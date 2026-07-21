@@ -43,6 +43,7 @@
 #include <vector>
 
 #include "defs_nr_UE_ISAC.h"
+#include "isac_sync.h"
 #include "range_doppler.h"
 
 namespace nr_isac {
@@ -162,6 +163,11 @@ private:
   // range profile beyond its comb's unambiguous window (kills sparse-comb grating lobes).
   std::vector<uint32_t> cpi_row_comb;     ///< native comb of each accumulated row
   std::vector<uint32_t> row_comb_uniform; ///< native comb carried onto each uniform (resampled) row
+
+  // Phase 1 (ota_sync_passive_ue.md): per-CPI fine-STO tracking/correction on the raw grid, run at
+  // CPI close before Stage-4b interpolation. See isac_sync.h and docs/NR_UE_ISAC_sync_gap_analysis.md.
+  cpi_sto_tracker  sto_tracker;
+  sto_fit_result_t last_sto_fit;
 
   // Range-Doppler processor and its outputs (engine thread only)
   std::unique_ptr<range_doppler>   rd;

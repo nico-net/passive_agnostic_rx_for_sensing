@@ -1034,6 +1034,7 @@ target_link_libraries(PHY_NR_UE PRIVATE asn1_nr_rrc_hdrs nr_phy_common nr_common
 # (repos/isac). Compiled as C++; exposes a C API to the RT PHY procedures.
 set(NR_UE_ISAC_SRC
   ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/isac_fft.cc
+  ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/isac_sync.cc
   ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/range_doppler.cc
   ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/detection_report.cc
   ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/sensing_engine.cc

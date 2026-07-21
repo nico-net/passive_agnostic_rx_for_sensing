@@ -284,10 +284,21 @@ void sensing_engine::accumulate_cpi(const sensing_slot_t& s)
   }
 
   if (cpi_row >= args.cpi_slots) {
-    // Per-row native comb (for DSP de-aliasing), computed from the real-sample occupancy BEFORE gap-
-    // fill; then Stage 4b (part 1): gap-fill every accumulated row now that same-slot merges are done.
+    // Per-row native comb (for DSP de-aliasing AND Phase 1 STO tracking below), computed from the
+    // real-sample occupancy BEFORE any correction or gap-fill.
     for (uint32_t rr = 0; rr < cpi_row; rr++) {
       cpi_row_comb[rr] = row_native_comb(&occ_all[(size_t)rr * nof_subc], nof_subc);
+    }
+
+    // Phase 1 (ota_sync_passive_ue.md): per-row LOS CIR peak tracking + fine-STO correction on the
+    // RAW grid, before Stage-4b interpolation -- interpolation should operate on already-timing-
+    // corrected data. See docs/NR_UE_ISAC_sync_gap_analysis.md for why this must run here.
+    last_sto_fit = sto_tracker.process(h_cpi.data(), occ_all.data(), cpi_row, nof_subc, cpi_row_comb.data(),
+                                        cpi_row_time.data(), cpi_carrier);
+
+    // Stage 4b (part 1): gap-fill every accumulated row now that same-slot merges + STO correction
+    // are done.
+    for (uint32_t rr = 0; rr < cpi_row; rr++) {
       if (args.interpolate) {
         interp_freq_row(&h_cpi[(size_t)rr * nof_subc], &occ_all[(size_t)rr * nof_subc], nof_subc);
       }
