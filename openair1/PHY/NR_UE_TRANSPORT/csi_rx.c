@@ -21,6 +21,7 @@
 #include "PHY/NR_REFSIG/nr_refsig.h"
 #include "common/utils/nr/nr_common.h"
 #include "PHY/NR_UE_ESTIMATION/filt16a_32.h"
+#include "PHY/NR_UE_ISAC/nr_isac.h"
 
 //#define NR_CSIRS_DEBUG
 //#define NR_CSIIM_DEBUG
@@ -793,6 +794,44 @@ void nr_ue_csi_im_procedures(PHY_VARS_NR_UE *ue,
   ue->nr_csi_info->csi_im_meas_computed = true;
 }
 
+// ISAC sensing tap: submit the raw per-RB CSI-RS LS estimates (Ĥ, antenna 0 / port 0) to the sensing
+// engine as one slow-time sample. Reports the full carrier width and CRB0-absolute subcarriers
+// (k = rb*12) so the row shares a common grid with the PDSCH source when both feed a fused CFR. Shared
+// by the own-CSI-RS path (nr_ue_csi_rs_procedures) and the UE-agnostic monitor path
+// (nr_ue_csi_rs_sensing_capture).
+static void nr_isac_submit_csirs_ls(const NR_DL_FRAME_PARMS *frame_parms,
+                             const UE_nr_rxtx_proc_t *proc,
+                             const fapi_nr_dl_config_csirs_pdu_rel15_t *csirs_config_pdu,
+                             const c16_t *ls,
+                             int loverline0)
+{
+  const uint16_t stop_rb = csirs_config_pdu->start_rb + csirs_config_pdu->nr_of_rbs;
+  static __thread float    isac_h[2 * 275];
+  static __thread uint32_t isac_k[275];
+  static __thread uint32_t isac_l[275];
+  uint32_t nof_re = 0;
+  for (int rb = csirs_config_pdu->start_rb; rb < stop_rb && nof_re < 275; rb++) {
+    if (csirs_config_pdu->freq_density <= 1 && csirs_config_pdu->freq_density != (rb % 2)) {
+      continue;
+    }
+    const uint16_t kk      = rb * NR_NB_SC_PER_RB;
+    isac_h[2 * nof_re]     = (float)ls[kk].r;
+    isac_h[2 * nof_re + 1] = (float)ls[kk].i;
+    isac_k[nof_re]         = kk;
+    isac_l[nof_re]         = (uint32_t)loverline0;
+    nof_re++;
+  }
+  if (nof_re > 0) {
+    nr_isac_carrier_t carrier = {.nof_prb         = (uint32_t)frame_parms->N_RB_DL,
+                                 .scs_hz          = frame_parms->subcarrier_spacing,
+                                 .dl_center_hz    = frame_parms->dl_CarrierFreq,
+                                 .pci             = frame_parms->Nid_cell,
+                                 .slots_per_frame = frame_parms->slots_per_frame};
+    const uint32_t slot_idx = (uint32_t)(proc->frame_rx * frame_parms->slots_per_frame + proc->nr_slot_rx);
+    nr_isac_submit_cfr(slot_idx, NR_ISAC_SRC_CSI_RS, &carrier, isac_h, isac_k, isac_l, nof_re);
+  }
+}
+
 void nr_ue_csi_rs_procedures(PHY_VARS_NR_UE *ue,
                              const UE_nr_rxtx_proc_t *proc,
                              const c16_t rxdataF[][ue->frame_parms.samples_per_slot_wCP],
@@ -894,6 +933,13 @@ void nr_ue_csi_rs_procedures(PHY_VARS_NR_UE *ue,
                                  &log2_maxh,
                                  &noise_power);
 
+  // ISAC sensing tap (CSI-RS source): submit the raw per-RB LS estimates (Ĥ) of antenna 0 / port 0.
+  // Guarded on measurement_bitmap>1 here because that gates the channel estimation above (own path).
+  if (csirs_config_pdu->measurement_bitmap > 1 && nr_isac_enabled() && nr_isac_source_enabled(NR_ISAC_SRC_CSI_RS)) {
+    nr_isac_submit_csirs_ls(frame_parms, proc, csirs_config_pdu, csi_rs_ls_estimated_channel[0][0],
+                            mapping_parms.loverline[0]);
+  }
+
   uint8_t rank_indicator = 0;
   // bit 1 in bitmap to indicate RI measurment
   if (csirs_config_pdu->measurement_bitmap & 2) {
@@ -963,4 +1009,71 @@ void nr_ue_csi_rs_procedures(PHY_VARS_NR_UE *ue,
   nr_fill_dl_indication(&dl_indication, NULL, &rx_ind, proc, ue, NULL);
   nr_fill_rx_indication(&rx_ind, FAPI_NR_MEAS_IND, ue, 0, 0, NULL, 1, proc, (void *)&l1_measurements, NULL);
   ue->if_inst->dl_indication(&dl_indication);
+}
+
+void nr_ue_csi_rs_sensing_capture(PHY_VARS_NR_UE *ue,
+                                  const UE_nr_rxtx_proc_t *proc,
+                                  const c16_t rxdataF[][ue->frame_parms.samples_per_slot_wCP],
+                                  const fapi_nr_dl_config_csirs_pdu_rel15_t *csirs_config_pdu)
+{
+  // UE-agnostic passive-sensing capture of a CSI-RS resource we are NOT the target of (cell-common /
+  // other-UE resource from the [sensing] csirs_monitor list). Mirrors nr_ue_csi_rs_procedures up to the
+  // LS channel estimate and feeds the ISAC engine, but performs NO RI/PMI/CQI measurement and emits NO
+  // CSI report to MAC/gNB. NZP CSI-RS only (the sole type the PHY estimation path handles today).
+  if (!nr_isac_enabled() || !nr_isac_source_enabled(NR_ISAC_SRC_CSI_RS)) {
+    return;
+  }
+  if (csirs_config_pdu->csi_type != 1) {
+    LOG_D(NR_PHY, "SENSING: csirs_monitor resource csi_type=%d not NZP; skipped\n", csirs_config_pdu->csi_type);
+    return;
+  }
+
+  const NR_DL_FRAME_PARMS *frame_parms = &ue->frame_parms;
+  csi_mapping_parms_t      mapping_parms =
+      get_csi_mapping_parms(csirs_config_pdu->row, csirs_config_pdu->freq_domain, csirs_config_pdu->symb_l0,
+                            csirs_config_pdu->symb_l1);
+  nr_csi_info_t *csi_info = ue->nr_csi_info;
+
+  nr_generate_csi_rs(frame_parms,
+                     &mapping_parms,
+                     AMP,
+                     proc->nr_slot_rx,
+                     csirs_config_pdu->freq_density,
+                     csirs_config_pdu->start_rb,
+                     csirs_config_pdu->nr_of_rbs,
+                     csirs_config_pdu->symb_l0,
+                     csirs_config_pdu->symb_l1,
+                     csirs_config_pdu->row,
+                     csirs_config_pdu->scramb_id,
+                     csirs_config_pdu->power_control_offset_ss,
+                     csirs_config_pdu->cdm_type,
+                     csi_info->csi_rs_generated_signal);
+  csi_info->csi_rs_generated_signal_bits = log2_approx(AMP);
+
+  c16_t csi_rs_ls_estimated_channel[frame_parms->nb_antennas_rx][mapping_parms.ports][frame_parms->ofdm_symbol_size];
+  c16_t csi_rs_estimated_channel_freq[frame_parms->nb_antennas_rx][mapping_parms.ports][frame_parms->ofdm_symbol_size];
+  int   CDM_group_size = get_cdm_group_size(csirs_config_pdu->cdm_type);
+  c16_t csi_rs_received_signal[frame_parms->nb_antennas_rx][frame_parms->samples_per_slot_wCP];
+  uint32_t rsrp     = 0;
+  int      rsrp_dBm = 0;
+  nr_get_csi_rs_signal(ue, proc, csirs_config_pdu, csi_info, &mapping_parms, CDM_group_size, csi_rs_received_signal,
+                       &rsrp, &rsrp_dBm, rxdataF);
+
+  int16_t  log2_re = 0, log2_maxh = 0;
+  uint32_t noise_power = 0;
+  nr_csi_rs_channel_estimation(frame_parms,
+                               csirs_config_pdu,
+                               csi_info,
+                               (const c16_t **)csi_info->csi_rs_generated_signal,
+                               csi_rs_received_signal,
+                               &mapping_parms,
+                               CDM_group_size,
+                               csi_rs_ls_estimated_channel,
+                               csi_rs_estimated_channel_freq,
+                               &log2_re,
+                               &log2_maxh,
+                               &noise_power);
+
+  nr_isac_submit_csirs_ls(frame_parms, proc, csirs_config_pdu, csi_rs_ls_estimated_channel[0][0],
+                          mapping_parms.loverline[0]);
 }

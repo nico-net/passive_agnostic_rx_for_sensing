@@ -136,6 +136,14 @@ void nr_ue_csi_rs_procedures(PHY_VARS_NR_UE *ue,
                              const c16_t rxdataF[][ue->frame_parms.samples_per_slot_wCP],
                              fapi_nr_dl_config_csirs_pdu_rel15_t *csirs_config_pdu);
 
+/*! \brief UE-agnostic passive-sensing capture of a CSI-RS resource this UE is not the target of
+    (from the [sensing] csirs_monitor list). Estimates Ĥ and feeds the ISAC engine only; performs no
+    CSI measurement and emits no report to MAC. */
+void nr_ue_csi_rs_sensing_capture(PHY_VARS_NR_UE *ue,
+                                  const UE_nr_rxtx_proc_t *proc,
+                                  const c16_t rxdataF[][ue->frame_parms.samples_per_slot_wCP],
+                                  const fapi_nr_dl_config_csirs_pdu_rel15_t *csirs_config_pdu);
+
 int psbch_pscch_processing(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc, nr_phy_data_t *phy_data);
 void phy_procedures_nrUE_SL_TX(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc, nr_phy_data_tx_t *phy_data, c16_t **txp);
 /*! \brief This function prepares the sl indication to pass to the MAC

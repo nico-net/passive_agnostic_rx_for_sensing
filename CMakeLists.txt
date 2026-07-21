@@ -974,6 +974,7 @@ set(PHY_SRC_UE
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/dci_nr.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/pucch_nr.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/csi_rx.c
+  ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_csirs_monitor.c
   ${OPENAIR1_DIR}/PHY/NR_TRANSPORT/nr_uci_tools_common.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_ulsch_ue.c
   ${OPENAIR1_DIR}/PHY/NR_REFSIG/ul_ref_seq_nr.c
@@ -1027,6 +1028,27 @@ target_compile_definitions(PHY_NR_NO_AVX_256 PUBLIC USE_128BIT)
 
 add_library(PHY_NR_UE ${PHY_NR_UE_SRC})
 target_link_libraries(PHY_NR_UE PRIVATE asn1_nr_rrc_hdrs nr_phy_common nr_common UTIL polar smallblock)
+
+# ISAC / passive-radar sensing pipeline (OAI-UE). Faithful port of the srsUE sensing engine
+# (repos/srs-ue-isac-dmd). Off-RT DSP + DetectionReport emission compliant with the central node
+# (repos/isac). Compiled as C++; exposes a C API to the RT PHY procedures.
+set(NR_UE_ISAC_SRC
+  ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/isac_fft.cc
+  ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/range_doppler.cc
+  ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/detection_report.cc
+  ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/sensing_engine.cc
+  ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/nr_isac.cc
+  )
+add_library(NR_UE_ISAC ${NR_UE_ISAC_SRC})
+target_link_libraries(NR_UE_ISAC PRIVATE UTIL)
+find_library(ZMQ_LIB zmq)
+if(ZMQ_LIB)
+  target_compile_definitions(NR_UE_ISAC PRIVATE ENABLE_ZEROMQ)
+  target_link_libraries(NR_UE_ISAC PRIVATE ${ZMQ_LIB})
+  message(STATUS "NR_UE_ISAC: ZeroMQ live DetectionReport bus enabled (${ZMQ_LIB})")
+else()
+  message(STATUS "NR_UE_ISAC: libzmq not found; live DetectionReport bus disabled (file sink only)")
+endif()
 
 add_library(PHY_RU ${PHY_SRC_RU})
 target_link_libraries(PHY_RU PRIVATE asn1_lte_rrc_hdrs UTIL)
@@ -1886,7 +1908,7 @@ add_executable(nr-uesoftmodem
 target_link_libraries(nr-uesoftmodem PRIVATE
   -Wl,--start-group
   nr_rrc SECURITY UTIL SCHED_NR_UE_LIB
-  PHY_NR_COMMON PHY_NR_UE NR_L2_UE MAC_NR_COMMON nfapi_nr_lib
+  PHY_NR_COMMON PHY_NR_UE NR_UE_ISAC NR_L2_UE MAC_NR_COMMON nfapi_nr_lib
   ITTI SIMU radio_common
   time_management softmodem_common
   -Wl,--end-group dl)

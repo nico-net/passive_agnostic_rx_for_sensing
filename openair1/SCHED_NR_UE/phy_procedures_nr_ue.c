@@ -21,6 +21,8 @@
 #include "PHY/NR_UE_TRANSPORT/nr_transport_proto_ue.h"
 #include "SCHED_NR_UE/phy_sch_processing_time.h"
 #include "PHY/NR_UE_ESTIMATION/nr_estimation.h"
+#include "PHY/NR_UE_ISAC/nr_isac.h"
+#include "PHY/NR_UE_TRANSPORT/nr_csirs_monitor.h"
 #include "executables/softmodem-common.h"
 #include "executables/nr-uesoftmodem.h"
 #include "SCHED_NR_UE/pucch_uci_ue_nr.h"
@@ -625,6 +627,55 @@ static int nr_ue_pdsch_procedures(PHY_VARS_NR_UE *ue,
   if (scope_req.copy_rxdataF_to_scope) {
     UEunlockScopeData(ue, pdschRxdataF);
   }
+
+  // ISAC sensing tap (PDSCH DM-RS / data-aided source): extract the per-RE CFR (Ĥ) from the DM-RS-based
+  // channel estimate over the allocation and hand it to the sensing engine (best-effort, off the RT
+  // critical path). One scheduled DL slot contributes one slow-time sample -> high PRF vs periodic
+  // CSI-RS. The interpolated estimate spans every allocated subcarrier: sub-sample comb-2 for the
+  // pdsch_dmrs source, use every subcarrier (comb-1, densest range) for the pdsch_data source.
+  if (nr_isac_enabled() &&
+      (nr_isac_source_enabled(NR_ISAC_SRC_PDSCH_DMRS) || nr_isac_source_enabled(NR_ISAC_SRC_PDSCH_DATA))) {
+    int dmrs_sym = -1;
+    for (int m = dlschCfg->start_symbol; m < dlschCfg->start_symbol + dlschCfg->number_symbols; m++) {
+      if (dlschCfg->dlDmrsSymbPos & (1 << m)) {
+        dmrs_sym = m;
+        break;
+      }
+    }
+    const int num_sc = freq_alloc->num_rbs * NR_NB_SC_PER_RB;
+    if (dmrs_sym >= 0 && num_sc >= 2) {
+      // pdsch_data (comb-1, every subcarrier) is a superset of pdsch_dmrs (comb-2); when both are in the
+      // enabled set, extract the denser one and tag the row as pdsch_data.
+      const bool     want_data = nr_isac_source_enabled(NR_ISAC_SRC_PDSCH_DATA);
+      const int      comb      = want_data ? 1 : 2;
+      const int      src       = want_data ? NR_ISAC_SRC_PDSCH_DATA : NR_ISAC_SRC_PDSCH_DMRS;
+      // dl_ch[j] is packed from the first allocated RB; map j to a CRB0-absolute subcarrier so this row
+      // shares the CSI-RS source's common grid: abs_sc = (BWPStart + first_rb)*12 + j.
+      const uint32_t base_sc = (uint32_t)(dlschCfg->BWPStart + freq_alloc->first_rb) * NR_NB_SC_PER_RB;
+      const c16_t* dl_ch = (const c16_t*)&pdsch_dl_ch_estimates[0][ue->frame_parms.ofdm_symbol_size * dmrs_sym];
+      static __thread float    isac_h[2 * 273 * NR_NB_SC_PER_RB];
+      static __thread uint32_t isac_k[273 * NR_NB_SC_PER_RB];
+      static __thread uint32_t isac_l[273 * NR_NB_SC_PER_RB];
+      uint32_t nof_re = 0;
+      for (int j = 0; j < num_sc && nof_re < 273 * NR_NB_SC_PER_RB; j += comb) {
+        isac_h[2 * nof_re]     = (float)dl_ch[j].r;
+        isac_h[2 * nof_re + 1] = (float)dl_ch[j].i;
+        isac_k[nof_re]         = base_sc + (uint32_t)j;
+        isac_l[nof_re]         = (uint32_t)dmrs_sym;
+        nof_re++;
+      }
+      if (nof_re > 0) {
+        nr_isac_carrier_t carrier = {.nof_prb         = (uint32_t)ue->frame_parms.N_RB_DL,
+                                     .scs_hz          = ue->frame_parms.subcarrier_spacing,
+                                     .dl_center_hz    = ue->frame_parms.dl_CarrierFreq,
+                                     .pci             = ue->frame_parms.Nid_cell,
+                                     .slots_per_frame = ue->frame_parms.slots_per_frame};
+        const uint32_t slot_idx = (uint32_t)(frame_rx * ue->frame_parms.slots_per_frame + nr_slot_rx);
+        nr_isac_submit_cfr(slot_idx, src, &carrier, isac_h, isac_k, isac_l, nof_re);
+      }
+    }
+  }
+
   free(toFree);
   free(toFree2);
   free(toFree3);
@@ -1194,6 +1245,25 @@ void pdsch_processing(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc, nr_phy_
       }
     }
     nr_ue_csi_rs_procedures(ue, proc, rxdataF, &phy_data->csirs_vars.csirs_config_pdu);
+  }
+
+  // UE-agnostic CSI-RS sensing monitors: cell-common / other-UE CSI-RS resources from the
+  // [sensing] csirs_monitor list, processed for passive sensing independent of our own
+  // RRC CSI-MeasConfig. Each due resource is FEP'd and run through the lean sensing-only
+  // capture (no CSI report to MAC). See nr_csirs_monitor.{h,c}.
+  if (nr_isac_enabled() && nr_csirs_monitor_enabled()) {
+    const fapi_nr_dl_config_csirs_pdu_rel15_t *mon[NR_CSIRS_MONITOR_MAX];
+    const int nmon = nr_csirs_monitor_due(proc->frame_rx, proc->nr_slot_rx, ue->frame_parms.slots_per_frame, mon,
+                                          NR_CSIRS_MONITOR_MAX);
+    for (int i = 0; i < nmon; i++) {
+      for (int symb = 0; symb < ue->frame_parms.symbols_per_slot; symb++) {
+        if (is_csi_rs_in_symbol(*mon[i], symb) && !slot_fep_map[symb]) {
+          nr_slot_fep(ue, &ue->frame_parms, proc->nr_slot_rx, symb, rxdataF, link_type_dl, 0, ue->common_vars.rxdata);
+          slot_fep_map[symb] = true;
+        }
+      }
+      nr_ue_csi_rs_sensing_capture(ue, proc, rxdataF, mon[i]);
+    }
   }
 
   int16_t *llr[2];

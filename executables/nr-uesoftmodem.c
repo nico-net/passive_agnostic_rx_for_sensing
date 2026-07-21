@@ -13,6 +13,8 @@
 #include "common/oai_version.h"
 #include "assertions.h"
 #include "PHY/defs_nr_UE.h"
+#include "PHY/NR_UE_ISAC/nr_isac.h"
+#include "PHY/NR_UE_TRANSPORT/nr_csirs_monitor.h"
 #include "SCHED_NR_UE/defs.h"
 #include "common/ran_context.h"
 #include "common/config/config_userapi.h"
@@ -235,6 +237,11 @@ int main(int argc, char **argv)
   get_common_options(uniqCfg);
   CONFIG_CLEARRTFLAG(CONFIG_NOEXITONHELP);
 
+  // ISAC / passive-radar sensing pipeline: parse the [sensing] config section (no-op if disabled).
+  nr_isac_init();
+  // UE-agnostic CSI-RS sensing monitors (cell-common / other-UE resources); no-op if unset.
+  nr_csirs_monitor_init();
+
   softmodem_verify_mode(get_softmodem_params());
 
 #if T_TRACER
@@ -429,6 +436,9 @@ int main(int argc, char **argv)
   int ret = pthread_join(ru_start_thread, NULL);
   AssertFatal(ret == 0, "pthread_join error %d, errno %d (%s)\n", ret, errno, strerror(errno));
 
+  // Launch the sensing engine consumer thread before the DL workers start producing CFR snapshots.
+  nr_isac_start();
+
   for (int inst = 0; inst < NB_UE_INST; inst++) {
     LOG_I(PHY,"Intializing UE Threads for instance %d ...\n", inst);
     init_NR_UE_threads(nrPHY_vars_UE_g[inst][0]);
@@ -448,6 +458,9 @@ int main(int argc, char **argv)
   itti_wait_tasks_end(trigger_deregistration);
   LOG_W(NR_PHY, "Returned from ITTI signal handler\n");
   oai_exit = 1;
+
+  // Stop the sensing engine, flush the final CPI and close the report sinks.
+  nr_isac_stop();
 
   nrue_ru_stop();
 
