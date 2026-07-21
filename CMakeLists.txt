@@ -2179,6 +2179,21 @@ if(ENABLE_TESTS)
   endif()
 endif()
 
+# ota_sync_passive_ue.md Phase 6a: offline STO/CFO/SFO/closed-loop self-test. No scratchpad/*_test.cc
+# existed to extend (Phase 0 confirmed), so this is a new, gtest-based target matching the existing
+# common/utils/nr/tests convention (add_executable + GTest::gtest + add_dependencies(tests ...) +
+# add_test(...)). Must come after the `tests` custom target + GTest::gtest are defined above. See
+# openair1/PHY/NR_UE_ISAC/tests/isac_sync_test.cc's file header for design notes.
+if(ENABLE_TESTS)
+  add_executable(test_isac_sync ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/tests/isac_sync_test.cc)
+  target_include_directories(test_isac_sync PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_ISAC)
+  # uniqCfg/exit_function (needed by LOG/CONFIG_LIB) are defined directly in isac_sync_test.cc,
+  # not via minimal_lib -- static-archive link order made minimal_lib's stubs unreliable here.
+  target_link_libraries(test_isac_sync PRIVATE NR_UE_ISAC UTIL GTest::gtest)
+  add_dependencies(tests test_isac_sync)
+  add_test(NAME test_isac_sync COMMAND ./test_isac_sync)
+endif()
+
 add_subdirectory(common)
 add_subdirectory(executables)
 add_subdirectory(doc)

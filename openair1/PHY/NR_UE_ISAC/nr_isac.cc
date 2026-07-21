@@ -166,7 +166,7 @@ extern "C" void nr_isac_init(void)
   }
 
   // Local storage for the [sensing] config section. Defaults mirror nr_isac_args_t / srsUE.
-  int    p_enable = 0, p_interp = 1, p_capture = 0, p_selftest = 0;
+  int    p_enable = 0, p_interp = 1, p_capture = 0, p_selftest = 0, p_sync_correction = 1;
   int    p_cpi_slots = 256;
   int    p_cfar_guard = 4, p_cfar_train = 8;
   double p_cfar_pfa = 1e-3;
@@ -175,6 +175,7 @@ extern "C" void nr_isac_init(void)
   char*  p_source     = nullptr;
   char*  p_sources    = nullptr;
   char*  p_targets    = nullptr;
+  char*  p_selftest_los = nullptr;
   char*  p_out_path   = nullptr;
   char*  p_rx_id      = nullptr;
   char*  p_illum_id   = nullptr;
@@ -190,6 +191,10 @@ extern "C" void nr_isac_init(void)
       mk_int("capture", "dump RVM raster + rvm_blob", PARAMFLAG_BOOL, &p_capture, 0),
       mk_int("selftest", "inject a default synthetic echo", PARAMFLAG_BOOL, &p_selftest, 0),
       mk_str("selftest_targets", "DELAY_US:DOPPLER_HZ:GAIN,...", &p_targets, ""),
+      mk_str("selftest_los", "known LOS-path impairment for the offline sync self-test: STO_US:CFO_HZ:SFO_PPM",
+             &p_selftest_los, ""),
+      mk_int("sync_correction", "enable Phase 1-4 STO/CFO/SFO/closed-loop LOS correction", PARAMFLAG_BOOL,
+             &p_sync_correction, 1),
       mk_int("cfar_guard", "CA-CFAR guard cells per side", 0, &p_cfar_guard, 4),
       mk_int("cfar_train", "CA-CFAR training cells per side", 0, &p_cfar_train, 8),
       mk_dbl("cfar_pfa", "CA-CFAR false-alarm probability", &p_cfar_pfa, 1e-3),
@@ -231,6 +236,8 @@ extern "C" void nr_isac_init(void)
   g_args.capture_enable     = p_capture != 0;
   g_args.selftest           = p_selftest != 0;
   g_args.selftest_targets   = (p_targets != nullptr) ? p_targets : "";
+  g_args.selftest_los       = (p_selftest_los != nullptr) ? p_selftest_los : "";
+  g_args.sync_correction_enable = p_sync_correction != 0;
   g_args.cfar_guard         = (uint32_t)p_cfar_guard;
   g_args.cfar_train         = (uint32_t)p_cfar_train;
   g_args.cfar_pfa           = (float)p_cfar_pfa;

@@ -62,6 +62,15 @@ struct nr_isac_args_t {
   bool        capture_enable   = false; ///< Also dump the raw RVM raster to file for offline analysis
   bool        selftest         = false; ///< Inject a default synthetic echo (25% range/velocity) to validate DSP
   std::string selftest_targets = "";    ///< Synthetic targets: "DELAY_US:DOPPLER_HZ:GAIN,..." injected into the CFR
+  std::string selftest_los     = "";    ///< ota_sync_passive_ue.md Phase 6a: known LOS-path impairment
+                                        ///< "STO_US:CFO_HZ:SFO_PPM" for the offline sync self-test (empty = none)
+
+  // ota_sync_passive_ue.md Phases 1-4: master enable for the STO/CFO/SFO/closed-loop LOS-pinning
+  // corrections. Default true (this is the new default-corrected behaviour); Phase 6a/6b's
+  // "corrections disabled" baseline runs set this false to reproduce pre-Phase-1 behaviour exactly
+  // (Phase 4's residual measurement still runs when false -- see sensing_engine.cc -- since observing
+  // an uncorrected residual/smear is the whole point of the disabled baseline, not something to blind).
+  bool sync_correction_enable = true;
 
   // CA-CFAR
   uint32_t cfar_guard = 4;      ///< CA-CFAR guard cells (per side)

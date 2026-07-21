@@ -33,6 +33,7 @@
 #define NR_ISAC_SYNC_H
 
 #include <cstdint>
+#include <deque>
 #include <memory>
 #include <utility>
 #include <vector>
@@ -66,10 +67,13 @@ public:
 
 private:
   fft_plan* plan_for(uint32_t m);
+  const std::vector<float>& hann_for(uint32_t m);
 
   // Keyed by compact-CIR length (M); only a handful of distinct M recur per CPI (one per native
-  // comb in play), so a small linear-scan cache is fine and avoids recomputing Bluestein chirps.
+  // comb in play), so a small linear-scan cache is fine and avoids recomputing Bluestein chirps
+  // (and, for hann_cache_, cos() calls) every row.
   std::vector<std::pair<uint32_t, std::unique_ptr<fft_plan>>> plan_cache_;
+  std::vector<std::pair<uint32_t, std::vector<float>>>        hann_cache_;
   std::vector<icf_t> compact_; ///< scratch: compacted occupied samples for one row
 };
 
@@ -228,8 +232,8 @@ struct sfo_fit_result_t {
  * The dominant contributor to the Doppler-axis smear the guard-band widening previously masked.
  * Unlike Phase 2, this phase does NOT reuse Phase 1's per-row LOS estimates: Phase 1 searches a
  * small, FIXED window around a constant nominal bin (right for fine/near-zero drift), but SFO can
- * walk the LOS peak by hundreds of range bins over a multi-second CPI (e.g. ~3000 m / ~367 bins at
- * 2 ppm over 5 s -- see docs/NR_UE_ISAC_sync_gap_analysis.md section 9) -- far outside Phase 1's
+ * walk the LOS peak by hundreds of range bins over a multi-second CPI (e.g. ~1500 m / ~184 bins,
+ * round-trip, at 2 ppm over 5 s -- see docs/NR_UE_ISAC_sync_gap_analysis.md section 9) -- far outside Phase 1's
  * window. Reusing Phase 1's estimates here would silently feed the fit garbage once drift exceeds
  * that window. Instead this phase does its own sequential TRACKING search per row (reusing only
  * the CIR-building step via row_cir_builder, not the peak-finding strategy): the first row seeds
@@ -302,12 +306,15 @@ private:
     bool     excluded_isi           = false;
   };
 
-  // Welford online mean/variance of out_win_energy_per_bin, tracked separately per native comb.
+  // Sliding-window (not whole-CPI-cumulative) mean/stddev of out_win_energy_per_bin, tracked
+  // separately per native comb, over only the last SFO_ISI_LOCAL_WINDOW ACCEPTED rows of that comb.
+  // "Neighboring rows" (task wording) is taken literally: a whole-CPI Welford running mean was
+  // tried first and over-triggered on clean synthetic signals (Phase 6a testing), because it
+  // doesn't track slow, legitimate baseline drift in this metric as the tracking window walks
+  // across the compact CIR over a long CPI (see docs/NR_UE_ISAC_sync_gap_analysis.md section 12).
   struct comb_stats_t {
-    uint32_t comb = 0;
-    uint32_t n    = 0;
-    double   mean = 0.0;
-    double   m2   = 0.0;
+    uint32_t          comb = 0;
+    std::deque<double> recent; ///< last (<= SFO_ISI_LOCAL_WINDOW) accepted out_win_energy_per_bin values
   };
   comb_stats_t& stats_for(uint32_t comb);
 

@@ -27,12 +27,38 @@
 #define NR_ISAC_RANGE_DOPPLER_H
 
 #include <memory>
+#include <string>
 #include <vector>
 
 #include "defs_nr_UE_ISAC.h"
 #include "isac_fft.h"
 
 namespace nr_isac {
+
+/// Phase 6a (ota_sync_passive_ue.md): a known impairment to apply to the synthetic LOS/reference
+/// path itself, parsed from `args.selftest_los = "STO_US:CFO_HZ:SFO_PPM"`. Distinct from
+/// `sensing_target_t` (which describes an echo/target, not the reference path).
+struct selftest_los_impairment_t {
+  double sto_s    = 0.0;   ///< constant delay offset (seconds) -- Phase 1's fine-STO correction target
+  double cfo_hz   = 0.0;   ///< constant residual carrier offset (Hz) -- Phase 2's target
+  double sfo_ppm  = 0.0;   ///< fractional sample-clock error (ppm) -- Phase 3's target; delay drifts as
+                           ///< `sfo_ppm * 1e-6 * elapsed_time_s`
+  bool   present  = false; ///< true if @p spec parsed to a non-degenerate impairment
+};
+
+/// Parses "STO_US:CFO_HZ:SFO_PPM" (same colon-separated style as `selftest_targets`) into @p out.
+/// Returns false (and leaves @p out default) for an empty or malformed spec. Shared between
+/// range_doppler's self-test config surface and the offline sync test harness (tests/isac_sync_test.cc)
+/// so the parsing logic isn't duplicated.
+bool parse_selftest_los(const std::string& spec, selftest_los_impairment_t& out);
+
+/// The complex-tone model shared by every self-test signal this module synthesizes (existing target
+/// injection, and Phase 6a's LOS-path impairment injection): a pure delay `tau` + Doppler `fd` tone
+/// at frequency-axis position `m_times_df` (= subcarrier_index * df_comb) and slow-time position
+/// `n_times_t_slow` (= row_index * t_slow), scaled to amplitude `amp`. Matches the physical model
+/// Phases 1-4 assume (`exp(-j*2*pi*m*df*tau + j*2*pi*fd*n*t_slow)`), so a correct estimator should
+/// recover exactly the injected tau/fd/drift.
+icf_t selftest_tone(double amp, double m_times_df, double tau, double fd, double n_times_t_slow);
 
 /**
  * @brief OFDM-based range-Doppler processor.
@@ -101,6 +127,10 @@ private:
 
   // Synthetic targets to inject (parsed once from args.selftest_targets / args.selftest)
   std::vector<sensing_target_t> targets_;
+
+  // Phase 6a: parsed args.selftest_los, kept for visibility/logging only -- see the constructor's
+  // comment for why process() itself doesn't consume this (it would be downstream of Phases 1-4).
+  selftest_los_impairment_t los_impairment_;
 };
 
 } // namespace nr_isac

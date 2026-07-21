@@ -290,31 +290,37 @@ void sensing_engine::accumulate_cpi(const sensing_slot_t& s)
       cpi_row_comb[rr] = row_native_comb(&occ_all[(size_t)rr * nof_subc], nof_subc);
     }
 
-    // Phase 4 (ota_sync_passive_ue.md): apply whatever closed-loop bias the LOS baseline tracker
-    // accumulated from PAST CPIs' residuals (measured in process_cpi(), after this CPI's own
-    // detections are known -- one-CPI feedback latency by design). A no-op until a baseline is
-    // established. Runs first purely for narrative ordering ("apply what we learned before this
-    // CPI's own fresh estimation") -- it commutes with Phases 1-3 like they commute with each other.
-    los_tracker.apply_bias_correction(h_cpi.data(), occ_all.data(), cpi_row, nof_subc, cpi_row_time.data(),
-                                      cpi_carrier);
+    // ota_sync_passive_ue.md Phase 6: master enable for Phases 1-4's tracking + correction. When
+    // false, Phase 1-3 are skipped entirely (last_*_fit stay at their default/zero state) and Phase
+    // 4's bias is not applied -- this reproduces today's pre-Phase-1 behaviour exactly, bit for bit,
+    // which is the Phase 6a/6b "corrections disabled" baseline these tests/runbook steps need.
+    if (args.sync_correction_enable) {
+      // Phase 4 (ota_sync_passive_ue.md): apply whatever closed-loop bias the LOS baseline tracker
+      // accumulated from PAST CPIs' residuals (measured in process_cpi(), after this CPI's own
+      // detections are known -- one-CPI feedback latency by design). A no-op until a baseline is
+      // established. Runs first purely for narrative ordering ("apply what we learned before this
+      // CPI's own fresh estimation") -- it commutes with Phases 1-3 like they commute with each other.
+      los_tracker.apply_bias_correction(h_cpi.data(), occ_all.data(), cpi_row, nof_subc, cpi_row_time.data(),
+                                        cpi_carrier);
 
-    // Phase 1 (ota_sync_passive_ue.md): per-row LOS CIR peak tracking + fine-STO correction on the
-    // RAW grid, before Stage-4b interpolation -- interpolation should operate on already-timing-
-    // corrected data. See docs/NR_UE_ISAC_sync_gap_analysis.md for why this must run here.
-    last_sto_fit = sto_tracker.process(h_cpi.data(), occ_all.data(), cpi_row, nof_subc, cpi_row_comb.data(),
-                                        cpi_row_time.data(), cpi_carrier);
+      // Phase 1 (ota_sync_passive_ue.md): per-row LOS CIR peak tracking + fine-STO correction on the
+      // RAW grid, before Stage-4b interpolation -- interpolation should operate on already-timing-
+      // corrected data. See docs/NR_UE_ISAC_sync_gap_analysis.md for why this must run here.
+      last_sto_fit = sto_tracker.process(h_cpi.data(), occ_all.data(), cpi_row, nof_subc, cpi_row_comb.data(),
+                                          cpi_row_time.data(), cpi_carrier);
 
-    // Phase 2 (ota_sync_passive_ue.md): residual-CFO fit + per-row CPE de-rotation, reusing Phase 1's
-    // per-row LOS-tap estimates (no second CIR pass). Also runs before Stage-4b interpolation, and
-    // commutes with the STO correction above (uniform per-row rotation vs. STO's per-subcarrier ramp).
-    last_cfo_fit = cfo_tracker.process(h_cpi.data(), occ_all.data(), nof_subc, sto_tracker.last_row_estimates());
+      // Phase 2 (ota_sync_passive_ue.md): residual-CFO fit + per-row CPE de-rotation, reusing Phase 1's
+      // per-row LOS-tap estimates (no second CIR pass). Also runs before Stage-4b interpolation, and
+      // commutes with the STO correction above (uniform per-row rotation vs. STO's per-subcarrier ramp).
+      last_cfo_fit = cfo_tracker.process(h_cpi.data(), occ_all.data(), nof_subc, sto_tracker.last_row_estimates());
 
-    // Phase 3 (ota_sync_passive_ue.md): SFO delay-drift fit + correction. Runs its own per-row
-    // CIR/peak tracking walk (does not reuse Phase 1's rows -- Phase 1's fixed-window search can't
-    // follow the multi-hundred-bin drift SFO can cause over a multi-second CPI). Also before
-    // Stage-4b interpolation; commutes with Phase 1/2's corrections above.
-    last_sfo_fit = sfo_tracker.process(h_cpi.data(), occ_all.data(), cpi_row, nof_subc, cpi_row_comb.data(),
-                                        cpi_row_time.data(), cpi_carrier);
+      // Phase 3 (ota_sync_passive_ue.md): SFO delay-drift fit + correction. Runs its own per-row
+      // CIR/peak tracking walk (does not reuse Phase 1's rows -- Phase 1's fixed-window search can't
+      // follow the multi-hundred-bin drift SFO can cause over a multi-second CPI). Also before
+      // Stage-4b interpolation; commutes with Phase 1/2's corrections above.
+      last_sfo_fit = sfo_tracker.process(h_cpi.data(), occ_all.data(), cpi_row, nof_subc, cpi_row_comb.data(),
+                                          cpi_row_time.data(), cpi_carrier);
+    }
 
     // Stage 4b (part 1): gap-fill every accumulated row now that same-slot merges + STO correction
     // are done.

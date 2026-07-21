@@ -33,6 +33,30 @@ namespace nr_isac {
 
 static constexpr double SPEED_OF_LIGHT = 299792458.0;
 
+bool parse_selftest_los(const std::string& spec, selftest_los_impairment_t& out)
+{
+  out = selftest_los_impairment_t();
+  if (spec.empty()) {
+    return false;
+  }
+  double sto_us = 0, cfo_hz = 0, sfo_ppm = 0;
+  if (std::sscanf(spec.c_str(), "%lf:%lf:%lf", &sto_us, &cfo_hz, &sfo_ppm) != 3) {
+    LOG_W(PHY, "SENSING: ignoring malformed selftest_los '%s' (expected STO_US:CFO_HZ:SFO_PPM)\n", spec.c_str());
+    return false;
+  }
+  out.sto_s   = sto_us * 1e-6;
+  out.cfo_hz  = cfo_hz;
+  out.sfo_ppm = sfo_ppm;
+  out.present = true;
+  return true;
+}
+
+icf_t selftest_tone(double amp, double m_times_df, double tau, double fd, double n_times_t_slow)
+{
+  const double phase = -2.0 * M_PI * m_times_df * tau + 2.0 * M_PI * fd * n_times_t_slow;
+  return icf_t((float)(amp * std::cos(phase)), (float)(amp * std::sin(phase)));
+}
+
 range_doppler::range_doppler(const nr_isac_args_t& args_) : args(args_)
 {
   // Parse "DELAY_US:DOPPLER_HZ:GAIN,DELAY_US:DOPPLER_HZ:GAIN,..." into synthetic targets.
@@ -51,6 +75,20 @@ range_doppler::range_doppler(const nr_isac_args_t& args_) : args(args_)
     } else {
       LOG_W(PHY, "SENSING: ignoring malformed target '%s' (expected DELAY_US:DOPPLER_HZ:GAIN)\n", item.c_str());
     }
+  }
+
+  // Phase 6a (ota_sync_passive_ue.md): known LOS-path impairment for the offline sync self-test.
+  // NOTE: process() below does NOT consume this itself -- by the time a CPI reaches range_doppler,
+  // it has already passed through Phases 1-4 in sensing_engine.cc's CPI-close block (before Stage-4b
+  // interpolation), so injecting the impairment here would be downstream of the very corrections
+  // Phase 6a needs to exercise. This is parsed and logged here (same config surface/style as
+  // selftest_targets) purely for visibility; the actual raw-grid injection that drives Phases 1-4
+  // lives in the offline test harness (tests/isac_sync_test.cc), which calls parse_selftest_los()
+  // and selftest_tone() directly to build a synthetic pre-Stage-4b CPI. See
+  // docs/NR_UE_ISAC_sync_gap_analysis.md section 12 for the full rationale.
+  if (parse_selftest_los(args.selftest_los, los_impairment_)) {
+    LOG_I(PHY, "SENSING: selftest_los parsed: sto=%.3f us cfo=%.2f Hz sfo=%.3f ppm (see gap-analysis doc sec. 12)\n",
+          los_impairment_.sto_s * 1e6, los_impairment_.cfo_hz, los_impairment_.sfo_ppm);
   }
 }
 
@@ -102,8 +140,7 @@ void range_doppler::inject_selftest(icf_t*    work_buf,
     const double amp = t.gain * rms;
     for (uint32_t n = 0; n < nof_slow; n++) {
       for (uint32_t m = 0; m < nof_subc; m++) {
-        const double phase = -2.0 * M_PI * ((double)m * df_comb) * tau + 2.0 * M_PI * fd * (double)n * t_slow;
-        work_buf[(size_t)n * nof_subc + m] += icf_t((float)(amp * std::cos(phase)), (float)(amp * std::sin(phase)));
+        work_buf[(size_t)n * nof_subc + m] += selftest_tone(amp, (double)m * df_comb, tau, fd, (double)n * t_slow);
       }
     }
     const int    r_bin = (int)std::lround(tau * (double)nof_subc * df_comb);

@@ -79,13 +79,28 @@ constexpr uint32_t SFO_TRACK_HALFWIN_BINS = 10;
 // Minimum {time, delay} pairs (post-ISI-exclusion) to attempt the SFO line fit.
 constexpr uint32_t SFO_MIN_VALID_ROWS = 8;
 
-// Minimum same-comb rows observed before the running ISI baseline is trusted enough to flag
-// anomalies; below this every row in that comb group is accepted (building up the baseline).
+// Minimum same-comb rows observed before the ISI baseline is trusted enough to flag anomalies;
+// below this every row in that comb group is accepted (building up the baseline).
 constexpr uint32_t SFO_ISI_MIN_GROUP_ROWS = 3;
 
+// Size of the sliding window of recent accepted same-comb rows the ISI baseline is computed over
+// (see comb_stats_t's comment for why this replaced a whole-CPI cumulative mean). Large enough to
+// average out row-to-row noise, small enough to track legitimate slow drift in the metric as the
+// tracking window walks across the compact CIR over a long CPI.
+constexpr uint32_t SFO_ISI_LOCAL_WINDOW = 20;
+
 // A row is excluded as ISI-contaminated if its out-of-window CIR energy exceeds its comb group's
-// running mean by more than this many standard deviations. Starting default; tune in Phase 6a.
-constexpr double SFO_ISI_SIGMA = 4.0;
+// local mean by more than this many standard deviations. Tuned (not guessed) from Phase 6a
+// measurement: out-of-window energy is dominated by ordinary windowed-DFT spectral leakage, whose
+// level swings ~3-4 orders of magnitude as a function of the row's OWN sub-bin fractional position
+// alone (near-zero frac -> near-zero leakage; frac near 0.5-0.9 -> much higher), entirely independent
+// of any real contamination -- confirmed via a standalone clean-signal measurement (see gap-analysis
+// doc section 12). A local-neighbor sigma threshold cannot distinguish this benign, frac-driven
+// swing from genuine ISI without normalizing by the row's own frac first (not implemented here --
+// flagged as follow-up work). SFO_ISI_SIGMA is set high enough that this ordinary swing does not
+// trigger false exclusions on a clean synthetic signal (empirically verified), while still able to
+// catch a genuinely extreme (many-sigma-beyond-the-local-mix) contamination event.
+constexpr double SFO_ISI_SIGMA = 30.0;
 
 // This build's actual RF sample rate (USRP B210, per CLAUDE.md's live-testbed config) -- used only
 // to additionally express the fitted (dimensionless) ppm figure as an absolute Hz clock error for
@@ -138,6 +153,22 @@ fft_plan* row_cir_builder::plan_for(uint32_t m)
   return plan_cache_.back().second.get();
 }
 
+const std::vector<float>& row_cir_builder::hann_for(uint32_t m)
+{
+  for (auto& kv : hann_cache_) {
+    if (kv.first == m) {
+      return kv.second;
+    }
+  }
+  std::vector<float> w(m);
+  const uint32_t     denom = (m > 1) ? (m - 1) : 1;
+  for (uint32_t i = 0; i < m; i++) {
+    w[i] = 0.5f * (1.0f - std::cos(2.0f * (float)M_PI * (float)i / (float)denom));
+  }
+  hann_cache_.emplace_back(m, std::move(w));
+  return hann_cache_.back().second;
+}
+
 bool row_cir_builder::build(const icf_t* row, const uint8_t* mask, uint32_t nof_subc, uint32_t comb,
                             std::vector<icf_t>& cir)
 {
@@ -173,6 +204,20 @@ bool row_cir_builder::build(const icf_t* row, const uint8_t* mask, uint32_t nof_
       return false;
     }
     compact_[i] = row[c];
+  }
+
+  // Hann-window before the IFFT (same formula range_doppler.cc already uses for its own range/
+  // Doppler axes). Discovered empirically in Phase 6a testing, not assumed: an un-windowed compact
+  // CIR is a raw Dirichlet-kernel (rectangular-spectrum) mainlobe, and 3-point parabolic
+  // interpolation of that shape has severe bias (measured up to ~0.2 bin error approaching a 0.5-bin
+  // true offset) -- windowing shapes the mainlobe much closer to parabolic, which is exactly why
+  // range_doppler's own main DSP path already windows both its axes. This does not shift the peak's
+  // location (a window is a real, symmetric taper -- it broadens the mainlobe, it does not move it),
+  // only the accuracy of sub-bin extraction from it. See docs/NR_UE_ISAC_sync_gap_analysis.md
+  // section 12 for the measured before/after bias figures.
+  const std::vector<float>& win = hann_for(m);
+  for (uint32_t i = 0; i < m; i++) {
+    compact_[i] *= win[i];
   }
 
   cir.resize(m);
@@ -467,7 +512,7 @@ cpi_sfo_tracker::comb_stats_t& cpi_sfo_tracker::stats_for(uint32_t comb)
       return s;
     }
   }
-  comb_stats_.push_back(comb_stats_t{comb, 0, 0.0, 0.0});
+  comb_stats_.push_back(comb_stats_t{comb, {}});
   return comb_stats_.back();
 }
 
@@ -574,33 +619,39 @@ sfo_fit_result_t cpi_sfo_tracker::process(icf_t*                   h_cpi,
       rowinfo.tau_s                 = ((double)peak + frac) * bin_to_delay_s;
       rowinfo.out_win_energy_per_bin = out_energy;
 
-      // Streaming, per-comb ISI check using ONLY the running baseline accumulated so far (causal
-      // within this walk), so an anomalous row can't inflate the very baseline used to judge it.
+      // Sliding-window, per-comb ISI check using only the last SFO_ISI_LOCAL_WINDOW ACCEPTED rows
+      // of the same comb ("neighboring rows", not the whole CPI since it started -- see comb_stats_t's
+      // comment for why a whole-CPI cumulative baseline over-triggered in testing).
       comb_stats_t& st = stats_for(row_comb[r]);
       bool          isi = false;
-      if (st.n >= SFO_ISI_MIN_GROUP_ROWS) {
-        const double mean    = st.mean;
-        const double std_dev = std::sqrt(st.m2 / (double)st.n);
+      if (st.recent.size() >= SFO_ISI_MIN_GROUP_ROWS) {
+        double mean = 0.0;
+        for (double v : st.recent) {
+          mean += v;
+        }
+        mean /= (double)st.recent.size();
+        double m2 = 0.0;
+        for (double v : st.recent) {
+          m2 += (v - mean) * (v - mean);
+        }
+        const double std_dev = std::sqrt(m2 / (double)st.recent.size());
         if (std_dev > 0.0 && out_energy > mean + SFO_ISI_SIGMA * std_dev) {
           isi = true;
           // Phase 5 instrumentation: per-row exclusion detail (which row, why). LOG_D since this can
           // fire multiple times per CPI; the LOG_I summary below covers the per-CPI count.
           LOG_D(PHY,
-                "SENSING: sync(SFO) row=%u comb=%u excluded (ISI): out_win_energy=%.3e > group_mean=%.3e + "
-                "%.1f*stddev=%.3e (n_group=%u)\n",
-                r, row_comb[r], out_energy, mean, SFO_ISI_SIGMA, std_dev, st.n);
+                "SENSING: sync(SFO) row=%u comb=%u excluded (ISI): out_win_energy=%.3e > local_mean=%.3e + "
+                "%.1f*stddev=%.3e (n_local=%zu)\n",
+                r, row_comb[r], out_energy, mean, SFO_ISI_SIGMA, std_dev, st.recent.size());
         }
       }
       rowinfo.excluded_isi = isi;
 
       if (!isi) {
-        // Welford online update of this comb group's mean/variance.
-        st.n++;
-        const double delta1 = out_energy - st.mean;
-        st.mean += delta1 / (double)st.n;
-        const double delta2 = out_energy - st.mean;
-        st.m2 += delta1 * delta2;
-
+        st.recent.push_back(out_energy);
+        if (st.recent.size() > SFO_ISI_LOCAL_WINDOW) {
+          st.recent.pop_front();
+        }
         anchor = peak; // advance the walk only on accepted (non-anomalous) rows
       }
     }
