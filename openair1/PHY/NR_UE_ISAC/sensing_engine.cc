@@ -528,6 +528,12 @@ void sensing_engine::write_report_json()
   rep.detections            = &detections;
   rep.include_rvm_blob      = args.capture_enable;
 
+  // Phase 5 (ota_sync_passive_ue.md): per-CPI STO/CFO/SFO estimates + Phase 4's LOS residual.
+  rep.sto = last_sto_fit;
+  rep.cfo = last_cfo_fit;
+  rep.sfo = last_sfo_fit;
+  rep.los = last_los_residual;
+
   const std::string line = build_detection_report_json(rep);
 
   if (!report_path.empty()) {

@@ -25,6 +25,14 @@
  * Field names and units mirror the fusion node's wire contract
  * (repos/isac crates/isac-core/src/report.rs — DetectionReport / Illuminator / Detection),
  * so isac_core::report::DetectionReport deserialises the emitted JSON unchanged.
+ *
+ * Phase 5 (ota_sync_passive_ue.md) adds an optional "sync" object with per-CPI STO/CFO/SFO
+ * estimates and the Phase 4 LOS residual. Confirmed safe against `repos/isac`'s wire contract:
+ * `DetectionReport` derives plain `serde::Deserialize` with no `#[serde(deny_unknown_fields)]`
+ * (crates/isac-core/src/report.rs), and `isac-bus::read_reports_jsonl()` (the function
+ * `isac-track replay` calls) parses each line with a plain `serde_json::from_str::<DetectionReport>`
+ * — unrecognised fields are silently ignored, not an error. Extending the JSON in place was
+ * therefore safe; no sibling output file was needed.
  */
 
 #ifndef NR_ISAC_DETECTION_REPORT_H
@@ -35,6 +43,7 @@
 #include <vector>
 
 #include "defs_nr_UE_ISAC.h"
+#include "isac_sync.h"
 
 namespace nr_isac {
 
@@ -55,6 +64,13 @@ struct detection_report_t {
   const sensing_rvm_t*                    rvm              = nullptr; ///< range/velocity resolution + extents
   const std::vector<sensing_detection_t>* detections       = nullptr; ///< per-CPI CA-CFAR detections
   bool                                    include_rvm_blob = false;    ///< emit the RVM raster as rvm_blob
+
+  // Phase 5: per-CPI sync estimates, always populated (Phases 1-4 run unconditionally) and always
+  // emitted as a "sync" object -- see the file-level comment above for the wire-compatibility check.
+  sto_fit_result_t sto;
+  cfo_fit_result_t cfo;
+  sfo_fit_result_t sfo;
+  los_residual_t   los;
 };
 
 /// Maps a sensing reference source to the DetectionReport Illuminator.ref_type string.

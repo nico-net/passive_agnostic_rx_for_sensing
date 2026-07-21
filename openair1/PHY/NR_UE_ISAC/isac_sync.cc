@@ -583,6 +583,12 @@ sfo_fit_result_t cpi_sfo_tracker::process(icf_t*                   h_cpi,
         const double std_dev = std::sqrt(st.m2 / (double)st.n);
         if (std_dev > 0.0 && out_energy > mean + SFO_ISI_SIGMA * std_dev) {
           isi = true;
+          // Phase 5 instrumentation: per-row exclusion detail (which row, why). LOG_D since this can
+          // fire multiple times per CPI; the LOG_I summary below covers the per-CPI count.
+          LOG_D(PHY,
+                "SENSING: sync(SFO) row=%u comb=%u excluded (ISI): out_win_energy=%.3e > group_mean=%.3e + "
+                "%.1f*stddev=%.3e (n_group=%u)\n",
+                r, row_comb[r], out_energy, mean, SFO_ISI_SIGMA, std_dev, st.n);
         }
       }
       rowinfo.excluded_isi = isi;

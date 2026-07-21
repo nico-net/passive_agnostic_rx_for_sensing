@@ -492,3 +492,44 @@ Phase 5 instrumentation · Phase 6 tests+runbook. Do not combine 2–5.
    *before* Phase 1/3's window-based searches run, which only makes their fixed/sequential windows
    more likely to find the true peak — not required for correctness, but a nice side effect worth
    noting.
+
+---
+
+## 11. Phase 5 implementation notes (instrumentation) — decisions made, not silently
+
+1. **Wire-contract compatibility was checked empirically, not just by reading the Rust source.**
+   `repos/isac/crates/isac-core/src/report.rs`'s `DetectionReport` derives plain
+   `#[derive(Serialize, Deserialize)]` with **no** `#[serde(deny_unknown_fields)]`, and
+   `isac-bus::read_reports_jsonl()` (what `isac-track replay` calls) parses each line with a plain
+   `serde_json::from_str::<DetectionReport>` — by serde's default behaviour, unrecognised JSON
+   fields are silently ignored, not an error. This was confirmed by actually running the prebuilt
+   `repos/isac/target/debug/isac-track replay` binary against a hand-built JSON-lines file carrying
+   the new `"sync"` object: it parsed cleanly (`emitted 0 track update(s)`, expected for a
+   single-Tx-Rx-pair capture per the standing single-receiver-validation note — not a failure). A
+   negative-control line with a genuinely truncated/malformed JSON object *did* produce a parse
+   error from the same binary, confirming the tool actually validates and the clean run on the
+   `"sync"`-bearing line wasn't a fluke of a no-op parser. **Conclusion: extending the wire contract
+   in place was safe; no sibling output file was needed** (the task's alternative if this had been
+   unsafe).
+
+2. **New fields live under a single `"sync"` object**, not flattened into the top level or spread
+   across `illuminator`/`detections` — keeps the addition visually separate from the pre-existing
+   schema and makes it trivial to spot in a diff or to drop entirely if a future consumer wants the
+   original schema back verbatim (e.g. by filtering the object out before re-parsing).
+
+3. **`sto`/`cfo`/`sfo`/`los_residual` are emitted unconditionally, using each tracker's own
+   default-constructed zero/false state when not yet meaningful** (e.g. before
+   `LOS_BASELINE_INIT_CPIS` CPIs have elapsed, or before `SFO_MIN_VALID_ROWS` is reached this CPI) —
+   simpler than making the whole `"sync"` object `Option`-shaped on the wire, and the boolean flags
+   already present on each struct (`is_constant`, `corrected`, `baseline_established`,
+   `detection_found`) tell a consumer whether the accompanying numeric fields are meaningful yet.
+
+4. **Per-row SFO ISI-exclusion detail is logged at `LOG_D`, not `LOG_I`, and only at the point of
+   exclusion** (`cpi_sfo_tracker::process()`), while the existing per-CPI summary count stays at
+   `LOG_I`. A CPI can have many excluded rows; matching OAI's existing convention of reserving
+   `LOG_I` for one-line-per-CPI summaries and `LOG_D` for verbose/per-event detail (consistent with
+   the Constraints section's "existing OAI logging macros/tags" instruction) avoids flooding the
+   default log level while keeping the detail available when `LOG_D` is enabled. The per-row line
+   includes the row index, its native comb, its measured out-of-window energy, and the comb group's
+   running mean/stddev at the moment of exclusion — i.e. both *which* row and *why*, per the task's
+   explicit ask.

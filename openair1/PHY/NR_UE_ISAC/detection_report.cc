@@ -191,6 +191,69 @@ std::string build_detection_report_json(const detection_report_t& rep)
     out += ']';
   }
 
+  // Phase 5 (ota_sync_passive_ue.md): per-CPI STO/CFO/SFO estimates + the Phase 4 LOS residual.
+  // Not part of repos/isac's DetectionReport schema -- confirmed safe to add (see detection_report.h's
+  // file comment): unrecognised fields are silently ignored by isac-track's plain serde deserialiser.
+  out += ",\"sync\":{";
+
+  out += "\"sto\":{\"n_valid\":";
+  out += std::to_string(rep.sto.n_valid);
+  out += ",\"slope_bins_per_s\":";
+  append_json_double(out, rep.sto.slope_bins_per_s);
+  out += ",\"mean_frac_bin\":";
+  append_json_double(out, rep.sto.mean_frac_bin);
+  out += ",\"drift_bins_cpi\":";
+  append_json_double(out, rep.sto.drift_bins_cpi);
+  out += ",\"is_constant\":";
+  out += rep.sto.is_constant ? "true" : "false";
+  out += '}';
+
+  out += ",\"cfo\":{\"n_valid\":";
+  out += std::to_string(rep.cfo.n_valid);
+  out += ",\"cfo_hz\":";
+  append_json_double(out, rep.cfo.cfo_hz);
+  out += ",\"cfo_hz_filtered\":";
+  append_json_double(out, rep.cfo.cfo_hz_filtered);
+  out += ",\"cfo_rate_hz_per_cpi\":";
+  append_json_double(out, rep.cfo.cfo_rate_hz_per_cpi);
+  out += ",\"residual_phase_rms_rad\":";
+  append_json_double(out, rep.cfo.residual_phase_rms_rad);
+  out += '}';
+
+  out += ",\"sfo\":{\"n_candidate\":";
+  out += std::to_string(rep.sfo.n_candidate);
+  out += ",\"n_excluded_isi\":";
+  out += std::to_string(rep.sfo.n_excluded_isi);
+  out += ",\"n_fit\":";
+  out += std::to_string(rep.sfo.n_fit);
+  out += ",\"sfo_ppm\":";
+  append_json_double(out, rep.sfo.sfo_ppm);
+  out += ",\"sample_clock_error_hz\":";
+  append_json_double(out, rep.sfo.sample_clock_error_hz);
+  out += ",\"corrected\":";
+  out += rep.sfo.corrected ? "true" : "false";
+  out += '}';
+
+  out += ",\"los_residual\":{\"baseline_established\":";
+  out += rep.los.baseline_established ? "true" : "false";
+  out += ",\"detection_found\":";
+  out += rep.los.detection_found ? "true" : "false";
+  out += ",\"range_bin\":";
+  out += std::to_string(rep.los.range_bin);
+  out += ",\"doppler_bin\":";
+  out += std::to_string(rep.los.doppler_bin);
+  out += ",\"range_residual_m\":";
+  append_json_double(out, rep.los.range_residual_m);
+  out += ",\"vel_residual_mps\":";
+  append_json_double(out, rep.los.vel_residual_mps);
+  out += ",\"delay_bias_s\":";
+  append_json_double(out, rep.los.delay_bias_s);
+  out += ",\"cfo_bias_hz\":";
+  append_json_double(out, rep.los.cfo_bias_hz);
+  out += '}';
+
+  out += '}'; // end "sync"
+
   out += '}';
   return out;
 }
