@@ -332,3 +332,95 @@ Phase 5 instrumentation · Phase 6 tests+runbook. Do not combine 2–5.
    corrections commute (uniform-in-*k* rotation vs. linear-in-*k* ramp), so their relative order
    in `sensing_engine.cc` doesn't affect the result; Phase 2 was placed immediately after Phase 1
    in the CPI-close block mainly so `last_row_estimates()` is read right after it's produced.
+
+---
+
+## 9. Phase 3 implementation notes (SFO) — decisions made, not silently
+
+1. **Why Phase 3 cannot reuse Phase 1's per-row LOS estimates (unlike Phase 2).** Worked example
+   at this repo's actual numbers: B210 TCXO worst-case free-running stability is "a few ppm" (per
+   the task's own framing); at 2 ppm and a ~5 s CPI (the length referenced in the resolved-artifact
+   note), the LOS delay walks by `2e-6 * 5 = 1e-5 s = c * 1e-5 = ~3000 m`, i.e. **~367 range bins**
+   at this build's `range_res = 8.16 m`. Phase 1's `estimate_row()` searches a *fixed* ±4-bin window
+   around a *constant* nominal bin every row — correct for near-zero drift, but it would silently
+   return garbage (whatever's biggest in that small fixed window, uncorrelated with the true peak)
+   once real drift exceeds a few bins. Feeding that into a line fit would produce a meaningless SFO
+   estimate that looks numerically plausible. Phase 3 therefore does its own pass.
+
+2. **Refactor: `row_cir_builder` factored out of `cpi_sto_tracker`.** The CIR-building step (gather
+   occupied samples at native comb stride, IFFT via `isac_fft`) is identical between Phase 1 and
+   Phase 3 — only the *peak-search strategy* differs (fixed narrow window vs. sequential tracking
+   window). Per Phase 0's "reuse the existing computation, don't duplicate" rule, this step (not
+   the peak search) is what's shared. Each tracker owns its own `row_cir_builder` instance rather
+   than sharing one — trivially cheap to warm up twice (a handful of FFT plans), and keeps the two
+   trackers decoupled (no shared-lifetime/ordering coupling between Phase 1 and Phase 3 objects).
+
+3. **Sequential tracking window, not a widened fixed window.** Rather than guessing a single window
+   wide enough to cover worst-case cumulative drift (hundreds of bins, per note 1 — impractically
+   wide, and would admit far more noise/spurious peaks into each row's search), each row's window is
+   re-centered on the *previous accepted row's* own peak. This is the same predict-from-previous
+   structure as Phase 2's sequential phase unwrap, applied to bins instead of radians: cumulative
+   drift across the whole CPI can be arbitrarily large as long as the *per-step* drift between
+   consecutive accepted rows stays within `SFO_TRACK_HALFWIN_BINS` (10) — true in practice for
+   realistic SFO magnitudes given this repo's row spacing (dominated by PDSCH availability when
+   fused, much closer together than the worst-case CSI-RS-only 20 ms gap).
+
+4. **ISI exclusion is causal/streaming and per-comb, and hard-excludes rather than down-weights.**
+   "Out-of-window CIR energy" is measured relative to *that row's own* search window (whatever it
+   currently is, since the window itself moves with the walk), and compared against a **running**
+   Welford mean/stddev tracked **separately per native comb** (comb-12 CSI-RS vs. comb-1/2 PDSCH
+   have different noise floors by construction — M differs, so per-bin noise contribution
+   differs). The comparison uses only statistics accumulated *so far* in the walk (not full-CPI
+   hindsight), so:
+   - an anomalous row cannot inflate the very baseline used to judge it (stats update is skipped
+     for excluded rows), and
+   - the walk's anchor does not advance on an excluded row (it keeps the last good peak), so one
+     bad row doesn't drag the tracking window off course for subsequent rows.
+   Rows are **excluded entirely** from the fit, not soft-down-weighted by a continuous ISI-based
+   weight. This is a real, stated simplification (per the Constraints section's tradeoff-disclosure
+   requirement) — a proper weighted least squares would use every candidate with a continuous
+   weight instead of a hard in/out threshold, and is a natural refinement if hard exclusion proves
+   too coarse in Phase 6a/6b testing.
+
+5. **SFO ppm needs no unit conversion beyond `x 1e6`.** The line-fit slope (delay in seconds vs.
+   elapsed time in seconds) is *directly* the dimensionless fractional sample-clock error — by
+   construction, a sample clock running fast/slow by fraction ε causes apparent delay to drift at
+   rate ε (seconds per second), so `ppm = slope * 1e6`. The task's instruction to "convert to ppm
+   using this build's actual sample rate, 23.04 MHz" is satisfied by additionally reporting the
+   equivalent **absolute** Hz-level clock error (`ppm * 1e-6 * 23.04e6`) for human-readable
+   cross-checking against TCXO datasheets, which quote ppm and/or Hz at a stated reference rate —
+   the 23.04 MHz constant does **not** enter the ppm computation itself, since ppm is rate-invariant
+   by definition.
+
+6. **Correction chose a per-row frequency-domain phase ramp over a cubic Farrow resampler, and
+   Phase 3's task text's two-part correction ((a) bulk, (b) residual/per-update-interval) collapses
+   into one continuous step.** `exp(j*2*pi*k*SCS*tau)` is the *exact* frequency-domain
+   representation of a (circular) time-domain shift by any `tau` — not limited to sub-sample shifts
+   the way a Farrow filter is designed for. Since the CFR is already held in the frequency domain
+   (`h_cpi`), applying the shift there avoids a second FFT/IFFT round trip entirely, and is the same
+   technique Phase 1 already uses for its (much smaller, sub-bin-only) correction. Because the SFO
+   fit gives a continuous function of time (`slope * time_s[row]`), every row is corrected at its
+   own *exact* time rather than at some coarser update-interval granularity — there is no leftover
+   "residual, per sub-update-interval" component to mop up separately, so part (b) of the task's
+   description is subsumed by part (a) here rather than implemented as a second pass.
+
+7. **Only the drift term is removed, never the intercept** — `tau_correct(row) = slope *
+   time_s[row]`, deliberately omitting the fit's intercept (its value at CPI-start, t=0). This
+   mirrors Phase 1's boundary exactly: the intercept carries wherever the row's *absolute* delay
+   level sits (the diagnosed ~49 m / bin-6 group delay, plus whatever Phase 1's own fractional
+   correction already did), which remains out of scope for removal here. Only the CPI-relative
+   *drift since CPI start* is nulled — exactly the quantity responsible for the Doppler-axis smear.
+
+8. **`nof_range x df = total bandwidth` invariant is preserved for the same reason as Phase 1/2**:
+   like both of those, this is a phase-only multiply of already-occupied grid columns — `nof_subc`,
+   which columns are occupied, and how many are occupied are all untouched; only existing complex
+   values are rotated. No grid-indexing or effective-bandwidth change results.
+
+9. **Ordering relative to Phase 1/2 in `sensing_engine.cc` doesn't matter, and was chosen for
+   readability, not correctness.** Phase 1's correction is a *constant-across-rows* fractional-bin
+   ramp (only shifts every row's delay by the *same* amount, so it cannot change the SFO fit's
+   *slope*, only every row's intercept — irrelevant here since the intercept is excluded anyway).
+   Phase 2's correction is a *uniform* (not per-subcarrier) rotation that leaves CIR magnitude, and
+   therefore peak location, completely unchanged. Since Phase 3's own peak search only looks at
+   magnitude, it is unaffected by whether it runs before or after Phase 1/2's phase-only
+   corrections. All three were placed in reading order (Phase 1 -> 2 -> 3) purely for code clarity.

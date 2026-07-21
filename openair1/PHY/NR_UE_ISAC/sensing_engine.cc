@@ -301,6 +301,13 @@ void sensing_engine::accumulate_cpi(const sensing_slot_t& s)
     // commutes with the STO correction above (uniform per-row rotation vs. STO's per-subcarrier ramp).
     last_cfo_fit = cfo_tracker.process(h_cpi.data(), occ_all.data(), nof_subc, sto_tracker.last_row_estimates());
 
+    // Phase 3 (ota_sync_passive_ue.md): SFO delay-drift fit + correction. Runs its own per-row
+    // CIR/peak tracking walk (does not reuse Phase 1's rows -- Phase 1's fixed-window search can't
+    // follow the multi-hundred-bin drift SFO can cause over a multi-second CPI). Also before
+    // Stage-4b interpolation; commutes with Phase 1/2's corrections above.
+    last_sfo_fit = sfo_tracker.process(h_cpi.data(), occ_all.data(), cpi_row, nof_subc, cpi_row_comb.data(),
+                                        cpi_row_time.data(), cpi_carrier);
+
     // Stage 4b (part 1): gap-fill every accumulated row now that same-slot merges + STO correction
     // are done.
     for (uint32_t rr = 0; rr < cpi_row; rr++) {

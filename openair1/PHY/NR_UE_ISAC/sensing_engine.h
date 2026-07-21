@@ -175,6 +175,12 @@ private:
   cpi_cfo_tracker  cfo_tracker;
   cfo_fit_result_t last_cfo_fit;
 
+  // Phase 3: SFO delay-drift fit + correction. Runs its own per-row CIR/peak walk (does not reuse
+  // Phase 1's estimates -- see cpi_sfo_tracker's class comment for why), independent of Phase 1/2's
+  // corrections (all three commute). Same ordering constraint (before Stage-4b interpolation).
+  cpi_sfo_tracker  sfo_tracker;
+  sfo_fit_result_t last_sfo_fit;
+
   // Range-Doppler processor and its outputs (engine thread only)
   std::unique_ptr<range_doppler>   rd;
   sensing_rvm_t                    rvm;
