@@ -424,3 +424,71 @@ Phase 5 instrumentation · Phase 6 tests+runbook. Do not combine 2–5.
    therefore peak location, completely unchanged. Since Phase 3's own peak search only looks at
    magnitude, it is unaffected by whether it runs before or after Phase 1/2's phase-only
    corrections. All three were placed in reading order (Phase 1 -> 2 -> 3) purely for code clarity.
+
+---
+
+## 10. Phase 4 implementation notes (closed-loop LOS pinning) — decisions made, not silently
+
+1. **Constraint 5 confirmation: no second RD/CFAR/detection path.** `los_baseline_tracker` only
+   reads `range_doppler.cc`'s existing `detections`/`rvm` outputs (via `update_residual()`, called
+   in `process_cpi()` right after `rd->process()`) and writes a bias state consumed as an *input*
+   correction to `h_cpi` (via `apply_bias_correction()`, called in the CPI-close block alongside
+   Phases 1-3, all upstream of `range_doppler` entirely). Nothing in `range_doppler.cc` or
+   `detection_report.cc` was touched.
+
+2. **Baseline established by averaging, not asserted as a universal constant.** The first
+   `LOS_BASELINE_INIT_CPIS` (5) CPIs with a detection near a physically-motivated initial guess
+   (the same `NOMINAL_LOS_RANGE_M`-derived range bin Phase 1/3 seed from, and the RVM's own
+   zero-Doppler bin, since the direct path is static once fully corrected) are averaged into the
+   baseline. This matches the task's explicit instruction not to assume bin 6 (or any other single
+   value) as a universal truth across configs/cells.
+
+3. **Nearest-detection matching is a simple gated Manhattan distance, not a statistical
+   association filter.** A detection must be within `LOS_MATCH_MAX_RANGE_BINS`/
+   `LOS_MATCH_MAX_DOPPLER_BINS` (5/5) of the current (candidate) baseline on *both* axes to be
+   considered; among qualifying detections, the one minimizing `|range_bin diff| + |doppler_bin
+   diff|` is picked. A real data-association filter (e.g. gated nearest-neighbor with a proper
+   Mahalanobis distance, or a light tracker) is the natural refinement if a real target ever
+   loiters within this gate and gets mistaken for the LOS — not implemented here; flagged as a
+   known simplification per the Constraints section.
+
+4. **Leaky integrator, not a pure integrator, and gains are starting defaults.** `bias = (1 -
+   LOS_BIAS_LEAK) * bias + LOS_BIAS_KI * residual` (KI=0.3, LEAK=0.02). A pure integrator has no
+   mechanism to recover if the residual measurement is wrong for several consecutive CPIs (e.g. a
+   real moving target transiently occupies the LOS's own gate and gets matched instead) — it would
+   wind the bias up unboundedly. The leak term bounds the bias state while still letting it
+   accumulate a persistent correction over many CPIs. This is exactly the "PLL bandwidth" tradeoff
+   the Constraints section asks to be stated explicitly; both constants are tuning targets for
+   Phase 6a's self-test sweep, not final values.
+
+5. **One-CPI feedback latency is intentional, not a bug.** `update_residual()` (measures this CPI's
+   residual, updates the bias) necessarily runs *after* `range_doppler::process()` produces this
+   CPI's detections, while `apply_bias_correction()` (applies the bias) necessarily runs *before*
+   this CPI's own CFR correction/RD processing — so the bias applied to CPI *N* was always computed
+   from CPI *N-1*'s residual. This is the expected shape of a closed loop operating at CPI
+   granularity, not a same-CPI feedthrough.
+
+6. **`fc_hz` is passed as an explicit parameter to `update_residual()`, not added to
+   `sensing_rvm_t`.** The Doppler-velocity residual needs the carrier frequency to convert to an
+   equivalent CFO-like Hz bias (`cfo_residual_hz = 2 * vel_residual_mps * fc_hz / c`, the same
+   relationship `range_doppler.cc` already uses to derive `vel_res_mps` from `fc`). Adding an `fc`
+   field to `sensing_rvm_t` would mean touching `defs_nr_UE_ISAC.h`/`range_doppler.cc` beyond what
+   the Constraints section allows (self-test injection only); `sensing_engine.cc` already has
+   `cpi_carrier.dl_center_hz` in scope at the `update_residual()` call site, so it is passed through
+   directly instead.
+
+7. **Bias correction uses the exact same two primitives as Phases 1-3** (a linear-in-*k* frequency
+   ramp for the delay bias, cancelling it with the identical sign convention as Phase 1/3's
+   "+j2*pi*k*SCS*tau"; a uniform per-row rotation scaled by each row's own elapsed time for the
+   CFO-like bias, with the identical "-observed phase" cancel convention as Phase 2) — deliberately
+   reusing the established techniques rather than inventing a third correction mechanism. Both are
+   phase-only multiplies of already-occupied columns, so the `nof_range x df = total bandwidth`
+   invariant is preserved for the same reason it was in Phases 1-3.
+
+8. **`apply_bias_correction()` runs before Phases 1-3 in `sensing_engine.cc`, but this is a
+   narrative choice, not a correctness one** — like Phases 1-3's corrections, it commutes with all
+   of them (same phase-only-multiply argument). Running it first has a genuine side benefit,
+   though: when the loop is converging correctly, it nudges the LOS peak closer to the nominal bin
+   *before* Phase 1/3's window-based searches run, which only makes their fixed/sequential windows
+   more likely to find the true peak — not required for correctness, but a nice side effect worth
+   noting.

@@ -181,6 +181,12 @@ private:
   cpi_sfo_tracker  sfo_tracker;
   sfo_fit_result_t last_sfo_fit;
 
+  // Phase 4: closed-loop LOS pinning, wrapping range_doppler/detection_report's existing output
+  // (no second RD/CFAR path). apply_bias_correction() runs alongside Phases 1-3 in the CPI-close
+  // block; update_residual() runs in process_cpi(), after rd->process() produces detections/rvm.
+  los_baseline_tracker los_tracker;
+  los_residual_t        last_los_residual;
+
   // Range-Doppler processor and its outputs (engine thread only)
   std::unique_ptr<range_doppler>   rd;
   sensing_rvm_t                    rvm;

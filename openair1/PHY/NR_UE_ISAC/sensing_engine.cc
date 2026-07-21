@@ -290,6 +290,14 @@ void sensing_engine::accumulate_cpi(const sensing_slot_t& s)
       cpi_row_comb[rr] = row_native_comb(&occ_all[(size_t)rr * nof_subc], nof_subc);
     }
 
+    // Phase 4 (ota_sync_passive_ue.md): apply whatever closed-loop bias the LOS baseline tracker
+    // accumulated from PAST CPIs' residuals (measured in process_cpi(), after this CPI's own
+    // detections are known -- one-CPI feedback latency by design). A no-op until a baseline is
+    // established. Runs first purely for narrative ordering ("apply what we learned before this
+    // CPI's own fresh estimation") -- it commutes with Phases 1-3 like they commute with each other.
+    los_tracker.apply_bias_correction(h_cpi.data(), occ_all.data(), cpi_row, nof_subc, cpi_row_time.data(),
+                                      cpi_carrier);
+
     // Phase 1 (ota_sync_passive_ue.md): per-row LOS CIR peak tracking + fine-STO correction on the
     // RAW grid, before Stage-4b interpolation -- interpolation should operate on already-timing-
     // corrected data. See docs/NR_UE_ISAC_sync_gap_analysis.md for why this must run here.
@@ -433,6 +441,11 @@ void sensing_engine::process_cpi()
   // independent of any individual source's native comb.
   rd->process(h_cpi_uniform.data(), args.cpi_slots, nof_subc, cpi_grid_comb, cpi_carrier,
               (float)cpi_period_slots, row_comb_uniform.data(), rvm, detections);
+
+  // Phase 4 (ota_sync_passive_ue.md): wraps range_doppler's existing output (no second RD/CFAR
+  // path) to find this CPI's LOS detection, measure its residual from the established baseline, and
+  // fold that into the closed-loop bias state applied on the NEXT CPI (one-CPI feedback latency).
+  last_los_residual = los_tracker.update_residual(detections, rvm, (double)cpi_carrier.dl_center_hz);
 
   const sensing_detection_t* top = nullptr;
   for (const sensing_detection_t& d : detections) {

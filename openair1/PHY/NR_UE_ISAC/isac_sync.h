@@ -320,6 +320,86 @@ private:
   std::vector<comb_stats_t> comb_stats_;  ///< per-comb running ISI baseline, current CPI
 };
 
+/// Phase 4: one CPI's LOS-detection offset from the established baseline. This is the primary
+/// acceptance-criterion signal for every Phase 7 test (per the task text) -- not any individual
+/// STO/CFO/SFO number in isolation.
+struct los_residual_t {
+  bool     baseline_established = false; ///< false while still accumulating the init average
+  bool     detection_found      = false; ///< false if no CA-CFAR/NMS detection landed near the
+                                          ///< (candidate) baseline this CPI -- no residual measured
+  uint32_t range_bin            = 0;     ///< this CPI's matched LOS detection, if found
+  uint32_t doppler_bin          = 0;
+  double   range_residual_m     = 0.0;   ///< matched detection's range - current baseline/running-avg range
+  double   vel_residual_mps     = 0.0;   ///< matched detection's velocity - current baseline/running-avg velocity
+  double   delay_bias_s         = 0.0;   ///< integrator's bias state after this update (applied next CPI)
+  double   cfo_bias_hz          = 0.0;   ///< integrator's bias state after this update (applied next CPI)
+};
+
+/**
+ * @brief Phase 4: closed-loop LOS pinning, wrapping the EXISTING range_doppler -> detection_report
+ * chain rather than adding a second RD/CFAR/detection path.
+ *
+ * Two entry points, called from two different places in sensing_engine.cc's per-CPI flow:
+ *
+ * - `apply_bias_correction()` runs EARLY, in the CPI-close block alongside Phases 1-3 (before
+ *   Stage-4b interpolation), and applies whatever bias the closed loop has accumulated from PAST
+ *   CPIs' residuals -- using the SAME two correction primitives Phases 1-3 already established
+ *   (a linear-in-*k* frequency ramp for the delay bias, a uniform per-row rotation scaled by each
+ *   row's own elapsed time for the CFO-like bias), so it commutes with all of Phase 1-3's
+ *   corrections and can run in any order relative to them.
+ * - `update_residual()` runs LATE, in `process_cpi()` immediately after `range_doppler::process()`
+ *   produces this CPI's `detections`/`rvm` -- it identifies the detection nearest the established
+ *   (or being-established) LOS baseline, measures this CPI's residual, and folds it into the bias
+ *   state that `apply_bias_correction()` will apply on the NEXT CPI. This one-CPI latency is the
+ *   expected shape of a closed loop, not an oversight.
+ *
+ * Baseline establishment: rather than assuming a universal constant (bin 6 is specific to THIS
+ * cell's group delay, not a general truth), the first `LOS_BASELINE_INIT_CPIS` CPIs with a
+ * detection near an initial guess (the same NOMINAL_LOS_RANGE_M-derived bin Phase 1/3 use for
+ * range, and the RVM's own zero-Doppler bin for velocity -- physically justified since the direct
+ * path is static once fully corrected, not an arbitrary guess) are averaged to become the baseline.
+ *
+ * Bias update is a leaky integrator (`bias = (1-LEAK)*bias + KI*residual`), not a pure integrator:
+ * a plain integrator risks unbounded windup if the baseline match ever degrades for several CPIs in
+ * a row (e.g. a real target passing near the LOS's own range/Doppler cell); the leak keeps the bias
+ * state bounded while still accumulating a persistent correction over many CPIs. Gains are starting
+ * defaults (see .cc), to be tuned in Phase 6a against the self-test harness's known-injected
+ * residual, exactly as the Constraints section asks for PLL/integrator bandwidth to be stated
+ * explicitly rather than picked silently.
+ *
+ * Confirms constraint 5: no second RD/CFAR/detection path exists here -- both methods only read
+ * `range_doppler.cc`'s existing `sensing_detection_t`/`sensing_rvm_t` outputs and write bias state
+ * consumed as an INPUT correction to the CFR grid, upstream of range_doppler entirely.
+ */
+class los_baseline_tracker
+{
+public:
+  /// Called after range_doppler::process() has populated this CPI's detections/rvm.
+  los_residual_t update_residual(const std::vector<sensing_detection_t>& detections, const sensing_rvm_t& rvm,
+                                 double fc_hz);
+
+  /// Called in the CPI-close block, before Stage-4b interpolation (see class comment for placement
+  /// rationale). No-op until a baseline has been established and at least one residual measured.
+  void apply_bias_correction(icf_t* h_cpi, const uint8_t* occ_all, uint32_t cpi_rows, uint32_t nof_subc,
+                             const double* row_time_slots, const nr_isac_carrier_t& carrier) const;
+
+private:
+  bool     baseline_set_         = false;
+  uint32_t baseline_range_bin_   = 0;
+  uint32_t baseline_doppler_bin_ = 0;
+  double   baseline_range_m_     = 0.0;
+  double   baseline_vel_mps_     = 0.0;
+
+  uint32_t init_count_    = 0; ///< successful (detection found) init CPIs accumulated so far
+  double   init_range_sum_ = 0.0;
+  double   init_vel_sum_   = 0.0;
+  uint64_t init_range_bin_sum_   = 0;
+  uint64_t init_doppler_bin_sum_ = 0;
+
+  double delay_bias_s_ = 0.0; ///< leaky-integrator state, applied next CPI
+  double cfo_bias_hz_  = 0.0; ///< leaky-integrator state, applied next CPI
+};
+
 } // namespace nr_isac
 
 #endif // NR_ISAC_SYNC_H

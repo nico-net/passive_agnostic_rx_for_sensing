@@ -105,6 +105,25 @@ uint32_t nominal_los_bin(uint32_t nof_subc, double scs_hz)
   return (uint32_t)std::lround(NOMINAL_LOS_RANGE_M / range_res_m);
 }
 
+// Phase 4: number of successful (detection-found) CPIs averaged to establish the LOS baseline.
+// "First several CPIs" per the task text; not tied to any particular CPI duration.
+constexpr uint32_t LOS_BASELINE_INIT_CPIS = 5;
+
+// Phase 4: a detection must be within this many bins of the current (candidate) baseline on BOTH
+// axes to be considered "the" LOS detection this CPI. Wide enough for residual jitter/sub-bin
+// quantization, narrow enough not to grab an unrelated target sharing the LOS's general vicinity.
+constexpr uint32_t LOS_MATCH_MAX_RANGE_BINS   = 5;
+constexpr uint32_t LOS_MATCH_MAX_DOPPLER_BINS = 5;
+
+// Phase 4: leaky-integrator gains for the closed-loop bias. A PURE integrator risks unbounded
+// windup if the baseline match degrades for several consecutive CPIs (e.g. a real target
+// transiting the LOS's own range/Doppler cell); the leak term keeps the bias state bounded while
+// still accumulating a persistent correction over many CPIs. Starting defaults; tune in Phase 6a
+// against the self-test harness's known-injected residual (this is the PLL/integrator bandwidth
+// choice the Constraints section asks to be stated explicitly, not picked silently).
+constexpr double LOS_BIAS_KI   = 0.3;
+constexpr double LOS_BIAS_LEAK = 0.02;
+
 } // namespace
 
 fft_plan* row_cir_builder::plan_for(uint32_t m)
@@ -654,6 +673,147 @@ sfo_fit_result_t cpi_sfo_tracker::process(icf_t*                   h_cpi,
         n_candidate, n_excluded, n, fit.sfo_ppm, fit.sample_clock_error_hz, SAMPLE_RATE_HZ / 1e6, cpi_rows);
 
   return fit;
+}
+
+los_residual_t los_baseline_tracker::update_residual(const std::vector<sensing_detection_t>& detections,
+                                                     const sensing_rvm_t& rvm, double fc_hz)
+{
+  los_residual_t out;
+
+  if (rvm.nof_range_bins == 0 || rvm.nof_doppler_bins == 0) {
+    return out;
+  }
+
+  // Reference to match against this CPI: the established baseline once set, otherwise the running
+  // init average (or, before any init CPI has succeeded, a physically-motivated initial guess --
+  // the same nominal LOS range Phase 1/3 seed from, and zero Doppler since the direct path is
+  // static once fully corrected -- NOT an arbitrary universal constant asserted as truth).
+  uint32_t guess_range_bin, guess_doppler_bin;
+  if (baseline_set_) {
+    guess_range_bin   = baseline_range_bin_;
+    guess_doppler_bin = baseline_doppler_bin_;
+  } else if (init_count_ > 0) {
+    guess_range_bin   = (uint32_t)(init_range_bin_sum_ / init_count_);
+    guess_doppler_bin = (uint32_t)(init_doppler_bin_sum_ / init_count_);
+  } else {
+    // Physically-motivated initial guess, not an arbitrary constant: the same nominal LOS range
+    // Phase 1/3 seed from (rvm.range_res_m already encodes this CPI's actual bin spacing), and
+    // zero Doppler since the direct path is static once fully corrected.
+    guess_range_bin   = (uint32_t)std::lround(NOMINAL_LOS_RANGE_M / (double)rvm.range_res_m);
+    guess_doppler_bin = rvm.nof_doppler_bins / 2;
+  }
+
+  const sensing_detection_t* best     = nullptr;
+  uint32_t                   best_dist = UINT32_MAX;
+  for (const auto& d : detections) {
+    const uint32_t dr = (d.range_bin > guess_range_bin) ? (d.range_bin - guess_range_bin) : (guess_range_bin - d.range_bin);
+    const uint32_t dd = (d.doppler_bin > guess_doppler_bin) ? (d.doppler_bin - guess_doppler_bin)
+                                                             : (guess_doppler_bin - d.doppler_bin);
+    if (dr > LOS_MATCH_MAX_RANGE_BINS || dd > LOS_MATCH_MAX_DOPPLER_BINS) {
+      continue;
+    }
+    const uint32_t dist = dr + dd;
+    if (dist < best_dist) {
+      best_dist = dist;
+      best      = &d;
+    }
+  }
+
+  if (best == nullptr) {
+    out.baseline_established = baseline_set_;
+    return out; // no detection near the (candidate) baseline this CPI -- nothing to measure
+  }
+
+  out.detection_found = true;
+  out.range_bin        = best->range_bin;
+  out.doppler_bin       = best->doppler_bin;
+
+  if (!baseline_set_) {
+    // Still accumulating the init average.
+    init_count_++;
+    init_range_sum_ += best->range_m;
+    init_vel_sum_ += best->vel_mps;
+    init_range_bin_sum_ += best->range_bin;
+    init_doppler_bin_sum_ += best->doppler_bin;
+
+    if (init_count_ >= LOS_BASELINE_INIT_CPIS) {
+      baseline_range_m_     = init_range_sum_ / (double)init_count_;
+      baseline_vel_mps_     = init_vel_sum_ / (double)init_count_;
+      baseline_range_bin_   = (uint32_t)std::lround((double)init_range_bin_sum_ / (double)init_count_);
+      baseline_doppler_bin_ = (uint32_t)std::lround((double)init_doppler_bin_sum_ / (double)init_count_);
+      baseline_set_         = true;
+      LOG_I(PHY,
+            "SENSING: sync(LOS baseline) established over %u CPIs: range_bin=%u (%.2f m) doppler_bin=%u "
+            "(%.3f m/s)\n",
+            init_count_, baseline_range_bin_, baseline_range_m_, baseline_doppler_bin_, baseline_vel_mps_);
+    }
+    out.baseline_established = baseline_set_;
+    // Report against the running average even before finalisation, for Phase 5 convergence logging.
+    out.range_residual_m = best->range_m - (init_range_sum_ / (double)init_count_);
+    out.vel_residual_mps = best->vel_mps - (init_vel_sum_ / (double)init_count_);
+    out.delay_bias_s     = delay_bias_s_;
+    out.cfo_bias_hz      = cfo_bias_hz_;
+    return out;
+  }
+
+  // Baseline established: this is the real residual, and the closed-loop bias update.
+  out.baseline_established = true;
+  out.range_residual_m     = best->range_m - baseline_range_m_;
+  out.vel_residual_mps     = best->vel_mps - baseline_vel_mps_;
+
+  const double delay_residual_s = 2.0 * out.range_residual_m / SPEED_OF_LIGHT; // matches range_doppler.cc's
+                                                                                // round-trip range_m = c*tau/2
+  const double cfo_residual_hz  = 2.0 * out.vel_residual_mps * fc_hz / SPEED_OF_LIGHT; // matches vel_res_mps's
+                                                                                        // own fc-based derivation
+
+  delay_bias_s_ = (1.0 - LOS_BIAS_LEAK) * delay_bias_s_ + LOS_BIAS_KI * delay_residual_s;
+  cfo_bias_hz_  = (1.0 - LOS_BIAS_LEAK) * cfo_bias_hz_ + LOS_BIAS_KI * cfo_residual_hz;
+
+  out.delay_bias_s = delay_bias_s_;
+  out.cfo_bias_hz  = cfo_bias_hz_;
+
+  LOG_I(PHY,
+        "SENSING: sync(LOS residual) range=%u (%.2f m, resid=%.3f m) doppler=%u (resid=%.4f m/s) -> "
+        "bias(delay=%.3e s, cfo=%.3f Hz)\n",
+        out.range_bin, best->range_m, out.range_residual_m, out.doppler_bin, out.vel_residual_mps, delay_bias_s_,
+        cfo_bias_hz_);
+
+  return out;
+}
+
+void los_baseline_tracker::apply_bias_correction(icf_t* h_cpi, const uint8_t* occ_all, uint32_t cpi_rows,
+                                                 uint32_t nof_subc, const double* row_time_slots,
+                                                 const nr_isac_carrier_t& carrier) const
+{
+  if (!baseline_set_ || (delay_bias_s_ == 0.0 && cfo_bias_hz_ == 0.0)) {
+    return; // no established baseline yet, or the integrator hasn't accumulated any correction
+  }
+
+  const double slots_per_sf = std::max(1.0, (double)carrier.scs_hz / 15000.0);
+  const double slot_dur_s   = 1e-3 / slots_per_sf;
+
+  // Same two correction primitives as Phases 1-3: a linear-in-k frequency ramp cancels the
+  // accumulated delay bias (identical sign convention to Phase 1/3's "+j2*pi*k*SCS*tau" cancel
+  // formula), and a uniform per-row rotation, scaled by that row's own elapsed time, cancels the
+  // accumulated CFO-like bias (identical sign convention to Phase 2's "-observed phase" cancel).
+  const double delay_phase_per_subc = 2.0 * M_PI * (double)carrier.scs_hz * delay_bias_s_;
+
+  for (uint32_t r = 0; r < cpi_rows; r++) {
+    const double time_s   = row_time_slots[r] * slot_dur_s;
+    const double cfo_phase = 2.0 * M_PI * cfo_bias_hz_ * time_s;
+    const icf_t  cfo_rot((float)std::cos(-cfo_phase), (float)std::sin(-cfo_phase));
+
+    icf_t*         row_ptr = &h_cpi[(size_t)r * nof_subc];
+    const uint8_t* mask    = &occ_all[(size_t)r * nof_subc];
+    for (uint32_t c = 0; c < nof_subc; c++) {
+      if (!mask[c]) {
+        continue;
+      }
+      const double delay_phase = delay_phase_per_subc * (double)c;
+      const icf_t  delay_rot((float)std::cos(delay_phase), (float)std::sin(delay_phase));
+      row_ptr[c] = row_ptr[c] * delay_rot * cfo_rot;
+    }
+  }
 }
 
 } // namespace nr_isac
