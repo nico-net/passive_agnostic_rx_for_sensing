@@ -296,6 +296,11 @@ void sensing_engine::accumulate_cpi(const sensing_slot_t& s)
     last_sto_fit = sto_tracker.process(h_cpi.data(), occ_all.data(), cpi_row, nof_subc, cpi_row_comb.data(),
                                         cpi_row_time.data(), cpi_carrier);
 
+    // Phase 2 (ota_sync_passive_ue.md): residual-CFO fit + per-row CPE de-rotation, reusing Phase 1's
+    // per-row LOS-tap estimates (no second CIR pass). Also runs before Stage-4b interpolation, and
+    // commutes with the STO correction above (uniform per-row rotation vs. STO's per-subcarrier ramp).
+    last_cfo_fit = cfo_tracker.process(h_cpi.data(), occ_all.data(), nof_subc, sto_tracker.last_row_estimates());
+
     // Stage 4b (part 1): gap-fill every accumulated row now that same-slot merges + STO correction
     // are done.
     for (uint32_t rr = 0; rr < cpi_row; rr++) {

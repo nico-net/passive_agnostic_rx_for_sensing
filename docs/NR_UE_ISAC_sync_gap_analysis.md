@@ -284,3 +284,51 @@ Phase 5 instrumentation · Phase 6 tests+runbook. Do not combine 2–5.
    operator? (Not part of this task's diff.)
 5. **LOS baseline bin (~bin 6):** to be re-confirmed empirically at Phase 1 on a clean
    capture before it is treated as "the" LOS bin; not assumed constant across configs.
+
+---
+
+## 8. Phase 2 implementation notes (CFO/CPE) — decisions made, not silently
+
+1. **Deviation from the section-6 layout**: rather than one `class cpi_synchronizer` holding
+   all of STO/CFO/SFO/closed-loop state, Phase 1 and 2 landed as two separate classes in the
+   same `isac_sync.{h,cc}` file (`cpi_sto_tracker`, `cpi_cfo_tracker`). Reasoning: each phase's
+   state (FFT plan cache vs. alpha-beta filter state) and fit logic are independent and land in
+   separate, individually reviewable commits per the Constraints section — a single god-class
+   accreting phase-specific members made that harder to review incrementally. `cpi_cfo_tracker`
+   takes `cpi_sto_tracker::last_row_estimates()` as an explicit input rather than being a method
+   on the same class, keeping the dependency visible at the call site
+   (`sensing_engine.cc`'s CPI-close block) rather than implicit. Revisit if Phase 3/4 end up
+   needing enough shared internal state that the split becomes awkward.
+
+2. **Correction is a full de-rotation, not "de-trend then remove residual" as two passes.**
+   The task text describes fitting a CFO line then handling "the residual" as CPE separately.
+   Implemented as one step: each valid row is de-rotated by its own *raw* observed LOS-tap phase
+   (not the post-fit residual only), because subtracting the whole observed phase removes both
+   the smooth (CFO) and non-smooth (CPE) components in one operation — mathematically identical
+   to "subtract fitted line, then subtract residual" since those two components sum back to the
+   raw phase. The line fit is retained purely for (a) a physically meaningful Hz figure to log/
+   track and (b) the slow cross-CPI alpha-beta filter; it is not a second correction pass.
+
+3. **Alpha-beta filter uses CPI-tick spacing, not elapsed seconds**, since `cpi_row_time` resets
+   every CPI (Phase 1 confirmed this) and there is no absolute across-CPI clock available in
+   `sensing_engine.cc` without adding one. A slowly-drifting TCXO tracked at "1 unit per CPI"
+   is a reasonable simplification for a diagnostic/reporting filter — flagged here per Constraints
+   rather than silently assumed. `cfo_hz_filtered` is not consumed by this phase's own
+   correction (which always uses the current CPI's raw per-row phase); it exists for Phase 5
+   logging and as the natural input Phase 4's closed loop would feed back into.
+
+4. **Sequential-unwrap ambiguity is a known, documented limitation, not fixed here.** The
+   per-row phase unwrap assumes consecutive valid rows don't accumulate ≥ π of true CFO-driven
+   phase rotation between them. This repo's live fused config (`csi_rs` + `pdsch_dmrs`/`data`)
+   has frequent PDSCH rows keeping gaps small, so this holds in practice for realistic residual
+   CFO (single-digit-to-low-tens of Hz, per the resolved-artifact note's smear description).
+   A `csirs_monitor`-only source set (Phase 8's passive mode, 20 ms period only) is materially
+   more exposed and is explicitly called out there for mandatory re-validation, not assumed to
+   inherit Phase 2's fused-case behavior.
+
+5. **CFO/CPE correction is independent of Phase 1's STO constant/drift classification** — it
+   runs on every CPI regardless of `sto_fit_result_t::is_constant`, since CFO (a frequency-domain
+   phase rotation) and STO/SFO (a delay/timing effect) are different physical phenomena. The two
+   corrections commute (uniform-in-*k* rotation vs. linear-in-*k* ramp), so their relative order
+   in `sensing_engine.cc` doesn't affect the result; Phase 2 was placed immediately after Phase 1
+   in the CPI-close block mainly so `last_row_estimates()` is read right after it's produced.

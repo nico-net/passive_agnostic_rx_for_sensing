@@ -58,6 +58,17 @@ constexpr uint32_t MIN_VALID_ROWS = 8;
 // range bin" residual tolerance.
 constexpr double DRIFT_BIN_THRESHOLD = 0.25;
 
+// Phase 2 (CFO): minimum valid LOS-tap rows to attempt the unwrap + line fit. Lower than Phase 1's
+// MIN_VALID_ROWS since a phase-vs-time line has only 2 unknowns (slope, intercept) and each row
+// contributes one scalar (vs. Phase 1 needing search-window margin per row).
+constexpr uint32_t CFO_MIN_VALID_ROWS = 4;
+
+// Alpha-beta tracker gains for the slow cross-CPI CFO estimate (diagnostic; not fed into this
+// phase's own correction). dt is 1 CPI tick, not elapsed seconds -- see cpi_cfo_tracker::process().
+// Starting defaults; tune in Phase 6a's sweep against a known injected CFO/drift rate.
+constexpr double CFO_ALPHA = 0.3;
+constexpr double CFO_BETA  = 0.05;
+
 } // namespace
 
 fft_plan* cpi_sto_tracker::plan_for(uint32_t m)
@@ -150,6 +161,7 @@ bool cpi_sto_tracker::estimate_row(const icf_t*         row,
 
   out.peak_bin = peak;
   out.frac_bin = delta;
+  out.peak_val = cir_[peak]; // pre-correction complex sample; Phase 2 reads its phase for CFO/CPE
   return true;
 }
 
@@ -275,6 +287,117 @@ void cpi_sto_tracker::apply_correction(icf_t*         h_cpi,
       row[c] *= icf_t((float)std::cos(phase), (float)std::sin(phase));
     }
   }
+}
+
+cfo_fit_result_t cpi_cfo_tracker::process(icf_t* h_cpi, const uint8_t* occ_all, uint32_t nof_subc,
+                                          const std::vector<los_row_estimate_t>& rows)
+{
+  cfo_fit_result_t fit;
+
+  // Sequential phase unwrap across valid rows, in time order (rows are already time-ordered by
+  // construction -- see sensing_engine.cc's absolute-slot-indexed row accumulation).
+  std::vector<uint32_t> valid_idx;
+  std::vector<double>   raw_phase;
+  std::vector<double>   unwrapped;
+  double prev_unwrapped = 0.0;
+  double prev_raw       = 0.0;
+  bool   have_prev      = false;
+  for (const auto& e : rows) {
+    if (!e.valid) {
+      continue;
+    }
+    const double raw = std::atan2((double)e.peak_val.imag(), (double)e.peak_val.real());
+    double       u;
+    if (!have_prev) {
+      u          = raw;
+      have_prev  = true;
+    } else {
+      double delta = raw - prev_raw;
+      delta -= std::round(delta / (2.0 * M_PI)) * 2.0 * M_PI; // wrap into (-pi, pi]
+      u = prev_unwrapped + delta;
+    }
+    valid_idx.push_back(e.row);
+    raw_phase.push_back(raw);
+    unwrapped.push_back(u);
+    prev_unwrapped = u;
+    prev_raw       = raw;
+  }
+
+  fit.n_valid = (uint32_t)valid_idx.size();
+  if (fit.n_valid < CFO_MIN_VALID_ROWS) {
+    LOG_I(PHY, "SENSING: sync(CFO) CPI has only %u valid LOS-phase rows (need >=%u) -- skipping fit/correction\n",
+          fit.n_valid, CFO_MIN_VALID_ROWS);
+    return fit;
+  }
+
+  // Least-squares fit of unwrapped phase vs. each row's own absolute time (irregular spacing).
+  double sx = 0.0, sy = 0.0, sxx = 0.0, sxy = 0.0;
+  const double n = (double)valid_idx.size();
+  for (size_t i = 0; i < valid_idx.size(); i++) {
+    const double x = rows[valid_idx[i]].time_s;
+    const double y = unwrapped[i];
+    sx += x;
+    sy += y;
+    sxx += x * x;
+    sxy += x * y;
+  }
+  const double denom = n * sxx - sx * sx;
+  double       slope = 0.0, intercept = 0.0;
+  if (std::abs(denom) > 1e-30) {
+    slope     = (n * sxy - sx * sy) / denom;
+    intercept = (sy - slope * sx) / n;
+  } else {
+    intercept = sy / n;
+  }
+  fit.cfo_hz = slope / (2.0 * M_PI);
+
+  double sq_resid = 0.0;
+  for (size_t i = 0; i < valid_idx.size(); i++) {
+    const double predicted = slope * rows[valid_idx[i]].time_s + intercept;
+    const double resid     = unwrapped[i] - predicted;
+    sq_resid += resid * resid;
+  }
+  fit.residual_phase_rms_rad = std::sqrt(sq_resid / n);
+
+  // Slow cross-CPI alpha-beta tracker (diagnostic only -- the correction below uses each row's own
+  // raw observed phase, not this filtered value; Phase 4's closed loop is where a filtered/fed-back
+  // estimate would actually be consumed). dt is taken as 1 CPI tick, not elapsed seconds: simple and
+  // sufficient per the task, and sidesteps needing an absolute across-CPI clock (cpi_row_time resets
+  // every CPI by design).
+  if (!state_init_) {
+    cfo_state_hz_        = fit.cfo_hz;
+    cfo_rate_hz_per_cpi_ = 0.0;
+    state_init_          = true;
+  } else {
+    const double predicted = cfo_state_hz_ + cfo_rate_hz_per_cpi_;
+    const double residual  = fit.cfo_hz - predicted;
+    cfo_state_hz_          = predicted + CFO_ALPHA * residual;
+    cfo_rate_hz_per_cpi_   = cfo_rate_hz_per_cpi_ + CFO_BETA * residual;
+  }
+  fit.cfo_hz_filtered     = cfo_state_hz_;
+  fit.cfo_rate_hz_per_cpi = cfo_rate_hz_per_cpi_;
+
+  // De-rotate every valid row's occupied subcarriers by its own raw observed LOS-tap phase -- a
+  // uniform (not per-subcarrier) rotation, since CFO/CPE is common to every subcarrier of a row.
+  for (size_t i = 0; i < valid_idx.size(); i++) {
+    const uint32_t r   = valid_idx[i];
+    const icf_t    rot((float)std::cos(-raw_phase[i]), (float)std::sin(-raw_phase[i]));
+    icf_t*         row  = &h_cpi[(size_t)r * nof_subc];
+    const uint8_t* mask = &occ_all[(size_t)r * nof_subc];
+    for (uint32_t c = 0; c < nof_subc; c++) {
+      if (mask[c]) {
+        row[c] *= rot;
+      }
+    }
+  }
+
+  LOG_I(PHY,
+        "SENSING: sync(CFO) n_valid=%u cfo=%.2f Hz (filtered=%.2f Hz, rate=%.3f Hz/CPI) resid_phase_rms=%.3f rad "
+        "-> CPE-corrected %u rows\n",
+        fit.n_valid, fit.cfo_hz, fit.cfo_hz_filtered, fit.cfo_rate_hz_per_cpi, fit.residual_phase_rms_rad,
+        fit.n_valid);
+
+  return fit;
 }
 
 } // namespace nr_isac

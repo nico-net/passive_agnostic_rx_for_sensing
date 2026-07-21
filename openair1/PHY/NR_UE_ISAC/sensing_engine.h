@@ -169,6 +169,12 @@ private:
   cpi_sto_tracker  sto_tracker;
   sto_fit_result_t last_sto_fit;
 
+  // Phase 2: residual-CFO estimation + per-row CPE de-rotation, reusing Phase 1's per-row LOS-tap
+  // estimates. Runs immediately after sto_tracker.process(), same ordering constraint (before
+  // Stage-4b interpolation).
+  cpi_cfo_tracker  cfo_tracker;
+  cfo_fit_result_t last_cfo_fit;
+
   // Range-Doppler processor and its outputs (engine thread only)
   std::unique_ptr<range_doppler>   rd;
   sensing_rvm_t                    rvm;
