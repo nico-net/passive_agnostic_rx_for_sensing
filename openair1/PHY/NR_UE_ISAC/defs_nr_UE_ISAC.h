@@ -128,6 +128,20 @@ struct nr_isac_args_t {
   // power keeps a windowed mainlobe close to parabolic -- the linear-power version is what forced
   // isac_sync.cc's empirical HANN_ESTIMATOR_SCALE correction. Offsets are clamped to +/-0.5 bin.
   bool     subbin_interp   = false;
+  // Measured-gating-offset rejection (opt-in). harmonic_reject assumes the scheduling replicas sit at
+  // INTEGER multiples k*v of a target's range-rate, which holds only for a strictly periodic gate. On
+  // real traffic the gate is irregular -- T_slot was measured wandering 1.0-3.7 slots -- so the offsets
+  // move CPI to CPI and the integer test catches only part of the family. This measures them instead:
+  // range_doppler transforms the per-row energy envelope (the physical amplitude modulation that
+  // creates the replicas) at the Doppler axis length, so its peak bins ARE the offsets, then rejects a
+  // detection sitting at one of them from a clearly stronger same-range detection. gating_snr_margin
+  // is the guard that keeps it honest: with several real targets crowded in Doppler, one real target
+  // can sit a gating offset from another, so only a distinctly stronger neighbour may veto.
+  bool     gating_reject      = false;
+  uint32_t gating_max_offsets = 3;     ///< how many of the strongest envelope peaks to treat as offsets
+  float    gating_min_rel     = 0.35f; ///< peak must reach this fraction of the strongest envelope peak
+  uint32_t gating_tol_bins    = 2;     ///< Doppler-bin tolerance when matching an offset
+  float    gating_snr_margin  = 3.0f;  ///< the vetoing neighbour must be this many dB STRONGER
   // cfar_pfa <= 0 (default) => AUTO: derive the per-cell Pfa from cfar_target_fa_per_cpi and the
   // CURRENT CPI's grid size (nof_range_bins * nof_doppler_bins), in range_doppler.cc's cfar().
   // WHY: cfar_pfa is a PER-CELL false-alarm probability, but the number of false alarms that

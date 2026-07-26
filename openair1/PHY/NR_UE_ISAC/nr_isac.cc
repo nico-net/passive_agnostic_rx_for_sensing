@@ -171,6 +171,8 @@ extern "C" void nr_isac_init(void)
   int    p_cpi_slots = 256;
   int    p_cfar_guard = 4, p_cfar_train = 8, p_cfar_per_column = 0, p_cfar_per_row = 0;
   int    p_subbin_interp = 0;
+  int    p_gating_reject = 0, p_gating_max_off = 3, p_gating_tol = 2;
+  double p_gating_min_rel = 0.35, p_gating_snr_margin = 3.0;
   double p_cfar_pfa = 0.0, p_cfar_target_fa = 1.0;
   int    p_zdg = 3, p_zrg = 2, p_nms_r = 3, p_nms_d = 3, p_maxdet = 32;
   int    p_conj_reject = 1, p_conj_guard = 4, p_range_whiten = 0, p_doppler_nudft = 0;
@@ -248,6 +250,11 @@ extern "C" void nr_isac_init(void)
       mk_int("cfar_per_column", "also require a per-Doppler-column (velocity-lane) CFAR test; rejects a strong target's range-wide pedestal", PARAMFLAG_BOOL, &p_cfar_per_column, 0),
       mk_int("cfar_per_row", "also require a per-RANGE-row (Doppler-lane) CFAR test; rejects the slow-time ridge a strong target smears across its own range row", PARAMFLAG_BOOL, &p_cfar_per_row, 0),
       mk_int("subbin_interp", "sub-bin parabolic peak interpolation in range and Doppler (removes half-bin quantisation error from every detection)", PARAMFLAG_BOOL, &p_subbin_interp, 0),
+      mk_int("gating_reject", "reject Doppler replicas at the MEASURED scheduling-gate offsets (from the per-CPI row-energy spectrum) rather than assumed integer multiples", PARAMFLAG_BOOL, &p_gating_reject, 0),
+      mk_int("gating_max_offsets", "how many envelope-spectrum peaks to treat as gating offsets", 0, &p_gating_max_off, 3),
+      mk_dbl("gating_min_rel", "envelope peak must reach this fraction of the strongest peak", &p_gating_min_rel, 0.35),
+      mk_int("gating_tol_bins", "Doppler-bin tolerance when matching a gating offset", 0, &p_gating_tol, 2),
+      mk_dbl("gating_snr_margin", "vetoing same-range neighbour must be this many dB stronger", &p_gating_snr_margin, 3.0),
       mk_dbl("cfar_pfa", "CA-CFAR per-cell false-alarm probability; <=0 (default)=auto-derive from cfar_target_fa_per_cpi", &p_cfar_pfa, 0.0),
       mk_dbl("cfar_target_fa_per_cpi", "auto mode only: target mean CA-CFAR false alarms per CPI across the whole grid", &p_cfar_target_fa, 1.0),
       mk_int("zero_doppler_guard", "Doppler notch half-width (bins)", 0, &p_zdg, 3),
@@ -406,6 +413,11 @@ extern "C" void nr_isac_init(void)
   g_args.cfar_per_column    = p_cfar_per_column != 0;
   g_args.cfar_per_row       = p_cfar_per_row != 0;
   g_args.subbin_interp      = p_subbin_interp != 0;
+  g_args.gating_reject      = p_gating_reject != 0;
+  g_args.gating_max_offsets = (uint32_t)(p_gating_max_off > 0 ? p_gating_max_off : 1);
+  g_args.gating_min_rel     = (float)p_gating_min_rel;
+  g_args.gating_tol_bins    = (uint32_t)(p_gating_tol >= 0 ? p_gating_tol : 0);
+  g_args.gating_snr_margin  = (float)p_gating_snr_margin;
   g_args.cfar_pfa           = (float)p_cfar_pfa; // <=0 = auto (see defs_nr_UE_ISAC.h)
   g_args.cfar_target_fa_per_cpi = (float)p_cfar_target_fa;
   g_args.zero_doppler_guard = (uint32_t)p_zdg;

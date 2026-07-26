@@ -509,6 +509,63 @@ void range_doppler::process(const icf_t*                       h_cpi,
     }
   }
 
+  // ---- Measured gating spectrum (gating_reject) -------------------------------------------------
+  // The scheduling-driven replicas are an AMPLITUDE-MODULATION product: the per-row received energy
+  // rises and falls as the scheduler grants more or fewer REs, and multiplying a target's slow-time
+  // tone by that envelope convolves its Doppler line with the envelope's spectrum -- putting copies at
+  // fd +/- (each envelope frequency). The existing harmonic_reject assumes those copies land at
+  // INTEGER MULTIPLES k*v, which is only true for a strictly periodic gate; on real traffic the gate
+  // is irregular (T_slot measured wandering 1.0-3.7 slots), so the offsets move CPI to CPI and the
+  // integer-ratio test catches only part of the family.
+  //
+  // Here the offsets are MEASURED instead of assumed: take the row-energy envelope of the very rows
+  // about to be transformed, remove its mean (the DC term is the wanted signal path, not a replica
+  // generator), transform it with the same length as the Doppler axis -- so its bin indices ARE
+  // Doppler-bin offsets, no unit conversion -- and keep the strongest few peaks. cfar() then rejects a
+  // detection sitting at one of those offsets from a stronger same-range detection.
+  //
+  // Using row energy rather than the occupancy mask is deliberate: it is the physical modulating
+  // quantity, it is defined on exactly the rows being transformed (no correspondence problem if
+  // slow-time resampling re-times the rows), and it needs nothing passed in from the engine.
+  gating_offsets_.clear();
+  if (args.gating_reject && nof_slow >= 8) {
+    std::vector<float> env(nof_slow, 0.0f);
+    for (uint32_t n = 0; n < nof_slow; n++) {
+      double acc = 0.0;
+      for (uint32_t c = 0; c < nof_subc; c++) {
+        acc += std::norm(work[(size_t)n * nof_subc + c]);
+      }
+      env[n] = (float)std::sqrt(acc); // amplitude envelope
+    }
+    double mean = 0.0;
+    for (float e : env) mean += e;
+    mean /= (double)nof_slow;
+    dopp_in.resize(nof_slow);
+    for (uint32_t n = 0; n < nof_slow; n++) {
+      dopp_in[n] = icf_t((float)((double)env[n] - mean), 0.0f);
+    }
+    dopp_out.resize(nof_slow);
+    dopp_plan->run(dopp_in.data(), dopp_out.data());
+    // Peak-pick over the positive half (the envelope is real, so the spectrum is symmetric).
+    const uint32_t nhalf = nof_slow / 2;
+    float peak = 0.0f;
+    for (uint32_t k = 1; k < nhalf; k++) peak = std::max(peak, std::abs(dopp_out[k]));
+    if (peak > 0.0f) {
+      std::vector<std::pair<float, uint32_t>> cands;
+      for (uint32_t k = 2; k + 1 < nhalf; k++) { // skip the lowest bins: near-DC drift is not a gate
+        const float m = std::abs(dopp_out[k]);
+        if (m >= args.gating_min_rel * peak && m >= std::abs(dopp_out[k - 1]) && m >= std::abs(dopp_out[k + 1])) {
+          cands.emplace_back(m, k);
+        }
+      }
+      std::sort(cands.begin(), cands.end(), [](auto& a, auto& b) { return a.first > b.first; });
+      for (const auto& c : cands) {
+        if (gating_offsets_.size() >= args.gating_max_offsets) break;
+        gating_offsets_.push_back(c.second);
+      }
+    }
+  }
+
   // Slow-time Hann window
   if (hann.size() != nof_slow) {
     hann.resize(nof_slow);
@@ -1390,6 +1447,38 @@ void range_doppler::cfar(const sensing_rvm_t& rvm, std::vector<sensing_detection
       }
     }
     detections.swap(kept3);
+  }
+
+  // Measured-gating-offset rejection (opt-in, args.gating_reject). Same shape as harmonic_reject
+  // above, but the offset list comes from THIS CPI's measured row-energy spectrum (see the estimator
+  // in process()) instead of assuming integer velocity ratios: a detection is dropped when a
+  // sufficiently strong detection sits at the same range and its Doppler bin differs by one of the
+  // measured gating offsets. Strictly more general than the integer-ratio test -- it also catches the
+  // asymmetric, non-integer replicas an irregular scheduler produces -- and it needs the SNR-margin
+  // guard for the same reason: with several real targets crowded into a narrow Doppler span, one real
+  // target can legitimately sit a gating offset away from another, so only a clearly stronger
+  // neighbour may veto a detection.
+  if (args.gating_reject && !gating_offsets_.empty() && detections.size() > 1) {
+    const int guard = (int)args.harmonic_guard;
+    const int tolb  = (int)args.gating_tol_bins;
+    std::vector<sensing_detection_t> keptg;
+    keptg.reserve(detections.size());
+    for (const sensing_detection_t& cand : detections) {
+      bool is_replica = false;
+      for (const sensing_detection_t& other : detections) {
+        if (&other == &cand) continue;
+        // Only a clearly stronger, same-range neighbour may veto.
+        if (other.snr_db < cand.snr_db + (double)args.gating_snr_margin) continue;
+        if (std::abs((int)cand.range_bin - (int)other.range_bin) > guard) continue;
+        const int dd = std::abs((int)cand.doppler_bin - (int)other.doppler_bin);
+        for (uint32_t off : gating_offsets_) {
+          if (std::abs(dd - (int)off) <= tolb) { is_replica = true; break; }
+        }
+        if (is_replica) break;
+      }
+      if (!is_replica) keptg.push_back(cand);
+    }
+    detections.swap(keptg);
   }
 
   // Far-range harmonic (range-smeared pedestal) rejection (opt-in). Unlike harmonic_reject above,

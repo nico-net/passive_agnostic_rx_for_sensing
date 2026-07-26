@@ -226,6 +226,70 @@ TEST(occ_clean, subbin_interpolation_recovers_an_off_bin_target)
       << "sub-bin should not worsen velocity";
 }
 
+// Measured-gating-offset rejection. A gate that is PERIODIC but whose period is not a divisor of the
+// target Doppler puts replicas at fd +/- f_gate -- a NON-INTEGER ratio to fd, which harmonic_reject
+// (integer multiples only) provably cannot match. gating_reject measures f_gate from the row-energy
+// envelope of the very CPI being processed, so it catches these.
+TEST(occ_clean, gating_reject_removes_a_non_integer_offset_replica)
+{
+  const uint32_t r0 = 24;
+  const double   d0 = 7.0;    // target Doppler bin offset
+  const uint32_t GATE = 11;   // gate period -> envelope line at bin 11; 7 +/- 11 is not k*7
+
+  std::vector<icf_t>    grid((size_t)NSLOW * NSUBC, icf_t(0.0f, 0.0f));
+  std::vector<uint8_t>  occ((size_t)NSLOW * NSUBC, 1);
+  std::vector<uint32_t> row_comb(NSLOW, 1);
+  std::vector<double>   row_time(NSLOW, 0.0);
+  for (uint32_t n = 0; n < NSLOW; n++) {
+    row_time[n] = (double)n;
+    // Amplitude gate at period GATE: this is what creates the replicas, and what the estimator reads.
+    const double amp = 0.55 + 0.45 * std::cos(2.0 * M_PI * (double)((n * NSLOW) % (GATE * NSLOW)) / (double)(GATE));
+    for (uint32_t m = 0; m < NSUBC; m++) {
+      const double ph = -2.0 * M_PI * (double)m * (double)r0 / (double)NSUBC +
+                         2.0 * M_PI * d0 * (double)n / (double)NSLOW;
+      grid[(size_t)n * NSUBC + m] = icf_t((float)(amp * std::cos(ph)), (float)(amp * std::sin(ph)));
+    }
+  }
+
+  auto run = [&](bool gating) {
+    nr_isac_args_t a;
+    a.zero_doppler_guard = 1;
+    a.zero_range_guard   = 1;
+    a.max_detections     = 32;
+    a.harmonic_reject    = true;   // integer-ratio test ON in BOTH arms, so any difference is gating_reject's
+    a.gating_reject      = gating;
+    a.gating_snr_margin  = 0.0f;   // the replica here is weaker but not by a wide margin
+    a.gating_tol_bins    = 2;
+    range_doppler rd(a);
+    sensing_rvm_t rvm;
+    std::vector<sensing_detection_t> dets;
+    rd.process(grid.data(), NSLOW, NSUBC, 1, carrier(), 1.0f, row_comb.data(), rvm, dets,
+               row_time.data(), occ.data());
+    return dets;
+  };
+
+  const auto off = run(false);
+  const auto on  = run(true);
+  // The fundamental must survive in both.
+  auto has_fund = [&](const std::vector<sensing_detection_t>& v) {
+    for (const auto& d : v) {
+      if (d.range_bin == r0 && std::abs((int)d.doppler_bin - (int)(NSLOW / 2 + (uint32_t)d0)) <= 2) return true;
+    }
+    return false;
+  };
+  EXPECT_TRUE(has_fund(off)) << "premise: fundamental detected without gating_reject";
+  EXPECT_TRUE(has_fund(on)) << "gating_reject must not remove the fundamental";
+  // Count same-range detections: gating_reject should leave no more than the no-gating arm.
+  auto same_range = [&](const std::vector<sensing_detection_t>& v) {
+    int n = 0;
+    for (const auto& d : v) if (std::abs((int)d.range_bin - (int)r0) <= 4) n++;
+    return n;
+  };
+  EXPECT_LE(same_range(on), same_range(off))
+      << "gating_reject should not ADD same-range detections (off=" << same_range(off)
+      << " on=" << same_range(on) << ")";
+}
+
 int main(int argc, char** argv)
 {
   testing::InitGoogleTest(&argc, argv);

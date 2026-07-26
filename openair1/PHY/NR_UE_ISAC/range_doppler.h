@@ -156,6 +156,8 @@ private:
   std::vector<icf_t>   clean_res;   ///< [nof_range*nof_dopp] CLEAN residual map (occ-aware)
   std::vector<icf_t>   clean_psf;   ///< [nof_range*nof_dopp] per-component PSF map (occ-aware)
   std::vector<icf_t>   clean_synth; ///< [nof_slow*nof_subc] per-component synthetic grid (occ-aware)
+  std::vector<uint32_t> gating_offsets_; ///< this CPI's MEASURED gating offsets, in Doppler bins
+                                         ///< (gating_reject; see the estimator in process())
   std::vector<float>  hann;      ///< [nof_slow] slow-time (Doppler) window
   std::vector<float>  freq_hann; ///< [nof_subc] frequency (range) window
   std::vector<float>  whiten_rms;    ///< [nof_subc] per-subcarrier slow-time RMS (range_whiten)
