@@ -1040,6 +1040,7 @@ set(NR_UE_ISAC_SRC
   ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/matrix_complete.cc
   ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/sparse_doppler.cc
   ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/clean_deconv.cc
+  ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/isac_aoa.cc
   ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/eca_clutter.cc
   ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/range_doppler.cc
   ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/detection_report.cc
