@@ -127,6 +127,11 @@ typedef struct {
   float *Doppler_phase_cur;
   /// flag indicating if channel direction is UL or DL
   bool is_uplink;
+  /// Optional synthetic moving-target sensing channel (opaque sensing_traj_t* from
+  /// openair1/SIMULATION/TOOLS/sensing_channel.h). NULL unless [sensing_channel] enable=1 on the DL
+  /// model. When set, update_channel_model() rebuilds ch[] each block from object trajectories
+  /// (LOS + moving reflectors) instead of the LEO/random path. See sensing_channel.{h,c}.
+  void *sensing_traj;
 } channel_desc_t;
 
 typedef struct {

@@ -34,6 +34,7 @@
 extern "C" {
 #include <common/utils/load_module_shlib.h>
 #include <openair1/SIMULATION/TOOLS/sim.h>
+#include <openair1/SIMULATION/TOOLS/sensing_channel.h>
 #include "rfsimulator.h"
 extern int get_currentchannels_type(const char *buf,
                                     int debug,
@@ -364,6 +365,17 @@ static buffer_t *allocCirBuf(rfsimulator_state_t *bridge, int sock)
     set_channeldesc_direction(ptr->channel_model, bridge->role == SIMU_ROLE_SERVER);
     random_channel(ptr->channel_model, false);
     LOG_I(HW, "Random channel %s in rfsimulator activated\n", modelname);
+
+    // Synthetic moving-target sensing channel: attach ONLY on the downlink (gNB->UE) model so the
+    // uplink stays clean and --do-ra RACH/attach is unaffected. is_uplink was just set above; it is
+    // false on the client (UE) side, whose applied model is the DL channel. No-op unless the UE
+    // config has [sensing_channel] enable=1.
+    if (!ptr->channel_model->is_uplink) {
+      ptr->channel_model->sensing_traj = sensing_channel_parse(ptr->channel_model);
+      if (ptr->channel_model->sensing_traj != NULL) {
+        LOG_I(HW, "Synthetic moving-target sensing channel attached to DL model %s\n", modelname);
+      }
+    }
   }
   return ptr;
 }

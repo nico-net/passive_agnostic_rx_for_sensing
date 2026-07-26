@@ -5,11 +5,19 @@
 #include <complex.h>
 #include <common/utils/LOG/log.h>
 #include <openair1/SIMULATION/TOOLS/sim.h>
+#include <openair1/SIMULATION/TOOLS/sensing_channel.h>
 #include "openair2/LAYER2/NR_MAC_gNB/mac_config.h"
 #include "rfsimulator.h"
 
 void update_channel_model(channel_desc_t *channelDesc, int nbSamples, uint64_t TS)
 {
+  // Synthetic moving-target sensing channel (DL only) rebuilds ch[] each block from object
+  // trajectories; it fully owns the CIR for this descriptor, so return before the LEO/other paths.
+  if (channelDesc->sensing_traj != NULL) {
+    sensing_channel_update(channelDesc, nbSamples, TS);
+    return;
+  }
+
   if ((channelDesc->sat_height > 0)
       && (channelDesc->enable_dynamic_delay
           || channelDesc->enable_dynamic_Doppler)) { // model for transparent satellite on circular orbit

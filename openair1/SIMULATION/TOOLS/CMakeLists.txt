@@ -26,3 +26,13 @@ if(ENABLE_CHANNEL_SIM_CUDA)
     )
     target_link_libraries(channel_pipeline PUBLIC oai_cuda_lib)
 endif()
+
+# Synthetic moving-target sensing-channel unit test (tap-synthesis math; no radio loop). Mirrors the
+# common/utils/nr/tests convention. uniqCfg/exit_function are defined in the test .cpp itself, so no
+# minimal_lib link (static-archive link order made that unreliable elsewhere in this tree).
+if(ENABLE_TESTS)
+  add_executable(test_sensing_channel tests/test_sensing_channel.cpp)
+  target_link_libraries(test_sensing_channel PRIVATE SIMU UTIL GTest::gtest)
+  add_dependencies(tests test_sensing_channel)
+  add_test(NAME test_sensing_channel COMMAND ./test_sensing_channel)
+endif()

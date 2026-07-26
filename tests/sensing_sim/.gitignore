@@ -1,0 +1,9 @@
+# Softmodem runtime artifacts, regenerated on every run
+rbconfig.raw
+reconfig.raw
+nrL1_stats.log
+nrL1_UE_stats-*.log
+nrMAC_stats.log
+nrRRC_stats.log
+# Rendered animations: large binaries, fully reproducible from make_tracking_gif2.py
+*.gif
