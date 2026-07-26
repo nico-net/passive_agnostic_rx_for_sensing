@@ -27,6 +27,7 @@ VMAX = 89.0        # subslot_symbols=6 -> ~+/-89 m/s unambiguous bistatic rate
 NOTCH = 3 * 0.755  # zero_doppler_guard = 3 bins
 TAPCAP = 622.0     # 100 MHz / 273 PRB
 T_OBS = 10.0       # the harness captures ~8-10 s of trajectory per run
+CROSS_MAX_FRAC = 0.20  # a crossing may overlap at most this fraction of the run
 REFL = 0.30        # < LOS gain 1.0, so no reflector hijacks the UE's own time sync
 
 def rate_of(rx, p, v):
@@ -70,9 +71,21 @@ def verify(name, trajs, allow_crossing=False):
             for j in range(i + 1, len(trajs)):
                 dRi, ri = curves[(rxn, i)]; dRj, rj = curves[(rxn, j)]
                 close = (np.abs(dRi - dRj) < 15.0) & (np.abs(ri - rj) < 3.0)
-                if close.any() and not allow_crossing:
+                frac = float(close.mean())
+                if not allow_crossing:
+                    if close.any():
+                        ok = False
+                        notes.append(f"  !! {rxn} obj{i}/obj{j}: unresolvable for {100*frac:.0f}% of the run")
+                # A crossing scene is allowed -- indeed required -- to go briefly unresolvable, but a
+                # PERSISTENT overlap is a degenerate scene, not a crossing: the two targets are then one
+                # indistinguishable object at that receiver and no associator can do anything about it.
+                # This bound exists because the first crossing design mirrored the velocities about the
+                # bistatic bisector, which (the bisector being the iso-dR ellipse's normal) keeps both
+                # targets on the SAME ellipse for the whole run -- 100% unresolvable at rx1, measured.
+                elif frac > CROSS_MAX_FRAC:
                     ok = False
-                    notes.append(f"  !! {rxn} obj{i}/obj{j}: unresolvable for {100*close.mean():.0f}% of the run")
+                    notes.append(f"  !! {rxn} obj{i}/obj{j}: overlap {100*frac:.0f}% > {100*CROSS_MAX_FRAC:.0f}%"
+                                 f" -- degenerate, not a crossing")
     print(f"[{'OK  ' if ok else 'FAIL'}] {name}")
     for n in notes[:8]:
         print(n)
@@ -124,34 +137,54 @@ def _resolved(t1, t2, margin_m=25.0, margin_v=4.0):
 #     while their world headings differ. That is precisely the case where a bistatic-domain associator
 #     can swap identities, and the reason the handover has wanted this scene since Part 1.
 def _crossing_pair():
-    tc = 5.0
-    rx = RXS["rx1"]
+    """Two targets whose bistatic-range tracks cross TRANSVERSALLY at rx1.
+
+    Design note (learned by getting it wrong): you cannot build a clean *transient* collision in both
+    range AND Doppler at once. Equal dR and equal range-rate at the same instant means the two dR(t)
+    curves are TANGENT there, so they stay within a bin of each other for a long stretch -- a permanent
+    degeneracy, not a crossing. The first attempt did exactly that (mirroring the velocities about the
+    bistatic bisector, which is the iso-dR ellipse's normal, so both targets rode the same ellipse for
+    the entire run: measured 100% unresolvable at rx1, and obj1 was correctly never reported).
+
+    So the useful test is a transversal crossing: the targets occupy the SAME range bin for ~1 s while
+    having clearly DIFFERENT range-rates, which is the association ambiguity that actually occurs in
+    practice. They are searched for, and the verifier now bounds the overlap so a tangency can't slip
+    back in.
+    """
+    rng = np.random.default_rng(3)
     best = None
-    for px in range(-200, 201, 20):
-        for py in range(-200, 261, 20):
-            P = np.array([float(px), float(py)])
-            if np.linalg.norm(P - TX) < 60 or np.linalg.norm(P - rx) < 60:
-                continue
-            u = (P - TX) / np.linalg.norm(P - TX) + (P - rx) / np.linalg.norm(P - rx)
-            nu = np.linalg.norm(u)
-            if nu < 1e-6:
-                continue
-            u /= nu
-            n = np.array([-u[1], u[0]])
-            for along in (4.0, 5.0, 6.0, 7.0, 8.0):
-                for across in (6.0, 8.0, 10.0, 12.0):
-                    v1 = along * u + across * n
-                    v2 = along * u - across * n
-                    a = lambda t, v=v1, P=P: np.stack([P[0]+v[0]*(np.asarray(t)-tc), P[1]+v[1]*(np.asarray(t)-tc)], -1)
-                    b = lambda t, v=v2, P=P: np.stack([P[0]+v[0]*(np.asarray(t)-tc), P[1]+v[1]*(np.asarray(t)-tc)], -1)
-                    if _ok_single(a) and _ok_single(b):
-                        # prefer the pair whose world tracks separate most by the end of the run
-                        sep = float(np.linalg.norm(a(np.array([T_OBS]))[0] - b(np.array([T_OBS]))[0]))
-                        if best is None or sep > best[0]:
-                            best = (sep, a, b)
+    rx = RXS["rx1"]
+    t = np.linspace(0, T_OBS, 201)
+    for _ in range(300000):
+        a = lin(rng.uniform(-200, 200), rng.uniform(-200, 260), rng.uniform(7, 14), rng.uniform(0, 360))
+        b = lin(rng.uniform(-200, 200), rng.uniform(-200, 260), rng.uniform(7, 14), rng.uniform(0, 360))
+        if not (_ok_single(a) and _ok_single(b)):
+            continue
+        pa, va = sample(a, t); pb, vb = sample(b, t)
+        dA, dB = dR_of(rx, pa), dR_of(rx, pb)
+        rA, rB = rate_of(rx, pa, va), rate_of(rx, pb, vb)
+        ddr = dA - dB
+        if not (ddr.min() < 0 < ddr.max()):
+            continue                                  # require a real sign change: a transversal crossing
+        same_bin = np.abs(ddr) < 15.0                  # within ~5 range bins
+        if not (0.02 <= same_bin.mean() <= CROSS_MAX_FRAC):
+            continue                                   # must happen, must not persist
+        drate = np.abs(rA - rB)[same_bin].min()
+        if drate < 6.0:
+            continue                                   # clearly separated in Doppler while co-range
+        unres = float((same_bin & (np.abs(rA - rB) < 3.0)).mean())
+        if unres > 0.0:
+            continue                                   # never simultaneously ambiguous in BOTH axes
+        # Prefer the SMALLEST Doppler separation that still clears the floor: that is the hardest
+        # crossing the association layer can be asked to survive without the scene being degenerate.
+        # (Maximising it instead gave a 54 m/s separation -- co-range, but trivially separable.)
+        score = -drate
+        if best is None or score > best[0]:
+            best = (score, a, b, same_bin.mean())
     if best is None:
-        raise RuntimeError("no valid crossing pair")
-    print(f"       crossing: world separation at t={T_OBS:.0f}s = {best[0]:.0f} m")
+        raise RuntimeError("no valid transversal crossing pair")
+    print(f"       crossing: co-range for {100*best[3]:.0f}% of the run, "
+          f"min |drate| while co-range = {-best[0]:.1f} m/s")
     return [best[1], best[2]]
 
 # (b) FIVE targets -- randomised search under the hard limits plus pairwise resolvability.
