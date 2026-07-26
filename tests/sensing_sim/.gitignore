@@ -7,3 +7,6 @@ nrMAC_stats.log
 nrRRC_stats.log
 # Rendered animations: large binaries, fully reproducible from make_tracking_gif2.py
 *.gif
+# Per-run scratch configs the runners copy-and-patch, then delete
+*_run.conf
+_mot_farharm_ab_*.conf
