@@ -328,3 +328,40 @@ a hand-edited max_detections was reverted by a later --write, and the 5-target
 scene was then measured saturating 16/16 detections per CPI). The verifier bounds
 crossing overlap rather than disabling the resolvability check, which is what let
 the degenerate crossing through in the first place.
+
+---
+
+# 10. `gating_reject` A/B (3 reps x 2 configs, 5-target scene, 2026-07-26)
+
+Run on the 5-target scene deliberately: it is both the worst ghost density AND the highest false-veto
+risk (five real targets crowded into a narrow Doppler span, so a real target can legitimately sit a
+gating offset from another).
+
+| metric | gating ON | gating OFF |
+|---|---|---|
+| per-rx raw precision | **43.0 ± 2.0 %** | 39.3 ± 1.2 % |
+| per-rx TRACK precision | **57.3 ± 1.2 %** | 50.7 ± 4.9 % |
+| false detections | **373 ± 21** | 438 ± 19 |
+| fused track ids | **20.3 ± 2.1** | 29.0 ± 0.0 |
+| fused world precision | 37.0 ± 1.0 % | 42.3 ± **22.4** % |
+| obj3 detection coverage | 45.3 ± 3.8 % | 52.3 ± 4.0 % |
+
+**Per-receiver: a real, consistent win.** Track precision is higher in ALL THREE reps individually
+(58/58/56 vs 53/54/45), false detections drop ~15%, and fragmentation drops from a rock-steady 29 track
+ids to 20.3. Keep it on for per-receiver work.
+
+**Fused world precision: no claim either way, and the OFF column shows why.** ON is 37.0 ± 1.0 --
+remarkably stable. OFF averages higher at 42.3 but with SD 22.4, driven entirely by one outlier rep
+(27%, **68%**, 32%): two of three OFF reps are BELOW ON, and the third is the best result in the batch.
+That is the 8-58% harness variance from section 7 showing up again on a metric that is a ratio over a
+few hundred updates. **With n=3 the fused difference is not resolvable**; do not quote it in either
+direction. If it matters, it needs ~10 reps.
+
+**The predicted cost is real and measurable.** obj3 -- already the weakest target -- loses coverage,
+45.3% vs 52.3%, consistently across reps. That is exactly the false-veto risk `gating_snr_margin`
+exists to bound: with five targets packed in Doppler, some real detections do sit a gating offset from
+a stronger neighbour. The current 3.0 dB margin is a guess, not a measurement. **If obj3-class weak
+targets matter, raise the margin** (or gate the whole mechanism on scene sparsity) and re-measure.
+
+Interpretation: `gating_reject` cleans the per-receiver detection stream measurably, at a small,
+quantified cost to the weakest target, with no demonstrated effect on fused output at this sample size.
