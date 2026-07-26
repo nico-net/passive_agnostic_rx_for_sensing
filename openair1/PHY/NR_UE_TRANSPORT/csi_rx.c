@@ -803,7 +803,8 @@ static void nr_isac_submit_csirs_ls(const NR_DL_FRAME_PARMS *frame_parms,
                              const UE_nr_rxtx_proc_t *proc,
                              const fapi_nr_dl_config_csirs_pdu_rel15_t *csirs_config_pdu,
                              const c16_t *ls,
-                             int loverline0)
+                             int loverline0,
+                             uint32_t noise_power)
 {
   const uint16_t stop_rb = csirs_config_pdu->start_rb + csirs_config_pdu->nr_of_rbs;
   static __thread float    isac_h[2 * 275];
@@ -828,7 +829,7 @@ static void nr_isac_submit_csirs_ls(const NR_DL_FRAME_PARMS *frame_parms,
                                  .pci             = frame_parms->Nid_cell,
                                  .slots_per_frame = frame_parms->slots_per_frame};
     const uint32_t slot_idx = (uint32_t)(proc->frame_rx * frame_parms->slots_per_frame + proc->nr_slot_rx);
-    nr_isac_submit_cfr(slot_idx, NR_ISAC_SRC_CSI_RS, &carrier, isac_h, isac_k, isac_l, nof_re);
+    nr_isac_submit_cfr(slot_idx, NR_ISAC_SRC_CSI_RS, &carrier, isac_h, isac_k, isac_l, nof_re, (float)noise_power);
   }
 }
 
@@ -937,7 +938,7 @@ void nr_ue_csi_rs_procedures(PHY_VARS_NR_UE *ue,
   // Guarded on measurement_bitmap>1 here because that gates the channel estimation above (own path).
   if (csirs_config_pdu->measurement_bitmap > 1 && nr_isac_enabled() && nr_isac_source_enabled(NR_ISAC_SRC_CSI_RS)) {
     nr_isac_submit_csirs_ls(frame_parms, proc, csirs_config_pdu, csi_rs_ls_estimated_channel[0][0],
-                            mapping_parms.loverline[0]);
+                            mapping_parms.loverline[0], noise_power);
   }
 
   uint8_t rank_indicator = 0;
@@ -1075,5 +1076,5 @@ void nr_ue_csi_rs_sensing_capture(PHY_VARS_NR_UE *ue,
                                &noise_power);
 
   nr_isac_submit_csirs_ls(frame_parms, proc, csirs_config_pdu, csi_rs_ls_estimated_channel[0][0],
-                          mapping_parms.loverline[0]);
+                          mapping_parms.loverline[0], noise_power);
 }

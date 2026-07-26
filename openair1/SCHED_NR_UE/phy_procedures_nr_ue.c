@@ -23,6 +23,10 @@
 #include "PHY/NR_UE_ESTIMATION/nr_estimation.h"
 #include "PHY/NR_UE_ISAC/nr_isac.h"
 #include "PHY/NR_UE_TRANSPORT/nr_csirs_monitor.h"
+#include "PHY/NR_TRANSPORT/nr_transport_common_proto.h"
+#include "PHY/CODING/coding_defs.h"
+#include "PHY/CODING/nrLDPC_coding/nrLDPC_coding_interface.h"
+#include "PHY/MODULATION/nr_modulation.h"
 #include "executables/softmodem-common.h"
 #include "executables/nr-uesoftmodem.h"
 #include "SCHED_NR_UE/pucch_uci_ue_nr.h"
@@ -438,7 +442,8 @@ static int nr_ue_pdsch_procedures(PHY_VARS_NR_UE *ue,
                                   fapi_nr_dl_config_dlsch_pdu_rel15_t *dlschCfg,
                                   int16_t *llr,
                                   c16_t rxdataF[][ue->frame_parms.samples_per_slot_wCP],
-                                  freq_alloc_bitmap_t *freq_alloc)
+                                  freq_alloc_bitmap_t *freq_alloc,
+                                  uint32_t *nvar_out)
 {
   int frame_rx = proc->frame_rx;
   int nr_slot_rx = proc->nr_slot_rx;
@@ -517,6 +522,8 @@ static int nr_ue_pdsch_procedures(PHY_VARS_NR_UE *ue,
   }
   stop_meas_nr_ue_phy(ue, DLSCH_CHANNEL_ESTIMATION_STATS);
   nvar /= (dlschCfg->number_symbols * dlsch->cw_info.Nl * ue->frame_parms.nb_antennas_rx);
+  if (nvar_out != NULL)
+    *nvar_out = nvar; // exposed for the ISAC data-aided tap's inverse-variance fusion weight
   nr_ue_measurement_procedures(2, ue, proc, freq_alloc->num_rbs, pdsch_est_size, pdsch_dl_ch_estimates);
 
   if (ue->chest_time == 1) { // averaging time domain channel estimates
@@ -628,13 +635,15 @@ static int nr_ue_pdsch_procedures(PHY_VARS_NR_UE *ue,
     UEunlockScopeData(ue, pdschRxdataF);
   }
 
-  // ISAC sensing tap (PDSCH DM-RS / data-aided source): extract the per-RE CFR (Ĥ) from the DM-RS-based
-  // channel estimate over the allocation and hand it to the sensing engine (best-effort, off the RT
-  // critical path). One scheduled DL slot contributes one slow-time sample -> high PRF vs periodic
-  // CSI-RS. The interpolated estimate spans every allocated subcarrier: sub-sample comb-2 for the
-  // pdsch_dmrs source, use every subcarrier (comb-1, densest range) for the pdsch_data source.
-  if (nr_isac_enabled() &&
-      (nr_isac_source_enabled(NR_ISAC_SRC_PDSCH_DMRS) || nr_isac_source_enabled(NR_ISAC_SRC_PDSCH_DATA))) {
+  // ISAC sensing tap (PDSCH DM-RS source): extract the per-RE CFR (Ĥ) from the DM-RS-based channel
+  // estimate over the allocation and hand it to the sensing engine (best-effort, off the RT critical
+  // path). One scheduled DL slot contributes one slow-time sample -> high PRF vs periodic CSI-RS.
+  // Comb-2 (the real DM-RS RE spacing) -- NOT a stand-in for pdsch_data anymore: that source is now
+  // produced by nr_isac_pdsch_data_aided_tap() (below, called post-decode from pdsch_processing())
+  // via genuine LDPC re-encode + rate-match + scramble + modulate, not by resampling this
+  // DM-RS-interpolated estimate (which carried a "comb-106" interpolator ripple when sampled at
+  // comb-1 -- see tests/sensing_sim/README.md).
+  if (nr_isac_enabled() && nr_isac_source_enabled(NR_ISAC_SRC_PDSCH_DMRS)) {
     int dmrs_sym = -1;
     for (int m = dlschCfg->start_symbol; m < dlschCfg->start_symbol + dlschCfg->number_symbols; m++) {
       if (dlschCfg->dlDmrsSymbPos & (1 << m)) {
@@ -644,11 +653,6 @@ static int nr_ue_pdsch_procedures(PHY_VARS_NR_UE *ue,
     }
     const int num_sc = freq_alloc->num_rbs * NR_NB_SC_PER_RB;
     if (dmrs_sym >= 0 && num_sc >= 2) {
-      // pdsch_data (comb-1, every subcarrier) is a superset of pdsch_dmrs (comb-2); when both are in the
-      // enabled set, extract the denser one and tag the row as pdsch_data.
-      const bool     want_data = nr_isac_source_enabled(NR_ISAC_SRC_PDSCH_DATA);
-      const int      comb      = want_data ? 1 : 2;
-      const int      src       = want_data ? NR_ISAC_SRC_PDSCH_DATA : NR_ISAC_SRC_PDSCH_DMRS;
       // dl_ch[j] is packed from the first allocated RB; map j to a CRB0-absolute subcarrier so this row
       // shares the CSI-RS source's common grid: abs_sc = (BWPStart + first_rb)*12 + j.
       const uint32_t base_sc = (uint32_t)(dlschCfg->BWPStart + freq_alloc->first_rb) * NR_NB_SC_PER_RB;
@@ -657,7 +661,7 @@ static int nr_ue_pdsch_procedures(PHY_VARS_NR_UE *ue,
       static __thread uint32_t isac_k[273 * NR_NB_SC_PER_RB];
       static __thread uint32_t isac_l[273 * NR_NB_SC_PER_RB];
       uint32_t nof_re = 0;
-      for (int j = 0; j < num_sc && nof_re < 273 * NR_NB_SC_PER_RB; j += comb) {
+      for (int j = 0; j < num_sc && nof_re < 273 * NR_NB_SC_PER_RB; j += 2) {
         isac_h[2 * nof_re]     = (float)dl_ch[j].r;
         isac_h[2 * nof_re + 1] = (float)dl_ch[j].i;
         isac_k[nof_re]         = base_sc + (uint32_t)j;
@@ -671,7 +675,7 @@ static int nr_ue_pdsch_procedures(PHY_VARS_NR_UE *ue,
                                      .pci             = ue->frame_parms.Nid_cell,
                                      .slots_per_frame = ue->frame_parms.slots_per_frame};
         const uint32_t slot_idx = (uint32_t)(frame_rx * ue->frame_parms.slots_per_frame + nr_slot_rx);
-        nr_isac_submit_cfr(slot_idx, src, &carrier, isac_h, isac_k, isac_l, nof_re);
+        nr_isac_submit_cfr(slot_idx, NR_ISAC_SRC_PDSCH_DMRS, &carrier, isac_h, isac_k, isac_l, nof_re, (float)nvar);
       }
     }
   }
@@ -1210,6 +1214,258 @@ int pbch_processing(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc, nr_phy_da
   return sampleShift;
 }
 
+// ISAC sensing tap (PDSCH data-aided source): after a CRC-verified DL-SCH decode, re-encode the
+// CONFIRMED-CORRECT payload through the real chain (LDPC encode + rate match + scramble + modulate,
+// reusing the exact primitives the UE's own PUSCH TX path uses -- see nr_ulsch_encoding() for the
+// template this mirrors) to reconstruct the transmitted symbol X at EVERY data RE, then submit
+// Ĥ[k] = Y[k]/X[k] to the sensing engine. Unlike the old pdsch_data behaviour (removed above -- it
+// just resampled the DM-RS-INTERPOLATED estimate at comb-1, inheriting a "comb-106" per-PRB
+// interpolator ripple, see tests/sensing_sim/README.md), this is genuine data-aided reconstruction:
+// no interpolation at all, a fresh Ĥ computed directly from the raw received samples at every RE.
+//
+// Scope (falls back to no tap, silently, outside these -- the common do-ra/rfsim-test conditions;
+// generalizing is future work, not a correctness risk since we simply contribute nothing then):
+//   - decode must have succeeded (harq->decodeResult, i.e. CRC passed) -- we ONLY ever re-encode a
+//     confirmed-correct payload, never a guess.
+//   - single layer (Nl==1), no PTRS (pduBitmap bit 0), no CSI-RS rate-matching overlap -- the RE
+//     enumeration below assumes every RE in a non-DMRS symbol within the allocation is plain data,
+//     matching nr_dlsch_extract_rbs()'s own "pilots==0 && csi_res_bitmap==0" fast path.
+static void nr_isac_pdsch_data_aided_tap(PHY_VARS_NR_UE *ue,
+                                         const UE_nr_rxtx_proc_t *proc,
+                                         const NR_UE_DLSCH_t *dlsch,
+                                         const NR_DL_UE_HARQ_t *harq,
+                                         const fapi_nr_dl_config_dlsch_pdu_rel15_t *dlsch_config,
+                                         const freq_alloc_bitmap_t *freq_alloc,
+                                         const c16_t rxdataF[][ue->frame_parms.samples_per_slot_wCP],
+                                         double nvar)
+{
+  if (!nr_isac_enabled() || !nr_isac_source_enabled(NR_ISAC_SRC_PDSCH_DATA))
+    return;
+  if (!harq->decodeResult)
+    return; // only re-encode a CRC-verified transport block
+  if (dlsch->cw_info.Nl != 1)
+    return; // single-layer only (scope)
+  if (dlsch_config->pduBitmap & 0x1)
+    return; // PTRS present: RE enumeration below doesn't account for punctured REs (scope)
+  if (dlsch_config->numCsiRsForRateMatching > 0)
+    return; // CSI-RS rate-matching overlap: not accounted for below (scope)
+
+  const NR_DL_FRAME_PARMS   *fp = &ue->frame_parms;
+  const fapi_nr_dl_cw_info_t *cw = &dlsch->cw_info;
+
+  // --- TB CRC-included payload: harq->b is ALREADY B = A + TB-CRC bits (16 or 24-bit, matching
+  // NR_MAX_PDSCH_TBS threshold) -- the exact same buffer format the TX-side encoder segments, so no
+  // CRC attach is needed here; the decoder already reconstructed it. ---
+  const uint32_t A = cw->TBS;
+  const unsigned int B = A + (A > NR_MAX_PDSCH_TBS ? 24 : 16);
+
+  // --- Segment into code blocks (must run again here to fill actual per-segment bytes: the decode
+  // path only sized C/K/Z/F, passing NULL/NULL for input/output). ---
+  static __thread uint8_t seg_storage[MAX_NUM_NR_DLSCH_SEGMENTS_PER_LAYER][8448];
+  static __thread uint8_t *c_segs[MAX_NUM_NR_DLSCH_SEGMENTS_PER_LAYER];
+  for (int r = 0; r < MAX_NUM_NR_DLSCH_SEGMENTS_PER_LAYER; r++)
+    c_segs[r] = seg_storage[r];
+
+  nrLDPC_TB_encoding_parameters_t TB_parameters = {0};
+  // Offset well clear of real harq_pid / 2*harq_pid+cw_idx ranges used by concurrent PDSCH decode
+  // and PUSCH encode on this same nrLDPC_coding_interface, to avoid any id collision.
+  TB_parameters.harq_unique_pid = 1000 + dlsch_config->harq_process_nbr;
+  TB_parameters.BG = cw->ldpcBaseGraph;
+  TB_parameters.A = A;
+  TB_parameters.Kb = nr_segmentation((unsigned char *)harq->b, c_segs, B, &TB_parameters.C, &TB_parameters.K,
+                                     &TB_parameters.Z, &TB_parameters.F, TB_parameters.BG);
+  if (TB_parameters.C > MAX_NUM_NR_DLSCH_SEGMENTS_PER_LAYER) {
+    LOG_W(NR_PHY, "SENSING: data-aided tap skipped -- too many segments C=%u\n", TB_parameters.C);
+    return;
+  }
+
+  TB_parameters.nb_rb = freq_alloc->num_rbs;
+  TB_parameters.Qm = cw->qamModOrder;
+  TB_parameters.mcs = cw->mcs;
+  TB_parameters.nb_layers = cw->Nl;
+  TB_parameters.rv_index = cw->rv;
+  TB_parameters.tbslbrm = dlsch_config->tbslbrm;
+
+  const uint8_t  nb_re_dmrs = get_num_dmrs_re_per_rb(dlsch_config->dmrsConfigType, dlsch_config->n_dmrs_cdm_groups);
+  const uint16_t dmrs_len   = get_num_dmrs(dlsch_config->dlDmrsSymbPos);
+  TB_parameters.G = nr_get_G(freq_alloc->num_rbs, dlsch_config->number_symbols, nb_re_dmrs, dmrs_len,
+                            0 /* unav_res: PTRS/CSI-RM already excluded above */, cw->qamModOrder, cw->Nl);
+  if (TB_parameters.G == 0)
+    return;
+
+  // 32-byte aligned: nr_modulation() / the LDPC encoder store through AVX2 intrinsics that fault on a
+  // misaligned buffer. These are thread-local, so their addresses depend on the TLS block layout --
+  // i.e. on every other __thread object in this file. That made the alignment ACCIDENTAL: adding the
+  // sub-slot bookkeeping arrays below shifted the layout and produced an immediate GP fault inside
+  // nr_modulation's `out128[i] = ...` store. Pin it explicitly so the layout can never break it again.
+  static __thread uint8_t coded_bits[(273 * 12 * 14 * 8 + 63) / 64 * 64 + 64] __attribute__((aligned(32)));
+  memset(coded_bits, 0, sizeof(coded_bits));
+  TB_parameters.output = coded_bits;
+
+  static __thread nrLDPC_segment_encoding_parameters_t segments[MAX_NUM_NR_DLSCH_SEGMENTS_PER_LAYER];
+  memset(segments, 0, sizeof(segments));
+  TB_parameters.segments = segments;
+  for (uint32_t r = 0; r < TB_parameters.C; r++) {
+    segments[r].c = c_segs[r];
+    segments[r].E = nr_get_E(TB_parameters.G, TB_parameters.C, TB_parameters.Qm, TB_parameters.nb_layers, r);
+    reset_meas(&segments[r].ts_interleave);
+    reset_meas(&segments[r].ts_rate_match);
+    reset_meas(&segments[r].ts_ldpc_encode);
+  }
+
+  nrLDPC_slot_encoding_parameters_t slot_parameters = {.frame = proc->frame_rx,
+                                                       .slot = proc->nr_slot_rx,
+                                                       .nb_TBs = 1,
+                                                       .threadPool = &get_nrUE_params()->Tpool,
+                                                       .tinput = NULL,
+                                                       .tinput_memcpy = NULL,
+                                                       .tprep = NULL,
+                                                       .tparity = NULL,
+                                                       .toutput = NULL,
+                                                       .tconcat = NULL,
+                                                       .TBs = &TB_parameters};
+  if (ue->nrLDPC_coding_interface.nrLDPC_coding_encoder(&slot_parameters) != 0) {
+    LOG_W(NR_PHY, "SENSING: data-aided LDPC re-encode failed\n");
+    return;
+  }
+
+  // --- Scramble (same Gold-sequence XOR the gNB TX side uses) + modulate. ---
+  static __thread uint32_t scrambled[(273 * 12 * 14 * 8 + 31) / 32 + 1] __attribute__((aligned(32)));
+  nr_codeword_scrambling(coded_bits, TB_parameters.G, 0 /* codeword index */, dlsch_config->dlDataScramblingId,
+                        dlsch->rnti, scrambled);
+
+  static __thread c16_t mod_syms[273 * 12 * 14] __attribute__((aligned(32)));
+  nr_modulation(scrambled, TB_parameters.G, cw->qamModOrder, (int16_t *)mod_syms);
+
+  // --- RE mapping: sweep non-DMRS symbols in the allocation, contiguous frequency within each --
+  // the same order nr_dlsch_extract_rbs() uses for its pure-data (no-DMRS, no-CSI-RM) fast path,
+  // mirrored here in the forward (TX-reconstruction) direction. Ĥ[k] = Y[k]/X[k] at every RE. --
+  const uint32_t base_sc  = (uint32_t)(dlsch_config->BWPStart + freq_alloc->first_rb) * NR_NB_SC_PER_RB;
+  const int      num_sc   = freq_alloc->num_rbs * NR_NB_SC_PER_RB;
+  const int      start_re = (fp->first_carrier_offset + (dlsch_config->BWPStart + freq_alloc->first_rb) * NR_NB_SC_PER_RB)
+                           % fp->ofdm_symbol_size;
+
+  static __thread float    isac_h[2 * 273 * 12 * 14] __attribute__((aligned(32)));
+  static __thread uint32_t isac_k[273 * 12 * 14];
+  static __thread uint32_t isac_l[273 * 12 * 14];
+  // Per-contributing-symbol slice bookkeeping, for sub-slot sampling: REs are emitted symbol by
+  // symbol below, so each symbol owns a contiguous [start, start+count) span of the arrays.
+  static __thread uint32_t sym_id[NR_SYMBOLS_PER_SLOT];
+  static __thread uint32_t sym_start[NR_SYMBOLS_PER_SLOT];
+  static __thread uint32_t sym_count[NR_SYMBOLS_PER_SLOT];
+  static __thread double   sym_ypow[NR_SYMBOLS_PER_SLOT]; // summed |Y|^2, for the per-group SNR gate
+  uint32_t nof_sym = 0;
+  uint32_t nof_re  = 0;
+  uint32_t mod_idx = 0;
+  const uint32_t max_re = sizeofArray(isac_k);
+
+  for (int l = dlsch_config->start_symbol; l < dlsch_config->start_symbol + dlsch_config->number_symbols; l++) {
+    if ((dlsch_config->dlDmrsSymbPos >> l) & 1)
+      continue; // DMRS symbol: covered by the pdsch_dmrs source instead, not part of this estimate
+
+    const uint32_t sym_re0 = nof_re;
+    double         ypow    = 0.0;
+    const c16_t *rxF = &rxdataF[0][l * fp->ofdm_symbol_size];
+    for (int j = 0; j < num_sc && nof_re < max_re && mod_idx < TB_parameters.G / cw->qamModOrder; j++) {
+      int re = start_re + j;
+      if (re >= fp->ofdm_symbol_size)
+        re -= fp->ofdm_symbol_size;
+      const c16_t y = rxF[re];
+      const c16_t x = mod_syms[mod_idx++];
+      const float xr = (float)x.r, xi = (float)x.i;
+      const float xmag2 = xr * xr + xi * xi;
+      if (xmag2 < 1e-6f)
+        continue; // shouldn't happen for a QAM point, but guard the division
+      const float yr = (float)y.r, yi = (float)y.i;
+      // Ĥ = Y / X = Y * conj(X) / |X|^2
+      isac_h[2 * nof_re]     = (yr * xr + yi * xi) / xmag2;
+      isac_h[2 * nof_re + 1] = (yi * xr - yr * xi) / xmag2;
+      isac_k[nof_re]         = base_sc + (uint32_t)j;
+      isac_l[nof_re]         = (uint32_t)l;
+      ypow += (double)yr * yr + (double)yi * yi;
+      nof_re++;
+    }
+    if (nof_re > sym_re0 && nof_sym < sizeofArray(sym_id)) {
+      sym_id[nof_sym]    = (uint32_t)l;
+      sym_start[nof_sym] = sym_re0;
+      sym_count[nof_sym] = nof_re - sym_re0;
+      sym_ypow[nof_sym]  = ypow;
+      nof_sym++;
+    }
+  }
+
+  if (nof_re == 0)
+    return;
+
+  nr_isac_carrier_t carrier = {.nof_prb         = (uint32_t)fp->N_RB_DL,
+                               .scs_hz          = fp->subcarrier_spacing,
+                               .dl_center_hz    = fp->dl_CarrierFreq,
+                               .pci             = fp->Nid_cell,
+                               .slots_per_frame = fp->slots_per_frame};
+  const uint32_t slot_idx = (uint32_t)(proc->frame_rx * fp->slots_per_frame + proc->nr_slot_rx);
+
+  // --- Sub-slot sampling (defs_nr_UE_ISAC.h): split this slot's symbols into GROUPS and submit each
+  // as its own slow-time row, multiplying the effective PRF (and hence the unambiguous velocity) by
+  // the number of groups. Grouping is ADAPTIVE because a short row is both sparser and noisier:
+  //   * SPARSITY gate -- a group must carry >= min_re REs (fewer REs = less frequency coverage =
+  //     a poorer, more sidelobe-prone range profile).
+  //   * SNR gate -- estimated post-integration SNR must clear min_snr_db. Per-RE SNR is
+  //     (mean|Y|^2 - nvar)/nvar from the demodulator's own noise estimate, and coherent integration
+  //     over N REs adds a factor N; both are in the SAME received-signal units, so the threshold is
+  //     a real dB figure rather than a scale-dependent fudge.
+  // A group that fails either gate absorbs the next symbol and retries; a TAIL group that can never
+  // pass is merged backwards into its predecessor rather than emitted, so we never inject a weak row
+  // into the slow-time sequence (which would just feed CFAR false alarms and undo the PRF gain).
+  uint32_t sub_min_re = 0;
+  float    sub_min_snr_db = 0.0f;
+  const uint32_t sub_target = nr_isac_subslot_config(&sub_min_re, &sub_min_snr_db);
+
+  if (sub_target == 0 || nof_sym <= 1) {
+    nr_isac_submit_cfr(slot_idx, NR_ISAC_SRC_PDSCH_DATA, &carrier, isac_h, isac_k, isac_l, nof_re, (float)nvar);
+    return;
+  }
+
+  const double nv = (nvar > 0.0) ? nvar : 1.0;
+  uint32_t g_first = 0; // first symbol index of the group being assembled
+  uint32_t emitted = 0;
+  for (uint32_t i = 0; i < nof_sym; i++) {
+    const uint32_t nsym = i - g_first + 1;
+    uint32_t g_re = 0;
+    double   g_yp = 0.0;
+    for (uint32_t t = g_first; t <= i; t++) {
+      g_re += sym_count[t];
+      g_yp += sym_ypow[t];
+    }
+    // Estimated coherent SNR of this group, in dB.
+    const double per_re = (g_re > 0) ? ((g_yp / (double)g_re) - nv) / nv : -1.0;
+    const double snr_db = (per_re > 0.0) ? 10.0 * log10(per_re * (double)g_re) : -99.0;
+    const bool   gates_ok = (g_re >= sub_min_re) && (snr_db >= (double)sub_min_snr_db);
+    const bool   is_last  = (i + 1 == nof_sym);
+
+    if ((nsym >= sub_target && gates_ok) || (is_last && gates_ok)) {
+      // Place the row at the group's centre symbol, in slots within this slot.
+      const double centre = 0.5 * ((double)sym_id[g_first] + (double)sym_id[i]) + 0.5;
+      const float  frac   = (float)(centre / (double)NR_SYMBOLS_PER_SLOT);
+      nr_isac_submit_cfr_at(slot_idx, frac, NR_ISAC_SRC_PDSCH_DATA, &carrier, &isac_h[2 * sym_start[g_first]],
+                            &isac_k[sym_start[g_first]], &isac_l[sym_start[g_first]], g_re, (float)nvar);
+      emitted++;
+      g_first = i + 1;
+    } else if (is_last) {
+      // Tail that never passed the gates: merge it BACKWARDS by re-emitting from g_first to the end
+      // as one row if nothing has been emitted yet, otherwise fold it into the whole-slot fallback.
+      if (emitted == 0) {
+        nr_isac_submit_cfr(slot_idx, NR_ISAC_SRC_PDSCH_DATA, &carrier, isac_h, isac_k, isac_l, nof_re, (float)nvar);
+        emitted++;
+      } else {
+        const double centre = 0.5 * ((double)sym_id[g_first] + (double)sym_id[i]) + 0.5;
+        const float  frac   = (float)(centre / (double)NR_SYMBOLS_PER_SLOT);
+        nr_isac_submit_cfr_at(slot_idx, frac, NR_ISAC_SRC_PDSCH_DATA, &carrier, &isac_h[2 * sym_start[g_first]],
+                              &isac_k[sym_start[g_first]], &isac_l[sym_start[g_first]], g_re, (float)nvar);
+      }
+    }
+  }
+}
+
 void pdsch_processing(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc, nr_phy_data_t *phy_data)
 {
   int frame_rx = proc->frame_rx;
@@ -1320,7 +1576,8 @@ void pdsch_processing(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc, nr_phy_
     // dlsch_harq contains the previous transmissions data for this harq pid
     NR_DL_UE_HARQ_t *harq = &ue->dl_harq_processes[c][dlsch_config->harq_process_nbr];
     // it returns -1 in case of internal failure, or 0 in case of normal result
-    int ret_pdsch = nr_ue_pdsch_procedures(ue, proc, dlsch, harq, dlsch_config, llr[c], rxdataF, &freq_alloc);
+    uint32_t nvar = 0;
+    int ret_pdsch = nr_ue_pdsch_procedures(ue, proc, dlsch, harq, dlsch_config, llr[c], rxdataF, &freq_alloc, &nvar);
     TracyCPlot("pdsch mcs", dlsch->cw_info.mcs);
 
     UEscopeCopy(ue, pdschLlr, llr[c], sizeof(int16_t), 1, G, 0);
@@ -1330,6 +1587,10 @@ void pdsch_processing(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc, nr_phy_
 
     if (ret_pdsch >= 0) {
       nr_ue_dlsch_procedures(ue, proc, dlsch, c, G, &freq_alloc, dlsch_config, llr[c]);
+      // ISAC data-aided PDSCH tap: only meaningful once decode has run (harq->decodeResult is set
+      // inside nr_ue_dlsch_procedures -> nr_dlsch_decoding). See nr_isac_pdsch_data_aided_tap()'s own
+      // scope-guard comments for when it actually contributes vs. silently no-ops.
+      nr_isac_pdsch_data_aided_tap(ue, proc, dlsch, harq, dlsch_config, &freq_alloc, rxdataF, (double)nvar);
     } else {
       LOG_E(NR_PHY, "Demodulation impossible, internal error\n");
       if (dlsch_config->k1_feedback) {

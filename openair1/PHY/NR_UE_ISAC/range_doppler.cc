@@ -57,6 +57,81 @@ icf_t selftest_tone(double amp, double m_times_df, double tau, double fd, double
   return icf_t((float)(amp * std::cos(phase)), (float)(amp * std::sin(phase)));
 }
 
+// Builds a symmetric Dolph-Chebyshev window of length N with equiripple sidelobe attenuation
+// @p sidelobe_db (positive dB, e.g. 60 => -60 dBc sidelobes), via the standard frequency-sampling
+// construction (Antoniou; same algorithm as scipy.signal.windows.chebwin / MATLAB's chebwin).
+// Reuses isac_fft's forward DFT (this module's established "own everything, no external DSP lib"
+// practice -- see isac_sync.cc's leakage_model/HANN_ESTIMATOR_SCALE for the same pattern) rather
+// than pulling in a dependency: isac_fft's uniform 1/sqrt(N) output scaling is identical on every
+// bin, and this function's final peak-normalisation step divides it out exactly, so reusing the
+// existing plan unmodified is safe.
+//
+// Applied only to the range/frequency-axis window (SYNC_NOISE_HANDOVER.md's diagnosed 55-100m
+// LOS-skirt is fast-time sidelobe leakage from the strong LOS/direct-path tap); the slow-time
+// (Doppler) window is untouched by this change and stays Hann.
+static void build_chebyshev_window(uint32_t N, double sidelobe_db, std::vector<float>& out)
+{
+  out.assign(N, 1.0f);
+  if (N < 2) {
+    return;
+  }
+  const uint32_t order = N - 1;
+  const double   r     = std::pow(10.0, std::abs(sidelobe_db) / 20.0);
+  const double   beta  = std::cosh(std::acosh(r) / (double)order);
+
+  std::vector<icf_t> p(N);
+  for (uint32_t k = 0; k < N; k++) {
+    const double x = beta * std::cos(M_PI * (double)k / (double)N);
+    double       val;
+    if (x > 1.0) {
+      val = std::cosh((double)order * std::acosh(x));
+    } else if (x < -1.0) {
+      // (1 - 2*(order%2)): +1 for even order, -1 for odd order.
+      val = ((order % 2 == 0) ? 1.0 : -1.0) * std::cosh((double)order * std::acosh(-x));
+    } else {
+      val = std::cos((double)order * std::acos(x));
+    }
+    p[k] = icf_t((float)val, 0.0f);
+  }
+
+  if (N % 2 == 1) {
+    // Odd length: w = concat(reverse(w_half[1:]), w_half), w_half = real(fft(p))[:n], n=(N+1)/2.
+    const uint32_t      n = (N + 1) / 2;
+    std::vector<icf_t> w(N);
+    fft_plan            plan(N, false /* forward DFT, matches numpy's fft(p) convention */);
+    plan.run(p.data(), w.data());
+    for (uint32_t i = 0; i < n; i++) {
+      out[i]         = w[n - 1 - i].real();
+      out[N - 1 - i] = w[n - 1 - i].real();
+    }
+  } else {
+    // Even length: pre-rotate by exp(j*pi*k/N), then w = concat(reverse(w_half[1:n]), w_half[1:n]),
+    // n = N/2+1.
+    for (uint32_t k = 0; k < N; k++) {
+      const double ph = M_PI * (double)k / (double)N;
+      p[k]             = p[k] * icf_t((float)std::cos(ph), (float)std::sin(ph));
+    }
+    const uint32_t      n = N / 2 + 1;
+    std::vector<icf_t> w(N);
+    fft_plan            plan(N, false);
+    plan.run(p.data(), w.data());
+    for (uint32_t i = 0; i < n - 1; i++) {
+      out[i]         = w[n - 1 - i].real();
+      out[n - 1 + i] = w[1 + i].real();
+    }
+  }
+
+  float mx = 0.0f;
+  for (float v : out) {
+    mx = std::max(mx, std::fabs(v));
+  }
+  if (mx > 0.0f) {
+    for (float& v : out) {
+      v /= mx;
+    }
+  }
+}
+
 range_doppler::range_doppler(const nr_isac_args_t& args_) : args(args_)
 {
   // Parse "DELAY_US:DOPPLER_HZ:GAIN,DELAY_US:DOPPLER_HZ:GAIN,..." into synthetic targets.
@@ -90,6 +165,25 @@ range_doppler::range_doppler(const nr_isac_args_t& args_) : args(args_)
     LOG_I(PHY, "SENSING: selftest_los parsed: sto=%.3f us cfo=%.2f Hz sfo=%.3f ppm (see gap-analysis doc sec. 12)\n",
           los_impairment_.sto_s * 1e6, los_impairment_.cfo_hz, los_impairment_.sfo_ppm);
   }
+
+  // Clutter-removal method (ECA_CLUTTER_HANDOVER.md). Default "mean" preserves legacy behaviour;
+  // "eca+" swaps in the CFR-domain ECA/ECA+ oblique projection (eca_clutter). Constructed once.
+  if (args.clutter_removal == "eca+") {
+    eca_.reset(new eca_clutter(args));
+    LOG_I(PHY, "SENSING: clutter removal = ECA+ (delay_max=%.1f m, dopp_max=%.3f m/s)\n",
+          (double)args.eca_delay_max_m, (double)args.eca_doppler_max_mps);
+  } else if (!args.clutter_removal.empty() && args.clutter_removal != "mean") {
+    LOG_W(PHY, "SENSING: unknown clutter_removal '%s'; falling back to mean subtraction\n",
+          args.clutter_removal.c_str());
+  }
+
+  // Fast-time (range) window (SYNC_NOISE_HANDOVER.md's LOS-skirt finding). Default "hann" preserves
+  // legacy behaviour; "chebyshev" swaps in the equiripple Dolph-Chebyshev window built above.
+  if (args.range_window == "chebyshev") {
+    LOG_I(PHY, "SENSING: range window = Dolph-Chebyshev (sidelobe=%.1f dB)\n", (double)args.range_window_sidelobe_db);
+  } else if (!args.range_window.empty() && args.range_window != "hann") {
+    LOG_W(PHY, "SENSING: unknown range_window '%s'; falling back to Hann\n", args.range_window.c_str());
+  }
 }
 
 bool range_doppler::ensure_plans(uint32_t nof_range, uint32_t nof_slow)
@@ -116,12 +210,18 @@ void range_doppler::inject_selftest(icf_t*    work_buf,
   // unambiguous range/velocity extents when selftest is set.
   std::vector<sensing_target_t> targets = targets_;
   if (targets.empty()) {
-    const double range_max = SPEED_OF_LIGHT / (2.0 * df_comb);
-    const double tau       = 2.0 * (0.25 * range_max) / SPEED_OF_LIGHT;
+    // Bistatic conventions, matching rvm.range_res_m / rvm.vel_res_mps (2026-07-23 calibration fix):
+    // dR = c*tau (no round-trip factor) and Ṙ = fd*lambda, so a target meant to land at 25% of each
+    // axis is placed with tau = 0.25*range_max/c and fd = 0.25*vel_max*fc/c. Previously both carried
+    // the erroneous monostatic 2, which put the DEFAULT self-test target at half the range and half
+    // the velocity it advertised.
+    const double range_max = SPEED_OF_LIGHT / df_comb;
+    const double tau       = (0.25 * range_max) / SPEED_OF_LIGHT;
     double       fd        = 0.0;
     if (fc > 0.0 && t_slow > 0.0) {
-      const double vel_max = SPEED_OF_LIGHT / (4.0 * fc * t_slow);
-      fd                   = 2.0 * (0.25 * vel_max) * fc / SPEED_OF_LIGHT;
+      const double vel_max = SPEED_OF_LIGHT / (2.0 * fc * t_slow);
+      // Negative fd for a positive (opening) range-rate -- matches the reporting sign above.
+      fd                   = -(0.25 * vel_max) * fc / SPEED_OF_LIGHT;
     }
     targets.push_back({tau, fd, 3.0}); // strong default so it is unmistakable
   }
@@ -162,7 +262,9 @@ void range_doppler::process(const icf_t*                       h_cpi,
                             float                             period_slots,
                             const uint32_t*                   row_comb,
                             sensing_rvm_t&                    rvm,
-                            std::vector<sensing_detection_t>& detections)
+                            std::vector<sensing_detection_t>& detections,
+                            const double*                     row_time_slots,
+                            const uint8_t*                    occ_mask)
 {
   detections.clear();
   if (h_cpi == nullptr || nof_slow < 2 || nof_subc < 2 || comb_spacing == 0) {
@@ -186,10 +288,46 @@ void range_doppler::process(const icf_t*                       h_cpi,
 
   rvm.nof_range_bins   = nof_range;
   rvm.nof_doppler_bins = nof_dopp;
-  rvm.range_res_m      = (float)(SPEED_OF_LIGHT / (2.0 * (double)nof_range * df_comb));
-  rvm.range_max_m      = (float)(SPEED_OF_LIGHT / (2.0 * df_comb));
-  rvm.vel_res_mps      = (fc > 0.0) ? (float)(SPEED_OF_LIGHT / (2.0 * fc * (double)nof_dopp * t_slow)) : 0.0f;
-  rvm.vel_max_mps      = (fc > 0.0) ? (float)(SPEED_OF_LIGHT / (4.0 * fc * t_slow)) : 0.0f;
+  // Range axis = DIFFERENTIAL BISTATIC RANGE (dR = R_tx→tgt→rx − R_los), NOT a monostatic one-way
+  // range. Same 2026-07-23 calibration fix as the velocity axis below, and the same root cause: a
+  // scatterer's CFR contribution is exp(-j2π·m·Δf·τ) with τ = dR/c (no round-trip factor — the
+  // "there and back" is already inside the bistatic path length), so the range IFFT puts it at bin
+  // k = N·Δf·dR/c and inverting gives dR = k·c/(N·Δf). The previous c/(2·N·Δf) reported HALF the
+  // true differential range.
+  //
+  // This was invisible to tests/isac_sync_test.cc because that test is CIRCULAR on this point: it
+  // synthesises its target with target_delay_s = 2·range/c and then checks range/range_res_m, so the
+  // erroneous 2 cancels itself and the test passes under either convention. It was caught only by
+  // comparing live sensing_sim RVMs against the harness's own physically-derived ground truth
+  // (openair1/SIMULATION/TOOLS/sensing_channel.c uses tau = dR/c, the correct bistatic convention).
+  //
+  // Bin indices are UNCHANGED (a relabelling). Anything configured in absolute metres against this
+  // axis must be re-tuned by 2x: `zero_range_guard` is in BINS and is unaffected, but `eca_delay_max_m`
+  // is in metres (eca_clutter.cc converts it with the same formula, kept in sync) — and note that a
+  // guard/notch specified in bins now masks TWICE the metric range it used to.
+  rvm.range_res_m      = (float)(SPEED_OF_LIGHT / ((double)nof_range * df_comb));
+  rvm.range_max_m      = (float)(SPEED_OF_LIGHT / df_comb);
+  // Velocity axis = BISTATIC RANGE-RATE (dR/dt), NOT a monostatic radial velocity.
+  //
+  // CALIBRATION FIX (2026-07-23), found by comparing live sensing_sim detections against the
+  // harness's own ground-truth log: these two lines previously carried the monostatic round-trip
+  // factor 2 (vel = f_d·λ/2, i.e. c/(2·fc·N·T) and c/(4·fc·T)), which is wrong for this pipeline.
+  // A bistatic scatterer's tap phase advances as exp(-j2π·R(t)/λ) where R is the FULL Tx→target→Rx
+  // path (openair1/SIMULATION/TOOLS/sensing_channel.c uses exactly this), so its slow-time frequency
+  // is f_d = Ṙ/λ with NO factor 2 — the "there and back" the monostatic factor accounts for is
+  // already inside R. Inverting with the monostatic relation therefore reported HALF the true
+  // bistatic range-rate. That also made the velocity axis inconsistent with the RANGE axis, which
+  // already reports differential bistatic range (dR = R − R_los), and with the ground-truth log,
+  // which prints range_rate = Ṙ — so GT-vs-detection velocity comparisons were off by 2x.
+  // Correct inversion: Ṙ = f_d·λ, giving c/(fc·N·T) per bin and ±c/(2·fc·T) unambiguous.
+  //
+  // Bin indices are UNCHANGED by this fix (it is a relabelling of the same axis) — only the m/s
+  // values reported in sensing_detection_t / sensing_rvm_t / DetectionReport change. Anything
+  // configured in absolute m/s against this axis must be re-tuned by 2x: `eca_doppler_max_mps`
+  // (eca_clutter.cc converts it to bins with the same formula, kept in sync below) and any
+  // velocity-band analysis scripts. `zero_doppler_guard` is specified in BINS and is unaffected.
+  rvm.vel_res_mps      = (fc > 0.0) ? (float)(SPEED_OF_LIGHT / (fc * (double)nof_dopp * t_slow)) : 0.0f;
+  rvm.vel_max_mps      = (fc > 0.0) ? (float)(SPEED_OF_LIGHT / (2.0 * fc * t_slow)) : 0.0f;
 
   // Working copy of the CPI (so the caller's matrix and self-test injection stay isolated)
   work.assign(h_cpi, h_cpi + (size_t)nof_slow * nof_subc);
@@ -198,25 +336,73 @@ void range_doppler::process(const icf_t*                       h_cpi,
     inject_selftest(work.data(), nof_slow, nof_subc, df_comb, t_slow, fc);
   }
 
-  // Clutter removal: subtract the per-subcarrier slow-time mean (suppresses the static/zero-Doppler LOS)
-  for (uint32_t c = 0; c < nof_subc; c++) {
-    double acc_re = 0.0, acc_im = 0.0;
-    for (uint32_t n = 0; n < nof_slow; n++) {
-      const icf_t v = work[(size_t)n * nof_subc + c];
-      acc_re += v.real();
-      acc_im += v.imag();
-    }
-    const icf_t mean((float)(acc_re / (double)nof_slow), (float)(acc_im / (double)nof_slow));
-    for (uint32_t n = 0; n < nof_slow; n++) {
-      work[(size_t)n * nof_subc + c] -= mean;
+  // Clutter removal. Default: subtract the per-subcarrier slow-time mean (suppresses the
+  // static/zero-Doppler LOS). ECA+ (opt-in): CFR-domain oblique projection that additionally removes
+  // the near-zero-Doppler clutter *band* over a bounded delay window, killing the static/slow residual
+  // that produces the conjugate mirror ghost — see eca_clutter.h / ECA_CLUTTER_HANDOVER.md.
+  if (eca_) {
+    eca_->remove(work.data(), nof_slow, nof_subc, df_comb, t_slow, fc);
+  } else {
+    for (uint32_t c = 0; c < nof_subc; c++) {
+      double acc_re = 0.0, acc_im = 0.0;
+      for (uint32_t n = 0; n < nof_slow; n++) {
+        const icf_t v = work[(size_t)n * nof_subc + c];
+        acc_re += v.real();
+        acc_im += v.imag();
+      }
+      const icf_t mean((float)(acc_re / (double)nof_slow), (float)(acc_im / (double)nof_slow));
+      for (uint32_t n = 0; n < nof_slow; n++) {
+        work[(size_t)n * nof_subc + c] -= mean;
+      }
     }
   }
 
-  // Frequency (range) Hann window to suppress range sidelobes
+  // Spectral whitening (opt-in, args.range_whiten): after clutter removal, attenuate subcarriers
+  // whose slow-time RMS exceeds the across-subcarrier median. With irregular per-slot pdsch_data
+  // occupancy a few subcarriers carry disproportionate energy; a near-impulse in the subcarrier
+  // domain becomes a FLAT pedestal across the whole range axis after the IFFT (RVM-confirmed as a
+  // strong target's smear at its own Doppler + harmonics -- see defs_nr_UE_ISAC.h). scale =
+  // median/max(rms,median) is <=1 for hot subcarriers and exactly 1 at/below the median, so no weak
+  // or empty subcarrier is ever amplified (would raise the noise floor). Phase is untouched, so a
+  // real target's across-subcarrier phase ramp -- the thing that localises it in range -- is
+  // preserved; only the disproportionate magnitude of the pedestal-driving subcarriers is capped.
+  if (args.range_whiten && nof_subc > 1) {
+    whiten_rms.assign(nof_subc, 0.0f);
+    for (uint32_t c = 0; c < nof_subc; c++) {
+      double acc = 0.0;
+      for (uint32_t n = 0; n < nof_slow; n++) {
+        const icf_t v = work[(size_t)n * nof_subc + c];
+        acc += (double)v.real() * v.real() + (double)v.imag() * v.imag();
+      }
+      whiten_rms[c] = (float)std::sqrt(acc / (double)nof_slow);
+    }
+    // Median RMS across subcarriers (nth_element on a scratch copy; O(n), no full sort).
+    whiten_sorted.assign(whiten_rms.begin(), whiten_rms.end());
+    std::nth_element(whiten_sorted.begin(), whiten_sorted.begin() + nof_subc / 2, whiten_sorted.end());
+    const float med_rms = whiten_sorted[nof_subc / 2];
+    if (med_rms > 0.0f) {
+      for (uint32_t c = 0; c < nof_subc; c++) {
+        const float scale = (whiten_rms[c] > med_rms) ? (med_rms / whiten_rms[c]) : 1.0f;
+        if (scale < 1.0f) {
+          for (uint32_t n = 0; n < nof_slow; n++) {
+            work[(size_t)n * nof_subc + c] *= scale;
+          }
+        }
+      }
+    }
+  }
+
+  // Frequency (range) window to suppress range sidelobes. Default Hann; opt-in equiripple
+  // Dolph-Chebyshev (args.range_window) trades a wider mainlobe for much deeper, controlled
+  // sidelobes -- see build_chebyshev_window() above and SYNC_NOISE_HANDOVER.md's LOS-skirt finding.
   if (freq_hann.size() != nof_subc) {
     freq_hann.resize(nof_subc);
-    for (uint32_t c = 0; c < nof_subc; c++) {
-      freq_hann[c] = 0.5f * (1.0f - std::cos(2.0f * (float)M_PI * (float)c / (float)(nof_subc - 1)));
+    if (args.range_window == "chebyshev") {
+      build_chebyshev_window(nof_subc, (double)args.range_window_sidelobe_db, freq_hann);
+    } else {
+      for (uint32_t c = 0; c < nof_subc; c++) {
+        freq_hann[c] = 0.5f * (1.0f - std::cos(2.0f * (float)M_PI * (float)c / (float)(nof_subc - 1)));
+      }
     }
   }
 
@@ -228,15 +414,82 @@ void range_doppler::process(const icf_t*                       h_cpi,
   // (comb-12) row otherwise scatters across the whole 0..range_max axis. Taper those replica bins to
   // zero per row, keeping only the row's valid window. A dense comb-1 row keeps the full range, so a
   // CSI-RS-only CPI collapses to its true ~416 m window while fused dense rows still reach far range.
+  // Matched-filter mode (args.detector=="matched_filter"): build each row's range response over ONLY
+  // its OCCUPIED subcarriers (no interpolated/held gap-fill -> no range pedestal) and energy-normalise
+  // the row by its occupancy fraction so a sparsely-scheduled slot contributes as much SIGNAL as a
+  // full one -- this removes the amplitude modulation irregular scheduling imposes on the slow-time
+  // signal, i.e. removes the gating harmonics at the source. Requires the occupancy mask; falls back
+  // to the plain windowed transform when unavailable. See defs_nr_UE_ISAC.h's `detector` comment.
+  const bool matched_filter = (args.detector == "matched_filter") && (occ_mask != nullptr);
+
+  // CLEAN deconvolution validity (see clean_deconv.h): needs a shift-invariant operator, i.e. NOT
+  // matched_filter (per-row occupancy masking) and a uniform full-band comb (no per-row de-alias
+  // taper). Under a fused multi-comb grid the range PSF differs per row -> non-separable -> skip.
+  bool uniform_comb = true;
+  if (row_comb != nullptr) {
+    for (uint32_t n = 0; n < nof_slow; n++) {
+      if (row_comb[n] > 1) {
+        uniform_comb = false;
+        break;
+      }
+    }
+  }
+  // Occupancy-aware forward-model CLEAN (clean_occ_aware): models each component's PSF through the real
+  // per-row occupancy so the amplitude-gating harmonic replicas are reproduced and subtracted. Needs
+  // the occupancy mask; runs its own range+Doppler+CLEAN+CFAR and returns early. Takes precedence over
+  // the separable variant when both are set.
+  const bool use_nudft_early = (args.doppler_nudft || matched_filter || (args.clean_deconv && args.clean_occ_aware)) &&
+                               row_time_slots != nullptr && period_slots > 0.0f;
+  if (args.clean_deconv && args.clean_occ_aware && occ_mask != nullptr) {
+    clean_occ_aware(work.data(), nof_slow, nof_subc, nof_range, nof_dopp, occ_mask, row_comb,
+                    row_time_slots, period_slots, use_nudft_early, rvm);
+    cfar(rvm, detections, nof_slow, row_time_slots, period_slots);
+    clean_prev_raw_det_ = (uint32_t)detections.size();
+    return;
+  }
+
+  // Separable window-PSF CLEAN validity (see clean_deconv.h): needs a shift-invariant operator, i.e.
+  // NOT matched_filter (per-row occupancy masking) and a uniform full-band comb (no per-row de-alias
+  // taper). Under a fused multi-comb grid the range PSF differs per row -> non-separable -> skip.
+  bool want_clean = args.clean_deconv && !args.clean_occ_aware && !matched_filter && uniform_comb;
+  if (args.clean_deconv && !args.clean_occ_aware && !want_clean && !clean_warned_) {
+    LOG_W(PHY, "SENSING: clean_deconv requested but operator is non-separable (%s%s) -- CLEAN skipped\n",
+          matched_filter ? "matched_filter " : "", uniform_comb ? "" : "multi-comb-grid");
+    clean_warned_ = true;
+  }
+
   static constexpr uint32_t DEALIAS_TAPER = 4; // raised-cosine rolloff width (bins) before the cut
   cir_rm.assign((size_t)nof_range * nof_slow, icf_t(0.0f, 0.0f));
   range_in.resize(nof_subc);
   range_out.resize(nof_range);
   for (uint32_t n = 0; n < nof_slow; n++) {
-    for (uint32_t c = 0; c < nof_subc; c++) {
-      range_in[c] = work[(size_t)n * nof_subc + c] * freq_hann[c];
+    float row_norm = 1.0f;
+    if (matched_filter) {
+      uint32_t occ_count = 0;
+      for (uint32_t c = 0; c < nof_subc; c++) {
+        if (occ_mask[(size_t)n * nof_subc + c]) {
+          range_in[c] = work[(size_t)n * nof_subc + c] * freq_hann[c];
+          occ_count++;
+        } else {
+          range_in[c] = icf_t(0.0f, 0.0f); // occupied-only: unobserved subcarriers contribute nothing
+        }
+      }
+      // Per-row occupancy normalisation: scale so every row's occupied energy is comparable, cancelling
+      // the amplitude gating. sqrt(N/occ) keeps a full row at unit gain and boosts sparse rows.
+      if (args.mf_per_row_norm && occ_count > 0) {
+        row_norm = std::sqrt((float)nof_subc / (float)occ_count);
+      }
+    } else {
+      for (uint32_t c = 0; c < nof_subc; c++) {
+        range_in[c] = work[(size_t)n * nof_subc + c] * freq_hann[c];
+      }
     }
     range_plan->run(range_in.data(), range_out.data());
+    if (row_norm != 1.0f) {
+      for (uint32_t r = 0; r < nof_range; r++) {
+        range_out[r] *= row_norm;
+      }
+    }
 
     uint32_t valid = nof_range; // no clipping by default (row_comb absent or comb<=1)
     if (row_comb != nullptr && row_comb[n] > 1) {
@@ -264,8 +517,34 @@ void range_doppler::process(const icf_t*                       h_cpi,
     }
   }
 
-  // Doppler: FFT along slow-time for each range bin, with fftshift so zero-Doppler is centred
+  // Doppler transform along slow-time for each range bin, with fftshift so zero-Doppler is centred.
+  // Two paths: (a) the default uniform forward FFT, and (b) a NON-UNIFORM DFT (args.doppler_nudft)
+  // that evaluates the spectrum at each row's ACTUAL time so the harmonics irregular sampling would
+  // otherwise generate never appear -- see defs_nr_UE_ISAC.h. The NUDFT matrix depends only on the
+  // row times, so it is built once here and reused for every range bin.
+  // Matched filter integrates coherently at the TRUE sample times -> its slow-time stage IS the NUDFT
+  // (a uniform FFT here would re-introduce the very harmonics the occ-only range stage just avoided).
+  const bool use_nudft = (args.doppler_nudft || matched_filter) && row_time_slots != nullptr && period_slots > 0.0f;
+  if (use_nudft) {
+    // W[d*N + n] = exp(-j*2*pi*d*tau_n/N)/sqrt(N), tau_n = t_n/T_mean (normalised sample index). For
+    // uniform sampling tau_n = n and this is exactly the forward DFT matrix (matches dopp_plan's
+    // 1/sqrt(N) normalisation), so enabling the mode is behaviour-preserving on evenly-spaced rows.
+    nudft_mat.resize((size_t)nof_dopp * nof_slow);
+    const double invN = 1.0 / (double)nof_slow;
+    const double norm = 1.0 / std::sqrt((double)nof_slow);
+    for (uint32_t d = 0; d < nof_dopp; d++) {
+      for (uint32_t n = 0; n < nof_slow; n++) {
+        const double tau = row_time_slots[n] / (double)period_slots;
+        const double ph  = -2.0 * M_PI * (double)d * tau * invN;
+        nudft_mat[(size_t)d * nof_slow + n] = icf_t((float)(std::cos(ph) * norm), (float)(std::sin(ph) * norm));
+      }
+    }
+  }
+
   rvm.power.assign((size_t)nof_range * nof_dopp, 0.0f);
+  if (want_clean) {
+    cmap.assign((size_t)nof_range * nof_dopp, icf_t(0.0f, 0.0f));
+  }
   dopp_in.resize(nof_slow);
   dopp_out.resize(nof_slow);
   const uint32_t half = nof_dopp / 2;
@@ -273,12 +552,26 @@ void range_doppler::process(const icf_t*                       h_cpi,
     for (uint32_t n = 0; n < nof_slow; n++) {
       dopp_in[n] = cir_rm[(size_t)r * nof_slow + n] * hann[n];
     }
-    dopp_plan->run(dopp_in.data(), dopp_out.data());
+    if (use_nudft) {
+      for (uint32_t d = 0; d < nof_dopp; d++) {
+        const icf_t* w = &nudft_mat[(size_t)d * nof_slow];
+        icf_t        acc(0.0f, 0.0f);
+        for (uint32_t n = 0; n < nof_slow; n++) {
+          acc += dopp_in[n] * w[n];
+        }
+        dopp_out[d] = acc;
+      }
+    } else {
+      dopp_plan->run(dopp_in.data(), dopp_out.data());
+    }
     for (uint32_t d = 0; d < nof_dopp; d++) {
       const uint32_t ds = (d + half) % nof_dopp; // fftshift
       const float    re = dopp_out[d].real();
       const float    im = dopp_out[d].imag();
       rvm.power[(size_t)r * nof_dopp + ds] = re * re + im * im;
+      if (want_clean) {
+        cmap[(size_t)r * nof_dopp + ds] = dopp_out[d];
+      }
     }
   }
 
@@ -293,21 +586,370 @@ void range_doppler::process(const icf_t*                       h_cpi,
       const bool zero_dopp = std::abs((int)d - (int)half) <= zdg;
       if (zero_range || zero_dopp) {
         rvm.power[(size_t)r * nof_dopp + d] = 0.0f;
+        if (want_clean) {
+          cmap[(size_t)r * nof_dopp + d] = icf_t(0.0f, 0.0f);
+        }
       }
     }
   }
 
+  // CLEAN deconvolution (opt-in, clean_deconv.h): coherently strip each strong scatterer's separable
+  // window PSF (range pedestal + Doppler sidelobes) from the COMPLEX map before CFAR, so its skirt
+  // can't spawn ghost detections. The notch above already zeroed the LOS/zero-Doppler cells in both
+  // rvm.power and cmap, keeping them out of CLEAN's peak search. Overwrites rvm.power with the cleaned
+  // power; the notch is re-applied afterwards (a restored clean beam near the notch edge must not leak
+  // back into the guarded band).
+  if (want_clean) {
+    build_clean_kernels(nof_range, nof_dopp, use_nudft);
+    clean_deconv_params cp;
+    cp.max_components = clean_components_budget(); // auto (prev-CPI det count) or the manual pin
+    cp.loop_gain     = args.clean_loop_gain;
+    cp.stop_db       = args.clean_stop_db;
+    cp.restore_bins  = args.clean_restore_bins;
+    uint32_t n_comp  = 0;
+    clean_deconv_run(cmap.data(), nof_range, nof_dopp, clean_kr.data(), clean_kd.data(), cp,
+                     rvm.power.data(), &n_comp);
+    for (uint32_t r = 0; r < nof_range; r++) {
+      const bool zero_range = (int)r <= zrg || (int)r >= (int)nof_range - 1 - zrg;
+      for (uint32_t d = 0; d < nof_dopp; d++) {
+        const bool zero_dopp = std::abs((int)d - (int)half) <= zdg;
+        if (zero_range || zero_dopp) {
+          rvm.power[(size_t)r * nof_dopp + d] = 0.0f;
+        }
+      }
+    }
+    clean_last_components_ = n_comp;
+  }
+
   // 2D CA-CFAR detection + non-max suppression
-  cfar(rvm, detections);
+  cfar(rvm, detections, nof_slow, row_time_slots, period_slots);
+
+  // Auto-budget feedback: record this CPI's raw detection count so the next CPI can size CLEAN's
+  // component budget from measured scene occupancy (same "measure, don't guess" pattern as mc_rank).
+  clean_prev_raw_det_ = (uint32_t)detections.size();
 }
 
-void range_doppler::cfar(const sensing_rvm_t& rvm, std::vector<sensing_detection_t>& detections)
+// Builds the separable, shift-invariant CLEAN PSF kernels for the current CPI geometry: kr (range
+// axis) = the range operator's response to a unit scatterer at range-bin 0, and kd (Doppler axis) =
+// the Doppler operator's response to a zero-Doppler scatterer, each normalised to (1,0) at zero lag
+// and expressed in the SAME fftshifted map coordinates the data uses. Rebuilt per CPI (one range +
+// one Doppler transform -- negligible next to the nof_range Doppler transforms of the main path) so
+// it always tracks the active window (hann/chebyshev) and Doppler mode (FFT/NUDFT).
+void range_doppler::build_clean_kernels(uint32_t nof_range, uint32_t nof_dopp, bool use_nudft)
+{
+  // Range kernel: IFFT of the (windowed) unit scatterer at bin 0 -> range_in[m] = freq_hann[m].
+  range_in.assign(nof_range, icf_t(0.0f, 0.0f));
+  for (uint32_t m = 0; m < nof_range; m++) {
+    range_in[m] = icf_t(freq_hann[m], 0.0f);
+  }
+  range_out.resize(nof_range);
+  range_plan->run(range_in.data(), range_out.data());
+  clean_kr.assign(nof_range, icf_t(0.0f, 0.0f));
+  const icf_t kr0 = range_out[0];
+  const float kr0n = std::norm(kr0);
+  if (kr0n > 0.0f) {
+    for (uint32_t r = 0; r < nof_range; r++) {
+      clean_kr[r] = range_out[r] / kr0; // complex-normalise so kr[0] = (1,0)
+    }
+  } else {
+    clean_kr[0] = icf_t(1.0f, 0.0f);
+  }
+
+  // Doppler kernel: transform of a zero-Doppler scatterer -> dopp_in[n] = hann[n]. Then fftshift so
+  // zero Doppler maps to ds = half, and re-index by lag from ds=half. (nof_dopp == nof_slow here.)
+  dopp_in.assign(nof_dopp, icf_t(0.0f, 0.0f));
+  for (uint32_t n = 0; n < nof_dopp; n++) {
+    dopp_in[n] = icf_t(hann[n], 0.0f);
+  }
+  dopp_out.resize(nof_dopp);
+  if (use_nudft) {
+    for (uint32_t d = 0; d < nof_dopp; d++) {
+      const icf_t* w = &nudft_mat[(size_t)d * nof_dopp];
+      icf_t        acc(0.0f, 0.0f);
+      for (uint32_t n = 0; n < nof_dopp; n++) {
+        acc += dopp_in[n] * w[n];
+      }
+      dopp_out[d] = acc;
+    }
+  } else {
+    dopp_plan->run(dopp_in.data(), dopp_out.data());
+  }
+  // In fftshifted map coords the zero-Doppler peak sits at ds = half; a cell at map-lag `lag` from the
+  // peak (ds = half+lag) is fed by dopp_out[lag mod N] (since (ds+half)%N picks bin `lag`). So the
+  // lag-indexed kernel is simply dopp_out normalised by its DC bin dopp_out[0] (the peak).
+  clean_kd.assign(nof_dopp, icf_t(0.0f, 0.0f));
+  const icf_t kd0 = dopp_out[0];
+  if (std::norm(kd0) > 0.0f) {
+    for (uint32_t lag = 0; lag < nof_dopp; lag++) {
+      clean_kd[lag] = dopp_out[lag] / kd0;
+    }
+  } else {
+    clean_kd[0] = icf_t(1.0f, 0.0f);
+  }
+}
+
+// CLEAN component budget: manual pin (clean_max_components > 0) or AUTO from the previous CPI's raw
+// detection count plus a small margin, clamped to [1, clean_max_components_cap]. First CPI (no history)
+// seeds at the cap so nothing is starved before a measurement exists.
+uint32_t range_doppler::clean_components_budget() const
+{
+  if (args.clean_max_components > 0) {
+    return args.clean_max_components;
+  }
+  uint32_t cap = args.clean_max_components_cap > 0 ? args.clean_max_components_cap : 16;
+  if (clean_prev_raw_det_ == 0) {
+    return cap; // no measurement yet
+  }
+  uint32_t budget = clean_prev_raw_det_ + 2; // margin so real targets aren't clipped by the budget
+  return std::min(budget, cap);
+}
+
+// Pushes @p grid through the exact range+Doppler operator WITH per-row occupancy masking (occ-only
+// subcarriers, NO per-row energy normalisation -- the gating must survive) and de-alias taper, writing
+// the complex fftshifted map to @p cmap_out. Identical transform for the data grid and each CLEAN
+// component's synthetic grid, which is what makes the coherent subtraction operator-consistent and
+// lets a component's modelled amplitude-gating Doppler-harmonic replicas cancel the data's.
+void range_doppler::occ_forward_transform(const icf_t* grid, uint32_t nof_slow, uint32_t nof_subc,
+                                          uint32_t nof_range, uint32_t nof_dopp, const uint8_t* occ_mask,
+                                          const uint32_t* row_comb, const double* row_time_slots,
+                                          float period_slots, bool use_nudft, icf_t* cmap_out)
+{
+  static constexpr uint32_t DEALIAS_TAPER = 4;
+  // Windows: freq_hann is already built by process() before the occ-aware branch; ensure the slow-time
+  // Hann exists (process() builds it only later on the normal path).
+  if (hann.size() != nof_slow) {
+    hann.resize(nof_slow);
+    for (uint32_t n = 0; n < nof_slow; n++) {
+      hann[n] = 0.5f * (1.0f - std::cos(2.0f * (float)M_PI * (float)n / (float)(nof_slow - 1)));
+    }
+  }
+
+  // Range: occ-masked windowed IFFT per slow-time row -> range-major CIR, with per-row de-alias taper.
+  cir_rm.assign((size_t)nof_range * nof_slow, icf_t(0.0f, 0.0f));
+  range_in.resize(nof_subc);
+  range_out.resize(nof_range);
+  for (uint32_t n = 0; n < nof_slow; n++) {
+    for (uint32_t c = 0; c < nof_subc; c++) {
+      range_in[c] = occ_mask[(size_t)n * nof_subc + c] ? (grid[(size_t)n * nof_subc + c] * freq_hann[c])
+                                                       : icf_t(0.0f, 0.0f);
+    }
+    range_plan->run(range_in.data(), range_out.data());
+    uint32_t valid = nof_range;
+    if (row_comb != nullptr && row_comb[n] > 1) {
+      valid = std::max(1u, nof_range / row_comb[n]);
+    }
+    for (uint32_t r = 0; r < nof_range; r++) {
+      float g = 1.0f;
+      if (r >= valid) {
+        g = 0.0f;
+      } else if (valid > DEALIAS_TAPER && r >= valid - DEALIAS_TAPER) {
+        g = 0.5f * (1.0f + std::cos((float)M_PI * (float)(r - (valid - DEALIAS_TAPER)) / (float)DEALIAS_TAPER));
+      }
+      cir_rm[(size_t)r * nof_slow + n] = (g == 1.0f) ? range_out[r] : range_out[r] * g;
+    }
+  }
+
+  // Doppler: NUDFT over the true row times (occ-aware always bypasses resampling, so rows are the raw
+  // irregular occurrences) or uniform FFT. Matrix built once per call.
+  if (use_nudft) {
+    nudft_mat.resize((size_t)nof_dopp * nof_slow);
+    const double invN = 1.0 / (double)nof_slow;
+    const double norm = 1.0 / std::sqrt((double)nof_slow);
+    for (uint32_t d = 0; d < nof_dopp; d++) {
+      for (uint32_t n = 0; n < nof_slow; n++) {
+        const double tau = row_time_slots[n] / (double)period_slots;
+        const double ph  = -2.0 * M_PI * (double)d * tau * invN;
+        nudft_mat[(size_t)d * nof_slow + n] = icf_t((float)(std::cos(ph) * norm), (float)(std::sin(ph) * norm));
+      }
+    }
+  }
+  dopp_in.resize(nof_slow);
+  dopp_out.resize(nof_slow);
+  const uint32_t half = nof_dopp / 2;
+  for (uint32_t r = 0; r < nof_range; r++) {
+    for (uint32_t n = 0; n < nof_slow; n++) {
+      dopp_in[n] = cir_rm[(size_t)r * nof_slow + n] * hann[n];
+    }
+    if (use_nudft) {
+      for (uint32_t d = 0; d < nof_dopp; d++) {
+        const icf_t* w = &nudft_mat[(size_t)d * nof_slow];
+        icf_t        acc(0.0f, 0.0f);
+        for (uint32_t n = 0; n < nof_slow; n++) {
+          acc += dopp_in[n] * w[n];
+        }
+        dopp_out[d] = acc;
+      }
+    } else {
+      dopp_plan->run(dopp_in.data(), dopp_out.data());
+    }
+    for (uint32_t d = 0; d < nof_dopp; d++) {
+      const uint32_t ds            = (d + half) % nof_dopp; // fftshift
+      cmap_out[(size_t)r * nof_dopp + ds] = dopp_out[d];
+    }
+  }
+}
+
+// Occupancy-aware forward-model CLEAN: build the data map through the occ operator, then iteratively
+// find the brightest cell, forward-model a unit scatterer at that (range,Doppler) THROUGH THE SAME occ
+// operator (so its modelled response carries the true amplitude-gating harmonic replicas), and subtract
+// a loop-gain fraction. The residual + restored clean beams -> |.|^2 -> rvm.power for CFAR.
+void range_doppler::clean_occ_aware(const icf_t* work_grid, uint32_t nof_slow, uint32_t nof_subc,
+                                    uint32_t nof_range, uint32_t nof_dopp, const uint8_t* occ_mask,
+                                    const uint32_t* row_comb, const double* row_time_slots,
+                                    float period_slots, bool use_nudft, sensing_rvm_t& rvm)
+{
+  const size_t   NRD  = (size_t)nof_range * nof_dopp;
+  const uint32_t half = nof_dopp / 2;
+  ensure_plans(nof_range, nof_slow);
+
+  // Data map through the occ operator.
+  clean_res.assign(NRD, icf_t(0.0f, 0.0f));
+  occ_forward_transform(work_grid, nof_slow, nof_subc, nof_range, nof_dopp, occ_mask, row_comb,
+                        row_time_slots, period_slots, use_nudft, clean_res.data());
+
+  // Notch (same guards as the normal path) so LOS/zero-Doppler stays out of the peak search.
+  const int zdg = (int)args.zero_doppler_guard;
+  const int zrg = (int)args.zero_range_guard;
+  auto apply_notch = [&](icf_t* m) {
+    for (uint32_t r = 0; r < nof_range; r++) {
+      const bool zero_range = (int)r <= zrg || (int)r >= (int)nof_range - 1 - zrg;
+      for (uint32_t d = 0; d < nof_dopp; d++) {
+        const bool zero_dopp = std::abs((int)d - (int)half) <= zdg;
+        if (zero_range || zero_dopp) {
+          m[(size_t)r * nof_dopp + d] = icf_t(0.0f, 0.0f);
+        }
+      }
+    }
+  };
+  apply_notch(clean_res.data());
+
+  // CLEAN loop.
+  float peak0 = 0.0f;
+  for (size_t i = 0; i < NRD; i++) {
+    peak0 = std::max(peak0, std::norm(clean_res[i]));
+  }
+  const float stop_pw = peak0 * std::pow(10.0f, -std::abs(args.clean_stop_db) / 10.0f);
+  const float gamma   = (args.clean_loop_gain > 0.0f && args.clean_loop_gain <= 1.0f) ? args.clean_loop_gain : 0.8f;
+  const uint32_t budget = clean_components_budget();
+
+  clean_psf.assign(NRD, icf_t(0.0f, 0.0f));
+  clean_synth.assign((size_t)nof_slow * nof_subc, icf_t(0.0f, 0.0f));
+  std::vector<uint32_t> comp_r, comp_d;
+  std::vector<icf_t>    comp_a;
+  uint32_t n_comp = 0;
+
+  for (uint32_t it = 0; it < budget && peak0 > 0.0f; it++) {
+    float    best = 0.0f;
+    uint32_t br = 0, bd = 0;
+    for (uint32_t r = 0; r < nof_range; r++) {
+      const icf_t* row = &clean_res[(size_t)r * nof_dopp];
+      for (uint32_t d = 0; d < nof_dopp; d++) {
+        const float pw = std::norm(row[d]);
+        if (pw > best) { best = pw; br = r; bd = d; }
+      }
+    }
+    if (best < stop_pw || best <= 0.0f) {
+      break;
+    }
+    // Synthesise a unit scatterer at (br,bd): subcarrier signature exp(-j2pi m br/nof_range) and
+    // slow-time signature exp(+j2pi (bd-half) tau_n/nof_dopp). occ_forward_transform re-applies the
+    // occupancy masking, so the synthetic scatterer picks up exactly the data's gating modulation.
+    const int      d0u = ((int)bd - (int)half + (int)nof_dopp) % (int)nof_dopp;
+    for (uint32_t n = 0; n < nof_slow; n++) {
+      const double tau       = use_nudft ? (row_time_slots[n] / (double)period_slots) : (double)n;
+      const double slow_ph   = 2.0 * M_PI * (double)d0u * tau / (double)nof_dopp;
+      const double cs = std::cos(slow_ph), sn = std::sin(slow_ph);
+      icf_t* srow = &clean_synth[(size_t)n * nof_subc];
+      for (uint32_t m = 0; m < nof_subc; m++) {
+        const double rp = -2.0 * M_PI * (double)m * (double)br / (double)nof_range;
+        // exp(j*rp) * exp(j*slow_ph)
+        const double cr = std::cos(rp), sr = std::sin(rp);
+        srow[m] = icf_t((float)(cr * cs - sr * sn), (float)(cr * sn + sr * cs));
+      }
+    }
+    occ_forward_transform(clean_synth.data(), nof_slow, nof_subc, nof_range, nof_dopp, occ_mask, row_comb,
+                          row_time_slots, period_slots, use_nudft, clean_psf.data());
+    apply_notch(clean_psf.data());
+    const icf_t g0 = clean_psf[(size_t)br * nof_dopp + bd];
+    if (std::norm(g0) <= 0.0f) {
+      break;
+    }
+    const icf_t peak_val = clean_res[(size_t)br * nof_dopp + bd];
+    const icf_t c        = (peak_val / g0) * gamma; // coefficient scaling the unit PSF
+    for (size_t i = 0; i < NRD; i++) {
+      clean_res[i] -= c * clean_psf[i];
+    }
+    // Bank the extracted map-amplitude (gamma fraction of the peak) for the clean-beam restore.
+    bool merged = false;
+    for (size_t k = 0; k < comp_r.size(); k++) {
+      if (comp_r[k] == br && comp_d[k] == bd) { comp_a[k] += peak_val * gamma; merged = true; break; }
+    }
+    if (!merged) { comp_r.push_back(br); comp_d.push_back(bd); comp_a.push_back(peak_val * gamma); }
+    n_comp++;
+  }
+  clean_last_components_ = n_comp;
+
+  // Restore: cleaned = residual + each banked component as a narrow clean beam; power -> rvm.power.
+  const int hw = (int)args.clean_restore_bins;
+  std::vector<float> bw(2 * hw + 1, 1.0f);
+  if (hw > 0) {
+    const float sigma = std::max(0.5f, (float)hw / 1.5f);
+    for (int t = -hw; t <= hw; t++) {
+      bw[t + hw] = std::exp(-0.5f * (float)(t * t) / (sigma * sigma));
+    }
+  }
+  for (size_t k = 0; k < comp_r.size(); k++) {
+    const int   r0 = (int)comp_r[k], d0 = (int)comp_d[k];
+    const icf_t a  = comp_a[k];
+    for (int dr = -hw; dr <= hw; dr++) {
+      const int rr = ((r0 + dr) % (int)nof_range + (int)nof_range) % (int)nof_range;
+      for (int dd = -hw; dd <= hw; dd++) {
+        const int dc = ((d0 + dd) % (int)nof_dopp + (int)nof_dopp) % (int)nof_dopp;
+        clean_res[(size_t)rr * nof_dopp + dc] += a * (bw[dr + hw] * bw[dd + hw]);
+      }
+    }
+  }
+
+  rvm.power.assign(NRD, 0.0f);
+  for (size_t i = 0; i < NRD; i++) {
+    rvm.power[i] = std::norm(clean_res[i]);
+  }
+  // Re-apply the notch on the power map (a restored beam near the guard edge must not leak in).
+  for (uint32_t r = 0; r < nof_range; r++) {
+    const bool zero_range = (int)r <= zrg || (int)r >= (int)nof_range - 1 - zrg;
+    for (uint32_t d = 0; d < nof_dopp; d++) {
+      const bool zero_dopp = std::abs((int)d - (int)half) <= zdg;
+      if (zero_range || zero_dopp) {
+        rvm.power[(size_t)r * nof_dopp + d] = 0.0f;
+      }
+    }
+  }
+}
+
+void range_doppler::cfar(const sensing_rvm_t& rvm, std::vector<sensing_detection_t>& detections,
+                         uint32_t nof_slow, const double* row_time_slots, float period_slots)
 {
   const uint32_t R   = rvm.nof_range_bins;
   const uint32_t D   = rvm.nof_doppler_bins;
   const int      g   = (int)args.cfar_guard;
   const int      t   = (int)args.cfar_train;
-  const double   pfa = (args.cfar_pfa > 0.0f) ? (double)args.cfar_pfa : 1e-3;
+  // Per-cell Pfa. args.cfar_pfa > 0 pins a manual value directly (legacy behaviour). Otherwise
+  // (default) derive it from a grid-SIZE-INDEPENDENT target: cfar_pfa is a PER-CELL probability, so
+  // the number of false alarms that actually appear scales with R*D (bandwidth * cpi_slots) -- a
+  // fixed cfar_pfa tuned on one grid silently gives a different false-alarm COUNT on another. See
+  // defs_nr_UE_ISAC.h's cfar_pfa/cfar_target_fa_per_cpi comment for the 2026-07-24 live finding this
+  // responds to (a stale cfar_pfa=1e-4 predicted ~42 false alarms/CPI on a 420k-cell grid).
+  // cfar_fa_adapt_enable: use the closed-loop state (seeded from args.cfar_target_fa_per_cpi, then
+  // adjusted below from the MEASURED raw detection count) instead of the static config value. See
+  // defs_nr_UE_ISAC.h's cfar_fa_adapt_enable comment.
+  if (args.cfar_fa_adapt_enable && cfar_fa_state_ < 0.0f) {
+    cfar_fa_state_ = args.cfar_target_fa_per_cpi;
+  }
+  const double   target_fa = args.cfar_fa_adapt_enable ? (double)cfar_fa_state_ : (double)args.cfar_target_fa_per_cpi;
+  const double   cells = (double)R * (double)D;
+  const double   pfa   = (args.cfar_pfa > 0.0f)
+                             ? (double)args.cfar_pfa
+                             : std::min(0.5, std::max(1e-12, target_fa / std::max(1.0, cells)));
 
   // Integral image of power (size (R+1)x(D+1)) for O(1) window sums
   integ.assign((size_t)(R + 1) * (D + 1), 0.0);
@@ -361,13 +1003,121 @@ void range_doppler::cfar(const sensing_rvm_t& rvm, std::vector<sensing_detection
       const double alpha = (double)train_c * (std::pow(pfa, -1.0 / (double)train_c) - 1.0);
       const double thr   = alpha * noise;
       const double cell  = (double)rvm.power[(size_t)r * D + d];
-      if (cell > thr) {
+
+      // Per-Doppler-column test (opt-in): the cell must also stand above the noise of its OWN velocity
+      // lane, estimated from range-only training cells in the same column d (guard band excluded).
+      // This is what rejects a strong target's range-wide pedestal, which uniformly elevates its own
+      // Doppler column and would otherwise sail through the 2-D box test. See defs_nr_UE_ISAC.h.
+      double thr_col   = 0.0;
+      double col_noise = noise;
+      if (args.cfar_per_column) {
+        const double col_outer_s = rect_sum((int)r - (g + t), (int)d, (int)r + (g + t), (int)d);
+        const long   col_outer_c = rect_cnt((int)r - (g + t), (int)d, (int)r + (g + t), (int)d);
+        const double col_guard_s = rect_sum((int)r - g, (int)d, (int)r + g, (int)d);
+        const long   col_guard_c = rect_cnt((int)r - g, (int)d, (int)r + g, (int)d);
+        const long   col_train_c = col_outer_c - col_guard_c;
+        if (col_train_c > 0) {
+          col_noise = (col_outer_s - col_guard_s) / (double)col_train_c;
+          if (col_noise > 0.0) {
+            const double col_alpha = (double)col_train_c * (std::pow(pfa, -1.0 / (double)col_train_c) - 1.0);
+            thr_col = col_alpha * col_noise;
+          }
+        }
+      }
+
+      // Per-RANGE-ROW test (opt-in): the mirror image of the column test above -- the cell must also
+      // stand above the noise of its OWN RANGE row, estimated from Doppler-only training cells at the
+      // same range r (guard band excluded). WHY (RVM-confirmed 2026-07-25, see
+      // MULTISTATIC_FAST_TARGET_NOTES.md and the sub-slot RVM animation): the dominant surviving ghost
+      // family is a horizontal RIDGE -- one scatterer's energy smeared along slow-time across its own
+      // range row, spanning the whole velocity axis. Those ghosts are not independent false alarms,
+      // they ARE the target's own signal mis-attributed to wrong velocities, which is why tightening
+      // pfa never removed them. cfar_per_column trains along range (it kills the vertical, same-velocity
+      // pedestal); a ridge runs the other way and sails straight through it. Training along DOPPLER
+      // makes the ridge its own noise floor, so only a genuine peak standing above the ridge survives.
+      // The two are complementary: enable both to bracket a strong target in each axis.
+      double thr_row   = 0.0;
+      double row_noise = noise;
+      if (args.cfar_per_row) {
+        const double row_outer_s = rect_sum((int)r, (int)d - (g + t), (int)r, (int)d + (g + t));
+        const long   row_outer_c = rect_cnt((int)r, (int)d - (g + t), (int)r, (int)d + (g + t));
+        const double row_guard_s = rect_sum((int)r, (int)d - g, (int)r, (int)d + g);
+        const long   row_guard_c = rect_cnt((int)r, (int)d - g, (int)r, (int)d + g);
+        const long   row_train_c = row_outer_c - row_guard_c;
+        if (row_train_c > 0) {
+          row_noise = (row_outer_s - row_guard_s) / (double)row_train_c;
+          if (row_noise > 0.0) {
+            const double row_alpha = (double)row_train_c * (std::pow(pfa, -1.0 / (double)row_train_c) - 1.0);
+            thr_row = row_alpha * row_noise;
+          }
+        }
+      }
+
+      if (cell > thr && (!args.cfar_per_column || cell > thr_col) && (!args.cfar_per_row || cell > thr_row)) {
         sensing_detection_t det;
         det.range_bin   = r;
         det.doppler_bin = d;
-        det.range_m     = (float)r * rvm.range_res_m;
-        det.vel_mps     = ((float)d - half_d) * rvm.vel_res_mps;
-        det.snr_db      = 10.0f * std::log10((float)(cell / noise));
+
+        // Sub-bin peak interpolation (opt-in, args.subbin_interp): a target almost never sits exactly
+        // on a bin centre, so reporting the bin index quantises range to range_res_m (3.05 m here) and
+        // velocity to vel_res_mps, injecting a uniform +/-half-bin error into every measurement the
+        // tracker and the multilateration then have to absorb. A 3-point parabolic fit through the
+        // peak and its two neighbours recovers the fractional offset. Fitted in dB (log power) rather
+        // than linear power: the mainlobe of a windowed peak is far closer to a parabola in log
+        // domain, which is also why isac_sync.cc's LOS estimator needed its empirical
+        // HANN_ESTIMATOR_SCALE correction for the linear-power version -- fitting in dB avoids that
+        // whole bias class. Skipped at the array edges and whenever a neighbour is notched to zero
+        // (log of 0), and the offset is clamped to +/-0.5 bin so a malformed fit can never move a
+        // detection into a different bin.
+        float dr_bin = 0.0f, dd_bin = 0.0f;
+        if (args.subbin_interp) {
+          if (r > 0 && r + 1 < R) {
+            const double ym = (double)rvm.power[(size_t)(r - 1) * D + d];
+            const double yp = (double)rvm.power[(size_t)(r + 1) * D + d];
+            if (ym > 0.0 && yp > 0.0) {
+              const double a = 10.0 * std::log10(ym);
+              const double b = 10.0 * std::log10(cell);
+              const double c = 10.0 * std::log10(yp);
+              const double den = a - 2.0 * b + c;
+              if (den < 0.0) { // concave => a genuine local maximum
+                dr_bin = (float)std::max(-0.5, std::min(0.5, 0.5 * (a - c) / den));
+              }
+            }
+          }
+          if (d > 0 && d + 1 < D) {
+            const double ym = (double)rvm.power[(size_t)r * D + (d - 1)];
+            const double yp = (double)rvm.power[(size_t)r * D + (d + 1)];
+            if (ym > 0.0 && yp > 0.0) {
+              const double a = 10.0 * std::log10(ym);
+              const double b = 10.0 * std::log10(cell);
+              const double c = 10.0 * std::log10(yp);
+              const double den = a - 2.0 * b + c;
+              if (den < 0.0) {
+                dd_bin = (float)std::max(-0.5, std::min(0.5, 0.5 * (a - c) / den));
+              }
+            }
+          }
+        }
+
+        det.range_m     = ((float)r + dr_bin) * rvm.range_res_m;
+        // NEGATED (2026-07-23): report BISTATIC RANGE-RATE, sign-consistent with the range axis
+        // (positive = differential range increasing = target opening). A scatterer's slow-time term
+        // is exp(-j2*pi*R(t)/lambda), so an OPENING target (Rdot>0) sits at NEGATIVE Doppler
+        // frequency and thus a negative shifted bin -- reporting the raw bin offset therefore gave
+        // -Rdot. Caught when the Kalman track seeded its rate from this field and converged to the
+        // wrong sign against a ground truth of +6.4 m/s.
+        det.vel_mps     = -(((float)d + dd_bin) - half_d) * rvm.vel_res_mps;
+        // Report SNR against the STRONGER noise reference in use (per-column noise is the meaningful
+        // one when a cell had to clear the column test), so a pedestal-adjacent survivor isn't
+        // over-credited by the low 2-D-box noise estimate.
+        double snr_noise = noise;
+        if (args.cfar_per_column && col_noise > snr_noise) {
+          snr_noise = col_noise;
+        }
+        if (args.cfar_per_row && row_noise > snr_noise) {
+          snr_noise = row_noise;
+        }
+        det.snr_db      = 10.0f * std::log10((float)(cell / snr_noise));
         detections.push_back(det);
         if (detections.size() >= 8192) {
           break; // safety cap on raw detections before suppression
@@ -376,13 +1126,26 @@ void range_doppler::cfar(const sensing_rvm_t& rvm, std::vector<sensing_detection
     }
   }
 
-  // Non-max suppression: collapse each detection cluster to its strongest cell (greedy, strongest first).
+  // Raw (pre-NMS, pre-filter) detection count -- the direct, correctly-attributed signal for the
+  // cfar_fa_adapt_enable feedback below (measures CFAR's own output, not the downstream filters').
+  const uint32_t raw_detection_count = (uint32_t)detections.size();
+
+  // Non-max suppression: collapse each detection cluster to its strongest cell (greedy, strongest
+  // first). Deliberately NOT truncated to max_detections here -- that cap is now applied ONCE, at the
+  // very end, AFTER conj_image_reject below. Truncating by SNR before mirror-pairing could cut away a
+  // real detection's ghost partner (the ghost typically has HIGHER SNR -- see conj_image_reject's own
+  // comment), orphaning the ghost so it survives unpaired with nothing left to match against.
+  // Live-confirmed 2026-07-24 (PHASE2_MOT_MULTIUE_HANDOVER.md): with 2 real targets + their 2 mirror
+  // ghosts + residual noise all competing for one small max_detections budget, this happened often
+  // enough to dominate multi_target_tracker's track churn (mirror ghosts at range ~R-1-r, velocity
+  // matching the real targets', surviving as confirmed spurious tracks).
   const int nms_r = (int)args.nms_range_bins;
   const int nms_d = (int)args.nms_doppler_bins;
   if ((nms_r > 0 || nms_d > 0) && detections.size() > 1) {
     std::sort(detections.begin(), detections.end(),
               [](const sensing_detection_t& a, const sensing_detection_t& b) { return a.snr_db > b.snr_db; });
     std::vector<sensing_detection_t> kept;
+    kept.reserve(detections.size());
     for (const sensing_detection_t& cand : detections) {
       bool suppressed = false;
       for (const sensing_detection_t& k : kept) {
@@ -394,16 +1157,326 @@ void range_doppler::cfar(const sensing_rvm_t& rvm, std::vector<sensing_detection
       }
       if (!suppressed) {
         kept.push_back(cand);
-        if (kept.size() >= args.max_detections) {
-          break;
-        }
       }
     }
     detections.swap(kept);
-  } else if (detections.size() > args.max_detections) {
+  }
+
+  // L1/FISTA sparse Doppler verification (opt-in, args.doppler_sparse). For each UNIQUE range bin
+  // among the surviving detections, re-solve that bin's slow-time CIR row via L1-regularized
+  // recovery over the SAME irregular sample times used by doppler_nudft (sparse_doppler.h): a genuine
+  // scatterer is explained by one sparse tone; a dense-transform harmonic/leakage artifact needed to
+  // borrow energy from a neighbouring bin and is revealed as spurious once solved sparsely (drops to
+  // ~0). Scoped to only the CFAR-flagged bins (not the whole grid) to keep cost tractable -- see
+  // sparse_doppler.h / defs_nr_UE_ISAC.h.
+  if (args.doppler_sparse && row_time_slots != nullptr && period_slots > 0.0f && !detections.empty()) {
+    // Seed the closed-loop lambda_scale from config on first use; thereafter it's adjusted below from
+    // the MEASURED number of surviving detections each CPI, not held at a fixed constant.
+    if (sparse_lambda_scale_state_ < 0.0f) {
+      sparse_lambda_scale_state_ = args.doppler_sparse_lambda_scale;
+    }
+    const float lambda_scale = sparse_lambda_scale_state_;
+
+    sparse_doppler_ctx sd_ctx;
+    sparse_doppler_prepare(row_time_slots, nof_slow, period_slots, D, sd_ctx);
+
+    std::vector<uint32_t> bins;
+    bins.reserve(detections.size());
+    for (const sensing_detection_t& det : detections) {
+      bins.push_back(det.range_bin);
+    }
+    std::sort(bins.begin(), bins.end());
+    bins.erase(std::unique(bins.begin(), bins.end()), bins.end());
+
+    std::vector<sensing_detection_t> kept4;
+    kept4.reserve(detections.size());
+    std::vector<icf_t>  x_out;
+    std::vector<float>  prof(D);
+    // Diagnostics (Fix-2 verification plan): count how many detections the orphaned-harmonic probe
+    // drops and the WORST (largest) sub-harmonic/peak ratio that triggered a drop -- a real orphaned
+    // harmonic should reject on a ratio near/above harmonic_ratio (~0.25); frequent rejections on
+    // tiny ratios would mean the probe is killing real targets via their own sidelobes.
+    uint32_t n_probe_reject = 0;
+    float    worst_reject_ratio = 0.0f;
+    for (uint32_t r : bins) {
+      // Noise floor for THIS range bin from the already-computed dense Doppler profile: most bins at
+      // a fixed range are noise, so the median is a robust floor even though the row overall is
+      // dominated by whatever scatterer(s) sit at their own bins (numerically validated: within-row
+      // TIME-DOMAIN median is the wrong estimator here -- it reflects signal amplitude, not noise,
+      // since every sample carries signal -- but the dense FREQUENCY-domain profile's median works
+      // because most Doppler bins there truly are just noise).
+      for (uint32_t d = 0; d < D; d++) {
+        prof[d] = rvm.power[(size_t)r * D + d];
+      }
+      std::nth_element(prof.begin(), prof.begin() + D / 2, prof.end());
+      const float noise_floor = prof[D / 2];
+      // |Z|^2 for complex Gaussian Z~CN(0,sigma^2) is exponential with mean sigma^2; its median is
+      // sigma^2*ln(2), so sigma = sqrt(median_power/ln2). Then the universal soft-threshold
+      // sigma*sqrt(2*log(N)) (standard sparse-recovery choice for iid Gaussian noise).
+      const float sigma  = std::sqrt(std::max(noise_floor, 1e-20f) / (float)M_LN2);
+      const float lambda = sigma * std::sqrt(2.0f * std::log((float)D)) * lambda_scale;
+
+      sparse_doppler_solve(sd_ctx, &cir_rm[(size_t)r * nof_slow], args.doppler_sparse_iters, lambda, x_out);
+      float maxp = 0.0f;
+      for (uint32_t n = 0; n < D; n++) {
+        maxp = std::max(maxp, std::norm(x_out[n]));
+      }
+      for (const sensing_detection_t& det : detections) {
+        if (det.range_bin != r) {
+          continue;
+        }
+        // Undo the fftshift used for rvm.power's storage order (ds=(n+half)%D is self-inverse for
+        // even D) to get back to the dictionary's natural bin index n.
+        const uint32_t n = (det.doppler_bin + D / 2) % D;
+        if (std::norm(x_out[n]) < args.doppler_sparse_peak_ratio * maxp) {
+          continue; // already rejected by the base sparse-peak check
+        }
+        // Orphaned-harmonic check: a detection can survive the check above and STILL be a Doppler
+        // harmonic of a real target whose FUNDAMENTAL never independently cleared CFAR that CPI (e.g.
+        // its true bistatic rate briefly fell in zero_doppler_guard's notch, or its SNR dipped) --
+        // track_harmonic_reject and the detection-level harmonic_reject above both require the
+        // fundamental to ALSO be a detection/track that CPI to compare against, so an orphaned
+        // harmonic with no co-detected fundamental slips through both. Since the full sparse spectrum
+        // x_out is already computed for this range bin, directly PROBE the candidate sub-harmonic
+        // bins (half/third this frequency) for meaningful energy, independent of whether anything was
+        // separately detected there. Signed-frequency arithmetic: natural bin n represents frequency
+        // n/D for n<=D/2 and (n-D)/D (negative) beyond it; dividing that SIGNED frequency by k and
+        // mapping back to a natural bin is what "half/third the frequency" means here.
+        const int  n_signed = ((int)n <= (int)D / 2) ? (int)n : (int)n - (int)D;
+        bool       is_harmonic = false;
+        // STRICTER, SEPARATE threshold for the reject-me-as-a-harmonic decision (harmonic_ratio,
+        // ~0.25/-6 dB) than the lenient peak-survival check above (peak_ratio, ~0.05/-13 dB). A real
+        // orphaned harmonic's fundamental sits within a few dB of it; a mere window sidelobe / SFO
+        // jitter leak is 15-20 dB down, so the higher bar stops a strong target from flagging itself
+        // as a harmonic of its own leakage (the "sidelobe self-destruction" that collapsed detections
+        // to zero -- see defs_nr_UE_ISAC.h's doppler_sparse_harmonic_ratio comment).
+        const float harm_thr = args.doppler_sparse_harmonic_ratio * maxp;
+        for (int k = 2; k <= 3; k++) {
+          if (std::abs(n_signed) < k) {
+            continue; // too close to DC to meaningfully sub-divide
+          }
+          const int      sub_signed = (int)std::lround((double)n_signed / (double)k);
+          const uint32_t sub_n = (sub_signed >= 0) ? (uint32_t)sub_signed : (uint32_t)(sub_signed + (int)D);
+          if (sub_n == n) {
+            continue;
+          }
+          if (std::norm(x_out[sub_n]) >= harm_thr) {
+            is_harmonic = true;
+            worst_reject_ratio = std::max(worst_reject_ratio,
+                                          (maxp > 0.0f) ? (float)(std::norm(x_out[sub_n]) / maxp) : 0.0f);
+            break;
+          }
+        }
+        if (!is_harmonic) {
+          kept4.push_back(det);
+        } else {
+          n_probe_reject++;
+        }
+      }
+    }
+    detections.swap(kept4);
+
+    // Closed-loop update for the NEXT CPI: too few survivors (real targets likely missed) relaxes
+    // the threshold; too many (ghosts likely leaking back through) tightens it. Clamped so it can't
+    // run away in either direction. This is what makes lambda_scale adapt instead of sitting at a
+    // fixed guess -- see defs_nr_UE_ISAC.h's doppler_sparse_lambda_scale comment.
+    if (detections.size() < args.doppler_sparse_target_min_det) {
+      sparse_lambda_scale_state_ *= args.doppler_sparse_adapt_rate; // relax (smaller threshold)
+    } else if (detections.size() > args.doppler_sparse_target_max_det) {
+      sparse_lambda_scale_state_ /= args.doppler_sparse_adapt_rate; // tighten (larger threshold)
+    }
+    sparse_lambda_scale_state_ = std::min(args.doppler_sparse_lambda_max,
+                                          std::max(args.doppler_sparse_lambda_min, sparse_lambda_scale_state_));
+
+    // Diagnostic dump (verification plan): per-CPI sparse-verify summary -- surviving detection count,
+    // how many the orphaned-harmonic probe dropped and the worst ratio that triggered a drop (should
+    // be >= harmonic_ratio; frequent drops at tiny ratios => probe killing real targets), the
+    // adapted lambda_scale carried to the next CPI, and how many survivors sit at far range (>500 m)
+    // together with the far survivors' velocities vs. the nearest-range survivor's (to check whether
+    // far ghosts are k*v harmonics of a near target -- decides whether Fix 3 is needed).
+    uint32_t n_far = 0;
+    float    near_min_r = 1e30f, near_v = 0.0f;
+    for (const sensing_detection_t& d : detections) {
+      if (d.range_m < near_min_r) { near_min_r = d.range_m; near_v = d.vel_mps; }
+    }
+    for (const sensing_detection_t& d : detections) {
+      if (d.range_m > 500.0f) { n_far++; }
+    }
+    LOG_I(PHY,
+          "SENSING: sparse-verify surv=%zu probe_reject=%u worst_reject_ratio=%.3f lambda_scale=%.3f "
+          "far>500m=%u near_r=%.1fm near_v=%.2f\n",
+          detections.size(), n_probe_reject, worst_reject_ratio, sparse_lambda_scale_state_, n_far,
+          (near_min_r < 1e29f) ? near_min_r : 0.0f, near_v);
+  }
+
+  // Conjugate-image ("mirror ghost") rejection. A range IFFT of a CFR carrying a real-valued
+  // (conjugate-symmetric) component — the near-zero-Doppler residual a static/slow scatterer leaves
+  // after clutter removal — produces a ghost at range bin (R-1-r) for a true scatterer at bin r. A
+  // physical scatterer and its numerical mirror cannot both be real.
+  //
+  // Which member of the pair is the ghost is decided by RANGE, not SNR: a real bistatic target has a
+  // SMALL differential range (dR >= 0, near bins), and its image lands in the far/upper half near
+  // range_max. (SNR is the wrong discriminator: the image sits in the quiet far-range region and CFAR
+  // gives it a *higher* SNR than the real target buried next to the LOS skirt — the opposite of what
+  // "keep the stronger" would need.) So: drop a detection when another detection sits at its
+  // range-mirror (R-1-r, within conj_image_guard) at a STRICTLY LOWER range bin — i.e. this one is the
+  // upper/far member of the mirror pair. The lower (physical) member is always kept.
+  if (args.conj_image_reject && detections.size() > 1) {
+    const int guard = (int)args.conj_image_guard;
+    std::vector<sensing_detection_t> kept2;
+    kept2.reserve(detections.size());
+    for (const sensing_detection_t& cand : detections) {
+      const int mirror = (int)R - 1 - (int)cand.range_bin;
+      bool is_image = false;
+      for (const sensing_detection_t& other : detections) {
+        // Another detection at this one's range-mirror, at a lower range bin => `cand` is the far image.
+        if ((int)other.range_bin < (int)cand.range_bin &&
+            std::abs((int)other.range_bin - mirror) <= guard) {
+          is_image = true;
+          break;
+        }
+      }
+      if (!is_image) {
+        kept2.push_back(cand);
+      }
+    }
+    detections.swap(kept2);
+  }
+
+  // Doppler-harmonic rejection (opt-in). The Doppler analog of conj_image_reject above. Irregular,
+  // scheduling-driven slow-time sampling of a moving target turns its slow-time tone into a
+  // harmonic-rich signal, so besides the true peak at its bistatic range-rate v it also produces
+  // strong peaks at k*v (k=2,3,...) AT THE SAME RANGE (RVM-confirmed 2026-07-24 once the range-wide
+  // pedestal was removed -- see PHASE2_MOT_MULTIUE_HANDOVER.md). A physical second target at the very
+  // same range and an exact integer-multiple velocity of another is astronomically unlikely, so a
+  // detection is dropped when a STRONGER detection sits at the same range bin (within harmonic_guard)
+  // whose velocity magnitude divides this one's by a near-integer k in [2, harmonic_max_k]. Keyed on
+  // magnitude so both +k*v and -k*v images (the gate produces both) are caught; the stronger member
+  // (the fundamental, i.e. the real target) is always kept.
+  if (args.harmonic_reject && detections.size() > 1) {
+    const int    guard = (int)args.harmonic_guard;
+    const int    maxk  = (int)args.harmonic_max_k;
+    const double tol   = (double)args.harmonic_tol; // fractional tolerance on the integer ratio
+    std::vector<sensing_detection_t> kept3;
+    kept3.reserve(detections.size());
+    for (const sensing_detection_t& cand : detections) {
+      const double vc = std::abs((double)cand.vel_mps);
+      bool is_harm = false;
+      for (const sensing_detection_t& other : detections) {
+        if (&other == &cand) {
+          continue;
+        }
+        const double vo = std::abs((double)other.vel_mps);
+        // `other` is the fundamental: same range, SMALLER |velocity| (the harmonic is always the
+        // higher-order term). It need NOT be stronger -- irregular-sampling harmonics routinely rival
+        // or exceed the fundamental in power (RVM-measured within ~1 dB, sometimes above) -- but it
+        // must not be much WEAKER, so a random weak low-velocity blip can't knock out a strong real
+        // detection: require it within harmonic_snr_margin dB of the candidate.
+        if (vo < 1e-3 || vc <= vo || other.snr_db < cand.snr_db - (double)args.harmonic_snr_margin) {
+          continue;
+        }
+        if (std::abs((int)cand.range_bin - (int)other.range_bin) > guard) {
+          continue;
+        }
+        const double ratio = vc / vo;
+        const double krnd  = std::round(ratio);
+        if (krnd >= 2.0 && krnd <= (double)maxk && std::abs(ratio - krnd) <= tol) {
+          is_harm = true;
+          break;
+        }
+      }
+      if (!is_harm) {
+        kept3.push_back(cand);
+      }
+    }
+    detections.swap(kept3);
+  }
+
+  // Far-range harmonic (range-smeared pedestal) rejection (opt-in). Unlike harmonic_reject above,
+  // which needs the fundamental to be a SAME-RANGE detection, this finds the scene's dominant
+  // NEAR-range Doppler component(s) directly from the range-integrated power profile -- so it catches
+  // an amplitude-gating harmonic smeared out to far range even when its near parent isn't separately
+  // detected that CPI (the "orphaned far ghost" the diagnostics showed at k*v_target, r>500 m). See
+  // defs_nr_UE_ISAC.h's far_harmonic_reject comment.
+  if (args.far_harmonic_reject && !detections.empty() && rvm.range_res_m > 0.0f) {
+    const int near_bin = std::min((int)R - 1, (int)(args.far_harmonic_near_m / rvm.range_res_m));
+    const int zrg_f    = (int)args.zero_range_guard;
+    // Range-integrated Doppler profile over the NEAR band only (skip the zero-range/LOS guard), so a
+    // real near target's tone stands out as a strong column.
+    std::vector<double> pnear(D, 0.0);
+    for (int r = zrg_f + 1; r <= near_bin; r++) {
+      const float* row = &rvm.power[(size_t)r * D];
+      for (uint32_t d = 0; d < D; d++) {
+        pnear[d] += (double)row[d];
+      }
+    }
+    // Dominant near velocities = columns whose integrated power exceeds a robust floor (median x 8)
+    // AND are a local max. Stored as SIGNED doppler offset from centre (= velocity sign/magnitude).
+    std::vector<double> sorted_pn = pnear;
+    std::nth_element(sorted_pn.begin(), sorted_pn.begin() + D / 2, sorted_pn.end());
+    const double floor_pn = sorted_pn[D / 2] * 8.0;
+    const int    half     = (int)D / 2;
+    std::vector<int> near_off;
+    for (uint32_t d = 1; d + 1 < D; d++) {
+      if (pnear[d] > floor_pn && pnear[d] >= pnear[d - 1] && pnear[d] >= pnear[d + 1]) {
+        const int off = (int)d - half; // shifted-bin index -> signed offset (skip DC/zero-Doppler)
+        if (std::abs(off) >= (int)args.zero_doppler_guard + 1) {
+          near_off.push_back(off);
+        }
+      }
+    }
+    if (!near_off.empty()) {
+      const int    far_bin = (int)(args.far_harmonic_far_m / rvm.range_res_m);
+      const int    maxk    = (int)args.harmonic_max_k;
+      const double tol     = (double)args.harmonic_tol;
+      std::vector<sensing_detection_t> kept5;
+      kept5.reserve(detections.size());
+      for (const sensing_detection_t& cand : detections) {
+        bool drop = false;
+        if ((int)cand.range_bin > far_bin) {
+          const int voff = (int)cand.doppler_bin - half; // signed offset of the far candidate
+          for (int no : near_off) {
+            if (std::abs(no) < 1) {
+              continue;
+            }
+            const double ratio = (double)std::abs(voff) / (double)std::abs(no);
+            const double krnd  = std::round(ratio);
+            if (krnd >= 2.0 && krnd <= (double)maxk && std::abs(ratio - krnd) <= tol) {
+              drop = true; // far detection is a k*v harmonic of a dominant near-range component
+              break;
+            }
+          }
+        }
+        if (!drop) {
+          kept5.push_back(cand);
+        }
+      }
+      detections.swap(kept5);
+    }
+  }
+
+  // Final cap to max_detections, by SNR -- moved here (after NMS dedup + mirror-pairing have had the
+  // FULL candidate set to work with) instead of happening mid-pipeline, so a real detection can't be
+  // truncated away before conj_image_reject gets a chance to pair it with its ghost.
+  if (detections.size() > args.max_detections) {
     std::sort(detections.begin(), detections.end(),
               [](const sensing_detection_t& a, const sensing_detection_t& b) { return a.snr_db > b.snr_db; });
     detections.resize(args.max_detections);
+  }
+
+  // Closed-loop update for the NEXT CPI: too few RAW detections (real targets likely starved by too
+  // strict a budget) raises cfar_target_fa_per_cpi; too many (flooding the downstream filters again)
+  // lowers it. Deliberately keyed on the RAW pre-filter count captured above, not the post-filter
+  // count returned to the caller -- this measures CFAR's own behaviour, not the downstream filters'.
+  // See defs_nr_UE_ISAC.h's cfar_fa_adapt_enable comment.
+  if (args.cfar_fa_adapt_enable) {
+    if (raw_detection_count < args.cfar_fa_target_min_det) {
+      cfar_fa_state_ *= args.cfar_fa_adapt_rate; // raise the budget
+    } else if (raw_detection_count > args.cfar_fa_target_max_det) {
+      cfar_fa_state_ /= args.cfar_fa_adapt_rate; // lower the budget
+    }
+    cfar_fa_state_ = std::min(args.cfar_fa_max, std::max(args.cfar_fa_min, cfar_fa_state_));
+    LOG_I(PHY, "SENSING: cfar-fa-adapt raw_det=%u target_fa=%.3f\n", raw_detection_count, cfar_fa_state_);
   }
 }
 

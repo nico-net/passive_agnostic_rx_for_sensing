@@ -85,37 +85,79 @@ struct los_row_estimate_t {
   double   frac_bin = 0.0;   ///< sub-bin parabolic offset from peak_bin, in bins, range [-0.5, 0.5]
   icf_t    peak_val = icf_t(0.0f, 0.0f); ///< complex CIR sample at peak_bin (pre-STO-correction);
                                          ///< Phase 2 reads its phase, no second CIR pass needed
-  bool     valid    = false; ///< false if the row's occupancy wasn't a clean uniform comb, or too short
+  bool     valid    = false; ///< false if the row's occupancy wasn't a clean uniform comb, or too short,
+                             ///< OR the walking tracker was flywheeling this row (see cpi_sto_tracker) --
+                             ///< a flywheeled row's peak_bin/frac_bin/peak_val are a PROJECTION, not a
+                             ///< real measurement, so Phase 2 (which filters on this same flag) must not
+                             ///< treat it as a real LOS-phase sample.
+  bool     flywheeling        = false; ///< true if this row was projected (faded lock), not measured
+  double   absolute_drift_bins = 0.0;  ///< cumulative walked drift since this CPI's first lock, in
+                                       ///< (signed) range bins -- integer walk distance + this row's own
+                                       ///< frac_bin; SYNC_NOISE_HANDOVER.md's proposed input for a future
+                                       ///< Phase 4 closed-loop consumer (not wired to Phase 4 in this
+                                       ///< change -- exposed here and in the DetectionReport JSON only)
 };
 
 /// Outcome of fitting sub-bin delay vs. time across a CPI's valid rows (Phase 1 classification).
 struct sto_fit_result_t {
-  uint32_t n_valid        = 0;     ///< valid rows that went into the fit
+  uint32_t n_valid        = 0;     ///< valid (locked, non-flywheeling) rows that went into the fit
   double   slope_bins_per_s = 0.0; ///< fitted sub-bin delay drift rate (bins/second)
   double   mean_frac_bin   = 0.0;  ///< mean sub-bin fractional delay across valid rows, in bins
   double   drift_bins_cpi  = 0.0;  ///< |slope * CPI time span|, in range bins -- the classification statistic
   bool     is_constant     = false; ///< true => classified as fine STO (corrected here); false => SFO leaking
                                      ///< through, hand off to Phase 3 (no correction applied here)
+  uint32_t n_flywheel        = 0;   ///< rows this CPI where the walking tracker's lock faded and the
+                                     ///< search window was instead projected forward (see cpi_sto_tracker)
+  double   total_drift_bins  = 0.0; ///< last locked row's absolute_drift_bins -- this CPI's total walked
+                                     ///< drift, signed range bins (0 if the tracker never locked)
 };
 
 /**
- * @brief Phase 1: per-CPI fine (sub-sample) STO tracking and correction.
+ * @brief Phase 1: per-CPI fine (sub-sample) STO tracking and correction, via a WALKING LOS search.
  *
- * For each committed row with a clean, uniformly-spaced occupancy (a single dominant native
- * comb), IFFTs the row's occupied subcarriers (via isac_fft, since row width varies with
- * source/comb) to a compact CIR, locates the LOS tap near the known fixed group-delay bin, and
- * refines its position with parabolic interpolation across the 3 bins straddling the peak. Fits
- * the per-row sub-bin delay vs. each row's own absolute time across the CPI (irregular spacing):
- * a value that stays constant is pure (fine) STO and is corrected by nulling ONLY that common
- * sub-bin component with a frequency-domain phase ramp applied identically to every row's
- * occupied columns -- the row's *integer* CIR bin (the diagnosed ~49 m / bin-6 group delay) is
- * deliberately left untouched, since removing it is a separate, out-of-scope concern (see
- * docs/NR_UE_ISAC_sync_gap_analysis.md). A value drifting linearly with row time is SFO leaking
- * through the fine-STO estimate; no correction is attempted here, only reported (Phase 3's job).
+ * SYNC_NOISE_HANDOVER.md root-caused this phase's original design (a small, FIXED window searched
+ * around a static nominal bin, every row) as the actual bottleneck behind that document's sync-noise
+ * investigation: once real inter-clock drift (SFO) walks the true LOS delay outside that fixed
+ * window within a CPI, the per-row peak search starts reading noise/sidelobe instead of the real
+ * tap, and that corruption propagates directly into Phase 2's CFO correction (which fully de-rotates
+ * each row by its own, now-garbage, observed phase). This class instead WALKS: each row's search
+ * window is re-centered on the PREVIOUS locked row's own peak (mirroring Phase 3/cpi_sfo_tracker's
+ * existing walking pattern -- see that class's comment), so cumulative drift across the CPI can be
+ * arbitrarily large as long as the PER-STEP drift between consecutive rows stays within
+ * WALK_HALFWIN_BINS. Deliberately a much narrower window than Phase 3's (isac_sync.cc) since this
+ * phase's job is fine per-row tracking, not surviving SFO's much larger multi-hundred-bin excursions
+ * -- Phase 3 remains the authority for that.
+ *
+ * FLYWHEEL (fade resistance): if a row's local search window doesn't clear a minimum SNR over the
+ * rest of that row's CIR (a real signal fade/dropout, not drift), the walker does NOT trust
+ * whatever happens to be the local maximum -- it PROJECTS current_center_bin forward using the most
+ * recently available cross-CPI-smoothed SFO estimate (cpi_sfo_tracker::filtered_sfo_ppm(), passed in
+ * by the caller -- necessarily the PREVIOUS CPI's estimate, since Phase 1 runs before Phase 3 within
+ * a given CPI) scaled by elapsed time since the last real lock, and marks that row `flywheeling`
+ * (excluded from both this class's own line fit AND Phase 2's CFO fit, which already filters on
+ * `los_row_estimate_t::valid`). This prevents a fade from corrupting the walk itself (which a lost
+ * lock would otherwise do permanently, since every subsequent row's window is seeded from wherever
+ * the walk last was).
+ *
+ * For each locked (non-flywheeling) row, sub-bin delay is refined via the same complex-domain
+ * estimator used everywhere else in this module (subbin_delta()). The per-row {time, frac_bin} pairs
+ * are still fit vs. time exactly as before (see sto_fit_result_t) and, if classified constant, a
+ * SINGLE frequency-domain phase ramp nulls the common (small, residual) fractional component across
+ * every row -- the row's own *integer* CIR bin (walked or not) is deliberately left untouched, same
+ * scope boundary as before: correcting it is Phase 3/Phase 4's job, not this class's. NOTE (semantic
+ * shift from the pre-walking design, documented so it isn't re-litigated): because the walker now
+ * absorbs real drift into the tracked INTEGER bin rather than letting it leak into frac_bin's linear
+ * trend, `is_constant` will typically read true even under substantial real drift -- it no longer
+ * doubles as an SFO-leaking-through detector (Phase 3 already runs unconditionally regardless of this
+ * classification). The actual walked distance is reported separately via
+ * `los_row_estimate_t::absolute_drift_bins` / `sto_fit_result_t::total_drift_bins`.
  *
  * RT-safety: engine thread only, called from sensing_engine's CPI-close path, before Stage-4b
  * interpolation. FFT plans are cached by compact-CIR length across CPIs, so steady state (once
- * every distinct row width has been seen) is allocation-free.
+ * every distinct row width has been seen) is allocation-free. Walk state
+ * (current_center_bin_/anchor_bin_cpi_start_/is_flywheeling_) is reset at the start of every
+ * process() call -- it does not persist cross-CPI (each CPI re-seeds from the nominal bin), unlike
+ * cpi_sfo_tracker's cross-CPI EMA state.
  */
 class cpi_sto_tracker
 {
@@ -129,6 +171,10 @@ public:
    * @param row_comb       per-row native comb (row_native_comb), length cpi_rows
    * @param row_time_slots per-row absolute slow-time position, in slots, length cpi_rows
    * @param carrier        carrier geometry for this CPI (SCS drives the bin/delay conversion)
+   * @param sfo_ppm_hint   most recently available cross-CPI-smoothed SFO estimate (typically the
+   *                       PREVIOUS CPI's cpi_sfo_tracker::filtered_sfo_ppm()), used only by the
+   *                       flywheel to project the search window forward across a signal fade;
+   *                       0.0 (default) if unavailable (e.g. this CPI/tracker instance is the first)
    */
   sto_fit_result_t process(icf_t*                   h_cpi,
                            const uint8_t*           occ_all,
@@ -136,25 +182,46 @@ public:
                            uint32_t                 nof_subc,
                            const uint32_t*          row_comb,
                            const double*            row_time_slots,
-                           const nr_isac_carrier_t& carrier);
+                           const nr_isac_carrier_t& carrier,
+                           double                   sfo_ppm_hint = 0.0,
+                           bool                     apply_corr   = true,
+                           double                   nominal_los_range_m = 98.0);
 
   /// Per-row LOS estimates from the most recent process() call, keyed by row index. Phase 2's CFO
   /// tracker reuses these directly rather than re-running the per-row CIR/peak search.
   const std::vector<los_row_estimate_t>& last_row_estimates() const { return rows_; }
 
 private:
+  /// Builds one row's compact CIR and searches [center_bin-halfwin, center_bin+halfwin] for its local
+  /// power maximum. Returns false only on a structural failure (bad occupancy / too-short CIR -- the
+  /// row can't be searched at all). On true, @p out_faded reports whether that local maximum cleared
+  /// the fade/SNR gate; when faded, @p out's peak_bin/frac_bin/peak_val are NOT populated (caller
+  /// supplies a projected bin instead) since the in-window "maximum" isn't trustworthy.
   bool estimate_row(const icf_t*   row,
                     const uint8_t* mask,
                     uint32_t       nof_subc,
                     uint32_t       comb,
-                    uint32_t       nominal_bin,
-                    los_row_estimate_t& out);
+                    int            center_bin,
+                    uint32_t       halfwin,
+                    los_row_estimate_t& out,
+                    bool&                out_faded,
+                    double*              out_snr_lin = nullptr);
   void apply_correction(icf_t* h_cpi, const uint8_t* occ_all, uint32_t cpi_rows, uint32_t nof_subc,
                         double mean_frac_bin);
 
   row_cir_builder     cir_builder_; ///< shared CIR-building logic (see class comment above)
   std::vector<icf_t>  cir_;         ///< scratch: CIR for one row
   std::vector<los_row_estimate_t> rows_; ///< per-row results, current CPI
+
+  // Walking-tracker state, reset at the top of every process() call (see class comment).
+  int  current_center_bin_   = -1; ///< tracked peak (compact-CIR bin index), -1 = not yet locked
+  int  anchor_bin_cpi_start_ = -1; ///< peak at this CPI's first lock, -1 = not yet locked
+  int  last_locked_bin_      = -1; ///< peak bin AT the moment of the most recent real lock -- the
+                                   ///< flywheel projects from this fixed reference (current_center_bin_
+                                   ///< + elapsed-time-scaled prediction), NOT by incrementing
+                                   ///< current_center_bin_ itself row-to-row, which would double-count
+                                   ///< already-applied drift and compound across a sustained fade
+  bool is_flywheeling_       = false;
 };
 
 /// Outcome of the per-CPI residual-CFO fit + CPE correction (Phase 2).
@@ -221,8 +288,15 @@ struct sfo_fit_result_t {
   uint32_t n_candidate           = 0;     ///< rows with a usable tentative peak from the sequential walk
   uint32_t n_excluded_isi        = 0;     ///< candidate rows excluded for anomalous out-of-window CIR energy
   uint32_t n_fit                 = 0;     ///< rows actually used in the line fit (candidates minus ISI exclusions)
-  double   sfo_ppm               = 0.0;   ///< fitted fractional sample-clock error, ppm (dimensionless slope * 1e6)
+  double   sfo_ppm               = 0.0;   ///< this CPI's own raw fitted ppm (diagnostic; NOT what's applied --
+                                           ///< see sfo_ppm_filtered)
+  double   sfo_ppm_filtered      = 0.0;   ///< cross-CPI EMA-smoothed ppm; this is what the correction below
+                                           ///< actually uses (see cpi_sfo_tracker's class comment for why)
   double   sample_clock_error_hz = 0.0;   ///< sfo_ppm expressed in absolute Hz at this build's actual sample rate
+  double   r_squared             = 0.0;   ///< goodness of the delay-vs-time line fit (1 = perfect line).
+                                           ///< A real sample-clock error drifts LINEARLY with time, so a
+                                           ///< genuine SFO fits tightly; a noise-driven fit does not.
+  double   resid_bins            = 0.0;   ///< RMS fit residual, in range bins
   bool     corrected             = false; ///< true if n_fit met the minimum and a correction was applied
 };
 
@@ -268,11 +342,35 @@ struct sfo_fit_result_t {
  *
  * Invariant check: like Phase 1/2, this is a phase-only multiply of existing occupied columns --
  * nof_subc, column identity, and occupied-column count are untouched, so `nof_range x df = total
- * bandwidth` (range_res = 8.16 m) is preserved exactly.
+ * bandwidth` (hence range_res) is preserved exactly.
  *
  * RT-safety: engine thread only, called from sensing_engine's CPI-close path after Phase 1/2 (order
  * among the three doesn't matter -- see docs/NR_UE_ISAC_sync_gap_analysis.md section 9), before
  * Stage-4b interpolation.
+ *
+ * CROSS-CPI SMOOTHING (added 2026-07-22, ECA_CLUTTER_HANDOVER.md's follow-on sync-noise
+ * investigation): unlike Phase 2 (CFO), whose per-row correction fully de-rotates each row by its
+ * OWN observed phase -- sidestepping the fit's noise entirely, since no other row's estimate factors
+ * into any given row's correction -- Phase 3's correction directly multiplies THIS CPI's fitted
+ * slope by each row's elapsed time (`slope * time_s[row]`). A noisy or wrong-sign single-CPI fit
+ * therefore injects a real, correction-proportional-to-elapsed-time error into every row of that
+ * CPI, not just a logging artifact. Live-sim testing (moving-target sensing_sim, iperf DL traffic)
+ * found `sfo_ppm` swinging wildly and inconsistently in sign CPI to CPI (e.g. +5.0, -1.4, +7.2 ppm
+ * across consecutive CPIs on what should be a slowly-varying physical quantity -- a real oscillator/
+ * clock-rate error does not flip sign every ~1 s), even after cpi_slots was widened from 256 to 512
+ * specifically to give the per-CPI fit more samples (which measurably made the CFO tracker's
+ * residual_phase_rms_rad WORSE, not better -- consistent with Phase 1's fixed +/-4-bin LOS search
+ * window losing lock once genuine per-process SFO in this software-clocked rfsimulator harness walks
+ * the true delay outside that window over a longer CPI; a real hardware TCXO's few-ppm drift would
+ * not exhibit this). A single-pole EMA (`SFO_EMA_ALPHA`, mirroring Phase 2's existing alpha-beta
+ * pattern) tracks `sfo_ppm` across CPIs; `sfo_ppm_filtered` -- not the raw per-CPI `sfo_ppm` -- is
+ * what the correction actually applies, so one noisy/wrong-sign CPI's fit is damped by the running
+ * average of recent CPIs rather than injecting its full error into that CPI's data. This does not
+ * fix the underlying per-CPI fit noise (a genuinely more robust fix would make Phase 1's LOS search
+ * itself walk/track like Phase 3's own does, rather than staying fixed-window -- flagged as a
+ * follow-up, not implemented here, since it changes Phase 1/2's behaviour too and this task's scope
+ * was Phase 3's correction quality specifically); it only prevents that noise from being applied
+ * at full strength to the data every single CPI.
  */
 class cpi_sfo_tracker
 {
@@ -293,38 +391,78 @@ public:
                            uint32_t                 nof_subc,
                            const uint32_t*          row_comb,
                            const double*            row_time_slots,
-                           const nr_isac_carrier_t& carrier);
+                           const nr_isac_carrier_t& carrier,
+                           double                   nominal_los_range_m = 98.0);
+
+  /// Most recently computed cross-CPI EMA (see "CROSS-CPI SMOOTHING" above), 0.0 before the first
+  /// successful process() call. Consumed by cpi_sto_tracker's flywheel (see its class comment) to
+  /// project the LOS search window forward across a fade -- necessarily one CPI stale, since Phase 1
+  /// runs before Phase 3 within any given CPI.
+  double filtered_sfo_ppm() const { return sfo_state_init_ ? sfo_ppm_state_ : 0.0; }
 
 private:
   struct sfo_row_t {
-    uint32_t row                    = 0;
-    double   time_s                 = 0.0;
-    double   tau_s                  = 0.0;
-    uint32_t comb                   = 0;
-    double   out_win_energy_per_bin = 0.0;
-    bool     valid                  = false;
-    bool     excluded_isi           = false;
+    uint32_t row              = 0;
+    double   time_s           = 0.0;
+    double   tau_s            = 0.0;
+    uint32_t comb             = 0;
+    double   leakage_anomaly  = 0.0; ///< normalized out-of-window leakage (see leakage_model below);
+                                      ///< ~1.0 nominal for a clean row, regardless of M or frac
+    bool     valid            = false;
+    bool     excluded_isi     = false;
   };
 
-  // Sliding-window (not whole-CPI-cumulative) mean/stddev of out_win_energy_per_bin, tracked
-  // separately per native comb, over only the last SFO_ISI_LOCAL_WINDOW ACCEPTED rows of that comb.
-  // "Neighboring rows" (task wording) is taken literally: a whole-CPI Welford running mean was
-  // tried first and over-triggered on clean synthetic signals (Phase 6a testing), because it
-  // doesn't track slow, legitimate baseline drift in this metric as the tracking window walks
-  // across the compact CIR over a long CPI (see docs/NR_UE_ISAC_sync_gap_analysis.md section 12).
+  // Sliding-window (not whole-CPI-cumulative) mean/stddev of leakage_anomaly, tracked separately per
+  // native comb, over only the last SFO_ISI_LOCAL_WINDOW ACCEPTED rows of that comb. "Neighboring
+  // rows" (task wording) is taken literally: a whole-CPI Welford running mean was tried first and
+  // over-triggered on clean synthetic signals (Phase 6a testing), because it doesn't track slow,
+  // legitimate baseline drift in this metric as the tracking window walks across the compact CIR
+  // over a long CPI (see docs/NR_UE_ISAC_sync_gap_analysis.md section 12).
   struct comb_stats_t {
     uint32_t          comb = 0;
-    std::deque<double> recent; ///< last (<= SFO_ISI_LOCAL_WINDOW) accepted out_win_energy_per_bin values
+    std::deque<double> recent; ///< last (<= SFO_ISI_LOCAL_WINDOW) accepted leakage_anomaly values
   };
   comb_stats_t& stats_for(uint32_t comb);
 
+  // Follow-up to gap-analysis doc sec. 12.3: raw out-of-window CIR energy swings 3-4 orders of
+  // magnitude as an entirely benign function of (M, the row's own fractional peak position) -- NOT
+  // just frac as sec 12.3 first framed it (a per-M calibration sweep found the shape and even the
+  // trend direction differ materially between e.g. M=32 and M=64+, since the fixed-width search
+  // window is a much larger fraction of a short compact CIR). This model measures, once per distinct
+  // M (cached, same pattern as row_cir_builder's plan_for/hann_for), the expected clean-signal
+  // out-of-window-energy/peak-power ratio as a function of |frac| via a synthetic single-tone sweep
+  // through this exact Hann+IFFT pipeline, so track_row can report a normalized anomaly score
+  // (actual/expected) that should be ~1.0 for a clean row regardless of M or frac -- the sliding-
+  // window sigma comparison then only needs to catch genuine deviations from that expectation,
+  // rather than being swamped by the (M, frac)-driven swing SFO_ISI_SIGMA=30.0 previously had to
+  // tolerate blindly. See isac_sync.cc for the calibration sweep and measured grid.
+  class leakage_model
+  {
+  public:
+    double expected_ratio(uint32_t M, double frac);
+
+  private:
+    struct entry_t {
+      uint32_t            M = 0;
+      std::vector<double> frac_grid;  ///< |frac| grid points, [0, 0.5]
+      std::vector<double> ratio;      ///< expected out_win_energy_per_bin / peak_power at each grid point
+    };
+    std::vector<entry_t> cache_;
+  };
+
   bool track_row(const icf_t* row, const uint8_t* mask, uint32_t nof_subc, uint32_t comb, uint32_t anchor_bin,
-                 uint32_t& out_peak, double& out_frac, double& out_win_energy_per_bin);
+                 uint32_t& out_peak, double& out_frac, double& out_leakage_anomaly);
 
   row_cir_builder           cir_builder_;
+  leakage_model              leakage_model_; ///< per-M expected-leakage curve cache (see above)
   std::vector<icf_t>        cir_;         ///< scratch: CIR for one row
   std::vector<sfo_row_t>    rows_;        ///< per-row results, current CPI
   std::vector<comb_stats_t> comb_stats_;  ///< per-comb running ISI baseline, current CPI
+
+  // Cross-CPI EMA state for sfo_ppm (see class comment's "CROSS-CPI SMOOTHING" section). Persists
+  // across process() calls -- NOT reset per CPI, unlike rows_/comb_stats_ above.
+  bool   sfo_state_init_ = false;
+  double sfo_ppm_state_  = 0.0;
 };
 
 /// Phase 4: one CPI's LOS-detection offset from the established baseline. This is the primary
@@ -383,7 +521,7 @@ class los_baseline_tracker
 public:
   /// Called after range_doppler::process() has populated this CPI's detections/rvm.
   los_residual_t update_residual(const std::vector<sensing_detection_t>& detections, const sensing_rvm_t& rvm,
-                                 double fc_hz);
+                                 double fc_hz, double nominal_los_range_m = 98.0);
 
   /// Called in the CPI-close block, before Stage-4b interpolation (see class comment for placement
   /// rationale). No-op until a baseline has been established and at least one residual measured.

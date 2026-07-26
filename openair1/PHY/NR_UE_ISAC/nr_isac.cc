@@ -167,13 +167,55 @@ extern "C" void nr_isac_init(void)
 
   // Local storage for the [sensing] config section. Defaults mirror nr_isac_args_t / srsUE.
   int    p_enable = 0, p_interp = 1, p_capture = 0, p_selftest = 0, p_sync_correction = 1;
+  int    p_sync_sto = 1, p_sync_cfo = 1, p_sync_sfo = 1, p_sync_los = 1;
   int    p_cpi_slots = 256;
-  int    p_cfar_guard = 4, p_cfar_train = 8;
-  double p_cfar_pfa = 1e-3;
+  int    p_cfar_guard = 4, p_cfar_train = 8, p_cfar_per_column = 0, p_cfar_per_row = 0;
+  int    p_subbin_interp = 0;
+  double p_cfar_pfa = 0.0, p_cfar_target_fa = 1.0;
   int    p_zdg = 3, p_zrg = 2, p_nms_r = 3, p_nms_d = 3, p_maxdet = 32;
+  int    p_conj_reject = 1, p_conj_guard = 4, p_range_whiten = 0, p_doppler_nudft = 0;
+  int    p_mc_enable = 0, p_mc_rank = 0, p_mc_rank_max = 8, p_mc_iters = 15, p_mc_power = 1;
+  int    p_sd_enable = 0, p_sd_iters = 40;
+  double p_sd_lambda_scale = 1.0, p_sd_peak_ratio = 0.05;
+  double p_sd_lambda_min = 0.05, p_sd_lambda_max = 1.5, p_sd_adapt_rate = 0.85;
+  int    p_sd_target_min = 1, p_sd_target_max = 6;
+  double p_sd_harmonic_ratio = 0.25;
+  int    p_harm_reject = 0, p_harm_guard = 4, p_harm_maxk = 4;
+  double p_harm_tol = 0.15, p_harm_snr_margin = 6.0;
+  int    p_far_harm_reject = 0;
+  double p_far_harm_far = 500.0, p_far_harm_near = 250.0;
+  int    p_cfar_fa_adapt = 0;
+  double p_cfar_fa_min = 0.5, p_cfar_fa_max = 20.0, p_cfar_fa_rate = 1.15;
+  int    p_cfar_fa_tmin = 2, p_cfar_fa_tmax = 8;
+  int    p_cpi_qgate = 0;
+  double p_cpi_qratio = 1.5, p_cpi_qalpha = 0.2;
+  double p_eca_delay_max = 0.0, p_eca_dopp_max = 0.5;
+  double p_range_window_sll = 60.0;
+  double p_nominal_los_range = 98.0;
+  int    p_track_enable = 0, p_track_max_coast = 5, p_track_q_adapt = 1;
+  double p_track_init_acc = 100.0;
+  char*  p_track_model = nullptr;
+  double p_track_r = 2.6, p_track_q = 0.0025, p_track_gate = 3.0, p_track_vvar = 25.0, p_track_rv = 1.0;
+  double p_track_nis_alpha = 0.3, p_track_q_mult_max = 30.0, p_track_adapt_win = 8.0;
+  int    p_track_max_tracks = 16, p_track_confirm_m = 0, p_track_confirm_n = 5;
+  double p_track_assoc_gate = 5.0, p_track_confirm_pfa = 1e-3;
+  double p_track_assoc_max_sr = 15.0, p_track_assoc_max_sv = 10.0;
+  int    p_track_harm_reject = 0;
+  double p_track_harm_range = 10.0;
+  int    p_track_flicker_reject = 0, p_track_flicker_min_upd = 3;
+  double p_track_flicker_max_db = 6.0, p_track_flicker_alpha = 0.4;
   double p_rx_x = 0.0, p_rx_y = 0.0, p_tx_x = 0.0, p_tx_y = 0.0;
   char*  p_source     = nullptr;
+  char*  p_clutter    = nullptr;
+  char*  p_range_win  = nullptr;
   char*  p_sources    = nullptr;
+  char*  p_detector   = nullptr;
+  int    p_mf_per_row_norm = 1;
+  int    p_clean_deconv = 0, p_clean_max_comp = 0, p_clean_max_comp_cap = 16, p_clean_restore = 1;
+  int    p_clean_occ_aware = 0;
+  int    p_subslot_symbols = 0, p_subslot_min_re = 600;
+  double p_subslot_min_snr_db = 10.0;
+  double p_clean_loop_gain = 0.8, p_clean_stop_db = 25.0;
   char*  p_targets    = nullptr;
   char*  p_selftest_los = nullptr;
   char*  p_out_path   = nullptr;
@@ -195,14 +237,104 @@ extern "C" void nr_isac_init(void)
              &p_selftest_los, ""),
       mk_int("sync_correction", "enable Phase 1-4 STO/CFO/SFO/closed-loop LOS correction", PARAMFLAG_BOOL,
              &p_sync_correction, 1),
+      mk_int("sync_sto", "Phase 1 fine-STO correction (under sync_correction)", PARAMFLAG_BOOL, &p_sync_sto, 1),
+      mk_int("sync_cfo", "Phase 2 residual-CFO/CPE correction (under sync_correction)", PARAMFLAG_BOOL, &p_sync_cfo, 1),
+      mk_int("sync_sfo", "Phase 3 SFO correction (under sync_correction)", PARAMFLAG_BOOL, &p_sync_sfo, 1),
+      mk_int("sync_los", "Phase 4 closed-loop LOS bias (under sync_correction)", PARAMFLAG_BOOL, &p_sync_los, 1),
+      mk_dbl("nominal_los_range_m", "expected LOS differential range (m); 0 when the direct path is at dR=0",
+             &p_nominal_los_range, 98.0),
       mk_int("cfar_guard", "CA-CFAR guard cells per side", 0, &p_cfar_guard, 4),
       mk_int("cfar_train", "CA-CFAR training cells per side", 0, &p_cfar_train, 8),
-      mk_dbl("cfar_pfa", "CA-CFAR false-alarm probability", &p_cfar_pfa, 1e-3),
+      mk_int("cfar_per_column", "also require a per-Doppler-column (velocity-lane) CFAR test; rejects a strong target's range-wide pedestal", PARAMFLAG_BOOL, &p_cfar_per_column, 0),
+      mk_int("cfar_per_row", "also require a per-RANGE-row (Doppler-lane) CFAR test; rejects the slow-time ridge a strong target smears across its own range row", PARAMFLAG_BOOL, &p_cfar_per_row, 0),
+      mk_int("subbin_interp", "sub-bin parabolic peak interpolation in range and Doppler (removes half-bin quantisation error from every detection)", PARAMFLAG_BOOL, &p_subbin_interp, 0),
+      mk_dbl("cfar_pfa", "CA-CFAR per-cell false-alarm probability; <=0 (default)=auto-derive from cfar_target_fa_per_cpi", &p_cfar_pfa, 0.0),
+      mk_dbl("cfar_target_fa_per_cpi", "auto mode only: target mean CA-CFAR false alarms per CPI across the whole grid", &p_cfar_target_fa, 1.0),
       mk_int("zero_doppler_guard", "Doppler notch half-width (bins)", 0, &p_zdg, 3),
       mk_int("zero_range_guard", "range notch half-width (bins)", 0, &p_zrg, 2),
       mk_int("nms_range_bins", "NMS radius in range bins", 0, &p_nms_r, 3),
       mk_int("nms_doppler_bins", "NMS radius in Doppler bins", 0, &p_nms_d, 3),
       mk_int("max_detections", "cap on detections per CPI", 0, &p_maxdet, 32),
+      mk_int("conj_image_reject", "reject conjugate-image (mirror ghost) detections", PARAMFLAG_BOOL, &p_conj_reject, 1),
+      mk_int("conj_image_guard", "range-bin tolerance when matching a detection to its mirror", 0, &p_conj_guard, 4),
+      mk_int("harmonic_reject", "reject Doppler-harmonic ghosts (same range, integer-multiple velocity of a stronger detection)", PARAMFLAG_BOOL, &p_harm_reject, 0),
+      mk_int("harmonic_guard", "range-bin tolerance when pairing a harmonic to its fundamental", 0, &p_harm_guard, 4),
+      mk_int("harmonic_max_k", "highest Doppler-harmonic order to reject (2..k)", 0, &p_harm_maxk, 4),
+      mk_dbl("harmonic_tol", "fractional tolerance on the integer velocity ratio", &p_harm_tol, 0.15),
+      mk_dbl("harmonic_snr_margin", "max dB the fundamental may be weaker than its harmonic and still reject it", &p_harm_snr_margin, 6.0),
+      mk_int("far_harmonic_reject", "reject far-range detections at k*velocity of a dominant near-range Doppler component (range-smeared amplitude-gating pedestal)", PARAMFLAG_BOOL, &p_far_harm_reject, 0),
+      mk_dbl("far_harmonic_far_m", "range beyond which a detection is a far-ghost candidate", &p_far_harm_far, 500.0),
+      mk_dbl("far_harmonic_near_m", "range within which dominant Doppler components are sought", &p_far_harm_near, 250.0),
+      mk_int("cfar_fa_adapt_enable", "closed-loop adaptation of cfar_target_fa_per_cpi from the measured raw detection count (seed unchanged, only the loop is new)", PARAMFLAG_BOOL, &p_cfar_fa_adapt, 0),
+      mk_dbl("cfar_fa_min", "floor for the adapted cfar_target_fa_per_cpi", &p_cfar_fa_min, 0.5),
+      mk_dbl("cfar_fa_max", "ceiling for the adapted cfar_target_fa_per_cpi", &p_cfar_fa_max, 20.0),
+      mk_dbl("cfar_fa_adapt_rate", "per-CPI multiplicative step for the cfar_target_fa_per_cpi adaptation", &p_cfar_fa_rate, 1.15),
+      mk_int("cfar_fa_target_min_det", "below this many raw detections/CPI, raise cfar_target_fa_per_cpi", 0, &p_cfar_fa_tmin, 2),
+      mk_int("cfar_fa_target_max_det", "above this many raw detections/CPI, lower cfar_target_fa_per_cpi", 0, &p_cfar_fa_tmax, 8),
+      mk_int("cpi_quality_gate", "drop all detections from a starved CPI whose T_slot >> running EMA (lets the tracker coast)", PARAMFLAG_BOOL, &p_cpi_qgate, 0),
+      mk_dbl("cpi_quality_max_ratio", "gate a CPI whose T_slot exceeds this x the running EMA", &p_cpi_qratio, 1.5),
+      mk_dbl("cpi_quality_ema_alpha", "EMA smoothing factor for the running typical T_slot", &p_cpi_qalpha, 0.2),
+      mk_str("clutter_removal", "clutter cancellation method: mean|eca+", &p_clutter, "mean"),
+      mk_dbl("eca_delay_max_m", "ECA delay removal window [0,x] m (<=0 => full range)", &p_eca_delay_max, 0.0),
+      mk_dbl("eca_doppler_max_mps", "ECA Doppler removal half-band [-x,+x] m/s", &p_eca_dopp_max, 0.5),
+      mk_str("detector", "detector front-end: fft|matched_filter (matched filter = occupancy-matched hypothesis bank, artifact-free by construction)", &p_detector, "fft"),
+      mk_int("mf_per_row_norm", "matched_filter: energy-normalise each row by its occupancy (removes amplitude-gating harmonics)", PARAMFLAG_BOOL, &p_mf_per_row_norm, 1),
+      mk_int("clean_deconv", "CLEAN deconvolution: coherently strip each strong scatterer's window PSF (range pedestal + Doppler sidelobes) before CFAR (detector=fft, uniform comb only)", PARAMFLAG_BOOL, &p_clean_deconv, 0),
+      mk_int("subslot_symbols", "sub-slot CFR sampling: target OFDM symbols per slow-time row (0=off, one row/slot). Raises the unambiguous velocity ~N-fold", 0, &p_subslot_symbols, 0),
+      mk_int("subslot_min_re", "sub-slot SPARSITY gate: min REs for a row to stand alone (else it absorbs the next symbol)", 0, &p_subslot_min_re, 600),
+      mk_dbl("subslot_min_snr_db", "sub-slot SNR gate: min estimated post-integration row SNR (dB)", &p_subslot_min_snr_db, 10.0),
+      mk_int("clean_occ_aware", "CLEAN: model each component's PSF through the ACTUAL per-row occupancy mask (removes amplitude-gating Doppler-harmonic replicas; needs clean_deconv=1, uses raw occ grid, costly)", PARAMFLAG_BOOL, &p_clean_occ_aware, 0),
+      mk_int("clean_max_components", "CLEAN component budget per CPI; 0=auto-derive from previous CPI's detection count (recommended)", 0, &p_clean_max_comp, 0),
+      mk_int("clean_max_components_cap", "CLEAN auto mode: hard ceiling on the derived component budget", 0, &p_clean_max_comp_cap, 16),
+      mk_dbl("clean_loop_gain", "CLEAN loop gain gamma (0,1]: fraction of the peak subtracted per iteration", &p_clean_loop_gain, 0.8),
+      mk_dbl("clean_stop_db", "CLEAN stop threshold: residual peak this many dB below the initial peak", &p_clean_stop_db, 25.0),
+      mk_int("clean_restore_bins", "CLEAN clean-beam half-width (bins) for restored components; 0=single-bin delta", 0, &p_clean_restore, 1),
+      mk_str("range_window", "fast-time (range) window: hann|chebyshev", &p_range_win, "hann"),
+      mk_dbl("range_window_sidelobe_db", "Dolph-Chebyshev equiripple sidelobe level (dB, positive)",
+             &p_range_window_sll, 60.0),
+      mk_int("range_whiten", "soft spectral whitening: attenuate subcarriers hotter than the median slow-time RMS (kills the sparse-occupancy range pedestal)", PARAMFLAG_BOOL, &p_range_whiten, 0),
+      mk_int("doppler_nudft", "non-uniform Doppler DFT over actual row times (removes irregular-sampling Doppler harmonics at the source; bypasses slow-time resampling)", PARAMFLAG_BOOL, &p_doppler_nudft, 0),
+      mk_int("slow_time_complete", "low-rank matrix completion of the CFR grid before range/Doppler (removes amplitude-gating harmonics at the source)", PARAMFLAG_BOOL, &p_mc_enable, 0),
+      mk_int("mc_rank", "matrix-completion target rank; 0=auto-derive from previous CPI's detection count (recommended)", 0, &p_mc_rank, 0),
+      mk_int("mc_rank_max", "auto mode only: ceiling on the derived completion rank", 0, &p_mc_rank_max, 8),
+      mk_int("mc_iters", "matrix-completion SVP iterations", 0, &p_mc_iters, 15),
+      mk_int("mc_power_iters", "matrix-completion extra subspace power iterations per projection", 0, &p_mc_power, 1),
+      mk_int("doppler_sparse", "L1/FISTA sparse Doppler verification on CFAR-flagged range bins (rejects dense-transform harmonic leakage)", PARAMFLAG_BOOL, &p_sd_enable, 0),
+      mk_int("doppler_sparse_iters", "FISTA iterations per verified range bin", 0, &p_sd_iters, 40),
+      mk_dbl("doppler_sparse_lambda_scale", "multiplier on the auto universal L1 threshold", &p_sd_lambda_scale, 1.0),
+      mk_dbl("doppler_sparse_peak_ratio", "min fraction of a row's max sparse power for a detection to survive", &p_sd_peak_ratio, 0.05),
+      mk_dbl("doppler_sparse_harmonic_ratio", "min sub-harmonic/max sparse power fraction to reject a detection as an orphaned harmonic (stricter than peak_ratio)", &p_sd_harmonic_ratio, 0.25),
+      mk_dbl("doppler_sparse_lambda_min", "adaptive lambda_scale floor", &p_sd_lambda_min, 0.05),
+      mk_dbl("doppler_sparse_lambda_max", "adaptive lambda_scale ceiling", &p_sd_lambda_max, 1.5),
+      mk_dbl("doppler_sparse_adapt_rate", "per-CPI multiplicative adaptation step (<1)", &p_sd_adapt_rate, 0.85),
+      mk_int("doppler_sparse_target_min_det", "below this many surviving detections/CPI, relax lambda_scale", 0, &p_sd_target_min, 1),
+      mk_int("doppler_sparse_target_max_det", "above this many surviving detections/CPI, tighten lambda_scale", 0, &p_sd_target_max, 6),
+      mk_int("track_enable", "enable the per-CPI Kalman target track", PARAMFLAG_BOOL, &p_track_enable, 0),
+      mk_str("track_model", "tracker motion model: cv|ca", &p_track_model, "cv"),
+      mk_dbl("track_init_acc_var", "CA initial acceleration variance ((m/s^2)^2)", &p_track_init_acc, 100.0),
+      mk_dbl("track_r_var_m2", "KF range measurement variance R (m^2)", &p_track_r, 2.6),
+      mk_dbl("track_rv_var_m2s2", "KF range-rate (Doppler) measurement variance ((m/s)^2)", &p_track_rv, 1.0),
+      mk_dbl("track_q_accel", "KF accel PSD q ((m/s^2)^2/Hz)", &p_track_q, 0.0025),
+      mk_dbl("track_gate_sigma", "KF association gate (sigmas)", &p_track_gate, 3.0),
+      mk_dbl("track_init_vel_var", "KF initial range-rate variance (m/s)^2", &p_track_vvar, 25.0),
+      mk_int("track_max_coast", "consecutive coasted CPIs before dropping the track", 0, &p_track_max_coast, 5),
+      mk_int("track_q_adapt", "adapt q from the NIS EWMA (no per-route tuning needed)", PARAMFLAG_BOOL, &p_track_q_adapt, 1),
+      mk_dbl("track_nis_ewma_alpha", "NIS EWMA smoothing", &p_track_nis_alpha, 0.3),
+      mk_dbl("track_q_mult_max", "cap on the NIS-driven q inflation factor", &p_track_q_mult_max, 30.0),
+      mk_dbl("track_q_adapt_window_sigma", "near-miss window (sigmas) that still feeds the NIS EWMA", &p_track_adapt_win, 8.0),
+      mk_int("track_max_tracks", "MOT: cap on simultaneous tracks (tentative+confirmed)", 0, &p_track_max_tracks, 16),
+      mk_int("track_confirm_m", "MOT: M hits within N CPIs to confirm a track (M-of-N); 0=auto-derive from measured false-alarm density (recommended)", 0, &p_track_confirm_m, 0),
+      mk_int("track_confirm_n", "MOT: N-CPI sliding window for the M-of-N confirmation", 0, &p_track_confirm_n, 5),
+      mk_dbl("track_confirm_target_pfa", "MOT: auto mode (track_confirm_m=0) target false-confirm probability within the N-CPI window", &p_track_confirm_pfa, 1e-3),
+      mk_dbl("track_assoc_gate_sigma", "MOT: association gate (sigmas) for detection<->track routing", &p_track_assoc_gate, 5.0),
+      mk_int("track_harmonic_reject", "MOT: drop a confirmed track at integer-multiple velocity of a same-range track (leaked Doppler harmonic)", PARAMFLAG_BOOL, &p_track_harm_reject, 0),
+      mk_dbl("track_harmonic_range_m", "MOT: max range separation (m) to treat two tracks as co-located for harmonic rejection", &p_track_harm_range, 10.0),
+      mk_int("track_flicker_reject", "MOT: withhold a confirmed track whose per-CPI SNR jitter (power flicker) is high -- a gated-harmonic ghost signature (TBD energy consistency)", PARAMFLAG_BOOL, &p_track_flicker_reject, 0),
+      mk_dbl("track_flicker_max_db", "MOT: max EWMA |dSNR_dB|/update for a track to be reported", &p_track_flicker_max_db, 6.0),
+      mk_int("track_flicker_min_updates", "MOT: min accepted detections before the flicker gate applies", 0, &p_track_flicker_min_upd, 3),
+      mk_dbl("track_flicker_ewma_alpha", "MOT: EWMA smoothing for the per-track SNR-jitter estimate", &p_track_flicker_alpha, 0.4),
+      mk_dbl("track_assoc_gate_max_sr_m", "MOT: hard ceiling on the association gate's range radius (m), independent of adaptive-q-inflated sigma", &p_track_assoc_max_sr, 15.0),
+      mk_dbl("track_assoc_gate_max_sv_mps", "MOT: hard ceiling on the association gate's range-rate radius (m/s)", &p_track_assoc_max_sv, 10.0),
       mk_str("out_path", "output path prefix", &p_out_path, "/tmp/oaiue_sensing"),
       mk_str("rx_id", "logical receiver id", &p_rx_id, "rx1"),
       mk_dbl("rx_pos_x", "receiver ENU x (m)", &p_rx_x, 0.0),
@@ -238,14 +370,102 @@ extern "C" void nr_isac_init(void)
   g_args.selftest_targets   = (p_targets != nullptr) ? p_targets : "";
   g_args.selftest_los       = (p_selftest_los != nullptr) ? p_selftest_los : "";
   g_args.sync_correction_enable = p_sync_correction != 0;
+  g_args.sync_sto           = p_sync_sto != 0;
+  g_args.sync_cfo           = p_sync_cfo != 0;
+  g_args.sync_sfo           = p_sync_sfo != 0;
+  g_args.sync_los           = p_sync_los != 0;
+  g_args.nominal_los_range_m = (float)p_nominal_los_range;
+  g_args.track_enable        = p_track_enable != 0;
+  g_args.track_model         = (p_track_model != nullptr) ? p_track_model : "cv";
+  g_args.track_init_acc_var  = (float)p_track_init_acc;
+  g_args.track_r_var_m2      = (float)p_track_r;
+  g_args.track_rv_var_m2s2   = (float)p_track_rv;
+  g_args.track_q_accel       = (float)p_track_q;
+  g_args.track_gate_sigma    = (float)p_track_gate;
+  g_args.track_init_vel_var_m2s2 = (float)p_track_vvar;
+  g_args.track_max_coast     = (uint32_t)(p_track_max_coast > 0 ? p_track_max_coast : 1);
+  g_args.track_q_adapt_enable = p_track_q_adapt != 0;
+  g_args.track_nis_ewma_alpha = (float)p_track_nis_alpha;
+  g_args.track_q_mult_max     = (float)p_track_q_mult_max;
+  g_args.track_q_adapt_window_sigma = (float)p_track_adapt_win;
+  g_args.track_max_tracks    = (uint32_t)(p_track_max_tracks > 0 ? p_track_max_tracks : 1);
+  g_args.track_confirm_m     = (uint32_t)(p_track_confirm_m > 0 ? p_track_confirm_m : 0); // 0 = auto
+  g_args.track_confirm_n     = (uint32_t)(p_track_confirm_n > 0 ? p_track_confirm_n : 1);
+  g_args.track_confirm_target_pfa = (float)p_track_confirm_pfa;
+  g_args.track_assoc_gate_sigma = (float)p_track_assoc_gate;
+  g_args.track_harmonic_reject   = p_track_harm_reject != 0;
+  g_args.track_harmonic_range_m  = (float)p_track_harm_range;
+  g_args.track_flicker_reject      = p_track_flicker_reject != 0;
+  g_args.track_flicker_max_db      = (float)p_track_flicker_max_db;
+  g_args.track_flicker_min_updates = (uint32_t)(p_track_flicker_min_upd >= 0 ? p_track_flicker_min_upd : 0);
+  g_args.track_flicker_ewma_alpha  = (float)p_track_flicker_alpha;
+  g_args.track_assoc_gate_max_sr_m   = (float)p_track_assoc_max_sr;
+  g_args.track_assoc_gate_max_sv_mps = (float)p_track_assoc_max_sv;
   g_args.cfar_guard         = (uint32_t)p_cfar_guard;
   g_args.cfar_train         = (uint32_t)p_cfar_train;
-  g_args.cfar_pfa           = (float)p_cfar_pfa;
+  g_args.cfar_per_column    = p_cfar_per_column != 0;
+  g_args.cfar_per_row       = p_cfar_per_row != 0;
+  g_args.subbin_interp      = p_subbin_interp != 0;
+  g_args.cfar_pfa           = (float)p_cfar_pfa; // <=0 = auto (see defs_nr_UE_ISAC.h)
+  g_args.cfar_target_fa_per_cpi = (float)p_cfar_target_fa;
   g_args.zero_doppler_guard = (uint32_t)p_zdg;
   g_args.zero_range_guard   = (uint32_t)p_zrg;
   g_args.nms_range_bins     = (uint32_t)p_nms_r;
   g_args.nms_doppler_bins   = (uint32_t)p_nms_d;
   g_args.max_detections     = (uint32_t)(p_maxdet > 0 ? p_maxdet : 1);
+  g_args.conj_image_reject  = p_conj_reject != 0;
+  g_args.conj_image_guard   = (uint32_t)(p_conj_guard >= 0 ? p_conj_guard : 0);
+  g_args.harmonic_reject    = p_harm_reject != 0;
+  g_args.harmonic_guard     = (uint32_t)(p_harm_guard >= 0 ? p_harm_guard : 0);
+  g_args.harmonic_max_k     = (uint32_t)(p_harm_maxk >= 2 ? p_harm_maxk : 2);
+  g_args.harmonic_tol       = (float)p_harm_tol;
+  g_args.harmonic_snr_margin = (float)p_harm_snr_margin;
+  g_args.far_harmonic_reject = p_far_harm_reject != 0;
+  g_args.far_harmonic_far_m  = (float)p_far_harm_far;
+  g_args.far_harmonic_near_m = (float)p_far_harm_near;
+  g_args.cfar_fa_adapt_enable   = p_cfar_fa_adapt != 0;
+  g_args.cfar_fa_min            = (float)p_cfar_fa_min;
+  g_args.cfar_fa_max            = (float)p_cfar_fa_max;
+  g_args.cfar_fa_adapt_rate     = (float)p_cfar_fa_rate;
+  g_args.cfar_fa_target_min_det = (uint32_t)(p_cfar_fa_tmin >= 0 ? p_cfar_fa_tmin : 0);
+  g_args.cfar_fa_target_max_det = (uint32_t)(p_cfar_fa_tmax > 0 ? p_cfar_fa_tmax : 1);
+  g_args.cpi_quality_gate      = p_cpi_qgate != 0;
+  g_args.cpi_quality_max_ratio = (float)p_cpi_qratio;
+  g_args.cpi_quality_ema_alpha = (float)p_cpi_qalpha;
+  g_args.clutter_removal    = (p_clutter != nullptr) ? p_clutter : "mean";
+  g_args.eca_delay_max_m    = (float)p_eca_delay_max;
+  g_args.eca_doppler_max_mps = (float)p_eca_dopp_max;
+  g_args.detector           = (p_detector != nullptr) ? p_detector : "fft";
+  g_args.mf_per_row_norm    = p_mf_per_row_norm != 0;
+  g_args.clean_deconv       = p_clean_deconv != 0;
+  g_args.clean_occ_aware    = p_clean_occ_aware != 0;
+  g_args.subslot_symbols    = (uint32_t)(p_subslot_symbols > 0 ? p_subslot_symbols : 0);
+  g_args.subslot_min_re     = (uint32_t)(p_subslot_min_re > 0 ? p_subslot_min_re : 0);
+  g_args.subslot_min_snr_db = (float)p_subslot_min_snr_db;
+  g_args.clean_max_components     = (uint32_t)(p_clean_max_comp > 0 ? p_clean_max_comp : 0); // 0 = auto
+  g_args.clean_max_components_cap = (uint32_t)(p_clean_max_comp_cap > 0 ? p_clean_max_comp_cap : 1);
+  g_args.clean_loop_gain    = (float)p_clean_loop_gain;
+  g_args.clean_stop_db      = (float)p_clean_stop_db;
+  g_args.clean_restore_bins = (uint32_t)(p_clean_restore >= 0 ? p_clean_restore : 0);
+  g_args.range_window       = (p_range_win != nullptr) ? p_range_win : "hann";
+  g_args.range_window_sidelobe_db = (float)p_range_window_sll;
+  g_args.range_whiten       = p_range_whiten != 0;
+  g_args.doppler_nudft      = p_doppler_nudft != 0;
+  g_args.slow_time_complete = p_mc_enable != 0;
+  g_args.mc_rank            = (uint32_t)(p_mc_rank > 0 ? p_mc_rank : 0); // 0 = auto
+  g_args.mc_rank_max        = (uint32_t)(p_mc_rank_max > 0 ? p_mc_rank_max : 1);
+  g_args.mc_iters           = (uint32_t)(p_mc_iters > 0 ? p_mc_iters : 1);
+  g_args.mc_power_iters     = (uint32_t)(p_mc_power >= 0 ? p_mc_power : 0);
+  g_args.doppler_sparse             = p_sd_enable != 0;
+  g_args.doppler_sparse_iters       = (uint32_t)(p_sd_iters > 0 ? p_sd_iters : 1);
+  g_args.doppler_sparse_lambda_scale = (float)p_sd_lambda_scale;
+  g_args.doppler_sparse_peak_ratio  = (float)p_sd_peak_ratio;
+  g_args.doppler_sparse_lambda_min  = (float)p_sd_lambda_min;
+  g_args.doppler_sparse_lambda_max  = (float)p_sd_lambda_max;
+  g_args.doppler_sparse_adapt_rate  = (float)p_sd_adapt_rate;
+  g_args.doppler_sparse_target_min_det = (uint32_t)(p_sd_target_min >= 0 ? p_sd_target_min : 0);
+  g_args.doppler_sparse_target_max_det = (uint32_t)(p_sd_target_max > 0 ? p_sd_target_max : 1);
+  g_args.doppler_sparse_harmonic_ratio = (float)p_sd_harmonic_ratio;
   g_args.out_path           = (p_out_path != nullptr) ? p_out_path : "/tmp/oaiue_sensing";
   g_args.rx_id              = (p_rx_id != nullptr) ? p_rx_id : "rx1";
   g_args.rx_pos_x           = (float)p_rx_x;
@@ -303,13 +523,41 @@ extern "C" int nr_isac_source_enabled(int source)
   return (g_args.sources_mask & (1u << source)) ? 1 : 0;
 }
 
+extern "C" uint32_t nr_isac_subslot_config(uint32_t* min_re, float* min_snr_db)
+{
+  if (!g_enabled.load(std::memory_order_relaxed)) {
+    return 0;
+  }
+  if (min_re != nullptr) {
+    *min_re = g_args.subslot_min_re;
+  }
+  if (min_snr_db != nullptr) {
+    *min_snr_db = g_args.subslot_min_snr_db;
+  }
+  return g_args.subslot_symbols;
+}
+
 extern "C" void nr_isac_submit_cfr(uint32_t                 slot_idx,
                                    int                      source,
                                    const nr_isac_carrier_t* carrier,
                                    const float*             h,
                                    const uint32_t*          k_abs,
                                    const uint32_t*          l_sym,
-                                   uint32_t                 nof_re)
+                                   uint32_t                 nof_re,
+                                   float                    noise_var)
+{
+  nr_isac_submit_cfr_at(slot_idx, 0.0f, source, carrier, h, k_abs, l_sym, nof_re, noise_var);
+}
+
+extern "C" void nr_isac_submit_cfr_at(uint32_t                 slot_idx,
+                                      float                    slot_frac,
+                                      int                      source,
+                                      const nr_isac_carrier_t* carrier,
+                                      const float*             h,
+                                      const uint32_t*          k_abs,
+                                      const uint32_t*          l_sym,
+                                      uint32_t                 nof_re,
+                                      float                    noise_var)
 {
   if (!g_enabled.load(std::memory_order_relaxed) || !g_engine || carrier == nullptr || h == nullptr || nof_re == 0) {
     return;
@@ -328,5 +576,6 @@ extern "C" void nr_isac_submit_cfr(uint32_t                 slot_idx,
     cfr[i] = icf_t(h[2 * i], h[2 * i + 1]);
   }
 
-  g_engine->submit(slot_idx, (nr_isac_source_t)source, *carrier, cfr.data(), k_abs, l_sym, nof_re);
+  g_engine->submit(slot_idx, slot_frac, (nr_isac_source_t)source, *carrier, cfr.data(), k_abs, l_sym, nof_re,
+                   noise_var);
 }

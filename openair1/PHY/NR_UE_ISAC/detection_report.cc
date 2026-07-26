@@ -206,6 +206,10 @@ std::string build_detection_report_json(const detection_report_t& rep)
   append_json_double(out, rep.sto.drift_bins_cpi);
   out += ",\"is_constant\":";
   out += rep.sto.is_constant ? "true" : "false";
+  out += ",\"n_flywheel\":";
+  out += std::to_string(rep.sto.n_flywheel);
+  out += ",\"absolute_drift_bins\":";
+  append_json_double(out, rep.sto.total_drift_bins);
   out += '}';
 
   out += ",\"cfo\":{\"n_valid\":";

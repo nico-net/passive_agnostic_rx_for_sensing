@@ -18,9 +18,9 @@ emits DetectionReports compliant with the central node (`repos/isac`,
    `sensing_engine::accumulate_cpi` and `CFR_FUSION_HANDOVER.md`.
 3. **Stage 4b interpolation**: linear fill of comb gaps in frequency + resampling of the
    non-uniform (bursty) slow-time onto a uniform grid.
-4. **Range-Doppler DSP** (`range_doppler`): per-subcarrier clutter mean subtraction →
-   Hann-windowed range IFFT → Hann-windowed Doppler FFT (fftshift) → |·|² →
-   zero-Doppler/zero-range notch.
+4. **Range-Doppler DSP** (`range_doppler`): clutter removal (per-subcarrier slow-time mean
+   subtraction, or opt-in **ECA/ECA+** — see below) → Hann-windowed range IFFT →
+   Hann-windowed Doppler FFT (fftshift) → |·|² → zero-Doppler/zero-range notch.
 5. **Detection**: 2D CA-CFAR (integral-image accelerated) + greedy non-max suppression.
 6. **Outputs**: `<out_path>_detections.csv`, optional `<out_path>_rvm_<n>.f32` raster, and
    `<out_path>_reports.jsonl` / a ZeroMQ PUB bus of DetectionReport JSON (isac-compliant).
@@ -35,6 +35,7 @@ because OAI's built-in DFT only supports the fixed OFDM sizes.
 | `nr_isac.h` / `nr_isac.cc` | C API (RT taps + lifecycle), `[sensing]` config parsing, global engine |
 | `defs_nr_UE_ISAC.h` | internal C++ structs (args, snapshot, RVM, detection) |
 | `isac_fft.{h,cc}` | arbitrary-N complex DFT |
+| `eca_clutter.{h,cc}` | ECA/ECA+ CFR-domain clutter cancellation (opt-in `clutter_removal = "eca+"`) |
 | `range_doppler.{h,cc}` | clutter removal, range/Doppler transforms, CA-CFAR, NMS, self-test injection |
 | `sensing_engine.{h,cc}` | consumer thread, CPI accumulation, interpolation, outputs, ZeroMQ |
 | `detection_report.{h,cc}` | DetectionReport JSON serialiser (isac wire contract) |
@@ -77,6 +78,25 @@ sensing = {
   nms_range_bins     = 3;
   nms_doppler_bins   = 3;
   max_detections     = 32;
+
+  # clutter cancellation (ECA_CLUTTER_HANDOVER.md)
+  clutter_removal     = "mean";  # "mean" (default, per-subcarrier slow-time mean) | "eca+"
+  # ECA/ECA+ (eca_clutter): a CFR-domain oblique projection that removes the near-zero-Doppler
+  # clutter band over a bounded delay window *in the complex domain, before the range IFFT*, so the
+  # static/slow residual that produces the conjugate mirror ghost never reaches the transform (the
+  # fix lives upstream of detection, not as the post-CFAR conj_image_reject band-aid, which stays on
+  # as a safety net). Because the sources are Ĥ = Y/X, the disturbance subspace is spanned by ideal
+  # delay/Doppler atoms and the projection factorises into a delay (frequency) and a Doppler
+  # (slow-time) projector: H_clean = H − P_Φ·H·P_Ψ. Mean subtraction is the exact special case
+  # (eca_delay_max_m = 0 / full, eca_doppler_max_mps = 0).
+  # eca_delay_max_m     = 0.0;   # delay removal window [0, x] m; <=0 => full range
+  # eca_doppler_max_mps = 0.5;   # Doppler removal half-band [-x, +x] m/s around zero velocity
+  #   NOTE (ECA blind speed): any real target inside [-eca_doppler_max_mps, +eca_doppler_max_mps] is
+  #   cancelled along with the clutter — keep this band narrower than the slowest target of interest.
+  #   IMPORTANT: this is an ABSOLUTE m/s band, but what matters is its size in BINS = band/vel_res.
+  #   A long CPI / slow PRF has a very fine vel_res (e.g. ~0.04 m/s in the sensing-sim), so 0.5 m/s
+  #   there removes ~12 Doppler bins and will eat a slow target. Tune it to ~zero_doppler_guard*vel_res
+  #   (a handful of bins). The 0.5 default suits coarse-vel_res OTA CPIs, not fine-resolution ones.
 
   # DSP self-test (optional): inject synthetic echoes into the live CFR
   # selftest         = 1;

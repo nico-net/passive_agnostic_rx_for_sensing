@@ -103,6 +103,11 @@ int nr_isac_source_enabled(int source);
  * several sources onto one grid and report per-source diagnostics. For fusion to be coherent, all
  * sources MUST submit @p k_abs on the same absolute subcarrier axis (relative to CRB0 / point A)
  * and the same full-carrier @p carrier.nof_prb.
+ *
+ * @p noise_var is this estimate's per-RE noise power (linear, same amplitude units as @p h). When
+ * two sources land on the same subcarrier in the same slot, the engine fuses them by inverse-variance
+ * weighting (ĥ = Σ ĥ_i/σ²_i / Σ 1/σ²_i) instead of last-write-wins, so the lower-noise estimate
+ * dominates. Pass 0 (or a negative value) if unknown -> the engine falls back to equal weighting.
  */
 void nr_isac_submit_cfr(uint32_t                 slot_idx,
                         int                      source,
@@ -110,7 +115,33 @@ void nr_isac_submit_cfr(uint32_t                 slot_idx,
                         const float*             h,
                         const uint32_t*          k_abs,
                         const uint32_t*          l_sym,
-                        uint32_t                 nof_re);
+                        uint32_t                 nof_re,
+                        float                    noise_var);
+
+/**
+ * @brief As nr_isac_submit_cfr(), but places the estimate at a SUB-SLOT slow-time position.
+ *
+ * @p slot_frac is the offset within the slot in slots, i.e. [0,1) -- typically
+ * (group centre symbol + 0.5)/symbols_per_slot. Submissions sharing the same (slot_idx, slot_frac)
+ * still merge into one slow-time row (multi-source fusion); different fractions open separate rows,
+ * which is what raises the effective PRF. nr_isac_submit_cfr() is exactly this with slot_frac = 0,
+ * so existing callers are unaffected. See defs_nr_UE_ISAC.h's sub-slot section for why this exists.
+ */
+void nr_isac_submit_cfr_at(uint32_t                 slot_idx,
+                           float                    slot_frac,
+                           int                      source,
+                           const nr_isac_carrier_t* carrier,
+                           const float*             h,
+                           const uint32_t*          k_abs,
+                           const uint32_t*          l_sym,
+                           uint32_t                 nof_re,
+                           float                    noise_var);
+
+/**
+ * @brief Sub-slot sampling configuration for the RT taps (see defs_nr_UE_ISAC.h).
+ * Returns the target symbols per row (0 = disabled) and fills the sparsity / SNR gates.
+ */
+uint32_t nr_isac_subslot_config(uint32_t* min_re, float* min_snr_db);
 
 #ifdef __cplusplus
 }

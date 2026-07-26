@@ -26,6 +26,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstring>
+#include <cstdlib>
 #include <fstream>
 
 extern "C" {
@@ -92,6 +93,9 @@ sensing_engine::sensing_engine(const nr_isac_args_t& args_, uint32_t max_prb_) :
   report_endpoint = args.report_endpoint;
 
   rd.reset(new range_doppler(args));
+  if (args.track_enable) {
+    tracker.reset(new multi_target_tracker(args));
+  }
 }
 
 sensing_engine::~sensing_engine()
@@ -119,12 +123,14 @@ void sensing_engine::stop()
 }
 
 void sensing_engine::submit(uint32_t                 slot_idx,
+                            float                    slot_frac,
                             nr_isac_source_t         source,
                             const nr_isac_carrier_t& carrier,
                             const icf_t*              h,
                             const uint32_t*          k_abs,
                             const uint32_t*          l,
-                            uint32_t                 nof_re)
+                            uint32_t                 nof_re,
+                            float                    noise_var)
 {
   if (!running.load(std::memory_order_relaxed) || h == nullptr || nof_re == 0) {
     return;
@@ -136,10 +142,12 @@ void sensing_engine::submit(uint32_t                 slot_idx,
     return;
   }
 
-  s->slot_idx = slot_idx;
-  s->source   = source;
-  s->carrier  = carrier;
-  s->nof_re   = nof_re;
+  s->slot_idx  = slot_idx;
+  s->slot_frac = (slot_frac >= 0.0f && slot_frac < 1.0f) ? slot_frac : 0.0f;
+  s->source    = source;
+  s->carrier   = carrier;
+  s->nof_re    = nof_re;
+  s->noise_var = noise_var;
   s->h.assign(h, h + nof_re);
   s->k_abs.assign(k_abs, k_abs + nof_re);
   s->l_sym.assign(l, l + nof_re);
@@ -225,6 +233,7 @@ void sensing_engine::accumulate_cpi(const sensing_slot_t& s)
     cpi_carrier   = s.carrier;
     h_cpi.assign((size_t)args.cpi_slots * nof_subc, icf_t(0.0f, 0.0f));
     occ_all.assign((size_t)args.cpi_slots * nof_subc, 0);
+    wsum_all.assign((size_t)args.cpi_slots * nof_subc, 0.0f);
     cpi_row_time.assign(args.cpi_slots, 0.0);
     cpi_row_comb.assign(args.cpi_slots, 1);
     row_comb_uniform.assign(args.cpi_slots, 1);
@@ -236,32 +245,57 @@ void sensing_engine::accumulate_cpi(const sensing_slot_t& s)
     cpi_prev_slot = s.slot_idx;
   }
 
+  // Advance the monotonic unwrapped slot counter (across CPI boundaries) for the true-dt measurement.
+  {
+    const uint32_t slots_per_frame = (s.carrier.slots_per_frame > 0) ? s.carrier.slots_per_frame : 10;
+    const uint32_t wrap            = slots_per_frame * 1024;
+    if (!abs_init_) {
+      abs_init_ = true;
+    } else {
+      abs_slot_run_ += (uint64_t)((wrap + s.slot_idx - abs_prev_raw_) % wrap);
+    }
+    abs_prev_raw_ = s.slot_idx;
+  }
+
   // Unwrapped slow-time position (in slots) of this submission relative to the CPI time origin.
-  uint32_t this_span;
+  // FRACTIONAL (sub-slot sampling): a submission's slow-time position is its integer slot delta plus
+  // its within-slot offset, so several symbol groups from the SAME slot land on distinct rows at their
+  // true times instead of collapsing onto one. slot_frac == 0 for every legacy caller, which
+  // reproduces the previous integer behaviour exactly.
+  double this_span;
   if (cpi_row == 0) {
-    this_span     = 0; // first submission anchors the CPI time origin
-    cpi_prev_slot = s.slot_idx;
+    this_span       = 0.0; // first submission anchors the CPI time origin
+    cpi_prev_slot   = s.slot_idx;
+    cpi_prev_pos    = 0.0;
+    cpi_anchor_abs_ = abs_slot_run_; // absolute anchor of this CPI, for the true inter-CPI dt
   } else {
     const uint32_t slots_per_frame = (s.carrier.slots_per_frame > 0) ? s.carrier.slots_per_frame : 10;
     const uint32_t wrap            = slots_per_frame * 1024;
     const uint32_t delta           = (wrap + s.slot_idx - cpi_prev_slot) % wrap;
-    this_span                      = (uint32_t)(cpi_slot_span + delta);
-    cpi_prev_slot                  = s.slot_idx;
+    // Position of this submission relative to the previous one, carrying both fractions.
+    this_span     = cpi_prev_pos + (double)delta + ((double)s.slot_frac - prev_frac_);
+    if (this_span < cpi_prev_pos) {
+      this_span = cpi_prev_pos; // never step backwards (out-of-order sub-slot arrival)
+    }
+    cpi_prev_slot = s.slot_idx;
   }
+  prev_frac_   = (double)s.slot_frac;
+  cpi_prev_pos = this_span;
 
   // Absolute-slot-indexed rows: fold this submission into the current row if it shares that row's real
   // slot (a second source densifying the same slot), otherwise open a new slow-time row. Rows are
   // reused across CPIs, so a freshly opened row is cleared before first use.
-  const bool merge = (cpi_row > 0) && ((uint64_t)this_span == cpi_slot_span);
+  const bool merge = (cpi_row > 0) && (std::fabs(this_span - cpi_slot_span) < 1e-6);
   uint32_t   r;
   if (merge) {
     r = cpi_row - 1;
   } else {
     r               = cpi_row;
     cpi_slot_span   = this_span;
-    cpi_row_time[r] = (double)this_span;
+    cpi_row_time[r] = this_span;
     std::fill(&h_cpi[(size_t)r * nof_subc], &h_cpi[(size_t)r * nof_subc] + nof_subc, icf_t(0.0f, 0.0f));
     std::memset(&occ_all[(size_t)r * nof_subc], 0, nof_subc);
+    std::fill(&wsum_all[(size_t)r * nof_subc], &wsum_all[(size_t)r * nof_subc] + nof_subc, 0.0f);
     cpi_row++;
   }
 
@@ -270,15 +304,26 @@ void sensing_engine::accumulate_cpi(const sensing_slot_t& s)
   }
   cpi_comb_spacing = (s.comb_spacing > 0) ? s.comb_spacing : cpi_comb_spacing;
 
-  // Place this submission's samples onto their absolute-subcarrier columns; last-write-wins on any
-  // per-column conflict (two sources hitting the same subcarrier — rare, they occupy disjoint REs by
-  // design). Frequency gap-fill is deferred to CPI close so a merged row is interpolated only once.
+  // Place this submission's samples onto their absolute-subcarrier columns, fusing per-column
+  // conflicts (two sources hitting the same subcarrier in this slot) by INVERSE-VARIANCE weighting
+  // rather than last-write-wins: the estimate with lower noise power dominates. h_cpi holds the
+  // running weighted mean ĥ = Σ(ĥ_i·w_i)/Σw_i and wsum_all its running Σw_i, updated incrementally so
+  // the order of same-slot source submissions doesn't matter. w_i = 1/σ²_i; an unknown/zero noise_var
+  // falls back to unit weight (equal weighting = the old behaviour). Frequency gap-fill is deferred to
+  // CPI close so a merged row is interpolated only once.
+  const float w = (s.noise_var > 0.0f) ? (1.0f / s.noise_var) : 1.0f;
   icf_t*   row  = &h_cpi[(size_t)r * nof_subc];
   uint8_t* mask = &occ_all[(size_t)r * nof_subc];
+  float*   wrow = &wsum_all[(size_t)r * nof_subc];
   for (uint32_t i = 0; i < s.nof_re; i++) {
     const uint32_t k = s.k_abs[i];
     if (k < nof_subc) {
-      row[k]  = s.h[i];
+      const float w_prev = wrow[k];
+      const float w_new  = w_prev + w;
+      // Running weighted mean: row[k] <- (row[k]*w_prev + h_i*w) / (w_prev + w).
+      // First writer (w_prev==0) reduces to row[k] = h_i exactly.
+      row[k]  = (row[k] * w_prev + s.h[i] * w) * (1.0f / w_new);
+      wrow[k] = w_new;
       mask[k] = 1;
     }
   }
@@ -300,45 +345,119 @@ void sensing_engine::accumulate_cpi(const sensing_slot_t& s)
       // detections are known -- one-CPI feedback latency by design). A no-op until a baseline is
       // established. Runs first purely for narrative ordering ("apply what we learned before this
       // CPI's own fresh estimation") -- it commutes with Phases 1-3 like they commute with each other.
-      los_tracker.apply_bias_correction(h_cpi.data(), occ_all.data(), cpi_row, nof_subc, cpi_row_time.data(),
-                                        cpi_carrier);
+      if (args.sync_los) {
+        los_tracker.apply_bias_correction(h_cpi.data(), occ_all.data(), cpi_row, nof_subc, cpi_row_time.data(),
+                                          cpi_carrier);
+      }
 
       // Phase 1 (ota_sync_passive_ue.md): per-row LOS CIR peak tracking + fine-STO correction on the
       // RAW grid, before Stage-4b interpolation -- interpolation should operate on already-timing-
       // corrected data. See docs/NR_UE_ISAC_sync_gap_analysis.md for why this must run here.
+      // Now a WALKING tracker (SYNC_NOISE_HANDOVER.md root-cause fix): the flywheel needs a recent
+      // SFO estimate to project through a fade, which can only be the PREVIOUS CPI's cross-CPI EMA
+      // (sfo_tracker.process() for THIS CPI hasn't run yet -- Phase 3 runs after Phase 1/2 below).
+      // Phase 1's ESTIMATION always runs (Phase 2 reuses its per-row LOS taps); args.sync_sto gates
+      // only whether it APPLIES its correction, so the two can be ablated independently.
       last_sto_fit = sto_tracker.process(h_cpi.data(), occ_all.data(), cpi_row, nof_subc, cpi_row_comb.data(),
-                                          cpi_row_time.data(), cpi_carrier);
+                                          cpi_row_time.data(), cpi_carrier, sfo_tracker.filtered_sfo_ppm(),
+                                          args.sync_sto, args.nominal_los_range_m);
 
       // Phase 2 (ota_sync_passive_ue.md): residual-CFO fit + per-row CPE de-rotation, reusing Phase 1's
       // per-row LOS-tap estimates (no second CIR pass). Also runs before Stage-4b interpolation, and
       // commutes with the STO correction above (uniform per-row rotation vs. STO's per-subcarrier ramp).
-      last_cfo_fit = cfo_tracker.process(h_cpi.data(), occ_all.data(), nof_subc, sto_tracker.last_row_estimates());
+      if (args.sync_cfo) {
+        last_cfo_fit = cfo_tracker.process(h_cpi.data(), occ_all.data(), nof_subc, sto_tracker.last_row_estimates());
+      }
 
       // Phase 3 (ota_sync_passive_ue.md): SFO delay-drift fit + correction. Runs its own per-row
       // CIR/peak tracking walk (does not reuse Phase 1's rows -- Phase 1's fixed-window search can't
       // follow the multi-hundred-bin drift SFO can cause over a multi-second CPI). Also before
       // Stage-4b interpolation; commutes with Phase 1/2's corrections above.
-      last_sfo_fit = sfo_tracker.process(h_cpi.data(), occ_all.data(), cpi_row, nof_subc, cpi_row_comb.data(),
-                                          cpi_row_time.data(), cpi_carrier);
+      if (args.sync_sfo) {
+        last_sfo_fit = sfo_tracker.process(h_cpi.data(), occ_all.data(), cpi_row, nof_subc, cpi_row_comb.data(),
+                                            cpi_row_time.data(), cpi_carrier, args.nominal_los_range_m);
+      }
     }
 
-    // Stage 4b (part 1): gap-fill every accumulated row now that same-slot merges + STO correction
-    // are done.
-    for (uint32_t rr = 0; rr < cpi_row; rr++) {
-      if (args.interpolate) {
-        interp_freq_row(&h_cpi[(size_t)rr * nof_subc], &occ_all[(size_t)rr * nof_subc], nof_subc);
+    // Stage 4b (part 1): fill the unobserved (unscheduled) CFR entries now that same-slot merges +
+    // STO correction are done. Two options:
+    //  - slow_time_complete: JOINT 2-D low-rank matrix completion over the whole [row x subcarrier]
+    //    grid (matrix_complete.{h,cc}). Uses the physical prior that the CFR is low-rank (rank ~
+    //    number of scatterers), giving each slot a consistent full aperture -- this removes the
+    //    amplitude-gating that convolves each target's Doppler line with the schedule mask and creates
+    //    the 2x/3x harmonic ghosts, at the source. Supersedes the per-row interpolation below.
+    //  - interpolate (legacy): independent per-row linear frequency gap-fill.
+    if (args.slow_time_complete && cpi_row >= 2) {
+      // mc_rank==0 -> AUTO: derive this CPI's completion rank from the number of DISTINCT-RANGE
+      // detections in the PREVIOUS CPI (a scatterer sits at ONE range; its Doppler harmonics and its
+      // mirror all share that SAME range, so counting distinct range bins collapses each real
+      // scatterer -- and its whole ghost family -- to a single count), +1 for the LOS/clutter
+      // residual, clamped to [1, mc_rank_max]. CRITICAL: do NOT derive rank from the raw detection or
+      // confirmed-track COUNT -- those are inflated by exactly the harmonic/false tracks this module
+      // removes, which creates a feedback loop (more ghosts -> higher rank -> completion has more DOF
+      // to REPRODUCE the ghosts -> more ghosts). Distinct ranges break that loop because ghosts don't
+      // add new ranges. `detections` still holds the PREVIOUS CPI's list here (process_cpi() hasn't
+      // overwritten it yet) -- see defs_nr_UE_ISAC.h's mc_rank comment.
+      uint32_t nscat = 0;
+      if (args.mc_rank == 0) {
+        std::vector<uint32_t> rbins;
+        rbins.reserve(detections.size());
+        for (const sensing_detection_t& d : detections) {
+          rbins.push_back(d.range_bin);
+        }
+        std::sort(rbins.begin(), rbins.end());
+        for (size_t i = 0; i < rbins.size(); i++) {
+          // Merge detections within a few bins of the previous distinct range into one scatterer.
+          if (i == 0 || (rbins[i] - rbins[i - 1]) > 3u) {
+            nscat++;
+          }
+        }
+      }
+      const uint32_t auto_rank = std::min(args.mc_rank_max, std::max(1u, nscat + 1));
+      const uint32_t rank      = (args.mc_rank > 0) ? args.mc_rank : auto_rank;
+      complete_lowrank(h_cpi.data(), occ_all.data(), cpi_row, nof_subc, rank, args.mc_iters,
+                       args.mc_power_iters, &mc_scratch);
+      // The completed grid is fully populated across the band, so every row now supports full range
+      // (comb 1); reset the native combs so the per-row de-aliasing taper doesn't clip a row that was
+      // sparse before completion.
+      for (uint32_t rr = 0; rr < cpi_row; rr++) {
+        cpi_row_comb[rr] = 1;
+      }
+    } else if (args.detector == "matched_filter" || (args.clean_deconv && args.clean_occ_aware)) {
+      // Matched filter AND occupancy-aware CLEAN both consume the RAW occupied grid (occ_all mask)
+      // directly -- no frequency gap-fill (interpolation is exactly the pedestal source MF avoids, and
+      // it would smear the per-row occupancy modulation occ-aware CLEAN needs to model). Rows as-is.
+    } else {
+      for (uint32_t rr = 0; rr < cpi_row; rr++) {
+        if (args.interpolate) {
+          interp_freq_row(&h_cpi[(size_t)rr * nof_subc], &occ_all[(size_t)rr * nof_subc], nof_subc);
+        }
       }
     }
 
     // Mean slow-time period (slots) across the CPI; falls back to the reported per-source period.
+    //
+    // FRACTIONAL, deliberately (2026-07-24). This used to round to an integer number of slots, which
+    // silently mis-scaled the whole Doppler/velocity axis: resample_slow_time() lays its uniform grid
+    // at exactly span/(N-1) slots, so rounding that to an integer here makes range_doppler's t_slow
+    // disagree with the grid it is actually given. Measured on tests/sensing_sim (100 MHz, 128 rows):
+    // true mean spacing 1.654 slots rounded to 2 -> every reported vel_mps came out at 0.822x the
+    // ground-truth bistatic range-rate (predicted ratio 1.654/2 = 0.827). That bias also propagated
+    // into the tracker, whose measurement vector includes vel_mps. The error is up to 25% at
+    // spacings near 1.5-2.5 slots -- exactly the regime DL-heavy TDD traffic produces.
     cpi_period_slots = (args.cpi_slots > 1 && cpi_slot_span > 0)
-                           ? (uint32_t)((cpi_slot_span + (args.cpi_slots - 1) / 2) / (args.cpi_slots - 1))
-                           : ((s.period_slots > 0) ? s.period_slots : 1);
-    if (cpi_period_slots == 0) {
-      cpi_period_slots = 1;
+                           ? ((double)cpi_slot_span / (double)(args.cpi_slots - 1))
+                           : ((s.period_slots > 0) ? (double)s.period_slots : 1.0);
+    if (!(cpi_period_slots > 0.0)) {
+      cpi_period_slots = 1.0;
     }
     // Stage 4b (part 2): resample the non-uniform-in-time rows onto a uniform slow-time grid.
-    if (args.interpolate) {
+    // BYPASSED under doppler_nudft OR doppler_sparse: both consume the raw irregular rows and their
+    // ACTUAL times directly (resampling would defeat the point -- the chord approximation it performs
+    // is itself a harmonic source, and doppler_sparse's dictionary must match cir_rm's real row
+    // times), so the raw rows map 1:1 and process_cpi() hands them cpi_row_time.
+    if (args.interpolate && !args.doppler_nudft && !args.doppler_sparse && args.detector != "matched_filter" &&
+        !(args.clean_deconv && args.clean_occ_aware)) {
       resample_slow_time();
     } else {
       h_cpi_uniform    = h_cpi;
@@ -445,13 +564,110 @@ void sensing_engine::process_cpi()
   // Stage 3: range-Doppler DSP on the (Stage-4b) uniformly-resampled CPI matrix. The fused grid is
   // per-subcarrier (column spacing = 1 subcarrier), so the range axis is scaled with cpi_grid_comb (1),
   // independent of any individual source's native comb.
+  // Under doppler_nudft, hand the range-Doppler processor the raw irregular rows' ACTUAL times
+  // (cpi_row_time, in slots) so its non-uniform DFT evaluates the true slow-time sampling; nullptr
+  // otherwise (uniform-FFT path). h_cpi_uniform already equals the raw h_cpi in that mode (resample
+  // bypassed above), so the row_time indexing matches its rows 1:1.
+  const bool mf         = (args.detector == "matched_filter");
+  const bool occ_clean  = (args.clean_deconv && args.clean_occ_aware);
   rd->process(h_cpi_uniform.data(), args.cpi_slots, nof_subc, cpi_grid_comb, cpi_carrier,
-              (float)cpi_period_slots, row_comb_uniform.data(), rvm, detections);
+              (float)cpi_period_slots, row_comb_uniform.data(), rvm, detections,
+              (args.doppler_nudft || args.doppler_sparse || mf || occ_clean) ? cpi_row_time.data() : nullptr,
+              (mf || occ_clean) ? occ_all.data() : nullptr);
+
+  // CPI-quality gate (see defs_nr_UE_ISAC.h): T_slot (= cpi_period_slots, the mean row spacing) is
+  // compared to a running EMA of "typical" T_slot. A CPI whose spacing is much larger is "starved" --
+  // too few well-spaced samples to resolve a real target, so its detections are dominated by
+  // amplitude-gating aliases/ghosts with no real reference to reject them against. Drop the whole
+  // CPI's detections and let the tracker coast. The EMA updates from EVERY CPI (gated or not) so the
+  // baseline tracks the cell's own traffic pattern rather than a hand-picked absolute T_slot.
+  bool cpi_gated = false;
+  if (args.cpi_quality_gate) {
+    if (tslot_ema_ < 0.0) {
+      tslot_ema_ = cpi_period_slots; // seed on first CPI
+    }
+    if (cpi_period_slots > (double)args.cpi_quality_max_ratio * tslot_ema_) {
+      cpi_gated = true;
+      LOG_I(PHY, "SENSING: cpi-quality GATE CPI #%u T_slot=%.3f > %.2f x EMA=%.3f -> %zu detections dropped\n",
+            cpi_count, cpi_period_slots, (double)args.cpi_quality_max_ratio, tslot_ema_, detections.size());
+      detections.clear();
+    }
+    const double a = (double)args.cpi_quality_ema_alpha;
+    tslot_ema_ = (1.0 - a) * tslot_ema_ + a * cpi_period_slots;
+  }
 
   // Phase 4 (ota_sync_passive_ue.md): wraps range_doppler's existing output (no second RD/CFAR
   // path) to find this CPI's LOS detection, measure its residual from the established baseline, and
   // fold that into the closed-loop bias state applied on the NEXT CPI (one-CPI feedback latency).
-  last_los_residual = los_tracker.update_residual(detections, rvm, (double)cpi_carrier.dl_center_hz);
+  last_los_residual = los_tracker.update_residual(detections, rvm, (double)cpi_carrier.dl_center_hz,
+                                                 args.nominal_los_range_m);
+
+  // Per-CPI target track. dt comes from the CPI start timestamps (irregular by design -- a CPI
+  // closes when enough reference occurrences have accumulated, which depends on DL traffic), which
+  // is precisely why a Kalman gain is used rather than fixed alpha-beta gains.
+  if (tracker) {
+    // dt must be SIMULATED elapsed time (the time base the target actually moves in), NOT wall clock.
+    // cpi_start_time_utc_ns is a host-clock stamp, and under rfsimulator the host runs far slower
+    // than the simulated air interface (measured ~44x on this harness), so feeding it here made the
+    // filter converge to a range-rate scaled by exactly that ratio (+0.14 m/s against a true
+    // +6.13 m/s) while still tracking range, because the wrong rate and wrong dt cancelled in the
+    // prediction. Derive it from this CPI's own slot span instead.
+    const double slots_per_sf = std::max(1.0, (double)cpi_carrier.scs_hz / 15000.0);
+    const double slot_dur_s   = 1e-3 / slots_per_sf;
+    // Inter-CPI time = (this CPI's anchor - previous CPI's anchor) in unwrapped slots, i.e. including
+    // the gap between one CPI's last row and the next CPI's first row that cpi_slot_span misses.
+    // VERIFIED (2026-07-24) against ground truth on tests/sensing_sim: inverted the known trajectory
+    // at each detection's chained range to get its true simulated time, least-squares fit vs CPI
+    // index -> 0.1043 s/CPI true spacing against 0.105 s/CPI from this formula, i.e. 0.7% agreement.
+    // This term is correct. (An earlier note in this file claimed a residual ~20% bias; that number
+    // came from comparing against UE-log line interleaving with SENSING_CHANNEL gt: lines, which is
+    // not a valid time reference -- the engine thread that prints this line lags the RF thread that
+    // prints the gt line by an unbounded, traffic-dependent queue depth, not a fixed offset.)
+    double dt_slots = (double)cpi_slot_span;
+    if (have_prev_anchor_ && cpi_anchor_abs_ > prev_cpi_anchor_abs_) {
+      dt_slots = (double)(cpi_anchor_abs_ - prev_cpi_anchor_abs_);
+    }
+    prev_cpi_anchor_abs_ = cpi_anchor_abs_;
+    have_prev_anchor_    = true;
+    const double dt_s    = dt_slots * slot_dur_s;
+    prev_cpi_time_ns  = cpi_start_time_utc_ns;
+    last_tracks       = tracker->update(detections, dt_s, &rvm);
+    for (const sensing_track_t& t : last_tracks) {
+      LOG_I(PHY,
+            "SENSING: track CPI #%u track_id=%u range=%.2f m rate=%+.2f m/s sigma=%.2f m %s "
+            "innov=%+.2f m nis=%.2f qmult=%.2f coast=%u\n",
+            cpi_count, t.track_id, t.range_m, t.range_rate_mps, t.sigma_range_m,
+            t.updated ? "updated" : "COASTED", t.innovation_m, t.nis, t.q_mult, t.coast_count);
+    }
+    // Visibility into the auto-derived M-of-N confirmation threshold (defs_nr_UE_ISAC.h's
+    // track_confirm_m==0 path): logged whenever auto mode is active so a scene whose measured
+    // false-alarm density has drifted shows up here, not just as unexplained track churn.
+    if (args.track_confirm_m == 0) {
+      LOG_I(PHY,
+            "SENSING: mot confirm CPI #%u auto_M=%u/N=%u mean_det_per_cpi=%.1f p_hit=%.5f target_pfa=%.1e\n",
+            cpi_count, tracker->last_confirm_m(), args.track_confirm_n, tracker->mean_detections_ewma(),
+            tracker->last_p_hit(), (double)args.track_confirm_target_pfa);
+    }
+  }
+
+  // Sync-correction status: one line per CPI showing whether STO (Phase 1, sub-sample delay drift),
+  // CFO (Phase 2, residual carrier frequency offset), SFO (Phase 3, sample-clock error / timing
+  // offset drift), and the Phase 4 closed-loop LOS bias (delay + frequency) are actually being
+  // tracked/corrected -- not just computed silently into the JSON report. Print regardless of
+  // sync_correction_enable: when disabled, Phases 1-3 leave their *_fit at the default/zero state
+  // (is_constant/corrected == false, n_valid/n_fit == 0), which itself is the visible "disabled" signal.
+  LOG_I(PHY,
+        "SENSING: sync CPI #%u STO[n=%u fly=%u frac_bin=%+.3f drift=%+.3f corrected=%s walk=%+.2f] "
+        "CFO[hz=%+.2f filt=%+.2f rms_rad=%.3f] SFO[raw=%+.4f filt=%+.4f hz=%+.3f n_fit=%u/%u corrected=%s] "
+        "LOS[baseline=%s det=%s range_res_m=%+.2f vel_res_mps=%+.4f bias_delay_ns=%+.1f bias_cfo_hz=%+.2f]\n",
+        cpi_count, last_sto_fit.n_valid, last_sto_fit.n_flywheel, last_sto_fit.mean_frac_bin,
+        last_sto_fit.drift_bins_cpi, last_sto_fit.is_constant ? "yes" : "no", last_sto_fit.total_drift_bins,
+        last_cfo_fit.cfo_hz, last_cfo_fit.cfo_hz_filtered,
+        last_cfo_fit.residual_phase_rms_rad, last_sfo_fit.sfo_ppm, last_sfo_fit.sfo_ppm_filtered,
+        last_sfo_fit.sample_clock_error_hz, last_sfo_fit.n_fit, last_sfo_fit.n_candidate,
+        last_sfo_fit.corrected ? "yes" : "no", last_los_residual.baseline_established ? "yes" : "no",
+        last_los_residual.detection_found ? "yes" : "no", last_los_residual.range_residual_m,
+        last_los_residual.vel_residual_mps, last_los_residual.delay_bias_s * 1e9, last_los_residual.cfo_bias_hz);
 
   const sensing_detection_t* top = nullptr;
   for (const sensing_detection_t& d : detections) {
@@ -462,7 +678,7 @@ void sensing_engine::process_cpi()
 
   if (top != nullptr) {
     LOG_I(PHY,
-          "SENSING: CPI #%u fc=%.1f MHz subc=%u T_slot=%u occ[csi=%lu dmrs=%lu data=%lu] range[res=%.2f max=%.0f]m "
+          "SENSING: CPI #%u fc=%.1f MHz subc=%u T_slot=%.3f occ[csi=%lu dmrs=%lu data=%lu] range[res=%.2f max=%.0f]m "
           "vel[res=%.3f max=%.1f]m/s detections=%zu top: range=%.1f m vel=%.2f m/s snr=%.1f dB\n",
           cpi_count, cpi_carrier.dl_center_hz / 1e6, nof_subc, cpi_period_slots,
           (unsigned long)src_occ[NR_ISAC_SRC_CSI_RS], (unsigned long)src_occ[NR_ISAC_SRC_PDSCH_DMRS],

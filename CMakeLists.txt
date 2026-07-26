@@ -1035,6 +1035,12 @@ target_link_libraries(PHY_NR_UE PRIVATE asn1_nr_rrc_hdrs nr_phy_common nr_common
 set(NR_UE_ISAC_SRC
   ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/isac_fft.cc
   ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/isac_sync.cc
+  ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/target_tracker.cc
+  ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/multi_target_tracker.cc
+  ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/matrix_complete.cc
+  ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/sparse_doppler.cc
+  ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/clean_deconv.cc
+  ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/eca_clutter.cc
   ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/range_doppler.cc
   ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/detection_report.cc
   ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/sensing_engine.cc
@@ -1669,6 +1675,7 @@ set (SIMUSRC
   ${OPENAIR1_DIR}/SIMULATION/TOOLS/abstraction.c
   ${OPENAIR1_DIR}/SIMULATION/TOOLS/channel_sim.c
   ${OPENAIR1_DIR}/SIMULATION/TOOLS/random_channel.c
+  ${OPENAIR1_DIR}/SIMULATION/TOOLS/sensing_channel.c
   ${OPENAIR1_DIR}/SIMULATION/TOOLS/rangen_double.c
   ${OPENAIR1_DIR}/SIMULATION/TOOLS/phase_noise.c
   ${OPENAIR1_DIR}/SIMULATION/RF/rf.c
@@ -2192,6 +2199,66 @@ if(ENABLE_TESTS)
   target_link_libraries(test_isac_sync PRIVATE NR_UE_ISAC UTIL GTest::gtest)
   add_dependencies(tests test_isac_sync)
   add_test(NAME test_isac_sync COMMAND ./test_isac_sync)
+
+  # ECA/ECA+ clutter-cancellation offline self-test (ECA_CLUTTER_HANDOVER.md rollout step 2/4):
+  # validates the CFR-domain oblique projection in isolation (mean-subtraction equivalence + mirror
+  # -ghost suppression) before RT/engine wiring, same pattern as test_isac_sync above.
+  add_executable(test_eca_clutter ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/tests/eca_clutter_test.cc)
+  target_include_directories(test_eca_clutter PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_ISAC)
+  target_link_libraries(test_eca_clutter PRIVATE NR_UE_ISAC UTIL GTest::gtest)
+  add_dependencies(tests test_eca_clutter)
+
+  # Per-CPI Kalman target track (target_tracker.{h,cc}): validates sub-bin accuracy vs the quantized
+  # detections it is fed, gating/association against false alarms, coast-and-reacquire, and filter
+  # consistency (mean NIS). Same standalone pattern as the two above.
+  add_executable(test_target_tracker ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/tests/target_tracker_test.cc)
+  target_include_directories(test_target_tracker PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_ISAC)
+  target_link_libraries(test_target_tracker PRIVATE NR_UE_ISAC UTIL GTest::gtest)
+  add_dependencies(tests test_target_tracker)
+  add_test(NAME test_target_tracker COMMAND ./test_target_tracker)
+  add_test(NAME test_eca_clutter COMMAND ./test_eca_clutter)
+
+  # Multi-object tracking (multi_target_tracker.{h,cc}): a bank of per-track filters + global greedy
+  # association + M-of-N initiation. Validates two-target association, track-ID stability across a
+  # range crossing, and spurious-track rejection. Same standalone pattern as the tests above.
+  add_executable(test_multi_target_tracker ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/tests/multi_target_tracker_test.cc)
+  target_include_directories(test_multi_target_tracker PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_ISAC)
+  target_link_libraries(test_multi_target_tracker PRIVATE NR_UE_ISAC UTIL GTest::gtest)
+  add_dependencies(tests test_multi_target_tracker)
+  add_test(NAME test_multi_target_tracker COMMAND ./test_multi_target_tracker)
+
+  # Low-rank CFR matrix completion (matrix_complete.{h,cc}): recovery accuracy, data consistency, and
+  # amplitude-gating Doppler-harmonic removal. Only needs isac_fft's icf_t; link the whole lib anyway
+  # for consistency with the other ISAC tests.
+  add_executable(test_matrix_complete ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/tests/matrix_complete_test.cc)
+  target_include_directories(test_matrix_complete PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_ISAC)
+  target_link_libraries(test_matrix_complete PRIVATE NR_UE_ISAC UTIL GTest::gtest)
+  add_dependencies(tests test_matrix_complete)
+  add_test(NAME test_matrix_complete COMMAND ./test_matrix_complete)
+
+  # L1/FISTA sparse Doppler recovery (sparse_doppler.{h,cc}): peak-to-harmonic ratio vs. dense NUDFT
+  # on a gappy tone, and preservation of a genuine second weaker target.
+  add_executable(test_sparse_doppler ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/tests/sparse_doppler_test.cc)
+  target_include_directories(test_sparse_doppler PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_ISAC)
+  target_link_libraries(test_sparse_doppler PRIVATE NR_UE_ISAC UTIL GTest::gtest)
+  add_dependencies(tests test_sparse_doppler)
+  add_test(NAME test_sparse_doppler COMMAND ./test_sparse_doppler)
+
+  # CLEAN deconvolution (clean_deconv.{h,cc}): a strong scatterer's window-PSF skirt is removed while
+  # a nearby weaker target buried in that skirt is recovered as a clean peak.
+  add_executable(test_clean_deconv ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/tests/clean_deconv_test.cc)
+  target_include_directories(test_clean_deconv PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_ISAC)
+  target_link_libraries(test_clean_deconv PRIVATE NR_UE_ISAC UTIL GTest::gtest)
+  add_dependencies(tests test_clean_deconv)
+  add_test(NAME test_clean_deconv COMMAND ./test_clean_deconv)
+
+  # Occupancy-aware forward-model CLEAN (range_doppler clean_occ_aware): end-to-end suppression of a
+  # gated Doppler harmonic through the real occupancy operator.
+  add_executable(test_occ_clean ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/tests/occ_clean_test.cc)
+  target_include_directories(test_occ_clean PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_ISAC)
+  target_link_libraries(test_occ_clean PRIVATE NR_UE_ISAC UTIL GTest::gtest)
+  add_dependencies(tests test_occ_clean)
+  add_test(NAME test_occ_clean COMMAND ./test_occ_clean)
 endif()
 
 add_subdirectory(common)

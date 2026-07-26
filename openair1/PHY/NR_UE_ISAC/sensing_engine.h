@@ -45,6 +45,9 @@
 #include "defs_nr_UE_ISAC.h"
 #include "isac_sync.h"
 #include "range_doppler.h"
+#include "target_tracker.h"
+#include "multi_target_tracker.h"
+#include "matrix_complete.h"
 
 namespace nr_isac {
 
@@ -105,12 +108,14 @@ public:
    * CFR, @p k_abs / @p l the absolute subcarrier / OFDM-symbol index of each RE.
    */
   void submit(uint32_t                 slot_idx,
+              float                    slot_frac,
               nr_isac_source_t         source,
               const nr_isac_carrier_t& carrier,
               const icf_t*              h,
               const uint32_t*          k_abs,
               const uint32_t*          l,
-              uint32_t                 nof_re);
+              uint32_t                 nof_re,
+              float                    noise_var);
 
 private:
   void run_thread();
@@ -146,9 +151,25 @@ private:
   uint32_t          cpi_count        = 0;
   uint32_t          cpi_grid_comb    = 1;  ///< grid column spacing in subcarriers (always 1 for the fused grid)
   uint32_t          cpi_comb_spacing = 0;  ///< comb of the most recent contributing source (diagnostic only)
-  uint32_t          cpi_period_slots = 0;
+  double            cpi_period_slots = 0.0; ///< mean slow-time row spacing in slots -- FRACTIONAL (see process_cpi)
+  double            prev_frac_       = 0.0; ///< previous submission's within-slot fraction (sub-slot sampling)
+  double            cpi_prev_pos     = 0.0; ///< previous submission's absolute slow-time position (slots,
+                                            ///< fractional once sub-slot sampling is on)
   uint32_t          cpi_prev_slot    = 0;
-  uint64_t          cpi_slot_span    = 0;
+  double            cpi_slot_span    = 0.0; ///< span of this CPI's rows in slots -- FRACTIONAL, so sub-slot
+                                            ///< rows land at their true slow-time position
+
+  // Monotonic UNWRAPPED absolute-slot counter, advanced on every submission across CPI boundaries, so
+  // the true inter-CPI time can be measured for the tracker's dt. cpi_slot_span (the span of a CPI's
+  // OWN rows) undercounts dt by the gap between one CPI's last row and the next CPI's first row --
+  // measured 0.105 s vs a true 0.147 s/CPI, a 29% bias that made the tracker lag. dt is now
+  // (this CPI's anchor - previous CPI's anchor) in unwrapped slots.
+  uint64_t          abs_slot_run_    = 0;   ///< running unwrapped slot count
+  uint32_t          abs_prev_raw_    = 0;   ///< previous submission's raw (wrapped) slot_idx
+  bool              abs_init_        = false;
+  uint64_t          cpi_anchor_abs_  = 0;   ///< abs_slot_run_ at this CPI's first row
+  uint64_t          prev_cpi_anchor_abs_ = 0;
+  bool              have_prev_anchor_ = false;
   nr_isac_carrier_t cpi_carrier      = {};
   uint64_t          src_occ[NR_ISAC_SRC_COUNT] = {0}; ///< per-source occurrence count in the current CPI
 
@@ -159,10 +180,18 @@ private:
   std::vector<icf_t>    h_cpi_uniform; ///< CPI matrix resampled onto a uniform slow-time grid (fed to DSP)
   std::vector<uint8_t> occ_all;       ///< Per-row occupied-subcarrier grid [cpi_slots][nof_subc]
 
+  // Inverse-variance fusion weights: running Σ(1/σ²) accumulated per grid cell, parallel to occ_all.
+  // When two sources (e.g. CSI-RS + PDSCH DM-RS) land on the same subcarrier in the same slot, h_cpi
+  // holds their inverse-variance-weighted running mean and wsum_all its total weight (see
+  // accumulate_cpi). Reset with each row alongside occ_all.
+  std::vector<float>   wsum_all;      ///< Per-row accumulated inverse-variance weight [cpi_slots][nof_subc]
+
   // Per-row native comb (min real-sample subcarrier spacing), used by the DSP to de-alias each row's
   // range profile beyond its comb's unambiguous window (kills sparse-comb grating lobes).
   std::vector<uint32_t> cpi_row_comb;     ///< native comb of each accumulated row
   std::vector<uint32_t> row_comb_uniform; ///< native comb carried onto each uniform (resampled) row
+  matrix_complete_scratch mc_scratch;     ///< reusable workspace for slow_time_complete (engine thread)
+  double tslot_ema_ = -1.0;               ///< running EMA of per-CPI T_slot for the cpi_quality_gate (neg = unseeded)
 
   // Phase 1 (ota_sync_passive_ue.md): per-CPI fine-STO tracking/correction on the raw grid, run at
   // CPI close before Stage-4b interpolation. See isac_sync.h and docs/NR_UE_ISAC_sync_gap_analysis.md.
@@ -185,6 +214,15 @@ private:
   // (no second RD/CFAR path). apply_bias_correction() runs alongside Phases 1-3 in the CPI-close
   // block; update_residual() runs in process_cpi(), after rd->process() produces detections/rvm.
   los_baseline_tracker los_tracker;
+
+  // Per-CPI multi-object Kalman tracking over the detection stream (multi_target_tracker.h -> a bank
+  // of per-track target_tracker filters + global association + M-of-N initiation). Purely additive:
+  // raw detections are unchanged; this adds cross-CPI association + continuous (sub-bin) range/rate
+  // estimates that coast through missed CPIs. Single-target operation is the special case
+  // track_max_tracks=1, track_confirm_m=1. Gated on args.track_enable.
+  std::unique_ptr<multi_target_tracker> tracker;
+  std::vector<sensing_track_t>          last_tracks;
+  int64_t                         prev_cpi_time_ns = 0;
   los_residual_t        last_los_residual;
 
   // Range-Doppler processor and its outputs (engine thread only)
