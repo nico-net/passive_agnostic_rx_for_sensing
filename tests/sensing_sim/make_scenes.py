@@ -234,6 +234,18 @@ CROSSING  = _crossing_pair()
 FIVE      = _five()
 MANOEUVRE = _manoeuvre()
 
+# Per-scene config overrides, applied at generation time. These MUST live here rather than being
+# hand-edited into the emitted .conf files: an earlier pass set max_detections by hand, then a later
+# `--write` regenerated from the base config and silently reverted it -- and the 5-target scene was
+# measured saturating the 16-detection cap in every CPI as a result, which starves the weakest target.
+OVERRIDES = {
+    "five": {
+        # 5 real targets plus their ghosts do not fit in the default cap; measured max 16/16 per CPI.
+        "max_detections": "32",
+        "track_max_tracks": "24",
+    },
+}
+
 SCENES = {
     "crossing":  (CROSSING,  True,  "two targets crossing in the bistatic cell (identity-swap test)"),
     "five":      (FIVE,      False, "five simultaneous targets (MOT scaling)"),
@@ -252,6 +264,10 @@ def main():
             import re
             base = re.sub(r'^  objects = ".*";\n', f'  objects = "{objs}";\n', base, count=1, flags=re.M)
             base = re.sub(r'subbin_interp\s*=\s*\d;', 'subbin_interp          = 1;', base)
+            for k, v in OVERRIDES.get(name, {}).items():
+                base, nsub = re.subn(rf'^(\s*){k}(\s*)=\s*[\d.]+;', rf'\g<1>{k}\g<2>= {v};', base, count=1, flags=re.M)
+                assert nsub == 1, f"override {k} did not apply to {name}"
+
             if "subbin_interp" not in base:
                 base = re.sub(r'(\n  cfar_per_row           = 1;\n)', r'\1  subbin_interp          = 1;\n', base, count=1)
             for rxn, rx in RXS.items():
