@@ -250,3 +250,81 @@ needs the multi-rep batch.
 Recommended config going forward: `cfar_per_row=1` WITH a re-opened budget (fa ~16, adaptive loop off
 or its min_det raised), since it keeps the track-level discrimination while feeding fusion enough
 detections to birth from.
+
+---
+
+# 9. Crossing, 5-target and manoeuvring scenes (2026-07-26)
+
+## Crossing: greedy association survives it -- Hungarian not warranted
+
+The first crossing design was degenerate, not a crossing (see the commit for the
+geometry: mirroring velocities about the bistatic bisector keeps both targets on
+the same iso-dR ellipse for the whole run; 100% unresolvable at rx1, so obj1's
+0% coverage was correct behaviour). Rebuilt as a TRANSVERSAL range crossing:
+co-range for 20% of the run with 7.7 m/s Doppler separation -- the minimum that
+still clears resolvability, i.e. the hardest non-degenerate case.
+
+Result, rx1: obj0 93% / obj1 90% track coverage, and **zero identity swaps**
+(check_identity.py). obj1 held one id throughout; obj0's two id switches were at
+CPI 4 and 10, during track establishment, not at the crossing. Fused across three
+receivers: **96% precision, 0.2 m median error** -- the best accuracy measured in
+this project.
+
+This settles the greedy-vs-Hungarian question open since Phase 2 Part 1: greedy
+nearest-neighbour is sufficient here. Revisit only if a scene is found where it
+demonstrably swaps.
+
+## cfar_per_row holds up at 5 targets -- hypothesis refuted
+
+Hypothesis: cfar_per_row trains along Doppler within a range row, so with many
+targets the rows get crowded and real targets contaminate each other's training,
+making the mechanism self-defeating at high target density.
+
+**Refuted, cleanly.** Same scene, same cap, only the flag differing:
+
+| rx1, 5 targets | per_row=1 | per_row=0 |
+|---|---|---|
+| raw precision | 38% | 23% |
+| track precision | 53% | 32% |
+| false detections | 477 | 986 |
+| fused world precision | 30% | 11% |
+| fused median error | 27.9 m | 103.3 m |
+| fused track ids | 29 | 37 |
+| obj3 detection coverage | 52% | **52%** |
+
+Turning it off made everything worse -- fused precision fell by a factor of ~3
+and median world error nearly quadrupled. So cfar_per_row is beneficial at 5
+targets too, not just at 2. Keep it on.
+
+## obj3's detection deficit: four causes eliminated, still open
+
+obj3 is detected in only ~52% of CPIs while its neighbours reach 89-98%. Measured
+eliminations, each by changing one thing:
+  - NOT the detection cap: raising max_detections 16 -> 32 improved obj3's TRACK
+    coverage 37% -> 62% but left DETECTION coverage at exactly 52%, and cost
+    fused precision (43% -> 30%) by admitting more ghosts. Partial factor for
+    tracking only.
+  - NOT cfar_per_row: 52% either way (table above).
+  - NOT the clutter notch: the notch is +/-1.1 m/s and obj3's slowest rate is
+    7.5 m/s, i.e. 21 bins clear.
+  - NOT Doppler aliasing: mean achieved vel_max is +/-82 m/s across these runs
+    (sub-slot sampling working as designed) against target rates of 7.5-20.6 m/s.
+    (An earlier reading of "+/-22 m/s" was taken from the first CPI of a run,
+    which is unrepresentative -- T_slot is large during startup. Mean T_slot is
+    1.0 slots. Do not size scenes from a single CPI line.)
+
+What remains: obj3 has both the lowest bistatic range-rate (7.5-11.6 m/s vs
+10-21 for the others) and the lowest matched-detection SNR (18.4 dB vs 20.3-20.8),
+despite the simulator applying no path loss, so all five taps have equal
+amplitude. The likely mechanism is local competition -- neighbouring targets'
+sidelobe structure entering obj3's CFAR training -- but that has NOT been
+demonstrated and should not be asserted without a measurement.
+
+## Scene generator
+
+make_scenes.py now designs, verifies and emits all three scenes, with per-scene
+overrides in an OVERRIDES dict so regeneration cannot silently drop them (it did:
+a hand-edited max_detections was reverted by a later --write, and the 5-target
+scene was then measured saturating 16/16 detections per CPI). The verifier bounds
+crossing overlap rather than disabling the resolvability check, which is what let
+the degenerate crossing through in the first place.
