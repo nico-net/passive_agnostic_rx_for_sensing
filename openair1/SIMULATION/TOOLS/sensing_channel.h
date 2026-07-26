@@ -89,6 +89,29 @@ void *sensing_channel_make(channel_desc_t *cd,
                            const char     *objects_spec);
 
 /**
+ * @brief Attach an RX antenna-array geometry so per-antenna taps carry the correct inter-element
+ * phase (this is what makes AoA observable in simulation — see PHASE3_AOA_MULTISTATIC_HANDOVER §5.5).
+ *
+ * Without this the descriptor's rx antennas all receive the identical CIR and any AoA estimator
+ * reads exactly zero phase difference. With it, element @c i at offset @c d_i gets the extra factor
+ * @c exp(+j*2*pi*(d_i·û)/lambda), where @c û points FROM the receiver TOWARDS the scatterer (the
+ * element is closer to the source by @c d_i·û, hence a phase ADVANCE).
+ *
+ * Narrowband array assumption, stated so it isn't re-derived: the across-aperture delay spread
+ * (~4 cm / c = 0.13 ns) is two orders of magnitude below one sample at any rate this simulator runs
+ * at (8.1 ns at 122.88 MHz), so the element offset changes the tap PHASE only, never its delay
+ * @c tau. All elements therefore share one fractional-delay kernel.
+ *
+ * @param traj          the handle returned by sensing_channel_make()/_parse().
+ * @param spec          element offsets, "x,y;x,y;..." in metres, in the ARRAY frame. NULL/empty (or
+ *                      a single element) restores the co-located behaviour exactly.
+ * @param boresight_deg rotation of the array frame into ENU (degrees CCW from +x/east); the offsets
+ *                      are rotated by this once, here, so everything downstream is ENU-aligned.
+ * @return number of elements accepted (0 on a NULL/empty/malformed spec).
+ */
+int sensing_channel_set_rx_array(void *traj, const char *spec, double boresight_deg);
+
+/**
  * @brief Rebuild cd->ch[] from the object trajectories at this block's (midpoint) time.
  *
  * Called from update_channel_model() once per rfsimulator RX block when cd->sensing_traj != NULL.

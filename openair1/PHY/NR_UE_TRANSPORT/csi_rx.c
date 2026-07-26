@@ -23,6 +23,9 @@
 #include "PHY/NR_UE_ESTIMATION/filt16a_32.h"
 #include "PHY/NR_UE_ISAC/nr_isac.h"
 
+/// Max rx antennas the CSI-RS sensing tap will extract for the receive-array AoA path.
+#define NR_ISAC_CSIRS_MAX_ANT 8
+
 //#define NR_CSIRS_DEBUG
 //#define NR_CSIIM_DEBUG
 
@@ -794,32 +797,51 @@ void nr_ue_csi_im_procedures(PHY_VARS_NR_UE *ue,
   ue->nr_csi_info->csi_im_meas_computed = true;
 }
 
-// ISAC sensing tap: submit the raw per-RB CSI-RS LS estimates (Ĥ, antenna 0 / port 0) to the sensing
-// engine as one slow-time sample. Reports the full carrier width and CRB0-absolute subcarriers
-// (k = rb*12) so the row shares a common grid with the PDSCH source when both feed a fused CFR. Shared
-// by the own-CSI-RS path (nr_ue_csi_rs_procedures) and the UE-agnostic monitor path
+// ISAC sensing tap: submit the raw per-RB CSI-RS LS estimates (Ĥ, port 0) to the sensing engine as
+// one slow-time sample. Reports the full carrier width and CRB0-absolute subcarriers (k = rb*12) so
+// the row shares a common grid with the PDSCH source when both feed a fused CFR. Shared by the
+// own-CSI-RS path (nr_ue_csi_rs_procedures) and the UE-agnostic monitor path
 // (nr_ue_csi_rs_sensing_capture).
+//
+// @param ls          &csi_rs_ls_estimated_channel[0][0][0]
+// @param ant_stride  distance (in c16_t) between consecutive rx antennas' planes, i.e. ports *
+//                    ofdm_symbol_size. Only used when the receive-array AoA path wants more than one
+//                    antenna; otherwise this reads exactly the antenna-0 plane it always did.
+#define NR_ISAC_CSIRS_MAX_RE 275
 static void nr_isac_submit_csirs_ls(const NR_DL_FRAME_PARMS *frame_parms,
                              const UE_nr_rxtx_proc_t *proc,
                              const fapi_nr_dl_config_csirs_pdu_rel15_t *csirs_config_pdu,
                              const c16_t *ls,
+                             size_t ant_stride,
                              int loverline0,
                              uint32_t noise_power)
 {
   const uint16_t stop_rb = csirs_config_pdu->start_rb + csirs_config_pdu->nr_of_rbs;
-  static __thread float    isac_h[2 * 275];
-  static __thread uint32_t isac_k[275];
-  static __thread uint32_t isac_l[275];
+  uint32_t nof_ant = nr_isac_aoa_antennas();
+  if (nof_ant > (uint32_t)frame_parms->nb_antennas_rx)
+    nof_ant = (uint32_t)frame_parms->nb_antennas_rx;
+  if (nof_ant == 0 || ant_stride == 0)
+    nof_ant = 1;
+  if (nof_ant > NR_ISAC_CSIRS_MAX_ANT)
+    nof_ant = NR_ISAC_CSIRS_MAX_ANT;
+
+  static __thread float    isac_h[NR_ISAC_CSIRS_MAX_ANT * 2 * NR_ISAC_CSIRS_MAX_RE];
+  static __thread uint32_t isac_k[NR_ISAC_CSIRS_MAX_RE];
+  static __thread uint32_t isac_l[NR_ISAC_CSIRS_MAX_RE];
   uint32_t nof_re = 0;
-  for (int rb = csirs_config_pdu->start_rb; rb < stop_rb && nof_re < 275; rb++) {
+  for (int rb = csirs_config_pdu->start_rb; rb < stop_rb && nof_re < NR_ISAC_CSIRS_MAX_RE; rb++) {
     if (csirs_config_pdu->freq_density <= 1 && csirs_config_pdu->freq_density != (rb % 2)) {
       continue;
     }
-    const uint16_t kk      = rb * NR_NB_SC_PER_RB;
-    isac_h[2 * nof_re]     = (float)ls[kk].r;
-    isac_h[2 * nof_re + 1] = (float)ls[kk].i;
-    isac_k[nof_re]         = kk;
-    isac_l[nof_re]         = (uint32_t)loverline0;
+    const uint16_t kk = rb * NR_NB_SC_PER_RB;
+    for (uint32_t a = 0; a < nof_ant; a++) {
+      const c16_t v = ls[a * ant_stride + kk];
+      const size_t o = 2 * ((size_t)a * NR_ISAC_CSIRS_MAX_RE + nof_re);
+      isac_h[o]     = (float)v.r;
+      isac_h[o + 1] = (float)v.i;
+    }
+    isac_k[nof_re] = kk;
+    isac_l[nof_re] = (uint32_t)loverline0;
     nof_re++;
   }
   if (nof_re > 0) {
@@ -829,7 +851,8 @@ static void nr_isac_submit_csirs_ls(const NR_DL_FRAME_PARMS *frame_parms,
                                  .pci             = frame_parms->Nid_cell,
                                  .slots_per_frame = frame_parms->slots_per_frame};
     const uint32_t slot_idx = (uint32_t)(proc->frame_rx * frame_parms->slots_per_frame + proc->nr_slot_rx);
-    nr_isac_submit_cfr(slot_idx, NR_ISAC_SRC_CSI_RS, &carrier, isac_h, isac_k, isac_l, nof_re, (float)noise_power);
+    nr_isac_submit_cfr_multi(slot_idx, 0.0f, NR_ISAC_SRC_CSI_RS, &carrier, isac_h, nof_ant, NR_ISAC_CSIRS_MAX_RE,
+                             isac_k, isac_l, nof_re, (float)noise_power);
   }
 }
 
@@ -934,11 +957,13 @@ void nr_ue_csi_rs_procedures(PHY_VARS_NR_UE *ue,
                                  &log2_maxh,
                                  &noise_power);
 
-  // ISAC sensing tap (CSI-RS source): submit the raw per-RB LS estimates (Ĥ) of antenna 0 / port 0.
+  // ISAC sensing tap (CSI-RS source): submit the raw per-RB LS estimates (Ĥ) of port 0, for as many rx
+  // antennas as the receive-array AoA path asks for (one otherwise).
   // Guarded on measurement_bitmap>1 here because that gates the channel estimation above (own path).
   if (csirs_config_pdu->measurement_bitmap > 1 && nr_isac_enabled() && nr_isac_source_enabled(NR_ISAC_SRC_CSI_RS)) {
-    nr_isac_submit_csirs_ls(frame_parms, proc, csirs_config_pdu, csi_rs_ls_estimated_channel[0][0],
-                            mapping_parms.loverline[0], noise_power);
+    nr_isac_submit_csirs_ls(frame_parms, proc, csirs_config_pdu, &csi_rs_ls_estimated_channel[0][0][0],
+                            (size_t)mapping_parms.ports * frame_parms->ofdm_symbol_size, mapping_parms.loverline[0],
+                            noise_power);
   }
 
   uint8_t rank_indicator = 0;
@@ -1075,6 +1100,7 @@ void nr_ue_csi_rs_sensing_capture(PHY_VARS_NR_UE *ue,
                                &log2_maxh,
                                &noise_power);
 
-  nr_isac_submit_csirs_ls(frame_parms, proc, csirs_config_pdu, csi_rs_ls_estimated_channel[0][0],
-                          mapping_parms.loverline[0], noise_power);
+  nr_isac_submit_csirs_ls(frame_parms, proc, csirs_config_pdu, &csi_rs_ls_estimated_channel[0][0][0],
+                          (size_t)mapping_parms.ports * frame_parms->ofdm_symbol_size, mapping_parms.loverline[0],
+                          noise_power);
 }

@@ -43,6 +43,7 @@
 #include <vector>
 
 #include "defs_nr_UE_ISAC.h"
+#include "isac_aoa.h"
 #include "isac_sync.h"
 #include "range_doppler.h"
 #include "target_tracker.h"
@@ -112,6 +113,7 @@ public:
               nr_isac_source_t         source,
               const nr_isac_carrier_t& carrier,
               const icf_t*              h,
+              uint32_t                 nof_ant,
               const uint32_t*          k_abs,
               const uint32_t*          l,
               uint32_t                 nof_re,
@@ -224,6 +226,22 @@ private:
   std::vector<sensing_track_t>          last_tracks;
   int64_t                         prev_cpi_time_ns = 0;
   los_residual_t        last_los_residual;
+
+  // ---- Receive-array AoA (isac_aoa.h) ----------------------------------------------------------
+  // A SEPARATE, raw per-antenna grid running alongside the primary one. It is deliberately not the
+  // same buffer: the primary grid is mutated in place by the sync trackers, matrix completion, gap
+  // fill and (later) ECA/whitening, all of which are either data-dependent per antenna or irrelevant
+  // to a phase difference. Keeping the AoA copy raw means the estimator's chain is provably identical
+  // across antennas, which is the whole basis of the measurement (see isac_aoa.h). The occupancy mask
+  // (occ_all) and row times (cpi_row_time) are SHARED -- every antenna observes the same REs.
+  uint32_t                       aoa_ant_ = 0;  ///< 0/1 => AoA off; no aux grid is allocated
+  std::vector<icf_t>             h_cpi_ant;     ///< [nof_ant][cpi_slots][nof_subc], raw
+  std::unique_ptr<aoa_estimator> aoa;
+  aoa_array_t                    aoa_array;
+  bool                           aoa_array_ready_ = false; ///< parsed once the carrier fc is known
+  std::vector<aoa_estimate_t>    aoa_out;
+  uint32_t                       aoa_ant_seen_ = 0;     ///< max antennas any submission actually carried
+  bool                           aoa_warned_   = false; ///< one-shot "configured but single-antenna" warning
 
   // Range-Doppler processor and its outputs (engine thread only)
   std::unique_ptr<range_doppler>   rd;

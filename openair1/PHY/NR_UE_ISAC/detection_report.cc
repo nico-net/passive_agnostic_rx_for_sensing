@@ -158,6 +158,21 @@ std::string build_detection_report_json(const detection_report_t& rep)
   out += ",\"vel_max_mps\":";
   append_json_double(out, rvm.vel_max_mps);
 
+  // Per-receiver measurement noise (isac-core TrackerParams fallbacks otherwise). Declared by the
+  // receiver because a heterogeneous fleet -- a 100 MHz X410 next to a 20-56 MHz B210 -- has very
+  // different range variance, and one global value lets the coarser receiver drag every fused fix.
+  // Derived from THIS run's own resolution rather than hand-picked: a peak quantised to a bin has a
+  // uniform error over that bin, i.e. std = bin/sqrt(12); sub-bin interpolation removes the
+  // quantisation and leaves an SNR-limited residual, empirically a few tenths of a bin.
+  if (rvm.range_res_m > 0.0f) {
+    out += ",\"range_std_m\":";
+    append_json_double(out, rep.subbin_interp ? rvm.range_res_m * 0.3 : rvm.range_res_m / std::sqrt(12.0));
+  }
+  if (rvm.vel_res_mps > 0.0f) {
+    out += ",\"rate_std_mps\":";
+    append_json_double(out, rep.subbin_interp ? rvm.vel_res_mps * 0.3 : rvm.vel_res_mps / std::sqrt(12.0));
+  }
+
   out += ",\"detections\":[";
   if (rep.detections != nullptr) {
     bool first = true;
@@ -172,6 +187,16 @@ std::string build_detection_report_json(const detection_report_t& rep)
       append_json_double(out, d.vel_mps);
       out += ",\"snr_db\":";
       append_json_double(out, d.snr_db);
+      // Bearing fields are OMITTED (not null, not zero) when this receiver has no array or the
+      // estimate failed its quality gate: isac-core's Detection has them as serde-default Options, so
+      // an absent azimuth degrades cleanly to a 2-D range/rate measurement instead of injecting a
+      // bogus 0-degree bearing.
+      if (d.azimuth_valid) {
+        out += ",\"azimuth_deg\":";
+        append_json_double(out, d.azimuth_deg);
+        out += ",\"azimuth_std_deg\":";
+        append_json_double(out, d.azimuth_std_deg);
+      }
       out += '}';
     }
   }

@@ -1345,7 +1345,32 @@ static void nr_isac_pdsch_data_aided_tap(PHY_VARS_NR_UE *ue,
   const int      start_re = (fp->first_carrier_offset + (dlsch_config->BWPStart + freq_alloc->first_rb) * NR_NB_SC_PER_RB)
                            % fp->ofdm_symbol_size;
 
-  static __thread float    isac_h[2 * 273 * 12 * 14] __attribute__((aligned(32)));
+  // Receive-array AoA (PHASE3_AOA_MULTISTATIC_HANDOVER 5.4): extract Ĥ = Y/X for every rx antenna,
+  // not just antenna 0. X is the SAME reconstructed transport block for all of them, so this is a
+  // pure inner loop over rxdataF[a] -- the per-element phase difference it captures IS the bearing.
+  const uint32_t isac_max_re = 273 * 12 * 14;
+  uint32_t       isac_nof_ant = nr_isac_aoa_antennas();
+  if (isac_nof_ant > (uint32_t)fp->nb_antennas_rx)
+    isac_nof_ant = (uint32_t)fp->nb_antennas_rx;
+  if (isac_nof_ant == 0)
+    isac_nof_ant = 1;
+
+  // Heap + thread-local pointer rather than a __thread array: with AoA on this is nof_ant x 367 kB,
+  // which would bloat every DL worker's TLS block even in the far more common single-antenna case --
+  // and a shifted TLS layout is exactly what produced the AVX alignment fault documented above.
+  // Allocated once per thread, grown if the antenna count ever rises.
+  static __thread float*   isac_h        = NULL;
+  static __thread uint32_t isac_h_nant   = 0;
+  if (isac_h == NULL || isac_h_nant < isac_nof_ant) {
+    free(isac_h);
+    isac_h = (float *)aligned_alloc(32, (size_t)isac_nof_ant * 2 * isac_max_re * sizeof(float));
+    if (isac_h == NULL) {
+      isac_h_nant = 0;
+      LOG_W(NR_PHY, "SENSING: data-aided tap skipped -- could not allocate the per-antenna CFR buffer\n");
+      return;
+    }
+    isac_h_nant = isac_nof_ant;
+  }
   static __thread uint32_t isac_k[273 * 12 * 14];
   static __thread uint32_t isac_l[273 * 12 * 14];
   // Per-contributing-symbol slice bookkeeping, for sub-slot sampling: REs are emitted symbol by
@@ -1365,24 +1390,27 @@ static void nr_isac_pdsch_data_aided_tap(PHY_VARS_NR_UE *ue,
 
     const uint32_t sym_re0 = nof_re;
     double         ypow    = 0.0;
-    const c16_t *rxF = &rxdataF[0][l * fp->ofdm_symbol_size];
     for (int j = 0; j < num_sc && nof_re < max_re && mod_idx < TB_parameters.G / cw->qamModOrder; j++) {
       int re = start_re + j;
       if (re >= fp->ofdm_symbol_size)
         re -= fp->ofdm_symbol_size;
-      const c16_t y = rxF[re];
       const c16_t x = mod_syms[mod_idx++];
       const float xr = (float)x.r, xi = (float)x.i;
       const float xmag2 = xr * xr + xi * xi;
       if (xmag2 < 1e-6f)
         continue; // shouldn't happen for a QAM point, but guard the division
-      const float yr = (float)y.r, yi = (float)y.i;
-      // Ĥ = Y / X = Y * conj(X) / |X|^2
-      isac_h[2 * nof_re]     = (yr * xr + yi * xi) / xmag2;
-      isac_h[2 * nof_re + 1] = (yi * xr - yr * xi) / xmag2;
+      for (uint32_t a = 0; a < isac_nof_ant; a++) {
+        const c16_t y  = rxdataF[a][l * fp->ofdm_symbol_size + re];
+        const float yr = (float)y.r, yi = (float)y.i;
+        // Ĥ = Y / X = Y * conj(X) / |X|^2
+        const size_t o = (size_t)2 * ((size_t)a * isac_max_re + nof_re);
+        isac_h[o]     = (yr * xr + yi * xi) / xmag2;
+        isac_h[o + 1] = (yi * xr - yr * xi) / xmag2;
+        if (a == 0)
+          ypow += (double)yr * yr + (double)yi * yi; // gates judge the primary antenna
+      }
       isac_k[nof_re]         = base_sc + (uint32_t)j;
       isac_l[nof_re]         = (uint32_t)l;
-      ypow += (double)yr * yr + (double)yi * yi;
       nof_re++;
     }
     if (nof_re > sym_re0 && nof_sym < sizeofArray(sym_id)) {
@@ -1421,7 +1449,8 @@ static void nr_isac_pdsch_data_aided_tap(PHY_VARS_NR_UE *ue,
   const uint32_t sub_target = nr_isac_subslot_config(&sub_min_re, &sub_min_snr_db);
 
   if (sub_target == 0 || nof_sym <= 1) {
-    nr_isac_submit_cfr(slot_idx, NR_ISAC_SRC_PDSCH_DATA, &carrier, isac_h, isac_k, isac_l, nof_re, (float)nvar);
+    nr_isac_submit_cfr_multi(slot_idx, 0.0f, NR_ISAC_SRC_PDSCH_DATA, &carrier, isac_h, isac_nof_ant, isac_max_re,
+                             isac_k, isac_l, nof_re, (float)nvar);
     return;
   }
 
@@ -1446,21 +1475,26 @@ static void nr_isac_pdsch_data_aided_tap(PHY_VARS_NR_UE *ue,
       // Place the row at the group's centre symbol, in slots within this slot.
       const double centre = 0.5 * ((double)sym_id[g_first] + (double)sym_id[i]) + 0.5;
       const float  frac   = (float)(centre / (double)NR_SYMBOLS_PER_SLOT);
-      nr_isac_submit_cfr_at(slot_idx, frac, NR_ISAC_SRC_PDSCH_DATA, &carrier, &isac_h[2 * sym_start[g_first]],
-                            &isac_k[sym_start[g_first]], &isac_l[sym_start[g_first]], g_re, (float)nvar);
+      // Slice, not copy: ant_stride_re stays the FULL buffer stride so antenna a's slice starts at
+      // the same symbol offset within its own plane.
+      nr_isac_submit_cfr_multi(slot_idx, frac, NR_ISAC_SRC_PDSCH_DATA, &carrier, &isac_h[2 * sym_start[g_first]],
+                               isac_nof_ant, isac_max_re, &isac_k[sym_start[g_first]], &isac_l[sym_start[g_first]],
+                               g_re, (float)nvar);
       emitted++;
       g_first = i + 1;
     } else if (is_last) {
       // Tail that never passed the gates: merge it BACKWARDS by re-emitting from g_first to the end
       // as one row if nothing has been emitted yet, otherwise fold it into the whole-slot fallback.
       if (emitted == 0) {
-        nr_isac_submit_cfr(slot_idx, NR_ISAC_SRC_PDSCH_DATA, &carrier, isac_h, isac_k, isac_l, nof_re, (float)nvar);
+        nr_isac_submit_cfr_multi(slot_idx, 0.0f, NR_ISAC_SRC_PDSCH_DATA, &carrier, isac_h, isac_nof_ant, isac_max_re,
+                                 isac_k, isac_l, nof_re, (float)nvar);
         emitted++;
       } else {
         const double centre = 0.5 * ((double)sym_id[g_first] + (double)sym_id[i]) + 0.5;
         const float  frac   = (float)(centre / (double)NR_SYMBOLS_PER_SLOT);
-        nr_isac_submit_cfr_at(slot_idx, frac, NR_ISAC_SRC_PDSCH_DATA, &carrier, &isac_h[2 * sym_start[g_first]],
-                              &isac_k[sym_start[g_first]], &isac_l[sym_start[g_first]], g_re, (float)nvar);
+        nr_isac_submit_cfr_multi(slot_idx, frac, NR_ISAC_SRC_PDSCH_DATA, &carrier, &isac_h[2 * sym_start[g_first]],
+                                 isac_nof_ant, isac_max_re, &isac_k[sym_start[g_first]], &isac_l[sym_start[g_first]],
+                                 g_re, (float)nvar);
       }
     }
   }

@@ -240,6 +240,179 @@ TEST(sensing_channel, fractional_delay_spreads_energy_across_taps)
   free_bare_desc(cd_sinc);
 }
 
+// ---------------------------------------------------------------------------------------------
+// RX array steering (PHASE3_AOA_MULTISTATIC_HANDOVER §5.5)
+// ---------------------------------------------------------------------------------------------
+
+namespace {
+
+// Multi-antenna descriptor: nb_tx=1, nb_rx=N, ch[] laid out [aarx + aatx*nb_rx].
+channel_desc_t *make_array_desc(uint64_t center_freq, double fs, int init_taps, int nb_rx)
+{
+  channel_desc_t *cd = (channel_desc_t *)calloc(1, sizeof(channel_desc_t));
+  cd->nb_tx          = 1;
+  cd->nb_rx          = nb_rx;
+  cd->center_freq    = center_freq;
+  cd->sampling_rate  = fs;
+  cd->channel_length = init_taps;
+  cd->ch             = (struct complexd **)calloc(nb_rx, sizeof(struct complexd *));
+  for (int a = 0; a < nb_rx; a++) {
+    cd->ch[a] = (struct complexd *)calloc(init_taps, sizeof(struct complexd));
+  }
+  return cd;
+}
+
+void free_array_desc(channel_desc_t *cd)
+{
+  for (int a = 0; a < cd->nb_rx; a++) {
+    free(cd->ch[a]);
+  }
+  free(cd->ch);
+  free(cd);
+}
+
+// Aggregate object phasor (all taps except the LOS bin 0) on one rx antenna.
+std::complex<double> object_phasor_ant(const channel_desc_t *cd, int aarx)
+{
+  std::complex<double> acc(0.0, 0.0);
+  for (int l = 1; l < (int)cd->channel_length; l++) {
+    acc += std::complex<double>(cd->ch[aarx][l].r, cd->ch[aarx][l].i);
+  }
+  return acc;
+}
+
+} // namespace
+
+// With no rx_array configured, every antenna must see the IDENTICAL CIR — i.e. the array support is
+// strictly opt-in and cannot perturb any existing scene.
+TEST(sensing_channel_array, unconfigured_array_leaves_antennas_identical)
+{
+  const uint64_t fc = 3414990000ULL;
+  const double   fs = 61.44e6;
+  channel_desc_t *cd = make_array_desc(fc, fs, 4, /*nb_rx=*/4);
+  cd->sensing_traj = sensing_channel_make(cd, 0, 0, 100, 0, 0.0, 0.0, 8, 128, "1.0;0,50,80");
+  ASSERT_NE(cd->sensing_traj, nullptr);
+  sensing_channel_update(cd, 0, 0);
+
+  for (int a = 1; a < cd->nb_rx; a++) {
+    for (int l = 0; l < (int)cd->channel_length; l++) {
+      EXPECT_NEAR(cd->ch[a][l].r, cd->ch[0][l].r, 1e-12) << "ant " << a << " tap " << l;
+      EXPECT_NEAR(cd->ch[a][l].i, cd->ch[0][l].i, 1e-12) << "ant " << a << " tap " << l;
+    }
+  }
+  sensing_channel_free(cd->sensing_traj);
+  free_array_desc(cd);
+}
+
+// The core AoA property: with a lambda/2 two-element array along x, the inter-element phase
+// difference of an object's tap must equal 2*pi*d*cos(theta)/lambda, where theta is the object's
+// true ENU bearing from the receiver. This is exactly what the UE-side interferometric estimator
+// inverts, so getting the sign wrong here would make every simulated AoA mirror-image correct.
+TEST(sensing_channel_array, two_element_phase_difference_matches_true_bearing)
+{
+  const uint64_t fc     = 3414990000ULL;
+  const double   fs     = 61.44e6;
+  const double   lambda = C_LIGHT / (double)fc;
+  const double   d      = lambda / 2.0;
+
+  const double tx_x = 0, tx_y = 0, rx_x = 100, rx_y = 0;
+  // Several bearings, including behind the array and near broadside.
+  for (const auto &obj : {std::pair<double, double>{50, 80}, {160, 60}, {40, -70}, {100, 150}}) {
+    channel_desc_t *cd = make_array_desc(fc, fs, 4, /*nb_rx=*/2);
+    char spec[128];
+    snprintf(spec, sizeof(spec), "1.0;0,%.1f,%.1f", obj.first, obj.second);
+    cd->sensing_traj = sensing_channel_make(cd, tx_x, tx_y, rx_x, rx_y, 0.0, 0.0, 8, 128, spec);
+    ASSERT_NE(cd->sensing_traj, nullptr);
+    // Elements at x=0 and x=d, array frame aligned to ENU.
+    char arr[64];
+    snprintf(arr, sizeof(arr), "0,0;%.9f,0", d);
+    ASSERT_EQ(sensing_channel_set_rx_array(cd->sensing_traj, arr, 0.0), 2);
+    sensing_channel_update(cd, 0, 0);
+
+    const std::complex<double> z0 = object_phasor_ant(cd, 0);
+    const std::complex<double> z1 = object_phasor_ant(cd, 1);
+    const double measured = std::arg(z1 * std::conj(z0));
+
+    const double theta    = std::atan2(obj.second - rx_y, obj.first - rx_x);
+    const double expected = 2.0 * M_PI * d * std::cos(theta) / lambda;
+    double diff = measured - expected;
+    diff -= 2.0 * M_PI * std::round(diff / (2.0 * M_PI));
+    EXPECT_NEAR(diff, 0.0, 1e-3) << "obj=(" << obj.first << "," << obj.second << ") theta="
+                                 << theta * 180.0 / M_PI << "deg";
+    sensing_channel_free(cd->sensing_traj);
+    free_array_desc(cd);
+  }
+}
+
+// The boresight rotation must be equivalent to rotating the element coordinates by hand: an array
+// declared along its own +x with boresight 90 deg is the same physical array as one declared along
+// ENU +y with boresight 0.
+TEST(sensing_channel_array, boresight_rotation_matches_hand_rotated_elements)
+{
+  const uint64_t fc     = 3414990000ULL;
+  const double   fs     = 61.44e6;
+  const double   lambda = C_LIGHT / (double)fc;
+  const double   d      = lambda / 2.0;
+  const char    *spec   = "1.0;0,50,80";
+
+  char along_x[64], along_y[64];
+  snprintf(along_x, sizeof(along_x), "0,0;%.9f,0", d);
+  snprintf(along_y, sizeof(along_y), "0,0;0,%.9f", d);
+
+  channel_desc_t *rot = make_array_desc(fc, fs, 4, 2);
+  rot->sensing_traj   = sensing_channel_make(rot, 0, 0, 100, 0, 0.0, 0.0, 8, 128, spec);
+  ASSERT_EQ(sensing_channel_set_rx_array(rot->sensing_traj, along_x, 90.0), 2);
+  sensing_channel_update(rot, 0, 0);
+
+  channel_desc_t *hand = make_array_desc(fc, fs, 4, 2);
+  hand->sensing_traj   = sensing_channel_make(hand, 0, 0, 100, 0, 0.0, 0.0, 8, 128, spec);
+  ASSERT_EQ(sensing_channel_set_rx_array(hand->sensing_traj, along_y, 0.0), 2);
+  sensing_channel_update(hand, 0, 0);
+
+  const double a_rot  = std::arg(object_phasor_ant(rot, 1) * std::conj(object_phasor_ant(rot, 0)));
+  const double a_hand = std::arg(object_phasor_ant(hand, 1) * std::conj(object_phasor_ant(hand, 0)));
+  EXPECT_NEAR(a_rot, a_hand, 1e-6);
+
+  sensing_channel_free(rot->sensing_traj);
+  free_array_desc(rot);
+  sensing_channel_free(hand->sensing_traj);
+  free_array_desc(hand);
+}
+
+// The LOS/direct-path tap must be steered by the ILLUMINATOR's bearing, not left unsteered. This is
+// the whole basis of the direct-path array self-calibration: the receiver knows where the gNB is, so
+// the LOS tap's inter-element phase is a known reference it can null out.
+TEST(sensing_channel_array, los_tap_carries_the_illuminator_bearing)
+{
+  const uint64_t fc     = 3414990000ULL;
+  const double   fs     = 61.44e6;
+  const double   lambda = C_LIGHT / (double)fc;
+  const double   d      = lambda / 2.0;
+
+  // TX at (0,0), RX at (100,60): the illuminator sits at bearing atan2(-60,-100) from the receiver.
+  const double tx_x = 0, tx_y = 0, rx_x = 100, rx_y = 60;
+  channel_desc_t *cd = make_array_desc(fc, fs, 8, /*nb_rx=*/2);
+  // LOS only (no objects), so tap 0 is unambiguously the direct path.
+  cd->sensing_traj = sensing_channel_make(cd, tx_x, tx_y, rx_x, rx_y, 0.0, 0.0, 8, 128, "");
+  ASSERT_NE(cd->sensing_traj, nullptr);
+  char arr[64];
+  snprintf(arr, sizeof(arr), "0,0;%.9f,0", d);
+  ASSERT_EQ(sensing_channel_set_rx_array(cd->sensing_traj, arr, 0.0), 2);
+  sensing_channel_update(cd, 0, 0);
+
+  const std::complex<double> z0(cd->ch[0][0].r, cd->ch[0][0].i);
+  const std::complex<double> z1(cd->ch[1][0].r, cd->ch[1][0].i);
+  const double measured = std::arg(z1 * std::conj(z0));
+  const double theta    = std::atan2(tx_y - rx_y, tx_x - rx_x);
+  const double expected = 2.0 * M_PI * d * std::cos(theta) / lambda;
+  double diff = measured - expected;
+  diff -= 2.0 * M_PI * std::round(diff / (2.0 * M_PI));
+  EXPECT_NEAR(diff, 0.0, 1e-6);
+
+  sensing_channel_free(cd->sensing_traj);
+  free_array_desc(cd);
+}
+
 int main(int argc, char **argv)
 {
   logInit();

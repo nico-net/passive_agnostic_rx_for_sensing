@@ -15,6 +15,10 @@ them fails SILENTLY (the target is simply never detected, with no error message)
                       time.
   * Separation     -- targets must be resolvable in (dR, rate) except where a crossing is the POINT
                       of the scene.
+  * AoA (arrays)   -- for receivers carrying an antenna array: element spacing must not exceed
+                      lambda/2 (above it, distinct bearings fold onto the same measured phase and the
+                      estimator is confidently WRONG rather than obviously bad), and targets should
+                      not sit at endfire, where a ULA's dphi/dtheta -> 0 and bearing accuracy collapses.
 
 Usage: make_scenes.py [--write]   (without --write it only prints the verification report)
 """
@@ -29,6 +33,35 @@ TAPCAP = 622.0     # 100 MHz / 273 PRB
 T_OBS = 10.0       # the harness captures ~8-10 s of trajectory per run
 CROSS_MAX_FRAC = 0.20  # a crossing may overlap at most this fraction of the run
 REFL = 0.30        # < LOS gain 1.0, so no reflector hijacks the UE's own time sync
+
+# --------------------------------------------------------------------------- AoA / array geometry
+# Mirrors the planned hardware (PHASE3_AOA_MULTISTATIC_HANDOVER §5): 2x USRP X410 (phase-coherent
+# multi-channel -> bearing capable) + 1x B210 (single channel -> range/Doppler only). rx3 therefore
+# has NO array entry, which is not an oversight: a heterogeneous fleet is the case the per-pair
+# measurement dimension in isac-core exists for.
+FC_HZ  = 3414.99e6
+LAMBDA = 299792458.0 / FC_HZ
+HALF_L = LAMBDA / 2.0
+# Uniform linear arrays, element offsets in the ARRAY frame; boresight rotates that frame into ENU.
+# Spacing is exactly lambda/2 -- the largest unambiguous ULA spacing.
+def _ula(n, d=HALF_L):
+    return [(i * d, 0.0) for i in range(n)]
+
+RX_ARRAYS = {
+    "rx1": (_ula(4), 90.0),   # X410, 4 elements, array axis along ENU +y
+    "rx2": (_ula(4), 0.0),    # X410, 4 elements, array axis along ENU +x
+    # rx3: B210, single channel -> no array
+}
+# Angular separation below which two targets are unresolved by the array (Rayleigh limit of a ULA at
+# broadside, lambda / aperture). Only a WARNING: an unresolved bearing pair is still perfectly usable
+# for fusion as long as the pair is separated in range or Doppler.
+def _beamwidth_deg(elems):
+    ap = max(math.hypot(a[0] - b[0], a[1] - b[1]) for a in elems for b in elems)
+    return math.degrees(LAMBDA / ap) if ap > 0 else 180.0
+# Within this many degrees of the array axis (endfire) the bearing estimate degrades sharply, because
+# the measured phase varies as cos(theta): d(phase)/d(theta) vanishes there.
+ENDFIRE_DEG = 15.0
+ENDFIRE_MAX_FRAC = 0.25
 
 def rate_of(rx, p, v):
     utx = (p - TX) / np.maximum(np.linalg.norm(p - TX, axis=-1, keepdims=True), 1e-9)
@@ -45,6 +78,62 @@ def sample(traj, t):
     h = 1e-3
     v = (traj(t + h) - traj(t - h)) / (2 * h)
     return p, v
+
+def bearing_of(rx, p):
+    """True ENU bearing (deg CCW from east) of each position as seen from rx -- the quantity the UE
+    reports as Detection.azimuth_deg and isac-core models as TxRxPair::bearing_meas()."""
+    d = p - rx
+    return np.degrees(np.arctan2(d[..., 1], d[..., 0]))
+
+
+def verify_aoa(name, trajs):
+    """Array-specific checks for the receivers that carry one. Hard-fails only on ambiguity (a
+    physically wrong estimator); geometry weaknesses are reported as warnings because they degrade
+    accuracy rather than invalidating the scene."""
+    t = np.linspace(0, T_OBS, 201)
+    ok, notes = True, []
+    for rxn, (elems, boresight) in RX_ARRAYS.items():
+        rx = RXS[rxn]
+        # Ambiguity: any pair of elements more than lambda/2 apart folds bearings onto one phase.
+        gaps = [math.hypot(a[0] - b[0], a[1] - b[1]) for i, a in enumerate(elems) for b in elems[i + 1:]]
+        min_gap = min(gaps) if gaps else 0.0
+        if min_gap > HALF_L + 1e-12:
+            ok = False
+            notes.append(f"  !! {rxn}: min element spacing {min_gap*100:.2f} cm > lambda/2 "
+                         f"({HALF_L*100:.2f} cm) -- bearings alias")
+        bw = _beamwidth_deg(elems)
+        # Array axis in ENU, and each target's angle off it.
+        axis = math.radians(boresight)
+        for i, tr in enumerate(trajs):
+            p, _ = sample(tr, t)
+            b = np.radians(bearing_of(rx, p))
+            off_axis = np.degrees(np.arccos(np.clip(np.abs(np.cos(b - axis)), 0.0, 1.0)))
+            frac_endfire = float((off_axis < ENDFIRE_DEG).mean())
+            if frac_endfire > ENDFIRE_MAX_FRAC:
+                notes.append(f"  ~~ {rxn} obj{i}: within {ENDFIRE_DEG:.0f} deg of endfire "
+                             f"{100*frac_endfire:.0f}% of the run -- weak bearing accuracy there")
+        # Bearing separation between targets (informational: unresolved bearings are fine as long as
+        # the pair separates in range or Doppler, which the main verifier already checks).
+        for i in range(len(trajs)):
+            for j in range(i + 1, len(trajs)):
+                pi, _ = sample(trajs[i], t)
+                pj, _ = sample(trajs[j], t)
+                db = np.abs(((bearing_of(rx, pi) - bearing_of(rx, pj)) + 180.0) % 360.0 - 180.0)
+                if (db < bw).any():
+                    notes.append(f"  ~~ {rxn} obj{i}/obj{j}: bearing gap dips to {db.min():.1f} deg "
+                                 f"(beamwidth {bw:.1f} deg) for {100*float((db<bw).mean()):.0f}% of the run")
+    for n in notes[:8]:
+        print(n)
+    for rxn, (elems, boresight) in RX_ARRAYS.items():
+        rx = RXS[rxn]
+        s = []
+        for i, tr in enumerate(trajs):
+            p, _ = sample(tr, t)
+            b = bearing_of(rx, p)
+            s.append(f"obj{i} az {b.min():6.1f}..{b.max():6.1f}deg")
+        print(f"       {rxn} AoA ({len(elems)} elem, {_beamwidth_deg(elems):.1f} deg beam): " + " | ".join(s))
+    return ok
+
 
 def verify(name, trajs, allow_crossing=False):
     t = np.linspace(0, T_OBS, 201)
@@ -252,12 +341,33 @@ SCENES = {
     "manoeuvre": (MANOEUVRE, False, "two manoeuvring targets, non-constant acceleration (jerk + turn)"),
 }
 
+def _apply_array(conf, rxn):
+    """Inject this receiver's array geometry into BOTH sections that need it, or strip any stale
+    entry when the receiver has no array (rx3/B210). The SAME element list has to appear twice --
+    `[sensing_channel]` is the simulated propagation (what phases the air actually carries) and
+    `[sensing]` is what the estimator assumes -- and the two disagreeing is a silent-garbage failure
+    exactly like a wrong csirs_monitor scramb_id, so they are always written together from one source."""
+    import re
+    conf = re.sub(r'^\s*rx_array\s*=.*\n', '', conf, flags=re.M)
+    conf = re.sub(r'^\s*rx_array_boresight_deg\s*=.*\n', '', conf, flags=re.M)
+    if rxn not in RX_ARRAYS:
+        return conf
+    elems, boresight = RX_ARRAYS[rxn]
+    spec = ";".join(f"{x:.6f},{y:.6f}" for x, y in elems)
+    chan = f'  rx_array          = "{spec}";\n  rx_array_boresight_deg = {boresight};\n'
+    conf = re.sub(r'(\n  channel_length\s*=\s*\d+;\n)', r'\1' + chan, conf, count=1)
+    sens = f'  rx_array          = "{spec}";\n  rx_array_boresight_deg = {boresight};\n  aoa_enable        = 1;\n'
+    conf = re.sub(r'(\n  rx_id\s*=\s*"[^"]*";\n)', r'\1' + sens, conf, count=1)
+    return conf
+
+
 def main():
     write = "--write" in sys.argv
     allok = True
     for name, (trajs, crossing, desc) in SCENES.items():
         print(f"\n=== {name}: {desc} ===")
         allok &= verify(name, trajs, allow_crossing=crossing)
+        allok &= verify_aoa(name, trajs)
         if write:
             objs = " | ".join(waypoints(tr) for tr in trajs)
             base = open("_dens_rx1_16.conf").read()
@@ -274,6 +384,7 @@ def main():
                 s = re.sub(r'rx_pos_x\s*=\s*[-0-9.]+;', f'rx_pos_x          = {rx[0]};', base)
                 s = re.sub(r'rx_pos_y\s*=\s*[-0-9.]+;', f'rx_pos_y          = {rx[1]};', s)
                 s = re.sub(r'rx_id\s*=\s*"[^"]*";', f'rx_id          = "{rxn}";', s)
+                s = _apply_array(s, rxn)
                 fn = f"_scene_{name}_{rxn}.conf"
                 open(fn, "w").write(s)
             print(f"       -> wrote _scene_{name}_rx{{1,2,3}}.conf")

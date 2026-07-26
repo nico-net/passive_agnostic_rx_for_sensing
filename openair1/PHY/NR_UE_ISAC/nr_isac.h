@@ -138,6 +138,38 @@ void nr_isac_submit_cfr_at(uint32_t                 slot_idx,
                            float                    noise_var);
 
 /**
+ * @brief As nr_isac_submit_cfr_at(), but carrying SEVERAL receive antennas for AoA estimation.
+ *
+ * @p h is ANTENNA-MAJOR with an explicit stride: antenna a's RE i is at `h[2*(a*ant_stride_re + i)]`.
+ * All antennas share the one @p k_abs / @p l_sym enumeration (every antenna of one receiver observes
+ * the same REs — only the per-element phase differs, which is exactly the quantity being measured).
+ * The stride is separate from @p nof_re so a caller can submit a CONTIGUOUS SLICE of a larger
+ * per-antenna buffer, which is what the sub-slot sampling path does. Antenna 0 is the primary and the
+ * only one that feeds the range-Doppler pipeline; the rest are used solely to estimate a bearing at
+ * each detection cell. The two single-antenna entry points above are this with @p nof_ant = 1, so
+ * existing callers are unaffected.
+ */
+void nr_isac_submit_cfr_multi(uint32_t                 slot_idx,
+                              float                    slot_frac,
+                              int                      source,
+                              const nr_isac_carrier_t* carrier,
+                              const float*             h,
+                              uint32_t                 nof_ant,
+                              uint32_t                 ant_stride_re,
+                              const uint32_t*          k_abs,
+                              const uint32_t*          l_sym,
+                              uint32_t                 nof_re,
+                              float                    noise_var);
+
+/**
+ * @brief Receive antennas the AoA path wants, or 0 when AoA is disabled.
+ *
+ * The RT taps call this to decide how many antennas to extract Ĥ for; they must additionally clamp
+ * to the carrier's actual `nb_antennas_rx`. Cheap; safe on the RT path.
+ */
+uint32_t nr_isac_aoa_antennas(void);
+
+/**
  * @brief Sub-slot sampling configuration for the RT taps (see defs_nr_UE_ISAC.h).
  * Returns the target symbols per row (0 = disabled) and fills the sparsity / SNR gates.
  */

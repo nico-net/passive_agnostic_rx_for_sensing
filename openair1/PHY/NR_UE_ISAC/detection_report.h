@@ -61,6 +61,10 @@ struct detection_report_t {
   int64_t     cpi_duration_ns       = 0;     ///< cpi_duration_ns
   double      fc_hz                 = 0.0;   ///< fc_hz (illuminator centre frequency)
 
+  bool        subbin_interp         = false; ///< whether sub-bin peak interpolation was on, which is what
+                                             ///< decides whether the declared range/rate noise is a
+                                             ///< bin-quantisation floor or an SNR-limited residual
+
   const sensing_rvm_t*                    rvm              = nullptr; ///< range/velocity resolution + extents
   const std::vector<sensing_detection_t>* detections       = nullptr; ///< per-CPI CA-CFAR detections
   bool                                    include_rvm_blob = false;    ///< emit the RVM raster as rvm_blob

@@ -27,6 +27,7 @@
 #include "nr_isac.h"
 #include "defs_nr_UE_ISAC.h"
 #include "detection_report.h"
+#include "isac_aoa.h"
 #include "sensing_engine.h"
 
 #include <cstring>
@@ -48,6 +49,9 @@ std::unique_ptr<sensing_engine> g_engine;
 nr_isac_args_t                  g_args;
 std::atomic<bool>               g_enabled{false};
 std::atomic<bool>               g_started{false};
+/// Element count parsed from [sensing] rx_array, or 0 when AoA is off. Read by the RT taps via
+/// nr_isac_aoa_antennas() to decide how many antennas to extract Ĥ for.
+uint32_t                        g_aoa_antennas = 0;
 
 nr_isac_source_t parse_source(const char* s)
 {
@@ -220,6 +224,10 @@ extern "C" void nr_isac_init(void)
   double p_clean_loop_gain = 0.8, p_clean_stop_db = 25.0;
   char*  p_targets    = nullptr;
   char*  p_selftest_los = nullptr;
+  int    p_aoa_enable = 0, p_aoa_selfcal = 0, p_aoa_search = 2;
+  double p_aoa_boresight = 0.0, p_aoa_scan_step = 1.0, p_aoa_min_snr = 6.0, p_aoa_broadside = -1000.0;
+  char*  p_rx_array   = nullptr;
+  char*  p_aoa_est    = nullptr;
   char*  p_out_path   = nullptr;
   char*  p_rx_id      = nullptr;
   char*  p_illum_id   = nullptr;
@@ -342,6 +350,20 @@ extern "C" void nr_isac_init(void)
       mk_dbl("track_flicker_ewma_alpha", "MOT: EWMA smoothing for the per-track SNR-jitter estimate", &p_track_flicker_alpha, 0.4),
       mk_dbl("track_assoc_gate_max_sr_m", "MOT: hard ceiling on the association gate's range radius (m), independent of adaptive-q-inflated sigma", &p_track_assoc_max_sr, 15.0),
       mk_dbl("track_assoc_gate_max_sv_mps", "MOT: hard ceiling on the association gate's range-rate radius (m/s)", &p_track_assoc_max_sv, 10.0),
+      mk_int("aoa_enable", "estimate a per-detection bearing from a receive antenna array", PARAMFLAG_BOOL,
+             &p_aoa_enable, 0),
+      mk_str("rx_array", "receive element offsets \"x,y;x,y;...\" (m, array frame)", &p_rx_array, ""),
+      mk_dbl("rx_array_boresight_deg", "rotation of the array frame into ENU (deg CCW from east)",
+             &p_aoa_boresight, 0.0),
+      mk_str("aoa_estimator", "beamscan|interferometry|music", &p_aoa_est, "beamscan"),
+      mk_dbl("aoa_scan_step_deg", "manifold scan step for beamscan/MUSIC (deg)", &p_aoa_scan_step, 1.0),
+      mk_dbl("aoa_min_snr_db", "min detection SNR to report a bearing at all", &p_aoa_min_snr, 6.0),
+      mk_int("aoa_cell_search_bins", "half-width of the local re-peak search around each detection cell", 0,
+             &p_aoa_search, 2),
+      mk_dbl("aoa_broadside_deg", "ENU direction the array faces; picks the half-plane a LINEAR array scans (-1000 = the array normal)",
+             &p_aoa_broadside, -1000.0),
+      mk_int("aoa_selfcal", "calibrate per-channel phase against the known-bearing direct path", PARAMFLAG_BOOL,
+             &p_aoa_selfcal, 0),
       mk_str("out_path", "output path prefix", &p_out_path, "/tmp/oaiue_sensing"),
       mk_str("rx_id", "logical receiver id", &p_rx_id, "rx1"),
       mk_dbl("rx_pos_x", "receiver ENU x (m)", &p_rx_x, 0.0),
@@ -382,6 +404,15 @@ extern "C" void nr_isac_init(void)
   g_args.sync_sfo           = p_sync_sfo != 0;
   g_args.sync_los           = p_sync_los != 0;
   g_args.nominal_los_range_m = (float)p_nominal_los_range;
+  g_args.aoa_enable          = p_aoa_enable != 0;
+  g_args.rx_array            = (p_rx_array != nullptr) ? p_rx_array : "";
+  g_args.rx_array_boresight_deg = (float)p_aoa_boresight;
+  g_args.aoa_estimator       = (p_aoa_est != nullptr) ? p_aoa_est : "beamscan";
+  g_args.aoa_scan_step_deg   = (float)p_aoa_scan_step;
+  g_args.aoa_min_snr_db      = (float)p_aoa_min_snr;
+  g_args.aoa_cell_search_bins = (uint32_t)(p_aoa_search >= 0 ? p_aoa_search : 0);
+  g_args.aoa_broadside_deg   = (float)p_aoa_broadside;
+  g_args.aoa_selfcal         = p_aoa_selfcal != 0;
   g_args.track_enable        = p_track_enable != 0;
   g_args.track_model         = (p_track_model != nullptr) ? p_track_model : "cv";
   g_args.track_init_acc_var  = (float)p_track_init_acc;
@@ -488,6 +519,24 @@ extern "C" void nr_isac_init(void)
   g_args.report_path        = (p_report != nullptr) ? p_report : "";
   g_args.report_endpoint    = (p_endpoint != nullptr) ? p_endpoint : "";
 
+  // Resolve the array geometry up front so the RT taps have a fixed antenna count to extract, and so
+  // a malformed rx_array is a start-up log line rather than a silently single-antenna run.
+  g_aoa_antennas = 0;
+  if (g_args.aoa_enable) {
+    aoa_array_t probe;
+    // The carrier frequency isn't known until the first CFR arrives; parse against a nominal value
+    // purely to validate the spec and count elements. The engine re-parses with the real fc.
+    if (parse_rx_array(g_args.rx_array, g_args.rx_array_boresight_deg, 3.5e9, probe)) {
+      g_aoa_antennas = probe.size();
+      LOG_I(PHY, "SENSING: AoA enabled, %u receive elements, estimator=%s selfcal=%d\n", g_aoa_antennas,
+            g_args.aoa_estimator.c_str(), (int)g_args.aoa_selfcal);
+    } else {
+      LOG_W(PHY, "SENSING: aoa_enable set but rx_array ('%s') is unusable; AoA disabled\n",
+            g_args.rx_array.c_str());
+      g_args.aoa_enable = false;
+    }
+  }
+
   g_engine.reset(new sensing_engine(g_args, /*max_prb=*/ISAC_MAX_PRB));
   g_enabled.store(true);
 
@@ -571,23 +620,58 @@ extern "C" void nr_isac_submit_cfr_at(uint32_t                 slot_idx,
                                       uint32_t                 nof_re,
                                       float                    noise_var)
 {
+  nr_isac_submit_cfr_multi(slot_idx, slot_frac, source, carrier, h, 1, nof_re, k_abs, l_sym, nof_re, noise_var);
+}
+
+extern "C" void nr_isac_submit_cfr_multi(uint32_t                 slot_idx,
+                                         float                    slot_frac,
+                                         int                      source,
+                                         const nr_isac_carrier_t* carrier,
+                                         const float*             h,
+                                         uint32_t                 nof_ant,
+                                         uint32_t                 ant_stride_re,
+                                         const uint32_t*          k_abs,
+                                         const uint32_t*          l_sym,
+                                         uint32_t                 nof_re,
+                                         float                    noise_var)
+{
   if (!g_enabled.load(std::memory_order_relaxed) || !g_engine || carrier == nullptr || h == nullptr || nof_re == 0) {
     return;
   }
   if (source < 0 || source >= NR_ISAC_SRC_COUNT) {
     source = (int)g_args.source;
   }
+  if (nof_ant == 0) {
+    nof_ant = 1;
+  }
+  if (ant_stride_re < nof_re) {
+    ant_stride_re = nof_re;
+  }
 
-  // Convert the interleaved float CFR into icf_t. thread_local so RT callers never contend or allocate
-  // after the first slot of each producer thread.
+  // Convert the interleaved float CFR into icf_t, PACKING the strided per-antenna slices into the
+  // contiguous antenna-major layout sensing_slot_t expects. thread_local so RT callers never contend
+  // or allocate after the first slot of each producer thread.
   static thread_local std::vector<icf_t> cfr;
-  if (cfr.size() < nof_re) {
-    cfr.resize(nof_re);
+  const size_t total = (size_t)nof_ant * nof_re;
+  if (cfr.size() < total) {
+    cfr.resize(total);
   }
-  for (uint32_t i = 0; i < nof_re; i++) {
-    cfr[i] = icf_t(h[2 * i], h[2 * i + 1]);
+  for (uint32_t a = 0; a < nof_ant; a++) {
+    const float* src = h + (size_t)2 * a * ant_stride_re;
+    icf_t*       dst = cfr.data() + (size_t)a * nof_re;
+    for (uint32_t i = 0; i < nof_re; i++) {
+      dst[i] = icf_t(src[2 * i], src[2 * i + 1]);
+    }
   }
 
-  g_engine->submit(slot_idx, slot_frac, (nr_isac_source_t)source, *carrier, cfr.data(), k_abs, l_sym, nof_re,
+  g_engine->submit(slot_idx, slot_frac, (nr_isac_source_t)source, *carrier, cfr.data(), nof_ant, k_abs, l_sym, nof_re,
                    noise_var);
+}
+
+extern "C" uint32_t nr_isac_aoa_antennas(void)
+{
+  if (!g_enabled.load(std::memory_order_relaxed) || !g_args.aoa_enable) {
+    return 0;
+  }
+  return g_aoa_antennas;
 }

@@ -546,6 +546,45 @@ struct nr_isac_args_t {
   uint32_t track_flicker_min_updates = 3;     ///< min accepted detections before the flicker gate applies
   float    track_flicker_ewma_alpha  = 0.4f;  ///< EWMA smoothing for the per-track SNR-jitter estimate
 
+  // ---- Receive-array angle of arrival (PHASE3_AOA_MULTISTATIC_HANDOVER §5.4) -------------------
+  // Opt-in and inert by default: with aoa_enable off the taps submit a single antenna and the engine
+  // allocates no per-antenna grid, so a single-channel receiver (B210) costs exactly nothing.
+  //
+  // SET EXPECTATIONS CORRECTLY (§5, stated here so it isn't mis-sold downstream): AoA does NOT fix
+  // ghosts. A ridge/scheduling-harmonic ghost shares its parent target's wavefront, so it shares its
+  // bearing and passes every bearing consistency test there is. What AoA buys is ACCURACY and
+  // single-receiver observability (one Tx-Rx pair localises, via ray-ellipse intersection); ghost
+  // rejection comes from having a third independent RANGE ellipse, not from bearing.
+  bool        aoa_enable = false;
+  // Element offsets "x,y;x,y;..." in metres, in the ARRAY frame. MUST match the geometry the air
+  // actually carries -- in simulation that is `[sensing_channel] rx_array`, and the two disagreeing is
+  // a silent-garbage failure of exactly the same class as a wrong csirs_monitor scramb_id.
+  std::string rx_array = "";
+  float       rx_array_boresight_deg = 0.0f; ///< rotation of the array frame into ENU (deg CCW from east)
+  // "beamscan" (default; any element count, conventional/Bartlett beamforming over the manifold with a
+  // parabolic-in-dB peak refinement), "interferometry" (exact two-element closed form; automatically
+  // used whenever the array has exactly 2 elements), or "music" (>=3 elements; builds a covariance
+  // from the detection cell's immediate neighbours as snapshots, since one cell alone gives a rank-1
+  // covariance that MUSIC cannot use, and falls back to beamscan if that is not satisfiable).
+  std::string aoa_estimator = "beamscan";
+  float       aoa_scan_step_deg = 1.0f; ///< manifold scan step for beamscan/MUSIC
+  // Minimum detection SNR to attempt a bearing. Below it the azimuth is left ABSENT rather than
+  // reported as noise -- isac-core treats a missing azimuth as a plain 2-D measurement and keeps the
+  // detection, so withholding costs a little accuracy while reporting garbage costs correctness.
+  float       aoa_min_snr_db = 6.0f;
+  // Half-width (bins) of the local re-peak search around each detection's (range, Doppler) cell. The
+  // AoA path deliberately does not reproduce the main pipeline's sync corrections or sub-bin
+  // interpolation (see isac_aoa.h), so the true peak can sit a bin or two away; searching absorbs that.
+  uint32_t    aoa_cell_search_bins = 2;
+  // ENU direction (deg) the array FACES, used to pick which half-plane a collinear array scans. A
+  // linear array physically cannot separate a bearing from its mirror about the array axis, so one
+  // half-plane must be chosen; -1000 (default) means "the array's own normal", i.e. boresight + 90.
+  float       aoa_broadside_deg = -1000.0f;
+  // Direct-path self-calibration (§5.4 item 3): estimate the per-channel phase offsets against the
+  // LOS tap, whose bearing is KNOWN from the surveyed illuminator position and which sits at zero
+  // Doppler and the configured nominal_los_range_m. Continuous, no injected tone, no anechoic chamber.
+  bool        aoa_selfcal = false;
+
   std::string out_path = "/tmp/oaiue_sensing"; ///< Output path prefix for RVM raster / detections CSV
 
   // DetectionReport metadata (central-node detection-bus contract).
@@ -582,6 +621,12 @@ struct sensing_detection_t {
   float    range_m     = 0.0f;
   float    vel_mps     = 0.0f;
   float    snr_db      = 0.0f;
+  // Receive-array AoA (isac_aoa.h). azimuth_valid == false => this receiver has no array, or the
+  // estimate failed its quality gate; the DetectionReport then simply omits the azimuth fields and
+  // the central node treats the detection as a plain 2-D range/rate measurement.
+  bool     azimuth_valid   = false;
+  float    azimuth_deg     = 0.0f; ///< ENU bearing from this receiver, deg CCW from east
+  float    azimuth_std_deg = 0.0f; ///< 1-sigma (CRB) uncertainty of the above
 };
 
 /// A synthetic target to inject into the CFR for testing (delay/Doppler/gain).
@@ -605,9 +650,11 @@ struct sensing_slot_t {
   nr_isac_source_t  source   = NR_ISAC_SRC_CSI_RS; ///< Which reference produced this row (fusion diagnostics)
   nr_isac_carrier_t carrier  = {};                ///< Carrier geometry valid for this snapshot
 
-  std::vector<icf_t>     h;     ///< Per-RE CFR Ĥ at the reference REs
+  std::vector<icf_t>     h;     ///< Per-RE CFR Ĥ at the reference REs, ANTENNA-MAJOR: h[a*nof_re + i].
+                                ///< nof_ant == 1 for every non-AoA caller, so this is the legacy layout.
   std::vector<uint32_t> k_abs; ///< Absolute subcarrier index (relative to CRB0) for each RE in @ref h
   std::vector<uint32_t> l_sym; ///< OFDM symbol index for each RE in @ref h
+  uint32_t              nof_ant      = 1; ///< receive antennas carried in @ref h (1 unless AoA is on)
   uint32_t              nof_re       = 0;
   uint32_t              comb_spacing = 0; ///< Subcarrier spacing of the reference comb
   uint32_t              period_slots = 0; ///< Slow-time sampling period, in slots

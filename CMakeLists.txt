@@ -2237,6 +2237,16 @@ if(ENABLE_TESTS)
   add_dependencies(tests test_matrix_complete)
   add_test(NAME test_matrix_complete COMMAND ./test_matrix_complete)
 
+  # Receive-array AoA (isac_aoa.{h,cc}, PHASE3_AOA_MULTISTATIC_HANDOVER 5.4): array parsing +
+  # ambiguity flags, bearing recovery across the field of view for beamscan/interferometry/MUSIC, the
+  # SNR gate, CRB behaviour, and direct-path self-calibration. Same standalone pattern as the tests
+  # above.
+  add_executable(test_isac_aoa ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/tests/isac_aoa_test.cc)
+  target_include_directories(test_isac_aoa PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_ISAC)
+  target_link_libraries(test_isac_aoa PRIVATE NR_UE_ISAC UTIL GTest::gtest)
+  add_dependencies(tests test_isac_aoa)
+  add_test(NAME test_isac_aoa COMMAND ./test_isac_aoa)
+
   # L1/FISTA sparse Doppler recovery (sparse_doppler.{h,cc}): peak-to-harmonic ratio vs. dense NUDFT
   # on a gappy tone, and preservation of a genuine second weaker target.
   add_executable(test_sparse_doppler ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/tests/sparse_doppler_test.cc)

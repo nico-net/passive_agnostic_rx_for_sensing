@@ -75,9 +75,23 @@ sensing_engine::sensing_engine(const nr_isac_args_t& args_, uint32_t max_prb_) :
   const uint32_t max_re = (max_prb > 0 ? max_prb : ISAC_MAX_PRB) * ISAC_NRE * ISAC_NSYMB;
 
   // Pre-allocate the snapshot pool and reserve their buffers so submit() never allocates.
+  // Receive-array AoA: fix the antenna count up front so the RT snapshot buffers can be reserved for
+  // it (submit() must never allocate). Parsed here against a nominal fc purely for the element COUNT;
+  // the real geometry is re-parsed at the first CPI, once the carrier frequency is known.
+  aoa_ant_ = 0;
+  if (args.aoa_enable) {
+    aoa_array_t probe;
+    if (parse_rx_array(args.rx_array, args.rx_array_boresight_deg, 3.5e9, probe)) {
+      aoa_ant_ = probe.size();
+    } else {
+      args.aoa_enable = false;
+    }
+  }
+  const uint32_t re_per_slot = (aoa_ant_ > 1) ? max_re * aoa_ant_ : max_re;
+
   slot_pool.resize(SENSING_SLOT_POOL_SIZE);
   for (sensing_slot_t& s : slot_pool) {
-    s.h.reserve(max_re);
+    s.h.reserve(re_per_slot);
     s.k_abs.reserve(max_re);
     s.l_sym.reserve(max_re);
     free_q.push(&s);
@@ -127,6 +141,7 @@ void sensing_engine::submit(uint32_t                 slot_idx,
                             nr_isac_source_t         source,
                             const nr_isac_carrier_t& carrier,
                             const icf_t*              h,
+                            uint32_t                 nof_ant,
                             const uint32_t*          k_abs,
                             const uint32_t*          l,
                             uint32_t                 nof_re,
@@ -148,7 +163,13 @@ void sensing_engine::submit(uint32_t                 slot_idx,
   s->carrier   = carrier;
   s->nof_re    = nof_re;
   s->noise_var = noise_var;
-  s->h.assign(h, h + nof_re);
+  // Only carry the extra antennas when AoA is actually configured; a single-antenna receiver copies
+  // exactly as much as it always did.
+  s->nof_ant   = (aoa_ant_ > 1 && nof_ant > 1) ? std::min(nof_ant, aoa_ant_) : 1u;
+  if (s->nof_ant > aoa_ant_seen_) {
+    aoa_ant_seen_ = s->nof_ant;
+  }
+  s->h.assign(h, h + (size_t)s->nof_ant * nof_re);
   s->k_abs.assign(k_abs, k_abs + nof_re);
   s->l_sym.assign(l, l + nof_re);
 
@@ -234,6 +255,13 @@ void sensing_engine::accumulate_cpi(const sensing_slot_t& s)
     h_cpi.assign((size_t)args.cpi_slots * nof_subc, icf_t(0.0f, 0.0f));
     occ_all.assign((size_t)args.cpi_slots * nof_subc, 0);
     wsum_all.assign((size_t)args.cpi_slots * nof_subc, 0.0f);
+    if (aoa_ant_ > 1) {
+      h_cpi_ant.assign((size_t)aoa_ant_ * args.cpi_slots * nof_subc, icf_t(0.0f, 0.0f));
+      // The array geometry needs the real carrier frequency, which is only known now.
+      aoa_array_ready_ = parse_rx_array(args.rx_array, args.rx_array_boresight_deg,
+                                        (double)s.carrier.dl_center_hz, aoa_array);
+      aoa.reset(aoa_array_ready_ ? new aoa_estimator(args, aoa_array) : nullptr);
+    }
     cpi_row_time.assign(args.cpi_slots, 0.0);
     cpi_row_comb.assign(args.cpi_slots, 1);
     row_comb_uniform.assign(args.cpi_slots, 1);
@@ -296,6 +324,10 @@ void sensing_engine::accumulate_cpi(const sensing_slot_t& s)
     std::fill(&h_cpi[(size_t)r * nof_subc], &h_cpi[(size_t)r * nof_subc] + nof_subc, icf_t(0.0f, 0.0f));
     std::memset(&occ_all[(size_t)r * nof_subc], 0, nof_subc);
     std::fill(&wsum_all[(size_t)r * nof_subc], &wsum_all[(size_t)r * nof_subc] + nof_subc, 0.0f);
+    for (uint32_t a = 0; a < aoa_ant_ && !h_cpi_ant.empty(); a++) {
+      icf_t* p = &h_cpi_ant[((size_t)a * args.cpi_slots + r) * nof_subc];
+      std::fill(p, p + nof_subc, icf_t(0.0f, 0.0f));
+    }
     cpi_row++;
   }
 
@@ -325,6 +357,14 @@ void sensing_engine::accumulate_cpi(const sensing_slot_t& s)
       row[k]  = (row[k] * w_prev + s.h[i] * w) * (1.0f / w_new);
       wrow[k] = w_new;
       mask[k] = 1;
+      // Mirror onto the raw per-antenna grid with the SAME inverse-variance weighting, so a fused
+      // multi-source row stays consistent between the two grids. Antenna 0's copy is redundant with
+      // h_cpi today but must exist: the primary grid is mutated in place downstream, and the AoA
+      // estimator needs every antenna to have gone through an identical chain.
+      for (uint32_t a = 0; a < s.nof_ant && a < aoa_ant_; a++) {
+        icf_t& cell = h_cpi_ant[((size_t)a * args.cpi_slots + r) * nof_subc + k];
+        cell        = (cell * w_prev + s.h[(size_t)a * s.nof_re + i] * w) * (1.0f / w_new);
+      }
     }
   }
 
@@ -596,6 +636,47 @@ void sensing_engine::process_cpi()
     tslot_ema_ = (1.0 - a) * tslot_ema_ + a * cpi_period_slots;
   }
 
+  // Receive-array AoA (isac_aoa.h): give every detection a bearing. Runs AFTER detection because a
+  // cell's angle of arrival is only meaningful where there IS a detection -- estimating per RE would
+  // cost orders of magnitude more for nothing. Uses the RAW per-antenna grid and the TRUE row times,
+  // not the corrected/resampled primary grid; see the h_cpi_ant comment in sensing_engine.h.
+  // Loud one-shot diagnostic for the silent-failure case this project keeps meeting: AoA configured,
+  // but the receiver is only delivering ONE antenna -- e.g. nr-uesoftmodem started without a matching
+  // --ue-nb-ant-rx, or an rfsim channel model with nb_rx = 1. Every bearing would simply be absent,
+  // with nothing in the logs to say why.
+  if (aoa_ant_ > 1 && aoa_ant_seen_ < 2 && !aoa_warned_ && cpi_count > 1) {
+    aoa_warned_ = true;
+    LOG_W(PHY,
+          "SENSING: AoA is configured for %u elements but every CFR submission carried 1 antenna -- no "
+          "bearing will ever be reported. Check --ue-nb-ant-rx and the channel model's rx antenna count.\n",
+          aoa_ant_);
+  }
+  if (aoa && aoa_array_ready_ && aoa_ant_seen_ >= 2 && !detections.empty() && cpi_row >= 2) {
+    if (args.aoa_selfcal) {
+      // The direct path's bearing is known from the surveyed geometry: it is simply the direction of
+      // the illuminator from this receiver. Must run BEFORE process(), which clutter-cancels exactly
+      // that path away.
+      const double los_bearing = std::atan2((double)args.tx_pos_y - (double)args.rx_pos_y,
+                                            (double)args.tx_pos_x - (double)args.rx_pos_x);
+      aoa->calibrate_from_los(h_cpi_ant.data(), aoa_ant_, cpi_row, args.cpi_slots, nof_subc, occ_all.data(),
+                              cpi_row_time.data(), cpi_period_slots, cpi_carrier, los_bearing);
+    }
+    // args.cpi_slots is the ROW STRIDE of each antenna plane; cpi_row is how many of them are valid.
+    aoa->process(h_cpi_ant.data(), aoa_ant_, cpi_row, args.cpi_slots, nof_subc, occ_all.data(),
+                 cpi_row_time.data(), cpi_period_slots, cpi_carrier, detections, aoa_out);
+    uint32_t n_az = 0;
+    for (size_t i = 0; i < detections.size() && i < aoa_out.size(); i++) {
+      if (aoa_out[i].valid) {
+        detections[i].azimuth_valid   = true;
+        detections[i].azimuth_deg     = aoa_out[i].azimuth_deg;
+        detections[i].azimuth_std_deg = aoa_out[i].azimuth_std_deg;
+        n_az++;
+      }
+    }
+    LOG_D(PHY, "SENSING: AoA CPI #%u -> %u/%zu detections carry a bearing (calibration updates=%u)\n", cpi_count,
+          n_az, detections.size(), aoa->calibration_updates());
+  }
+
   // Phase 4 (ota_sync_passive_ue.md): wraps range_doppler's existing output (no second RD/CFAR
   // path) to find this CPI's LOS detection, measure its residual from the established baseline, and
   // fold that into the closed-loop bias state applied on the NEXT CPI (one-CPI feedback latency).
@@ -746,6 +827,7 @@ void sensing_engine::write_report_json()
   rep.cpi_start_time_utc_ns = cpi_start_time_utc_ns;
   rep.cpi_duration_ns       = slot_dur_ns * (int64_t)args.cpi_slots;
   rep.fc_hz                 = (double)cpi_carrier.dl_center_hz;
+  rep.subbin_interp         = args.subbin_interp;
   rep.rvm                   = &rvm;
   rep.detections            = &detections;
   rep.include_rvm_blob      = args.capture_enable;
