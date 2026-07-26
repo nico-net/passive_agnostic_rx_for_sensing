@@ -39,6 +39,7 @@ because OAI's built-in DFT only supports the fixed OFDM sizes.
 | `range_doppler.{h,cc}` | clutter removal, range/Doppler transforms, CA-CFAR, NMS, self-test injection |
 | `sensing_engine.{h,cc}` | consumer thread, CPI accumulation, interpolation, outputs, ZeroMQ |
 | `detection_report.{h,cc}` | DetectionReport JSON serialiser (isac wire contract) |
+| `isac_aoa.{h,cc}` | receive-array angle of arrival per detection cell (opt-in `aoa_enable`) |
 
 Hooked from `SCHED_NR_UE/phy_procedures_nr_ue.c` (PDSCH DM-RS / data-aided) and
 `PHY/NR_UE_TRANSPORT/csi_rx.c` (CSI-RS); lifecycle from `executables/nr-uesoftmodem.c`.
@@ -106,6 +107,27 @@ sensing = {
   out_path        = "/tmp/oaiue_sensing";  # <out_path>_detections.csv / _rvm_*.f32 / _reports.jsonl
   # report_path    = "";                    # override JSON-lines path
   # report_endpoint = "tcp://127.0.0.1:5556"; # live ZeroMQ PUB bus (SUB-connect from isac-track bus)
+
+  # ---- receive-array AoA (PHASE3_AOA_MULTISTATIC_HANDOVER 5.4). Opt-in; costs nothing when off.
+  # Needs a phase-coherent multi-channel receiver AND nr-uesoftmodem started with a matching
+  # --ue-nb-ant-rx. The engine logs a loud one-shot warning if that is forgotten, because otherwise
+  # every bearing is simply absent with nothing to say why.
+  # aoa_enable       = 1;
+  # rx_array         = "0,0;0.0439,0;0.0878,0;0.1317,0";  # element offsets (m), ARRAY frame
+  # rx_array_boresight_deg = 90.0;   # rotation of that frame into ENU (deg CCW from east)
+  # aoa_estimator    = "beamscan";   # beamscan | interferometry | music
+  # aoa_scan_step_deg = 1.0;
+  # aoa_min_snr_db   = 6.0;          # below this the azimuth is OMITTED, not guessed
+  # aoa_cell_search_bins = 2;        # local re-peak around each detection cell
+  # aoa_broadside_deg = -1000.0;     # which half-plane a LINEAR array scans (-1000 = its own normal)
+  # aoa_selfcal      = 1;            # calibrate per-channel phase against the known-bearing LOS tap
+  #
+  # In simulation the SAME element list must also appear in [sensing_channel] rx_array — that section
+  # is what the air actually carries, this one is what the estimator assumes, and the two disagreeing
+  # is a silent-garbage failure, not a degraded one. make_scenes.py emits both from one source.
+  #
+  # A LINEAR array cannot separate a bearing from its mirror about the array axis (physics: the phase
+  # depends only on d.u). Only a genuinely 2-D element layout removes that.
 
   # surveyed geometry / logical ids for the central node
   rx_id           = "rx1";
