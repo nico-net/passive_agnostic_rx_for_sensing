@@ -56,7 +56,7 @@ inline double wrap_pi(double a)
 // Array geometry
 // ---------------------------------------------------------------------------------------------
 
-bool parse_rx_array(const std::string& spec, double boresight_deg, double fc_hz, aoa_array_t& out)
+bool parse_rx_array(const std::string& spec, double boresight_deg, double fc_hz, aoa_array_t& out, bool quiet)
 {
   out = aoa_array_t{};
   if (spec.empty() || fc_hz <= 0.0) {
@@ -136,9 +136,12 @@ bool parse_rx_array(const std::string& spec, double boresight_deg, double fc_hz,
   // a perpendicular spread far below lambda/8 gives a phase difference under the noise.
   out.collinear = (max_perp < out.lambda_m / 8.0);
 
+  if (quiet) {
+    return true;
+  }
   LOG_I(PHY,
-        "SENSING: rx_array %u elements, boresight=%.1fdeg, spacing %.4f-%.4fm (lambda/2=%.4fm)%s%s\n",
-        out.size(), boresight_deg, min_gap, max_gap, out.lambda_m / 2.0,
+        "SENSING: rx_array %u elements, fc=%.3fGHz, boresight=%.1fdeg, spacing %.4f-%.4fm (lambda/2=%.4fm)%s%s\n",
+        out.size(), fc_hz / 1e9, boresight_deg, min_gap, max_gap, out.lambda_m / 2.0,
         out.ambiguous ? " -- SPACING AMBIGUOUS" : "",
         out.collinear ? " -- collinear (mirror ambiguity, scan restricted)" : "");
   return true;
@@ -217,30 +220,21 @@ void aoa_estimator::remove_clutter(const icf_t*   h_ant,
   }
 }
 
-void aoa_estimator::eval_cell(uint32_t            nof_ant,
-                              uint32_t            nof_slow,
-                              uint32_t            nof_subc,
-                              uint32_t            range_bin,
-                              double              f_d_norm,
-                              std::vector<icf_t>& z) const
+void aoa_estimator::range_project(uint32_t nof_ant, uint32_t nof_slow, uint32_t nof_subc, uint32_t range_bin)
 {
-  // Always reads work_, which remove_clutter()/calibrate_from_los() have already compacted to
-  // nof_slow rows per antenna.
+  // Inner (range) sum, matching range_doppler's inverse transform convention so bin indices agree:
+  //   rowsum[a][n] = sum_c H[a][n][c] * e^{+j2*pi*c*range_bin/nof_subc}
+  // work_ is the clutter-removed grid, already compacted to nof_slow rows per antenna. Unoccupied
+  // cells are exactly zero there and are skipped, which is what makes this affordable on the sparse,
+  // irregularly-scheduled pdsch_data occupancy this receiver actually sees.
   const size_t plane = (size_t)nof_slow * nof_subc;
-  z.assign(nof_ant, icf_t(0.0f, 0.0f));
-
-  // Separable evaluation of the 2-D transform at ONE cell:
-  //   z = sum_n w[n] e^{-j2*pi*f_d*t_n} * ( sum_c H[n][c] e^{+j2*pi*c*range_bin/nof_subc} )
-  // The inner (range) sum matches range_doppler's inverse transform convention so bin indices agree;
-  // the outer sum is evaluated at the row's TRUE slow-time position, which is the non-uniform DFT and
-  // therefore exact even when the scheduler's row spacing wanders.
+  rowsum_.assign((size_t)nof_ant * nof_slow, icf_t(0.0f, 0.0f));
+  const double sr = TWO_PI * (double)range_bin / (double)nof_subc;
   for (uint32_t a = 0; a < nof_ant; a++) {
     const icf_t* g = work_.data() + (size_t)a * plane;
-    icf_t        acc(0.0f, 0.0f);
     for (uint32_t n = 0; n < nof_slow; n++) {
       const icf_t* row = g + (size_t)n * nof_subc;
       icf_t        rs(0.0f, 0.0f);
-      const double sr = TWO_PI * (double)range_bin / (double)nof_subc;
       for (uint32_t c = 0; c < nof_subc; c++) {
         if (row[c] == icf_t(0.0f, 0.0f)) {
           continue; // unoccupied (or clutter-cancelled to nothing): contributes nothing
@@ -248,11 +242,24 @@ void aoa_estimator::eval_cell(uint32_t            nof_ant,
         const double ph = sr * (double)c;
         rs += row[c] * icf_t((float)std::cos(ph), (float)std::sin(ph));
       }
-      // Hann along slow time, purely to suppress Doppler sidelobes from neighbouring targets. Being
-      // a common real weighting it cannot bias the inter-antenna phase (see isac_aoa.h).
-      const float  w  = 0.5f * (1.0f - std::cos(2.0f * (float)M_PI * (float)n / (float)std::max(1u, nof_slow - 1)));
+      rowsum_[(size_t)a * nof_slow + n] = rs;
+    }
+  }
+}
+
+void aoa_estimator::eval_cell(uint32_t nof_ant, uint32_t nof_slow, double f_d_norm, std::vector<icf_t>& z) const
+{
+  // Outer (slow-time) sum at the row's TRUE position -- the non-uniform DFT, exact even when the
+  // scheduler's row spacing wanders. The Hann weighting suppresses Doppler sidelobes from
+  // neighbouring targets; being a common REAL weighting it cannot bias the inter-antenna phase
+  // (see isac_aoa.h).
+  z.assign(nof_ant, icf_t(0.0f, 0.0f));
+  for (uint32_t a = 0; a < nof_ant; a++) {
+    const icf_t* rs = rowsum_.data() + (size_t)a * nof_slow;
+    icf_t        acc(0.0f, 0.0f);
+    for (uint32_t n = 0; n < nof_slow; n++) {
       const double phd = -TWO_PI * f_d_norm * row_t_[n];
-      acc += rs * w * icf_t((float)std::cos(phd), (float)std::sin(phd));
+      acc += rs[n] * slow_win_[n] * icf_t((float)std::cos(phd), (float)std::sin(phd));
     }
     z[a] = acc;
   }
@@ -436,7 +443,12 @@ double aoa_estimator::bearing_sigma(double theta_rad, double snr_lin) const
   if (var <= 1e-12 || snr_lin <= 0.0) {
     return M_PI; // no information: report a full-circle uncertainty rather than a fake small number
   }
-  return 1.0 / std::sqrt(2.0 * snr_lin * var);
+  // Clamp to a half turn. The CRB genuinely diverges as the target approaches endfire (the phase
+  // stops varying with bearing there), and an unclamped value is not wrong so much as useless --
+  // a live run reported sigma = 312881 deg, which is both meaningless and liable to overflow any
+  // consumer that squares it into a covariance. Beyond pi the estimate carries no information at
+  // all, so pi is the honest ceiling.
+  return std::min(M_PI, 1.0 / std::sqrt(2.0 * snr_lin * var));
 }
 
 bool aoa_estimator::calibrate_from_los(const icf_t*             h_ant,
@@ -474,8 +486,13 @@ bool aoa_estimator::calibrate_from_los(const icf_t*             h_ant,
   int          los_bin   = (range_res > 0.0) ? (int)std::lround((double)args.nominal_los_range_m / range_res) : 0;
   los_bin                = std::max(0, std::min((int)nof_subc - 1, los_bin));
 
+  slow_win_.assign(nof_slow, 1.0f);
+  for (uint32_t n = 0; n < nof_slow; n++) {
+    slow_win_[n] = 0.5f * (1.0f - std::cos(2.0f * (float)M_PI * (float)n / (float)std::max(1u, nof_slow - 1)));
+  }
   std::vector<icf_t> z;
-  eval_cell(nof_ant, nof_slow, nof_subc, (uint32_t)los_bin, 0.0, z);
+  range_project(nof_ant, nof_slow, nof_subc, (uint32_t)los_bin);
+  eval_cell(nof_ant, nof_slow, 0.0, z);
 
   // The direct path's expected inter-element phases are known from the surveyed illuminator bearing;
   // whatever is left over is the receiver's own per-channel phase/gain error.
@@ -522,6 +539,10 @@ void aoa_estimator::process(const icf_t*                            h_ant,
   (void)carrier;
 
   row_t_.assign(row_time_slots, row_time_slots + nof_slow);
+  slow_win_.assign(nof_slow, 1.0f);
+  for (uint32_t n = 0; n < nof_slow; n++) {
+    slow_win_[n] = 0.5f * (1.0f - std::cos(2.0f * (float)M_PI * (float)n / (float)std::max(1u, nof_slow - 1)));
+  }
   remove_clutter(h_ant, nof_ant, nof_slow, row_stride, nof_subc, occ);
 
   const uint32_t m    = array.size();
@@ -548,13 +569,35 @@ void aoa_estimator::process(const icf_t*                            h_ant,
       if (rb < 0 || rb >= (int)nof_subc) {
         continue;
       }
+      // ONE range projection per candidate range bin, reused across every candidate Doppler bin.
+      range_project(m, nof_slow, nof_subc, (uint32_t)rb);
       for (int dd = -srch; dd <= srch; dd++) {
         const int db = d0 + dd;
         if (db < 0 || db >= (int)nof_slow) {
           continue;
         }
+        // Never let the re-peak wander into the direct-path guard region. MEASURED failure, not a
+        // precaution: in the 2026-07-26 rx1 run two detections adjacent to the LOS skirt re-peaked
+        // onto the direct-path leakage cell and reported the ILLUMINATOR's bearing (~180 deg),
+        // producing the only two gross outliers in an otherwise 0.35 deg-median set. These are
+        // exactly the cells CFAR itself is forbidden to detect in, so a re-peak has no business
+        // preferring one. The detection's OWN cell is always admissible -- sub-bin interpolation can
+        // round a legitimate detection's reported bin into the guard, and dropping it there would be
+        // a regression rather than a fix.
+        // Guard semantics are copied verbatim from range_doppler.cc's notch (inclusive `<=`, and the
+        // wrap-around range guard at the top of the axis) so the admissible set here is EXACTLY the
+        // set CFAR was allowed to detect in -- an off-by-one either way would silently re-admit the
+        // cell this exists to exclude, or drop a legitimate neighbour.
+        if (!(dr == 0 && dd == 0)) {
+          const bool zero_range = rb <= (int)args.zero_range_guard
+                                  || rb >= (int)nof_subc - 1 - (int)args.zero_range_guard;
+          const bool zero_dopp  = std::abs(db - half) <= (int)args.zero_doppler_guard;
+          if (zero_range || zero_dopp) {
+            continue;
+          }
+        }
         const double fd = ((double)(db - half)) * df_bin;
-        eval_cell(m, nof_slow, nof_subc, (uint32_t)rb, fd, z);
+        eval_cell(m, nof_slow, fd, z);
         // Apply the self-calibration before anything reads a phase from these.
         for (uint32_t a = 0; a < m; a++) {
           z[a] *= cal_[a];

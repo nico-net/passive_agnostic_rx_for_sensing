@@ -440,6 +440,56 @@ TEST(isac_aoa, separate_cells_get_their_own_bearings)
   EXPECT_NEAR(wrap_deg((double)out[1].azimuth_deg - b2), 0.0, 3.0);
 }
 
+/// Regression for the ONLY gross bearing errors the 2026-07-26 live rx1 run produced: 2 of 417
+/// detections reported ~180 deg, i.e. the ILLUMINATOR's bearing rather than their target's. The
+/// +/-`aoa_cell_search_bins` re-peak had wandered into the direct-path guard region and found a
+/// leakage cell stronger than the target's own. Those cells are exactly the ones CFAR is forbidden to
+/// detect in, so the re-peak must not prefer one either.
+///
+/// Constructed to fail loudly without the guard: the interferer sits 2 Doppler bins away (inside
+/// zero_doppler_guard, hence reachable by the re-peak but not by CFAR) at 8x the amplitude, so
+/// 64x the power — an unguarded search picks it every time.
+TEST(isac_aoa, re_peak_never_wanders_into_the_direct_path_guard)
+{
+  scene_t      sc;
+  const double lambda = C_LIGHT / sc.fc_hz;
+  aoa_array_t  arr;
+  ASSERT_TRUE(parse_rx_array(ula_spec(4, lambda), 0.0, sc.fc_hz, arr));
+
+  nr_isac_args_t a       = base_args();
+  a.zero_range_guard     = 2;
+  a.zero_doppler_guard   = 3;
+  a.aoa_cell_search_bins = 2;
+
+  const int    half     = (int)(sc.nof_slow / 2);
+  const int    tgt_db   = half + 4;  // |4| > zero_doppler_guard -> a legitimate CFAR cell
+  const int    leak_db  = half + 2;  // |2| <= zero_doppler_guard -> inside the notch, reachable at dd=-2
+  const double tgt_bear = 60.0, leak_bear = 180.0;
+
+  std::vector<icf_t>   h;
+  std::vector<uint8_t> occ;
+  std::vector<double>  row_t;
+  synth(sc, arr,
+        {{40.0, (double)(tgt_db - half) / (double)sc.nof_slow, tgt_bear * M_PI / 180.0, 1.0},
+         {40.0, (double)(leak_db - half) / (double)sc.nof_slow, leak_bear * M_PI / 180.0, 8.0}},
+        0.0, h, occ, row_t);
+
+  std::vector<sensing_detection_t> dets(1);
+  dets[0].range_bin   = 40;
+  dets[0].doppler_bin = (uint32_t)tgt_db;
+  dets[0].snr_db      = 20.0f;
+
+  std::vector<aoa_estimate_t> out;
+  aoa_estimator               est(a, arr);
+  est.process(h.data(), sc.nof_ant, sc.nof_slow, sc.nof_slow, sc.nof_subc, occ.data(), row_t.data(), 1.0,
+              carrier_of(sc), dets, out);
+
+  ASSERT_TRUE(out[0].valid);
+  EXPECT_NEAR(wrap_deg((double)out[0].azimuth_deg - tgt_bear), 0.0, 3.0);
+  // And specifically NOT the interferer's bearing, which is what the unguarded search returned.
+  EXPECT_GT(std::abs(wrap_deg((double)out[0].azimuth_deg - leak_bear)), 30.0);
+}
+
 // ---------------------------------------------------------------------------------------------
 // Direct-path self-calibration (§5.4 item 3)
 // ---------------------------------------------------------------------------------------------

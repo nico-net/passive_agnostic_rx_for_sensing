@@ -526,7 +526,7 @@ extern "C" void nr_isac_init(void)
     aoa_array_t probe;
     // The carrier frequency isn't known until the first CFR arrives; parse against a nominal value
     // purely to validate the spec and count elements. The engine re-parses with the real fc.
-    if (parse_rx_array(g_args.rx_array, g_args.rx_array_boresight_deg, 3.5e9, probe)) {
+    if (parse_rx_array(g_args.rx_array, g_args.rx_array_boresight_deg, 3.5e9, probe, /*quiet=*/true)) {
       g_aoa_antennas = probe.size();
       LOG_I(PHY, "SENSING: AoA enabled, %u receive elements, estimator=%s selfcal=%d\n", g_aoa_antennas,
             g_args.aoa_estimator.c_str(), (int)g_args.aoa_selfcal);

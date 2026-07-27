@@ -81,7 +81,7 @@ sensing_engine::sensing_engine(const nr_isac_args_t& args_, uint32_t max_prb_) :
   aoa_ant_ = 0;
   if (args.aoa_enable) {
     aoa_array_t probe;
-    if (parse_rx_array(args.rx_array, args.rx_array_boresight_deg, 3.5e9, probe)) {
+    if (parse_rx_array(args.rx_array, args.rx_array_boresight_deg, 3.5e9, probe, /*quiet=*/true)) {
       aoa_ant_ = probe.size();
     } else {
       args.aoa_enable = false;

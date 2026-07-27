@@ -95,9 +95,14 @@ struct aoa_array_t {
  * agree, since a mismatch between the geometry the air carries and the geometry the estimator
  * assumes is a silent-garbage failure, not a degraded one.
  *
+ * @param quiet  suppress the summary/ambiguity log line. Set for the start-up probes, which parse
+ *               against a PLACEHOLDER frequency just to count elements: their ambiguity verdict is
+ *               computed from the wrong wavelength and printing it is actively misleading (it did
+ *               mislead, on the first live run). Only the real per-carrier parse should report.
  * @return false (leaving @p out unusable) for an empty/malformed spec or fewer than 2 elements.
  */
-bool parse_rx_array(const std::string& spec, double boresight_deg, double fc_hz, aoa_array_t& out);
+bool parse_rx_array(const std::string& spec, double boresight_deg, double fc_hz, aoa_array_t& out,
+                    bool quiet = false);
 
 /// One detection's bearing estimate.
 struct aoa_estimate_t {
@@ -175,13 +180,17 @@ public:
   uint32_t calibration_updates() const { return cal_updates_; }
 
 private:
-  /// Evaluate every antenna's complex range-Doppler value at one (range_bin, doppler_bin) cell.
-  void eval_cell(uint32_t       nof_ant,
-                 uint32_t       nof_slow,
-                 uint32_t       nof_subc,
-                 uint32_t       range_bin,
-                 double         f_d_norm, ///< Doppler in cycles per slot
-                 std::vector<icf_t>& z) const;
+  /// Project every antenna's every slow-time row onto ONE range bin, into `rowsum_`.
+  ///
+  /// This is the whole cost of the estimator (O(nof_ant * nof_slow * nof_subc)), and it is
+  /// independent of the Doppler bin -- so it is hoisted out of the Doppler search rather than
+  /// recomputed per cell. With the default +/-2-bin re-peak that is a 5x saving (25 cells -> 5 range
+  /// projections); measured necessary, not speculative: at 273 PRB / 128 rows / 4 antennas the naive
+  /// form is ~0.67 G complex ops per CPI, which does not fit in a CPI.
+  void range_project(uint32_t nof_ant, uint32_t nof_slow, uint32_t nof_subc, uint32_t range_bin);
+
+  /// Finish the transform for one Doppler bin from the hoisted `rowsum_`. O(nof_ant * nof_slow).
+  void eval_cell(uint32_t nof_ant, uint32_t nof_slow, double f_d_norm, std::vector<icf_t>& z) const;
 
   /// Slow-time mean removal, shared across antennas (see the header's linearity argument).
   void remove_clutter(const icf_t* h_ant, uint32_t nof_ant, uint32_t nof_slow, uint32_t row_stride,
@@ -204,6 +213,8 @@ private:
 
   std::vector<icf_t>  work_;      ///< clutter-removed per-antenna grid, antenna-major
   std::vector<double> row_t_;     ///< per-row TRUE slow-time position (slots), for the non-uniform DFT
+  std::vector<icf_t>  rowsum_;    ///< [nof_ant][nof_slow] range projection at the current range bin
+  std::vector<float>  slow_win_;  ///< [nof_slow] slow-time (Doppler) window
   std::vector<icf_t>  cal_;       ///< per-channel calibration phasors
   std::vector<icf_t>  cal_accum_; ///< running (unnormalised) calibration sum across CPIs
   uint32_t            cal_updates_ = 0;
