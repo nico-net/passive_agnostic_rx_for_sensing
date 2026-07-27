@@ -13,7 +13,7 @@ sudo rm -f reconfig.raw rbconfig.raw nrL1_stats.log nrMAC_stats.log nrL1_UE_stat
 
 c="_mot2_variant_run.conf"
 cp "$CONF" "$c"
-sed -i "s/cpi_slots *= *[0-9]*;/cpi_slots       = 128;/" "$c"
+sed -i "s/cpi_slots *= *[0-9]*;/cpi_slots       = ${CPI_SLOTS:-128};/" "$c"
 sed -i "s#out_path *= *\"[^\"]*\";#out_path    = \"$OUT/oaiue_sensing\";#" "$c"
 sed -i "s#report_path *= *\"[^\"]*\";#report_path = \"$OUT/oaiue_reports.jsonl\";#" "$c"
 

@@ -906,8 +906,9 @@ cpi_sfo_tracker::comb_stats_t& cpi_sfo_tracker::stats_for(uint32_t comb)
 
 bool cpi_sfo_tracker::track_row(const icf_t* row, const uint8_t* mask, uint32_t nof_subc, uint32_t comb,
                                 uint32_t anchor_bin, uint32_t& out_peak, double& out_frac,
-                                double& out_leakage_anomaly)
+                                double& out_leakage_anomaly, bool& out_faded)
 {
+  out_faded = false;
   if (!cir_builder_.build(row, mask, nof_subc, comb, cir_)) {
     return false;
   }
@@ -950,6 +951,26 @@ bool cpi_sfo_tracker::track_row(const icf_t* row, const uint8_t* mask, uint32_t 
     out_count++;
   }
   const double out_win_energy_per_bin = (out_count > 0) ? (out_energy_sum / (double)out_count) : 0.0;
+
+  // Fade gate (ROOT-CAUSE FIX, 2026-07-27): Phase 1's estimate_row() has always compared its in-window
+  // peak against this exact out-of-window floor statistic and refused to trust a "peak" that isn't
+  // meaningfully above it (FADE_MIN_SNR_LINEAR) -- Phase 3's own independent walk never had the
+  // equivalent check, so on a low-SNR row it silently accepted whatever bin the argmax landed on,
+  // noise included. MEASURED, not theorised: a `sensing_channel_set_rx_clock()`-injected KNOWN linear
+  // SFO ramp (0/2/0.5 ppm) produced a per-row tau_s series with ~3.3-3.5 RANGE-BIN RMS scatter even
+  // with the injected drift alone the true expected signal, EQUAL to the scatter seen with NO drift
+  // injected at all -- i.e. most rows were contributing pure noise indistinguishable from a real
+  // signal, which is exactly what an unconditional argmax over a window does on a faded row. This
+  // single gap is sufficient to explain why the line fit's R^2 never cleared SFO_MIN_R_SQUARED even
+  // under a genuine, noise-free synthetic ramp: enough noise-dominated rows corrupt any fit, no matter
+  // how clean the true underlying drift is.
+  if (out_count >= FADE_MIN_FLOOR_SAMPLES && out_win_energy_per_bin > 0.0
+      && peak_pow < FADE_MIN_SNR_LINEAR * out_win_energy_per_bin) {
+    out_faded = true;
+    // Still report peak/frac/anomaly (mirrors Phase 1: "structurally fine row, just not trustworthy")
+    // so a caller that wants the raw value for diagnostics can have it; process() below is the one
+    // that must exclude a faded row from the fit and from advancing the walk's anchor.
+  }
 
   // Normalize by this (M, frac)'s expected clean-signal leakage (gap-analysis doc sec. 12.3
   // follow-up): raw out_win_energy_per_bin swings 3-4 orders of magnitude as an entirely benign
@@ -1006,9 +1027,18 @@ sfo_fit_result_t cpi_sfo_tracker::process(icf_t*                   h_cpi,
 
     uint32_t peak = 0;
     double   frac = 0.0, anomaly = 0.0;
-    rowinfo.valid = track_row(row_ptr, mask, nof_subc, row_comb[r], anchor, peak, frac, anomaly);
+    bool     faded = false;
+    rowinfo.valid = track_row(row_ptr, mask, nof_subc, row_comb[r], anchor, peak, frac, anomaly, faded);
+    rowinfo.excluded_fade = faded;
 
-    if (rowinfo.valid) {
+    if (rowinfo.valid && faded) {
+      // Same treatment as an ISI exclusion: don't trust this row's peak for the fit, and don't move
+      // the walk's anchor off of it either (a noise-dominated argmax is not a place to re-center the
+      // NEXT row's search window). Unlike Phase 1 there is no flywheel/dead-reckoning projection here
+      // -- the anchor simply holds, which is safe because SFO_TRACK_HALFWIN_BINS re-searches around
+      // it again next row regardless.
+      LOG_D(PHY, "SENSING: sync(SFO) row=%u comb=%u excluded (faded): peak below SNR gate\n", r, row_comb[r]);
+    } else if (rowinfo.valid) {
       rowinfo.tau_s           = ((double)peak + frac) * bin_to_delay_s;
       rowinfo.leakage_anomaly = anomaly;
 
@@ -1056,11 +1086,17 @@ sfo_fit_result_t cpi_sfo_tracker::process(icf_t*                   h_cpi,
     rows_.push_back(rowinfo);
   }
 
-  uint32_t n_candidate = 0, n_excluded = 0;
+  uint32_t n_candidate = 0, n_excluded = 0, n_isi = 0, n_fade = 0;
   for (const auto& e : rows_) {
     if (e.valid) {
       n_candidate++;
       if (e.excluded_isi) {
+        n_isi++;
+      }
+      if (e.excluded_fade) {
+        n_fade++;
+      }
+      if (e.excluded_isi || e.excluded_fade) {
         n_excluded++;
       }
     }
@@ -1068,11 +1104,11 @@ sfo_fit_result_t cpi_sfo_tracker::process(icf_t*                   h_cpi,
   fit.n_candidate    = n_candidate;
   fit.n_excluded_isi = n_excluded;
 
-  // Least-squares fit of {time, delay} over surviving (valid, non-ISI-excluded) rows.
+  // Least-squares fit of {time, delay} over surviving (valid, non-ISI-excluded, non-faded) rows.
   double   sx = 0.0, sy = 0.0, sxx = 0.0, sxy = 0.0;
   uint32_t n  = 0;
   for (const auto& e : rows_) {
-    if (!e.valid || e.excluded_isi) {
+    if (!e.valid || e.excluded_isi || e.excluded_fade) {
       continue;
     }
     sx += e.time_s;
@@ -1105,7 +1141,7 @@ sfo_fit_result_t cpi_sfo_tracker::process(icf_t*                   h_cpi,
     double ss_res = 0.0, ss_tot = 0.0;
     const double ybar = sy / (double)n;
     for (const auto& e : rows_) {
-      if (!e.valid || e.excluded_isi) {
+      if (!e.valid || e.excluded_isi || e.excluded_fade) {
         continue;
       }
       const double pred = slope * e.time_s + intercept;
@@ -1126,9 +1162,9 @@ sfo_fit_result_t cpi_sfo_tracker::process(icf_t*                   h_cpi,
   if (fit.r_squared < SFO_MIN_R_SQUARED) {
     fit.corrected = false;
     LOG_I(PHY,
-          "SENSING: sync(SFO) fit_rows=%u r2=%.3f < %.2f (resid=%.2f bins) -- slope %.4f ppm is not a "
-          "linear clock drift; correction WITHHELD\n",
-          n, fit.r_squared, SFO_MIN_R_SQUARED, fit.resid_bins, fit.sfo_ppm);
+          "SENSING: sync(SFO) fit_rows=%u/candidates=%u (excl_isi=%u excl_fade=%u) r2=%.3f < %.2f "
+          "(resid=%.2f bins) -- slope %.4f ppm is not a linear clock drift; correction WITHHELD\n",
+          n, n_candidate, n_isi, n_fade, fit.r_squared, SFO_MIN_R_SQUARED, fit.resid_bins, fit.sfo_ppm);
     return fit;
   }
   fit.corrected             = true;

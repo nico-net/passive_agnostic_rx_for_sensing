@@ -17,11 +17,21 @@
 # wraps about once a second, i.e. roughly one CPI in ten contains a step and will (correctly) fail
 # Phase 3's linearity gate. Expect ~90% clean, not 100%.
 #
-# Usage: sudo setsid ./_run_sync_injection.sh [dur_s] [wrap_samples] > /tmp/ms/syncinj.log 2>&1
+# CPI length matters just as much and was the likely culprit in the FIRST run of this sweep
+# (2026-07-27, cpi_slots=128 = 64ms CPI): 0.5 ppm drift over 64ms is only ~2 samples of ramp, which
+# a per-row noise floor can plausibly swamp before the linearity gate ever sees it -- the gate
+# reporting 0/CPIs passed could be "correctly rejecting noise", not "broken". CPI_SLOTS defaults to
+# 512 (256ms) here specifically to give the ramp more room over noise; note this INCREASES how often
+# the sawtooth wrap falls inside a single CPI (a real, unavoidable trade-off, not tuned away) --
+# read the wrap-crossing rate implied by WRAP/CPI_SLOTS/the injected ppm before trusting a 0%-pass
+# result as evidence the gate itself is broken, rather than as noise or wrap-crossing artifacts.
+#
+# Usage: sudo setsid ./_run_sync_injection.sh [dur_s] [wrap_samples] [cpi_slots] > /tmp/ms/syncinj.log 2>&1
 set -u
 cd "$(dirname "${BASH_SOURCE[0]}")"
 DUR=${1:-200}
 WRAP=${2:-64}
+export CPI_SLOTS=${3:-512}
 ROOT=/tmp/ms/sync_inj
 BW=98280000     # 273 PRB x 12 x 30 kHz occupied bandwidth
 FS=122880000    # RF sample rate at 273 PRB

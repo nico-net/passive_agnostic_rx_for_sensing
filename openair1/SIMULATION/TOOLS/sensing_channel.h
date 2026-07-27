@@ -137,6 +137,28 @@ int sensing_channel_set_rx_array(void *traj, const char *spec, double boresight_
  *                      ABOVE the drift expected within one CPI to leave Phase 3 an unbroken ramp.
  *                      <=0 disables wrapping (warned about).
  * @return 0 on success (including the all-zero no-op case), -1 on a NULL argument.
+ *
+ * MEASURED LIMITATION -- READ BEFORE USING THIS TO VALIDATE PHASE 3 (2026-07-27). Injecting SFO here
+ * does NOT deliver a delay ramp to the sensing pipeline, because the UE's OWN receive timing loop
+ * tracks and removes it upstream of the ISAC CFR tap. Verified two independent ways on a 0.5 ppm /
+ * 512-slot (256 ms) CPI run, where the ramp should present ~12.6 range bins of drift per CPI:
+ *   - Phase 1's STO tracker reported `walk` of only 0.3-2.1 bins/CPI, not ~12.6.
+ *   - Phase 3's own accepted-row delays had ~1.3-bin RMS scatter about a flat line (r2 ~ 0.00-0.01),
+ *     i.e. clustered, not ramping; a genuine 12.6-bin ramp would show ~3.6-bin std and r2 ~ 0.99.
+ * So `SFO_MIN_R_SQUARED` withholding the correction on 0% of CPIs here is the gate being CORRECT --
+ * there genuinely is no residual linear drift left in the grid to correct. Do not "fix" that gate on
+ * the strength of this harness. This is the same physical effect the wrap_samples comment above
+ * describes (a real receiver's coarse loop removes whole-sample drift); it simply turns out to remove
+ * essentially all of it here rather than leaving a sensing-grade residual.
+ *
+ * CFO is only PARTIALLY removed the same way (by --ue-fo-compensation), so cfo_hz does reach the
+ * pipeline attenuated -- a 50 Hz injection was recovered as ~30 Hz -- which makes it usable as a
+ * qualitative check but not as an absolute-accuracy one.
+ *
+ * To actually exercise Phases 1-3 end-to-end against known impairments, inject into the CFR grid
+ * INSIDE the sensing engine (after the UE's timing/frequency loops, before the sync stack), not into
+ * the rfsim channel. Not implemented; `tests/isac_sync_test.cc` already covers the estimators
+ * directly on synthetic grids, which is why this was not pursued further.
  */
 int sensing_channel_set_rx_clock(channel_desc_t *cd,
                                  void           *traj,

@@ -410,6 +410,7 @@ private:
                                       ///< ~1.0 nominal for a clean row, regardless of M or frac
     bool     valid            = false;
     bool     excluded_isi     = false;
+    bool     excluded_fade    = false;
   };
 
   // Sliding-window (not whole-CPI-cumulative) mean/stddev of leakage_anomaly, tracked separately per
@@ -451,7 +452,7 @@ private:
   };
 
   bool track_row(const icf_t* row, const uint8_t* mask, uint32_t nof_subc, uint32_t comb, uint32_t anchor_bin,
-                 uint32_t& out_peak, double& out_frac, double& out_leakage_anomaly);
+                 uint32_t& out_peak, double& out_frac, double& out_leakage_anomaly, bool& out_faded);
 
   row_cir_builder           cir_builder_;
   leakage_model              leakage_model_; ///< per-M expected-leakage curve cache (see above)
