@@ -17,7 +17,7 @@ sed -i "s/cpi_slots *= *[0-9]*;/cpi_slots       = 128;/" "$c"
 sed -i "s#out_path *= *\"[^\"]*\";#out_path    = \"$OUT/oaiue_sensing\";#" "$c"
 sed -i "s#report_path *= *\"[^\"]*\";#report_path = \"$OUT/oaiue_reports.jsonl\";#" "$c"
 
-sudo env GNB_CONF=gnb.sensing.100mhz.rfsim.conf UE_PRB=273 UE_CFREQ=3750000000 \
+sudo env GNB_CONF=gnb.sensing.100mhz.rfsim.conf UE_PRB=273 UE_CFREQ=3750000000 UE_NB_ANT_RX="${UE_NB_ANT_RX:-1}" \
   ./run_sim_traffic_iperf.sh "$DUR" "$OUT/logs" "$c" 3M
 rm -f "$c"
 

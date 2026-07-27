@@ -102,9 +102,16 @@ GNB_PID=$!
 
 sleep 3 # let the gNB open the rfsim server socket + its TUN before the UE connects
 
+# Receive-array AoA: opt-in via UE_NB_ANT_RX (see tests/sensing_sim/run_sim_traffic_iperf.sh).
+UE_ANT_ARG=()
+if [ "${UE_NB_ANT_RX:-1}" -gt 1 ]; then
+  UE_ANT_ARG=(--ue-nb-ant-rx "$UE_NB_ANT_RX")
+  echo "AoA: running the UE with $UE_NB_ANT_RX receive antennas"
+fi
+
 $SUDO ip netns exec "$NS_UE" env ISAC_DBG_DT="${ISAC_DBG_DT:-}" "$BUILD_DIR/nr-uesoftmodem" \
   -O "$SCRIPT_DIR/$UE_CONF" --do-ra --rfsim --noS1 \
-  -r "$UE_PRB" --numerology 1 --band 78 -C "$UE_CFREQ" \
+  -r "$UE_PRB" --numerology 1 --band 78 -C "$UE_CFREQ" "${UE_ANT_ARG[@]}" \
   --rfsimulator.[0].serveraddr "$GNB_IP" >"$UE_LOG" 2>&1 &
 UE_PID=$!
 
