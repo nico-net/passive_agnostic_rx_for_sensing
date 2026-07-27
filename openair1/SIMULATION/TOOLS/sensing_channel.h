@@ -112,6 +112,40 @@ void *sensing_channel_make(channel_desc_t *cd,
 int sensing_channel_set_rx_array(void *traj, const char *spec, double boresight_deg);
 
 /**
+ * @brief Inject a RECEIVER CLOCK error (STO / CFO / SFO) into the sensing channel.
+ *
+ * WHY THIS EXISTS. rfsimulator runs both ends as processes on one machine clock, so the impairments
+ * the UE's Phase 1-3 sync stack exists to correct are almost absent: measured on the 4-object scene,
+ * CFO rms 0.42 Hz and STO drift 0.12 bins/CPI, with the SFO correction correctly withheld by its own
+ * linearity gate because there is no real drift to fit. A sync-on/off A/B on that harness therefore
+ * measures "correcting nothing changes nothing" and can neither validate nor condemn the algorithm.
+ * This function gives the harness a KNOWN impairment to recover, so the sync stack can be scored
+ * against ground truth without an SDR.
+ *
+ * All three are applied COMMON-MODE to every path (LOS and every target), because a clock error
+ * belongs to the receiver, not to any propagation path -- and that common-mode structure is exactly
+ * what the sync stack assumes when it estimates from the LOS tap and corrects the whole grid.
+ *
+ * @param cd            channel descriptor; may have its CIR GROWN to fit the shifted taps.
+ * @param traj          handle from sensing_channel_make()/_parse().
+ * @param sto_us        constant timing offset, microseconds.
+ * @param cfo_hz        carrier frequency offset, Hz (a common phase rotation 2*pi*f*t).
+ * @param sfo_ppm       sample-clock offset, ppm; the injected delay RAMPS at this rate.
+ * @param wrap_samples  sawtooth limit for that ramp, samples. Models the coarse time-tracking loop a
+ *                      real receiver runs, and is load-bearing: at 1 ppm / 61.44 Msps a free ramp
+ *                      passes the 255-tap CIR cap in ~4 s and the whole scene goes dark. Set it
+ *                      ABOVE the drift expected within one CPI to leave Phase 3 an unbroken ramp.
+ *                      <=0 disables wrapping (warned about).
+ * @return 0 on success (including the all-zero no-op case), -1 on a NULL argument.
+ */
+int sensing_channel_set_rx_clock(channel_desc_t *cd,
+                                 void           *traj,
+                                 double          sto_us,
+                                 double          cfo_hz,
+                                 double          sfo_ppm,
+                                 double          wrap_samples);
+
+/**
  * @brief Rebuild cd->ch[] from the object trajectories at this block's (midpoint) time.
  *
  * Called from update_channel_model() once per rfsimulator RX block when cd->sensing_traj != NULL.

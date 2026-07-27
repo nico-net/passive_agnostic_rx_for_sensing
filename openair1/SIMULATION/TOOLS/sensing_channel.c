@@ -103,6 +103,19 @@ typedef struct sensing_traj_s {
   sens_elem_t elem[SENS_MAX_RX_ELEM]; ///< RX element offsets, ENU-aligned; see sensing_channel_set_rx_array()
   int         nelem;                  ///< 0 => no array configured, every rx antenna is co-located
 
+  // --- Receiver clock impairments (see sensing_channel_set_rx_clock) ----------------------------
+  // These model the RECEIVER's own oscillator/sampling error, which is why they are applied
+  // COMMON-MODE to every path (LOS and every target alike). That is not a simplification: a clock
+  // error is a property of the receiver, not of any propagation path, and the common-mode property
+  // is precisely what the UE's Phase 1-3 sync stack exploits (it estimates STO/CFO/SFO from the LOS
+  // tap and applies the result to the whole grid). Injecting them any other way would validate
+  // something the sync stack is not designed to do.
+  double clk_sto_samples;  ///< constant receiver timing offset, samples
+  double clk_cfo_hz;       ///< receiver carrier frequency offset, Hz
+  double clk_sfo_ppm;      ///< receiver sample-clock offset, ppm (delay ramps at this rate)
+  double clk_wrap_samples; ///< sawtooth limit for the SFO ramp, samples; <=0 = free ramp
+  int    clk_active;       ///< any of the above non-zero
+
   int      started;   ///< false until the first update() call anchors start_TS
   uint64_t start_TS;  ///< block timestamp of the first update() call
   double   last_log_t; ///< last ground-truth-log time (s), for once-per-second logging
@@ -288,12 +301,45 @@ void sensing_channel_update(channel_desc_t *cd, int nbSamples, uint64_t TS)
     memset(cd->ch[p], 0, (size_t)cd->channel_length * sizeof(cd->ch[p][0]));
   }
 
+  // Receiver clock error, common-mode across every path (see the struct comment).
+  //
+  //  * STO -> a constant added delay.
+  //  * SFO -> a delay that RAMPS at sfo_ppm, because a sample-clock error accumulates timing error
+  //           linearly with time. (A sample-rate error also scales each path's own delay by
+  //           1+sfo_ppm*1e-6, but with tau ~ 1 us and ppm ~ 1e-6 that term is ~1e-12 s -- five
+  //           orders of magnitude below one sample -- so the common ramp is the whole effect, not
+  //           an approximation of convenience.)
+  //  * CFO -> a common phase rotation 2*pi*f*t applied to every tap's complex gain.
+  //
+  // The ramp is WRAPPED into [0, clk_wrap_samples) rather than left free. That is not a numerical
+  // dodge: a real receiver's coarse time-tracking loop removes whole-sample drift and leaves the
+  // sensing pipeline the sub-loop residual, so a sawtooth is the physically honest shape. It is also
+  // load-bearing here -- at 1 ppm and 61.44 Msps the free ramp reaches ~14700 samples over a 240 s
+  // run, far past the 255-tap uint8_t CIR cap, so every tap would silently fall off the end of the
+  // channel and the scene would go dark. Size clk_wrap_samples ABOVE the drift expected within one
+  // CPI if you want a clean unbroken ramp for Phase 3 to fit.
+  double clk_delay = 0.0;
+  double clk_cos = 1.0, clk_sin = 0.0;
+  if (s->clk_active) {
+    double ramp = s->clk_sfo_ppm * 1e-6 * t * s->fs;
+    if (s->clk_wrap_samples > 0.0) {
+      ramp = fmod(ramp, s->clk_wrap_samples);
+      if (ramp < 0.0) {
+        ramp += s->clk_wrap_samples; // keep the total delay non-negative: accum_tap drops k<0
+      }
+    }
+    clk_delay             = s->clk_sto_samples + ramp;
+    const double clk_phase = 2.0 * M_PI * s->clk_cfo_hz * t;
+    clk_cos                = cos(clk_phase);
+    clk_sin                = sin(clk_phase);
+  }
+
   // Static direct path (LOS): real gain, zero Doppler, at the differential-delay origin. Its arrival
   // direction at the receiver is the (known, surveyed) bearing of the illuminator — which is exactly
   // what the UE-side direct-path array self-calibration exploits.
   double ulx, uly;
   arrival_dir(s, s->tx_x, s->tx_y, &ulx, &uly);
-  add_tap_frac(cd, s, s->los_delay, s->los_gain, 0.0, ulx, uly);
+  add_tap_frac(cd, s, s->los_delay + clk_delay, s->los_gain * clk_cos, s->los_gain * clk_sin, ulx, uly);
 
   // Moving reflectors.
   for (int k = 0; k < s->nobj; k++) {
@@ -301,10 +347,12 @@ void sensing_channel_update(channel_desc_t *cd, int nbSamples, uint64_t TS)
     object_position(&s->obj[k], t, &ox, &oy);
     const double R   = bistatic_range(s, ox, oy);
     const double dR  = R - s->r_los;              // differential range vs. direct path
-    const double tau = s->los_delay + dR / c * s->fs; // continuous fractional delay, samples
+    const double tau = s->los_delay + clk_delay + dR / c * s->fs; // continuous fractional delay, samples
     const double phase = -2.0 * M_PI * R / s->lambda; // carrier phase for a path of length R
-    const double gr    = s->obj[k].refl * cos(phase);
-    const double gi    = s->obj[k].refl * sin(phase);
+    const double gr0   = s->obj[k].refl * cos(phase);
+    const double gi0   = s->obj[k].refl * sin(phase);
+    const double gr    = gr0 * clk_cos - gi0 * clk_sin; // common CFO rotation
+    const double gi    = gi0 * clk_cos + gr0 * clk_sin;
     double ux, uy;
     arrival_dir(s, ox, oy, &ux, &uy);
     add_tap_frac(cd, s, tau, gr, gi, ux, uy);
@@ -317,6 +365,14 @@ void sensing_channel_update(channel_desc_t *cd, int nbSamples, uint64_t TS)
   // range-rate (centered finite difference of R, so it's well-defined even sitting on a corner).
   if (t - s->last_log_t >= 1.0) {
     s->last_log_t = t;
+    // Injected receiver-clock truth, on its own line so a scorer can diff it against the UE's
+    // "SENSING: sync CPI #n STO[...] CFO[...] SFO[...]" without parsing the target lines.
+    if (s->clk_active) {
+      LOG_I(HW,
+            "SENSING_CHANNEL clk: t=%.3fs sto_samples=%.4f sfo_ppm=%.4f cfo_hz=%.4f "
+            "total_delay_samples=%.4f\n",
+            t, s->clk_sto_samples, s->clk_sfo_ppm, s->clk_cfo_hz, clk_delay);
+    }
     const double delta = 1e-3;
     for (int k = 0; k < s->nobj; k++) {
       const double R  = object_bistatic_range(s, &s->obj[k], t);
@@ -559,25 +615,74 @@ int sensing_channel_set_rx_array(void *traj, const char *spec, double boresight_
     return 0;
   }
 
-  // Ambiguity warning: an inter-element spacing above lambda/2 folds distinct bearings onto the same
-  // measured phase difference. Reported here rather than silently, because a scene that violates it
-  // produces confidently WRONG AoA rather than obviously-bad AoA.
-  double max_gap = 0.0;
+  // Ambiguity warning: it is the SMALLEST inter-element spacing that sets the unambiguous field of
+  // view -- a 4-element lambda/2 ULA spans 3*lambda/2 end to end and is perfectly unambiguous. Testing
+  // the MAX gap (as this did originally) declares every array of more than two elements ambiguous,
+  // which is both wrong and, on the first live run, actively misleading. The largest gap sets
+  // RESOLUTION, so both are reported. Kept in step with isac_aoa.cc's parse_rx_array().
+  double min_gap = 1e30, max_gap = 0.0;
   for (int i = 0; i < s->nelem; i++) {
     for (int j = i + 1; j < s->nelem; j++) {
       const double g = hypot(s->elem[i].x - s->elem[j].x, s->elem[i].y - s->elem[j].y);
       if (g > max_gap) {
         max_gap = g;
       }
+      if (g < min_gap) {
+        min_gap = g;
+      }
     }
   }
-  LOG_I(HW, "SENSING_CHANNEL: rx_array %d elements, boresight=%.1fdeg, max spacing=%.4fm (lambda/2=%.4fm)%s\n",
-        s->nelem, boresight_deg, max_gap, s->lambda / 2.0,
-        (max_gap > s->lambda / 2.0 + 1e-9) ? " -- AMBIGUOUS (> lambda/2)" : "");
+  LOG_I(HW,
+        "SENSING_CHANNEL: rx_array %d elements, boresight=%.1fdeg, spacing %.4f-%.4fm "
+        "(lambda/2=%.4fm)%s\n",
+        s->nelem, boresight_deg, min_gap, max_gap, s->lambda / 2.0,
+        (min_gap > s->lambda / 2.0 + 1e-9) ? " -- AMBIGUOUS (min gap > lambda/2)" : "");
   for (int i = 0; i < s->nelem; i++) {
     LOG_I(HW, "SENSING_CHANNEL:   elem%d ENU offset=(%.4f,%.4f)m\n", i, s->elem[i].x, s->elem[i].y);
   }
   return s->nelem;
+}
+
+// Takes `cd` (unlike sensing_channel_set_rx_array) because a non-zero impairment can need MORE taps
+// than the scene alone, and growing the CIR requires the descriptor.
+int sensing_channel_set_rx_clock(channel_desc_t *cd,
+                                 void           *traj,
+                                 double          sto_us,
+                                 double          cfo_hz,
+                                 double          sfo_ppm,
+                                 double          wrap_samples)
+{
+  sensing_traj_t *s = (sensing_traj_t *)traj;
+  if (s == NULL || cd == NULL) {
+    return -1;
+  }
+  s->clk_sto_samples  = sto_us * 1e-6 * s->fs;
+  s->clk_cfo_hz       = cfo_hz;
+  s->clk_sfo_ppm      = sfo_ppm;
+  s->clk_wrap_samples = wrap_samples;
+  s->clk_active       = (s->clk_sto_samples != 0.0 || cfo_hz != 0.0 || sfo_ppm != 0.0);
+  if (!s->clk_active) {
+    return 0; // default: bit-identical to the pre-impairment channel
+  }
+
+  // Headroom so the shifted taps still land inside the CIR. Without this the injected delay would
+  // silently push the far targets past channel_length and accum_tap would drop them -- the failure
+  // would look like "the impairment destroyed the scene" rather than "the CIR was too short".
+  const double max_shift = fabs(s->clk_sto_samples) + ((wrap_samples > 0.0) ? wrap_samples : 0.0);
+  ensure_channel_length(cd, (int)ceil(max_shift) + (int)cd->channel_length + s->frac_taps + 1);
+
+  LOG_I(HW,
+        "SENSING_CHANNEL: rx clock impairment ACTIVE -- sto=%.3fus (%.2f samples) cfo=%.3fHz "
+        "sfo=%.4fppm (ramp %.2f samples/s%s)\n",
+        sto_us, s->clk_sto_samples, cfo_hz, sfo_ppm, sfo_ppm * 1e-6 * s->fs,
+        (wrap_samples > 0.0) ? ", sawtooth-wrapped" : ", FREE RAMP -- will overflow the CIR on a long run");
+  if (wrap_samples <= 0.0 && sfo_ppm != 0.0) {
+    LOG_W(HW,
+          "SENSING_CHANNEL: rx_sfo_wrap_samples<=0 with a non-zero SFO: the delay ramp is unbounded and "
+          "every tap will leave the %d-tap CIR after ~%.1fs. Set rx_sfo_wrap_samples.\n",
+          SENS_MAX_TAPS, (double)SENS_MAX_TAPS / fabs(sfo_ppm * 1e-6 * s->fs));
+  }
+  return 0;
 }
 
 void *sensing_channel_parse(channel_desc_t *cd)
@@ -588,6 +693,7 @@ void *sensing_channel_parse(channel_desc_t *cd)
   double p_tx_x = 0.0, p_tx_y = 0.0, p_rx_x = 0.0, p_rx_y = 0.0;
   double p_los_db = 0.0, p_los_delay = 0.0;
   double p_boresight = 0.0;
+  double p_sto_us = 0.0, p_cfo_hz = 0.0, p_sfo_ppm = 0.0, p_sfo_wrap = 64.0;
   char  *p_objects = NULL;
   char  *p_rx_array = NULL;
 
@@ -611,6 +717,14 @@ void *sensing_channel_parse(channel_desc_t *cd)
        .strptr = &p_rx_array, .defstrval = "", TYPE_STRING, 0},
       {"rx_array_boresight_deg", "rotation of the rx array frame into ENU (deg CCW from east)", 0,
        .dblptr = &p_boresight, .defdblval = 0.0, TYPE_DOUBLE, 0},
+      {"rx_sto_us", "receiver constant timing offset (us, 0 = none)", 0, .dblptr = &p_sto_us,
+       .defdblval = 0.0, TYPE_DOUBLE, 0},
+      {"rx_cfo_hz", "receiver carrier frequency offset (Hz, 0 = none)", 0, .dblptr = &p_cfo_hz,
+       .defdblval = 0.0, TYPE_DOUBLE, 0},
+      {"rx_sfo_ppm", "receiver sample-clock offset (ppm, 0 = none)", 0, .dblptr = &p_sfo_ppm,
+       .defdblval = 0.0, TYPE_DOUBLE, 0},
+      {"rx_sfo_wrap_samples", "sawtooth limit for the SFO delay ramp (samples; <=0 = free ramp)", 0,
+       .dblptr = &p_sfo_wrap, .defdblval = 64.0, TYPE_DOUBLE, 0},
   };
   const int nparams = (int)(sizeof(params) / sizeof(params[0]));
   config_get(config_get_if(), params, nparams, SENSING_CHANNEL_SECTION);
@@ -622,6 +736,7 @@ void *sensing_channel_parse(channel_desc_t *cd)
       sensing_channel_make(cd, p_tx_x, p_tx_y, p_rx_x, p_rx_y, p_los_db, p_los_delay, p_frac, p_chanlen, p_objects);
   if (traj != NULL) {
     sensing_channel_set_rx_array(traj, p_rx_array, p_boresight);
+    sensing_channel_set_rx_clock(cd, traj, p_sto_us, p_cfo_hz, p_sfo_ppm, p_sfo_wrap);
   }
   return traj;
 }
