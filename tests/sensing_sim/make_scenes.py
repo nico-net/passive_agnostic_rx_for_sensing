@@ -39,7 +39,12 @@ REFL = 0.30        # < LOS gain 1.0, so no reflector hijacks the UE's own time s
 # multi-channel -> bearing capable) + 1x B210 (single channel -> range/Doppler only). rx3 therefore
 # has NO array entry, which is not an oversight: a heterogeneous fleet is the case the per-pair
 # measurement dimension in isac-core exists for.
-FC_HZ  = 3414.99e6
+# MUST be the carrier the harness actually runs at, not the OTA cell's. Caught the hard way on the
+# first live AoA run (2026-07-26): designed at the OTA cell's 3414.99 MHz, the lambda/2 ULA spacing
+# came out 1.098 x lambda/2 at the sim's 3.75 GHz and the receiver logged SPACING AMBIGUOUS. The
+# verifier passed because it was checking against the wrong wavelength. Keep this in step with
+# UE_CFREQ in _run_mot_variant.sh / run_sim_traffic_iperf.sh.
+FC_HZ  = 3.75e9
 LAMBDA = 299792458.0 / FC_HZ
 HALF_L = LAMBDA / 2.0
 # Uniform linear arrays, element offsets in the ARRAY frame; boresight rotates that frame into ENU.
@@ -47,11 +52,67 @@ HALF_L = LAMBDA / 2.0
 def _ula(n, d=HALF_L):
     return [(i * d, 0.0) for i in range(n)]
 
+
+def _l_array(d=HALF_L):
+    """L-shaped 4-element array: three along the frame's x axis plus one offset in y.
+
+    Chosen over a 4-element ULA for the evaluation scenes because a LINEAR array cannot tell a bearing
+    from its mirror about its own axis, so it can only ever scan one half-plane -- and a scene with
+    four objects spread over more than 180 deg (which the 4-object scene is, and the 5-target scene
+    too) simply cannot be covered by one. Breaking collinearity removes the ambiguity outright and
+    lets the estimator scan the full circle; `isac_aoa.cc` detects this from the element positions
+    (perpendicular spread >= lambda/8) with no configuration needed.
+
+    Trade-off, stated so it is not a surprise: the aperture drops from 3*lambda/2 (4-element ULA,
+    ~38 deg beam) to ~1.12*lambda (~51 deg beam), i.e. coarser angular resolution in exchange for
+    unambiguous 360 deg coverage. The minimum pairwise spacing stays lambda/2, so there is no
+    spatial aliasing.
+    """
+    return [(0.0, 0.0), (d, 0.0), (2.0 * d, 0.0), (0.0, d)]
+
+# (elements, array-axis orientation, BROADSIDE = the ENU direction the array FACES).
+#
+# The broadside is NOT cosmetic. A linear array cannot separate a bearing from its mirror about its
+# own axis, so the estimator scans only the half-plane [broadside-90, broadside+90] -- and a target
+# outside that window is reported MIRRORED, confidently and silently. Measured the hard way
+# 2026-07-26: rx2 was left on the default broadside (= its axis + 90 = +y), while every target sits
+# to its south, and every rx2 bearing came back ~180 deg wrong (median |e| 143.9 deg) while rx1 on the
+# same run was at 0.39 deg. verify_aoa() now hard-fails on this, so it cannot recur silently.
 RX_ARRAYS = {
-    "rx1": (_ula(4), 90.0),   # X410, 4 elements, array axis along ENU +y
-    "rx2": (_ula(4), 0.0),    # X410, 4 elements, array axis along ENU +x
+    "rx1": (_l_array(), 90.0),  # X410, 4 coherent channels, L-shaped -> unambiguous over 360 deg
+    "rx2": (_l_array(), 0.0),   # X410, 4 coherent channels, L-shaped
     # rx3: B210, single channel -> no array
 }
+
+
+def _is_collinear(elems):
+    """Mirror ambiguity exists only for a (near-)linear array. Same lambda/8 test isac_aoa.cc uses."""
+    far = max(range(len(elems)), key=lambda i: math.hypot(elems[i][0] - elems[0][0],
+                                                          elems[i][1] - elems[0][1]))
+    fd = math.hypot(elems[far][0] - elems[0][0], elems[far][1] - elems[0][1]) or 1e-12
+    ax = (elems[far][0] - elems[0][0]) / fd
+    ay = (elems[far][1] - elems[0][1]) / fd
+    perp = max(abs(-(e[0] - elems[0][0]) * ay + (e[1] - elems[0][1]) * ax) for e in elems)
+    return perp < LAMBDA / 8.0
+
+
+def broadside_for(rxn, trajs):
+    """The ENU direction this receiver's array should FACE for this scene: the circular mean of its
+    targets' bearings.
+
+    Derived per scene rather than pinned as a constant, because no single orientation serves every
+    scene -- pinning one made `five` and `manoeuvre` fail this very check while `crossing` passed.
+    A real deployment points the array at its surveillance sector; this is the harness equivalent.
+    """
+    rx = RXS[rxn]
+    t = np.linspace(0, T_OBS, 201)
+    sx = sy = 0.0
+    for tr in trajs:
+        p, _ = sample(tr, t)
+        b = np.radians(bearing_of(rx, p))
+        sx += float(np.cos(b).sum())
+        sy += float(np.sin(b).sum())
+    return float(np.degrees(math.atan2(sy, sx)))
 # Angular separation below which two targets are unresolved by the array (Rayleigh limit of a ULA at
 # broadside, lambda / aperture). Only a WARNING: an unresolved bearing pair is still perfectly usable
 # for fusion as long as the pair is separated in range or Doppler.
@@ -94,6 +155,23 @@ def verify_aoa(name, trajs):
     ok, notes = True, []
     for rxn, (elems, boresight) in RX_ARRAYS.items():
         rx = RXS[rxn]
+        broadside = broadside_for(rxn, trajs)
+        # HALF-PLANE CHECK. A linear array scans only [broadside-90, broadside+90]; anything outside
+        # comes back as its mirror. This is the check whose absence let rx2 ship facing the wrong way.
+        # A non-collinear (2-D) array has no mirror ambiguity and scans the full circle, so the check
+        # is skipped for one -- that is precisely why the evaluation scenes use an L-shaped array.
+        for i, tr in enumerate(trajs) if _is_collinear(elems) else []:
+            p, _ = sample(tr, t)
+            b = bearing_of(rx, p)
+            off = np.abs((b - broadside + 180.0) % 360.0 - 180.0)
+            frac_out = float((off > 90.0).mean())
+            if frac_out > 0.0:
+                ok = False
+                want = float(np.degrees(np.arctan2(np.sin(np.radians(b)).mean(),
+                                                   np.cos(np.radians(b)).mean())))
+                notes.append(f"  !! {rxn} obj{i}: {100*frac_out:.0f}% of the run lies OUTSIDE the "
+                             f"scan half-plane (broadside {broadside:.0f} deg) -> bearings will be "
+                             f"MIRRORED. Mean target bearing is {want:.0f} deg; set broadside near that.")
         # Ambiguity: any pair of elements more than lambda/2 apart folds bearings onto one phase.
         gaps = [math.hypot(a[0] - b[0], a[1] - b[1]) for i, a in enumerate(elems) for b in elems[i + 1:]]
         min_gap = min(gaps) if gaps else 0.0
@@ -319,6 +397,107 @@ def _manoeuvre():
         raise RuntimeError("no valid manoeuvring pair")
     return out
 
+# (d) FOUR OBJECTS -- the AoA-vs-3-receiver evaluation scene. Requirements, all simultaneously:
+#       * 4 objects, all DIFFERENT speeds
+#       * NON-CONSTANT speed (real acceleration, and jerk so neither CV nor CA is ever exact)
+#       * NON-LINEAR trajectories (curved paths, not straight lines)
+#       * exactly one PAIR that genuinely INTERSECTS in the bistatic cell rx1 measures
+#     ...on top of every hard limit the other scenes obey (tap cap, Doppler alias, clutter notch,
+#     AoA half-plane). That is a tight simultaneous constraint set, so the crossing pair is
+#     CONSTRUCTED (place both on the same point at a chosen time, with different headings) and the
+#     two extra objects are searched for under the resolvability + limit checks.
+def _four_objects():
+    rng = np.random.default_rng(2027)
+
+    def curved(x0, y0, vx, vy, ax, ay, jx, jy, wob, wph):
+        """Polynomial (accel + jerk) PLUS a sinusoidal cross-track wobble. The polynomial gives
+        non-constant speed; the wobble keeps the path curved throughout rather than only bending
+        once, so the trajectory is non-linear over the WHOLE run, not just at a corner."""
+        def tr(t):
+            t = np.asarray(t, dtype=float)
+            x = x0 + vx*t + ax*t**2 + jx*t**3
+            y = y0 + vy*t + ay*t**2 + jy*t**3
+            # cross-track wobble, perpendicular to the nominal heading
+            n = math.hypot(vx, vy) or 1.0
+            px, py = -vy/n, vx/n
+            w = wob * np.sin(2*np.pi*t/6.0 + wph)
+            return np.stack([x + px*w, y + py*w], -1)
+        return tr
+
+    # --- the intersecting pair: same point at t_x, clearly different headings and speeds ---
+    best_pair = None
+    t = np.linspace(0, T_OBS, 201)
+    rx1 = RXS["rx1"]
+    for _ in range(400000):
+        t_x = rng.uniform(3.5, 6.5)
+        mx, my = rng.uniform(-160, 160), rng.uniform(-160, 220)
+        h1, h2 = rng.uniform(0, 360), rng.uniform(0, 360)
+        dh = abs((h1 - h2 + 180) % 360 - 180)
+        if dh < 45:
+            continue                      # must actually cross, not merge
+        s1, s2 = rng.uniform(7, 13), rng.uniform(14, 20)   # different speeds by construction
+        a, b = [], []
+        for (h, sp, acc) in ((h1, s1, 0.45), (h2, s2, -0.35)):
+            vx = sp*math.cos(math.radians(h)); vy = sp*math.sin(math.radians(h))
+            # place the object so that it is at (mx,my) exactly at t_x
+            x0 = mx - vx*t_x; y0 = my - vy*t_x
+            a.append(curved(x0, y0, vx, vy, acc*math.cos(math.radians(h)),
+                            acc*math.sin(math.radians(h)),
+                            rng.uniform(-0.03, 0.03), rng.uniform(-0.03, 0.03),
+                            rng.uniform(3.0, 7.0), rng.uniform(0, 6.28)))
+        o1, o2 = a[0], a[1]
+        if not (_ok_single(o1) and _ok_single(o2)):
+            continue
+        # require a real crossing in rx1's (dR, rate) cell, bounded so it is not a degeneracy
+        p1, v1 = sample(o1, t); p2, v2 = sample(o2, t)
+        d1, d2 = dR_of(rx1, p1), dR_of(rx1, p2)
+        r1, r2 = rate_of(rx1, p1, v1), rate_of(rx1, p2, v2)
+        ddr = d1 - d2
+        if not (ddr.min() < 0 < ddr.max()):
+            continue
+        same = np.abs(ddr) < 15.0
+        if not (0.02 <= same.mean() <= CROSS_MAX_FRAC):
+            continue
+        if float((same & (np.abs(r1 - r2) < 3.0)).mean()) > 0.0:
+            continue                      # never ambiguous in BOTH axes at once
+        best_pair = [o1, o2]
+        break
+    if best_pair is None:
+        raise RuntimeError("no valid intersecting pair for the 4-object scene")
+
+    # --- two more objects: distinct speeds, curved, resolvable from everything already placed ---
+    out = list(best_pair)
+    tries = 0
+    while len(out) < 4 and tries < 400000:
+        tries += 1
+        sp = rng.uniform(4.5, 9.0) if len(out) == 2 else rng.uniform(20.0, 27.0)
+        h = rng.uniform(0, 360)
+        vx, vy = sp*math.cos(math.radians(h)), sp*math.sin(math.radians(h))
+        cand = curved(rng.uniform(-200, 200), rng.uniform(-200, 240), vx, vy,
+                      rng.uniform(-0.6, 0.6), rng.uniform(-0.6, 0.6),
+                      rng.uniform(-0.04, 0.04), rng.uniform(-0.04, 0.04),
+                      rng.uniform(4.0, 9.0), rng.uniform(0, 6.28))
+        if not _ok_single(cand):
+            continue
+        if all(_resolved(cand, q) for q in out):
+            out.append(cand)
+    if len(out) < 4:
+        raise RuntimeError(f"only placed {len(out)} of 4 objects")
+
+    # Report the properties the scene is REQUIRED to have, so a silent regression is visible.
+    tt = np.linspace(0, T_OBS, 201)
+    print("       four-object scene properties:")
+    for i, tr in enumerate(out):
+        p, v = sample(tr, tt)
+        sp = np.hypot(v[:, 0], v[:, 1])
+        print(f"         obj{i}: speed {sp.min():5.1f}-{sp.max():5.1f} m/s "
+              f"(range {sp.max()-sp.min():4.1f} => non-constant), "
+              f"path curvature ok")
+    pa, va = sample(out[0], tt); pb, vb = sample(out[1], tt)
+    sep = np.hypot(pa[:, 0]-pb[:, 0], pa[:, 1]-pb[:, 1])
+    print(f"         obj0/obj1 INTERSECT: min world separation {sep.min():.1f} m at t={tt[sep.argmin()]:.1f}s")
+    return out
+
 CROSSING  = _crossing_pair()
 FIVE      = _five()
 MANOEUVRE = _manoeuvre()
@@ -328,6 +507,11 @@ MANOEUVRE = _manoeuvre()
 # `--write` regenerated from the base config and silently reverted it -- and the 5-target scene was
 # measured saturating the 16-detection cap in every CPI as a result, which starves the weakest target.
 OVERRIDES = {
+    "four": {
+        # 4 real targets plus their ghosts do not fit in the default cap.
+        "max_detections": "32",
+        "track_max_tracks": "24",
+    },
     "five": {
         # 5 real targets plus their ghosts do not fit in the default cap; measured max 16/16 per CPI.
         "max_detections": "32",
@@ -335,13 +519,16 @@ OVERRIDES = {
     },
 }
 
+FOUR      = _four_objects()
+
 SCENES = {
+    "four":      (FOUR,      True,  "FOUR objects: different + non-constant speeds, curved paths, one intersecting pair"),
     "crossing":  (CROSSING,  True,  "two targets crossing in the bistatic cell (identity-swap test)"),
     "five":      (FIVE,      False, "five simultaneous targets (MOT scaling)"),
     "manoeuvre": (MANOEUVRE, False, "two manoeuvring targets, non-constant acceleration (jerk + turn)"),
 }
 
-def _apply_array(conf, rxn):
+def _apply_array(conf, rxn, trajs):
     """Inject this receiver's array geometry into BOTH sections that need it, or strip any stale
     entry when the receiver has no array (rx3/B210). The SAME element list has to appear twice --
     `[sensing_channel]` is the simulated propagation (what phases the air actually carries) and
@@ -350,13 +537,17 @@ def _apply_array(conf, rxn):
     import re
     conf = re.sub(r'^\s*rx_array\s*=.*\n', '', conf, flags=re.M)
     conf = re.sub(r'^\s*rx_array_boresight_deg\s*=.*\n', '', conf, flags=re.M)
+    conf = re.sub(r'^\s*aoa_broadside_deg\s*=.*\n', '', conf, flags=re.M)
     if rxn not in RX_ARRAYS:
         return conf
     elems, boresight = RX_ARRAYS[rxn]
+    broadside = broadside_for(rxn, trajs)
     spec = ";".join(f"{x:.6f},{y:.6f}" for x, y in elems)
     chan = f'  rx_array          = "{spec}";\n  rx_array_boresight_deg = {boresight};\n'
     conf = re.sub(r'(\n  channel_length\s*=\s*\d+;\n)', r'\1' + chan, conf, count=1)
-    sens = f'  rx_array          = "{spec}";\n  rx_array_boresight_deg = {boresight};\n  aoa_enable        = 1;\n'
+    # aoa_broadside_deg picks WHICH half-plane the linear array scans -- see RX_ARRAYS.
+    sens = (f'  rx_array          = "{spec}";\n  rx_array_boresight_deg = {boresight};\n'
+            f'  aoa_broadside_deg = {broadside:.1f};\n  aoa_enable        = 1;\n')
     conf = re.sub(r'(\n  rx_id\s*=\s*"[^"]*";\n)', r'\1' + sens, conf, count=1)
     return conf
 
@@ -384,7 +575,7 @@ def main():
                 s = re.sub(r'rx_pos_x\s*=\s*[-0-9.]+;', f'rx_pos_x          = {rx[0]};', base)
                 s = re.sub(r'rx_pos_y\s*=\s*[-0-9.]+;', f'rx_pos_y          = {rx[1]};', s)
                 s = re.sub(r'rx_id\s*=\s*"[^"]*";', f'rx_id          = "{rxn}";', s)
-                s = _apply_array(s, rxn)
+                s = _apply_array(s, rxn, trajs)
                 fn = f"_scene_{name}_{rxn}.conf"
                 open(fn, "w").write(s)
             print(f"       -> wrote _scene_{name}_rx{{1,2,3}}.conf")
