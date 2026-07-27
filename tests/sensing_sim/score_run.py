@@ -16,6 +16,15 @@ Usage: score_run.py <run_dir> [range_tol_m] [vel_tol_mps]
 import sys, re
 import numpy as np
 
+# Optional "--csv PREFIX": one machine-readable row instead of the human report, so an A/B batch can
+# aggregate many runs. Also harvests the per-CPI sync diagnostics (locked rows / flywheel count) from
+# the same ue.log, since a sync A/B needs to see WHY an arm behaved as it did, not just that it did.
+CSV = None
+if "--csv" in sys.argv:
+    i = sys.argv.index("--csv")
+    CSV = sys.argv[i + 1]
+    del sys.argv[i:i + 2]
+
 run_dir  = sys.argv[1]
 RANGE_TOL = float(sys.argv[2]) if len(sys.argv) > 2 else 15.0   # ~5 range bins
 VEL_TOL   = float(sys.argv[3]) if len(sys.argv) > 3 else 3.0    # ~4 velocity bins, << the 8-20 m/s harmonic offset
@@ -94,6 +103,27 @@ for cpi, trks in trk_by_cpi.items():
 
 n_det_cpi = len(det_by_cpi)
 n_trk_cpi = len(trk_by_cpi)
+
+if CSV is not None:
+    # STO[n=<locked> fly=<flywheel> ...] from the per-CPI sync log line.
+    sync_re = re.compile(r"SENSING: sync CPI #\d+ STO\[n=(\d+) fly=(\d+)")
+    locked, fly = [], []
+    with open(ue_log, errors="ignore") as fh:
+        for line in fh:
+            m = sync_re.search(line)
+            if m:
+                locked.append(int(m[1])); fly.append(int(m[2]))
+    fly_mean = (sum(fly) / len(fly)) if fly else float("nan")
+    lock_mean = (sum(locked) / len(locked)) if locked else float("nan")
+    cov = [len(det_cpi_cover[o]) / max(n_det_cpi, 1) * 100.0 for o in sorted(curves)]
+    cov += [float("nan")] * (4 - len(cov))
+    print(f"{CSV},{n_det_cpi},{n_trk_cpi},{det_total},{det_match},"
+          f"{100*det_match/max(det_total,1):.2f},{trk_total},{trk_match},"
+          f"{100*trk_match/max(trk_total,1):.2f},"
+          + ",".join(f"{c:.2f}" for c in cov[:4])
+          + f",{fly_mean:.2f},{lock_mean:.2f}")
+    sys.exit(0)
+
 print(f"=== {run_dir}  (tol: range=±{RANGE_TOL}m vel=±{VEL_TOL}m/s) ===")
 print(f"targets: {sorted(curves)}   detection-CPIs: {n_det_cpi}   track-CPIs: {n_trk_cpi}")
 print(f"\nRAW DETECTIONS: {det_total} total, {det_match} match a real target "

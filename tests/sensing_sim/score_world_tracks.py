@@ -13,6 +13,14 @@ Usage: score_world_tracks.py <tracks.jsonl> <run_dir | ue.log> [tol_m=15]
 import sys, json, re, collections
 import numpy as np
 
+# Optional "--csv PREFIX": emit a single CSV row instead of the human summary, so a batch runner can
+# aggregate hundreds of arms. PREFIX is prepended verbatim (rep,nrx,aoa,gated,arm).
+CSV = None
+if "--csv" in sys.argv:
+    i = sys.argv.index("--csv")
+    CSV = sys.argv[i + 1]
+    del sys.argv[i:i + 2]
+
 tracks_path = sys.argv[1]
 gt_src = sys.argv[2]
 TOL = float(sys.argv[3]) if len(sys.argv) > 3 else 15.0
@@ -58,9 +66,16 @@ for line in open(tracks_path):
 
 n = len(conf)
 hit = sum(1 for d, _ in conf if d <= TOL)
-print(f"confirmed updates: {n}  within {TOL}m: {hit} ({100*hit//max(n,1)}% precision)  distinct ids: {len(ids)}")
-if hit:
-    ds = np.array([d for d, _ in conf])
-    cov = collections.Counter(w for d, w in conf if d <= TOL)
-    per = "  ".join(f"obj{o}={cov[o]}" for o in sorted(paths))
-    print(f"median world err: {np.median(ds):.1f} m (matched {np.median(ds[ds<=TOL]):.1f} m)  per-target: {per}")
+ds = np.array([d for d, _ in conf]) if conf else np.array([])
+cov = collections.Counter(w for d, w in conf if d <= TOL)
+med = float(np.median(ds)) if len(ds) else float("nan")
+medm = float(np.median(ds[ds <= TOL])) if hit else float("nan")
+
+if CSV is not None:
+    per = ",".join(str(cov[o]) for o in sorted(paths))
+    print(f"{CSV},{n},{hit},{100*hit//max(n,1)},{med:.3f},{medm:.3f},{len(ids)},{per}")
+else:
+    print(f"confirmed updates: {n}  within {TOL}m: {hit} ({100*hit//max(n,1)}% precision)  distinct ids: {len(ids)}")
+    if hit:
+        per = "  ".join(f"obj{o}={cov[o]}" for o in sorted(paths))
+        print(f"median world err: {med:.1f} m (matched {medm:.1f} m)  per-target: {per}")
