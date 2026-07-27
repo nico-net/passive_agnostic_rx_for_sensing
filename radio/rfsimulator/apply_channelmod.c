@@ -232,8 +232,37 @@ void rxAddInput(c16_t **input_sig, cf_t *after_channel_sig, int rxAnt, channel_d
   // the normalized OAI value seems to be 256 as average amplitude (numerical amplification = 1)
   const double noise_per_sample = pow(10, channelDesc->noise_power_dB / 10.0) * 256;
   const int nbTx = channelDesc->nb_tx;
+  const int chLen = (int)channelDesc->channel_length;
   double Doppler_phase_cur = channelDesc->Doppler_phase_cur[rxAnt];
   Doppler_phase_cur -= 2 * M_PI * round(Doppler_phase_cur / (2 * M_PI));
+
+  // Index the NON-ZERO taps once, then convolve only those. A tap that is exactly (0,0) contributes
+  // exactly 0 to the sum, so this is numerically identical to the dense loop -- it is purely a cost
+  // reduction, and only where the CIR is actually sparse.
+  //
+  // WHY THIS MATTERS (measured 2026-07-26): the synthetic sensing channel sizes channel_length to
+  // reach the FARTHEST target (up to the 255-tap cap), but only puts energy in the LOS tap plus a
+  // ~17-tap windowed-sinc kernel per object -- around 20% occupancy for a two-target scene. The dense
+  // loop is O(nbSamples * nbTx * channel_length) PER RX ANTENNA, so a 4-element receive array pays
+  // 4 x 255 MAC/sample. That made the rfsim link so slow that the UE never got past initial sync
+  // within a 200 s run (it blocks in pullNotifiedFIFO waiting for the MIB), which looked exactly like
+  // a hang. With the zero taps skipped the same scene costs ~4 x 51, i.e. LESS than the single-antenna
+  // case did before, and multi-antenna AoA simulation becomes practical.
+  //
+  // Scratch is sized for the worst case (all taps non-zero) and lives on the stack: channel_length is
+  // a uint8_t, so this is bounded by 255 * nbTx entries.
+  int nz_idx[nbTx > 0 ? nbTx : 1][256];
+  int nz_cnt[nbTx > 0 ? nbTx : 1];
+  for (int txAnt = 0; txAnt < nbTx; txAnt++) {
+    const struct complexd *cm = channelDesc->ch[rxAnt + (txAnt * channelDesc->nb_rx)];
+    int n = 0;
+    for (int l = 0; l < chLen; l++) {
+      if (cm[l].r != 0.0 || cm[l].i != 0.0) {
+        nz_idx[txAnt][n++] = l;
+      }
+    }
+    nz_cnt[txAnt] = n;
+  }
 
   for (int i = 0; i < nbSamples; i++) {
     cf_t *out_ptr = after_channel_sig + i;
@@ -241,14 +270,16 @@ void rxAddInput(c16_t **input_sig, cf_t *after_channel_sig, int rxAnt, channel_d
 
     for (int txAnt = 0; txAnt < nbTx; txAnt++) {
       const struct complexd *channelModel = channelDesc->ch[rxAnt + (txAnt * channelDesc->nb_rx)];
+      const int *nz = nz_idx[txAnt];
+      const int ntap = nz_cnt[txAnt];
 
-      // const struct complex *channelModelEnd=channelModel+channelDesc->channel_length;
-      for (int l = 0; l < (int)channelDesc->channel_length; l++) {
-        const int idx = i - l + channelDesc->channel_length - 1;
+      for (int t = 0; t < ntap; t++) {
+        const int l = nz[t];
+        const int idx = i - l + chLen - 1;
         const struct complex16 tx16 = input_sig[txAnt][idx];
         rx_tmp.r += tx16.r * channelModel[l].r - tx16.i * channelModel[l].i;
         rx_tmp.i += tx16.i * channelModel[l].r + tx16.r * channelModel[l].i;
-      } // l
+      } // t
     }
 
     if (channelDesc->Doppler_phase_inc != 0.0) {
