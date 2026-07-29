@@ -1,0 +1,251 @@
+# SPDX-License-Identifier: LicenseRef-CSSL-1.0
+#
+# Fictitious-gNB sensing loop — UE side, TWO constant-velocity targets (Phase 2 MOT, Part 1).
+#
+# Motivation (2026-07-24, PHASE2_MOT_MULTIUE_HANDOVER.md Part 1): the first MOT validation scene.
+# Two independent reflectors moving in straight lines at constant Cartesian velocity, chosen WELL
+# SEPARATED in bistatic range throughout (never within ~75 m of each other) — the "does the plumbing
+# work at all" case that proves the multi-track container, global greedy association, and M-of-N
+# initiation, before the harder crossing scene (where identities can swap) is built. This is the
+# separated-targets baseline the handover asks for first.
+#
+# Geometry (same TX/RX as the eca_walk / sine scenes so all the DSP/window/clutter config carries
+# over unchanged):
+#   TX (gNB, illuminator) at (0, 0), RX (this UE) at (100, 0), R_los = 100 m.
+#   Target A: x(t) = 30 + 5*t [m], y(t) = 90 [m]  — drifts right at 5 m/s in the near lane.
+#             bistatic dR sweeps ~109 -> 153 m over t in [0, 20] s (opening).
+#   Target B: x(t) = 70 - 4*t [m], y(t) = 155 [m] — drifts left at 4 m/s in the far lane.
+#             bistatic dR sweeps ~228 -> 245 m over t in [0, 20] s (opening, far).
+#   The two dR tracks stay >= ~75 m apart at all times, so nearest-neighbour association is
+#   unambiguous — any identity swap here is a plumbing bug, not an association hard case.
+# Both targets have constant Cartesian velocity, so their bistatic range-rate is only mildly
+# geometry-dependent (not perfectly linear) — the tracker's constant-velocity model + adaptive q
+# absorbs the gentle curvature, exactly as in the single-target scenes. Waypoints every 0.5 s
+# (piecewise-linear interpolation between them, see sensing_channel.c).
+
+rfsimulator = (
+  {
+    serveraddr = "192.168.101.1";  # gNB's veth address (run_sim_traffic_iperf.sh's netns pair)
+    options    = ("chanmod");
+  }
+);
+
+channelmod = {
+  max_chan  = 10;
+  modellist = "modellist_rfsimu_1";
+  modellist_rfsimu_1 = (
+    {
+      model_name     = "rfsimu_channel_enB0";
+      type           = "AWGN";
+      ploss_dB       = 0;
+      noise_power_dB = -30;
+      forgetfact     = 0;
+      offset         = 0;
+      ds_tdl         = 0;
+    },
+    {
+      model_name     = "rfsimu_channel_ue0";
+      type           = "AWGN";
+      ploss_dB       = 0;
+      noise_power_dB = -30;
+      forgetfact     = 0;
+      offset         = 0;
+      ds_tdl         = 0;
+    }
+  );
+};
+
+sensing_channel = {
+  enable            = 1;
+  tx_pos_x          = 0.0;
+  tx_pos_y          = 0.0;
+  rx_pos_x          = 100.0;
+  rx_pos_y          = 0.0;
+  los_gain_db       = 0.0;
+  los_delay_samples = 0.0;
+  frac_delay_taps   = 8;
+  channel_length    = 128;
+
+  # Two '|'-separated objects. Each: "refl; t,x,y; t,x,y; ...". refl=0.30 (< LOS gain 1.0) so neither
+  # reflector hijacks the UE's own time sync — see the sensing-sim harness caution about
+  # reflectivity exceeding the direct path.
+  # Speeds raised 5/4 -> 10/8 m/s (2026-07-24): at 5/4 m/s the true bistatic range-rate (0.7-2.2 m/s,
+  # geometry-projected) fell mostly INSIDE zero_doppler_guard's clutter notch, erasing the real slow
+  # targets and leaving only their Doppler-harmonic ghosts to track -- see PHASE2_MOT_MULTIUE_HANDOVER.md.
+  objects = "0.30; 0.0,35.0,55.0; 0.5,37.0,59.5; 1.0,39.0,64.0; 1.5,41.0,68.5; 2.0,43.0,73.0; 2.5,45.0,77.5; 3.0,47.0,82.0; 3.5,49.0,86.5; 4.0,51.0,91.0; 4.5,53.0,95.5; 5.0,55.0,100.0; 5.5,57.0,104.5; 6.0,59.0,109.0; 6.5,61.0,113.5; 7.0,63.0,118.0; 7.5,65.0,122.5; 8.0,67.0,127.0; 8.5,69.0,131.5; 9.0,71.0,136.0; 9.5,73.0,140.5; 10.0,75.0,145.0; 10.5,77.0,149.5; 11.0,79.0,154.0; 11.5,81.0,158.5; 12.0,83.0,163.0; 12.5,85.0,167.5; 13.0,87.0,172.0; 13.5,89.0,176.5; 14.0,91.0,181.0; 14.5,93.0,185.5; 15.0,95.0,190.0; 15.5,97.0,194.5; 16.0,99.0,199.0; 16.5,101.0,203.5; 17.0,103.0,208.0; 17.5,105.0,212.5; 18.0,107.0,217.0; 18.5,109.0,221.5; 19.0,111.0,226.0; 19.5,113.0,230.5; 20.0,115.0,235.0 | 0.30; 0.0,70.0,120.0; 0.5,68.5,124.0; 1.0,67.0,128.0; 1.5,65.5,132.0; 2.0,64.0,136.0; 2.5,62.5,140.0; 3.0,61.0,144.0; 3.5,59.5,148.0; 4.0,58.0,152.0; 4.5,56.5,156.0; 5.0,55.0,160.0; 5.5,53.5,164.0; 6.0,52.0,168.0; 6.5,50.5,172.0; 7.0,49.0,176.0; 7.5,47.5,180.0; 8.0,46.0,184.0; 8.5,44.5,188.0; 9.0,43.0,192.0; 9.5,41.5,196.0; 10.0,40.0,200.0; 10.5,38.5,204.0; 11.0,37.0,208.0; 11.5,35.5,212.0; 12.0,34.0,216.0; 12.5,32.5,220.0; 13.0,31.0,224.0; 13.5,29.5,228.0; 14.0,28.0,232.0; 14.5,26.5,236.0; 15.0,25.0,240.0; 15.5,23.5,244.0; 16.0,22.0,248.0; 16.5,20.5,252.0; 17.0,19.0,256.0; 17.5,17.5,260.0; 18.0,16.0,264.0; 18.5,14.5,268.0; 19.0,13.0,272.0; 19.5,11.5,276.0; 20.0,10.0,280.0";
+};
+
+sensing = {
+  enable          = 1;
+  # CSI-RS fusion was tried (2026-07-24) and REVERTED: this cell's own-CSI-RS fires only ~1-3x per
+  # 128-row CPI (too sparse to be a sampling backbone) AND mixing its different PRB scope with the
+  # 273-PRB PDSCH corrupted the fused grid (far ghosts got worse). The starved-CPI ghosts are instead
+  # addressed by cpi_quality_gate below. See PHASE2_MOT_MULTIUE_HANDOVER.md.
+  sources         = "pdsch_data";
+  # Matched-filter detector front-end (2026-07-24): replaces the FFT core (which assumes uniform,
+  # complete, real-symmetric sampling and thus MANUFACTURES the harmonic/mirror/pedestal ghosts) with
+  # an occupancy-matched hypothesis bank -- per-row occupied-only range transform + per-row occupancy
+  # normalisation + coherent NUDFT slow-time. Artifact-suppression by construction rather than by
+  # downstream rejection. See PHASE2_MOT_MULTIUE_HANDOVER.md / defs_nr_UE_ISAC.h.
+  detector        = "fft";
+  mf_per_row_norm = 1;
+  cpi_slots       = 512;   # overridden to 128 by the runner script, kept as the documented default
+  interpolate     = 1;
+  capture         = 1;
+
+  # Disabled for a test (2026-07-24): prior (pre-this-session) validation found sync_correction=ON
+  # net-negative on this same harness type (61-69% target detection vs 100% OFF, p<=0.002,
+  # ota-sync-task-progress memory) and the flagged WALK_HALFWIN_BINS recalibration was never done.
+  # It had been left ON, untested, through this whole session's MOT work.
+  sync_correction = 0;
+  selftest        = 0;
+
+  cfar_guard         = 16;
+  cfar_train         = 8;
+  # cfar_pfa = 0 => AUTO-derive the per-cell Pfa from cfar_target_fa_per_cpi and the grid size
+  # (see defs_nr_UE_ISAC.h). The old fixed cfar_pfa=1e-4 predicted ~42 statistical false alarms/CPI
+  # on this grid (3276 range x 128 Doppler bins) -- live-confirmed 2026-07-24 as the actual source of
+  # multi_target_tracker's track churn, not a clutter/mirror bug (see PHASE2_MOT_MULTIUE_HANDOVER.md).
+  cfar_pfa               = 0;
+  cfar_target_fa_per_cpi = 1.0;   # seed only -- adapts below, see cfar_fa_adapt_enable
+  # Closed-loop adaptation (2026-07-24): 1.0 was tuned for an EARLIER problem (16 det/CPI, mostly
+  # noise) and never revisited -- live-measured to throttle the WHOLE stream to ~1 event/CPI (77
+  # detections / 76 CPIs), making real-target-vs-noise close to a coin flip each CPI. Adapts from the
+  # measured raw detection count instead of staying pinned to a stale constant.
+  cfar_fa_adapt_enable    = 1;
+  cfar_fa_min              = 0.5;
+  cfar_fa_max              = 20.0;
+  cfar_fa_adapt_rate       = 1.15;
+  # target_max_det raised 8->60 (2026-07-24): the tight band pinned the loop at its FLOOR the entire
+  # run (raw_det measured 7-52, NEVER below 8) -- most of that isn't statistical noise the pfa knob
+  # can suppress, it's structured signal (sidelobes/ghosts/harmonics). 60 sits above the observed
+  # max, so the loop stops wastefully over-tightening and leaves real-vs-structured discrimination to
+  # the downstream filters (harmonic_reject, track_harmonic_reject) that already do that job.
+  cfar_fa_target_min_det   = 2;
+  cfar_fa_target_max_det   = 60;
+  # Per-Doppler-column CFAR: also judge each cell against the noise of its own velocity lane, which
+  # rejects the range-wide pedestal a strong target smears across its own Doppler column (the dominant
+  # MOT-false-track source at the target FUNDAMENTAL velocity, RVM-confirmed 2026-07-24 -- see
+  # PHASE2_MOT_MULTIUE_HANDOVER.md). Complementary to range_whiten (which handles the harmonic ridges).
+  cfar_per_column        = 1;
+  # Restored to 3 (from the 1 tried earlier): targets now move fast enough (10/8 m/s -> bistatic rate
+  # >=3 m/s) to clear guard=3's ~2.27 m/s notch, and guard=1 reopened a LOS/clutter leakage regression
+  # (far-range ghosts returned) -- see PHASE2_MOT_MULTIUE_HANDOVER.md.
+  zero_doppler_guard = 3;
+  zero_range_guard   = 7;
+  nms_range_bins     = 3;
+  nms_doppler_bins   = 3;
+  max_detections     = 16;
+
+  range_window            = "chebyshev";
+  range_window_sidelobe_db = 60.0;
+  # Soft spectral whitening: caps subcarriers hotter than the median slow-time RMS, collapsing the
+  # flat range pedestal that the irregular pdsch_data occupancy smears a strong target into (the
+  # dominant MOT-false-track source, RVM-confirmed 2026-07-24 -- see PHASE2_MOT_MULTIUE_HANDOVER.md).
+  range_whiten            = 1;
+
+  # doppler_nudft evaluated (2026-07-24) but left OFF: it removes only the TIMING-irregularity
+  # harmonic family, not the amplitude-gating (on/off PDSCH occupancy) one, and was net-neutral to
+  # slightly worse on end-to-end churn here. Kept as an opt-in knob. See PHASE2_MOT_MULTIUE_HANDOVER.md.
+  doppler_nudft           = 0;
+
+  # Low-rank matrix completion of the CFR grid BEFORE range/Doppler: fills the per-slot subcarrier
+  # gaps (varying PRB allocation) with a rank~=#scatterers model, giving every slot a consistent full
+  # aperture. This attacks the AMPLITUDE-GATING harmonic mechanism at the source -- the one NUDFT
+  # can't reach (see PHASE2_MOT_MULTIUE_HANDOVER.md). Supersedes the per-row interpolate gap-fill.
+  slow_time_complete      = 1;
+  mc_rank                 = 0;   # 0 = auto-derive from the previous CPI's confirmed track count
+  mc_rank_max             = 8;
+  mc_iters                = 15;
+  mc_power_iters          = 1;
+
+  # L1/FISTA sparse Doppler verification: re-solves only the CFAR-flagged range bins via sparse
+  # recovery over the actual irregular sample times, dropping detections that needed to borrow
+  # energy from a neighbouring bin in the dense transform (Doppler harmonics). Offline-validated
+  # >80 dB peak-to-harmonic ratio vs ~5.5 dB for the dense transform on the same gappy data. Bypasses
+  # slow-time resampling (needs the real row times), same as doppler_nudft.
+  # lambda_scale=1.0 (fixed) over-suppressed real targets live 2026-07-24 (0-2 det/CPI, long zero
+  # stretches) -- now just the SEED for a closed-loop adaptation in range_doppler.cc (see
+  # defs_nr_UE_ISAC.h), which relaxes/tightens per CPI based on the measured surviving-detection count.
+  doppler_sparse             = 1;
+  doppler_sparse_iters       = 40;
+  doppler_sparse_lambda_scale = 1.0;
+  doppler_sparse_lambda_min  = 0.05;
+  doppler_sparse_lambda_max  = 1.5;
+  doppler_sparse_adapt_rate  = 0.85;
+  doppler_sparse_target_min_det = 1;
+  doppler_sparse_target_max_det = 6;
+  doppler_sparse_peak_ratio  = 0.05;   # lenient: does THIS detection's own bin survive sparse recovery
+  doppler_sparse_harmonic_ratio = 0.25; # strict: reject as orphaned harmonic only if a sub-bin is >=-6dB
+
+  # Doppler-harmonic rejection: irregular slot sampling turns a moving target's slow-time tone into a
+  # harmonic-rich signal, leaving strong ghosts at 2x/3x its velocity at the SAME range. Reject them
+  # (a real target at exactly integer-multiple velocity + same range is absurd). 2026-07-24, see
+  # PHASE2_MOT_MULTIUE_HANDOVER.md.
+  harmonic_reject         = 1;
+  harmonic_max_k          = 4;
+  harmonic_tol            = 0.15;
+
+  # Far-range harmonic rejection: reverted to 0 (2026-07-24). Diagnostics showed the residual far
+  # ghosts live in SPARSE CPIs (high T_slot) where the real near target isn't detected at all, so this
+  # filter has no near reference to compare against and can't fire -- it's the wrong layer. The root
+  # cause (uninformative sparse CPIs) is instead being addressed by fusing the traffic-independent,
+  # PERIODIC CSI-RS as a sampling backbone (sensing.sources below). See PHASE2_MOT_MULTIUE_HANDOVER.md.
+  # Re-enabled (2026-07-24): was reverted only because it looked ineffective during the CSI-RS-fusion
+  # detour, but that run was confounded by CSI-RS corruption. Now on clean pdsch_data + cpi_quality_gate,
+  # detections.csv shows 8/22 far-ghost CPIs DO have a co-located near-range reference (e.g. CPI 57:
+  # near=+8.27 m/s, far=-15.79 m/s, ratio -1.91 ~= -2, within harmonic_tol) -- exactly what this catches.
+  far_harmonic_reject     = 1;
+  far_harmonic_far_m      = 500.0;
+  far_harmonic_near_m     = 250.0;
+
+  # CPI-quality gate: drop all detections from a "starved" CPI whose T_slot spikes well above the
+  # running EMA -- these are the sparse-scheduling CPIs where only amplitude-gating ghosts survive
+  # (diagnostics-confirmed 2026-07-24, PHASE2_MOT_MULTIUE_HANDOVER.md). Tracker coasts through them.
+  cpi_quality_gate        = 1;
+  cpi_quality_max_ratio   = 1.5;
+  cpi_quality_ema_alpha   = 0.2;
+
+  clutter_removal     = "eca+";
+  eca_delay_max_m     = 0.0;
+  eca_doppler_max_mps = 0.30;
+
+  nominal_los_range_m = 0.0;   # true LOS dR = 0 in this synthetic geometry
+
+  # Multi-object tracking. CV model for two constant-velocity targets. track_confirm_m = 0 => AUTO
+  # -derive the M-of-N confirmation threshold from the MEASURED per-CPI false-alarm density instead
+  # of a hand-picked constant (see multi_target_tracker.cc's solve_confirm_m): a fixed 3-of-5 was
+  # live-tested on this exact scene 2026-07-24 and let a range=5146 m ghost (and several extra ids)
+  # confirm as tracks once CFAR was running ~14-16 raw detections/CPI for only 2 real targets.
+  track_enable              = 1;
+  track_model               = "cv";
+  track_r_var_m2            = 2.6;
+  track_q_accel             = 0.0025;
+  track_gate_sigma          = 3.0;
+  track_max_tracks          = 16;
+  track_confirm_m           = 0;      # 0 = auto (see comment above)
+  track_confirm_n           = 5;
+  track_confirm_target_pfa  = 1e-3;
+  track_assoc_gate_sigma    = 5.0;
+  # Track-level harmonic rejection: drops a confirmed track at integer-multiple velocity of a
+  # same-range track -- catches the leaked/coasting Doppler harmonics the per-CPI detection filter
+  # misses (see PHASE2_MOT_MULTIUE_HANDOVER.md).
+  track_harmonic_reject     = 1;
+  track_harmonic_range_m    = 10.0;
+
+  out_path    = "/tmp/sensing_mot2/oaiue_sensing";
+  report_path = "/tmp/sensing_mot2/oaiue_reports.jsonl";
+
+  rx_id          = "rx1";
+  illuminator_id = "gnb1";
+  rx_pos_x = 100.0;
+  rx_pos_y = 0.0;
+  tx_pos_x = 0.0;
+  tx_pos_y = 0.0;
+};
+
+log_config = {
+  global_log_level = "info";
+  hw_log_level     = "info";
+  phy_log_level    = "info";
+};

@@ -811,9 +811,20 @@ void sensing_engine::write_report_json()
     return;
   }
 
-  // CPI duration = cpi_slots x slot duration. A 10 ms radio frame holds slots_per_frame slots.
+  // CPI duration = (number of slow-time rows) x (mean row spacing), in slots, x slot duration.
+  // A 10 ms radio frame holds slots_per_frame slots.
+  //
+  // It is NOT cpi_slots x slot_dur: a row is one REFERENCE-SIGNAL occurrence, not one slot, and the
+  // two differ by the reference's own periodicity. That only coincides when the reference fires
+  // (nearly) every slot, which is the case in tests/sensing_sim -- so the old cpi_slots*slot_dur
+  // form looked right there and is 160x low under, e.g., a 160-slot CSI-RS period (see
+  // tests/passive_rx, where it reported 16 ms for a real 2.56 s CPI). cpi_period_slots is the same
+  // fractional mean spacing already fed to range_doppler for the velocity axis, so this keeps the
+  // reported duration consistent with the axes it is reported alongside.
   const uint32_t slots_per_frame = (cpi_carrier.slots_per_frame > 0) ? cpi_carrier.slots_per_frame : 10;
   const int64_t  slot_dur_ns     = (slots_per_frame > 0) ? (int64_t)(10000000LL / slots_per_frame) : 0;
+  const double   cpi_rows_slots  = (cpi_period_slots > 0.0) ? (cpi_period_slots * (double)args.cpi_slots)
+                                                            : (double)args.cpi_slots;
 
   detection_report_t rep;
   rep.rx_id                 = args.rx_id;
@@ -825,7 +836,7 @@ void sensing_engine::write_report_json()
   rep.rx_pos_x              = args.rx_pos_x;
   rep.rx_pos_y              = args.rx_pos_y;
   rep.cpi_start_time_utc_ns = cpi_start_time_utc_ns;
-  rep.cpi_duration_ns       = slot_dur_ns * (int64_t)args.cpi_slots;
+  rep.cpi_duration_ns       = (int64_t)((double)slot_dur_ns * cpi_rows_slots);
   rep.fc_hz                 = (double)cpi_carrier.dl_center_hz;
   rep.subbin_interp         = args.subbin_interp;
   rep.rvm                   = &rvm;

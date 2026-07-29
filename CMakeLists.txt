@@ -972,6 +972,7 @@ set(PHY_SRC_UE
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_prach.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/dci_nr.c
+  ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/pucch_nr.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/csi_rx.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_csirs_monitor.c
@@ -1375,6 +1376,24 @@ add_library(MAC_NR_COMMON
             ${OPENAIR2_DIR}/LAYER2/NR_MAC_COMMON/nr_compute_tbs_common.c
 )
 target_link_libraries(MAC_NR_COMMON PRIVATE asn1_nr_rrc_hdrs asn1_lte_rrc_hdrs)
+
+# Phase 3 (TOTAL_PASSIVE_UE_HANDOVER.md): blind PDCCH/DCI-1_1 decode + extract -- pure decode core +
+# config parsing only (offline-gtest-covered). Kept deliberately lean/STANDALONE, not folded into
+# PHY_NR_UE: needs MAC_NR_COMMON (get_dl_tda_info/fill_dmrs_mask) but not PHY_NR_UE's much larger RT
+# dependency graph. The RT tap that actually calls into PHY_NR_UE/NR_UE_ISAC
+# (nr_pdcch_blind_monitor_process()) lives in a separate translation unit,
+# nr_pdcch_blind_monitor_rt.c, compiled into PHY_NR_UE_SRC instead -- see
+# nr_pdcch_blind_monitor_rt.h's file comment for the full seam rationale. This target's own
+# nr_pdcch_blind_monitor_rt.h include (for the shared cfg struct) needs PHY/defs_nr_UE.h's bare-
+# filename NFAPI header includes to resolve even though this target has no RT-symbol dependency,
+# hence the explicit NFAPI include dirs below (global include_directories() for those paths is set
+# later in this file, so target_include_directories is used instead of relying on call order).
+add_library(nr_pdcch_blind_monitor ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c)
+target_include_directories(nr_pdcch_blind_monitor PRIVATE
+  ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT
+  ${NFAPI_DIR}/nfapi/public_inc
+  ${NFAPI_DIR}/common/public_inc)
+target_link_libraries(nr_pdcch_blind_monitor PRIVATE nr_common MAC_NR_COMMON polar crc_byte UTIL asn1_nr_rrc_hdrs asn1_lte_rrc_hdrs)
 
 include_directories("${OPENAIR2_DIR}/NR_UE_PHY_INTERFACE")
 include_directories("${OPENAIR2_DIR}/LAYER2")
@@ -1917,7 +1936,7 @@ add_executable(nr-uesoftmodem
 target_link_libraries(nr-uesoftmodem PRIVATE
   -Wl,--start-group
   nr_rrc SECURITY UTIL SCHED_NR_UE_LIB
-  PHY_NR_COMMON PHY_NR_UE NR_UE_ISAC NR_L2_UE MAC_NR_COMMON nfapi_nr_lib
+  PHY_NR_COMMON PHY_NR_UE NR_UE_ISAC NR_L2_UE MAC_NR_COMMON nfapi_nr_lib nr_pdcch_blind_monitor
   ITTI SIMU radio_common
   time_management softmodem_common
   -Wl,--end-group dl)
@@ -2246,6 +2265,16 @@ if(ENABLE_TESTS)
   target_link_libraries(test_isac_aoa PRIVATE NR_UE_ISAC UTIL GTest::gtest)
   add_dependencies(tests test_isac_aoa)
   add_test(NAME test_isac_aoa COMMAND ./test_isac_aoa)
+
+  # Phase 3 (TOTAL_PASSIVE_UE_HANDOVER.md): offline blind PDCCH/DCI-1_1 decode + extract, synthetic
+  # DCI injection against known ground truth -- required by this project's own testing plan before
+  # any live-air attempt. See nr_pdcch_blind_monitor.c's file-level comment for the reuse-vs-
+  # duplication decisions and /home/sens/.claude/plans/zesty-baking-thompson.md for the design record.
+  add_executable(test_nr_pdcch_blind_monitor ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_blind_monitor_test.cc)
+  target_include_directories(test_nr_pdcch_blind_monitor PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
+  target_link_libraries(test_nr_pdcch_blind_monitor PRIVATE nr_pdcch_blind_monitor nr_common MAC_NR_COMMON polar crc_byte UTIL asn1_nr_rrc_hdrs asn1_lte_rrc_hdrs GTest::gtest)
+  add_dependencies(tests test_nr_pdcch_blind_monitor)
+  add_test(NAME test_nr_pdcch_blind_monitor COMMAND ./test_nr_pdcch_blind_monitor)
 
   # L1/FISTA sparse Doppler recovery (sparse_doppler.{h,cc}): peak-to-harmonic ratio vs. dense NUDFT
   # on a gappy tone, and preservation of a genuine second weaker target.

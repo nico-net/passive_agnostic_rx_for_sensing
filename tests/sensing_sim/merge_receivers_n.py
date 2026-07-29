@@ -35,7 +35,7 @@ def gt_curves_from_log(ue_log):
     """
     import collections
     gt = collections.defaultdict(list)
-    rx = re.compile(r"SENSING_CHANNEL gt: t=([\d.]+)s obj(\d+).*?dR=([-\d.]+)m range_rate=([-\d.]+)m/s")
+    rx = re.compile(r"SENSING_CHANNEL gt: t=([\d.]+)s(?:\s+utc_ns=\d+)? obj(\d+).*?dR=([-\d.]+)m range_rate=([-\d.]+)m/s")
     with open(ue_log, errors="ignore") as f:
         for line in f:
             m = rx.search(line)

@@ -29,7 +29,7 @@ def wrap180(d):
 def load_truth(ue_log):
     """{obj: [(t, dR, rate, azimuth_deg)]} from the SENSING_CHANNEL gt lines."""
     pat = re.compile(
-        r"SENSING_CHANNEL gt: t=([\d.]+)s obj(\d+).*?dR=([-\d.]+)m "
+        r"SENSING_CHANNEL gt: t=([\d.]+)s(?:\s+utc_ns=\d+)? obj(\d+).*?dR=([-\d.]+)m "
         r"range_rate=([-\d.]+)m/s azimuth=([-\d.]+)deg"
     )
     gt = {}

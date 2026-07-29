@@ -182,6 +182,17 @@ struct nr_isac_args_t {
   // Clutter suppression + detection cleanup (Stage 5)
   uint32_t zero_doppler_guard = 3;  ///< Doppler bins around zero velocity to notch out (static clutter / ghost)
   uint32_t zero_range_guard   = 2;  ///< Range bins near zero delay to notch out (direct-path / LOS clutter)
+  // Per-row comb de-aliasing (range_doppler.cc): a row whose real samples are comb-N spaced only
+  // unambiguously supports the first nof_range/N bins; beyond that is the row's own periodic image.
+  // Bins are hard-zeroed from that point, with a raised-cosine ramp of this width immediately before
+  // it. Tuned against the passive_rx test harness (single comb-12 CSI-RS source, tests/passive_rx/):
+  // a strong near-ideal direct path aliases to the comb-12 boundary and its Hann-window sidelobe skirt
+  // bleeds BACKWARD into the nominally-valid region -- e.g. at the default width of 4, bin (valid-4) is
+  // still at full gain (0 dB), so a sidelobe skirt spanning ~10+ bins back from the boundary is entirely
+  // untouched. Widening this trades usable range (dealias_taper_bins * range_res_m, ~ (N-1)/N of it)
+  // for suppression of that skirt; it does not affect rows with comb<=1 (row_comb absent or 1 -> no
+  // taper at all, per range_doppler.cc's `valid = nof_range` default).
+  uint32_t dealias_taper_bins = 4;  ///< Raised-cosine de-alias taper width (bins) before the comb cutoff
   uint32_t nms_range_bins     = 3;  ///< Non-max-suppression radius in range bins (0 disables)
   uint32_t nms_doppler_bins   = 3;  ///< Non-max-suppression radius in Doppler bins (0 disables)
   uint32_t max_detections     = 32; ///< Cap on reported detections per CPI after suppression

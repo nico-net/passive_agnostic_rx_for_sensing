@@ -50,7 +50,12 @@
 // after removing the 3 DMRS RE, the RB contains 9 RE with PDCCH
 #define RE_PER_RB_OUT_DMRS 9
 
-static void nr_pdcch_demapping_deinterleaving(uint32_t coreset_nbr_rb,
+// Exported (was static) for openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c's blind-decode
+// tap, which needs the exact same "already-demapped/already-unscrambled" e_rx/tmp_e shape this
+// file's own nr_dci_decoding_procedure() consumes, but without going through that function's
+// own-RNTI-only equality gate (line ~541 below). Pure linkage change, no logic touched -- see
+// TOTAL_PASSIVE_UE_HANDOVER.md Phase 3 and /home/sens/.claude/plans/zesty-baking-thompson.md.
+void nr_pdcch_demapping_deinterleaving(uint32_t coreset_nbr_rb,
                                               c16_t *llr,
                                               c16_t *e_rx,
                                               uint8_t coreset_time_dur,
@@ -467,7 +472,8 @@ void nr_pdcch_generate_llr(PHY_VARS_NR_UE *ue,
   }
 }
 
-static void nr_pdcch_unscrambling(c16_t *e_rx,
+// Exported (was static) -- see nr_pdcch_demapping_deinterleaving's comment above; same reasoning.
+void nr_pdcch_unscrambling(c16_t *e_rx,
                                   uint16_t scrambling_RNTI,
                                   uint32_t length,
                                   uint16_t pdcch_DMRS_scrambling_id,
@@ -603,6 +609,7 @@ void nr_pdcch_dci_indication(const UE_nr_rxtx_proc_t *proc,
     for (int m = 0; m < num_monitoring_occ; m++) {
       /// PDCCH/DCI e-sequence (input to rate matching).
       c16_t pdcch_e_rx[NR_MAX_PDCCH_SIZE];
+
 
       nr_pdcch_demapping_deinterleaving(n_rb,
                                         llr[ss_idx][m],

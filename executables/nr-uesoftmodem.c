@@ -15,6 +15,7 @@
 #include "PHY/defs_nr_UE.h"
 #include "PHY/NR_UE_ISAC/nr_isac.h"
 #include "PHY/NR_UE_TRANSPORT/nr_csirs_monitor.h"
+#include "PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.h"
 #include "SCHED_NR_UE/defs.h"
 #include "common/ran_context.h"
 #include "common/config/config_userapi.h"
@@ -241,6 +242,8 @@ int main(int argc, char **argv)
   nr_isac_init();
   // UE-agnostic CSI-RS sensing monitors (cell-common / other-UE resources); no-op if unset.
   nr_csirs_monitor_init();
+  // Blind PDCCH/DCI-1_1 monitor (TOTAL_PASSIVE_UE_HANDOVER.md Phase 3); no-op if unset.
+  nr_pdcch_blind_monitor_init();
 
   softmodem_verify_mode(get_softmodem_params());
 

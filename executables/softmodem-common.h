@@ -70,6 +70,9 @@ extern "C"
 #define CONFIG_HLP_USRP_THREAD   "having extra thead for usrp tx\n"
 #define CONFIG_HLP_NFAPI         "Change the nFAPI mode for NR 'MONOLITHIC', 'PNF', 'VNF', 'AERIAL','UE_STUB_PNF','UE_STUB_OFFNET','STANDALONE_PNF'\n"
 #define CONFIG_HLP_CONTINUOUS_TX "perform continuous transmission, even in TDD mode (to work around USRP issues)\n"
+#define CONFIG_HLP_PASSIVE_RX                                                                                                \
+  "UE receive-only mode: cell search, MIB and SIB1 as usual, then park before random access. Never transmits (no PRACH, "     \
+  "Msg3, PUCCH, PUSCH or SRS). Modifier of SA mode, for passive ISAC sensing\n"
 #define CONFIG_HLP_STATS_DISABLE "disable globally the stats generation and persistence"
 #define CONFIG_HLP_NOITTI        "Do not start itti threads, call queue processing in place, inside the caller thread"
 #define CONFIG_HLP_SYNC_REF      "UE acts a Sync Reference in Sidelink. 0-none 1-GNB 2-GNSS 4-localtiming\n"
@@ -86,6 +89,7 @@ extern "C"
 #define CONTINUOUS_TX       softmodem_params.continuous_tx
 #define PHY_TEST            softmodem_params.phy_test
 #define DO_RA               softmodem_params.do_ra
+#define PASSIVE_RX          softmodem_params.passive_rx
 #define SL_MODE             softmodem_params.sl_mode
 #define CHAIN_OFFSET        softmodem_params.chain_offset
 #define NUMEROLOGY          softmodem_params.numerology
@@ -142,6 +146,7 @@ extern int usrp_tx_thread;
   {"imscope" ,              CONFIG_HLP_IMSCOPE,       PARAMFLAG_BOOL, .uptr=&enable_imscope,                   .defintval=0,            TYPE_UINT,   0}, \
   {"imscope-record" ,       CONFIG_HLP_IMSCOPE_RECORD,PARAMFLAG_BOOL, .uptr=&enable_imscope_record,            .defintval=0,            TYPE_UINT,   0}, \
   {"default-pdu-id",        NULL,                     0,              .iptr=&DEFAULT_PDU_ID,                   .defintval=-1,           TYPE_INT,    0}, \
+  {"passive-rx",            CONFIG_HLP_PASSIVE_RX,    PARAMFLAG_BOOL, .iptr=&PASSIVE_RX,                       .defintval=0,            TYPE_INT,    0}, \
 }
 // clang-format on
 
@@ -176,6 +181,7 @@ extern int usrp_tx_thread;
                {"MONOLITHIC", "PNF", "VNF", "AERIAL","UE_STUB_PNF","UE_STUB_OFFNET","STANDALONE_PNF"}, \
                {NFAPI_MONOLITHIC, NFAPI_MODE_PNF, NFAPI_MODE_VNF, NFAPI_MODE_AERIAL,NFAPI_UE_STUB_PNF,NFAPI_UE_STUB_OFFNET,NFAPI_MODE_STANDALONE_PNF}, \
                7 } }, \
+    { .s5 = { NULL } },                     \
     { .s5 = { NULL } },                     \
     { .s5 = { NULL } },                     \
     { .s5 = { NULL } },                     \
@@ -272,6 +278,7 @@ typedef struct {
   char *threadPoolConfig;
   int            phy_test;
   int            do_ra;
+  int            passive_rx;
   uint8_t        sl_mode;
   int            chain_offset;
   int            numerology;
@@ -297,6 +304,10 @@ typedef struct {
 } softmodem_params_t;
 
 #define IS_SA_MODE(sM_params) (!(sM_params)->phy_test && !(sM_params)->do_ra && !(sM_params)->nsa)
+/* Receive-only sensing mode. Deliberately NOT part of IS_SA_MODE: it is a modifier of SA, since it
+   relies on the SA cell search / MIB / SIB1 path. It only inhibits the transition to random access
+   (and hence every uplink transmission), leaving the UE parked in UE_RECEIVING_SIB. */
+#define IS_PASSIVE_RX_MODE(sM_params) ((sM_params)->passive_rx != 0)
 void softmodem_verify_mode(const softmodem_params_t *p);
 
 #define get_softmodem_optmask() (&(get_softmodem_params()->optmask))

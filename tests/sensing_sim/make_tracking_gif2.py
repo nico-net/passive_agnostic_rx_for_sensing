@@ -28,7 +28,7 @@ RTOL, VTOL = 15.0, 3.0
 log = f"{run}/logs/ue.log"
 # --- ground truth curves: obj -> (t, dR, rate) ---
 gt = collections.defaultdict(list)
-gtre = re.compile(r"SENSING_CHANNEL gt: t=([\d.]+)s obj(\d+).*?dR=([-\d.]+)m range_rate=([-\d.]+)m/s")
+gtre = re.compile(r"SENSING_CHANNEL gt: t=([\d.]+)s(?:\s+utc_ns=\d+)? obj(\d+).*?dR=([-\d.]+)m range_rate=([-\d.]+)m/s")
 # --- per-CPI axis scaling ---
 cpire = re.compile(r"SENSING: CPI #(\d+).*?range\[res=([\d.]+).*?vel\[res=([\d.]+) max=([\d.]+)\]")
 axes = {}

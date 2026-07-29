@@ -111,7 +111,8 @@ public:
 
 private:
   bool ensure_plans(uint32_t nof_range, uint32_t nof_slow);
-  void inject_selftest(icf_t* work, uint32_t nof_slow, uint32_t nof_subc, double df_comb, double t_slow, double fc);
+  void inject_selftest(icf_t* work, uint32_t nof_slow, uint32_t nof_subc, double df_comb, double t_slow, double fc,
+                       uint32_t comb_spacing);
   void cfar(const sensing_rvm_t& rvm, std::vector<sensing_detection_t>& detections, uint32_t nof_slow,
             const double* row_time_slots, float period_slots);
   // CLEAN deconvolution helpers (clean_deconv). build_clean_kernels fills clean_kr/clean_kd for the

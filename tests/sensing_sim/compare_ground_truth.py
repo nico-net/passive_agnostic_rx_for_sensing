@@ -13,7 +13,7 @@ import re
 import sys
 
 GT_RE = re.compile(
-    r"SENSING_CHANNEL gt: t=([\d.]+)s obj(\d+) pos=\(([-\d.]+),([-\d.]+)\)m "
+    r"SENSING_CHANNEL gt: t=([\d.]+)s(?:\s+utc_ns=\d+)? obj(\d+) pos=\(([-\d.]+),([-\d.]+)\)m "
     r"bistatic_range=([\d.]+)m dR=([-\d.]+)m range_rate=([-\d.]+)m/s"
 )
 CPI_RE = re.compile(

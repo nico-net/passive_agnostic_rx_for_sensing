@@ -140,6 +140,12 @@ void get_common_options(configmodule_interface_t *cfg)
 
 void softmodem_verify_mode(const softmodem_params_t *p)
 {
+  if (IS_PASSIVE_RX_MODE(p)) {
+    AssertFatal(IS_SA_MODE(p), "--passive-rx is a modifier of SA mode, it cannot be combined with --phy-test, --do-ra or --nsa\n");
+    LOG_I(UTIL, "running in passive receive-only mode (--passive-rx): cell search and SI acquisition only, no uplink\n");
+    return;
+  }
+
   if (IS_SA_MODE(p)) {
     LOG_I(UTIL, "running in SA mode (no --phy-test, --do-ra, --nsa option present)\n");
     return;

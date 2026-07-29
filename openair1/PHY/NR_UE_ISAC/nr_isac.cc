@@ -79,6 +79,12 @@ uint32_t source_bit_from_token(const std::string& tok)
   if (tok == "pdsch_data") {
     return 1u << NR_ISAC_SRC_PDSCH_DATA;
   }
+  if (tok == "pdsch_dmrs_blind") {
+    // Reserved 2026-07-28 (Phase 3): accepted here so the token is inert-but-valid ahead of the
+    // not-yet-built RT tap; nothing submits this source yet (nr_pdcch_blind_monitor.{h,c} is
+    // offline-decode-only this slice -- see TOTAL_PASSIVE_UE_HANDOVER.md).
+    return 1u << NR_ISAC_SRC_PDSCH_DMRS_BLIND;
+  }
   return 0;
 }
 
@@ -178,7 +184,7 @@ extern "C" void nr_isac_init(void)
   int    p_gating_reject = 0, p_gating_max_off = 3, p_gating_tol = 2;
   double p_gating_min_rel = 0.35, p_gating_snr_margin = 3.0;
   double p_cfar_pfa = 0.0, p_cfar_target_fa = 1.0;
-  int    p_zdg = 3, p_zrg = 2, p_nms_r = 3, p_nms_d = 3, p_maxdet = 32;
+  int    p_zdg = 3, p_zrg = 2, p_nms_r = 3, p_nms_d = 3, p_maxdet = 32, p_dealias_taper = 4;
   int    p_conj_reject = 1, p_conj_guard = 4, p_range_whiten = 0, p_doppler_nudft = 0;
   int    p_mc_enable = 0, p_mc_rank = 0, p_mc_rank_max = 8, p_mc_iters = 15, p_mc_power = 1;
   int    p_sd_enable = 0, p_sd_iters = 40;
@@ -267,6 +273,7 @@ extern "C" void nr_isac_init(void)
       mk_dbl("cfar_target_fa_per_cpi", "auto mode only: target mean CA-CFAR false alarms per CPI across the whole grid", &p_cfar_target_fa, 1.0),
       mk_int("zero_doppler_guard", "Doppler notch half-width (bins)", 0, &p_zdg, 3),
       mk_int("zero_range_guard", "range notch half-width (bins)", 0, &p_zrg, 2),
+      mk_int("dealias_taper_bins", "raised-cosine de-alias taper width (bins) before a comb row's periodic-image cutoff; widen if a strong direct path's sidelobe skirt leaks past the default", 0, &p_dealias_taper, 4),
       mk_int("nms_range_bins", "NMS radius in range bins", 0, &p_nms_r, 3),
       mk_int("nms_doppler_bins", "NMS radius in Doppler bins", 0, &p_nms_d, 3),
       mk_int("max_detections", "cap on detections per CPI", 0, &p_maxdet, 32),
@@ -453,6 +460,7 @@ extern "C" void nr_isac_init(void)
   g_args.cfar_target_fa_per_cpi = (float)p_cfar_target_fa;
   g_args.zero_doppler_guard = (uint32_t)p_zdg;
   g_args.zero_range_guard   = (uint32_t)p_zrg;
+  g_args.dealias_taper_bins = (uint32_t)p_dealias_taper;
   g_args.nms_range_bins     = (uint32_t)p_nms_r;
   g_args.nms_doppler_bins   = (uint32_t)p_nms_d;
   g_args.max_detections     = (uint32_t)(p_maxdet > 0 ? p_maxdet : 1);

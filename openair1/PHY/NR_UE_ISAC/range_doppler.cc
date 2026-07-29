@@ -204,7 +204,8 @@ void range_doppler::inject_selftest(icf_t*    work_buf,
                                     uint32_t nof_subc,
                                     double   df_comb,
                                     double   t_slow,
-                                    double   fc)
+                                    double   fc,
+                                    uint32_t comb_spacing)
 {
   // Build the target list: explicit selftest_targets if given, else a default target at 25% of the
   // unambiguous range/velocity extents when selftest is set.
@@ -245,12 +246,33 @@ void range_doppler::inject_selftest(icf_t*    work_buf,
     }
     const int    r_bin = (int)std::lround(tau * (double)nof_subc * df_comb);
     const int    d_bin = (int)nof_slow / 2 + (int)std::lround(fd * (double)nof_slow * t_slow);
-    const double range = SPEED_OF_LIGHT * tau / 2.0;
-    const double vel   = (fc > 0.0) ? fd * SPEED_OF_LIGHT / (2.0 * fc) : 0.0;
+    // Bistatic range/velocity: dR = c*tau, v = fd*lambda (no monostatic round-trip /2) -- matches the
+    // convention documented at this function's default-target branch above / rvm.range_res_m. This
+    // pair was still using the erroneous /2 (a cosmetic mislabeling of the log line only; r_bin/d_bin
+    // above were already correct, computed straight from tau/fd, not from this range/vel value).
+    const double range = SPEED_OF_LIGHT * tau;
+    const double vel   = (fc > 0.0) ? fd * SPEED_OF_LIGHT / fc : 0.0;
     LOG_I(PHY,
           "SENSING: injected target delay=%.2f us dopp=%+.1f Hz gain=%.2f -> range=%.1f m vel=%.2f m/s "
           "(expected bins r=%d d=%d)\n",
           tau * 1e6, fd, t.gain, range, vel, r_bin, d_bin);
+    // A comb-N row's own range-domain de-aliasing taper (see process()'s "Per-row de-aliasing" comment
+    // below) survives only out to nof_subc/N bins -- and this injection runs BEFORE that taper, so a
+    // target beyond it is silently zeroed downstream rather than reported as a garbage/aliased
+    // detection. MEASURED, not theorised: found live on a pure csi_rs (comb=12) capture where both a
+    // user-specified target and this function's own 25%-of-range_max default landed past the cutoff
+    // and produced zero power at the expected bin. Warn here so that failure mode is diagnosable from
+    // the log alone instead of looking like a silent DSP-chain bug.
+    if (comb_spacing > 1) {
+      const int cutoff = (int)(nof_subc / comb_spacing);
+      if (r_bin > cutoff) {
+        LOG_W(PHY,
+              "SENSING: self-test target at r_bin=%d exceeds this capture's comb-%u de-aliasing cutoff "
+              "(nof_subc/comb=%d bins, ~%.0f m) -- it will be TAPERED TO ZERO downstream and will not "
+              "appear as a detection. Use a closer delay, or a source/config with a smaller comb.\n",
+              r_bin, comb_spacing, cutoff, (double)cutoff * SPEED_OF_LIGHT / ((double)nof_subc * df_comb));
+      }
+    }
   }
 }
 
@@ -333,7 +355,7 @@ void range_doppler::process(const icf_t*                       h_cpi,
   work.assign(h_cpi, h_cpi + (size_t)nof_slow * nof_subc);
 
   if (args.selftest || !targets_.empty()) {
-    inject_selftest(work.data(), nof_slow, nof_subc, df_comb, t_slow, fc);
+    inject_selftest(work.data(), nof_slow, nof_subc, df_comb, t_slow, fc, comb_spacing);
   }
 
   // Clutter removal. Default: subtract the per-subcarrier slow-time mean (suppresses the
@@ -458,7 +480,7 @@ void range_doppler::process(const icf_t*                       h_cpi,
     clean_warned_ = true;
   }
 
-  static constexpr uint32_t DEALIAS_TAPER = 4; // raised-cosine rolloff width (bins) before the cut
+  const uint32_t DEALIAS_TAPER = args.dealias_taper_bins; // raised-cosine rolloff width (bins) before the cut
   cir_rm.assign((size_t)nof_range * nof_slow, icf_t(0.0f, 0.0f));
   range_in.resize(nof_subc);
   range_out.resize(nof_range);
@@ -771,7 +793,7 @@ void range_doppler::occ_forward_transform(const icf_t* grid, uint32_t nof_slow, 
                                           const uint32_t* row_comb, const double* row_time_slots,
                                           float period_slots, bool use_nudft, icf_t* cmap_out)
 {
-  static constexpr uint32_t DEALIAS_TAPER = 4;
+  const uint32_t DEALIAS_TAPER = args.dealias_taper_bins;
   // Windows: freq_hann is already built by process() before the occ-aware branch; ensure the slow-time
   // Hann exists (process() builds it only later on the normal path).
   if (hann.size() != nof_slow) {

@@ -38,6 +38,26 @@ void set_first_last_pdcch_symb(const NR_UE_PDCCH_CONFIG *phy_pdcch_config, int s
 
 int get_max_pdcch_monOcc(const NR_UE_PDCCH_CONFIG *phy_pdcch_config, int nb_symb_slot);
 
+// Exported from dci_nr.c for nr_pdcch_blind_monitor.c's blind-decode tap -- see that file's
+// file-level comment. Same signatures dci_nr.c's own nr_pdcch_dci_indication() uses internally.
+void nr_pdcch_demapping_deinterleaving(uint32_t coreset_nbr_rb,
+                                       c16_t *llr,
+                                       c16_t *e_rx,
+                                       uint8_t coreset_time_dur,
+                                       uint8_t reg_bundle_size_L_in,
+                                       uint8_t coreset_interleaver_size_R,
+                                       uint8_t n_shift,
+                                       uint8_t number_of_candidates,
+                                       uint16_t *CCE,
+                                       uint8_t *L,
+                                       int llr_stride_per_symbol);
+
+void nr_pdcch_unscrambling(c16_t *e_rx,
+                           uint16_t scrambling_RNTI,
+                           uint32_t length,
+                           uint16_t pdcch_DMRS_scrambling_id,
+                           int16_t *z2);
+
 /** \brief This is the alternative top-level entry point for DLSCH decoding in UE.
     It handles all the HARQ processes in only one call. The routine first
     computes the segmentation information and then call LDPC decoder on the

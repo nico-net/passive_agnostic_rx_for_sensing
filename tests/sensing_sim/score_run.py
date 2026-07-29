@@ -34,7 +34,7 @@ det_csv = f"{run_dir}/oaiue_sensing_detections.csv"
 
 # --- Parse ground-truth trajectory curves: obj_id -> list of (t, dR, range_rate) ---
 gt = {}
-gt_re = re.compile(r"SENSING_CHANNEL gt: t=([\d.]+)s obj(\d+).*?dR=([\-\d.]+)m range_rate=([\-\d.]+)m/s")
+gt_re = re.compile(r"SENSING_CHANNEL gt: t=([\d.]+)s(?:\s+utc_ns=\d+)? obj(\d+).*?dR=([\-\d.]+)m range_rate=([\-\d.]+)m/s")
 with open(ue_log, errors="ignore") as f:
     for line in f:
         m = gt_re.search(line)

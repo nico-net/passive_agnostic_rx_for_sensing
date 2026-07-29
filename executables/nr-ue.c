@@ -13,6 +13,7 @@
 #include "RRC/NR_UE/L2_interface_ue.h"
 #include "SCHED_NR_UE/defs.h"
 #include "PHY/NR_UE_TRANSPORT/nr_transport_proto_ue.h"
+#include "PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.h"
 #include "executables/softmodem-common.h"
 #include "radio/COMMON/common_lib.h"
 #include "LAYER2/nr_pdcp/nr_pdcp_oai_api.h"
@@ -276,6 +277,13 @@ static void RU_write(nr_rxtx_thread_data_t *rxtxD, bool sl_tx_action, c16_t **tx
 {
   int writeBlockSize = rxtxD->writeBlockSize;
   if (writeBlockSize == 0)
+    return;
+
+  /* Passive receive-only mode: MAC never leaves UE_RECEIVING_SIB so txp is all-zero anyway, but the
+     radio TX stream would still be keyed every slot (LO leakage / DAC noise into a co-located RX).
+     Skip the write entirely on real radios. Under rfsimulator the UE's write drives the simulator's
+     sample clock, so it must be kept (cf. the explicit dummyWrite() in readFrame()). */
+  if (IS_PASSIVE_RX_MODE(get_softmodem_params()) && !IS_SOFTMODEM_RFSIM)
     return;
 
   PHY_VARS_NR_UE *UE = rxtxD->UE;
@@ -555,6 +563,10 @@ static int UE_dl_preprocessing(PHY_VARS_NR_UE *UE,
 
     sampleShift = pbch_processing(UE, proc, phy_data);
     pdcch_processing(UE, proc, phy_data);
+    // Phase 3 (TOTAL_PASSIVE_UE_HANDOVER.md): blind PDCCH/DCI-1_1 decode for a passive receiver with
+    // no RRC context of its own -- a fully local PDCCH config, never phy_data's real MAC-driven one
+    // (see nr_pdcch_blind_monitor_rt.h). No-op unless [sensing] pdcch_blind_monitor_* is configured.
+    nr_pdcch_blind_monitor_process(UE, proc);
     if (phy_data->dlsch[0].active
         && (phy_data->dlsch[0].rnti_type == TYPE_C_RNTI_ || phy_data->dlsch[0].rnti_type == TYPE_RA_RNTI_)) {
       // indicate to tx thread to wait for DLSCH decoding

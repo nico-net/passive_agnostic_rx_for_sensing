@@ -53,6 +53,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "common/config/config_userapi.h"
 #include "common/platform_constants.h" /* SPEED_OF_LIGHT */
@@ -385,10 +386,19 @@ void sensing_channel_update(channel_desc_t *cd, int nbSamples, uint64_t TS)
       // east. Same convention as isac-core's TxRxPair::bearing_meas() and the UE's reported
       // Detection.azimuth_deg, so an AoA run can be scored straight off this line.
       const double az_deg = atan2(oy - s->rx_y, ox - s->rx_x) * 180.0 / M_PI;
+      // Real UTC alongside the simulated-sample-clock "t=" -- "t" is TS/fs (elapsed SAMPLES, not
+      // wall time; see this function's other timestamp above), which drifts from real host time
+      // under load (confirmed live 2026-07-28: up to ~100s drift over a 120s tests/passive_rx run
+      // with several concurrent softmodem processes). A GT scorer needs to align against
+      // sensing_engine.cc's cpi_start_time_utc_ns (std::chrono::system_clock::now()), which IS real
+      // UTC, so this line needs its own real-UTC stamp rather than assuming a fixed t->UTC offset.
+      struct timespec ts;
+      clock_gettime(CLOCK_REALTIME, &ts);
+      const long long utc_ns = (long long)ts.tv_sec * 1000000000LL + (long long)ts.tv_nsec;
       LOG_I(HW,
-            "SENSING_CHANNEL gt: t=%.2fs obj%d pos=(%.1f,%.1f)m bistatic_range=%.2fm dR=%.2fm "
-            "range_rate=%.3fm/s azimuth=%.2fdeg (expect detection near range=%.2fm)\n",
-            t, k, ox, oy, R, R - s->r_los, range_rate, az_deg, R - s->r_los);
+            "SENSING_CHANNEL gt: t=%.2fs utc_ns=%lld obj%d pos=(%.1f,%.1f)m bistatic_range=%.2fm "
+            "dR=%.2fm range_rate=%.3fm/s azimuth=%.2fdeg (expect detection near range=%.2fm)\n",
+            t, utc_ns, k, ox, oy, R, R - s->r_los, range_rate, az_deg, R - s->r_los);
     }
   }
 }

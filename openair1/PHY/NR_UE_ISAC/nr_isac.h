@@ -49,7 +49,11 @@ typedef enum nr_isac_source_e {
   NR_ISAC_SRC_CSI_RS = 0,     ///< NZP-CSI-RS LS estimates (periodic, low PRF)
   NR_ISAC_SRC_PDSCH_DMRS = 1, ///< PDSCH DM-RS positions (comb-2, one per scheduled DL slot -> high PRF)
   NR_ISAC_SRC_PDSCH_DATA = 2, ///< Full-allocation interpolated CFR (dense comb-1 -> finest range resolution)
-  NR_ISAC_SRC_COUNT      = 3  ///< Number of distinct sources (for the enabled-set bitmask)
+  /// PDSCH DM-RS for a grant addressed to ANOTHER UE, discovered via blind PDCCH/DCI-1_1 decode
+  /// (Phase 3, TOTAL_PASSIVE_UE_HANDOVER.md). Reserved 2026-07-28; not yet submitted by anything --
+  /// nr_pdcch_blind_monitor.{h,c} is offline-decode-only this slice, no RT wiring exists yet.
+  NR_ISAC_SRC_PDSCH_DMRS_BLIND = 3,
+  NR_ISAC_SRC_COUNT            = 4 ///< Number of distinct sources (for the enabled-set bitmask)
 } nr_isac_source_t;
 
 /// Carrier geometry valid for one submitted CFR snapshot. All axis scaling derives from this.

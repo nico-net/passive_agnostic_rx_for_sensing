@@ -372,7 +372,8 @@ static void nr_decode_SI(NR_UE_RRC_SI_INFO *SI_info, NR_SystemInformation_t *si,
     asn_copy(&asn_DEF_NR_SIB19_r17, (void **)&sib19_msg->sib19, sib19);
     sib19_msg->hfn = hfn;
     sib19_msg->frame = frame;
-    sib19_msg->can_start_ra = rrc->is_NTN_UE;
+    // NTN counterpart of the SIB1 gate below: never leave UE_RECEIVING_SIB in passive receive-only mode
+    sib19_msg->can_start_ra = rrc->is_NTN_UE && !IS_PASSIVE_RX_MODE(get_softmodem_params());
     nr_rrc_send_msg_to_mac(rrc, &rrc_msg);
   }
 }
@@ -504,7 +505,8 @@ static void nr_rrc_process_sib1(NR_UE_RRC_INST_t *rrc, NR_UE_RRC_SI_INFO *SI_inf
 
   nr_timer_start(&SI_info->sib1_timer);
   SI_info->sib1_validity = true;
-  if (rrc->nrRrcState == RRC_STATE_IDLE_NR) {
+  // In passive receive-only mode we never establish a connection, so no RA is ever triggered.
+  if (rrc->nrRrcState == RRC_STATE_IDLE_NR && !IS_PASSIVE_RX_MODE(get_softmodem_params())) {
     rrc->ra_trigger = RRC_CONNECTION_SETUP;
   }
 
@@ -535,7 +537,10 @@ static void nr_rrc_process_sib1(NR_UE_RRC_INST_t *rrc, NR_UE_RRC_SI_INFO *SI_inf
   rrc_msg.payload_type = NR_MAC_RRC_CONFIG_SIB1;
   nr_mac_rrc_config_sib1_t *config_sib1 = &rrc_msg.payload.config_sib1;
   config_sib1->sib1 = sib1;
-  config_sib1->can_start_ra = !rrc->is_NTN_UE;
+  // This is the single gate that lets MAC leave UE_RECEIVING_SIB for UE_PERFORMING_RA in SA. Keeping
+  // it false parks MAC in UE_RECEIVING_SIB indefinitely, which inhibits every uplink transmission
+  // (PRACH/Msg3/PUCCH/PUSCH/SRS are all gated on state >= UE_PERFORMING_RA in nr_ue_ul_scheduler).
+  config_sib1->can_start_ra = !rrc->is_NTN_UE && !IS_PASSIVE_RX_MODE(get_softmodem_params());
   nr_rrc_send_msg_to_mac(rrc, &rrc_msg);
 }
 

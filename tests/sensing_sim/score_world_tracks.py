@@ -26,7 +26,7 @@ gt_src = sys.argv[2]
 TOL = float(sys.argv[3]) if len(sys.argv) > 3 else 15.0
 
 ue_log = gt_src if gt_src.endswith(".log") else f"{gt_src}/logs/ue.log"
-gt_re = re.compile(r"SENSING_CHANNEL gt: t=([\d.]+)s obj(\d+) pos=\(([-\d.]+),([-\d.]+)\)m")
+gt_re = re.compile(r"SENSING_CHANNEL gt: t=([\d.]+)s(?:\s+utc_ns=\d+)? obj(\d+) pos=\(([-\d.]+),([-\d.]+)\)m")
 raw = collections.defaultdict(list)
 with open(ue_log, errors="ignore") as f:
     for line in f:
