@@ -37,3 +37,7 @@ CMakeUserPresets.json
 # Softmodem runtime artifacts written to the repo root when run from here
 /rbconfig.raw
 /reconfig.raw
+
+# Python bytecode cache (tests/ota_sync_bench/ and any other Python tooling)
+__pycache__/
+*.pyc
