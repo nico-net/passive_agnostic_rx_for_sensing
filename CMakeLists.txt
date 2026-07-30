@@ -2201,6 +2201,15 @@ if(ENABLE_TESTS)
   add_dependencies(tests test_isac_sync)
   add_test(NAME test_isac_sync COMMAND ./test_isac_sync)
 
+  # tests/ota_sync_bench/ (cheap-office OTA sync validation, no gNB/RU needed): replays a CFR
+  # grid built from a real two-SDR RF capture (tests/ota_sync_bench/process_capture.py) through
+  # the same production tracker classes as test_isac_sync above, instead of a synthetic grid.
+  # Not a gtest (takes a required --grid file argument), so no add_test() registration.
+  add_executable(isac_sync_replay ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/tools/isac_sync_replay.cc)
+  target_include_directories(isac_sync_replay PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_ISAC)
+  target_link_libraries(isac_sync_replay PRIVATE NR_UE_ISAC UTIL)
+  add_dependencies(tests isac_sync_replay)
+
   # ECA/ECA+ clutter-cancellation offline self-test (ECA_CLUTTER_HANDOVER.md rollout step 2/4):
   # validates the CFR-domain oblique projection in isolation (mean-subtraction equivalence + mirror
   # -ghost suppression) before RT/engine wiring, same pattern as test_isac_sync above.
