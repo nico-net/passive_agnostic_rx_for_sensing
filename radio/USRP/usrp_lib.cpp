@@ -349,14 +349,32 @@ static void trx_usrp_finish_rx(usrp_state_t *s)
   uhd::stream_cmd_t cmd(uhd::stream_cmd_t::STREAM_MODE_STOP_CONTINUOUS);
   s->rx_stream->issue_stream_cmd(cmd);
 
-  /* collect all remaining samples (not sure if needed) */
+  /* Collect the samples still in flight, so the next start_rx begins on a clean stream.
+   *
+   * BOUNDED, and that is load-bearing: this loop used to be an unbounded
+   * "do { recv } while (samples > 0)". On an X410 (RFNoC) the stream does not reliably run dry
+   * after STOP_CONTINUOUS, so recv keeps returning samples and the loop never exits. MEASURED:
+   * the UE completed initial sync against a live 100 MHz cell, then hit this during its first
+   * resync and froze permanently -- UEthread_0 parked in recv(), every other thread idle, not one
+   * further line of log output, and no error anywhere. It looks exactly like a protocol/decode
+   * problem and is not one. Stop on the first timeout/error, and cap the iteration count so a
+   * device that keeps producing can never wedge the UE. */
   size_t samples;
   uint8_t buf[1024];
   std::vector<void *> buff_ptrs;
   for (size_t i = 0; i < s->usrp->get_rx_num_channels(); i++) buff_ptrs.push_back(buf);
+  const int max_drain_iterations = 10000;
+  int iterations = 0;
   do {
-    samples = s->rx_stream->recv(buff_ptrs, sizeof(buf)/4, s->rx_md);
-  } while (samples > 0);
+    samples = s->rx_stream->recv(buff_ptrs, sizeof(buf) / 4, s->rx_md, 0.01);
+    if (s->rx_md.error_code != uhd::rx_metadata_t::ERROR_CODE_NONE) {
+      break; // timeout (stream is dry) or a real error -- either way, stop draining
+    }
+  } while (samples > 0 && ++iterations < max_drain_iterations);
+
+  if (iterations >= max_drain_iterations) {
+    LOG_W(HW, "RX stream still delivering after %d drain iterations, continuing anyway\n", max_drain_iterations);
+  }
 }
 
 static void trx_usrp_write_reset(openair0_thread_t *wt);
