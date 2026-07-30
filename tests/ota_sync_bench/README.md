@@ -121,7 +121,7 @@ python3 process_capture.py --capture /tmp/rx_capture.fc32 --meta /tmp/tx_wavefor
     --out /tmp/grid_dump.bin --max-rows 256
 
 # 5. Run the real trackers:
-cd /home/sens/NICOLA/openairinterface5g-isac-ota-sync/cmake_targets/ran_build/build
+cd /home/sens/NICOLA/openairinterface5g-active-ue/cmake_targets/ran_build/build
 ./isac_sync_replay --grid /tmp/grid_dump.bin
 ```
 
@@ -225,7 +225,7 @@ short-window silence is the estimator correctly refusing to fit noise.
 ## Building `isac_sync_replay`
 
 ```bash
-cd /home/sens/NICOLA/openairinterface5g-isac-ota-sync/cmake_targets/ran_build/build
+cd /home/sens/NICOLA/openairinterface5g-active-ue/cmake_targets/ran_build/build
 cmake -G Ninja -DENABLE_TESTS=ON -DENABLE_WEBSRV=OFF -DENABLE_TELNETSRV=OFF ../../..
 ninja isac_sync_replay
 ```

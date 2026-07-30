@@ -85,7 +85,7 @@ Each of these cost real time. None produce an error message.
 
 ## 3. What was added this session
 
-All opt-in, all defaulting to previous behaviour. OAI branch `isac-ota-sync`, isac branch
+All opt-in, all defaulting to previous behaviour. OAI branch `active-ue`, isac branch
 `phase1-central-node`.
 
 **`cfar_per_row`** — mirrors `cfar_per_column` along the Doppler axis, training within a range ROW so
