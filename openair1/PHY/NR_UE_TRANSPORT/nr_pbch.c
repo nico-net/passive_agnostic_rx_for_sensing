@@ -307,16 +307,33 @@ void nr_generate_pbch_llr(const PHY_VARS_NR_UE *ue,
   LOG_I(PHY, "[PHY] PBCH starting channel_level\n");
 #endif
 
-  double log2_maxh = 0;
-  uint32_t max_h = 0;
-  if (symbolSSB == 1) {
-    int avg[frame_parms->nb_antennas_rx];
-    nr_channel_level(0, PBCH_MAX_RE_PER_SYMBOL, dl_ch_estimates_ext, frame_parms->nb_antennas_rx, 1, avg, nb_re);
-    max_h = avg[0];
-    for (int i = 1; i < frame_parms->nb_antennas_rx; i++)
-      max_h = cmax(avg[i], max_h);
-    log2_maxh = 3 + (log2_approx(max_h) / 2);
-  }
+  // Channel-compensation output shift, computed for EVERY PBCH symbol.
+  //
+  // This used to be guarded by `if (symbolSSB == 1)`. That was correct only while this code was a
+  // loop over symbols 1..3 with `log2_maxh` declared OUTSIDE it (see this file before commit
+  // e4b2125f1e "Refactor PBCH & PSBCH UE procedures"): the value was computed once on symbol 1 and
+  // deliberately REUSED for symbols 2 and 3. When the loop body became this per-symbol function,
+  // log2_maxh became a local initialised to 0 while the guard was carried over verbatim -- so
+  // symbols 2 and 3 silently started compensating with a shift of 0, i.e. no downscaling at all.
+  //
+  // MEASURED consequence (X410, 273 PRB, live cell): symbol 2 and symbol 3 LLRs came out 100%
+  // saturated at nr_pbch_quantize()'s +-32 clamp (144/144 and 360/360), so two thirds of the polar
+  // codeword carried only hard decisions and no soft information, while symbol 1 was properly scaled
+  // (|LLR| mean ~9-15, ~15% saturated). Fixing it takes those to ~10% and ~55% saturated. That is a
+  // large amount of coding gain recovered on EVERY PBCH decode, in both the initial-sync and the
+  // steady-state tracking paths.
+  //
+  // Computing it per symbol -- rather than restoring the old "reuse symbol 1's value" behaviour -- is
+  // both simpler and more correct here: each symbol already carries its own dl_ch_estimates_ext, and
+  // symbol 2 spans a different number of REs (72 vs 180) than symbols 1 and 3. nr_channel_level() is
+  // safe at both lengths (it indexes from 0 since symbol==0 is passed, and 72 and 180 are both
+  // multiples of the 4-wide SIMD stride, well within the 240-element array).
+  int avg[frame_parms->nb_antennas_rx];
+  nr_channel_level(0, PBCH_MAX_RE_PER_SYMBOL, dl_ch_estimates_ext, frame_parms->nb_antennas_rx, 1, avg, nb_re);
+  uint32_t max_h = avg[0];
+  for (int i = 1; i < frame_parms->nb_antennas_rx; i++)
+    max_h = cmax(avg[i], max_h);
+  const double log2_maxh = 3 + (log2_approx(max_h) / 2);
 
 #ifdef DEBUG_PBCH
   LOG_I(PHY, "[PHY] PBCH log2_maxh = %f (%d)\n", log2_maxh, max_h);
