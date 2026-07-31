@@ -437,6 +437,32 @@ int nrue_ru_read(PHY_VARS_NR_UE *UE, openair0_timestamp_t *ptimestamp, void **bu
   openair0_device_t *dev0 = &openair0_dev[UE->rf_map.card];
   openair0_timestamp_t tmp_timestamp;
   int ret = dev0->trx_read_func(dev0, &tmp_timestamp, buff, nsamps, num_antennas);
+  // Centralised short-read tolerance: trx_read_func() (trx_usrp_read() on USRP) can legitimately
+  // return fewer samples than requested on a transient overflow/timeout -- that is its own by-design
+  // recovery path (see its error_code check), not corruption. Every caller in nr-ue.c used to
+  // AssertFatal(ret==nsamps) and abort the whole process on any hiccup; this had at least five
+  // separate call sites with the identical assertion, each found one at a time via a live crash
+  // under sustained RX load (--ue-scan-carrier at 273 PRB: dozens of parallel GSCN-correlation
+  // threads compete with the RX thread for CPU, making a transient overflow far more likely).
+  // Fixed once, centrally, here, instead of duplicating a retry loop at every call site.
+  if (ret >= 0 && ret != nsamps) {
+    LOG_W(HW, "nrue_ru_read: short read (got %d of %d samples) -- retrying remainder instead of aborting\n", ret, nsamps);
+    int retries = 0;
+    const int max_retries = 20;
+    while (ret < nsamps && retries < max_retries) {
+      void *retry_buf[num_antennas];
+      for (int ant = 0; ant < num_antennas; ant++)
+        retry_buf[ant] = (char *)buff[ant] + (size_t)ret * 4; // c16_t is 4 bytes (int16 I + int16 Q)
+      int got = dev0->trx_read_func(dev0, &tmp_timestamp, retry_buf, nsamps - ret, num_antennas);
+      if (got <= 0)
+        retries++;
+      else
+        ret += got;
+    }
+    if (ret != nsamps)
+      LOG_W(HW, "nrue_ru_read: gave up after %d retries, still short by %d samples -- continuing anyway\n", retries,
+            nsamps - ret);
+  }
   if (!dev0->firstTS_initialized) {
     dev0->firstTS = tmp_timestamp;
     dev0->firstTS_initialized = true;
