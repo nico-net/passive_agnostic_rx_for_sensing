@@ -659,11 +659,21 @@ void range_doppler::process(const icf_t*                       h_cpi,
   // leaves at a moving target's range, and keeps the strong clutter out of the CFAR noise estimate.
   const int zdg = (int)args.zero_doppler_guard;
   const int zrg = (int)args.zero_range_guard;
+  // Far-range cutoff (args.max_range_m, 0 = off): everything past the receiver's physically
+  // observable range is an artifact, so notch it here rather than filtering detections later -- this
+  // way it also stays out of the CFAR noise estimate instead of inflating the threshold across the
+  // band the real targets live in. See defs_nr_UE_ISAC.h's max_range_m comment for the measurement
+  // that motivated it. The band is [max_bin+1, nof_range-2-zrg]: the top of the axis is the
+  // wrapped near-zero-delay side and is already handled by zrg.
+  const int max_bin = (args.max_range_m > 0.0f && rvm.range_res_m > 0.0f)
+                          ? (int)(args.max_range_m / rvm.range_res_m)
+                          : -1;
   for (uint32_t r = 0; r < nof_range; r++) {
     const bool zero_range = (int)r <= zrg || (int)r >= (int)nof_range - 1 - zrg;
+    const bool beyond_max = (max_bin >= 0) && ((int)r > max_bin) && ((int)r < (int)nof_range - 1 - zrg);
     for (uint32_t d = 0; d < nof_dopp; d++) {
       const bool zero_dopp = std::abs((int)d - (int)half) <= zdg;
-      if (zero_range || zero_dopp) {
+      if (zero_range || zero_dopp || beyond_max) {
         rvm.power[(size_t)r * nof_dopp + d] = 0.0f;
         if (want_clean) {
           cmap[(size_t)r * nof_dopp + d] = icf_t(0.0f, 0.0f);
@@ -690,9 +700,10 @@ void range_doppler::process(const icf_t*                       h_cpi,
                      rvm.power.data(), &n_comp);
     for (uint32_t r = 0; r < nof_range; r++) {
       const bool zero_range = (int)r <= zrg || (int)r >= (int)nof_range - 1 - zrg;
+      const bool beyond_max = (max_bin >= 0) && ((int)r > max_bin) && ((int)r < (int)nof_range - 1 - zrg);
       for (uint32_t d = 0; d < nof_dopp; d++) {
         const bool zero_dopp = std::abs((int)d - (int)half) <= zdg;
-        if (zero_range || zero_dopp) {
+        if (zero_range || zero_dopp || beyond_max) {
           rvm.power[(size_t)r * nof_dopp + d] = 0.0f;
         }
       }

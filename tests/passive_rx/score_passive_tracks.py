@@ -20,6 +20,11 @@ tracks_path, gt_log_path = sys.argv[1], sys.argv[2]
 TOL = float(sys.argv[3]) if len(sys.argv) > 3 else 15.0
 
 GT_RE = re.compile(r"SENSING_CHANNEL gt: t=([\d.]+)s utc_ns=(\d+) obj\d+ pos=\(([-\d.]+),([-\d.]+)\)")
+# The merge now emits track timestamps in SIMULATED time (see merge_receivers_walltime_n.py's
+# wall_to_sim: wall-clock stamps made the tracker's dt 33x too large and crashed it). So ground
+# truth has to be indexed by the SAME base. utc_ns values are ~1.7e18; simulated seconds are ~1e3,
+# so the two are trivially distinguishable and this auto-detects rather than needing a flag.
+USE_SIM_TIME = True
 
 gt = []  # (utc_s, x, y)
 with open(gt_log_path, errors="ignore") as f:

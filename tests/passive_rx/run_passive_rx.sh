@@ -100,6 +100,21 @@ RX_CONFS=("${ALL_RX_CONFS[@]:0:$NUM_RX}")
 RX_REPORTS=("${ALL_RX_REPORTS[@]:0:$NUM_RX}")
 RX_LABELS=("${ALL_RX_LABELS[@]:0:$NUM_RX}")
 
+# Prefer each conf's OWN report_path over the hardcoded ALL_RX_REPORTS above. Those arrays only ever
+# knew about the base and .100mhz variants, so any new CONF_TAG whose confs write elsewhere would
+# have been SCORED AGAINST ANOTHER ARM'S FILE -- silently, and looking entirely plausible. Added
+# 2026-07-30 while building the pdsch_data A/B, whose control arm needs distinct report paths
+# precisely so the two arms cannot contaminate each other. Falls back to the array when a conf has
+# no report_path line, so existing behaviour is unchanged.
+for i in "${!RX_CONFS[@]}"; do
+  conf_report=$(sed -n 's/^[[:space:]]*report_path[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' \
+                "$SCRIPT_DIR/${RX_CONFS[$i]}" | head -1)
+  if [ -n "$conf_report" ] && [ "$conf_report" != "${RX_REPORTS[$i]}" ]; then
+    echo "note: ${RX_LABELS[$i]} report path taken from ${RX_CONFS[$i]}: $conf_report"
+    RX_REPORTS[$i]="$conf_report"
+  fi
+done
+
 ALL_UE_CONFS=("ue.active.conf" "ue.active2.conf" "ue.active3.conf")
 ALL_UE_LABELS=("ue1" "ue2" "ue3")
 UE_CONFS=("${ALL_UE_CONFS[@]:0:$NUM_UE}")
@@ -281,8 +296,11 @@ for i in "${!UE_CONFS[@]}"; do
     sudo -n ip netns exec "${UE_NETNS_BY_IDX[$i]}" $(pin_for ue "$i") "$BUILD_DIR/nr-uesoftmodem" -O "$SCRIPT_DIR/$conf" --rfsim \
       "${CELL_ARGS[@]}" >"$log" 2>&1 &
   fi
-  wait_for "$log" "RA procedure succeeded"            60 "active UE $label completed random access" || exit 1
-  wait_for "$log" "PDU Session Establishment Accept"  60 "active UE $label got a PDU session"       || exit 1
+  # 150s for the same reason as the passive receivers below: at 273 PRB with several softmodems
+  # already running, initial sync + RA legitimately takes longer than the original 60s. Measured
+  # timing out (val9) on ue1 with a perfectly healthy UE that had simply not finished syncing.
+  wait_for "$log" "RA procedure succeeded"            150 "active UE $label completed random access" || exit 1
+  wait_for "$log" "PDU Session Establishment Accept"  150 "active UE $label got a PDU session"       || exit 1
   ip=$(grep -oP 'UE IPv4: \K[0-9.]+' "$log" | tail -1)
   UE_IPS+=("${ip:-}")
   echo "  $label IP: ${ip:-<unknown>}"
@@ -311,7 +329,11 @@ for i in "${!RX_CONFS[@]}"; do
   fi
   $(pin_for rx "$i") "$BUILD_DIR/nr-uesoftmodem" -O "$SCRIPT_DIR/$conf" --rfsim --passive-rx \
     "${CELL_ARGS[@]}" "${ANT_ARGS[@]}" >"$log" 2>&1 &
-  wait_for "$log" "SIB1 decoded" 60 "passive UE $label synced and decoded SIB1" || exit 1
+  # 150s, not 60: the passive receivers start LAST, with the gNB and every active UE already
+  # loading the box, and at 273 PRB with 4 antennas initial sync is slow. 60s was marginal and was
+  # measured timing out (val8) even though the receiver was healthy -- it had printed its sensing
+  # channel setup and started its engine thread, it simply had not reached SIB1 yet.
+  wait_for "$log" "SIB1 decoded" 150 "passive UE $label synced and decoded SIB1" || exit 1
 done
 
 # --- 4. downlink traffic -----------------------------------------------------------------------
@@ -356,7 +378,82 @@ for i in "${!UE_IPS[@]}"; do
       --dur "$DURATION" >"$OUT_DIR/udp_client_${label}.log" 2>&1 &
   fi
 done
+# Confirm traffic is ACTUALLY flowing before committing the rest of the run to it. Found the hard
+# way 2026-07-29: the UDP receivers were failing to bind (EADDRNOTAVAIL, the UE address not yet on
+# oaitun_ue1) and dying silently, and the gNB's own counters later showed two of three UEs had
+# essentially no downlink at all (dlsch_rounds 56/59 versus 1523). Every conclusion drawn about the
+# blind-PDCCH grant rate on those runs was therefore drawn on a nearly-idle cell. A 20s check costs
+# nothing next to a multi-hour capture.
+#
+# 2026-07-30, TWO THINGS WERE WRONG WITH THAT CHECK and both are fixed below.
+#
+#  (a) It tested `udp_server log lines`, but udp_dl.py only prints its summary AT EXIT. That count is
+#      therefore ZERO for the entire run by construction -- the check could never fire, and never
+#      did. The gNB's own dlsch_rounds is the only signal here that means anything.
+#  (b) It sampled ONCE, 20 s in -- during the attach burst. It cannot see a cell that goes idle
+#      LATER, which is exactly what happens: on a 273 PRB run with 3 active UEs plus a 4-antenna
+#      passive receiver, CPU contention starves the active UEs of uplink, the gNB logs
+#      `UE <rnti> ... out-of-sync` (pucch0_DTX in the hundreds, goodput 0.00 Mbps) and STOPS
+#      SCHEDULING THEM. Measured: DL died ~2-3 min into a run, after 34 MB had flowed perfectly --
+#      so a 25-minute arm would be ~90 % dead cell while every startup check reported success.
+#
+# Replaced with a background sampler that runs for the whole capture, writes a time series, and
+# warns the moment DL stalls or a UE drops out of sync. The time series is the important part: it
+# makes "was the cell alive while this data was collected?" answerable AFTER the fact, which a
+# one-shot check never could.
+dl_total() {
+  grep -oE "UE [0-9a-fx]+: dlsch_rounds [0-9]+" "$GNB_LOG" 2>/dev/null \
+    | grep -oE "[0-9]+$" | paste -sd+ | bc 2>/dev/null
+}
+
+TRAFFIC_TS="$OUT_DIR/traffic_timeline.csv"
+echo "wall_s,dlsch_rounds_total,delta,out_of_sync_events" > "$TRAFFIC_TS"
+#
+# SAMPLE PERIOD vs the gNB's STATS PERIOD: the gNB only dumps its MAC stats every ~40 s, so a 20 s
+# sampler sees no new line on alternate ticks and a naive "delta == 0 means stalled" test
+# false-positives on half of them (measured: 8/30 windows flagged on a cell that was demonstrably
+# healthy and never went out of sync). Sample at 60 s, and require SEVERAL consecutive flat samples
+# before calling it -- a real stall stays flat forever, a sampling artifact does not.
+STALL_SAMPLE_S=60
+STALL_CONSEC=3
+(
+  prev=0; t=0; stalled=0
+  while [ "$t" -le "$((DURATION + STALL_SAMPLE_S))" ]; do
+    sleep "$STALL_SAMPLE_S"
+    t=$((t + STALL_SAMPLE_S))
+    cur=$(dl_total); cur=${cur:-0}
+    # `grep -c` already prints 0 when there is no match; a `|| echo 0` fallback appends a SECOND
+    # line, which corrupts the CSV (it did -- stray bare "0" rows).
+    oos=$(grep -c "out-of-sync" "$GNB_LOG" 2>/dev/null)
+    oos=${oos:-0}
+    d=$((cur - prev))
+    echo "$t,$cur,$d,$oos" >> "$TRAFFIC_TS"
+    if [ "$t" -ge $((STALL_SAMPLE_S * 2)) ] && [ "$d" -le 0 ]; then
+      stalled=$((stalled + 1))
+      if [ "$stalled" -eq "$STALL_CONSEC" ] || { [ "$stalled" -gt "$STALL_CONSEC" ] && [ $((stalled % 10)) -eq 0 ]; }; then
+        echo "  *** WARNING ${t}s: DOWNLINK STALLED ($((stalled * STALL_SAMPLE_S))s flat at dlsch_rounds=$cur, out-of-sync events=$oos)."
+        echo "  ***   The cell is idle -- sensing data collected from here on is not representative."
+        echo "  ***   Usual cause is CPU contention starving the active UEs of uplink; reduce NUM_UE,"
+        echo "  ***   RX*_NANT or IPERF_RATE. See traffic_timeline.csv."
+      fi
+    else
+      stalled=0
+    fi
+    prev=$cur
+  done
+) &
+TRAFFIC_MON_PID=$!
+
+sleep 20
+echo "--- traffic check (20s in) ---"
+grep -oE "UE [0-9a-fx]+: dlsch_rounds [0-9]+" "$GNB_LOG" 2>/dev/null | tail -3 | sed 's/^/  gNB: /'
+DLTOT=$(dl_total)
+echo "  total dlsch_rounds so far: ${DLTOT:-0}"
+[ "${DLTOT:-0}" -lt 50 ] 2>/dev/null && echo "  *** WARNING: almost no downlink -- traffic path is broken, results will be meaningless ***"
+echo "  (per-20s DL timeline -> $TRAFFIC_TS; stalls are warned about as they happen)"
+
 sleep "$DURATION"
+kill "$TRAFFIC_MON_PID" 2>/dev/null
 
 # --- 5. summary --------------------------------------------------------------------------------
 echo
@@ -371,6 +468,30 @@ for i in "${!UE_ACTIVE_LOGS[@]}"; do
   cat "$OUT_DIR/udp_server_${label}.log" 2>/dev/null | sed 's/^/  udp_dl: /'
 done
 grep -oP 'ulsch_rounds \K[0-9]+' "$GNB_LOG" | tail -1 | sed 's/^/  gNB-seen UL rounds (all UEs):  /'
+
+# --- Was the cell actually ALIVE for this capture? Printed as a headline verdict, not buried in a
+# file: every sensing number below is conditioned on this, and a capture whose cell died 3 minutes in
+# is not a weaker result, it is a different experiment. See the sampler above for how this fails.
+echo "--- DL LIVENESS (the precondition for every sensing number below) ---"
+if [ -f "$TRAFFIC_TS" ]; then
+  # A single flat sample is a sampling artifact (see the sampler's own comment); a STALL is
+  # STALL_CONSEC consecutive flat samples, after which dlsch_rounds never moves again. Report the
+  # start of the first such run, and the total DL growth, which is the honest one-number summary.
+  read -r TOTAL_SAMPLES GROWTH STALL_AT OOS <<<"$(awk -F, -v need="$STALL_CONSEC" '
+    NR>1 { n++; last=$2; if (first=="") first=$2; oos=$4
+           if ($3<=0) { run++; if (run==need && stall=="") stall=$1-(need-1)*'"$STALL_SAMPLE_S"' }
+           else run=0 }
+    END { printf "%d %d %s %d", n, last-first, (stall==""?"none":stall), oos+0 }' "$TRAFFIC_TS")"
+  echo "  samples: ${TOTAL_SAMPLES:-0} x ${STALL_SAMPLE_S}s   DL growth over capture: ${GROWTH:-0} dlsch_rounds"
+  echo "  gNB out-of-sync events: ${OOS:-0}"
+  if [ "${STALL_AT:-none}" != "none" ]; then
+    echo "  *** DL STALLED from ~${STALL_AT}s -- sensing data after that point was collected on an IDLE cell ***"
+    echo "  *** and is NOT comparable with data from a live one. Reduce NUM_UE / RX*_NANT / IPERF_RATE. ***"
+  else
+    echo "  no sustained DL stall -- cell was alive for the whole capture"
+  fi
+  echo "  timeline: $TRAFFIC_TS"
+fi
 
 summarize_rx() { # summarize_rx <label> <log_file> <reports_jsonl>
   local label="$1" log="$2" reports="$3"
@@ -429,10 +550,12 @@ else
   # stronger noise-floor test than any single receiver's own persistence gate, since it needs no
   # tuned threshold. csi_rs-only CPIs pass through untouched. Feed the GATED reports into the merge
   # below instead of the raw ones.
+  MERGE_SPECS=()
   RNTI_GATE_SPECS=()
   for i in "${!RX_REPORTS[@]}"; do RNTI_GATE_SPECS+=("${RX_REPORTS[$i]}:${RX_LOGS[$i]}"); done
   GATED_REPORTS_STR=$(python3 "$SCRIPT_DIR/rnti_gate.py" "$OUT_DIR" "${RNTI_GATE_SPECS[@]}" 2> >(sed 's/^/  rnti_gate: /' >&2))
   read -r -a GATED_REPORTS <<< "$GATED_REPORTS_STR"
+  for i in "${!GATED_REPORTS[@]}"; do MERGE_SPECS+=("${GATED_REPORTS[$i]}@${RX_LOGS[$i]}"); done
 
   MERGED="$OUT_DIR/fused_reports.jsonl"
   if [ "$NUM_RX" -eq 2 ]; then
@@ -440,7 +563,7 @@ else
       "${GATED_REPORTS[0]}" "${GATED_REPORTS[1]}" "$MERGED" 2>&1 | sed 's/^/  merge: /'
   else
     python3 "$SCRIPT_DIR/merge_receivers_walltime_n.py" \
-      "$MERGED" 2 auto "${GATED_REPORTS[@]}" 2>&1 | sed 's/^/  merge: /'
+      "$MERGED" 2 auto "${MERGE_SPECS[@]}" 2>&1 | sed 's/^/  merge: /'
   fi
   TRACKS="$OUT_DIR/fused_tracks.jsonl"
   if [ -s "$MERGED" ]; then
@@ -464,6 +587,15 @@ print(n)
       echo "  confirmed-status track updates: ${NCONF:-?}"
       # Ground-truth precision, mirroring tests/sensing_sim's score_world_tracks.py TOL=15m metric.
       python3 "$SCRIPT_DIR/score_passive_tracks.py" "$TRACKS" "${RX_LOGS[0]}" 2>&1 | sed 's/^/  /'
+      # STANDING REQUIREMENT: every capture gets plotted against ground truth -- fused tracks and
+      # speed, plus per-receiver detections. Numbers alone hid a 33x time-base error and a whole
+      # class of bearing outliers that were obvious the moment they were drawn.
+      python3 "$SCRIPT_DIR/plot_fused_tracks.py" "$TRACKS" "${RX_LOGS[0]}" \
+        "$OUT_DIR/fused_tracks_vs_gt.png" "$(basename "$OUT_DIR")" 2>&1 | sed 's/^/  plot: /'
+      for i in "${!RX_LABELS[@]}"; do
+        python3 "$SCRIPT_DIR/plot_est_vs_gt.py" "${RX_REPORTS[$i]}" "${RX_LOGS[$i]}" \
+          "$OUT_DIR/est_vs_gt_${RX_LABELS[$i]}.png" "${RX_LABELS[$i]}" 2>&1 | sed 's/^/  plot: /'
+      done
     fi
   else
     echo "  SKIPPED isac-track: no paired CPIs (receiver CPI timestamps never landed within tolerance)"

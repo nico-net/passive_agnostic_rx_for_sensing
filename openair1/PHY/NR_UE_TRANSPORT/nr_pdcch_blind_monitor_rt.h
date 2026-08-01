@@ -42,6 +42,7 @@
 #define NR_PDCCH_BLIND_MONITOR_RT_H
 
 #include "PHY/defs_nr_UE.h"
+#include "nr_pdcch_blind_monitor.h" // nr_pdcch_blind_extract_opts_t, carried in the cfg below
 
 /// [sensing] pdcch_blind_monitor_* parsed config. Owned (static instance) by
 /// nr_pdcch_blind_monitor.c; read-only access for RT code via nr_pdcch_blind_monitor_get_cfg().
@@ -85,6 +86,19 @@ typedef struct {
                           // pdcch_e_rx units): skip polar decode entirely below this -- unscheduled
                           // CCEs measured exactly (0,0) live 2026-07-28, real grants measured
                           // mean_abs in the tens, so this is a coarse but cheap and safe gate.
+                          // 0 disables it. NOTE this is an ABSOLUTE threshold in receiver-dependent
+                          // units, so a value tuned on one deployment/gain setting does not transfer
+                          // to another -- prefer energy_adapt_factor below.
+  float energy_adapt_factor; // >0 selects the ADAPTIVE energy gate and OVERRIDES energy_min.
+                          // The threshold becomes factor * (running estimate of the NOISE-FLOOR
+                          // candidate energy), so it self-calibrates to whatever the receiver's
+                          // gain, bandwidth and noise environment actually are instead of encoding
+                          // one deployment's absolute level. Dimensionless, so one value is portable
+                          // -- which is the whole point: the absolute energy_min could not be
+                          // carried from the 106 PRB cell to 273 PRB, let alone to real OTA gain
+                          // settings. See nr_pdcch_blind_monitor_rt.c's energy_floor_update() for
+                          // the estimator and why the median (not the mean) is tracked.
+                          // ~2.0 is a sane starting point; 0 keeps the legacy absolute behaviour.
                           // <=0 disables (always decode).
   int   rnti_persist_k;   // accept (and CFR-submit) only once this CRC-recovered RNTI has been seen
                           // at least this many times within rnti_persist_window_ms -- a real UE's
@@ -96,6 +110,31 @@ typedef struct {
                           // fine, plausible fields, but the actual DMRS channel estimate itself
                           // looks like noise) -- catches candidates that pass every payload-level
                           // check by chance but were never really scheduled. <=0 disables.
+
+  // ---- Deployment facts a blind receiver cannot read off the air (2026-07-30). See
+  // nr_pdcch_blind_extract_opts_t in nr_pdcch_blind_monitor.h for WHY the spec defaults are wrong
+  // for this project's gNB and why that only starts mattering once the PDSCH is actually decoded.
+  // Zeroed/absent = the spec-default behaviour this module has always had. ----
+  nr_pdcch_blind_extract_opts_t extract;
+
+  // ---- Passive data-aided PDSCH (PASSIVE_PDSCH_DATA_AIDED_HANDOVER.md Part B). ----
+  int   pdsch_decode;     // 0 = off (default). 1 = decode overheard PDSCH and COUNT the CRC pass
+                          // rate only -- the handover doc's go/no-go gate, deliberately its own
+                          // level so the expensive-but-harmless measurement can be run before
+                          // anything downstream trusts a reconstructed X. 2 = also re-encode a
+                          // CRC-verified TB and submit Ĥ = Y/X as NR_ISAC_SRC_PDSCH_DATA (which
+                          // additionally requires `pdsch_data` in [sensing] sources).
+  int   pdsch_mcs_table;  // 0 = qam64 (this deployment: no mcs-Table configured), 1 = qam256,
+                          // 2 = qam64LowSE. Must match the gNB's PDSCH-Config or every TBS is wrong.
+  int   pdsch_xoverhead;  // xOverhead_PDSCH in REs/PRB (0/6/12/18); 0 = not configured, the default.
+  int   pdsch_rv0_only;   // 1 = only attempt grants with rv==0 (default). A retransmission is not
+                          // self-decodable without the earlier round's soft bits, which a passive
+                          // receiver that missed the first grant does not have -- attempting them
+                          // burns LDPC iterations for a guaranteed CRC failure. 0 = attempt all,
+                          // which is what you want when MEASURING the pass rate by RV.
+  int   pdsch_max_per_slot; // cap on decode attempts per monitoring occasion (<=0 = 1). LDPC decode
+                            // is by far the most expensive thing in this tap and a noisy slot can
+                            // otherwise present several accepted candidates at once.
 } nr_pdcch_blind_monitor_cfg_t;
 
 #ifdef __cplusplus

@@ -973,6 +973,8 @@ set(PHY_SRC_UE
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_prach.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/dci_nr.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c
+  ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c
+  ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_data_aided.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/pucch_nr.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/csi_rx.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_csirs_monitor.c

@@ -23,7 +23,42 @@ out_path = sys.argv[1]
 MIN_RX = int(sys.argv[2])
 TOL_ARG = sys.argv[3]
 QUANT_NS = 100_000_000
-rx_paths = sys.argv[4:]
+# Each spec is "reports.jsonl" or "reports.jsonl@ue.log"; the log enables the wall->sim remap.
+specs = sys.argv[4:]
+rx_paths, rx_logs = [], []
+for sp in specs:
+    if "@" in sp:
+        a, b = sp.rsplit("@", 1)
+        rx_paths.append(a); rx_logs.append(b)
+    else:
+        rx_paths.append(sp); rx_logs.append(None)
+
+
+def wall_to_sim(log_path):
+    """Build a wall(utc_ns) -> simulated(seconds) mapping from a receiver's own gt lines.
+
+    REQUIRED whenever simulated time does not track wall time. sensing_engine.cc stamps each report
+    with CLOCK_REALTIME, but the SCENE evolves in simulated time, and on this harness simulated time
+    advances at only ~3-7% of real time. A 6 h capture therefore spans 5.97 h of wall clock while the
+    targets move just 646 s worth -- so a tracker fed the wall stamps sees dt ~86 s between updates
+    for ~2.6 s of real target motion, a 33x error. Its process noise integrated over that bogus dt
+    grows the covariance until it is no longer positive-definite and isac-track PANICS
+    (ukf.rs:87) -- which is exactly what produced 0 fused tracks from 251 cleanly paired CPIs.
+    tests/sensing_sim's merge_receivers_n.py never hit this because it stamps in simulated time by
+    inverting the trajectory; the wall-clock merge here was only ever safe when sim ~= wall (106 PRB).
+    """
+    import re as _re
+    rx = _re.compile(r"SENSING_CHANNEL gt: t=([\d.]+)s utc_ns=(\d+)")
+    w, sim = [], []
+    with open(log_path, errors="ignore") as f:
+        for line in f:
+            m = rx.search(line)
+            if m:
+                sim.append(float(m.group(1))); w.append(int(m.group(2)))
+    if len(w) < 2:
+        return None
+    order = np.argsort(w)
+    return np.array(w)[order], np.array(sim)[order]
 
 
 def load(path):
@@ -48,6 +83,20 @@ def median_gap_ns(rows):
 
 
 rx = [load(p) for p in rx_paths]
+# Remap every report's timestamp into simulated time before any pairing, so the tolerance and the
+# stamps handed to isac-track are both in the time base the SCENE actually evolves in.
+for i, lg in enumerate(rx_logs):
+    if not lg:
+        continue
+    mp = wall_to_sim(lg)
+    if mp is None:
+        print(f"rx{i+1}: no gt lines in {lg}; leaving wall-clock stamps", file=sys.stderr)
+        continue
+    wv, sv = mp
+    for d in rx[i]:
+        d["cpi_start_time_utc_ns"] = int(np.interp(d["cpi_start_time_utc_ns"], wv, sv) * 1e9)
+    print(f"rx{i+1}: remapped wall->sim ({(wv[-1]-wv[0])/1e9/3600:.2f} h wall -> {sv[-1]-sv[0]:.0f} s sim)",
+          file=sys.stderr)
 for i, r in enumerate(rx):
     print(f"rx{i+1}={len(r)} CPIs", file=sys.stderr)
 

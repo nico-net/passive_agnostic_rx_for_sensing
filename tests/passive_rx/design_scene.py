@@ -21,15 +21,25 @@ import argparse, math
 
 C = 299792458.0
 
-# ---- measured CPI geometry: 100 MHz cell, sources="csi_rs" ONLY ----
-# Using a SINGLE fixed-period source is what makes this axis deterministic. Measured over /tmp/val4:
-# vel_max = 0.500 m/s in EVERY CPI (0th..100th percentile identical), because CSI-RS arrives on a
-# strict 160-slot (80 ms) lattice, so the slow-time row spacing cannot drift.
-# Contrast the mixed csi_rs+pdsch_dmrs_blind config, where vel_max swung 0.7..27 m/s CPI-to-CPI:
-# blind-PDCCH rows arrive with DL grants, so how many land in a CPI depends on traffic AND on how
-# starved the receiver is -- there is no single target speed detectable across both regimes.
+# ---- CPI geometry ----
+# HISTORY, because it explains why the shipped scene was undetectable (2026-07-30). These constants
+# were measured with sources="csi_rs" ONLY, where the axis is deterministic: CSI-RS arrives on a
+# strict 160-slot (80 ms) lattice, so vel_max was 0.500 m/s in EVERY CPI. A 0.15 m/s target is the
+# only thing detectable in that regime, and that is what the confs encode.
+#
+# But the confs RUN a mixed source set (csi_rs + pdsch_dmrs_blind [+ pdsch_data]), where slow-time
+# rows arrive with DL grants. Measured there: vel_max p10..p90 = 17.7..26.4 m/s, vel_res median
+# 1.45 m/s -- so the zero-Doppler notch is ~4.3 m/s and the 0.15 m/s target sits deep inside it.
+# Measured consequence: 1/54 CPIs detected the target. The scene was designed for one regime and
+# deployed in another.
+#
+# The fix is not a different constant, it is a different QUESTION. With a traffic-driven slow-time
+# lattice there is no single worst case -- "do all constraints pass?" is unanswerable and the honest
+# metric is "in what FRACTION of real CPIs would this target be detectable?". Pass --from-reports
+# with a real reports.jsonl and this script scores every sampled trajectory instant against every
+# CPI's OWN measured geometry. The constants below remain the csi_rs-only fallback.
 RANGE_RES = 3.05
-VEL_MAX_WORST = 0.50      # measured, deterministic
+VEL_MAX_WORST = 0.50      # measured, deterministic, csi_rs-only
 VEL_RES_WORST = VEL_MAX_WORST / 16.0   # = vel_max / (cpi_slots/2), cpi_slots=32
 ZERO_RANGE_GUARD = 3
 ZERO_DOPPLER_GUARD = 3
@@ -42,15 +52,24 @@ RX = {"rx1": (100.0, 0.0), "rx2": (-100.0, 0.0)}
 # (The 2x2 UPA confs scan the full circle, so this check is the strictest of the two.)
 BROADSIDE = {"rx1": 122.0, "rx2": 30.0}
 
-DURATION_S = 2000.0       # cover a long run: ~6.7% of real time -> 1200 s sim ~ 5 h wall
-SPEED = 0.15              # m/s, world frame
+# Cover a long capture WITHOUT slowing the targets down. The previous scene stretched a single
+# 180 m leg over 1200 s to "cover a 5 h wall-clock run", which silently set the speed to 0.15 m/s and
+# put both targets in the zero-Doppler notch. Duration is bought with MORE PATROL LEGS at a fixed
+# speed, never by making the leg longer in time.
+DURATION_S = 2000.0
+SPEED = 6.0               # m/s, world frame
 
 # Patrol legs: each object bounces between two waypoints forever. A piecewise-linear reversal means
 # the range rate flips sign instantly rather than dwelling near zero, so the notch is only crossed
 # where the GEOMETRY makes dR/dt small -- which is exactly what check 3 verifies.
+# Placed so |dR/dt| lands inside [7, 15] m/s -- above the mixed regime's ~4.3-4.9 m/s zero-Doppler
+# notch and well under its p10 vel_max of 17.7 m/s. Both patrol in y at an x offset, which is what
+# makes dR/dt large: for a target at (x, y) the bistatic rate is ~ y_dot * (y/|P| + y/|P-RX|), i.e.
+# it grows with |y| and is near zero for motion perpendicular to that. They move in OPPOSITE
+# directions so they separate in Doppler even where their ranges cross -- a real association test.
 OBJECTS = [
-    {"refl": 1.0, "a": (0.0, 60.0),   "b": (0.0, 240.0)},
-    {"refl": 0.8, "a": (50.0, 200.0), "b": (50.0, 80.0)},
+    {"refl": 1.0, "a": (50.0, 60.0),  "b": (50.0, 250.0)},
+    {"refl": 0.8, "a": (20.0, 260.0), "b": (20.0, 80.0)},
 ]
 
 
@@ -92,9 +111,47 @@ def pos_at(wps, t):
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--emit", action="store_true")
+ap.add_argument("--from-reports", metavar="JSONL",
+                help="score against the per-CPI geometry MEASURED in a real reports.jsonl instead of "
+                     "the csi_rs-only constants -- required for any mixed source set")
+ap.add_argument("--speed", type=float, default=SPEED, help=f"target speed m/s (default {SPEED})")
 args = ap.parse_args()
+SPEED = args.speed
 
-print(f"CPI geometry used (worst case of measured): range_res={RANGE_RES} m, "
+CPIS = None
+if args.from_reports:
+    import json
+    CPIS = []
+    for line in open(args.from_reports):
+        if not line.strip():
+            continue
+        r = json.loads(line)
+        if "vel_res_mps" in r and "vel_max_mps" in r and "range_res_m" in r:
+            CPIS.append((r["range_res_m"], r["vel_res_mps"], r["vel_max_mps"]))
+    if not CPIS:
+        raise SystemExit(f"no usable CPI geometry in {args.from_reports}")
+
+
+def detectable_fraction(r, rate):
+    """Fraction of MEASURED CPIs in which a target at differential range r with rate `rate` clears
+    every notch. This replaces the binary pass/fail: with a traffic-driven slow-time lattice the
+    geometry differs CPI to CPI, so detectability is a probability, not a property."""
+    n = 0
+    for rres, vres, vmax in CPIS:
+        if (r > ZERO_RANGE_GUARD * rres and r < CIR_MAX_M
+                and abs(rate) > ZERO_DOPPLER_GUARD * vres and abs(rate) < vmax):
+            n += 1
+    return n / len(CPIS)
+
+if CPIS:
+    import statistics as _st
+    _vr = sorted(c[1] for c in CPIS); _vm = sorted(c[2] for c in CPIS)
+    print(f"CPI geometry MEASURED over {len(CPIS)} real CPIs ({args.from_reports}):")
+    print(f"  vel_res  median {_st.median(_vr):.3f} m/s  -> zero-Doppler notch median "
+          f"{ZERO_DOPPLER_GUARD*_st.median(_vr):.2f} m/s")
+    print(f"  vel_max  p10 {_vm[len(_vm)//10]:.2f}  median {_st.median(_vm):.2f} m/s")
+    print("  scoring = fraction of those CPIs in which the target clears every notch\n")
+print(f"CPI geometry fallback (csi_rs-only worst case): range_res={RANGE_RES} m, "
       f"vel_res={VEL_RES_WORST} m/s, vel_max={VEL_MAX_WORST} m/s")
 print(f"  zero-Doppler notch  : |dR/dt| must exceed {ZERO_DOPPLER_GUARD*VEL_RES_WORST:.2f} m/s")
 print(f"  zero-range notch    : dR must exceed {ZERO_RANGE_GUARD*RANGE_RES:.2f} m")
@@ -127,15 +184,29 @@ for oi, o in enumerate(OBJECTS):
         rel = [abs(wrap180(b - BROADSIDE[name])) for b in bears]
         c1 = min(rs) > ZERO_RANGE_GUARD * RANGE_RES
         c2 = max(rs) < CIR_MAX_M
-        c3 = amin > ZERO_DOPPLER_GUARD * VEL_RES_WORST
-        c4 = amax < VEL_MAX_WORST
         c5 = max(rel) < 90.0
-        ok = all((c1, c2, c3, c4, c5))
-        ok_all &= ok
-        print(f"   {name}: dR {min(rs):6.1f}..{max(rs):6.1f} m [{'ok' if c1 and c2 else 'FAIL'}]   "
-              f"|dR/dt| {amin:5.2f}..{amax:5.2f} m/s [{'ok' if c3 and c4 else 'FAIL'}]   "
-              f"bearing {bmin:6.1f}..{bmax:6.1f} deg, max {max(rel):.0f} deg off broadside "
-              f"[{'ok' if c5 else 'FAIL'}]")
+        if CPIS:
+            # Score every sampled instant against every measured CPI. `worst` is the least
+            # detectable moment of the patrol -- the number that decides whether a track survives.
+            fr = [detectable_fraction(r, rt) for r, rt in zip(rs[1:], rates)]
+            worst, mean = min(fr), sum(fr) / len(fr)
+            ok = c1 and c2 and c5 and worst >= 0.5
+            ok_all &= ok
+            print(f"   {name}: dR {min(rs):6.1f}..{max(rs):6.1f} m [{'ok' if c1 and c2 else 'FAIL'}]   "
+                  f"|dR/dt| {amin:5.2f}..{amax:5.2f} m/s   "
+                  f"detectable in {100*mean:.0f}% of CPIs on average, {100*worst:.0f}% at the worst "
+                  f"instant [{'ok' if worst >= 0.5 else 'FAIL'}]   "
+                  f"bearing {bmin:6.1f}..{bmax:6.1f} deg, max {max(rel):.0f} deg off broadside "
+                  f"[{'ok' if c5 else 'FAIL'}]")
+        else:
+            c3 = amin > ZERO_DOPPLER_GUARD * VEL_RES_WORST
+            c4 = amax < VEL_MAX_WORST
+            ok = all((c1, c2, c3, c4, c5))
+            ok_all &= ok
+            print(f"   {name}: dR {min(rs):6.1f}..{max(rs):6.1f} m [{'ok' if c1 and c2 else 'FAIL'}]   "
+                  f"|dR/dt| {amin:5.2f}..{amax:5.2f} m/s [{'ok' if c3 and c4 else 'FAIL'}]   "
+                  f"bearing {bmin:6.1f}..{bmax:6.1f} deg, max {max(rel):.0f} deg off broadside "
+                  f"[{'ok' if c5 else 'FAIL'}]")
 print("\n" + ("ALL CONSTRAINTS PASS" if ok_all else "*** SOME CONSTRAINTS FAIL ***"))
 
 if args.emit:

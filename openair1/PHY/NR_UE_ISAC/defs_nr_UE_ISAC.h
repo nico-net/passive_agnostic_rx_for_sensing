@@ -196,6 +196,21 @@ struct nr_isac_args_t {
   uint32_t nms_range_bins     = 3;  ///< Non-max-suppression radius in range bins (0 disables)
   uint32_t nms_doppler_bins   = 3;  ///< Non-max-suppression radius in Doppler bins (0 disables)
   uint32_t max_detections     = 32; ///< Cap on reported detections per CPI after suppression
+  /// Hard upper bound on DETECTABLE differential range, in metres; 0 = disabled (whole axis).
+  ///
+  /// The range axis spans nof_range * range_res, which at 273 PRB is ~10 km -- far beyond any range
+  /// the receiver can physically observe. In the simulator the channel is capped at SENS_MAX_TAPS
+  /// (255 taps @ 122.88 Msps = 622 m), so EVERY cell past that is by construction an artifact:
+  /// window skirt, comb alias or noise. Measured 2026-07-30 on the 273 PRB passive scene: of 820
+  /// reported detections, the median range was 3356 m and only 17 sat in the band the targets
+  /// actually occupied -- the artifacts were consuming the whole max_detections budget and crowding
+  /// out every real target.
+  ///
+  /// Zeroing those bins BEFORE CFAR (alongside zero_range_guard, which does the same job at the near
+  /// end) is strictly better than filtering detections afterwards: it also keeps the artifacts out of
+  /// the CFAR noise estimate, so the threshold over the real band stops being inflated by them.
+  /// Set it from physics -- the CIR span in simulation, the instrumented range OTA -- not by tuning.
+  float    max_range_m        = 0.0f;
 
   // Detector front-end. "fft" (default) = the legacy range-IFFT + Doppler-FFT/NUDFT chain, which
   // ASSUMES uniform, complete, real-symmetric sampling and therefore scatters each target's energy

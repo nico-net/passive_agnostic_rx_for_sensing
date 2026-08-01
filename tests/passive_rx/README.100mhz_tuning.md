@@ -111,3 +111,87 @@ Cost of the deterministic grid: CPI is 2.56 s of SIMULATED time, and sim time ru
 time, so expect roughly **1 CPI per 40-100 s of wall clock per receiver**. Budget accordingly — a
 few hundred CPIs is a multi-hour capture. That is the honest throughput of 100 MHz + 3 active UEs +
 2 four-antenna receivers on 12 cores.
+
+## 7. Adaptive energy gate — and what it revealed about blind-PDCCH (2026-07-29)
+
+`energy_min` was an ABSOLUTE threshold in receiver-dependent units, so it could not be carried
+between bandwidths or gain settings and had simply been disabled (0). Replaced with
+`energy_adapt_factor` (optional 5th field of `pdcch_blind_monitor_noise_gates`, so 4-field configs
+still parse): threshold = `factor * running estimate of the noise-floor candidate energy`.
+Dimensionless, therefore portable, therefore safe to ship a default for (2.0) in a way the absolute
+value never was.
+
+The estimator tracks the **median**, not the mean, via a frugal streaming update (O(1) time and
+state, no allocation -- the RT path allows nothing else) with a step RELATIVE to the current
+estimate, making it scale-free. Unit-verified: 0.3-4.2% error, and identical accuracy across a
+250,000x gain range. The median matters and is not a detail -- at 25% cell load the true median is
+11.7 while the mean is 262, so a mean-based floor would sit 22x too high and progressively suppress
+the very grants the gate exists to find.
+
+**LIVE-VERIFIED working**: `held[energy=300694]` where it was previously 0, `efloor` converging to a
+stable 0.69, and detection clutter collapsing from median 2486 m to 886 m.
+
+**And that is how it disproved the case for blind-PDCCH here.** With false accepts removed,
+`cfr_submits` fell from ~1000-2000 to **119**. The genuine grant rate is that low; the rest was
+noise. A sparse slow-time grid takes far longer to fill a CPI, so `vel_max` collapsed to 0.1-0.4 m/s
+and only 3 CPIs completed in 900 s (versus ~30 before, and 9 for csi_rs).
+
+So the row density that made blind-PDCCH look attractive -- `vel_max` 14-27 m/s, plenty of CPIs --
+was **substantially manufactured by false accepts**. Properly gated it delivers a LOWER PRF and ~10x
+fewer CPIs than csi_rs. This is structural, not a tuning problem: lowering `energy_adapt_factor`
+would only re-admit the noise that produced the illusion.
+
+**Consequence**: `sources = "csi_rs"` is the right choice for this deployment, and that is now a
+MEASURED conclusion rather than the untested assumption it was in section 6. The blind-PDCCH decode
+path itself remains live-verified correct (exact RNTI matches against the gNB log) -- it is the
+sensing DUTY CYCLE that is inadequate here, not the decoder. On a busier cell, with genuinely more
+DL grants, the balance could change; re-measure `cfr_submits` before assuming either way.
+
+## 8. Blind-PDCCH, properly measured (2026-07-29) — supersedes section 7's verdict
+
+Section 7 concluded blind-PDCCH's grant rate was "structurally too sparse". **That was measured on a
+nearly-idle cell and is withdrawn.**
+
+**The harness was not delivering the traffic it reported.** `udp_dl.py`'s RECEIVERS were dying at
+startup on `bind()` -> EADDRNOTAVAIL (the UE address is not on `oaitun_ue1` yet when the receiver is
+launched one second after the UE reports its IP). The tracebacks went to `udp_server_*.log`, which
+nothing read, while the SENDERS all reported a clean 6.00 Mbit/s -- so the failure was invisible.
+The gNB's own counters showed the truth: `dlsch_rounds` of 1523 / 56 / 59, i.e. two of three UEs
+were idle and the cell was carrying about one UE's worth of load.
+
+Fixed: the receiver retries the bind for 60 s and falls back to `0.0.0.0`; and `run_passive_rx.sh`
+now prints per-UE `dlsch_rounds` 20 s into every run with a loud warning if the cell is idle. A 20 s
+check is nothing against a multi-hour capture, and this class of failure had already invalidated
+one set of conclusions.
+
+**With traffic actually flowing** (dlsch_rounds 4489/6191/6036): `cfr_submits` 119 -> **1957**, CPIs
+3 -> **61 per 1800 s**. So the grant rate was indeed traffic-limited, not structural.
+
+**A second error of mine, in the opposite direction from section 4**: the blind scene was designed
+against `vel_max` 13.8-27 m/s, but that figure came from runs where FALSE accepts arrived every slot
+and inflated the row density. Real grants land ~46 ms apart, giving `vel_max` **0.7 m/s**. Targets
+at 5.4-11.5 m/s were therefore outside the Doppler window -- the same mistake as the original 0.17
+m/s scene, just overshooting instead of undershooting. Always size a scene against the velocity axis
+the CLEAN configuration produces, never one measured with the noise still in.
+
+**The honest head-to-head**, same loaded cell, same adaptive gate, same DSP options, each source
+given a scene matched to its OWN measured velocity window:
+
+| | csi_rs | pdsch_dmrs_blind |
+|---|---|---|
+| CPIs / 1800 s | ~18 | **64** |
+| target detection | **56-78 %** | 8-14 % |
+| bearing error, median | **0.05-0.26 deg** | 2.5-45 deg |
+| bearing p90 | <= 0.51 deg | 38-49 deg |
+
+Blind-PDCCH works -- it detects both targets. It wins on CPI count and loses decisively on quality.
+**Likely cause of the bearing collapse**: every blind-PDCCH row comes from a different grant with a
+different PRB allocation, so the frequency support changes from row to row, whereas CSI-RS always
+occupies the same comb. Inconsistent support across a CPI degrades coherent integration, and AoA --
+which lives on precise inter-element phase -- degrades hardest. A 45 deg bearing is useless to
+fusion, which is the entire reason the array exists. (Not yet confirmed by direct experiment; it is
+the mechanism most consistent with high CPI count but poor phase coherence.)
+
+**Conclusion: `sources = "csi_rs"` for AoA/fusion work** -- now on a like-for-like measurement rather
+than section 7's artifact-driven reasoning. Blind-PDCCH remains valuable where bearings are not
+needed, and its decoder is unaffected by any of this (exact RNTI matches against the gNB log).

@@ -102,13 +102,34 @@ struct GroundTruth {
   uint32_t time_domain_assignment = 0;
   uint32_t antenna_ports      = 0; // index into Table 7.3.1.2.2-1, 0..11 valid
   uint8_t  dmrs_seq_init      = 0;
+  // Transport-block fields: read and discarded before 2026-07-30, now surfaced for the passive
+  // data-aided decode. mcs stays < 28 by default so the reserved-range plausibility check passes.
+  uint32_t mcs                = 0;
+  uint32_t ndi                = 0;
+  uint32_t rv                 = 0;
+  uint32_t harq_pid           = 0;
 };
+
+/// Resolve one overridable field width the same way nr_pdcch_blind_monitor.c's blind_field_bits()
+/// does, so a packed test payload always matches the layout the extractor will read.
+int PickBits(int override_val, int dflt) { return override_val >= 0 ? override_val : dflt; }
+
+/// Time-domain-assignment width: DERIVED from the configured TDRA entry count, exactly as
+/// nr_dci_size() derives it from the real list -- never an independent knob.
+int TdaBits(const nr_pdcch_blind_extract_opts_t* opts)
+{
+  if (opts == nullptr || opts->tda_count <= 0) return 4;
+  int b = 0;
+  while ((1 << b) < opts->tda_count) b++;
+  return b;
+}
 
 /// Packs a GroundTruth's fields into the MSB-first, spec-field-order 64-bit layout
 /// nr_pdcch_blind_decode_and_extract()'s read_field() expects (mirrors
 /// nr_ue_procedures.c's readBits()/EXTRACT_DCI_ITEM convention -- see the module's file-level
-/// comment). Field list and widths must match nr_pdcch_blind_monitor.c's extraction order exactly.
-uint64_t PackPayload(const GroundTruth& gt, int riv_bits)
+/// comment). Field list and widths must match nr_pdcch_blind_monitor.c's extraction order exactly,
+/// which is why `opts` is threaded through: once a width is overridden, the packer must move with it.
+uint64_t PackPayload(const GroundTruth& gt, int riv_bits, const nr_pdcch_blind_extract_opts_t* opts = nullptr)
 {
   uint64_t p = 0;
   auto put = [&](uint32_t val, int nbits) {
@@ -118,27 +139,52 @@ uint64_t PackPayload(const GroundTruth& gt, int riv_bits)
   };
   put(1, 1);                          // format indicator = 1 (DL)
   put(0, 0);                          // carrier indicator
-  put(0, 1);                          // bwp indicator
+  put(0, opts ? PickBits(opts->bwp_indicator_bits, 1) : 1);   // bwp indicator
   put(gt.riv, riv_bits);              // freq domain assignment
-  put(gt.time_domain_assignment, 4);  // time domain assignment
-  put(0, 0);                          // vrb-to-prb mapping
-  put(0, 0);                          // prb bundling size indicator
-  put(0, 0);                          // rate matching indicator
-  put(0, 0);                          // zp csi-rs trigger
-  put(0, 8);                          // MCS(5)+NDI(1)+RV(2)
-  put(0, 0);                          // TB2
-  put(0, 4);                          // harq process number
-  put(0, 2);                          // DAI
+  put(gt.time_domain_assignment, TdaBits(opts));              // time domain assignment
+  put(0, opts ? PickBits(opts->vrb_to_prb_bits, 0) : 0);      // vrb-to-prb mapping
+  put(0, opts ? PickBits(opts->prb_bundling_bits, 0) : 0);    // prb bundling size indicator
+  put(0, opts ? PickBits(opts->rate_matching_bits, 0) : 0);   // rate matching indicator
+  put(0, opts ? PickBits(opts->zp_csirs_bits, 0) : 0);        // zp csi-rs trigger
+  put(gt.mcs, 5);                     // MCS
+  put(gt.ndi, 1);                     // NDI
+  put(gt.rv, 2);                      // RV
+  put(0, opts ? PickBits(opts->tb2_bits, 0) : 0);             // TB2
+  put(gt.harq_pid, opts ? PickBits(opts->harq_pid_bits, 4) : 4);        // harq process number
+  put(0, opts ? PickBits(opts->dai_bits, 2) : 2);             // DAI
   put(0, 2);                          // TPC PUCCH
   put(0, 3);                          // PUCCH resource indicator
-  put(0, 3);                          // PDSCH-to-HARQ timing indicator
-  put(gt.antenna_ports, 4);           // antenna ports
-  put(0, 0);                          // TCI
-  put(0, 2);                          // SRS request
-  put(0, 0);                          // CBGTI
-  put(0, 0);                          // CBGFI
+  put(0, opts ? PickBits(opts->pdsch_to_harq_bits, 3) : 3);   // PDSCH-to-HARQ timing indicator
+  put(gt.antenna_ports, opts ? PickBits(opts->antenna_ports_bits, 4) : 4); // antenna ports
+  put(0, opts ? PickBits(opts->tci_bits, 0) : 0);             // TCI
+  put(0, opts ? PickBits(opts->srs_request_bits, 2) : 2);     // SRS request
+  put(0, opts ? PickBits(opts->cbg_bits, 0) : 0);             // CBGTI + CBGFI
   put(gt.dmrs_seq_init, 1);           // DMRS sequence initialization
   return p;
+}
+
+/// An all-defaults opts, i.e. every width left at the module's built-in assumption. Tests that only
+/// want to exercise the TDRA/DM-RS overrides start from this so the PAYLOAD LAYOUT stays the
+/// legacy one and only the thing under test changes.
+nr_pdcch_blind_extract_opts_t DefaultOpts()
+{
+  nr_pdcch_blind_extract_opts_t o = {};
+  o.dmrs_add_pos        = -1;
+  o.dmrs_max_length     = 0;
+  o.bwp_indicator_bits  = -1;
+  o.vrb_to_prb_bits     = -1;
+  o.prb_bundling_bits   = -1;
+  o.rate_matching_bits  = -1;
+  o.zp_csirs_bits       = -1;
+  o.tb2_bits            = -1;
+  o.harq_pid_bits       = -1;
+  o.dai_bits            = -1;
+  o.pdsch_to_harq_bits  = -1;
+  o.antenna_ports_bits  = -1;
+  o.tci_bits            = -1;
+  o.srs_request_bits    = -1;
+  o.cbg_bits            = -1;
+  return o;
 }
 
 /// Encode a payload for `rnti`, BPSK-modulate, add AWGN at `snr_db`, return int16 LLRs sized to
@@ -240,6 +286,31 @@ TEST(DciSize, MatchesHandDerivedValues) {
 
 TEST(DciSize, ZeroBwpIsInvalid) {
   EXPECT_EQ(nr_pdcch_blind_dci_size(0), 0);
+}
+
+// The decomposition of the long-standing "dci_length_override is 3 bits below the formula" gap,
+// pinned as a test because it is the whole reason the per-field widths exist. This project's gNB:
+// no additional DL BWP (bwp_indicator 1->0) and a 3-entry pdsch-TimeDomainAllocationList
+// (time-domain assignment 4->2). Both totals below are LIVE-VERIFIED payload lengths, so a change
+// that breaks either one is a real regression, not a cosmetic disagreement.
+TEST(DciSize, DeploymentFieldWidthsReproduceTheLiveVerifiedLengths) {
+  nr_pdcch_blind_extract_opts_t opts = DefaultOpts();
+  opts.tda_count      = 3; // -> ceil(log2(3)) = 2 bits
+  opts.tda_start[0]   = 1; opts.tda_length[0] = 13;
+  opts.tda_start[1]   = 1; opts.tda_length[1] = 12;
+  opts.tda_start[2]   = 1; opts.tda_length[2] = 5;
+  opts.dmrs_add_pos   = 1;
+  opts.dmrs_max_length = 1;
+  opts.bwp_indicator_bits = 0;
+
+  EXPECT_EQ(nr_pdcch_blind_dci_size_ex(106, &opts), 45); // live-verified 2026-07-28
+  EXPECT_EQ(nr_pdcch_blind_dci_size_ex(273, &opts), 48); // live-verified 2026-07-28 off the gNB log
+
+  // With no overrides it must reproduce the plain formula exactly -- the "opt-in changes nothing"
+  // guarantee, at the size level.
+  EXPECT_EQ(nr_pdcch_blind_dci_size_ex(106, nullptr), nr_pdcch_blind_dci_size(106));
+  EXPECT_EQ(nr_pdcch_blind_dci_size_ex(273, nullptr), nr_pdcch_blind_dci_size(273));
+  EXPECT_EQ(nr_pdcch_blind_dci_size_ex(51, nullptr), nr_pdcch_blind_dci_size(51));
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -346,6 +417,167 @@ TEST_F(BlindPdcchTest, ExtractsAllFieldsCorrectly) {
   EXPECT_EQ(out.n_dmrs_cdm_groups, 2);
   EXPECT_EQ(out.dmrs_ports, 0x7u); // ports 0,1,2 active -> bits 0,1,2 set = 0b0111
   EXPECT_EQ(out.nscid, gt.dmrs_seq_init);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Group 3b: transport-block fields + deployment overrides (2026-07-30). These exist ONLY because
+// the passive data-aided decode needs them; nothing before this session read past the allocation.
+// ---------------------------------------------------------------------------------------------
+TEST_F(BlindPdcchTest, ExtractsTransportBlockFields) {
+  const uint16_t bwp_size   = 106;
+  const int      riv_bits   = RivBitsFor(bwp_size);
+  const uint16_t dci_length = nr_pdcch_blind_dci_size(bwp_size);
+
+  GroundTruth gt;
+  gt.rnti                   = 0x4711;
+  gt.bwp_size                = bwp_size;
+  gt.riv                     = (uint32_t)PRBalloc_to_locationandbandwidth0(24, 8, bwp_size);
+  gt.time_domain_assignment  = 1;
+  gt.antenna_ports            = 0;
+  gt.dmrs_seq_init            = 0;
+  // Deliberately all-distinct and non-zero: MCS/NDI/RV/HARQ-pid are ADJACENT fields, so a
+  // one-bit-off read_field() offset would swap or shift them, and a test using zeros everywhere
+  // could not see that.
+  gt.mcs                      = 19;
+  gt.ndi                      = 1;
+  gt.rv                       = 2;
+  gt.harq_pid                 = 11;
+
+  const uint64_t packed = PackPayload(gt, riv_bits);
+  auto llr = EncodeToLLR(packed, gt.rnti, dci_length, kAggregationLevel, /*snr_db=*/40.0, rng_);
+
+  nr_pdcch_blind_result_t out;
+  const bool ok = nr_pdcch_blind_decode_and_extract(llr.data(), kAggregationLevel, dci_length, bwp_size,
+                                                     kDmrsTypeAPositionPos2, NR_PDCCH_BLIND_RNTI_MIN_DEFAULT,
+                                                     NR_PDCCH_BLIND_RNTI_MAX_DEFAULT, &out);
+  ASSERT_TRUE(ok) << (out.reject_reason ? out.reject_reason : "?");
+  EXPECT_EQ(out.mcs, gt.mcs);
+  EXPECT_EQ(out.ndi, gt.ndi);
+  EXPECT_EQ(out.rv, gt.rv);
+  EXPECT_EQ(out.harq_pid, gt.harq_pid);
+  EXPECT_EQ(out.tda_index, gt.time_domain_assignment);
+  EXPECT_EQ(out.mapping_type, 0); // default TDRA index 1 is mapping type A
+}
+
+TEST_F(BlindPdcchTest, TdaOverrideReplacesTheDefaultTable) {
+  const uint16_t bwp_size   = 106;
+  const int      riv_bits   = RivBitsFor(bwp_size);
+  const uint16_t dci_length = nr_pdcch_blind_dci_size(bwp_size);
+
+  GroundTruth gt;
+  gt.rnti                   = 0x51A0;
+  gt.bwp_size                = bwp_size;
+  gt.riv                     = (uint32_t)PRBalloc_to_locationandbandwidth0(20, 10, bwp_size);
+  gt.time_domain_assignment  = 0;
+  gt.antenna_ports            = 0;
+
+  const uint64_t packed = PackPayload(gt, riv_bits);
+  auto llr = EncodeToLLR(packed, gt.rnti, dci_length, kAggregationLevel, /*snr_db=*/40.0, rng_);
+
+  // Baseline: the spec default table's index 0 is S=2, L=12.
+  nr_pdcch_blind_result_t def;
+  ASSERT_TRUE(nr_pdcch_blind_decode_and_extract(llr.data(), kAggregationLevel, dci_length, bwp_size,
+                                                kDmrsTypeAPositionPos2, NR_PDCCH_BLIND_RNTI_MIN_DEFAULT,
+                                                NR_PDCCH_BLIND_RNTI_MAX_DEFAULT, &def));
+  EXPECT_EQ(def.start_symbol, 2);
+  EXPECT_EQ(def.num_symbols, 12);
+
+  // This project's gNB installs its own list instead (nr_rrc_config_dl_tda(): index 0 =
+  // S=len_coreset, L=14-len_coreset, i.e. S=1/L=13 for a 1-symbol CORESET). The whole reason the
+  // override exists is that this difference is INVISIBLE to a DM-RS-only tap -- the front-loaded
+  // DM-RS symbol is at l0=2 either way -- and fatal to a decode.
+  nr_pdcch_blind_extract_opts_t opts = DefaultOpts();
+  opts.tda_count      = 3;
+  opts.tda_start[0]   = 1;  opts.tda_length[0] = 13;
+  opts.tda_start[1]   = 1;  opts.tda_length[1] = 12;
+  opts.tda_start[2]   = 1;  opts.tda_length[2] = 5;
+
+  // A 3-entry TDRA list narrows the time-domain-assignment field to 2 bits, so the payload has a
+  // DIFFERENT layout and must be re-packed -- re-using the 4-bit-TDA `llr` above would be testing a
+  // deliberately mismatched pair.
+  const uint16_t ovr_len = nr_pdcch_blind_dci_size_ex(bwp_size, &opts);
+  ASSERT_EQ(ovr_len, dci_length - 2) << "a 3-entry TDRA list should narrow the payload by exactly 2 bits";
+  auto llr_ovr = EncodeToLLR(PackPayload(gt, riv_bits, &opts), gt.rnti, ovr_len, kAggregationLevel, 40.0, rng_);
+  nr_pdcch_blind_result_t ovr;
+  ASSERT_TRUE(nr_pdcch_blind_decode_and_extract_ex(llr_ovr.data(), kAggregationLevel, ovr_len, bwp_size,
+                                                   kDmrsTypeAPositionPos2, NR_PDCCH_BLIND_RNTI_MIN_DEFAULT,
+                                                   NR_PDCCH_BLIND_RNTI_MAX_DEFAULT, &opts, &ovr));
+  EXPECT_EQ(ovr.start_symbol, 1);
+  EXPECT_EQ(ovr.num_symbols, 13);
+  // Front-loaded DM-RS lands on symbol 2 in BOTH cases -- asserted so the "why this was invisible"
+  // claim above is a checked fact, not a comment.
+  EXPECT_TRUE(def.dl_dmrs_symb_pos & (1u << 2));
+  EXPECT_TRUE(ovr.dl_dmrs_symb_pos & (1u << 2));
+
+  // An index past the configured list must be rejected rather than silently read out of bounds.
+  // Index 3 IS representable in the 2 bits a 3-entry list gets, but has no entry -- so a garbage or
+  // mis-decoded candidate can land there and must be rejected, not read out of bounds.
+  GroundTruth gt2 = gt;
+  gt2.time_domain_assignment = 3;
+  const uint16_t ovr_len2 = nr_pdcch_blind_dci_size_ex(bwp_size, &opts);
+  auto llr2 = EncodeToLLR(PackPayload(gt2, riv_bits, &opts), gt2.rnti, ovr_len2, kAggregationLevel, 40.0, rng_);
+  nr_pdcch_blind_result_t oob;
+  EXPECT_FALSE(nr_pdcch_blind_decode_and_extract_ex(llr2.data(), kAggregationLevel, ovr_len2, bwp_size,
+                                                    kDmrsTypeAPositionPos2, NR_PDCCH_BLIND_RNTI_MIN_DEFAULT,
+                                                    NR_PDCCH_BLIND_RNTI_MAX_DEFAULT, &opts, &oob));
+  ASSERT_NE(oob.reject_reason, nullptr);
+  EXPECT_STREQ(oob.reject_reason, "time_domain_assignment index beyond the configured TDRA list");
+}
+
+TEST_F(BlindPdcchTest, DmrsAdditionalPositionChangesTheSymbolMask) {
+  const uint16_t bwp_size   = 106;
+  const int      riv_bits   = RivBitsFor(bwp_size);
+  const uint16_t dci_length = nr_pdcch_blind_dci_size(bwp_size);
+
+  GroundTruth gt;
+  gt.rnti                   = 0x6C2D;
+  gt.bwp_size                = bwp_size;
+  gt.riv                     = (uint32_t)PRBalloc_to_locationandbandwidth0(20, 10, bwp_size);
+  gt.time_domain_assignment  = 0;
+  gt.antenna_ports            = 0;
+
+  nr_pdcch_blind_extract_opts_t opts = DefaultOpts();
+  opts.tda_count      = 1;  // -> 0 TDA bits, so the payload is 4 bits shorter than the default layout
+  opts.tda_start[0]   = 1;
+  opts.tda_length[0]  = 13; // ld = 14: table row where pos1 and pos2 genuinely differ
+  opts.dmrs_max_length = 1;
+  const uint16_t ovr_len = nr_pdcch_blind_dci_size_ex(bwp_size, &opts);
+  auto llr = EncodeToLLR(PackPayload(gt, riv_bits, &opts), gt.rnti, ovr_len, kAggregationLevel, 40.0, rng_);
+
+  // pos1 (this gNB's configured value, nr_radio_config.c:1743) vs the pos2 fallback
+  // fill_dmrs_mask() assumes with no dedicated pdsch_Config.
+  opts.dmrs_add_pos = 1;
+  nr_pdcch_blind_result_t p1;
+  ASSERT_TRUE(nr_pdcch_blind_decode_and_extract_ex(llr.data(), kAggregationLevel, ovr_len, bwp_size,
+                                                   kDmrsTypeAPositionPos2, NR_PDCCH_BLIND_RNTI_MIN_DEFAULT,
+                                                   NR_PDCCH_BLIND_RNTI_MAX_DEFAULT, &opts, &p1));
+  opts.dmrs_add_pos = 2;
+  nr_pdcch_blind_result_t p2;
+  ASSERT_TRUE(nr_pdcch_blind_decode_and_extract_ex(llr.data(), kAggregationLevel, ovr_len, bwp_size,
+                                                   kDmrsTypeAPositionPos2, NR_PDCCH_BLIND_RNTI_MIN_DEFAULT,
+                                                   NR_PDCCH_BLIND_RNTI_MAX_DEFAULT, &opts, &p2));
+
+  // Same front-loaded symbol, different ADDITIONAL symbols -- exactly the failure mode that makes a
+  // decode fail while leaving a DM-RS-only CFR tap looking perfectly healthy.
+  EXPECT_TRUE(p1.dl_dmrs_symb_pos & (1u << 2));
+  EXPECT_TRUE(p2.dl_dmrs_symb_pos & (1u << 2));
+  EXPECT_NE(p1.dl_dmrs_symb_pos, p2.dl_dmrs_symb_pos);
+  // And pos2 must place strictly more DM-RS symbols than pos1 (2 additional vs 1).
+  EXPECT_GT(__builtin_popcount((unsigned)p2.dl_dmrs_symb_pos), __builtin_popcount((unsigned)p1.dl_dmrs_symb_pos));
+
+  // NULL opts must stay bit-identical to the plain entry point -- the "opt-in changes nothing until
+  // configured" guarantee the whole override rests on. Uses the DEFAULT-layout payload.
+  auto llr_def = EncodeToLLR(PackPayload(gt, riv_bits), gt.rnti, dci_length, kAggregationLevel, 40.0, rng_);
+  nr_pdcch_blind_result_t plain, null_opts;
+  ASSERT_TRUE(nr_pdcch_blind_decode_and_extract(llr_def.data(), kAggregationLevel, dci_length, bwp_size,
+                                                kDmrsTypeAPositionPos2, NR_PDCCH_BLIND_RNTI_MIN_DEFAULT,
+                                                NR_PDCCH_BLIND_RNTI_MAX_DEFAULT, &plain));
+  ASSERT_TRUE(nr_pdcch_blind_decode_and_extract_ex(llr_def.data(), kAggregationLevel, dci_length, bwp_size,
+                                                   kDmrsTypeAPositionPos2, NR_PDCCH_BLIND_RNTI_MIN_DEFAULT,
+                                                   NR_PDCCH_BLIND_RNTI_MAX_DEFAULT, nullptr, &null_opts));
+  EXPECT_EQ(plain.start_symbol, null_opts.start_symbol);
+  EXPECT_EQ(plain.num_symbols, null_opts.num_symbols);
+  EXPECT_EQ(plain.dl_dmrs_symb_pos, null_opts.dl_dmrs_symb_pos);
 }
 
 TEST_F(BlindPdcchTest, RejectsValidCrcWithOutOfBoundAntennaPorts) {

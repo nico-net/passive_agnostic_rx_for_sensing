@@ -11,6 +11,13 @@ Time alignment uses the `utc_ns=` field on sensing_channel.c's SENSING_CHANNEL g
 report's own cpi_start_time_utc_ns -- both are CLOCK_REALTIME on the same host, so they are directly
 comparable. (The older `t=` field is sample-clock derived and drifts; do not pair on it.)
 
+Ground truth is INTERPOLATED in utc_ns, not matched to a nearest neighbour within a fixed window.
+That matters more than it sounds: sensing_channel.c logs gt once per SIMULATED second, and simulated
+time advances at only ~3-7% of real time on this harness, so consecutive gt lines are ~15-30 s apart
+in WALL clock. An earlier version of this script rejected any CPI without a gt line within 2 s and
+therefore discarded almost every CPI, reporting 0% detection while detections were in fact sitting
+right on the targets. Only CPIs genuinely outside the gt time span are skipped now.
+
 Usage: check_detection.py <reports.jsonl> <ue.log> [range_tol_m] [vel_tol_mps]
 """
 import sys, re, json
@@ -57,28 +64,56 @@ for o, rows in sorted(gt.items()):
     az = [r[3] for r in rows]
     hits = 0
     azerr = []
+    scored = 0
+    azv = np.array([a if a is not None else np.nan for a in az], dtype=float)
     for rep in reports:
         tc = rep["cpi_start_time_utc_ns"] + rep.get("cpi_duration_ns", 0) // 2
-        j = int(np.argmin(np.abs(t - tc)))
-        if abs(int(t[j]) - tc) > 2e9:      # no GT within 2 s -> can't score this CPI
+        if tc < t[0] - 2e9 or tc > t[-1] + 2e9:   # outside the gt span entirely
             continue
+        scored += 1
+        dR_t = float(np.interp(tc, t, dR))
+        rate_t = float(np.interp(tc, t, rate))
+        az_t = float(np.interp(tc, t, azv))
+        # Credit the NEAREST detection in the (range, velocity) window, not the first one found.
+        # With tens of detections per CPI and clutter sitting near a target's range, "first inside
+        # the box" frequently picks a clutter peak and then reports ITS bearing -- which is what
+        # produced an apparent 22.8 deg median bearing error for the target nearest the LOS skirt
+        # while the further target scored 0.19 deg. Normalise each axis by its own tolerance so the
+        # two are comparable before combining.
+        best, best_c = None, None
         for d in rep["detections"]:
-            if (abs(d["bistatic_range_m"] - dR[j]) <= RTOL
-                    and abs(abs(d["bistatic_velocity_mps"]) - abs(rate[j])) <= VTOL):
-                hits += 1
-                if "azimuth_deg" in d and az[j] is not None:
-                    e = (d["azimuth_deg"] - az[j] + 180) % 360 - 180
-                    azerr.append(abs(e))
-                break
+            dr = abs(d["bistatic_range_m"] - dR_t)
+            dv = abs(abs(d["bistatic_velocity_mps"]) - abs(rate_t))
+            if dr <= RTOL and dv <= VTOL:
+                c = (dr / RTOL) ** 2 + (dv / VTOL) ** 2
+                if best_c is None or c < best_c:
+                    best, best_c = d, c
+        if best is not None:
+            hits += 1
+            if "azimuth_deg" in best and not np.isnan(az_t):
+                e = (best["azimuth_deg"] - az_t + 180) % 360 - 180
+                azerr.append(abs(e))
     overall_hit += hits
-    line = (f"  obj{o}: detected in {hits}/{len(reports)} CPIs ({100*hits/len(reports):.0f}%)   "
+    line = (f"  obj{o}: detected in {hits}/{scored} scorable CPIs ({100*hits/max(scored,1):.0f}%)   "
             f"dR {dR.min():.0f}..{dR.max():.0f} m, |rate| {np.abs(rate).min():.1f}..{np.abs(rate).max():.1f} m/s")
     if azerr:
         line += f"   bearing |err| median {np.median(azerr):.2f} deg, p90 {np.percentile(azerr,90):.2f}"
     print(line)
 
-cov = sum(1 for rep in reports
-          if any(any(abs(d["bistatic_range_m"] - gt[o][int(np.argmin(np.abs(np.array([g[0] for g in gt[o]])
-                 - (rep["cpi_start_time_utc_ns"]))))][1]) <= RTOL for d in rep["detections"]) for o in gt))
+def _hit(rep):
+    tc = rep["cpi_start_time_utc_ns"] + rep.get("cpi_duration_ns", 0) // 2
+    for o, rows in gt.items():
+        t = np.array([g[0] for g in rows]); dRv = np.array([g[1] for g in rows])
+        rv = np.array([g[2] for g in rows])
+        if tc < t[0] - 2e9 or tc > t[-1] + 2e9:
+            continue
+        dR_t = float(np.interp(tc, t, dRv)); rate_t = float(np.interp(tc, t, rv))
+        for d in rep["detections"]:
+            if (abs(d["bistatic_range_m"] - dR_t) <= RTOL
+                    and abs(abs(d["bistatic_velocity_mps"]) - abs(rate_t)) <= VTOL):
+                return True
+    return False
+
+cov = sum(1 for rep in reports if _hit(rep))
 print(f"\nCPIs with at least one true-target detection: {cov}/{len(reports)} ({100*cov/len(reports):.0f}%)")
 print("VERDICT:", "USABLE" if cov >= 0.5 * len(reports) else "*** TOO FEW DETECTIONS -- fix the scene/geometry first ***")

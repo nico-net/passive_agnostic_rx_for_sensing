@@ -270,7 +270,18 @@ void threadCreate(pthread_t* t, void * (*func)(void*), void * param, char* name,
   strncpy(short_name, name, sizeof(short_name) - 1);
   short_name[sizeof(short_name) - 1] = '\0';
   ret = pthread_setname_np(*t, short_name);
-  AssertFatal(ret == 0, "Error in pthread_setname_np(): ret: %d, errno: %d\n", ret, errno);
+  // Naming is best-effort. glibc implements pthread_setname_np() by writing
+  // /proc/self/task/<tid>/comm, so a thread that has ALREADY EXITED by the time we get here yields
+  // ENOENT (or ESRCH) -- a benign startup race, not a failure of thread creation, which
+  // pthread_create() above already checked. Asserting on it turned that race into a hard abort:
+  // measured 2026-07-29, running any softmodem under `taskset -c` (a constrained CPU set makes the
+  // race far more likely) reliably aborted a UE during startup. Warn and continue; any other error
+  // is still fatal.
+  if (ret != 0 && ret != ENOENT && ret != ESRCH) {
+    AssertFatal(ret == 0, "Error in pthread_setname_np(): ret: %d, errno: %d\n", ret, errno);
+  } else if (ret != 0) {
+    LOG_W(UTIL, "pthread_setname_np(%s) returned %d (thread already gone); continuing\n", short_name, ret);
+  }
 
   if (affinity != -1 ) {
     cpu_set_t cpuset;

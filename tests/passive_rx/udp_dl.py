@@ -81,7 +81,24 @@ def recv(a):
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1 << 22)
-    s.bind((a.bind, a.port))
+    # Retry the bind: the receiver is started right after the UE reports its IP, but the address is
+    # not necessarily configured on oaitun_ue1 yet, and bind() then fails with EADDRNOTAVAIL. That
+    # happened silently on every run until 2026-07-29 (udp_server_*.log held a bare traceback that
+    # nothing checked), so the UDP receivers were simply never up. Retry, then fall back to
+    # INADDR_ANY rather than dying -- a receiver on 0.0.0.0 still absorbs the traffic, which is all
+    # this needs to do.
+    deadline = time.monotonic() + 60.0
+    while True:
+        try:
+            s.bind((a.bind, a.port))
+            break
+        except OSError as e:
+            if time.monotonic() >= deadline:
+                print(f"udp_dl recv: could not bind {a.bind}:{a.port} ({e}); falling back to 0.0.0.0",
+                      flush=True)
+                s.bind(("0.0.0.0", a.port))
+                break
+            time.sleep(0.5)
     s.settimeout(1.0)
     end = time.monotonic() + a.dur
     n = 0

@@ -185,6 +185,7 @@ extern "C" void nr_isac_init(void)
   double p_gating_min_rel = 0.35, p_gating_snr_margin = 3.0;
   double p_cfar_pfa = 0.0, p_cfar_target_fa = 1.0;
   int    p_zdg = 3, p_zrg = 2, p_nms_r = 3, p_nms_d = 3, p_maxdet = 32, p_dealias_taper = 4;
+  double p_max_range_m = 0.0;
   int    p_conj_reject = 1, p_conj_guard = 4, p_range_whiten = 0, p_doppler_nudft = 0;
   int    p_mc_enable = 0, p_mc_rank = 0, p_mc_rank_max = 8, p_mc_iters = 15, p_mc_power = 1;
   int    p_sd_enable = 0, p_sd_iters = 40;
@@ -276,6 +277,11 @@ extern "C" void nr_isac_init(void)
       mk_int("dealias_taper_bins", "raised-cosine de-alias taper width (bins) before a comb row's periodic-image cutoff; widen if a strong direct path's sidelobe skirt leaks past the default", 0, &p_dealias_taper, 4),
       mk_int("nms_range_bins", "NMS radius in range bins", 0, &p_nms_r, 3),
       mk_int("nms_doppler_bins", "NMS radius in Doppler bins", 0, &p_nms_d, 3),
+      mk_dbl("max_range_m",
+             "hard upper bound on detectable differential range (m); 0 = whole axis. Set from "
+             "physics (the CIR span in sim, the instrumented range OTA) -- past it every cell is an "
+             "artifact and, unfiltered, they consume the entire max_detections budget",
+             &p_max_range_m, 0.0),
       mk_int("max_detections", "cap on detections per CPI", 0, &p_maxdet, 32),
       mk_int("conj_image_reject", "reject conjugate-image (mirror ghost) detections", PARAMFLAG_BOOL, &p_conj_reject, 1),
       mk_int("conj_image_guard", "range-bin tolerance when matching a detection to its mirror", 0, &p_conj_guard, 4),
@@ -460,6 +466,7 @@ extern "C" void nr_isac_init(void)
   g_args.cfar_target_fa_per_cpi = (float)p_cfar_target_fa;
   g_args.zero_doppler_guard = (uint32_t)p_zdg;
   g_args.zero_range_guard   = (uint32_t)p_zrg;
+  g_args.max_range_m        = (float)p_max_range_m;
   g_args.dealias_taper_bins = (uint32_t)p_dealias_taper;
   g_args.nms_range_bins     = (uint32_t)p_nms_r;
   g_args.nms_doppler_bins   = (uint32_t)p_nms_d;

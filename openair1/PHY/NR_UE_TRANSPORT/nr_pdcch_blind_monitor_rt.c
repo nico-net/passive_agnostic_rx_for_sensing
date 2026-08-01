@@ -49,6 +49,8 @@
 #include "PHY/NR_UE_ESTIMATION/nr_estimation.h"          // nr_pdsch_channel_estimation
 #include "PHY/TOOLS/tools_defs.h"                        // allocCast2D/fourDimArray_t
 #include "PHY/NR_UE_ISAC/nr_isac.h"                      // nr_isac_submit_cfr/_enabled/_source_enabled
+#include "PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.h"  // passive PDSCH decode (data-aided source)
+#include "PHY/NR_UE_TRANSPORT/nr_pdsch_data_aided.h"      // shared re-encode + Ĥ=Y/X submit
 #include "nfapi/open-nFAPI/nfapi/public_inc/fapi_nr_ue_constants.h" // FAPI_NR_CCE_REG_MAPPING_TYPE_*
 
 #define NR_PDCCH_BLIND_RE_PER_RB_OUT_DMRS 9 // == dci_nr.c's file-local RE_PER_RB_OUT_DMRS #define
@@ -59,6 +61,10 @@
                                             // count -- see the plan's Stage-1 implementation note)
 #define NR_PDCCH_BLIND_MAX_ANT 8 // matches csi_rx.c's NR_ISAC_CSIRS_MAX_ANT -- same reasoning, a
                                  // generous cap on the AoA receive array size this tap will extract
+#define NR_PDCCH_BLIND_DATA_AIDED_TAG_BASE 3000 // nrLDPC_coding_interface harq_unique_pid namespace
+                                                // for the passive data-aided RE-ENCODE; distinct from
+                                                // the attached tap's 1000+pid and from
+                                                // nr_pdsch_passive_decode.c's 2000+pid DECODE tag
 
 static void build_coreset_bitmap(int num_groups, uint8_t bitmap[6])
 {
@@ -87,8 +93,59 @@ static uint64_t g_cfr_submits    = 0; // final count that actually reached the I
 // ---- Noise-floor gate counters (2026-07-28) -- how many raw accepts each gate held back, so the
 // periodic summary shows where candidates are actually being lost, not just the final count. ----
 static uint64_t g_held_energy   = 0; // skipped decode entirely, raw LLR energy below energy_min
+
+// ---- Adaptive energy floor (cfg->energy_adapt_factor) ------------------------------------------
+// Tracks the NOISE-FLOOR candidate energy so the gate threshold can be expressed as a dimensionless
+// multiple of it rather than an absolute level. Motivation: the absolute `energy_min` is in
+// receiver-dependent pdcch_e_rx units, so a value tuned at one bandwidth/gain does not transfer --
+// it could not even be carried from the 106 PRB cell to 273 PRB, never mind to real OTA gain
+// settings, which is exactly why it ended up disabled (0) rather than retuned per deployment.
+//
+// Why the MEDIAN and not the mean: at this scan's trial volume the candidate population is
+// overwhelmingly unscheduled CCEs (8 candidates/slot, of which at most a couple are real grants),
+// so the median IS the noise floor. Real grants are large outliers and would drag a mean upward,
+// raising the threshold and progressively suppressing the very signals the gate is meant to keep --
+// a feedback loop that gets worse the better the cell is loaded.
+//
+// The median is tracked with a "frugal" streaming update (step toward the sample by a fraction of
+// the current estimate) rather than a histogram or reservoir: O(1) time, O(1) state, no allocation
+// and no unbounded growth, which is what the RT path requires. The step is RELATIVE to the current
+// estimate so convergence speed is scale-free -- it adapts equally fast whether the floor is 0.5 or
+// 5000 units. ENERGY_FLOOR_STEP is a rate, not a magnitude: it sets how fast the estimate follows a
+// changing environment, and is the only tuned number left, deliberately loose (anything in
+// ~0.001-0.05 behaves the same on a stationary floor).
+#define ENERGY_FLOOR_STEP        0.01f  // fractional step per candidate toward the running median
+#define ENERGY_FLOOR_MIN         1e-6f  // keep strictly positive: the threshold is multiplicative
+#define ENERGY_FLOOR_WARMUP      200    // candidates observed before the gate is allowed to reject
+static float    g_energy_floor  = 0.0f;
+static uint64_t g_energy_nseen  = 0;
+
+static void energy_floor_update(float x)
+{
+  g_energy_nseen++;
+  if (g_energy_floor <= 0.0f) {
+    // Seed on the first sample rather than from 0, so the relative step has something to scale.
+    g_energy_floor = (x > ENERGY_FLOOR_MIN) ? x : ENERGY_FLOOR_MIN;
+    return;
+  }
+  const float step = g_energy_floor * ENERGY_FLOOR_STEP;
+  g_energy_floor += (x > g_energy_floor) ? step : -step;
+  if (g_energy_floor < ENERGY_FLOOR_MIN) {
+    g_energy_floor = ENERGY_FLOOR_MIN;
+  }
+}
 static uint64_t g_held_persist  = 0; // decoded+accepted but RNTI not yet seen rnti_persist_k times
 static uint64_t g_held_snr      = 0; // decoded+accepted+persisted but post-estimation SNR too low
+
+// ---- Passive PDSCH decode counters (2026-07-30). g_dec_ok/g_dec_try IS the go/no-go measurement
+// PASSIVE_PDSCH_DATA_AIDED_HANDOVER.md §B.5 asks for: a passive receiver sits somewhere the grant
+// was not aimed at, so whether overheard transport blocks pass CRC at all is an open empirical
+// question, and everything downstream of it is worthless if the answer is "almost never". ----
+static uint64_t g_dec_try   = 0; // decodes actually attempted (i.e. reached the LDPC decoder)
+static uint64_t g_dec_ok    = 0; // ... of which the transport-block CRC passed
+static uint64_t g_dec_skip_rv = 0; // skipped: rv != 0 and rv0_only set (not self-decodable, see cfg)
+static uint64_t g_dec_unsup = 0; // skipped: grant outside the decode/reconstruction scope
+static uint64_t g_data_submits = 0; // reconstructed CFRs submitted as NR_ISAC_SRC_PDSCH_DATA
 
 // ---- RNTI persistence tracking (2026-07-28): a real UE's RNTI recurs across many grants; a noise
 // accept is a one-off. Small ring buffer of recent (rnti, abs_slot) sightings -- linear scan is fine
@@ -128,11 +185,21 @@ static bool rnti_persistence_check(uint16_t rnti, uint32_t abs_slot, uint32_t wi
 
 void nr_pdcch_blind_monitor_process(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc)
 {
-  if (!nr_pdcch_blind_monitor_enabled() || !nr_isac_enabled()
-      || !nr_isac_source_enabled(NR_ISAC_SRC_PDSCH_DMRS_BLIND)) {
+  if (!nr_pdcch_blind_monitor_enabled() || !nr_isac_enabled()) {
     return;
   }
   const nr_pdcch_blind_monitor_cfg_t *cfg = nr_pdcch_blind_monitor_get_cfg();
+
+  // What this occasion is for. The tap used to run only for the DM-RS source; the passive
+  // data-aided path (pdsch_decode) is a second, independent reason to scan the same candidates, and
+  // `pdsch_decode == 1` (measure the CRC pass rate, submit nothing) must work with NO sensing source
+  // enabled at all -- that is the whole point of having a measure-only level.
+  const bool want_dmrs = nr_isac_source_enabled(NR_ISAC_SRC_PDSCH_DMRS_BLIND);
+  const bool want_data = cfg->pdsch_decode >= 2 && nr_isac_source_enabled(NR_ISAC_SRC_PDSCH_DATA);
+  const bool want_decode = cfg->pdsch_decode >= 1; // >=1 always decodes; only >=2 submits
+  if (!want_dmrs && !want_decode) {
+    return;
+  }
 
   NR_DL_FRAME_PARMS *fp = &ue->frame_parms;
   const uint32_t abs_slot = (uint32_t)proc->frame_rx * fp->slots_per_frame + (uint32_t)proc->nr_slot_rx;
@@ -231,6 +298,7 @@ void nr_pdcch_blind_monitor_process(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t 
           : 0;
 
   int e_rx_cand_idx = 0;
+  int decodes_this_occasion = 0; // capped by cfg->pdsch_max_per_slot -- see that field's comment
   for (int c = 0; c < rel15->number_of_candidates; c++) {
     const int L         = rel15->L[c];
     const int n_re_cand = NR_PDCCH_BLIND_RE_PER_RB_OUT_DMRS * L * 6;
@@ -238,13 +306,31 @@ void nr_pdcch_blind_monitor_process(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t 
     // ---- Gate 1 (cheapest, runs first): raw pre-decode LLR energy. Unscheduled CCEs measured
     // exactly (0,0) live 2026-07-28; skips the polar decode entirely for those, not just the CFR
     // submission -- a real CPU saving alongside the false-accept reduction. ----
-    if (cfg->energy_min > 0.0f) {
+    if (cfg->energy_adapt_factor > 0.0f || cfg->energy_min > 0.0f) {
       const c16_t *e_raw   = &pdcch_e_rx[e_rx_cand_idx];
       double        sum_abs = 0;
       for (int i = 0; i < n_re_cand; i++) {
         sum_abs += (e_raw[i].r < 0 ? -e_raw[i].r : e_raw[i].r) + (e_raw[i].i < 0 ? -e_raw[i].i : e_raw[i].i);
       }
-      if ((float)(sum_abs / n_re_cand) < cfg->energy_min) {
+      const float mean_abs = (float)(sum_abs / n_re_cand);
+
+      float thresh;
+      if (cfg->energy_adapt_factor > 0.0f) {
+        // Adaptive: threshold rides the measured noise floor. Update the floor estimate with EVERY
+        // candidate (including this one) BEFORE thresholding -- the estimator must see the whole
+        // population to stay calibrated, and feeding it only the survivors would let it collapse.
+        energy_floor_update(mean_abs);
+        // Until the estimate has converged, reject nothing: a not-yet-settled floor can sit far
+        // above the true one and would throw away real grants during exactly the startup window
+        // where the persistence gate is also still cold.
+        thresh = (g_energy_nseen >= ENERGY_FLOOR_WARMUP)
+                     ? cfg->energy_adapt_factor * g_energy_floor
+                     : 0.0f;
+      } else {
+        thresh = cfg->energy_min;
+      }
+
+      if (mean_abs < thresh) {
         e_rx_cand_idx += n_re_cand;
         g_held_energy++;
         continue;
@@ -258,9 +344,9 @@ void nr_pdcch_blind_monitor_process(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t 
     g_candidates_run++;
 
     nr_pdcch_blind_result_t out;
-    const bool ok = nr_pdcch_blind_decode_and_extract(tmp_e, (uint8_t)L, dci_length, (uint16_t)cfg->bwp_size,
-                                                       (uint8_t)cfg->dmrs_typeA_position, cfg->rnti_min,
-                                                       cfg->rnti_max, &out);
+    const bool ok = nr_pdcch_blind_decode_and_extract_ex(tmp_e, (uint8_t)L, dci_length, (uint16_t)cfg->bwp_size,
+                                                         (uint8_t)cfg->dmrs_typeA_position, cfg->rnti_min,
+                                                         cfg->rnti_max, &cfg->extract, &out);
     if (!ok) {
       g_last_reject_reason = out.reject_reason; // TEMPORARY diagnostic, see periodic summary below
       g_last_reject_rnti   = out.rnti;
@@ -322,6 +408,17 @@ void nr_pdcch_blind_monitor_process(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t 
     dlsch_pdu.number_symbols     = out.num_symbols;
     dlsch_pdu.dlDmrsSymbPos      = out.dl_dmrs_symb_pos;
     dlsch_pdu.dmrs_ports         = out.dmrs_ports;
+    // Only the passive PDSCH decode below reads these; harmless for the DM-RS-only path, which
+    // never looks past the allocation. dlDataScramblingId = PCI because this gNB leaves
+    // dataScramblingIdentityPDSCH unset (nr_radio_config.c:1745) -- re-verify per deployment, a
+    // wrong value descrambles to noise exactly like a wrong csirs_monitor scramb_id does.
+    dlsch_pdu.dlDataScramblingId = fp->Nid_cell;
+    dlsch_pdu.harq_process_nbr   = out.harq_pid;
+    dlsch_pdu.number_rbs         = out.num_rb;
+    dlsch_pdu.start_rb           = out.start_rb;
+    dlsch_pdu.mcs_table          = (uint8_t)cfg->pdsch_mcs_table;
+    dlsch_pdu.pduBitmap          = 0; // no PTRS: format 1_1 with no dedicated PTRS config
+    dlsch_pdu.numCsiRsForRateMatching = 0;
 
     const freq_alloc_bitmap_t freq_alloc = set_bitmap_from_start_size(out.start_rb, out.num_rb);
 
@@ -388,14 +485,60 @@ void nr_pdcch_blind_monitor_process(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t 
           !(cfg->min_snr_lin > 0.0f && nof_re > 0 && nvar > 0
             && (float)(h_pow_sum / nof_re) < cfg->min_snr_lin * (float)nvar);
       if (nof_re > 0 && snr_ok) {
-        nr_isac_carrier_t carrier = {.nof_prb         = (uint32_t)fp->N_RB_DL,
-                                     .scs_hz          = fp->subcarrier_spacing,
-                                     .dl_center_hz    = fp->dl_CarrierFreq,
-                                     .pci             = fp->Nid_cell,
-                                     .slots_per_frame = fp->slots_per_frame};
-        nr_isac_submit_cfr_multi(abs_slot, 0.0f, NR_ISAC_SRC_PDSCH_DMRS_BLIND, &carrier, isac_h, nof_ant,
-                                 273 * NR_NB_SC_PER_RB, isac_k, isac_l, nof_re, (float)nvar);
-        g_cfr_submits++;
+        if (want_dmrs) {
+          nr_isac_carrier_t carrier = {.nof_prb         = (uint32_t)fp->N_RB_DL,
+                                       .scs_hz          = fp->subcarrier_spacing,
+                                       .dl_center_hz    = fp->dl_CarrierFreq,
+                                       .pci             = fp->Nid_cell,
+                                       .slots_per_frame = fp->slots_per_frame};
+          nr_isac_submit_cfr_multi(abs_slot, 0.0f, NR_ISAC_SRC_PDSCH_DMRS_BLIND, &carrier, isac_h, nof_ant,
+                                   273 * NR_NB_SC_PER_RB, isac_k, isac_l, nof_re, (float)nvar);
+          g_cfr_submits++;
+        }
+
+        // ---- Passive data-aided PDSCH (PASSIVE_PDSCH_DATA_AIDED_HANDOVER.md Part B). Deliberately
+        // the LAST thing in the chain: an LDPC decode is an order of magnitude more expensive than
+        // everything above it, so it only ever runs for a candidate that already survived the raw
+        // energy, RNTI-persistence and post-estimation SNR gates. ----
+        if (want_decode && decodes_this_occasion < cfg->pdsch_max_per_slot) {
+          if (cfg->pdsch_rv0_only && out.rv != 0) {
+            // A retransmission carries only an incremental-redundancy slice of the codeword and is
+            // not self-decodable without the earlier round's soft bits -- which a receiver that
+            // never saw the first grant does not have. Counted, not attempted.
+            g_dec_skip_rv++;
+          } else {
+            decodes_this_occasion++;
+            const nr_pdsch_passive_grant_t grant = {.rnti      = out.rnti,
+                                                    .mcs       = out.mcs,
+                                                    .rv        = out.rv,
+                                                    .mcs_table = (uint8_t)cfg->pdsch_mcs_table,
+                                                    .nb_rb_oh  = (uint16_t)cfg->pdsch_xoverhead};
+            nr_pdsch_passive_decode_result_t dec;
+            // Reuses rxdataF_pdsch: nr_pdsch_passive_decode() FEPs the WHOLE allocation into it,
+            // a superset of the single DM-RS symbol already transformed above, so the buffer is
+            // simply refilled rather than duplicated (~900 kB at 273 PRB x 4 antennas).
+            const nr_pdsch_passive_decode_status_t st =
+                nr_pdsch_passive_decode(ue, proc, &dlsch_pdu, &freq_alloc, &grant, rxdataF_pdsch, &dec);
+            if (st == NR_PDSCH_PASSIVE_DECODE_UNSUPPORTED) {
+              g_dec_unsup++;
+            } else if (st != NR_PDSCH_PASSIVE_DECODE_ERROR) {
+              g_dec_try++;
+              if (st == NR_PDSCH_PASSIVE_DECODE_CRC_OK) {
+                g_dec_ok++;
+                LOG_D(PHY, "SENSING: passive PDSCH decode OK (%d.%d) rnti=0x%x mcs=%u rv=%u TBS=%u\n",
+                      proc->frame_rx, proc->nr_slot_rx, out.rnti, out.mcs, out.rv, dec.cw.TBS);
+                if (want_data) {
+                  // The reconstruction chain the attached UE uses, unchanged -- the ONLY difference
+                  // is where the verified transport block came from.
+                  nr_isac_pdsch_data_aided_submit(ue, proc, &dec.cw, &dlsch_pdu, &freq_alloc, out.rnti, dec.tb,
+                                                  NR_PDCCH_BLIND_DATA_AIDED_TAG_BASE + out.harq_pid, rxdataF_pdsch,
+                                                  (double)dec.nvar);
+                  g_data_submits++;
+                }
+              }
+            }
+          }
+        }
       } else if (nof_re > 0) {
         g_held_snr++;
       }
@@ -406,10 +549,17 @@ void nr_pdcch_blind_monitor_process(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t 
   if (g_occasions_run % NR_PDCCH_BLIND_SUMMARY_PERIOD_OCC == 0) {
     LOG_I(PHY,
          "SENSING: blind PDCCH monitor summary: occasions=%lu candidates=%lu accepts=%lu "
-         "held[energy=%lu persist=%lu snr=%lu] cfr_submits=%lu last_reject=\"%s\" last_reject_rnti=0x%x\n",
+         "held[energy=%lu persist=%lu snr=%lu] efloor=%.2f cfr_submits=%lu "
+         "pdsch_decode[try=%lu crc_ok=%lu (%.1f%%) skip_rv=%lu unsup=%lu data_submits=%lu] "
+         "last_reject=\"%s\" last_reject_rnti=0x%x\n",
          (unsigned long)g_occasions_run, (unsigned long)g_candidates_run, (unsigned long)g_accepts,
          (unsigned long)g_held_energy, (unsigned long)g_held_persist, (unsigned long)g_held_snr,
-         (unsigned long)g_cfr_submits, g_last_reject_reason ? g_last_reject_reason : "(none yet)",
+         g_energy_floor,
+         (unsigned long)g_cfr_submits,
+         (unsigned long)g_dec_try, (unsigned long)g_dec_ok,
+         g_dec_try ? (100.0 * (double)g_dec_ok / (double)g_dec_try) : 0.0,
+         (unsigned long)g_dec_skip_rv, (unsigned long)g_dec_unsup, (unsigned long)g_data_submits,
+         g_last_reject_reason ? g_last_reject_reason : "(none yet)",
          g_last_reject_rnti);
   }
 }

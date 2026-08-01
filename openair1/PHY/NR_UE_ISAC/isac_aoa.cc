@@ -636,8 +636,37 @@ void aoa_estimator::process(const icf_t*                            h_ant,
     if (dets[i].snr_db < args.aoa_min_snr_db) {
       continue; // too weak to trust a phase from: leave azimuth absent rather than emit noise
     }
-    out[i].azimuth_deg     = (float)(wrap_pi(theta) * 180.0 / M_PI);
-    out[i].azimuth_std_deg = (float)(bearing_sigma(theta, snr_lin) * 180.0 / M_PI);
+    out[i].azimuth_deg = (float)(wrap_pi(theta) * 180.0 / M_PI);
+    // The pure geometry+SNR CRB is OPTIMISTIC in a real scene and must not be reported as-is.
+    // MEASURED on the 2026-07-29 6h capture: reported sigma median 1.43 deg against an actual
+    // median |error| of 4.5-7 deg, i.e. over-confident by 3-5x. The CRB assumes the cell contains
+    // ONE scatterer in white noise; here a cell also carries comb-12 range sidelobes and
+    // direct-path leakage (only 273 of 3276 subcarriers are measured), so the phase across the
+    // array is not a clean single-source wavefront. This matters well beyond cosmetics: isac-core's
+    // birth gate divides the bearing residual by THIS sigma, so an over-confident value inflates
+    // chi2 and rejects good births, while also letting a genuinely bad bearing look authoritative.
+    //
+    // Rather than invent a fudge factor, take the WORSE of the CRB and an empirical sigma derived
+    // from how sharply the array actually resolves this cell: `resid` is the fraction of the
+    // snapshot's energy NOT explained by the best-fit steering vector, so it rises exactly when the
+    // cell holds more than one wavefront. A perfectly-fit cell keeps the CRB unchanged.
+    double sigma = bearing_sigma(theta, snr_lin);
+    {
+      icf_t  acc(0.0f, 0.0f);
+      double p_tot = 0.0;
+      for (uint32_t a = 0; a < m; a++) {
+        acc += zbest[a] * std::conj(steering(a, theta));
+        p_tot += (double)std::norm(zbest[a]);
+      }
+      const double p_fit = (double)std::norm(acc) / (double)m;
+      if (p_tot > 0.0) {
+        const double resid = std::max(0.0, 1.0 - p_fit / p_tot);      // 0 = single clean wavefront
+        // Effective SNR implied by the unexplained energy; combine so the limiting term wins.
+        const double snr_eff = (resid > 1e-6) ? (1.0 - resid) / resid : 1e9;
+        sigma = std::max(sigma, bearing_sigma(theta, snr_eff));
+      }
+    }
+    out[i].azimuth_std_deg = (float)(sigma * 180.0 / M_PI);
     out[i].snr_db          = dets[i].snr_db;
     out[i].mirror_ambiguous = mirror;
     out[i].valid           = true;

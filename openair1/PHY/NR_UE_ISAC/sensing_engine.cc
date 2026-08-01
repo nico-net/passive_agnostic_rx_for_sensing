@@ -759,19 +759,20 @@ void sensing_engine::process_cpi()
 
   if (top != nullptr) {
     LOG_I(PHY,
-          "SENSING: CPI #%u fc=%.1f MHz subc=%u T_slot=%.3f occ[csi=%lu dmrs=%lu data=%lu] range[res=%.2f max=%.0f]m "
+          "SENSING: CPI #%u fc=%.1f MHz subc=%u T_slot=%.3f occ[csi=%lu dmrs=%lu data=%lu blind=%lu] range[res=%.2f max=%.0f]m "
           "vel[res=%.3f max=%.1f]m/s detections=%zu top: range=%.1f m vel=%.2f m/s snr=%.1f dB\n",
           cpi_count, cpi_carrier.dl_center_hz / 1e6, nof_subc, cpi_period_slots,
           (unsigned long)src_occ[NR_ISAC_SRC_CSI_RS], (unsigned long)src_occ[NR_ISAC_SRC_PDSCH_DMRS],
-          (unsigned long)src_occ[NR_ISAC_SRC_PDSCH_DATA], rvm.range_res_m, rvm.range_max_m, rvm.vel_res_mps,
+          (unsigned long)src_occ[NR_ISAC_SRC_PDSCH_DATA],
+          (unsigned long)src_occ[NR_ISAC_SRC_PDSCH_DMRS_BLIND], rvm.range_res_m, rvm.range_max_m, rvm.vel_res_mps,
           rvm.vel_max_mps, detections.size(), top->range_m, top->vel_mps, top->snr_db);
   } else {
     LOG_I(PHY,
-          "SENSING: CPI #%u fc=%.1f MHz subc=%u occ[csi=%lu dmrs=%lu data=%lu] range_res=%.2f m vel_res=%.3f m/s "
+          "SENSING: CPI #%u fc=%.1f MHz subc=%u occ[csi=%lu dmrs=%lu data=%lu blind=%lu] range_res=%.2f m vel_res=%.3f m/s "
           "detections=0\n",
           cpi_count, cpi_carrier.dl_center_hz / 1e6, nof_subc, (unsigned long)src_occ[NR_ISAC_SRC_CSI_RS],
           (unsigned long)src_occ[NR_ISAC_SRC_PDSCH_DMRS], (unsigned long)src_occ[NR_ISAC_SRC_PDSCH_DATA],
-          rvm.range_res_m, rvm.vel_res_mps);
+          (unsigned long)src_occ[NR_ISAC_SRC_PDSCH_DMRS_BLIND], rvm.range_res_m, rvm.vel_res_mps);
   }
 
   write_outputs();

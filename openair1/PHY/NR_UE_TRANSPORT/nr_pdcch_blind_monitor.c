@@ -135,9 +135,72 @@ static int parse_rnti_range(const char* s)
 // carry this on its own.
 static int parse_noise_gates(const char* s)
 {
-  return sscanf(s, "%f:%d:%d:%f", &g_cfg.energy_min, &g_cfg.rnti_persist_k, &g_cfg.rnti_persist_window_ms,
-               &g_cfg.min_snr_lin)
-         == 4;
+  // 5th field (energy_adapt_factor) is OPTIONAL so existing 4-field configs keep working unchanged.
+  // When present and > 0 it selects the adaptive energy gate and overrides energy_min -- see
+  // nr_pdcch_blind_monitor_rt.h for why an absolute energy threshold is not portable.
+  g_cfg.energy_adapt_factor = 0.0f;
+  const int n = sscanf(s, "%f:%d:%d:%f:%f", &g_cfg.energy_min, &g_cfg.rnti_persist_k,
+                       &g_cfg.rnti_persist_window_ms, &g_cfg.min_snr_lin, &g_cfg.energy_adapt_factor);
+  return n == 4 || n == 5;
+}
+
+// "S:L[:map],S:L[:map],..." -- the deployment's real pdsch-TimeDomainAllocationList, indexed by the
+// DCI's time-domain-assignment field. map: 0 = typeA (default), 1 = typeB.
+static int parse_tda(const char* s)
+{
+  int n = 0;
+  const char* p = s;
+  while (*p != '\0' && n < 16) {
+    int start = 0, len = 0, map = 0;
+    const int got = sscanf(p, "%d:%d:%d", &start, &len, &map);
+    if (got < 2) {
+      return 0;
+    }
+    if (start < 0 || start > 13 || len < 1 || start + len > 14 || map < 0 || map > 1) {
+      return 0;
+    }
+    g_cfg.extract.tda_start[n]   = (uint8_t)start;
+    g_cfg.extract.tda_length[n]  = (uint8_t)len;
+    g_cfg.extract.tda_mapping[n] = (uint8_t)map;
+    n++;
+    const char* comma = strchr(p, ',');
+    if (comma == NULL) {
+      break;
+    }
+    p = comma + 1;
+  }
+  g_cfg.extract.tda_count = n;
+  return n > 0;
+}
+
+// "add_pos:max_length" -- dmrs-AdditionalPosition as fill_dmrs_mask()'s column index (0=pos0,
+// 1=pos1, 2=pos2, 3=pos3) and DM-RS maxLength (1 or 2).
+static int parse_dmrs(const char* s)
+{
+  return sscanf(s, "%d:%d", &g_cfg.extract.dmrs_add_pos, &g_cfg.extract.dmrs_max_length) == 2;
+}
+
+// Per-field DCI-1_1 bit widths, in TS 38.212 payload order (nr_dci_size()'s own accumulation
+// order). -1 in any position keeps this module's built-in assumption for that field. See
+// nr_pdcch_blind_extract_opts_t for why getting the TOTAL right via dci_length_override is not
+// sufficient.
+static int parse_dci_bits(const char* s)
+{
+  nr_pdcch_blind_extract_opts_t* o = &g_cfg.extract;
+  return sscanf(s, "%d:%d:%d:%d:%d:%d:%d:%d:%d:%d:%d:%d:%d", &o->bwp_indicator_bits, &o->vrb_to_prb_bits,
+                &o->prb_bundling_bits, &o->rate_matching_bits, &o->zp_csirs_bits, &o->tb2_bits,
+                &o->harq_pid_bits, &o->dai_bits, &o->pdsch_to_harq_bits, &o->antenna_ports_bits,
+                &o->tci_bits, &o->srs_request_bits, &o->cbg_bits)
+         == 13;
+}
+
+// "decode:mcs_table:xoverhead:rv0_only:max_per_slot" -- see the field comments in
+// nr_pdcch_blind_monitor_rt.h.
+static int parse_pdsch(const char* s)
+{
+  const int n = sscanf(s, "%d:%d:%d:%d:%d", &g_cfg.pdsch_decode, &g_cfg.pdsch_mcs_table, &g_cfg.pdsch_xoverhead,
+                       &g_cfg.pdsch_rv0_only, &g_cfg.pdsch_max_per_slot);
+  return n >= 1;
 }
 
 void nr_pdcch_blind_monitor_init(void)
@@ -156,16 +219,51 @@ void nr_pdcch_blind_monitor_init(void)
   // means. Values are a reasonable starting point, NOT independently tuned against a live deployment
   // this session -- re-verify against measured accept/RNTI-cross-check rates the same way
   // dci_length_override was, if they turn out too strict (losing real grants) or too loose.
-  g_cfg.energy_min             = 2.0f;
+  // energy_min defaults OFF: it is an ABSOLUTE threshold in receiver-dependent units, so shipping a
+  // default for it was always wrong -- 2.0 was calibrated at 106 PRB and does not carry to 273 PRB
+  // or to any real OTA gain setting, which is why it ended up disabled in the configs rather than
+  // retuned. The adaptive gate replaces it and CAN safely carry a default, because a multiple of the
+  // measured noise floor is dimensionless.
+  g_cfg.energy_min             = 0.0f;
+  g_cfg.energy_adapt_factor    = 2.0f;
   g_cfg.rnti_persist_k         = 2;
   g_cfg.rnti_persist_window_ms = 500;
   g_cfg.min_snr_lin            = 4.0f; // ~6 dB
+  // Spec defaults for the deployment-fact overrides: tda_count=0 keeps the default TDRA table and
+  // dmrs_add_pos<0 keeps fill_dmrs_mask()'s pos2 fallback -- i.e. exactly the pre-2026-07-30
+  // behaviour unless the corresponding config lines are present.
+  g_cfg.extract.tda_count      = 0;
+  g_cfg.extract.dmrs_add_pos   = -1;
+  g_cfg.extract.dmrs_max_length = 0;
+  // -1 everywhere = "use the built-in assumption", i.e. the pre-2026-07-30 hard-coded widths.
+  g_cfg.extract.bwp_indicator_bits = -1;
+  g_cfg.extract.vrb_to_prb_bits    = -1;
+  g_cfg.extract.prb_bundling_bits  = -1;
+  g_cfg.extract.rate_matching_bits = -1;
+  g_cfg.extract.zp_csirs_bits      = -1;
+  g_cfg.extract.tb2_bits           = -1;
+  g_cfg.extract.harq_pid_bits      = -1;
+  g_cfg.extract.dai_bits           = -1;
+  g_cfg.extract.pdsch_to_harq_bits = -1;
+  g_cfg.extract.antenna_ports_bits = -1;
+  g_cfg.extract.tci_bits           = -1;
+  g_cfg.extract.srs_request_bits   = -1;
+  g_cfg.extract.cbg_bits           = -1;
+  g_cfg.pdsch_decode           = 0;
+  g_cfg.pdsch_mcs_table        = 0;
+  g_cfg.pdsch_xoverhead        = 0;
+  g_cfg.pdsch_rv0_only         = 1;
+  g_cfg.pdsch_max_per_slot     = 1;
 
   char*     p_coreset = NULL;
   char*     p_ss       = NULL;
   char*     p_bwp       = NULL;
   char*     p_rnti_range = NULL;
   char*     p_noise_gates = NULL;
+  char*     p_tda        = NULL;
+  char*     p_dmrs       = NULL;
+  char*     p_pdsch      = NULL;
+  char*     p_dci_bits   = NULL;
   paramdef_t params[] = {
       {"pdcch_blind_monitor_coreset",
         "Dedicated CORESET geometry for blind PDCCH monitoring; "
@@ -190,6 +288,26 @@ void nr_pdcch_blind_monitor_init(void)
         "(any field <=0/<=1 as documented in nr_pdcch_blind_monitor_rt.h disables that specific gate; "
         "omit the whole line to use the compiled-in defaults, not to disable all gates)",
         0, .strptr = &p_noise_gates, .defstrval = "", TYPE_STRING, 0},
+      {"pdcch_blind_monitor_tda",
+        "The gNB's real pdsch-TimeDomainAllocationList, indexed by the DCI's time-domain-assignment "
+        "field; S:L[:mapping],S:L[:mapping],... (mapping 0=typeA default, 1=typeB). Omit to use the "
+        "3GPP default TDRA table -- which is WRONG for any gNB that configures its own list, and "
+        "must be set before the passive PDSCH decode can work",
+        0, .strptr = &p_tda, .defstrval = "", TYPE_STRING, 0},
+      {"pdcch_blind_monitor_dmrs",
+        "PDSCH DM-RS config the gNB's dedicated pdsch-Config carries; add_pos:max_length "
+        "(add_pos 0=pos0,1=pos1,2=pos2,3=pos3). Omit for the no-dedicated-config default (pos2, len 1)",
+        0, .strptr = &p_dmrs, .defstrval = "", TYPE_STRING, 0},
+      {"pdcch_blind_monitor_dci_bits",
+        "Per-field DCI-1_1 bit widths for this deployment, TS 38.212 payload order: "
+        "bwp_ind:vrb_to_prb:prb_bundling:rate_match:zp_csirs:tb2:harq_pid:dai:pdsch_to_harq:"
+        "ant_ports:tci:srs_req:cbg (-1 = built-in default). Getting dci_length_override right is "
+        "NOT enough on its own -- see nr_pdcch_blind_extract_opts_t",
+        0, .strptr = &p_dci_bits, .defstrval = "", TYPE_STRING, 0},
+      {"pdcch_blind_monitor_pdsch",
+        "Passive data-aided PDSCH; decode:mcs_table:xoverhead:rv0_only:max_per_slot "
+        "(decode 0=off, 1=decode+count CRC pass rate only, 2=also submit the reconstructed CFR)",
+        0, .strptr = &p_pdsch, .defstrval = "", TYPE_STRING, 0},
   };
   config_get(config_get_if(), params, (int)(sizeof(params) / sizeof(params[0])), "sensing");
 
@@ -217,20 +335,76 @@ void nr_pdcch_blind_monitor_init(void)
     LOG_E(PHY, "SENSING: malformed pdcch_blind_monitor_noise_gates '%s'; using compiled-in defaults\n",
           p_noise_gates);
   }
+  if (p_tda != NULL && p_tda[0] != '\0' && !parse_tda(p_tda)) {
+    g_cfg.extract.tda_count = 0;
+    LOG_E(PHY, "SENSING: malformed pdcch_blind_monitor_tda '%s'; falling back to the default TDRA table\n", p_tda);
+  }
+  if (p_dmrs != NULL && p_dmrs[0] != '\0' && !parse_dmrs(p_dmrs)) {
+    g_cfg.extract.dmrs_add_pos    = -1;
+    g_cfg.extract.dmrs_max_length = 0;
+    LOG_E(PHY, "SENSING: malformed pdcch_blind_monitor_dmrs '%s'; falling back to pos2/len1\n", p_dmrs);
+  }
+  if (p_dci_bits != NULL && p_dci_bits[0] != '\0' && !parse_dci_bits(p_dci_bits)) {
+    LOG_E(PHY, "SENSING: malformed pdcch_blind_monitor_dci_bits '%s'; using built-in field widths\n", p_dci_bits);
+  }
+  if (p_pdsch != NULL && p_pdsch[0] != '\0' && !parse_pdsch(p_pdsch)) {
+    g_cfg.pdsch_decode = 0;
+    LOG_E(PHY, "SENSING: malformed pdcch_blind_monitor_pdsch '%s'; passive PDSCH decode disabled\n", p_pdsch);
+  }
+  if (g_cfg.pdsch_max_per_slot <= 0) {
+    g_cfg.pdsch_max_per_slot = 1;
+  }
+  // A decode built on the spec-default TDRA/DM-RS assumptions is near-certain to fail CRC on any
+  // gNB that configures its own list (this project's does -- see nr_pdcch_blind_extract_opts_t).
+  // Warn rather than refuse: "0% CRC pass rate" is itself a legitimate measurement to take, but it
+  // must not be mistaken for a statement about the CHANNEL.
+  // ---- Reconcile the per-field widths against the payload length actually in use. This is the
+  // check that would have caught 2026-07-30's misalignment on day one: dci_length_override made the
+  // TOTAL right while the per-field widths stayed wrong, so every field after the frequency-domain
+  // assignment was read from the wrong offset and nobody noticed, because the only fields consumed
+  // (RNTI, RIV allocation) happen to precede the damage. ----
+  {
+    const uint16_t used_len = g_cfg.dci_length_override > 0 ? (uint16_t)g_cfg.dci_length_override
+                                                            : nr_pdcch_blind_dci_size((uint16_t)g_cfg.bwp_size);
+    const uint16_t implied  = nr_pdcch_blind_dci_size_ex((uint16_t)g_cfg.bwp_size, &g_cfg.extract);
+    if (used_len != implied) {
+      LOG_W(PHY,
+            "SENSING: blind PDCCH DCI field widths imply %u bits but the payload in use is %u -- every field "
+            "after the frequency-domain assignment is being read from the WRONG bit offset (RNTI and the PRB "
+            "allocation are still correct, which is why this can look healthy). Set "
+            "pdcch_blind_monitor_dci_bits / pdcch_blind_monitor_tda to this deployment's real widths; see "
+            "nr_pdcch_blind_extract_opts_t\n",
+            implied, used_len);
+    } else {
+      LOG_I(PHY, "SENSING: blind PDCCH DCI field widths reconcile with the %u-bit payload\n", used_len);
+    }
+  }
+
+  if (g_cfg.pdsch_decode > 0 && g_cfg.extract.tda_count == 0) {
+    LOG_W(PHY,
+          "SENSING: passive PDSCH decode enabled with NO pdcch_blind_monitor_tda -- the 3GPP default "
+          "TDRA table will be assumed, which is wrong for any gNB carrying its own "
+          "pdsch-TimeDomainAllocationList; expect a ~0%% CRC pass rate that says nothing about the channel\n");
+  }
 
   g_enabled = 1;
   LOG_I(PHY,
         "SENSING: blind PDCCH monitor configured: coreset(num_groups=%d duration=%d reg_bundle=%d "
         "interleaver=%d shift=%d scramb=%u) ss(period=%d offset=%d duration=%d first_symb=%d "
         "al_cand=[%d,%d,%d,%d]) bwp=[%d..%d) dmrs_typeA_pos=%d rnti_range=[%u..%u] "
-        "noise_gates(energy_min=%.2f persist_k=%d persist_window_ms=%d min_snr_lin=%.2f)\n",
+        "noise_gates(energy_min=%.2f energy_adapt_factor=%.2f persist_k=%d persist_window_ms=%d "
+        "min_snr_lin=%.2f) tda_entries=%d dmrs(add_pos=%d max_len=%d) "
+        "pdsch(decode=%d mcs_table=%d xoverhead=%d rv0_only=%d max_per_slot=%d)\n",
         g_cfg.coreset_freq_domain, g_cfg.coreset_duration, g_cfg.coreset_reg_bundle_size,
         g_cfg.coreset_interleaver_size, g_cfg.coreset_shift_index, g_cfg.coreset_pdcch_dmrs_scrambling_id,
         g_cfg.ss_monitoring_slot_periodicity, g_cfg.ss_monitoring_slot_offset, g_cfg.ss_duration,
         g_cfg.ss_first_symbol, g_cfg.ss_al_candidates[0], g_cfg.ss_al_candidates[1], g_cfg.ss_al_candidates[2],
         g_cfg.ss_al_candidates[3], g_cfg.bwp_start, g_cfg.bwp_start + g_cfg.bwp_size,
-        g_cfg.dmrs_typeA_position, g_cfg.rnti_min, g_cfg.rnti_max, g_cfg.energy_min, g_cfg.rnti_persist_k,
-        g_cfg.rnti_persist_window_ms, g_cfg.min_snr_lin);
+        g_cfg.dmrs_typeA_position, g_cfg.rnti_min, g_cfg.rnti_max, g_cfg.energy_min,
+        g_cfg.energy_adapt_factor, g_cfg.rnti_persist_k, g_cfg.rnti_persist_window_ms,
+        g_cfg.min_snr_lin, g_cfg.extract.tda_count, g_cfg.extract.dmrs_add_pos, g_cfg.extract.dmrs_max_length,
+        g_cfg.pdsch_decode, g_cfg.pdsch_mcs_table, g_cfg.pdsch_xoverhead, g_cfg.pdsch_rv0_only,
+        g_cfg.pdsch_max_per_slot);
 }
 
 int nr_pdcch_blind_monitor_enabled(void)
@@ -272,6 +446,66 @@ uint16_t nr_pdcch_blind_dci_size(uint16_t bwp_size)
   const uint16_t riv_bits = (uint16_t)ceil(log2(riv_span));
 
   return FIXED_BITS + riv_bits;
+}
+
+// Per-field widths actually used by the extraction, resolving each override against this module's
+// built-in assumption. Kept in ONE place so nr_pdcch_blind_dci_size_ex() (which validates a config)
+// and nr_pdcch_blind_decode_and_extract_ex() (which reads the payload) can never disagree about the
+// layout -- the two disagreeing is precisely the bug the override exists to fix.
+typedef struct {
+  int bwp_ind, riv, tda, vrb, prb_bundling, rate_match, zp_csirs;
+  int tb2, harq_pid, dai, pdsch_to_harq, ant_ports, tci, srs, cbg;
+} blind_field_bits_t;
+
+static int pick_bits(int override_val, int dflt)
+{
+  return (override_val >= 0) ? override_val : dflt;
+}
+
+static blind_field_bits_t blind_field_bits(uint16_t bwp_size, const nr_pdcch_blind_extract_opts_t* opts)
+{
+  const double riv_span = ((double)bwp_size * (double)(bwp_size + 1)) / 2.0;
+  blind_field_bits_t f;
+  f.riv = (int)ceil(log2(riv_span));
+  // time_domain_assignment: nr_dci_size() uses ceil(log2(tdaList->count)), so a configured TDRA
+  // list determines this width -- it is not a separate knob. Default 4 = the 16-entry default table.
+  if (opts != NULL && opts->tda_count > 0) {
+    int b = 0;
+    while ((1 << b) < opts->tda_count) {
+      b++;
+    }
+    f.tda = b;
+  } else {
+    f.tda = 4;
+  }
+  f.bwp_ind       = opts ? pick_bits(opts->bwp_indicator_bits, 1) : 1;
+  f.vrb           = opts ? pick_bits(opts->vrb_to_prb_bits, 0) : 0;
+  f.prb_bundling  = opts ? pick_bits(opts->prb_bundling_bits, 0) : 0;
+  f.rate_match    = opts ? pick_bits(opts->rate_matching_bits, 0) : 0;
+  f.zp_csirs      = opts ? pick_bits(opts->zp_csirs_bits, 0) : 0;
+  f.tb2           = opts ? pick_bits(opts->tb2_bits, 0) : 0;
+  f.harq_pid      = opts ? pick_bits(opts->harq_pid_bits, 4) : 4;
+  f.dai           = opts ? pick_bits(opts->dai_bits, 2) : 2;
+  f.pdsch_to_harq = opts ? pick_bits(opts->pdsch_to_harq_bits, 3) : 3;
+  f.ant_ports     = opts ? pick_bits(opts->antenna_ports_bits, 4) : 4;
+  f.tci           = opts ? pick_bits(opts->tci_bits, 0) : 0;
+  f.srs           = opts ? pick_bits(opts->srs_request_bits, 2) : 2;
+  f.cbg           = opts ? pick_bits(opts->cbg_bits, 0) : 0;
+  return f;
+}
+
+uint16_t nr_pdcch_blind_dci_size_ex(uint16_t bwp_size, const nr_pdcch_blind_extract_opts_t* opts)
+{
+  if (bwp_size < 1) {
+    return 0;
+  }
+  const blind_field_bits_t f = blind_field_bits(bwp_size, opts);
+  // Constant-width fields: format identifier (1) + MCS/NDI/RV (8) + TPC PUCCH (2) +
+  // PUCCH resource indicator (3) + DM-RS sequence initialisation (1). Carrier indicator is 0 here
+  // (no cross-carrier scheduling is representable in this module's fixed assumption set).
+  return (uint16_t)(1 + 8 + 2 + 3 + 1 + f.bwp_ind + f.riv + f.tda + f.vrb + f.prb_bundling + f.rate_match
+                    + f.zp_csirs + f.tb2 + f.harq_pid + f.dai + f.pdsch_to_harq + f.ant_ports + f.tci + f.srs
+                    + f.cbg);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -318,6 +552,103 @@ static bool riv_to_prb_alloc(uint32_t riv, uint16_t n_RB_DLBWP, uint16_t* start_
   return true;
 }
 
+// ---------------------------------------------------------------------------------------------
+// TS 38.211 Tables 7.4.1.1.2-3 / -4 (PDSCH DM-RS positions l' within a slot). Duplicated from
+// nr_mac_common.c, where both are file-static, for the SAME reason the antenna-port table above is
+// duplicated: they are 3GPP spec constants, not deployment logic. What is NOT duplicated is
+// fill_dmrs_mask()'s policy layer -- that function derives dmrs_AdditionalPosition from an ASN.1
+// pdsch_Config a blind receiver does not have, and AssertFatal()s (i.e. aborts the softmodem) on
+// inputs this module must merely reject. blind_fill_dmrs_mask() below takes the column directly and
+// returns -1 instead. Columns 0-3 = mapping type A, 4-7 = type B; l' == l0 is encoded as bit 0.
+// ---------------------------------------------------------------------------------------------
+static const int32_t g_table_7_4_1_1_2_3[13][8] = {
+    {-1, -1, -1, -1, 1, 1, 1, 1},          // ld = 2
+    {0, 0, 0, 0, 1, 1, 1, 1},              // ld = 3
+    {0, 0, 0, 0, 1, 1, 1, 1},              // ld = 4
+    {0, 0, 0, 0, 1, 17, 17, 17},           // ld = 5
+    {0, 0, 0, 0, 1, 17, 17, 17},           // ld = 6
+    {0, 0, 0, 0, 1, 17, 17, 17},           // ld = 7
+    {0, 128, 128, 128, 1, 65, 73, 73},     // ld = 8
+    {0, 128, 128, 128, 1, 129, 145, 145},  // ld = 9
+    {0, 512, 576, 576, 1, 129, 145, 145},  // ld = 10
+    {0, 512, 576, 576, 1, 257, 273, 585},  // ld = 11
+    {0, 512, 576, 2336, 1, 513, 545, 585}, // ld = 12
+    {0, 2048, 2176, 2336, 1, 513, 545, 585}, // ld = 13
+    {0, 2048, 2176, 2336, -1, -1, -1, -1}, // ld = 14
+};
+static const int32_t g_table_7_4_1_1_2_4[12][8] = {
+    {-1, -1, -1, -1, -1, -1, -1, -1}, // ld < 4
+    {0, 0, -1, -1, -1, -1, -1, -1},   // ld = 4
+    {0, 0, -1, -1, 3, 3, -1, -1},     // ld = 5
+    {0, 0, -1, -1, 3, 3, -1, -1},     // ld = 6
+    {0, 0, -1, -1, 3, 3, -1, -1},     // ld = 7
+    {0, 0, -1, -1, 3, 99, -1, -1},    // ld = 8
+    {0, 0, -1, -1, 3, 99, -1, -1},    // ld = 9
+    {0, 768, -1, -1, 3, 387, -1, -1}, // ld = 10
+    {0, 768, -1, -1, 3, 387, -1, -1}, // ld = 11
+    {0, 768, -1, -1, 3, 771, -1, -1}, // ld = 12
+    {0, 3072, -1, -1, 3, 771, -1, -1},// ld = 13
+    {0, 3072, -1, -1, -1, -1, -1, -1},// ld = 14
+};
+
+/// DM-RS symbol bitmap, with dmrs_AdditionalPosition/maxLength supplied explicitly rather than
+/// derived from an ASN.1 pdsch_Config. Mirrors fill_dmrs_mask()'s arithmetic exactly; returns -1
+/// (reject) where that function would AssertFatal.
+static int32_t blind_fill_dmrs_mask(int dmrs_TypeA_Position,
+                                    int NrOfSymbols,
+                                    int startSymbol,
+                                    mappingType_t mappingtype,
+                                    int add_pos,
+                                    int length)
+{
+  if (add_pos < 0 || add_pos > 3 || (length != 1 && length != 2)) {
+    return -1;
+  }
+  int l0 = 0; // type B
+  if (mappingtype == typeA) {
+    if (dmrs_TypeA_Position == NR_ServingCellConfigCommon__dmrs_TypeA_Position_pos2) {
+      l0 = 2;
+    } else if (dmrs_TypeA_Position == NR_ServingCellConfigCommon__dmrs_TypeA_Position_pos3) {
+      l0 = 3;
+    } else {
+      return -1;
+    }
+    // fill_dmrs_mask()'s three AssertFatal conditions, as rejections.
+    if (l0 == 3 && add_pos == 3) {
+      return -1;
+    }
+    if (startSymbol > l0) {
+      return -1;
+    }
+  }
+  const int column = (mappingtype == typeA) ? add_pos : (add_pos + 4);
+  const int ld     = (mappingtype == typeA) ? (NrOfSymbols + startSymbol) : NrOfSymbols;
+  if (ld <= 1 || ld >= 15 || (NrOfSymbols + startSymbol) >= 15) {
+    return -1;
+  }
+  if (mappingtype == typeA && l0 == 3 && (ld == 3 || ld == 4)) {
+    return -1;
+  }
+
+  int32_t l_prime;
+  int     l0_shift;
+  if (length == 1) {
+    l_prime  = g_table_7_4_1_1_2_3[ld - 2][column];
+    l0_shift = 1 << l0;
+  } else {
+    const int row = (ld < 4) ? 0 : (ld - 3);
+    if (row >= 12) {
+      return -1;
+    }
+    l_prime  = g_table_7_4_1_1_2_4[row][column];
+    l0_shift = (1 << l0) | (1 << (l0 + 1));
+  }
+  if (l_prime < 0) {
+    return -1;
+  }
+  return (mappingtype == typeA) ? (l_prime | l0_shift) : (l_prime << startSymbol);
+}
+
 bool nr_pdcch_blind_decode_and_extract(const int16_t* llr,
                                        uint8_t         aggregation_level,
                                        uint16_t        dci_length,
@@ -326,6 +657,20 @@ bool nr_pdcch_blind_decode_and_extract(const int16_t* llr,
                                        uint16_t        rnti_min,
                                        uint16_t        rnti_max,
                                        nr_pdcch_blind_result_t* out)
+{
+  return nr_pdcch_blind_decode_and_extract_ex(llr, aggregation_level, dci_length, bwp_size, dmrs_typeA_position,
+                                              rnti_min, rnti_max, NULL /* spec defaults */, out);
+}
+
+bool nr_pdcch_blind_decode_and_extract_ex(const int16_t* llr,
+                                          uint8_t         aggregation_level,
+                                          uint16_t        dci_length,
+                                          uint16_t        bwp_size,
+                                          uint8_t         dmrs_typeA_position,
+                                          uint16_t        rnti_min,
+                                          uint16_t        rnti_max,
+                                          const nr_pdcch_blind_extract_opts_t* opts,
+                                          nr_pdcch_blind_result_t* out)
 {
   memset(out, 0, sizeof(*out));
   out->plausible = false;
@@ -362,35 +707,40 @@ bool nr_pdcch_blind_decode_and_extract(const int16_t* llr,
   // deployment that needed dci_length_override=45 has NOT been isolated, so the per-field bit
   // positions below may still be misaligned for that deployment even once decode (Step 1-2) starts
   // succeeding. Flagged, not fixed -- see the Stage 1 handover note this session leaves behind. ----
-  const double   riv_span = ((double)bwp_size * (double)(bwp_size + 1)) / 2.0;
-  const int      riv_bits = (int)ceil(log2(riv_span));
+  const blind_field_bits_t f = blind_field_bits(bwp_size, opts);
+  // read_field() walks DOWN from dci_length, so a field list wider than the payload would shift by
+  // a negative count (undefined behaviour) -- and, long before that, would mean every field is
+  // being read from the wrong offset anyway. Reject rather than produce confident garbage.
+  if (nr_pdcch_blind_dci_size_ex(bwp_size, opts) > dci_length) {
+    out->reject_reason = "configured DCI field widths exceed dci_length";
+    return false;
+  }
 
   int            pos     = (int)dci_length;
   const uint64_t payload = dci_estimation[0];
 
   const uint32_t format_indicator = read_field(payload, &pos, 1);
-  (void)read_field(payload, &pos, 0); // carrier indicator (0 bits, no cross-carrier scheduling)
-  (void)read_field(payload, &pos, 1); // bwp indicator (1 bit, n_dl_bwp=1 -- consumed, not gated on)
-  const uint32_t freq_domain_assignment = read_field(payload, &pos, riv_bits);
-  const uint32_t time_domain_assignment = read_field(payload, &pos, 4);
-  (void)read_field(payload, &pos, 0); // vrb-to-prb mapping
-  (void)read_field(payload, &pos, 0); // prb bundling size indicator
-  (void)read_field(payload, &pos, 0); // rate matching indicator
-  (void)read_field(payload, &pos, 0); // zp csi-rs trigger
+  (void)read_field(payload, &pos, 0);           // carrier indicator (no cross-carrier scheduling)
+  (void)read_field(payload, &pos, f.bwp_ind);   // bwp indicator (consumed, not gated on)
+  const uint32_t freq_domain_assignment = read_field(payload, &pos, f.riv);
+  const uint32_t time_domain_assignment = read_field(payload, &pos, f.tda);
+  (void)read_field(payload, &pos, f.vrb);          // vrb-to-prb mapping
+  (void)read_field(payload, &pos, f.prb_bundling); // prb bundling size indicator
+  (void)read_field(payload, &pos, f.rate_match);   // rate matching indicator
+  (void)read_field(payload, &pos, f.zp_csirs);     // zp csi-rs trigger
   const uint32_t mcs = read_field(payload, &pos, 5);
-  (void)read_field(payload, &pos, 1); // NDI, unused by this extraction
-  (void)read_field(payload, &pos, 2); // RV, unused by this extraction
-  (void)read_field(payload, &pos, 0); // TB2 (single codeword)
-  (void)read_field(payload, &pos, 4); // HARQ process number, unused by this extraction
-  (void)read_field(payload, &pos, 2); // DAI, unused by this extraction
-  (void)read_field(payload, &pos, 2); // TPC PUCCH
-  (void)read_field(payload, &pos, 3); // PUCCH resource indicator
-  (void)read_field(payload, &pos, 3); // PDSCH-to-HARQ feedback timing indicator
-  const uint32_t antenna_ports = read_field(payload, &pos, 4);
-  (void)read_field(payload, &pos, 0); // TCI
-  (void)read_field(payload, &pos, 2); // SRS request
-  (void)read_field(payload, &pos, 0); // CBGTI
-  (void)read_field(payload, &pos, 0); // CBGFI
+  const uint32_t ndi = read_field(payload, &pos, 1);
+  const uint32_t rv  = read_field(payload, &pos, 2);
+  (void)read_field(payload, &pos, f.tb2);          // TB2
+  const uint32_t harq_pid = read_field(payload, &pos, f.harq_pid);
+  (void)read_field(payload, &pos, f.dai);          // DAI, unused by this extraction
+  (void)read_field(payload, &pos, 2);              // TPC PUCCH
+  (void)read_field(payload, &pos, 3);              // PUCCH resource indicator
+  (void)read_field(payload, &pos, f.pdsch_to_harq); // PDSCH-to-HARQ feedback timing indicator
+  const uint32_t antenna_ports = read_field(payload, &pos, f.ant_ports);
+  (void)read_field(payload, &pos, f.tci);          // TCI
+  (void)read_field(payload, &pos, f.srs);          // SRS request
+  (void)read_field(payload, &pos, f.cbg);          // CBGTI + CBGFI
   const uint32_t dmrs_seq_init = read_field(payload, &pos, 1);
 
   // ---- Step 4: plausibility filter on decoded fields. This is the false-positive control the
@@ -419,17 +769,48 @@ bool nr_pdcch_blind_decode_and_extract(const int16_t* llr,
     return false;
   }
 
-  const NR_tda_info_t tda =
-      get_dl_tda_info(NULL /* dl_BWP */, 0 /* ss_type, unused when dl_BWP is NULL */, (int)time_domain_assignment,
-                      dmrs_typeA_position, 1 /* mux_pattern */, TYPE_C_RNTI_, 0 /* coresetid */, false /* sib1 */);
-  if (!tda.valid_tda) {
-    out->reject_reason = "time_domain_assignment index invalid for the default TDRA table";
-    return false;
+  // TDRA: the deployment's own pdsch-TimeDomainAllocationList when supplied (see
+  // nr_pdcch_blind_extract_opts_t's comment for why the spec default is wrong here), otherwise the
+  // spec default table exactly as before.
+  NR_tda_info_t tda = {0};
+  if (opts != NULL && opts->tda_count > 0) {
+    if ((int)time_domain_assignment >= opts->tda_count) {
+      out->reject_reason = "time_domain_assignment index beyond the configured TDRA list";
+      return false;
+    }
+    tda.valid_tda         = true;
+    tda.startSymbolIndex  = opts->tda_start[time_domain_assignment];
+    tda.nrOfSymbols       = opts->tda_length[time_domain_assignment];
+    tda.mapping_type      = opts->tda_mapping[time_domain_assignment] ? typeB : typeA;
+    // fill_dmrs_mask() AssertFatal()s on an out-of-range span rather than returning an error, so
+    // range-check the configured entry here instead of letting a typo abort the softmodem.
+    if (tda.nrOfSymbols < 1 || tda.startSymbolIndex + tda.nrOfSymbols > 14
+        || (tda.mapping_type == typeA && tda.startSymbolIndex + tda.nrOfSymbols < 2)) {
+      out->reject_reason = "configured TDRA entry spans an illegal symbol range";
+      return false;
+    }
+  } else {
+    tda = get_dl_tda_info(NULL /* dl_BWP */, 0 /* ss_type, unused when dl_BWP is NULL */, (int)time_domain_assignment,
+                          dmrs_typeA_position, 1 /* mux_pattern */, TYPE_C_RNTI_, 0 /* coresetid */, false /* sib1 */);
+    if (!tda.valid_tda) {
+      out->reject_reason = "time_domain_assignment index invalid for the default TDRA table";
+      return false;
+    }
   }
 
+  // fill_dmrs_mask()'s dmrs_AdditionalPosition/maxLength come from the dedicated pdsch_Config,
+  // which a blind receiver has not seen. Passing pdsch_Config=NULL makes it assume pos2/len1; when
+  // the deployment's real values are configured, apply them by driving the same table lookup
+  // through a synthetic column instead (fill_dmrs_mask takes no override argument, and adding one
+  // would touch the shared MAC path -- see nr_pdcch_blind_extract_opts_t).
+  const int add_pos = (opts != NULL && opts->dmrs_add_pos >= 0) ? opts->dmrs_add_pos : 2;
+  const int max_len = (opts != NULL && opts->dmrs_max_length > 0) ? opts->dmrs_max_length : 1;
   const int16_t dmrs_mask =
-      fill_dmrs_mask(NULL /* pdsch_Config */, NR_DL_DCI_FORMAT_1_1, dmrs_typeA_position, tda.nrOfSymbols,
-                     tda.startSymbolIndex, tda.mapping_type, 1 /* maxLength=1 */);
+      blind_fill_dmrs_mask(dmrs_typeA_position, tda.nrOfSymbols, tda.startSymbolIndex, tda.mapping_type, add_pos, max_len);
+  if (dmrs_mask <= 0) {
+    out->reject_reason = "DM-RS symbol mask undefined for this TDRA entry / additional-position";
+    return false;
+  }
 
   // ---- All checks passed: fill the result. ----
   out->start_rb          = start_rb;
@@ -442,6 +823,12 @@ bool nr_pdcch_blind_decode_and_extract(const int16_t* llr,
                                        | (g_table_7_3_2_3_3_1[antenna_ports][3] << 2)
                                        | (g_table_7_3_2_3_3_1[antenna_ports][4] << 3));
   out->nscid              = (uint8_t)dmrs_seq_init;
+  out->mcs                = (uint8_t)mcs;
+  out->rv                 = (uint8_t)rv;
+  out->ndi                = (uint8_t)ndi;
+  out->harq_pid           = (uint8_t)harq_pid;
+  out->tda_index          = (uint8_t)time_domain_assignment;
+  out->mapping_type       = (tda.mapping_type == typeB) ? 1 : 0;
   out->plausible          = true;
   out->reject_reason      = NULL;
   return true;
