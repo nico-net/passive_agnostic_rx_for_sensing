@@ -284,7 +284,8 @@ void nr_generate_pbch_llr(const PHY_VARS_NR_UE *ue,
                           const int ssb_start_subcarrier,
                           const c16_t rxdataF[frame_parms->nb_antennas_rx][frame_parms->ofdm_symbol_size],
                           const c16_t dl_ch_estimates[frame_parms->nb_antennas_rx][frame_parms->ofdm_symbol_size],
-                          int16_t pbch_e_rx[NR_POLAR_PBCH_E])
+                          int16_t pbch_e_rx[NR_POLAR_PBCH_E],
+                          double *log2_maxh_state)
 {
   const int symbol_offset = nr_get_ssb_start_symbol(frame_parms, i_ssb) % (NR_SYMBOLS_PER_SLOT);
   const int nb_re = (symbolSSB == 2) ? 72 : 180;
@@ -307,36 +308,43 @@ void nr_generate_pbch_llr(const PHY_VARS_NR_UE *ue,
   LOG_I(PHY, "[PHY] PBCH starting channel_level\n");
 #endif
 
-  // Channel-compensation output shift, computed for EVERY PBCH symbol.
+  // Channel-compensation output shift: computed ONCE from symbol 1 and reused for symbols 2 and 3,
+  // via caller-owned state in *log2_maxh_state.
   //
-  // This used to be guarded by `if (symbolSSB == 1)`. That was correct only while this code was a
-  // loop over symbols 1..3 with `log2_maxh` declared OUTSIDE it (see this file before commit
-  // e4b2125f1e "Refactor PBCH & PSBCH UE procedures"): the value was computed once on symbol 1 and
-  // deliberately REUSED for symbols 2 and 3. When the loop body became this per-symbol function,
-  // log2_maxh became a local initialised to 0 while the guard was carried over verbatim -- so
-  // symbols 2 and 3 silently started compensating with a shift of 0, i.e. no downscaling at all.
+  // Before commit e4b2125f1e "Refactor PBCH & PSBCH UE procedures" this code was a loop over
+  // symbols 1..3 with `log2_maxh` declared OUTSIDE the loop and computed under `if (symbol == 1)`,
+  // so symbols 2 and 3 deliberately reused symbol 1's value. When the loop body became this
+  // per-symbol function, log2_maxh became a local initialised to 0 while the `symbolSSB == 1` guard
+  // was carried over verbatim -- so symbols 2 and 3 silently began compensating with a shift of 0,
+  // i.e. no downscaling at all.
   //
   // MEASURED consequence (X410, 273 PRB, live cell): symbol 2 and symbol 3 LLRs came out 100%
   // saturated at nr_pbch_quantize()'s +-32 clamp (144/144 and 360/360), so two thirds of the polar
   // codeword carried only hard decisions and no soft information, while symbol 1 was properly scaled
-  // (|LLR| mean ~9-15, ~15% saturated). Fixing it takes those to ~10% and ~55% saturated. That is a
-  // large amount of coding gain recovered on EVERY PBCH decode, in both the initial-sync and the
-  // steady-state tracking paths.
+  // (|LLR| mean ~9-15, ~15% saturated).
   //
-  // Computing it per symbol -- rather than restoring the old "reuse symbol 1's value" behaviour -- is
-  // both simpler and more correct here: each symbol already carries its own dl_ch_estimates_ext, and
-  // symbol 2 spans a different number of REs (72 vs 180) than symbols 1 and 3. nr_channel_level() is
-  // safe at both lengths (it indexes from 0 since symbol==0 is passed, and 72 and 180 are both
-  // multiples of the 4-wide SIMD stride, well within the 240-element array).
-  int avg[frame_parms->nb_antennas_rx];
-  nr_channel_level(0, PBCH_MAX_RE_PER_SYMBOL, dl_ch_estimates_ext, frame_parms->nb_antennas_rx, 1, avg, nb_re);
-  uint32_t max_h = avg[0];
-  for (int i = 1; i < frame_parms->nb_antennas_rx; i++)
-    max_h = cmax(avg[i], max_h);
-  const double log2_maxh = 3 + (log2_approx(max_h) / 2);
+  // The shift MUST be shared across the three symbols rather than recomputed per symbol, and that is
+  // why the state is threaded through the caller instead of being a local. nr_pbch_decode() feeds
+  // all three symbols' LLRs into ONE polar codeword, so their magnitudes have to stay on a common
+  // scale: LLR ~ |H|^2 / 2^log2_maxh. With a single shared shift, a symbol whose channel is stronger
+  // yields proportionally larger LLRs and is weighted more by the decoder, which is what soft
+  // combining wants. Giving each symbol its own shift divides each by its own |H| instead, which
+  // EQUALISES the symbols and throws away exactly that reliability weighting.
+  double log2_maxh;
+  if (symbolSSB == 1 || *log2_maxh_state < 0.0) {
+    int avg[frame_parms->nb_antennas_rx];
+    nr_channel_level(0, PBCH_MAX_RE_PER_SYMBOL, dl_ch_estimates_ext, frame_parms->nb_antennas_rx, 1, avg, nb_re);
+    uint32_t max_h = avg[0];
+    for (int i = 1; i < frame_parms->nb_antennas_rx; i++)
+      max_h = cmax(avg[i], max_h);
+    log2_maxh = 3 + (log2_approx(max_h) / 2);
+    *log2_maxh_state = log2_maxh;
+  } else {
+    log2_maxh = *log2_maxh_state;
+  }
 
 #ifdef DEBUG_PBCH
-  LOG_I(PHY, "[PHY] PBCH log2_maxh = %f (%d)\n", log2_maxh, max_h);
+  LOG_I(PHY, "[PHY] PBCH log2_maxh = %f\n", log2_maxh);
 #endif
   __attribute__((aligned(32))) struct complex16 rxdataF_comp[frame_parms->nb_antennas_rx][PBCH_MAX_RE_PER_SYMBOL];
   nr_pbch_channel_compensation(rxdataF_ext, dl_ch_estimates_ext, nb_re, rxdataF_comp, frame_parms,
