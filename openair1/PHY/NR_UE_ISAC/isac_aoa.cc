@@ -148,6 +148,135 @@ bool parse_rx_array(const std::string& spec, double boresight_deg, double fc_hz,
 }
 
 // ---------------------------------------------------------------------------------------------
+// Position-anchored harmonic rejection (GHOST_KINEMATIC_CONSISTENCY_HANDOVER.md Phase A)
+// ---------------------------------------------------------------------------------------------
+
+bool aoa_localize(double tx_x, double tx_y, double rx_x, double rx_y, double reported_range_m,
+                  double bearing_deg, double& out_x, double& out_y)
+{
+  // The report carries the DIFFERENTIAL range; the ellipse is defined by the TOTAL bistatic path.
+  const double baseline = std::hypot(rx_x - tx_x, rx_y - tx_y);
+  const double r_b      = reported_range_m + baseline;
+  if (!std::isfinite(r_b) || r_b <= 0.0) {
+    return false;
+  }
+  const double th    = bearing_deg * (TWO_PI / 360.0);
+  const double ux    = std::cos(th);
+  const double uy    = std::sin(th);
+  const double ax    = rx_x - tx_x;
+  const double ay    = rx_y - tx_y;
+  const double denom = 2.0 * (r_b + ax * ux + ay * uy);
+  if (std::fabs(denom) < 1e-9) {
+    return false;
+  }
+  const double t = (r_b * r_b - (ax * ax + ay * ay)) / denom;
+  if (!std::isfinite(t) || t <= 0.0) {
+    return false; // solution behind the receiver: range and bearing describe different objects
+  }
+  out_x = rx_x + ux * t;
+  out_y = rx_y + uy * t;
+  return true;
+}
+
+/// True if detections `i` and `j` (both already localised) are consistent with being the SAME
+/// physical reflection: their positions differ only by noise, decomposed along detection `i`'s own
+/// line of sight into a RADIAL component (flat metre tolerance) and a TANGENTIAL component (chi2
+/// against each detection's OWN reported bearing uncertainty). See defs_nr_UE_ISAC.h's
+/// harmonic_pos_chi2 / harmonic_pos_range_tol_m comment for why the two axes are treated differently.
+static bool same_reflection(const nr_isac_args_t& args, double px_i, double py_i, double rx_i,
+                            double az_deg_i, float az_std_deg_i, double px_j, double py_j, double rx_j,
+                            float az_std_deg_j)
+{
+  const double th    = az_deg_i * (TWO_PI / 360.0);
+  const double ur_x  = std::cos(th), ur_y = std::sin(th); // radial (along i's line of sight)
+  const double ut_x  = -std::sin(th), ut_y = std::cos(th); // tangential (cross-range)
+  const double dx = px_i - px_j, dy = py_i - py_j;
+  const double d_r = dx * ur_x + dy * ur_y;
+  const double d_t = dx * ut_x + dy * ut_y;
+
+  if (std::fabs(d_r) > (double)args.harmonic_pos_range_tol_m) {
+    return false;
+  }
+  // Tangential 1-sigma of each independent bearing estimate, propagated through its own range to the
+  // fix: sigma_t,x = R_r,x * azimuth_std_deg,x (radians). Floored so a (near-)zero reported sigma
+  // cannot manufacture an artificially tiny, always-failing gate.
+  const double sig_i = rx_i * (double)std::max(az_std_deg_i, 0.1f) * (TWO_PI / 360.0);
+  const double sig_j = rx_j * (double)std::max(az_std_deg_j, 0.1f) * (TWO_PI / 360.0);
+  const double var_t = sig_i * sig_i + sig_j * sig_j;
+  return (d_t * d_t) <= (double)args.harmonic_pos_chi2 * var_t;
+}
+
+uint32_t harmonic_pos_reject(const nr_isac_args_t& args, std::vector<sensing_detection_t>& dets)
+{
+  if (!args.harmonic_pos_reject || dets.size() < 2) {
+    return 0;
+  }
+  // Localise every detection that carries a bearing. A detection without one gets no position and is
+  // simply not a participant -- neither rejectable nor usable as a fundamental -- which is what makes
+  // this whole filter inert on a receiver with no array.
+  const size_t         n = dets.size();
+  std::vector<double>  px(n, 0.0), py(n, 0.0), rr(n, 0.0); // rr = range from THIS rx to the fix
+  std::vector<char>    ok(n, 0);
+  uint32_t             n_pos = 0;
+  for (size_t i = 0; i < n; i++) {
+    if (!dets[i].azimuth_valid) {
+      continue;
+    }
+    if (aoa_localize((double)args.tx_pos_x, (double)args.tx_pos_y, (double)args.rx_pos_x,
+                     (double)args.rx_pos_y, (double)dets[i].range_m, (double)dets[i].azimuth_deg,
+                     px[i], py[i])) {
+      rr[i] = std::hypot(px[i] - (double)args.rx_pos_x, py[i] - (double)args.rx_pos_y);
+      ok[i] = 1;
+      n_pos++;
+    }
+  }
+  if (n_pos < 2) {
+    return 0;
+  }
+
+  const double                     tol  = (double)args.harmonic_tol;
+  const double                     maxk = (double)args.harmonic_max_k;
+  std::vector<sensing_detection_t> kept;
+  kept.reserve(n);
+  uint32_t dropped = 0;
+  for (size_t i = 0; i < n; i++) {
+    bool is_harm = false;
+    if (ok[i]) {
+      const double vc = std::fabs((double)dets[i].vel_mps);
+      for (size_t j = 0; j < n && !is_harm; j++) {
+        if (j == i || !ok[j]) {
+          continue;
+        }
+        const double vo = std::fabs((double)dets[j].vel_mps);
+        // `j` must be the FUNDAMENTAL: the same reflection (same fix), a strictly smaller |velocity|,
+        // and -- exactly as in range_doppler.cc's range-bin-anchored version -- not much weaker, so a
+        // weak low-velocity blip cannot knock out a strong real detection. Magnitudes, because an
+        // irregular slow-time lattice produces both +k*v and -k*v.
+        if (vo < 1e-3 || vc <= vo || dets[j].snr_db < dets[i].snr_db - (double)args.harmonic_snr_margin) {
+          continue;
+        }
+        if (!same_reflection(args, px[i], py[i], rr[i], (double)dets[i].azimuth_deg,
+                             dets[i].azimuth_std_deg, px[j], py[j], rr[j], dets[j].azimuth_std_deg)) {
+          continue; // different place in the world: not one reflection, so not one another's harmonic
+        }
+        const double ratio = vc / vo;
+        const double krnd  = std::round(ratio);
+        if (krnd >= 2.0 && krnd <= maxk && std::fabs(ratio - krnd) <= tol) {
+          is_harm = true;
+        }
+      }
+    }
+    if (is_harm) {
+      dropped++;
+    } else {
+      kept.push_back(dets[i]);
+    }
+  }
+  dets.swap(kept);
+  return dropped;
+}
+
+// ---------------------------------------------------------------------------------------------
 // Estimator
 // ---------------------------------------------------------------------------------------------
 

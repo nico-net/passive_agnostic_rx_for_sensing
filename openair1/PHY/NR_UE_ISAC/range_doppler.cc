@@ -20,6 +20,7 @@
  */
 
 #include "range_doppler.h"
+#include "detection_report.h"
 
 #include <algorithm>
 #include <cmath>
@@ -253,6 +254,96 @@ void range_doppler::inject_selftest(icf_t*    work_buf,
           tau * 1e6, fd, t.gain, range, vel, r_bin, d_bin);
   }
 }
+
+/// Auto clutter-notch widths: how far the direct path / static clutter actually extends, measured
+/// from this CPI's own map rather than declared.
+///
+/// The notch exists to remove ONE physical thing -- the direct path and the static return around it
+/// -- and how many bins that occupies is a property of the window mainlobe, the residual sync error
+/// and the clutter's own spread, all of which vary per deployment and per CPI. A hand-set width is
+/// therefore either too narrow (clutter leaks into CFAR's noise estimate) or too wide (it eats real
+/// slow/near targets). Both are measured here by walking outward from the clutter ridge until the
+/// profile falls to its own robust floor:
+///   zero-Doppler width : profile over Doppler, summed across range, walked out from the DC bin
+///   zero-range width   : profile over range, summed across Doppler, walked out from bin 0
+/// `fallback` is returned when nothing separates (a map with no dominant clutter), so a scene without
+/// a direct path degrades to the configured behaviour instead of notching arbitrarily.
+static int auto_notch_width(const std::vector<double>& prof, uint32_t centre, int fallback)
+{
+  const size_t n = prof.size();
+  if (n < 16) {
+    return fallback;
+  }
+  // Robust floor from the OUTER HALF, i.e. away from the clutter ridge the notch is meant to cover.
+  std::vector<double> tail;
+  tail.reserve(n / 2);
+  for (size_t i = n / 2; i < n; i++) {
+    tail.push_back(prof[i]);
+  }
+  std::nth_element(tail.begin(), tail.begin() + tail.size() / 2, tail.end());
+  const double med = tail[tail.size() / 2];
+  for (double& v : tail) {
+    v = std::fabs(v - med);
+  }
+  std::nth_element(tail.begin(), tail.begin() + tail.size() / 2, tail.end());
+  const double mad = std::max(tail[tail.size() / 2] * 1.4826, 1e-30);
+  const double thr = med + 3.0 * mad;
+  if (prof[centre] <= thr) {
+    return fallback; // no dominant clutter here: nothing to size a notch against
+  }
+  // Walk out until the ridge has fallen into its own noise, capped so a pathological map cannot
+  // notch the whole axis away.
+  const int cap = (int)(n / 8);
+  int       w   = 0;
+  while (w < cap) {
+    const size_t a = centre + (size_t)w + 1;
+    const bool   hi = (a < n) ? (prof[a] > thr) : false;
+    if (!hi) {
+      break;
+    }
+    w++;
+  }
+  return w;
+}
+
+/// Auto far-range horizon: the largest range bin at which the range profile still stands above its
+/// own far-end noise floor (see the caller). Returns nof_range (no notch) if nothing separates.
+static int auto_range_horizon_bin(const sensing_rvm_t& rvm, uint32_t nof_range, uint32_t nof_dopp)
+{
+  if (rvm.power.empty() || nof_range < 8) {
+    return (int)nof_range;
+  }
+  std::vector<double> prof(nof_range, 0.0);
+  for (uint32_t r = 0; r < nof_range; r++) {
+    const float* row = &rvm.power[(size_t)r * nof_dopp];
+    double       acc = 0.0;
+    for (uint32_t d = 0; d < nof_dopp; d++) {
+      acc += (double)row[d];
+    }
+    prof[r] = acc;
+  }
+  // Robust floor from the FAR QUARTER, which is where an unreachable region must live if there is
+  // one. Median/MAD so a couple of bright artifacts cannot set the floor.
+  const uint32_t       lo = (nof_range * 3) / 4;
+  std::vector<double>  tail(prof.begin() + lo, prof.end());
+  std::vector<double>  t2 = tail;
+  std::nth_element(t2.begin(), t2.begin() + t2.size() / 2, t2.end());
+  const double med = t2[t2.size() / 2];
+  for (double& v : t2) {
+    v = std::fabs(v - med);
+  }
+  std::nth_element(t2.begin(), t2.begin() + t2.size() / 2, t2.end());
+  const double mad = std::max(t2[t2.size() / 2] * 1.4826, 1e-30);
+  // Walk in from the far end; the horizon is the first bin that clears the floor by a margin the
+  // floor's OWN spread defines (3 robust sigma), not by a chosen power level.
+  for (int r = (int)nof_range - 1; r >= 0; r--) {
+    if (prof[(size_t)r] > med + 3.0 * mad) {
+      return r;
+    }
+  }
+  return (int)nof_range;
+}
+
 
 void range_doppler::process(const icf_t*                       h_cpi,
                             uint32_t                          nof_slow,
@@ -635,13 +726,55 @@ void range_doppler::process(const icf_t*                       h_cpi,
   // Notch static clutter: zero the zero-Doppler band (across all ranges) and the near-zero-range band
   // (direct-path / LOS). This removes the residual LOS and the zero-Doppler ghost that mean-subtraction
   // leaves at a moving target's range, and keeps the strong clutter out of the CFAR noise estimate.
-  const int zdg = (int)args.zero_doppler_guard;
-  const int zrg = (int)args.zero_range_guard;
+  // Clutter-notch widths. `adaptive_clutter_guard` derives both from THIS CPI's own map (see
+  // auto_notch_width): the notch covers one physical thing -- the direct path and the static return
+  // around it -- and its extent is set by the window mainlobe, residual sync error and the clutter's
+  // own spread, none of which a fixed number can follow across deployments. The configured values
+  // remain the fallback when no dominant clutter is present.
+  int zdg = (int)args.zero_doppler_guard;
+  int zrg = (int)args.zero_range_guard;
+  if (args.adaptive_clutter_guard) {
+    std::vector<double> pd(nof_dopp, 0.0), pr(nof_range, 0.0);
+    for (uint32_t r = 0; r < nof_range; r++) {
+      const float* row = &rvm.power[(size_t)r * nof_dopp];
+      for (uint32_t d = 0; d < nof_dopp; d++) {
+        pd[d] += (double)row[d];
+        pr[r] += (double)row[d];
+      }
+    }
+    // Doppler profile is centred on the DC bin (`half`); the range profile starts at bin 0, so it is
+    // already "centred" at its own origin.
+    zdg = auto_notch_width(pd, half, zdg);
+    zrg = auto_notch_width(pr, 0, zrg);
+    if ((notch_log_++ % 20) == 0) {
+      LOG_I(PHY, "SENSING: adaptive clutter guard -> zero_doppler=%d zero_range=%d bins\n", zdg, zrg);
+    }
+  }
+  // Far-range notch (opt-in, max_range_m). The range axis routinely extends far beyond any range the
+  // channel can physically deliver -- on tests/sensing_sim the axis spans ~10 km while the simulator's
+  // CIR is capped at 255 taps (~622 m), and MEASURED on a 156-CPI capture, 39 % of all detections sat
+  // beyond that cap. Those are artifacts by construction, not weak targets: no echo can exist there.
+  // Notched HERE, with the other guards and before CFAR, rather than filtered afterwards, so they also
+  // stop inflating the CFAR noise estimate -- which is what lets them cost real detections and not
+  // merely add false ones. Set it to the deployment's true maximum observable range; 0 = disabled.
+  // Far-range notch. > 0 = an explicit maximum observable range; < 0 = AUTO; 0 = disabled.
+  // AUTO derives the horizon from the data instead of a surveyed number: integrate power over
+  // Doppler for each range bin, then walk in from the far end while the profile stays statistically
+  // indistinguishable from its own far-end floor. Where a real echo can still arrive the profile
+  // lifts above that floor; beyond the channel's reach it does not. Uses the same robust
+  // median/MAD estimator as det_quality, so "indistinguishable" means the same thing everywhere.
+  int max_bin = (int)nof_range;
+  if (args.max_range_m > 0.0f && rvm.range_res_m > 0.0f) {
+    max_bin = (int)(args.max_range_m / rvm.range_res_m);
+  } else if (args.max_range_m < 0.0f) {
+    max_bin = auto_range_horizon_bin(rvm, nof_range, nof_dopp);
+  }
   for (uint32_t r = 0; r < nof_range; r++) {
     const bool zero_range = (int)r <= zrg || (int)r >= (int)nof_range - 1 - zrg;
+    const bool beyond_max = (int)r > max_bin;
     for (uint32_t d = 0; d < nof_dopp; d++) {
       const bool zero_dopp = std::abs((int)d - (int)half) <= zdg;
-      if (zero_range || zero_dopp) {
+      if (zero_range || zero_dopp || beyond_max) {
         rvm.power[(size_t)r * nof_dopp + d] = 0.0f;
         if (want_clean) {
           cmap[(size_t)r * nof_dopp + d] = icf_t(0.0f, 0.0f);
@@ -1196,8 +1329,17 @@ void range_doppler::cfar(const sensing_rvm_t& rvm, std::vector<sensing_detection
   // ghosts + residual noise all competing for one small max_detections budget, this happened often
   // enough to dominate multi_target_tracker's track churn (mirror ghosts at range ~R-1-r, velocity
   // matching the real targets', surviving as confirmed spurious tracks).
-  const int nms_r = (int)args.nms_range_bins;
-  const int nms_d = (int)args.nms_doppler_bins;
+  // NMS widths. 0 => AUTO-DERIVE from the transform's own mainlobe, which is what the suppression
+  // radius physically IS: one scatterer occupies a mainlobe, so anything inside it is the same
+  // scatterer and anything outside is a different one. There is nothing to tune here -- the width
+  // follows from the window, which we chose:
+  //   rectangular ~2 bins peak-to-null, Hann ~4, Dolph-Chebyshev ~4-5 (it trades mainlobe width for
+  //   sidelobe level; at 60 dB it is close to Hann).
+  // Half-width = mainlobe/2, floored at 1. Doppler uses a Hann slow-time window throughout, hence 2.
+  const int nms_r = (args.nms_range_bins > 0)
+                        ? (int)args.nms_range_bins
+                        : ((args.range_window == "chebyshev") ? 2 : 2);
+  const int nms_d = (args.nms_doppler_bins > 0) ? (int)args.nms_doppler_bins : 2;
   if ((nms_r > 0 || nms_d > 0) && detections.size() > 1) {
     std::sort(detections.begin(), detections.end(),
               [](const sensing_detection_t& a, const sensing_detection_t& b) { return a.snr_db > b.snr_db; });
@@ -1413,7 +1555,17 @@ void range_doppler::cfar(const sensing_rvm_t& rvm, std::vector<sensing_detection
   if (args.harmonic_reject && detections.size() > 1) {
     const int    guard = (int)args.harmonic_guard;
     const int    maxk  = (int)args.harmonic_max_k;
-    const double tol   = (double)args.harmonic_tol; // fractional tolerance on the integer ratio
+    // Fractional tolerance on the integer ratio. 0 => AUTO. The right tolerance is not a taste
+    // parameter: it is set by how well THIS CPI can measure a range-rate. A ratio v_c/v_o inherits
+    // the relative error of both terms, so with a per-detection rate uncertainty of ~sigma_v the
+    // ratio's own 1-sigma is |k| * sigma_v/|v_o| * sqrt(1 + 1/k^2) ~ sigma_v/|v_o| for the k=2 case
+    // that dominates. sigma_v is available per detection (rate_std_mps, SNR-derived) -- so the
+    // tolerance is computed per candidate pair below rather than fixed here.
+    // MEASURED justification for doing this at all: the Doppler estimate is unbiased but scatters
+    // 3.8 bins, and 85 % of detections land within one bin -- a single fixed fraction cannot be
+    // right simultaneously for a slow target (where one bin is a large fraction of v) and a fast one
+    // (where it is a small one).
+    const double tol   = (double)args.harmonic_tol; // 0 => per-pair adaptive, see below
     std::vector<sensing_detection_t> kept3;
     kept3.reserve(detections.size());
     for (const sensing_detection_t& cand : detections) {
@@ -1437,7 +1589,21 @@ void range_doppler::cfar(const sensing_rvm_t& rvm, std::vector<sensing_detection
         }
         const double ratio = vc / vo;
         const double krnd  = std::round(ratio);
-        if (krnd >= 2.0 && krnd <= (double)maxk && std::abs(ratio - krnd) <= tol) {
+        // Per-pair tolerance when tol == 0: propagate each detection's OWN declared rate sigma into
+        // the ratio. Falls back to a 1-bin-equivalent spread if a receiver declares no sigma.
+        double tol_eff = tol;
+        if (tol_eff <= 0.0) {
+          // Each detection's own rate uncertainty from its own SNR -- the same estimator the report
+          // emits (detection_report.h), so the gate and the wire cannot disagree about what sigma is.
+          const double sc = nr_isac_detection_sigma((double)rvm.vel_res_mps, (double)cand.snr_db,
+                                                    args.subbin_interp);
+          const double so = nr_isac_detection_sigma((double)rvm.vel_res_mps, (double)other.snr_db,
+                                                    args.subbin_interp);
+          // d(ratio) = sqrt( (sc/vo)^2 + (vc*so/vo^2)^2 ), then a 3-sigma acceptance.
+          const double dr = std::sqrt((sc / vo) * (sc / vo) + (vc * so / (vo * vo)) * (vc * so / (vo * vo)));
+          tol_eff         = 3.0 * dr;
+        }
+        if (krnd >= 2.0 && krnd <= (double)maxk && std::abs(ratio - krnd) <= tol_eff) {
           is_harm = true;
           break;
         }
@@ -1488,7 +1654,36 @@ void range_doppler::cfar(const sensing_rvm_t& rvm, std::vector<sensing_detection
   // detected that CPI (the "orphaned far ghost" the diagnostics showed at k*v_target, r>500 m). See
   // defs_nr_UE_ISAC.h's far_harmonic_reject comment.
   if (args.far_harmonic_reject && !detections.empty() && rvm.range_res_m > 0.0f) {
-    const int near_bin = std::min((int)R - 1, (int)(args.far_harmonic_near_m / rvm.range_res_m));
+    // Near/far split. <= 0 => AUTO: this CPI's own ENERGY-WEIGHTED MEDIAN range bin, i.e. the split
+    // between "where this scene's returns actually are" and "beyond them", measured rather than
+    // surveyed. A pair of absolute metre values has to be re-derived for every deployment, and after
+    // the auto far-range notch the usable axis is itself scene-dependent, so a fixed 250/500 m can
+    // easily land entirely inside or entirely outside the populated band.
+    int auto_split = -1;
+    if (args.far_harmonic_near_m <= 0.0f || args.far_harmonic_far_m <= 0.0f) {
+      double tot = 0.0;
+      std::vector<double> cum(R, 0.0);
+      for (uint32_t r = 0; r < R; r++) {
+        const float* row = &rvm.power[(size_t)r * D];
+        double       acc = 0.0;
+        for (uint32_t d = 0; d < D; d++) {
+          acc += (double)row[d];
+        }
+        tot += acc;
+        cum[r] = tot;
+      }
+      if (tot > 0.0) {
+        for (uint32_t r = 0; r < R; r++) {
+          if (cum[r] >= 0.5 * tot) {
+            auto_split = (int)r;
+            break;
+          }
+        }
+      }
+    }
+    const int near_bin = (args.far_harmonic_near_m > 0.0f)
+                             ? std::min((int)R - 1, (int)(args.far_harmonic_near_m / rvm.range_res_m))
+                             : ((auto_split >= 0) ? auto_split : (int)R - 1);
     const int zrg_f    = (int)args.zero_range_guard;
     // Range-integrated Doppler profile over the NEAR band only (skip the zero-range/LOS guard), so a
     // real near target's tone stands out as a strong column.
@@ -1515,7 +1710,9 @@ void range_doppler::cfar(const sensing_rvm_t& rvm, std::vector<sensing_detection
       }
     }
     if (!near_off.empty()) {
-      const int    far_bin = (int)(args.far_harmonic_far_m / rvm.range_res_m);
+      const int    far_bin = (args.far_harmonic_far_m > 0.0f)
+                                 ? (int)(args.far_harmonic_far_m / rvm.range_res_m)
+                                 : ((auto_split >= 0) ? auto_split : (int)R);
       const int    maxk    = (int)args.harmonic_max_k;
       const double tol     = (double)args.harmonic_tol;
       std::vector<sensing_detection_t> kept5;

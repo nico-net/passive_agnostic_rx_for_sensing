@@ -182,8 +182,10 @@ struct nr_isac_args_t {
   // Clutter suppression + detection cleanup (Stage 5)
   uint32_t zero_doppler_guard = 3;  ///< Doppler bins around zero velocity to notch out (static clutter / ghost)
   uint32_t zero_range_guard   = 2;  ///< Range bins near zero delay to notch out (direct-path / LOS clutter)
-  uint32_t nms_range_bins     = 3;  ///< Non-max-suppression radius in range bins (0 disables)
-  uint32_t nms_doppler_bins   = 3;  ///< Non-max-suppression radius in Doppler bins (0 disables)
+  uint32_t nms_range_bins   = 0; ///< NMS radius, range bins. 0 = AUTO from the range window's own
+                                 ///< mainlobe half-width -- which is what the radius physically IS:
+                                 ///< one scatterer occupies one mainlobe.
+  uint32_t nms_doppler_bins = 0; ///< NMS radius, Doppler bins. 0 = AUTO (Hann slow-time mainlobe).
   uint32_t max_detections     = 32; ///< Cap on reported detections per CPI after suppression
 
   // Detector front-end. "fft" (default) = the legacy range-IFFT + Doppler-FFT/NUDFT chain, which
@@ -219,7 +221,11 @@ struct nr_isac_args_t {
   // one-row-per-slot behaviour.
   uint32_t    subslot_symbols    = 0;      ///< target OFDM symbols per row; 0 = off (one row/slot)
   uint32_t    subslot_min_re     = 600;    ///< SPARSITY gate: min distinct REs for a row to stand alone
-  float       subslot_min_snr_db = 10.0f;  ///< SNR gate: min estimated post-integration row SNR (dB)
+  float       subslot_min_snr_db = 0.0f;   ///< SNR gate on a sub-slot row, dB. <= 0 = AUTO: a group must
+                                           ///< clear the FULL slot's own coherent SNR minus 10*log10(G),
+                                           ///< which is exactly the loss splitting into G groups costs.
+                                           ///< Self-referencing, so it needs no absolute dB level and
+                                           ///< follows gain/traffic automatically.
 
   // CLEAN deconvolution (opt-in, clean_deconv.{h,cc}). Runs on the COMPLEX range-Doppler map before
   // CFAR. A strong scatterer does not sit in one cell: the range/Doppler windows spread it into a
@@ -274,13 +280,59 @@ struct nr_isac_args_t {
   // Doppler-harmonic rejection (opt-in): drop a detection at the same range as a STRONGER one whose
   // velocity magnitude is a near-integer multiple (2..harmonic_max_k) of the stronger one's -- the
   // scheduling-driven slow-time harmonics of a moving target. See range_doppler.cc's harmonic block.
+  /// MEASURED USELESS on the current pipeline (2026-07-31) -- kept only for reproducing older runs.
+  /// Two independent lines of evidence: (a) a live ablation with `det_quality_adapt` on scored
+  /// SLIGHTLY BETTER without it (detection precision 91 % vs 90 %, track precision 89 % vs 87 %);
+  /// (b) the separability study found `has_harmonic_parent` -- exactly the relation this test keys on
+  /// -- carries ROC AUC 0.507, i.e. no discriminating power at all. Its job is now done upstream by
+  /// the adaptive per-detection gate. Leave off; `harmonic_guard`/`harmonic_snr_margin`/`harmonic_tol`
+  /// are inert with it.
   bool     harmonic_reject = false;
   uint32_t harmonic_guard  = 4;    ///< range-bin tolerance when pairing a harmonic to its fundamental
   uint32_t harmonic_max_k  = 4;    ///< highest harmonic order k to reject (2..k)
-  float    harmonic_tol    = 0.15f;///< fractional tolerance on the integer velocity ratio
+  float    harmonic_tol    = 0.0f; ///< fractional tolerance on the integer velocity ratio.
+                                   ///< 0 = AUTO (recommended): the tolerance is derived PER PAIR by
+                                   ///< propagating each detection's own SNR-derived rate sigma into
+                                   ///< the ratio, at 3 sigma. A single fixed fraction cannot be right
+                                   ///< for a slow and a fast target at once -- one Doppler bin is a
+                                   ///< large fraction of a slow target's rate and a small one of a
+                                   ///< fast target's. Measured: the rate estimate is unbiased but
+                                   ///< scatters 3.8 bins, with 85 % of detections inside one bin.
   float    harmonic_snr_margin = 6.0f; ///< the fundamental (lower |velocity|) may be at most this many
                                        ///< dB weaker than the harmonic and still trigger rejection --
                                        ///< guards a strong real detection against a weak low-velocity blip
+  // Position-anchored Doppler-harmonic rejection (opt-in; GHOST_KINEMATIC_CONSISTENCY_HANDOVER.md
+  // Phase A). Same test as harmonic_reject above, with a STRICTLY TIGHTER anchor: instead of "same
+  // range bin", two detections must localise (ray n bistatic ellipse, from range + AoA bearing) to
+  // the SAME reflection. Harmonics are one physical reflection mis-binned in Doppler, so they share
+  // range AND bearing and always pass; two distinct targets sharing a range bin -- common -- almost
+  // never also share a bearing. Lives in sensing_engine.cc, NOT in range_doppler.cc, because azimuth
+  // is attached after process() returns.
+  // Inert without AoA: a detection with no bearing has no position, so it is neither rejected nor
+  // usable as a fundamental. Still needs the fundamental detected in the SAME CPI -- the orphaned
+  // case is Phase B, in repos/isac, where a track carries position and velocity.
+  //
+  // MEASURED 2026-07-30 (GHOST_KINEMATIC_CONSISTENCY_HANDOVER.md 7.3) against a flat metre tolerance:
+  // it LOST to the existing range anchor, because the two fixes of a genuine harmonic pair are
+  // dominated by INDEPENDENT bearing estimation noise (~1.9 deg CRB here), not by geometry -- at
+  // R_r~290 m that is ~14 m of cross-range spread between two noisy estimates of the SAME point, so a
+  // flat 15 m gate is only ~1 sigma of pure noise: it missed real pairs at 15 m, and widening it let
+  // in unrelated targets faster than it caught more real ones. Replaced with a per-axis chi2 test
+  // that uses each detection's OWN reported azimuth_std_deg, so the gate scales with the actual
+  // uncertainty of the estimate being compared rather than a hand-picked constant -- the same
+  // "dimensionless, not a metre threshold" fix already applied to Phase B and to the AoA redundancy
+  // gates (CLAUDE.md 9). The two fixes' positions are decomposed into RADIAL (along detection i's own
+  // line of sight) and TANGENTIAL (cross-range) components relative to i's bearing:
+  //   - tangential: chi2-gated, sigma_t_x = R_r,x * azimuth_std_deg,x (radians) per detection -- this
+  //     is the MEASURED dominant error term, so it is the one actually normalised.
+  //   - radial: a flat metre tolerance, NOT chi2-ized -- no per-detection range_std exists to build a
+  //     real test from (range_std_m is report-level, not per-detection), and the measured radial
+  //     spread is small next to the tangential term, so inventing a false precision here was avoided.
+  bool     harmonic_pos_reject     = false;
+  float    harmonic_pos_chi2       = 9.0f; ///< per-axis (1 dof) chi2 threshold on the tangential
+                                           ///< (bearing-driven) position residual; 9 = 3 sigma, same
+                                           ///< convention as repos/isac's kinematic_same_reflection_chi2
+  float    harmonic_pos_range_tol_m = 8.0f; ///< flat tolerance on the RADIAL residual only (see above)
   // Far-range harmonic (range-smeared pedestal) rejection (opt-in). The amplitude-gating harmonics of
   // a strong NEAR target smear across the WHOLE range axis at k*v_target (RVM-confirmed 2026-07-24,
   // PHASE2_MOT_MULTIUE_HANDOVER.md: far>500m ghosts logged at -15.6/-23.8 m/s = 2x/3x the +7.8 m/s
@@ -290,9 +342,44 @@ struct nr_isac_args_t {
   // a separate detection) and drops any FAR-range detection whose |velocity| is a near-integer
   // multiple (2..harmonic_max_k) of one. k=1 (same-velocity pedestal) is intentionally NOT rejected
   // here (that's cfar_per_column's job, and a genuine far target could share a near target's speed).
+  // Adaptive per-detection quality gate (opt-in; det_quality.h). Estimates P(real target) for each
+  // detection from statistics learned ONLINE -- the CPI's own robust SNR null, plus temporal
+  // persistence, both of which were MEASURED to separate real from ghost (AUC 0.94 / 0.86, and
+  // persistence separates within every SNR quartile so it is genuinely orthogonal to SNR). Admits on
+  // the Bayes boundary rather than any dB threshold: an absolute threshold does not survive a gain,
+  // traffic or scene change (the two validation captures learn null medians 12.7 and 18.1 dB).
+  // Measured offline: detection precision 32->90 % and 55->88 %, harmonics 0/16 and 2/36 surviving;
+  // single-receiver world-track precision 46->59 % and 47->66 %, median error 17.8->7.9 m and
+  // 18.4->6.1 m. Costs recall (~73-82 % of real detections kept), so per-target coverage drops --
+  // raise det_quality_cost_ratio above 1 to keep more.
+  bool     det_quality_adapt = false;
+  float    det_quality_cost_ratio = 1.0f; ///< relative cost of admitting a false alarm vs losing a
+                                          ///< real detection. 1 = symmetric (Bayes-optimal, and NOT
+                                          ///< fitted to this data); >1 keeps fewer, <1 keeps more.
+  // Far-range notch (opt-in; 0 = disabled). Zeroes every range bin beyond max_range_m BEFORE CFAR,
+  // the far-end counterpart of zero_range_guard. The range axis (set by comb spacing x SCS) routinely
+  // extends far past any range the link can physically deliver: on tests/sensing_sim it spans ~10 km
+  // while the simulator's CIR is capped at 255 taps (~622 m), and 39 % of all detections on a measured
+  // 156-CPI capture sat beyond that cap. Those cells cannot contain an echo, so anything CFAR finds
+  // there is an artifact -- and, left in, they also inflate CFAR's noise estimate, which costs real
+  // detections elsewhere rather than merely adding false ones. Set to the deployment's true maximum
+  // observable range (simulator CIR cap, or the link budget's own limit).
+  ///< > 0 = explicit maximum observable range; < 0 = AUTO-derive it from the range profile's own
+  ///< far-end noise floor (robust median/MAD, 3 sigma) so no surveyed number is needed; 0 = disabled.
+  /// Derive zero_range_guard / zero_doppler_guard from each CPI's own clutter profile instead of
+  /// taking them as given. The notch covers one physical thing -- the direct path and the static
+  /// return around it -- whose extent follows from the window mainlobe, residual sync error and the
+  /// clutter's own spread. A fixed width is either too narrow (clutter leaks into CFAR's noise
+  /// estimate) or too wide (it eats real slow/near targets). The configured values stay as the
+  /// fallback for a map with no dominant clutter ridge.
+  bool     adaptive_clutter_guard = false;
+  float    max_range_m = 0.0f;
   bool     far_harmonic_reject = false;
-  float    far_harmonic_far_m  = 500.0f;  ///< a detection past this range is a far-ghost candidate
-  float    far_harmonic_near_m = 250.0f;  ///< dominant Doppler components are sought within this range
+  ///< <= 0 = AUTO for both: the split is taken as this CPI's own energy-weighted MEDIAN range, so
+  ///< "dominant near-range component" and "far ghost" mean "below / above where this scene's energy
+  ///< actually is" rather than two surveyed metre values that must be re-derived per deployment.
+  float    far_harmonic_far_m  = 0.0f;  ///< a detection past this range is a far-ghost candidate
+  float    far_harmonic_near_m = 0.0f;  ///< dominant Doppler components are sought within this range
 
   // CPI-quality gate (opt-in). When a CPI's row spacing (T_slot) is much larger than the recent
   // typical value, that CPI physically lacks enough well-spaced samples to resolve a real target --
@@ -316,7 +403,10 @@ struct nr_isac_args_t {
   // special case eca_delay_max_m=full & eca_doppler_max_mps=0.
   std::string clutter_removal    = "mean"; ///< "mean" | "eca+"
   float       eca_delay_max_m    = 0.0f;   ///< ECA delay removal window [0, delay_max] m; <=0 => full range
-  float       eca_doppler_max_mps = 0.5f;  ///< ECA Doppler removal half-band [-v,+v] around zero, in the
+  float    eca_doppler_max_mps = 0.0f; ///< < 0 = AUTO: span the slow-time window's mainlobe about DC
+                                       ///< (~2 bins, Hann), which is what STATIC clutter occupies. An
+                                       ///< m/s value must be re-derived on any fc/CPI/slot change.
+                                       ///< 0 keeps its existing meaning: DC-only (= mean subtraction).  ///< ECA Doppler removal half-band [-v,+v] around zero, in the
                                             ///< same BISTATIC RANGE-RATE units as sensing_rvm_t::vel_res_mps
                                             ///< (2026-07-23: that axis lost its erroneous monostatic factor
                                             ///< 2, so a given value here now covers half as many bins as it
@@ -627,6 +717,15 @@ struct sensing_detection_t {
   bool     azimuth_valid   = false;
   float    azimuth_deg     = 0.0f; ///< ENU bearing from this receiver, deg CCW from east
   float    azimuth_std_deg = 0.0f; ///< 1-sigma (CRB) uncertainty of the above
+  /// P(real target | this detection's evidence), from the adaptive gate in det_quality.h. NEGATIVE
+  /// when that gate did not run (det_quality_adapt off), in which case the field is OMITTED from the
+  /// DetectionReport and the central node treats every detection as equally credible -- i.e. exactly
+  /// the previous behaviour.
+  ///
+  /// Emitted because the gate's decision is thrown away otherwise: it makes a hard keep/drop call and
+  /// the survivors then look identical on the wire, so a 0.55-confidence detection and a 0.99 one
+  /// update a track with equal weight. The gate is the only party that knows the difference.
+  float    p_real          = -1.0f;
 };
 
 /// A synthetic target to inject into the CFR for testing (delay/Doppler/gain).

@@ -1040,6 +1040,7 @@ set(NR_UE_ISAC_SRC
   ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/matrix_complete.cc
   ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/sparse_doppler.cc
   ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/clean_deconv.cc
+  ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/det_quality.cc
   ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/isac_aoa.cc
   ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/eca_clutter.cc
   ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/range_doppler.cc
@@ -2250,6 +2251,12 @@ if(ENABLE_TESTS)
   # ambiguity flags, bearing recovery across the field of view for beamscan/interferometry/MUSIC, the
   # SNR gate, CRB behaviour, and direct-path self-calibration. Same standalone pattern as the tests
   # above.
+  add_executable(test_det_quality ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/tests/det_quality_test.cc)
+  target_include_directories(test_det_quality PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_ISAC)
+  target_link_libraries(test_det_quality PRIVATE NR_UE_ISAC UTIL GTest::gtest)
+  add_dependencies(tests test_det_quality)
+  add_test(NAME test_det_quality COMMAND ./test_det_quality)
+
   add_executable(test_isac_aoa ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/tests/isac_aoa_test.cc)
   target_include_directories(test_isac_aoa PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_ISAC)
   target_link_libraries(test_isac_aoa PRIVATE NR_UE_ISAC UTIL GTest::gtest)

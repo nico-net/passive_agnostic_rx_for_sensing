@@ -198,7 +198,18 @@ void eca_clutter::rebuild(uint32_t nof_slow, uint32_t nof_subc, double df_comb, 
   // e.g. tests/sensing_sim's 0.15 — must be doubled to preserve their previous bin coverage.)
   // fc≤0 (no carrier) => Qh=0 (DC-only removal).
   uint32_t Qh = 0;
-  if (fc > 0.0 && t_slow > 0.0 && args.eca_doppler_max_mps > 0.0f) {
+  if (args.eca_doppler_max_mps < 0.0f) {
+    // AUTO (negative sentinel; 0 keeps its existing meaning of DC-ONLY removal, which is exactly
+    // mean subtraction and is asserted by EcaClutter.MeanSubtractionEquivalence).
+    // Expressing this in m/s was the wrong unit and the comment above says why: the same
+    // physical clutter needs a different m/s value at every fc / nof_slow / t_slow, so the number had
+    // to be re-derived on any config change (it already had to be DOUBLED once when vel_res lost a
+    // factor 2). What the atom set must actually span is fixed and dimensionless: clutter is STATIC,
+    // so it occupies the slow-time window's mainlobe about DC and nothing more. For the Hann window
+    // used on the slow-time axis that is ~2 bins either side, independent of carrier, CPI length and
+    // slot duration. Same argument as the auto NMS radius: one scatterer, one mainlobe.
+    Qh = 2;
+  } else if (fc > 0.0 && t_slow > 0.0 && args.eca_doppler_max_mps > 0.0f) {
     const double vel_res = SPEED_OF_LIGHT / (fc * (double)nof_slow * t_slow);
     if (vel_res > 0.0) {
       Qh = (uint32_t)std::lround((double)args.eca_doppler_max_mps / vel_res);

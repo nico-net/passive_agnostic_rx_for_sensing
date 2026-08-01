@@ -677,6 +677,61 @@ void sensing_engine::process_cpi()
           n_az, detections.size(), aoa->calibration_updates());
   }
 
+  // Position-anchored harmonic rejection (GHOST_KINEMATIC_CONSISTENCY_HANDOVER.md Phase A). MUST run
+  // here and not alongside range_doppler.cc's range-bin-anchored harmonic_reject: azimuth is only
+  // attached in the block above, after process() has already returned, so a position anchor is simply
+  // not available where the existing test lives. Logged unconditionally when it fires -- a gate whose
+  // rejection count is invisible is indistinguishable from a gate that is silently inert.
+  if (args.harmonic_pos_reject) {
+    const size_t   before  = detections.size();
+    const uint32_t dropped = harmonic_pos_reject(args, detections);
+    harmonic_pos_dropped_ += dropped;
+    if (dropped > 0) {
+      LOG_I(PHY, "SENSING: harmonic-pos CPI #%u dropped %u/%zu detections (cumulative %lu)\n", cpi_count,
+            dropped, before, (unsigned long)harmonic_pos_dropped_);
+    }
+  }
+
+  // Adaptive per-detection quality gate (det_quality.h). Runs LAST among the detection filters, and
+  // after AoA, so it sees the final detection set. Learns its own operating point online -- there is
+  // deliberately no SNR threshold here, because the SNR population moves bodily with gain, traffic
+  // and scene (measured: the same algorithm settles at a 12.7 dB null on one capture and 18.1 dB on
+  // another). Logged whenever it drops anything, with the learned state, so a gate that has latched
+  // into a degenerate corner is visible rather than silently eating every detection.
+  if (args.det_quality_adapt && !detections.empty()) {
+    if (!det_q_) {
+      det_q_.reset(new det_quality(args.det_quality_cost_ratio));
+    }
+    // Inter-CPI time, mirroring what the DetectionReport declares as cpi_duration: it lets each
+    // detection's own range-rate say where it was in previous CPIs (motion-compensated persistence).
+    const double slots_per_sf_dq = std::max(1.0, (double)cpi_carrier.scs_hz / 15000.0);
+    const double cpi_dt_s        = (double)args.cpi_slots * (1e-3 / slots_per_sf_dq);
+    det_q_->score(detections, rvm.range_res_m, cpi_dt_s, det_q_p_);
+    const size_t                     before = detections.size();
+    std::vector<sensing_detection_t> kept;
+    kept.reserve(before);
+    for (size_t i = 0; i < detections.size() && i < det_q_p_.size(); i++) {
+      if (det_q_p_[i] >= det_q_->boundary()) {
+        kept.push_back(detections[i]);
+        // Carry the posterior through to the report. Survivors are NOT equally credible -- the
+        // boundary is a decision, not a description -- and the central node has no way to recover
+        // this number from range/rate/SNR alone.
+        kept.back().p_real = det_q_p_[i];
+      }
+    }
+    const size_t dropped = before - kept.size();
+    detections.swap(kept);
+    det_q_dropped_ += dropped;
+    if (dropped > 0) {
+      LOG_I(PHY,
+            "SENSING: det-quality CPI #%u kept %zu/%zu (cumulative dropped %lu) "
+            "null[med=%.1f mad=%.2f]dB sep=%.2f var[real=%.2f null=%.2f] prior=%.2f\n",
+            cpi_count, detections.size(), before, (unsigned long)det_q_dropped_,
+            det_q_->null_median_db(), det_q_->null_mad_db(), det_q_->separation_sigma(),
+            det_q_->var_real(), det_q_->var_null(), det_q_->prior_real());
+    }
+  }
+
   // Phase 4 (ota_sync_passive_ue.md): wraps range_doppler's existing output (no second RD/CFAR
   // path) to find this CPI's LOS detection, measure its residual from the established baseline, and
   // fold that into the closed-loop bias state applied on the NEXT CPI (one-CPI feedback latency).
@@ -828,6 +883,7 @@ void sensing_engine::write_report_json()
   rep.cpi_duration_ns       = slot_dur_ns * (int64_t)args.cpi_slots;
   rep.fc_hz                 = (double)cpi_carrier.dl_center_hz;
   rep.subbin_interp         = args.subbin_interp;
+  rep.p_detect              = det_q_ ? det_q_->detection_rate() : -1.0;
   rep.rvm                   = &rvm;
   rep.detections            = &detections;
   rep.include_rvm_blob      = args.capture_enable;

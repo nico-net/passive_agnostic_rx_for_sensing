@@ -226,6 +226,25 @@ sensing = {
   # A LINEAR array cannot separate a bearing from its mirror about the array axis (physics: the phase
   # depends only on d.u). Only a genuinely 2-D element layout removes that.
 
+  # ---- position-anchored harmonic rejection (GHOST_KINEMATIC_CONSISTENCY_HANDOVER.md Phase A)
+  # The same test as harmonic_reject, with a strictly tighter anchor: two detections must localise
+  # (range + bearing -> ray n bistatic ellipse) to the SAME reflection, rather than merely share a
+  # range bin. Harmonics are one reflection mis-binned in Doppler, so they share range AND bearing;
+  # two distinct targets sharing a range bin -- common -- almost never share both.
+  # Runs in sensing_engine.cc AFTER the AoA block (azimuth does not exist earlier). Inert without
+  # bearings. Logs its per-CPI and cumulative rejection count whenever it fires.
+  # It does NOT catch an ORPHANED harmonic (fundamental undetected this CPI) -- that is Phase B, and
+  # it lives in repos/isac, where a track carries position and velocity to predict the rate from.
+  #
+  # MEASURED 2026-07-30: a flat metre gate LOST to the existing range anchor -- the two fixes of a
+  # real harmonic pair are dominated by INDEPENDENT bearing noise (~1.9 deg CRB here), so a gate tight
+  # enough to reject unrelated targets was also too tight to hold real pairs together. The tangential
+  # (bearing-driven) residual is therefore chi2-normalised by each detection's OWN azimuth_std_deg;
+  # only the radial residual (no per-detection range sigma exists) stays a flat metre tolerance.
+  # harmonic_pos_reject      = 1;
+  # harmonic_pos_chi2        = 9.0;  # 1-dof chi2 on the tangential residual, 9 = 3 sigma
+  # harmonic_pos_range_tol_m = 8.0;  # flat tolerance on the radial residual only
+
   # surveyed geometry / logical ids for the central node
   rx_id           = "rx1";
   illuminator_id  = "gnb1";

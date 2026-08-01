@@ -178,6 +178,8 @@ private:
   // Closed-loop state for cfar_target_fa_per_cpi (see defs_nr_UE_ISAC.h's cfar_fa_adapt_enable
   // comment): persists across CPIs, seeded from args.cfar_target_fa_per_cpi on first use.
   float cfar_fa_state_ = -1.0f;
+  /// CPI counter, used only to rate-limit the adaptive-clutter-guard diagnostic.
+  uint32_t notch_log_ = 0;
 
   // Phase 6a: parsed args.selftest_los, kept for visibility/logging only -- see the constructor's
   // comment for why process() itself doesn't consume this (it would be downstream of Phases 1-4).

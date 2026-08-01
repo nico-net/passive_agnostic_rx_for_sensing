@@ -26,7 +26,11 @@ gt_src = sys.argv[2]
 TOL = float(sys.argv[3]) if len(sys.argv) > 3 else 15.0
 
 ue_log = gt_src if gt_src.endswith(".log") else f"{gt_src}/logs/ue.log"
-gt_re = re.compile(r"SENSING_CHANNEL gt: t=([\d.]+)s obj(\d+) pos=\(([-\d.]+),([-\d.]+)\)m")
+# `.*?` between the timestamp and `objN` on purpose: the gt line has gained fields before (a `utc_ns=`
+# stamp on another branch), and a strict `t=Xs objN` match silently yields ZERO ground truth rather
+# than an error -- which is exactly how every score computed with it becomes a quiet 0 %. Same class
+# of break CLAUDE.md 11 records for six of these scripts.
+gt_re = re.compile(r"SENSING_CHANNEL gt: t=([\d.]+)s .*?obj(\d+) pos=\(([-\d.]+),([-\d.]+)\)m")
 raw = collections.defaultdict(list)
 with open(ue_log, errors="ignore") as f:
     for line in f:

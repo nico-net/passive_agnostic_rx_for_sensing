@@ -25,6 +25,24 @@
 
 namespace nr_isac {
 
+double nr_isac_detection_sigma(double res, double snr_db, bool subbin)
+{
+  if (!(res > 0.0)) {
+    return 0.0;
+  }
+  const double quant = res / std::sqrt(12.0); // uniform bin-quantisation bound
+  if (!subbin) {
+    return quant; // no sub-bin estimate was computed; SNR cannot improve what was never measured
+  }
+  const double snr_lin = std::pow(10.0, snr_db / 10.0);
+  if (!(snr_lin > 0.0) || !std::isfinite(snr_lin)) {
+    return quant;
+  }
+  const double sigma = res / std::sqrt(2.0 * snr_lin);
+  const double floor_ = res / 20.0; // sub-bin interpolation bias floor (see the header comment)
+  return std::min(quant, std::max(floor_, sigma));
+}
+
 const char* nr_isac_source_to_ref_type(nr_isac_source_t source)
 {
   switch (source) {
@@ -173,6 +191,13 @@ std::string build_detection_report_json(const detection_report_t& rep)
     append_json_double(out, rep.subbin_interp ? rvm.vel_res_mps * 0.3 : rvm.vel_res_mps / std::sqrt(12.0));
   }
 
+  // Receiver-measured P_D. OMITTED when unavailable, so a consumer falls back to its own estimate
+  // exactly as before rather than reading a sentinel as a real detection rate.
+  if (rep.p_detect >= 0.0) {
+    out += ",\"p_detect\":";
+    append_json_double(out, rep.p_detect);
+  }
+
   out += ",\"detections\":[";
   if (rep.detections != nullptr) {
     bool first = true;
@@ -196,6 +221,26 @@ std::string build_detection_report_json(const detection_report_t& rep)
         append_json_double(out, d.azimuth_deg);
         out += ",\"azimuth_std_deg\":";
         append_json_double(out, d.azimuth_std_deg);
+      }
+      // PER-DETECTION range/rate uncertainty from this detection's own SNR (see
+      // nr_isac_detection_sigma). The report-level values remain for consumers that ignore these, and
+      // for detections in a CPI with no usable resolution; isac-core prefers the per-detection value
+      // when present, so an older tracker simply keeps using the report-level one.
+      const double r_sig = nr_isac_detection_sigma(rvm.range_res_m, d.snr_db, rep.subbin_interp);
+      const double v_sig = nr_isac_detection_sigma(rvm.vel_res_mps, d.snr_db, rep.subbin_interp);
+      if (r_sig > 0.0) {
+        out += ",\"range_std_m\":";
+        append_json_double(out, r_sig);
+      }
+      if (v_sig > 0.0) {
+        out += ",\"rate_std_mps\":";
+        append_json_double(out, v_sig);
+      }
+      // Adaptive quality posterior (det_quality.h). OMITTED, not zeroed, when the gate did not run --
+      // 0.0 would read as "certainly a false alarm" and would suppress every track.
+      if (d.p_real >= 0.0f) {
+        out += ",\"p_real\":";
+        append_json_double(out, d.p_real);
       }
       out += '}';
     }
