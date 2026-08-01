@@ -104,6 +104,59 @@ struct aoa_array_t {
 bool parse_rx_array(const std::string& spec, double boresight_deg, double fc_hz, aoa_array_t& out,
                     bool quiet = false);
 
+/**
+ * @brief Ray ∩ bistatic-ellipse: turn ONE receiver's (differential range, bearing) into a position.
+ *
+ * The exact closed form isac-core's `TxRxPair::localize_with_bearing()` uses -- deliberately the same
+ * algebra, so a fix computed UE-side and the same fix computed at the central node cannot disagree:
+ *
+ *     P = R + t·û,  R_b = |P − T| + t   =>   t = (R_b² − |a|²) / (2·(R_b + a·û)),  a = R − T
+ *
+ * The t² terms cancel, so this is exact, not an iteration.
+ *
+ * @param reported_range_m DIFFERENTIAL range ΔR = R_b − L, the convention the DetectionReport uses
+ *        (`report_is_differential = true` at the central node). Note that `sensing_detection_t`'s
+ *        `range_m` subtracts no LOS reference of its own -- it equals ΔR only because the direct path
+ *        lands at range bin 0 on this harness. If that ever stops holding (the OTA cell puts the
+ *        direct path at ~98 m; see `nominal_los_range_m`), the fixes computed here shift with it and
+ *        the range convention must be reconciled BEFORE trusting a position from this function.
+ * @return false when the solution is behind the receiver or the denominator degenerates -- which is
+ *         what happens when the range and the bearing describe different objects.
+ */
+bool aoa_localize(double tx_x, double tx_y, double rx_x, double rx_y, double reported_range_m,
+                  double bearing_deg, double& out_x, double& out_y);
+
+/**
+ * @brief Position-anchored Doppler-harmonic rejection (GHOST_KINEMATIC_CONSISTENCY_HANDOVER §3, A).
+ *
+ * `range_doppler`'s existing `harmonic_reject` anchors a harmonic to its fundamental by RANGE BIN
+ * alone. Two detections that are harmonics of each other share range AND bearing (they are one
+ * physical reflection mis-binned in Doppler), so they localise to the same point; two genuinely
+ * distinct targets sharing a range bin -- which is common -- almost never also share a bearing.
+ * Anchoring on the AoA-derived POSITION is therefore a strictly TIGHTER test in principle.
+ *
+ * **MEASURED (2026-07-30, GHOST_KINEMATIC_CONSISTENCY_HANDOVER.md 7.3): a flat metre tolerance on
+ * that position anchor LOST to the existing range anchor**, because the two fixes of a genuine
+ * harmonic pair are dominated by INDEPENDENT bearing estimation noise, not by geometry -- a flat gate
+ * tight enough to reject unrelated targets was also too tight to hold real pairs together. The gate
+ * therefore normalises the tangential (bearing-driven) residual by each detection's OWN reported
+ * `azimuth_std_deg` via a chi2 test (`harmonic_pos_chi2`), and leaves only the radial residual as a
+ * flat tolerance (`harmonic_pos_range_tol_m`) -- there is no per-detection range uncertainty to build
+ * a real chi2 test from, so none is invented. See `same_reflection()` in the .cc.
+ *
+ * Scope, stated so it is not oversold: like every same-CPI test this still needs the FUNDAMENTAL to
+ * have been detected in this CPI. It does nothing for an orphaned harmonic -- that is Phase B, and
+ * it lives in `repos/isac` where a track carries position and velocity.
+ *
+ * Automatically inert when no detection carries a bearing (a receiver with no array), because a
+ * detection without a position can neither be rejected nor act as a fundamental.
+ *
+ * @param args   supplies rx/tx survey positions, harmonic_pos_chi2/range_tol_m, and harmonic_* tolerances.
+ * @param dets   modified in place; rejected detections are erased.
+ * @return number of detections rejected.
+ */
+uint32_t harmonic_pos_reject(const nr_isac_args_t& args, std::vector<sensing_detection_t>& dets);
+
 /// One detection's bearing estimate.
 struct aoa_estimate_t {
   float azimuth_deg     = 0.0f;

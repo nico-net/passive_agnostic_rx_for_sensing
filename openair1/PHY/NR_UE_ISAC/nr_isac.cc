@@ -185,7 +185,6 @@ extern "C" void nr_isac_init(void)
   double p_gating_min_rel = 0.35, p_gating_snr_margin = 3.0;
   double p_cfar_pfa = 0.0, p_cfar_target_fa = 1.0;
   int    p_zdg = 3, p_zrg = 2, p_nms_r = 3, p_nms_d = 3, p_maxdet = 32, p_dealias_taper = 4;
-  double p_max_range_m = 0.0;
   int    p_conj_reject = 1, p_conj_guard = 4, p_range_whiten = 0, p_doppler_nudft = 0;
   int    p_mc_enable = 0, p_mc_rank = 0, p_mc_rank_max = 8, p_mc_iters = 15, p_mc_power = 1;
   int    p_sd_enable = 0, p_sd_iters = 40;
@@ -195,8 +194,14 @@ extern "C" void nr_isac_init(void)
   double p_sd_harmonic_ratio = 0.25;
   int    p_harm_reject = 0, p_harm_guard = 4, p_harm_maxk = 4;
   double p_harm_tol = 0.15, p_harm_snr_margin = 6.0;
+  double p_max_range = 0.0;
+  int    p_adapt_guard = 0;
+  int    p_dq_adapt = 0;
+  double p_dq_cost = 1.0;
   int    p_far_harm_reject = 0;
-  double p_far_harm_far = 500.0, p_far_harm_near = 250.0;
+  double p_far_harm_far = 0.0, p_far_harm_near = 0.0;
+  int    p_harm_pos_reject = 0;
+  double p_harm_pos_chi2 = 9.0, p_harm_pos_range_tol = 8.0;
   int    p_cfar_fa_adapt = 0;
   double p_cfar_fa_min = 0.5, p_cfar_fa_max = 20.0, p_cfar_fa_rate = 1.15;
   int    p_cfar_fa_tmin = 2, p_cfar_fa_tmax = 8;
@@ -227,7 +232,7 @@ extern "C" void nr_isac_init(void)
   int    p_clean_deconv = 0, p_clean_max_comp = 0, p_clean_max_comp_cap = 16, p_clean_restore = 1;
   int    p_clean_occ_aware = 0;
   int    p_subslot_symbols = 0, p_subslot_min_re = 600;
-  double p_subslot_min_snr_db = 10.0;
+  double p_subslot_min_snr_db = 0.0;
   double p_clean_loop_gain = 0.8, p_clean_stop_db = 25.0;
   char*  p_targets    = nullptr;
   char*  p_selftest_los = nullptr;
@@ -275,24 +280,26 @@ extern "C" void nr_isac_init(void)
       mk_int("zero_doppler_guard", "Doppler notch half-width (bins)", 0, &p_zdg, 3),
       mk_int("zero_range_guard", "range notch half-width (bins)", 0, &p_zrg, 2),
       mk_int("dealias_taper_bins", "raised-cosine de-alias taper width (bins) before a comb row's periodic-image cutoff; widen if a strong direct path's sidelobe skirt leaks past the default", 0, &p_dealias_taper, 4),
-      mk_int("nms_range_bins", "NMS radius in range bins", 0, &p_nms_r, 3),
-      mk_int("nms_doppler_bins", "NMS radius in Doppler bins", 0, &p_nms_d, 3),
-      mk_dbl("max_range_m",
-             "hard upper bound on detectable differential range (m); 0 = whole axis. Set from "
-             "physics (the CIR span in sim, the instrumented range OTA) -- past it every cell is an "
-             "artifact and, unfiltered, they consume the entire max_detections budget",
-             &p_max_range_m, 0.0),
+      mk_int("nms_range_bins", "NMS radius in range bins; 0 = AUTO from the range window's mainlobe half-width", 0, &p_nms_r, 0),
+      mk_int("nms_doppler_bins", "NMS radius in Doppler bins; 0 = AUTO from the slow-time (Hann) mainlobe half-width", 0, &p_nms_d, 0),
       mk_int("max_detections", "cap on detections per CPI", 0, &p_maxdet, 32),
       mk_int("conj_image_reject", "reject conjugate-image (mirror ghost) detections", PARAMFLAG_BOOL, &p_conj_reject, 1),
       mk_int("conj_image_guard", "range-bin tolerance when matching a detection to its mirror", 0, &p_conj_guard, 4),
       mk_int("harmonic_reject", "reject Doppler-harmonic ghosts (same range, integer-multiple velocity of a stronger detection)", PARAMFLAG_BOOL, &p_harm_reject, 0),
       mk_int("harmonic_guard", "range-bin tolerance when pairing a harmonic to its fundamental", 0, &p_harm_guard, 4),
       mk_int("harmonic_max_k", "highest Doppler-harmonic order to reject (2..k)", 0, &p_harm_maxk, 4),
-      mk_dbl("harmonic_tol", "fractional tolerance on the integer velocity ratio", &p_harm_tol, 0.15),
+      mk_dbl("harmonic_tol", "fractional tolerance on the integer velocity ratio; 0 = AUTO (per-pair, from each detection's own SNR-derived rate sigma)", &p_harm_tol, 0.0),
       mk_dbl("harmonic_snr_margin", "max dB the fundamental may be weaker than its harmonic and still reject it", &p_harm_snr_margin, 6.0),
+      mk_int("harmonic_pos_reject", "reject a Doppler harmonic anchored on the AoA-derived POSITION of its fundamental instead of its range bin (needs bearings; inert without an array)", PARAMFLAG_BOOL, &p_harm_pos_reject, 0),
+      mk_dbl("harmonic_pos_chi2", "chi2 threshold (1 dof, 9=3sigma) on the tangential position residual, normalised by each detection's own azimuth_std_deg", &p_harm_pos_chi2, 9.0),
+      mk_dbl("harmonic_pos_range_tol_m", "flat tolerance (m) on the RADIAL position residual only (no per-detection range sigma exists to chi2-ize it)", &p_harm_pos_range_tol, 8.0),
+      mk_int("det_quality_adapt", "adaptive per-detection P(real) gate learned online (robust SNR null + temporal persistence); no dB threshold", PARAMFLAG_BOOL, &p_dq_adapt, 0),
+      mk_dbl("det_quality_cost_ratio", "relative cost of admitting a false alarm vs losing a real detection (1 = symmetric Bayes)", &p_dq_cost, 1.0),
+      mk_int("adaptive_clutter_guard", "derive zero_range_guard/zero_doppler_guard from each CPI's own clutter profile", PARAMFLAG_BOOL, &p_adapt_guard, 0),
+      mk_dbl("max_range_m", "notch every range bin beyond this BEFORE CFAR; >0 = explicit, <0 = AUTO from the range profile's own noise floor, 0 = disabled", &p_max_range, 0.0),
       mk_int("far_harmonic_reject", "reject far-range detections at k*velocity of a dominant near-range Doppler component (range-smeared amplitude-gating pedestal)", PARAMFLAG_BOOL, &p_far_harm_reject, 0),
-      mk_dbl("far_harmonic_far_m", "range beyond which a detection is a far-ghost candidate", &p_far_harm_far, 500.0),
-      mk_dbl("far_harmonic_near_m", "range within which dominant Doppler components are sought", &p_far_harm_near, 250.0),
+      mk_dbl("far_harmonic_far_m", "range beyond which a detection is a far-ghost candidate", &p_far_harm_far, 0.0),
+      mk_dbl("far_harmonic_near_m", "range within which dominant Doppler components are sought", &p_far_harm_near, 0.0),
       mk_int("cfar_fa_adapt_enable", "closed-loop adaptation of cfar_target_fa_per_cpi from the measured raw detection count (seed unchanged, only the loop is new)", PARAMFLAG_BOOL, &p_cfar_fa_adapt, 0),
       mk_dbl("cfar_fa_min", "floor for the adapted cfar_target_fa_per_cpi", &p_cfar_fa_min, 0.5),
       mk_dbl("cfar_fa_max", "ceiling for the adapted cfar_target_fa_per_cpi", &p_cfar_fa_max, 20.0),
@@ -310,7 +317,7 @@ extern "C" void nr_isac_init(void)
       mk_int("clean_deconv", "CLEAN deconvolution: coherently strip each strong scatterer's window PSF (range pedestal + Doppler sidelobes) before CFAR (detector=fft, uniform comb only)", PARAMFLAG_BOOL, &p_clean_deconv, 0),
       mk_int("subslot_symbols", "sub-slot CFR sampling: target OFDM symbols per slow-time row (0=off, one row/slot). Raises the unambiguous velocity ~N-fold", 0, &p_subslot_symbols, 0),
       mk_int("subslot_min_re", "sub-slot SPARSITY gate: min REs for a row to stand alone (else it absorbs the next symbol)", 0, &p_subslot_min_re, 600),
-      mk_dbl("subslot_min_snr_db", "sub-slot SNR gate: min estimated post-integration row SNR (dB)", &p_subslot_min_snr_db, 10.0),
+      mk_dbl("subslot_min_snr_db", "sub-slot SNR gate (dB); <= 0 = AUTO: full-slot SNR minus 10*log10(groups)", &p_subslot_min_snr_db, 0.0),
       mk_int("clean_occ_aware", "CLEAN: model each component's PSF through the ACTUAL per-row occupancy mask (removes amplitude-gating Doppler-harmonic replicas; needs clean_deconv=1, uses raw occ grid, costly)", PARAMFLAG_BOOL, &p_clean_occ_aware, 0),
       mk_int("clean_max_components", "CLEAN component budget per CPI; 0=auto-derive from previous CPI's detection count (recommended)", 0, &p_clean_max_comp, 0),
       mk_int("clean_max_components_cap", "CLEAN auto mode: hard ceiling on the derived component budget", 0, &p_clean_max_comp_cap, 16),
@@ -466,7 +473,6 @@ extern "C" void nr_isac_init(void)
   g_args.cfar_target_fa_per_cpi = (float)p_cfar_target_fa;
   g_args.zero_doppler_guard = (uint32_t)p_zdg;
   g_args.zero_range_guard   = (uint32_t)p_zrg;
-  g_args.max_range_m        = (float)p_max_range_m;
   g_args.dealias_taper_bins = (uint32_t)p_dealias_taper;
   g_args.nms_range_bins     = (uint32_t)p_nms_r;
   g_args.nms_doppler_bins   = (uint32_t)p_nms_d;
@@ -478,6 +484,13 @@ extern "C" void nr_isac_init(void)
   g_args.harmonic_max_k     = (uint32_t)(p_harm_maxk >= 2 ? p_harm_maxk : 2);
   g_args.harmonic_tol       = (float)p_harm_tol;
   g_args.harmonic_snr_margin = (float)p_harm_snr_margin;
+  g_args.harmonic_pos_reject     = p_harm_pos_reject != 0;
+  g_args.harmonic_pos_chi2       = (float)p_harm_pos_chi2;
+  g_args.harmonic_pos_range_tol_m = (float)p_harm_pos_range_tol;
+  g_args.det_quality_adapt      = p_dq_adapt != 0;
+  g_args.det_quality_cost_ratio = (float)p_dq_cost;
+  g_args.adaptive_clutter_guard = p_adapt_guard != 0;
+  g_args.max_range_m         = (float)p_max_range;
   g_args.far_harmonic_reject = p_far_harm_reject != 0;
   g_args.far_harmonic_far_m  = (float)p_far_harm_far;
   g_args.far_harmonic_near_m = (float)p_far_harm_near;

@@ -25,7 +25,13 @@ sed -i "s/cpi_slots *= *[0-9]*;/cpi_slots       = 128;/" "$c"
 sed -i "s#out_path *= *\"[^\"]*\";#out_path    = \"$OUT/oaiue_sensing\";#" "$c"
 sed -i "s#report_path *= *\"[^\"]*\";#report_path = \"$OUT/oaiue_reports.jsonl\";#" "$c"
 
-sudo env BUILD_DIR=/home/sens/NICOLA/openairinterface5g/cmake_targets/ran_build/build UE_NB_ANT_RX="${UE_NB_ANT_RX:-1}" \
+# BUILD_DIR defaults to THIS SCRIPT'S OWN worktree, resolved relatively. It used to be an absolute
+# path, which silently ran rx2/rx3 from a different git worktree (and therefore a different branch)
+# than rx1 -- so in a multi-receiver capture the receivers could disagree about which report fields
+# exist at all (p_real / p_detect), a silent-garbage failure of the same class as a wrong
+# csirs_monitor scramb_id. A relative default cannot drift that way when the file is on two branches.
+DEFAULT_BUILD_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../cmake_targets/ran_build/build" 2>/dev/null && pwd)"
+sudo env BUILD_DIR="${BUILD_DIR:-$DEFAULT_BUILD_DIR}" UE_NB_ANT_RX="${UE_NB_ANT_RX:-1}" \
   GNB_CONF=gnb.sensing.100mhz.rfsim.conf UE_PRB=273 UE_CFREQ=3750000000 \
   ./run_sim_traffic_iperf_ns3.sh "$DUR" "$OUT/logs" "$c" 3M
 rm -f "$c"

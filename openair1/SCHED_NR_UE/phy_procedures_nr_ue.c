@@ -1001,7 +1001,8 @@ int nr_process_pbch_symbol(
     const int ssbIndexIn,
     c16_t dl_ch_estimates_time[ue->frame_parms.nb_antennas_rx][ue->frame_parms.ofdm_symbol_size],
     c16_t *dl_ch_estimates_symbol,
-    int16_t pbch_e_rx[NR_POLAR_PBCH_E])
+    int16_t pbch_e_rx[NR_POLAR_PBCH_E],
+    double *log2_maxh_state)
 {
   NR_DL_FRAME_PARMS *fp = &ue->frame_parms;
   const int symbIdxInFrame = symbol + NR_SYMBOLS_PER_SLOT * proc->nr_slot_rx;
@@ -1058,7 +1059,8 @@ int nr_process_pbch_symbol(
     memcpy(dl_ch_estimates_symbol, dl_ch_estimates[0], sizeof(*dl_ch_estimates_symbol) * NR_PBCH_NUM_RB * NR_NB_SC_PER_RB);
 
   const int symbIdxInSSB = relPbchSymb + 1;
-  nr_generate_pbch_llr(ue, proc, fp, symbIdxInSSB, ssbIndex, nid, ssb_start_subcarrier, rxdataF, dl_ch_estimates, pbch_e_rx);
+  nr_generate_pbch_llr(ue, proc, fp, symbIdxInSSB, ssbIndex, nid, ssb_start_subcarrier, rxdataF, dl_ch_estimates, pbch_e_rx,
+                       log2_maxh_state);
   // Do measurements on middle symbol of PBCH block
   if (relPbchSymb == 1) {
     nr_ue_ssb_rsrp_measurements(ue, ssbIndex, proc, rxdataF);
@@ -1079,7 +1081,8 @@ static int pbch_process(PHY_VARS_NR_UE *UE,
                         c16_t pbch_ch_est_sym1[NR_PBCH_NUM_RB * NR_NB_SC_PER_RB],
                         c16_t pbch_ch_est_time[UE->frame_parms.nb_antennas_rx][UE->frame_parms.ofdm_symbol_size],
                         int16_t pbch_e_rx[NR_POLAR_PBCH_E],
-                        int *pbchSymbCnt)
+                        int *pbchSymbCnt,
+                        double *log2_maxh_state)
 {
   int sampleShift = INT_MAX;
 
@@ -1092,7 +1095,7 @@ static int pbch_process(PHY_VARS_NR_UE *UE,
   else if (*pbchSymbCnt == 2)
     cur_pbch_est = pbch_ch_est_sym3;
 
-  *ssbIndex = nr_process_pbch_symbol(UE, proc, symbol, *ssbIndex, pbch_ch_est_time, cur_pbch_est, pbch_e_rx);
+  *ssbIndex = nr_process_pbch_symbol(UE, proc, symbol, *ssbIndex, pbch_ch_est_time, cur_pbch_est, pbch_e_rx, log2_maxh_state);
   // If valid PBCH symbol, increment symbol count.
   if (*ssbIndex > -1)
     (*pbchSymbCnt)++;
@@ -1157,12 +1160,16 @@ int pbch_processing(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc, nr_phy_da
     int16_t pbch_e_rx[NR_POLAR_PBCH_E];
     // Buffer to hold estimates of symbol 1 for FO compensation in symbol 3
     c16_t pbch_ch_est_sym1[NR_PBCH_NUM_RB * NR_NB_SC_PER_RB];
+    // Channel-compensation shift, shared across this SSB's three PBCH symbols so their LLRs stay on
+    // a common scale for the single polar codeword -- see nr_generate_pbch_llr().
+    double pbch_log2_maxh = -1.0;
 
     int ssbIndex = -1;
     // TODO: Remove loopover symbols when symbol based receiver is fully integrated.
     for (int symbol = 0; symbol < fp->symbols_per_slot; symbol++) {
       const int pbch_sampleShift =
-          pbch_process(ue, proc, symbol, &ssbIndex, pbch_ch_est_sym1, pbch_ch_est_time, pbch_e_rx, &pbchSymbCnt);
+          pbch_process(ue, proc, symbol, &ssbIndex, pbch_ch_est_sym1, pbch_ch_est_time, pbch_e_rx, &pbchSymbCnt,
+                       &pbch_log2_maxh);
       // To prevent overwrite estimated shift by consecutive symbol calls
       sampleShift = (sampleShift == INT_MAX) ? pbch_sampleShift : sampleShift;
     }

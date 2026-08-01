@@ -349,14 +349,32 @@ static void trx_usrp_finish_rx(usrp_state_t *s)
   uhd::stream_cmd_t cmd(uhd::stream_cmd_t::STREAM_MODE_STOP_CONTINUOUS);
   s->rx_stream->issue_stream_cmd(cmd);
 
-  /* collect all remaining samples (not sure if needed) */
+  /* Collect the samples still in flight, so the next start_rx begins on a clean stream.
+   *
+   * BOUNDED, and that is load-bearing: this loop used to be an unbounded
+   * "do { recv } while (samples > 0)". On an X410 (RFNoC) the stream does not reliably run dry
+   * after STOP_CONTINUOUS, so recv keeps returning samples and the loop never exits. MEASURED:
+   * the UE completed initial sync against a live 100 MHz cell, then hit this during its first
+   * resync and froze permanently -- UEthread_0 parked in recv(), every other thread idle, not one
+   * further line of log output, and no error anywhere. It looks exactly like a protocol/decode
+   * problem and is not one. Stop on the first timeout/error, and cap the iteration count so a
+   * device that keeps producing can never wedge the UE. */
   size_t samples;
   uint8_t buf[1024];
   std::vector<void *> buff_ptrs;
   for (size_t i = 0; i < s->usrp->get_rx_num_channels(); i++) buff_ptrs.push_back(buf);
+  const int max_drain_iterations = 10000;
+  int iterations = 0;
   do {
-    samples = s->rx_stream->recv(buff_ptrs, sizeof(buf)/4, s->rx_md);
-  } while (samples > 0);
+    samples = s->rx_stream->recv(buff_ptrs, sizeof(buf) / 4, s->rx_md, 0.01);
+    if (s->rx_md.error_code != uhd::rx_metadata_t::ERROR_CODE_NONE) {
+      break; // timeout (stream is dry) or a real error -- either way, stop draining
+    }
+  } while (samples > 0 && ++iterations < max_drain_iterations);
+
+  if (iterations >= max_drain_iterations) {
+    LOG_W(HW, "RX stream still delivering after %d drain iterations, continuing anyway\n", max_drain_iterations);
+  }
 }
 
 static void trx_usrp_write_reset(openair0_thread_t *wt);
@@ -1199,8 +1217,14 @@ extern "C" {
         // from usrp_time_offset
         //openair0_cfg[0].samples_per_packet    = 2048;
         openair0_cfg[0].tx_sample_advance     = 15; //to be checked
-        openair0_cfg[0].tx_bw                 = 80e6;
-        openair0_cfg[0].rx_bw                 = 80e6;
+        // 100e6, not the former 80e6: 122.88 Msps carries a 273-PRB/100 MHz carrier, which spans
+        // 273*12*30kHz = 98.28 MHz. An 80 MHz analog filter centred on the carrier truncates ~9 MHz
+        // at EACH edge, and an SSB placed low in the carrier then falls outside the passband
+        // entirely -- measured on a live srsRAN cell whose SSB sat 40 MHz below carrier centre
+        // (3374.4 MHz vs 3414.99 MHz): the filter's lower edge landed at 3374.99 MHz, 0.6 MHz above
+        // the SSB, and initial sync could never see it. Widening to 100e6 covers the whole carrier.
+        openair0_cfg[0].tx_bw                 = 100e6;
+        openair0_cfg[0].rx_bw                 = 100e6;
         break;
 
       case 92160000:
@@ -1370,13 +1394,31 @@ extern "C" {
             cfg->rx_gain_offset[i],
             cfg->rx_gain[i] - cfg->rx_gain_offset[i],
             gain_range.stop());
-      // Bistatic sensing UE: force RX onto the RX2 connector so the receive
-      // antenna is physically separate from the TX/RX transmit antenna,
-      // improving TX->RX isolation. OAI otherwise leaves the antenna at the
-      // UHD default, which on a B2x0 shares the TX/RX port for both directions.
-      s->usrp->set_rx_antenna("RX2", i + choffset);
-      LOG_I(HW, "RX antenna forced to %s on channel %d\n",
-            s->usrp->get_rx_antenna(i + choffset).c_str(), i);
+      // Bistatic sensing UE: force RX onto a connector physically separate from the one TX uses,
+      // improving TX->RX isolation. OAI otherwise leaves the antenna at the UHD default, which
+      // shares one port for both directions on a B2x0.
+      //
+      // PORT NAMES ARE DEVICE-SPECIFIC and an invalid name is not a soft failure -- it segfaults
+      // inside libuhd (null deref). Measured on an X410 (UHD 4.10): its ports are
+      // {TX/RX0, RX1, CAL_LOOPBACK, TERMINATION} for RX and {TX/RX0, CAL_LOOPBACK} for TX, so the
+      // B2x0 names "RX2"/"TX/RX" -- which this block previously applied UNCONDITIONALLY to every
+      // device type -- crash the X410 before it ever streams. Hence the explicit per-type switch,
+      // and no forcing at all on device types whose port naming hasn't been verified here.
+      const char *rx_ant = NULL;
+      if (device->type == USRP_B200_DEV) {
+        rx_ant = "RX2";
+      } else if (device->type == USRP_X400_DEV) {
+        rx_ant = "RX1"; // X410: TX stays on TX/RX0, so RX1 is the separate-connector choice
+      }
+      if (rx_ant != NULL) {
+        s->usrp->set_rx_antenna(rx_ant, i + choffset);
+        LOG_I(HW, "RX antenna forced to %s on channel %d\n",
+              s->usrp->get_rx_antenna(i + choffset).c_str(), i);
+      } else {
+        LOG_I(HW, "RX antenna left at UHD default (%s) on channel %d -- port naming not verified "
+                  "for this device type\n",
+              s->usrp->get_rx_antenna(i + choffset).c_str(), i);
+      }
     }
   }
 
@@ -1393,11 +1435,23 @@ extern "C" {
       s->usrp->set_tx_freq(tx_tune_req, i+choffset);
       s->usrp->set_tx_gain(gain_range_tx.stop()-openair0_cfg[0].tx_gain[i],i+choffset);
       LOG_I(HW,"USRP TX_GAIN:%3.2lf gain_range:%3.2lf tx_gain:%3.2lf\n", gain_range_tx.stop()-openair0_cfg[0].tx_gain[i], gain_range_tx.stop(), openair0_cfg[0].tx_gain[i]);
-      // Keep TX on the TX/RX connector (the only TX-capable port on a B2x0),
-      // paired with the separate RX antenna on RX2 set above.
-      s->usrp->set_tx_antenna("TX/RX", i + choffset);
-      LOG_I(HW, "TX antenna forced to %s on channel %d\n",
-            s->usrp->get_tx_antenna(i + choffset).c_str(), i);
+      // Pair of the RX-antenna forcing above: keep TX on the transmit-capable connector, leaving
+      // RX on its own. Same device-specific naming caveat -- see that block's comment.
+      const char *tx_ant = NULL;
+      if (device->type == USRP_B200_DEV) {
+        tx_ant = "TX/RX"; // the only TX-capable port on a B2x0
+      } else if (device->type == USRP_X400_DEV) {
+        tx_ant = "TX/RX0"; // X410's TX-capable port (the bare "TX/RX" name does not exist there)
+      }
+      if (tx_ant != NULL) {
+        s->usrp->set_tx_antenna(tx_ant, i + choffset);
+        LOG_I(HW, "TX antenna forced to %s on channel %d\n",
+              s->usrp->get_tx_antenna(i + choffset).c_str(), i);
+      } else {
+        LOG_I(HW, "TX antenna left at UHD default (%s) on channel %d -- port naming not verified "
+                  "for this device type\n",
+              s->usrp->get_tx_antenna(i + choffset).c_str(), i);
+      }
     }
   }
 

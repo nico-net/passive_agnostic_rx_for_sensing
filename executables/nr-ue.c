@@ -478,7 +478,17 @@ static int handle_sync_req_from_mac(PHY_VARS_NR_UE *UE)
     const fapi_nr_ue_carrier_config_t *cfg = &config->carrier_config;
     uint64_t dl_CarrierFreq = get_carrier_frequency(fp->N_RB_DL, fp->numerology_index, cfg->dl_frequency);
     uint64_t ul_CarrierFreq = get_carrier_frequency(fp->N_RB_UL, fp->numerology_index, cfg->uplink_frequency);
-    if (dl_CarrierFreq != fp->dl_CarrierFreq || ul_CarrierFreq != fp->ul_CarrierFreq) {
+    // cfg->dl_frequency is point A in kHz and is only populated once SIB1 has been decoded. Before
+    // that it is 0, and get_carrier_frequency() then returns just half the carrier bandwidth --
+    // e.g. 49.14 MHz at 273 PRB / 30 kHz -- which is not a frequency at all. Acting on it retunes
+    // the radio away from the band and makes every subsequent sync attempt impossible, silently
+    // discarding the -C given on the command line. MEASURED on a live 100 MHz srsRAN cell: the
+    // first attempt correctly searched 3414990000, every retry searched 49140000 and never
+    // recovered, so only one real attempt ever happened. Keep whatever frequency we were told to
+    // use until upper layers actually know point A.
+    if (cfg->dl_frequency == 0) {
+      LOG_D(NR_PHY, "SYNC REQ: point A not known yet (dl_frequency=0), keeping current RF frequency\n");
+    } else if (dl_CarrierFreq != fp->dl_CarrierFreq || ul_CarrierFreq != fp->ul_CarrierFreq) {
       LOG_I(NR_PHY,
             "[UE %d] SYNC REQ: RF frequency change: dl %lu->%lu Hz, ul %lu->%lu Hz (from dl_frequency=%u kHz, target_Nid_cell=%d)\n",
             UE->Mod_id,
@@ -494,14 +504,21 @@ static int handle_sync_req_from_mac(PHY_VARS_NR_UE *UE)
       init_symbol_rotation(fp);
     }
 
-    int ssb_start_subcarrier = nr_get_ssb_start_sc(fp->numerology_index,
-                                                   config->ssb_table.ssb_offset_point_a,
-                                                   config->ssb_table.ssb_subcarrier_offset,
-                                                   fp->freq_range);
-    // SSB location can change during for ex: handover on the target cell
-    if (ssb_start_subcarrier != fp->ssb_start_subcarrier) {
-      fp->ssb_start_subcarrier = ssb_start_subcarrier;
-      LOG_I(NR_PHY, "SYNC REQ: SSB location changed:%d\n", fp->ssb_start_subcarrier);
+    // Same pre-SIB1 caveat as the carrier frequency above: ssb_table is only populated once upper
+    // layers know the cell, so recomputing from it before that yields 0 and wipes the SSB position
+    // supplied on the command line (--ssb). MEASURED: after a FIRST successful sync the next sync
+    // request re-derived offset 0 and every following attempt searched the wrong place. Gate both
+    // updates on the same "do upper layers actually know the cell yet" test.
+    if (cfg->dl_frequency != 0) {
+      int ssb_start_subcarrier = nr_get_ssb_start_sc(fp->numerology_index,
+                                                     config->ssb_table.ssb_offset_point_a,
+                                                     config->ssb_table.ssb_subcarrier_offset,
+                                                     fp->freq_range);
+      // SSB location can change during for ex: handover on the target cell
+      if (ssb_start_subcarrier != fp->ssb_start_subcarrier) {
+        fp->ssb_start_subcarrier = ssb_start_subcarrier;
+        LOG_I(NR_PHY, "SYNC REQ: SSB location changed:%d\n", fp->ssb_start_subcarrier);
+      }
     }
 
     // Apply Doppler based on NTN-Config for target cell
@@ -668,7 +685,35 @@ void readFrame(PHY_VARS_NR_UE *UE, openair0_timestamp_t *timestamp, int duration
       int readBlockSize = get_samples_per_slot(slot_rx, fp);
       int tmp = nrue_ru_read(UE, timestamp, (void **)rxp, readBlockSize, fp->nb_antennas_rx);
       UEscopeCopy(UE, ueTimeDomainSamplesBeforeSync, rxp[0], sizeof(c16_t), 1, readBlockSize, 0);
-      AssertFatal(readBlockSize == tmp, "");
+      // A short read here is a legitimate, by-design outcome of trx_usrp_read()'s own overflow/
+      // timeout handling (it deliberately returns a partial block rather than blocking forever --
+      // see its own error_code check), not corruption. Treating it as fatal turns any transient RF
+      // hiccup into a full process abort. MEASURED: this fires reliably under --ue-scan-carrier at
+      // 273 PRB, where dozens of parallel GSCN-correlation threads compete for CPU with the
+      // real-time RX thread and make a transient overflow far more likely -- confirmed via gdb that
+      // the abort is exactly this assertion, not memory corruption from the scan buffers themselves.
+      // This loop's own job (see the "toTrash" branch above) is just to advance the stream position
+      // past samples nobody reads the content of, so a short read only needs to be topped up, not
+      // treated as an error.
+      if (readBlockSize != tmp) {
+        LOG_W(PHY, "readFrame: short read (got %d of %d samples) -- retrying remainder instead of aborting\n", tmp,
+              readBlockSize);
+        int remaining = readBlockSize - tmp;
+        int retries = 0;
+        const int max_retries = 20;
+        while (remaining > 0 && retries < max_retries) {
+          c16_t *retry_rxp[fp->nb_antennas_rx];
+          for (int i = 0; i < fp->nb_antennas_rx; i++)
+            retry_rxp[i] = rxp[i] + tmp;
+          int got = nrue_ru_read(UE, timestamp, (void **)retry_rxp, remaining, fp->nb_antennas_rx);
+          tmp += got;
+          remaining -= got;
+          retries++;
+        }
+        if (remaining > 0)
+          LOG_W(PHY, "readFrame: gave up after %d retries, still short by %d samples -- continuing anyway\n", retries,
+                remaining);
+      }
 
       if (IS_SOFTMODEM_RFSIM) {
         int slot_tx = (slot_rx + duration_rx_to_tx) % fp->slots_per_frame;
@@ -697,8 +742,33 @@ static void syncInFrame(PHY_VARS_NR_UE *UE, openair0_timestamp_t *timestamp, int
   while (size > 0) {
     // Set a maximum transfer size. As we usually read/write single slots, we use the size of slot 0 as maximum here.
     const int unitTransfer = min(get_samples_per_slot(0, fp), size);
-    const int res = nrue_ru_read(UE, timestamp, (void **)UE->common_vars.rxdata, unitTransfer, fp->nb_antennas_rx);
-    DevAssert(unitTransfer == res);
+    int res = nrue_ru_read(UE, timestamp, (void **)UE->common_vars.rxdata, unitTransfer, fp->nb_antennas_rx);
+    // Same fix as readFrame()/UE_thread()'s equivalent checks: a short (including zero-sample,
+    // ERROR_CODE_TIMEOUT) read is trx_usrp_read()'s own by-design recovery path, not corruption.
+    // CONFIRMED as the actual root cause of the original silent-stall/overflow crashes this fix set
+    // out to explain: caught live via gdb -- "Resynchronizing RX by N samples" -> "[recv] received 0
+    // samples out of 61440" / ERROR_CODE_TIMEOUT -> this exact assertion. This loop only discards
+    // samples to advance stream position (see the IS_SOFTMODEM_RFSIM branch below, which doesn't
+    // touch content), so a short read only needs topping up, not treating as fatal.
+    if (unitTransfer != res) {
+      LOG_W(PHY, "syncInFrame: short read (got %d of %d samples) -- retrying remainder instead of aborting\n", res,
+            unitTransfer);
+      int remaining = unitTransfer - res;
+      int retries = 0;
+      const int max_retries = 20;
+      while (remaining > 0 && retries < max_retries) {
+        void *retry_rxp[fp->nb_antennas_rx];
+        for (int i = 0; i < fp->nb_antennas_rx; i++)
+          retry_rxp[i] = (c16_t *)UE->common_vars.rxdata[i] + res;
+        int got = nrue_ru_read(UE, timestamp, retry_rxp, remaining, fp->nb_antennas_rx);
+        res += got;
+        remaining -= got;
+        retries++;
+      }
+      if (remaining > 0)
+        LOG_W(PHY, "syncInFrame: gave up after %d retries, still short by %d samples -- continuing anyway\n", retries,
+              remaining);
+    }
     if (IS_SOFTMODEM_RFSIM) {
       int ta = UE->timing_advance + UE->timing_advance_ntn;
       const openair0_timestamp_t writeTimestamp =
@@ -864,13 +934,32 @@ void *UE_thread(void *arg)
       shiftForNextFrame = -(UE->init_sync_frame + trashed_frames + 2) * UE->max_pos_acc * get_nrUE_params()->time_sync_I; // compensate for the time drift that happened during initial sync
       LOG_I(PHY, "max_pos_acc = %d, shiftForNextFrame = %d\n", UE->max_pos_acc, shiftForNextFrame);
       // read in first symbol
-      AssertFatal(fp->ofdm_symbol_size + fp->nb_prefix_samples0
-                      == nrue_ru_read(UE,
-                                      &sync_timestamp,
-                                      (void **)UE->common_vars.rxdata,
-                                      fp->ofdm_symbol_size + fp->nb_prefix_samples0,
-                                      fp->nb_antennas_rx),
-                  "");
+      // Same fix and rationale as this file's other nrue_ru_read() assertion sites: a short read is
+      // trx_usrp_read()'s own by-design overflow/timeout recovery, not corruption -- retry the
+      // shortfall instead of aborting the whole process.
+      {
+        const int firstSymBlockSize = fp->ofdm_symbol_size + fp->nb_prefix_samples0;
+        int firstSymRes = nrue_ru_read(UE, &sync_timestamp, (void **)UE->common_vars.rxdata, firstSymBlockSize, fp->nb_antennas_rx);
+        if (firstSymBlockSize != firstSymRes) {
+          LOG_W(PHY, "UE_thread (first symbol): short read (got %d of %d samples) -- retrying remainder instead of aborting\n",
+                firstSymRes, firstSymBlockSize);
+          int remaining = firstSymBlockSize - firstSymRes;
+          int retries = 0;
+          const int max_retries = 20;
+          while (remaining > 0 && retries < max_retries) {
+            void *retry_rxp[fp->nb_antennas_rx];
+            for (int i = 0; i < fp->nb_antennas_rx; i++)
+              retry_rxp[i] = UE->common_vars.rxdata[i] + firstSymRes;
+            int got = nrue_ru_read(UE, &sync_timestamp, retry_rxp, remaining, fp->nb_antennas_rx);
+            firstSymRes += got;
+            remaining -= got;
+            retries++;
+          }
+          if (remaining > 0)
+            LOG_W(PHY, "UE_thread (first symbol): gave up after %d retries, still short by %d samples -- continuing anyway\n",
+                  retries, remaining);
+        }
+      }
       // we have the decoded frame index in the return of the synch process
       // and we shifted above to the first slot of next frame
       decoded_frame_rx = (decoded_frame_rx + 1) % MAX_FRAME_NUMBER;
@@ -973,7 +1062,29 @@ void *UE_thread(void *arg)
     int tmp = nrue_ru_read(UE, &rx_timestamp, (void **)rxp, readBlockSize, fp->nb_antennas_rx);
     metadata meta = {.slot =  curMsg.proc.nr_slot_rx, .frame =  curMsg.proc.frame_rx};
     UEscopeCopyWithMetadata(UE, ueTimeDomainSamples, rxp[0] - firstSymSamp, sizeof(c16_t), 1, readBlockSize, 0, &meta);
-    AssertFatal(readBlockSize == tmp, "");
+    // Same fix and rationale as readFrame()'s equivalent check above: a short read is
+    // trx_usrp_read()'s own by-design overflow/timeout recovery path, not corruption, and doesn't
+    // warrant killing the whole process. Retry the shortfall; if retries are also exhausted, this
+    // one slot's demod may be degraded, which HARQ/CRC already has to tolerate anyway.
+    if (readBlockSize != tmp) {
+      LOG_W(PHY, "UE_thread: short read (got %d of %d samples) -- retrying remainder instead of aborting\n", tmp,
+            readBlockSize);
+      int remaining = readBlockSize - tmp;
+      int retries = 0;
+      const int max_retries = 20;
+      while (remaining > 0 && retries < max_retries) {
+        c16_t *retry_rxp[fp->nb_antennas_rx];
+        for (int i = 0; i < fp->nb_antennas_rx; i++)
+          retry_rxp[i] = rxp[i] + tmp;
+        int got = nrue_ru_read(UE, &rx_timestamp, (void **)retry_rxp, remaining, fp->nb_antennas_rx);
+        tmp += got;
+        remaining -= got;
+        retries++;
+      }
+      if (remaining > 0)
+        LOG_W(PHY, "UE_thread: gave up after %d retries, still short by %d samples -- continuing anyway\n", retries,
+              remaining);
+    }
     struct timespec current_time;
     if (clock_gettime(CLOCK_REALTIME, &current_time)) {
       LOG_E(PHY, "clock_gettime failed\n");
@@ -986,7 +1097,12 @@ void *UE_thread(void *arg)
       if (first_symbols > 0) {
         openair0_timestamp_t ignore_timestamp;
         int tmp = nrue_ru_read(UE, &ignore_timestamp, (void **)UE->common_vars.rxdata, first_symbols, fp->nb_antennas_rx);
-        AssertFatal(first_symbols == tmp, "");
+        // nrue_ru_read() already retries short reads internally (see its own comment); this only
+        // fires if that internal retry budget was truly exhausted. Warn and continue rather than
+        // abort the whole process -- same rationale as this file's other read-assertion fixes.
+        if (first_symbols != tmp)
+          LOG_W(PHY, "UE_thread (next-frame first symbol): still short by %d samples after internal retries -- continuing anyway\n",
+                first_symbols - tmp);
 
       } else
         LOG_E(PHY,"can't compensate: diff =%d\n", first_symbols);

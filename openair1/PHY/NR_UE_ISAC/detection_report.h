@@ -61,6 +61,12 @@ struct detection_report_t {
   int64_t     cpi_duration_ns       = 0;     ///< cpi_duration_ns
   double      fc_hz                 = 0.0;   ///< fc_hz (illuminator centre frequency)
 
+  /// P_D measured receiver-side by det_quality (see its `detection_rate()`), or negative when the
+  /// quality gate is not running / has not warmed up. Emitted so the central node does not have to
+  /// estimate it from its own track population, which is self-reinforcing -- see the header note on
+  /// `detection_rate()` for the measured pathology this exists to avoid.
+  double      p_detect              = -1.0;
+
   bool        subbin_interp         = false; ///< whether sub-bin peak interpolation was on, which is what
                                              ///< decides whether the declared range/rate noise is a
                                              ///< bin-quantisation floor or an SNR-limited residual
@@ -76,6 +82,39 @@ struct detection_report_t {
   sfo_fit_result_t sfo;
   los_residual_t   los;
 };
+
+/**
+ * @brief PER-DETECTION 1-sigma uncertainty on a range or range-rate estimate, from THIS detection's
+ *        own SNR and the CPI's resolution.
+ *
+ * The report-level `range_std_m` / `rate_std_mps` are a property of the CPI, so every detection in a
+ * batch declares the same uncertainty however strong or marginal it is. That is the wrong shape: a
+ * 25 dB detection and a 7 dB one in the same CPI do not deserve equal weight in a fused fix, and the
+ * central node already whitens by whatever sigma it is given (CLAUDE.md 9's whitened Gauss-Newton).
+ * The per-detection azimuth already works this way (`azimuth_std_deg`); this closes the same gap for
+ * range and rate.
+ *
+ * Uses the standard estimator bound for a peak located in a transform of resolution `res` at linear
+ * post-integration SNR `g`:  sigma ~= res / sqrt(2*g)  -- parameter-free, no fitted constant. Worth
+ * recording that this is CONSISTENT with the hand-tuned value it replaces: the existing report-level
+ * `0.3 * res` for the sub-bin-interpolated case is what this formula returns at ~7 dB, a typical
+ * detection SNR here, so the two agree where they overlap and this only adds the SNR dependence.
+ *
+ * Clamped at both ends, because an unclamped CRB is a way to claim nonsense:
+ *  - never better than `res/20` -- sub-bin interpolation has its own bias floor (CLAUDE.md 6 records
+ *    a real parabolic-interpolation bias found on this pipeline), so an arbitrarily strong detection
+ *    must not be allowed to declare arbitrarily small error;
+ *  - never worse than `res/sqrt(12)`, the uniform bin-quantisation bound, which is what the estimate
+ *    degenerates to with no interpolation at all.
+ *
+ * @param res         range_res_m or vel_res_mps for this CPI
+ * @param snr_db      this detection's own SNR
+ * @param subbin      whether sub-bin peak interpolation was enabled; if not, quantisation dominates
+ *                    and the bound is returned directly (SNR cannot buy sub-bin accuracy you did not
+ *                    compute)
+ * @return 1-sigma in the same units as @p res, or 0 when @p res is not positive (caller omits it).
+ */
+double nr_isac_detection_sigma(double res, double snr_db, bool subbin);
 
 /// Maps a sensing reference source to the DetectionReport Illuminator.ref_type string.
 const char* nr_isac_source_to_ref_type(nr_isac_source_t source);

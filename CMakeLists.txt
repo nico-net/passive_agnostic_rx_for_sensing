@@ -1043,6 +1043,7 @@ set(NR_UE_ISAC_SRC
   ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/matrix_complete.cc
   ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/sparse_doppler.cc
   ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/clean_deconv.cc
+  ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/det_quality.cc
   ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/isac_aoa.cc
   ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/eca_clutter.cc
   ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/range_doppler.cc
@@ -2222,6 +2223,15 @@ if(ENABLE_TESTS)
   add_dependencies(tests test_isac_sync)
   add_test(NAME test_isac_sync COMMAND ./test_isac_sync)
 
+  # tests/ota_sync_bench/ (cheap-office OTA sync validation, no gNB/RU needed): replays a CFR
+  # grid built from a real two-SDR RF capture (tests/ota_sync_bench/process_capture.py) through
+  # the same production tracker classes as test_isac_sync above, instead of a synthetic grid.
+  # Not a gtest (takes a required --grid file argument), so no add_test() registration.
+  add_executable(isac_sync_replay ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/tools/isac_sync_replay.cc)
+  target_include_directories(isac_sync_replay PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_ISAC)
+  target_link_libraries(isac_sync_replay PRIVATE NR_UE_ISAC UTIL)
+  add_dependencies(tests isac_sync_replay)
+
   # ECA/ECA+ clutter-cancellation offline self-test (ECA_CLUTTER_HANDOVER.md rollout step 2/4):
   # validates the CFR-domain oblique projection in isolation (mean-subtraction equivalence + mirror
   # -ghost suppression) before RT/engine wiring, same pattern as test_isac_sync above.
@@ -2262,6 +2272,12 @@ if(ENABLE_TESTS)
   # ambiguity flags, bearing recovery across the field of view for beamscan/interferometry/MUSIC, the
   # SNR gate, CRB behaviour, and direct-path self-calibration. Same standalone pattern as the tests
   # above.
+  add_executable(test_det_quality ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/tests/det_quality_test.cc)
+  target_include_directories(test_det_quality PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_ISAC)
+  target_link_libraries(test_det_quality PRIVATE NR_UE_ISAC UTIL GTest::gtest)
+  add_dependencies(tests test_det_quality)
+  add_test(NAME test_det_quality COMMAND ./test_det_quality)
+
   add_executable(test_isac_aoa ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/tests/isac_aoa_test.cc)
   target_include_directories(test_isac_aoa PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_ISAC)
   target_link_libraries(test_isac_aoa PRIVATE NR_UE_ISAC UTIL GTest::gtest)

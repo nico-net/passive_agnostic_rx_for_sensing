@@ -549,6 +549,202 @@ TEST(isac_aoa_selfcal, direct_path_calibration_removes_per_channel_phase_error)
   EXPECT_LT(err_cal, 2.0) << "self-calibration should recover the true bearing, got " << err_cal << " deg";
 }
 
+// =================================================================================================
+// Position-anchored harmonic rejection (GHOST_KINEMATIC_CONSISTENCY_HANDOVER.md Phase A)
+//
+// These exercise the geometry and the filter directly, on hand-built detection lists: the point of
+// Phase A is the ANCHOR, and the anchor is decided entirely by (range, bearing) -> position, with no
+// dependence on the CFR grid the bearings came from.
+// =================================================================================================
+
+namespace {
+
+nr_isac_args_t harm_args()
+{
+  nr_isac_args_t a;
+  a.tx_pos_x                = 0.0f;
+  a.tx_pos_y                = 0.0f;
+  a.rx_pos_x                = 100.0f;
+  a.rx_pos_y                = 0.0f;
+  a.harmonic_pos_reject     = true;
+  a.harmonic_pos_chi2       = 9.0f; // 3 sigma per axis, matches repos/isac's convention
+  a.harmonic_pos_range_tol_m = 8.0f;
+  a.harmonic_max_k          = 4;
+  a.harmonic_tol            = 0.15f;
+  a.harmonic_snr_margin     = 6.0f;
+  return a;
+}
+
+/// The differential range and ENU bearing of a target at (x, y), for the geometry in harm_args().
+void true_meas(double x, double y, double& dr, double& az_deg)
+{
+  const double rt = std::hypot(x - 0.0, y - 0.0);
+  const double rr = std::hypot(x - 100.0, y - 0.0);
+  dr              = rt + rr - 100.0;
+  az_deg          = std::atan2(y - 0.0, x - 100.0) * 180.0 / M_PI;
+}
+
+/// @param az_offset_deg  added to the TRUE bearing before it is reported -- simulates this
+///        detection's own independent AoA estimation error, which is the whole point of the chi2
+///        gate: two detections of the SAME reflection do not report exactly the same bearing.
+/// @param az_std_deg     the reported 1-sigma CRB this detection claims for its own bearing.
+sensing_detection_t det_at(double x, double y, double vel, double snr, bool with_az = true,
+                           float az_std_deg = 2.0f, double az_offset_deg = 0.0)
+{
+  double dr = 0.0, az = 0.0;
+  true_meas(x, y, dr, az);
+  sensing_detection_t d;
+  d.range_m         = (float)dr;
+  d.vel_mps         = (float)vel;
+  d.snr_db          = (float)snr;
+  d.azimuth_valid   = with_az;
+  d.azimuth_deg     = (float)(az + az_offset_deg);
+  d.azimuth_std_deg = with_az ? az_std_deg : 0.0f;
+  return d;
+}
+
+} // namespace
+
+/// The forward/inverse pair must be exact: localising a self-consistent (range, bearing) has to
+/// return the position it came from. Same closed form as isac-core's localize_with_bearing(), and it
+/// is pinned here because a UE-side fix and a central-node fix disagreeing would be invisible.
+TEST(HarmonicPos, LocalizeInvertsTheGeometryExactly)
+{
+  for (auto p : {std::pair<double, double>{70.0, 110.0},
+                 {-140.0, 60.0},
+                 {400.0, -300.0},
+                 {250.0, 5.0}}) {
+    double dr = 0.0, az = 0.0;
+    true_meas(p.first, p.second, dr, az);
+    double gx = 0.0, gy = 0.0;
+    ASSERT_TRUE(nr_isac::aoa_localize(0.0, 0.0, 100.0, 0.0, dr, az, gx, gy));
+    EXPECT_NEAR(gx, p.first, 1e-6);
+    EXPECT_NEAR(gy, p.second, 1e-6);
+  }
+}
+
+/// The core case: a ghost at the SAME position (same range, same bearing -- the measured signature of
+/// a harmonic) with 2x the velocity is dropped, and its fundamental survives.
+TEST(HarmonicPos, DropsASecondHarmonicAtTheSamePosition)
+{
+  std::vector<sensing_detection_t> dets = {
+      det_at(70.0, 110.0, 6.0, 18.0),   // fundamental
+      det_at(70.0, 110.0, 12.0, 17.0),  // its 2nd harmonic
+  };
+  EXPECT_EQ(nr_isac::harmonic_pos_reject(harm_args(), dets), 1u);
+  ASSERT_EQ(dets.size(), 1u);
+  EXPECT_NEAR(dets[0].vel_mps, 6.0f, 1e-6) << "the fundamental, not the harmonic, must be kept";
+}
+
+/// The reason Phase A exists at all. These two targets share a RANGE BIN -- so the existing
+/// range-anchored harmonic_reject would pair them -- but sit at opposite bearings, i.e. at completely
+/// different places in the world. A position anchor must spare them.
+TEST(HarmonicPos, SparesTwoTargetsThatShareARangeButNotABearing)
+{
+  // Mirror image across the baseline: identical bistatic range, opposite bearing.
+  auto a = det_at(70.0, 110.0, 6.0, 18.0);
+  auto b = det_at(70.0, -110.0, 12.0, 17.0);
+  ASSERT_NEAR(a.range_m, b.range_m, 1e-3) << "the test geometry must actually share a range";
+  std::vector<sensing_detection_t> dets = {a, b};
+  EXPECT_EQ(nr_isac::harmonic_pos_reject(harm_args(), dets), 0u);
+  EXPECT_EQ(dets.size(), 2u);
+}
+
+/// Without bearings there are no positions, so the filter must be exactly inert -- the convention
+/// every gate in this project follows, asserted rather than assumed.
+TEST(HarmonicPos, IsInertWithoutBearings)
+{
+  std::vector<sensing_detection_t> dets = {
+      det_at(70.0, 110.0, 6.0, 18.0, false),
+      det_at(70.0, 110.0, 12.0, 17.0, false),
+  };
+  EXPECT_EQ(nr_isac::harmonic_pos_reject(harm_args(), dets), 0u);
+  EXPECT_EQ(dets.size(), 2u);
+
+  // ...and equally inert when the feature itself is off.
+  nr_isac_args_t off  = harm_args();
+  off.harmonic_pos_reject = false;
+  std::vector<sensing_detection_t> dets2 = {
+      det_at(70.0, 110.0, 6.0, 18.0),
+      det_at(70.0, 110.0, 12.0, 17.0),
+  };
+  EXPECT_EQ(nr_isac::harmonic_pos_reject(off, dets2), 0u);
+  EXPECT_EQ(dets2.size(), 2u);
+}
+
+/// A mixed CPI: only the detections that carry a bearing take part. A bearing-less detection at the
+/// harmonic velocity must survive (it cannot be positioned, so nothing may be concluded about it),
+/// which is what keeps this filter safe on a weak cell whose AoA failed its quality gate.
+TEST(HarmonicPos, LeavesBearinglessDetectionsAlone)
+{
+  std::vector<sensing_detection_t> dets = {
+      det_at(70.0, 110.0, 6.0, 18.0),          // fundamental, positioned
+      det_at(70.0, 110.0, 12.0, 17.0, false),  // harmonic velocity, but no bearing
+      det_at(70.0, 110.0, 18.0, 17.0),         // 3rd harmonic, positioned
+  };
+  EXPECT_EQ(nr_isac::harmonic_pos_reject(harm_args(), dets), 1u);
+  ASSERT_EQ(dets.size(), 2u);
+  EXPECT_NEAR(dets[1].vel_mps, 12.0f, 1e-6);
+}
+
+/// A non-integer velocity ratio is not a harmonic, and a fundamental far weaker than its supposed
+/// harmonic may not veto it (the snr_margin guard, carried over from the range-anchored version).
+TEST(HarmonicPos, RespectsTheIntegerRatioAndSnrMargin)
+{
+  std::vector<sensing_detection_t> ratio = {
+      det_at(70.0, 110.0, 6.0, 18.0),
+      det_at(70.0, 110.0, 15.0, 17.0), // 2.5x -- not an integer
+  };
+  EXPECT_EQ(nr_isac::harmonic_pos_reject(harm_args(), ratio), 0u);
+
+  std::vector<sensing_detection_t> weak = {
+      det_at(70.0, 110.0, 6.0, 2.0),   // 16 dB weaker than the "harmonic"
+      det_at(70.0, 110.0, 12.0, 18.0),
+  };
+  EXPECT_EQ(nr_isac::harmonic_pos_reject(harm_args(), weak), 0u);
+}
+
+// ---------------------------------------------------------------------------------------------
+// The chi2 rewrite (2026-07-30, GHOST_KINEMATIC_CONSISTENCY_HANDOVER.md 7.3). A flat metre gate
+// on the raw fix-to-fix distance was measured to LOSE to the existing range anchor, because a real
+// harmonic pair's two fixes are dominated by INDEPENDENT bearing noise (~1.9 deg CRB on the harness
+// that measured it) -- a gate tight enough to reject unrelated targets was also too tight to hold
+// real pairs together. These two tests are the reason the rewrite exists: they use REALISTIC,
+// independently-perturbed bearings (not the noiseless det_at(...) calls above) and pin the direction
+// of the fix -- a 15 m EUCLIDEAN gate would have gotten the first one wrong.
+// ---------------------------------------------------------------------------------------------
+
+/// Candidate and fundamental are the SAME true reflection, each reporting its OWN independent
+/// bearing estimate (3 deg apart, both at a realistic ~2 deg CRB). Two independent estimates of one
+/// point disagreeing by a couple of degrees is what real noise looks like, not evidence of two
+/// objects. Hand-verified: the resulting fixes are ~16 m apart in raw Euclidean distance (a flat
+/// 15 m gate would have SPARED this real harmonic), but the chi2-normalised tangential residual is
+/// ~1.1 sigma^2 and the radial residual ~3 m -- both comfortably inside the default gate.
+TEST(HarmonicPos, DropsAHarmonicDespiteRealisticIndependentBearingNoise)
+{
+  auto fundamental = det_at(70.0, 300.0, 6.0, 18.0, true, 2.0f, 0.0);
+  auto candidate   = det_at(70.0, 300.0, 12.0, 17.0, true, 2.0f, 3.0); // 3 deg independent offset
+  std::vector<sensing_detection_t> dets = {fundamental, candidate};
+  EXPECT_EQ(nr_isac::harmonic_pos_reject(harm_args(), dets), 1u);
+  ASSERT_EQ(dets.size(), 1u);
+  EXPECT_NEAR(dets[0].vel_mps, 6.0f, 1e-6) << "the fundamental, not the harmonic, must be kept";
+}
+
+/// Same construction, but the bearing disagreement (20 deg) is far beyond anything a ~2 deg CRB
+/// explains -- these are two different objects, not one noisy reflection, and must be spared. Chi2
+/// alone is not what catches this case (the radial residual at this bearing separation is already
+/// ~36 m, well past harmonic_pos_range_tol_m), which is by design: an implausible bearing
+/// disagreement drags the localised fix off the true point entirely, and the radial gate is what
+/// catches a fix that has moved that far.
+TEST(HarmonicPos, SparesADistinctTargetWhoseBearingDisagreesFarBeyondNoise)
+{
+  auto fundamental = det_at(70.0, 300.0, 6.0, 18.0, true, 2.0f, 0.0);
+  auto other       = det_at(70.0, 300.0, 12.0, 17.0, true, 2.0f, 20.0); // 20 deg: not noise
+  std::vector<sensing_detection_t> dets = {fundamental, other};
+  EXPECT_EQ(nr_isac::harmonic_pos_reject(harm_args(), dets), 0u);
+  EXPECT_EQ(dets.size(), 2u);
+}
+
 int main(int argc, char **argv)
 {
   logInit();

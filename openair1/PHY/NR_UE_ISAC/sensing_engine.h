@@ -43,6 +43,7 @@
 #include <vector>
 
 #include "defs_nr_UE_ISAC.h"
+#include "det_quality.h"
 #include "isac_aoa.h"
 #include "isac_sync.h"
 #include "range_doppler.h"
@@ -242,6 +243,15 @@ private:
   std::vector<aoa_estimate_t>    aoa_out;
   uint32_t                       aoa_ant_seen_ = 0;     ///< max antennas any submission actually carried
   bool                           aoa_warned_   = false; ///< one-shot "configured but single-antenna" warning
+  /// Running count of detections dropped by the Phase-A position-anchored harmonic test, so its
+  /// activity is visible across a whole run and not only per CPI.
+  uint64_t                       harmonic_pos_dropped_ = 0;
+  /// Adaptive per-detection quality (det_quality.h). Constructed only when det_quality_adapt is set,
+  /// so it costs nothing when off; its state is intentionally long-lived (everything it uses is
+  /// learned across CPIs).
+  std::unique_ptr<det_quality>   det_q_;
+  std::vector<float>             det_q_p_;
+  uint64_t                       det_q_dropped_ = 0;
 
   // Range-Doppler processor and its outputs (engine thread only)
   std::unique_ptr<range_doppler>   rd;
