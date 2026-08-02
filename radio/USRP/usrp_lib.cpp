@@ -1370,6 +1370,13 @@ extern "C" {
             cfg->rx_gain_offset[i],
             cfg->rx_gain[i] - cfg->rx_gain_offset[i],
             gain_range.stop());
+      // Bistatic sensing UE: force RX onto the RX2 connector so the receive
+      // antenna is physically separate from the TX/RX transmit antenna,
+      // improving TX->RX isolation. OAI otherwise leaves the antenna at the
+      // UHD default, which on a B2x0 shares the TX/RX port for both directions.
+      s->usrp->set_rx_antenna("RX2", i + choffset);
+      LOG_I(HW, "RX antenna forced to %s on channel %d\n",
+            s->usrp->get_rx_antenna(i + choffset).c_str(), i);
     }
   }
 
@@ -1386,6 +1393,11 @@ extern "C" {
       s->usrp->set_tx_freq(tx_tune_req, i+choffset);
       s->usrp->set_tx_gain(gain_range_tx.stop()-openair0_cfg[0].tx_gain[i],i+choffset);
       LOG_I(HW,"USRP TX_GAIN:%3.2lf gain_range:%3.2lf tx_gain:%3.2lf\n", gain_range_tx.stop()-openair0_cfg[0].tx_gain[i], gain_range_tx.stop(), openair0_cfg[0].tx_gain[i]);
+      // Keep TX on the TX/RX connector (the only TX-capable port on a B2x0),
+      // paired with the separate RX antenna on RX2 set above.
+      s->usrp->set_tx_antenna("TX/RX", i + choffset);
+      LOG_I(HW, "TX antenna forced to %s on channel %d\n",
+            s->usrp->get_tx_antenna(i + choffset).c_str(), i);
     }
   }
 
