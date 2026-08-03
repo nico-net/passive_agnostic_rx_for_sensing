@@ -75,14 +75,21 @@ sense with.
 cd ~/NICOLA/openairinterface5g-total-passive-ue/cmake_targets/ran_build/build
 
 sudo ./nr-uesoftmodem \
-  --passive-rx \
   -r 273 --numerology 1 --band 78 \
   -C 3414990000 --ssb 165 \
-  --usrp-args "addr=192.168.10.2" \
-  --ue-rxgain 85 --ue-nb-ant-rx 4 \
-  -O ~/NICOLA/nrue.ota.100mhz.conf \
+  --ue-rxgain 85 --ue-fo-compensation \
+  --passive-rx \
+  --usrp-args "type=x4xx,addr=192.168.10.2" \
+  --uecap_file ~/NICOLA/openairinterface5g-total-passive-ue/targets/PROJECTS/GENERIC-NR-5GC/CONF/uecap_ports1.xml \
+  -O ~/NICOLA/nrue.ota.sensing.conf \
   2>&1 | tee /tmp/ota_rx.log
 ```
+
+**This exact line is verified** — taken from the `CMDLINE:` of the 2026-08-02 100 MHz capture
+that produced `/tmp/ota_sensing/ota_reports.jsonl` (1551 CPIs). Note `type=x4xx` in
+`--usrp-args`, and that the conf is **`nrue.ota.sensing.conf`** (not `nrue.ota.100mhz.conf`).
+
+Add `--ue-nb-ant-rx 4` for AoA. The verified run above was **single-antenna, no bearings**.
 
 **Always pin `--ssb`. Never use `--ue-scan-carrier` here.** A GSCN scan at 273 PRB starves
 the RX thread, causes an overflow, and permanently stalls the stream (§0). It also segfaults
@@ -223,11 +230,41 @@ EOF
 
 ---
 
-## 6. Current measured state (rfsim, other host, 2026-08-03)
+## 6. Measured state
 
-Single passive receiver: coverage **18-26 %**, confirmed track precision **0-17 %**,
-2-receiver fusion **0 tracks** — coverage-starved, not a fusion defect (joint coverage is the
-*product* of per-receiver coverages). Detection coverage is the bottleneck for detection,
-tracking and fusion simultaneously.
+### OTA, 100 MHz, 2026-08-02 (`/tmp/ota_sensing/ota_reports.jsonl`, 1551 CPIs)
+
+| | measured |
+|---|---|
+| `range_res` | 3.05 m (confirms 273 PRB / 100 MHz) |
+| `vel_res` | 0.104 m/s |
+| **`vel_max`** | **±6.6 m/s** |
+| `N_dopp` | 128, fixed every CPI |
+| **dwell** | **median 848 ms** (p10 293 ms, p90 10.2 s) |
+| detections | 19714 total, median 2.0/CPI, only 385 CPIs empty |
+
+**This configuration can only see very slow targets, and that is a tuning choice worth
+revisiting before the next campaign.** Two independent limits, both from the numbers above:
+
+- **Doppler ambiguity**: `vel_max` ±6.6 m/s = ±24 km/h. Anything faster aliases. A car does
+  not appear at its true velocity.
+- **Range migration**: at an 848 ms dwell a target crosses one 3.05 m range bin at just
+  **3.6 m/s**. Faster than that and its energy smears across range bins and is lost to
+  coherent integration — a walking person (~1.5 m/s) is fine, a vehicle is not.
+
+So the current OTA setup is effectively a pedestrian sensor. Both limits have the same cause
+(`sources = "csi_rs"` alone gives a 13.2 ms slow-time spacing) and the same fix: enabling the
+blind-PDCCH source raises the row rate to 3.8-4.8 ms spacing, which takes `vel_max` to
+**±18-23 m/s** and lets the dwell come down into a range where vehicles survive integration.
+
+### rfsim, other host, 2026-08-03
+
+Single passive receiver: coverage 18-26 %, confirmed track precision 0-17 %, 2-receiver
+fusion 0 tracks — coverage-starved, not a fusion defect (joint coverage is the *product* of
+per-receiver coverages).
+
+Note the two rigs sit at **opposite ends of the same dwell curve**: rfsim runs at 50-70 ms
+(too short — measured optimum is 100-200 ms), OTA at 848 ms (too long for anything but a
+pedestrian). Dwell is the parameter to get right on both.
 
 Full record: `AGENT_HANDOFF.md` and `RESULTS_2026-08-03.md` on the other host.
