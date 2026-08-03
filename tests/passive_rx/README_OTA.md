@@ -126,7 +126,7 @@ grep -c "uplink\|RA_" /tmp/ota_rx.log                 # MUST be 0 — it must ne
 
 ## 3. Config that must match the live cell
 
-In `~/NICOLA/nrue.ota.100mhz.conf`, `[sensing]`:
+In `~/NICOLA/nrue.ota.sensing.conf` (the conf the verified run uses), `[sensing]`:
 
 - `sources` — `"csi_rs"`, and add `"pdsch_dmrs_blind,pdsch_data"` once blind PDCCH is
   verified on the cell. Blind PDCCH is what raises the slow-time rate (13.2 ms → 3.8-4.8 ms
