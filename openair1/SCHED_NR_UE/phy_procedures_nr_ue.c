@@ -160,7 +160,33 @@ void nr_fill_rx_indication(fapi_nr_rx_indication_t *rx_ind,
         rx->ssb_pdu.radiolink_monitoring = RLM_in_sync; // TODO to be removed from here
         rx->ssb_pdu.decoded_pdu = true;
       } else {
-        rx->ssb_pdu.radiolink_monitoring = RLM_out_of_sync; // TODO to be removed from here
+        /* A failed MIB re-decode does NOT mean radio-link failure for a passive receiver.
+         *
+         * These two assignments carry upstream's own "TODO to be removed from here" and are not
+         * spec-conformant: 38.133 sec 8.1 derives RLM from RLM-RS *quality*, not from whether a
+         * MIB happened to decode. In normal operation the UE attaches within seconds and the
+         * shortcut rarely bites; a --passive-rx receiver never attaches, so it sits in the
+         * PBCH-tracking-only regime indefinitely and every failed MIB drives
+         * handle_rlm -> nr_mac_rrc_sync_ind -> N310 -> T310 -> RRC IDLE -> full re-acquisition.
+         *
+         * MEASURED (2026-08-02, live 100 MHz cell): with DL traffic on the cell, PBCH tracking
+         * fails on essentially every SSB occasion (1827-1943 failures / 90 s) and the receiver
+         * re-acquired 32-34 times, while the SAME run still produced valid sensing CPIs. With the
+         * cell idle: 0 failures. Since traffic IS the illuminator for passive sensing, obeying
+         * this shortcut would make the receiver tear its own timing down exactly when it is
+         * supposed to be collecting.
+         *
+         * Timing is demonstrably still good across these failures -- the SSB burst stays on
+         * symbols 2-6 and initial sync succeeds every time -- and the sensing CFR taps come from
+         * CSI-RS / PDSCH DM-RS / data-aided paths, NOT from PBCH channel estimation. So in passive
+         * mode we keep the previous RLM state instead of declaring out-of-sync. Active mode is
+         * untouched: it still needs MIB re-decode as its (imperfect) liveness signal.
+         */
+        if (IS_PASSIVE_RX_MODE(get_softmodem_params())) {
+          rx->ssb_pdu.radiolink_monitoring = RLM_in_sync;
+        } else {
+          rx->ssb_pdu.radiolink_monitoring = RLM_out_of_sync; // TODO to be removed from here
+        }
         rx->ssb_pdu.decoded_pdu = false;
       }
     } break;
@@ -1107,6 +1133,11 @@ static int pbch_process(PHY_VARS_NR_UE *UE,
       const int nid = UE->frame_parms.Nid_cell;
       const int pbchSuccess =
           nr_pbch_decode(UE, &UE->frame_parms, proc, *ssbIndex, nid, pbch_e_rx, &hfb, &ssb_idx, &symb_offset, &pbchResult);
+      // TEMPORARY DIAGNOSTIC (2026-08-02): dump per-symbol PBCH internals ONLY on a failed decode,
+      // together with the last successful occasion's, so a failing and a working decode under
+      // otherwise identical conditions can be diffed directly.
+      extern void nr_pbch_diag_report(int success, int frame, int slot, int ssbIndex);
+      nr_pbch_diag_report(pbchSuccess == 0, proc->frame_rx, proc->nr_slot_rx, *ssbIndex);
       if (pbchSuccess != 0)
         LOG_E(PHY, "Frame %d, slot %d, SSB Index %d. Error decoding PBCH!\n", proc->frame_rx, proc->nr_slot_rx, *ssbIndex);
       else
@@ -1163,6 +1194,28 @@ int pbch_processing(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc, nr_phy_da
     // Channel-compensation shift, shared across this SSB's three PBCH symbols so their LLRs stay on
     // a common scale for the single polar codeword -- see nr_generate_pbch_llr().
     double pbch_log2_maxh = -1.0;
+
+    // TEMPORARY DIAGNOSTIC (acquisition->tracking handoff root-cause hunt, 2026-08-02):
+    // per-symbol energy across the SSB slot, computed with the SAME window arithmetic nr_slot_fep
+    // uses, so we can see which symbols the SSB burst actually occupies after the handoff.
+    // Expected: burst on symbols 2..6 (PSS/PBCH/SSS/PBCH for ssbIndex 0, Case C band n78).
+    if (nr_slot_rx == 0) {
+      static int sweeps = 0;
+      if (sweeps < 8) {
+        sweeps++;
+        char buf[768];
+        int p = 0;
+        int off = get_samples_slot_timestamp(fp, nr_slot_rx);
+        for (int s = 0; s < fp->symbols_per_slot; s++) {
+          const int abs_s = nr_slot_rx * fp->symbols_per_slot + s;
+          off += (abs_s % (0x7 << fp->numerology_index)) ? fp->nb_prefix_samples : fp->nb_prefix_samples0;
+          const int e = dB_fixed(signal_energy((int32_t *)&ue->common_vars.rxdata[0][off], fp->ofdm_symbol_size));
+          p += snprintf(buf + p, sizeof(buf) - p, " s%d=%d", s, e);
+          off += fp->ofdm_symbol_size;
+        }
+        LOG_I(PHY, "SSBSWEEP frame=%d slot=%d energy_dB:%s\n", frame_rx, nr_slot_rx, buf);
+      }
+    }
 
     int ssbIndex = -1;
     // TODO: Remove loopover symbols when symbol based receiver is fully integrated.

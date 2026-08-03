@@ -54,7 +54,17 @@
 #include "nfapi/open-nFAPI/nfapi/public_inc/fapi_nr_ue_constants.h" // FAPI_NR_CCE_REG_MAPPING_TYPE_*
 
 #define NR_PDCCH_BLIND_RE_PER_RB_OUT_DMRS 9 // == dci_nr.c's file-local RE_PER_RB_OUT_DMRS #define
-#define NR_PDCCH_BLIND_AL2_MAX_CANDIDATES 8 // scan every non-overlapping AL2 CCE position -- a blind
+// Spec maxima for a CORESET: the frequency-domain bitmap addresses 6-PRB groups over the BWP, so at
+// most floor(275/6) = 45 groups = 270 PRB; duration is 1..3 symbols (38.331 ControlResourceSet).
+#define NR_PDCCH_BLIND_MAX_CORESET_RB 270
+#define NR_PDCCH_BLIND_MAX_CORESET_DURATION 3
+// 32 covers a full-BWP CORESET: 270 PRB / 6 = 45 CCEs -> 22 non-overlapping AL2 positions. The
+// previous value of 8 was sized for the small rfsim CORESET and silently covered only CCE 0-14,
+// i.e. ~36 % of a wideband CORESET -- MEASURED on a live 273 PRB cell, every one of the ~2200
+// accepts was a random-CRC false positive and not one real grant was caught, because the gNB's
+// UE-specific search space hashes its candidate to a per-slot position that mostly fell outside
+// the scanned range. Bounded by fapi_nr_ue_interface.h's CCE[64].
+#define NR_PDCCH_BLIND_AL2_MAX_CANDIDATES 32 // scan every non-overlapping AL2 CCE position -- a blind
                                             // receiver does not know which of these the real UE's own
                                             // RNTI hash landed on (unlike this SS's own al2_cand
                                             // config value, which describes ONE known UE's candidate
@@ -239,16 +249,46 @@ void nr_pdcch_blind_monitor_process(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t 
     return;
   }
   const int num_cces = (n_rb * rel15->coreset.duration) / 6;
-  const int num_candidates =
-      (num_cces / 2 < NR_PDCCH_BLIND_AL2_MAX_CANDIDATES) ? (num_cces / 2) : NR_PDCCH_BLIND_AL2_MAX_CANDIDATES;
-  if (num_candidates < 1) {
+
+  /* Build the blind candidate set across AGGREGATION LEVELS, not just AL2.
+   *
+   * A blind receiver does not know the target UE's C-RNTI, so it cannot evaluate the search-space
+   * hash and must scan every non-overlapping CCE position at each aggregation level it wants to
+   * catch. This module originally scanned AL2 only, which was correct for the gNB it was built
+   * against (that deployment's dedicated SS had nrofCandidates AL2=2 and AL1/4/8/16 all zero, so
+   * AL2 was the ONLY level real grants ever used -- see CLAUDE.md sec 10, which flagged multi-AL
+   * scanning as future work "for a deployment with a genuinely different scheduler config").
+   *
+   * This IS that deployment. MEASURED on the live srsRAN cell, dedicated CORESET:
+   *   dci_aggregation_level=1 : 774382   (99.997 %)
+   *   dci_aggregation_level=2 :     20   ( 0.003 %)
+   * so AL2-only scanning caught exactly zero real grants -- every accept was a random-CRC false
+   * positive, and widening the AL2 ladder from 8 to 22 positions only scaled the noise linearly
+   * (2244 -> 5859 accepts, still cfr_submits=0).
+   *
+   * AL1 is scanned exhaustively first because it has the most positions AND carries the traffic
+   * here; the remaining budget goes to AL2. The candidate array bounds the total (CCE[64]).
+   * Cost: more candidates per occasion means proportionally more random-CRC accepts, which is
+   * exactly what the RNTI cross-CPI persistence gate exists to absorb -- a real C-RNTI recurs,
+   * a random one does not.
+   */
+  const int max_cand = (int)(sizeof(rel15->CCE) / sizeof(rel15->CCE[0]));
+  int nc = 0;
+  for (int cce = 0; cce < num_cces && nc < max_cand; cce++) {
+    rel15->CCE[nc] = (uint16_t)cce;
+    rel15->L[nc]   = 1;
+    nc++;
+  }
+  for (int cce = 0; cce + 1 < num_cces && nc < max_cand && (nc - num_cces) < NR_PDCCH_BLIND_AL2_MAX_CANDIDATES;
+       cce += 2) {
+    rel15->CCE[nc] = (uint16_t)cce;
+    rel15->L[nc]   = 2;
+    nc++;
+  }
+  if (nc < 1) {
     return;
   }
-  rel15->number_of_candidates = (uint8_t)num_candidates;
-  for (int c = 0; c < num_candidates; c++) {
-    rel15->CCE[c] = (uint16_t)(c * 2);
-    rel15->L[c]   = 2;
-  }
+  rel15->number_of_candidates = (uint8_t)nc;
   const uint16_t dci_length =
       cfg->dci_length_override > 0 ? (uint16_t)cfg->dci_length_override : nr_pdcch_blind_dci_size((uint16_t)cfg->bwp_size);
   if (dci_length == 0) {
@@ -260,7 +300,15 @@ void nr_pdcch_blind_monitor_process(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t 
   // ---- FEP the CORESET's own symbol(s) + generate LLR (reuses the real RT PDCCH pipeline). ----
   const int llr_size_symbol    = n_rb * NR_PDCCH_BLIND_RE_PER_RB_OUT_DMRS;
   const int num_monitoring_occ = 1; // exactly one bit set in StartSymbolBitmap by construction above
-  c16_t pdcch_llr[1][1][255 * NR_PDCCH_BLIND_RE_PER_RB_OUT_DMRS]; // generously sized; see bound check below
+  /* Sized from the SPEC MAXIMUM, not a guess. A CORESET's frequency-domain resource is a bitmap of
+   * 6-PRB groups over the BWP, so it spans at most floor(275/6) = 45 groups = 270 PRB, and its
+   * duration is at most 3 symbols (38.331 ControlResourceSet::duration). The previous 255-RB bound
+   * was inherited from the small rfsim CORESET and is EXCEEDED by any real wideband dedicated
+   * CORESET: measured on a live 273 PRB srsRAN cell, the dedicated CORESET is 45 groups = 270 PRB,
+   * which tripped the bound check below and silently disabled blind PDCCH monitoring entirely
+   * (blind=0, no accepts, no error other than this one line). ~30 kB on the stack at the maximum. */
+  c16_t pdcch_llr[1][1][NR_PDCCH_BLIND_MAX_CORESET_RB * NR_PDCCH_BLIND_MAX_CORESET_DURATION
+                        * NR_PDCCH_BLIND_RE_PER_RB_OUT_DMRS];
   if ((size_t)(rel15->coreset.duration * llr_size_symbol) > sizeof(pdcch_llr[0][0]) / sizeof(c16_t)) {
     LOG_E(PHY, "SENSING: blind PDCCH monitor CORESET too large for local LLR buffer (n_rb=%d)\n", n_rb);
     return;

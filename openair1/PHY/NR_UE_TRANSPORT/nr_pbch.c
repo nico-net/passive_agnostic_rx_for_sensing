@@ -255,6 +255,70 @@ void nr_pbch_unscrambling(int16_t *demod_pbch_e,
   }
 }
 
+/* TEMPORARY DIAGNOSTIC (intermittent PBCH tracking failure, 2026-08-02).
+ * Per-SSB-occasion state, recorded unconditionally in nr_generate_pbch_llr() and printed ONLY when
+ * nr_pbch_decode() fails -- alongside the last SUCCESSFUL occasion's state, which is the
+ * comparison that matters given the failure is intermittent rather than bandwidth-determined.
+ * __thread because the DL actors are several threads and this must not race. */
+typedef struct {
+  int valid;
+  int is_track;
+  double log2_maxh;
+  double rawmean;
+  int rawmax;
+  int presat;
+  int nb;
+  double hmean;
+  int hmax;
+  int nb_re;
+} pbch_sym_diag_t;
+
+static __thread pbch_sym_diag_t g_pbch_diag[4];
+static __thread pbch_sym_diag_t g_pbch_last_good[4];
+static __thread int g_pbch_have_good;
+
+/* Cross-thread reference, deliberately NOT __thread: acquisition and tracking run on different
+ * threads, and in a failing run tracking never succeeds, so the only "known good" decode available
+ * to compare against is acquisition's. Benign last-writer-wins race, acceptable for a diagnostic. */
+static pbch_sym_diag_t g_pbch_ref[4];
+static volatile int g_pbch_have_ref;
+
+void nr_pbch_diag_snapshot_reference(void)
+{
+  memcpy(g_pbch_ref, g_pbch_diag, sizeof(g_pbch_ref));
+  g_pbch_have_ref = 1;
+}
+
+void nr_pbch_diag_report(int success, int frame, int slot, int ssbIndex)
+{
+  static __thread int nfail;
+  if (success) {
+    memcpy(g_pbch_last_good, g_pbch_diag, sizeof(g_pbch_last_good));
+    g_pbch_have_good = 1;
+    return;
+  }
+  if (nfail >= 6)
+    return;
+  nfail++;
+  LOG_E(PHY, "PBCHFAIL #%d frame=%d slot=%d ssb=%d have_reference_success=%d\n", nfail, frame, slot, ssbIndex, g_pbch_have_good);
+  for (int s = 1; s <= 3; s++) {
+    const pbch_sym_diag_t *f = &g_pbch_diag[s];
+    const pbch_sym_diag_t *g = &g_pbch_last_good[s];
+    LOG_E(PHY,
+          "  sym%d FAIL track=%d log2_maxh=%.1f |H|mean=%.1f |H|max=%d rawmean=%.1f rawmax=%d sat=%d/%d\n",
+          s, f->is_track, f->log2_maxh, f->hmean, f->hmax, f->rawmean, f->rawmax, f->presat, f->nb);
+    if (g_pbch_have_good && g->valid)
+      LOG_E(PHY,
+            "  sym%d GOOD track=%d log2_maxh=%.1f |H|mean=%.1f |H|max=%d rawmean=%.1f rawmax=%d sat=%d/%d\n",
+            s, g->is_track, g->log2_maxh, g->hmean, g->hmax, g->rawmean, g->rawmax, g->presat, g->nb);
+    const pbch_sym_diag_t *r = &g_pbch_ref[s];
+    if (g_pbch_have_ref && r->valid)
+      LOG_E(PHY,
+            "  sym%d ACQREF track=%d log2_maxh=%.1f |H|mean=%.1f |H|max=%d rawmean=%.1f rawmax=%d sat=%d/%d\n",
+            s, r->is_track, r->log2_maxh, r->hmean, r->hmax, r->rawmean, r->rawmax, r->presat, r->nb);
+  }
+}
+
 void nr_pbch_quantize(int16_t *pbch_llr8, const int16_t *pbch_llr, const uint16_t len)
 {
   for (int i=0; i<len; i++) {
@@ -378,6 +442,52 @@ void nr_generate_pbch_llr(const PHY_VARS_NR_UE *ue,
   }
 
   const int nb = (symbolSSB == 2) ? 144 : 360;
+
+  // TEMPORARY DIAGNOSTIC (PBCH tracking-vs-acquisition root-cause hunt, 2026-08-02).
+  // nr_generate_pbch_llr() is SHARED by both paths -- acquisition calls it with ue == NULL,
+  // tracking with ue != NULL -- so the quantiser is common and any divergence must be in its
+  // inputs (|H| via log2_maxh, and the compensated REs) rather than in the quantisation itself.
+  // Logs log2_maxh, the pre-quantisation dynamic range, and the saturation fraction for each,
+  // so the 273 PRB (broken) and 51 PRB (working) arms can be compared directly.
+  // Record per-symbol state for the FAILURE-TRIGGERED dump (see nr_pbch_diag_report below).
+  // Recording is unconditional and cheap; nothing is printed unless a decode actually fails, so a
+  // failing occasion can be compared against the immediately preceding successful one.
+  {
+    const int16_t *raw = (const int16_t *)rxdataF_comp[0];
+    long rawsum = 0;
+    int rawmax = 0;
+    int presat = 0;
+    for (int i = 0; i < nb; i++) {
+      const int a = abs(raw[i]);
+      rawsum += a;
+      if (a > rawmax)
+        rawmax = a;
+      if (a > 31)
+        presat++;
+    }
+    // mean |H| over the extracted channel estimate, as a scale-independent health check
+    long hsum = 0;
+    int hmax = 0;
+    for (int i = 0; i < nb_re; i++) {
+      const int a = abs(dl_ch_estimates_ext[0][i].r) + abs(dl_ch_estimates_ext[0][i].i);
+      hsum += a;
+      if (a > hmax)
+        hmax = a;
+    }
+    if (symbolSSB >= 1 && symbolSSB <= 3) {
+      g_pbch_diag[symbolSSB] = (pbch_sym_diag_t){.valid = 1,
+                                                 .is_track = (ue != NULL),
+                                                 .log2_maxh = log2_maxh,
+                                                 .rawmean = (double)rawsum / nb,
+                                                 .rawmax = rawmax,
+                                                 .presat = presat,
+                                                 .nb = nb,
+                                                 .hmean = (double)hsum / (nb_re ? nb_re : 1),
+                                                 .hmax = hmax,
+                                                 .nb_re = nb_re};
+    }
+  }
+
   nr_pbch_quantize(pbch_e_rx + pbch_e_rx_idx, (short *)rxdataF_comp[0], nb);
 #ifdef DEBUG_PBCH
   char fname[50];

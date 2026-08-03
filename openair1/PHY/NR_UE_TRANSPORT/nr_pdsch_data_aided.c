@@ -59,6 +59,34 @@ void nr_isac_pdsch_data_aided_submit(PHY_VARS_NR_UE *ue,
   if (!nr_isac_enabled() || !nr_isac_source_enabled(NR_ISAC_SRC_PDSCH_DATA))
     return;
 
+  /* SINGLE LAYER ONLY -- and this is a correctness guard, not a scope preference.
+   *
+   * The extraction below computes Ĥ[k] = Y[k]/X[k] as a SCALAR division per (RE, rx antenna). That
+   * is only valid when one modulation symbol is transmitted per RE. At Nl > 1 the receive sample is
+   * a superposition, y_a[k] = sum_l h_{a,l}[k] * x_l[k], so dividing by any single layer's x_l
+   * leaves the other layers' contributions in the "channel estimate" -- it does not merely add
+   * noise, it produces a CFR that is not a channel at all, and a plausible-looking but wrong range
+   * profile. Recovering the per-layer h_{a,l} needs a LEAST-SQUARES SOLVE over a window of REs
+   * (4 rx antennas give 4 equations per RE against Nl*nb_ant unknowns, so W >= Nl REs must be
+   * pooled assuming H is flat across them) -- deliberately NOT attempted here.
+   *
+   * The passive DECODE path now supports Nl > 1 (nr_pdsch_passive_decode.c), so a rank-4 grant will
+   * decode and its CRC pass rate is measurable; it just cannot contribute a CFR row until that
+   * solve exists. Contributing nothing is always preferable to corrupting the range profile -- the
+   * same rule the DM-RS-symbol RE-enumeration bug below is written under. */
+  if (cw->Nl != 1) {
+    static __thread bool warned_ml = false;
+    if (!warned_ml) {
+      warned_ml = true;
+      LOG_W(NR_PHY,
+            "SENSING: data-aided CFR skipped -- grant has Nl=%u layers and Ĥ=Y/X is only valid at "
+            "Nl=1 (needs a windowed least-squares MIMO solve). The TB still decodes; only the CFR "
+            "submission is suppressed.\n",
+            cw->Nl);
+    }
+    return;
+  }
+
   const NR_DL_FRAME_PARMS *fp = &ue->frame_parms;
 
   // --- TB CRC-included payload: tb_bytes is ALREADY B = A + TB-CRC bits (16 or 24-bit, matching

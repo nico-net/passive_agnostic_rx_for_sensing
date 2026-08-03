@@ -23,6 +23,13 @@
 //#define DEBUG_INITIAL_SYNCH
 #define DUMP_PBCH_CH_ESTIMATES 0
 
+/* Upper bound on the scratch memory nr_initial_sync() may hold for parallel GSCN scanning at any
+ * one moment. Each concurrently scanned GSCN needs a private copy of the capture (see the long
+ * comment in nr_initial_sync()), so without a cap the requirement grows with numGscn * antennas *
+ * bandwidth and reaches ~1.6 GB at 273 PRB / 4 RX / ~40 GSCN. 512 MB comfortably holds several
+ * 273 PRB 4-antenna captures (~39 MB each) while staying well inside what a UE host can spare. */
+#define NR_INITIAL_SYNC_SCAN_SCRATCH_BUDGET (512UL * 1024UL * 1024UL)
+
 // structure used for multiple SSB detection
 typedef struct NR_UE_SSB {
   uint i_ssb; // i_ssb between 0 and 7 (it corresponds to ssb_index only for Lmax=4,8)
@@ -124,6 +131,12 @@ static bool nr_pbch_detection(const UE_nr_rxtx_proc_t *proc,
                           symbol_offset,
                           result)) {
       LOG_A(PHY, "Initial sync: pbch decoded sucessfully, ssb index %d\n", *ssb_index);
+      // TEMPORARY DIAGNOSTIC (2026-08-02): snapshot this SUCCESSFUL acquisition decode as the
+      // cross-thread reference for the failure dump. Tracking never succeeds in a failing run, so
+      // acquisition -- same signal, same cell, seconds earlier -- is the only available "working"
+      // decode to diff a failing tracking decode against.
+      extern void nr_pbch_diag_snapshot_reference(void);
+      nr_pbch_diag_snapshot_reference();
       return true;
     }
   }
@@ -387,58 +400,144 @@ nr_initial_sync_t nr_initial_sync(UE_nr_rxtx_proc_t *proc,
         fp->N_RB_DL,
         numGscn);
   DevAssert(numGscn);
-  task_ans_t ans;
-  init_task_ans(&ans, numGscn);
-  nr_ue_ssb_scan_t ssb_info[numGscn];
-  for (int s = 0; s < numGscn; s++) {
-    nr_ue_ssb_scan_t *ssbInfo = &ssb_info[s];
-    *ssbInfo = (nr_ue_ssb_scan_t){.gscnInfo = gscnInfo[s],
-                                  .fp = &ue->frame_parms,
-                                  .proc = proc,
-                                  .syncRes.cell_detected = false,
-                                  .nFrames = n_frames,
-                                  .foFlag = ue->UE_fo_compensation,
-                                  .freqOffset = ue->initial_fo,
-                                  .targetNidCell = ue->target_Nid_cell};
-    ssbInfo->rxdata = malloc16_clear(fp->nb_antennas_rx * sizeof(c16_t *));
-    for (int ant = 0; ant < fp->nb_antennas_rx; ant++) {
-      ssbInfo->rxdata[ant] = malloc16(sizeof(c16_t) * (fp->samples_per_frame * n_frames + fp->ofdm_symbol_size));
-      memcpy(ssbInfo->rxdata[ant], ue->common_vars.rxdata[ant], sizeof(c16_t) * fp->samples_per_frame * n_frames);
-      memset(ssbInfo->rxdata[ant] + fp->samples_per_frame * n_frames, 0, fp->ofdm_symbol_size * sizeof(c16_t));
-      ssbInfo->rxdata_sz = fp->samples_per_frame * n_frames + fp->ofdm_symbol_size;
-    }
-    LOG_I(NR_PHY,
-          "Scanning GSCN: %d, with SSB offset: %d, SSB Freq: %lf\n",
-          ssbInfo->gscnInfo.gscn,
-          ssbInfo->gscnInfo.ssbFirstSC,
-          ssbInfo->gscnInfo.ssRef);
-    ssbInfo->ans = &ans;
-    task_t t = {.func = nr_scan_ssb, .args = ssbInfo};
-    pushTpool(&get_nrUE_params()->Tpool, t);
-  }
 
-  // Collect the scan results
+  /* Peak scratch memory, not parallelism, is the binding constraint on this scan.
+   *
+   * Every scanned GSCN needs its OWN copy of the capture: nr_search_ssb_common() applies the
+   * frequency-offset correction IN PLACE when --ue-fo-compensation is set, so the copies cannot
+   * be shared even though they all start out identical. Allocating every one of them up front,
+   * as this loop used to, costs
+   *     numGscn * nb_antennas_rx * (samples_per_frame*n_frames + ofdm_symbol_size) * sizeof(c16_t)
+   * simultaneously. MEASURED: at 273 PRB with 4 RX antennas and ~40 GSCN that is ~1.6 GB, at
+   * which point malloc16() returns NULL and the memcpy below dereferenced it -- a segfault during
+   * --ue-scan-carrier that presents as an X410 or a 100 MHz bug and is neither.
+   *
+   * Two independent things were wrong and both are fixed here:
+   *   1. the allocations were never checked before being written through;
+   *   2. concurrency was numGscn, unbounded by anything physical.
+   * Scanning more GSCN at once than the pool has worker threads buys no throughput -- the extra
+   * tasks just queue -- while costing one full capture copy each for the whole scan. So the batch
+   * is bounded by BOTH the worker count and a fixed scratch budget, which keeps peak memory flat
+   * regardless of bandwidth, antenna count, or how many GSCN the band search yields.
+   */
+  const size_t rxdata_len = (size_t)fp->samples_per_frame * n_frames + fp->ofdm_symbol_size;
+  const size_t bytes_per_gscn = (size_t)fp->nb_antennas_rx * rxdata_len * sizeof(c16_t);
+  size_t max_by_mem = NR_INITIAL_SYNC_SCAN_SCRATCH_BUDGET / (bytes_per_gscn ? bytes_per_gscn : 1);
+  if (max_by_mem < 1)
+    max_by_mem = 1; // one GSCN at a time is the floor; below that the scan cannot run at all
+  size_t max_by_thread = get_nrUE_params()->Tpool.len_thr;
+  if (max_by_thread < 1)
+    max_by_thread = 1; // a pool with no workers runs tasks inline
+  int batch = (int)(max_by_mem < max_by_thread ? max_by_mem : max_by_thread);
+  if (batch > numGscn)
+    batch = numGscn;
+  if (batch < numGscn)
+    LOG_I(NR_PHY,
+          "Scanning %d GSCN in batches of %d (%zu MB scratch per GSCN, %zu worker threads)\n",
+          numGscn,
+          batch,
+          bytes_per_gscn >> 20,
+          get_nrUE_params()->Tpool.len_thr);
+
+  nr_ue_ssb_scan_t ssb_info[numGscn];
+  for (int s = 0; s < numGscn; s++)
+    ssb_info[s] = (nr_ue_ssb_scan_t){.syncRes.cell_detected = false, .rxdata = NULL};
+
+  // Collect the scan results. Batches run in GSCN order and the first detected cell wins, so this
+  // returns exactly the cell the single-shot version did.
   nr_ue_ssb_scan_t *res = NULL;
-  join_task_ans(&ans);
-  for (int i = 0; i < numGscn; i++) {
-    nr_ue_ssb_scan_t *ssbInfo = &ssb_info[i];
-    if (ssbInfo->syncRes.cell_detected) {
-      LOG_I(NR_PHY,
-            "Cell Detected with GSCN: %d, SSB SC offset: %d, SSB Ref: %lf, PSS Corr peak: %d dB, PSS Corr Average: %d\n",
-            ssbInfo->gscnInfo.gscn,
-            ssbInfo->gscnInfo.ssbFirstSC,
-            ssbInfo->gscnInfo.ssRef,
-            ssbInfo->pssCorrPeakPower,
-            ssbInfo->pssCorrAvgPower);
-      // take the first cell detected
-      if (!res)
-        res = ssbInfo;
+
+  for (int base = 0; base < numGscn; base += batch) {
+    const int n = (numGscn - base < batch) ? (numGscn - base) : batch;
+    bool ready[n];
+    int pushed = 0;
+
+    /* Allocate the batch BEFORE pushing anything: a GSCN whose scratch could not be allocated must
+     * not be pushed, or join_task_ans() below would block forever waiting on a completion that is
+     * never going to arrive. */
+    for (int k = 0; k < n; k++) {
+      nr_ue_ssb_scan_t *ssbInfo = &ssb_info[base + k];
+      *ssbInfo = (nr_ue_ssb_scan_t){.gscnInfo = gscnInfo[base + k],
+                                    .fp = &ue->frame_parms,
+                                    .proc = proc,
+                                    .syncRes.cell_detected = false,
+                                    .nFrames = n_frames,
+                                    .foFlag = ue->UE_fo_compensation,
+                                    .freqOffset = ue->initial_fo,
+                                    .targetNidCell = ue->target_Nid_cell};
+      ready[k] = false;
+      ssbInfo->rxdata = malloc16_clear(fp->nb_antennas_rx * sizeof(c16_t *));
+      if (!ssbInfo->rxdata) {
+        LOG_E(NR_PHY, "GSCN %d: cannot allocate scan buffer array, skipping this GSCN\n", ssbInfo->gscnInfo.gscn);
+        continue;
+      }
+      bool ok = true;
+      for (int ant = 0; ant < fp->nb_antennas_rx; ant++) {
+        ssbInfo->rxdata[ant] = malloc16(sizeof(c16_t) * rxdata_len);
+        if (!ssbInfo->rxdata[ant]) {
+          LOG_E(NR_PHY,
+                "GSCN %d: cannot allocate %zu MB scan buffer for antenna %d, skipping this GSCN\n",
+                ssbInfo->gscnInfo.gscn,
+                (sizeof(c16_t) * rxdata_len) >> 20,
+                ant);
+          ok = false;
+          break; // partial allocation is released by the collection loop below
+        }
+        memcpy(ssbInfo->rxdata[ant], ue->common_vars.rxdata[ant], sizeof(c16_t) * fp->samples_per_frame * n_frames);
+        memset(ssbInfo->rxdata[ant] + fp->samples_per_frame * n_frames, 0, fp->ofdm_symbol_size * sizeof(c16_t));
+        ssbInfo->rxdata_sz = rxdata_len;
+      }
+      ready[k] = ok;
+      if (ok)
+        pushed++;
     }
-    for (int ant = 0; ant < fp->nb_antennas_rx; ant++) {
-      free(ssbInfo->rxdata[ant]);
+
+    if (pushed > 0) {
+      task_ans_t ans;
+      init_task_ans(&ans, pushed);
+      for (int k = 0; k < n; k++) {
+        if (!ready[k])
+          continue;
+        nr_ue_ssb_scan_t *ssbInfo = &ssb_info[base + k];
+        LOG_I(NR_PHY,
+              "Scanning GSCN: %d, with SSB offset: %d, SSB Freq: %lf\n",
+              ssbInfo->gscnInfo.gscn,
+              ssbInfo->gscnInfo.ssbFirstSC,
+              ssbInfo->gscnInfo.ssRef);
+        ssbInfo->ans = &ans;
+        task_t t = {.func = nr_scan_ssb, .args = ssbInfo};
+        pushTpool(&get_nrUE_params()->Tpool, t);
+      }
+      join_task_ans(&ans);
     }
-    free(ssbInfo->rxdata);
-    ssbInfo->rxdata = NULL;
+
+    for (int k = 0; k < n; k++) {
+      nr_ue_ssb_scan_t *ssbInfo = &ssb_info[base + k];
+      if (ssbInfo->syncRes.cell_detected) {
+        LOG_I(NR_PHY,
+              "Cell Detected with GSCN: %d, SSB SC offset: %d, SSB Ref: %lf, PSS Corr peak: %d dB, PSS Corr Average: %d\n",
+              ssbInfo->gscnInfo.gscn,
+              ssbInfo->gscnInfo.ssbFirstSC,
+              ssbInfo->gscnInfo.ssRef,
+              ssbInfo->pssCorrPeakPower,
+              ssbInfo->pssCorrAvgPower);
+        // take the first cell detected
+        if (!res)
+          res = ssbInfo;
+      }
+      if (ssbInfo->rxdata) {
+        for (int ant = 0; ant < fp->nb_antennas_rx; ant++) {
+          free(ssbInfo->rxdata[ant]);
+        }
+        free(ssbInfo->rxdata);
+        ssbInfo->rxdata = NULL;
+      }
+    }
+
+    if (pushed == 0) {
+      LOG_E(NR_PHY, "cell search aborted: no scan scratch could be allocated for any GSCN in this batch\n");
+      break;
+    }
   }
 
   // Set globals based on detected cell
@@ -493,6 +592,30 @@ nr_initial_sync_t nr_initial_sync(UE_nr_rxtx_proc_t *proc,
     } else {
       res->syncRes.rx_offset = res->ssbOffset - sync_pos_frame;
     }
+
+    // TEMPORARY DIAGNOSTIC (acquisition->tracking handoff root-cause hunt, 2026-08-02).
+    // Everything the handoff derives its timing origin from, in one line, so the 273 PRB (broken)
+    // and 51 PRB (working) arms can be diffed numerically instead of reasoned about.
+    LOG_I(PHY,
+          "SYNCDIAG symbolOffset=%d mu=%d n_symb_prefix0=%d sync_pos_frame=%d ssbOffset=%d "
+          "rx_offset=%d wrapped=%d samples_per_frame=%d fft=%d cp=%d cp0=%d symdur=%d "
+          "frame_id=%d init_sync_frame=%d ssbIndex=%d halfFrameBit=%d\n",
+          res->symbolOffset,
+          mu,
+          n_symb_prefix0,
+          sync_pos_frame,
+          res->ssbOffset,
+          res->syncRes.rx_offset,
+          (res->ssbOffset < sync_pos_frame) ? 1 : 0,
+          fp->samples_per_frame,
+          fp->ofdm_symbol_size,
+          fp->nb_prefix_samples,
+          fp->nb_prefix_samples0,
+          fp->ofdm_symbol_size + fp->nb_prefix_samples,
+          res->syncRes.frame_id,
+          ue->init_sync_frame,
+          res->ssbIndex,
+          res->halfFrameBit);
 
     LOG_I(PHY, "[UE%d] In synch, rx_offset %d samples\n", ue->Mod_id, res->syncRes.rx_offset);
     LOG_I(PHY, "[UE %d] Measured Carrier Frequency offset %d Hz\n", ue->Mod_id, res->freqOffset);

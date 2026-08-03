@@ -249,8 +249,16 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
       n_ports++;
     }
   }
-  if (n_ports != 1) {
-    return out->status; // single layer only
+  /* Multi-layer is supported up to the receive-antenna count: separating Nl spatial streams needs
+   * at least Nl receive antennas, and nr_rx_pdsch()'s MIMO equaliser is what does the separation.
+   * MEASURED on the live srsRAN cell (4 DL antennas, commercial UE): num_layers=4 on 97 % of grants,
+   * 3 on ~2 %, 1-2 on a handful -- so the previous "single layer only" guard rejected essentially
+   * every real grant (`pdsch_decode[try=0 unsup=...]`) and the data-aided source could never fire.
+   * The cell cannot be reconfigured to rank 1: its RU has 4 DL ports and the DU refuses
+   * nof_antennas_dl < 4 ("RU number of downlink ports=4 must match the number of transmission
+   * antennas"). */
+  if (n_ports < 1 || n_ports > fp->nb_antennas_rx) {
+    return out->status; // cannot separate more layers than we have receive antennas
   }
 
   // ---- Codeword parameters. get_cw_info()'s arithmetic (nr_ue_procedures.c), minus the HARQ
@@ -259,7 +267,7 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
   memset(cw, 0, sizeof(*cw));
   cw->mcs = grant->mcs;
   cw->rv  = grant->rv;
-  cw->Nl  = 1;
+  cw->Nl  = (uint8_t)n_ports; // was pinned to 1; the DM-RS port count IS the layer count
   cw->new_data_indicator = true;
   cw->qamModOrder = nr_get_Qm_dl(grant->mcs, grant->mcs_table);
   const uint32_t R = nr_get_code_rate_dl(grant->mcs, grant->mcs_table);
@@ -305,7 +313,10 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
   // ---- Channel estimation on the DM-RS symbols. ----
   const uint32_t pdsch_est_size = ((fp->symbols_per_slot * fp->ofdm_symbol_size + 15) / 16) * 16;
   fourDimArray_t *toFree = NULL;
-  allocCast2D(pdsch_dl_ch_estimates, int32_t, toFree, fp->nb_antennas_rx, pdsch_est_size, false);
+  // One estimate per (layer, rx antenna) -- nr_rx_pdsch() indexes this as nl*nb_antennas_rx + aarx,
+  // matching nr_ue_pdsch_procedures()'s own allocation. Estimating only layer 0 (as this used to)
+  // gives the equaliser nothing to separate the other layers with.
+  allocCast2D(pdsch_dl_ch_estimates, int32_t, toFree, fp->nb_antennas_rx * cw->Nl, pdsch_est_size, false);
 
   uint32_t nvar = 0;
   int n_dmrs_sym = 0;
@@ -313,11 +324,13 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
     if (!((dlsch_config->dlDmrsSymbPos >> m) & 1)) {
       continue;
     }
-    uint32_t nvar_tmp = 0;
-    nr_pdsch_channel_estimation(ue, proc, dlsch_config, freq_alloc, 0 /* layer */,
-                                get_dmrs_port(0, dlsch_config->dmrs_ports), (unsigned char)m, pdsch_est_size,
-                                pdsch_dl_ch_estimates, fp->samples_per_slot_wCP, rxdataF, &nvar_tmp);
-    nvar += nvar_tmp;
+    for (int nl = 0; nl < cw->Nl; nl++) { // mirrors nr_ue_pdsch_procedures()'s per-layer loop
+      uint32_t nvar_tmp = 0;
+      nr_pdsch_channel_estimation(ue, proc, dlsch_config, freq_alloc, nl,
+                                  get_dmrs_port(nl, dlsch_config->dmrs_ports), (unsigned char)m, pdsch_est_size,
+                                  pdsch_dl_ch_estimates, fp->samples_per_slot_wCP, rxdataF, &nvar_tmp);
+      nvar += nvar_tmp;
+    }
     n_dmrs_sym++;
   }
   if (n_dmrs_sym == 0) {

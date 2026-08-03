@@ -315,6 +315,13 @@ static int auto_notch_width(const std::vector<double>& prof, uint32_t centre, in
   }
   // Walk out until the ridge has fallen into its own noise, capped so a pathological map cannot
   // notch the whole axis away.
+  //
+  // The cap BINDING is a red flag, not a safe fallback: it means the profile never fell back to its
+  // own floor, i.e. the "one dominant ridge over a flat floor" model this estimator assumes does not
+  // describe this receiver at all. Measured on the full-passive receiver (tests/passive_rx, 273 PRB):
+  // it pinned at the cap of 184 bins = ~561 m of range axis notched away, against 2 bins on
+  // tests/sensing_sim -- silently deleting the entire band the targets live in and leaving 6
+  // detections across 52 CPIs. The caller logs this; do not read a capped value as a derived one.
   const int cap = (int)(n / 8);
   int       w   = 0;
   while (w < cap) {
@@ -770,6 +777,16 @@ void range_doppler::process(const icf_t*                       h_cpi,
     zrg = auto_notch_width(pr, 0, zrg);
     if ((notch_log_++ % 20) == 0) {
       LOG_I(PHY, "SENSING: adaptive clutter guard -> zero_doppler=%d zero_range=%d bins\n", zdg, zrg);
+    }
+    // Loud, every time: a capped width means the profile never returned to its floor, so the notch is
+    // not measuring a direct-path ridge any more -- it is deleting the observable range. See
+    // auto_notch_width's comment for the capture where this cost all but 6 detections in 52 CPIs.
+    if (zrg >= (int)(nof_range / 8) || zdg >= (int)(nof_dopp / 8)) {
+      LOG_W(PHY,
+            "SENSING: adaptive clutter guard hit its cap (zero_range=%d/%u zero_doppler=%d/%u) -- the "
+            "range/Doppler profile never falls back to its own floor, so this is NOT a derived notch "
+            "width. Disable adaptive_clutter_guard on this receiver.\n",
+            zrg, nof_range / 8, zdg, nof_dopp / 8);
     }
   }
   // Far-range notch (opt-in, max_range_m). The range axis routinely extends far beyond any range the

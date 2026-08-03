@@ -43,7 +43,7 @@ set -u
 
 DURATION="${1:-90}"
 OUT_DIR="${2:-/tmp/passive_rx}"
-NUM_RX="${NUM_RX:-2}"
+NUM_RX="${NUM_RX:-2}"   # 1 is supported: see the birth-flag note in the FUSION section
 NUM_UE="${NUM_UE:-3}"
 IPERF_RATE="${IPERF_RATE:-3M}"
 TRAFFIC="${TRAFFIC:-udp}"   # udp = udp_dl.py (1% CPU/stream) | iperf3 (100% CPU/stream, measured)
@@ -551,14 +551,28 @@ else
   # tuned threshold. csi_rs-only CPIs pass through untouched. Feed the GATED reports into the merge
   # below instead of the raw ones.
   MERGE_SPECS=()
-  RNTI_GATE_SPECS=()
-  for i in "${!RX_REPORTS[@]}"; do RNTI_GATE_SPECS+=("${RX_REPORTS[$i]}:${RX_LOGS[$i]}"); done
-  GATED_REPORTS_STR=$(python3 "$SCRIPT_DIR/rnti_gate.py" "$OUT_DIR" "${RNTI_GATE_SPECS[@]}" 2> >(sed 's/^/  rnti_gate: /' >&2))
-  read -r -a GATED_REPORTS <<< "$GATED_REPORTS_STR"
+  if [ "$NUM_RX" -eq 1 ]; then
+    # The RNTI gate is a CROSS-RECEIVER consistency test: it keeps a blind-PDCCH CPI only if some
+    # OTHER receiver saw the same RNTI at the same wall-clock time. With one receiver that question
+    # has no answer and the gate rejects every blind-sourced CPI BY CONSTRUCTION, not on evidence --
+    # measured dropping 39 of 67 CPIs on a single-receiver run, leaving only the csi_rs-only ones.
+    # So it is skipped entirely here; there is nothing for it to cross-check against.
+    GATED_REPORTS=("${RX_REPORTS[@]}")
+    echo "  rnti_gate: SKIPPED (single receiver -- a cross-receiver test has no second opinion)"
+  else
+    RNTI_GATE_SPECS=()
+    for i in "${!RX_REPORTS[@]}"; do RNTI_GATE_SPECS+=("${RX_REPORTS[$i]}:${RX_LOGS[$i]}"); done
+    GATED_REPORTS_STR=$(python3 "$SCRIPT_DIR/rnti_gate.py" "$OUT_DIR" "${RNTI_GATE_SPECS[@]}" 2> >(sed 's/^/  rnti_gate: /' >&2))
+    read -r -a GATED_REPORTS <<< "$GATED_REPORTS_STR"
+  fi
   for i in "${!GATED_REPORTS[@]}"; do MERGE_SPECS+=("${GATED_REPORTS[$i]}@${RX_LOGS[$i]}"); done
 
   MERGED="$OUT_DIR/fused_reports.jsonl"
-  if [ "$NUM_RX" -eq 2 ]; then
+  if [ "$NUM_RX" -eq 1 ]; then
+    # Single receiver: there is nothing to merge, so the (gated) reports ARE the fusion input.
+    cp -f "${GATED_REPORTS[0]}" "$MERGED"
+    echo "  merge: single receiver, $(wc -l < "$MERGED") CPIs passed through unmerged"
+  elif [ "$NUM_RX" -eq 2 ]; then
     python3 "$SCRIPT_DIR/../sensing_sim/merge_receivers_walltime.py" \
       "${GATED_REPORTS[0]}" "${GATED_REPORTS[1]}" "$MERGED" 2>&1 | sed 's/^/  merge: /'
   else
@@ -574,7 +588,19 @@ else
     # then rejects inconsistent ones. Both are dimensionless and AUTOMATICALLY INERT when a fix has
     # no redundancy (isac-track's own guarantee), so this is safe to pass unconditionally even for
     # receivers running single-antenna/no-AoA (RX*_NANT=1) -- it just does nothing for them.
-    "$ISAC_TRACK" --out "$TRACKS" --birth-max-pos-chi2 9 --birth-min-pos-redundancy 1 \
+    # Birth flags depend on how many receivers there are, and getting this wrong is silent:
+    # redundancy is (pairs + bearings - 2), so ONE pair plus its bearing scores exactly 0 and
+    # --birth-min-pos-redundancy 1 would refuse EVERY birth -- turning a single-receiver arm into
+    # "no tracks" rather than into a result. (Measured on the attached-UE harness: the 1-pair arm
+    # emits 135 track updates without that flag and 0 with it.) A single receiver instead needs
+    # --birth-single-pair-bearing, which localises by ray-ellipse intersection; it buys COVERAGE,
+    # not ghost rejection, because a harmonic ghost shares its parent's bearing.
+    if [ "$NUM_RX" -eq 1 ]; then
+      BIRTH_FLAGS=(--birth-max-pos-chi2 9 --birth-single-pair-bearing)
+    else
+      BIRTH_FLAGS=(--birth-max-pos-chi2 9 --birth-min-pos-redundancy 1)
+    fi
+    "$ISAC_TRACK" --out "$TRACKS" "${BIRTH_FLAGS[@]}" ${ISAC_EXTRA_ARGS:-} \
       replay "$MERGED" >"$OUT_DIR/isac_track.log" 2>&1
     NTRACKS=$(wc -l < "$TRACKS" 2>/dev/null || echo 0)
     echo "  fused tracks: $NTRACKS   (see $TRACKS, $OUT_DIR/isac_track.log)"
