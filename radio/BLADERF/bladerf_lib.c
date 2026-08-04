@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
+#include <stdbool.h>
 
 #include <libbladeRF.h>
 #include "common_lib.h"
@@ -32,6 +33,15 @@ typedef struct {
   struct bladerf_metadata meta_tx;
   //! Sample rate
   unsigned int sample_rate;
+  //! Stream sample format
+  bladerf_format format;
+  //! True when the oversample feature and packed 8-bit samples are used
+  bool use_sc8;
+  //! Number of complex samples available in each conversion buffer
+  size_t conversion_buffer_size;
+  //! Packed SC8 Q7 RX/TX conversion buffers
+  int8_t *rx_conversion_buffer;
+  int8_t *tx_conversion_buffer;
 
   // --------------------------------
   // Debug and output control
@@ -75,8 +85,6 @@ typedef struct {
     return -1;                                                                               \
   }
 
-const bladerf_format format = BLADERF_FORMAT_SC16_Q11_META;
-
 static const char *ch_dir(bladerf_channel ch)
 {
   switch (ch) {
@@ -105,17 +113,13 @@ static int trx_brf_start(openair0_device_t *device)
 
   brf->meta_tx.flags = 0;
 
-  /* Configure the device's TX module for use with the sync interface.
-   * SC16 Q11 samples *with* metadata are used. */
-  status = bladerf_sync_config(brf->dev, BLADERF_CHANNEL_TX(0), format,
+  status = bladerf_sync_config(brf->dev, BLADERF_CHANNEL_TX(0), brf->format,
                                brf->num_buffers, brf->buffer_size, brf->num_transfers, brf->tx_timeout_ms);
   BLADERF_CHECK(status == 0,
                 "Set TX sync interface num_buffers %u, buffer_size %u, num_transfer %u, tx_timeout_ms %u",
                 brf->num_buffers, brf->buffer_size, brf->num_transfers, brf->tx_timeout_ms);
 
-  /* Configure the device's RX module for use with the sync interface.
-   * SC16 Q11 samples *with* metadata are used. */
-  status = bladerf_sync_config(brf->dev, BLADERF_CHANNEL_RX(0), format,
+  status = bladerf_sync_config(brf->dev, BLADERF_CHANNEL_RX(0), brf->format,
                                brf->num_buffers, brf->buffer_size, brf->num_transfers, brf->rx_timeout_ms);
   BLADERF_CHECK(status == 0,
                 "Set RX sync interface num_buffers %u, buffer_size %u, num_transfer %u, rx_timeout_ms %u",
@@ -153,6 +157,15 @@ static int trx_brf_write(openair0_device_t *device, openair0_timestamp_t ptimest
 
   /* BRF has only 1 rx/tx chaine : is it correct? TODO: now, handle also two! */
   int16_t *samples = (int16_t *)buff[0];
+  void *wire_samples = samples;
+  if (brf->use_sc8) {
+    DevAssert(nsamps <= brf->conversion_buffer_size);
+    for (int i = 0; i < 2 * nsamps; ++i) {
+      int16_t sample = samples[i] >> 4;
+      brf->tx_conversion_buffer[i] = sample > INT8_MAX ? INT8_MAX : sample < INT8_MIN ? INT8_MIN : sample;
+    }
+    wire_samples = brf->tx_conversion_buffer;
+  }
   ptimestamp -= device->openair0_cfg->command_line_sample_advance - device->openair0_cfg->tx_sample_advance;
 
   // When  BLADERF_META_FLAG_TX_NOW is used the timestamp is not used, so one can't schedule a tx
@@ -160,7 +173,7 @@ static int trx_brf_write(openair0_device_t *device, openair0_timestamp_t ptimest
     brf->meta_tx.flags = BLADERF_META_FLAG_TX_BURST_START;
   brf->meta_tx.timestamp = (uint64_t)(ptimestamp);
 
-  int status = bladerf_sync_tx(brf->dev, samples, nsamps, &brf->meta_tx, 2 * brf->tx_timeout_ms);
+  int status = bladerf_sync_tx(brf->dev, wire_samples, nsamps, &brf->meta_tx, 2 * brf->tx_timeout_ms);
   if (status == BLADERF_ERR_TIME_PAST) {
     brf->num_tx_errors++;
     LOG_W(HW, "Timestamp error: Requested timestamp %ld is in the past.\n", ptimestamp);
@@ -197,10 +210,20 @@ static int trx_brf_read(openair0_device_t *device, openair0_timestamp_t *ptimest
 
   // BRF has only one rx/tx chain
   int16_t *samples = (int16_t *)buff[0];
+  void *wire_samples = samples;
+  if (brf->use_sc8) {
+    DevAssert(nsamps <= brf->conversion_buffer_size);
+    wire_samples = brf->rx_conversion_buffer;
+  }
 
   brf->meta_rx.actual_count = 0;
   brf->meta_rx.flags = BLADERF_META_FLAG_RX_NOW;
-  int status = bladerf_sync_rx(brf->dev, samples, (unsigned int)nsamps, &brf->meta_rx, 2 * brf->rx_timeout_ms);
+  int status = bladerf_sync_rx(brf->dev, wire_samples, (unsigned int)nsamps, &brf->meta_rx, 2 * brf->rx_timeout_ms);
+
+  if (brf->use_sc8 && status == 0) {
+    for (int i = 0; i < 2 * nsamps; ++i)
+      samples[i] = (int16_t)brf->rx_conversion_buffer[i] * 16;
+  }
 
   if (status != 0) {
     LOG_E(HW, "RX failed: %s\n", bladerf_strerror(status));
@@ -242,6 +265,8 @@ static void trx_brf_end(openair0_device_t *device)
     LOG_E(HW, "Failed: Disable RX module: %s\n", bladerf_strerror(status));
   if ((status = bladerf_enable_module(brf->dev, BLADERF_CHANNEL_TX(0), false)) != 0)
     LOG_E(HW, "Failed: Disable TX module: %s\n", bladerf_strerror(status));
+  free(brf->rx_conversion_buffer);
+  free(brf->tx_conversion_buffer);
   bladerf_close(brf->dev);
 }
 
@@ -332,8 +357,10 @@ static int configure_channel(struct bladerf *dev, channel_config_t *c)
   status = bladerf_set_sample_rate(dev, c->channel, c->sample_rate, &actual_value);
   BLADERF_CHECK(status == 0, "Set %s sample rate %u (is %u)", dir, c->sample_rate, actual_value);
 
-  status = bladerf_set_bandwidth(dev, c->channel, c->bandwidth, &actual_value);
-  BLADERF_CHECK(status == 0, "Set %s bandwidth %u (is %u)", dir, c->bandwidth, actual_value);
+  if (c->bandwidth > 0) {
+    status = bladerf_set_bandwidth(dev, c->channel, c->bandwidth, &actual_value);
+    BLADERF_CHECK(status == 0, "Set %s bandwidth %u (is %u)", dir, c->bandwidth, actual_value);
+  }
 
   status = bladerf_set_gain(dev, c->channel, c->gain);
   BLADERF_CHECK(status == 0, "Set %s gain %u", dir, c->gain);
@@ -356,6 +383,15 @@ int device_init(openair0_device_t *device, openair0_config_t *openair0_cfg)
   brf_state_t brf = {0};
 
   switch ((long) openair0_cfg->sample_rate) {
+    case 122880000:
+      openair0_cfg->samples_per_packet = 16384;
+      openair0_cfg->tx_sample_advance = 0;
+      brf.num_buffers = 128;
+      brf.num_transfers = 32;
+      brf.rx_timeout_ms = 2000;
+      brf.use_sc8 = true;
+      break;
+
     case 46080000:
       openair0_cfg->samples_per_packet = 8192;
       openair0_cfg->tx_sample_advance = 0;
@@ -421,6 +457,12 @@ int device_init(openair0_device_t *device, openair0_config_t *openair0_cfg)
   brf.tx_timeout_ms = 2000;
   brf.buffer_size = (unsigned int)openair0_cfg->samples_per_packet;
   brf.sample_rate   = (unsigned int)openair0_cfg->sample_rate;
+  brf.format = brf.use_sc8 ? BLADERF_FORMAT_SC8_Q7_META : BLADERF_FORMAT_SC16_Q11_META;
+  if (brf.use_sc8) {
+    brf.conversion_buffer_size = brf.sample_rate / 1000;
+    brf.rx_conversion_buffer = malloc_or_fail(2 * brf.conversion_buffer_size * sizeof(*brf.rx_conversion_buffer));
+    brf.tx_conversion_buffer = malloc_or_fail(2 * brf.conversion_buffer_size * sizeof(*brf.tx_conversion_buffer));
+  }
 
   float rxterm = brf.num_transfers * brf.buffer_size * 1000.0 / brf.rx_timeout_ms;
   float txterm = brf.num_transfers * brf.buffer_size * 1000.0 / brf.tx_timeout_ms;
@@ -450,6 +492,11 @@ int device_init(openair0_device_t *device, openair0_config_t *openair0_cfg)
     return -1;
     }
 
+  if (brf.use_sc8) {
+    status = bladerf_enable_feature(brf.dev, BLADERF_FEATURE_OVERSAMPLE, true);
+    BLADERF_CHECK(status == 0, "Enable oversample feature with packed 8-bit samples");
+  }
+
   /** [Forcing Tuning Mode to FPGA] */
   const bladerf_tuning_mode tMode = BLADERF_TUNING_MODE_FPGA;
   status = bladerf_set_tuning_mode(brf.dev, tMode);
@@ -462,7 +509,7 @@ int device_init(openair0_device_t *device, openair0_config_t *openair0_cfg)
     .channel = BLADERF_CHANNEL_RX(0),
     .frequency = openair0_cfg->rx_freq[0],
     .sample_rate = openair0_cfg->sample_rate,
-    .bandwidth = openair0_cfg->rx_bw,
+    .bandwidth = brf.use_sc8 ? 0 : openair0_cfg->rx_bw,
     .gain = openair0_cfg->rx_gain[0],
   };
   configure_channel(brf.dev, &rx_chan);
@@ -480,7 +527,7 @@ int device_init(openair0_device_t *device, openair0_config_t *openair0_cfg)
     .channel = BLADERF_CHANNEL_TX(0),
     .frequency = openair0_cfg->tx_freq[0],
     .sample_rate = openair0_cfg->sample_rate,
-    .bandwidth = openair0_cfg->tx_bw,
+    .bandwidth = brf.use_sc8 ? 0 : openair0_cfg->tx_bw,
     .gain = g->max - openair0_cfg->tx_gain[0], // see comment above
   };
   configure_channel(brf.dev, &tx_chan);
