@@ -8,6 +8,7 @@
 
 #define _GNU_SOURCE
 
+#include <math.h>
 #include "nr/nr_common.h"
 #include "assertions.h"
 #include "defs.h"
@@ -1058,6 +1059,173 @@ int nr_process_pbch_symbol(
   const int relPbchSymb = (symbIdxInFrame > (fp->slots_per_frame * NR_SYMBOLS_PER_SLOT / 2)) ? (symbIdxInFrame - startPbchSymbHf)
                                                                                              : (symbIdxInFrame - startPbchSymb);
 
+  // CFO-CORRECTION SWEEP (2026-08-04e, capture-only diagnostic, opt-in ISAC_PBCH_CFO_SWEEP=1, no
+  // behavioural change to the real decode below). SUPERSEDES an earlier version that derotated
+  // rxdataF (POST-FFT): a post-FFT rotation only removes CFO's common-phase term and cannot correct
+  // inter-carrier interference (ICI), which only a PRE-FFT, per-sample time-domain derotation
+  // removes. This version derotates the raw time-domain samples (ue->common_vars.rxdata) and
+  // re-invokes the REAL nr_slot_fep() (FFT/CP-removal) on the corrected copy, then proceeds through
+  // the REAL nr_pbch_channel_estimation / nr_generate_pbch_llr / nr_pbch_decode verbatim -- entirely
+  // separate shadow buffers, nr_pbch_decode called with ue=NULL (an already-supported, null-checked
+  // calling convention) so nothing here writes back into UE state.
+  //
+  // Window, not full-buffer: nr_slot_fep indexes rxdata at an ABSOLUTE sample offset computed from
+  // get_samples_slot_timestamp() + per-symbol CP accounting, so the shadow buffer must be allocated
+  // at the SAME total size nr_slot_fep expects (else its internal offset reads out of bounds) -- but
+  // only the WINDOW actually read needs correct (derotated) content. Bounded using the real
+  // get_samples_slot_timestamp() call (zero risk of misreplicating that arithmetic) plus a generous
+  // fixed margin (8x nb_prefix_samples), rather than reimplementing nr_slot_fep's full offset
+  // formula (including its wrapped-buffer edge case, which its own comment says only triggers during
+  // initial sync -- out of scope for this ongoing-tracking diagnostic). Also clamped to 2x
+  // samples_per_frame (nr_slot_fep's own total_samples), so the window can never read past the real
+  // rxdata buffer's actual extent.
+  {
+    static int cfo_sweep = -1;
+    if (cfo_sweep < 0)
+      cfo_sweep = (getenv("ISAC_PBCH_CFO_SWEEP") != NULL) ? 1 : 0;
+    if (cfo_sweep && relPbchSymb >= 0 && relPbchSymb < NB_SYMBOLS_PBCH) {
+#define CFO_SWEEP_NHYP 33
+#define CFO_SWEEP_MAX_SAMPLES 3000000
+#define CFO_SWEEP_MAX_ANT 4
+      static double hyp_hz[CFO_SWEEP_NHYP];
+      static int hyp_init = 0;
+      if (!hyp_init) {
+        for (int h = 0; h < CFO_SWEEP_NHYP; h++)
+          hyp_hz[h] = -8000.0 + 500.0 * h; // -8000 .. +8000 Hz in 500 Hz steps
+        hyp_init = 1;
+      }
+      static __thread int16_t shadow_e_rx[CFO_SWEEP_NHYP][NR_POLAR_PBCH_E];
+      static __thread double shadow_log2maxh[CFO_SWEEP_NHYP];
+      static __thread c16_t shadow_sym0_est[CFO_SWEEP_NHYP][NR_PBCH_NUM_RB * NR_NB_SC_PER_RB];
+      static __thread int shadow_occasions_left = 10;
+      static __thread c16_t *shadow_rxdata[CFO_SWEEP_MAX_ANT];
+      static __thread c16_t *shadow_rxdataF_full;
+
+      if (fp->nb_antennas_rx <= CFO_SWEEP_MAX_ANT && shadow_rxdata[0] == NULL) {
+        for (int aarx = 0; aarx < fp->nb_antennas_rx; aarx++)
+          shadow_rxdata[aarx] = malloc(sizeof(c16_t) * CFO_SWEEP_MAX_SAMPLES);
+        shadow_rxdataF_full = malloc(sizeof(c16_t) * fp->nb_antennas_rx * fp->samples_per_slot_wCP);
+      }
+
+      if (relPbchSymb == 0)
+        for (int h = 0; h < CFO_SWEEP_NHYP; h++)
+          shadow_log2maxh[h] = 0.0;
+
+      if (shadow_occasions_left > 0 && shadow_rxdata[0] != NULL && fp->nb_antennas_rx <= CFO_SWEEP_MAX_ANT) {
+        const double fs = fp->samples_per_subframe * 1000.0; // samples/sec
+        const long total_samples = 2L * fp->samples_per_frame; // matches nr_slot_fep's own total_samples
+        const uint32_t slot_base = get_samples_slot_timestamp(fp, proc->nr_slot_rx);
+        const long margin = 8L * (long)fp->nb_prefix_samples;
+        long w0 = (long)slot_base + (long)fp->ofdm_symbol_size * symbol - margin;
+        long w1 = (long)slot_base + (long)fp->ofdm_symbol_size * (symbol + 1) + margin;
+        if (w0 < 0) w0 = 0;
+        if (w1 > total_samples) w1 = total_samples;
+        if (w1 > CFO_SWEEP_MAX_SAMPLES) w1 = CFO_SWEEP_MAX_SAMPLES;
+
+        for (int h = 0; h < CFO_SWEEP_NHYP; h++) {
+          for (int aarx = 0; aarx < fp->nb_antennas_rx; aarx++) {
+            for (long n = w0; n < w1; n++) {
+              const double t = (double)n / fs;
+              // correction = e^{-j*2*pi*hyp_hz*t}, undoing a signal of the form s(t)*e^{+j*2*pi*cfo*t}
+              // (sign convention verified against dot_product()'s conj(x)*y and nr_ue_pbch_freq_offset()).
+              const double phase = -2.0 * M_PI * hyp_hz[h] * t;
+              const double cr = cos(phase), ci = sin(phase);
+              const double re = ue->common_vars.rxdata[aarx][n].r, im = ue->common_vars.rxdata[aarx][n].i;
+              shadow_rxdata[aarx][n].r = (int16_t)lround(re * cr - im * ci);
+              shadow_rxdata[aarx][n].i = (int16_t)lround(re * ci + im * cr);
+            }
+          }
+
+          c16_t(*rxdataF_shadow_full)[fp->samples_per_slot_wCP] = (c16_t(*)[fp->samples_per_slot_wCP])shadow_rxdataF_full;
+          nr_slot_fep(ue, fp, proc->nr_slot_rx, symbol, rxdataF_shadow_full, link_type_dl, 0, shadow_rxdata);
+
+          c16_t rxdataF_shadow[fp->nb_antennas_rx][fp->ofdm_symbol_size];
+          for (int aarx = 0; aarx < fp->nb_antennas_rx; aarx++)
+            memcpy(rxdataF_shadow[aarx],
+                   rxdataF_shadow_full[aarx] + symbol * fp->ofdm_symbol_size,
+                   sizeof(c16_t) * fp->ofdm_symbol_size);
+
+          c16_t dl_ch_estimates_shadow[fp->nb_antennas_rx][fp->ofdm_symbol_size];
+          for (int aarx = 0; aarx < fp->nb_antennas_rx; aarx++) {
+            nr_pbch_channel_estimation(fp,
+                                       NULL,
+                                       dl_ch_estimates_shadow[aarx],
+                                       proc,
+                                       relPbchSymb,
+                                       ssbIndex & 7,
+                                       symbIdxInFrame > (fp->slots_per_frame * NR_SYMBOLS_PER_SLOT / 2),
+                                       fp->ssb_start_subcarrier,
+                                       rxdataF_shadow[aarx],
+                                       false,
+                                       fp->Nid_cell);
+          }
+
+          if (relPbchSymb == 0)
+            memcpy(shadow_sym0_est[h], dl_ch_estimates_shadow[0], sizeof(shadow_sym0_est[h]));
+
+          nr_generate_pbch_llr(ue,
+                               proc,
+                               fp,
+                               relPbchSymb + 1,
+                               ssbIndex,
+                               fp->Nid_cell,
+                               fp->ssb_start_subcarrier,
+                               rxdataF_shadow,
+                               dl_ch_estimates_shadow,
+                               shadow_e_rx[h],
+                               &shadow_log2maxh[h]);
+
+          if (relPbchSymb == NB_SYMBOLS_PBCH - 1) {
+            // coherence: |dot(sym0,sym2)| / sqrt(E0*E2) in [0,1] -- same conj(x)*y convention as
+            // dot_product()/nr_ue_pbch_freq_offset(), magnitude-only so sign convention doesn't matter.
+            const int nb_re = NR_PBCH_NUM_RB * NR_NB_SC_PER_RB;
+            double lr = 0.0, li = 0.0, e0 = 0.0, e2 = 0.0;
+            for (int k = 0; k < nb_re; k++) {
+              const c16_t x = shadow_sym0_est[h][k], y = dl_ch_estimates_shadow[0][k];
+              lr += (double)x.r * y.r + (double)x.i * y.i;
+              li += (double)x.r * y.i - (double)x.i * y.r;
+              e0 += (double)x.r * x.r + (double)x.i * x.i;
+              e2 += (double)y.r * y.r + (double)y.i * y.i;
+            }
+            const double coh = (e0 > 0.0 && e2 > 0.0) ? sqrt(lr * lr + li * li) / sqrt(e0 * e2) : 0.0;
+
+            double llr_absmean = 0.0;
+            for (int i = 0; i < NR_POLAR_PBCH_E; i++)
+              llr_absmean += fabs((double)shadow_e_rx[h][i]);
+            llr_absmean /= NR_POLAR_PBCH_E;
+
+            fapiPbch_t shadow_result;
+            int shfb, sssb_idx, ssymb_offset = 0;
+            const int shadowSuccess = nr_pbch_decode(NULL,
+                                                      fp,
+                                                      proc,
+                                                      ssbIndex,
+                                                      fp->Nid_cell,
+                                                      shadow_e_rx[h],
+                                                      &shfb,
+                                                      &sssb_idx,
+                                                      &ssymb_offset,
+                                                      &shadow_result);
+            struct timespec ts;
+            clock_gettime(CLOCK_REALTIME, &ts);
+            LOG_I(PHY,
+                  "TSYNC_CFO_SWEEP utc_ns=%lld frame=%d slot=%d ssb=%d hyp_hz=%.1f coherence=%.4f llr_absmean=%.2f crc_ok=%d\n",
+                  (long long)ts.tv_sec * 1000000000LL + ts.tv_nsec,
+                  proc->frame_rx,
+                  proc->nr_slot_rx,
+                  ssbIndex,
+                  hyp_hz[h],
+                  coh,
+                  llr_absmean,
+                  (shadowSuccess == 0) ? 1 : 0);
+          }
+        }
+        if (relPbchSymb == NB_SYMBOLS_PBCH - 1)
+          shadow_occasions_left--;
+      }
+    }
+  }
+
   const int nid = fp->Nid_cell;
   const int ssb_start_subcarrier = fp->ssb_start_subcarrier;
   for (int aarx = 0; aarx < fp->nb_antennas_rx; aarx++) {
@@ -1142,8 +1310,94 @@ static int pbch_process(PHY_VARS_NR_UE *UE,
         LOG_E(PHY, "Frame %d, slot %d, SSB Index %d. Error decoding PBCH!\n", proc->frame_rx, proc->nr_slot_rx, *ssbIndex);
       else
         T(T_NRUE_PHY_MIB, T_INT(proc->frame_rx), T_INT(proc->nr_slot_rx), T_INT(*ssbIndex), T_BUFFER(pbchResult.decoded_output, 3));
-      // Measure timing offset if PBCH is present in slot
-      if (UE->no_timing_correction == 0 && pbchSuccess == 0) {
+      // TIME-TRACKING AUDIT (2026-08-04, instrumentation only). Time tracking runs ONLY on a
+      // successful PBCH decode, so a PBCH failure silently freezes the FFT-window correction and the
+      // window free-runs. Record every SSB occasion -- success or not -- so PBCH tracking failures
+      // can be correlated against PDCCH coherence loss. Enabled by ISAC_TSYNC_AUDIT=1.
+      {
+        static int audit = -1;
+        if (audit < 0)
+          audit = (getenv("ISAC_TSYNC_AUDIT") != NULL) ? 1 : 0;
+        if (audit) {
+          struct timespec ts;
+          clock_gettime(CLOCK_REALTIME, &ts);
+          LOG_I(PHY, "TSYNC_PBCH utc_ns=%lld frame=%d slot=%d ssb=%d pbch_ok=%d tracking_applied=%d\n",
+                (long long)ts.tv_sec * 1000000000LL + ts.tv_nsec,
+                proc->frame_rx, proc->nr_slot_rx, *ssbIndex, (pbchSuccess == 0) ? 1 : 0,
+                (UE->no_timing_correction == 0 && pbchSuccess == 0) ? 1 : 0);
+        }
+      }
+
+      // CFO CAPTURE (2026-08-04c, capture-only, no behavioural change). nr_ue_pbch_freq_offset()
+      // already exists and is already correct -- it is just normally only CALLED after a successful
+      // decode (get_nrUE_params()->cont_fo_comp && pbchSuccess==0 below), the same "only fires after
+      // success" deadlock already found for timing correction. pbch_ch_est_sym1/sym3 are populated
+      // regardless of decode outcome, so compute and log the estimate on EVERY occasion here,
+      // independently of whether the production cont_fo_comp path also runs. Nothing reads this
+      // value; it does not feed sample_shift, freq_offset, or any decode input.
+      {
+        static int cfo_audit = -1;
+        if (cfo_audit < 0)
+          cfo_audit = (getenv("ISAC_TSYNC_AUDIT") != NULL) ? 1 : 0;
+        if (cfo_audit) {
+          const double cfo_hz = nr_ue_pbch_freq_offset(&UE->frame_parms, pbch_ch_est_sym1, pbch_ch_est_sym3);
+          struct timespec ts;
+          clock_gettime(CLOCK_REALTIME, &ts);
+          LOG_I(PHY, "TSYNC_CFO_PBCH utc_ns=%lld frame=%d slot=%d ssb=%d pbch_ok=%d cfo_hz=%.3f\n",
+                (long long)ts.tv_sec * 1000000000LL + ts.tv_nsec,
+                proc->frame_rx, proc->nr_slot_rx, *ssbIndex, (pbchSuccess == 0) ? 1 : 0, cfo_hz);
+        }
+      }
+
+      // RAW CAPTURE (2026-08-04c, capture-only, opt-in ISAC_PBCH_CAPTURE=1, capped at 300 occasions).
+      // Dumps pbch_ch_est_sym1/sym3 (channel estimate, pre-decode) and pbch_e_rx (LLRs going into the
+      // polar decoder) so a CFO derotation and/or replay of the decode can be done OFFLINE against
+      // the exact same captured data -- this file writes nothing back into the live decode path.
+      {
+        static int pbch_cap = -1;
+        if (pbch_cap < 0)
+          pbch_cap = (getenv("ISAC_PBCH_CAPTURE") != NULL) ? 1 : 0;
+        static FILE *pbch_cap_fp = NULL;
+        static int pbch_cap_left = 300;
+        if (pbch_cap && pbch_cap_left > 0) {
+          if (!pbch_cap_fp) {
+            const char *path = getenv("ISAC_PBCH_CAPTURE_PATH");
+            pbch_cap_fp = fopen(path ? path : "/tmp/pbch_capture.bin", "wb");
+          }
+          if (pbch_cap_fp) {
+            struct timespec ts;
+            clock_gettime(CLOCK_REALTIME, &ts);
+            const int64_t utc_ns = (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;
+            const int32_t frame_i = proc->frame_rx, slot_i = proc->nr_slot_rx, ssb_i = *ssbIndex;
+            const int32_t ok_i = (pbchSuccess == 0) ? 1 : 0;
+            const int32_t nre = NR_PBCH_NUM_RB * NR_NB_SC_PER_RB;
+            const int32_t ne = NR_POLAR_PBCH_E;
+            fwrite(&utc_ns, sizeof(utc_ns), 1, pbch_cap_fp);
+            fwrite(&frame_i, sizeof(frame_i), 1, pbch_cap_fp);
+            fwrite(&slot_i, sizeof(slot_i), 1, pbch_cap_fp);
+            fwrite(&ssb_i, sizeof(ssb_i), 1, pbch_cap_fp);
+            fwrite(&ok_i, sizeof(ok_i), 1, pbch_cap_fp);
+            fwrite(&nre, sizeof(nre), 1, pbch_cap_fp);
+            fwrite(&ne, sizeof(ne), 1, pbch_cap_fp);
+            fwrite(pbch_ch_est_sym1, sizeof(c16_t), nre, pbch_cap_fp);
+            fwrite(pbch_ch_est_sym3, sizeof(c16_t), nre, pbch_cap_fp);
+            fwrite(pbch_e_rx, sizeof(int16_t), ne, pbch_cap_fp);
+            fflush(pbch_cap_fp);
+            pbch_cap_left--;
+          }
+        }
+      }
+
+      // Measure timing offset if PBCH is present in slot.
+      // CAUSAL TEST (2026-08-04b): normally this only runs AFTER a successful decode, which is a
+      // structural deadlock if PBCH has never once succeeded (correction needs success, success may
+      // need correction). ISAC_FORCE_GLOBAL_SYNC=1 also runs it on FAILURES, so the forced
+      // full-symbol correction inside nr_adjust_synch_ue() actually gets a chance to run and be
+      // tested, instead of silently never firing.
+      static int force_global_call = -1;
+      if (force_global_call < 0)
+        force_global_call = (getenv("ISAC_FORCE_GLOBAL_SYNC") != NULL) ? 1 : 0;
+      if (UE->no_timing_correction == 0 && (pbchSuccess == 0 || force_global_call)) {
         sampleShift = nr_adjust_synch_ue(&UE->frame_parms, UE, pbch_ch_est_time, proc->frame_rx, proc->nr_slot_rx, 16384);
       }
 

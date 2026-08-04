@@ -14,6 +14,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <math.h>
 #include <string.h>
 
 #include "executables/nr-softmodem-common.h"
@@ -844,6 +845,61 @@ static void nr_isac_submit_csirs_ls(const NR_DL_FRAME_PARMS *frame_parms,
     isac_l[nof_re] = (uint32_t)loverline0;
     nof_re++;
   }
+
+  // TIME-TRACKING AUDIT (2026-08-04, instrumentation only -- no behavioural change, nothing
+  // downstream reads these values). Same coherence/tau estimator as dci_nr.c's TSYNC_PDCCH probe
+  // (see that file for the derivation), applied here to the CSI-RS LS estimate (isac_h/isac_k)
+  // BEFORE nr_isac_submit_cfr_multi() below hands it to the consumer thread -- i.e. this measures
+  // the raw per-RB Ĥ phase slope before any of NR_UE_ISAC's own STO/CFO/SFO/LOS-residual
+  // corrections (those all run later, in the sensing_engine consumer thread). Antenna 0 only.
+  // isac_k[] is an exact arithmetic sequence (step = NR_NB_SC_PER_RB = 12) whenever freq_density
+  // > 1 (every csirs_monitor resource in this cell's conf), since the skip-every-other-RB branch
+  // above is dead in that case; a non-uniform step is detected and the probe silently skipped
+  // rather than risk a wrong tau on some future freq_density<=1 resource.
+  {
+    static int audit = -1;
+    if (audit < 0)
+      audit = (getenv("ISAC_TSYNC_AUDIT") != NULL) ? 1 : 0;
+    if (audit && nof_re >= 2) {
+      const int step = (int)isac_k[1] - (int)isac_k[0];
+      int uniform = (step > 0);
+      for (uint32_t i = 1; i < nof_re && uniform; i++)
+        if ((int)isac_k[i] - (int)isac_k[i - 1] != step)
+          uniform = 0;
+      if (uniform) {
+        const int symb_sz = frame_parms->ofdm_symbol_size;
+        double lr = 0.0, li = 0.0, e = 0.0;
+        double pr = 0.0, pi = 0.0;
+        for (uint32_t n = 0; n < nof_re; n++) {
+          const double zr = isac_h[2 * n];
+          const double zi = isac_h[2 * n + 1];
+          if (n > 0) {
+            lr += pr * zr + pi * zi;
+            li += pi * zr - pr * zi;
+          }
+          pr = zr;
+          pi = zi;
+          e += zr * zr + zi * zi;
+        }
+        const double coh = (e > 0.0) ? sqrt(lr * lr + li * li) / e : 0.0;
+        const double dphi = -atan2(li, lr);
+        struct timespec ts;
+        clock_gettime(CLOCK_REALTIME, &ts);
+        LOG_I(NR_PHY,
+              "TSYNC_CSIRS utc_ns=%lld frame=%d slot=%d nof_re=%d step=%d coherence=%.4f "
+              "tau_samples=%.1f tau_ambig=%.1f\n",
+              (long long)ts.tv_sec * 1000000000LL + ts.tv_nsec,
+              proc->frame_rx,
+              proc->nr_slot_rx,
+              (int)nof_re,
+              step,
+              coh,
+              dphi * symb_sz / (2.0 * M_PI * step),
+              (double)symb_sz / (2.0 * step));
+      }
+    }
+  }
+
   if (nof_re > 0) {
     nr_isac_carrier_t carrier = {.nof_prb         = (uint32_t)frame_parms->N_RB_DL,
                                  .scs_hz          = frame_parms->subcarrier_spacing,

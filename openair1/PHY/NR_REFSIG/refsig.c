@@ -79,7 +79,14 @@ uint32_t *gold_cache(uint32_t key, int length)
 uint32_t *nr_gold_pbch(int Lmax, int Nid, int n_hf, int l)
 {
   int i_ssb = l & (Lmax - 1);
-  int i_ssb2 = i_ssb + (n_hf << 2);
+  // FIX (2026-08-04): per 3GPP TS 38.211 7.4.1.4.1, the half-frame bit only extends i_ssb when
+  // L_max == 4 (i_ssb is then only 2 bits and needs n_hf to disambiguate). For L_max == 8/64, i_ssb
+  // already spans 3/6 bits on its own and n_hf must NOT be added -- adding it unconditionally (as
+  // this used to) produces a scrambling sequence that disagrees with the transmitter whenever an
+  // SSB occasion falls in the second half-frame (n_hf=1). Confirmed against the transmitter's own
+  // source: OCUDU's dmrs_pbch_processor_impl::c_init() only adds the half-frame term in its
+  // L_max==4 branch, never in the L_max==8/64 branch.
+  int i_ssb2 = (Lmax == 4) ? (i_ssb + (n_hf << 2)) : i_ssb;
   uint32_t x2 = (1 << 11) * (i_ssb2 + 1) * ((Nid >> 2) + 1) + (1 << 6) * (i_ssb2 + 1) + (Nid & 3);
   return gold_cache(x2, NR_PBCH_DMRS_LENGTH_DWORD);
 }
