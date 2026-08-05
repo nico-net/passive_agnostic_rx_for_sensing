@@ -70,14 +70,6 @@ typedef struct {
   uint64_t tx_count;
   //! number of RX count
   uint64_t rx_count;
-  //! Timestamp expected at the start of the next RX block
-  uint64_t rx_next_ts;
-  //! Whether rx_next_ts contains a valid timestamp
-  bool rx_next_ts_valid;
-  //! Previous RX request size, used for low-volume transition diagnostics
-  int rx_last_request;
-  //! Number of request-size transition diagnostics already printed
-  unsigned int rx_transition_logs;
 } brf_state_t;
 
 /** @addtogroup _BLADERF_PHY_RF_INTERFACE_
@@ -226,31 +218,6 @@ static int trx_brf_read(openair0_device_t *device, openair0_timestamp_t *ptimest
   brf->meta_rx.actual_count = 0;
   brf->meta_rx.flags = BLADERF_META_FLAG_RX_NOW;
   int status = bladerf_sync_rx(brf->dev, wire_samples, (unsigned int)nsamps, &brf->meta_rx, 2 * brf->rx_timeout_ms);
-
-  if (status == 0) {
-    if (brf->rx_next_ts_valid && brf->meta_rx.timestamp != brf->rx_next_ts) {
-      LOG_W(HW,
-            "RX timestamp discontinuity: expected %lu, got %lu (delta %+ld), request %d, actual %u\n",
-            brf->rx_next_ts,
-            brf->meta_rx.timestamp,
-            (int64_t)brf->meta_rx.timestamp - (int64_t)brf->rx_next_ts,
-            nsamps,
-            brf->meta_rx.actual_count);
-    }
-    if (brf->rx_count < 6 || (brf->rx_last_request != nsamps && brf->rx_transition_logs < 16)) {
-      LOG_I(HW,
-            "RX timing: timestamp %lu, request %d, actual %u, frame_phase %lu\n",
-            brf->meta_rx.timestamp,
-            nsamps,
-            brf->meta_rx.actual_count,
-            brf->meta_rx.timestamp % (10 * brf->sample_rate / 1000));
-      if (brf->rx_last_request != nsamps)
-        brf->rx_transition_logs++;
-    }
-    brf->rx_next_ts = brf->meta_rx.timestamp + brf->meta_rx.actual_count;
-    brf->rx_next_ts_valid = true;
-    brf->rx_last_request = nsamps;
-  }
 
   if (brf->use_sc8 && status == 0) {
     for (int i = 0; i < 2 * nsamps; ++i)
