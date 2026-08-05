@@ -26,6 +26,7 @@ void nrue_ru_stop(void);
 void nrue_ru_end(void);
 void nrue_ru_set_freq(PHY_VARS_NR_UE *UE, uint64_t ul_carrier, uint64_t dl_carrier, int freq_offset);
 int nrue_ru_adjust_rx_gain(PHY_VARS_NR_UE *UE, int gain_change);
+int nrue_ru_get_device_type(const PHY_VARS_NR_UE *UE);
 int nrue_ru_read(PHY_VARS_NR_UE *UE, openair0_timestamp_t *ptimestamp, void **buff, int nsamps, int num_antennas);
 int nrue_ru_write(PHY_VARS_NR_UE *UE, openair0_timestamp_t timestamp, void **buff, int nsamps, int num_antennas, int flags);
 int nrue_ru_write_reorder(PHY_VARS_NR_UE *UE, openair0_timestamp_t timestamp, void **txp, int nsamps, int nbAnt, int flags);

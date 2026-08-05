@@ -432,6 +432,11 @@ int nrue_ru_adjust_rx_gain(PHY_VARS_NR_UE *UE, int gain_change)
   return gain_change;
 }
 
+int nrue_ru_get_device_type(const PHY_VARS_NR_UE *UE)
+{
+  return openair0_dev[UE->rf_map.card].type;
+}
+
 int nrue_ru_read(PHY_VARS_NR_UE *UE, openair0_timestamp_t *ptimestamp, void **buff, int nsamps, int num_antennas)
 {
   openair0_device_t *dev0 = &openair0_dev[UE->rf_map.card];

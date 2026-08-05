@@ -865,7 +865,25 @@ void *UE_thread(void *arg)
 
     if (stream_status == STREAM_STATUS_UNSYNC) {
       stream_status = STREAM_STATUS_SYNCING;
-      syncInFrame(UE, &sync_timestamp, duration_rx_to_tx, intialSyncOffset);
+      int sync_sample_drift = 0;
+      if (nrue_ru_get_device_type(UE) == BLADERF_DEV && fp->dl_CarrierFreq > 0) {
+        const int elapsed_frames = UE->init_sync_frame + trashed_frames + 2;
+        sync_sample_drift = lround(-(double)UE->common_vars.freq_offset * elapsed_frames * fp->samples_per_frame
+                                   / fp->dl_CarrierFreq);
+        LOG_I(PHY,
+              "bladeRF initial-sync drift compensation: CFO %d Hz, elapsed %d frames, correction %+d samples\n",
+              UE->common_vars.freq_offset,
+              elapsed_frames,
+              sync_sample_drift);
+      }
+      int corrected_sync_offset = intialSyncOffset + sync_sample_drift;
+      int extra_frames = 0;
+      while (corrected_sync_offset < 0) {
+        corrected_sync_offset += fp->samples_per_frame;
+        extra_frames++;
+      }
+      extra_frames += corrected_sync_offset / fp->samples_per_frame;
+      syncInFrame(UE, &sync_timestamp, duration_rx_to_tx, corrected_sync_offset);
       nrue_ru_write_reorder_clear_context(UE);
       shiftForNextFrame = -(UE->init_sync_frame + trashed_frames + 2) * UE->max_pos_acc * get_nrUE_params()->time_sync_I; // compensate for the time drift that happened during initial sync
       LOG_I(PHY, "max_pos_acc = %d, shiftForNextFrame = %d\n", UE->max_pos_acc, shiftForNextFrame);
@@ -879,7 +897,7 @@ void *UE_thread(void *arg)
                   "");
       // we have the decoded frame index in the return of the synch process
       // and we shifted above to the first slot of next frame
-      decoded_frame_rx = (decoded_frame_rx + 1) % MAX_FRAME_NUMBER;
+      decoded_frame_rx = (decoded_frame_rx + 1 + extra_frames) % MAX_FRAME_NUMBER;
       const int prev_frame_rx = (absolute_slot / nb_slot_frame) % MAX_FRAME_NUMBER;
       const int prev_hfn_rx = (absolute_slot / nb_slot_frame) / MAX_FRAME_NUMBER;
       int decoded_hfn_rx = prev_hfn_rx;
