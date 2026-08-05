@@ -776,6 +776,9 @@ void *UE_thread(void *arg)
   }
   int shiftForNextFrame = 0;
   int intialSyncOffset = 0;
+  double bladeRF_sample_drift_per_frame = 0.0;
+  double bladeRF_sample_drift_acc = 0.0;
+  int bladeRF_timing_diag_count = 0;
   openair0_timestamp_t sync_timestamp;
   bool stats_printed = false;
 
@@ -866,15 +869,19 @@ void *UE_thread(void *arg)
     if (stream_status == STREAM_STATUS_UNSYNC) {
       stream_status = STREAM_STATUS_SYNCING;
       int sync_sample_drift = 0;
+      bladeRF_sample_drift_per_frame = 0.0;
+      bladeRF_sample_drift_acc = 0.0;
+      bladeRF_timing_diag_count = 0;
       if (nrue_ru_get_device_type(UE) == BLADERF_DEV && fp->dl_CarrierFreq > 0) {
         const int elapsed_frames = UE->init_sync_frame + trashed_frames + 2;
-        sync_sample_drift = lround(-(double)UE->common_vars.freq_offset * elapsed_frames * fp->samples_per_frame
-                                   / fp->dl_CarrierFreq);
+        bladeRF_sample_drift_per_frame = -(double)UE->common_vars.freq_offset * fp->samples_per_frame / fp->dl_CarrierFreq;
+        sync_sample_drift = lround(bladeRF_sample_drift_per_frame * elapsed_frames);
         LOG_I(PHY,
-              "bladeRF initial-sync drift compensation: CFO %d Hz, elapsed %d frames, correction %+d samples\n",
+              "bladeRF initial-sync drift compensation: CFO %d Hz, elapsed %d frames, correction %+d samples, per-frame drift %.3f samples\n",
               UE->common_vars.freq_offset,
               elapsed_frames,
-              sync_sample_drift);
+              sync_sample_drift,
+              bladeRF_sample_drift_per_frame);
       }
       int corrected_sync_offset = intialSyncOffset + sync_sample_drift;
       int extra_frames = 0;
@@ -976,9 +983,23 @@ void *UE_thread(void *arg)
       rxp[i] = &UE->common_vars.rxdata[i][firstSymSamp + get_samples_slot_timestamp(fp, slot_nr)];
 
     int iq_shift_to_apply = 0;
+    int bladeRF_extra_discard = 0;
     if (slot_nr == nb_slot_frame - 1) {
       // we shift of half of measured drift, at each beginning of frame for both rx and tx
       iq_shift_to_apply = shiftForNextFrame;
+      if (bladeRF_sample_drift_per_frame != 0.0) {
+        bladeRF_sample_drift_acc += bladeRF_sample_drift_per_frame;
+        bladeRF_extra_discard = lround(bladeRF_sample_drift_acc);
+        bladeRF_sample_drift_acc -= bladeRF_extra_discard;
+        if (bladeRF_timing_diag_count < 20) {
+          LOG_I(PHY,
+              "bladeRF timing drift compensation: per-frame drift %.3f, discarding %d samples, residual %.3f\n",
+              bladeRF_sample_drift_per_frame,
+              bladeRF_extra_discard,
+              bladeRF_sample_drift_acc);
+          bladeRF_timing_diag_count++;
+        }
+      }
       // autonomous timing advance calculation, which does not use SIB19 information
       if (ntn_koffset && get_nrUE_params()->autonomous_ta)
         UE->timing_advance_ntn -= 2 * shiftForNextFrame;
@@ -1004,6 +1025,16 @@ void *UE_thread(void *arg)
     }
 
     if(slot_nr == (nb_slot_frame - 1)) {
+      if (bladeRF_extra_discard > 0) {
+        openair0_timestamp_t ignore_timestamp;
+        c16_t discard_buf[bladeRF_extra_discard];
+        c16_t *discard_rxp[fp->nb_antennas_rx];
+        discard_rxp[0] = discard_buf;
+        for (int i = 1; i < fp->nb_antennas_rx; i++)
+          discard_rxp[i] = discard_rxp[0];
+        int tmp = nrue_ru_read(UE, &ignore_timestamp, (void **)discard_rxp, bladeRF_extra_discard, fp->nb_antennas_rx);
+        AssertFatal(bladeRF_extra_discard == tmp, "");
+      }
       // read in first symbol of next frame and adjust for timing drift
       int first_symbols = fp->ofdm_symbol_size + fp->nb_prefix_samples0; // first symbol of every frames
 

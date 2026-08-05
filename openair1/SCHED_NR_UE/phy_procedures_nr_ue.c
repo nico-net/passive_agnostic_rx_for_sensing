@@ -483,6 +483,18 @@ static int nr_ue_pdsch_procedures(PHY_VARS_NR_UE *ue,
   stop_meas_nr_ue_phy(ue, DLSCH_CHANNEL_ESTIMATION_STATS);
   nvar /= (dlschCfg->number_symbols * dlsch->cw_info.Nl * ue->frame_parms.nb_antennas_rx);
   nr_ue_measurement_procedures(2, ue, proc, freq_alloc->num_rbs, pdsch_est_size, pdsch_dl_ch_estimates);
+  static unsigned int sib1_pdsch_diag_count;
+  const bool sib1_pdsch_diag = dlsch->rnti_type == TYPE_SI_RNTI_ && sib1_pdsch_diag_count < 8;
+  if (sib1_pdsch_diag) {
+    LOG_I(PHY,
+          "SIB1 PDSCH chan %d.%d: nvar %u, rx_power_avg %d dB, n0 %d dB, wideband_cqi %d dB\n",
+          frame_rx,
+          nr_slot_rx,
+          nvar,
+          ue->measurements.rx_power_avg_dB[0],
+          ue->measurements.n0_power_avg_dB,
+          ue->measurements.wideband_cqi_avg[0]);
+  }
 
   if (ue->chest_time == 1) { // averaging time domain channel estimates
     nr_chest_time_domain_avg(&ue->frame_parms,
@@ -573,6 +585,19 @@ static int nr_ue_pdsch_procedures(PHY_VARS_NR_UE *ue,
     }
   } // CRNTI active
   stop_meas_nr_ue_phy(ue, RX_PDSCH_STATS);
+  if (sib1_pdsch_diag) {
+    LOG_I(PHY,
+          "SIB1 PDSCH demod %d.%d: log2_maxh %d, valid_re_sym2 %u, sym3 %u, sym7 %u, sym11 %u, sym13 %u\n",
+          frame_rx,
+          nr_slot_rx,
+          log2_maxh,
+          dl_valid_re[2],
+          dl_valid_re[3],
+          dl_valid_re[7],
+          dl_valid_re[11],
+          dl_valid_re[13]);
+    sib1_pdsch_diag_count++;
+  }
   if (scope_req.copy_chanest_to_scope) {
     UEunlockScopeData(ue, pdschChanEstimates);
   }
@@ -655,6 +680,62 @@ static void nr_ue_dlsch_procedures(PHY_VARS_NR_UE *ue,
   LOG_D(PHY, "AbsSubframe %d.%d Start LDPC Decoder for CW%d [harq_pid %d]\n", frame_rx % 1024, nr_slot_rx, cw_idx, harq_pid);
 
   NR_DL_FRAME_PARMS *fp = &ue->frame_parms;
+  static unsigned int sib1_diag_count;
+  const bool sib1_diag = dlsch->rnti_type == TYPE_SI_RNTI_ && sib1_diag_count < 8;
+  if (sib1_diag) {
+    int16_t llr_min = INT16_MAX;
+    int16_t llr_max = INT16_MIN;
+    int64_t llr_abs_sum = 0;
+    int llr_zero = 0;
+    for (int i = 0; i < G; i++) {
+      llr_min = min(llr_min, llr[i]);
+      llr_max = max(llr_max, llr[i]);
+      llr_abs_sum += abs(llr[i]);
+      llr_zero += llr[i] == 0;
+    }
+    LOG_I(PHY,
+          "SIB1 PHY input %d.%d: G %d, TBS %d, MCS %d, Qm %d, code-rate %.4f, RBs %d, symbols %d@%d, "
+          "LLR min/max %d/%d mean-abs %.1f zeros %.1f%%, SSB SINR %.1f dB\n",
+          frame_rx,
+          nr_slot_rx,
+          G,
+          dlsch->cw_info.TBS,
+          dlsch->cw_info.mcs,
+          dlsch->cw_info.qamModOrder,
+          dlsch->cw_info.targetCodeRate / 10240.0,
+          freq_alloc->num_rbs,
+          config->number_symbols,
+          config->start_symbol,
+          llr_min,
+          llr_max,
+          (double)llr_abs_sum / G,
+          100.0 * llr_zero / G,
+          ue->measurements.ssb_sinr_dB[fp->ssb_index]);
+    LOG_I(PHY,
+          "SIB1 PHY config %d.%d: rnti 0x%04x, harq %u, ndi %u, rv %u, BWP %u@%u, alloc type %u, RB %d-%d, "
+          "dmrs_pos 0x%04x, dmrs_type %u, dmrs_ports 0x%04x, cdm_groups %u, data_scrambling_id %u, dmrs_scrambling_id %u, "
+          "nscid %u, mapping %u, pduBitmap 0x%x\n",
+          frame_rx,
+          nr_slot_rx,
+          dlsch->rnti,
+          config->harq_process_nbr,
+          dlsch->cw_info.new_data_indicator,
+          dlsch->cw_info.rv,
+          config->BWPSize,
+          config->BWPStart,
+          config->resource_alloc,
+          freq_alloc->first_rb,
+          freq_alloc->last_rb,
+          config->dlDmrsSymbPos,
+          config->dmrsConfigType,
+          config->dmrs_ports,
+          config->n_dmrs_cdm_groups,
+          config->dlDataScramblingId,
+          config->dlDmrsScramblingId,
+          config->nscid,
+          config->vrb_to_prb_mapping,
+          config->pduBitmap);
+  }
   // exit dlsch procedures as there are no active dlsch
   NR_DL_UE_HARQ_t *dl_harq = &ue->dl_harq_processes[cw_idx][harq_pid];
   if (dl_harq->status != NR_ACTIVE) {
@@ -674,6 +755,19 @@ static void nr_ue_dlsch_procedures(PHY_VARS_NR_UE *ue,
   start_meas_nr_ue_phy(ue, DLSCH_DECODING_STATS);
   nr_dlsch_decoding(ue, proc, dlsch, cw_idx, config, llr, dl_harq->b, freq_alloc->num_rbs, G);
   stop_meas_nr_ue_phy(ue, DLSCH_DECODING_STATS);
+
+  if (sib1_diag) {
+    LOG_I(PHY,
+          "SIB1 PHY result %d.%d: CRC %s, decoded segments %u/%u, LDPC iterations %d/%u\n",
+          frame_rx,
+          nr_slot_rx,
+          dl_harq->decodeResult ? "OK" : "NACK",
+          dl_harq->processedSegments,
+          dl_harq->C,
+          dlsch->last_iteration_cnt,
+          dlsch->max_ldpc_iterations);
+    sib1_diag_count++;
+  }
 
   int ind_type = -1;
   switch (dlsch->rnti_type) {
