@@ -509,7 +509,12 @@ int device_init(openair0_device_t *device, openair0_config_t *openair0_cfg)
     .channel = BLADERF_CHANNEL_RX(0),
     .frequency = openair0_cfg->rx_freq[0],
     .sample_rate = openair0_cfg->sample_rate,
-    .bandwidth = brf.use_sc8 ? 0 : openair0_cfg->rx_bw,
+    /* At 122.88 Msps, calibrate the AD9361 RX baseband filter at its widest
+     * supported bandwidth. libbladeRF's oversample setup, invoked by the
+     * sample-rate calls, then applies its extended-bandwidth register setup.
+     * Leaving this at zero retains the device's previous/default calibration
+     * and can suppress an SSB near the edge of a 100 MHz NR carrier. */
+    .bandwidth = brf.use_sc8 ? 56000000 : openair0_cfg->rx_bw,
     .gain = openair0_cfg->rx_gain[0],
   };
   configure_channel(brf.dev, &rx_chan);
