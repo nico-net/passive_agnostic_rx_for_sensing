@@ -1740,19 +1740,29 @@ static int pbch_process(PHY_VARS_NR_UE *UE,
           // nr_adjust_synch_ue() return, i.e. the fine correction it wanted.
           {
             extern _Atomic int nr_ue_rebase_epoch;
+            extern _Atomic long nr_ue_diag_rf_timestamp;
+            extern _Atomic long nr_ue_diag_samples_consumed;
             static int s_last_epoch = -1;
             static int s_since_rebase = -1;
             const int ep = atomic_load_explicit(&nr_ue_rebase_epoch, memory_order_relaxed);
             if (ep != s_last_epoch) { s_last_epoch = ep; s_since_rebase = 0; }
             else if (s_since_rebase >= 0) s_since_rebase++;
+            const long ts_now = atomic_load_explicit(&nr_ue_diag_rf_timestamp, memory_order_relaxed);
+            const long cons_now = atomic_load_explicit(&nr_ue_diag_samples_consumed, memory_order_relaxed);
+            static long s_ts_prev = 0, s_cons_prev = 0;
             static int s_trace_left = 120;
             if (s_trace_left > 0) {
               s_trace_left--;
               LOG_W(PHY,
                     "SENSING: POSTREBASE frame=%d n_since_rebase=%d epoch=%d state=%s "
-                    "coh_at_pred=%.4f best_coh=%.4f delta=%+ld thr=%.3f cir_resid_prev=%d\n",
+                    "coh_at_pred=%.4f best_coh=%.4f delta=%+ld thr=%.3f cir_resid_prev=%d "
+                    "ts=%ld d_ts=%ld consumed=%ld d_consumed=%ld\n",
                     proc->frame_rx, s_since_rebase, ep, s_locked ? "LOCKED" : "SUSPECT",
-                    cohp, cohb, dl, thr, s_last_cir_resid);
+                    cohp, cohb, dl, thr, s_last_cir_resid,
+                    ts_now, (s_ts_prev ? ts_now - s_ts_prev : 0),
+                    cons_now, (s_cons_prev ? cons_now - s_cons_prev : 0));
+              s_ts_prev = ts_now;
+              s_cons_prev = cons_now;
             }
           }
 

@@ -786,6 +786,26 @@ _Atomic int nr_ue_pending_rebase_valid = 0;
 /* Incremented on every applied rebase so consumers can tell which timing epoch a
  * measurement belongs to, and count occasions since the last one. */
 _Atomic int nr_ue_rebase_epoch = 0;
+/* Absolute RF timestamp of the most recent read, and total samples consumed since start.
+ * Between two SSB occasions (20 ms) these must advance by exactly samples_per_frame*2 unless a
+ * timing correction was explicitly applied -- so comparing them against that constant separates
+ * "samples were physically discarded/duplicated" from "only the logical origin moved". */
+_Atomic long nr_ue_diag_rf_timestamp = 0;
+_Atomic long nr_ue_diag_samples_consumed = 0;
+/* Every mutation of the global timing state, with its call site, so the one that coincides with
+ * the coherence collapse is identifiable rather than inferred. */
+void nr_ue_timing_mutation_log(const char *what, long before, long after, const char *file, int line)
+{
+  static int left = 200;
+  if (before == after || left <= 0)
+    return;
+  left--;
+  LOG_W(PHY, "SENSING: TIMEMUT %s %ld -> %ld (delta %+ld) at %s:%d ts=%ld consumed=%ld\n",
+        what, before, after, after - before, file, line,
+        atomic_load_explicit(&nr_ue_diag_rf_timestamp, memory_order_relaxed),
+        atomic_load_explicit(&nr_ue_diag_samples_consumed, memory_order_relaxed));
+}
+#define LOG_TIMEMUT(w, b, a) nr_ue_timing_mutation_log((w), (long)(b), (long)(a), __FILE__, __LINE__)
 
 static void syncInFrame(PHY_VARS_NR_UE *UE, openair0_timestamp_t *timestamp, int duration_rx_to_tx, openair0_timestamp_t rx_offset)
 {
@@ -1207,7 +1227,9 @@ void *UE_thread(void *arg)
       // autonomous timing advance calculation, which does not use SIB19 information
       if (ntn_koffset && get_nrUE_params()->autonomous_ta)
         UE->timing_advance_ntn -= 2 * shiftForNextFrame;
-      shiftForNextFrame = -round(UE->max_pos_acc * get_nrUE_params()->time_sync_I);
+      { const int b = shiftForNextFrame;
+        shiftForNextFrame = -round(UE->max_pos_acc * get_nrUE_params()->time_sync_I);
+        LOG_TIMEMUT("shiftForNextFrame(perframe)", b, shiftForNextFrame); }
     }
 
     // Calculate new TA based on SIB19 information for each subframe in NTN mode, if "autonomous_ta" is not enabled
@@ -1260,6 +1282,7 @@ void *UE_thread(void *arg)
     }
     s_rxts_prev = rx_timestamp;
     rx_samples_consumed += (tmp > 0) ? tmp : readBlockSize;
+    atomic_store_explicit(&nr_ue_diag_rf_timestamp, (long)rx_timestamp, memory_order_relaxed);
     metadata meta = {.slot =  curMsg.proc.nr_slot_rx, .frame =  curMsg.proc.frame_rx};
     UEscopeCopyWithMetadata(UE, ueTimeDomainSamples, rxp[0] - firstSymSamp, sizeof(c16_t), 1, readBlockSize, 0, &meta);
     // Same fix and rationale as readFrame()'s equivalent check above: a short read is
@@ -1312,6 +1335,7 @@ void *UE_thread(void *arg)
 
     // Every read of this iteration is now counted; commit for the next iteration's continuity test.
     s_rxts_prev_consumed = rx_samples_consumed;
+    atomic_fetch_add_explicit(&nr_ue_diag_samples_consumed, rx_samples_consumed, memory_order_relaxed);
 
     // use previous timing_advance value to compute writeTimestamp
     const openair0_timestamp_t writeTimestamp =
@@ -1349,8 +1373,11 @@ void *UE_thread(void *arg)
     nr_rxtx_thread_data_t *curMsgRx = (nr_rxtx_thread_data_t *)NotifiedFifoData(newRx);
     *curMsgRx = (nr_rxtx_thread_data_t){.proc = curMsg.proc, .UE = UE};
     int ret = UE_dl_preprocessing(UE, &curMsgRx->proc, tx_wait_for_dlsch, &curMsgRx->phy_data, &stats_printed);
-    if (ret != INT_MAX)
+    if (ret != INT_MAX) {
+      const int b = shiftForNextFrame;
       shiftForNextFrame = ret;
+      LOG_TIMEMUT("shiftForNextFrame(pbch)", b, shiftForNextFrame);
+    }
     if (get_nrUE_params()->num_dl_actors > 0) {
       pushNotifiedFIFO(&UE->dl_actors[curMsg.proc.nr_slot_rx % get_nrUE_params()->num_dl_actors].fifo, newRx);
     } else {
