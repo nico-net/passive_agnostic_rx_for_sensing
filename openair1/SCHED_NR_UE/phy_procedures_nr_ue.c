@@ -1634,7 +1634,42 @@ int pbch_processing(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc, nr_phy_da
   LOG_D(PHY," ****** start RX-Chain for Frame.Slot %d.%d ******  \n",
         frame_rx%1024, nr_slot_rx);
 
-  {
+  // ---- CACHED-MIB LATCH: skip periodic PBCH tracking in passive sensing mode (2026-08-06) ------
+  // A passive sensing receiver does not need the MIB re-decoded every 20 ms. Acquisition cannot
+  // report cell_detected unless nr_pbch_detection() decoded PBCH (nr_initial_sync.c), so
+  // is_synchronized == 1 already means "MIB known and latched"; the periodic re-decode only
+  // re-derives configuration that has not changed.
+  //
+  // Why SKIP rather than force pbchSuccess = 0: nr_adjust_synch_ue() and nr_ue_pbch_freq_offset()
+  // are BOTH gated on a successful decode (see pbch_process()), so faking success would feed the
+  // timing- and frequency-correction loops the channel estimates of a FAILED decode. That is
+  // strictly worse than not running them. Timing therefore stays with the acquisition/PDCCH/CSI-RS
+  // path, which is the path that demonstrably works here.
+  //
+  // Scope: passive receive-only mode ONLY -- an attached UE must keep tracking PBCH for real RLM
+  // and for MIB changes. ISAC_PBCH_TRACK=1 restores the periodic decode for future debugging.
+  //
+  // Context: on this deployment tracking PBCH fails on nearly every occasion at 273 PRB while
+  // acquisition decodes reliably, and the golden-buffer replay (ISAC_PBCH_REPLAY) proved the decode
+  // chain itself healthy and tolerant to +/-432 samples. That defect is documented as a receiver
+  // limitation in PBCH_TRACKING_BUFFER_HANDOVER.md rather than blocking sensing.
+  static int s_pbch_track_force = -1;
+  if (s_pbch_track_force < 0)
+    s_pbch_track_force = (getenv("ISAC_PBCH_TRACK") && atoi(getenv("ISAC_PBCH_TRACK"))) ? 1 : 0;
+  const bool use_cached_mib =
+      !s_pbch_track_force && IS_PASSIVE_RX_MODE(get_softmodem_params()) && ue->is_synchronized;
+  if (use_cached_mib) {
+    static int s_announced = 0;
+    if (!s_announced) {
+      s_announced = 1;
+      LOG_I(PHY,
+            "SENSING: PBCH tracking DISABLED (cached MIB from acquisition, Nid_cell=%d ssb_index=%d). "
+            "Timing/CFO stay with the acquisition/PDCCH/CSI-RS path. Set ISAC_PBCH_TRACK=1 to re-enable.\n",
+            fp->Nid_cell, fp->ssb_index);
+    }
+  }
+
+  if (!use_cached_mib) {
     int pbchSymbCnt = 0;
     __attribute__((aligned(32))) c16_t pbch_ch_est_time[ue->frame_parms.nb_antennas_rx][ue->frame_parms.ofdm_symbol_size];
     int16_t pbch_e_rx[NR_POLAR_PBCH_E];
