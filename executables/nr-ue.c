@@ -783,6 +783,9 @@ void readFrame(PHY_VARS_NR_UE *UE, openair0_timestamp_t *timestamp, int duration
  */
 _Atomic long nr_ue_pending_rebase_delta = 0;
 _Atomic int nr_ue_pending_rebase_valid = 0;
+/* Incremented on every applied rebase so consumers can tell which timing epoch a
+ * measurement belongs to, and count occasions since the last one. */
+_Atomic int nr_ue_rebase_epoch = 0;
 
 static void syncInFrame(PHY_VARS_NR_UE *UE, openair0_timestamp_t *timestamp, int duration_rx_to_tx, openair0_timestamp_t rx_offset)
 {
@@ -1162,7 +1165,9 @@ void *UE_thread(void *arg)
         UE->max_pos_acc = 0;
         UE->max_pos_iir = 0;
         shiftForNextFrame = 0;
-        LOG_W(PHY, "SENSING: REBASE done; fine-timing state reset\n");
+        atomic_fetch_add_explicit(&nr_ue_rebase_epoch, 1, memory_order_relaxed);
+        LOG_W(PHY, "SENSING: REBASE done; fine-timing state reset (epoch %d)\n",
+              atomic_load_explicit(&nr_ue_rebase_epoch, memory_order_relaxed));
       } else {
         LOG_W(PHY, "SENSING: REBASE rejected implausible delta %ld\n", d);
       }

@@ -1717,6 +1717,7 @@ static int pbch_process(PHY_VARS_NR_UE *UE,
         s_sign = e ? atoi(e) : -1;
       }
       static bool s_locked = false;
+      static int s_last_cir_resid = 0;
       if (s_anchor && UE->no_timing_correction == 0) {
         extern int nr_pbch_dmrs_anchor(const NR_DL_FRAME_PARMS *, const UE_nr_rxtx_proc_t *,
                                        c16_t *const *, int, unsigned, double *, double *, long *);
@@ -1728,6 +1729,33 @@ static int pbch_process(PHY_VARS_NR_UE *UE,
                                    &cohp, &cohb, &dl)) {
           const double thr = s_locked ? s_stay : s_enter;
           static int s_anchor_log = 40;
+
+          // ---- POST-REBASE VERIFICATION TRACE (2026-08-06) -------------------------------
+          // Logged on EVERY occasion, not only when the anchor fires, and tagged with how many
+          // occasions have elapsed since the last rebase. This is what separates the three
+          // possible outcomes: rebase lands then drifts (coh starts ~0.999 and decays, delta
+          // grows), rebase never lands (coh stays low and delta stays large from occasion 0),
+          // or rebase lands and holds while CRC still fails (coh stays high -- timing is then
+          // no longer the PBCH problem). cir_resid is the previous occasion's
+          // nr_adjust_synch_ue() return, i.e. the fine correction it wanted.
+          {
+            extern _Atomic int nr_ue_rebase_epoch;
+            static int s_last_epoch = -1;
+            static int s_since_rebase = -1;
+            const int ep = atomic_load_explicit(&nr_ue_rebase_epoch, memory_order_relaxed);
+            if (ep != s_last_epoch) { s_last_epoch = ep; s_since_rebase = 0; }
+            else if (s_since_rebase >= 0) s_since_rebase++;
+            static int s_trace_left = 120;
+            if (s_trace_left > 0) {
+              s_trace_left--;
+              LOG_W(PHY,
+                    "SENSING: POSTREBASE frame=%d n_since_rebase=%d epoch=%d state=%s "
+                    "coh_at_pred=%.4f best_coh=%.4f delta=%+ld thr=%.3f cir_resid_prev=%d\n",
+                    proc->frame_rx, s_since_rebase, ep, s_locked ? "LOCKED" : "SUSPECT",
+                    cohp, cohb, dl, thr, s_last_cir_resid);
+            }
+          }
+
           if (cohp >= thr) {
             s_locked = true; /* on the real SSB and inside capture range -> fine tracking below */
           } else {
@@ -1776,6 +1804,7 @@ static int pbch_process(PHY_VARS_NR_UE *UE,
         // the success signal, not the decode alone.
         const int mpa_before = UE->max_pos_acc;
         sampleShift = nr_adjust_synch_ue(&UE->frame_parms, UE, pbch_ch_est_time, proc->frame_rx, proc->nr_slot_rx, 16384);
+        s_last_cir_resid = sampleShift;
         {
           static int s_track_log_left = 25;
           if (s_track_log_left > 0 && pbchSuccess == 0) {
