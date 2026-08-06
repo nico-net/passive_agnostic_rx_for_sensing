@@ -719,6 +719,102 @@ static int pbch_replay_mask(const NR_DL_FRAME_PARMS *fp,
   return crc_ok;
 }
 
+
+/* Normalized DMRS-match metric. chest_rms only says the estimator produced energy; it cannot
+ * distinguish a correct DMRS sequence from a wrong one, because Y*conj(X) has similar magnitude
+ * either way. This measures whether the resulting channel is SMOOTH across subcarriers -- the
+ * defining property of a real channel estimate, and what collapses when X is the wrong sequence.
+ * |sum conj(H[k])H[k+1]| / sum |H[k]||H[k+1]| in [0,1]; ~1 = coherent, ~0 = random phase. */
+static double chest_coherence(const c16_t *h, int n)
+{
+  double lr = 0.0, li = 0.0, den = 0.0;
+  for (int k = 0; k + 1 < n; k++) {
+    const double ar = h[k].r, ai = h[k].i, br = h[k + 1].r, bi = h[k + 1].i;
+    lr += ar * br + ai * bi;
+    li += ar * bi - ai * br;
+    den += sqrt((ar * ar + ai * ai) * (br * br + bi * bi));
+  }
+  return (den > 0.0) ? sqrt(lr * lr + li * li) / den : 0.0;
+}
+
+/* ---- i_ssb / n_hf SWEEP (2026-08-06) ----------------------------------------------------------
+ * Regenerates the ENTIRE candidate-dependent path per tuple -- PBCH DMRS, channel estimate,
+ * log2_maxh/scaling, equalisation, LLRs, descrambling, polar decode, CRC mask. It deliberately does
+ * NOT reuse one i_ssb=0 channel estimate and vary only the descrambling: PBCH DMRS generation is
+ * itself a function of the SSB index, so reusing an estimate would test nothing.
+ */
+static void pbch_sweep_issb(const NR_DL_FRAME_PARMS *fp,
+                            const UE_nr_rxtx_proc_t *proc,
+                            const pbch_snapshot_t *snap,
+                            unsigned mask,
+                            const char *what)
+{
+  if (!snap->valid)
+    return;
+  int sel[4], nsel = 0;
+  for (int a = 0; a < snap->nb_ant && a < 4; a++)
+    if (mask & (1u << a))
+      sel[nsel++] = a;
+  if (nsel == 0)
+    return;
+
+  NR_DL_FRAME_PARMS fp2 = *fp;
+  fp2.nb_antennas_rx = nsel;
+  const int N = snap->ofdm_symbol_size;
+  const int cp = snap->nb_prefix_samples;
+  const int stride = N + cp;
+  const dft_size_idx_t dsz = get_dft(N);
+  const int n_hf_max = (fp->Lmax == 4) ? 2 : 1;
+
+  LOG_W(PHY, "SENSING: PBCHSWEEP --- %s (mask=0x%x) Lmax=%d ---\n", what, mask, fp->Lmax);
+
+  for (int i_ssb = 0; i_ssb < 8; i_ssb++) {
+    for (int n_hf = 0; n_hf < n_hf_max; n_hf++) {
+      int16_t pbch_e_rx[NR_POLAR_PBCH_E];
+      memset(pbch_e_rx, 0, sizeof(pbch_e_rx));
+      double pbch_log2_maxh = -1.0;
+      double coh = 0.0, crms = 0.0;
+
+      for (int s = 1; s <= 3; s++) {
+        const long base = (long)snap->ssb_time_offset + (long)s * stride + cp;
+        if (base < 0 || base + N > snap->nsamp)
+          return;
+        __attribute__((aligned(32))) c16_t rxdataF[nsel][N];
+        __attribute__((aligned(32))) c16_t dl_ch[nsel][N];
+        memset(rxdataF, 0, sizeof(rxdataF));
+        memset(dl_ch, 0, sizeof(dl_ch));
+        for (int k = 0; k < nsel; k++)
+          dft(dsz, (int16_t *)&snap->rxdata[sel[k]][base], (int16_t *)rxdataF[k], 1);
+        for (int k = 0; k < nsel; k++)
+          nr_pbch_channel_estimation(&fp2, NULL, dl_ch[k], proc, s - 1, i_ssb, n_hf,
+                                     snap->ssb_start_subcarrier, rxdataF[k], false, snap->nid_cell);
+        if (s == 1) {
+          coh = chest_coherence(dl_ch[0], N);
+          crms = rms_c16(dl_ch[0], N);
+        }
+        nr_generate_pbch_llr(NULL, proc, &fp2, s, i_ssb, snap->nid_cell, snap->ssb_start_subcarrier,
+                             rxdataF, dl_ch, pbch_e_rx, &pbch_log2_maxh);
+      }
+
+      double llr = 0.0;
+      for (int i = 0; i < NR_POLAR_PBCH_E; i++)
+        llr += fabs((double)pbch_e_rx[i]);
+      llr /= NR_POLAR_PBCH_E;
+
+      fapiPbch_t res;
+      memset(&res, 0, sizeof(res));
+      int hfb = 0, ssb_idx = 0, sym_off = 0;
+      const int crc_ok = (0 == nr_pbch_decode(NULL, fp, proc, i_ssb, snap->nid_cell, pbch_e_rx, &hfb,
+                                              &ssb_idx, &sym_off, &res));
+      LOG_W(PHY,
+            "SENSING: PBCHSWEEP %s i_ssb=%d n_hf=%d dmrs_coh=%.4f chest_rms=%.1f llr=%.2f "
+            "log2_maxh=%.1f crc_ok=%d%s\n",
+            what, i_ssb, n_hf, coh, crms, llr, pbch_log2_maxh, crc_ok,
+            crc_ok ? "  <== PASS" : "");
+    }
+  }
+}
+
 void nr_pbch_replay_masks(const NR_DL_FRAME_PARMS *fp, const UE_nr_rxtx_proc_t *proc)
 {
   static int done = 0;
@@ -771,6 +867,13 @@ void nr_pbch_replay_masks(const NR_DL_FRAME_PARMS *fp, const UE_nr_rxtx_proc_t *
     for (unsigned i = 0; i < sizeof(tests) / sizeof(tests[0]); i++)
       pbch_replay_mask(fp, proc, &g_pbch_live, tests[i].m, tests[i].n);
   }
+
+  // Sweep validated on GOLDEN first: it must select the known acquisition tuple and only that one.
+  // If it selects several, candidate-dependent state is not being fully regenerated and the live
+  // result would be meaningless.
+  pbch_sweep_issb(fp, proc, &g_pbch_golden, 0x4, "GOLDEN");
+  if (g_pbch_live.valid)
+    pbch_sweep_issb(fp, proc, &g_pbch_live, 0x4, "LIVE");
 }
 
 void nr_pbch_replay_2x2(const NR_DL_FRAME_PARMS *fp, const UE_nr_rxtx_proc_t *proc)
