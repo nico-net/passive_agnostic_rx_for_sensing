@@ -1592,7 +1592,20 @@ static int pbch_process(PHY_VARS_NR_UE *UE,
       static int force_global_call = -1;
       if (force_global_call < 0)
         force_global_call = (getenv("ISAC_FORCE_GLOBAL_SYNC") != NULL) ? 1 : 0;
-      if (UE->no_timing_correction == 0 && (pbchSuccess == 0 || force_global_call)) {
+      // ---- CRC-INDEPENDENT TIMING UPDATE (2026-08-06) -------------------------------------
+      // A CRC protects the decoded MIB bits. The timing estimate comes from the PBCH-DMRS channel
+      // impulse response and is independent of whether those bits happened to decode -- so gating
+      // this call on pbchSuccess made a failed payload stop timing recovery, precisely when timing
+      // recovery is most needed. That is the deadlock: no decode -> no timing update -> no decode.
+      // The reliability of the MEASUREMENT is now judged inside nr_adjust_synch_ue() from the CIR
+      // itself (ISAC_TSYNC_MIN_EWIN), which is the correct place for it.
+      // MIB contents are still taken only on CRC success -- that is untouched above.
+      // ISAC_TSYNC_CRC_GATE=1 restores the old CRC-gated behaviour for comparison.
+      static int crc_gate = -1;
+      if (crc_gate < 0)
+        crc_gate = (getenv("ISAC_TSYNC_CRC_GATE") && atoi(getenv("ISAC_TSYNC_CRC_GATE"))) ? 1 : 0;
+      const bool timing_allowed = crc_gate ? (pbchSuccess == 0 || force_global_call) : true;
+      if (UE->no_timing_correction == 0 && timing_allowed) {
         // DEADLOCK-BREAK EVIDENCE (2026-08-06): max_pos_acc across the FIRST successful tracking
         // PBCH decodes. If the CFO seed (ISAC_CFO_DRIFT_SEED, executables/nr-ue.c) merely masked
         // the problem, this never runs. If it genuinely bootstrapped the loop, max_pos_acc starts

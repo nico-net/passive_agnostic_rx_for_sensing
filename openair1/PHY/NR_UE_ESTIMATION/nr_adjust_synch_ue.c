@@ -56,8 +56,23 @@ int nr_adjust_synch_ue(const NR_DL_FRAME_PARMS *frame_parms,
   if (force_global < 0)
     force_global = (getenv("ISAC_FORCE_GLOBAL_SYNC") != NULL) ? 1 : 0;
 
+  // ---- DMRS TIMING-MEASUREMENT RELIABILITY (2026-08-06) ------------------------------------
+  // A CRC protects DECODED BITS; it has no bearing on whether a timing estimate derived from the
+  // DMRS channel impulse response is trustworthy. Gating this loop on PBCH CRC (the caller's old
+  // behaviour) means one failed payload stops timing recovery, which is exactly backwards: timing
+  // is what recovery needs most when decoding is marginal. So the reliability of the MEASUREMENT
+  // is judged here, from the CIR itself, and the caller no longer needs a CRC to call us.
+  //
+  // Metric: fraction of total CIR energy lying within +-CP of the peak (e_win/e_tot), plus whether
+  // the full-symbol peak falls inside that window at all. A clean, well-positioned channel puts
+  // most of its energy in the window; a decorrelated or badly-misplaced one does not. Both
+  // quantities were already being computed here, but only under the audit flag -- they are now
+  // computed ALWAYS (one pass over ofdm_symbol_size, negligible next to the FFT that produced the
+  // estimate) so they can gate the update.
   int g_val = 0, g_pos = 0;
-  if (audit || force_global) {
+  double e_win_frac = 0.0;
+  bool peak_out_of_window = false;
+  {
     int64_t e_tot = 0, e_win = 0;
     for (int i = 0; i < frame_parms->ofdm_symbol_size; i++) {
       int temp = 0;
@@ -75,6 +90,8 @@ int nr_adjust_synch_ue(const NR_DL_FRAME_PARMS *frame_parms,
       if (s >= -frame_parms->nb_prefix_samples && s < frame_parms->nb_prefix_samples)
         e_win += temp;
     }
+    e_win_frac = e_tot ? (double)e_win / (double)e_tot : 0.0;
+    peak_out_of_window = (g_pos < -frame_parms->nb_prefix_samples || g_pos >= frame_parms->nb_prefix_samples);
     if (audit) {
       struct timespec ts;
       clock_gettime(CLOCK_REALTIME, &ts);
@@ -103,6 +120,68 @@ int nr_adjust_synch_ue(const NR_DL_FRAME_PARMS *frame_parms,
   // INPUT changes, not the control law, so this isolates "was the search window too narrow" from
   // "is the filter/PI loop itself wrong".
   const int corr_pos = force_global ? g_pos : max_pos;
+
+  // ---- RELIABILITY GATE + MEASURE-ONLY MODE (2026-08-06) -----------------------------------
+  // Two independent controls, both defaulting to the previous behaviour:
+  //
+  //   ISAC_TSYNC_MIN_EWIN=<frac>  reject this measurement if the CIR is too diffuse or its peak
+  //                               sits outside the +-CP window. Default 0 = no gate (unchanged).
+  //   ISAC_TSYNC_MEASURE=1        MEASUREMENT ONLY: log what the loop WOULD do and return 0
+  //                               without touching max_pos_iir / max_pos_acc or shifting anything.
+  //
+  // The measure-only mode exists so loop gains are chosen from observed timing-error statistics
+  // (per-occasion measurement, its variance, and the residual after a feed-forward drift estimate)
+  // rather than picked arbitrarily -- the mistake made by the earlier time_sync_I = 0.01 guess.
+  // It is the open-loop characterisation step that must precede designing the closed loop.
+  static double min_ewin = -1.0;
+  if (min_ewin < 0.0) {
+    const char *e = getenv("ISAC_TSYNC_MIN_EWIN");
+    min_ewin = e ? atof(e) : 0.0;
+  }
+  static int measure_only = -1;
+  if (measure_only < 0)
+    measure_only = (getenv("ISAC_TSYNC_MEASURE") && atoi(getenv("ISAC_TSYNC_MEASURE"))) ? 1 : 0;
+
+  const bool reliable = (min_ewin <= 0.0) || (e_win_frac >= min_ewin && !peak_out_of_window);
+
+  // Open-loop drift observation: successive corr_pos values against elapsed frames give the
+  // sample-clock drift DIRECTLY, in samples/frame, from this stream -- no CFO inference. Tracked
+  // here (not applied) so the estimate can be compared against the CFO-derived prior.
+  {
+    static int prev_frame = -1;
+    static int prev_pos = 0;
+    static bool have_prev = false;
+    static double drift_ema = 0.0;
+    static int n_obs = 0;
+    if (have_prev && reliable) {
+      int df = (int)frame - prev_frame;
+      if (df < 0)
+        df += MAX_FRAME_NUMBER;
+      if (df > 0 && df <= 64) { // ignore wraps/gaps; SSB period here is 2 frames
+        const double d_per_frame = (double)(corr_pos - prev_pos) / (double)df;
+        n_obs++;
+        drift_ema = (n_obs == 1) ? d_per_frame : (0.9 * drift_ema + 0.1 * d_per_frame);
+        static int obs_log_left = 60;
+        if (obs_log_left > 0) {
+          obs_log_left--;
+          LOG_W(PHY,
+                "SENSING: TSYNC_OBS frame=%d slot=%d corr_pos=%d prev_pos=%d d_frames=%d "
+                "d_per_frame=%+.3f drift_ema=%+.3f n_obs=%d e_win_frac=%.3f peak_oow=%d reliable=%d "
+                "max_val=%d measure_only=%d\n",
+                frame, slot, corr_pos, prev_pos, df, d_per_frame, drift_ema, n_obs,
+                e_win_frac, peak_out_of_window ? 1 : 0, reliable ? 1 : 0, max_val, measure_only);
+        }
+      }
+    }
+    if (reliable) {
+      prev_frame = (int)frame;
+      prev_pos = corr_pos;
+      have_prev = true;
+    }
+  }
+
+  if (!reliable || measure_only)
+    return 0; // no state mutation, no correction applied
 
   // filter position to reduce jitter
   const int ncoef = 32767 - coef;
