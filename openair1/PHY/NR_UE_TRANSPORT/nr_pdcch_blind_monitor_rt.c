@@ -52,6 +52,9 @@
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.h"  // passive PDSCH decode (data-aided source)
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_data_aided.h"      // shared re-encode + Ĥ=Y/X submit
 #include "nfapi/open-nFAPI/nfapi/public_inc/fapi_nr_ue_constants.h" // FAPI_NR_CCE_REG_MAPPING_TYPE_*
+#include "executables/nr-uesoftmodem.h"                   // get_nrUE_params()->Tpool
+#include "common/utils/threadPool/thread-pool.h"          // tpool_t, pushTpool, task_t
+#include "common/utils/threadPool/task_ans.h"             // task_ans_t, init/join/completed_task_ans
 
 #define NR_PDCCH_BLIND_RE_PER_RB_OUT_DMRS 9 // == dci_nr.c's file-local RE_PER_RB_OUT_DMRS #define
 // Spec maxima for a CORESET: the frequency-domain bitmap addresses 6-PRB groups over the BWP, so at
@@ -92,6 +95,7 @@ static void build_coreset_bitmap(int num_groups, uint8_t bitmap[6])
 #define NR_PDCCH_BLIND_SUMMARY_PERIOD_OCC 1000
 static uint64_t    g_occasions_run  = 0;
 static uint64_t    g_candidates_run = 0;
+static int         g_constdiag_left = 20; // TEMPORARY, see CONSTDIAG below
 static uint64_t    g_accepts        = 0; // raw plausibility accepts (Step 1-4 of decode_and_extract),
                                          // BEFORE the noise-floor gates below -- unchanged meaning
                                          // from before 2026-07-28's gates, so old logs stay comparable
@@ -146,6 +150,7 @@ static void energy_floor_update(float x)
 }
 static uint64_t g_held_persist  = 0; // decoded+accepted but RNTI not yet seen rnti_persist_k times
 static uint64_t g_held_snr      = 0; // decoded+accepted+persisted but post-estimation SNR too low
+static uint64_t g_held_mismatch = 0; // migrated from NRSniffer: rejected by the adaptive mismatched-bits gate
 
 // ---- Passive PDSCH decode counters (2026-07-30). g_dec_ok/g_dec_try IS the go/no-go measurement
 // PASSIVE_PDSCH_DATA_AIDED_HANDOVER.md §B.5 asks for: a passive receiver sits somewhere the grant
@@ -193,6 +198,43 @@ static bool rnti_persistence_check(uint16_t rnti, uint32_t abs_slot, uint32_t wi
   return (seen + 1) >= min_k; // +1 counts the sighting just recorded
 }
 
+// ---- Parallel per-candidate decode (2026-08-05) ------------------------------------------------
+// MEASURED live: unscrambling + polar decode (Step 1's SCL search) + the mismatched-bits re-encode
+// check are, per candidate, by far the most expensive work in this file, and ran strictly
+// sequentially even though no candidate's decode depends on another's -- one core pegged at
+// ~80-90% while 5 of 8 cores sat completely idle. This fans that independent work out across the
+// UE's existing thread pool (get_nrUE_params()->Tpool, already used elsewhere on this RT path --
+// see nr_initial_sync.c's GSCN scan for the same fork-join pattern this mirrors). Anything with a
+// genuine sequential dependency (the dci_thres EMA, the RNTI persistence ring buffer, CFR/PDSCH
+// decode submission) stays on the calling thread, in original candidate order, in a second pass
+// AFTER the join -- those are cheap and only reached for the rare candidate that survives decode,
+// so leaving them sequential costs nothing and avoids adding locking to genuinely shared state.
+typedef struct {
+  const c16_t *e_rx;
+  uint8_t      L;
+  uint16_t     dci_length;
+  uint16_t     bwp_size;
+  uint8_t      dmrs_typeA_position;
+  uint16_t     rnti_min;
+  uint16_t     rnti_max;
+  const nr_pdcch_blind_extract_opts_t *extract_opts;
+  uint16_t     scrambling_rnti;
+  uint16_t     dmrs_scrambling_id;
+  nr_pdcch_blind_result_t out; // OUTPUT
+  bool         ok;             // OUTPUT
+  task_ans_t  *ans;
+} nr_pdcch_blind_cand_task_t;
+
+static void nr_pdcch_blind_cand_worker(void *arg)
+{
+  nr_pdcch_blind_cand_task_t *t = (nr_pdcch_blind_cand_task_t *)arg;
+  int16_t tmp_e[16 * 108];
+  nr_pdcch_unscrambling((c16_t *)t->e_rx, t->scrambling_rnti, (uint32_t)(t->L * 108), t->dmrs_scrambling_id, tmp_e);
+  t->ok = nr_pdcch_blind_decode_and_extract_ex(tmp_e, t->L, t->dci_length, t->bwp_size, t->dmrs_typeA_position,
+                                               t->rnti_min, t->rnti_max, t->extract_opts, &t->out);
+  completed_task_ans(t->ans);
+}
+
 void nr_pdcch_blind_monitor_process(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc)
 {
   if (!nr_pdcch_blind_monitor_enabled() || !nr_isac_enabled()) {
@@ -231,13 +273,31 @@ void nr_pdcch_blind_monitor_process(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t 
   rel15->coreset.rb_offset   = 0;
   rel15->coreset.duration    = (uint8_t)cfg->coreset_duration;
   build_coreset_bitmap(cfg->coreset_freq_domain, rel15->coreset.frequency_domain_resource);
-  rel15->coreset.CceRegMappingType = FAPI_NR_CCE_REG_MAPPING_TYPE_NON_INTERLEAVED;
+  /* Kept CONSISTENT with nr_pdcch_demapping_deinterleaving() in dci_nr.c, which is what actually
+   * demaps here and does NOT read this field: it switches on reg_bundle_size alone --
+   *     interleaved   := (reg_bundle_size_L_in != 0)
+   *     bundle size L := (reg_bundle_size_L_in != 0) ? reg_bundle_size_L_in : 6
+   * i.e. reg_bundle_size = 0 MEANS non-interleaved and already implies L = 6. Setting this config
+   * field to the CORESET's real bundle size (6) to "be accurate" therefore selects INTERLEAVED and
+   * then divides by interleaver_size = 0 -- an FPE, observed 2026-08-03. Derived from the same
+   * input as the demapper so the FAPI field and the demapping can never disagree.
+   * Verified for this cell from the gNB's own debug log: the dedicated CORESET carrying every
+   * DCI 1_1 is "NON INTERLEAVED reg_bundle_sz=6", so reg_bundle_size = 0 here is correct. */
+  rel15->coreset.CceRegMappingType = (cfg->coreset_reg_bundle_size != 0)
+                                         ? FAPI_NR_CCE_REG_MAPPING_TYPE_INTERLEAVED
+                                         : FAPI_NR_CCE_REG_MAPPING_TYPE_NON_INTERLEAVED;
   rel15->coreset.RegBundleSize     = (uint8_t)cfg->coreset_reg_bundle_size;
   rel15->coreset.InterleaverSize   = (uint8_t)cfg->coreset_interleaver_size;
   rel15->coreset.ShiftIndex        = (uint8_t)cfg->coreset_shift_index;
   rel15->coreset.pdcch_dmrs_scrambling_id = cfg->coreset_pdcch_dmrs_scrambling_id;
-  rel15->coreset.scrambling_rnti   = 0; // PCI-only descrambling -- this gNB never sets
-                                       // pdcch_DMRS_ScramblingID (see plan finding 1)
+  /* PDCCH data scrambling is c_init = (n_RNTI*2^16 + n_ID), where n_RNTI is the C-RNTI only when
+   * the search space is UE-specific AND the CORESET carries pdcch-DMRS-ScramblingID; otherwise 0.
+   * VERIFIED for this cell from the gNB debug log, on the very lines carrying the DCI 1_1 grants:
+   * "nid_pdcch_data=2 nid_pdcch_dmrs=2 nrnti_pdcch_data=0" -- so n_RNTI = 0 and n_ID = PCI = 2,
+   * which is what this module already assumed. (Had it been non-zero, blind decoding of the USS
+   * would need the C-RNTI *before* it can descramble -- the very thing the scan is recovering --
+   * i.e. a structural blocker rather than a tuning error. It is not the case here.) */
+  rel15->coreset.scrambling_rnti   = 0;
   if (cfg->ss_first_symbol < 0 || cfg->ss_first_symbol >= fp->symbols_per_slot) {
     return;
   }
@@ -317,6 +377,16 @@ void nr_pdcch_blind_monitor_process(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t 
   const uint32_t rxdataF_sz = fp->samples_per_slot_wCP;
   __attribute__((aligned(32))) c16_t rxdataF[fp->nb_antennas_rx][rxdataF_sz];
 
+  /* See nr_pdcch_blind_llr_autoscale's comment in dci_nr.c: the stock equaliser scale is derived
+   * from the mean level over the whole CORESET, which for a blind full-BWP monitor is dominated by
+   * empty REs and drives real PDCCH symbols past the LLR clip rail. Enabled only for this path. */
+  extern int nr_pdcch_blind_llr_autoscale;
+  nr_pdcch_blind_llr_autoscale = 1;
+  extern int nr_pdcch_blind_dmrs_probe;
+  nr_pdcch_blind_dmrs_probe = 1;
+  extern int nr_pdcch_blind_capture;
+  nr_pdcch_blind_capture = (getenv("ISAC_PDCCH_CAPTURE") != NULL);
+
   for (int symbol = cfg->ss_first_symbol; symbol < cfg->ss_first_symbol + rel15->coreset.duration; symbol++) {
     nr_slot_fep(ue, fp, proc->nr_slot_rx, symbol, rxdataF, link_type_dl, 0, ue->common_vars.rxdata);
     __attribute__((aligned(32))) c16_t rxdataF_symb[fp->nb_antennas_rx][((fp->ofdm_symbol_size + 7) / 8) * 8];
@@ -338,6 +408,73 @@ void nr_pdcch_blind_monitor_process(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t 
                                     rel15->coreset.ShiftIndex, rel15->number_of_candidates, rel15->CCE, rel15->L,
                                     llr_stride);
 
+  /* ------------------------------------------------------------------------------------------
+   * PURE INDEXING CHECK (2026-08-04). Does the CCE's equalised data-RE content actually land in
+   * the LLR slice that polar consumes?
+   *
+   * This is a STRUCTURAL property, so it needs no occupied CCE and no real grant -- the demapper
+   * is a permutation of its input, and noise makes a perfectly good fingerprint. Under
+   * NON-interleaved mapping with duration 1, CCE c occupies CORESET REs [54c, 54c+54) of the
+   * demapper INPUT (pdcch_llr, 9 data REs per RB x 6 RBs per CCE). So for a candidate at CCE c with
+   * aggregation level L, the demapper OUTPUT slice pdcch_e_rx[off .. off + 54L) must be exactly
+   * pdcch_llr[54c .. 54c + 54L).
+   *
+   *   match      -> demapper slicing is right; the fault is later (deinterleave ORDER within the
+   *                 slice, LLR sign convention, unscrambling, rate recovery, polar).
+   *   mismatch   -> the fault is the indexing/write offset itself.
+   *   partial    -> REG-bundle / symbol-local offset problem.
+   *
+   * On mismatch it also SEARCHES the input for where the slice actually came from, which names the
+   * offending offset directly instead of leaving it to be guessed. ---------------------------- */
+  {
+    static int s_idx_left = 6;
+    if (s_idx_left > 0 && rel15->number_of_candidates > 0) {
+      const c16_t *in = pdcch_llr[0][0];
+      int probe_off = 0;
+      char rep[600];
+      int u = 0;
+      for (int j = 0; j < rel15->number_of_candidates && j < 6 && u < (int)sizeof(rep) - 90; j++) {
+        const int Lc = rel15->L[j];
+        const int cc = rel15->CCE[j];
+        const int n_re = NR_PDCCH_BLIND_RE_PER_RB_OUT_DMRS * Lc * 6; /* 54*L */
+        const int exp_base = 54 * cc;
+        int same = 0;
+        if (exp_base + n_re <= llr_stride) {
+          for (int i = 0; i < n_re; i++) {
+            if (pdcch_e_rx[probe_off + i].r == in[exp_base + i].r
+                && pdcch_e_rx[probe_off + i].i == in[exp_base + i].i) {
+              same++;
+            }
+          }
+        }
+        /* If it does not line up, find where this slice really lives in the input. */
+        int found_at = -1;
+        if (same != n_re) {
+          const c16_t a = pdcch_e_rx[probe_off + 0];
+          const c16_t b = pdcch_e_rx[probe_off + 1];
+          const c16_t c2 = pdcch_e_rx[probe_off + 2];
+          for (int q = 0; q + 2 < llr_stride; q++) {
+            if (in[q].r == a.r && in[q].i == a.i && in[q + 1].r == b.r && in[q + 1].i == b.i
+                && in[q + 2].r == c2.r && in[q + 2].i == c2.i) {
+              found_at = q;
+              break;
+            }
+          }
+        }
+        u += snprintf(rep + u, sizeof(rep) - u, "[j%d L%d cce%d exp%d %d/%d%s] ",
+                      j, Lc, cc, exp_base, same, n_re,
+                      (same == n_re) ? "" : (found_at >= 0 ? (snprintf(rep + u + 0, 0, "") , " src=?") : " src=none"));
+        if (same != n_re && found_at >= 0 && u < (int)sizeof(rep) - 24) {
+          u += snprintf(rep + u, sizeof(rep) - u, "src=%d(d%+d) ", found_at, found_at - exp_base);
+        }
+        probe_off += n_re;
+      }
+      LOG_W(PHY, "SENSING: IDXCHK n_rb=%d stride=%d ncand=%d %s\n",
+            n_rb, llr_stride, rel15->number_of_candidates, rep);
+      s_idx_left--;
+    }
+  }
+
   // Persistence window in slots -- computed once per occasion (cheap, only used when the gate is
   // enabled). Standard NR: 10ms/frame regardless of numerology, so slots_per_frame slots = 10ms.
   const uint32_t persist_window_slots =
@@ -345,62 +482,165 @@ void nr_pdcch_blind_monitor_process(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t 
           ? (uint32_t)(((int64_t)cfg->rnti_persist_window_ms * fp->slots_per_frame) / 10)
           : 0;
 
-  int e_rx_cand_idx = 0;
-  int decodes_this_occasion = 0; // capped by cfg->pdsch_max_per_slot -- see that field's comment
-  for (int c = 0; c < rel15->number_of_candidates; c++) {
-    const int L         = rel15->L[c];
-    const int n_re_cand = NR_PDCCH_BLIND_RE_PER_RB_OUT_DMRS * L * 6;
+  // ---- Pre-pass (sequential, cheap): compute each candidate's offset into pdcch_e_rx, apply the
+  // energy gate, run the CONSTDIAG diagnostic, and build the task list for every candidate that
+  // survives -- i.e. everything that does NOT need the expensive decode is filtered out BEFORE
+  // the parallel phase, exactly as it was filtered before this loop was split. ----
+  nr_pdcch_blind_cand_task_t cand_task[64]; // bounded by rel15->CCE[64]/L[64] (fapi_nr_ue_interface.h)
+  int nof_tasks = 0;
+  {
+    int e_rx_cand_idx = 0;
+    for (int c = 0; c < rel15->number_of_candidates; c++) {
+      const int L         = rel15->L[c];
+      const int n_re_cand = NR_PDCCH_BLIND_RE_PER_RB_OUT_DMRS * L * 6;
 
-    // ---- Gate 1 (cheapest, runs first): raw pre-decode LLR energy. Unscheduled CCEs measured
-    // exactly (0,0) live 2026-07-28; skips the polar decode entirely for those, not just the CFR
-    // submission -- a real CPU saving alongside the false-accept reduction. ----
-    if (cfg->energy_adapt_factor > 0.0f || cfg->energy_min > 0.0f) {
-      const c16_t *e_raw   = &pdcch_e_rx[e_rx_cand_idx];
-      double        sum_abs = 0;
-      for (int i = 0; i < n_re_cand; i++) {
-        sum_abs += (e_raw[i].r < 0 ? -e_raw[i].r : e_raw[i].r) + (e_raw[i].i < 0 ? -e_raw[i].i : e_raw[i].i);
-      }
-      const float mean_abs = (float)(sum_abs / n_re_cand);
+      // ---- Gate 1 (cheapest, runs first): raw pre-decode LLR energy. Unscheduled CCEs measured
+      // exactly (0,0) live 2026-07-28; skips the polar decode entirely for those, not just the CFR
+      // submission -- a real CPU saving alongside the false-accept reduction. ----
+      if (cfg->energy_adapt_factor > 0.0f || cfg->energy_min > 0.0f) {
+        const c16_t *e_raw   = &pdcch_e_rx[e_rx_cand_idx];
+        double        sum_abs = 0;
+        for (int i = 0; i < n_re_cand; i++) {
+          sum_abs += (e_raw[i].r < 0 ? -e_raw[i].r : e_raw[i].r) + (e_raw[i].i < 0 ? -e_raw[i].i : e_raw[i].i);
+        }
+        const float mean_abs = (float)(sum_abs / n_re_cand);
 
-      float thresh;
-      if (cfg->energy_adapt_factor > 0.0f) {
-        // Adaptive: threshold rides the measured noise floor. Update the floor estimate with EVERY
-        // candidate (including this one) BEFORE thresholding -- the estimator must see the whole
-        // population to stay calibrated, and feeding it only the survivors would let it collapse.
-        energy_floor_update(mean_abs);
-        // Until the estimate has converged, reject nothing: a not-yet-settled floor can sit far
-        // above the true one and would throw away real grants during exactly the startup window
-        // where the persistence gate is also still cold.
-        thresh = (g_energy_nseen >= ENERGY_FLOOR_WARMUP)
-                     ? cfg->energy_adapt_factor * g_energy_floor
-                     : 0.0f;
-      } else {
-        thresh = cfg->energy_min;
+        float thresh;
+        if (cfg->energy_adapt_factor > 0.0f) {
+          // Adaptive: threshold rides the measured noise floor. Update the floor estimate with EVERY
+          // candidate (including this one) BEFORE thresholding -- the estimator must see the whole
+          // population to stay calibrated, and feeding it only the survivors would let it collapse.
+          energy_floor_update(mean_abs);
+          // Until the estimate has converged, reject nothing: a not-yet-settled floor can sit far
+          // above the true one and would throw away real grants during exactly the startup window
+          // where the persistence gate is also still cold.
+          thresh = (g_energy_nseen >= ENERGY_FLOOR_WARMUP)
+                       ? cfg->energy_adapt_factor * g_energy_floor
+                       : 0.0f;
+        } else {
+          thresh = cfg->energy_min;
+        }
+
+        if (mean_abs < thresh) {
+          e_rx_cand_idx += n_re_cand;
+          g_held_energy++;
+          continue;
+        }
       }
 
-      if (mean_abs < thresh) {
-        e_rx_cand_idx += n_re_cand;
-        g_held_energy++;
-        continue;
+      /* TEMPORARY DIAGNOSTIC (2026-08-04): separate "channel estimation/equalisation is wrong" from
+       * "descrambling/decode is wrong". At this point pdcch_e_rx holds the EQUALISED symbols for this
+       * candidate, BEFORE any descrambling -- so if the channel estimate is good they must look like
+       * QPSK: |I| ~= |Q| ~= a stable magnitude, and the per-symbol magnitude spread should be small.
+       * Noise-like magnitudes here would put the fault upstream (extraction/estimation); clean QPSK
+       * here would put it downstream (unscrambling/demapping/polar), which the energy gate has now
+       * made worth distinguishing (real PDCCH power IS present -- 0.9% of candidates sit >3x the
+       * measured noise floor). Only fires for candidates the energy gate already judged hot, and only
+       * a handful of times, so it cannot flood the log or perturb timing meaningfully. */
+      /* Fire ONLY on candidates the adaptive gate has judged clearly hot, and ONLY once its floor has
+       * converged. The first version fired on the first 12 candidates full stop, which all land
+       * during the floor warmup (where the gate passes everything) -- so it sampled cold, empty CCEs
+       * and said nothing about real PDCCH. This version reproduces the intended measurement: the
+       * equalised constellation of REs that actually carry a grant. */
+      if (g_constdiag_left > 0 && g_energy_nseen >= ENERGY_FLOOR_WARMUP && g_energy_floor > 0.0f) {
+        const c16_t *eqp = &pdcch_e_rx[e_rx_cand_idx];
+        double probe_abs = 0.0;
+        for (int i = 0; i < n_re_cand; i++) {
+          probe_abs += (eqp[i].r < 0 ? -eqp[i].r : eqp[i].r) + (eqp[i].i < 0 ? -eqp[i].i : eqp[i].i);
+        }
+        probe_abs /= (double)n_re_cand;
+        if (probe_abs < 5.0 * (double)g_energy_floor) {
+          goto constdiag_done; // not a hot candidate -- say nothing rather than describe noise
+        }
+        const c16_t *eq = &pdcch_e_rx[e_rx_cand_idx];
+        double sum_i = 0.0, sum_q = 0.0, sum_m = 0.0, sum_m2 = 0.0;
+        for (int i = 0; i < n_re_cand; i++) {
+          const double vi = (double)eq[i].r, vq = (double)eq[i].i;
+          const double m  = sqrt(vi * vi + vq * vq);
+          sum_i += (vi < 0 ? -vi : vi);
+          sum_q += (vq < 0 ? -vq : vq);
+          sum_m += m;
+          sum_m2 += m * m;
+        }
+        const double n     = (double)n_re_cand;
+        const double mean_m = sum_m / n;
+        const double var_m  = (sum_m2 / n) - (mean_m * mean_m);
+        /* QPSK on a good estimate: cv (magnitude coefficient of variation) is SMALL (all points on one
+         * ring) and iq_bal ~= 1. Circularly-symmetric noise gives cv ~= 0.52 and iq_bal ~= 1 too, so
+         * cv is the discriminator and iq_bal only catches a gross I/Q imbalance. */
+        const double cv     = (mean_m > 0.0) ? sqrt(var_m > 0.0 ? var_m : 0.0) / mean_m : -1.0;
+        const double iq_bal = (sum_q > 0.0) ? (sum_i / sum_q) : -1.0;
+        LOG_W(PHY,
+              "SENSING: CONSTDIAG L=%d cce=%u n_re=%d mean_mag=%.1f cv=%.3f iq_bal=%.3f hot=%.1fx "
+              "(QPSK-on-good-estimate: cv<<0.5; circular noise: cv~0.52) s0=(%d,%d) s1=(%d,%d) s2=(%d,%d)\n",
+              L, (unsigned)rel15->CCE[c], n_re_cand, mean_m, cv, iq_bal,
+              probe_abs / (double)g_energy_floor,
+              (int)eq[0].r, (int)eq[0].i, (int)eq[1].r, (int)eq[1].i, (int)eq[2].r, (int)eq[2].i);
+        g_constdiag_left--;
       }
+constdiag_done:;
+
+      cand_task[nof_tasks] = (nr_pdcch_blind_cand_task_t){
+          .e_rx                = &pdcch_e_rx[e_rx_cand_idx],
+          .L                   = (uint8_t)L,
+          .dci_length          = dci_length,
+          .bwp_size            = (uint16_t)cfg->bwp_size,
+          .dmrs_typeA_position = (uint8_t)cfg->dmrs_typeA_position,
+          .rnti_min            = cfg->rnti_min,
+          .rnti_max            = cfg->rnti_max,
+          .extract_opts        = &cfg->extract,
+          .scrambling_rnti     = rel15->coreset.scrambling_rnti,
+          .dmrs_scrambling_id  = rel15->coreset.pdcch_dmrs_scrambling_id,
+      };
+      nof_tasks++;
+      e_rx_cand_idx += n_re_cand;
+      g_candidates_run++;
     }
+  }
 
-    int16_t tmp_e[16 * 108];
-    nr_pdcch_unscrambling(&pdcch_e_rx[e_rx_cand_idx], rel15->coreset.scrambling_rnti, (uint32_t)(L * 108),
-                          rel15->coreset.pdcch_dmrs_scrambling_id, tmp_e);
-    e_rx_cand_idx += n_re_cand;
-    g_candidates_run++;
+  // ---- Phase 1 (parallel): fan the independent unscramble+decode work out across the UE's thread
+  // pool. pushTpool() runs the task inline if the pool has zero worker threads configured (its own
+  // documented fallback), so this degrades to the original sequential behaviour rather than
+  // breaking on a single-core/no-pool build. ----
+  if (nof_tasks > 0) {
+    task_ans_t ans;
+    init_task_ans(&ans, nof_tasks);
+    for (int i = 0; i < nof_tasks; i++) {
+      cand_task[i].ans = &ans;
+      task_t t = {.func = nr_pdcch_blind_cand_worker, .args = &cand_task[i]};
+      pushTpool(&get_nrUE_params()->Tpool, t);
+    }
+    join_task_ans(&ans);
+  }
 
-    nr_pdcch_blind_result_t out;
-    const bool ok = nr_pdcch_blind_decode_and_extract_ex(tmp_e, (uint8_t)L, dci_length, (uint16_t)cfg->bwp_size,
-                                                         (uint8_t)cfg->dmrs_typeA_position, cfg->rnti_min,
-                                                         cfg->rnti_max, &cfg->extract, &out);
-    if (!ok) {
+  // ---- Phase 2 (sequential, in original candidate order): everything below has a genuine
+  // sequential dependency (dci_thres EMA, RNTI persistence ring buffer) or is rare/expensive enough
+  // (CFR submission, PDSCH decode) that parallelising it buys nothing. Unchanged from before the
+  // split, just walking cand_task[] instead of decoding inline. ----
+  int decodes_this_occasion = 0; // capped by cfg->pdsch_max_per_slot -- see that field's comment
+  for (int ti = 0; ti < nof_tasks; ti++) {
+    const nr_pdcch_blind_result_t out = cand_task[ti].out;
+    if (!cand_task[ti].ok) {
       g_last_reject_reason = out.reject_reason; // TEMPORARY diagnostic, see periodic summary below
       g_last_reject_rnti   = out.rnti;
       continue;
     }
     g_accepts++;
+
+    // ---- Gate 1.5: mismatched-bits adaptive threshold. Migrated from NRSniffer's dci_nr.c
+    // (nr_dci_false_detection + ue->dci_thres), 2026-08-05. out.mismatched_bits (computed in
+    // nr_pdcch_blind_decode_and_extract_ex) counts bit disagreements between the re-encoded
+    // payload and the original LLR polarity -- a CRC-plausible candidate that's actually a random
+    // false accept will typically mismatch far more bits than a genuine decode. ue->dci_thres is a
+    // simple EMA of recent mismatch counts (self-calibrating to this receiver's own noise floor,
+    // not a fixed constant); a candidate mismatching more than dci_thres+30 bits is rejected.
+    // Default ON (NRSniffer runs this unconditionally); no new config knob added given time
+    // constraints -- flag for follow-up if it needs to be independently disable-able.
+    ue->dci_thres = (ue->dci_thres + out.mismatched_bits) / 2;
+    if (out.mismatched_bits > (ue->dci_thres + 30)) {
+      g_held_mismatch++;
+      continue;
+    }
 
     // ---- Gate 2: RNTI persistence. A real UE's RNTI recurs across many grants; a noise accept is
     // (almost always) a one-off. See rnti_persistence_check()'s own comment. ----
@@ -597,11 +837,12 @@ void nr_pdcch_blind_monitor_process(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t 
   if (g_occasions_run % NR_PDCCH_BLIND_SUMMARY_PERIOD_OCC == 0) {
     LOG_I(PHY,
          "SENSING: blind PDCCH monitor summary: occasions=%lu candidates=%lu accepts=%lu "
-         "held[energy=%lu persist=%lu snr=%lu] efloor=%.2f cfr_submits=%lu "
+         "held[energy=%lu persist=%lu snr=%lu mismatch=%lu] efloor=%.2f cfr_submits=%lu "
          "pdsch_decode[try=%lu crc_ok=%lu (%.1f%%) skip_rv=%lu unsup=%lu data_submits=%lu] "
          "last_reject=\"%s\" last_reject_rnti=0x%x\n",
          (unsigned long)g_occasions_run, (unsigned long)g_candidates_run, (unsigned long)g_accepts,
          (unsigned long)g_held_energy, (unsigned long)g_held_persist, (unsigned long)g_held_snr,
+         (unsigned long)g_held_mismatch,
          g_energy_floor,
          (unsigned long)g_cfr_submits,
          (unsigned long)g_dec_try, (unsigned long)g_dec_ok,

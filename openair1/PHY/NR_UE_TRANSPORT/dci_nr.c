@@ -14,6 +14,7 @@
 
 #include "executables/softmodem-common.h"
 #include "nr_transport_proto_ue.h"
+#include <math.h>
 #include "PHY/CODING/nrPolar_tools/nr_polar_dci_defs.h"
 #include "PHY/phy_extern.h"
 #include "PHY/CODING/coding_extern.h"
@@ -161,6 +162,32 @@ void nr_pdcch_demapping_deinterleaving(uint32_t coreset_nbr_rb,
     }
   }
 }
+
+/* Opt-in headroom correction for BLIND PDCCH monitoring (0 = off = stock behaviour).
+ *
+ * nr_rx_pdcch_symbol() picks its equaliser output scale from
+ *     log2_maxh = log2_approx(avgs)/2 + 5
+ * where avgs is the mean channel level over the WHOLE CORESET. For a UE decoding its own grants
+ * that is fine: its CORESET is small and largely occupied, so the mean is representative of the
+ * REs that carry the DCI. A blind monitor is the opposite case -- it watches a full-BWP CORESET
+ * (here 270 RB = 2430 REs) of which only a couple of CCEs are ever transmitted, so avgs is set by
+ * EMPTY, noise-only REs. The resulting shift is far too small and the REs that do carry PDCCH
+ * overshoot nr_pdcch_llr()'s [-32,31] clip by a wide margin.
+ *
+ * MEASURED on this cell (273 PRB, 4 rx, blind monitor): mean_mag 5-8 with peak 375-691 in the same
+ * symbol -- i.e. real PDCCH REs sitting 12-21x above the clip rail. Clipping at that ratio does not
+ * merely compress amplitude, it rotates the symbol (a QPSK point (203,-14) clips to (31,-14)), so
+ * the soft bits handed to the polar decoder are wrong in PHASE, not just scale.
+ *
+ * When enabled, the scale is derived per symbol from the observed peak rather than from a mean that
+ * the empty REs dominate -- no hand-tuned constant, and it self-adjusts with received level. */
+int nr_pdcch_blind_llr_autoscale = 1;
+int nr_pdcch_blind_dmrs_probe = 0;
+static int    g_dmrs_hot_cce = -1;
+int nr_pdcch_blind_capture = 0;   /* 1 = write the replay fixture */
+static FILE  *g_cap_fp = NULL;
+static int    g_cap_left = 400;
+static double g_dmrs_hot_nc = 0.0; /* TEMPORARY stage-split probe, see DMRSPROBE below */
 
 static void nr_pdcch_llr(uint32_t sz, c16_t *rxF, c16_t *llr)
 {
@@ -324,6 +351,7 @@ static void nr_rx_pdcch_symbol(PHY_VARS_NR_UE *ue,
   int32_t pdcch_est_size = ceil_mod(fp->ofdm_symbol_size + LTE_CE_FILTER_LENGTH, 16);
   __attribute__((aligned(16))) c16_t pdcch_dl_ch_estimates[fp->nb_antennas_rx][pdcch_est_size];
   int n_rb, cset_start;
+  unsigned short cs_sc_cap = 0; /* CORESET start subcarrier, copied out for the replay fixture */
   get_coreset_rballoc(coreset->frequency_domain_resource, &n_rb, &cset_start);
   int rb_offset = cset_start + coreset->rb_offset;
   unsigned short scrambling_id = coreset->pdcch_dmrs_scrambling_id;
@@ -335,6 +363,173 @@ static void nr_rx_pdcch_symbol(PHY_VARS_NR_UE *ue,
   // Note: pilot returned by the following function is already the complex conjugate of the transmitted DMRS
   const uint32_t *gold = nr_gold_pdcch(fp->N_RB_DL, fp->symbols_per_slot, scrambling_id, proc->nr_slot_rx, symbol);
   nr_pdcch_dmrs_ref(gold, pilot, n_rb + rb_offset + dmrs_ref);
+
+  /* ------------------------------------------------------------------------------------------
+   * TEMPORARY STAGE-SPLIT PROBE (2026-08-04). Deterministic, not a parameter search.
+   *
+   * Correlates the RECEIVED PDCCH DM-RS against the LOCALLY REGENERATED sequence, per CCE:
+   *     corr = sum(Y * conj(X)) / sqrt(sum|Y|^2 * sum|X|^2)
+   * nr_pdcch_dmrs_ref() already returns conj(X), so Y*pil is Y*conj(X) directly.
+   *
+   * Indexing mirrors nr_pdcch_channel_estimation() exactly (same start subcarrier, DM-RS at RE
+   * 1,5,9 of each RB, pilot advanced 3/RB) so the probe cannot disagree with the estimator about
+   * where the pilots are. At duration 1 a REG is one RB and a CCE is 6 REGs, so CCE n covers
+   * CORESET RBs [6n, 6n+6) under NON-interleaved mapping -- which the gNB log confirms for this
+   * cell.
+   *
+   * Reading it:
+   *   |corr| HIGH on some CCEs  -> DM-RS sequence, nid, slot/symbol, REG/CCE mapping and RE
+   *                                extraction are all correct; any remaining failure is AFTER
+   *                                equalisation (demap/descramble/rate-recover/polar/CRC).
+   *   |corr| LOW on every CCE   -> the fault is at or before channel estimation.
+   * The empty CCEs are the built-in control: they must sit at the noise level, and their spread
+   * gives the significance bar for whatever the best CCE scores. ------------------------------ */
+  if (nr_pdcch_blind_dmrs_probe) {
+    /* ACCUMULATING version. The first cut fired on the first 6 CORESET symbols it saw and found
+     * only noise -- but that proved nothing: this gNB sends ~1219 DCIs over ~900 s, i.e. roughly
+     * 0.07 % of slots carry a grant, so 6 arbitrary slots are almost certainly all EMPTY. An empty
+     * CORESET has no DM-RS to correlate against, so a noise-level result there is the expected
+     * answer, not evidence about the receive chain.
+     *
+     * So instead: score EVERY CORESET symbol, keep running extremes, and report periodically. Over
+     * a 100 s run this sees ~200k slots and therefore ~140 real grants. The population of empty
+     * slots is its own control -- it fixes the noise distribution precisely, and any slot carrying
+     * a real PDCCH must stand far outside it.
+     *
+     * Decision rule (unchanged): a real DM-RS gives |corr| ~ 0.8-0.95 over the 18 pilots of a CCE.
+     * Pure noise gives sqrt(pi)/(2*sqrt(18)) = 0.209 per trial, and the max over many trials grows
+     * only as sqrt(ln(trials)/18). If max_seen never leaves that envelope, the DM-RS is not being
+     * recovered at all -> fault at/before channel estimation. If some symbols do reach ~0.8+, the
+     * estimator input is fine and the fault is after equalisation. */
+    static double s_max_corr = -1.0;
+    static int    s_max_cce = -1, s_max_slot = -1;
+    static long   s_symbols = 0, s_hits70 = 0, s_hits80 = 0;
+    static double s_sum = 0.0, s_sum2 = 0.0;
+    static long   s_n = 0;
+
+    const int symb_sz = fp->ofdm_symbol_size;
+    const unsigned short cs_sc =
+        (fp->first_carrier_offset + (phy_pdcch_config->pdcch_config[ss_idx].BWPStart + rb_offset) * 12) % symb_sz;
+    const int n_cce = n_rb / 6;
+    double sym_best = -1.0;
+    int    sym_best_cce = -1;
+
+    for (int cce = 0; cce < n_cce; cce++) {
+      double cr = 0.0, ci = 0.0, py = 0.0, px = 0.0;
+      for (int rb = cce * 6; rb < (cce + 1) * 6; rb++) {
+        for (int p = 0; p < 3; p++) {
+          const int k = (cs_sc + rb * 12 + 1 + 4 * p) % symb_sz;
+          const c16_t y = rxdataF[0][k];
+          const c16_t x = pilot[(dmrs_ref + rb_offset + rb) * 3 + p];
+          cr += (double)y.r * x.r - (double)y.i * x.i;
+          ci += (double)y.r * x.i + (double)y.i * x.r;
+          py += (double)y.r * y.r + (double)y.i * y.i;
+          px += (double)x.r * x.r + (double)x.i * x.i;
+        }
+      }
+      const double den = sqrt(py * px);
+      const double a = (den > 0.0) ? sqrt(cr * cr + ci * ci) / den : 0.0;
+      s_sum += a;
+      s_sum2 += a * a;
+      s_n++;
+      if (a > 0.70) s_hits70++;
+      if (a > 0.80) s_hits80++;
+      if (a > sym_best) { sym_best = a; sym_best_cce = cce; }
+    }
+    if (sym_best > s_max_corr) {
+      s_max_corr = sym_best;
+      s_max_cce  = sym_best_cce;
+      s_max_slot = proc->nr_slot_rx;
+    }
+    /* PER-RB (NON-COHERENT) DM-RS CORRELATION.
+     *
+     * The CCE-wide coherent metric above is not phase-ramp immune: it sums 18 pilots spanning 72
+     * subcarriers, so ANY residual FFT-window timing error rotates the later pilots relative to the
+     * earlier ones and the coherent sum collapses even when the DM-RS is present and perfectly
+     * correct. OAI's own estimator does not have that weakness -- it forms per-pilot products and
+     * interpolates -- so a low coherent score does NOT by itself prove the DM-RS is missing.
+     *
+     * Here each RB is correlated on its own 3 pilots (|corr| per RB), and the MAGNITUDES are
+     * averaged over the 6 RBs of a CCE. That is immune to a phase ramp across the CCE. It also
+     * reports the mean phase STEP between adjacent RBs of the best CCE: a real timing offset shows
+     * up as a consistent per-RB rotation, and tau ~ (dphi/2pi) * (N_fft / 12) samples.
+     *
+     * Noise reference: |corr| over 3 complex pilots has mean sqrt(pi)/(2*sqrt(3)) = 0.512, so the
+     * non-coherent average over 6 RBs sits near 0.51 for empty CORESETs. A real DM-RS should push
+     * the per-CCE average well above that regardless of timing. */
+    cs_sc_cap = cs_sc;
+    {
+      static double s_nc_max = 0.0;
+      static long   s_nc_hits = 0, s_nc_n = 0;
+      static double s_nc_sum = 0.0;
+      static long   s_nc_cnt = 0;
+      static double s_best_dphi = 0.0;
+      double sym_best_nc = 0.0;
+      double sym_best_dphi = 0.0;
+      int    sym_best_cce_nc = -1;
+      for (int cce = 0; cce < n_cce; cce++) {
+        double mag_sum = 0.0;
+        double ph[6];
+        for (int j = 0; j < 6; j++) {
+          const int rb = cce * 6 + j;
+          double cr = 0.0, ci = 0.0, py = 0.0, px = 0.0;
+          for (int p = 0; p < 3; p++) {
+            const int k = (cs_sc + rb * 12 + 1 + 4 * p) % symb_sz;
+            const c16_t y = rxdataF[0][k];
+            const c16_t x = pilot[(dmrs_ref + rb_offset + rb) * 3 + p];
+            cr += (double)y.r * x.r - (double)y.i * x.i;
+            ci += (double)y.r * x.i + (double)y.i * x.r;
+            py += (double)y.r * y.r + (double)y.i * y.i;
+            px += (double)x.r * x.r + (double)x.i * x.i;
+          }
+          const double d = sqrt(py * px);
+          mag_sum += (d > 0.0) ? sqrt(cr * cr + ci * ci) / d : 0.0;
+          ph[j] = atan2(ci, cr);
+        }
+        const double nc = mag_sum / 6.0;
+        s_nc_sum += nc;
+        s_nc_cnt++;
+        if (nc > 0.75) s_nc_hits++;
+        if (nc > sym_best_nc) {
+          sym_best_nc = nc;
+          sym_best_cce_nc = cce;
+          double dsum = 0.0;
+          for (int j = 1; j < 6; j++) {
+            double d = ph[j] - ph[j - 1];
+            while (d > M_PI) d -= 2 * M_PI;
+            while (d < -M_PI) d += 2 * M_PI;
+            dsum += d;
+          }
+          sym_best_dphi = dsum / 5.0;
+        }
+      }
+      if (sym_best_nc > s_nc_max) { s_nc_max = sym_best_nc; s_best_dphi = sym_best_dphi; }
+      g_dmrs_hot_cce = (sym_best_nc > 0.85) ? sym_best_cce_nc : -1; /* a genuinely occupied CCE */
+      g_dmrs_hot_nc  = sym_best_nc;
+      s_nc_n++;
+      if ((s_nc_n % 20000) == 0) {
+        const double tau = (s_best_dphi / (2.0 * M_PI)) * ((double)symb_sz / 12.0);
+        LOG_W(PHY,
+              "SENSING: PERRB n=%ld cce_trials=%ld | pop mean=%.3f (noise ref 0.512) | MAX nc=%.3f "
+              "n>0.75=%ld | best-CCE per-RB phase step=%+.3f rad => timing ~%+.1f samples "
+              "(if MAX ~0.5 the DM-RS truly is absent; if MAX >0.8 it is present and the coherent "
+              "metric was being killed by the ramp)\n",
+              s_nc_n, s_nc_cnt, s_nc_sum / (double)s_nc_cnt, s_nc_max, s_nc_hits, s_best_dphi, tau);
+      }
+    }
+
+    s_symbols++;
+    if ((s_symbols % 20000) == 0) {
+      const double mean_a = s_sum / (double)s_n;
+      const double sd_a = sqrt((s_sum2 / (double)s_n) - mean_a * mean_a);
+      LOG_W(PHY,
+            "SENSING: DMRSSTAT symbols=%ld cce_trials=%ld | noise pop mean=%.3f sd=%.3f | "
+            "MAX |corr|=%.3f (slot=%d cce=%d) | n>0.70=%ld n>0.80=%ld "
+            "(real DM-RS ~0.8-0.95; if MAX stays ~0.6 the DM-RS is never recovered)\n",
+            s_symbols, s_n, mean_a, sd_a, s_max_corr, s_max_slot, s_max_cce, s_hits70, s_hits80);
+    }
+  }
+
   nr_pdcch_channel_estimation(ue,
                               n_rb,
                               rb_offset,
@@ -345,6 +540,55 @@ static void nr_rx_pdcch_symbol(PHY_VARS_NR_UE *ue,
                               pdcch_dl_ch_estimates,
                               rxdataF,
                               pilot);
+
+  // TIME-TRACKING AUDIT (2026-08-04, instrumentation only -- no behavioural change, nothing below
+  // this block reads these values). Reports, per PDCCH occasion, the DM-RS phase slope across the
+  // CORESET and the resulting implied receive delay, plus a coherence figure.
+  //
+  //   z_k       = Y_k * pilot_k          (pilot is already conj(X), so z is the raw channel)
+  //   coherence = |sum z_k conj(z_k+1)| / sum |z_k|^2
+  //
+  // Coherence is the load-bearing number: adjacent DM-RS REs are 4 subcarriers apart, so a smooth
+  // channel gives ~1 and an incoherent one ~1/sqrt(n). It is delay- and per-RB-phase tolerant, unlike
+  // a plain coherent sum. tau is reported too but is only meaningful WHEN coherence is high -- a phase
+  // slope fitted to incoherent pilots is noise, and is ambiguous beyond +-ofdm_symbol_size/8.
+  {
+    static int audit = -1;
+    if (audit < 0)
+      audit = (getenv("ISAC_TSYNC_AUDIT") != NULL) ? 1 : 0;
+    if (audit) {
+      const int symb_sz = fp->ofdm_symbol_size;
+      const unsigned short cs_sc =
+          (fp->first_carrier_offset + (phy_pdcch_config->pdcch_config[ss_idx].BWPStart + rb_offset) * 12) % symb_sz;
+      const c16_t *pil = &pilot[(dmrs_ref + rb_offset) * 3];
+      const int npil = 3 * n_rb;
+      double lr = 0.0, li = 0.0, e = 0.0;
+      double pr = 0.0, pi = 0.0;
+      for (int n = 0; n < npil; n++) {
+        const int k = (cs_sc + 4 * n + 1) % symb_sz;
+        const c16_t y = rxdataF[0][k];
+        const c16_t x = pil[n];
+        const double zr = (double)y.r * x.r - (double)y.i * x.i;
+        const double zi = (double)y.r * x.i + (double)y.i * x.r;
+        if (n > 0) { // accumulate z_{n-1} * conj(z_n)
+          lr += pr * zr + pi * zi;
+          li += pi * zr - pr * zi;
+        }
+        pr = zr; pi = zi;
+        e += zr * zr + zi * zi;
+      }
+      const double coh = (e > 0.0) ? sqrt(lr * lr + li * li) / e : 0.0;
+      const double dphi = -atan2(li, lr);
+      struct timespec ts;
+      clock_gettime(CLOCK_REALTIME, &ts);
+      LOG_I(PHY,
+            "TSYNC_PDCCH utc_ns=%lld frame=%d slot=%d symbol=%d ss=%d n_rb=%d coherence=%.4f "
+            "tau_samples=%.1f tau_ambig=%d\n",
+            (long long)ts.tv_sec * 1000000000LL + ts.tv_nsec,
+            proc->frame_rx, proc->nr_slot_rx, symbol, ss_idx, n_rb, coh,
+            dphi * symb_sz / (2.0 * M_PI * 4.0), symb_sz / 8);
+    }
+  }
 
   const int32_t rx_size = ceil_mod(fp->N_RB_DL * 12, 32);
   __attribute__((aligned(32))) c16_t rxdataF_ext[fp->nb_antennas_rx][rx_size];
@@ -384,7 +628,203 @@ static void nr_rx_pdcch_symbol(PHY_VARS_NR_UE *ue,
   if (fp->nb_antennas_rx > 1) {
     nr_pdcch_detection_mrc(fp->nb_antennas_rx, rx_comp_sz, rxdataF_comp);
   }
+  /* TEMPORARY DIAGNOSTIC (2026-08-04, blind-PDCCH bring-up): the PRE-CLIP equalised constellation.
+   * nr_pdcch_llr() below deliberately clips to [-32,31] (6-bit soft values for the polar decoder),
+   * so anything sampled AFTER it cannot answer "is the channel estimate good?" -- an earlier
+   * attempt measured post-clip values and was misread as a saturation bug. Here rxdataF_comp holds
+   * the equalised symbols, MRC-combined, before any clipping: on a good estimate a PDCCH candidate
+   * is QPSK, so |I| ~= |Q| and the magnitude spread (cv) is small. Circularly-symmetric noise gives
+   * cv ~= 0.52. Reports the symbol-level view plus how far the values sit from the clip rail, so a
+   * genuinely over-driven front end stays distinguishable from a bad estimate.
+   * Gated to a handful of shots and to the strongest symbols only; costs nothing once exhausted. */
+  {
+    static int s_preclip_left = 24;
+    if (s_preclip_left > 0) {
+      const c16_t *cp = rxdataF_comp[0];
+      double sum_i = 0.0, sum_q = 0.0, sum_m = 0.0, sum_m2 = 0.0, peak = 0.0;
+      int n_clip = 0;
+      for (int i = 0; i < llr_size_symbol; i++) {
+        const double vi = (double)cp[i].r, vq = (double)cp[i].i;
+        const double m = sqrt(vi * vi + vq * vq);
+        sum_i += (vi < 0 ? -vi : vi);
+        sum_q += (vq < 0 ? -vq : vq);
+        sum_m += m;
+        sum_m2 += m * m;
+        if (m > peak) peak = m;
+        if (vi > 31.0 || vi < -32.0 || vq > 31.0 || vq < -32.0) n_clip++;
+      }
+      const double n = (double)llr_size_symbol;
+      const double mean_m = sum_m / n;
+      const double var_m = (sum_m2 / n) - (mean_m * mean_m);
+      const double cv = (mean_m > 0.0) ? sqrt(var_m > 0.0 ? var_m : 0.0) / mean_m : -1.0;
+      const double iq = (sum_q > 0.0) ? (sum_i / sum_q) : -1.0;
+      /* Only report symbols with real energy -- an empty CORESET symbol says nothing. */
+      if (mean_m > 4.0) {
+        LOG_W(PHY,
+              "SENSING: PRECLIP slot=%d symb=%d n_rb=%d n=%d mean_mag=%.1f peak=%.0f cv=%.3f iq=%.3f "
+              "would_clip=%d/%d (QPSK+good-est: cv<<0.5 ; circular noise: cv~0.52) "
+              "s=(%d,%d),(%d,%d),(%d,%d),(%d,%d)\n",
+              proc->nr_slot_rx, symbol, n_rb, llr_size_symbol, mean_m, peak, cv, iq,
+              n_clip, llr_size_symbol,
+              (int)cp[0].r, (int)cp[0].i, (int)cp[1].r, (int)cp[1].i,
+              (int)cp[2].r, (int)cp[2].i, (int)cp[3].r, (int)cp[3].i);
+        s_preclip_left--;
+      }
+    }
+  }
   UEscopeCopy(ue, pdcchRxdataF_comp, rxdataF_comp[0], sizeof(c16_t), 1, llr_size_symbol, 0);
+  /* ------------------------------------------------------------------------------------------
+   * REPLAY-FIXTURE CAPTURE. Writes every PDCCH stage for one CORESET symbol to a file so the rest
+   * of the debugging is deterministic offline replay instead of repeated OTA runs (where the RF
+   * conditions, the C-RNTI and even the gNB config move between hypotheses).
+   *
+   * Triggered on a CCE whose per-RB DM-RS correlation is high, i.e. a symbol that really does carry
+   * PDCCH -- dumping arbitrary slots is useless here because only ~0.07 % of slots carry a grant.
+   * frame/slot are recorded so the fixture can be cross-referenced against the gNB log's own
+   * "[frame.slot] PDCCH: rnti=... cce=... al=..." lines and replayed against a KNOWN grant.
+   *
+   * Record layout (all little-endian, c16_t = 2x int16):
+   *   magic 'PDCH', ver, frame, slot, symbol, n_rb, rb_offset, dmrs_ref, cs_sc, symb_sz,
+   *   llr_size_symbol, pdcch_est_size, nb_rx, hot_cce, hot_nc(float), log2_maxh
+   *   then: rxdataF[symb_sz]            (raw received symbol, antenna 0)
+   *         pilot[(n_rb+rb_offset+dmrs_ref)*3]  (regenerated conj DM-RS)
+   *         ch_est[pdcch_est_size]      (antenna 0)
+   *         rxdataF_comp[llr_size_symbol]       (equalised, PRE-clip)
+   * ------------------------------------------------------------------------------------------ */
+  /* Trigger UNCONDITIONALLY on consecutive CORESET symbols. The first version triggered on
+   * DM-RS corr > 0.88, but the noise tail of that statistic reaches 0.954, so it selected noise
+   * peaks with no data energy -- the resulting fixture contained no verifiable grant. This cell
+   * puts a DCI in ~6 %% of slots, so a few hundred consecutive symbols is certain to contain many. */
+  /* Trigger on real CORESET OCCUPANCY, self-normalised per symbol. Blind consecutive capture was
+   * wrong: measured against the gNB log, this cell runs at only ~2 grants/s, so a 0.24 s window of
+   * consecutive slots contained ZERO grants and the fixture had nothing to decode. DM-RS
+   * correlation is no good as a trigger either (its noise tail reaches 0.95). Occupancy is: some
+   * CCE whose raw data-RE energy stands well above the median CCE of the SAME symbol -- scale-free,
+   * so it needs no absolute threshold and cannot drift with gain. */
+  int cap_occupied = 0;
+  if (nr_pdcch_blind_capture && g_cap_left > 0) {
+    const int ncce_c = n_rb / 6;
+    if (ncce_c > 4) {
+      double e[64];
+      int ne = ncce_c > 64 ? 64 : ncce_c;
+      for (int c = 0; c < ne; c++) {
+        double t = 0.0; int cnt = 0;
+        for (int j = 0; j < 6; j++) {
+          const int rb = c * 6 + j;
+          for (int sc = 0; sc < 12; sc++) {
+            if ((sc & 3) == 1) continue;            /* 1,5,9 are DM-RS */
+            const int k = (cs_sc_cap + rb * 12 + sc) % fp->ofdm_symbol_size;
+            const c16_t y = rxdataF[0][k];
+            t += fabs((double)y.r) + fabs((double)y.i);
+            cnt++;
+          }
+        }
+        e[c] = t / cnt;
+      }
+      double srt[64];
+      memcpy(srt, e, sizeof(double) * ne);
+      for (int a = 1; a < ne; a++) { double v = srt[a]; int b = a - 1; while (b >= 0 && srt[b] > v) { srt[b+1] = srt[b]; b--; } srt[b+1] = v; }
+      const double med_e = srt[ne / 2];
+      for (int c = 0; c < ne; c++) {
+        if (med_e > 0.0 && e[c] > 6.0 * med_e) { cap_occupied = 1; break; }
+      }
+    }
+  }
+  if (nr_pdcch_blind_capture && g_cap_left > 0 && cap_occupied) {
+    if (g_cap_fp == NULL) {
+      g_cap_fp = fopen("/tmp/pdcch_fixture.bin", "wb");
+    }
+    if (g_cap_fp != NULL) {
+      const int32_t hdr[14] = {0x48434450, 1, (int32_t)proc->frame_rx, (int32_t)proc->nr_slot_rx,
+                               (int32_t)symbol, n_rb, rb_offset, dmrs_ref, (int32_t)cs_sc_cap,
+                               (int32_t)fp->ofdm_symbol_size, llr_size_symbol, pdcch_est_size,
+                               (int32_t)fp->nb_antennas_rx, g_dmrs_hot_cce};
+      struct timespec cap_ts;
+      clock_gettime(CLOCK_REALTIME, &cap_ts);
+      const int64_t cap_utc_ns = (int64_t)cap_ts.tv_sec * 1000000000LL + cap_ts.tv_nsec;
+      const float nc_f = (float)g_dmrs_hot_nc;
+      const int32_t l2m = log2_maxh;
+      fwrite(hdr, sizeof(hdr), 1, g_cap_fp);
+      fwrite(&nc_f, sizeof(nc_f), 1, g_cap_fp);
+      fwrite(&l2m, sizeof(l2m), 1, g_cap_fp);
+      fwrite(&cap_utc_ns, sizeof(cap_utc_ns), 1, g_cap_fp);
+      fwrite(rxdataF[0], sizeof(c16_t), fp->ofdm_symbol_size, g_cap_fp);
+      fwrite(pilot, sizeof(c16_t), (n_rb + rb_offset + dmrs_ref) * 3, g_cap_fp);
+      fwrite(pdcch_dl_ch_estimates[0], sizeof(c16_t), pdcch_est_size, g_cap_fp);
+      fwrite(rxdataF_comp[0], sizeof(c16_t), llr_size_symbol, g_cap_fp);
+      fflush(g_cap_fp);
+      g_cap_left--;
+      LOG_W(PHY, "SENSING: CAPTURE wrote record (frame=%d slot=%d cce=%d nc=%.3f) %d left\n",
+            proc->frame_rx, proc->nr_slot_rx, g_dmrs_hot_cce, g_dmrs_hot_nc, g_cap_left);
+    }
+  }
+
+  /* POST-EQUALISATION DATA-RE CHECK, triggered by a CCE whose DM-RS correlated at >0.85 -- i.e. a
+   * PDCCH we KNOW is really there. The per-RB DM-RS result proves the DM-RS REs (subcarriers 1,5,9
+   * of each RB) are extracted and sequenced correctly; it says nothing about the other 9 REs per RB
+   * that actually carry the DCI. This looks at those, after channel compensation, for the very same
+   * CCE: on a correct chain they must be QPSK, so the magnitude spread cv is small and |I|~|Q|.
+   * Non-coherent-noise-like values here would place the fault in data-RE extraction / compensation
+   * rather than in demapping/unscrambling/polar further downstream.
+   * Under non-interleaved mapping with duration 1, CCE c covers CORESET RBs [6c,6c+6), i.e.
+   * rxdataF_comp REs [54c, 54c+54). */
+  if (nr_pdcch_blind_dmrs_probe && g_dmrs_hot_cce >= 0) {
+    static int s_dq_left = 25;
+    const int base = g_dmrs_hot_cce * 54;
+    if (s_dq_left > 0 && base + 54 <= llr_size_symbol) {
+      const c16_t *dq = &rxdataF_comp[0][base];
+      double si = 0.0, sq = 0.0, sm = 0.0, sm2 = 0.0;
+      for (int i = 0; i < 54; i++) {
+        const double vi = (double)dq[i].r, vq = (double)dq[i].i;
+        const double m = sqrt(vi * vi + vq * vq);
+        si += (vi < 0 ? -vi : vi);
+        sq += (vq < 0 ? -vq : vq);
+        sm += m;
+        sm2 += m * m;
+      }
+      const double mean_m = sm / 54.0;
+      const double var_m = (sm2 / 54.0) - mean_m * mean_m;
+      const double cv = (mean_m > 0.0) ? sqrt(var_m > 0.0 ? var_m : 0.0) / mean_m : -1.0;
+      LOG_W(PHY,
+            "SENSING: DATAQ slot=%d cce=%d dmrs_nc=%.3f | data REs: mean_mag=%.1f cv=%.3f iq=%.3f "
+            "(QPSK on a correct chain: cv<<0.5 ; noise: cv~0.52) s=(%d,%d),(%d,%d),(%d,%d)\n",
+            proc->nr_slot_rx, g_dmrs_hot_cce, g_dmrs_hot_nc, mean_m, cv,
+            (sq > 0.0) ? si / sq : -1.0,
+            (int)dq[0].r, (int)dq[0].i, (int)dq[1].r, (int)dq[1].i, (int)dq[2].r, (int)dq[2].i);
+      s_dq_left--;
+    }
+  }
+
+  if (nr_pdcch_blind_llr_autoscale) {
+    /* Bring the strongest REs just inside nr_pdcch_llr()'s clip rail. Peak-referenced (not mean-),
+     * because the mean here is the empty-CORESET noise floor -- the very thing that mis-scales the
+     * stock path. A pure right shift keeps I and Q in the same ratio, so the constellation is
+     * scaled rather than rotated. Peaks below the rail are left completely alone. */
+    int peak = 0;
+    for (int i = 0; i < llr_size_symbol; i++) {
+      const int ar = rxdataF_comp[0][i].r < 0 ? -rxdataF_comp[0][i].r : rxdataF_comp[0][i].r;
+      const int ai = rxdataF_comp[0][i].i < 0 ? -rxdataF_comp[0][i].i : rxdataF_comp[0][i].i;
+      if (ar > peak) peak = ar;
+      if (ai > peak) peak = ai;
+    }
+    int sh = 0;
+    while (peak > 31 && sh < 15) {
+      peak >>= 1;
+      sh++;
+    }
+    if (sh > 0) {
+      for (int i = 0; i < llr_size_symbol; i++) {
+        rxdataF_comp[0][i].r = (int16_t)(rxdataF_comp[0][i].r >> sh);
+        rxdataF_comp[0][i].i = (int16_t)(rxdataF_comp[0][i].i >> sh);
+      }
+      static int s_shift_log_left = 8;
+      if (s_shift_log_left > 0) {
+        LOG_W(PHY, "SENSING: PDCCH autoscale slot=%d symb=%d extra_shift=%d (peak now %d)\n",
+              proc->nr_slot_rx, symbol, sh, peak);
+        s_shift_log_left--;
+      }
+    }
+  }
   nr_pdcch_llr(llr_size_symbol, rxdataF_comp[0], llr);
 }
 

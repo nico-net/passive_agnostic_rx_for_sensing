@@ -25,6 +25,23 @@
 #include "nr_phy_common.h"
 #include "common/utils/time_manager/time_manager.h"
 #include "log.h"
+#include <stdatomic.h>
+
+// TEMPORARY DIAGNOSTIC (2026-08-05): receive-buffer producer/consumer lag measurement. See
+// PBCH_TRACKING_BUFFER_HANDOVER.md -- PHY-domain diagnostics have exhausted what they can show
+// (acquisition decodes cleanly, tracking's entire live rxdata buffer contains no SSB anywhere in
+// it) and the remaining candidate is a stale-buffer read: PBCH tracking runs on an async worker
+// (UE->dl_actors, num_dl_actors=4 by default) that consumes ue->common_vars.rxdata BY REFERENCE
+// (only .proc metadata is copied into the queued message, not the samples) while THIS read loop
+// continues overwriting that same physical buffer on every subsequent slot with no backpressure.
+// Updated by the producer (this file's main read loop) immediately after each nrue_ru_read()
+// completes; read by the consumer (nr_process_pbch_symbol() in phy_procedures_nr_ue.c) to compute
+// the actual lag in slots/wall-clock time between "when this buffer region was last written" and
+// "when tracking is now reading it". Genuinely cross-thread (producer and the dl_actors workers are
+// different threads), hence _Atomic rather than __thread; relaxed ordering is sufficient for a
+// diagnostic counter that isn't gating any correctness-relevant control flow.
+_Atomic long nr_ue_diag_producer_absolute_slot = -1;
+_Atomic long nr_ue_diag_producer_wall_ns = 0;
 
 /*
  *  NR SLOT PROCESSING SEQUENCE
@@ -216,15 +233,40 @@ static void UE_synch(void *arg) {
         ((ret.rx_offset << 1) / fp->samples_per_subframe * fp->slots_per_subframe)
         + round((float)((ret.rx_offset << 1) % fp->samples_per_subframe) / fp->samples_per_slot0);
 
+    // ---- POST-SYNC RADIO-STATE FREEZE (2026-08-06, diagnostic, opt-in) --------------------
+    // Both actions below mutate HARDWARE state immediately after a SUCCESSFUL acquisition, i.e.
+    // exactly at the acquisition->tracking boundary where PBCH decode starts failing (see
+    // PBCH_TRACKING_BUFFER_HANDOVER.md). The retune in particular calls uhd set_rx_freq() on a
+    // LIVE stream. Gated by env so the same binary can A/B them without a rebuild; unset = the
+    // previous behaviour exactly.
+    //   ISAC_FREEZE_RF_RETUNE=1  keep acquisition's centre frequency (skip nrue_ru_set_freq)
+    //   ISAC_FREEZE_RF_GAIN=1    keep acquisition's RX gain      (skip nrue_ru_adjust_rx_gain)
+    static int s_freeze_retune = -1, s_freeze_gain = -1;
+    if (s_freeze_retune < 0) {
+      const char *e = getenv("ISAC_FREEZE_RF_RETUNE");
+      s_freeze_retune = (e && atoi(e)) ? 1 : 0;
+      const char *g = getenv("ISAC_FREEZE_RF_GAIN");
+      s_freeze_gain = (g && atoi(g)) ? 1 : 0;
+      LOG_W(PHY, "SENSING: RFFREEZE retune_frozen=%d gain_frozen=%d\n", s_freeze_retune, s_freeze_gain);
+    }
+
     if (get_nrUE_params()->cont_fo_comp) {
       UE->freq_offset = freq_offset - UE->dl_Doppler_shift;
+    } else if (s_freeze_retune) {
+      // Do NOT touch the radio. Carry the measured offset the same way cont_fo_comp does, so the
+      // digital FO compensation still sees it and this is a pure "who moves the LO" experiment.
+      UE->freq_offset = freq_offset - UE->dl_Doppler_shift;
+      LOG_W(PHY, "SENSING: RFFREEZE skipped post-sync retune (would have applied %d Hz)\n", freq_offset);
     } else {
       // rerun with new cell parameters and frequency-offset
       nrue_ru_set_freq(UE, ul_carrier, dl_carrier, freq_offset);
     }
 
     if (get_nrUE_params()->agc) {
-      nrue_ru_adjust_rx_gain(UE, UE->adjust_rxgain);
+      if (s_freeze_gain)
+        LOG_W(PHY, "SENSING: RFFREEZE skipped post-sync gain adjust (would have applied %d dB)\n", UE->adjust_rxgain);
+      else
+        nrue_ru_adjust_rx_gain(UE, UE->adjust_rxgain);
     }
 
     LOG_I(PHY, "Got synch: hw_slot_offset %d, carrier off %d Hz\n", hw_slot_offset, freq_offset);
@@ -1060,6 +1102,46 @@ void *UE_thread(void *arg)
     const int readBlockSize = get_readBlockSize(slot_nr, fp) - iq_shift_to_apply;
     openair0_timestamp_t rx_timestamp;
     int tmp = nrue_ru_read(UE, &rx_timestamp, (void **)rxp, readBlockSize, fp->nb_antennas_rx);
+    {
+      struct timespec diag_ts;
+      clock_gettime(CLOCK_REALTIME, &diag_ts);
+      atomic_store_explicit(&nr_ue_diag_producer_absolute_slot, absolute_slot, memory_order_relaxed);
+      atomic_store_explicit(&nr_ue_diag_producer_wall_ns,
+                            (long)diag_ts.tv_sec * 1000000000L + diag_ts.tv_nsec, memory_order_relaxed);
+    }
+    // ---- RF SAMPLE-STREAM CONTINUITY (2026-08-06) --------------------------------------------
+    // Matching software slot counters (the producer/consumer lag check above) prove the PIPELINE
+    // is keeping up; they say nothing about whether consecutive reads returned CONSECUTIVE RF
+    // samples. The radio's own timestamp does. A gap here means the buffer's contents are not the
+    // contiguous signal every downstream time-offset computation assumes -- which would produce
+    // exactly "timing arithmetic correct, no SSB in the buffer". Especially suspected right after
+    // the post-sync retune / stream re-basing. Bounded so a persistently broken stream cannot
+    // flood the log.
+    // Accounting note: this iteration may consume MORE than readBlockSize -- the short-read retries
+    // just below, and the extra first_symbols read at end-of-frame -- so the expected next
+    // timestamp is accumulated in rx_samples_consumed and only committed at the end of the reads.
+    static openair0_timestamp_t s_rxts_prev = 0;
+    static long s_rxts_prev_consumed = 0;
+    static int s_rxts_discont_left = 40;
+    static long s_rxts_discont_total = 0;
+    long rx_samples_consumed = 0;
+    if (s_rxts_prev_consumed > 0) {
+      const openair0_timestamp_t expected = s_rxts_prev + s_rxts_prev_consumed;
+      if (rx_timestamp != expected) {
+        s_rxts_discont_total++;
+        if (s_rxts_discont_left > 0) {
+          s_rxts_discont_left--;
+          LOG_E(PHY,
+                "SENSING: RXDISCONT abs_slot=%d frame=%d slot=%d expected=%llu actual=%llu "
+                "delta=%lld prev_consumed=%ld n=%ld\n",
+                absolute_slot, curMsg.proc.frame_rx, curMsg.proc.nr_slot_rx,
+                (unsigned long long)expected, (unsigned long long)rx_timestamp,
+                (long long)(rx_timestamp - expected), s_rxts_prev_consumed, s_rxts_discont_total);
+        }
+      }
+    }
+    s_rxts_prev = rx_timestamp;
+    rx_samples_consumed += (tmp > 0) ? tmp : readBlockSize;
     metadata meta = {.slot =  curMsg.proc.nr_slot_rx, .frame =  curMsg.proc.frame_rx};
     UEscopeCopyWithMetadata(UE, ueTimeDomainSamples, rxp[0] - firstSymSamp, sizeof(c16_t), 1, readBlockSize, 0, &meta);
     // Same fix and rationale as readFrame()'s equivalent check above: a short read is
@@ -1079,6 +1161,7 @@ void *UE_thread(void *arg)
         int got = nrue_ru_read(UE, &rx_timestamp, (void **)retry_rxp, remaining, fp->nb_antennas_rx);
         tmp += got;
         remaining -= got;
+        rx_samples_consumed += got;
         retries++;
       }
       if (remaining > 0)
@@ -1097,6 +1180,7 @@ void *UE_thread(void *arg)
       if (first_symbols > 0) {
         openair0_timestamp_t ignore_timestamp;
         int tmp = nrue_ru_read(UE, &ignore_timestamp, (void **)UE->common_vars.rxdata, first_symbols, fp->nb_antennas_rx);
+        rx_samples_consumed += (tmp > 0) ? tmp : first_symbols;
         // nrue_ru_read() already retries short reads internally (see its own comment); this only
         // fires if that internal retry budget was truly exhausted. Warn and continue rather than
         // abort the whole process -- same rationale as this file's other read-assertion fixes.
@@ -1107,6 +1191,9 @@ void *UE_thread(void *arg)
       } else
         LOG_E(PHY,"can't compensate: diff =%d\n", first_symbols);
     }
+
+    // Every read of this iteration is now counted; commit for the next iteration's continuity test.
+    s_rxts_prev_consumed = rx_samples_consumed;
 
     // use previous timing_advance value to compute writeTimestamp
     const openair0_timestamp_t writeTimestamp =

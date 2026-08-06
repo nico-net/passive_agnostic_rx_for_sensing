@@ -40,6 +40,13 @@ int nr_slot_fep(PHY_VARS_NR_UE *ue,
                 uint32_t sample_offset,
                 c16_t **rxdata);
 
+// TEMPORARY DIAGNOSTIC (2026-08-05): see slot_fep_nr.c's definition-site comment. Valid only
+// immediately after a synchronous nr_slot_fep() call on the same thread.
+extern __thread unsigned int nr_slot_fep_diag_rx_offset;
+extern __thread unsigned int nr_slot_fep_diag_nb_prefix_samples;
+extern __thread unsigned int nr_slot_fep_diag_nb_prefix_samples0;
+extern __thread int nr_slot_fep_diag_is_synchronized;
+
 int slot_fep_mbsfn(PHY_VARS_UE *phy_vars_ue,
                    unsigned char l,
                    int subframe,

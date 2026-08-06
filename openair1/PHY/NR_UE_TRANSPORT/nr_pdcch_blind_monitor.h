@@ -81,6 +81,12 @@ typedef struct {
   uint8_t     harq_pid;           ///< HARQ process number
   uint8_t     tda_index;          ///< raw time-domain-assignment index the DCI carried
   uint8_t     mapping_type;       ///< PDSCH mapping type resolved from the TDRA (0 = typeA, 1 = typeB)
+  // ---- Migrated from NRSniffer's dci_nr.c (nr_dci_false_detection / dci_thres), 2026-08-05: a
+  // CRC match alone is a 1/65536 chance false accept on a candidate that never carried real PDCCH.
+  // Re-encoding the decoded bits with the recovered RNTI and counting mismatches against the
+  // original soft LLR polarity is a far stronger discriminator than CRC alone. Only meaningful
+  // when the CRC-plausibility check (Step 2) already passed. See mismatched_bits_gate() in the .c.
+  uint16_t    mismatched_bits;    ///< bit mismatches between re-encoded payload and input LLR polarity
   bool        plausible;          ///< false => caller MUST discard this result
   const char* reject_reason;      ///< non-NULL iff !plausible; static string, do not free
 } nr_pdcch_blind_result_t;

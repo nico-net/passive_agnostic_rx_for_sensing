@@ -43,6 +43,17 @@ void nr_symbol_fep(const NR_DL_FRAME_PARMS *frame_parms,
   }
 }
 
+// TEMPORARY DIAGNOSTIC (2026-08-05): exported so callers (acquisition's do_time_to_freq() in
+// nr_initial_sync.c does NOT call this function at all -- see that file -- and tracking's
+// nr_process_pbch_symbol() in phy_procedures_nr_ue.c DOES) can read the exact rx_offset/CP-length
+// this call actually used, without duplicating (and risking drifting out of sync with) the offset
+// arithmetic above. Read immediately after the call returns, on the same thread -- this function is
+// called synchronously, never through the thread pool, so a plain __thread is sufficient.
+__thread unsigned int nr_slot_fep_diag_rx_offset = 0;
+__thread unsigned int nr_slot_fep_diag_nb_prefix_samples = 0;
+__thread unsigned int nr_slot_fep_diag_nb_prefix_samples0 = 0;
+__thread int nr_slot_fep_diag_is_synchronized = 0;
+
 int nr_slot_fep(PHY_VARS_NR_UE *ue,
                 const NR_DL_FRAME_PARMS *frame_parms,
                 unsigned int slot,
@@ -75,6 +86,11 @@ int nr_slot_fep(PHY_VARS_NR_UE *ue,
 
   // use OFDM symbol from within 1/8th of the CP to avoid ISI
   rx_offset -= (nb_prefix_samples / frame_parms->ofdm_offset_divisor);
+
+  nr_slot_fep_diag_rx_offset = rx_offset;
+  nr_slot_fep_diag_nb_prefix_samples = nb_prefix_samples;
+  nr_slot_fep_diag_nb_prefix_samples0 = nb_prefix_samples0;
+  nr_slot_fep_diag_is_synchronized = is_synchronized ? 1 : 0;
 
   LOG_D(PHY,
         "slot_fep: slot %d, symbol %d, nb_prefix_samples %u, nb_prefix_samples0 %u, rx_offset %u energy %d\n",

@@ -33,6 +33,14 @@
 #include "common/utils/LOG/vcd_signal_dumper.h"
 
 #include <sys/resource.h>
+#include <thread>
+#include <atomic>
+#include <mutex>
+#include <condition_variable>
+#include <deque>
+#include <functional>
+#include <vector>
+#include <algorithm>
 
 #include "openair1/PHY/sse_intrin.h"
 
@@ -41,6 +49,548 @@
  */
 extern int usrp_tx_thread;
 
+/* ---------------------------------------------------------------------------------------------
+ * Software RX decimation, for radio images whose FPGA fabric has no DDC/decimation block and can
+ * only stream at one fixed native ADC rate.
+ *
+ * MEASURED cause (2026-08-02): the X410's "CG" (100 GbE dual-QSFP28) FPGA image variant carries
+ * only two bare Radio blocks in its RFNoC graph (confirmed via `rfnoc_graph::find_blocks("DDC")`
+ * returning empty) -- unlike the default "X4" image, which has DDC blocks and can decimate down
+ * from its master clock to whatever rate `openair0_cfg[0].sample_rate` asks for. CG's native rate
+ * is fixed at 491.52 MSps; `set_rx_rate(122.88e6, ...)` is silently coerced back to 491.52e6 by
+ * UHD, so a 100 MHz/273 PRB NR capture -- built entirely around 122.88 MSps -- cannot run on that
+ * image at all without decimating somewhere. This is not X410/CG-specific in general: any image
+ * whose native rate is a fixed multiple of the requested rate hits the same wall, so the fix is
+ * generic (auto-detected from the requested-vs-granted rate ratio), not hardcoded to one radio.
+ *
+ * Two cascaded halfband decimate-by-2 stages give exactly 4:1 without a custom FPGA image. Two
+ * halfbands, not one CIC-style single conversion, because a 273 PRB NR carrier occupies close to
+ * the FULL post-decimation Nyquist (49.14 MHz occupied vs 61.44 MHz Nyquist after 4:1) -- a bare
+ * boxcar/CIC decimator's droop and imperfect stopband rejection right at the band edge would
+ * measurably corrupt the outer PRBs' SNR, which is exactly where CSI-RS/PDSCH edge subcarriers
+ * live. Designed and numerically verified with scipy.signal.remez against this exact rate plan
+ * (491.52 -> 245.76 -> 122.88 MSps, signal edge 49.14 MHz): stage 1 (15 taps) gets ~90 dB stopband
+ * rejection with a huge transition margin (its Nyquist boundary sits at 122.88 MHz, far past the
+ * 49.14 MHz signal edge); stage 2 (63 taps) needs the real design margin (transition band centered
+ * on the actual 61.44 MHz post-decimation Nyquist) and gets ~105 dB stopband rejection with
+ * passband ripple under +/-0.0001 dB -- both well beyond the ADC's own ~12-bit quantization noise
+ * floor, so this filtering is not the SNR-limiting step anywhere in the chain.
+ *
+ * Gated entirely on the runtime-measured rate ratio: when the granted rate equals the requested
+ * rate (every other radio: B210, X4_200, N3xx, ...), decim_ratio stays 1 and every code path below
+ * is skipped -- zero behavioural change, zero overhead, for anything that isn't this specific
+ * fixed-rate-image case.
+ * ------------------------------------------------------------------------------------------- */
+#define USRP_DECIM_STAGE1_TAPS 15
+#define USRP_DECIM_STAGE2_TAPS 63
+#define USRP_DECIM_MAX_CHANNELS 4
+#define USRP_DECIM_SPINPOOL_MAX_WORKERS 16
+
+static const double usrp_decim_stage1_coefs[USRP_DECIM_STAGE1_TAPS] = {
+  -0.002467254140064427,  0.0000109969032381363,  0.016946422031120453, -0.0000399029721231070,
+  -0.067653720057452680,  0.0000774717380695567,  0.303158827377735100,  0.499905344309461040,
+   0.303158827377735100,  0.0000774717380695567, -0.067653720057452680, -0.0000399029721231070,
+   0.016946422031120453,  0.0000109969032381363, -0.002467254140064427
+};
+
+static const double usrp_decim_stage2_coefs[USRP_DECIM_STAGE2_TAPS] = {
+  -0.0000195778516340630,  0.0000001483067034824,  0.0000717977538721336, -0.0000003501664479559,
+  -0.0001941869750372001,  0.0000008832540940562,  0.0004403332074740212, -0.0000016655935971132,
+  -0.0008872411544588247,  0.0000029851308579077,  0.0016397637319077306, -0.0000047481604754422,
+  -0.0028342385897048724,  0.0000071921928357313,  0.0046458266993861160, -0.0000101238408573647,
+  -0.0073013093558810140,  0.0000136492720357229,  0.0111110078060990550, -0.0000174408238450310,
+  -0.0165425534339318570,  0.0000214437338654342,  0.0244090225801943150, -0.0000252133815109156,
+  -0.0363940058120946350,  0.0000286344986108370,  0.0568586119965269200, -0.0000312432557904523,
+  -0.1018874543441340200,  0.0000329837223696620,  0.3168816747068428600,  0.4999664773337295600,
+   0.3168816747068428600,  0.0000329837223696620, -0.1018874543441340200, -0.0000312432557904523,
+   0.0568586119965269200,  0.0000286344986108370, -0.0363940058120946350, -0.0000252133815109156,
+   0.0244090225801943150,  0.0000214437338654342, -0.0165425534339318570, -0.0000174408238450310,
+   0.0111110078060990550,  0.0000136492720357229, -0.0073013093558810140, -0.0000101238408573647,
+   0.0046458266993861160,  0.0000071921928357313, -0.0028342385897048724, -0.0000047481604754422,
+   0.0016397637319077306,  0.0000029851308579077, -0.0008872411544588247, -0.0000016655935971132,
+   0.0004403332074740212,  0.0000008832540940562, -0.0001941869750372001, -0.0000003501664479559,
+   0.0000717977538721336,  0.0000001483067034824, -0.0000195778516340630
+};
+
+/* Shift-register history per stage per channel. Shift-based (not circular-indexed) on purpose for
+ * this first implementation: simplicity and ease of correctness-review over the modulo-indexed
+ * alternative's marginally lower shift cost, given decimation only runs at up to a few hundred
+ * MSps per channel on a host CPU with cores to spare -- revisit only if profiling shows this is
+ * actually a bottleneck.
+ *
+ * SUPERSEDED (2026-08-02): the shift-per-sample version above was measured live and found NOT
+ * fine -- 140 UHD RX overflows / 90 s at 491.52 MSps (vs 0 on the same test before decimation was
+ * added), CPI count collapsing from 129-300 to 4. Root cause: shifting the ENTIRE tap history on
+ * every single sample is O(taps) per sample regardless of whether that sample produces an output,
+ * effectively doubling the real cost of the FIR (the dot product itself is only computed on every
+ * OTHER sample). Replaced with the standard double-length circular buffer technique below, which
+ * turns the per-sample update into O(1) (two writes, no shifting) while keeping the dot product a
+ * single contiguous, non-modulo read -- correct AND SIMD-friendly if ever revisited. */
+typedef struct {
+  double hist1_re[2 * USRP_DECIM_STAGE1_TAPS];
+  double hist1_im[2 * USRP_DECIM_STAGE1_TAPS];
+  int hist1_pos;
+  double hist2_re[2 * USRP_DECIM_STAGE2_TAPS];
+  double hist2_im[2 * USRP_DECIM_STAGE2_TAPS];
+  int hist2_pos;
+} usrp_decim_chan_state_t;
+
+/* One halfband decimate-by-2 stage. Consumes n_in input samples, produces n_in/2 output samples
+ * (n_in must be even -- guaranteed by construction: the caller always requests a multiple of 4
+ * raw samples, so stage 1's input is always even and stage 2's input, being stage 1's output, is
+ * too).
+ *
+ * Double-length circular buffer, O(1) per-sample update: hist_{re,im} must be `2*taps` long.
+ * Writing each new sample at BOTH buf[pos] and buf[pos+taps] (pos cycling over [0,taps)) means the
+ * chronologically-ordered (oldest..newest) window of the last `taps` samples is ALWAYS the plain
+ * contiguous read buf[pos+1 .. pos+taps] -- no modulo indexing inside the hot dot-product loop.
+ * Verified by hand-tracing several write/wraparound cycles before trusting it (a rotation error
+ * here would silently misalign the filter, not crash -- worth re-deriving by trace, not just
+ * inspection, if this is ever touched again). *hist_pos persists across calls, matching the old
+ * version's cross-call continuity requirement.
+ *
+ * Templated on the INPUT sample type: stage 1 consumes int16_t straight from UHD's recv() buffer,
+ * stage 2 consumes stage 1's own double-precision output -- same filter structure, different input
+ * representation, so a template avoids a near-duplicate function rather than genuinely different
+ * behaviour. */
+
+/* AVX2+FMA dot product over `taps` doubles, contiguous on both operands -- exactly what the
+ * circular buffer's window read provides, so no gather/scatter is needed. MEASURED (2026-08-02):
+ * the scalar version above cost 5.0 ms per trx_usrp_read() call against a 500 us real-time budget
+ * (10x too slow -- confirmed by direct wall-clock instrumentation, not estimated), which is what
+ * actually caused the RX overflows; no amount of socket-buffer tuning could have fixed a 10x
+ * compute deficit. Reduction ordering (parallel lanes then horizontal sum) differs from the
+ * scalar version's strictly-sequential sum, which for floating point is not strictly
+ * bit-identical -- utterly negligible here: this filters 12-bit ADC data through a design with
+ * >=89 dB stopband rejection, so a last-bit reordering difference is far below the noise floor. */
+#if defined(__AVX512F__) && defined(__AVX512BW__)
+/* AVX-512, 8 doubles/instruction -- double the AVX2 path's lane width. Confirmed genuine hardware
+ * (not just a compile-time assumption) on the deployment target (sens3: Xeon W-2225, avx512f/bw/
+ * cd/dq/vl all present in /proc/cpuinfo) before writing this: this session's OWN sandbox has no
+ * AVX-512, so correctness was verified by compiling+running a standalone comparison against the
+ * plain scalar sum ON sens3 itself (200000 random trials x 2 filter lengths x 16 alignments,
+ * max diff ~3e-11 -- pure floating-point reduction-order noise, nowhere near a real bug) BEFORE
+ * this code ever touched the live receiver. _mm512_reduce_add_pd is a genuine hardware horizontal
+ * reduction instruction, simpler than AVX2's manual lane-extract-and-add. No codebase precedent
+ * existed for raw (non-simde) AVX-512 intrinsics in openair1/ before this -- guarded by the same
+ * __AVX512F__/__AVX512BW__ macros sse_intrin.h already uses elsewhere in this file's include
+ * chain, so a build without AVX-512 falls through to the AVX2 path below unchanged. */
+static inline double usrp_simd_dot_pd(const double *coefs, const double *data, int taps)
+{
+  __m512d acc = _mm512_setzero_pd();
+  int k = 0;
+  for (; k + 8 <= taps; k += 8) {
+    __m512d c = _mm512_loadu_pd(&coefs[k]);
+    __m512d d = _mm512_loadu_pd(&data[k]);
+    acc = _mm512_fmadd_pd(c, d, acc);
+  }
+  double sum = _mm512_reduce_add_pd(acc);
+  for (; k < taps; k++) // remainder for taps not a multiple of 8 (15 -> 7 left over, 63 -> 7 left over)
+    sum += coefs[k] * data[k];
+  return sum;
+}
+#else
+static inline double usrp_simd_dot_pd(const double *coefs, const double *data, int taps)
+{
+  simde__m256d acc = simde_mm256_setzero_pd();
+  int k = 0;
+  for (; k + 4 <= taps; k += 4) {
+    simde__m256d c = simde_mm256_loadu_pd(&coefs[k]);
+    simde__m256d d = simde_mm256_loadu_pd(&data[k]);
+    acc = simde_mm256_fmadd_pd(c, d, acc);
+  }
+  double lanes[4];
+  simde_mm256_storeu_pd(lanes, acc);
+  double sum = lanes[0] + lanes[1] + lanes[2] + lanes[3];
+  for (; k < taps; k++) // remainder for taps not a multiple of 4 (15 -> 3 left over, 63 -> 3 left over)
+    sum += coefs[k] * data[k];
+  return sum;
+}
+#endif
+
+template <typename T>
+static void usrp_halfband_decimate2x(const double *coefs, int taps, double *hist_re, double *hist_im,
+                                     int *hist_pos, const T *in_re, const T *in_im, int in_stride, int n_in,
+                                     double *out_re, double *out_im, int out_stride = 1)
+{
+  int n_out = 0;
+  int pos = *hist_pos;
+  for (int i = 0; i < n_in; i++) {
+    const double re = (double)in_re[(size_t)i * in_stride];
+    const double im = (double)in_im[(size_t)i * in_stride];
+    hist_re[pos] = re;
+    hist_re[pos + taps] = re;
+    hist_im[pos] = im;
+    hist_im[pos + taps] = im;
+    if ((i & 1) == 1) { // one output per pair of input samples
+      const double *hr = &hist_re[pos + 1];
+      const double *hi = &hist_im[pos + 1];
+      out_re[(size_t)n_out * out_stride] = usrp_simd_dot_pd(coefs, hr, taps);
+      out_im[(size_t)n_out * out_stride] = usrp_simd_dot_pd(coefs, hi, taps);
+      n_out++;
+    }
+    pos++;
+    if (pos == taps)
+      pos = 0;
+  }
+  *hist_pos = pos;
+}
+
+/* ---------------------------------------------------------------------------------------------
+ * Parallel block decomposition, added 2026-08-02 after live measurement showed the single-threaded
+ * decimator (even with the circular buffer + SIMD dot product above) cost ~2.8 ms per
+ * trx_usrp_read() call against a 500 us real-time budget at 491.52 MSps -- still >5x too slow, a
+ * gap no further single-core tuning was closing reliably.
+ *
+ * The technique: split each call's n_in raw samples into P chunks. Chunk 0 continues the
+ * PERSISTED cross-call circular-buffer state exactly as usrp_halfband_decimate2x() does today.
+ * Chunks 1..P-1 are STATELESS: each reads its own `taps-1` samples of true lookback directly from
+ * the raw input array (already contiguous and available, no synchronization needed) and computes
+ * independently. This is an EXACT decomposition, not an approximation -- a causal LTI FIR filter's
+ * output at any sample depends only on that sample and its `taps-1` predecessors, which are fully
+ * determined by the input stream itself regardless of how the computation is partitioned.
+ *
+ * VERIFIED OFFLINE before ever touching the live receiver with it (see
+ * /tmp/.../decim_test/decim_pool_test.cpp, not shipped -- scratch verification artifact): bit-exact
+ * (max abs diff 0.0) against the sequential reference across hundreds of consecutive calls (so
+ * cross-call state continuity is exercised, not just one isolated block) and multiple chunk counts.
+ * Two real bugs were caught and fixed by that offline test before deployment:
+ *   1. Chunks 1..P-1 compute correct OUTPUTS but never touch the persisted circular-buffer state,
+ *      so naively only updating it from chunk 0 silently corrupts every later call's continuity.
+ *      Fixed by re-seeding the persisted state from the raw array's own last `taps` samples after
+ *      the parallel section -- and that reseed must be O(taps), not O(n_in-chunk): an earlier draft
+ *      walked the entire remainder sequentially to "catch up" the state, which is unnecessary (the
+ *      circular buffer only ever remembers its last `taps` writes) and was itself an Amdahl's-law
+ *      bottleneck capping the whole exercise's speedup regardless of parallel worker count.
+ *   2. Chunk 0 must be submitted to the SAME pool batch as the stateless chunks (not run
+ *      sequentially before them) or 1/P of the work is serial before the parallel section even
+ *      starts, which is the OTHER Amdahl's-law bottleneck that was capping measured speedup well
+ *      below Px even after fix #1. Safe to co-schedule: chunk 0's hist_re/hist_im/hist_pos are
+ *      touched by nothing else in the batch.
+ * ------------------------------------------------------------------------------------------- */
+
+/* Minimal persistent worker pool: threads created ONCE (not per trx_usrp_read() call -- per-call
+ * std::thread spawn overhead was measured to dominate and mask the real parallel speedup during
+ * offline testing), reused via a simple job-queue + batch-barrier. Deliberately simple: this call
+ * site only ever needs "submit exactly P jobs, block until all P finish, repeat next call". */
+/* Spin-wait worker pool, replacing an earlier mutex+condvar version (2026-08-02). MEASURED live on
+ * sens3 (perf stat during a real decimating capture): IPC 1.73 (not memory-stalled) but aggregate
+ * cycles implied only ~3 of 8 cores busy on average while 6 workers were supposedly running --
+ * i.e. workers were mostly BLOCKED on synchronization, not computing. Futex/condvar round-trip
+ * latency is genuinely large relative to a job dispatched roughly every ~500 us, which is exactly
+ * this workload's regime. Switching to a busy-poll handoff (spend CPU cycles spinning instead of
+ * a syscall-backed wait) is the right trade here: verified offline (see
+ * /tmp/.../decim_test/spinpool_test.cpp, not shipped) at P=6, stage 1 speedup went 9.58x (vs a
+ * mutex/condvar version's own measured ~1.2-1.6x on the SAME algorithm), correctness bit-exact
+ * (max diff 0.0) across hundreds of calls. P=8 measured WORSE than P=6 (oversubscribes the 8
+ * physical cores once spin-waiting threads are counted against the softmodem's own real-time
+ * threads) -- see the P selection logic at the call site for why 6 is the current default.
+ *
+ * One real bug was caught by that offline test before this ever ran live: the destructor woke
+ * workers by bumping the SAME counter used to signal "new job" (there is no separate exit signal),
+ * so shutdown could make a worker execute a stale/default-constructed std::function --
+ * std::bad_function_call, manifesting as a crash under -O2 and a hang under -O0/gdb depending on
+ * timing. Fixed by re-checking stop_ immediately after waking, before touching the job slot. */
+class UsrpDecimWorkerPool
+{
+public:
+  explicit UsrpDecimWorkerPool(int n) : n_(n), stop_(false)
+  {
+    AssertFatal(n <= USRP_DECIM_SPINPOOL_MAX_WORKERS, "USRP decim: requested %d workers, max is %d\n", n,
+                USRP_DECIM_SPINPOOL_MAX_WORKERS);
+    for (int i = 0; i < n; i++) {
+      job_ready_[i].store(0);
+      job_done_[i].store(0);
+    }
+    jobs_.resize(n);
+    for (int i = 0; i < n; i++)
+      workers_.emplace_back([this, i] { worker_loop(i); });
+  }
+  ~UsrpDecimWorkerPool()
+  {
+    stop_.store(true, std::memory_order_release);
+    for (int i = 0; i < n_; i++)
+      job_ready_[i].fetch_add(1, std::memory_order_release); // wake any worker parked in the spin-wait
+    for (auto &t : workers_)
+      t.join();
+  }
+  // jobs.size() must equal n (the worker count passed to the constructor). Blocks (spins) until
+  // every worker has finished this batch.
+  void run_batch(std::vector<std::function<void()>> jobs)
+  {
+    for (int i = 0; i < n_; i++) {
+      jobs_[i] = std::move(jobs[i]);
+      job_ready_[i].fetch_add(1, std::memory_order_release);
+    }
+    for (int i = 0; i < n_; i++) {
+      const int target = job_ready_[i].load(std::memory_order_relaxed);
+      while (job_done_[i].load(std::memory_order_acquire) != target) {
+        // busy-wait: see the class comment for why this beats a condvar for this workload
+      }
+    }
+  }
+
+private:
+  void worker_loop(int idx)
+  {
+    int seen = 0;
+    for (;;) {
+      int cur;
+      while ((cur = job_ready_[idx].load(std::memory_order_acquire)) == seen) {
+        if (stop_.load(std::memory_order_acquire))
+          return;
+      }
+      if (stop_.load(std::memory_order_acquire)) // see class comment: a wake is not always a real job
+        return;
+      seen = cur;
+      jobs_[idx]();
+      job_done_[idx].store(seen, std::memory_order_release);
+    }
+  }
+  int n_;
+  std::vector<std::thread> workers_;
+  std::vector<std::function<void()>> jobs_;
+  std::atomic<int> job_ready_[USRP_DECIM_SPINPOOL_MAX_WORKERS], job_done_[USRP_DECIM_SPINPOOL_MAX_WORKERS];
+  std::atomic<bool> stop_;
+};
+
+/* Stateless chunk: in_re/in_im must point at (chunk_start - (taps-1)) so indices [0,taps-1) are
+ * true lookback context and index (taps-1+i) is "new sample i". The taps-length window ending at
+ * new-sample i is therefore in_re[i .. i+taps-1] -- read directly, no circular buffer needed since
+ * the whole chunk (lookback + new) is already contiguous and fully available up front. */
+template <typename T>
+static void usrp_decim_chunk_stateless(const double *coefs, int taps, const T *in_re, const T *in_im,
+                                       int in_stride, int n_new, double *out_re, double *out_im)
+{
+  int n_out = 0;
+  for (int i = 0; i < n_new; i++) {
+    if ((i & 1) == 1) {
+      double acc_re = 0.0, acc_im = 0.0;
+      for (int k = 0; k < taps; k++) {
+        acc_re += coefs[k] * (double)in_re[(size_t)(i + k) * in_stride];
+        acc_im += coefs[k] * (double)in_im[(size_t)(i + k) * in_stride];
+      }
+      out_re[n_out] = acc_re;
+      out_im[n_out] = acc_im;
+      n_out++;
+    }
+  }
+}
+
+/* Re-seed the persisted circular buffer FRESH (pos=0) from just the last `taps` raw samples of the
+ * whole n_in block. O(taps), not O(n_in) -- see the block comment above for why this matters. */
+template <typename T>
+static void usrp_decim_reseed_state(double *hist_re, double *hist_im, int *hist_pos, int taps,
+                                    const T *in_re, const T *in_im, int in_stride, int n_in)
+{
+  int pos = 0;
+  for (int i = 0; i < taps; i++) {
+    const size_t idx = (size_t)(n_in - taps + i) * in_stride;
+    const double re = (double)in_re[idx];
+    const double im = (double)in_im[idx];
+    hist_re[pos] = re;
+    hist_re[pos + taps] = re;
+    hist_im[pos] = im;
+    hist_im[pos + taps] = im;
+    pos++;
+    if (pos == taps)
+      pos = 0;
+  }
+  *hist_pos = pos;
+}
+
+/* Parallel driver: splits n_in into P chunks, all P (including chunk 0) run concurrently via the
+ * pool, then the persisted state is re-seeded for next-call continuity. Falls back to the plain
+ * sequential path (unchanged behaviour) if n_in is too small to usefully/safely split. */
+template <typename T>
+static void usrp_decim_parallel(UsrpDecimWorkerPool *pool, int P, const double *coefs, int taps,
+                                double *hist_re, double *hist_im, int *hist_pos,
+                                const T *in_re, const T *in_im, int in_stride, int n_in,
+                                double *out_re, double *out_im)
+{
+  int chunk = n_in / P;
+  chunk -= (chunk % 2);
+  if (pool == NULL || P < 2 || chunk < taps * 2) {
+    usrp_halfband_decimate2x<T>(coefs, taps, hist_re, hist_im, hist_pos, in_re, in_im, in_stride, n_in, out_re, out_im);
+    return;
+  }
+  const int last_chunk = n_in - chunk * (P - 1);
+
+  std::vector<std::function<void()>> jobs;
+  jobs.reserve(P);
+  jobs.push_back([=]() {
+    usrp_halfband_decimate2x<T>(coefs, taps, hist_re, hist_im, hist_pos, in_re, in_im, in_stride, chunk, out_re, out_im);
+  });
+  int in_off = chunk, out_off = chunk / 2;
+  for (int p = 1; p < P; p++) {
+    const int n_new = (p == P - 1) ? last_chunk : chunk;
+    const T *cre = in_re + (size_t)(in_off - (taps - 1)) * in_stride;
+    const T *cim = in_im + (size_t)(in_off - (taps - 1)) * in_stride;
+    double *ore = out_re + out_off;
+    double *oim = out_im + out_off;
+    jobs.push_back([=]() { usrp_decim_chunk_stateless<T>(coefs, taps, cre, cim, in_stride, n_new, ore, oim); });
+    in_off += n_new;
+    out_off += n_new / 2;
+  }
+  pool->run_batch(std::move(jobs));
+
+  usrp_decim_reseed_state<T>(hist_re, hist_im, hist_pos, taps, in_re, in_im, in_stride, n_in);
+}
+
+/* ---------------------------------------------------------------------------------------------
+ * Cross-channel SIMD interleaving, added 2026-08-03 after live measurement showed the
+ * per-channel-worker-split batching above (usrp_decim_append_jobs / usrp_decim_parallel_multi_
+ * channel) was CORRECT but gave essentially no speedup: splitting a FIXED n_workers budget across
+ * cc channels (per_ch[c] workers each) and running them concurrently costs the same total
+ * wall-clock time as running each channel sequentially with the FULL n_workers, because either
+ * way the constraint is (total samples across all channels) / (total cores) -- there was no idle
+ * parallelism being left on the table to reclaim. Confirmed live: cc=2 decim_us stayed ~4000-4400us
+ * (barely down from ~4500us pre-fix), still ~8x over the 500us budget.
+ *
+ * The only way to actually go faster is to reduce the SCALAR work per tap, and that's what this
+ * does: instead of one thread computing one channel's dot product at a time, lay the cc channels'
+ * samples out INTERLEAVED in memory (channel-minor) so a single AVX FMA processes all cc channels'
+ * contribution to the SAME tap in one instruction. This is genuine additional throughput on top of
+ * the existing P-way thread split (multiplicative, not competing for the same cores), unlike the
+ * per-channel worker split above.
+ *
+ * Requires transposing the per-channel raw buffers into a channel-interleaved layout once per
+ * stage. Stage 1's raw input is genuinely separate per-channel buffers (UHD's recv() fills them
+ * that way), so it needs a real transpose. Stage 2's input is stage 1's OWN output, which this
+ * code already produces pre-interleaved -- so stage 2 needs no transpose at all, it just reuses
+ * stage 1's output buffer directly (see the two call sites in trx_usrp_read()). */
+
+/* Transpose cc separate per-channel buffers into one channel-interleaved double buffer:
+ * out_re_il[i*cc + c] = (double)in_re[c][i*in_stride]. O(n_in*cc) plain copies -- cheap relative
+ * to the O(n_in*cc*taps) FIR work it feeds, so doing the whole range (not just the stateless
+ * jobs' portion) rather than optimizing the split is a fine trade for simpler code. */
+template <typename T>
+static void usrp_decim_transpose_channels(const T *const *in_re, const T *const *in_im, int in_stride,
+                                          int cc, int n_in, double *out_re_il, double *out_im_il)
+{
+  for (int i = 0; i < n_in; i++) {
+    for (int c = 0; c < cc; c++) {
+      out_re_il[(size_t)i * cc + c] = (double)in_re[c][(size_t)i * in_stride];
+      out_im_il[(size_t)i * cc + c] = (double)in_im[c][(size_t)i * in_stride];
+    }
+  }
+}
+
+/* Stateless chunk, channel-interleaved: in_re_il/in_im_il must point at (chunk_start - (taps-1))*cc
+ * so index (i+k)*cc + c is channel c's sample for tap-window position (i+k), matching
+ * usrp_decim_chunk_stateless's per-channel indexing exactly but with a cc-wide stride. The cc==4
+ * fast path (this codebase's actual channel cap, USRP_DECIM_MAX_CHANNELS) does all 4 channels'
+ * accumulation for one tap in a single 256-bit FMA; other channel counts (1-3) use the equivalent
+ * plain scalar loop -- correct, just not vectorized, since 4 is what the 4-antenna goal needs. */
+static void usrp_decim_chunk_stateless_interleaved(int cc, const double *coefs, int taps,
+                                                   const double *in_re_il, const double *in_im_il,
+                                                   int n_new, double *out_re_il, double *out_im_il)
+{
+  int n_out = 0;
+  for (int i = 0; i < n_new; i++) {
+    if ((i & 1) == 1) {
+#if defined(__AVX2__) && defined(__FMA__)
+      if (cc == 4) {
+        __m256d acc_re = _mm256_setzero_pd();
+        __m256d acc_im = _mm256_setzero_pd();
+        for (int k = 0; k < taps; k++) {
+          const __m256d c = _mm256_set1_pd(coefs[k]);
+          acc_re = _mm256_fmadd_pd(c, _mm256_loadu_pd(&in_re_il[(size_t)(i + k) * 4]), acc_re);
+          acc_im = _mm256_fmadd_pd(c, _mm256_loadu_pd(&in_im_il[(size_t)(i + k) * 4]), acc_im);
+        }
+        _mm256_storeu_pd(&out_re_il[(size_t)n_out * 4], acc_re);
+        _mm256_storeu_pd(&out_im_il[(size_t)n_out * 4], acc_im);
+        n_out++;
+        continue;
+      }
+#endif
+      double acc_re[USRP_DECIM_MAX_CHANNELS] = {0}, acc_im[USRP_DECIM_MAX_CHANNELS] = {0};
+      for (int k = 0; k < taps; k++) {
+        const double coef = coefs[k];
+        for (int c = 0; c < cc; c++) {
+          acc_re[c] += coef * in_re_il[(size_t)(i + k) * cc + c];
+          acc_im[c] += coef * in_im_il[(size_t)(i + k) * cc + c];
+        }
+      }
+      for (int c = 0; c < cc; c++) {
+        out_re_il[(size_t)n_out * cc + c] = acc_re[c];
+        out_im_il[(size_t)n_out * cc + c] = acc_im[c];
+      }
+      n_out++;
+    }
+  }
+}
+
+/* Chunk 0 (stateful, persisted circular buffer): unlike the stateless path above, this reads each
+ * channel's OWN separate history buffer, so it stays a per-channel loop over the existing,
+ * unchanged usrp_halfband_decimate2x() -- only its NEW out_stride=cc parameter is new, letting it
+ * write directly into the shared interleaved output array at column c instead of needing its own
+ * per-channel scratch + a second transpose. Small fraction of total work (1 chunk out of P), so
+ * leaving it un-vectorized costs little. */
+template <typename T>
+static void usrp_decim_chan0_stateful_interleaved(const double *coefs, int taps,
+                                                  double *const *hist_re, double *const *hist_im, int *const *hist_pos,
+                                                  const T *const *in_re, const T *const *in_im, int in_stride,
+                                                  int cc, int chunk_len,
+                                                  double *out_re_il, double *out_im_il)
+{
+  for (int c = 0; c < cc; c++) {
+    usrp_halfband_decimate2x<T>(coefs, taps, hist_re[c], hist_im[c], hist_pos[c],
+                                in_re[c], in_im[c], in_stride, chunk_len,
+                                out_re_il + c, out_im_il + c, cc);
+  }
+}
+
+/* Top-level interleaved driver: full n_workers is used for the P-way CHUNK split (same as the
+ * original single-channel usrp_decim_parallel, NOT divided by channel count -- the win here comes
+ * from each stateless chunk job internally covering all cc channels via SIMD, not from giving each
+ * channel fewer workers). in_re_il/in_im_il is the ALREADY-INTERLEAVED input the caller supplies:
+ * for stage 1 that's a freshly transposed scratch buffer (usrp_decim_transpose_channels, raw
+ * per-channel buffers are genuinely separate); for stage 2 it's simply stage 1's own output buffer
+ * reused in place, since this function already produces interleaved output -- no second transpose. */
+template <typename T>
+static void usrp_decim_parallel_interleaved(UsrpDecimWorkerPool *pool, int n_workers,
+                                            const double *coefs, int taps,
+                                            double *const *hist_re, double *const *hist_im, int *const *hist_pos,
+                                            const T *const *in_re, const T *const *in_im, int in_stride,
+                                            int cc, int n_in,
+                                            const double *in_re_il, const double *in_im_il,
+                                            double *out_re_il, double *out_im_il)
+{
+  const int P = n_workers;
+  int chunk = n_in / P;
+  chunk -= (chunk % 2);
+  if (pool == NULL || P < 2 || chunk < taps * 2) {
+    usrp_decim_chan0_stateful_interleaved<T>(coefs, taps, hist_re, hist_im, hist_pos, in_re, in_im, in_stride,
+                                             cc, n_in, out_re_il, out_im_il);
+    for (int c = 0; c < cc; c++)
+      usrp_decim_reseed_state<T>(hist_re[c], hist_im[c], hist_pos[c], taps, in_re[c], in_im[c], in_stride, n_in);
+    return;
+  }
+  const int last_chunk = n_in - chunk * (P - 1);
+
+  std::vector<std::function<void()>> jobs;
+  jobs.reserve(P);
+  jobs.push_back([=]() {
+    usrp_decim_chan0_stateful_interleaved<T>(coefs, taps, hist_re, hist_im, hist_pos, in_re, in_im, in_stride,
+                                             cc, chunk, out_re_il, out_im_il);
+  });
+  int in_off = chunk, out_off = (chunk / 2) * cc;
+  for (int p = 1; p < P; p++) {
+    const int n_new = (p == P - 1) ? last_chunk : chunk;
+    const double *sre = in_re_il + (size_t)(in_off - (taps - 1)) * cc;
+    const double *sim = in_im_il + (size_t)(in_off - (taps - 1)) * cc;
+    double *ore = out_re_il + out_off;
+    double *oim = out_im_il + out_off;
+    jobs.push_back([=]() { usrp_decim_chunk_stateless_interleaved(cc, coefs, taps, sre, sim, n_new, ore, oim); });
+    in_off += n_new;
+    out_off += (n_new / 2) * cc;
+  }
+  pool->run_batch(std::move(jobs));
+
+  for (int c = 0; c < cc; c++)
+    usrp_decim_reseed_state<T>(hist_re[c], hist_im[c], hist_pos[c], taps, in_re[c], in_im[c], in_stride, n_in);
+}
 
 typedef struct {
 
@@ -61,8 +611,43 @@ typedef struct {
   //! USRP RX Metadata
   uhd::rx_metadata_t rx_md;
 
-  //! Sampling rate
+  //! Sampling rate (LOGICAL rate OAI's timing model is built around -- e.g. 122.88e6. May differ
+  //! from the USRP's actual hardware rate; see decim_ratio below)
   double sample_rate;
+
+  //! Software RX decimation ratio (1 = disabled, i.e. hardware rate == requested rate; currently
+  //! only 1 or 4 are supported -- see usrp_halfband_decimate2x() and the comment block above it.
+  //! Detected automatically after set_rx_rate() by comparing the requested and granted rates.
+  int decim_ratio;
+  usrp_decim_chan_state_t decim_state[USRP_DECIM_MAX_CHANNELS];
+  // All three scratch buffers are HEAP-allocated and grown on demand (never a stack VLA): at
+  // decim_ratio=4 the raw buffer alone is ~4x the size of the pre-existing buff_tmp stack VLA in
+  // trx_usrp_read() (which itself already scales with nsamps, typically ~61440 complex samples per
+  // call at 273 PRB -- i.e. ~1 MB raw here), and stacking that on top of an already-sized stack
+  // frame is exactly the oversized-VLA failure class fixed in nr_initial_sync.c earlier this
+  // session. Sized in complex-sample units; grown (not shrunk) the first time a call needs more.
+  int16_t *decim_raw_buf[USRP_DECIM_MAX_CHANNELS];       // raw pre-decimation samples, interleaved I/Q
+  int decim_raw_buf_nsamps[USRP_DECIM_MAX_CHANNELS];     // capacity of decim_raw_buf, in complex samples
+  // Channel-interleaved scratch (SHARED across all channels, not per-channel arrays) for the
+  // cross-channel SIMD decimation path -- see the usrp_decim_parallel_interleaved block comment.
+  // decim_il_raw_{re,im}: transposed raw input for stage 1 (raw_needed*cc doubles each).
+  // decim_il_stage1_{re,im}: stage 1 output AND stage 2 input, already interleaved -- no
+  // re-transpose needed between stages ((raw_needed/2)*cc doubles each).
+  // decim_il_stage2_{re,im}: final interleaved output, de-interleaved directly into buff_tmp
+  // (nsamps*cc doubles each).
+  double *decim_il_raw_re, *decim_il_raw_im;
+  int decim_il_raw_nsamps;         // capacity, in TOTAL (all channels combined) complex samples
+  double *decim_il_stage1_re, *decim_il_stage1_im;
+  int decim_il_stage1_nsamps;
+  double *decim_il_stage2_re, *decim_il_stage2_im;
+  int decim_il_stage2_nsamps;
+  // Lazily created on first use (only when decim_ratio > 1 -- every other radio never touches
+  // this). Persistent across calls: per-call thread spawn was measured to dominate and mask the
+  // real parallel speedup during offline testing, hence a reusable pool rather than std::thread
+  // per trx_usrp_read() call. usrp_state_t is private to this .cpp (never referenced from a
+  // shared header, confirmed), so a real typed pointer is fine here, not void*.
+  UsrpDecimWorkerPool *decim_pool;
+  int decim_num_workers; // P used for usrp_decim_parallel(); 0 until first decimating call
 
   //! TX forward samples. We use usrp_time_offset to get this value
   int tx_forward_nsamps; //166 for 20Mhz
@@ -403,6 +988,13 @@ static void trx_usrp_end(openair0_device_t *device)
   s->tx_stream = NULL;
   s->rx_stream = NULL;
   s->usrp = NULL;
+  for (int i = 0; i < USRP_DECIM_MAX_CHANNELS; i++) {
+    free(s->decim_raw_buf[i]);
+  }
+  free(s->decim_il_raw_re); free(s->decim_il_raw_im);
+  free(s->decim_il_stage1_re); free(s->decim_il_stage1_im);
+  free(s->decim_il_stage2_re); free(s->decim_il_stage2_im);
+  delete s->decim_pool; // safe on NULL (never created if decim_ratio never exceeded 1)
   free(s);
   device->priv = NULL;
   device->trx_start_func = NULL;
@@ -696,6 +1288,56 @@ static void trx_usrp_write_reset(openair0_thread_t *wt) {
 
 //---------------------end-------------------------
 
+/* Grow (never shrink) the three per-channel decimation scratch buffers to hold at least `nsamps`
+ * (post-decimation, i.e. what the caller of trx_usrp_read() asked for) worth of samples at each
+ * stage. Heap-allocated, plain malloc/free -- nothing downstream needs SIMD alignment (the raw
+ * buffer is only ever handed to UHD's recv() as a generic byte buffer, and both decimation stages
+ * are scalar loops), so there is no reason to pull in the codebase's malloc16 helper here. */
+static void usrp_decim_ensure_scratch(usrp_state_t *s, int ch, int cc, int nsamps)
+{
+  const int raw_needed = nsamps * s->decim_ratio;
+  if (s->decim_raw_buf_nsamps[ch] < raw_needed) {
+    free(s->decim_raw_buf[ch]);
+    s->decim_raw_buf[ch] = (int16_t *)malloc(sizeof(int16_t) * 2 * (size_t)raw_needed); // I/Q interleaved
+    AssertFatal(s->decim_raw_buf[ch] != NULL, "USRP decim: cannot allocate %d raw samples for channel %d\n", raw_needed, ch);
+    s->decim_raw_buf_nsamps[ch] = raw_needed;
+  }
+
+  // Channel-interleaved shared scratch, sized for ALL cc channels combined -- grown once; the
+  // per-channel loop calling this just re-checks the same (already-satisfied) condition on later
+  // iterations, which is cheap and keeps this function's per-channel calling convention unchanged.
+  const int il_raw_needed = raw_needed * cc;
+  if (s->decim_il_raw_nsamps < il_raw_needed) {
+    free(s->decim_il_raw_re);
+    free(s->decim_il_raw_im);
+    s->decim_il_raw_re = (double *)malloc(sizeof(double) * (size_t)il_raw_needed);
+    s->decim_il_raw_im = (double *)malloc(sizeof(double) * (size_t)il_raw_needed);
+    AssertFatal(s->decim_il_raw_re != NULL && s->decim_il_raw_im != NULL,
+                "USRP decim: cannot allocate interleaved raw scratch (%d samples)\n", il_raw_needed);
+    s->decim_il_raw_nsamps = il_raw_needed;
+  }
+  const int il_stage1_needed = (raw_needed / 2) * cc;
+  if (s->decim_il_stage1_nsamps < il_stage1_needed) {
+    free(s->decim_il_stage1_re);
+    free(s->decim_il_stage1_im);
+    s->decim_il_stage1_re = (double *)malloc(sizeof(double) * (size_t)il_stage1_needed);
+    s->decim_il_stage1_im = (double *)malloc(sizeof(double) * (size_t)il_stage1_needed);
+    AssertFatal(s->decim_il_stage1_re != NULL && s->decim_il_stage1_im != NULL,
+                "USRP decim: cannot allocate interleaved stage1 scratch (%d samples)\n", il_stage1_needed);
+    s->decim_il_stage1_nsamps = il_stage1_needed;
+  }
+  const int il_stage2_needed = nsamps * cc;
+  if (s->decim_il_stage2_nsamps < il_stage2_needed) {
+    free(s->decim_il_stage2_re);
+    free(s->decim_il_stage2_im);
+    s->decim_il_stage2_re = (double *)malloc(sizeof(double) * (size_t)il_stage2_needed);
+    s->decim_il_stage2_im = (double *)malloc(sizeof(double) * (size_t)il_stage2_needed);
+    AssertFatal(s->decim_il_stage2_re != NULL && s->decim_il_stage2_im != NULL,
+                "USRP decim: cannot allocate interleaved stage2 scratch (%d samples)\n", il_stage2_needed);
+    s->decim_il_stage2_nsamps = il_stage2_needed;
+  }
+}
+
 /*! \brief Receive samples from hardware.
  * Read \ref nsamps samples from each channel to buffers. buff[0] is the array for
  * the first channel. *ptimestamp is the time at which the first sample
@@ -729,29 +1371,138 @@ static int trx_usrp_read(openair0_device_t *device, openair0_timestamp_t *ptimes
        AssertFatal(1==0,"Shouldn't be here\n");
   }
 
+  // Software RX decimation (see the usrp_halfband_decimate2x block comment near the top of this
+  // file): when active, we must pull decim_ratio times as many RAW samples from UHD as the caller
+  // asked for, since this FPGA image can only stream at its one fixed native rate. decim==1 takes
+  // the exact pre-existing code path below with zero behavioural change.
+  const int decim = s->decim_ratio;
+  const int recv_target = nsamps * decim;
+  if (decim > 1) {
+    for (int i = 0; i < cc; i++)
+      usrp_decim_ensure_scratch(s, i, cc, nsamps);
+  }
+
   samples_received=0;
-  while (samples_received != nsamps) {
+  while (samples_received != recv_target) {
 
     if (cc>1) {
       // receive multiple channels (e.g. RF A and RF B)
       std::vector<void *> buff_ptrs;
 
-      for (int i=0; i<cc; i++) buff_ptrs.push_back(buff_tmp[i]+samples_received);
-      samples_received += s->rx_stream->recv(buff_ptrs, nsamps-samples_received, s->rx_md);
+      for (int i=0; i<cc; i++) {
+        void *dst = (decim > 1) ? (void *)(s->decim_raw_buf[i] + 2 * samples_received)
+                                 : (void *)((int32_t *)buff_tmp[i] + samples_received);
+        buff_ptrs.push_back(dst);
+      }
+      samples_received += s->rx_stream->recv(buff_ptrs, recv_target-samples_received, s->rx_md);
     } else {
       // receive a single channel (e.g. from connector RF A)
-
-      samples_received += s->rx_stream->recv((void*)((int32_t*)buff_tmp[0]+samples_received),
-                                             nsamps-samples_received, s->rx_md);
+      void *dst = (decim > 1) ? (void *)(s->decim_raw_buf[0] + 2 * samples_received)
+                               : (void *)((int32_t *)buff_tmp[0] + samples_received);
+      samples_received += s->rx_stream->recv(dst, recv_target-samples_received, s->rx_md);
     }
     if  ((s->wait_for_first_pps == 0) && (s->rx_md.error_code!=uhd::rx_metadata_t::ERROR_CODE_NONE))
       break;
 
-    if ((s->wait_for_first_pps == 1) && (samples_received != nsamps)) {
+    if ((s->wait_for_first_pps == 1) && (samples_received != recv_target)) {
       printf("sleep...\n"); //usleep(100);
     }
   }
-  if (samples_received == nsamps) s->wait_for_first_pps=0;
+  if (samples_received == recv_target) s->wait_for_first_pps=0;
+
+  // How many LOGICAL (post-decimation) samples we actually have to hand downstream. Equals nsamps
+  // on a full/normal receive; on a short read while decimating, only whole decimation windows of
+  // raw samples correspond to a valid decimated output, so anything past that is not computed --
+  // consistent with the pre-existing (non-decimating) short-read behaviour of simply reporting
+  // fewer samples than asked for rather than fabricating data.
+  int logical_received = samples_received;
+
+  if (decim > 1) {
+    if (samples_received == recv_target) {
+      // TEMPORARY DIAGNOSTIC (2026-08-02): measure the decimation cascade's own wall-clock cost
+      // directly, to settle whether remaining RX overflows are compute-bound (this taking too
+      // long) or still a buffer/transport configuration issue, rather than guessing further.
+      static int decim_timing_calls = 0;
+      struct timespec ts_decim_start, ts_decim_end;
+      clock_gettime(CLOCK_MONOTONIC, &ts_decim_start);
+      {
+        // Cross-channel SIMD interleaving (see usrp_decim_parallel_interleaved's block comment
+        // for why the earlier per-channel-worker-split batching didn't help): stage 1's raw input
+        // is transposed once into a channel-interleaved buffer so each stateless chunk job covers
+        // all cc channels via one AVX FMA per tap; stage 2 reuses stage 1's own (already
+        // interleaved) output directly, no second transpose.
+        const int16_t *raw_re_arr[USRP_DECIM_MAX_CHANNELS];
+        const int16_t *raw_im_arr[USRP_DECIM_MAX_CHANNELS];
+        double *hist1_re_arr[USRP_DECIM_MAX_CHANNELS];
+        double *hist1_im_arr[USRP_DECIM_MAX_CHANNELS];
+        int *hist1_pos_arr[USRP_DECIM_MAX_CHANNELS];
+        double *hist2_re_arr[USRP_DECIM_MAX_CHANNELS];
+        double *hist2_im_arr[USRP_DECIM_MAX_CHANNELS];
+        int *hist2_pos_arr[USRP_DECIM_MAX_CHANNELS];
+        const double *stage1_view_re[USRP_DECIM_MAX_CHANNELS]; // strided view: channel c's own
+        const double *stage1_view_im[USRP_DECIM_MAX_CHANNELS]; // column in the shared interleaved buffer
+
+        const int n_workers = s->decim_num_workers;
+        for (int i = 0; i < cc; i++) {
+          raw_re_arr[i] = s->decim_raw_buf[i];
+          raw_im_arr[i] = s->decim_raw_buf[i] + 1;
+          hist1_re_arr[i] = s->decim_state[i].hist1_re;
+          hist1_im_arr[i] = s->decim_state[i].hist1_im;
+          hist1_pos_arr[i] = &s->decim_state[i].hist1_pos;
+          hist2_re_arr[i] = s->decim_state[i].hist2_re;
+          hist2_im_arr[i] = s->decim_state[i].hist2_im;
+          hist2_pos_arr[i] = &s->decim_state[i].hist2_pos;
+          stage1_view_re[i] = s->decim_il_stage1_re + i;
+          stage1_view_im[i] = s->decim_il_stage1_im + i;
+        }
+
+        usrp_decim_transpose_channels<int16_t>(raw_re_arr, raw_im_arr, 2, cc, recv_target,
+                                               s->decim_il_raw_re, s->decim_il_raw_im);
+        usrp_decim_parallel_interleaved<int16_t>(s->decim_pool, n_workers,
+                                                 usrp_decim_stage1_coefs, USRP_DECIM_STAGE1_TAPS,
+                                                 hist1_re_arr, hist1_im_arr, hist1_pos_arr,
+                                                 raw_re_arr, raw_im_arr, 2, cc, recv_target,
+                                                 s->decim_il_raw_re, s->decim_il_raw_im,
+                                                 s->decim_il_stage1_re, s->decim_il_stage1_im);
+        usrp_decim_parallel_interleaved<double>(s->decim_pool, n_workers,
+                                                usrp_decim_stage2_coefs, USRP_DECIM_STAGE2_TAPS,
+                                                hist2_re_arr, hist2_im_arr, hist2_pos_arr,
+                                                stage1_view_re, stage1_view_im, cc, cc, recv_target / 2,
+                                                s->decim_il_stage1_re, s->decim_il_stage1_im,
+                                                s->decim_il_stage2_re, s->decim_il_stage2_im);
+
+        // Write the decimated output into buff_tmp in the SAME interleaved-int16 layout UHD's
+        // recv() would have produced directly, so the existing rxshift loop below needs no
+        // changes at all. The filter cascade has unity passband gain (verified numerically at
+        // design time), so no additional scaling belongs here -- only rounding + a defensive
+        // saturation clamp (a well-designed unity-gain filter on real ADC data should not clip,
+        // but a silent int16 wraparound would be a far worse failure than a clean clip).
+        for (int i = 0; i < cc; i++) {
+          int16_t *dst = (int16_t *)buff_tmp[i];
+          for (int j = 0; j < nsamps; j++) {
+            long re_i = lround(s->decim_il_stage2_re[(size_t)j * cc + i]);
+            long im_i = lround(s->decim_il_stage2_im[(size_t)j * cc + i]);
+            if (re_i > 32767) re_i = 32767; else if (re_i < -32768) re_i = -32768;
+            if (im_i > 32767) im_i = 32767; else if (im_i < -32768) im_i = -32768;
+            dst[2 * j]     = (int16_t)re_i;
+            dst[2 * j + 1] = (int16_t)im_i;
+          }
+        }
+      }
+      clock_gettime(CLOCK_MONOTONIC, &ts_decim_end);
+      decim_timing_calls++;
+      if (decim_timing_calls <= 20 || (decim_timing_calls % 200) == 0) {
+        const double decim_us = (ts_decim_end.tv_sec - ts_decim_start.tv_sec) * 1e6
+                               + (ts_decim_end.tv_nsec - ts_decim_start.tv_nsec) / 1e3;
+        const double budget_us = 1e6 * (double)recv_target / (s->sample_rate * decim);
+        LOG_W(HW, "DECIMTIMING call=%d decim_us=%.1f budget_us=%.1f (raw_samples=%d cc=%d)\n",
+              decim_timing_calls, decim_us, budget_us, recv_target, cc);
+      }
+      logical_received = nsamps;
+    } else {
+      logical_received = samples_received / decim;
+    }
+  }
 
   // bring RX data into 12 LSBs for softmodem RX
   for (int i=0; i<cc; i++) {
@@ -769,8 +1520,8 @@ static int trx_usrp_read(openair0_device_t *device, openair0_timestamp_t *ptimes
     }
   }
 
-  if (samples_received < nsamps) {
-    LOG_E(HW,"[recv] received %d samples out of %d\n",samples_received,nsamps);
+  if (logical_received < nsamps) {
+    LOG_E(HW,"[recv] received %d samples out of %d\n",logical_received,nsamps);
   }
 
   if ( s->rx_md.error_code != uhd::rx_metadata_t::ERROR_CODE_NONE)
@@ -780,7 +1531,7 @@ static int trx_usrp_read(openair0_device_t *device, openair0_timestamp_t *ptimes
   s->rx_timestamp = s->rx_md.time_spec.to_ticks(s->sample_rate);
   *ptimestamp = s->rx_timestamp;
 
-  T(T_USRP_RX_ANT0, T_INT(s->rx_timestamp), T_BUFFER(buff[0], samples_received*4));
+  T(T_USRP_RX_ANT0, T_INT(s->rx_timestamp), T_BUFFER(buff[0], logical_received*4));
 
   recplay_state_t *recPlay=device->recplay_state;
 
@@ -807,8 +1558,8 @@ static int trx_usrp_read(openair0_device_t *device, openair0_timestamp_t *ptimes
       exit_function(__FILE__, __FUNCTION__, __LINE__, "Recording reaches max iq limit\n", OAI_EXIT_NORMAL);
   }
   read_count++;
-  LOG_D(HW,"usrp_lib: returning %d samples at ts %lu read_count %d\n", samples_received, *ptimestamp, read_count); 
-  return samples_received;
+  LOG_D(HW,"usrp_lib: returning %d samples at ts %lu read_count %d\n", logical_received, *ptimestamp, read_count);
+  return logical_received;
 }
 
 /*! \brief Compares two variables within precision
@@ -1167,11 +1918,35 @@ extern "C" {
     if (device_adds[0].get(type_str) == "x4xx") {
       printf("Found USRP x400\n");
       device->type = USRP_X400_DEV;
-      usrp_master_clock = 245.76e6;
+      // 245.76 MHz was previously hardcoded here for every X4xx configuration, an assumption that
+      // only holds for FPGA images with a DDC/decimation block (e.g. the default "X4_200" image).
+      // MEASURED (2026-08-02): the "CG" (100 GbE dual-QSFP28) image has no DDC block at all --
+      // confirmed via `rfnoc_graph::find_blocks("DDC")` returning empty -- and its ONLY valid
+      // master clock rate is its native ADC rate, 491.52 MHz; requesting 245.76 MHz against it
+      // fails outright at MPM's init() RPC, before any sample-rate negotiation is even reached.
+      // The currently loaded image is already reported by discovery (the same `fpga=...` string
+      // visible in the MPMD init log), so branch on it instead of assuming one MCR for all X4xx.
+      const std::string fpga_type = device_adds[0].get("fpga", "");
+      if (fpga_type.rfind("CG", 0) == 0) { // "CG_400", or any future CG-prefixed variant
+        usrp_master_clock = 491.52e6;
+        LOG_W(HW,
+              "X4xx FPGA image type '%s' has no DDC block -- native rate %.2f MHz is fixed; "
+              "requested sample rates that don't match it will need software decimation (see the "
+              "usrp_halfband_decimate2x block comment near the top of this file)\n",
+              fpga_type.c_str(), usrp_master_clock / 1e6);
+      } else {
+        usrp_master_clock = 245.76e6;
+      }
       args += boost::str(boost::format(",master_clock_rate=%f") % usrp_master_clock);
 
       // https://kb.ettus.com/USRP_Host_Performance_Tuning_Tips_and_Tricks
-      if (0 != system("sysctl -w net.core.rmem_max=62500000 net.core.wmem_max=62500000"))
+      //
+      // 62.5 MB was sized for the 10 GbE / 245.76 MSps X4_200 case. MEASURED (2026-08-02): at
+      // 491.52 MSps over 100 GbE (the CG_400 image) this is only 25% of what UHD itself asks for
+      // -- every run logs "Target sock buff size: 250000000 bytes. Actual sock buff size:
+      // 62500000 bytes" -- and RX overflows appeared (0 -> 140+/90s) that were never present at
+      // the lower rate. Matching UHD's own requested size rather than guessing a bigger one.
+      if (0 != system("sysctl -w net.core.rmem_max=250000000 net.core.wmem_max=250000000"))
         LOG_W(HW, "Can't set kernel parameters for X4x0\n");
     }
 
@@ -1376,6 +2151,61 @@ extern "C" {
     openair0_config_t *cfg = &openair0_cfg[0];
     if (i < cfg->rx_num_channels) {
       s->usrp->set_rx_rate(cfg->sample_rate, i + choffset);
+      // Some FPGA images have no DDC/decimation block and silently coerce the granted rate to a
+      // fixed native ADC rate regardless of what was requested (measured: X410 "CG" 100 GbE image,
+      // 491.52 MSps native vs the 122.88 MSps a 273 PRB/100 MHz NR capture needs -- see the
+      // usrp_halfband_decimate2x block comment near the top of this file for the full story).
+      // Detected generically from the requested-vs-granted ratio so this isn't X410/CG-specific.
+      {
+        const double granted = s->usrp->get_rx_rate(i + choffset);
+        const double ratio_f = granted / cfg->sample_rate;
+        const int ratio = (int)llround(ratio_f);
+        const bool ratio_is_clean = fabs(ratio_f - (double)ratio) < 1e-3;
+        const bool ratio_is_supported = (ratio == 1 || ratio == 4);
+        AssertFatal(ratio_is_clean && ratio_is_supported,
+                    "USRP granted RX rate %f Hz is not the requested %f Hz (ratio %f) and is not a "
+                    "supported software-decimation factor (only 1x/4x are implemented) -- refusing "
+                    "to stream a rate OAI's timing model does not expect\n",
+                    granted, cfg->sample_rate, ratio_f);
+        if (i == 0) { // ratio is a device-wide property (shared ADC clock), not per-channel
+          s->decim_ratio = (ratio == 4) ? 4 : 1;
+          if (s->decim_ratio > 1) {
+            LOG_W(HW,
+                  "USRP granted RX rate %.0f Hz != requested %.0f Hz -- enabling %dx software RX "
+                  "decimation (no DDC block in this FPGA image)\n",
+                  granted, cfg->sample_rate, s->decim_ratio);
+            // hw_cores - 2 leaves headroom for the softmodem's own real-time threads (UE_thread,
+            // DL/UL actors, sensing engine consumer, ...). MEASURED (2026-08-02, spin-wait pool,
+            // sens3's 8-core Xeon W-2225): P=6 gave 9.58x/2.96x speedup (stage1/stage2) and was
+            // the best of {2,4,6,8}; P=8 measured WORSE (2.78x/1.34x) -- with spin-waiting workers
+            // burning cycles even while idle, using ALL physical cores for the pool starves the
+            // softmodem's own threads and everything slows down net. hw_cores-2 already lands on
+            // exactly 6 for this 8-core box, which is why the formula (not just the cap) matters.
+            unsigned hw_cores = std::thread::hardware_concurrency();
+            if (hw_cores == 0)
+              hw_cores = 4; // std::thread::hardware_concurrency() is allowed to return 0 if undetectable
+            int p = (int)hw_cores - 2;
+            if (p < 2) p = 2;
+            if (p > 8) p = 8; // untested above 8; the P=8-is-worse result above suggests this cap is generous, not tight
+            // TEMPORARY (2026-08-02): env override for re-tuning P against LIVE contention (the
+            // isolated-stage offline benchmark that picked hw_cores-2 did not, and could not,
+            // account for spin-waiting workers competing with the softmodem's OWN real-time
+            // threads for the same physical cores -- that only shows up live). Remove once P is
+            // re-settled against a live measurement instead of the isolated offline one.
+            const char *p_override = getenv("USRP_DECIM_WORKERS");
+            if (p_override != NULL) {
+              int p_env = atoi(p_override);
+              if (p_env >= 1 && p_env <= USRP_DECIM_SPINPOOL_MAX_WORKERS) {
+                p = p_env;
+                LOG_W(HW, "USRP decim: worker count overridden to %d via USRP_DECIM_WORKERS\n", p);
+              }
+            }
+            s->decim_num_workers = p;
+            s->decim_pool = new UsrpDecimWorkerPool(p);
+            LOG_I(HW, "USRP decim: started %d-worker pool for parallel software decimation (hw_cores=%u)\n", p, hw_cores);
+          }
+        }
+      }
       uhd::tune_request_t rx_tune_req(cfg->rx_freq[i], cfg->tune_offset);
       s->usrp->set_rx_freq(rx_tune_req, i+choffset);
       set_rx_gain_offset(cfg, i, bw_gain_adjust);

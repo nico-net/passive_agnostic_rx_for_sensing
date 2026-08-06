@@ -194,6 +194,45 @@ static void do_time_to_freq(nr_ssb_search_params_t *params, uint32_t sample_offs
     for (unsigned char aa = 0; aa < params->nb_antennas_rx; aa++) {
       c16_t *rxF = rxdataF[symb][aa];
       dft(dftsize, (int16_t *)&params->rxdata[aa][rx_offset], (int16_t *)rxF, 1);
+
+      // TEMPORARY DIAGNOSTIC (2026-08-05): matches phy_procedures_nr_ue.c's tracking-path FEPDIAG --
+      // same 3 stages, so the two paths' amplitude at each stage can be compared directly for the
+      // same nominal SSB position. do_time_to_freq() has no equivalent nb_prefix_samples0 (this
+      // path never uses the long/first-symbol CP length at all -- see this function's rx_offset
+      // formula above), logged as 0 to make that asymmetry explicit rather than omitting the field.
+      if (aa == 0) {
+        static int s_fepdiag_acq_left = 40;
+        if (s_fepdiag_acq_left > 0) {
+          const c16_t *rxd = params->rxdata[0];
+          double s1_sum = 0.0, s1_sumsq = 0.0;
+          const int s1_n = (int)(params->nb_prefix_samples + params->ofdm_symbol_size);
+          for (int i = 0; i < s1_n; i++) {
+            const double m = hypot((double)rxd[rx_offset - params->nb_prefix_samples + i].r,
+                                   (double)rxd[rx_offset - params->nb_prefix_samples + i].i);
+            s1_sum += m;
+            s1_sumsq += m * m;
+          }
+          double s2_sum = 0.0, s2_sumsq = 0.0;
+          for (int i = 0; i < params->ofdm_symbol_size; i++) {
+            const double m = hypot((double)rxd[rx_offset + i].r, (double)rxd[rx_offset + i].i);
+            s2_sum += m;
+            s2_sumsq += m * m;
+          }
+          double s3_sum = 0.0, s3_sumsq = 0.0;
+          for (int i = 0; i < params->ofdm_symbol_size; i++) {
+            const double m = hypot((double)rxF[i].r, (double)rxF[i].i);
+            s3_sum += m;
+            s3_sumsq += m * m;
+          }
+          LOG_W(PHY,
+                "SENSING: FEPDIAG path=acquisition slot=- symbol=%d rx_offset=%u nb_prefix=%u nb_prefix0=0 "
+                "is_sync=0 s1_mean=%.2f s1_rms=%.2f s2_mean=%.2f s2_rms=%.2f s3_mean=%.2f s3_rms=%.2f\n",
+                symb, rx_offset, params->nb_prefix_samples, s1_sum / s1_n, sqrt(s1_sumsq / s1_n),
+                s2_sum / params->ofdm_symbol_size, sqrt(s2_sumsq / params->ofdm_symbol_size),
+                s3_sum / params->ofdm_symbol_size, sqrt(s3_sumsq / params->ofdm_symbol_size));
+          s_fepdiag_acq_left--;
+        }
+      }
       apply_nr_rotation_symbol_RX(params->symbols_per_slot,
                                   params->slots_per_subframe,
                                   timeshift_symbol_rotation,
@@ -245,9 +284,58 @@ bool nr_search_ssb_common(nr_ssb_search_params_t *params)
     return false;
   }
 
+  // ---- GOLDEN-BUFFER FRAMESCAN CROSS-VALIDATION (2026-08-06) --------------------------------
+  // Runs the SAME scan the tracking path uses (nr_isac_framescan) against a buffer KNOWN to
+  // contain a good SSB -- this one, which PSS/SSS is about to succeed on. Without this, the
+  // tracking-side "no SSB anywhere, best ratio 1.16x" result is unfalsifiable: a bug in the search
+  // would look identical to an empty buffer. Fires once per process, opt-in.
+  //
+  // Deliberately runs BOTH sides of compensate_freq_offset() below. That call mutates this buffer
+  // in place, so acquisition's published ~19 dB figure is from a CFO-CORRECTED buffer while
+  // tracking's FRAMESCAN reads a raw one. At this cell's measured offset (~-15 kHz, 0.507 x the
+  // 30 kHz SCS) that difference alone can move the score between "clean peak" and "noise", so the
+  // raw-vs-corrected pair is the actual controlled comparison, not the corrected number alone.
+  if (getenv("ISAC_GOLDEN_FRAMESCAN") && atoi(getenv("ISAC_GOLDEN_FRAMESCAN"))) {
+    static volatile int s_golden_done = 0;
+    if (!s_golden_done) {
+      s_golden_done = 1;
+      extern void nr_isac_framescan(const c16_t *, unsigned int, int, int, int, int, long, double, double, double, const char *);
+      const int N = params->ofdm_symbol_size;
+      const int sym_stride = params->ofdm_symbol_size + params->nb_prefix_samples;
+      const int start_bin = (params->first_carrier_offset + params->ssb_start_subcarrier) % N;
+      const int nsym = params->rxdata_size / sym_stride;
+      LOG_W(PHY,
+            "SENSING: GOLDEN acquisition buffer: rxdata_size=%d sym_stride=%d N=%d start_bin=%d "
+            "ssb_time_offset=%d pss_freq_offset=%d apply_fo=%d\n",
+            params->rxdata_size, sym_stride, N, start_bin, ssb_time_offset,
+            params->pss_res.freq_offset, params->apply_freq_offset);
+      // RAW: exactly what tracking's FRAMESCAN sees (no CFO correction applied yet).
+      nr_isac_framescan(params->rxdata[0], params->rxdata_size, N, start_bin, sym_stride, nsym,
+                        ssb_time_offset, params->sampling_rate, 0.0, 0.0, "acq_raw");
+      // RAW + CFO sweep: does derotation alone recover the peak from the same raw samples?
+      nr_isac_framescan(params->rxdata[0], params->rxdata_size, N, start_bin, sym_stride, nsym,
+                        ssb_time_offset, params->sampling_rate, 20000.0, 1000.0, "acq_raw_cfosweep");
+    }
+  }
+
   // Apply frequency offset compensation if requested
   if (params->apply_freq_offset && params->pss_res.freq_offset != 0) {
     compensate_freq_offset(params->rxdata, params->nb_antennas_rx, params->rxdata_size, params->pss_res.freq_offset, params->sampling_rate);
+  }
+
+  if (getenv("ISAC_GOLDEN_FRAMESCAN") && atoi(getenv("ISAC_GOLDEN_FRAMESCAN"))) {
+    static volatile int s_golden_post_done = 0;
+    if (!s_golden_post_done) {
+      s_golden_post_done = 1;
+      extern void nr_isac_framescan(const c16_t *, unsigned int, int, int, int, int, long, double, double, double, const char *);
+      const int N = params->ofdm_symbol_size;
+      const int sym_stride = params->ofdm_symbol_size + params->nb_prefix_samples;
+      const int start_bin = (params->first_carrier_offset + params->ssb_start_subcarrier) % N;
+      const int nsym = params->rxdata_size / sym_stride;
+      // CORRECTED: the buffer do_time_to_freq() actually measures its ~19 dB peak on.
+      nr_isac_framescan(params->rxdata[0], params->rxdata_size, N, start_bin, sym_stride, nsym,
+                        ssb_time_offset, params->sampling_rate, 0.0, 0.0, "acq_cfo_corrected");
+    }
   }
 
   // Extract SSB symbols to frequency domain

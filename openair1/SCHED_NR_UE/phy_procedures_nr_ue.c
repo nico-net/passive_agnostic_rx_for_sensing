@@ -9,6 +9,12 @@
 #define _GNU_SOURCE
 
 #include <math.h>
+#include <stdatomic.h>
+#include <time.h>
+// TEMPORARY DIAGNOSTIC (2026-08-05): producer-side counters, defined in executables/nr-ue.c. See
+// that file's own comment and PBCH_TRACKING_BUFFER_HANDOVER.md.
+extern _Atomic long nr_ue_diag_producer_absolute_slot;
+extern _Atomic long nr_ue_diag_producer_wall_ns;
 #include "nr/nr_common.h"
 #include "assertions.h"
 #include "defs.h"
@@ -1052,6 +1058,195 @@ int nr_process_pbch_symbol(
     nr_slot_fep(ue, fp, proc->nr_slot_rx, symbol, tmp, link_type_dl, 0, ue->common_vars.rxdata);
     for (int aarx = 0; aarx < fp->nb_antennas_rx; aarx++) {
       memcpy(rxdataF[aarx], tmp[aarx] + symbol * fp->ofdm_symbol_size, sizeof(c16_t) * fp->ofdm_symbol_size);
+    }
+
+    // TEMPORARY DIAGNOSTIC (2026-08-05): 3-stage amplitude trace for the tracking path, to compare
+    // against acquisition's do_time_to_freq() (nr_initial_sync.c) at the same 3 stages. Reads
+    // nr_slot_fep's just-computed rx_offset/CP lengths (exported via slot_fep_nr.c, valid
+    // immediately after the synchronous call above) so this does NOT duplicate/risk drifting from
+    // that function's own offset arithmetic.
+    {
+      static int s_fepdiag_left = 40;
+      if (s_fepdiag_left > 0) {
+        const unsigned int rx_off = nr_slot_fep_diag_rx_offset;
+        const unsigned int nb_pfx = nr_slot_fep_diag_nb_prefix_samples;
+        const c16_t *rxd = ue->common_vars.rxdata[0];
+        // Stage 1: raw time-domain samples spanning a full CP-length lookback + the symbol itself
+        // (i.e. BEFORE the CP is discarded), starting at rx_off - nb_pfx.
+        double s1_sum = 0.0, s1_sumsq = 0.0;
+        const int s1_n = (int)(nb_pfx + fp->ofdm_symbol_size);
+        for (int i = 0; i < s1_n; i++) {
+          const double m = hypot((double)rxd[rx_off - nb_pfx + i].r, (double)rxd[rx_off - nb_pfx + i].i);
+          s1_sum += m;
+          s1_sumsq += m * m;
+        }
+        // Stage 2: exactly the window nr_slot_fep hands to the DFT (post-CP-removal).
+        double s2_sum = 0.0, s2_sumsq = 0.0;
+        for (int i = 0; i < fp->ofdm_symbol_size; i++) {
+          const double m = hypot((double)rxd[rx_off + i].r, (double)rxd[rx_off + i].i);
+          s2_sum += m;
+          s2_sumsq += m * m;
+        }
+        // Stage 3: raw FFT output for this symbol, BEFORE nr_pbch_extract subselects subcarriers.
+        double s3_sum = 0.0, s3_sumsq = 0.0;
+        const c16_t *fftout = &tmp[0][symbol * fp->ofdm_symbol_size];
+        for (int i = 0; i < fp->ofdm_symbol_size; i++) {
+          const double m = hypot((double)fftout[i].r, (double)fftout[i].i);
+          s3_sum += m;
+          s3_sumsq += m * m;
+        }
+        LOG_W(PHY,
+              "SENSING: FEPDIAG path=tracking slot=%d symbol=%d rx_offset=%u nb_prefix=%u nb_prefix0=%u "
+              "is_sync=%d s1_mean=%.2f s1_rms=%.2f s2_mean=%.2f s2_rms=%.2f s3_mean=%.2f s3_rms=%.2f\n",
+              proc->nr_slot_rx, symbol, rx_off, nb_pfx, nr_slot_fep_diag_nb_prefix_samples0,
+              nr_slot_fep_diag_is_synchronized, s1_sum / s1_n, sqrt(s1_sumsq / s1_n),
+              s2_sum / fp->ofdm_symbol_size, sqrt(s2_sumsq / fp->ofdm_symbol_size),
+              s3_sum / fp->ofdm_symbol_size, sqrt(s3_sumsq / fp->ofdm_symbol_size));
+
+        // ---- SSB TIME-SELECTION DIAGNOSTIC (2026-08-05) ------------------------------------
+        // The frequency-domain SPECDIAG showed tracking's FFT window contains NO SSB anywhere in
+        // the spectrum (flat at the noise floor) while acquisition finds it at 19 dB from the same
+        // RF -- so the fault is WHICH SAMPLES are selected, not how they are processed. This logs
+        // the full time-coordinate state tracking used, and then SWEEPS +/-1 slot around the chosen
+        // window to locate where the real SSB burst actually sits relative to it.
+        //
+        // Absolute sample offsets are the comparison currency, deliberately: acquisition indexes a
+        // scan buffer by a PSS-correlation-derived sample position while tracking indexes the live
+        // ring buffer by slot/symbol arithmetic, so their slot/symbol NUMBERS are not in the same
+        // coordinate system and comparing those alone would be misleading.
+        {
+          const unsigned int total_samples = 2 * fp->samples_per_frame;
+          const int sym_stride = fp->ofdm_symbol_size + (int)nb_pfx; // one OFDM symbol incl. CP
+          const int span_syms = 14;                                  // +/- ~1 slot
+          double best_e = -1.0;
+          int best_d = 0;
+          char sweep[640];
+          int sp = 0;
+          for (int k = -span_syms; k <= span_syms; k++) {
+            const long d = (long)k * sym_stride;
+            long base = (long)rx_off + d;
+            base = ((base % (long)total_samples) + (long)total_samples) % (long)total_samples;
+            double e = 0.0;
+            int n = 0;
+            for (int i = 0; i < fp->ofdm_symbol_size; i += 4) { // decimated: shape, not exactness
+              const unsigned int idx = (unsigned int)((base + i) % (long)total_samples);
+              const double re = rxd[idx].r, im = rxd[idx].i;
+              e += re * re + im * im;
+              n++;
+            }
+            e = sqrt(e / n);
+            if (e > best_e) {
+              best_e = e;
+              best_d = k;
+            }
+            if (sp < (int)sizeof(sweep) - 8)
+              sp += snprintf(sweep + sp, sizeof(sweep) - sp, "%.0f ", e);
+          }
+          // ---- PRODUCER/CONSUMER LAG (2026-08-05) ------------------------------------------
+          // prod_slot: the read loop's raw absolute_slot counter at its LATEST completed write
+          // (executables/nr-ue.c, updated right after nrue_ru_read() returns). wall_lag_us: wall-
+          // clock time between that write and THIS diagnostic executing, on whatever dl_actor
+          // worker thread ended up running this PBCH occasion. A large lag directly proves the
+          // physical rxdata buffer this consumer is about to FFT has already been overwritten by
+          // later slots by the time it gets here (the buffer holds only ~1 frame's worth of
+          // samples -- see the handover doc -- so any lag approaching one frame duration, ~10ms
+          // at mu=1, is already enough).
+          const long prod_slot = atomic_load_explicit(&nr_ue_diag_producer_absolute_slot, memory_order_relaxed);
+          const long prod_wall_ns = atomic_load_explicit(&nr_ue_diag_producer_wall_ns, memory_order_relaxed);
+          struct timespec diag_now_ts;
+          clock_gettime(CLOCK_REALTIME, &diag_now_ts);
+          const long diag_now_ns = (long)diag_now_ts.tv_sec * 1000000000L + diag_now_ts.tv_nsec;
+          const double wall_lag_us = (prod_wall_ns > 0) ? (double)(diag_now_ns - prod_wall_ns) / 1000.0 : -1.0;
+          const long consumer_abs_slot_wrapped = (long)proc->frame_rx * fp->slots_per_frame + proc->nr_slot_rx;
+
+          LOG_W(PHY,
+                "SENSING: SSBTIME path=tracking frame=%d slot=%d symbol=%d symbIdxInFrame=%d "
+                "halfframe=%d ssbIndex=%d startPbchSymb=%d relPbchSymb=%d mu=%d ssb_period_cfg=%d "
+                "rx_offset=%u acq_ssb_offset=%d acq_symbol_offset=%u delta_vs_acq=%ld "
+                "ssb_start_sc=%d sym_stride=%d "
+                "sweep_best_dsym=%+d sweep_best_rms=%.2f sweep_at_0=%.2f "
+                "prod_abs_slot=%ld cons_abs_slot_wrapped=%ld wall_lag_us=%.1f sweep[-14..+14]: %s\n",
+                proc->frame_rx, proc->nr_slot_rx, symbol, symbIdxInFrame,
+                (symbIdxInFrame > (fp->slots_per_frame * NR_SYMBOLS_PER_SLOT / 2)) ? 1 : 0,
+                ssbIndex, startPbchSymb, (symbIdxInFrame > (fp->slots_per_frame * NR_SYMBOLS_PER_SLOT / 2))
+                                             ? (symbIdxInFrame - startPbchSymbHf)
+                                             : (symbIdxInFrame - startPbchSymb),
+                fp->numerology_index, ue->nrUE_config.ssb_table.ssb_period, rx_off,
+                ue->ssb_offset, (unsigned)ue->symbol_offset,
+                (long)rx_off - (long)ue->ssb_offset,
+                fp->ssb_start_subcarrier, sym_stride, best_d, best_e,
+                s2_sum / fp->ofdm_symbol_size, prod_slot, consumer_abs_slot_wrapped, wall_lag_us, sweep);
+
+          // ---- ONE-SHOT FRAME-WIDE FREQUENCY-DOMAIN SSB SEARCH (2026-08-05) ----------------
+          // The +/-1 slot TIME-domain sweep above is blind here on purpose-of-record: on a loaded
+          // 273-PRB cell every symbol carries wideband traffic at ~17 dB, so a 240-subcarrier SSB
+          // is invisible in total symbol energy (the existing SSBSWEEP reads a flat 17 across all
+          // 14 symbols for exactly this reason). This instead FFTs each candidate symbol position
+          // across a whole frame and scores the SSB's OWN 240 bins against that position's local
+          // floor -- the same start_bin formula nr_pbch_extract() uses -- so the SSB is detectable
+          // regardless of the traffic around it. Fires ONCE per process.
+          static int s_framescan_done = 0;
+          if (!s_framescan_done) {
+            s_framescan_done = 1;
+            const int N = fp->ofdm_symbol_size;
+            const int start_bin = (fp->first_carrier_offset + fp->ssb_start_subcarrier) % N;
+            const unsigned int total_samples = 2 * fp->samples_per_frame;
+            const int nsym = fp->samples_per_frame / sym_stride; // ~280 symbol slots per frame
+            dft_size_idx_t dsz = get_dft(N);
+            __attribute__((aligned(32))) c16_t win[N];
+            __attribute__((aligned(32))) c16_t spec[N];
+            double best_ratio = -1.0;
+            long best_off = -1;
+            char top[256];
+            int tp = 0;
+            for (int k = 0; k < nsym; k++) {
+              const long base = ((long)k * sym_stride) % (long)total_samples;
+              for (int i = 0; i < N; i++)
+                win[i] = rxd[(unsigned int)((base + i) % (long)total_samples)];
+              dft(dsz, (int16_t *)win, (int16_t *)spec, 1);
+              double in_p = 0.0, out_p = 0.0;
+              for (int i = 0; i < 240; i++) {
+                const c16_t v = spec[(start_bin + i) % N];
+                in_p += (double)v.r * v.r + (double)v.i * v.i;
+              }
+              for (int i = 0; i < 240; i++) { // local floor: 300 bins below the SSB band
+                const c16_t v = spec[(((start_bin - 300 + i) % N) + N) % N];
+                out_p += (double)v.r * v.r + (double)v.i * v.i;
+              }
+              const double ratio = (out_p > 0.0) ? sqrt(in_p / out_p) : 0.0;
+              if (ratio > best_ratio) {
+                best_ratio = ratio;
+                best_off = base;
+              }
+              if (ratio > 2.0 && tp < (int)sizeof(top) - 24)
+                tp += snprintf(top + tp, sizeof(top) - tp, "%ld:%.1f ", base, ratio);
+            }
+            if (tp == 0)
+              snprintf(top, sizeof(top), "(none above 2.0x)");
+            LOG_W(PHY,
+                  "SENSING: FRAMESCAN nsym=%d sym_stride=%d start_bin=%d tracking_rx_offset=%u "
+                  "best_off=%ld best_ratio=%.2f delta_vs_tracking=%ld hits[>2x]: %s\n",
+                  nsym, sym_stride, start_bin, rx_off, best_off, best_ratio,
+                  best_off - (long)rx_off, top);
+
+            // Same scan again via the SHARED implementation, with a CFO derotation sweep. The scan
+            // above (and acquisition's own published figure) are not directly comparable: acquisition
+            // measures AFTER compensate_freq_offset(), this measures raw. A residual offset near half
+            // a subcarrier -- which this cell's measured ~-15 kHz at 30 kHz SCS is -- smears the SSB
+            // across bins and can read as noise even when the SSB is perfectly present. If the swept
+            // version finds a peak the unswept one misses, "no SSB in the buffer" was a CFO artifact,
+            // not an empty buffer.
+            extern void nr_isac_framescan(const c16_t *, unsigned int, int, int, int, int, long, double, double, double,
+                                          const char *);
+            const double fs_hz = (double)fp->samples_per_subframe * 1000.0;
+            nr_isac_framescan(rxd, total_samples, N, start_bin, sym_stride, nsym, (long)rx_off, fs_hz, 0.0, 0.0,
+                              "track_raw");
+            nr_isac_framescan(rxd, total_samples, N, start_bin, sym_stride, nsym, (long)rx_off, fs_hz, 20000.0, 1000.0,
+                              "track_raw_cfosweep");
+          }
+        }
+        s_fepdiag_left--;
+      }
     }
   }
   c16_t dl_ch_estimates[fp->nb_antennas_rx][fp->ofdm_symbol_size];

@@ -319,6 +319,103 @@ void nr_pbch_diag_report(int success, int frame, int slot, int ssbIndex)
   }
 }
 
+/* ---- SHARED FRAME-WIDE SSB SEARCH (2026-08-06) -------------------------------------------------
+ * Factored out of phy_procedures_nr_ue.c's tracking-side FRAMESCAN so the IDENTICAL scoring can be
+ * run against acquisition's own known-good buffer. Reason this matters: FRAMESCAN's "no SSB
+ * anywhere in the tracking buffer" was never validated against a buffer KNOWN to contain one, so a
+ * bug in the search itself was indistinguishable from a genuinely empty buffer.
+ *
+ * It also sweeps a CFO derotation, because the two paths were NOT comparable as originally written:
+ * nr_initial_sync.c calls compensate_freq_offset() on its private copy BEFORE measuring, so
+ * acquisition's ~19 dB figure is from a CFO-CORRECTED buffer, while tracking's FRAMESCAN reads the
+ * raw live buffer. At this cell's measured -15204 Hz that is 0.507 x the 30 kHz SCS -- worst-case
+ * half-subcarrier straddle -- so an uncorrected buffer can score near-noise while holding a
+ * perfectly good SSB. cfo_hz_span=0 disables the sweep (single pass at 0 Hz).
+ */
+void nr_isac_framescan(const c16_t *rxd,
+                       unsigned int total_samples,
+                       int N,
+                       int start_bin,
+                       int sym_stride,
+                       int nsym,
+                       long ref_offset,
+                       double sampling_rate,
+                       double cfo_hz_span,
+                       double cfo_hz_step,
+                       const char *label)
+{
+  if (!rxd || N <= 0 || sym_stride <= 0 || nsym <= 0 || total_samples == 0)
+    return;
+
+  const dft_size_idx_t dsz = get_dft(N);
+  c16_t *win = (c16_t *)malloc16(sizeof(c16_t) * N);
+  c16_t *spec = (c16_t *)malloc16(sizeof(c16_t) * N);
+  if (!win || !spec) {
+    if (win)
+      free16(win, sizeof(c16_t) * N);
+    if (spec)
+      free16(spec, sizeof(c16_t) * N);
+    return;
+  }
+
+  const int nsteps = (cfo_hz_span > 0.0 && cfo_hz_step > 0.0) ? (2 * (int)(cfo_hz_span / cfo_hz_step) + 1) : 1;
+  double glob_best_ratio = -1.0;
+  long glob_best_off = -1;
+  double glob_best_cfo = 0.0;
+
+  for (int c = 0; c < nsteps; c++) {
+    const double cfo = (nsteps == 1) ? 0.0 : (-cfo_hz_span + c * cfo_hz_step);
+    double best_ratio = -1.0;
+    long best_off = -1;
+
+    for (int k = 0; k < nsym; k++) {
+      const long base = ((long)k * sym_stride) % (long)total_samples;
+      for (int i = 0; i < N; i++) {
+        const c16_t v = rxd[(unsigned int)((base + i) % (long)total_samples)];
+        if (cfo == 0.0) {
+          win[i] = v;
+        } else {
+          /* Derotate in time domain: the only place a CFO correction can remove ICI. Phase
+           * referenced to this window's own start, matching what the FFT below assumes. */
+          const double ph = -2.0 * M_PI * cfo * ((double)i / sampling_rate);
+          const double cs = cos(ph), sn = sin(ph);
+          win[i].r = (int16_t)lround(v.r * cs - v.i * sn);
+          win[i].i = (int16_t)lround(v.r * sn + v.i * cs);
+        }
+      }
+      dft(dsz, (int16_t *)win, (int16_t *)spec, 1);
+      double in_p = 0.0, out_p = 0.0;
+      for (int i = 0; i < 240; i++) {
+        const c16_t v = spec[(start_bin + i) % N];
+        in_p += (double)v.r * v.r + (double)v.i * v.i;
+      }
+      for (int i = 0; i < 240; i++) { /* local floor: 300 bins below the SSB band */
+        const c16_t v = spec[(((start_bin - 300 + i) % N) + N) % N];
+        out_p += (double)v.r * v.r + (double)v.i * v.i;
+      }
+      const double ratio = (out_p > 0.0) ? sqrt(in_p / out_p) : 0.0;
+      if (ratio > best_ratio) {
+        best_ratio = ratio;
+        best_off = base;
+      }
+    }
+    if (best_ratio > glob_best_ratio) {
+      glob_best_ratio = best_ratio;
+      glob_best_off = best_off;
+      glob_best_cfo = cfo;
+    }
+  }
+
+  LOG_W(PHY,
+        "SENSING: FRAMESCAN2 label=%s nsym=%d sym_stride=%d start_bin=%d ref_offset=%ld "
+        "best_off=%ld best_ratio=%.2f best_cfo_hz=%.0f delta_vs_ref=%ld cfo_steps=%d\n",
+        label, nsym, sym_stride, start_bin, ref_offset, glob_best_off, glob_best_ratio,
+        glob_best_cfo, glob_best_off - ref_offset, nsteps);
+
+  free16(win, sizeof(c16_t) * N);
+  free16(spec, sizeof(c16_t) * N);
+}
+
 void nr_pbch_quantize(int16_t *pbch_llr8, const int16_t *pbch_llr, const uint16_t len)
 {
   for (int i=0; i<len; i++) {
@@ -367,6 +464,185 @@ void nr_generate_pbch_llr(const PHY_VARS_NR_UE *ue,
                   symbol_offset,
                   ssb_start_subcarrier,
                   nid);
+
+  // TEMPORARY DIAGNOSTIC (2026-08-05): nr_generate_pbch_llr() is the SHARED convergence point of
+  // acquisition (ue==NULL) and tracking (ue!=NULL) -- see this function's other TEMPORARY diagnostic
+  // block below and the caller comment at its call site. Logs a cheap FNV-1a checksum plus the key
+  // scalar parameters for BOTH the raw extracted rxdataF (post-FFT, pre-channel-estimation) and the
+  // extracted channel estimate (dl_ch_estimates_ext), from every call on either path, bounded so a
+  // live run's log stays readable. Purpose: acquisition (273 PRB) is known to decode PBCH reliably
+  // while tracking (same bandwidth, same FFT size, same nr_generate_pbch_llr call) fails -- this
+  // pins down whether the two paths' INPUTS to this shared function already differ (checksums/means
+  // disagree at matching symbolSSB/i_ssb/nid) or whether they agree here and the fault is further
+  // downstream (log2_maxh derivation, LLR quantisation, or polar decode).
+  //
+  // EXTENDED 2026-08-05 with the metrics that actually discriminate a TIMING OFFSET from a
+  // DECORRELATED estimate -- raw amplitude alone cannot, and the SSB's four symbols carry different
+  // signals over different occupied-RE patterns (sym0 PSS/127 SC, sym1 PBCH/240 SC, sym2 SSS+PBCH
+  // edges, sym3 PBCH/240 SC), so cross-SYMBOL amplitude comparison is meaningless anyway. Everything
+  // below is measured over the SAME extracted RE set on BOTH paths (this function is the shared
+  // convergence point), and keyed by symbolSSB so only like-for-like symbol TYPES are compared.
+  //
+  //  - slope_rad: mean phase increment per extracted RE, from the adjacent-RE product
+  //      sum_i conj(H[i])*H[i+1]  ->  atan2(im, re)
+  //    computed this way deliberately: no phase unwrapping, and noise averages down. A constant FFT
+  //    window displacement dn shows up here as a CONSTANT non-zero slope (H_d[k] = H[k]e^{-j2pi k dn/N}).
+  //  - slope_coh: |sum conj(H[i])H[i+1]| / sum |H[i]||H[i+1]|, in [0,1] -- how CONSISTENT that
+  //    increment is across the band. This is the decisive discriminator:
+  //      coh -> 1 with slope != 0 : clean linear phase ramp = pure timing offset (correctable)
+  //      coh -> 0                 : estimate is decorrelated, NOT a timing offset (a window shift
+  //                                 cannot explain it, and correcting the slope would not recover it)
+  //  - resid: mean |H| after removing the fitted slope, relative to mean |H| -- residual spread once
+  //    the linear-phase component is taken out.
+  {
+    static int s_pbchdiag_left = 60;
+    if (s_pbchdiag_left > 0) {
+      uint64_t h_rxf = 1469598103934665603ULL, h_chest = 1469598103934665603ULL;
+      double rxf_abs_sum = 0.0, chest_abs_sum = 0.0;
+      const int16_t *rxf_p = (const int16_t *)&rxdataF_ext[0][0];
+      const int16_t *chest_p = (const int16_t *)&dl_ch_estimates_ext[0][0];
+      for (int i = 0; i < nb_re * 2; i++) {
+        h_rxf = (h_rxf ^ (uint64_t)(uint16_t)rxf_p[i]) * 1099511628211ULL;
+        h_chest = (h_chest ^ (uint64_t)(uint16_t)chest_p[i]) * 1099511628211ULL;
+        rxf_abs_sum += (rxf_p[i] < 0) ? -rxf_p[i] : rxf_p[i];
+        chest_abs_sum += (chest_p[i] < 0) ? -chest_p[i] : chest_p[i];
+      }
+
+      // Occupied-RE power (RMS), over exactly the extracted set -- comparable across paths for the
+      // same symbolSSB, unlike a whole-FFT mean which is dominated by unoccupied subcarriers.
+      double rxf_p2 = 0.0, chest_p2 = 0.0;
+      for (int i = 0; i < nb_re; i++) {
+        const double yr = rxdataF_ext[0][i].r, yi = rxdataF_ext[0][i].i;
+        const double hr = dl_ch_estimates_ext[0][i].r, hi = dl_ch_estimates_ext[0][i].i;
+        rxf_p2 += yr * yr + yi * yi;
+        chest_p2 += hr * hr + hi * hi;
+      }
+      const double rxf_rms = sqrt(rxf_p2 / nb_re);
+      const double chest_rms = sqrt(chest_p2 / nb_re);
+
+      // Adjacent-RE phase increment + its consistency.
+      double dr = 0.0, di = 0.0, dnorm = 0.0;
+      for (int i = 0; i + 1 < nb_re; i++) {
+        const double ar = dl_ch_estimates_ext[0][i].r, ai = dl_ch_estimates_ext[0][i].i;
+        const double br = dl_ch_estimates_ext[0][i + 1].r, bi = dl_ch_estimates_ext[0][i + 1].i;
+        dr += ar * br + ai * bi; // Re{conj(a)*b}
+        di += ar * bi - ai * br; // Im{conj(a)*b}
+        dnorm += sqrt(ar * ar + ai * ai) * sqrt(br * br + bi * bi);
+      }
+      const double slope_rad = atan2(di, dr);
+      const double slope_coh = (dnorm > 0.0) ? sqrt(dr * dr + di * di) / dnorm : 0.0;
+      // Implied FFT-window displacement in samples, if (and only if) slope_coh says the ramp is real.
+      const double implied_dn = -slope_rad * (double)frame_parms->ofdm_symbol_size / (2.0 * M_PI);
+
+      // Residual spread after de-rotating the fitted linear phase.
+      double res_sum = 0.0, mag_sum = 0.0;
+      double acc_r = 1.0, acc_i = 0.0; // running e^{-j*slope*i}
+      const double cs = cos(-slope_rad), sn = sin(-slope_rad);
+      double mr = 0.0, mi = 0.0;
+      for (int i = 0; i < nb_re; i++) {
+        const double hr = dl_ch_estimates_ext[0][i].r, hi = dl_ch_estimates_ext[0][i].i;
+        const double dr2 = hr * acc_r - hi * acc_i;
+        const double di2 = hr * acc_i + hi * acc_r;
+        mr += dr2;
+        mi += di2;
+        mag_sum += sqrt(hr * hr + hi * hi);
+        const double nacc_r = acc_r * cs - acc_i * sn;
+        acc_i = acc_r * sn + acc_i * cs;
+        acc_r = nacc_r;
+      }
+      mr /= nb_re;
+      mi /= nb_re;
+      // recompute deviation from that de-rotated mean
+      acc_r = 1.0;
+      acc_i = 0.0;
+      for (int i = 0; i < nb_re; i++) {
+        const double hr = dl_ch_estimates_ext[0][i].r, hi = dl_ch_estimates_ext[0][i].i;
+        const double dr2 = hr * acc_r - hi * acc_i;
+        const double di2 = hr * acc_i + hi * acc_r;
+        res_sum += sqrt((dr2 - mr) * (dr2 - mr) + (di2 - mi) * (di2 - mi));
+        const double nacc_r = acc_r * cs - acc_i * sn;
+        acc_i = acc_r * sn + acc_i * cs;
+        acc_r = nacc_r;
+      }
+      const double resid = (mag_sum > 0.0) ? res_sum / mag_sum : -1.0;
+
+      LOG_W(PHY,
+            "SENSING: PBCHDIAG path=%s frame=%d slot=%d symbolSSB=%d i_ssb=%d nid=%d ssb_sc=%d nb_re=%d "
+            "rxf_hash=%016lx rxf_meanabs=%.2f rxf_rms=%.2f chest_hash=%016lx chest_meanabs=%.2f "
+            "chest_rms=%.2f slope_rad=%+.5f slope_coh=%.4f implied_dn=%+.2f resid=%.4f log2maxh_st=%.2f\n",
+            ue ? "tracking" : "acquisition", proc ? proc->frame_rx : -1, proc ? proc->nr_slot_rx : -1,
+            symbolSSB, i_ssb, nid, ssb_start_subcarrier, nb_re,
+            (unsigned long)h_rxf, rxf_abs_sum / (nb_re * 2), rxf_rms, (unsigned long)h_chest,
+            chest_abs_sum / (nb_re * 2), chest_rms, slope_rad, slope_coh, implied_dn, resid,
+            *log2_maxh_state);
+
+      // ---- SPECTRUM / EXTRACTION-INDEX DIAGNOSTIC (2026-08-05) -------------------------------
+      // Separates "a strong SSB peak exists but the extraction indices miss it" from "there is no
+      // SSB peak anywhere near" and from "indices+peak align but extracted power is still low".
+      // Uses the SAME start-bin formula nr_pbch_extract() itself uses, quoted from its own source
+      // (rx_offset = (first_carrier_offset + ssb_start_subcarrier) % ofdm_symbol_size, then 240
+      // subcarriers walked with mod-N wrap), so the reported window is what is actually read, not
+      // an independent re-derivation that could drift from it.
+      {
+        const int N = frame_parms->ofdm_symbol_size;
+        const int start_bin = (frame_parms->first_carrier_offset + ssb_start_subcarrier) % N;
+        const c16_t *X = rxdataF[0];
+
+        // Per-bin power, then a sliding 240-wide window over the WHOLE spectrum to find where the
+        // SSB actually is -- if it sits somewhere else, that is the answer outright.
+        double win_cfg = 0.0;
+        for (int i = 0; i < 240; i++) {
+          const c16_t v = X[(start_bin + i) % N];
+          win_cfg += (double)v.r * v.r + (double)v.i * v.i;
+        }
+        double run = 0.0;
+        for (int i = 0; i < 240; i++) {
+          const c16_t v = X[i % N];
+          run += (double)v.r * v.r + (double)v.i * v.i;
+        }
+        double best = run;
+        int best_bin = 0;
+        for (int s = 1; s < N; s++) {
+          const c16_t out = X[(s - 1) % N];
+          const c16_t in = X[(s + 239) % N];
+          run -= (double)out.r * out.r + (double)out.i * out.i;
+          run += (double)in.r * in.r + (double)in.i * in.i;
+          if (run > best) {
+            best = run;
+            best_bin = s;
+          }
+        }
+        // Neighbouring (nominally empty) guard regions, same width, for a reference floor.
+        double win_lo = 0.0, win_hi = 0.0;
+        for (int i = 0; i < 240; i++) {
+          const c16_t a = X[((start_bin - 300 + i) % N + N) % N];
+          const c16_t b = X[(start_bin + 300 + i) % N];
+          win_lo += (double)a.r * a.r + (double)a.i * a.i;
+          win_hi += (double)b.r * b.r + (double)b.i * b.i;
+        }
+        // Coarse profile: 14 blocks of 60 bins spanning [start-300, start+540).
+        char prof[420];
+        int pp = 0;
+        for (int b = 0; b < 14 && pp < (int)sizeof(prof) - 12; b++) {
+          double blk = 0.0;
+          for (int i = 0; i < 60; i++) {
+            const c16_t v = X[(((start_bin - 300 + b * 60 + i) % N) + N) % N];
+            blk += (double)v.r * v.r + (double)v.i * v.i;
+          }
+          pp += snprintf(prof + pp, sizeof(prof) - pp, "%.0f ", sqrt(blk / 60.0));
+        }
+        LOG_W(PHY,
+              "SENSING: SPECDIAG path=%s symbolSSB=%d N=%d fco=%d ssb_sc=%d start_bin=%d "
+              "cfg_rms=%.2f best_bin=%d best_rms=%.2f delta_bins=%d lo_rms=%.2f hi_rms=%.2f "
+              "prof[start-300,+60/blk]: %s\n",
+              ue ? "tracking" : "acquisition", symbolSSB, N, frame_parms->first_carrier_offset,
+              ssb_start_subcarrier, start_bin, sqrt(win_cfg / 240.0), best_bin, sqrt(best / 240.0),
+              ((best_bin - start_bin + N / 2 + N) % N) - N / 2, sqrt(win_lo / 240.0),
+              sqrt(win_hi / 240.0), prof);
+      }
+      s_pbchdiag_left--;
+    }
+  }
 #ifdef DEBUG_PBCH
   LOG_I(PHY, "[PHY] PBCH Symbol %d ofdm size %d\n", symbolSSB, frame_parms->ofdm_symbol_size);
   LOG_I(PHY, "[PHY] PBCH starting channel_level\n");

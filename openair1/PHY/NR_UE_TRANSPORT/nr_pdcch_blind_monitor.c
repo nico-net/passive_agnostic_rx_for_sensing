@@ -694,6 +694,28 @@ bool nr_pdcch_blind_decode_and_extract_ex(const int16_t* llr,
   }
   out->rnti = (uint16_t)crc;
 
+  // ---- Step 2b: mismatched-bits false-detection check. Migrated from NRSniffer's dci_nr.c
+  // (nr_dci_false_detection): re-encode the decoded payload with the just-recovered RNTI and count
+  // bit mismatches against the ORIGINAL soft LLR polarity. A CRC match is a 1/65536 chance false
+  // accept even on a candidate that never carried real PDCCH; this is a far stronger discriminator,
+  // since a genuine decode's re-encoded codeword should agree with almost every soft-bit sign. The
+  // caller (nr_pdcch_blind_monitor_rt.c) owns the actual accept/reject threshold decision -- this
+  // function only measures and reports the count, staying consistent with its existing contract of
+  // returning `plausible=true` results for the caller's own gates to filter further. */
+  {
+    uint32_t encoder_output[NR_MAX_DCI_SIZE_DWORD];
+    polar_encoder_fast(dci_estimation, (void*)encoder_output, (int)crc, 1,
+                       NR_POLAR_DCI_MESSAGE_TYPE, dci_length, aggregation_level);
+    const uint8_t *enout_p = (const uint8_t*)encoder_output;
+    const int encoded_length = (int)aggregation_level * 108;
+    uint16_t mismatches = 0;
+    for (int i = 0; i < encoded_length/8; i++) {
+      for (int b = 0; b < 8; b++)
+        mismatches += ((enout_p[i] >> b) & 1) ^ ((llr[i*8+b] >> 15) & 1);
+    }
+    out->mismatched_bits = mismatches;
+  }
+
   // ---- Step 3: field extraction, in TS 38.212 spec order (MSB-first, matches
   // nr_mac_common.c's nr_dci_size() accumulation order and nr_ue_procedures.c's readBits()).
   // NOTE: this does NOT re-check dci_length against nr_pdcch_blind_dci_size(bwp_size) -- it used to,
