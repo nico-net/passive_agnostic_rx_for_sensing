@@ -500,9 +500,15 @@ static void nr_scan_ssb(void *arg)
         if (getenv("ISAC_PBCH_REPLAY") && atoi(getenv("ISAC_PBCH_REPLAY"))) {
           extern void nr_pbch_golden_capture(int, int, c16_t *const *, int, int, int, int, int, int, int);
           extern void nr_pbch_replay_golden(const NR_DL_FRAME_PARMS *, const UE_nr_rxtx_proc_t *);
+          // search_params.rxdata is rxdataShift -- the FRAME-SHIFTED base pointer of the frame that
+          // actually succeeded. Passing the caller's `rxdata` here instead (as an earlier version
+          // did) takes samples from frame 0 while taking the offset from whichever frame decoded,
+          // so a frame_id=1 success mis-points by exactly samples_per_frame and the "golden"
+          // snapshot silently contains no SSB. The offset and the samples must come from the same
+          // frame -- hence both are read from search_params.
           nr_pbch_golden_capture(fp->nb_antennas_rx,
                                  search_params.rxdata_size,
-                                 rxdata,
+                                 search_params.rxdata,
                                  search_params.pss_res.pos - fp->nb_prefix_samples,
                                  ssbInfo->nidCell,
                                  ssbInfo->ssbIndex,

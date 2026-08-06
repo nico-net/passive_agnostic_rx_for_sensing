@@ -635,6 +635,144 @@ static void pbch_replay_one(const NR_DL_FRAME_PARMS *fp,
         label, crc_ok, llr_absmean, pbch_log2_maxh, h_time, r_time, h_fft, r_fft, h_chest, r_chest, h_llr);
 }
 
+/* ---- PER-ANTENNA MASKED DECODE (2026-08-06) ----------------------------------------------------
+ * Decodes ONE immutable snapshot repeatedly using only the antennas selected by a bitmask, so the
+ * contribution of each RF branch is measured rather than argued. Motivation: acquisition CHRMS
+ * shows only channel 2 carries signal (ch0/1/3 sit at the noise floor), and acquisition succeeds
+ * while tracking fails -- but three noise branches do NOT by themselves prove an MRC bug. A
+ * correctly weighted combiner should suppress branches with weak channel estimates. This measures
+ * which is true.
+ *
+ * A local copy of the frame params carries nb_antennas_rx = popcount(mask), and the selected
+ * antennas are packed into the low indices, so every downstream function (channel estimation, the
+ * extract/compensate/MRC chain inside nr_generate_pbch_llr) sees a consistent, genuinely smaller
+ * antenna set rather than zeroed branches -- zeroing would still be accumulated and would test a
+ * different thing.
+ */
+static int pbch_replay_mask(const NR_DL_FRAME_PARMS *fp,
+                            const UE_nr_rxtx_proc_t *proc,
+                            const pbch_snapshot_t *snap,
+                            unsigned mask,
+                            const char *label)
+{
+  if (!snap->valid)
+    return -1;
+  int sel[4], nsel = 0;
+  for (int a = 0; a < snap->nb_ant && a < 4; a++)
+    if (mask & (1u << a))
+      sel[nsel++] = a;
+  if (nsel == 0)
+    return -1;
+
+  NR_DL_FRAME_PARMS fp2 = *fp;
+  fp2.nb_antennas_rx = nsel;
+
+  const int N = snap->ofdm_symbol_size;
+  const int cp = snap->nb_prefix_samples;
+  const int stride = N + cp;
+  const dft_size_idx_t dsz = get_dft(N);
+
+  // Full per-mask reset: the LLR codeword, the shared channel-compensation shift, and the
+  // per-antenna power record. nsel changes between masks, so any carry-over would silently
+  // contaminate the next mask -- exactly the "results depend on mask order" failure mode.
+  int16_t pbch_e_rx[NR_POLAR_PBCH_E];
+  memset(pbch_e_rx, 0, sizeof(pbch_e_rx));
+  double pbch_log2_maxh = -1.0;
+  double chpow[4] = {0};
+
+  for (int s = 1; s <= 3; s++) {
+    const long base = (long)snap->ssb_time_offset + (long)s * stride + cp;
+    if (base < 0 || base + N > snap->nsamp)
+      return -1;
+    __attribute__((aligned(32))) c16_t rxdataF[nsel][N];
+    __attribute__((aligned(32))) c16_t dl_ch_estimates[nsel][N];
+    memset(rxdataF, 0, sizeof(rxdataF));
+    memset(dl_ch_estimates, 0, sizeof(dl_ch_estimates));
+    for (int k = 0; k < nsel; k++)
+      dft(dsz, (int16_t *)&snap->rxdata[sel[k]][base], (int16_t *)rxdataF[k], 1);
+    for (int k = 0; k < nsel; k++) {
+      nr_pbch_channel_estimation(&fp2, NULL, dl_ch_estimates[k], proc, s - 1, snap->i_ssb, snap->n_hf,
+                                 snap->ssb_start_subcarrier, rxdataF[k], false, snap->nid_cell);
+      if (s == 1)
+        chpow[k] = rms_c16(dl_ch_estimates[k], N);
+    }
+    nr_generate_pbch_llr(NULL, proc, &fp2, s, snap->i_ssb, snap->nid_cell, snap->ssb_start_subcarrier,
+                         rxdataF, dl_ch_estimates, pbch_e_rx, &pbch_log2_maxh);
+  }
+
+  double llr_absmean = 0.0;
+  for (int i = 0; i < NR_POLAR_PBCH_E; i++)
+    llr_absmean += fabs((double)pbch_e_rx[i]);
+  llr_absmean /= NR_POLAR_PBCH_E;
+
+  fapiPbch_t res;
+  int hfb = 0, ssb_idx = 0, sym_off = 0;
+  const int crc_ok =
+      (0 == nr_pbch_decode(NULL, fp, proc, snap->i_ssb, snap->nid_cell, pbch_e_rx, &hfb, &ssb_idx, &sym_off, &res));
+
+  char cb[128];
+  int p = 0;
+  for (int k = 0; k < nsel; k++)
+    p += snprintf(cb + p, sizeof(cb) - p, " ch%d_chest_rms=%.1f", sel[k], chpow[k]);
+  LOG_W(PHY, "SENSING: PBCHMASK %-14s mask=0x%x nant=%d crc_ok=%d llr_absmean=%.2f log2_maxh=%.2f |%s\n",
+        label, mask, nsel, crc_ok, llr_absmean, pbch_log2_maxh, cb);
+  return crc_ok;
+}
+
+void nr_pbch_replay_masks(const NR_DL_FRAME_PARMS *fp, const UE_nr_rxtx_proc_t *proc)
+{
+  static int done = 0;
+  if (done)
+    return;
+  done = 1;
+
+  // ---- MANDATORY CONTROLS ------------------------------------------------------------------
+  // No mask result may be read unless the harness is proven working IN THIS RUN. A previous
+  // version printed a full table from a run whose golden snapshot pointed at the wrong frame, so
+  // every row was noise and the live numbers looked meaningful. Both controls must pass:
+  //   (1) golden samples + golden params must decode;
+  //   (2) the +-432 sweep must show its expected pass region (the tolerance already established).
+  // If either fails the snapshot is bad and the experiment is aborted rather than reported.
+  if (!g_pbch_golden.valid) {
+    LOG_W(PHY, "SENSING: PBCHMASK ABORT -- no golden snapshot captured\n");
+    return;
+  }
+  const int ctrl_crc = pbch_replay_mask(fp, proc, &g_pbch_golden, 0xF, "CONTROL_all4");
+  int sweep_pass = 0;
+  {
+    const int cp = g_pbch_golden.nb_prefix_samples;
+    for (int d = -432; d <= 432; d += 108) {
+      pbch_snapshot_t shifted = g_pbch_golden;
+      shifted.ssb_time_offset += d;
+      if (pbch_replay_mask(fp, proc, &shifted, 0xF, "CONTROL_sweep") == 1)
+        sweep_pass++;
+    }
+    (void)cp;
+  }
+  if (ctrl_crc != 1 || sweep_pass < 5) {
+    LOG_W(PHY,
+          "SENSING: PBCHMASK ABORT -- controls failed (golden_crc=%d sweep_pass=%d/9). "
+          "Snapshot is not trustworthy; mask table suppressed.\n",
+          ctrl_crc, sweep_pass);
+    return;
+  }
+  LOG_W(PHY, "SENSING: PBCHMASK CONTROLS OK (golden_crc=1 sweep_pass=%d/9) -- table follows\n", sweep_pass);
+
+  const struct {
+    unsigned m;
+    const char *n;
+  } tests[] = {{0x1, "ch0"},      {0x2, "ch1"},      {0x4, "ch2"},      {0x8, "ch3"},
+               {0x5, "ch2+ch0"},  {0x6, "ch2+ch1"},  {0xC, "ch2+ch3"},  {0xF, "all4"}};
+  LOG_W(PHY, "SENSING: PBCHMASK --- GOLDEN (acquisition) snapshot ---\n");
+  for (unsigned i = 0; i < sizeof(tests) / sizeof(tests[0]); i++)
+    pbch_replay_mask(fp, proc, &g_pbch_golden, tests[i].m, tests[i].n);
+  if (g_pbch_live.valid) {
+    LOG_W(PHY, "SENSING: PBCHMASK --- LIVE (tracking) snapshot ---\n");
+    for (unsigned i = 0; i < sizeof(tests) / sizeof(tests[0]); i++)
+      pbch_replay_mask(fp, proc, &g_pbch_live, tests[i].m, tests[i].n);
+  }
+}
+
 void nr_pbch_replay_2x2(const NR_DL_FRAME_PARMS *fp, const UE_nr_rxtx_proc_t *proc)
 {
   static int done = 0;
