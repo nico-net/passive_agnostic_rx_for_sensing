@@ -1740,8 +1740,30 @@ static int pbch_process(PHY_VARS_NR_UE *UE,
                     "-> global shift=%+d (coarse re-anchor)\n",
                     proc->frame_rx, proc->nr_slot_rx, cohp, cohb, dl, shift);
             }
-            if (cohb > s_enter)
-              return shift; /* re-anchor the GLOBAL timeline; skip the untrustworthy CIR update */
+            if (cohb > s_enter) {
+              // REQUEST an atomic rebase at the next frame boundary; do NOT apply it here and do
+              // NOT let this occasion continue. Applying a multi-thousand-sample shift through
+              // shiftForNextFrame moves the timeline under in-flight frame/slot/symbol state and
+              // aborts on AssertFatal(dmrss<3) -- measured. delta is positive when the SSB is LATER
+              // than predicted, and syncInFrame discards samples to advance the stream, so the
+              // rebase amount is +delta.
+              extern _Atomic long nr_ue_pending_rebase_delta;
+              extern _Atomic int nr_ue_pending_rebase_valid;
+              if (!atomic_load_explicit(&nr_ue_pending_rebase_valid, memory_order_relaxed)) {
+                atomic_store_explicit(&nr_ue_pending_rebase_delta, dl, memory_order_relaxed);
+                atomic_store_explicit(&nr_ue_pending_rebase_valid, 1, memory_order_relaxed);
+                LOG_W(PHY, "SENSING: ANCHOR requesting deferred rebase of %+ld samples (coh %.4f)\n", dl, cohb);
+              }
+              (void)shift;
+              // Abandoning the occasion must also RESET its state machine. Returning early here
+              // skips the `*pbchSymbCnt = 0; *ssbIndex = -1;` reset at the end of this block, which
+              // leaves the counter at 3; the next PBCH symbol then pushes it to 4 and dmrss goes out
+              // of range -> AssertFatal(dmrss < 3). Measured: this, not the rebase itself, was the
+              // second abort.
+              *pbchSymbCnt = 0;
+              *ssbIndex = -1;
+              return INT_MAX; /* no incremental shift; occasion abandoned cleanly */
+            }
           }
         }
       }

@@ -772,6 +772,18 @@ void readFrame(PHY_VARS_NR_UE *UE, openair0_timestamp_t *timestamp, int duration
     free(rxp[0]);
 }
 
+
+/* ---- DEFERRED COARSE TIMING REBASE (2026-08-06) ------------------------------------------------
+ * A multi-thousand-sample displacement is a loss of COARSE alignment, not a fine correction.
+ * Pushing it through shiftForNextFrame -- which adjusts readBlockSize incrementally -- moves the
+ * sample timeline while the current frame/slot/symbol bookkeeping still describes the old one, and
+ * the receiver then derives an impossible PBCH symbol index (measured: AssertFatal(dmrss<3) abort
+ * on the first firing). So the anchor only REQUESTS a rebase here; it is applied atomically at a
+ * frame boundary, through the same discard path acquisition uses to move the stream origin.
+ */
+_Atomic long nr_ue_pending_rebase_delta = 0;
+_Atomic int nr_ue_pending_rebase_valid = 0;
+
 static void syncInFrame(PHY_VARS_NR_UE *UE, openair0_timestamp_t *timestamp, int duration_rx_to_tx, openair0_timestamp_t rx_offset)
 {
   const NR_DL_FRAME_PARMS *fp = &UE->frame_parms;
@@ -1134,6 +1146,28 @@ void *UE_thread(void *arg)
     time_manager_iq_samples(1, nb_slot_frame * 100);
 
     int slot_nr = absolute_slot % nb_slot_frame;
+    const bool slot_nr_prev0 = (slot_nr == 0);
+    // ---- APPLY A PENDING COARSE REBASE AT A FRAME BOUNDARY (2026-08-06) --------------------
+    // Only at slot 0, so the frame/slot/symbol origin is recomputed consistently rather than
+    // shifted underneath an in-flight occasion. Discards `delta` samples through the same path
+    // acquisition uses (syncInFrame), then clears every accumulated fine-timing state so the CIR
+    // loop restarts from the new origin instead of integrating corrections from the old one.
+    if (atomic_load_explicit(&nr_ue_pending_rebase_valid, memory_order_relaxed) && slot_nr_prev0) {
+      const long d = atomic_load_explicit(&nr_ue_pending_rebase_delta, memory_order_relaxed);
+      atomic_store_explicit(&nr_ue_pending_rebase_valid, 0, memory_order_relaxed);
+      if (d > 0 && d < (long)fp->samples_per_frame) {
+        LOG_W(PHY, "SENSING: REBASE applying coarse timing rebase of %ld samples at frame boundary\n", d);
+        syncInFrame(UE, &sync_timestamp, duration_rx_to_tx, (openair0_timestamp_t)d);
+        nrue_ru_write_reorder_clear_context(UE);
+        UE->max_pos_acc = 0;
+        UE->max_pos_iir = 0;
+        shiftForNextFrame = 0;
+        LOG_W(PHY, "SENSING: REBASE done; fine-timing state reset\n");
+      } else {
+        LOG_W(PHY, "SENSING: REBASE rejected implausible delta %ld\n", d);
+      }
+    }
+
     nr_rxtx_thread_data_t curMsg = {0};
     curMsg.UE=UE;
     // update thread index for received subframe
