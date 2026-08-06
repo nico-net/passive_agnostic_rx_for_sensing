@@ -1519,6 +1519,8 @@ static int pbch_process(PHY_VARS_NR_UE *UE,
       nr_pbch_replay_2x2(fp2, proc);
       extern void nr_pbch_replay_masks(const NR_DL_FRAME_PARMS *, const UE_nr_rxtx_proc_t *);
       nr_pbch_replay_masks(fp2, proc);
+      extern void nr_pbch_dmrs_scan_launch(const NR_DL_FRAME_PARMS *, const UE_nr_rxtx_proc_t *);
+      nr_pbch_dmrs_scan_launch(fp2, proc);
     }
   }
   // If valid PBCH symbol, increment symbol count.

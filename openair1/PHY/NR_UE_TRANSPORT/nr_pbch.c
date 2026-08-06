@@ -815,6 +815,147 @@ static void pbch_sweep_issb(const NR_DL_FRAME_PARMS *fp,
   }
 }
 
+
+/* ---- OFFLINE DMRS-COHERENCE LOCALISATION (2026-08-06) ------------------------------------------
+ * Locates the PBCH DMRS signature in an immutable live capture, or proves it absent.
+ *
+ * Why this replaces the earlier occupied-band-ratio scan: on a loaded 273-PRB cell EVERY offset
+ * carries band energy, so that scan locked onto a shallow, wandering maximum and was inconclusive.
+ * Normalized DMRS coherence has a sharp calibrated target instead -- measured on this cell:
+ *     correct DMRS 0.9999 | wrong i_ssb 0.81-0.89 | live floor 0.84-0.91
+ * so a candidate near 0.90 is NOT a hit; only a sharp jump toward the golden signature counts.
+ *
+ * Runs on a DETACHED THREAD, never in the RT receive path.
+ *
+ * Requires STRUCTURE, not one high value: all three PBCH-bearing symbols must score, and the
+ * candidate is scored by the MINIMUM across them (a single lucky symbol cannot carry a candidate).
+ * A residual-CFO dimension is swept at the refine stage so "SSB absent" cannot be declared merely
+ * because live and golden entered the harness with different CFO preprocessing.
+ */
+typedef struct {
+  pbch_snapshot_t snap;
+  NR_DL_FRAME_PARMS fp;
+  UE_nr_rxtx_proc_t proc;
+} pbch_scan_arg_t;
+
+static double pbch_cand_score(const pbch_scan_arg_t *A, long off, int i_ssb, double cfo_hz, int ant,
+                              double *per_sym)
+{
+  const pbch_snapshot_t *sn = &A->snap;
+  const int N = sn->ofdm_symbol_size, cp = sn->nb_prefix_samples, stride = N + cp;
+  const dft_size_idx_t dsz = get_dft(N);
+  const double fs = (double)A->fp.samples_per_subframe * 1000.0;
+  NR_DL_FRAME_PARMS fp1 = A->fp;
+  fp1.nb_antennas_rx = 1;
+  double worst = 1.0;
+  for (int s = 1; s <= 3; s++) {
+    const long base = off + (long)s * stride + cp;
+    if (base < 0 || base + N > sn->nsamp)
+      return -1.0;
+    __attribute__((aligned(32))) c16_t win[N], rxF[N], H[N];
+    for (int i = 0; i < N; i++) {
+      const c16_t v = sn->rxdata[ant][base + i];
+      if (cfo_hz == 0.0) {
+        win[i] = v;
+      } else {
+        const double ph = -2.0 * M_PI * cfo_hz * ((double)i / fs);
+        const double c = cos(ph), sn2 = sin(ph);
+        win[i].r = (int16_t)lround(v.r * c - v.i * sn2);
+        win[i].i = (int16_t)lround(v.r * sn2 + v.i * c);
+      }
+    }
+    dft(dsz, (int16_t *)win, (int16_t *)rxF, 1);
+    memset(H, 0, sizeof(H));
+    nr_pbch_channel_estimation(&fp1, NULL, H, &A->proc, s - 1, i_ssb, sn->n_hf,
+                               sn->ssb_start_subcarrier, rxF, false, sn->nid_cell);
+    const double c = chest_coherence(H, N);
+    if (per_sym)
+      per_sym[s - 1] = c;
+    if (c < worst)
+      worst = c;
+  }
+  return worst;
+}
+
+static void *pbch_scan_thread(void *arg)
+{
+  pbch_scan_arg_t *A = (pbch_scan_arg_t *)arg;
+  const pbch_snapshot_t *sn = &A->snap;
+  const int stride = sn->ofdm_symbol_size + sn->nb_prefix_samples;
+  const long span = sn->nsamp - 4L * stride;
+  const int COARSE = 64;
+
+  LOG_W(PHY, "SENSING: DMRSSCAN begin nsamp=%d span=%ld coarse_stride=%d ant=0..%d\n",
+        sn->nsamp, span, COARSE, sn->nb_ant - 1);
+
+  /* Stage 1: coarse, symbol-1 only, i_ssb=0, no CFO -- a cheap sieve, not a decision. */
+  typedef struct { long off; double sc; } cand_t;
+  cand_t best[8];
+  int nb = 0;
+  for (int a = 0; a < sn->nb_ant; a++) {
+    double amax = -1.0;
+    long amax_off = -1;
+    for (long off = 0; off < span; off += COARSE) {
+      double ps[3];
+      const double sc = pbch_cand_score(A, off, 0, 0.0, a, ps);
+      if (sc > amax) { amax = sc; amax_off = off; }
+      if (sc > 0.95 && nb < 8) { best[nb].off = off; best[nb].sc = sc; nb++; }
+    }
+    LOG_W(PHY, "SENSING: DMRSSCAN coarse ant%d best_off=%ld min3_coh=%.4f\n", a, amax_off, amax);
+    if (nb < 8 && amax_off >= 0) { best[nb].off = amax_off; best[nb].sc = amax; nb++; }
+  }
+
+  /* Stage 2: refine to 1 sample, sweep i_ssb and a residual-CFO grid, require all 3 symbols. */
+  double gmax = -1.0;
+  long goff = -1;
+  int gi = -1, ga = -1;
+  double gcfo = 0.0, gps[3] = {0};
+  for (int k = 0; k < nb; k++) {
+    for (int a = 0; a < sn->nb_ant; a++) {
+      for (long off = best[k].off - 64; off <= best[k].off + 64; off++) {
+        for (int i_ssb = 0; i_ssb < 8; i_ssb++) {
+          for (double cfo = -25000.0; cfo <= 25000.0; cfo += 5000.0) {
+            double ps[3];
+            const double sc = pbch_cand_score(A, off, i_ssb, cfo, a, ps);
+            if (sc > gmax) {
+              gmax = sc; goff = off; gi = i_ssb; ga = a; gcfo = cfo;
+              gps[0] = ps[0]; gps[1] = ps[1]; gps[2] = ps[2];
+            }
+          }
+        }
+      }
+    }
+  }
+
+  LOG_W(PHY,
+        "SENSING: DMRSSCAN RESULT best min3_coh=%.4f off=%ld i_ssb=%d ant=%d cfo_hz=%.0f "
+        "sym_coh=[%.4f %.4f %.4f] live_ref_off=%d delta=%ld verdict=%s\n",
+        gmax, goff, gi, ga, gcfo, gps[0], gps[1], gps[2], sn->ssb_time_offset,
+        (goff >= 0) ? goff - sn->ssb_time_offset : 0,
+        (gmax > 0.97) ? "SSB_FOUND" : "NO_DMRS_SIGNATURE_ANYWHERE");
+  free(A);
+  return NULL;
+}
+
+void nr_pbch_dmrs_scan_launch(const NR_DL_FRAME_PARMS *fp, const UE_nr_rxtx_proc_t *proc)
+{
+  static int launched = 0;
+  if (launched || !g_pbch_live.valid)
+    return;
+  launched = 1;
+  pbch_scan_arg_t *A = (pbch_scan_arg_t *)calloc(1, sizeof(*A));
+  if (!A)
+    return;
+  A->snap = g_pbch_live; /* pointers shared; the snapshot is immutable after capture */
+  A->fp = *fp;
+  A->proc = *proc;
+  pthread_t th;
+  if (pthread_create(&th, NULL, pbch_scan_thread, A) == 0)
+    pthread_detach(th);
+  else
+    free(A);
+}
+
 void nr_pbch_replay_masks(const NR_DL_FRAME_PARMS *fp, const UE_nr_rxtx_proc_t *proc)
 {
   static int done = 0;
