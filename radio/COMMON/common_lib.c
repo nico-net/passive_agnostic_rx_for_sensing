@@ -164,7 +164,7 @@ static void writerEnqueue(re_order_t *ctx, openair0_timestamp_t timestamp, void 
         ctx->queue[i].txp[j] = txp[j];
       break;
     }
-  AssertFatal(i < WRITE_QUEUE_SZ, "Write queue full\n");
+  AssertFatal(i < (WRITE_QUEUE_SZ + 1), "Write queue full\n");
   pthread_mutex_unlock(&ctx->mutex_store);
 }
 
