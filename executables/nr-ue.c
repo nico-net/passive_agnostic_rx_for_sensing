@@ -973,7 +973,86 @@ void *UE_thread(void *arg)
       stream_status = STREAM_STATUS_SYNCING;
       syncInFrame(UE, &sync_timestamp, duration_rx_to_tx, intialSyncOffset);
       nrue_ru_write_reorder_clear_context(UE);
+
+      // ---- CFO-SEEDED SAMPLE-CLOCK DRIFT BOOTSTRAP (2026-08-06, opt-in) ---------------------
+      // Problem this addresses: the drift-compensation machinery below is generic and present,
+      // but inert here for TWO independent reasons, both measured:
+      //   1. time_sync_I defaults to 0.0 (nr-uesoftmodem.h), and BOTH shiftForNextFrame sites
+      //      multiply by it -- so the post-sync rebase and the continuous per-frame correction
+      //      are identically zero unless --time-sync-I is passed. The proportional term
+      //      (time_sync_P, default 0.5) is unaffected, but it only runs on a SUCCESSFUL PBCH
+      //      tracking decode.
+      //   2. max_pos_acc is seeded only from ntn_init_time_drift (NTN), so it is 0 on a
+      //      terrestrial cell, and is otherwise only advanced by nr_adjust_synch_ue() -- which
+      //      again needs a successful tracking PBCH decode.
+      // Together: correcting drift needs a PBCH decode, and (at this receiver's drift rate) a
+      // PBCH decode needs drift correction. The loop never starts.
+      //
+      // Bootstrap: the transmitter/receiver reference error shows up in BOTH the carrier and the
+      // sample clock, so the CFO already measured at acquisition gives a first estimate of
+      // samples/frame drift: (cfo/fc) * samples_per_frame. Verified against a working bladeRF run
+      // on this same cell: -16111 Hz / 3414.99 MHz = -4.718 ppm -> -5.797 samples/frame, and
+      // x188 elapsed frames -> -1090 samples, both matching that run's logged values exactly.
+      //
+      // DELIBERATELY A BOOTSTRAP, NOT A PERMANENT ESTIMATOR. CFO mixes transmitter and receiver
+      // carrier-reference error, and the X410's sampling clock need not share the carrier's
+      // exact fractional offset. The seed only has to get the FIRST tracking PBCH to decode;
+      // after that nr_adjust_synch_ue() (PBCH-DMRS timing feedback) advances max_pos_acc from
+      // real measurements and takes over. max_pos_acc moving away from the seeded value is
+      // therefore the success signal -- it means the loop is closed, not merely masked.
+      static int s_cfo_seed = -1;
+      if (s_cfo_seed < 0)
+        s_cfo_seed = (getenv("ISAC_CFO_DRIFT_SEED") && atoi(getenv("ISAC_CFO_DRIFT_SEED"))) ? 1 : 0;
+      if (s_cfo_seed && UE->max_pos_acc == 0) {
+        const double cfo_hz = (double)UE->common_vars.freq_offset;
+        const double fc_hz = (double)fp->dl_CarrierFreq;
+        if (fc_hz > 0.0 && cfo_hz != 0.0) {
+          // time_sync_I is the gain EVERYTHING here is multiplied by; a zero gain means the
+          // machinery is switched off, so seeding max_pos_acc alone would still produce 0.
+          // Pick a small non-zero gain so max_pos_acc keeps enough integer resolution to
+          // represent a fractional samples/frame drift (at I=0.01, one LSB is 0.01 samples/frame).
+          if (get_nrUE_params()->time_sync_I == 0.0) {
+            get_nrUE_params()->time_sync_I = 0.01;
+            LOG_W(PHY,
+                  "SENSING: CFOSEED time_sync_I was 0.0 (drift compensation disabled by default) -- "
+                  "setting it to %.3f so the existing rebase/per-frame correction can act\n",
+                  get_nrUE_params()->time_sync_I);
+          }
+          const double ppm = cfo_hz / fc_hz;
+          const double samples_per_frame_drift = ppm * (double)fp->samples_per_frame;
+          UE->max_pos_acc = (int)lround(samples_per_frame_drift / get_nrUE_params()->time_sync_I);
+          const int elapsed_frames = UE->init_sync_frame + trashed_frames + 2;
+          LOG_W(PHY,
+                "SENSING: CFOSEED cfo_hz=%.0f fc_hz=%.0f ppm=%.3f samples_per_frame=%.3f "
+                "elapsed_frames=%d predicted_rebase=%.0f time_sync_I=%.4f max_pos_acc_seeded=%d\n",
+                cfo_hz, fc_hz, ppm * 1e6, samples_per_frame_drift, elapsed_frames,
+                -(double)elapsed_frames * samples_per_frame_drift,
+                get_nrUE_params()->time_sync_I, UE->max_pos_acc);
+        } else {
+          LOG_W(PHY, "SENSING: CFOSEED skipped (cfo=%.0f Hz, fc=%.0f Hz)\n", cfo_hz, fc_hz);
+        }
+      }
+
       shiftForNextFrame = -(UE->init_sync_frame + trashed_frames + 2) * UE->max_pos_acc * get_nrUE_params()->time_sync_I; // compensate for the time drift that happened during initial sync
+
+      // Manual post-sync correction, applied ONLY to this one-off rebase and never to the saved
+      // acquisition samples. Fallback control if the CFO seed above turns out to be the wrong
+      // estimate: it sweeps the same quantity the seed predicts, so the two are directly
+      // comparable. Sign convention matches shiftForNextFrame: POSITIVE discards samples
+      // (advances the stream), negative re-reads them.
+      {
+        static int s_manual_corr = INT_MIN;
+        if (s_manual_corr == INT_MIN) {
+          const char *e = getenv("ISAC_MANUAL_SYNC_CORR");
+          s_manual_corr = e ? atoi(e) : 0;
+        }
+        if (s_manual_corr != 0) {
+          shiftForNextFrame += s_manual_corr;
+          LOG_W(PHY, "SENSING: MANUALCORR applied %+d samples to post-sync rebase (shiftForNextFrame now %d)\n",
+                s_manual_corr, shiftForNextFrame);
+        }
+      }
+
       LOG_I(PHY, "max_pos_acc = %d, shiftForNextFrame = %d\n", UE->max_pos_acc, shiftForNextFrame);
       // read in first symbol
       // Same fix and rationale as this file's other nrue_ru_read() assertion sites: a short read is

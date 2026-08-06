@@ -1593,7 +1593,24 @@ static int pbch_process(PHY_VARS_NR_UE *UE,
       if (force_global_call < 0)
         force_global_call = (getenv("ISAC_FORCE_GLOBAL_SYNC") != NULL) ? 1 : 0;
       if (UE->no_timing_correction == 0 && (pbchSuccess == 0 || force_global_call)) {
+        // DEADLOCK-BREAK EVIDENCE (2026-08-06): max_pos_acc across the FIRST successful tracking
+        // PBCH decodes. If the CFO seed (ISAC_CFO_DRIFT_SEED, executables/nr-ue.c) merely masked
+        // the problem, this never runs. If it genuinely bootstrapped the loop, max_pos_acc starts
+        // moving AWAY from its seeded value under real PBCH-DMRS measurements -- that migration is
+        // the success signal, not the decode alone.
+        const int mpa_before = UE->max_pos_acc;
         sampleShift = nr_adjust_synch_ue(&UE->frame_parms, UE, pbch_ch_est_time, proc->frame_rx, proc->nr_slot_rx, 16384);
+        {
+          static int s_track_log_left = 25;
+          if (s_track_log_left > 0 && pbchSuccess == 0) {
+            s_track_log_left--;
+            LOG_W(PHY,
+                  "SENSING: TRACKLOCK frame=%d slot=%d ssb=%d pbch_crc_ok=1 max_pos_acc %d -> %d (delta %+d) "
+                  "sampleShift=%d\n",
+                  proc->frame_rx, proc->nr_slot_rx, *ssbIndex, mpa_before, UE->max_pos_acc,
+                  UE->max_pos_acc - mpa_before, sampleShift);
+          }
+        }
       }
 
       // Continuous FO estimation and compensation
