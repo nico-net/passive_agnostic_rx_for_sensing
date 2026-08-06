@@ -1262,21 +1262,48 @@ void *UE_thread(void *arg)
     // timestamp is accumulated in rx_samples_consumed and only committed at the end of the reads.
     static openair0_timestamp_t s_rxts_prev = 0;
     static long s_rxts_prev_consumed = 0;
-    static int s_rxts_discont_left = 40;
     static long s_rxts_discont_total = 0;
     long rx_samples_consumed = 0;
     if (s_rxts_prev_consumed > 0) {
       const openair0_timestamp_t expected = s_rxts_prev + s_rxts_prev_consumed;
       if (rx_timestamp != expected) {
+        // ---- RF DISCONTINUITY => INVALIDATE SYNCHRONISATION (2026-08-06) --------------------
+        // Measured root cause: at 4x122.88 MS/s the host periodically fails to consume samples
+        // fast enough, UHD overflows and the stream resumes SECONDS later. OAI previously advanced
+        // its frame counters by the samples it RECEIVED, so the frame/SFN-to-sample mapping silently
+        // became wrong and every downstream stage -- CIR tracking, PBCH, PDCCH -- operated on the
+        // wrong samples. Nothing detected it: PBCH simply stopped decoding.
+        //
+        // The discontinuity ITSELF proves the current frame mapping is invalid, so recovery must not
+        // wait for PBCH failures or T310. Note the clean read FOLLOWING an overflow carries
+        // ERROR_CODE_NONE and must still be treated as discontinuous -- which is why this tests the
+        // timestamp rather than the metadata.
+        //
+        // A multi-second hole is beyond any bounded coarse search, so it forces full reacquisition
+        // rather than a widened DMRS anchor: the receiver no longer knows which radio frame its
+        // samples belong to. The anchor remains for ordinary coarse errors and must not conceal
+        // stream loss. Event-driven, no line cap.
         s_rxts_discont_total++;
-        if (s_rxts_discont_left > 0) {
-          s_rxts_discont_left--;
-          LOG_E(PHY,
-                "SENSING: RXDISCONT abs_slot=%d frame=%d slot=%d expected=%llu actual=%llu "
-                "delta=%lld prev_consumed=%ld n=%ld\n",
-                absolute_slot, curMsg.proc.frame_rx, curMsg.proc.nr_slot_rx,
-                (unsigned long long)expected, (unsigned long long)rx_timestamp,
-                (long long)(rx_timestamp - expected), s_rxts_prev_consumed, s_rxts_discont_total);
+        const long long jump = (long long)(rx_timestamp - expected);
+        LOG_E(PHY,
+              "SENSING: RXDISCONT abs_slot=%d frame=%d slot=%d expected=%llu actual=%llu "
+              "delta=%lld prev_consumed=%ld n=%ld -> INVALIDATING SYNC\n",
+              absolute_slot, curMsg.proc.frame_rx, curMsg.proc.nr_slot_rx,
+              (unsigned long long)expected, (unsigned long long)rx_timestamp, jump,
+              s_rxts_prev_consumed, s_rxts_discont_total);
+        static int s_disc_invalidate = -1;
+        if (s_disc_invalidate < 0)
+          s_disc_invalidate = (getenv("ISAC_DISC_NO_RESYNC") && atoi(getenv("ISAC_DISC_NO_RESYNC"))) ? 0 : 1;
+        if (s_disc_invalidate && UE->is_synchronized) {
+          UE->is_synchronized = 0;
+          stream_status = STREAM_STATUS_UNSYNC;
+          UE->max_pos_acc = 0;
+          UE->max_pos_iir = 0;
+          shiftForNextFrame = 0;
+          atomic_store_explicit(&nr_ue_pending_rebase_valid, 0, memory_order_relaxed);
+          decoded_frame_rx = MAX_FRAME_NUMBER - 1;
+          trashed_frames = 0;
+          LOG_W(PHY, "SENSING: RXDISCONT sync invalidated, timing state cleared, reacquiring\n");
         }
       }
     }
