@@ -1136,6 +1136,79 @@ void nr_pbch_cir_convention_test(const NR_DL_FRAME_PARMS *fp,
   LOG_W(PHY, "SENSING: CIRTEST end\n");
 }
 
+
+/* ---- COARSE DMRS RE-ANCHOR (2026-08-06) --------------------------------------------------------
+ * Stage 1 of the two-stage timing design. nr_adjust_synch_ue() is correct but can only observe
+ * +-nb_prefix_samples (288 here); an error of ~2100 samples is invisible to it, so on a loaded cell
+ * it locks onto traffic inside its blind window and reports a confident false near-zero.
+ *
+ * This measures PBCH-DMRS coherence at the position the receiver is actually using, and when that
+ * is below the valid-match level it performs a bounded coherence search and returns the
+ * displacement of the true SSB. The caller routes that into shiftForNextFrame, i.e. the GLOBAL
+ * stream origin, so PDCCH and the rest of the slot move with PBCH -- unlike a PBCH-local FFT bias.
+ *
+ * Returns 1 if a usable measurement was made. *coh_at_pred and *delta are always set on success.
+ * Requires a coherent match on all three PBCH symbols (pbch_cand_score takes the MINIMUM), so a
+ * single lucky symbol cannot re-anchor the receiver.
+ */
+int nr_pbch_dmrs_anchor(const NR_DL_FRAME_PARMS *fp,
+                        const UE_nr_rxtx_proc_t *proc,
+                        c16_t *const *rxdata,
+                        int nsamp_total,
+                        unsigned fep_rx_offset_sym1,
+                        double *coh_at_pred,
+                        double *best_coh,
+                        long *delta)
+{
+  const int N = fp->ofdm_symbol_size, cp = fp->nb_prefix_samples, stride = N + cp;
+  const long pred = (long)fep_rx_offset_sym1 - stride - cp;
+  const long lo = pred - stride, hi = pred + stride;
+  const long need = (hi + 4L * stride) - lo;
+  if (lo < 0 || hi + 4L * stride > nsamp_total || need <= 0)
+    return 0;
+
+  pbch_scan_arg_t A;
+  memset(&A, 0, sizeof(A));
+  A.fp = *fp;
+  A.proc = *proc;
+  A.snap.valid = 1;
+  A.snap.nb_ant = 1;
+  A.snap.nsamp = (int)need;
+  A.snap.nid_cell = fp->Nid_cell;
+  A.snap.n_hf = fp->half_frame_bit;
+  A.snap.ssb_start_subcarrier = fp->ssb_start_subcarrier;
+  A.snap.ofdm_symbol_size = N;
+  A.snap.nb_prefix_samples = cp;
+  A.snap.rxdata[0] = (c16_t *)malloc16(sizeof(c16_t) * need);
+  if (!A.snap.rxdata[0])
+    return 0;
+  memcpy(A.snap.rxdata[0], &rxdata[0][lo], sizeof(c16_t) * need);
+
+  double ps[3];
+  *coh_at_pred = pbch_cand_score(&A, pred - lo, 0, 0.0, 0, ps);
+
+  double bc = -1.0;
+  long boff = -1;
+  for (long off = 0; off + 4L * stride <= need; off += 8) {
+    const double sc = pbch_cand_score(&A, off, 0, 0.0, 0, ps);
+    if (sc > bc) { bc = sc; boff = off; }
+  }
+  /* 1-sample refinement around the coarse winner */
+  if (boff >= 0) {
+    const long c0 = boff;
+    for (long off = c0 - 8; off <= c0 + 8; off++) {
+      if (off < 0 || off + 4L * stride > need)
+        continue;
+      const double sc = pbch_cand_score(&A, off, 0, 0.0, 0, ps);
+      if (sc > bc) { bc = sc; boff = off; }
+    }
+  }
+  *best_coh = bc;
+  *delta = (boff >= 0) ? (lo + boff) - pred : 0;
+  free16(A.snap.rxdata[0], sizeof(c16_t) * need);
+  return (boff >= 0);
+}
+
 void nr_pbch_replay_masks(const NR_DL_FRAME_PARMS *fp, const UE_nr_rxtx_proc_t *proc)
 {
   static int done = 0;

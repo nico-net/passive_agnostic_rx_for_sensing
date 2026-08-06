@@ -1679,6 +1679,62 @@ static int pbch_process(PHY_VARS_NR_UE *UE,
       if (crc_gate < 0)
         crc_gate = (getenv("ISAC_TSYNC_CRC_GATE") && atoi(getenv("ISAC_TSYNC_CRC_GATE"))) ? 1 : 0;
       const bool timing_allowed = crc_gate ? (pbchSuccess == 0 || force_global_call) : true;
+      // ---- TWO-STAGE TIMING (2026-08-06) ------------------------------------------------
+      // Stage 1 (coarse): when PBCH-DMRS coherence at the position we are using is below the
+      // valid-match level, the CIR estimator cannot be trusted -- it only sees +-nb_prefix_samples
+      // and, measured on this cell, reports a confident near-zero while sitting ~2100 samples away
+      // on a traffic feature. Re-anchor from a bounded DMRS-coherence search instead, and return
+      // the displacement so it flows into shiftForNextFrame, i.e. the GLOBAL stream origin --
+      // PDCCH and the rest of the slot move with PBCH, unlike a PBCH-local FFT bias.
+      // Stage 2 (fine): once coherence is valid the receiver is genuinely on the SSB and inside
+      // the estimator's capture range, so nr_adjust_synch_ue() does the few-sample correction it
+      // was designed for.
+      // Thresholds are diagnostic values from this cell's calibration (valid 0.999, floor
+      // 0.80-0.92) with hysteresis; they need re-calibrating at lower SNR before production use.
+      static int s_anchor = -1;
+      if (s_anchor < 0)
+        s_anchor = (getenv("ISAC_DMRS_ANCHOR") && atoi(getenv("ISAC_DMRS_ANCHOR"))) ? 1 : 0;
+      static double s_enter = -1.0, s_stay = -1.0;
+      if (s_enter < 0.0) {
+        const char *e = getenv("ISAC_ANCHOR_ENTER");
+        s_enter = e ? atof(e) : 0.99;
+        const char *t = getenv("ISAC_ANCHOR_STAY");
+        s_stay = t ? atof(t) : 0.97;
+      }
+      static int s_sign = INT_MIN;
+      if (s_sign == INT_MIN) {
+        const char *e = getenv("ISAC_ANCHOR_SIGN");
+        s_sign = e ? atoi(e) : -1;
+      }
+      static bool s_locked = false;
+      if (s_anchor && UE->no_timing_correction == 0) {
+        extern int nr_pbch_dmrs_anchor(const NR_DL_FRAME_PARMS *, const UE_nr_rxtx_proc_t *,
+                                       c16_t *const *, int, unsigned, double *, double *, long *);
+        double cohp = 0.0, cohb = 0.0;
+        long dl = 0;
+        if (nr_pbch_dmrs_anchor(&UE->frame_parms, proc, UE->common_vars.rxdata,
+                                2 * UE->frame_parms.samples_per_frame, nr_slot_fep_diag_rx_offset,
+                                &cohp, &cohb, &dl)) {
+          const double thr = s_locked ? s_stay : s_enter;
+          static int s_anchor_log = 40;
+          if (cohp >= thr) {
+            s_locked = true; /* on the real SSB and inside capture range -> fine tracking below */
+          } else {
+            s_locked = false;
+            const int shift = (int)(s_sign * dl);
+            if (s_anchor_log > 0) {
+              s_anchor_log--;
+              LOG_W(PHY,
+                    "SENSING: ANCHOR frame=%d slot=%d coh_at_pred=%.4f best_coh=%.4f delta=%+ld "
+                    "-> global shift=%+d (coarse re-anchor)\n",
+                    proc->frame_rx, proc->nr_slot_rx, cohp, cohb, dl, shift);
+            }
+            if (cohb > s_enter)
+              return shift; /* re-anchor the GLOBAL timeline; skip the untrustworthy CIR update */
+          }
+        }
+      }
+
       if (UE->no_timing_correction == 0 && timing_allowed) {
         // DEADLOCK-BREAK EVIDENCE (2026-08-06): max_pos_acc across the FIRST successful tracking
         // PBCH decodes. If the CFO seed (ISAC_CFO_DRIFT_SEED, executables/nr-ue.c) merely masked
