@@ -1526,7 +1526,17 @@ static int pbch_process(PHY_VARS_NR_UE *UE,
   else if (*pbchSymbCnt == 2)
     cur_pbch_est = pbch_ch_est_sym3;
 
+  const int pbchSymbCntBefore = *pbchSymbCnt;
   *ssbIndex = nr_process_pbch_symbol(UE, proc, symbol, *ssbIndex, pbch_ch_est_time, cur_pbch_est, pbch_e_rx, log2_maxh_state);
+  // Latch the FEP offset of the FIRST PBCH symbol. The anchor below runs after all three symbols
+  // have been processed, at which point nr_slot_fep_diag_rx_offset holds SYMBOL 3's offset -- using
+  // it there puts the predicted SSB start 2*stride (8768 samples) away, outside the anchor's own
+  // +-stride search window, so the search can never find the SSB and correctly reports the
+  // wrong-match floor. This is why the online scorer read 0.87-0.92 while the standalone scanner,
+  // which is invoked per-symbol and deduped on the first, read 0.9998-0.9999 on the same signal.
+  static unsigned s_pbch_sym1_off = 0;
+  if (pbchSymbCntBefore == 0 && *ssbIndex > -1)
+    s_pbch_sym1_off = nr_slot_fep_diag_rx_offset;
 
   // ---- LIVE TRACKING-OCCASION SNAPSHOT for the 2x2 cross-replay (2026-08-06) -----------------
   // Capture the samples the LIVE path is about to process, with the LIVE state, at PBCH symbol 1.
@@ -1712,9 +1722,10 @@ static int pbch_process(PHY_VARS_NR_UE *UE,
                                        c16_t *const *, int, unsigned, double *, double *, long *);
         double cohp = 0.0, cohb = 0.0;
         long dl = 0;
-        if (nr_pbch_dmrs_anchor(&UE->frame_parms, proc, UE->common_vars.rxdata,
-                                2 * UE->frame_parms.samples_per_frame, nr_slot_fep_diag_rx_offset,
-                                &cohp, &cohb, &dl)) {
+        if (s_pbch_sym1_off != 0
+            && nr_pbch_dmrs_anchor(&UE->frame_parms, proc, UE->common_vars.rxdata,
+                                   2 * UE->frame_parms.samples_per_frame, s_pbch_sym1_off,
+                                   &cohp, &cohb, &dl)) {
           const double thr = s_locked ? s_stay : s_enter;
           static int s_anchor_log = 40;
           if (cohp >= thr) {
