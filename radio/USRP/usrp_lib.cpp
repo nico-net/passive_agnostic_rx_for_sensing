@@ -4,6 +4,7 @@
 
 #define _LARGEFILE_SOURCE
 #define _FILE_OFFSET_BITS 64
+#include <cinttypes>
 #include <string.h>
 #include <pthread.h>
 #include <unistd.h>
@@ -1530,6 +1531,41 @@ static int trx_usrp_read(openair0_device_t *device, openair0_timestamp_t *ptimes
   s->rx_count += nsamps;
   s->rx_timestamp = s->rx_md.time_spec.to_ticks(s->sample_rate);
   *ptimestamp = s->rx_timestamp;
+
+  /* ---- RAW RF TIMESTAMP DISCONTINUITY AUDIT (2026-08-06) --------------------------------------
+   * Logged HERE, at the radio boundary, from the UHD metadata itself -- before the value reaches
+   * any OAI diagnostic atomic -- so a genuine stream discontinuity can be told apart from a
+   * conversion or wrap artifact downstream. Measured downstream: a single +641,449,058-sample
+   * (~5.22 s) advance while OAI consumed its normal 2,457,612 samples, which destroys the
+   * frame-to-sample mapping and is the actual cause of PBCH loss of lock.
+   *
+   * Deliberately event-driven with NO line cap: a discontinuity should be rare, and if it floods
+   * that is itself the result. Every field needed to discriminate the three cases is printed
+   * together -- raw previous/current timestamp, the expectation, requested vs returned samples,
+   * and the UHD error/fragment flags. */
+  {
+    static_assert(sizeof(s->rx_timestamp) == 8, "Unexpected raw RF timestamp width");
+    static uint64_t s_prev_raw_ts = 0;
+    static int s_prev_returned = 0;
+    static uint64_t s_disc_count = 0;
+    const uint64_t cur = (uint64_t)s->rx_timestamp;
+    if (s_prev_returned > 0) {
+      const uint64_t expect = s_prev_raw_ts + (uint64_t)s_prev_returned;
+      if (cur != expect) {
+        s_disc_count++;
+        LOG_E(HW,
+              "SENSING: RFTSDISC n=%" PRIu64 " prev_raw=%" PRIu64 " cur_raw=%" PRIu64
+              " expected=%" PRIu64 " delta=%+" PRId64 " requested=%d returned=%d prev_returned=%d "
+              "uhd_err=%d(%s) more_fragments=%d has_time_spec=%d\n",
+              s_disc_count, s_prev_raw_ts, cur, expect, (int64_t)(cur - expect), nsamps,
+              logical_received, s_prev_returned, (int)s->rx_md.error_code,
+              s->rx_md.strerror().c_str(), (int)s->rx_md.more_fragments,
+              (int)s->rx_md.has_time_spec);
+      }
+    }
+    s_prev_raw_ts = cur;
+    s_prev_returned = (logical_received > 0) ? logical_received : nsamps;
+  }
 
   T(T_USRP_RX_ANT0, T_INT(s->rx_timestamp), T_BUFFER(buff[0], logical_received*4));
 
