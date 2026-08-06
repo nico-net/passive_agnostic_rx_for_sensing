@@ -466,6 +466,28 @@ static void nr_scan_ssb(void *arg)
         int rsrp_db_per_re = 10 * log10(rsrp_avg);
         ssbInfo->adjust_rxgain = TARGET_RX_POWER - rsrp_db_per_re;
         LOG_I(PHY, "pbch rx ok. rsrp:%d dB/RE, adjust_rxgain:%d dB\n", rsrp_db_per_re, ssbInfo->adjust_rxgain);
+
+        // ---- GOLDEN-BUFFER PBCH REPLAY (2026-08-06) ----------------------------------------
+        // This is the ONE point where the time-domain samples are known-good: PBCH just decoded
+        // from them. Snapshot them with every decode parameter, then immediately re-run the full
+        // chain over a swept FFT-window offset. delta=0 MUST decode -- if it does not, the fault
+        // is in the chain rather than in sample selection, and every timing hypothesis is dead.
+        // Runs on this thread while everything is in scope, so no cross-thread plumbing.
+        if (getenv("ISAC_PBCH_REPLAY") && atoi(getenv("ISAC_PBCH_REPLAY"))) {
+          extern void nr_pbch_golden_capture(int, int, c16_t *const *, int, int, int, int, int, int, int);
+          extern void nr_pbch_replay_golden(const NR_DL_FRAME_PARMS *, const UE_nr_rxtx_proc_t *);
+          nr_pbch_golden_capture(fp->nb_antennas_rx,
+                                 search_params.rxdata_size,
+                                 rxdata,
+                                 search_params.pss_res.pos - fp->nb_prefix_samples,
+                                 ssbInfo->nidCell,
+                                 ssbInfo->ssbIndex,
+                                 ssbInfo->halfFrameBit,
+                                 ssbInfo->gscnInfo.ssbFirstSC,
+                                 fp->ofdm_symbol_size,
+                                 fp->nb_prefix_samples);
+          nr_pbch_replay_golden(fp, ssbInfo->proc);
+        }
       }
     }
   }

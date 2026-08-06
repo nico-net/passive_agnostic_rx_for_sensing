@@ -14,6 +14,7 @@
 #include <openair1/PHY/TOOLS/phy_scope_interface.h>
 #include "PHY/nr_phy_common/inc/nr_phy_common.h"
 #include "openair1/PHY/NR_REFSIG/nr_refsig.h"
+#include "openair1/PHY/NR_UE_ESTIMATION/nr_estimation.h"
 #include "bits.h"
 #include "instrumentation.h"
 //#define DEBUG_PBCH
@@ -414,6 +415,164 @@ void nr_isac_framescan(const c16_t *rxd,
 
   free16(win, sizeof(c16_t) * N);
   free16(spec, sizeof(c16_t) * N);
+}
+
+/* ---- GOLDEN-BUFFER PBCH REPLAY (2026-08-06) ----------------------------------------------------
+ * Runs the FULL PBCH chain (FFT -> nr_pbch_channel_estimation -> nr_generate_pbch_llr ->
+ * nr_pbch_decode) against the exact samples acquisition just decoded successfully, sweeping the FFT
+ * window offset. Purpose, and why this beats another live diagnostic: acquisition decodes and
+ * tracking does not, so the decisive question is whether the difference is WHERE the FFT window is
+ * placed or WHAT happens after it. Here the samples are held fixed and known-good, so:
+ *   - delta=0 must decode. If it does not, the fault is in the chain (chest / LLR / decode
+ *     parameters), NOT in sample selection, and every timing hypothesis is dead.
+ *   - if it decodes only in a narrow delta window, that window IS the alignment tolerance, and
+ *     tracking's actual offset can be compared against it directly.
+ * Deliberately uses acquisition's own uniform-stride window (ofdm_symbol_size + nb_prefix_samples),
+ * matching do_time_to_freq(), so delta is measured against a reference that is known to work.
+ */
+static struct {
+  int valid;
+  int nb_ant;
+  int nsamp;
+  int ssb_time_offset;
+  int nid_cell;
+  int i_ssb;
+  int n_hf;
+  int ssb_start_subcarrier;
+  int ofdm_symbol_size;
+  int nb_prefix_samples;
+  c16_t *rxdata[4];
+} g_pbch_golden;
+
+void nr_pbch_golden_capture(int nb_ant,
+                            int nsamp,
+                            c16_t *const *rxdata,
+                            int ssb_time_offset,
+                            int nid_cell,
+                            int i_ssb,
+                            int n_hf,
+                            int ssb_start_subcarrier,
+                            int ofdm_symbol_size,
+                            int nb_prefix_samples)
+{
+  if (g_pbch_golden.valid || nb_ant <= 0 || nb_ant > 4 || nsamp <= 0)
+    return;
+  for (int a = 0; a < nb_ant; a++) {
+    g_pbch_golden.rxdata[a] = (c16_t *)malloc16(sizeof(c16_t) * nsamp);
+    if (!g_pbch_golden.rxdata[a]) {
+      for (int b = 0; b < a; b++)
+        free16(g_pbch_golden.rxdata[b], sizeof(c16_t) * nsamp);
+      return;
+    }
+    memcpy(g_pbch_golden.rxdata[a], rxdata[a], sizeof(c16_t) * nsamp);
+  }
+  g_pbch_golden.nb_ant = nb_ant;
+  g_pbch_golden.nsamp = nsamp;
+  g_pbch_golden.ssb_time_offset = ssb_time_offset;
+  g_pbch_golden.nid_cell = nid_cell;
+  g_pbch_golden.i_ssb = i_ssb;
+  g_pbch_golden.n_hf = n_hf;
+  g_pbch_golden.ssb_start_subcarrier = ssb_start_subcarrier;
+  g_pbch_golden.ofdm_symbol_size = ofdm_symbol_size;
+  g_pbch_golden.nb_prefix_samples = nb_prefix_samples;
+  g_pbch_golden.valid = 1;
+  LOG_W(PHY,
+        "SENSING: PBCHGOLDEN captured nb_ant=%d nsamp=%d ssb_time_offset=%d nid=%d i_ssb=%d n_hf=%d "
+        "ssb_sc=%d N=%d cp=%d\n",
+        nb_ant, nsamp, ssb_time_offset, nid_cell, i_ssb, n_hf, ssb_start_subcarrier,
+        ofdm_symbol_size, nb_prefix_samples);
+}
+
+void nr_pbch_replay_golden(const NR_DL_FRAME_PARMS *fp, const UE_nr_rxtx_proc_t *proc)
+{
+  if (!g_pbch_golden.valid)
+    return;
+  static int s_done = 0;
+  if (s_done)
+    return;
+  s_done = 1;
+
+  const int N = g_pbch_golden.ofdm_symbol_size;
+  const int cp = g_pbch_golden.nb_prefix_samples;
+  const int nb_ant = g_pbch_golden.nb_ant;
+  const int stride = N + cp;
+  const dft_size_idx_t dsz = get_dft(N);
+
+  /* Sweep a little over one CP either side: a correct window may sit anywhere in the CP for a
+   * flat channel, so the pass region's WIDTH is itself the result, not just its centre. */
+  const int dmax = cp + (cp / 2);
+  const int dstep = (cp / 16 > 0) ? cp / 16 : 1;
+
+  LOG_W(PHY, "SENSING: PBCHREPLAY begin N=%d cp=%d stride=%d nb_ant=%d sweep=[%d..%d] step=%d\n",
+        N, cp, stride, nb_ant, -dmax, dmax, dstep);
+
+  for (int delta = -dmax; delta <= dmax; delta += dstep) {
+    int16_t pbch_e_rx[NR_POLAR_PBCH_E];
+    double pbch_log2_maxh = -1.0;
+    double llr_absmean = 0.0;
+
+    /* SSB symbols 1..3 carry PBCH (symbol 0 is PSS). Same loop shape as nr_initial_sync.c. */
+    for (int s = 1; s <= 3; s++) {
+      const long base = (long)g_pbch_golden.ssb_time_offset + (long)s * stride + cp + delta;
+      if (base < 0 || base + N > g_pbch_golden.nsamp)
+        goto next_delta;
+
+      __attribute__((aligned(32))) c16_t rxdataF[nb_ant][N];
+      __attribute__((aligned(32))) c16_t dl_ch_estimates[nb_ant][N];
+      for (int a = 0; a < nb_ant; a++)
+        dft(dsz, (int16_t *)&g_pbch_golden.rxdata[a][base], (int16_t *)rxdataF[a], 1);
+
+      for (int a = 0; a < nb_ant; a++)
+        nr_pbch_channel_estimation(fp,
+                                   NULL,
+                                   dl_ch_estimates[a],
+                                   proc,
+                                   s - 1,
+                                   g_pbch_golden.i_ssb,
+                                   g_pbch_golden.n_hf,
+                                   g_pbch_golden.ssb_start_subcarrier,
+                                   rxdataF[a],
+                                   false,
+                                   g_pbch_golden.nid_cell);
+
+      nr_generate_pbch_llr(NULL,
+                           proc,
+                           fp,
+                           s,
+                           g_pbch_golden.i_ssb,
+                           g_pbch_golden.nid_cell,
+                           g_pbch_golden.ssb_start_subcarrier,
+                           rxdataF,
+                           dl_ch_estimates,
+                           pbch_e_rx,
+                           &pbch_log2_maxh);
+    }
+
+    for (int i = 0; i < NR_POLAR_PBCH_E; i++)
+      llr_absmean += fabs((double)pbch_e_rx[i]);
+    llr_absmean /= NR_POLAR_PBCH_E;
+
+    {
+      fapiPbch_t res;
+      int hfb = 0, ssb_idx = 0, sym_off = 0;
+      const int crc_ok = (0
+                          == nr_pbch_decode(NULL,
+                                            fp,
+                                            proc,
+                                            g_pbch_golden.i_ssb,
+                                            g_pbch_golden.nid_cell,
+                                            pbch_e_rx,
+                                            &hfb,
+                                            &ssb_idx,
+                                            &sym_off,
+                                            &res));
+      LOG_W(PHY,
+            "SENSING: PBCHREPLAY delta=%+d crc_ok=%d llr_absmean=%.2f log2_maxh=%.2f\n",
+            delta, crc_ok, llr_absmean, pbch_log2_maxh);
+    }
+  next_delta:;
+  }
+  LOG_W(PHY, "SENSING: PBCHREPLAY end\n");
 }
 
 void nr_pbch_quantize(int16_t *pbch_llr8, const int16_t *pbch_llr, const uint16_t len)
