@@ -956,6 +956,107 @@ void nr_pbch_dmrs_scan_launch(const NR_DL_FRAME_PARMS *fp, const UE_nr_rxtx_proc
     free(A);
 }
 
+
+/* ---- PER-OCCASION DELTA MEASUREMENT (2026-08-06) -----------------------------------------------
+ * The one-shot scan found the DMRS at +3620 in a single capture, and a verified +3620 FFT-window
+ * bias (confirmed to move fep_rx_offset by exactly 3620) still did not decode. So the displacement
+ * is not a fixed handover constant. This measures its DISTRIBUTION across occasions.
+ *
+ * Cheap by construction: a bounded +-4384 (one OFDM symbol) search around the position the live
+ * path actually used, on a SMALL window copied per occasion (~26k samples/antenna, not the whole
+ * 20 ms ring), scored by min-over-3-symbols DMRS coherence. Runs on the calling thread only after
+ * the copy, and the copy is all that touches live buffers.
+ */
+typedef struct {
+  int frame, slot;
+  unsigned fep_rx_offset;
+  long delta;
+  double best_coh, coh_at_predicted;
+  int i_ssb, ant;
+} occ_delta_t;
+
+void nr_pbch_measure_delta(const NR_DL_FRAME_PARMS *fp,
+                           const UE_nr_rxtx_proc_t *proc,
+                           c16_t *const *rxdata,
+                           int nsamp_total,
+                           unsigned fep_rx_offset_sym1)
+{
+  static int left = 24;
+  if (left <= 0)
+    return;
+  static int en = -1;
+  if (en < 0)
+    en = (getenv("ISAC_DELTA_SCAN") && atoi(getenv("ISAC_DELTA_SCAN"))) ? 1 : 0;
+  if (!en)
+    return;
+  /* One measurement per SSB occasion: this is called for each of the three PBCH symbols, but
+   * `pred` is derived assuming the offset belongs to the FIRST of them, so later symbols would
+   * yield a meaningless prediction. Dedupe on the frame rather than plumbing a counter in. */
+  static int last_frame = -1;
+  if (proc->frame_rx == last_frame)
+    return;
+  last_frame = proc->frame_rx;
+  left--;
+
+  const int N = fp->ofdm_symbol_size, cp = fp->nb_prefix_samples, stride = N + cp;
+  const int HALF = stride; /* +-1 OFDM symbol */
+  /* ssb symbol0 start implied by the live path, same convention the scanner uses */
+  const long pred = (long)fep_rx_offset_sym1 - stride - cp;
+  const long lo = pred - HALF, hi = pred + HALF;
+  const long need = (hi + 4L * stride) - lo;
+  if (lo < 0 || hi + 4L * stride > nsamp_total || need <= 0)
+    return;
+
+  const int nant = fp->nb_antennas_rx > 4 ? 4 : fp->nb_antennas_rx;
+  pbch_snapshot_t w;
+  memset(&w, 0, sizeof(w));
+  for (int a = 0; a < nant; a++) {
+    w.rxdata[a] = (c16_t *)malloc16(sizeof(c16_t) * need);
+    if (!w.rxdata[a]) {
+      for (int b = 0; b < a; b++)
+        free16(w.rxdata[b], sizeof(c16_t) * need);
+      return;
+    }
+    memcpy(w.rxdata[a], &rxdata[a][lo], sizeof(c16_t) * need);
+  }
+  w.valid = 1;
+  w.nb_ant = nant;
+  w.nsamp = (int)need;
+  w.nid_cell = fp->Nid_cell;
+  w.n_hf = fp->half_frame_bit;
+  w.ssb_start_subcarrier = fp->ssb_start_subcarrier;
+  w.ofdm_symbol_size = N;
+  w.nb_prefix_samples = cp;
+
+  pbch_scan_arg_t A;
+  memset(&A, 0, sizeof(A));
+  A.snap = w;
+  A.fp = *fp;
+  A.proc = *proc;
+
+  double best = -1.0, at_pred = -1.0;
+  long best_off = -1;
+  int best_i = -1, best_a = -1;
+  for (int a = 0; a < nant; a++) {
+    for (long off = 0; off + 4L * stride <= need; off += 8) {
+      double ps[3];
+      const double sc = pbch_cand_score(&A, off, 0, 0.0, a, ps);
+      if (sc > best) { best = sc; best_off = off; best_i = 0; best_a = a; }
+      if (off == pred - lo && a == 0)
+        at_pred = sc;
+    }
+  }
+  LOG_W(PHY,
+        "SENSING: DELTA frame=%d slot=%d fep_rx_offset=%u pred_ssb0=%ld best_coh=%.4f "
+        "coh_at_predicted=%.4f delta=%+ld ant=%d hit=%s\n",
+        proc->frame_rx, proc->nr_slot_rx, fep_rx_offset_sym1, pred, best,
+        at_pred, (best_off >= 0) ? (lo + best_off) - pred : 0, best_a,
+        (best > 0.97) ? "YES" : "no");
+
+  for (int a = 0; a < nant; a++)
+    free16(w.rxdata[a], sizeof(c16_t) * need);
+}
+
 void nr_pbch_replay_masks(const NR_DL_FRAME_PARMS *fp, const UE_nr_rxtx_proc_t *proc)
 {
   static int done = 0;

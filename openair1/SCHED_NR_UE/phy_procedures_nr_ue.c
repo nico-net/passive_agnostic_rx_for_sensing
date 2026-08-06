@@ -1069,6 +1069,29 @@ int nr_process_pbch_symbol(
         LOG_W(PHY, "SENSING: PBCHBIAS applying %+d samples to tracking PBCH FFT window only\n", s_pbch_bias);
     }
     nr_slot_fep(ue, fp, proc->nr_slot_rx, symbol, tmp, link_type_dl, s_pbch_bias, ue->common_vars.rxdata);
+    // COORDINATE-SYSTEM CHECK (2026-08-06): nr_slot_fep_diag_rx_offset is the FINAL buffer index
+    // the DFT reads from, after slot origin, symbol offset, sample_offset and the CP/divisor
+    // backoff. Logging it with and without the bias proves whether ISAC_PBCH_OFFSET_BIAS actually
+    // moves the FFT window by that many samples in the SAME coordinate the offline scanner reports
+    // its best DMRS position in. Until the difference is EXACTLY the bias, a scanner delta cannot
+    // be translated into sample_offset at all, and the bias test proves nothing.
+    {
+      // Per-occasion displacement measurement (bounded, small window copy, ISAC_DELTA_SCAN=1).
+      {
+        extern void nr_pbch_measure_delta(const NR_DL_FRAME_PARMS *, const UE_nr_rxtx_proc_t *,
+                                          c16_t *const *, int, unsigned);
+        nr_pbch_measure_delta(fp, proc, ue->common_vars.rxdata, 2 * fp->samples_per_frame,
+                              nr_slot_fep_diag_rx_offset);
+      }
+      static int s_fftaddr_left = 6;
+      if (s_fftaddr_left > 0) {
+        s_fftaddr_left--;
+        LOG_W(PHY,
+              "SENSING: FFTADDR frame=%d slot=%d symbol=%d bias=%d fep_rx_offset=%u nb_pfx=%u nb_pfx0=%u\n",
+              proc->frame_rx, proc->nr_slot_rx, symbol, s_pbch_bias, nr_slot_fep_diag_rx_offset,
+              nr_slot_fep_diag_nb_prefix_samples, nr_slot_fep_diag_nb_prefix_samples0);
+      }
+    }
     for (int aarx = 0; aarx < fp->nb_antennas_rx; aarx++) {
       memcpy(rxdataF[aarx], tmp[aarx] + symbol * fp->ofdm_symbol_size, sizeof(c16_t) * fp->ofdm_symbol_size);
     }
