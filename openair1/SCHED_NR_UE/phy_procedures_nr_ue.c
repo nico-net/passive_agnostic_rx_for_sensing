@@ -1066,8 +1066,14 @@ int nr_process_pbch_symbol(
     // immediately after the synchronous call above) so this does NOT duplicate/risk drifting from
     // that function's own offset arithmetic.
     {
+      static int s_phy_diag = -1;
+      if (s_phy_diag < 0)
+        s_phy_diag = (getenv("ISAC_PHY_DIAG") && atoi(getenv("ISAC_PHY_DIAG"))) ? 1 : 0;
+      // FEPDIAG/SSBTIME/FRAMESCAN are heavy: FRAMESCAN alone does ~280 4096-point FFTs
+      // INLINE ON THE RT PATH. Measured elsewhere to stall processing long enough to cause
+      // an RF overrun. Default OFF so a control run is not perturbed by its own instrumentation.
       static int s_fepdiag_left = 40;
-      if (s_fepdiag_left > 0) {
+      if (s_phy_diag && s_fepdiag_left > 0) {
         const unsigned int rx_off = nr_slot_fep_diag_rx_offset;
         const unsigned int nb_pfx = nr_slot_fep_diag_nb_prefix_samples;
         const c16_t *rxd = ue->common_vars.rxdata[0];
@@ -1743,7 +1749,10 @@ int pbch_processing(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc, nr_phy_da
     // Expected: burst on symbols 2..6 (PSS/PBCH/SSS/PBCH for ssbIndex 0, Case C band n78).
     if (nr_slot_rx == 0) {
       static int sweeps = 0;
-      if (sweeps < 8) {
+      static int s_sweep_diag = -1;
+      if (s_sweep_diag < 0)
+        s_sweep_diag = (getenv("ISAC_PHY_DIAG") && atoi(getenv("ISAC_PHY_DIAG"))) ? 1 : 0;
+      if (s_sweep_diag && sweeps < 8) {
         sweeps++;
         char buf[768];
         int p = 0;

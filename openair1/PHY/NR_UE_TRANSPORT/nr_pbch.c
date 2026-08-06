@@ -822,7 +822,10 @@ void nr_generate_pbch_llr(const PHY_VARS_NR_UE *ue,
   //    the linear-phase component is taken out.
   {
     static int s_pbchdiag_left = 60;
-    if (s_pbchdiag_left > 0) {
+    static int s_pbchdiag_en = -1;
+    if (s_pbchdiag_en < 0)
+      s_pbchdiag_en = (getenv("ISAC_PHY_DIAG") && atoi(getenv("ISAC_PHY_DIAG"))) ? 1 : 0;
+    if (s_pbchdiag_en && s_pbchdiag_left > 0) {
       uint64_t h_rxf = 1469598103934665603ULL, h_chest = 1469598103934665603ULL;
       double rxf_abs_sum = 0.0, chest_abs_sum = 0.0;
       const int16_t *rxf_p = (const int16_t *)&rxdataF_ext[0][0];

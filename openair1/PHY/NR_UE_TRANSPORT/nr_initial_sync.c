@@ -382,6 +382,30 @@ static void nr_scan_ssb(void *arg)
 
   nr_ue_ssb_scan_t *ssbInfo = (nr_ue_ssb_scan_t *)arg;
   c16_t **rxdata = ssbInfo->rxdata;
+
+  // ---- PER-CHANNEL RMS AT ACQUISITION (2026-08-06) ------------------------------------------
+  // Cheap: one pass over a decimated slice of each antenna's acquisition buffer, once per process.
+  // Identifies WHICH physical RF channel actually carries signal, so the 1-channel mapping
+  // question can be settled from a run that is happening anyway rather than a blind port sweep.
+  {
+    static volatile int s_rms_done = 0;
+    if (!s_rms_done) {
+      s_rms_done = 1;
+      char buf[256];
+      int p = 0;
+      const int n = ssbInfo->fp->samples_per_frame;
+      for (int a = 0; a < ssbInfo->fp->nb_antennas_rx && p < (int)sizeof(buf) - 24; a++) {
+        double s = 0.0;
+        int cnt = 0;
+        for (int i = 0; i < n; i += 64) { // decimated: relative level, not exactness
+          s += (double)rxdata[a][i].r * rxdata[a][i].r + (double)rxdata[a][i].i * rxdata[a][i].i;
+          cnt++;
+        }
+        p += snprintf(buf + p, sizeof(buf) - p, " ch%d=%.1f", a, cnt ? sqrt(s / cnt) : 0.0);
+      }
+      LOG_W(PHY, "SENSING: CHRMS acquisition per-channel RMS:%s\n", buf);
+    }
+  }
   const NR_DL_FRAME_PARMS *fp = ssbInfo->fp;
 
   // Generate PSS time signal for this GSCN.
