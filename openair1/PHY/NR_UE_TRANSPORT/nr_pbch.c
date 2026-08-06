@@ -430,7 +430,7 @@ void nr_isac_framescan(const c16_t *rxd,
  * Deliberately uses acquisition's own uniform-stride window (ofdm_symbol_size + nb_prefix_samples),
  * matching do_time_to_freq(), so delta is measured against a reference that is known to work.
  */
-static struct {
+typedef struct {
   int valid;
   int nb_ant;
   int nsamp;
@@ -442,7 +442,10 @@ static struct {
   int ofdm_symbol_size;
   int nb_prefix_samples;
   c16_t *rxdata[4];
-} g_pbch_golden;
+} pbch_snapshot_t;
+
+static pbch_snapshot_t g_pbch_golden; /* acquisition: samples KNOWN to decode */
+static pbch_snapshot_t g_pbch_live;   /* one live tracking occasion, captured verbatim */
 
 void nr_pbch_golden_capture(int nb_ant,
                             int nsamp,
@@ -481,6 +484,170 @@ void nr_pbch_golden_capture(int nb_ant,
         "ssb_sc=%d N=%d cp=%d\n",
         nb_ant, nsamp, ssb_time_offset, nid_cell, i_ssb, n_hf, ssb_start_subcarrier,
         ofdm_symbol_size, nb_prefix_samples);
+}
+
+/* Capture ONE live tracking occasion verbatim: the time-domain samples the live path is about to
+ * process, plus the live state it will process them with. The live ssb_time_offset is expressed in
+ * the SAME convention as the acquisition snapshot (start of SSB symbol 0), derived from the
+ * rx_offset nr_slot_fep actually used for PBCH symbol 1, so one replay loop serves both. */
+void nr_pbch_live_capture(int nb_ant,
+                          int nsamp,
+                          c16_t *const *rxdata,
+                          int fep_rx_offset_sym1,
+                          int nid_cell,
+                          int i_ssb,
+                          int n_hf,
+                          int ssb_start_subcarrier,
+                          int ofdm_symbol_size,
+                          int nb_prefix_samples)
+{
+  if (g_pbch_live.valid || nb_ant <= 0 || nb_ant > 4 || nsamp <= 0)
+    return;
+  for (int a = 0; a < nb_ant; a++) {
+    g_pbch_live.rxdata[a] = (c16_t *)malloc16(sizeof(c16_t) * nsamp);
+    if (!g_pbch_live.rxdata[a]) {
+      for (int b = 0; b < a; b++)
+        free16(g_pbch_live.rxdata[b], sizeof(c16_t) * nsamp);
+      return;
+    }
+    memcpy(g_pbch_live.rxdata[a], rxdata[a], sizeof(c16_t) * nsamp);
+  }
+  const int stride = ofdm_symbol_size + nb_prefix_samples;
+  g_pbch_live.nb_ant = nb_ant;
+  g_pbch_live.nsamp = nsamp;
+  /* replay computes base = ssb_time_offset + s*stride + cp; make s=1 land on the live offset */
+  g_pbch_live.ssb_time_offset = fep_rx_offset_sym1 - stride - nb_prefix_samples;
+  g_pbch_live.nid_cell = nid_cell;
+  g_pbch_live.i_ssb = i_ssb;
+  g_pbch_live.n_hf = n_hf;
+  g_pbch_live.ssb_start_subcarrier = ssb_start_subcarrier;
+  g_pbch_live.ofdm_symbol_size = ofdm_symbol_size;
+  g_pbch_live.nb_prefix_samples = nb_prefix_samples;
+  g_pbch_live.valid = 1;
+  LOG_W(PHY,
+        "SENSING: PBCHLIVE captured nb_ant=%d nsamp=%d fep_rx_offset=%d -> ssb_time_offset=%d "
+        "nid=%d i_ssb=%d n_hf=%d ssb_sc=%d N=%d cp=%d\n",
+        nb_ant, nsamp, fep_rx_offset_sym1, g_pbch_live.ssb_time_offset, nid_cell, i_ssb, n_hf,
+        ssb_start_subcarrier, ofdm_symbol_size, nb_prefix_samples);
+}
+
+static uint32_t fnv1a_c16(const c16_t *v, int n)
+{
+  uint32_t h = 2166136261u;
+  for (int i = 0; i < n; i++) {
+    const uint8_t *p = (const uint8_t *)&v[i];
+    for (unsigned k = 0; k < sizeof(c16_t); k++) {
+      h ^= p[k];
+      h *= 16777619u;
+    }
+  }
+  return h;
+}
+
+static double rms_c16(const c16_t *v, int n)
+{
+  double s = 0.0;
+  for (int i = 0; i < n; i++)
+    s += (double)v[i].r * v[i].r + (double)v[i].i * v[i].i;
+  return (n > 0) ? sqrt(s / n) : 0.0;
+}
+
+/* ---- 2x2 CROSS-REPLAY: samples x parameters (2026-08-06) ---------------------------------------
+ * Separates two claims that a timing measurement alone cannot: whether the LIVE SAMPLES carry a
+ * decodable PBCH, and whether the LIVE STATE is correct. Runs one chain over all four crossings and
+ * hashes every stage, so the FIRST differing stage is the bug boundary.
+ *
+ *   golden samples + golden params -> control, must pass
+ *   golden samples + live params   -> isolates tracking metadata/state
+ *   live samples   + golden params -> isolates the live samples
+ *   live samples   + live params   -> reproduces the real occasion offline
+ *
+ * If the last one PASSES offline while the online occasion failed, the fault is not in samples or
+ * parameters at all but in something only the live path has: a race, buffer reuse/aliasing, or
+ * shared scratch state.
+ */
+static void pbch_replay_one(const NR_DL_FRAME_PARMS *fp,
+                            const UE_nr_rxtx_proc_t *proc,
+                            const pbch_snapshot_t *samples,
+                            const pbch_snapshot_t *params,
+                            const char *label)
+{
+  if (!samples->valid || !params->valid)
+    return;
+  const int N = params->ofdm_symbol_size;
+  const int cp = params->nb_prefix_samples;
+  const int stride = N + cp;
+  const int nb_ant = samples->nb_ant < params->nb_ant ? samples->nb_ant : params->nb_ant;
+  const dft_size_idx_t dsz = get_dft(N);
+
+  int16_t pbch_e_rx[NR_POLAR_PBCH_E];
+  double pbch_log2_maxh = -1.0;
+  uint32_t h_time = 0, h_fft = 0, h_chest = 0;
+  double r_time = 0.0, r_fft = 0.0, r_chest = 0.0;
+
+  for (int s = 1; s <= 3; s++) {
+    const long base = (long)params->ssb_time_offset + (long)s * stride + cp;
+    if (base < 0 || base + N > samples->nsamp) {
+      LOG_W(PHY, "SENSING: PBCH2X2 label=%s SKIPPED (base %ld out of range, nsamp=%d)\n", label, base,
+            samples->nsamp);
+      return;
+    }
+    __attribute__((aligned(32))) c16_t rxdataF[nb_ant][N];
+    __attribute__((aligned(32))) c16_t dl_ch_estimates[nb_ant][N];
+    for (int a = 0; a < nb_ant; a++)
+      dft(dsz, (int16_t *)&samples->rxdata[a][base], (int16_t *)rxdataF[a], 1);
+
+    for (int a = 0; a < nb_ant; a++)
+      nr_pbch_channel_estimation(fp, NULL, dl_ch_estimates[a], proc, s - 1, params->i_ssb, params->n_hf,
+                                 params->ssb_start_subcarrier, rxdataF[a], false, params->nid_cell);
+
+    if (s == 1) { /* hash one representative symbol's stages */
+      h_time = fnv1a_c16(&samples->rxdata[0][base], N);
+      r_time = rms_c16(&samples->rxdata[0][base], N);
+      h_fft = fnv1a_c16(rxdataF[0], N);
+      r_fft = rms_c16(rxdataF[0], N);
+      h_chest = fnv1a_c16(dl_ch_estimates[0], N);
+      r_chest = rms_c16(dl_ch_estimates[0], N);
+    }
+
+    nr_generate_pbch_llr(NULL, proc, fp, s, params->i_ssb, params->nid_cell, params->ssb_start_subcarrier,
+                         rxdataF, dl_ch_estimates, pbch_e_rx, &pbch_log2_maxh);
+  }
+
+  double llr_absmean = 0.0;
+  for (int i = 0; i < NR_POLAR_PBCH_E; i++)
+    llr_absmean += fabs((double)pbch_e_rx[i]);
+  llr_absmean /= NR_POLAR_PBCH_E;
+  uint32_t h_llr = 2166136261u;
+  for (int i = 0; i < NR_POLAR_PBCH_E; i++) {
+    h_llr ^= (uint8_t)(pbch_e_rx[i] & 0xff);
+    h_llr *= 16777619u;
+  }
+
+  fapiPbch_t res;
+  int hfb = 0, ssb_idx = 0, sym_off = 0;
+  const int crc_ok =
+      (0 == nr_pbch_decode(NULL, fp, proc, params->i_ssb, params->nid_cell, pbch_e_rx, &hfb, &ssb_idx, &sym_off, &res));
+
+  LOG_W(PHY,
+        "SENSING: PBCH2X2 label=%-22s crc_ok=%d llr_absmean=%.2f log2_maxh=%.2f | "
+        "time[h=%08x rms=%.1f] fft[h=%08x rms=%.1f] chest[h=%08x rms=%.1f] llr[h=%08x]\n",
+        label, crc_ok, llr_absmean, pbch_log2_maxh, h_time, r_time, h_fft, r_fft, h_chest, r_chest, h_llr);
+}
+
+void nr_pbch_replay_2x2(const NR_DL_FRAME_PARMS *fp, const UE_nr_rxtx_proc_t *proc)
+{
+  static int done = 0;
+  if (done || !g_pbch_golden.valid || !g_pbch_live.valid)
+    return;
+  done = 1;
+  LOG_W(PHY, "SENSING: PBCH2X2 begin (golden ssb_off=%d, live ssb_off=%d)\n",
+        g_pbch_golden.ssb_time_offset, g_pbch_live.ssb_time_offset);
+  pbch_replay_one(fp, proc, &g_pbch_golden, &g_pbch_golden, "goldenSamp+goldenParm");
+  pbch_replay_one(fp, proc, &g_pbch_golden, &g_pbch_live, "goldenSamp+liveParm");
+  pbch_replay_one(fp, proc, &g_pbch_live, &g_pbch_golden, "liveSamp+goldenParm");
+  pbch_replay_one(fp, proc, &g_pbch_live, &g_pbch_live, "liveSamp+liveParm");
+  LOG_W(PHY, "SENSING: PBCH2X2 end\n");
 }
 
 void nr_pbch_replay_golden(const NR_DL_FRAME_PARMS *fp, const UE_nr_rxtx_proc_t *proc)

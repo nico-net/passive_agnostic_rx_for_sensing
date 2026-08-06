@@ -1485,6 +1485,34 @@ static int pbch_process(PHY_VARS_NR_UE *UE,
     cur_pbch_est = pbch_ch_est_sym3;
 
   *ssbIndex = nr_process_pbch_symbol(UE, proc, symbol, *ssbIndex, pbch_ch_est_time, cur_pbch_est, pbch_e_rx, log2_maxh_state);
+
+  // ---- LIVE TRACKING-OCCASION SNAPSHOT for the 2x2 cross-replay (2026-08-06) -----------------
+  // Capture the samples the LIVE path is about to process, with the LIVE state, at PBCH symbol 1.
+  // A stable CIR peak proves the timing ESTIMATOR is well-behaved; it does not prove the live
+  // buffer carries a decodable PBCH. Crossing these samples/params against acquisition's known-good
+  // pair separates "wrong samples" from "wrong state" from "something only the online path does".
+  // Opt-in: ISAC_PBCH_2X2=1.
+  if (*ssbIndex > -1 && *pbchSymbCnt == 0) {
+    static int s_2x2 = -1;
+    if (s_2x2 < 0)
+      s_2x2 = (getenv("ISAC_PBCH_2X2") && atoi(getenv("ISAC_PBCH_2X2"))) ? 1 : 0;
+    if (s_2x2) {
+      extern void nr_pbch_live_capture(int, int, c16_t *const *, int, int, int, int, int, int, int);
+      extern void nr_pbch_replay_2x2(const NR_DL_FRAME_PARMS *, const UE_nr_rxtx_proc_t *);
+      const NR_DL_FRAME_PARMS *fp2 = &UE->frame_parms;
+      nr_pbch_live_capture(fp2->nb_antennas_rx,
+                           2 * fp2->samples_per_frame,
+                           UE->common_vars.rxdata,
+                           (int)nr_slot_fep_diag_rx_offset,
+                           fp2->Nid_cell,
+                           *ssbIndex,
+                           fp2->half_frame_bit,
+                           fp2->ssb_start_subcarrier,
+                           fp2->ofdm_symbol_size,
+                           fp2->nb_prefix_samples);
+      nr_pbch_replay_2x2(fp2, proc);
+    }
+  }
   // If valid PBCH symbol, increment symbol count.
   if (*ssbIndex > -1)
     (*pbchSymbCnt)++;
