@@ -1053,8 +1053,87 @@ void nr_pbch_measure_delta(const NR_DL_FRAME_PARMS *fp,
         at_pred, (best_off >= 0) ? (lo + best_off) - pred : 0, best_a,
         (best > 0.97) ? "YES" : "no");
 
+  if (best > 0.99 && best_off >= 0) {
+    extern void nr_pbch_cir_convention_test(const NR_DL_FRAME_PARMS *, const UE_nr_rxtx_proc_t *,
+                                            c16_t *const *, int, long);
+    nr_pbch_cir_convention_test(fp, proc, rxdata, nsamp_total, lo + best_off);
+  }
+
   for (int a = 0; a < nant; a++)
     free16(w.rxdata[a], sizeof(c16_t) * need);
+}
+
+
+/* ---- CIR ZERO-DELAY CONVENTION TEST (2026-08-06) -----------------------------------------------
+ * Feeds the CIR estimator a snapshot at a KNOWN-CORRECT alignment (the position the DMRS scanner
+ * confirms at ~0.9999) plus controlled displacements, and reports what it says the timing error is.
+ * At a known-correct position a healthy estimator must report ~0; if it reports ~N/2 the zero-delay
+ * convention is wrong. Sweeping displacements rather than testing one point also exposes sign
+ * errors, wrapping and false-lock regions, which a single aligned sample cannot.
+ *
+ * Replicates nr_adjust_synch_ue()'s peak search EXACTLY (same +-CP window, same j = (i<0)?i+N:i
+ * index mapping) but touches no filter state, so it is a pure read of the estimator's convention.
+ * Also reports the full-symbol peak, so a peak sitting outside the +-CP window is visible rather
+ * than silently clipped.
+ */
+void nr_pbch_cir_convention_test(const NR_DL_FRAME_PARMS *fp,
+                                 const UE_nr_rxtx_proc_t *proc,
+                                 c16_t *const *rxdata,
+                                 int nsamp_total,
+                                 long true_ssb0)
+{
+  static int done = 0;
+  if (done)
+    return;
+  static int en = -1;
+  if (en < 0)
+    en = (getenv("ISAC_CIR_TEST") && atoi(getenv("ISAC_CIR_TEST"))) ? 1 : 0;
+  if (!en)
+    return;
+  done = 1;
+
+  const int N = fp->ofdm_symbol_size, cp = fp->nb_prefix_samples, stride = N + cp;
+  const dft_size_idx_t dsz = get_dft(N);
+  NR_DL_FRAME_PARMS fp1 = *fp;
+  fp1.nb_antennas_rx = 1;
+  const int offs[] = {-1024, -512, -256, 0, 256, 512, 1024};
+
+  LOG_W(PHY, "SENSING: CIRTEST begin N=%d cp=%d true_ssb0=%ld (scanner-confirmed)\n", N, cp, true_ssb0);
+
+  for (unsigned k = 0; k < sizeof(offs) / sizeof(offs[0]); k++) {
+    const long base = true_ssb0 + offs[k] + 1L * stride + cp; /* PBCH symbol 1 */
+    if (base < 0 || base + N > nsamp_total)
+      continue;
+    __attribute__((aligned(32))) c16_t rxF[N], H[N], Ht[N];
+    memset(rxF, 0, sizeof(rxF));
+    memset(H, 0, sizeof(H));
+    memset(Ht, 0, sizeof(Ht));
+    dft(dsz, (int16_t *)&rxdata[0][base], (int16_t *)rxF, 1);
+    nr_pbch_channel_estimation(&fp1, NULL, H, proc, 0, 0, fp->half_frame_bit, fp->ssb_start_subcarrier,
+                               rxF, false, fp->Nid_cell);
+    const double coh = chest_coherence(H, N);
+    freq2time(N, (int16_t *)H, (int16_t *)Ht);
+
+    /* nr_adjust_synch_ue()'s exact search: +-CP, index-0-centred with negative wrap */
+    int max_val = 0, max_pos = 0;
+    for (int i = -cp; i < cp; i++) {
+      const int j = (i < 0) ? (i + N) : i;
+      const int t = (Ht[j].r * Ht[j].r) / 2 + (Ht[j].i * Ht[j].i) / 2;
+      if (t > max_val) { max_val = t; max_pos = i; }
+    }
+    /* full-symbol peak: reveals a peak the +-CP window cannot see */
+    int g_val = 0, g_raw = 0;
+    for (int i = 0; i < N; i++) {
+      const int t = (Ht[i].r * Ht[i].r) / 2 + (Ht[i].i * Ht[i].i) / 2;
+      if (t > g_val) { g_val = t; g_raw = i; }
+    }
+    const int g_signed = (g_raw > N / 2) ? (g_raw - N) : g_raw;
+    LOG_W(PHY,
+          "SENSING: CIRTEST injected=%+5d dmrs_coh=%.4f | cp_window: max_pos=%+5d max_val=%d | "
+          "full_symbol: raw_peak=%4d signed=%+5d peak_minus_N2=%+5d val=%d\n",
+          offs[k], coh, max_pos, max_val, g_raw, g_signed, g_raw - N / 2, g_val);
+  }
+  LOG_W(PHY, "SENSING: CIRTEST end\n");
 }
 
 void nr_pbch_replay_masks(const NR_DL_FRAME_PARMS *fp, const UE_nr_rxtx_proc_t *proc)
