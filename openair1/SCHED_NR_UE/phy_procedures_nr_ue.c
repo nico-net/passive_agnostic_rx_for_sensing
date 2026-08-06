@@ -1055,7 +1055,20 @@ int nr_process_pbch_symbol(
   __attribute__((aligned(32))) c16_t rxdataF[fp->nb_antennas_rx][fp->ofdm_symbol_size];
   {
     __attribute__((aligned(32))) c16_t tmp[fp->nb_antennas_rx][fp->samples_per_slot_wCP];
-    nr_slot_fep(ue, fp, proc->nr_slot_rx, symbol, tmp, link_type_dl, 0, ue->common_vars.rxdata);
+    // ---- TRACKING-ONLY PBCH FFT-WINDOW BIAS (2026-08-06, diagnostic) ------------------------
+    // The offline DMRS-coherence scan located the PBCH DMRS signature (min-over-3-symbols
+    // coherence 0.999, i_ssb=0) at +3620 samples from where this path FFTs. Applying that bias
+    // HERE ONLY -- the PBCH extraction path, not acquisition, not the sample stream, not any
+    // other consumer of rxdata -- tests whether the samples and decoder are fine and the handover
+    // offset is the whole bug. ISAC_PBCH_OFFSET_BIAS=<samples>, default 0 = unchanged.
+    static int s_pbch_bias = INT_MIN;
+    if (s_pbch_bias == INT_MIN) {
+      const char *e = getenv("ISAC_PBCH_OFFSET_BIAS");
+      s_pbch_bias = e ? atoi(e) : 0;
+      if (s_pbch_bias)
+        LOG_W(PHY, "SENSING: PBCHBIAS applying %+d samples to tracking PBCH FFT window only\n", s_pbch_bias);
+    }
+    nr_slot_fep(ue, fp, proc->nr_slot_rx, symbol, tmp, link_type_dl, s_pbch_bias, ue->common_vars.rxdata);
     for (int aarx = 0; aarx < fp->nb_antennas_rx; aarx++) {
       memcpy(rxdataF[aarx], tmp[aarx] + symbol * fp->ofdm_symbol_size, sizeof(c16_t) * fp->ofdm_symbol_size);
     }
