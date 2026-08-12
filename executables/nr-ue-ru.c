@@ -433,6 +433,32 @@ int nrue_ru_read(PHY_VARS_NR_UE *UE, openair0_timestamp_t *ptimestamp, void **bu
   openair0_device_t *dev = &openair0_dev[UE->rf_map.card];
   openair0_timestamp_t tmp_timestamp;
   int ret = dev->trx_read_func(dev, &tmp_timestamp, buff, nsamps, num_antennas);
+  openair0_timestamp_t first_timestamp = tmp_timestamp;
+  bool have_timestamp = ret > 0;
+
+  if (ret >= 0 && ret < nsamps) {
+    LOG_W(HW, "Short RX read: got %d of %d samples, retrying\n", ret, nsamps);
+    for (int retry = 0; ret < nsamps && retry < 20; retry++) {
+      void *retry_buf[num_antennas];
+      for (int ant = 0; ant < num_antennas; ant++)
+        retry_buf[ant] = (char *)buff[ant] + (size_t)ret * sizeof(int32_t);
+
+      openair0_timestamp_t retry_timestamp;
+      int got = dev->trx_read_func(dev, &retry_timestamp, retry_buf, nsamps - ret, num_antennas);
+      if (got > 0) {
+        if (!have_timestamp) {
+          first_timestamp = retry_timestamp;
+          have_timestamp = true;
+        }
+        ret += got;
+      }
+    }
+    if (ret < nsamps)
+      LOG_W(HW, "Short RX read remains: got %d of %d samples\n", ret, nsamps);
+  }
+
+  if (have_timestamp)
+    tmp_timestamp = first_timestamp;
   if (!dev->firstTS_initialized) {
     dev->firstTS = tmp_timestamp;
     dev->firstTS_initialized = true;

@@ -682,7 +682,8 @@ void readFrame(PHY_VARS_NR_UE *UE, openair0_timestamp_t *timestamp, int duration
       int readBlockSize = get_samples_per_slot(slot_rx, fp);
       int tmp = nrue_ru_read(UE, timestamp, (void **)rxp, readBlockSize, fp->nb_antennas_rx);
       UEscopeCopy(UE, ueTimeDomainSamplesBeforeSync, rxp[0], sizeof(c16_t), 1, readBlockSize, 0);
-      AssertFatal(readBlockSize == tmp, "read rf board failed %d", tmp);
+      if (readBlockSize != tmp)
+        LOG_W(PHY, "readFrame: got %d of %d RF samples\n", tmp, readBlockSize);
 
       if (IS_SOFTMODEM_RFSIM) {
         int slot_tx = (slot_rx + duration_rx_to_tx) % fp->slots_per_frame;
@@ -712,14 +713,19 @@ static void syncInFrame(PHY_VARS_NR_UE *UE, openair0_timestamp_t *timestamp, int
     // Set a maximum transfer size. As we usually read/write single slots, we use the size of slot 0 as maximum here.
     const int unitTransfer = min(get_samples_per_slot(0, fp), size);
     const int res = nrue_ru_read(UE, timestamp, (void **)UE->common_vars.rxdata, unitTransfer, fp->nb_antennas_rx);
-    DevAssert(unitTransfer == res);
+    if (res <= 0) {
+      LOG_W(PHY, "Unable to read RF samples while resynchronizing\n");
+      break;
+    }
+    if (unitTransfer != res)
+      LOG_W(PHY, "syncInFrame: got %d of %d RF samples\n", res, unitTransfer);
     if (IS_SOFTMODEM_RFSIM) {
       int ta = UE->timing_advance + UE->timing_advance_ntn;
       const openair0_timestamp_t writeTimestamp =
           *timestamp + get_samples_slot_duration(fp, 0, duration_rx_to_tx) - UE->N_TA_offset - ta;
       dummyWrite(UE, writeTimestamp, unitTransfer);
     }
-    size -= unitTransfer;
+    size -= res;
   }
 }
 
@@ -860,6 +866,11 @@ void *UE_thread(void *arg)
     AssertFatal(!syncRunning, "At this point synchronization can't be running\n");
 
     if (!UE->is_synchronized) {
+      if (get_nrUE_params()->time_sync_I)
+        UE->max_pos_acc = ntn_init_time_drift * 1e-6 * fp->samples_per_frame / get_nrUE_params()->time_sync_I;
+      else
+        UE->max_pos_acc = 0;
+      UE->max_pos_iir = 0;
       readFrame(UE, &sync_timestamp, duration_rx_to_tx, false);
       notifiedFIFO_elt_t *Msg = newNotifiedFIFO_elt(sizeof(syncData_t), 0, &nf, UE_synch);
       syncData_t *syncMsg = (syncData_t *)NotifiedFifoData(Msg);
@@ -884,17 +895,34 @@ void *UE_thread(void *arg)
 
     if (stream_status == STREAM_STATUS_UNSYNC) {
       stream_status = STREAM_STATUS_SYNCING;
-      syncInFrame(UE, &sync_timestamp, duration_rx_to_tx, intialSyncOffset);
+      const int elapsed_frames = UE->init_sync_frame + trashed_frames + 2;
+      const int initial_drift_shift =
+          -round(elapsed_frames * UE->max_pos_acc * get_nrUE_params()->time_sync_I);
+      const int corrected_sync_offset = intialSyncOffset + initial_drift_shift;
+      if (corrected_sync_offset >= 0) {
+        syncInFrame(UE, &sync_timestamp, duration_rx_to_tx, corrected_sync_offset);
+      } else {
+        LOG_W(PHY,
+              "Initial drift correction %d exceeds sync offset %d, using uncorrected offset\n",
+              initial_drift_shift,
+              intialSyncOffset);
+        syncInFrame(UE, &sync_timestamp, duration_rx_to_tx, intialSyncOffset);
+      }
       nrue_ru_write_reorder_clear_context(UE);
-      shiftForNextFrame = -(UE->init_sync_frame + trashed_frames + 2) * UE->max_pos_acc * get_nrUE_params()->time_sync_I; // compensate for the time drift that happened during initial sync
-      LOG_I(PHY, "max_pos_acc = %d, shiftForNextFrame = %d\n", UE->max_pos_acc, shiftForNextFrame);
+      shiftForNextFrame = -round(UE->max_pos_acc * get_nrUE_params()->time_sync_I);
+      LOG_I(PHY,
+            "max_pos_acc = %d, initial_drift_shift = %d, shiftForNextFrame = %d\n",
+            UE->max_pos_acc,
+            initial_drift_shift,
+            shiftForNextFrame);
       // read in first symbol
       int ret = nrue_ru_read(UE,
                              &sync_timestamp,
                              (void **)UE->common_vars.rxdata,
                              fp->ofdm_symbol_size + fp->nb_prefix_samples0,
                              fp->nb_antennas_rx);
-      AssertFatal(fp->ofdm_symbol_size + fp->nb_prefix_samples0 == ret, "read rf board failed %d", ret);
+      if (fp->ofdm_symbol_size + fp->nb_prefix_samples0 != ret)
+        LOG_W(PHY, "Initial symbol: got %d RF samples\n", ret);
       // we have the decoded frame index in the return of the synch process
       // and we shifted above to the first slot of next frame
       decoded_frame_rx = (decoded_frame_rx + 1) % MAX_FRAME_NUMBER;
@@ -998,7 +1026,8 @@ void *UE_thread(void *arg)
     int tmp = nrue_ru_read(UE, &rx_timestamp, (void **)rxp, readBlockSize, fp->nb_antennas_rx);
     metadata meta = {.slot =  curMsg.proc.nr_slot_rx, .frame =  curMsg.proc.frame_rx};
     UEscopeCopyWithMetadata(UE, ueTimeDomainSamples, rxp[0] - firstSymSamp, sizeof(c16_t), 1, readBlockSize, 0, &meta);
-    AssertFatal(readBlockSize == tmp, "read to rf board failed %d", tmp);
+    if (readBlockSize != tmp)
+      LOG_W(PHY, "UE slot: got %d of %d RF samples\n", tmp, readBlockSize);
     struct timespec current_time;
     if (clock_gettime(CLOCK_REALTIME, &current_time)) {
       LOG_E(PHY, "clock_gettime failed\n");
@@ -1011,7 +1040,8 @@ void *UE_thread(void *arg)
       if (first_symbols > 0) {
         openair0_timestamp_t ignore_timestamp;
         int tmp = nrue_ru_read(UE, &ignore_timestamp, (void **)UE->common_vars.rxdata, first_symbols, fp->nb_antennas_rx);
-        AssertFatal(first_symbols == tmp, "read to rf board failed %d", tmp);
+        if (first_symbols != tmp)
+          LOG_W(PHY, "Next-frame symbol: got %d of %d RF samples\n", tmp, first_symbols);
 
       } else
         LOG_E(PHY,"can't compensate: diff =%d\n", first_symbols);
