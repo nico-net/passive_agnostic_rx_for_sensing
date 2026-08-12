@@ -403,9 +403,10 @@ int nr_pbch_decode(PHY_VARS_NR_UE *ue,
                                                                           .rx_ind = &rx_ind};
       ue->if_inst->dl_indication(&dl_indication);
     }
+    LOG_E(PHY, "ERROR NR_PBCH_DECODE => polar decoding wrong\n");
     return(decoderState);
   }
-  //  printf("polar decoder output 0x%08x\n",pbch_a_prime);
+  //printf("polar decoder output 0x%08x\n",pbch_a_prime);
   // Decoder reversal
   pbch_a_prime = (uint32_t)reverse_bits(pbch_a_prime, NR_POLAR_PBCH_PAYLOAD_BITS);
 
