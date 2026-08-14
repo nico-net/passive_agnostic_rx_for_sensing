@@ -746,6 +746,16 @@ static inline int get_readBlockSize(uint16_t slot, const NR_DL_FRAME_PARMS *fp)
 void trs_freq_correction(PHY_VARS_NR_UE *ue, int cfo)
 {
   if (abs(cfo) > TRS_CFO_THRESH) {
+    if (ue->frame_parms.nb_antennas_rx == 4) {
+      /* Initial synchronization already corrects the carrier offset. The
+       * unfiltered four-RX TRS estimate can jump by several kHz and make the
+       * UE chase noise, so keep the synchronized RF frequency stable. */
+      LOG_W(PHY,
+            "Ignoring unfiltered four-RX TRS CFO estimate %d Hz (threshold %d Hz)\n",
+            cfo,
+            TRS_CFO_THRESH);
+      return;
+    }
     LOG_A(PHY, "CFO estimated (%d) from TRS exceeded threshold (%d). Adjusting radio CF\n", cfo, TRS_CFO_THRESH);
     ue->freq_offset += cfo;
     uint64_t dl_carrier;

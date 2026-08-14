@@ -291,6 +291,11 @@ static void nr_pdcch_channel_compensation(int arraySz,
 
 static void nr_pdcch_detection_mrc(int nb_ant, int sz, c16_t rxdataF_comp[][sz])
 {
+  /* Four-RX rank-one compatibility mode uses branch 0 to avoid overflow in
+   * the fixed-point MRC accumulator. */
+  if (nb_ant == 4)
+    return;
+
   c16_t *rx0 = rxdataF_comp[0];
   // MRC on each re of rb
   // input always aligned and accepting tail padding to process all actual samples

@@ -194,7 +194,9 @@ void nr_pbch_channel_compensation(const struct complex16 rxdataF_ext[][PBCH_MAX_
 
 static void nr_pbch_detection_mrc(struct complex16 rxdataF_comp[][PBCH_MAX_RE_PER_SYMBOL], uint8_t nb_antennas_rx, int nb_re)
 {
-  if (nb_antennas_rx == 1)
+  /* Four-RX rank-one compatibility mode uses branch 0 to avoid overflow in
+   * the fixed-point MRC accumulator. */
+  if (nb_antennas_rx == 1 || nb_antennas_rx == 4)
     return;
 
   simde__m128i *rxdataF_comp128_0 = (simde__m128i *)rxdataF_comp[0];

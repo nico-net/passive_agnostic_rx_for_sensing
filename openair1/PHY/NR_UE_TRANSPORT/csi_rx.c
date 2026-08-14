@@ -443,7 +443,7 @@ static int nr_csi_rs_ri_estimation(const PHY_VARS_NR_UE *ue,
   if (ue->frame_parms.nb_antennas_rx == 1 || N_ports == 1) {
     return 0;
   } else if( !(ue->frame_parms.nb_antennas_rx == 2 && N_ports == 2) ) {
-    LOG_W(NR_PHY, "Rank indicator computation is not implemented for %i x %i system\n",
+    LOG_D(NR_PHY, "Rank indicator computation is not implemented for %i x %i system\n",
           ue->frame_parms.nb_antennas_rx, N_ports);
     return -1;
   }
@@ -566,6 +566,7 @@ static int nr_csi_rs_pmi_estimation(const PHY_VARS_NR_UE *ue,
                                     const uint32_t interference_plus_noise_power,
                                     const uint8_t rank_indicator,
                                     const int16_t log2_re,
+                                    uint8_t *i1,
                                     uint8_t *i2,
                                     int32_t *precoded_sinr_dB)
 {
@@ -603,6 +604,70 @@ static int nr_csi_rs_pmi_estimation(const PHY_VARS_NR_UE *ue,
       *precoded_sinr_dB = dB_fixed(sinr);
     }
 
+    return 0;
+  }
+
+  if (N_ports == 4 && rank_indicator == 0) {
+    /*
+     * Four-port Type-I single-panel rank-one codebook for N1=2, N2=1,
+     * O1=4 (TS 38.214 5.2.2.2.1).  Search i11=l in [0,7] and i2=n in [0,3]
+     * over W=(1/2)[1 exp(j*pi*l/4) exp(j*pi*n/2)
+     * exp(j*(pi*l/4+pi*n/2))]^T.  The previous two-port search ignored CSI
+     * ports 2 and 3 and consequently reported a beam unrelated to the actual
+     * four-port channel.
+     */
+    static const c16_t phase8[8] = {
+        {32767, 0}, {23170, 23170}, {0, 32767}, {-23170, 23170},
+        {-32767, 0}, {-23170, -23170}, {0, -32767}, {23170, -23170}};
+    int64_t candidate_power[8][4] = {{0}};
+    int count = 0;
+    for (int rb = csirs_config_pdu->start_rb; rb < (csirs_config_pdu->start_rb + csirs_config_pdu->nr_of_rbs); rb++) {
+      if (csirs_config_pdu->freq_density <= 1 && csirs_config_pdu->freq_density != (rb % 2))
+        continue;
+      const uint16_t k = rb * NR_NB_SC_PER_RB;
+      for (int ant_rx = 0; ant_rx < frame_parms->nb_antennas_rx; ant_rx++) {
+        const c16_t *h = csi_rs_estimated_channel_freq[ant_rx][0] + k;
+        for (int l = 0; l < 8; l++) {
+          const c16_t wl = phase8[l];
+          for (int n = 0; n < 4; n++) {
+            const c16_t wn = phase8[2 * n];
+            const c16_t wln = phase8[(l + 2 * n) & 7];
+            int64_t re = h[0].r;
+            int64_t im = h[0].i;
+            re += ((int64_t)h[frame_parms->ofdm_symbol_size].r * wl.r
+                   - (int64_t)h[frame_parms->ofdm_symbol_size].i * wl.i) >> 15;
+            im += ((int64_t)h[frame_parms->ofdm_symbol_size].r * wl.i
+                   + (int64_t)h[frame_parms->ofdm_symbol_size].i * wl.r) >> 15;
+            re += ((int64_t)h[2 * frame_parms->ofdm_symbol_size].r * wn.r
+                   - (int64_t)h[2 * frame_parms->ofdm_symbol_size].i * wn.i) >> 15;
+            im += ((int64_t)h[2 * frame_parms->ofdm_symbol_size].r * wn.i
+                   + (int64_t)h[2 * frame_parms->ofdm_symbol_size].i * wn.r) >> 15;
+            re += ((int64_t)h[3 * frame_parms->ofdm_symbol_size].r * wln.r
+                   - (int64_t)h[3 * frame_parms->ofdm_symbol_size].i * wln.i) >> 15;
+            im += ((int64_t)h[3 * frame_parms->ofdm_symbol_size].r * wln.i
+                   + (int64_t)h[3 * frame_parms->ofdm_symbol_size].i * wln.r) >> 15;
+            // The rank-one four-port codeword has a 1/2 normalization.
+            candidate_power[l][n] += (re * re + im * im) >> 2;
+          }
+        }
+        count++;
+      }
+    }
+    i1[0] = 0;
+    i2[0] = 0;
+    for (int l = 0; l < 8; l++)
+      for (int n = 0; n < 4; n++)
+        if (candidate_power[l][n] > candidate_power[i1[0]][i2[0]]) {
+          i1[0] = l;
+          i2[0] = n;
+        }
+    if (count > 0)
+      *precoded_sinr_dB = dB_fixed((candidate_power[i1[0]][i2[0]] / count) / ipn);
+    return 0;
+  }
+
+  if (N_ports > 2) {
+    LOG_W(NR_PHY, "PMI computation is not implemented for %u ports and rank %u\n", N_ports, rank_indicator + 1);
     return 0;
   }
 
@@ -979,6 +1044,7 @@ void nr_ue_csi_rs_procedures(PHY_VARS_NR_UE *ue,
                              csi_info->csi_im_meas_computed ? csi_info->interference_plus_noise_power : noise_power,
                              rank_indicator,
                              log2_re,
+                             i1,
                              i2,
                              &precoded_sinr_dB);
 
@@ -1007,7 +1073,7 @@ void nr_ue_csi_rs_procedures(PHY_VARS_NR_UE *ue,
   switch (csirs_config_pdu->measurement_bitmap) {
     case 0:
       if (do_trs_est)
-        LOG_I(NR_PHY,
+        LOG_D(NR_PHY,
               "%d.%d TRS estimated CFO: %d Hz\n",
               proc->frame_rx,
               proc->nr_slot_rx,
@@ -1017,11 +1083,11 @@ void nr_ue_csi_rs_procedures(PHY_VARS_NR_UE *ue,
       LOG_I(NR_PHY, "%d.%d [UE %d] RSRP = %i dBm\n", proc->frame_rx, proc->nr_slot_rx, ue->Mod_id, rsrp_dBm);
       break;
     case 26 :
-      LOG_I(NR_PHY, "RI = %i i1 = %i.%i.%i, i2 = %i, SINR = %i dB, CQI = %i\n",
+      LOG_D(NR_PHY, "RI = %i i1 = %i.%i.%i, i2 = %i, SINR = %i dB, CQI = %i\n",
             rank_indicator + 1, i1[0], i1[1], i1[2], i2[0], precoded_sinr_dB, cqi);
       break;
     case 27 :
-      LOG_I(NR_PHY, "RSRP = %i dBm, RI = %i i1 = %i.%i.%i, i2 = %i, SINR = %i dB, CQI = %i\n",
+      LOG_D(NR_PHY, "RSRP = %i dBm, RI = %i i1 = %i.%i.%i, i2 = %i, SINR = %i dB, CQI = %i\n",
             rsrp_dBm, rank_indicator + 1, i1[0], i1[1], i1[2], i2[0], precoded_sinr_dB, cqi);
       break;
     default :

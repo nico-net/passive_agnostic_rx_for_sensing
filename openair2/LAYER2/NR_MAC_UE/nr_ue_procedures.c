@@ -1552,7 +1552,17 @@ static int nr_ue_process_dci_dl_11(NR_UE_MAC_INST_t *mac,
     max_mimo_layers = *sc_info->maxMIMO_Layers_PDSCH;
   else
     max_mimo_layers = mac->uecap_maxMIMO_PDSCH_layers;
-  AssertFatal(max_mimo_layers > 0, "Invalid number of max MIMO layers for PDSCH\n");
+  if (max_mimo_layers < 1) {
+    /*
+     * Some third-party gNBs omit maxMIMO-Layers and the UE capability can be
+     * applied after the first DCI 1_1.  TBS_LBRM still needs a valid layer
+     * count, so use the conservative single-layer value until either source
+     * supplies the negotiated capability.  This value does not override the
+     * number of layers signalled for the actual PDSCH transmission.
+     */
+    LOG_W(NR_MAC, "No maximum PDSCH MIMO layer count available; using 1 for TBS_LBRM\n");
+    max_mimo_layers = 1;
+  }
   int nl_tbslbrm = max_mimo_layers < 4 ? max_mimo_layers : 4;
   dlsch_pdu->tbslbrm = nr_compute_tbslbrm(dlsch_pdu->mcs_table, sc_info->dl_bw_tbslbrm, nl_tbslbrm);
   /*PTRS configuration */
