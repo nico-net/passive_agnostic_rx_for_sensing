@@ -383,17 +383,19 @@ int main(int argc, char **argv)
       mac->dl_frequency = cell.rf_frequency;
 
       UE_CC->sl_mode = get_softmodem_params()->sl_mode;
-      init_actor(&UE_CC->sync_actor, "SYNC_", -1);
+      init_actor(&UE_CC->sync_actor, "SYNC_", get_nrUE_params()->sync_actor_core);
       if (get_nrUE_params()->num_dl_actors > 0) {
         UE_CC->dl_actors = calloc_or_fail(get_nrUE_params()->num_dl_actors, sizeof(*UE_CC->dl_actors));
         for (int i = 0; i < get_nrUE_params()->num_dl_actors; i++) {
-          init_actor(&UE_CC->dl_actors[i], "DL_", -1);
+          const int first_core = get_nrUE_params()->dl_actor_core_start;
+          init_actor(&UE_CC->dl_actors[i], "DL_", first_core < 0 ? -1 : first_core + i);
         }
       }
       if (get_nrUE_params()->num_ul_actors > 0) {
         UE_CC->ul_actors = calloc_or_fail(get_nrUE_params()->num_ul_actors, sizeof(*UE_CC->ul_actors));
         for (int i = 0; i < get_nrUE_params()->num_ul_actors; i++) {
-          init_actor(&UE_CC->ul_actors[i], "UL_", -1);
+          const int first_core = get_nrUE_params()->ul_actor_core_start;
+          init_actor(&UE_CC->ul_actors[i], "UL_", first_core < 0 ? -1 : first_core + i);
         }
       }
       init_nr_ue_vars(UE_CC, inst);

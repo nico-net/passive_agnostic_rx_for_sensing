@@ -91,15 +91,18 @@ const nr_pdcch_blind_monitor_cfg_t* nr_pdcch_blind_monitor_get_cfg(void)
 
 static int parse_coreset(const char* s)
 {
-  return sscanf(s,
-               "%d:%d:%d:%d:%d:%hu",
+  // 7th field (coreset_type) is OPTIONAL so every existing 6-field config keeps working unchanged.
+  g_cfg.coreset_type = 0; // 0 = PDCCH-Config (dedicated), 1 = MIB/SIB1 (CORESET0)
+  const int n = sscanf(s,
+               "%d:%d:%d:%d:%d:%hu:%d",
                &g_cfg.coreset_freq_domain,
                &g_cfg.coreset_duration,
                &g_cfg.coreset_reg_bundle_size,
                &g_cfg.coreset_interleaver_size,
                &g_cfg.coreset_shift_index,
-               &g_cfg.coreset_pdcch_dmrs_scrambling_id)
-         == 6;
+               &g_cfg.coreset_pdcch_dmrs_scrambling_id,
+               &g_cfg.coreset_type);
+  return n == 6 || n == 7;
 }
 
 static int parse_ss(const char* s)
@@ -684,6 +687,24 @@ bool nr_pdcch_blind_decode_and_extract_ex(const int16_t* llr,
   uint64_t dci_estimation[2] = {0};
   const uint32_t crc = polar_decoder_int16((int16_t*)llr, dci_estimation, 1, NR_POLAR_DCI_MESSAGE_TYPE,
                                            dci_length, aggregation_level);
+
+  /* FULLCRC probe: polar_decoder_int16() returns a 24-bit CRC, and only a genuine match has its
+   * upper bits zero (the live path relies on exactly that when it does `crc == n_rnti`). Logging
+   * out->rnti instead -- which is (uint16_t)crc -- makes a false decode whose LOW 16 bits happen to
+   * equal the target look like a success. Print the untruncated value. */
+  {
+    static int s_fullcrc = -1;
+    if (s_fullcrc < 0)
+      s_fullcrc = (getenv("ISAC_PDCCH_FULLCRC") != NULL) ? 1 : 0;
+    /* RNTI-AGNOSTIC detector: a genuine polar decode has the upper 8 bits of the 24-bit CRC zero.
+     * Keying this on a PINNED rnti_min was a mistake -- the C-RNTI churns on every re-attach, so a
+     * pinned probe only sees the window where the guess happened to be live. Logging every crc with
+     * upper==0 finds real DCIs no matter which RNTI they carry. */
+    if (s_fullcrc && (crc >> 16) == 0)
+      printf("FULLCRC L=%u dci_len=%u crc=0x%x upper=0x%x in_range=%d\n",
+             (unsigned)aggregation_level, (unsigned)dci_length, crc, crc >> 16,
+             (crc >= rnti_min && crc <= rnti_max) ? 1 : 0);
+  }
 
   // ---- Step 2: RNTI plausibility -- range check instead of the live path's equality check. This
   // is the entire "blind" widening; see dci_nr.c:538-541 (reference only, not modified). ----

@@ -53,6 +53,13 @@ typedef struct {
   int      coreset_interleaver_size;
   int      coreset_shift_index;
   uint16_t coreset_pdcch_dmrs_scrambling_id;
+  /* CORESET type. 0 = PDCCH-Config (a dedicated CORESET; the DM-RS reference point is the
+     BWP start), 1 = MIB/SIB1 (CORESET0; the reference point is CRB0). This is NOT cosmetic:
+     nr_rx_pdcch_symbol() sets dmrs_ref = BWPStart only for the PDCCH-Config case, so a
+     CORESET0 configured with a non-zero bwp_start and the wrong type generates its DM-RS
+     sequence offset by bwp_start RBs and can NEVER decode. Default 0 keeps every existing
+     dedicated-CORESET config bit-identical (they all use bwp_start = 0). */
+  int      coreset_type;
 
   int ss_monitoring_slot_periodicity;
   int ss_monitoring_slot_offset;

@@ -716,7 +716,12 @@ int nr_config_pusch_pdu(NR_UE_MAC_INST_t *mac,
         } else
           maxMIMO_Layers = 1; // single antenna port
       }
-      AssertFatal (maxMIMO_Layers > 0, "Invalid number of max MIMO layers for PUSCH\n");
+      if (maxMIMO_Layers < 1) {
+        /* Keep rate-matching valid when neither the serving-cell config nor
+         * the UE capability has supplied a maximum rank yet. */
+        LOG_W(NR_MAC, "No maximum PUSCH MIMO layer count available; using 1 for TBS_LBRM\n");
+        maxMIMO_Layers = 1;
+      }
       pusch_config_pdu->tbslbrm = nr_compute_tbslbrm(pusch_config_pdu->mcs_table, sc_info->ul_bw_tbslbrm, maxMIMO_Layers);
     } else
       pusch_config_pdu->tbslbrm = 0;

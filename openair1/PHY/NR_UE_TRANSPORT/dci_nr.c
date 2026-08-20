@@ -323,6 +323,28 @@ static void nr_pdcch_channel_compensation(int arraySz,
 
 static void nr_pdcch_detection_mrc(int nb_ant, int sz, c16_t rxdataF_comp[][sz])
 {
+  /* Four-RX rank-one compatibility mode uses branch 0 to avoid overflow in the fixed-point MRC
+   * accumulator -- but ONLY for the attached UE. The passive receiver needs the array gain: its
+   * targets are dedicated AL1 grants at code rate 0.66, sized by the gNB for the SERVED UE's SNR,
+   * not ours. MEASURED 2026-08-19, dedicated grants, top recovered-RNTI count vs an ~8 chance
+   * floor: skip -> 8, combine -> 3202, and occ[blind=] 0 -> 66 per CPI.
+   * ISAC_PDCCH_MRC4=1 forces combining on in either mode for A/B. */
+  {
+    static int s_mrc4 = -1;
+    if (s_mrc4 < 0)
+      s_mrc4 = (getenv("ISAC_PDCCH_MRC4") != NULL) ? 1 : 0;
+    if (nb_ant == 4 && !s_mrc4 && !IS_PASSIVE_RX_MODE(get_softmodem_params()))
+      return;
+  }
+
+  /* NOTE -- an "equal-gain, 32-bit accumulator, divide by nb_ant" rewrite of this loop was built and
+   * MEASURED on 2026-08-19 and is a REGRESSION: it returns the dedicated-grant decode rate to the
+   * chance floor (top RNTI count 11, occ[blind=5]). Reason: the output feeds nr_pdcch_llr(), which
+   * CLIPS at +/-31, so absolute amplitude -- not just relative branch weighting -- sets the soft-bit
+   * resolution. Dividing by nb_ant drops the signal ~4x below the rail and the LLRs collapse to
+   * 0/+-1. The cascade below is lopsided (a0/8 + a1/8 + a2/4 + a3/2 at four branches) but keeps the
+   * sum near the rail, which matters more here. Do not "fix" the weighting without renormalising to
+   * the clip rail and re-measuring. */
   c16_t *rx0 = rxdataF_comp[0];
   // MRC on each re of rb
   // input always aligned and accepting tail padding to process all actual samples
@@ -358,6 +380,31 @@ static void nr_rx_pdcch_symbol(PHY_VARS_NR_UE *ue,
   int dmrs_ref = 0;
   if (coreset->CoreSetType == NFAPI_NR_CSET_CONFIG_PDCCH_CONFIG)
     dmrs_ref = phy_pdcch_config->pdcch_config[ss_idx].BWPStart;
+  /* CFGTRACE (ISAC_PDCCH_CFGTRACE=1): dump every DERIVED PDCCH parameter for each invocation.
+   * The blind monitor and the normal MAC-driven path both call this function, so with an attached
+   * UE both appear in one log and can be diffed line-by-line for the SAME slot -- which is the only
+   * way to see which derived value the synthetic blind config gets wrong. Read-only, off by default. */
+  {
+    static int s_cfgtrace = -1;
+    if (s_cfgtrace < 0)
+      s_cfgtrace = (getenv("ISAC_PDCCH_CFGTRACE") != NULL) ? 1 : 0;
+    static int s_cfgslot = -2;
+    if (s_cfgslot == -2) {
+      const char *e = getenv("ISAC_PDCCH_CFGTRACE_SLOT");
+      s_cfgslot = e ? atoi(e) : -1; // -1 = every slot
+    }
+    if (s_cfgtrace && (s_cfgslot < 0 || proc->nr_slot_rx == s_cfgslot))
+      LOG_I(PHY,
+            "PDCCHCFG f=%d s=%d ss=%d type=%d n_rb=%d cset_start=%d rb_offset=%d dmrs_ref=%d "
+            "scr_id=%d BWPStart=%d BWPSize=%d dur=%d bundle=%d ilv=%d shift=%d ncand=%d\n",
+            proc->frame_rx, proc->nr_slot_rx, ss_idx, (int)coreset->CoreSetType, n_rb, cset_start,
+            (int)rb_offset, dmrs_ref, (int)scrambling_id,
+            (int)phy_pdcch_config->pdcch_config[ss_idx].BWPStart,
+            (int)phy_pdcch_config->pdcch_config[ss_idx].BWPSize, (int)coreset->duration,
+            (int)coreset->RegBundleSize, (int)coreset->InterleaverSize, (int)coreset->ShiftIndex,
+            (int)phy_pdcch_config->pdcch_config[ss_idx].number_of_candidates);
+  }
+
   // generate pilot
   c16_t pilot[(n_rb + rb_offset + dmrs_ref) * 3] __attribute__((aligned(16)));
   // Note: pilot returned by the following function is already the complex conjugate of the transmitted DMRS
@@ -611,7 +658,16 @@ static void nr_rx_pdcch_symbol(PHY_VARS_NR_UE *ue,
   int avg[fp->nb_antennas_rx];
   nr_channel_level(0, rx_size, pdcch_dl_ch_estimates_ext, fp->nb_antennas_rx, 1, avg, n_rb * RE_PER_RB_OUT_DMRS);
   int avgs = avg[0];
-  for (int i = 1; i < fp->nb_antennas_rx; i++)
+  // The four-RX rank-one mode below skips MRC, so ONLY branch 0 reaches nr_pdcch_llr(). The output
+  // shift must then be derived from branch 0 as well: taking the max over all four branches scales
+  // the compensation for a stronger antenna that is not part of the decoder input, right-shifting
+  // branch 0's REs too far and shrinking every LLR. This mirrors the identical correction the
+  // four-RX commit makes in nr_rx_pdsch() (`if (nl == 1 && nbRx == 4) avgs = avg[0];`), which it
+  // did not carry over to PDCCH. Kept in lockstep with nr_pdcch_detection_mrc()'s own nb_ant == 4
+  // early return -- if that condition is ever changed, change it here too or the shift and the
+  // decoder input silently disagree again.
+  if (fp->nb_antennas_rx != 4)
+    for (int i = 1; i < fp->nb_antennas_rx; i++)
       avgs = cmax(avgs, avg[i]);
   const int log2_maxh = (log2_approx(avgs) / 2) + 5; //+frame_parms->nb_antennas_rx;
   int rx_comp_sz = ceil_mod(llr_size_symbol, 4);
@@ -932,6 +988,43 @@ void nr_pdcch_unscrambling(c16_t *e_rx,
   }
 }
 
+
+/* LLRPROBE (ISAC_PDCCH_LLRPROBE=1): compact signature of the unscrambled soft bits a PDCCH
+ * candidate feeds to polar_decoder_int16(), plus the CRC that decoder recovered.
+ *
+ * Why this exists: the normal path and the blind monitor call polar_decoder_int16() with IDENTICAL
+ * arguments and advance their candidate index identically, so if their `tmp_e` agree for the same
+ * (frame, slot, CCE, L) they MUST recover the same CRC. Printing the signature from both therefore
+ * localises the defect to LLR PRODUCTION vs anything downstream, with no ground truth needed.
+ * Read-only, off by default. */
+void nr_pdcch_llr_probe(const char *path, int frame, int slot, int cce, int L, uint32_t crc, const int16_t *e, int n)
+{
+  static int s_on = -1;
+  if (s_on < 0)
+    s_on = (getenv("ISAC_PDCCH_LLRPROBE") != NULL) ? 1 : 0;
+  if (!s_on)
+    return;
+  /* Slot filter: full-rate probing floods the log and has been MEASURED to break the attach that
+   * provides the control arm. SIB1 sits in one slot index, so filtering to it costs nothing. */
+  static int s_slot = -2;
+  if (s_slot == -2) {
+    const char *e2 = getenv("ISAC_PDCCH_LLRPROBE_SLOT");
+    s_slot = e2 ? atoi(e2) : -1;
+  }
+  if (s_slot >= 0 && slot != s_slot)
+    return;
+  long sum = 0;
+  int nz = 0;
+  for (int i = 0; i < n; i++) {
+    sum += e[i] < 0 ? -e[i] : e[i];
+    if (e[i] != 0)
+      nz++;
+  }
+  LOG_I(PHY, "LLRPROBE path=%s f=%d s=%d cce=%d L=%d crc=0x%x n=%d sum=%ld nz=%d e=%d,%d,%d,%d,%d,%d,%d,%d\n",
+        path, frame, slot, cce, L, crc, n, sum, nz,
+        e[0], e[1], e[2], e[3], e[4], e[5], e[6], e[7]);
+}
+
 static void nr_dci_decoding_procedure(const UE_nr_rxtx_proc_t *proc,
                                       c16_t *pdcch_e_rx,
                                       fapi_nr_dl_config_dci_dl_pdu_rel15_t *rel15,
@@ -982,6 +1075,7 @@ static void nr_dci_decoding_procedure(const UE_nr_rxtx_proc_t *proc,
                             tmp_e);
 
       const uint32_t crc = polar_decoder_int16(tmp_e, dci_estimation, 1, NR_POLAR_DCI_MESSAGE_TYPE, dci_length, L);
+      nr_pdcch_llr_probe("normal", proc->frame_rx, proc->nr_slot_rx, CCEind, L, crc, tmp_e, L * 108);
 
       rnti_t n_rnti = rel15->rnti;
       if (crc == n_rnti) {

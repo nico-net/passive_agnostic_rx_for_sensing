@@ -220,6 +220,9 @@ typedef struct {
   const nr_pdcch_blind_extract_opts_t *extract_opts;
   uint16_t     scrambling_rnti;
   uint16_t     dmrs_scrambling_id;
+  int          frame;   /* LLRPROBE correlation only */
+  int          slot;    /* LLRPROBE correlation only */
+  int          cce;     /* LLRPROBE correlation only */
   nr_pdcch_blind_result_t out; // OUTPUT
   bool         ok;             // OUTPUT
   task_ans_t  *ans;
@@ -232,6 +235,10 @@ static void nr_pdcch_blind_cand_worker(void *arg)
   nr_pdcch_unscrambling((c16_t *)t->e_rx, t->scrambling_rnti, (uint32_t)(t->L * 108), t->dmrs_scrambling_id, tmp_e);
   t->ok = nr_pdcch_blind_decode_and_extract_ex(tmp_e, t->L, t->dci_length, t->bwp_size, t->dmrs_typeA_position,
                                                t->rnti_min, t->rnti_max, t->extract_opts, &t->out);
+  {
+    extern void nr_pdcch_llr_probe(const char *, int, int, int, int, uint32_t, const int16_t *, int);
+    nr_pdcch_llr_probe("blind", t->frame, t->slot, t->cce, t->L, t->out.rnti, tmp_e, t->L * 108);
+  }
   completed_task_ans(t->ans);
 }
 
@@ -269,7 +276,8 @@ void nr_pdcch_blind_monitor_process(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t 
 
   rel15->BWPStart = (uint16_t)cfg->bwp_start;
   rel15->BWPSize  = (uint16_t)cfg->bwp_size;
-  rel15->coreset.CoreSetType = NFAPI_NR_CSET_CONFIG_PDCCH_CONFIG;
+  rel15->coreset.CoreSetType =
+      (cfg->coreset_type == 1) ? NFAPI_NR_CSET_CONFIG_MIB_SIB1 : NFAPI_NR_CSET_CONFIG_PDCCH_CONFIG;
   rel15->coreset.rb_offset   = 0;
   rel15->coreset.duration    = (uint8_t)cfg->coreset_duration;
   build_coreset_bitmap(cfg->coreset_freq_domain, rel15->coreset.frequency_domain_resource);
@@ -310,41 +318,83 @@ void nr_pdcch_blind_monitor_process(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t 
   }
   const int num_cces = (n_rb * rel15->coreset.duration) / 6;
 
-  /* Build the blind candidate set across AGGREGATION LEVELS, not just AL2.
+  /* Build the blind candidate set across AGGREGATION LEVELS.
    *
    * A blind receiver does not know the target UE's C-RNTI, so it cannot evaluate the search-space
    * hash and must scan every non-overlapping CCE position at each aggregation level it wants to
-   * catch. This module originally scanned AL2 only, which was correct for the gNB it was built
-   * against (that deployment's dedicated SS had nrofCandidates AL2=2 and AL1/4/8/16 all zero, so
-   * AL2 was the ONLY level real grants ever used -- see CLAUDE.md sec 10, which flagged multi-AL
-   * scanning as future work "for a deployment with a genuinely different scheduler config").
+   * catch.
    *
-   * This IS that deployment. MEASURED on the live srsRAN cell, dedicated CORESET:
-   *   dci_aggregation_level=1 : 774382   (99.997 %)
-   *   dci_aggregation_level=2 :     20   ( 0.003 %)
-   * so AL2-only scanning caught exactly zero real grants -- every accept was a random-CRC false
-   * positive, and widening the AL2 ladder from 8 to 22 positions only scaled the noise linearly
-   * (2244 -> 5859 accepts, still cfr_submits=0).
+   * WHICH LEVELS ACTUALLY CARRY TRAFFIC -- MEASURED 2026-08-20 against the gNB's own debug log.
+   * This CORRECTS the reading that drove the previous version of this ladder:
    *
-   * AL1 is scanned exhaustively first because it has the most positions AND carries the traffic
-   * here; the remaining budget goes to AL2. The candidate array bounds the total (CCE[64]).
-   * Cost: more candidates per occasion means proportionally more random-CRC accepts, which is
-   * exactly what the RNTI cross-CPI persistence gate exists to absorb -- a real C-RNTI recurs,
-   * a random one does not.
+   *   srsRAN's FAPI line prints `dci_aggregation_level` as LOG2(L), NOT L. Verified by pairing
+   *   every scheduler record with its FAPI record over a 449 MB debug log: 3071/3071 satisfy
+   *   sched `al=` == 2^`dci_aggregation_level`, zero exceptions.
+   *     [SCHED] - DL PDCCH: ... cce=36 al=4                       <- the real aggregation level
+   *     [FAPI ] - PDCCH ... cce_index=36 dci_aggregation_level=2  <- log2 of it
+   *
+   *   So this cell's dedicated grants are:  AL2 = 3060 (99.6 %),  AL4 = 11 (0.4 %),  AL1 = 0.
+   *   The previous comment read `dci_aggregation_level=1 : 774382 (99.997 %)` as "AL1" and made
+   *   AL1 the exhaustively-scanned level. AL1 carries NO grants here, and because it has the most
+   *   non-overlapping positions (one per CCE) it consumed 45 of the 64 candidate slots: the AL2
+   *   sweep was truncated at CCE 36 -- missing the real grants at CCE 38/40, 12.6 % of traffic --
+   *   and the AL4/AL8 loops could not run at all on the dedicated CORESET.
+   *
+   * BUDGET. Two independent limits bind, and the second was previously unchecked:
+   *   - candidate count : rel15->CCE[64] / L[64]
+   *   - LLR volume      : the demapper writes 54*L equalised REs per candidate into
+   *                       pdcch_e_rx[NR_MAX_PDCCH_SIZE]. A full sweep of a 45-CCE CORESET at every
+   *                       level needs 45+23+11+5 = 84 candidates and 9450 REs -- over BOTH caps --
+   *                       so whichever levels are allocated first necessarily starve the rest.
+   * Allocation order is therefore AL2, AL4, AL8, AL1: descending measured usage, AL1 last because
+   * it is simultaneously the most numerous and (here) the least used. Per-deployment override via
+   * `pdcch_blind_monitor_ss`'s al-candidate fields, using the house `0 = auto` convention:
+   *   >0 = cap that level at N candidates,  0 = auto (full non-overlapping sweep),  <0 = disable.
    */
   const int max_cand = (int)(sizeof(rel15->CCE) / sizeof(rel15->CCE[0]));
+  const int max_re   = NR_MAX_PDCCH_SIZE; // pdcch_e_rx holds this many c16_t REs
+  static const int al_order[4] = {2, 4, 8, 1};
   int nc = 0;
-  for (int cce = 0; cce < num_cces && nc < max_cand; cce++) {
-    rel15->CCE[nc] = (uint16_t)cce;
-    rel15->L[nc]   = 1;
-    nc++;
+  int used_re = 0;
+  for (int oi = 0; oi < 4; oi++) {
+    const int L   = al_order[oi];
+    const int idx = (L == 1) ? 0 : (L == 2) ? 1 : (L == 4) ? 2 : 3; // ss_al_candidates[] is AL 1,2,4,8
+    int cap = cfg->ss_al_candidates[idx];
+    if (cap < 0) {
+      continue; // explicitly disabled for this deployment
+    }
+    if (cap == 0) {
+      cap = max_cand; // auto: sweep every non-overlapping position the budget allows
+    }
+    const int need = NR_PDCCH_BLIND_RE_PER_RB_OUT_DMRS * L * 6; // 54*L REs per candidate
+    int added = 0;
+    for (int cce = 0; cce + L - 1 < num_cces && nc < max_cand && added < cap && used_re + need <= max_re;
+         cce += L) {
+      rel15->CCE[nc] = (uint16_t)cce;
+      rel15->L[nc]   = (uint8_t)L;
+      nc++;
+      added++;
+      used_re += need;
+    }
   }
-  for (int cce = 0; cce + 1 < num_cces && nc < max_cand && (nc - num_cces) < NR_PDCCH_BLIND_AL2_MAX_CANDIDATES;
-       cce += 2) {
-    rel15->CCE[nc] = (uint16_t)cce;
-    rel15->L[nc]   = 2;
-    nc++;
+
+  /* One-shot visibility. A ladder that silently fails to cover the level the deployment actually
+   * uses produces a 100 % false-accept stream rather than an error -- which is precisely the
+   * failure mode this ladder just had, undetected across several sessions. Print what was built. */
+  {
+    static int s_ladder_logged = 0;
+    if (!s_ladder_logged) {
+      s_ladder_logged = 1;
+      int n_per_al[4] = {0, 0, 0, 0};
+      for (int c = 0; c < nc; c++) {
+        n_per_al[(rel15->L[c] == 1) ? 0 : (rel15->L[c] == 2) ? 1 : (rel15->L[c] == 4) ? 2 : 3]++;
+      }
+      LOG_I(PHY,
+            "SENSING: blind PDCCH ladder: num_cces=%d ncand=%d/%d re=%d/%d (AL1=%d AL2=%d AL4=%d AL8=%d)\n",
+            num_cces, nc, max_cand, used_re, max_re, n_per_al[0], n_per_al[1], n_per_al[2], n_per_al[3]);
+    }
   }
+
   if (nc < 1) {
     return;
   }
@@ -521,6 +571,30 @@ void nr_pdcch_blind_monitor_process(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t 
           thresh = cfg->energy_min;
         }
 
+        /* ENERGYPROBE (ISAC_PDCCH_ENERGY=1): strongest candidate of this occasion vs the adaptive
+         * noise floor. This separates "we cannot decode it" from "there is nothing to decode":
+         * a CORESET actually carrying PDCCH must show candidates well ABOVE the floor. SIB1 slots
+         * are the built-in positive control -- they are known-strong and decode reliably. */
+        {
+          static int s_ep = -1;
+          if (s_ep < 0)
+            s_ep = (getenv("ISAC_PDCCH_ENERGY") != NULL) ? 1 : 0;
+          if (s_ep) {
+            static float occ_max = 0.0f;
+            static int   occ_slot = -1;
+            if (proc->nr_slot_rx != occ_slot) {
+              if (occ_slot >= 0 && g_energy_nseen >= ENERGY_FLOOR_WARMUP)
+                LOG_I(PHY, "ENERGYPROBE slot=%d max_mean=%.2f floor=%.2f ratio=%.2f\n",
+                      occ_slot, occ_max, g_energy_floor,
+                      g_energy_floor > 0.0f ? occ_max / g_energy_floor : 0.0f);
+              occ_slot = proc->nr_slot_rx;
+              occ_max  = 0.0f;
+            }
+            if (mean_abs > occ_max)
+              occ_max = mean_abs;
+          }
+        }
+
         if (mean_abs < thresh) {
           e_rx_cand_idx += n_re_cand;
           g_held_energy++;
@@ -591,6 +665,9 @@ constdiag_done:;
           .extract_opts        = &cfg->extract,
           .scrambling_rnti     = rel15->coreset.scrambling_rnti,
           .dmrs_scrambling_id  = rel15->coreset.pdcch_dmrs_scrambling_id,
+          .frame               = proc->frame_rx,
+          .slot                = proc->nr_slot_rx,
+          .cce                 = rel15->CCE[c],
       };
       nof_tasks++;
       e_rx_cand_idx += n_re_cand;
@@ -794,6 +871,23 @@ constdiag_done:;
             // not self-decodable without the earlier round's soft bits -- which a receiver that
             // never saw the first grant does not have. Counted, not attempted.
             g_dec_skip_rv++;
+            {
+              /* DCIFIELDS (ISAC_DCI_FIELDS=1): dump what we decoded out of an ACCEPTED payload.
+               * A high rv!=0 rate on a link without retransmissions is the KNOWN signature of
+               * misaligned DCI field widths -- that is exactly what exposed the bwp_indicator/TDA
+               * bug in 2026-07-30. Compare these against the gNB's own PDSCH line for the same
+               * RNTI before touching any width. */
+              static int s_df = -1;
+              if (s_df < 0)
+                s_df = (getenv("ISAC_DCI_FIELDS") != NULL) ? 1 : 0;
+              if (s_df)
+                LOG_I(PHY,
+                      "DCIFIELDS rnti=0x%x rv=%u mcs=%u ndi=%u harq=%u tda=%u startrb=%u numrb=%u ssym=%u nsym=%u cdm=%u\n",
+                      out.rnti, (unsigned)out.rv, (unsigned)out.mcs, (unsigned)out.ndi,
+                      (unsigned)out.harq_pid, (unsigned)out.tda_index, (unsigned)out.start_rb,
+                      (unsigned)out.num_rb, (unsigned)out.start_symbol, (unsigned)out.num_symbols,
+                      (unsigned)out.n_dmrs_cdm_groups);
+            }
           } else {
             decodes_this_occasion++;
             const nr_pdsch_passive_grant_t grant = {.rnti      = out.rnti,

@@ -789,6 +789,10 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
 {
   NR_DL_FRAME_PARMS *fp = &ue->frame_parms;
   const int nl = dlsch->cw_info.Nl;
+  /* Four-RX rank-one compatibility mode keeps every RF stream active but
+   * decodes branch 0, avoiding overflow in the fixed-point MRC accumulator. */
+  const int mrc_nb_rx = (nl == 1 && nbRx == 4) ? 1 : nbRx;
+  const int mrc_rx_index = 0;
   const int matrixSz = nbRx * nl;
   __attribute__((aligned(32))) int32_t dl_ch_estimates_ext[matrixSz][rx_size_symbol];
   memset(dl_ch_estimates_ext, 0, sizeof(dl_ch_estimates_ext));
@@ -950,6 +954,12 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
         median[l][aarx] = avg[l * nbRx + aarx];
       }
 
+    /* The rank-one fallback below compensates branch 0 only, so its fixed-
+     * point shift must also be derived from branch 0 rather than a stronger
+     * branch that is not part of the decoder input. */
+    if (nl == 1 && nbRx == 4)
+      avgs = avg[0];
+
     if (nl > 1) {
       nr_dlsch_channel_level_median(rx_size_symbol, dl_ch_estimates_ext, median, nl, nbRx, nb_re_pdsch);
       for (int l = 0; l < nl; l++) {
@@ -961,7 +971,7 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
     // Output shift: half channel energy (log2|h|^2/2) + MRC antenna gain.
     // Single-layer adds +1 guard bit (raw peak); multi-layer uses median so no guard needed.
     if (nl == 1)
-      *log2_maxh = (log2_approx(avgs) >> 1) + 1 + log2_approx(nbRx >> 1);
+      *log2_maxh = (log2_approx(avgs) >> 1) + 1 + log2_approx(mrc_nb_rx >> 1);
     else
       *log2_maxh = (log2_approx(avgs) >> 1) + log2_approx(nbRx >> 1);
     LOG_D(PHY, "[DLSCH] AbsSubframe %d.%d log2_maxh = %d (%d)\n", frame % 1024, nr_slot_rx, *log2_maxh, avgs);
@@ -993,10 +1003,10 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
   //----------------------------------------------------------
   start_meas_nr_ue_phy(ue, DLSCH_CHANNEL_COMPENSATION_STATS);
   nr_channel_compensation(rx_size_symbol,
-                          nbRx,
+                          mrc_nb_rx,
                           nl,
-                          rxdataF_ext,
-                          chFext,
+                          &rxdataF_ext[mrc_rx_index],
+                          (c16_t(*)[mrc_nb_rx][rx_size_symbol]) & chFext[0][mrc_rx_index],
                           dl_ch_mag[symbol],
                           dl_ch_magb[symbol],
                           dl_ch_magr[symbol],
