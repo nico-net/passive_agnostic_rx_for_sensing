@@ -150,8 +150,14 @@ static void nr_ue_scheduled_response_dl(NR_UE_MAC_INST_t *mac,
         phy_data->csiim_vars.active = true;
         break;
       case FAPI_NR_DL_CONFIG_TYPE_CSI_RS:
-        phy_data->csirs_vars.csirs_config_pdu = pdu->csirs_config_pdu.csirs_config_rel15;
-        phy_data->csirs_vars.active = true;
+        AssertFatal(phy_data->num_csirs < MAX_CSI_RES_SLOT, "CSI resources per slot exceeded limit\n");
+        const int c = phy_data->num_csirs;
+        if (phy_data->csirs_vars[c].active) {
+          AssertFatal(false, "Resource should not be active before its configured\n");
+        }
+        phy_data->csirs_vars[c].csirs_config_pdu = pdu->csirs_config_pdu.csirs_config_rel15;
+        phy_data->csirs_vars[c].active = true;
+        phy_data->num_csirs++;
         break;
       case FAPI_NR_DL_CONFIG_TYPE_RA_DLSCH:
       case FAPI_NR_DL_CONFIG_TYPE_SI_DLSCH:
@@ -337,6 +343,7 @@ static void nr_ue_scheduled_response_ul(PHY_VARS_NR_UE *phy, fapi_nr_ul_config_r
       case FAPI_NR_UL_CONFIG_TYPE_PRACH: {
         phy->prach_vars[0]->prach_pdu = pdu->prach_config_pdu;
         phy->prach_vars[0]->active = true;
+        phy->timing_advance = 0;
         pdu->pdu_type = FAPI_NR_UL_CONFIG_TYPE_DONE; // not handle it any more
       } break;
 

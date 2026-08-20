@@ -239,18 +239,26 @@ int nr_dl_proportional_fair(const nr_dl_sched_params_t *params, nr_dl_candidate_
     COMMIT_ALLOC(params, cand, rbStart, min_rbSize, cand->sched_pdsch.mcs, n_scheduled);
   }
 
-  /* Phase 3: New data UEs — PF priority order, largest free block */
-  for (int j = 0; j < n_active; j++) {
+  /* BW is the same across all beams, just use beam 0 */
+  int max_rbSize = params->n_rb_avail[0];
+  DevAssert(max_rbSize >= min_rbSize);
+  int n_remain_ue = params->max_num_ue - n_scheduled;
+  // share RBs fairly between remaining allocatable UEs
+  int n_rb_per_ue = max(min_rbSize, max_rbSize / n_remain_ue);
+
+  /* Phase 3: New data UEs — PF priority order, count number of RBs required,
+   * store number of excess RBs for UEs. Check two additional UEs in case the
+   * first ones cannot be allocated (DCI alloc fail). This is only necessary
+   * because we use type-1 allocation, if we used type-0, we could fix the UEs,
+   * then iteratively give RBs as needed. */
+  uint16_t rbs_ue[MAX_MOBILES_PER_GNB] = {0};
+  int excess_total_rbs = max_rbSize;
+  for (int j = 0, n = 0; j < n_active && n < n_remain_ue + 2; j++) {
     nr_dl_candidate_t *cand = order[j];
     if (cand->is_retx || cand->pending_bytes == 0)
       continue;
 
-    int rbStart;
-    uint16_t *vrb_map = params->vrb_map[cand->alloc_beam_idx];
-    int max_rbSize = find_largest_free_block(vrb_map, cand->alloc_slbitmap, cand->bwp_start, cand->bwp_size, &rbStart);
-    if (max_rbSize < min_rbSize)
-      continue;
-
+    // calculate the number of RBs that UE would like to have
     int mcs = cand->sched_pdsch.mcs;
     uint8_t Qm = nr_get_Qm_dl(mcs, cand->mcs_table);
     uint16_t R = nr_get_code_rate_dl(mcs, cand->mcs_table);
@@ -260,7 +268,6 @@ int nr_dl_proportional_fair(const nr_dl_sched_params_t *params, nr_dl_candidate_
                                               cand->sched_pdsch.nrOfLayers);
     const int oh = 3 * 4 + (cand->UE->UE_sched_ctrl.ta_apply ? 2 : 0);
     uint32_t tbs;
-    uint16_t rbSize;
     nr_find_nb_rb(Qm,
                   R,
                   1,
@@ -271,8 +278,38 @@ int nr_dl_proportional_fair(const nr_dl_sched_params_t *params, nr_dl_candidate_
                   min_rbSize,
                   max_rbSize,
                   &tbs,
-                  &rbSize);
+                  &rbs_ue[j]);
+    if (n < n_remain_ue) {
+      // for the first n_remain_ue UEs: account number of RBs
+      // so excess RBs not used by some UEs could be given to others
+      excess_total_rbs -= min(rbs_ue[j], n_rb_per_ue);
+      excess_total_rbs = max(excess_total_rbs, 0);
+    }
+    n++;
+  }
 
+  /* allocate up to all UEs checked above */
+  for (int j = 0; j < n_active; j++) {
+    nr_dl_candidate_t *cand = order[j];
+    if (cand->is_retx || cand->pending_bytes == 0 || rbs_ue[j] == 0)
+      continue;
+
+    // give every UE its chunk of data. If total_rbs indicates excess RBs, give
+    // additionally as appropriate.
+    int rb_req = min(rbs_ue[j], n_rb_per_ue);
+    int excess_req = max(rbs_ue[j] - rb_req, 0);
+    if (excess_total_rbs > 0 && excess_req > 0) {
+      int excess_ack = min(excess_total_rbs, excess_req);
+      rb_req += excess_ack;
+      excess_total_rbs -= excess_ack;
+      DevAssert(excess_total_rbs >= 0);
+    }
+    int rbStart, rbSize;
+    uint16_t *vrb_map = params->vrb_map[cand->alloc_beam_idx];
+    if (!get_rb_alloc(min_rbSize, rb_req, cand->bwp_start, cand->bwp_size, vrb_map, cand->alloc_slbitmap, &rbStart, &rbSize))
+      continue;
+
+    int mcs = cand->sched_pdsch.mcs;
     COMMIT_ALLOC(params, cand, rbStart, rbSize, mcs, n_scheduled);
   }
 

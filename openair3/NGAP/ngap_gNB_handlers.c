@@ -700,7 +700,6 @@ static int ngap_gNB_handle_handover_request(sctp_assoc_t assoc_id, uint32_t stre
 
   MessageDef *message_p = itti_alloc_new_message(TASK_NGAP, 0, NGAP_HANDOVER_REQUEST);
   ngap_handover_request_t *msg = &NGAP_HANDOVER_REQUEST(message_p);
-  memset(msg, 0, sizeof(*msg));
 
   if (decode_ng_handover_request(msg, pdu) < 0) {
     NGAP_ERROR("Failed to decode NG Handover Request\n");
@@ -771,7 +770,6 @@ static int ngap_gNB_handle_initial_context_request(sctp_assoc_t assoc_id, uint32
   
   MessageDef *message_p = itti_alloc_new_message(TASK_NGAP, 0, NGAP_INITIAL_CONTEXT_SETUP_REQ);
   ngap_initial_context_setup_req_t * msg=&NGAP_INITIAL_CONTEXT_SETUP_REQ(message_p);
-  memset(msg, 0, sizeof(*msg));
   msg->gNB_ue_ngap_id = ue_desc_p->gNB_ue_ngap_id;
   msg->amf_ue_ngap_id = ue_desc_p->amf_ue_ngap_id;
   /* id-UEAggregateMaximumBitRate */
@@ -958,7 +956,6 @@ static int ngap_gNB_handle_pdusession_setup_request(sctp_assoc_t assoc_id, uint3
 
   MessageDef * message_p = itti_alloc_new_message(TASK_NGAP, 0, NGAP_PDUSESSION_SETUP_REQ);
   ngap_pdusession_setup_req_t * msg=&NGAP_PDUSESSION_SETUP_REQ(message_p);
-  memset(msg, 0, sizeof(*msg));
   msg->gNB_ue_ngap_id = ue_desc_p->gNB_ue_ngap_id;
   msg->amf_ue_ngap_id = ue_desc_p->amf_ue_ngap_id;
 
@@ -1015,7 +1012,6 @@ static int ngap_gNB_handle_handover_command(sctp_assoc_t assoc_id, uint32_t stre
 
   MessageDef *message_p = itti_alloc_new_message(TASK_NGAP, 0, NGAP_HANDOVER_COMMAND);
   ngap_handover_command_t *msg = &NGAP_HANDOVER_COMMAND(message_p);
-  memset(msg, 0, sizeof(*msg));
   if (decode_ng_handover_command(msg, pdu) < 0) {
     NGAP_ERROR("Failed to decode NG Handover Command");
     free_ng_handover_command(msg);
@@ -1322,7 +1318,6 @@ static int ngap_gNB_handle_pdusession_modify_request(sctp_assoc_t assoc_id, uint
               (uint64_t)ue_desc_p->amf_ue_ngap_id, amf_ue_ngap_id);
     MessageDef *message_p = itti_alloc_new_message (TASK_RRC_GNB, 0, NGAP_PDUSESSION_MODIFY_RESP);
     ngap_pdusession_modify_resp_t* msg=&NGAP_PDUSESSION_MODIFY_RESP(message_p);
-    memset(msg, 0, sizeof(*msg));
     msg->gNB_ue_ngap_id = gnb_ue_ngap_id;
     for (int nb_of_pdusessions_failed = 0; nb_of_pdusessions_failed < ie->value.choice.PDUSessionResourceModifyListModReq.list.count; nb_of_pdusessions_failed++) {
         NGAP_PDUSessionResourceModifyItemModReq_t *item_p;
@@ -1340,7 +1335,6 @@ static int ngap_gNB_handle_pdusession_modify_request(sctp_assoc_t assoc_id, uint
 
   MessageDef *message_p = itti_alloc_new_message(TASK_NGAP, 0, NGAP_PDUSESSION_MODIFY_REQ);
   ngap_pdusession_modify_req_t * msg=&NGAP_PDUSESSION_MODIFY_REQ(message_p);
-  memset(msg, 0, sizeof(*msg));
   msg->amf_ue_ngap_id  = amf_ue_ngap_id;
   msg->gNB_ue_ngap_id = gnb_ue_ngap_id;
 
@@ -1425,7 +1419,6 @@ static int ngap_gNB_handle_pdusession_release_command(sctp_assoc_t assoc_id, uin
              assoc_id, gnb_ue_ngap_id, amf_ue_ngap_id);
   MessageDef * message_p = itti_alloc_new_message(TASK_NGAP, 0, NGAP_PDUSESSION_RELEASE_COMMAND);
   ngap_pdusession_release_command_t * msg=&NGAP_PDUSESSION_RELEASE_COMMAND(message_p);
-  memset(msg, 0, sizeof(*msg));
 
   msg->gNB_ue_ngap_id = gnb_ue_ngap_id;
   msg->amf_ue_ngap_id = amf_ue_ngap_id;
@@ -1508,7 +1501,6 @@ static int ngap_gNB_handle_dl_ran_status_transfer(sctp_assoc_t assoc_id, uint32_
 
   MessageDef *message_p = itti_alloc_new_message(TASK_NGAP, 0, NGAP_DL_RAN_STATUS_TRANSFER);
   ngap_ran_status_transfer_t *msg = &NGAP_DL_RAN_STATUS_TRANSFER(message_p);
-  memset(msg, 0, sizeof(*msg));
 
   msg->amf_ue_ngap_id = amf_ue_ngap_id;
   msg->gnb_ue_ngap_id = gnb_ue_ngap_id;

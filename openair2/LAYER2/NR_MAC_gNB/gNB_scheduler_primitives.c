@@ -6,6 +6,7 @@
  * \brief primitives used by gNB for BCH, RACH, ULSCH, DLSCH scheduling
  */
 
+#include "nfapi_nr_interface_scf.h"
 #include <softmodem-common.h>
 #include "assertions.h"
 
@@ -423,7 +424,7 @@ static void get_coreset_rb_params(const NR_ControlResourceSet_t *coreset, uint16
   AssertFatal(!coreset->ext1 || !coreset->ext1->rb_Offset_r16, "rb-Offset in coreset configuration not handled\n");
   *n_rb = 0;
   *rb_start = 0;
-  
+
   for (int i = 0; i < 6; i++) {
     for (int t = 0; t < 8; t++) {
       if ((coreset->frequencyDomainResources.buf[i] >> (7 - t)) & 1) {
@@ -678,18 +679,6 @@ bool update_rb_mcs_tbs(NR_sched_pdsch_t *pdsch, uint32_t num_total_bytes, uint16
   return true;
 }
 
-static bool multiple_2_3_5(int rb)
-{
-  while (rb % 2 == 0)
-    rb /= 2;
-  while (rb % 3 == 0)
-    rb /= 3;
-  while (rb % 5 == 0)
-    rb /= 5;
-
-  return (rb == 1);
-}
-
 bool nr_find_nb_rb(uint16_t Qm,
                    uint16_t R,
                    long transform_precoding,
@@ -702,10 +691,6 @@ bool nr_find_nb_rb(uint16_t Qm,
                    uint32_t *tbs,
                    uint16_t *nb_rb)
 {
-  // for transform precoding only RB = 2^a_2 * 3^a_3 * 5^a_5 is allowed with a non-negative
-  while (transform_precoding == NR_PUSCH_Config__transformPrecoder_enabled && !multiple_2_3_5(nb_rb_max))
-    nb_rb_max--;
-
   /* is the maximum (not even) enough? */
   *nb_rb = nb_rb_max;
   *tbs = nr_compute_tbs(Qm, R, *nb_rb, nb_symb_sch, nb_dmrs_prb, 0, 0, nrOfLayers) >> 3;
@@ -727,11 +712,6 @@ bool nr_find_nb_rb(uint16_t Qm,
   int hi = nb_rb_max;
   int lo = nb_rb_min;
   for (int p = (hi + lo) / 2; lo + 1 < hi; p = (hi + lo) / 2) {
-    // for transform precoding only RB = 2^a_2 * 3^a_3 * 5^a_5 is allowed with a non-negative
-    while(transform_precoding == NR_PUSCH_Config__transformPrecoder_enabled &&
-          !multiple_2_3_5(p))
-      p++;
-
     // If by increasing p for transform precoding we already hit the high, break to avoid infinite loop
     if (p == hi)
       break;
@@ -831,13 +811,13 @@ const NR_DMRS_UplinkConfig_t *get_DMRS_UplinkConfig(const NR_PUSCH_Config_t *pus
 NR_pusch_dmrs_t get_ul_dmrs_params(const NR_ServingCellConfigCommon_t *scc,
                                    const NR_UE_UL_BWP_t *ul_bwp,
                                    const NR_tda_info_t *tda_info,
-                                   const int Layers)
+                                   const int Layers,
+                                   const uint16_t dmrs_ports,
+                                   const uint8_t cdm_groups)
 {
   NR_pusch_dmrs_t dmrs = {0};
-  if (ul_bwp->transform_precoding && Layers < 3)
-    dmrs.num_dmrs_cdm_grps_no_data = ul_bwp->dci_format == NR_UL_DCI_FORMAT_0_1 || tda_info->nrOfSymbols <= 2 ? 1 : 2;
-  else
-    dmrs.num_dmrs_cdm_grps_no_data = 2;
+  dmrs.dmrs_ports = (dmrs_ports != 0) ? dmrs_ports : (uint16_t)((1 << Layers) - 1);
+  dmrs.num_dmrs_cdm_grps_no_data = (cdm_groups > 0) ? cdm_groups : 2;
 
   const NR_DMRS_UplinkConfig_t *NR_DMRS_UplinkConfig = get_DMRS_UplinkConfig(ul_bwp->pusch_Config, tda_info);
   dmrs.ptrsConfig = NR_DMRS_UplinkConfig
@@ -939,6 +919,7 @@ nfapi_nr_dl_dci_pdu_t *prepare_dci_pdu(nfapi_nr_dl_tti_pdcch_pdu_rel15_t *pdcch_
                                        int beam_index,
                                        int rnti)
 {
+  DevAssert(pdcch_pdu->numDlDci < MAX_DCI_CORESET);
   nfapi_nr_dl_dci_pdu_t *dci_pdu = &pdcch_pdu->dci_pdu[pdcch_pdu->numDlDci];
   dci_pdu->RNTI = rnti;
   dci_pdu->AggregationLevel = aggregation_level;
@@ -1346,6 +1327,17 @@ static uint32_t compute_precoding_information(NR_PUSCH_Config_t *pusch_Config,
   return val;
 }
 
+static uint8_t get_pusch_front_load_symb(const nfapi_nr_pusch_pdu_t *pusch_pdu)
+{
+  // Detect if the scheduled DMRS uses 1 or 2 front-loaded symbols
+  // Consecutive bits signify a double-symbol DMRS
+  for (int i = 0; i < NR_SYMBOLS_PER_SLOT - 1; i++) {
+    if (((pusch_pdu->ul_dmrs_symb_pos >> i) & 0x3) == 0x3)
+      return 2;
+  }
+  return 1;
+}
+
 void config_uldci(const NR_UE_ServingCell_Info_t *sc_info,
                   const nfapi_nr_pusch_pdu_t *pusch_pdu,
                   dci_pdu_rel15_t *dci_pdu_rel15,
@@ -1406,9 +1398,25 @@ void config_uldci(const NR_UE_ServingCell_Info_t *sc_info,
                                                                                &pusch_pdu->nrOfLayers,
                                                                                tpmi);
 
-      // antenna_ports.val = 0 for transform precoder is disabled, dmrs-Type=1, maxLength=1, Rank=1/2/3/4
       // Antenna Ports
-      dci_pdu_rel15->antenna_ports.val = 0;
+      uint8_t front_load_symb = get_pusch_front_load_symb(pusch_pdu);
+      int antenna_ports_val = get_dci_antenna_ports_val(pusch_pdu->nrOfLayers,
+                                                        pusch_pdu->dmrs_ports,
+                                                        pusch_pdu->num_dmrs_cdm_grps_no_data,
+                                                        pusch_pdu->dmrs_config_type,
+                                                        front_load_symb,
+                                                        ul_bwp->transform_precoding);
+      if (antenna_ports_val < 0) {
+        LOG_E(NR_MAC,
+              "No DCI antenna_ports entry for rank=%d ports=0x%04x cdm=%d type=%d front load symbols %d\n",
+              pusch_pdu->nrOfLayers,
+              pusch_pdu->dmrs_ports,
+              pusch_pdu->num_dmrs_cdm_grps_no_data,
+              pusch_pdu->dmrs_config_type,
+              front_load_symb);
+        antenna_ports_val = 0;
+      }
+      dci_pdu_rel15->antenna_ports.val = (uint32_t)antenna_ports_val;
 
       // DMRS sequence initialization
       dci_pdu_rel15->dmrs_sequence_initialization.val = pusch_pdu->scid;
@@ -1494,7 +1502,9 @@ void nr_configure_pucch(nfapi_nr_pucch_pdu_t *pucch_pdu,
                         uint8_t O_sr,
                         int r_pucch,
                         nr_beam_mode_t beam_mode,
-                        uint16_t ant_port_idx)
+                        uint16_t ant_port_start,
+                        uint16_t *ssi,
+                        uint16_t num_ant)
 {
   NR_PUCCH_Resource_t *pucchres;
   NR_PUCCH_FormatConfig_t *pucchfmt;
@@ -1602,8 +1612,7 @@ void nr_configure_pucch(nfapi_nr_pucch_pdu_t *pucch_pdu,
             pucch_pdu->start_symbol_index = pucchres->format.choice.format2->startingSymbolIndex;
             pucch_pdu->data_scrambling_id = pusch_id ? *pusch_id : *scc->physCellId;
             pucch_pdu->dmrs_scrambling_id = id0 ? *id0 : *scc->physCellId;
-            pucch_pdu->prb_size = compute_pucch_prb_size(2,
-                                                         pucchres->format.choice.format2->nrofPRBs,
+            pucch_pdu->prb_size = compute_pucch_prb_size(pucchres->format.choice.format2->nrofPRBs,
                                                          O_csi,
                                                          O_ack,
                                                          O_sr,
@@ -1628,8 +1637,7 @@ void nr_configure_pucch(nfapi_nr_pucch_pdu_t *pucch_pdu,
               pucch_pdu->add_dmrs_flag = pucchfmt->additionalDMRS ? 1 : 0;
             }
             int f3_dmrs_symbols = get_f3_dmrs_symbols(pucchres, pucch_Config);
-            pucch_pdu->prb_size = compute_pucch_prb_size(3,
-                                                         pucchres->format.choice.format3->nrofPRBs,
+            pucch_pdu->prb_size = compute_pucch_prb_size(pucchres->format.choice.format3->nrofPRBs,
                                                          O_csi,
                                                          O_ack,
                                                          O_sr,
@@ -1708,8 +1716,9 @@ void nr_configure_pucch(nfapi_nr_pucch_pdu_t *pucch_pdu,
   pucch_pdu->beamforming.dig_bf_interface = 1;
   const uint16_t fapi_beam = convert_to_fapi_beam(UE->UE_beam_index, beam_mode);
   pucch_pdu->beamforming.prgs_list[0].dig_bf_interface_list[0].beam_idx = fapi_beam;
-  pucch_pdu->param_v4.numSpatialStreamIndices = 1;
-  pucch_pdu->param_v4.spatialStreamIndices[0] = ant_port_idx;
+  pucch_pdu->param_v4.numSpatialStreamIndices = num_ant;
+  for (int i = 0; i < num_ant; i++)
+    pucch_pdu->param_v4.spatialStreamIndices[i] = ssi[ant_port_start + i];
 }
 
 void set_r_pucch_parms(int rsetindex,
@@ -2479,11 +2488,11 @@ int get_spf(nfapi_nr_config_request_scf_t *cfg) {
   AssertFatal(mu>=0&&mu<4,"Illegal scs %d\n",mu);
 
   return(10 * (1<<mu));
-} 
+}
 
 int to_absslot(nfapi_nr_config_request_scf_t *cfg,int frame,int slot) {
 
-  return(get_spf(cfg)*frame) + slot; 
+  return(get_spf(cfg)*frame) + slot;
 
 }
 
@@ -2695,7 +2704,7 @@ uint8_t *allocate_transportBlock_buffer(byte_array_t *tb, uint32_t needed)
     size *= 2;
   LOG_D(NR_MAC, "allocating new TB block of size %d\n", size);
   free(tb->buf);
-  tb->buf = malloc_or_fail(size);
+  tb->buf = aligned_alloc(4, size); // important: FAPI use u32*
   tb->len = size;
   return tb->buf;
 }
@@ -3768,7 +3777,7 @@ void nr_mac_trigger_release_complete(gNB_MAC_INST *mac, int rnti)
   // table. This can happen, e.g., on Msg.3 with C-RNTI, where we create a UE
   // MAC context, decode the PDU, find the C-RNTI MAC CE, and then throw the
   // newly created context away. See also in _nr_rx_sdu() and commit 93f59a3c6e56f
-  if (!du_exists_f1_ue_data(rnti)) 
+  if (!du_exists_f1_ue_data(rnti))
     return;
 
   // unlock the scheduler temporarily to prevent possible deadlocks with
@@ -4093,10 +4102,15 @@ bool prepare_initial_ul_rrc_message(gNB_MAC_INST *mac, NR_UE_info_t *UE)
   int srb_id = 1;
   const NR_ServingCellConfigCommon_t *scc = mac->common_channels[CC_id].ServingCellConfigCommon;
   int ssb_index = get_ssbidx_from_beam(mac, UE->UE_beam_index);
-  NR_CellGroupConfig_t *cellGroupConfig = get_initial_cellGroupConfig(UE->uid, scc, &mac->radio_config, &mac->rlc_config, ssb_index);
+  NR_CellGroupConfig_t *cellGroupConfig = get_initial_cellGroupConfig(UE->uid,
+                                                                      UE->is_redcap,
+                                                                      scc,
+                                                                      &mac->radio_config,
+                                                                      &mac->rlc_config,
+                                                                      ssb_index);
   ASN_STRUCT_FREE(asn_DEF_NR_CellGroupConfig, UE->CellGroup);
   UE->CellGroup = cellGroupConfig;
-  UE->local_bwp_id = mac->radio_config.first_active_bwp;
+  UE->local_bwp_id = UE->is_redcap ? 0 : mac->radio_config.first_active_bwp;
 
   if (!cellGroupConfig)
     return true;
@@ -4382,6 +4396,12 @@ void nr_mac_update_pdcch_closed_loop_adjust(NR_UE_sched_ctrl_t *sched_ctrl, bool
 float nr_mac_get_snr(const nr_power_control_t *pc)
 {
   return pc->avg_snr + pc->tpc_in_flight;
+}
+
+float nr_mac_get_rssi(const nr_power_control_t *pc)
+{
+  // in FAPI scale: convert to dBm/dBFs
+  return pc->avg_rssi / 10.f - 128.f;
 }
 
 /**

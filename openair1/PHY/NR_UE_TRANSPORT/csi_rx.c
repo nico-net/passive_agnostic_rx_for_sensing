@@ -30,8 +30,6 @@
 //#define NR_CSIRS_DEBUG
 //#define NR_CSIIM_DEBUG
 
-extern openair0_config_t openair0_cfg[MAX_CARDS];
-
 void nr_det_A_MF_2x2(int32_t *a_mf_00,
                      int32_t *a_mf_01,
                      int32_t *a_mf_10,
@@ -227,7 +225,7 @@ static int nr_get_csi_rs_signal(const PHY_VARS_NR_UE *ue,
 
   *rsrp = rsrp_sum/meas_count;
   *rsrp_dBm = dB_fixed(*rsrp) + 30 - SQ15_SQUARED_NORM_FACTOR_DB
-              - ((int)openair0_cfg[ue->rf_map.card].rx_gain[0] - (int)openair0_cfg[ue->rf_map.card].rx_gain_offset[0])
+              - ((int)openair0_cfg_g[ue->rf_map.card].rx_gain[0] - (int)openair0_cfg_g[ue->rf_map.card].rx_gain_offset[0])
               - dB_fixed(ue->frame_parms.ofdm_symbol_size);
 
 #ifdef NR_CSIRS_DEBUG
@@ -267,6 +265,8 @@ static int nr_csi_rs_channel_estimation(
     int16_t *log2_maxh,
     uint32_t *noise_power)
 {
+  const int meas_bitmap = csirs_config_pdu->measurement_bitmap;
+  AssertFatal(meas_bitmap != 1, "No need to do CSI-RS channel estimation for only RSRP measurment\n");
   *noise_power = 0;
   int maxh = 0;
   int count = 0;
@@ -306,10 +306,16 @@ static int nr_csi_rs_channel_estimation(
               const c16_t *rx_csi_rs_signal = &csi_rs_received_signal[ant_rx][symbol_offset];
               c16_t tmp =
                   c16MulConjShift(tx_csi_rs_signal[k_tx], rx_csi_rs_signal[k_rx], nr_csi_info->csi_rs_generated_signal_bits);
-              // This is not just the LS estimation for each (k,l), but also the sum of the different contributions
-              // for the sake of optimizing the memory used.
-              csi_rs_ls_estimated_channel[ant_rx][port_tx][kinit_tx].r += tmp.r;
-              csi_rs_ls_estimated_channel[ant_rx][port_tx][kinit_tx].i += tmp.i;
+              if (csirs_config_pdu->csi_type != 0) {
+                // This is not just the LS estimation for each (k,l), but also the sum of the different contributions
+                // for the sake of optimizing the memory used.
+                csi_rs_ls_estimated_channel[ant_rx][port_tx][kinit_tx].r += tmp.r;
+                csi_rs_ls_estimated_channel[ant_rx][port_tx][kinit_tx].i += tmp.i;
+              } else {
+                // for tracking we want estimates of all sub carriers having CSI-RS
+                csi_rs_ls_estimated_channel[ant_rx][port_tx][k_tx].r = tmp.r;
+                csi_rs_ls_estimated_channel[ant_rx][port_tx][k_tx].i = tmp.i;
+              }
             }
           }
         }
@@ -367,6 +373,10 @@ static int nr_csi_rs_channel_estimation(
       }
     }
 
+    // we need only ls estimates for tracking CSI. So stop here.
+    if (meas_bitmap == 0)
+      continue;
+
     /// Power noise estimation
     AssertFatal(csirs_config_pdu->nr_of_rbs > 0, " nr_of_rbs needs to be greater than 0\n");
     uint16_t noise_real[fp->nb_antennas_rx][csi_mapping->ports][csirs_config_pdu->nr_of_rbs];
@@ -411,9 +421,11 @@ static int nr_csi_rs_channel_estimation(
 
   }
 
-  *noise_power /= (fp->nb_antennas_rx * csi_mapping->ports);
-  *log2_maxh = log2_approx(maxh - 1);
-  *log2_re = log2_approx(count - 1);
+  if (meas_bitmap > 1) {
+    *noise_power /= (fp->nb_antennas_rx * csi_mapping->ports);
+    *log2_maxh = log2_approx(maxh - 1);
+    *log2_re = log2_approx(count - 1);
+  }
 
 #ifdef NR_CSIRS_DEBUG
   LOG_I(NR_PHY, "Noise power estimation based on CSI-RS: %i\n", *noise_power);
@@ -844,6 +856,61 @@ static void nr_csi_im_power_estimation(const PHY_VARS_NR_UE *ue,
 #endif
 }
 
+static double get_cfo(const double phase_diff, const int sym0, const int sym1, const NR_DL_FRAME_PARMS *fp)
+{
+  const double one_fs = 1.0 / (fp->samples_per_frame * 100);
+  int sample_count = 0;
+  for (int s = sym0 + 1; s <= sym1; s++) {
+    const int prefix = (s % (7 * (1 << fp->numerology_index))) ? fp->nb_prefix_samples : fp->nb_prefix_samples0;
+    sample_count += (fp->ofdm_symbol_size + prefix);
+  }
+  const double delta_time = sample_count * one_fs;
+  const double cfo = phase_diff / (2 * M_PI * delta_time);
+  return cfo;
+}
+
+static void nr_ue_trs_processing(PHY_VARS_NR_UE *ue,
+                                 const c16_t res0_est[][1][ue->frame_parms.ofdm_symbol_size],
+                                 const c16_t res1_est[][1][ue->frame_parms.ofdm_symbol_size],
+                                 const c16_t freq_interp_est[][1][ue->frame_parms.ofdm_symbol_size],
+                                 const fapi_nr_dl_config_csirs_pdu_rel15_t *csirs_config_pdu,
+                                 const csi_mapping_parms_t *csi_mapping,
+                                 const int sym0,
+                                 const int sym1,
+                                 int *cfo,
+                                 int *time_offset)
+{
+  AssertFatal((sym0 > -1) && (sym1 > -1) && (sym1 > sym0), "Invalid symbol index for TRS estimation\n");
+  const NR_DL_FRAME_PARMS *fp = &ue->frame_parms;
+  // CFO estimation
+  const int ant_rx = 0; // Estimate only on first antenna port
+  cd_t phase_diff = {0.0};
+  AssertFatal(csirs_config_pdu->freq_density == 3,
+              "CSI-RS for tracking must have freq density of 3 but has %d\n",
+              csirs_config_pdu->freq_density);
+  AssertFatal(csi_mapping->kprime == 0 && csi_mapping->lprime == 0, "Invalid kprime, lprime for CSI-RS for tracking (row 1)\n");
+  for (int rb = csirs_config_pdu->start_rb; rb < (csirs_config_pdu->start_rb + csirs_config_pdu->nr_of_rbs); rb++) {
+    for (int cdm_id = 0; cdm_id < csi_mapping->size; cdm_id++) {
+      uint16_t kinit = rb * NR_NB_SC_PER_RB;
+      uint16_t k = kinit + csi_mapping->koverline[cdm_id];
+
+      const c16_t *res0 = res0_est[ant_rx][0];
+      const c16_t *res1 = res1_est[ant_rx][0];
+      phase_diff.r += res1[k].r * res0[k].r + res1[k].i * res0[k].i;
+      phase_diff.i += res1[k].i * res0[k].r - res1[k].r * res0[k].i;
+    }
+  }
+  *cfo = (int)get_cfo(atan2(phase_diff.i, phase_diff.r), sym0, sym1, fp);
+
+  if (time_offset) {
+    // Time offset estimation
+    __attribute__((aligned(32))) c16_t time_est[fp->ofdm_symbol_size];
+    delay_t delay = {0};
+    nr_est_delay(fp->ofdm_symbol_size, freq_interp_est[ant_rx][0], time_est, &delay);
+    *time_offset = delay.delay_max_pos;
+  }
+}
+
 void nr_ue_csi_im_procedures(PHY_VARS_NR_UE *ue,
                              const c16_t rxdataF[][ue->frame_parms.samples_per_slot_wCP],
                              const fapi_nr_dl_config_csiim_pdu_rel15_t *csiim_config_pdu)
@@ -980,7 +1047,10 @@ static void nr_isac_submit_csirs_ls(const NR_DL_FRAME_PARMS *frame_parms,
 void nr_ue_csi_rs_procedures(PHY_VARS_NR_UE *ue,
                              const UE_nr_rxtx_proc_t *proc,
                              const c16_t rxdataF[][ue->frame_parms.samples_per_slot_wCP],
-                             fapi_nr_dl_config_csirs_pdu_rel15_t *csirs_config_pdu)
+                             fapi_nr_dl_config_csirs_pdu_rel15_t *csirs_config_pdu,
+                             c16_t trs_estimates[][1][ue->frame_parms.ofdm_symbol_size],
+                             const int res_idx,
+                             const int trs_sym0)
 {
 
 #ifdef NR_CSIRS_DEBUG
@@ -999,11 +1069,6 @@ void nr_ue_csi_rs_procedures(PHY_VARS_NR_UE *ue,
   LOG_I(NR_PHY, "csirs_config_pdu->power_control_offset = %i\n", csirs_config_pdu->power_control_offset);
   LOG_I(NR_PHY, "csirs_config_pdu->power_control_offset_ss = %i\n", csirs_config_pdu->power_control_offset_ss);
 #endif
-
-  if(csirs_config_pdu->csi_type == 0) {
-    LOG_E(NR_PHY, "Handling of CSI-RS for tracking not handled yet at PHY\n");
-    return;
-  }
 
   if(csirs_config_pdu->csi_type == 2) {
     LOG_E(NR_PHY, "Handling of ZP CSI-RS not handled yet at PHY\n");
@@ -1054,29 +1119,25 @@ void nr_ue_csi_rs_procedures(PHY_VARS_NR_UE *ue,
                        &rsrp_dBm,
                        rxdataF);
 
-
-  if (csirs_config_pdu->measurement_bitmap == 0) {
-    LOG_D(NR_PHY, "No CSI-RS measurements configured\n");
-    return;
-  }
-
   uint32_t noise_power = 0;
   int16_t log2_re = 0;
   int16_t log2_maxh = 0;
   // if we need to measure only RSRP no need to do channel estimation
-  if (csirs_config_pdu->measurement_bitmap > 1)
+  if (csirs_config_pdu->measurement_bitmap != 1) {
+    const bool use_trs_buff = (csirs_config_pdu->csi_type == 0 && res_idx == 0);
     nr_csi_rs_channel_estimation(frame_parms,
-                                 csirs_config_pdu,
-                                 csi_info,
-                                 (const c16_t **)csi_info->csi_rs_generated_signal,
-                                 csi_rs_received_signal,
-                                 &mapping_parms,
-                                 CDM_group_size,
-                                 csi_rs_ls_estimated_channel,
-                                 csi_rs_estimated_channel_freq,
-                                 &log2_re,
-                                 &log2_maxh,
-                                 &noise_power);
+                                csirs_config_pdu,
+                                csi_info,
+                                (const c16_t **)csi_info->csi_rs_generated_signal,
+                                csi_rs_received_signal,
+                                &mapping_parms,
+                                CDM_group_size,
+                                (use_trs_buff) ? trs_estimates : csi_rs_ls_estimated_channel,
+                                csi_rs_estimated_channel_freq,
+                                &log2_re,
+                                &log2_maxh,
+                                &noise_power);
+  }
 
   // ISAC sensing tap (CSI-RS source): submit the raw per-RB LS estimates (Ĥ) of port 0, for as many rx
   // antennas as the receive-array AoA path asks for (one otherwise).
@@ -1120,20 +1181,49 @@ void nr_ue_csi_rs_procedures(PHY_VARS_NR_UE *ue,
       nr_csi_rs_cqi_estimation(precoded_sinr_dB, &cqi);
   }
 
+  int trs_cfo = 0;
+  const bool do_trs_est = (csirs_config_pdu->csi_type == 0) && (res_idx == 1);
+  if (do_trs_est) {
+    start_meas_nr_ue_phy(ue, TRS_PROCESSING);
+    nr_ue_trs_processing(ue,
+                         trs_estimates,
+                         csi_rs_ls_estimated_channel,
+                         csi_rs_estimated_channel_freq,
+                         csirs_config_pdu,
+                         &mapping_parms,
+                         trs_sym0,
+                         csirs_config_pdu->symb_l0,
+                         &trs_cfo,
+                         NULL); // Time offset not estimated because it is corrected using PBCH DMRS
+    stop_meas_nr_ue_phy(ue, TRS_PROCESSING);
+  }
+
   switch (csirs_config_pdu->measurement_bitmap) {
-    case 1 :
-      LOG_I(NR_PHY, "[UE %d] RSRP = %i dBm\n", ue->Mod_id, rsrp_dBm);
+    case 0:
+      if (do_trs_est)
+        LOG_D(NR_PHY,
+              "%d.%d TRS estimated CFO: %d Hz\n",
+              proc->frame_rx,
+              proc->nr_slot_rx,
+              trs_cfo);
+      break;
+    case 1:
+      LOG_I(NR_PHY, "%d.%d [UE %d] RSRP = %i dBm\n", proc->frame_rx, proc->nr_slot_rx, ue->Mod_id, rsrp_dBm);
       break;
     case 26 :
-      LOG_I(NR_PHY, "RI = %i i1 = %i.%i.%i, i2 = %i, SINR = %i dB, CQI = %i\n",
+      LOG_D(NR_PHY, "RI = %i i1 = %i.%i.%i, i2 = %i, SINR = %i dB, CQI = %i\n",
             rank_indicator + 1, i1[0], i1[1], i1[2], i2[0], precoded_sinr_dB, cqi);
       break;
     case 27 :
-      LOG_I(NR_PHY, "RSRP = %i dBm, RI = %i i1 = %i.%i.%i, i2 = %i, SINR = %i dB, CQI = %i\n",
+      LOG_D(NR_PHY, "RSRP = %i dBm, RI = %i i1 = %i.%i.%i, i2 = %i, SINR = %i dB, CQI = %i\n",
             rsrp_dBm, rank_indicator + 1, i1[0], i1[1], i1[2], i2[0], precoded_sinr_dB, cqi);
       break;
     default :
       AssertFatal(false, "Not supported measurement configuration\n");
+  }
+
+  if (!ue->cont_fo_comp && do_trs_est && csirs_config_pdu->last_trs_slot) {
+    trs_freq_correction(ue, trs_cfo);
   }
 
   // Send CSI measurements to MAC
@@ -1141,21 +1231,29 @@ void nr_ue_csi_rs_procedures(PHY_VARS_NR_UE *ue,
     return;
 
   fapi_nr_l1_measurements_t l1_measurements = {
-    .gNB_index = proc->gNB_id,
-    .meas_type = NFAPI_NR_CSI_MEAS,
-    .Nid_cell = frame_parms->Nid_cell,
-    .is_neighboring_cell = false,
-    .rsrp_dBm = rsrp_dBm,
-    .rank_indicator = rank_indicator,
-    .i1 = *i1,
-    .i2 = *i2,
-    .cqi = cqi,
-    .radiolink_monitoring = RLM_no_monitoring, // TODO do be activated in case of RLM based on CSI-RS
+      .gNB_index = proc->gNB_id,
+      .meas_type = NFAPI_NR_CSI_MEAS,
+      .Nid_cell = frame_parms->Nid_cell,
+      .is_neighboring_cell = false,
+      .rsrp_dBm = rsrp_dBm,
+      .rank_indicator = rank_indicator,
+      .i1 = *i1,
+      .i2 = *i2,
+      .cqi = cqi,
+      .radiolink_monitoring = RLM_no_monitoring, // TODO do be activated in case of RLM based on CSI-RS
   };
-  nr_downlink_indication_t dl_indication;
-  fapi_nr_rx_indication_t rx_ind = {0};
-  nr_fill_dl_indication(&dl_indication, NULL, &rx_ind, proc, ue, NULL);
-  nr_fill_rx_indication(&rx_ind, FAPI_NR_MEAS_IND, ue, 0, 0, NULL, 1, proc, (void *)&l1_measurements, NULL);
+  fapi_nr_rx_indication_t rx_ind;
+  rx_ind.number_pdus = 0;
+  nr_fill_rx_indication(&rx_ind, FAPI_NR_MEAS_IND, ue, 0, 0, NULL, proc, (void *)&l1_measurements);
+  nr_downlink_indication_t dl_indication = (nr_downlink_indication_t){
+      .gNB_index = proc->gNB_id,
+      .module_id = ue->Mod_id,
+      .cc_id = ue->CC_id,
+      .hfn = proc->hfn_rx,
+      .frame = proc->frame_rx,
+      .slot = proc->nr_slot_rx,
+      .rx_ind = &rx_ind,
+  };
   ue->if_inst->dl_indication(&dl_indication);
 }
 

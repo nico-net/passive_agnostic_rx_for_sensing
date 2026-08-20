@@ -34,7 +34,9 @@ static bool is_xlsch_in_slot(uint64_t bitmap, uint32_t modval, slot_t slot)
 }
 
 uint32_t target_dl_mcs = 9;
+uint32_t target_dl_mcs_table_index = 0;
 uint32_t target_dl_Nl = 1;
+uint32_t target_dl_pmi = 0;
 uint32_t target_dl_bw = 50;
 uint64_t dlsch_slot_bitmap = (1<<1);
 uint32_t dlsch_slot_modval = 0;
@@ -55,6 +57,7 @@ void nr_preprocessor_phytest(gNB_MAC_INST *mac, post_process_pdsch_t *pp_pdsch)
   NR_ServingCellConfigCommon_t *scc = mac->common_channels[0].ServingCellConfigCommon;
   NR_UE_sched_ctrl_t *sched_ctrl = &UE->UE_sched_ctrl;
   NR_UE_DL_BWP_t *dl_bwp = &UE->current_DL_BWP;
+  dl_bwp->mcsTableIdx = target_dl_mcs_table_index;
   const int CC_id = 0;
 
   /* return if all DL HARQ processes wait for feedback */
@@ -161,7 +164,7 @@ void nr_preprocessor_phytest(gNB_MAC_INST *mac, post_process_pdsch_t *pp_pdsch)
       // tbSize further below
       .dl_harq_pid = sched_ctrl->retrans_dl_harq.head, // PID of HARQ awaiting retransmission, or -1 otherwise
       .pucch_allocation = alloc,
-      .pm_index = 0,
+      .pm_index = target_dl_pmi,
       .nrOfLayers = target_dl_Nl,
       .bwp_info = get_pdsch_bwp_start_size(mac, UE),
       .dmrs_parms = get_dl_dmrs_params(scc, dl_bwp, &tda_info, target_dl_Nl),
@@ -207,6 +210,7 @@ void nr_preprocessor_phytest(gNB_MAC_INST *mac, post_process_pdsch_t *pp_pdsch)
 }
 
 uint32_t target_ul_mcs = 9;
+uint32_t target_ul_mcs_table_index = 0;
 uint32_t target_ul_bw = 50;
 uint32_t target_ul_Nl = 1;
 uint64_t ulsch_slot_bitmap = (1 << 8);
@@ -230,6 +234,7 @@ void nr_ul_preprocessor_phytest(gNB_MAC_INST *nr_mac, post_process_pusch_t *pp_p
 
   NR_UE_sched_ctrl_t *sched_ctrl = &UE->UE_sched_ctrl;
   NR_UE_UL_BWP_t *ul_bwp = &UE->current_UL_BWP;
+  ul_bwp->mcs_table = target_ul_mcs_table_index;
 
   /* return if all UL HARQ processes wait for feedback */
   if (sched_ctrl->retrans_ul_harq.head == -1 && sched_ctrl->available_ul_harq.head == -1) {
@@ -310,7 +315,7 @@ void nr_ul_preprocessor_phytest(gNB_MAC_INST *nr_mac, post_process_pusch_t *pp_p
       // tpmi in post-process
       .time_domain_allocation = tda,
       .tda_info = tda_info,
-      .dmrs_info = get_ul_dmrs_params(scc, ul_bwp, &tda_info, target_ul_Nl),
+      .dmrs_info = get_ul_dmrs_params(scc, ul_bwp, &tda_info, target_ul_Nl, 0, 1),
       .bwp_info = get_pusch_bwp_start_size(UE),
       .ant_port_idx.numSpatialStreamIndices = nr_mac->radio_config.pusch_AntennaPorts,
   };

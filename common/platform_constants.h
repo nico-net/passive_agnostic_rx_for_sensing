@@ -57,6 +57,8 @@
 /** Maximum number of Paging Occasions per Paging Frame (TS 38.331 PCCH-Config) */
 #define NR_PCCH_MAX_PO 4
 
+#define NR_PHYS_CELL_ID_MAX 1007 /* Maximum Physical Cell ID (0..1007) */
+
 #define NB_RB_MBMS_MAX (29 * 16) /* 29 = LTE_maxSessionPerPMCH + 16 = LTE_maxServiceCount from LTE_asn_constant.h */
 
 #define NB_RAB_MAX 11 /* from LTE_maxDRB in LTE_asn_constant.h */

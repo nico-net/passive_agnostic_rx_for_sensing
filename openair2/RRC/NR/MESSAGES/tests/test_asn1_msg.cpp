@@ -106,7 +106,7 @@ TEST(nr_asn1, rrc_reestablishment_request)
   unsigned char buf[1000];
   const uint16_t c_rnti = 1;
   const uint32_t cell_id = 177;
-  EXPECT_GT(do_RRCReestablishmentRequest(buf, NR_ReestablishmentCause_reconfigurationFailure, cell_id, c_rnti), 0);
+  EXPECT_GT(do_RRCReestablishmentRequest(buf, NR_ReestablishmentCause_reconfigurationFailure, cell_id, c_rnti, 0), 0);
 }
 
 TEST(nr_asn1, rrc_reestablishment)

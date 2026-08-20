@@ -126,6 +126,16 @@ static ngap_gNB_amf_data_t *select_amf(ngap_gNB_instance_t *instance_p, const ng
   return amf;
 }
 
+/** @brief Map UE EstablishmentCause (TS 38.331) to NGAP RRCEstablishmentCause (clause 9.3.1.111).
+ *  Values 0-9 pass through, otherwise return notAvailable. */
+static NGAP_RRCEstablishmentCause_t rrc2ngap_establishment_cause(ngap_rrc_establishment_cause_t cause)
+{
+  if (cause <= NGAP_RRC_CAUSE_MCS_PRIORITY_ACCESS)
+    return cause;
+  /* clause 9.3.1.111: notAvailable when the UE cause does not map to any other value */
+  return NGAP_RRCEstablishmentCause_notAvailable;
+}
+
 /** @brief NAS Transport Messages: Initial UE Message
  *         forward the first received (layer 3) uplink NAS message
  *         from the radio interface to the AMF over N2
@@ -201,16 +211,13 @@ int ngap_gNB_handle_nas_first_req(instance_t instance, ngap_nas_first_req_t *UEf
     MCC_MNC_TO_PLMNID(plmn->mcc, plmn->mnc, plmn->mnc_digit_length, &userinfo_nr_p->tAI.pLMNIdentity);
   }
 
-  /* Set the establishment cause according to those provided by RRC */
-  DevCheck(UEfirstReq->establishment_cause < NGAP_RRC_CAUSE_LAST, UEfirstReq->establishment_cause, NGAP_RRC_CAUSE_LAST, 0);
-
   // RRC Establishment Cause (M)
   {
     asn1cSequenceAdd(out->protocolIEs.list, NGAP_InitialUEMessage_IEs_t, ie);
     ie->id = NGAP_ProtocolIE_ID_id_RRCEstablishmentCause;
     ie->criticality = NGAP_Criticality_ignore;
     ie->value.present = NGAP_InitialUEMessage_IEs__value_PR_RRCEstablishmentCause;
-    ie->value.choice.RRCEstablishmentCause = UEfirstReq->establishment_cause;
+    ie->value.choice.RRCEstablishmentCause = rrc2ngap_establishment_cause(UEfirstReq->establishment_cause);
   }
 
   // 5G-S-TMSI (O)

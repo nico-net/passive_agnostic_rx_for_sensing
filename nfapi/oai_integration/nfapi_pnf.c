@@ -2440,6 +2440,13 @@ int oai_nfapi_nr_srs_indication(nfapi_nr_srs_indication_t *ind) {
   return nfapi_pnf_p7_nr_srs_ind(p7_config_g, ind);
 }
 
+int oai_nfapi_nr_srs_toa_vendor_ext_indication(nfapi_nr_srs_toa_vendor_ext_indication_t *ind)
+{
+  ind->header.phy_id = 1; // HACK TODO FIXME - need to pass this around!!!!
+  ind->header.message_id = NFAPI_NR_PHY_MSG_TYPE_SRS_TOA_VENDOR_EXTENSION_INDICATION;
+  return nfapi_pnf_p7_nr_srs_toa_vendor_ext_ind(p7_config_g, ind);
+}
+
 int oai_nfapi_nr_uci_indication(nfapi_nr_uci_indication_t *ind) {
   ind->header.phy_id = 1; // HACK TODO FIXME - need to pass this around!!!!
   ind->header.message_id = NFAPI_NR_PHY_MSG_TYPE_UCI_INDICATION;

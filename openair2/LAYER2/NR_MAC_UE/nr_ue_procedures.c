@@ -1798,8 +1798,7 @@ int nr_ue_configure_pucch(NR_UE_MAC_INST_t *mac,
         pucch_pdu->start_symbol_index = pucchres->format.choice.format2->startingSymbolIndex;
         pucch_pdu->data_scrambling_id = pusch_id != NULL ? *pusch_id : mac->physCellId;
         pucch_pdu->dmrs_scrambling_id = id0 != NULL ? *id0 : mac->physCellId;
-        pucch_pdu->prb_size = compute_pucch_prb_size(2,
-                                                     pucchres->format.choice.format2->nrofPRBs,
+        pucch_pdu->prb_size = compute_pucch_prb_size(pucchres->format.choice.format2->nrofPRBs,
                                                      pucch->csi_payload.p1_bits,
                                                      pucch->n_harq,
                                                      pucch->n_sr,
@@ -1834,8 +1833,7 @@ int nr_ue_configure_pucch(NR_UE_MAC_INST_t *mac,
           else
             f3_dmrs_symbols = 2<<pucch_pdu->add_dmrs_flag;
         }
-        pucch_pdu->prb_size = compute_pucch_prb_size(3,
-                                                     pucchres->format.choice.format3->nrofPRBs,
+        pucch_pdu->prb_size = compute_pucch_prb_size(pucchres->format.choice.format3->nrofPRBs,
                                                      pucch->csi_payload.p1_bits,
                                                      pucch->n_harq,
                                                      pucch->n_sr,
@@ -2679,8 +2677,7 @@ int nr_get_csi_measurements(NR_UE_MAC_INST_t *mac,
                             frame_t frame,
                             int slot,
                             nfapi_nr_ue_csi_payload_t *csi_payload,
-                            NR_PUCCH_Resource_t **csi_pucch,
-                            bool csi_on_pusch)
+                            NR_PUCCH_Resource_t **csi_pucch)
 {
   NR_UE_UL_BWP_t *current_UL_BWP = mac->current_UL_BWP;
   NR_PUCCH_Config_t *pucch_Config = current_UL_BWP ? current_UL_BWP->pucch_Config : NULL;
@@ -2734,13 +2731,17 @@ int nr_get_csi_measurements(NR_UE_MAC_INST_t *mac,
         // we discard previous report
         csi_priority = temp_priority;
         num_csi = 1;
-        *csi_payload = nr_get_csi_payload(mac, csi_report_id, csi_on_pusch ? ON_PUSCH : WIDEBAND_ON_PUCCH, csi_measconfig);
+        // 38.214 section 5.2.3: "For both Type I and Type II reports configured for PUCCH but transmitted
+        // on PUSCH, the determination of the payload for CSI part 1 and CSI part 2 follows that of PUCCH
+        // as described in Clause 5.2.4." Hence WIDEBAND_ON_PUCCH is used here regardless of whether
+        // the CSI report is sent on PUCCH or PUSCH.
+        *csi_payload = nr_get_csi_payload(mac, csi_report_id, WIDEBAND_ON_PUCCH, csi_measconfig);
       } else
         continue;
     } else {
       num_csi = 1;
       csi_priority = temp_priority;
-      *csi_payload = nr_get_csi_payload(mac, csi_report_id, csi_on_pusch ? ON_PUSCH : WIDEBAND_ON_PUCCH, csi_measconfig);
+      *csi_payload = nr_get_csi_payload(mac, csi_report_id, WIDEBAND_ON_PUCCH, csi_measconfig);
     }
   }
   return num_csi;
@@ -3764,6 +3765,9 @@ static nr_dci_format_t nr_extract_dci_00_10(NR_UE_MAC_INST_t *mac,
       // sys info = 0 for SIB1 and 1 for other SIB
       if (mac->get_sib1 == 0 && sys_info == 0)
         return NR_DCI_NONE;
+      // received DCI for other SI while still waiting to receive SIB1
+      if (mac->get_sib1 != 0 && sys_info == 1)
+        return NR_DCI_NONE;
       break;
     case TYPE_C_RNTI_ :
       // Identifier for DCI formats
@@ -4013,7 +4017,7 @@ static void nr_ue_process_mac_pdu(NR_UE_MAC_INST_t *mac, nr_downlink_indication_
 {
   frame_t frameP = dl_info->frame;
   int slot = dl_info->slot;
-  fapi_nr_pdsch_pdu_t *pdsch_pdu = &(dl_info->rx_ind->rx_indication_body + pdu_id)->pdsch_pdu;
+  fapi_nr_pdsch_pdu_t *pdsch_pdu = &dl_info->rx_ind->rx_indication_body[pdu_id].pdsch_pdu;
   uint8_t *pduP = pdsch_pdu->pdu;
   int32_t pdu_len = (int32_t)pdsch_pdu->pdu_length;
   uint8_t CC_id = dl_info->cc_id;

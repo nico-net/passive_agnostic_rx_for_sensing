@@ -618,7 +618,6 @@ typedef struct NR_UE_MAC_INST_s {
   dci_pdu_rel15_t def_dci_pdu_rel15[NR_MAX_SLOTS_PER_FRAME][8];
 
   // Defined for abstracted mode
-  nr_downlink_indication_t dl_info;
   NR_UE_DL_HARQ_STATUS_t dl_harq_info[NR_MAX_HARQ_PROCESSES][2]; // one harq process for each codeword
   NR_UE_UL_HARQ_INFO_t ul_harq_info[NR_MAX_HARQ_PROCESSES];
 
@@ -626,8 +625,6 @@ typedef struct NR_UE_MAC_INST_s {
   A_SEQUENCE_OF(NR_TAG_t) TAG_list;
   NR_TimeAlignmentTimer_t timeAlignmentTimerCommon;
   NR_timer_t time_alignment_timer;
-
-  pthread_mutex_t mutex_dl_info;
 
   //SIDELINK MAC PARAMETERS
   sl_nr_ue_mac_params_t *SL_MAC_PARAMS;
@@ -638,6 +635,7 @@ typedef struct NR_UE_MAC_INST_s {
   bool pusch_power_control_initialized;
   int delta_msg2;
   bool msg3_C_RNTI;
+  bool sr_fallback_ra_triggered; // SR-fallback RA triggered; block re-trigger until PUCCH SR resource is restored
   pthread_mutex_t if_mutex;
   ue_mac_stats_t stats;
   notifiedFIFO_t input_nf;

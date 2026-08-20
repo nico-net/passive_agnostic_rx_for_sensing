@@ -51,6 +51,7 @@ void nr_ue_init_mac(NR_UE_MAC_INST_t *mac)
   mac->p_Max = INT_MIN;
   mac->p_Max_alt = INT_MIN;
   mac->msg3_C_RNTI = false;
+  mac->sr_fallback_ra_triggered = false;
   mac->phy_config.config_req.ntn_config.params_changed = false;
   initNotifiedFIFO(&mac->input_nf);
   reset_mac_inst(mac);
@@ -187,6 +188,7 @@ void reset_mac_inst(NR_UE_MAC_INST_t *nr_mac)
   // stop any ongoing RACH procedure
   if (nr_mac->ra.RA_active) {
     nr_mac->msg3_C_RNTI = false;
+    nr_mac->sr_fallback_ra_triggered = false;
     nr_mac->ra.ra_state = nrRA_UE_IDLE;
     nr_mac->ra.RA_active = false;
   }

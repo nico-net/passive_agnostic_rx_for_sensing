@@ -138,7 +138,7 @@ These modes of operation are supported:
   - HARQ procedures for uplink
   - MCS adaption from HARQ BLER or PUSCH SINR
 - Scheduler procedures for SRS reception
-  - Periodic SRS reception
+  - Periodic and aperiodic SRS reception
   - Channel rank computation up to 2x2 scenario
   - TPMI computation based on SRS up 4 antenna ports and 2 layers
 - MAC procedures to handle CSI measurement report
@@ -251,6 +251,11 @@ These modes of operation are supported:
     * NGAP Handover Cancel Acknowledge
     * NGAP Uplink RAN Status Transfer
     * NGAP Downlink RAN Status Transfer
+  - NGAP NRPPa Transport Procedures:
+    * Downlink UE Associated NRPPa Transport
+    * Uplink UE Associated NRPPa Transport
+    * Downlink Non UE Associated NRPPa Transport
+    * Uplink Non UE Associated NRPPa Transport
 - Interface with RRC
 
 ### gNB F1AP
@@ -273,6 +278,11 @@ These modes of operation are supported:
   - F1 Reset (handled at DU only, full reset only)
   - F1 Mobility Management Procedures:
     * F1 Intra-CU Handover (Inter-DU mobility)
+  - F1 Positioning Procedures:
+    * F1 TRP Information Request/Response
+    * F1 Positioning Information Request/Response
+    * F1 Positioning Activation Request/Response
+    * F1 Positioning Measurement Request/Response
 - Interface with RRC
 - Interface with GTP-u (tunnel creation/handling for F1-U interface)
 - One CU(-CP) can handle multiple DUs
@@ -298,6 +308,28 @@ These modes of operation are supported:
       - E1 Bearer Context Release Complete
 - Interface with RRC and PDCP/SDAP
 - One CU-CP can handle multiple CU-UPs
+
+### gNB NRPPA
+
+- Integration of NRPPa (NR Positioning Protocol A) messages and procedures for
+  location services via the AMF and LMF according to TS 38.455
+  - TRP Information Exchange:
+     - TRP Information Request
+     - TRP Information Response
+  - Positioning Information Exchange:
+     - Positioning Information Request (SRS Configuration)
+     - Positioning Information Response
+  - Positioning Activation:
+     - Positioning Activation Request
+     - Positioning Activation Response
+  - Measurement Information Transfer:
+     - Measurement Request (UL-RTOA measurement)
+     - Measurement Response
+- Support for Uplink Time Difference of Arrival (UL-TDOA) based positioning
+- Support for distributed antenna systems, where a single DU manages multiple
+  antennas acting as individual Transmission and Reception Points (TRPs)
+- Interface with NGAP and RRC for UE-associated and Non-UE-associated
+  positioning contexts
 
 ### gNB GTP-U
 
@@ -325,7 +357,7 @@ These modes of operation are supported:
 *  Reception of NR-PSS/NR-SSS
 *  NR-PBCH supports multiple SSBs and flexible periodicity
    - RSRP measurement for the strongest SSB
-   - RSRP measurement for neighboring cell at same SSB frequency with serving cell
+   - RSRP measurement for up to 8 neighboring cell at same SSB frequency with serving cell
 *  Reception of NR-PDCCH (including reception of DCI, polar decoding, de-scrambling, de-modulation, RB de-mapping, etc)
    - common search space configured by MIB
    - user-specific search space configured by RRC
@@ -477,7 +509,7 @@ These modes of operation are supported:
    - RRCReestablishmentRequest/RRC Reestablishment/Reestablishment complete
    - Support for master cell group configuration
    - Reception of UECapabilityEnquiry, encoding and transmission of UECapability
-   - Support for measurement report of Event A2/A3
+   - Support for measurement report type of Event A2/A3 and periodical (only RSRP in the report)
    - Paging: PCCH reception
 * NTN according to 38.331 Rel.17
    - Reception of ntn-Config-r17 from SIB19 or reconfigurationWithSync

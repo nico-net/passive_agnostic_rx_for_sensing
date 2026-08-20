@@ -1,0 +1,97 @@
+cu_cp:
+  amf:
+    addr: 10.42.0.144
+    bind_addr: 10.42.0.1
+    supported_tracking_areas:
+      - tac: 1
+        plmn_list:
+          - plmn: "00106"
+            tai_slice_support_list:
+              - sst: 1
+                sd: 0
+
+ru_ofh:
+  t1a_max_cp_dl: 350
+  t1a_min_cp_dl: 200
+  t1a_max_cp_ul: 350
+  t1a_min_cp_ul: 200
+  t1a_max_up: 300
+  t1a_min_up: 0
+  ta4_max: 500
+  ta4_min: 0
+  is_prach_cp_enabled: true
+  ignore_ecpri_payload_size: false
+  ignore_ecpri_seq_id: true
+  compr_method_ul: bfp
+  compr_bitwidth_ul: 9
+  compr_method_dl: bfp
+  compr_bitwidth_dl: 9
+  compr_method_prach: bfp
+  compr_bitwidth_prach: 9
+  enable_ul_static_compr_hdr: true
+  enable_dl_static_compr_hdr: true
+  iq_scaling: 2
+  cells:
+    - network_interface: 0000:55:11.0
+      vlan_tag_cp: 564
+      vlan_tag_up: 564
+      ru_mac_addr: e8:c7:4f:25:81:df
+      du_mac_addr: 00:33:22:33:00:11
+      prach_port_id: [4, 5, 6, 7]
+      dl_port_id: [0, 1, 2, 3]
+      ul_port_id: [0, 1, 2, 3]
+
+cell_cfg:
+  dl_arfcn: 627666
+  band: 78
+  channel_bandwidth_MHz: 100
+  common_scs: 30
+  plmn: "00106"
+  tac: 1
+  pci: 2
+  sector_id: 1
+  nof_antennas_dl: 4
+  nof_antennas_ul: 4
+  prach:
+    prach_root_sequence_index: 0
+    zero_correlation_zone: 0
+    prach_frequency_start: 20
+    preamble_trans_max: 100
+  pdsch:
+    mcs_table: qam256
+    olla_target_bler: 0.1
+    min_ue_mcs: 1
+    max_ue_mcs: 10
+    max_nof_harq_retxs: 16
+    max_rank: 1
+  pusch:
+    olla_max_snr_offset: 20
+    mcs_table: qam64
+    olla_target_bler: 0.1
+    min_ue_mcs: 1
+    max_ue_mcs: 4
+    max_nof_harq_retxs: 16
+  ssb:
+    ssb_period: 20
+  tdd_ul_dl_cfg:
+    dl_ul_tx_period: 10
+    nof_dl_slots: 7
+    nof_ul_slots: 2
+    nof_dl_symbols: 8
+    nof_ul_symbols: 0
+
+expert_phy:
+  allow_request_on_empty_uplink_slot: true
+
+hal:
+  eal_args: "--lcores (0-1)@(0-11) -a 0000:55:11.0"
+
+log:
+  filename: /tmp/gnb-4x4-r1.log
+  all_level: warning
+
+du:
+  warn_on_drop: true
+
+metrics:
+  autostart_stdout_metrics: true

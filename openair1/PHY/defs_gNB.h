@@ -181,6 +181,11 @@ typedef struct {
   uint32_t slot;
   /// ULSCH PDU
   nfapi_nr_pusch_pdu_t pusch_pdu;
+  // Multi-User (MU) group index
+  // -1 : unallocated
+  int16_t mu_group_idx;
+  // 1 for Single-User (SU) and > 1 is MU
+  uint8_t mu_group_size;
 } NR_gNB_PUSCH_job_t;
 
 typedef struct {

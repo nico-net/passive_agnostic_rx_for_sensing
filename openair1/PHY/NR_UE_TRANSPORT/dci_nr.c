@@ -323,28 +323,23 @@ static void nr_pdcch_channel_compensation(int arraySz,
 
 static void nr_pdcch_detection_mrc(int nb_ant, int sz, c16_t rxdataF_comp[][sz])
 {
-  /* Four-RX rank-one compatibility mode uses branch 0 to avoid overflow in the fixed-point MRC
-   * accumulator -- but ONLY for the attached UE. The passive receiver needs the array gain: its
-   * targets are dedicated AL1 grants at code rate 0.66, sized by the gNB for the SERVED UE's SNR,
-   * not ours. MEASURED 2026-08-19, dedicated grants, top recovered-RNTI count vs an ~8 chance
-   * floor: skip -> 8, combine -> 3202, and occ[blind=] 0 -> 66 per CPI.
-   * ISAC_PDCCH_MRC4=1 forces combining on in either mode for A/B. */
-  {
-    static int s_mrc4 = -1;
-    if (s_mrc4 < 0)
-      s_mrc4 = (getenv("ISAC_PDCCH_MRC4") != NULL) ? 1 : 0;
-    if (nb_ant == 4 && !s_mrc4 && !IS_PASSIVE_RX_MODE(get_softmodem_params()))
-      return;
-  }
+  /* Four-RX rank-one compatibility mode uses branch 0 to avoid overflow in
+   * the fixed-point MRC accumulator. */
+  if (nb_ant == 4)
+    return;
 
-  /* NOTE -- an "equal-gain, 32-bit accumulator, divide by nb_ant" rewrite of this loop was built and
-   * MEASURED on 2026-08-19 and is a REGRESSION: it returns the dedicated-grant decode rate to the
-   * chance floor (top RNTI count 11, occ[blind=5]). Reason: the output feeds nr_pdcch_llr(), which
-   * CLIPS at +/-31, so absolute amplitude -- not just relative branch weighting -- sets the soft-bit
-   * resolution. Dividing by nb_ant drops the signal ~4x below the rail and the LLRs collapse to
-   * 0/+-1. The cascade below is lopsided (a0/8 + a1/8 + a2/4 + a3/2 at four branches) but keeps the
-   * sum near the rail, which matters more here. Do not "fix" the weighting without renormalising to
-   * the clip rail and re-measuring. */
+  /* NOTE -- an "equal-gain, 32-bit accumulator, divide by nb_ant" rewrite of the loop below is a
+   * REGRESSION: the output feeds nr_pdcch_llr(), which CLIPS at +/-31, so absolute amplitude --
+   * not just relative branch weighting -- sets the soft-bit resolution. Dividing by nb_ant drops
+   * the signal ~4x below the rail and the LLRs collapse to 0/+-1. The cascade below is lopsided
+   * (a0/8 + a1/8 + a2/4 + a3/2 at four branches) but keeps the sum near the rail, which matters
+   * more here. Do not "fix" the weighting without renormalising to the clip rail and re-measuring.
+   *
+   * The passive-mode carve-out that used to sit here (combine instead of skip when
+   * IS_PASSIVE_RX_MODE) has been REVERTED to the baseline: its justification was the 817-vs-8 /
+   * 3202-vs-11 recovered-RNTI counts, which X410_BLIND_PDCCH_HANDOVER.md section 5 retracted as
+   * 0x5199, a degenerate polar-decoder fixed point on empty CCEs. Re-measure before reinstating. */
+
   c16_t *rx0 = rxdataF_comp[0];
   // MRC on each re of rb
   // input always aligned and accepting tail padding to process all actual samples
@@ -1129,7 +1124,6 @@ void nr_pdcch_dci_indication(const UE_nr_rxtx_proc_t *proc,
 {
   NR_UE_PDCCH_CONFIG *phy_pdcch_config = &phy_data->phy_pdcch_config;
 
-  nr_downlink_indication_t dl_indication;
   fapi_nr_dci_indication_t dci_ind = {.SFN = proc->frame_rx, .slot = proc->nr_slot_rx};
 
   for (int ss_idx = 0; ss_idx < phy_pdcch_config->nb_search_space; ss_idx++) {
@@ -1173,7 +1167,14 @@ void nr_pdcch_dci_indication(const UE_nr_rxtx_proc_t *proc,
   }
 
   /* Send to MAC */
-  nr_fill_dl_indication(&dl_indication, &dci_ind, NULL, proc, ue, phy_data);
+  nr_downlink_indication_t dl_indication = (nr_downlink_indication_t){.gNB_index = proc->gNB_id,
+                                                                      .module_id = ue->Mod_id,
+                                                                      .cc_id = ue->CC_id,
+                                                                      .hfn = proc->hfn_rx,
+                                                                      .frame = proc->frame_rx,
+                                                                      .slot = proc->nr_slot_rx,
+                                                                      .phy_data = phy_data,
+                                                                      .dci_ind = &dci_ind};
   ue->if_inst->dl_indication(&dl_indication);
   phy_pdcch_config->nb_search_space = 0;
 }

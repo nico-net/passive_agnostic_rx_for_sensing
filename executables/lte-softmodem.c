@@ -165,6 +165,18 @@ void handle_nr_srs_measurements(const module_id_t module_id,
   return;
 }
 
+/* hack: nfapi code is common for 4G/5G, so some function calls are hardcoded.
+ * Provide body for 5G function not used in 4G code */
+void handle_nr_srs_toa_vendor_ext_measurements(const module_id_t module_id,
+                                               const frame_t frame,
+                                               const slot_t slot,
+                                               const uint8_t num_ta,
+                                               const int16_t *ta_offset_nsec,
+                                               const rnti_t rnti)
+{
+  return;
+}
+
 /* forward declarations */
 void set_default_frame_parms(LTE_DL_FRAME_PARMS *frame_parms[MAX_NUM_CCs]);
 

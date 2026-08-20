@@ -10,11 +10,17 @@ add_test(NAME test_oru_io COMMAND test_oru_io ${DPDK_TEST_ARGS} "--file-prefix=t
 set_property(TEST test_oru_io PROPERTY LABELS fronthaul)
 
 add_executable(test_oru_packet_processor test_oru_packet_processor.c)
-target_link_libraries(test_oru_packet_processor PRIVATE oru_packet_processor log_headers ${dpdk_LIBRARIES})
+target_link_libraries(test_oru_packet_processor PRIVATE oru_packet_processor fh_compression log_headers ${dpdk_LIBRARIES})
 target_include_directories(test_oru_packet_processor PRIVATE ${dpdk_INCLUDE_DIRS} ${CMAKE_CURRENT_SOURCE_DIR}/../../xran_pkt)
 add_dependencies(tests test_oru_packet_processor)
 add_test(NAME test_oru_packet_processor COMMAND test_oru_packet_processor ${DPDK_TEST_ARGS} "--file-prefix=test_oru_packet_processor" "--vdev=net_null0" "--vdev=net_null1")
 set_property(TEST test_oru_packet_processor PROPERTY LABELS fronthaul)
+
+add_executable(test_fh_compression test_fh_compression.c)
+target_link_libraries(test_fh_compression PRIVATE fh_compression)
+add_dependencies(tests test_fh_compression)
+add_test(NAME test_fh_compression COMMAND test_fh_compression)
+set_property(TEST test_fh_compression PROPERTY LABELS fronthaul)
 
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(PCAP REQUIRED libpcap)

@@ -37,7 +37,6 @@ uint16_t pck_seq_num_prev=0;
 int eth_socket_init_udp(openair0_device_t *device)
 {
   eth_state_t *eth = (eth_state_t*)device->priv;
-  eth_params_t *eth_params = device->eth_params;
  
   char str_local[INET_ADDRSTRLEN];
   char str_remote[INET_ADDRSTRLEN];
@@ -51,22 +50,22 @@ int eth_socket_init_udp(openair0_device_t *device)
   const char str[2][4] = {"RRU\0","RAU\0"};
   int hostind = 0;
 
-  local_ip     = eth_params->my_addr;   
-  local_portc  = eth_params->my_portc;
-  local_portd  = eth_params->my_portd;
+  local_ip     = device->eth_params.my_addr;
+  local_portc  = device->eth_params.my_portc;
+  local_portd  = device->eth_params.my_portd;
   
 
   if (device->host_type == RRU_HOST ) {
 
     remote_ipc   = "0.0.0.0";   
-    remote_ipd   = eth_params->remote_addr;   
+    remote_ipd   = device->eth_params.remote_addr;
     remote_portc =  0;   
-    remote_portd =  eth_params->remote_portd;;   
+    remote_portd =  device->eth_params.remote_portd;;
     printf("[%s] local ip addr %s portc %d portd %d\n", "RRU", local_ip, local_portc, local_portd);    
   } else { 
-    remote_ipc   = eth_params->remote_addr;   
+    remote_ipc   = device->eth_params.remote_addr;
     remote_ipd   = "0.0.0.0";   
-    remote_portc = eth_params->remote_portc;   
+    remote_portc = device->eth_params.remote_portc;
     remote_portd = 0;
     hostind      = 1;
     printf("[%s] local ip addr %s portc %d portd %d\n","RAU", local_ip, local_portc, local_portd);    

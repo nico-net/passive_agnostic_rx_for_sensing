@@ -381,6 +381,7 @@ nr_ue_if_module_t *nr_ue_if_module_init(uint32_t module_id)
     nr_ue_if_module_inst[module_id]->dl_indication = nr_ue_dl_indication;
     nr_ue_if_module_inst[module_id]->ul_indication = nr_ue_ul_indication;
     nr_ue_if_module_inst[module_id]->slot_indication = nr_ue_slot_indication;
+    nr_ue_if_module_inst[module_id]->meas_ind = nr_mac_rrc_meas_ind_ue;
   }
   return nr_ue_if_module_inst[module_id];
 }

@@ -28,8 +28,6 @@ int num_devices_eth = 0;
 struct sockaddr_in dest_addr[MAX_INST];
 int dest_addr_len[MAX_INST];
 
-int load_lib(openair0_device_t *device, openair0_config_t *openair0_cfg, eth_params_t *cfg, uint8_t flag);
-
 int trx_eth_start(openair0_device_t *device)
 {
   eth_state_t *eth = (eth_state_t *)device->priv;
@@ -445,23 +443,23 @@ int ethernet_tune(openair0_device_t *device, unsigned int option, int value)
   return 0;
 }
 
-int transport_init(openair0_device_t *device, openair0_config_t *openair0_cfg, eth_params_t *eth_params)
+int transport_init(openair0_device_t *device, openair0_config_t *openair0_cfg)
 {
   eth_state_t *eth = (eth_state_t *)malloc(sizeof(eth_state_t));
   memset(eth, 0, sizeof(eth_state_t));
 
-  eth->flags = eth_params->transp_preference;
+  eth->flags = device->eth_params.transp_preference;
 
   // load third-party driver
   if (eth->flags == ETH_UDP_IF5_ECPRI_MODE)
-    load_lib(device, openair0_cfg, eth_params, RAU_REMOTE_THIRDPARTY_RADIO_HEAD);
+    load_lib(device, openair0_cfg, RAU_REMOTE_THIRDPARTY_RADIO_HEAD);
 
-  if (eth_params->if_compress == 0) {
+  if (device->eth_params.if_compress == 0) {
     eth->compression = NO_COMPRESS;
-  } else if (eth_params->if_compress == 1) {
+  } else if (device->eth_params.if_compress == 1) {
     eth->compression = ALAW_COMPRESS;
   } else {
-    printf("transport_init: Unknown compression scheme %d - default to ALAW", eth_params->if_compress);
+    printf("transport_init: Unknown compression scheme %d - default to ALAW", device->eth_params.if_compress);
     eth->compression = ALAW_COMPRESS;
   }
 
@@ -509,7 +507,7 @@ int transport_init(openair0_device_t *device, openair0_config_t *openair0_cfg, e
     // device->trx_read_func    = trx_eth_read_udp_IF4p5;
   }
 
-  eth->if_name = eth_params->local_if_name;
+  eth->if_name = device->eth_params.local_if_name;
   device->priv = eth;
   device->openair0_cfg = &openair0_cfg[0];
   return 0;

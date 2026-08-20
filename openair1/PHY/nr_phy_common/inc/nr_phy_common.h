@@ -377,6 +377,22 @@ int nr_get_ssb_start_sc(int scs,
                         int ssb_sco,
                         frequency_range_t freq_range);
 
+/**
+ * @brief Interleave per-layer LLRs into a flat output buffer (layer de-mapping).
+ *
+ * For Nl=1 the per-layer LLR array is copied contiguously into llr_out.
+ * For Nl>1 LLRs are interleaved as: RE0_L0, RE0_L1, ..., RE0_L(Nl-1),
+ * RE1_L0, ... so that the decoder sees all layers interleaved per RE.
+ *
+ * @param Nl          Number of layers (1-4)
+ * @param mod_order   Modulation order (2/4/6/8)
+ * @param nb_re       Number of REs in this symbol
+ * @param llr_layers  Per-layer LLR pointers: llr_layers[l] points to
+ *                    nb_re * mod_order int16_t values for layer l
+ * @param llr_out     Output flat buffer (nb_re * mod_order * Nl int16_t values)
+ */
+void nr_layer_demapping(uint8_t Nl, uint8_t mod_order, int nb_re, int16_t **llr_layers, int16_t *llr_out);
+
 #include "nr_channel_compensation.h"
 #include "nr_compute_llr.h"
 #endif

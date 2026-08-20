@@ -56,6 +56,11 @@
 //       (0  + 0 * 20) % 512 = 0
 #define NUM_PROCESS_SLOT_TX_BARRIERS 512
 
+// CSI for tracking can have up to 2 resources per slot
+#define MAX_CSI_RES_SLOT 2
+// Threshold to change radio frequency
+#define TRS_CFO_THRESH 500
+
 #include "impl_defs_nr.h"
 #include "time_meas.h"
 #include "PHY/CODING/coding_defs.h"
@@ -85,6 +90,7 @@ typedef struct {
 #define NEIGHBOR_CELL_MAX_CONSECUTIVE_FAILURES 10
 
 typedef struct {
+  int ssb_slot;
   int pss_search_start;
   int pss_search_length;
   uint32_t ssb_rsrp;
@@ -148,7 +154,10 @@ typedef struct {
 
   /// Info about neighboring cells to perform the measurements
   neighboring_cell_info_t neighboring_cell_info[NUMBER_OF_NEIGHBORING_CELLS_MAX];
-  bool meas_request_pending;
+  _Atomic(bool) meas_request_pending;
+  _Atomic(bool) search_new_cells_pending;
+  int last_blind_slot;
+  int last_slot;
 } PHY_NR_MEASUREMENTS;
 
 typedef struct {
@@ -377,6 +386,7 @@ typedef struct PHY_VARS_NR_UE_s {
   double freq_off_acc; /// accumulated DL frequency error (for PI controller)
   double dl_Doppler_shift; /// calculated DL Doppler shift
   double ul_Doppler_shift; /// calculated UL Doppler shift
+  int disable_blind_search; /// flag disabling the blind search for UE searches by neighboring cells
 
   /// Timing Advance updates variables
   /// Timing advance update computed from the TA command signalled from gNB
@@ -438,7 +448,22 @@ typedef struct PHY_VARS_NR_UE_s {
   Actor_t *ul_actors;
   pthread_t main_thread;
   pthread_t stat_thread;
+  // Per-DL-actor pre-allocated PDSCH scratch buffers (one set per actor to avoid races)
+  struct pdsch_scratch_s {
+    c16_t   *rxdataF_comp;          // [NR_SYMBOLS_PER_SLOT][NR_MAX_NB_LAYERS][pdsch_buf_size_max]
+    c16_t   *dl_ch_mag;             // [NR_SYMBOLS_PER_SLOT][NR_MAX_NB_LAYERS][pdsch_buf_size_max]
+    c16_t   *dl_ch_magb;            // [NR_SYMBOLS_PER_SLOT][NR_MAX_NB_LAYERS][pdsch_buf_size_max]
+    c16_t   *dl_ch_magr;            // [NR_SYMBOLS_PER_SLOT][NR_MAX_NB_LAYERS][pdsch_buf_size_max]
+    c16_t   *rho_dl;                // [NR_SYMBOLS_PER_SLOT][NR_MAX_NB_LAYERS*NR_MAX_NB_LAYERS][pdsch_buf_size_max]
+    int32_t *pdsch_dl_ch_estimates; // [nb_antennas_rx*NR_MAX_NB_LAYERS][pdsch_est_size]
+    int16_t *llr[2];               // [2 codewords][llr_buf_max]
+    uint32_t pdsch_buf_size_max;
+    uint32_t pdsch_est_size;
+    uint32_t llr_buf_max;
+  } *pdsch_scratch;
+  int pdsch_num_actors;
 } PHY_VARS_NR_UE;
+typedef struct pdsch_scratch_s pdsch_scratch_t;
 
 typedef struct {
   openair0_timestamp_t timestamp_tx;
@@ -526,7 +551,8 @@ typedef struct {
   int subcarrier_spacing;
   int samples_per_slot_wCP;
   int target_nid_cell; // -1 for blind search, specific PCI for targeted search
-  int exclude_nid_cell; // -1 for no exclusion, or serving cell PCI to exclude
+  const uint16_t *exclude_nid_cells; // PCIs to exclude (serving cell + already discovered neighboring cells)
+  int num_exclude_nid_cells; // Number of PCIs in exclude_nid_cells array
   bool apply_freq_offset; // whether to compensate frequency offset
   bool fo_flag; // frequency offset estimation flag for pss_synchro_nr()
   void *rxdataF; // Pre-allocated rxdataF buffer
@@ -553,7 +579,8 @@ typedef struct nr_phy_data_s {
   int n_dlsch_codewords;
   // Sidelink Rx action decided by MAC
   sl_nr_rx_config_type_enum_t sl_rx_action;
-  NR_UE_CSI_RS csirs_vars;
+  int num_csirs;
+  NR_UE_CSI_RS csirs_vars[MAX_CSI_RES_SLOT];
   NR_UE_CSI_IM csiim_vars;
 } nr_phy_data_t;
 

@@ -113,12 +113,13 @@ int do_RRCSetupRequest(uint8_t *buffer, size_t buffer_size, uint8_t *rv, uint64_
 
 int do_nrMeasurementReport_SA(long trigger_to_measid,
                               long trigger_quantity,
+                              bool report_rsrp,
                               long rs_type,
                               uint16_t Nid_cell,
                               int rsrp_index,
-                              bool neighbor_cell_valid,
-                              uint16_t neighbor_Nid_cell,
-                              int neighbor_rsrp_index,
+                              int num_neighbor_cells,
+                              const uint16_t *neighbor_Nid_cells,
+                              const int *neighbor_rsrp_indexes,
                               uint8_t *buffer,
                               size_t buffer_size);
 
@@ -126,11 +127,7 @@ int do_NR_RRCReconfigurationComplete_for_nsa(uint8_t *buffer, size_t buffer_size
 
 int do_NR_RRCReconfigurationComplete(uint8_t *buffer, size_t buffer_size, const uint8_t Transaction_id);
 
-int do_NR_DLInformationTransfer(uint8_t *buffer,
-                                size_t buffer_len,
-                                uint8_t transaction_id,
-                                uint32_t pdu_length,
-                                uint8_t *pdu_buffer);
+byte_array_t do_NR_DLInformationTransfer(uint8_t Transaction_id, uint32_t pdu_length, uint8_t *pdu_buffer);
 
 int do_NR_ULInformationTransfer(uint8_t **buffer,
                                 uint32_t pdu_length,
@@ -139,7 +136,8 @@ int do_NR_ULInformationTransfer(uint8_t **buffer,
 int do_RRCReestablishmentRequest(uint8_t *buffer,
                                  NR_ReestablishmentCause_t cause,
                                  uint32_t cell_id,
-                                 uint16_t c_rnti);
+                                 uint16_t c_rnti,
+                                 uint16_t short_mac_i);
 
 int do_RRCReestablishment(int8_t nh_ncc, uint8_t *const buffer, size_t buffer_size, const uint8_t Transaction_id);
 

@@ -183,6 +183,9 @@ void init_nr_ue_vars(PHY_VARS_NR_UE *ue, uint8_t UE_id)
   // intialize transport
   init_nr_ue_transport(ue);
 
+  // Initialization of measurement variables
+  init_phy_nr_measurements(ue);
+
   ue->ta_frame = -1;
   ue->ta_slot = -1;
 }
@@ -233,40 +236,17 @@ static void UE_synch(void *arg) {
         ((ret.rx_offset << 1) / fp->samples_per_subframe * fp->slots_per_subframe)
         + round((float)((ret.rx_offset << 1) % fp->samples_per_subframe) / fp->samples_per_slot0);
 
-    // ---- POST-SYNC RADIO-STATE FREEZE (2026-08-06, diagnostic, opt-in) --------------------
-    // Both actions below mutate HARDWARE state immediately after a SUCCESSFUL acquisition, i.e.
-    // exactly at the acquisition->tracking boundary where PBCH decode starts failing (see
-    // PBCH_TRACKING_BUFFER_HANDOVER.md). The retune in particular calls uhd set_rx_freq() on a
-    // LIVE stream. Gated by env so the same binary can A/B them without a rebuild; unset = the
-    // previous behaviour exactly.
-    //   ISAC_FREEZE_RF_RETUNE=1  keep acquisition's centre frequency (skip nrue_ru_set_freq)
-    //   ISAC_FREEZE_RF_GAIN=1    keep acquisition's RX gain      (skip nrue_ru_adjust_rx_gain)
-    static int s_freeze_retune = -1, s_freeze_gain = -1;
-    if (s_freeze_retune < 0) {
-      const char *e = getenv("ISAC_FREEZE_RF_RETUNE");
-      s_freeze_retune = (e && atoi(e)) ? 1 : 0;
-      const char *g = getenv("ISAC_FREEZE_RF_GAIN");
-      s_freeze_gain = (g && atoi(g)) ? 1 : 0;
-      LOG_W(PHY, "SENSING: RFFREEZE retune_frozen=%d gain_frozen=%d\n", s_freeze_retune, s_freeze_gain);
-    }
-
-    if (get_nrUE_params()->cont_fo_comp) {
-      UE->freq_offset = freq_offset - UE->dl_Doppler_shift;
-    } else if (s_freeze_retune) {
-      // Do NOT touch the radio. Carry the measured offset the same way cont_fo_comp does, so the
-      // digital FO compensation still sees it and this is a pure "who moves the LO" experiment.
-      UE->freq_offset = freq_offset - UE->dl_Doppler_shift;
-      LOG_W(PHY, "SENSING: RFFREEZE skipped post-sync retune (would have applied %d Hz)\n", freq_offset);
-    } else {
+    UE->freq_offset = freq_offset - UE->dl_Doppler_shift;
+    if (!get_nrUE_params()->cont_fo_comp) {
       // rerun with new cell parameters and frequency-offset
       nrue_ru_set_freq(UE, ul_carrier, dl_carrier, freq_offset);
     }
 
     if (get_nrUE_params()->agc) {
-      if (s_freeze_gain)
-        LOG_W(PHY, "SENSING: RFFREEZE skipped post-sync gain adjust (would have applied %d dB)\n", UE->adjust_rxgain);
-      else
-        nrue_ru_adjust_rx_gain(UE, UE->adjust_rxgain);
+      /* The ISAC_FREEZE_RF_GAIN escape hatch that used to gate this belonged to the retracted
+       * PBCH-tracking investigation, and its declaration lived in the block x410-100MHz replaced.
+       * Restored to the baseline behaviour: always apply the post-sync gain adjustment. */
+      nrue_ru_adjust_rx_gain(UE, UE->adjust_rxgain);
     }
 
     LOG_I(PHY, "Got synch: hw_slot_offset %d, carrier off %d Hz\n", hw_slot_offset, freq_offset);
@@ -392,7 +372,7 @@ static void RU_write(nr_rxtx_thread_data_t *rxtxD, bool sl_tx_action, c16_t **tx
   while (writeBlockSize > maxWriteBlockSize) {
     const int dummyBlockSize = min(writeBlockSize - maxWriteBlockSize, maxWriteBlockSize);
     int tmp = nrue_ru_write_reorder(UE, writeTimestamp, (void **)txp, dummyBlockSize, fp->nb_antennas_tx, flags);
-    AssertFatal(tmp == dummyBlockSize, "");
+    AssertFatal(tmp == dummyBlockSize, "write samples to reorder function failed %d", tmp);
 
     writeTimestamp += dummyBlockSize;
     writeBlockSize -= dummyBlockSize;
@@ -415,7 +395,7 @@ static void RU_write(nr_rxtx_thread_data_t *rxtxD, bool sl_tx_action, c16_t **tx
   }
 
   int tmp = nrue_ru_write_reorder(UE, writeTimestamp, (void **)txp, writeBlockSize, fp->nb_antennas_tx, flags);
-  AssertFatal(tmp == writeBlockSize, "");
+  AssertFatal(tmp == writeBlockSize, "write to reorder function failed %d", tmp);
 }
 
 void processSlotTX(void *arg)
@@ -615,8 +595,15 @@ static int UE_dl_preprocessing(PHY_VARS_NR_UE *UE,
   if (proc->rx_slot_type == NR_DOWNLINK_SLOT || proc->rx_slot_type == NR_MIXED_SLOT) {
     dl_slot = true;
     if(UE->if_inst != NULL && UE->if_inst->dl_indication != NULL) {
-      nr_downlink_indication_t dl_indication;
-      nr_fill_dl_indication(&dl_indication, NULL, NULL, proc, UE, phy_data);
+      nr_downlink_indication_t dl_indication = (nr_downlink_indication_t){
+          .gNB_index = proc->gNB_id,
+          .module_id = UE->Mod_id,
+          .cc_id = UE->CC_id,
+          .hfn = proc->hfn_rx,
+          .frame = proc->frame_rx,
+          .slot = proc->nr_slot_rx,
+          .phy_data = phy_data,
+      };
       UE->if_inst->dl_indication(&dl_indication);
     }
 
@@ -697,7 +684,7 @@ void dummyWrite(PHY_VARS_NR_UE *UE, openair0_timestamp_t timestamp, int writeBlo
     dummy_tx[i] = dummy_tx_data;
 
   int tmp = nrue_ru_write(UE, timestamp, (void **)dummy_tx, writeBlockSize, fp->nb_antennas_tx, 4);
-  AssertFatal(writeBlockSize == tmp, "");
+  AssertFatal(writeBlockSize == tmp, "write to reorder function failed %d", tmp);
 }
 
 void readFrame(PHY_VARS_NR_UE *UE, openair0_timestamp_t *timestamp, int duration_rx_to_tx, bool toTrash)
@@ -727,35 +714,8 @@ void readFrame(PHY_VARS_NR_UE *UE, openair0_timestamp_t *timestamp, int duration
       int readBlockSize = get_samples_per_slot(slot_rx, fp);
       int tmp = nrue_ru_read(UE, timestamp, (void **)rxp, readBlockSize, fp->nb_antennas_rx);
       UEscopeCopy(UE, ueTimeDomainSamplesBeforeSync, rxp[0], sizeof(c16_t), 1, readBlockSize, 0);
-      // A short read here is a legitimate, by-design outcome of trx_usrp_read()'s own overflow/
-      // timeout handling (it deliberately returns a partial block rather than blocking forever --
-      // see its own error_code check), not corruption. Treating it as fatal turns any transient RF
-      // hiccup into a full process abort. MEASURED: this fires reliably under --ue-scan-carrier at
-      // 273 PRB, where dozens of parallel GSCN-correlation threads compete for CPU with the
-      // real-time RX thread and make a transient overflow far more likely -- confirmed via gdb that
-      // the abort is exactly this assertion, not memory corruption from the scan buffers themselves.
-      // This loop's own job (see the "toTrash" branch above) is just to advance the stream position
-      // past samples nobody reads the content of, so a short read only needs to be topped up, not
-      // treated as an error.
-      if (readBlockSize != tmp) {
-        LOG_W(PHY, "readFrame: short read (got %d of %d samples) -- retrying remainder instead of aborting\n", tmp,
-              readBlockSize);
-        int remaining = readBlockSize - tmp;
-        int retries = 0;
-        const int max_retries = 20;
-        while (remaining > 0 && retries < max_retries) {
-          c16_t *retry_rxp[fp->nb_antennas_rx];
-          for (int i = 0; i < fp->nb_antennas_rx; i++)
-            retry_rxp[i] = rxp[i] + tmp;
-          int got = nrue_ru_read(UE, timestamp, (void **)retry_rxp, remaining, fp->nb_antennas_rx);
-          tmp += got;
-          remaining -= got;
-          retries++;
-        }
-        if (remaining > 0)
-          LOG_W(PHY, "readFrame: gave up after %d retries, still short by %d samples -- continuing anyway\n", retries,
-                remaining);
-      }
+      if (readBlockSize != tmp)
+        LOG_W(PHY, "readFrame: got %d of %d RF samples\n", tmp, readBlockSize);
 
       if (IS_SOFTMODEM_RFSIM) {
         int slot_tx = (slot_rx + duration_rx_to_tx) % fp->slots_per_frame;
@@ -819,40 +779,20 @@ static void syncInFrame(PHY_VARS_NR_UE *UE, openair0_timestamp_t *timestamp, int
   while (size > 0) {
     // Set a maximum transfer size. As we usually read/write single slots, we use the size of slot 0 as maximum here.
     const int unitTransfer = min(get_samples_per_slot(0, fp), size);
-    int res = nrue_ru_read(UE, timestamp, (void **)UE->common_vars.rxdata, unitTransfer, fp->nb_antennas_rx);
-    // Same fix as readFrame()/UE_thread()'s equivalent checks: a short (including zero-sample,
-    // ERROR_CODE_TIMEOUT) read is trx_usrp_read()'s own by-design recovery path, not corruption.
-    // CONFIRMED as the actual root cause of the original silent-stall/overflow crashes this fix set
-    // out to explain: caught live via gdb -- "Resynchronizing RX by N samples" -> "[recv] received 0
-    // samples out of 61440" / ERROR_CODE_TIMEOUT -> this exact assertion. This loop only discards
-    // samples to advance stream position (see the IS_SOFTMODEM_RFSIM branch below, which doesn't
-    // touch content), so a short read only needs topping up, not treating as fatal.
-    if (unitTransfer != res) {
-      LOG_W(PHY, "syncInFrame: short read (got %d of %d samples) -- retrying remainder instead of aborting\n", res,
-            unitTransfer);
-      int remaining = unitTransfer - res;
-      int retries = 0;
-      const int max_retries = 20;
-      while (remaining > 0 && retries < max_retries) {
-        void *retry_rxp[fp->nb_antennas_rx];
-        for (int i = 0; i < fp->nb_antennas_rx; i++)
-          retry_rxp[i] = (c16_t *)UE->common_vars.rxdata[i] + res;
-        int got = nrue_ru_read(UE, timestamp, retry_rxp, remaining, fp->nb_antennas_rx);
-        res += got;
-        remaining -= got;
-        retries++;
-      }
-      if (remaining > 0)
-        LOG_W(PHY, "syncInFrame: gave up after %d retries, still short by %d samples -- continuing anyway\n", retries,
-              remaining);
+    const int res = nrue_ru_read(UE, timestamp, (void **)UE->common_vars.rxdata, unitTransfer, fp->nb_antennas_rx);
+    if (res <= 0) {
+      LOG_W(PHY, "Unable to read RF samples while resynchronizing\n");
+      break;
     }
+    if (unitTransfer != res)
+      LOG_W(PHY, "syncInFrame: got %d of %d RF samples\n", res, unitTransfer);
     if (IS_SOFTMODEM_RFSIM) {
       int ta = UE->timing_advance + UE->timing_advance_ntn;
       const openair0_timestamp_t writeTimestamp =
           *timestamp + get_samples_slot_duration(fp, 0, duration_rx_to_tx) - UE->N_TA_offset - ta;
       dummyWrite(UE, writeTimestamp, unitTransfer);
     }
-    size -= unitTransfer;
+    size -= res;
   }
 }
 
@@ -868,6 +808,28 @@ static inline int get_readBlockSize(uint16_t slot, const NR_DL_FRAME_PARMS *fp)
   if (slot < (fp->slots_per_frame-1))
     next_slot_first_symbol = get_firstSymSamp(slot+1, fp);
   return rem_samples + next_slot_first_symbol;
+}
+
+void trs_freq_correction(PHY_VARS_NR_UE *ue, int cfo)
+{
+  if (abs(cfo) > TRS_CFO_THRESH) {
+    if (ue->frame_parms.nb_antennas_rx == 4) {
+      /* Initial synchronization already corrects the carrier offset. The
+       * unfiltered four-RX TRS estimate can jump by several kHz and make the
+       * UE chase noise, so keep the synchronized RF frequency stable. */
+      LOG_W(PHY,
+            "Ignoring unfiltered four-RX TRS CFO estimate %d Hz (threshold %d Hz)\n",
+            cfo,
+            TRS_CFO_THRESH);
+      return;
+    }
+    LOG_A(PHY, "CFO estimated (%d) from TRS exceeded threshold (%d). Adjusting radio CF\n", cfo, TRS_CFO_THRESH);
+    ue->freq_offset += cfo;
+    uint64_t dl_carrier;
+    uint64_t ul_carrier;
+    nr_get_carrier_frequencies(ue, &dl_carrier, &ul_carrier);
+    nrue_ru_set_freq(ue, ul_carrier, dl_carrier, ue->freq_offset);
+  }
 }
 
 void *UE_thread(void *arg)
@@ -929,7 +891,6 @@ void *UE_thread(void *arg)
       readFrame(UE, &tmp, duration_rx_to_tx, true);
   }
 
-  c16_t *rxp[fp->nb_antennas_rx];
   while (!oai_exit) {
     if (syncRunning) {
       notifiedFIFO_elt_t *res = pollNotifiedFIFO(&nf);
@@ -965,7 +926,7 @@ void *UE_thread(void *arg)
           /* For IQ recorder-player we force synchronization to happen in a fixed duration so that
              the replay runs in sync with recorded samples.
           */
-          openair0_config_t *cfg0 = &openair0_cfg[UE->rf_map.card];
+          openair0_config_t *cfg0 = &openair0_cfg_g[UE->rf_map.card];
           const unsigned int sync_in_frames = cfg0->recplay_conf->u_f_sync;
           while (trashed_frames != sync_in_frames) {
             readFrame(UE, &sync_timestamp, duration_rx_to_tx, true);
@@ -982,6 +943,11 @@ void *UE_thread(void *arg)
     AssertFatal(!syncRunning, "At this point synchronization can't be running\n");
 
     if (!UE->is_synchronized) {
+      if (get_nrUE_params()->time_sync_I)
+        UE->max_pos_acc = ntn_init_time_drift * 1e-6 * fp->samples_per_frame / get_nrUE_params()->time_sync_I;
+      else
+        UE->max_pos_acc = 0;
+      UE->max_pos_iir = 0;
       readFrame(UE, &sync_timestamp, duration_rx_to_tx, false);
       notifiedFIFO_elt_t *Msg = newNotifiedFIFO_elt(sizeof(syncData_t), 0, &nf, UE_synch);
       syncData_t *syncMsg = (syncData_t *)NotifiedFifoData(Msg);
@@ -1006,116 +972,34 @@ void *UE_thread(void *arg)
 
     if (stream_status == STREAM_STATUS_UNSYNC) {
       stream_status = STREAM_STATUS_SYNCING;
-      syncInFrame(UE, &sync_timestamp, duration_rx_to_tx, intialSyncOffset);
+      const int elapsed_frames = UE->init_sync_frame + trashed_frames + 2;
+      const int initial_drift_shift =
+          -round(elapsed_frames * UE->max_pos_acc * get_nrUE_params()->time_sync_I);
+      const int corrected_sync_offset = intialSyncOffset + initial_drift_shift;
+      if (corrected_sync_offset >= 0) {
+        syncInFrame(UE, &sync_timestamp, duration_rx_to_tx, corrected_sync_offset);
+      } else {
+        LOG_W(PHY,
+              "Initial drift correction %d exceeds sync offset %d, using uncorrected offset\n",
+              initial_drift_shift,
+              intialSyncOffset);
+        syncInFrame(UE, &sync_timestamp, duration_rx_to_tx, intialSyncOffset);
+      }
       nrue_ru_write_reorder_clear_context(UE);
-
-      // ---- CFO-SEEDED SAMPLE-CLOCK DRIFT BOOTSTRAP (2026-08-06, opt-in) ---------------------
-      // Problem this addresses: the drift-compensation machinery below is generic and present,
-      // but inert here for TWO independent reasons, both measured:
-      //   1. time_sync_I defaults to 0.0 (nr-uesoftmodem.h), and BOTH shiftForNextFrame sites
-      //      multiply by it -- so the post-sync rebase and the continuous per-frame correction
-      //      are identically zero unless --time-sync-I is passed. The proportional term
-      //      (time_sync_P, default 0.5) is unaffected, but it only runs on a SUCCESSFUL PBCH
-      //      tracking decode.
-      //   2. max_pos_acc is seeded only from ntn_init_time_drift (NTN), so it is 0 on a
-      //      terrestrial cell, and is otherwise only advanced by nr_adjust_synch_ue() -- which
-      //      again needs a successful tracking PBCH decode.
-      // Together: correcting drift needs a PBCH decode, and (at this receiver's drift rate) a
-      // PBCH decode needs drift correction. The loop never starts.
-      //
-      // Bootstrap: the transmitter/receiver reference error shows up in BOTH the carrier and the
-      // sample clock, so the CFO already measured at acquisition gives a first estimate of
-      // samples/frame drift: (cfo/fc) * samples_per_frame. Verified against a working bladeRF run
-      // on this same cell: -16111 Hz / 3414.99 MHz = -4.718 ppm -> -5.797 samples/frame, and
-      // x188 elapsed frames -> -1090 samples, both matching that run's logged values exactly.
-      //
-      // DELIBERATELY A BOOTSTRAP, NOT A PERMANENT ESTIMATOR. CFO mixes transmitter and receiver
-      // carrier-reference error, and the X410's sampling clock need not share the carrier's
-      // exact fractional offset. The seed only has to get the FIRST tracking PBCH to decode;
-      // after that nr_adjust_synch_ue() (PBCH-DMRS timing feedback) advances max_pos_acc from
-      // real measurements and takes over. max_pos_acc moving away from the seeded value is
-      // therefore the success signal -- it means the loop is closed, not merely masked.
-      static int s_cfo_seed = -1;
-      if (s_cfo_seed < 0)
-        s_cfo_seed = (getenv("ISAC_CFO_DRIFT_SEED") && atoi(getenv("ISAC_CFO_DRIFT_SEED"))) ? 1 : 0;
-      if (s_cfo_seed && UE->max_pos_acc == 0) {
-        const double cfo_hz = (double)UE->common_vars.freq_offset;
-        const double fc_hz = (double)fp->dl_CarrierFreq;
-        if (fc_hz > 0.0 && cfo_hz != 0.0) {
-          // time_sync_I is the gain EVERYTHING here is multiplied by; a zero gain means the
-          // machinery is switched off, so seeding max_pos_acc alone would still produce 0.
-          // Pick a small non-zero gain so max_pos_acc keeps enough integer resolution to
-          // represent a fractional samples/frame drift (at I=0.01, one LSB is 0.01 samples/frame).
-          if (get_nrUE_params()->time_sync_I == 0.0) {
-            get_nrUE_params()->time_sync_I = 0.01;
-            LOG_W(PHY,
-                  "SENSING: CFOSEED time_sync_I was 0.0 (drift compensation disabled by default) -- "
-                  "setting it to %.3f so the existing rebase/per-frame correction can act\n",
-                  get_nrUE_params()->time_sync_I);
-          }
-          const double ppm = cfo_hz / fc_hz;
-          const double samples_per_frame_drift = ppm * (double)fp->samples_per_frame;
-          UE->max_pos_acc = (int)lround(samples_per_frame_drift / get_nrUE_params()->time_sync_I);
-          const int elapsed_frames = UE->init_sync_frame + trashed_frames + 2;
-          LOG_W(PHY,
-                "SENSING: CFOSEED cfo_hz=%.0f fc_hz=%.0f ppm=%.3f samples_per_frame=%.3f "
-                "elapsed_frames=%d predicted_rebase=%.0f time_sync_I=%.4f max_pos_acc_seeded=%d\n",
-                cfo_hz, fc_hz, ppm * 1e6, samples_per_frame_drift, elapsed_frames,
-                -(double)elapsed_frames * samples_per_frame_drift,
-                get_nrUE_params()->time_sync_I, UE->max_pos_acc);
-        } else {
-          LOG_W(PHY, "SENSING: CFOSEED skipped (cfo=%.0f Hz, fc=%.0f Hz)\n", cfo_hz, fc_hz);
-        }
-      }
-
-      shiftForNextFrame = -(UE->init_sync_frame + trashed_frames + 2) * UE->max_pos_acc * get_nrUE_params()->time_sync_I; // compensate for the time drift that happened during initial sync
-
-      // Manual post-sync correction, applied ONLY to this one-off rebase and never to the saved
-      // acquisition samples. Fallback control if the CFO seed above turns out to be the wrong
-      // estimate: it sweeps the same quantity the seed predicts, so the two are directly
-      // comparable. Sign convention matches shiftForNextFrame: POSITIVE discards samples
-      // (advances the stream), negative re-reads them.
-      {
-        static int s_manual_corr = INT_MIN;
-        if (s_manual_corr == INT_MIN) {
-          const char *e = getenv("ISAC_MANUAL_SYNC_CORR");
-          s_manual_corr = e ? atoi(e) : 0;
-        }
-        if (s_manual_corr != 0) {
-          shiftForNextFrame += s_manual_corr;
-          LOG_W(PHY, "SENSING: MANUALCORR applied %+d samples to post-sync rebase (shiftForNextFrame now %d)\n",
-                s_manual_corr, shiftForNextFrame);
-        }
-      }
-
-      LOG_I(PHY, "max_pos_acc = %d, shiftForNextFrame = %d\n", UE->max_pos_acc, shiftForNextFrame);
+      shiftForNextFrame = -round(UE->max_pos_acc * get_nrUE_params()->time_sync_I);
+      LOG_I(PHY,
+            "max_pos_acc = %d, initial_drift_shift = %d, shiftForNextFrame = %d\n",
+            UE->max_pos_acc,
+            initial_drift_shift,
+            shiftForNextFrame);
       // read in first symbol
-      // Same fix and rationale as this file's other nrue_ru_read() assertion sites: a short read is
-      // trx_usrp_read()'s own by-design overflow/timeout recovery, not corruption -- retry the
-      // shortfall instead of aborting the whole process.
-      {
-        const int firstSymBlockSize = fp->ofdm_symbol_size + fp->nb_prefix_samples0;
-        int firstSymRes = nrue_ru_read(UE, &sync_timestamp, (void **)UE->common_vars.rxdata, firstSymBlockSize, fp->nb_antennas_rx);
-        if (firstSymBlockSize != firstSymRes) {
-          LOG_W(PHY, "UE_thread (first symbol): short read (got %d of %d samples) -- retrying remainder instead of aborting\n",
-                firstSymRes, firstSymBlockSize);
-          int remaining = firstSymBlockSize - firstSymRes;
-          int retries = 0;
-          const int max_retries = 20;
-          while (remaining > 0 && retries < max_retries) {
-            void *retry_rxp[fp->nb_antennas_rx];
-            for (int i = 0; i < fp->nb_antennas_rx; i++)
-              retry_rxp[i] = UE->common_vars.rxdata[i] + firstSymRes;
-            int got = nrue_ru_read(UE, &sync_timestamp, retry_rxp, remaining, fp->nb_antennas_rx);
-            firstSymRes += got;
-            remaining -= got;
-            retries++;
-          }
-          if (remaining > 0)
-            LOG_W(PHY, "UE_thread (first symbol): gave up after %d retries, still short by %d samples -- continuing anyway\n",
-                  retries, remaining);
-        }
-      }
+      int ret = nrue_ru_read(UE,
+                             &sync_timestamp,
+                             (void **)UE->common_vars.rxdata,
+                             fp->ofdm_symbol_size + fp->nb_prefix_samples0,
+                             fp->nb_antennas_rx);
+      if (fp->ofdm_symbol_size + fp->nb_prefix_samples0 != ret)
+        LOG_W(PHY, "Initial symbol: got %d RF samples\n", ret);
       // we have the decoded frame index in the return of the synch process
       // and we shifted above to the first slot of next frame
       decoded_frame_rx = (decoded_frame_rx + 1) % MAX_FRAME_NUMBER;
@@ -1217,6 +1101,7 @@ void *UE_thread(void *arg)
     }
 
     int firstSymSamp = get_firstSymSamp(slot_nr, fp);
+    c16_t *rxp[fp->nb_antennas_rx];
     for (int i = 0; i < fp->nb_antennas_rx; i++)
       rxp[i] = &UE->common_vars.rxdata[i][firstSymSamp + get_samples_slot_timestamp(fp, slot_nr)];
 
@@ -1312,30 +1197,8 @@ void *UE_thread(void *arg)
     atomic_store_explicit(&nr_ue_diag_rf_timestamp, (long)rx_timestamp, memory_order_relaxed);
     metadata meta = {.slot =  curMsg.proc.nr_slot_rx, .frame =  curMsg.proc.frame_rx};
     UEscopeCopyWithMetadata(UE, ueTimeDomainSamples, rxp[0] - firstSymSamp, sizeof(c16_t), 1, readBlockSize, 0, &meta);
-    // Same fix and rationale as readFrame()'s equivalent check above: a short read is
-    // trx_usrp_read()'s own by-design overflow/timeout recovery path, not corruption, and doesn't
-    // warrant killing the whole process. Retry the shortfall; if retries are also exhausted, this
-    // one slot's demod may be degraded, which HARQ/CRC already has to tolerate anyway.
-    if (readBlockSize != tmp) {
-      LOG_W(PHY, "UE_thread: short read (got %d of %d samples) -- retrying remainder instead of aborting\n", tmp,
-            readBlockSize);
-      int remaining = readBlockSize - tmp;
-      int retries = 0;
-      const int max_retries = 20;
-      while (remaining > 0 && retries < max_retries) {
-        c16_t *retry_rxp[fp->nb_antennas_rx];
-        for (int i = 0; i < fp->nb_antennas_rx; i++)
-          retry_rxp[i] = rxp[i] + tmp;
-        int got = nrue_ru_read(UE, &rx_timestamp, (void **)retry_rxp, remaining, fp->nb_antennas_rx);
-        tmp += got;
-        remaining -= got;
-        rx_samples_consumed += got;
-        retries++;
-      }
-      if (remaining > 0)
-        LOG_W(PHY, "UE_thread: gave up after %d retries, still short by %d samples -- continuing anyway\n", retries,
-              remaining);
-    }
+    if (readBlockSize != tmp)
+      LOG_W(PHY, "UE slot: got %d of %d RF samples\n", tmp, readBlockSize);
     struct timespec current_time;
     if (clock_gettime(CLOCK_REALTIME, &current_time)) {
       LOG_E(PHY, "clock_gettime failed\n");
@@ -1348,13 +1211,8 @@ void *UE_thread(void *arg)
       if (first_symbols > 0) {
         openair0_timestamp_t ignore_timestamp;
         int tmp = nrue_ru_read(UE, &ignore_timestamp, (void **)UE->common_vars.rxdata, first_symbols, fp->nb_antennas_rx);
-        rx_samples_consumed += (tmp > 0) ? tmp : first_symbols;
-        // nrue_ru_read() already retries short reads internally (see its own comment); this only
-        // fires if that internal retry budget was truly exhausted. Warn and continue rather than
-        // abort the whole process -- same rationale as this file's other read-assertion fixes.
         if (first_symbols != tmp)
-          LOG_W(PHY, "UE_thread (next-frame first symbol): still short by %d samples after internal retries -- continuing anyway\n",
-                first_symbols - tmp);
+          LOG_W(PHY, "Next-frame symbol: got %d of %d RF samples\n", tmp, first_symbols);
 
       } else
         LOG_E(PHY,"can't compensate: diff =%d\n", first_symbols);

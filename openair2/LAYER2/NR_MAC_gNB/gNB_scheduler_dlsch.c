@@ -305,7 +305,7 @@ static uint32_t update_dlsch_buffer(frame_t frame, slot_t slot, NR_UE_info_t *UE
   sched_ctrl->num_total_bytes = 0;
   int dl_pdus_total = 0;
 
-  logical_chan_id_t ch[NR_MAX_NUM_LCID] = {0};
+  logical_chan_id_t ch[NR_MAX_NUM_LCID];
   int n = 0;
   /* loop over all activated logical channels */
   FOR_EACH_SEQ_ARR(const nr_lc_config_t *, c, &sched_ctrl->lc_config ) {
@@ -317,7 +317,7 @@ static uint32_t update_dlsch_buffer(frame_t frame, slot_t slot, NR_UE_info_t *UE
     ch[n++] = lcid;
   }
 
-  mac_rlc_status_resp_t ret[NR_MAX_NUM_LCID] = {0};
+  mac_rlc_status_resp_t ret[n];
   nr_mac_rlc_status_ind(UE->rnti, frame, n, ch, ret);
 
   for (int i = 0; i < n; ++i) {
@@ -886,11 +886,9 @@ void nr_dlsch_preprocessor(gNB_MAC_INST *mac, post_process_pdsch_t *pp_pdsch)
   for (int i = 0; i < num_beams; i++)
     n_rb_sched[i] = bw;
 
-  int average_agg_level = 4; // TODO find a better estimation
-  int max_sched_ues = bw / (average_agg_level * NR_NB_REG_PER_CCE);
-
   // FAPI cannot handle more than MAX_DCI_CORESET DCIs
-  max_sched_ues = min(max_sched_ues, MAX_DCI_CORESET);
+  static_assert(4 < MAX_DCI_CORESET, "cannot have more concurrent UEs than MAX_DCI_CORESET\n");
+  int max_sched_ues = 4;
 
   nr_dl_schedule(mac, pp_pdsch, UE_info->connected_ue_list, max_sched_ues, num_beams, n_rb_sched);
 }
@@ -1205,7 +1203,9 @@ static void fill_dl_tx_request(post_process_pdsch_t *pdsch,
   tx_req->num_TLV = 1;
   tx_req->TLVs[0].length = TBS;
   tx_req->PDU_length = compute_PDU_length(tx_req->num_TLV, tx_req->TLVs[0].length);
-  memcpy(tx_req->TLVs[0].value.direct, buf, TBS);
+  tx_req->TLVs[0].tag = 1; // means ptr carries for payload
+  DevAssert((uintptr_t) buf % 4 == 0); // check alignment: FAPI uses u32
+  tx_req->TLVs[0].value.ptr = (uint32_t *)buf;
   pdsch->TX_req->Number_of_PDUs++;
   pdsch->TX_req->SFN = frame;
   pdsch->TX_req->Slot = slot;
@@ -1264,6 +1264,11 @@ void post_process_dlsch(gNB_MAC_INST *nr_mac,
         sched_pdsch->pucch_allocation,
         tpc);
   DevAssert(sched_pdsch->rbSize > 0);
+
+  DevAssert(nrOfLayers >= 1 && nrOfLayers <= NR_KPM_MAX_LAYERS);
+  DevAssert(current_BWP->mcsTableIdx >= 0 && current_BWP->mcsTableIdx < NR_KPM_NB_MCS_TABLE_DL);
+  DevAssert(sched_pdsch->mcs < NR_KPM_NB_MCS);
+  nr_mac->du_stats.pdsch_mcs_dist[nrOfLayers - 1][current_BWP->mcsTableIdx][sched_pdsch->mcs] += sched_pdsch->rbSize;
 
   const int bwp_id = current_BWP->bwp_id;
   const int coresetid = sched_ctrl->coreset->controlResourceSetId;

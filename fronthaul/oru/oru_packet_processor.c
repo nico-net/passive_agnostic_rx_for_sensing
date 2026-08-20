@@ -30,8 +30,8 @@
     }                                                                                     \
   } while (0)
 
-#define DL_JOB_RING_SIZE 128
-#define UL_JOB_RING_SIZE 128
+#define DL_JOB_RING_SIZE 1024
+#define UL_JOB_RING_SIZE 1024
 #define MAX_CONCURRENT_DL_JOBS (DL_JOB_RING_SIZE - 1)
 #define NUM_CONCURRENT_DL_SYMBOL_WINDOWS MAX_CONCURRENT_DL_JOBS
 #define NUM_CONCURRENT_UL_SYMBOL_WINDOWS 128
@@ -43,6 +43,7 @@
 #define MAX_RX_FRAGMENTS 4
 #define MAX_MBUFS_PER_SYMBOL 64
 #define MAX_SLOTS_PER_FRAME 160
+#define XRAN_IQ_BITS_UNCOMPRESSED 16 /* xRAN table 7.7.1.1-1: udIqWidth=0 means 16-bit samples */
 
 typedef struct {
   struct {
@@ -59,6 +60,8 @@ typedef struct {
   int expected_iq;
   int received_iq;
   uint64_t absolute_symbol;
+  fh_comp_method_t comp_method;
+  uint8_t iq_width;
 } dl_symbol_job_t;
 
 typedef struct {
@@ -69,6 +72,8 @@ typedef struct {
   int num_prb;
   int start_prb;
   int filter_id;
+  fh_comp_method_t comp_method;
+  uint8_t iq_width;
 } prach_job_t;
 typedef struct {
   _Atomic(uint64_t) dl_tdd_mismatch;
@@ -93,7 +98,7 @@ typedef struct {
   bool was_dl_symbol_completed[NUM_CONCURRENT_DL_SYMBOL_WINDOWS];
   prach_job_t prach_jobs[MAX_SLOTS_PER_FRAME][MAX_ANTENNAS];
   uint64_t current_absolute_symbol;
-  uint64_t last_pushed_symbol;
+  uint64_t window_tail_symbol;
   struct rte_ring *dl_free_jobs;
   struct rte_ring *dl_ready_jobs;
   struct rte_ring *ul_free_jobs;
@@ -105,6 +110,7 @@ typedef struct {
   uint32_t T2a_max_up_dl_sym_diff;
   struct xran_eaxcid_config eaxcid_config;
   int prach_eaxc_offset;
+  int prach_kbar;
   int numerology;
   int num_prb;
   oru_packet_processor_stats_t stats;
@@ -117,6 +123,7 @@ typedef struct {
   void *io_controller;
   _Atomic(uint8_t) pusch_seq_id[MAX_ANTENNAS];
   size_t mtu;
+  fh_comp_method_t dl_comp_method;
 } oru_packet_processor_context_t;
 
 static inline void set_bit(uint8_t *bits, uint64_t bit)
@@ -153,7 +160,9 @@ void *init_packet_processor(int numerology,
                             send_func_t send_func,
                             void *io_controller,
                             size_t mtu,
-                            int prach_eaxc_offset)
+                            int prach_eaxc_offset,
+                            fh_comp_method_t dl_comp_method,
+                            int prach_kbar)
 {
   oru_packet_processor_context_t *ctx = calloc(1, sizeof(*ctx));
   ctx->alloc_func = alloc_func;
@@ -164,6 +173,11 @@ void *init_packet_processor(int numerology,
   ctx->numerology = numerology;
   ctx->mtu = mtu;
   ctx->prach_eaxc_offset = prach_eaxc_offset;
+  AssertFatal(prach_kbar >= 0 && prach_kbar + FH_PRACH_NUM_SUBCARRIERS * 2 <= FH_PRACH_NUM_PRBS * FH_VALS_PER_PRB,
+              "PRACH kbar %d out of range\n",
+              prach_kbar);
+  ctx->prach_kbar = prach_kbar;
+  ctx->dl_comp_method = dl_comp_method;
   uint32_t slots_per_subframe = 1 << numerology;
   uint32_t symbol_duration_uS = 1000 / slots_per_subframe / NR_SYMBOLS_PER_SLOT;
   ctx->T2a_min_cp_sym_diff = T2a_cp_min_uS / symbol_duration_uS;
@@ -226,61 +240,64 @@ void cleanup_packet_processor(void *context)
   }
 }
 
-// happens when all packets for one symbol are collected
-void try_push_symbol_job(oru_packet_processor_context_t *ctx, uint64_t absolute_symbol)
+// Releases a single symbol job the instant it individually completes, independent of any other
+// symbol's state (sliding window: no head-of-line blocking on neighboring, still-incomplete jobs).
+void release_completed_symbol_job(oru_packet_processor_context_t *ctx, uint64_t absolute_symbol)
 {
-  while (ctx->last_pushed_symbol <= absolute_symbol) {
-    if (!test_bit(ctx->dl_symbol_bitmask, ctx->last_pushed_symbol % ctx->symbol_bitmask_length)) {
-      // skip non-dl symbols
-      ctx->last_pushed_symbol++;
-      continue;
-    }
-
-    uint32_t job_index = ctx->last_pushed_symbol % NUM_CONCURRENT_DL_SYMBOL_WINDOWS;
-    dl_symbol_job_t *job = ctx->dl_symbol_rx_window[job_index];
-    if (!job) {
-      break;
-    }
-    if (job->expected_iq != job->received_iq) {
-      // Only push finished jobs from here
-      break;
-    }
-    ctx->dl_symbol_rx_window[job_index] = NULL;
-    int ret = rte_ring_enqueue(ctx->dl_ready_jobs, (void *)job);
-    if (ret != 0) {
-      ctx->stats.application_too_slow++;
-    }
-    ctx->last_pushed_symbol++;
+  uint32_t job_index = absolute_symbol % NUM_CONCURRENT_DL_SYMBOL_WINDOWS;
+  dl_symbol_job_t *job = ctx->dl_symbol_rx_window[job_index];
+  if (!job || job->absolute_symbol != absolute_symbol) {
+    return;
+  }
+  ctx->dl_symbol_rx_window[job_index] = NULL;
+  ctx->was_dl_symbol_completed[job_index] = true;
+  int ret = rte_ring_enqueue(ctx->dl_ready_jobs, (void *)job);
+  if (ret != 0) {
+    ctx->stats.application_too_slow++;
   }
 }
 
-// Happens during timer expiry
+// Happens during timer expiry: slides the trailing edge of the window forward, forcibly evicting
+// any slot that fell behind (reclaiming it for the job pool) so every DL symbol eventually reaches
+// dl_ready_jobs even if it was never released early via release_completed_symbol_job().
 void push_symbol_job(oru_packet_processor_context_t *ctx, uint64_t absolute_symbol)
 {
-  while (ctx->last_pushed_symbol <= absolute_symbol) {
-    if (!test_bit(ctx->dl_symbol_bitmask, ctx->last_pushed_symbol % ctx->symbol_bitmask_length)) {
+  while (ctx->window_tail_symbol <= absolute_symbol) {
+    if (!test_bit(ctx->dl_symbol_bitmask, ctx->window_tail_symbol % ctx->symbol_bitmask_length)) {
       // skip non-dl symbols
-      ctx->last_pushed_symbol++;
+      ctx->window_tail_symbol++;
       continue;
     }
 
-    uint32_t job_index = ctx->last_pushed_symbol % NUM_CONCURRENT_DL_SYMBOL_WINDOWS;
+    uint32_t job_index = ctx->window_tail_symbol % NUM_CONCURRENT_DL_SYMBOL_WINDOWS;
     dl_symbol_job_t *job = ctx->dl_symbol_rx_window[job_index];
-    if (!job) {
+    if (job) {
+      // Still sitting in the window (incomplete or never checked) - force flush whatever is there.
+      ctx->dl_symbol_rx_window[job_index] = NULL;
+      ctx->was_dl_symbol_completed[job_index] = false;
+      int ret = rte_ring_enqueue(ctx->dl_ready_jobs, (void *)job);
+      if (ret != 0) {
+        ctx->stats.application_too_slow++;
+      }
+    } else if (ctx->was_dl_symbol_completed[job_index]) {
+      // Already released early for this exact symbol - nothing to do.
+      ctx->was_dl_symbol_completed[job_index] = false;
+    } else {
+      // Never got a single C-plane packet for this symbol - push an empty placeholder so the
+      // consumer still sees every DL symbol.
       int ret = rte_ring_dequeue(ctx->dl_free_jobs, (void **)&job);
       if (ret != 0) {
         ctx->stats.application_too_slow++;
         return;
       }
       memset(job, 0, sizeof(*job));
-      job->absolute_symbol = absolute_symbol;
+      job->absolute_symbol = ctx->window_tail_symbol;
+      ret = rte_ring_enqueue(ctx->dl_ready_jobs, (void *)job);
+      if (ret != 0) {
+        ctx->stats.application_too_slow++;
+      }
     }
-    ctx->dl_symbol_rx_window[job_index] = NULL;
-    int ret = rte_ring_enqueue(ctx->dl_ready_jobs, (void *)job);
-    if (ret != 0) {
-      ctx->stats.application_too_slow++;
-    }
-    ctx->last_pushed_symbol++;
+    ctx->window_tail_symbol++;
   }
 }
 
@@ -289,11 +306,18 @@ void handle_absolute_symbol_tick(void *context, uint64_t absolute_symbol)
   oru_packet_processor_context_t *ctx = (oru_packet_processor_context_t *)context;
   if (ctx->current_absolute_symbol == 0) {
     ctx->current_absolute_symbol = absolute_symbol - 1;
-    ctx->last_pushed_symbol = absolute_symbol - 1;
+    ctx->window_tail_symbol = absolute_symbol - 1;
   }
   ctx->current_absolute_symbol = absolute_symbol;
   uint64_t window_expiry_symbol = ctx->current_absolute_symbol + ctx->T2a_min_up_dl_sym_diff;
   push_symbol_job(ctx, window_expiry_symbol);
+}
+
+void get_dl_symbol_bitmask(void *context, const uint8_t **bitmask, uint16_t *bit_length)
+{
+  oru_packet_processor_context_t *ctx = (oru_packet_processor_context_t *)context;
+  *bitmask = ctx->dl_symbol_bitmask;
+  *bit_length = ctx->symbol_bitmask_length;
 }
 
 void handle_uplane_packet(void *context, void *pkt)
@@ -314,7 +338,7 @@ void handle_uplane_packet(void *context, void *pkt)
   uint16_t sym_inc;
   uint16_t rb;
   uint16_t sect_id;
-  int expect_comp = 0;
+  const bool has_comp_hdr = ctx->dl_comp_method != FH_COMP_NONE;
   uint8_t staticComp = 0;
   uint8_t compMeth = 0;
   uint8_t iqWidth = 0;
@@ -334,12 +358,17 @@ void handle_uplane_packet(void *context, void *pkt)
                                     &sym_inc,
                                     &rb,
                                     &sect_id,
-                                    expect_comp,
+                                    has_comp_hdr,
                                     staticComp,
                                     &compMeth,
                                     &iqWidth);
   if (ret == 0) {
     LOG_W(HW, "Error reading packet\n");
+    rte_pktmbuf_free(pkt);
+    return;
+  }
+  if (has_comp_hdr && compMeth >= FH_COMP_NUM_METHODS) {
+    LOG_W(HW, "U-plane packet: invalid compression method %u, dropping\n", compMeth);
     rte_pktmbuf_free(pkt);
     return;
   }
@@ -362,18 +391,19 @@ void handle_uplane_packet(void *context, void *pkt)
         compMeth,
         iqWidth);
 
-  AssertFatal(compMeth == 0, "Compression not supported\n");
   int mu = ctx->numerology;
   int slots_per_subframe = 1 << mu;
   int num_symbols_per_frame = NR_NUMBER_OF_SUBFRAMES_PER_FRAME * slots_per_subframe * NR_SYMBOLS_PER_SLOT;
   uint32_t current_symbol_in_frame = ctx->current_absolute_symbol % num_symbols_per_frame;
   int symbol_in_frame = NR_SYMBOLS_PER_SLOT * (slot_id + subframe_id * slots_per_subframe) + symb_id;
-  int32_t diff = symbol_in_frame - current_symbol_in_frame;
-  if (diff < -num_symbols_per_frame / 2) {
-    diff += num_symbols_per_frame;
-  } else if (diff > num_symbols_per_frame / 2) {
-    diff -= num_symbols_per_frame;
+  uint8_t current_frame_id = (ctx->current_absolute_symbol / num_symbols_per_frame) % 256;
+  int frame_diff = (int)frame_id - (int)current_frame_id;
+  if (frame_diff < -128) {
+    frame_diff += 256;
+  } else if (frame_diff > 127) {
+    frame_diff -= 256;
   }
+  int32_t diff = frame_diff * num_symbols_per_frame + symbol_in_frame - (int32_t)current_symbol_in_frame;
   txrx_window_histogram_count(&ctx->stats.dl_uplane_hist, diff);
   if (diff > (int32_t)ctx->T2a_max_up_dl_sym_diff) {
     ctx->stats.uplane_err_early++;
@@ -417,8 +447,10 @@ void handle_uplane_packet(void *context, void *pkt)
     rte_pktmbuf_free(pkt);
   }
   job->received_iq += num_prbu == 0 ? ctx->num_prb : num_prbu;
+  job->comp_method = (fh_comp_method_t)compMeth;
+  job->iq_width = iqWidth == 0 ? XRAN_IQ_BITS_UNCOMPRESSED : iqWidth;
   if (job->expected_iq == job->received_iq) {
-    try_push_symbol_job(ctx, target_absolute_symbol);
+    release_completed_symbol_job(ctx, target_absolute_symbol);
   }
   return;
 }
@@ -436,12 +468,14 @@ static void handle_dl_cplane_packet(oru_packet_processor_context_t *ctx,
   int num_symbols_per_frame = NR_NUMBER_OF_SUBFRAMES_PER_FRAME * (1 << numerology) * NR_SYMBOLS_PER_SLOT;
   uint64_t symbol_in_frame = slot_in_frame * 14 + start_symbol;
   uint32_t current_symbol_in_frame = ctx->current_absolute_symbol % num_symbols_per_frame;
-  int32_t diff = symbol_in_frame - current_symbol_in_frame;
-  if (diff < -num_symbols_per_frame / 2) {
-    diff += num_symbols_per_frame;
-  } else if (diff > num_symbols_per_frame / 2) {
-    diff -= num_symbols_per_frame;
+  uint8_t current_frame_id = (ctx->current_absolute_symbol / num_symbols_per_frame) % 256;
+  int frame_diff = (int)hdr->cmnhdr.field.frameId - (int)current_frame_id;
+  if (frame_diff < -128) {
+    frame_diff += 256;
+  } else if (frame_diff > 127) {
+    frame_diff -= 256;
   }
+  int32_t diff = frame_diff * num_symbols_per_frame + (int32_t)symbol_in_frame - (int32_t)current_symbol_in_frame;
   txrx_window_histogram_count(&ctx->stats.dl_cplane_hist, diff);
   if (diff > (int32_t)ctx->T2a_max_cp_sym_diff) {
     ctx->stats.cplane_err_early++;
@@ -470,6 +504,8 @@ static void handle_dl_cplane_packet(oru_packet_processor_context_t *ctx,
       job->absolute_symbol = target_absolute_symbol + i;
       job->expected_iq = 0;
       job->received_iq = 0;
+      job->comp_method = FH_COMP_NONE;
+      job->iq_width = 16;
       for (int j = 0; j < MAX_ANTENNAS; j++) {
         job->per_antenna[j].cplane_received = false;
         job->per_antenna[j].num_rx_fragments = 0;
@@ -479,6 +515,7 @@ static void handle_dl_cplane_packet(oru_packet_processor_context_t *ctx,
         }
       }
       ctx->dl_symbol_rx_window[job_index] = job;
+      ctx->was_dl_symbol_completed[job_index] = false;
     } else {
       if (job->absolute_symbol != target_absolute_symbol + i) {
         ctx->stats.cplane_err_late++;
@@ -492,6 +529,8 @@ static void handle_dl_cplane_packet(oru_packet_processor_context_t *ctx,
     }
     job->per_antenna[ant_id].section_id = section->hdr.u1.common.sectionId;
     job->expected_iq += section->hdr.u1.common.numPrbc == 0 ? ctx->num_prb : section->hdr.u1.common.numPrbc;
+    job->comp_method = (fh_comp_method_t)hdr->udComp.udCompMeth;
+    job->iq_width = hdr->udComp.udIqWidth == 0 ? XRAN_IQ_BITS_UNCOMPRESSED : hdr->udComp.udIqWidth;
   }
 }
 
@@ -508,12 +547,14 @@ static void handle_ul_cplane_packet(oru_packet_processor_context_t *ctx,
   int num_symbols_per_frame = NR_NUMBER_OF_SUBFRAMES_PER_FRAME * (1 << numerology) * NR_SYMBOLS_PER_SLOT;
   uint64_t symbol_in_frame = slot_in_frame * 14 + start_symbol;
   uint32_t current_symbol_in_frame = ctx->current_absolute_symbol % num_symbols_per_frame;
-  int32_t diff = symbol_in_frame - current_symbol_in_frame;
-  if (diff < -num_symbols_per_frame / 2) {
-    diff += num_symbols_per_frame;
-  } else if (diff > num_symbols_per_frame / 2) {
-    diff -= num_symbols_per_frame;
+  uint8_t current_frame_id = (ctx->current_absolute_symbol / num_symbols_per_frame) % 256;
+  int frame_diff = (int)hdr->cmnhdr.field.frameId - (int)current_frame_id;
+  if (frame_diff < -128) {
+    frame_diff += 256;
+  } else if (frame_diff > 127) {
+    frame_diff -= 256;
   }
+  int32_t diff = frame_diff * num_symbols_per_frame + (int32_t)symbol_in_frame - (int32_t)current_symbol_in_frame;
   txrx_window_histogram_count(&ctx->stats.ul_cplane_hist, diff);
   if (diff > (int32_t)ctx->T2a_max_cp_sym_diff) {
     ctx->stats.cplane_err_early++;
@@ -534,7 +575,7 @@ static void handle_ul_cplane_packet(oru_packet_processor_context_t *ctx,
     memset(ul_job, 0, sizeof(*ul_job));
     ul_job->response_payload.section_id = section->hdr.u1.common.sectionId;
     ul_job->response_payload.comp_method = hdr->udComp.udCompMeth;
-    ul_job->response_payload.iq_width = hdr->udComp.udIqWidth == 0 ? 16 : hdr->udComp.udIqWidth;
+    ul_job->response_payload.iq_width = hdr->udComp.udIqWidth == 0 ? XRAN_IQ_BITS_UNCOMPRESSED : hdr->udComp.udIqWidth;
     uint64_t absolute_gps_symbol = target_absolute_symbol;
     ul_job->hyper_frame = absolute_gps_symbol / (1024 * (10 * (1 << ctx->numerology) * 14));
     ul_job->frame = (absolute_gps_symbol / (10 * (1 << ctx->numerology) * 14)) % 1024;
@@ -587,12 +628,14 @@ void handle_prach_cplane_packet(oru_packet_processor_context_t *ctx,
   int num_symbols_per_frame = NR_NUMBER_OF_SUBFRAMES_PER_FRAME * (1 << numerology) * NR_SYMBOLS_PER_SLOT;
   uint64_t symbol_in_frame = slot_in_frame * NR_SYMBOLS_PER_SLOT + start_symbol;
   uint32_t current_symbol_in_frame = ctx->current_absolute_symbol % num_symbols_per_frame;
-  int32_t diff = symbol_in_frame - current_symbol_in_frame;
-  if (diff < -num_symbols_per_frame / 2) {
-    diff += num_symbols_per_frame;
-  } else if (diff > num_symbols_per_frame / 2) {
-    diff -= num_symbols_per_frame;
+  uint8_t current_frame_id = (ctx->current_absolute_symbol / num_symbols_per_frame) % 256;
+  int frame_diff = (int)hdr->cmnhdr.field.frameId - (int)current_frame_id;
+  if (frame_diff < -128) {
+    frame_diff += 256;
+  } else if (frame_diff > 127) {
+    frame_diff -= 256;
   }
+  int32_t diff = frame_diff * num_symbols_per_frame + (int32_t)symbol_in_frame - (int32_t)current_symbol_in_frame;
   txrx_window_histogram_count(&ctx->stats.prach_cplane_hist, diff);
   uint64_t target_absolute_symbol = ctx->current_absolute_symbol + diff;
 
@@ -617,6 +660,8 @@ void handle_prach_cplane_packet(oru_packet_processor_context_t *ctx,
   job->num_prb = section->hdr.u1.common.numPrbc == 0 ? ctx->num_prb : section->hdr.u1.common.numPrbc;
   job->start_prb = section->hdr.u1.common.startPrbc;
   job->filter_id = hdr->cmnhdr.field.filterIndex;
+  job->comp_method = (fh_comp_method_t)hdr->udComp.udCompMeth;
+  job->iq_width = hdr->udComp.udIqWidth == 0 ? XRAN_IQ_BITS_UNCOMPRESSED : hdr->udComp.udIqWidth;
   RATELIMIT(PRACH_ERR_LOG_RATELIMIT, {
     LOG_A(HW,
           "PRACH JOB added slot_in_frame %d, aarx %d target_absolute_symbol %lu\n",
@@ -826,12 +871,18 @@ void get_packet_processor_stats(void *context, oru_packet_processor_stats_t *out
   }
 }
 
-static void unpack_iq(c16_t *txdataF, void *iqdata, int start_prb, int num_prb)
+static void unpack_iq(c16_t *txdataF, const uint8_t *iqdata, int start_prb, int num_prb,
+                      fh_comp_method_t comp_method, uint8_t iq_width)
 {
-  uint16_t *source = (uint16_t *)iqdata;
-  uint16_t *destination = (uint16_t *)&txdataF[start_prb * NR_NB_SC_PER_RB];
-  for (int j = 0; j < num_prb * NR_NB_SC_PER_RB * 2; j++) {
-    destination[j] = rte_bswap16(source[j]);
+  if (comp_method != FH_COMP_NONE) {
+    fh_decompress_prbs(comp_method, iq_width, num_prb,
+                       (const int8_t *)iqdata,
+                       (int16_t *)&txdataF[start_prb * NR_NB_SC_PER_RB]);
+  } else {
+    const uint16_t *source = (const uint16_t *)iqdata;
+    uint16_t *destination = (uint16_t *)&txdataF[start_prb * NR_NB_SC_PER_RB];
+    for (int j = 0; j < num_prb * NR_NB_SC_PER_RB * 2; j++)
+      destination[j] = rte_bswap16(source[j]);
   }
 }
 
@@ -864,7 +915,9 @@ void read_dl_iq(void *context, uint32_t **txdataF, int nb_tx, uint64_t *hyper_fr
       unpack_iq((c16_t *)txdataF[aatx],
                 job->per_antenna[aatx].rx_fragments[k].iq_data,
                 job->per_antenna[aatx].rx_fragments[k].start_prbc,
-                job->per_antenna[aatx].rx_fragments[k].num_prbc);
+                job->per_antenna[aatx].rx_fragments[k].num_prbc,
+                job->comp_method,
+                job->iq_width);
       if (job->per_antenna[aatx].rx_fragments[k].mbuf) {
         rte_pktmbuf_free(job->per_antenna[aatx].rx_fragments[k].mbuf);
       }
@@ -991,7 +1044,9 @@ void write_ul_iq(void *context, uint32_t *rxdataF, int symbol, const ul_job_t *j
   if (use_comp) {
     overhead += sizeof(struct data_section_compression_hdr);
   }
-  int max_prb_per_packet = (int)((ctx->mtu - overhead) / (NR_NB_SC_PER_RB * sizeof(int32_t)));
+  const size_t prb_bytes = use_comp ? (size_t)FH_COMP_PRB_BYTES(job->response_payload.iq_width)
+                                    : (size_t)(NR_NB_SC_PER_RB * sizeof(int32_t));
+  int max_prb_per_packet = (int)((ctx->mtu - overhead) / prb_bytes);
 
   while (rbs_sent < total_ul_rbs) {
     int num_ul_rbs = total_ul_rbs - rbs_sent;
@@ -1010,7 +1065,8 @@ void write_ul_iq(void *context, uint32_t *rxdataF, int symbol, const ul_job_t *j
       header_length += sizeof(struct data_section_compression_hdr);
     }
     const uint num_sc = num_ul_rbs * NR_NB_SC_PER_RB;
-    size_t data_len = sizeof(int32_t) * num_sc;
+    size_t data_len = use_comp ? (size_t)FH_COMP_PRB_BYTES(job->response_payload.iq_width) * num_ul_rbs
+                               : (size_t)sizeof(int32_t) * num_sc;
 
     char *buf = rte_pktmbuf_append(pkt, (uint16_t)(header_length + data_len));
     if (buf == NULL) {
@@ -1036,21 +1092,29 @@ void write_ul_iq(void *context, uint32_t *rxdataF, int symbol, const ul_job_t *j
     struct data_section_hdr *data_section_header = (struct data_section_hdr *)(radio_app_header + 1);
     fill_data_section_header(data_section_header, num_ul_rbs, start_prb_base + rbs_sent, section_id);
 
-    void *iq_data_start;
+    uint8_t *iq_data_start;
     if (use_comp) {
       struct data_section_compression_hdr *compression_header = (struct data_section_compression_hdr *)(data_section_header + 1);
       compression_header->ud_comp_hdr.ud_comp_meth = job->response_payload.comp_method;
       compression_header->ud_comp_hdr.ud_iq_width = XRAN_CONVERT_IQWIDTH(job->response_payload.iq_width);
       compression_header->rsrvd = 0;
-      iq_data_start = (void *)(compression_header + 1);
+      iq_data_start = (uint8_t *)(compression_header + 1);
     } else {
-      iq_data_start = (void *)(data_section_header + 1);
+      iq_data_start = (uint8_t *)(data_section_header + 1);
     }
 
-    uint16_t *src = (uint16_t *)&rxdataF[(start_prb_base + rbs_sent) * NR_NB_SC_PER_RB];
-    uint16_t *dst = (uint16_t *)iq_data_start;
-    for (int i = 0; i < num_sc * 2; i++) {
-      *dst++ = rte_cpu_to_be_16(*src++);
+    const int16_t *src = (const int16_t *)&rxdataF[(start_prb_base + rbs_sent) * NR_NB_SC_PER_RB];
+    if (use_comp) {
+      fh_compress_prbs((fh_comp_method_t)job->response_payload.comp_method,
+                       job->response_payload.iq_width,
+                       num_ul_rbs,
+                       src,
+                       (int8_t *)iq_data_start);
+    } else {
+      const uint16_t *raw = (const uint16_t *)src;
+      uint16_t *dst = (uint16_t *)iq_data_start;
+      for (int i = 0; i < num_sc * 2; i++)
+        dst[i] = rte_cpu_to_be_16(raw[i]);
     }
     rbs_sent += num_ul_rbs;
   }
@@ -1131,9 +1195,13 @@ void write_prach_iq(void *context, uint32_t **txdataF, int nb_rx, int frame, int
       continue;
     }
 
+    const bool prach_compressed = job->comp_method != FH_COMP_NONE;
     size_t header_length = sizeof(struct xran_ecpri_hdr) + sizeof(struct radio_app_common_hdr) + sizeof(struct data_section_hdr);
+    if (prach_compressed)
+      header_length += sizeof(struct data_section_compression_hdr);
     const uint prach_length = 139;
-    size_t data_len = sizeof(int32_t) * prach_length;
+    size_t data_len = prach_compressed ? (size_t)FH_COMP_PRB_BYTES(job->iq_width) * FH_PRACH_NUM_PRBS
+                                       : (size_t)(prach_length + ctx->prach_kbar) * 2 * sizeof(uint16_t);
 
     char *buf = rte_pktmbuf_append(pkt, (uint16_t)(header_length + data_len));
     if (buf == NULL) {
@@ -1164,11 +1232,22 @@ void write_prach_iq(void *context, uint32_t **txdataF, int nb_rx, int frame, int
     struct data_section_hdr *data_section_header = (struct data_section_hdr *)(radio_app_header + 1);
     fill_data_section_header(data_section_header, num_ul_rbs, start_prb, section_id);
 
-    void *iq_data_start = (void *)(data_section_header + 1);
-    uint16_t *src = (uint16_t *)txdataF[aarx];
-    uint16_t *dst = (uint16_t *)iq_data_start;
-    for (int i = 0; i < prach_length * 2; i++) {
-      *dst++ = rte_cpu_to_be_16(*src++);
+    uint8_t *iq_data_start;
+    if (prach_compressed) {
+      struct data_section_compression_hdr *comp_hdr =
+          (struct data_section_compression_hdr *)(data_section_header + 1);
+      comp_hdr->ud_comp_hdr.ud_comp_meth = job->comp_method;
+      comp_hdr->ud_comp_hdr.ud_iq_width = XRAN_CONVERT_IQWIDTH(job->iq_width);
+      comp_hdr->rsrvd = 0;
+      iq_data_start = (uint8_t *)(comp_hdr + 1);
+      fh_compress_prach(job->comp_method, job->iq_width, ctx->prach_kbar, (const int16_t *)txdataF[aarx], (int8_t *)iq_data_start);
+    } else {
+      iq_data_start = (uint8_t *)(data_section_header + 1);
+      const uint16_t *raw = (const uint16_t *)txdataF[aarx];
+      uint16_t *dst = (uint16_t *)iq_data_start;
+      memset(dst, 0, (prach_length + ctx->prach_kbar) * 2 * sizeof(uint16_t));
+      for (int i = 0; i < prach_length * 2; i++)
+        dst[ctx->prach_kbar + i] = rte_cpu_to_be_16(raw[i]);
     }
   }
 

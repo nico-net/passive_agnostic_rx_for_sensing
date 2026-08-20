@@ -33,6 +33,7 @@ extern uint16_t ue_id_g;
 #define  CONFIG_HLP_DL_ACTOR_CORE_START    "First CPU core for DL actors. Negative means no affinity\n"
 #define  CONFIG_HLP_UL_ACTOR_CORE_START    "First CPU core for UL actors. Negative means no affinity\n"
 #define  CONFIG_HLP_EXTRA_PDU_ID           "ID of an additional PDU session to configure alongside default PDU session\n"
+#define  CONFIG_HLP_DISABLE_BLIND_SEARCH   "Disable blind search for UE searches by neighboring cells\n"
 
 /***************************************************************************************************************************************/
 /* command line options definitions, CMDLINE_XXXX_DESC macros are used to initialize paramdef_t arrays which are then used as argument
@@ -85,6 +86,7 @@ extern uint16_t ue_id_g;
   {"dl-actor-core-start",          CONFIG_HLP_DL_ACTOR_CORE_START, 0,            .iptr=&nrUE_params.dl_actor_core_start,      .defintval=-1,     TYPE_INT,      0}, \
   {"ul-actor-core-start",          CONFIG_HLP_UL_ACTOR_CORE_START, 0,            .iptr=&nrUE_params.ul_actor_core_start,      .defintval=-1,     TYPE_INT,      0}, \
   {"extra-pdu-id",                 CONFIG_HLP_EXTRA_PDU_ID,   0,                .iptr=&nrUE_params.extra_pdu_id,             .defintval=-1,     TYPE_INT,      0}, \
+  {"disable-blind-search",         CONFIG_HLP_DISABLE_BLIND_SEARCH, PARAMFLAG_BOOL, .iptr=&nrUE_params.disable_blind_search, .defintval=0,    TYPE_INT,      0}, \
 }
 // clang-format on
 
@@ -129,6 +131,7 @@ typedef struct {
   int dl_actor_core_start;
   int ul_actor_core_start;
   int extra_pdu_id;
+  int disable_blind_search;
 } nrUE_params_t;
 extern uint64_t get_nrUE_optmask(void);
 extern uint64_t set_nrUE_optmask(uint64_t bitmask);

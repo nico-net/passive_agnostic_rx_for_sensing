@@ -193,25 +193,21 @@ void nr_pbch_channel_compensation(const struct complex16 rxdataF_ext[][PBCH_MAX_
   }
 }
 
-void nr_pbch_detection_mrc(NR_DL_FRAME_PARMS *frame_parms,
-                           int **rxdataF_comp,
-                           uint8_t symbol) {
-  uint8_t symbol_mod;
-  int i, nb_rb = 6;
-  simde__m128i *rxdataF_comp128_0, *rxdataF_comp128_1;
-  symbol_mod = (symbol>=(7-frame_parms->Ncp)) ? symbol-(7-frame_parms->Ncp) : symbol;
+static void nr_pbch_detection_mrc(struct complex16 rxdataF_comp[][PBCH_MAX_RE_PER_SYMBOL], uint8_t nb_antennas_rx, int nb_re)
+{
+  /* Four-RX rank-one compatibility mode uses branch 0 to avoid overflow in
+   * the fixed-point MRC accumulator. */
+  if (nb_antennas_rx == 1 || nb_antennas_rx == 4)
+    return;
 
-  if (frame_parms->nb_antennas_rx > 1) {
-    rxdataF_comp128_0 = (simde__m128i *)&rxdataF_comp[0][symbol_mod * 6 * 12];
-    rxdataF_comp128_1 = (simde__m128i *)&rxdataF_comp[1][symbol_mod * 6 * 12];
+  simde__m128i *rxdataF_comp128_0 = (simde__m128i *)rxdataF_comp[0];
 
-    // MRC on each re of rb, both on MF output and magnitude (for 16QAM/64QAM llr computation)
-    for (i = 0; i < nb_rb * 3; i++) {
-      rxdataF_comp128_0[i] =
-          simde_mm_adds_epi16(simde_mm_srai_epi16(rxdataF_comp128_0[i], 1), simde_mm_srai_epi16(rxdataF_comp128_1[i], 1));
+  for (int a = 1; a < nb_antennas_rx; a++) {
+    simde__m128i *rxdataF_comp128_a = (simde__m128i *)rxdataF_comp[a];
+    for (int i = 0; i < nb_re / 4; i++) {
+      rxdataF_comp128_0[i] = simde_mm_adds_epi16(rxdataF_comp128_0[i], rxdataF_comp128_a[i]);
     }
   }
-
 }
 
 void nr_pbch_unscrambling(int16_t *demod_pbch_e,
@@ -1650,14 +1646,12 @@ void nr_generate_pbch_llr(const PHY_VARS_NR_UE *ue,
 #ifdef DEBUG_PBCH
   LOG_I(PHY, "[PHY] PBCH log2_maxh = %f\n", log2_maxh);
 #endif
+
   __attribute__((aligned(32))) struct complex16 rxdataF_comp[frame_parms->nb_antennas_rx][PBCH_MAX_RE_PER_SYMBOL];
   nr_pbch_channel_compensation(rxdataF_ext, dl_ch_estimates_ext, nb_re, rxdataF_comp, frame_parms,
                                log2_maxh); // log2_maxh+I0_shift
 
-  /*if (frame_parms->nb_antennas_rx > 1)
-    pbch_detection_mrc(frame_parms,
-                        rxdataF_comp,
-                        symbol);*/
+  nr_pbch_detection_mrc(rxdataF_comp, frame_parms->nb_antennas_rx, nb_re);
 
   /*
       if (mimo_mode == ALAMOUTI) {
@@ -1773,20 +1767,24 @@ int nr_pbch_decode(PHY_VARS_NR_UE *ue,
                                                NR_POLAR_PBCH_AGGREGATION_LEVEL);
   pbch_a_prime = tmp;
 
-  nr_downlink_indication_t dl_indication;
-  fapi_nr_rx_indication_t rx_ind = {0};
-  uint16_t number_pdus = 1;
-
   if (decoderState) {
-    if (ue) { // decoding failed in synced state
-      nr_fill_dl_indication(&dl_indication, NULL, &rx_ind, proc, ue, NULL);
-      nr_fill_rx_indication(&rx_ind, FAPI_NR_RX_PDU_TYPE_SSB, ue, 0, 0, NULL, number_pdus, proc, NULL, NULL);
-      if (ue->if_inst && ue->if_inst->dl_indication)
-        ue->if_inst->dl_indication(&dl_indication);
+    if (ue && ue->if_inst && ue->if_inst->dl_indication) { // decoding failed in synced state
+      fapi_nr_rx_indication_t rx_ind;
+      rx_ind.number_pdus = 0;
+      nr_fill_rx_indication(&rx_ind, FAPI_NR_RX_PDU_TYPE_SSB, ue, 0, 0, NULL, proc, NULL);
+      nr_downlink_indication_t dl_indication = (nr_downlink_indication_t){.gNB_index = proc->gNB_id,
+                                                                          .module_id = ue->Mod_id,
+                                                                          .cc_id = ue->CC_id,
+                                                                          .hfn = proc->hfn_rx,
+                                                                          .frame = proc->frame_rx,
+                                                                          .slot = proc->nr_slot_rx,
+                                                                          .rx_ind = &rx_ind};
+      ue->if_inst->dl_indication(&dl_indication);
     }
+    LOG_E(PHY, "ERROR NR_PBCH_DECODE => polar decoding wrong\n");
     return(decoderState);
   }
-  //  printf("polar decoder output 0x%08x\n",pbch_a_prime);
+  //printf("polar decoder output 0x%08x\n",pbch_a_prime);
   // Decoder reversal
   pbch_a_prime = (uint32_t)reverse_bits(pbch_a_prime, NR_POLAR_PBCH_PAYLOAD_BITS);
 
@@ -1838,12 +1836,20 @@ int nr_pbch_decode(PHY_VARS_NR_UE *ue,
 
 #endif
 
-  if (ue) {
-    nr_fill_dl_indication(&dl_indication, NULL, &rx_ind, proc, ue, NULL);
-    nr_fill_rx_indication(&rx_ind, FAPI_NR_RX_PDU_TYPE_SSB, ue, 0, 0, NULL, number_pdus, proc, (void *)result, NULL);
-
-    if (ue->if_inst && ue->if_inst->dl_indication)
-      ue->if_inst->dl_indication(&dl_indication);
+  if (ue && ue->if_inst && ue->if_inst->dl_indication) {
+    fapi_nr_rx_indication_t rx_ind;
+    rx_ind.number_pdus = 0;
+    nr_fill_rx_indication(&rx_ind, FAPI_NR_RX_PDU_TYPE_SSB, ue, 0, 0, NULL, proc, (void *)result);
+    nr_downlink_indication_t dl_indication = (nr_downlink_indication_t){
+        .gNB_index = proc->gNB_id,
+        .module_id = ue->Mod_id,
+        .cc_id = ue->CC_id,
+        .hfn = proc->hfn_rx,
+        .frame = proc->frame_rx,
+        .slot = proc->nr_slot_rx,
+        .rx_ind = &rx_ind,
+    };
+    ue->if_inst->dl_indication(&dl_indication);
   }
 
   TracyCZoneEnd(ctx);

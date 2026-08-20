@@ -118,43 +118,12 @@ e.g., `v3.0`. We target to make releases bi-yearly.
 
 ### How to manage your own branch
 
-Before starting to work, please make sure to branch off the latest `develop`
-branch.  Make commits as appropriate.
-```bash
-$ git fetch origin
-$ git checkout develop
-$ git checkout -b my-new-feature # name as appropriate
-$ git add -p                     # add changes for change set 1, use `-p` to review what to include
-$ git commit                     # in the editor, describe your changes
-$ git add -p                     # add changes for change set 2
-$ git commit                     # in the editor, describe your changes
-```
-
-Again, commit message should take multiple lines; after the initial title, a
-blank line should follow. Read the `DISCUSSION` section in `man git commit` for
-more information.
-
-If your development takes longer, make sure to synchronize regularly with
-`origin/develop` using `git rebase`:
-```bash
-$ git fetch origin
-$ git rebase -i origin/develop
-```
-
-If you do logical changes, you should not have to resolve the same conflicts
-over and over again. Note that if you jumped over multiple develop tags, you
-can also rebase in intermediate steps, in case you fear the differences might
-be too big.
-```
-$ git rebase -i 2023.w38
-$ git rebase -i 2023.w41
-$ git rebase -i develop
-```
-
-Once you rebased, push the changes to the remote
-```
-$ git push origin my-new-feature --force-with-lease # force with lease let's you only overwrite what you also have locally in origin/my-new-feature
-```
+Branch off the latest `develop` branch before starting to work, keep your
+branch synchronized with `origin/develop` through regular rebases, and push
+with `--force-with-lease` after rebasing. The step-by-step commands — including
+how to rebase over multiple develop tags in intermediate steps and how to avoid
+resolving the same conflicts repeatedly with `git rerere` — are in the
+[branch management section of the Git guide](./git-guide.md#managing-your-own-branch).
 
 ### Use of git commit trailers
 

@@ -2438,6 +2438,227 @@ static int binomial(int n, int k)
   return c;
 }
 
+// Type 1 (Tables 7.3.1.1.2-8 to 7.3.1.1.2-15)
+// The array indices are in the order [Number of front-loaded symbols - 1][CDM_groups_no_data - 1][DMRS_Port_Bitmask]
+// The LUTs are initialized with 0's
+// The +1 while storing the DCI antenna port value indicate a valid dci array index (The value at the other indices are 0 and is a
+// valid dci antenna port)
+const int8_t lut_t1_r1[MAX_FRONTLOAD_SYMB][MAX_CDM_GROUPS][MAX_TYPE1_DMRS_MASK] = {
+    [0][0][1] = 0 + 1,
+    [0][0][2] = 1 + 1,
+    [0][1][1] = 2 + 1,
+    [0][1][2] = 3 + 1,
+    [0][1][4] = 4 + 1,
+    [0][1][8] = 5 + 1,
+    [1][1][1] = 6 + 1,
+    [1][1][2] = 7 + 1,
+    [1][1][4] = 8 + 1,
+    [1][1][8] = 9 + 1,
+    [1][1][16] = 10 + 1,
+    [1][1][32] = 11 + 1,
+    [1][1][64] = 12 + 1,
+    [1][1][128] = 13 + 1,
+};
+
+const int8_t lut_t1_r2[MAX_FRONTLOAD_SYMB][MAX_CDM_GROUPS][MAX_TYPE1_DMRS_MASK] = {
+    [0][0][3] = 0 + 1,
+    [0][1][3] = 1 + 1,
+    [0][1][12] = 2 + 1,
+    [0][1][5] = 3 + 1,
+    [1][1][3] = 4 + 1,
+    [1][1][12] = 5 + 1,
+    [1][1][48] = 6 + 1,
+    [1][1][192] = 7 + 1,
+    [1][1][17] = 8 + 1,
+    [1][1][68] = 9 + 1,
+};
+
+const int8_t lut_t1_r3[MAX_FRONTLOAD_SYMB][MAX_CDM_GROUPS][MAX_TYPE1_DMRS_MASK] = {
+    [0][1][7] = 0 + 1,
+    [1][1][19] = 1 + 1,
+    [1][1][76] = 2 + 1,
+};
+
+const int8_t lut_t1_r4[MAX_FRONTLOAD_SYMB][MAX_CDM_GROUPS][MAX_TYPE1_DMRS_MASK] = {
+    [0][1][15] = 0 + 1,
+    [1][1][51] = 1 + 1,
+    [1][1][204] = 2 + 1,
+    [1][1][85] = 3 + 1,
+};
+
+// Type 2 (Tables 7.3.1.1.2-16 to 7.3.1.1.2-23)
+const int8_t lut_t2_r1[MAX_FRONTLOAD_SYMB][MAX_CDM_GROUPS][MAX_TYPE2_DMRS_MASK] = {
+    [0][0][1] = 0 + 1,    [0][0][2] = 1 + 1,    [0][1][1] = 2 + 1,     [0][1][2] = 3 + 1,     [0][1][4] = 4 + 1,
+    [0][1][8] = 5 + 1,    [0][2][1] = 6 + 1,    [0][2][2] = 7 + 1,     [0][2][4] = 8 + 1,     [0][2][8] = 9 + 1,
+    [0][2][16] = 10 + 1,  [0][2][32] = 11 + 1,  [1][2][1] = 12 + 1,    [1][2][2] = 13 + 1,    [1][2][4] = 14 + 1,
+    [1][2][8] = 15 + 1,   [1][2][16] = 16 + 1,  [1][2][32] = 17 + 1,   [1][2][64] = 18 + 1,   [1][2][128] = 19 + 1,
+    [1][2][256] = 20 + 1, [1][2][512] = 21 + 1, [1][2][1024] = 22 + 1, [1][2][2048] = 23 + 1, [1][0][1] = 24 + 1,
+    [1][0][2] = 25 + 1,   [1][0][64] = 26 + 1,  [1][0][128] = 27 + 1,
+};
+
+const int8_t lut_t2_r2[MAX_FRONTLOAD_SYMB][MAX_CDM_GROUPS][MAX_TYPE2_DMRS_MASK] = {
+    [0][0][3] = 0 + 1,    [0][1][3] = 1 + 1,    [0][1][12] = 2 + 1,    [0][2][3] = 3 + 1,    [0][2][12] = 4 + 1,
+    [0][2][48] = 5 + 1,   [0][1][5] = 6 + 1,    [1][2][3] = 7 + 1,     [1][2][12] = 8 + 1,   [1][2][48] = 9 + 1,
+    [1][2][192] = 10 + 1, [1][2][768] = 11 + 1, [1][2][3072] = 12 + 1, [1][0][3] = 13 + 1,   [1][0][192] = 14 + 1,
+    [1][1][3] = 15 + 1,   [1][1][12] = 16 + 1,  [1][1][192] = 17 + 1,  [1][1][768] = 18 + 1,
+};
+
+const int8_t lut_t2_r3[MAX_FRONTLOAD_SYMB][MAX_CDM_GROUPS][MAX_TYPE2_DMRS_MASK] = {
+    [0][1][7] = 0 + 1,
+    [0][2][7] = 1 + 1,
+    [0][2][56] = 2 + 1,
+    [1][2][67] = 3 + 1,
+    [1][2][268] = 4 + 1,
+    [1][2][1072] = 5 + 1,
+};
+
+const int8_t lut_t2_r4[MAX_FRONTLOAD_SYMB][MAX_CDM_GROUPS][MAX_TYPE2_DMRS_MASK] = {
+    [0][1][15] = 0 + 1,
+    [0][2][15] = 1 + 1,
+    [1][2][195] = 2 + 1,
+    [1][2][780] = 3 + 1,
+    [1][2][3120] = 4 + 1,
+};
+
+// Transform Precoding Enabled (Tables 7.3.1.1.2-6/7)
+const int8_t lut_tp[MAX_FRONTLOAD_SYMB][MAX_CDM_GROUPS][MAX_TYPE1_DMRS_MASK] = {
+    [0][1][1] = 0 + 1,
+    [0][1][2] = 1 + 1,
+    [0][1][4] = 2 + 1,
+    [0][1][8] = 3 + 1,
+    [1][1][1] = 4 + 1,
+    [1][1][2] = 5 + 1,
+    [1][1][4] = 6 + 1,
+    [1][1][8] = 7 + 1,
+    [1][1][16] = 8 + 1,
+    [1][1][32] = 9 + 1,
+    [1][1][64] = 10 + 1,
+    [1][1][128] = 11 + 1,
+};
+
+/**
+ * @brief Looksup DCI antenna_ports.val based on assigned dmrs ports, type, cdm groups, front load symbols and rank.
+ */
+int get_dci_antenna_ports_val(uint8_t rank, uint16_t dmrs_ports, uint8_t cdm, int dmrs_type, uint8_t front_load, int tp)
+{
+  if (rank < 1 || rank > 4 || cdm < 1 || cdm > 3 || front_load < 1 || front_load > 2)
+    return -1;
+
+  int f = front_load - 1, c = cdm - 1;
+  int val = 0;
+
+  if (tp == NR_PUSCH_Config__transformPrecoder_enabled) {
+    val = (dmrs_ports < MAX_TYPE1_DMRS_MASK) ? lut_tp[f][c][dmrs_ports] : 0;
+  } else if (dmrs_type == pusch_dmrs_type1) {
+    if (dmrs_ports >= MAX_TYPE1_DMRS_MASK)
+      return -1;
+    switch (rank) {
+      case 1:
+        val = lut_t1_r1[f][c][dmrs_ports];
+        break;
+      case 2:
+        val = lut_t1_r2[f][c][dmrs_ports];
+        break;
+      case 3:
+        val = lut_t1_r3[f][c][dmrs_ports];
+        break;
+      case 4:
+        val = lut_t1_r4[f][c][dmrs_ports];
+        break;
+      default:
+        return -1;
+    }
+  } else {
+    if (dmrs_ports >= MAX_TYPE2_DMRS_MASK)
+      return -1;
+    switch (rank) {
+      case 1:
+        val = lut_t2_r1[f][c][dmrs_ports];
+        break;
+      case 2:
+        val = lut_t2_r2[f][c][dmrs_ports];
+        break;
+      case 3:
+        val = lut_t2_r3[f][c][dmrs_ports];
+        break;
+      case 4:
+        val = lut_t2_r4[f][c][dmrs_ports];
+        break;
+      default:
+        return -1;
+    }
+  }
+
+  return val ? val - 1 : -1;
+}
+
+// Returns 0 on success, -1 on invalid val. Fills cdm groups, dmrs port mask, front load symbols.
+int decode_dci_antenna_ports_val(uint8_t rank,
+                                 const long *dmrs_type,
+                                 long tp,
+                                 uint8_t val,
+                                 uint8_t *cdm,
+                                 uint16_t *dmrs_ports,
+                                 int *front_load)
+{
+  const dci_port_rev_t *tbl;
+  int size;
+
+  if (tp == NR_PUSCH_Config__transformPrecoder_enabled) {
+    tbl = lut_tp_rev;
+    size = sizeofArray(lut_tp_rev);
+  } else if (dmrs_type == NULL) {
+    switch (rank) {
+      case 1:
+        tbl = lut_rev_t1_r1;
+        size = sizeofArray(lut_rev_t1_r1);
+        break;
+      case 2:
+        tbl = lut_rev_t1_r2;
+        size = sizeofArray(lut_rev_t1_r2);
+        break;
+      case 3:
+        tbl = lut_rev_t1_r3;
+        size = sizeofArray(lut_rev_t1_r3);
+        break;
+      case 4:
+        tbl = lut_rev_t1_r4;
+        size = sizeofArray(lut_rev_t1_r4);
+        break;
+      default:
+        return -1;
+    }
+  } else {
+    switch (rank) {
+      case 1:
+        tbl = lut_rev_t2_r1;
+        size = sizeofArray(lut_rev_t2_r1);
+        break;
+      case 2:
+        tbl = lut_rev_t2_r2;
+        size = sizeofArray(lut_rev_t2_r2);
+        break;
+      case 3:
+        tbl = lut_rev_t2_r3;
+        size = sizeofArray(lut_rev_t2_r3);
+        break;
+      case 4:
+        tbl = lut_rev_t2_r4;
+        size = sizeofArray(lut_rev_t2_r4);
+        break;
+      default:
+        return -1;
+    }
+  }
+
+  if (val >= size)
+    return -1;
+  *cdm = tbl[val].cdm_groups;
+  *dmrs_ports = tbl[val].port_mask;
+  *front_load = tbl[val].num_front_load_symb;
+  return 0;
+}
+
 int srs_codebook_nb_res(NR_SRS_Config_t *srs_config)
 {
   int count = 0;
@@ -4103,8 +4324,7 @@ int get_f3_dmrs_symbols(NR_PUCCH_Resource_t *pucchres, NR_PUCCH_Config_t *pucch_
   return f3_dmrs_symbols;
 }
 
-uint16_t compute_pucch_prb_size(uint8_t format,
-                                uint8_t nr_prbs,
+uint16_t compute_pucch_prb_size(uint8_t nr_prbs,
                                 uint16_t O_csi,
                                 uint16_t O_ack,
                                 uint8_t O_sr,

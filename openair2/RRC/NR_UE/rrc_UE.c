@@ -503,6 +503,10 @@ static void nr_rrc_process_sib1(NR_UE_RRC_INST_t *rrc, NR_UE_RRC_SI_INFO *SI_inf
   nr_ue_nas_t *nas = get_ue_nas_info(rrc->ue_id);
   nas->sn_id = plmn_id;
 
+  /* Extract 36-bit NR Cell Identity */
+  const NR_CellIdentity_t *ci = &sib1->cellAccessRelatedInfo.plmn_IdentityInfoList.list.array[0]->cellIdentity;
+  rrc->cell_identity = BIT_STRING_to_uint64(ci);
+
   nr_timer_start(&SI_info->sib1_timer);
   SI_info->sib1_validity = true;
   // In passive receive-only mode we never establish a connection, so no RA is ever triggered.
@@ -1222,12 +1226,13 @@ static void handle_meas_reporting_remove(rrcPerNB_t *rrc, int id, NR_UE_Timers_C
   nr_timer_stop(&timers->T321);
 
   l3_measurements_t *l3_measurements = &rrc->l3_measurements;
-  nr_timer_stop(&l3_measurements->TA2);
-  nr_timer_stop(&l3_measurements->periodic_report_timer);
+  meas_report_params_t *params = &l3_measurements->meas_report[id];
 
-  l3_measurements->reports_sent = 0;
-  l3_measurements->max_reports = 0;
-  l3_measurements->report_interval_ms = 0;
+  nr_timer_stop(&params->TA2);
+  nr_timer_stop(&params->TA3);
+  nr_timer_stop(&params->periodic_report_timer);
+
+  memset(params, 0, sizeof(*params));
 }
 
 static void handle_measobj_remove(rrcPerNB_t *rrc, struct NR_MeasObjectToRemoveList *remove_list, NR_UE_Timers_Constants_t *timers)
@@ -1409,11 +1414,165 @@ static void handle_measid_remove(rrcPerNB_t *rrc, struct NR_MeasIdToRemoveList *
   }
 }
 
+static long get_measurement_report_interval_ms(NR_ReportInterval_t interval)
+{
+  switch (interval) {
+    case NR_ReportInterval_ms120:
+      return 120;
+    case NR_ReportInterval_ms240:
+      return 240;
+    case NR_ReportInterval_ms480:
+      return 480;
+    case NR_ReportInterval_ms640:
+      return 640;
+    case NR_ReportInterval_ms1024:
+      return 1024;
+    case NR_ReportInterval_ms2048:
+      return 2048;
+    case NR_ReportInterval_ms5120:
+      return 5120;
+    case NR_ReportInterval_ms10240:
+      return 10240;
+    case NR_ReportInterval_min1:
+      return 60000;
+    case NR_ReportInterval_min6:
+      return 360000;
+    case NR_ReportInterval_min12:
+      return 720000;
+    case NR_ReportInterval_min30:
+      return 1800000;
+    default:
+      return 1024;
+  }
+}
+
+static int get_meas_id(rrcPerNB_t *rrcNB, int report_config_id)
+{
+  for (int j = 0; j < MAX_MEAS_ID; j++) {
+    NR_MeasIdToAddMod_t *meas_id_toAddMod = rrcNB->MeasId[j];
+    if (meas_id_toAddMod && meas_id_toAddMod->reportConfigId == report_config_id)
+      return meas_id_toAddMod->measId;
+  }
+  return -1;
+}
+
+static void setup_meas_params(meas_report_params_t *params,
+                              long trigger_quantity,
+                              long rs_type,
+                              long report_amount,
+                              bool is_infinity,
+                              NR_ReportInterval_t report_interval,
+                              bool neighbor_cell_valid)
+{
+  params->trigger_quantity = trigger_quantity;
+  params->rs_type = rs_type;
+  params->reports_sent = 0;
+  params->max_reports = is_infinity ? INT_MAX : (1 << report_amount);
+  params->report_interval_ms = get_measurement_report_interval_ms(report_interval);
+  params->neighbor_cell_valid = neighbor_cell_valid;
+  params->report_rsrp = false;
+}
+
+static void start_periodical_report(rrcPerNB_t *rrc, NR_PeriodicalReportConfig_t *periodical_config, int meas_id)
+{
+  l3_measurements_t *l3_measurements = &rrc->l3_measurements;
+  meas_report_params_t *params = &l3_measurements->meas_report[meas_id];
+
+  setup_meas_params(params,
+                    0,
+                    periodical_config->rsType,
+                    periodical_config->reportAmount,
+                    periodical_config->reportAmount == NR_PeriodicalReportConfig__reportAmount_infinity,
+                    periodical_config->reportInterval,
+                    true);
+
+  params->reports_sent = 0;
+  params->report_rsrp = periodical_config->reportQuantityCell.rsrp;
+  params->max_report_cells = periodical_config->maxReportCells;
+
+  // Start the periodic report timer
+  if (!nr_timer_is_active(&params->periodic_report_timer)) {
+    nr_timer_setup(&params->periodic_report_timer, params->report_interval_ms, 10);
+    nr_timer_start(&params->periodic_report_timer);
+  }
+}
+
+static void extract_neighbor_cells_from_measObject(NR_MeasObjectNR_t *obj_nr,
+                                                   nr_neighbor_cell_info_t *neighbor_cells,
+                                                   int *num_neighbors,
+                                                   int max_neighbors,
+                                                   uint32_t serving_cell_pci)
+{
+  uint32_t ssb_freq = 0;
+  if (obj_nr->ssbFrequency) {
+    ssb_freq = *obj_nr->ssbFrequency;
+  }
+
+  if (obj_nr->cellsToAddModList) {
+    NR_CellsToAddModList_t *cellsToAddModList = obj_nr->cellsToAddModList;
+    for (int j = 0; j < cellsToAddModList->list.count; j++) {
+      NR_CellsToAddMod_t *cell = cellsToAddModList->list.array[j];
+      // Skip serving cell
+      if (cell->physCellId == serving_cell_pci) {
+        LOG_D(NR_RRC, "Skipping serving cell PCI %d from neighbor list\n", serving_cell_pci);
+        continue;
+      }
+      // Check if this cell is already in the list
+      bool is_duplicate = false;
+      for (int k = 0; k < *num_neighbors; k++) {
+        if (neighbor_cells[k].Nid_cell == cell->physCellId && neighbor_cells[k].ssb_freq == ssb_freq) {
+          is_duplicate = true;
+          break;
+        }
+      }
+      if (!is_duplicate) {
+        if (*num_neighbors < max_neighbors) {
+          neighbor_cells[*num_neighbors].Nid_cell = cell->physCellId;
+          neighbor_cells[*num_neighbors].ssb_freq = ssb_freq;
+          neighbor_cells[*num_neighbors].active = 1;
+          (*num_neighbors)++;
+        } else {
+          LOG_W(NR_RRC, "More than %d neighboring cells configured, ignoring excess cells!\n", max_neighbors);
+          break;
+        }
+      }
+    }
+  } else {
+    // We do not know PCI of neighboring cells, so we do blind search
+    bool is_duplicate = false;
+    for (int k = 0; k < *num_neighbors; k++) {
+      if (neighbor_cells[k].Nid_cell == -1 && neighbor_cells[k].ssb_freq == ssb_freq) {
+        is_duplicate = true;
+        break;
+      }
+    }
+    if (!is_duplicate && *num_neighbors < max_neighbors) {
+      neighbor_cells[*num_neighbors].Nid_cell = -1;
+      neighbor_cells[*num_neighbors].ssb_freq = ssb_freq;
+      neighbor_cells[*num_neighbors].active = 1;
+      (*num_neighbors)++;
+    }
+  }
+
+  // 3GPP TS 38.133
+  // 9.2 NR intra-frequency measurements - 9.2.1 Introduction
+  // The UE shall be able to identify new intra-frequency cells (...) even if no explicit neighbour list with physical layer cell
+  // identities is provided
+  if (*num_neighbors == 0) {
+    neighbor_cells[*num_neighbors].Nid_cell = -1;
+    neighbor_cells[*num_neighbors].ssb_freq = ssb_freq;
+    neighbor_cells[*num_neighbors].active = 1;
+    (*num_neighbors)++;
+  }
+}
+
 static void handle_measid_addmod(rrcPerNB_t *rrc,
                                  struct NR_MeasIdToAddModList *addmod_list,
                                  NR_UE_Timers_Constants_t *timers,
                                  nr_neighbor_cell_info_t *neighbor_cells,
-                                 int *num_neighbors)
+                                 int *num_neighbors,
+                                 int max_neighbors,
+                                 uint32_t serving_cell_pci)
 {
   for (int i = 0; i < addmod_list->list.count; i++) {
     NR_MeasId_t id = addmod_list->list.array[i]->measId;
@@ -1447,45 +1606,26 @@ static void handle_measid_addmod(rrcPerNB_t *rrc,
           nr_timer_start(&timers->T321);
         }
       }
-      // Check for A3 event and extract neighbor cell info for MAC/PHY
+      // Check for A3 event and extract neighbor cell info for MAC
       else if (reportNR->reportType.present == NR_ReportConfigNR__reportType_PR_eventTriggered) {
         NR_EventTriggerConfig_t *eventTriggerConfig = reportNR->reportType.choice.eventTriggered;
         if (eventTriggerConfig->eventId.present == NR_EventTriggerConfig__eventId_PR_eventA3) {
           if (rrc->MeasObj[measObjectId]
               && rrc->MeasObj[measObjectId]->measObject.present == NR_MeasObjectToAddMod__measObject_PR_measObjectNR) {
             NR_MeasObjectNR_t *obj_nr = rrc->MeasObj[measObjectId]->measObject.choice.measObjectNR;
-
-            uint32_t ssb_freq = 0;
-            if (obj_nr->ssbFrequency) {
-              ssb_freq = *obj_nr->ssbFrequency;
-            }
-
-            if (obj_nr->cellsToAddModList) {
-              NR_CellsToAddModList_t *cellsToAddModList = obj_nr->cellsToAddModList;
-              for (int j = 0; j < cellsToAddModList->list.count; j++) {
-                if (*num_neighbors < NUMBER_OF_NEIGHBORING_CELLS_MAX) {
-                  NR_CellsToAddMod_t *cell = cellsToAddModList->list.array[j];
-                  neighbor_cells[*num_neighbors].Nid_cell = cell->physCellId;
-                  neighbor_cells[*num_neighbors].ssb_freq = ssb_freq;
-                  neighbor_cells[*num_neighbors].active = 1;
-                  (*num_neighbors)++;
-                } else {
-                  LOG_W(NR_RRC,
-                        "More than %d neighboring cells configured, ignoring excess cells!\n",
-                        NUMBER_OF_NEIGHBORING_CELLS_MAX);
-                  break;
-                }
-              }
-            } else {
-              // We do not know PCI of neighboring cells, so we do blind search
-              if (*num_neighbors < NUMBER_OF_NEIGHBORING_CELLS_MAX) {
-                neighbor_cells[*num_neighbors].Nid_cell = -1;
-                neighbor_cells[*num_neighbors].ssb_freq = ssb_freq;
-                neighbor_cells[*num_neighbors].active = 1;
-                (*num_neighbors)++;
-              }
-            }
+            extract_neighbor_cells_from_measObject(obj_nr, neighbor_cells, num_neighbors, max_neighbors, serving_cell_pci);
           }
+        }
+      }
+      // Check for periodical report and extract neighbor cell info for MAC
+      else if (reportNR->reportType.present == NR_ReportConfigNR__reportType_PR_periodical) {
+        NR_PeriodicalReportConfig_t *periodical_config = reportNR->reportType.choice.periodical;
+        if (rrc->MeasObj[measObjectId]
+            && rrc->MeasObj[measObjectId]->measObject.present == NR_MeasObjectToAddMod__measObject_PR_measObjectNR) {
+          NR_MeasObjectNR_t *obj_nr = rrc->MeasObj[measObjectId]->measObject.choice.measObjectNR;
+          extract_neighbor_cells_from_measObject(obj_nr, neighbor_cells, num_neighbors, max_neighbors, serving_cell_pci);
+          // Initialize periodical report (first report sent when measurements available)
+          start_periodical_report(rrc, periodical_config, id);
         }
       }
     }
@@ -1496,7 +1636,9 @@ static void nr_rrc_ue_process_measConfig(rrcPerNB_t *rrc,
                                          NR_MeasConfig_t *const measConfig,
                                          NR_UE_Timers_Constants_t *timers,
                                          nr_neighbor_cell_info_t *neighbor_cells,
-                                         int *num_neighbors)
+                                         int *num_neighbors,
+                                         int max_neighbors,
+                                         uint32_t serving_cell_pci)
 {
   if (measConfig->measObjectToRemoveList)
     handle_measobj_remove(rrc, measConfig->measObjectToRemoveList, timers);
@@ -1517,7 +1659,7 @@ static void nr_rrc_ue_process_measConfig(rrcPerNB_t *rrc,
     handle_measid_remove(rrc, measConfig->measIdToRemoveList, timers);
 
   if (measConfig->measIdToAddModList)
-    handle_measid_addmod(rrc, measConfig->measIdToAddModList, timers, neighbor_cells, num_neighbors);
+    handle_measid_addmod(rrc, measConfig->measIdToAddModList, timers, neighbor_cells, num_neighbors, max_neighbors, serving_cell_pci);
 
   LOG_W(NR_RRC, "Measurement gaps not yet supported!\n");
 
@@ -1596,7 +1738,7 @@ static void nr_rrc_ue_process_rrcReconfiguration(NR_UE_RRC_INST_t *rrc, int gNB_
         LOG_I(NR_RRC, "RRCReconfiguration includes Measurement Configuration\n");
         nr_neighbor_cell_info_t neighbor_cells[NUMBER_OF_NEIGHBORING_CELLS_MAX];
         int num_neighbors = 0;
-        nr_rrc_ue_process_measConfig(rrcNB, ie->measConfig, &rrc->timers_and_constants, neighbor_cells, &num_neighbors);
+        nr_rrc_ue_process_measConfig(rrcNB, ie->measConfig, &rrc->timers_and_constants, neighbor_cells, &num_neighbors, NUMBER_OF_NEIGHBORING_CELLS_MAX, rrc->phyCellID);
         if (num_neighbors > 0) {
           nr_rrc_mac_config_req_meas(rrc->ue_id, neighbor_cells, num_neighbors);
         }
@@ -1960,7 +2102,44 @@ static void nr_rrc_ue_decode_NR_BCCH_BCH_Message(NR_UE_RRC_INST_t *rrc,
 static void nr_rrc_ue_prepare_RRCReestablishmentRequest(NR_UE_RRC_INST_t *rrc)
 {
   uint8_t buffer[1024];
-  int buf_size = do_RRCReestablishmentRequest(buffer, rrc->reestablishment_cause, rrc->phyCellID, rrc->rnti); // old rnti
+
+  /* Compute shortMAC-I per TS 38.331 §5.3.7.4:
+   * over the ASN.1 encoded as per clause 8 VarShortMAC-Input;
+   * with the KRRCint key and integrity protection algorithm that was used in the source PCell
+   * of the PCell in which the trigger for the re-establishment occurred (other cases);
+   * with all input bits for COUNT, BEARER and DIRECTION set to binary ones */
+  AssertFatal(rrc->as_security_activated, "RRCReestablishmentRequest requires AS security to be activated\n");
+  uint8_t krrcint[16];
+  nr_derive_key(RRC_INT_ALG, rrc->integrityProtAlgorithm, rrc->kgnb, krrcint);
+
+  uint8_t var_input[8] = {0};
+  /* Write 62 bits MSB-first into var_input */
+  uint64_t hi = ((uint64_t)rrc->reestab_source_pci << 54) | (rrc->cell_identity << 18) | ((uint64_t)rrc->reestab_source_crnti << 2);
+  var_input[0] = (hi >> 56) & 0xFF;
+  var_input[1] = (hi >> 48) & 0xFF;
+  var_input[2] = (hi >> 40) & 0xFF;
+  var_input[3] = (hi >> 32) & 0xFF;
+  var_input[4] = (hi >> 24) & 0xFF;
+  var_input[5] = (hi >> 16) & 0xFF;
+  var_input[6] = (hi >> 8) & 0xFF;
+  var_input[7] = hi & 0xFF;
+
+  stream_security_context_t *ctx = stream_integrity_init(rrc->integrityProtAlgorithm, krrcint);
+  AssertFatal(ctx != NULL, "Failed to initialise integrity context for integrityProtAlgorithm %d\n", rrc->integrityProtAlgorithm);
+  nas_stream_cipher_t cipher = {
+      .context = ctx,
+      .count = 0xffffffff,
+      .bearer = 0x1f,
+      .direction = SECU_DIRECTION_DOWNLINK,
+      .message = var_input,
+      .blength = 64, /* 8 bytes: 62 bits content + 2 zero padding bits */
+  };
+  uint8_t mac[4];
+  stream_compute_integrity((eia_alg_id_e)rrc->integrityProtAlgorithm, &cipher, mac);
+  stream_integrity_free(rrc->integrityProtAlgorithm, ctx);
+  uint16_t short_mac_i = ((uint16_t)mac[2] << 8) | mac[3];
+
+  int buf_size = do_RRCReestablishmentRequest(buffer, rrc->reestablishment_cause, rrc->reestab_source_pci, rrc->reestab_source_crnti, short_mac_i);
   nr_rlc_srb_recv_sdu(rrc->ue_id, 0, buffer, buf_size);
 }
 
@@ -2152,7 +2331,7 @@ static void rrc_ue_generate_RRCSetupComplete(NR_UE_RRC_INST_t *rrc, const uint8_
 static void nr_rrc_rrcsetup_fallback(NR_UE_RRC_INST_t *rrc)
 {
   LOG_W(NR_RRC,
-        "[UE %ld] Recived RRCSetup in response to %s request\n",
+        "[UE %ld] Received RRCSetup in response to %s request\n",
         rrc->ue_id, rrc->ra_trigger == RRC_CONNECTION_REESTABLISHMENT ? "RRCReestablishment" : "RRCResume");
 
   // discard any stored UE Inactive AS context and suspendConfig
@@ -2164,8 +2343,15 @@ static void nr_rrc_rrcsetup_fallback(NR_UE_RRC_INST_t *rrc)
   memset(rrc->kgnb, 0, sizeof(rrc->kgnb));
   rrc->as_security_activated = false;
 
+  // release the RRC configuration except for the default L1 parameter values,
+  // default MAC Cell Group configuration and CCCH configuration
+  nr_mac_rrc_message_t rrc_msg = {0};
+  rrc_msg.payload_type = NR_MAC_RRC_CONFIG_RESET;
+  rrc_msg.payload.config_reset.cause = RRC_SETUP_REESTAB_RESUME;
+  nr_rrc_send_msg_to_mac(rrc, &rrc_msg);
+
   // release radio resources for all established RBs except SRB0,
-  // including release of the RLC entities, of the associated PDCP entities and of SDAP
+  // including release of the associated PDCP entities and of SDAP
   for (int i = 1; i <= MAX_DRBS_PER_UE; i++) {
     if (get_DRB_status(rrc, i) != RB_NOT_PRESENT) {
       set_DRB_status(rrc, i, RB_NOT_PRESENT);
@@ -2182,15 +2368,6 @@ static void nr_rrc_rrcsetup_fallback(NR_UE_RRC_INST_t *rrc)
     nr_rrc_release_rlc_entity(rrc, i);
   }
   nr_sdap_delete_ue_entities(rrc->ue_id);
-
-  // release the RRC configuration except for the default L1 parameter values,
-  // default MAC Cell Group configuration and CCCH configuration
-  // TODO to be completed
-  NR_UE_MAC_reset_cause_t cause = RRC_SETUP_REESTAB_RESUME;
-  nr_mac_rrc_message_t rrc_msg = {0};
-  rrc_msg.payload_type = NR_MAC_RRC_CONFIG_RESET;
-  rrc_msg.payload.config_reset.cause = cause;
-  nr_rrc_send_msg_to_mac(rrc, &rrc_msg);
 
   // indicate to upper layers fallback of the RRC connection
   // TODO
@@ -2690,7 +2867,6 @@ static int nr_rrc_ue_decode_dcch(NR_UE_RRC_INST_t *rrc,
           break;
 
         case NR_DL_DCCH_MessageType__c1_PR_rrcReconfiguration: {
-          nr_rrc_ue_process_rrcReconfiguration(rrc, gNB_indexP, c1->choice.rrcReconfiguration);
           if (rrc->reconfig_after_reestab) {
             // if this is the first RRCReconfiguration message after successful completion of the RRC re-establishment procedure
             // resume SRB2 and DRBs that are suspended
@@ -2714,6 +2890,7 @@ static int nr_rrc_ue_decode_dcch(NR_UE_RRC_INST_t *rrc,
             }
             rrc->reconfig_after_reestab = false;
           }
+          nr_rrc_ue_process_rrcReconfiguration(rrc, gNB_indexP, c1->choice.rrcReconfiguration);
           nr_rrc_ue_generate_RRCReconfigurationComplete(rrc, Srb_id, c1->choice.rrcReconfiguration->rrc_TransactionIdentifier);
         } break;
 
@@ -2827,38 +3004,6 @@ void nr_ue_meas_filtering(rrcPerNB_t *rrc, meas_t *meas_cell, uint16_t Nid_cell,
     apply_ema(&meas_cell->ss_rsrp_dBm, l3_measurements->ssb_filter_coeff_rsrp, rsrp_dBm);
 }
 
-static long get_measurement_report_interval_ms(NR_ReportInterval_t interval)
-{
-  switch (interval) {
-    case NR_ReportInterval_ms120:
-      return 120;
-    case NR_ReportInterval_ms240:
-      return 240;
-    case NR_ReportInterval_ms480:
-      return 480;
-    case NR_ReportInterval_ms640:
-      return 640;
-    case NR_ReportInterval_ms1024:
-      return 1024;
-    case NR_ReportInterval_ms2048:
-      return 2048;
-    case NR_ReportInterval_ms5120:
-      return 5120;
-    case NR_ReportInterval_ms10240:
-      return 10240;
-    case NR_ReportInterval_min1:
-      return 60000;
-    case NR_ReportInterval_min6:
-      return 360000;
-    case NR_ReportInterval_min12:
-      return 720000;
-    case NR_ReportInterval_min30:
-      return 1800000;
-    default:
-      return 1024;
-  }
-}
-
 static int get_rsrp_value(const meas_t *cell)
 {
   if (cell->ss_rsrp_dBm.init)
@@ -2868,30 +3013,24 @@ static int get_rsrp_value(const meas_t *cell)
   return INT_MAX;
 }
 
-static int get_meas_id(rrcPerNB_t *rrcNB, int report_config_id)
-{
-  for (int j = 0; j < MAX_MEAS_ID; j++) {
-    NR_MeasIdToAddMod_t *meas_id_toAddMod = rrcNB->MeasId[j];
-    if (meas_id_toAddMod && meas_id_toAddMod->reportConfigId == report_config_id)
-      return meas_id_toAddMod->measId;
-  }
-  return -1;
-}
-
 static void setup_meas_trigger(l3_measurements_t *l3_measurements,
                                NR_EventTriggerConfig_t *event_config,
                                int meas_id,
                                long trigger_quantity,
                                bool neighbor_cell_valid)
 {
-  l3_measurements->trigger_to_measid = meas_id;
-  l3_measurements->trigger_quantity = trigger_quantity;
-  l3_measurements->rs_type = event_config->rsType;
-  l3_measurements->reports_sent = 0;
-  l3_measurements->max_reports =
-      (event_config->reportAmount == NR_EventTriggerConfig__reportAmount_infinity) ? INT_MAX : (1 << event_config->reportAmount);
-  l3_measurements->report_interval_ms = get_measurement_report_interval_ms(event_config->reportInterval);
-  l3_measurements->neighbor_cell_valid = neighbor_cell_valid;
+  meas_report_params_t *params = &l3_measurements->meas_report[meas_id];
+
+  setup_meas_params(params,
+                    trigger_quantity,
+                    event_config->rsType,
+                    event_config->reportAmount,
+                    event_config->reportAmount == NR_EventTriggerConfig__reportAmount_infinity,
+                    event_config->reportInterval,
+                    neighbor_cell_valid);
+
+  params->report_rsrp = event_config->reportQuantityCell.rsrp;
+  params->max_report_cells = event_config->maxReportCells;
 }
 
 static void start_meas_event(l3_measurements_t *l3_measurements,
@@ -2912,11 +3051,10 @@ static void start_meas_event(l3_measurements_t *l3_measurements,
   setup_meas_trigger(l3_measurements, event_config, meas_id, trigger_quantity, neighbor_cell_valid);
 }
 
-static void stop_meas_event(l3_measurements_t *l3_measurements, NR_timer_t *event_timer)
+static void stop_meas_event(meas_report_params_t *params, NR_timer_t *event_timer)
 {
   nr_timer_stop(event_timer);
-  nr_timer_stop(&l3_measurements->periodic_report_timer);
-  l3_measurements->reports_sent = 0;
+  params->reports_sent = 0;
 }
 
 // TS 38.331 - 5.5.4.3 Event A2 (Serving becomes worse than threshold)
@@ -2929,6 +3067,10 @@ static void handle_event_a2(l3_measurements_t *l3_measurements,
   if (event_A2->a2_Threshold.present != NR_MeasTriggerQuantity_PR_rsrp)
     return;
 
+  int meas_id = get_meas_id(rrcNB, report_config_id);
+  if (meas_id < 0)
+    return;
+  meas_report_params_t *params = &l3_measurements->meas_report[meas_id];
   meas_t *serving_cell = &l3_measurements->serving_cell;
   int serving_cell_rsrp = get_rsrp_value(serving_cell);
   if (serving_cell_rsrp == INT_MAX) {
@@ -2940,10 +3082,10 @@ static void handle_event_a2(l3_measurements_t *l3_measurements,
   int rsrp_hysteresis = event_A2->hysteresis >> 1;
 
   if (serving_cell_rsrp + rsrp_hysteresis < rsrp_threshold) {
-    if (!nr_timer_is_active(&l3_measurements->TA2) && (l3_measurements->reports_sent == 0)) {
+    if (!nr_timer_is_active(&params->TA2) && (params->reports_sent == 0)) {
       start_meas_event(l3_measurements,
                        rrcNB,
-                       &l3_measurements->TA2,
+                       &params->TA2,
                        event_trigger_config,
                        report_config_id,
                        event_A2->a2_Threshold.present,
@@ -2956,8 +3098,8 @@ static void handle_event_a2(l3_measurements_t *l3_measurements,
             rsrp_hysteresis,
             rsrp_threshold);
     }
-  } else if (nr_timer_is_active(&l3_measurements->TA2) && (serving_cell_rsrp - rsrp_hysteresis > rsrp_threshold)) {
-    stop_meas_event(l3_measurements, &l3_measurements->TA2);
+  } else if (nr_timer_is_active(&params->TA2) && (serving_cell_rsrp - rsrp_hysteresis > rsrp_threshold)) {
+    stop_meas_event(params, &params->TA2);
   }
 }
 
@@ -2971,6 +3113,10 @@ static void handle_event_a3(l3_measurements_t *l3_measurements,
   if (event_A3->a3_Offset.present != NR_MeasTriggerQuantityOffset_PR_rsrp)
     return;
 
+  int meas_id = get_meas_id(rrcNB, report_config_id);
+  if (meas_id < 0)
+    return;
+  meas_report_params_t *params = &l3_measurements->meas_report[meas_id];
   meas_t *serving_cell = &l3_measurements->serving_cell;
 
   int serving_cell_rsrp = get_rsrp_value(serving_cell);
@@ -3009,10 +3155,10 @@ static void handle_event_a3(l3_measurements_t *l3_measurements,
   }
 
   // Trigger event if any neighbor meets entry condition
-  if (entry_cond_met && !nr_timer_is_active(&l3_measurements->TA3) && (l3_measurements->reports_sent == 0)) {
+  if (entry_cond_met && !nr_timer_is_active(&params->TA3) && (params->reports_sent == 0)) {
     start_meas_event(l3_measurements,
                      rrcNB,
-                     &l3_measurements->TA3,
+                     &params->TA3,
                      event_trigger_config,
                      report_config_id,
                      NR_MeasTriggerQuantityOffset_PR_rsrp,
@@ -3027,8 +3173,8 @@ static void handle_event_a3(l3_measurements_t *l3_measurements,
           rsrp_hysteresis);
   }
   // Stop event if all neighbors are below leaving threshold
-  else if (nr_timer_is_active(&l3_measurements->TA3) && !above_leaving_threshold) {
-    stop_meas_event(l3_measurements, &l3_measurements->TA3);
+  else if (nr_timer_is_active(&params->TA3) && !above_leaving_threshold) {
+    stop_meas_event(params, &params->TA3);
   }
 }
 
@@ -3148,7 +3294,7 @@ static void nr_rrc_handle_meas_indication(NR_UE_RRC_INST_t *rrc, NRRrcMacMeasDat
   }
 
   if (meas_ind->is_neighboring_cell && meas_ind->rsrp_dBm == INT_MAX) {
-    LOG_W(NR_RRC, "[Nid_cell %i] Neighboring cell not detected. L3 measurements will be reset.\n", meas_ind->Nid_cell);
+    LOG_D(NR_RRC, "[Nid_cell %i] Neighboring cell not detected. L3 measurements will be reset.\n", meas_ind->Nid_cell);
     meas_cell->Nid_cell = meas_ind->Nid_cell;
     nr_ue_meas_reset(meas_cell, meas_ind->is_csi_meas);
   } else {
@@ -3410,6 +3556,8 @@ void nr_rrc_ue_process_sidelink_radioResourceConfig(NR_SetupRelease_SL_ConfigDed
 static void nr_rrc_initiate_rrcReestablishment(NR_UE_RRC_INST_t *rrc, NR_ReestablishmentCause_t cause)
 {
   rrc->reestablishment_cause = cause;
+  rrc->reestab_source_pci = rrc->phyCellID;
+  rrc->reestab_source_crnti = rrc->rnti;
 
   NR_UE_Timers_Constants_t *timers = &rrc->timers_and_constants;
 
@@ -3477,7 +3625,7 @@ void handle_RRCRelease(NR_UE_RRC_INST_t *rrc)
     if (rrcReleaseIEs->cellReselectionPriorities)
       LOG_E(NR_RRC, "cellReselectionPriorities in RRCRelease not handled\n");
     if (rrcReleaseIEs->deprioritisationReq)
-      LOG_E(NR_RRC, "deprioritisationReq in RRCRelease not handled\n");
+      LOG_I(NR_RRC, "deprioritisationReq in RRCRelease not applied, UE doesn't support release with deprioritisation\n");
     if (rrcReleaseIEs->suspendConfig) {
       suspend = true;
       // procedures to go in INACTIVE state
@@ -3562,6 +3710,16 @@ void nr_rrc_going_to_IDLE(NR_UE_RRC_INST_t *rrc,
   nr_timer_stop(&tac->T310);
   nr_timer_stop(&tac->T311);
   nr_timer_stop(&tac->T319);
+
+  for (int i = 0; i < NB_CNX_UE; i++) {
+    l3_measurements_t *l3m = &rrc->perNB[i].l3_measurements;
+    for (int j = 0; j < MAX_MEAS_ID; j++) {
+      meas_report_params_t *p = &l3m->meas_report[j];
+      nr_timer_stop(&p->TA2);
+      nr_timer_stop(&p->TA3);
+      nr_timer_stop(&p->periodic_report_timer);
+    }
+  }
 
   // discard the UE Inactive AS context
   // TODO there is no inactive AS context
@@ -3720,23 +3878,66 @@ void nr_rrc_set_mac_queue(instance_t instance, notifiedFIFO_t *mac_input_nf)
   rrc->mac_input_nf = mac_input_nf;
 }
 
-void rrc_ue_generate_measurementReport(rrcPerNB_t *rrc, instance_t ue_id)
+void rrc_ue_generate_measurementReport(rrcPerNB_t *rrc, instance_t ue_id, int meas_id)
 {
   uint8_t buffer[NR_RRC_BUF_SIZE];
   l3_measurements_t *l3m = &rrc->l3_measurements;
-  int rsrp_dBm = l3m->rs_type == NR_NR_RS_Type_ssb ? l3m->serving_cell.ss_rsrp_dBm.val : l3m->serving_cell.csi_rsrp_dBm.val;
+  meas_report_params_t *params = &l3m->meas_report[meas_id];
+  int rsrp_dBm = params->rs_type == NR_NR_RS_Type_ssb ? l3m->serving_cell.ss_rsrp_dBm.val : l3m->serving_cell.csi_rsrp_dBm.val;
   int rsrp_index = get_rsrp_index(rsrp_dBm);
-  int neighbor_rsrp_dBm =
-      l3m->rs_type == NR_NR_RS_Type_ssb ? l3m->neighboring_cell[0].ss_rsrp_dBm.val : l3m->neighboring_cell[0].csi_rsrp_dBm.val;
-  int neighbor_rsrp_index = get_rsrp_index(neighbor_rsrp_dBm);
-  uint8_t size = do_nrMeasurementReport_SA(l3m->trigger_to_measid,
-                                           l3m->trigger_quantity,
-                                           l3m->rs_type,
+  uint16_t neighbor_pcis[NUMBER_OF_NEIGHBORING_CELLS_MAX];
+  int neighbor_rsrp_indexes[NUMBER_OF_NEIGHBORING_CELLS_MAX];
+  int num_neighbors = 0;
+
+  if (params->neighbor_cell_valid) {
+    for (int i = 0; i < NUMBER_OF_NEIGHBORING_CELLS_MAX; i++) {
+      bool is_valid = false;
+
+      // Check if this neighboring cell has valid measurements
+      if (params->rs_type == NR_NR_RS_Type_ssb) {
+        is_valid = l3m->neighboring_cell[i].ss_rsrp_dBm.init;
+      } else {
+        is_valid = l3m->neighboring_cell[i].csi_rsrp_dBm.init;
+      }
+
+      if (is_valid) {
+        neighbor_pcis[num_neighbors] = l3m->neighboring_cell[i].Nid_cell;
+        int neighbor_rsrp_dBm = params->rs_type == NR_NR_RS_Type_ssb ? l3m->neighboring_cell[i].ss_rsrp_dBm.val
+                                                                     : l3m->neighboring_cell[i].csi_rsrp_dBm.val;
+        neighbor_rsrp_indexes[num_neighbors] = get_rsrp_index(neighbor_rsrp_dBm);
+        num_neighbors++;
+      }
+    }
+
+    // Sort neighbors in decreasing order of RSRP index per TS 38.331 5.5.5
+    for (int i = 0; i < num_neighbors - 1; i++) {
+      for (int j = i + 1; j < num_neighbors; j++) {
+        if (neighbor_rsrp_indexes[j] > neighbor_rsrp_indexes[i]) {
+          int tmp_rsrp = neighbor_rsrp_indexes[i];
+          neighbor_rsrp_indexes[i] = neighbor_rsrp_indexes[j];
+          neighbor_rsrp_indexes[j] = tmp_rsrp;
+          uint16_t tmp_pci = neighbor_pcis[i];
+          neighbor_pcis[i] = neighbor_pcis[j];
+          neighbor_pcis[j] = tmp_pci;
+        }
+      }
+    }
+
+    if (params->max_report_cells > 0 && num_neighbors > params->max_report_cells)
+      num_neighbors = params->max_report_cells;
+  }
+
+  LOG_D(NR_RRC, "Generating MeasurementReport with %d neighboring cells\n", num_neighbors);
+
+  uint8_t size = do_nrMeasurementReport_SA(meas_id,
+                                           params->trigger_quantity,
+                                           params->report_rsrp,
+                                           params->rs_type,
                                            l3m->serving_cell.Nid_cell,
                                            rsrp_index,
-                                           l3m->neighbor_cell_valid,
-                                           l3m->neighboring_cell[0].Nid_cell,
-                                           neighbor_rsrp_index,
+                                           num_neighbors,
+                                           neighbor_pcis,
+                                           neighbor_rsrp_indexes,
                                            buffer,
                                            sizeof(buffer));
 

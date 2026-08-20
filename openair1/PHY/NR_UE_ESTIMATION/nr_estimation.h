@@ -81,6 +81,7 @@ int nr_adjust_synch_ue(const NR_DL_FRAME_PARMS *frame_parms,
 void nr_ue_measurements(PHY_VARS_NR_UE *ue,
                         const UE_nr_rxtx_proc_t *proc,
                         int number_rbs,
+                        uint16_t l,
                         uint32_t pdsch_est_size,
                         int32_t dl_ch_estimates[][pdsch_est_size]);
 
@@ -97,14 +98,13 @@ void nr_ue_ssb_rsrp_measurements(PHY_VARS_NR_UE *ue,
 typedef struct {
   UE_nr_rxtx_proc_t proc;
   PHY_VARS_NR_UE *ue;
-  c16_t **rxdata;
+  int nb_ant;
   uint32_t rxdata_size;
   c16_t rxdata_ant[];
 } nr_meas_task_args_t;
 
 void nr_ue_meas_neighboring_cell(void *arg);
-
-void do_neighboring_cell_measurements(UE_nr_rxtx_proc_t *proc, PHY_VARS_NR_UE *ue, c16_t **rxdata, uint32_t rxdata_size);
+void nr_ue_search_new_neighboring_cell(void *arg);
 
 void nr_ue_rrc_measurements(PHY_VARS_NR_UE *ue,
                             const UE_nr_rxtx_proc_t *proc,
@@ -117,9 +117,9 @@ void phy_adjust_gain_nr(PHY_VARS_NR_UE *ue,
 void nr_pdsch_ptrs_processing(int nbRx,
                               c16_t ptrs_phase_per_slot[][14],
                               int32_t ptrs_re_per_slot[][14],
-                              uint32_t rx_size_symbol,
+                              uint32_t pdsch_buf_size_max,
                               int nl,
-                              c16_t rxdataF_comp[][nl][rx_size_symbol],
+                              c16_t rxdataF_comp[][NR_MAX_NB_LAYERS][pdsch_buf_size_max],
                               NR_DL_FRAME_PARMS *frame_parms,
                               fapi_nr_dl_config_dlsch_pdu_rel15_t *dlsch_config,
                               uint8_t nr_slot_rx,

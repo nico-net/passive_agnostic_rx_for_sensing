@@ -970,6 +970,12 @@ int phy_nr_srs_indication(nfapi_nr_srs_indication_t *ind)
     handle_nr_srs_measurements(0, ind->sfn, ind->slot, &ind->pdu_list[i]);
   return 1;
 }
+
+int phy_nr_srs_toa_vendor_ext_indication(nfapi_nr_srs_toa_vendor_ext_indication_t *ind)
+{
+  handle_nr_srs_toa_vendor_ext_measurements(0, ind->sfn, ind->slot, ind->num_ta, ind->ta_offset_nsec, ind->rnti);
+  return 1;
+}
 //end NR phy indication
 
 int phy_lbt_dl_indication(struct nfapi_vnf_p7_config *config, nfapi_lbt_dl_indication_t *ind) {
@@ -1272,6 +1278,7 @@ void *configure_nr_p7_vnf(void *ptr)
 #endif
   p7_vnf->config->nr_slot_indication = &phy_nr_slot_indication;
   p7_vnf->config->nr_srs_indication = &phy_nr_srs_indication;
+  p7_vnf->config->nr_srs_toa_vendor_ext_indication = &phy_nr_srs_toa_vendor_ext_indication;
   p7_vnf->config->malloc = &vnf_allocate;
   p7_vnf->config->free = &vnf_deallocate;
   p7_vnf->config->vendor_ext = &phy_nr_vendor_ext;
@@ -1579,15 +1586,20 @@ int nr_error_ind_cb(nfapi_vnf_config_t *config, int p5_idx, nfapi_nr_error_indic
 {
   UNUSED(config);
   NFAPI_TRACE(NFAPI_TRACE_WARN,
-              "[VNF] Received NFAPI_NR_PHY_MSG_TYPE_ERROR_INDICATION idx:%d phy_id:%d\n",
-              p5_idx,
-              resp->header.phy_id);
-  NFAPI_TRACE(NFAPI_TRACE_WARN, "[VNF] Previous message 0x%02x resulted in an error on the PNF \n", resp->message_id);
-  NFAPI_TRACE(NFAPI_TRACE_WARN,
-              "[VNF] Received error code 0x%02x (%s)\n",
+              "[VNF] %4d.%2d Received NFAPI_NR_PHY_MSG_TYPE_ERROR_INDICATION (error code 0x%02x, %s) idx:%d phy_id:%d (Previous message 0x%02x)\n",
+              resp->sfn,
+              resp->slot,
               resp->error_code,
-              error_ind_code_to_str(resp->error_code));
+              error_ind_code_to_str(resp->error_code),
+              p5_idx,
+              resp->header.phy_id,
+              resp->message_id);
   // TODO: add error handling to the VNF instead of only reporting the received error
+  // - for specific slot errors: possibly reset/stop L1
+  // - out of sync: could use Expected SFN/Slot to clean up state
+  // - error for DL_TTI/UL_TTI/UL_DCI/Tx_data: "should assume that the UE did
+  //   not receive data and control sent in this slot." => this is handled
+  //   implicitly by OAI
   return 0;
 }
 

@@ -26,9 +26,8 @@
 #define OAI_IQPLAYER_LIBNAME  "oai_iqplayer"
 
 /* flags for BBU to determine whether the attached radio head is local or remote */
-#define RAU_LOCAL_RADIO_HEAD  0
-#define RAU_REMOTE_RADIO_HEAD 1
-#define RAU_REMOTE_THIRDPARTY_RADIO_HEAD 2
+typedef enum { RAU_LOCAL_RADIO_HEAD, RAU_REMOTE_RADIO_HEAD, RAU_REMOTE_THIRDPARTY_RADIO_HEAD } rau_type_t;
+
 #define MAX_WRITE_THREAD_PACKAGE     10
 #define MAX_WRITE_THREAD_BUFFER_SIZE 8
 #define MAX_CARDS 10
@@ -253,7 +252,7 @@ typedef struct openair0_config {
   //! this interface is reused for split 7, so split 7 options provided below
   split7_config_t split7;
 } openair0_config_t;
-extern openair0_config_t openair0_cfg[MAX_CARDS];
+extern openair0_config_t openair0_cfg_g[MAX_CARDS];
 
 /*! \brief RF mapping */
 typedef struct {
@@ -360,7 +359,7 @@ struct openair0_device {
   bool firstTS_initialized;
 
   /* !brief ETH params set by application */
-  eth_params_t *eth_params;
+  eth_params_t eth_params;
   //! record player data, definition in record_player.h
   recplay_state_t *recplay_state;
   /*!brief Can be used by driver to hold internal structure*/
@@ -616,29 +615,25 @@ extern "C"
 {
 #endif
 
+int load_lib(openair0_device_t *device, openair0_config_t *openair0_cfg, rau_type_t rau_type);
+typedef struct PHY_VARS_NR_UE_s PHY_VARS_NR_UE;
+typedef int (*nrue_ru_write_t)(PHY_VARS_NR_UE *UE, openair0_timestamp_t timestamp, void **txp, int nsamps, int nbAnt, int flags);
 
-#define  DEVICE_SECTION   "device"
-#define  CONFIG_HLP_DEVICE  "Identifies the oai device (the interface to RF) to use, the shared lib \"lib_<name>.so\" will be loaded"
-#define  CONFIG_DEVICEOPT_NAME "name"
-
-/* inclusion for device configuration */
-/*---------------------------------------------------------------------------------------------------------------------------------------------------------------------------*/
-/*                                            config parameters for oai device                                                                                               */
-/*   optname                     helpstr                paramflags                      XXXptr                  defXXXval                            type           numelt   */
-/*---------------------------------------------------------------------------------------------------------------------------------------------------------------------------*/
-#define DEVICE_PARAMS_DESC {\
-    { CONFIG_DEVICEOPT_NAME,      CONFIG_HLP_DEVICE,          0,               .strptr=&devname,                .defstrval=NULL,         TYPE_STRING,     0}\
-}
-
-
+int openair0_write_reorder_common(nrue_ru_write_t nrue_ru_write,
+                                  PHY_VARS_NR_UE *UE,
+                                  openair0_device_t *device,
+                                  openair0_timestamp_t timestamp,
+                                  void **txp,
+                                  int nsamps,
+                                  int nbAnt,
+                                  int flags);
 
 /*! \brief get device name from device type */
 const char *get_devname(int devtype);
 /*! \brief Initialize openair RF target. It returns 0 if OK */
 int openair0_device_load(openair0_device_t *device, openair0_config_t *openair0_cfg);
 /*! \brief Initialize transport protocol . It returns 0 if OK */
-int openair0_transport_load(openair0_device_t *device, openair0_config_t *openair0_cfg, eth_params_t *eth_params);
-int openair0_load(openair0_device_t *device, char *name, openair0_config_t *openair0_cfg, eth_params_t *eth_params);
+int openair0_transport_load(openair0_device_t *device, openair0_config_t *openair0_cfg);
 
 /*! \brief Set RX frequencies
  * \param device the hardware to use

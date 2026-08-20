@@ -328,8 +328,7 @@ void free_nr_ue_dl_harq(NR_DL_UE_HARQ_t harq_list[2][NR_MAX_HARQ_PROCESSES], int
   }
 
   for (int j=0; j < 2; j++) {
-    for (int i=0; i<number_of_processes; i++) {
-      free_and_zero(harq_list[j][i].b);
+    for (int i = 0; i < number_of_processes; i++) {
       free_and_zero(harq_list[j][i].c);
       free_and_zero(harq_list[j][i].d);
     }
@@ -359,12 +358,28 @@ void free_nr_ue_ul_harq(NR_UL_UE_HARQ_t harq_list[NR_MAX_HARQ_PROCESSES], int nu
   }
 }
 
+void free_nr_ue_pdsch_buffers(pdsch_scratch_t *buffers, int num_actors)
+{
+  for (int i = 0; i < num_actors; i++) {
+    free_and_zero(buffers[i].rxdataF_comp);
+    free_and_zero(buffers[i].dl_ch_mag);
+    free_and_zero(buffers[i].dl_ch_magb);
+    free_and_zero(buffers[i].dl_ch_magr);
+    free_and_zero(buffers[i].rho_dl);
+    free_and_zero(buffers[i].pdsch_dl_ch_estimates);
+    for (int c = 0; c < 2; c++)
+      free_and_zero(buffers[i].llr[c]);
+  }
+}
+
 void term_nr_ue_transport(PHY_VARS_NR_UE *ue)
 {
   const int N_RB_DL = ue->frame_parms.N_RB_DL;
   const int N_RB_UL = ue->frame_parms.N_RB_UL;
   free_nr_ue_dl_harq(ue->dl_harq_processes, NR_MAX_HARQ_PROCESSES, N_RB_DL);
   free_nr_ue_ul_harq(ue->ul_harq_processes, NR_MAX_HARQ_PROCESSES, N_RB_UL, ue->frame_parms.nb_antennas_tx);
+  free_nr_ue_pdsch_buffers(ue->pdsch_scratch, ue->pdsch_num_actors);
+  free_and_zero(ue->pdsch_scratch);
 }
 
 void nr_init_dl_harq_processes(NR_DL_UE_HARQ_t harq_list[2][NR_MAX_HARQ_PROCESSES], int number_of_processes, int num_rb)
@@ -380,7 +395,6 @@ void nr_init_dl_harq_processes(NR_DL_UE_HARQ_t harq_list[2][NR_MAX_HARQ_PROCESSE
       memset(harq_list[j] + i, 0, sizeof(NR_DL_UE_HARQ_t));
       init_downlink_harq_status(harq_list[j] + i);
 
-      harq_list[j][i].b = malloc16_clear(a_segments * 1056);
       harq_list[j][i].c = malloc16(a_segments * sizeof(*harq_list[j][i].c) * 1056);
       harq_list[j][i].d = malloc16(a_segments * sizeof(*harq_list[j][i].d) * 3 * 8448);
       init_abort(&harq_list[j][i].abort_decode);
@@ -434,10 +448,46 @@ void nr_init_ul_harq_processes(NR_UL_UE_HARQ_t harq_list[NR_MAX_HARQ_PROCESSES],
   }
 }
 
+void nr_init_pdsch_buffers(pdsch_scratch_t *buffers, int num_actors, const NR_DL_FRAME_PARMS *fp)
+{
+  const uint32_t pdsch_buf_size_max = (fp->N_RB_DL * NR_NB_SC_PER_RB + 15) & ~15;
+  const uint32_t pdsch_est_size = fp->symbols_per_slot * fp->ofdm_symbol_size;
+  const uint32_t llr_buf_max = NR_NB_SC_PER_RB * NR_SYMBOLS_PER_SLOT * fp->N_RB_DL * 8 * NR_MAX_NB_LAYERS;
+  const size_t comp_elems = (size_t)NR_SYMBOLS_PER_SLOT * NR_MAX_NB_LAYERS * pdsch_buf_size_max;
+  const size_t rho_elems  = (size_t)NR_SYMBOLS_PER_SLOT * NR_MAX_NB_LAYERS * NR_MAX_NB_LAYERS * pdsch_buf_size_max;
+  const size_t ch_est_elems = (size_t)fp->nb_antennas_rx * NR_MAX_NB_LAYERS * pdsch_est_size;
+  for (int i = 0; i < num_actors; i++) {
+    buffers[i].pdsch_buf_size_max           = pdsch_buf_size_max;
+    buffers[i].pdsch_est_size        = pdsch_est_size;
+    buffers[i].llr_buf_max           = llr_buf_max;
+    buffers[i].rxdataF_comp          = malloc16_clear(comp_elems   * sizeof(c16_t));
+    buffers[i].dl_ch_mag             = malloc16_clear(comp_elems   * sizeof(c16_t));
+    buffers[i].dl_ch_magb            = malloc16_clear(comp_elems   * sizeof(c16_t));
+    buffers[i].dl_ch_magr            = malloc16_clear(comp_elems   * sizeof(c16_t));
+    buffers[i].rho_dl                = malloc16_clear(rho_elems    * sizeof(c16_t));
+    buffers[i].pdsch_dl_ch_estimates = malloc16_clear(ch_est_elems * sizeof(int32_t));
+    for (int c = 0; c < 2; c++)
+      buffers[i].llr[c]              = malloc16(llr_buf_max * sizeof(int16_t));
+  }
+}
+
 void init_nr_ue_transport(PHY_VARS_NR_UE *ue)
 {
   nr_init_dl_harq_processes(ue->dl_harq_processes, NR_MAX_HARQ_PROCESSES, ue->frame_parms.N_RB_DL);
   nr_init_ul_harq_processes(ue->ul_harq_processes, NR_MAX_HARQ_PROCESSES, ue->frame_parms.N_RB_UL, ue->frame_parms.nb_antennas_tx);
+  const int num_actors = get_nrUE_params()->num_dl_actors > 0 ? get_nrUE_params()->num_dl_actors : 1;
+  ue->pdsch_num_actors = num_actors;
+  ue->pdsch_scratch = calloc_or_fail(num_actors, sizeof(*ue->pdsch_scratch));
+  nr_init_pdsch_buffers(ue->pdsch_scratch, num_actors, &ue->frame_parms);
+}
+
+void init_phy_nr_measurements(PHY_VARS_NR_UE *ue)
+{
+  PHY_NR_MEASUREMENTS *measurements = &ue->measurements;
+  measurements->meas_request_pending = false;
+  measurements->search_new_cells_pending = false;
+  measurements->last_blind_slot = -1;
+  measurements->last_slot = -1;
 }
 
 void clean_UE_harq(PHY_VARS_NR_UE *UE)

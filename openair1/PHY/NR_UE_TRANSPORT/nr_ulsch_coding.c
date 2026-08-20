@@ -156,17 +156,14 @@ int nr_ulsch_encoding(PHY_VARS_NR_UE *ue,
 
     for (int r = 0; r < TB_parameters->C; r++) {
       nrLDPC_segment_encoding_parameters_t *segment_parameters = &TB_parameters->segments[r];
+      int E = nr_get_E(TB_parameters->G, TB_parameters->C, TB_parameters->Qm, TB_parameters->nb_layers, r);
+      if (E < 0)
+         return -1;
       segment_parameters->c = harq_process->c[r];
-      segment_parameters->E = nr_get_E(TB_parameters->G,
-                                            TB_parameters->C,
-                                            TB_parameters->Qm,
-                                            TB_parameters->nb_layers,
-                                            r);
-
+      segment_parameters->E = E;
       reset_meas(&segment_parameters->ts_interleave);
       reset_meas(&segment_parameters->ts_rate_match);
       reset_meas(&segment_parameters->ts_ldpc_encode);
-
     } // TB_parameters->C
   } // pusch_id
 

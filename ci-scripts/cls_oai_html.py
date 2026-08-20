@@ -85,7 +85,6 @@ class HTMLManagement():
 			self.htmlFile.write('    </tr>\n')
 			self.htmlFile.write('  </table>\n')
 			self.htmlFile.write('  <br>\n')
-			self.htmlFile.write('  <div class="alert alert-info"><strong> <span class="glyphicon glyphicon-dashboard"></span> TEMPLATE_STAGE_NAME</strong></div>\n')
 			self.htmlFile.write('  <table border = "1">\n')
 			self.htmlFile.write('     <tr>\n')
 			self.htmlFile.write('       <td bgcolor = "lightcyan" > <span class="glyphicon glyphicon-time"></span> Build Start Time (UTC) </td>\n')
@@ -289,14 +288,14 @@ class HTMLManagement():
 		self.htmlFile.close()
 
 	#for the moment it is limited to 4 columns, to be made generic later
-	def CreateHtmlDataLogTable(self, DataLog):
+	def CreateHtmlDataLogTable(self, DataLog, filename):
 		if (self.htmlFooterCreated or (not self.htmlHeaderCreated)):
 			return
 		self.htmlFile = open('test_results.html', 'a')
 		
         # TabHeader 
 		self.htmlFile.write('      <tr bgcolor = "#F0F0F0" >\n')
-		self.htmlFile.write('        <td colspan="6"><b> ---- ' + DataLog['Title'] + ' ---- </b></td>\n')
+		self.htmlFile.write(f'        <td colspan="6"><b> ---- Processing Time from {filename} ---- </b></td>\n')
 		self.htmlFile.write('      </tr>\n')
 		self.htmlFile.write('      <tr bgcolor = "#33CCFF" >\n')
 		self.htmlFile.write('        <th colspan="3">'+ DataLog['ColNames'][0] +'</th>\n')

@@ -118,7 +118,9 @@ int main(int argc, char *argv[])
                                     test_send_mbuf,
                                     NULL,
                                     mtu,
-                                    prach_eaxc_offset);
+                                    prach_eaxc_offset,
+                                    FH_COMP_NONE,
+                                    0);
   assert(ctx != NULL);
 
   char errbuf[PCAP_ERRBUF_SIZE];

@@ -440,16 +440,13 @@ int nr_prs_channel_estimation(uint8_t gNB_id,
     // peak estimator
     mean_val = squaredMod(((c16_t *)ch_tmp)[(prs_cfg->NumRB * 12) >> 1]);
     peak_estimator(&chT_interpol[rxAnt][0], NR_PRS_IDFT_OVERSAMP_FACTOR * frame_params->ofdm_symbol_size, &prs_toa, &ch_pwr, mean_val);
-
+    openair0_config_t *cfg = &openair0_cfg_g[ue->rf_map.card];
     // adjusting the rx_gains for channel peak power
-    ch_pwr_dbm = 10 * log10(ch_pwr) + 30 - SQ15_SQUARED_NORM_FACTOR_DB
-                 - ((int)openair0_cfg[ue->rf_map.card].rx_gain[0] - (int)openair0_cfg[ue->rf_map.card].rx_gain_offset[0])
+    ch_pwr_dbm = 10 * log10(ch_pwr) + 30 - SQ15_SQUARED_NORM_FACTOR_DB - ((int)cfg->rx_gain[0] - (int)cfg->rx_gain_offset[0])
                  - dB_fixed(frame_params->ofdm_symbol_size);
 
-    prs_meas[rxAnt]->rsrp_dBm =
-        10 * log10(prs_meas[rxAnt]->rsrp) + 30 - SQ15_SQUARED_NORM_FACTOR_DB
-        - ((int)openair0_cfg[ue->rf_map.card].rx_gain[0] - (int)openair0_cfg[ue->rf_map.card].rx_gain_offset[0])
-        - dB_fixed(ue->frame_parms.ofdm_symbol_size);
+    prs_meas[rxAnt]->rsrp_dBm = 10 * log10(prs_meas[rxAnt]->rsrp) + 30 - SQ15_SQUARED_NORM_FACTOR_DB
+                                - ((int)cfg->rx_gain[0] - (int)cfg->rx_gain_offset[0]) - dB_fixed(ue->frame_parms.ofdm_symbol_size);
 
     // prs measurements
     prs_meas[rxAnt]->gNB_id     = gNB_id;
@@ -1343,9 +1340,9 @@ void nr_pdsch_channel_estimation(PHY_VARS_NR_UE *ue,
 void nr_pdsch_ptrs_processing(int nbRx,
                               c16_t ptrs_phase_per_slot[][14],
                               int32_t ptrs_re_per_slot[][14],
-                              uint32_t rx_size_symbol,
+                              uint32_t pdsch_buf_size_max,
                               int nl,
-                              c16_t rxdataF_comp[][nl][rx_size_symbol],
+                              c16_t rxdataF_comp[][NR_MAX_NB_LAYERS][pdsch_buf_size_max],
                               NR_DL_FRAME_PARMS *frame_parms,
                               fapi_nr_dl_config_dlsch_pdu_rel15_t *dlsch_config,
                               uint8_t nr_slot_rx,
@@ -1424,7 +1421,7 @@ void nr_pdsch_ptrs_processing(int nbRx,
       }
 #ifdef DEBUG_DL_PTRS
       LOG_M("ptrsEst.m","est", ptrs_phase_per_slot[aarx], frame_parms->symbols_per_slot, 1, 1);
-      LOG_M("rxdataF_bf_ptrs_comp.m", "bf_ptrs_cmp", rxdataF_comp[0][aarx] + startSymbIndex * rx_size_symbol, rx_size_symbol * nbSymb, 1, 1);
+      LOG_M("rxdataF_bf_ptrs_comp.m", "bf_ptrs_cmp", rxdataF_comp[0][aarx] + startSymbIndex * pdsch_buf_size_max, pdsch_buf_size_max * nbSymb, 1, 1);
 #endif
       /*------------------------------------------------------------------------------------------------------- */
       /* 3) Compensated DMRS based estimated signal with PTRS estimation                                        */

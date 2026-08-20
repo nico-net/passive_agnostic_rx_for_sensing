@@ -89,8 +89,12 @@ static void dump_pusch_pdu(int instance, int frame, int slot, nfapi_nr_pusch_pdu
         pusch_pdu->pusch_data.num_cb);
 }
 
-
-void nr_fill_ulsch(PHY_VARS_gNB *gNB, int frame, int slot, nfapi_nr_pusch_pdu_t *ulsch_pdu)
+void nr_fill_ulsch(PHY_VARS_gNB *gNB,
+                   int frame,
+                   int slot,
+                   nfapi_nr_pusch_pdu_t *ulsch_pdu,
+                   int16_t mu_group_idx,
+                   uint8_t mu_group_size)
 {
   dump_pusch_pdu(gNB->Mod_id, frame, slot, ulsch_pdu);
   LOG_D(NR_PHY,
@@ -101,7 +105,11 @@ void nr_fill_ulsch(PHY_VARS_gNB *gNB, int frame, int slot, nfapi_nr_pusch_pdu_t 
         ulsch_pdu->pusch_data.harq_process_id,
         ulsch_pdu->pusch_data.new_data_indicator);
 
-  NR_gNB_PUSCH_job_t pusch = {.frame = frame, .slot = slot, .pusch_pdu = *ulsch_pdu};
+  NR_gNB_PUSCH_job_t pusch = {.frame = frame,
+                              .slot = slot,
+                              .pusch_pdu = *ulsch_pdu,
+                              .mu_group_idx = mu_group_idx,
+                              .mu_group_size = mu_group_size};
   if (gNB->common_vars.beam_id) {
     int fapi_beam_idx = ulsch_pdu->beamforming.prgs_list[0].dig_bf_interface_list[0].beam_idx;
     int bitmap = SL_to_bitmap(ulsch_pdu->start_symbol_index, ulsch_pdu->nr_of_symbols);

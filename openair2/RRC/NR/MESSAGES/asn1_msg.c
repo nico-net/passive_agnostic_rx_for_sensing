@@ -881,15 +881,16 @@ int do_RRCSetupComplete(uint8_t *buffer,
   return((enc_rval.encoded+7)/8);
 }
 
-// TODO: This function is only implemented for event A2/A3
+// This function is implemented for event A2/A3 and periodical report
 int do_nrMeasurementReport_SA(long trigger_to_measid,
                               long trigger_quantity,
+                              bool report_rsrp,
                               long rs_type,
                               uint16_t Nid_cell,
                               int rsrp_index,
-                              bool neighbor_cell_valid,
-                              uint16_t neighbor_Nid_cell,
-                              int neighbor_rsrp_index,
+                              int num_neighbor_cells,
+                              const uint16_t *neighbor_Nid_cells,
+                              const int *neighbor_rsrp_indexes,
                               uint8_t *buffer,
                               size_t buffer_size)
 {
@@ -914,7 +915,7 @@ int do_nrMeasurementReport_SA(long trigger_to_measid,
   *pci = Nid_cell;
 
   struct NR_MeasQuantityResults *active_mq_res = calloc_or_fail(1, sizeof(*active_mq_res));
-  if (trigger_quantity == NR_MeasTriggerQuantityOffset_PR_rsrp) {
+  if (trigger_quantity == NR_MeasTriggerQuantityOffset_PR_rsrp || report_rsrp) {
     asn1cCalloc(active_mq_res->rsrp, rsrp);
     // Assign precomputed RSRP index
     *rsrp = rsrp_index;
@@ -926,27 +927,30 @@ int do_nrMeasurementReport_SA(long trigger_to_measid,
 
   ASN_SEQUENCE_ADD(&mrIE->measResults.measResultServingMOList.list, measResultServMo);
 
-  // Neighbor cell
-  if (neighbor_cell_valid) {
+  // Neighbor cells
+  if (num_neighbor_cells > 0) {
     struct NR_MeasResults__measResultNeighCells *measResultNeighCells = calloc_or_fail(1, sizeof(*measResultNeighCells));
     mrIE->measResults.measResultNeighCells = measResultNeighCells;
     measResultNeighCells->present = NR_MeasResults__measResultNeighCells_PR_measResultListNR;
     NR_MeasResultListNR_t *measResultListNR = calloc_or_fail(1, sizeof(*measResultListNR));
     measResultNeighCells->choice.measResultListNR = measResultListNR;
-    struct NR_MeasResultNR *meas_result_neigh_cell = calloc_or_fail(1, sizeof(*meas_result_neigh_cell));
-    asn1cCalloc(meas_result_neigh_cell->physCellId, neighbor_pci);
-    *neighbor_pci = neighbor_Nid_cell;
-    struct NR_MeasResultNR__measResult__cellResults *cellResults = &meas_result_neigh_cell->measResult.cellResults;
-    struct NR_MeasQuantityResults *neigh_mq_res = calloc_or_fail(1, sizeof(*neigh_mq_res));
-    if (trigger_quantity == NR_MeasTriggerQuantityOffset_PR_rsrp) {
-      asn1cCalloc(neigh_mq_res->rsrp, rsrp);
-      *rsrp = neighbor_rsrp_index;
-      if (rs_type == NR_NR_RS_Type_ssb)
-        cellResults->resultsSSB_Cell = neigh_mq_res;
-      else
-        cellResults->resultsCSI_RS_Cell = neigh_mq_res;
+
+    for (int i = 0; i < num_neighbor_cells; i++) {
+      struct NR_MeasResultNR *meas_result_neigh_cell = calloc_or_fail(1, sizeof(*meas_result_neigh_cell));
+      asn1cCalloc(meas_result_neigh_cell->physCellId, neighbor_pci);
+      *neighbor_pci = neighbor_Nid_cells[i];
+      struct NR_MeasResultNR__measResult__cellResults *cellResults = &meas_result_neigh_cell->measResult.cellResults;
+      struct NR_MeasQuantityResults *neigh_mq_res = calloc_or_fail(1, sizeof(*neigh_mq_res));
+      if (trigger_quantity == NR_MeasTriggerQuantityOffset_PR_rsrp || report_rsrp) {
+        asn1cCalloc(neigh_mq_res->rsrp, rsrp);
+        *rsrp = neighbor_rsrp_indexes[i];
+        if (rs_type == NR_NR_RS_Type_ssb)
+          cellResults->resultsSSB_Cell = neigh_mq_res;
+        else
+          cellResults->resultsCSI_RS_Cell = neigh_mq_res;
+      }
+      ASN_SEQUENCE_ADD(&measResultListNR->list, meas_result_neigh_cell);
     }
-    ASN_SEQUENCE_ADD(&measResultListNR->list, meas_result_neigh_cell);
   }
 
   enc_rval = uper_encode_to_buffer(&asn_DEF_NR_UL_DCCH_Message, NULL, (void *)&ul_dcch_msg, buffer, buffer_size);
@@ -958,15 +962,14 @@ int do_nrMeasurementReport_SA(long trigger_to_measid,
 
   LOG_I(NR_RRC, "MeasurementReport Encoded %zd bits (%zd bytes)\n", enc_rval.encoded, (enc_rval.encoded + 7) / 8);
 
-  return ((enc_rval.encoded + 7) / 8);
+  int ret = (enc_rval.encoded + 7) / 8;
+  ASN_STRUCT_FREE_CONTENTS_ONLY(asn_DEF_NR_UL_DCCH_Message, &ul_dcch_msg);
+  return ret;
 }
 
-int do_NR_DLInformationTransfer(uint8_t *buffer,
-                                size_t buffer_len,
-                                uint8_t transaction_id,
-                                uint32_t pdu_length,
-                                uint8_t *pdu_buffer)
+byte_array_t do_NR_DLInformationTransfer(uint8_t transaction_id, uint32_t pdu_length, uint8_t *pdu_buffer)
 {
+  byte_array_t msg = {0};
   NR_DL_DCCH_Message_t dl_dcch_msg = {0};
   dl_dcch_msg.message.present = NR_DL_DCCH_MessageType_PR_c1;
   asn1cCalloc(dl_dcch_msg.message.choice.c1, c1);
@@ -977,18 +980,20 @@ int do_NR_DLInformationTransfer(uint8_t *buffer,
   infoTransfer->criticalExtensions.present = NR_DLInformationTransfer__criticalExtensions_PR_dlInformationTransfer;
 
   asn1cCalloc(infoTransfer->criticalExtensions.choice.dlInformationTransfer, dlInfoTransfer);
-  asn1cCalloc(dlInfoTransfer->dedicatedNAS_Message, msg);
-  // we will free the caller buffer, that is ok in the present code logic (else it will leak memory) but not natural,
-  // comprehensive code design
-  msg->buf = pdu_buffer;
-  msg->size = pdu_length;
+  asn1cCalloc(dlInfoTransfer->dedicatedNAS_Message, nas);
+  /* Takes ownership of pdu_buffer, freed below via ASN_STRUCT_FREE_CONTENTS_ONLY */
+  nas->buf = pdu_buffer;
+  nas->size = pdu_length;
 
-  asn_enc_rval_t r = uper_encode_to_buffer(&asn_DEF_NR_DL_DCCH_Message, NULL, (void *)&dl_dcch_msg, buffer, buffer_len);
-  AssertFatal(r.encoded > 0, "ASN1 message encoding failed (%s, %ld)!\n", "DLInformationTransfer", r.encoded);
+  int val = uper_encode_to_new_buffer(&asn_DEF_NR_DL_DCCH_Message, NULL, &dl_dcch_msg, (void **)&msg.buf);
   ASN_STRUCT_FREE_CONTENTS_ONLY(asn_DEF_NR_DL_DCCH_Message, &dl_dcch_msg);
-  LOG_D(NR_RRC, "DLInformationTransfer Encoded %zd bytes\n", r.encoded);
-  // for (int i=0;i<encoded;i++) printf("%02x ",(*buffer)[i]);
-  return (r.encoded + 7) / 8;
+  if (val <= 0) {
+    LOG_E(NR_RRC, "ASN1 message encoding failed (DLInformationTransfer, %d)!\n", val);
+    return msg;
+  }
+  msg.len = val;
+  LOG_D(NR_RRC, "DLInformationTransfer Encoded %ld bytes\n", msg.len);
+  return msg;
 }
 
 int do_NR_ULInformationTransfer(uint8_t **buffer, uint32_t pdu_length, uint8_t *pdu_buffer)
@@ -1020,7 +1025,8 @@ int do_NR_ULInformationTransfer(uint8_t **buffer, uint32_t pdu_length, uint8_t *
 int do_RRCReestablishmentRequest(uint8_t *buffer,
                                  NR_ReestablishmentCause_t cause,
                                  uint32_t cell_id,
-                                 uint16_t c_rnti)
+                                 uint16_t c_rnti,
+                                 uint16_t short_mac_i)
 {
   asn_enc_rval_t enc_rval;
   NR_UL_CCCH_Message_t ul_ccch_msg;
@@ -1038,10 +1044,9 @@ int do_RRCReestablishmentRequest(uint8_t *buffer,
   rrcReestablishmentRequest->rrcReestablishmentRequest.reestablishmentCause = cause;
   rrcReestablishmentRequest->rrcReestablishmentRequest.ue_Identity.c_RNTI = c_rnti;
   rrcReestablishmentRequest->rrcReestablishmentRequest.ue_Identity.physCellId = cell_id;
-  // TODO properly setting shortMAC-I (see 5.3.7.4 of 331)
   rrcReestablishmentRequest->rrcReestablishmentRequest.ue_Identity.shortMAC_I.buf = buf;
-  rrcReestablishmentRequest->rrcReestablishmentRequest.ue_Identity.shortMAC_I.buf[0] = 0x08;
-  rrcReestablishmentRequest->rrcReestablishmentRequest.ue_Identity.shortMAC_I.buf[1] = 0x32;
+  rrcReestablishmentRequest->rrcReestablishmentRequest.ue_Identity.shortMAC_I.buf[0] = (short_mac_i >> 8) & 0xFF;
+  rrcReestablishmentRequest->rrcReestablishmentRequest.ue_Identity.shortMAC_I.buf[1] = short_mac_i & 0xFF;
   rrcReestablishmentRequest->rrcReestablishmentRequest.ue_Identity.shortMAC_I.size = 2;
 
   if (LOG_DEBUGFLAG(DEBUG_ASN1)) {

@@ -3,6 +3,7 @@
  */
 
 #include <sched.h>
+#include <string.h>
 #include "assertions.h"
 #include "PHY/types.h"
 #include "PHY/defs_RU.h"
@@ -22,6 +23,7 @@
 #include <executables/thread-common.h>
 #include "executables/nr-softmodem.h"
 #include "nr-oru.h"
+#include "common/utils/threadPool/thread-pool.h"
 #include "openair1/PHY/INIT/nr_phy_init.h"
 #include "openair1/SCHED_NR/sched_nr.h"
 
@@ -36,12 +38,7 @@ int emulate_rf = 0;
 
 RAN_CONTEXT_t RC;
 
-extern void kill_NR_RU_proc(int inst);
-extern void set_function_spec_param(RU_t *ru);
-extern void start_NR_RU();
-extern void init_NR_RU(configmodule_interface_t *cfg, char *);
-void fill_rf_config(RU_t *ru, char *rf_config_file);
-void fill_split7_2_config(split7_config_t *split7, const nfapi_nr_config_request_scf_t *config, const NR_DL_FRAME_PARMS *fp);
+
 
 int64_t uplink_frequency_offset[MAX_NUM_CCs][4];
 
@@ -56,20 +53,26 @@ void exit_function(const char *file, const char *function, const int line, const
   }
   close_log_mem();
   oai_exit = 1;
-  RU_t *ru = RC.ru[0];
+  RU_t *ru = RC.ru ? RC.ru[0] : NULL;
 
-  if (ru->rfdevice.trx_end_func) {
-    ru->rfdevice.trx_end_func(&ru->rfdevice);
-    ru->rfdevice.trx_end_func = NULL;
+  if (ru) {
+    if (ru->threadPool) {
+      abortTpool(ru->threadPool);
+    }
+
+    if (ru->rfdevice.trx_end_func) {
+      ru->rfdevice.trx_end_func(&ru->rfdevice);
+      ru->rfdevice.trx_end_func = NULL;
+    }
+
+    if (ru->ifdevice.trx_end_func) {
+      ru->ifdevice.trx_end_func(&ru->ifdevice);
+      ru->ifdevice.trx_end_func = NULL;
+    }
+
+    pthread_mutex_destroy(ru->ru_mutex);
+    pthread_cond_destroy(ru->ru_cond);
   }
-
-  if (ru->ifdevice.trx_end_func) {
-    ru->ifdevice.trx_end_func(&ru->ifdevice);
-    ru->ifdevice.trx_end_func = NULL;
-  }
-
-  pthread_mutex_destroy(ru->ru_mutex);
-  pthread_cond_destroy(ru->ru_cond);
   if (assert) {
     abort();
   } else {
@@ -220,27 +223,73 @@ int main(int argc, char **argv)
   oru.fronthaul = oru_fh_init(&oru.fh_config);
   AssertFatal(oru.fronthaul != NULL, "Cannot configure oru fronthaul, check your config file/cmdline");
 
-  LOG_I(PHY, "starting vrtsim\n");
-  ret = openair0_load(&ru->rfdevice, "vrtsim", &ru->openair0_cfg, NULL);
-  AssertFatal(ret == 0, "RU %u: openair0_load() ret %d: cannot initialize vrtsim\n", ru->idx, ret);
+  LOG_I(PHY, "starting rfdevice\n");
+  ret = openair0_device_load(&ru->rfdevice, &ru->openair0_cfg);
+  AssertFatal(ret == 0, "RU %u: openair0_device_load() ret %d: cannot initialize rfdevice\n", ru->idx, ret);
   ret = ru->rfdevice.trx_start_func(&ru->rfdevice);
-  AssertFatal(ret == 0, "RU %u: trx_start_func() ret %d: cannot start vrtsim\n", ru->idx, ret);
-
-  threadCreate(&oru.north_read_thread, oru_north_read_thread, (void *)&oru, "north_read_thread", -1, OAI_PRIORITY_RT_MAX);
-  threadCreate(&oru.south_read_thread, oru_south_read_thread, (void *)&oru, "south_read_thread", -1, OAI_PRIORITY_RT_MAX);
-  usleep(1000);
-  oru_fh_start(oru.fronthaul);
+  AssertFatal(ret == 0, "RU %u: trx_start_func() ret %d: cannot start rfdevice\n", ru->idx, ret);
 
   // Signal handler
   signal(SIGINT, sig_handler);
+
+  ret = oru_fh_start(oru.fronthaul);
+  AssertFatal(ret == 0, "Cannot start O-RU fronthaul\n");
+
+  int rc = pthread_mutex_init(&oru.tx_write.mutex, NULL);
+  AssertFatal(rc == 0, "pthread_mutex_init() failed: %d, %s\n", rc, strerror(rc));
+  rc = pthread_cond_init(&oru.tx_write.cond, NULL);
+  AssertFatal(rc == 0, "pthread_cond_init() failed: %d, %s\n", rc, strerror(rc));
+  oru.tx_write.initialized = false;
+
+  AssertFatal(ru->num_tpcores > 0, "RU %u: num_tp_cores must be > 0\n", ru->idx);
+  char pool[80];
+  int s_offset = sprintf(pool, "%d", ru->tpcores[0]);
+  for (int icpu = 1; icpu < ru->num_tpcores; icpu++) {
+    s_offset += sprintf(pool + s_offset, ",%d", ru->tpcores[icpu]);
+  }
+  LOG_I(PHY, "O-RU thread-pool core string %s (size %d)\n", pool, ru->num_tpcores);
+  ru->threadPool = malloc(sizeof(tpool_t));
+  initNamedTpool(pool, ru->threadPool, false, "ul_worker");
+
+  for (int i = 0; i < oru.num_dl_read_threads; i++) {
+    char thread_name[32];
+    snprintf(thread_name, sizeof(thread_name), "north_read_%d", i);
+    threadCreate(&oru.dl_read_threads[i], oru_north_read_worker, (void *)&oru, thread_name, -1, OAI_PRIORITY_RT_MAX);
+  }
+  threadCreate(&oru.south_read_thread, oru_south_read_thread, (void *)&oru, "south_read_thread", -1, OAI_PRIORITY_RT_MAX);
+  threadCreate(&oru.south_write_thread, oru_south_write_thread, (void *)&oru, "south_write_thread", oru.tx_write.core, OAI_PRIORITY_RT_MAX);
 
   while (oai_exit == 0) {
     oru_fh_print_stats(oru.fronthaul);
     sleep(1);
   }
 
-  pthread_join(oru.north_read_thread, NULL);
+  pthread_mutex_lock(&oru.tx_write.mutex);
+  pthread_cond_signal(&oru.tx_write.cond);
+  pthread_mutex_unlock(&oru.tx_write.mutex);
+  if (oru.dl_reorder) {
+    // Wakes oru_south_write_thread() if it's blocked in symbol_reorder_wait_at_least() rather than
+    // the tx_write.cond startup wait above.
+    symbol_reorder_notify_all(oru.dl_reorder);
+  }
+
+  for (int i = 0; i < oru.num_dl_read_threads; i++) {
+    pthread_join(oru.dl_read_threads[i], NULL);
+  }
   pthread_join(oru.south_read_thread, NULL);
+  pthread_join(oru.south_write_thread, NULL);
+
+  if (ru->threadPool) {
+    abortTpool(ru->threadPool);
+    free(ru->threadPool);
+    ru->threadPool = NULL;
+  }
+
+  pthread_mutex_destroy(&oru.tx_write.mutex);
+  pthread_cond_destroy(&oru.tx_write.cond);
+  if (oru.dl_reorder) {
+    symbol_reorder_destroy(oru.dl_reorder);
+  }
 
   oru_fh_stop(oru.fronthaul);
 

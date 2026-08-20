@@ -68,8 +68,6 @@ typedef struct {
   uint8_t first_rx;
   /// DLSCH status flag indicating
   NR_SCH_status_t status;
-  /// Pointer to the payload (38.212 V15.4.0 section 5.1)
-  uint8_t *b;
   /// Pointer to transport block segments
   uint8_t *c;
   /// soft bits for each received segment ("d"-sequence)(for definition see 36-212 V8.6 2009-03, p.15)

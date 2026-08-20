@@ -68,7 +68,8 @@ static void timer_cb(uint64_t s_abs, void *user_data)
 
 void *oru_fh_init(oru_fh_config_t *cfg)
 {
-  AssertFatal(cfg->enable_compression == false, "IQ compression not supported\n");
+  AssertFatal(cfg->comp_type < FH_COMP_NUM_METHODS,
+              "comp_type %d out of range [0..%d]\n", cfg->comp_type, FH_COMP_NUM_METHODS - 1);
 
   char *argv[64];
   int argc = 0;
@@ -206,7 +207,9 @@ void *oru_fh_init(oru_fh_config_t *cfg)
                                                (send_func_t)oru_io_send_uplane,
                                                &fh->io,
                                                cfg->mtu,
-                                               cfg->prach_eaxc_offset);
+                                               cfg->prach_eaxc_offset,
+                                               cfg->comp_type,
+                                               cfg->prach_kbar);
 
   return fh;
 }
@@ -272,6 +275,13 @@ int oru_fh_poll_ul_job(void *handle, ul_job_t *job) {
   oru_fh_t *fh = (oru_fh_t *)handle;
   AssertFatal(fh, "Invalid handle\n");
   return poll_ul_job(fh->packet_processor, job);
+}
+
+void oru_fh_get_dl_symbol_bitmask(void *handle, const uint8_t **bitmask, uint16_t *bit_length)
+{
+  oru_fh_t *fh = (oru_fh_t *)handle;
+  AssertFatal(fh, "Invalid handle\n");
+  get_dl_symbol_bitmask(fh->packet_processor, bitmask, bit_length);
 }
 
 void oru_fh_rx_send_pusch(void *handle, uint32_t *puschF, int symbol_index, const ul_job_t *job)

@@ -434,6 +434,8 @@ void add_noise_float(c16_t **rxdata,
                      bool apply_phase_noise,
                      const uint8_t nb_antennas_rx);
 
+void add_rx_signals(float **y_re, float **y_im, float **x_re, float **x_im, int n_rx, int length);
+
 /*
 \fn double compute_pbch_sinr(channel_desc_t *desc,
                              channel_desc_t *desc_i1,

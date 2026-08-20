@@ -113,6 +113,11 @@ typedef struct Gtpv1uExtHeader {
  * Used when there is no UL PDU Session Information (SDAP header) present */
 #define NO_QFI (-1)
 
+/** number of packets to receive at once in recvmmsg() */
+#define VLEN 8
+/** buffer size for each packet */
+#define BUFSIZE 65536
+
 /** GTP bearer context: for sending data */
 typedef struct gtpv1u_bearer_s {
   int sock_fd;
@@ -249,10 +254,8 @@ static int gtpv1uCreateAndSendMsg(gtpv1u_bearer_t *bearer,
                                   gtpu_extension_header_t *extensions,
                                   int extensions_count)
 {
-  DevAssert(msgLen + HDR_MAX < 65536); // maximum size of UDP packet
-  uint8_t buffer[msgLen + HDR_MAX];
-  uint8_t *curPtr = buffer;
-  Gtpv1uMsgHeaderT *msgHdr = (Gtpv1uMsgHeaderT *)buffer;
+  uint8_t header[HDR_MAX];
+  Gtpv1uMsgHeaderT *msgHdr = (Gtpv1uMsgHeaderT *)header;
   // N should be 0 for us (it was used only in 2G and 3G)
   msgHdr->PN = npduNumFlag;
   msgHdr->S = seqNumFlag;
@@ -264,8 +267,7 @@ static int gtpv1uCreateAndSendMsg(gtpv1u_bearer_t *bearer,
   msgHdr->msgType = msgType;
   msgHdr->teid = htonl(bearer->teid_outgoing);
 
-  curPtr += sizeof(Gtpv1uMsgHeaderT);
-
+  uint8_t *curPtr = header + sizeof(Gtpv1uMsgHeaderT);
   if (msgHdr->PN || msgHdr->S || msgHdr->E) {
     *(uint16_t *)curPtr = seqNumFlag ? bearer->seqNum : 0x0000;
     curPtr += sizeof(uint16_t);
@@ -276,7 +278,7 @@ static int gtpv1uCreateAndSendMsg(gtpv1u_bearer_t *bearer,
   }
 
   for (int i = 0; i < extensions_count; i++) {
-    int available_size = sizeof(buffer) - (curPtr - buffer);
+    int available_size = sizeof(header) - (curPtr - header);
     gtpu_extension_header_type_t next = i == extensions_count - 1 ? GTPU_EXT_NONE : extensions[i + 1].type;
     int len = serialize_extension(&extensions[i], next, curPtr, available_size);
     if (len == -1) {
@@ -286,18 +288,8 @@ static int gtpv1uCreateAndSendMsg(gtpv1u_bearer_t *bearer,
     curPtr += len;
   }
 
-  if (Msg != NULL) {
-    int available_size = sizeof(buffer) - (curPtr - buffer);
-    if (msgLen > available_size) {
-      LOG_E(GTPU, "GTP message creation: buffer too small\n");
-      return GTPNOK;
-    }
-    memcpy(curPtr, Msg, msgLen);
-    curPtr += msgLen;
-  }
-
-  msgHdr->msgLength = htons(curPtr - (buffer + sizeof(Gtpv1uMsgHeaderT)));
-  AssertFatal(curPtr - (buffer + msgLen) < HDR_MAX, "fixed max size of all headers too short");
+  size_t hdr_len = curPtr - header;
+  msgHdr->msgLength = htons(hdr_len - sizeof(Gtpv1uMsgHeaderT) + msgLen);
 
   // Fix me: add IPv6 support
   DevAssert(bearer->ip.ss_family == AF_INET);
@@ -307,14 +299,20 @@ static int gtpv1uCreateAndSendMsg(gtpv1u_bearer_t *bearer,
         IPV4_ADDR_FORMAT(to->sin_addr.s_addr),
         htons(to->sin_port),
         bearer->teid_outgoing);
-  int ret = sendto(bearer->sock_fd, buffer, curPtr - buffer, 0, (struct sockaddr *)to, sizeof(*to));
-  if (ret != curPtr - buffer) {
-    LOG_E(GTPU,
-          "[SD %d] Failed to send data buffer size %lu, ret: %d, errno: %d\n",
-          bearer->sock_fd,
-          curPtr - buffer,
-          ret,
-          errno);
+
+  struct iovec iov[2] = {
+      { .iov_base = msgHdr, .iov_len = hdr_len, },
+      { .iov_base = Msg, .iov_len = (size_t) msgLen, },
+  };
+  struct msghdr m = {
+    .msg_name = to,
+    .msg_namelen = sizeof(*to),
+    .msg_iov = iov,
+    .msg_iovlen = Msg ? 2U : 1U,
+  };
+  ssize_t ret = sendmsg(bearer->sock_fd, &m, 0);
+  if (ret != (ssize_t) (hdr_len + msgLen)) {
+    LOG_E(GTPU, "[SD %d] Failed to send data, ret: %ld, errno: %d\n", bearer->sock_fd, ret, errno);
     return GTPNOK;
   }
 
@@ -604,7 +602,7 @@ static int udpServerSocket(openAddr_s addr)
   }
 
   int sendbuff = 1000 * 1000 * 10;
-  AssertFatal(0 == setsockopt(sockfd, SOL_SOCKET, SO_SNDBUF, &sendbuff, sizeof(sendbuff)), "");
+  AssertFatal(0 == setsockopt(sockfd, SOL_SOCKET, SO_SNDBUF, &sendbuff, sizeof(sendbuff)), "%s", strerror(errno));
   LOG_D(GTPU,
         "[%d] Created listener for paquets to: %s:%s, send buffer size: %d\n",
         sockfd,
@@ -1295,21 +1293,30 @@ static int Gtpv1uHandleGpdu(int h, uint8_t *msgBuf, uint32_t msgBufLen, const st
   return !GTPNOK;
 }
 
-static bool gtpv1uReceiveHandleMessage(int h)
+static bool gtpv1uReceiveHandleMessage(int h, uint8_t buf[VLEN][BUFSIZE])
 {
-  uint8_t udpData[65536];
-  int udpDataLen;
-  socklen_t from_len;
-  struct sockaddr_in addr;
-  from_len = (socklen_t)sizeof(struct sockaddr_in);
+  struct iovec iovecs[VLEN];
+  struct mmsghdr msgs[VLEN];
+  struct sockaddr_in addr[VLEN];
 
-  if ((udpDataLen = recvfrom(h, udpData, sizeof(udpData), 0, (struct sockaddr *)&addr, &from_len)) < 0) {
+  for (size_t i = 0; i < VLEN; ++i) {
+    iovecs[i].iov_base = buf[i];
+    iovecs[i].iov_len = BUFSIZE;
+    msgs[i].msg_hdr.msg_iov = &iovecs[i];
+    msgs[i].msg_hdr.msg_iovlen = 1;
+    msgs[i].msg_hdr.msg_name = &addr[i];
+    msgs[i].msg_hdr.msg_namelen = (socklen_t)sizeof(struct sockaddr_in);
+  };
+
+  int ret = recvmmsg(h, msgs, VLEN, MSG_WAITFORONE, NULL);
+  if (ret < 0) {
     LOG_E(GTPU, "[%d] Recvfrom failed (%s)\n", h, strerror(errno));
     return false;
-  } else if (udpDataLen == 0) {
-    LOG_W(GTPU, "[%d] Recvfrom returned 0\n", h);
-    return true;
-  } else {
+  }
+
+  for (int i = 0; i < ret; ++i) {
+    int udpDataLen = msgs[i].msg_len;
+    uint8_t *udpData = buf[i];
     if (udpDataLen < (int)sizeof(Gtpv1uMsgHeaderT)) {
       LOG_W(GTPU, "[%d] received malformed gtp packet \n", h);
       return true;
@@ -1325,7 +1332,7 @@ static bool gtpv1uReceiveHandleMessage(int h)
         break;
 
       case GTP_ECHO_REQ:
-        Gtpv1uHandleEchoReq(h, udpData, &addr);
+        Gtpv1uHandleEchoReq(h, udpData, &addr[i]);
         break;
 
       case GTP_ERROR_INDICATION:
@@ -1341,7 +1348,7 @@ static bool gtpv1uReceiveHandleMessage(int h)
         break;
 
       case GTP_GPDU:
-        Gtpv1uHandleGpdu(h, udpData, udpDataLen, &addr);
+        Gtpv1uHandleGpdu(h, udpData, udpDataLen, &addr[i]);
         break;
 
       default:
@@ -1355,7 +1362,9 @@ static bool gtpv1uReceiveHandleMessage(int h)
 static void* gtpv1uReceiver(void *thr)
 {
   gtpThread_t *gt = (gtpThread_t *)thr;
-  while (gtpv1uReceiveHandleMessage(gt->h)) {
+  /* this buffer is 1MB large, ok because at the bottom of the stack */
+  uint8_t buf[VLEN][BUFSIZE];
+  while (gtpv1uReceiveHandleMessage(gt->h, buf)) {
   }
   LOG_W(GTPU, "exiting thread\n");
   return NULL;
