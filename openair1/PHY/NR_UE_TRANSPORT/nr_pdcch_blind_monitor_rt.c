@@ -755,11 +755,13 @@ constdiag_done:;
       if (s_dcigt)
         LOG_I(PHY,
               "SENSING: DCIGT %d.%d rnti=0x%x cce=%d al=%u mcs=%u rv=%u ndi=%u hid=%u tda=%u "
-              "prb=%u+%u sym=%u+%u\n",
+              "prb=%u+%u sym=%u+%u cdm=%u ports=0x%x nscid=%u dmrsmask=0x%x\n",
               cand_task[ti].frame, cand_task[ti].slot, out.rnti, cand_task[ti].cce,
               (unsigned)cand_task[ti].L, (unsigned)out.mcs, (unsigned)out.rv, (unsigned)out.ndi,
               (unsigned)out.harq_pid, (unsigned)out.tda_index, (unsigned)out.start_rb,
-              (unsigned)out.num_rb, (unsigned)out.start_symbol, (unsigned)out.num_symbols);
+              (unsigned)out.num_rb, (unsigned)out.start_symbol, (unsigned)out.num_symbols,
+              (unsigned)out.n_dmrs_cdm_groups, (unsigned)out.dmrs_ports, (unsigned)out.nscid,
+              (unsigned)out.dl_dmrs_symb_pos);
     }
 
     struct timespec rnti_ts;
