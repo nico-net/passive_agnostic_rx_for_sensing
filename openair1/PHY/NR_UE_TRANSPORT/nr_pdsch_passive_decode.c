@@ -374,6 +374,117 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
   // nr_ue_pdsch_procedures() divides by number_symbols (not by the DM-RS symbol count) x layers x
   // antennas; mirrored so nvar carries the same scale the attached path's gates were tuned against.
   nvar /= (uint32_t)(dlsch_config->number_symbols * cw->Nl * fp->nb_antennas_rx);
+
+  /* CHESTDIAG (ISAC_PDSCH_TBPARM=1): per-(layer,antenna) channel power, plus the layer-space Gram
+   * matrix conditioning. This is the one remaining hypothesis for the rank-4 CRC failure that has
+   * been asserted but never measured: separating Nl spatial streams requires the Nl x nbRx effective
+   * channel to be well conditioned AT THIS RECEIVER, and the gNB chose its precoder from the SERVED
+   * UE's PMI, not ours. If the layer columns are near-parallel here the MMSE inverse amplifies noise
+   * without bound and no parameter fix can help; if they are well separated, the fault is in the
+   * demodulation chain instead. Cheap: one pass over the already-computed estimates. */
+  {
+    static int s_cd = -1;
+    if (s_cd < 0)
+      s_cd = (getenv("ISAC_PDSCH_TBPARM") != NULL) ? 1 : 0;
+    static int s_cd_left = 12;
+    if (s_cd && s_cd_left > 0 && cw->Nl >= 1) {
+      s_cd_left--;
+      const int nsc = freq_alloc->num_rbs * NR_NB_SC_PER_RB;
+      /* Estimates are written at ch_offset = ofdm_symbol_size * <DM-RS symbol>, NOT at
+       * start_symbol -- reading start_symbol returns an untouched buffer (all zeros). */
+      int sym = -1;
+      for (int m2 = 0; m2 < NR_SYMBOLS_PER_SLOT; m2++) {
+        if (dlsch_config->dlDmrsSymbPos & (1u << m2)) {
+          sym = m2;
+          break;
+        }
+      }
+      if (sym < 0)
+        sym = dlsch_config->start_symbol;
+      char rep[420];
+      int u = 0;
+      double pw[8][8];
+      for (int l = 0; l < cw->Nl && l < 8; l++) {
+        for (int a = 0; a < fp->nb_antennas_rx && a < 8; a++) {
+          const c16_t *h = (const c16_t *)&pdsch_dl_ch_estimates[l * fp->nb_antennas_rx + a][fp->ofdm_symbol_size * sym];
+          double acc = 0;
+          for (int k = 0; k < nsc; k++)
+            acc += (double)h[k].r * h[k].r + (double)h[k].i * h[k].i;
+          pw[l][a] = acc / (nsc > 0 ? nsc : 1);
+        }
+      }
+      /* MIMO separability, done properly (2026-08-20). The previous statistic summed the layer
+       * inner product over antennas AND subcarriers with POWER weighting, so a single dominant
+       * branch (ch0 measured 11-17 dB above the others) made it return ~1 mechanically, whatever
+       * the true spatial structure was. It could not distinguish "layers are parallel" from
+       * "only one antenna is alive".
+       *
+       * Correct measure: per-subcarrier Gram matrix over LAYERS, G = H^H H with H[antenna][layer],
+       * after normalising each ANTENNA branch by its own RMS so per-chain gain cannot bias the
+       * geometry. Then the normalised determinant det(G) / prod(G_ii) in [0,1]:
+       *   1  -> layers mutually orthogonal, full rank, 4 streams separable
+       *   0  -> layers collinear, rank deficient, streams NOT separable
+       * Computed by Cholesky (G is Hermitian positive semi-definite), which also yields the
+       * per-layer residual L_ii^2 / G_ii: how much NEW information each layer adds beyond the
+       * previous ones. That is the honest "effective rank" read-out. */
+      double bn[8];
+      for (int a = 0; a < fp->nb_antennas_rx && a < 8; a++) {
+        double acc = 0;
+        for (int l = 0; l < cw->Nl && l < 8; l++)
+          acc += pw[l][a];
+        bn[a] = (acc > 0) ? 1.0 / sqrt(acc) : 0.0; // per-branch gain normalisation
+      }
+      const int NL = (cw->Nl < 4) ? cw->Nl : 4;
+      double gr[4][4] = {{0}}, gi[4][4] = {{0}};
+      for (int x = 0; x < NL; x++) {
+        for (int y = 0; y < NL; y++) {
+          double ar = 0, ai = 0;
+          for (int a = 0; a < fp->nb_antennas_rx && a < 8; a++) {
+            const c16_t *hx = (const c16_t *)&pdsch_dl_ch_estimates[x * fp->nb_antennas_rx + a][fp->ofdm_symbol_size * sym];
+            const c16_t *hy = (const c16_t *)&pdsch_dl_ch_estimates[y * fp->nb_antennas_rx + a][fp->ofdm_symbol_size * sym];
+            const double w = bn[a] * bn[a];
+            for (int k = 0; k < nsc; k++) {
+              ar += w * ((double)hx[k].r * hy[k].r + (double)hx[k].i * hy[k].i);
+              ai += w * ((double)hx[k].r * hy[k].i - (double)hx[k].i * hy[k].r);
+            }
+          }
+          gr[x][y] = ar;
+          gi[x][y] = ai;
+        }
+      }
+      /* Cholesky of the Hermitian Gram; lr/li hold L. */
+      double lr[4][4] = {{0}}, li[4][4] = {{0}}, resid[4] = {0};
+      int pd = 1;
+      for (int x = 0; x < NL && pd; x++) {
+        for (int y = 0; y <= x && pd; y++) {
+          double sr = gr[x][y], si = gi[x][y];
+          for (int m2 = 0; m2 < y; m2++) {
+            sr -= lr[x][m2] * lr[y][m2] + li[x][m2] * li[y][m2];
+            si -= li[x][m2] * lr[y][m2] - lr[x][m2] * li[y][m2];
+          }
+          if (x == y) {
+            if (sr <= 0) { pd = 0; break; }
+            lr[x][x] = sqrt(sr);
+            li[x][x] = 0;
+            resid[x] = (gr[x][x] > 0) ? sr / gr[x][x] : 0.0; // fraction of layer x NOT explained by earlier layers
+          } else {
+            const double d = lr[y][y];
+            lr[x][y] = sr / d;
+            li[x][y] = si / d;
+          }
+        }
+      }
+      double detg = 1.0, prod_diag = 1.0;
+      for (int x = 0; x < NL; x++) {
+        detg *= pd ? (lr[x][x] * lr[x][x]) : 0.0;
+        prod_diag *= gr[x][x];
+      }
+      const double orth = (prod_diag > 0) ? detg / prod_diag : 0.0;
+      LOG_I(PHY,
+            "SENSING: CHESTDIAG nl=%u nvar=%u orth=%.4f resid=[%.3f,%.3f,%.3f,%.3f] %s\n",
+            (unsigned)cw->Nl, nvar, orth, resid[0], resid[1], resid[2], resid[3], rep);
+    }
+  }
   out->nvar = nvar;
 
   if (ue->chest_time == 1) {
@@ -406,14 +517,23 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
   }
 
   const uint32_t rx_size_symbol = (freq_alloc->num_rbs * NR_NB_SC_PER_RB + 15) & ~15;
+  /* Middle dimension MUST be NR_MAX_NB_LAYERS, not cw->Nl: nr_rx_pdsch() declares these as
+   * c16_t buf[][NR_MAX_NB_LAYERS][pdsch_buf_size_max], so it indexes symbol m with a COMPILE-TIME
+   * stride of NR_MAX_NB_LAYERS * pdsch_buf_size_max. Allocating with the runtime layer count made
+   * the per-symbol stride too small for any grant with Nl < NR_MAX_NB_LAYERS, and every write past
+   * symbol 0 landed outside the buffer.
+   * It never showed up before because this cell only ever scheduled Nl = 4, where the two happen to
+   * be equal. The moment the gNB was reconfigured to max_rank = 1 it segfaulted on the first
+   * full-band (273 PRB) grant -- big enough for the overrun to leave the mapping. */
+
   fourDimArray_t *toFree2 = NULL;
-  allocCast3D(rxdataF_comp, c16_t, toFree2, fp->symbols_per_slot, cw->Nl, rx_size_symbol, false);
+  allocCast3D(rxdataF_comp, c16_t, toFree2, fp->symbols_per_slot, NR_MAX_NB_LAYERS, rx_size_symbol, false);
   fourDimArray_t *toFree3 = NULL;
-  allocCast3D(dl_ch_mag, c16_t, toFree3, NR_SYMBOLS_PER_SLOT, cw->Nl, rx_size_symbol, false);
+  allocCast3D(dl_ch_mag, c16_t, toFree3, NR_SYMBOLS_PER_SLOT, NR_MAX_NB_LAYERS, rx_size_symbol, false);
   fourDimArray_t *toFree4 = NULL;
-  allocCast3D(dl_ch_magb, c16_t, toFree4, NR_SYMBOLS_PER_SLOT, cw->Nl, rx_size_symbol, false);
+  allocCast3D(dl_ch_magb, c16_t, toFree4, NR_SYMBOLS_PER_SLOT, NR_MAX_NB_LAYERS, rx_size_symbol, false);
   fourDimArray_t *toFree5 = NULL;
-  allocCast3D(dl_ch_magr, c16_t, toFree5, NR_SYMBOLS_PER_SLOT, cw->Nl, rx_size_symbol, false);
+  allocCast3D(dl_ch_magr, c16_t, toFree5, NR_SYMBOLS_PER_SLOT, NR_MAX_NB_LAYERS, rx_size_symbol, false);
 
   c16_t ptrs_phase_per_slot[fp->nb_antennas_rx][NR_SYMBOLS_PER_SLOT];
   memset(ptrs_phase_per_slot, 0, sizeof(ptrs_phase_per_slot));
