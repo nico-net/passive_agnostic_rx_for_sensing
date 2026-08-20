@@ -728,9 +728,17 @@ constdiag_done:;
     // Default ON (NRSniffer runs this unconditionally); no new config knob added given time
     // constraints -- flag for follow-up if it needs to be independently disable-able.
     ue->dci_thres = (ue->dci_thres + out.mismatched_bits) / 2;
-    if (out.mismatched_bits > (ue->dci_thres + 30)) {
-      g_held_mismatch++;
-      continue;
+    {
+      /* ISAC_PDCCH_NO_MISMATCH_GATE=1 bypasses this gate. It has no config knob (see the note above),
+       * and for DIAGNOSIS it must be removable: it is an adaptive EMA, so a genuine decode whose
+       * mismatch count sits above the running mean is dropped before it can ever be examined. */
+      static int s_no_mm = -1;
+      if (s_no_mm < 0)
+        s_no_mm = (getenv("ISAC_PDCCH_NO_MISMATCH_GATE") != NULL) ? 1 : 0;
+      if (!s_no_mm && out.mismatched_bits > (ue->dci_thres + 30)) {
+        g_held_mismatch++;
+        continue;
+      }
     }
 
     // ---- Gate 2: RNTI persistence. A real UE's RNTI recurs across many grants; a noise accept is

@@ -2000,7 +2000,12 @@ void pdsch_processing(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc, nr_phy_
   // [sensing] csirs_monitor list, processed for passive sensing independent of our own
   // RRC CSI-MeasConfig. Each due resource is FEP'd and run through the lean sensing-only
   // capture (no CSI report to MAC). See nr_csirs_monitor.{h,c}.
-  if (nr_isac_enabled() && nr_csirs_monitor_enabled()) {
+  /* CSI-RS monitoring is a RECEIVE function, not a sensing one: it recovers the cell's own
+   * reference signals and yields a channel estimate with no grant and no attachment. It was gated
+   * on nr_isac_enabled() only because it was originally written to feed the sensing engine, so on a
+   * receiver-only build (ISAC stubbed) CSI-RS silently stopped being received at all. Gate it on
+   * its own config instead; the SUBMISSION to sensing stays gated on ISAC inside the capture. */
+  if (nr_csirs_monitor_enabled()) {
     const fapi_nr_dl_config_csirs_pdu_rel15_t *mon[NR_CSIRS_MONITOR_MAX];
     const int nmon = nr_csirs_monitor_due(proc->frame_rx, proc->nr_slot_rx, ue->frame_parms.slots_per_frame, mon,
                                           NR_CSIRS_MONITOR_MAX);

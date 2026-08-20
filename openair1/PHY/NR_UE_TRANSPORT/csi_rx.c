@@ -23,6 +23,7 @@
 #include "common/utils/nr/nr_common.h"
 #include "PHY/NR_UE_ESTIMATION/filt16a_32.h"
 #include "PHY/NR_UE_ISAC/nr_isac.h"
+#include "PHY/NR_UE_TRANSPORT/nr_csirs_monitor.h"
 
 /// Max rx antennas the CSI-RS sensing tap will extract for the receive-array AoA path.
 #define NR_ISAC_CSIRS_MAX_ANT 8
@@ -1266,7 +1267,10 @@ void nr_ue_csi_rs_sensing_capture(PHY_VARS_NR_UE *ue,
   // other-UE resource from the [sensing] csirs_monitor list). Mirrors nr_ue_csi_rs_procedures up to the
   // LS channel estimate and feeds the ISAC engine, but performs NO RI/PMI/CQI measurement and emits NO
   // CSI report to MAC/gNB. NZP CSI-RS only (the sole type the PHY estimation path handles today).
-  if (!nr_isac_enabled() || !nr_isac_source_enabled(NR_ISAC_SRC_CSI_RS)) {
+  /* Was gated on ISAC; see phy_procedures_nr_ue.c's caller comment. A CSI-RS estimate is useful to
+   * the receiver on its own -- a grant-free channel measurement on a known reference -- so compute
+   * it whenever the monitor is configured, and let only the sensing SUBMISSION depend on ISAC. */
+  if (!nr_csirs_monitor_enabled()) {
     return;
   }
   if (csirs_config_pdu->csi_type != 1) {
@@ -1319,6 +1323,39 @@ void nr_ue_csi_rs_sensing_capture(PHY_VARS_NR_UE *ue,
                                &log2_re,
                                &log2_maxh,
                                &noise_power);
+
+  /* CSIDIAG (ISAC_CSI_DIAG=1): report the CSI-RS measurement so CSI is observably TRACKED by the
+   * receiver instead of only being handed to a sensing engine that may not be linked in. */
+  {
+    static int s_cd = -1;
+    if (s_cd < 0)
+      s_cd = (getenv("ISAC_CSI_DIAG") != NULL) ? 1 : 0;
+    if (s_cd) {
+      double pw[4] = {0, 0, 0, 0};
+      const int nant = (frame_parms->nb_antennas_rx < 4) ? frame_parms->nb_antennas_rx : 4;
+      for (int a = 0; a < nant; a++) {
+        double acc = 0;
+        int cnt = 0;
+        for (int k = 0; k < frame_parms->ofdm_symbol_size; k++) {
+          const c16_t v = csi_rs_ls_estimated_channel[a][0][k];
+          if (v.r || v.i) {
+            acc += (double)v.r * v.r + (double)v.i * v.i;
+            cnt++;
+          }
+        }
+        pw[a] = cnt ? acc / cnt : 0.0;
+      }
+      double sig = 0;
+      for (int a = 0; a < nant; a++)
+        sig += pw[a];
+      sig /= (nant ? nant : 1);
+      LOG_I(PHY,
+            "SENSING: CSIDIAG %d.%d symb_l0=%d nport=%d noise=%u pw=[%.0f,%.0f,%.0f,%.0f] snr=%.1fdB\n",
+            proc->frame_rx, proc->nr_slot_rx, (int)csirs_config_pdu->symb_l0, (int)mapping_parms.ports,
+            noise_power, pw[0], pw[1], pw[2], pw[3],
+            (noise_power > 0 && sig > 0) ? 10.0 * log10(sig / (double)noise_power) : 0.0);
+    }
+  }
 
   nr_isac_submit_csirs_ls(frame_parms, proc, csirs_config_pdu, &csi_rs_ls_estimated_channel[0][0][0],
                           (size_t)mapping_parms.ports * frame_parms->ofdm_symbol_size, mapping_parms.loverline[0],

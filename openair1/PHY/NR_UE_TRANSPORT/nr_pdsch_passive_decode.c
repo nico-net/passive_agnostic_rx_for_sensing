@@ -173,6 +173,25 @@ static bool passive_ldpc_decode(PHY_VARS_NR_UE *ue,
       break;
     }
   }
+  /* SEGDIAG (ISAC_PDSCH_TBPARM=1): the full rate-matching / segmentation parameter set, on ONE
+   * line, so an MCS that fails deterministically can be diffed against one that succeeds without
+   * pairing log lines. Everything the LDPC decoder is handed is here. */
+  {
+    static int s_sd = -1;
+    if (s_sd < 0)
+      s_sd = (getenv("ISAC_PDSCH_TBPARM") != NULL) ? 1 : 0;
+    if (s_sd)
+      LOG_I(PHY,
+            "SENSING: SEGDIAG mcs=%u BG=%u A=%u G=%u C=%u K=%u Z=%u F=%u E=%u E2=%u frE2=%u R=%u R2=%u "
+            "Qm=%u nl=%u rv=%u tbslbrm=%u nb_rb=%d llrLen=%d\n",
+            (unsigned)cw->mcs, (unsigned)TB_parameters.BG, (unsigned)TB_parameters.A, (unsigned)TB_parameters.G,
+            (unsigned)TB_parameters.C, (unsigned)TB_parameters.K, (unsigned)TB_parameters.Z,
+            (unsigned)TB_parameters.F, (unsigned)TB_parameters.E, (unsigned)TB_parameters.E2,
+            (unsigned)TB_parameters.first_rE2, (unsigned)TB_parameters.R, (unsigned)TB_parameters.R2,
+            (unsigned)TB_parameters.Qm, (unsigned)TB_parameters.nb_layers, (unsigned)TB_parameters.rv_index,
+            (unsigned)TB_parameters.tbslbrm, TB_parameters.nb_rb, h->llrLen);
+  }
+
   TB_parameters.d_to_be_cleared = true;
   for (uint32_t r = 0; r < TB_parameters.C; r++) {
     TB_parameters.decodeSuccess[r] = false;
