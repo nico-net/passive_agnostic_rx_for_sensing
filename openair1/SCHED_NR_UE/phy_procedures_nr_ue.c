@@ -1754,30 +1754,35 @@ int pbch_processing(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc, nr_phy_da
   LOG_D(PHY," ****** start RX-Chain for Frame.Slot %d.%d ******  \n",
         frame_rx%1024, nr_slot_rx);
 
-  // ---- CACHED-MIB LATCH: skip periodic PBCH tracking in passive sensing mode (2026-08-06) ------
-  // A passive sensing receiver does not need the MIB re-decoded every 20 ms. Acquisition cannot
-  // report cell_detected unless nr_pbch_detection() decoded PBCH (nr_initial_sync.c), so
-  // is_synchronized == 1 already means "MIB known and latched"; the periodic re-decode only
-  // re-derives configuration that has not changed.
+  // ---- PBCH TRACKING IN PASSIVE MODE: RE-ENABLED BY DEFAULT (2026-08-20) ----------------------
+  // This used to latch the acquisition MIB and SKIP periodic PBCH tracking whenever
+  // IS_PASSIVE_RX_MODE, on the reasoning that a sensing receiver does not need the MIB re-decoded
+  // every 20 ms and that "timing therefore stays with the acquisition/PDCCH/CSI-RS path, which is
+  // the path that demonstrably works here."
   //
-  // Why SKIP rather than force pbchSuccess = 0: nr_adjust_synch_ue() and nr_ue_pbch_freq_offset()
-  // are BOTH gated on a successful decode (see pbch_process()), so faking success would feed the
-  // timing- and frequency-correction loops the channel estimates of a FAILED decode. That is
-  // strictly worse than not running them. Timing therefore stays with the acquisition/PDCCH/CSI-RS
-  // path, which is the path that demonstrably works here.
+  // That reasoning was WRONG, and measurably so. On a terrestrial cell nr_adjust_synch_ue() is the
+  // ONLY thing that advances the receiver's timing loop (max_pos_acc is otherwise seeded just from
+  // ntn_init_time_drift, i.e. 0), and it is gated on a successful PBCH TRACKING decode. Skipping
+  // tracking therefore does not merely "leave timing to another path" -- it leaves the FFT window
+  // uncorrected after initial sync, free-running against the gNB's clock. Nothing else closes it.
   //
-  // Scope: passive receive-only mode ONLY -- an attached UE must keep tracking PBCH for real RLM
-  // and for MIB changes. ISAC_PBCH_TRACK=1 restores the periodic decode for future debugging.
+  // MEASURED 2026-08-20, X410 / live srsRAN 273 PRB cell, blind PDCCH monitor, identical binary and
+  // config, only this flag differing:
+  //     tracking skipped (old default) : accepts = 0
+  //     tracking enabled               : accepts = 15089, ALL of them the live C-RNTI 0x4604,
+  //                                      no other value in the histogram at all
+  // ~137 recovered DCIs/s against the ~170 DL grants/s the gNB's own log shows for that UE.
   //
-  // Context: on this deployment tracking PBCH fails on nearly every occasion at 273 PRB while
-  // acquisition decodes reliably, and the golden-buffer replay (ISAC_PBCH_REPLAY) proved the decode
-  // chain itself healthy and tolerant to +/-432 samples. That defect is documented as a receiver
-  // limitation in PBCH_TRACKING_BUFFER_HANDOVER.md rather than blocking sensing.
-  static int s_pbch_track_force = -1;
-  if (s_pbch_track_force < 0)
-    s_pbch_track_force = (getenv("ISAC_PBCH_TRACK") && atoi(getenv("ISAC_PBCH_TRACK"))) ? 1 : 0;
+  // The old justification ("tracking PBCH fails on nearly every occasion at 273 PRB") was itself
+  // measured on a tree that could not decode SIB1 even as an attached UE -- a branch-level
+  // regression fixed by merging x410-100MHz. With a working receive chain, tracking succeeds.
+  //
+  // Escape hatch kept for A/B: ISAC_PBCH_NO_TRACK=1 restores the old cached-MIB behaviour.
+  static int s_pbch_no_track = -1;
+  if (s_pbch_no_track < 0)
+    s_pbch_no_track = (getenv("ISAC_PBCH_NO_TRACK") && atoi(getenv("ISAC_PBCH_NO_TRACK"))) ? 1 : 0;
   const bool use_cached_mib =
-      !s_pbch_track_force && IS_PASSIVE_RX_MODE(get_softmodem_params()) && ue->is_synchronized;
+      s_pbch_no_track && IS_PASSIVE_RX_MODE(get_softmodem_params()) && ue->is_synchronized;
   if (use_cached_mib) {
     static int s_announced = 0;
     if (!s_announced) {
