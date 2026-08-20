@@ -288,22 +288,22 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
   }
   cw->ldpcBaseGraph = get_BG(cw->TBS, cw->targetCodeRate);
   dlsch_config->n_codewords = 1;
-  /* TBS_LBRM's layer term is the UE's maxMIMO-Layers capability (TS 38.212 5.4.2.1 n_L =
-   * min(maxMIMO-Layers, 4)), NOT this grant's own rank -- and it was hardcoded to 1 here, which is
-   * wrong for every UE this cell actually serves. It matters because TBS_LBRM sets N_ref and hence
-   * the LDPC circular-buffer bound N_cb: pick n_L = 1 against a gNB that used 4 and the rate
-   * DE-matching reads a buffer a quarter of the right length, so the CRC can never pass however
-   * clean the LLRs are. The attached-UE path already does this correctly
-   * (nr_ue_process_dci_dl_11(): nl_tbslbrm = min(max_mimo_layers, 4)).
+  /* TBS_LBRM's layer term is n_L = min(maxMIMO-LayersPDSCH, 4) -- the UE's CAPABILITY (TS 38.212
+   * 5.4.2.1), NOT the rank of this particular grant. It was hardcoded to 1, which is wrong for any
+   * modern UE and matters because TBS_LBRM sets N_ref and hence the LDPC circular-buffer bound
+   * N_cb: get it wrong and rate DE-matching reads a buffer of the wrong length, so the CRC can
+   * never pass however clean the LLRs are.
    *
-   * A passive receiver cannot read the served UE's capability off the air, so derive it instead of
-   * guessing: the largest layer count the cell has ever been observed to SCHEDULE for that UE is a
-   * lower bound on its capability, and n_L saturates at 4. Monotonic, so the benign race between
-   * receive threads can only under-report transiently. */
-  static int s_max_nl_seen = 1; // monotonic, capped at 4 by the min() below
-  if (cw->Nl > s_max_nl_seen)
-    s_max_nl_seen = cw->Nl;
-  const int nl_tbslbrm = s_max_nl_seen < 4 ? s_max_nl_seen : 4;
+   * MEASURED, and it rules out deriving this from the observed rank: on this cell our own attached
+   * UE is scheduled nl=1 while its capability file declares maxNumberMIMO-LayersPDSCH=fourLayers,
+   * so the gNB uses n_L=4 for it too. A "largest rank seen" heuristic would give 1 and be wrong.
+   * The gNB prints its own value: tb_size_lbrm=159749 bytes = 1277992 bits, which is n_L=4.
+   *
+   * A passive receiver cannot read the capability off the air, so this is the deployment fact the
+   * module already takes on trust elsewhere (like csirs_monitor and dci_length_override). 4 is both
+   * the spec ceiling and this deployment's value, so it is the default; re-derive per deployment if
+   * a cell serves layer-limited UEs. */
+  const int nl_tbslbrm = 4; // = min(maxMIMO-LayersPDSCH, 4); confirmed against the gNB's own print
   dlsch_config->tbslbrm = nr_compute_tbslbrm(grant->mcs_table, dlsch_config->BWPSize, (uint8_t)nl_tbslbrm);
 
   const uint32_t G = nr_get_G(freq_alloc->num_rbs, dlsch_config->number_symbols, nb_re_dmrs, dmrs_len,
@@ -457,6 +457,21 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
     }
   } else {
     out->status = NR_PDSCH_PASSIVE_DECODE_ERROR;
+  }
+
+  /* Per-RNTI outcome (ISAC_PDSCH_TBPARM=1). Run inside an ATTACHED UE this splits the decode
+   * population into grants addressed to US and grants addressed to ANOTHER UE, with everything
+   * else -- code, rank machinery, config, radio, slot -- held identical. That is the controlled
+   * test for whether a passive PDSCH failure is positional (precoder conditioned for the served
+   * UE) or a defect in the receive path. */
+  {
+    static int s_tbp2 = -1;
+    if (s_tbp2 < 0)
+      s_tbp2 = (getenv("ISAC_PDSCH_TBPARM") != NULL) ? 1 : 0;
+    if (s_tbp2)
+      LOG_I(PHY, "SENSING: TBRESULT rnti=0x%x nl=%u status=%s\n", grant->rnti, (unsigned)cw->Nl,
+            out->status == NR_PDSCH_PASSIVE_DECODE_CRC_OK ? "CRC_OK"
+              : (out->status == NR_PDSCH_PASSIVE_DECODE_CRC_FAIL ? "CRC_FAIL" : "ERROR"));
   }
 
   free(llr);
