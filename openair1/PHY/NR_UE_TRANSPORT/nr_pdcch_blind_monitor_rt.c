@@ -739,6 +739,29 @@ constdiag_done:;
     // recur on a SECOND receiver at the same wall-clock time. LOG_I (not LOG_D) and deliberately
     // separate from the line above -- that one is for interactive debugging (PRB/symbol detail, gets
     // noisy fast), this one is a fixed, parseable schema meant to be grepped by tooling. ----
+    /* ---- DCIGT probe (ISAC_PDCCH_DCIGT=1): a fixed, parseable schema carrying EVERYTHING that
+     * can be checked against the gNB's own scheduler log for the same grant --
+     *   [SFN.slot] cce/al   -> did we look in the right place, and is our slot clock aligned?
+     *   mcs/rv/ndi/hid      -> are the DCI FIELD OFFSETS right? A CRC pass only proves the payload
+     *                          BITS are right; it says nothing about where the fields sit in them,
+     *                          and section 12 of CLAUDE.md records two widths that were wrong for
+     *                          exactly this reason while CRC still passed.
+     *   prb/sym             -> does the PDSCH allocation we derive match what the gNB scheduled?
+     * Off by default (rule R7: no full-rate logging during a capture). */
+    {
+      static int s_dcigt = -1;
+      if (s_dcigt < 0)
+        s_dcigt = (getenv("ISAC_PDCCH_DCIGT") != NULL) ? 1 : 0;
+      if (s_dcigt)
+        LOG_I(PHY,
+              "SENSING: DCIGT %d.%d rnti=0x%x cce=%d al=%u mcs=%u rv=%u ndi=%u hid=%u tda=%u "
+              "prb=%u+%u sym=%u+%u\n",
+              cand_task[ti].frame, cand_task[ti].slot, out.rnti, cand_task[ti].cce,
+              (unsigned)cand_task[ti].L, (unsigned)out.mcs, (unsigned)out.rv, (unsigned)out.ndi,
+              (unsigned)out.harq_pid, (unsigned)out.tda_index, (unsigned)out.start_rb,
+              (unsigned)out.num_rb, (unsigned)out.start_symbol, (unsigned)out.num_symbols);
+    }
+
     struct timespec rnti_ts;
     clock_gettime(CLOCK_REALTIME, &rnti_ts);
     const long long rnti_utc_ns = (long long)rnti_ts.tv_sec * 1000000000LL + (long long)rnti_ts.tv_nsec;
