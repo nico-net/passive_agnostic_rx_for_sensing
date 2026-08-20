@@ -288,13 +288,47 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
   }
   cw->ldpcBaseGraph = get_BG(cw->TBS, cw->targetCodeRate);
   dlsch_config->n_codewords = 1;
-  dlsch_config->tbslbrm = nr_compute_tbslbrm(grant->mcs_table, dlsch_config->BWPSize, 1);
+  /* TBS_LBRM's layer term is the UE's maxMIMO-Layers capability (TS 38.212 5.4.2.1 n_L =
+   * min(maxMIMO-Layers, 4)), NOT this grant's own rank -- and it was hardcoded to 1 here, which is
+   * wrong for every UE this cell actually serves. It matters because TBS_LBRM sets N_ref and hence
+   * the LDPC circular-buffer bound N_cb: pick n_L = 1 against a gNB that used 4 and the rate
+   * DE-matching reads a buffer a quarter of the right length, so the CRC can never pass however
+   * clean the LLRs are. The attached-UE path already does this correctly
+   * (nr_ue_process_dci_dl_11(): nl_tbslbrm = min(max_mimo_layers, 4)).
+   *
+   * A passive receiver cannot read the served UE's capability off the air, so derive it instead of
+   * guessing: the largest layer count the cell has ever been observed to SCHEDULE for that UE is a
+   * lower bound on its capability, and n_L saturates at 4. Monotonic, so the benign race between
+   * receive threads can only under-report transiently. */
+  static int s_max_nl_seen = 1; // monotonic, capped at 4 by the min() below
+  if (cw->Nl > s_max_nl_seen)
+    s_max_nl_seen = cw->Nl;
+  const int nl_tbslbrm = s_max_nl_seen < 4 ? s_max_nl_seen : 4;
+  dlsch_config->tbslbrm = nr_compute_tbslbrm(grant->mcs_table, dlsch_config->BWPSize, (uint8_t)nl_tbslbrm);
 
   const uint32_t G = nr_get_G(freq_alloc->num_rbs, dlsch_config->number_symbols, nb_re_dmrs, dmrs_len,
                               0 /* unav_res: PTRS/CSI-RM excluded above */, cw->qamModOrder, cw->Nl);
   if (G == 0) {
     return out->status;
   }
+  /* TBPARM probe (ISAC_PDSCH_TBPARM=1): every transport-block parameter the gNB also prints on its
+   * own PDSCH line, so they can be compared one-for-one instead of inferred from a CRC failure.
+   * gNB prints: mcs_index / mod / tbs / tb_size_lbrm / ldpc_base_graph / vrbs=[start..end). */
+  {
+    static int s_tbp = -1;
+    if (s_tbp < 0)
+      s_tbp = (getenv("ISAC_PDSCH_TBPARM") != NULL) ? 1 : 0;
+    if (s_tbp)
+      LOG_I(PHY,
+            "SENSING: TBPARM rnti=0x%x nl=%u mcs=%u tbl=%u Qm=%u R=%u tbs=%u G=%u lbrm=%u bg=%u "
+            "prb=%u+%u nsym=%u dmrs_len=%u nb_re_dmrs=%u\n",
+            grant->rnti, (unsigned)cw->Nl, (unsigned)grant->mcs, (unsigned)grant->mcs_table,
+            (unsigned)cw->qamModOrder, (unsigned)cw->targetCodeRate, (unsigned)cw->TBS, G,
+            (unsigned)dlsch_config->tbslbrm, (unsigned)cw->ldpcBaseGraph, (unsigned)freq_alloc->first_rb,
+            (unsigned)freq_alloc->num_rbs, (unsigned)dlsch_config->number_symbols, (unsigned)dmrs_len,
+            (unsigned)nb_re_dmrs);
+  }
+
   out->cw = *cw;
   out->G  = G;
 
