@@ -1211,6 +1211,13 @@ void *UE_thread(void *arg)
       if (first_symbols > 0) {
         openair0_timestamp_t ignore_timestamp;
         int tmp = nrue_ru_read(UE, &ignore_timestamp, (void **)UE->common_vars.rxdata, first_symbols, fp->nb_antennas_rx);
+        /* This read MUST be counted. It is an EXTRA read on top of readBlockSize, so leaving it out
+         * makes the next iteration's expected timestamp short by exactly first_symbols and the
+         * RXDISCONT continuity test above fires on every frame boundary -- a false positive, not an
+         * RF fault. Measured after it was lost in the x410-100MHz merge: 11582 discontinuities per
+         * 120 s, all with delta = 4448 = ofdm_symbol_size + nb_prefix_samples0 (4096 + 352), i.e.
+         * exactly this read, at ~96/s = one per 10 ms radio frame. */
+        rx_samples_consumed += (tmp > 0) ? tmp : first_symbols;
         if (first_symbols != tmp)
           LOG_W(PHY, "Next-frame symbol: got %d of %d RF samples\n", tmp, first_symbols);
 
