@@ -1053,10 +1053,23 @@ set(NR_UE_ISAC_SRC
   ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/sensing_engine.cc
   ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/nr_isac.cc
   )
-add_library(NR_UE_ISAC ${NR_UE_ISAC_SRC})
+# Passive receiver vs sensing pipeline. The blind PDCCH -> DCI -> PDSCH receiver only ever hands
+# channel estimates TO the sensing engine and never reads anything back, so on a receiver-only build
+# the whole library is replaced by no-ops (nr_isac_stub.c) and the receive path is unchanged.
+# Measured on the X410: running the sensing pipeline alongside the receiver cost 5.4x the recovered
+# DCIs (78616 -> 14659), because the CSI-RS monitor FEP and CFR submission compete with the blind
+# monitor on the PHY receive thread.
+option(ENABLE_ISAC_SENSING "Build the ISAC sensing pipeline (off = passive receiver only)" OFF)
+if(ENABLE_ISAC_SENSING)
+  add_library(NR_UE_ISAC ${NR_UE_ISAC_SRC})
+  message(STATUS "NR_UE_ISAC: sensing pipeline ENABLED")
+else()
+  add_library(NR_UE_ISAC ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/nr_isac_stub.c)
+  message(STATUS "NR_UE_ISAC: sensing pipeline DISABLED (no-op stub; passive receiver only)")
+endif()
 target_link_libraries(NR_UE_ISAC PRIVATE UTIL)
 find_library(ZMQ_LIB zmq)
-if(ZMQ_LIB)
+if(ZMQ_LIB AND ENABLE_ISAC_SENSING)
   target_compile_definitions(NR_UE_ISAC PRIVATE ENABLE_ZEROMQ)
   target_link_libraries(NR_UE_ISAC PRIVATE ${ZMQ_LIB})
   message(STATUS "NR_UE_ISAC: ZeroMQ live DetectionReport bus enabled (${ZMQ_LIB})")

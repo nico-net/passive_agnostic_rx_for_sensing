@@ -589,7 +589,15 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
     if (s_tbp2 < 0)
       s_tbp2 = (getenv("ISAC_PDSCH_TBPARM") != NULL) ? 1 : 0;
     if (s_tbp2)
-      LOG_I(PHY, "SENSING: TBRESULT rnti=0x%x nl=%u status=%s\n", grant->rnti, (unsigned)cw->Nl,
+      /* Every field needed to attribute a failure is on THIS line. Do NOT reconstruct it by pairing
+       * against the preceding TBPARM line: decodes for different slots interleave in the log, so
+       * adjacency-based pairing silently mis-attributes (it produced two mutually contradictory
+       * breakdowns before this was fixed). Same class of error as the retracted "20 % dt bias". */
+      LOG_I(PHY,
+            "SENSING: TBRESULT rnti=0x%x nl=%u mcs=%u Qm=%u R=%u tbs=%u bg=%u prb=%u+%u status=%s\n",
+            grant->rnti, (unsigned)cw->Nl, (unsigned)grant->mcs, (unsigned)cw->qamModOrder,
+            (unsigned)cw->targetCodeRate, (unsigned)cw->TBS, (unsigned)cw->ldpcBaseGraph,
+            (unsigned)freq_alloc->first_rb, (unsigned)freq_alloc->num_rbs,
             out->status == NR_PDSCH_PASSIVE_DECODE_CRC_OK ? "CRC_OK"
               : (out->status == NR_PDSCH_PASSIVE_DECODE_CRC_FAIL ? "CRC_FAIL" : "ERROR"));
   }
