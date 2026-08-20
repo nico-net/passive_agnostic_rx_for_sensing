@@ -244,7 +244,20 @@ static void nr_pdcch_blind_cand_worker(void *arg)
 
 void nr_pdcch_blind_monitor_process(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc)
 {
-  if (!nr_pdcch_blind_monitor_enabled() || !nr_isac_enabled()) {
+  /* The blind PDCCH monitor is the PASSIVE RECEIVER, not part of the sensing pipeline: it decodes
+   * other UEs' DCIs and (optionally) their PDSCH. It used to be gated on nr_isac_enabled() as well,
+   * which forced the whole ISAC stack -- CSI-RS monitor FEP, CFR submission, CPI accumulation,
+   * range-Doppler, AoA -- to be running before a single DCI could be recovered.
+   *
+   * That coupling is expensive on real hardware. MEASURED on the X410 over 120 s, same binary,
+   * only the [sensing] section differing: RXDISCONT (RF timestamp discontinuities caused by the PHY
+   * receive thread missing its deadline) 10847 with sensing on versus 100 with it off, and 672
+   * SIB1 NACKs versus 0. CLAUDE.md section 12 already flagged that the passive decode runs on the
+   * PHY receive thread and "would be the first thing to break on real hardware".
+   *
+   * So the two are now independent: configure pdcch_blind_monitor_* and the passive receiver runs
+   * with sensing.enable = 0. The ISAC-sourced paths below stay gated on nr_isac_enabled(). */
+  if (!nr_pdcch_blind_monitor_enabled()) {
     return;
   }
   const nr_pdcch_blind_monitor_cfg_t *cfg = nr_pdcch_blind_monitor_get_cfg();
@@ -253,8 +266,9 @@ void nr_pdcch_blind_monitor_process(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t 
   // data-aided path (pdsch_decode) is a second, independent reason to scan the same candidates, and
   // `pdsch_decode == 1` (measure the CRC pass rate, submit nothing) must work with NO sensing source
   // enabled at all -- that is the whole point of having a measure-only level.
-  const bool want_dmrs = nr_isac_source_enabled(NR_ISAC_SRC_PDSCH_DMRS_BLIND);
-  const bool want_data = cfg->pdsch_decode >= 2 && nr_isac_source_enabled(NR_ISAC_SRC_PDSCH_DATA);
+  const bool isac_on   = nr_isac_enabled() != 0;
+  const bool want_dmrs = isac_on && nr_isac_source_enabled(NR_ISAC_SRC_PDSCH_DMRS_BLIND);
+  const bool want_data = isac_on && cfg->pdsch_decode >= 2 && nr_isac_source_enabled(NR_ISAC_SRC_PDSCH_DATA);
   const bool want_decode = cfg->pdsch_decode >= 1; // >=1 always decodes; only >=2 submits
   if (!want_dmrs && !want_decode) {
     return;
