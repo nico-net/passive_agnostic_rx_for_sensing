@@ -101,6 +101,12 @@ static uint64_t    g_accepts        = 0; // raw plausibility accepts (Step 1-4 o
                                          // from before 2026-07-28's gates, so old logs stay comparable
 static const char *g_last_reject_reason = NULL; // TEMPORARY diagnostic, 2026-07-28 root-cause pass
 static uint16_t     g_last_reject_rnti  = 0;
+/* Per-DCI-format / per-RNTI-class accept census. Format 1_0 exists to reach SIB1, RAR and Msg4, so
+ * "how many accepts, and of what" is the primary thing to look at when judging whether the 1_0 scan
+ * is doing anything -- a single aggregate accept count cannot distinguish "found the RRCSetup" from
+ * "found more C-RNTI fallback grants". Indexed by nr_blind_rnti_class_t. */
+static uint64_t g_accepts_10     = 0;
+static uint64_t g_accepts_class[NR_BLIND_RNTI_CLASS_COUNT] = {0};
 static uint64_t g_cfr_submits    = 0; // final count that actually reached the ISAC engine, i.e. after
                                       // ALL gates (raw accept + energy + persistence + SNR)
 
@@ -223,6 +229,11 @@ typedef struct {
   int          frame;   /* LLRPROBE correlation only */
   int          slot;    /* LLRPROBE correlation only */
   int          cce;     /* LLRPROBE correlation only */
+  /* Which DCI format to interpret this candidate's payload as. The two formats have DIFFERENT
+     payload widths, so scanning both means two INDEPENDENT tasks over the same LLR slice -- the
+     polar decoder is sized by dci_length and there is no way to share the decode. */
+  uint8_t      format;  // nr_blind_dci_format_t
+  const nr_pdcch_blind_dci10_ctx_t *dci10_ctx; // format 1_0 only; NULL for 1_1
   nr_pdcch_blind_result_t out; // OUTPUT
   bool         ok;             // OUTPUT
   task_ans_t  *ans;
@@ -233,8 +244,13 @@ static void nr_pdcch_blind_cand_worker(void *arg)
   nr_pdcch_blind_cand_task_t *t = (nr_pdcch_blind_cand_task_t *)arg;
   int16_t tmp_e[16 * 108];
   nr_pdcch_unscrambling((c16_t *)t->e_rx, t->scrambling_rnti, (uint32_t)(t->L * 108), t->dmrs_scrambling_id, tmp_e);
-  t->ok = nr_pdcch_blind_decode_and_extract_ex(tmp_e, t->L, t->dci_length, t->bwp_size, t->dmrs_typeA_position,
-                                               t->rnti_min, t->rnti_max, t->extract_opts, &t->out);
+  if (t->format == NR_BLIND_DCI_FORMAT_1_0) {
+    t->ok = nr_pdcch_blind_decode_and_extract_10(tmp_e, t->L, t->dci_length, t->dci10_ctx, t->rnti_min, t->rnti_max,
+                                                 t->extract_opts, &t->out);
+  } else {
+    t->ok = nr_pdcch_blind_decode_and_extract_ex(tmp_e, t->L, t->dci_length, t->bwp_size, t->dmrs_typeA_position,
+                                                 t->rnti_min, t->rnti_max, t->extract_opts, &t->out);
+  }
   {
     extern void nr_pdcch_llr_probe(const char *, int, int, int, int, uint32_t, const int16_t *, int);
     nr_pdcch_llr_probe("blind", t->frame, t->slot, t->cce, t->L, t->out.rnti, tmp_e, t->L * 108);
@@ -421,6 +437,62 @@ void nr_pdcch_blind_monitor_process(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t 
   rel15->num_dci_options       = 1;
   rel15->dci_length_options[0] = dci_length;
 
+  /* ---- DCI format 1_0 context (TS 38.212 7.3.1.0 / TS 38.214 5.1.2.2.2). Three things change with
+   * the search-space kind and NONE of them is cosmetic: the frequency-domain field is sized from
+   * CORESET#0 in a common search space and from the active DL BWP in a UE-specific one; the decoded
+   * PRB start is counted from the CORESET's lowest RB rather than the BWP start; and the TDRA list
+   * is pdsch-ConfigCommon's rather than the dedicated one. Resolved once per occasion, then shared
+   * (read-only) by every candidate task. ---- */
+  const bool scan_11 = (cfg->dci10_scan != 2);
+  const bool scan_10 = (cfg->dci10_scan >= 1);
+  nr_pdcch_blind_dci10_ctx_t dci10_ctx;
+  memset(&dci10_ctx, 0, sizeof(dci10_ctx));
+  uint16_t dci10_length = 0;
+  int      dci10_rb_base = cfg->bwp_start;
+  if (scan_10) {
+    dci10_ctx.ss_type = (uint8_t)cfg->dci10_ss_type;
+    /* 0 = auto. In a common search space the frequency reference is the CORESET the DCI arrived in
+     * -- which, when this monitor is pointed at CORESET#0 (coreset_type = 1), is exactly the
+     * CORESET#0 size the spec asks for; n_rb here is that CORESET's own measured RB count. */
+    dci10_ctx.n_rb_riv = (cfg->dci10_n_rb_riv > 0)
+                             ? (uint16_t)cfg->dci10_n_rb_riv
+                             : ((cfg->dci10_ss_type == NR_BLIND_SS_COMMON) ? (uint16_t)n_rb : (uint16_t)cfg->bwp_size);
+    /* 0 or negative = auto. TS 38.214 5.1.2.2.2 counts a common-search-space format-1_0 grant's PRBs
+     * from the LOWEST RB OF THE CORESET, which in the same frame of reference as bwp_start is
+     * bwp_start + the CORESET's own offset within it -- NOT cset_start alone. Measured on this cell
+     * 2026-08-21: the gNB places CORESET#0 at "bwp=[1..49)", i.e. CRB 1, so dropping bwp_start would
+     * put every SIB1 allocation one RB low and quietly corrupt the channel estimate. For a
+     * UE-specific search space the CORESET offset does not enter at all and this is bwp_start. */
+    dci10_rb_base = (cfg->dci10_rb_offset >= 0)
+                        ? cfg->dci10_rb_offset
+                        : (cfg->bwp_start + ((cfg->dci10_ss_type == NR_BLIND_SS_COMMON) ? cset_start : 0));
+    dci10_ctx.rb_offset           = (uint16_t)dci10_rb_base;
+    dci10_ctx.dmrs_typeA_position = (uint8_t)cfg->dmrs_typeA_position;
+    dci10_ctx.mux_pattern         = (uint8_t)cfg->dci10_mux_pattern;
+    dci10_ctx.sib1                = (uint8_t)(cfg->dci10_sib1 ? 1 : 0);
+    dci10_ctx.rnti_class_mask     = (uint32_t)cfg->dci10_class_mask;
+    dci10_length = cfg->dci10_length_override > 0 ? (uint16_t)cfg->dci10_length_override
+                                                  : nr_pdcch_blind_dci10_size(dci10_ctx.n_rb_riv);
+  }
+  {
+    /* One-shot: a scan ladder that silently covers the wrong format/size finds nothing and reports
+     * no error, which is the same failure mode the aggregation-level ladder already had. */
+    static int s_fmt_logged = 0;
+    if (!s_fmt_logged) {
+      s_fmt_logged = 1;
+      LOG_I(PHY,
+            "SENSING: blind PDCCH formats: 1_1=%s (len=%u bwp=%u) 1_0=%s (len=%u n_rb_riv=%u rb_offset=%d "
+            "ss=%s class_mask=0x%x mux=%u sib1=%u)\n",
+            scan_11 ? "on" : "off", (unsigned)dci_length, (unsigned)cfg->bwp_size, scan_10 ? "on" : "off",
+            (unsigned)dci10_length, (unsigned)dci10_ctx.n_rb_riv, dci10_rb_base,
+            (cfg->dci10_ss_type == NR_BLIND_SS_COMMON) ? "common" : "ue-specific",
+            (unsigned)dci10_ctx.rnti_class_mask, (unsigned)dci10_ctx.mux_pattern, (unsigned)dci10_ctx.sib1);
+    }
+  }
+  if (scan_10 && dci10_length == 0) {
+    return; // misconfigured n_rb_riv -- nothing to scan rather than a wrong-width sweep
+  }
+
   // ---- FEP the CORESET's own symbol(s) + generate LLR (reuses the real RT PDCCH pipeline). ----
   const int llr_size_symbol    = n_rb * NR_PDCCH_BLIND_RE_PER_RB_OUT_DMRS;
   const int num_monitoring_occ = 1; // exactly one bit set in StartSymbolBitmap by construction above
@@ -550,7 +622,9 @@ void nr_pdcch_blind_monitor_process(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t 
   // energy gate, run the CONSTDIAG diagnostic, and build the task list for every candidate that
   // survives -- i.e. everything that does NOT need the expensive decode is filtered out BEFORE
   // the parallel phase, exactly as it was filtered before this loop was split. ----
-  nr_pdcch_blind_cand_task_t cand_task[64]; // bounded by rel15->CCE[64]/L[64] (fapi_nr_ue_interface.h)
+  // Two entries per candidate at most: one per DCI format scanned (see the task struct's `format`
+  // comment for why the two cannot share a decode). rel15->CCE[64]/L[64] bounds the candidate count.
+  nr_pdcch_blind_cand_task_t cand_task[128];
   int nof_tasks = 0;
   {
     int e_rx_cand_idx = 0;
@@ -558,57 +632,67 @@ void nr_pdcch_blind_monitor_process(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t 
       const int L         = rel15->L[c];
       const int n_re_cand = NR_PDCCH_BLIND_RE_PER_RB_OUT_DMRS * L * 6;
 
+      // ---- Candidate energy. Computed UNCONDITIONALLY since 2026-08-21, and that matters:
+      // the floor estimator and the ENERGYPROBE diagnostic used to live INSIDE the
+      // `if (gate enabled)` block below, so turning the gate off in order to characterise it --
+      // which is exactly what R7 prescribes -- also switched off the only instrument that measures
+      // what the gate is doing. A characterisation run then returned zero probe lines and looked
+      // like "no energy", which is indistinguishable from "no measurement". Same trap as
+      // FULLCRC living downstream of the gate. Cost of always computing it is a sum over 108-216
+      // REs, negligible beside the polar decode it guards. ----
+      const c16_t *e_raw   = &pdcch_e_rx[e_rx_cand_idx];
+      double       sum_abs = 0;
+      for (int i = 0; i < n_re_cand; i++) {
+        sum_abs += (e_raw[i].r < 0 ? -e_raw[i].r : e_raw[i].r) + (e_raw[i].i < 0 ? -e_raw[i].i : e_raw[i].i);
+      }
+      const float mean_abs = (float)(sum_abs / n_re_cand);
+      // The estimator must see the WHOLE population to stay calibrated -- feeding it only survivors
+      // would let it collapse -- so it is updated before any thresholding, gate enabled or not.
+      energy_floor_update(mean_abs);
+
+      /* ENERGYPROBE (ISAC_PDCCH_ENERGY=1): strongest candidate of this occasion PER AGGREGATION
+       * LEVEL, as a ratio to the measured noise floor. Per-AL because that is the open question on
+       * this cell: CORESET#0 SIB1 at AL4 (216 REs) decodes at 85-90 % while the dedicated CORESET's
+       * AL2 grants (108 REs, 3 dB less) decode at ~3 %, so "is the energy there at AL2" decides
+       * whether the fix is RF or DSP. A CORESET actually carrying PDCCH must show candidates well
+       * above the floor. */
+      {
+        static int s_ep = -1;
+        if (s_ep < 0)
+          s_ep = (getenv("ISAC_PDCCH_ENERGY") != NULL) ? 1 : 0;
+        if (s_ep) {
+          static float occ_max[4] = {0.0f, 0.0f, 0.0f, 0.0f}; // AL 1,2,4,8
+          static int   occ_slot   = -1;
+          const int    al_i       = (L == 1) ? 0 : (L == 2) ? 1 : (L == 4) ? 2 : 3;
+          if (proc->nr_slot_rx != occ_slot) {
+            if (occ_slot >= 0 && g_energy_nseen >= ENERGY_FLOOR_WARMUP && g_energy_floor > 0.0f) {
+              LOG_I(PHY, "ENERGYPROBE slot=%d floor=%.2f al1=%.2f al2=%.2f al4=%.2f al8=%.2f\n",
+                    occ_slot, g_energy_floor, occ_max[0] / g_energy_floor, occ_max[1] / g_energy_floor,
+                    occ_max[2] / g_energy_floor, occ_max[3] / g_energy_floor);
+            }
+            occ_slot   = proc->nr_slot_rx;
+            occ_max[0] = occ_max[1] = occ_max[2] = occ_max[3] = 0.0f;
+          }
+          if (mean_abs > occ_max[al_i]) {
+            occ_max[al_i] = mean_abs;
+          }
+        }
+      }
+
       // ---- Gate 1 (cheapest, runs first): raw pre-decode LLR energy. Unscheduled CCEs measured
       // exactly (0,0) live 2026-07-28; skips the polar decode entirely for those, not just the CFR
-      // submission -- a real CPU saving alongside the false-accept reduction. ----
+      // submission -- a real CPU saving alongside the false-accept reduction. Only the REJECTION is
+      // conditional now; the measurement above always runs. ----
       if (cfg->energy_adapt_factor > 0.0f || cfg->energy_min > 0.0f) {
-        const c16_t *e_raw   = &pdcch_e_rx[e_rx_cand_idx];
-        double        sum_abs = 0;
-        for (int i = 0; i < n_re_cand; i++) {
-          sum_abs += (e_raw[i].r < 0 ? -e_raw[i].r : e_raw[i].r) + (e_raw[i].i < 0 ? -e_raw[i].i : e_raw[i].i);
-        }
-        const float mean_abs = (float)(sum_abs / n_re_cand);
-
         float thresh;
         if (cfg->energy_adapt_factor > 0.0f) {
-          // Adaptive: threshold rides the measured noise floor. Update the floor estimate with EVERY
-          // candidate (including this one) BEFORE thresholding -- the estimator must see the whole
-          // population to stay calibrated, and feeding it only the survivors would let it collapse.
-          energy_floor_update(mean_abs);
           // Until the estimate has converged, reject nothing: a not-yet-settled floor can sit far
           // above the true one and would throw away real grants during exactly the startup window
           // where the persistence gate is also still cold.
-          thresh = (g_energy_nseen >= ENERGY_FLOOR_WARMUP)
-                       ? cfg->energy_adapt_factor * g_energy_floor
-                       : 0.0f;
+          thresh = (g_energy_nseen >= ENERGY_FLOOR_WARMUP) ? cfg->energy_adapt_factor * g_energy_floor : 0.0f;
         } else {
           thresh = cfg->energy_min;
         }
-
-        /* ENERGYPROBE (ISAC_PDCCH_ENERGY=1): strongest candidate of this occasion vs the adaptive
-         * noise floor. This separates "we cannot decode it" from "there is nothing to decode":
-         * a CORESET actually carrying PDCCH must show candidates well ABOVE the floor. SIB1 slots
-         * are the built-in positive control -- they are known-strong and decode reliably. */
-        {
-          static int s_ep = -1;
-          if (s_ep < 0)
-            s_ep = (getenv("ISAC_PDCCH_ENERGY") != NULL) ? 1 : 0;
-          if (s_ep) {
-            static float occ_max = 0.0f;
-            static int   occ_slot = -1;
-            if (proc->nr_slot_rx != occ_slot) {
-              if (occ_slot >= 0 && g_energy_nseen >= ENERGY_FLOOR_WARMUP)
-                LOG_I(PHY, "ENERGYPROBE slot=%d max_mean=%.2f floor=%.2f ratio=%.2f\n",
-                      occ_slot, occ_max, g_energy_floor,
-                      g_energy_floor > 0.0f ? occ_max / g_energy_floor : 0.0f);
-              occ_slot = proc->nr_slot_rx;
-              occ_max  = 0.0f;
-            }
-            if (mean_abs > occ_max)
-              occ_max = mean_abs;
-          }
-        }
-
         if (mean_abs < thresh) {
           e_rx_cand_idx += n_re_cand;
           g_held_energy++;
@@ -668,7 +752,7 @@ void nr_pdcch_blind_monitor_process(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t 
       }
 constdiag_done:;
 
-      cand_task[nof_tasks] = (nr_pdcch_blind_cand_task_t){
+      const nr_pdcch_blind_cand_task_t base_task = {
           .e_rx                = &pdcch_e_rx[e_rx_cand_idx],
           .L                   = (uint8_t)L,
           .dci_length          = dci_length,
@@ -682,8 +766,19 @@ constdiag_done:;
           .frame               = proc->frame_rx,
           .slot                = proc->nr_slot_rx,
           .cce                 = rel15->CCE[c],
+          .format              = NR_BLIND_DCI_FORMAT_1_1,
+          .dci10_ctx           = NULL,
       };
-      nof_tasks++;
+      if (scan_11 && nof_tasks < (int)(sizeof(cand_task) / sizeof(cand_task[0]))) {
+        cand_task[nof_tasks++] = base_task;
+      }
+      if (scan_10 && nof_tasks < (int)(sizeof(cand_task) / sizeof(cand_task[0]))) {
+        cand_task[nof_tasks]            = base_task;
+        cand_task[nof_tasks].dci_length = dci10_length;
+        cand_task[nof_tasks].format     = NR_BLIND_DCI_FORMAT_1_0;
+        cand_task[nof_tasks].dci10_ctx  = &dci10_ctx;
+        nof_tasks++;
+      }
       e_rx_cand_idx += n_re_cand;
       g_candidates_run++;
     }
@@ -717,6 +812,25 @@ constdiag_done:;
       continue;
     }
     g_accepts++;
+    /* ---- Per-format resolution, hoisted here because everything below -- the DCIGT probe, the
+     * PDSCH allocation, the TBS -- depends on it. THREE quantities differ between DCI 1_1 and DCI
+     * 1_0 and each is silently wrong rather than loudly wrong if mixed up:
+     *   rb_origin        TS 38.214 5.1.2.2.2 -- a 1_0 grant in a COMMON search space numbers its RBs
+     *                    from the CORESET's lowest RB, not the BWP start.
+     *   BWP framing      the same distinction, for the frequency reference the allocation sits in.
+     *   grant_mcs_table  TS 38.214 5.1.3.1 -- format 1_0 is ALWAYS Table 5.1.3.1-1 (qam64); a
+     *                    deployment-wide qam256 must not leak onto it.
+     * For format 1_1, and for 1_0 in a UE-specific search space, all three resolve to what this
+     * function used before. ---- */
+    const bool    is_dci10        = (out.dci_format == NR_BLIND_DCI_FORMAT_1_0);
+    const int     rb_origin       = is_dci10 ? dci10_rb_base : cfg->bwp_start;
+    const uint8_t grant_mcs_table = is_dci10 ? out.mcs_table : (uint8_t)cfg->pdsch_mcs_table;
+    if (is_dci10) {
+      g_accepts_10++;
+      if (out.rnti_class < NR_BLIND_RNTI_CLASS_COUNT) {
+        g_accepts_class[out.rnti_class]++;
+      }
+    }
 
     // ---- Gate 1.5: mismatched-bits adaptive threshold. Migrated from NRSniffer's dci_nr.c
     // (nr_dci_false_detection + ue->dci_thres), 2026-08-05. out.mismatched_bits (computed in
@@ -774,16 +888,21 @@ constdiag_done:;
       static int s_dcigt = -1;
       if (s_dcigt < 0)
         s_dcigt = (getenv("ISAC_PDCCH_DCIGT") != NULL) ? 1 : 0;
-      if (s_dcigt)
+      if (s_dcigt) {
+        static const char *const kClassName[NR_BLIND_RNTI_CLASS_COUNT] = {"C", "TC", "SI", "RA", "P"};
         LOG_I(PHY,
-              "SENSING: DCIGT %d.%d rnti=0x%x cce=%d al=%u mcs=%u rv=%u ndi=%u hid=%u tda=%u "
-              "prb=%u+%u sym=%u+%u cdm=%u ports=0x%x nscid=%u dmrsmask=0x%x\n",
-              cand_task[ti].frame, cand_task[ti].slot, out.rnti, cand_task[ti].cce,
-              (unsigned)cand_task[ti].L, (unsigned)out.mcs, (unsigned)out.rv, (unsigned)out.ndi,
-              (unsigned)out.harq_pid, (unsigned)out.tda_index, (unsigned)out.start_rb,
-              (unsigned)out.num_rb, (unsigned)out.start_symbol, (unsigned)out.num_symbols,
+              "SENSING: DCIGT %d.%d fmt=%s class=%s rnti=0x%x cce=%d al=%u mcs=%u/tbl%u rv=%u ndi=%u hid=%u "
+              "tda=%u prb=%u+%u(org%d) sym=%u+%u cdm=%u ports=0x%x nscid=%u dmrsmask=0x%x vrb=%u tbs_scal=%u\n",
+              cand_task[ti].frame, cand_task[ti].slot,
+              (out.dci_format == NR_BLIND_DCI_FORMAT_1_0) ? "1_0" : "1_1",
+              (out.rnti_class < NR_BLIND_RNTI_CLASS_COUNT) ? kClassName[out.rnti_class] : "?",
+              out.rnti, cand_task[ti].cce,
+              (unsigned)cand_task[ti].L, (unsigned)out.mcs, (unsigned)grant_mcs_table, (unsigned)out.rv,
+              (unsigned)out.ndi, (unsigned)out.harq_pid, (unsigned)out.tda_index, (unsigned)out.start_rb,
+              (unsigned)out.num_rb, rb_origin, (unsigned)out.start_symbol, (unsigned)out.num_symbols,
               (unsigned)out.n_dmrs_cdm_groups, (unsigned)out.dmrs_ports, (unsigned)out.nscid,
-              (unsigned)out.dl_dmrs_symb_pos);
+              (unsigned)out.dl_dmrs_symb_pos, (unsigned)out.vrb_to_prb, (unsigned)out.tb_scaling);
+      }
     }
 
     struct timespec rnti_ts;
@@ -808,10 +927,28 @@ constdiag_done:;
 
     fapi_nr_dl_config_dlsch_pdu_rel15_t dlsch_pdu;
     memset(&dlsch_pdu, 0, sizeof(dlsch_pdu));
-    dlsch_pdu.BWPStart           = (uint16_t)cfg->bwp_start;
-    dlsch_pdu.BWPSize            = (uint16_t)cfg->bwp_size;
+    dlsch_pdu.BWPStart           = (uint16_t)rb_origin;
+    dlsch_pdu.BWPSize            = is_dci10 ? dci10_ctx.n_rb_riv : (uint16_t)cfg->bwp_size;
     dlsch_pdu.resource_alloc     = 1; // Type-1/RIV -- the only branch this module ever produces
-    dlsch_pdu.refPoint           = 0;
+    /* DM-RS SEQUENCE reference point, TS 38.211 7.4.1.1.2. NOT cosmetic and NOT unread:
+     * nr_dl_channel_estimation.c:1249 computes the gold-sequence offset as
+     *     first_rb + (refPoint ? 0 : BWPStart)
+     * so refPoint = 0 references the sequence to CRB 0 and refPoint = 1 references it to the
+     * BWP/CORESET start. The spec's rule is "subcarrier 0 of CRB 0 in general, EXCEPT for a PDSCH
+     * scheduled by DCI format 1_0 with CRC scrambled by SI-RNTI in a Type0-PDCCH common search
+     * space, where it is subcarrier 0 of the lowest-numbered RB of the CORESET" -- i.e. exactly
+     * OAI's own `mac->get_sib1 ? 1 : 0`.
+     *
+     * MEASURED 2026-08-21: this cell puts CORESET#0 at CRB 1, the gNB logs `ref_point=1` on every
+     * SIB1 PDSCH, and hardcoding 0 here offset our DM-RS sequence by one RB -- every DCI field
+     * decoded perfectly and the PDSCH still failed CRC 32/32. A wrong sequence looks like a dead
+     * channel, not like a wrong parameter.
+     *
+     * Scoped to SI-RNTI: RA-/TC-/P-RNTI and every format 1_1 grant take the general CRB-0 rule.
+     * KNOWN GAP: the spec scopes the exception to Type0-PDCCH CSS specifically, and this monitor
+     * cannot tell Type0 from Type0A (other SI messages, si_indicator = 1) -- if Type0A SI ever needs
+     * decoding here, gate this on out.si_indicator == 0 as well. */
+    dlsch_pdu.refPoint           = (is_dci10 && out.rnti_class == NR_BLIND_RNTI_CLASS_SI) ? 1 : 0;
     dlsch_pdu.dmrsConfigType     = NFAPI_NR_DMRS_TYPE1;
     dlsch_pdu.n_dmrs_cdm_groups  = out.n_dmrs_cdm_groups;
     dlsch_pdu.dlDmrsScramblingId = fp->Nid_cell;
@@ -828,7 +965,7 @@ constdiag_done:;
     dlsch_pdu.harq_process_nbr   = out.harq_pid;
     dlsch_pdu.number_rbs         = out.num_rb;
     dlsch_pdu.start_rb           = out.start_rb;
-    dlsch_pdu.mcs_table          = (uint8_t)cfg->pdsch_mcs_table;
+    dlsch_pdu.mcs_table          = grant_mcs_table;
     dlsch_pdu.pduBitmap          = 0; // no PTRS: format 1_1 with no dedicated PTRS config
     dlsch_pdu.numCsiRsForRateMatching = 0;
 
@@ -850,7 +987,7 @@ constdiag_done:;
 
     const int num_sc = out.num_rb * NR_NB_SC_PER_RB;
     if (num_sc >= 2) {
-      const uint32_t base_sc = (uint32_t)(cfg->bwp_start + out.start_rb) * NR_NB_SC_PER_RB;
+      const uint32_t base_sc = (uint32_t)(rb_origin + out.start_rb) * NR_NB_SC_PER_RB;
       // ---- AoA (2026-07-28): nr_pdsch_channel_estimation() above already computed the estimate for
       // EVERY rx antenna (it loops aarx in [0,nb_antennas_rx) internally and writes
       // pdsch_dl_ch_estimates[a][...] for each) -- this was already true before today, nothing new
@@ -937,11 +1074,18 @@ constdiag_done:;
             }
           } else {
             decodes_this_occasion++;
-            const nr_pdsch_passive_grant_t grant = {.rnti      = out.rnti,
-                                                    .mcs       = out.mcs,
-                                                    .rv        = out.rv,
-                                                    .mcs_table = (uint8_t)cfg->pdsch_mcs_table,
-                                                    .nb_rb_oh  = (uint16_t)cfg->pdsch_xoverhead};
+            const nr_pdsch_passive_grant_t grant = {.rnti       = out.rnti,
+                                                    .mcs        = out.mcs,
+                                                    .rv         = out.rv,
+                                                    .mcs_table  = grant_mcs_table,
+                                                    .nb_rb_oh   = (uint16_t)cfg->pdsch_xoverhead,
+                                                    .tb_scaling = out.tb_scaling,
+                                                    // The carrier, never this grant's own frequency
+                                                    // reference -- see nr_pdsch_passive_grant_t.
+                                                    .bw_tbslbrm = (uint16_t)fp->N_RB_DL,
+                                                    // The DEPLOYMENT's mcs-Table, never the
+                                                    // format-1_0-forced one -- see the field comment.
+                                                    .mcs_table_lbrm = (int8_t)cfg->pdsch_mcs_table};
             nr_pdsch_passive_decode_result_t dec;
             // Reuses rxdataF_pdsch: nr_pdsch_passive_decode() FEPs the WHOLE allocation into it,
             // a superset of the single DM-RS symbol already transformed above, so the buffer is
@@ -978,10 +1122,17 @@ constdiag_done:;
   if (g_occasions_run % NR_PDCCH_BLIND_SUMMARY_PERIOD_OCC == 0) {
     LOG_I(PHY,
          "SENSING: blind PDCCH monitor summary: occasions=%lu candidates=%lu accepts=%lu "
+         "dci10[accepts=%lu C=%lu TC=%lu SI=%lu RA=%lu P=%lu] "
          "held[energy=%lu persist=%lu snr=%lu mismatch=%lu] efloor=%.2f cfr_submits=%lu "
          "pdsch_decode[try=%lu crc_ok=%lu (%.1f%%) skip_rv=%lu unsup=%lu data_submits=%lu] "
          "last_reject=\"%s\" last_reject_rnti=0x%x\n",
          (unsigned long)g_occasions_run, (unsigned long)g_candidates_run, (unsigned long)g_accepts,
+         (unsigned long)g_accepts_10,
+         (unsigned long)g_accepts_class[NR_BLIND_RNTI_CLASS_C],
+         (unsigned long)g_accepts_class[NR_BLIND_RNTI_CLASS_TC],
+         (unsigned long)g_accepts_class[NR_BLIND_RNTI_CLASS_SI],
+         (unsigned long)g_accepts_class[NR_BLIND_RNTI_CLASS_RA],
+         (unsigned long)g_accepts_class[NR_BLIND_RNTI_CLASS_P],
          (unsigned long)g_held_energy, (unsigned long)g_held_persist, (unsigned long)g_held_snr,
          (unsigned long)g_held_mismatch,
          g_energy_floor,

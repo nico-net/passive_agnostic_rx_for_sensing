@@ -301,7 +301,7 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
   const uint16_t dmrs_len  = get_num_dmrs(dlsch_config->dlDmrsSymbPos);
   cw->targetCodeRate = (uint16_t)R;
   cw->TBS = nr_compute_tbs(cw->qamModOrder, (uint16_t)R, freq_alloc->num_rbs, dlsch_config->number_symbols,
-                           nb_re_dmrs * dmrs_len, grant->nb_rb_oh, 0 /* tb_scaling */, cw->Nl);
+                           nb_re_dmrs * dmrs_len, grant->nb_rb_oh, grant->tb_scaling, cw->Nl);
   if (cw->TBS == 0) {
     return out->status;
   }
@@ -323,7 +323,18 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
    * the spec ceiling and this deployment's value, so it is the default; re-derive per deployment if
    * a cell serves layer-limited UEs. */
   const int nl_tbslbrm = 4; // = min(maxMIMO-LayersPDSCH, 4); confirmed against the gNB's own print
-  dlsch_config->tbslbrm = nr_compute_tbslbrm(grant->mcs_table, dlsch_config->BWPSize, (uint8_t)nl_tbslbrm);
+  /* TS 38.212 5.4.2.1 sizes N_ref from TBS_LBRM over the carrier's LARGEST configured DL BWP, not
+   * over whatever frequency reference this particular grant uses. Measured 2026-08-21: on a
+   * CORESET#0 format-1_0 grant BWPSize is 48 and this produced lbrm=229576 against the gNB's own
+   * 1277992 -- harmless there only because N_ref cannot bind on an 808-bit TB, and wrong the moment
+   * a large TB is decoded. */
+  const uint16_t bw_lbrm = grant->bw_tbslbrm > 0 ? grant->bw_tbslbrm : dlsch_config->BWPSize;
+  /* ...and its MODULATION term is likewise a cell property, not this grant's table. MEASURED
+   * 2026-08-21 on a SIB1 grant: passing the grant's own (format-1_0-forced) table 0 gave
+   * lbrm=950984 against the gNB's 1277992, a clean Qm 6-vs-8 ratio. Fixing only the bandwidth left
+   * this half wrong. */
+  const uint8_t tbl_lbrm = grant->mcs_table_lbrm >= 0 ? (uint8_t)grant->mcs_table_lbrm : grant->mcs_table;
+  dlsch_config->tbslbrm = nr_compute_tbslbrm(tbl_lbrm, bw_lbrm, (uint8_t)nl_tbslbrm);
 
   const uint32_t G = nr_get_G(freq_alloc->num_rbs, dlsch_config->number_symbols, nb_re_dmrs, dmrs_len,
                               0 /* unav_res: PTRS/CSI-RM excluded above */, cw->qamModOrder, cw->Nl);

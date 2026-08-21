@@ -142,6 +142,37 @@ typedef struct {
   int   pdsch_max_per_slot; // cap on decode attempts per monitoring occasion (<=0 = 1). LDPC decode
                             // is by far the most expensive thing in this tap and a noisy slot can
                             // otherwise present several accepted candidates at once.
+
+  // ---- DCI format 1_0 scanning (2026-08-21). All-zero = off, i.e. exactly the format-1_1-only
+  // behaviour this module had before. See nr_pdcch_blind_monitor.h's nr_blind_dci_format_t block
+  // for why a passive receiver needs 1_0 at all (SIB1, Msg2/RAR, Msg4/RRCSetup, C-RNTI fallback).
+  //
+  // COST: format 1_0 and 1_1 have DIFFERENT payload widths (44 vs 47 bits at 273 PRB here), and the
+  // polar decoder is sized by that width, so scanning both means a SECOND decode per candidate --
+  // this roughly doubles the tap's CPU. That is why it is opt-in and why dci10_scan == 2 (1_0 only)
+  // exists: a receiver watching CORESET#0 for broadcast/RA traffic has no 1_1 to find there.
+  int dci10_scan;        // 0 = format 1_1 only (default), 1 = both, 2 = format 1_0 only
+  int dci10_ss_type;     // nr_blind_ss_type_t: 0 = UE-specific (default), 1 = common. Selects
+                         // 1_0's frequency reference, PRB origin and TDRA list -- see the
+                         // nr_pdcch_blind_dci10_ctx_t field comments; NOT a cosmetic label.
+  int dci10_n_rb_riv;    // TS 38.212 7.3.1.0's N_RB^DL,BWP for format 1_0. 0 = auto: bwp_size for a
+                         // UE-specific search space, and the CONFIGURED CORESET's own RB count for a
+                         // common one (which is CORESET#0's size when this monitor is pointed at it,
+                         // exactly what the spec asks for).
+  int dci10_rb_offset;   // TS 38.214 5.1.2.2.2's PRB origin. <0 = auto: bwp_start for a UE-specific
+                         // search space, the CORESET's first RB for a common one.
+  int dci10_length_override; // 0 = use nr_pdcch_blind_dci10_size(). Unlike the 1_1 override this
+                         // should almost never be needed -- 1_0's width is a pure spec formula with
+                         // no RRC-derived terms. Set it only to apply TS 38.212 7.3.1.0's
+                         // UE-specific-search-space zero-padding up to DCI 0_0's size, which
+                         // nr_pdcch_blind_dci00_size() computes.
+  int dci10_class_mask;  // bitmask of (1u << nr_blind_rnti_class_t); 0 = auto from ss_type.
+                         // Narrowing it is the cheapest false-accept reduction on this format.
+  int dci10_mux_pattern; // SS/PBCH-to-CORESET#0 multiplexing pattern (1/2/3); 0 = 1. Only consulted
+                         // for SIB1's own DCIs with no TDRA list configured.
+  int dci10_sib1;        // 1 = the SI-RNTI DCIs being scanned schedule SIB1 itself, so no
+                         // pdsch-ConfigCommon TDRA list can exist yet (it travels inside SIB1) and
+                         // the mux-pattern default table applies instead.
 } nr_pdcch_blind_monitor_cfg_t;
 
 #ifdef __cplusplus

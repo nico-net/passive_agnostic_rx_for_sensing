@@ -13,6 +13,7 @@
 #include "common/utils/nr/nr_common.h"
 #include "executables/softmodem-common.h"
 #include "RRC/NR_UE/rrc_proto.h"
+#include "PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.h" // nr_pdcch_blind_dci10_size(), for the OTACFG probe
 #include <stdio.h>
 
 static void fill_dci_search_candidates(const NR_SearchSpace_t *ss, fapi_nr_dl_config_dci_dl_pdu_rel15_t *rel15, const uint32_t Y)
@@ -523,6 +524,50 @@ void update_pdcch_config(NR_UE_MAC_INST_t *mac)
     mac->coreset0 = calloc(1, sizeof(*mac->coreset0));
   fill_coresetZero(mac->coreset0, &mac->type0_PDCCH_CSS_config);
   fill_searchSpaceZero(mac->search_space_zero, slots_per_frame, &mac->type0_PDCCH_CSS_config);
+
+  /* ---- OTA CONFIG DERIVATION PROBE, CORESET#0 half (ISAC_OTA_CFG=1). Companion to the SIB1-derived
+   * BWP/TDRA dump in config_ue.c. Everything here comes from the MIB alone, so it is available to a
+   * receiver that has done nothing but sync -- no SIB1, no attach, no transmission.
+   *
+   * WHY IT MATTERS for DCI format 1_0: TS 38.212 7.3.1.0 sizes a format-1_0 frequency-domain field
+   * from CORESET#0 in a COMMON search space, and TS 38.214 5.1.2.2.2 counts its PRBs from CORESET#0's
+   * lowest RB -- so num_rbs and cset_start_rb ARE the two values pdcch_blind_monitor_dci10's
+   * n_rb_riv/rb_offset need, and nr_ue_dci_configuration.c's own coreset-0 branch below uses exactly
+   * this pair for BWPSize/BWPStart. Printed in the config file's own units so the two can be
+   * reconciled rather than guessed, the same discipline the SIB1 probe follows.
+   *
+   * num_rbs is also a multiple of 6 by construction (CORESET frequency-domain resources are 6-PRB
+   * groups), so num_rbs/6 is directly pdcch_blind_monitor_coreset's first field. */
+  if (getenv("ISAC_OTA_CFG")) {
+    const NR_Type0_PDCCH_CSS_config_t *t0 = &mac->type0_PDCCH_CSS_config;
+    LOG_I(NR_MAC,
+          "SENSING: OTACFG from MIB -- CORESET0 num_rbs=%d (=%d freq groups) num_symbols=%d "
+          "cset_start_rb=%d rb_offset=%d mux_pattern=%u | SS0 first_symbol=%u duration=%u "
+          "slot=%u frame_period=%u ssb_index=%u => dci10 freq_domain_bits=%d\n",
+          (int)t0->num_rbs, (int)(t0->num_rbs / 6), (int)t0->num_symbols, (int)t0->cset_start_rb,
+          (int)t0->rb_offset, (unsigned)t0->type0_pdcch_ss_mux_pattern, (unsigned)t0->first_symbol_index,
+          (unsigned)t0->search_space_duration, (unsigned)t0->slot,
+          (unsigned)t0->search_space_frame_period, (unsigned)t0->ssb_index,
+          t0->num_rbs > 0 ? (int)(nr_pdcch_blind_dci10_size((uint16_t)t0->num_rbs) - 28) : 0);
+    /* A ready-to-paste config for scanning CORESET#0's common search spaces. Every constant here is
+     * read off fill_coresetZero()/fill_searchSpaceZero() rather than from the spec text: CORESET#0 is
+     * ALWAYS interleaved with reg-bundle-size 6 and interleaver-size 2, and both its shift index and
+     * its PDCCH DM-RS scrambling id fall back to the physical cell id (both ASN.1 fields are left
+     * NULL). The BWP line matters as much as the CORESET one -- OAI's own coreset-0 path sets
+     * BWPStart = cset_start_rb / BWPSize = num_rbs (nr_ue_dci_configuration.c), so the frequency
+     * origin must be moved with it or the DM-RS sequence and the RIV origin both land in the wrong
+     * place. */
+    LOG_I(NR_MAC,
+          "SENSING: OTACFG   => pdcch_blind_monitor_coreset = \"%d:%d:6:2:%d:%d:1\"  "
+          "pdcch_blind_monitor_bwp = \"%d:%d:<dmrs_typeA_pos>\"  "
+          "pdcch_blind_monitor_ss = \"%u:%u:%u:%u:0:0:0:0\"  "
+          "pdcch_blind_monitor_dci10 = \"2:1:0:-1:0:0:%u:0\"\n",
+          (int)(t0->num_rbs / 6), (int)t0->num_symbols, (int)mac->physCellId, (int)mac->physCellId,
+          (int)t0->cset_start_rb, (int)t0->num_rbs,
+          (unsigned)(t0->search_space_frame_period ? t0->search_space_frame_period : 1u),
+          (unsigned)t0->slot, (unsigned)t0->search_space_duration, (unsigned)t0->first_symbol_index,
+          (unsigned)t0->type0_pdcch_ss_mux_pattern);
+  }
 }
 
 void ue_dci_configuration(NR_UE_MAC_INST_t *mac, fapi_nr_dl_config_request_t *dl_config, const frame_t frame, const int slot)

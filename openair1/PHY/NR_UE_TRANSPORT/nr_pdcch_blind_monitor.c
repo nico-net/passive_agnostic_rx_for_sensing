@@ -206,6 +206,125 @@ static int parse_pdsch(const char* s)
   return n >= 1;
 }
 
+// "scan:ss_type:n_rb_riv:rb_offset:length_override:class_mask:mux_pattern:sib1" -- everything after
+// `scan` is optional and defaults to the auto/spec value, so "1" alone is a valid line meaning
+// "also scan format 1_0 in this (UE-specific) search space, sizing everything from the configured
+// BWP". See the field comments in nr_pdcch_blind_monitor_rt.h.
+static int parse_dci10(const char* s)
+{
+  g_cfg.dci10_ss_type        = 0;
+  g_cfg.dci10_n_rb_riv       = 0;
+  g_cfg.dci10_rb_offset      = -1;
+  g_cfg.dci10_length_override = 0;
+  g_cfg.dci10_class_mask     = 0;
+  g_cfg.dci10_mux_pattern    = 0;
+  g_cfg.dci10_sib1           = 0;
+  const int n = sscanf(s, "%d:%d:%d:%d:%d:%d:%d:%d", &g_cfg.dci10_scan, &g_cfg.dci10_ss_type,
+                       &g_cfg.dci10_n_rb_riv, &g_cfg.dci10_rb_offset, &g_cfg.dci10_length_override,
+                       &g_cfg.dci10_class_mask, &g_cfg.dci10_mux_pattern, &g_cfg.dci10_sib1);
+  if (n < 1) {
+    return 0;
+  }
+  if (g_cfg.dci10_scan < 0 || g_cfg.dci10_scan > 2 || g_cfg.dci10_ss_type < 0 || g_cfg.dci10_ss_type > 1
+      || g_cfg.dci10_mux_pattern < 0 || g_cfg.dci10_mux_pattern > 3) {
+    return 0;
+  }
+  return 1;
+}
+
+// Same syntax as pdcch_blind_monitor_tda, for the pdsch-ConfigCommon list format 1_0 uses under
+// every RNTI class except C-RNTI-in-a-UE-specific-search-space (TS 38.214 Table 5.1.2.1.1-1).
+static int parse_tda_common(const char* s)
+{
+  int         n = 0;
+  const char* p = s;
+  while (*p != '\0' && n < 16) {
+    int       start = 0, len = 0, map = 0;
+    const int got = sscanf(p, "%d:%d:%d", &start, &len, &map);
+    if (got < 2) {
+      return 0;
+    }
+    if (start < 0 || start > 13 || len < 1 || start + len > 14 || map < 0 || map > 1) {
+      return 0;
+    }
+    g_cfg.extract.tda_common_start[n]   = (uint8_t)start;
+    g_cfg.extract.tda_common_length[n]  = (uint8_t)len;
+    g_cfg.extract.tda_common_mapping[n] = (uint8_t)map;
+    n++;
+    const char* comma = strchr(p, ',');
+    if (comma == NULL) {
+      break;
+    }
+    p = comma + 1;
+  }
+  g_cfg.extract.tda_common_count = n;
+  return n > 0;
+}
+
+/* Format-1_0 startup reconciliation. Same purpose as the 1_1 field-width check above -- say out
+ * loud what the configuration implies, so a wrong value shows up as a line at start-up rather than
+ * as a silently empty accept census hours later. Unlike 1_1's, the 1_0 width is a pure spec formula,
+ * so the only thing that can be wrong here is n_rb_riv (or an override that disagrees with it). */
+static void nr_pdcch_blind_log_dci10_config(void)
+{
+  if (g_cfg.dci10_scan == 0) {
+    return;
+  }
+  /* In a COMMON search space n_rb_riv defaults to the CORESET's own measured RB count, which is not
+   * known until the RT tap reads the frequency-domain bitmap -- so there is nothing honest to print
+   * here. Say so rather than printing a 0 that reads as a misconfiguration; the RT path logs the
+   * resolved value once ("blind PDCCH formats: ..."). */
+  const bool     n_rb_deferred = (g_cfg.dci10_ss_type == NR_BLIND_SS_COMMON) && (g_cfg.dci10_n_rb_riv <= 0);
+  const int      n_rb_auto = (g_cfg.dci10_ss_type == NR_BLIND_SS_COMMON) ? 0 : g_cfg.bwp_size;
+  const uint16_t n_rb      = (g_cfg.dci10_n_rb_riv > 0) ? (uint16_t)g_cfg.dci10_n_rb_riv : (uint16_t)n_rb_auto;
+  const uint16_t formula   = nr_pdcch_blind_dci10_size(n_rb);
+  if (n_rb_deferred) {
+    LOG_I(PHY,
+          "SENSING: blind PDCCH DCI 1_0 scanning %s, ss=common; n_rb_riv/rb_offset/dci_length are taken "
+          "from the CORESET at run time (see the \"blind PDCCH formats\" line) -- class_mask=0x%x "
+          "mux_pattern=%u sib1=%d tda_common_entries=%d\n",
+          (g_cfg.dci10_scan == 2) ? "EXCLUSIVE (format 1_1 not scanned)" : "alongside format 1_1",
+          (unsigned)g_cfg.dci10_class_mask, (unsigned)g_cfg.dci10_mux_pattern, g_cfg.dci10_sib1,
+          g_cfg.extract.tda_common_count);
+    return;
+  }
+  LOG_I(PHY,
+        "SENSING: blind PDCCH DCI 1_0 scanning %s, ss=%s n_rb_riv=%s%u rb_offset=%s%d dci_length=%u "
+        "class_mask=0x%x mux_pattern=%u sib1=%d tda_common_entries=%d\n",
+        (g_cfg.dci10_scan == 2) ? "EXCLUSIVE (format 1_1 not scanned)" : "alongside format 1_1",
+        (g_cfg.dci10_ss_type == NR_BLIND_SS_COMMON) ? "common" : "ue-specific",
+        (g_cfg.dci10_n_rb_riv > 0) ? "" : "auto:", (unsigned)n_rb,
+        (g_cfg.dci10_rb_offset >= 0) ? "" : "auto:", g_cfg.dci10_rb_offset,
+        (unsigned)(g_cfg.dci10_length_override > 0 ? (uint16_t)g_cfg.dci10_length_override : formula),
+        (unsigned)g_cfg.dci10_class_mask, (unsigned)g_cfg.dci10_mux_pattern, g_cfg.dci10_sib1,
+        g_cfg.extract.tda_common_count);
+  if (g_cfg.dci10_length_override > 0 && formula > 0 && (uint16_t)g_cfg.dci10_length_override != formula) {
+    /* TS 38.212 7.3.1.0 only ever pads format 1_0 UPWARDS (to DCI 0_0's size, in a UE-specific
+     * search space). An override BELOW the formula cannot be a legitimate size and means the two
+     * disagree about n_rb_riv -- in which case every field is read from the wrong offset. */
+    if ((uint16_t)g_cfg.dci10_length_override < formula) {
+      LOG_E(PHY,
+            "SENSING: pdcch_blind_monitor_dci10 length override %d is SMALLER than the %u bits "
+            "n_rb_riv=%u implies -- format 1_0 is only ever zero-padded upwards, so one of the two is "
+            "wrong and every field will be read from the wrong bit offset\n",
+            g_cfg.dci10_length_override, (unsigned)formula, (unsigned)n_rb);
+    } else {
+      LOG_I(PHY,
+            "SENSING: DCI 1_0 payload padded %u -> %d bits (TS 38.212 7.3.1.0 size alignment against "
+            "DCI 0_0 in a UE-specific search space); the padding is checked for zero on every decode\n",
+            (unsigned)formula, g_cfg.dci10_length_override);
+    }
+  }
+  if (g_cfg.dci10_ss_type == NR_BLIND_SS_COMMON && g_cfg.coreset_type != 1) {
+    LOG_W(PHY,
+          "SENSING: DCI 1_0 configured for a COMMON search space but pdcch_blind_monitor_coreset's "
+          "type is %d (PDCCH-Config), not 1 (CORESET0/MIB-SIB1). SI-/RA-/TC-RNTI DCIs live in the "
+          "CORESET#0 common search spaces, and the DM-RS reference point differs between the two "
+          "CORESET types -- a mismatch here can never decode\n",
+          g_cfg.coreset_type);
+  }
+}
+
 void nr_pdcch_blind_monitor_init(void)
 {
   if (g_parsed) {
@@ -236,6 +355,10 @@ void nr_pdcch_blind_monitor_init(void)
   // dmrs_add_pos<0 keeps fill_dmrs_mask()'s pos2 fallback -- i.e. exactly the pre-2026-07-30
   // behaviour unless the corresponding config lines are present.
   g_cfg.extract.tda_count      = 0;
+  g_cfg.extract.tda_common_count = 0;
+  // Format 1_0 scanning off => the module behaves exactly as before.
+  g_cfg.dci10_scan             = 0;
+  g_cfg.dci10_rb_offset        = -1;
   g_cfg.extract.dmrs_add_pos   = -1;
   g_cfg.extract.dmrs_max_length = 0;
   // -1 everywhere = "use the built-in assumption", i.e. the pre-2026-07-30 hard-coded widths.
@@ -267,6 +390,8 @@ void nr_pdcch_blind_monitor_init(void)
   char*     p_dmrs       = NULL;
   char*     p_pdsch      = NULL;
   char*     p_dci_bits   = NULL;
+  char*     p_dci10      = NULL;
+  char*     p_tda_common = NULL;
   paramdef_t params[] = {
       {"pdcch_blind_monitor_coreset",
         "Dedicated CORESET geometry for blind PDCCH monitoring; "
@@ -307,6 +432,19 @@ void nr_pdcch_blind_monitor_init(void)
         "ant_ports:tci:srs_req:cbg (-1 = built-in default). Getting dci_length_override right is "
         "NOT enough on its own -- see nr_pdcch_blind_extract_opts_t",
         0, .strptr = &p_dci_bits, .defstrval = "", TYPE_STRING, 0},
+      {"pdcch_blind_monitor_dci10",
+        "DCI format 1_0 scanning; scan[:ss_type[:n_rb_riv[:rb_offset[:length_override[:class_mask"
+        "[:mux_pattern[:sib1]]]]]]] (scan 0=format 1_1 only, 1=both, 2=1_0 only; ss_type 0=UE-specific, "
+        "1=common). Needed for SIB1/RAR/Msg4-RRCSetup and C-RNTI fallback grants, none of which are "
+        "carried on format 1_1",
+        0, .strptr = &p_dci10, .defstrval = "", TYPE_STRING, 0},
+      {"pdcch_blind_monitor_tda_common",
+        "The gNB pdsch-ConfigCommon pdsch-TimeDomainAllocationList (same S:L[:mapping],... syntax as "
+        "pdcch_blind_monitor_tda). TS 38.214 Table 5.1.2.1.1-1 uses this list -- NOT the dedicated one "
+        "-- for every DCI 1_0 except C-RNTI in a UE-specific search space. Omit to reuse "
+        "pdcch_blind_monitor_tda, which is correct when the gNB derives both from the same "
+        "pdsch-ConfigCommon",
+        0, .strptr = &p_tda_common, .defstrval = "", TYPE_STRING, 0},
       {"pdcch_blind_monitor_pdsch",
         "Passive data-aided PDSCH; decode:mcs_table:xoverhead:rv0_only:max_per_slot "
         "(decode 0=off, 1=decode+count CRC pass rate only, 2=also submit the reconstructed CFR)",
@@ -350,6 +488,17 @@ void nr_pdcch_blind_monitor_init(void)
   if (p_dci_bits != NULL && p_dci_bits[0] != '\0' && !parse_dci_bits(p_dci_bits)) {
     LOG_E(PHY, "SENSING: malformed pdcch_blind_monitor_dci_bits '%s'; using built-in field widths\n", p_dci_bits);
   }
+  if (p_dci10 != NULL && p_dci10[0] != '\0' && !parse_dci10(p_dci10)) {
+    g_cfg.dci10_scan = 0;
+    LOG_E(PHY, "SENSING: malformed pdcch_blind_monitor_dci10 '%s'; format 1_0 scanning disabled\n", p_dci10);
+  }
+  if (p_tda_common != NULL && p_tda_common[0] != '\0' && !parse_tda_common(p_tda_common)) {
+    g_cfg.extract.tda_common_count = 0;
+    LOG_E(PHY,
+          "SENSING: malformed pdcch_blind_monitor_tda_common '%s'; DCI 1_0 will reuse the dedicated "
+          "pdcch_blind_monitor_tda list\n",
+          p_tda_common);
+  }
   if (p_pdsch != NULL && p_pdsch[0] != '\0' && !parse_pdsch(p_pdsch)) {
     g_cfg.pdsch_decode = 0;
     LOG_E(PHY, "SENSING: malformed pdcch_blind_monitor_pdsch '%s'; passive PDSCH decode disabled\n", p_pdsch);
@@ -391,6 +540,7 @@ void nr_pdcch_blind_monitor_init(void)
   }
 
   g_enabled = 1;
+  nr_pdcch_blind_log_dci10_config();
   LOG_I(PHY,
         "SENSING: blind PDCCH monitor configured: coreset(num_groups=%d duration=%d reg_bundle=%d "
         "interleaver=%d shift=%d scramb=%u) ss(period=%d offset=%d duration=%d first_symb=%d "
@@ -652,6 +802,515 @@ static int32_t blind_fill_dmrs_mask(int dmrs_TypeA_Position,
   return (mappingtype == typeA) ? (l_prime | l0_shift) : (l_prime << startSymbol);
 }
 
+// ---------------------------------------------------------------------------------------------
+// Steps shared by the format 1_1 and format 1_0 entry points. Factored out rather than duplicated
+// because the mismatched-bits check in particular is subtle (it compares a re-encode against the
+// ORIGINAL soft-LLR polarity, and the caller owns the threshold) -- two copies of it would be one
+// copy too many. The SPLIT between the two helpers is deliberate and load-bearing: the re-encode is
+// only run for a candidate whose RNTI already passed its range check, which at this scan's trial
+// volume (~470k occasions per capture) is the difference between paying a polar encode per
+// candidate and paying it per plausible one.
+// ---------------------------------------------------------------------------------------------
+
+/// Step 1: RNTI-independent polar decode. The CRC-recovered value IS the candidate RNTI in its low
+/// 16 bits; the full 24 bits are returned because only a genuine decode has the upper 8 zero.
+static uint32_t blind_polar_decode(const int16_t* llr,
+                                   uint8_t        aggregation_level,
+                                   uint16_t       dci_length,
+                                   uint16_t       rnti_min,
+                                   uint16_t       rnti_max,
+                                   uint64_t       dci_estimation[2])
+{
+  dci_estimation[0] = 0;
+  dci_estimation[1] = 0;
+  const uint32_t crc = polar_decoder_int16((int16_t*)llr, dci_estimation, 1, NR_POLAR_DCI_MESSAGE_TYPE,
+                                           dci_length, aggregation_level);
+
+  /* FULLCRC probe: polar_decoder_int16() returns a 24-bit CRC, and only a genuine match has its
+   * upper bits zero (the live path relies on exactly that when it does `crc == n_rnti`). Logging
+   * out->rnti instead -- which is (uint16_t)crc -- makes a false decode whose LOW 16 bits happen to
+   * equal the target look like a success. Print the untruncated value. */
+  {
+    static int s_fullcrc = -1;
+    if (s_fullcrc < 0)
+      s_fullcrc = (getenv("ISAC_PDCCH_FULLCRC") != NULL) ? 1 : 0;
+    /* RNTI-AGNOSTIC detector: a genuine polar decode has the upper 8 bits of the 24-bit CRC zero.
+     * Keying this on a PINNED rnti_min was a mistake -- the C-RNTI churns on every re-attach, so a
+     * pinned probe only sees the window where the guess happened to be live. Logging every crc with
+     * upper==0 finds real DCIs no matter which RNTI they carry. */
+    if (s_fullcrc && (crc >> 16) == 0)
+      printf("FULLCRC L=%u dci_len=%u crc=0x%x upper=0x%x in_range=%d\n",
+             (unsigned)aggregation_level, (unsigned)dci_length, crc, crc >> 16,
+             (crc >= rnti_min && crc <= rnti_max) ? 1 : 0);
+  }
+  return crc;
+}
+
+/// Step 2b: mismatched-bits false-detection measure. Migrated from NRSniffer's dci_nr.c
+/// (nr_dci_false_detection): re-encode the decoded payload with the just-recovered RNTI and count
+/// bit mismatches against the ORIGINAL soft LLR polarity. A CRC match is a 1/65536 chance false
+/// accept even on a candidate that never carried real PDCCH; this is a far stronger discriminator,
+/// since a genuine decode's re-encoded codeword should agree with almost every soft-bit sign. The
+/// caller owns the accept/reject threshold -- this only measures.
+static uint16_t blind_mismatched_bits(const int16_t* llr,
+                                      uint64_t       dci_estimation[2],
+                                      uint32_t       crc,
+                                      uint8_t        aggregation_level,
+                                      uint16_t       dci_length)
+{
+  uint32_t encoder_output[NR_MAX_DCI_SIZE_DWORD];
+  polar_encoder_fast(dci_estimation, (void*)encoder_output, (int)crc, 1, NR_POLAR_DCI_MESSAGE_TYPE, dci_length,
+                     aggregation_level);
+  const uint8_t* enout_p        = (const uint8_t*)encoder_output;
+  const int      encoded_length = (int)aggregation_level * 108;
+  uint16_t       mismatches     = 0;
+  for (int i = 0; i < encoded_length / 8; i++) {
+    for (int b = 0; b < 8; b++)
+      mismatches += ((enout_p[i] >> b) & 1) ^ ((llr[i * 8 + b] >> 15) & 1);
+  }
+  return mismatches;
+}
+
+// ---------------------------------------------------------------------------------------------
+// DCI format 1_0 (TS 38.212 7.3.1.2.1). See nr_pdcch_blind_monitor.h's nr_blind_dci_format_t block
+// for why this exists and why one decode serves all five RNTI variants.
+// ---------------------------------------------------------------------------------------------
+
+/// Bits every format-1_0 variant carries BESIDES the frequency-domain assignment. All five field
+/// lists sum to this same value, which is what TS 38.212 7.3.1.0's size-alignment rules rely on:
+///   C-RNTI / TC-RNTI : 1 identifier + 4 TDA + 1 VRB + 5 MCS + 1 NDI + 2 RV + 4 HARQ + 2 DAI
+///                      + 2 TPC + 3 PUCCH-RI + 3 PDSCH-to-HARQ            = 28
+///   SI-RNTI          : 4 + 1 + 5 + 2 RV + 1 SI-indicator + 15 reserved   = 28
+///   RA-RNTI          : 4 + 1 + 5 + 2 TB-scaling + 16 reserved            = 28
+///   P-RNTI           : 2 SM-indicator + 8 short-message + 4 + 1 + 5
+///                      + 2 TB-scaling + 6 reserved                       = 28
+#define NR_BLIND_DCI10_FIXED_BITS 28
+
+/// ceil(log2(N*(N+1)/2)) -- the resource-allocation-type-1 (RIV) field width, shared by 0_0/1_0/1_1.
+static int blind_riv_bits(uint16_t n_rb)
+{
+  const double span = ((double)n_rb * (double)(n_rb + 1)) / 2.0;
+  return (int)ceil(log2(span));
+}
+
+uint16_t nr_pdcch_blind_dci10_size(uint16_t n_rb_riv)
+{
+  if (n_rb_riv < 1) {
+    return 0;
+  }
+  return (uint16_t)(NR_BLIND_DCI10_FIXED_BITS + blind_riv_bits(n_rb_riv));
+}
+
+uint16_t nr_pdcch_blind_dci00_size(uint16_t n_rb_riv, int supplementary_uplink)
+{
+  if (n_rb_riv < 1) {
+    return 0;
+  }
+  // TS 38.212 7.3.1.1.1: identifier(1) + freq domain(RIV) + TDA(4) + frequency hopping(1) + MCS(5)
+  // + NDI(1) + RV(2) + HARQ process(4) + TPC for scheduled PUSCH(2) [+ UL/SUL indicator(1)].
+  return (uint16_t)(20 + blind_riv_bits(n_rb_riv) + (supplementary_uplink ? 1 : 0));
+}
+
+/// Which RNTI classes to attempt when the caller does not narrow it. A C-RNTI format-1_0 CAN appear
+/// in a common search space, but it is bit-indistinguishable from TC-RNTI there and TC selects the
+/// same (common) TDRA list, so TC covers both -- see nr_blind_rnti_class_t's comment.
+static uint32_t dci10_default_class_mask(uint8_t ss_type)
+{
+  if (ss_type == NR_BLIND_SS_COMMON) {
+    return (1u << NR_BLIND_RNTI_CLASS_SI) | (1u << NR_BLIND_RNTI_CLASS_P) | (1u << NR_BLIND_RNTI_CLASS_RA)
+           | (1u << NR_BLIND_RNTI_CLASS_TC);
+  }
+  return 1u << NR_BLIND_RNTI_CLASS_C;
+}
+
+/// Map a class onto the nr_rnti_type_t get_dl_tda_info() switches on (TS 38.214 Table 5.1.2.1.1-1).
+static nr_rnti_type_t dci10_rnti_type(nr_blind_rnti_class_t klass)
+{
+  switch (klass) {
+    case NR_BLIND_RNTI_CLASS_SI: return TYPE_SI_RNTI_;
+    case NR_BLIND_RNTI_CLASS_RA: return TYPE_RA_RNTI_;
+    case NR_BLIND_RNTI_CLASS_P:  return TYPE_P_RNTI_;
+    case NR_BLIND_RNTI_CLASS_TC: return TYPE_TC_RNTI_;
+    default:                     return TYPE_C_RNTI_;
+  }
+}
+
+/// Parse ONE format-1_0 payload under ONE RNTI-class hypothesis and fill everything in `out` except
+/// rnti/mismatched_bits (which the caller already wrote). Returns false with out->reject_reason set
+/// on the first check that fails, leaving the caller free to try the next hypothesis.
+///
+/// Field order and widths are taken from TS 38.212 7.3.1.2.1 and cross-checked field-by-field
+/// against this codebase's OWN gNB packer (gNB_scheduler_primitives.c's NR_DL_DCI_FORMAT_1_0 case,
+/// which writes MSB-first from `dci_size` downward) -- the same reconcile-a-derivation-against-a-
+/// known-good-implementation discipline that caught the SLIV ambiguity in the SIB1 work.
+static bool dci10_parse(uint64_t                             payload,
+                        uint16_t                             dci_length,
+                        int                                  riv_bits,
+                        int                                  pad_bits,
+                        nr_blind_rnti_class_t                klass,
+                        const nr_pdcch_blind_dci10_ctx_t*    ctx,
+                        const nr_pdcch_blind_extract_opts_t* opts,
+                        nr_pdcch_blind_result_t*             out)
+{
+  int      pos        = (int)dci_length;
+  uint32_t fdra       = 0;
+  uint32_t tda_idx    = 0;
+  uint32_t vrb        = 0;
+  uint32_t mcs        = 0;
+  uint32_t ndi        = 0;
+  uint32_t rv         = 0;
+  uint32_t harq_pid   = 0;
+  uint32_t tb_scaling = 0;
+  uint32_t si_ind     = 0;
+  uint32_t sm_ind     = 0;
+  uint32_t sm         = 0;
+  uint32_t reserved   = 0;
+
+  switch (klass) {
+    case NR_BLIND_RNTI_CLASS_C:
+    case NR_BLIND_RNTI_CLASS_TC: {
+      // Identifier for DCI formats: 1 = DL. A 0 here is DCI format 0_0, the UL grant that shares
+      // this search space and payload size by construction (TS 38.212 7.3.1.0) -- correctly
+      // rejected, exactly as the format 1_1 path rejects it.
+      if (read_field(payload, &pos, 1) != 1) {
+        out->reject_reason = "DCI-1_0 identifier=0 (format 0_0 UL grant, not a PDSCH DCI)";
+        return false;
+      }
+      fdra = read_field(payload, &pos, riv_bits);
+      // TS 38.212 7.3.1.2.1: an ALL-ONES frequency-domain field on a C-/TC-RNTI format 1_0 marks a
+      // PDCCH ORDER -- a command to start random access -- and the remaining bits are
+      // ra_preamble_index / UL-SUL / SSB index / PRACH mask, NOT a grant. Parsing it as one yields a
+      // confident and completely wrong allocation, so it is rejected rather than mis-read.
+      if (riv_bits < 32 && fdra == ((1u << riv_bits) - 1u)) {
+        out->reject_reason = "DCI-1_0 PDCCH order (RA initiation), not a PDSCH assignment";
+        return false;
+      }
+      tda_idx  = read_field(payload, &pos, 4);
+      vrb      = read_field(payload, &pos, 1);
+      mcs      = read_field(payload, &pos, 5);
+      ndi      = read_field(payload, &pos, 1);
+      rv       = read_field(payload, &pos, 2);
+      harq_pid = read_field(payload, &pos, 4);
+      (void)read_field(payload, &pos, 2); // Downlink assignment index (2 RESERVED bits for TC-RNTI)
+      (void)read_field(payload, &pos, 2); // TPC command for scheduled PUCCH
+      (void)read_field(payload, &pos, 3); // PUCCH resource indicator
+      (void)read_field(payload, &pos, 3); // PDSCH-to-HARQ_feedback timing indicator
+      break;
+    }
+    case NR_BLIND_RNTI_CLASS_SI:
+      fdra     = read_field(payload, &pos, riv_bits);
+      tda_idx  = read_field(payload, &pos, 4);
+      vrb      = read_field(payload, &pos, 1);
+      mcs      = read_field(payload, &pos, 5);
+      rv       = read_field(payload, &pos, 2);
+      si_ind   = read_field(payload, &pos, 1);
+      reserved = read_field(payload, &pos, 15);
+      // 15 bits that the spec fixes at zero: a 1-in-32768 signature, and by far the strongest
+      // false-accept discriminator available to a blind receiver on this format.
+      if (reserved != 0) {
+        out->reject_reason = "DCI-1_0/SI-RNTI reserved bits are non-zero";
+        return false;
+      }
+      break;
+    case NR_BLIND_RNTI_CLASS_RA:
+      fdra       = read_field(payload, &pos, riv_bits);
+      tda_idx    = read_field(payload, &pos, 4);
+      vrb        = read_field(payload, &pos, 1);
+      mcs        = read_field(payload, &pos, 5);
+      tb_scaling = read_field(payload, &pos, 2);
+      reserved   = read_field(payload, &pos, 16);
+      if (reserved != 0) {
+        out->reject_reason = "DCI-1_0/RA-RNTI reserved bits are non-zero";
+        return false;
+      }
+      break;
+    case NR_BLIND_RNTI_CLASS_P:
+      sm_ind     = read_field(payload, &pos, 2);
+      sm         = read_field(payload, &pos, 8);
+      fdra       = read_field(payload, &pos, riv_bits);
+      tda_idx    = read_field(payload, &pos, 4);
+      vrb        = read_field(payload, &pos, 1);
+      mcs        = read_field(payload, &pos, 5);
+      tb_scaling = read_field(payload, &pos, 2);
+      reserved   = read_field(payload, &pos, 6);
+      if (reserved != 0) {
+        out->reject_reason = "DCI-1_0/P-RNTI reserved bits are non-zero";
+        return false;
+      }
+      // TS 38.331 Short Message Indicator: 00 is reserved; 01 = scheduling info only (a real PDSCH
+      // grant, no short message); 10 = short message only, which carries NO PDSCH assignment, so the
+      // allocation fields below are meaningless; 11 = both.
+      if (sm_ind == 0) {
+        out->reject_reason = "DCI-1_0/P-RNTI shortMessageIndicator=00 (reserved)";
+        return false;
+      }
+      if (sm_ind == 2) {
+        out->reject_reason = "DCI-1_0/P-RNTI carries a short message only (no PDSCH assignment)";
+        return false;
+      }
+      break;
+    default:
+      out->reject_reason = "unknown DCI-1_0 RNTI class";
+      return false;
+  }
+
+  // TS 38.212 7.3.1.0: in a UE-specific search space the smaller of format 0_0/1_0 is ZERO-padded
+  // up to the other's size. Any non-zero padding means this is not a real format-1_0 payload (or
+  // n_rb_riv is wrong, which would invalidate everything above it anyway).
+  if (pad_bits > 0) {
+    const int chunk = (pad_bits > 32) ? 32 : pad_bits;
+    if (read_field(payload, &pos, chunk) != 0) {
+      out->reject_reason = "DCI-1_0 size-alignment padding is non-zero";
+      return false;
+    }
+  }
+
+  // TS 38.214 5.1.3.1: a PDSCH scheduled by format 1_0 ALWAYS uses Table 5.1.3.1-1 (qam64),
+  // whatever mcs-Table the deployment configures -- qam256 is conditioned on format 1_1. In that
+  // table entries 0..28 are valid and 29..31 are reserved for retransmissions whose modulation the
+  // UE already knows. (The format 1_1 path above uses >=28 because table 2, which a qam256
+  // deployment selects there, reserves 28..31; here the table is fixed by the spec so the exact
+  // bound is known.)
+  if (mcs >= 29) {
+    out->reject_reason = "DCI-1_0 MCS in the reserved range (29-31 of Table 5.1.3.1-1)";
+    return false;
+  }
+  // TS 38.214 Table 5.1.3.2-2: scaling factor S = {1, 0.5, 0.25}; the fourth code point is reserved.
+  if ((klass == NR_BLIND_RNTI_CLASS_RA || klass == NR_BLIND_RNTI_CLASS_P) && tb_scaling > 2) {
+    out->reject_reason = "DCI-1_0 TB scaling in the reserved code point (3)";
+    return false;
+  }
+  // TS 38.211 7.3.1.6 interleaved VRB-to-PRB mapping permutes the allocation in 2-RB bundles, so the
+  // PRBs are NOT the contiguous set the RIV names. This receiver's whole downstream -- DM-RS channel
+  // estimation, RE enumeration, the data-aided reconstruction -- indexes a contiguous PRB range, and
+  // OAI's UE PHY implements no de-interleaving at all (nr_ue_procedures.c sets
+  // dlsch_pdu->vrb_to_prb_mapping and NOTHING in openair1/PHY/NR_UE_TRANSPORT ever reads it), so
+  // there is nothing to reuse. Decoded, reported, and REJECTED -- silently extracting the wrong REs
+  // would look like a weak channel rather than a wrong one.
+  if (vrb != 0) {
+    out->reject_reason = "DCI-1_0 interleaved VRB-to-PRB mapping (not supported: no de-interleaver)";
+    return false;
+  }
+
+  uint16_t start_rb, num_rb;
+  if (!riv_to_prb_alloc(fdra, ctx->n_rb_riv, &start_rb, &num_rb)) {
+    out->reject_reason = "RIV decodes to a PRB allocation outside the DCI-1_0 frequency reference";
+    return false;
+  }
+
+  // ---- TDRA. TS 38.214 Table 5.1.2.1.1-1, mirroring get_dl_tda_info()/get_dl_tdalist(): the
+  // DEDICATED pdsch-Config list applies only to C-RNTI in a UE-SPECIFIC search space; everything
+  // else -- SI/RA/TC-RNTI, and C-RNTI in a common search space -- takes pdsch-ConfigCommon's list.
+  // Note the field is ALWAYS 4 bits in format 1_0 (unlike 1_1's ceil(log2(count))), so an index past
+  // the end of a short list is a real and useful false-accept discriminator, not a config error. ----
+  const bool     dedicated_list = (klass == NR_BLIND_RNTI_CLASS_C) && (ctx->ss_type == NR_BLIND_SS_UE_SPECIFIC);
+  int            n_tda          = 0;
+  const uint8_t* t_start        = NULL;
+  const uint8_t* t_len          = NULL;
+  const uint8_t* t_map          = NULL;
+  if (opts != NULL) {
+    if (!dedicated_list && opts->tda_common_count > 0) {
+      n_tda   = opts->tda_common_count;
+      t_start = opts->tda_common_start;
+      t_len   = opts->tda_common_length;
+      t_map   = opts->tda_common_mapping;
+    } else if (opts->tda_count > 0) {
+      n_tda   = opts->tda_count;
+      t_start = opts->tda_start;
+      t_len   = opts->tda_length;
+      t_map   = opts->tda_mapping;
+    }
+  }
+  // SIB1's own DCIs are the one case where no configured list can apply: pdsch-ConfigCommon travels
+  // INSIDE SIB1, so a receiver decoding SIB1 has not read it yet and the default table selected by
+  // the SS/PBCH-to-CORESET#0 multiplexing pattern is what the gNB used (TS 38.214 5.1.2.1.1).
+  if (klass == NR_BLIND_RNTI_CLASS_SI && ctx->sib1) {
+    n_tda = 0;
+  }
+
+  NR_tda_info_t tda = {0};
+  if (n_tda > 0) {
+    if ((int)tda_idx >= n_tda) {
+      out->reject_reason = "DCI-1_0 time_domain_assignment index beyond the configured TDRA list";
+      return false;
+    }
+    tda.valid_tda        = true;
+    tda.startSymbolIndex = t_start[tda_idx];
+    tda.nrOfSymbols      = t_len[tda_idx];
+    tda.mapping_type     = t_map[tda_idx] ? typeB : typeA;
+    if (tda.nrOfSymbols < 1 || tda.startSymbolIndex + tda.nrOfSymbols > 14
+        || (tda.mapping_type == typeA && tda.startSymbolIndex + tda.nrOfSymbols < 2)) {
+      out->reject_reason = "configured TDRA entry spans an illegal symbol range";
+      return false;
+    }
+  } else {
+    // mux_pattern is validated by the caller (get_default_table_type() AssertFatal()s outside 1..3,
+    // and this runs on the RT receive path).
+    tda = get_dl_tda_info(NULL /* dl_BWP: forces the default-table branch */, 0 /* ss_type, unused */,
+                          (int)tda_idx, ctx->dmrs_typeA_position, ctx->mux_pattern ? ctx->mux_pattern : 1,
+                          dci10_rnti_type(klass), (ctx->ss_type == NR_BLIND_SS_COMMON) ? 0 : 1,
+                          ctx->sib1 != 0);
+    if (!tda.valid_tda) {
+      out->reject_reason = "DCI-1_0 time_domain_assignment index invalid for the default TDRA table";
+      return false;
+    }
+  }
+
+  // ---- DM-RS. TS 38.214 5.1.6.2, and this codebase's own fill_dmrs_mask() implements it the same
+  // way: for a PDSCH scheduled by format 1_0 with mapping type A, dmrs-AdditionalPosition is pos2
+  // REGARDLESS of any dedicated DMRS config (see its `dci_format != NR_DL_DCI_FORMAT_1_0` guard).
+  // This is why the deployment's dmrs override -- correct for format 1_1, and set to pos1 on gNBs
+  // that configure it -- must NOT be applied here. Type B does read the dedicated config, so the
+  // override still applies on that branch. maxLength is 1: format 1_0 is single-symbol front-loaded
+  // DM-RS by definition. ----
+  const int add_pos = (tda.mapping_type == typeA)
+                          ? 2
+                          : ((opts != NULL && opts->dmrs_add_pos >= 0) ? opts->dmrs_add_pos : 2);
+  const int32_t dmrs_mask = blind_fill_dmrs_mask(ctx->dmrs_typeA_position, tda.nrOfSymbols, tda.startSymbolIndex,
+                                                 tda.mapping_type, add_pos, 1 /* maxLength */);
+  if (dmrs_mask <= 0) {
+    out->reject_reason = "DM-RS symbol mask undefined for this DCI-1_0 TDRA entry";
+    return false;
+  }
+
+  // ---- All checks passed. ----
+  out->dci_format   = NR_BLIND_DCI_FORMAT_1_0;
+  out->rnti_class   = (uint8_t)klass;
+  out->start_rb     = start_rb;
+  out->num_rb       = num_rb;
+  out->start_symbol = (uint8_t)tda.startSymbolIndex;
+  out->num_symbols  = (uint8_t)tda.nrOfSymbols;
+  out->dl_dmrs_symb_pos = (uint16_t)dmrs_mask;
+  // TS 38.214 5.1.6.1.3: for a PDSCH scheduled by format 1_0 the UE assumes 1 CDM group without data
+  // (group 0) for a 2-symbol allocation and 2 CDM groups ({0,1}, i.e. the whole DM-RS symbol
+  // reserved) in every other case. Format 1_0 has no antenna-ports field to read this from -- it is
+  // derived, not decoded. Consequence worth knowing: at n_dmrs_cdm_groups == 2 the data-aided RE
+  // enumeration takes its whole-symbol branch, which is the case that behaves identically with and
+  // without the DM-RS-symbol data-RE fix; a 2-symbol 1_0 grant lands in the other one.
+  out->n_dmrs_cdm_groups = (tda.nrOfSymbols == 2) ? 1 : 2;
+  out->dmrs_ports        = 1;  // antenna port 1000 only (TS 38.214 5.1.6.2)
+  out->nscid             = 0;  // format 1_0 has no DM-RS sequence initialisation field
+  out->mcs               = (uint8_t)mcs;
+  out->mcs_table         = 0;  // Table 5.1.3.1-1, always -- see the MCS check above
+  out->rv                = (uint8_t)rv;
+  out->ndi               = (uint8_t)ndi;
+  out->harq_pid          = (uint8_t)harq_pid;
+  out->tda_index         = (uint8_t)tda_idx;
+  out->mapping_type      = (tda.mapping_type == typeB) ? 1 : 0;
+  out->vrb_to_prb        = (uint8_t)vrb;
+  out->tb_scaling        = (uint8_t)tb_scaling;
+  out->si_indicator      = (uint8_t)si_ind;
+  out->short_messages_ind = (uint8_t)sm_ind;
+  out->short_messages    = (uint8_t)sm;
+  out->plausible         = true;
+  out->reject_reason     = NULL;
+  return true;
+}
+
+bool nr_pdcch_blind_decode_and_extract_10(const int16_t*                       llr,
+                                          uint8_t                              aggregation_level,
+                                          uint16_t                             dci_length,
+                                          const nr_pdcch_blind_dci10_ctx_t*    ctx,
+                                          uint16_t                             rnti_min,
+                                          uint16_t                             rnti_max,
+                                          const nr_pdcch_blind_extract_opts_t* opts,
+                                          nr_pdcch_blind_result_t*             out)
+{
+  memset(out, 0, sizeof(*out));
+  out->plausible  = false;
+  out->dci_format = NR_BLIND_DCI_FORMAT_1_0;
+
+  if (ctx == NULL || dci_length == 0 || dci_length > 63 || ctx->n_rb_riv < 1) {
+    out->reject_reason = "invalid dci_length / DCI-1_0 context";
+    return false;
+  }
+  if (ctx->mux_pattern > 3) {
+    // get_default_table_type() AssertFatal()s on anything outside 1..3 and this runs on the RT
+    // receive path, so it is checked here rather than allowed to abort the softmodem.
+    out->reject_reason = "invalid SS/PBCH-to-CORESET0 multiplexing pattern";
+    return false;
+  }
+  const int riv_bits = blind_riv_bits(ctx->n_rb_riv);
+  const int need     = NR_BLIND_DCI10_FIXED_BITS + riv_bits;
+  if (need > (int)dci_length) {
+    out->reject_reason = "DCI-1_0 field widths exceed dci_length";
+    return false;
+  }
+  const int pad_bits = (int)dci_length - need;
+
+  // ---- Step 1: one RNTI-independent polar decode, shared by every class hypothesis below. ----
+  uint64_t       dci_estimation[2] = {0};
+  const uint32_t crc = blind_polar_decode(llr, aggregation_level, dci_length, rnti_min, rnti_max, dci_estimation);
+  out->rnti          = (uint16_t)crc;
+
+  // ---- Step 2: which classes are admissible for this CRC-recovered value. The broadcast RNTIs are
+  // FIXED by TS 38.321 Table 7.1-1 (SI-RNTI = 0xFFFF, P-RNTI = 0xFFFE) and sit outside the dynamic
+  // C-RNTI range by construction, so they are admitted independently of [rnti_min, rnti_max] rather
+  // than requiring the caller to widen a range that exists to reject exactly those values. ----
+  const uint32_t mask = ctx->rnti_class_mask ? ctx->rnti_class_mask : dci10_default_class_mask(ctx->ss_type);
+  nr_blind_rnti_class_t attempts[3];
+  int                   n_attempts = 0;
+
+  if (crc == 0xFFFF) {
+    if (mask & (1u << NR_BLIND_RNTI_CLASS_SI)) {
+      attempts[n_attempts++] = NR_BLIND_RNTI_CLASS_SI;
+    }
+  } else if (crc == 0xFFFE) {
+    if (mask & (1u << NR_BLIND_RNTI_CLASS_P)) {
+      attempts[n_attempts++] = NR_BLIND_RNTI_CLASS_P;
+    }
+  } else if (crc >= rnti_min && crc <= rnti_max) {
+    // RA first: it is the only one of the three dynamic-range classes with a spec-fixed reserved
+    // field (16 bits) AND a bounded value range, so when it passes it passes for a reason. A
+    // C-/TC-RNTI payload can also present 16 zero tail bits (rv=0, harq=0, dai=0, tpc=0, PUCCH-RI=0,
+    // k1=0 is an entirely ordinary grant), which is why the RNTI bound is applied as well.
+    if ((mask & (1u << NR_BLIND_RNTI_CLASS_RA)) && crc <= NR_PDCCH_BLIND_RA_RNTI_MAX) {
+      attempts[n_attempts++] = NR_BLIND_RNTI_CLASS_RA;
+    }
+    // C and TC share one hypothesis: the field lists are bit-identical and the label is chosen by
+    // search space (see nr_blind_rnti_class_t). EITHER bit therefore enables it -- gating on the
+    // label's own bit would silently return nothing when a caller asks for C in a common search
+    // space, which is a configuration foot-gun rather than a meaningful distinction.
+    const nr_blind_rnti_class_t dyn =
+        (ctx->ss_type == NR_BLIND_SS_COMMON) ? NR_BLIND_RNTI_CLASS_TC : NR_BLIND_RNTI_CLASS_C;
+    if (mask & ((1u << NR_BLIND_RNTI_CLASS_C) | (1u << NR_BLIND_RNTI_CLASS_TC))) {
+      attempts[n_attempts++] = dyn;
+    }
+  } else {
+    out->reject_reason = "CRC-recovered value outside plausible RNTI range";
+    return false;
+  }
+
+  if (n_attempts == 0) {
+    out->reject_reason = "no DCI-1_0 RNTI class enabled for this CRC-recovered value";
+    return false;
+  }
+
+  // ---- Step 2b: the re-encode false-detection measure, once -- it depends only on the recovered
+  // RNTI and the coded bits, not on which class hypothesis wins. ----
+  out->mismatched_bits = blind_mismatched_bits(llr, dci_estimation, crc, aggregation_level, dci_length);
+
+  // ---- Step 3/4: try each admissible class; the first whose every field check passes wins. ----
+  const uint16_t saved_rnti       = out->rnti;
+  const uint16_t saved_mismatches = out->mismatched_bits;
+  for (int i = 0; i < n_attempts; i++) {
+    const char* last_reason = NULL;
+    if (dci10_parse(dci_estimation[0], dci_length, riv_bits, pad_bits, attempts[i], ctx, opts, out)) {
+      return true;
+    }
+    last_reason = out->reject_reason;
+    // dci10_parse() writes into `out` as it goes, so reset the fields the caller still needs before
+    // the next hypothesis -- without this a failed attempt would clear the RNTI a later one reports.
+    memset(out, 0, sizeof(*out));
+    out->plausible       = false;
+    out->dci_format      = NR_BLIND_DCI_FORMAT_1_0;
+    out->rnti            = saved_rnti;
+    out->mismatched_bits = saved_mismatches;
+    out->reject_reason   = last_reason;
+  }
+  return false;
+}
+
 bool nr_pdcch_blind_decode_and_extract(const int16_t* llr,
                                        uint8_t         aggregation_level,
                                        uint16_t        dci_length,
@@ -683,28 +1342,10 @@ bool nr_pdcch_blind_decode_and_extract_ex(const int16_t* llr,
     return false;
   }
 
-  // ---- Step 1: RNTI-independent polar decode; the CRC-recovered value IS the candidate RNTI. ----
-  uint64_t dci_estimation[2] = {0};
-  const uint32_t crc = polar_decoder_int16((int16_t*)llr, dci_estimation, 1, NR_POLAR_DCI_MESSAGE_TYPE,
-                                           dci_length, aggregation_level);
-
-  /* FULLCRC probe: polar_decoder_int16() returns a 24-bit CRC, and only a genuine match has its
-   * upper bits zero (the live path relies on exactly that when it does `crc == n_rnti`). Logging
-   * out->rnti instead -- which is (uint16_t)crc -- makes a false decode whose LOW 16 bits happen to
-   * equal the target look like a success. Print the untruncated value. */
-  {
-    static int s_fullcrc = -1;
-    if (s_fullcrc < 0)
-      s_fullcrc = (getenv("ISAC_PDCCH_FULLCRC") != NULL) ? 1 : 0;
-    /* RNTI-AGNOSTIC detector: a genuine polar decode has the upper 8 bits of the 24-bit CRC zero.
-     * Keying this on a PINNED rnti_min was a mistake -- the C-RNTI churns on every re-attach, so a
-     * pinned probe only sees the window where the guess happened to be live. Logging every crc with
-     * upper==0 finds real DCIs no matter which RNTI they carry. */
-    if (s_fullcrc && (crc >> 16) == 0)
-      printf("FULLCRC L=%u dci_len=%u crc=0x%x upper=0x%x in_range=%d\n",
-             (unsigned)aggregation_level, (unsigned)dci_length, crc, crc >> 16,
-             (crc >= rnti_min && crc <= rnti_max) ? 1 : 0);
-  }
+  // ---- Step 1: RNTI-independent polar decode; the CRC-recovered value IS the candidate RNTI.
+  // Shared with the format 1_0 entry point (blind_polar_decode() also carries the FULLCRC probe). ----
+  uint64_t       dci_estimation[2] = {0};
+  const uint32_t crc = blind_polar_decode(llr, aggregation_level, dci_length, rnti_min, rnti_max, dci_estimation);
 
   // ---- Step 2: RNTI plausibility -- range check instead of the live path's equality check. This
   // is the entire "blind" widening; see dci_nr.c:538-541 (reference only, not modified). ----
@@ -715,27 +1356,9 @@ bool nr_pdcch_blind_decode_and_extract_ex(const int16_t* llr,
   }
   out->rnti = (uint16_t)crc;
 
-  // ---- Step 2b: mismatched-bits false-detection check. Migrated from NRSniffer's dci_nr.c
-  // (nr_dci_false_detection): re-encode the decoded payload with the just-recovered RNTI and count
-  // bit mismatches against the ORIGINAL soft LLR polarity. A CRC match is a 1/65536 chance false
-  // accept even on a candidate that never carried real PDCCH; this is a far stronger discriminator,
-  // since a genuine decode's re-encoded codeword should agree with almost every soft-bit sign. The
-  // caller (nr_pdcch_blind_monitor_rt.c) owns the actual accept/reject threshold decision -- this
-  // function only measures and reports the count, staying consistent with its existing contract of
-  // returning `plausible=true` results for the caller's own gates to filter further. */
-  {
-    uint32_t encoder_output[NR_MAX_DCI_SIZE_DWORD];
-    polar_encoder_fast(dci_estimation, (void*)encoder_output, (int)crc, 1,
-                       NR_POLAR_DCI_MESSAGE_TYPE, dci_length, aggregation_level);
-    const uint8_t *enout_p = (const uint8_t*)encoder_output;
-    const int encoded_length = (int)aggregation_level * 108;
-    uint16_t mismatches = 0;
-    for (int i = 0; i < encoded_length/8; i++) {
-      for (int b = 0; b < 8; b++)
-        mismatches += ((enout_p[i] >> b) & 1) ^ ((llr[i*8+b] >> 15) & 1);
-    }
-    out->mismatched_bits = mismatches;
-  }
+  // ---- Step 2b: mismatched-bits false-detection measure. See blind_mismatched_bits(), which owns
+  // the rationale and is shared with the format 1_0 entry point. The caller owns the threshold. ----
+  out->mismatched_bits = blind_mismatched_bits(llr, dci_estimation, crc, aggregation_level, dci_length);
 
   // ---- Step 3: field extraction, in TS 38.212 spec order (MSB-first, matches
   // nr_mac_common.c's nr_dci_size() accumulation order and nr_ue_procedures.c's readBits()).
@@ -872,6 +1495,8 @@ bool nr_pdcch_blind_decode_and_extract_ex(const int16_t* llr,
   out->harq_pid           = (uint8_t)harq_pid;
   out->tda_index          = (uint8_t)time_domain_assignment;
   out->mapping_type       = (tda.mapping_type == typeB) ? 1 : 0;
+  out->dci_format         = NR_BLIND_DCI_FORMAT_1_1;
+  out->rnti_class         = NR_BLIND_RNTI_CLASS_C;
   out->plausible          = true;
   out->reject_reason      = NULL;
   return true;

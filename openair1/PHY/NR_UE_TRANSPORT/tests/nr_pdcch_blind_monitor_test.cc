@@ -38,6 +38,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <random>
+#include <string>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -656,6 +657,691 @@ TEST_F(BlindPdcchTest, PureNoiseFalseAcceptRateIsBounded) {
   EXPECT_LT(rate, 0.05) << "measured false-accept rate " << (rate * 100.0)
                         << "% is far above the ~0.39% estimate -- RNTI range check or field bound "
                            "checks may not be engaging";
+}
+
+
+// ---------------------------------------------------------------------------------------------
+// Group 5: DCI format 1_0 (TS 38.212 7.3.1.2.1). Added 2026-08-21.
+//
+// The packers below are written from the SPEC field lists, deliberately NOT by reading
+// nr_pdcch_blind_monitor.c's extractor -- a test that mirrors the implementation proves only that
+// the code is self-consistent. They were cross-checked field-by-field against this codebase's own
+// gNB packer (gNB_scheduler_primitives.c's NR_DL_DCI_FORMAT_1_0 case), which is a genuinely
+// independent implementation of the same table and is what actually transmits on this deployment.
+// ---------------------------------------------------------------------------------------------
+
+/// Bit-appender shared by the five format-1_0 packers: MSB-first, exactly as the gNB writes from
+/// `dci_size` downward.
+struct BitPacker {
+  uint64_t p = 0;
+  int      n = 0;
+  void put(uint32_t val, int nbits) {
+    if (nbits == 0) return;
+    const uint32_t mask = (nbits >= 32) ? 0xFFFFFFFFu : ((1u << nbits) - 1u);
+    p = (p << nbits) | (val & mask);
+    n += nbits;
+  }
+};
+
+struct Dci10Gt {
+  uint32_t riv         = 0;
+  uint32_t tda         = 0;
+  uint32_t vrb         = 0;
+  uint32_t mcs         = 0;
+  uint32_t ndi         = 0;
+  uint32_t rv          = 0;
+  uint32_t harq_pid    = 0;
+  uint32_t dai         = 0;
+  uint32_t tpc         = 0;
+  uint32_t pucch_ri    = 0;
+  uint32_t k1          = 0;
+  uint32_t tb_scaling  = 0;
+  uint32_t si_ind      = 0;
+  uint32_t sm_ind      = 3;
+  uint32_t sm          = 0;
+  uint32_t reserved    = 0; ///< deliberately settable: the reserved-bit checks are load-bearing
+  uint32_t pad_bits    = 0; ///< TS 38.212 7.3.1.0 UE-specific-search-space size alignment
+  uint32_t pad_value   = 0;
+};
+
+/// C-RNTI / TC-RNTI: identifier(1) freq(riv) tda(4) vrb(1) mcs(5) ndi(1) rv(2) harq(4) dai(2)
+/// tpc(2) pucch-ri(3) k1(3) = 28 + riv.
+uint64_t PackDci10Crnti(const Dci10Gt& gt, int riv_bits, uint32_t identifier = 1) {
+  BitPacker b;
+  b.put(identifier, 1);
+  b.put(gt.riv, riv_bits);
+  b.put(gt.tda, 4);
+  b.put(gt.vrb, 1);
+  b.put(gt.mcs, 5);
+  b.put(gt.ndi, 1);
+  b.put(gt.rv, 2);
+  b.put(gt.harq_pid, 4);
+  b.put(gt.dai, 2);
+  b.put(gt.tpc, 2);
+  b.put(gt.pucch_ri, 3);
+  b.put(gt.k1, 3);
+  b.put(gt.pad_value, gt.pad_bits);
+  return b.p;
+}
+
+/// SI-RNTI: freq(riv) tda(4) vrb(1) mcs(5) rv(2) si-indicator(1) reserved(15) = 28 + riv.
+uint64_t PackDci10Si(const Dci10Gt& gt, int riv_bits) {
+  BitPacker b;
+  b.put(gt.riv, riv_bits);
+  b.put(gt.tda, 4);
+  b.put(gt.vrb, 1);
+  b.put(gt.mcs, 5);
+  b.put(gt.rv, 2);
+  b.put(gt.si_ind, 1);
+  b.put(gt.reserved, 15);
+  return b.p;
+}
+
+/// RA-RNTI: freq(riv) tda(4) vrb(1) mcs(5) tb-scaling(2) reserved(16) = 28 + riv.
+uint64_t PackDci10Ra(const Dci10Gt& gt, int riv_bits) {
+  BitPacker b;
+  b.put(gt.riv, riv_bits);
+  b.put(gt.tda, 4);
+  b.put(gt.vrb, 1);
+  b.put(gt.mcs, 5);
+  b.put(gt.tb_scaling, 2);
+  b.put(gt.reserved, 16);
+  return b.p;
+}
+
+/// P-RNTI: sm-indicator(2) short-message(8) freq(riv) tda(4) vrb(1) mcs(5) tb-scaling(2)
+/// reserved(6) = 28 + riv.
+uint64_t PackDci10P(const Dci10Gt& gt, int riv_bits) {
+  BitPacker b;
+  b.put(gt.sm_ind, 2);
+  b.put(gt.sm, 8);
+  b.put(gt.riv, riv_bits);
+  b.put(gt.tda, 4);
+  b.put(gt.vrb, 1);
+  b.put(gt.mcs, 5);
+  b.put(gt.tb_scaling, 2);
+  b.put(gt.reserved, 6);
+  return b.p;
+}
+
+/// The deployment's real pdsch-ConfigCommon list, live-derived from this cell's SIB1 2026-08-21
+/// (2 entries: SLIV 40 -> S=1/L=13, SLIV 85 -> S=1/L=7). Used as BOTH lists unless a test
+/// deliberately makes them differ.
+nr_pdcch_blind_extract_opts_t OptsWithTdaLists(bool separate_common = false) {
+  nr_pdcch_blind_extract_opts_t o = DefaultOpts();
+  o.tda_count      = 2;
+  o.tda_start[0]   = 1;  o.tda_length[0]  = 13; o.tda_mapping[0] = 0;
+  o.tda_start[1]   = 1;  o.tda_length[1]  = 7;  o.tda_mapping[1] = 0;
+  if (separate_common) {
+    // A deliberately DIFFERENT common list, so a test can tell which one was consulted.
+    o.tda_common_count     = 2;
+    o.tda_common_start[0]  = 2; o.tda_common_length[0] = 4; o.tda_common_mapping[0] = 0;
+    o.tda_common_start[1]  = 2; o.tda_common_length[1] = 9; o.tda_common_mapping[1] = 0;
+  }
+  return o;
+}
+
+nr_pdcch_blind_dci10_ctx_t Dci10Ctx(uint8_t ss_type, uint16_t n_rb_riv) {
+  nr_pdcch_blind_dci10_ctx_t c = {};
+  c.ss_type             = ss_type;
+  c.n_rb_riv            = n_rb_riv;
+  c.rb_offset           = 0;
+  c.dmrs_typeA_position = kDmrsTypeAPositionPos2;
+  c.mux_pattern         = 1;
+  c.sib1                = 0;
+  c.rnti_class_mask     = 0;
+  return c;
+}
+
+// --- Sizing -------------------------------------------------------------------------------------
+
+TEST(Dci10Size, MatchesTheSpecFormula) {
+  // 28 fixed bits + ceil(log2(N(N+1)/2)). At the two bandwidths this project runs:
+  EXPECT_EQ(nr_pdcch_blind_dci10_size(106), 28 + 13); // 106*107/2 = 5671 -> 13 bits
+  EXPECT_EQ(nr_pdcch_blind_dci10_size(273), 28 + 16); // 273*274/2 = 37401 -> 16 bits
+  EXPECT_EQ(nr_pdcch_blind_dci10_size(48), 28 + 11);  // a typical CORESET#0 size
+  EXPECT_EQ(nr_pdcch_blind_dci10_size(0), 0);
+}
+
+TEST(Dci10Size, AllFiveRntiVariantsAreTheSameWidth) {
+  // This is the structural fact the whole design rests on (one decode, several hypotheses), so it
+  // is asserted directly rather than assumed: pack each variant and check the bit count.
+  const int riv_bits = RivBitsFor(273);
+  Dci10Gt gt;
+  BitPacker c, si, ra, p;
+  c.put(1,1); c.put(0,riv_bits); c.put(0,4); c.put(0,1); c.put(0,5); c.put(0,1); c.put(0,2);
+  c.put(0,4); c.put(0,2); c.put(0,2); c.put(0,3); c.put(0,3);
+  si.put(0,riv_bits); si.put(0,4); si.put(0,1); si.put(0,5); si.put(0,2); si.put(0,1); si.put(0,15);
+  ra.put(0,riv_bits); ra.put(0,4); ra.put(0,1); ra.put(0,5); ra.put(0,2); ra.put(0,16);
+  p.put(0,2); p.put(0,8); p.put(0,riv_bits); p.put(0,4); p.put(0,1); p.put(0,5); p.put(0,2); p.put(0,6);
+  EXPECT_EQ(c.n, nr_pdcch_blind_dci10_size(273));
+  EXPECT_EQ(si.n, c.n);
+  EXPECT_EQ(ra.n, c.n);
+  EXPECT_EQ(p.n, c.n);
+  (void)gt;
+}
+
+TEST(Dci00Size, MatchesTheSpecFormula) {
+  // 20 fixed bits + RIV (+1 with a supplementary uplink). Exists only for TS 38.212 7.3.1.0's
+  // UE-specific-search-space size alignment, so the useful assertion is the COMPARISON: at equal
+  // DL/UL bandwidth format 1_0 is the larger of the two, i.e. no padding is applied on this cell.
+  EXPECT_EQ(nr_pdcch_blind_dci00_size(273, 0), 20 + 16);
+  EXPECT_EQ(nr_pdcch_blind_dci00_size(273, 1), 20 + 16 + 1);
+  EXPECT_GT(nr_pdcch_blind_dci10_size(273), nr_pdcch_blind_dci00_size(273, 0));
+}
+
+// --- Field extraction, per RNTI class -----------------------------------------------------------
+
+TEST_F(BlindPdcchTest, Dci10CrntiExtractsEveryField) {
+  const uint16_t bwp = 273;
+  const int      riv_bits = RivBitsFor(bwp);
+  const uint16_t len = nr_pdcch_blind_dci10_size(bwp);
+  auto opts = OptsWithTdaLists();
+
+  Dci10Gt gt;
+  gt.riv      = 275; // start 2, length 3 under NRRIV2BW/NRRIV2PRBOFFSET
+  gt.tda      = 1;   // -> S=1 L=7 from the dedicated list
+  gt.mcs      = 9;
+  gt.ndi      = 1;
+  gt.rv       = 2;
+  gt.harq_pid = 5;
+  const uint64_t payload = PackDci10Crnti(gt, riv_bits);
+  auto llr = EncodeToLLR(payload, 0x4601, len, kAggregationLevel, 40.0, rng_);
+
+  auto ctx = Dci10Ctx(NR_BLIND_SS_UE_SPECIFIC, bwp);
+  nr_pdcch_blind_result_t out;
+  ASSERT_TRUE(nr_pdcch_blind_decode_and_extract_10(llr.data(), kAggregationLevel, len, &ctx, 0x0001, 0xFFEF,
+                                                   &opts, &out))
+      << (out.reject_reason ? out.reject_reason : "");
+  EXPECT_EQ(out.rnti, 0x4601);
+  EXPECT_EQ(out.dci_format, NR_BLIND_DCI_FORMAT_1_0);
+  EXPECT_EQ(out.rnti_class, NR_BLIND_RNTI_CLASS_C);
+  EXPECT_EQ(out.mcs, 9);
+  EXPECT_EQ(out.ndi, 1);
+  EXPECT_EQ(out.rv, 2);
+  EXPECT_EQ(out.harq_pid, 5);
+  EXPECT_EQ(out.tda_index, 1);
+  EXPECT_EQ(out.start_symbol, 1);
+  EXPECT_EQ(out.num_symbols, 7);
+  // TS 38.214 5.1.6.2 / 5.1.6.1.3: format 1_0 is single-port (1000), no DM-RS sequence init field,
+  // and 2 CDM groups without data for any allocation that is not exactly 2 symbols.
+  EXPECT_EQ(out.dmrs_ports, 1);
+  EXPECT_EQ(out.nscid, 0);
+  EXPECT_EQ(out.n_dmrs_cdm_groups, 2);
+  // TS 38.214 5.1.3.1: format 1_0 always indexes Table 5.1.3.1-1.
+  EXPECT_EQ(out.mcs_table, 0);
+}
+
+TEST_F(BlindPdcchTest, Dci10TwoSymbolAllocationUsesOneCdmGroup) {
+  // The OTHER branch of TS 38.214 5.1.6.1.3, and the one that matters downstream: at
+  // n_dmrs_cdm_groups == 1 the DM-RS symbol still carries data in the unreserved CDM group, which
+  // is the case the data-aided RE enumeration has to handle explicitly.
+  const uint16_t bwp = 273;
+  const int      riv_bits = RivBitsFor(bwp);
+  const uint16_t len = nr_pdcch_blind_dci10_size(bwp);
+  auto opts = OptsWithTdaLists();
+  opts.tda_count    = 1;
+  opts.tda_start[0] = 2;
+  opts.tda_length[0] = 2; // exactly 2 symbols
+  opts.tda_mapping[0] = 1; // typeB: type A would need S <= dmrs_TypeA_Position
+
+  Dci10Gt gt;
+  gt.riv = 275;
+  gt.tda = 0;
+  const uint64_t payload = PackDci10Crnti(gt, riv_bits);
+  auto llr = EncodeToLLR(payload, 0x1234, len, kAggregationLevel, 40.0, rng_);
+  auto ctx = Dci10Ctx(NR_BLIND_SS_UE_SPECIFIC, bwp);
+  nr_pdcch_blind_result_t out;
+  ASSERT_TRUE(nr_pdcch_blind_decode_and_extract_10(llr.data(), kAggregationLevel, len, &ctx, 0x0001, 0xFFEF,
+                                                   &opts, &out))
+      << (out.reject_reason ? out.reject_reason : "");
+  EXPECT_EQ(out.num_symbols, 2);
+  EXPECT_EQ(out.n_dmrs_cdm_groups, 1);
+}
+
+TEST_F(BlindPdcchTest, Dci10SiRntiIsAcceptedOutsideTheDynamicRange) {
+  // SI-RNTI is 0xFFFF, deliberately OUTSIDE the plausible C-RNTI range the caller passes. The
+  // format 1_1 path rejects it there; the 1_0 path must admit it on class, not on range.
+  const uint16_t cset0 = 48;
+  const int      riv_bits = RivBitsFor(cset0);
+  const uint16_t len = nr_pdcch_blind_dci10_size(cset0);
+  auto opts = OptsWithTdaLists();
+
+  Dci10Gt gt;
+  gt.riv    = 100;
+  gt.tda    = 0;
+  gt.mcs    = 4;
+  gt.rv     = 1;
+  gt.si_ind = 1;
+  const uint64_t payload = PackDci10Si(gt, riv_bits);
+  auto llr = EncodeToLLR(payload, 0xFFFF, len, kAggregationLevel, 40.0, rng_);
+
+  auto ctx = Dci10Ctx(NR_BLIND_SS_COMMON, cset0);
+  nr_pdcch_blind_result_t out;
+  ASSERT_TRUE(nr_pdcch_blind_decode_and_extract_10(llr.data(), kAggregationLevel, len, &ctx, 0x0001, 0xFFEF,
+                                                   &opts, &out))
+      << (out.reject_reason ? out.reject_reason : "");
+  EXPECT_EQ(out.rnti, 0xFFFF);
+  EXPECT_EQ(out.rnti_class, NR_BLIND_RNTI_CLASS_SI);
+  EXPECT_EQ(out.si_indicator, 1);
+  EXPECT_EQ(out.mcs, 4);
+  EXPECT_EQ(out.rv, 1);
+}
+
+TEST_F(BlindPdcchTest, Dci10SiRntiRejectsNonZeroReservedBits) {
+  // The 15 spec-fixed zero bits are this format's strongest false-accept discriminator. If they are
+  // not actually checked, a random payload that CRC-matches 0xFFFF becomes a confident SIB1 grant.
+  const uint16_t cset0 = 48;
+  const int      riv_bits = RivBitsFor(cset0);
+  const uint16_t len = nr_pdcch_blind_dci10_size(cset0);
+  auto opts = OptsWithTdaLists();
+
+  Dci10Gt gt;
+  gt.riv      = 100;
+  gt.reserved = 1; // a single bit is enough
+  const uint64_t payload = PackDci10Si(gt, riv_bits);
+  auto llr = EncodeToLLR(payload, 0xFFFF, len, kAggregationLevel, 40.0, rng_);
+
+  auto ctx = Dci10Ctx(NR_BLIND_SS_COMMON, cset0);
+  nr_pdcch_blind_result_t out;
+  EXPECT_FALSE(nr_pdcch_blind_decode_and_extract_10(llr.data(), kAggregationLevel, len, &ctx, 0x0001, 0xFFEF,
+                                                    &opts, &out));
+  EXPECT_EQ(out.rnti, 0xFFFF); // still reported, so the caller can see WHAT was rejected
+  ASSERT_NE(out.reject_reason, nullptr);
+  EXPECT_NE(std::string(out.reject_reason).find("reserved"), std::string::npos);
+}
+
+TEST_F(BlindPdcchTest, Dci10RaRntiCarriesTbScaling) {
+  const uint16_t cset0 = 48;
+  const int      riv_bits = RivBitsFor(cset0);
+  const uint16_t len = nr_pdcch_blind_dci10_size(cset0);
+  auto opts = OptsWithTdaLists();
+
+  Dci10Gt gt;
+  gt.riv        = 100;
+  gt.tda        = 1;
+  gt.mcs        = 3;
+  gt.tb_scaling = 1; // S = 0.5
+  const uint64_t payload = PackDci10Ra(gt, riv_bits);
+  auto llr = EncodeToLLR(payload, 0x0011, len, kAggregationLevel, 40.0, rng_); // a valid RA-RNTI
+
+  auto ctx = Dci10Ctx(NR_BLIND_SS_COMMON, cset0);
+  nr_pdcch_blind_result_t out;
+  ASSERT_TRUE(nr_pdcch_blind_decode_and_extract_10(llr.data(), kAggregationLevel, len, &ctx, 0x0001, 0xFFEF,
+                                                   &opts, &out))
+      << (out.reject_reason ? out.reject_reason : "");
+  EXPECT_EQ(out.rnti_class, NR_BLIND_RNTI_CLASS_RA);
+  EXPECT_EQ(out.tb_scaling, 1);
+  EXPECT_EQ(out.mcs, 3);
+}
+
+TEST_F(BlindPdcchTest, Dci10RaRntiRejectsTheReservedTbScalingCodePoint) {
+  // TS 38.214 Table 5.1.3.2-2 defines three scaling factors; the fourth code point is reserved.
+  const uint16_t cset0 = 48;
+  const int      riv_bits = RivBitsFor(cset0);
+  const uint16_t len = nr_pdcch_blind_dci10_size(cset0);
+  auto opts = OptsWithTdaLists();
+
+  Dci10Gt gt;
+  gt.riv        = 100;
+  gt.tb_scaling = 3;
+  const uint64_t payload = PackDci10Ra(gt, riv_bits);
+  auto llr = EncodeToLLR(payload, 0x0011, len, kAggregationLevel, 40.0, rng_);
+
+  auto ctx = Dci10Ctx(NR_BLIND_SS_COMMON, cset0);
+  ctx.rnti_class_mask = 1u << NR_BLIND_RNTI_CLASS_RA; // isolate the class under test
+  nr_pdcch_blind_result_t out;
+  EXPECT_FALSE(nr_pdcch_blind_decode_and_extract_10(llr.data(), kAggregationLevel, len, &ctx, 0x0001, 0xFFEF,
+                                                    &opts, &out));
+  ASSERT_NE(out.reject_reason, nullptr);
+  EXPECT_NE(std::string(out.reject_reason).find("TB scaling"), std::string::npos);
+}
+
+TEST_F(BlindPdcchTest, Dci10RaRntiIsNotAttemptedAboveTheSpecMaximum) {
+  // TS 38.321 5.1.3 bounds RA-RNTI at 17920. Above that the value CANNOT be an RA-RNTI, which is
+  // the one spec-derived way to stop an RA hypothesis from shadowing a TC/C-RNTI grant.
+  const uint16_t cset0 = 48;
+  const int      riv_bits = RivBitsFor(cset0);
+  const uint16_t len = nr_pdcch_blind_dci10_size(cset0);
+  auto opts = OptsWithTdaLists();
+
+  // A payload that would parse cleanly AS an RA grant (16 zero reserved bits, valid scaling).
+  Dci10Gt gt;
+  gt.riv = 100;
+  const uint64_t payload = PackDci10Ra(gt, riv_bits);
+  auto ctx = Dci10Ctx(NR_BLIND_SS_COMMON, cset0);
+  ctx.rnti_class_mask = 1u << NR_BLIND_RNTI_CLASS_RA;
+
+  nr_pdcch_blind_result_t out;
+  auto in_range = EncodeToLLR(payload, NR_PDCCH_BLIND_RA_RNTI_MAX, len, kAggregationLevel, 40.0, rng_);
+  EXPECT_TRUE(nr_pdcch_blind_decode_and_extract_10(in_range.data(), kAggregationLevel, len, &ctx, 0x0001,
+                                                   0xFFEF, &opts, &out))
+      << (out.reject_reason ? out.reject_reason : "");
+  auto out_of_range = EncodeToLLR(payload, NR_PDCCH_BLIND_RA_RNTI_MAX + 1, len, kAggregationLevel, 40.0, rng_);
+  EXPECT_FALSE(nr_pdcch_blind_decode_and_extract_10(out_of_range.data(), kAggregationLevel, len, &ctx, 0x0001,
+                                                    0xFFEF, &opts, &out));
+}
+
+TEST_F(BlindPdcchTest, Dci10PRntiShortMessageOnlyCarriesNoGrant) {
+  // TS 38.331 shortMessageIndicator: 10 = short message only. There is no PDSCH to point at, so
+  // reporting an allocation from those bits would be inventing one.
+  const uint16_t cset0 = 48;
+  const int      riv_bits = RivBitsFor(cset0);
+  const uint16_t len = nr_pdcch_blind_dci10_size(cset0);
+  auto opts = OptsWithTdaLists();
+  auto ctx  = Dci10Ctx(NR_BLIND_SS_COMMON, cset0);
+
+  Dci10Gt gt;
+  gt.riv = 100;
+  gt.sm  = 0xA5;
+
+  nr_pdcch_blind_result_t out;
+  gt.sm_ind = 3; // paging + short message: a real grant
+  auto both = EncodeToLLR(PackDci10P(gt, riv_bits), 0xFFFE, len, kAggregationLevel, 40.0, rng_);
+  ASSERT_TRUE(nr_pdcch_blind_decode_and_extract_10(both.data(), kAggregationLevel, len, &ctx, 0x0001, 0xFFEF,
+                                                   &opts, &out))
+      << (out.reject_reason ? out.reject_reason : "");
+  EXPECT_EQ(out.rnti_class, NR_BLIND_RNTI_CLASS_P);
+  EXPECT_EQ(out.short_messages, 0xA5);
+  EXPECT_EQ(out.short_messages_ind, 3);
+
+  gt.sm_ind = 2; // short message only
+  auto sm_only = EncodeToLLR(PackDci10P(gt, riv_bits), 0xFFFE, len, kAggregationLevel, 40.0, rng_);
+  EXPECT_FALSE(nr_pdcch_blind_decode_and_extract_10(sm_only.data(), kAggregationLevel, len, &ctx, 0x0001,
+                                                    0xFFEF, &opts, &out));
+}
+
+// --- The three things the search-space kind changes ----------------------------------------------
+
+TEST_F(BlindPdcchTest, Dci10CommonSearchSpaceUsesTheCommonTdaList) {
+  // TS 38.214 Table 5.1.2.1.1-1: the DEDICATED pdsch-Config list applies only to C-RNTI in a
+  // UE-specific search space. Everything else takes pdsch-ConfigCommon's. Made observable by giving
+  // the two lists different symbol allocations.
+  const uint16_t cset0 = 48;
+  const int      riv_bits = RivBitsFor(cset0);
+  const uint16_t len = nr_pdcch_blind_dci10_size(cset0);
+  auto opts = OptsWithTdaLists(/*separate_common=*/true);
+
+  Dci10Gt gt;
+  gt.riv = 100;
+  gt.tda = 0;
+  nr_pdcch_blind_result_t out;
+
+  // Common search space, TC-RNTI -> the COMMON list (S=2, L=4).
+  auto ctx_css = Dci10Ctx(NR_BLIND_SS_COMMON, cset0);
+  ctx_css.rnti_class_mask = 1u << NR_BLIND_RNTI_CLASS_TC;
+  auto llr_css = EncodeToLLR(PackDci10Crnti(gt, riv_bits), 0x4601, len, kAggregationLevel, 40.0, rng_);
+  ASSERT_TRUE(nr_pdcch_blind_decode_and_extract_10(llr_css.data(), kAggregationLevel, len, &ctx_css, 0x0001,
+                                                   0xFFEF, &opts, &out))
+      << (out.reject_reason ? out.reject_reason : "");
+  EXPECT_EQ(out.rnti_class, NR_BLIND_RNTI_CLASS_TC);
+  EXPECT_EQ(out.start_symbol, 2);
+  EXPECT_EQ(out.num_symbols, 4);
+
+  // UE-specific search space, C-RNTI, SAME payload -> the DEDICATED list (S=1, L=13).
+  const uint16_t bwp = 273;
+  const int      riv_bits_uss = RivBitsFor(bwp);
+  const uint16_t len_uss = nr_pdcch_blind_dci10_size(bwp);
+  auto llr_uss = EncodeToLLR(PackDci10Crnti(gt, riv_bits_uss), 0x4601, len_uss, kAggregationLevel, 40.0, rng_);
+  auto ctx_uss = Dci10Ctx(NR_BLIND_SS_UE_SPECIFIC, bwp);
+  ASSERT_TRUE(nr_pdcch_blind_decode_and_extract_10(llr_uss.data(), kAggregationLevel, len_uss, &ctx_uss,
+                                                   0x0001, 0xFFEF, &opts, &out))
+      << (out.reject_reason ? out.reject_reason : "");
+  EXPECT_EQ(out.rnti_class, NR_BLIND_RNTI_CLASS_C);
+  EXPECT_EQ(out.start_symbol, 1);
+  EXPECT_EQ(out.num_symbols, 13);
+}
+
+TEST_F(BlindPdcchTest, Dci10FrequencyReferenceComesFromTheContextNotTheBwp) {
+  // TS 38.212 7.3.1.0 sizes the frequency-domain field from CORESET#0 in a common search space. The
+  // SAME RIV value therefore names a DIFFERENT allocation depending on n_rb_riv -- so this asserts
+  // that the context, not a BWP constant, drives the decode.
+  auto opts = OptsWithTdaLists();
+  Dci10Gt gt;
+  gt.tda = 0;
+  nr_pdcch_blind_result_t out;
+
+  // RIV for start=3, length=2 in a 48-RB reference: (L-1)*N + S = 1*48 + 3 = 51.
+  gt.riv = 51;
+  const uint16_t len48 = nr_pdcch_blind_dci10_size(48);
+  auto ctx48 = Dci10Ctx(NR_BLIND_SS_COMMON, 48);
+  ctx48.rnti_class_mask = 1u << NR_BLIND_RNTI_CLASS_TC;
+  auto llr48 = EncodeToLLR(PackDci10Crnti(gt, RivBitsFor(48)), 0x4601, len48, kAggregationLevel, 40.0, rng_);
+  ASSERT_TRUE(nr_pdcch_blind_decode_and_extract_10(llr48.data(), kAggregationLevel, len48, &ctx48, 0x0001,
+                                                   0xFFEF, &opts, &out))
+      << (out.reject_reason ? out.reject_reason : "");
+  EXPECT_EQ(out.start_rb, 3);
+  EXPECT_EQ(out.num_rb, 2);
+
+  // Same RIV against a 273-RB reference is start=51, length=1 -- a different allocation entirely.
+  const uint16_t len273 = nr_pdcch_blind_dci10_size(273);
+  auto ctx273 = Dci10Ctx(NR_BLIND_SS_UE_SPECIFIC, 273);
+  auto llr273 = EncodeToLLR(PackDci10Crnti(gt, RivBitsFor(273)), 0x4601, len273, kAggregationLevel, 40.0, rng_);
+  ASSERT_TRUE(nr_pdcch_blind_decode_and_extract_10(llr273.data(), kAggregationLevel, len273, &ctx273, 0x0001,
+                                                   0xFFEF, &opts, &out))
+      << (out.reject_reason ? out.reject_reason : "");
+  EXPECT_EQ(out.start_rb, 51);
+  EXPECT_EQ(out.num_rb, 1);
+}
+
+TEST_F(BlindPdcchTest, Dci10SibOneFallsBackToTheDefaultTdaTable) {
+  // pdsch-ConfigCommon travels INSIDE SIB1, so a receiver decoding SIB1 cannot have its TDRA list
+  // yet: TS 38.214 Table 5.1.2.1.1-1 sends it to the default table selected by the SS/PBCH-to-
+  // CORESET#0 multiplexing pattern. Asserted by checking the configured list is NOT used.
+  const uint16_t cset0 = 48;
+  const int      riv_bits = RivBitsFor(cset0);
+  const uint16_t len = nr_pdcch_blind_dci10_size(cset0);
+  auto opts = OptsWithTdaLists(/*separate_common=*/true); // common list is S=2/L=4 at index 0
+
+  Dci10Gt gt;
+  gt.riv = 100;
+  gt.tda = 0;
+  auto llr = EncodeToLLR(PackDci10Si(gt, riv_bits), 0xFFFF, len, kAggregationLevel, 40.0, rng_);
+
+  auto ctx = Dci10Ctx(NR_BLIND_SS_COMMON, cset0);
+  ctx.sib1        = 1;
+  ctx.mux_pattern = 1; // -> default table A
+  nr_pdcch_blind_result_t out;
+  ASSERT_TRUE(nr_pdcch_blind_decode_and_extract_10(llr.data(), kAggregationLevel, len, &ctx, 0x0001, 0xFFEF,
+                                                   &opts, &out))
+      << (out.reject_reason ? out.reject_reason : "");
+  // Default table A row 0 at dmrs-TypeA-Position pos2 is S=2, L=12 -- and crucially NOT the
+  // configured common list's S=2/L=4.
+  EXPECT_EQ(out.num_symbols, 12);
+  EXPECT_NE(out.num_symbols, 4);
+}
+
+// --- Rejections that keep a blind scan honest -----------------------------------------------------
+
+TEST_F(BlindPdcchTest, Dci10RejectsTheUplinkFormatZeroZero) {
+  // Formats 0_0 and 1_0 share a payload size by construction (TS 38.212 7.3.1.0), so the identifier
+  // bit is the ONLY thing separating an UL grant from a DL one.
+  const uint16_t bwp = 273;
+  const uint16_t len = nr_pdcch_blind_dci10_size(bwp);
+  auto opts = OptsWithTdaLists();
+  Dci10Gt gt;
+  gt.riv = 275;
+  auto llr = EncodeToLLR(PackDci10Crnti(gt, RivBitsFor(bwp), /*identifier=*/0), 0x4601, len, kAggregationLevel,
+                         40.0, rng_);
+  auto ctx = Dci10Ctx(NR_BLIND_SS_UE_SPECIFIC, bwp);
+  nr_pdcch_blind_result_t out;
+  EXPECT_FALSE(nr_pdcch_blind_decode_and_extract_10(llr.data(), kAggregationLevel, len, &ctx, 0x0001, 0xFFEF,
+                                                    &opts, &out));
+  ASSERT_NE(out.reject_reason, nullptr);
+  EXPECT_NE(std::string(out.reject_reason).find("0_0"), std::string::npos);
+}
+
+TEST_F(BlindPdcchTest, Dci10RejectsAPdcchOrder) {
+  // TS 38.212 7.3.1.2.1: an all-ones frequency-domain field is a PDCCH order (start random access),
+  // and the bits after it are preamble/SSB/PRACH-mask, not a grant. Reading them as one produces a
+  // confident, wrong allocation -- which is exactly the failure class this module keeps hitting.
+  const uint16_t bwp = 273;
+  const int      riv_bits = RivBitsFor(bwp);
+  const uint16_t len = nr_pdcch_blind_dci10_size(bwp);
+  auto opts = OptsWithTdaLists();
+  Dci10Gt gt;
+  gt.riv = (1u << riv_bits) - 1u;
+  auto llr = EncodeToLLR(PackDci10Crnti(gt, riv_bits), 0x4601, len, kAggregationLevel, 40.0, rng_);
+  auto ctx = Dci10Ctx(NR_BLIND_SS_UE_SPECIFIC, bwp);
+  nr_pdcch_blind_result_t out;
+  EXPECT_FALSE(nr_pdcch_blind_decode_and_extract_10(llr.data(), kAggregationLevel, len, &ctx, 0x0001, 0xFFEF,
+                                                    &opts, &out));
+  ASSERT_NE(out.reject_reason, nullptr);
+  EXPECT_NE(std::string(out.reject_reason).find("PDCCH order"), std::string::npos);
+}
+
+TEST_F(BlindPdcchTest, Dci10RejectsInterleavedVrbToPrbRatherThanMisreadingIt) {
+  // Interleaved VRB-to-PRB mapping (TS 38.211 7.3.1.6) permutes the allocation in 2-RB bundles, so
+  // the PRBs are NOT the contiguous set the RIV names. OAI's UE PHY has no de-interleaver, so the
+  // only honest outcome is a labelled rejection -- silently extracting the wrong REs would look
+  // like a weak channel instead of a wrong one.
+  const uint16_t bwp = 273;
+  const uint16_t len = nr_pdcch_blind_dci10_size(bwp);
+  auto opts = OptsWithTdaLists();
+  Dci10Gt gt;
+  gt.riv = 275;
+  gt.vrb = 1;
+  auto llr = EncodeToLLR(PackDci10Crnti(gt, RivBitsFor(bwp)), 0x4601, len, kAggregationLevel, 40.0, rng_);
+  auto ctx = Dci10Ctx(NR_BLIND_SS_UE_SPECIFIC, bwp);
+  nr_pdcch_blind_result_t out;
+  EXPECT_FALSE(nr_pdcch_blind_decode_and_extract_10(llr.data(), kAggregationLevel, len, &ctx, 0x0001, 0xFFEF,
+                                                    &opts, &out));
+  ASSERT_NE(out.reject_reason, nullptr);
+  EXPECT_NE(std::string(out.reject_reason).find("interleaved"), std::string::npos);
+}
+
+TEST_F(BlindPdcchTest, Dci10RejectsATdaIndexBeyondTheList) {
+  // The time-domain field is ALWAYS 4 bits in format 1_0 (unlike 1_1's ceil(log2(count))), so on a
+  // 2-entry list 14 of the 16 code points are impossible -- a genuinely useful false-accept filter.
+  const uint16_t bwp = 273;
+  const uint16_t len = nr_pdcch_blind_dci10_size(bwp);
+  auto opts = OptsWithTdaLists();
+  Dci10Gt gt;
+  gt.riv = 275;
+  gt.tda = 7;
+  auto llr = EncodeToLLR(PackDci10Crnti(gt, RivBitsFor(bwp)), 0x4601, len, kAggregationLevel, 40.0, rng_);
+  auto ctx = Dci10Ctx(NR_BLIND_SS_UE_SPECIFIC, bwp);
+  nr_pdcch_blind_result_t out;
+  EXPECT_FALSE(nr_pdcch_blind_decode_and_extract_10(llr.data(), kAggregationLevel, len, &ctx, 0x0001, 0xFFEF,
+                                                    &opts, &out));
+  ASSERT_NE(out.reject_reason, nullptr);
+  EXPECT_NE(std::string(out.reject_reason).find("TDRA"), std::string::npos);
+}
+
+TEST_F(BlindPdcchTest, Dci10RejectsTheReservedMcsRange) {
+  // Format 1_0 always indexes Table 5.1.3.1-1, where 0..28 are valid and 29..31 are reserved. Note
+  // this bound differs from the format 1_1 path's >=28, which is table 2's -- see the comment at
+  // that check for why the two are deliberately different rather than inconsistent.
+  const uint16_t bwp = 273;
+  const uint16_t len = nr_pdcch_blind_dci10_size(bwp);
+  auto opts = OptsWithTdaLists();
+  auto ctx  = Dci10Ctx(NR_BLIND_SS_UE_SPECIFIC, bwp);
+  nr_pdcch_blind_result_t out;
+
+  Dci10Gt gt;
+  gt.riv = 275;
+  gt.mcs = 28; // the last VALID entry of table 1
+  auto ok = EncodeToLLR(PackDci10Crnti(gt, RivBitsFor(bwp)), 0x4601, len, kAggregationLevel, 40.0, rng_);
+  EXPECT_TRUE(nr_pdcch_blind_decode_and_extract_10(ok.data(), kAggregationLevel, len, &ctx, 0x0001, 0xFFEF,
+                                                   &opts, &out))
+      << (out.reject_reason ? out.reject_reason : "");
+  gt.mcs = 29; // reserved
+  auto bad = EncodeToLLR(PackDci10Crnti(gt, RivBitsFor(bwp)), 0x4601, len, kAggregationLevel, 40.0, rng_);
+  EXPECT_FALSE(nr_pdcch_blind_decode_and_extract_10(bad.data(), kAggregationLevel, len, &ctx, 0x0001, 0xFFEF,
+                                                    &opts, &out));
+}
+
+TEST_F(BlindPdcchTest, Dci10SizeAlignmentPaddingIsCheckedForZero) {
+  // TS 38.212 7.3.1.0 pads the smaller of 0_0/1_0 with ZEROS in a UE-specific search space. Padding
+  // that is not zero is not a format 1_0 payload.
+  const uint16_t bwp = 273;
+  const int      riv_bits = RivBitsFor(bwp);
+  const uint16_t base_len = nr_pdcch_blind_dci10_size(bwp);
+  const uint16_t len      = base_len + 3;
+  auto opts = OptsWithTdaLists();
+  auto ctx  = Dci10Ctx(NR_BLIND_SS_UE_SPECIFIC, bwp);
+  nr_pdcch_blind_result_t out;
+
+  Dci10Gt gt;
+  gt.riv      = 275;
+  gt.pad_bits = 3;
+  gt.pad_value = 0;
+  auto ok = EncodeToLLR(PackDci10Crnti(gt, riv_bits), 0x4601, len, kAggregationLevel, 40.0, rng_);
+  EXPECT_TRUE(nr_pdcch_blind_decode_and_extract_10(ok.data(), kAggregationLevel, len, &ctx, 0x0001, 0xFFEF,
+                                                   &opts, &out))
+      << (out.reject_reason ? out.reject_reason : "");
+  gt.pad_value = 5;
+  auto bad = EncodeToLLR(PackDci10Crnti(gt, riv_bits), 0x4601, len, kAggregationLevel, 40.0, rng_);
+  EXPECT_FALSE(nr_pdcch_blind_decode_and_extract_10(bad.data(), kAggregationLevel, len, &ctx, 0x0001, 0xFFEF,
+                                                    &opts, &out));
+}
+
+TEST_F(BlindPdcchTest, Dci10ClassMaskNarrowsWhatIsAttempted) {
+  // The mask is the cheapest false-accept control on this format: a receiver that only wants RRCSetup
+  // should not be inventing SI or paging grants out of noise.
+  const uint16_t cset0 = 48;
+  const uint16_t len = nr_pdcch_blind_dci10_size(cset0);
+  auto opts = OptsWithTdaLists();
+  Dci10Gt gt;
+  gt.riv = 100;
+  auto llr = EncodeToLLR(PackDci10Si(gt, RivBitsFor(cset0)), 0xFFFF, len, kAggregationLevel, 40.0, rng_);
+  nr_pdcch_blind_result_t out;
+
+  auto ctx_on = Dci10Ctx(NR_BLIND_SS_COMMON, cset0);
+  EXPECT_TRUE(nr_pdcch_blind_decode_and_extract_10(llr.data(), kAggregationLevel, len, &ctx_on, 0x0001, 0xFFEF,
+                                                   &opts, &out));
+  auto ctx_off = Dci10Ctx(NR_BLIND_SS_COMMON, cset0);
+  ctx_off.rnti_class_mask = 1u << NR_BLIND_RNTI_CLASS_TC; // SI not enabled
+  EXPECT_FALSE(nr_pdcch_blind_decode_and_extract_10(llr.data(), kAggregationLevel, len, &ctx_off, 0x0001,
+                                                    0xFFEF, &opts, &out));
+}
+
+TEST_F(BlindPdcchTest, Dci10EitherDynamicClassBitEnablesTheSameHypothesis) {
+  // C-RNTI and TC-RNTI are bit-identical on the air and the label is chosen by search space, so a
+  // caller asking for "C" in a common search space must not silently get nothing back.
+  const uint16_t cset0 = 48;
+  const uint16_t len = nr_pdcch_blind_dci10_size(cset0);
+  auto opts = OptsWithTdaLists();
+  Dci10Gt gt;
+  gt.riv = 100;
+  gt.tda = 0;
+  auto llr = EncodeToLLR(PackDci10Crnti(gt, RivBitsFor(cset0)), 0x4601, len, kAggregationLevel, 40.0, rng_);
+  nr_pdcch_blind_result_t out;
+  for (uint32_t bit : {(uint32_t)NR_BLIND_RNTI_CLASS_C, (uint32_t)NR_BLIND_RNTI_CLASS_TC}) {
+    auto ctx = Dci10Ctx(NR_BLIND_SS_COMMON, cset0);
+    ctx.rnti_class_mask = 1u << bit;
+    EXPECT_TRUE(nr_pdcch_blind_decode_and_extract_10(llr.data(), kAggregationLevel, len, &ctx, 0x0001, 0xFFEF,
+                                                     &opts, &out))
+        << "class bit " << bit << ": " << (out.reject_reason ? out.reject_reason : "");
+    EXPECT_EQ(out.rnti_class, NR_BLIND_RNTI_CLASS_TC) << "label follows the search space, not the mask";
+  }
+}
+
+TEST_F(BlindPdcchTest, Dci10PureNoiseFalseAcceptRateIsBounded) {
+  // The 1_1 path has this test; 1_0 needs its own because it accepts MORE RNTI values (the two
+  // broadcast ones) and tries several hypotheses per decode -- both of which could plausibly raise
+  // the false-accept rate, and neither of which is allowed to.
+  const uint16_t bwp = 273;
+  const uint16_t len = nr_pdcch_blind_dci10_size(bwp);
+  auto opts = OptsWithTdaLists();
+  auto ctx  = Dci10Ctx(NR_BLIND_SS_UE_SPECIFIC, bwp);
+
+  std::uniform_int_distribution<int> noise(-128, 127);
+  int accepts = 0;
+  const int kTrials = 2000;
+  for (int t = 0; t < kTrials; t++) {
+    std::vector<int16_t> llr(kAggregationLevel * 108);
+    for (auto& v : llr) v = (int16_t)noise(rng_);
+    nr_pdcch_blind_result_t out;
+    if (nr_pdcch_blind_decode_and_extract_10(llr.data(), kAggregationLevel, len, &ctx, 0x0001, 0xFFEF, &opts,
+                                             &out)) {
+      accepts++;
+    }
+  }
+  // A CRC-plausible false decode still has to pass the identifier bit, the MCS/TDRA/RIV/VRB checks
+  // and the padding check. The 1_1 test bounds itself the same way; the point is that the wider RNTI
+  // admission has not made this materially worse.
+  EXPECT_LT(accepts, kTrials / 20) << "accepts=" << accepts << " of " << kTrials;
 }
 
 }  // namespace

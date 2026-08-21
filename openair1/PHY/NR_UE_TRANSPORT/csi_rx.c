@@ -950,6 +950,17 @@ static void nr_isac_submit_csirs_ls(const NR_DL_FRAME_PARMS *frame_parms,
                              int loverline0,
                              uint32_t noise_power)
 {
+  /* Gate BOTH the engine and the per-source mask here, in the one place every caller passes through.
+   * The csirs_monitor caller (nr_ue_csi_rs_sensing_capture) had NO gate at all -- only the own-CSI-RS
+   * caller checked -- so `[sensing] sources` silently did not apply to monitored resources, and the
+   * call site in phy_procedures_nr_ue.c states the opposite ("the SUBMISSION to sensing stays gated
+   * on ISAC inside the capture"). MEASURED 2026-08-21: a capture configured sources="pdsch_data"
+   * still accumulated 126 CSI-RS rows per CPI against 148 pdsch_data rows in the whole run, so the
+   * unwanted source dominated the slow-time grid. CSI-RS RECEPTION stays ungated (it is a receive
+   * function and the monitor has its own enable); only the sensing SUBMISSION is gated. */
+  if (!nr_isac_enabled() || !nr_isac_source_enabled(NR_ISAC_SRC_CSI_RS)) {
+    return;
+  }
   const uint16_t stop_rb = csirs_config_pdu->start_rb + csirs_config_pdu->nr_of_rbs;
   uint32_t nof_ant = nr_isac_aoa_antennas();
   if (nof_ant > (uint32_t)frame_parms->nb_antennas_rx)

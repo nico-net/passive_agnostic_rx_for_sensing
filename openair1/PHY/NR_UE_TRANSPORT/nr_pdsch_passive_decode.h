@@ -71,6 +71,23 @@ typedef struct {
   uint8_t  rv;        ///< redundancy version from the DCI
   uint8_t  mcs_table; ///< 0 = qam64, 1 = qam256, 2 = qam64LowSE (the gNB's PDSCH-Config mcs-Table)
   uint16_t nb_rb_oh;  ///< xOverhead_PDSCH in REs per PRB (0/6/12/18); 0 when not configured
+  int8_t   mcs_table_lbrm; ///< MCS table whose MAXIMUM modulation order sizes TBS_LBRM. TS 38.214
+                       ///< 5.1.3.2 makes this a CELL property -- Qm = 8 if the UE is configured with
+                       ///< mcs-Table = qam256 on ANY BWP of the serving cell, else 6 -- NOT the table
+                       ///< this particular grant indexes. The two differ for every format 1_0 grant on
+                       ///< a qam256 cell, since 1_0 always uses table 1 (qam64) for its own MCS while
+                       ///< TBS_LBRM still uses 8. <0 = fall back to mcs_table (previous behaviour).
+  uint16_t bw_tbslbrm; ///< PRBs to size TBS_LBRM from (TS 38.212 5.4.2.1: the MAXIMUM number of PRBs
+                       ///< across the carrier's configured DL BWPs, which is NOT the allocation's own
+                       ///< frequency reference). 0 = fall back to dlsch_config->BWPSize, the previous
+                       ///< behaviour and correct whenever the two coincide. They do NOT coincide for a
+                       ///< format 1_0 grant in a CORESET#0 common search space, where BWPSize is the
+                       ///< 48-RB CORESET rather than the 273-RB carrier.
+  uint8_t  tb_scaling; ///< TS 38.214 Table 5.1.3.2-2 index: scaling factor S = {1, 0.5, 0.25}
+                       ///< applied to the TBS intermediate value. Non-zero ONLY for a DCI format 1_0
+                       ///< with CRC scrambled by RA-RNTI or P-RNTI (Msg2/RAR and paging), where the
+                       ///< field exists in place of NDI/HARQ. 0 everywhere else, which is the
+                       ///< identity, so a caller that never sets it is unchanged.
 } nr_pdsch_passive_grant_t;
 
 /// Outcome of one passive decode attempt.
