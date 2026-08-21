@@ -1750,6 +1750,52 @@ static void configure_common_BWP_dl(NR_UE_MAC_INST_t *mac, int bwp_id, NR_BWP_Do
       if (dl_common->pdsch_ConfigCommon->present == NR_SetupRelease_PDSCH_ConfigCommon_PR_release)
         asn1cFreeStruc(asn_DEF_NR_PDSCH_TimeDomainResourceAllocationList, bwp->tdaList_Common);
     }
+
+    /* ---- OTA CONFIG DERIVATION PROBE (ISAC_OTA_CFG=1) -------------------------------------
+     * Everything the blind PDCCH monitor is currently TOLD via pdcch_blind_monitor_* is, for the
+     * COMMON configuration, already available here -- decoded from SIB1 over the air, with no
+     * attach and no transmission. Printed in the same units the config file uses so the two can be
+     * reconciled directly; this is the first step toward a self-configuring receiver.
+     *
+     * Also derives the two DCI-1_1 field widths that depend on this config:
+     *   frequency-domain RA : ceil(log2(N*(N+1)/2))  with N = BWPSize
+     *   time-domain RA      : ceil(log2(#TDRA entries))
+     * Those are exactly the widths that were WRONG when the DCI payload was first decoded
+     * (CLAUDE.md sec 12), so deriving them beats guessing. NOT obtainable from SIB1: the DEDICATED
+     * CORESET/search space, DM-RS additional position, MCS table, CSI-RS resources -> RRCSetup. */
+    if (bwp_id == 0 && getenv("ISAC_OTA_CFG")) {
+      const int N = bwp->BWPSize;
+      int fd_bits = 0;
+      const long long riv_max = (long long)N * (N + 1) / 2;
+      while ((1LL << fd_bits) < riv_max)
+        fd_bits++;
+      const int n_tda = bwp->tdaList_Common ? bwp->tdaList_Common->list.count : 0;
+      int tda_bits = 0;
+      while ((1 << tda_bits) < n_tda)
+        tda_bits++;
+      LOG_I(NR_MAC,
+            "SENSING: OTACFG from SIB1 -- BWPStart=%d BWPSize=%d tdra_entries=%d => "
+            "dci freq_domain_bits=%d time_domain_bits=%d\n",
+            bwp->BWPStart, bwp->BWPSize, n_tda, fd_bits, tda_bits);
+      for (int t = 0; t < n_tda; t++) {
+        const NR_PDSCH_TimeDomainResourceAllocation_t *e = bwp->tdaList_Common->list.array[t];
+        const int sliv = (int)e->startSymbolAndLength;
+        /* TS 38.214 5.1.2.1. SLIV is AMBIGUOUS on its own: SLIV=40 encodes both (S=12,L=3) and
+         * (S=1,L=13). The spec disambiguates with S + L <= 14, so the constraint -- not the
+         * (L-1)<=7 branch alone -- is what selects the right pair. Getting this wrong silently
+         * yields a valid-looking but wrong PDSCH symbol allocation. */
+        int S, L;
+        L = (sliv / 14) + 1;
+        S = sliv % 14;
+        if (S + L > 14) {
+          L = 14 - (sliv / 14) + 1;
+          S = 14 - 1 - (sliv % 14);
+        }
+        LOG_I(NR_MAC, "SENSING: OTACFG   tda[%d] k0=%ld mappingType=%ld SLIV=%d -> S=%d L=%d\n",
+              t, e->k0 ? *e->k0 : 0, (long)e->mappingType, sliv, S, L);
+      }
+    }
+
     NR_BWP_PDCCH_t *pdcch = &mac->config_BWP_PDCCH[bwp_id];
     if (dl_common->pdcch_ConfigCommon) {
       if (dl_common->pdcch_ConfigCommon->present == NR_SetupRelease_PDCCH_ConfigCommon_PR_setup)
