@@ -24,6 +24,8 @@ void nrue_init_openair0(void);
 void nrue_ru_start(void);
 void nrue_ru_stop(void);
 void nrue_ru_end(void);
+int nrue_ru_restart_rx(void);
+int nrue_ru_reinit(void);
 void nrue_ru_set_freq(PHY_VARS_NR_UE *UE, uint64_t ul_carrier, uint64_t dl_carrier, int freq_offset);
 int nrue_ru_adjust_rx_gain(PHY_VARS_NR_UE *UE, int gain_change);
 int nrue_ru_read(PHY_VARS_NR_UE *UE, openair0_timestamp_t *ptimestamp, void **buff, int nsamps, int num_antennas);

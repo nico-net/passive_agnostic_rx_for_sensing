@@ -767,6 +767,21 @@ void nr_ue_timing_mutation_log(const char *what, long before, long after, const 
 }
 #define LOG_TIMEMUT(w, b, a) nr_ue_timing_mutation_log((w), (long)(b), (long)(a), __FILE__, __LINE__)
 
+/* ---- RF/PBCH CENSUS (2026-08-23) -------------------------------------------------------------
+ * An UNCAPPED, UNCONDITIONAL periodic census, added because every existing timing/PBCH diagnostic
+ * in this file is censored in a way that silently invalidates exactly the inference one wants to
+ * draw from it: PBCHFAIL stops after 6 prints (nr_pbch.c), TRACKLOCK after 25, and TIMEMUT both
+ * caps at 200 AND suppresses any event where the value did not change -- so "TIMEMUT went to zero"
+ * means "shiftForNextFrame stopped moving", NOT "PBCH stopped decoding". Reading it as the latter
+ * produced one wrong root cause here already.
+ * Reports absolute RF power straight off the just-read time-domain slot buffer, which is
+ * independent of frame/symbol alignment: it therefore separates "the signal went away" from "the
+ * receiver is looking in the wrong place", which no other instrument here can do. */
+static double g_census_pow;
+static long g_census_pow_n;
+static long g_census_ssb_slots;
+static long g_census_slots;
+
 static void syncInFrame(PHY_VARS_NR_UE *UE, openair0_timestamp_t *timestamp, int duration_rx_to_tx, openair0_timestamp_t rx_offset)
 {
   const NR_DL_FRAME_PARMS *fp = &UE->frame_parms;
@@ -1227,6 +1242,23 @@ void *UE_thread(void *arg)
 
     // Every read of this iteration is now counted; commit for the next iteration's continuity test.
     s_rxts_prev_consumed = rx_samples_consumed;
+    /* Sub-sampled mean |I|+|Q| of this slot, antenna 0. Every 64th sample keeps the cost
+     * negligible on the RT thread while still averaging hundreds of points per slot. */
+    {
+      const int n = (tmp > 0) ? tmp : readBlockSize;
+      double acc = 0.0;
+      int cnt = 0;
+      for (int i = 0; i < n; i += 64) {
+        const int ar = rxp[0][i].r < 0 ? -rxp[0][i].r : rxp[0][i].r;
+        const int ai = rxp[0][i].i < 0 ? -rxp[0][i].i : rxp[0][i].i;
+        acc += (double)(ar + ai);
+        cnt++;
+      }
+      if (cnt) {
+        g_census_pow += acc / cnt;
+        g_census_pow_n++;
+      }
+    }
     atomic_fetch_add_explicit(&nr_ue_diag_samples_consumed, rx_samples_consumed, memory_order_relaxed);
 
     // use previous timing_advance value to compute writeTimestamp
@@ -1269,6 +1301,162 @@ void *UE_thread(void *arg)
       const int b = shiftForNextFrame;
       shiftForNextFrame = ret;
       LOG_TIMEMUT("shiftForNextFrame(pbch)", b, shiftForNextFrame);
+    }
+
+    /* ---- RF STALL WATCHDOG + census ---------------------------------------------------------
+     * ROOT CAUSE THIS EXISTS FOR, measured 2026-08-23 on the live n78 cell. The X410 receive path
+     * stops delivering signal at a random point in a run: the mean |I|+|Q| of the raw time-domain
+     * slot buffer drops from ~70-81 to a PINNED 4.90-4.93 (constant to two decimals for tens of
+     * seconds -- a fixed level, not a fade) and NEVER recovers. It is invisible to everything that
+     * already exists here: UHD reports no error, reads return full length, and the RF timestamps
+     * stay perfectly continuous, so neither RFTSDISC (usrp_lib.cpp, uncapped) nor the RXDISCONT
+     * path above ever fires. Downstream nothing looks broken either -- the blind PDCCH monitor
+     * keeps emitting noise decodes (5129 distinct RNTIs over 5317 accepts) -- but real DCI accepts
+     * for the live C-RNTI go to EXACTLY zero for the remainder of the run.
+     *
+     * That failure, not any property of the CORESET, is what PASSIVE_RX_ONLY_HANDOVER.md section
+     * 10.5 measured as "2-3 % catch rate on the dedicated CORESET". Across 6 runs the catch rate
+     * is predicted by the healthy fraction alone at ~0.70 x healthy: 7 % healthy -> 4.6 % catch,
+     * 35 % -> 22.9 %, 66 % -> 49.1 %, 100 % -> 69.6/75.0 %. A receiver that stays healthy sustains
+     * ~70 %, and one 200 s run did so end to end.
+     *
+     * Keyed on RF POWER and nothing else. An earlier version of this watchdog keyed on "PBCH
+     * decoded" via UE_dl_preprocessing()'s return and could never fire: that return is set for
+     * every SSB slot PROCESSED, not for a successful decode, so it keeps resetting the counter
+     * straight through the stall. Power off the raw buffer is measured before any alignment,
+     * demodulation or gating, so it cannot be confounded by them.
+     *
+     * The reference is deliberately NOT a plain EMA of recent power: an EMA follows the signal
+     * down into the stall and then reports it as the new normal (the same self-referential trap
+     * that made a median-normalised offline detector report "no collapse" for a run that was
+     * collapsed for 93 % of its length). It is updated ONLY from windows that are still within
+     * 0.5x of it, so a genuine stall can never move it.
+     *
+     * Recovery mirrors the RXDISCONT block above verbatim -- same fields, same order -- so there
+     * is one invalidate-and-reacquire path rather than two that can drift apart. max_pos_acc is
+     * re-seeded from ntn_init_time_drift by the !UE->is_synchronized branch, so clearing it here
+     * is correct.
+     */
+    {
+      static int s_wd_on = -1;
+      static double s_ref;      /* healthy reference power; never follows the signal downward */
+      static int s_bad;         /* consecutive collapsed census windows */
+      static long s_fires;
+      if (s_wd_on < 0) {
+        const char *e = getenv("ISAC_RF_STALL_WATCHDOG");
+        s_wd_on = e ? atoi(e) : 1; /* 0 disables */
+      }
+      if (ret != INT_MAX)
+        g_census_ssb_slots++;
+      if (++g_census_slots >= 2000) { /* 2000 slots = 100 frames = 1 s at mu=1 */
+        const double w = g_census_pow_n ? g_census_pow / g_census_pow_n : -1.0;
+        extern void nr_pbch_diag_counts(unsigned long *ok, unsigned long *fail);
+        unsigned long pbch_ok = 0, pbch_fail = 0;
+        nr_pbch_diag_counts(&pbch_ok, &pbch_fail);
+        bool rf_collapsed = false, pbch_dead = false;
+        if (w >= 0.0) {
+          /* Running max with a hard-bounded fall. The previous form ("EMA, but only from windows
+           * within 0.5x of the reference") was NOT safe: it permits a GEOMETRIC RATCHET DOWNWARD
+           * -- 77 -> 40 -> 37 -> ... each step legal -- and MEASURED it did exactly that, ending
+           * at ref=14.13 while rf_pow sat at 4.90, so the collapse never tripped the 0.25x test.
+           * Rise instantly to any new healthy level; fall at most 0.1 %/window, which is far
+           * slower than the ~1 s the detector needs, so a real stall can never drag the reference
+           * into itself while still tracking genuine slow gain/channel drift. */
+          if (s_ref <= 0.0)
+            s_ref = w;
+          else if (w > s_ref)
+            s_ref = w;
+          else
+            s_ref = (w > s_ref * 0.999) ? w : s_ref * 0.999;
+          /* Two independent loss-of-lock signatures, both MEASURED on this cell:
+           *   - RF stall: the X410 stops delivering signal, power collapses to a pinned ~4.9.
+           *   - Timing runaway: power stays healthy (75-87) while max_pos_acc diverges
+           *     (439 -> 1394 and climbing) and the FFT window walks off the signal.
+           * Only the second is invisible to the power test, and PBCH failure is common to both --
+           * so a window in which NOT ONE SSB decoded is the general detector. A healthy receiver
+           * decodes every SSB (50/s at this cell's 20 ms period), so zero is unambiguous. */
+          rf_collapsed = (s_ref > 0.0 && w < 0.25 * s_ref);
+          pbch_dead = (pbch_ok == 0 && pbch_fail > 0);
+          if (rf_collapsed || pbch_dead)
+            s_bad++;
+          else
+            s_bad = 0;
+        }
+        LOG_I(PHY,
+              "SENSING: RFCENSUS slots=%ld ssb_slots=%ld pbch_ok=%lu pbch_fail=%lu rf_pow=%.2f "
+              "ref=%.2f bad=%d shiftForNextFrame=%d max_pos_acc=%d frame=%d\n",
+              g_census_slots, g_census_ssb_slots, pbch_ok, pbch_fail, w, s_ref, s_bad,
+              shiftForNextFrame, UE->max_pos_acc, curMsg.proc.frame_rx);
+        g_census_slots = 0;
+        g_census_ssb_slots = 0;
+        g_census_pow = 0.0;
+        g_census_pow_n = 0;
+        /* Two consecutive windows (2 s) before acting: one window is enough to be sure given how
+         * far apart the two levels sit, but the stall is permanent and a spurious reacquisition
+         * costs a real capture gap, so require it to persist. */
+        if (s_wd_on && s_bad >= 2 && UE->is_synchronized) {
+          s_fires++;
+          LOG_E(PHY,
+                "SENSING: RFSTALL %s (rf_pow=%.2f ref=%.2f pbch_ok=%lu pbch_fail=%lu "
+                "max_pos_acc=%d) for %d windows (frame=%d) n=%ld -> reacquiring\n",
+                rf_collapsed ? "RF stream stalled" : "PBCH lock lost (timing runaway)",
+                w, s_ref, pbch_ok, pbch_fail, UE->max_pos_acc, s_bad,
+                curMsg.proc.frame_rx, s_fires);
+          /* Re-acquisition ALONE does not work here, measured: after invalidating sync the UE made
+           * 52 consecutive failed initial-sync attempts, because there is no signal to acquire --
+           * the stream itself is stalled, not merely mis-aligned. The RX stream must be torn down
+           * and restarted at the device before any re-sync can succeed. */
+          if (1) { /* stream-level restart never succeeded in any observed case; go straight to re-init */
+            /* A stream-level restart is not enough when the MPM claim itself is gone: every RPC
+             * to the device throws (measured: set_gpio_src, then get_timekeeper_time at a 2000 ms
+             * timeout). Escalate to a full teardown + re-open, which releases the stale claim and
+             * takes a fresh one. Bounded, so a device that is genuinely gone cannot spin here. */
+            /* Cap is generous on purpose. MEASURED: this device can stall 8 times in 42 s, and
+             * each re-init recovers it with the real-accept rate staying flat across the gap --
+             * so giving up after a handful throws away a capture that was still working. The cap
+             * exists only so a permanently dead device cannot spin forever. Override with
+             * ISAC_RF_STALL_MAX_REINIT. */
+            /* IN-PROCESS RE-INIT IS OFF BY DEFAULT. It demonstrably restores the RF stream and
+             * PDCCH decoding -- real DCI accepts resume at full rate across the gap -- but whether
+             * PDSCH decoding survives it is NOT established. On one run whose re-init landed 15 %
+             * in, pdsch crc_ok froze at 726 for the remainder (84.7 % -> 10.1 % cumulative), which
+             * looked causal; it is not safe to read it that way, because a change in the SERVED
+             * UE's reported PMI produces the identical signature and was not ruled out. (Measured
+             * separately: PDSCH is precoded toward the served UE while PDCCH carries no pm_index
+             * at all, so a PMI change can null PDSCH at a passive receiver while leaving PDCCH at
+             * 84 % -- observed exactly, pm_index moving 3 -> 15/19 after a UE re-attach.)
+             * Defaulting to exit is the safe choice under that ambiguity: a capture is then either
+             * good or absent, never silently half-working. Set ISAC_RF_STALL_MAX_REINIT > 0 to opt
+             * in, and re-test the PDSCH question with the PMI held constant before trusting it. */
+            static int s_reinits;
+            static int s_reinit_cap = -1;
+            if (s_reinit_cap < 0) {
+              const char *e = getenv("ISAC_RF_STALL_MAX_REINIT");
+              s_reinit_cap = e ? atoi(e) : 0;
+            }
+            if (s_reinits < s_reinit_cap && nrue_ru_reinit() == 0) {
+              s_reinits++;
+              LOG_W(PHY, "SENSING: RFSTALL recovered by full device re-init (n=%d)\n", s_reinits);
+            } else {
+              /* Exiting is the correct outcome. Every sample from here on is a constant near-zero
+               * level that still produces plausible-looking noise decodes, so continuing would
+               * silently corrupt the capture -- which is exactly how this fault stayed hidden. A
+               * supervisor can restart the run; a contaminated result cannot be fixed afterwards. */
+              LOG_E(PHY, "SENSING: RFSTALL -- stopping capture (exit 3); restart the run\n");
+              exit(3);
+            }
+          }
+          UE->is_synchronized = 0;
+          stream_status = STREAM_STATUS_UNSYNC;
+          UE->max_pos_acc = 0;
+          UE->max_pos_iir = 0;
+          shiftForNextFrame = 0;
+          atomic_store_explicit(&nr_ue_pending_rebase_valid, 0, memory_order_relaxed);
+          decoded_frame_rx = MAX_FRAME_NUMBER - 1;
+          trashed_frames = 0;
+          s_bad = 0;
+        }
+      }
     }
     if (get_nrUE_params()->num_dl_actors > 0) {
       pushNotifiedFIFO(&UE->dl_actors[curMsg.proc.nr_slot_rx % get_nrUE_params()->num_dl_actors].fifo, newRx);

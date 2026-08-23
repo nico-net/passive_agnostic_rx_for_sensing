@@ -865,19 +865,29 @@ static void trx_usrp_start_generic_gpio(usrp_state_t *s)
 /*! \brief Called to start the USRP transceiver. Return 0 if OK, < 0 if error
     @param device pointer to the device structure specific to the RF hardware target
 */
-static int trx_usrp_start(openair0_device_t *device)
+static int trx_usrp_start_impl(openair0_device_t *device)
 {
   usrp_state_t *s = (usrp_state_t *)device->priv;
 
-  s->gpio_bank = (char *) "FP0"; //good for B210, X310 and N310
+  /* GPIO routing is a ONE-TIME device configuration, not part of starting the RX stream. It must
+   * be skipped on a restart (the RFSTALL recovery in nr-ue.c calls stop/start at runtime): on an
+   * X410 the second set_gpio_src() throws
+   *   uhd::runtime_error: Error during RPC call to `set_gpio_src' ... rpc::rpc_error during call
+   * which is uncaught and aborts the process. MEASURED: the recovery reproduced the stall, fired
+   * correctly, then core-dumped here. Everything below this block is genuine stream state and
+   * must still run on every start. */
+  static bool s_gpio_configured = false;
+  if (!s_gpio_configured) {
+    s_gpio_configured = true;
+    s->gpio_bank = (char *) "FP0"; //good for B210, X310 and N310
 
 #if UHD_VERSION>4000000
-  if (device->type == USRP_X400_DEV) {
-    // Set every pin on GPIO0 to be controlled by DB0_RF0
-    std::vector<std::string> sxx{12, "DB0_RF0"};
-    s->gpio_bank = (char *) "GPIO0";
-    s->usrp->set_gpio_src(s->gpio_bank, sxx);
-  }
+    if (device->type == USRP_X400_DEV) {
+      // Set every pin on GPIO0 to be controlled by DB0_RF0
+      std::vector<std::string> sxx{12, "DB0_RF0"};
+      s->gpio_bank = (char *) "GPIO0";
+      s->usrp->set_gpio_src(s->gpio_bank, sxx);
+    }
 #endif
 
   switch (device->openair0_cfg->gpio_controller) {
@@ -891,6 +901,7 @@ static int trx_usrp_start(openair0_device_t *device)
       break;
     default:
       AssertFatal(false, "illegal GPIO controller %d\n", device->openair0_cfg->gpio_controller);
+    }
   }
 
   s->wait_for_first_pps = 1;
@@ -916,6 +927,27 @@ static int trx_usrp_start(openair0_device_t *device)
   s->rx_stream->issue_stream_cmd(cmd);
 
   return 0;
+}
+
+/* Exception-safe wrapper. Starting the stream is fine at init, but the RFSTALL recovery in
+ * nr-ue.c calls it again after the host has LOST ITS MPM CLAIM on the X410 -- which is the
+ * underlying fault (UHD logs "mpmd device reclaiming loop failed!" / "rpc::timeout: Timeout of
+ * 10000ms"). Every RPC to the device then throws, and an uncaught uhd::runtime_error out of here
+ * aborts the whole receiver with a core dump. MEASURED: recovery attempts died first in
+ * set_gpio_src() and then in get_timekeeper_time(). Report the failure instead, and let the
+ * caller decide -- a capture that stops cleanly and says why beats one that core-dumps.
+ * Init keeps its old strictness: nrue_ru_start() asserts on a negative return. */
+static int trx_usrp_start(openair0_device_t *device)
+{
+  try {
+    return trx_usrp_start_impl(device);
+  } catch (const std::exception &e) {
+    LOG_E(HW, "trx_usrp_start failed: %s\n", e.what());
+    return -1;
+  } catch (...) {
+    LOG_E(HW, "trx_usrp_start failed: unknown exception\n");
+    return -1;
+  }
 }
 
 static void trx_usrp_send_end_of_burst(usrp_state_t *s)
@@ -982,13 +1014,27 @@ static void trx_usrp_end(openair0_device_t *device)
   if (usrp_tx_thread != 0)
     trx_usrp_write_reset(&device->write_thread);
 
-  /* finish tx and rx */
-  trx_usrp_send_end_of_burst(s);
-  trx_usrp_finish_rx(s);
+  /* finish tx and rx. NOTE: teardown must survive a dead RPC session -- this is reached from the
+   * RFSTALL re-init path in nr-ue.c precisely when the MPM claim has been lost, so every call that
+   * talks to the device can throw. An uncaught throw here would abort the receiver during the very
+   * recovery meant to save it. Dropping the shared_ptrs below is what actually releases the claim,
+   * so it must happen even if the graceful stop fails. */
+  try {
+    trx_usrp_send_end_of_burst(s);
+    trx_usrp_finish_rx(s);
+  } catch (const std::exception &e) {
+    LOG_W(HW, "trx_usrp_end: graceful stop failed (%s); releasing device anyway\n", e.what());
+  } catch (...) {
+    LOG_W(HW, "trx_usrp_end: graceful stop failed; releasing device anyway\n");
+  }
   /* set tx_stream, rx_stream, and usrp to NULL to clear/free them */
-  s->tx_stream = NULL;
-  s->rx_stream = NULL;
-  s->usrp = NULL;
+  try {
+    s->tx_stream = NULL;
+    s->rx_stream = NULL;
+    s->usrp = NULL;
+  } catch (...) {
+    LOG_W(HW, "trx_usrp_end: exception while releasing device handles\n");
+  }
   for (int i = 0; i < USRP_DECIM_MAX_CHANNELS; i++) {
     free(s->decim_raw_buf[i]);
   }
@@ -1686,8 +1732,16 @@ int trx_usrp_set_gains(openair0_device_t *device,
  */
 int trx_usrp_stop(openair0_device_t *device)
 {
+  /* Deliberately a NO-OP. An earlier version of the RFSTALL work made this drain the RX stream so
+   * a stall could be recovered by a stop/start -- but nrue_ru_stop() is ALSO called on NORMAL
+   * shutdown (nr-uesoftmodem.c:114 and :471), immediately before nrue_ru_end(), which drains
+   * again. On an X410 the drain is documented right here as not reliably running dry after
+   * STOP_CONTINUOUS, and it is bounded at 10000 iterations x 10 ms; doing it twice per exit hung
+   * the receiver at shutdown for minutes and left a zombie that wedged the capture harness.
+   * MEASURED: one run sat unreaped for ~28 minutes. Stall recovery goes straight to a full device
+   * re-init (nrue_ru_reinit), which is the tier that actually worked in every observed case. */
   UNUSED(device);
-  return(0);
+  return 0;
 }
 
 /*! \brief USRPB210 RX calibration table */
@@ -1845,7 +1899,7 @@ static void usrp_sync_pps(usrp_state_t *s)
 }
 
 extern "C" {
-  int device_init(openair0_device_t *device, openair0_config_t *openair0_cfg)
+  static int device_init_impl(openair0_device_t *device, openair0_config_t *openair0_cfg)
   {
     LOG_I(HW, "openair0_cfg[0].sdr_addrs == '%s'\n", openair0_cfg[0].sdr_addrs);
     LOG_I(HW, "openair0_cfg[0].clock_source == '%d' (internal = %d, external = %d)\n", openair0_cfg[0].clock_source,internal,external);
@@ -2479,6 +2533,28 @@ extern "C" {
     }
   }
   return 0;
+}
+
+/* Exception-safe entry point. multi_usrp::make() THROWS when the device is still claimed, which
+ * is exactly the state after an MPM claim is lost or a previous process was killed: MPM holds the
+ * stale claim for ~20 s (measured) before it expires. The RFSTALL re-init path in nr-ue.c retries
+ * across that window, so this must report the failure instead of aborting the receiver.
+ * device->priv is freed and cleared on failure -- otherwise the "multiple device init detected"
+ * short-circuit at the top would make every retry return success against a half-built device. */
+int device_init(openair0_device_t *device, openair0_config_t *openair0_cfg)
+{
+  try {
+    return device_init_impl(device, openair0_cfg);
+  } catch (const std::exception &e) {
+    LOG_E(HW, "device_init failed: %s\n", e.what());
+  } catch (...) {
+    LOG_E(HW, "device_init failed: unknown exception\n");
+  }
+  if (device != NULL && device->priv != NULL) {
+    free(device->priv);
+    device->priv = NULL;
+  }
+  return -1;
 }
 /*@}*/
 }/* extern c */

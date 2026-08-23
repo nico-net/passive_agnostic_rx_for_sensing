@@ -286,9 +286,30 @@ void nr_pbch_diag_snapshot_reference(void)
   g_pbch_have_ref = 1;
 }
 
+/* Uncapped PBCH decode counters. Everything else here is print-limited (this function stops
+ * after 6 failures), which makes a diagnostic's SILENCE meaningless -- reading TIMEMUT going quiet
+ * as "PBCH died" produced a wrong root cause once already. These are plain counters, read and
+ * cleared by the RF/PBCH census in nr-ue.c, and are the ONLY signal that catches both observed
+ * loss-of-lock modes: an RF stream stall (power collapses) AND a timing-loop runaway (power stays
+ * healthy while the FFT window walks off). */
+unsigned long g_nr_pbch_ok;
+unsigned long g_nr_pbch_fail;
+
+void nr_pbch_diag_counts(unsigned long *ok, unsigned long *fail)
+{
+  *ok = g_nr_pbch_ok;
+  *fail = g_nr_pbch_fail;
+  g_nr_pbch_ok = 0;
+  g_nr_pbch_fail = 0;
+}
+
 void nr_pbch_diag_report(int success, int frame, int slot, int ssbIndex)
 {
   static __thread int nfail;
+  if (success)
+    g_nr_pbch_ok++;
+  else
+    g_nr_pbch_fail++;
   if (success) {
     memcpy(g_pbch_last_good, g_pbch_diag, sizeof(g_pbch_last_good));
     g_pbch_have_good = 1;

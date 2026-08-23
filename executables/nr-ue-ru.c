@@ -2,6 +2,7 @@
  * SPDX-License-Identifier: LicenseRef-CSSL-1.0
  */
 
+#include <unistd.h>
 #include "nr-ue-ru.h"
 #include "nr-uesoftmodem.h"
 #include "PHY/NR_UE_TRANSPORT/nr_transport_proto_ue.h"
@@ -354,6 +355,71 @@ void nrue_ru_stop(void)
     if (ru->trx_stop_func)
       ru->trx_stop_func(ru);
   }
+}
+
+/* Runtime RX stream stop/start, for recovering the measured X410 stall where the device keeps
+ * returning full-length reads with continuous timestamps but no signal (see the RFSTALL watchdog
+ * in nr-ue.c). Separate from nrue_ru_stop()/nrue_ru_start() because it must ALSO drop the cached
+ * timestamp origin: the device restarts its sample counter at 0, and firstTS was captured on the
+ * first read of the previous stream, so keeping it would make every subsequent
+ * `tmp_timestamp - dev->firstTS` negative and corrupt all downstream slot arithmetic. */
+int nrue_ru_restart_rx(void)
+{
+  int rc = 0;
+  for (openair0_device_t *ru = openair0_dev; ru < openair0_dev + nrue_ru_count; ru++) {
+    if (ru->trx_stop_func)
+      ru->trx_stop_func(ru);
+    ru->firstTS_initialized = false;
+    if (ru->trx_start_func && ru->trx_start_func(ru) < 0)
+      rc = -1;
+  }
+  return rc;
+}
+
+/* FULL device teardown + re-open, for the case nrue_ru_restart_rx() cannot fix: the host has lost
+ * its MPM claim on the X410, so every RPC to the device throws and no stream-level restart can
+ * succeed. Releasing the multi_usrp handle (inside trx_end_func) is what drops the stale claim;
+ * MPM then lets a fresh openair0_device_load() claim the device again.
+ *
+ * Deliberately NOT AssertFatal on failure, unlike nrue_ru_start(): this runs mid-capture, and the
+ * caller has a defined fallback (stop the capture cleanly) that is better than aborting. */
+int nrue_ru_reinit(void)
+{
+  for (int ru_id = 0; ru_id < nrue_ru_count; ru_id++) {
+    openair0_device_t *dev = &openair0_dev[ru_id];
+    if (dev->trx_end_func)
+      dev->trx_end_func(dev); /* nulls the hooks and frees priv, so this cannot double-free */
+    dev->host_type = RAU_HOST;
+    /* MPM holds the stale claim for ~20 s after the previous session dies (MEASURED: a re-claim
+     * is refused with "Someone tried to claim this device again" at t=10 s and succeeds by
+     * t=20 s). When the claim was lost because the RPC link stalled, our release could not
+     * un-claim it, so the device is still marked claimed and the first attempts MUST fail.
+     * Retry across that window rather than giving up on the first refusal. */
+#define MPMD_CLAIM_EXPIRY_ATTEMPTS 8
+#define MPMD_CLAIM_EXPIRY_SLEEP_S  5
+    int loaded = -1;
+    for (int attempt = 0; attempt < MPMD_CLAIM_EXPIRY_ATTEMPTS; attempt++) {
+      if (attempt)
+        sleep(MPMD_CLAIM_EXPIRY_SLEEP_S);
+      loaded = openair0_device_load(dev, &openair0_cfg_g[ru_id]);
+      if (loaded == 0)
+        break;
+      LOG_W(HW, "nrue_ru_reinit: device %d still unavailable (attempt %d/%d)\n",
+            ru_id, attempt + 1, MPMD_CLAIM_EXPIRY_ATTEMPTS);
+    }
+    if (loaded != 0) {
+      LOG_E(HW, "nrue_ru_reinit: could not re-open device %d\n", ru_id);
+      return -1;
+    }
+    dev->firstTS_initialized = false;
+    if (dev->trx_start_func == NULL || dev->trx_start_func(dev) < 0) {
+      LOG_E(HW, "nrue_ru_reinit: could not restart device %d\n", ru_id);
+      return -1;
+    }
+    if (usrp_tx_thread == 1 && dev->trx_write_init)
+      dev->trx_write_init(dev);
+  }
+  return 0;
 }
 
 void nrue_ru_end(void)

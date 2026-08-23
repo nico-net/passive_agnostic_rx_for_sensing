@@ -72,6 +72,17 @@ print(f"run{i} crnti={crnti} dur={d:.0f}s occ={occ} offered={off} ({off/d:.0f}/s
       f"real_accepts={real} crc_ok={ok} rows/s={ok/d:.1f} "
       f"CATCH={100*ok/off if off else 0:.2f}% efloor={ef}")
 PY
-  sleep 3
+  # The X410 keeps a stale MPM claim for ~20 s after a process exits, so a run started too soon
+  # simply cannot open the device and dies at dur=1s with occ=0. MEASURED: with the previous
+  # `sleep 3`, alternate runs failed exactly this way (run2 and run4 of a 6-run batch). Wait for
+  # the device to be claimable again rather than guessing a delay.
+  for _ in $(seq 1 10); do
+    sleep 5
+    if timeout 45 uhd_usrp_probe --args "type=x4xx,addr=192.168.20.2,mgmt_addr=128.178.122.3" \
+         2>&1 | grep -qE "X410|Device: X400"; then
+      break
+    fi
+    echo "  (waiting for X410 claim to expire)"
+  done
 done
 echo "=== DONE ==="; cat "$RESULTS"
