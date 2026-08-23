@@ -39,11 +39,104 @@
 #include "PHY/CODING/coding_defs.h"
 #include "PHY/NR_REFSIG/dmrs_nr.h" // get_num_dmrs_re_per_rb, nr_chest_time_domain_avg
 #include "PHY/CODING/nrLDPC_coding/nrLDPC_coding_interface.h"
+#include <complex.h>
 #include "PHY/MODULATION/nr_modulation.h"
 #include "PHY/NR_TRANSPORT/nr_transport_common_proto.h"
 #include "PHY/NR_UE_ISAC/nr_isac.h"
 #include "executables/nr-uesoftmodem.h"
 #include "openair2/LAYER2/NR_MAC_COMMON/nr_mac_common.h"
+
+/* ==============================================================================================
+ * MULTI-LAYER (Nl > 1) CFR: windowed least-squares MIMO channel solve.
+ *
+ * Why this exists. At Nl == 1 the channel is recovered per RE by a scalar division, H = Y/X. At
+ * Nl > 1 the receive sample is a SUPERPOSITION, y_a[k] = sum_l h_{a,l} x_l[k], so dividing by any
+ * one layer's x_l leaves the other layers inside the result: not a noisy channel estimate, but
+ * not a channel at all. The grant still decodes -- the passive decode path handles Nl > 1 -- so
+ * before this the transport block was recovered and its CFR thrown away.
+ *
+ * The solve. Over a window of W REs across which the channel is taken to be flat, the Nl unknowns
+ * per receive antenna are over-determined by W equations:
+ *     G[l][m] = sum_k x_l[k] conj(x_m[k])        (Nl x Nl, Hermitian, SHARED by all antennas)
+ *     b_a[l]  = sum_k y_a[k] conj(x_l[k])
+ *     h_a     = G^-1 b_a
+ * G is shared because X is the same reconstructed transport block for every antenna -- the same
+ * property that makes the AoA extraction a pure inner loop. Layers carry independent data, so G is
+ * close to W*E|x|^2*I and well conditioned once W is a few times Nl; it is still solved exactly,
+ * and the conditioning is CHECKED rather than assumed.
+ *
+ * Window shape. A window never spans symbols: flatness is a frequency-coherence assumption, and
+ * crossing a symbol boundary would fold time variation into it. Within a symbol the REs are
+ * contiguous in k, which is the direction the channel varies most slowly.
+ *
+ * WHICH LAYER IS EMITTED, and why it is fixed. The solve yields Nl channels per antenna, one per
+ * layer: h_{a,l} is the physical channel projected through precoder column w_l. Layer 0 is emitted
+ * ALWAYS -- never "the strongest layer" -- because the sensing pipeline integrates coherently
+ * across slow time, and switching which projection is reported would inject a phase discontinuity
+ * that looks exactly like target motion. Note the residual caveat this cannot fix: w_l itself is
+ * chosen by the gNB from the SERVED UE's PMI report, so a PMI change still re-projects the CFR
+ * between CPIs. That is a property of the air interface, not of this solve.
+ *
+ * At Nl == 1 the window degenerates to W = 1 and the arithmetic below is the ORIGINAL expression,
+ * written out explicitly so the validated single-layer path is bit-identical, not merely equivalent.
+ * ============================================================================================== */
+#define NR_ISAC_MIMO_MAX_LAYERS 4
+#define NR_ISAC_MIMO_MAX_ANT    8
+#define NR_ISAC_MIMO_MAX_W      64
+
+/* Gauss-Jordan with partial pivoting on an Nl x Nl complex system, nrhs right-hand sides solved
+ * together (one per receive antenna). Returns false if the pivot magnitude falls too far below the
+ * largest initial diagonal -- an ill-conditioned window is dropped rather than inverted, following
+ * this file's standing rule that contributing nothing beats corrupting the range profile. */
+static bool isac_mimo_solve(float _Complex *G, float _Complex *b, unsigned n, unsigned nrhs)
+{
+  float dmax = 0.0f;
+  for (unsigned i = 0; i < n; i++) {
+    const float d = cabsf(G[i * n + i]);
+    if (d > dmax)
+      dmax = d;
+  }
+  if (!(dmax > 0.0f))
+    return false;
+  const float tol = 1e-4f * dmax;
+
+  for (unsigned i = 0; i < n; i++) {
+    unsigned piv = i;
+    float    pm  = cabsf(G[i * n + i]);
+    for (unsigned r = i + 1; r < n; r++) {
+      const float m = cabsf(G[r * n + i]);
+      if (m > pm) { pm = m; piv = r; }
+    }
+    if (pm < tol)
+      return false;
+    if (piv != i) {
+      for (unsigned c = 0; c < n; c++) {
+        const float _Complex t = G[i * n + c]; G[i * n + c] = G[piv * n + c]; G[piv * n + c] = t;
+      }
+      for (unsigned q = 0; q < nrhs; q++) {
+        const float _Complex t = b[q * n + i]; b[q * n + i] = b[q * n + piv]; b[q * n + piv] = t;
+      }
+    }
+    const float _Complex inv = 1.0f / G[i * n + i];
+    for (unsigned c = 0; c < n; c++)
+      G[i * n + c] *= inv;
+    for (unsigned q = 0; q < nrhs; q++)
+      b[q * n + i] *= inv;
+    for (unsigned r = 0; r < n; r++) {
+      if (r == i)
+        continue;
+      const float _Complex f = G[r * n + i];
+      if (f == 0.0f)
+        continue;
+      for (unsigned c = 0; c < n; c++)
+        G[r * n + c] -= f * G[i * n + c];
+      for (unsigned q = 0; q < nrhs; q++)
+        b[q * n + r] -= f * b[q * n + i];
+    }
+  }
+  return true;
+}
+
 
 void nr_isac_pdsch_data_aided_submit(PHY_VARS_NR_UE *ue,
                                      const UE_nr_rxtx_proc_t *proc,
@@ -74,15 +167,16 @@ void nr_isac_pdsch_data_aided_submit(PHY_VARS_NR_UE *ue,
    * decode and its CRC pass rate is measurable; it just cannot contribute a CFR row until that
    * solve exists. Contributing nothing is always preferable to corrupting the range profile -- the
    * same rule the DM-RS-symbol RE-enumeration bug below is written under. */
-  if (cw->Nl != 1) {
-    static __thread bool warned_ml = false;
-    if (!warned_ml) {
-      warned_ml = true;
-      LOG_W(NR_PHY,
-            "SENSING: data-aided CFR skipped -- grant has Nl=%u layers and Ĥ=Y/X is only valid at "
-            "Nl=1 (needs a windowed least-squares MIMO solve). The TB still decodes; only the CFR "
-            "submission is suppressed.\n",
-            cw->Nl);
+  /* The windowed least-squares solve below (isac_mimo_solve) now handles Nl > 1, so the former
+   * unconditional bail-out here is gone. What remains is a genuine SUPPORTED-RANGE gate: the solve
+   * needs at least as many receive antennas as layers (Nl equations per RE come from nof_ant
+   * observations), and this file's buffers are sized for a single codeword. */
+  if (cw->Nl < 1 || cw->Nl > NR_ISAC_MIMO_MAX_LAYERS) {
+    static __thread bool warned_nl = false;
+    if (!warned_nl) {
+      warned_nl = true;
+      LOG_W(NR_PHY, "SENSING: data-aided CFR skipped -- Nl=%u outside the supported range 1..%d\n",
+            cw->Nl, NR_ISAC_MIMO_MAX_LAYERS);
     }
     return;
   }
@@ -222,6 +316,107 @@ void nr_isac_pdsch_data_aided_submit(PHY_VARS_NR_UE *ue,
   uint32_t mod_idx = 0;
   const uint32_t max_re = sizeofArray(isac_k);
 
+  /* Least-squares window. W = 1 at Nl == 1 keeps the single-layer arithmetic bit-identical; above
+   * that the default is 4x the layer count, which puts the Gram matrix comfortably clear of the
+   * conditioning gate while staying narrow enough in frequency for the flat-channel assumption.
+   * ISAC_MIMO_WINDOW overrides it for experiments. */
+  const uint32_t NL = cw->Nl;
+  uint32_t isac_mimo_win = 1;
+  if (NL > 1) {
+    static int s_win = -1;
+    if (s_win < 0) {
+      const char *e = getenv("ISAC_MIMO_WINDOW");
+      s_win = e ? atoi(e) : 0;
+    }
+    isac_mimo_win = (s_win > 0) ? (uint32_t)s_win : 4u * NL;
+    if (isac_mimo_win < NL)
+      isac_mimo_win = NL;
+    if (isac_mimo_win > NR_ISAC_MIMO_MAX_W)
+      isac_mimo_win = NR_ISAC_MIMO_MAX_W;
+  }
+  if (isac_nof_ant < NL) {
+    static __thread bool warned_ant = false;
+    if (!warned_ant) {
+      warned_ant = true;
+      LOG_W(NR_PHY,
+            "SENSING: data-aided CFR skipped -- Nl=%u layers need at least that many rx antennas, have %u\n",
+            NL, isac_nof_ant);
+    }
+    return;
+  }
+  static __thread float    xw[NR_ISAC_MIMO_MAX_W][NR_ISAC_MIMO_MAX_LAYERS][2];
+  static __thread float    yw[NR_ISAC_MIMO_MAX_W][NR_ISAC_MIMO_MAX_ANT][2];
+  static __thread uint32_t wk[NR_ISAC_MIMO_MAX_W];
+  uint32_t wn = 0;
+  uint32_t dropped_windows = 0;
+
+  /* Close the current window: build the shared Gram matrix and one right-hand side per antenna,
+   * solve, and commit layer 0's channel to every RE in the window. A window that fails the solve's
+   * conditioning gate is DROPPED whole -- its REs are never recorded -- so a badly conditioned
+   * stretch costs coverage, never correctness. Written as a macro because it needs a dozen locals
+   * of the enclosing scope and C has no closures; it is used twice, at window-full and symbol-end. */
+#define ISAC_MIMO_FLUSH()                                                                            \
+  do {                                                                                               \
+    if (wn > 0) {                                                                                    \
+      if (NL == 1) {                                                                                 \
+        /* Bit-identical to the original single-layer expression, not merely equivalent. */           \
+        for (uint32_t w = 0; w < wn && nof_re < max_re; w++) {                                        \
+          const float xr = xw[w][0][0], xi = xw[w][0][1];                                             \
+          const float xmag2 = xr * xr + xi * xi;                                                      \
+          for (uint32_t a = 0; a < isac_nof_ant; a++) {                                               \
+            const float yr = yw[w][a][0], yi = yw[w][a][1];                                           \
+            const size_t o = (size_t)2 * ((size_t)a * isac_max_re + nof_re);                          \
+            isac_h[o]     = (yr * xr + yi * xi) / xmag2;                                              \
+            isac_h[o + 1] = (yi * xr - yr * xi) / xmag2;                                              \
+            if (a == 0)                                                                               \
+              ypow += (double)yr * yr + (double)yi * yi;                                              \
+          }                                                                                           \
+          isac_k[nof_re] = wk[w];                                                                      \
+          isac_l[nof_re] = (uint32_t)l;                                                                \
+          nof_re++;                                                                                    \
+        }                                                                                              \
+      } else {                                                                                         \
+        float _Complex Gm[NR_ISAC_MIMO_MAX_LAYERS * NR_ISAC_MIMO_MAX_LAYERS];                          \
+        float _Complex bv[NR_ISAC_MIMO_MAX_ANT * NR_ISAC_MIMO_MAX_LAYERS];                             \
+        for (uint32_t u = 0; u < NL * NL; u++)                                                         \
+          Gm[u] = 0.0f;                                                                                \
+        for (uint32_t u = 0; u < isac_nof_ant * NL; u++)                                               \
+          bv[u] = 0.0f;                                                                                \
+        for (uint32_t w = 0; w < wn; w++) {                                                            \
+          for (uint32_t li = 0; li < NL; li++) {                                                       \
+            const float _Complex xl = xw[w][li][0] + I * xw[w][li][1];                                 \
+            for (uint32_t mi = 0; mi < NL; mi++) {                                                     \
+              const float _Complex xm = xw[w][mi][0] + I * xw[w][mi][1];                               \
+              Gm[li * NL + mi] += xl * conjf(xm);                                                      \
+            }                                                                                          \
+            for (uint32_t a = 0; a < isac_nof_ant; a++) {                                              \
+              const float _Complex ya = yw[w][a][0] + I * yw[w][a][1];                                 \
+              bv[a * NL + li] += ya * conjf(xl);                                                       \
+            }                                                                                          \
+          }                                                                                            \
+        }                                                                                              \
+        if (isac_mimo_solve(Gm, bv, NL, isac_nof_ant)) {                                               \
+          for (uint32_t w = 0; w < wn && nof_re < max_re; w++) {                                       \
+            for (uint32_t a = 0; a < isac_nof_ant; a++) {                                              \
+              const float _Complex h0 = bv[a * NL + 0]; /* layer 0, always -- see the header note */   \
+              const size_t o = (size_t)2 * ((size_t)a * isac_max_re + nof_re);                         \
+              isac_h[o]     = crealf(h0);                                                              \
+              isac_h[o + 1] = cimagf(h0);                                                              \
+              if (a == 0)                                                                              \
+                ypow += (double)yw[w][a][0] * yw[w][a][0] + (double)yw[w][a][1] * yw[w][a][1];         \
+            }                                                                                          \
+            isac_k[nof_re] = wk[w];                                                                     \
+            isac_l[nof_re] = (uint32_t)l;                                                               \
+            nof_re++;                                                                                   \
+          }                                                                                             \
+        } else {                                                                                        \
+          dropped_windows++;                                                                             \
+        }                                                                                                \
+      }                                                                                                  \
+      wn = 0;                                                                                            \
+    }                                                                                                    \
+  } while (0)
+
   for (int l = dlsch_config->start_symbol; l < dlsch_config->start_symbol + dlsch_config->number_symbols; l++) {
     // --- Which REs of this symbol carry DATA. A DM-RS symbol is NOT necessarily data-free: with
     // numDmrsCdmGrpsNoData == 1 only one CDM group is reserved and the rest of the symbol is
@@ -270,25 +465,40 @@ void nr_isac_pdsch_data_aided_submit(PHY_VARS_NR_UE *ue,
       int re = start_re + j;
       if (re >= fp->ofdm_symbol_size)
         re -= fp->ofdm_symbol_size;
-      const c16_t x = mod_syms[mod_idx++];
-      const float xr = (float)x.r, xi = (float)x.i;
-      const float xmag2 = xr * xr + xi * xi;
-      if (xmag2 < 1e-6f)
-        continue; // shouldn't happen for a QAM point, but guard the division
-      for (uint32_t a = 0; a < isac_nof_ant; a++) {
-        const c16_t y  = rxdataF[a][l * fp->ofdm_symbol_size + re];
-        const float yr = (float)y.r, yi = (float)y.i;
-        // Ĥ = Y / X = Y * conj(X) / |X|^2
-        const size_t o = (size_t)2 * ((size_t)a * isac_max_re + nof_re);
-        isac_h[o]     = (yr * xr + yi * xi) / xmag2;
-        isac_h[o + 1] = (yi * xr - yr * xi) / xmag2;
-        if (a == 0)
-          ypow += (double)yr * yr + (double)yi * yi; // gates judge the primary antenna
+      // Single-codeword layer mapping, TS 38.211 7.3.1.3: x^(l)(i) = d(Nl*i + l). One RE therefore
+      // consumes Nl consecutive modulation symbols, interleaved across layers. At Nl == 1 this is
+      // exactly the previous `mod_syms[mod_idx++]`.
+      if (mod_idx + NL > TB_parameters.G / cw->qamModOrder)
+        break;
+      float xre[NR_ISAC_MIMO_MAX_LAYERS][2];
+      bool  degenerate = false;
+      for (uint32_t lay = 0; lay < NL; lay++) {
+        const c16_t xs = mod_syms[mod_idx + lay];
+        xre[lay][0] = (float)xs.r;
+        xre[lay][1] = (float)xs.i;
+        if (xre[lay][0] * xre[lay][0] + xre[lay][1] * xre[lay][1] < 1e-6f)
+          degenerate = true;
       }
-      isac_k[nof_re]         = base_sc + (uint32_t)j;
-      isac_l[nof_re]         = (uint32_t)l;
-      nof_re++;
+      mod_idx += NL;
+      if (degenerate)
+        continue; // shouldn't happen for a QAM point, but guard the solve
+      for (uint32_t lay = 0; lay < NL; lay++) {
+        xw[wn][lay][0] = xre[lay][0];
+        xw[wn][lay][1] = xre[lay][1];
+      }
+      for (uint32_t a = 0; a < isac_nof_ant; a++) {
+        const c16_t y = rxdataF[a][l * fp->ofdm_symbol_size + re];
+        yw[wn][a][0]  = (float)y.r;
+        yw[wn][a][1]  = (float)y.i;
+      }
+      wk[wn] = base_sc + (uint32_t)j;
+      wn++;
+      if (wn >= isac_mimo_win)
+        ISAC_MIMO_FLUSH();
     }
+    // A window never spans symbols: flatness is a frequency assumption, and carrying it across a
+    // symbol boundary would fold time variation into the solve. Close whatever is buffered.
+    ISAC_MIMO_FLUSH();
     if (nof_re > sym_re0 && nof_sym < sizeofArray(sym_id)) {
       sym_id[nof_sym]    = (uint32_t)l;
       sym_start[nof_sym] = sym_re0;
@@ -298,6 +508,16 @@ void nr_isac_pdsch_data_aided_submit(PHY_VARS_NR_UE *ue,
     }
   }
 
+  if (dropped_windows) {
+    static __thread bool warned_cond = false;
+    if (!warned_cond) {
+      warned_cond = true;
+      LOG_W(NR_PHY,
+            "SENSING: %u multi-layer CFR window(s) dropped on conditioning (Nl=%u W=%u) -- coverage "
+            "lost, not accuracy; widen ISAC_MIMO_WINDOW if this is frequent\n",
+            dropped_windows, NL, isac_mimo_win);
+    }
+  }
   if (nof_re == 0)
     return;
 
@@ -309,7 +529,11 @@ void nr_isac_pdsch_data_aided_submit(PHY_VARS_NR_UE *ue,
   // DM-RS-symbol data REs caused (see the bitmap comment above); checked from now on rather than
   // trusted. One-shot LOG_W, not an assert: this runs on the RT path and contributing nothing is
   // always preferable to killing the receiver.
-  const uint32_t expected_syms = TB_parameters.G / (cw->qamModOrder * cw->Nl);
+  /* mod_idx counts modulation symbols across ALL layers (one RE consumes Nl of them), so the
+   * target is G/Qm rather than the per-layer G/(Qm*Nl). At Nl == 1 the two coincide, which is why
+   * the old form was correct until multi-layer landed. */
+#undef ISAC_MIMO_FLUSH
+  const uint32_t expected_syms = TB_parameters.G / cw->qamModOrder;
   if (mod_idx != expected_syms) {
     static __thread bool warned = false;
     if (!warned) {
