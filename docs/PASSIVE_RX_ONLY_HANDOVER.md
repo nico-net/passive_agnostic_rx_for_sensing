@@ -519,6 +519,88 @@ the gNB log per run, so the two cannot be separated. Offered load is known to va
 `stat -c%s` on the gNB log around EACH run and report rows-per-offered-grant, not rows/s.** Until
 that is done, no row-rate number here should be quoted as a property of the receiver.
 
+### 10.5 The open problem: 2-3 % catch rate on the DEDICATED CORESET — causes and next steps
+
+**The shape of the problem, which is the strongest clue available.** Same binary, same receiver,
+same slots, same run:
+
+| CORESET | width | mapping | AL used | catch rate |
+|---|---|---|---|---|
+| **#0** (SIB1/RA/TC) | 48 RB at CRB 1, adjacent to the SSB | interleaved, bundle 6, R=2 | AL4 | **~90 %** |
+| **dedicated** (C-RNTI 1_1) | 270 RB, spans the whole BWP | non-interleaved, bundle 6 | AL2 (99.6 %) | **2-3 %** |
+
+A 30x difference between two CORESETs decoded by the same code in the same slot rules out most
+generic explanations (sync, gain, slot coverage, the AL ladder, the DCI parsing) -- all of those are
+common to both. Whatever it is has to be something the two do NOT share.
+
+**Ranked candidate causes.**
+
+1. **Frequency-dependent channel estimate / residual sub-bin STO.** *(best fit to the evidence)*
+   The receiver syncs on the SSB. CORESET#0 sits immediately next to it (CRB 1-49); the dedicated
+   CORESET extends across all 273 PRB. A residual sub-bin timing offset is a PHASE RAMP across
+   subcarriers, so the estimate degrades with distance from the sync reference — which is exactly a
+   narrow-CORESET-works / wide-CORESET-fails signature. This project has already measured that
+   failure mode elsewhere: `[[rx2-cfr-decoherence-root-cause]]` records a 22 dB deficit traced to an
+   uncorrected ~0.46-bin STO. **Decisive test: per-CCE catch rate (`score_cce.py`). Falling with CCE
+   index supports it; flat or rising refutes it.** Cheap, and it reuses a capture you need anyway.
+
+2. **LLR autoscaling on a sparse wideband CORESET.** `nr_pdcch_blind_llr_autoscale` exists because
+   (its own comment) "the stock equaliser scale is derived from the mean level over the whole
+   CORESET, which for a blind full-BWP monitor is dominated by empty REs and drives real PDCCH
+   symbols past the LLR clip rail". A 270 PRB CORESET carrying one or two AL2 grants is ~97 % empty;
+   CORESET#0 carrying SIB1 is comparatively full. So the heuristic is operating in a far harsher
+   regime on exactly the CORESET that fails. Live logs do show it engaging
+   (`PDCCH autoscale ... extra_shift=4`). **Test: dump the per-candidate LLR magnitude distribution
+   at CCEs the gNB is known to have occupied, and compare against CORESET#0's.**
+
+3. **AL2 vs AL4 = 3 dB.** Real, and in the right direction, but 3 dB cannot produce 30x. Contributory
+   at most. Would be settled by forcing the gNB to schedule AL4 (`max_ue_mcs`-style config change) —
+   not worth a cell reconfiguration until 1 and 2 are excluded.
+
+4. **NOT the energy gate.** Measured directly: catch is 2.9 % with the gate at 3.0 and 3.1 % with it
+   off. The gate matters enormously on CORESET#0 (it hides RA/TC entirely, section 10.3) and not at
+   all here. Do not re-test this.
+
+**MANDATORY FIRST STEP — normalise, or every later measurement is uninterpretable.** The offered load
+on this cell was measured at 170/s, 543/s and 738/s on the same day, and the previous repeatability
+set produced a monotonic 0 -> 61 rows/s trend over six sequential runs that CANNOT be attributed
+(receiver stabilising vs iperf ramping) because it did not record offered grants per run. Use
+`_run_catchrate.sh`, which brackets the gNB log around every run and reports catch rate rather than
+rows/s.
+
+```bash
+# On sens6. gNB and iperf must be up; do NOT toggle airplane mode (this needs the UE attached).
+cd /home/sens/NICOLA/openairinterface5g-total-passive-ue/tests/passive_rx/ota
+setsid nohup ./_run_catchrate.sh > /home/sens/NICOLA/captures/catchrate.log 2>&1 &
+# ~11 min for the default 6 x 90 s. Then:
+python3 score_cce.py /home/sens/NICOLA/captures/catchrate_<timestamp>
+```
+
+Knobs: `RUNS`, `DUR`, `RXGAIN`, `CONF`, `OUTDIR` as environment variables. For the gain sweep in
+step 3 below: `for g in 30 40 50 60; do RXGAIN=$g RUNS=2 ./_run_catchrate.sh; done`.
+
+**Order of work.**
+1. `_run_catchrate.sh` -> is catch rate stable once normalised, or is the trend real?
+2. `score_cce.py` on the same capture -> frequency dependence yes/no. **This single number chooses
+   between cause 1 and cause 2** and should be done before writing any code.
+3. Only if 1 and 2 are both inconclusive: sweep `--ue-rxgain` (currently 40, never swept).
+
+**Traps that have already cost time here.**
+- **Do not quote `accepts` as a catch rate.** With the mismatch gate off it is dominated by one-off
+  false decodes — measured 9,948 distinct RNTIs across 11,178 accepts. Use `crc_ok`, which is
+  self-validating, or DCIGT lines filtered on the live C-RNTI.
+- **Re-read the C-RNTI every run.** It changed 0x4601 -> 0x461a -> 0x4638 across this session.
+- **Never pair gNB log lines by adjacency (R1).** "RA is in slot 6" came from grepping backwards for
+  a nearby `slot=` and landing on a *previous* slot's postponed-RAR message; the true slot was 7,
+  recovered from the enclosing `DL_TTI.request slot=X.Y` block. `_run_catchrate.sh` uses byte ranges
+  and enclosing blocks only.
+- **Write capture logs OUTSIDE `/tmp`.** sens6's `/tmp` is cleaned and destroyed an entire set of
+  capture logs mid-investigation, which is why the per-CCE analysis could not be run on data already
+  collected. The script defaults to `/home/sens/NICOLA/captures/`.
+- **Characterise with gates OFF, score with them ON (R7)** — and check the instrument is not itself
+  behind the gate. Both `FULLCRC` and `ENERGYPROBE` were, and both produced confidently wrong
+  conclusions before being moved.
+
 ### 10.1 What is NOT done
 
 1. ~~No live run.~~ **Done — §10.0, §10.2, §10.3.** SI-RNTI, RA-RNTI, TC-RNTI, C-RNTI fallback,
