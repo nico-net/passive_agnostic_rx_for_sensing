@@ -390,18 +390,8 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
     }
     for (int nl = 0; nl < cw->Nl; nl++) { // mirrors nr_ue_pdsch_procedures()'s per-layer loop
       uint32_t nvar_tmp = 0;
-      /* ISAC_LAYER_SWAP=1 reverses which DM-RS port feeds which layer index. A pure PROBE: the
-       * layer<->port order is invisible at Nl == 1 (identity) and would be fatal at Nl > 1, which
-       * is exactly the symptom under investigation. If CRC jumps with this set, the mapping is
-       * inverted somewhere between here and nr_layer_demapping(). */
-      static int s_swap = -1;
-      if (s_swap < 0) {
-        const char *e = getenv("ISAC_LAYER_SWAP");
-        s_swap = e ? atoi(e) : 0;
-      }
-      const int nl_port = s_swap ? (cw->Nl - 1 - nl) : nl;
       nr_pdsch_channel_estimation(ue, proc, dlsch_config, freq_alloc, nl,
-                                  get_dmrs_port(nl_port, dlsch_config->dmrs_ports), (unsigned char)m, pdsch_est_size,
+                                  get_dmrs_port(nl, dlsch_config->dmrs_ports), (unsigned char)m, pdsch_est_size,
                                   pdsch_dl_ch_estimates, fp->samples_per_slot_wCP, rxdataF, &nvar_tmp);
       nvar += nvar_tmp;
     }
@@ -414,83 +404,6 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
   // nr_ue_pdsch_procedures() divides by number_symbols (not by the DM-RS symbol count) x layers x
   // antennas; mirrored so nvar carries the same scale the attached path's gates were tuned against.
   nvar /= (uint32_t)(dlsch_config->number_symbols * cw->Nl * fp->nb_antennas_rx);
-
-  /* ---- DEAD-BRANCH EXCLUSION -------------------------------------------------------------------
-   * MEASURED 2026-08-23 on this receiver: the four RX branches are NOT comparable. Median channel
-   * power relative to the strongest was 0 / -26.1 / -18.2 / -7.4 dB, i.e. antennas 1 and 2 carry
-   * essentially no signal. OAI's equaliser takes ONE scalar noise variance for all branches, so a
-   * dead branch is combined with the same weight as a live one and injects pure noise.
-   *
-   * Why this only bites above rank 1: nr_rx_pdsch()'s four-RX rank-one compatibility mode decodes
-   * BRANCH 0 ALONE (`mrc_nb_rx = (nl == 1 && nbRx == 4) ? 1 : nbRx`), and branch 0 happens to be a
-   * live one -- so rank 1 measured 77 % CRC while rank 2, which uses all four, measured 1/23101.
-   * Raising --ue-rxgain by 15 dB changed nothing, which is what ruled out a link-budget cause: gain
-   * lifts the dead branches' noise equally.
-   *
-   * Note the separability statistic CANNOT see this: CHESTDIAG normalises each branch by its own
-   * RMS before forming the Gram matrix (deliberately, so per-chain gain cannot bias the geometry),
-   * so it reported orth 0.73-0.95 while two branches were noise. Do not use orth to judge branches.
-   *
-   * Zeroing a branch's channel estimate is what excludes it: the combiner weights by conj(H), so
-   * H = 0 contributes neither signal nor noise. At least Nl branches are always kept -- separating
-   * Nl streams needs Nl observations -- so this can only ever remove branches that are surplus.
-   * This is a MITIGATION, not a repair: fix the antennas and all four come back. */
-  {
-    static int s_min_db = -1;
-    if (s_min_db < 0) {
-      const char *e = getenv("ISAC_RX_BRANCH_MIN_DB");
-      s_min_db = e ? atoi(e) : 12; /* 0 disables */
-    }
-    if (s_min_db > 0 && fp->nb_antennas_rx > cw->Nl) {
-      int sym_d = dlsch_config->start_symbol;
-      for (int m2 = 0; m2 < NR_SYMBOLS_PER_SLOT; m2++)
-        if (dlsch_config->dlDmrsSymbPos & (1u << m2)) { sym_d = m2; break; }
-      const int nsc_d = freq_alloc->num_rbs * NR_NB_SC_PER_RB;
-      double apw[NB_ANTENNAS_RX] = {0};
-      double amax = 0.0;
-      for (int aa = 0; aa < fp->nb_antennas_rx; aa++) {
-        double acc = 0;
-        for (int l = 0; l < cw->Nl; l++) {
-          const c16_t *h = (const c16_t *)&pdsch_dl_ch_estimates[l * fp->nb_antennas_rx + aa]
-                                                                [fp->ofdm_symbol_size * sym_d];
-          for (int k = 0; k < nsc_d; k++)
-            acc += (double)h[k].r * h[k].r + (double)h[k].i * h[k].i;
-        }
-        apw[aa] = acc;
-        if (acc > amax)
-          amax = acc;
-      }
-      if (amax > 0.0) {
-        const double thr = amax * pow(10.0, -(double)s_min_db / 10.0);
-        int keep = 0;
-        for (int aa = 0; aa < fp->nb_antennas_rx; aa++)
-          if (apw[aa] >= thr)
-            keep++;
-        if (keep >= cw->Nl && keep < fp->nb_antennas_rx) {
-          for (int aa = 0; aa < fp->nb_antennas_rx; aa++) {
-            if (apw[aa] >= thr)
-              continue;
-            for (int l = 0; l < cw->Nl; l++)
-              memset(pdsch_dl_ch_estimates[l * fp->nb_antennas_rx + aa], 0,
-                     pdsch_est_size * sizeof(int32_t));
-          }
-          static __thread bool warned_db = false;
-          if (!warned_db) {
-            warned_db = true;
-            LOG_W(NR_PHY,
-                  "SENSING: DEADBRANCH excluding %d of %d rx branches below -%d dB "
-                  "(rel dB: %.1f %.1f %.1f %.1f) -- FIX THE ANTENNAS; this only stops them "
-                  "injecting noise into the equaliser\n",
-                  fp->nb_antennas_rx - keep, fp->nb_antennas_rx, s_min_db,
-                  amax > 0 ? 10 * log10(apw[0] / amax) : 0.0,
-                  (fp->nb_antennas_rx > 1 && amax > 0) ? 10 * log10(apw[1] / amax) : 0.0,
-                  (fp->nb_antennas_rx > 2 && amax > 0) ? 10 * log10(apw[2] / amax) : 0.0,
-                  (fp->nb_antennas_rx > 3 && amax > 0) ? 10 * log10(apw[3] / amax) : 0.0);
-          }
-        }
-      }
-    }
-  }
 
   /* CHESTDIAG (ISAC_PDSCH_TBPARM=1): per-(layer,antenna) channel power, plus the layer-space Gram
    * matrix conditioning. This is the one remaining hypothesis for the rank-4 CRC failure that has
@@ -544,18 +457,6 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
        * Computed by Cholesky (G is Hermitian positive semi-definite), which also yields the
        * per-layer residual L_ii^2 / G_ii: how much NEW information each layer adds beyond the
        * previous ones. That is the honest "effective rank" read-out. */
-      /* Emit the per-(layer,antenna) powers. `rep` was declared and PRINTED but never written --
-       * so the CHESTDIAG line carried an uninitialised buffer and the one number that distinguishes
-       * "layers separated" from "layer 1 is noise" was computed and thrown away. orth/resid cannot
-       * make that distinction on their own: pure noise is independent of the signal, so a dead
-       * layer still scores resid ~1. */
-      for (int l = 0; l < cw->Nl && l < 8 && u < (int)sizeof(rep) - 24; l++) {
-        u += snprintf(rep + u, sizeof(rep) - u, "%sL%d[", (l ? " " : "pw="), l);
-        for (int a = 0; a < fp->nb_antennas_rx && a < 8 && u < (int)sizeof(rep) - 12; a++)
-          u += snprintf(rep + u, sizeof(rep) - u, "%.0f%s", pw[l][a], (a + 1 < fp->nb_antennas_rx) ? "," : "");
-        u += snprintf(rep + u, sizeof(rep) - u, "]");
-      }
-
       double bn[8];
       for (int a = 0; a < fp->nb_antennas_rx && a < 8; a++) {
         double acc = 0;
@@ -622,25 +523,6 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
                              fp->nb_antennas_rx);
   }
 
-  /* MAXIMUM-LIKELIHOOD DETECTION FOR RANK 2.
-   * nr_rx_pdsch() picks its detector from `ue->do_ml`: with it set, a 2-layer grant at
-   * qamModOrder <= 6 (QPSK/16QAM/64QAM) gets an ML detector instead of the MMSE equaliser, using
-   * the inter-layer correlation `rho` it computes for exactly that purpose. That flag was
-   * previously set ONLY by dlsim (-E), so on a real receiver it was always false and the ML path
-   * was dead code -- which matters here because layer separation, not SNR, is what limits a
-   * passive receiver at rank > 1: it sits away from the beam the gNB steers at the served UE, so
-   * the effective per-layer channels are far less orthogonal than at the intended position.
-   * Default ON for the passive path (it only engages at Nl == 2 and costs nothing otherwise);
-   * ISAC_PDSCH_ML=0 restores the MMSE behaviour for an A/B. */
-  {
-    static int s_ml = -1;
-    if (s_ml < 0) {
-      const char *e = getenv("ISAC_PDSCH_ML");
-      s_ml = e ? atoi(e) : 1;
-    }
-    ue->do_ml = (s_ml != 0);
-  }
-
   // ---- Demodulate to LLRs, symbol by symbol. nr_rx_pdsch() reads its transport-block parameters
   // out of a NR_UE_DLSCH_t and a NR_DL_UE_HARQ_t; both are stack-local here, deliberately (see the
   // header). `status = NR_ACTIVE` is what makes it apply the PTRS/symbol-span branch consistently
@@ -683,24 +565,6 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
   fourDimArray_t *toFree5 = NULL;
   allocCast3D(dl_ch_magr, c16_t, toFree5, NR_SYMBOLS_PER_SLOT, NR_MAX_NB_LAYERS, rx_size_symbol, false);
 
-  /* Inter-layer correlation buffer for the ML detector. nr_rx_pdsch() dereferences rho_dl[symbol]
-   * whenever it selects the ML path -- do_ml && nl == 2 && qamModOrder <= 6 -- and this call site
-   * used to pass NULL because the passive path was single-layer only. Enabling ML without this
-   * SEGFAULTS on the first rank-2 grant, which is exactly what happened the moment the gNB moved to
-   * max_rank 4. Allocated only when the ML path can actually engage: it is ~3 MB at 273 PRB and
-   * this runs on the RT receive thread.
-   * Middle dimension is NR_MAX_NB_LAYERS^2 and the last is rx_size_symbol because nr_rx_pdsch
-   * declares it `c16_t [][NR_MAX_NB_LAYERS*NR_MAX_NB_LAYERS][pdsch_buf_size_max]` -- the same
-   * compile-time-stride trap documented for rxdataF_comp just above. */
-  const bool ml_active = ue->do_ml && (cw->Nl == 2) && (cw->qamModOrder <= 6);
-  fourDimArray_t *toFree6 = NULL;
-  c16_t (*rho_dl)[NR_MAX_NB_LAYERS * NR_MAX_NB_LAYERS][rx_size_symbol] = NULL;
-  if (ml_active) {
-    allocCast3D(rho_alloc, c16_t, toFree6, NR_SYMBOLS_PER_SLOT, NR_MAX_NB_LAYERS * NR_MAX_NB_LAYERS,
-                rx_size_symbol, false);
-    rho_dl = rho_alloc;
-  }
-
   c16_t ptrs_phase_per_slot[fp->nb_antennas_rx][NR_SYMBOLS_PER_SLOT];
   memset(ptrs_phase_per_slot, 0, sizeof(ptrs_phase_per_slot));
   int32_t ptrs_re_per_slot[fp->nb_antennas_rx][NR_SYMBOLS_PER_SLOT];
@@ -726,62 +590,10 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
                     m == first_symbol_with_data, (unsigned char)dlsch_config->harq_process_nbr, pdsch_est_size,
                     pdsch_dl_ch_estimates, llr, dl_valid_re, rxdataF, &log2_maxh, rx_size_symbol,
                     fp->nb_antennas_rx, rxdataF_comp, dl_ch_mag, dl_ch_magb, dl_ch_magr, ptrs_phase_per_slot,
-                    ptrs_re_per_slot, nvar, &scope_req, rho_dl)
+                    ptrs_re_per_slot, nvar, &scope_req, NULL /* rho_dl: single layer */)
         < 0) {
       demod_ok = false;
       break;
-    }
-  }
-
-  /* EQDIAG (ISAC_PDSCH_TBPARM=1): post-equalisation constellation quality PER LAYER, as EVM
-   * against the ideal QAM grid. This is the measurement that separates "the equaliser/channel
-   * estimate is wrong" from "everything after it is wrong": on a correct chain each layer's
-   * equalised symbols sit on the constellation (EVM well under ~30 %), whatever the coding does
-   * later. Reported per layer because at Nl > 1 one layer can be clean while the other is noise --
-   * which orth/resid cannot show, since noise is independent too. */
-  if (getenv("ISAC_PDSCH_TBPARM") && demod_ok) {
-    static __thread int s_eq_left = 20000;
-    if (s_eq_left > 0) {
-      s_eq_left--;
-      /* Pick the symbol with the MOST valid data REs: the last symbol of the allocation is often a
-       * DM-RS symbol carrying none, which made the first version report nre=0. */
-      int msym = dlsch_config->start_symbol;
-      for (int mm = dlsch_config->start_symbol; mm < dlsch_config->start_symbol + dlsch_config->number_symbols; mm++)
-        if (dl_valid_re[mm] > dl_valid_re[msym])
-          msym = mm;
-      const int nre = (int)dl_valid_re[msym];
-      char eb[256];
-      int ep = 0;
-      for (int l = 0; l < cw->Nl && l < 4 && nre > 0; l++) {
-        const c16_t *z = rxdataF_comp[msym][l];
-        double acc = 0;
-        for (int k = 0; k < nre; k++)
-          acc += (double)z[k].r * z[k].r + (double)z[k].i * z[k].i;
-        const double rms = sqrt(acc / nre);
-        if (!(rms > 0))
-          continue;
-        /* Normalise so the ideal QAM grid has unit spacing, then measure distance to the nearest
-         * odd-integer lattice point -- the standard QAM constellation on both axes. */
-        const int m = 1 << (cw->qamModOrder / 2);          /* points per axis: 2=QPSK,4=16QAM,8=64QAM */
-        double gsum = 0;
-        for (int i = 1; i < m; i += 2)
-          gsum += (double)i * i;
-        const double gnorm = sqrt(gsum * 2.0 / (m / 2));   /* rms of the ideal grid */
-        const double sc = gnorm / (rms * sqrt(2.0));
-        double err = 0, sig = 0;
-        for (int k = 0; k < nre; k++) {
-          double vi = z[k].r * sc, vq = z[k].i * sc;
-          double qi = round((vi - 1.0) / 2.0) * 2.0 + 1.0, qq = round((vq - 1.0) / 2.0) * 2.0 + 1.0;
-          if (qi > m - 1) qi = m - 1; if (qi < -(m - 1)) qi = -(m - 1);
-          if (qq > m - 1) qq = m - 1; if (qq < -(m - 1)) qq = -(m - 1);
-          err += (vi - qi) * (vi - qi) + (vq - qq) * (vq - qq);
-          sig += qi * qi + qq * qq;
-        }
-        ep += snprintf(eb + ep, sizeof(eb) - ep, "%sL%d_evm=%.1f%%", l ? " " : "", l,
-                       (sig > 0) ? 100.0 * sqrt(err / sig) : -1.0);
-      }
-      LOG_I(NR_PHY, "SENSING: EQDIAG rnti=0x%x nl=%u Qm=%u nre=%d %s\n", grant->rnti,
-            (unsigned)cw->Nl, (unsigned)cw->qamModOrder, nre, eb);
     }
   }
 
@@ -826,6 +638,5 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
   free(toFree3);
   free(toFree4);
   free(toFree5);
-  free(toFree6);
   return out->status;
 }
