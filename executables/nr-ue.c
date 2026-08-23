@@ -1377,7 +1377,16 @@ void *UE_thread(void *arg)
            * decodes every SSB (50/s at this cell's 20 ms period), so zero is unambiguous. */
           rf_collapsed = (s_ref > 0.0 && w < 0.25 * s_ref);
           pbch_dead = (pbch_ok == 0 && pbch_fail > 0);
-          if (rf_collapsed || pbch_dead)
+          /* TRIGGER ON PBCH ONLY. rf_pow alone FALSE-POSITIVES and was MEASURED doing so: the
+           * running-max reference latches any transient startup spike (observed ref=155 while the
+           * run's steady level was 16.5), after which perfectly normal operation sits below the
+           * 0.25x test and the watchdog kills a HEALTHY capture -- seen with pbch_ok=50
+           * pbch_fail=0 for all 77 windows, i.e. every SSB decoding. The absolute level also
+           * varies several-fold between runs, so no reference derived from it is trustworthy.
+           * In EVERY genuine stall pbch_ok was 0, so PBCH already catches them and the power test
+           * contributes only false alarms. rf_pow is still measured and REPORTED, because it is
+           * what distinguishes an RF stream stall from a timing runaway once the trigger fires. */
+          if (pbch_dead)
             s_bad++;
           else
             s_bad = 0;
