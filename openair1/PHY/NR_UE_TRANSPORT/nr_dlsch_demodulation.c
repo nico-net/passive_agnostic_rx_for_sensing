@@ -17,6 +17,8 @@
 #include "PHY/NR_REFSIG/nr_refsig.h"
 #include "PHY/NR_REFSIG/dmrs_nr.h"
 #include "common/utils/nr/nr_common.h"
+#include <stdlib.h> // atoi (ISAC_RX_MRC_MODE)
+#include <math.h>   // log10 (RXBRANCH probe)
 #include <complex.h>
 #include "openair1/PHY/TOOLS/phy_scope_interface.h"
 #include "nfapi/open-nFAPI/nfapi/public_inc/nfapi_nr_interface.h"
@@ -769,10 +771,57 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
 {
   NR_DL_FRAME_PARMS *fp = &ue->frame_parms;
   const int nl = dlsch->cw_info.Nl;
-  /* Four-RX rank-one compatibility mode keeps every RF stream active but
-   * decodes branch 0, avoiding overflow in the fixed-point MRC accumulator. */
-  const int mrc_nb_rx = (nl == 1 && nbRx == 4) ? 1 : nbRx;
-  const int mrc_rx_index = 0;
+  /* ---- Four-RX rank-one receive-branch selection (ISAC_RX_MRC_MODE) --------------------------
+   * The original code decoded BRANCH 0 UNCONDITIONALLY ("four-RX rank-one compatibility mode ...
+   * avoiding overflow in the fixed-point MRC accumulator"). On this passive rig that is a latent
+   * ~6 dB trapdoor: PASSIVE_RX_ONLY_HANDOVER.md §12.3 measured the four receive branches at
+   * 0 / -26.1 / -18.2 / -7.4 dB on one occasion and -6.2 / -17.2 / -7.9 / 0 dB on another -- i.e.
+   * branch 0 is NOT always the live one. §12.1 measured rank 1 sitting only ~1 dB above the 16QAM
+   * R=0.64 waterfall, so a run that happens to put branch 0 in the weak position falls off the
+   * cliff entirely. That is the shape of the 0 % / ~90 % PDSCH bimodality §13 recorded as
+   * "cause UNKNOWN".
+   *   0 = branch 0 only (the previous behaviour, kept so the A/B is one env var)
+   *   1 = strongest branch (removes the trapdoor; costs the MRC gain)
+   *   2 = MRC across all branches (default)
+   * The selection is decided once per transport block, at first_symbol_flag, and must persist
+   * across the remaining symbols -- hence thread-local state rather than a local: the deferred
+   * decode runs several consumer threads concurrently, each on a different TB. */
+  static __thread int t_mrc_nb_rx = 0;
+  static __thread int t_mrc_rx_index = 0;
+  static __thread int t_mrc_live_mask = 0xF; // which receive branches feed the combiner (mode 3)
+  static __thread int t_mrc_mode = -1;
+  static __thread double t_mrc_min_db = 12.0;
+  if (t_mrc_mode < 0) {
+    const char *e = getenv("ISAC_RX_MRC_MODE");
+    /* DEFAULT 0 -- MEASURED, not inherited. A 2x4 sweep on the live cell (modes alternated so
+     * run-to-run drift is shared) gave: mode 0 = 48.9 % and 82.6 % PDSCH CRC; modes 1, 2 and 3 =
+     * 0.0 % on every one of six runs. Post-equalisation EVM stayed flat at 47-60 % across ALL of
+     * them, so the failures are not constellation quality.
+     *
+     * Mode 1 is the same code path as mode 0 with only a different antenna INDEX, and it decodes
+     * nothing even though branch 3 reports the HIGHEST |h| -- so the other branches are not merely
+     * weak, they are not coherently USABLE. The X410 puts channels 0/1 on RF daughterboard A and
+     * 2/3 on board B; a residual per-board frequency offset would leave branch 3 with a strong
+     * DM-RS-symbol estimate whose phase then rotates across the 13 data symbols -- exactly
+     * "high |h|, zero decodes" -- and would equally corrupt any coherent sum containing it (modes 2
+     * and 3). That makes §12.3's "+6 dB of MRC gain" UNAVAILABLE on this rig until the boards are
+     * frequency-aligned or the antennas moved onto one board: hardware, not code. Keep the knob and
+     * the RXBRANCH probe for that work; do not re-enable a combining mode by assumption. */
+    t_mrc_mode = (e != NULL) ? atoi(e) : 0;
+    const char *d = getenv("ISAC_RX_BRANCH_MIN_DB");
+    if (d != NULL) {
+      t_mrc_min_db = atof(d);
+    }
+  }
+  if (!(nl == 1 && nbRx == 4)) {
+    t_mrc_nb_rx = nbRx;
+    t_mrc_rx_index = 0;
+  } else if (t_mrc_nb_rx == 0) {
+    t_mrc_nb_rx = 1; // until first_symbol_flag decides; never leave it 0
+    t_mrc_rx_index = 0;
+  }
+  int mrc_nb_rx = t_mrc_nb_rx;
+  int mrc_rx_index = t_mrc_rx_index;
   const int matrixSz = nbRx * nl;
   const uint32_t rx_size_symbol = (freq_alloc->num_rbs * NR_NB_SC_PER_RB + 15) & ~15;
   __attribute__((aligned(32))) int32_t dl_ch_estimates_ext[matrixSz][rx_size_symbol];
@@ -934,11 +983,86 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
         median[l][aarx] = avg[l * nbRx + aarx];
       }
 
-    /* The rank-one fallback below compensates branch 0 only, so its fixed-
-     * point shift must also be derived from branch 0 rather than a stronger
-     * branch that is not part of the decoder input. */
-    if (nl == 1 && nbRx == 4)
-      avgs = avg[0];
+    /* Decide which receive branch(es) actually feed the equaliser, and derive the fixed-point
+     * shift from the SAME set -- the two must agree or the compensation is scaled for energy the
+     * decoder never sees. `avgs` already holds the max over all branches from the loop above,
+     * which is what modes 1 and 2 want; only mode 0 overrides it back to branch 0. */
+    if (nl == 1 && nbRx == 4) {
+      int best = 0;
+      for (int aarx = 1; aarx < nbRx; aarx++) {
+        if (avg[aarx] > avg[best]) {
+          best = aarx;
+        }
+      }
+      if (t_mrc_mode == 0) {
+        t_mrc_nb_rx = 1;
+        t_mrc_rx_index = 0;
+        avgs = avg[0];
+      } else if (t_mrc_mode == 1) {
+        t_mrc_nb_rx = 1;
+        t_mrc_rx_index = best;
+        avgs = avg[best];
+      } else if (t_mrc_mode == 2) {
+        /* Full MRC over every branch. nr_channel_compensation() takes a CONTIGUOUS slice, so all
+         * four go in -- INCLUDING the dead ones, which contribute ~no signal but do add noise,
+         * because the combiner uses ONE scalar noise variance for all branches. That is why §12.7
+         * measured the gain over the best single branch as only +0.8 dB rather than the +6 dB four
+         * balanced branches would give. */
+        t_mrc_nb_rx = nbRx;
+        t_mrc_live_mask = 0xF;
+        t_mrc_rx_index = 0;
+      } else {
+        /* Mode 3 (default): MRC over the LIVE branches only. Measured on this rig the four branches
+         * sit at 0 / -28.5 / -17.0 / -3.3 dB -- two are noise and one is only 3.3 dB down, so
+         * combining 0+3 while excluding 1+2 is worth ~+1.8 dB against §12.1's ~1 dB rank-1 margin,
+         * whereas mode 2 spends most of that re-admitting the two dead branches' noise.
+         *
+         * Implemented by ZEROING the excluded branches' channel estimates rather than by permuting
+         * rows into a contiguous slice: MRC weights by h*, so h == 0 contributes exactly zero
+         * signal AND zero noise, which is the same result for a fraction of the work and no data
+         * movement. (This is §12.7's ISAC_RX_BRANCH_MIN_DB, which the §13 revert removed.) */
+        const double thr = pow(10.0, -t_mrc_min_db / 10.0) * (double)avg[best];
+        int mask = 0;
+        for (int aarx = 0; aarx < nbRx; aarx++) {
+          if ((double)avg[aarx] >= thr) {
+            mask |= (1 << aarx);
+          }
+        }
+        if (mask == 0) {
+          mask = (1 << best); // never exclude everything
+        }
+        t_mrc_live_mask = mask;
+        t_mrc_nb_rx = nbRx; // the slice stays contiguous; excluded branches are zeroed instead
+        t_mrc_rx_index = 0;
+      }
+      mrc_nb_rx = t_mrc_nb_rx;
+      mrc_rx_index = t_mrc_rx_index;
+
+      /* RXBRANCH: the per-branch powers this decision is made from. §12.7 records that CHESTDIAG's
+       * equivalent field was declared, printed and never written, which is why the imbalance stayed
+       * invisible for so long -- so this one prints the raw values, not a derived summary. dB are
+       * relative to the strongest branch. */
+      {
+        static __thread int s_rxb = -1;
+        static __thread unsigned long s_rxb_n = 0;
+        if (s_rxb < 0) {
+          s_rxb = (getenv("ISAC_RX_BRANCH") != NULL) ? atoi(getenv("ISAC_RX_BRANCH")) : 0;
+        }
+        /* ISAC_RX_BRANCH=2 prints EVERY transport block, not 1 in 500. A 1-in-500 sample of
+         * `best` cannot distinguish "branch 0 is always strongest" from "branch 0 is strongest one
+         * time in three", and that decides whether mode 1 is even selecting the branch it should. */
+        if (s_rxb && ((s_rxb >= 2) || (s_rxb_n++ % 500) == 0)) {
+          const double mx = (avg[best] > 0) ? (double)avg[best] : 1.0;
+          LOG_I(PHY,
+                "SENSING: RXBRANCH mode=%d best=%d used=[%d..%d) live_mask=0x%x pw=[%d %d %d %d] "
+                "dB=[%.1f %.1f %.1f %.1f]\n",
+                t_mrc_mode, best, mrc_rx_index, mrc_rx_index + mrc_nb_rx, t_mrc_live_mask,
+                avg[0], avg[1], avg[2], avg[3],
+                10.0 * log10((avg[0] > 0 ? avg[0] : 1) / mx), 10.0 * log10((avg[1] > 0 ? avg[1] : 1) / mx),
+                10.0 * log10((avg[2] > 0 ? avg[2] : 1) / mx), 10.0 * log10((avg[3] > 0 ? avg[3] : 1) / mx));
+        }
+      }
+    }
 
     if (nl > 1) {
       nr_dlsch_channel_level_median(rx_size_symbol, dl_ch_estimates_ext, median, nl, nbRx, nb_re_pdsch);
@@ -950,11 +1074,49 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
     }
     // Output shift: half channel energy (log2|h|^2/2) + MRC antenna gain.
     // Single-layer adds +1 guard bit (raw peak); multi-layer uses median so no guard needed.
-    if (nl == 1)
-      *log2_maxh = (log2_approx(avgs) >> 1) + 1 + log2_approx(mrc_nb_rx >> 1);
+    /* MRC headroom. `log2_approx(n >> 1)` gives 1 for n = 4, but a coherent sum of 4 branches grows
+     * by up to 4x and therefore needs 2 bits -- the formula was ONE BIT SHORT, which is the second
+     * half of why multi-branch combining produced garbage (the first is the wrapping accumulator in
+     * nr_channel_compensation.c). log2_approx(1) == log2_approx(0) == 0, so the single-branch case
+     * -- the only one this deployment has been decoding with -- is BIT-IDENTICAL to before. */
+    if (nl == 1) {
+      /* Headroom must match the number of branches that actually CONTRIBUTE, not the width of the
+       * slice. Mode 3 keeps the slice contiguous at nbRx and silences the dead branches by zeroing
+       * their estimates, so charging it log2(nbRx) bits would spend 2 bits of LLR dynamic range to
+       * protect a sum that only ever has popcount(live_mask) non-zero terms. */
+      int contributing = mrc_nb_rx;
+      if (nbRx == 4 && t_mrc_mode == 3) {
+        contributing = 0;
+        for (int aarx = 0; aarx < nbRx; aarx++) {
+          if (t_mrc_live_mask & (1 << aarx)) {
+            contributing++;
+          }
+        }
+        if (contributing < 1) {
+          contributing = 1;
+        }
+      }
+      *log2_maxh = (log2_approx(avgs) >> 1) + 1 + log2_approx(contributing);
+    }
     else
       *log2_maxh = (log2_approx(avgs) >> 1) + log2_approx(nbRx >> 1);
     LOG_D(PHY, "[DLSCH] AbsSubframe %d.%d log2_maxh = %d (%d)\n", frame % 1024, nr_slot_rx, *log2_maxh, avgs);
+    /* L2MAXH (ISAC_RX_BRANCH=1): the fixed-point shift the equaliser scales its output -- and hence
+     * the QAM LLR decision thresholds -- by. This is the one quantity that can leave the CONSTELLATION
+     * intact while destroying the DECODER's soft input, which is exactly the signature this rig shows:
+     * post-equalisation EVM sits at 47-62 % whether the run decodes 82.6 % of transport blocks or
+     * 0.0 % of them, so whatever separates those runs is downstream of the equaliser, and log2_maxh
+     * is derived from the MEASURED channel level `avgs` and therefore free to move run to run with
+     * gain/AGC. A self-normalising EVM probe is blind to it by construction. */
+    {
+      static __thread int s_l2 = -1;
+      static __thread unsigned long s_l2n = 0;
+      if (s_l2 < 0)
+        s_l2 = (getenv("ISAC_RX_BRANCH") != NULL) ? 1 : 0;
+      if (s_l2 && (s_l2n++ % 500) == 0)
+        LOG_I(PHY, "SENSING: L2MAXH log2_maxh=%d avgs=%d nl=%d mrc_nb_rx=%d Qm=%u\n",
+              *log2_maxh, avgs, nl, mrc_nb_rx, (unsigned)dlsch->cw_info.qamModOrder);
+    }
 #if T_TRACER
     T(T_UE_PHY_PDSCH_ENERGY,
       T_INT(gNB_id),
@@ -976,6 +1138,18 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
           symbol,
           first_symbol_flag,
           ue->phy_cpu_stats.cpu_time_stats[DLSCH_CHANNEL_LEVEL_STATS].p_time / (cpuf * 1000.0));
+  }
+
+  /* Mode 3: silence the excluded branches. Applied EVERY symbol, not just at first_symbol_flag --
+   * dl_ch_estimates_ext is rebuilt by nr_dlsch_extract_rbs() on each call, so a mask applied once
+   * would be undone for every symbol after the first. The decision itself is made once (at
+   * first_symbol_flag, from the true unzeroed powers) and carried in thread-local state. */
+  if (nl == 1 && nbRx == 4 && t_mrc_mode == 3 && t_mrc_live_mask != 0xF) {
+    for (int aarx = 0; aarx < nbRx; aarx++) {
+      if (!(t_mrc_live_mask & (1 << aarx))) {
+        memset(chFext[0][aarx], 0, rx_size_symbol * sizeof(c16_t));
+      }
+    }
   }
 
   //----------------------------------------------------------

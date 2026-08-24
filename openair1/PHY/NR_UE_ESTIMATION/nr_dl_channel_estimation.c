@@ -2,6 +2,7 @@
  * SPDX-License-Identifier: LicenseRef-CSSL-1.0
  */
 
+#include <stdlib.h> // getenv (NVAR probe)
 #include "nr_common.h"
 #include <string.h>
 #include "SCHED_NR_UE/defs.h"
@@ -954,7 +955,13 @@ static void NFAPI_NR_DMRS_TYPE1_linear_interp(NR_DL_FRAME_PARMS *frame_parms,
   }
 
   if (nvar && nest_count > 0) {
-    *nvar = (uint32_t)(noise_amp2 / (nest_count * frame_parms->nb_antennas_rx));
+    /* Per-ANTENNA mean noise. The `/ nb_antennas_rx` that used to be here was wrong twice over:
+     * this helper is called once per receive antenna and never sums across them, so dividing by the
+     * antenna count inside it under-reported the noise by that factor -- and its caller then
+     * OVERWROTE the result on the next antenna, so the value that survived described only the LAST
+     * antenna. Aggregation across antennas now belongs to the caller, the only scope that sees all
+     * of them. */
+    *nvar = (uint32_t)(noise_amp2 / nest_count);
   }
 }
 
@@ -1123,7 +1130,13 @@ void NFAPI_NR_DMRS_TYPE2_linear_interp(NR_DL_FRAME_PARMS *frame_parms,
   }
 
   if (nvar && nest_count > 0) {
-    *nvar = (uint32_t)(noise_amp2 / (nest_count * frame_parms->nb_antennas_rx));
+    /* Per-ANTENNA mean noise. The `/ nb_antennas_rx` that used to be here was wrong twice over:
+     * this helper is called once per receive antenna and never sums across them, so dividing by the
+     * antenna count inside it under-reported the noise by that factor -- and its caller then
+     * OVERWROTE the result on the next antenna, so the value that survived described only the LAST
+     * antenna. Aggregation across antennas now belongs to the caller, the only scope that sees all
+     * of them. */
+    *nvar = (uint32_t)(noise_amp2 / nest_count);
   }
 }
 
@@ -1258,6 +1271,19 @@ void nr_pdsch_channel_estimation(PHY_VARS_NR_UE *ue,
 
   delay_t delay = {0};
 
+  /* nvar sets the equaliser's confidence, so getting it wrong degrades decoding without touching the
+   * constellation -- a failure with perfectly healthy EVM, which is exactly the signature this
+   * passive receiver shows (post-equalisation EVM flat at 47-62 % whether it decodes 82.6 % of
+   * transport blocks or 0.0 %). Before this, `nvar` was handed straight to the per-antenna helper
+   * below, which ASSIGNS to it, so each antenna clobbered the last and the value reaching the
+   * equaliser was antenna (nb_antennas_rx - 1)'s noise ALONE, already ~nb_antennas_rx times too
+   * small. On this rig, branch 3 is both the last antenna and the one whose level swings most
+   * between runs (measured 97 k - 572 k), so the noise estimate was effectively sampled from the
+   * least trustworthy branch. An under-estimate makes the LLRs too large and they clip.
+   * Single-antenna behaviour is unchanged: a sum of one, divided by one. */
+  uint64_t nvar_acc = 0;
+  int nvar_ant_count = 0;
+
   for (int aarx = 0; aarx < fp->nb_antennas_rx; aarx++) {
 #ifdef DEBUG_PDSCH
     printf("\n============================================\n");
@@ -1265,6 +1291,8 @@ void nr_pdsch_channel_estimation(PHY_VARS_NR_UE *ue,
     printf("============================================\n");
 #endif
 
+    uint32_t nvar_ant = 0;
+    uint32_t *nvar_p = nvar ? &nvar_ant : NULL;
     c16_t *rxF = &rxdataF[aarx][symbol_offset + delta];
     c16_t *dl_ch = (c16_t *)&dl_ch_estimates[nl * fp->nb_antennas_rx + aarx][ch_offset];
     memset(dl_ch, 0, sizeof(*dl_ch) * fp->ofdm_symbol_size);
@@ -1278,7 +1306,7 @@ void nr_pdsch_channel_estimation(PHY_VARS_NR_UE *ue,
                                         freq_alloc,
                                         dlsch->BWPSize,
                                         &delay,
-                                        nvar);
+                                        nvar_p);
 
     } else if (config_type == NFAPI_NR_DMRS_TYPE2 && ue->chest_freq == 0) {
       NFAPI_NR_DMRS_TYPE2_linear_interp(fp,
@@ -1289,7 +1317,7 @@ void nr_pdsch_channel_estimation(PHY_VARS_NR_UE *ue,
                                         freq_alloc,
                                         dlsch->BWPSize,
                                         &delay,
-                                        nvar);
+                                        nvar_p);
 
     } else if (config_type == NFAPI_NR_DMRS_TYPE1) {
       AssertFatal(dlsch->resource_alloc == 1, "PRB average in channel estimation not supported for type0 DLSCH\n");
@@ -1309,6 +1337,23 @@ void nr_pdsch_channel_estimation(PHY_VARS_NR_UE *ue,
       printf("%2d\n", idxP);
     }
 #endif
+    if (nvar && nvar_ant > 0) {
+      nvar_acc += nvar_ant;
+      nvar_ant_count++;
+    }
+  }
+
+  if (nvar) {
+    /* Mean over the antennas that actually produced an estimate. Antennas that produced none are
+     * excluded rather than counted as zero noise, which would drag the average down and reintroduce
+     * the over-confidence this fix exists to remove. */
+    *nvar = (nvar_ant_count > 0) ? (uint32_t)(nvar_acc / (uint64_t)nvar_ant_count) : 0;
+    static __thread int s_nv = -1;
+    static __thread unsigned long s_nv_n = 0;
+    if (s_nv < 0)
+      s_nv = (getenv("ISAC_RX_BRANCH") != NULL) ? 1 : 0;
+    if (s_nv && (s_nv_n++ % 500) == 0)
+      LOG_I(PHY, "SENSING: NVAR nvar=%u ants=%d nl=%d\n", *nvar, nvar_ant_count, nl);
   }
 }
 

@@ -280,7 +280,19 @@ void sensing_engine::accumulate_cpi(const sensing_slot_t& s)
     if (!abs_init_) {
       abs_init_ = true;
     } else {
-      abs_slot_run_ += (uint64_t)((wrap + s.slot_idx - abs_prev_raw_) % wrap);
+      /* SIGNED shortest-path delta. The unsigned `(wrap + a - b) % wrap` form is only correct while
+       * submissions arrive in slot ORDER: an out-of-order arrival 2 slots early yields
+       * (20480 + 998 - 1000) % 20480 = 20478, not -2. That never happened while the PDSCH decode ran
+       * in-line, and happens constantly now that it is deferred to a CONCURRENT consumer pool. */
+      int64_t d_run = (int64_t)s.slot_idx - (int64_t)abs_prev_raw_;
+      if (d_run > (int64_t)wrap / 2) {
+        d_run -= (int64_t)wrap;
+      } else if (d_run < -(int64_t)wrap / 2) {
+        d_run += (int64_t)wrap;
+      }
+      if (d_run > 0) {
+        abs_slot_run_ += (uint64_t)d_run; // out-of-order arrivals must not rewind the run counter
+      }
     }
     abs_prev_raw_ = s.slot_idx;
   }
@@ -299,9 +311,19 @@ void sensing_engine::accumulate_cpi(const sensing_slot_t& s)
   } else {
     const uint32_t slots_per_frame = (s.carrier.slots_per_frame > 0) ? s.carrier.slots_per_frame : 10;
     const uint32_t wrap            = slots_per_frame * 1024;
-    const uint32_t delta           = (wrap + s.slot_idx - cpi_prev_slot) % wrap;
+    /* SIGNED shortest-path delta -- see the identical fix on abs_slot_run_ above. MEASURED
+     * consequence of getting this wrong with a concurrent consumer pool: every out-of-order arrival
+     * added ~20480 slots to cpi_slot_span, so a CPI of 128 rows whose true span is ~256 slots
+     * reported 190,000, T_slot came out at ~1500 instead of ~2, and vel[max] collapsed to 0.1 m/s
+     * on a receiver genuinely producing ~1000 rows/s. */
+    int64_t d_cpi = (int64_t)s.slot_idx - (int64_t)cpi_prev_slot;
+    if (d_cpi > (int64_t)wrap / 2) {
+      d_cpi -= (int64_t)wrap;
+    } else if (d_cpi < -(int64_t)wrap / 2) {
+      d_cpi += (int64_t)wrap;
+    }
     // Position of this submission relative to the previous one, carrying both fractions.
-    this_span     = cpi_prev_pos + (double)delta + ((double)s.slot_frac - prev_frac_);
+    this_span     = cpi_prev_pos + (double)d_cpi + ((double)s.slot_frac - prev_frac_);
     if (this_span < cpi_prev_pos) {
       this_span = cpi_prev_pos; // never step backwards (out-of-order sub-slot arrival)
     }

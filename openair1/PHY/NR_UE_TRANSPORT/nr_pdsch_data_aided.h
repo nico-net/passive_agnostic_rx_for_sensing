@@ -43,6 +43,12 @@
 extern "C" {
 #endif
 
+/// Slow-time index override for a DEFERRED caller. `proc->frame_rx` wraps at 1024, so deriving the
+/// CPI grid index from it breaks once submissions arrive out of order across a wrap. Set this to the
+/// producer's monotonic absolute slot before the submit and back to 0 after. 0 = derive from proc,
+/// which is what the in-order attached-UE path wants.
+extern __thread uint64_t nr_isac_abs_slot_override;
+
 /**
  * @brief Re-encode a CRC-verified transport block through the real TX chain (LDPC encode + rate
  * match + scramble + modulate), then submit Ĥ = Y/X at every DATA RE of the allocation to the

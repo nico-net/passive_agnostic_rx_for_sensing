@@ -29,6 +29,9 @@
 
 #include "nr_pdsch_data_aided.h"
 
+/* Set by a DEFERRED caller to this job's monotonic absolute slot; 0 = derive from proc. */
+__thread uint64_t nr_isac_abs_slot_override = 0;
+
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
@@ -329,7 +332,17 @@ void nr_isac_pdsch_data_aided_submit(PHY_VARS_NR_UE *ue,
                                .dl_center_hz    = fp->dl_CarrierFreq,
                                .pci             = fp->Nid_cell,
                                .slots_per_frame = fp->slots_per_frame};
-  const uint32_t slot_idx = (uint32_t)(proc->frame_rx * fp->slots_per_frame + proc->nr_slot_rx);
+  /* Slow-time index for the CPI grid. `proc->frame_rx` WRAPS at 1024, so the obvious
+   * frame*slots_per_frame + slot wraps every 20480 slots. In-line that was benign: submissions
+   * arrived in strict slot order and a wrap was just a discontinuity between CPIs. Once the decode
+   * is DEFERRED to a consumer pool they arrive concurrently and can straddle a wrap, and the CPI's
+   * slot SPAN then explodes -- measured 2026-08-24 as T_slot = 1942.6 slots between rows on a run
+   * producing ~670 rows/s (true spacing ~3), which drove vel[max] to 0.0 m/s.
+   * A deferred caller publishes the producer's MONOTONIC absolute slot here before calling;
+   * 0 means "not set", i.e. the previous behaviour for the in-order attached-UE path. */
+  const uint32_t slot_idx = (nr_isac_abs_slot_override != 0)
+                                ? (uint32_t)nr_isac_abs_slot_override
+                                : (uint32_t)(proc->frame_rx * fp->slots_per_frame + proc->nr_slot_rx);
 
   // --- Sub-slot sampling (defs_nr_UE_ISAC.h): split this slot's symbols into GROUPS and submit each
   // as its own slow-time row, multiplying the effective PRF (and hence the unambiguous velocity) by

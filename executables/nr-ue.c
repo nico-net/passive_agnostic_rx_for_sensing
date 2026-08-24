@@ -779,6 +779,16 @@ void nr_ue_timing_mutation_log(const char *what, long before, long after, const 
  * receiver is looking in the wrong place", which no other instrument here can do. */
 static double g_census_pow;
 static long g_census_pow_n;
+/* RAW per-antenna receive power, measured on the TIME-DOMAIN slot buffer before any alignment,
+ * demodulation or channel estimation. This exists to answer one question that nothing else here
+ * can: RXBRANCH's `pw[]` is the DM-RS CHANNEL-ESTIMATE magnitude, so a branch that receives a
+ * perfectly good signal but is misaligned in time reads 15 dB down anyway. Comparing these two
+ * separates "this antenna is not receiving" (antennas/cabling) from "this antenna is receiving and
+ * we are estimating it badly" (software) -- and on this rig the four branches span ~20 dB, which is
+ * not a shape four elements at lambda/2 looking at the same gNB should produce. */
+#define CENSUS_MAX_ANT 4
+static double g_census_pow_ant[CENSUS_MAX_ANT];
+static long g_census_pow_ant_n;
 static long g_census_ssb_slots;
 static long g_census_slots;
 
@@ -1246,6 +1256,7 @@ void *UE_thread(void *arg)
      * negligible on the RT thread while still averaging hundreds of points per slot. */
     {
       const int n = (tmp > 0) ? tmp : readBlockSize;
+      const int nant = (fp->nb_antennas_rx < CENSUS_MAX_ANT) ? fp->nb_antennas_rx : CENSUS_MAX_ANT;
       double acc = 0.0;
       int cnt = 0;
       for (int i = 0; i < n; i += 64) {
@@ -1258,6 +1269,22 @@ void *UE_thread(void *arg)
         g_census_pow += acc / cnt;
         g_census_pow_n++;
       }
+      /* Same sub-sampling, every antenna. Cost is nant/64 of an add per sample -- negligible beside
+       * the FEP, and this runs on the RT thread so it stays a sum of absolute values, not a norm. */
+      for (int a2 = 0; a2 < nant; a2++) {
+        double acca = 0.0;
+        int cnta = 0;
+        for (int i = 0; i < n; i += 64) {
+          const int ar = rxp[a2][i].r < 0 ? -rxp[a2][i].r : rxp[a2][i].r;
+          const int ai = rxp[a2][i].i < 0 ? -rxp[a2][i].i : rxp[a2][i].i;
+          acca += (double)(ar + ai);
+          cnta++;
+        }
+        if (cnta) {
+          g_census_pow_ant[a2] += acca / cnta;
+        }
+      }
+      g_census_pow_ant_n++;
     }
     atomic_fetch_add_explicit(&nr_ue_diag_samples_consumed, rx_samples_consumed, memory_order_relaxed);
 
@@ -1396,10 +1423,40 @@ void *UE_thread(void *arg)
               "ref=%.2f bad=%d shiftForNextFrame=%d max_pos_acc=%d frame=%d\n",
               g_census_slots, g_census_ssb_slots, pbch_ok, pbch_fail, w, s_ref, s_bad,
               shiftForNextFrame, UE->max_pos_acc, curMsg.proc.frame_rx);
+        /* ANTPOW: raw per-antenna receive power and its dB spread, to be read ALONGSIDE RXBRANCH's
+         * pw[]. If these are flat and pw[] is not, the imbalance is in the estimation path, not the
+         * antennas. */
+        if (g_census_pow_ant_n > 0) {
+          double pa[CENSUS_MAX_ANT], mx = 0.0;
+          const int nant = (UE->frame_parms.nb_antennas_rx < CENSUS_MAX_ANT) ? UE->frame_parms.nb_antennas_rx
+                                                                            : CENSUS_MAX_ANT;
+          for (int a2 = 0; a2 < nant; a2++) {
+            pa[a2] = g_census_pow_ant[a2] / (double)g_census_pow_ant_n;
+            if (pa[a2] > mx)
+              mx = pa[a2];
+          }
+          if (mx <= 0.0)
+            mx = 1.0;
+          LOG_I(PHY,
+                "SENSING: ANTPOW raw=[%.2f %.2f %.2f %.2f] dB=[%.1f %.1f %.1f %.1f] (raw |I|+|Q| off "
+                "the time-domain buffer, BEFORE any alignment -- compare against RXBRANCH pw[])\n",
+                pa[0], nant > 1 ? pa[1] : 0.0, nant > 2 ? pa[2] : 0.0, nant > 3 ? pa[3] : 0.0,
+                /* 20*log10, NOT 10: this accumulates mean(|I|+|Q|), an AMPLITUDE, whereas RXBRANCH's
+                 * pw[] is |h|^2, a POWER. Printing an amplitude ratio with 10*log10 halves it, which
+                 * made the raw imbalance look like -9 dB when it is -18 dB and made the estimate look
+                 * like it was inventing 10 dB of extra spread that it was not. */
+                20.0 * log10((pa[0] > 0 ? pa[0] : 1e-9) / mx),
+                nant > 1 ? 20.0 * log10((pa[1] > 0 ? pa[1] : 1e-9) / mx) : 0.0,
+                nant > 2 ? 20.0 * log10((pa[2] > 0 ? pa[2] : 1e-9) / mx) : 0.0,
+                nant > 3 ? 20.0 * log10((pa[3] > 0 ? pa[3] : 1e-9) / mx) : 0.0);
+        }
         g_census_slots = 0;
         g_census_ssb_slots = 0;
         g_census_pow = 0.0;
         g_census_pow_n = 0;
+        for (int a2 = 0; a2 < CENSUS_MAX_ANT; a2++)
+          g_census_pow_ant[a2] = 0.0;
+        g_census_pow_ant_n = 0;
         /* Two consecutive windows (2 s) before acting: one window is enough to be sure given how
          * far apart the two levels sit, but the stall is permanent and a spurious reacquisition
          * costs a real capture gap, so require it to persist. */

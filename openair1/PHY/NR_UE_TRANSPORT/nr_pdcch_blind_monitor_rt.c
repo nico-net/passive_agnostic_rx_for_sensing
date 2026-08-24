@@ -50,6 +50,13 @@
 #include "PHY/TOOLS/tools_defs.h"                        // allocCast2D/fourDimArray_t
 #include "PHY/NR_UE_ISAC/nr_isac.h"                      // nr_isac_submit_cfr/_enabled/_source_enabled
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.h"  // passive PDSCH decode (data-aided source)
+#include "PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.h"   // deferred decode off the RT thread
+#include <stdatomic.h>
+
+/* Published by the RF producer thread (executables/nr-ue.c:43/1148) immediately before it reads
+ * each slot. The deferred-decode staleness check differences against it, so the enqueue side must
+ * read the SAME counter rather than rebuild one from the wrapping frame number. */
+extern _Atomic long nr_ue_diag_producer_absolute_slot;
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_data_aided.h"      // shared re-encode + Ĥ=Y/X submit
 #include "nfapi/open-nFAPI/nfapi/public_inc/fapi_nr_ue_constants.h" // FAPI_NR_CCE_REG_MAPPING_TYPE_*
 #include "executables/nr-uesoftmodem.h"                   // get_nrUE_params()->Tpool
@@ -162,6 +169,88 @@ static uint64_t g_held_mismatch = 0; // migrated from NRSniffer: rejected by the
 // PASSIVE_PDSCH_DATA_AIDED_HANDOVER.md §B.5 asks for: a passive receiver sits somewhere the grant
 // was not aimed at, so whether overheard transport blocks pass CRC at all is an open empirical
 // question, and everything downstream of it is worthless if the answer is "almost never". ----
+/* ---- RT-THREAD COST BREAKDOWN (ISAC_PDCCH_TIMING=1, default OFF) ------------------------------
+ * PASSIVE_RX_ONLY_HANDOVER.md section 14 measures the SYMPTOM of running this tap on the PHY
+ * receive thread (PBCH lock lost within ~2 s at ~1550 grants/s) but never measured WHERE the time
+ * goes, so "move the PDSCH decode off the receive thread" is an assumption about which stage is
+ * expensive, not a measurement. Sections 7.4/14.4 both name the PDSCH decode specifically; this
+ * probe exists to confirm or refute that before any restructuring, because moving the wrong stage
+ * costs the same effort and buys nothing.
+ *
+ * Deliberately CLOCK_MONOTONIC wall time, not CPU time: what starves the timing loop is elapsed
+ * time on this thread, including the join_task_ans() wait for pool workers (which is wall time
+ * this thread cannot use, but almost no CPU time). A getrusage/CLOCK_THREAD_CPUTIME view would
+ * report the parallel decode as nearly free and point at the wrong stage.
+ *
+ * Cost when off: one already-resolved int test per call site. When on: two clock_gettime per
+ * stage, which at ~8 stages/occasion is far below the microsecond-scale stages being measured --
+ * but it is still a probe, so read it as R7 prescribes (characterise with it, score without it). */
+#define BTIM_FEP_LLR 0
+#define BTIM_DEMAP   1
+#define BTIM_PREPASS 2
+#define BTIM_DECODE  3
+#define BTIM_CHEST   4
+#define BTIM_PDSCH   5
+#define BTIM_SUBMIT  6
+#define BTIM_TOTAL   7
+#define BTIM_N       8
+static const char *const kBtimName[BTIM_N] = {"fep_llr", "demap", "prepass", "decode",
+                                              "chest",   "pdsch", "submit",  "TOTAL"};
+static uint64_t g_btim_ns[BTIM_N]  = {0};
+static uint64_t g_btim_n[BTIM_N]   = {0};
+static uint64_t g_btim_max[BTIM_N] = {0};
+/* Per-occasion TOTAL, bucketed. The mean is not the interesting statistic here: the receive thread
+ * is starved by the TAIL, so what matters is how often one occasion eats a large fraction of the
+ * slot. Buckets are microseconds: <50 <100 <200 <400 <800 <1600 <3200 >=3200. */
+static uint64_t g_btim_hist[8] = {0};
+static uint64_t g_btim_over_slot = 0; // occasions whose total exceeded the slot duration
+static int      g_btim_on        = -1;
+
+static inline int btim_enabled(void)
+{
+  if (g_btim_on < 0) {
+    g_btim_on = (getenv("ISAC_PDCCH_TIMING") != NULL) ? 1 : 0;
+  }
+  return g_btim_on;
+}
+
+static inline uint64_t btim_now(void)
+{
+  struct timespec t;
+  clock_gettime(CLOCK_MONOTONIC, &t);
+  return (uint64_t)t.tv_sec * 1000000000ull + (uint64_t)t.tv_nsec;
+}
+
+static inline void btim_add(int k, uint64_t t0)
+{
+  if (g_btim_on <= 0) {
+    return;
+  }
+  const uint64_t d = btim_now() - t0;
+  g_btim_ns[k] += d;
+  g_btim_n[k]++;
+  if (d > g_btim_max[k]) {
+    g_btim_max[k] = d;
+  }
+}
+
+static void btim_occasion_total(uint64_t d_ns, uint64_t slot_ns)
+{
+  const uint64_t us = d_ns / 1000;
+  int b = 0;
+  if (us >= 3200) b = 7;
+  else if (us >= 1600) b = 6;
+  else if (us >= 800) b = 5;
+  else if (us >= 400) b = 4;
+  else if (us >= 200) b = 3;
+  else if (us >= 100) b = 2;
+  else if (us >= 50) b = 1;
+  g_btim_hist[b]++;
+  if (slot_ns > 0 && d_ns > slot_ns) {
+    g_btim_over_slot++;
+  }
+}
+
 static uint64_t g_dec_try   = 0; // decodes actually attempted (i.e. reached the LDPC decoder)
 static uint64_t g_dec_ok    = 0; // ... of which the transport-block CRC passed
 static uint64_t g_dec_skip_rv = 0; // skipped: rv != 0 and rv0_only set (not self-decodable, see cfg)
@@ -286,6 +375,32 @@ void nr_pdcch_blind_monitor_process(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t 
   const bool want_dmrs = isac_on && nr_isac_source_enabled(NR_ISAC_SRC_PDSCH_DMRS_BLIND);
   const bool want_data = isac_on && cfg->pdsch_decode >= 2 && nr_isac_source_enabled(NR_ISAC_SRC_PDSCH_DATA);
   const bool want_decode = cfg->pdsch_decode >= 1; // >=1 always decodes; only >=2 submits
+
+  /* ---- Deferred decode (PASSIVE_RX_ONLY_HANDOVER.md §15). Started lazily here rather than from
+   * the monitor's config parse because the consumer needs a live PHY_VARS_NR_UE (frame_parms sized,
+   * rxdata allocated), which does not exist yet when [sensing] is parsed. One-shot; if the start is
+   * REFUSED -- e.g. --cont-fo-comp makes a deferred FEP unsound, see nr_pdsch_passive_queue_start()
+   * -- `defer` stays false and every decode runs in-line exactly as before. */
+  bool defer = false;
+  if (want_decode && cfg->pdsch_thread) {
+    static int s_queue_tried = 0;
+    if (!s_queue_tried) {
+      s_queue_tried = 1;
+      /* pdsch_thread is the CONSUMER COUNT (1 = one thread). One consumer sustains ~1290
+       * decodes/s and measurably could not keep up with this cell -- 31 % of accepts were dropped
+       * at the ring. Depth defaults to 8 per consumer so worst-case job latency stays put as
+       * consumers are added, rather than growing into the rxdata lifetime. */
+      const int n_cons = cfg->pdsch_thread;
+      const int depth  = (cfg->pdsch_queue_depth > 0) ? cfg->pdsch_queue_depth : (8 * n_cons);
+      if (nr_pdsch_passive_queue_start(ue, depth, n_cons, cfg->pdsch_thread_core)) {
+        LOG_I(PHY,
+              "SENSING: passive PDSCH decode DEFERRED to %d consumer thread(s) (depth=%d core=%d) -- "
+              "775us mean decode no longer runs on the PHY receive thread\n",
+              n_cons, depth, cfg->pdsch_thread_core);
+      }
+    }
+    defer = nr_pdsch_passive_queue_running();
+  }
   if (!want_dmrs && !want_decode) {
     return;
   }
@@ -297,6 +412,8 @@ void nr_pdcch_blind_monitor_process(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t 
     return; // not a monitoring occasion this slot
   }
   g_occasions_run++;
+  const int      btim_on   = btim_enabled();
+  const uint64_t btim_occ0 = btim_on ? btim_now() : 0;
 
   // ---- Build the local, single-search-space PDCCH config. ----
   nr_phy_data_t local_phy_data;
@@ -523,6 +640,7 @@ void nr_pdcch_blind_monitor_process(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t 
   extern int nr_pdcch_blind_capture;
   nr_pdcch_blind_capture = (getenv("ISAC_PDCCH_CAPTURE") != NULL);
 
+  const uint64_t btim_t_fep = btim_on ? btim_now() : 0;
   for (int symbol = cfg->ss_first_symbol; symbol < cfg->ss_first_symbol + rel15->coreset.duration; symbol++) {
     nr_slot_fep(ue, fp, proc->nr_slot_rx, symbol, rxdataF, link_type_dl, 0, ue->common_vars.rxdata);
     __attribute__((aligned(32))) c16_t rxdataF_symb[fp->nb_antennas_rx][((fp->ofdm_symbol_size + 7) / 8) * 8];
@@ -532,6 +650,7 @@ void nr_pdcch_blind_monitor_process(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t 
     nr_pdcch_generate_llr(ue, proc, symbol, &local_phy_data, llr_size_symbol, num_monitoring_occ,
                          rel15->coreset.duration, rxdataF_symb, pdcch_llr);
   }
+  btim_add(BTIM_FEP_LLR, btim_t_fep);
 
   // ---- Demapping/deinterleaving + per-candidate unscrambling/decode. Mirrors dci_nr.c's own
   // nr_pdcch_dci_indication()/nr_dci_decoding_procedure(), minus the own-RNTI equality gate --
@@ -539,10 +658,12 @@ void nr_pdcch_blind_monitor_process(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t 
   // check instead). ----
   const int llr_stride = llr_size_symbol; // duration==1 here -> llr_size == llr_size_symbol
   c16_t pdcch_e_rx[NR_MAX_PDCCH_SIZE];
+  const uint64_t btim_t_dmp = btim_on ? btim_now() : 0;
   nr_pdcch_demapping_deinterleaving((uint32_t)n_rb, pdcch_llr[0][0], pdcch_e_rx, rel15->coreset.duration,
                                     rel15->coreset.RegBundleSize, rel15->coreset.InterleaverSize,
                                     rel15->coreset.ShiftIndex, rel15->number_of_candidates, rel15->CCE, rel15->L,
                                     llr_stride);
+  btim_add(BTIM_DEMAP, btim_t_dmp);
 
   /* ------------------------------------------------------------------------------------------
    * PURE INDEXING CHECK (2026-08-04). Does the CCE's equalised data-RE content actually land in
@@ -626,6 +747,7 @@ void nr_pdcch_blind_monitor_process(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t 
   // comment for why the two cannot share a decode). rel15->CCE[64]/L[64] bounds the candidate count.
   nr_pdcch_blind_cand_task_t cand_task[128];
   int nof_tasks = 0;
+  const uint64_t btim_t_pre = btim_on ? btim_now() : 0;
   {
     int e_rx_cand_idx = 0;
     for (int c = 0; c < rel15->number_of_candidates; c++) {
@@ -788,6 +910,9 @@ constdiag_done:;
   // pool. pushTpool() runs the task inline if the pool has zero worker threads configured (its own
   // documented fallback), so this degrades to the original sequential behaviour rather than
   // breaking on a single-core/no-pool build. ----
+  btim_add(BTIM_PREPASS, btim_t_pre);
+
+  const uint64_t btim_t_dec = btim_on ? btim_now() : 0;
   if (nof_tasks > 0) {
     task_ans_t ans;
     init_task_ans(&ans, nof_tasks);
@@ -798,6 +923,7 @@ constdiag_done:;
     }
     join_task_ans(&ans);
   }
+  btim_add(BTIM_DECODE, btim_t_dec);
 
   // ---- Phase 2 (sequential, in original candidate order): everything below has a genuine
   // sequential dependency (dci_thres EMA, RNTI persistence ring buffer) or is rare/expensive enough
@@ -971,12 +1097,61 @@ constdiag_done:;
 
     const freq_alloc_bitmap_t freq_alloc = set_bitmap_from_start_size(out.start_rb, out.num_rb);
 
+    /* ---- Is the per-accept channel estimate needed AT ALL on this thread? -----------------------
+     * It exists for exactly two consumers: the DM-RS CFR tap (`want_dmrs`) and the post-estimation
+     * SNR gate (`min_snr_lin`). When neither is active it is computed and thrown away -- and it is
+     * NOT cheap: 96.7 us measured, which at ~1500 accepts/s is ~14.5 % of the receive thread, on top
+     * of fep_llr's ~9 %.
+     *
+     * That matters because it is now the thing costing us the capture. MEASURED 2026-08-24: every
+     * short run died `RFSTALL PBCH lock lost (timing runaway)` with rf_pow HEALTHY (405-476) and
+     * max_pos_acc running away to 606-1699, while the one long run held `pbch_ok=50 pbch_fail=0`
+     * with max_pos_acc flat at ~545. The 0 %-CRC runs and the 3-6 s runs are the SAME fault -- the
+     * timing loop losing lock -- not two separate problems, and section 15's ablation already showed
+     * this receiver holds lock at ~18 % RT duty and loses it above that.
+     *
+     * The DEFERRED decode does its own FEP and channel estimation in the consumer, so skipping here
+     * costs it nothing. `sources = "pdsch_data"` makes want_dmrs false, and this deployment runs the
+     * SNR gate off, so on the sensing config this skips the whole block. */
+    const bool need_chest = want_dmrs || (cfg->min_snr_lin > 0.0f);
+    if (!need_chest && defer && want_decode && !(cfg->pdsch_rv0_only && out.rv != 0)
+        && decodes_this_occasion < cfg->pdsch_max_per_slot) {
+      /* Nothing on this thread needs the estimate, and the consumer makes its own -- so enqueue
+       * straight from the decoded DCI and skip the FEP + channel estimation entirely. Mirrors the
+       * job built on the normal path below; kept explicit rather than reached by a goto, which
+       * cannot legally jump into that nested block. */
+      decodes_this_occasion++;
+      const nr_pdsch_passive_grant_t grant_q = {.rnti           = out.rnti,
+                                                .mcs            = out.mcs,
+                                                .rv             = out.rv,
+                                                .mcs_table      = grant_mcs_table,
+                                                .nb_rb_oh       = (uint16_t)cfg->pdsch_xoverhead,
+                                                .tb_scaling     = out.tb_scaling,
+                                                .bw_tbslbrm     = (uint16_t)fp->N_RB_DL,
+                                                .mcs_table_lbrm = (int8_t)cfg->pdsch_mcs_table};
+      nr_pdsch_passive_job_t job;
+      memset(&job, 0, sizeof(job));
+      job.dlsch_pdu     = dlsch_pdu;
+      job.freq_alloc    = freq_alloc;
+      job.grant         = grant_q;
+      job.frame_rx      = proc->frame_rx;
+      job.nr_slot_rx    = proc->nr_slot_rx;
+      job.gNB_id        = proc->gNB_id;
+      job.absolute_slot = atomic_load_explicit(&nr_ue_diag_producer_absolute_slot, memory_order_relaxed);
+      job.rnti          = out.rnti;
+      job.harq_pid_tag  = (uint32_t)(NR_PDCCH_BLIND_DATA_AIDED_TAG_BASE + out.harq_pid);
+      job.want_data     = want_data;
+      nr_pdsch_passive_queue_enqueue(&job);
+      continue;
+    }
+
     const uint32_t pdsch_est_size = ((fp->symbols_per_slot * fp->ofdm_symbol_size + 15) / 16) * 16;
     fourDimArray_t *toFree        = NULL;
     allocCast2D(pdsch_dl_ch_estimates, int32_t, toFree, fp->nb_antennas_rx, pdsch_est_size, false);
 
     // Full-slot FEP for the PDSCH's own DMRS symbol -- separate from the CORESET FEP above (a
     // different symbol in general; the PDSCH allocation starts after the PDCCH region).
+    const uint64_t btim_t_che = btim_on ? btim_now() : 0;
     __attribute__((aligned(32))) c16_t rxdataF_pdsch[fp->nb_antennas_rx][rxdataF_sz];
     nr_slot_fep(ue, fp, proc->nr_slot_rx, dmrs_sym, rxdataF_pdsch, link_type_dl, 0, ue->common_vars.rxdata);
 
@@ -984,6 +1159,7 @@ constdiag_done:;
     nr_pdsch_channel_estimation(ue, proc, &dlsch_pdu, &freq_alloc, 0, get_dmrs_port(0, out.dmrs_ports),
                                (unsigned char)dmrs_sym, pdsch_est_size, pdsch_dl_ch_estimates,
                                fp->samples_per_slot_wCP, rxdataF_pdsch, &nvar);
+    btim_add(BTIM_CHEST, btim_t_che);
 
     const int num_sc = out.num_rb * NR_NB_SC_PER_RB;
     if (num_sc >= 2) {
@@ -1049,7 +1225,20 @@ constdiag_done:;
         // the LAST thing in the chain: an LDPC decode is an order of magnitude more expensive than
         // everything above it, so it only ever runs for a candidate that already survived the raw
         // energy, RNTI-persistence and post-estimation SNR gates. ----
-        if (want_decode && decodes_this_occasion < cfg->pdsch_max_per_slot) {
+        /* ISAC_PDCCH_NO_PDSCH_DECODE=1 (diagnosis only, default off): run the whole PDCCH scan --
+         * FEP, LLR, demap, polar decode, every gate, the CFR tap -- but skip ONLY the passive PDSCH
+         * decode. This exists because `pdsch_decode = 0` in the config is NOT the same experiment:
+         * that value makes want_decode false, and with sensing off the function then returns at the
+         * `!want_dmrs && !want_decode` guard BEFORE any FEP, so it disables the PDCCH scan as well
+         * and cannot separate the two costs. Needed to answer PASSIVE_RX_ONLY_HANDOVER.md section
+         * 14's open question -- whether the timing runaway at high DL load is caused by the PDSCH
+         * decode specifically or by the tap as a whole -- without first writing the consumer thread
+         * that section 14.4 proposes. */
+        static int s_no_pdsch = -1;
+        if (s_no_pdsch < 0) {
+          s_no_pdsch = (getenv("ISAC_PDCCH_NO_PDSCH_DECODE") != NULL) ? 1 : 0;
+        }
+        if (want_decode && !s_no_pdsch && decodes_this_occasion < cfg->pdsch_max_per_slot) {
           if (cfg->pdsch_rv0_only && out.rv != 0) {
             // A retransmission carries only an incremental-redundancy slice of the codeword and is
             // not self-decodable without the earlier round's soft bits -- which a receiver that
@@ -1090,8 +1279,44 @@ constdiag_done:;
             // Reuses rxdataF_pdsch: nr_pdsch_passive_decode() FEPs the WHOLE allocation into it,
             // a superset of the single DM-RS symbol already transformed above, so the buffer is
             // simply refilled rather than duplicated (~900 kB at 273 PRB x 4 antennas).
+            /* ---- DEFERRED PATH. Hands the job to the consumer and returns immediately: a
+             * ~600 B copy plus one atomic store, against the 775 us it replaces. Deliberately does
+             * NOT fall back to an in-line decode when the ring is full -- doing so would reintroduce
+             * exactly the deadline overrun this exists to remove, and precisely under the load where
+             * it hurts most. A full ring is counted (dropped_full) and reported. ---- */
+            if (defer) {
+              nr_pdsch_passive_job_t job;
+              memset(&job, 0, sizeof(job));
+              job.dlsch_pdu     = dlsch_pdu;
+              job.freq_alloc    = freq_alloc;
+              job.grant         = grant;
+              job.frame_rx      = proc->frame_rx;
+              job.nr_slot_rx    = proc->nr_slot_rx;
+              job.gNB_id        = proc->gNB_id;
+              /* READ the producer's clock; do NOT reconstruct it. proc->frame_rx WRAPS at 1024
+               * while nr_ue_diag_producer_absolute_slot is monotonic, so the obvious
+               * `frame_rx * slots_per_frame + slot` is a DIFFERENT quantity and differencing the two
+               * yields nonsense -- measured 2026-08-24 as max_lag_slots = 20491 against a
+               * slots_per_frame of 20, which let genuinely stale jobs through the staleness check
+               * and produced crc_ok = 0/3757. This tap runs inside UE_dl_preprocessing() for the
+               * very slot the producer published at nr-ue.c:1148 before reading it, so loading it
+               * here IS this job's own absolute slot, on the same clock by construction. */
+              job.absolute_slot = atomic_load_explicit(&nr_ue_diag_producer_absolute_slot, memory_order_relaxed);
+              job.rnti          = out.rnti;
+              job.harq_pid_tag  = (uint32_t)(NR_PDCCH_BLIND_DATA_AIDED_TAG_BASE + out.harq_pid);
+              job.want_data     = want_data;
+              nr_pdsch_passive_queue_enqueue(&job);
+              /* The per-candidate channel-estimate allocation is freed at the BOTTOM of this loop,
+               * which `continue` skips -- ~917 kB per job at 273 PRB x 4 antennas, and mlockall()
+               * makes every byte of it count against RLIMIT_MEMLOCK. Free it here. */
+              free(toFree);
+              continue; // nothing further to do on this thread for this candidate
+            }
+
+            const uint64_t btim_t_pds = btim_on ? btim_now() : 0;
             const nr_pdsch_passive_decode_status_t st =
                 nr_pdsch_passive_decode(ue, proc, &dlsch_pdu, &freq_alloc, &grant, rxdataF_pdsch, &dec);
+            btim_add(BTIM_PDSCH, btim_t_pds);
             if (st == NR_PDSCH_PASSIVE_DECODE_UNSUPPORTED) {
               g_dec_unsup++;
             } else if (st != NR_PDSCH_PASSIVE_DECODE_ERROR) {
@@ -1103,9 +1328,11 @@ constdiag_done:;
                 if (want_data) {
                   // The reconstruction chain the attached UE uses, unchanged -- the ONLY difference
                   // is where the verified transport block came from.
+                  const uint64_t btim_t_sub = btim_on ? btim_now() : 0;
                   nr_isac_pdsch_data_aided_submit(ue, proc, &dec.cw, &dlsch_pdu, &freq_alloc, out.rnti, dec.tb,
                                                   NR_PDCCH_BLIND_DATA_AIDED_TAG_BASE + out.harq_pid, rxdataF_pdsch,
                                                   (double)dec.nvar);
+                  btim_add(BTIM_SUBMIT, btim_t_sub);
                   g_data_submits++;
                 }
               }
@@ -1117,6 +1344,20 @@ constdiag_done:;
       }
     }
     free(toFree);
+  }
+
+  if (btim_on) {
+    const uint64_t d = btim_now() - btim_occ0;
+    g_btim_ns[BTIM_TOTAL] += d;
+    g_btim_n[BTIM_TOTAL]++;
+    if (d > g_btim_max[BTIM_TOTAL]) {
+      g_btim_max[BTIM_TOTAL] = d;
+    }
+    /* Slot duration in ns from the frame parameters themselves, never a hardcoded 500 us -- the
+     * whole point of the comparison is "what fraction of the receive thread's budget did this
+     * occasion consume", and that budget is 1 ms / 2^numerology. */
+    const uint64_t slot_ns = (fp->slots_per_frame > 0) ? (10000000ull / (uint64_t)fp->slots_per_frame) : 0;
+    btim_occasion_total(d, slot_ns);
   }
 
   if (g_occasions_run % NR_PDCCH_BLIND_SUMMARY_PERIOD_OCC == 0) {
@@ -1143,4 +1384,55 @@ constdiag_done:;
          g_last_reject_reason ? g_last_reject_reason : "(none yet)",
          g_last_reject_rnti);
   }
+
+    /* Distinct decode-parameter census. Printed with the periodic summary rather than only at
+     * teardown, because a run that hits the RFSTALL watchdog leaves via exit(3) and would otherwise
+     * take its census with it -- and the long, high-load runs are exactly the specimens worth
+     * diffing (section 23.3). */
+    /* PERIOD-GUARDED. These used to sit OUTSIDE the `% NR_PDCCH_BLIND_SUMMARY_PERIOD_OCC` block that
+     * opens above, so they fired on EVERY monitoring occasion instead of every 1000 -- measured
+     * 2026-08-24 as 790,798 PARMSET lines and a 163 MB log per 90 s run. That is not merely untidy:
+     * it is ~1600 formatted LOG_I calls per second issued from the process whose PHY receive thread
+     * must hit a 500 us deadline, i.e. an instrument heavy enough to cause the very timing runaways
+     * it was added to diagnose. PARMSET is additionally throttled again on top, because it prints a
+     * whole table and its content changes only when the gNB starts using a new configuration. */
+    if (want_decode && (g_occasions_run % (NR_PDCCH_BLIND_SUMMARY_PERIOD_OCC * 50)) == 0) {
+      nr_pdsch_passive_parmset_dump();
+    }
+
+    if (nr_pdsch_passive_queue_running() && (g_occasions_run % NR_PDCCH_BLIND_SUMMARY_PERIOD_OCC) == 0) {
+      nr_pdsch_passive_queue_stats_t qs;
+      nr_pdsch_passive_queue_get_stats(&qs);
+      /* Every field here is a reason a queued job did NOT become a decode, so a shortfall in
+       * `decoded` is attributable rather than merely visible. max_lag is the number that says
+       * whether the configured depth was right: it must stay well under slots_per_frame. */
+      LOG_I(PHY,
+            "SENSING: PDSCHQ queued=%lu decoded=%lu crc_ok=%lu (%.1f%%) dropped[full=%lu stale=%lu] "
+            "max_lag_slots=%lu/%d\n",
+            (unsigned long)qs.queued, (unsigned long)qs.decoded, (unsigned long)qs.crc_ok,
+            qs.decoded ? (100.0 * (double)qs.crc_ok / (double)qs.decoded) : 0.0,
+            (unsigned long)qs.dropped_full, (unsigned long)qs.dropped_stale,
+            (unsigned long)qs.max_lag_slots, fp->slots_per_frame);
+    }
+
+    if (btim_on && (g_occasions_run % NR_PDCCH_BLIND_SUMMARY_PERIOD_OCC) == 0) {
+      char rep[700];
+      int u = 0;
+      for (int k = 0; k < BTIM_N && u < (int)sizeof(rep) - 90; k++) {
+        u += snprintf(rep + u, sizeof(rep) - u, "%s[n=%lu mean=%.1fus max=%.1fus tot=%.2fs] ",
+                      kBtimName[k], (unsigned long)g_btim_n[k],
+                      g_btim_n[k] ? (double)g_btim_ns[k] / (double)g_btim_n[k] / 1000.0 : 0.0,
+                      (double)g_btim_max[k] / 1000.0, (double)g_btim_ns[k] / 1e9);
+      }
+      const uint64_t slot_ns = (fp->slots_per_frame > 0) ? (10000000ull / (uint64_t)fp->slots_per_frame) : 0;
+      LOG_I(PHY, "SENSING: BTIM %s\n", rep);
+      LOG_I(PHY,
+            "SENSING: BTIM occ_total_us_hist <50=%lu <100=%lu <200=%lu <400=%lu <800=%lu <1600=%lu "
+            "<3200=%lu >=3200=%lu over_slot(%luus)=%lu/%lu\n",
+            (unsigned long)g_btim_hist[0], (unsigned long)g_btim_hist[1], (unsigned long)g_btim_hist[2],
+            (unsigned long)g_btim_hist[3], (unsigned long)g_btim_hist[4], (unsigned long)g_btim_hist[5],
+            (unsigned long)g_btim_hist[6], (unsigned long)g_btim_hist[7],
+            (unsigned long)(slot_ns / 1000), (unsigned long)g_btim_over_slot,
+            (unsigned long)g_btim_n[BTIM_TOTAL]);
+    }
 }

@@ -28,6 +28,8 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
+#include <pthread.h> // sqrt/floor/log10 (EQDIAG)
 
 #include "common/utils/LOG/log.h"
 #include "common/utils/nr/nr_common.h"
@@ -41,6 +43,142 @@
 #include "PHY/TOOLS/tools_defs.h"
 #include "executables/nr-uesoftmodem.h"
 #include "openair2/LAYER2/NR_MAC_COMMON/nr_mac_common.h"
+
+/* ---- INNER COST BREAKDOWN (ISAC_PDCCH_TIMING=1, shares the blind monitor's switch) -------------
+ * The outer probe in nr_pdcch_blind_monitor_rt.c measures this whole function as ONE ~774 us stage,
+ * which is enough to prove it blows the 500 us slot deadline but NOT enough to choose how to move
+ * it off the PHY receive thread. The split matters because the two candidate designs have opposite
+ * constraints:
+ *   - if the FEP dominates, a deferred consumer must re-read ue->common_vars.rxdata, whose steady-
+ *     state write region is ONE FRAME, so a given slot's samples are overwritten exactly 10 ms
+ *     later -- a hard, silent deadline the consumer would have to police;
+ *   - if the demodulation/LDPC dominate, the tap can hand over already-transformed data and the
+ *     consumer has no deadline at all, at the cost of copying it.
+ * So this is not curiosity: it is the measurement that picks the architecture. */
+#define PDTIM_FEP   0
+#define PDTIM_CHEST 1
+#define PDTIM_ALLOC 2
+#define PDTIM_DEMOD 3
+#define PDTIM_LDPC  4
+#define PDTIM_N     5
+static const char *const kPdtimName[PDTIM_N] = {"fep", "chest", "alloc", "demod", "ldpc"};
+static uint64_t g_pdtim_ns[PDTIM_N] = {0};
+static uint64_t g_pdtim_n[PDTIM_N]  = {0};
+static uint64_t g_pdtim_max[PDTIM_N] = {0};
+static uint64_t g_pdtim_calls = 0;
+static int      g_pdtim_on    = -1;
+
+static inline int pdtim_enabled(void)
+{
+  if (g_pdtim_on < 0) {
+    g_pdtim_on = (getenv("ISAC_PDCCH_TIMING") != NULL) ? 1 : 0;
+  }
+  return g_pdtim_on;
+}
+
+static inline uint64_t pdtim_now(void)
+{
+  struct timespec t;
+  clock_gettime(CLOCK_MONOTONIC, &t);
+  return (uint64_t)t.tv_sec * 1000000000ull + (uint64_t)t.tv_nsec;
+}
+
+static inline void pdtim_add(int k, uint64_t t0)
+{
+  if (g_pdtim_on <= 0) {
+    return;
+  }
+  const uint64_t d = pdtim_now() - t0;
+  g_pdtim_ns[k] += d;
+  g_pdtim_n[k]++;
+  if (d > g_pdtim_max[k]) {
+    g_pdtim_max[k] = d;
+  }
+}
+
+static void pdtim_report(void)
+{
+  if (g_pdtim_on <= 0) {
+    return;
+  }
+  g_pdtim_calls++;
+  if ((g_pdtim_calls % 200) != 0) {
+    return;
+  }
+  char rep[520];
+  int u = 0;
+  for (int k = 0; k < PDTIM_N && u < (int)sizeof(rep) - 90; k++) {
+    u += snprintf(rep + u, sizeof(rep) - u, "%s[n=%lu mean=%.1fus max=%.1fus tot=%.2fs] ", kPdtimName[k],
+                  (unsigned long)g_pdtim_n[k],
+                  g_pdtim_n[k] ? (double)g_pdtim_ns[k] / (double)g_pdtim_n[k] / 1000.0 : 0.0,
+                  (double)g_pdtim_max[k] / 1000.0, (double)g_pdtim_ns[k] / 1e9);
+  }
+  LOG_I(PHY, "SENSING: PDTIM calls=%lu %s\n", (unsigned long)g_pdtim_calls, rep);
+}
+
+/* ---- PARMSET: distinct decode-parameter census (always on, printed at teardown) ---------------
+ * PASSIVE_RX_ONLY_HANDOVER.md section 23.3: this receiver decodes 0 of 104,143 transport blocks on
+ * some runs and 90 % on others, at matched load, dwell and receiver health. A hard zero over five
+ * figures is a WRONG-PARAMETER signature, not a weak-link one -- a channel 1 dB under the waterfall
+ * gives a few percent, never exactly none. So the question is simply: which parameter differs
+ * between a 90 % run and a 0 % run?
+ *
+ * TBPARM already prints all of this, but UNCAPPED -- 100k lines at 1500 decodes/s, heavy enough to
+ * perturb the very run being characterised. This records the DISTINCT tuples instead, with a count
+ * each, which is what a diff actually needs and costs one linear scan of a 16-entry table per
+ * decode. */
+#define PARMSET_MAX 16
+typedef struct {
+  uint8_t  mcs, tbl, Qm, bg, nl, cdm, nscid, refpt, ssym, nsym, dmrs_len;
+  uint16_t R, ports, scramb;
+  uint32_t tbs, dmrsmask;
+  uint64_t count;
+} parmset_t;
+static parmset_t g_parmset[PARMSET_MAX];
+static int       g_parmset_n = 0;
+static uint64_t  g_parmset_other = 0;
+static pthread_mutex_t g_parmset_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static void parmset_record(const parmset_t *k)
+{
+  pthread_mutex_lock(&g_parmset_lock);
+  for (int i = 0; i < g_parmset_n; i++) {
+    parmset_t *e = &g_parmset[i];
+    if (e->mcs == k->mcs && e->tbl == k->tbl && e->Qm == k->Qm && e->bg == k->bg && e->nl == k->nl
+        && e->cdm == k->cdm && e->nscid == k->nscid && e->refpt == k->refpt && e->ssym == k->ssym
+        && e->nsym == k->nsym && e->dmrs_len == k->dmrs_len && e->R == k->R && e->ports == k->ports
+        && e->scramb == k->scramb && e->tbs == k->tbs && e->dmrsmask == k->dmrsmask) {
+      e->count++;
+      pthread_mutex_unlock(&g_parmset_lock);
+      return;
+    }
+  }
+  if (g_parmset_n < PARMSET_MAX) {
+    g_parmset[g_parmset_n] = *k;
+    g_parmset[g_parmset_n].count = 1;
+    g_parmset_n++;
+  } else {
+    g_parmset_other++;
+  }
+  pthread_mutex_unlock(&g_parmset_lock);
+}
+
+void nr_pdsch_passive_parmset_dump(void)
+{
+  pthread_mutex_lock(&g_parmset_lock);
+  for (int i = 0; i < g_parmset_n; i++) {
+    const parmset_t *e = &g_parmset[i];
+    LOG_I(PHY,
+          "SENSING: PARMSET[%d] n=%lu mcs=%u tbl=%u Qm=%u R=%u tbs=%u bg=%u nl=%u cdm=%u ports=0x%x "
+          "nscid=%u refpt=%u sym=%u+%u dmrs_len=%u dmrsmask=0x%x scramb=%u\n",
+          i, (unsigned long)e->count, e->mcs, e->tbl, e->Qm, e->R, e->tbs, e->bg, e->nl, e->cdm,
+          e->ports, e->nscid, e->refpt, e->ssym, e->nsym, e->dmrs_len, e->dmrsmask, e->scramb);
+  }
+  if (g_parmset_other)
+    LOG_I(PHY, "SENSING: PARMSET overflow=%lu (more than %d distinct tuples)\n",
+          (unsigned long)g_parmset_other, PARMSET_MAX);
+  pthread_mutex_unlock(&g_parmset_lock);
+}
 
 // Distinct from the attached path's 1000 + harq_pid (phy_procedures_nr_ue.c) and from
 // nr_dlsch_decoding()'s 2*harq_pid + cw_idx, so a hardware LDPC accelerator's per-harq_unique_pid
@@ -341,7 +479,7 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
   if (G == 0) {
     return out->status;
   }
-  /* TBPARM probe (ISAC_PDSCH_TBPARM=1): every transport-block parameter the gNB also prints on its
+/* TBPARM probe (ISAC_PDSCH_TBPARM=1): every transport-block parameter the gNB also prints on its
    * own PDSCH line, so they can be compared one-for-one instead of inferred from a CRC failure.
    * gNB prints: mcs_index / mod / tbs / tb_size_lbrm / ldpc_base_graph / vrbs=[start..end). */
   {
@@ -362,6 +500,27 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
   out->cw = *cw;
   out->G  = G;
 
+  {
+    parmset_t k = {0};
+    k.mcs      = (uint8_t)grant->mcs;
+    k.tbl      = (uint8_t)grant->mcs_table;
+    k.Qm       = (uint8_t)cw->qamModOrder;
+    k.bg       = (uint8_t)cw->ldpcBaseGraph;
+    k.nl       = (uint8_t)cw->Nl;
+    k.cdm      = (uint8_t)dlsch_config->n_dmrs_cdm_groups;
+    k.nscid    = (uint8_t)dlsch_config->nscid;
+    k.refpt    = (uint8_t)dlsch_config->refPoint;
+    k.ssym     = (uint8_t)dlsch_config->start_symbol;
+    k.nsym     = (uint8_t)dlsch_config->number_symbols;
+    k.dmrs_len = (uint8_t)dmrs_len;
+    k.R        = (uint16_t)cw->targetCodeRate;
+    k.ports    = (uint16_t)dlsch_config->dmrs_ports;
+    k.scramb   = (uint16_t)dlsch_config->dlDataScramblingId;
+    k.tbs      = (uint32_t)cw->TBS;
+    k.dmrsmask = (uint32_t)dlsch_config->dlDmrsSymbPos;
+    parmset_record(&k);
+  }
+
   if (!passive_harq_prepare(&g_harq, fp->N_RB_DL)) {
     out->status = NR_PDSCH_PASSIVE_DECODE_ERROR;
     return out->status;
@@ -370,11 +529,15 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
   // ---- FEP every symbol of the allocation. The caller keeps this buffer: the data-aided submit
   // needs the SAME Y samples to form Ĥ = Y/X, and re-transforming them would be both wasteful and a
   // chance for the two views to diverge. ----
+  const int      pdtim_on = pdtim_enabled();
+  const uint64_t pdt_fep  = pdtim_on ? pdtim_now() : 0;
   for (int m = dlsch_config->start_symbol; m < dlsch_config->start_symbol + dlsch_config->number_symbols; m++) {
     nr_slot_fep(ue, fp, proc->nr_slot_rx, m, rxdataF, link_type_dl, 0, ue->common_vars.rxdata);
   }
+  pdtim_add(PDTIM_FEP, pdt_fep);
 
   // ---- Channel estimation on the DM-RS symbols. ----
+  const uint64_t pdt_che = pdtim_on ? pdtim_now() : 0;
   const uint32_t pdsch_est_size = ((fp->symbols_per_slot * fp->ofdm_symbol_size + 15) / 16) * 16;
   fourDimArray_t *toFree = NULL;
   // One estimate per (layer, rx antenna) -- nr_rx_pdsch() indexes this as nl*nb_antennas_rx + aarx,
@@ -404,6 +567,7 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
   // nr_ue_pdsch_procedures() divides by number_symbols (not by the DM-RS symbol count) x layers x
   // antennas; mirrored so nvar carries the same scale the attached path's gates were tuned against.
   nvar /= (uint32_t)(dlsch_config->number_symbols * cw->Nl * fp->nb_antennas_rx);
+  pdtim_add(PDTIM_CHEST, pdt_che);
 
   /* CHESTDIAG (ISAC_PDSCH_TBPARM=1): per-(layer,antenna) channel power, plus the layer-space Gram
    * matrix conditioning. This is the one remaining hypothesis for the rank-4 CRC failure that has
@@ -538,6 +702,7 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
   harq.status = NR_ACTIVE;
   harq.first_rx = 1;
 
+  const uint64_t pdt_alc = pdtim_on ? pdtim_now() : 0;
   const uint32_t rx_llr_buf_sz = ALIGNARRAYSIZE(G, 32);
   int16_t *llr = (int16_t *)malloc16_clear(rx_llr_buf_sz * sizeof(int16_t));
   if (llr == NULL) {
@@ -570,6 +735,8 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
   int32_t ptrs_re_per_slot[fp->nb_antennas_rx][NR_SYMBOLS_PER_SLOT];
   memset(ptrs_re_per_slot, 0, sizeof(ptrs_re_per_slot));
 
+  pdtim_add(PDTIM_ALLOC, pdt_alc);
+
   uint32_t dl_valid_re[NR_SYMBOLS_PER_SLOT] = {0};
   int32_t log2_maxh = 0;
   pdsch_scope_req_t scope_req = {.copy_chanest_to_scope = false, .copy_rxdataF_to_scope = false,
@@ -584,6 +751,7 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
     first_symbol_with_data++;
   }
 
+  const uint64_t pdt_dem = pdtim_on ? pdtim_now() : 0;
   bool demod_ok = true;
   for (int m = dlsch_config->start_symbol; m < dlsch_config->start_symbol + dlsch_config->number_symbols; m++) {
     if (nr_rx_pdsch(ue, proc, &dlsch, freq_alloc, dlsch_config, &harq, (unsigned char)m,
@@ -597,9 +765,85 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
     }
   }
 
+  pdtim_add(PDTIM_DEMOD, pdt_dem);
+
+  /* ---- EQDIAG: post-equalisation EVM (ISAC_PDSCH_EVM=1, default off) --------------------------
+   * PASSIVE_RX_ONLY_HANDOVER.md §13 names this as "the measurement to take next, and why it was not
+   * taken": the receiver goes bimodally 0 % / ~90 % PDSCH CRC across otherwise identical runs and
+   * nothing measured so far separates "the signal reaching the equaliser is degraded" from "the
+   * signal is fine and something downstream is wrong". EVM answers exactly that and nothing else:
+   *   ~30 %  -> the constellation is as good as the 90.7 % runs (§12.1); the fault is DOWNSTREAM
+   *             (descrambling, rate recovery, LDPC, TBS) and no amount of gain or geometry helps.
+   *   >>40 % -> the signal itself is short; the fault is the LINK (gain, beam, channel, rank).
+   * The §12.7 version of this probe was removed by the §13 revert; this reinstates it.
+   *
+   * Measured on rxdataF_comp, which is the EQUALISED symbol stream, and against the ideal QAM grid
+   * for this grant's own modulation order -- normalised by the measured RMS, so the arbitrary
+   * log2_maxh fixed-point scaling cancels and the number is comparable across runs and MCSs. */
+  {
+    static int s_evm = -1;
+    if (s_evm < 0)
+      s_evm = (getenv("ISAC_PDSCH_EVM") != NULL) ? 1 : 0;
+    static __thread unsigned long s_evm_n = 0;
+    if (s_evm && demod_ok && (s_evm_n++ % 200) == 0) {
+      /* Sample the symbol carrying the MOST valid data REs: the last symbol of an allocation is
+       * often DM-RS with none, and scoring a near-empty symbol reports noise as signal. */
+      int best_m = -1;
+      uint32_t best_n = 0;
+      for (int m = dlsch_config->start_symbol; m < dlsch_config->start_symbol + dlsch_config->number_symbols; m++) {
+        if (dl_valid_re[m] > best_n) {
+          best_n = dl_valid_re[m];
+          best_m = m;
+        }
+      }
+      if (best_m >= 0 && best_n >= 64) {
+        const uint32_t n = (best_n > 4096) ? 4096 : best_n;
+        const c16_t *z = rxdataF_comp[best_m][0];
+        double p = 0.0;
+        for (uint32_t i = 0; i < n; i++) {
+          p += (double)z[i].r * z[i].r + (double)z[i].i * z[i].i;
+        }
+        p /= (double)n;
+        /* Ideal per-dimension levels are the odd integers +-1..+-(2^(Qm/2)-1); mean square of those
+         * is the constellation's per-dimension power, so 2x it is the total. */
+        const int lmax = (1 << (cw->qamModOrder / 2)) - 1; // 1 (QPSK), 3 (16QAM), 7 (64QAM), 15 (256QAM)
+        double ms = 0.0;
+        int nlev = 0;
+        for (int l = 1; l <= lmax; l += 2) {
+          ms += (double)l * l;
+          nlev++;
+        }
+        ms /= (double)nlev;
+        const double ideal_pow = 2.0 * ms;
+        const double scale = (p > 0.0) ? sqrt(ideal_pow / p) : 0.0;
+        double errsum = 0.0;
+        for (uint32_t i = 0; i < n; i++) {
+          const double vi = (double)z[i].r * scale;
+          const double vq = (double)z[i].i * scale;
+          /* Slice to the nearest ODD integer, clamped to the constellation edge. */
+          double si = 2.0 * floor(vi / 2.0) + 1.0;
+          double sq = 2.0 * floor(vq / 2.0) + 1.0;
+          if (si > lmax) si = lmax;
+          if (si < -lmax) si = -lmax;
+          if (sq > lmax) sq = lmax;
+          if (sq < -lmax) sq = -lmax;
+          errsum += (vi - si) * (vi - si) + (vq - sq) * (vq - sq);
+        }
+        const double evm = sqrt((errsum / (double)n) / ideal_pow) * 100.0;
+        LOG_I(NR_PHY,
+              "SENSING: EQDIAG rnti=0x%x Qm=%u sym=%d n=%u evm=%.1f%% (ref: 29.7%% -> 90.7%% CRC, "
+              "42.6%% -> ~0%%, PASSIVE_RX_ONLY_HANDOVER.md §12.1)\n",
+              grant->rnti, (unsigned)cw->qamModOrder, best_m, n, evm);
+      }
+    }
+  }
+
   if (demod_ok) {
+    const uint64_t pdt_ldp = pdtim_on ? pdtim_now() : 0;
     nr_dlsch_unscrambling(llr, G, 0 /* codeword */, dlsch_config->dlDataScramblingId, grant->rnti);
-    if (passive_ldpc_decode(ue, proc, &g_harq, cw, dlsch_config, llr, freq_alloc->num_rbs, G)) {
+    const bool ldpc_ok = passive_ldpc_decode(ue, proc, &g_harq, cw, dlsch_config, llr, freq_alloc->num_rbs, G);
+    pdtim_add(PDTIM_LDPC, pdt_ldp);
+    if (ldpc_ok) {
       out->status = NR_PDSCH_PASSIVE_DECODE_CRC_OK;
       out->tb     = g_harq.b;
     } else {
@@ -631,6 +875,8 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
             out->status == NR_PDSCH_PASSIVE_DECODE_CRC_OK ? "CRC_OK"
               : (out->status == NR_PDSCH_PASSIVE_DECODE_CRC_FAIL ? "CRC_FAIL" : "ERROR"));
   }
+
+  pdtim_report();
 
   free(llr);
   free(toFree);

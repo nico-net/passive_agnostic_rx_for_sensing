@@ -143,6 +143,25 @@ typedef struct {
                             // is by far the most expensive thing in this tap and a noisy slot can
                             // otherwise present several accepted candidates at once.
 
+  // ---- Deferred decode (PASSIVE_RX_ONLY_HANDOVER.md §15, 2026-08-24) --------------------------
+  // nr_pdsch_passive_decode() costs 775 us mean / 2689 us max against a 500 us slot budget, so an
+  // occasion that runs one ALWAYS overruns its deadline; a three-arm ablation at ~1500 offered
+  // grants/s showed that alone taking PBCH lock from 88 s to 3 s (max_pos_acc runaway
+  // 375->583->794). Setting this moves the decode to a consumer thread reading the same rxdata,
+  // policed against the RF producer's position so a job whose samples were overwritten is dropped
+  // rather than decoded. See nr_pdsch_passive_queue.h for the full measurement.
+  //
+  // DEFAULT 0 = the previous in-line behaviour, bit-identical, so the A/B is one config field.
+  int   pdsch_thread;       // 0 = decode in-line on the PHY receive thread (default), 1 = consumer
+  int   pdsch_queue_depth;  // ring depth, 0 = auto (8). Bounded by the rxdata lifetime, NOT taste:
+                            // depth x 775 us must stay inside one frame (10 ms at mu=1), so 8 gives
+                            // 6.2 ms with margin. Raising it does not buy throughput, it buys
+                            // staleness.
+  int   pdsch_thread_core;  // core to pin the consumer to; <0 = unpinned (default). MUST NOT be one
+                            // of --thread-pool's cores -- the point is to stop competing with the
+                            // receive path, and sharing a core with the candidate-decode pool would
+                            // partly undo that.
+
   // ---- DCI format 1_0 scanning (2026-08-21). All-zero = off, i.e. exactly the format-1_1-only
   // behaviour this module had before. See nr_pdcch_blind_monitor.h's nr_blind_dci_format_t block
   // for why a passive receiver needs 1_0 at all (SIB1, Msg2/RAR, Msg4/RRCSetup, C-RNTI fallback).

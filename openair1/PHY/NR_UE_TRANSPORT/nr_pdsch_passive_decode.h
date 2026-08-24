@@ -142,6 +142,10 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
                                                          c16_t rxdataF[][ue->frame_parms.samples_per_slot_wCP],
                                                          nr_pdsch_passive_decode_result_t *out);
 
+/// Print the distinct decode-parameter tuples seen this run, with counts. Diffing this between a
+/// 90 %-CRC run and a 0 %-CRC run is what identifies a wrong parameter -- see section 23.3.
+void nr_pdsch_passive_parmset_dump(void);
+
 #ifdef __cplusplus
 }
 #endif

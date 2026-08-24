@@ -86,19 +86,29 @@ void nr_channel_compensation(uint32_t buffer_length,
 
       for (uint32_t i = 0; i < buffer_length >> 3; i++) {
         simde__m256i comp = oai_mm256_cpx_mult_conj(chF_256[i], rxF_256[i], output_shift);
-        rxComp_256[i] = simde_mm256_add_epi16(rxComp_256[i], comp);
+        /* SATURATING add. This was simde_mm256_add_epi16, which WRAPS on overflow: a 4-branch
+         * coherent sum that exceeds int16 does not clamp, it SIGN-FLIPS, turning the strongest REs
+         * into large negative ones and handing the LDPC decoder confidently wrong LLRs. That is a
+         * catastrophic failure mode, not a graceful one, and it is why nr_dlsch_demodulation.c
+         * carried a "four-RX rank-one compatibility mode ... avoiding overflow in the fixed-point
+         * MRC accumulator" that decoded branch 0 ALONE -- the overflow was worked around rather
+         * than fixed. Note the rho accumulation a few lines below ALREADY uses the saturating form,
+         * so the two paths in this same function disagreed. Measured 2026-08-24: with mrc over 4
+         * branches the receiver decoded 0.0 % of transport blocks on 4/4 runs while branch-0-only
+         * decoded 48.9-82.6 %. */
+        rxComp_256[i] = simde_mm256_adds_epi16(rxComp_256[i], comp);
 
         if (mod_order > 2) {
           simde__m256i mag = oai_mm256_smadd(chF_256[i], chF_256[i], output_shift);
           mag = simde_mm256_packs_epi32(mag, mag);
           mag = simde_mm256_unpacklo_epi16(mag, mag);
-          ch_maga_256[i] = simde_mm256_add_epi16(ch_maga_256[i], simde_mm256_mulhrs_epi16(mag, QAM_ampa_256));
+          ch_maga_256[i] = simde_mm256_adds_epi16(ch_maga_256[i], simde_mm256_mulhrs_epi16(mag, QAM_ampa_256));
 
           if (mod_order > 4)
-            ch_magb_256[i] = simde_mm256_add_epi16(ch_magb_256[i], simde_mm256_mulhrs_epi16(mag, QAM_ampb_256));
+            ch_magb_256[i] = simde_mm256_adds_epi16(ch_magb_256[i], simde_mm256_mulhrs_epi16(mag, QAM_ampb_256));
 
           if (mod_order > 6)
-            ch_magc_256[i] = simde_mm256_add_epi16(ch_magc_256[i], simde_mm256_mulhrs_epi16(mag, QAM_ampc_256));
+            ch_magc_256[i] = simde_mm256_adds_epi16(ch_magc_256[i], simde_mm256_mulhrs_epi16(mag, QAM_ampc_256));
         }
       }
 
