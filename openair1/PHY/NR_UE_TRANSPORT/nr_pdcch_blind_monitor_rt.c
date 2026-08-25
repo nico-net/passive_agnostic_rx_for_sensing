@@ -1399,6 +1399,10 @@ constdiag_done:;
     if (want_decode && (g_occasions_run % (NR_PDCCH_BLIND_SUMMARY_PERIOD_OCC * 50)) == 0) {
       nr_pdsch_passive_parmset_dump();
     }
+    /* Which HALF of the decode is failing -- see §29.1. Cheap (one line) and period-guarded. */
+    if (want_decode && (g_occasions_run % NR_PDCCH_BLIND_SUMMARY_PERIOD_OCC) == 0) {
+      nr_pdsch_passive_ldpc_stats_dump();
+    }
 
     if (nr_pdsch_passive_queue_running() && (g_occasions_run % NR_PDCCH_BLIND_SUMMARY_PERIOD_OCC) == 0) {
       nr_pdsch_passive_queue_stats_t qs;

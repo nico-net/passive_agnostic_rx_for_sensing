@@ -28,8 +28,11 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <stdatomic.h>
 #include <math.h>
 #include <pthread.h> // sqrt/floor/log10 (EQDIAG)
+#include <stdarg.h> // rep_append (CHESTDIAG)
+#include <stdio.h>  // vsnprintf
 
 #include "common/utils/LOG/log.h"
 #include "common/utils/nr/nr_common.h"
@@ -202,6 +205,196 @@ typedef struct {
   decode_abort_t abort_decode;
 } passive_harq_t;
 
+/* ---- LDPC failure-mode census (always on; printed with the periodic summary) -----------------
+ * The passive receiver decodes either ~40-65 % of transport blocks or ~0 %, deterministic for a
+ * whole run, and PASSIVE_RX_ONLY_HANDOVER.md §29 has now refuted every upstream cause: the channel
+ * estimate is VALID in the failing runs (9-18.6 dB) and its SNR is ANTI-correlated with CRC. So the
+ * fault is downstream of the equaliser -- and this function already distinguishes the two places it
+ * can be, it just discarded the distinction by returning false from both:
+ *   seg_fail : a per-SEGMENT CRC failed  -> LDPC did not converge -> the LLRs are wrong
+ *              (demodulation, LLR scaling, rate de-matching, descrambling)
+ *   tb_fail  : every segment CRC PASSED but the TB CRC did not -> the decode was CORRECT and the
+ *              reassembly/TBS/CRC-type is wrong
+ *   zero_tb  : decoded to an all-zero payload (the known false-pass guard below)
+ * Those two point at completely different code, so this split is the next fork in the diagnosis.
+ * Also records how many segments of C actually decoded, which separates "nothing works" from
+ * "one segment is marginal". */
+/* ---- LLR quality, ATTRIBUTED BY OUTCOME (§30's next measurement) -----------------------------
+ * §30 pinned the fault to the LLRs: every failure is a per-segment LDPC non-convergence
+ * (`tb_fail = 0` in every run), while §29 showed the channel estimate feeding them is VALID at
+ * 9-18.6 dB. So the question is what the LLRs actually look like, and the discriminator is:
+ *   saturated at the int16 rail -> the SCALING is wrong (nvar / log2_maxh)
+ *   crushed towards zero        -> no soft information reaches the decoder
+ *   healthy magnitude, decodes nothing -> the SIGNS are wrong, i.e. descrambling
+ * Binned by whether that transport block subsequently decoded, so a 43 % run compares its OWN
+ * successes against its OWN failures -- far stronger than comparing across runs, which is what
+ * every cross-run comparison in §§17-29 was reduced to.
+ * Sampled every 32nd LLR: G reaches ~150k and this runs per decode. */
+static _Atomic uint64_t g_llr_n[2]    = {0, 0}; // [0] = TB failed, [1] = TB decoded
+static _Atomic uint64_t g_llr_absum[2] = {0, 0};
+static _Atomic uint64_t g_llr_zero[2]  = {0, 0};
+static _Atomic uint64_t g_llr_sat[2]   = {0, 0};
+/* SIGNED sum, and the count of positive LLRs. mean|LLR| (above) is BLIND to a sign bias, and a bias
+ * is exactly what would explain the dominant failure mode: all-zeros is a valid codeword for any
+ * linear code, so LDPC settles on it whenever the LLRs systematically favour 0-bits. With one UE on
+ * the cell every accepted grant is a REAL grant carrying REAL data, and MAC padding carries an LCID
+ * subheader so it is not all-zero either -- so a bias in the soft information is the remaining
+ * mechanism that produces an all-zero transport block from a non-empty one. Balanced data should
+ * give mean ~ 0 and pos ~ 50 %. */
+/* Grant SHAPE per outcome. §33 left one question: what distinguishes the ~47 % of transport blocks
+ * that decode to all-zeros from the ones that carry data, given the gNB has 590 kB backlogged and is
+ * transmitting real data on essentially every grant. If the all-zero population clusters on a
+ * particular TBS, PRB count or RV, that is a structural clue; if its shape distribution is identical
+ * to the decoding population's, the cause is not in the grant at all. Indexed [0]=zero_tb,
+ * [1]=decoded-with-data, [2]=seg_fail. */
+static _Atomic uint64_t g_shape_n[3]   = {0, 0, 0};
+static _Atomic uint64_t g_shape_tbs[3] = {0, 0, 0};
+static _Atomic uint64_t g_shape_rb[3]  = {0, 0, 0};
+static _Atomic uint64_t g_shape_rv[3]  = {0, 0, 0};
+static _Atomic uint64_t g_shape_G[3]   = {0, 0, 0};
+/* Segmentation parameters, binned by outcome. §34.4's hypothesis: filler bits F are ZEROS by
+ * definition, and the reassembly copies `(K>>3) - (F>>3) - (C>1?3:0)` bytes per segment. If K/F/C
+ * are computed for a different TBS than was transmitted, the copied bytes come from the FILLER
+ * region -- giving an all-zero transport block while every segment CRC still passes, because the
+ * LDPC decoded its codeword correctly and only the extraction window is wrong. That fits confident
+ * zeros + valid segment CRCs + tb_fail=0 + a dependence on TBS. */
+static _Atomic uint64_t g_shape_K[3] = {0, 0, 0};
+static _Atomic uint64_t g_shape_F[3] = {0, 0, 0};
+static _Atomic uint64_t g_shape_C[3] = {0, 0, 0};
+static _Atomic uint64_t g_shape_Z[3] = {0, 0, 0};
+/* Outcome binned DIRECTLY by symbol count, replacing §35's inference from a mean-TBS difference.
+ * This cell uses two TDA entries, sym=1+13 (dmrs_len=3, mask 0x884) and sym=1+7 (dmrs_len=2, mask
+ * 0x84). A short grant has a different DM-RS pattern, hence different nb_re_dmrs and G, so an error
+ * confined to the 7-symbol variant would produce confidently wrong soft bits on exactly that subset
+ * and leave 13-symbol grants untouched. [outcome][0]=short(<=9 sym), [1]=long. */
+static _Atomic uint64_t g_nsym[3][2] = {{0, 0}, {0, 0}, {0, 0}};
+/* Set by passive_ldpc_decode() for the TB it just processed; read by the caller once the outcome is
+ * known. Thread-local because several consumers decode concurrently. */
+static __thread uint32_t t_seg_K = 0, t_seg_F = 0, t_seg_C = 0, t_seg_Z = 0;
+
+static _Atomic int64_t  g_llr_sgnsum[2] = {0, 0};
+static _Atomic uint64_t g_llr_pos[2]    = {0, 0};
+/* Positive-rate split by BIT POSITION within each 16QAM symbol. nr_16qam_llr() emits 4 LLRs per
+ * symbol: b0,b1 are the SIGN bits (llr = y) and b2,b3 the MAGNITUDE bits (llr = ch_mag - |y|).
+ * If the equalised symbols are systematically SMALL relative to ch_mag -- which is what a
+ * DM-RS-to-data power offset that we do not account for would produce, since ch_mag is derived from
+ * the DM-RS -- then the magnitude bits go CONFIDENTLY POSITIVE while the sign bits stay balanced,
+ * and LDPC reads the result as all-zeros. That is precisely the observed signature (89-91 % positive
+ * overall, confident, no convergence failure). This split tells the two apart:
+ *   sign ~50 % and magnitude ~100 %  -> amplitude/scaling mismatch, NOT a data or sequence problem
+ *   both ~equally biased             -> the payload really is zeros
+ * [outcome][0]=sign bits (i%4<2), [1]=magnitude bits (i%4>=2). */
+static _Atomic uint64_t g_llr_posbit[2][2] = {{0, 0}, {0, 0}};
+static _Atomic uint64_t g_llr_nbit[2][2]   = {{0, 0}, {0, 0}};
+static _Atomic uint64_t g_llr_tb[2]    = {0, 0};
+
+static _Atomic uint64_t g_ldpc_seg_fail = 0;
+static _Atomic uint64_t g_ldpc_tb_fail  = 0;
+static _Atomic uint64_t g_ldpc_zero_tb  = 0;
+static _Atomic uint64_t g_ldpc_ok       = 0;
+static _Atomic uint64_t g_ldpc_iface_err = 0;
+static _Atomic uint64_t g_seg_ok_sum    = 0; // segments that decoded, summed over failing TBs
+static _Atomic uint64_t g_seg_tot_sum   = 0; // C, summed over the same TBs
+
+void nr_pdsch_passive_ldpc_stats_dump(void)
+{
+  const uint64_t sf = atomic_load(&g_ldpc_seg_fail), tf = atomic_load(&g_ldpc_tb_fail);
+  const uint64_t zt = atomic_load(&g_ldpc_zero_tb), ok = atomic_load(&g_ldpc_ok);
+  const uint64_t ie = atomic_load(&g_ldpc_iface_err);
+  const uint64_t so = atomic_load(&g_seg_ok_sum), st = atomic_load(&g_seg_tot_sum);
+  for (int k = 0; k < 2; k++) {
+    const uint64_t n = atomic_load(&g_llr_n[k]);
+    if (n == 0) {
+      continue;
+    }
+    LOG_I(PHY,
+          "SENSING: LLRDIAG %s tbs=%lu n=%lu mean_abs=%.1f mean_signed=%+.2f pos=%.2f%% "
+          "zero=%.2f%% saturated=%.4f%%\n",
+          k ? "DECODED" : "FAILED  ", (unsigned long)atomic_load(&g_llr_tb[k]), (unsigned long)n,
+          (double)atomic_load(&g_llr_absum[k]) / (double)n,
+          (double)atomic_load(&g_llr_sgnsum[k]) / (double)n,
+          100.0 * (double)atomic_load(&g_llr_pos[k]) / (double)n,
+          100.0 * (double)atomic_load(&g_llr_zero[k]) / (double)n,
+          100.0 * (double)atomic_load(&g_llr_sat[k]) / (double)n);
+  }
+  {
+    /* The direct test: all-zero RATE for short versus long grants. If short grants are dramatically
+     * worse, the bug is in the 7-symbol TDA handling. */
+    const uint64_t zs = atomic_load(&g_nsym[0][0]), zl = atomic_load(&g_nsym[0][1]);
+    const uint64_t ds = atomic_load(&g_nsym[1][0]), dl = atomic_load(&g_nsym[1][1]);
+    const uint64_t fs = atomic_load(&g_nsym[2][0]), fl = atomic_load(&g_nsym[2][1]);
+    if (zs + zl + ds + dl + fs + fl > 0) {
+      LOG_I(PHY,
+            "SENSING: NSYM short(<=9sym): zero=%lu decoded=%lu segfail=%lu -> zero_rate=%.1f%% | "
+            "long(>9sym): zero=%lu decoded=%lu segfail=%lu -> zero_rate=%.1f%%\n",
+            (unsigned long)zs, (unsigned long)ds, (unsigned long)fs,
+            (zs + ds) ? 100.0 * (double)zs / (double)(zs + ds) : 0.0,
+            (unsigned long)zl, (unsigned long)dl, (unsigned long)fl,
+            (zl + dl) ? 100.0 * (double)zl / (double)(zl + dl) : 0.0);
+    }
+  }
+  {
+    static const char *const kNm[3] = {"ZERO_TB ", "DECODED ", "SEG_FAIL"};
+    for (int k = 0; k < 3; k++) {
+      const uint64_t n = atomic_load(&g_shape_n[k]);
+      if (n == 0) {
+        continue;
+      }
+      const double dn = (double)n;
+      const double mK = (double)atomic_load(&g_shape_K[k]) / dn;
+      const double mF = (double)atomic_load(&g_shape_F[k]) / dn;
+      const double mC = (double)atomic_load(&g_shape_C[k]) / dn;
+      LOG_I(PHY,
+            "SENSING: SHAPE %s n=%lu mean_tbs=%.0f mean_prb=%.1f mean_G=%.0f mean_rv=%.3f "
+            "K=%.0f F=%.0f C=%.2f Z=%.0f F/K=%.4f payload_bytes=%.0f\n",
+            kNm[k], (unsigned long)n,
+            (double)atomic_load(&g_shape_tbs[k]) / dn,
+            (double)atomic_load(&g_shape_rb[k]) / dn,
+            (double)atomic_load(&g_shape_G[k]) / dn,
+            (double)atomic_load(&g_shape_rv[k]) / dn,
+            mK, mF, mC, (double)atomic_load(&g_shape_Z[k]) / dn,
+            (mK > 0.0) ? mF / mK : 0.0,
+            /* what the reassembly actually copies per segment, times C -- if this drifts away from
+             * TBS/8 for the all-zero population, the extraction window is the bug. */
+            mC * ((mK / 8.0) - (mF / 8.0) - ((mC > 1.0) ? 3.0 : 0.0)));
+    }
+  }
+  for (int k = 0; k < 2; k++) {
+    const uint64_t ns = atomic_load(&g_llr_nbit[k][0]), nm = atomic_load(&g_llr_nbit[k][1]);
+    if (ns == 0 || nm == 0) {
+      continue;
+    }
+    LOG_I(PHY, "SENSING: BITPOS %s sign_bits_pos=%.2f%% magnitude_bits_pos=%.2f%%\n",
+          k ? "DECODED" : "FAILED  ",
+          100.0 * (double)atomic_load(&g_llr_posbit[k][0]) / (double)ns,
+          100.0 * (double)atomic_load(&g_llr_posbit[k][1]) / (double)nm);
+  }
+  LOG_I(PHY,
+        "SENSING: LDPCDIAG ok=%lu seg_fail=%lu tb_fail=%lu zero_tb=%lu iface_err=%lu "
+        "segs_decoded=%lu/%lu (%.1f%%)\n",
+        (unsigned long)ok, (unsigned long)sf, (unsigned long)tf, (unsigned long)zt,
+        (unsigned long)ie, (unsigned long)so, (unsigned long)st,
+        st ? (100.0 * (double)so / (double)st) : 0.0);
+}
+
+/// Bounded append for CHESTDIAG's report string. snprintf() returns the length it WOULD have
+/// written, so accumulating its return value directly walks the buffer once the text is truncated --
+/// which is easy to reach at Nl x nb_antennas_rx entries. Clamps to `cap - 1` instead.
+static void rep_append(char *buf, size_t cap, int *u, const char *fmt, ...)
+{
+  if (cap == 0 || *u < 0 || (size_t)*u >= cap - 1) {
+    return;
+  }
+  va_list ap;
+  va_start(ap, fmt);
+  const int n = vsnprintf(buf + *u, cap - (size_t)*u, fmt, ap);
+  va_end(ap);
+  if (n < 0) {
+    return;
+  }
+  *u = ((size_t)(*u + n) >= cap - 1) ? (int)(cap - 1) : (*u + n);
+}
+
 static __thread passive_harq_t g_harq; // zero-initialised per thread
 
 static bool passive_harq_prepare(passive_harq_t *h, int n_rb_dl)
@@ -296,6 +489,10 @@ static bool passive_ldpc_decode(PHY_VARS_NR_UE *ue,
   TB_parameters.llr = llr;
   TB_parameters.c = h->c;
   TB_parameters.d = h->d;
+  t_seg_K = TB_parameters.K;
+  t_seg_F = TB_parameters.F;
+  t_seg_C = TB_parameters.C;
+  t_seg_Z = TB_parameters.Z;
   TB_parameters.E = nr_get_E(TB_parameters.G, TB_parameters.C, TB_parameters.Qm, TB_parameters.nb_layers, 0);
   TB_parameters.E2 = TB_parameters.E;
   TB_parameters.first_rE2 = TB_parameters.C;
@@ -341,12 +538,23 @@ static bool passive_ldpc_decode(PHY_VARS_NR_UE *ue,
 
   if (ue->nrLDPC_coding_interface.nrLDPC_coding_decoder(&slot_parameters) != 0) {
     LOG_W(NR_PHY, "SENSING: passive PDSCH decode -- nrLDPC_coding_decoder failed\n");
+    atomic_fetch_add(&g_ldpc_iface_err, 1);
     return false;
   }
 
-  for (uint32_t r = 0; r < TB_parameters.C; r++) {
-    if (!TB_parameters.decodeSuccess[r]) {
-      return false; // per-segment CRC failed: the expected outcome for a grant meant for someone else
+  {
+    uint32_t seg_ok = 0;
+    for (uint32_t r = 0; r < TB_parameters.C; r++) {
+      if (TB_parameters.decodeSuccess[r]) {
+        seg_ok++;
+      }
+    }
+    if (seg_ok != TB_parameters.C) {
+      /* LDPC did not converge on at least one segment -> the LLRs feeding it are wrong. */
+      atomic_fetch_add(&g_ldpc_seg_fail, 1);
+      atomic_fetch_add(&g_seg_ok_sum, seg_ok);
+      atomic_fetch_add(&g_seg_tot_sum, TB_parameters.C);
+      return false;
     }
   }
 
@@ -361,7 +569,10 @@ static bool passive_ldpc_decode(PHY_VARS_NR_UE *ue,
   }
 
   if (TB_parameters.C > 1 && !check_crc(h->b, lenWithCrc(1, cw->TBS), crcType(1, cw->TBS))) {
-    return false; // segment CRCs passed but the TB CRC did not
+    /* Every segment decoded and CRC'd correctly, so the LLRs and the LDPC were RIGHT -- the fault is
+     * in reassembly, TBS, or the CRC type. Completely different code from the seg_fail path. */
+    atomic_fetch_add(&g_ldpc_tb_fail, 1);
+    return false;
   }
 
   // The same all-zero-payload guard the real decoder applies: an all-zero TB with a zero CRC is a
@@ -373,9 +584,11 @@ static bool passive_ldpc_decode(PHY_VARS_NR_UE *ue,
       i++;
     }
     if (i == sz) {
+      atomic_fetch_add(&g_ldpc_zero_tb, 1);
       return false;
     }
   }
+  atomic_fetch_add(&g_ldpc_ok, 1);
   return true;
 }
 
@@ -564,9 +777,35 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
     free(toFree);
     return out->status; // no DM-RS in the allocation: nothing to equalise against
   }
-  // nr_ue_pdsch_procedures() divides by number_symbols (not by the DM-RS symbol count) x layers x
-  // antennas; mirrored so nvar carries the same scale the attached path's gates were tuned against.
-  nvar /= (uint32_t)(dlsch_config->number_symbols * cw->Nl * fp->nb_antennas_rx);
+  /* nvar normalisation. ISAC_RX_NVAR_FIX=1 (opt-in, default OFF = bit-identical to before).
+   *
+   * The loop above accumulates (n_dmrs_sym x Nl) terms, each one already a PER-ANTENNA MEAN of
+   * |LS_est - filtered_est|^2 (that per-antenna averaging is 18.3's fix inside
+   * nr_pdsch_channel_estimation). So the mean is the sum over (n_dmrs_sym x Nl) -- and the divisor
+   * used below is neither of those factors:
+   *   - it divides by nb_antennas_rx AGAIN, though the helper already averaged over antennas: 4x;
+   *   - it divides by number_symbols (13, the whole allocation) though only n_dmrs_sym (3) terms
+   *     were summed: 4.33x.
+   * MEASURED 2026-08-25 on run SNR1: the NVAR probe's pre-division value 20245 against CHESTDIAG's
+   * post-division 1167 = 17.35x, matching 13/3 exactly. nvar sets the equaliser's confidence, so a
+   * 12.4 dB under-estimate makes the LLRs too large and they clip -- a decode failure with a
+   * perfectly healthy constellation, which is the signature 17.2b measured (post-equalisation EVM
+   * flat at 47-62 % across runs decoding 82.6 % and 0.0 %). Same defect CLASS as 18.3, which took
+   * CRC 0 % -> 54-71 % when the antenna part of it was corrected.
+   *
+   * DEFAULT STAYS OFF because the current form is a DELIBERATE mirror of nr_ue_pdsch_procedures(),
+   * which carries the identical arithmetic -- this is upstream OAI behaviour, not a local slip, and
+   * the attached path's gates were tuned against it. Flip it only on an alternated >= 5-run-per-arm
+   * A/B at comparable offered load (19.3), never on inspection. */
+  {
+    static int s_nvfix = -1;
+    if (s_nvfix < 0) {
+      s_nvfix = (getenv("ISAC_RX_NVAR_FIX") != NULL) ? atoi(getenv("ISAC_RX_NVAR_FIX")) : 0;
+    }
+    const uint32_t den = s_nvfix ? (uint32_t)(n_dmrs_sym * cw->Nl)
+                                 : (uint32_t)(dlsch_config->number_symbols * cw->Nl * fp->nb_antennas_rx);
+    nvar /= (den > 0) ? den : 1u;
+  }
   pdtim_add(PDTIM_CHEST, pdt_che);
 
   /* CHESTDIAG (ISAC_PDSCH_TBPARM=1): per-(layer,antenna) channel power, plus the layer-space Gram
@@ -595,8 +834,9 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
       }
       if (sym < 0)
         sym = dlsch_config->start_symbol;
-      char rep[420];
+      char rep[1024];
       int u = 0;
+      rep[0] = '\0';
       double pw[8][8];
       for (int l = 0; l < cw->Nl && l < 8; l++) {
         for (int a = 0; a < fp->nb_antennas_rx && a < 8; a++) {
@@ -606,6 +846,33 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
             acc += (double)h[k].r * h[k].r + (double)h[k].i * h[k].i;
           pw[l][a] = acc / (nsc > 0 ? nsc : 1);
         }
+      }
+      /* Fill `rep`. It was declared, printed with %s and NEVER WRITTEN -- undefined behaviour on
+       * every CHESTDIAG line, and it discarded the per-(layer,antenna) powers computed just above.
+       * That is PASSIVE_RX_ONLY_HANDOVER.md 12.7's bug, reintroduced by the 13 revert (812f6b4af6).
+       * Restored because it is the only per-BRANCH PDSCH SNR instrument in the tree, and both the
+       * branch-imbalance work and the "can this link carry mcs 25" question need it.
+       *
+       * Two things to know before reading the numbers:
+       *  - the dB are 10log10(pw / nvar) against the nvar THIS function has already divided by
+       *    (number_symbols x Nl x nb_antennas_rx), mirroring nr_ue_pdsch_procedures(). The blind
+       *    monitor's own SNR gate uses the RAW nvar, so the two are on different scales -- treat this
+       *    as this path's scale, not as a calibrated link SNR;
+       *  - that division is common-mode across antennas, so the BRANCH-TO-BRANCH deltas are exact
+       *    whatever the convention, and those are the quantity the imbalance work actually needs.
+       * Use ANTPOW for the raw antenna powers (RXBRANCH pw[] is a channel ESTIMATE and swings 10 dB
+       * between transport blocks -- 20/21). */
+      for (int l = 0; l < cw->Nl && l < 8; l++) {
+        rep_append(rep, sizeof(rep), &u, "%spw=L%d[", l ? " " : "", l);
+        for (int a = 0; a < fp->nb_antennas_rx && a < 8; a++) {
+          rep_append(rep, sizeof(rep), &u, "%s%.0f", a ? "," : "", pw[l][a]);
+        }
+        rep_append(rep, sizeof(rep), &u, "] snr_dB=L%d[", l);
+        for (int a = 0; a < fp->nb_antennas_rx && a < 8; a++) {
+          rep_append(rep, sizeof(rep), &u, "%s%.1f", a ? "," : "",
+                     (nvar > 0 && pw[l][a] > 0.0) ? 10.0 * log10(pw[l][a] / (double)nvar) : -99.0);
+        }
+        rep_append(rep, sizeof(rep), &u, "]");
       }
       /* MIMO separability, done properly (2026-08-20). The previous statistic summed the layer
        * inner product over antennas AND subcarriers with POWER weighting, so a single dominant
@@ -839,10 +1106,82 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
   }
 
   if (demod_ok) {
+    /* Measured BEFORE unscrambling: descrambling only flips signs, so magnitudes are identical
+     * either side of it and taking them here keeps this independent of whether the scrambling
+     * sequence is the suspect. */
+    uint64_t llr_n = 0, llr_absum = 0, llr_zero = 0, llr_sat = 0, llr_pos = 0;
+    int64_t  llr_sgnsum = 0;
+    for (uint32_t i = 0; i < G; i += 32) {
+      const int v = llr[i] < 0 ? -llr[i] : llr[i];
+      llr_absum += (uint64_t)v;
+      llr_n++;
+      if (v == 0) {
+        llr_zero++;
+      }
+      if (v >= 32767) {
+        llr_sat++;
+      }
+    }
+
+    const uint64_t zero_before = atomic_load(&g_ldpc_zero_tb);
     const uint64_t pdt_ldp = pdtim_on ? pdtim_now() : 0;
     nr_dlsch_unscrambling(llr, G, 0 /* codeword */, dlsch_config->dlDataScramblingId, grant->rnti);
+
+    /* SIGN statistics AFTER descrambling -- measuring them before is meaningless, and that was the
+     * first version's mistake: the scrambler exists to randomise signs, so an all-zero transport
+     * block scrambled gives balanced +/- by construction (measured: pos = 49.5 % / 49.0 %, which
+     * proves only that the scrambler works). Post-descramble, a genuinely all-zero TB shows a strong
+     * POSITIVE bias (OAI's convention: LLR > 0 favours bit 0), and a TB whose descrambling is wrong
+     * stays balanced. That is the discriminator for the zero_tb population. */
+    uint64_t posbit[2] = {0, 0}, nbit[2] = {0, 0};
+    /* Step 4, not 32: the stride must not alias the 4-LLRs-per-symbol structure, or every sample
+     * lands on the same bit position and the split is meaningless. Sample whole symbols instead. */
+    for (uint32_t i = 0; i + 3 < G; i += 32) {
+      for (uint32_t j = 0; j < 4; j++) {
+        const int raw = llr[i + j];
+        const int b   = (j < 2) ? 0 : 1;
+        nbit[b]++;
+        if (raw > 0) {
+          posbit[b]++;
+        }
+      }
+      llr_sgnsum += (int64_t)llr[i];
+      if (llr[i] > 0) {
+        llr_pos++;
+      }
+    }
     const bool ldpc_ok = passive_ldpc_decode(ue, proc, &g_harq, cw, dlsch_config, llr, freq_alloc->num_rbs, G);
     pdtim_add(PDTIM_LDPC, pdt_ldp);
+
+    {
+      /* 1 = decoded with data, 0 = zero_tb, 2 = seg_fail. `out->status` is not set yet here, so the
+       * zero/seg distinction comes from the counters passive_ldpc_decode just bumped. */
+      const int sk = ldpc_ok ? 1 : ((atomic_load(&g_ldpc_zero_tb) != zero_before) ? 0 : 2);
+      atomic_fetch_add(&g_shape_n[sk], 1);
+      atomic_fetch_add(&g_shape_tbs[sk], (uint64_t)cw->TBS);
+      atomic_fetch_add(&g_shape_rb[sk], (uint64_t)freq_alloc->num_rbs);
+      atomic_fetch_add(&g_shape_G[sk], (uint64_t)G);
+      atomic_fetch_add(&g_shape_rv[sk], (uint64_t)grant->rv);
+      atomic_fetch_add(&g_shape_K[sk], (uint64_t)t_seg_K);
+      atomic_fetch_add(&g_shape_F[sk], (uint64_t)t_seg_F);
+      atomic_fetch_add(&g_shape_C[sk], (uint64_t)t_seg_C);
+      atomic_fetch_add(&g_shape_Z[sk], (uint64_t)t_seg_Z);
+      atomic_fetch_add(&g_nsym[sk][(dlsch_config->number_symbols <= 9) ? 0 : 1], 1);
+    }
+    {
+      const int k = ldpc_ok ? 1 : 0;
+      atomic_fetch_add(&g_llr_n[k], llr_n);
+      atomic_fetch_add(&g_llr_absum[k], llr_absum);
+      atomic_fetch_add(&g_llr_zero[k], llr_zero);
+      atomic_fetch_add(&g_llr_sat[k], llr_sat);
+      atomic_fetch_add(&g_llr_sgnsum[k], llr_sgnsum);
+      atomic_fetch_add(&g_llr_pos[k], llr_pos);
+      for (int b = 0; b < 2; b++) {
+        atomic_fetch_add(&g_llr_posbit[k][b], posbit[b]);
+        atomic_fetch_add(&g_llr_nbit[k][b], nbit[b]);
+      }
+      atomic_fetch_add(&g_llr_tb[k], 1);
+    }
     if (ldpc_ok) {
       out->status = NR_PDSCH_PASSIVE_DECODE_CRC_OK;
       out->tb     = g_harq.b;

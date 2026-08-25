@@ -146,6 +146,10 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
 /// 90 %-CRC run and a 0 %-CRC run is what identifies a wrong parameter -- see section 23.3.
 void nr_pdsch_passive_parmset_dump(void);
 
+/// Split the CRC failures into "LDPC did not converge" (LLRs wrong) versus "segments decoded but the
+/// TB CRC failed" (reassembly/TBS wrong). Those point at different code -- see §29.1.
+void nr_pdsch_passive_ldpc_stats_dump(void);
+
 #ifdef __cplusplus
 }
 #endif
