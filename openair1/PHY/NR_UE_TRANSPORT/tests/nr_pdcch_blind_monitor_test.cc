@@ -1344,6 +1344,489 @@ TEST_F(BlindPdcchTest, Dci10PureNoiseFalseAcceptRateIsBounded) {
   EXPECT_LT(accepts, kTrials / 20) << "accepts=" << accepts << " of " << kTrials;
 }
 
+// =============================================================================================
+// Group 4: UPLINK DCI formats 0_1 and 0_0.
+//
+// A note on what these tests can and cannot establish. The DL 1_1 tests can assert a real field
+// layout because the deployment's DL widths were pinned field-by-field against the gNB's own log.
+// The UL 0_1 layout has NOT been pinned that way yet -- the gNB does not dump its UL RRC config,
+// and the 43-bit live payload width admits more than one width assignment (see the header's UL
+// section). So these tests assert:
+//   - that the packer, the size function and the extractor agree with EACH OTHER for any width
+//     assignment (which is what stops the module drifting internally, the failure that produced
+//     the DL path's year of wrong offsets), and
+//   - the pieces that ARE independently pinned against the live gNB: the DM-RS symbol mask and the
+//     antenna-ports code point, both reconciled below against a dumped FAPI PUSCH PDU.
+// They deliberately do NOT assert "43 bits is field list X" as truth. That comes from replaying a
+// capture against the gNB log, not from a unit test.
+// =============================================================================================
+
+/// Resolve one overridable UL width exactly as nr_pdcch_blind_monitor.c's blind_ul_field_bits()
+/// does, so a packed test payload always matches the layout the extractor reads.
+int UlTdaBits(const nr_pdcch_blind_ul_opts_t& o)
+{
+  if (o.tda_count <= 0) return 4;
+  int b = 0;
+  while ((1 << b) < o.tda_count) b++;
+  return b;
+}
+
+/// One synthetic DCI-0_1 payload's ground truth.
+struct UlGroundTruth {
+  uint16_t rnti      = 0x4630;
+  uint32_t riv       = 0;
+  uint32_t tda_index = 0;
+  uint32_t mcs       = 10;
+  uint32_t ndi       = 1;
+  uint32_t rv        = 0;
+  uint32_t harq_pid  = 1;
+  uint32_t tpc       = 1;
+  uint32_t dai       = 2;
+  uint32_t antenna_ports = 2;
+  uint32_t srs_request   = 0;
+  uint32_t csi_request   = 0;
+  uint32_t freq_hopping  = 0;
+  uint32_t dmrs_seq_init = 0;
+  uint32_t ulsch_ind     = 1;
+  uint32_t format_ind    = 0; // 0 = UL
+};
+
+/// Packs a UlGroundTruth in fill_dci_pdu_rel15()'s NR_UL_DCI_FORMAT_0_1 PACKER order -- the same
+/// order nr_pdcch_blind_decode_and_extract_01() walks. If these two ever disagree, every test below
+/// fails loudly, which is the point.
+uint64_t PackUlPayload(const UlGroundTruth& gt, const nr_pdcch_blind_ul_opts_t& o)
+{
+  uint64_t p = 0;
+  auto put = [&](uint32_t val, int nbits) {
+    if (nbits == 0) return;
+    const uint32_t mask = (nbits >= 32) ? 0xFFFFFFFFu : ((1u << nbits) - 1u);
+    p = (p << nbits) | (val & mask);
+  };
+  const int riv_bits = RivBitsFor(o.bwp_size);
+  put(gt.format_ind, 1);                                   // format identifier (0 = UL)
+  put(0, PickBits(o.carrier_indicator_bits, 0));           // carrier indicator
+  put(0, PickBits(o.ul_sul_bits, 0));                      // UL/SUL indicator
+  put(0, PickBits(o.bwp_indicator_bits, 0));               // BWP indicator
+  put(gt.riv, riv_bits);                                   // frequency domain assignment
+  put(gt.tda_index, UlTdaBits(o));                         // time domain assignment
+  put(gt.freq_hopping, PickBits(o.freq_hopping_bits, 0));  // frequency hopping flag
+  put(gt.mcs, 5);                                          // MCS
+  put(gt.ndi, 1);                                          // NDI
+  put(gt.rv, 2);                                           // RV
+  put(gt.harq_pid, PickBits(o.harq_pid_bits, 4));          // HARQ process number
+  put(gt.dai, PickBits(o.dai1_bits, 2));                   // 1st DAI
+  put(0, PickBits(o.dai2_bits, 0));                        // 2nd DAI
+  put(gt.tpc, 2);                                          // TPC for scheduled PUSCH
+  put(0, PickBits(o.sri_bits, 0));                         // SRS resource indicator
+  put(0, PickBits(o.precoding_info_bits, 0));              // precoding information / layers
+  put(gt.antenna_ports, PickBits(o.antenna_ports_bits, 2)); // antenna ports
+  put(gt.srs_request, PickBits(o.srs_request_bits, 2));    // SRS request
+  put(gt.csi_request, PickBits(o.csi_request_bits, 0));    // CSI request
+  put(0, PickBits(o.cbg_bits, 0));                         // CBGTI
+  put(0, PickBits(o.ptrs_dmrs_bits, 0));                   // PTRS-DMRS association
+  put(0, PickBits(o.beta_offset_bits, 0));                 // beta offset indicator
+  put(gt.dmrs_seq_init, PickBits(o.dmrs_seq_init_bits, 1)); // DM-RS sequence initialisation
+  put(gt.ulsch_ind, 1);                                    // UL-SCH indicator
+  return p;
+}
+
+/// UL opts matching THIS deployment as far as it is known (live gNB, 2026-08-25): 273-PRB UL BWP
+/// at CRB 0, CP-OFDM, qam64, PCI 2, and the 2-entry TDRA list the PUSCH dump implies
+/// (symb=[0..14), k2=4). Widths are left at their documented defaults -- see the group comment for
+/// why no width here is claimed to be the pinned truth.
+nr_pdcch_blind_ul_opts_t LiveUlOpts()
+{
+  nr_pdcch_blind_ul_opts_t o = {};
+  o.bwp_start = 0;
+  o.bwp_size  = 273;
+  o.tda_count = 2;
+  o.tda_start[0] = 0;  o.tda_length[0] = 14; o.tda_mapping[0] = 0; o.tda_k2[0] = 4;
+  o.tda_start[1] = 0;  o.tda_length[1] = 12; o.tda_mapping[1] = 0; o.tda_k2[1] = 4;
+  o.dmrs_config_type      = 0;
+  o.dmrs_add_pos          = 2;   // reconciled below against the live ul_dmrs_symb_pos dump
+  o.dmrs_max_length       = 1;
+  o.transform_precoding   = 0;   // live dump says "Transform Precoding Disabled"
+  o.mcs_table             = 0;   // live dump says mcs_table=qam64
+  o.data_scrambling_id    = -1;
+  o.ul_dmrs_scrambling_id = -1;
+  o.phy_cell_id           = 2;
+  o.carrier_indicator_bits = -1;
+  o.ul_sul_bits            = -1;
+  o.bwp_indicator_bits     = -1;
+  o.freq_hopping_bits      = -1;
+  o.harq_pid_bits          = -1;
+  o.dai1_bits              = -1;
+  o.dai2_bits              = -1;
+  o.sri_bits               = -1;
+  o.precoding_info_bits    = -1;
+  o.antenna_ports_bits     = -1;
+  o.srs_request_bits       = -1;
+  o.csi_request_bits       = -1;
+  o.cbg_bits               = -1;
+  o.ptrs_dmrs_bits         = -1;
+  o.beta_offset_bits       = -1;
+  o.dmrs_seq_init_bits     = -1;
+  return o;
+}
+
+TEST_F(BlindPdcchTest, Dci01SizeIsTheSumOfItsFieldWidths) {
+  nr_pdcch_blind_ul_opts_t o = LiveUlOpts();
+  // 12 spec-fixed (fmt 1 + MCS 5 + NDI 1 + RV 2 + TPC 2 + ULSCH-ind 1) + RIV 16 + TDA 1
+  // + HARQ 4 + DAI1 2 + antenna ports 2 + SRS request 2 + DM-RS seq init 1 = 40 at every other
+  // default. Asserting the arithmetic keeps the size function and the documented defaults honest.
+  EXPECT_EQ(nr_pdcch_blind_dci01_size(&o), 40);
+  EXPECT_EQ(RivBitsFor(273), 16);
+
+  // Widening any one field moves the total by exactly that much -- i.e. no field is being
+  // double-counted or dropped.
+  o.freq_hopping_bits = 1;
+  EXPECT_EQ(nr_pdcch_blind_dci01_size(&o), 41);
+  o.csi_request_bits = 2;
+  EXPECT_EQ(nr_pdcch_blind_dci01_size(&o), 43);
+}
+
+TEST_F(BlindPdcchTest, Dci01SizeIsZeroForAnInvalidBwp) {
+  nr_pdcch_blind_ul_opts_t o = LiveUlOpts();
+  o.bwp_size = 0;
+  EXPECT_EQ(nr_pdcch_blind_dci01_size(&o), 0);
+  EXPECT_EQ(nr_pdcch_blind_dci01_size(nullptr), 0);
+}
+
+TEST_F(BlindPdcchTest, Dci01RoundTripRecoversEveryField) {
+  nr_pdcch_blind_ul_opts_t o = LiveUlOpts();
+  const uint16_t len = nr_pdcch_blind_dci01_size(&o);
+
+  UlGroundTruth gt;
+  gt.riv       = 1200;
+  gt.tda_index = 0;
+  gt.mcs       = 25;
+  gt.ndi       = 1;
+  gt.rv        = 0;
+  gt.harq_pid  = 1;
+  gt.tpc       = 1;
+  gt.dai       = 2;
+  gt.antenna_ports = 2;
+
+  const uint64_t payload = PackUlPayload(gt, o);
+  auto llr = EncodeToLLR(payload, gt.rnti, len, kAggregationLevel, 40.0, rng_);
+
+  nr_pdcch_blind_ul_result_t out;
+  ASSERT_TRUE(nr_pdcch_blind_decode_and_extract_01(llr.data(), kAggregationLevel, len, &o, 0x0001, 0xFFEF, &out))
+      << (out.reject_reason ? out.reject_reason : "");
+  EXPECT_EQ(out.rnti, gt.rnti);
+  EXPECT_EQ(out.ul_dci_format, NR_BLIND_UL_DCI_FORMAT_0_1);
+  EXPECT_EQ(out.freq_domain_assignment, gt.riv);
+  EXPECT_EQ(out.mcs, gt.mcs);
+  EXPECT_EQ(out.ndi, gt.ndi);
+  EXPECT_EQ(out.rv, gt.rv);
+  EXPECT_EQ(out.harq_pid, gt.harq_pid);
+  EXPECT_EQ(out.tpc, gt.tpc);
+  EXPECT_EQ(out.dai, gt.dai);
+  EXPECT_EQ(out.antenna_ports_field, gt.antenna_ports);
+  EXPECT_EQ(out.tda_index, gt.tda_index);
+  EXPECT_EQ(out.ulsch_indicator, 1);
+  // TDRA entry 0 of the configured list, and the k2 that makes the grant actionable.
+  EXPECT_EQ(out.start_symbol, 0);
+  EXPECT_EQ(out.num_symbols, 14);
+  EXPECT_EQ(out.k2, 4);
+  EXPECT_EQ(out.mapping_type, 0);
+  // Identities fall back to the PCI when not separately configured.
+  EXPECT_EQ(out.data_scrambling_id, 2);
+  EXPECT_EQ(out.ul_dmrs_scrambling_id, 2);
+  EXPECT_EQ(out.transform_precoding, 0);
+}
+
+// The two quantities below ARE pinned against the live gNB, unlike the field widths. The FAPI
+// UL_TTI.request dump for this cell reads, verbatim:
+//   ul_dmrs_symb_pos=2180 dmrs_type=1 nscid=0 dmrs_ports=1 symb=[0..14)
+//   num_dmrs_cdm_grps_no_data=2   (and the UL PDCCH line logs `ant=2`)
+// 2180 == 0x884 == symbols 2, 7 and 11.
+TEST_F(BlindPdcchTest, Dci01DmrsMaskMatchesTheLiveGnbDump) {
+  nr_pdcch_blind_ul_opts_t o = LiveUlOpts();
+  const uint16_t len = nr_pdcch_blind_dci01_size(&o);
+
+  UlGroundTruth gt;
+  gt.tda_index     = 0;  // S=0, L=14, mapping type A
+  gt.antenna_ports = 2;
+  auto llr = EncodeToLLR(PackUlPayload(gt, o), gt.rnti, len, kAggregationLevel, 40.0, rng_);
+
+  nr_pdcch_blind_ul_result_t out;
+  ASSERT_TRUE(nr_pdcch_blind_decode_and_extract_01(llr.data(), kAggregationLevel, len, &o, 0x0001, 0xFFEF, &out))
+      << (out.reject_reason ? out.reject_reason : "");
+  EXPECT_EQ(out.ul_dmrs_symb_pos, 0x884) << "expected the live gNB's ul_dmrs_symb_pos=2180";
+  EXPECT_EQ(out.dmrs_config_type, 0);
+  EXPECT_EQ(out.nscid, 0);
+}
+
+TEST_F(BlindPdcchTest, Dci01AntennaPortsCodePointMatchesTheLiveGnbDump) {
+  nr_pdcch_blind_ul_opts_t o = LiveUlOpts();
+  const uint16_t len = nr_pdcch_blind_dci01_size(&o);
+
+  // val=2 -> 2 CDM groups without data, DM-RS port 0 (bitmask 1). Exactly what the gNB dumps.
+  UlGroundTruth gt;
+  gt.antenna_ports = 2;
+  auto llr = EncodeToLLR(PackUlPayload(gt, o), gt.rnti, len, kAggregationLevel, 40.0, rng_);
+  nr_pdcch_blind_ul_result_t out;
+  ASSERT_TRUE(nr_pdcch_blind_decode_and_extract_01(llr.data(), kAggregationLevel, len, &o, 0x0001, 0xFFEF, &out));
+  EXPECT_EQ(out.n_dmrs_cdm_groups, 2);
+  EXPECT_EQ(out.dmrs_ports, 1);
+
+  // val=0 is the other branch of the same closed form: 1 CDM group, port 0. Included so a future
+  // edit cannot collapse the two cases into one and still pass.
+  gt.antenna_ports = 0;
+  llr = EncodeToLLR(PackUlPayload(gt, o), gt.rnti, len, kAggregationLevel, 40.0, rng_);
+  ASSERT_TRUE(nr_pdcch_blind_decode_and_extract_01(llr.data(), kAggregationLevel, len, &o, 0x0001, 0xFFEF, &out));
+  EXPECT_EQ(out.n_dmrs_cdm_groups, 1);
+  EXPECT_EQ(out.dmrs_ports, 1);
+}
+
+TEST_F(BlindPdcchTest, Dci01RejectsTheDownlinkFormatIndicator) {
+  nr_pdcch_blind_ul_opts_t o = LiveUlOpts();
+  const uint16_t len = nr_pdcch_blind_dci01_size(&o);
+  UlGroundTruth gt;
+  gt.format_ind = 1; // a DL assignment that happened to decode at this width
+  auto llr = EncodeToLLR(PackUlPayload(gt, o), gt.rnti, len, kAggregationLevel, 40.0, rng_);
+
+  nr_pdcch_blind_ul_result_t out;
+  EXPECT_FALSE(nr_pdcch_blind_decode_and_extract_01(llr.data(), kAggregationLevel, len, &o, 0x0001, 0xFFEF, &out));
+  EXPECT_FALSE(out.plausible);
+  ASSERT_NE(out.reject_reason, nullptr);
+}
+
+// UL-SCH indicator 0 is a CSI-only grant: correctly decoded, but it carries no transport block and
+// its slot offset is the CSI report's reportSlotOffset, which is NOT in the payload. Accepting it
+// would hand a downstream consumer a k2 that was never derived.
+TEST_F(BlindPdcchTest, Dci01RejectsACsiOnlyGrant) {
+  nr_pdcch_blind_ul_opts_t o = LiveUlOpts();
+  const uint16_t len = nr_pdcch_blind_dci01_size(&o);
+  UlGroundTruth gt;
+  gt.ulsch_ind = 0;
+  auto llr = EncodeToLLR(PackUlPayload(gt, o), gt.rnti, len, kAggregationLevel, 40.0, rng_);
+
+  nr_pdcch_blind_ul_result_t out;
+  EXPECT_FALSE(nr_pdcch_blind_decode_and_extract_01(llr.data(), kAggregationLevel, len, &o, 0x0001, 0xFFEF, &out));
+  ASSERT_NE(out.reject_reason, nullptr);
+}
+
+// The reconciliation instrument: the raw payload and the CRC-recovered RNTI must survive a
+// rejection, because a rejected payload is exactly what gets replayed against the gNB's log while
+// the width assignment is still being pinned.
+TEST_F(BlindPdcchTest, Dci01RawPayloadSurvivesRejection) {
+  nr_pdcch_blind_ul_opts_t o = LiveUlOpts();
+  const uint16_t len = nr_pdcch_blind_dci01_size(&o);
+  UlGroundTruth gt;
+  gt.ulsch_ind = 0; // rejected, but decoded cleanly
+  const uint64_t payload = PackUlPayload(gt, o);
+  auto llr = EncodeToLLR(payload, gt.rnti, len, kAggregationLevel, 40.0, rng_);
+
+  nr_pdcch_blind_ul_result_t out;
+  ASSERT_FALSE(nr_pdcch_blind_decode_and_extract_01(llr.data(), kAggregationLevel, len, &o, 0x0001, 0xFFEF, &out));
+  EXPECT_EQ(out.raw_payload, payload);
+  EXPECT_EQ(out.crc_rnti, gt.rnti);
+  EXPECT_EQ(out.dci_length, len);
+}
+
+TEST_F(BlindPdcchTest, Dci01TdaWidthIsDerivedFromTheListCount) {
+  nr_pdcch_blind_ul_opts_t o = LiveUlOpts();
+  const uint16_t two_entries = nr_pdcch_blind_dci01_size(&o); // ceil(log2(2)) = 1
+  o.tda_count = 5;                                            // ceil(log2(5)) = 3
+  o.tda_start[2] = 0; o.tda_length[2] = 10; o.tda_mapping[2] = 0; o.tda_k2[2] = 4;
+  o.tda_start[3] = 2; o.tda_length[3] = 10; o.tda_mapping[3] = 1; o.tda_k2[3] = 5;
+  o.tda_start[4] = 4; o.tda_length[4] = 8;  o.tda_mapping[4] = 1; o.tda_k2[4] = 6;
+  EXPECT_EQ(nr_pdcch_blind_dci01_size(&o), two_entries + 2);
+
+  // ...and the extractor moves with it, which is the property that matters: a width the size
+  // function and the packer agree on but the extractor does not is the exact DL bug this mirrors.
+  const uint16_t len = nr_pdcch_blind_dci01_size(&o);
+  UlGroundTruth gt;
+  gt.tda_index = 3;
+  auto llr = EncodeToLLR(PackUlPayload(gt, o), gt.rnti, len, kAggregationLevel, 40.0, rng_);
+  nr_pdcch_blind_ul_result_t out;
+  ASSERT_TRUE(nr_pdcch_blind_decode_and_extract_01(llr.data(), kAggregationLevel, len, &o, 0x0001, 0xFFEF, &out))
+      << (out.reject_reason ? out.reject_reason : "");
+  EXPECT_EQ(out.tda_index, 3);
+  EXPECT_EQ(out.start_symbol, 2);
+  EXPECT_EQ(out.num_symbols, 10);
+  EXPECT_EQ(out.mapping_type, 1);
+  EXPECT_EQ(out.k2, 5);
+}
+
+TEST_F(BlindPdcchTest, Dci01RejectsATdaIndexBeyondTheList) {
+  nr_pdcch_blind_ul_opts_t o = LiveUlOpts(); // 2 entries -> 1 bit, so no index can overflow...
+  o.tda_count = 3;                           // ...but 3 entries -> 2 bits, and code point 3 cannot.
+  o.tda_start[2] = 0; o.tda_length[2] = 10; o.tda_mapping[2] = 0; o.tda_k2[2] = 4;
+  const uint16_t len = nr_pdcch_blind_dci01_size(&o);
+  UlGroundTruth gt;
+  gt.tda_index = 3;
+  auto llr = EncodeToLLR(PackUlPayload(gt, o), gt.rnti, len, kAggregationLevel, 40.0, rng_);
+  nr_pdcch_blind_ul_result_t out;
+  EXPECT_FALSE(nr_pdcch_blind_decode_and_extract_01(llr.data(), kAggregationLevel, len, &o, 0x0001, 0xFFEF, &out));
+  ASSERT_NE(out.reject_reason, nullptr);
+}
+
+// Rather than silently assuming rank 1, a present precoding-information field is rejected: mapping
+// its code point to (layers, TPMI) needs a PUSCH-Config this receiver cannot read, and guessing
+// would give a confident wrong DM-RS port set and TBS on every multi-layer grant.
+TEST_F(BlindPdcchTest, Dci01RejectsAPresentPrecodingField) {
+  nr_pdcch_blind_ul_opts_t o = LiveUlOpts();
+  o.precoding_info_bits = 2;
+  const uint16_t len = nr_pdcch_blind_dci01_size(&o);
+  UlGroundTruth gt;
+  auto llr = EncodeToLLR(PackUlPayload(gt, o), gt.rnti, len, kAggregationLevel, 40.0, rng_);
+  nr_pdcch_blind_ul_result_t out;
+  EXPECT_FALSE(nr_pdcch_blind_decode_and_extract_01(llr.data(), kAggregationLevel, len, &o, 0x0001, 0xFFEF, &out));
+  ASSERT_NE(out.reject_reason, nullptr);
+}
+
+TEST_F(BlindPdcchTest, Dci01RejectsTheReservedUlMcsRange) {
+  nr_pdcch_blind_ul_opts_t o = LiveUlOpts(); // mcs_table = 0 (qam64) -> 28..31 reserved
+  const uint16_t len = nr_pdcch_blind_dci01_size(&o);
+  UlGroundTruth gt;
+  gt.mcs = 29;
+  auto llr = EncodeToLLR(PackUlPayload(gt, o), gt.rnti, len, kAggregationLevel, 40.0, rng_);
+  nr_pdcch_blind_ul_result_t out;
+  EXPECT_FALSE(nr_pdcch_blind_decode_and_extract_01(llr.data(), kAggregationLevel, len, &o, 0x0001, 0xFFEF, &out));
+  ASSERT_NE(out.reject_reason, nullptr);
+}
+
+// ---- DCI format 0_0. No second polar decode: it reinterprets a payload the 1_0 scan already
+// produced, which is what TS 38.212 7.3.1.0's size alignment buys. ----
+
+/// Pack a DCI 0_0 payload at `dci_length`, MSB-first, per TS 38.212 7.3.1.1.1. Any width above the
+/// spec field list is trailing zero padding, exactly as the size-alignment rule requires.
+uint64_t PackDci00(const UlGroundTruth& gt, uint16_t bwp_size, uint16_t dci_length, uint32_t padding = 0)
+{
+  uint64_t p = 0;
+  int used = 0;
+  auto put = [&](uint32_t val, int nbits) {
+    if (nbits == 0) return;
+    const uint32_t mask = (nbits >= 32) ? 0xFFFFFFFFu : ((1u << nbits) - 1u);
+    p = (p << nbits) | (val & mask);
+    used += nbits;
+  };
+  const int riv_bits = RivBitsFor(bwp_size);
+  put(gt.format_ind, 1);
+  put(gt.riv, riv_bits);
+  put(gt.tda_index, 4);
+  put(gt.freq_hopping, 1);
+  put(gt.mcs, 5);
+  put(gt.ndi, 1);
+  put(gt.rv, 2);
+  put(gt.harq_pid, 4);
+  put(gt.tpc, 2);
+  const int pad = (int)dci_length - used;
+  if (pad > 0) put(padding, pad);
+  return p;
+}
+
+TEST_F(BlindPdcchTest, Dci00SizeMatchesTheSpecFormulaAndTheFieldList) {
+  // 20 fixed + RIV. Cross-checks the (previously dead) size helper against the packer's own count.
+  EXPECT_EQ(nr_pdcch_blind_dci00_size(273, 0), (uint16_t)(20 + RivBitsFor(273)));
+  EXPECT_EQ(nr_pdcch_blind_dci00_size(273, 1), (uint16_t)(21 + RivBitsFor(273)));
+  EXPECT_EQ(nr_pdcch_blind_dci00_size(0, 0), 0);
+}
+
+TEST_F(BlindPdcchTest, Dci00ExtractsEveryFieldWithoutASecondDecode) {
+  nr_pdcch_blind_ul_opts_t o = LiveUlOpts();
+  o.tda_count = 0; // 0_0's TDA is always 4 bits and indexes the DEFAULT table
+  const uint16_t len = nr_pdcch_blind_dci00_size(o.bwp_size, 0);
+
+  UlGroundTruth gt;
+  gt.riv       = 1200;
+  gt.tda_index = 0;   // default table row 0: type A, k2 base 0, S=0, L=14
+  gt.mcs       = 10;
+  gt.ndi       = 1;
+  gt.rv        = 0;
+  gt.harq_pid  = 5;
+  gt.tpc       = 2;
+  gt.freq_hopping = 1;
+
+  nr_pdcch_blind_ul_result_t out;
+  ASSERT_TRUE(nr_pdcch_blind_extract_00(PackDci00(gt, o.bwp_size, len), len, gt.rnti, &o, &out))
+      << (out.reject_reason ? out.reject_reason : "");
+  EXPECT_EQ(out.ul_dci_format, NR_BLIND_UL_DCI_FORMAT_0_0);
+  EXPECT_EQ(out.rnti, gt.rnti);
+  EXPECT_EQ(out.freq_domain_assignment, gt.riv);
+  EXPECT_EQ(out.mcs, gt.mcs);
+  EXPECT_EQ(out.ndi, gt.ndi);
+  EXPECT_EQ(out.rv, gt.rv);
+  EXPECT_EQ(out.harq_pid, gt.harq_pid);
+  EXPECT_EQ(out.tpc, gt.tpc);
+  EXPECT_EQ(out.frequency_hopping, 1);
+  EXPECT_EQ(out.start_symbol, 0);
+  EXPECT_EQ(out.num_symbols, 14);
+  // Default-table k2 = base + j, and j = 1 at mu = 1 (30 kHz) per TS 38.214 6.1.2.1.1.
+  EXPECT_EQ(out.k2, 1);
+  EXPECT_EQ(out.ulsch_indicator, 1); // 0_0 has no indicator field; it always schedules UL-SCH
+  EXPECT_EQ(out.nscid, 0);           // TS 38.211 6.4.1.1.1
+}
+
+TEST_F(BlindPdcchTest, Dci00RejectsTheDownlinkFormatIndicator) {
+  nr_pdcch_blind_ul_opts_t o = LiveUlOpts();
+  o.tda_count = 0;
+  const uint16_t len = nr_pdcch_blind_dci00_size(o.bwp_size, 0);
+  UlGroundTruth gt;
+  gt.format_ind = 1; // this is a 1_0 payload, not 0_0
+  nr_pdcch_blind_ul_result_t out;
+  EXPECT_FALSE(nr_pdcch_blind_extract_00(PackDci00(gt, o.bwp_size, len), len, gt.rnti, &o, &out));
+  ASSERT_NE(out.reject_reason, nullptr);
+}
+
+TEST_F(BlindPdcchTest, Dci00RejectsNonZeroSizeAlignmentPadding) {
+  nr_pdcch_blind_ul_opts_t o = LiveUlOpts();
+  o.tda_count = 0;
+  // Size-aligned UP to a wider 1_0: the excess must be zero (TS 38.212 7.3.1.0).
+  const uint16_t len = (uint16_t)(nr_pdcch_blind_dci00_size(o.bwp_size, 0) + 3);
+  UlGroundTruth gt;
+  nr_pdcch_blind_ul_result_t out;
+  EXPECT_TRUE(nr_pdcch_blind_extract_00(PackDci00(gt, o.bwp_size, len, 0), len, gt.rnti, &o, &out))
+      << (out.reject_reason ? out.reject_reason : "");
+  EXPECT_FALSE(nr_pdcch_blind_extract_00(PackDci00(gt, o.bwp_size, len, 5), len, gt.rnti, &o, &out));
+  ASSERT_NE(out.reject_reason, nullptr);
+}
+
+// TS 38.214 6.2.2: a 0_0-scheduled PUSCH uses port 0, with one CDM group without data for a
+// 2-symbol allocation and two otherwise -- the same length-dependent rule the DL 1_0 path applies.
+TEST_F(BlindPdcchTest, Dci00TwoSymbolAllocationUsesOneCdmGroup) {
+  nr_pdcch_blind_ul_opts_t o = LiveUlOpts();
+  o.tda_count = 2;
+  o.tda_start[0] = 0; o.tda_length[0] = 14; o.tda_mapping[0] = 0; o.tda_k2[0] = 4;
+  o.tda_start[1] = 4; o.tda_length[1] = 2;  o.tda_mapping[1] = 1; o.tda_k2[1] = 4;
+  const uint16_t len = nr_pdcch_blind_dci00_size(o.bwp_size, 0);
+
+  UlGroundTruth gt;
+  gt.tda_index = 0; // 14 symbols
+  nr_pdcch_blind_ul_result_t out;
+  ASSERT_TRUE(nr_pdcch_blind_extract_00(PackDci00(gt, o.bwp_size, len), len, gt.rnti, &o, &out));
+  EXPECT_EQ(out.n_dmrs_cdm_groups, 2);
+
+  gt.tda_index = 1; // 2 symbols
+  ASSERT_TRUE(nr_pdcch_blind_extract_00(PackDci00(gt, o.bwp_size, len), len, gt.rnti, &o, &out));
+  EXPECT_EQ(out.n_dmrs_cdm_groups, 1);
+  EXPECT_EQ(out.dmrs_ports, 1);
+}
+
+TEST_F(BlindPdcchTest, Dci01PureNoiseFalseAcceptRateIsBounded) {
+  nr_pdcch_blind_ul_opts_t o = LiveUlOpts();
+  const uint16_t len = nr_pdcch_blind_dci01_size(&o);
+  std::normal_distribution<double> noise(0.0, 30.0);
+
+  int accepts = 0;
+  const int kTrials = 2000;
+  for (int t = 0; t < kTrials; t++) {
+    std::vector<int16_t> llr(kAggregationLevel * 108);
+    for (auto& v : llr) v = (int16_t)noise(rng_);
+    nr_pdcch_blind_ul_result_t out;
+    if (nr_pdcch_blind_decode_and_extract_01(llr.data(), kAggregationLevel, len, &o, 0x0001, 0xFFEF, &out)) {
+      accepts++;
+    }
+  }
+  // Same bound as the DL groups. Adding a second format must not raise the noise floor -- the
+  // live 1_0 rollout measured zero false accepts over 234,000 occasions, and this is the offline
+  // counterpart of that check.
+  EXPECT_LT(accepts, kTrials / 20) << "accepts=" << accepts << " of " << kTrials;
+}
+
 }  // namespace
 
 int main(int argc, char** argv)

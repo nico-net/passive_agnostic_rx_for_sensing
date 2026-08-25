@@ -1514,3 +1514,491 @@ bool nr_pdcch_blind_decode_and_extract_ex(const int16_t* llr,
   return true;
 }
 
+// =============================================================================================
+// UPLINK: DCI formats 0_1 and 0_0. See the header's UL section for why this exists and, more
+// importantly, for why the field WIDTHS here must be reconciled against the deployment rather
+// than trusted.
+// =============================================================================================
+
+// ---------------------------------------------------------------------------------------------
+// TS 38.214 Table 6.1.2.1.1-2 (default PUSCH time-domain resource allocation A, normal CP).
+// Columns: {mapping type (0=A,1=B), k2 base, S, L}. The actual k2 is this base PLUS j, where j
+// depends on the numerology (TS 38.214 6.1.2.1.1: j = {1,1,2,3,11,21}[mu]) -- so k2 is NOT a
+// property of the table alone, which is why blind_ul_tda() takes mu.
+//
+// Duplicated from nr_mac_common.c's table_6_1_2_1_1_2 for the same reason the DL tables above are
+// duplicated: they are 3GPP spec constants, and the file they live in compiles into a heavy target
+// this lean library deliberately does not link.
+// ---------------------------------------------------------------------------------------------
+static const uint8_t g_table_6_1_2_1_1_2[16][4] = {
+    {0, 0, 0, 14}, {0, 0, 0, 12}, {0, 0, 0, 10}, {1, 0, 2, 10},
+    {1, 0, 4, 10}, {1, 0, 4, 8},  {1, 0, 4, 6},  {0, 1, 0, 14},
+    {0, 1, 0, 12}, {0, 1, 0, 10}, {0, 2, 0, 14}, {0, 2, 0, 12},
+    {0, 2, 0, 10}, {1, 0, 8, 6},  {0, 3, 0, 14}, {0, 3, 0, 10},
+};
+
+/// TS 38.214 6.1.2.1.1's j, indexed by numerology mu.
+static const uint8_t g_ul_tda_j[6] = {1, 1, 2, 3, 11, 21};
+
+// ---------------------------------------------------------------------------------------------
+// TS 38.211 Tables 6.4.1.1.3-3 / -4 (PUSCH DM-RS positions l' within a slot). These are the UPLINK
+// tables and they are NOT the same as the PDSCH ones already duplicated above -- rows 8/9 and
+// 10/11 differ, so reusing g_table_7_4_1_1_2_3 would give a wrong DM-RS mask on exactly the
+// mid-length allocations. Row index is 0 for ld < 4 and ld-3 otherwise (12 rows, ld up to 14),
+// which is also a different indexing convention from the PDSCH table's.
+// Columns 0-3 = mapping type A, 4-7 = type B. l' == l0 is encoded as bit 0.
+// ---------------------------------------------------------------------------------------------
+static const int32_t g_table_6_4_1_1_3_3[12][8] = {
+    {-1, -1, -1, -1, 1, 1, 1, 1},            // ld < 4
+    {0, 0, 0, 0, 1, 1, 1, 1},                // ld = 4
+    {0, 0, 0, 0, 1, 17, 17, 17},             // ld = 5
+    {0, 0, 0, 0, 1, 17, 17, 17},             // ld = 6
+    {0, 0, 0, 0, 1, 17, 17, 17},             // ld = 7
+    {0, 128, 128, 128, 1, 65, 73, 73},       // ld = 8
+    {0, 128, 128, 128, 1, 65, 73, 73},       // ld = 9
+    {0, 512, 576, 576, 1, 257, 273, 585},    // ld = 10
+    {0, 512, 576, 576, 1, 257, 273, 585},    // ld = 11
+    {0, 512, 576, 2336, 1, 1025, 1057, 585}, // ld = 12
+    {0, 2048, 2176, 2336, 1, 1025, 1057, 585}, // ld = 13
+    {0, 2048, 2176, 2336, 1, 1025, 1057, 585}, // ld = 14
+};
+static const int32_t g_table_6_4_1_1_3_4[12][8] = {
+    {-1, -1, -1, -1, -1, -1, -1, -1}, // ld < 4
+    {0, 0, -1, -1, -1, -1, -1, -1},   // ld = 4
+    {0, 0, -1, -1, 3, 3, -1, -1},     // ld = 5
+    {0, 0, -1, -1, 3, 3, -1, -1},     // ld = 6
+    {0, 0, -1, -1, 3, 3, -1, -1},     // ld = 7
+    {0, 0, -1, -1, 3, 99, -1, -1},    // ld = 8
+    {0, 0, -1, -1, 3, 99, -1, -1},    // ld = 9
+    {0, 768, -1, -1, 3, 387, -1, -1}, // ld = 10
+    {0, 768, -1, -1, 3, 387, -1, -1}, // ld = 11
+    {0, 768, -1, -1, 3, 1539, -1, -1},// ld = 12
+    {0, 3072, -1, -1, 3, 1539, -1, -1},// ld = 13
+    {0, 3072, -1, -1, 3, 1539, -1, -1},// ld = 14
+};
+
+/// PUSCH DM-RS symbol bitmap. Mirrors nr_mac_common.c's get_l_prime() exactly, except that where
+/// that function AssertFatal()s on an invalid (ld, column) pair -- aborting the softmodem -- this
+/// one returns -1, because a blind decoder must be able to REJECT a candidate that a real UE could
+/// never have been given.
+static int32_t blind_ul_dmrs_mask(uint8_t num_symbols,
+                                  uint8_t start_symbol,
+                                  int     mapping_type_is_b,
+                                  int     add_pos,
+                                  int     max_length,
+                                  uint8_t dmrs_typeA_position)
+{
+  if (add_pos < 0 || add_pos > 3) {
+    return -1;
+  }
+  const int ld  = mapping_type_is_b ? num_symbols : (num_symbols + start_symbol);
+  const int row = (ld < 4) ? 0 : (ld - 3);
+  if (row < 0 || row > 11) {
+    return -1;
+  }
+  int col = add_pos + (mapping_type_is_b ? 4 : 0);
+  const int l0 = (dmrs_typeA_position == 2) ? 2 : 3;
+  int32_t l_prime;
+  int32_t l0_shift;
+  if (max_length <= 1) {
+    l_prime  = g_table_6_4_1_1_3_3[row][col];
+    l0_shift = 1 << l0;
+  } else {
+    l_prime  = g_table_6_4_1_1_3_4[row][col];
+    l0_shift = (1 << l0) | (1 << (l0 + 1));
+  }
+  if (l_prime < 0) {
+    return -1;
+  }
+  return mapping_type_is_b ? (l_prime << start_symbol) : (l_prime | l0_shift);
+}
+
+// Per-field widths actually used by the UL extraction, resolving each override against the
+// documented default. Kept in ONE place so nr_pdcch_blind_dci01_size() (which validates a config)
+// and nr_pdcch_blind_decode_and_extract_01() (which reads the payload) can never disagree about the
+// layout -- the two disagreeing is precisely the bug this reconciliation exists to catch.
+typedef struct {
+  int carrier_ind, ul_sul, bwp_ind, riv, tda, fh;
+  int harq_pid, dai1, dai2, sri, precoding, ant_ports;
+  int srs_req, csi_req, cbg, ptrs_dmrs, beta_offset, dmrs_seq_init;
+} blind_ul_field_bits_t;
+
+static blind_ul_field_bits_t blind_ul_field_bits(const nr_pdcch_blind_ul_opts_t* opts)
+{
+  blind_ul_field_bits_t f;
+  const double riv_span = ((double)opts->bwp_size * (double)(opts->bwp_size + 1)) / 2.0;
+  f.riv = (int)ceil(log2(riv_span));
+  // time_domain_assignment: nr_dci_size() uses ceil(log2(tdaList->count)) when a
+  // pusch-TimeDomainAllocationList is configured, and 4 (the 16-entry default table) otherwise.
+  // Derived from tda_count, never a separate knob -- same rule as the DL path.
+  if (opts->tda_count > 0) {
+    int b = 0;
+    while ((1 << b) < opts->tda_count) {
+      b++;
+    }
+    f.tda = b;
+  } else {
+    f.tda = 4;
+  }
+  f.carrier_ind    = pick_bits(opts->carrier_indicator_bits, 0);
+  f.ul_sul         = pick_bits(opts->ul_sul_bits, 0);
+  f.bwp_ind        = pick_bits(opts->bwp_indicator_bits, 0);
+  f.fh             = pick_bits(opts->freq_hopping_bits, 0);
+  f.harq_pid       = pick_bits(opts->harq_pid_bits, 4);
+  f.dai1           = pick_bits(opts->dai1_bits, 2);
+  f.dai2           = pick_bits(opts->dai2_bits, 0);
+  f.sri            = pick_bits(opts->sri_bits, 0);
+  f.precoding      = pick_bits(opts->precoding_info_bits, 0);
+  f.ant_ports      = pick_bits(opts->antenna_ports_bits, 2);
+  f.srs_req        = pick_bits(opts->srs_request_bits, 2);
+  f.csi_req        = pick_bits(opts->csi_request_bits, 0);
+  f.cbg            = pick_bits(opts->cbg_bits, 0);
+  f.ptrs_dmrs      = pick_bits(opts->ptrs_dmrs_bits, 0);
+  f.beta_offset    = pick_bits(opts->beta_offset_bits, 0);
+  f.dmrs_seq_init  = pick_bits(opts->dmrs_seq_init_bits, 1);
+  return f;
+}
+
+uint16_t nr_pdcch_blind_dci01_size(const nr_pdcch_blind_ul_opts_t* opts)
+{
+  if (opts == NULL || opts->bwp_size < 1) {
+    return 0;
+  }
+  const blind_ul_field_bits_t f = blind_ul_field_bits(opts);
+  // Constant-width fields: format identifier (1) + MCS (5) + NDI (1) + RV (2) + TPC (2)
+  // + UL-SCH indicator (1) = 12. Everything else is RRC-derived.
+  return (uint16_t)(12 + f.carrier_ind + f.ul_sul + f.bwp_ind + f.riv + f.tda + f.fh + f.harq_pid
+                    + f.dai1 + f.dai2 + f.sri + f.precoding + f.ant_ports + f.srs_req + f.csi_req
+                    + f.cbg + f.ptrs_dmrs + f.beta_offset + f.dmrs_seq_init);
+}
+
+/// Resolve the PUSCH time-domain allocation. `mu` is the numerology, needed for k2's j offset when
+/// the default table applies. Returns false when the index is past the configured list -- on a
+/// 2-entry list that rejects 14 of 16 code points, which is a strong plausibility check in itself.
+static bool blind_ul_tda(const nr_pdcch_blind_ul_opts_t* opts,
+                         uint32_t idx,
+                         uint8_t  mu,
+                         uint8_t* S,
+                         uint8_t* L,
+                         uint8_t* mapping_is_b,
+                         uint8_t* k2)
+{
+  if (opts->tda_count > 0) {
+    if ((int)idx >= opts->tda_count) {
+      return false;
+    }
+    *S            = opts->tda_start[idx];
+    *L            = opts->tda_length[idx];
+    *mapping_is_b = opts->tda_mapping[idx] ? 1 : 0;
+    *k2           = opts->tda_k2[idx];
+  } else {
+    if (idx >= 16) {
+      return false;
+    }
+    *mapping_is_b = g_table_6_1_2_1_1_2[idx][0] ? 1 : 0;
+    *S            = g_table_6_1_2_1_1_2[idx][2];
+    *L            = g_table_6_1_2_1_1_2[idx][3];
+    *k2           = (uint8_t)(g_table_6_1_2_1_1_2[idx][1] + g_ul_tda_j[(mu < 6) ? mu : 1]);
+  }
+  if (*L < 1 || (int)(*S) + (int)(*L) > 14) {
+    return false;
+  }
+  return true;
+}
+
+/// Shared tail: everything both 0_1 and 0_0 do once their own field walk has produced the common
+/// quantities. Factored out for the same reason blind_polar_decode()/blind_mismatched_bits() were:
+/// so the two formats cannot drift apart on the parts that are genuinely identical.
+///
+/// `force_add_pos` is -1 for format 0_1 (use the deployment's configured dmrs-AdditionalPosition)
+/// and 2 for format 0_0 with mapping type A, where TS 38.214 6.2.2 fixes it at pos2 REGARDLESS of
+/// any dedicated DMRS-UplinkConfig. That is the uplink twin of the rule the DL path documents for
+/// 1_0, and it is silently wrong rather than loudly wrong if inherited from the 0_1 config: the
+/// front-loaded DM-RS symbol lands in the same place either way, so a DM-RS-only tap still works
+/// while every additional-DM-RS symbol -- and hence the data-RE set and G -- is wrong.
+static bool blind_ul_finish(const nr_pdcch_blind_ul_opts_t* opts,
+                            uint32_t riv,
+                            uint32_t tda_idx,
+                            uint32_t mcs,
+                            uint32_t antenna_ports,
+                            uint32_t nrOfLayers,
+                            int      force_add_pos,
+                            nr_pdcch_blind_ul_result_t* out)
+{
+  uint16_t start_rb, num_rb;
+  if (!riv_to_prb_alloc(riv, opts->bwp_size, &start_rb, &num_rb)) {
+    out->reject_reason = "RIV decodes to a PRB allocation outside the UL BWP";
+    return false;
+  }
+  // MCS 28-31 are reserved for retransmissions on the 64QAM table (TS 38.214 Table 6.1.4.1-1);
+  // 29-31 on the 256QAM table. A grant carrying one has almost certainly been misparsed.
+  const uint32_t mcs_reserved_from = (opts->mcs_table == 1) ? 29u : 28u;
+  if (mcs >= mcs_reserved_from) {
+    out->reject_reason = "UL MCS in the reserved retransmission-only range";
+    return false;
+  }
+
+  uint8_t S, L, mapping_is_b, k2;
+  if (!blind_ul_tda(opts, tda_idx, 1 /* mu: 30 kHz, the only numerology this monitor runs at */,
+                    &S, &L, &mapping_is_b, &k2)) {
+    out->reject_reason = "time-domain assignment index past the pusch-TimeDomainAllocationList";
+    return false;
+  }
+
+  // Mapping type B keeps the dedicated value even under format 0_0 -- the pos2 rule is scoped to
+  // type A (TS 38.214 6.2.2), exactly as the DL 1_0 path scopes its own.
+  const int add_pos = (force_add_pos >= 0 && !mapping_is_b)
+                          ? force_add_pos
+                          : ((opts->dmrs_add_pos >= 0) ? opts->dmrs_add_pos : 2);
+  const int max_len = (opts->dmrs_max_length > 0) ? opts->dmrs_max_length : 1;
+  const int32_t mask = blind_ul_dmrs_mask(L, S, mapping_is_b, add_pos, max_len, 2 /* dmrs-TypeA-Position */);
+  if (mask < 0) {
+    out->reject_reason = "no valid PUSCH DM-RS position for this allocation length";
+    return false;
+  }
+
+  // Antenna ports -> (CDM groups without data, port bitmask). Closed form rather than a table,
+  // copied from mac_tables.c's ul_ports_config() for the transform-precoder-disabled / dmrs-type1 /
+  // maxLength1 / rank-1 case (TS 38.212 Table 7.3.1.1.2-8), which is the only combination this
+  // deployment produces. Verified against the live gNB 2026-08-25: it logs `ant=2` on every UL DCI
+  // and dumps `num_dmrs_cdm_grps_no_data=2 dmrs_ports=1`, which is exactly what val=2 gives here.
+  uint8_t  cdm_groups;
+  uint16_t ports;
+  if (opts->transform_precoding == 1) {
+    cdm_groups = 2;
+    ports      = (uint16_t)(1u << antenna_ports);
+  } else if (nrOfLayers <= 1) {
+    cdm_groups = (antenna_ports > 1) ? 2 : 1;
+    ports      = (uint16_t)(1u << ((antenna_ports > 1) ? (antenna_ports - 2) : antenna_ports));
+  } else {
+    // Multi-layer UL is out of scope: this deployment schedules num_layers=1 and the passive
+    // receiver has no way to separate UE layers it was not precoded for. Reject rather than
+    // produce a confident wrong port set.
+    out->reject_reason = "multi-layer PUSCH not supported by this monitor";
+    return false;
+  }
+
+  out->start_rb          = start_rb;
+  out->num_rb            = num_rb;
+  out->bwp_start         = opts->bwp_start;
+  out->bwp_size          = opts->bwp_size;
+  out->tda_index         = (uint8_t)tda_idx;
+  out->start_symbol      = S;
+  out->num_symbols       = L;
+  out->mapping_type      = mapping_is_b;
+  out->k2                = k2;
+  out->mcs               = (uint8_t)mcs;
+  out->mcs_table         = (uint8_t)((opts->mcs_table >= 0) ? opts->mcs_table : 0);
+  out->nrOfLayers        = (uint8_t)((nrOfLayers < 1) ? 1 : nrOfLayers);
+  out->ul_dmrs_symb_pos  = (uint16_t)mask;
+  out->dmrs_config_type  = (uint8_t)((opts->dmrs_config_type > 0) ? 1 : 0);
+  out->n_dmrs_cdm_groups = cdm_groups;
+  out->dmrs_ports        = ports;
+  out->antenna_ports_field = (uint8_t)antenna_ports;
+  out->transform_precoding = (uint8_t)((opts->transform_precoding == 1) ? 1 : 0);
+  out->data_scrambling_id  = (uint16_t)((opts->data_scrambling_id >= 0) ? opts->data_scrambling_id : opts->phy_cell_id);
+  out->ul_dmrs_scrambling_id =
+      (uint16_t)((opts->ul_dmrs_scrambling_id >= 0) ? opts->ul_dmrs_scrambling_id : opts->phy_cell_id);
+  out->plausible     = true;
+  out->reject_reason = NULL;
+  return true;
+}
+
+bool nr_pdcch_blind_decode_and_extract_01(const int16_t* llr,
+                                          uint8_t        aggregation_level,
+                                          uint16_t       dci_length,
+                                          const nr_pdcch_blind_ul_opts_t* opts,
+                                          uint16_t       rnti_min,
+                                          uint16_t       rnti_max,
+                                          nr_pdcch_blind_ul_result_t* out)
+{
+  memset(out, 0, sizeof(*out));
+  out->plausible      = false;
+  out->ul_dci_format  = NR_BLIND_UL_DCI_FORMAT_0_1;
+  out->dci_length     = dci_length;
+
+  if (opts == NULL || dci_length == 0 || dci_length > 63 || opts->bwp_size < 1) {
+    out->reject_reason = "invalid dci_length/opts argument";
+    return false;
+  }
+
+  // ---- Step 1: RNTI-independent polar decode, shared verbatim with both DL entry points. ----
+  uint64_t       dci_estimation[2] = {0};
+  const uint32_t crc = blind_polar_decode(llr, aggregation_level, dci_length, rnti_min, rnti_max, dci_estimation);
+
+  // raw_payload/crc_rnti are filled BEFORE any plausibility check: they are the reconciliation
+  // instrument (see the header), and a rejected payload is exactly the case worth dumping while a
+  // width assignment is still being pinned against the gNB's own log.
+  out->raw_payload = dci_estimation[0];
+  out->crc_rnti    = (uint16_t)crc;
+
+  if (crc < rnti_min || crc > rnti_max) {
+    out->reject_reason = "CRC-recovered value outside plausible RNTI range";
+    return false;
+  }
+  out->rnti = (uint16_t)crc;
+  out->mismatched_bits = blind_mismatched_bits(llr, dci_estimation, crc, aggregation_level, dci_length);
+
+  const blind_ul_field_bits_t f = blind_ul_field_bits(opts);
+  if (nr_pdcch_blind_dci01_size(opts) > dci_length) {
+    out->reject_reason = "configured UL DCI field widths exceed dci_length";
+    return false;
+  }
+
+  // ---- Step 2: field walk, in fill_dci_pdu_rel15()'s NR_UL_DCI_FORMAT_0_1 PACKER order.
+  // That order is deliberately NOT nr_dci_size()'s accumulation order -- the two differ (size adds
+  // the HARQ process before the carrier indicator, the packer emits the carrier indicator first).
+  // Totals agree either way; OFFSETS follow the packer, and offsets are what a decoder needs. ----
+  int            pos     = (int)dci_length;
+  const uint64_t payload = dci_estimation[0];
+
+  const uint32_t format_indicator = read_field(payload, &pos, 1);
+  (void)read_field(payload, &pos, f.carrier_ind);
+  (void)read_field(payload, &pos, f.ul_sul);
+  const uint32_t bwp_indicator = read_field(payload, &pos, f.bwp_ind);
+  const uint32_t riv           = read_field(payload, &pos, f.riv);
+  const uint32_t tda_idx       = read_field(payload, &pos, f.tda);
+  const uint32_t freq_hopping  = read_field(payload, &pos, f.fh);
+  const uint32_t mcs           = read_field(payload, &pos, 5);
+  const uint32_t ndi           = read_field(payload, &pos, 1);
+  const uint32_t rv            = read_field(payload, &pos, 2);
+  const uint32_t harq_pid      = read_field(payload, &pos, f.harq_pid);
+  const uint32_t dai1          = read_field(payload, &pos, f.dai1);
+  (void)read_field(payload, &pos, f.dai2);
+  const uint32_t tpc           = read_field(payload, &pos, 2);
+  (void)read_field(payload, &pos, f.sri);
+  const uint32_t precoding     = read_field(payload, &pos, f.precoding);
+  const uint32_t antenna_ports = read_field(payload, &pos, f.ant_ports);
+  const uint32_t srs_request   = read_field(payload, &pos, f.srs_req);
+  const uint32_t csi_request   = read_field(payload, &pos, f.csi_req);
+  (void)read_field(payload, &pos, f.cbg);
+  (void)read_field(payload, &pos, f.ptrs_dmrs);
+  (void)read_field(payload, &pos, f.beta_offset);
+  const uint32_t dmrs_seq_init = read_field(payload, &pos, f.dmrs_seq_init);
+  const uint32_t ulsch_ind     = read_field(payload, &pos, 1);
+
+  // ---- Step 3: plausibility. ----
+  if (format_indicator != 0) {
+    out->reject_reason = "format indicator=1 (DL assignment, not an UL grant)";
+    return false;
+  }
+  // UL-SCH indicator 0 means the grant carries CSI ONLY and no transport block (TS 38.212
+  // 7.3.1.1.2). It is a real, correctly-decoded grant -- but there is no PUSCH data to extract or
+  // decode, and its k2 is replaced by the CSI report's own reportSlotOffset, which is not in the
+  // payload. Rejecting it here keeps a downstream consumer from being handed a slot number that
+  // was never derived.
+  if (ulsch_ind == 0) {
+    out->reject_reason = "UL-SCH indicator=0 (CSI-only grant, carries no PUSCH data)";
+    return false;
+  }
+
+  out->bwp_indicator          = (uint8_t)bwp_indicator;
+  out->freq_domain_assignment = riv;
+  out->frequency_hopping      = (uint8_t)freq_hopping;
+  out->rv                     = (uint8_t)rv;
+  out->ndi                    = (uint8_t)ndi;
+  out->harq_pid               = (uint8_t)harq_pid;
+  out->nscid                  = (uint8_t)dmrs_seq_init;
+  out->tpc                    = (uint8_t)tpc;
+  out->dai                    = (uint8_t)dai1;
+  out->srs_request            = (uint8_t)srs_request;
+  out->csi_request            = (uint8_t)csi_request;
+  out->precoding_info         = (uint8_t)precoding;
+  out->ulsch_indicator        = (uint8_t)ulsch_ind;
+
+  // nrOfLayers from the precoding-information field. With that field 0 bits wide -- a single UE
+  // transmit port, which is what this deployment's rank-1 UL produces -- rank is 1 BY DEFINITION
+  // and there is nothing to resolve.
+  //
+  // When the field IS present, mapping its code point to (nrOfLayers, TPMI) needs TS 38.212
+  // Table 7.3.1.1.2-2..5, selected by the UE's SRS port count, maxRank and codebookSubset -- all of
+  // which live in a PUSCH-Config this receiver cannot read. Rejecting is the honest outcome:
+  // assuming rank 1 anyway would produce a confident wrong DM-RS port set and a wrong TBS on every
+  // multi-layer grant, which is the failure mode this module has been bitten by twice already.
+  if (f.precoding != 0) {
+    out->reject_reason = "precoding-information field present: layer count needs a PUSCH-Config this receiver cannot read";
+    return false;
+  }
+  return blind_ul_finish(opts, riv, tda_idx, mcs, antenna_ports, 1 /* rank 1 */,
+                         -1 /* 0_1 uses the configured dmrs-AdditionalPosition */, out);
+}
+
+bool nr_pdcch_blind_extract_00(uint64_t       payload,
+                               uint16_t       dci_length,
+                               uint16_t       crc_rnti,
+                               const nr_pdcch_blind_ul_opts_t* opts,
+                               nr_pdcch_blind_ul_result_t* out)
+{
+  memset(out, 0, sizeof(*out));
+  out->plausible     = false;
+  out->ul_dci_format = NR_BLIND_UL_DCI_FORMAT_0_0;
+  out->dci_length    = dci_length;
+  out->raw_payload   = payload;
+  out->crc_rnti      = crc_rnti;
+  out->rnti          = crc_rnti;
+
+  if (opts == NULL || dci_length == 0 || dci_length > 63 || opts->bwp_size < 1) {
+    out->reject_reason = "invalid dci_length/opts argument";
+    return false;
+  }
+
+  // Format 0_0's field list is spec-fixed -- unlike 0_1 there are no RRC-derived widths at all
+  // (TS 38.212 7.3.1.1.1): identifier 1, FDRA = RIV, TDA always 4, hopping flag 1, MCS 5, NDI 1,
+  // RV 2, HARQ 4, TPC 2. That is what makes this branch essentially free, and it is also why
+  // nothing here consults blind_ul_field_bits().
+  const double   riv_span = ((double)opts->bwp_size * (double)(opts->bwp_size + 1)) / 2.0;
+  const int      riv_bits = (int)ceil(log2(riv_span));
+  const uint16_t need     = (uint16_t)(20 + riv_bits);
+  if (need > dci_length) {
+    out->reject_reason = "DCI 0_0 field list exceeds dci_length";
+    return false;
+  }
+
+  int pos = (int)dci_length;
+  const uint32_t format_indicator = read_field(payload, &pos, 1);
+  const uint32_t riv              = read_field(payload, &pos, riv_bits);
+  const uint32_t tda_idx          = read_field(payload, &pos, 4);
+  const uint32_t freq_hopping     = read_field(payload, &pos, 1);
+  const uint32_t mcs              = read_field(payload, &pos, 5);
+  const uint32_t ndi              = read_field(payload, &pos, 1);
+  const uint32_t rv               = read_field(payload, &pos, 2);
+  const uint32_t harq_pid         = read_field(payload, &pos, 4);
+  const uint32_t tpc              = read_field(payload, &pos, 2);
+
+  if (format_indicator != 0) {
+    out->reject_reason = "format indicator=1 (this is DCI 1_0, not 0_0)";
+    return false;
+  }
+  // Size-alignment padding. TS 38.212 7.3.1.0 zero-pads whichever of 0_0/1_0 is smaller in a
+  // UE-specific search space, so any excess MUST be zero -- the same check the 1_0 path already
+  // applies, and a cheap false-accept discriminator.
+  if (pos > 0 && (payload & ((1ULL << pos) - 1ULL)) != 0) {
+    out->reject_reason = "DCI 0_0 size-alignment padding is non-zero";
+    return false;
+  }
+
+  out->freq_domain_assignment = riv;
+  out->frequency_hopping      = (uint8_t)freq_hopping;
+  out->rv                     = (uint8_t)rv;
+  out->ndi                    = (uint8_t)ndi;
+  out->harq_pid               = (uint8_t)harq_pid;
+  out->tpc                    = (uint8_t)tpc;
+  out->ulsch_indicator        = 1; // 0_0 always schedules UL-SCH; there is no indicator field
+  // DCI 0_0 carries no antenna-ports field. TS 38.214 6.2.2: port 0, and the CDM-group count is
+  // derived from the allocation length exactly as the DL 1_0 path derives its own
+  // (numDmrsCdmGrpsNoData = 1 for a 2-symbol allocation, 2 otherwise). blind_ul_finish() gets the
+  // code point that reproduces that: val 0 -> 1 group/port 0, val 2 -> 2 groups/port 0.
+  // The length is not known until the TDRA is resolved, so pass val=2 (the ordinary case) and
+  // correct it below for the 2-symbol one.
+  if (!blind_ul_finish(opts, riv, tda_idx, mcs, 2 /* 2 CDM groups, port 0 */, 1,
+                       2 /* TS 38.214 6.2.2: pos2 for 0_0 mapping type A */, out)) {
+    return false;
+  }
+  if (out->num_symbols <= 2) {
+    out->n_dmrs_cdm_groups   = 1;
+    out->antenna_ports_field = 0;
+  }
+  out->nscid = 0; // TS 38.211 6.4.1.1.1: n_SCID = 0 for a DCI 0_0 scheduled PUSCH
+  return true;
+}
+
