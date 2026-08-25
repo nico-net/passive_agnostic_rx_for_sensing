@@ -788,6 +788,20 @@ static long g_census_pow_n;
  * not a shape four elements at lambda/2 looking at the same gNB should produce. */
 #define CENSUS_MAX_ANT 4
 static double g_census_pow_ant[CENSUS_MAX_ANT];
+/* ULPROBE (ISAC_UL_PROBE=1, default OFF): the three Phase-0 questions the UL work is gated on, and
+ * none of them can be answered from an existing capture.
+ *   1. Does this receiver even KNOW the TDD pattern? nr_ue_slot_select() returns NR_DOWNLINK_SLOT
+ *      for EVERY slot until UE->received_config_request goes true (this file's own fallback), so a
+ *      passive receiver that never got a config request silently treats UL slots as DL.
+ *   2. Are UL-slot samples present in rxdata at all? Passive mode skips RU_write entirely on a real
+ *      radio, so they should be -- but "should be" is how this project acquires wrong conclusions.
+ *   3. Is the UE AUDIBLE in UL slots? This is the go/no-go for the whole PUSCH path: the gNB
+ *      transmits at tens of watts, a UE at a fraction of one, under power control that minimises it.
+ * Splitting the SAME per-antenna accumulator by slot type answers 2 and 3 together, and costs one
+ * compare per slot when enabled and nothing at all when not. */
+static double g_ulprobe_pow[2][CENSUS_MAX_ANT];
+static long g_ulprobe_n[2];
+static int g_ulprobe_on = -1;
 static long g_census_pow_ant_n;
 static long g_census_ssb_slots;
 static long g_census_slots;
@@ -1111,6 +1125,26 @@ void *UE_thread(void *arg)
     curMsg.proc.frame_tx    = ((absolute_slot + duration_rx_to_tx) / nb_slot_frame) % MAX_FRAME_NUMBER;
     curMsg.proc.hfn_rx      = (absolute_slot / nb_slot_frame) / MAX_FRAME_NUMBER;
     curMsg.proc.hfn_tx      = ((absolute_slot + duration_rx_to_tx) / nb_slot_frame) / MAX_FRAME_NUMBER;
+    if (g_ulprobe_on < 0)
+      g_ulprobe_on = (getenv("ISAC_UL_PROBE") != NULL) ? atoi(getenv("ISAC_UL_PROBE")) : 0;
+    if (g_ulprobe_on > 0 && UE->received_config_request) {
+      /* One shot, the first time a config request has landed: the actual slot-type MAP. Printing
+       * the map rather than a yes/no matters -- "received_config_request is true" does not tell you
+       * the TDD table was populated, and nr_ue_slot_select() returns NR_DOWNLINK_SLOT for a NULL
+       * max_tdd_periodicity_list too, which is indistinguishable from a genuinely all-DL cell. */
+      static int s_map_done = 0;
+      if (!s_map_done) {
+        s_map_done = 1;
+        char map[64];
+        int mu2 = 0;
+        for (int sl = 0; sl < nb_slot_frame && sl < 40; sl++) {
+          const int t = nr_ue_slot_select(cfg, sl);
+          map[mu2++] = (t == NR_UPLINK_SLOT) ? 'U' : ((t == NR_MIXED_SLOT) ? 'M' : 'D');
+        }
+        map[mu2] = 0;
+        LOG_I(PHY, "SENSING: ULPROBE slot_map(frame)=%s  (D=downlink U=uplink M=mixed)\n", map);
+      }
+    }
     if (UE->received_config_request) {
       if (UE->sl_mode) {
         curMsg.proc.rx_slot_type = sl_nr_ue_slot_select(sl_cfg, curMsg.proc.nr_slot_rx, TDD);
@@ -1282,6 +1316,15 @@ void *UE_thread(void *arg)
         }
         if (cnta) {
           g_census_pow_ant[a2] += acca / cnta;
+          if (g_ulprobe_on > 0) {
+            /* NR_MIXED_SLOT counts as DL here: its UL symbols sit at the END of the slot while this
+             * accumulator spans the whole slot, so a mixed slot cannot be attributed cleanly and
+             * would only dilute both bins. This cell configures nrofUplinkSymbols=0 anyway. */
+            const int ul = (curMsg.proc.rx_slot_type == NR_UPLINK_SLOT) ? 1 : 0;
+            g_ulprobe_pow[ul][a2] += acca / cnta;
+            if (a2 == 0)
+              g_ulprobe_n[ul]++;
+          }
         }
       }
       g_census_pow_ant_n++;
@@ -1449,6 +1492,33 @@ void *UE_thread(void *arg)
                 nant > 1 ? 20.0 * log10((pa[1] > 0 ? pa[1] : 1e-9) / mx) : 0.0,
                 nant > 2 ? 20.0 * log10((pa[2] > 0 ? pa[2] : 1e-9) / mx) : 0.0,
                 nant > 3 ? 20.0 * log10((pa[3] > 0 ? pa[3] : 1e-9) / mx) : 0.0);
+        }
+        if (g_ulprobe_on > 0) {
+          const int nantu = (UE->frame_parms.nb_antennas_rx < CENSUS_MAX_ANT) ? UE->frame_parms.nb_antennas_rx
+                                                                              : CENSUS_MAX_ANT;
+          double d[CENSUS_MAX_ANT] = {0}, u[CENSUS_MAX_ANT] = {0};
+          for (int a2 = 0; a2 < nantu; a2++) {
+            d[a2] = g_ulprobe_n[0] ? g_ulprobe_pow[0][a2] / (double)g_ulprobe_n[0] : 0.0;
+            u[a2] = g_ulprobe_n[1] ? g_ulprobe_pow[1][a2] / (double)g_ulprobe_n[1] : 0.0;
+          }
+          /* ul_slots=0 with cfg_req=1 would mean the TDD table says this cell has no UL slot;
+           * ul_slots=0 with cfg_req=0 means the receiver never learned the pattern and is treating
+           * every slot as DL. Completely different problems, so both numbers are printed. */
+          LOG_I(PHY,
+                "SENSING: ULPROBE cfg_req=%d dl_slots=%ld ul_slots=%ld dl_pow=[%.2f %.2f %.2f %.2f] "
+                "ul_pow=[%.2f %.2f %.2f %.2f] ul_minus_dl_dB=[%.1f %.1f %.1f %.1f]\n",
+                UE->received_config_request ? 1 : 0, g_ulprobe_n[0], g_ulprobe_n[1],
+                d[0], d[1], d[2], d[3], u[0], u[1], u[2], u[3],
+                (d[0] > 0 && u[0] > 0) ? 20.0 * log10(u[0] / d[0]) : -99.0,
+                (d[1] > 0 && u[1] > 0) ? 20.0 * log10(u[1] / d[1]) : -99.0,
+                (d[2] > 0 && u[2] > 0) ? 20.0 * log10(u[2] / d[2]) : -99.0,
+                (d[3] > 0 && u[3] > 0) ? 20.0 * log10(u[3] / d[3]) : -99.0);
+          for (int a2 = 0; a2 < CENSUS_MAX_ANT; a2++) {
+            g_ulprobe_pow[0][a2] = 0.0;
+            g_ulprobe_pow[1][a2] = 0.0;
+          }
+          g_ulprobe_n[0] = 0;
+          g_ulprobe_n[1] = 0;
         }
         g_census_slots = 0;
         g_census_ssb_slots = 0;
