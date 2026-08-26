@@ -59,6 +59,7 @@
  * read the SAME counter rather than rebuild one from the wrapping frame number. */
 extern _Atomic long nr_ue_diag_producer_absolute_slot;
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_data_aided.h"      // shared re-encode + Ĥ=Y/X submit
+#include "PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.h" // passive UPLINK PUSCH receive census
 #include "nfapi/open-nFAPI/nfapi/public_inc/fapi_nr_ue_constants.h" // FAPI_NR_CCE_REG_MAPPING_TYPE_*
 #include "executables/nr-uesoftmodem.h"                   // get_nrUE_params()->Tpool
 #include "common/utils/threadPool/thread-pool.h"          // tpool_t, pushTpool, task_t
@@ -1719,6 +1720,13 @@ constdiag_done:;
       nr_pdsch_passive_ldpc_stats_dump();
     }
 
+    /* Uplink receive census. Also the reference that forces PHY_NR_PASSIVE_UL into the link: a
+     * static library contributes nothing until something needs a symbol from it, so without a
+     * caller a clean build proves only that the sources COMPILE, not that the gNB PUSCH receive
+     * chain resolves inside this binary. */
+    if ((g_occasions_run % NR_PDCCH_BLIND_SUMMARY_PERIOD_OCC) == 0) {
+      nr_pusch_passive_stats_dump();
+    }
     if (nr_pdsch_passive_queue_running() && (g_occasions_run % NR_PDCCH_BLIND_SUMMARY_PERIOD_OCC) == 0) {
       nr_pdsch_passive_queue_stats_t qs;
       nr_pdsch_passive_queue_get_stats(&qs);

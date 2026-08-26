@@ -1027,6 +1027,37 @@ add_library(PHY_NR_COMMON ${PHY_NR_SRC_COMMON})
 target_link_libraries(PHY_NR_COMMON PUBLIC UTIL)
 
 add_library(PHY_NR ${PHY_NR_SRC})
+
+# ---------------------------------------------------------------------------------------------
+# PHY_NR_PASSIVE_UL -- the gNB-side PUSCH RECEIVE chain, for the passive receiver.
+#
+# A passive receiver eavesdropping on another UE's uplink needs the gNB's receiver, not the UE's:
+# nr_rx_pusch_tp() -> nr_ulsch_decoding(), with nr_pusch_channel_estimation() underneath. Those live
+# in PHY_NR, which nr-uesoftmodem does NOT link -- it links PHY_NR_COMMON and PHY_NR_UE.
+#
+# This is deliberately a SEPARATE lean library rather than adding PHY_NR to the UE link group.
+# PHY_NR and PHY_NR_UE both compile nr_parms.c, nr_modulation.c, nr_dmrs_rx.c, dmrs_nr.c, ptrs_nr.c,
+# nr_gen_mod_table.c, ul_ref_seq_nr.c and the whole PHY/TOOLS set. Inside one --start-group the
+# linker usually resolves that to whichever archive it reaches first, but which one it picks is not
+# something to leave to chance in a receiver where a subtly different modulation table or DM-RS
+# generator would produce a plausible-looking wrong answer rather than a link error. So this list
+# contains ONLY files that are not already in PHY_NR_UE; everything else resolves to the UE's copy,
+# which is the copy the rest of this binary already uses.
+set(PHY_NR_PASSIVE_UL_SRC
+  ${OPENAIR1_DIR}/PHY/NR_TRANSPORT/nr_ulsch_demodulation.c
+  ${OPENAIR1_DIR}/PHY/NR_TRANSPORT/nr_ulsch_decoding.c
+  ${OPENAIR1_DIR}/PHY/NR_TRANSPORT/nr_ulsch.c
+  ${OPENAIR1_DIR}/PHY/NR_ESTIMATION/nr_ul_channel_estimation.c
+  ${OPENAIR1_DIR}/PHY/NR_ESTIMATION/nr_freq_equalization.c
+  ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c
+  )
+add_library(PHY_NR_PASSIVE_UL ${PHY_NR_PASSIVE_UL_SRC})
+# Same dependency set PHY_NR itself declares -- these carry the include directories these sources
+# need (nr_common.h, the polar/smallblock decoders, the FAPI p5 headers), not just link objects.
+target_link_libraries(PHY_NR_PASSIVE_UL PUBLIC nr_phy_common nr_common nr_fapi_p5 polar smallblock ds)
+# nr_mac_common.h (Qm/code-rate/TBS/BG helpers) pulls generated ASN.1 headers; same dependency
+# PHY_NR_UE declares for the same reason.
+target_link_libraries(PHY_NR_PASSIVE_UL PRIVATE asn1_nr_rrc_hdrs UTIL)
 target_link_libraries(PHY_NR nr_phy_common nr_common nr_fapi_p5 polar smallblock ds)
 
 add_library(PHY_NR_NO_AVX_256 ${PHY_NR_SRC})
@@ -1952,7 +1983,7 @@ add_executable(nr-uesoftmodem
 target_link_libraries(nr-uesoftmodem PRIVATE
   -Wl,--start-group
   nr_rrc SECURITY UTIL SCHED_NR_UE_LIB
-  PHY_NR_COMMON PHY_NR_UE NR_UE_ISAC NR_L2_UE MAC_NR_COMMON nfapi_nr_lib nr_pdcch_blind_monitor
+  PHY_NR_COMMON PHY_NR_UE PHY_NR_PASSIVE_UL NR_UE_ISAC NR_L2_UE MAC_NR_COMMON nfapi_nr_lib nr_pdcch_blind_monitor
   ITTI SIMU radio_common
   time_management softmodem_common
   -Wl,--end-group dl)
