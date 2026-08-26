@@ -118,13 +118,13 @@ static bool passive_gnb_prepare(PHY_VARS_NR_UE *ue)
 
   /* rxdataF is a RING of RU_RX_SLOT_DEPTH slots: the UL chest indexes it as
    * (Ns % RU_RX_SLOT_DEPTH) * symbols_per_slot * ofdm_symbol_size + symbol * ofdm_symbol_size. */
-  gnb->common_vars.rxdataF = (c16_t **)calloc(nant, sizeof(c16_t *));
+  gnb->common_vars.rxdataF = (c16_t **)malloc16_clear(nant * sizeof(c16_t *));
   if (gnb->common_vars.rxdataF == NULL) {
     free(gnb);
     return false;
   }
   for (int a = 0; a < nant; a++) {
-    gnb->common_vars.rxdataF[a] = (c16_t *)calloc((size_t)RU_RX_SLOT_DEPTH * sps * symsz, sizeof(c16_t));
+    gnb->common_vars.rxdataF[a] = (c16_t *)malloc16_clear((size_t)RU_RX_SLOT_DEPTH * sps * symsz * sizeof(c16_t));
     if (gnb->common_vars.rxdataF[a] == NULL) {
       free(gnb);
       return false;
@@ -136,24 +136,24 @@ static bool passive_gnb_prepare(PHY_VARS_NR_UE *ue)
   const int nb_re      = gnb->frame_parms.N_RB_UL * NR_NB_SC_PER_RB;
   const int nb_re2     = ((nb_re + 15) / 16) * 16;
 
-  gnb->pusch_vars = (NR_gNB_PUSCH *)calloc(1, sizeof(NR_gNB_PUSCH));
+  gnb->pusch_vars = (NR_gNB_PUSCH *)malloc16_clear(sizeof(NR_gNB_PUSCH));
   NR_gNB_PUSCH *pv = &gnb->pusch_vars[0];
-  pv->ul_ch_estimates     = (int32_t **)calloc(n_buf, sizeof(int32_t *));
-  pv->ptrs_phase_per_slot = (int32_t **)calloc(n_buf, sizeof(int32_t *));
+  pv->ul_ch_estimates     = (int32_t **)malloc16_clear(n_buf * sizeof(int32_t *));
+  pv->ptrs_phase_per_slot = (int32_t **)malloc16_clear(n_buf * sizeof(int32_t *));
   for (int i = 0; i < n_buf; i++) {
-    pv->ul_ch_estimates[i]     = (int32_t *)calloc((size_t)symsz * sps, sizeof(int32_t));
-    pv->ptrs_phase_per_slot[i] = (int32_t *)calloc(sps, sizeof(int32_t));
+    pv->ul_ch_estimates[i]     = (int32_t *)malloc16_clear((size_t)symsz * sps * sizeof(int32_t));
+    pv->ptrs_phase_per_slot[i] = (int32_t *)malloc16_clear(sps * sizeof(int32_t));
   }
-  pv->rxdataF_comp = (c16_t **)calloc(max_layers, sizeof(c16_t *));
+  pv->rxdataF_comp = (c16_t **)malloc16_clear(max_layers * sizeof(c16_t *));
   for (int i = 0; i < max_layers; i++) {
-    pv->rxdataF_comp[i] = (c16_t *)calloc((size_t)nb_re2 * sps, sizeof(c16_t));
+    pv->rxdataF_comp[i] = (c16_t *)malloc16_clear((size_t)nb_re2 * sps * sizeof(c16_t));
   }
   /* Same size expression nr_init.c uses. It is not derived from anything here; copied deliberately
    * so the two cannot diverge. */
-  pv->llr = (int16_t *)calloc(8 * ((3 * 8 * 6144) + 12), sizeof(int16_t));
-  pv->ul_valid_re_per_slot = (int16_t *)calloc(sps, sizeof(int16_t));
+  pv->llr = (int16_t *)malloc16_clear(8 * ((3 * 8 * 6144) + 12) * sizeof(int16_t));
+  pv->ul_valid_re_per_slot = (int16_t *)malloc16_clear(sps * sizeof(int16_t));
 
-  gnb->ulsch = (NR_gNB_ULSCH_t *)calloc(1, sizeof(NR_gNB_ULSCH_t));
+  gnb->ulsch = (NR_gNB_ULSCH_t *)malloc16_clear(sizeof(NR_gNB_ULSCH_t));
   gnb->ulsch[0] = new_gNB_ulsch(gnb->max_ldpc_iterations, gnb->frame_parms.N_RB_UL);
 
   g_gnb       = gnb;
@@ -290,8 +290,12 @@ bool nr_pusch_passive_decode(PHY_VARS_NR_UE *ue,
      * gNB grid is [antenna][RU_RX_SLOT_DEPTH * symbols_per_slot * ofdm_symbol_size]. Fill one
      * symbol at a time through a scratch view so the two layouts stay explicit rather than
      * assumed equal -- they are not. */
+    /* malloc16_clear, NOT calloc: nr_slot_fep writes this through the SIMD DFT, which ASSERTS on
+     * output alignment (oai_dfts.c dft_implementation). calloc only guarantees max_align_t and the
+     * assertion fired on the first real grant OTA. Every DSP-facing buffer above is allocated the
+     * same way for the same reason -- it is why nr_init.c uses malloc16_clear throughout. */
     c16_t (*scratch)[fp->samples_per_slot_wCP] =
-        (c16_t (*)[fp->samples_per_slot_wCP])calloc(nant, sizeof(c16_t) * fp->samples_per_slot_wCP);
+        (c16_t (*)[fp->samples_per_slot_wCP])malloc16_clear((size_t)nant * sizeof(c16_t) * fp->samples_per_slot_wCP);
     if (scratch == NULL) {
       atomic_fetch_add_explicit(&g_rej_setup, 1, memory_order_relaxed);
       out->reject_reason = "scratch allocation failed";
@@ -306,7 +310,7 @@ bool nr_pusch_passive_decode(PHY_VARS_NR_UE *ue,
                (size_t)symsz * sizeof(c16_t));
       }
     }
-    free(scratch);
+    free16(scratch, (size_t)nant * sizeof(c16_t) * fp->samples_per_slot_wCP);
   }
 
   /* ---- TBS, then the receive chain, exactly as the gNB runs it. ---- */

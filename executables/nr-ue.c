@@ -14,6 +14,7 @@
 #include "SCHED_NR_UE/defs.h"
 #include "PHY/NR_UE_TRANSPORT/nr_transport_proto_ue.h"
 #include "PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.h"
+#include "PHY/NR_UE_TRANSPORT/nr_pusch_passive_monitor_rt.h" // passive UL PUSCH hook
 #include "executables/softmodem-common.h"
 #include "radio/COMMON/common_lib.h"
 #include "LAYER2/nr_pdcp/nr_pdcp_oai_api.h"
@@ -654,8 +655,15 @@ static int UE_dl_preprocessing(PHY_VARS_NR_UE *UE,
         sampleShift = psbch_pscch_processing(UE, proc, phy_data);
       }
     }
-  } else
+  } else {
+    /* UPLINK slot. Nothing used to run here -- a UE has no reason to process one. A passive
+     * receiver does: this is where another UE's PUSCH actually is, k2 slots after the DCI that
+     * scheduled it. No-op unless [sensing] pdcch_blind_monitor_ul_pusch is configured. */
+    if (proc->rx_slot_type == NR_UPLINK_SLOT) {
+      nr_pusch_passive_monitor_process(UE, proc);
+    }
     ue_ta_procedures(UE, proc->nr_slot_tx, proc->frame_tx);
+  }
 
   TracyCZoneEnd(ctx);
   return sampleShift;

@@ -336,6 +336,19 @@ static int parse_ul_misc(const char* s)
   return 1;
 }
 
+// "decode[:max_per_slot[:ta_offset_samples]]" -- passive PUSCH receive.
+static int parse_ul_pusch(const char* s)
+{
+  g_cfg.ul_pusch_max_per_slot = 0;
+  g_cfg.ul_ta_offset_samples  = 0;
+  const int n = sscanf(s, "%d:%d:%d", &g_cfg.ul_pusch_decode, &g_cfg.ul_pusch_max_per_slot,
+                       &g_cfg.ul_ta_offset_samples);
+  if (n < 1 || g_cfg.ul_pusch_decode < 0 || g_cfg.ul_pusch_decode > 1) {
+    return 0;
+  }
+  return 1;
+}
+
 // 16 ints, in fill_dci_pdu_rel15()'s NR_UL_DCI_FORMAT_0_1 PACKER order; -1 = the documented default.
 // time_domain_assignment has NO entry, for the same reason it has none on the DL side: it is
 // DERIVED from the TDRA list count rather than being a second independently-wrong knob.
@@ -549,6 +562,7 @@ void nr_pdcch_blind_monitor_init(void)
   char*     p_ul_dmrs    = NULL;
   char*     p_ul_misc    = NULL;
   char*     p_ul_dci_bits = NULL;
+  char*     p_ul_pusch   = NULL;
   paramdef_t params[] = {
       {"pdcch_blind_monitor_coreset",
         "Dedicated CORESET geometry for blind PDCCH monitoring; "
@@ -624,6 +638,10 @@ void nr_pdcch_blind_monitor_init(void)
         "carrier:ulsul:bwp:hopping:harq:dai1:dai2:sri:precoding:antports:srsreq:csireq:cbg:ptrs:"
         "beta:dmrsseq",
         0, .strptr = &p_ul_dci_bits, .defstrval = "", TYPE_STRING, 0},
+      {"pdcch_blind_monitor_ul_pusch",
+        "Passive PUSCH receive; decode[:max_per_slot[:ta_offset_samples]] (decode 0=off default, "
+        "1=on; ta_offset 0 = derive N_TA_offset from the sample rate -- the per-UE N_TA is in no DCI)",
+        0, .strptr = &p_ul_pusch, .defstrval = "", TYPE_STRING, 0},
       {"pdcch_blind_monitor_scan_thread",
         "Defer the blind-PDCCH scan (FEP/LLR/demap/candidate decode) off the PHY receive thread; "
         "n_consumers[:queue_depth[:core]]. 0/absent = in-line. Measured: the scan is 69-102us per "
@@ -697,6 +715,11 @@ void nr_pdcch_blind_monitor_init(void)
   }
   if (p_ul_misc != NULL && p_ul_misc[0] != '\0' && !parse_ul_misc(p_ul_misc)) {
     LOG_E(PHY, "SENSING: malformed pdcch_blind_monitor_ul_misc '%s'; UL identities left at defaults\n", p_ul_misc);
+  }
+  if (p_ul_pusch != NULL && p_ul_pusch[0] != '\0' && !parse_ul_pusch(p_ul_pusch)) {
+    g_cfg.ul_pusch_decode = 0;
+    LOG_E(PHY, "SENSING: malformed pdcch_blind_monitor_ul_pusch '%s'; passive PUSCH decode disabled\n",
+          p_ul_pusch);
   }
   if (p_ul_dci_bits != NULL && p_ul_dci_bits[0] != '\0' && !parse_ul_dci_bits(p_ul_dci_bits)) {
     LOG_E(PHY, "SENSING: malformed pdcch_blind_monitor_ul_dci_bits '%s' (need 16 ints); UL widths left "

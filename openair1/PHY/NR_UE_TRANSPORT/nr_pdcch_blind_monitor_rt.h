@@ -227,6 +227,15 @@ typedef struct {
                              // defaults are a starting point, not the pinned layout -- see the UL
                              // section of nr_pdcch_blind_monitor.h. 43 is the live-verified value
                              // for this deployment at 273 PRB, read off the gNB's own FAPI dump.
+  int ul_pusch_decode;   // 0 = off (default). 1 = decode the PUSCH each recovered UL grant names.
+                         // Runs IN-LINE in the uplink slot. That is affordable only because uplink
+                         // slots are otherwise idle for this receiver -- 2 of every 10 slots do no
+                         // work at all today -- but the decode is the same order of cost as the DL
+                         // one that was measured overrunning a 500 us slot budget, so watch
+                         // max_pos_acc and PBCH before trusting a long capture.
+  int ul_pusch_max_per_slot; // 0 = 1
+  int ul_ta_offset_samples;  // 0 = derive N_TA_offset from the sample rate. The per-UE N_TA is NOT
+                         // in any DCI, so this is where a measured or swept residual goes.
   nr_pdcch_blind_ul_opts_t ul; // UL BWP, pusch-TimeDomainAllocationList (k2 lives here), DM-RS,
                                // waveform/identities and the per-field widths.
 } nr_pdcch_blind_monitor_cfg_t;
