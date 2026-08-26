@@ -1667,13 +1667,45 @@ TEST_F(BlindPdcchTest, Dci01RejectsATdaIndexBeyondTheList) {
 // Rather than silently assuming rank 1, a present precoding-information field is rejected: mapping
 // its code point to (layers, TPMI) needs a PUSCH-Config this receiver cannot read, and guessing
 // would give a confident wrong DM-RS port set and TBS on every multi-layer grant.
-TEST_F(BlindPdcchTest, Dci01RejectsAPresentPrecodingField) {
+// The guard keys on the precoding field's VALUE, not on the field existing. Code point 0 is
+// "1 layer, TPMI 0" in every one of TS 38.212 Tables 7.3.1.1.2-2..5 -- whatever the antenna-port
+// count, maxRank or codebookSubset -- so it needs no PUSCH-Config and must be ACCEPTED.
+//
+// This is a regression test for a real live failure: keying on presence rejected 18514 of 18614
+// correctly decoded UL grants on a cell that logs mimo=0 on 100 % of its UL DCIs, while every other
+// decoded field on those same grants already matched the gNB exactly.
+TEST_F(BlindPdcchTest, Dci01AcceptsAPresentButZeroPrecodingField) {
+  nr_pdcch_blind_ul_opts_t o = LiveUlOpts();
+  o.precoding_info_bits = 1;
+  o.antenna_ports_bits  = 2;
+  const uint16_t len = nr_pdcch_blind_dci01_size(&o);
+  UlGroundTruth gt;
+  gt.antenna_ports = 2;
+  auto llr = EncodeToLLR(PackUlPayload(gt, o), gt.rnti, len, kAggregationLevel, 40.0, rng_);
+  nr_pdcch_blind_ul_result_t out;
+  ASSERT_TRUE(nr_pdcch_blind_decode_and_extract_01(llr.data(), kAggregationLevel, len, &o, 0x0001, 0xFFEF, &out))
+      << (out.reject_reason ? out.reject_reason : "");
+  EXPECT_EQ(out.nrOfLayers, 1);
+  EXPECT_EQ(out.precoding_info, 0);
+}
+
+// A NON-ZERO code point still needs the tables, so it is still rejected rather than guessed.
+TEST_F(BlindPdcchTest, Dci01RejectsANonZeroPrecodingCodePoint) {
   nr_pdcch_blind_ul_opts_t o = LiveUlOpts();
   o.precoding_info_bits = 2;
   const uint16_t len = nr_pdcch_blind_dci01_size(&o);
   UlGroundTruth gt;
   auto llr = EncodeToLLR(PackUlPayload(gt, o), gt.rnti, len, kAggregationLevel, 40.0, rng_);
   nr_pdcch_blind_ul_result_t out;
+  // PackUlPayload writes 0 into precoding, so build a non-zero one by hand: the field sits between
+  // the SRI and the antenna ports, and with sri = 0 bits it is the 2 bits directly above them.
+  const int riv_bits = RivBitsFor(o.bwp_size);
+  (void)riv_bits;
+  uint64_t p = PackUlPayload(gt, o);
+  const int ant_bits = 2;
+  const int below = ant_bits + 2 /*srs*/ + 1 /*dmrs seq*/ + 1 /*ulsch*/;
+  p |= (uint64_t)1 << below; // set the low bit of the precoding field
+  llr = EncodeToLLR(p, gt.rnti, len, kAggregationLevel, 40.0, rng_);
   EXPECT_FALSE(nr_pdcch_blind_decode_and_extract_01(llr.data(), kAggregationLevel, len, &o, 0x0001, 0xFFEF, &out));
   ASSERT_NE(out.reject_reason, nullptr);
 }

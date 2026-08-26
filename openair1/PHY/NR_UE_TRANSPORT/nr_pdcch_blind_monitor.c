@@ -2120,11 +2120,24 @@ bool nr_pdcch_blind_decode_and_extract_01(const int16_t* llr,
   // which live in a PUSCH-Config this receiver cannot read. Rejecting is the honest outcome:
   // assuming rank 1 anyway would produce a confident wrong DM-RS port set and a wrong TBS on every
   // multi-layer grant, which is the failure mode this module has been bitten by twice already.
-  if (f.precoding != 0) {
-    out->reject_reason = "precoding-information field present: layer count needs a PUSCH-Config this receiver cannot read";
+  uint32_t layers = 1;
+  if (f.precoding != 0 && precoding != 0) {
+    /* A NON-ZERO code point needs TS 38.212 Tables 7.3.1.1.2-2..5, selected by the UE's SRS port
+     * count, maxRank and codebookSubset -- all in a PUSCH-Config this receiver cannot read.
+     * Rejecting is the honest outcome; guessing would give a confident wrong DM-RS port set and a
+     * wrong TBS on every multi-layer grant. */
+    out->reject_reason = "non-zero precoding code point: layer count needs a PUSCH-Config this receiver cannot read";
     return false;
   }
-  return blind_ul_finish(opts, riv, tda_idx, mcs, antenna_ports, 1 /* rank 1 */,
+  /* Code point 0, however, IS resolvable with no config at all: it is "1 layer, TPMI 0" in EVERY
+   * one of those four tables, whatever the antenna-port count, maxRank or codebookSubset. So a
+   * present-but-zero precoding field costs nothing to accept.
+   *
+   * This mattered: the first live capture with the pinned layout rejected 18514 of 18614 correctly
+   * decoded UL grants here, because the guard keyed on the field EXISTING rather than on its VALUE
+   * -- and this cell logs mimo=0 on 100 % of its UL DCIs. The decoded rv/tpc/ulsch/dai/h_id/ndi on
+   * those rejected grants already matched the gNB exactly, i.e. everything upstream was right. */
+  return blind_ul_finish(opts, riv, tda_idx, mcs, antenna_ports, layers,
                          -1 /* 0_1 uses the configured dmrs-AdditionalPosition */, out);
 }
 
