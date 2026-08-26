@@ -162,6 +162,28 @@ typedef struct {
                             // receive path, and sharing a core with the candidate-decode pool would
                             // partly undo that.
 
+  /* ---- Deferred blind-PDCCH SCAN. Distinct from pdsch_thread above: that defers the PDSCH DECODE
+   * of an already-accepted grant; this defers the SCAN that finds the grant at all -- the full-slot
+   * FEP, PDCCH channel estimation/equalisation, demapping and the candidate polar decodes.
+   *
+   * MEASURED (BTIM, mean per monitoring occasion, this deployment): fep_llr 54-62us out of a
+   * 69-102us occasion, i.e. 60-79 % of it. Against a 500us slot that is 13.9 % receive-thread duty
+   * at 165 grants/s and 16-20 % at ~1530 grants/s, straddling the ~18 % at which section 15
+   * measured this receiver losing PBCH lock -- which is the mechanism behind the grant-rate-driven
+   * 0 %/91 % PDSCH CRC bimodality (BRANCH_IMBALANCE_HARQ_PLAN.md section 12).
+   *
+   * DEFAULT 0 = in-line on the PHY receive thread, i.e. bit-identical to the previous behaviour.
+   * The deferral changes WHICH thread demodulates, so it is opt-in rather than silent. */
+  int   scan_thread;       // consumer count; 0 = in-line (default). >1 warns -- see
+                           // nr_pdcch_passive_queue.h: the occasion body's energy floor, RNTI
+                           // persistence table and counters are not yet thread-safe, and ONE
+                           // consumer already sustains a slot-rate occasion stream.
+  int   scan_queue_depth;  // ring depth; 0 = auto (8). Same bound as the PDSCH queue: a job holds
+                           // only a slot reference, so it must be consumed before the producer laps
+                           // rxdata, and a deeper ring buys staleness rather than throughput.
+  int   scan_thread_core;  // first core to pin consumers to; <0 = unpinned. Same caution as
+                           // pdsch_thread_core -- do not share with --thread-pool's cores.
+
   // ---- DCI format 1_0 scanning (2026-08-21). All-zero = off, i.e. exactly the format-1_1-only
   // behaviour this module had before. See nr_pdcch_blind_monitor.h's nr_blind_dci_format_t block
   // for why a passive receiver needs 1_0 at all (SIB1, Msg2/RAR, Msg4/RRCSetup, C-RNTI fallback).
@@ -217,6 +239,28 @@ const nr_pdcch_blind_monitor_cfg_t* nr_pdcch_blind_monitor_get_cfg(void);
  * @param proc  Current slot's RX/TX processing context
  */
 void nr_pdcch_blind_monitor_process(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc);
+
+/**
+ * @brief Run ONE monitoring occasion: FEP -> PDCCH LLR -> demap -> per-candidate decode -> accepts.
+ *
+ * Split out of nr_pdcch_blind_monitor_process() so it can run on a scan consumer instead of the PHY
+ * receive thread (see nr_pdcch_passive_queue.h for the BTIM measurement that motivates it). The
+ * SAME code runs either way -- in-line when the pool is not configured, deferred when it is -- so
+ * the two are directly A/B-able with one config field and no second code path to keep in step.
+ *
+ * Takes only `proc`: the occasion's slot index is derived from it exactly as before the split, so a
+ * deferred occasion lands on the same ISAC slow-time row as an in-line one would. The queue's own
+ * monotonic slot reference stays inside the queue, where it belongs -- it answers "do these samples
+ * still exist", not "which row is this".
+ *
+ * @param serial_candidates run the per-candidate decodes in THIS thread instead of fanning them out
+ *        to the shared UE pool. True from a scan consumer: the occasion is already off the receive
+ *        thread, so the fan-out protects nothing and instead blocks at priority 50 behind whatever
+ *        else the pool is serving -- measured at 18.4us in-line versus 271.1us deferred for the
+ *        identical 38-candidate workload.
+ */
+void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc,
+                                         bool serial_candidates);
 
 #ifdef __cplusplus
 }

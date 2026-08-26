@@ -214,6 +214,18 @@ static int parse_pdsch(const char* s)
   return n >= 1;
 }
 
+// "n_consumers[:queue_depth[:core]]" -- defer the blind-PDCCH SCAN off the PHY receive thread.
+// Its own config line rather than more fields appended to pdcch_blind_monitor_pdsch, because it
+// defers a DIFFERENT stage (the scan, not the decode of what the scan found) and the two are
+// independently useful: either, neither, or both. Absent/0 = in-line, the previous behaviour.
+static int parse_scan_thread(const char* s)
+{
+  g_cfg.scan_queue_depth = 0;
+  g_cfg.scan_thread_core = -1;
+  const int n = sscanf(s, "%d:%d:%d", &g_cfg.scan_thread, &g_cfg.scan_queue_depth, &g_cfg.scan_thread_core);
+  return n >= 1;
+}
+
 // "scan:ss_type:n_rb_riv:rb_offset:length_override:class_mask:mux_pattern:sib1" -- everything after
 // `scan` is optional and defaults to the auto/spec value, so "1" alone is a valid line meaning
 // "also scan format 1_0 in this (UE-specific) search space, sizing everything from the configured
@@ -392,12 +404,16 @@ void nr_pdcch_blind_monitor_init(void)
   g_cfg.pdsch_xoverhead        = 0;
   g_cfg.pdsch_rv0_only         = 1;
   g_cfg.pdsch_max_per_slot     = 1;
+  g_cfg.scan_thread            = 0;  // in-line on the PHY receive thread, as before
+  g_cfg.scan_queue_depth       = 0;
+  g_cfg.scan_thread_core       = -1;
 
   char*     p_coreset = NULL;
   char*     p_ss       = NULL;
   char*     p_bwp       = NULL;
   char*     p_rnti_range = NULL;
   char*     p_noise_gates = NULL;
+  char*     p_scan_thread = NULL;
   char*     p_tda        = NULL;
   char*     p_dmrs       = NULL;
   char*     p_pdsch      = NULL;
@@ -457,6 +473,11 @@ void nr_pdcch_blind_monitor_init(void)
         "pdcch_blind_monitor_tda, which is correct when the gNB derives both from the same "
         "pdsch-ConfigCommon",
         0, .strptr = &p_tda_common, .defstrval = "", TYPE_STRING, 0},
+      {"pdcch_blind_monitor_scan_thread",
+        "Defer the blind-PDCCH scan (FEP/LLR/demap/candidate decode) off the PHY receive thread; "
+        "n_consumers[:queue_depth[:core]]. 0/absent = in-line. Measured: the scan is 69-102us per "
+        "occasion = 14-20 % of a 500us slot, straddling the ~18 % at which PBCH lock is lost",
+        0, .strptr = &p_scan_thread, .defstrval = "", TYPE_STRING, 0},
       {"pdcch_blind_monitor_pdsch",
         "Passive data-aided PDSCH; decode:mcs_table:xoverhead:rv0_only:max_per_slot "
         "(decode 0=off, 1=decode+count CRC pass rate only, 2=also submit the reconstructed CFR)",
@@ -483,6 +504,10 @@ void nr_pdcch_blind_monitor_init(void)
   if (p_rnti_range != NULL && p_rnti_range[0] != '\0' && !parse_rnti_range(p_rnti_range)) {
     LOG_E(PHY, "SENSING: malformed pdcch_blind_monitor_rnti_range '%s'; using default %u-%u\n", p_rnti_range,
           NR_PDCCH_BLIND_RNTI_MIN_DEFAULT, NR_PDCCH_BLIND_RNTI_MAX_DEFAULT);
+  }
+  if (p_scan_thread != NULL && p_scan_thread[0] != '\0' && !parse_scan_thread(p_scan_thread)) {
+    LOG_E(PHY, "SENSING: malformed pdcch_blind_monitor_scan_thread '%s'; scan stays in-line\n", p_scan_thread);
+    g_cfg.scan_thread = 0;
   }
   if (p_noise_gates != NULL && p_noise_gates[0] != '\0' && !parse_noise_gates(p_noise_gates)) {
     LOG_E(PHY, "SENSING: malformed pdcch_blind_monitor_noise_gates '%s'; using compiled-in defaults\n",

@@ -51,6 +51,7 @@
 #include "PHY/NR_UE_ISAC/nr_isac.h"                      // nr_isac_submit_cfr/_enabled/_source_enabled
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.h"  // passive PDSCH decode (data-aided source)
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.h"   // deferred decode off the RT thread
+#include "PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.h"   // deferred SCAN off the RT thread
 #include <stdatomic.h>
 
 /* Published by the RF producer thread (executables/nr-ue.c:43/1148) immediately before it reads
@@ -253,7 +254,36 @@ static void btim_occasion_total(uint64_t d_ns, uint64_t slot_ns)
 
 static uint64_t g_dec_try   = 0; // decodes actually attempted (i.e. reached the LDPC decoder)
 static uint64_t g_dec_ok    = 0; // ... of which the transport-block CRC passed
-static uint64_t g_dec_skip_rv = 0; // skipped: rv != 0 and rv0_only set (not self-decodable, see cfg)
+static uint64_t g_dec_skip_rv = 0;
+/* Accepted candidates abandoned BEFORE the FEP/channel-estimation because the occasion had already
+ * queued pdsch_max_per_slot decodes. Counted rather than silent: a large value means the cap is
+ * throwing away real grants and should be raised (or more consumers added), which is a capacity
+ * decision, not a defect. */
+static uint64_t g_dec_over_cap = 0;
+
+/* ---- ADAPTIVE AGGREGATION-LEVEL ALLOCATION --------------------------------------------------
+ * The candidate budget (64 candidates / NR_MAX_PDCCH_SIZE REs) cannot cover a full sweep of every
+ * level: 45+23+11+5 = 84 candidates and 9450 REs on this CORESET, over both caps. Something must
+ * be given up, and the previous rule gave up whatever came last in a FIXED order.
+ *
+ * That hardcodes a deployment. The gNB picks the aggregation level from the SERVED UE's link
+ * quality -- a UE at cell edge gets AL8 -- so a fixed ladder tuned on one cell silently misses
+ * every grant on another, or on the same cell after the UE moves. It is the same mistake as pinning
+ * the MCS: the receiver does not choose, and must not assume.
+ *
+ * So allocate in proportion to where accepts are ACTUALLY observed, learned online, with two
+ * guarantees that keep it adaptive rather than self-confirming:
+ *   - a FLOOR of at least AL_MIN_PROBE candidates on every enabled level, so a level that has never
+ *     produced an accept still gets looked at and can be discovered. Without this the split is a
+ *     ratchet: a level starved to zero can never earn its way back.
+ *   - Laplace smoothing (+AL_PRIOR) on the counts, so early noise cannot drive a level to nothing
+ *     before there is evidence either way.
+ * The floor's CCE position ROTATES between occasions, so a level held at its minimum still sweeps
+ * its whole CCE space over time instead of probing the same spot forever. */
+#define AL_MIN_PROBE 2
+#define AL_PRIOR     1.0
+static _Atomic uint64_t g_al_accepts[4]; // indexed as ss_al_candidates[]: AL 1, 2, 4, 8
+static uint32_t         g_al_rotate[4];  // per-level rotating CCE start, advanced each occasion // skipped: rv != 0 and rv0_only set (not self-decodable, see cfg)
 static uint64_t g_dec_unsup = 0; // skipped: grant outside the decode/reconstruction scope
 static uint64_t g_data_submits = 0; // reconstructed CFRs submitted as NR_ISAC_SRC_PDSCH_DATA
 
@@ -328,9 +358,11 @@ typedef struct {
   task_ans_t  *ans;
 } nr_pdcch_blind_cand_task_t;
 
-static void nr_pdcch_blind_cand_worker(void *arg)
+/* The candidate body WITHOUT the task_ans handshake, for the serial path. Split rather than passing
+ * a flag so the parallel worker keeps exactly its previous shape and the pool contract (every task
+ * must signal completion exactly once) cannot be broken by a wrong flag. */
+static void nr_pdcch_blind_cand_worker_body(nr_pdcch_blind_cand_task_t *t)
 {
-  nr_pdcch_blind_cand_task_t *t = (nr_pdcch_blind_cand_task_t *)arg;
   int16_t tmp_e[16 * 108];
   nr_pdcch_unscrambling((c16_t *)t->e_rx, t->scrambling_rnti, (uint32_t)(t->L * 108), t->dmrs_scrambling_id, tmp_e);
   if (t->format == NR_BLIND_DCI_FORMAT_1_0) {
@@ -344,6 +376,17 @@ static void nr_pdcch_blind_cand_worker(void *arg)
     extern void nr_pdcch_llr_probe(const char *, int, int, int, int, uint32_t, const int16_t *, int);
     nr_pdcch_llr_probe("blind", t->frame, t->slot, t->cce, t->L, t->out.rnti, tmp_e, t->L * 108);
   }
+}
+
+static void nr_pdcch_blind_cand_worker_serial(nr_pdcch_blind_cand_task_t *t)
+{
+  nr_pdcch_blind_cand_worker_body(t);
+}
+
+static void nr_pdcch_blind_cand_worker(void *arg)
+{
+  nr_pdcch_blind_cand_task_t *t = (nr_pdcch_blind_cand_task_t *)arg;
+  nr_pdcch_blind_cand_worker_body(t);
   completed_task_ans(t->ans);
 }
 
@@ -373,7 +416,6 @@ void nr_pdcch_blind_monitor_process(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t 
   // enabled at all -- that is the whole point of having a measure-only level.
   const bool isac_on   = nr_isac_enabled() != 0;
   const bool want_dmrs = isac_on && nr_isac_source_enabled(NR_ISAC_SRC_PDSCH_DMRS_BLIND);
-  const bool want_data = isac_on && cfg->pdsch_decode >= 2 && nr_isac_source_enabled(NR_ISAC_SRC_PDSCH_DATA);
   const bool want_decode = cfg->pdsch_decode >= 1; // >=1 always decodes; only >=2 submits
 
   /* ---- Deferred decode (PASSIVE_RX_ONLY_HANDOVER.md §15). Started lazily here rather than from
@@ -381,7 +423,6 @@ void nr_pdcch_blind_monitor_process(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t 
    * rxdata allocated), which does not exist yet when [sensing] is parsed. One-shot; if the start is
    * REFUSED -- e.g. --cont-fo-comp makes a deferred FEP unsound, see nr_pdsch_passive_queue_start()
    * -- `defer` stays false and every decode runs in-line exactly as before. */
-  bool defer = false;
   if (want_decode && cfg->pdsch_thread) {
     static int s_queue_tried = 0;
     if (!s_queue_tried) {
@@ -399,18 +440,86 @@ void nr_pdcch_blind_monitor_process(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t 
               n_cons, depth, cfg->pdsch_thread_core);
       }
     }
-    defer = nr_pdsch_passive_queue_running();
   }
   if (!want_dmrs && !want_decode) {
     return;
   }
 
   NR_DL_FRAME_PARMS *fp = &ue->frame_parms;
-  const uint32_t abs_slot = (uint32_t)proc->frame_rx * fp->slots_per_frame + (uint32_t)proc->nr_slot_rx;
+  const uint32_t gate_slot = (uint32_t)proc->frame_rx * fp->slots_per_frame + (uint32_t)proc->nr_slot_rx;
   if (cfg->ss_monitoring_slot_periodicity <= 0
-      || (abs_slot % (uint32_t)cfg->ss_monitoring_slot_periodicity) != (uint32_t)cfg->ss_monitoring_slot_offset) {
+      || (gate_slot % (uint32_t)cfg->ss_monitoring_slot_periodicity) != (uint32_t)cfg->ss_monitoring_slot_offset) {
     return; // not a monitoring occasion this slot
   }
+
+  /* ---- Deferred SCAN (nr_pdcch_passive_queue.h). Everything below this point -- full-slot FEP over
+   * the CORESET symbols, PDCCH channel estimation + equalisation, demapping, and the per-candidate
+   * polar decodes -- used to run HERE, on the PHY receive thread.
+   *
+   * BTIM, mean per occasion, measured on this deployment: fep_llr 54-62us, demap 3.2-3.5us,
+   * prepass 2.6-3.0us, candidate decode 5.4-19.2us, for a TOTAL of 69us at 165 grants/s and
+   * 80-102us at ~1530 grants/s. Against a 500us slot that is 13.9 % RT duty at low load and
+   * 16-20 % at high load, and section 15 measured this receiver holding PBCH lock below ~18 % and
+   * losing it above. That straddle IS the mechanism behind the grant-rate-driven CRC bimodality.
+   * fep_llr alone is 60-79 % of the occasion, so deferring the body is what buys the margin.
+   *
+   * Started lazily here for the same reason the PDSCH pool is: the consumer needs a live
+   * PHY_VARS_NR_UE with frame_parms sized and rxdata allocated, which does not exist when [sensing]
+   * is parsed. One-shot, and RT-side so the guard itself stays single-threaded. If the start is
+   * REFUSED (--cont-fo-comp makes a deferred FEP unsound) the scan runs in-line exactly as before. */
+  if (cfg->scan_thread) {
+    static int s_scan_tried = 0;
+    if (!s_scan_tried) {
+      s_scan_tried = 1;
+      const int n_cons = cfg->scan_thread;
+      const int depth  = (cfg->scan_queue_depth > 0) ? cfg->scan_queue_depth : 8;
+      nr_pdcch_passive_queue_start(ue, depth, n_cons, cfg->scan_thread_core);
+    }
+  }
+
+  /* The producer's MONOTONIC slot counter, used ONLY as the job's staleness reference -- the
+   * consumer compares it against the producer's current value to decide whether this occasion's raw
+   * IQ still exists in rxdata. It deliberately does NOT become the occasion's slot index: see the
+   * epoch note in nr_pdcch_blind_monitor_run_occasion(). */
+  const long mono_slot = atomic_load_explicit(&nr_ue_diag_producer_absolute_slot, memory_order_relaxed);
+
+  if (nr_pdcch_passive_queue_running()) {
+    const nr_pdcch_passive_job_t job = {.frame_rx      = proc->frame_rx,
+                                        .nr_slot_rx    = proc->nr_slot_rx,
+                                        .gNB_id        = proc->gNB_id,
+                                        .absolute_slot = mono_slot};
+    nr_pdcch_passive_queue_enqueue(&job);
+    return; // the consumer runs the occasion; the receive thread is done here
+  }
+
+  nr_pdcch_blind_monitor_run_occasion(ue, proc, false /* on the RT thread: fan out as before */);
+}
+
+/* The occasion body. Runs on a scan consumer when the pool is up, and on the PHY receive thread
+ * otherwise -- identical code either way, which is what makes the deferral A/B-able with one config
+ * field. `abs_slot_monotonic` is the producer's un-wrapped slot counter for this occasion. */
+void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc,
+                                         bool serial_candidates)
+{
+  const nr_pdcch_blind_monitor_cfg_t *cfg = nr_pdcch_blind_monitor_get_cfg();
+  NR_DL_FRAME_PARMS *fp = &ue->frame_parms;
+  /* Frame-derived, exactly as before the split -- NOT the producer's monotonic counter, even though
+   * one is available here now. This value indexes the ISAC slow-time grid via
+   * nr_isac_submit_cfr_multi(), and csi_rx.c's CSI-RS submissions are on the SAME grid using this
+   * same frame-derived epoch. Only the deferred pdsch_data path uses the monotonic counter, and it
+   * does so through nr_isac_abs_slot_override. Switching this one source to a different epoch would
+   * silently scatter DM-RS rows away from the CSI-RS rows they are meant to fuse with.
+   * The deferred consumer reconstructs proc from the job's own frame/slot, so this is identical
+   * whether the occasion runs here or on the receive thread -- which is what keeps the deferral a
+   * pure threading change and therefore A/B-able. */
+  const uint32_t abs_slot = (uint32_t)proc->frame_rx * fp->slots_per_frame + (uint32_t)proc->nr_slot_rx;
+
+  const bool isac_on     = nr_isac_enabled() != 0;
+  const bool want_dmrs   = isac_on && nr_isac_source_enabled(NR_ISAC_SRC_PDSCH_DMRS_BLIND);
+  const bool want_data   = isac_on && cfg->pdsch_decode >= 2 && nr_isac_source_enabled(NR_ISAC_SRC_PDSCH_DATA);
+  const bool want_decode = cfg->pdsch_decode >= 1;
+  const bool defer       = nr_pdsch_passive_queue_running();
+
   g_occasions_run++;
   const int      btim_on   = btim_enabled();
   const uint64_t btim_occ0 = btim_on ? btim_now() : 0;
@@ -503,42 +612,87 @@ void nr_pdcch_blind_monitor_process(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t 
   static const int al_order[4] = {2, 4, 8, 1};
   int nc = 0;
   int used_re = 0;
+
+  /* Per-level share of the budget, from observed accepts (see the ADAPTIVE block above). An
+   * explicit cap in the config still wins -- >0 pins a level, <0 disables it -- so a deployment that
+   * KNOWS its scheduler can say so; 0 (the house "auto") is what learns. */
+  int al_cap[4];
+  {
+    double w[4] = {0, 0, 0, 0};
+    double wsum = 0;
+    int    n_auto = 0;
+    for (int idx = 0; idx < 4; idx++) {
+      if (cfg->ss_al_candidates[idx] != 0) {
+        continue; // pinned or disabled: not part of the adaptive split
+      }
+      w[idx] = (double)atomic_load_explicit(&g_al_accepts[idx], memory_order_relaxed) + AL_PRIOR;
+      wsum += w[idx];
+      n_auto++;
+    }
+    /* Reserve the floor first, then share what is left by weight. With no accepts yet every weight
+     * is the prior, so this starts as an EVEN split and converges on the cell's real distribution
+     * -- it does not start from an assumption about which level matters. */
+    const int reserved = n_auto * AL_MIN_PROBE;
+    const int spare    = (max_cand > reserved) ? (max_cand - reserved) : 0;
+    for (int idx = 0; idx < 4; idx++) {
+      const int cfg_cap = cfg->ss_al_candidates[idx];
+      if (cfg_cap != 0) {
+        al_cap[idx] = cfg_cap; // <0 disabled, >0 pinned -- handled in the sweep below
+        continue;
+      }
+      al_cap[idx] = AL_MIN_PROBE + (int)((wsum > 0) ? ((double)spare * w[idx] / wsum) : 0);
+    }
+  }
+
   for (int oi = 0; oi < 4; oi++) {
     const int L   = al_order[oi];
     const int idx = (L == 1) ? 0 : (L == 2) ? 1 : (L == 4) ? 2 : 3; // ss_al_candidates[] is AL 1,2,4,8
-    int cap = cfg->ss_al_candidates[idx];
+    int cap = al_cap[idx];
     if (cap < 0) {
       continue; // explicitly disabled for this deployment
     }
-    if (cap == 0) {
-      cap = max_cand; // auto: sweep every non-overlapping position the budget allows
-    }
     const int need = NR_PDCCH_BLIND_RE_PER_RB_OUT_DMRS * L * 6; // 54*L REs per candidate
+    const int n_pos = (num_cces >= L) ? ((num_cces - L) / L + 1) : 0; // non-overlapping positions
+    if (n_pos <= 0) {
+      continue;
+    }
+    /* Start where the previous occasion left off, so a level held near its floor still sweeps every
+     * CCE position over successive occasions rather than re-probing one spot forever. */
+    const uint32_t start = g_al_rotate[idx] % (uint32_t)n_pos;
     int added = 0;
-    for (int cce = 0; cce + L - 1 < num_cces && nc < max_cand && added < cap && used_re + need <= max_re;
-         cce += L) {
+    for (int k = 0; k < n_pos && nc < max_cand && added < cap && used_re + need <= max_re; k++) {
+      const int cce = (int)(((start + (uint32_t)k) % (uint32_t)n_pos) * (uint32_t)L);
       rel15->CCE[nc] = (uint16_t)cce;
       rel15->L[nc]   = (uint8_t)L;
       nc++;
       added++;
       used_re += need;
     }
+    g_al_rotate[idx] = start + (uint32_t)added;
   }
 
   /* One-shot visibility. A ladder that silently fails to cover the level the deployment actually
    * uses produces a 100 % false-accept stream rather than an error -- which is precisely the
    * failure mode this ladder just had, undetected across several sessions. Print what was built. */
   {
-    static int s_ladder_logged = 0;
-    if (!s_ladder_logged) {
-      s_ladder_logged = 1;
+    /* PERIODIC, not one-shot. With the allocation now ADAPTIVE, a one-shot line reports the initial
+     * even split for the rest of the run and hides the very thing worth watching -- whether the
+     * split actually converged on where the accepts are. Printed on the same cadence as the monitor
+     * summary so the two can be read together. */
+    static unsigned long s_ladder_n = 0;
+    if ((s_ladder_n++ % NR_PDCCH_BLIND_SUMMARY_PERIOD_OCC) == 0) {
       int n_per_al[4] = {0, 0, 0, 0};
       for (int c = 0; c < nc; c++) {
         n_per_al[(rel15->L[c] == 1) ? 0 : (rel15->L[c] == 2) ? 1 : (rel15->L[c] == 4) ? 2 : 3]++;
       }
       LOG_I(PHY,
-            "SENSING: blind PDCCH ladder: num_cces=%d ncand=%d/%d re=%d/%d (AL1=%d AL2=%d AL4=%d AL8=%d)\n",
-            num_cces, nc, max_cand, used_re, max_re, n_per_al[0], n_per_al[1], n_per_al[2], n_per_al[3]);
+            "SENSING: blind PDCCH ladder: num_cces=%d ncand=%d/%d re=%d/%d (AL1=%d AL2=%d AL4=%d AL8=%d) "
+            "accepts_per_al=[%lu %lu %lu %lu]\n",
+            num_cces, nc, max_cand, used_re, max_re, n_per_al[0], n_per_al[1], n_per_al[2], n_per_al[3],
+            (unsigned long)atomic_load_explicit(&g_al_accepts[0], memory_order_relaxed),
+            (unsigned long)atomic_load_explicit(&g_al_accepts[1], memory_order_relaxed),
+            (unsigned long)atomic_load_explicit(&g_al_accepts[2], memory_order_relaxed),
+            (unsigned long)atomic_load_explicit(&g_al_accepts[3], memory_order_relaxed));
     }
   }
 
@@ -914,14 +1068,33 @@ constdiag_done:;
 
   const uint64_t btim_t_dec = btim_on ? btim_now() : 0;
   if (nof_tasks > 0) {
-    task_ans_t ans;
-    init_task_ans(&ans, nof_tasks);
-    for (int i = 0; i < nof_tasks; i++) {
-      cand_task[i].ans = &ans;
-      task_t t = {.func = nr_pdcch_blind_cand_worker, .args = &cand_task[i]};
-      pushTpool(&get_nrUE_params()->Tpool, t);
+    if (serial_candidates) {
+      /* ALREADY off the PHY receive thread, so there is nothing to protect by fanning out -- and
+       * fanning out here actively HURT. MEASURED, same work, same candidate count (38), same
+       * binary, only the calling thread differing:
+       *     BTIM decode   in-line on the RT thread : 18.4 us
+       *     BTIM decode   on a scan consumer       : 271.1 us   (15x)
+       * The consumer runs at priority 50 and then BLOCKS in join_task_ans() behind whatever else
+       * the shared pool is serving, so the fan-out buys parallelism and pays for it in queueing.
+       * At 363.5 us total per occasion against occasions arriving every 500 us, one consumer went
+       * marginal and the ring evicted up to 29562 occasions per run.
+       *
+       * Running them serially here costs honest CPU instead of scheduling luck. The whole machine
+       * is at ~1.5 of 12 cores, so there is no throughput reason to fan out -- only a latency one,
+       * and latency is exactly what the deferral already bought. */
+      for (int i = 0; i < nof_tasks; i++) {
+        nr_pdcch_blind_cand_worker_serial(&cand_task[i]);
+      }
+    } else {
+      task_ans_t ans;
+      init_task_ans(&ans, nof_tasks);
+      for (int i = 0; i < nof_tasks; i++) {
+        cand_task[i].ans = &ans;
+        task_t t = {.func = nr_pdcch_blind_cand_worker, .args = &cand_task[i]};
+        pushTpool(&get_nrUE_params()->Tpool, t);
+      }
+      join_task_ans(&ans);
     }
-    join_task_ans(&ans);
   }
   btim_add(BTIM_DECODE, btim_t_dec);
 
@@ -938,6 +1111,14 @@ constdiag_done:;
       continue;
     }
     g_accepts++;
+    {
+      /* Feeds the adaptive ladder above. Counted per AGGREGATION LEVEL of the candidate that
+       * produced the accept, which is the quantity the allocation needs -- not per candidate index,
+       * which changes meaning as the allocation itself changes. */
+      const int Lc = cand_task[ti].L;
+      const int li = (Lc == 1) ? 0 : (Lc == 2) ? 1 : (Lc == 4) ? 2 : 3;
+      atomic_fetch_add_explicit(&g_al_accepts[li], 1, memory_order_relaxed);
+    }
     /* ---- Per-format resolution, hoisted here because everything below -- the DCIGT probe, the
      * PDSCH allocation, the TBS -- depends on it. THREE quantities differ between DCI 1_1 and DCI
      * 1_0 and each is silently wrong rather than loudly wrong if mixed up:
@@ -1142,6 +1323,24 @@ constdiag_done:;
       job.harq_pid_tag  = (uint32_t)(NR_PDCCH_BLIND_DATA_AIDED_TAG_BASE + out.harq_pid);
       job.want_data     = want_data;
       nr_pdsch_passive_queue_enqueue(&job);
+      continue;
+    }
+
+    /* ---- Nothing below this point can be USED once the per-occasion decode cap is reached.
+     * MEASURED: BTIM reports chest[n=61..2147 mean~100us] on runs configured with
+     * sources = "pdsch_data", where want_dmrs is FALSE and the estimate therefore has no consumer
+     * at all. The cause is the cap: the fast enqueue path above requires
+     * decodes_this_occasion < pdsch_max_per_slot, so once an occasion has queued its 16 grants every
+     * FURTHER accepted candidate fell through to here, paid a full-slot FEP plus
+     * nr_pdsch_channel_estimation (~100us EACH, on the PHY receive thread), and then hit the same
+     * cap again at the decode below and threw the result away.
+     *
+     * That cost scales with the ACCEPT rate, i.e. with offered load, which is exactly the wrong
+     * direction: it is largest in the regime where receive-thread duty is already at the ~18 % PBCH
+     * lock threshold. Bail out before the expensive work instead. `want_dmrs` still gets its
+     * estimate because the DM-RS CFR tap is not subject to the decode cap. */
+    if (!want_dmrs && want_decode && decodes_this_occasion >= cfg->pdsch_max_per_slot) {
+      g_dec_over_cap++;
       continue;
     }
 
@@ -1361,11 +1560,17 @@ constdiag_done:;
   }
 
   if (g_occasions_run % NR_PDCCH_BLIND_SUMMARY_PERIOD_OCC == 0) {
+    /* scanq is all-zero when the scan runs in-line, which is what distinguishes "deferral off" from
+     * "deferral on and keeping up" in a log without needing a second line. */
+    nr_pdcch_passive_queue_stats_t scanq;
+    memset(&scanq, 0, sizeof(scanq));
+    nr_pdcch_passive_queue_get_stats(&scanq);
     LOG_I(PHY,
          "SENSING: blind PDCCH monitor summary: occasions=%lu candidates=%lu accepts=%lu "
          "dci10[accepts=%lu C=%lu TC=%lu SI=%lu RA=%lu P=%lu] "
          "held[energy=%lu persist=%lu snr=%lu mismatch=%lu] efloor=%.2f cfr_submits=%lu "
-         "pdsch_decode[try=%lu crc_ok=%lu (%.1f%%) skip_rv=%lu unsup=%lu data_submits=%lu] "
+         "pdsch_decode[try=%lu crc_ok=%lu (%.1f%%) skip_rv=%lu unsup=%lu over_cap=%lu data_submits=%lu] "
+         "scanq[queued=%lu done=%lu drop_full=%lu drop_stale=%lu maxlag=%lu] "
          "last_reject=\"%s\" last_reject_rnti=0x%x\n",
          (unsigned long)g_occasions_run, (unsigned long)g_candidates_run, (unsigned long)g_accepts,
          (unsigned long)g_accepts_10,
@@ -1380,7 +1585,10 @@ constdiag_done:;
          (unsigned long)g_cfr_submits,
          (unsigned long)g_dec_try, (unsigned long)g_dec_ok,
          g_dec_try ? (100.0 * (double)g_dec_ok / (double)g_dec_try) : 0.0,
-         (unsigned long)g_dec_skip_rv, (unsigned long)g_dec_unsup, (unsigned long)g_data_submits,
+         (unsigned long)g_dec_skip_rv, (unsigned long)g_dec_unsup, (unsigned long)g_dec_over_cap,
+         (unsigned long)g_data_submits,
+         (unsigned long)scanq.queued, (unsigned long)scanq.processed, (unsigned long)scanq.dropped_full,
+         (unsigned long)scanq.dropped_stale, (unsigned long)scanq.max_lag_slots,
          g_last_reject_reason ? g_last_reject_reason : "(none yet)",
          g_last_reject_rnti);
   }
