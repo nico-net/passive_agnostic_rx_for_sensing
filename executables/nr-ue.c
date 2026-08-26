@@ -203,6 +203,9 @@ typedef struct {
   int rx_offset;
 } syncData_t;
 
+extern _Atomic int nr_ue_cfo_resync_request; // set by the CFO trim loop (phy_procedures_nr_ue.c)
+extern int         nr_ue_cfo_resync_hz;
+
 static void UE_synch(void *arg) {
   syncData_t *syncD = (syncData_t *)arg;
   PHY_VARS_NR_UE *UE = syncD->UE;
@@ -1567,8 +1570,14 @@ void *UE_thread(void *arg)
             static int s_reinits;
             static int s_reinit_cap = -1;
             if (s_reinit_cap < 0) {
+              /* DEFAULT NOW 4, was 0. The open question that kept this off -- whether PDSCH
+               * decoding SURVIVES a re-init -- was answered 2026-08-26 at ~160 grants/s, where CRC
+               * is a stable 91 % and a post-recovery freeze would be unambiguous: 4/4 recovered runs
+               * kept decoding (crc_ok grew 749->28547, 833->2447, 4168->7683, 739->1782), and dwell
+               * went from active_s=8 (run dies at the stall) to 50-66 s. Set 0 to restore exit-on-
+               * stall. */
               const char *e = getenv("ISAC_RF_STALL_MAX_REINIT");
-              s_reinit_cap = e ? atoi(e) : 0;
+              s_reinit_cap = e ? atoi(e) : 4;
             }
             if (s_reinits < s_reinit_cap && nrue_ru_reinit() == 0) {
               s_reinits++;
@@ -1593,6 +1602,53 @@ void *UE_thread(void *arg)
           s_bad = 0;
         }
       }
+    }
+
+    /* ---- CFO TRIM: retune + clean re-acquisition, requested by the trim loop in pbch_process().
+     * Done HERE because this scope owns stream_status / shiftForNextFrame / the rebase flag, which
+     * an in-place retune from the PBCH path leaves stale -- measured as a run dying at active_s=4
+     * immediately after an otherwise CORRECT correction (GT_r4, proposal -14968 vs a true -14390).
+     * Re-acquiring with the radio already on the corrected frequency means the fresh acquisition
+     * measures a near-zero offset, which is the state a healthy run starts from anyway. */
+    if (atomic_load_explicit(&nr_ue_cfo_resync_request, memory_order_acquire)) {
+      atomic_store_explicit(&nr_ue_cfo_resync_request, 0, memory_order_relaxed);
+      uint64_t dl_carrier = 0, ul_carrier = 0;
+      nr_get_carrier_frequencies(UE, &dl_carrier, &ul_carrier);
+      /* DELIVERY VIA FULL DEVICE RE-INIT, not a bare retune.
+       * MEASURED 2026-08-26: retuning under a running stream and clearing is_synchronized produced
+       * CORRECT corrections (-13677->-14310, -13051->-14293, -15723->-14312, all within ~100 Hz of
+       * the true -14390) and the receiver never came back -- 3/3 runs died at active_s=4. The
+       * lighter path does not recover on this hardware.
+       * The stall-recovery path DOES: nrue_ru_reinit() tears the device down and re-opens it, and
+       * 4/4 runs resumed decoding afterwards (grew=YES, one going 749 -> 28547 crc_ok). So the
+       * correction is delivered the way that is already proven to survive on this X410, rather than
+       * the way that is cheaper. */
+      LOG_W(PHY, "SENSING: CFOTRK retuning %d -> %d Hz and re-initialising the device\n",
+            UE->common_vars.freq_offset, nr_ue_cfo_resync_hz);
+      nrue_ru_set_freq(UE, ul_carrier, dl_carrier, nr_ue_cfo_resync_hz);
+      UE->common_vars.freq_offset = nr_ue_cfo_resync_hz;
+      /* SEED THE RE-ACQUISITION WITH THE CORRECTION WE JUST APPLIED.
+       * Without this the fix silently undoes itself. MEASURED (F2_r7): acquisition #1 gave -20234,
+       * the loop correctly retuned to -15066, and the re-acquisition then measured -1176 -- the
+       * RESIDUAL left on an already-corrected radio -- and UE_synch applied that -1176 as the TOTAL
+       * via its unconditional nrue_ru_set_freq(). The radio went from nearly right back to ~14 kHz
+       * off and the run decoded 0.0 %, with the trim loop afterwards proposing nonsense (-844/-691/
+       * -741) because common_vars.freq_offset no longer described the hardware.
+       * nr_initial_sync() seeds its accumulator from ue->initial_fo (`ssbInfo->freqOffset =
+       * ue->initial_fo`), so setting it here makes the next acquisition ACCUMULATE onto the applied
+       * correction (-15066 + -1176 = -16242) instead of replacing it. That accumulator is known to
+       * converge: seeding +6000 Hz took it back to within 34-276 Hz on 3/3 runs. */
+      if (nrue_ru_reinit() != 0) {
+        LOG_E(PHY, "SENSING: CFOTRK device re-init FAILED; the offset is set but the stream may not recover\n");
+      }
+      UE->is_synchronized = 0;
+      stream_status = STREAM_STATUS_UNSYNC;
+      UE->max_pos_acc = 0;
+      UE->max_pos_iir = 0;
+      shiftForNextFrame = 0;
+      atomic_store_explicit(&nr_ue_pending_rebase_valid, 0, memory_order_relaxed);
+      decoded_frame_rx = MAX_FRAME_NUMBER - 1;
+      trashed_frames = 0;
     }
     if (get_nrUE_params()->num_dl_actors > 0) {
       pushNotifiedFIFO(&UE->dl_actors[curMsg.proc.nr_slot_rx % get_nrUE_params()->num_dl_actors].fifo, newRx);
@@ -1661,7 +1717,33 @@ void init_NR_UE(int nb_inst, char *uecap_file, char *reconfig_file, char *rbconf
 void init_NR_UE_threads(PHY_VARS_NR_UE *UE) {
   char thread_name[16];
   sprintf(thread_name, "UEthread_%d", UE->Mod_id);
-  threadCreate(&UE->main_thread, UE_thread, (void *)UE, thread_name, -1, OAI_PRIORITY_RT_MAX);
+  /* ---- PIN THE PHY RECEIVE THREAD (ISAC_UE_RT_CORE, default -1 = unpinned, as before) ---------
+   * This thread carries the hard real-time deadline: miss it and the timing loop loses PBCH lock,
+   * which is the measured mechanism behind the grant-rate-driven PDSCH CRC collapse
+   * (BRANCH_IMBALANCE_HARQ_PLAN.md section 12 -- 8/8 healthy at 165 grants/s, 17/32 dead at ~1500).
+   *
+   * It has always been created UNPINNED. RT priority alone does not protect it: unpinned, it is
+   * free to be migrated onto whichever core the scheduler likes, including the ones already
+   * saturated by --thread-pool (0,1,4-7), the PDSCH decode consumers (9-13) and the blind-PDCCH
+   * scan consumer. Every migration also costs its working set.
+   *
+   * MEASURED on this host: cores 2-3 are ISOLATED for exactly this purpose --
+   * `isolcpus=domain,managed_irq,2-3` and `nohz_full=2-3`, so no ordinary task is scheduled there
+   * and the timer tick is off -- and nothing was using them. An explicitly pinned thread still runs
+   * on an isolated core; that is what isolation is for.
+   *
+   * Left OFF by default because the right core is host-specific and pinning to a BUSY core would be
+   * worse than not pinning at all. Set ISAC_UE_RT_CORE to an isolated core (2 or 3 here) to opt in;
+   * check /sys/devices/system/cpu/isolated before choosing. */
+  int rt_core = -1;
+  {
+    const char *e = getenv("ISAC_UE_RT_CORE");
+    if (e != NULL) {
+      rt_core = atoi(e);
+      LOG_I(PHY, "SENSING: pinning the PHY receive thread to core %d (ISAC_UE_RT_CORE)\n", rt_core);
+    }
+  }
+  threadCreate(&UE->main_thread, UE_thread, (void *)UE, thread_name, rt_core, OAI_PRIORITY_RT_MAX);
   if (!IS_SOFTMODEM_NOSTATS) {
     sprintf(thread_name, "L1_UE_stats_%d", UE->Mod_id);
     threadCreate(&UE->stat_thread, nrL1_UE_stats_thread, UE, thread_name, -1, OAI_PRIORITY_RT_LOW);

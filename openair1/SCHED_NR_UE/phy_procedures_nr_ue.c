@@ -57,6 +57,12 @@ extern _Atomic long nr_ue_diag_producer_wall_ns;
 #include "intertask_interface.h"
 #include "T.h"
 #include "instrumentation.h"
+#include "executables/nr-ue-ru.h" // nrue_ru_set_freq() -- CFO trim loop, see CFOTRK below
+/* Set by the CFO trim loop, consumed by the UE thread in nr-ue.c: the corrected total offset to
+ * retune to, plus a one-shot request flag. Split this way because only the UE thread owns the
+ * stream/timing state a clean re-acquisition has to reset. */
+_Atomic int nr_ue_cfo_resync_request = 0;
+int         nr_ue_cfo_resync_hz = 0;
 
 static const unsigned int gain_table[31] = {100,  112,  126,  141,  158,  178,  200,  224,  251, 282,  316,
                                             359,  398,  447,  501,  562,  631,  708,  794,  891, 1000, 1122,
@@ -1490,6 +1496,115 @@ static int pbch_process(PHY_VARS_NR_UE *UE,
           LOG_I(PHY, "TSYNC_CFO_PBCH utc_ns=%lld frame=%d slot=%d ssb=%d pbch_ok=%d cfo_hz=%.3f\n",
                 (long long)ts.tv_sec * 1000000000LL + ts.tv_nsec,
                 proc->frame_rx, proc->nr_slot_rx, *ssbIndex, (pbchSuccess == 0) ? 1 : 0, cfo_hz);
+        }
+      }
+
+      /* ---- CFO TRIM LOOP (ISAC_CFO_TRACK_HZ = threshold in Hz, 0 = off) -------------------------
+       * ROOT CAUSE it addresses (measured 2026-08-26, 21 runs, zero exceptions): the carrier
+       * frequency offset is estimated ONCE at acquisition and never revisited. |err| < 600 Hz always
+       * decodes (14/14, 59-91 %); |err| >= 600 Hz always decodes EXACTLY 0.0 % (7/7). A positive
+       * control (no FO compensation, ~13.9 kHz left uncorrected) gave 0.0 % on 3/3.
+       *
+       * WHY NOT JUST --cont-fo-comp. That flag already gates a PI controller on this same estimator
+       * a few hundred lines below -- but it ALSO disables the acquisition radio retune
+       * (`if (!cont_fo_comp) nrue_ru_set_freq(...)` in UE_synch), replacing it with a digital
+       * de-rotation in nr_slot_fep. On this rig that trade is fatal: measured 2026-08-26, the flag
+       * gave 0/2 runs synced against 3/3 without it, and CLAUDE.md's Phase 0 note already recorded
+       * that neither FO flag tracks at sensing-grade rate. So this trims the offset the radio is
+       * ACTUALLY tuned to, using the mechanism that demonstrably works, instead of swapping it for
+       * one that does not.
+       *
+       * NOT gated on pbchSuccess. The PI loop below is (`cont_fo_comp && pbchSuccess == 0`), which
+       * deadlocks exactly when it is needed most: a badly mis-tuned receiver may never decode PBCH,
+       * so the correction that would rescue it never runs. The audit block directly above proves the
+       * escape -- pbch_ch_est_sym1/sym3 are populated REGARDLESS of decode outcome. Same
+       * "only fires after success" trap this file already documents for timing correction.
+       *
+       * TWO STAGES ON PURPOSE. ISAC_CFO_TRACK_HZ alone only MEASURES and logs what it would do;
+       * ISAC_CFO_TRACK_APPLY=1 is required before it retunes anything. The sign convention between
+       * this estimator and nrue_ru_set_freq() is not something to assume -- and today three
+       * plausible fixes (timing offset, accumulator double-count, acquisition consistency) each died
+       * on contact with data, so a loop does not get to touch a working radio unvalidated. */
+      {
+        static int    s_trk_hz = -1;
+        static int    s_trk_spread = 500;
+        static int    s_trk_apply = 0;
+        static double s_ema = 0.0;
+        static int    s_n = 0;
+#define TRK_HIST 5
+        static double s_hist[TRK_HIST];
+        static int    s_streak = 0;
+        if (s_trk_hz < 0) {
+          const char *e = getenv("ISAC_CFO_TRACK_HZ");
+          s_trk_hz = (e != NULL) ? atoi(e) : 0;
+          const char *v = getenv("ISAC_CFO_TRACK_SPREAD_HZ");
+          if (v != NULL) {
+            s_trk_spread = atoi(v);
+          }
+          s_trk_apply = (getenv("ISAC_CFO_TRACK_APPLY") != NULL) ? 1 : 0;
+        }
+        if (s_trk_hz > 0) {
+          const double res_hz = nr_ue_pbch_freq_offset(&UE->frame_parms, pbch_ch_est_sym1, pbch_ch_est_sym3);
+          s_ema = (s_n == 0) ? res_hz : (0.75 * s_ema + 0.25 * res_hz);
+          s_n++;
+          /* Evaluate once per 50 SSBs (~1 s). A retune disturbs samples in flight, so it must stay
+           * rare, and the EMA needs samples to mean anything. */
+          if (s_n >= 8 && (s_n % 50) == 0) {
+            if (fabs(s_ema) > (double)s_trk_hz) {
+              /* ---- VALIDITY GATE -------------------------------------------------------------
+               * The estimate is EXACT while the receiver holds lock (measured: +6055 vs a true
+               * +6055 Hz error, -5455 vs -5453) but produces LATE SPURIOUS readings otherwise. On
+               * TK_r6 -- a HEALTHY 88.3 % run whose acquisition was 40 Hz from perfect -- a bare
+               * threshold proposed retuning by 4.2 kHz, which would have destroyed a working
+               * capture. So a threshold alone is not safe to act on.
+               *
+               * The two populations separate on ONSET and SPREAD, measured:
+               *   genuine : fires from the first opportunity (n=50), 44 times, all within +/-100 Hz
+               *   spurious: fires only after ~1085 SSBs, 3 times, with a 3082 Hz JUMP between the
+               *             1st and 2nd reading (-1093 -> -4175, and -1250 -> -4228 on TK_r4)
+               * Requiring 5 CONSECUTIVE above-threshold windows whose spread is under
+               * ISAC_CFO_TRACK_SPREAD_HZ accepts the genuine case and rejects both spurious ones.
+               *
+               * NOTE the spread must include the ONSET reading: the LAST three spurious values
+               * (-4218/-4275/-4338) agree to within 120 Hz and would pass a short window. It is the
+               * jump from the first reading that exposes them. Hence 5, not 3. */
+              s_hist[s_streak % TRK_HIST] = s_ema;
+              s_streak++;
+              double mn = s_hist[0], mx = s_hist[0];
+              const int have = (s_streak < TRK_HIST) ? s_streak : TRK_HIST;
+              for (int q = 0; q < have; q++) {
+                if (s_hist[q] < mn) mn = s_hist[q];
+                if (s_hist[q] > mx) mx = s_hist[q];
+              }
+              const double spread = mx - mn;
+              const bool stable = (s_streak >= TRK_HIST) && (spread < (double)s_trk_spread);
+              const double cur = (double)UE->common_vars.freq_offset;
+              const double proposed = cur + s_ema;
+              LOG_W(PHY,
+                    "SENSING: CFOTRK ema=%.1f Hz streak=%d spread=%.0f Hz stable=%s current=%.0f "
+                    "proposed=%.0f thr=%d %s\n",
+                    s_ema, s_streak, spread, stable ? "yes" : "no", cur, proposed, s_trk_hz,
+                    (stable && s_trk_apply) ? "APPLYING" : "(no action)");
+              if (stable && s_trk_apply) {
+                /* REQUEST a re-acquisition rather than retuning under a running stream.
+                 * MEASURED 2026-08-26 (GT_r4): retuning in place produced a correct proposal
+                 * (-14968 against a true -14390, from a 3599 Hz error) and the run then died at
+                 * active_s=4 -- the LO moved under samples already in flight. The stall-recovery
+                 * path shows the receiver survives a FULL device re-init and resumes decoding
+                 * (4/4, grew=YES), so a clean re-acquisition is demonstrably the safer delivery.
+                 * The retune itself is done by the UE thread, which owns stream_status,
+                 * shiftForNextFrame and the rebase flag -- state this function cannot reach, and
+                 * leaving it stale is what makes an in-place retune unrecoverable. */
+                nr_ue_cfo_resync_hz = (int)lround(proposed);
+                atomic_store_explicit(&nr_ue_cfo_resync_request, 1, memory_order_release);
+                s_ema = 0.0;
+                s_n = 0;
+                s_streak = 0;
+              }
+            } else {
+              s_streak = 0; // dropped below threshold: the run of agreeing windows is broken
+            }
+          }
         }
       }
 
