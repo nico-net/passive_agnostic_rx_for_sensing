@@ -1181,7 +1181,14 @@ constdiag_done:;
         static int s_uldcigt = -1;
         if (s_uldcigt < 0)
           s_uldcigt = (getenv("ISAC_PDCCH_ULDCIGT") != NULL) ? 1 : 0;
-        if (s_uldcigt && u->crc_rnti >= cfg->rnti_min && u->crc_rnti <= cfg->rnti_max) {
+        /* Print ACCEPTS plus every candidate whose FULL 24-bit CRC landed in the plausible RNTI
+         * range -- `rnti` is written only after that check passes, so a non-zero value IS the
+         * check. Gating on crc_rnti instead was wrong and expensive: crc_rnti is the low 16 bits of
+         * a 24-bit CRC, so a pure-noise decode with a non-zero high byte still shows a plausible
+         * looking value, and the probe fired on essentially every candidate -- 54,998 lines and
+         * 21 MB in one 150 s run. Same probe-volume trap this file already records costing 163 MB
+         * per run and causing the very timing runaway it was added to diagnose. */
+        if (s_uldcigt && (cand_task[ti].ok || u->rnti != 0)) {
           LOG_I(PHY,
                 "SENSING: ULDCIGT %d.%d cce=%d al=%u len=%u raw=0x%016llx crc_rnti=0x%x ok=%d "
                 "mcs=%u rv=%u ndi=%u hid=%u tpc=%u dai=%u ant=%u sri_prec=%u srs=%u csi=%u "
