@@ -515,7 +515,14 @@ static bool passive_ldpc_decode(PHY_VARS_NR_UE *ue,
     static int s_sd = -1;
     if (s_sd < 0)
       s_sd = (getenv("ISAC_PDSCH_TBPARM") != NULL) ? 1 : 0;
-    if (s_sd)
+    /* RATE-LIMITED (2026-08-25). This fired on EVERY decode: 30204 lines / 16 MB on a 48 s run,
+     * and it shares ISAC_PDSCH_TBPARM with CHESTDIAG, which is capped at 12 -- so wanting the
+     * 12 per-branch SNR samples used to cost the full SEGDIAG flood. The handover's 27.3 records an
+     * instrument firing every occasion costing 163 MB/run and CAUSING the timing runaway it was
+     * added to diagnose. 1-in-500 gives ~60 samples/run, and nr_pdsch_passive_parmset_dump() already
+     * records every DISTINCT parameter tuple with counts, so nothing is lost by sampling. */
+    static __thread unsigned long s_sd_n = 0;
+    if (s_sd && (s_sd_n++ % 500) == 0)
       LOG_I(PHY,
             "SENSING: SEGDIAG mcs=%u BG=%u A=%u G=%u C=%u K=%u Z=%u F=%u E=%u E2=%u frE2=%u R=%u R2=%u "
             "Qm=%u nl=%u rv=%u tbslbrm=%u nb_rb=%d llrLen=%d\n",
