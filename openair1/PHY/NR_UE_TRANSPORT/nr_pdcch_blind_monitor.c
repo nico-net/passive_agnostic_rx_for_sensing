@@ -252,6 +252,104 @@ static int parse_dci10(const char* s)
   return 1;
 }
 
+// ---------------------------------------------------------------------------------------------
+// UPLINK config (DCI format 0_1). Split across several keys rather than one very long one, matching
+// the DL style: each key is independently parseable and independently wrong, so a malformed one
+// disables only its own group.
+// ---------------------------------------------------------------------------------------------
+
+// "scan[:length_override]" -- scan 0 = off (default), 1 = on. length_override is the live-verified
+// payload width; 0 = derive from the field widths. SET IT (see the header's UL section).
+static int parse_dci01(const char* s)
+{
+  g_cfg.dci01_length_override = 0;
+  const int n = sscanf(s, "%d:%d", &g_cfg.dci01_scan, &g_cfg.dci01_length_override);
+  if (n < 1 || g_cfg.dci01_scan < 0 || g_cfg.dci01_scan > 1) {
+    return 0;
+  }
+  return 1;
+}
+
+// "bwp_start:bwp_size" -- the UL BWP. bwp_size is also the RIV reference for resource allocation
+// type 1, which is the only type this deployment uses.
+static int parse_ul_bwp(const char* s)
+{
+  int start = 0, size = 0;
+  if (sscanf(s, "%d:%d", &start, &size) != 2 || start < 0 || size < 1 || size > 275) {
+    return 0;
+  }
+  g_cfg.ul.bwp_start = (uint16_t)start;
+  g_cfg.ul.bwp_size  = (uint16_t)size;
+  return 1;
+}
+
+// "S:L:k2[:map],..." -- the pusch-TimeDomainAllocationList. NOTE the extra k2 field compared with
+// the DL tda key: k2 is what makes an UL grant actionable at all (the PUSCH is k2 slots after the
+// DCI) and it exists nowhere in the payload, so it has to come from here.
+static int parse_ul_tda(const char* s)
+{
+  int n = 0;
+  const char* p = s;
+  while (*p != '\0' && n < 16) {
+    int start = 0, len = 0, k2 = 0, map = 0;
+    const int got = sscanf(p, "%d:%d:%d:%d", &start, &len, &k2, &map);
+    if (got < 3) {
+      return 0;
+    }
+    if (start < 0 || start > 13 || len < 1 || start + len > 14 || map < 0 || map > 1 || k2 < 0 || k2 > 32) {
+      return 0;
+    }
+    g_cfg.ul.tda_start[n]   = (uint8_t)start;
+    g_cfg.ul.tda_length[n]  = (uint8_t)len;
+    g_cfg.ul.tda_k2[n]      = (uint8_t)k2;
+    g_cfg.ul.tda_mapping[n] = (uint8_t)map;
+    n++;
+    const char* comma = strchr(p, ',');
+    if (comma == NULL) {
+      break;
+    }
+    p = comma + 1;
+  }
+  g_cfg.ul.tda_count = n;
+  return n > 0;
+}
+
+// "config_type:add_pos:max_length" -- UL DM-RS. config_type 0 = type1, 1 = type2.
+static int parse_ul_dmrs(const char* s)
+{
+  return sscanf(s, "%d:%d:%d", &g_cfg.ul.dmrs_config_type, &g_cfg.ul.dmrs_add_pos,
+                &g_cfg.ul.dmrs_max_length) == 3;
+}
+
+// "transform_precoding:mcs_table:data_scrambling_id:ul_dmrs_scrambling_id:phy_cell_id"
+// The two scrambling ids take <0 to mean "use the PCI", which is the spec default and what this
+// deployment does (the gNB dumps pusch_dmrs_scrambling_id=2 = nid_pusch = PCI).
+static int parse_ul_misc(const char* s)
+{
+  int pci = 0;
+  const int n = sscanf(s, "%d:%d:%d:%d:%d", &g_cfg.ul.transform_precoding, &g_cfg.ul.mcs_table,
+                       &g_cfg.ul.data_scrambling_id, &g_cfg.ul.ul_dmrs_scrambling_id, &pci);
+  if (n < 5 || pci < 0 || pci > 1007) {
+    return 0;
+  }
+  g_cfg.ul.phy_cell_id = (uint16_t)pci;
+  return 1;
+}
+
+// 16 ints, in fill_dci_pdu_rel15()'s NR_UL_DCI_FORMAT_0_1 PACKER order; -1 = the documented default.
+// time_domain_assignment has NO entry, for the same reason it has none on the DL side: it is
+// DERIVED from the TDRA list count rather than being a second independently-wrong knob.
+static int parse_ul_dci_bits(const char* s)
+{
+  return sscanf(s, "%d:%d:%d:%d:%d:%d:%d:%d:%d:%d:%d:%d:%d:%d:%d:%d",
+                &g_cfg.ul.carrier_indicator_bits, &g_cfg.ul.ul_sul_bits, &g_cfg.ul.bwp_indicator_bits,
+                &g_cfg.ul.freq_hopping_bits, &g_cfg.ul.harq_pid_bits, &g_cfg.ul.dai1_bits,
+                &g_cfg.ul.dai2_bits, &g_cfg.ul.sri_bits, &g_cfg.ul.precoding_info_bits,
+                &g_cfg.ul.antenna_ports_bits, &g_cfg.ul.srs_request_bits, &g_cfg.ul.csi_request_bits,
+                &g_cfg.ul.cbg_bits, &g_cfg.ul.ptrs_dmrs_bits, &g_cfg.ul.beta_offset_bits,
+                &g_cfg.ul.dmrs_seq_init_bits) == 16;
+}
+
 // Same syntax as pdcch_blind_monitor_tda, for the pdsch-ConfigCommon list format 1_0 uses under
 // every RNTI class except C-RNTI-in-a-UE-specific-search-space (TS 38.214 Table 5.1.2.1.1-1).
 static int parse_tda_common(const char* s)
@@ -407,6 +505,31 @@ void nr_pdcch_blind_monitor_init(void)
   g_cfg.scan_thread            = 0;  // in-line on the PHY receive thread, as before
   g_cfg.scan_queue_depth       = 0;
   g_cfg.scan_thread_core       = -1;
+  /* UL defaults: every width at -1 = the documented assumption, both identities at -1 = fall back
+   * to the PCI, scan off. With dci01_scan == 0 none of this is read, so an unconfigured deployment
+   * is bit-identical to before. */
+  g_cfg.dci01_scan               = 0;
+  g_cfg.dci01_length_override    = 0;
+  g_cfg.ul.dmrs_add_pos          = -1;
+  g_cfg.ul.dmrs_max_length       = 0;
+  g_cfg.ul.data_scrambling_id    = -1;
+  g_cfg.ul.ul_dmrs_scrambling_id = -1;
+  g_cfg.ul.carrier_indicator_bits = -1;
+  g_cfg.ul.ul_sul_bits            = -1;
+  g_cfg.ul.bwp_indicator_bits     = -1;
+  g_cfg.ul.freq_hopping_bits      = -1;
+  g_cfg.ul.harq_pid_bits          = -1;
+  g_cfg.ul.dai1_bits              = -1;
+  g_cfg.ul.dai2_bits              = -1;
+  g_cfg.ul.sri_bits               = -1;
+  g_cfg.ul.precoding_info_bits    = -1;
+  g_cfg.ul.antenna_ports_bits     = -1;
+  g_cfg.ul.srs_request_bits       = -1;
+  g_cfg.ul.csi_request_bits       = -1;
+  g_cfg.ul.cbg_bits               = -1;
+  g_cfg.ul.ptrs_dmrs_bits         = -1;
+  g_cfg.ul.beta_offset_bits       = -1;
+  g_cfg.ul.dmrs_seq_init_bits     = -1;
 
   char*     p_coreset = NULL;
   char*     p_ss       = NULL;
@@ -420,6 +543,12 @@ void nr_pdcch_blind_monitor_init(void)
   char*     p_dci_bits   = NULL;
   char*     p_dci10      = NULL;
   char*     p_tda_common = NULL;
+  char*     p_dci01      = NULL;
+  char*     p_ul_bwp     = NULL;
+  char*     p_ul_tda     = NULL;
+  char*     p_ul_dmrs    = NULL;
+  char*     p_ul_misc    = NULL;
+  char*     p_ul_dci_bits = NULL;
   paramdef_t params[] = {
       {"pdcch_blind_monitor_coreset",
         "Dedicated CORESET geometry for blind PDCCH monitoring; "
@@ -473,6 +602,28 @@ void nr_pdcch_blind_monitor_init(void)
         "pdcch_blind_monitor_tda, which is correct when the gNB derives both from the same "
         "pdsch-ConfigCommon",
         0, .strptr = &p_tda_common, .defstrval = "", TYPE_STRING, 0},
+      {"pdcch_blind_monitor_dci01",
+        "UPLINK DCI format 0_1 scanning; scan[:length_override] (scan 0=off default, 1=on). "
+        "length_override is the live-verified payload width -- SET IT: 0_1's per-field widths are "
+        "RRC-derived and this deployment's UL RRC config is not readable off the air",
+        0, .strptr = &p_dci01, .defstrval = "", TYPE_STRING, 0},
+      {"pdcch_blind_monitor_ul_bwp", "UL BWP for DCI 0_1 sizing; bwp_start:bwp_size", 0,
+        .strptr = &p_ul_bwp, .defstrval = "", TYPE_STRING, 0},
+      {"pdcch_blind_monitor_ul_tda",
+        "pusch-TimeDomainAllocationList; S:L:k2[:mapping_type],... (note the k2 field -- the PUSCH "
+        "is k2 slots after its DCI and k2 appears nowhere in the payload)",
+        0, .strptr = &p_ul_tda, .defstrval = "", TYPE_STRING, 0},
+      {"pdcch_blind_monitor_ul_dmrs", "UL DM-RS; dmrs_config_type:add_pos:max_length", 0,
+        .strptr = &p_ul_dmrs, .defstrval = "", TYPE_STRING, 0},
+      {"pdcch_blind_monitor_ul_misc",
+        "transform_precoding:mcs_table:data_scrambling_id:ul_dmrs_scrambling_id:phy_cell_id "
+        "(scrambling ids <0 = use the PCI)",
+        0, .strptr = &p_ul_misc, .defstrval = "", TYPE_STRING, 0},
+      {"pdcch_blind_monitor_ul_dci_bits",
+        "DCI 0_1 per-field widths in packer order, -1 = default; "
+        "carrier:ulsul:bwp:hopping:harq:dai1:dai2:sri:precoding:antports:srsreq:csireq:cbg:ptrs:"
+        "beta:dmrsseq",
+        0, .strptr = &p_ul_dci_bits, .defstrval = "", TYPE_STRING, 0},
       {"pdcch_blind_monitor_scan_thread",
         "Defer the blind-PDCCH scan (FEP/LLR/demap/candidate decode) off the PHY receive thread; "
         "n_consumers[:queue_depth[:core]]. 0/absent = in-line. Measured: the scan is 69-102us per "
@@ -528,6 +679,35 @@ void nr_pdcch_blind_monitor_init(void)
   if (p_dci10 != NULL && p_dci10[0] != '\0' && !parse_dci10(p_dci10)) {
     g_cfg.dci10_scan = 0;
     LOG_E(PHY, "SENSING: malformed pdcch_blind_monitor_dci10 '%s'; format 1_0 scanning disabled\n", p_dci10);
+  }
+  if (p_dci01 != NULL && p_dci01[0] != '\0' && !parse_dci01(p_dci01)) {
+    g_cfg.dci01_scan = 0;
+    LOG_E(PHY, "SENSING: malformed pdcch_blind_monitor_dci01 '%s'; UL DCI 0_1 scanning disabled\n", p_dci01);
+  }
+  if (p_ul_bwp != NULL && p_ul_bwp[0] != '\0' && !parse_ul_bwp(p_ul_bwp)) {
+    g_cfg.dci01_scan = 0;
+    LOG_E(PHY, "SENSING: malformed pdcch_blind_monitor_ul_bwp '%s'; UL DCI 0_1 scanning disabled\n", p_ul_bwp);
+  }
+  if (p_ul_tda != NULL && p_ul_tda[0] != '\0' && !parse_ul_tda(p_ul_tda)) {
+    g_cfg.dci01_scan = 0;
+    LOG_E(PHY, "SENSING: malformed pdcch_blind_monitor_ul_tda '%s'; UL DCI 0_1 scanning disabled\n", p_ul_tda);
+  }
+  if (p_ul_dmrs != NULL && p_ul_dmrs[0] != '\0' && !parse_ul_dmrs(p_ul_dmrs)) {
+    LOG_E(PHY, "SENSING: malformed pdcch_blind_monitor_ul_dmrs '%s'; UL DM-RS left at defaults\n", p_ul_dmrs);
+  }
+  if (p_ul_misc != NULL && p_ul_misc[0] != '\0' && !parse_ul_misc(p_ul_misc)) {
+    LOG_E(PHY, "SENSING: malformed pdcch_blind_monitor_ul_misc '%s'; UL identities left at defaults\n", p_ul_misc);
+  }
+  if (p_ul_dci_bits != NULL && p_ul_dci_bits[0] != '\0' && !parse_ul_dci_bits(p_ul_dci_bits)) {
+    LOG_E(PHY, "SENSING: malformed pdcch_blind_monitor_ul_dci_bits '%s' (need 16 ints); UL widths left "
+               "at defaults\n", p_ul_dci_bits);
+  }
+  /* An UL scan with no UL BWP cannot size a RIV and would sweep a wrong width silently -- the same
+   * class of failure the 1_0 path guards with its n_rb_riv check. */
+  if (g_cfg.dci01_scan && g_cfg.ul.bwp_size < 1) {
+    g_cfg.dci01_scan = 0;
+    LOG_E(PHY, "SENSING: pdcch_blind_monitor_dci01 is on but pdcch_blind_monitor_ul_bwp is unset; "
+               "UL DCI 0_1 scanning disabled\n");
   }
   if (p_tda_common != NULL && p_tda_common[0] != '\0' && !parse_tda_common(p_tda_common)) {
     g_cfg.extract.tda_common_count = 0;

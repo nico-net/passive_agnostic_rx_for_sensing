@@ -214,6 +214,21 @@ typedef struct {
   int dci10_sib1;        // 1 = the SI-RNTI DCIs being scanned schedule SIB1 itself, so no
                          // pdsch-ConfigCommon TDRA list can exist yet (it travels inside SIB1) and
                          // the mux-pattern default table applies instead.
+
+  // ---- UPLINK: DCI format 0_1 (2026-08-26) ------------------------------------------------
+  // UL grants ride the SAME CORESET and CCE space as the DL ones and were already being polar-
+  // decoded and thrown away at the format-indicator test. Keeping them is what makes the receiver
+  // bidirectional: each one names a PUSCH that can then be extracted from the same 4-antenna
+  // stream. Format 0_1 has its own RRC-derived width (43 bits on this cell against 1_1's 47), so
+  // unlike 0_0 -- which is size-aligned with 1_0 and therefore free -- it needs its own polar
+  // decode. Budget roughly one extra 1_0-scan's worth of CPU per candidate.
+  int dci01_scan;            // 0 = off (default, bit-identical to before), 1 = scan DCI 0_1
+  int dci01_length_override; // 0 = use nr_pdcch_blind_dci01_size(&ul). SET THIS: the formula's
+                             // defaults are a starting point, not the pinned layout -- see the UL
+                             // section of nr_pdcch_blind_monitor.h. 43 is the live-verified value
+                             // for this deployment at 273 PRB, read off the gNB's own FAPI dump.
+  nr_pdcch_blind_ul_opts_t ul; // UL BWP, pusch-TimeDomainAllocationList (k2 lives here), DM-RS,
+                               // waveform/identities and the per-field widths.
 } nr_pdcch_blind_monitor_cfg_t;
 
 #ifdef __cplusplus

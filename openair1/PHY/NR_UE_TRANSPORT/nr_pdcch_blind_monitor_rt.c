@@ -104,6 +104,12 @@ static void build_coreset_bitmap(int num_groups, uint8_t bitmap[6])
 static uint64_t    g_occasions_run  = 0;
 static uint64_t    g_candidates_run = 0;
 static int         g_constdiag_left = 20; // TEMPORARY, see CONSTDIAG below
+static uint64_t    g_ul_accepts     = 0; // DCI 0_1 accepts (UL grants recovered)
+static uint64_t    g_ul_rejects     = 0; // DCI 0_1 candidates whose CRC was in range but whose
+                                         // fields failed a plausibility check. Reported next to the
+                                         // accepts because on an UNPINNED field layout a high
+                                         // reject count is the FIRST symptom of wrong widths, and a
+                                         // bare accept count cannot show it.
 static uint64_t    g_accepts        = 0; // raw plausibility accepts (Step 1-4 of decode_and_extract),
                                          // BEFORE the noise-floor gates below -- unchanged meaning
                                          // from before 2026-07-28's gates, so old logs stay comparable
@@ -353,6 +359,12 @@ typedef struct {
      polar decoder is sized by dci_length and there is no way to share the decode. */
   uint8_t      format;  // nr_blind_dci_format_t
   const nr_pdcch_blind_dci10_ctx_t *dci10_ctx; // format 1_0 only; NULL for 1_1
+  /* UPLINK. A separate flag rather than a third value of `format`, so that no existing switch or
+     comparison over nr_blind_dci_format_t silently acquires a new reachable case -- the DL path
+     must be unable to see this task kind at all. */
+  uint8_t      ul_scan; // 1 = interpret this candidate as DCI 0_1; `format` is then meaningless
+  const nr_pdcch_blind_ul_opts_t *ul_opts;
+  nr_pdcch_blind_ul_result_t ul_out; // OUTPUT when ul_scan
   nr_pdcch_blind_result_t out; // OUTPUT
   bool         ok;             // OUTPUT
   task_ans_t  *ans;
@@ -365,7 +377,10 @@ static void nr_pdcch_blind_cand_worker_body(nr_pdcch_blind_cand_task_t *t)
 {
   int16_t tmp_e[16 * 108];
   nr_pdcch_unscrambling((c16_t *)t->e_rx, t->scrambling_rnti, (uint32_t)(t->L * 108), t->dmrs_scrambling_id, tmp_e);
-  if (t->format == NR_BLIND_DCI_FORMAT_1_0) {
+  if (t->ul_scan) {
+    t->ok = nr_pdcch_blind_decode_and_extract_01(tmp_e, t->L, t->dci_length, t->ul_opts, t->rnti_min, t->rnti_max,
+                                                 &t->ul_out);
+  } else if (t->format == NR_BLIND_DCI_FORMAT_1_0) {
     t->ok = nr_pdcch_blind_decode_and_extract_10(tmp_e, t->L, t->dci_length, t->dci10_ctx, t->rnti_min, t->rnti_max,
                                                  t->extract_opts, &t->out);
   } else {
@@ -716,6 +731,12 @@ void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_pr
    * (read-only) by every candidate task. ---- */
   const bool scan_11 = (cfg->dci10_scan != 2);
   const bool scan_10 = (cfg->dci10_scan >= 1);
+  const bool scan_01 = (cfg->dci01_scan >= 1);
+  uint16_t   dci01_length = 0;
+  if (scan_01) {
+    dci01_length = cfg->dci01_length_override > 0 ? (uint16_t)cfg->dci01_length_override
+                                                  : nr_pdcch_blind_dci01_size(&cfg->ul);
+  }
   nr_pdcch_blind_dci10_ctx_t dci10_ctx;
   memset(&dci10_ctx, 0, sizeof(dci10_ctx));
   uint16_t dci10_length = 0;
@@ -758,6 +779,30 @@ void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_pr
             (unsigned)dci10_length, (unsigned)dci10_ctx.n_rb_riv, dci10_rb_base,
             (cfg->dci10_ss_type == NR_BLIND_SS_COMMON) ? "common" : "ue-specific",
             (unsigned)dci10_ctx.rnti_class_mask, (unsigned)dci10_ctx.mux_pattern, (unsigned)dci10_ctx.sib1);
+      if (scan_01) {
+        const uint16_t derived = nr_pdcch_blind_dci01_size(&cfg->ul);
+        LOG_I(PHY,
+              "SENSING: blind PDCCH formats: 0_1=on (len=%u derived=%u ul_bwp=%u+%u tda=%d tp=%d "
+              "mcs_tbl=%d add_pos=%d)\n",
+              (unsigned)dci01_length, (unsigned)derived, (unsigned)cfg->ul.bwp_start,
+              (unsigned)cfg->ul.bwp_size, cfg->ul.tda_count, cfg->ul.transform_precoding,
+              cfg->ul.mcs_table, cfg->ul.dmrs_add_pos);
+        /* The DL path learned this the expensive way: a live-verified TOTAL length with wrong
+         * per-field widths reads every field after the frequency-domain assignment from the wrong
+         * offset, while the CRC still passes and the RNTI still looks right. Warn loudly when the
+         * override and the configured widths disagree -- the override is ground truth, so a
+         * mismatch means the widths are wrong, not the override. */
+        if (derived > 0 && dci01_length > 0 && derived != dci01_length) {
+          LOG_W(PHY,
+                "SENSING: DCI 0_1 width MISMATCH: configured field widths sum to %u but "
+                "dci01_length_override says %u. The override is ground truth, so %d bit(s) are "
+                "misassigned across the RRC-derived fields (TDA / freq-hopping / SRI / precoding / "
+                "CSI-request). Every field after the frequency-domain assignment is being read from "
+                "the wrong offset. Pin the layout with ISAC_PDCCH_ULDCIGT=1 against the gNB log "
+                "before trusting any UL grant.\n",
+                (unsigned)derived, (unsigned)dci01_length, (int)dci01_length - (int)derived);
+        }
+      }
     }
   }
   if (scan_10 && dci10_length == 0) {
@@ -1055,6 +1100,13 @@ constdiag_done:;
         cand_task[nof_tasks].dci10_ctx  = &dci10_ctx;
         nof_tasks++;
       }
+      if (scan_01 && nof_tasks < (int)(sizeof(cand_task) / sizeof(cand_task[0]))) {
+        cand_task[nof_tasks]            = base_task;
+        cand_task[nof_tasks].dci_length = dci01_length;
+        cand_task[nof_tasks].ul_scan    = 1;
+        cand_task[nof_tasks].ul_opts    = &cfg->ul;
+        nof_tasks++;
+      }
       e_rx_cand_idx += n_re_cand;
       g_candidates_run++;
     }
@@ -1104,6 +1156,53 @@ constdiag_done:;
   // split, just walking cand_task[] instead of decoding inline. ----
   int decodes_this_occasion = 0; // capped by cfg->pdsch_max_per_slot -- see that field's comment
   for (int ti = 0; ti < nof_tasks; ti++) {
+    /* ---- UPLINK candidates are handled here and nothing below runs for them: every line after
+     * this point reads a DL result and would misinterpret a UL one. ---- */
+    if (cand_task[ti].ul_scan) {
+      const nr_pdcch_blind_ul_result_t *u = &cand_task[ti].ul_out;
+      if (cand_task[ti].ok) {
+        g_ul_accepts++;
+      } else {
+        g_ul_rejects++;
+      }
+      /* ULDCIGT (ISAC_PDCCH_ULDCIGT=1): the reconciliation instrument, and the reason this commit
+       * exists before any extraction does. The 0_1 field WIDTHS on this deployment are not pinned
+       * -- 33 of the live 43 bits are spec-fixed and the remaining 10 admit more than one
+       * assignment (see the UL section of nr_pdcch_blind_monitor.h) -- so the payload is dumped RAW
+       * alongside the decoded fields, for EVERY candidate whose CRC landed in the plausible RNTI
+       * range including rejected ones.
+       *
+       * The gNB logs h_id/ndi/rv/mcs/tpc/dai/mimo/ant on its own `UL PDCCH:` line for the same
+       * grant. Solving offline for the width assignment that reproduces all EIGHT simultaneously is
+       * a far stronger test than any total-length check -- and a total-length check is exactly what
+       * let the DL path read every field after the frequency-domain assignment from the wrong
+       * offset for a year while CRC still passed. Derive, then reconcile (R6). */
+      {
+        static int s_uldcigt = -1;
+        if (s_uldcigt < 0)
+          s_uldcigt = (getenv("ISAC_PDCCH_ULDCIGT") != NULL) ? 1 : 0;
+        if (s_uldcigt && u->crc_rnti >= cfg->rnti_min && u->crc_rnti <= cfg->rnti_max) {
+          LOG_I(PHY,
+                "SENSING: ULDCIGT %d.%d cce=%d al=%u len=%u raw=0x%016llx crc_rnti=0x%x ok=%d "
+                "mcs=%u rv=%u ndi=%u hid=%u tpc=%u dai=%u ant=%u sri_prec=%u srs=%u csi=%u "
+                "tda=%u prb=%u+%u sym=%u+%u k2=%u cdm=%u ports=0x%x nscid=%u dmrsmask=0x%x fh=%u "
+                "ulsch=%u mism=%u rej=%s\n",
+                cand_task[ti].frame, cand_task[ti].slot, cand_task[ti].cce, (unsigned)cand_task[ti].L,
+                (unsigned)u->dci_length, (unsigned long long)u->raw_payload, u->crc_rnti,
+                cand_task[ti].ok ? 1 : 0,
+                (unsigned)u->mcs, (unsigned)u->rv, (unsigned)u->ndi, (unsigned)u->harq_pid,
+                (unsigned)u->tpc, (unsigned)u->dai, (unsigned)u->antenna_ports_field,
+                (unsigned)u->precoding_info, (unsigned)u->srs_request, (unsigned)u->csi_request,
+                (unsigned)u->tda_index, (unsigned)u->start_rb, (unsigned)u->num_rb,
+                (unsigned)u->start_symbol, (unsigned)u->num_symbols, (unsigned)u->k2,
+                (unsigned)u->n_dmrs_cdm_groups, (unsigned)u->dmrs_ports, (unsigned)u->nscid,
+                (unsigned)u->ul_dmrs_symb_pos, (unsigned)u->frequency_hopping,
+                (unsigned)u->ulsch_indicator, (unsigned)u->mismatched_bits,
+                u->reject_reason ? u->reject_reason : "-");
+        }
+      }
+      continue;
+    }
     const nr_pdcch_blind_result_t out = cand_task[ti].out;
     if (!cand_task[ti].ok) {
       g_last_reject_reason = out.reject_reason; // TEMPORARY diagnostic, see periodic summary below
@@ -1567,7 +1666,7 @@ constdiag_done:;
     nr_pdcch_passive_queue_get_stats(&scanq);
     LOG_I(PHY,
          "SENSING: blind PDCCH monitor summary: occasions=%lu candidates=%lu accepts=%lu "
-         "dci10[accepts=%lu C=%lu TC=%lu SI=%lu RA=%lu P=%lu] "
+         "dci10[accepts=%lu C=%lu TC=%lu SI=%lu RA=%lu P=%lu] dci01[accepts=%lu rejects=%lu] "
          "held[energy=%lu persist=%lu snr=%lu mismatch=%lu] efloor=%.2f cfr_submits=%lu "
          "pdsch_decode[try=%lu crc_ok=%lu (%.1f%%) skip_rv=%lu unsup=%lu over_cap=%lu data_submits=%lu] "
          "scanq[queued=%lu done=%lu drop_full=%lu drop_stale=%lu maxlag=%lu] "
@@ -1579,6 +1678,7 @@ constdiag_done:;
          (unsigned long)g_accepts_class[NR_BLIND_RNTI_CLASS_SI],
          (unsigned long)g_accepts_class[NR_BLIND_RNTI_CLASS_RA],
          (unsigned long)g_accepts_class[NR_BLIND_RNTI_CLASS_P],
+         (unsigned long)g_ul_accepts, (unsigned long)g_ul_rejects,
          (unsigned long)g_held_energy, (unsigned long)g_held_persist, (unsigned long)g_held_snr,
          (unsigned long)g_held_mismatch,
          g_energy_floor,
