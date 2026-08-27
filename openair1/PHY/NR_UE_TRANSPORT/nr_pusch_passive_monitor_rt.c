@@ -108,6 +108,15 @@ void nr_pusch_passive_monitor_process(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_
 
   const int32_t ta = (cfg->ul_ta_offset_samples != 0) ? cfg->ul_ta_offset_samples
                                                       : n_ta_offset_samples(&ue->frame_parms);
+  /* A one-shot marker on ENTRY, so that "the decode hung" and "the decode was never called" are
+   * distinguishable from the log alone. Without it, a blocked receive thread and a hook that never
+   * fires look identical: both simply stop producing output. */
+  static int s_first = 1;
+  if (s_first) {
+    s_first = 0;
+    LOG_I(PHY, "SENSING: PUSCHDIAG entering first decode %d.%d rnti=0x%x\n",
+          proc->frame_rx, proc->nr_slot_rx, g.rnti);
+  }
   nr_pusch_passive_out_t out;
   nr_pusch_passive_decode(ue, proc->frame_rx, proc->nr_slot_rx, &g, ta, &out);
 

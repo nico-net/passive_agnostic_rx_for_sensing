@@ -111,7 +111,21 @@ static bool passive_gnb_prepare(PHY_VARS_NR_UE *ue)
    * receiver its own small pool instead, which also keeps the decode off the UE's RT pool: this
    * tree has already measured blind PDSCH decoding on the receive thread costing PBCH lock. */
   gnb->nrLDPC_coding_interface     = ue->nrLDPC_coding_interface;
-  initFloatingCoresTpool(2, &gnb->threadPool, false, "passiveUL-tpool");
+  /* ZERO worker threads, so pushTpool() runs every task INLINE (its own documented fallback).
+   *
+   * A 2-thread pool deadlocked the PHY receive thread on the first live grant: threadCreate gives
+   * pool workers priority 97, the same as the receive thread, and this box already pins six Tpool
+   * threads across the only cores the receiver has (--thread-pool 0,1,4,5,6,7). New RT-priority
+   * workers on saturated cores may never be scheduled, and nr_rx_pusch_group_tp() then blocks
+   * forever in join_task_ans() waiting for tasks that cannot run. Measured signature: the receiver
+   * logged "passive PUSCH receiver ready" and then emitted nothing further for the remaining ~295 s
+   * -- no RFCENSUS, no summary, no PUSCHDIAG -- while the process stayed alive.
+   *
+   * Inline costs the decode's full time on the receive thread. That is affordable ONLY because
+   * uplink slots are otherwise completely idle here (2 slots in 10 doing no work at all), and it is
+   * a stepping stone: the DL path already learned this lesson and moved its decode to a priority-50
+   * consumer. Watch max_pos_acc and pbch_ok, and move this to a queue before any long capture. */
+  initFloatingCoresTpool(0, &gnb->threadPool, false, "passiveUL-tpool");
 
   const int symsz = ufp->ofdm_symbol_size;
   const int sps   = ufp->symbols_per_slot;
@@ -216,7 +230,31 @@ static void fill_pusch_pdu(const nr_pdcch_blind_ul_result_t *g, int nant, nfapi_
   p->pusch_data.new_data_indicator = g->ndi;
 
   p->maintenance_parms_v3.ldpcBaseGraph = 0; // filled below once the TBS is known
-  p->param_v4.numSpatialStreamIndices   = 0;
+
+  /* THE RECEIVE ANTENNA COUNT FOR THE WHOLE UL CHAIN COMES FROM HERE, not from
+   * frame_parms.nb_antennas_rx. nr_ul_channel_estimation.c:550 reads it as
+   *     int nb_antennas_rx = pusch_pdu->param_v4.numSpatialStreamIndices;
+   * and nr_ulsch_demodulation.c:239 does the same. Leaving it at 0 -- which is what a memset gives,
+   * and what this function did -- is not merely "no MU-MIMO": it makes every per-antenna loop empty
+   * and every antenna-dimensioned VLA zero-length.
+   *
+   * It also DEADLOCKS, silently. The channel estimator computes
+   *     num_jobs = CEILIDIV(nb_antennas_rx, dmrs_num_antennas_per_thread)   -> 0
+   *     init_task_ans(&ans, 0)                                             -> counter 0, sem 0
+   *     for (job_id = 0; job_id < 0; ...)                                  -> pushes NOTHING
+   *     join_task_ans(&ans)                                                -> sem_wait, forever
+   * The semaphore is posted only when the counter reaches exactly zero THROUGH a completion, so a
+   * count of zero jobs is never signalled. Measured live: the receiver logged that it was ready and
+   * then produced nothing for the remaining ~295 s of the run -- no census, no summary -- with the
+   * thread SLEEPING rather than spinning, which is exactly a sem_wait and is why it read as a hang
+   * rather than a crash or a busy loop.
+   *
+   * spatialStreamIndices[] must be filled too: get_first_ant_idx() returns element 0 as the first
+   * antenna index, and the chain then indexes rxdataF[aa_start + antenna]. */
+  p->param_v4.numSpatialStreamIndices = (uint8_t)nant;
+  for (int a = 0; a < nant && a < MAX_NUM_SPATIAL_STREAMS; a++) {
+    p->param_v4.spatialStreamIndices[a] = (uint16_t)a;
+  }
   p->beamforming.num_prgs               = 0;
   p->beamforming.dig_bf_interface       = nant;
 }
@@ -264,6 +302,12 @@ bool nr_pusch_passive_decode(PHY_VARS_NR_UE *ue,
     return false;
   }
 
+  /* One-shot STAGE markers. The first live run entered the decode and never returned, and with no
+   * gdb on this host and every thread sleeping rather than spinning, the log is the only instrument
+   * that can say WHERE. Each prints once; the last one printed is the stage that blocked. */
+  static int s_stage = 1;
+#define PUSCH_STAGE(n, what) do { if (s_stage) { LOG_I(PHY, "SENSING: PUSCHSTAGE %d %s\n", (n), (what)); } } while (0)
+  PUSCH_STAGE(1, "guards passed");
   PHY_VARS_gNB *gnb = g_gnb;
   NR_DL_FRAME_PARMS *fp = &gnb->frame_parms;
   const int nant = g_gnb_nant;
@@ -301,6 +345,7 @@ bool nr_pusch_passive_decode(PHY_VARS_NR_UE *ue,
       out->reject_reason = "scratch allocation failed";
       return false;
     }
+    PUSCH_STAGE(2, "gNB ready, entering FEP");
     const int s0 = g->start_symbol;
     const int s1 = g->start_symbol + g->num_symbols;
     for (int sym = s0; sym < s1 && sym < sps; sym++) {
@@ -314,6 +359,7 @@ bool nr_pusch_passive_decode(PHY_VARS_NR_UE *ue,
   }
 
   /* ---- TBS, then the receive chain, exactly as the gNB runs it. ---- */
+  PUSCH_STAGE(3, "FEP done");
   nfapi_nr_pusch_pdu_t pdu;
   fill_pusch_pdu(g, nant, &pdu);
 
@@ -344,10 +390,15 @@ bool nr_pusch_passive_decode(PHY_VARS_NR_UE *ue,
   const nfapi_nr_pusch_pdu_t *pdup = &ulsch->harq_process->ulsch_pdu;
   uint32_t *unavp = &ulsch->unav_res;
   atomic_fetch_add_explicit(&g_try, 1, memory_order_relaxed);
+  PUSCH_STAGE(4, "entering nr_rx_pusch_group_tp");
   nr_rx_pusch_group_tp(gnb, &pvp, &pdup, &unavp, 1, frame, slot);
+  PUSCH_STAGE(5, "rx_pusch returned, entering nr_ulsch_decoding");
 
   int ulsch_id = 0;
   const int rc = nr_ulsch_decoding(gnb, fp, frame, slot, &ulsch_id, 1);
+  PUSCH_STAGE(6, "ulsch_decoding returned");
+  s_stage = 0;
+#undef PUSCH_STAGE
 
   out->G             = nr_get_G(g->num_rb, g->num_symbols, nb_dmrs_re_per_rb, n_dmrs_sym, 0,
                                 pdu.qam_mod_order, g->nrOfLayers);
