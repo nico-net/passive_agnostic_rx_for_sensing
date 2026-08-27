@@ -17,6 +17,7 @@
 #include "executables/softmodem-common.h"
 #include "executables/nr-uesoftmodem.h" // get_nrUE_params -- the UE thread pool this reuses
 #include "openair2/LAYER2/NR_MAC_COMMON/nr_mac_common.h"
+#include "PHY/NR_UE_ISAC/nr_isac.h" // UL CFR submission
 
 /* nr_ulsch_decoding() has no declaration in any header this library exposes -- nr_transport_proto.h
  * declares nr_rx_pusch_group_tp() but not its decoder. Declared here against the definition read
@@ -68,6 +69,7 @@ NR_gNB_PHY_STATS_t *get_phy_stats(PHY_VARS_gNB *gNB, uint16_t rnti)
 static PHY_VARS_gNB *g_gnb;
 static int           g_gnb_nant;
 static _Atomic uint64_t g_try, g_crc_ok, g_rej_unsup, g_rej_setup;
+static _Atomic uint64_t g_cfr_submits, g_cfr_re;
 
 /* ------------------------------------------------------------------------------------------
  * Minimal gNB context. Deliberately NOT phy_init_nr_gNB(): that allocates PRACH, SRS, PUCCH, the
@@ -394,6 +396,86 @@ bool nr_pusch_passive_decode(PHY_VARS_NR_UE *ue,
   nr_rx_pusch_group_tp(gnb, &pvp, &pdup, &unavp, 1, frame, slot);
   PUSCH_STAGE(5, "rx_pusch returned, entering nr_ulsch_decoding");
 
+  /* ---- UPLINK CFR from the PUSCH DM-RS ------------------------------------------------------
+   * Placed HERE, after nr_rx_pusch_group_tp() has filled ul_ch_estimates and BEFORE the LDPC
+   * decode, deliberately: the DM-RS channel estimate does not depend on the transport block, so
+   * gating it on CRC would throw away a perfectly good measurement every time a decode fails. The
+   * data-aided UL CFR is the one that needs a CRC-verified TB; this one does not.
+   *
+   * Layout: ul_ch_estimates[nl * num_sp_streams + antenna] is a per-symbol buffer indexed
+   * [ofdm_symbol_size * symbol + k], with k an ABSOLUTE subcarrier. num_sp_streams is
+   * param_v4.numSpatialStreamIndices -- the same field whose being zero deadlocked this function,
+   * so it is read back from the PDU rather than assumed equal to nant.
+   *
+   * The antennas are kept SEPARATE (nof_ant > 1, ant_stride_re) rather than combined: the whole
+   * point of a 4-element array is that the inter-element phase carries the bearing, and combining
+   * before submission would destroy exactly that. */
+  if (nr_isac_enabled() && nr_isac_source_enabled(NR_ISAC_SRC_PUSCH_DMRS)) {
+    const uint32_t nof_ant_cfr = (uint32_t)nant;
+    const int      num_sp      = pdu.param_v4.numSpatialStreamIndices;
+    /* First DM-RS symbol inside the allocation. TS 38.211 puts the front-loaded one at l0, and it
+     * is the strongest; the additional positions are used by the estimator but one symbol is what
+     * a slow-time row wants. */
+    int dmrs_sym = -1;
+    for (int m = g->start_symbol; m < g->start_symbol + g->num_symbols; m++) {
+      if (g->ul_dmrs_symb_pos & (1u << m)) {
+        dmrs_sym = m;
+        break;
+      }
+    }
+    const int start_sc = ((g->bwp_start + g->start_rb) * NR_NB_SC_PER_RB + fp->first_carrier_offset)
+                         % fp->ofdm_symbol_size;
+    const int num_sc = g->num_rb * NR_NB_SC_PER_RB;
+    if (dmrs_sym >= 0 && num_sp > 0 && num_sc > 0) {
+      static __thread float    *ul_h = NULL;
+      static __thread uint32_t *ul_k = NULL, *ul_l = NULL;
+      static __thread uint32_t  ul_cap = 0;
+      const uint32_t cap = (uint32_t)(273 * NR_NB_SC_PER_RB);
+      if (ul_cap < cap) {
+        free(ul_h); free(ul_k); free(ul_l);
+        ul_h = (float *)malloc16_clear(sizeof(float) * 2 * PASSIVE_UL_MAX_ANT * cap);
+        ul_k = (uint32_t *)malloc16_clear(sizeof(uint32_t) * cap);
+        ul_l = (uint32_t *)malloc16_clear(sizeof(uint32_t) * cap);
+        ul_cap = (ul_h && ul_k && ul_l) ? cap : 0;
+      }
+      uint32_t nof_re = 0;
+      double   pw = 0.0;
+      for (int j = 0; j < num_sc && nof_re < ul_cap; j++) {
+        const int k_abs = (start_sc + j) % fp->ofdm_symbol_size;
+        for (uint32_t a = 0; a < nof_ant_cfr; a++) {
+          /* layer 0 only: this receiver rejects multi-layer PUSCH upstream, and a second layer
+           * would need its own submission rather than being folded into this one. */
+          const c16_t *h = (const c16_t *)&pvp->ul_ch_estimates[0 * num_sp + (int)a][fp->ofdm_symbol_size * dmrs_sym];
+          const size_t o = 2 * ((size_t)a * cap + nof_re);
+          ul_h[o]     = (float)h[k_abs].r;
+          ul_h[o + 1] = (float)h[k_abs].i;
+          if (a == 0) {
+            pw += (double)h[k_abs].r * h[k_abs].r + (double)h[k_abs].i * h[k_abs].i;
+          }
+        }
+        ul_k[nof_re] = (uint32_t)k_abs;
+        ul_l[nof_re] = (uint32_t)dmrs_sym;
+        nof_re++;
+      }
+      if (nof_re > 0) {
+        /* ul_CarrierFreq, not dl_CarrierFreq: the range axis scales with the wavelength of the
+         * signal actually observed, and on a TDD cell these are equal only by coincidence of the
+         * duplex spacing being zero. */
+        nr_isac_carrier_t carrier = {.nof_prb         = (uint32_t)fp->N_RB_UL,
+                                     .scs_hz          = fp->subcarrier_spacing,
+                                     .dl_center_hz    = fp->ul_CarrierFreq,
+                                     .pci             = fp->Nid_cell,
+                                     .slots_per_frame = fp->slots_per_frame};
+        nr_isac_submit_cfr_multi((uint32_t)(frame * fp->slots_per_frame + slot), 0.0f,
+                                 NR_ISAC_SRC_PUSCH_DMRS, &carrier, ul_h, nof_ant_cfr, cap,
+                                 ul_k, ul_l, nof_re, 1.0f);
+        atomic_fetch_add_explicit(&g_cfr_re, nof_re, memory_order_relaxed);
+        atomic_fetch_add_explicit(&g_cfr_submits, 1, memory_order_relaxed);
+        out->snr_db = (pw > 0.0 && nof_re) ? (float)(10.0 * log10(pw / (double)nof_re)) : 0.0f;
+      }
+    }
+  }
+
   int ulsch_id = 0;
   const int rc = nr_ulsch_decoding(gnb, fp, frame, slot, &ulsch_id, 1);
   PUSCH_STAGE(6, "ulsch_decoding returned");
@@ -426,8 +508,11 @@ void nr_pusch_passive_stats_dump(void)
   const uint64_t t = atomic_load_explicit(&g_try, memory_order_relaxed);
   const uint64_t k = atomic_load_explicit(&g_crc_ok, memory_order_relaxed);
   LOG_I(PHY,
-        "SENSING: pusch_passive[try=%lu crc_ok=%lu (%.1f%%) unsup=%lu setup_fail=%lu]\n",
+        "SENSING: pusch_passive[try=%lu crc_ok=%lu (%.1f%%) unsup=%lu setup_fail=%lu] "
+        "ul_cfr[submits=%lu re=%lu]\n",
         (unsigned long)t, (unsigned long)k, t ? (100.0 * (double)k / (double)t) : 0.0,
         (unsigned long)atomic_load_explicit(&g_rej_unsup, memory_order_relaxed),
-        (unsigned long)atomic_load_explicit(&g_rej_setup, memory_order_relaxed));
+        (unsigned long)atomic_load_explicit(&g_rej_setup, memory_order_relaxed),
+        (unsigned long)atomic_load_explicit(&g_cfr_submits, memory_order_relaxed),
+        (unsigned long)atomic_load_explicit(&g_cfr_re, memory_order_relaxed));
 }

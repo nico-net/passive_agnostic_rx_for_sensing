@@ -53,7 +53,12 @@ typedef enum nr_isac_source_e {
   /// (Phase 3, TOTAL_PASSIVE_UE_HANDOVER.md). Reserved 2026-07-28; not yet submitted by anything --
   /// nr_pdcch_blind_monitor.{h,c} is offline-decode-only this slice, no RT wiring exists yet.
   NR_ISAC_SRC_PDSCH_DMRS_BLIND = 3,
-  NR_ISAC_SRC_COUNT            = 4 ///< Number of distinct sources (for the enabled-set bitmask)
+  /// PUSCH DM-RS from an UPLINK grant addressed to another UE, recovered by blind DCI 0_1 decode.
+  /// The first source on this receiver whose ILLUMINATOR IS A UE rather than the gNB: the geometry
+  /// is UE->target->receiver, not gNB->target->receiver, so a detection from this source sits on a
+  /// different bistatic ellipse from every DL source and must not be fused with them as if it did.
+  NR_ISAC_SRC_PUSCH_DMRS = 4,
+  NR_ISAC_SRC_COUNT      = 5 ///< Number of distinct sources (for the enabled-set bitmask)
 } nr_isac_source_t;
 
 /// Carrier geometry valid for one submitted CFR snapshot. All axis scaling derives from this.
