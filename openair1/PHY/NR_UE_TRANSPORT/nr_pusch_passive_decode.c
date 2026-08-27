@@ -23,6 +23,11 @@
  * declares nr_rx_pusch_group_tp() but not its decoder. Declared here against the definition read
  * from nr_ulsch_decoding.c rather than adding a prototype to a shared header, so that this passive
  * path cannot quietly change a signature the gNB build also depends on. */
+/* The producer's un-wrapped slot counter. This is the SAME clock nr_pdsch_passive_queue.c stamps
+ * onto pdsch_data rows via nr_isac_abs_slot_override, and the slow-time grid only makes sense if
+ * every source shares one origin. */
+extern _Atomic long nr_ue_diag_producer_absolute_slot;
+
 extern int nr_ulsch_decoding(PHY_VARS_gNB *phy_vars_gNB,
                              NR_DL_FRAME_PARMS *frame_parms,
                              uint32_t frame,
@@ -466,7 +471,27 @@ bool nr_pusch_passive_decode(PHY_VARS_NR_UE *ue,
                                      .dl_center_hz    = fp->ul_CarrierFreq,
                                      .pci             = fp->Nid_cell,
                                      .slots_per_frame = fp->slots_per_frame};
-        nr_isac_submit_cfr_multi((uint32_t)(frame * fp->slots_per_frame + slot), 0.0f,
+        /* SLOW-TIME EPOCH. Must match what pdsch_data is indexed on, or a fused CPI mixes two
+         * different origins and its span is meaningless -- measured: T_slot 67409 against a true
+         * ~256, and the velocity axis collapsed to vel[res=0.000 max=0.0] with every "detection"
+         * pinned at 0 m/s.
+         *
+         * pdsch_data uses the PRODUCER's monotonic counter (nr_pdsch_passive_queue.c stamps
+         * job.absolute_slot through nr_isac_abs_slot_override). The obvious frame*slots_per_frame +
+         * slot used here before is a DIFFERENT clock: it wraps at slots_per_frame*1024, so the two
+         * sources drift apart by a whole wrap period and never share a timeline.
+         *
+         * This decode runs in-line in the uplink slot, but the producer counter still runs AHEAD of
+         * the slot being processed by the pipeline depth. Align it to this slot's phase: both
+         * counters advance one per slot, so subtracting the phase difference modulo the wrap yields
+         * the producer-timeline value FOR THIS SLOT. Exact while the lag stays under one wrap
+         * (~10 slots in practice against a 20480-slot wrap). */
+        const long     prod = atomic_load_explicit(&nr_ue_diag_producer_absolute_slot, memory_order_relaxed);
+        const long     wrap = (long)fp->slots_per_frame * 1024;
+        const long     fd   = (long)frame * fp->slots_per_frame + (long)slot;
+        const long     lag  = ((prod - fd) % wrap + wrap) % wrap;
+        const uint32_t ul_slot_idx = (uint32_t)(prod - lag);
+        nr_isac_submit_cfr_multi(ul_slot_idx, 0.0f,
                                  NR_ISAC_SRC_PUSCH_DMRS, &carrier, ul_h, nof_ant_cfr, cap,
                                  ul_k, ul_l, nof_re, 1.0f);
         atomic_fetch_add_explicit(&g_cfr_re, nof_re, memory_order_relaxed);
