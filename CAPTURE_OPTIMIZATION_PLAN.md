@@ -1,3 +1,9 @@
+> **SUPERSEDED 2026-08-28.** All four optimizations in this document are IMPLEMENTED and live, and
+> the framing below (CPI wall time is grant-limited) was measured before the uplink worked. Read
+>  section 2 for the current state; this file is kept only
+> for the measurements that motivated the work (the 1469 us -> 75 us allocation benchmark and the
+> per-stage UTIM/BTIM breakdown), which remain valid.
+
 # Capture-path optimization plan (UL+DL passive receiver)
 
 Scope: the **capture** path only — blind PDCCH scan, PDSCH/PUSCH decode, CFR extraction. The
