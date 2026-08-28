@@ -83,6 +83,43 @@ static int           g_gnb_nant;
 static _Atomic uint64_t g_try, g_crc_ok, g_rej_unsup, g_rej_setup;
 static _Atomic uint64_t g_seg_fail, g_zero_tb;
 
+/* ---- TIMING-ADVANCE SWEEP (ISAC_UL_TA_SWEEP="start:step:count", default off) ------------------
+ * The applied advance is N_TA_offset, derived from the sample rate. What it CANNOT know is N_TA --
+ * the per-UE advance the gNB commands, which appears in no DCI -- nor any fixed offset in this
+ * receiver's own chain. After correcting the window's sign the estimator still measures a residual
+ * of ~180-260 samples, an order beyond the +/-20 it can compensate, so the remaining offset has to
+ * be found rather than derived.
+ *
+ * Swept INSIDE one capture, one value per grant round-robin, rather than one value per run. A run
+ * on this rig costs ~4 minutes and mis-locks its CFO about half the time, so a 17-point sweep as
+ * separate runs is two hours of wall time and a dozen VOID results; as a round-robin it is ~1100
+ * grants per value in a single 200 s capture, and every value sees the SAME channel, traffic and
+ * lock, which a sequence of runs could never guarantee. */
+#define TA_SWEEP_MAX 33
+static int      g_ta_sweep_n     = -1;
+static int32_t  g_ta_sweep_start = 0;
+static int32_t  g_ta_sweep_step  = 0;
+static _Atomic uint32_t g_ta_sweep_seq;
+static _Atomic uint64_t g_ta_try[TA_SWEEP_MAX];
+static _Atomic uint64_t g_ta_ok[TA_SWEEP_MAX];
+
+static int ta_sweep_points(void)
+{
+  if (g_ta_sweep_n < 0) {
+    g_ta_sweep_n = 0;
+    const char *e = getenv("ISAC_UL_TA_SWEEP");
+    if (e != NULL) {
+      int a = 0, b = 0, c = 0;
+      if (sscanf(e, "%d:%d:%d", &a, &b, &c) == 3 && c > 0) {
+        g_ta_sweep_start = a;
+        g_ta_sweep_step  = b;
+        g_ta_sweep_n     = (c > TA_SWEEP_MAX) ? TA_SWEEP_MAX : c;
+      }
+    }
+  }
+  return g_ta_sweep_n;
+}
+
 /* ---- UL RT-THREAD COST BREAKDOWN (ISAC_PUSCH_TIMING=1, default OFF) ---------------------------
  * The downlink has BTIM (nr_pdcch_blind_monitor_rt.c) and it is what turned "move the PDSCH decode
  * off the receive thread" from an assumption into a measurement. The uplink path had no equivalent
@@ -445,6 +482,15 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
    * interpolates so the estimate still looked smooth across subcarriers, the equaliser still
    * produced a full field of confident LLRs, and the only symptom was that the LDPC never
    * converged -- which reads as "weak link" rather than "wrong samples". */
+  /* Round-robin over the sweep set when one is configured. The index is carried into the census
+   * below so a value's outcome is attributable; without a sweep this is inert. */
+  int ta_idx = -1;
+  if (ta_sweep_points() > 0) {
+    ta_idx = (int)(atomic_fetch_add_explicit(&g_ta_sweep_seq, 1, memory_order_relaxed)
+                   % (uint32_t)ta_sweep_points());
+    ta_offset_samples = g_ta_sweep_start + (int32_t)ta_idx * g_ta_sweep_step;
+  }
+
   const uint32_t total_rx = (uint32_t)(fp->samples_per_frame);
   uint32_t sample_offset = 0;
   if (ta_offset_samples != 0) {
@@ -797,6 +843,12 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
     out->reject_reason = "LDPC decoder interface error";
     return false;
   }
+  if (ta_idx >= 0) {
+    atomic_fetch_add_explicit(&g_ta_try[ta_idx], 1, memory_order_relaxed);
+    if (hp->C > 0 && hp->processedSegments == hp->C) {
+      atomic_fetch_add_explicit(&g_ta_ok[ta_idx], 1, memory_order_relaxed);
+    }
+  }
   if (hp->C == 0 || hp->processedSegments != hp->C) {
     atomic_fetch_add_explicit(&g_seg_fail, 1, memory_order_relaxed);
     out->status = NR_PUSCH_PASSIVE_CRC_FAIL;
@@ -865,6 +917,18 @@ bool nr_pusch_passive_decode(PHY_VARS_NR_UE *ue,
 
 void nr_pusch_passive_stats_dump(void)
 {
+  if (ta_sweep_points() > 0) {
+    char rep[1024];
+    unsigned u = 0;
+    for (int i = 0; i < ta_sweep_points() && u + 40 < sizeof(rep); i++) {
+      const uint64_t t = atomic_load_explicit(&g_ta_try[i], memory_order_relaxed);
+      const uint64_t k = atomic_load_explicit(&g_ta_ok[i], memory_order_relaxed);
+      u += (unsigned)snprintf(rep + u, sizeof(rep) - u, "%d:%lu/%lu ",
+                              g_ta_sweep_start + i * g_ta_sweep_step,
+                              (unsigned long)k, (unsigned long)t);
+    }
+    LOG_I(PHY, "SENSING: TASWEEP (ta_samples:crc_ok/try) %s\n", rep);
+  }
   const uint64_t t = atomic_load_explicit(&g_try, memory_order_relaxed);
   const uint64_t k = atomic_load_explicit(&g_crc_ok, memory_order_relaxed);
   /* Reported the way the downlink investigation had to learn to report it: crc_ok/try mixes two
