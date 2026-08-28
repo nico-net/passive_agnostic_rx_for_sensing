@@ -7,6 +7,8 @@
 #include <math.h>
 #include <stdatomic.h>
 
+#include "PHY/MODULATION/nr_modulation.h" // nr_symbol_fep_ul: the gNB uplink FEP
+
 #include "nr_pusch_passive_decode.h"
 
 #include "common/utils/LOG/log.h"
@@ -468,20 +470,6 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
    * uplink arrives EARLY, so the correction is negative. Express it modulo the rxdata ring instead
    * of passing a negative number: the FEP wraps its reads against the same total, so an offset of
    * (total - advance) lands exactly where (-advance) would. */
-  /* SIGN. nr_slot_fep() does rx_offset += sample_offset (slot_fep_nr.c:85), so a POSITIVE value
-   * reads LATER. The uplink arrives EARLIER -- the UE transmits advanced by N_TA_offset + N_TA --
-   * so the window must move BACK, and ta_offset_samples is documented as "samples to advance the
-   * FFT window by", a positive quantity.
-   *
-   * This previously passed ta_offset_samples straight through: with the derived N_TA_offset of
-   * +1600 samples at 122.88 Msps it read 1600 samples LATE when it needed 1600 EARLY -- 3200
-   * samples out, about 11x the 288-sample cyclic prefix. The negation is the fix.
-   *
-   * It hid because nothing downstream reports a gross window error as such. The DM-RS channel
-   * estimate still had real energy and still tracked the antenna imbalance, the estimator
-   * interpolates so the estimate still looked smooth across subcarriers, the equaliser still
-   * produced a full field of confident LLRs, and the only symptom was that the LDPC never
-   * converged -- which reads as "weak link" rather than "wrong samples". */
   /* Round-robin over the sweep set when one is configured. The index is carried into the census
    * below so a value's outcome is attributable; without a sweep this is inert. */
   int ta_idx = -1;
@@ -491,43 +479,47 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
     ta_offset_samples = g_ta_sweep_start + (int32_t)ta_idx * g_ta_sweep_step;
   }
 
-  const uint32_t total_rx = (uint32_t)(fp->samples_per_frame);
-  uint32_t sample_offset = 0;
-  if (ta_offset_samples != 0) {
-    int32_t off = (int32_t)(-ta_offset_samples) % (int32_t)total_rx;
-    sample_offset = (uint32_t)((off < 0) ? (int32_t)total_rx + off : off);
-    if (sample_offset == total_rx) {
-      sample_offset = 0;
-    }
-  }
+  /* SIGN. nr_symbol_fep_ul() does `rxdata_offset -= sample_offset` (slot_fep_nr.c:158), so a
+   * POSITIVE value reads EARLIER -- which is exactly what a timing advance is. The value is passed
+   * through unchanged.
+   *
+   * Note this is the OPPOSITE of nr_slot_fep(), which does `rx_offset += sample_offset` (:85). The
+   * two functions take an identically-named argument with inverted meaning. This path used to call
+   * nr_slot_fep() and passed the advance straight through, so it read 1600 samples LATE where it
+   * needed 1600 EARLY. */
+  const int32_t ul_sample_offset = ta_offset_samples;
+
   const int slot_off = (slot % RU_RX_SLOT_DEPTH) * sps * symsz;
   {
-    /* nr_slot_fep writes a [antenna][symbols_per_slot * samples_per_slot_wCP] shaped buffer; the
-     * gNB grid is [antenna][RU_RX_SLOT_DEPTH * symbols_per_slot * ofdm_symbol_size]. Fill one
-     * symbol at a time through a scratch view so the two layouts stay explicit rather than
-     * assumed equal -- they are not. */
-    /* malloc16_clear, NOT calloc: nr_slot_fep writes this through the SIMD DFT, which ASSERTS on
-     * output alignment (oai_dfts.c dft_implementation). calloc only guarantees max_align_t and the
-     * assertion fired on the first real grant OTA. Every DSP-facing buffer above is allocated the
-     * same way for the same reason -- it is why nr_init.c uses malloc16_clear throughout. */
-    c16_t (*scratch)[fp->samples_per_slot_wCP] =
-        (c16_t (*)[fp->samples_per_slot_wCP])malloc16_clear((size_t)nant * sizeof(c16_t) * fp->samples_per_slot_wCP);
-    if (scratch == NULL) {
-      atomic_fetch_add_explicit(&g_rej_setup, 1, memory_order_relaxed);
-      out->reject_reason = "scratch allocation failed";
-      return false;
-    }
-    PUSCH_STAGE(2, "gNB ready, entering FEP");
+    /* ---- FEP EXACTLY AS THE gNB DOES IT -------------------------------------------------------
+     * nr_fep() (SCHED_NR/nr_ru_procedures.c:281) is the gNB's uplink FEP, and all it does per
+     * symbol is nr_symbol_fep_ul() -- a bare DFT. It applies NO symbol rotation.
+     *
+     * This path previously used nr_slot_fep(..., link_type_ul, ...), which routes through
+     * nr_symbol_fep() and applies BOTH frame_parms->symbol_rotation[link_type] and
+     * frame_parms->timeshift_symbol_rotation (slot_fep_nr.c:33-42). Those are downlink-receiver
+     * conventions that the gNB's uplink chain does not expect and does not undo.
+     *
+     * The consequence is precisely the failure that was observed. A per-symbol phase is COMMON to
+     * DM-RS and data within one symbol but DIFFERS between symbols, so the channel estimate taken
+     * on the DM-RS symbols absorbs it there and leaves a residual phase on every data symbol. The
+     * estimate looks perfect, its per-antenna powers track the real antenna imbalance, the
+     * equaliser emits a full field of confident LLRs -- and their SIGNS are wrong, so the LDPC
+     * never converges. It is also why sweeping the timing advance over eleven cyclic prefixes
+     * changed nothing: the fault was never in the window position.
+     *
+     * Writing straight into the gNB grid also removes the ~917 kB scratch buffer and the
+     * per-symbol memcpy this loop used to need, since nr_symbol_fep_ul() takes the destination
+     * pointer directly. */
     const int s0 = g->start_symbol;
     const int s1 = g->start_symbol + g->num_symbols;
-    for (int sym = s0; sym < s1 && sym < sps; sym++) {
-      nr_slot_fep(ue, fp, slot, sym, scratch, link_type_ul, sample_offset, ue->common_vars.rxdata);
-      for (int a = 0; a < nant; a++) {
-        memcpy(&gnb->common_vars.rxdataF[a][slot_off + sym * symsz], &scratch[a][sym * symsz],
-               (size_t)symsz * sizeof(c16_t));
+    for (int a = 0; a < nant; a++) {
+      const c16_t *rx = (const c16_t *)ue->common_vars.rxdata[a];
+      for (int sym = s0; sym < s1 && sym < sps; sym++) {
+        nr_symbol_fep_ul(fp, rx, &gnb->common_vars.rxdataF[a][slot_off + sym * symsz],
+                         (unsigned char)sym, (unsigned char)slot, ul_sample_offset);
       }
     }
-    free16(scratch, (size_t)nant * sizeof(c16_t) * fp->samples_per_slot_wCP);
   }
 
   /* ---- TBS, then the receive chain, exactly as the gNB runs it. ---- */
