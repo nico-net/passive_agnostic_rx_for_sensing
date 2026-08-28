@@ -61,6 +61,9 @@ typedef struct {
   /// est_delay measured on the FIRST pass, when the window was re-placed and the chain re-run.
   /// 0 when no refinement was needed. Kept separate so a refined grant is distinguishable.
   int      est_delay_pre;
+  /// HARQ-ACK bit count that made the transport block decode, when the UCI reservation search
+  /// found one. 0 = decoded with no reservation (no UCI, or O_ACK <= 2, which punctures instead).
+  uint8_t  o_ack;
   int      n_segments;    ///< transport-block segments (C)
   int      segments_ok;   ///< of which the CRC passed. 0 vs C-1 are different failures.
   const char *reject_reason; ///< non-NULL when status != OK

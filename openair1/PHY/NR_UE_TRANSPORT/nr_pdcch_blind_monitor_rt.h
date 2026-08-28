@@ -195,6 +195,14 @@ typedef struct {
   int   ul_thread_core;    // first core to pin consumers to; <0 = unpinned. Do not share with
                            // --thread-pool's cores.
 
+  // ---- UCI-on-PUSCH reservation search (2026-08-28). 0 = off, and off is the previous behaviour.
+  // O_ACK is not in the uplink DCI -- the DAI pins it only modulo 4 -- so the candidates consistent
+  // with the observed DAI are tried and the transport-block CRC decides. See the block comment on
+  // passive_ul_unav_res() in nr_pusch_passive_decode.c.
+  int   ul_uci_search;     // max candidates to try per failed grant; 0 = disabled
+  int   ul_uci_beta;       // betaOffsets HARQ-ACK index (TS 38.213 Table 9.3-1)
+  int   ul_uci_alpha;      // alpha-scaling index: 0=0.5 1=0.65 2=0.8 3=1.0
+
   // ---- DCI format 1_0 scanning (2026-08-21). All-zero = off, i.e. exactly the format-1_1-only
   // behaviour this module had before. See nr_pdcch_blind_monitor.h's nr_blind_dci_format_t block
   // for why a passive receiver needs 1_0 at all (SIB1, Msg2/RAR, Msg4/RRCSetup, C-RNTI fallback).

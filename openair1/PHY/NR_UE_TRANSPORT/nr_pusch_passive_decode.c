@@ -22,6 +22,7 @@
 #include "executables/nr-uesoftmodem.h" // get_nrUE_params -- the UE thread pool this reuses
 #include "openair2/LAYER2/NR_MAC_COMMON/nr_mac_common.h"
 #include "PHY/NR_UE_ISAC/nr_isac.h" // UL CFR submission
+#include "nr_pdcch_blind_monitor_rt.h" // nr_pdcch_blind_monitor_get_cfg: the UCI search parameters
 
 /* nr_ulsch_decoding() has no declaration in any header this library exposes -- nr_transport_proto.h
  * declares nr_rx_pusch_group_tp() but not its decoder. Declared here against the definition read
@@ -88,6 +89,15 @@ static _Atomic uint64_t g_seg_fail, g_zero_tb;
  * beyond a comfortable fraction of that is worth re-placing the window for rather than hoping. */
 #define PASSIVE_UL_DELAY_TOL 6
 static _Atomic uint64_t g_ta_refined;
+static _Atomic uint64_t g_uci_trials, g_uci_rescued;
+
+/* The per-segment CRC verdict, the same expression nr_ulsch_decoding.c:289 calls `crcok`. Kept as a
+ * helper because the UCI search needs it mid-function, not only at the end. */
+static inline bool hp_crc_failed(const NR_gNB_ULSCH_t *u)
+{
+  const NR_UL_gNB_HARQ_t *h = u->harq_process;
+  return (h == NULL) || (h->C == 0) || (h->processedSegments != h->C);
+}
 
 /* ---- TIMING-ADVANCE SWEEP (ISAC_UL_TA_SWEEP="start:step:count", default off) ------------------
  * The applied advance is N_TA_offset, derived from the sample rate. What it CANNOT know is N_TA --
@@ -215,6 +225,106 @@ static _Atomic uint64_t g_cfr_submits, g_cfr_re;
  * thousands of grants, so it does not carry the 10 dB per-TB swing the DL pw[] does. */
 static _Atomic uint64_t g_ant_pw[PASSIVE_UL_MAX_ANT];
 static _Atomic uint64_t g_ant_n;
+
+/* ==============================================================================================
+ * UCI ON PUSCH: reserve the REs the HARQ-ACK takes, so ULSCH rate matching is right.
+ *
+ * WHY THIS IS NEEDED. When the UE has HARQ-ACK to report and is scheduled a PUSCH in the same slot,
+ * it multiplexes the ACK onto the PUSCH, and for O_ACK > 2 those coded bits are RATE-MATCHED AROUND
+ * -- the ULSCH gets a smaller G. OAI's gNB receiver has no UCI-on-PUSCH support at all, so it
+ * computes the full G and every rate-recovery offset is wrong on such a grant. Measured on this
+ * cell: UCI rides 98.3 % of grants under bidirectional traffic and 32.7 % under uplink-only, which
+ * is the difference between a passive receiver that works on a loaded cell and one that does not.
+ *
+ * WHY IT IS A SEARCH AND NOT A DERIVATION. O_ACK is not in the uplink DCI. With a dynamic codebook
+ * the UL DAI carries (V_T_DAI - 1) mod 4, so the DCI pins O_ACK only MODULO 4 -- the receiver knows
+ * the count's residue, not the count. A UE-attached receiver resolves it from its own downlink
+ * assignment history; a passive one would have to reconstruct that UE's entire HARQ codebook state,
+ * which is a much larger piece of work and fails silently whenever a DL assignment was missed.
+ *
+ * So the candidates consistent with the observed DAI are tried in order and the 24-bit transport
+ * block CRC is the oracle. That is sound because the CRC is what decides acceptance anyway: a wrong
+ * hypothesis produces a failed CRC, and a false accept across a handful of trials is ~n/2^24. The
+ * cost is bounded and paid only on grants that failed without reservation, which is the honest
+ * trade -- those grants currently yield nothing at all.
+ *
+ * The arithmetic mirrors nr_ulsch_ue.c's calc_rate_match_info_uci() rather than re-reading the
+ * spec, so the transmitter this receiver is trying to invert and the receiver stay in step by
+ * construction. TS 38.212 6.3.2.4.1.1.
+ * ============================================================================================== */
+
+/* TS 38.213 Table 9.3-1, betaOffsets for HARQ-ACK. Index straight from RRC. */
+static double passive_beta_harq(uint8_t idx)
+{
+  /* Transcribed from nr_ulsch_ue.c's get_beta_offset_harq_ack() rather than from the spec table, so
+   * the transmitter this inverts and this receiver cannot drift apart. Note indices 16-20 are the
+   * sub-unity entries, not a continuation of the ramp -- writing them from memory got them wrong. */
+  static const double v[21] = {1.000,  2.000,  2.500,  3.125,  4.000,  5.000,  6.250,
+                               8.000,  10.000, 12.625, 15.875, 20.000, 31.000, 50.000,
+                               80.000, 126.000, 0.600, 0.400, 0.200, 0.100, 0.050};
+  return v[(idx < 21) ? idx : 11];
+}
+
+static double passive_alpha(uint8_t idx)
+{
+  switch (idx) {
+    case 0: return 0.5;
+    case 1: return 0.65;
+    case 2: return 0.8;
+    default: return 1.0;
+  }
+}
+
+/* TS 38.212 6.3.1.2.1 */
+static int passive_uci_crc(uint32_t o)
+{
+  return (o > 19) ? 11 : ((o > 11) ? 6 : 0);
+}
+
+/* Q'_ACK, TS 38.212 6.3.2.4.1.1. Identical shape to nr_ulsch_ue.c's get_Qd(). */
+static uint32_t passive_qd_ack(uint32_t o_ack, double beta, double alpha,
+                               uint32_t sum_kr, uint32_t s1, uint32_t s2)
+{
+  if (o_ack == 0 || sum_kr == 0) {
+    return 0;
+  }
+  const uint32_t a = (uint32_t)ceil(((double)o_ack + passive_uci_crc(o_ack)) * beta * (double)s1 / (double)sum_kr);
+  const uint32_t b = (uint32_t)ceil(alpha * (double)s2);
+  return (a < b) ? a : b;
+}
+
+/* REs per layer the HARQ-ACK removes from the ULSCH, i.e. exactly nr_get_G()'s unav_res.
+ * nr_get_G does `G -= unav_res * Qm * Nl` and the transmitter removes E_uci_ACK = Q'_ACK * Nl * Qm,
+ * so the two are the same quantity -- checked against the units rather than assumed. */
+static uint32_t passive_ul_unav_res(const nr_pdcch_blind_ul_result_t *g, uint32_t tbs_bits,
+                                    uint8_t bg, uint32_t o_ack, uint8_t beta_idx, uint8_t alpha_idx)
+{
+  /* Below 3 bits the ACK PUNCTURES the ULSCH instead of being rate-matched around it
+   * (TS 38.212 6.2.7, and nr_ulsch_ue.c only subtracts E_uci_ACK when O_ack > 2), so G is
+   * unchanged and there is nothing to reserve. */
+  if (o_ack <= 2) {
+    return 0;
+  }
+  uint32_t C = 0, K = 0, Z = 0, F = 0;
+  nr_segmentation(NULL, NULL, lenWithCrc(1, tbs_bits >> 3), &C, &K, &Z, &F, bg);
+  const uint32_t sum_kr = K * C;
+
+  const uint16_t mask     = g->ul_dmrs_symb_pos;
+  const int      n_dmrs   = __builtin_popcount((unsigned)mask
+                                               & (((1u << g->num_symbols) - 1u) << g->start_symbol));
+  const int      nsc      = g->num_rb * NR_NB_SC_PER_RB;
+  const uint32_t s1       = (uint32_t)(nsc * (g->num_symbols - n_dmrs));
+
+  /* s2 counts only the non-DM-RS REs AFTER the first DM-RS symbol: the ACK is mapped starting from
+   * there so the receiver has a channel estimate for it. */
+  const int first_dmrs    = mask ? __builtin_ctz(mask) : g->start_symbol;
+  const uint32_t range    = ((1u << g->num_symbols) - 1u) << g->start_symbol;
+  const uint32_t post     = range & ~((1u << (first_dmrs + 1)) - 1u);
+  const int n_post_nodmrs = __builtin_popcount(post & ~(uint32_t)mask);
+  const uint32_t s2       = (uint32_t)(nsc * n_post_nodmrs);
+
+  return passive_qd_ack(o_ack, passive_beta_harq(beta_idx), passive_alpha(alpha_idx), sum_kr, s1, s2);
+}
 
 /* ------------------------------------------------------------------------------------------
  * Minimal gNB context. Deliberately NOT phy_init_nr_gNB(): that allocates PRACH, SRS, PUCCH, the
@@ -835,7 +945,41 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
   }
 
   int ulsch_id = 0;
-  const int rc = nr_ulsch_decoding(gnb, fp, frame, slot, &ulsch_id, 1);
+  int rc = nr_ulsch_decoding(gnb, fp, frame, slot, &ulsch_id, 1);
+
+  /* ---- UCI-ON-PUSCH RESERVATION SEARCH ---------------------------------------------------------
+   * If the first attempt failed, the grant may have carried HARQ-ACK that rate-matched the ULSCH
+   * down. Try the O_ACK values consistent with the DAI this DCI carried; see the block comment on
+   * passive_ul_unav_res() for why the DAI pins O_ACK only modulo 4 and why the transport-block CRC
+   * is the right oracle for the rest.
+   *
+   * Ordered cheapest-first, and entered only on failure, so a grant that decodes without UCI pays
+   * nothing. unav_res feeds BOTH nr_rx_pusch_group_tp()'s scrambling-sequence length and the
+   * decoder's G, so the whole receive chain is re-run per candidate rather than just the LDPC --
+   * that is what makes the trial count worth bounding. */
+  const nr_pdcch_blind_monitor_cfg_t *ucfg = nr_pdcch_blind_monitor_get_cfg();
+  if (rc == 0 && hp_crc_failed(ulsch) && ucfg != NULL && ucfg->ul_uci_search > 0) {
+    const uint8_t bg = pdu.maintenance_parms_v3.ldpcBaseGraph;
+    for (int t = 0; t < ucfg->ul_uci_search; t++) {
+      /* Dynamic codebook: DAI = (V_T_DAI - 1) mod 4, so the candidates are dai+1, +5, +9, ... */
+      const uint32_t o_ack = (uint32_t)g->dai + 1u + 4u * (uint32_t)t;
+      const uint32_t unav  = passive_ul_unav_res(g, tbs, bg, o_ack, ucfg->ul_uci_beta, ucfg->ul_uci_alpha);
+      if (unav == 0) {
+        continue;
+      }
+      atomic_fetch_add_explicit(&g_uci_trials, 1, memory_order_relaxed);
+      ulsch->unav_res = unav;
+      ulsch->harq_process->harq_to_be_cleared = true; // else `d` accumulates across attempts
+      nr_rx_pusch_group_tp(gnb, &pvp, &pdup, &unavp, 1, frame, slot);
+      rc = nr_ulsch_decoding(gnb, fp, frame, slot, &ulsch_id, 1);
+      if (rc == 0 && !hp_crc_failed(ulsch)) {
+        atomic_fetch_add_explicit(&g_uci_rescued, 1, memory_order_relaxed);
+        out->o_ack = (uint8_t)o_ack;
+        break;
+      }
+    }
+  }
+
   if (utim) {
     utim_add(UTIM_DECODE, t_stage);
     /* slots_per_frame is 10 * 2^mu; the slot budget is 10 ms / slots_per_frame. */
@@ -965,11 +1109,13 @@ void nr_pusch_passive_stats_dump(void)
   const uint64_t zt = atomic_load_explicit(&g_zero_tb, memory_order_relaxed);
   LOG_I(PHY,
         "SENSING: pusch_passive[try=%lu crc_ok=%lu (%.1f%%) seg_fail=%lu zero_tb=%lu (%.1f%%) "
-        "ta_refined=%lu "
+        "ta_refined=%lu uci[trials=%lu rescued=%lu] "
         "health=%.1f%% unsup=%lu setup_fail=%lu] ul_cfr[submits=%lu re=%lu]\n",
         (unsigned long)t, (unsigned long)k, t ? (100.0 * (double)k / (double)t) : 0.0,
         (unsigned long)sf, (unsigned long)zt, t ? (100.0 * (double)zt / (double)t) : 0.0,
         (unsigned long)atomic_load_explicit(&g_ta_refined, memory_order_relaxed),
+        (unsigned long)atomic_load_explicit(&g_uci_trials, memory_order_relaxed),
+        (unsigned long)atomic_load_explicit(&g_uci_rescued, memory_order_relaxed),
         (k + sf) ? (100.0 * (double)k / (double)(k + sf)) : 0.0,
         (unsigned long)atomic_load_explicit(&g_rej_unsup, memory_order_relaxed),
         (unsigned long)atomic_load_explicit(&g_rej_setup, memory_order_relaxed),

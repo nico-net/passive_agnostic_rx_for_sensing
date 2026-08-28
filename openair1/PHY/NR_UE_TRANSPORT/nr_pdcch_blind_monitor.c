@@ -221,6 +221,19 @@ static int parse_pdsch(const char* s)
 /* Its own config line rather than more fields on pdcch_blind_monitor_ul_pusch, for the same reason
  * parse_scan_thread gives: it defers a stage, which is independent of whether that stage runs at
  * all. Absent/0 = in-line, the previous behaviour. */
+// "max_trials[:beta_idx[:alpha_idx]]" -- UCI-on-PUSCH reservation search. Absent/0 = off.
+static int parse_ul_uci(const char* s)
+{
+  g_cfg.ul_uci_beta  = 11;  // ~20, a mid-table default; override from the gNB's own betaOffsets
+  g_cfg.ul_uci_alpha = 0;   // 0.5, what this deployment logs
+  const int n = sscanf(s, "%d:%d:%d", &g_cfg.ul_uci_search, &g_cfg.ul_uci_beta, &g_cfg.ul_uci_alpha);
+  if (n < 1 || g_cfg.ul_uci_search < 0) {
+    g_cfg.ul_uci_search = 0;
+    return 0;
+  }
+  return 1;
+}
+
 static int parse_ul_thread(const char* s)
 {
   g_cfg.ul_queue_depth = 0;
@@ -539,6 +552,9 @@ void nr_pdcch_blind_monitor_init(void)
   g_cfg.scan_thread            = 0;  // in-line on the PHY receive thread, as before
   g_cfg.scan_queue_depth       = 0;
   g_cfg.scan_thread_core       = -1;
+  g_cfg.ul_uci_search          = 0;  // off = previous behaviour
+  g_cfg.ul_uci_beta            = 11;
+  g_cfg.ul_uci_alpha           = 0;
   g_cfg.ul_thread              = 0;  // in-line on the PHY receive thread, as before
   g_cfg.ul_queue_depth         = 0;
   g_cfg.ul_thread_core         = -1;
@@ -575,6 +591,7 @@ void nr_pdcch_blind_monitor_init(void)
   char*     p_noise_gates = NULL;
   char*     p_scan_thread = NULL;
   char*     p_ul_thread   = NULL;
+  char*     p_ul_uci      = NULL;
   char*     p_tda        = NULL;
   char*     p_dmrs       = NULL;
   char*     p_pdsch      = NULL;
@@ -667,6 +684,10 @@ void nr_pdcch_blind_monitor_init(void)
         "Passive PUSCH receive; decode[:max_per_slot[:ta_offset_samples]] (decode 0=off default, "
         "1=on; ta_offset 0 = derive N_TA_offset from the sample rate -- the per-UE N_TA is in no DCI)",
         0, .strptr = &p_ul_pusch, .defstrval = "", TYPE_STRING, 0},
+      {"pdcch_blind_monitor_ul_uci",
+        "UCI-on-PUSCH reservation search: max_trials[:beta_idx[:alpha_idx]]. 0/absent = off. O_ACK is "
+        "not in the UL DCI (the DAI pins it only mod 4), so candidates are tried and the TB CRC decides",
+        0, .strptr = &p_ul_uci, .defstrval = "", TYPE_STRING, 0},
       {"pdcch_blind_monitor_ul_thread",
         "Defer the passive PUSCH decode off the PHY receive thread; n_consumers[:queue_depth[:core]]. "
         "0/absent = in-line. Measured: the UL decode is 1065us per grant against a 500us slot, "
@@ -703,6 +724,10 @@ void nr_pdcch_blind_monitor_init(void)
   if (p_rnti_range != NULL && p_rnti_range[0] != '\0' && !parse_rnti_range(p_rnti_range)) {
     LOG_E(PHY, "SENSING: malformed pdcch_blind_monitor_rnti_range '%s'; using default %u-%u\n", p_rnti_range,
           NR_PDCCH_BLIND_RNTI_MIN_DEFAULT, NR_PDCCH_BLIND_RNTI_MAX_DEFAULT);
+  }
+  if (p_ul_uci != NULL && p_ul_uci[0] != '\0' && !parse_ul_uci(p_ul_uci)) {
+    LOG_E(PHY, "SENSING: malformed pdcch_blind_monitor_ul_uci '%s'; UCI reservation search off\n",
+          p_ul_uci);
   }
   if (p_ul_thread != NULL && p_ul_thread[0] != '\0' && !parse_ul_thread(p_ul_thread)) {
     LOG_E(PHY, "SENSING: malformed pdcch_blind_monitor_ul_thread '%s'; UL decode stays in-line\n",
