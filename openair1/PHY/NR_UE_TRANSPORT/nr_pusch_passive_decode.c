@@ -516,8 +516,22 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
     for (int a = 0; a < nant; a++) {
       const c16_t *rx = (const c16_t *)ue->common_vars.rxdata[a];
       for (int sym = s0; sym < s1 && sym < sps; sym++) {
-        nr_symbol_fep_ul(fp, rx, &gnb->common_vars.rxdataF[a][slot_off + sym * symsz],
-                         (unsigned char)sym, (unsigned char)slot, ul_sample_offset);
+        c16_t *dst = &gnb->common_vars.rxdataF[a][slot_off + sym * symsz];
+        nr_symbol_fep_ul(fp, rx, dst, (unsigned char)sym, (unsigned char)slot, ul_sample_offset);
+        /* ...AND THE ROTATION. This is the second half of nr_ofdm_demod_and_rx_rotation()
+         * (slot_fep_nr.c:219), which is what ulsim feeds phy_procedures_gNB_uespec_RX() with and
+         * which decodes -- so it is the authority on what nr_rx_pusch_group_tp() expects, and it
+         * expects ROTATED rxdataF. The gNB RU path (nr_fep) omits it only because the RU applies
+         * its own rotation elsewhere.
+         *
+         * Note fp->N_RB_UL, not N_RB_DL: nr_symbol_fep() -- the UE-side path this code used to go
+         * through -- passes N_RB_DL, which is a downlink-receiver assumption. They happen to be
+         * equal on this TDD cell, so that particular difference is inert here, but the two
+         * functions are not interchangeable in general. */
+        apply_nr_rotation_symbol_RX(fp->symbols_per_slot, fp->slots_per_subframe,
+                                    fp->timeshift_symbol_rotation, fp->first_carrier_offset,
+                                    dst, fp->symbol_rotation[link_type_ul], fp->N_RB_UL,
+                                    slot, sym);
       }
     }
   }
