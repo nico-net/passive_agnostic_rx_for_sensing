@@ -184,6 +184,17 @@ typedef struct {
   int   scan_thread_core;  // first core to pin consumers to; <0 = unpinned. Same caution as
                            // pdsch_thread_core -- do not share with --thread-pool's cores.
 
+  // ---- Deferred passive PUSCH decode (2026-08-28). All-zero = in-line on the PHY receive thread,
+  // exactly the previous behaviour. UTIM measured that in-line decode at 1065 us mean against a
+  // 500 us slot budget -- over_slot 16830/16907 = 99.5 %, i.e. every uplink grant overran its
+  // deadline. See nr_pusch_passive_queue.h.
+  int   ul_thread;         // consumer count; 0 = in-line (default). Bounded by the decode-context
+                           // count, since consumer index IS context index and two consumers must
+                           // never share one PHY_VARS_gNB.
+  int   ul_queue_depth;    // ring depth; 0 = auto (8). Deeper buys staleness, not throughput.
+  int   ul_thread_core;    // first core to pin consumers to; <0 = unpinned. Do not share with
+                           // --thread-pool's cores.
+
   // ---- DCI format 1_0 scanning (2026-08-21). All-zero = off, i.e. exactly the format-1_1-only
   // behaviour this module had before. See nr_pdcch_blind_monitor.h's nr_blind_dci_format_t block
   // for why a passive receiver needs 1_0 at all (SIB1, Msg2/RAR, Msg4/RRCSetup, C-RNTI fallback).

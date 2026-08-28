@@ -5,6 +5,7 @@
 #include "nr_pusch_passive_monitor_rt.h"
 #include "nr_pusch_passive_decode.h"
 #include "nr_pdcch_blind_monitor_rt.h"
+#include "nr_pusch_passive_queue.h"
 
 #include "common/utils/LOG/log.h"
 #include "common/utils/nr/nr_common.h"
@@ -29,6 +30,9 @@ static book_entry_t g_book[BOOK_SIZE];
 static pthread_mutex_t g_book_lock = PTHREAD_MUTEX_INITIALIZER;
 
 static _Atomic uint64_t g_parked, g_claimed, g_expired, g_overwritten;
+
+/* Published in executables/nr-ue.c immediately BEFORE nrue_ru_read() fills that slot's rxdata. */
+extern _Atomic long nr_ue_diag_producer_absolute_slot;
 
 void nr_pusch_grant_book_add(const nr_pdcch_blind_ul_result_t *g, int frame, int slot,
                              int slots_per_frame)
@@ -117,27 +121,53 @@ void nr_pusch_passive_monitor_process(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_
     LOG_I(PHY, "SENSING: PUSCHDIAG entering first decode %d.%d rnti=0x%x\n",
           proc->frame_rx, proc->nr_slot_rx, g.rnti);
   }
-  nr_pusch_passive_out_t out;
-  nr_pusch_passive_decode(ue, proc->frame_rx, proc->nr_slot_rx, &g, ta, &out);
+  /* ---- Deferred decode (nr_pusch_passive_queue.h). UTIM measured this decode at 1065 us mean
+   * against a 500 us slot, over_slot 16830/16907 = 99.5 %: in-line, every uplink grant overruns its
+   * deadline by more than 2x. Started lazily HERE for the same reason the downlink pools are: the
+   * consumer needs a live PHY_VARS_NR_UE with frame_parms sized and rxdata allocated, which does
+   * not exist when [sensing] is parsed. One-shot, and RT-side, so the guard stays single-threaded.
+   * A refused start (--cont-fo-comp) degrades to the previous in-line behaviour rather than
+   * dropping every grant. ---- */
+  if (cfg->ul_thread) {
+    static int s_ul_tried = 0;
+    if (!s_ul_tried) {
+      s_ul_tried = 1;
+      const int depth = (cfg->ul_queue_depth > 0) ? cfg->ul_queue_depth : 8;
+      nr_pusch_passive_queue_start(ue, depth, cfg->ul_thread, cfg->ul_thread_core);
+    }
+  }
 
-  /* One line per attempt, gated: this is the instrument that says whether a decode failure is the
-   * allocation, the timing offset or the link. Sampling rather than every slot -- at 2 UL slots in
-   * 10 this would otherwise be ~200 lines/s, and a probe firing every occasion has already cost
-   * this tree a run. */
-  static int s_probe = -1;
-  if (s_probe < 0) {
-    s_probe = (getenv("ISAC_PUSCH_DIAG") != NULL) ? 1 : 0;
+  /* The producer's monotonic slot for THIS uplink slot. Computed here, on the receive thread, and
+   * carried in the job: it is both the staleness reference and the CFR's slow-time index, and a
+   * consumer recomputing it would read a producer counter that has moved on since these samples
+   * were taken. Phase-align the producer counter to this slot -- both advance one per slot, so
+   * subtracting the phase difference modulo the wrap gives this slot's value on the producer
+   * timeline. */
+  long abs_slot;
+  {
+    const long prod = atomic_load_explicit(&nr_ue_diag_producer_absolute_slot, memory_order_relaxed);
+    const long spf  = (long)ue->frame_parms.slots_per_frame;
+    const long wrap = spf * 1024;
+    const long fd   = (long)proc->frame_rx * spf + (long)proc->nr_slot_rx;
+    const long lag  = ((prod - fd) % wrap + wrap) % wrap;
+    abs_slot = prod - lag;
   }
-  if (s_probe) {
-    LOG_I(PHY,
-          "SENSING: PUSCHDIAG %d.%d rnti=0x%x k2=%u prb=%u+%u sym=%u+%u mcs=%u/tbl%u rv=%u ta=%d "
-          "tbs=%u G=%u Qm=%u snr=%.1f status=%u %s\n",
-          proc->frame_rx, proc->nr_slot_rx, g.rnti, (unsigned)g.k2, (unsigned)g.start_rb,
-          (unsigned)g.num_rb, (unsigned)g.start_symbol, (unsigned)g.num_symbols, (unsigned)g.mcs,
-          (unsigned)g.mcs_table, (unsigned)g.rv, ta, out.tbs_bytes, out.G,
-          (unsigned)out.qam_mod_order, out.snr_db, (unsigned)out.status,
-          out.reject_reason ? out.reject_reason : "-");
+
+  nr_pusch_passive_out_t out;
+  if (nr_pusch_passive_queue_running()) {
+    nr_pusch_passive_job_t job = {.grant             = g,
+                                  .frame_rx          = (int)proc->frame_rx,
+                                  .nr_slot_rx        = (int)proc->nr_slot_rx,
+                                  .ta_offset_samples = ta,
+                                  .absolute_slot     = abs_slot};
+    nr_pusch_passive_queue_enqueue(&job);
+    /* Nothing more to report per grant here: the outcome belongs to the consumer, and the census
+     * (pusch_passive[...] / puschq[...]) is where it is read. Deliberately NOT decoded in-line on a
+     * failed enqueue -- that would reintroduce the deadline overrun this exists to remove. */
+    return;
   }
+  nr_pusch_passive_decode(ue, 0, proc->frame_rx, proc->nr_slot_rx, &g, ta, (uint64_t)abs_slot, &out);
+
 }
 
 void nr_pusch_grant_book_stats_dump(void)
@@ -148,5 +178,15 @@ void nr_pusch_grant_book_stats_dump(void)
         (unsigned long)atomic_load_explicit(&g_claimed, memory_order_relaxed),
         (unsigned long)atomic_load_explicit(&g_expired, memory_order_relaxed),
         (unsigned long)atomic_load_explicit(&g_overwritten, memory_order_relaxed));
+  if (nr_pusch_passive_queue_running()) {
+    nr_pusch_passive_queue_stats_t q;
+    nr_pusch_passive_queue_get_stats(&q);
+    LOG_I(PHY,
+          "SENSING: PUSCHQ queued=%lu decoded=%lu crc_ok=%lu dropped[full=%lu stale=%lu] "
+          "max_lag_slots=%lu/%d\n",
+          (unsigned long)q.queued, (unsigned long)q.decoded, (unsigned long)q.crc_ok,
+          (unsigned long)q.dropped_full, (unsigned long)q.dropped_stale,
+          (unsigned long)q.max_lag_slots, NR_PUSCH_PASSIVE_QUEUE_MARGIN_SLOTS);
+  }
   nr_pusch_passive_stats_dump();
 }

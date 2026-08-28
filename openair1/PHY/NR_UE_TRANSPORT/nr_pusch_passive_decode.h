@@ -53,23 +53,43 @@ typedef struct {
   uint16_t nb_rb;
   uint8_t  nb_symbols;
   float    snr_db;        ///< post-estimation SNR, per this path's own scale
+  /// DM-RS CIR peak offset in samples, as nr_pusch_channel_estimation() measured it. This is the
+  /// FFT-window error the applied timing advance did NOT remove, and it is the one number that says
+  /// whether a failed decode is a timing problem: the receiver's own delay compensation spans only
+  /// +/-MAX_DELAY_COMP (20) samples, so anything past that is uncorrected ISI.
+  int      est_delay;
+  int      n_segments;    ///< transport-block segments (C)
+  int      segments_ok;   ///< of which the CRC passed. 0 vs C-1 are different failures.
   const char *reject_reason; ///< non-NULL when status != OK
 } nr_pusch_passive_out_t;
+
+/// Independent decode contexts. Each holds its own minimal PHY_VARS_gNB -- rxdataF ring, pusch_vars,
+/// ULSCH HARQ and thread pool -- so two consumers never share one. Sized to the queue's consumer
+/// cap; a caller decoding in-line uses context 0.
+#define NR_PUSCH_PASSIVE_MAX_CTX 6
 
 /**
  * @brief Decode one passively-observed PUSCH.
  *
  * @param ue                the passive UE (supplies frame_parms, rxdata, thread pool, LDPC iface)
+ * @param ctx               decode-context index, < NR_PUSCH_PASSIVE_MAX_CTX. Every buffer the chain
+ *                          writes lives in this context, so concurrent callers MUST pass distinct
+ *                          values. 0 for the in-line path.
  * @param frame,slot        the slot the PUSCH occupies -- the DCI's slot PLUS k2, not the DCI slot
  * @param g                 the recovered UL grant
  * @param ta_offset_samples samples to advance the FFT window by (N_TA_offset + N_TA); 0 = none
+ * @param abs_slot          CPI slow-time index for this PUSCH, captured on the RECEIVE thread.
+ *                          Must not be derived here once deferred: a consumer reads a producer
+ *                          counter that has moved on since these samples were taken. 0 = derive.
  * @param[out] out          filled unconditionally; check out->status
  */
 bool nr_pusch_passive_decode(PHY_VARS_NR_UE *ue,
+                             int      ctx,
                              uint32_t frame,
                              uint8_t  slot,
                              const nr_pdcch_blind_ul_result_t *g,
                              int32_t  ta_offset_samples,
+                             uint64_t abs_slot,
                              nr_pusch_passive_out_t *out);
 
 /// Release the minimal gNB context. Safe to call when it was never built.

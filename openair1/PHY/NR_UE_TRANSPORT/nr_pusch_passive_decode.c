@@ -73,7 +73,12 @@ NR_gNB_PHY_STATS_t *get_phy_stats(PHY_VARS_gNB *gNB, uint16_t rnti)
  * internal state on this id, so an overlap would alias two unrelated transport blocks. */
 #define PASSIVE_UL_HARQ_TAG_BASE 4000
 
-static PHY_VARS_gNB *g_gnb;
+/* One context per potential concurrent decoder. Every buffer the receive chain writes -- the
+ * rxdataF ring, pusch_vars, the ULSCH HARQ, the tpool -- hangs off PHY_VARS_gNB, so sharing one
+ * across threads would interleave two grants' intermediate state silently. Indexed rather than
+ * thread-local: the queue already numbers its consumers, and __thread storage of this size is what
+ * produced an AVX alignment fault in the AoA work. */
+static PHY_VARS_gNB *g_gnb[NR_PUSCH_PASSIVE_MAX_CTX];
 static int           g_gnb_nant;
 static _Atomic uint64_t g_try, g_crc_ok, g_rej_unsup, g_rej_setup;
 static _Atomic uint64_t g_seg_fail, g_zero_tb;
@@ -164,9 +169,12 @@ static _Atomic uint64_t g_ant_n;
  * would drag most of PHY_NR into the link for buffers nothing here touches. Only the fields the
  * PUSCH receive chain actually reads are built, each one traceable to where it is read.
  * ------------------------------------------------------------------------------------------ */
-static bool passive_gnb_prepare(PHY_VARS_NR_UE *ue)
+static bool passive_gnb_prepare(PHY_VARS_NR_UE *ue, int ctx)
 {
-  if (g_gnb != NULL) {
+  if (ctx < 0 || ctx >= NR_PUSCH_PASSIVE_MAX_CTX) {
+    return false;
+  }
+  if (g_gnb[ctx] != NULL) {
     return true;
   }
   const NR_DL_FRAME_PARMS *ufp = &ue->frame_parms;
@@ -259,22 +267,21 @@ static bool passive_gnb_prepare(PHY_VARS_NR_UE *ue)
   gnb->ulsch = (NR_gNB_ULSCH_t *)malloc16_clear(sizeof(NR_gNB_ULSCH_t));
   gnb->ulsch[0] = new_gNB_ulsch(gnb->max_ldpc_iterations, gnb->frame_parms.N_RB_UL);
 
-  g_gnb       = gnb;
+  g_gnb[ctx]  = gnb;
   g_gnb_nant  = nant;
   LOG_I(PHY,
-        "SENSING: passive PUSCH receiver ready (N_RB_UL=%d ant=%d fft=%d sps=%d pci=%d)\n",
-        gnb->frame_parms.N_RB_UL, nant, symsz, sps, ufp->Nid_cell);
+        "SENSING: passive PUSCH receiver ready ctx=%d (N_RB_UL=%d ant=%d fft=%d sps=%d pci=%d)\n",
+        ctx, gnb->frame_parms.N_RB_UL, nant, symsz, sps, ufp->Nid_cell);
   return true;
 }
 
 void nr_pusch_passive_decode_free(void)
 {
-  if (g_gnb == NULL) {
-    return;
-  }
   /* Deliberately a shallow teardown at process exit only: the buffers above are freed by the OS,
    * and free_gNB_ulsch()'s partner allocations are inside a struct this file did not fully build. */
-  g_gnb = NULL;
+  for (int c = 0; c < NR_PUSCH_PASSIVE_MAX_CTX; c++) {
+    g_gnb[c] = NULL;
+  }
 }
 
 /* Fill the FAPI PUSCH PDU from a recovered UL grant. Everything here either came from the DCI or
@@ -348,12 +355,14 @@ static void fill_pusch_pdu(const nr_pdcch_blind_ul_result_t *g, int nant, nfapi_
   p->beamforming.dig_bf_interface       = nant;
 }
 
-bool nr_pusch_passive_decode(PHY_VARS_NR_UE *ue,
-                             uint32_t frame,
-                             uint8_t  slot,
-                             const nr_pdcch_blind_ul_result_t *g,
-                             int32_t  ta_offset_samples,
-                             nr_pusch_passive_out_t *out)
+static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
+                                          int      ctx,
+                                          uint32_t frame,
+                                          uint8_t  slot,
+                                          const nr_pdcch_blind_ul_result_t *g,
+                                          int32_t  ta_offset_samples,
+                                          uint64_t abs_slot,
+                                          nr_pusch_passive_out_t *out)
 {
   memset(out, 0, sizeof(*out));
   out->status = NR_PUSCH_PASSIVE_ERROR;
@@ -385,7 +394,7 @@ bool nr_pusch_passive_decode(PHY_VARS_NR_UE *ue,
     out->reject_reason = "rv != 0 with no HARQ history to combine";
     return false;
   }
-  if (!passive_gnb_prepare(ue)) {
+  if (!passive_gnb_prepare(ue, ctx)) {
     atomic_fetch_add_explicit(&g_rej_setup, 1, memory_order_relaxed);
     out->reject_reason = "gNB context allocation failed";
     return false;
@@ -400,7 +409,7 @@ bool nr_pusch_passive_decode(PHY_VARS_NR_UE *ue,
   const int      utim = utim_enabled();
   const uint64_t t_all = utim ? utim_now() : 0;
   uint64_t t_stage = t_all;
-  PHY_VARS_gNB *gnb = g_gnb;
+  PHY_VARS_gNB *gnb = g_gnb[ctx];
   NR_DL_FRAME_PARMS *fp = &gnb->frame_parms;
   const int nant = g_gnb_nant;
   const int symsz = fp->ofdm_symbol_size;
@@ -536,9 +545,46 @@ bool nr_pusch_passive_decode(PHY_VARS_NR_UE *ue,
         ul_l = (uint32_t *)malloc16_clear(sizeof(uint32_t) * cap);
         ul_cap = (ul_h && ul_k && ul_l) ? cap : 0;
       }
+      /* ONE-SHOT INDEX AUDIT. The conventions above are read off nr_ul_channel_estimation.c, and a
+       * prior version of this loop used the absolute index and produced numbers that LOOKED fine on
+       * near-full-band grants. So the choice is measured here rather than trusted: print the energy
+       * the estimate carries at the relative index against the absolute one for the first grant. If
+       * relative is not the larger by a wide margin, this comment is wrong and so is the code. */
+      {
+        static __thread int s_audit = 1;
+        if (s_audit) {
+          s_audit = 0;
+          const c16_t *h0 = (const c16_t *)&pvp->ul_ch_estimates[0][fp->ofdm_symbol_size * dmrs_sym];
+          double e_rel = 0.0, e_abs = 0.0;
+          for (int j = 0; j < num_sc; j++) {
+            const int ka = (start_sc + j) % fp->ofdm_symbol_size;
+            e_rel += (double)h0[j].r * h0[j].r + (double)h0[j].i * h0[j].i;
+            e_abs += (double)h0[ka].r * h0[ka].r + (double)h0[ka].i * h0[ka].i;
+          }
+          LOG_I(PHY,
+                "SENSING: ULCFRIDX dmrs_sym=%d start_sc=%d num_sc=%d num_sp=%d E_rel=%.3e E_abs=%.3e\n",
+                dmrs_sym, start_sc, num_sc, num_sp, e_rel, e_abs);
+        }
+      }
       uint32_t nof_re = 0;
       double   pw = 0.0;
       double   ant_pw[PASSIVE_UL_MAX_ANT] = {0};
+      /* TWO DIFFERENT SUBCARRIER CONVENTIONS, and mixing them is what this loop got wrong.
+       *
+       * nr_pusch_channel_estimation() writes ul_ch_estimates[..][symbolSize*symbol + n] with n
+       * RELATIVE to the allocation, n = 0 .. rb_size*12-1: it starts each symbol's buffer at index
+       * 0 and walks forward (nr_ul_channel_estimation.c:109 `ul_ch = &..[symbol_offset]`, then
+       * `ul_ch += 4`, and the delta realignment at :246 shifts within `nb_rb_pusch*12`). Only
+       * rxdataF is absolute there -- it is read as `rx[(k0 + n) % symbolSize]`.
+       *
+       * Reading it at the ABSOLUTE subcarrier was silently wrong in a way sized by the grant: a
+       * near-full-band allocation still lands inside the written region and returns plausible
+       * nonsense, while a small one reads untouched memory and returns EXACTLY ZERO. Measured both:
+       * 256-PRB grants gave pw=[13333 579 58538 53579] (wrong, but believable) and 7-PRB grants
+       * gave pw=[0 0 0 0] over 308628 REs, which is what made it visible at all.
+       *
+       * The REPORTED subcarrier (ul_k below) stays ABSOLUTE and CRB-referenced -- that is what the
+       * CPI grid indexes on, and it was always correct. Only the read index was wrong. */
       for (int j = 0; j < num_sc && nof_re < ul_cap; j++) {
         const int k_abs = (start_sc + j) % fp->ofdm_symbol_size;
         for (uint32_t a = 0; a < nof_ant_cfr; a++) {
@@ -546,9 +592,9 @@ bool nr_pusch_passive_decode(PHY_VARS_NR_UE *ue,
            * would need its own submission rather than being folded into this one. */
           const c16_t *h = (const c16_t *)&pvp->ul_ch_estimates[0 * num_sp + (int)a][fp->ofdm_symbol_size * dmrs_sym];
           const size_t o = 2 * ((size_t)a * cap + nof_re);
-          ul_h[o]     = (float)h[k_abs].r;
-          ul_h[o + 1] = (float)h[k_abs].i;
-          const double p2 = (double)h[k_abs].r * h[k_abs].r + (double)h[k_abs].i * h[k_abs].i;
+          ul_h[o]     = (float)h[j].r;
+          ul_h[o + 1] = (float)h[j].i;
+          const double p2 = (double)h[j].r * h[j].r + (double)h[j].i * h[j].i;
           if (a == 0) {
             pw += p2;
           }
@@ -584,11 +630,19 @@ bool nr_pusch_passive_decode(PHY_VARS_NR_UE *ue,
          * counters advance one per slot, so subtracting the phase difference modulo the wrap yields
          * the producer-timeline value FOR THIS SLOT. Exact while the lag stays under one wrap
          * (~10 slots in practice against a 20480-slot wrap). */
-        const long     prod = atomic_load_explicit(&nr_ue_diag_producer_absolute_slot, memory_order_relaxed);
-        const long     wrap = (long)fp->slots_per_frame * 1024;
-        const long     fd   = (long)frame * fp->slots_per_frame + (long)slot;
-        const long     lag  = ((prod - fd) % wrap + wrap) % wrap;
-        const uint32_t ul_slot_idx = (uint32_t)(prod - lag);
+        uint32_t ul_slot_idx;
+        if (abs_slot != 0) {
+          /* Stamped by the producer at enqueue. Once the decode is deferred this is the ONLY
+           * correct source: the phase-alignment below assumes the producer is at most a pipeline
+           * depth ahead, and a queued job breaks that assumption by however long it waited. */
+          ul_slot_idx = (uint32_t)abs_slot;
+        } else {
+          const long prod = atomic_load_explicit(&nr_ue_diag_producer_absolute_slot, memory_order_relaxed);
+          const long wrap = (long)fp->slots_per_frame * 1024;
+          const long fd   = (long)frame * fp->slots_per_frame + (long)slot;
+          const long lag  = ((prod - fd) % wrap + wrap) % wrap;
+          ul_slot_idx = (uint32_t)(prod - lag);
+        }
         nr_isac_submit_cfr_multi(ul_slot_idx, 0.0f,
                                  NR_ISAC_SRC_PUSCH_DMRS, &carrier, ul_h, nof_ant_cfr, cap,
                                  ul_k, ul_l, nof_re, 1.0f);
@@ -628,6 +682,7 @@ bool nr_pusch_passive_decode(PHY_VARS_NR_UE *ue,
   out->nb_rb         = g->num_rb;
   out->nb_symbols    = g->num_symbols;
   out->tbs_bytes     = tbs >> 3;
+  out->est_delay     = pvp->delay.est_delay;
   if (pvp->ulsch_noise_power_tot > 0) {
     out->snr_db = 10.0f * log10f((float)pvp->ulsch_power_tot / (float)pvp->ulsch_noise_power_tot);
   }
@@ -639,6 +694,8 @@ bool nr_pusch_passive_decode(PHY_VARS_NR_UE *ue,
    * two are checked separately here, and a segment failure is counted apart from the all-zero case
    * below: they have completely different causes. */
   NR_UL_gNB_HARQ_t *hp = ulsch->harq_process;
+  out->n_segments  = (int)hp->C;
+  out->segments_ok = (int)hp->processedSegments;
   if (rc != 0 || hp->b == NULL) {
     out->status = NR_PUSCH_PASSIVE_CRC_FAIL;
     out->reject_reason = "LDPC decoder interface error";
@@ -677,6 +734,39 @@ bool nr_pusch_passive_decode(PHY_VARS_NR_UE *ue,
   out->tb     = hp->b;
   atomic_fetch_add_explicit(&g_crc_ok, 1, memory_order_relaxed);
   return true;
+}
+
+/* The per-grant probe lives HERE, wrapping the decode, rather than in a caller: there are two
+ * callers now (the in-line uplink hook and the deferred queue's consumer) and a probe that only one
+ * of them carries goes silent exactly when the configuration changes -- which is when it is most
+ * needed. Gated, and sampling nothing: at ~178 grants/s over a 95 s capture this is ~17 k lines,
+ * well inside what this tree has found tolerable (a 55 k-line probe cost a run once). */
+bool nr_pusch_passive_decode(PHY_VARS_NR_UE *ue,
+                             int      ctx,
+                             uint32_t frame,
+                             uint8_t  slot,
+                             const nr_pdcch_blind_ul_result_t *g,
+                             int32_t  ta_offset_samples,
+                             uint64_t abs_slot,
+                             nr_pusch_passive_out_t *out)
+{
+  const bool ok = nr_pusch_passive_decode_inner(ue, ctx, frame, slot, g, ta_offset_samples, abs_slot, out);
+
+  static int s_probe = -1;
+  if (s_probe < 0) {
+    s_probe = (getenv("ISAC_PUSCH_DIAG") != NULL) ? 1 : 0;
+  }
+  if (s_probe && g != NULL) {
+    LOG_I(PHY,
+          "SENSING: PUSCHDIAG %u.%u rnti=0x%x k2=%u prb=%u+%u sym=%u+%u mcs=%u/tbl%u rv=%u ta=%d "
+          "tbs=%u G=%u Qm=%u snr=%.1f delay=%d seg=%d/%d status=%u %s\n",
+          frame, (unsigned)slot, g->rnti, (unsigned)g->k2, (unsigned)g->start_rb, (unsigned)g->num_rb,
+          (unsigned)g->start_symbol, (unsigned)g->num_symbols, (unsigned)g->mcs,
+          (unsigned)g->mcs_table, (unsigned)g->rv, ta_offset_samples, out->tbs_bytes, out->G,
+          (unsigned)out->qam_mod_order, out->snr_db, out->est_delay, out->segments_ok,
+          out->n_segments, (unsigned)out->status, out->reject_reason ? out->reject_reason : "-");
+  }
+  return ok;
 }
 
 void nr_pusch_passive_stats_dump(void)

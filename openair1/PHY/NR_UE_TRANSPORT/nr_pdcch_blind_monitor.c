@@ -218,6 +218,21 @@ static int parse_pdsch(const char* s)
 // Its own config line rather than more fields appended to pdcch_blind_monitor_pdsch, because it
 // defers a DIFFERENT stage (the scan, not the decode of what the scan found) and the two are
 // independently useful: either, neither, or both. Absent/0 = in-line, the previous behaviour.
+/* Its own config line rather than more fields on pdcch_blind_monitor_ul_pusch, for the same reason
+ * parse_scan_thread gives: it defers a stage, which is independent of whether that stage runs at
+ * all. Absent/0 = in-line, the previous behaviour. */
+static int parse_ul_thread(const char* s)
+{
+  g_cfg.ul_queue_depth = 0;
+  g_cfg.ul_thread_core = -1;
+  const int n = sscanf(s, "%d:%d:%d", &g_cfg.ul_thread, &g_cfg.ul_queue_depth, &g_cfg.ul_thread_core);
+  if (n < 1 || g_cfg.ul_thread < 0) {
+    g_cfg.ul_thread = 0;
+    return 0;
+  }
+  return 1;
+}
+
 static int parse_scan_thread(const char* s)
 {
   g_cfg.scan_queue_depth = 0;
@@ -518,6 +533,9 @@ void nr_pdcch_blind_monitor_init(void)
   g_cfg.scan_thread            = 0;  // in-line on the PHY receive thread, as before
   g_cfg.scan_queue_depth       = 0;
   g_cfg.scan_thread_core       = -1;
+  g_cfg.ul_thread              = 0;  // in-line on the PHY receive thread, as before
+  g_cfg.ul_queue_depth         = 0;
+  g_cfg.ul_thread_core         = -1;
   /* UL defaults: every width at -1 = the documented assumption, both identities at -1 = fall back
    * to the PCI, scan off. With dci01_scan == 0 none of this is read, so an unconfigured deployment
    * is bit-identical to before. */
@@ -550,6 +568,7 @@ void nr_pdcch_blind_monitor_init(void)
   char*     p_rnti_range = NULL;
   char*     p_noise_gates = NULL;
   char*     p_scan_thread = NULL;
+  char*     p_ul_thread   = NULL;
   char*     p_tda        = NULL;
   char*     p_dmrs       = NULL;
   char*     p_pdsch      = NULL;
@@ -642,6 +661,11 @@ void nr_pdcch_blind_monitor_init(void)
         "Passive PUSCH receive; decode[:max_per_slot[:ta_offset_samples]] (decode 0=off default, "
         "1=on; ta_offset 0 = derive N_TA_offset from the sample rate -- the per-UE N_TA is in no DCI)",
         0, .strptr = &p_ul_pusch, .defstrval = "", TYPE_STRING, 0},
+      {"pdcch_blind_monitor_ul_thread",
+        "Defer the passive PUSCH decode off the PHY receive thread; n_consumers[:queue_depth[:core]]. "
+        "0/absent = in-line. Measured: the UL decode is 1065us per grant against a 500us slot, "
+        "over_slot 99.5 %",
+        0, .strptr = &p_ul_thread, .defstrval = "", TYPE_STRING, 0},
       {"pdcch_blind_monitor_scan_thread",
         "Defer the blind-PDCCH scan (FEP/LLR/demap/candidate decode) off the PHY receive thread; "
         "n_consumers[:queue_depth[:core]]. 0/absent = in-line. Measured: the scan is 69-102us per "
@@ -673,6 +697,10 @@ void nr_pdcch_blind_monitor_init(void)
   if (p_rnti_range != NULL && p_rnti_range[0] != '\0' && !parse_rnti_range(p_rnti_range)) {
     LOG_E(PHY, "SENSING: malformed pdcch_blind_monitor_rnti_range '%s'; using default %u-%u\n", p_rnti_range,
           NR_PDCCH_BLIND_RNTI_MIN_DEFAULT, NR_PDCCH_BLIND_RNTI_MAX_DEFAULT);
+  }
+  if (p_ul_thread != NULL && p_ul_thread[0] != '\0' && !parse_ul_thread(p_ul_thread)) {
+    LOG_E(PHY, "SENSING: malformed pdcch_blind_monitor_ul_thread '%s'; UL decode stays in-line\n",
+          p_ul_thread);
   }
   if (p_scan_thread != NULL && p_scan_thread[0] != '\0' && !parse_scan_thread(p_scan_thread)) {
     LOG_E(PHY, "SENSING: malformed pdcch_blind_monitor_scan_thread '%s'; scan stays in-line\n", p_scan_thread);
