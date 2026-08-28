@@ -95,6 +95,9 @@ typedef struct {
   /// is only the former -- the CFR's slow-time index, which MUST be stamped here because a consumer
   /// reading the producer counter would read a value from after its own samples were taken.
   long     absolute_slot;
+  /// Mode 2: estimate and emit the CFR, skip the LLR/LDPC half. Carried per job rather than read
+  /// from config in the consumer, so a config change cannot alter a job already in flight.
+  bool     cfr_only;
 } nr_pusch_passive_job_t;
 
 /// Per-run census. Every field is a reason a job did NOT become a decode, so a shortfall in

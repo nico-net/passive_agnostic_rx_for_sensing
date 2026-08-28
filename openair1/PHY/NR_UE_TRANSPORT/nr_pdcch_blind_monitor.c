@@ -352,13 +352,19 @@ static int parse_ul_misc(const char* s)
 }
 
 // "decode[:max_per_slot[:ta_offset_samples]]" -- passive PUSCH receive.
+// decode: 0 = off, 1 = channel-estimate + CFR + LDPC decode, 2 = CHANNEL-ESTIMATE AND CFR ONLY.
+// Mode 2 exists because the two halves have very different value per microsecond. UTIM measured
+// the LDPC decode at 403 us and the full nr_rx_pusch_group_tp at 319 us of a 1065 us grant, while
+// the DM-RS CFR -- the only part the sensing pipeline consumes -- costs 29 us and does not depend
+// on the transport block at all. With the UL CRC at 0 % that is ~700 us per grant spent on an
+// output nothing reads.
 static int parse_ul_pusch(const char* s)
 {
   g_cfg.ul_pusch_max_per_slot = 0;
   g_cfg.ul_ta_offset_samples  = 0;
   const int n = sscanf(s, "%d:%d:%d", &g_cfg.ul_pusch_decode, &g_cfg.ul_pusch_max_per_slot,
                        &g_cfg.ul_ta_offset_samples);
-  if (n < 1 || g_cfg.ul_pusch_decode < 0 || g_cfg.ul_pusch_decode > 1) {
+  if (n < 1 || g_cfg.ul_pusch_decode < 0 || g_cfg.ul_pusch_decode > 2) {
     return 0;
   }
   return 1;

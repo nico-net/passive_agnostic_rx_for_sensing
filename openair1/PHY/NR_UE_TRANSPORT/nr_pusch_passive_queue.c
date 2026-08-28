@@ -119,7 +119,7 @@ static void *nr_pusch_passive_queue_thread(void *arg)
 
     nr_pusch_passive_out_t out;
     nr_pusch_passive_decode(ue, idx, (uint32_t)job.frame_rx, (uint8_t)job.nr_slot_rx, &job.grant,
-                            job.ta_offset_samples, (uint64_t)job.absolute_slot, &out);
+                            job.ta_offset_samples, (uint64_t)job.absolute_slot, job.cfr_only, &out);
 
     if (out.status != NR_PUSCH_PASSIVE_UNSUPPORTED && out.status != NR_PUSCH_PASSIVE_ERROR) {
       atomic_fetch_add_explicit(&g_decoded, 1, memory_order_relaxed);

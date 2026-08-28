@@ -372,6 +372,7 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
                                           const nr_pdcch_blind_ul_result_t *g,
                                           int32_t  ta_offset_samples,
                                           uint64_t abs_slot,
+                                          bool     cfr_only,
                                           nr_pusch_passive_out_t *out)
 {
   memset(out, 0, sizeof(*out));
@@ -430,11 +431,25 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
    * uplink arrives EARLY, so the correction is negative. Express it modulo the rxdata ring instead
    * of passing a negative number: the FEP wraps its reads against the same total, so an offset of
    * (total - advance) lands exactly where (-advance) would. */
+  /* SIGN. nr_slot_fep() does rx_offset += sample_offset (slot_fep_nr.c:85), so a POSITIVE value
+   * reads LATER. The uplink arrives EARLIER -- the UE transmits advanced by N_TA_offset + N_TA --
+   * so the window must move BACK, and ta_offset_samples is documented as "samples to advance the
+   * FFT window by", a positive quantity.
+   *
+   * This previously passed ta_offset_samples straight through: with the derived N_TA_offset of
+   * +1600 samples at 122.88 Msps it read 1600 samples LATE when it needed 1600 EARLY -- 3200
+   * samples out, about 11x the 288-sample cyclic prefix. The negation is the fix.
+   *
+   * It hid because nothing downstream reports a gross window error as such. The DM-RS channel
+   * estimate still had real energy and still tracked the antenna imbalance, the estimator
+   * interpolates so the estimate still looked smooth across subcarriers, the equaliser still
+   * produced a full field of confident LLRs, and the only symptom was that the LDPC never
+   * converged -- which reads as "weak link" rather than "wrong samples". */
   const uint32_t total_rx = (uint32_t)(fp->samples_per_frame);
   uint32_t sample_offset = 0;
   if (ta_offset_samples != 0) {
-    int32_t off = ta_offset_samples % (int32_t)total_rx;
-    sample_offset = (uint32_t)((off <= 0) ? (int32_t)total_rx + off : off);
+    int32_t off = (int32_t)(-ta_offset_samples) % (int32_t)total_rx;
+    sample_offset = (uint32_t)((off < 0) ? (int32_t)total_rx + off : off);
     if (sample_offset == total_rx) {
       sample_offset = 0;
     }
@@ -504,7 +519,9 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
   NR_gNB_PUSCH *pvp = &gnb->pusch_vars[0];
   const nfapi_nr_pusch_pdu_t *pdup = &ulsch->harq_process->ulsch_pdu;
   uint32_t *unavp = &ulsch->unav_res;
-  atomic_fetch_add_explicit(&g_try, 1, memory_order_relaxed);
+  if (!cfr_only) {
+    atomic_fetch_add_explicit(&g_try, 1, memory_order_relaxed);
+  }
   PUSCH_STAGE(4, "entering nr_rx_pusch_group_tp");
   nr_rx_pusch_group_tp(gnb, &pvp, &pdup, &unavp, 1, frame, slot);
   if (utim) {
@@ -734,6 +751,17 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
           rho, e0, nllr, nllr ? sum_abs / nllr : 0.0, nllr ? (double)nz / nllr : 0.0);
   }
 
+  if (cfr_only) {
+    /* The CFR is already submitted above. Everything past this point exists to produce a transport
+     * block, which mode 2 does not want -- so stop here rather than paying for it and discarding
+     * the result. Reported as UNSUPPORTED so it lands in a reject bucket rather than inflating
+     * either the try or the CRC-failure count: a decode that was never attempted must not read as
+     * a decode that failed. */
+    out->status = NR_PUSCH_PASSIVE_UNSUPPORTED;
+    out->reject_reason = "cfr_only mode: LDPC decode deliberately skipped";
+    return false;
+  }
+
   int ulsch_id = 0;
   const int rc = nr_ulsch_decoding(gnb, fp, frame, slot, &ulsch_id, 1);
   if (utim) {
@@ -816,9 +844,11 @@ bool nr_pusch_passive_decode(PHY_VARS_NR_UE *ue,
                              const nr_pdcch_blind_ul_result_t *g,
                              int32_t  ta_offset_samples,
                              uint64_t abs_slot,
+                             bool     cfr_only,
                              nr_pusch_passive_out_t *out)
 {
-  const bool ok = nr_pusch_passive_decode_inner(ue, ctx, frame, slot, g, ta_offset_samples, abs_slot, out);
+  const bool ok = nr_pusch_passive_decode_inner(ue, ctx, frame, slot, g, ta_offset_samples, abs_slot,
+                                                cfr_only, out);
 
   if (s_diag_on() && g != NULL) {
     LOG_I(PHY,

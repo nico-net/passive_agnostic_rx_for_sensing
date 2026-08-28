@@ -1529,6 +1529,13 @@ static int pbch_process(PHY_VARS_NR_UE *UE,
         static int    s_trk_hz = -1;
         static int    s_trk_spread = 500;
         static int    s_trk_apply = 0;
+        /* Evaluation period in SSBs. 50 (~1 s) was the original, and it makes the EARLIEST possible
+         * retune n=250 -- five agreeing windows -- i.e. ~5 s of a run already lost, and measured
+         * runs acted much later than that. The two populations this gate separates do NOT depend on
+         * the period: the genuine one fires from the FIRST opportunity whatever that is, and the
+         * spurious one only appears after ~1085 SSBs. So shortening the period moves the genuine
+         * correction earlier without weakening the discriminator, which is the 5-window spread. */
+        static int    s_trk_period = 50;
         static double s_ema = 0.0;
         static int    s_n = 0;
 #define TRK_HIST 5
@@ -1542,6 +1549,10 @@ static int pbch_process(PHY_VARS_NR_UE *UE,
             s_trk_spread = atoi(v);
           }
           s_trk_apply = (getenv("ISAC_CFO_TRACK_APPLY") != NULL) ? 1 : 0;
+          const char *pv = getenv("ISAC_CFO_TRACK_PERIOD");
+          if (pv != NULL && atoi(pv) > 0) {
+            s_trk_period = atoi(pv);
+          }
         }
         if (s_trk_hz > 0) {
           const double res_hz = nr_ue_pbch_freq_offset(&UE->frame_parms, pbch_ch_est_sym1, pbch_ch_est_sym3);
@@ -1549,7 +1560,7 @@ static int pbch_process(PHY_VARS_NR_UE *UE,
           s_n++;
           /* Evaluate once per 50 SSBs (~1 s). A retune disturbs samples in flight, so it must stay
            * rare, and the EMA needs samples to mean anything. */
-          if (s_n >= 8 && (s_n % 50) == 0) {
+          if (s_n >= 8 && (s_n % s_trk_period) == 0) {
             if (fabs(s_ema) > (double)s_trk_hz) {
               /* ---- VALIDITY GATE -------------------------------------------------------------
                * The estimate is EXACT while the receiver holds lock (measured: +6055 vs a true

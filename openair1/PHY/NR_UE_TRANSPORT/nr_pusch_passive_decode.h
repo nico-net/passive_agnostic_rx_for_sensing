@@ -83,6 +83,9 @@ typedef struct {
  *                          counter that has moved on since these samples were taken. 0 = derive.
  * @param[out] out          filled unconditionally; check out->status
  */
+/// Mode 2 (`pdcch_blind_monitor_ul_pusch = "2:.."`): estimate the channel and emit the CFR, but do
+/// not run the LLR/LDPC half. `cfr_only` is that switch, plumbed rather than read from config here
+/// so the decode stays a pure function of its arguments.
 bool nr_pusch_passive_decode(PHY_VARS_NR_UE *ue,
                              int      ctx,
                              uint32_t frame,
@@ -90,6 +93,7 @@ bool nr_pusch_passive_decode(PHY_VARS_NR_UE *ue,
                              const nr_pdcch_blind_ul_result_t *g,
                              int32_t  ta_offset_samples,
                              uint64_t abs_slot,
+                             bool     cfr_only,
                              nr_pusch_passive_out_t *out);
 
 /// Release the minimal gNB context. Safe to call when it was never built.

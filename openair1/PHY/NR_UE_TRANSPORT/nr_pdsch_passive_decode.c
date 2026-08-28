@@ -765,11 +765,31 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
   // ---- Channel estimation on the DM-RS symbols. ----
   const uint64_t pdt_che = pdtim_on ? pdtim_now() : 0;
   const uint32_t pdsch_est_size = ((fp->symbols_per_slot * fp->ofdm_symbol_size + 15) / 16) * 16;
-  fourDimArray_t *toFree = NULL;
+  /* ---- PERSISTENT SCRATCH, NOT PER-GRANT allocation --------------------------------------------
+   * These handles used to be locals, allocated and freed on every decode. allocCast2D/3D are
+   * DESIGNED to persist -- CheckArrAllocated only allocates `if (!(ArraY))`, and resizeAllowed
+   * exists so a shape change is handled -- and declaring the handle as a local defeated exactly
+   * that.
+   *
+   * The cost is not the malloc, it is the pages. malloc16_clear() is memalign + memset, and above
+   * glibc's mmap threshold every allocation returns fresh pages that the memset then faults in one
+   * by one, with munmap giving them back at the end. Measured on these exact shapes
+   * (tests/passive_rx/allocbench.c, run twice on this host): 1469 us per grant to
+   * allocate+clear+free ~4 MB, against 75 us to clear the same buffers when they persist. ~19.6x.
+   *
+   * THREAD-LOCAL, not static: nr_pdsch_passive_queue runs N consumers concurrently and each needs
+   * its own. Heap-backed via the existing allocator rather than a __thread array -- the AoA work
+   * records a shifted TLS layout producing an AVX alignment fault, and these are far larger than
+   * the buffer that did it. */
+  static __thread fourDimArray_t *toFree = NULL;
   // One estimate per (layer, rx antenna) -- nr_rx_pdsch() indexes this as nl*nb_antennas_rx + aarx,
   // matching nr_ue_pdsch_procedures()'s own allocation. Estimating only layer 0 (as this used to)
   // gives the equaliser nothing to separate the other layers with.
-  allocCast2D(pdsch_dl_ch_estimates, int32_t, toFree, fp->nb_antennas_rx * cw->Nl, pdsch_est_size, false);
+  /* dim1 at the MAXIMUM layer count, not cw->Nl: nr_rx_pdsch() indexes this as nl*nb_antennas_rx +
+   * aarx, so an over-allocation is harmless, while sizing it by the runtime layer count would make
+   * the shape vary per grant and force a reallocation (and a "resizing" log line) on every change.
+   * dim2 is the stride and is already constant. */
+  allocCast2D(pdsch_dl_ch_estimates, int32_t, toFree, fp->nb_antennas_rx * NR_MAX_NB_LAYERS, pdsch_est_size, true);
 
   uint32_t nvar = 0;
   int n_dmrs_sym = 0;
@@ -787,7 +807,6 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
     n_dmrs_sym++;
   }
   if (n_dmrs_sym == 0) {
-    free(toFree);
     return out->status; // no DM-RS in the allocation: nothing to equalise against
   }
   /* nvar normalisation. ISAC_RX_NVAR_FIX=1 (opt-in, default OFF = bit-identical to before).
@@ -1003,14 +1022,29 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
 
   const uint64_t pdt_alc = pdtim_on ? pdtim_now() : 0;
   const uint32_t rx_llr_buf_sz = ALIGNARRAYSIZE(G, 32);
-  int16_t *llr = (int16_t *)malloc16_clear(rx_llr_buf_sz * sizeof(int16_t));
+  /* Grow-only, and cleared each call: nr_rx_pdsch writes one symbol's worth at a time and the
+   * decoder reads G of them, so stale bytes past this grant's G must not be visible. Clearing is
+   * the 75 us the measurement above already accounts for; the allocation is what is being removed. */
+  static __thread int16_t  *llr     = NULL;
+  static __thread uint32_t  llr_cap = 0;
+  if (llr_cap < rx_llr_buf_sz) {
+    free(llr);
+    llr = (int16_t *)malloc16_clear(rx_llr_buf_sz * sizeof(int16_t));
+    llr_cap = llr ? rx_llr_buf_sz : 0;
+  } else {
+    memset(llr, 0, (size_t)rx_llr_buf_sz * sizeof(int16_t));
+  }
   if (llr == NULL) {
-    free(toFree);
     out->status = NR_PDSCH_PASSIVE_DECODE_ERROR;
     return out->status;
   }
 
-  const uint32_t rx_size_symbol = (freq_alloc->num_rbs * NR_NB_SC_PER_RB + 15) & ~15;
+  /* FIXED at the widest allocation this carrier can carry, rather than sized to this grant. It is
+   * used for exactly two things -- the shape of the four buffers below and the stride handed to
+   * nr_rx_pdsch() -- so as long as both agree, a larger stride is harmless: the equaliser writes
+   * freq_alloc->num_rbs*12 entries into each row either way. Keeping it constant is what lets the
+   * buffers persist across grants of different widths without reallocating. */
+  const uint32_t rx_size_symbol = (fp->N_RB_DL * NR_NB_SC_PER_RB + 15) & ~15;
   /* Middle dimension MUST be NR_MAX_NB_LAYERS, not cw->Nl: nr_rx_pdsch() declares these as
    * c16_t buf[][NR_MAX_NB_LAYERS][pdsch_buf_size_max], so it indexes symbol m with a COMPILE-TIME
    * stride of NR_MAX_NB_LAYERS * pdsch_buf_size_max. Allocating with the runtime layer count made
@@ -1020,14 +1054,14 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
    * be equal. The moment the gNB was reconfigured to max_rank = 1 it segfaulted on the first
    * full-band (273 PRB) grant -- big enough for the overrun to leave the mapping. */
 
-  fourDimArray_t *toFree2 = NULL;
-  allocCast3D(rxdataF_comp, c16_t, toFree2, fp->symbols_per_slot, NR_MAX_NB_LAYERS, rx_size_symbol, false);
-  fourDimArray_t *toFree3 = NULL;
-  allocCast3D(dl_ch_mag, c16_t, toFree3, NR_SYMBOLS_PER_SLOT, NR_MAX_NB_LAYERS, rx_size_symbol, false);
-  fourDimArray_t *toFree4 = NULL;
-  allocCast3D(dl_ch_magb, c16_t, toFree4, NR_SYMBOLS_PER_SLOT, NR_MAX_NB_LAYERS, rx_size_symbol, false);
-  fourDimArray_t *toFree5 = NULL;
-  allocCast3D(dl_ch_magr, c16_t, toFree5, NR_SYMBOLS_PER_SLOT, NR_MAX_NB_LAYERS, rx_size_symbol, false);
+  static __thread fourDimArray_t *toFree2 = NULL;
+  allocCast3D(rxdataF_comp, c16_t, toFree2, fp->symbols_per_slot, NR_MAX_NB_LAYERS, rx_size_symbol, true);
+  static __thread fourDimArray_t *toFree3 = NULL;
+  allocCast3D(dl_ch_mag, c16_t, toFree3, NR_SYMBOLS_PER_SLOT, NR_MAX_NB_LAYERS, rx_size_symbol, true);
+  static __thread fourDimArray_t *toFree4 = NULL;
+  allocCast3D(dl_ch_magb, c16_t, toFree4, NR_SYMBOLS_PER_SLOT, NR_MAX_NB_LAYERS, rx_size_symbol, true);
+  static __thread fourDimArray_t *toFree5 = NULL;
+  allocCast3D(dl_ch_magr, c16_t, toFree5, NR_SYMBOLS_PER_SLOT, NR_MAX_NB_LAYERS, rx_size_symbol, true);
 
   c16_t ptrs_phase_per_slot[fp->nb_antennas_rx][NR_SYMBOLS_PER_SLOT];
   memset(ptrs_phase_per_slot, 0, sizeof(ptrs_phase_per_slot));
@@ -1249,11 +1283,7 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
 
   pdtim_report();
 
-  free(llr);
-  free(toFree);
-  free(toFree2);
-  free(toFree3);
-  free(toFree4);
-  free(toFree5);
+  /* Nothing is freed here any more: every buffer above persists for the life of this thread and is
+   * reused by the next grant. See the note at the chest allocation for the measurement. */
   return out->status;
 }

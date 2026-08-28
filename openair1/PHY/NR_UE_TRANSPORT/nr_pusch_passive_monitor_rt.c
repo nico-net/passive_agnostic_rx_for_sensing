@@ -159,14 +159,16 @@ void nr_pusch_passive_monitor_process(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_
                                   .frame_rx          = (int)proc->frame_rx,
                                   .nr_slot_rx        = (int)proc->nr_slot_rx,
                                   .ta_offset_samples = ta,
-                                  .absolute_slot     = abs_slot};
+                                  .absolute_slot     = abs_slot,
+                                  .cfr_only          = (cfg->ul_pusch_decode == 2)};
     nr_pusch_passive_queue_enqueue(&job);
     /* Nothing more to report per grant here: the outcome belongs to the consumer, and the census
      * (pusch_passive[...] / puschq[...]) is where it is read. Deliberately NOT decoded in-line on a
      * failed enqueue -- that would reintroduce the deadline overrun this exists to remove. */
     return;
   }
-  nr_pusch_passive_decode(ue, 0, proc->frame_rx, proc->nr_slot_rx, &g, ta, (uint64_t)abs_slot, &out);
+  nr_pusch_passive_decode(ue, 0, proc->frame_rx, proc->nr_slot_rx, &g, ta, (uint64_t)abs_slot,
+                          cfg->ul_pusch_decode == 2, &out);
 
 }
 
