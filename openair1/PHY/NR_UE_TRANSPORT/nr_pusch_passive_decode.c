@@ -108,6 +108,16 @@ static uint64_t g_utim_hist[8]   = {0};
 static uint64_t g_utim_over_slot = 0;
 static int      g_utim_on        = -1;
 
+/* One gate for every per-grant probe in this file, so they cannot drift apart. */
+static inline int s_diag_on(void)
+{
+  static int v = -1;
+  if (v < 0) {
+    v = (getenv("ISAC_PUSCH_DIAG") != NULL) ? 1 : 0;
+  }
+  return v;
+}
+
 static inline int utim_enabled(void)
 {
   if (g_utim_on < 0) {
@@ -660,10 +670,70 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
     }
   }
 
+  /* G is needed by the LLR probe below, which runs BEFORE nr_ulsch_decoding(). It used to be
+   * assigned after it, so the probe read G = 0 and reported an empty LLR field on every grant --
+   * a probe reporting its own initialisation order rather than the receiver. */
+  out->G = nr_get_G(g->num_rb, g->num_symbols, nb_dmrs_re_per_rb, n_dmrs_sym, 0,
+                    pdu.qam_mod_order, g->nrOfLayers);
+
   if (utim) {
     utim_add(UTIM_CFR, t_stage);
     t_stage = utim_now();
   }
+
+  /* ---- TWO PROBES THAT SEPARATE THE TWO WAYS A DECODE CAN FAIL (ISAC_PUSCH_DIAG=1) -------------
+   *
+   * The transport-block parameters are already verified exact against the gNB's own log (same
+   * rb_start, rb_size, symbols, MCS, TBS, and G = rb*12*11*Qm to the bit), and the gNB decodes the
+   * same grants at 100 %. So the fault is in the SIGNAL path, and there are two candidates that a
+   * CRC result alone cannot tell apart:
+   *
+   *   COHERENCE: the lag-1 correlation of the channel estimate across subcarriers. A real channel
+   *   is smooth on a 15 kHz grid, so a correct DM-RS sequence at the right position gives |rho|
+   *   near 1. A wrong sequence, a wrong scrambling identity or a wrong RE position correlates noise
+   *   against noise and gives |rho| near 0 -- while still producing plenty of ENERGY, which is why
+   *   energy alone (E_rel=5.6e6) proves nothing about correctness. Same discriminator the downlink
+   *   work used to prove its DM-RS generator right (16.8 % vs a 1.0 % wrong-sequence control).
+   *
+   *   LLR OCCUPANCY: mean |LLR| and the fraction that are non-trivial. An LLR field that is empty
+   *   or saturated means the demodulator never produced usable soft bits, and the LDPC failure is
+   *   then downstream of a problem that has nothing to do with coding.
+   *
+   * Printed per grant so they can be correlated with allocation and with the gNB's own per-grant
+   * verdict, not just averaged. */
+  if (s_diag_on()) {
+    const c16_t *h = (const c16_t *)&pvp->ul_ch_estimates[0][fp->ofdm_symbol_size * g->start_symbol];
+    int dsym = -1;
+    for (int m = g->start_symbol; m < g->start_symbol + g->num_symbols; m++) {
+      if (g->ul_dmrs_symb_pos & (1u << m)) { dsym = m; break; }
+    }
+    if (dsym >= 0) {
+      h = (const c16_t *)&pvp->ul_ch_estimates[0][fp->ofdm_symbol_size * dsym];
+    }
+    const int nsc = g->num_rb * NR_NB_SC_PER_RB;
+    double acc_r = 0.0, acc_i = 0.0, e0 = 0.0;
+    for (int j = 0; j + 1 < nsc; j++) {
+      /* h[j] * conj(h[j+1]) summed: the magnitude of the sum over the sum of energies is the
+       * normalised lag-1 coherence. */
+      acc_r += (double)h[j].r * h[j + 1].r + (double)h[j].i * h[j + 1].i;
+      acc_i += (double)h[j].i * h[j + 1].r - (double)h[j].r * h[j + 1].i;
+      e0    += (double)h[j].r * h[j].r + (double)h[j].i * h[j].i;
+    }
+    const double rho = (e0 > 0.0) ? sqrt(acc_r * acc_r + acc_i * acc_i) / e0 : 0.0;
+
+    const int16_t *llr = pvp->llr;
+    const uint32_t nllr = out->G;
+    double sum_abs = 0.0;
+    uint32_t nz = 0;
+    for (uint32_t q = 0; q < nllr; q++) {
+      const int v = llr[q] < 0 ? -llr[q] : llr[q];
+      sum_abs += v;
+      if (v > 4) { nz++; }
+    }
+    LOG_I(PHY, "SENSING: ULSIG rho=%.3f e_chest=%.3e llr_n=%u llr_mean=%.1f llr_active=%.2f\n",
+          rho, e0, nllr, nllr ? sum_abs / nllr : 0.0, nllr ? (double)nz / nllr : 0.0);
+  }
+
   int ulsch_id = 0;
   const int rc = nr_ulsch_decoding(gnb, fp, frame, slot, &ulsch_id, 1);
   if (utim) {
@@ -676,8 +746,6 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
   s_stage = 0;
 #undef PUSCH_STAGE
 
-  out->G             = nr_get_G(g->num_rb, g->num_symbols, nb_dmrs_re_per_rb, n_dmrs_sym, 0,
-                                pdu.qam_mod_order, g->nrOfLayers);
   out->qam_mod_order = pdu.qam_mod_order;
   out->nb_rb         = g->num_rb;
   out->nb_symbols    = g->num_symbols;
@@ -752,11 +820,7 @@ bool nr_pusch_passive_decode(PHY_VARS_NR_UE *ue,
 {
   const bool ok = nr_pusch_passive_decode_inner(ue, ctx, frame, slot, g, ta_offset_samples, abs_slot, out);
 
-  static int s_probe = -1;
-  if (s_probe < 0) {
-    s_probe = (getenv("ISAC_PUSCH_DIAG") != NULL) ? 1 : 0;
-  }
-  if (s_probe && g != NULL) {
+  if (s_diag_on() && g != NULL) {
     LOG_I(PHY,
           "SENSING: PUSCHDIAG %u.%u rnti=0x%x k2=%u prb=%u+%u sym=%u+%u mcs=%u/tbl%u rv=%u ta=%d "
           "tbs=%u G=%u Qm=%u snr=%.1f delay=%d seg=%d/%d status=%u %s\n",
