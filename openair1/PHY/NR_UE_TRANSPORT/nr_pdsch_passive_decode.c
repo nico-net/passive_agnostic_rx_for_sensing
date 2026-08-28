@@ -37,6 +37,12 @@
 #include "common/utils/LOG/log.h"
 #include "common/utils/nr/nr_common.h"
 
+/* Per-RX-antenna noise variance published by nr_pdsch_channel_estimation(). Declared here rather
+ * than in a shared header: the natural home (defs_nr_UE.h) is a large file whose top section is
+ * inside an #ifdef __cplusplus block, and a declaration placed there is silently invisible to C. */
+#define NR_DL_CHEST_MAX_ANT 8
+extern __thread uint32_t nr_dl_chest_nvar_ant[];
+
 #include "PHY/CODING/coding_defs.h"
 #include "PHY/NR_REFSIG/dmrs_nr.h" // get_num_dmrs_re_per_rb, nr_chest_time_domain_avg
 #include "PHY/CODING/nrLDPC_coding/nrLDPC_coding_interface.h"
@@ -874,10 +880,29 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
         for (int a = 0; a < fp->nb_antennas_rx && a < 8; a++) {
           rep_append(rep, sizeof(rep), &u, "%s%.0f", a ? "," : "", pw[l][a]);
         }
-        rep_append(rep, sizeof(rep), &u, "] snr_dB=L%d[", l);
+        rep_append(rep, sizeof(rep), &u, "] rel_dB=L%d[", l);
         for (int a = 0; a < fp->nb_antennas_rx && a < 8; a++) {
+          /* Against the SHARED noise, deliberately. The per-antenna value exists (printed as
+           * resid= below) but it is NOT a noise power and must not be used as an SNR denominator:
+           * nr_dl_channel_estimation.c forms it as |dl_ls_est - dl_ch|^2, the residual between the
+           * RAW LS estimate and the FILTERED one, which is noise PLUS filter mismatch. On a
+           * frequency-selective branch the mismatch term scales with |H|, so the ratio collapses
+           * towards a constant -- measured pw/resid = 2.3 on three branches at once while raw
+           * power said those branches differed, which is the signature of a denominator tracking
+           * its own numerator.
+           * A shared denominator at least makes the RELATIVE dB between branches exact, which is
+           * what this line is used for. It is NOT an absolute per-branch SNR and is not labelled
+           * as one. For judging a single antenna, use raw ANTPOW power -- no estimator involved. */
           rep_append(rep, sizeof(rep), &u, "%s%.1f", a ? "," : "",
                      (nvar > 0 && pw[l][a] > 0.0) ? 10.0 * log10(pw[l][a] / (double)nvar) : -99.0);
+        }
+        /* resid, not nvar: |LS - filtered|^2 per antenna. Reported because the SPREAD across
+         * branches is diagnostic (a branch whose estimate the filter cannot fit stands out), but it
+         * is not a noise power -- see the snr_dB comment above. */
+        rep_append(rep, sizeof(rep), &u, "] resid=L%d[", l);
+        for (int a = 0; a < fp->nb_antennas_rx && a < 8; a++) {
+          rep_append(rep, sizeof(rep), &u, "%s%u", a ? "," : "",
+                     (a < NR_DL_CHEST_MAX_ANT) ? nr_dl_chest_nvar_ant[a] : 0u);
         }
         rep_append(rep, sizeof(rep), &u, "]");
       }

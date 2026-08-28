@@ -19,6 +19,12 @@
 #include "nfapi/open-nFAPI/nfapi/public_inc/nfapi_nr_interface.h"
 #include "instrumentation.h"
 #include "executables/nr-softmodem-common.h"
+
+/* Per-RX-antenna noise variance from the most recent channel estimate, for diagnostics that need to
+ * judge ONE branch rather than the combine. Thread-local: several passive decode consumers run this
+ * estimator concurrently on different transport blocks. 0 = that antenna produced no estimate. */
+#define NR_DL_CHEST_MAX_ANT 8
+__thread uint32_t nr_dl_chest_nvar_ant[NR_DL_CHEST_MAX_ANT];
 // #define DEBUG_PDSCH
 // #define DEBUG_PDCCH
 // #define DEBUG_PBCH(a...) printf(a)
@@ -1283,6 +1289,14 @@ void nr_pdsch_channel_estimation(PHY_VARS_NR_UE *ue,
    * Single-antenna behaviour is unchanged: a sum of one, divided by one. */
   uint64_t nvar_acc = 0;
   int nvar_ant_count = 0;
+  /* Publish the PER-ANTENNA noise alongside the mean. The mean is what the equaliser needs (one
+   * scalar for the whole combine), but it is useless for judging an individual branch: dividing a
+   * weak branch's signal by the ARRAY's noise scores it against the other antennas' noise, not its
+   * own. A dead branch then reports a plausible-looking SNR that is not its SNR. Zeroed here each
+   * call so a stale value from a previous grant can never be read as current. */
+  for (int a_ = 0; a_ < NR_DL_CHEST_MAX_ANT; a_++) {
+    nr_dl_chest_nvar_ant[a_] = 0;
+  }
 
   for (int aarx = 0; aarx < fp->nb_antennas_rx; aarx++) {
 #ifdef DEBUG_PDSCH
@@ -1340,6 +1354,9 @@ void nr_pdsch_channel_estimation(PHY_VARS_NR_UE *ue,
     if (nvar && nvar_ant > 0) {
       nvar_acc += nvar_ant;
       nvar_ant_count++;
+      if (aarx < NR_DL_CHEST_MAX_ANT) {
+        nr_dl_chest_nvar_ant[aarx] = nvar_ant;
+      }
     }
   }
 

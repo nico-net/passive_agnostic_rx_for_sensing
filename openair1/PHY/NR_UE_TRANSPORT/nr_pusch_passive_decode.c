@@ -75,6 +75,13 @@ static PHY_VARS_gNB *g_gnb;
 static int           g_gnb_nant;
 static _Atomic uint64_t g_try, g_crc_ok, g_rej_unsup, g_rej_setup;
 static _Atomic uint64_t g_cfr_submits, g_cfr_re;
+/* Per-antenna UL channel power, the uplink analogue of the DL RXBRANCH probe. Accumulated from the
+ * PUSCH DM-RS channel ESTIMATE (|H|^2), not from raw time-domain power: raw power cannot separate
+ * signal from interference, and the DL side has already been misled once by reading ANTPOW as an
+ * antenna measure when ~70 % of its energy was uplink. Summed over whole transport blocks and
+ * thousands of grants, so it does not carry the 10 dB per-TB swing the DL pw[] does. */
+static _Atomic uint64_t g_ant_pw[PASSIVE_UL_MAX_ANT];
+static _Atomic uint64_t g_ant_n;
 
 /* ------------------------------------------------------------------------------------------
  * Minimal gNB context. Deliberately NOT phy_init_nr_gNB(): that allocates PRACH, SRS, PUCCH, the
@@ -445,6 +452,7 @@ bool nr_pusch_passive_decode(PHY_VARS_NR_UE *ue,
       }
       uint32_t nof_re = 0;
       double   pw = 0.0;
+      double   ant_pw[PASSIVE_UL_MAX_ANT] = {0};
       for (int j = 0; j < num_sc && nof_re < ul_cap; j++) {
         const int k_abs = (start_sc + j) % fp->ofdm_symbol_size;
         for (uint32_t a = 0; a < nof_ant_cfr; a++) {
@@ -454,8 +462,12 @@ bool nr_pusch_passive_decode(PHY_VARS_NR_UE *ue,
           const size_t o = 2 * ((size_t)a * cap + nof_re);
           ul_h[o]     = (float)h[k_abs].r;
           ul_h[o + 1] = (float)h[k_abs].i;
+          const double p2 = (double)h[k_abs].r * h[k_abs].r + (double)h[k_abs].i * h[k_abs].i;
           if (a == 0) {
-            pw += (double)h[k_abs].r * h[k_abs].r + (double)h[k_abs].i * h[k_abs].i;
+            pw += p2;
+          }
+          if (a < PASSIVE_UL_MAX_ANT) {
+            ant_pw[a] += p2;
           }
         }
         ul_k[nof_re] = (uint32_t)k_abs;
@@ -495,6 +507,13 @@ bool nr_pusch_passive_decode(PHY_VARS_NR_UE *ue,
                                  NR_ISAC_SRC_PUSCH_DMRS, &carrier, ul_h, nof_ant_cfr, cap,
                                  ul_k, ul_l, nof_re, 1.0f);
         atomic_fetch_add_explicit(&g_cfr_re, nof_re, memory_order_relaxed);
+        for (uint32_t a = 0; a < nof_ant_cfr && a < PASSIVE_UL_MAX_ANT; a++) {
+          /* Accumulate the SUM and divide once at report time. Dividing per grant and casting to
+           * uint64_t truncated to ZERO on small allocations -- measured pw=[0 0 0 0] on ~110-RE
+           * HARQ-only grants, i.e. the probe went silently useless at exactly low UL load. */
+          atomic_fetch_add_explicit(&g_ant_pw[a], (uint64_t)ant_pw[a], memory_order_relaxed);
+        }
+        atomic_fetch_add_explicit(&g_ant_n, nof_re, memory_order_relaxed);
         atomic_fetch_add_explicit(&g_cfr_submits, 1, memory_order_relaxed);
         out->snr_db = (pw > 0.0 && nof_re) ? (float)(10.0 * log10(pw / (double)nof_re)) : 0.0f;
       }
@@ -540,4 +559,28 @@ void nr_pusch_passive_stats_dump(void)
         (unsigned long)atomic_load_explicit(&g_rej_setup, memory_order_relaxed),
         (unsigned long)atomic_load_explicit(&g_cfr_submits, memory_order_relaxed),
         (unsigned long)atomic_load_explicit(&g_cfr_re, memory_order_relaxed));
+  {
+    const uint64_t n = atomic_load_explicit(&g_ant_n, memory_order_relaxed);
+    if (n > 0) {
+      double p[PASSIVE_UL_MAX_ANT], mx = 0.0;
+      for (int a = 0; a < PASSIVE_UL_MAX_ANT; a++) {
+        p[a] = (double)atomic_load_explicit(&g_ant_pw[a], memory_order_relaxed) / (double)n;
+        if (p[a] > mx) {
+          mx = p[a];
+        }
+      }
+      if (mx <= 0.0) {
+        mx = 1.0;
+      }
+      /* 10log10: these are POWERS (|H|^2), unlike ANTPOW which accumulates an amplitude and needs
+       * 20log10. Getting that wrong once made a -18 dB imbalance read as -9 dB on the DL side. */
+      LOG_I(PHY,
+            "SENSING: ULBRANCH pw=[%.0f %.0f %.0f %.0f] dB=[%.1f %.1f %.1f %.1f] n=%lu "
+            "(PUSCH DM-RS |H|^2 per RX antenna)\n",
+            p[0], p[1], p[2], p[3],
+            10.0 * log10((p[0] > 0 ? p[0] : 1e-9) / mx), 10.0 * log10((p[1] > 0 ? p[1] : 1e-9) / mx),
+            10.0 * log10((p[2] > 0 ? p[2] : 1e-9) / mx), 10.0 * log10((p[3] > 0 ? p[3] : 1e-9) / mx),
+            (unsigned long)n);
+    }
+  }
 }
