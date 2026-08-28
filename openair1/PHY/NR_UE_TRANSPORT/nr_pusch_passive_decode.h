@@ -58,6 +58,9 @@ typedef struct {
   /// whether a failed decode is a timing problem: the receiver's own delay compensation spans only
   /// +/-MAX_DELAY_COMP (20) samples, so anything past that is uncorrected ISI.
   int      est_delay;
+  /// est_delay measured on the FIRST pass, when the window was re-placed and the chain re-run.
+  /// 0 when no refinement was needed. Kept separate so a refined grant is distinguishable.
+  int      est_delay_pre;
   int      n_segments;    ///< transport-block segments (C)
   int      segments_ok;   ///< of which the CRC passed. 0 vs C-1 are different failures.
   const char *reject_reason; ///< non-NULL when status != OK

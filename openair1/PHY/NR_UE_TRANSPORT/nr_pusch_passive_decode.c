@@ -84,6 +84,10 @@ static PHY_VARS_gNB *g_gnb[NR_PUSCH_PASSIVE_MAX_CTX];
 static int           g_gnb_nant;
 static _Atomic uint64_t g_try, g_crc_ok, g_rej_unsup, g_rej_setup;
 static _Atomic uint64_t g_seg_fail, g_zero_tb;
+/* Residual the channel estimator can absorb on its own: MAX_DELAY_COMP is 20 samples, so anything
+ * beyond a comfortable fraction of that is worth re-placing the window for rather than hoping. */
+#define PASSIVE_UL_DELAY_TOL 6
+static _Atomic uint64_t g_ta_refined;
 
 /* ---- TIMING-ADVANCE SWEEP (ISAC_UL_TA_SWEEP="start:step:count", default off) ------------------
  * The applied advance is N_TA_offset, derived from the sample rate. What it CANNOT know is N_TA --
@@ -490,51 +494,35 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
   const int32_t ul_sample_offset = ta_offset_samples;
 
   const int slot_off = (slot % RU_RX_SLOT_DEPTH) * sps * symsz;
-  {
-    /* ---- FEP EXACTLY AS THE gNB DOES IT -------------------------------------------------------
-     * nr_fep() (SCHED_NR/nr_ru_procedures.c:281) is the gNB's uplink FEP, and all it does per
-     * symbol is nr_symbol_fep_ul() -- a bare DFT. It applies NO symbol rotation.
-     *
-     * This path previously used nr_slot_fep(..., link_type_ul, ...), which routes through
-     * nr_symbol_fep() and applies BOTH frame_parms->symbol_rotation[link_type] and
-     * frame_parms->timeshift_symbol_rotation (slot_fep_nr.c:33-42). Those are downlink-receiver
-     * conventions that the gNB's uplink chain does not expect and does not undo.
-     *
-     * The consequence is precisely the failure that was observed. A per-symbol phase is COMMON to
-     * DM-RS and data within one symbol but DIFFERS between symbols, so the channel estimate taken
-     * on the DM-RS symbols absorbs it there and leaves a residual phase on every data symbol. The
-     * estimate looks perfect, its per-antenna powers track the real antenna imbalance, the
-     * equaliser emits a full field of confident LLRs -- and their SIGNS are wrong, so the LDPC
-     * never converges. It is also why sweeping the timing advance over eleven cyclic prefixes
-     * changed nothing: the fault was never in the window position.
-     *
-     * Writing straight into the gNB grid also removes the ~917 kB scratch buffer and the
-     * per-symbol memcpy this loop used to need, since nr_symbol_fep_ul() takes the destination
-     * pointer directly. */
-    const int s0 = g->start_symbol;
-    const int s1 = g->start_symbol + g->num_symbols;
-    for (int a = 0; a < nant; a++) {
-      const c16_t *rx = (const c16_t *)ue->common_vars.rxdata[a];
-      for (int sym = s0; sym < s1 && sym < sps; sym++) {
-        c16_t *dst = &gnb->common_vars.rxdataF[a][slot_off + sym * symsz];
-        nr_symbol_fep_ul(fp, rx, dst, (unsigned char)sym, (unsigned char)slot, ul_sample_offset);
-        /* ...AND THE ROTATION. This is the second half of nr_ofdm_demod_and_rx_rotation()
-         * (slot_fep_nr.c:219), which is what ulsim feeds phy_procedures_gNB_uespec_RX() with and
-         * which decodes -- so it is the authority on what nr_rx_pusch_group_tp() expects, and it
-         * expects ROTATED rxdataF. The gNB RU path (nr_fep) omits it only because the RU applies
-         * its own rotation elsewhere.
-         *
-         * Note fp->N_RB_UL, not N_RB_DL: nr_symbol_fep() -- the UE-side path this code used to go
-         * through -- passes N_RB_DL, which is a downlink-receiver assumption. They happen to be
-         * equal on this TDD cell, so that particular difference is inert here, but the two
-         * functions are not interchangeable in general. */
-        apply_nr_rotation_symbol_RX(fp->symbols_per_slot, fp->slots_per_subframe,
-                                    fp->timeshift_symbol_rotation, fp->first_carrier_offset,
-                                    dst, fp->symbol_rotation[link_type_ul], fp->N_RB_UL,
-                                    slot, sym);
-      }
-    }
-  }
+  /* ---- FEP the grant's symbols, EXACTLY as the gNB does -----------------------------------------
+   * nr_symbol_fep_ul() (bare DFT, offset convention that SUBTRACTS) followed by
+   * apply_nr_rotation_symbol_RX() with fp->symbol_rotation[link_type_ul] and fp->N_RB_UL. That pair
+   * is nr_ofdm_demod_and_rx_rotation() (slot_fep_nr.c:219), which is what ulsim feeds
+   * phy_procedures_gNB_uespec_RX() with -- so it, not the RU's nr_fep(), is the authority on what
+   * nr_rx_pusch_group_tp() expects, and it expects ROTATED rxdataF.
+   *
+   * Writing straight into the gNB grid also avoids the ~917 kB scratch buffer and per-symbol memcpy
+   * an intermediate layout would need.
+   *
+   * Factored out because it is run TWICE per grant -- see the delay refinement below. */
+#define PASSIVE_UL_FEP(off_)                                                                       \
+  do {                                                                                             \
+    const int s0_ = g->start_symbol;                                                               \
+    const int s1_ = g->start_symbol + g->num_symbols;                                              \
+    for (int a_ = 0; a_ < nant; a_++) {                                                            \
+      const c16_t *rx_ = (const c16_t *)ue->common_vars.rxdata[a_];                                \
+      for (int sym_ = s0_; sym_ < s1_ && sym_ < sps; sym_++) {                                     \
+        c16_t *dst_ = &gnb->common_vars.rxdataF[a_][slot_off + sym_ * symsz];                      \
+        nr_symbol_fep_ul(fp, rx_, dst_, (unsigned char)sym_, (unsigned char)slot, (off_));         \
+        apply_nr_rotation_symbol_RX(fp->symbols_per_slot, fp->slots_per_subframe,                  \
+                                    fp->timeshift_symbol_rotation, fp->first_carrier_offset,       \
+                                    dst_, fp->symbol_rotation[link_type_ul], fp->N_RB_UL,          \
+                                    slot, sym_);                                                   \
+      }                                                                                            \
+    }                                                                                              \
+  } while (0)
+
+  PASSIVE_UL_FEP(ul_sample_offset);
 
   /* ---- TBS, then the receive chain, exactly as the gNB runs it. ---- */
   if (utim) {
@@ -576,6 +564,38 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
   }
   PUSCH_STAGE(4, "entering nr_rx_pusch_group_tp");
   nr_rx_pusch_group_tp(gnb, &pvp, &pdup, &unavp, 1, frame, slot);
+
+  /* ---- PER-GRANT DELAY REFINEMENT ---------------------------------------------------------------
+   * A FIXED timing advance cannot work here, and the reason is measurable rather than theoretical.
+   * With ta pinned at the derived N_TA_offset, the residual delay this receiver measures per grant
+   * walks a clean SAWTOOTH -- monotonically from about -387 to +433 samples over ~2 s, then wraps.
+   * That is roughly 400 samples/s, ~3.3 ppm: sample-clock drift between a free-running receiver and
+   * the gNB, which is exactly the condition this project targets (no shared hardware reference).
+   *
+   * nr_pusch_channel_estimation() compensates a delay only within +/-MAX_DELAY_COMP (20 samples),
+   * so a grant decodes only when the ramp happens to pass near zero. Measured on the first capture
+   * that decoded anything: the three successes had est_delay 8, 8 and 13, while the 58 failures of
+   * the same shape were scattered across -387..+433.
+   *
+   * So the window is re-placed using the delay the estimator itself just measured, and the receive
+   * chain re-run once. A positive est_delay means the CIR peak sits LATE of the window start, so the
+   * window must start later, i.e. the ADVANCE must shrink: ta_new = ta - est_delay.
+   *
+   * One retry, not a loop: the correction is a direct measurement rather than a search, and a second
+   * pass that still lands outside the compensation range means the estimate itself was unreliable
+   * (nr_est_delay returns 0 unless the CIR peak clears PEAK_DETECT_THRESHOLD, so a poor grant simply
+   * asks for no correction). Tracking the ramp across grants was considered and rejected: consecutive
+   * grants are tens of ms apart, which is ~90 samples of drift, already far outside +/-20. */
+  {
+    const int d = pvp->delay.est_delay;
+    if (d != 0 && (d > PASSIVE_UL_DELAY_TOL || d < -PASSIVE_UL_DELAY_TOL)) {
+      atomic_fetch_add_explicit(&g_ta_refined, 1, memory_order_relaxed);
+      PASSIVE_UL_FEP(ul_sample_offset - d);
+      nr_rx_pusch_group_tp(gnb, &pvp, &pdup, &unavp, 1, frame, slot);
+      out->est_delay_pre = d;
+    }
+  }
+
   if (utim) {
     utim_add(UTIM_RXPUSCH, t_stage);
     t_stage = utim_now();
@@ -945,9 +965,11 @@ void nr_pusch_passive_stats_dump(void)
   const uint64_t zt = atomic_load_explicit(&g_zero_tb, memory_order_relaxed);
   LOG_I(PHY,
         "SENSING: pusch_passive[try=%lu crc_ok=%lu (%.1f%%) seg_fail=%lu zero_tb=%lu (%.1f%%) "
+        "ta_refined=%lu "
         "health=%.1f%% unsup=%lu setup_fail=%lu] ul_cfr[submits=%lu re=%lu]\n",
         (unsigned long)t, (unsigned long)k, t ? (100.0 * (double)k / (double)t) : 0.0,
         (unsigned long)sf, (unsigned long)zt, t ? (100.0 * (double)zt / (double)t) : 0.0,
+        (unsigned long)atomic_load_explicit(&g_ta_refined, memory_order_relaxed),
         (k + sf) ? (100.0 * (double)k / (double)(k + sf)) : 0.0,
         (unsigned long)atomic_load_explicit(&g_rej_unsup, memory_order_relaxed),
         (unsigned long)atomic_load_explicit(&g_rej_setup, memory_order_relaxed),
