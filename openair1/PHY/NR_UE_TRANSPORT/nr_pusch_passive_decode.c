@@ -1,6 +1,8 @@
 /* See nr_pusch_passive_decode.h for why this file constructs a gNB by hand. */
 
 #include <stdlib.h>
+#include <stdio.h>
+#include <time.h>
 #include <string.h>
 #include <math.h>
 #include <stdatomic.h>
@@ -74,6 +76,79 @@ NR_gNB_PHY_STATS_t *get_phy_stats(PHY_VARS_gNB *gNB, uint16_t rnti)
 static PHY_VARS_gNB *g_gnb;
 static int           g_gnb_nant;
 static _Atomic uint64_t g_try, g_crc_ok, g_rej_unsup, g_rej_setup;
+static _Atomic uint64_t g_seg_fail, g_zero_tb;
+
+/* ---- UL RT-THREAD COST BREAKDOWN (ISAC_PUSCH_TIMING=1, default OFF) ---------------------------
+ * The downlink has BTIM (nr_pdcch_blind_monitor_rt.c) and it is what turned "move the PDSCH decode
+ * off the receive thread" from an assumption into a measurement. The uplink path had no equivalent
+ * at all, and unlike the downlink it runs ENTIRELY IN-LINE on the PHY receive thread -- there is no
+ * deferred queue between nr-ue.c's UL-slot hook and the LDPC decoder. So the one path with no
+ * timing instrument is also the one with no escape valve. Same shape as BTIM deliberately, so the
+ * two directions' numbers are read the same way.
+ *
+ * R7 applies: characterise with this on, score with it off. */
+#define UTIM_FEP     0
+#define UTIM_RXPUSCH 1
+#define UTIM_CFR     2
+#define UTIM_DECODE  3
+#define UTIM_TOTAL   4
+#define UTIM_N       5
+static const char *const kUtimName[UTIM_N] = {"fep", "rx_pusch", "cfr", "decode", "TOTAL"};
+static uint64_t g_utim_ns[UTIM_N]  = {0};
+static uint64_t g_utim_n[UTIM_N]   = {0};
+static uint64_t g_utim_max[UTIM_N] = {0};
+/* Per-grant TOTAL, bucketed in microseconds: <50 <100 <200 <400 <800 <1600 <3200 >=3200. The mean
+ * is not what starves a receive thread; the tail is. */
+static uint64_t g_utim_hist[8]   = {0};
+static uint64_t g_utim_over_slot = 0;
+static int      g_utim_on        = -1;
+
+static inline int utim_enabled(void)
+{
+  if (g_utim_on < 0) {
+    g_utim_on = (getenv("ISAC_PUSCH_TIMING") != NULL) ? 1 : 0;
+  }
+  return g_utim_on;
+}
+
+static inline uint64_t utim_now(void)
+{
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+}
+
+static inline void utim_add(int k, uint64_t t0)
+{
+  const uint64_t d = utim_now() - t0;
+  g_utim_ns[k] += d;
+  g_utim_n[k]++;
+  if (d > g_utim_max[k]) {
+    g_utim_max[k] = d;
+  }
+}
+
+static void utim_total(uint64_t d_ns, uint64_t slot_ns)
+{
+  g_utim_ns[UTIM_TOTAL] += d_ns;
+  g_utim_n[UTIM_TOTAL]++;
+  if (d_ns > g_utim_max[UTIM_TOTAL]) {
+    g_utim_max[UTIM_TOTAL] = d_ns;
+  }
+  const uint64_t us = d_ns / 1000;
+  int b = 0;
+  if (us >= 3200) b = 7;
+  else if (us >= 1600) b = 6;
+  else if (us >= 800) b = 5;
+  else if (us >= 400) b = 4;
+  else if (us >= 200) b = 3;
+  else if (us >= 100) b = 2;
+  else if (us >= 50) b = 1;
+  g_utim_hist[b]++;
+  if (slot_ns > 0 && d_ns > slot_ns) {
+    g_utim_over_slot++;
+  }
+}
 static _Atomic uint64_t g_cfr_submits, g_cfr_re;
 /* Per-antenna UL channel power, the uplink analogue of the DL RXBRANCH probe. Accumulated from the
  * PUSCH DM-RS channel ESTIMATE (|H|^2), not from raw time-domain power: raw power cannot separate
@@ -322,6 +397,9 @@ bool nr_pusch_passive_decode(PHY_VARS_NR_UE *ue,
   static int s_stage = 1;
 #define PUSCH_STAGE(n, what) do { if (s_stage) { LOG_I(PHY, "SENSING: PUSCHSTAGE %d %s\n", (n), (what)); } } while (0)
   PUSCH_STAGE(1, "guards passed");
+  const int      utim = utim_enabled();
+  const uint64_t t_all = utim ? utim_now() : 0;
+  uint64_t t_stage = t_all;
   PHY_VARS_gNB *gnb = g_gnb;
   NR_DL_FRAME_PARMS *fp = &gnb->frame_parms;
   const int nant = g_gnb_nant;
@@ -373,6 +451,10 @@ bool nr_pusch_passive_decode(PHY_VARS_NR_UE *ue,
   }
 
   /* ---- TBS, then the receive chain, exactly as the gNB runs it. ---- */
+  if (utim) {
+    utim_add(UTIM_FEP, t_stage);
+    t_stage = utim_now();
+  }
   PUSCH_STAGE(3, "FEP done");
   nfapi_nr_pusch_pdu_t pdu;
   fill_pusch_pdu(g, nant, &pdu);
@@ -406,6 +488,10 @@ bool nr_pusch_passive_decode(PHY_VARS_NR_UE *ue,
   atomic_fetch_add_explicit(&g_try, 1, memory_order_relaxed);
   PUSCH_STAGE(4, "entering nr_rx_pusch_group_tp");
   nr_rx_pusch_group_tp(gnb, &pvp, &pdup, &unavp, 1, frame, slot);
+  if (utim) {
+    utim_add(UTIM_RXPUSCH, t_stage);
+    t_stage = utim_now();
+  }
   PUSCH_STAGE(5, "rx_pusch returned, entering nr_ulsch_decoding");
 
   /* ---- UPLINK CFR from the PUSCH DM-RS ------------------------------------------------------
@@ -520,8 +606,18 @@ bool nr_pusch_passive_decode(PHY_VARS_NR_UE *ue,
     }
   }
 
+  if (utim) {
+    utim_add(UTIM_CFR, t_stage);
+    t_stage = utim_now();
+  }
   int ulsch_id = 0;
   const int rc = nr_ulsch_decoding(gnb, fp, frame, slot, &ulsch_id, 1);
+  if (utim) {
+    utim_add(UTIM_DECODE, t_stage);
+    /* slots_per_frame is 10 * 2^mu; the slot budget is 10 ms / slots_per_frame. */
+    utim_total(utim_now() - t_all,
+               (fp->slots_per_frame > 0) ? (10000000ull / (uint64_t)fp->slots_per_frame) : 0);
+  }
   PUSCH_STAGE(6, "ulsch_decoding returned");
   s_stage = 0;
 #undef PUSCH_STAGE
@@ -536,29 +632,91 @@ bool nr_pusch_passive_decode(PHY_VARS_NR_UE *ue,
     out->snr_db = 10.0f * log10f((float)pvp->ulsch_power_tot / (float)pvp->ulsch_noise_power_tot);
   }
 
-  if (rc == 0 && ulsch->harq_process->b != NULL) {
-    out->status = NR_PUSCH_PASSIVE_OK;
-    out->tb     = ulsch->harq_process->b;
-    atomic_fetch_add_explicit(&g_crc_ok, 1, memory_order_relaxed);
-    return true;
+  /* `rc` is the LDPC coding INTERFACE return, not the CRC verdict -- nr_ulsch_decoding() returns
+   * whatever nrLDPC_coding_decoder() gave it and reports the actual per-segment CRC only through
+   * harq_process->processedSegments (nr_ulsch_decoding.c:289 computes exactly this expression and
+   * calls it `crcok`). Checking rc alone accepts a transport block whose segments failed, so the
+   * two are checked separately here, and a segment failure is counted apart from the all-zero case
+   * below: they have completely different causes. */
+  NR_UL_gNB_HARQ_t *hp = ulsch->harq_process;
+  if (rc != 0 || hp->b == NULL) {
+    out->status = NR_PUSCH_PASSIVE_CRC_FAIL;
+    out->reject_reason = "LDPC decoder interface error";
+    return false;
   }
-  out->status = NR_PUSCH_PASSIVE_CRC_FAIL;
-  out->reject_reason = "LDPC/CRC failed";
-  return false;
+  if (hp->C == 0 || hp->processedSegments != hp->C) {
+    atomic_fetch_add_explicit(&g_seg_fail, 1, memory_order_relaxed);
+    out->status = NR_PUSCH_PASSIVE_CRC_FAIL;
+    out->reject_reason = "segment CRC failed";
+    return false;
+  }
+
+  /* All-zero-payload guard, the uplink twin of nr_pdsch_passive_decode.c's. An all-zero transport
+   * block carries an all-zero CRC24, so it passes the CRC by construction -- a false pass, not a
+   * decode. On the downlink this population turned out to be REAL (the gNB emits PDSCH with no MAC
+   * PDU when it has no HARQ buffer, 30.4 % of grants), so the same shape on the uplink is REPORTED
+   * rather than silently dropped: counted, excluded from crc_ok, and never allowed to reach a
+   * data-aided reconstruction where it would inject a constant X and hence a meaningless CFR.
+   * `b` is malloc16_clear'd to a_segments*1056 bytes, past tbs, so reading the two CRC bytes just
+   * beyond the payload is in bounds. */
+  const uint32_t sz = (uint32_t)(tbs >> 3);
+  if (sz > 0 && hp->b[sz] == 0 && hp->b[sz + 1] == 0) {
+    uint32_t i = 0;
+    while (i < sz && hp->b[i] == 0) {
+      i++;
+    }
+    if (i == sz) {
+      atomic_fetch_add_explicit(&g_zero_tb, 1, memory_order_relaxed);
+      out->status = NR_PUSCH_PASSIVE_ZERO_TB;
+      out->reject_reason = "all-zero transport block (CRC passes by construction)";
+      return false;
+    }
+  }
+
+  out->status = NR_PUSCH_PASSIVE_OK;
+  out->tb     = hp->b;
+  atomic_fetch_add_explicit(&g_crc_ok, 1, memory_order_relaxed);
+  return true;
 }
 
 void nr_pusch_passive_stats_dump(void)
 {
   const uint64_t t = atomic_load_explicit(&g_try, memory_order_relaxed);
   const uint64_t k = atomic_load_explicit(&g_crc_ok, memory_order_relaxed);
+  /* Reported the way the downlink investigation had to learn to report it: crc_ok/try mixes two
+   * independent things, decoder health and the empty-grant rate. `health` = ok/(ok+seg_fail) is the
+   * one that says whether the receive chain works; crc_ok/try falls with the uplink's empty-TB
+   * fraction even when nothing is wrong. Quoting only the latter misled the downlink work once. */
+  const uint64_t sf = atomic_load_explicit(&g_seg_fail, memory_order_relaxed);
+  const uint64_t zt = atomic_load_explicit(&g_zero_tb, memory_order_relaxed);
   LOG_I(PHY,
-        "SENSING: pusch_passive[try=%lu crc_ok=%lu (%.1f%%) unsup=%lu setup_fail=%lu] "
-        "ul_cfr[submits=%lu re=%lu]\n",
+        "SENSING: pusch_passive[try=%lu crc_ok=%lu (%.1f%%) seg_fail=%lu zero_tb=%lu (%.1f%%) "
+        "health=%.1f%% unsup=%lu setup_fail=%lu] ul_cfr[submits=%lu re=%lu]\n",
         (unsigned long)t, (unsigned long)k, t ? (100.0 * (double)k / (double)t) : 0.0,
+        (unsigned long)sf, (unsigned long)zt, t ? (100.0 * (double)zt / (double)t) : 0.0,
+        (k + sf) ? (100.0 * (double)k / (double)(k + sf)) : 0.0,
         (unsigned long)atomic_load_explicit(&g_rej_unsup, memory_order_relaxed),
         (unsigned long)atomic_load_explicit(&g_rej_setup, memory_order_relaxed),
         (unsigned long)atomic_load_explicit(&g_cfr_submits, memory_order_relaxed),
         (unsigned long)atomic_load_explicit(&g_cfr_re, memory_order_relaxed));
+  if (utim_enabled() && g_utim_n[UTIM_TOTAL] > 0) {
+    char rep[512];
+    unsigned u = 0;
+    for (int k = 0; k < UTIM_N && u + 72 < sizeof(rep); k++) {
+      u += (unsigned)snprintf(rep + u, sizeof(rep) - u, "%s[n=%lu mean=%.0fus max=%.0fus tot=%.2fs] ",
+                              kUtimName[k], (unsigned long)g_utim_n[k],
+                              g_utim_n[k] ? (double)g_utim_ns[k] / (double)g_utim_n[k] / 1000.0 : 0.0,
+                              (double)g_utim_max[k] / 1000.0, (double)g_utim_ns[k] / 1e9);
+    }
+    LOG_I(PHY, "SENSING: UTIM %s\n", rep);
+    LOG_I(PHY,
+          "SENSING: UTIM grant_total_us_hist <50=%lu <100=%lu <200=%lu <400=%lu <800=%lu <1600=%lu "
+          "<3200=%lu >=3200=%lu over_slot=%lu/%lu\n",
+          (unsigned long)g_utim_hist[0], (unsigned long)g_utim_hist[1], (unsigned long)g_utim_hist[2],
+          (unsigned long)g_utim_hist[3], (unsigned long)g_utim_hist[4], (unsigned long)g_utim_hist[5],
+          (unsigned long)g_utim_hist[6], (unsigned long)g_utim_hist[7],
+          (unsigned long)g_utim_over_slot, (unsigned long)g_utim_n[UTIM_TOTAL]);
+  }
   {
     const uint64_t n = atomic_load_explicit(&g_ant_n, memory_order_relaxed);
     if (n > 0) {

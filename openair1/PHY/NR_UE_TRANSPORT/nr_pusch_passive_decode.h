@@ -41,6 +41,7 @@ typedef enum {
   NR_PUSCH_PASSIVE_CRC_FAIL = 1,  ///< decoded, CRC failed
   NR_PUSCH_PASSIVE_UNSUPPORTED = 2, ///< grant outside this receiver's scope; nothing attempted
   NR_PUSCH_PASSIVE_ERROR = 3,     ///< setup/allocation failure
+  NR_PUSCH_PASSIVE_ZERO_TB = 4,   ///< all-zero payload: CRC passes by construction, not a decode
 } nr_pusch_passive_status_t;
 
 typedef struct {
