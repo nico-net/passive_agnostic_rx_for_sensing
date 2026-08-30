@@ -145,6 +145,27 @@ class LogTail:
             return {"counters": dict(self.counters), "stats": dict(self.stats), "lines": list(self.lines)[-60:]}
 
 
+def replay_thread(path, store, rate_hz):
+    """Feed a recorded report JSONL through the same store as the live path, for testing the GUI
+    with no receiver attached. Same code path as ZMQ from add() onward, so what you see is what a
+    live run renders."""
+    period = 1.0 / max(0.01, rate_hz)
+    while True:
+        with open(path, "r", errors="replace") as f:
+            n = 0
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    store.add("replay:" + path, json.loads(line))
+                    n += 1
+                except json.JSONDecodeError:
+                    continue
+                time.sleep(period)
+        print(f"[monitor] replay {path}: {n} reports, looping")
+
+
 def sub_thread(endpoint, store):
     ctx = zmq.Context.instance()
     sock = ctx.socket(zmq.SUB)
@@ -205,12 +226,19 @@ def main():
     ap.add_argument("--port", type=int, default=8080, help="HTTP port (default 8080)")
     ap.add_argument("--bind", default="0.0.0.0", help="HTTP bind address (default 0.0.0.0, for SSH access)")
     ap.add_argument("--log", help="receiver log file to tail for radio/decode health")
+    ap.add_argument("--replay", metavar="FILE.jsonl",
+                    help="replay a recorded report JSONL instead of subscribing (testing, no receiver needed)")
+    ap.add_argument("--replay-rate", type=float, default=2.0,
+                    help="reports per second when replaying (default 2)")
     args = ap.parse_args()
 
-    endpoints = args.connect or ["tcp://127.0.0.1:5556"]
     store = ReportStore()
-    for ep in endpoints:
-        threading.Thread(target=sub_thread, args=(ep, store), daemon=True).start()
+    if args.replay:
+        threading.Thread(target=replay_thread, args=(args.replay, store, args.replay_rate),
+                         daemon=True).start()
+    else:
+        for ep in (args.connect or ["tcp://127.0.0.1:5556"]):
+            threading.Thread(target=sub_thread, args=(ep, store), daemon=True).start()
 
     logtail = None
     if args.log:
