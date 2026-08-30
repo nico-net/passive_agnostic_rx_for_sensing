@@ -1,0 +1,482 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Passive RX Monitor</title>
+<style>
+:root{
+  --bg:oklch(0.16 0.014 240); --panel:oklch(0.205 0.016 240); --raised:oklch(0.245 0.018 240);
+  --border:oklch(0.32 0.02 240); --soft:oklch(0.27 0.018 240);
+  --text:oklch(0.93 0.006 240); --dim:oklch(0.66 0.012 240); --faint:oklch(0.48 0.012 240);
+  --green:oklch(0.78 0.19 150); --green-d:oklch(0.26 0.05 150);
+  --amber:oklch(0.80 0.15 75);  --amber-d:oklch(0.28 0.05 75);
+  --red:oklch(0.68 0.19 25);    --red-d:oklch(0.28 0.06 25);
+  --cyan:oklch(0.76 0.12 215);  --cyan-d:oklch(0.26 0.05 215);
+  --violet:oklch(0.72 0.15 305);--violet-d:oklch(0.27 0.05 305);
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:14px/1.4 "IBM Plex Sans",system-ui,sans-serif;height:100vh;display:flex;flex-direction:column;overflow:hidden}
+.mono{font-family:"IBM Plex Mono",ui-monospace,monospace}
+header{display:flex;align-items:center;gap:20px;padding:0 20px;height:52px;background:var(--panel);border-bottom:1px solid var(--border);flex-shrink:0}
+.brand{display:flex;align-items:center;gap:9px;font-weight:600;letter-spacing:.05em;font-size:13.5px}
+.brand svg{width:21px;height:21px;color:var(--green)}
+select{background:var(--raised);color:var(--dim);border:1px solid var(--border);border-radius:5px;padding:6px 10px;font-family:"IBM Plex Mono",monospace;font-size:11.5px}
+.status{margin-left:auto;display:flex;align-items:center;gap:14px}
+.chip{display:inline-flex;align-items:center;gap:6px;font-family:"IBM Plex Mono",monospace;font-size:11px;font-weight:500;padding:5px 10px;border-radius:4px}
+.chip-green{background:var(--green-d);color:var(--green)} .chip-amber{background:var(--amber-d);color:var(--amber)}
+.chip-red{background:var(--red-d);color:var(--red)} .chip-grey{background:var(--raised);color:var(--faint)}
+.dot{width:6px;height:6px;border-radius:50%;background:currentColor;flex-shrink:0}
+.stat{font-family:"IBM Plex Mono",monospace;font-size:11px;color:var(--faint)} .stat b{color:var(--text);font-weight:500}
+nav{display:flex;gap:4px;padding:0 20px;height:38px;border-bottom:1px solid var(--border);flex-shrink:0}
+nav button{background:none;border:none;border-bottom:2px solid transparent;color:var(--faint);font:500 12.5px/1 inherit;padding:0 15px;cursor:pointer}
+nav button:hover{color:var(--dim)} nav button.active{color:var(--text);border-bottom-color:var(--green)}
+main{flex:1;min-height:0;padding:16px 20px;display:flex;flex-direction:column;gap:14px;overflow:auto}
+.panel{background:var(--panel);border:1px solid var(--soft);border-radius:8px;padding:14px 16px}
+.ptitle{font-size:10.5px;font-weight:600;letter-spacing:.07em;text-transform:uppercase;color:var(--faint);margin-bottom:11px}
+.row{display:flex;gap:14px} .row>*{flex:1;min-width:0}
+.cardv{font-family:"IBM Plex Mono",monospace;font-size:22px;font-weight:600;margin:6px 0 4px}
+.cardv.good{color:var(--green)} .cardv.warn{color:var(--amber)} .cardv.bad{color:var(--red)}
+.clab{font-size:10.5px;letter-spacing:.06em;text-transform:uppercase;color:var(--faint);font-weight:600}
+.csub{font-size:11px;color:var(--dim);font-family:"IBM Plex Mono",monospace}
+table{width:100%;border-collapse:collapse;font-family:"IBM Plex Mono",monospace;font-size:11.5px}
+th{text-align:left;font-size:9.5px;text-transform:uppercase;letter-spacing:.04em;color:var(--faint);font-weight:600;padding:0 6px 8px}
+td{padding:5px 6px;border-top:1px solid var(--soft);color:var(--dim)} td.hl{color:var(--text)}
+.kv{display:flex;justify-content:space-between;gap:10px;font-family:"IBM Plex Mono",monospace;font-size:11.5px;padding:6px 0;border-bottom:1px solid var(--soft)}
+.kv:last-child{border-bottom:none} .kv .k{color:var(--faint)} .kv .v{color:var(--text);text-align:right}
+.bar{height:9px;background:var(--raised);border-radius:5px;overflow:hidden} .bar>div{height:100%}
+canvas{display:block;width:100%;border-radius:6px;border:1px solid var(--soft);background:oklch(0.11 0.018 240)}
+.banner{display:flex;gap:10px;padding:10px 14px;background:var(--amber-d);border:1px solid oklch(0.80 0.15 75/.35);border-radius:7px;font-size:11.5px;color:var(--dim);line-height:1.5}
+.banner b{color:var(--amber)}
+.log{font-family:"IBM Plex Mono",monospace;font-size:11px;color:var(--dim);white-space:pre-wrap;word-break:break-all;max-height:220px;overflow:auto;line-height:1.7}
+.hidden{display:none!important}
+.empty{color:var(--faint);font-size:12px;padding:18px 0;text-align:center;font-family:"IBM Plex Mono",monospace}
+</style>
+</head>
+<body>
+<header>
+  <div class="brand">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
+      <circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5.2" stroke-opacity=".5"/>
+      <circle cx="12" cy="12" r="1.6" fill="currentColor" stroke="none"/>
+      <path d="M12 12 L12 3"/><path d="M12 12 L18.4 7.6" stroke-opacity=".35"/>
+    </svg>PASSIVE&middot;RX MONITOR
+  </div>
+  <select id="rxsel"></select>
+  <div class="status" id="status"></div>
+</header>
+<nav id="tabs"></nav>
+<main id="view"></main>
+
+<script>
+const TABS = ["Link & Sync Health","DL Detections","UL Detections","Tracking","Config / Scene"];
+let tab = 0, state = null, rxId = null;
+
+const el = (t, cls, txt) => { const e = document.createElement(t); if (cls) e.className = cls; if (txt != null) e.textContent = txt; return e; };
+const fmt = (v, d = 2) => (v == null || Number.isNaN(v)) ? "—" : (+v).toFixed(d);
+const panel = (title, ...kids) => { const p = el("div","panel"); if (title) p.appendChild(el("div","ptitle",title)); kids.forEach(k => k && p.appendChild(k)); return p; };
+
+function chip(cls, txt, dot = true) {
+  const c = el("span", "chip " + cls);
+  if (dot) c.appendChild(el("span","dot"));
+  c.appendChild(document.createTextNode(txt));
+  return c;
+}
+function card(label, value, cls, sub) {
+  const p = el("div","panel");
+  p.appendChild(el("div","clab",label));
+  p.appendChild(el("div","cardv " + (cls||""), value));
+  if (sub) p.appendChild(el("div","csub",sub));
+  return p;
+}
+function kvRows(pairs) {
+  const f = document.createDocumentFragment();
+  for (const [k,v,color] of pairs) {
+    const r = el("div","kv");
+    r.appendChild(el("span","k",k));
+    const val = el("span","v",v);
+    if (color) val.style.color = `var(--${color})`;
+    r.appendChild(val); f.appendChild(r);
+  }
+  return f;
+}
+function table(cols, rows) {
+  const t = el("table"), hr = el("tr");
+  cols.forEach(c => hr.appendChild(el("th",null,c)));
+  t.appendChild(hr);
+  rows.forEach(r => {
+    const tr = el("tr");
+    r.forEach((c,i) => tr.appendChild(el("td", i===0?"hl":null, c)));
+    t.appendChild(tr);
+  });
+  return t;
+}
+
+const rx = () => state && rxId ? state.receivers[rxId] : null;
+const rep = () => { const r = rx(); return r && r.latest; };
+
+/* ---- detection source split -------------------------------------------------------------------
+   src_occ counts ROWS per source in the fused CPI grid. Detections come out of that ONE grid, so a
+   detection cannot be attributed to DL or UL individually -- the split below is by which sources
+   contributed rows, and the UL tab says so rather than implying per-detection attribution. */
+function occ() {
+  const r = rep(); if (!r || !r.src_occ) return null;
+  const names = state.source_names, out = {};
+  r.src_occ.forEach((n,i) => { if (names[i]) out[names[i]] = n; });
+  return out;
+}
+const ulRows = () => { const o = occ(); return o ? state.ul_sources.reduce((a,s) => a + (o[s]||0), 0) : 0; };
+const dlRows = () => { const o = occ(); if (!o) return 0;
+  return Object.entries(o).filter(([s]) => !state.ul_sources.includes(s)).reduce((a,[,n]) => a+n, 0); };
+
+/* ---- range-Doppler raster ---------------------------------------------------------------------- */
+function rasterCanvas(r) {
+  const wrap = el("div");
+  const cv = el("canvas"); cv.height = 320; wrap.appendChild(cv);
+  requestAnimationFrame(() => {
+    cv.width = cv.clientWidth;
+    const ctx = cv.getContext("2d"), W = cv.width, H = cv.height;
+    ctx.fillStyle = "oklch(0.11 0.018 240)"; ctx.fillRect(0,0,W,H);
+    const blob = r.rvm_blob;
+    if (blob && blob.length) {
+      // rvm_blob is row-major over Doppler x range; infer the range extent from the axis metadata.
+      const nR = Math.max(1, Math.round(r.range_max_m / r.range_res_m));
+      const nD = Math.max(1, Math.floor(blob.length / nR));
+      let lo = Infinity, hi = -Infinity;
+      for (const v of blob) { if (v < lo) lo = v; if (v > hi) hi = v; }
+      const span = (hi - lo) || 1;
+      const img = ctx.createImageData(W, H);
+      for (let y = 0; y < H; y++) {
+        const d = Math.min(nD-1, Math.floor(y / H * nD));
+        for (let x = 0; x < W; x++) {
+          const rr = Math.min(nR-1, Math.floor(x / W * nR));
+          const t = Math.max(0, Math.min(1, (blob[d*nR + rr] - lo) / span));
+          const i = (y*W + x) * 4;
+          // dark blue -> cyan -> amber, matching the colorbar
+          img.data[i]   = 255 * Math.min(1, Math.max(0, t*2 - 0.9));
+          img.data[i+1] = 255 * Math.min(1, t*1.5);
+          img.data[i+2] = 255 * Math.min(1, Math.max(0.08, 1.2 - t*1.6));
+          img.data[i+3] = 255;
+        }
+      }
+      ctx.putImageData(img, 0, 0);
+    } else {
+      ctx.fillStyle = "oklch(0.48 0.012 240)"; ctx.font = "12px IBM Plex Mono, monospace";
+      ctx.textAlign = "center";
+      ctx.fillText("no rvm_blob in report — set [sensing] capture = 1 to stream the raster", W/2, H/2);
+    }
+    // detection markers
+    ctx.strokeStyle = "oklch(0.76 0.12 215)"; ctx.lineWidth = 1.5;
+    ctx.fillStyle = "oklch(0.76 0.12 215)"; ctx.font = "10px IBM Plex Mono, monospace";
+    ctx.textAlign = "left";
+    for (const d of r.detections || []) {
+      const x = (d.bistatic_range_m / (r.range_max_m||1)) * W;
+      const y = H/2 - (d.bistatic_velocity_mps / (r.vel_max_mps||1)) * (H/2);
+      ctx.strokeRect(x-10, y-10, 20, 20);
+      ctx.fillText(`${fmt(d.bistatic_range_m,0)}m ${fmt(d.bistatic_velocity_mps,1)}m/s`, x+13, y+3);
+    }
+    // axes
+    ctx.fillStyle = "oklch(0.48 0.012 240)"; ctx.font = "9px IBM Plex Mono, monospace";
+    for (let i = 0; i <= 4; i++) {
+      ctx.fillText(fmt(r.range_max_m*i/4, 0)+" m", i/4*W + 3, H-5);
+    }
+    ctx.fillText("+"+fmt(r.vel_max_mps,1)+" m/s", 3, 11);
+    ctx.fillText("−"+fmt(r.vel_max_mps,1)+" m/s", 3, H-16);
+  });
+  return wrap;
+}
+
+function detTable(r) {
+  const rows = (r.detections||[]).map((d,i) => [
+    String(i+1), fmt(d.bistatic_range_m,1), fmt(d.bistatic_velocity_mps,2),
+    d.azimuth_deg != null ? fmt(d.azimuth_deg,1)+"°" : "—",
+    fmt(d.snr_db,1), d.p_real != null ? fmt(d.p_real,2) : "—",
+  ]);
+  return rows.length ? table(["#","Range m","Rate m/s","Az","SNR dB","p(real)"], rows)
+                     : el("div","empty","no detections in the latest CPI");
+}
+
+/* ---- tabs -------------------------------------------------------------------------------------- */
+function tabHealth(v) {
+  const r = rep(), h = rx(), log = state.log;
+  if (!r) { v.appendChild(el("div","empty","waiting for the first DetectionReport…")); return; }
+  const s = r.sync || {}, sto = s.sto||{}, cfo = s.cfo||{}, sfo = s.sfo||{}, los = s.los_residual||{};
+  const age = h.last_seen ? state.now - h.last_seen : 999;
+  const fly = sto.n_valid ? 100*sto.n_flywheel/(sto.n_valid+sto.n_flywheel) : null;
+  const st = log && log.stats || {};
+
+  const cards = el("div","row");
+  cards.appendChild(card("Report stream", age < 60 ? "LIVE" : "STALE", age < 60 ? "good":"bad",
+    `${h.cpi_count} CPIs · last ${fmt(age,0)}s ago`));
+  cards.appendChild(card("CFO", fmt(cfo.cfo_hz,1)+" Hz", Math.abs(cfo.cfo_hz||0) < 300 ? "good":"bad",
+    `filtered ${fmt(cfo.cfo_hz_filtered,1)} Hz · mis-lock >2600 Hz`));
+  cards.appendChild(card("STO flywheel", fly==null?"—":fmt(fly,0)+"%", fly>60?"bad":fly>35?"warn":"good",
+    `${sto.n_valid||0} locked · ${sto.n_flywheel||0} flywheel rows`));
+  cards.appendChild(card("SFO", fmt(sfo.sfo_ppm,3)+" ppm", sfo.corrected ? "good":"warn",
+    sfo.corrected ? "correction applied" : "correction withheld (R² gate)"));
+  v.appendChild(cards);
+
+  const o = occ();
+  const occPanel = panel("CFR occupancy (rows / CPI)");
+  if (o) {
+    const max = Math.max(1, ...Object.values(o));
+    for (const [name,n] of Object.entries(o)) {
+      const row = el("div"); row.style.cssText = "display:grid;grid-template-columns:110px 1fr 40px;gap:10px;align-items:center;margin-bottom:9px;font-family:'IBM Plex Mono',monospace;font-size:11.5px";
+      row.appendChild(el("span",null,name));
+      const bar = el("div","bar"), fill = el("div");
+      fill.style.cssText = `width:${100*n/max}%;background:var(--${state.ul_sources.includes(name)?"violet":"cyan"})`;
+      bar.appendChild(fill); row.appendChild(bar);
+      row.appendChild(el("span",null,String(n)));
+      occPanel.appendChild(row);
+    }
+  } else occPanel.appendChild(el("div","empty","receiver build predates src_occ reporting"));
+
+  const health = panel("Decode / radio health", kvRows([
+    ["PDSCH CRC", st.pdsch_rate!=null ? fmt(st.pdsch_rate,1)+"%" : "—", st.pdsch_rate>=80?"green":st.pdsch_rate!=null?"amber":null],
+    ["blind PDCCH accepts", st.blind_accepts!=null ? `${st.blind_accepts} → ${st.blind_submits} submits` : "—"],
+    ["occupancy line", st.occ || "—"],
+    ["X410 overflows", log ? String(log.counters.overflow) : "—", log && log.counters.overflow ? "red":"green"],
+    ["out-of-sync events", log ? String(log.counters.sync_lost) : "—", log && log.counters.sync_lost ? "amber":"green"],
+    ["LOS baseline", los.baseline_established ? "established" : "not established", los.baseline_established?"green":"amber"],
+  ]));
+  v.appendChild(el("div","row")).append(occPanel, health);
+
+  if (log && log.lines.length) {
+    const lg = panel("Receiver log");
+    lg.appendChild(el("div","log", log.lines.join("\n")));
+    v.appendChild(lg);
+  } else {
+    v.appendChild(panel("Receiver log", el("div","empty","start monitor.py with --log <receiver.log> for radio health")));
+  }
+}
+
+function tabDL(v) {
+  const r = rep();
+  if (!r) { v.appendChild(el("div","empty","waiting for data…")); return; }
+  const meta = el("div","row");
+  meta.appendChild(card("Range res", fmt(r.range_res_m,2)+" m", null, `max ${fmt(r.range_max_m,0)} m`));
+  meta.appendChild(card("Velocity res", fmt(r.vel_res_mps,3)+" m/s", null, `max ±${fmt(r.vel_max_mps,2)} m/s`));
+  meta.appendChild(card("Detections", String((r.detections||[]).length), null, `ref: ${r.illuminator?r.illuminator.ref_type:"?"}`));
+  meta.appendChild(card("DL rows / CPI", String(dlRows()), null, "csi_rs + dmrs + data + blind"));
+  v.appendChild(meta);
+  v.appendChild(panel("Range–Doppler map (DL illuminator: gNB)", rasterCanvas(r)));
+  v.appendChild(panel("Detections — latest CPI", detTable(r)));
+}
+
+function tabUL(v) {
+  const r = rep();
+  const b = el("div","banner");
+  b.innerHTML = "<b>Illuminator position unknown.</b> The uplink illuminator is a UE, not the surveyed gNB, so a PUSCH-sourced echo sits on a different bistatic ellipse and its range is receiver-relative. These rows are <b>not</b> fed to the Tracking map. The receiver currently fuses all sources into one grid, so detections below cannot be attributed to UL individually — only the row counts can.";
+  v.appendChild(b);
+  if (!r) { v.appendChild(el("div","empty","waiting for data…")); return; }
+  const o = occ() || {};
+  const meta = el("div","row");
+  meta.appendChild(card("UL rows / CPI", String(ulRows()), ulRows()?"good":"warn", "source: pusch_dmrs"));
+  meta.appendChild(card("DL rows / CPI", String(dlRows()), null, "for comparison"));
+  const st = state.log && state.log.stats || {};
+  meta.appendChild(card("PDSCH CRC", st.pdsch_rate!=null?fmt(st.pdsch_rate,1)+"%":"—", null, "decode health"));
+  v.appendChild(meta);
+  if (!ulRows()) {
+    v.appendChild(panel("Uplink status", el("div","empty",
+      "no pusch_dmrs rows this CPI — add \"pusch_dmrs\" to [sensing] sources and confirm UL grants are being decoded")));
+  }
+  v.appendChild(panel("Fused-grid detections (DL + UL, not separable)", detTable(r)));
+}
+
+function tabTracking(v) {
+  const r = rep(), h = rx();
+  if (!r) { v.appendChild(el("div","empty","waiting for data…")); return; }
+  const tracks = r.tracks || [];
+  const wrap = el("div"); wrap.style.cssText = "display:flex;gap:14px;flex:1;min-height:0";
+  const mapPanel = el("div","panel"); mapPanel.style.cssText = "flex:1;min-width:0;padding:0;position:relative";
+  const cv = el("canvas"); cv.height = 560; mapPanel.appendChild(cv);
+  wrap.appendChild(mapPanel);
+
+  const side = el("div"); side.style.cssText = "width:290px;flex-shrink:0;display:flex;flex-direction:column;gap:10px;overflow:auto";
+  side.appendChild(panel(`Tracks (${tracks.length})`));
+  const COLORS = ["cyan","amber","violet","green"];
+  tracks.forEach((t,i) => {
+    const p = el("div","panel");
+    const head = el("div"); head.style.cssText="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px";
+    const id = el("div"); id.style.cssText="font-family:'IBM Plex Mono',monospace;font-size:12px;font-weight:600;display:flex;align-items:center;gap:7px";
+    const sw = el("span"); sw.style.cssText=`width:9px;height:9px;border-radius:50%;background:var(--${COLORS[i%4]})`;
+    id.append(sw, document.createTextNode("TRK-"+String(t.track_id).padStart(3,"0")));
+    head.appendChild(id);
+    head.appendChild(chip(t.updated?"chip-green":"chip-amber", t.updated?"UPDATED":"COASTING"));
+    p.appendChild(head);
+    p.appendChild(kvRows([
+      ["Δrange", fmt(t.bistatic_range_m,1)+" m"],
+      ["range rate", fmt(t.bistatic_velocity_mps,2)+" m/s"],
+      ["bearing", t.azimuth_deg!=null ? `${fmt(t.azimuth_deg,1)}° ±${fmt(t.azimuth_std_deg,1)}°` : "— (no AoA)"],
+      ["position", t.position ? `${fmt(t.position[0],0)}, ${fmt(t.position[1],0)} m` : "no fix"],
+      ["σ range / coast", `${fmt(t.sigma_range_m,1)} m / ${t.coast_count}`],
+    ]));
+    side.appendChild(p);
+  });
+  if (!tracks.length) side.appendChild(panel(null, el("div","empty","no confirmed tracks")));
+  wrap.appendChild(side);
+  v.appendChild(wrap);
+
+  requestAnimationFrame(() => {
+    cv.width = cv.clientWidth;
+    const ctx = cv.getContext("2d"), W = cv.width, H = cv.height;
+    const tx = r.tx_position || [0,0], rxp = r.rx_position || [0,0];
+    // world extent from everything we must show, with margin
+    const pts = [rxp, tx, ...tracks.filter(t=>t.position).map(t=>t.position)];
+    Object.values(h.trails||{}).forEach(tr => tr.forEach(p => pts.push([p.x,p.y])));
+    let minX = Math.min(...pts.map(p=>p[0])), maxX = Math.max(...pts.map(p=>p[0]));
+    let minY = Math.min(...pts.map(p=>p[1])), maxY = Math.max(...pts.map(p=>p[1]));
+    const pad = Math.max(60, 0.15*Math.max(maxX-minX, maxY-minY, 1));
+    minX-=pad; maxX+=pad; minY-=pad; maxY+=pad;
+    const sc = Math.min(W/(maxX-minX), H/(maxY-minY));
+    const X = x => (x-minX)*sc, Y = y => H-(y-minY)*sc;   // world +y is up
+
+    ctx.fillStyle="oklch(0.13 0.016 245)"; ctx.fillRect(0,0,W,H);
+    // range rings around the receiver
+    ctx.strokeStyle="oklch(1 0 0 / 0.09)"; ctx.lineWidth=1;
+    ctx.fillStyle="oklch(1 0 0 / 0.3)"; ctx.font="9px IBM Plex Mono, monospace";
+    for (let d=100; d<=1000; d+=100) {
+      const rad = d*sc; if (rad > Math.hypot(W,H)) break;
+      ctx.beginPath(); ctx.arc(X(rxp[0]), Y(rxp[1]), rad, 0, 7); ctx.stroke();
+      ctx.fillText(d+" m", X(rxp[0])+4, Y(rxp[1])-rad-3);
+    }
+    // baseline Rx -> gNB
+    ctx.strokeStyle="oklch(0.80 0.15 75 / 0.6)"; ctx.setLineDash([5,5]); ctx.beginPath();
+    ctx.moveTo(X(rxp[0]),Y(rxp[1])); ctx.lineTo(X(tx[0]),Y(tx[1])); ctx.stroke(); ctx.setLineDash([]);
+
+    tracks.forEach((t,i) => {
+      const col = `oklch(${["0.76 0.12 215","0.80 0.15 75","0.72 0.15 305","0.78 0.19 150"][i%4]})`;
+      // bearing ray: the constraint that makes a single-receiver fix possible at all
+      if (t.azimuth_deg != null) {
+        const a = t.azimuth_deg*Math.PI/180, L = Math.max(W,H)/sc;
+        ctx.strokeStyle=col; ctx.globalAlpha=.45; ctx.setLineDash([2,4]); ctx.beginPath();
+        ctx.moveTo(X(rxp[0]),Y(rxp[1]));
+        ctx.lineTo(X(rxp[0]+L*Math.cos(a)), Y(rxp[1]+L*Math.sin(a)));
+        ctx.stroke(); ctx.setLineDash([]); ctx.globalAlpha=1;
+      }
+      const trail = (h.trails||{})[String(t.track_id)] || [];
+      if (trail.length > 1) {
+        ctx.strokeStyle=col; ctx.lineWidth=2; ctx.beginPath();
+        trail.forEach((p,j) => j ? ctx.lineTo(X(p.x),Y(p.y)) : ctx.moveTo(X(p.x),Y(p.y)));
+        ctx.stroke();
+      }
+      // per-detection dots, radius scaled by that fix's own range rate
+      ctx.fillStyle=col;
+      trail.forEach(p => { ctx.beginPath(); ctx.arc(X(p.x),Y(p.y), 3+Math.min(6,Math.abs(p.v)), 0, 7); ctx.fill(); });
+      if (t.position) {
+        ctx.strokeStyle=col; ctx.lineWidth=2; ctx.beginPath();
+        ctx.arc(X(t.position[0]),Y(t.position[1]),11,0,7); ctx.stroke();
+        ctx.font="600 10.5px IBM Plex Mono, monospace";
+        ctx.fillText(`TRK-${String(t.track_id).padStart(3,"0")}  ${fmt(t.bistatic_velocity_mps,1)} m/s`,
+                     X(t.position[0])+14, Y(t.position[1])-4);
+      }
+    });
+
+    // gNB
+    ctx.strokeStyle="oklch(0.80 0.15 75)"; ctx.lineWidth=2; ctx.beginPath();
+    ctx.moveTo(X(tx[0])-9,Y(tx[1])+15); ctx.lineTo(X(tx[0]),Y(tx[1])-11); ctx.lineTo(X(tx[0])+9,Y(tx[1])+15); ctx.closePath(); ctx.stroke();
+    ctx.fillStyle="oklch(0.80 0.15 75)"; ctx.font="600 11px IBM Plex Mono, monospace"; ctx.textAlign="center";
+    ctx.fillText("gNB · TX", X(tx[0]), Y(tx[1])+34);
+    ctx.font="9.5px IBM Plex Mono, monospace"; ctx.fillStyle="oklch(0.6 0.01 240)";
+    ctx.fillText(`(${fmt(tx[0],0)}, ${fmt(tx[1],0)}) m`, X(tx[0]), Y(tx[1])+47);
+    // receiver
+    ctx.strokeStyle="oklch(0.78 0.19 150)"; ctx.lineWidth=2.2; ctx.beginPath();
+    ctx.arc(X(rxp[0]),Y(rxp[1]),15,0,7); ctx.stroke();
+    ctx.fillStyle="oklch(0.78 0.19 150)"; ctx.beginPath(); ctx.arc(X(rxp[0]),Y(rxp[1]),3,0,7); ctx.fill();
+    ctx.font="600 11px IBM Plex Mono, monospace";
+    ctx.fillText("X410 · RX", X(rxp[0]), Y(rxp[1])+34);
+    ctx.textAlign="left";
+    ctx.fillStyle="oklch(0.85 0.01 240 / 0.45)"; ctx.font="9.5px IBM Plex Mono, monospace";
+    ctx.fillText("fix = bearing ray ∩ bistatic range ellipse (single receiver)", 12, H-12);
+  });
+}
+
+function tabConfig(v) {
+  const r = rep();
+  if (!r) { v.appendChild(el("div","empty","waiting for data…")); return; }
+  const g = el("div","row");
+  g.appendChild(panel("Identity / geometry", kvRows([
+    ["rx_id", r.rx_id||"—"],
+    ["illuminator", r.illuminator? r.illuminator.id : "—"],
+    ["pci", r.illuminator? String(r.illuminator.pci) : "—"],
+    ["rx_position", r.rx_position? r.rx_position.map(x=>fmt(x,1)).join(", ")+" m" : "—"],
+    ["tx_position", r.tx_position? r.tx_position.map(x=>fmt(x,1)).join(", ")+" m" : "—"],
+    ["fc", fmt(r.fc_hz/1e6,2)+" MHz"],
+  ])));
+  g.appendChild(panel("CPI / axes", kvRows([
+    ["ref_type", r.illuminator? r.illuminator.ref_type : "—"],
+    ["cpi_duration", fmt(r.cpi_duration_ns/1e9,3)+" s"],
+    ["range_res / max", `${fmt(r.range_res_m,2)} / ${fmt(r.range_max_m,0)} m`],
+    ["vel_res / max", `${fmt(r.vel_res_mps,3)} / ±${fmt(r.vel_max_mps,2)} m/s`],
+    ["p_detect", r.p_detect>=0? fmt(r.p_detect,3) : "not measured"],
+    ["subbin_interp", String(!!r.subbin_interp)],
+  ])));
+  const o = occ();
+  g.appendChild(panel("Sources this CPI", o ? kvRows(Object.entries(o).map(([k,n]) =>
+      [k + (state.ul_sources.includes(k)?" (UL)":""), String(n)]))
+    : el("div","empty","—")));
+  v.appendChild(g);
+  const raw = panel("Latest report (raw)");
+  const pre = el("div","log");
+  const copy = {...r}; delete copy.rvm_blob;   // the raster is thousands of floats
+  pre.textContent = JSON.stringify(copy, null, 1);
+  pre.style.maxHeight = "340px";
+  raw.appendChild(pre);
+  v.appendChild(raw);
+}
+
+const RENDER = [tabHealth, tabDL, tabUL, tabTracking, tabConfig];
+
+function renderChrome() {
+  const nav = document.getElementById("tabs"); nav.textContent = "";
+  TABS.forEach((t,i) => {
+    const b = el("button", i===tab?"active":null, t);
+    b.onclick = () => { tab = i; render(); };
+    nav.appendChild(b);
+  });
+  const sel = document.getElementById("rxsel");
+  const ids = state ? Object.keys(state.receivers) : [];
+  if (sel.dataset.ids !== ids.join()) {
+    sel.dataset.ids = ids.join(); sel.textContent = "";
+    ids.forEach(id => { const o = el("option",null,id); o.value = id; sel.appendChild(o); });
+    sel.onchange = () => { rxId = sel.value; render(); };
+  }
+  if (ids.length && (!rxId || !ids.includes(rxId))) rxId = ids[0];
+  sel.value = rxId || "";
+
+  const st = document.getElementById("status"); st.textContent = "";
+  const r = rep(), h = rx();
+  const age = h && h.last_seen ? state.now - h.last_seen : null;
+  st.appendChild(chip(age==null?"chip-grey":age<60?"chip-green":"chip-red",
+                      age==null?"NO DATA":age<60?"LIVE":"STALE"));
+  if (r) {
+    const cfo = (r.sync&&r.sync.cfo||{}).cfo_hz;
+    st.appendChild(chip(Math.abs(cfo||0)<300?"chip-green":"chip-red", "CFO "+fmt(cfo,0)+" Hz"));
+    const s = el("span","stat"); s.innerHTML = `CPI <b>${h.cpi_count}</b>`; st.appendChild(s);
+    const d = el("span","stat"); d.innerHTML = `DET <b>${(r.detections||[]).length}</b>`; st.appendChild(d);
+    const t = el("span","stat"); t.innerHTML = `TRK <b>${(r.tracks||[]).length}</b>`; st.appendChild(t);
+  }
+}
+
+function render() {
+  renderChrome();
+  const v = document.getElementById("view"); v.textContent = "";
+  if (!state || !Object.keys(state.receivers).length) {
+    v.appendChild(el("div","empty","no receiver connected — check --connect matches [sensing] report_endpoint"));
+    return;
+  }
+  RENDER[tab](v);
+}
+
+async function poll() {
+  try {
+    const res = await fetch("/state");
+    state = await res.json();
+    render();
+  } catch (e) { /* receiver or server restarting; keep the last view */ }
+  setTimeout(poll, 1000);
+}
+render(); poll();
+window.addEventListener("resize", () => render());
+</script>
+</body>
+</html>

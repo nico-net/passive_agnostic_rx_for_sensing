@@ -101,6 +101,18 @@ struct sensing_track_t {
   float  nis_ewma      = 0.0f;  ///< smoothed NIS driving q_mult
   float  sigma_range_m = 0.0f;  ///< sqrt(P00), the filter's own 1σ range uncertainty
   uint32_t coast_count = 0;     ///< consecutive CPIs without an accepted detection
+
+  // Single-receiver AoA fusion (isac_aoa.h aoa_localize). The bearing is NOT filtered -- it is the
+  // last ACCEPTED detection's azimuth, carried through so the position can be recomputed each CPI.
+  // ponytail: unfiltered bearing, add a bearing state to the Kalman filter if position jitter matters.
+  bool   azimuth_valid = false;
+  float  azimuth_deg   = 0.0f;  ///< ENU bearing, deg CCW from east, of the last accepted detection
+  float  azimuth_std_deg = 0.0f;
+  // World-frame position from ray-ellipse intersection (range + bearing, ONE Tx-Rx pair). Only set
+  // when azimuth_valid and the intersection is in front of the receiver.
+  bool   pos_valid     = false;
+  float  pos_x         = 0.0f;
+  float  pos_y         = 0.0f;
 };
 
 /**

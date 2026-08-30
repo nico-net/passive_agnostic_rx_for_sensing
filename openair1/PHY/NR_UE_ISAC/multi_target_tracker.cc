@@ -175,7 +175,13 @@ multi_target_tracker::update(const std::vector<sensing_detection_t>& detections,
     // harmonic ghosts swing hard with the instantaneous slot occupancy. Coasts don't update it (no
     // new power sample); gross dropout is already handled by M-of-N.
     if (st.updated && det_of_slot[(size_t)s] >= 0) {
-      const float snr = detections[(size_t)det_of_slot[(size_t)s]].snr_db;
+      const sensing_detection_t& acc = detections[(size_t)det_of_slot[(size_t)s]];
+      if (acc.azimuth_valid) {
+        sl.az_valid   = true;
+        sl.az_deg     = acc.azimuth_deg;
+        sl.az_std_deg = acc.azimuth_std_deg;
+      }
+      const float snr = acc.snr_db;
       if (sl.have_snr_prev) {
         const float a = args.track_flicker_ewma_alpha;
         const float j = std::fabs(snr - sl.snr_prev_db);
@@ -218,6 +224,11 @@ multi_target_tracker::update(const std::vector<sensing_detection_t>& detections,
     const sensing_track_t st = sl.filter.update({detections[(size_t)d]}, 0.0);
     sl.age_cpis    = 1;
     sl.hit_history = st.updated ? 1u : 0u;
+    if (detections[(size_t)d].azimuth_valid) {
+      sl.az_valid   = true;
+      sl.az_deg     = detections[(size_t)d].azimuth_deg;
+      sl.az_std_deg = detections[(size_t)d].azimuth_std_deg;
+    }
     if (M <= 1u && popcount(sl.hit_history) >= M) {
       sl.confirmed = true; // confirm_m=1 => legacy "confirm on first hit"
     }
@@ -241,7 +252,10 @@ multi_target_tracker::update(const std::vector<sensing_detection_t>& detections,
         sl.snr_jitter_ewma > args.track_flicker_max_db) {
       continue; // flickering power trajectory -> treat as a gated-harmonic ghost, don't report
     }
-    t.track_id = sl.id;
+    t.track_id       = sl.id;
+    t.azimuth_valid  = sl.az_valid;
+    t.azimuth_deg    = sl.az_deg;
+    t.azimuth_std_deg = sl.az_std_deg;
     out_.push_back(t);
   }
 

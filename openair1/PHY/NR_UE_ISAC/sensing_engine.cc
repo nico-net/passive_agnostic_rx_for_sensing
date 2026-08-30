@@ -790,6 +790,18 @@ void sensing_engine::process_cpi()
     const double dt_s    = dt_slots * slot_dur_s;
     prev_cpi_time_ns  = cpi_start_time_utc_ns;
     last_tracks       = tracker->update(detections, dt_s, &rvm);
+    // Single-receiver fusion: ONE Tx-Rx pair plus a bearing is enough for a position, via the exact
+    // ray-ellipse closed form already used for the per-detection anchor (isac_aoa.h aoa_localize).
+    // Without a bearing a lone pair fixes only the ellipse, so pos_valid stays false and the track
+    // remains a range/rate-only measurement -- which is the pre-AoA behaviour, unchanged.
+    for (sensing_track_t& t : last_tracks) {
+      double px = 0.0, py = 0.0;
+      t.pos_valid = t.azimuth_valid &&
+                    aoa_localize(args.tx_pos_x, args.tx_pos_y, args.rx_pos_x, args.rx_pos_y,
+                                 t.range_m, t.azimuth_deg, px, py);
+      t.pos_x = (float)px;
+      t.pos_y = (float)py;
+    }
     for (const sensing_track_t& t : last_tracks) {
       LOG_I(PHY,
             "SENSING: track CPI #%u track_id=%u range=%.2f m rate=%+.2f m/s sigma=%.2f m %s "
@@ -922,6 +934,9 @@ void sensing_engine::write_report_json()
   rep.p_detect              = det_q_ ? det_q_->detection_rate() : -1.0;
   rep.rvm                   = &rvm;
   rep.detections            = &detections;
+  rep.tracks                = &last_tracks;
+  rep.src_occ               = src_occ;
+  rep.src_occ_len           = (uint32_t)NR_ISAC_SRC_COUNT;
   rep.include_rvm_blob      = args.capture_enable;
 
   // Phase 5 (ota_sync_passive_ue.md): per-CPI STO/CFO/SFO estimates + Phase 4's LOS residual.

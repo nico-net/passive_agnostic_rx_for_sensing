@@ -124,6 +124,13 @@ private:
     uint32_t       snr_updates      = 0;
     bool           have_snr_prev    = false;
 
+    // Last ACCEPTED detection's bearing, carried onto the emitted track so a single receiver can
+    // localise it (range ellipse + bearing ray). Sticky across coasts on purpose: a coasting track
+    // keeps its last known bearing rather than losing its position entirely.
+    bool           az_valid         = false;
+    float          az_deg           = 0.0f;
+    float          az_std_deg       = 0.0f;
+
     explicit slot_t(uint32_t id_, const nr_isac_args_t& a) : id(id_), filter(a) {}
   };
 

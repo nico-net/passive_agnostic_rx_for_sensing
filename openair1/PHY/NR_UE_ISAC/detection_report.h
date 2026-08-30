@@ -44,6 +44,7 @@
 
 #include "defs_nr_UE_ISAC.h"
 #include "isac_sync.h"
+#include "target_tracker.h"
 
 namespace nr_isac {
 
@@ -74,6 +75,17 @@ struct detection_report_t {
   const sensing_rvm_t*                    rvm              = nullptr; ///< range/velocity resolution + extents
   const std::vector<sensing_detection_t>* detections       = nullptr; ///< per-CPI CA-CFAR detections
   bool                                    include_rvm_blob = false;    ///< emit the RVM raster as rvm_blob
+
+  /// Confirmed tracks for this CPI, with the single-receiver AoA position fix when they carry a
+  /// bearing. Additive to the wire schema (repos/isac ignores unknown fields); consumed by the live
+  /// monitor GUI, which is a single-receiver tool and so cannot get positions from cross-rx fusion.
+  const std::vector<sensing_track_t>*     tracks           = nullptr;
+
+  /// Rows contributed to this CPI by each source, indexed by nr_isac_source_t. Already counted by the
+  /// engine for its own occupancy log line; emitted so the monitor can show DL/UL source mix without
+  /// re-deriving it. PUSCH_DMRS is the UPLINK entry, and its geometry differs (see nr_isac.h).
+  const uint64_t*                         src_occ          = nullptr;
+  uint32_t                                src_occ_len      = 0;
 
   // Phase 5: per-CPI sync estimates, always populated (Phases 1-4 run unconditionally) and always
   // emitted as a "sync" object -- see the file-level comment above for the wire-compatibility check.

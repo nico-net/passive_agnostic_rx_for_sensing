@@ -265,6 +265,60 @@ std::string build_detection_report_json(const detection_report_t& rep)
     out += ']';
   }
 
+  // Confirmed tracks + their single-receiver AoA position fix (sensing_engine calls aoa_localize).
+  // Additive field, same wire-compat argument as "sync" below.
+  if (rep.tracks != nullptr && !rep.tracks->empty()) {
+    out += ",\"tracks\":[";
+    bool first_t = true;
+    for (const sensing_track_t& t : *rep.tracks) {
+      if (!first_t) {
+        out += ',';
+      }
+      first_t = false;
+      out += "{\"track_id\":";
+      out += std::to_string(t.track_id);
+      out += ",\"bistatic_range_m\":";
+      append_json_double(out, t.range_m);
+      out += ",\"bistatic_velocity_mps\":";
+      append_json_double(out, t.range_rate_mps);
+      out += ",\"sigma_range_m\":";
+      append_json_double(out, t.sigma_range_m);
+      out += ",\"coast_count\":";
+      out += std::to_string(t.coast_count);
+      out += ",\"updated\":";
+      out += t.updated ? "true" : "false";
+      if (t.azimuth_valid) {
+        out += ",\"azimuth_deg\":";
+        append_json_double(out, t.azimuth_deg);
+        out += ",\"azimuth_std_deg\":";
+        append_json_double(out, t.azimuth_std_deg);
+      }
+      // Omitted, never zeroed, when the track has no bearing: (0,0) is the receiver's own position
+      // and would plot as a real fix at the origin.
+      if (t.pos_valid) {
+        out += ",\"position\":[";
+        append_json_double(out, t.pos_x);
+        out += ',';
+        append_json_double(out, t.pos_y);
+        out += ']';
+      }
+      out += '}';
+    }
+    out += ']';
+  }
+
+  // Per-source row counts for this CPI (index = nr_isac_source_t).
+  if (rep.src_occ != nullptr && rep.src_occ_len > 0) {
+    out += ",\"src_occ\":[";
+    for (uint32_t i = 0; i < rep.src_occ_len; i++) {
+      if (i != 0) {
+        out += ',';
+      }
+      out += std::to_string(rep.src_occ[i]);
+    }
+    out += ']';
+  }
+
   // Phase 5 (ota_sync_passive_ue.md): per-CPI STO/CFO/SFO estimates + the Phase 4 LOS residual.
   // Not part of repos/isac's DetectionReport schema -- confirmed safe to add (see detection_report.h's
   // file comment): unrecognised fields are silently ignored by isac-track's plain serde deserialiser.
