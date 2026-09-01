@@ -40,7 +40,22 @@ extern "C" {
 namespace nr_isac {
 
 // Number of pre-allocated snapshots cycling between the free and ready queues.
-static constexpr uint32_t SENSING_SLOT_POOL_SIZE = 64;
+/* Sized to cover a CPI CLOSE, not the steady stream. The consumer is one thread doing
+ * wait_pop -> accumulate_cpi() -> recycle, and the close (interpolation, clutter removal, range
+ * IFFT, Doppler FFT, CFAR, NMS, AoA, tracking, serialisation) happens INSIDE accumulate_cpi() --
+ * so for its whole duration nothing returns to free_q and every submission is dropped on the spot
+ * (:155). Measured 2026-08-31 at 273 PRB / cpi_slots=128: drops arrive in BURSTS at CPI
+ * boundaries, not steadily, and cost 63-78 % of all submissions -- which starves the slow-time
+ * grid enough that the STO peak search finds zero valid rows and SFO never gets a fit.
+ * 64 slots is ~32 ms of buffering at ~0.5 ms/slot; 512 is ~256 ms. Overridable so the trade can be
+ * measured without a rebuild. THE REAL FIX is to close the CPI off the drain thread; this only
+ * buys headroom, so keep watching `dropped=` rather than assuming it is solved. */
+static uint32_t sensing_slot_pool_size()
+{
+  const char* e = getenv("ISAC_SLOT_POOL");
+  const int   v = (e != nullptr) ? atoi(e) : 0;
+  return (v >= 8 && v <= 8192) ? (uint32_t)v : 512u;
+}
 
 // Native comb of a row = smallest gap between consecutive occupied (real-sample) subcarriers.
 // 12 for CSI-RS-per-RB, 2 for PDSCH DM-RS, 1 for full-allocation/merged rows. 1 (no clipping) if a
@@ -89,7 +104,7 @@ sensing_engine::sensing_engine(const nr_isac_args_t& args_, uint32_t max_prb_) :
   }
   const uint32_t re_per_slot = (aoa_ant_ > 1) ? max_re * aoa_ant_ : max_re;
 
-  slot_pool.resize(SENSING_SLOT_POOL_SIZE);
+  slot_pool.resize(sensing_slot_pool_size());
   for (sensing_slot_t& s : slot_pool) {
     s.h.reserve(re_per_slot);
     s.k_abs.reserve(max_re);
@@ -115,6 +130,24 @@ sensing_engine::sensing_engine(const nr_isac_args_t& args_, uint32_t max_prb_) :
 sensing_engine::~sensing_engine()
 {
   stop();
+}
+
+/* slots_per_frame, DERIVED. nr_isac.cc never populates carrier.slots_per_frame, so every call site
+ * fell back to a hardcoded 10 -- correct only at 15 kHz SCS. This deployment runs 30 kHz, where it
+ * is 20, so the slot-index wrap used by the span accumulator was 10*1024 instead of 20*1024. Every
+ * real wrap was then mis-corrected (measured: slot_idx stepping 8675 -> 6645 backwards), which
+ * inflated cpi_slot_span ~190x: T_slot read 4356 slots against a true ~22, cpi_duration_ns read
+ * 268 s for a CPI that really lasted 1.45 s, and vel_res/vel_max collapsed to 0 -- i.e. no usable
+ * Doppler axis at all. 3GPP: slots per 10 ms frame = 10 * 2^mu = 10 * scs/15 kHz. */
+static inline uint32_t isac_slots_per_frame(const nr_isac_carrier_t& c)
+{
+  if (c.slots_per_frame > 0) {
+    return c.slots_per_frame;
+  }
+  if (c.scs_hz >= 15000.0) {
+    return (uint32_t)llround(10.0 * (c.scs_hz / 15000.0));
+  }
+  return 10;
 }
 
 void sensing_engine::start()
@@ -275,7 +308,7 @@ void sensing_engine::accumulate_cpi(const sensing_slot_t& s)
 
   // Advance the monotonic unwrapped slot counter (across CPI boundaries) for the true-dt measurement.
   {
-    const uint32_t slots_per_frame = (s.carrier.slots_per_frame > 0) ? s.carrier.slots_per_frame : 10;
+    const uint32_t slots_per_frame = isac_slots_per_frame(s.carrier);
     const uint32_t wrap            = slots_per_frame * 1024;
     if (!abs_init_) {
       abs_init_ = true;
@@ -309,7 +342,7 @@ void sensing_engine::accumulate_cpi(const sensing_slot_t& s)
     cpi_prev_pos    = 0.0;
     cpi_anchor_abs_ = abs_slot_run_; // absolute anchor of this CPI, for the true inter-CPI dt
   } else {
-    const uint32_t slots_per_frame = (s.carrier.slots_per_frame > 0) ? s.carrier.slots_per_frame : 10;
+    const uint32_t slots_per_frame = isac_slots_per_frame(s.carrier);
     const uint32_t wrap            = slots_per_frame * 1024;
     /* SIGNED shortest-path delta -- see the identical fix on abs_slot_run_ above. MEASURED
      * consequence of getting this wrong with a concurrent consumer pool: every out-of-order arrival
@@ -365,6 +398,48 @@ void sensing_engine::accumulate_cpi(const sensing_slot_t& s)
   // the order of same-slot source submissions doesn't matter. w_i = 1/σ²_i; an unknown/zero noise_var
   // falls back to unit weight (equal weighting = the old behaviour). Frequency gap-fill is deferred to
   // CPI close so a merged row is interpolated only once.
+  /* ---- RECEIVE-BRANCH COMBINING FOR THE SENSING GRID (ISAC_SENSE_COMB=1) --------------------
+   * h_cpi -- the grid STO, SFO, CFO and range-Doppler all run on -- was built from s.h[i], i.e.
+   * ANTENNA 0 ONLY. ISAC_RX_MRC_MODE combines branches for the PDSCH DECODER and never reaches
+   * here, so on a rig where antenna 0 is not the strongest branch the whole sync stack runs on the
+   * weak one: rows fail the fade gate, STO flywheels, and SFO's line fit never clears its R^2 gate.
+   *
+   * For the single dominant path STO/CFO actually track, h_a[k] = h_0[k]*s_a with s_a a constant
+   * array phase across k, so co-phasing to antenna 0 and summing IS maximum-ratio combining: up to
+   * 10*log10(A) = 6 dB at four branches. s_a is estimated from this submission's own REs, so it
+   * costs one pass and carries no state.
+   *
+   * h_cpi_ant is deliberately NOT touched -- AoA needs the per-antenna phases this collapses. */
+  static const bool sense_comb = [] {
+    const char* e = getenv("ISAC_SENSE_COMB");
+    return e != nullptr && atoi(e) != 0;
+  }();
+  constexpr uint32_t COMB_MAX = 8;
+  icf_t    comb_w[COMB_MAX];
+  uint32_t comb_n = 1;
+  if (sense_comb && s.nof_ant > 1 && s.nof_re > 0) {
+    comb_n    = std::min<uint32_t>(s.nof_ant, COMB_MAX);
+    comb_w[0] = icf_t(1.0f, 0.0f);
+    for (uint32_t a = 1; a < comb_n; a++) {
+      icf_t acc(0.0f, 0.0f);
+      for (uint32_t i = 0; i < s.nof_re; i++) {
+        acc += s.h[(size_t)a * s.nof_re + i] * std::conj(s.h[i]);
+      }
+      const float m = std::abs(acc);
+      /* No usable correlation with antenna 0 (dead branch, or a fade): drop it rather than let an
+       * arbitrary phase fold that branch's noise in. Weight 0 contributes exactly nothing. */
+      comb_w[a] = (m > 0.0f) ? (std::conj(acc) / m) : icf_t(0.0f, 0.0f);
+    }
+    float norm = 0.0f;
+    for (uint32_t a = 0; a < comb_n; a++) {
+      norm += std::abs(comb_w[a]);
+    }
+    const float g = (norm > 0.0f) ? (1.0f / norm) : 1.0f;
+    for (uint32_t a = 0; a < comb_n; a++) {
+      comb_w[a] *= g;
+    }
+  }
+
   const float w = (s.noise_var > 0.0f) ? (1.0f / s.noise_var) : 1.0f;
   icf_t*   row  = &h_cpi[(size_t)r * nof_subc];
   uint8_t* mask = &occ_all[(size_t)r * nof_subc];
@@ -376,7 +451,14 @@ void sensing_engine::accumulate_cpi(const sensing_slot_t& s)
       const float w_new  = w_prev + w;
       // Running weighted mean: row[k] <- (row[k]*w_prev + h_i*w) / (w_prev + w).
       // First writer (w_prev==0) reduces to row[k] = h_i exactly.
-      row[k]  = (row[k] * w_prev + s.h[i] * w) * (1.0f / w_new);
+      icf_t h_in = s.h[i];
+      if (comb_n > 1) {
+        h_in = icf_t(0.0f, 0.0f);
+        for (uint32_t a = 0; a < comb_n; a++) {
+          h_in += s.h[(size_t)a * s.nof_re + i] * comb_w[a];
+        }
+      }
+      row[k]  = (row[k] * w_prev + h_in * w) * (1.0f / w_new);
       wrow[k] = w_new;
       mask[k] = 1;
       // Mirror onto the raw per-antenna grid with the SAME inverse-variance weighting, so a fused
@@ -623,6 +705,18 @@ void sensing_engine::process_cpi()
 
   cpi_count++;
 
+  /* ---- SYNC-ONLY MODE (ISAC_SYNC_ONLY=1) ----------------------------------------------------
+   * Everything from here to the end-of-CPI log is the DETECTION half: range-Doppler, clutter
+   * removal, CFAR, NMS, AoA, det-quality, tracking. When the question under study is STO/CFO/SFO
+   * and the LOS peak finder -- all of which run ABOVE this point on the raw CPI grid -- that half
+   * is pure cost, and it is what makes the CPI close long enough to block the drain thread and
+   * drop 48-78 % of submissions. Skipping it leaves `detections` empty and `rvm` zeroed; the
+   * report still carries the full sync block, which is the thing being measured. */
+  const bool sync_only = [] {
+    const char* e = getenv("ISAC_SYNC_ONLY");
+    return e != nullptr && atoi(e) != 0;
+  }();
+  if (!sync_only) {
   // Stage 3: range-Doppler DSP on the (Stage-4b) uniformly-resampled CPI matrix. The fused grid is
   // per-subcarrier (column spacing = 1 subcarrier), so the range axis is scaled with cpi_grid_comb (1),
   // independent of any individual source's native comb.
@@ -757,8 +851,14 @@ void sensing_engine::process_cpi()
   // Phase 4 (ota_sync_passive_ue.md): wraps range_doppler's existing output (no second RD/CFAR
   // path) to find this CPI's LOS detection, measure its residual from the established baseline, and
   // fold that into the closed-loop bias state applied on the NEXT CPI (one-CPI feedback latency).
+  // Prefer the MEASURED LOS range over args.nominal_los_range_m (default 98 m, a stale bench
+  // value): Phase 4 matches detections within +-5 range bins of its guess, so a guess 29 bins off
+  // means det=no on every CPI and the baseline never establishes.
+  const double los_hint_m = (sto_tracker.measured_los_range_m() >= 0.0)
+                                ? sto_tracker.measured_los_range_m()
+                                : args.nominal_los_range_m;
   last_los_residual = los_tracker.update_residual(detections, rvm, (double)cpi_carrier.dl_center_hz,
-                                                 args.nominal_los_range_m);
+                                                 los_hint_m);
 
   // Per-CPI target track. dt comes from the CPI start timestamps (irregular by design -- a CPI
   // closes when enough reference occurrences have accumulated, which depends on DL traffic), which
@@ -866,6 +966,17 @@ void sensing_engine::process_cpi()
           rvm.range_res_m, rvm.vel_res_mps);
   }
 
+  } else {
+    LOG_I(PHY,
+          "SENSING: CPI #%u SYNC-ONLY fc=%.1f MHz subc=%u rows=%u T_slot=%.3f "
+          "occ[csi=%lu dmrs=%lu data=%lu blind=%lu pusch=%lu] (detection half disabled)\n",
+          cpi_count, cpi_carrier.dl_center_hz / 1e6, nof_subc, cpi_row, cpi_period_slots,
+          (unsigned long)src_occ[NR_ISAC_SRC_CSI_RS], (unsigned long)src_occ[NR_ISAC_SRC_PDSCH_DMRS],
+          (unsigned long)src_occ[NR_ISAC_SRC_PDSCH_DATA],
+          (unsigned long)src_occ[NR_ISAC_SRC_PDSCH_DMRS_BLIND],
+          (unsigned long)src_occ[NR_ISAC_SRC_PUSCH_DMRS]);
+  } // end !sync_only (detection half)
+
   write_outputs();
 }
 
@@ -913,7 +1024,7 @@ void sensing_engine::write_report_json()
   // tests/passive_rx, where it reported 16 ms for a real 2.56 s CPI). cpi_period_slots is the same
   // fractional mean spacing already fed to range_doppler for the velocity axis, so this keeps the
   // reported duration consistent with the axes it is reported alongside.
-  const uint32_t slots_per_frame = (cpi_carrier.slots_per_frame > 0) ? cpi_carrier.slots_per_frame : 10;
+  const uint32_t slots_per_frame = isac_slots_per_frame(cpi_carrier);
   const int64_t  slot_dur_ns     = (slots_per_frame > 0) ? (int64_t)(10000000LL / slots_per_frame) : 0;
   const double   cpi_rows_slots  = (cpi_period_slots > 0.0) ? (cpi_period_slots * (double)args.cpi_slots)
                                                             : (double)args.cpi_slots;

@@ -1720,10 +1720,15 @@ int trx_usrp_set_gains(openair0_device_t *device,
     return gain_diff;
   }
 
-  s->usrp->set_rx_gain(openair0_cfg[0].rx_gain[0]-openair0_cfg[0].rx_gain_offset[0]);
-  LOG_I(HW,"Setting USRP RX gain to %f (rx_gain %f,gain_range.stop() %f)\n",
-        openair0_cfg[0].rx_gain[0]-openair0_cfg[0].rx_gain_offset[0],
-        openair0_cfg[0].rx_gain[0],gain_range.stop());
+  /* PER CHANNEL. The single-argument set_rx_gain() applies to EVERY channel, which silently
+   * flattened any per-branch trim device_init() had set up (it already calls the per-channel
+   * overload in a loop). Same call, addressed. */
+  for (int ch = 0; ch < openair0_cfg[0].rx_num_channels; ch++) {
+    const double g = openair0_cfg[0].rx_gain[ch] - openair0_cfg[0].rx_gain_offset[ch];
+    s->usrp->set_rx_gain(g, ch);
+    LOG_I(HW,"Setting USRP RX gain ch%d to %f (rx_gain %f,gain_range.stop() %f)\n",
+          ch, g, openair0_cfg[0].rx_gain[ch], gain_range.stop());
+  }
   return(0);
 }
 

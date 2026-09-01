@@ -156,6 +156,21 @@ constexpr uint32_t SFO_MIN_VALID_ROWS = 8;
 // it -- only the correction is withheld -- so the diagnostics/JSON keep working.
 constexpr double SFO_MIN_R_SQUARED = 0.90;
 
+// SECOND acceptance path for the fit above, added 2026-09-01 after the r2 gate was measured
+// rejecting a 21-sigma slope on real OTA data. R^2 is fraction-of-variance-explained, NOT a
+// significance test: it collapses when the PER-ROW delay noise is large even though the slope
+// itself is pinned down by sheer row count. Measured on this X410/gNB pair, same run, same slope:
+//   128-slot CPI:   n=88   r2=0.013  ->  t= 1.1   (genuinely unresolvable, reject)
+//   1024-slot CPI:  n=726  r2=0.379  ->  t=21.0   (slope known to 5%, r2 rejected it anyway)
+// Both fits agree on the slope (-0.194 / -0.158 ppm), which is an ordinary free-running OCXO
+// offset. The drift signal grows with the CPI's time span while per-row scatter stays flat
+// (resid 4.22 -> 3.64 bins), so r2 only clears 0.90 at a CPI ~5x longer again -- impractical.
+// t = sqrt(r2*(n-2)/(1-r2)) is the standard slope t-statistic. At t=10 the slope is determined to
+// ~10%, so applying it removes ~90% of the real ramp rather than injecting noise.
+// This is an OR, not a replacement: everything that passed the r2 gate still passes, so no
+// previously-accepted fit changes behaviour and the injected-SFO tests are unaffected.
+constexpr double SFO_MIN_SLOPE_T = 10.0;
+
 // Minimum same-comb rows observed before the ISI baseline is trusted enough to flag anomalies;
 // below this every row in that comb group is accepted (building up the baseline).
 constexpr uint32_t SFO_ISI_MIN_GROUP_ROWS = 3;
@@ -528,6 +543,49 @@ sto_fit_result_t cpi_sto_tracker::process(icf_t*                   h_cpi,
   const double slots_per_sf = std::max(1.0, (double)carrier.scs_hz / 15000.0);
   const double slot_dur_s   = 1e-3 / slots_per_sf;
 
+  /* ---- MEASURED LOS SEED ------------------------------------------------------------------
+   * The walker used to seed row 0 at nominal_los_bin(nominal_los_range_m), a CONFIG CONSTANT whose
+   * default is 98.0 m -- a TX/RX separation carried over from an old B210 bench setup. If the real
+   * direct path is not there, every row's in-window "peak" is noise, correctly fails the
+   * FADE_MIN_SNR_LINEAR gate, and the whole CPI flywheels: measured 2026-08-31 as n_valid=0 with
+   * ~100 flywheel rows on EVERY CPI, which also starves Phase 2 (CFO) and Phase 3 (SFO) of the
+   * locked rows they fit. Widening the pool from 64 to 512 slots cut submission drops 78 % -> 26 %
+   * and did NOT move it, which is what ruled out row starvation as the cause.
+   *
+   * So measure it: sweep the search window across the CIR on the first row that locks and keep the
+   * center with the strongest in-window peak. Reuses estimate_row() unchanged -- same fade gate,
+   * same comb handling -- so the seed is found by exactly the test every later row must pass.
+   * nominal_los_range_m survives only as the fallback when no window anywhere clears the gate. */
+  uint32_t seed_bin = nominal_bin;
+  {
+    double         best_snr = -1.0;
+    int            best_bin = -1;
+    const uint32_t step     = 2 * SEARCH_HALFWIN_BINS + 1;
+    for (uint32_t r0 = 0; r0 < cpi_rows && r0 < 8 && best_bin < 0; r0++) {
+      const icf_t*   row0 = &h_cpi[(size_t)r0 * nof_subc];
+      const uint8_t* m0   = &occ_all[(size_t)r0 * nof_subc];
+      for (uint32_t c = SEARCH_HALFWIN_BINS + 1; c + SEARCH_HALFWIN_BINS + 2 < nof_subc; c += step) {
+        los_row_estimate_t e;
+        bool               f   = false;
+        double             snr = -1.0;
+        if (estimate_row(row0, m0, nof_subc, row_comb[r0], (int)c, SEARCH_HALFWIN_BINS, e, f, &snr)
+            && snr > best_snr) {
+          best_snr = snr;
+          best_bin = (int)e.peak_bin;
+        }
+      }
+    }
+    if (best_bin >= 0) {
+      seed_bin = (uint32_t)best_bin;
+      // Same bin->metre scale nominal_los_bin() inverts, so Phase 4 can consume it directly.
+      measured_los_range_m_ = (double)seed_bin * SPEED_OF_LIGHT / ((double)nof_subc * carrier.scs_hz);
+    }
+    LOG_I(PHY, "SENSING: sync(STO) LOS seed bin=%u (%s), nominal was %u from %.1f m; peak snr=%.1f dB\n",
+          seed_bin, (best_bin >= 0) ? "MEASURED" : "fallback: nothing cleared the gate",
+          nominal_bin, nominal_los_range_m,
+          (best_snr > 0.0) ? 10.0 * std::log10(best_snr) : -99.0);
+  }
+
   double   last_locked_time_s = 0.0;
   uint32_t n_flywheel         = 0;
 
@@ -551,7 +609,7 @@ sto_fit_result_t cpi_sto_tracker::process(icf_t*                   h_cpi,
     // Seed from the nominal bin with the wide seed window until the walker locks for the first
     // time this CPI; every subsequent row searches a narrow window re-centered on the previous
     // LOCKED row's own peak (SYNC_NOISE_HANDOVER.md's root-cause fix -- see class comment).
-    const int      center  = (current_center_bin_ >= 0) ? current_center_bin_ : (int)nominal_bin;
+    const int      center  = (current_center_bin_ >= 0) ? current_center_bin_ : (int)seed_bin;
     const uint32_t halfwin = (current_center_bin_ >= 0) ? WALK_HALFWIN_BINS : SEARCH_HALFWIN_BINS;
 
     bool   faded   = false;
@@ -1159,12 +1217,17 @@ sfo_fit_result_t cpi_sfo_tracker::process(icf_t*                   h_cpi,
 
   // Fit-quality gate (see SFO_MIN_R_SQUARED): a poorly-fitting line means the slope is noise, and
   // applying it is actively harmful. Report the estimate, withhold the correction.
-  if (fit.r_squared < SFO_MIN_R_SQUARED) {
+  const double slope_t = (n > 2 && fit.r_squared > 0.0 && fit.r_squared < 1.0)
+                             ? std::sqrt(fit.r_squared * (double)(n - 2) / (1.0 - fit.r_squared))
+                             : 0.0;
+  if (fit.r_squared < SFO_MIN_R_SQUARED && slope_t < SFO_MIN_SLOPE_T) {
     fit.corrected = false;
     LOG_I(PHY,
           "SENSING: sync(SFO) fit_rows=%u/candidates=%u (excl_isi=%u excl_fade=%u) r2=%.3f < %.2f "
-          "(resid=%.2f bins) -- slope %.4f ppm is not a linear clock drift; correction WITHHELD\n",
-          n, n_candidate, n_isi, n_fade, fit.r_squared, SFO_MIN_R_SQUARED, fit.resid_bins, fit.sfo_ppm);
+          "t=%.1f < %.1f (resid=%.2f bins) -- slope %.4f ppm is not a linear clock drift; "
+          "correction WITHHELD\n",
+          n, n_candidate, n_isi, n_fade, fit.r_squared, SFO_MIN_R_SQUARED, slope_t, SFO_MIN_SLOPE_T,
+          fit.resid_bins, fit.sfo_ppm);
     return fit;
   }
   fit.corrected             = true;
@@ -1203,9 +1266,9 @@ sfo_fit_result_t cpi_sfo_tracker::process(icf_t*                   h_cpi,
   }
 
   LOG_I(PHY,
-        "SENSING: sync(SFO) candidates=%u excluded_isi=%u fit_rows=%u r2=%.3f resid=%.2f bins sfo_raw=%.4f ppm sfo_filt=%.4f ppm "
+        "SENSING: sync(SFO) candidates=%u excluded_isi=%u fit_rows=%u r2=%.3f t=%.1f resid=%.2f bins sfo_raw=%.4f ppm sfo_filt=%.4f ppm "
         "(%.3f Hz @ %.2f MHz sample rate) -> corrected %u rows\n",
-        n_candidate, n_excluded, n, fit.r_squared, fit.resid_bins, fit.sfo_ppm, fit.sfo_ppm_filtered,
+        n_candidate, n_excluded, n, fit.r_squared, slope_t, fit.resid_bins, fit.sfo_ppm, fit.sfo_ppm_filtered,
         fit.sample_clock_error_hz,
         SAMPLE_RATE_HZ / 1e6, cpi_rows);
 

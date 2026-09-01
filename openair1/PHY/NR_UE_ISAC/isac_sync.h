@@ -191,7 +191,15 @@ public:
   /// tracker reuses these directly rather than re-running the per-row CIR/peak search.
   const std::vector<los_row_estimate_t>& last_row_estimates() const { return rows_; }
 
+  /** Where this receiver's direct path ACTUALLY is, in metres, as measured by the seed sweep --
+   *  not the nominal_los_range_m config value. Negative until a CPI has measured one. Phase 4's
+   *  los_baseline_tracker must use this: it seeds its own search from the same nominal constant,
+   *  and with the real LOS 29-31 bins away from it, its +-LOS_MATCH_MAX_RANGE_BINS=5 window never
+   *  matched a detection, so the baseline could never bootstrap. */
+  double measured_los_range_m() const { return measured_los_range_m_; }
+
 private:
+  double measured_los_range_m_ = -1.0; ///< set by process()'s seed sweep; <0 = not measured yet
   /// Builds one row's compact CIR and searches [center_bin-halfwin, center_bin+halfwin] for its local
   /// power maximum. Returns false only on a structural failure (bad occupancy / too-short CIR -- the
   /// row can't be searched at all). On true, @p out_faded reports whether that local maximum cleared

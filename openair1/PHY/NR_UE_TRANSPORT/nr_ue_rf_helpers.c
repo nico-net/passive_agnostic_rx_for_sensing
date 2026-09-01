@@ -10,6 +10,8 @@
 #include "openair1/PHY/phy_extern_nr_ue.h"
 #include "nr_transport_proto_ue.h"
 #include "executables/softmodem-common.h"
+#include <stdlib.h>
+#include <string.h>
 
 void nr_get_carrier_frequencies(const PHY_VARS_NR_UE *ue, uint64_t *dl_carrier, uint64_t *ul_carrier)
 {
@@ -22,6 +24,42 @@ void nr_get_carrier_frequencies(const PHY_VARS_NR_UE *ue, uint64_t *dl_carrier, 
     *dl_carrier = fp->dl_CarrierFreq;
     *ul_carrier = fp->ul_CarrierFreq;
   }
+}
+
+
+/* PER-BRANCH RX GAIN TRIM -- ISAC_RX_GAIN_TRIM="d0,d1,d2,d3", dB ADDED to --ue-rxgain per channel.
+ *
+ * openair0_config_t::rx_gain is already a per-channel array and usrp_lib.cpp's device_init already
+ * calls set_rx_gain(gain, chan) in a per-channel loop; the only reason every branch got the same
+ * value is that this function wrote the same number into all four. So this is a fill change, not a
+ * driver change.
+ *
+ * WHAT IT CANNOT DO: recover SNR on a branch that is down because of loss AHEAD of the LNA (cable,
+ * connector, antenna). Gain there raises signal and that branch's own noise together, so its SNR is
+ * unchanged. What it does buy is EQUAL LEVELS into the fixed-point combiner, which picks one shift
+ * from the strongest branch (nr_ulsch_demodulation.c: avgs = cmax over antennas), so a branch 16 dB
+ * down loses ~3 bits of the accumulator. Use it for that, and fix the cable for the SNR.
+ */
+static double nr_ue_rx_gain_trim(int ch)
+{
+  static double trim[8];
+  static int parsed;
+  if (!parsed) {
+    parsed = 1;
+    const char *e = getenv("ISAC_RX_GAIN_TRIM");
+    if (e && *e) {
+      char buf[128];
+      strncpy(buf, e, sizeof(buf) - 1);
+      buf[sizeof(buf) - 1] = '\0';
+      int i = 0;
+      for (char *t = strtok(buf, ","); t != NULL && i < 8; t = strtok(NULL, ","), i++) {
+        trim[i] = atof(t);
+      }
+      LOG_W(PHY, "SENSING: RX gain trim = [%.1f %.1f %.1f %.1f] dB (added per branch)\n",
+            trim[0], trim[1], trim[2], trim[3]);
+    }
+  }
+  return (ch >= 0 && ch < 8) ? trim[ch] : 0.0;
 }
 
 void nr_rf_card_config_gain(openair0_config_t *openair0_cfg)
@@ -38,7 +76,7 @@ void nr_rf_card_config_gain(openair0_config_t *openair0_cfg)
     if (tx_gain)
       openair0_cfg->tx_gain[i] = tx_gain;
     if (rx_gain)
-      openair0_cfg->rx_gain[i] = rx_gain;
+      openair0_cfg->rx_gain[i] = rx_gain + nr_ue_rx_gain_trim(i - rf_chain);
 
     openair0_cfg->autocal[i] = 1;
 
