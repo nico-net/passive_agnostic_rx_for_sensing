@@ -43,10 +43,17 @@ class ReportStore:
         with self._lock:
             st = self._rx.setdefault(
                 rx_id,
-                {"endpoint": endpoint, "history": deque(maxlen=HISTORY), "trails": {}, "cpi_count": 0},
+                {"endpoint": endpoint, "history": deque(maxlen=HISTORY), "trails": {}, "cpi_count": 0,
+                 "gaps": deque(maxlen=8)},
             )
             st["latest"] = rep
-            st["last_seen"] = time.time()
+            now = time.time()
+            # Observed inter-report gap. The CPI closes on ROW COUNT, so its wall-clock cadence
+            # swings with traffic -- ~4 s at cpi_slots=128 but 150-200 s at 1024. A fixed staleness
+            # threshold is therefore meaningless; the UI derives one from these gaps instead.
+            if st.get("last_seen") is not None:
+                st["gaps"].append(now - st["last_seen"])
+            st["last_seen"] = now
             st["cpi_count"] += 1
             st["history"].append(
                 {
@@ -80,6 +87,7 @@ class ReportStore:
                     "latest": st.get("latest"),
                     "last_seen": st.get("last_seen"),
                     "cpi_count": st["cpi_count"],
+                    "cadence_s": (sorted(st["gaps"])[len(st["gaps"]) // 2] if st["gaps"] else None),
                     "history": list(st["history"]),
                     "trails": {k: list(v) for k, v in st["trails"].items()},
                 }
@@ -93,6 +101,11 @@ class LogTail:
 
     PATTERNS = [
         ("pdsch_crc", re.compile(r"pdsch_decode\[try=(\d+) crc_ok=(\d+)")),
+        # DL TRANSPORT-BLOCK rate. NOT segs_decoded: those counters are summed only over FAILING
+        # TBs (nr_pdsch_passive_decode.c:302-303), so that ratio FALLS as decoding improves.
+        ("ldpc", re.compile(r"LDPCDIAG ok=(\d+) seg_fail=(\d+) tb_fail=(\d+) zero_tb=(\d+)")),
+        ("pusch", re.compile(r"pusch_passive\[try=(\d+) crc_ok=(\d+)")),
+        ("dci", re.compile(r"dci01\[accepts=(\d+) rejects=(\d+)")),
         ("blind", re.compile(r"accepts=(\d+)\s+cfr_submits=(\d+)")),
         ("occ", re.compile(r"occ\[([^\]]*)\]")),
         ("overflow", re.compile(r"[Oo]verflow|OOOO|\bO\b")),
@@ -100,7 +113,7 @@ class LogTail:
         ("pbch_ok", re.compile(r"PBCH.*(?:decoded|CRC OK)|MIB decoded", re.I)),
     ]
 
-    def __init__(self, path, maxlines=400):
+    def __init__(self, path, maxlines=4000):
         self.path = Path(path)
         self.lines = deque(maxlen=maxlines)
         self.counters = {"overflow": 0, "sync_lost": 0, "pbch_ok": 0}
@@ -132,17 +145,34 @@ class LogTail:
                     self.stats["pdsch_try"] = try_n
                     self.stats["pdsch_ok"] = ok_n
                     self.stats["pdsch_rate"] = (100.0 * ok_n / try_n) if try_n else None
+                elif name == "ldpc":
+                    ok, sf, tf, zt = (int(m.group(i)) for i in (1, 2, 3, 4))
+                    tot = ok + sf + tf
+                    self.stats["dl_ok"] = ok
+                    self.stats["dl_fail"] = sf + tf
+                    self.stats["dl_zero_tb"] = zt
+                    self.stats["dl_tb_rate"] = (100.0 * ok / tot) if tot else None
+                elif name == "pusch":
+                    t, o = int(m.group(1)), int(m.group(2))
+                    self.stats["ul_try"] = t
+                    self.stats["ul_ok"] = o
+                    self.stats["ul_rate"] = (100.0 * o / t) if t else None
+                elif name == "dci":
+                    self.stats["dci_accepts"] = int(m.group(1))
+                    self.stats["dci_rejects"] = int(m.group(2))
                 elif name == "blind":
                     self.stats["blind_accepts"] = int(m.group(1))
                     self.stats["blind_submits"] = int(m.group(2))
                 elif name == "occ":
                     self.stats["occ"] = m.group(1)
             if any(k in line for k in ("SENSING", "ERROR", "WARN", "overflow", "sync")):
-                self.lines.append(line[-400:])
+                # Wall-clock stamp: the receiver's own lines carry no time, so without this there is
+                # no way to tell a line from this second from one ten minutes old.
+                self.lines.append(time.strftime("%H:%M:%S ") + line[-400:])
 
     def snapshot(self):
         with self._lock:
-            return {"counters": dict(self.counters), "stats": dict(self.stats), "lines": list(self.lines)[-60:]}
+            return {"counters": dict(self.counters), "stats": dict(self.stats), "lines": list(self.lines)[-400:]}
 
 
 def replay_thread(path, store, rate_hz):
@@ -226,6 +256,11 @@ def main():
     ap.add_argument("--port", type=int, default=8080, help="HTTP port (default 8080)")
     ap.add_argument("--bind", default="0.0.0.0", help="HTTP bind address (default 0.0.0.0, for SSH access)")
     ap.add_argument("--log", help="receiver log file to tail for radio/decode health")
+    ap.add_argument("--seed", metavar="FILE.jsonl",
+                    help="backfill the store from a report JSONL at startup, then subscribe live. "
+                         "ZeroMQ PUB/SUB does not replay, so without this a monitor restart shows an "
+                         "EMPTY page until the next CPI closes -- up to several minutes at a long "
+                         "cpi_slots, which reads as a dead receiver.")
     ap.add_argument("--replay", metavar="FILE.jsonl",
                     help="replay a recorded report JSONL instead of subscribing (testing, no receiver needed)")
     ap.add_argument("--replay-rate", type=float, default=2.0,
@@ -233,6 +268,33 @@ def main():
     args = ap.parse_args()
 
     store = ReportStore()
+    if args.seed:
+        n = 0
+        try:
+            with open(args.seed) as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        store.add("seed:" + args.seed, json.loads(line))
+                        n += 1
+                    except (ValueError, TypeError):
+                        continue  # a torn last line while the receiver is mid-write
+        except OSError as e:
+            print(f"[monitor] seed {args.seed}: {e}")
+        # Seeded reports all land at once, so their ARRIVAL gaps are ~0 and would peg the derived
+        # staleness threshold at its floor. Recover the real cadence from the reports' own
+        # cpi_start_time_utc_ns instead -- that is wall-clock truth and survives the restart.
+        with store._lock:
+            for st in store._rx.values():
+                st["gaps"].clear()
+                t = sorted(h["t"] for h in st["history"] if h.get("t"))
+                for a, b in zip(t, t[1:]):
+                    gap = (b - a) / 1e9
+                    if 0.0 < gap < 3600.0:
+                        st["gaps"].append(gap)
+        print(f"[monitor] seeded {n} reports from {args.seed}")
     if args.replay:
         threading.Thread(target=replay_thread, args=(args.replay, store, args.replay_rate),
                          daemon=True).start()

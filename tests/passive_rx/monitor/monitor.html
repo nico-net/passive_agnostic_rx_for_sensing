@@ -47,7 +47,7 @@ td{padding:5px 6px;border-top:1px solid var(--soft);color:var(--dim)} td.hl{colo
 canvas{display:block;width:100%;border-radius:6px;border:1px solid var(--soft);background:oklch(0.11 0.018 240)}
 .banner{display:flex;gap:10px;padding:10px 14px;background:var(--amber-d);border:1px solid oklch(0.80 0.15 75/.35);border-radius:7px;font-size:11.5px;color:var(--dim);line-height:1.5}
 .banner b{color:var(--amber)}
-.log{font-family:"IBM Plex Mono",monospace;font-size:11px;color:var(--dim);white-space:pre-wrap;word-break:break-all;max-height:220px;overflow:auto;line-height:1.7}
+.log{font-family:"IBM Plex Mono",monospace;font-size:11px;color:var(--dim);white-space:pre-wrap;word-break:break-all;max-height:420px;overflow:auto;line-height:1.7}
 .hidden{display:none!important}
 .empty{color:var(--faint);font-size:12px;padding:18px 0;text-align:center;font-family:"IBM Plex Mono",monospace}
 </style>
@@ -195,24 +195,31 @@ function detTable(r) {
                      : el("div","empty","no detections in the latest CPI");
 }
 
+/* Staleness limit. A CPI closes on ROW COUNT, never on time, so its wall-clock cadence swings with
+   traffic: ~4 s at cpi_slots=128 but 150-200 s at 1024. A fixed 60 s threshold made a perfectly
+   healthy long-CPI run read STALE for two thirds of every CPI. Derive it from the receiver's own
+   median inter-report gap instead, with 60 s as the floor for a run too young to have a gap yet. */
+function staleLimit(h) { return Math.max(60, 2.5 * ((h && h.cadence_s) || 0)); }
+
 /* ---- tabs -------------------------------------------------------------------------------------- */
 function tabHealth(v) {
   const r = rep(), h = rx(), log = state.log;
   if (!r) { v.appendChild(el("div","empty","waiting for the first DetectionReport…")); return; }
   const s = r.sync || {}, sto = s.sto||{}, cfo = s.cfo||{}, sfo = s.sfo||{}, los = s.los_residual||{};
   const age = h.last_seen ? state.now - h.last_seen : 999;
+  const lim = staleLimit(h);
   const fly = sto.n_valid ? 100*sto.n_flywheel/(sto.n_valid+sto.n_flywheel) : null;
   const st = log && log.stats || {};
 
   const cards = el("div","row");
-  cards.appendChild(card("Report stream", age < 60 ? "LIVE" : "STALE", age < 60 ? "good":"bad",
-    `${h.cpi_count} CPIs · last ${fmt(age,0)}s ago`));
+  cards.appendChild(card("Report stream", age < lim ? "LIVE" : "STALE", age < lim ? "good":"bad",
+    `${h.cpi_count} CPIs · last ${fmt(age,0)}s ago` + (h.cadence_s ? ` · every ~${fmt(h.cadence_s,0)}s` : "")));
   cards.appendChild(card("CFO", fmt(cfo.cfo_hz,1)+" Hz", Math.abs(cfo.cfo_hz||0) < 300 ? "good":"bad",
     `filtered ${fmt(cfo.cfo_hz_filtered,1)} Hz · mis-lock >2600 Hz`));
   cards.appendChild(card("STO flywheel", fly==null?"—":fmt(fly,0)+"%", fly>60?"bad":fly>35?"warn":"good",
     `${sto.n_valid||0} locked · ${sto.n_flywheel||0} flywheel rows`));
   cards.appendChild(card("SFO", fmt(sfo.sfo_ppm,3)+" ppm", sfo.corrected ? "good":"warn",
-    sfo.corrected ? "correction applied" : "correction withheld (R² gate)"));
+    sfo.corrected ? "correction applied" : "correction withheld (R²/t gate)"));
   v.appendChild(cards);
 
   const o = occ();
@@ -231,8 +238,13 @@ function tabHealth(v) {
   } else occPanel.appendChild(el("div","empty","receiver build predates src_occ reporting"));
 
   const health = panel("Decode / radio health", kvRows([
-    ["PDSCH CRC", st.pdsch_rate!=null ? fmt(st.pdsch_rate,1)+"%" : "—", st.pdsch_rate>=80?"green":st.pdsch_rate!=null?"amber":null],
-    ["blind PDCCH accepts", st.blind_accepts!=null ? `${st.blind_accepts} → ${st.blind_submits} submits` : "—"],
+    ["DL grants decoded", st.dl_ok!=null ? `${st.dl_ok} ok / ${st.dl_ok+st.dl_fail} tried` : "—"],
+    ["DL TB decode rate", st.dl_tb_rate!=null ? fmt(st.dl_tb_rate,1)+"%" : "—", st.dl_tb_rate>=50?"green":st.dl_tb_rate!=null?"amber":null],
+    ["DL empty TBs (gNB)", st.dl_zero_tb!=null ? String(st.dl_zero_tb) : "—"],
+    ["UL grants decoded", st.ul_ok!=null ? `${st.ul_ok} ok / ${st.ul_try} tried` : "—"],
+    ["UL CRC rate", st.ul_rate!=null ? fmt(st.ul_rate,1)+"%" : "—", st.ul_rate>=50?"green":st.ul_rate!=null?"amber":null],
+    ["UL DCI 0_1 accepts", st.dci_accepts!=null ? `${st.dci_accepts} acc / ${st.dci_rejects} rej` : "—"],
+    ["blind PDCCH accepts", st.blind_accepts!=null ? `${st.blind_accepts} → ${st.blind_submits} CFR submits` : "—"],
     ["occupancy line", st.occ || "—"],
     ["X410 overflows", log ? String(log.counters.overflow) : "—", log && log.counters.overflow ? "red":"green"],
     ["out-of-sync events", log ? String(log.counters.sync_lost) : "—", log && log.counters.sync_lost ? "amber":"green"],
@@ -446,8 +458,9 @@ function renderChrome() {
   const st = document.getElementById("status"); st.textContent = "";
   const r = rep(), h = rx();
   const age = h && h.last_seen ? state.now - h.last_seen : null;
-  st.appendChild(chip(age==null?"chip-grey":age<60?"chip-green":"chip-red",
-                      age==null?"NO DATA":age<60?"LIVE":"STALE"));
+  const lim = staleLimit(h);
+  st.appendChild(chip(age==null?"chip-grey":age<lim?"chip-green":"chip-red",
+                      age==null?"NO DATA":age<lim?"LIVE":"STALE"));
   if (r) {
     const cfo = (r.sync&&r.sync.cfo||{}).cfo_hz;
     st.appendChild(chip(Math.abs(cfo||0)<300?"chip-green":"chip-red", "CFO "+fmt(cfo,0)+" Hz"));
@@ -459,12 +472,22 @@ function renderChrome() {
 
 function render() {
   renderChrome();
-  const v = document.getElementById("view"); v.textContent = "";
+  const v = document.getElementById("view");
+  // Preserve scroll across the rebuild, per pane, in DOM order. `stick` means the user was at the
+  // bottom, so keep them there as lines arrive; otherwise hold the exact offset so they can read.
+  const prev = [...v.querySelectorAll(".log")].map(n => ({
+    top: n.scrollTop, stick: n.scrollHeight - n.scrollTop - n.clientHeight < 24 }));
+  v.textContent = "";
   if (!state || !Object.keys(state.receivers).length) {
     v.appendChild(el("div","empty","no receiver connected — check --connect matches [sensing] report_endpoint"));
     return;
   }
   RENDER[tab](v);
+  [...v.querySelectorAll(".log")].forEach((n, i) => {
+    const p = prev[i];
+    if (!p) { n.scrollTop = n.scrollHeight; return; }   // new pane: start at the newest line
+    n.scrollTop = p.stick ? n.scrollHeight : p.top;
+  });
 }
 
 async function poll() {

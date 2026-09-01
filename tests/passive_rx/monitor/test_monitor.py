@@ -99,6 +99,38 @@ def test_ul_source_is_separable_by_name():
     print("ok  UL rows separable from DL rows by source name")
 
 
+def test_cadence_is_median_inter_report_gap():
+    """The staleness threshold is derived from this, so a wrong cadence makes a healthy
+    long-CPI run read STALE (a fixed 60 s did exactly that at cpi_slots=1024)."""
+    import time as _t
+    from monitor import ReportStore
+
+    st = ReportStore()
+    fake = {"rx_id": "rx1", "detections": [], "sync": {}}
+    base = _t.time()
+    gaps = [10.0, 200.0, 150.0]
+    times = [base]
+    for g in gaps:
+        times.append(times[-1] + g)
+    real_time = _t.time
+    try:
+        for t in times:
+            _t.time = lambda t=t: t
+            st.add("tcp://x", dict(fake))
+    finally:
+        _t.time = real_time
+
+    snap = st.snapshot()["rx1"]
+    assert snap["cpi_count"] == 4, snap["cpi_count"]
+    # median of [10, 200, 150] -> 150
+    assert snap["cadence_s"] == 150.0, snap["cadence_s"]
+    # and the first report, with no gap yet, must not claim a cadence
+    st2 = ReportStore()
+    st2.add("tcp://x", dict(fake))
+    assert st2.snapshot()["rx1"]["cadence_s"] is None
+    print("ok  cadence is the median inter-report gap (drives staleness)")
+
+
 if __name__ == "__main__":
     test_localize_roundtrip()
     test_localize_rejects_behind()
@@ -106,4 +138,5 @@ if __name__ == "__main__":
     test_dead_track_trail_is_dropped()
     test_track_without_bearing_has_no_position()
     test_ul_source_is_separable_by_name()
+    test_cadence_is_median_inter_report_gap()
     print("\nall checks passed")
