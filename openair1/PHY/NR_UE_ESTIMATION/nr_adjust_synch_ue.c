@@ -7,10 +7,15 @@
 #include "executables/nr-uesoftmodem.h"
 #include <stdlib.h>
 #include <time.h>
+#include <stdatomic.h>
 
 /// Anti-windup bound on the timing PI loop's integral term -- see where it is applied. A healthy
 /// receiver holds max_pos_acc ~450 flat; a runaway reached -2141 and cost the capture.
 #define NR_MAX_POS_ACC_LIMIT 1024
+
+/* Set by the RF census in nr-ue.c while the receive stream is delivering noise floor on every
+ * branch. Read here to FREEZE the integral term: see where it is used. */
+_Atomic int nr_ue_rf_signal_absent = 0;
 
 //#define DEBUG_PHY
 
@@ -221,7 +226,16 @@ int nr_adjust_synch_ue(const NR_DL_FRAME_PARMS *frame_parms,
 
   // reset IIR filter for next offset calculation
   ue->max_pos_iir += -round(sampleShift * PID_P) * 32768;
-  ue->max_pos_acc += corr_pos;
+  /* Do not integrate a measurement that does not exist. When the X410 stream goes quiet -- all
+   * four branches at the noise floor for seconds at a time, measured recovering on its own -- the
+   * correlation above is computed on noise, and integrating it is precisely the windup this
+   * function used to produce. Freezing holds the loop at the last good correction so it resumes
+   * where it left off when the signal returns, which is the right behaviour for an outage on a
+   * link whose true drift is ~0.14 samples/frame. The clamp below stays as the backstop for
+   * anything this flag does not catch. */
+  if (!atomic_load_explicit(&nr_ue_rf_signal_absent, memory_order_relaxed)) {
+    ue->max_pos_acc += corr_pos;
+  }
 
   /* ANTI-WINDUP. max_pos_acc is the integral term and was unbounded: it is advanced by corr_pos on
    * EVERY call, including calls where the correlation ran on noise because the SSB was not being

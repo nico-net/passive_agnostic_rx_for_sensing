@@ -28,6 +28,9 @@
 #include "log.h"
 #include <stdatomic.h>
 
+/// Defined in nr_adjust_synch_ue.c -- freezes the timing integrator during a stream outage.
+extern _Atomic int nr_ue_rf_signal_absent;
+
 // TEMPORARY DIAGNOSTIC (2026-08-05): receive-buffer producer/consumer lag measurement. See
 // PBCH_TRACKING_BUFFER_HANDOVER.md -- PHY-domain diagnostics have exhausted what they can show
 // (acquisition decodes cleanly, tracking's entire live rxdata buffer contains no SSB anywhere in
@@ -1471,6 +1474,25 @@ void *UE_thread(void *arg)
             s_bad++;
           else
             s_bad = 0;
+
+          /* Freeze the timing integrator while there is no signal to integrate -- but ONLY once
+           * synchronised.
+           *
+           * The is_synchronized guard is load-bearing and was learned the hard way: during initial
+           * acquisition pbch_dead is true BY DEFINITION (nothing has decoded yet), and s_ref can
+           * already have latched a startup level, so the freeze engaged before the first lock and
+           * stopped the loop from ever converging. Runs went from 31-81 s down to 3-34 s. The
+           * freeze exists for an outage AFTER a working lock, which is the only situation where
+           * "hold the last good correction" is the right answer; before a lock there is no good
+           * correction to hold and the loop must be free to search.
+           *
+           * rf_collapsed is deliberately NOT a trigger here -- the comment above records it
+           * false-positiving on a latched reference -- only a modifier. Both of its effects
+           * (suppress integration, buy patience) are one-directional and cannot end a healthy
+           * capture on their own. */
+          atomic_store_explicit(&nr_ue_rf_signal_absent,
+                                (rf_collapsed && pbch_dead && UE->is_synchronized) ? 1 : 0,
+                                memory_order_relaxed);
         }
         LOG_I(PHY,
               "SENSING: RFCENSUS slots=%ld ssb_slots=%ld pbch_ok=%lu pbch_fail=%lu rf_pow=%.2f "
@@ -1541,7 +1563,19 @@ void *UE_thread(void *arg)
         /* Two consecutive windows (2 s) before acting: one window is enough to be sure given how
          * far apart the two levels sit, but the stall is permanent and a spurious reacquisition
          * costs a real capture gap, so require it to persist. */
-        if (s_wd_on && s_bad >= 2 && UE->is_synchronized) {
+        /* PATIENCE DEPENDS ON WHICH FAULT THIS IS.
+         *
+         * Signal present but no SSB decoding is a timing runaway: it does not heal itself and every
+         * further window walks the FFT window further off, so act after 2.
+         *
+         * All four branches at the noise floor is a STREAM OUTAGE, and measured 2026-09-01 those
+         * recover ON THEIR OWN after 3-4 s (17 of 122 census windows deaf across a run, always
+         * followed by a full return to pbch_ok=50/50). Killing at 2 windows threw away captures
+         * that were about to come back -- the receiver was ending the run over a transient it would
+         * have survived. With the integrator frozen above there is nothing to gain by acting fast,
+         * so wait long enough to let the outage clear. */
+        const int bad_needed = (rf_collapsed && UE->is_synchronized) ? 8 : 2;
+        if (s_wd_on && s_bad >= bad_needed && UE->is_synchronized) {
           s_fires++;
           LOG_E(PHY,
                 "SENSING: RFSTALL %s (rf_pow=%.2f ref=%.2f pbch_ok=%lu pbch_fail=%lu "
