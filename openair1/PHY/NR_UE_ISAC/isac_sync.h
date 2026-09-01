@@ -108,6 +108,14 @@ struct sto_fit_result_t {
                                      ///< through, hand off to Phase 3 (no correction applied here)
   uint32_t n_flywheel        = 0;   ///< rows this CPI where the walking tracker's lock faded and the
                                      ///< search window was instead projected forward (see cpi_sto_tracker)
+  /// Sub-bin LOS seed for THIS CPI and the range it implies. Reported per CPI because the seed is
+  /// re-measured every CPI and is the one number that says whether the receiver is looking at the
+  /// direct path at all -- a comb replica seeds it at nof_range/2 and every other counter still
+  /// reads healthy (see the MEASURED LOS SEED block in isac_sync.cc).
+  double   los_seed_bin      = -1.0;
+  double   los_range_m       = -1.0;
+  uint32_t n_seed_rejected   = 0;   ///< polled rows the MAD gate discarded when seeding
+
   double   total_drift_bins  = 0.0; ///< last locked row's absolute_drift_bins -- this CPI's total walked
                                      ///< drift, signed range bins (0 if the tracker never locked)
 };
@@ -199,7 +207,29 @@ public:
   double measured_los_range_m() const { return measured_los_range_m_; }
 
 private:
-  double measured_los_range_m_ = -1.0; ///< set by process()'s seed sweep; <0 = not measured yet
+  double measured_los_range_m_ = -1.0;
+  /// Sub-bin LOS seed position, in bins, from the same median-of-rows estimate that sets
+  /// measured_los_range_m_. Kept separately because the walker needs the rounded integer bin while
+  /// the reported range wants the fraction.
+  double   measured_los_bin_   = -1.0;
+  /// Rows discarded by the MAD gate in the last seed sweep -- a nonzero value here is the seed
+  /// disagreeing with itself, which is what the outliers used to look like before they were caught.
+  uint32_t n_seed_rejected_    = 0;
+  /* ---- STATIC-LOS CONVERGENCE ----------------------------------------------------------------
+   * The receiver and the illuminating gNB do not move, so the LOS delay is ONE CONSTANT and every
+   * CPI's seed is a noisy measurement of it. Re-seeding from scratch each CPI discards all previous
+   * evidence, which is why a CPI whose polled rows all miss the direct path could seed on a comb
+   * replica at nof_range/2 with nothing to overrule it (16 of 152 CPIs beyond 5 bins, one at
+   * 1636.9). Accumulate instead: the estimate is the median of accepted per-CPI seeds, and once
+   * enough CPIs agree it becomes a gate that rejects a wild seed rather than following it.
+   *
+   * Median over a bounded window, not a running mean: a single 1636-bin seed would drag a mean
+   * permanently and there is no way back, whereas the median is unmoved by it. Bounded rather than
+   * cumulative so that if the geometry really does change (an antenna is moved) the estimate
+   * eventually follows instead of defending a value that is no longer true. */
+  std::deque<double> los_hist_;
+  double             los_locked_bin_ = -1.0; ///< converged sub-bin LOS, -1 until LOS_LOCK_MIN_CPIS
+  uint32_t           n_cpi_rejected_ = 0;    ///< CPIs whose seed disagreed with the converged value ///< set by process()'s seed sweep; <0 = not measured yet
   /// Builds one row's compact CIR and searches [center_bin-halfwin, center_bin+halfwin] for its local
   /// power maximum. Returns false only on a structural failure (bad occupancy / too-short CIR -- the
   /// row can't be searched at all). On true, @p out_faded reports whether that local maximum cleared

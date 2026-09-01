@@ -338,6 +338,12 @@ std::string build_detection_report_json(const detection_report_t& rep)
   out += std::to_string(rep.sto.n_flywheel);
   out += ",\"absolute_drift_bins\":";
   append_json_double(out, rep.sto.total_drift_bins);
+  out += ",\"los_seed_bin\":";
+  append_json_double(out, rep.sto.los_seed_bin);
+  out += ",\"los_range_m\":";
+  append_json_double(out, rep.sto.los_range_m);
+  out += ",\"n_seed_rejected\":";
+  out += std::to_string(rep.sto.n_seed_rejected);
   out += '}';
 
   out += ",\"cfo\":{\"n_valid\":";

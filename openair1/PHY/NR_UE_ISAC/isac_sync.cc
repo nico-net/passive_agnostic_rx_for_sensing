@@ -158,6 +158,13 @@ constexpr uint32_t SFO_MIN_VALID_ROWS = 8;
 // direct path if its peak is within this LINEAR power ratio of the strongest window found; among
 // those, the EARLIEST wins. 0.25 = -6 dB.
 //
+// Tightening this to -3 dB was TRIED and REVERTED 2026-09-01. The motivation was sound (39 % of
+// per-CPI seeds fall below the 3-4 m ground truth, i.e. weak early peaks are being accepted), but
+// it was changed in the same build as LOS_LOCK_QUANTILE, so neither could be attributed, and the
+// only capture that survived long enough to sample it gave n=8. At -6 dB the per-CPI median is
+// 1.248 bins = 3.81 m, inside ground truth, which is what the converged estimate consumes. Re-try
+// the tightening on its own, against >=200 seeds, before believing it either way.
+//
 // Why earliest-not-strongest, measured 2026-09-01: the sweep used to keep the strongest peak
 // anywhere in the CIR. With only comb-1 sources enabled that is the direct path and it seeded a
 // steady bin 1-4 (3-12 m). Enabling the combed sources (pdsch_dmrs_blind is comb-2, csi_rs
@@ -172,6 +179,48 @@ constexpr uint32_t SFO_MIN_VALID_ROWS = 8;
 // ordinary noise on a marginally-stronger later window cannot outrank a clean early one; the gate
 // inside estimate_row() (FADE_MIN_SNR_LINEAR) still decides what qualifies at all.
 constexpr double LOS_SEED_EARLIEST_FRAC = 0.25;
+
+// How many rows the LOS seed sweep polls before deciding. Each contributes ONE candidate (its own
+// earliest qualifying arrival) and the seed is their MEDIAN, so a single bad row cannot set the
+// seed for the whole CPI.
+//
+// Why a median and not the first row that locks, measured 2026-09-01: taking the first locking row
+// left 2 seeds of 109 at bin 197 and 270 against a population otherwise entirely in bins 0-3. One
+// row landing on a fade, a collision or a strong second path is enough, and there was no second
+// opinion to overrule it. The median needs more than half the polled rows to agree before it moves,
+// which is exactly the robustness the single-row version lacked -- and it costs one extra sweep
+// over rows that were already being read.
+constexpr uint32_t LOS_SEED_POLL_ROWS = 8;
+
+// Accepted per-CPI seeds kept for the static-LOS estimate, and how many are needed before it is
+// trusted enough to reject a disagreeing CPI. 8 CPIs is a few seconds of capture -- long enough
+// that a run of unlucky CPIs cannot lock in a wrong value, short enough that the estimate is useful
+// early in a run rather than after it has ended.
+constexpr size_t   LOS_HIST_MAX       = 64;
+constexpr uint32_t LOS_LOCK_MIN_CPIS  = 8;
+// Quantile of the accepted per-CPI seeds taken as the converged LOS. 0.50 = median.
+//
+// MEASURED, and it corrects an earlier theory in this file. The argument for a LOW quantile was
+// that the direct path is the shortest path, so no measurement can place it earlier and every
+// failure biases the estimate upward. The second half of that is false. Against a known 3-4 m
+// ground truth (bins 0.98-1.31), 230 per-CPI seeds distribute:
+//
+//   min 0.000  p10 0.500  p20 0.561  p50 1.248  p75 1.911  p90 22.9  max 1636.6
+//   39 % below the true value, 16 % inside it, 45 % above
+//
+// 39 % LOW is not a one-sided distribution: taking the earliest qualifying arrival means a noise
+// peak in FRONT of the direct path wins whenever one clears the gate, so the estimator undershoots
+// about as often as it overshoots. The median lands at 1.248 bins = 3.81 m, inside ground truth;
+// the 20th percentile lands at 0.561 bins = 1.71 m, roughly half the true range.
+//
+// The upward tail is real (p90 = 22.9, max = 1636.6 -- the nof_range/2 comb replica) but a median
+// is already immune to it, which is the property that was actually needed. Do not re-derive a low
+// quantile from the shortest-path argument without re-measuring this distribution.
+constexpr double   LOS_LOCK_QUANTILE  = 0.50;
+// A CPI seed further than this from the converged value is rejected as a replica or a fade rather
+// than believed. In BINS, and generous on purpose: it only has to exclude the failure actually
+// observed (nof_range/2, i.e. 1638 bins away) without fighting honest sub-bin noise.
+constexpr double   LOS_LOCK_TOL_BINS  = 8.0;
 
 constexpr double SFO_MIN_R_SQUARED = 0.90;
 
@@ -580,13 +629,23 @@ sto_fit_result_t cpi_sto_tracker::process(icf_t*                   h_cpi,
     double         best_snr = -1.0;
     int            best_bin = -1;
     const uint32_t step     = 2 * SEARCH_HALFWIN_BINS + 1;
-    /* Two passes over the SAME row, because "is this the direct path or a replica of it" cannot be
-     * answered until the strongest peak is known. Pass 1 finds it; pass 2 takes the earliest peak
-     * within LOS_SEED_EARLIEST_FRAC of it. */
-    for (uint32_t r0 = 0; r0 < cpi_rows && r0 < 8 && best_bin < 0; r0++) {
+
+    /* One candidate per polled row, carried as a SUB-BIN position (peak_bin + frac_bin). The
+     * fractional part is the parabolic offset estimate_row() already computes for every row and
+     * that this seed used to discard by keeping only the integer bin -- which quantised the
+     * reported LOS range to one bin, 3.05 m at 273 PRB / 30 kHz. */
+    double   pos_c_dbg = -1.0; // this CPI's own estimate, before the static-LOS layer
+    double   cand[LOS_SEED_POLL_ROWS];
+    double   cand_snr[LOS_SEED_POLL_ROWS];
+    uint32_t n_cand = 0;
+
+    for (uint32_t r0 = 0; r0 < cpi_rows && n_cand < LOS_SEED_POLL_ROWS; r0++) {
       const icf_t*   row0 = &h_cpi[(size_t)r0 * nof_subc];
       const uint8_t* m0   = &occ_all[(size_t)r0 * nof_subc];
 
+      /* Two passes over the SAME row, because "is this the direct path or a replica of it" cannot
+       * be answered until the strongest peak is known. Pass 1 finds it; pass 2 takes the earliest
+       * peak within LOS_SEED_EARLIEST_FRAC of it. */
       double peak_snr = -1.0;
       for (uint32_t c = SEARCH_HALFWIN_BINS + 1; c + SEARCH_HALFWIN_BINS + 2 < nof_subc; c += step) {
         los_row_estimate_t e;
@@ -598,7 +657,7 @@ sto_fit_result_t cpi_sto_tracker::process(icf_t*                   h_cpi,
         }
       }
       if (peak_snr <= 0.0) {
-        continue; // nothing on this row cleared the fade gate; try the next one
+        continue; // nothing on this row cleared the fade gate; poll the next one
       }
 
       const double accept = peak_snr * LOS_SEED_EARLIEST_FRAC;
@@ -608,21 +667,94 @@ sto_fit_result_t cpi_sto_tracker::process(icf_t*                   h_cpi,
         double             snr = -1.0;
         if (estimate_row(row0, m0, nof_subc, row_comb[r0], (int)c, SEARCH_HALFWIN_BINS, e, f, &snr)
             && snr >= accept) {
-          best_snr = snr;
-          best_bin = (int)e.peak_bin; // first qualifying window == earliest arrival == direct path
+          cand_snr[n_cand] = snr;
+          cand[n_cand]     = (double)e.peak_bin + e.frac_bin; // earliest arrival == direct path
+          n_cand++;
           break;
         }
       }
     }
-    if (best_bin >= 0) {
-      seed_bin = (uint32_t)best_bin;
+
+    if (n_cand > 0) {
+      /* MEDIAN over the polled rows, then a MAD-based reject of the rows that disagree with it,
+       * then the mean of the survivors. Median alone is robust but quantises to one candidate's
+       * own value; averaging the agreeing rows recovers sub-bin precision from independent
+       * measurements of the same static path. MAD (scaled to a sigma by 1.4826) is used rather
+       * than a standard deviation because the outliers this rejects would inflate an SD enough to
+       * keep themselves inside the gate. */
+      double srt[LOS_SEED_POLL_ROWS];
+      std::copy(cand, cand + n_cand, srt);
+      std::sort(srt, srt + n_cand);
+      const double med = (n_cand % 2) ? srt[n_cand / 2]
+                                      : 0.5 * (srt[n_cand / 2 - 1] + srt[n_cand / 2]);
+
+      double dev[LOS_SEED_POLL_ROWS];
+      for (uint32_t i = 0; i < n_cand; i++) {
+        dev[i] = std::fabs(cand[i] - med);
+      }
+      std::sort(dev, dev + n_cand);
+      const double mad   = (n_cand % 2) ? dev[n_cand / 2] : 0.5 * (dev[n_cand / 2 - 1] + dev[n_cand / 2]);
+      /* Floor the tolerance at half a bin: with several rows agreeing exactly, MAD is 0 and a bare
+       * 3*MAD would reject every row whose sub-bin estimate differs by any amount at all. */
+      const double tol = std::max(0.5, 3.0 * 1.4826 * mad);
+
+      double   sum = 0.0, sum_snr = 0.0;
+      uint32_t n_keep = 0;
+      for (uint32_t i = 0; i < n_cand; i++) {
+        if (std::fabs(cand[i] - med) <= tol) {
+          sum += cand[i];
+          sum_snr += cand_snr[i];
+          n_keep++;
+        }
+      }
+      const double pos = (n_keep > 0) ? (sum / (double)n_keep) : med;
+      best_snr         = (n_keep > 0) ? (sum_snr / (double)n_keep) : -1.0;
+      n_seed_rejected_ = n_cand - n_keep;
+
+      /* The walker tracks an INTEGER bin, so it gets the rounded position; Phase 4 consumes the
+       * sub-bin one. Clamped because a negative bin would index out of the CIR. */
+      const double pos_c = (pos < 0.0) ? 0.0 : pos;
+      pos_c_dbg          = pos_c;
+
+      /* Fold this CPI's estimate into the STATIC-LOS estimate (see isac_sync.h). Once locked, a
+       * seed that disagrees by more than LOS_LOCK_TOL_BINS is rejected outright -- it is a replica
+       * or a fade, and the geometry says the true value cannot have moved. */
+      const bool locked = (los_locked_bin_ >= 0.0);
+      if (!locked || std::fabs(pos_c - los_locked_bin_) <= LOS_LOCK_TOL_BINS) {
+        los_hist_.push_back(pos_c);
+        if (los_hist_.size() > LOS_HIST_MAX) {
+          los_hist_.pop_front();
+        }
+      } else {
+        n_cpi_rejected_++;
+      }
+      if (los_hist_.size() >= LOS_LOCK_MIN_CPIS) {
+        std::vector<double> h(los_hist_.begin(), los_hist_.end());
+        std::sort(h.begin(), h.end());
+        size_t q = (size_t)(LOS_LOCK_QUANTILE * (double)h.size());
+        if (q >= h.size()) {
+          q = h.size() - 1;
+        }
+        los_locked_bin_ = h[q];
+      }
+
+      /* Report the converged value once it exists: it is a strictly better estimate of a constant
+       * than any single CPI's measurement of it. */
+      const double use = (los_locked_bin_ >= 0.0) ? los_locked_bin_ : pos_c;
+      best_bin              = (int)std::lround(use);
+      seed_bin              = (uint32_t)best_bin;
       // Same bin->metre scale nominal_los_bin() inverts, so Phase 4 can consume it directly.
-      measured_los_range_m_ = (double)seed_bin * SPEED_OF_LIGHT / ((double)nof_subc * carrier.scs_hz);
+      measured_los_range_m_ = use * SPEED_OF_LIGHT / ((double)nof_subc * carrier.scs_hz);
+      measured_los_bin_     = use;
     }
-    LOG_I(PHY, "SENSING: sync(STO) LOS seed bin=%u (%s, earliest within -6 dB of peak), nominal was %u "
-               "from %.1f m; snr=%.1f dB\n",
-          seed_bin, (best_bin >= 0) ? "MEASURED" : "fallback: nothing cleared the gate",
-          nominal_bin, nominal_los_range_m,
+    LOG_I(PHY,
+          "SENSING: sync(STO) LOS bin=%.3f -> %.2f m (%s; %s over %u CPIs, %u CPIs rejected; "
+          "this CPI raw=%.3f from %u rows, %u rejected), nominal was %u from %.1f m; snr=%.1f dB\n",
+          measured_los_bin_, measured_los_range_m_,
+          (best_bin >= 0) ? "MEASURED" : "fallback: nothing cleared the gate",
+          (los_locked_bin_ >= 0.0) ? "CONVERGED" : "converging",
+          (unsigned)los_hist_.size(), n_cpi_rejected_,
+          pos_c_dbg, n_cand, n_seed_rejected_, nominal_bin, nominal_los_range_m,
           (best_snr > 0.0) ? 10.0 * std::log10(best_snr) : -99.0);
   }
 
@@ -751,6 +883,9 @@ sto_fit_result_t cpi_sto_tracker::process(icf_t*                   h_cpi,
   }
   fit.n_valid    = n;
   fit.n_flywheel = n_flywheel;
+  fit.los_seed_bin    = measured_los_bin_;
+  fit.los_range_m     = measured_los_range_m_;
+  fit.n_seed_rejected = n_seed_rejected_;
 
   if (dbg_walk) {
     LOG_I(PHY,
