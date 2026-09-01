@@ -92,10 +92,15 @@ def test_track_without_bearing_has_no_position():
 
 
 def test_ul_source_is_separable_by_name():
-    occ = dict(zip(SOURCE_NAMES, [13, 0, 19, 19, 4]))
+    # One entry per source, built from SOURCE_NAMES itself so adding a source cannot silently
+    # leave this zip short -- which is exactly what happened when pusch_data was added.
+    counts = [13, 0, 19, 19, 4, 7][: len(SOURCE_NAMES)]
+    assert len(counts) == len(SOURCE_NAMES), (len(counts), len(SOURCE_NAMES))
+    occ = dict(zip(SOURCE_NAMES, counts))
     ul = sum(occ[s] for s in UL_SOURCES)
     dl = sum(n for s, n in occ.items() if s not in UL_SOURCES)
-    assert ul == 4 and dl == 51, (ul, dl)
+    assert ul + dl == sum(counts), (ul, dl, counts)
+    assert all(s in occ for s in UL_SOURCES), (UL_SOURCES, list(occ))
     print("ok  UL rows separable from DL rows by source name")
 
 

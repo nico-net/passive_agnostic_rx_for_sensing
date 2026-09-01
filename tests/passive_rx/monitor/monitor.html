@@ -301,6 +301,18 @@ function tabHealth(v) {
   const st = log && log.stats || {};
 
   const cards = el("div","row");
+  /* Receiver liveness is a SEPARATE fact from report freshness. A receiver that has lost PBCH
+     lock still writes to its log continuously while emitting no CPIs at all, and showing only
+     "STALE" for that is indistinguishable from nothing running -- which is the opposite of what
+     it means. */
+  {
+    const la = (state.log && state.log.last_line_at) || null;
+    const lage = la ? (state.now - la) : null;
+    cards.appendChild(card("Receiver",
+      lage == null ? "NO LOG" : lage < 15 ? "ALIVE" : "SILENT " + fmt(lage,0) + "s",
+      lage == null ? null : lage < 15 ? "good" : "bad",
+      lage != null && lage < 15 && age >= lim ? "running but not closing CPIs" : "log activity"));
+  }
   cards.appendChild(card("Report stream", age < lim ? "LIVE" : "STALE", age < lim ? "good":"bad",
     `${h.cpi_count} CPIs · last ${fmt(age,0)}s ago` + (h.cadence_s ? ` · every ~${fmt(h.cadence_s,0)}s` : "")));
   cards.appendChild(card("CFO", fmt(cfo.cfo_hz,1)+" Hz", Math.abs(cfo.cfo_hz||0) < 300 ? "good":"bad",

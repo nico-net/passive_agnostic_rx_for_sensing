@@ -252,8 +252,16 @@ int nr_adjust_synch_ue(const NR_DL_FRAME_PARMS *frame_parms,
   if (audit && (audit_n % (unsigned)audit) == 0) {
     LOG_I(PHY,
           "TSYNC_OUT frame=%d slot=%d corr_pos=%d max_power=%d diff=%d sampleShift=%d "
-          "sample_shift=%d mpa=%d\n",
-          frame, slot, corr_pos, max_val, diff, sampleShift, sample_shift, ue->max_pos_acc);
+          "sample_shift=%d mpa=%d fo=%.0f\n",
+          frame, slot, corr_pos, max_val, diff, sampleShift, sample_shift, ue->max_pos_acc,
+          /* Total frequency offset in force for THIS SSB. The open question about the -6.6 dB
+           * correlation collapse is coherence: total received power is unchanged, so the SSB is
+           * present but not correlating, and a residual frequency error is the classic way to lose
+           * correlation gain without losing power. Emitting it per SSB is the only way to pair it
+           * with the peak it produced -- the census CFO figure is an aggregate and already showed
+           * no discrimination (69 % vs 68 % above 2600 Hz), which is exactly the resolution problem
+           * this trace exists to escape. */
+          (double)ue->dl_Doppler_shift + (double)ue->freq_offset);
   }
   audit_n++;
 

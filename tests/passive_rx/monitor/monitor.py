@@ -120,6 +120,7 @@ class LogTail:
     ]
 
     def __init__(self, path, maxlines=4000):
+        self.last_line_at = None
         self.path = Path(path)
         self.lines = deque(maxlen=maxlines)
         self.counters = {"overflow": 0, "sync_lost": 0, "pbch_ok": 0}
@@ -175,10 +176,18 @@ class LogTail:
                 # Wall-clock stamp: the receiver's own lines carry no time, so without this there is
                 # no way to tell a line from this second from one ten minutes old.
                 self.lines.append(time.strftime("%H:%M:%S ") + line[-400:])
+            self.last_line_at = time.time()
 
     def snapshot(self):
         with self._lock:
-            return {"counters": dict(self.counters), "stats": dict(self.stats), "lines": list(self.lines)[-400:]}
+            return {"counters": dict(self.counters), "stats": dict(self.stats),
+                    # When the receiver last wrote ANYTHING. The report stream only proves a CPI
+                    # closed, and a receiver can be up, streaming and visibly unwell without
+                    # closing one -- an arm that loses PBCH lock in a few seconds emits one CPI and
+                    # then nothing. Reading that as "no receiver" hides exactly the state an
+                    # operator most needs to see, so liveness is tracked separately from reports.
+                    "last_line_at": self.last_line_at,
+                    "lines": list(self.lines)[-400:]}
 
 
 def replay_thread(path, store, rate_hz):
