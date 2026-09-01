@@ -708,6 +708,8 @@ sto_fit_result_t cpi_sto_tracker::process(icf_t*                   h_cpi,
      * reported LOS range to one bin, 3.05 m at 273 PRB / 30 kHz. */
     double   pos_c_dbg = -1.0; // this CPI's own estimate, before the static-LOS layer
     double   cand[LOS_SEED_POLL_ROWS];
+    uint32_t cand_pk[LOS_SEED_POLL_ROWS];
+    double   cand_fr[LOS_SEED_POLL_ROWS];
     double   cand_snr[LOS_SEED_POLL_ROWS];
     uint32_t n_cand = 0;
 
@@ -729,7 +731,7 @@ sto_fit_result_t cpi_sto_tracker::process(icf_t*                   h_cpi,
         bool               f   = false;
         double             snr = -1.0;
         if (estimate_row(row0, m0, nof_subc, row_comb[r0], (int)c, SEARCH_HALFWIN_BINS, e, f, &snr)
-            && snr > peak_snr) {
+            && !f && snr > peak_snr) {
           peak_snr = snr;
         }
       }
@@ -742,10 +744,23 @@ sto_fit_result_t cpi_sto_tracker::process(icf_t*                   h_cpi,
         los_row_estimate_t e;
         bool               f   = false;
         double             snr = -1.0;
+        /* !f is LOAD-BEARING, not defensive. estimate_row() returns TRUE on a faded row -- the row
+         * is structurally fine, just not trustworthy -- and its contract leaves peak_bin/frac_bin
+         * UNPOPULATED in that case, i.e. at their defaults of 0 and 0.0. Without this check every
+         * faded row contributed a candidate of exactly (bin 0, frac +0.000), which is both the
+         * earliest possible arrival and therefore an automatic winner under the earliest-arrival
+         * rule. Measured 2026-09-01: the downlink seed reported "raw=0.000 ... first pk=0
+         * frac=+0.000" on a large fraction of CPIs and the converged LOS sat at 0.22-1.54 m against
+         * a 3-4 m ground truth. The tell was frac being EXACTLY +0.000 -- a real parabolic estimate
+         * essentially never is. */
         if (estimate_row(row0, m0, nof_subc, row_comb[r0], (int)c, SEARCH_HALFWIN_BINS, e, f, &snr)
-            && snr >= accept) {
+            && !f && snr >= accept) {
           cand_snr[n_cand] = snr;
           cand[n_cand]     = (double)e.peak_bin + e.frac_bin; // earliest arrival == direct path
+          /* Decomposed because the sum alone cannot say which half is wrong: a bin-0 pick and a
+           * negative fraction produce the same number, and they need different fixes. */
+          cand_pk[n_cand]  = e.peak_bin;
+          cand_fr[n_cand]  = e.frac_bin;
           n_cand++;
           break;
         }
@@ -850,14 +865,16 @@ sto_fit_result_t cpi_sto_tracker::process(icf_t*                   h_cpi,
     }
     LOG_I(PHY,
           "SENSING: sync(STO) LOS[%s] bin=%.3f -> %.2f m (%s; %s over %u CPIs mode_support=%u, "
-          "%u CPIs rejected; this CPI raw=%.3f from %u rows, %u rejected); nominal was %u from %.1f m; "
-          "snr=%.1f dB\n",
+          "%u CPIs rejected; this CPI raw=%.3f from %u rows, %u rejected, first pk=%d frac=%+.3f); "
+          "nominal was %u from %.1f m; snr=%.1f dB\n",
           (il == NR_ISAC_ILLUM_UL) ? "UL/UE" : "DL/gNB",
           measured_los_bin_[il], measured_los_range_m_[il],
           (best_bin >= 0) ? "MEASURED" : "fallback: nothing cleared the gate",
           (los_locked_bin_[il] >= 0.0) ? "CONVERGED" : "converging",
           (unsigned)los_hist_[il].size(), n_mode_support_[il], n_cpi_rejected_[il],
-          pos_c_dbg, n_cand, n_seed_rejected_[il], nominal_bin, nominal_los_range_m,
+          pos_c_dbg, n_cand, n_seed_rejected_[il],
+          (n_cand > 0) ? (int)cand_pk[0] : -1, (n_cand > 0) ? cand_fr[0] : 0.0,
+          nominal_bin, nominal_los_range_m,
           (best_snr > 0.0) ? 10.0 * std::log10(best_snr) : -99.0);
   }
   }
