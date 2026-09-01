@@ -1050,6 +1050,7 @@ set(PHY_NR_PASSIVE_UL_SRC
   ${OPENAIR1_DIR}/PHY/NR_ESTIMATION/nr_ul_channel_estimation.c
   ${OPENAIR1_DIR}/PHY/NR_ESTIMATION/nr_freq_equalization.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c
+  ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pusch_data_aided.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pusch_passive_queue.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pusch_passive_monitor_rt.c
   )

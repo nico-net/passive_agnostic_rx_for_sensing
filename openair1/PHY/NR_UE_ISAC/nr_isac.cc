@@ -85,6 +85,9 @@ uint32_t source_bit_from_token(const std::string& tok)
        being rejected, and the engine reported sources=pdsch_data with the UL source never firing. */
     return 1u << NR_ISAC_SRC_PUSCH_DMRS;
   }
+  if (tok == "pusch_data") {
+    return 1u << NR_ISAC_SRC_PUSCH_DATA;
+  }
   if (tok == "pdsch_dmrs_blind") {
     // Reserved 2026-07-28 (Phase 3): accepted here so the token is inert-but-valid ahead of the
     // not-yet-built RT tap; nothing submits this source yet (nr_pdcch_blind_monitor.{h,c} is

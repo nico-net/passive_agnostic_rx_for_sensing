@@ -58,7 +58,11 @@ typedef enum nr_isac_source_e {
   /// is UE->target->receiver, not gNB->target->receiver, so a detection from this source sits on a
   /// different bistatic ellipse from every DL source and must not be fused with them as if it did.
   NR_ISAC_SRC_PUSCH_DMRS = 4,
-  NR_ISAC_SRC_COUNT      = 5 ///< Number of distinct sources (for the enabled-set bitmask)
+  /// Passive UPLINK data-aided: the CRC-verified PUSCH TB re-encoded and H = Y/X measured at every
+  /// data RE (comb-1). The uplink twin of NR_ISAC_SRC_PDSCH_DATA -- see nr_pusch_data_aided.h.
+  /// Only ever submitted for grants carrying NO UCI, because HARQ-ACK overwrites ULSCH REs.
+  NR_ISAC_SRC_PUSCH_DATA = 5,
+  NR_ISAC_SRC_COUNT      = 6 ///< Number of distinct sources (for the enabled-set bitmask)
 } nr_isac_source_t;
 
 /// Carrier geometry valid for one submitted CFR snapshot. All axis scaling derives from this.

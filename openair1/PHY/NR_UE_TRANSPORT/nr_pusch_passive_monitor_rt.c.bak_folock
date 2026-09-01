@@ -6,7 +6,6 @@
 #include "nr_pusch_passive_decode.h"
 #include "nr_pdcch_blind_monitor_rt.h"
 #include "nr_pusch_passive_queue.h"
-#include "nr_pusch_data_aided.h"
 
 #include "common/utils/LOG/log.h"
 #include "common/utils/nr/nr_common.h"
@@ -155,17 +154,13 @@ void nr_pusch_passive_monitor_process(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_
   }
 
   nr_pusch_passive_out_t out;
-  /* Sampled HERE, on the receive thread, in the same call that captured these samples -- see
-   * nr_pusch_passive_job_t::fo_hz. A consumer reading ue-> later would get a newer value. */
-  const double fo_hz = ue->cont_fo_comp ? (ue->dl_Doppler_shift + ue->freq_offset) : 0.0;
   if (nr_pusch_passive_queue_running()) {
     nr_pusch_passive_job_t job = {.grant             = g,
                                   .frame_rx          = (int)proc->frame_rx,
                                   .nr_slot_rx        = (int)proc->nr_slot_rx,
                                   .ta_offset_samples = ta,
                                   .absolute_slot     = abs_slot,
-                                  .cfr_only          = (cfg->ul_pusch_decode == 2),
-                                  .fo_hz             = fo_hz};
+                                  .cfr_only          = (cfg->ul_pusch_decode == 2)};
     nr_pusch_passive_queue_enqueue(&job);
     /* Nothing more to report per grant here: the outcome belongs to the consumer, and the census
      * (pusch_passive[...] / puschq[...]) is where it is read. Deliberately NOT decoded in-line on a
@@ -173,7 +168,7 @@ void nr_pusch_passive_monitor_process(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_
     return;
   }
   nr_pusch_passive_decode(ue, 0, proc->frame_rx, proc->nr_slot_rx, &g, ta, (uint64_t)abs_slot,
-                          cfg->ul_pusch_decode == 2, fo_hz, &out);
+                          cfg->ul_pusch_decode == 2, &out);
 
 }
 
@@ -196,5 +191,4 @@ void nr_pusch_grant_book_stats_dump(void)
           (unsigned long)q.max_lag_slots, NR_PUSCH_PASSIVE_QUEUE_MARGIN_SLOTS);
   }
   nr_pusch_passive_stats_dump();
-  nr_isac_pusch_data_aided_stats_dump();
 }

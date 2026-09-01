@@ -54,6 +54,8 @@ const char* nr_isac_source_to_ref_type(nr_isac_source_t source)
       return "pdsch_dmrs_blind";
     case NR_ISAC_SRC_PUSCH_DMRS:
       return "pusch_dmrs";
+    case NR_ISAC_SRC_PUSCH_DATA:
+      return "pusch_data";
     case NR_ISAC_SRC_CSI_RS:
     default:
       return "csi_rs";

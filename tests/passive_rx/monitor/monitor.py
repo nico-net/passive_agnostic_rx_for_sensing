@@ -25,8 +25,8 @@ import zmq
 
 # nr_isac_source_t order (nr_isac.h). PUSCH_DMRS is the only uplink source, and its geometry is
 # UE->target->rx, not gNB->target->rx -- which is why the UI reports it separately and never maps it.
-SOURCE_NAMES = ["csi_rs", "pdsch_dmrs", "pdsch_data", "blind", "pusch_dmrs"]
-UL_SOURCES = {"pusch_dmrs"}
+SOURCE_NAMES = ["csi_rs", "pdsch_dmrs", "pdsch_data", "blind", "pusch_dmrs", "pusch_data"]
+UL_SOURCES = {"pusch_dmrs", "pusch_data"}
 
 HISTORY = 200  # CPIs kept per receiver for the sparklines / track trails
 

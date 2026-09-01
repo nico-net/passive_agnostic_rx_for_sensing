@@ -11,7 +11,6 @@
 #include "PHY/nr_phy_common/inc/nr_phy_common.h" // nr_fo_compensation: the same de-rotation nr_slot_fep uses
 
 #include "nr_pusch_passive_decode.h"
-#include "nr_pusch_data_aided.h"
 
 #include "common/utils/LOG/log.h"
 #include "common/utils/nr/nr_common.h"
@@ -578,26 +577,6 @@ static void passive_ul_fep_fo(const NR_DL_FRAME_PARMS *fp, const c16_t *rxdata, 
   dft(get_dft(N), (int16_t *)rot, (int16_t *)rxdataF, 1);
 }
 
-/* The producer-timeline slow-time index for this uplink slot. Hoisted into a helper because BOTH
- * CFR sources need it and they MUST agree: a fused CPI mixing two slow-time origins has a
- * meaningless span (measured once as T_slot 67409 against a true ~256, collapsing the velocity axis
- * to zero). See the long comment at the DM-RS submission for why frame*slots_per_frame + slot is
- * the wrong clock. */
-static uint32_t passive_ul_slow_time_idx(const NR_DL_FRAME_PARMS *fp,
-                                         uint32_t frame,
-                                         uint8_t slot,
-                                         uint64_t abs_slot)
-{
-  if (abs_slot != 0) {
-    return (uint32_t)abs_slot;
-  }
-  const long prod = atomic_load_explicit(&nr_ue_diag_producer_absolute_slot, memory_order_relaxed);
-  const long wrap = (long)fp->slots_per_frame * 1024;
-  const long fd   = (long)frame * fp->slots_per_frame + (long)slot;
-  const long lag  = ((prod - fd) % wrap + wrap) % wrap;
-  return (uint32_t)(prod - lag);
-}
-
 static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
                                           int      ctx,
                                           uint32_t frame,
@@ -606,7 +585,6 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
                                           int32_t  ta_offset_samples,
                                           uint64_t abs_slot,
                                           bool     cfr_only,
-                                          double   fo_hz,
                                           nr_pusch_passive_out_t *out)
 {
   memset(out, 0, sizeof(*out));
@@ -698,7 +676,7 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
    * Factored out because it is run TWICE per grant -- see the delay refinement below. */
 #define PASSIVE_UL_FEP(off_)                                                                       \
   do {                                                                                             \
-    const double fo_hz_ = fo_hz;                                                                   \
+    const double fo_hz_ = ue->cont_fo_comp ? (ue->dl_Doppler_shift + ue->freq_offset) : 0.0;       \
     const int s0_ = g->start_symbol;                                                               \
     const int s1_ = g->start_symbol + g->num_symbols;                                              \
     for (int a_ = 0; a_ < nant; a_++) {                                                            \
@@ -925,7 +903,19 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
          * counters advance one per slot, so subtracting the phase difference modulo the wrap yields
          * the producer-timeline value FOR THIS SLOT. Exact while the lag stays under one wrap
          * (~10 slots in practice against a 20480-slot wrap). */
-        const uint32_t ul_slot_idx = passive_ul_slow_time_idx(fp, frame, slot, abs_slot);
+        uint32_t ul_slot_idx;
+        if (abs_slot != 0) {
+          /* Stamped by the producer at enqueue. Once the decode is deferred this is the ONLY
+           * correct source: the phase-alignment below assumes the producer is at most a pipeline
+           * depth ahead, and a queued job breaks that assumption by however long it waited. */
+          ul_slot_idx = (uint32_t)abs_slot;
+        } else {
+          const long prod = atomic_load_explicit(&nr_ue_diag_producer_absolute_slot, memory_order_relaxed);
+          const long wrap = (long)fp->slots_per_frame * 1024;
+          const long fd   = (long)frame * fp->slots_per_frame + (long)slot;
+          const long lag  = ((prod - fd) % wrap + wrap) % wrap;
+          ul_slot_idx = (uint32_t)(prod - lag);
+        }
         nr_isac_submit_cfr_multi(ul_slot_idx, 0.0f,
                                  NR_ISAC_SRC_PUSCH_DMRS, &carrier, ul_h, nof_ant_cfr, cap,
                                  ul_k, ul_l, nof_re, 1.0f);
@@ -1125,19 +1115,6 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
   out->status = NR_PUSCH_PASSIVE_OK;
   out->tb     = hp->b;
   atomic_fetch_add_explicit(&g_crc_ok, 1, memory_order_relaxed);
-
-  /* UPLINK DATA-AIDED CFR. Gated on o_ack == 0, which means this TB decoded on the FIRST attempt --
-   * the no-UCI hypothesis -- so the codeword occupies every data RE and X is fully reconstructible.
-   * A grant rescued by a UCI hypothesis has HARQ-ACK PUNCTURING the ULSCH at positions derived from
-   * bits this receiver never decodes; reconstructing X there would be a guess, and a guess in the
-   * numerator of Y/X is indistinguishable from a measurement downstream. Those grants keep
-   * contributing through the DM-RS source, which does not depend on the payload at all. */
-  if (out->o_ack == 0) {
-    nr_isac_pusch_data_aided_submit(ue, gnb, &pdu, g, hp->b,
-                                    NR_PUSCH_PASSIVE_DA_TAG_BASE + (uint32_t)ctx,
-                                    passive_ul_slow_time_idx(fp, frame, slot, abs_slot),
-                                    (uint32_t)nant, slot);
-  }
   return true;
 }
 
@@ -1154,11 +1131,10 @@ bool nr_pusch_passive_decode(PHY_VARS_NR_UE *ue,
                              int32_t  ta_offset_samples,
                              uint64_t abs_slot,
                              bool     cfr_only,
-                             double   fo_hz,
                              nr_pusch_passive_out_t *out)
 {
   const bool ok = nr_pusch_passive_decode_inner(ue, ctx, frame, slot, g, ta_offset_samples, abs_slot,
-                                                cfr_only, fo_hz, out);
+                                                cfr_only, out);
 
   if (s_diag_on() && g != NULL) {
     LOG_I(PHY,
