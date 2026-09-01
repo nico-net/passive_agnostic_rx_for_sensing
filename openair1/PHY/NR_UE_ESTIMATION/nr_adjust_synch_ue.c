@@ -8,6 +8,10 @@
 #include <stdlib.h>
 #include <time.h>
 
+/// Anti-windup bound on the timing PI loop's integral term -- see where it is applied. A healthy
+/// receiver holds max_pos_acc ~450 flat; a runaway reached -2141 and cost the capture.
+#define NR_MAX_POS_ACC_LIMIT 1024
+
 //#define DEBUG_PHY
 
 // Adjust location synchronization point to account for drift
@@ -218,6 +222,36 @@ int nr_adjust_synch_ue(const NR_DL_FRAME_PARMS *frame_parms,
   // reset IIR filter for next offset calculation
   ue->max_pos_iir += -round(sampleShift * PID_P) * 32768;
   ue->max_pos_acc += corr_pos;
+
+  /* ANTI-WINDUP. max_pos_acc is the integral term and was unbounded: it is advanced by corr_pos on
+   * EVERY call, including calls where the correlation ran on noise because the SSB was not being
+   * decoded. That is textbook integrator windup, and it is what ends passive captures.
+   *
+   * Measured 2026-09-01 on sens6, from the RFCENSUS trail into an RFSTALL:
+   *     pbch_ok=6  fail=44   max_pos_acc= 225   shiftForNextFrame= -2
+   *     pbch_ok=0  fail=50   max_pos_acc= 329   shiftForNextFrame= -3    <- PBCH dead,
+   *     pbch_ok=0  fail=50   max_pos_acc= 439   shiftForNextFrame= -4       integrator still winding
+   *     pbch_ok=7  fail=43   max_pos_acc=-2141  shiftForNextFrame=+21    <- discharge
+   * against a healthy receiver that sits flat at max_pos_acc ~450 / shift -5 indefinitely. The +21
+   * sample jump moves the FFT window far enough to lose the lock, the next correlation is worse,
+   * and the loop diverges -- "RFSTALL PBCH lock lost (timing runaway)".
+   *
+   * Two hypotheses for that stall were tested against this same data and REFUTED, so do not revisit
+   * them: offered load (anti-correlated -- 387 UL grants/s ran clean for 187 s while 24 grants/s
+   * died at 13 s) and RF front-end overload (forced with gain to rf_pow 233-249, dead centre of the
+   * failing range, 0 stalls).
+   *
+   * The bound is on the INTEGRAL, not on the output, which is what makes it anti-windup rather than
+   * mere output saturation: a saturated output with a still-winding integrator takes just as long to
+   * unwind. Sized from the loop's own behaviour -- a healthy receiver holds ~450, so 1024 leaves
+   * >2x headroom for a genuine standing offset while capping the correction this term can ever
+   * demand at 1024*time_sync_I ~ 10 samples/frame. Real clock drift needs a tiny fraction of that:
+   * the measured SFO on this pair is 0.11 ppm, i.e. ~0.14 samples/frame. */
+  if (ue->max_pos_acc > NR_MAX_POS_ACC_LIMIT) {
+    ue->max_pos_acc = NR_MAX_POS_ACC_LIMIT;
+  } else if (ue->max_pos_acc < -NR_MAX_POS_ACC_LIMIT) {
+    ue->max_pos_acc = -NR_MAX_POS_ACC_LIMIT;
+  }
 
   return sample_shift;
 }

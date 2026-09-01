@@ -208,25 +208,31 @@ constexpr uint32_t LOS_SEED_POLL_ROWS = 8;
 // that has not converged should say so.
 constexpr size_t   LOS_HIST_MAX       = 64;
 constexpr uint32_t LOS_LOCK_MIN_CPIS  = 32;
-// Quantile of the accepted per-CPI seeds taken as the converged LOS. 0.50 = median.
+// The converged LOS is the MODE of the accepted per-CPI seeds, not a quantile of them.
 //
-// MEASURED, and it corrects an earlier theory in this file. The argument for a LOW quantile was
-// that the direct path is the shortest path, so no measurement can place it earlier and every
-// failure biases the estimate upward. The second half of that is false. Against a known 3-4 m
-// ground truth (bins 0.98-1.31), 230 per-CPI seeds distribute:
+// Measured against a known 3-4 m ground truth (bins 0.98-1.31), 230 per-CPI seeds distribute:
+//     min 0.000  p10 0.500  p20 0.561  p25 0.608  p50 1.248  p75 1.911  p90 22.9  max 1636.6
+//     39 % below the true value, 16 % inside it, 45 % above
+// so the noise is TWO-SIDED and heavy-tailed on both ends. The low mass (bins 0.0-0.6) is the
+// earliest-arrival rule admitting noise peaks IN FRONT of the direct path; the high tail is comb
+// replicas at nof_range/2 and beyond.
 //
-//   min 0.000  p10 0.500  p20 0.561  p50 1.248  p75 1.911  p90 22.9  max 1636.6
-//   39 % below the true value, 16 % inside it, 45 % above
+// Every order statistic fails on that shape, and both were tried on live data: the 20th percentile
+// converged to 1.71 m (dragged by the low tail) and the median wandered between 1.5 m and 5.9 m
+// across runs depending on which side happened to dominate its window. Neither is a defect of the
+// estimator so much as of the question -- a quantile asks "what value splits this sample", when the
+// physical quantity is ONE CONSTANT that every CPI is trying to measure.
 //
-// 39 % LOW is not a one-sided distribution: taking the earliest qualifying arrival means a noise
-// peak in FRONT of the direct path wins whenever one clears the gate, so the estimator undershoots
-// about as often as it overshoots. The median lands at 1.248 bins = 3.81 m, inside ground truth;
-// the 20th percentile lands at 0.561 bins = 1.71 m, roughly half the true range.
+// The mode asks the right question. A static LOS reproduces the SAME sub-bin position every CPI, so
+// it accumulates; noise peaks land wherever they land and do not. A 1636-bin replica occupies its
+// own histogram cell with a count of one and can never win, no matter how many of them there are,
+// which is the property neither a mean nor a quantile has.
 //
-// The upward tail is real (p90 = 22.9, max = 1636.6 -- the nof_range/2 comb replica) but a median
-// is already immune to it, which is the property that was actually needed. Do not re-derive a low
-// quantile from the shortest-path argument without re-measuring this distribution.
-constexpr double   LOS_LOCK_QUANTILE  = 0.50;
+// Cell width is a compromise: narrow enough to resolve the sub-bin position that is the whole point
+// of carrying frac_bin, wide enough that honest jitter on a real path lands in ONE cell rather than
+// splitting across two and losing to a coincidence. A quarter bin is 0.76 m at 273 PRB / 30 kHz,
+// comfortably finer than the 3-4 m the answer needs to distinguish.
+constexpr double LOS_MODE_CELL_BINS = 0.25;
 // A CPI seed further than this from the converged value is rejected as a replica or a fade rather
 // than believed. In BINS, and generous on purpose: it only has to exclude the failure actually
 // observed (nof_range/2, i.e. 1638 bins away) without fighting honest sub-bin noise.
@@ -379,9 +385,23 @@ double subbin_delta(const std::vector<icf_t>& cir, uint32_t peak)
   if (std::abs(den) == 0.0) {
     return 0.0;
   }
-  const double raw = std::real((xm1 - xp1) / den);
-  // Scale from THIS row's compact-CIR length -- see hann_estimator_scale().
-  return std::clamp(raw / hann_estimator_scale(cir.size()), -0.5, 0.5);
+  const double raw   = std::real((xm1 - xp1) / den);
+  const double delta = raw / hann_estimator_scale(cir.size()); // scale from THIS row's compact-CIR length
+
+  /* BIN 0 IS NOT A PROPAGATION PATH. cir[0] is the DC term of Y/X -- the mean of the channel
+   * estimate -- and it is large. For a peak at bin 1 it becomes the parabola's LEFT sample, which
+   * drags the fit toward it until delta hits the -0.5 clamp, placing the path BEFORE the first
+   * valid bin. That is not a physical answer: nothing arrives earlier than zero delay.
+   *
+   * Measured 2026-09-01 with the downlink LOS separated from the uplink one: 54 of 64 CPIs agreed
+   * on bin 0.071 (0.22 m) against a 3-4 m ground truth -- a sharp, repeatable consensus on an
+   * artifact, which is exactly what a systematic pull looks like as opposed to noise. The mode
+   * estimator above cannot help, because every CPI is making the same mistake.
+   *
+   * One-sided clamp at peak == 1: the right neighbour is a real sample so a LATER sub-bin estimate
+   * is still trusted; only the DC-driven earlier half is refused. */
+  const double lo = (peak <= 1) ? 0.0 : -0.5;
+  return std::clamp(delta, lo, 0.5);
 }
 
 // Grid resolution for cpi_sfo_tracker::leakage_model's per-M calibration sweep (see that class's
@@ -625,6 +645,7 @@ sto_fit_result_t cpi_sto_tracker::process(icf_t*                   h_cpi,
                                           uint32_t                 cpi_rows,
                                           uint32_t                 nof_subc,
                                           const uint32_t*          row_comb,
+                                       const uint8_t*           row_illum,
                                           const double*            row_time_slots,
                                           const nr_isac_carrier_t& carrier,
                                           double                   sfo_ppm_hint,
@@ -636,10 +657,14 @@ sto_fit_result_t cpi_sto_tracker::process(icf_t*                   h_cpi,
 
   // Walking-tracker state resets every CPI -- each CPI re-acquires from the nominal bin (see class
   // comment in isac_sync.h for why this does NOT persist cross-CPI, unlike cpi_sfo_tracker's EMA).
-  current_center_bin_   = -1;
-  anchor_bin_cpi_start_ = -1;
-  last_locked_bin_       = -1;
-  is_flywheeling_        = false;
+  for (unsigned q = 0; q < NR_ISAC_NUM_ILLUM; q++) {
+    current_center_bin_[q] = -1;
+  }
+  for (unsigned q = 0; q < NR_ISAC_NUM_ILLUM; q++) { anchor_bin_cpi_start_[q] = -1; }
+  for (unsigned q = 0; q < NR_ISAC_NUM_ILLUM; q++) {
+    last_locked_bin_[q] = -1;
+  }
+  for (unsigned q = 0; q < NR_ISAC_NUM_ILLUM; q++) { is_flywheeling_[q] = false; }
 
   if (cpi_rows == 0 || nof_subc == 0 || carrier.scs_hz == 0) {
     return fit;
@@ -664,7 +689,14 @@ sto_fit_result_t cpi_sto_tracker::process(icf_t*                   h_cpi,
    * center with the strongest in-window peak. Reuses estimate_row() unchanged -- same fade gate,
    * same comb handling -- so the seed is found by exactly the test every later row must pass.
    * nominal_los_range_m survives only as the fallback when no window anywhere clears the gate. */
-  uint32_t seed_bin = nominal_bin;
+  /* One seed PER ILLUMINATOR. The gNB lights the downlink rows and a UE the uplink ones, from
+   * different positions, so their direct paths are at different delays and a shared seed sends one
+   * walker hunting the other transmitter's path. */
+  uint32_t seed_bin[NR_ISAC_NUM_ILLUM];
+  for (unsigned q = 0; q < NR_ISAC_NUM_ILLUM; q++) {
+    seed_bin[q] = nominal_bin;
+  }
+  for (unsigned il = 0; il < NR_ISAC_NUM_ILLUM; il++) {
   {
     double         best_snr = -1.0;
     int            best_bin = -1;
@@ -680,6 +712,11 @@ sto_fit_result_t cpi_sto_tracker::process(icf_t*                   h_cpi,
     uint32_t n_cand = 0;
 
     for (uint32_t r0 = 0; r0 < cpi_rows && n_cand < LOS_SEED_POLL_ROWS; r0++) {
+      const unsigned r0_il = (row_illum != nullptr && row_illum[r0] < NR_ISAC_NUM_ILLUM)
+                                 ? (unsigned)row_illum[r0] : (unsigned)NR_ISAC_ILLUM_DL;
+      if (r0_il != il) {
+        continue; // this row belongs to the other transmitter
+      }
       const icf_t*   row0 = &h_cpi[(size_t)r0 * nof_subc];
       const uint8_t* m0   = &occ_all[(size_t)r0 * nof_subc];
 
@@ -749,7 +786,7 @@ sto_fit_result_t cpi_sto_tracker::process(icf_t*                   h_cpi,
       }
       const double pos = (n_keep > 0) ? (sum / (double)n_keep) : med;
       best_snr         = (n_keep > 0) ? (sum_snr / (double)n_keep) : -1.0;
-      n_seed_rejected_ = n_cand - n_keep;
+      n_seed_rejected_[il] = n_cand - n_keep;
 
       /* The walker tracks an INTEGER bin, so it gets the rounded position; Phase 4 consumes the
        * sub-bin one. Clamped because a negative bin would index out of the CIR. */
@@ -759,43 +796,70 @@ sto_fit_result_t cpi_sto_tracker::process(icf_t*                   h_cpi,
       /* Fold this CPI's estimate into the STATIC-LOS estimate (see isac_sync.h). Once locked, a
        * seed that disagrees by more than LOS_LOCK_TOL_BINS is rejected outright -- it is a replica
        * or a fade, and the geometry says the true value cannot have moved. */
-      const bool locked = (los_locked_bin_ >= 0.0);
-      if (!locked || std::fabs(pos_c - los_locked_bin_) <= LOS_LOCK_TOL_BINS) {
-        los_hist_.push_back(pos_c);
-        if (los_hist_.size() > LOS_HIST_MAX) {
-          los_hist_.pop_front();
+      const bool locked = (los_locked_bin_[il] >= 0.0);
+      if (!locked || std::fabs(pos_c - los_locked_bin_[il]) <= LOS_LOCK_TOL_BINS) {
+        los_hist_[il].push_back(pos_c);
+        if (los_hist_[il].size() > LOS_HIST_MAX) {
+          los_hist_[il].pop_front();
         }
       } else {
-        n_cpi_rejected_++;
+        n_cpi_rejected_[il]++;
       }
-      if (los_hist_.size() >= LOS_LOCK_MIN_CPIS) {
-        std::vector<double> h(los_hist_.begin(), los_hist_.end());
-        std::sort(h.begin(), h.end());
-        size_t q = (size_t)(LOS_LOCK_QUANTILE * (double)h.size());
-        if (q >= h.size()) {
-          q = h.size() - 1;
+      if (los_hist_[il].size() >= LOS_LOCK_MIN_CPIS) {
+        /* Mode over a quarter-bin histogram, then the MEAN of the seeds inside the winning cell --
+         * the cell says which arrival is real, its members say where it is to sub-bin precision.
+         * Ties break toward the EARLIER cell: two cells with equal support are the direct path and
+         * something behind it, and only one of those can arrive first. */
+        size_t best_n    = 0;
+        double best_cell = 0.0;
+        for (double c : los_hist_[il]) {
+          const double cell = std::floor(c / LOS_MODE_CELL_BINS);
+          size_t       n    = 0;
+          for (double d : los_hist_[il]) {
+            if (std::floor(d / LOS_MODE_CELL_BINS) == cell) {
+              n++;
+            }
+          }
+          if (n > best_n || (n == best_n && cell < best_cell)) {
+            best_n    = n;
+            best_cell = cell;
+          }
         }
-        los_locked_bin_ = h[q];
+        double   sum = 0.0;
+        uint32_t cnt = 0;
+        for (double c : los_hist_[il]) {
+          if (std::floor(c / LOS_MODE_CELL_BINS) == best_cell) {
+            sum += c;
+            cnt++;
+          }
+        }
+        if (cnt > 0) {
+          los_locked_bin_[il] = sum / (double)cnt;
+          n_mode_support_[il] = (uint32_t)best_n;
+        }
       }
 
       /* Report the converged value once it exists: it is a strictly better estimate of a constant
        * than any single CPI's measurement of it. */
-      const double use = (los_locked_bin_ >= 0.0) ? los_locked_bin_ : pos_c;
+      const double use = (los_locked_bin_[il] >= 0.0) ? los_locked_bin_[il] : pos_c;
       best_bin              = (int)std::lround(use);
-      seed_bin              = (uint32_t)best_bin;
+      seed_bin[il]          = (uint32_t)best_bin;
       // Same bin->metre scale nominal_los_bin() inverts, so Phase 4 can consume it directly.
-      measured_los_range_m_ = use * SPEED_OF_LIGHT / ((double)nof_subc * carrier.scs_hz);
-      measured_los_bin_     = use;
+      measured_los_range_m_[il] = use * SPEED_OF_LIGHT / ((double)nof_subc * carrier.scs_hz);
+      measured_los_bin_[il] = use;
     }
     LOG_I(PHY,
-          "SENSING: sync(STO) LOS bin=%.3f -> %.2f m (%s; %s over %u CPIs, %u CPIs rejected; "
-          "this CPI raw=%.3f from %u rows, %u rejected), nominal was %u from %.1f m; snr=%.1f dB\n",
-          measured_los_bin_, measured_los_range_m_,
+          "SENSING: sync(STO) LOS[%s] bin=%.3f -> %.2f m (%s; %s over %u CPIs mode_support=%u, "
+          "%u CPIs rejected; this CPI raw=%.3f from %u rows, %u rejected); nominal was %u from %.1f m; "
+          "snr=%.1f dB\n",
+          (il == NR_ISAC_ILLUM_UL) ? "UL/UE" : "DL/gNB",
+          measured_los_bin_[il], measured_los_range_m_[il],
           (best_bin >= 0) ? "MEASURED" : "fallback: nothing cleared the gate",
-          (los_locked_bin_ >= 0.0) ? "CONVERGED" : "converging",
-          (unsigned)los_hist_.size(), n_cpi_rejected_,
-          pos_c_dbg, n_cand, n_seed_rejected_, nominal_bin, nominal_los_range_m,
+          (los_locked_bin_[il] >= 0.0) ? "CONVERGED" : "converging",
+          (unsigned)los_hist_[il].size(), n_mode_support_[il], n_cpi_rejected_[il],
+          pos_c_dbg, n_cand, n_seed_rejected_[il], nominal_bin, nominal_los_range_m,
           (best_snr > 0.0) ? 10.0 * std::log10(best_snr) : -99.0);
+  }
   }
 
   double   last_locked_time_s = 0.0;
@@ -821,8 +885,14 @@ sto_fit_result_t cpi_sto_tracker::process(icf_t*                   h_cpi,
     // Seed from the nominal bin with the wide seed window until the walker locks for the first
     // time this CPI; every subsequent row searches a narrow window re-centered on the previous
     // LOCKED row's own peak (SYNC_NOISE_HANDOVER.md's root-cause fix -- see class comment).
-    const int      center  = (current_center_bin_ >= 0) ? current_center_bin_ : (int)seed_bin;
-    const uint32_t halfwin = (current_center_bin_ >= 0) ? WALK_HALFWIN_BINS : SEARCH_HALFWIN_BINS;
+    /* Which transmitter lit this row. The downlink sources come from the gNB and the uplink ones
+     * from a UE: different positions, different direct-path delays, therefore SEPARATE walkers.
+     * Running one walker across both makes it chase the difference between two illuminators. */
+    const unsigned il = (row_illum != nullptr && row_illum[r] < NR_ISAC_NUM_ILLUM)
+                            ? (unsigned)row_illum[r]
+                            : (unsigned)NR_ISAC_ILLUM_DL;
+    const int      center  = (current_center_bin_[il] >= 0) ? current_center_bin_[il] : (int)seed_bin[il];
+    const uint32_t halfwin = (current_center_bin_[il] >= 0) ? WALK_HALFWIN_BINS : SEARCH_HALFWIN_BINS;
 
     bool   faded   = false;
     double snr_lin = -1.0;
@@ -841,26 +911,26 @@ sto_fit_result_t cpi_sto_tracker::process(icf_t*                   h_cpi,
     if (ok && !faded) {
       // Locked: adopt this row's peak as the walk's new position AND as the new stable reference
       // future flywheel projections measure elapsed time/drift from.
-      if (current_center_bin_ < 0) {
-        anchor_bin_cpi_start_ = (int)est.peak_bin;
+      if (current_center_bin_[il] < 0) {
+        anchor_bin_cpi_start_[il] = (int)est.peak_bin;
       }
-      current_center_bin_  = (int)est.peak_bin;
-      last_locked_bin_      = current_center_bin_;
-      last_locked_time_s   = est.time_s;
-      is_flywheeling_       = false;
+      current_center_bin_[il] = (int)est.peak_bin;
+      last_locked_bin_[il]    = current_center_bin_[il];
+      last_locked_time_s      = est.time_s;
+      is_flywheeling_[il]     = false;
       est.flywheeling       = false;
       est.valid             = true;
       est.absolute_drift_bins =
-          (double)(current_center_bin_ - anchor_bin_cpi_start_) + est.frac_bin;
+          (double)(current_center_bin_[il] - anchor_bin_cpi_start_[il]) + est.frac_bin;
       if (dbg_walk) {
         if (dbg_prev_lock_bin >= 0) {
-          const int step = std::abs(current_center_bin_ - dbg_prev_lock_bin);
+          const int step = std::abs(current_center_bin_[il] - dbg_prev_lock_bin);
           dbg_step_hist[std::min(step, 7)]++;
           if (step >= (int)halfwin) {
             dbg_at_edge++; // peak pinned at the window boundary => window may be the binding limit
           }
         }
-        dbg_prev_lock_bin = current_center_bin_;
+        dbg_prev_lock_bin = current_center_bin_[il];
       }
     } else if (ok && faded) {
       // Faded: don't trust the in-window maximum. Project the walk forward using the most recent
@@ -872,23 +942,23 @@ sto_fit_result_t cpi_sto_tracker::process(icf_t*                   h_cpi,
       // prediction on top of an already-shifted position every consecutive flywheel row, compounding
       // quadratically over a sustained fade (caught via a live sensing_sim run showing +-1000+ bin
       // per-CPI swings from a handful of dt-scaled ppm projections that should have summed to O(10)).
-      is_flywheeling_ = true;
+      is_flywheeling_[il] = true;
       n_flywheel++;
-      if (last_locked_bin_ >= 0) {
+      if (last_locked_bin_[il] >= 0) {
         const double dt_s              = est.time_s - last_locked_time_s;
         const double predicted_delay_s = sfo_ppm_hint * 1.0e-6 * dt_s;
         const int    predicted_bins    = (int)std::lround(predicted_delay_s / bin_to_delay_s);
-        current_center_bin_ = last_locked_bin_ + predicted_bins;
+        current_center_bin_[il] = last_locked_bin_[il] + predicted_bins;
       }
       est.flywheeling = true;
       est.valid        = false; // projection, not a measurement -- Phase 2's CFO fit must skip this row
-      est.peak_bin     = (uint32_t)std::max(0, current_center_bin_);
+      est.peak_bin     = (uint32_t)std::max(0, current_center_bin_[il]);
       est.frac_bin     = 0.0;
-      est.absolute_drift_bins = (current_center_bin_ >= 0 && anchor_bin_cpi_start_ >= 0)
-                                    ? (double)(current_center_bin_ - anchor_bin_cpi_start_)
+      est.absolute_drift_bins = (current_center_bin_[il] >= 0 && anchor_bin_cpi_start_[il] >= 0)
+                                    ? (double)(current_center_bin_[il] - anchor_bin_cpi_start_[il])
                                     : 0.0;
       LOG_W(PHY, "SENSING: sync(STO) row=%u flywheeling (signal fade) -- projected center_bin=%d\n", r,
-            current_center_bin_);
+            current_center_bin_[il]);
     } else {
       // Structural failure (bad occupancy / too-short CIR / center walked off this row's shorter
       // CIR span) -- leave invalid, don't move the walk.
@@ -923,9 +993,11 @@ sto_fit_result_t cpi_sto_tracker::process(icf_t*                   h_cpi,
   }
   fit.n_valid    = n;
   fit.n_flywheel = n_flywheel;
-  fit.los_seed_bin    = measured_los_bin_;
-  fit.los_range_m     = measured_los_range_m_;
-  fit.n_seed_rejected = n_seed_rejected_;
+  for (unsigned q = 0; q < NR_ISAC_NUM_ILLUM; q++) {
+    fit.los_seed_bin[q] = measured_los_bin_[q];
+    fit.los_range_m[q]  = measured_los_range_m_[q];
+  }
+  fit.n_seed_rejected = n_seed_rejected_[NR_ISAC_ILLUM_DL] + n_seed_rejected_[NR_ISAC_ILLUM_UL];
 
   if (dbg_walk) {
     LOG_I(PHY,

@@ -65,6 +65,22 @@ typedef enum nr_isac_source_e {
   NR_ISAC_SRC_COUNT      = 6 ///< Number of distinct sources (for the enabled-set bitmask)
 } nr_isac_source_t;
 
+/// Number of distinct ILLUMINATORS a fused CPI can contain. The downlink sources are lit by the
+/// gNB and the uplink sources by a UE, and those are different transmitters at different places,
+/// so they have DIFFERENT direct-path delays. Anything that measures a propagation delay -- above
+/// all the LOS -- must be kept per illuminator; fusing them estimates a distance to nothing.
+#define NR_ISAC_NUM_ILLUM 2
+#define NR_ISAC_ILLUM_DL  0
+#define NR_ISAC_ILLUM_UL  1
+
+/// Which transmitter lights this source up.
+static inline unsigned nr_isac_source_illum(nr_isac_source_t s)
+{
+  return (s == NR_ISAC_SRC_PUSCH_DMRS || s == NR_ISAC_SRC_PUSCH_DATA) ? NR_ISAC_ILLUM_UL
+                                                                      : NR_ISAC_ILLUM_DL;
+}
+
+
 /// Carrier geometry valid for one submitted CFR snapshot. All axis scaling derives from this.
 typedef struct nr_isac_carrier_s {
   uint32_t nof_prb;         ///< PRBs spanned by the submitted lattice (subcarrier grid = nof_prb*12)

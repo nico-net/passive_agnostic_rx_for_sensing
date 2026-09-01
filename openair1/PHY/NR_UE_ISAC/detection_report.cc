@@ -340,10 +340,17 @@ std::string build_detection_report_json(const detection_report_t& rep)
   out += std::to_string(rep.sto.n_flywheel);
   out += ",\"absolute_drift_bins\":";
   append_json_double(out, rep.sto.total_drift_bins);
+  /* Per illuminator. "los_range_m" stays the DOWNLINK (gNB) value so existing consumers keep the
+   * meaning they already had -- that is the surveyed illuminator Phase 4's baseline refers to --
+   * and the uplink one is published alongside rather than averaged into it. */
   out += ",\"los_seed_bin\":";
-  append_json_double(out, rep.sto.los_seed_bin);
+  append_json_double(out, rep.sto.los_seed_bin[NR_ISAC_ILLUM_DL]);
   out += ",\"los_range_m\":";
-  append_json_double(out, rep.sto.los_range_m);
+  append_json_double(out, rep.sto.los_range_m[NR_ISAC_ILLUM_DL]);
+  out += ",\"los_range_m_ul\":";
+  append_json_double(out, rep.sto.los_range_m[NR_ISAC_ILLUM_UL]);
+  out += ",\"los_seed_bin_ul\":";
+  append_json_double(out, rep.sto.los_seed_bin[NR_ISAC_ILLUM_UL]);
   out += ",\"n_seed_rejected\":";
   out += std::to_string(rep.sto.n_seed_rejected);
   out += '}';

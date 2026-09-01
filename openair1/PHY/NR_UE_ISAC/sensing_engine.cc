@@ -297,6 +297,7 @@ void sensing_engine::accumulate_cpi(const sensing_slot_t& s)
     }
     cpi_row_time.assign(args.cpi_slots, 0.0);
     cpi_row_comb.assign(args.cpi_slots, 1);
+    cpi_row_illum.assign(args.cpi_slots, (uint8_t)NR_ISAC_ILLUM_DL);
     row_comb_uniform.assign(args.cpi_slots, 1);
     for (int i = 0; i < NR_ISAC_SRC_COUNT; i++) {
       src_occ[i] = 0;
@@ -388,6 +389,17 @@ void sensing_engine::accumulate_cpi(const sensing_slot_t& s)
 
   if ((uint32_t)s.source < (uint32_t)NR_ISAC_SRC_COUNT) {
     src_occ[s.source]++;
+    /* Stamp the row's illuminator. On a merge the row already has one: TDD says the two must agree,
+     * so a disagreement is a real anomaly (a slot carrying both PDSCH and PUSCH) rather than
+     * something to average -- keep the first and let the count below surface it. */
+    if (r < cpi_row_illum.size()) {
+      const uint8_t il = (uint8_t)nr_isac_source_illum(s.source);
+      if (!merge) {
+        cpi_row_illum[r] = il;
+      } else if (cpi_row_illum[r] != il) {
+        n_mixed_illum_rows_++;
+      }
+    }
   }
   cpi_comb_spacing = (s.comb_spacing > 0) ? s.comb_spacing : cpi_comb_spacing;
 
@@ -503,6 +515,7 @@ void sensing_engine::accumulate_cpi(const sensing_slot_t& s)
       // Phase 1's ESTIMATION always runs (Phase 2 reuses its per-row LOS taps); args.sync_sto gates
       // only whether it APPLIES its correction, so the two can be ablated independently.
       last_sto_fit = sto_tracker.process(h_cpi.data(), occ_all.data(), cpi_row, nof_subc, cpi_row_comb.data(),
+                                         cpi_row_illum.data(),
                                           cpi_row_time.data(), cpi_carrier, sfo_tracker.filtered_sfo_ppm(),
                                           args.sync_sto, args.nominal_los_range_m);
 

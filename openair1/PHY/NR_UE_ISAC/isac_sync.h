@@ -32,6 +32,7 @@
 #ifndef NR_ISAC_SYNC_H
 #define NR_ISAC_SYNC_H
 
+#include "nr_isac.h"
 #include <cstdint>
 #include <deque>
 #include <memory>
@@ -112,9 +113,12 @@ struct sto_fit_result_t {
   /// re-measured every CPI and is the one number that says whether the receiver is looking at the
   /// direct path at all -- a comb replica seeds it at nof_range/2 and every other counter still
   /// reads healthy (see the MEASURED LOS SEED block in isac_sync.cc).
-  double   los_seed_bin      = -1.0;
-  double   los_range_m       = -1.0;
-  uint32_t n_seed_rejected   = 0;   ///< polled rows the MAD gate discarded when seeding
+  /// Indexed by illuminator (NR_ISAC_ILLUM_DL / _UL). Two entries because the downlink is lit by
+  /// the gNB and the uplink by a UE: two transmitters, two positions, two direct-path delays. A
+  /// single fused figure is a distance to nothing.
+  double   los_seed_bin[NR_ISAC_NUM_ILLUM] = {-1.0, -1.0};
+  double   los_range_m[NR_ISAC_NUM_ILLUM]  = {-1.0, -1.0};
+  uint32_t n_seed_rejected                 = 0; ///< polled rows the MAD gate discarded when seeding
 
   double   total_drift_bins  = 0.0; ///< last locked row's absolute_drift_bins -- this CPI's total walked
                                      ///< drift, signed range bins (0 if the tracker never locked)
@@ -189,6 +193,7 @@ public:
                            uint32_t                 cpi_rows,
                            uint32_t                 nof_subc,
                            const uint32_t*          row_comb,
+                           const uint8_t*           row_illum,
                            const double*            row_time_slots,
                            const nr_isac_carrier_t& carrier,
                            double                   sfo_ppm_hint = 0.0,
@@ -204,17 +209,35 @@ public:
    *  los_baseline_tracker must use this: it seeds its own search from the same nominal constant,
    *  and with the real LOS 29-31 bins away from it, its +-LOS_MATCH_MAX_RANGE_BINS=5 window never
    *  matched a detection, so the baseline could never bootstrap. */
-  double measured_los_range_m() const { return measured_los_range_m_; }
+  /// Converged LOS range for one illuminator (NR_ISAC_ILLUM_DL / _UL), metres, -1 if not measured.
+  /// PER ILLUMINATOR, because the downlink is lit by the gNB and the uplink by a UE -- two
+  /// transmitters at two positions, hence two different direct-path delays. A single LOS over the
+  /// fused grid is a distance to nothing, and it was measurably wrong: with UL rows outnumbering DL
+  /// (143 vs 73) the fused estimate converged onto the uplink path.
+  double measured_los_range_m(unsigned il) const
+  {
+    return (il < NR_ISAC_NUM_ILLUM) ? measured_los_range_m_[il] : -1.0;
+  }
+  /// Back-compat: the downlink (gNB) illuminator, which is what Phase 4's baseline means by "LOS".
+  double measured_los_range_m() const { return measured_los_range_m_[NR_ISAC_ILLUM_DL]; }
+  double measured_los_bin(unsigned il) const
+  {
+    return (il < NR_ISAC_NUM_ILLUM) ? measured_los_bin_[il] : -1.0;
+  }
+  uint32_t los_mode_support(unsigned il) const
+  {
+    return (il < NR_ISAC_NUM_ILLUM) ? n_mode_support_[il] : 0u;
+  }
 
 private:
-  double measured_los_range_m_ = -1.0;
+  double measured_los_range_m_[NR_ISAC_NUM_ILLUM] = {-1.0, -1.0};
   /// Sub-bin LOS seed position, in bins, from the same median-of-rows estimate that sets
   /// measured_los_range_m_. Kept separately because the walker needs the rounded integer bin while
   /// the reported range wants the fraction.
-  double   measured_los_bin_   = -1.0;
+  double   measured_los_bin_[NR_ISAC_NUM_ILLUM]   = {-1.0, -1.0};
   /// Rows discarded by the MAD gate in the last seed sweep -- a nonzero value here is the seed
   /// disagreeing with itself, which is what the outliers used to look like before they were caught.
-  uint32_t n_seed_rejected_    = 0;
+  uint32_t n_seed_rejected_[NR_ISAC_NUM_ILLUM]    = {0, 0};
   /* ---- STATIC-LOS CONVERGENCE ----------------------------------------------------------------
    * The receiver and the illuminating gNB do not move, so the LOS delay is ONE CONSTANT and every
    * CPI's seed is a noisy measurement of it. Re-seeding from scratch each CPI discards all previous
@@ -227,9 +250,11 @@ private:
    * permanently and there is no way back, whereas the median is unmoved by it. Bounded rather than
    * cumulative so that if the geometry really does change (an antenna is moved) the estimate
    * eventually follows instead of defending a value that is no longer true. */
-  std::deque<double> los_hist_;
-  double             los_locked_bin_ = -1.0; ///< converged sub-bin LOS, -1 until LOS_LOCK_MIN_CPIS
-  uint32_t           n_cpi_rejected_ = 0;    ///< CPIs whose seed disagreed with the converged value ///< set by process()'s seed sweep; <0 = not measured yet
+  std::deque<double> los_hist_[NR_ISAC_NUM_ILLUM];
+  double             los_locked_bin_[NR_ISAC_NUM_ILLUM] = {-1.0, -1.0}; ///< converged sub-bin LOS, -1 until LOS_LOCK_MIN_CPIS
+  uint32_t           n_cpi_rejected_[NR_ISAC_NUM_ILLUM] = {0, 0};    ///< CPIs whose seed disagreed with the converged value
+  uint32_t           n_mode_support_[NR_ISAC_NUM_ILLUM] = {0, 0};    ///< seeds in the winning histogram cell; low support
+                                             ///< means the estimate has not really converged ///< set by process()'s seed sweep; <0 = not measured yet
   /// Builds one row's compact CIR and searches [center_bin-halfwin, center_bin+halfwin] for its local
   /// power maximum. Returns false only on a structural failure (bad occupancy / too-short CIR -- the
   /// row can't be searched at all). On true, @p out_faded reports whether that local maximum cleared
@@ -252,14 +277,14 @@ private:
   std::vector<los_row_estimate_t> rows_; ///< per-row results, current CPI
 
   // Walking-tracker state, reset at the top of every process() call (see class comment).
-  int  current_center_bin_   = -1; ///< tracked peak (compact-CIR bin index), -1 = not yet locked
-  int  anchor_bin_cpi_start_ = -1; ///< peak at this CPI's first lock, -1 = not yet locked
-  int  last_locked_bin_      = -1; ///< peak bin AT the moment of the most recent real lock -- the
+  int  current_center_bin_[NR_ISAC_NUM_ILLUM]   = {-1, -1}; ///< tracked peak (compact-CIR bin index), -1 = not yet locked
+  int  anchor_bin_cpi_start_[NR_ISAC_NUM_ILLUM] = {-1, -1}; ///< peak at this CPI's first lock, -1 = not yet locked
+  int  last_locked_bin_[NR_ISAC_NUM_ILLUM]      = {-1, -1}; ///< peak bin AT the moment of the most recent real lock -- the
                                    ///< flywheel projects from this fixed reference (current_center_bin_
                                    ///< + elapsed-time-scaled prediction), NOT by incrementing
                                    ///< current_center_bin_ itself row-to-row, which would double-count
                                    ///< already-applied drift and compound across a sustained fade
-  bool is_flywheeling_       = false;
+  bool is_flywheeling_[NR_ISAC_NUM_ILLUM]       = {false, false};
 };
 
 /// Outcome of the per-CPI residual-CFO fit + CPE correction (Phase 2).

@@ -192,6 +192,13 @@ private:
   // Per-row native comb (min real-sample subcarrier spacing), used by the DSP to de-alias each row's
   // range profile beyond its comb's unambiguous window (kills sparse-comb grating lobes).
   std::vector<uint32_t> cpi_row_comb;     ///< native comb of each accumulated row
+  /// Illuminator of each accumulated row (NR_ISAC_ILLUM_DL / _UL). TDD makes this well defined:
+  /// a downlink slot carries no PUSCH and an uplink slot no PDSCH, so a row is never mixed.
+  std::vector<uint8_t>  cpi_row_illum;
+  /// Rows where a merge tried to change the illuminator. TDD says this cannot happen (a slot is
+  /// either downlink or uplink), so a nonzero count means that assumption is wrong here and the
+  /// per-illuminator LOS split below it is unsound -- surfaced rather than silently averaged.
+  uint64_t              n_mixed_illum_rows_ = 0;
   std::vector<uint32_t> row_comb_uniform; ///< native comb carried onto each uniform (resampled) row
   matrix_complete_scratch mc_scratch;     ///< reusable workspace for slow_time_complete (engine thread)
   double tslot_ema_ = -1.0;               ///< running EMA of per-CPI T_slot for the cpi_quality_gate (neg = unseeded)
