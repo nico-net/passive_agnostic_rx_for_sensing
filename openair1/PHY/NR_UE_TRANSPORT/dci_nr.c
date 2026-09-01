@@ -596,9 +596,25 @@ static void nr_rx_pdcch_symbol(PHY_VARS_NR_UE *ue,
   // slope fitted to incoherent pilots is noise, and is ambiguous beyond +-ofdm_symbol_size/8.
   {
     static int audit = -1;
-    if (audit < 0)
-      audit = (getenv("ISAC_TSYNC_AUDIT") != NULL) ? 1 : 0;
-    if (audit) {
+    if (audit < 0) {
+      /* SAME DECIMATION FACTOR as the per-SSB trace in nr_adjust_synch_ue.c, and for a much
+       * sharper reason: this probe fires per PDCCH CANDIDATE, not per SSB. Left undecimated while
+       * the SSB trace was decimated, it alone produced 40 % of a 683 line/s (90 kB/s) log written
+       * from the PHY receive thread, and 14837 lines in a single short run. That is the "overflow
+       * and block" a live operator sees, and it is also the observer effect that made both traced
+       * runs come out 100 % PBCH-dead while untraced runs held 164 healthy windows.
+       *
+       * "1" logs every candidate (only ever do this on a short, deliberate capture); "25" every
+       * 25th. Unset is off. */
+      const char *e_ = getenv("ISAC_TSYNC_AUDIT");
+      audit = (e_ != NULL) ? atoi(e_) : 0;
+      if (e_ != NULL && audit < 1) {
+        audit = 1;
+      }
+    }
+    static unsigned audit_n_ = 0;
+    const int audit_now_ = audit && ((audit_n_++ % (unsigned)audit) == 0);
+    if (audit_now_) {
       const int symb_sz = fp->ofdm_symbol_size;
       const unsigned short cs_sc =
           (fp->first_carrier_offset + (phy_pdcch_config->pdcch_config[ss_idx].BWPStart + rb_offset) * 12) % symb_sz;
