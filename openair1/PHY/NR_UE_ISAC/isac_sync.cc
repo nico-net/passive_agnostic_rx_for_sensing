@@ -624,8 +624,18 @@ bool cpi_sto_tracker::estimate_row(const icf_t*         row,
       *out_snr_lin = peak_pow / floor_pow;
     }
     if (floor_pow > 0.0 && peak_pow < FADE_MIN_SNR_LINEAR * floor_pow) {
+      /* Flag it and FALL THROUGH. This used to `return true` here, leaving out.peak_bin /
+       * frac_bin / peak_val at their defaults while still reporting success -- so any caller that
+       * did not also test the fade flag silently consumed (bin 0, +0.000) as if it were a
+       * measurement. The LOS seed did exactly that, and bin 0 is the earliest arrival there is, so
+       * a faded row beat every real path under the earliest-arrival rule.
+       *
+       * The estimate is now always populated and `out_faded` is purely ADVISORY: the walker still
+       * uses it to decide when to flywheel, while the seed -- which is trying to FIND the path
+       * rather than track it -- can use the peak position on its own merits. A gate tuned for
+       * "should I trust this step of the walk" was never the right test for "where is the path",
+       * and applying it there discarded the rows the seed most needed. */
       out_faded = true;
-      return true; // structurally fine row, just not trustworthy this step -- caller flywheels
     }
   }
 
@@ -731,7 +741,7 @@ sto_fit_result_t cpi_sto_tracker::process(icf_t*                   h_cpi,
         bool               f   = false;
         double             snr = -1.0;
         if (estimate_row(row0, m0, nof_subc, row_comb[r0], (int)c, SEARCH_HALFWIN_BINS, e, f, &snr)
-            && !f && snr > peak_snr) {
+            && snr > peak_snr) {
           peak_snr = snr;
         }
       }
@@ -744,17 +754,17 @@ sto_fit_result_t cpi_sto_tracker::process(icf_t*                   h_cpi,
         los_row_estimate_t e;
         bool               f   = false;
         double             snr = -1.0;
-        /* !f is LOAD-BEARING, not defensive. estimate_row() returns TRUE on a faded row -- the row
-         * is structurally fine, just not trustworthy -- and its contract leaves peak_bin/frac_bin
-         * UNPOPULATED in that case, i.e. at their defaults of 0 and 0.0. Without this check every
-         * faded row contributed a candidate of exactly (bin 0, frac +0.000), which is both the
-         * earliest possible arrival and therefore an automatic winner under the earliest-arrival
-         * rule. Measured 2026-09-01: the downlink seed reported "raw=0.000 ... first pk=0
-         * frac=+0.000" on a large fraction of CPIs and the converged LOS sat at 0.22-1.54 m against
-         * a 3-4 m ground truth. The tell was frac being EXACTLY +0.000 -- a real parabolic estimate
-         * essentially never is. */
+        /* No fade test here, deliberately. estimate_row() now always populates the estimate and
+         * treats the fade flag as advisory, so a "faded" row still carries a real measured peak --
+         * and the seed's job is to FIND the direct path, not to decide whether one step of a walk
+         * is trustworthy. Gating the seed on the walker's fade threshold threw away most downlink
+         * rows at ~7 dB and left the seed working from a handful of scattered survivors.
+         *
+         * What still qualifies a candidate is the RELATIVE test below (within
+         * LOS_SEED_EARLIEST_FRAC of this row's own strongest peak), which needs no absolute SNR
+         * threshold, plus the cross-row MAD reject and the cross-CPI mode. */
         if (estimate_row(row0, m0, nof_subc, row_comb[r0], (int)c, SEARCH_HALFWIN_BINS, e, f, &snr)
-            && !f && snr >= accept) {
+            && snr >= accept) {
           cand_snr[n_cand] = snr;
           cand[n_cand]     = (double)e.peak_bin + e.frac_bin; // earliest arrival == direct path
           /* Decomposed because the sum alone cannot say which half is wrong: a bin-0 pick and a
