@@ -121,7 +121,18 @@ const rep = () => { const r = rx(); return r && r.latest; };
 function occ() {
   const r = rep(); if (!r || !r.src_occ) return null;
   const names = state.source_names, out = {};
-  r.src_occ.forEach((n,i) => { if (names[i]) out[names[i]] = n; });
+  /* pdsch_dmrs is the ATTACHED-UE DM-RS source: its RT tap lives in nr_ue_pdsch_procedures(), which
+     only runs for grants addressed to this UE's own RNTI after RRC connection. A --passive-rx
+     receiver never attaches, so the row is structurally always 0 and a permanently empty bar just
+     reads as a fault. Its passive counterpart is pdsch_dmrs_blind (the blind-PDCCH tap), which
+     carries the same signal and is typically the LARGEST contributor -- so that one is shown in its
+     place. Indices stay aligned with nr_isac_source_t; this is display only. */
+  const HIDE = {pdsch_dmrs: 1};
+  const LABEL = {blind: "pdsch_dmrs (blind)"};
+  r.src_occ.forEach((n,i) => {
+    const k = names[i];
+    if (k && !HIDE[k]) out[LABEL[k] || k] = n;
+  });
   return out;
 }
 const ulRows = () => { const o = occ(); return o ? state.ul_sources.reduce((a,s) => a + (o[s]||0), 0) : 0; };
@@ -268,7 +279,7 @@ function tabDL(v) {
   meta.appendChild(card("Range res", fmt(r.range_res_m,2)+" m", null, `max ${fmt(r.range_max_m,0)} m`));
   meta.appendChild(card("Velocity res", fmt(r.vel_res_mps,3)+" m/s", null, `max ±${fmt(r.vel_max_mps,2)} m/s`));
   meta.appendChild(card("Detections", String((r.detections||[]).length), null, `ref: ${r.illuminator?r.illuminator.ref_type:"?"}`));
-  meta.appendChild(card("DL rows / CPI", String(dlRows()), null, "csi_rs + dmrs + data + blind"));
+  meta.appendChild(card("DL rows / CPI", String(dlRows()), null, "csi_rs + pdsch_data + pdsch_dmrs (blind)"));
   v.appendChild(meta);
   v.appendChild(panel("Range–Doppler map (DL illuminator: gNB)", rasterCanvas(r)));
   v.appendChild(panel("Detections — latest CPI", detTable(r)));
