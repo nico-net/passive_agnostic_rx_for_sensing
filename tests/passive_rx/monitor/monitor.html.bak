@@ -47,7 +47,7 @@ td{padding:5px 6px;border-top:1px solid var(--soft);color:var(--dim)} td.hl{colo
 canvas{display:block;width:100%;border-radius:6px;border:1px solid var(--soft);background:oklch(0.11 0.018 240)}
 .banner{display:flex;gap:10px;padding:10px 14px;background:var(--amber-d);border:1px solid oklch(0.80 0.15 75/.35);border-radius:7px;font-size:11.5px;color:var(--dim);line-height:1.5}
 .banner b{color:var(--amber)}
-.log{font-family:"IBM Plex Mono",monospace;font-size:11px;color:var(--dim);white-space:pre-wrap;word-break:break-all;max-height:420px;overflow:auto;line-height:1.7}
+.log{font-family:"IBM Plex Mono",monospace;font-size:11px;color:var(--dim);white-space:pre-wrap;word-break:break-all;max-height:220px;overflow:auto;line-height:1.7}
 .hidden{display:none!important}
 .empty{color:var(--faint);font-size:12px;padding:18px 0;text-align:center;font-family:"IBM Plex Mono",monospace}
 </style>
@@ -121,18 +121,7 @@ const rep = () => { const r = rx(); return r && r.latest; };
 function occ() {
   const r = rep(); if (!r || !r.src_occ) return null;
   const names = state.source_names, out = {};
-  /* pdsch_dmrs is the ATTACHED-UE DM-RS source: its RT tap lives in nr_ue_pdsch_procedures(), which
-     only runs for grants addressed to this UE's own RNTI after RRC connection. A --passive-rx
-     receiver never attaches, so the row is structurally always 0 and a permanently empty bar just
-     reads as a fault. Its passive counterpart is pdsch_dmrs_blind (the blind-PDCCH tap), which
-     carries the same signal and is typically the LARGEST contributor -- so that one is shown in its
-     place. Indices stay aligned with nr_isac_source_t; this is display only. */
-  const HIDE = {pdsch_dmrs: 1};
-  const LABEL = {blind: "pdsch_dmrs (blind)"};
-  r.src_occ.forEach((n,i) => {
-    const k = names[i];
-    if (k && !HIDE[k]) out[LABEL[k] || k] = n;
-  });
+  r.src_occ.forEach((n,i) => { if (names[i]) out[names[i]] = n; });
   return out;
 }
 const ulRows = () => { const o = occ(); return o ? state.ul_sources.reduce((a,s) => a + (o[s]||0), 0) : 0; };
@@ -206,113 +195,24 @@ function detTable(r) {
                      : el("div","empty","no detections in the latest CPI");
 }
 
-/* Staleness limit. A CPI closes on ROW COUNT, never on time, so its wall-clock cadence swings with
-   traffic: ~4 s at cpi_slots=128 but 150-200 s at 1024. A fixed 60 s threshold made a perfectly
-   healthy long-CPI run read STALE for two thirds of every CPI. Derive it from the receiver's own
-   median inter-report gap instead, with 60 s as the floor for a run too young to have a gap yet. */
-function staleLimit(h) { return Math.max(60, 2.5 * ((h && h.cadence_s) || 0)); }
-
-/* Per-CPI LOS trace: labelled y-axis, current value, and off-scale points kept visible.
-   Values outside `sane` are drawn as warn-coloured ticks at the top and EXCLUDED from the
-   autoscale -- otherwise a single comb-replica reading (measured up to 1.4e10 bins) flattens every
-   real 0-10 m value onto the axis and hides the thing the trace exists to show. */
-function trace(vals, sane, unit) {
-  const wrap = el("div");
-  const good = vals.filter(v => v != null && v >= 0 && v <= sane);
-  if (!good.length) { wrap.appendChild(el("div","empty","no LOS estimate yet")); return wrap; }
-
-  let lo = Math.min(...good), hi = Math.max(...good);
-  if (hi - lo < 0.5) { const m = (lo + hi) / 2; lo = m - 0.25; hi = m + 0.25; }   // avoid a flat line filling the box
-  if (lo < 0) lo = 0;
-  const span = hi - lo;
-  const cur  = [...vals].reverse().find(v => v != null && v >= 0);
-
-  const PADL = 54, W = 560, H = 110, TOP = 12, BOT = H - 20;
-  const x = i => PADL + (vals.length < 2 ? (W - PADL) : (i * (W - PADL)) / (vals.length - 1));
-  const y = v => BOT - ((v - lo) / span) * (BOT - TOP);
-
-  const ns  = "http://www.w3.org/2000/svg";
-  const svg = document.createElementNS(ns, "svg");
-  svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
-  svg.setAttribute("width", "100%"); svg.setAttribute("height", H);
-
-  const mk = (tag, attrs, text) => {
-    const e = document.createElementNS(ns, tag);
-    for (const k in attrs) e.setAttribute(k, attrs[k]);
-    if (text != null) e.textContent = text;
-    return e;
-  };
-
-  // y-axis: three labelled gridlines, in the unit the reader cares about
-  [0, 0.5, 1].forEach(f => {
-    const v = lo + f * span, yy = y(v);
-    svg.appendChild(mk("line", {x1: PADL, y1: yy, x2: W, y2: yy,
-                                stroke: "var(--line)", "stroke-width": 1, "stroke-dasharray": f === 0 ? "" : "3 3"}));
-    svg.appendChild(mk("text", {x: PADL - 6, y: yy + 3.5, "text-anchor": "end",
-                                fill: "var(--dim)", "font-size": "9.5",
-                                "font-family": "'IBM Plex Mono',monospace"}, v.toFixed(2)));
-  });
-  svg.appendChild(mk("text", {x: 4, y: TOP - 3, fill: "var(--dim)", "font-size": "9.5",
-                              "font-family": "'IBM Plex Mono',monospace"}, unit));
-
-  const pts = [];
-  vals.forEach((v, i) => {
-    if (v == null || v < 0) return;
-    if (v > sane) {
-      svg.appendChild(mk("line", {x1: x(i), y1: TOP - 6, x2: x(i), y2: TOP - 1,
-                                  stroke: "var(--amber)", "stroke-width": 1.6}));
-    } else {
-      pts.push(x(i).toFixed(1) + "," + y(v).toFixed(1));
-    }
-  });
-  svg.appendChild(mk("polyline", {points: pts.join(" "), fill: "none",
-                                  stroke: "var(--cyan)", "stroke-width": 1.7}));
-
-  // current value, marked on the trace and printed at the right edge
-  if (cur != null && cur <= sane) {
-    svg.appendChild(mk("circle", {cx: x(vals.length - 1), cy: y(cur), r: 3, fill: "var(--cyan)"}));
-    svg.appendChild(mk("text", {x: W - 2, y: Math.max(TOP + 9, y(cur) - 7), "text-anchor": "end",
-                                fill: "var(--cyan)", "font-size": "11", "font-weight": "600",
-                                "font-family": "'IBM Plex Mono',monospace"},
-                       cur.toFixed(2) + " " + unit));
-  }
-  svg.appendChild(mk("text", {x: PADL, y: H - 6, fill: "var(--dim)", "font-size": "9.5",
-                              "font-family": "'IBM Plex Mono',monospace"},
-                     `oldest  <- ${vals.length} CPIs ->  newest`));
-  wrap.appendChild(svg);
-
-  const off = vals.filter(v => v != null && v > sane).length;
-  const cap = el("div","empty");
-  cap.textContent = `current ${cur != null ? cur.toFixed(2) + " " + unit : "-"}`
-                  + ` · axis ${lo.toFixed(2)}-${hi.toFixed(2)} ${unit}`
-                  + (off ? ` · ${off} CPIs off-scale (>${sane} ${unit}, comb replica -- rejected by the tracker)` : "");
-  wrap.appendChild(cap);
-  return wrap;
-}
-
 /* ---- tabs -------------------------------------------------------------------------------------- */
 function tabHealth(v) {
   const r = rep(), h = rx(), log = state.log;
   if (!r) { v.appendChild(el("div","empty","waiting for the first DetectionReport…")); return; }
   const s = r.sync || {}, sto = s.sto||{}, cfo = s.cfo||{}, sfo = s.sfo||{}, los = s.los_residual||{};
   const age = h.last_seen ? state.now - h.last_seen : 999;
-  const lim = staleLimit(h);
   const fly = sto.n_valid ? 100*sto.n_flywheel/(sto.n_valid+sto.n_flywheel) : null;
   const st = log && log.stats || {};
 
   const cards = el("div","row");
-  cards.appendChild(card("Report stream", age < lim ? "LIVE" : "STALE", age < lim ? "good":"bad",
-    `${h.cpi_count} CPIs · last ${fmt(age,0)}s ago` + (h.cadence_s ? ` · every ~${fmt(h.cadence_s,0)}s` : "")));
+  cards.appendChild(card("Report stream", age < 60 ? "LIVE" : "STALE", age < 60 ? "good":"bad",
+    `${h.cpi_count} CPIs · last ${fmt(age,0)}s ago`));
   cards.appendChild(card("CFO", fmt(cfo.cfo_hz,1)+" Hz", Math.abs(cfo.cfo_hz||0) < 300 ? "good":"bad",
     `filtered ${fmt(cfo.cfo_hz_filtered,1)} Hz · mis-lock >2600 Hz`));
   cards.appendChild(card("STO flywheel", fly==null?"—":fmt(fly,0)+"%", fly>60?"bad":fly>35?"warn":"good",
     `${sto.n_valid||0} locked · ${sto.n_flywheel||0} flywheel rows`));
-  cards.appendChild(card("LOS range", sto.los_range_m!=null && sto.los_range_m>=0 ? fmt(sto.los_range_m,2)+" m" : "—",
-    (sto.los_range_m!=null && sto.los_range_m>=0 && sto.los_range_m<=60) ? "good" : "warn",
-    (sto.los_seed_bin!=null ? `bin ${fmt(sto.los_seed_bin,3)}` : "") +
-    (sto.n_seed_rejected ? ` · ${sto.n_seed_rejected} rows rejected` : "")));
   cards.appendChild(card("SFO", fmt(sfo.sfo_ppm,3)+" ppm", sfo.corrected ? "good":"warn",
-    sfo.corrected ? "correction applied" : "correction withheld (R²/t gate)"));
+    sfo.corrected ? "correction applied" : "correction withheld (R² gate)"));
   v.appendChild(cards);
 
   const o = occ();
@@ -330,17 +230,9 @@ function tabHealth(v) {
     }
   } else occPanel.appendChild(el("div","empty","receiver build predates src_occ reporting"));
 
-  v.appendChild(panel("LOS range per CPI — converged estimate (m)",
-    trace((h.history||[]).map(x => x.los_range_m), 60, "m")));
-
   const health = panel("Decode / radio health", kvRows([
-    ["DL grants decoded", st.dl_ok!=null ? `${st.dl_ok} ok / ${st.dl_ok+st.dl_fail} tried` : "—"],
-    ["DL TB decode rate", st.dl_tb_rate!=null ? fmt(st.dl_tb_rate,1)+"%" : "—", st.dl_tb_rate>=50?"green":st.dl_tb_rate!=null?"amber":null],
-    ["DL empty TBs (gNB)", st.dl_zero_tb!=null ? String(st.dl_zero_tb) : "—"],
-    ["UL grants decoded", st.ul_ok!=null ? `${st.ul_ok} ok / ${st.ul_try} tried` : "—"],
-    ["UL CRC rate", st.ul_rate!=null ? fmt(st.ul_rate,1)+"%" : "—", st.ul_rate>=50?"green":st.ul_rate!=null?"amber":null],
-    ["UL DCI 0_1 accepts", st.dci_accepts!=null ? `${st.dci_accepts} acc / ${st.dci_rejects} rej` : "—"],
-    ["blind PDCCH accepts", st.blind_accepts!=null ? `${st.blind_accepts} → ${st.blind_submits} CFR submits` : "—"],
+    ["PDSCH CRC", st.pdsch_rate!=null ? fmt(st.pdsch_rate,1)+"%" : "—", st.pdsch_rate>=80?"green":st.pdsch_rate!=null?"amber":null],
+    ["blind PDCCH accepts", st.blind_accepts!=null ? `${st.blind_accepts} → ${st.blind_submits} submits` : "—"],
     ["occupancy line", st.occ || "—"],
     ["X410 overflows", log ? String(log.counters.overflow) : "—", log && log.counters.overflow ? "red":"green"],
     ["out-of-sync events", log ? String(log.counters.sync_lost) : "—", log && log.counters.sync_lost ? "amber":"green"],
@@ -364,7 +256,7 @@ function tabDL(v) {
   meta.appendChild(card("Range res", fmt(r.range_res_m,2)+" m", null, `max ${fmt(r.range_max_m,0)} m`));
   meta.appendChild(card("Velocity res", fmt(r.vel_res_mps,3)+" m/s", null, `max ±${fmt(r.vel_max_mps,2)} m/s`));
   meta.appendChild(card("Detections", String((r.detections||[]).length), null, `ref: ${r.illuminator?r.illuminator.ref_type:"?"}`));
-  meta.appendChild(card("DL rows / CPI", String(dlRows()), null, "csi_rs + pdsch_data + pdsch_dmrs (blind)"));
+  meta.appendChild(card("DL rows / CPI", String(dlRows()), null, "csi_rs + dmrs + data + blind"));
   v.appendChild(meta);
   v.appendChild(panel("Range–Doppler map (DL illuminator: gNB)", rasterCanvas(r)));
   v.appendChild(panel("Detections — latest CPI", detTable(r)));
@@ -382,18 +274,6 @@ function tabUL(v) {
   meta.appendChild(card("DL rows / CPI", String(dlRows()), null, "for comparison"));
   const st = state.log && state.log.stats || {};
   meta.appendChild(card("PDSCH CRC", st.pdsch_rate!=null?fmt(st.pdsch_rate,1)+"%":"—", null, "decode health"));
-  /* USABLE uplink. crc_ok is the count that can actually feed anything downstream -- a failed
-     decode still yields a DM-RS CFR row, but only a CRC-verified TB could ever be re-encoded, and
-     only a CRC-verified grant proves the field layout was read correctly. The rate is quoted
-     against attempts, but the ceiling is structural rather than a decoder fault: HARQ-ACK-only
-     grants (O_ACK<=2) PUNCTURE and decode 97-99 %, while CSI-Part-1 grants are rate-matched around
-     reserved positions and decode 0 %, so this number mostly tracks the traffic's UCI mix. */
-  meta.appendChild(card("UL usable decodes", st.ul_ok!=null ? String(st.ul_ok) : "—",
-    st.ul_ok ? "good" : "warn",
-    st.ul_try!=null ? `${st.ul_ok} CRC-OK of ${st.ul_try} grants` : "CRC-verified PUSCH TBs"));
-  meta.appendChild(card("UL CRC rate", st.ul_rate!=null?fmt(st.ul_rate,1)+"%":"—",
-    st.ul_rate>=20?"good":st.ul_rate!=null?"warn":null,
-    "ACK-only decode ~98 %; CSI-Part-1 grants 0 % by construction"));
   v.appendChild(meta);
   if (!ulRows()) {
     v.appendChild(panel("Uplink status", el("div","empty",
@@ -566,9 +446,8 @@ function renderChrome() {
   const st = document.getElementById("status"); st.textContent = "";
   const r = rep(), h = rx();
   const age = h && h.last_seen ? state.now - h.last_seen : null;
-  const lim = staleLimit(h);
-  st.appendChild(chip(age==null?"chip-grey":age<lim?"chip-green":"chip-red",
-                      age==null?"NO DATA":age<lim?"LIVE":"STALE"));
+  st.appendChild(chip(age==null?"chip-grey":age<60?"chip-green":"chip-red",
+                      age==null?"NO DATA":age<60?"LIVE":"STALE"));
   if (r) {
     const cfo = (r.sync&&r.sync.cfo||{}).cfo_hz;
     st.appendChild(chip(Math.abs(cfo||0)<300?"chip-green":"chip-red", "CFO "+fmt(cfo,0)+" Hz"));
@@ -580,22 +459,12 @@ function renderChrome() {
 
 function render() {
   renderChrome();
-  const v = document.getElementById("view");
-  // Preserve scroll across the rebuild, per pane, in DOM order. `stick` means the user was at the
-  // bottom, so keep them there as lines arrive; otherwise hold the exact offset so they can read.
-  const prev = [...v.querySelectorAll(".log")].map(n => ({
-    top: n.scrollTop, stick: n.scrollHeight - n.scrollTop - n.clientHeight < 24 }));
-  v.textContent = "";
+  const v = document.getElementById("view"); v.textContent = "";
   if (!state || !Object.keys(state.receivers).length) {
     v.appendChild(el("div","empty","no receiver connected — check --connect matches [sensing] report_endpoint"));
     return;
   }
   RENDER[tab](v);
-  [...v.querySelectorAll(".log")].forEach((n, i) => {
-    const p = prev[i];
-    if (!p) { n.scrollTop = n.scrollHeight; return; }   // new pane: start at the newest line
-    n.scrollTop = p.stick ? n.scrollHeight : p.top;
-  });
 }
 
 async function poll() {
