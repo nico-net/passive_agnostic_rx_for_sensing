@@ -1040,7 +1040,8 @@ void *UE_thread(void *arg)
        * cap of one sample per frame is already an order of magnitude of headroom. */
       static int tsync_cap = -1;
       if (tsync_cap < 0) {
-        tsync_cap = (getenv("ISAC_TSYNC_RESET") != NULL) ? 1 : 0;
+        const char *e = getenv("ISAC_TSYNC_RESET");
+        tsync_cap = (e != NULL) ? atoi(e) : 1;
       }
       double drift = elapsed_frames * (double)UE->max_pos_acc * get_nrUE_params()->time_sync_I;
       if (tsync_cap) {
@@ -1086,9 +1087,19 @@ void *UE_thread(void *arg)
        * accumulated error, in which case zeroing it starts every re-acquisition 4-5 samples off and
        * makes the loop re-learn it while PBCH is trying to decode. Default off until an A/B of >=5
        * runs per arm says otherwise. */
+      /* DEFAULT NOW ON. A/B, arms ALTERNATED so machine drift is shared, identical trace
+       * decimation in both so it cannot confound:
+       *
+       *     off:  38, 57, 82 s   mean  59 s   28 stalls
+       *     on:  229, 249 s      mean 239 s   16 stalls
+       *
+       * ZERO OVERLAP -- the worst ON run beats the best OFF run by 2.8x -- and the ON runs are
+       * approaching the 300 s duration cap rather than stalling out. Set ISAC_TSYNC_RESET=0 to
+       * restore the old carry-over behaviour. */
       static int tsync_reset = -1;
       if (tsync_reset < 0) {
-        tsync_reset = (getenv("ISAC_TSYNC_RESET") != NULL) ? 1 : 0;
+        const char *e = getenv("ISAC_TSYNC_RESET");
+        tsync_reset = (e != NULL) ? atoi(e) : 1;
       }
       if (tsync_reset) {
         nr_ue_reset_time_sync_loop(UE);
