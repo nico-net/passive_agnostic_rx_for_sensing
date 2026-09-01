@@ -154,13 +154,17 @@ void nr_pusch_passive_monitor_process(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_
   }
 
   nr_pusch_passive_out_t out;
+  /* Sampled HERE, on the receive thread, in the same call that captured these samples -- see
+   * nr_pusch_passive_job_t::fo_hz. A consumer reading ue-> later would get a newer value. */
+  const double fo_hz = ue->cont_fo_comp ? (ue->dl_Doppler_shift + ue->freq_offset) : 0.0;
   if (nr_pusch_passive_queue_running()) {
     nr_pusch_passive_job_t job = {.grant             = g,
                                   .frame_rx          = (int)proc->frame_rx,
                                   .nr_slot_rx        = (int)proc->nr_slot_rx,
                                   .ta_offset_samples = ta,
                                   .absolute_slot     = abs_slot,
-                                  .cfr_only          = (cfg->ul_pusch_decode == 2)};
+                                  .cfr_only          = (cfg->ul_pusch_decode == 2),
+                                  .fo_hz             = fo_hz};
     nr_pusch_passive_queue_enqueue(&job);
     /* Nothing more to report per grant here: the outcome belongs to the consumer, and the census
      * (pusch_passive[...] / puschq[...]) is where it is read. Deliberately NOT decoded in-line on a
@@ -168,7 +172,7 @@ void nr_pusch_passive_monitor_process(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_
     return;
   }
   nr_pusch_passive_decode(ue, 0, proc->frame_rx, proc->nr_slot_rx, &g, ta, (uint64_t)abs_slot,
-                          cfg->ul_pusch_decode == 2, &out);
+                          cfg->ul_pusch_decode == 2, fo_hz, &out);
 
 }
 

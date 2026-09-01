@@ -98,6 +98,11 @@ typedef struct {
   /// Mode 2: estimate and emit the CFR, skip the LLR/LDPC half. Carried per job rather than read
   /// from config in the consumer, so a config change cannot alter a job already in flight.
   bool     cfr_only;
+  /// Frequency offset (Hz) READ ON THE RECEIVE THREAD, in the same call that captured these
+  /// samples. Carrying it is what makes a deferred decode safe under --cont-fo-comp: ue->
+  /// dl_Doppler_shift and ue->freq_offset are mutated by the receive thread, so a consumer reading
+  /// them later would de-rotate with a value newer than its own samples. 0.0 = no de-rotation.
+  double   fo_hz;
 } nr_pusch_passive_job_t;
 
 /// Per-run census. Every field is a reason a job did NOT become a decode, so a shortfall in

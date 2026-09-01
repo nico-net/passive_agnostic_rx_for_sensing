@@ -4,6 +4,7 @@
 
 #include "PHY/defs_gNB.h"
 #include "PHY/defs_nr_common.h"
+#include <math.h>
 #include "modulation_UE.h"
 #include "nr_modulation.h"
 #include "PHY/NR_UE_ESTIMATION/nr_estimation.h"
@@ -49,6 +50,19 @@ void nr_symbol_fep(const NR_DL_FRAME_PARMS *frame_parms,
 // this call actually used, without duplicating (and risking drifting out of sync with) the offset
 // arithmetic above. Read immediately after the call returns, on the same thread -- this function is
 // called synchronously, never through the thread pool, so a plain __thread is sufficient.
+/* Frequency offset (Hz) this thread's FEP must de-rotate by, instead of reading
+ * ue->dl_Doppler_shift + ue->freq_offset live. NAN = unset = read from ue (every existing caller,
+ * including the RT receive thread, so behaviour there is unchanged).
+ *
+ * Why it exists: the passive PDSCH/PDCCH/PUSCH consumer threads decode samples captured EARLIER by
+ * the receive thread, which keeps mutating those two fields. Reading them at decode time de-rotates
+ * with a frequency offset newer than the samples it is applied to. Those queues used to REFUSE to
+ * start under --cont-fo-comp for exactly this reason and fall back to decoding in-line on the RT
+ * thread -- which overran the slot deadline on 99.5 % of grants and cost PBCH lock under load.
+ * Capturing the offset at enqueue and replaying it here fixes the hazard instead of avoiding it.
+ * Thread-local, so one consumer cannot perturb another or the RT thread. */
+__thread double nr_slot_fep_fo_override_hz = NAN;
+
 __thread unsigned int nr_slot_fep_diag_rx_offset = 0;
 __thread unsigned int nr_slot_fep_diag_nb_prefix_samples = 0;
 __thread unsigned int nr_slot_fep_diag_nb_prefix_samples0 = 0;
@@ -120,7 +134,8 @@ int nr_slot_fep(PHY_VARS_NR_UE *ue,
 
     if (ue && ue->cont_fo_comp) {
       start_meas_nr_ue_phy(ue, RX_FO_COMPENSATION_STATS);
-      nr_fo_compensation(ue->dl_Doppler_shift + ue->freq_offset,
+      nr_fo_compensation(isnan(nr_slot_fep_fo_override_hz) ? (ue->dl_Doppler_shift + ue->freq_offset)
+                                                            : nr_slot_fep_fo_override_hz,
                          frame_parms->samples_per_subframe,
                          rx_offset,
                          rxdata_symb_ptr[aa],

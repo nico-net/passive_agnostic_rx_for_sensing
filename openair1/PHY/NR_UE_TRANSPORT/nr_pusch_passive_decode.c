@@ -8,6 +8,7 @@
 #include <stdatomic.h>
 
 #include "PHY/MODULATION/nr_modulation.h" // nr_symbol_fep_ul: the gNB uplink FEP
+#include "PHY/nr_phy_common/inc/nr_phy_common.h" // nr_fo_compensation: the same de-rotation nr_slot_fep uses
 
 #include "nr_pusch_passive_decode.h"
 
@@ -518,6 +519,64 @@ static void fill_pusch_pdu(const nr_pdcch_blind_ul_result_t *g, int nant, nfapi_
   p->beamforming.dig_bf_interface       = nant;
 }
 
+
+/* ------------------------------------------------------------------------------------------
+ * CONTINUOUS CFO, ON THE UPLINK FEP.
+ *
+ * With --cont-fo-comp the LO is deliberately NOT retuned (executables/nr-ue.c:244): the whole
+ * offset lives in UE->freq_offset and is removed digitally, per OFDM symbol, in nr_slot_fep()
+ * (slot_fep_nr.c:120). Every DL path inherits that for free -- including the passive PDSCH decode,
+ * which calls nr_slot_fep().
+ *
+ * The passive UPLINK path does not: it calls nr_symbol_fep_ul(), the gNB's bare DFT, which has no
+ * such hook. Left alone it would demodulate a grant that still carries the full carrier offset --
+ * ~14 kHz here, half a subcarrier at 30 kHz SCS -- which is fatal.
+ *
+ * So do exactly what slot_fep_nr.c does, on the same window nr_symbol_fep_ul() would have read.
+ * The offset arithmetic below is lifted verbatim from nr_symbol_fep_ul (slot_fep_nr.c:150-165) so
+ * the compensated and uncompensated paths cannot drift apart; the DFT and rotation that follow are
+ * the callers' own. With cont_fo_comp off the caller keeps the untouched nr_symbol_fep_ul() path,
+ * so behaviour is bit-identical to before.
+ * ------------------------------------------------------------------------------------------ */
+static unsigned int passive_ul_fep_offset(const NR_DL_FRAME_PARMS *fp, unsigned char slot, unsigned char symbol,
+                                          int sample_offset)
+{
+  uint32_t prefix_length = get_samples_symbol_duration(fp, slot, symbol, 1) - fp->ofdm_symbol_size;
+  unsigned int off = get_samples_slot_timestamp(fp, slot) + get_samples_symbol_timestamp(fp, slot, symbol) + prefix_length;
+  off -= (fp->nb_prefix_samples / fp->ofdm_offset_divisor);
+  if (off >= (unsigned int)sample_offset) {
+    off -= sample_offset;
+  } else {
+    off += fp->samples_per_frame - sample_offset;
+  }
+  return off;
+}
+
+/* De-rotate one symbol's worth of samples into scratch, then DFT it. Mirrors nr_symbol_fep_ul()'s
+ * wrap handling against samples_per_frame. */
+static void passive_ul_fep_fo(const NR_DL_FRAME_PARMS *fp, const c16_t *rxdata, c16_t *rxdataF,
+                              unsigned char symbol, unsigned char slot, int sample_offset, double fo_hz)
+{
+  const int N = fp->ofdm_symbol_size;
+  const unsigned int off = passive_ul_fep_offset(fp, slot, symbol, sample_offset);
+
+  c16_t win[N] __attribute__((aligned(32)));
+  if (off + N > (unsigned int)fp->samples_per_frame) {
+    const unsigned int first = fp->samples_per_frame - off;
+    memcpy(&win[0], &rxdata[off], first * sizeof(c16_t));
+    memcpy(&win[first], &rxdata[0], (N - first) * sizeof(c16_t));
+  } else {
+    memcpy(win, &rxdata[off], N * sizeof(c16_t));
+  }
+
+  c16_t rot[N] __attribute__((aligned(32)));
+  /* sample_offset argument is the ABSOLUTE sample index, which is what keeps the de-rotation phase
+   * continuous from symbol to symbol -- passing 0 here would restart the phase every symbol. */
+  nr_fo_compensation(fo_hz, fp->samples_per_subframe, (int)off, win, rot, N);
+
+  dft(get_dft(N), (int16_t *)rot, (int16_t *)rxdataF, 1);
+}
+
 static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
                                           int      ctx,
                                           uint32_t frame,
@@ -526,6 +585,7 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
                                           int32_t  ta_offset_samples,
                                           uint64_t abs_slot,
                                           bool     cfr_only,
+                                          double   fo_hz,
                                           nr_pusch_passive_out_t *out)
 {
   memset(out, 0, sizeof(*out));
@@ -617,13 +677,18 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
    * Factored out because it is run TWICE per grant -- see the delay refinement below. */
 #define PASSIVE_UL_FEP(off_)                                                                       \
   do {                                                                                             \
+    const double fo_hz_ = fo_hz;                                                                   \
     const int s0_ = g->start_symbol;                                                               \
     const int s1_ = g->start_symbol + g->num_symbols;                                              \
     for (int a_ = 0; a_ < nant; a_++) {                                                            \
       const c16_t *rx_ = (const c16_t *)ue->common_vars.rxdata[a_];                                \
       for (int sym_ = s0_; sym_ < s1_ && sym_ < sps; sym_++) {                                     \
         c16_t *dst_ = &gnb->common_vars.rxdataF[a_][slot_off + sym_ * symsz];                      \
-        nr_symbol_fep_ul(fp, rx_, dst_, (unsigned char)sym_, (unsigned char)slot, (off_));         \
+        if (fo_hz_ != 0.0) {                                                                       \
+          passive_ul_fep_fo(fp, rx_, dst_, (unsigned char)sym_, (unsigned char)slot, (off_), fo_hz_);\
+        } else {                                                                                   \
+          nr_symbol_fep_ul(fp, rx_, dst_, (unsigned char)sym_, (unsigned char)slot, (off_));       \
+        }                                                                                          \
         apply_nr_rotation_symbol_RX(fp->symbols_per_slot, fp->slots_per_subframe,                  \
                                     fp->timeshift_symbol_rotation, fp->first_carrier_offset,       \
                                     dst_, fp->symbol_rotation[link_type_ul], fp->N_RB_UL,          \
@@ -1067,10 +1132,11 @@ bool nr_pusch_passive_decode(PHY_VARS_NR_UE *ue,
                              int32_t  ta_offset_samples,
                              uint64_t abs_slot,
                              bool     cfr_only,
+                             double   fo_hz,
                              nr_pusch_passive_out_t *out)
 {
   const bool ok = nr_pusch_passive_decode_inner(ue, ctx, frame, slot, g, ta_offset_samples, abs_slot,
-                                                cfr_only, out);
+                                                cfr_only, fo_hz, out);
 
   if (s_diag_on() && g != NULL) {
     LOG_I(PHY,

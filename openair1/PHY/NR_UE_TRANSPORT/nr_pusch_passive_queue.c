@@ -119,7 +119,7 @@ static void *nr_pusch_passive_queue_thread(void *arg)
 
     nr_pusch_passive_out_t out;
     nr_pusch_passive_decode(ue, idx, (uint32_t)job.frame_rx, (uint8_t)job.nr_slot_rx, &job.grant,
-                            job.ta_offset_samples, (uint64_t)job.absolute_slot, job.cfr_only, &out);
+                            job.ta_offset_samples, (uint64_t)job.absolute_slot, job.cfr_only, job.fo_hz, &out);
 
     if (out.status != NR_PUSCH_PASSIVE_UNSUPPORTED && out.status != NR_PUSCH_PASSIVE_ERROR) {
       atomic_fetch_add_explicit(&g_decoded, 1, memory_order_relaxed);
@@ -141,17 +141,19 @@ bool nr_pusch_passive_queue_start(PHY_VARS_NR_UE *ue, int depth, int n_consumers
   if (ue == NULL) {
     return false;
   }
-  /* Same refusal as the downlink queue, for the same reason: nr_slot_fep() de-rotates using
-   * ue->dl_Doppler_shift + ue->freq_offset, both mutated by the RECEIVE thread, so a deferred FEP
-   * would use a value newer than its own samples. Refused rather than approximated; the caller
-   * falls back to the in-line decode. */
-  if (ue->cont_fo_comp) {
-    LOG_W(PHY,
-          "SENSING: passive PUSCH decode threading REFUSED: --cont-fo-comp is active, and a deferred "
-          "nr_slot_fep() would de-rotate with a frequency offset newer than its own samples. "
-          "Falling back to the in-line decode on the PHY receive thread.\n");
-    return false;
-  }
+  /* The --cont-fo-comp refusal that used to live here is GONE, and the hazard it named is fixed
+   * rather than avoided. It read: a deferred nr_slot_fep() would de-rotate using
+   * ue->dl_Doppler_shift + ue->freq_offset, both mutated by the RECEIVE thread, hence newer than
+   * the job's own samples. True -- so the producer now SAMPLES that offset on the receive thread,
+   * in the same call that captured the samples, and carries it in nr_pusch_passive_job_t::fo_hz;
+   * the consumer passes it to nr_pusch_passive_decode() instead of reading ue->.
+   *
+   * Why this mattered enough to fix: the fallback was not benign. --cont-fo-comp is required for
+   * CFO to converge at sensing grade, so every run had it on, so the queue never started, so the
+   * decode (measured 1065 us mean against a 500 us slot) ran in-line and overran its deadline on
+   * 99.5 % of grants. Under bidirectional iperf that timing runaway lost PBCH lock and the
+   * supervisor killed the capture at 73 s. The two features were mutually exclusive by accident.
+   */
 
   if (n_consumers < 1) n_consumers = 1;
   if (n_consumers > NR_PUSCH_PASSIVE_QUEUE_MAX_CONSUMERS) n_consumers = NR_PUSCH_PASSIVE_QUEUE_MAX_CONSUMERS;

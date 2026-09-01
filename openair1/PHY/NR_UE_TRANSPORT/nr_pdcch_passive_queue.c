@@ -30,6 +30,7 @@
  */
 
 #include "nr_pdcch_passive_queue.h"
+#include "PHY/MODULATION/modulation_UE.h"
 
 #include <pthread.h>
 #include <stdatomic.h>
@@ -117,6 +118,9 @@ static void *nr_pdcch_passive_queue_thread(void *arg)
       continue;
     }
 
+    /* Replay the offset captured with these samples (see nr_slot_fep_fo_override_hz). */
+    nr_slot_fep_fo_override_hz = job.fo_hz;
+
     UE_nr_rxtx_proc_t proc = {0};
     proc.frame_rx   = job.frame_rx;
     proc.nr_slot_rx = job.nr_slot_rx;
@@ -138,17 +142,11 @@ bool nr_pdcch_passive_queue_start(PHY_VARS_NR_UE *ue, int depth, int n_consumers
   if (ue == NULL) {
     return false;
   }
-  /* Same refusal as the PDSCH queue, and for the same reason: nr_slot_fep() de-rotates using
-   * ue->dl_Doppler_shift + ue->freq_offset, both mutated by the RECEIVE thread, so a deferred FEP
-   * would apply a correction newer than its own samples. The scan does a full-slot FEP too, so it
-   * inherits the constraint exactly. Refused rather than approximated. */
-  if (ue->cont_fo_comp) {
-    LOG_W(PHY,
-          "SENSING: blind PDCCH scan threading REFUSED: --cont-fo-comp is active, and a deferred "
-          "nr_slot_fep() would de-rotate with a frequency offset newer than its own samples. "
-          "Falling back to the in-line scan on the PHY receive thread.\n");
-    return false;
-  }
+  /* The --cont-fo-comp refusal that stood here is gone: the producer now samples the
+   * frequency offset on the receive thread and the consumer replays it through
+   * nr_slot_fep_fo_override_hz, so the deferred FEP de-rotates with the offset that
+   * belongs to its own samples. Falling back in-line was never benign -- it overran the
+   * slot deadline and cost PBCH lock under load. */
 
   if (n_consumers < 1) n_consumers = 1;
   if (n_consumers > NR_PDCCH_PASSIVE_QUEUE_MAX_CONSUMERS) n_consumers = NR_PDCCH_PASSIVE_QUEUE_MAX_CONSUMERS;

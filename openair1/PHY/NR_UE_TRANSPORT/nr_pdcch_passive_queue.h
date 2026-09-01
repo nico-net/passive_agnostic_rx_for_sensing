@@ -79,6 +79,9 @@ typedef struct {
   int  nr_slot_rx;
   int  gNB_id;
   long absolute_slot; ///< producer's slot counter at enqueue; drives the staleness check
+  /// FO (Hz) sampled on the RECEIVE thread with these samples; replayed by the consumer
+  /// via nr_slot_fep_fo_override_hz. NAN would mean "read live", which is the bug.
+  double fo_hz;
 } nr_pdcch_passive_job_t;
 
 typedef struct {

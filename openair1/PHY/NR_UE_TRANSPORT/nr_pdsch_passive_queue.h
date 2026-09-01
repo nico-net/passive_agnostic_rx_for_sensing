@@ -98,6 +98,9 @@ typedef struct {
   /// LDPC accelerator cannot mix two receivers' contexts.
   uint32_t harq_pid_tag;
   bool     want_data;     ///< submit the reconstructed CFR (pdsch_decode >= 2 and the source enabled)
+  /// FO (Hz) sampled on the RECEIVE thread with these samples; replayed by the consumer
+  /// via nr_slot_fep_fo_override_hz. NAN would mean "read live", which is the bug.
+  double fo_hz;
 } nr_pdsch_passive_job_t;
 
 /// Per-run census. Every field is a reason a job did NOT become a decode, so a shortfall in

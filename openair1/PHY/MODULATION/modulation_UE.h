@@ -42,6 +42,9 @@ int nr_slot_fep(PHY_VARS_NR_UE *ue,
 
 // TEMPORARY DIAGNOSTIC (2026-08-05): see slot_fep_nr.c's definition-site comment. Valid only
 // immediately after a synchronous nr_slot_fep() call on the same thread.
+/// See slot_fep_nr.c. NAN = read the offset from `ue` (default for every thread).
+extern __thread double nr_slot_fep_fo_override_hz;
+
 extern __thread unsigned int nr_slot_fep_diag_rx_offset;
 extern __thread unsigned int nr_slot_fep_diag_nb_prefix_samples;
 extern __thread unsigned int nr_slot_fep_diag_nb_prefix_samples0;

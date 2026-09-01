@@ -504,7 +504,9 @@ void nr_pdcch_blind_monitor_process(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t 
     const nr_pdcch_passive_job_t job = {.frame_rx      = proc->frame_rx,
                                         .nr_slot_rx    = proc->nr_slot_rx,
                                         .gNB_id        = proc->gNB_id,
-                                        .absolute_slot = mono_slot};
+                                        .absolute_slot = mono_slot,
+                                        /* Sampled HERE, on the receive thread, with these samples. */
+                                        .fo_hz         = ue->cont_fo_comp ? (ue->dl_Doppler_shift + ue->freq_offset) : 0.0};
     nr_pdcch_passive_queue_enqueue(&job);
     return; // the consumer runs the occasion; the receive thread is done here
   }
@@ -1433,6 +1435,7 @@ constdiag_done:;
       job.rnti          = out.rnti;
       job.harq_pid_tag  = (uint32_t)(NR_PDCCH_BLIND_DATA_AIDED_TAG_BASE + out.harq_pid);
       job.want_data     = want_data;
+      job.fo_hz         = ue->cont_fo_comp ? (ue->dl_Doppler_shift + ue->freq_offset) : 0.0;  /* receive-thread sample; see nr_slot_fep_fo_override_hz */
       nr_pdsch_passive_queue_enqueue(&job);
       continue;
     }
@@ -1615,6 +1618,7 @@ constdiag_done:;
               job.rnti          = out.rnti;
               job.harq_pid_tag  = (uint32_t)(NR_PDCCH_BLIND_DATA_AIDED_TAG_BASE + out.harq_pid);
               job.want_data     = want_data;
+              job.fo_hz         = ue->cont_fo_comp ? (ue->dl_Doppler_shift + ue->freq_offset) : 0.0;  /* receive-thread sample */
               nr_pdsch_passive_queue_enqueue(&job);
               /* The per-candidate channel-estimate allocation is freed at the BOTTOM of this loop,
                * which `continue` skips -- ~917 kB per job at 273 PRB x 4 antennas, and mlockall()

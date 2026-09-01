@@ -92,6 +92,11 @@ typedef struct {
 /// Mode 2 (`pdcch_blind_monitor_ul_pusch = "2:.."`): estimate the channel and emit the CFR, but do
 /// not run the LLR/LDPC half. `cfr_only` is that switch, plumbed rather than read from config here
 /// so the decode stays a pure function of its arguments.
+/// fo_hz is the frequency offset to de-rotate the FEP by (0.0 = none). It is a PARAMETER, not
+/// read from ue inside, so a DEFERRED decode can pass the value that was live when its own samples
+/// were captured -- reading ue->freq_offset here would use a newer one, which is exactly the hazard
+/// that used to make nr_pusch_passive_queue refuse to start under --cont-fo-comp. See that
+/// header's fo_hz field.
 bool nr_pusch_passive_decode(PHY_VARS_NR_UE *ue,
                              int      ctx,
                              uint32_t frame,
@@ -100,6 +105,7 @@ bool nr_pusch_passive_decode(PHY_VARS_NR_UE *ue,
                              int32_t  ta_offset_samples,
                              uint64_t abs_slot,
                              bool     cfr_only,
+                             double   fo_hz,
                              nr_pusch_passive_out_t *out);
 
 /// Release the minimal gNB context. Safe to call when it was never built.

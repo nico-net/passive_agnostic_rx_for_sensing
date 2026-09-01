@@ -56,6 +56,7 @@
 #include "common/utils/system.h" // threadCreate
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_data_aided.h"
 #include "PHY/NR_UE_ISAC/nr_isac.h"
+#include "PHY/MODULATION/modulation_UE.h"
 
 /* The RF producer's own position, published in executables/nr-ue.c immediately BEFORE nrue_ru_read()
  * fills that slot's region of rxdata. */
@@ -150,6 +151,9 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
 
     c16_t (*rxdataF)[rxdataF_sz] = (c16_t (*)[rxdataF_sz])g_rxdataF[idx];
 
+    /* Replay the offset captured with these samples (see nr_slot_fep_fo_override_hz). */
+    nr_slot_fep_fo_override_hz = job.fo_hz;
+
     nr_pdsch_passive_decode_result_t dec;
     const nr_pdsch_passive_decode_status_t st =
         nr_pdsch_passive_decode(ue, &proc, &job.dlsch_pdu, &job.freq_alloc, &job.grant, rxdataF, &dec);
@@ -183,17 +187,11 @@ bool nr_pdsch_passive_queue_start(PHY_VARS_NR_UE *ue, int depth, int n_consumers
   if (ue == NULL) {
     return false;
   }
-  /* nr_slot_fep() applies a continuous-FO de-rotation using ue->dl_Doppler_shift + ue->freq_offset,
-   * both mutated by the RECEIVE thread. A deferred FEP would silently use a value from after its own
-   * samples were captured, and there is no way to pin them per job without writing shared ue state
-   * from a consumer. REFUSED rather than approximated; the caller falls back to the in-line decode. */
-  if (ue->cont_fo_comp) {
-    LOG_W(PHY,
-          "SENSING: passive PDSCH decode threading REFUSED: --cont-fo-comp is active, and a deferred "
-          "nr_slot_fep() would de-rotate with a frequency offset newer than its own samples. "
-          "Falling back to the in-line decode on the PHY receive thread.\n");
-    return false;
-  }
+  /* The --cont-fo-comp refusal that stood here is gone: the producer now samples the
+   * frequency offset on the receive thread and the consumer replays it through
+   * nr_slot_fep_fo_override_hz, so the deferred FEP de-rotates with the offset that
+   * belongs to its own samples. Falling back in-line was never benign -- it overran the
+   * slot deadline and cost PBCH lock under load. */
 
   if (n_consumers < 1) n_consumers = 1;
   if (n_consumers > NR_PDSCH_PASSIVE_QUEUE_MAX_CONSUMERS) n_consumers = NR_PDSCH_PASSIVE_QUEUE_MAX_CONSUMERS;
