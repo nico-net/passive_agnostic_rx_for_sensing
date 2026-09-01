@@ -1041,7 +1041,7 @@ void *UE_thread(void *arg)
       static int tsync_cap = -1;
       if (tsync_cap < 0) {
         const char *e = getenv("ISAC_TSYNC_RESET");
-        tsync_cap = (e != NULL) ? atoi(e) : 1;
+        tsync_cap = (e != NULL) ? atoi(e) : 0;
       }
       double drift = elapsed_frames * (double)UE->max_pos_acc * get_nrUE_params()->time_sync_I;
       if (tsync_cap) {
@@ -1087,19 +1087,31 @@ void *UE_thread(void *arg)
        * accumulated error, in which case zeroing it starts every re-acquisition 4-5 samples off and
        * makes the loop re-learn it while PBCH is trying to decode. Default off until an A/B of >=5
        * runs per arm says otherwise. */
-      /* DEFAULT NOW ON. A/B, arms ALTERNATED so machine drift is shared, identical trace
-       * decimation in both so it cannot confound:
+      /* DEFAULT OFF. Opt in with ISAC_TSYNC_RESET=1.
        *
-       *     off:  38, 57, 82 s   mean  59 s   28 stalls
-       *     on:  229, 249 s      mean 239 s   16 stalls
+       * The DIAGNOSIS stands: max_pos_acc is an integral against the OLD timing origin, syncInFrame()
+       * has just replaced that origin, and the acquisition path then AMPLIFIES the stale value by
+       * elapsed_frames when projecting drift across the gap. max_pos_acc < 0 appears in 23/100
+       * "signal present, PBCH dead" windows against 2/1126 healthy ones.
        *
-       * ZERO OVERLAP -- the worst ON run beats the best OFF run by 2.8x -- and the ON runs are
-       * approaching the 300 s duration cap rather than stalling out. Set ISAC_TSYNC_RESET=0 to
-       * restore the old carry-over behaviour. */
+       * But the BENEFIT does not survive a clean measurement. An early A/B showed off 38/57 s vs on
+       * 229/249 s, zero overlap, and this default was flipped on that. Those runs were later found
+       * to have been taken while the host had lost its 100 GbE address and UHD was falling back to
+       * the 1 GbE management link -- a starved stream, not a fair test. Repeated on a healthy rig,
+       * 5 reps per arm, alternated:
+       *
+       *     off  mean  42.8 s  median 30 s   runs 30, 75, 0, 89, 20
+       *     on   mean 122.4 s  median 32 s   runs 32, 254, 23, 25, 278
+       *     Welch t=1.30, df=4.7, p ~ 0.2-0.3, arms overlap
+       *
+       * The higher ON mean rests entirely on two outlier runs; its other three are
+       * indistinguishable from off, and the medians match. No demonstrated benefit, so it does not
+       * ship on. Re-test with more reps, or with a metric less noisy than run length, before
+       * enabling it. */
       static int tsync_reset = -1;
       if (tsync_reset < 0) {
         const char *e = getenv("ISAC_TSYNC_RESET");
-        tsync_reset = (e != NULL) ? atoi(e) : 1;
+        tsync_reset = (e != NULL) ? atoi(e) : 0;
       }
       if (tsync_reset) {
         nr_ue_reset_time_sync_loop(UE);
