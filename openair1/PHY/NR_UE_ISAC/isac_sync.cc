@@ -154,6 +154,25 @@ constexpr uint32_t SFO_MIN_VALID_ROWS = 8;
 // genuine SFO's ~0.99 (tests/isac_sync_test.cc's injected-SFO sweep still passes, confirming a real
 // clock error is not gated out). The estimate is still COMPUTED and REPORTED when the gate rejects
 // it -- only the correction is withheld -- so the diagnostics/JSON keep working.
+// LOS seed selection (see the MEASURED LOS SEED block). A qualifying window is accepted as the
+// direct path if its peak is within this LINEAR power ratio of the strongest window found; among
+// those, the EARLIEST wins. 0.25 = -6 dB.
+//
+// Why earliest-not-strongest, measured 2026-09-01: the sweep used to keep the strongest peak
+// anywhere in the CIR. With only comb-1 sources enabled that is the direct path and it seeded a
+// steady bin 1-4 (3-12 m). Enabling the combed sources (pdsch_dmrs_blind is comb-2, csi_rs
+// comb-12) injects range-domain replicas -- a comb-c row repeats every nof_range/c bins -- and the
+// replica is an exact copy, so it ties or beats the original. The seed then locked onto
+// bin 1636-1641 against nof_range/2 = 1638, i.e. ~5 km, on 84 of 419 CPIs. range_doppler::process
+// already de-aliases per row, but this sweep runs on the RAW CIR and does not.
+//
+// Strength cannot separate a replica from its original, because they have the same power. Arrival
+// order can, and does so without depending on the comb layout: the direct path is the SHORTEST
+// path, so nothing can arrive before it and every replica arrives after. The margin exists only so
+// ordinary noise on a marginally-stronger later window cannot outrank a clean early one; the gate
+// inside estimate_row() (FADE_MIN_SNR_LINEAR) still decides what qualifies at all.
+constexpr double LOS_SEED_EARLIEST_FRAC = 0.25;
+
 constexpr double SFO_MIN_R_SQUARED = 0.90;
 
 // SECOND acceptance path for the fit above, added 2026-09-01 after the r2 gate was measured
@@ -561,17 +580,37 @@ sto_fit_result_t cpi_sto_tracker::process(icf_t*                   h_cpi,
     double         best_snr = -1.0;
     int            best_bin = -1;
     const uint32_t step     = 2 * SEARCH_HALFWIN_BINS + 1;
+    /* Two passes over the SAME row, because "is this the direct path or a replica of it" cannot be
+     * answered until the strongest peak is known. Pass 1 finds it; pass 2 takes the earliest peak
+     * within LOS_SEED_EARLIEST_FRAC of it. */
     for (uint32_t r0 = 0; r0 < cpi_rows && r0 < 8 && best_bin < 0; r0++) {
       const icf_t*   row0 = &h_cpi[(size_t)r0 * nof_subc];
       const uint8_t* m0   = &occ_all[(size_t)r0 * nof_subc];
+
+      double peak_snr = -1.0;
       for (uint32_t c = SEARCH_HALFWIN_BINS + 1; c + SEARCH_HALFWIN_BINS + 2 < nof_subc; c += step) {
         los_row_estimate_t e;
         bool               f   = false;
         double             snr = -1.0;
         if (estimate_row(row0, m0, nof_subc, row_comb[r0], (int)c, SEARCH_HALFWIN_BINS, e, f, &snr)
-            && snr > best_snr) {
+            && snr > peak_snr) {
+          peak_snr = snr;
+        }
+      }
+      if (peak_snr <= 0.0) {
+        continue; // nothing on this row cleared the fade gate; try the next one
+      }
+
+      const double accept = peak_snr * LOS_SEED_EARLIEST_FRAC;
+      for (uint32_t c = SEARCH_HALFWIN_BINS + 1; c + SEARCH_HALFWIN_BINS + 2 < nof_subc; c += step) {
+        los_row_estimate_t e;
+        bool               f   = false;
+        double             snr = -1.0;
+        if (estimate_row(row0, m0, nof_subc, row_comb[r0], (int)c, SEARCH_HALFWIN_BINS, e, f, &snr)
+            && snr >= accept) {
           best_snr = snr;
-          best_bin = (int)e.peak_bin;
+          best_bin = (int)e.peak_bin; // first qualifying window == earliest arrival == direct path
+          break;
         }
       }
     }
@@ -580,7 +619,8 @@ sto_fit_result_t cpi_sto_tracker::process(icf_t*                   h_cpi,
       // Same bin->metre scale nominal_los_bin() inverts, so Phase 4 can consume it directly.
       measured_los_range_m_ = (double)seed_bin * SPEED_OF_LIGHT / ((double)nof_subc * carrier.scs_hz);
     }
-    LOG_I(PHY, "SENSING: sync(STO) LOS seed bin=%u (%s), nominal was %u from %.1f m; peak snr=%.1f dB\n",
+    LOG_I(PHY, "SENSING: sync(STO) LOS seed bin=%u (%s, earliest within -6 dB of peak), nominal was %u "
+               "from %.1f m; snr=%.1f dB\n",
           seed_bin, (best_bin >= 0) ? "MEASURED" : "fallback: nothing cleared the gate",
           nominal_bin, nominal_los_range_m,
           (best_snr > 0.0) ? 10.0 * std::log10(best_snr) : -99.0);
