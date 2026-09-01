@@ -2481,11 +2481,38 @@ extern "C" {
   // N310 with UHD >= 4.2.0 has issues with changing the BW, which is a NOP on N310 in earlier versions
   // see also: https://github.com/EttusResearch/uhd/issues/644
   if (device->type != USRP_N300_DEV) {
-    for(int i=0; i<((int) s->usrp->get_tx_num_channels()) && i<openair0_cfg[0].tx_num_channels; i++)
-      s->usrp->set_tx_bandwidth(openair0_cfg[0].tx_bw,i+choffset);
+    /* Clamp to what the daughterboard actually supports instead of asking for the signal bandwidth
+     * and letting UHD reject it. The X410's ZBX has a FIXED analog bandwidth (400 MHz measured
+     * here): requesting 100 MHz produced "[WARNING] [0/Radio#N] Invalid analog bandwidth: 100 MHz"
+     * on every channel, forty times a run, and was silently ignored.
+     *
+     * Worth stating plainly because the warning looks cosmetic and is not: the front end passes
+     * 400 MHz while only 100 MHz is digitised, so out-of-band energy anywhere within +/-200 MHz of
+     * the carrier loads the ADC without ever appearing in the samples. In n78 (3.3-3.8 GHz) that is
+     * a realistic amount of other spectrum. Clamping does not narrow the filter -- the hardware
+     * cannot -- but it stops the log claiming a bandwidth the receiver does not have, which is what
+     * made this invisible. If ADC loading is a concern the remedy is external filtering or less
+     * gain, not this call. */
+    for (int i = 0; i < ((int)s->usrp->get_tx_num_channels()) && i < openair0_cfg[0].tx_num_channels; i++) {
+      const uhd::meta_range_t r = s->usrp->get_tx_bandwidth_range(i + choffset);
+      const double            bw = r.clip(openair0_cfg[0].tx_bw);
+      if (bw != openair0_cfg[0].tx_bw) {
+        LOG_W(HW, "TX ch%d: requested analog BW %.1f MHz not supported, using %.1f MHz\n",
+              i, openair0_cfg[0].tx_bw / 1e6, bw / 1e6);
+      }
+      s->usrp->set_tx_bandwidth(bw, i + choffset);
+    }
 
-    for(int i=0; i<((int) s->usrp->get_rx_num_channels()) && i<openair0_cfg[0].rx_num_channels; i++)
-      s->usrp->set_rx_bandwidth(openair0_cfg[0].rx_bw,i+choffset);
+    for (int i = 0; i < ((int)s->usrp->get_rx_num_channels()) && i < openair0_cfg[0].rx_num_channels; i++) {
+      const uhd::meta_range_t r = s->usrp->get_rx_bandwidth_range(i + choffset);
+      const double            bw = r.clip(openair0_cfg[0].rx_bw);
+      if (bw != openair0_cfg[0].rx_bw) {
+        LOG_W(HW, "RX ch%d: requested analog BW %.1f MHz not supported, using %.1f MHz -- the front "
+                  "end passes this much while only the sample rate is digitised\n",
+              i, openair0_cfg[0].rx_bw / 1e6, bw / 1e6);
+      }
+      s->usrp->set_rx_bandwidth(bw, i + choffset);
+    }
   }
 
   for (int i=0; i<openair0_cfg[0].rx_num_channels; i++) {
