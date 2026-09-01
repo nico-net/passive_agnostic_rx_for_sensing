@@ -17,6 +17,15 @@
  * branch. Read here to FREEZE the integral term: see where it is used. */
 _Atomic int nr_ue_rf_signal_absent = 0;
 
+void nr_ue_reset_time_sync_loop(PHY_VARS_NR_UE *ue)
+{
+  if (ue == NULL) {
+    return;
+  }
+  ue->max_pos_acc = 0;
+  ue->max_pos_iir = 0;
+}
+
 //#define DEBUG_PHY
 
 // Adjust location synchronization point to account for drift
@@ -53,9 +62,23 @@ int nr_adjust_synch_ue(const NR_DL_FRAME_PARMS *frame_parms,
   // The search above is deliberately confined to +-nb_prefix_samples. If the true channel peak lies
   // OUTSIDE that window the loop cannot see it and locks onto whatever is inside, so we additionally
   // locate the peak over the FULL symbol (read-only) and report both. Enabled by ISAC_TSYNC_AUDIT=1.
+  /* ISAC_TSYNC_AUDIT is a DECIMATION FACTOR, not a boolean: "1" traces every SSB, "10" every
+   * tenth. Unset = off.
+   *
+   * It has to be decimated because the trace perturbs what it measures. At one LOG_I per SSB --
+   * 50 lines/s on the PHY receive thread, which already misses ~96 % of its slot deadlines -- both
+   * traced runs came out 100 % "signal present, PBCH dead" with not one healthy window, against
+   * runs of 164 healthy windows without it. That is the observer effect, not a finding, and a
+   * diagnostic that induces the fault it is investigating is worse than none. */
   static int audit = -1;
-  if (audit < 0)
-    audit = (getenv("ISAC_TSYNC_AUDIT") != NULL) ? 1 : 0;
+  if (audit < 0) {
+    const char *e = getenv("ISAC_TSYNC_AUDIT");
+    audit = (e != NULL) ? atoi(e) : 0;
+    if (e != NULL && audit < 1) {
+      audit = 1;
+    }
+  }
+  static unsigned audit_n = 0;
 
   // CAUSAL TEST (2026-08-04b): does actually CORRECTING with the full-symbol peak (instead of the
   // blind +-CP one) make PBCH decode succeed? This is the experiment that can directly confirm or
@@ -101,7 +124,7 @@ int nr_adjust_synch_ue(const NR_DL_FRAME_PARMS *frame_parms,
     }
     e_win_frac = e_tot ? (double)e_win / (double)e_tot : 0.0;
     peak_out_of_window = (g_pos < -frame_parms->nb_prefix_samples || g_pos >= frame_parms->nb_prefix_samples);
-    if (audit) {
+    if (audit && (audit_n % (unsigned)audit) == 0) {
       struct timespec ts;
       clock_gettime(CLOCK_REALTIME, &ts);
       // peak_out_of_window is the load-bearing field: 1 means the tracking loop is structurally blind
@@ -220,9 +243,19 @@ int nr_adjust_synch_ue(const NR_DL_FRAME_PARMS *frame_parms,
         sample_shift,
         max_val);
 
-  if (audit)
-    LOG_I(PHY, "TSYNC_OUT frame=%d slot=%d diff=%d sampleShift=%d sample_shift=%d\n",
-          frame, slot, diff, sampleShift, sample_shift);
+  /* PER-SSB TRACE. The RF census aggregates 2000 slots, which is why mode-B failures (signal
+   * present, pbch_ok=0) could not be told apart from healthy windows on ANY census variable -- the
+   * aggregate hides whatever differs SSB to SSB. These are the quantities the timing decision is
+   * actually made from, emitted once per SSB so a failed PBCH can be paired with the correlation
+   * that produced its window: raw peak position, peak POWER (the thing a census mean destroys),
+   * the filtered/hysteresis output, and the integrator state before it is updated. */
+  if (audit && (audit_n % (unsigned)audit) == 0) {
+    LOG_I(PHY,
+          "TSYNC_OUT frame=%d slot=%d corr_pos=%d max_power=%d diff=%d sampleShift=%d "
+          "sample_shift=%d mpa=%d\n",
+          frame, slot, corr_pos, max_val, diff, sampleShift, sample_shift, ue->max_pos_acc);
+  }
+  audit_n++;
 
   // reset IIR filter for next offset calculation
   ue->max_pos_iir += -round(sampleShift * PID_P) * 32768;

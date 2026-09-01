@@ -71,6 +71,12 @@ void nr_pdsch_channel_estimation(PHY_VARS_NR_UE *ue,
                                  c16_t rxdataF[][rxdataFsize],
                                  uint32_t *nvar);
 
+/*! \brief Clear the time-tracking PI loop's accumulated state (max_pos_acc / max_pos_iir).
+    MUST be called at every RE-ACQUISITION. max_pos_acc is an integral accumulated against the OLD
+    timing origin; against a new one it is meaningless, and the acquisition path AMPLIFIES it by
+    elapsed_frames when projecting drift across the gap. */
+void nr_ue_reset_time_sync_loop(PHY_VARS_NR_UE *ue);
+
 int nr_adjust_synch_ue(const NR_DL_FRAME_PARMS *frame_parms,
                        PHY_VARS_NR_UE *ue,
                        const c16_t dl_ch_estimates_time[][frame_parms->ofdm_symbol_size],

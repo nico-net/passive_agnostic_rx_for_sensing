@@ -7,6 +7,7 @@
 #include <pthread.h>
 #include "executables/nr-ue-ru.h"
 #include "executables/nr-uesoftmodem.h"
+#include "PHY/NR_UE_ESTIMATION/nr_estimation.h"
 #include "PHY/INIT/nr_phy_init.h"
 #include "NR_MAC_UE/mac_proto.h"
 #include "RRC/NR_UE/rrc_proto.h"
@@ -1026,8 +1027,34 @@ void *UE_thread(void *arg)
     if (stream_status == STREAM_STATUS_UNSYNC) {
       stream_status = STREAM_STATUS_SYNCING;
       const int elapsed_frames = UE->init_sync_frame + trashed_frames + 2;
-      const int initial_drift_shift =
-          -round(elapsed_frames * UE->max_pos_acc * get_nrUE_params()->time_sync_I);
+      /* Projecting the integrator across the acquisition gap is only meaningful if the integrator
+       * is still describing the SAME timing origin. After a fault it is not: a runaway leaves
+       * max_pos_acc at whatever the divergence reached (measured -2141 before the clamp, and
+       * pinned at the +/-1024 bound after it), and multiplying THAT by elapsed_frames turns a
+       * corrupt state into a large bogus sync offset. Measured 2026-09-01: max_pos_acc < 0 appears
+       * in 23/100 "signal present but PBCH dead" windows against 2/1126 healthy ones -- a fresh
+       * lock landing in a place PBCH never decodes from, then settling with the sign flipped.
+       *
+       * Bound the projection so a corrupt integrator cannot move the sync point further than a
+       * plausible real drift. At the measured 0.11 ppm this link drifts ~0.14 samples/frame, so a
+       * cap of one sample per frame is already an order of magnitude of headroom. */
+      static int tsync_cap = -1;
+      if (tsync_cap < 0) {
+        tsync_cap = (getenv("ISAC_TSYNC_RESET") != NULL) ? 1 : 0;
+      }
+      double drift = elapsed_frames * (double)UE->max_pos_acc * get_nrUE_params()->time_sync_I;
+      if (tsync_cap) {
+        /* Same switch, same reason: unvalidated. At the measured 0.11 ppm this link drifts ~0.14
+         * samples/frame, so one sample per frame is an order of magnitude of headroom -- but a cap
+         * that is wrong in the other direction breaks a legitimate long-gap re-acquisition. */
+        const double drift_cap = (double)elapsed_frames;
+        if (drift > drift_cap) {
+          drift = drift_cap;
+        } else if (drift < -drift_cap) {
+          drift = -drift_cap;
+        }
+      }
+      const int initial_drift_shift = -round(drift);
       const int corrected_sync_offset = intialSyncOffset + initial_drift_shift;
       if (corrected_sync_offset >= 0) {
         syncInFrame(UE, &sync_timestamp, duration_rx_to_tx, corrected_sync_offset);
@@ -1039,6 +1066,33 @@ void *UE_thread(void *arg)
         syncInFrame(UE, &sync_timestamp, duration_rx_to_tx, intialSyncOffset);
       }
       nrue_ru_write_reorder_clear_context(UE);
+      /* NEW ORIGIN, NEW INTEGRAL. syncInFrame() above has just redefined where the frame starts, so
+       * every sample of correction accumulated against the previous origin is now describing
+       * something that no longer exists. Carrying it was measurable: it is what let a post-fault
+       * re-acquisition inherit a wound-up (often sign-flipped) value and never recover PBCH. The
+       * loop re-learns the standing offset within a few frames -- healthy runs settle back to
+       * ~+450-500 -- so there is nothing to preserve. */
+      /* OPT-IN, DEFAULT OFF (ISAC_TSYNC_RESET=1).
+       *
+       * The reasoning is sound -- max_pos_acc is an integral against the OLD timing origin and
+       * syncInFrame() above has just replaced that origin -- and the defect it targets is real:
+       * max_pos_acc < 0 appears in 23/100 "signal present, PBCH dead" windows against 2/1126
+       * healthy ones. But it is NOT VALIDATED and the first evidence points the wrong way: runs
+       * since it went in last 4-16 s against 164 s before, and this rig is documented as swinging
+       * wildly run to run, so a handful of short runs cannot attribute that either way.
+       *
+       * There is also a real mechanism for it to HURT: the standing offset a healthy receiver holds
+       * (+450 to +500, i.e. shift -5) may be a genuine constant of this signal path rather than
+       * accumulated error, in which case zeroing it starts every re-acquisition 4-5 samples off and
+       * makes the loop re-learn it while PBCH is trying to decode. Default off until an A/B of >=5
+       * runs per arm says otherwise. */
+      static int tsync_reset = -1;
+      if (tsync_reset < 0) {
+        tsync_reset = (getenv("ISAC_TSYNC_RESET") != NULL) ? 1 : 0;
+      }
+      if (tsync_reset) {
+        nr_ue_reset_time_sync_loop(UE);
+      }
       shiftForNextFrame = -round(UE->max_pos_acc * get_nrUE_params()->time_sync_I);
       LOG_I(PHY,
             "max_pos_acc = %d, initial_drift_shift = %d, shiftForNextFrame = %d\n",
