@@ -193,11 +193,21 @@ constexpr double LOS_SEED_EARLIEST_FRAC = 0.25;
 constexpr uint32_t LOS_SEED_POLL_ROWS = 8;
 
 // Accepted per-CPI seeds kept for the static-LOS estimate, and how many are needed before it is
-// trusted enough to reject a disagreeing CPI. 8 CPIs is a few seconds of capture -- long enough
-// that a run of unlucky CPIs cannot lock in a wrong value, short enough that the estimate is useful
-// early in a run rather than after it has ended.
+// trusted enough to reject a disagreeing CPI and be reported as CONVERGED.
+//
+// 32, raised from 8 on 2026-09-01. Four runs of the SAME binary, differing only in how long they
+// survived before an RFSTALL ended them:
+//     n=308 CPIs -> 5.91 m      n=40 -> 5.05 m      n=15 -> 1.53 m      n=14 -> 38.47 m
+// The two long runs agree to within a bin; the two short ones are noise, and at 8 CPIs both were
+// still labelled CONVERGED. A premature lock is worse than no lock, because the tolerance gate then
+// starts REJECTING the good seeds that disagree with the bad value it settled on.
+//
+// The per-CPI seed distribution is what sets this: only ~16 % of individual seeds land inside the
+// 3-4 m ground-truth window, 39 % fall below and 45 % above, so a median needs a few tens of
+// samples before it is stable. Do not lower it to make a short run report a number sooner -- a run
+// that has not converged should say so.
 constexpr size_t   LOS_HIST_MAX       = 64;
-constexpr uint32_t LOS_LOCK_MIN_CPIS  = 8;
+constexpr uint32_t LOS_LOCK_MIN_CPIS  = 32;
 // Quantile of the accepted per-CPI seeds taken as the converged LOS. 0.50 = median.
 //
 // MEASURED, and it corrects an earlier theory in this file. The argument for a LOW quantile was
@@ -326,6 +336,35 @@ constexpr double LOS_BIAS_LEAK = 0.02;
 // CIR peak the same way -- see subbin_delta() below.
 constexpr double HANN_ESTIMATOR_SCALE = 0.478762;
 
+// M-DEPENDENT form of the scale above, 2026-09-01. The comment above records the fitted scale as
+// mildly M-dependent -- 0.416 at M=8, 0.478762 at M=32, 0.495 at M=128, asymptoting to 0.5 -- and
+// settled on the single M=32 value because one global constant was accurate enough when every row
+// had a similar M.
+//
+// That premise no longer holds. With sources = csi_rs + pdsch_dmrs_blind + pdsch_data fused into
+// one grid, M is the row's occupied-subcarrier count and now spans a comb-12 CSI-RS row to a comb-1
+// data row in the SAME CPI, so rows sit at both ends of the M range the single scale was chosen to
+// average over.
+//
+// The three measured anchors are fit to three decimals by 0.5 - 0.672/M:
+//     M=8   -> 0.4160  (measured 0.416)
+//     M=32  -> 0.4790  (measured 0.478762)
+//     M=128 -> 0.4947  (measured 0.495)
+// which is also the right SHAPE -- the correction is a finite-length window effect and must vanish
+// as 1/M with the asymptote at 0.5. So this is the measured calibration expressed exactly, not a
+// new guess: at M=32 it reproduces the old constant to 4 decimals, so any row near that M is
+// unchanged.
+constexpr double HANN_SCALE_ASYMPTOTE = 0.5;
+constexpr double HANN_SCALE_COEFF     = 0.672;
+
+inline double hann_estimator_scale(size_t m)
+{
+  if (m < 4) {
+    return HANN_ESTIMATOR_SCALE; // below the calibrated range; keep the old behaviour
+  }
+  return HANN_SCALE_ASYMPTOTE - HANN_SCALE_COEFF / (double)m;
+}
+
 // Complex-domain (Jacobsen/Candan-form) sub-bin peak estimator: unlike the discarded power-based
 // parabolic fit, this uses the raw complex CIR samples straddling the peak (not |.|^2), then divides
 // by HANN_ESTIMATOR_SCALE to correct for this module's specific Hann-windowed compact-CIR pipeline
@@ -341,7 +380,8 @@ double subbin_delta(const std::vector<icf_t>& cir, uint32_t peak)
     return 0.0;
   }
   const double raw = std::real((xm1 - xp1) / den);
-  return std::clamp(raw / HANN_ESTIMATOR_SCALE, -0.5, 0.5);
+  // Scale from THIS row's compact-CIR length -- see hann_estimator_scale().
+  return std::clamp(raw / hann_estimator_scale(cir.size()), -0.5, 0.5);
 }
 
 // Grid resolution for cpi_sfo_tracker::leakage_model's per-M calibration sweep (see that class's
