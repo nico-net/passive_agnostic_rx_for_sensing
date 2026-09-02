@@ -159,6 +159,17 @@ private:
   double            cpi_prev_pos     = 0.0; ///< previous submission's absolute slow-time position (slots,
                                             ///< fractional once sub-slot sampling is on)
   uint32_t          cpi_prev_slot    = 0;
+  /// Per-CPI accepted-step statistics, used to bound an implausible FORWARD slot jump. Reset at
+  /// every CPI open. A running mean is enough here BECAUSE outliers are rejected rather than
+  /// accumulated, so it cannot be dragged by the very excursions it exists to catch.
+  double            cpi_step_sum_      = 0.0;
+  uint32_t          cpi_step_n_        = 0;
+  uint32_t          cpi_step_rejected_ = 0;
+  uint32_t          n_dl_steps_        = 0; ///< DL-only steps that set T_slot this CPI
+  /// A step this many times the CPI's own mean accepted step is treated as stale/out-of-order.
+  /// Measured 2026-09-02: legitimate steps are 1-4 slots, the pathological ones 40-3227.
+  static constexpr double   FORWARD_STEP_MAX_FACTOR  = 8.0;
+  static constexpr uint32_t FORWARD_STEP_MIN_SAMPLES = 8;
   double            cpi_slot_span    = 0.0; ///< span of this CPI's rows in slots -- FRACTIONAL, so sub-slot
                                             ///< rows land at their true slow-time position
 

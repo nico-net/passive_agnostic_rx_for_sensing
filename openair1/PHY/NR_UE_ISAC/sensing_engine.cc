@@ -303,7 +303,10 @@ void sensing_engine::accumulate_cpi(const sensing_slot_t& s)
       src_occ[i] = 0;
     }
     cpi_row       = 0;
-    cpi_slot_span = 0;
+    cpi_slot_span     = 0;
+    cpi_step_sum_     = 0.0;
+    cpi_step_n_       = 0;
+    cpi_step_rejected_ = 0;
     cpi_prev_slot = s.slot_idx;
   }
 
@@ -312,7 +315,8 @@ void sensing_engine::accumulate_cpi(const sensing_slot_t& s)
     const uint32_t slots_per_frame = isac_slots_per_frame(s.carrier);
     const uint32_t wrap            = slots_per_frame * 1024;
     if (!abs_init_) {
-      abs_init_ = true;
+      abs_init_     = true;
+      abs_prev_raw_ = s.slot_idx;
     } else {
       /* SIGNED shortest-path delta. The unsigned `(wrap + a - b) % wrap` form is only correct while
        * submissions arrive in slot ORDER: an out-of-order arrival 2 slots early yields
@@ -326,9 +330,14 @@ void sensing_engine::accumulate_cpi(const sensing_slot_t& s)
       }
       if (d_run > 0) {
         abs_slot_run_ += (uint64_t)d_run; // out-of-order arrivals must not rewind the run counter
+        abs_prev_raw_ = s.slot_idx;
       }
+      /* REFERENCE MUST NOT FOLLOW A REJECTED STEP. Rewinding abs_prev_raw_ to an early
+       * out-of-order slot while abs_slot_run_ is held makes the NEXT in-order submission
+       * measure its delta from that earlier slot, so the backwards step is added right
+       * back on -- the rejection is undone one submission later. Keep the reference at the
+       * highest slot seen. */
     }
-    abs_prev_raw_ = s.slot_idx;
   }
 
   // Unwrapped slow-time position (in slots) of this submission relative to the CPI time origin.
@@ -357,11 +366,40 @@ void sensing_engine::accumulate_cpi(const sensing_slot_t& s)
       d_cpi += (int64_t)wrap;
     }
     // Position of this submission relative to the previous one, carrying both fractions.
+    /* BOUND THE FORWARD STEP. Rejecting only BACKWARDS steps (below) left the other half of
+     * the same defect open: a stale or wrap-mis-detected submission looks like a jump of
+     * hundreds of slots FORWARD, is accepted as real elapsed time, and inflates the CPI span
+     * for good. MEASURED 2026-09-02 after the backwards-step fix: T_slot still bimodal, most
+     * CPIs at 1.2-2.3 slots but a minority at 40-3227, and the source mix does NOT predict
+     * which (two CPIs in one run, both ul_rows=74, read 2.14 and 1292.18) -- i.e. one bad
+     * jump per bad CPI, not a systematic offset. The bound is the CPI's OWN running mean
+     * accepted step, not a constant: legitimate spacing is set by this cell's scheduling and
+     * varies run to run. FORWARD_STEP_MAX_FACTOR admits a genuine gap several times the
+     * typical one (a real scheduling hole) while rejecting the 10^2-10^3 excursions. Held
+     * until enough steps have been accepted to have an estimate at all. */
+    if (cpi_step_n_ >= FORWARD_STEP_MIN_SAMPLES) {
+      const double typical = cpi_step_sum_ / (double)cpi_step_n_;
+      if ((double)d_cpi > FORWARD_STEP_MAX_FACTOR * std::max(typical, 1.0)) {
+        d_cpi = 0; // treat as out-of-order/stale: contributes its CFR, does not move the clock
+        cpi_step_rejected_++;
+      }
+    }
     this_span     = cpi_prev_pos + (double)d_cpi + ((double)s.slot_frac - prev_frac_);
     if (this_span < cpi_prev_pos) {
-      this_span = cpi_prev_pos; // never step backwards (out-of-order sub-slot arrival)
+      /* Hold the span AND the reference. Advancing cpi_prev_slot to the rejected (earlier)
+       * slot made the next in-order submission measure from it, double-counting the
+       * backwards step; over 128 rows with DL/PUSCH/UL submitting from concurrent threads
+       * that accumulated without bound. MEASURED 2026-09-02: T_slot 285478-437334 slots
+       * against a true 1.0-3.7 on every run with mixed sources, i.e. no Doppler axis at
+       * all, while the one single-producer run in the same batch read a correct 1.244. */
+      this_span = cpi_prev_pos;
+    } else {
+      cpi_prev_slot = s.slot_idx;
+      if (d_cpi > 0) {
+        cpi_step_sum_ += (double)d_cpi;
+        cpi_step_n_++;
+      }
     }
-    cpi_prev_slot = s.slot_idx;
   }
   prev_frac_   = (double)s.slot_frac;
   cpi_prev_pos = this_span;
@@ -602,9 +640,55 @@ void sensing_engine::accumulate_cpi(const sensing_slot_t& s)
     // ground-truth bistatic range-rate (predicted ratio 1.654/2 = 0.827). That bias also propagated
     // into the tracker, whose measurement vector includes vel_mps. The error is up to 25% at
     // spacings near 1.5-2.5 slots -- exactly the regime DL-heavy TDD traffic produces.
-    cpi_period_slots = (args.cpi_slots > 1 && cpi_slot_span > 0)
-                           ? ((double)cpi_slot_span / (double)(args.cpi_slots - 1))
-                           : ((s.period_slots > 0) ? (double)s.period_slots : 1.0);
+    /* T_slot FROM DL ROWS ONLY (2026-09-02, deliberate and temporary). The span-derived mean
+     * above is taken over EVERY row, so a UL row whose slow-time position is corrupt drags the
+     * whole Doppler axis with it -- and the axis is shared, so one bad row costs every source.
+     * Until the UL slow-time origin is confirmed to share the DL one, the period is measured
+     * over consecutive DL rows and UL rows ride that clock instead of setting it. They still
+     * contribute their CFR; they just do not define the sampling interval.
+     * TRIMMED MEAN, not median: a plain mean is dragged by any outlier the forward-step bound
+     * misses, but a MEDIAN OF INTEGER SLOT STEPS IS ITSELF AN INTEGER, which reinstates exactly
+     * the quantisation the 2026-07-24 fractional fix removed (true mean spacing 1.654 rounded to
+     * 2 scaled every reported velocity by 0.827). Dropping the top decile before averaging keeps
+     * the estimate fractional AND outlier-resistant.
+     * REVISIT once the UL origin is verified -- UL rows are real slow-time samples and
+     * excluding them costs effective PRF. */
+    {
+      std::vector<double> dl_steps;
+      dl_steps.reserve(cpi_row);
+      double prev_dl = 0.0;
+      bool   have_dl = false;
+      for (uint32_t rr = 0; rr < cpi_row; rr++) {
+        if (rr < cpi_row_illum.size() && cpi_row_illum[rr] != NR_ISAC_ILLUM_DL) {
+          continue;
+        }
+        if (have_dl) {
+          const double d = cpi_row_time[rr] - prev_dl;
+          if (d > 0.0) {
+            dl_steps.push_back(d);
+          }
+        }
+        prev_dl = cpi_row_time[rr];
+        have_dl = true;
+      }
+      if (!dl_steps.empty()) {
+        std::sort(dl_steps.begin(), dl_steps.end());
+        size_t keep = (dl_steps.size() * 9) / 10; // drop the top decile
+        if (keep == 0) {
+          keep = dl_steps.size();
+        }
+        double acc = 0.0;
+        for (size_t i = 0; i < keep; i++) {
+          acc += dl_steps[i];
+        }
+        cpi_period_slots = acc / (double)keep;
+      } else {
+        cpi_period_slots = (args.cpi_slots > 1 && cpi_slot_span > 0)
+                               ? ((double)cpi_slot_span / (double)(args.cpi_slots - 1))
+                               : ((s.period_slots > 0) ? (double)s.period_slots : 1.0);
+      }
+      n_dl_steps_ = (uint32_t)dl_steps.size();
+    }
     if (!(cpi_period_slots > 0.0)) {
       cpi_period_slots = 1.0;
     }
