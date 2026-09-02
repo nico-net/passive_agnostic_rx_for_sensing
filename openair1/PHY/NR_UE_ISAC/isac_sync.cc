@@ -233,6 +233,12 @@ constexpr uint32_t LOS_LOCK_MIN_CPIS  = 32;
 // splitting across two and losing to a coincidence. A quarter bin is 0.76 m at 273 PRB / 30 kHz,
 // comfortably finer than the 3-4 m the answer needs to distinguish.
 constexpr double LOS_MODE_CELL_BINS = 0.25;
+/// Support window for the cross-CPI LOS cluster search: the range mainlobe half-width, so the
+/// selection cannot hinge on a histogram cell boundary.
+constexpr double LOS_CLUSTER_HALFWIN_BINS = 0.5;
+/// A cluster counts as real at this fraction of the modal support. See the derivation at the
+/// call site -- measured against surveyed geometry, not tuned for a target number.
+constexpr double LOS_CLUSTER_MIN_FRAC = 0.5;
 // A CPI seed further than this from the converged value is rejected as a replica or a fade rather
 // than believed. In BINS, and generous on purpose: it only has to exclude the failure actually
 // observed (nof_range/2, i.e. 1638 bins away) without fighting honest sub-bin noise.
@@ -831,36 +837,68 @@ sto_fit_result_t cpi_sto_tracker::process(icf_t*                   h_cpi,
         n_cpi_rejected_[il]++;
       }
       if (los_hist_[il].size() >= LOS_LOCK_MIN_CPIS) {
-        /* Mode over a quarter-bin histogram, then the MEAN of the seeds inside the winning cell --
-         * the cell says which arrival is real, its members say where it is to sub-bin precision.
-         * Ties break toward the EARLIER cell: two cells with equal support are the direct path and
-         * something behind it, and only one of those can arrive first. */
-        size_t best_n    = 0;
-        double best_cell = 0.0;
+        /* EARLIEST WELL-SUPPORTED ARRIVAL, not the most populous one.
+         *
+         * The plain mode picks whichever arrival happened to be seen most often, and in a room
+         * that is frequently a REFLECTION rather than the direct path. Measured 2026-09-02 with
+         * surveyed geometry (rx at the origin, gNB (0.3,4,1) -> 4.134 m, UE (0,-0.8,0) -> 0.800 m,
+         * range_res 3.05 m): the mode put the gNB LOS at 8.84 m, 2.77 m late, while the earliest
+         * supported cluster put it 0.14 m from truth. The UL illuminator was unaffected either way
+         * -- at 0.8 m its direct path dominates so completely that nothing competes with it.
+         *
+         * MULTIPATH IS ALWAYS LATER, NEVER EARLIER, so among clusters that are real the first one
+         * is the direct path. What stops us simply taking the minimum is that a few CPIs land
+         * BELOW the truth (5 of 69 here) on noise, so the rule needs a support floor rather than
+         * an extremum. Support is counted over a +/-0.5 bin window (the range mainlobe) so the
+         * answer cannot depend on where a histogram cell boundary happens to fall, and the floor
+         * is a FRACTION OF THE MODAL SUPPORT -- scale-free, so it does not need retuning as the
+         * history fills. Sensitivity at n=69: f=0.4 -> 0.72 m, f=0.5 -> 0.14 m, f=0.6 -> 0.73 m.
+         * Half the modal support is the natural value rather than a tuned one, but the choice
+         * between neighbours is NOT strongly determined by one session's data -- re-measure
+         * against surveyed geometry before treating 0.5 as settled. */
+        size_t max_sup = 0;
         for (double c : los_hist_[il]) {
-          const double cell = std::floor(c / LOS_MODE_CELL_BINS);
-          size_t       n    = 0;
+          size_t n = 0;
           for (double d : los_hist_[il]) {
-            if (std::floor(d / LOS_MODE_CELL_BINS) == cell) {
+            if (std::fabs(d - c) <= LOS_CLUSTER_HALFWIN_BINS) {
               n++;
             }
           }
-          if (n > best_n || (n == best_n && cell < best_cell)) {
-            best_n    = n;
-            best_cell = cell;
-          }
+          max_sup = std::max(max_sup, n);
         }
-        double   sum = 0.0;
-        uint32_t cnt = 0;
+        const size_t floor_sup =
+            std::max<size_t>(2, (size_t)std::ceil(LOS_CLUSTER_MIN_FRAC * (double)max_sup));
+        double best_c = 0.0;
+        size_t best_n = 0;
+        bool   found  = false;
         for (double c : los_hist_[il]) {
-          if (std::floor(c / LOS_MODE_CELL_BINS) == best_cell) {
-            sum += c;
-            cnt++;
+          size_t n = 0;
+          for (double d : los_hist_[il]) {
+            if (std::fabs(d - c) <= LOS_CLUSTER_HALFWIN_BINS) {
+              n++;
+            }
+          }
+          if (n >= floor_sup && (!found || c < best_c)) {
+            best_c = c;
+            best_n = n;
+            found  = true;
           }
         }
-        if (cnt > 0) {
-          los_locked_bin_[il] = sum / (double)cnt;
-          n_mode_support_[il] = (uint32_t)best_n;
+        if (found) {
+          /* Sub-bin position from the members of the winning cluster, as before: the cluster says
+           * WHICH arrival is real, its members say where it is. */
+          double   sum = 0.0;
+          uint32_t cnt = 0;
+          for (double c : los_hist_[il]) {
+            if (std::fabs(c - best_c) <= LOS_CLUSTER_HALFWIN_BINS) {
+              sum += c;
+              cnt++;
+            }
+          }
+          if (cnt > 0) {
+            los_locked_bin_[il] = sum / (double)cnt;
+            n_mode_support_[il] = (uint32_t)best_n;
+          }
         }
       }
 
