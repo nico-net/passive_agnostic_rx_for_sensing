@@ -46,7 +46,8 @@ extern __thread uint32_t nr_dl_chest_nvar_ant[];
 #include "PHY/CODING/coding_defs.h"
 #include "PHY/NR_REFSIG/dmrs_nr.h" // get_num_dmrs_re_per_rb, nr_chest_time_domain_avg
 #include "PHY/CODING/nrLDPC_coding/nrLDPC_coding_interface.h"
-#include "PHY/MODULATION/modulation_UE.h" // nr_slot_fep
+#include "PHY/MODULATION/modulation_UE.h" // nr_slot_fep, nr_slot_fep_ant
+#include "common/utils/threadPool/task_ans.h" // init_task_ans/join_task_ans/completed_task_ans, for the per-antenna FEP dispatch below
 #include "PHY/NR_UE_ESTIMATION/nr_estimation.h"
 #include "PHY/NR_UE_TRANSPORT/nr_transport_proto_ue.h"
 #include "PHY/TOOLS/tools_defs.h"
@@ -236,6 +237,26 @@ typedef struct {
  * successes against its OWN failures -- far stronger than comparing across runs, which is what
  * every cross-run comparison in §§17-29 was reduced to.
  * Sampled every 32nd LLR: G reaches ~150k and this runs per decode. */
+/* Selection diversity: per-branch retry attempts and successes, indexed by receive branch.
+ * `try` counts only RETRIES (the default path's own branch is not counted here), so
+ * ok[b]/try[b] reads directly as "how often branch b rescued a TB the default branch lost".
+ * This is the measurement that decides whether the other branches are usable at all -- the
+ * standing hypothesis, never directly tested, is that only branch 0 is. */
+static _Atomic uint64_t g_branch_try[NR_DL_CHEST_MAX_ANT] = {0};
+static _Atomic uint64_t g_branch_ok[NR_DL_CHEST_MAX_ANT]  = {0};
+
+/* Default ON: the retry runs only after the normal path has already failed, so it can add
+ * successes but cannot remove any. ISAC_RX_BRANCH_RETRY=0 disables it for a clean A/B. */
+static bool g_branch_retry_enabled(void)
+{
+  static int s_en = -1;
+  if (s_en < 0) {
+    const char *e = getenv("ISAC_RX_BRANCH_RETRY");
+    s_en = (e != NULL) ? atoi(e) : 1;
+  }
+  return s_en != 0;
+}
+
 static _Atomic uint64_t g_llr_n[2]    = {0, 0}; // [0] = TB failed, [1] = TB decoded
 static _Atomic uint64_t g_llr_absum[2] = {0, 0};
 static _Atomic uint64_t g_llr_zero[2]  = {0, 0};
@@ -381,6 +402,33 @@ void nr_pdsch_passive_ldpc_stats_dump(void)
         (unsigned long)ok, (unsigned long)sf, (unsigned long)tf, (unsigned long)zt,
         (unsigned long)ie, (unsigned long)so, (unsigned long)st,
         st ? (100.0 * (double)so / (double)st) : 0.0);
+  /* BRANCHSEL: what selection diversity actually bought, per branch. `rescued` is the number of
+   * transport blocks that FAILED on the default branch and then decoded on this one -- so a column
+   * that stays at 0/N says that branch is unusable however strong it looks, which is exactly the
+   * per-daughterboard-offset question. Printed unconditionally alongside LDPCDIAG (one line per
+   * census) rather than behind a probe env var, because it is the headline result of the feature. */
+  {
+    char bs[160];
+    size_t u = 0;
+    uint64_t tot_try = 0, tot_ok = 0;
+    bs[0] = '\0';
+    for (int b = 0; b < NR_DL_CHEST_MAX_ANT; b++) {
+      const uint64_t bt = atomic_load(&g_branch_try[b]);
+      const uint64_t bo = atomic_load(&g_branch_ok[b]);
+      tot_try += bt;
+      tot_ok += bo;
+      if (u < sizeof(bs) - 1) {
+        const int n = snprintf(bs + u, sizeof(bs) - u, "%s%d:%lu/%lu",
+                               b ? " " : "", b, (unsigned long)bo, (unsigned long)bt);
+        // snprintf returns what it WOULD have written; clamp so a truncation cannot walk past the end
+        u = (n > 0 && (size_t)n < sizeof(bs) - u) ? u + (size_t)n : sizeof(bs) - 1;
+      }
+    }
+    if (tot_try > 0) {
+      LOG_I(PHY, "SENSING: BRANCHSEL rescued=%lu/%lu retries [%s] (branch:rescued/tried)\n",
+            (unsigned long)tot_ok, (unsigned long)tot_try, bs);
+    }
+  }
 }
 
 /// Bounded append for CHESTDIAG's report string. snprintf() returns the length it WOULD have
@@ -605,6 +653,33 @@ static bool passive_ldpc_decode(PHY_VARS_NR_UE *ue,
   return true;
 }
 
+/* Per-antenna FEP task, dispatched across the thread pool by the FEP loop below when
+ * nb_antennas_rx > 1 -- see nr_slot_fep_ant()'s definition-site comment (slot_fep_nr.c) for why
+ * this exists. rxdataF_flat/stride reconstruct the VLA-typed pointer nr_slot_fep_ant() expects;
+ * a plain struct field cannot carry a runtime-sized array type directly. */
+typedef struct {
+  PHY_VARS_NR_UE *ue;
+  const NR_DL_FRAME_PARMS *fp;
+  unsigned int slot;
+  int start_symbol;
+  int number_symbols;
+  unsigned int ant;
+  c16_t *rxdataF_flat;
+  uint32_t stride;
+  c16_t **rxdata;
+  task_ans_t *ans;
+} nr_slot_fep_ant_task_t;
+
+static void nr_slot_fep_ant_task(void *arg)
+{
+  nr_slot_fep_ant_task_t *a = (nr_slot_fep_ant_task_t *)arg;
+  c16_t(*rxdataF)[a->stride] = (c16_t(*)[a->stride])a->rxdataF_flat;
+  for (int m = a->start_symbol; m < a->start_symbol + a->number_symbols; m++) {
+    nr_slot_fep_ant(a->ue, a->fp, a->slot, m, a->ant, rxdataF, link_type_dl, 0, a->rxdata);
+  }
+  completed_task_ans(a->ans);
+}
+
 nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
                                                          const UE_nr_rxtx_proc_t *proc,
                                                          fapi_nr_dl_config_dlsch_pdu_rel15_t *dlsch_config,
@@ -757,8 +832,36 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
   // chance for the two views to diverge. ----
   const int      pdtim_on = pdtim_enabled();
   const uint64_t pdt_fep  = pdtim_on ? pdtim_now() : 0;
-  for (int m = dlsch_config->start_symbol; m < dlsch_config->start_symbol + dlsch_config->number_symbols; m++) {
-    nr_slot_fep(ue, fp, proc->nr_slot_rx, m, rxdataF, link_type_dl, 0, ue->common_vars.rxdata);
+  /* PASSIVE-RX ANTENNA PARALLELISM (2026-09-03): measured 4-antenna FEP at ~4x a single antenna's
+   * cost (79.9us -> 321.3us), which together with channel estimation's own ~4x scaling pushed
+   * this inline RT-thread decode over the 500us/slot budget and collapsed CRC at MCS25 (0% at 4
+   * antennas vs 76-93% at 1) independent of MRC mode -- see nr_slot_fep_ant()'s comment in
+   * slot_fep_nr.c. Each antenna's FEP is independent, so dispatch one per antenna across the
+   * thread pool instead of looping them serially. nb_antennas_rx==1 skips the pool and matches
+   * the previous behaviour exactly. */
+  if (fp->nb_antennas_rx > 1) {
+    nr_slot_fep_ant_task_t fep_tasks[fp->nb_antennas_rx];
+    task_ans_t fep_ans;
+    init_task_ans(&fep_ans, fp->nb_antennas_rx);
+    for (unsigned int ant = 0; ant < (unsigned int)fp->nb_antennas_rx; ant++) {
+      fep_tasks[ant] = (nr_slot_fep_ant_task_t){.ue = ue,
+                                                .fp = fp,
+                                                .slot = proc->nr_slot_rx,
+                                                .start_symbol = dlsch_config->start_symbol,
+                                                .number_symbols = dlsch_config->number_symbols,
+                                                .ant = ant,
+                                                .rxdataF_flat = &rxdataF[0][0],
+                                                .stride = fp->samples_per_slot_wCP,
+                                                .rxdata = ue->common_vars.rxdata,
+                                                .ans = &fep_ans};
+      task_t t = {.func = nr_slot_fep_ant_task, .args = &fep_tasks[ant]};
+      pushTpool(&get_nrUE_params()->Tpool, t);
+    }
+    join_task_ans(&fep_ans);
+  } else {
+    for (int m = dlsch_config->start_symbol; m < dlsch_config->start_symbol + dlsch_config->number_symbols; m++) {
+      nr_slot_fep(ue, fp, proc->nr_slot_rx, m, rxdataF, link_type_dl, 0, ue->common_vars.rxdata);
+    }
   }
   pdtim_add(PDTIM_FEP, pdt_fep);
 
@@ -793,10 +896,15 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
 
   uint32_t nvar = 0;
   int n_dmrs_sym = 0;
+  int dmrs_first = -1, dmrs_last = -1; // for the per-branch phase-slope estimator below
   for (int m = dlsch_config->start_symbol; m < dlsch_config->start_symbol + dlsch_config->number_symbols; m++) {
     if (!((dlsch_config->dlDmrsSymbPos >> m) & 1)) {
       continue;
     }
+    if (dmrs_first < 0) {
+      dmrs_first = m;
+    }
+    dmrs_last = m;
     for (int nl = 0; nl < cw->Nl; nl++) { // mirrors nr_ue_pdsch_procedures()'s per-layer loop
       uint32_t nvar_tmp = 0;
       nr_pdsch_channel_estimation(ue, proc, dlsch_config, freq_alloc, nl,
@@ -839,6 +947,63 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
     nvar /= (den > 0) ? den : 1u;
   }
   pdtim_add(PDTIM_CHEST, pdt_che);
+
+  /* ---- PER-BRANCH FREQUENCY-OFFSET ESTIMATE (2026-09-03) --------------------------------------
+   * THE measurement that decides why branches 1-3 are undecodable. Selection diversity established
+   * that they rescue 0 of 15411 TBs while branch 2 is only 1.7 dB down -- too small a deficit to be
+   * a link-budget failure, so their channel must be moving WITHIN the slot. This quantifies that
+   * directly, per branch, from data already computed.
+   *
+   * Estimator: the DM-RS channel estimate at the first and last DM-RS symbol differ, for a static
+   * channel, only by the phase a residual frequency offset accumulated between them:
+   *     acc   = sum_k H_last[k] . conj(H_first[k])        (noise averages out over subcarriers)
+   *     f_res = arg(acc) / (2.pi.dt)
+   * Reported as a DIFFERENCE against branch 0, because the part common to all branches is already
+   * handled by the shared sync loop -- what breaks a branch is the part that is NOT common.
+   *
+   * Unambiguous only for |arg| < pi, i.e. |f| < 1/(2.dt): with DM-RS at symbols 2 and 11 at 30 kHz
+   * SCS that is ~1557 Hz. A branch beyond that aliases and reads small -- so treat a near-zero
+   * value on an otherwise-dead branch with suspicion rather than as proof of coherence.
+   *
+   * ISAC_RX_BRANCH_FO=1 additionally APPLIES the estimate (nr_ue_set_branch_fo_hz -> the per-branch
+   * de-rotation in nr_slot_fep_ant). Default is measure-and-log ONLY: correcting on the strength of
+   * an unvalidated estimate is exactly the mistake this file's history is full of. */
+  if (fp->nb_antennas_rx > 1 && dmrs_first >= 0 && dmrs_last > dmrs_first) {
+    static _Atomic uint64_t s_fo_n = 0;
+    static double s_fo_ema[NR_DL_CHEST_MAX_ANT];
+    // symbol duration incl. CP: one slot is 1ms/slots_per_subframe, split into symbols_per_slot
+    const double dt = (1.0e-3 / (double)fp->slots_per_subframe) / (double)fp->symbols_per_slot
+                      * (double)(dmrs_last - dmrs_first);
+    double fo[NR_DL_CHEST_MAX_ANT] = {0};
+    for (int a = 0; a < fp->nb_antennas_rx && a < NR_DL_CHEST_MAX_ANT; a++) {
+      const c16_t *h0 = (const c16_t *)&pdsch_dl_ch_estimates[a][fp->ofdm_symbol_size * dmrs_first];
+      const c16_t *h1 = (const c16_t *)&pdsch_dl_ch_estimates[a][fp->ofdm_symbol_size * dmrs_last];
+      double re = 0.0, im = 0.0;
+      for (uint32_t k = 0; k < fp->ofdm_symbol_size; k++) {
+        // H_last * conj(H_first); unallocated subcarriers are zero and contribute nothing
+        re += (double)h1[k].r * h0[k].r + (double)h1[k].i * h0[k].i;
+        im += (double)h1[k].i * h0[k].r - (double)h1[k].r * h0[k].i;
+      }
+      fo[a] = (re != 0.0 || im != 0.0) ? atan2(im, re) / (2.0 * M_PI * dt) : 0.0;
+    }
+    const uint64_t n = atomic_fetch_add(&s_fo_n, 1);
+    for (int a = 0; a < fp->nb_antennas_rx && a < NR_DL_CHEST_MAX_ANT; a++) {
+      // Differential against branch 0: the common part is the shared sync loop's job, not ours.
+      const double d = fo[a] - fo[0];
+      s_fo_ema[a] = (n == 0) ? d : (0.99 * s_fo_ema[a] + 0.01 * d);
+      if (getenv("ISAC_RX_BRANCH_FO") != NULL && atoi(getenv("ISAC_RX_BRANCH_FO")) != 0) {
+        nr_ue_set_branch_fo_hz(a, -s_fo_ema[a]); // de-rotate by the negative of the observed drift
+      }
+    }
+    if ((n % 500) == 0) {
+      LOG_I(PHY,
+            "SENSING: BRANCHFO d_vs_br0=[%.1f %.1f %.1f %.1f] Hz (EMA, DM-RS sym %d->%d, "
+            "unambiguous to +/-%.0f Hz)\n",
+            s_fo_ema[0], fp->nb_antennas_rx > 1 ? s_fo_ema[1] : 0.0,
+            fp->nb_antennas_rx > 2 ? s_fo_ema[2] : 0.0, fp->nb_antennas_rx > 3 ? s_fo_ema[3] : 0.0,
+            dmrs_first, dmrs_last, 1.0 / (2.0 * dt));
+    }
+  }
 
   /* CHESTDIAG (ISAC_PDSCH_TBPARM=1): per-(layer,antenna) channel power, plus the layer-space Gram
    * matrix conditioning. This is the one remaining hypothesis for the rank-4 CRC failure that has
@@ -1216,8 +1381,69 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
         llr_pos++;
       }
     }
-    const bool ldpc_ok = passive_ldpc_decode(ue, proc, &g_harq, cw, dlsch_config, llr, freq_alloc->num_rbs, G);
+    bool ldpc_ok = passive_ldpc_decode(ue, proc, &g_harq, cw, dlsch_config, llr, freq_alloc->num_rbs, G);
     pdtim_add(PDTIM_LDPC, pdt_ldp);
+
+    /* ---- SELECTION DIVERSITY across receive branches (2026-09-03) -------------------------------
+     * If the default branch selection failed CRC, re-demodulate and re-decode the SAME transport
+     * block from each OTHER receive branch in turn, and keep the first one that passes.
+     *
+     * WHY THIS SHAPE, and why it is safe: the default path runs FIRST and unchanged, so this can
+     * only convert a failure into a success -- never the reverse. `nb_antennas_rx == 1` and a
+     * successful first attempt both skip the whole block, leaving those cases bit-identical.
+     *
+     * WHY SELECTION AND NOT COMBINING: OAI's fixed-point MRC accumulator overflows at four RX
+     * (the reason ISAC_RX_MRC_MODE defaults to 0, branch 0 only), and on this rig an alternated
+     * 2x4 sweep measured every combining mode at 0.0 % CRC against 48.9-82.6 % for branch 0 alone.
+     * Decoding one branch at a time keeps each attempt in exactly the configuration that works.
+     *
+     * WHY IT COSTS NOTHING FOR SENSING: the decode exists only to recover X. X is a single physical
+     * truth -- whichever branch recovers it, the data-aided tap then forms H = Y_a/X against the RAW
+     * per-antenna Y of EVERY antenna (nr_pdsch_data_aided.c loops rxdataF[a]), so AoA and per-antenna
+     * CFR are unaffected by which branch happened to decode.
+     *
+     * WHY BY INDEX AND NOT BY POWER: mode 1 already picks the strongest branch, and it measured
+     * 0.0 % while branch 3 held the highest |h| -- power does not predict decodability on this rig
+     * (the standing hypothesis is a per-daughterboard frequency offset: X410 puts ch0/1 on board A
+     * and ch2/3 on board B). So walk by index and let the CRC be the judge. The per-branch counters
+     * below are the measurement that turns that hypothesis into data. */
+    if (!ldpc_ok && fp->nb_antennas_rx > 1 && cw->Nl == 1 && g_branch_retry_enabled()) {
+      const int first_branch = nr_dlsch_last_branch(); // -1 if the first attempt combined
+      for (int b = 0; b < fp->nb_antennas_rx && !ldpc_ok; b++) {
+        if (b == first_branch) {
+          continue; // already tried, and it failed
+        }
+        atomic_fetch_add(&g_branch_try[b], 1);
+        nr_dlsch_force_branch(b);
+        /* Per-branch nvar: the equaliser is about to work on branch b ALONE, so hand it branch b's
+         * own noise rather than the mean across all four. The mean is dominated by the weak
+         * branches here (8-15 dB down), which mis-states the confidence for whichever single branch
+         * is actually being decoded. Falls back to the mean if this branch produced no estimate. */
+        const uint32_t nvar_saved = nvar;
+        if (b < NR_DL_CHEST_MAX_ANT && nr_dl_chest_nvar_ant[b] > 0) {
+          nvar = nr_dl_chest_nvar_ant[b];
+        }
+        memset(llr, 0, rx_llr_buf_sz * sizeof(*llr));
+        bool redemod_ok = true;
+        for (int m = dlsch_config->start_symbol; m < dlsch_config->start_symbol + dlsch_config->number_symbols; m++) {
+          if (nr_rx_pdsch(ue, proc, &dlsch, freq_alloc, dlsch_config, &harq, (unsigned char)m,
+                          m == first_symbol_with_data, (unsigned char)dlsch_config->harq_process_nbr, pdsch_est_size,
+                          pdsch_dl_ch_estimates, llr, dl_valid_re, rxdataF, &log2_maxh, rx_size_symbol,
+                          fp->nb_antennas_rx, rxdataF_comp, dl_ch_mag, dl_ch_magb, dl_ch_magr, ptrs_phase_per_slot,
+                          ptrs_re_per_slot, nvar, &scope_req, NULL /* rho_dl: single layer */)
+              < 0) {
+            redemod_ok = false;
+            break;
+          }
+        }
+        if (redemod_ok && passive_ldpc_decode(ue, proc, &g_harq, cw, dlsch_config, llr, freq_alloc->num_rbs, G)) {
+          ldpc_ok = true;
+          atomic_fetch_add(&g_branch_ok[b], 1);
+        }
+        nvar = nvar_saved; // restore: the next retry (and anything downstream) expects the mean
+      }
+      nr_dlsch_force_branch(-1); // never leave a pin set: the next TB must re-decide normally
+    }
 
     {
       /* 1 = decoded with data, 0 = zero_tb, 2 = seg_fail. `out->status` is not set yet here, so the

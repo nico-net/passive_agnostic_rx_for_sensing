@@ -356,6 +356,14 @@ int nr_pbch_decode(PHY_VARS_NR_UE *ue,
                    int *ssb_index,
                    int *ret_symbol_offset,
                    fapiPbch_t *result);
+
+/* Receive-branch selection diversity (see nr_dlsch_demodulation.c's definition-site comment).
+ * nr_dlsch_force_branch(a) pins the rank-1 four-RX decode to branch `a`; -1 restores the normal
+ * ISAC_RX_MRC_MODE behaviour and is the default for every caller that never calls this.
+ * nr_dlsch_last_branch() returns the branch the previous decode actually used, or -1 if it
+ * combined. Both are thread-local: concurrent consumers decode different TBs. */
+void nr_dlsch_force_branch(int ant);
+int nr_dlsch_last_branch(void);
 /**@}*/
 #endif
 

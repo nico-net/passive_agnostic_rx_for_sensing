@@ -23,6 +23,29 @@
 #include "openair1/PHY/TOOLS/phy_scope_interface.h"
 #include "nfapi/open-nFAPI/nfapi/public_inc/nfapi_nr_interface.h"
 
+/* SELECTION DIVERSITY across receive branches (2026-09-03).
+ *
+ * `nr_dlsch_forced_branch` pins the branch the rank-1 four-RX path decodes from; -1 (default)
+ * leaves the ISAC_RX_MRC_MODE logic in charge, so every caller that does not set it is
+ * bit-identical to before. `nr_dlsch_used_branch` reports back which branch was actually used
+ * (-1 = a combining mode, i.e. no single branch).
+ *
+ * Thread-local, not global: nr_pdsch_passive_queue runs several consumer threads, each decoding a
+ * different transport block, and a shared pin would make one consumer's retry silently change
+ * another's branch mid-TB. */
+__thread int nr_dlsch_forced_branch = -1;
+__thread int nr_dlsch_used_branch = -1;
+
+void nr_dlsch_force_branch(int ant)
+{
+  nr_dlsch_forced_branch = ant;
+}
+
+int nr_dlsch_last_branch(void)
+{
+  return nr_dlsch_used_branch;
+}
+
 // #define DEBUG_HARQ(a...) printf(a)
 #define DEBUG_HARQ(...)
 //#define DEBUG_DLSCH_DEMOD
@@ -786,6 +809,8 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
    * The selection is decided once per transport block, at first_symbol_flag, and must persist
    * across the remaining symbols -- hence thread-local state rather than a local: the deferred
    * decode runs several consumer threads concurrently, each on a different TB. */
+  /* Which branch this TB actually decoded from, for the caller's retry bookkeeping. Thread-local
+   * for the same reason as the state below: several consumer threads decode different TBs at once. */
   static __thread int t_mrc_nb_rx = 0;
   static __thread int t_mrc_rx_index = 0;
   static __thread int t_mrc_live_mask = 0xF; // which receive branches feed the combiner (mode 3)
@@ -994,7 +1019,21 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
           best = aarx;
         }
       }
-      if (t_mrc_mode == 0) {
+      /* SELECTION-DIVERSITY OVERRIDE (2026-09-03). When nr_dlsch_force_branch() has pinned a
+       * branch, it wins over every mode below: the passive decoder uses it to RE-DECODE the same
+       * transport block from a different branch after a CRC failure, so the branch identity has to
+       * come from the caller rather than from this function's own power ranking. -1 (the default,
+       * and the only value any other caller ever sees) leaves the mode logic untouched.
+       *
+       * Why the caller and not `best`: mode 1 already decodes the STRONGEST branch and this rig
+       * measured it at 0.0 % across six runs while branch 3 held the highest |h| -- power ranking
+       * does not predict decodability here, so the retry walks branches by index instead and lets
+       * the CRC decide. */
+      if (nr_dlsch_forced_branch >= 0 && nr_dlsch_forced_branch < nbRx) {
+        t_mrc_nb_rx = 1;
+        t_mrc_rx_index = nr_dlsch_forced_branch;
+        avgs = avg[nr_dlsch_forced_branch];
+      } else if (t_mrc_mode == 0) {
         t_mrc_nb_rx = 1;
         t_mrc_rx_index = 0;
         avgs = avg[0];
@@ -1037,6 +1076,8 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
       }
       mrc_nb_rx = t_mrc_nb_rx;
       mrc_rx_index = t_mrc_rx_index;
+      // Publish the branch actually used, so the passive decoder's retry knows which one to skip.
+      nr_dlsch_used_branch = (t_mrc_nb_rx == 1) ? t_mrc_rx_index : -1;
 
       /* RXBRANCH: the per-branch powers this decision is made from. §12.7 records that CHESTDIAG's
        * equivalent field was declared, printed and never written, which is why the imbalance stayed

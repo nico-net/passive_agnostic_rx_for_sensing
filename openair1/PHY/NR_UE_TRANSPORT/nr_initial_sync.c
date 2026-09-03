@@ -81,14 +81,47 @@ static bool nr_pbch_detection(const UE_nr_rxtx_proc_t *proc,
 
   const int nb_ant = frame_parms->nb_antennas_rx;
   const int estimateSz = frame_parms->ofdm_symbol_size;
+  /* SELECTION DIVERSITY for acquisition (2026-09-03), mirroring the PDSCH decode retry in
+   * nr_pdsch_passive_decode.c.
+   *
+   * `sel` 0 is the ORIGINAL all-antenna attempt, unchanged; sel 1..nb_ant then retry PBCH using
+   * ONE branch each. So this can only turn a failed acquisition into a successful one, and at
+   * nb_ant == 1 the extra passes do not exist at all -- bit-identical to before in that case.
+   *
+   * Why acquisition needs it too: nr_generate_pbch_llr() combines every branch, so a branch that
+   * is present but not coherently usable (the per-daughterboard frequency-offset hypothesis --
+   * X410 puts ch0/1 on board A, ch2/3 on board B) corrupts the combined PBCH LLRs and can fail
+   * sync outright, which is the shape of the VOID_NO_SIB1 / CFO mis-lock runs. One clean branch is
+   * worth more than four averaged ones when some of them are rotating.
+   *
+   * Cost is bounded and paid only on failure: PBCH detection runs once per DETECTED cell, not per
+   * scanned GSCN, and every extra pass is skipped as soon as one decodes. */
+  for (int sel = 0; sel <= nb_ant; sel++) {
+    if (sel > 0 && nb_ant == 1) {
+      break; // single antenna: sel 0 already WAS that branch
+    }
+    const int sel_ant = sel - 1;             // -1 for the all-antenna pass
+    const int eff_ant = (sel == 0) ? nb_ant : 1;
+    /* A shallow copy with nb_antennas_rx narrowed to 1: nr_generate_pbch_llr() takes its antenna
+     * count from frame_parms, not from the array extents, so restricting it to one branch means
+     * handing it a frame_parms that says so. Shallow is correct -- the struct's pointer members
+     * (rotation tables etc.) are read-only and shared. */
+    NR_DL_FRAME_PARMS fp_one;
+    const NR_DL_FRAME_PARMS *fp_eff = frame_parms;
+    if (sel > 0) {
+      fp_one = *frame_parms;
+      fp_one.nb_antennas_rx = 1;
+      fp_eff = &fp_one;
+    }
   for (NR_UE_SSB *ssb = best_ssb; ssb < best_ssb + N_L * N_hf; ssb++) {
     // computing channel estimation for selected best ssb
     int16_t pbch_e_rx[NR_POLAR_PBCH_E];
     // Shared across this SSB's three PBCH symbols -- see nr_generate_pbch_llr().
     double pbch_log2_maxh = -1.0;
     for (int i = pbch_initial_symbol; i < pbch_initial_symbol + 3; i++) {
-      __attribute__((aligned(32))) c16_t dl_ch_estimates[nb_ant][estimateSz];
-      for (int aarx = 0; aarx < nb_ant; aarx++) {
+      __attribute__((aligned(32))) c16_t dl_ch_estimates[eff_ant][estimateSz];
+      for (int aarx = 0; aarx < eff_ant; aarx++) {
+        const int src_ant = (sel == 0) ? aarx : sel_ant;
         nr_pbch_channel_estimation(frame_parms,
                                    NULL,
                                    dl_ch_estimates[aarx],
@@ -97,23 +130,23 @@ static bool nr_pbch_detection(const UE_nr_rxtx_proc_t *proc,
                                    ssb->i_ssb,
                                    ssb->n_hf,
                                    ssb_start_subcarrier,
-                                   rxdataF[i][aarx],
+                                   rxdataF[i][src_ant],
                                    false,
                                    Nid_cell);
       }
       if (DUMP_PBCH_CH_ESTIMATES) {
         char varName[30] = "";
         snprintf(varName, sizeof(varName), "pbch_ch_estimates_symbol_%d", i);
-        LOG_MM("pbch_ch_estimates", varName, dl_ch_estimates, nb_ant * estimateSz, 1, 1);
+        LOG_MM("pbch_ch_estimates", varName, dl_ch_estimates, eff_ant * estimateSz, 1, 1);
       }
       nr_generate_pbch_llr(NULL,
                            proc,
-                           frame_parms,
+                           fp_eff,
                            i,
                            ssb->i_ssb,
                            Nid_cell,
                            ssb_start_subcarrier,
-                           rxdataF[i],
+                           (sel == 0) ? rxdataF[i] : (const c16_t(*)[frame_parms->ofdm_symbol_size]) & rxdataF[i][sel_ant],
                            dl_ch_estimates,
                            pbch_e_rx,
                            &pbch_log2_maxh);
@@ -121,7 +154,7 @@ static bool nr_pbch_detection(const UE_nr_rxtx_proc_t *proc,
 
     if (0
         == nr_pbch_decode(NULL,
-                          frame_parms,
+                          fp_eff,
                           proc,
                           ssb->i_ssb,
                           Nid_cell,
@@ -130,7 +163,13 @@ static bool nr_pbch_detection(const UE_nr_rxtx_proc_t *proc,
                           ssb_index,
                           symbol_offset,
                           result)) {
-      LOG_A(PHY, "Initial sync: pbch decoded sucessfully, ssb index %d\n", *ssb_index);
+      if (sel == 0) {
+        LOG_A(PHY, "Initial sync: pbch decoded sucessfully, ssb index %d\n", *ssb_index);
+      } else {
+        // Worth its own line: it says the combined path FAILED and this branch alone carried it.
+        LOG_A(PHY, "Initial sync: pbch decoded sucessfully on BRANCH %d alone (combined attempt failed), ssb index %d\n",
+              sel_ant, *ssb_index);
+      }
       // TEMPORARY DIAGNOSTIC (2026-08-02): snapshot this SUCCESSFUL acquisition decode as the
       // cross-thread reference for the failure dump. Tracking never succeeds in a failing run, so
       // acquisition -- same signal, same cell, seconds earlier -- is the only available "working"
@@ -140,8 +179,9 @@ static bool nr_pbch_detection(const UE_nr_rxtx_proc_t *proc,
       return true;
     }
   }
+  } // end per-branch selection-diversity retry (sel)
 
-  LOG_W(PHY, "Initial sync: pbch not decoded, ssb index %d\n", frame_parms->ssb_index);
+  LOG_W(PHY, "Initial sync: pbch not decoded on any branch, ssb index %d\n", frame_parms->ssb_index);
   return false;
 }
 

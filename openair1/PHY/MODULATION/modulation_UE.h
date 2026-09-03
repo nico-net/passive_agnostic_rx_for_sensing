@@ -40,6 +40,26 @@ int nr_slot_fep(PHY_VARS_NR_UE *ue,
                 uint32_t sample_offset,
                 c16_t **rxdata);
 
+/* Per-branch residual frequency offset, in Hz, added to the common de-rotation inside
+ * nr_slot_fep_ant(). Written by the DM-RS phase-slope estimator in nr_pdsch_passive_decode.c,
+ * read by the FEP. All-zero (the default) reproduces the previous behaviour exactly.
+ * See slot_fep_nr.c's definition-site comment for why per-branch de-rotation is needed at all. */
+#define NR_MAX_BRANCH_FO 8
+void nr_ue_set_branch_fo_hz(int ant, double hz);
+double nr_ue_get_branch_fo_hz(int ant);
+
+// Single-antenna variant of nr_slot_fep(), for passive-rx to dispatch across the thread pool --
+// see its definition-site comment in slot_fep_nr.c for why this exists as a separate function.
+int nr_slot_fep_ant(PHY_VARS_NR_UE *ue,
+                    const NR_DL_FRAME_PARMS *frame_parms,
+                    unsigned int slot,
+                    unsigned int symbol,
+                    unsigned int ant,
+                    c16_t rxdataF[][frame_parms->samples_per_slot_wCP],
+                    enum nr_Link linktype,
+                    uint32_t sample_offset,
+                    c16_t **rxdata);
+
 // TEMPORARY DIAGNOSTIC (2026-08-05): see slot_fep_nr.c's definition-site comment. Valid only
 // immediately after a synchronous nr_slot_fep() call on the same thread.
 /// See slot_fep_nr.c. NAN = read the offset from `ue` (default for every thread).

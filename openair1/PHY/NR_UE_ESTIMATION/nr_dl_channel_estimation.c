@@ -19,6 +19,8 @@
 #include "nfapi/open-nFAPI/nfapi/public_inc/nfapi_nr_interface.h"
 #include "instrumentation.h"
 #include "executables/nr-softmodem-common.h"
+#include "executables/nr-uesoftmodem.h" // get_nrUE_params, for the per-antenna chest dispatch below
+#include "common/utils/threadPool/task_ans.h"
 
 /* Per-RX-antenna noise variance from the most recent channel estimate, for diagnostics that need to
  * judge ONE branch rather than the combine. Thread-local: several passive decode consumers run this
@@ -1230,6 +1232,78 @@ void NFAPI_NR_DMRS_TYPE2_average_prb(NR_DL_FRAME_PARMS *frame_parms,
 #endif
 }
 
+/* PASSIVE-RX ANTENNA PARALLELISM (2026-09-03): the per-antenna interpolation loop below
+ * (NFAPI_NR_DMRS_TYPE{1,2}_{linear_interp,average_prb}) measured ~4x cost at 4 antennas vs 1
+ * (123.3us vs 31.5us, PDTIM's "chest" timer), same mechanism as nr_slot_fep_ant() in
+ * slot_fep_nr.c -- see that function's comment for the full writeup. Each antenna writes its own
+ * dl_ch_estimates[nl*nb_antennas_rx+aarx] slice and its own nr_dl_chest_nvar_ant[aarx] entry, so
+ * antennas share no mutable state except the two nvar REDUCTION scalars (nvar_acc/
+ * nvar_ant_count), which this dispatch moves out of the parallel section into a serial pass over
+ * a per-antenna array afterward -- exactly mirroring the ordering the comment above this function
+ * already documents (get the mean right by not letting antennas clobber each other). pilot[] is
+ * computed once and read-only across tasks. nb_antennas_rx==1 skips the pool and is bit-identical
+ * to before. */
+typedef struct {
+  PHY_VARS_NR_UE *ue;
+  const fapi_nr_dl_config_dlsch_pdu_rel15_t *dlsch;
+  const freq_alloc_bitmap_t *freq_alloc;
+  int nl;
+  unsigned char symbol;
+  uint32_t pdsch_est_size;
+  int32_t *dl_ch_estimates_flat;
+  int rxdataFsize;
+  c16_t *rxdataF_flat;
+  int aarx;
+  c16_t *pilot;
+  int config_type;
+  int rb_offset;
+  int nb_rb_pdsch;
+  int8_t delta;
+  int bwp_start_subcarrier;
+  bool want_nvar;
+  uint32_t nvar_out;
+  task_ans_t *ans;
+} nr_pdsch_chest_ant_task_t;
+
+static void nr_pdsch_chest_ant_task(void *arg)
+{
+  nr_pdsch_chest_ant_task_t *a = (nr_pdsch_chest_ant_task_t *)arg;
+  NR_DL_FRAME_PARMS *fp = &a->ue->frame_parms;
+  const int ch_offset = fp->ofdm_symbol_size * a->symbol;
+  const int symbol_offset = ch_offset;
+  const int aarx = a->aarx;
+
+  c16_t(*rxdataF)[a->rxdataFsize] = (c16_t(*)[a->rxdataFsize])a->rxdataF_flat;
+  int32_t(*dl_ch_estimates)[a->pdsch_est_size] = (int32_t(*)[a->pdsch_est_size])a->dl_ch_estimates_flat;
+
+  uint32_t nvar_ant = 0;
+  uint32_t *nvar_p = a->want_nvar ? &nvar_ant : NULL;
+  c16_t *rxF = &rxdataF[aarx][symbol_offset + a->delta];
+  c16_t *dl_ch = (c16_t *)&dl_ch_estimates[a->nl * fp->nb_antennas_rx + aarx][ch_offset];
+  memset(dl_ch, 0, sizeof(*dl_ch) * fp->ofdm_symbol_size);
+
+  delay_t delay = {0};
+  if (a->config_type == NFAPI_NR_DMRS_TYPE1 && a->ue->chest_freq == 0) {
+    NFAPI_NR_DMRS_TYPE1_linear_interp(fp, rxF, &a->pilot[6 * a->rb_offset], dl_ch, a->bwp_start_subcarrier,
+                                      a->freq_alloc, a->dlsch->BWPSize, &delay, nvar_p);
+  } else if (a->config_type == NFAPI_NR_DMRS_TYPE2 && a->ue->chest_freq == 0) {
+    NFAPI_NR_DMRS_TYPE2_linear_interp(fp, rxF, &a->pilot[4 * a->rb_offset], dl_ch, a->bwp_start_subcarrier,
+                                      a->freq_alloc, a->dlsch->BWPSize, &delay, nvar_p);
+  } else if (a->config_type == NFAPI_NR_DMRS_TYPE1) {
+    AssertFatal(a->dlsch->resource_alloc == 1, "PRB average in channel estimation not supported for type0 DLSCH\n");
+    NFAPI_NR_DMRS_TYPE1_average_prb(fp, rxF, &a->pilot[6 * a->rb_offset], dl_ch, a->bwp_start_subcarrier, a->nb_rb_pdsch);
+  } else {
+    AssertFatal(a->dlsch->resource_alloc == 1, "PRB average in channel estimation not supported for type0 DLSCH\n");
+    NFAPI_NR_DMRS_TYPE2_average_prb(fp, rxF, &a->pilot[4 * a->rb_offset], dl_ch, a->bwp_start_subcarrier, a->nb_rb_pdsch);
+  }
+
+  a->nvar_out = nvar_ant;
+  if (aarx < NR_DL_CHEST_MAX_ANT) {
+    nr_dl_chest_nvar_ant[aarx] = nvar_ant; // 0 here matches the pre-loop zeroing this replaces for a no-estimate antenna
+  }
+  completed_task_ans(a->ans);
+}
+
 void nr_pdsch_channel_estimation(PHY_VARS_NR_UE *ue,
                                  const UE_nr_rxtx_proc_t *proc,
                                  const fapi_nr_dl_config_dlsch_pdu_rel15_t *dlsch,
@@ -1298,64 +1372,101 @@ void nr_pdsch_channel_estimation(PHY_VARS_NR_UE *ue,
     nr_dl_chest_nvar_ant[a_] = 0;
   }
 
-  for (int aarx = 0; aarx < fp->nb_antennas_rx; aarx++) {
-#ifdef DEBUG_PDSCH
-    printf("\n============================================\n");
-    printf("==== Tx port %i, Rx antenna %i, Symbol %i ====\n", p, aarx, symbol);
-    printf("============================================\n");
-#endif
-
-    uint32_t nvar_ant = 0;
-    uint32_t *nvar_p = nvar ? &nvar_ant : NULL;
-    c16_t *rxF = &rxdataF[aarx][symbol_offset + delta];
-    c16_t *dl_ch = (c16_t *)&dl_ch_estimates[nl * fp->nb_antennas_rx + aarx][ch_offset];
-    memset(dl_ch, 0, sizeof(*dl_ch) * fp->ofdm_symbol_size);
-
-    if (config_type == NFAPI_NR_DMRS_TYPE1 && ue->chest_freq == 0) {
-      NFAPI_NR_DMRS_TYPE1_linear_interp(fp,
-                                        rxF,
-                                        &pilot[6 * rb_offset],
-                                        dl_ch,
-                                        bwp_start_subcarrier,
-                                        freq_alloc,
-                                        dlsch->BWPSize,
-                                        &delay,
-                                        nvar_p);
-
-    } else if (config_type == NFAPI_NR_DMRS_TYPE2 && ue->chest_freq == 0) {
-      NFAPI_NR_DMRS_TYPE2_linear_interp(fp,
-                                        rxF,
-                                        &pilot[4 * rb_offset],
-                                        dl_ch,
-                                        bwp_start_subcarrier,
-                                        freq_alloc,
-                                        dlsch->BWPSize,
-                                        &delay,
-                                        nvar_p);
-
-    } else if (config_type == NFAPI_NR_DMRS_TYPE1) {
-      AssertFatal(dlsch->resource_alloc == 1, "PRB average in channel estimation not supported for type0 DLSCH\n");
-      NFAPI_NR_DMRS_TYPE1_average_prb(fp, rxF, &pilot[6 * rb_offset], dl_ch, bwp_start_subcarrier, nb_rb_pdsch);
-
-    } else {
-      AssertFatal(dlsch->resource_alloc == 1, "PRB average in channel estimation not supported for type0 DLSCH\n");
-      NFAPI_NR_DMRS_TYPE2_average_prb(fp, rxF, &pilot[4 * rb_offset], dl_ch, bwp_start_subcarrier, nb_rb_pdsch);
+  if (fp->nb_antennas_rx > 1) {
+    nr_pdsch_chest_ant_task_t chest_tasks[fp->nb_antennas_rx];
+    task_ans_t chest_ans;
+    init_task_ans(&chest_ans, fp->nb_antennas_rx);
+    for (int aarx = 0; aarx < fp->nb_antennas_rx; aarx++) {
+      chest_tasks[aarx] = (nr_pdsch_chest_ant_task_t){.ue = ue,
+                                                      .dlsch = dlsch,
+                                                      .freq_alloc = freq_alloc,
+                                                      .nl = nl,
+                                                      .symbol = symbol,
+                                                      .pdsch_est_size = pdsch_est_size,
+                                                      .dl_ch_estimates_flat = &dl_ch_estimates[0][0],
+                                                      .rxdataFsize = rxdataFsize,
+                                                      .rxdataF_flat = &rxdataF[0][0],
+                                                      .aarx = aarx,
+                                                      .pilot = pilot,
+                                                      .config_type = config_type,
+                                                      .rb_offset = rb_offset,
+                                                      .nb_rb_pdsch = nb_rb_pdsch,
+                                                      .delta = delta,
+                                                      .bwp_start_subcarrier = bwp_start_subcarrier,
+                                                      .want_nvar = (nvar != NULL),
+                                                      .ans = &chest_ans};
+      task_t t = {.func = nr_pdsch_chest_ant_task, .args = &chest_tasks[aarx]};
+      pushTpool(&get_nrUE_params()->Tpool, t);
     }
-
-#ifdef DEBUG_PDSCH
-    dl_ch = (c16_t *)&dl_ch_estimates[nl * fp->nb_antennas_rx + aarx][ch_offset];
-    for (uint16_t idxP = 0; idxP < ceil((float)nb_rb_pdsch * 12 / 8); idxP++) {
-      for (uint8_t idxI = 0; idxI < 8; idxI++) {
-        printf("%4d\t%4d\t", dl_ch[idxP * 8 + idxI].r, dl_ch[idxP * 8 + idxI].i);
+    join_task_ans(&chest_ans);
+    if (nvar) {
+      for (int aarx = 0; aarx < fp->nb_antennas_rx; aarx++) {
+        if (chest_tasks[aarx].nvar_out > 0) {
+          nvar_acc += chest_tasks[aarx].nvar_out;
+          nvar_ant_count++;
+        }
       }
-      printf("%2d\n", idxP);
     }
+  } else {
+    for (int aarx = 0; aarx < fp->nb_antennas_rx; aarx++) {
+#ifdef DEBUG_PDSCH
+      printf("\n============================================\n");
+      printf("==== Tx port %i, Rx antenna %i, Symbol %i ====\n", p, aarx, symbol);
+      printf("============================================\n");
 #endif
-    if (nvar && nvar_ant > 0) {
-      nvar_acc += nvar_ant;
-      nvar_ant_count++;
-      if (aarx < NR_DL_CHEST_MAX_ANT) {
-        nr_dl_chest_nvar_ant[aarx] = nvar_ant;
+
+      uint32_t nvar_ant = 0;
+      uint32_t *nvar_p = nvar ? &nvar_ant : NULL;
+      c16_t *rxF = &rxdataF[aarx][symbol_offset + delta];
+      c16_t *dl_ch = (c16_t *)&dl_ch_estimates[nl * fp->nb_antennas_rx + aarx][ch_offset];
+      memset(dl_ch, 0, sizeof(*dl_ch) * fp->ofdm_symbol_size);
+
+      if (config_type == NFAPI_NR_DMRS_TYPE1 && ue->chest_freq == 0) {
+        NFAPI_NR_DMRS_TYPE1_linear_interp(fp,
+                                          rxF,
+                                          &pilot[6 * rb_offset],
+                                          dl_ch,
+                                          bwp_start_subcarrier,
+                                          freq_alloc,
+                                          dlsch->BWPSize,
+                                          &delay,
+                                          nvar_p);
+
+      } else if (config_type == NFAPI_NR_DMRS_TYPE2 && ue->chest_freq == 0) {
+        NFAPI_NR_DMRS_TYPE2_linear_interp(fp,
+                                          rxF,
+                                          &pilot[4 * rb_offset],
+                                          dl_ch,
+                                          bwp_start_subcarrier,
+                                          freq_alloc,
+                                          dlsch->BWPSize,
+                                          &delay,
+                                          nvar_p);
+
+      } else if (config_type == NFAPI_NR_DMRS_TYPE1) {
+        AssertFatal(dlsch->resource_alloc == 1, "PRB average in channel estimation not supported for type0 DLSCH\n");
+        NFAPI_NR_DMRS_TYPE1_average_prb(fp, rxF, &pilot[6 * rb_offset], dl_ch, bwp_start_subcarrier, nb_rb_pdsch);
+
+      } else {
+        AssertFatal(dlsch->resource_alloc == 1, "PRB average in channel estimation not supported for type0 DLSCH\n");
+        NFAPI_NR_DMRS_TYPE2_average_prb(fp, rxF, &pilot[4 * rb_offset], dl_ch, bwp_start_subcarrier, nb_rb_pdsch);
+      }
+
+#ifdef DEBUG_PDSCH
+      dl_ch = (c16_t *)&dl_ch_estimates[nl * fp->nb_antennas_rx + aarx][ch_offset];
+      for (uint16_t idxP = 0; idxP < ceil((float)nb_rb_pdsch * 12 / 8); idxP++) {
+        for (uint8_t idxI = 0; idxI < 8; idxI++) {
+          printf("%4d\t%4d\t", dl_ch[idxP * 8 + idxI].r, dl_ch[idxP * 8 + idxI].i);
+        }
+        printf("%2d\n", idxP);
+      }
+#endif
+      if (nvar && nvar_ant > 0) {
+        nvar_acc += nvar_ant;
+        nvar_ant_count++;
+        if (aarx < NR_DL_CHEST_MAX_ANT) {
+          nr_dl_chest_nvar_ant[aarx] = nvar_ant;
+        }
       }
     }
   }
