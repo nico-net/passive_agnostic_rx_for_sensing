@@ -37,16 +37,15 @@ namespace {
 
 constexpr double SPEED_OF_LIGHT = 299792458.0;
 
-// Matches the diagnosed fixed group-delay LOS tap (~bin 6 on the fused 51-PRB grid, per CLAUDE.md's
-// resolved LOS/CFO artifact note). Used only to seed the per-row peak search window -- range_res is
-// invariant to a row's native comb (see process()), so this nominal bin is the same integer for
-// every row regardless of source/comb.
+// LAST-RESORT fallback bin for the LOS search, nothing more. The walking tracker seeds row 0 from
+// the earliest arrival it can actually find, and this value is used only when no window anywhere
+// clears the fade gate (see the comment at the row-0 seed below). It is NOT a calibration and NOT a
+// measurement of where the direct path is: on the current rig the gNB sits 4.13 m away and the LOS
+// locks near bin 2. Deployments that want a better fallback set [sensing] nominal_los_range_m.
 //
-// 2026-07-23: DOUBLED 49.0 -> 98.0 alongside the range-axis calibration fix (range_res_m lost its
-// erroneous monostatic factor 2; see range_doppler.cc). The physical tap did not move -- 49 m was
-// that same tap's range as reported by the OLD, halved axis. Doubling the constant in step keeps
-// nominal_los_bin() on the IDENTICAL bin it always seeded from, which is what this constant is
-// actually for; leaving it at 49.0 would have silently halved the seed bin.
+// Do not read a physical meaning into 98.0. It is twice a 49.0 that dated from a 20 MHz OTA cell,
+// doubled in 2026-07-23 only so nominal_los_bin() kept landing on the same integer after
+// range_res_m dropped an erroneous monostatic factor of 2.
 constexpr double NOMINAL_LOS_RANGE_M = 98.0;
 
 // Half-width (in bins) of the window around the nominal bin searched for the CPI's FIRST locked row

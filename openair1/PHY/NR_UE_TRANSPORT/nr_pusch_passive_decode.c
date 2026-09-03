@@ -140,11 +140,17 @@ static int ta_sweep_points(void)
 
 /* ---- UL RT-THREAD COST BREAKDOWN (ISAC_PUSCH_TIMING=1, default OFF) ---------------------------
  * The downlink has BTIM (nr_pdcch_blind_monitor_rt.c) and it is what turned "move the PDSCH decode
- * off the receive thread" from an assumption into a measurement. The uplink path had no equivalent
- * at all, and unlike the downlink it runs ENTIRELY IN-LINE on the PHY receive thread -- there is no
- * deferred queue between nr-ue.c's UL-slot hook and the LDPC decoder. So the one path with no
- * timing instrument is also the one with no escape valve. Same shape as BTIM deliberately, so the
- * two directions' numbers are read the same way.
+ * off the receive thread" from an assumption into a measurement. UTIM is the uplink equivalent,
+ * same shape deliberately, so the two directions' numbers are read the same way.
+ *
+ * WHERE THIS RUNS. Corrected 2026-09-03: an earlier version of this comment said the uplink runs
+ * "ENTIRELY IN-LINE ... there is no deferred queue", and that is false for every conf we actually
+ * capture with. nr_pusch_passive_queue.{c,h} is the UL escape valve; nr_pusch_passive_monitor_rt.c
+ * enqueues to it when pdcch_blind_monitor_ul_thread is non-zero and calls this decoder in-line only
+ * as the fallback when it is not. The default IS 0 (in-line), which is what made the stale claim
+ * plausible -- but tests/passive_rx sets "2:32:2" and the logs show "passive PUSCH decode consumer
+ * 0/1 started". So the 1065 us/grant measured below is the cost of the WORK, not of blocking the
+ * receive thread, unless you have deliberately turned the queue off.
  *
  * R7 applies: characterise with this on, score with it off. */
 #define UTIM_FEP     0
