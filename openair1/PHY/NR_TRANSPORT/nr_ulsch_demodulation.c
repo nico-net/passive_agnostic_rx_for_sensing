@@ -18,6 +18,35 @@
 #include "T_messages_creator.h"
 #include <sys/time.h>
 #include "openair1/SCHED_NR/sched_nr.h"
+#include "executables/softmodem-common.h" // IS_PASSIVE_RX_MODE, for the passive-only branch restriction below
+
+/* PASSIVE-RX UL RECEIVE-BRANCH RESTRICTION (2026-09-03).
+ *
+ * Returns the single receive branch the UL path should use, or -1 for the legacy all-branch
+ * behaviour. Two call sites must agree on the answer -- the equaliser's combining (chFext) and the
+ * fixed-point scale (avgs) -- because the DL four-RX work established that fixing one without the
+ * other does not help: the LLR shift has to match the branch the decoder actually reads.
+ *
+ * Why UL needs this at all, measured on this rig: branches 1-3 are undecodable (selection diversity
+ * rescued 0 of 15411 transport blocks) while branch 0 alone decodes. UL scored 93.5 % CRC at
+ * --ue-nb-ant-rx 1 and 0-22 % at 4, because the UL joint receiver combines every branch
+ * unconditionally and has no equivalent of the DL path's ISAC_RX_MRC_MODE=0 escape hatch.
+ *
+ * GATED ON PASSIVE MODE: a real gNB wants all of its branches. four-rx-mrc-skip-blocks-passive-pdcch
+ * records what it costs to fix one use case by breaking the other. */
+static int nr_ulsch_passive_keep_branch(int nb_rx_ant)
+{
+  if (nb_rx_ant <= 1 || !IS_PASSIVE_RX_MODE(get_softmodem_params())) {
+    return -1;
+  }
+  static int s_keep = -2; // -2 = unparsed
+  if (s_keep == -2) {
+    const char *e = getenv("ISAC_UL_RX_BRANCH");
+    s_keep = (e != NULL) ? atoi(e) : 0; // default branch 0, mirroring the DL default
+    LOG_W(PHY, "SENSING: UL restricted to receive branch %d (ISAC_UL_RX_BRANCH, -1 = all branches)\n", s_keep);
+  }
+  return (s_keep >= 0 && s_keep < nb_rx_ant) ? s_keep : -1;
+}
 
 #define NR_MAX_PUSCH_SCRAMBLING_STACK_BYTES (2 * 1024 * 1024) // 2MB
 
@@ -280,6 +309,25 @@ static void inner_rx(PHY_VARS_gNB *gNB,
 #endif
     }
   }
+  /* Silence the branches this receiver cannot decode, BEFORE they reach the combiner. chFext is a
+   * local, freshly-memset buffer, so this touches no shared state: zeroing a branch's channel
+   * estimate makes nr_channel_compensation() weight it by h* == 0, contributing exactly zero
+   * signal AND zero noise. Same technique the DL path uses for its excluded branches, and cheaper
+   * than permuting rows. -1 (a real gNB, or ISAC_UL_RX_BRANCH=-1) skips this entirely. */
+  {
+    const int ul_keep = nr_ulsch_passive_keep_branch(nb_rx_ant);
+    if (ul_keep >= 0) {
+      for (int aarx = 0; aarx < nb_rx_ant; aarx++) {
+        if (aarx == ul_keep) {
+          continue;
+        }
+        for (int aatx = 0; aatx < nb_layer; aatx++) {
+          memset(chFext[aatx][aarx], 0, sizeof(chFext[0][0]));
+        }
+      }
+    }
+  }
+
   start_meas(pusch_ch_comp);
   c16_t rho[nb_layer][nb_layer][buffer_length] __attribute__((aligned(64)));
   c16_t rxF_ch_maga[nb_layer][buffer_length] __attribute__((aligned(64)));
@@ -805,10 +853,36 @@ int nr_rx_pusch_group_tp(PHY_VARS_gNB *gNB,
   int avg[num_sp_streams * total_layers];
   nr_channel_level(meas_symbol, size_est, (c16_t(*)[size_est])ul_ch_estimates_ext, num_sp_streams, total_layers, avg, nb_re_pusch);
 
+  /* ---- PASSIVE-RX: derive the fixed-point scale from the USABLE branch only (2026-09-03) -------
+   *
+   * `avgs` is the mean |H|^2 (nr_channel_level -> simde_mm_average over the extracted estimates) of
+   * the STRONGEST (layer, antenna) pair, and log2_maxh below turns it into the right-shift the
+   * equaliser applies to its y.conj(h) product. It is, in effect, the fixed-point AGC: size it for
+   * more energy than the decoder actually receives and the real signal is shifted down into the
+   * quantiser's noise floor.
+   *
+   * THE DEFECT this fixes: `cmax` takes the max over ALL branches. On this passive rig branches 1-3
+   * are undecodable (measured: 0 of 15411 transport blocks rescued, while branch 0 alone decodes
+   * 42-93 %), so whenever a dead branch is the strongest, the AGC is sized for energy that carries
+   * no information and the good branch's LLRs are quantised away. That is why four antennas score
+   * WORSE than one here rather than merely no better -- UL 93.5 % at 1 antenna vs 0-22 % at 4.
+   *
+   * The DL path has had this fix since the four-RX work (nr_dlsch_demodulation.c mode 0 overrides
+   * `avgs = avg[0]`, recorded as "the load-bearing half" -- the LLR shift must match the branch the
+   * decoder actually reads). This is that same half, for UL, which never had it.
+   *
+   * GATED ON PASSIVE MODE, deliberately: a real gNB wants every branch in the max, and
+   * four-rx-mrc-skip-blocks-passive-pdcch records the cost of "fixing" one use case by breaking the
+   * other. ISAC_UL_RX_BRANCH overrides -- -1 keeps the legacy all-branch max, >= 0 pins a branch.
+   *
+   * This is the SCALE half; the COMBINING half is the chFext zeroing in nr_rx_pusch_symbol(), and
+   * both read nr_ulsch_passive_keep_branch() so they cannot disagree about which branch is live. */
+  const int ul_keep = nr_ulsch_passive_keep_branch(num_sp_streams);
   int avgs = 0;
   for (int nl = 0; nl < total_layers; nl++)
     for (int aarx = 0; aarx < num_sp_streams; aarx++)
-      avgs = cmax(avgs, avg[nl * num_sp_streams + aarx]);
+      if (ul_keep < 0 || aarx == ul_keep)
+        avgs = cmax(avgs, avg[nl * num_sp_streams + aarx]);
 
   if (total_layers == 2 && rel15_ul_ref->qam_mod_order > 6)
     joint_pv->log2_maxh = (log2_approx(avgs) >> 1) - 3; // for MMSE
