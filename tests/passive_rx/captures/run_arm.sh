@@ -147,15 +147,16 @@ for t in $(seq 1 "$TRIES"); do
 
   B=$(ssh sens4 "stat -c%s /home/sens/NICOLA/gnbLogs/gnb.log")
   MISS0=$(nic_miss)
-  # PER-SLOT DIAGNOSTICS BACK ON BY DEFAULT -- turning them off MADE THINGS WORSE.
+  # PER-SLOT DIAGNOSTICS ON BY DEFAULT. Set DIAGOFF=1 to run without them.
   #
-  # They were hardcoded on and together wrote 683 log lines/s from the receive thread, so gating
-  # them off looked like free headroom. Measured the opposite: with them off, runs lasted 10-30 s
-  # (both A/B arms, so not the knob under test); with them back on, 127 s and still healthy at
-  # pbch_ok=50/50, max_pos_acc flat at 542-549. n=1 on the recovery, but the direction contradicts
-  # the assumption that they are pure logging, and an unexplained 4x regression is not worth
-  # keeping for a log-rate saving. Set DIAGOFF=1 to try without them again -- and re-measure the
-  # real culprit first: the TSYNC_PDCCH flood was ISAC_TSYNC_AUDIT, not these.
+  # This block used to carry an n=1 claim that turning them OFF "MADE THINGS WORSE" (runs of
+  # 10-30 s against 127 s). RETRACTED 2026-09-02: that pair was captured while the host had
+  # silently reverted to its 1 GbE management address, so UHD was starved and EVERY measurement
+  # from that window read as a code effect. The preflight above now makes that specific failure
+  # impossible, but the conclusion drawn under it does not survive. Their real cost is also now
+  # measured and small -- the 683 lines/s figure was dominated by the TSYNC_PDCCH flood, which is
+  # gated separately on ISAC_TSYNC_AUDIT -- and log rate turns out to track receiver HEALTH rather
+  # than harm it (the 2195 lines/s run had zero NIC drops; the 41 lines/s run had 45k).
   sudo env ISAC_DISC_NO_RESYNC=1  \
     ISAC_PDCCH_TIMING=1 ISAC_PUSCH_TIMING=1 ISAC_PUSCH_DIAG=1 \
    ${PDCCHTIMING:+ISAC_PDCCH_TIMING=1} ${PUSCHTIMING:+ISAC_PUSCH_TIMING=1} ${PUSCHDIAG:+ISAC_PUSCH_DIAG=1} \
@@ -174,6 +175,7 @@ for t in $(seq 1 "$TRIES"); do
     -O $CONF -r 273 --numerology 1 --band 78 -C 3414990000 --ssb 165 --ue-rxgain $RXG \
     --ue-nb-ant-rx $NANT --ue-nb-ant-tx $NANT --passive-rx --ue-fo-compensation \
     ${CONTFO:+--cont-fo-comp $CONTFO --freq-sync-P $FSP --freq-sync-I $FSI} \
+    ${OFFDIV:+--offset-divisor $OFFDIV} \
     --thread-pool 0,1,4,5,6,7 --time-sync-I 0.01 --ntn-initial-time-drift -4.25 -A 90" \
     > "$OUT/run.log" 2>&1 < /dev/null &
   sleep 5

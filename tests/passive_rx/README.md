@@ -8,6 +8,16 @@ Three processes, one cell, one downlink:
 | `nr-uesoftmodem` | **ACTIVE UE** — normal attach (RA → RRC → NAS registration → PDU session), carries IP traffic |
 | `nr-uesoftmodem --passive-rx` | **PASSIVE UE** — never transmits, never attaches, senses the active UE's CSI-RS |
 
+Other docs in this directory:
+
+| doc | covers |
+|---|---|
+| `README.100mhz_tuning.md` | 273 PRB / 100 MHz bring-up: `--ssb`, `-C`, the confs, and the traps already paid for |
+| `README.upa.md` | the 2x2 UPA array geometry |
+| `README_OTA.md` | over-the-air operation against the real cell |
+| `ota/README.md` | the OTA sub-harness (`_run_catchrate.sh`, `_run_repeatability.sh`) |
+| `captures/` | the capture harness (`run_arm.sh` and the A/B runners), symlinked from `/home/sens/NICOLA/captures` |
+
 Run it:
 
 ```bash

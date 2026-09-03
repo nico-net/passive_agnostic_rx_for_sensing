@@ -47,16 +47,15 @@ run_arm() {
     grep -E "CPI duration|CFR occupancy|pdsch_decode\[|detections carrying azimuth" "$out.log" | sed 's/^/  /'
     if [ -f "$rep_file" ] && [ -f "$out/ue_rx1.log" ]; then
       echo "  check_detection ($rep_file):"
-      # RANGE TOLERANCE 40 m, not the 12 m default. There is a ~40 m SYSTEMATIC bias between the
-      # reported bistatic range and ground truth (measured 2026-07-30: median -38 m and -42 m on two
-      # independent runs, constant across objects at 120 m and 360 m, so a fixed ~16-sample delay
-      # offset, not a scale error). The simulator is not the source -- sensing_channel.c places the
-      # target tap at exactly los_delay + dR/c*fs -- so it is a receiver range-axis calibration
-      # defect, pre-existing and unrelated to pdsch_data. At 12 m it scores 0/77 while the targets
-      # are demonstrably being found with 0.04-0.17 deg median bearing error; at 40 m it scores 18%.
+      # DEFAULT 12 m TOLERANCE. This used to pass 40 m to accommodate a "~40 m systematic range
+      # bias". That bias was re-measured on 2026-08-11 and is GONE (sub-metre: rx1 +0.35/+0.30 m,
+      # rx2 +0.52/-0.11 m median, sd ~2.4 m, well inside one 3.05 m bin) -- its real cause was a
+      # scene defect, object reflectivity equalling the direct path so obj0 captured the UE's own
+      # timing loop, since corrected in ue.passive*.aoa.conf. A tolerance three times the range
+      # resolution turns "detected" into "somewhere in the room", and the 18 % it used to report
+      # was manufactured by the tolerance, not measured.
       # Both arms carry the SAME bias, so it cancels in the comparison this script exists to make.
-      # Revisit the tolerance if the bias is ever fixed -- do not treat 40 m as an accuracy claim.
-      python3 "$SCRIPT_DIR/check_detection.py" "$rep_file" "$out/ue_rx1.log" 40 4.0 2>&1 | sed 's/^/    /'
+      python3 "$SCRIPT_DIR/check_detection.py" "$rep_file" "$out/ue_rx1.log" 12 4.0 2>&1 | sed 's/^/    /'
       # Keep this arm's reports; RESULTS.txt only summarises, and a re-score later needs the raw file.
       cp -f "$rep_file" "$out/reports.jsonl" 2>/dev/null || true
     else
