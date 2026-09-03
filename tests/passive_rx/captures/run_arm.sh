@@ -102,6 +102,17 @@ nic_miss() { awk '{print $1}' /sys/class/net/$NIC/statistics/rx_missed_errors 2>
 preflight
 cd /home/sens/NICOLA/openairinterface5g-total-passive-ue/cmake_targets || exit 1
 
+# CARRIER/SSB: cell moved to dl_arfcn=630000 (3450 MHz) / dl_ssb_arfcn=627264 on 2026-09-03.
+# ssb_start_subcarrier = (F_ssb - pointA)/scs - 120, F_ssb=3408.96 MHz, pointA=3400.86 MHz -> 150.
+# SCAN=1 drops the hardcoded --ssb and blind-searches instead (--ue-scan-carrier) -- independent
+# of any pre-computed SSB position, at the cost of a known crash risk: blind GSCN scan at
+# --ue-nb-ant-rx 4 / 273 PRB has previously segfaulted (malloc16, ~1.6 GB of simultaneous
+# per-antenna scan buffers). Testing it here on purpose.
+CARRIER=${CARRIER:-3450000000}
+SCAN=${SCAN:-0}
+SSB=${SSB:-150}
+if [ "$SCAN" = 1 ]; then FREQARGS="--ue-scan-carrier"; else FREQARGS="--ssb $SSB"; fi
+
 for t in $(seq 1 "$TRIES"); do
   OUT=$BASE/${ARM}_$(date +%H%M%S); mkdir -p "$OUT"
   # RELEASE THE X410 CLAIM GRACEFULLY BEFORE PROBING. Root-caused 2026-09-02 from the X410's own
@@ -163,7 +174,7 @@ for t in $(seq 1 "$TRIES"); do
     ISAC_CFO_TRACK_HZ=800 ISAC_CFO_TRACK_PERIOD=20 ${CFOAPPLY:+ISAC_CFO_TRACK_APPLY=1} \
     ISAC_UL_TA_SWEEP=${TASWEEP:-0:0:0} ${ULPROBE:+ISAC_UL_PROBE=1} \
     ${GAINTRIM:+ISAC_RX_GAIN_TRIM=$GAINTRIM} \
-    ${MRC:+ISAC_RX_MRC_MODE=$MRC} ${BRMIN:+ISAC_RX_BRANCH_MIN_DB=$BRMIN} \
+    ${MRC:+ISAC_RX_MRC_MODE=$MRC} ${BRMIN:+ISAC_RX_BRANCH_MIN_DB=$BRMIN} ${RXBRANCH:+ISAC_RX_BRANCH=$RXBRANCH} ${NVARFIX:+ISAC_RX_NVAR_FIX=$NVARFIX} ${BRFO:+ISAC_RX_BRANCH_FO=$BRFO} \
     ${SENSECOMB:+ISAC_SENSE_COMB=$SENSECOMB} ${SLOTPOOL:+ISAC_SLOT_POOL=$SLOTPOOL} \
     ${SYNCONLY:+ISAC_SYNC_ONLY=$SYNCONLY} \
     ${TSYNCAUDIT:+ISAC_TSYNC_AUDIT=$TSYNCAUDIT} \
@@ -172,7 +183,7 @@ for t in $(seq 1 "$TRIES"); do
     setsid nohup bash -c "ulimit -c 0; exec timeout $DUR ${CPUSET:+taskset -c $CPUSET} \
     $BIN \
     --usrp-args type=x4xx,addr=$DATA,mgmt_addr=$MGMT${DPDK:+,use_dpdk=$DPDK} \
-    -O $CONF -r 273 --numerology 1 --band 78 -C 3414990000 --ssb 165 --ue-rxgain $RXG \
+    -O $CONF -r 273 --numerology 1 --band 78 -C $CARRIER $FREQARGS --ue-rxgain $RXG \
     --ue-nb-ant-rx $NANT --ue-nb-ant-tx $NANT --passive-rx --ue-fo-compensation \
     ${CONTFO:+--cont-fo-comp $CONTFO --freq-sync-P $FSP --freq-sync-I $FSI} \
     ${OFFDIV:+--offset-divisor $OFFDIV} \
