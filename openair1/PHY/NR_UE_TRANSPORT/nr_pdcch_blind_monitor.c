@@ -851,6 +851,23 @@ void nr_pdcch_blind_monitor_init(void)
   const bool have_manual_coreset = (p_coreset != NULL && p_coreset[0] != '\0'
                                     && p_ss != NULL && p_ss[0] != '\0'
                                     && p_bwp != NULL && p_bwp[0] != '\0');
+  if (!have_manual_coreset) {
+    // Only some of the three lines present -- e.g. a half-finished migration to/from autoconf.
+    // Silently falling back (to autoconf if it's on, disabled otherwise) would discard an
+    // operator's stray config with no trace. Warn regardless of g_cfg.autoconf: the silent-discard
+    // risk exists whichever way this falls.
+    const bool any_manual = (p_coreset != NULL && p_coreset[0] != '\0')
+                          || (p_ss != NULL && p_ss[0] != '\0')
+                          || (p_bwp != NULL && p_bwp[0] != '\0');
+    if (any_manual) {
+      LOG_W(PHY,
+            "SENSING: pdcch_blind_monitor_coreset/_ss/_bwp are only PARTIALLY set "
+            "(coreset='%s' ss='%s' bwp='%s') -- all three describe one dedicated search space and "
+            "are only ever used together. The incomplete set is being IGNORED. Supply all three, "
+            "or none\n",
+            p_coreset ? p_coreset : "", p_ss ? p_ss : "", p_bwp ? p_bwp : "");
+    }
+  }
   if (!have_manual_coreset && !g_cfg.autoconf) {
     return; // monitor disabled -- either the three lines together, or autoconf
   }
@@ -990,23 +1007,31 @@ void nr_pdcch_blind_monitor_init(void)
 
   g_enabled = 1;
   nr_pdcch_blind_log_dci10_config();
-  LOG_I(PHY,
-        "SENSING: blind PDCCH monitor configured: coreset(num_groups=%d duration=%d reg_bundle=%d "
-        "interleaver=%d shift=%d scramb=%u) ss(period=%d offset=%d duration=%d first_symb=%d "
-        "al_cand=[%d,%d,%d,%d]) bwp=[%d..%d) dmrs_typeA_pos=%d rnti_range=[%u..%u] "
-        "noise_gates(energy_min=%.2f energy_adapt_factor=%.2f persist_k=%d persist_window_ms=%d "
-        "min_snr_lin=%.2f) tda_entries=%d dmrs(add_pos=%d max_len=%d) "
-        "pdsch(decode=%d mcs_table=%d xoverhead=%d rv0_only=%d max_per_slot=%d)\n",
-        g_cfg.coreset_freq_domain, g_cfg.coreset_duration, g_cfg.coreset_reg_bundle_size,
-        g_cfg.coreset_interleaver_size, g_cfg.coreset_shift_index, g_cfg.coreset_pdcch_dmrs_scrambling_id,
-        g_cfg.ss_monitoring_slot_periodicity, g_cfg.ss_monitoring_slot_offset, g_cfg.ss_duration,
-        g_cfg.ss_first_symbol, g_cfg.ss_al_candidates[0], g_cfg.ss_al_candidates[1], g_cfg.ss_al_candidates[2],
-        g_cfg.ss_al_candidates[3], g_cfg.bwp_start, g_cfg.bwp_start + g_cfg.bwp_size,
-        g_cfg.dmrs_typeA_position, g_cfg.rnti_min, g_cfg.rnti_max, g_cfg.energy_min,
-        g_cfg.energy_adapt_factor, g_cfg.rnti_persist_k, g_cfg.rnti_persist_window_ms,
-        g_cfg.min_snr_lin, g_cfg.extract.tda_count, g_cfg.extract.dmrs_add_pos, g_cfg.extract.dmrs_max_length,
-        g_cfg.pdsch_decode, g_cfg.pdsch_mcs_table, g_cfg.pdsch_xoverhead, g_cfg.pdsch_rv0_only,
-        g_cfg.pdsch_max_per_slot);
+  if (have_manual_coreset) {
+    LOG_I(PHY,
+          "SENSING: blind PDCCH monitor configured: coreset(num_groups=%d duration=%d reg_bundle=%d "
+          "interleaver=%d shift=%d scramb=%u) ss(period=%d offset=%d duration=%d first_symb=%d "
+          "al_cand=[%d,%d,%d,%d]) bwp=[%d..%d) dmrs_typeA_pos=%d rnti_range=[%u..%u] "
+          "noise_gates(energy_min=%.2f energy_adapt_factor=%.2f persist_k=%d persist_window_ms=%d "
+          "min_snr_lin=%.2f) tda_entries=%d dmrs(add_pos=%d max_len=%d) "
+          "pdsch(decode=%d mcs_table=%d xoverhead=%d rv0_only=%d max_per_slot=%d)\n",
+          g_cfg.coreset_freq_domain, g_cfg.coreset_duration, g_cfg.coreset_reg_bundle_size,
+          g_cfg.coreset_interleaver_size, g_cfg.coreset_shift_index, g_cfg.coreset_pdcch_dmrs_scrambling_id,
+          g_cfg.ss_monitoring_slot_periodicity, g_cfg.ss_monitoring_slot_offset, g_cfg.ss_duration,
+          g_cfg.ss_first_symbol, g_cfg.ss_al_candidates[0], g_cfg.ss_al_candidates[1], g_cfg.ss_al_candidates[2],
+          g_cfg.ss_al_candidates[3], g_cfg.bwp_start, g_cfg.bwp_start + g_cfg.bwp_size,
+          g_cfg.dmrs_typeA_position, g_cfg.rnti_min, g_cfg.rnti_max, g_cfg.energy_min,
+          g_cfg.energy_adapt_factor, g_cfg.rnti_persist_k, g_cfg.rnti_persist_window_ms,
+          g_cfg.min_snr_lin, g_cfg.extract.tda_count, g_cfg.extract.dmrs_add_pos, g_cfg.extract.dmrs_max_length,
+          g_cfg.pdsch_decode, g_cfg.pdsch_mcs_table, g_cfg.pdsch_xoverhead, g_cfg.pdsch_rv0_only,
+          g_cfg.pdsch_max_per_slot);
+  } else {
+    // Under deferred/autoconf config, g_cfg's coreset/ss/bwp fields are not populated yet at this
+    // point (autoconf fills them later, once the MIB decodes) -- printing them here would claim
+    // configured values that don't exist, the same "looks broken while healthy" trap the DCI-width
+    // reconciliation block above already guards against.
+    LOG_I(PHY, "SENSING: blind PDCCH monitor: autoconf mode, will configure once MIB is decoded\n");
+  }
 }
 
 int nr_pdcch_blind_monitor_enabled(void)
