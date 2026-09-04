@@ -51,6 +51,7 @@ extern "C" {
 #include "common/utils/nr/nr_common.h"
 #include "openair2/LAYER2/NR_MAC_COMMON/nr_mac_common.h" // NR_tda_info_t, get_dl_tda_info(), TYPE_C_RNTI_
 #include "nr_pdcch_blind_monitor.h"
+#include "nr_pdcch_blind_monitor_rt.h"
 #include "executables/softmodem-common.h"
 }
 
@@ -1857,6 +1858,54 @@ TEST_F(BlindPdcchTest, Dci01PureNoiseFalseAcceptRateIsBounded) {
   // live 1_0 rollout measured zero false accepts over 234,000 occasions, and this is the offline
   // counterpart of that check.
   EXPECT_LT(accepts, kTrials / 20) << "accepts=" << accepts << " of " << kTrials;
+}
+
+// ---- Phase 1: CSS0 self-configuration ---------------------------------------------------------
+// The claim under test is not "autoconf sets the CORESET#0 constants" (it plainly does) but
+// "autoconf switches OFF the settings that describe the DEDICATED search space". Leaving one on
+// does active harm rather than nothing: dci01_scan consumed every surviving candidate and rejected
+// all of them, and the adaptive energy gate rejected 100% of candidates forever (measured
+// 2026-09-04: candidates frozen at 199 == ENERGY_FLOOR_WARMUP while held[energy] grew 3/occasion).
+TEST(Css0Autoconf, TurnsOffEverySettingThatDescribesTheDedicatedSearchSpace) {
+  auto* c = const_cast<nr_pdcch_blind_monitor_cfg_t*>(nr_pdcch_blind_monitor_get_cfg());
+
+  // What nrue.passive_rx.autoconf.conf actually sets today for the dedicated CORESET.
+  c->energy_adapt_factor = 3.0f;
+  c->energy_min          = 2.0f;
+  c->dci01_scan          = 1;
+  c->rnti_min            = 1;
+  c->rnti_max            = 0xFFEF;
+
+  // This cell: CORESET#0 = 48 RB / 1 symbol at CRB 0, SSB at CRB offset 12 from point A,
+  // SS0 period 40 slots / offset 0 / duration 2 / first symbol 0, mux pattern 1, PCI 2.
+  ASSERT_TRUE(nr_pdcch_blind_monitor_autoconf_css0(48, 1, 0, 12, 40, 0, 2, 0, 1, 2));
+
+  // The adaptive energy floor is estimated from the very candidates it gates. On the dedicated
+  // CORESET (45 groups) most candidates are empty so it tracks noise; CORESET#0 is 8 CCEs with
+  // SIB1 every 20 ms, so every sample is signal and the floor rises to meet it.
+  EXPECT_FLOAT_EQ(c->energy_adapt_factor, 0.0f);
+  EXPECT_FLOAT_EQ(c->energy_min, 0.0f);
+
+  // Already-established behaviour, asserted here so a future edit cannot silently drop it.
+  EXPECT_EQ(c->dci01_scan, 0);
+  EXPECT_EQ(c->rnti_min, 0xFFFF);
+  EXPECT_EQ(c->rnti_max, 0xFFFF);
+}
+
+// BWPStart is the frequency origin for both the DM-RS sequence and the RIV. A wrong value leaves
+// every log line looking healthy, so the value must carry its derivation rather than be copied: it
+// is cset_start_rb, which nr_mac_common.c:4078 defines as ssb_offset_point_a - rb_offset, and which
+// OAI's own working normal path uses for coreset_id == 0 (nr_ue_dci_configuration.c:225).
+TEST(Css0Autoconf, BwpOriginIsTheCoresetZeroStartNotTheSsbOrigin) {
+  auto* c = const_cast<nr_pdcch_blind_monitor_cfg_t*>(nr_pdcch_blind_monitor_get_cfg());
+
+  // A cell where the two differ, so passing the wrong one is detectable: CORESET#0 starts at
+  // CRB 1 while the SSB sits at CRB 26 (the 2026-08-19 cell: offsetToPointA 26, rb_offset 25).
+  ASSERT_TRUE(nr_pdcch_blind_monitor_autoconf_css0(48, 1, 1, 26, 40, 0, 2, 0, 1, 2));
+  EXPECT_EQ(c->bwp_start, 1);
+  EXPECT_EQ(c->bwp_size, 48);
+  EXPECT_EQ(c->coreset_freq_domain, 8);
+  EXPECT_EQ(c->coreset_type, 1);
 }
 
 }  // namespace

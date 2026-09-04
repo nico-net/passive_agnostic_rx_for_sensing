@@ -545,6 +545,7 @@ void update_pdcch_config(NR_UE_MAC_INST_t *mac)
     nr_pdcch_blind_monitor_autoconf_css0((int)t0c->num_rbs,
                                          (int)t0c->num_symbols,
                                          (int)t0c->cset_start_rb,
+                                         (int)ssb_offset_point_a,
                                          (int)t0c->search_space_frame_period,
                                          css0_offset,
                                          (int)t0c->search_space_duration,

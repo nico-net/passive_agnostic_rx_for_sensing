@@ -345,6 +345,7 @@ bool nr_pdcch_blind_monitor_autoconf_wanted(void);
 bool nr_pdcch_blind_monitor_autoconf_css0(int num_rbs,
                                           int num_symbols,
                                           int cset_start_rb,
+                                          int ssb_offset_point_a,
                                           int ss_period_slots,
                                           int ss_slot,
                                           int ss_duration,

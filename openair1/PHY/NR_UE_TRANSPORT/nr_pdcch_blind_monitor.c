@@ -115,6 +115,7 @@ bool nr_pdcch_blind_monitor_autoconf_wanted(void)
 bool nr_pdcch_blind_monitor_autoconf_css0(int num_rbs,
                                           int num_symbols,
                                           int cset_start_rb,
+                                          int ssb_offset_point_a,
                                           int ss_period_slots,
                                           int ss_slot,
                                           int ss_duration,
@@ -189,11 +190,31 @@ bool nr_pdcch_blind_monitor_autoconf_css0(int num_rbs,
    * off here, not just left unread. */
   g_cfg.dci01_scan = 0;
 
+  /* The ADAPTIVE ENERGY GATE describes the dedicated CORESET and must be switched OFF here, for the
+   * same reason dci01_scan is: leaving a dedicated-path setting on does active harm, not nothing.
+   * energy_floor_update() is fed by every candidate it tests, so it only measures a NOISE floor when
+   * most candidates are empty. That holds on the dedicated CORESET (45 groups / 270 RB) and fails
+   * completely on CORESET#0, which is 8 CCEs with SIB1 every 20 ms: every AL4/AL8 candidate overlaps
+   * the grant, the floor converges to SIGNAL level, and the threshold then sits above everything.
+   * MEASURED 2026-09-04: candidates froze at 199 (== ENERGY_FLOOR_WARMUP) while held[energy] grew by
+   * exactly 3 per occasion for the rest of the run -- a 100 % rejection rate that looked like a
+   * decode failure and hid every downstream question, BWPStart included.
+   *
+   * OFF rather than retuned: the false-accept budget this gate defends is small here anyway. It was
+   * sized for 8 CCE candidates x ~2000 slots/s on the dedicated CORESET; SS0 gives 3 candidates x
+   * ~50 occasions/s, ~800x fewer trials, and the SI-RNTI pin above is worth ~16 bits of rejection on
+   * its own. If a deployment ever needs a floor here, estimate it from CCEs OUTSIDE the monitored
+   * candidates rather than from the candidates themselves -- that is the defect, not the factor. */
+  g_cfg.energy_adapt_factor = 0.0f;
+  g_cfg.energy_min          = 0.0f;
+
   LOG_A(PHY,
         "SENSING: CSS0 autoconf from MIB/SIB1 -- coreset(groups=%d dur=%d bundle=6 interleaver=2 "
-        "shift=%d scramb=%d) bwp=[%d..%d) ss(period=%d offset=%d dur=%d symb=%d) dci10(mux=%d sib1=1)\n",
+        "shift=%d scramb=%d) bwp=[%d..%d) (cset_start_rb = ssb_offset_point_a %d - rb_offset %d) "
+        "ss(period=%d offset=%d dur=%d symb=%d) dci10(mux=%d sib1=1)\n",
         g_cfg.coreset_freq_domain, g_cfg.coreset_duration, g_cfg.coreset_shift_index,
         g_cfg.coreset_pdcch_dmrs_scrambling_id, g_cfg.bwp_start, g_cfg.bwp_start + g_cfg.bwp_size,
+        ssb_offset_point_a, ssb_offset_point_a - cset_start_rb,
         g_cfg.ss_monitoring_slot_periodicity, g_cfg.ss_monitoring_slot_offset, g_cfg.ss_duration,
         g_cfg.ss_first_symbol, g_cfg.dci10_mux_pattern);
   return true;
