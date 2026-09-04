@@ -33,6 +33,7 @@
  * convention rather than by an independent worked example.
  */
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -1916,6 +1917,169 @@ TEST(Css0Autoconf, BwpOriginIsTheCoresetZeroStartNotTheSsbOrigin) {
 }
 
 }  // namespace
+
+extern "C" {
+// Forward-declared directly (not via nr_transport_proto_ue.h, which is full of GNU-C VLA
+// parameter-dependent array declarations invalid in C++) -- same signatures that header carries.
+void nr_pdcch_demapping_deinterleaving(uint32_t coreset_nbr_rb, c16_t *llr, c16_t *e_rx,
+                                       uint8_t coreset_time_dur, uint8_t reg_bundle_size_L_in,
+                                       uint8_t coreset_interleaver_size_R, uint8_t n_shift,
+                                       uint8_t number_of_candidates, uint16_t *CCE, uint8_t *L,
+                                       int llr_stride_per_symbol);
+void nr_pdcch_unscrambling(c16_t *e_rx, uint16_t scrambling_RNTI, uint32_t length,
+                          uint16_t pdcch_DMRS_scrambling_id, int16_t *z2);
+}
+
+// Stubs for symbols reachable ONLY through dci_nr.c's nr_rx_pdcch_symbol() (the legacy live
+// PDCCH-symbol-processing entry point), which this test never calls -- only
+// nr_pdcch_demapping_deinterleaving()/nr_pdcch_unscrambling() are actually exercised below. Real
+// implementations pull in heavy PHY estimation/FFT dependencies for code this test never runs;
+// same sidestep convention this file already uses for get_softmodem_params()/uniqCfg above.
+extern "C" {
+void nr_pdcch_dmrs_ref(void) {}
+void nr_pdcch_channel_estimation(void) {}
+void nr_channel_level(void) {}
+uint8_t log2_approx(uint32_t x) { (void)x; return 0; }
+}
+
+
+// ---------------------------------------------------------------------------------------------
+// Group: interleaved CORESET#0 demapping/deinterleaving + unscrambling, end-to-end.
+//
+// No existing test in this file (or anywhere in this codebase) exercises
+// nr_pdcch_demapping_deinterleaving()/nr_pdcch_unscrambling() at all -- every existing test builds
+// dci_estimation[] directly and skips straight to polar_decoder_int16(). This group closes that
+// gap for the SPECIFIC config CORESET#0 always uses: interleaved (TS 38.213 Table 10.1-1 mandates
+// bundle=6/R=2 for CORESET#0 unconditionally), using this cell's live-verified parameters
+// (48 REGs / 8 CCEs, n_shift=PCI=2).
+//
+// CONSTRUCTION NOTE, load-bearing: coded bits are assigned to a candidate's own bundles in
+// ASCENDING PHYSICAL position order, NOT ascending logical-bundle order. This was gotten wrong in
+// an earlier version of this test (see git history, commit 34fc1dc904/its revert
+// 73b0e34c50) -- the gNB-side TX mapping (openair1/PHY/NR_TRANSPORT/nr_dci_tools.c:56-73,
+// "this implements TS 38.211 Sec. 7.3.2.2") builds each candidate's REG list in logical order via
+// the interleaver formula, then explicitly qsorts it into ascending PHYSICAL order before
+// assigning the coded bit stream -- confirmed against that real gNB-side code, not assumed.
+// ---------------------------------------------------------------------------------------------
+
+namespace {
+
+int InterleaverF(int k, int R, int C, int n_shift, int N_over_L) {
+  if (R == 0) return k;
+  const int c = k / R;
+  const int r = k % R;
+  return (r * C + c + n_shift) % N_over_L;
+}
+
+/// Builds a physical-domain, interleaved candidate the way a gNB transmitting on CORESET#0
+/// actually does: encode -> "scramble" (nr_pdcch_unscrambling() is a pure XOR-with-gold-sequence
+/// sign flip, so calling it ONCE on the clean values produces exactly what would be transmitted)
+/// -> assign the coded bit stream to the candidate's own logical bundles taken in ASCENDING
+/// PHYSICAL position order (matching nr_dci_tools.c's qsort), each placed at ITS OWN physical
+/// bundle position in the returned buffer.
+std::vector<c16_t> BuildInterleavedCandidateLlr(uint64_t packed, uint16_t rnti, uint16_t dci_length,
+                                                uint8_t agg_level, uint16_t dmrs_scrambling_id,
+                                                int n_rb_coreset, int reg_bundle_L, int interleaver_R,
+                                                int n_shift) {
+  t_nrPolar_params* params = nr_polar_params(NR_POLAR_DCI_MESSAGE_TYPE, dci_length, agg_level);
+  const uint16_t encoder_len = params->encoderLength;
+
+  std::vector<uint32_t> out((encoder_len + 31) / 32, 0);
+  polar_encoder_fast(&packed, out.data(), (int32_t)rnti, /*ones_flag=*/1, NR_POLAR_DCI_MESSAGE_TYPE,
+                     dci_length, agg_level);
+  std::vector<uint8_t> coded_bits(encoder_len);
+  nr_bit2byte_uint32_8(out.data(), encoder_len, coded_bits.data());
+
+  // "clean" (pre-scramble) soft representation: bit 0 -> +K, bit 1 -> -K, matching this file's
+  // own EncodeToLLR() convention and matching what a correct nr_pdcch_unscrambling() call recovers.
+  const int16_t K = 100;
+  std::vector<int16_t> clean(encoder_len);
+  for (int i = 0; i < encoder_len; i++) clean[i] = (coded_bits[i] == 0) ? K : (int16_t)(-K);
+
+  std::vector<int16_t> tx(encoder_len);
+  nr_pdcch_unscrambling(reinterpret_cast<c16_t*>(clean.data()), rnti, encoder_len, dmrs_scrambling_id,
+                        tx.data());
+
+  const int N_regs = n_rb_coreset; // duration 1
+  const int B_rb = reg_bundle_L;   // duration 1
+  const int max_bundles = N_regs / reg_bundle_L;
+  const int C = N_regs / (interleaver_R * reg_bundle_L);
+  const int re_per_bundle = B_rb * 9; // RE_PER_RB_OUT_DMRS == 9, this module's own #define
+
+  std::vector<c16_t> llr((size_t)N_regs * 9, {0, 0});
+
+  // agg_level CCEs = agg_level logical bundles for this cell (bundle size 6 == REGs/CCE). Compute
+  // each one's physical position, then SORT ascending by physical position -- this is the qsort
+  // step nr_dci_tools.c performs on its own reg_list before bit assignment.
+  std::vector<int> phys_positions(agg_level);
+  for (int cce = 0; cce < agg_level; cce++) {
+    phys_positions[cce] = InterleaverF(cce, interleaver_R, C, n_shift, max_bundles);
+  }
+  std::vector<int> order(agg_level);
+  for (int i = 0; i < agg_level; i++) order[i] = i;
+  std::sort(order.begin(), order.end(),
+           [&](int a, int b) { return phys_positions[a] < phys_positions[b]; });
+
+  // Walk the SORTED order, handing out consecutive 108-bit chunks of the coded stream in that
+  // order -- chunk 0 (the first 108 coded bits) goes to whichever logical bundle has the smallest
+  // physical position, chunk 1 to the next-smallest, etc. Each chunk is physically placed at ITS
+  // OWN bundle's physical RE range (unchanged from before -- only the STREAM-TO-BUNDLE assignment
+  // order changes).
+  for (int chunk = 0; chunk < agg_level; chunk++) {
+    const int phys_bundle = phys_positions[order[chunk]];
+    for (int re = 0; re < re_per_bundle; re++) {
+      const int m = chunk * (re_per_bundle * 2) + re * 2;
+      c16_t& dst = llr[(size_t)phys_bundle * re_per_bundle + re];
+      dst.r = tx[m];
+      dst.i = tx[m + 1];
+    }
+  }
+  return llr;
+}
+
+}  // namespace
+
+TEST_F(BlindPdcchTest, InterleavedCoreset0CandidateRoundTrips) {
+  // This cell's live CORESET#0: 48 REGs (8 CCEs), bundle=6, interleaver R=2, n_shift=PCI=2.
+  const int n_rb_coreset = 48, reg_bundle_L = 6, interleaver_R = 2, n_shift = 2;
+  const uint8_t agg_level = 4; // this cell's live SI-RNTI aggregation level
+
+  const uint16_t bwp_size = (uint16_t)n_rb_coreset;
+  const int riv_bits = RivBitsFor(bwp_size);
+  const uint16_t dci_length = 39; // this cell's live-verified DCI 1_0/CORESET#0 length
+
+  GroundTruth gt;
+  gt.rnti = 0xFFFF; // SI-RNTI
+  gt.bwp_size = bwp_size;
+  gt.riv = 12345u % (1u << riv_bits);
+  const uint64_t packed = PackPayload(gt, riv_bits);
+
+  auto llr = BuildInterleavedCandidateLlr(packed, gt.rnti, dci_length, agg_level,
+                                          /*dmrs_scrambling_id=*/2, n_rb_coreset, reg_bundle_L,
+                                          interleaver_R, n_shift);
+
+  uint16_t cce_list[1] = {0};
+  uint8_t l_list[1] = {agg_level};
+  c16_t e_rx[NR_MAX_PDCCH_SIZE];
+  nr_pdcch_demapping_deinterleaving((uint32_t)n_rb_coreset, llr.data(), e_rx,
+                                    /*coreset_time_dur=*/1, (uint8_t)reg_bundle_L,
+                                    (uint8_t)interleaver_R, (uint8_t)n_shift,
+                                    /*number_of_candidates=*/1, cce_list, l_list,
+                                    /*llr_stride_per_symbol=*/(int)llr.size());
+
+  int16_t tmp_e[16 * 108];
+  nr_pdcch_unscrambling(e_rx, gt.rnti, agg_level * 108, /*dmrs_scrambling_id=*/2, tmp_e);
+
+  uint64_t dci_estimation[2] = {0};
+  const uint32_t crc = polar_decoder_int16(tmp_e, dci_estimation, 1, NR_POLAR_DCI_MESSAGE_TYPE,
+                                          dci_length, agg_level);
+
+  ASSERT_EQ(crc, gt.rnti) << "interleaved CORESET#0 candidate did not round-trip through the real "
+                             "demapping/deinterleaving + unscrambling chain";
+  EXPECT_EQ(dci_estimation[0] & ((1ULL << dci_length) - 1), packed & ((1ULL << dci_length) - 1))
+      << "only the low dci_length bits are meaningful -- higher bits are PackPayload overflow "
+         "from an oversized synthetic field set, not part of the actual encoded/decoded payload";
+}
 
 int main(int argc, char** argv)
 {
