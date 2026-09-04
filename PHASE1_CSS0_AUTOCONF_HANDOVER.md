@@ -300,6 +300,59 @@ open problem tracked in `branch-2-is-strong-and-undecodable`, and it only adds n
 
 ---
 
+## 6b. Live monitoring — the dashboard and the log follower
+
+Two long-running helpers watch captures. They are **already running**; check before starting a
+second copy, because two writers on the same follower output will interleave and corrupt it.
+
+```bash
+ssh sens6 "pgrep -af 'monitor.py|watch_log'"
+```
+
+### Web dashboard (port 8081)
+
+Renders detections, range-Doppler and the report stream. Reachable from another machine because it
+binds `0.0.0.0`.
+
+```bash
+cd /home/sens/NICOLA/openairinterface5g-total-passive-ue/tests/passive_rx/monitor
+python3 ./monitor.py --connect tcp://127.0.0.1:5556 \
+                     --log  /tmp/rx_follow.log \
+                     --seed /home/sens/NICOLA/captures/sens/reports.jsonl \
+                     --port 8081 --bind 0.0.0.0
+```
+
+- `--connect` is the receiver's ZeroMQ report bus; it must match `report_endpoint` in the `[sensing]`
+  section of the conf in use.
+- `--seed` preloads history from a reports file so the page is not blank on open.
+- Open `http://<sens6>:8081`.
+
+### Log follower
+
+`monitor.py --log` reads one file, but each capture writes a **new** `run.log`. `/tmp/watch_log.sh`
+re-evaluates which is newest every 20 s and appends it to `/tmp/rx_follow.log`, so the dashboard
+keeps following the current run instead of latching onto the previous one.
+
+```bash
+setsid nohup /tmp/watch_log.sh >/dev/null 2>&1 &
+```
+
+It self-rotates at 200 MB (it once reached 1.4 GB) and bounds every `tail` with `timeout 20`, so it
+cannot orphan them.
+
+**If the dashboard says "no log":** the follower died, or its output file was moved/deleted while it
+held the descriptor. Truncate in place, never `rm` or `mv`:
+
+```bash
+: > /tmp/rx_follow.log      # correct -- the follower keeps writing
+# rm /tmp/rx_follow.log     # WRONG -- the fd survives, output goes nowhere, page goes blank
+```
+
+That exact mistake produced a "no log" dashboard once; the fix was restarting the follower onto a
+fresh file, and the avoidance is the truncate above.
+
+---
+
 ## 7. Cell under test
 
 ARFCN 630000 · 3450 MHz · PCI 2 · 273 PRB / 100 MHz · SCS 30 kHz · TDD (8 DL / 2 UL, 10-slot period)
