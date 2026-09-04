@@ -1,9 +1,12 @@
 # Phase 1 — self-configuring common search space (CSS0) — HANDOVER
 
-**Status: derivation works, grants not yet recovered. One index is wrong and it is identified.**
-**Branch:** `total-passive-rx-UL-DL-graphics` · **Commits:** `b60fa7ba3b`, `924d1bf863`
+**Status: autoconf-only enablement WORKS and is verified. BWPStart derivation is resolved (it was**
+**never actually wrong at this ARFCN). Genuine SI-RNTI recovery is still 0 across three independent**
+**live captures after every fix in this document -- a further blocker remains, out of scope here.**
+**Branch:** `total-passive-rx-UL-DL-graphics` ·
+**Commits:** `b60fa7ba3b`, `924d1bf863`, `f4537cdb8d`, `0adf449a73`, `602726b0ce`
 **Host:** sens6 · **Repo:** `/home/sens/NICOLA/openairinterface5g-total-passive-ue`
-**Written:** 2026-09-04
+**Written:** 2026-09-04 · **Updated:** 2026-09-04 (sdd Task 3)
 
 ---
 
@@ -72,36 +75,90 @@ Three real defects were found and fixed in `924d1bf863` — do not reintroduce t
 
 ---
 
-## 2. THE OPEN DEFECT — one index
+## 2. RESOLVED — BWPStart, the energy gate, and autoconf-only enablement; the remaining gap is open
 
-`ISAC_PDCCH_CFGTRACE=1` output (log tag is **`PDCCHCFG`**, not `CFGTRACE`) compared against the
-known-good configuration recorded when this path last produced 438 real SIB1 decodes:
+Three fixes landed since this document's original §2 ("one index is wrong and it is identified")
+was written, closing three of the four Definition-of-Done items (§9). A fourth item — genuine
+SI-RNTI decode at a rate comparable to the historical 438/120 s — is **not** met, measured three
+separate times, AFTER all three fixes below were in place. Read this before re-opening anything
+retired into §2b.
 
-| index | known-good | autoconf now |
-|---|---|---|
-| type | 0 | 0 ✓ |
-| n_rb | 48 | 48 ✓ |
-| cset_start / rb_offset | 0 / 0 | 0 / 0 ✓ |
-| dmrs_ref | 0 | 0 ✓ |
-| scr_id | 2 | 2 ✓ |
-| dur / bundle / ilv / shift | 1 / 6 / 2 / 2 | 1 / 6 / 2 / 2 ✓ |
-| **BWPStart** | **1** | **0** ✗ |
-| ncand | 12 blind / 3 normal | 3 |
+### BWPStart — resolved, and it was never actually wrong at this ARFCN
 
-Live line:
+The original table here compared the current cell (ARFCN 630000 / 3450 MHz) against a known-good
+value of `1` measured on a **different** cell (ARFCN 627666, 2026-08-19) — exactly the
+inherited-number trap §3 itself warns against. Task 2 (`0adf449a73`) derived it instead of copying
+either number: `BWPStart = cset_start_rb = ssb_offset_point_a - rb_offset`
+(`nr_mac_common.c:4078`), the same formula OAI's own normal (non-blind) path uses at
+`coreset_id == 0` (`nr_ue_dci_configuration.c:225`). Both terms are now in the autoconf log line,
+so the value carries its own derivation:
 
 ```
-PDCCHCFG f=26 s=1 ss=0 type=0 n_rb=48 cset_start=0 rb_offset=0 dmrs_ref=0 scr_id=2
-         BWPStart=0 BWPSize=48 dur=1 bundle=6 ilv=2 shift=2 ncand=3
+CSS0 autoconf from MIB/SIB1 -- coreset(...) bwp=[0..48)
+(cset_start_rb = ssb_offset_point_a 12 - rb_offset 12)
 ```
 
-`BWPStart` is the frequency origin used for extraction and for the RIV. Getting it wrong puts the
-DM-RS sequence and the RIV origin in the wrong place while every log line still looks healthy —
-the same failure class as the DCI field-width bug in `PASSIVE_PDSCH_DATA_AIDED_HANDOVER.md` §C,
-where the total length was right, two field offsets were wrong, and the result was 0 % CRC with
-plausible-looking output.
+`12 - 12 = 0` is arithmetically self-consistent and matches what OAI's own working normal-path
+receiver computes for this cell. **BWPStart = 0 is correct here.** §2c's arm B (below) could not
+tell "BWPStart wrong" apart from "energy gate still on", because both were simultaneously true at
+the time of that measurement — with the gate now confirmed off (next) and BWPStart independently
+re-derived and confirmed correct, that ambiguity is closed: neither is the remaining blocker.
 
-### 2c. 2026-09-04 — sdd Task 1: energy gate confirmed as A blocker; BWPStart still open, NOT ruled out
+### The energy gate — confirmed as A blocker (Task 1), turned off under autoconf (Task 2)
+
+§2c's arm A/B measurements (kept below unedited, as the historical evidence) showed the adaptive
+energy-floor gate freezing at `ENERGY_FLOOR_WARMUP - 1 = 199` candidates and rejecting essentially
+everything after, on this cell's CORESET#0 cadence (8 CCEs, SIB1 every 20 ms — dense enough that
+the "adaptive" floor converges to signal power, not noise). Task 2 turned it off unconditionally
+under autoconf, the same rule already applied to `dci01_scan` (§1 item 3): a dedicated-path
+setting must be turned OFF under autoconf, not merely left unread.
+
+Live confirmation (150 s, `egate_autoconf`): `held[energy=0]` steady for the whole run (was frozen
+`candidates=199` before this fix), `candidates` rising linearly with occasions (21000 at close of
+a 7000-occasion run) — the gate is off **by derivation** (autoconf forces it off regardless of the
+conf file's `energy_adapt_factor`), not merely by a conf value someone could silently re-enable.
+
+### The `init()` coupling that made DoD #3 unreachable — fixed (Task 3, this document's own task)
+
+Independently of both fixes above, `nr_pdcch_blind_monitor_init()` required
+`pdcch_blind_monitor_coreset`/`_ss`/`_bwp` to ALL be present before it would even look at
+`g_cfg.autoconf`, else it returned with `g_enabled = 0` — which gates the entire RT tap
+(`nr_pdcch_blind_monitor_rt.c`). A conf carrying autoconf but none of the three manual lines (the
+literal DoD #3 claim) ran the CSS0-autoconf derivation into a monitor that was already dead.
+Fixed in `602726b0ce`: the three lines are now required together only when
+`pdcch_blind_monitor_autoconf` is off; with it on they're optional, and the DCI-width
+reconciliation block (which needs a derived `bwp_size` that doesn't exist yet at `config_get()`
+time) is deferred with its own log line instead of firing a spurious "every field is being read
+from the WRONG bit offset" warning at every startup.
+
+Verified live with `nrue.passive_rx.selfconf.conf` — a copy of the autoconf conf with all three
+manual lines deleted (`grep -nE 'pdcch_blind_monitor_(coreset|ss|bwp) *='` returns nothing): the
+monitor configures and scans (7 `monitor summary` lines over 150 s, `occasions`/`candidates`
+growing 5000→21000+), with the `CSS0 autoconf from MIB/SIB1` line now actually feeding a live
+monitor instead of a dead one. This is the DoD #3 claim, and it is now true.
+
+### The remaining gap — genuine SI-RNTI decode is still 0, measured three separate times
+
+With all three fixes above in place, `ISAC_PDCCH_FULLCRC=1` on the no-manual-lines conf still
+recovered **0 decodes at `crc=0xffff`** (the real SI-RNTI) out of 94 `FULLCRC` hits over 150 s —
+all 94 distinct payloads, no repeats. This is the THIRD independent live measurement of the exact
+same pattern:
+
+| capture | conf | FULLCRC hits | genuine (`crc=0xffff`) |
+|---|---|---|---|
+| Task 1 arm B (gate forced off; BWPStart not yet re-derived) | autoconf.conf | 82 | 0 |
+| Task 2 (gate off by derivation; BWPStart logged + confirmed) | autoconf.conf | 96 | 0 |
+| Task 3 (autoconf alone, zero manual config lines) | selfconf.conf | 94 | 0 |
+
+Per the controlling plan, a zero-hit result is **not** a failure of any of these three tasks — each
+proved its own mechanical claim (gate identified; gate off; autoconf-only enablement), and all
+three are independently true regardless of the genuine-decode count. But the pattern across all
+three captures is now strong enough to say plainly: **a further blocker remains, beyond the energy
+gate, BWPStart, and the manual-config-required-ness this document set out to fix.** Finding it is
+out of scope for Tasks 1–3 and is Task 4's territory (conditional, not yet dispatched as of this
+writing).
+
+### 2c. 2026-09-04 — sdd Task 1: energy gate confirmed as A blocker (historical record, superseded above)
 
 `run_arm.sh` did not pass `ISAC_PDCCH_ENERGY`/`ISAC_PDCCH_CAPTURE` through its `sudo env`
 allowlist before this session (`4c9a762785`, `e595841d2f`) — neither read as "no effect" so much
@@ -192,6 +249,9 @@ unscrambling, polar decode and CRC/RNTI recovery are all correct on real SIB1. A
 | RNTI value / C-RNTI churn | **EXONERATED for SIB1** | SI-RNTI is a fixed known answer; pinning the range makes the accept test a known-RNTI test |
 | Noise gates suppressing real decodes | **EXONERATED** | the oracle ran with all gates off (`held[energy=0 persist=0 snr=0]`) |
 | X410 overflows / RF drops on sens6 | **NOT a factor** | 0 overflow / 0 `ERROR_CODE_TIMEOUT` / 0 short-read across every run; `benchmark_rate` clean at 4×122.88 MS/s. The `dropped=` lines in logs are the SENSING CFR-queue counter, not RF |
+| `BWPStart` mismatch (known-good=1 vs autoconf=0) | **RESOLVED, not a defect** | the "known-good" 1 was measured on a different ARFCN; re-derived from first principles (Task 2, §2) it is arithmetically `0` at this cell and matches OAI's own normal-path formula — never actually wrong here |
+| Energy gate alone is sufficient to restore genuine decodes | **REFUTED** | Task 2 turned the gate off by derivation (`held[energy=0]` steady) and re-measured: still 0 decodes at `crc=0xffff` (§2) — the gate was A blocker, not the only one |
+| The three manual `pdcch_blind_monitor_coreset/_ss/_bwp` lines are needed only for parsing, not for enablement | **REFUTED, then fixed** | `init()` gated the entire monitor on their presence regardless of `autoconf`; deleting them disabled the monitor rather than handing it to autoconf (Task 3, `602726b0ce`) |
 
 **One real bug found and FIXED along the way, keep it:** `CoreSetType` was hardcoded to
 `NFAPI_NR_CSET_CONFIG_PDCCH_CONFIG`. Its only effect in the UE RX path (`dci_nr.c:338`) is
@@ -543,11 +603,35 @@ unable to show success. That cost a full build-and-run round; reading the entry 
 
 ## 9. Definition of done
 
+**Overall status: NOT done.** Three of four items are met; item #2, the genuine-decode rate, is not,
+and nothing in Tasks 1–3 was expected to fix it on its own (see §2's "remaining gap"). A further
+diagnostic task (offline capture-and-replay against gNB ground truth, §5) is still needed to close it.
+
 1. `BWPStart` derived — with the reasoning recorded, not a copied constant.
+   **MET**, done in Task 2 (`0adf449a73`). `BWPStart = cset_start_rb = ssb_offset_point_a -
+   rb_offset`, both terms now in the log line; confirmed to match OAI's own normal-path formula and
+   arithmetically consistent at this cell (`12 - 12 = 0`). See §2.
 2. FULLCRC decodes of SI-RNTI at a rate comparable to the historical 438 / 120 s, passing all three
    parts of the §4 test.
+   **NOT YET MET.** 0 genuine SI-RNTI decodes (`crc=0xffff`) recovered across three independent live
+   captures, all taken after the fixes below landed: Task 1's arm B (82 FULLCRC hits, 0 genuine),
+   Task 2's live capture (96 hits, 0 genuine), and Task 3's own capture on the zero-manual-lines conf
+   (94 hits, 0 genuine). See §2's "remaining gap" table. A further blocker remains beyond BWPStart,
+   the energy gate, and the manual-config coupling — out of scope for this document's Tasks 1–3.
 3. Autoconf produces those decodes on the test conf with **no** `pdcch_blind_monitor_coreset/_ss/_bwp`
    lines present at all — that is the actual claim being made, and it is not proven while a
    hand-written config is still in the file.
+   **This is what Task 3 itself verifies, and it is established** for the *enablement* half of the
+   claim (Task 3 does not, and was not expected to, establish the *decode* half — that's item #2).
+   `nrue.passive_rx.selfconf.conf` carries none of the three lines (`grep` confirms empty); with the
+   `602726b0ce` fix the monitor still configures and actively scans CORESET#0 (7 `monitor summary`
+   lines over 150 s, `occasions`/`candidates` growing 5000→21000+, the `CSS0 autoconf from MIB/SIB1`
+   line feeding a live monitor). The mechanical, log-verifiable claim — autoconf alone enables
+   scanning — is **verified**.
 4. The default (`pdcch_blind_monitor_autoconf = 0`) remains bit-identical to today for every
    existing deployment.
+   **Verified by Task 3's Step 7 regression** (`nrue.passive_rx.conf`, all three manual lines
+   present, `autoconf` unset/0): `configured`/`monitor summary` lines report the manual values
+   (`coreset(num_groups=45 ...)`, `bwp=[0..273)`), `held[energy=6084483]` non-zero (the gate is back
+   on where it belongs), and the new `deferred to CSS0 autoconf` log line does not appear (0
+   occurrences). **MET.**
