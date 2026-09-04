@@ -2344,6 +2344,14 @@ if(ENABLE_TESTS)
   add_dependencies(tests test_isac_aoa)
   add_test(NAME test_isac_aoa COMMAND ./test_isac_aoa)
 
+  # Phase 2 (roadmap artifact "Cell-Agnostic Passive Receiver"): type-system plumbing for the SSB
+  # CFR source (NR_ISAC_SRC_SSB), tested in isolation from the RT tap.
+  add_executable(test_nr_isac_ssb_source ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/tests/nr_isac_ssb_source_test.cc)
+  target_include_directories(test_nr_isac_ssb_source PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_ISAC)
+  target_link_libraries(test_nr_isac_ssb_source PRIVATE NR_UE_ISAC UTIL GTest::gtest_main)
+  add_dependencies(tests test_nr_isac_ssb_source)
+  add_test(NAME test_nr_isac_ssb_source COMMAND ./test_nr_isac_ssb_source)
+
   # Phase 3 (TOTAL_PASSIVE_UE_HANDOVER.md): offline blind PDCCH/DCI-1_1 decode + extract, synthetic
   # DCI injection against known ground truth -- required by this project's own testing plan before
   # any live-air attempt. See nr_pdcch_blind_monitor.c's file-level comment for the reuse-vs-

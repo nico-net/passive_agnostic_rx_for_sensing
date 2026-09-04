@@ -39,6 +39,7 @@
 #define NR_ISAC_H
 
 #include <stdint.h>
+#include <string>
 
 #ifdef __cplusplus
 extern "C" {
@@ -62,7 +63,13 @@ typedef enum nr_isac_source_e {
   /// data RE (comb-1). The uplink twin of NR_ISAC_SRC_PDSCH_DATA -- see nr_pusch_data_aided.h.
   /// Only ever submitted for grants carrying NO UCI, because HARQ-ACK overwrites ULSCH REs.
   NR_ISAC_SRC_PUSCH_DATA = 5,
-  NR_ISAC_SRC_COUNT      = 6 ///< Number of distinct sources (for the enabled-set bitmask)
+  /// SSB (PBCH DM-RS) channel estimate. Requires no grant, no RNTI, no decode of any kind — every
+  /// NR cell transmits it on a fixed raster with known structure, so it is the one source that
+  /// cannot fail for a configuration reason. Trade-off: 20 ms burst period caps unambiguous
+  /// velocity at +-2.17 m/s (lambda/(4*T) at 86.9 mm/20 ms) -- see Phase 2 of the roadmap
+  /// (https://claude.ai/code/artifact/e1e6ae5d-25f6-4c30-97cb-09f2c0f239a2).
+  NR_ISAC_SRC_SSB    = 6,
+  NR_ISAC_SRC_COUNT  = 7 ///< Number of distinct sources (for the enabled-set bitmask)
 } nr_isac_source_t;
 
 /// Number of distinct ILLUMINATORS a fused CPI can contain. The downlink sources are lit by the
@@ -203,6 +210,10 @@ uint32_t nr_isac_aoa_antennas(void);
  * Returns the target symbols per row (0 = disabled) and fills the sparsity / SNR gates.
  */
 uint32_t nr_isac_subslot_config(uint32_t* min_re, float* min_snr_db);
+
+
+/** @brief Map a whitespace-trimmed token to its source bit; returns 0 for unknown/empty tokens. */
+uint32_t source_bit_from_token(const std::string& tok);
 
 #ifdef __cplusplus
 }

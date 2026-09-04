@@ -68,34 +68,6 @@ nr_isac_source_t parse_source(const char* s)
 }
 
 // Map one whitespace-trimmed token to its source bit; returns 0 (no bit) for an empty/unknown token.
-uint32_t source_bit_from_token(const std::string& tok)
-{
-  if (tok == "csi_rs") {
-    return 1u << NR_ISAC_SRC_CSI_RS;
-  }
-  if (tok == "pdsch_dmrs") {
-    return 1u << NR_ISAC_SRC_PDSCH_DMRS;
-  }
-  if (tok == "pdsch_data") {
-    return 1u << NR_ISAC_SRC_PDSCH_DATA;
-  }
-  if (tok == "pusch_dmrs") {
-    /* 1u << SRC, like every other branch. Returning the bare enum here returned 4, which IS
-       1u << NR_ISAC_SRC_PDSCH_DATA -- so the token silently enabled the WRONG source rather than
-       being rejected, and the engine reported sources=pdsch_data with the UL source never firing. */
-    return 1u << NR_ISAC_SRC_PUSCH_DMRS;
-  }
-  if (tok == "pusch_data") {
-    return 1u << NR_ISAC_SRC_PUSCH_DATA;
-  }
-  if (tok == "pdsch_dmrs_blind") {
-    // Reserved 2026-07-28 (Phase 3): accepted here so the token is inert-but-valid ahead of the
-    // not-yet-built RT tap; nothing submits this source yet (nr_pdcch_blind_monitor.{h,c} is
-    // offline-decode-only this slice -- see TOTAL_PASSIVE_UE_HANDOVER.md).
-    return 1u << NR_ISAC_SRC_PDSCH_DMRS_BLIND;
-  }
-  return 0;
-}
 
 // Parse a comma-separated enabled-source set ("csi_rs,pdsch_dmrs"). Empty string -> mask 0 so the
 // caller can fall back to the single legacy `source`.
@@ -177,6 +149,37 @@ paramdef_t mk_str(const char* name, const char* help, char** ptr, const char* de
 }
 
 } // namespace
+uint32_t source_bit_from_token(const std::string& tok)
+{
+  if (tok == "csi_rs") {
+    return 1u << NR_ISAC_SRC_CSI_RS;
+  }
+  if (tok == "pdsch_dmrs") {
+    return 1u << NR_ISAC_SRC_PDSCH_DMRS;
+  }
+  if (tok == "pdsch_data") {
+    return 1u << NR_ISAC_SRC_PDSCH_DATA;
+  }
+  if (tok == "pusch_dmrs") {
+    /* 1u << SRC, like every other branch. Returning the bare enum here returned 4, which IS
+       1u << NR_ISAC_SRC_PDSCH_DATA -- so the token silently enabled the WRONG source rather than
+       being rejected, and the engine reported sources=pdsch_data with the UL source never firing. */
+    return 1u << NR_ISAC_SRC_PUSCH_DMRS;
+  }
+  if (tok == "pusch_data") {
+    return 1u << NR_ISAC_SRC_PUSCH_DATA;
+  }
+  if (tok == "pdsch_dmrs_blind") {
+    // Reserved 2026-07-28 (Phase 3): accepted here so the token is inert-but-valid ahead of the
+    // not-yet-built RT tap; nothing submits this source yet (nr_pdcch_blind_monitor.{h,c} is
+    // offline-decode-only this slice -- see TOTAL_PASSIVE_UE_HANDOVER.md).
+    return 1u << NR_ISAC_SRC_PDSCH_DMRS_BLIND;
+  }
+  if (tok == "ssb") {
+    return 1u << NR_ISAC_SRC_SSB;
+  }
+  return 0;
+}
 
 extern "C" void nr_isac_init(void)
 {
