@@ -1446,7 +1446,17 @@ int nr_process_pbch_symbol(
         .pci             = (uint16_t)fp->Nid_cell,
         .slots_per_frame = fp->slots_per_frame,
     };
-    nr_isac_submit_cfr_multi(proc->nr_slot_rx,
+    // Absolute (frame,slot) index, matching csi_rx.c's own nr_isac_submit_cfr_multi() call
+    // (nr_isac_carrier_t.slots_per_frame * frame_rx + nr_slot_rx) -- proc->nr_slot_rx ALONE is only
+    // slot-within-frame [0, slots_per_frame), and this cell's single SSB beam recurs at the SAME
+    // within-frame slot every occurrence (period 40 slots = 2 frames), so every submission reported
+    // an IDENTICAL slot_idx: the engine's slow-time delta (sensing_engine.cc accumulate_cpi) saw
+    // zero elapsed slots between consecutive rows, merged every submission into row 0, and no CPI
+    // ever reached cpi_slots rows to close. Found live 2026-09-04 (Task 4: zero "SENSING: CPI #"
+    // lines over a 150 s ssb-only capture, root-caused by inspecting sensing_engine.cc + the
+    // csi_rs tap's slot_idx computation for comparison).
+    const uint32_t ssb_abs_slot = (uint32_t)(proc->frame_rx * fp->slots_per_frame + proc->nr_slot_rx);
+    nr_isac_submit_cfr_multi(ssb_abs_slot,
                              0.0f,
                              NR_ISAC_SRC_SSB,
                              &carrier,
