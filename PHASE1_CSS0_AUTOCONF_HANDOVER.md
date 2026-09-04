@@ -353,6 +353,95 @@ fresh file, and the avoidance is the truncate above.
 
 ---
 
+## 6c. X410 — access, health checks, and the failure that impersonates a bug
+
+| what | value |
+|---|---|
+| management (SSH, MPM) | `128.178.122.174`, hostname `ni-x4xx-327C1F2`, root SSH works from sens6 |
+| data plane (streaming) | `192.168.20.2` |
+| host NIC | `enp129s0f0np0`, must hold `192.168.20.1/24`, MTU 9000, rx/tx ring 8192 |
+
+`run_arm.sh`'s `preflight()` already asserts every one of these and repairs what it can, so a normal
+capture needs none of the commands below. They are for when something is wrong.
+
+### Is it alive?
+
+```bash
+ssh sens6 "ping -c1 -W2 192.168.20.2"                       # data plane
+ssh sens6 "timeout 30 uhd_usrp_probe --args \
+   'type=x4xx,addr=192.168.20.2,mgmt_addr=128.178.122.174' | grep -E 'X410|Device'"
+ssh sens6 "ssh root@128.178.122.174 'systemctl is-active usrp-hwd'"
+```
+
+### THE trap: a stale MPM claim, which looks exactly like a stream stall
+
+SIGKILL never lets UHD release its device claim, so the claim goes stale. The **next** claimant —
+including an innocent `uhd_usrp_probe` — makes MPM decide someone is stealing the device and
+**kill itself**, and it is then down for about 100 s. Visible only in the X410's own journal:
+
+```
+[MPM.RPCServer] [WARNING] Someone tried to claim this device again (From: <host>)
+[MPM.kill] [INFO] Terminating pid: 141048
+systemd[1]: Stopping USRP Hardware Daemon (MPM)...
+systemd[1]: Started USRP Hardware Daemon (MPM).          # ~100 s later
+```
+
+```bash
+ssh sens6 "ssh root@128.178.122.174 'journalctl -u usrp-hwd --since -20min --no-pager | tail -40'"
+```
+
+A run launched into that window shows `returned=0` / `ERROR_CODE_TIMEOUT` for its whole life **with
+healthy ANTPOW and zero NIC drops** — i.e. it presents as an X410 stream stall and is not one. By the
+time anything re-probes, MPM is back and the probe succeeds, which is why this stayed hidden.
+
+**Avoid it: stop the receiver with SIGTERM and wait**, never SIGKILL first. `run_arm.sh` does this.
+
+```bash
+ssh sens6 "sudo pkill -TERM -x nr-uesoftmodem"
+ssh sens6 "for i in \$(seq 1 20); do pgrep -x nr-uesoftmodem >/dev/null || break; sleep 1; done"
+# only if it ignores SIGTERM -- and then expect a stale claim:
+ssh sens6 "sudo pkill -9 -x nr-uesoftmodem"
+ssh sens6 "ssh root@128.178.122.174 'systemctl restart usrp-hwd'"   # ~40 s to settle
+```
+
+After any MPM restart the device needs time to settle — ANTPOW sits at the noise floor for a while,
+so an immediate capture reads as a dead cell.
+
+### NIC — the silent one
+
+```bash
+ssh sens6 "ip -4 addr show enp129s0f0np0 | grep inet; cat /sys/class/net/enp129s0f0np0/mtu"
+ssh sens6 "ethtool -g enp129s0f0np0 | awk '/Current hardware/,0' | head -3"
+ssh sens6 "cat /sys/class/net/enp129s0f0np0/statistics/rx_missed_errors"
+```
+
+Three things to know:
+
+1. **The interface legitimately carries two addresses.** As of 2026-09-04 it holds
+   `192.168.10.45/24` *and* `192.168.20.1/24`. The first is a NetworkManager profile that has
+   silently reverted before; when only that one is present, UHD quietly falls back to the 1 GbE
+   management port and starves the stream — **an afternoon of captures was lost to this, and every
+   measurement taken over it read as a code regression.** Assert `192.168.20.1/24` is present, do
+   not merely check the link is up.
+2. **`rx_missed_errors` is CUMULATIVE** (26.7 M on this host and climbing since boot). Only a
+   per-run **delta** means anything. `run_arm.sh` samples it at 1 Hz into `nic.csv` and prints
+   `nic_miss=` on the verdict line — use those, not the raw counter.
+3. `rx_out_of_buffer` is **n/a** on this NIC, so `rx_missed_errors` is the drop counter here.
+   Ring size and MTU are **not reboot-persistent**; preflight re-applies them.
+
+### Telling the three failure modes apart
+
+| symptom | drops | ANTPOW | likely cause |
+|---|---|---|---|
+| `returned=0` / `ERROR_CODE_TIMEOUT`, whole run | **zero** | healthy (90-300) | stale MPM claim — check the X410 journal |
+| NIC ring overflow | tens of thousands | healthy | IRQ/CPU placement; `run_arm.sh` pins NIC IRQs to cores 8-13 and the softmodem to 0-7 (`NOSEP=1` waives) |
+| genuine RF loss | zero | collapses (e.g. 62 → 4.9) | cell down, cabling, or antenna |
+
+`dropped=` lines inside `run.log` are the **sensing CFR-queue** counter, not RF — do not read them
+as radio drops.
+
+---
+
 ## 7. Cell under test
 
 ARFCN 630000 · 3450 MHz · PCI 2 · 273 PRB / 100 MHz · SCS 30 kHz · TDD (8 DL / 2 UL, 10-slot period)
