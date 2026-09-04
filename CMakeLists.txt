@@ -2346,7 +2346,10 @@ if(ENABLE_TESTS)
 
   # Phase 2 (roadmap artifact "Cell-Agnostic Passive Receiver"): type-system plumbing for the SSB
   # CFR source (NR_ISAC_SRC_SSB), tested in isolation from the RT tap.
-  add_executable(test_nr_isac_ssb_source ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/tests/nr_isac_ssb_source_test.cc)
+  add_executable(test_nr_isac_ssb_source ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/tests/nr_isac_ssb_source_test.cc
+                                        ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/nr_isac.cc
+                                        ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/detection_report.cc
+                                        ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/nr_isac_ssb_axis.c)
   target_include_directories(test_nr_isac_ssb_source PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_ISAC)
   target_link_libraries(test_nr_isac_ssb_source PRIVATE NR_UE_ISAC UTIL GTest::gtest_main)
   add_dependencies(tests test_nr_isac_ssb_source)
