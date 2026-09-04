@@ -842,21 +842,31 @@ void nr_pdcch_blind_monitor_init(void)
   };
   config_get(config_get_if(), params, (int)(sizeof(params) / sizeof(params[0])), "sensing");
 
-  if (p_coreset == NULL || p_coreset[0] == '\0' || p_ss == NULL || p_ss[0] == '\0' || p_bwp == NULL
-      || p_bwp[0] == '\0') {
-    return; // monitor disabled -- coreset/ss/bwp are all required together
+  /* The three lines below describe a DEDICATED search space, which a passive receiver can never
+   * read off the air (it arrives in RRCReconfiguration over a ciphered SRB). Requiring them made
+   * "self-configure from the MIB" unreachable: delete them and init() returned here, leaving
+   * g_enabled = 0, which gates the entire RT tap (nr_pdcch_blind_monitor_rt.c). Autoconf would then
+   * populate a config nothing ever read -- and it logged its success line while doing so.
+   * g_cfg.autoconf is already set: config_get() above filled it via .iptr. */
+  const bool have_manual_coreset = (p_coreset != NULL && p_coreset[0] != '\0'
+                                    && p_ss != NULL && p_ss[0] != '\0'
+                                    && p_bwp != NULL && p_bwp[0] != '\0');
+  if (!have_manual_coreset && !g_cfg.autoconf) {
+    return; // monitor disabled -- either the three lines together, or autoconf
   }
-  if (!parse_coreset(p_coreset)) {
-    LOG_E(PHY, "SENSING: malformed pdcch_blind_monitor_coreset '%s'\n", p_coreset);
-    return;
-  }
-  if (!parse_ss(p_ss)) {
-    LOG_E(PHY, "SENSING: malformed pdcch_blind_monitor_ss '%s'\n", p_ss);
-    return;
-  }
-  if (!parse_bwp(p_bwp)) {
-    LOG_E(PHY, "SENSING: malformed pdcch_blind_monitor_bwp '%s'\n", p_bwp);
-    return;
+  if (have_manual_coreset) {
+    if (!parse_coreset(p_coreset)) {
+      LOG_E(PHY, "SENSING: malformed pdcch_blind_monitor_coreset '%s'\n", p_coreset);
+      return;
+    }
+    if (!parse_ss(p_ss)) {
+      LOG_E(PHY, "SENSING: malformed pdcch_blind_monitor_ss '%s'\n", p_ss);
+      return;
+    }
+    if (!parse_bwp(p_bwp)) {
+      LOG_E(PHY, "SENSING: malformed pdcch_blind_monitor_bwp '%s'\n", p_bwp);
+      return;
+    }
   }
   if (p_rnti_range != NULL && p_rnti_range[0] != '\0' && !parse_rnti_range(p_rnti_range)) {
     LOG_E(PHY, "SENSING: malformed pdcch_blind_monitor_rnti_range '%s'; using default %u-%u\n", p_rnti_range,
@@ -951,7 +961,7 @@ void nr_pdcch_blind_monitor_init(void)
   // TOTAL right while the per-field widths stayed wrong, so every field after the frequency-domain
   // assignment was read from the wrong offset and nobody noticed, because the only fields consumed
   // (RNTI, RIV allocation) happen to precede the damage. ----
-  {
+  if (have_manual_coreset) {
     const uint16_t used_len = g_cfg.dci_length_override > 0 ? (uint16_t)g_cfg.dci_length_override
                                                             : nr_pdcch_blind_dci_size((uint16_t)g_cfg.bwp_size);
     const uint16_t implied  = nr_pdcch_blind_dci_size_ex((uint16_t)g_cfg.bwp_size, &g_cfg.extract);
@@ -966,6 +976,9 @@ void nr_pdcch_blind_monitor_init(void)
     } else {
       LOG_I(PHY, "SENSING: blind PDCCH DCI field widths reconcile with the %u-bit payload\n", used_len);
     }
+  } else {
+    LOG_I(PHY, "SENSING: blind PDCCH config deferred to CSS0 autoconf; DCI widths reconcile once "
+               "the MIB has been decoded\n");
   }
 
   if (g_cfg.pdsch_decode > 0 && g_cfg.extract.tda_count == 0) {
