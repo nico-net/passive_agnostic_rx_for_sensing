@@ -2360,10 +2360,8 @@ if(ENABLE_TESTS)
   # DCI injection against known ground truth -- required by this project's own testing plan before
   # any live-air attempt. See nr_pdcch_blind_monitor.c's file-level comment for the reuse-vs-
   # duplication decisions and /home/sens/.claude/plans/zesty-baking-thompson.md for the design record.
-  add_executable(test_nr_pdcch_blind_monitor ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_blind_monitor_test.cc ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/dci_nr.c ${OPENAIR1_DIR}/PHY/NR_REFSIG/refsig.c ${OPENAIR_DIR}/common/utils/ds/hashtable.c)
-  target_include_directories(test_nr_pdcch_blind_monitor PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT ${OPENAIR_DIR}/common/utils/ds)
-  target_compile_options(test_nr_pdcch_blind_monitor PRIVATE -ffunction-sections -fdata-sections)
-  target_link_options(test_nr_pdcch_blind_monitor PRIVATE -Wl,--gc-sections)
+  add_executable(test_nr_pdcch_blind_monitor ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_blind_monitor_test.cc)
+  target_include_directories(test_nr_pdcch_blind_monitor PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
   target_link_libraries(test_nr_pdcch_blind_monitor PRIVATE nr_pdcch_blind_monitor nr_common MAC_NR_COMMON polar crc_byte UTIL asn1_nr_rrc_hdrs asn1_lte_rrc_hdrs GTest::gtest)
   add_dependencies(tests test_nr_pdcch_blind_monitor)
   add_test(NAME test_nr_pdcch_blind_monitor COMMAND ./test_nr_pdcch_blind_monitor)
