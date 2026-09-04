@@ -103,6 +103,54 @@ plausible-looking output.
 
 ---
 
+## 2b. REFUTED AND ALREADY ELIMINATED — do not re-litigate any of these
+
+Each line below cost a measurement to establish. They are the reason the search space for the
+remaining defect is small. Sources in §8.
+
+**The blind PDCCH chain itself WORKS.** Measured 2026-08-19:
+`438 x FULLCRC L=4 dci_len=39 crc=0xffff upper=0x0 in_range=1`. Extraction, LLR generation,
+unscrambling, polar decode and CRC/RNTI recovery are all correct on real SIB1. Any statement that
+"the receive chain is broken" is retracted — it was an artefact of reading `accepts` (§4).
+
+| hypothesis | verdict | evidence |
+|---|---|---|
+| PDCCH receive chain / equalisation broken | **RETRACTED** | 438 real SIB1 decodes; and an active UE completed RA → Msg4 → RRCSetup → PDU session on the same cell with `cumulated bad DCI 0` |
+| FFT-window / time-tracking defect ("frequency coherence destroyed") | **RETRACTED** | that 2026-08-04 offline analysis shared the blind path's own extraction assumptions, so it was measuring this defect, not the receiver. Do not spend time here |
+| Config derivation differs between paths | **EXONERATED** | `PDCCHCFG` traces from blind and normal paths are identical except `ncand` (12 vs 3) |
+| LLR generation differs between paths | **EXONERATED** | for matched `(frame, slot, cce, L)` the two LLR buffers are byte-identical — `sum`, `nz`, first 8 soft bits all equal (`f=0 s=1 cce=0 L=4 → crc=0xffff sum=2614 nz=432` on both) |
+| `nr_pdcch_blind_llr_autoscale` is a blind-only difference | **ELIMINATED** | its comment says "enabled only for this path", but `dci_nr.c:184` initialises the global to 1 and nothing ever clears it. The normal path runs with it ON too. Comment is stale — fix the comment, don't retest |
+| `nr_slot_fep(..., 0, ...)` sample-offset argument | **NOT the cause** | the normal path passes `0` as well (`phy_procedures_nr_ue.c:956`) |
+| per-symbol `memcpy` into `rxdataF_symb` | **NOT the cause** | byte-for-byte the same pattern the normal path uses |
+| `CceRegMappingType = NON_INTERLEAVED` hardcode at `nr_pdcch_blind_monitor_rt.c:234` | **INERT** | only gNB-side files read it; the UE deinterleaver switches on `reg_bundle_size != 0`, which the monitor does pass. Interleaving IS applied |
+| RNTI value / C-RNTI churn | **EXONERATED for SIB1** | SI-RNTI is a fixed known answer; pinning the range makes the accept test a known-RNTI test |
+| Noise gates suppressing real decodes | **EXONERATED** | the oracle ran with all gates off (`held[energy=0 persist=0 snr=0]`) |
+| X410 overflows / RF drops on sens6 | **NOT a factor** | 0 overflow / 0 `ERROR_CODE_TIMEOUT` / 0 short-read across every run; `benchmark_rate` clean at 4×122.88 MS/s. The `dropped=` lines in logs are the SENSING CFR-queue counter, not RF |
+
+**One real bug found and FIXED along the way, keep it:** `CoreSetType` was hardcoded to
+`NFAPI_NR_CSET_CONFIG_PDCCH_CONFIG`. Its only effect in the UE RX path (`dci_nr.c:338`) is
+`dmrs_ref = BWPStart` for PDCCH-Config versus `0` for MIB/SIB1, so any CORESET#0-style config with a
+non-zero `bwp_start` generated its DM-RS sequence offset by that many RBs. Now an optional 7th
+`pdcch_blind_monitor_coreset` field (`...:1` = MIB_SIB1); autoconf sets it. Note the current trace
+shows `dmrs_ref=0`, i.e. this is behaving correctly — **but it also means `BWPStart` and `dmrs_ref`
+are coupled through this field, so changing one without checking the other is a trap.**
+
+**Two measurement artefacts that have already produced false conclusions:**
+
+- **`dci_length` sweeps are not free.** `nr_pdcch_blind_dci_size_ex()` rejects any `dci_length`
+  smaller than its computed DCI-1_1 field sum *before decoding*, so a sweep shows `accepts=0` for
+  everything below 47 and ~130 random accepts above it. That is the validator, not the air. Zero the
+  optional field widths when testing a 39-bit payload.
+- **`grep -c "a|b|c"` without `-E`** matched a literal string and reported "0 overflows" while
+  testing nothing. Always `-E`, and sanity-check any zero.
+
+**AL4 is required.** SIB1 lands at `L=4`. An AL1+AL2 ladder could never find it; the AL4/AL8 sweep
+is what made the 438 decodes visible. Autoconf pins SS0's TS 38.213 Table 10.1-1 values
+(AL1/AL2 unused, AL4 = 4, AL8 = 2). Related: srsRAN's `dci_aggregation_level` is very likely
+**log2(L)**, not L — do not quote "99.997 % at AL1" as fact without re-checking units.
+
+---
+
 ## 3. TASK 1 — resolve `BWPStart` from first principles
 
 **Do not just set it to 1.** The known-good value of 1 was measured on 2026-08-19, when the cell
@@ -124,10 +172,23 @@ Derive it. The relevant facts:
   `openair2/LAYER2/NR_MAC_UE/nr_ue_dci_configuration.c:225`, which is 0 here — yet the known-good
   blind config used 1. Establish which is right for the *current* cell before changing anything.
 
-Suggested method: run with `ISAC_PDCCH_CFGTRACE=1 ISAC_PDCCH_CFGTRACE_SLOT=1` on an **attached**
-UE (not `--passive-rx`), so the normal path — which demonstrably decodes SIB1 — traces alongside
-the blind one in the same process on the same samples. The two lines differing in `BWPStart` is the
-answer; identical lines mean the fault is elsewhere and this task is closed as a non-issue.
+Suggested method — **run both paths in ONE process on identical samples.** Attach normally (not
+`--passive-rx`) with the blind monitor pointed at the same CORESET#0, so the normal path, which
+demonstrably decodes SIB1, traces alongside the blind one. Two lines differing in `BWPStart` is the
+answer; identical lines close this task as a non-issue.
+
+```bash
+cd /home/sens/NICOLA/openairinterface5g-total-passive-ue/tests/passive_rx/captures
+ARM=bwpstart CONF=/home/sens/NICOLA/nrue.passive_rx.autoconf.conf \
+  DUR=150 TRIES=1 NANT=1 CFGTRACE=1 FULLCRC=1 ./run_arm.sh
+
+# compare the two paths' derived indices (log tag is PDCCHCFG, NOT CFGTRACE):
+L=$(ls -dt /home/sens/NICOLA/captures/bwpstart_*/ | head -1)/run.log
+grep -aoE 'PDCCHCFG .{0,160}' "$L" | sort -u
+```
+
+Expect one line per path per traced slot. If only one distinct line appears, both paths agree and
+`BWPStart` is not the defect — say so and move to §5 rather than changing the value on suspicion.
 
 > `ISAC_DISC_NO_RESYNC=1` is REQUIRED for any attached-UE run on this tree, or it re-acquires
 > endlessly and never attaches. `run_arm.sh` already sets it.
@@ -186,8 +247,19 @@ Ground truth requires the gNB at **debug** log level. Traps:
   read its `-c` argument). Both have moved mid-session before, and a stale log reads as "no traffic".
 - The C-RNTI churns on every re-attach. Re-read it at capture time; never reuse one.
 
-Once the fixture replays with a known answer, `BWPStart` becomes a one-line sweep with an
-unambiguous pass/fail instead of a 150 s round trip.
+```bash
+# capture a fixture (env must be added to run_arm.sh's sudo env allowlist first -- see section 6)
+ARM=fixture CONF=/home/sens/NICOLA/nrue.passive_rx.autoconf.conf \
+  DUR=120 TRIES=1 NANT=1 CAPTURE=1 FULLCRC=1 ./run_arm.sh
+
+# gNB ground truth -- resolve BOTH paths from the RUNNING process, never assume:
+ssh sens4 "pgrep -a gnb"                    # read its -c argument for the live config
+ssh sens4 "grep -c 'SI-RNTI' <that log>"    # needs log: all_level: debug
+```
+
+`ISAC_PDCCH_CAPTURE` is **not yet in the `run_arm.sh` allowlist** — add it before expecting `CAPTURE=1`
+to do anything (§6). Once the fixture replays with a known answer, `BWPStart` becomes a one-line
+sweep with an unambiguous pass/fail instead of a 150 s round trip.
 
 ---
 
@@ -207,6 +279,14 @@ cd /home/sens/NICOLA/openairinterface5g-total-passive-ue/tests/passive_rx/captur
 ARM=<name> CONF=/home/sens/NICOLA/nrue.passive_rx.autoconf.conf \
   DUR=150 TRIES=1 NANT=1 FULLCRC=1 CFGTRACE=1 ./run_arm.sh
 # results land in /home/sens/NICOLA/captures/<ARM>_<HHMMSS>/{run.log,verdict.txt}
+```
+
+```bash
+# WHAT CHANGED, and why -- the commit messages carry the measurements, not just the diff
+cd /home/sens/NICOLA/openairinterface5g-total-passive-ue
+git log --oneline -4               # d3521885cd this doc | 924d1bf863 fixes | b60fa7ba3b first cut
+git show b60fa7ba3b 924d1bf863     # the whole Phase 1 diff
+git log -1 --format=%B 924d1bf863  # the three defects and why each one mattered
 ```
 
 `run_arm.sh` passes env through a **`sudo env` allowlist** — a variable not listed there is silently
@@ -231,7 +311,29 @@ TDD pattern comes from SIB1 automatically.
 
 ---
 
-## 8. Definition of done
+## 8. Where the rest of the state lives
+
+This document is self-contained for the task. For everything around it:
+
+| what | where |
+|---|---|
+| The SIB1 oracle: full history, the 438-decode resolution, every eliminated hypothesis in §2b | `/home/sens/.claude/projects/-home-sens-NICOLA/memory/sib1-oracle-proves-pdcch-rx-chain-broken.md` |
+| Memory index — grep it for a subsystem name **before** forming any hypothesis | `/home/sens/.claude/projects/-home-sens-NICOLA/memory/MEMORY.md` |
+| Passive receiver state, measured numbers, eliminated-hypothesis list | `/home/sens/NICOLA/PASSIVE_RX_ONLY_HANDOVER.md` |
+| Blind PDCCH on X410 | `/home/sens/NICOLA/X410_BLIND_PDCCH_HANDOVER.md` |
+| PDCCH coherence investigation (note: its conclusion is RETRACTED, see §2b) | `/home/sens/NICOLA/PDCCH_COHERENCE_HANDOVER.md` |
+| Passive UL decode | `PASSIVE_UL_HANDOVER.md` (repo root) |
+| Harness usage and caveats | `tests/passive_rx/README.md`, `README_OTA.md` |
+| Receive-branch problem (why `NANT=1` here) | memory `branch-2-is-strong-and-undecodable.md` |
+| Roadmap this is Phase 1 of, incl. Phases 2-3 | https://claude.ai/code/artifact/e1e6ae5d-25f6-4c30-97cb-09f2c0f239a2 |
+
+**Read the memory index first.** Not doing so is what produced this document's own detour: three
+fixes were built for a problem already recorded as resolved, using a metric already recorded as
+unable to show success. That cost a full build-and-run round; reading the entry cost 30 seconds.
+
+---
+
+## 9. Definition of done
 
 1. `BWPStart` derived — with the reasoning recorded, not a copied constant.
 2. FULLCRC decodes of SI-RNTI at a rate comparable to the historical 438 / 120 s, passing all three
