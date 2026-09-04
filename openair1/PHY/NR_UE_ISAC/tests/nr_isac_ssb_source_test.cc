@@ -32,7 +32,7 @@ extern "C" void exit_function(const char *file, const char *function, const int 
 // Use the qualified name for the function from the namespace
 using nr_isac::nr_isac_source_to_ref_type;
 
-// The parser function is C++ (nr_isac.cc), declared here with C++ linkage.
+// Forward declaration for C++ function (defined in nr_isac.cc, outside anonymous namespace)
 uint32_t source_bit_from_token(const std::string& tok);
 
 TEST(SsbSource, TokenMapsToTheShiftedSsbBitNotABareEnum) {

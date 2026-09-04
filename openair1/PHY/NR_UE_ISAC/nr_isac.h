@@ -39,7 +39,6 @@
 #define NR_ISAC_H
 
 #include <stdint.h>
-#include <string>
 
 #ifdef __cplusplus
 extern "C" {
@@ -212,8 +211,6 @@ uint32_t nr_isac_aoa_antennas(void);
 uint32_t nr_isac_subslot_config(uint32_t* min_re, float* min_snr_db);
 
 
-/** @brief Map a whitespace-trimmed token to its source bit; returns 0 for unknown/empty tokens. */
-uint32_t source_bit_from_token(const std::string& tok);
 
 #ifdef __cplusplus
 }
