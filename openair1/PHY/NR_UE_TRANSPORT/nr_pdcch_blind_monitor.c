@@ -171,7 +171,20 @@ bool nr_pdcch_blind_monitor_autoconf_css0(int num_rbs,
   /* Format 1_0 ONLY. 1_1 lives in the DEDICATED search space, whose description is ciphered and
    * therefore not available to us -- scanning for it here would only manufacture false accepts. */
   g_cfg.dci10_scan        = 2;
-  g_cfg.dci10_ss_type     = 0; // common
+  /* BUG FIXED 2026-09-04 (found while investigating 0 blind SI-RNTI accepts on CORESET#0, after the
+   * occasion-gate ss_duration fix above got genuine CRC=0xFFFF polar decodes flowing but "accepts"
+   * stayed at 0): this line read `= 0; // common`, but nr_blind_ss_type_t (nr_pdcch_blind_monitor.h)
+   * defines NR_BLIND_SS_UE_SPECIFIC = 0 and NR_BLIND_SS_COMMON = 1 -- the comment was simply wrong.
+   * With ss_type left at UE-specific, dci10_default_class_mask() enables ONLY the C-RNTI class for
+   * every CORESET#0 candidate, so a genuine SI-RNTI (0xFFFF) or P-RNTI (0xFFFE) decode -- which
+   * SS0 exists to carry -- hit `n_attempts == 0` and was rejected with "no DCI-1_0 RNTI class
+   * enabled for this CRC-recovered value" every time, before ever reaching dci10_parse()'s
+   * SIB1-specific field checks. Confirmed live: the periodic summary's `last_reject` only ever
+   * showed the much more common "CRC-recovered value outside plausible RNTI range" because that
+   * reason is overwritten by whichever candidate rejects last before each 1000-occasion snapshot,
+   * and real SI-RNTI hits are rare against ~3 candidates/occasion of mostly noise -- so this defect
+   * was invisible to a last-value diagnostic and needed tracing the class-mask logic directly. */
+  g_cfg.dci10_ss_type     = NR_BLIND_SS_COMMON;
   g_cfg.dci10_n_rb_riv    = num_rbs; // RIV is over CORESET#0 for SI-RNTI, not the whole carrier
   g_cfg.dci10_rb_offset   = 0;
   g_cfg.dci10_mux_pattern = (mux_pattern >= 1 && mux_pattern <= 3) ? mux_pattern : 1;

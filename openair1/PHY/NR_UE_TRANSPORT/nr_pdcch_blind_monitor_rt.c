@@ -464,8 +464,22 @@ void nr_pdcch_blind_monitor_process(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t 
 
   NR_DL_FRAME_PARMS *fp = &ue->frame_parms;
   const uint32_t gate_slot = (uint32_t)proc->frame_rx * fp->slots_per_frame + (uint32_t)proc->nr_slot_rx;
-  if (cfg->ss_monitoring_slot_periodicity <= 0
-      || (gate_slot % (uint32_t)cfg->ss_monitoring_slot_periodicity) != (uint32_t)cfg->ss_monitoring_slot_offset) {
+  // BUG FIXED 2026-09-04 (found while investigating 0 blind SI-RNTI accepts on CORESET#0): this
+  // gate checked ONLY the single slot at ss_monitoring_slot_offset, ignoring ss_duration entirely
+  // -- ss_duration is set correctly by autoconf (2 for this cell's SS0, confirmed against the MAC's
+  // own get_type0_PDCCH_CSS_config_parameters() computation and logged as "dur=2"), but was never
+  // read anywhere in this file. A search space with duration > 1 spans MULTIPLE CONSECUTIVE slots
+  // per occasion (TS 38.213 ch.13: SS0 is "over two consecutive slots"), and the real candidate can
+  // land in any of them -- confirmed live: this cell's genuine SI-RNTI grant is at gate_slot%40==1,
+  // the SECOND slot of the 2-slot window starting at offset=0, which the old single-slot check could
+  // never reach. Duration 1 (the overwhelmingly common case -- every other search space this module
+  // handles) makes this identical to the old check, so nothing else changes behavior.
+  const uint32_t ss_dur = (cfg->ss_duration > 0) ? (uint32_t)cfg->ss_duration : 1;
+  if (cfg->ss_monitoring_slot_periodicity <= 0) {
+    return;
+  }
+  const uint32_t rem = gate_slot % (uint32_t)cfg->ss_monitoring_slot_periodicity;
+  if (rem < (uint32_t)cfg->ss_monitoring_slot_offset || rem >= (uint32_t)cfg->ss_monitoring_slot_offset + ss_dur) {
     return; // not a monitoring occasion this slot
   }
 
