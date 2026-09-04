@@ -641,19 +641,21 @@ void nr_pdcch_blind_monitor_init(void)
    * --thread-pool cores, so a zeroed default would silently pin the deferred-decode consumer onto
    * the RT candidate-decode pool -- the one placement the feature exists to avoid. -1 = unpinned. */
   g_cfg.pdsch_thread_core = -1;
-  // Noise-floor gates default ON (not opt-in): the RNTI range above is, by necessity, nearly the
-  // whole space (see its own comment) and cannot alone keep the false-accept rate down at this
-  // scan's trial volume -- see nr_pdcch_blind_monitor_rt.h's field comments for what each number
-  // means. Values are a reasonable starting point, NOT independently tuned against a live deployment
-  // this session -- re-verify against measured accept/RNTI-cross-check rates the same way
-  // dci_length_override was, if they turn out too strict (losing real grants) or too loose.
+  // Noise-floor gates default: the RNTI range above is, by necessity, nearly the whole space (see
+  // its own comment) and on its own cannot keep the false-accept rate down at this scan's trial
+  // volume -- see nr_pdcch_blind_monitor_rt.h's field comments for what each number means.
   // energy_min defaults OFF: it is an ABSOLUTE threshold in receiver-dependent units, so shipping a
   // default for it was always wrong -- 2.0 was calibrated at 106 PRB and does not carry to 273 PRB
   // or to any real OTA gain setting, which is why it ended up disabled in the configs rather than
-  // retuned. The adaptive gate replaces it and CAN safely carry a default, because a multiple of the
-  // measured noise floor is dimensionless.
+  // retuned. energy_adapt_factor ALSO now defaults OFF (2026-09-04): measured live on this cell's
+  // CORESET#0 to saturate its own floor estimator and reject 100% of candidates within seconds
+  // (the estimator is fed by every candidate it gates, so a dense/small CORESET converges the
+  // "noise" floor to signal level -- see PHASE1_CSS0_AUTOCONF_HANDOVER.md). A large dedicated
+  // CORESET was the case this gate was designed for and where it stays safe, but a default this
+  // deployment-shape-dependent is not a safe global default; a deployment that wants it back on
+  // sets pdcch_blind_monitor_noise_gates explicitly (the 5th field, energy_adapt_factor).
   g_cfg.energy_min             = 0.0f;
-  g_cfg.energy_adapt_factor    = 2.0f;
+  g_cfg.energy_adapt_factor    = 0.0f;
   g_cfg.rnti_persist_k         = 2;
   g_cfg.rnti_persist_window_ms = 500;
   g_cfg.min_snr_lin            = 4.0f; // ~6 dB
