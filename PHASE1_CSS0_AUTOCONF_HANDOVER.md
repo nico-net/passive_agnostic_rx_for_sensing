@@ -101,6 +101,72 @@ the same failure class as the DCI field-width bug in `PASSIVE_PDSCH_DATA_AIDED_H
 where the total length was right, two field offsets were wrong, and the result was 0 % CRC with
 plausible-looking output.
 
+### 2c. 2026-09-04 — sdd Task 1: energy gate confirmed as A blocker; BWPStart still open, NOT ruled out
+
+`run_arm.sh` did not pass `ISAC_PDCCH_ENERGY`/`ISAC_PDCCH_CAPTURE` through its `sudo env`
+allowlist before this session (`4c9a762785`, `e595841d2f`) — neither read as "no effect" so much
+as "never reached the process". Two 150 s captures on live hardware (sens6, X410, same cell as
+§7) with the allowlist fixed:
+
+**Arm A (`egate_on`, gate ON, `ISAC_PDCCH_ENERGY=1 ISAC_PDCCH_FULLCRC=1`):** reproduces §1's
+already-recorded numbers, now over a full 150 s rather than a single snapshot —
+`candidates` frozen at **199** across all seven periodic summaries (occasions 1000→7000),
+`held[energy]` growing **exactly 3/occasion** (2801→20801 over 6000 occasions), `efloor` climbing
+0.98→1.11+. 199 = `ENERGY_FLOOR_WARMUP`(200) − 1: the gate lets the warmup candidates through
+uncontested, then rejects every candidate after, permanently. This is the predicted signature —
+**confirmed**, and independent of ENERGYPROBE (below).
+
+**`ISAC_PDCCH_ENERGY`'s al4-to-floor numbers could not be measured — the instrument itself
+never printed, root-caused, not a plumbing failure.** `ENERGYPROBE` produced **zero** lines in
+either arm despite the env var demonstrably reaching the live process
+(`sudo cat /proc/<pid>/environ` on the running `nr-uesoftmodem`, mid-capture, showed
+`ISAC_PDCCH_ENERGY=1` verbatim). Root cause, read from source
+(`nr_pdcch_blind_monitor_rt.c:987-1000`): the print fires on
+`proc->nr_slot_rx != occ_slot`, using the **intra-frame** slot index — but CORESET#0/SIB1
+occasions recur when `gate_slot % ss_monitoring_slot_periodicity == ss_monitoring_slot_offset`
+(`:466`), and this cell's periodicity (20 ms ≈ 40 slots) is an exact multiple of
+`slots_per_frame` (20 at numerology 1), so every qualifying occasion lands on the *same*
+intra-frame `nr_slot_rx`. The transition check is true exactly once (the very first occasion),
+which is also the one occasion the code suppresses (`occ_slot >= 0` guard) because there is
+nothing yet to report. Net effect: permanently silent for any CSS0-cadence monitor. Pre-existing,
+unrelated to this task's plumbing fix, and out of scope to fix here (no C changes this task) —
+flagged for whoever next needs per-AL energy numbers; it needs an absolute slot count
+(`frame_rx*slots_per_frame+nr_slot_rx`, the pattern already used at `:466`/`:534`), not
+`nr_slot_rx` alone.
+
+**Arm B (`egate_off`, gate OFF via `noise_gates="0:2:500:0:0"`):** with the gate disabled, ALL
+raw candidates reach `blind_polar_decode()` — cumulative `candidates` climbed to **21000** by
+occasion 7000 (vs. frozen at 199 in arm A), confirming the gate really was the thing stopping
+candidates from reaching the decoder. **82 `FULLCRC` lines** over 150 s (vs. the historical
+438/120 s target in §4, and vs. this doc's prior single-event measurement). All 82 have
+`upper=0x0` (passes the narrow 1-in-256 test) and **all 82 have `in_range=0`** — expected and
+uninformative here, since this conf pins `pdcch_blind_monitor_rnti_range = "1:65519"`
+(0x1..0xFFEF), which excludes SI-RNTI (0xFFFF) *by construction*, gate or no gate.
+**The decisive number: zero of the 82 have `crc=0xffff`.** The 82 CRC values are scattered
+across the full 16-bit space with no repeats (`0x69aa, 0x22c3, 0x4747, ... 0xafad`) — textbook
+noise, and the count matches pure chance almost exactly: 21000 candidates × P(upper 8 bits of a
+24-bit CRC == 0) = 21000/256 ≈ **82.03**, against an observed 82. This capture did **not**
+surface a single genuine SIB1 decode with the gate fully open.
+
+**This does not refute Task 1's own claim (the gate blocks the decoder) — but it does mean the
+gate is demonstrably *A* blocker, not demonstrated to be *the only* one.** A null result from
+arm B is exactly what §2's already-open `BWPStart` defect (BWPStart=0 autoconf vs. BWPStart=1
+known-good, unresolved, "one index is wrong and it is identified") predicts: wrong DM-RS/RIV
+origin corrupts the decode before the RNTI gate is ever reached, regardless of whether the
+energy gate lets the candidate through. **`BWPStart` was never under test by this task** — Task 1
+touched no C/C++ code and did not change `dmrs_ref`/`BWPStart` derivation. Do not read arm B's
+null result as evidence against the `BWPStart` hypothesis; it is equally consistent with it.
+Sample size caveat: 82 events is much better than the prior 1-event measurement but is still one
+150 s run on a rig with documented 0%↔82% run-to-run swings
+(`passive-rx-needs-5-runs-per-arm`) — do not treat "0 genuine decodes" as proven-zero without a
+repeat.
+
+**Net finding:** the energy gate saturating during warmup and then rejecting ~100% of candidates
+thereafter is real and measured (arm A). Whether removing it alone is *sufficient* to restore
+real SIB1 decodes is **not** established by arm B — the data is consistent with `BWPStart` (§2)
+remaining a live, separate defect. Task 2 (BWPStart derivation) is not obviated by this task's
+result.
+
 ---
 
 ## 2b. REFUTED AND ALREADY ELIMINATED — do not re-litigate any of these
