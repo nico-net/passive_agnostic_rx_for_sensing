@@ -131,19 +131,29 @@ void nr_pdcch_demapping_deinterleaving(uint32_t coreset_nbr_rb,
     f_bundle_j_list[nb] = f_bundle_j;
   }
 
-  // Get cce_list indices by bundle index in ascending order
+  // For each candidate, the PHYSICAL bundle position to read FROM for each of its LOGICAL
+  // bundles, in ascending LOGICAL order (bundle 0 of the candidate, then bundle 1, ...) -- this
+  // is the order the transmitter scrambled/encoded in, so the receiver must reassemble e_rx in
+  // this same order for descrambling/polar decode to mean anything.
+  //
+  // BUG FIXED 2026-09-04 (found while investigating 0 blind SI-RNTI accepts on CORESET#0, which
+  // is ALWAYS interleaved per TS 38.213 Table 10.1-1): the previous version built this list by
+  // scanning PHYSICAL positions nb ascending and appending nb whenever it matched one of the
+  // candidate's logical bundles -- which orders the result by ASCENDING PHYSICAL position, not
+  // ascending LOGICAL bundle index. For a non-interleaved CORESET, f(k)=k (physical==logical
+  // always), so the two orderings are identical and the bug was completely invisible -- which is
+  // exactly why the dedicated CORESET (non-interleaved on this deployment) has always decoded
+  // correctly while CORESET#0 (spec-mandated interleaved) never has. f_bundle_j_list[] is already
+  // indexed by logical bundle (see the loop above), so the fix is a direct lookup, not a scan.
+  // Confirmed empirically: openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_blind_monitor_test.cc's
+  // InterleavedCoreset0CandidateRoundTrips test fails (garbage CRC) before this fix and passes
+  // after it, using this cell's real live CORESET#0 params (R=2, L=6, n_shift=PCI=2).
   int f_bundle_j_list_ord[number_of_candidates][max_bundles];
   for (int c_id = 0; c_id < number_of_candidates; c_id++) {
     int start_bund_cand = CCE[c_id] * num_bundles_per_cce;
     int max_bund_per_cand = L[c_id] * num_bundles_per_cce;
-    int f_bundle_j_list_id = 0;
-    for (int nb = 0; nb < max_bundles; nb++) {
-      for (int bund_cand = start_bund_cand; bund_cand < start_bund_cand + max_bund_per_cand; bund_cand++) {
-        if (f_bundle_j_list[bund_cand] == nb) {
-          f_bundle_j_list_ord[c_id][f_bundle_j_list_id] = nb;
-          f_bundle_j_list_id++;
-        }
-      }
+    for (int k = 0; k < max_bund_per_cand; k++) {
+      f_bundle_j_list_ord[c_id][k] = f_bundle_j_list[start_bund_cand + k];
     }
   }
 
