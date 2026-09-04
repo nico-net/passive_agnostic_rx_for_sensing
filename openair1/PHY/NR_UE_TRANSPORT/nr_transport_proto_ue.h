@@ -364,6 +364,10 @@ int nr_pbch_decode(PHY_VARS_NR_UE *ue,
  * combined. Both are thread-local: concurrent consumers decode different TBs. */
 void nr_dlsch_force_branch(int ant);
 int nr_dlsch_last_branch(void);
+/* The branch the rank-1 four-RX path will decode, known BEFORE the demodulator runs (-1 if it
+ * cannot be predicted). Lets the caller match nvar to the branch actually decoded -- see the
+ * definition-site comment in nr_dlsch_demodulation.c. */
+int nr_dlsch_planned_branch(int nbRx, int nl);
 /**@}*/
 #endif
 

@@ -89,6 +89,93 @@ const nr_pdcch_blind_monitor_cfg_t* nr_pdcch_blind_monitor_get_cfg(void)
   return &g_cfg;
 }
 
+/* ---- PHASE 1: SELF-CONFIGURE FROM MIB/SIB1 (2026-09-04) ---------------------------------------
+ *
+ * Everything the monitor needs to watch the COMMON search space is broadcast in the clear, so a
+ * receiver pointed at an unknown cell can derive it instead of being told. The UE already computes
+ * it -- it has to, or SIB1 could not decode -- into mac->type0_PDCCH_CSS_config. This just copies
+ * that into the monitor's config, which is the step that was missing: the runtime line read
+ * `ss=ue-specific ... sib1=0` while a perfectly good CORESET#0 description sat unused in MAC.
+ *
+ * The values that are NOT passed in are fixed by TS 38.211 7.3.2.2 for CORESET#0 and so are set
+ * here rather than derived: REG bundle 6, interleaver 2, interleaved mapping, and both the DM-RS
+ * scrambling ID and the shift index equal to the PCI. That is exactly the hand-written recipe in
+ * the conf file's comments, now computed.
+ *
+ * Returns false and changes NOTHING if the caller's inputs are not usable, so a failed derivation
+ * leaves any operator-supplied config standing. */
+/* Is self-configuration wanted? Default OFF: an existing deployment has a hand-written config that
+ * describes its DEDICATED search space, and silently replacing it with the common one would trade a
+ * dense data-aided source for a sparse SIB1 one without being asked. */
+bool nr_pdcch_blind_monitor_autoconf_wanted(void)
+{
+  return g_cfg.autoconf != 0;
+}
+
+bool nr_pdcch_blind_monitor_autoconf_css0(int num_rbs,
+                                          int num_symbols,
+                                          int cset_start_rb,
+                                          int ss_period_slots,
+                                          int ss_slot,
+                                          int ss_duration,
+                                          int ss_first_symbol,
+                                          int mux_pattern,
+                                          int pci)
+{
+  if (num_rbs <= 0 || (num_rbs % 6) != 0 || num_symbols < 1 || num_symbols > 3 || cset_start_rb < 0
+      || pci < 0 || pci > 1007) {
+    LOG_W(PHY,
+          "SENSING: CSS0 autoconf REFUSED (num_rbs=%d num_symbols=%d cset_start_rb=%d pci=%d) -- "
+          "keeping the existing config\n",
+          num_rbs, num_symbols, cset_start_rb, pci);
+    return false;
+  }
+
+  g_cfg.coreset_type                     = 1; // MIB/SIB1 CORESET#0
+  g_cfg.coreset_freq_domain              = num_rbs / 6; // the monitor counts 6-RB groups
+  g_cfg.coreset_duration                 = num_symbols;
+  g_cfg.coreset_reg_bundle_size          = 6; // 38.211: CORESET#0 is always L=6, interleaved
+  g_cfg.coreset_interleaver_size         = 2;
+  g_cfg.coreset_shift_index              = pci;
+  g_cfg.coreset_pdcch_dmrs_scrambling_id = (uint16_t)pci;
+
+  g_cfg.bwp_start = cset_start_rb;
+  g_cfg.bwp_size  = num_rbs;
+
+  g_cfg.ss_monitoring_slot_periodicity = (ss_period_slots > 0) ? ss_period_slots : 1;
+  g_cfg.ss_monitoring_slot_offset      = ss_slot;
+  g_cfg.ss_duration                    = (ss_duration > 0) ? ss_duration : 1;
+  g_cfg.ss_first_symbol                = ss_first_symbol;
+
+  /* Format 1_0 ONLY. 1_1 lives in the DEDICATED search space, whose description is ciphered and
+   * therefore not available to us -- scanning for it here would only manufacture false accepts. */
+  g_cfg.dci10_scan        = 2;
+  g_cfg.dci10_ss_type     = 0; // common
+  g_cfg.dci10_n_rb_riv    = num_rbs; // RIV is over CORESET#0 for SI-RNTI, not the whole carrier
+  g_cfg.dci10_rb_offset   = 0;
+  g_cfg.dci10_mux_pattern = (mux_pattern >= 1 && mux_pattern <= 3) ? mux_pattern : 1;
+  g_cfg.dci10_sib1        = 1;
+
+  /* SI-RNTI, and ONLY SI-RNTI. The default plausibility range is 1..0xFFEF, which EXCLUDES
+   * SI-RNTI (0xFFFF) -- so without this the monitor scans CORESET#0 correctly and then rejects
+   * every SIB1 grant it finds. Measured: sib1 decoded but dl_ldpc_ok=0, claimed=0.
+   *
+   * Pinning it to the single value is also a far stronger gate than the wide default: a false
+   * accept must now hit one specific RNTI rather than any of 65519, which is worth ~16 bits of
+   * additional rejection on a search whose only other check is a 24-bit CRC. */
+  g_cfg.rnti_min = 0xFFFF; // SI-RNTI
+  g_cfg.rnti_max = 0xFFFF;
+
+  LOG_A(PHY,
+        "SENSING: CSS0 autoconf from MIB/SIB1 -- coreset(groups=%d dur=%d bundle=6 interleaver=2 "
+        "shift=%d scramb=%d) bwp=[%d..%d) ss(period=%d offset=%d dur=%d symb=%d) dci10(mux=%d sib1=1)\n",
+        g_cfg.coreset_freq_domain, g_cfg.coreset_duration, g_cfg.coreset_shift_index,
+        g_cfg.coreset_pdcch_dmrs_scrambling_id, g_cfg.bwp_start, g_cfg.bwp_start + g_cfg.bwp_size,
+        g_cfg.ss_monitoring_slot_periodicity, g_cfg.ss_monitoring_slot_offset, g_cfg.ss_duration,
+        g_cfg.ss_first_symbol, g_cfg.dci10_mux_pattern);
+  return true;
+}
+
 static int parse_coreset(const char* s)
 {
   // 7th field (coreset_type) is OPTIONAL so every existing 6-field config keeps working unchanged.
@@ -645,6 +732,12 @@ void nr_pdcch_blind_monitor_init(void)
         "ant_ports:tci:srs_req:cbg (-1 = built-in default). Getting dci_length_override right is "
         "NOT enough on its own -- see nr_pdcch_blind_extract_opts_t",
         0, .strptr = &p_dci_bits, .defstrval = "", TYPE_STRING, 0},
+      {"pdcch_blind_monitor_autoconf",
+        "1 = derive the COMMON search space (CORESET#0/SearchSpace#0, initial BWP, DCI 1_0 size) "
+        "from MIB/SIB1 at runtime, so the receiver works on a cell whose dedicated configuration is "
+        "unknown. Overrides pdcch_blind_monitor_coreset/_ss/_bwp once SIB1 decodes. Default 0 keeps "
+        "any hand-written (dedicated) config, which is denser but cell-specific",
+        0, .iptr = &g_cfg.autoconf, .defintval = 0, TYPE_INT, 0},
       {"pdcch_blind_monitor_dci10",
         "DCI format 1_0 scanning; scan[:ss_type[:n_rb_riv[:rb_offset[:length_override[:class_mask"
         "[:mux_pattern[:sib1]]]]]]] (scan 0=format 1_1 only, 1=both, 2=1_0 only; ss_type 0=UE-specific, "

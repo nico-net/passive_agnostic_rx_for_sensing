@@ -525,6 +525,27 @@ void update_pdcch_config(NR_UE_MAC_INST_t *mac)
   fill_coresetZero(mac->coreset0, &mac->type0_PDCCH_CSS_config);
   fill_searchSpaceZero(mac->search_space_zero, slots_per_frame, &mac->type0_PDCCH_CSS_config);
 
+  /* PHASE 1 SELF-CONFIGURATION (2026-09-04). Everything the blind monitor needs for the COMMON
+   * search space has just been derived above, from the MIB alone -- no SIB1, no attach, no
+   * transmission. Hand it over instead of making the operator read these values out of a gNB log
+   * and paste them into pdcch_blind_monitor_coreset/_ss/_bwp, which is what made the receiver
+   * cell-specific. This is the same derivation the ISAC_OTA_CFG probe below prints; the probe
+   * emitted a config to paste, this applies it.
+   *
+   * No-ops unless pdcch_blind_monitor_autoconf = 1, so every existing deployment is unaffected. */
+  if (nr_pdcch_blind_monitor_autoconf_wanted()) {
+    const NR_Type0_PDCCH_CSS_config_t *t0c = &mac->type0_PDCCH_CSS_config;
+    nr_pdcch_blind_monitor_autoconf_css0((int)t0c->num_rbs,
+                                         (int)t0c->num_symbols,
+                                         (int)t0c->cset_start_rb,
+                                         (int)t0c->search_space_frame_period,
+                                         (int)t0c->slot,
+                                         (int)t0c->search_space_duration,
+                                         (int)t0c->first_symbol_index,
+                                         (int)t0c->type0_pdcch_ss_mux_pattern,
+                                         (int)mac->physCellId);
+  }
+
   /* ---- OTA CONFIG DERIVATION PROBE, CORESET#0 half (ISAC_OTA_CFG=1). Companion to the SIB1-derived
    * BWP/TDRA dump in config_ue.c. Everything here comes from the MIB alone, so it is available to a
    * receiver that has done nothing but sync -- no SIB1, no attach, no transmission.

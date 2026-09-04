@@ -937,6 +937,7 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
    * which carries the identical arithmetic -- this is upstream OAI behaviour, not a local slip, and
    * the attached path's gates were tuned against it. Flip it only on an alternated >= 5-run-per-arm
    * A/B at comparable offered load (19.3), never on inspection. */
+  uint32_t nvar_den = 1u; // hoisted: the per-branch substitution below must reuse the SAME divisor
   {
     static int s_nvfix = -1;
     if (s_nvfix < 0) {
@@ -944,8 +945,46 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
     }
     const uint32_t den = s_nvfix ? (uint32_t)(n_dmrs_sym * cw->Nl)
                                  : (uint32_t)(dlsch_config->number_symbols * cw->Nl * fp->nb_antennas_rx);
-    nvar /= (den > 0) ? den : 1u;
+    nvar_den = (den > 0) ? den : 1u;
+    nvar /= nvar_den;
   }
+  /* ---- Match nvar to the branch actually decoded (2026-09-04) ---------------------------------
+   * nvar above is the MEAN over every receive branch, but the rank-1 four-RX path decodes ONE
+   * branch. On this rig three of the four are noise, so the mean tells the equaliser the channel is
+   * far noisier than the branch it actually reads, and the LLRs clip -- which is why branch 0 scored
+   * 51-64 % at 4 antennas but 76 % at --ue-nb-ant-rx 1, decoding the same branch either way.
+   * This is the DL counterpart of the UL scale fix in nr_ulsch_demodulation.c.
+   *
+   * Only applied when the branch is known in advance (mode 0, the default) and that branch actually
+   * produced an estimate; otherwise the mean stands, so nothing changes for the attached UE, for
+   * mode 1/2/3, or for a single-antenna receiver. ISAC_RX_NVAR_PERBRANCH=0 disables it. */
+  {
+    static int s_pb = -1;
+    if (s_pb < 0) {
+      const char *e = getenv("ISAC_RX_NVAR_PERBRANCH");
+      s_pb = (e != NULL) ? atoi(e) : 1;
+    }
+    const int dl_branch = s_pb ? nr_dlsch_planned_branch(fp->nb_antennas_rx, cw->Nl) : -1;
+    if (dl_branch >= 0 && dl_branch < NR_DL_CHEST_MAX_ANT && nr_dl_chest_nvar_ant[dl_branch] > 0) {
+      /* SCALE-PRESERVING substitution, not a raw one. `nvar` at this point is
+       *     (sum over n_dmrs_sym x Nl calls of the per-antenna MEAN) / den
+       * while nr_dl_chest_nvar_ant[] holds one RAW per-antenna value. Swapping the mean for a
+       * single branch means re-applying the same accumulation and divisor, otherwise the equaliser
+       * gets a number that is off by (n_dmrs_sym x Nl)/den -- a large factor, and exactly the class
+       * of silent scale error this file's history is full of.
+       *
+       * Approximation, stated: nr_dl_chest_nvar_ant[] is overwritten per call, so it carries the
+       * LAST DM-RS symbol's value rather than an average over them. That is the same approximation
+       * the per-antenna publication already makes, and at Nl=1 with 2-3 DM-RS symbols it is small
+       * next to the 4x error it replaces. */
+      const uint64_t scaled = (uint64_t)nr_dl_chest_nvar_ant[dl_branch] * (uint64_t)(n_dmrs_sym * cw->Nl);
+      const uint32_t nvar_branch = (uint32_t)(scaled / nvar_den);
+      if (nvar_branch > 0) {
+        nvar = nvar_branch;
+      }
+    }
+  }
+
   pdtim_add(PDTIM_CHEST, pdt_che);
 
   /* ---- PER-BRANCH FREQUENCY-OFFSET ESTIMATE (2026-09-03) --------------------------------------

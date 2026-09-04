@@ -46,6 +46,34 @@ int nr_dlsch_last_branch(void)
   return nr_dlsch_used_branch;
 }
 
+/* Which branch the rank-1 four-RX path WILL decode, known before the demodulator runs, or -1 if
+ * that cannot be predicted here.
+ *
+ * Exists so the caller can hand the equaliser the noise variance of the branch actually being
+ * decoded. nvar reaches nr_rx_pdsch() as an argument, i.e. it is fixed BEFORE the branch selection
+ * inside the demodulator happens, so a caller that wants them to agree has to know the choice in
+ * advance. Mode 0 is deterministic (branch 0) and is the default; mode 1 picks the strongest branch
+ * from channel levels this function has not seen, so it honestly answers -1 there rather than
+ * guessing, and the caller keeps the cross-antenna mean.
+ *
+ * Why it matters, measured: at 4 antennas DL decodes branch 0 alone and scored 51-64 %, while the
+ * SAME branch 0 at --ue-nb-ant-rx 1 scored 76 %. The difference is that nvar is a mean over all
+ * four branches, and on this rig three of them are noise -- so the equaliser is told the channel is
+ * far noisier than the branch it is actually reading, and clips the LLRs. Same defect class as the
+ * UL scale bug fixed in nr_ulsch_demodulation.c. */
+int nr_dlsch_planned_branch(int nbRx, int nl)
+{
+  if (!(nl == 1 && nbRx == 4)) {
+    return -1; // the branch-restriction logic does not engage outside rank-1 four-RX
+  }
+  if (nr_dlsch_forced_branch >= 0 && nr_dlsch_forced_branch < nbRx) {
+    return nr_dlsch_forced_branch; // the retry has pinned one
+  }
+  const char *e = getenv("ISAC_RX_MRC_MODE");
+  const int mode = (e != NULL) ? atoi(e) : 0;
+  return (mode == 0) ? 0 : -1;
+}
+
 // #define DEBUG_HARQ(a...) printf(a)
 #define DEBUG_HARQ(...)
 //#define DEBUG_DLSCH_DEMOD

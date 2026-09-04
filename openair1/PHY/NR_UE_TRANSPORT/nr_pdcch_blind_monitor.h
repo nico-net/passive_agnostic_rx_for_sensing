@@ -335,6 +335,23 @@ void nr_pdcch_blind_monitor_init(void);
 /// Non-zero once nr_pdcch_blind_monitor_init() has parsed a non-empty configuration.
 int nr_pdcch_blind_monitor_enabled(void);
 
+/* Self-configure the monitor for the COMMON search space from values the cell broadcasts in the
+ * clear (MIB/SIB1 -> mac->type0_PDCCH_CSS_config). Lets the receiver work on an unknown cell with
+ * no hand-written pdcch_blind_monitor_* config. Returns false and changes nothing if the inputs are
+ * not usable. See the definition-site comment in nr_pdcch_blind_monitor.c. */
+/* 1 when pdcch_blind_monitor_autoconf asked for self-configuration (default 0). */
+bool nr_pdcch_blind_monitor_autoconf_wanted(void);
+
+bool nr_pdcch_blind_monitor_autoconf_css0(int num_rbs,
+                                          int num_symbols,
+                                          int cset_start_rb,
+                                          int ss_period_slots,
+                                          int ss_slot,
+                                          int ss_duration,
+                                          int ss_first_symbol,
+                                          int mux_pattern,
+                                          int pci);
+
 /**
  * @brief DCI format 1_1 payload bit-width under this module's fixed MVP assumption set (see the
  * file-level comment). Derived field-by-field from openair2/LAYER2/NR_MAC_COMMON/nr_mac_common.c's

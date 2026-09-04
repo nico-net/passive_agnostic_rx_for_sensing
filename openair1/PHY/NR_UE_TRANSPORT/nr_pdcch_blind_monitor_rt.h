@@ -257,6 +257,11 @@ typedef struct {
                          // in any DCI, so this is where a measured or swept residual goes.
   nr_pdcch_blind_ul_opts_t ul; // UL BWP, pusch-TimeDomainAllocationList (k2 lives here), DM-RS,
                                // waveform/identities and the per-field widths.
+  /* PHASE 1 self-configuration. 1 = derive the COMMON search space (CORESET#0 / SearchSpace#0)
+   * from MIB/SIB1 at runtime instead of reading it from pdcch_blind_monitor_coreset/_ss/_bwp.
+   * Default 0: an existing config describes the DEDICATED search space, and replacing it with the
+   * common one trades a dense data-aided source for a sparse SIB1 one -- never do that unasked. */
+  int autoconf;
 } nr_pdcch_blind_monitor_cfg_t;
 
 #ifdef __cplusplus
