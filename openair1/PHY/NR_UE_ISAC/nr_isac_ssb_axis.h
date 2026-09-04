@@ -27,7 +27,11 @@ extern "C" {
  *
  * @param ssb_start_subcarrier fp->ssb_start_subcarrier (frame_parms), the FFT-relative subcarrier
  *                              the SSB's own RE 0 sits at.
- * @param k_ssb                Sub-RB SSB shift (fp->ssb_subcarrier_offset), 0 for this deployment.
+ * @param k_ssb                Sub-RB SSB shift, ALREADY NORMALIZED (see openair2/LAYER2/NR_MAC_UE/
+ *                              nr_ue_dci_configuration.c's ssb_sc_offset_norm derivation: mac->
+ *                              ssb_subcarrier_offset is raw 15kHz-unit kSSB and must be right-shifted
+ *                              by scs for FR1 before being passed here — NOT read directly from
+ *                              frame_parms, which has no field of this name). 0 for this deployment.
  * @param ofdm_symbol_size     fp->ofdm_symbol_size, the FFT size k_abs must be taken modulo.
  * @param k_abs_out            Caller-owned array of at least 240 uint32_t.
  */

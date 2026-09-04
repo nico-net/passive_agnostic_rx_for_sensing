@@ -113,3 +113,17 @@ TEST(SsbAxis, HandlesAWraparoundNearTheFftEdgeWithoutOverflowing) {
     EXPECT_LT(k_abs[i], 256u);
   }
 }
+
+TEST(SsbAxis, NeverProducesGarbageOnANegativeOffset) {
+  uint32_t k_abs[240];
+  // A mismatched/un-normalized k_ssb (demonstrating the guard from Finding 2): ssb_start_subcarrier=0
+  // is tiny (typical for some ARFCN values), and k_ssb=100 is large-ish but still sub-240, giving
+  // ssb_offset_point_a = (0 - 100) / 12 = -9 (integer division is floor-ish on negatives in C),
+  // so base_sc = -108, which is negative. Without the guard, (base_sc + i) % ofdm_symbol_size
+  // would produce negative remainders that cast to near-UINT32_MAX garbage. With the guard, all
+  // results must be valid indices [0, ofdm_symbol_size).
+  nr_isac_ssb_k_abs(/*ssb_start_subcarrier=*/0, /*k_ssb=*/100, /*ofdm_symbol_size=*/4096, k_abs);
+  for (int i = 0; i < 240; i++) {
+    EXPECT_LT(k_abs[i], 4096u) << "index " << i << " produced garbage (value " << k_abs[i] << ")";
+  }
+}

@@ -8,6 +8,13 @@ void nr_isac_ssb_k_abs(int ssb_start_subcarrier, int k_ssb, int ofdm_symbol_size
   const int ssb_offset_point_a = (ssb_start_subcarrier - k_ssb) / 12;
   const int base_sc            = ssb_offset_point_a * 12;
   for (int i = 0; i < 240; i++) {
-    k_abs_out[i] = (uint32_t)((base_sc + i) % ofdm_symbol_size);
+    // Guard against negative modulo: C's % keeps sign of dividend, so ensure result is always
+    // non-negative before casting to uint32_t. This protects against mismatched/un-normalized k_ssb
+    // (see nr_isac_ssb_axis.h doc comment on the k_ssb parameter).
+    int idx = (base_sc + i) % ofdm_symbol_size;
+    if (idx < 0) {
+      idx += ofdm_symbol_size;
+    }
+    k_abs_out[i] = (uint32_t)idx;
   }
 }
