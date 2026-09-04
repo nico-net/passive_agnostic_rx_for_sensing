@@ -121,7 +121,9 @@ bool nr_pdcch_blind_monitor_autoconf_css0(int num_rbs,
                                           int ss_duration,
                                           int ss_first_symbol,
                                           int mux_pattern,
-                                          int pci)
+                                          int pci,
+                                          int rb_offset,
+                                          int dmrs_typea_position)
 {
   if (num_rbs <= 0 || (num_rbs % 6) != 0 || num_symbols < 1 || num_symbols > 3 || cset_start_rb < 0
       || pci < 0 || pci > 1007) {
@@ -142,6 +144,10 @@ bool nr_pdcch_blind_monitor_autoconf_css0(int num_rbs,
 
   g_cfg.bwp_start = cset_start_rb;
   g_cfg.bwp_size  = num_rbs;
+  g_cfg.dmrs_typeA_position = dmrs_typea_position; // MIB dmrs-TypeA-Position (2 or 3); feeds the
+                                                   // passive PDSCH-extraction path's l0/DM-RS mask
+                                                   // (blind_fill_dmrs_mask()) -- unset here left it
+                                                   // at its zero default, an illegal value.
 
   g_cfg.ss_monitoring_slot_periodicity = (ss_period_slots > 0) ? ss_period_slots : 1;
   /* `ss_slot` must already carry the frame term for mux pattern 1 -- the caller computes it the
@@ -214,7 +220,7 @@ bool nr_pdcch_blind_monitor_autoconf_css0(int num_rbs,
         "ss(period=%d offset=%d dur=%d symb=%d) dci10(mux=%d sib1=1)\n",
         g_cfg.coreset_freq_domain, g_cfg.coreset_duration, g_cfg.coreset_shift_index,
         g_cfg.coreset_pdcch_dmrs_scrambling_id, g_cfg.bwp_start, g_cfg.bwp_start + g_cfg.bwp_size,
-        ssb_offset_point_a, ssb_offset_point_a - cset_start_rb,
+        ssb_offset_point_a, rb_offset,
         g_cfg.ss_monitoring_slot_periodicity, g_cfg.ss_monitoring_slot_offset, g_cfg.ss_duration,
         g_cfg.ss_first_symbol, g_cfg.dci10_mux_pattern);
   return true;
@@ -994,8 +1000,8 @@ void nr_pdcch_blind_monitor_init(void)
       LOG_I(PHY, "SENSING: blind PDCCH DCI field widths reconcile with the %u-bit payload\n", used_len);
     }
   } else {
-    LOG_I(PHY, "SENSING: blind PDCCH config deferred to CSS0 autoconf; DCI widths reconcile once "
-               "the MIB has been decoded\n");
+    LOG_I(PHY, "SENSING: blind PDCCH config deferred to CSS0 autoconf; DCI-1_1 width reconciliation "
+               "not applicable (autoconf scans DCI format 1_0 only)\n");
   }
 
   if (g_cfg.pdsch_decode > 0 && g_cfg.extract.tda_count == 0) {

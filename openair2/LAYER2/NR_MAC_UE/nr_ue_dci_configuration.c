@@ -551,7 +551,9 @@ void update_pdcch_config(NR_UE_MAC_INST_t *mac)
                                          (int)t0c->search_space_duration,
                                          (int)t0c->first_symbol_index,
                                          (int)t0c->type0_pdcch_ss_mux_pattern,
-                                         (int)mac->physCellId);
+                                         (int)mac->physCellId,
+                                         (int)t0c->rb_offset,
+                                         (int)mac->dmrs_TypeA_Position);
   }
 
   /* ---- OTA CONFIG DERIVATION PROBE, CORESET#0 half (ISAC_OTA_CFG=1). Companion to the SIB1-derived

@@ -351,7 +351,9 @@ bool nr_pdcch_blind_monitor_autoconf_css0(int num_rbs,
                                           int ss_duration,
                                           int ss_first_symbol,
                                           int mux_pattern,
-                                          int pci);
+                                          int pci,
+                                          int rb_offset,
+                                          int dmrs_typea_position);
 
 /**
  * @brief DCI format 1_1 payload bit-width under this module's fixed MVP assumption set (see the

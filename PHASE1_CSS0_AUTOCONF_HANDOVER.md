@@ -154,9 +154,11 @@ Per the controlling plan, a zero-hit result is **not** a failure of any of these
 proved its own mechanical claim (gate identified; gate off; autoconf-only enablement), and all
 three are independently true regardless of the genuine-decode count. But the pattern across all
 three captures is now strong enough to say plainly: **a further blocker remains, beyond the energy
-gate, BWPStart, and the manual-config-required-ness this document set out to fix.** Finding it is
-out of scope for Tasks 1–3 and is Task 4's territory (conditional, not yet dispatched as of this
-writing).
+gate, BWPStart, and the manual-config-required-ness this document set out to fix.** Finding it was
+out of scope for Tasks 1–3 and was Task 4's territory. Task 4 **has since run** — see §2d below for
+what it found (BWPStart independently confirmed against live gNB ground truth; the
+`ISAC_PDCCH_CAPTURE` replay tool itself confirmed broken, not built out; the genuine-decode question
+still open).
 
 ### 2c. 2026-09-04 — sdd Task 1: energy gate confirmed as A blocker (historical record, superseded above)
 
@@ -223,6 +225,44 @@ thereafter is real and measured (arm A). Whether removing it alone is *sufficien
 real SIB1 decodes is **not** established by arm B — the data is consistent with `BWPStart` (§2)
 remaining a live, separate defect. Task 2 (BWPStart derivation) is not obviated by this task's
 result.
+
+### 2d. 2026-09-04 — Task 4: BWPStart confirmed against live gNB ground truth; replay tool confirmed broken; genuine-decode question still open
+
+Task 4 ran. It did not build the offline capture-and-replay tool §5 describes — that work item is
+still not done, see the correction below — but it did settle two open questions and surface one new
+confirmed defect.
+
+**(a) `BWPStart` = 0 is now confirmed correct against live gNB ground truth, not just re-derived from
+a formula.** §2's formula derivation (`cset_start_rb = ssb_offset_point_a - rb_offset = 12 - 12 = 0`)
+was internally self-consistent but only checked against OAI's own normal-path *code*. This task
+compared the receiver's own live autoconf log line, field-by-field, against the gNB's own live
+per-grant PDCCH/PDSCH debug log lines on `sens4`. Every field matched exactly: CORESET groups=8,
+duration=1, REG bundle=6, interleaver=2, shift=2, DM-RS/data scrambling ID=2, BWP range=[0..48), and
+CORESET/BWP start=0. `BWPStart` is closed — do not re-open it without new evidence.
+
+**(b) SIB1 cadence confirmed frequent, refuting any "too rare to catch" concern.** 193 real SI-RNTI
+grants measured in a 30 s slice of the gNB's own log — ~155 ms cadence, not sparse enough to explain
+zero genuine decodes across 94-96 FULLCRC hits per 150 s capture.
+
+**(c) NEW open item — the `ISAC_PDCCH_CAPTURE` fixture-write mechanism is confirmed broken.** Two
+independent captures against the current (energy-heuristic) trigger wrote **0/400 records** to
+`/tmp/pdcch_fixture.bin`, despite thousands of real scan occasions and an independently-confirmed
+real, strongly-correlated PDCCH signal in-window: the separate DM-RS-correlation probe in the same
+file (`dci_nr.c`, unconditionally on) showed `dmrs_nc=0.974` on real signal in the same capture
+window that the occupancy heuristic missed entirely. Most likely fault, not yet root-caused: the
+6×-median-CCE-energy occupancy heuristic at `dci_nr.c:772-798` disagreeing with the DM-RS-correlation
+probe on the same data. §5's `ISAC_PDCCH_CAPTURE` workflow is therefore not yet usable as described —
+flagged as follow-up for whoever picks up the offline-replay approach next.
+
+**(d) The original open question remains open, restated honestly.** Three independent live captures
+(Task 1 arm B: 82 FULLCRC hits / 0 genuine; Task 2: 96/0; Task 3: 94/0) show zero genuine SI-RNTI
+decodes despite CSS0 config now confirmed fully correct by (a) above. The most likely remaining seam,
+not yet inspected: the blind monitor's own separate demapping/unscrambling/decode-chain
+reimplementation (`nr_pdcch_blind_monitor_rt.c`). Its own comment at line ~858-861 says it "mirrors
+`dci_nr.c`'s own `nr_pdcch_dci_indication()`... minus the own-RNTI equality gate" — i.e. it is a
+*parallel reimplementation* of decode logic, not a shared call into the confirmed-working
+legacy/RRC-configured path. That divergence is real follow-up work for a future task, not something
+to chase as part of this fix wave.
 
 ---
 
@@ -383,9 +423,13 @@ ssh sens4 "pgrep -a gnb"                    # read its -c argument for the live 
 ssh sens4 "grep -c 'SI-RNTI' <that log>"    # needs log: all_level: debug
 ```
 
-`ISAC_PDCCH_CAPTURE` is **not yet in the `run_arm.sh` allowlist** — add it before expecting `CAPTURE=1`
-to do anything (§6). Once the fixture replays with a known answer, `BWPStart` becomes a one-line
-sweep with an unambiguous pass/fail instead of a 150 s round trip.
+`ISAC_PDCCH_CAPTURE` **is** in the `run_arm.sh` allowlist (added by Task 1, `e595841d2f`) — the env
+var reaches the process. `BWPStart` no longer needs this workflow to close it: it is now confirmed
+correct against live gNB ground truth by other means (§2d(a)). What this workflow is still useful
+for is the *remaining* open question (§2d(d)) — but the fixture-write mechanism itself is confirmed
+broken (§2d(c), 0/400 records written across two captures despite real, correlatable signal
+in-window): fix the occupancy-detection heuristic at `dci_nr.c:772-798` before expecting `CAPTURE=1`
+to produce a usable fixture.
 
 ---
 
