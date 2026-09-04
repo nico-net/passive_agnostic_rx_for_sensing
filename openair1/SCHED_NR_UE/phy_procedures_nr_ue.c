@@ -29,6 +29,7 @@ extern _Atomic long nr_ue_diag_producer_wall_ns;
 #include "SCHED_NR_UE/phy_sch_processing_time.h"
 #include "PHY/NR_UE_ESTIMATION/nr_estimation.h"
 #include "PHY/NR_UE_ISAC/nr_isac.h"
+#include "PHY/NR_UE_ISAC/nr_isac_ssb_axis.h"
 #include "PHY/NR_UE_TRANSPORT/nr_csirs_monitor.h"
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_data_aided.h"
 #include "PHY/NR_TRANSPORT/nr_transport_common_proto.h"
@@ -1396,6 +1397,66 @@ int nr_process_pbch_symbol(
       freq2time(fp->ofdm_symbol_size, (int16_t *)&dl_ch_estimates[aarx], (int16_t *)dl_ch_estimates_time[aarx]);
       UEscopeCopy(ue, pbchDlChEstimateTime, (void *)dl_ch_estimates_time, sizeof(c16_t), fp->nb_antennas_rx, fp->ofdm_symbol_size, 0);
     }
+  }
+
+  // Phase 2 (roadmap artifact "Cell-Agnostic Passive Receiver"): submit this PBCH symbol's
+  // per-antenna channel estimate as a CFR row. No grant, no RNTI, no decode required -- every
+  // NR cell transmits this on a fixed raster, so it is the sensing source most robust to
+  // cell-specific misconfiguration. Guarded by nr_isac_source_enabled() so this is a true no-op
+  // (not even the k_abs derivation runs) unless "ssb" is in sensing.sources.
+  if (nr_isac_enabled() && nr_isac_source_enabled(NR_ISAC_SRC_SSB)) {
+    uint32_t k_abs[NR_PBCH_NUM_RB * NR_NB_SC_PER_RB];
+    uint32_t l_sym[NR_PBCH_NUM_RB * NR_NB_SC_PER_RB];
+    // k_ssb hardcoded to 0: there is no PHY-side plumbing path to the MAC's real
+    // ssb_subcarrier_offset at this call site (nr_process_pbch_symbol only receives
+    // PHY_VARS_NR_UE*, never the MAC instance) -- and no field on NR_DL_FRAME_PARMS carries it
+    // either (verified: grepped the whole PHY tree, zero hits). CORRECT for this deployment
+    // (Phase 1 already confirmed this cell's actual kSSB is 0) but WRONG for any future cell
+    // with a nonzero kSSB -- flagged, not fixed; adding real MAC->PHY plumbing for this one
+    // value is out of scope for this task.
+    nr_isac_ssb_k_abs(ssb_start_subcarrier, /*k_ssb=*/0, fp->ofdm_symbol_size, k_abs);
+    for (uint32_t i = 0; i < NR_PBCH_NUM_RB * NR_NB_SC_PER_RB; i++) {
+      l_sym[i] = (uint32_t)relPbchSymb;
+    }
+    // NR_ISAC_SSB_MAX_ANT mirrors csi_rx.c's NR_ISAC_CSIRS_MAX_ANT convention -- there is no
+    // shared NR_MAX_RX_ANTENNAS constant anywhere in the PHY tree (verified by grep), so this
+    // follows the existing per-ISAC-tap local-bound pattern rather than inventing a new one.
+    enum { NR_ISAC_SSB_MAX_ANT = 8 };
+    const uint32_t nof_ant = nr_isac_aoa_antennas() > 0
+                                  ? (nr_isac_aoa_antennas() < (uint32_t)fp->nb_antennas_rx ? nr_isac_aoa_antennas()
+                                                                                            : (uint32_t)fp->nb_antennas_rx)
+                                  : 1;
+    // dl_ch_estimates is ANTENNA-MAJOR ALREADY at this call site (dl_ch_estimates[aarx]), and
+    // nr_isac_submit_cfr_multi() wants one contiguous antenna-major buffer with an explicit
+    // stride -- dl_ch_estimates[aarx] are separate allocations, not one contiguous block, so pack
+    // them into a stack buffer rather than assuming a stride across dl_ch_estimates itself.
+    float h_packed[2 * (NR_PBCH_NUM_RB * NR_NB_SC_PER_RB) * NR_ISAC_SSB_MAX_ANT];
+    const uint32_t nof_ant_clamped = nof_ant > NR_ISAC_SSB_MAX_ANT ? NR_ISAC_SSB_MAX_ANT : nof_ant;
+    for (uint32_t a = 0; a < nof_ant_clamped; a++) {
+      const c16_t* est = (const c16_t*)dl_ch_estimates[a];
+      for (uint32_t i = 0; i < NR_PBCH_NUM_RB * NR_NB_SC_PER_RB; i++) {
+        h_packed[2 * (a * (NR_PBCH_NUM_RB * NR_NB_SC_PER_RB) + i) + 0] = (float)est[i].r;
+        h_packed[2 * (a * (NR_PBCH_NUM_RB * NR_NB_SC_PER_RB) + i) + 1] = (float)est[i].i;
+      }
+    }
+    const nr_isac_carrier_t carrier = {
+        .nof_prb         = (uint32_t)fp->N_RB_DL,
+        .scs_hz          = fp->subcarrier_spacing,
+        .dl_center_hz    = fp->dl_CarrierFreq,
+        .pci             = (uint16_t)fp->Nid_cell,
+        .slots_per_frame = fp->slots_per_frame,
+    };
+    nr_isac_submit_cfr_multi(proc->nr_slot_rx,
+                             0.0f,
+                             NR_ISAC_SRC_SSB,
+                             &carrier,
+                             h_packed,
+                             nof_ant_clamped,
+                             NR_PBCH_NUM_RB * NR_NB_SC_PER_RB,
+                             k_abs,
+                             l_sym,
+                             NR_PBCH_NUM_RB * NR_NB_SC_PER_RB,
+                             0.0f);
   }
 
   // Copy current symbol estimate for FO estimation

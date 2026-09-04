@@ -1088,6 +1088,7 @@ set(NR_UE_ISAC_SRC
   ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/detection_report.cc
   ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/sensing_engine.cc
   ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/nr_isac.cc
+  ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/nr_isac_ssb_axis.c
   )
 # Passive receiver vs sensing pipeline. The blind PDCCH -> DCI -> PDSCH receiver only ever hands
 # channel estimates TO the sensing engine and never reads anything back, so on a receiver-only build
