@@ -42,6 +42,8 @@ extern "C" {
 
 using namespace nr_isac;
 
+// Forward declaration: defined after the anonymous namespace
+uint32_t source_bit_from_token(const std::string& tok);
 namespace {
 
 // Process-wide sensing state. The engine is created only when [sensing] enable is set.
@@ -90,7 +92,7 @@ uint32_t parse_sources_mask(const char* s)
       continue;
     }
     tok = tok.substr(b, e - b + 1);
-    const uint32_t bit = source_bit_from_token(tok);
+    const uint32_t bit = ::source_bit_from_token(tok);
     if (bit != 0) {
       mask |= bit;
     } else {
