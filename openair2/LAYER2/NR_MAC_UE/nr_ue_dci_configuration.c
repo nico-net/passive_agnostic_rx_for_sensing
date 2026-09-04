@@ -535,11 +535,18 @@ void update_pdcch_config(NR_UE_MAC_INST_t *mac)
    * No-ops unless pdcch_blind_monitor_autoconf = 1, so every existing deployment is unaffected. */
   if (nr_pdcch_blind_monitor_autoconf_wanted()) {
     const NR_Type0_PDCCH_CSS_config_t *t0c = &mac->type0_PDCCH_CSS_config;
+    /* The monitoring-slot OFFSET is not t0c->slot. fill_searchSpaceZero() above computes it as
+     * slot + slots_per_frame * sfn_c for multiplexing pattern 1, and mirroring that here is the
+     * difference between monitoring SearchSpace#0's real occasions and monitoring the wrong frame
+     * on alternate periods (20 slots/frame at 30 kHz against a 40-slot period). */
+    const int css0_offset = (t0c->type0_pdcch_ss_mux_pattern == 1)
+                                ? (int)t0c->slot + slots_per_frame * (int)t0c->sfn_c
+                                : (int)t0c->slot;
     nr_pdcch_blind_monitor_autoconf_css0((int)t0c->num_rbs,
                                          (int)t0c->num_symbols,
                                          (int)t0c->cset_start_rb,
                                          (int)t0c->search_space_frame_period,
-                                         (int)t0c->slot,
+                                         css0_offset,
                                          (int)t0c->search_space_duration,
                                          (int)t0c->first_symbol_index,
                                          (int)t0c->type0_pdcch_ss_mux_pattern,

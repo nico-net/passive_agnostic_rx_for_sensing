@@ -143,9 +143,23 @@ bool nr_pdcch_blind_monitor_autoconf_css0(int num_rbs,
   g_cfg.bwp_size  = num_rbs;
 
   g_cfg.ss_monitoring_slot_periodicity = (ss_period_slots > 0) ? ss_period_slots : 1;
+  /* `ss_slot` must already carry the frame term for mux pattern 1 -- the caller computes it the
+   * same way fill_searchSpaceZero() does (slot + slots_per_frame * sfn_c). Passing the bare slot
+   * monitors the wrong frame on every other period at 30 kHz, which is how the first attempt
+   * scanned CORESET#0 correctly and still recovered nothing. */
   g_cfg.ss_monitoring_slot_offset      = ss_slot;
   g_cfg.ss_duration                    = (ss_duration > 0) ? ss_duration : 1;
   g_cfg.ss_first_symbol                = ss_first_symbol;
+
+  /* SearchSpace#0's candidate counts are FIXED by TS 38.213 Table 10.1-1, and fill_searchSpaceZero()
+   * sets exactly these: AL1 = 0, AL2 = 0, AL4 = 4, AL8 = 2. Pin them rather than leaving the
+   * adaptive split to discover them -- the split spends candidates on AL1/AL2, where SIB1 is never
+   * sent, and CORESET#0 here is only 8 CCEs (48 REGs / 6), so AL8 already spans the whole thing.
+   * ss_al_candidates[] is indexed AL 1,2,4,8; <0 disables, >0 pins, 0 is adaptive. */
+  g_cfg.ss_al_candidates[0] = -1; // AL1 -- not used by SS0
+  g_cfg.ss_al_candidates[1] = -1; // AL2 -- not used by SS0
+  g_cfg.ss_al_candidates[2] = 4;  // AL4
+  g_cfg.ss_al_candidates[3] = 2;  // AL8
 
   /* Format 1_0 ONLY. 1_1 lives in the DEDICATED search space, whose description is ciphered and
    * therefore not available to us -- scanning for it here would only manufacture false accepts. */
@@ -165,6 +179,15 @@ bool nr_pdcch_blind_monitor_autoconf_css0(int num_rbs,
    * additional rejection on a search whose only other check is a 24-bit CRC. */
   g_cfg.rnti_min = 0xFFFF; // SI-RNTI
   g_cfg.rnti_max = 0xFFFF;
+
+  /* Format 0_1 OFF. It is a UE-specific-search-space format and cannot appear in CORESET#0, but
+   * leaving the configured scan on does real harm rather than nothing: MEASURED, it consumed every
+   * candidate that survived the energy gate and rejected all of them --
+   *   occasions=7000 candidates=199 dci10[accepts=0] dci01[accepts=0 rejects=199]
+   * and it was doing so at THIS cell's dedicated 0_1 payload length, a value that has no meaning on
+   * another gNB. Anything the operator configured for the dedicated search space has to be switched
+   * off here, not just left unread. */
+  g_cfg.dci01_scan = 0;
 
   LOG_A(PHY,
         "SENSING: CSS0 autoconf from MIB/SIB1 -- coreset(groups=%d dur=%d bundle=6 interleaver=2 "
