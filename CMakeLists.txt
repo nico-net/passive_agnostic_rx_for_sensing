@@ -2396,6 +2396,23 @@ if(ENABLE_TESTS)
   add_dependencies(tests test_nr_pdcch_blind_rnti_bootstrap)
   add_test(NAME test_nr_pdcch_blind_rnti_bootstrap COMMAND ./test_nr_pdcch_blind_rnti_bootstrap)
   add_test(NAME test_occ_clean COMMAND ./test_occ_clean)
+
+  # Phase 3 Technique A (roadmap artifact "Cell-Agnostic Passive Receiver"): full-carrier PDCCH
+  # DM-RS correlation mapping. Closed-loop synthetic test (regenerates its own known-good DM-RS to
+  # verify against) plus a pure-noise negative control. Needs the REAL nr_gold_pdcch (refsig.c) and
+  # nr_pdcch_dmrs_ref (nr_dmrs_rx.c) implementations linked in directly -- the nr_pdcch_blind_monitor
+  # library target does not contain either (it is nr_pdcch_blind_monitor.c +
+  # nr_pdcch_blind_rnti_bootstrap.c only); test_nr_pdcch_blind_monitor gets away with a
+  # zero-signature stub for nr_pdcch_dmrs_ref because it never actually calls it.
+  add_executable(test_nr_pdcch_coreset_map ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_coreset_map_test.cc
+                                            ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_coreset_map.c
+                                            ${OPENAIR1_DIR}/PHY/NR_REFSIG/refsig.c
+                                            ${OPENAIR1_DIR}/PHY/NR_REFSIG/nr_dmrs_rx.c
+                                            ${OPENAIR_DIR}/common/utils/ds/hashtable.c)
+  target_include_directories(test_nr_pdcch_coreset_map PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT ${OPENAIR_DIR}/common/utils/ds)
+  target_link_libraries(test_nr_pdcch_coreset_map PRIVATE nr_common UTIL GTest::gtest)
+  add_dependencies(tests test_nr_pdcch_coreset_map)
+  add_test(NAME test_nr_pdcch_coreset_map COMMAND ./test_nr_pdcch_coreset_map)
 endif()
 
 add_subdirectory(common)
