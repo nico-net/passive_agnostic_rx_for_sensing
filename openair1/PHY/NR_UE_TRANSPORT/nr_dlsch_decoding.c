@@ -5,6 +5,7 @@
 /*! \file PHY/NR_UE_TRANSPORT/nr_dlsch_decoding_slot.c
  */
 
+#include <math.h>
 #include "PHY/defs_nr_UE.h"
 #include "SCHED_NR_UE/harq_nr.h"
 #include "PHY/CODING/coding_extern.h"
@@ -231,6 +232,43 @@ void nr_dlsch_decoding(PHY_VARS_NR_UE *phy_vars_ue,
   kpiStructure.nofRBs = number_rbs;
 
   harq_process->decodeResult = harq_process->processedSegments == harq_process->C;
+
+  /* TEMPORARY DIAGNOSTIC (2026-09-04): SIB1/CORESET#0 DLSCH decode NACKs on essentially every
+   * blind-monitor-confirmed occasion (1187 accepts vs 1197 NACKs in one capture) even though the
+   * PDCCH grant itself is now proven correctly found -- narrows the search to the DLSCH/LDPC chain
+   * for the SI-RNTI-specific allocation. dlsch_config->refPoint is set to 1 ONLY for SIB1
+   * (nr_ue_procedures.c: `dlsch_pdu->refPoint = mac->get_sib1 ? 1 : 0;`), so it is a free,
+   * already-computed filter -- no separate RNTI plumbing needed here. */
+  {
+    static int s_sib1diag = -1;
+    if (s_sib1diag < 0)
+      s_sib1diag = (getenv("ISAC_SIB1_DIAG") != NULL) ? 1 : 0;
+    if (s_sib1diag && dlsch_config->refPoint == 1) {
+      /* LLR magnitude: distinguishes "channel estimate/descrambling reaching the decoder is
+       * garbage" (near-zero, noise-like) from "LLRs look confident but the decode config itself
+       * is wrong" (large, consistent magnitude, still 100% CRC fail). */
+      double llr_sum_abs = 0.0;
+      int64_t llr_sum_sq = 0;
+      const int llr_n = G > 0 ? G : 0;
+      for (int i = 0; i < llr_n; i++) {
+        const int16_t v = dlsch_llr[i];
+        llr_sum_abs += (v < 0) ? -v : v;
+        llr_sum_sq += (int64_t)v * (int64_t)v;
+      }
+      const double llr_mean_abs = llr_n > 0 ? llr_sum_abs / llr_n : 0.0;
+      const double llr_rms = llr_n > 0 ? sqrt((double)llr_sum_sq / llr_n) : 0.0;
+      printf("SIB1DIAG %d.%d TBS=%u mcs=%u Qm=%u nb_layers=%u BG=%u C=%u K=%u Z=%u F=%u "
+             "processedSegs=%d start_rb=%u nb_rb=%d start_sym=%u nb_sym=%u rv=%u first_rx=%d "
+             "coderate=%.3f crcok=%d G=%d llr_mean_abs=%.2f llr_rms=%.2f llr0=%d llr1=%d llr2=%d\n",
+             slot_parameters.frame, slot_parameters.slot, cw_info->TBS, cw_info->mcs,
+             cw_info->qamModOrder, cw_info->Nl, cw_info->ldpcBaseGraph, harq_process->C,
+             harq_process->K, harq_process->Z, harq_process->F, harq_process->processedSegments,
+             dlsch_config->start_rb, number_rbs, dlsch_config->start_symbol,
+             dlsch_config->number_symbols, cw_info->rv, harq_process->first_rx, Coderate,
+             harq_process->decodeResult ? 1 : 0, llr_n, llr_mean_abs, llr_rms,
+             llr_n > 0 ? dlsch_llr[0] : 0, llr_n > 1 ? dlsch_llr[1] : 0, llr_n > 2 ? dlsch_llr[2] : 0);
+    }
+  }
 
   if (harq_process->decodeResult && harq_process->C > 1) {
     /* check global CRC */

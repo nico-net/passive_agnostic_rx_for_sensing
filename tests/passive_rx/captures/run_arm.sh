@@ -25,7 +25,14 @@ DUR=${DUR:-200}
 TRIES=${TRIES:-3}
 RXG=${RXG:-40}
 NANT=${NANT:-4}
-MRC=${MRC:-3}          # PDSCH decoder: MRC over live branches
+MRC=${MRC:-0}          # PDSCH decoder branch selection. BUG FOUND 2026-09-05: mode 3 (4-branch MRC
+                       # combining, this script's old default) gives 0% PDSCH CRC on this deployment
+                       # -- confirmed on BOTH real dedicated-CORESET traffic and CORESET#0/SIB1 grants,
+                       # ruling out a SIB1/CORESET#0-specific cause. Mode 0 (branch 0 only) gets
+                       # 89.9-99.7% CRC on the identical grants/traffic. Root cause of the 4-branch
+                       # combiner defect NOT yet found -- this changes only the operating default so
+                       # every future capture is not silently broken by it. Set MRC=3 explicitly to
+                       # reproduce/debug the combining bug itself.
 SENSECOMB=${SENSECOMB:-1}  # sensing grid: co-phased branch combining (STO/SFO/CFO run on this)
 # CFO DELIVERY. CONTFO=1 selects upstream OAI's continuous compensation: the PI loop on
 # UE->freq_offset is applied DIGITALLY per OFDM symbol in the FEP and the LO is never retuned
@@ -174,7 +181,7 @@ for t in $(seq 1 "$TRIES"); do
     ISAC_CFO_TRACK_HZ=800 ISAC_CFO_TRACK_PERIOD=20 ${CFOAPPLY:+ISAC_CFO_TRACK_APPLY=1} \
     ISAC_UL_TA_SWEEP=${TASWEEP:-0:0:0} ${ULPROBE:+ISAC_UL_PROBE=1} \
     ${GAINTRIM:+ISAC_RX_GAIN_TRIM=$GAINTRIM} \
-    ${MRC:+ISAC_RX_MRC_MODE=$MRC} ${BRMIN:+ISAC_RX_BRANCH_MIN_DB=$BRMIN} ${RXBRANCH:+ISAC_RX_BRANCH=$RXBRANCH} ${NVARFIX:+ISAC_RX_NVAR_FIX=$NVARFIX} ${BRFO:+ISAC_RX_BRANCH_FO=$BRFO} ${FULLCRC:+ISAC_PDCCH_FULLCRC=1} ${CFGTRACE:+ISAC_PDCCH_CFGTRACE=1 ISAC_PDCCH_CFGTRACE_SLOT=$CFGTRACE} ${LLRPROBE:+ISAC_PDCCH_LLRPROBE=1 ISAC_PDCCH_LLRPROBE_SLOT=$LLRPROBE} ${DCIGT:+ISAC_PDCCH_DCIGT=1} ${OTACFG:+ISAC_OTA_CFG=1} \
+    ${MRC:+ISAC_RX_MRC_MODE=$MRC} ${BRMIN:+ISAC_RX_BRANCH_MIN_DB=$BRMIN} ${RXBRANCH:+ISAC_RX_BRANCH=$RXBRANCH} ${NVARFIX:+ISAC_RX_NVAR_FIX=$NVARFIX} ${BRFO:+ISAC_RX_BRANCH_FO=$BRFO} ${FULLCRC:+ISAC_PDCCH_FULLCRC=1} ${CFGTRACE:+ISAC_PDCCH_CFGTRACE=1 ISAC_PDCCH_CFGTRACE_SLOT=$CFGTRACE} ${LLRPROBE:+ISAC_PDCCH_LLRPROBE=1 ISAC_PDCCH_LLRPROBE_SLOT=$LLRPROBE} ${DCIGT:+ISAC_PDCCH_DCIGT=1} ${OTACFG:+ISAC_OTA_CFG=1} ${SIB1DIAG:+ISAC_SIB1_DIAG=1} \
     ${ENERGY:+ISAC_PDCCH_ENERGY=1} ${CAPTURE:+ISAC_PDCCH_CAPTURE=1} \
     ${SENSECOMB:+ISAC_SENSE_COMB=$SENSECOMB} ${SLOTPOOL:+ISAC_SLOT_POOL=$SLOTPOOL} \
     ${SYNCONLY:+ISAC_SYNC_ONLY=$SYNCONLY} \
