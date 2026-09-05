@@ -1439,7 +1439,7 @@ target_link_libraries(NR_L2_UE PRIVATE nr_nas)
 # filename NFAPI header includes to resolve even though this target has no RT-symbol dependency,
 # hence the explicit NFAPI include dirs below (global include_directories() for those paths is set
 # later in this file, so target_include_directories is used instead of relying on call order).
-add_library(nr_pdcch_blind_monitor ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c)
+add_library(nr_pdcch_blind_monitor ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_rnti_bootstrap.c)
 target_include_directories(nr_pdcch_blind_monitor PRIVATE
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT
   ${NFAPI_DIR}/nfapi/public_inc
@@ -2415,3 +2415,11 @@ endif()
 if(PACKAGING_LTE OR PACKAGING_NR OR PACKAGING_COMMON OR PACKAGING_USRP OR PACKAGING_PHYSIM)
   include("tools/packages/packages.cmake")
 endif()
+
+  # Phase 3 Technique B (roadmap artifact "Cell-Agnostic Passive Receiver"): C-RNTI bootstrap
+  # state machine, tested independently of any live RT capture.
+  add_executable(test_nr_pdcch_blind_rnti_bootstrap ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_blind_rnti_bootstrap_test.cc)
+  target_include_directories(test_nr_pdcch_blind_rnti_bootstrap PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
+  target_link_libraries(test_nr_pdcch_blind_rnti_bootstrap PRIVATE nr_pdcch_blind_monitor nr_common MAC_NR_COMMON polar crc_byte UTIL asn1_nr_rrc_hdrs asn1_lte_rrc_hdrs GTest::gtest)
+  add_dependencies(tests test_nr_pdcch_blind_rnti_bootstrap)
+  add_test(NAME test_nr_pdcch_blind_rnti_bootstrap COMMAND ./test_nr_pdcch_blind_rnti_bootstrap)

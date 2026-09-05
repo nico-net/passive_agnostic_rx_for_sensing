@@ -644,6 +644,21 @@ bool nr_pdcch_blind_extract_00(uint64_t       payload,
                                const nr_pdcch_blind_ul_opts_t* opts,
                                nr_pdcch_blind_ul_result_t* out);
 
+
+/* Phase 3 Technique B: bootstrap the dedicated C-RNTI from sightings the accept path already
+ * classifies (nr_blind_rnti_class_t). Recording is idempotent and RT-safe (no allocation, no
+ * lock) -- call it from the same point the accept path already logs DCIGT. */
+void nr_pdcch_blind_rnti_bootstrap_record(uint16_t rnti, uint8_t rnti_class, uint32_t abs_slot);
+
+/* Non-zero (true) when a persistence-confirmed C-RNTI or TC-RNTI exists and is not stale as of
+ * now_abs_slot (the caller's own current absolute slot -- this function has no other way to know
+ * "now"). age_slots_out (now_abs_slot - last sighting) is filled only on a true return. */
+bool nr_pdcch_blind_monitor_confirmed_rnti(uint32_t now_abs_slot, uint16_t* rnti_out, uint8_t* class_out,
+                                           uint32_t* age_slots_out);
+
+/* Test-only: clears bootstrap state between gtest cases. Not for RT use. */
+void nr_pdcch_blind_rnti_bootstrap_reset_for_test(void);
+
 #ifdef __cplusplus
 }
 #endif

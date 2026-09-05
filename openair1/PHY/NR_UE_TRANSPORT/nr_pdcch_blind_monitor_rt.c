@@ -1301,6 +1301,7 @@ constdiag_done:;
          proc->frame_rx, proc->nr_slot_rx, out.rnti, out.start_rb, out.start_rb + out.num_rb, out.start_symbol,
          out.start_symbol + out.num_symbols, out.dl_dmrs_symb_pos);
 
+    nr_pdcch_blind_rnti_bootstrap_record(out.rnti, out.rnti_class, abs_slot);
     // ---- Cross-receiver RNTI consistency (offline, post-hoc -- see tests/passive_rx/rnti_gate.py):
     // this line's sole purpose is a wall-clock anchor to correlate accepts across INDEPENDENT
     // receiver PROCESSES that share no RT state. A real active UE's RNTI is legitimately accepted by
