@@ -485,18 +485,21 @@ void nr_pdcch_blind_monitor_process(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t 
    *
    * So the two are now independent: configure pdcch_blind_monitor_* and the passive receiver runs
    * with sensing.enable = 0. The ISAC-sourced paths below stay gated on nr_isac_enabled(). */
+  if (!nr_pdcch_blind_monitor_enabled()) {
+    return;
+  }
   {
+    // Moved to after the enabled() check above (was before it) so this doesn't fire for every
+    // deployment with the monitor disabled entirely -- enabled is always 1 here now, so that
+    // field is dropped from the message.
     static int s_entry_diag = -1;
     if (s_entry_diag < 0)
       s_entry_diag = (getenv("ISAC_DISCOVER_DIAG") != NULL) ? 1 : 0;
     static int s_entry_calls = 0;
     s_entry_calls++;
     if (s_entry_diag && s_entry_calls == 1) {
-      printf("DISCOVERDIAG ENTRY enabled=%d\n", nr_pdcch_blind_monitor_enabled()); fflush(stdout);
+      printf("DISCOVERDIAG ENTRY\n"); fflush(stdout);
     }
-  }
-  if (!nr_pdcch_blind_monitor_enabled()) {
-    return;
   }
   const nr_pdcch_blind_monitor_cfg_t *cfg = nr_pdcch_blind_monitor_get_cfg();
   {
@@ -1095,6 +1098,10 @@ void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_pr
       uint8_t  bootstrap_class = 0xFF;
       uint32_t age = 0;
       nr_pdcch_blind_monitor_confirmed_rnti(abs_slot, &bootstrap_rnti, &bootstrap_class, &age);
+      // Only bootstrap_rnti feeds the sweep below; the function unconditionally writes through
+      // all three out-params (see nr_pdcch_blind_rnti_bootstrap.c), so these two can't be NULL.
+      (void)bootstrap_class;
+      (void)age;
       nr_pdcch_autodiscover_sweep_ctx_t sweep_ctx = {
           .cand                = disc_cand,
           .n_cand              = disc_n_cand,

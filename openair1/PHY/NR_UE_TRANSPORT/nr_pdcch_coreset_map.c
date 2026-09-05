@@ -23,7 +23,6 @@
  * \brief Implementation for nr_pdcch_coreset_map.h -- see that header for the design rationale.
  */
 #include <math.h>
-#include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include "nr_pdcch_coreset_map.h"
@@ -67,7 +66,8 @@ int nr_pdcch_coreset_map_scan(const c16_t* rxdataF,
   nr_pdcch_dmrs_ref(gold, pilot, (unsigned short)n_rb_carrier);
 
   int found = 0;
-  /* TEMPORARY DIAGNOSTIC (2026-09-05, Task 5 live validation): zero candidates ever cleared the
+  /* DIAGNOSTIC (env-gated, kept permanently -- same convention as this project's other ISAC_*
+   * debug flags) (2026-09-05, Task 5 live validation): zero candidates ever cleared the
    * significance bar on live air over 2800+ calls. Track raw max/rb0 correlation regardless of
    * threshold, rate-limited, to see how close (or far) live air gets vs the 0.836 bar and vs the
    * synthetic test's 0.8-0.95 assumption. */

@@ -23,7 +23,6 @@
  * \brief See nr_pdcch_dci_length_sweep.h for the full design rationale (the two false-accept
  * traps this sweep must reject).
  */
-#include <stdlib.h>
 #include "nr_pdcch_dci_length_sweep.h"
 
 // Trials per length hypothesis. Enough that a real length (which should land the bootstrap RNTI

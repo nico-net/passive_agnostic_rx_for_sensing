@@ -286,7 +286,8 @@ bool nr_pdcch_blind_monitor_autodiscover_step(const void* rxdataF_symbol, int of
                                           first_carrier_offset, pci, slot, symbol, candidates,
                                           NR_PDCCH_MAX_CANDIDATE_WINDOWS);
   {
-    /* TEMPORARY DIAGNOSTIC (2026-09-05, Task 5 live validation): zero convergence observed over a
+    /* DIAGNOSTIC (env-gated, kept permanently -- same convention as this project's other ISAC_*
+     * debug flags) (2026-09-05, Task 5 live validation): zero convergence observed over a
      * 150s+ live capture on a cell with continuous DL/UL traffic and a known-good dedicated CORESET
      * -- need to see whether nr_pdcch_coreset_map_scan() is finding candidates at all (n>0 but never
      * reaching AUTODISCOVER_STABLE_VOTES) vs never finding any (n==0 every call, e.g. a live-SNR or
@@ -371,7 +372,7 @@ bool nr_pdcch_blind_monitor_autodiscover_step(const void* rxdataF_symbol, int of
    * (tests/passive_rx/ota/nrue.passive_rx.conf's pdcch_blind_monitor_{ss,rnti_range,dci10,
    * noise_gates} lines), not CSS0's CORESET#0/SIB1-specific choices. */
   g_cfg.ss_al_candidates[0] = 0;  // adaptive/auto, not CSS0's AL1/AL2-disabled {-1,-1,4,2} -- this
-  g_cfg.ss_al_candidates[1] = 0;  // cell's dedicated grants are measured ~99.997% AL2 (CLAUDE.md),
+  g_cfg.ss_al_candidates[1] = 0;  // cell's dedicated grants are measured ~99.997% AL1 (CLAUDE.md),
   g_cfg.ss_al_candidates[2] = 0;  // i.e. exactly the level CSS0's pin disables
   g_cfg.ss_al_candidates[3] = 0;
   g_cfg.rnti_min = NR_PDCCH_BLIND_RNTI_MIN_DEFAULT;  // wide dynamic C-RNTI range, not CSS0's
@@ -414,7 +415,14 @@ bool nr_pdcch_blind_monitor_autodiscover_step(const void* rxdataF_symbol, int of
    * inter-occupancy gap Technique A already measures, once that's shown to matter live. */
   g_cfg.coreset_duration                 = 1;
   g_cfg.coreset_reg_bundle_size          = 0;
-  g_cfg.coreset_interleaver_size         = 2;
+  // interleaver_size=0 matches the manual ground-truth dedicated conf's own field 4
+  // (tests/passive_rx/ota/nrue.passive_rx.conf: "45:1:0:0:0:2"). Inert either way given
+  // reg_bundle_size=0 above -- both nr_pdcch_demapping_deinterleaving() (dci_nr.c, this module's
+  // actual RX demapper) and cce_to_reg_interleaving() (nr_common.c) take the non-interleaved
+  // identity path (f = k) whenever the bundle size is 0, never reading R -- but 0 is the value
+  // that's actually correct here, not a leftover 2 from CORESET#0's own (genuinely interleaved,
+  // R=2) reset above.
+  g_cfg.coreset_interleaver_size         = 0;
   g_cfg.ss_monitoring_slot_periodicity   = 1;
   g_cfg.ss_monitoring_slot_offset        = 0;
   g_cfg.ss_duration                      = 1;
@@ -427,6 +435,10 @@ bool nr_pdcch_blind_monitor_autodiscover_step(const void* rxdataF_symbol, int of
   uint8_t  bootstrap_class = 0xFF;
   uint32_t age = 0;
   nr_pdcch_blind_monitor_confirmed_rnti(abs_slot, &bootstrap_rnti, &bootstrap_class, &age);
+  // Only bootstrap_rnti is consumed below (the log line); the function unconditionally writes
+  // through all three out-params (see nr_pdcch_blind_rnti_bootstrap.c), so these two can't be NULL.
+  (void)bootstrap_class;
+  (void)age;
 
   s_dedicated_found = true;
 

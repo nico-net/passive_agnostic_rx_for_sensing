@@ -51,7 +51,7 @@ void nr_pdcch_blind_rnti_bootstrap_record(uint16_t rnti, uint8_t rnti_class, uin
   if (rnti_class != NR_BLIND_RNTI_CLASS_C && rnti_class != NR_BLIND_RNTI_CLASS_TC) {
     return;
   }
-  
+
   // Check if this is a second sighting of the pending RNTI
   if (rnti == g_boot_pending_rnti && rnti_class == g_boot_pending_class && g_boot_pending_rnti != 0) {
     // Second sighting of the same pending RNTI -> confirm it
@@ -61,7 +61,7 @@ void nr_pdcch_blind_rnti_bootstrap_record(uint16_t rnti, uint8_t rnti_class, uin
     g_boot_confirmed = 1;  // Mark as confirmed
     return;
   }
-  
+
   // Check if this is a repeat sighting of an already-confirmed RNTI
   if (rnti == g_boot_rnti && rnti_class == g_boot_class && g_boot_confirmed > 0) {
     // Already confirmed; a further sighting just refreshes staleness.
@@ -69,7 +69,7 @@ void nr_pdcch_blind_rnti_bootstrap_record(uint16_t rnti, uint8_t rnti_class, uin
     g_boot_confirmed++;  // Track further sightings
     return;
   }
-  
+
   // First sighting of a NEW candidate -- park it as pending, do not confirm on one sighting.
   g_boot_pending_rnti  = rnti;
   g_boot_pending_class = rnti_class;

@@ -30,8 +30,6 @@
  * pass a naive "any CRC-adjacent pass" check.
  */
 #include <cstdint>
-#include <cstring>
-#include <map>
 #include <gtest/gtest.h>
 
 extern "C" {

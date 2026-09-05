@@ -33,9 +33,10 @@ DM-RS scrambling ID. This is the answer key every measurement below is checked a
   1. `nr_pdcch_blind_monitor_process()` IS being entered (confirmed: `enabled=1`,
      `autodiscover=1`, `pdsch_decode=2` all correct) and `nr_pdcch_blind_monitor_autodiscover_step()`
      IS being called continuously (thousands of calls observed).
-  2. `nr_pdcch_coreset_map_scan()` (Technique A) returns `n=0` candidates on **every single
-     sampled call** — not "occasionally misses," never once found anything above the 0.836
-     significance bar.
+  2. `nr_pdcch_coreset_map_scan()` (Technique A) never once found a candidate above the 0.836
+     significance bar — not merely on the sampled calls: the diagnostic prints unconditionally
+     (not rate-limited) on every call where `n>0`, falling back to the rate-limited periodic
+     sample only when `n==0`, and `n==0` is all that was ever observed.
   3. **Decisive measurement**: instrumented the raw, per-window correlation value regardless of
      threshold. At the KNOWN-GOOD location (RB 0, symbol 0), live correlation measured
      **0.02-0.39** across ten samples spanning a full capture — scattered around and below the
@@ -44,8 +45,11 @@ DM-RS scrambling ID. This is the answer key every measurement below is checked a
      winning `rb_offset` jumping unpredictably between samples (18, 108, 42, 36, 216, 174, 36, 222,
      228, 12...) — the signature of extreme-value noise statistics (max-of-45 trials), not a real,
      stable transmission. **This is not a threshold-calibration problem** (the code's own comment
-     claims 0.8-0.95 for a real hit; live values never got within 2x of the 0.836 bar) — something
-     is preventing the reference DM-RS from correlating with whatever is actually on the air at
+     claims 0.8-0.95 for a real hit; the RB-0 series never got within 2x of the 0.836 bar, and
+     while the carrier-wide maximum series does come within roughly 1.6-2.4x, its own instability —
+     a different winning `rb_offset` almost every sample — is the disqualifying evidence there, not
+     distance from the bar) — something is preventing the reference DM-RS from correlating with
+     whatever is actually on the air at
      that location, or the assumed (RB, symbol) location itself does not carry a live dedicated
      PDCCH transmission as often as needed for this scan to see one.
   4. **Eliminated as causes** (checked directly against this file's own already-proven-working
@@ -103,9 +107,28 @@ CRC while RNTI cross-checks still passed). This remains moot until Technique A c
    ever discovered, which has not happened.
 4. `dci01_scan` is still leaked from CSS0's config into the (currently never-reached) dedicated
    search — parked in the review record, harmless for the DL-1_1 goal this feature targets.
+5. **Technique B (the bootstrapped C-RNTI) is currently INERT as wired, independent of whether
+   Technique A ever converges.** In `nr_pdcch_blind_monitor_rt.c`, the Technique A block
+   (`if (cfg->autodiscover && !nr_pdcch_blind_monitor_autodiscover_done())`) unconditionally
+   `return`s before `run_occasion()`'s candidate-accept loop is ever reached, and
+   `nr_pdcch_blind_rnti_bootstrap_record()` — the only place a sighting gets recorded — is called
+   from deep inside that loop. So for as long as autodiscover is on and unconverged (measured
+   above to be the entire duration of every capture so far), `bootstrap_rnti` is `0` at both of
+   its consumers (Technique C's sweep and the CORESET-footprint log line), and the sweep silently
+   falls back to its payload-variance-only significance floor. Do not assume Technique B is
+   contributing evidence just because `autodiscover=1` — check the `bootstrap_rnti=0x...` value
+   actually logged; a future engineer should not spend a session debugging Technique A while
+   believing Technique B is already helping it.
+6. **Technique A's per-slot cost while unconverged is unbounded, unlike Technique C's sweep.**
+   Every DL slot spent unconverged runs a full-carrier FEP plus a 45-window correlation scan, and
+   per Task 5's own measurement this never converges on the current cell — so, as currently wired,
+   this cost runs forever, not once. Technique C's sweep was deliberately capped to run exactly
+   once, success or fail, in an earlier fix round; Technique A has no equivalent cap. Worth
+   bounding in a future session, given this project's own repeated findings elsewhere about how
+   tight the RT-thread budget is on this receive path.
 
-## Diagnostics added (kept, env-gated, zero-cost when off — same convention as this project's
-other `ISAC_*` debug flags)
+## Diagnostics added (kept, env-gated, negligible cost when off — a cached env-var check plus a
+counter increment per call, same convention as this project's other `ISAC_*` debug flags)
 
 - `ISAC_DISCOVER_DIAG=1` (wired into `tests/passive_rx/captures/run_arm.sh` as `DISCOVERDIAG=1`):
   prints `DISCOVERDIAG ENTRY`/`CFG` once, then `DISCOVERDIAG calls=N n=...` every 200 calls (or
