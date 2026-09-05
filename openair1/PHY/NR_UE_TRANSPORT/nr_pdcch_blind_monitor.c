@@ -74,6 +74,9 @@
 
 #include "openair2/LAYER2/NR_MAC_COMMON/nr_mac_common.h"
 
+#include "nr_pdcch_coreset_map.h"        // Phase 3 Technique A: nr_pdcch_coreset_map_scan()
+#include "nr_pdcch_dci_length_sweep.h"   // Phase 3 Technique C: nr_pdcch_dci_length_sweep()
+
 // ---------------------------------------------------------------------------------------------
 // [sensing] pdcch_blind_monitor_* config surface. Parsed but NOT consumed by
 // nr_pdcch_blind_dci_size()/nr_pdcch_blind_decode_and_extract() (both pure functions, driven
@@ -237,6 +240,145 @@ bool nr_pdcch_blind_monitor_autoconf_css0(int num_rbs,
         g_cfg.ss_monitoring_slot_periodicity, g_cfg.ss_monitoring_slot_offset, g_cfg.ss_duration,
         g_cfg.ss_first_symbol, g_cfg.dci10_mux_pattern);
   return true;
+}
+
+/* ---- PHASE 3: RECOVER THE DEDICATED CONFIG BY SEARCH (2026-09-04) -----------------------------
+ *
+ * Orchestrates Technique A (nr_pdcch_coreset_map_scan(), whole-carrier DM-RS correlation) and
+ * Technique C (nr_pdcch_dci_length_sweep(), histogram sweep) into a self-contained "recover the
+ * dedicated CORESET" attempt, mirroring nr_pdcch_blind_monitor_autoconf_css0()'s "populate g_cfg,
+ * every downstream consumer is unaware which path did it" contract.
+ *
+ * NOT gated on g_cfg.bwp_size == 0: g_cfg is SHARED with CSS0 autoconf above, which this feature's
+ * own bootstrap-RNTI dependency REQUIRES to be running first (see the autodiscover conf knob's own
+ * comment) -- by the time this function is first called, CSS0 has almost certainly already set
+ * g_cfg.bwp_size to CORESET#0's span, so that field can no longer distinguish "dedicated geometry
+ * still unknown" from "CSS0 already populated the common one". Tracked with its own state instead
+ * (s_dedicated_found below), separate from anything CSS0 writes. */
+static bool s_dedicated_found = false;
+
+bool nr_pdcch_blind_monitor_autodiscover_done(void)
+{
+  return s_dedicated_found;
+}
+
+#define NR_PDCCH_MAX_CANDIDATE_WINDOWS (273 / 6)  // generous headroom for a 273 PRB carrier
+#define AUTODISCOVER_STABLE_VOTES 5  // consecutive symbols agreeing on the same rb_offset cluster
+
+// ponytail: the brief's starter design carried a per-window vote-tally struct
+// (nr_pdcch_autodiscover_state_t) alongside this macro; the simpler "last rb_offset + consecutive
+// count" static pair below (inside the function) is enough to implement AUTODISCOVER_STABLE_VOTES
+// and was kept instead of an unused struct -- add the tally back if a future revision needs to
+// distinguish "clearly one winner" from "several windows tied", which the current scheme does not.
+
+/* Phase 3: orchestrate Techniques A/B/C into a self-contained "recover the dedicated CORESET"
+ * attempt. Called from the RT path (nr_pdcch_blind_monitor_rt.c) once per symbol while
+ * autodiscover is on AND the dedicated CORESET has not been found yet (see
+ * nr_pdcch_blind_monitor_autodiscover_done() above, NOT g_cfg.bwp_size). Cheap to call
+ * repeatedly -- it is a no-op once found (checked by the caller, not here, so this function's own
+ * logic stays simple: "try once, report success/failure"). */
+bool nr_pdcch_blind_monitor_autodiscover_step(const void* rxdataF_symbol, int ofdm_symbol_size, int n_rb_carrier,
+                                              int first_carrier_offset, uint16_t pci, int slot, int symbol,
+                                              uint32_t abs_slot)
+{
+  nr_pdcch_coreset_candidate_t candidates[NR_PDCCH_MAX_CANDIDATE_WINDOWS];
+  const int n = nr_pdcch_coreset_map_scan((const c16_t*)rxdataF_symbol, ofdm_symbol_size, n_rb_carrier,
+                                          first_carrier_offset, pci, slot, symbol, candidates,
+                                          NR_PDCCH_MAX_CANDIDATE_WINDOWS);
+  if (n == 0) {
+    return false;  // nothing occupied this symbol -- not an error, most symbols carry no PDCCH
+  }
+  // Vote for the STRONGEST candidate window this symbol. A single symbol is not enough (the
+  // roadmap's own figure schematic shows the footprint spanning multiple slots/symbols); require
+  // AUTODISCOVER_STABLE_VOTES consecutive agreeing votes before trusting it, the same discipline
+  // rnti_persistence_check() applies to RNTI sightings.
+  static int s_last_rb_offset = -1;
+  static int s_consecutive = 0;
+  if (candidates[0].rb_offset == s_last_rb_offset) {
+    s_consecutive++;
+  } else {
+    s_last_rb_offset = candidates[0].rb_offset;
+    s_consecutive = 1;
+  }
+  if (s_consecutive < AUTODISCOVER_STABLE_VOTES) {
+    return false;
+  }
+
+  // Footprint stable -- how many CONSECUTIVE occupied 6-RB windows does it span, starting at
+  // s_last_rb_offset? Reuse the SAME `candidates[]` array already computed above -- one scan
+  // already covers the whole carrier at this (slot, symbol), so re-invoking
+  // nr_pdcch_coreset_map_scan() again here would recompute all n_rb_carrier/6 windows a second
+  // time for no new information (it is a pure function of the same inputs).
+  int span_rb = 6;
+  for (int w = 1; w < n_rb_carrier / 6; w++) {
+    bool extends = false;
+    for (int c = 0; c < n; c++) {
+      if (candidates[c].rb_offset == s_last_rb_offset + span_rb) {
+        extends = true;
+        break;
+      }
+    }
+    if (!extends) {
+      break;
+    }
+    span_rb += 6;
+  }
+
+  g_cfg.coreset_type            = 0;  // PDCCH-Config (dedicated), NOT MIB/SIB1 -- see coreset_type's
+                                        // own comment in autoconf_css0() for why this field matters
+  g_cfg.coreset_freq_domain     = span_rb / 6;
+  g_cfg.bwp_start               = s_last_rb_offset;
+  g_cfg.bwp_size                = span_rb;
+  g_cfg.coreset_pdcch_dmrs_scrambling_id = pci;
+  g_cfg.coreset_shift_index     = pci;
+
+  /* Fields Technique A cannot determine (it detects OCCUPANCY, not CORESET/SS structure) but that
+   * nr_pdcch_blind_monitor_process()'s existing occasion gate and run_occasion()'s CORESET builder
+   * both require non-zero/valid before they will do anything at all -- without these, "geometry
+   * found" would still produce zero scanning, silently. Deliberately conservative, scan-everything
+   * defaults rather than guesses tuned to one deployment:
+   *  - coreset_duration=1: every dedicated CORESET this project has captured is 1 symbol (see the
+   *    repeated "S=1/L=13 for a 1-symbol CORESET" note elsewhere in this file).
+   *  - coreset_reg_bundle_size=0: non-interleaved, this project's own live-confirmed dedicated
+   *    CORESET mapping (run_occasion()'s own comment: "NON INTERLEAVED reg_bundle_sz=6" -> the
+   *    CONFIG field encoding for that is 0, not 6 -- see that comment for the encoding).
+   *  - ss_monitoring_slot_periodicity=1/offset=0/duration=1: monitor EVERY slot. We have no way to
+   *    derive the real dedicated SS periodicity from occupancy alone, and scanning every slot is
+   *    always a superset of any real (sparser) schedule -- costs CPU, not correctness.
+   *  - ss_first_symbol = the symbol Technique A actually locked onto.
+   *  - dmrs_typeA_position=2: TS 38.331 spec default, same fallback this module uses elsewhere
+   *    when no dedicated PDSCH config is known (fill_dmrs_mask()'s own documented behaviour).
+   * ponytail: fixed "scan every slot" ceiling -- ~2000 extra occasions/s of CPU on a cell whose
+   * real dedicated SS periodicity is sparser. Upgrade path: derive periodicity from the actual
+   * inter-occupancy gap Technique A already measures, once that's shown to matter live. */
+  g_cfg.coreset_duration                 = 1;
+  g_cfg.coreset_reg_bundle_size          = 0;
+  g_cfg.coreset_interleaver_size         = 2;
+  g_cfg.ss_monitoring_slot_periodicity   = 1;
+  g_cfg.ss_monitoring_slot_offset        = 0;
+  g_cfg.ss_duration                      = 1;
+  g_cfg.ss_first_symbol                  = symbol;
+  if (g_cfg.dmrs_typeA_position == 0) {
+    g_cfg.dmrs_typeA_position = 2;
+  }
+
+  uint16_t bootstrap_rnti = 0;
+  uint8_t  bootstrap_class = 0xFF;
+  uint32_t age = 0;
+  nr_pdcch_blind_monitor_confirmed_rnti(abs_slot, &bootstrap_rnti, &bootstrap_class, &age);
+
+  s_dedicated_found = true;
+
+  LOG_A(PHY, "SENSING: Phase 3 autodiscover -- CORESET footprint rb_offset=%d span_rb=%d "
+            "bootstrap_rnti=0x%x\n", s_last_rb_offset, span_rb, bootstrap_rnti);
+  return true;  // g_cfg's CORESET fields are now populated; dci_length sweep is the caller's next step
+}
+
+/* Technique C's result lands here rather than at a direct g_cfg write from the RT tap, since g_cfg
+ * is a static owned by this translation unit and the RT tap only ever sees the const accessor. */
+void nr_pdcch_blind_monitor_autodiscover_set_dci_length(int dci_length)
+{
+  g_cfg.dci_length_override = dci_length;
 }
 
 static int parse_coreset(const char* s)
@@ -803,6 +945,12 @@ void nr_pdcch_blind_monitor_init(void)
         "unknown. Overrides pdcch_blind_monitor_coreset/_ss/_bwp once SIB1 decodes. Default 0 keeps "
         "any hand-written (dedicated) config, which is denser but cell-specific",
         0, .iptr = &g_cfg.autoconf, .defintval = 0, TYPE_INT, 0},
+      {"pdcch_blind_monitor_autodiscover",
+        "Phase 3: recover the DEDICATED CORESET/search space by DM-RS correlation + dci_length "
+        "sweep instead of reading pdcch_blind_monitor_coreset/_ss/_bwp. Default 0. Requires "
+        "pdcch_blind_monitor_autoconf=1 (Phase 1) to have a working common search space first -- "
+        "the bootstrap RNTI comes from THAT path's own grants.",
+        0, .iptr = &g_cfg.autodiscover, .defintval = 0, TYPE_INT, 0},
       {"pdcch_blind_monitor_dci10",
         "DCI format 1_0 scanning; scan[:ss_type[:n_rb_riv[:rb_offset[:length_override[:class_mask"
         "[:mux_pattern[:sib1]]]]]]] (scan 0=format 1_1 only, 1=both, 2=1_0 only; ss_type 0=UE-specific, "

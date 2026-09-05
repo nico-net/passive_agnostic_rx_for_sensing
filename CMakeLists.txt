@@ -1439,7 +1439,14 @@ target_link_libraries(NR_L2_UE PRIVATE nr_nas)
 # filename NFAPI header includes to resolve even though this target has no RT-symbol dependency,
 # hence the explicit NFAPI include dirs below (global include_directories() for those paths is set
 # later in this file, so target_include_directories is used instead of relying on call order).
-add_library(nr_pdcch_blind_monitor ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_rnti_bootstrap.c)
+# Phase 3 autodiscover (2026-09-04, task-4-report.md): nr_pdcch_blind_monitor.c now calls
+# nr_pdcch_coreset_map_scan() (Technique A) and nr_pdcch_blind_monitor_rt.c (PHY_NR_UE, linked into
+# nr-uesoftmodem's own --start-group alongside this library) now calls nr_pdcch_dci_length_sweep()
+# (Technique C). Both source files previously compiled ONLY into their own standalone gtest
+# executables (see the test_nr_pdcch_coreset_map/test_nr_pdcch_dci_length_sweep targets below) --
+# nothing wired them into any library nr-uesoftmodem links, so the first real (non-test) caller
+# failed at link time with "undefined reference" until they were added here.
+add_library(nr_pdcch_blind_monitor ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_rnti_bootstrap.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_coreset_map.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_dci_length_sweep.c)
 target_include_directories(nr_pdcch_blind_monitor PRIVATE
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT
   ${NFAPI_DIR}/nfapi/public_inc

@@ -37,6 +37,7 @@
 
 #include "PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.h"
 #include "PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.h"
+#include "PHY/NR_UE_TRANSPORT/nr_pdcch_dci_length_sweep.h" // Phase 3 Technique C
 
 #include <string.h>
 #include <time.h> // clock_gettime for the rnti_seen correlation line below
@@ -105,6 +106,10 @@ static void build_coreset_bitmap(int num_groups, uint8_t bitmap[6])
 #define NR_PDCCH_BLIND_SUMMARY_PERIOD_OCC 1000
 static uint64_t    g_occasions_run  = 0;
 static uint64_t    g_candidates_run = 0;
+// Phase 3 autodiscover (2026-09-04): Technique C's dci_length sweep has succeeded once. Guards
+// nr_pdcch_dci_length_sweep() from re-running every occasion once the length is locked -- see the
+// autodiscover branch in nr_pdcch_blind_monitor_run_occasion() below.
+static bool         g_length_swept  = false;
 static int         g_constdiag_left = 20; // TEMPORARY, see CONSTDIAG below
 static uint64_t    g_ul_accepts     = 0; // DCI 0_1 accepts (UL grants recovered)
 static uint64_t    g_ul_rejects     = 0; // DCI 0_1 candidates whose CRC was in range but whose
@@ -331,6 +336,64 @@ static bool rnti_persistence_check(uint16_t rnti, uint32_t abs_slot, uint32_t wi
   return (seen + 1) >= min_k; // +1 counts the sighting just recorded
 }
 
+// ---- Phase 3 Technique C scorer adapter (2026-09-04) --------------------------------------------
+// nr_pdcch_dci_length_sweep() (nr_pdcch_dci_length_sweep.c) drives this synchronously: for each
+// hypothesised length it calls the scorer up to TRIALS_PER_LENGTH times in a tight loop, so this
+// adapter reads candidates from a SHORT-LIVED, occasion-local list (built by the autodiscover
+// branch in nr_pdcch_blind_monitor_run_occasion() below, by replaying the SAME e_rx_cand_idx walk
+// the pre-pass loop further down uses -- not a second, independently-wrong indexing scheme, per
+// the plan brief's own Step 4 warning) rather than pulling in a whole extra candidate-iteration
+// mechanism. `trial_idx % n_cand` cycles through whatever real candidates this ONE occasion
+// offers -- a real occasion rarely has 64 distinct ones, so most lengths get each real candidate
+// tried several times, which is fine: a genuinely wrong length still degenerates to "few/no passes"
+// or "one fixed-point payload", exactly the two traps nr_pdcch_dci_length_sweep.h documents.
+typedef struct {
+  const c16_t *e_rx;
+  uint8_t      L;
+} nr_pdcch_autodiscover_cand_t;
+
+typedef struct {
+  const nr_pdcch_autodiscover_cand_t *cand;
+  int      n_cand;
+  uint16_t bwp_size;
+  uint8_t  dmrs_typeA_position;
+  uint16_t rnti_min;
+  uint16_t rnti_max;
+  const nr_pdcch_blind_extract_opts_t *extract_opts;
+  uint16_t scrambling_rnti;
+  uint16_t dmrs_scrambling_id;
+} nr_pdcch_autodiscover_sweep_ctx_t;
+
+static bool nr_pdcch_autodiscover_length_scorer(int dci_length, int trial_idx, uint16_t *rnti_out,
+                                                uint32_t *payload_hash_out, void *user_ctx)
+{
+  const nr_pdcch_autodiscover_sweep_ctx_t *ctx = (const nr_pdcch_autodiscover_sweep_ctx_t *)user_ctx;
+  if (ctx == NULL || ctx->n_cand <= 0) {
+    return false;
+  }
+  const nr_pdcch_autodiscover_cand_t *c = &ctx->cand[trial_idx % ctx->n_cand];
+  // Same unscramble step nr_pdcch_blind_cand_worker_body() below uses on the identical cursor
+  // (t->e_rx from the same pdcch_e_rx[]/e_rx_cand_idx walk), just with `dci_length` substituted
+  // for the hypothesis under test instead of the (as yet unknown) real one.
+  int16_t tmp_e[16 * 108];
+  nr_pdcch_unscrambling((c16_t *)c->e_rx, ctx->scrambling_rnti, (uint32_t)(c->L * 108), ctx->dmrs_scrambling_id,
+                        tmp_e);
+  nr_pdcch_blind_result_t out;
+  const bool ok = nr_pdcch_blind_decode_and_extract_ex(tmp_e, c->L, (uint16_t)dci_length, ctx->bwp_size,
+                                                       ctx->dmrs_typeA_position, ctx->rnti_min, ctx->rnti_max,
+                                                       ctx->extract_opts, &out);
+  if (!ok || !out.plausible) {
+    return false;
+  }
+  *rnti_out = out.rnti;
+  // Cheap fingerprint of the decoded fields -- varies with genuine traffic, stays constant for a
+  // degenerate fixed point, per nr_pdcch_dci_length_scorer_fn's own contract (any deterministic
+  // function of the decode suffices; this one packs the fields Step 4's brief itself suggested).
+  *payload_hash_out = ((uint32_t)out.start_rb << 20) ^ ((uint32_t)out.num_rb << 12) ^ ((uint32_t)out.mcs << 4)
+                    ^ (uint32_t)out.rv;
+  return true;
+}
+
 // ---- Parallel per-candidate decode (2026-08-05) ------------------------------------------------
 // MEASURED live: unscrambling + polar decode (Step 1's SCL search) + the mismatched-bits re-encode
 // check are, per candidate, by far the most expensive work in this file, and ran strictly
@@ -463,6 +526,36 @@ void nr_pdcch_blind_monitor_process(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t 
   }
 
   NR_DL_FRAME_PARMS *fp = &ue->frame_parms;
+
+  /* ---- PHASE 3 (2026-09-04): recover the DEDICATED CORESET by search, Technique A -------------
+   * Runs BEFORE the dedicated-SS occasion gate below, which is keyed on ss_monitoring_slot_* --
+   * exactly the fields Technique A exists to find, so they cannot gate reaching it. Gated on
+   * nr_pdcch_blind_monitor_autodiscover_done(), NOT g_cfg.bwp_size: CSS0 autoconf (required to be
+   * on for this feature's bootstrap RNTI, see the autodiscover conf knob's own comment) very likely
+   * already set g_cfg.bwp_size for CORESET#0 by the time this runs, so that field can no longer
+   * tell "dedicated geometry still unknown" from "the common one is already known" -- see the
+   * definition-site comment on nr_pdcch_blind_monitor_autodiscover_step() in
+   * nr_pdcch_blind_monitor.c for the full reasoning.
+   *
+   * Does its OWN minimal single-symbol, whole-carrier FEP -- NOT run_occasion()'s CORESET-scoped
+   * one further down, which needs coreset geometry (duration, frequency_domain_resource) this
+   * function does not have until Technique A succeeds. */
+  if (cfg->autodiscover && !nr_pdcch_blind_monitor_autodiscover_done()) {
+    const uint32_t abs_slot_now = (uint32_t)proc->frame_rx * fp->slots_per_frame + (uint32_t)proc->nr_slot_rx;
+    // ponytail: fixed at symbol 0 rather than rotating through the slot. This deployment's
+    // dedicated CORESETs are always 1 symbol starting at 0 (see nr_pdcch_blind_monitor.c's
+    // coreset_duration=1 comment); upgrade to a rotating symbol index if a future cell's dedicated
+    // CORESET does not start at symbol 0. symbol=0 also keeps the FEP buffer below single-symbol
+    // sized (nr_slot_fep() writes at `symbol * ofdm_symbol_size` within it).
+    const int disc_symbol = 0;
+    __attribute__((aligned(32))) c16_t rxdataF_disc[fp->nb_antennas_rx][((fp->ofdm_symbol_size + 7) / 8) * 8];
+    nr_slot_fep(ue, fp, proc->nr_slot_rx, disc_symbol, rxdataF_disc, link_type_dl, 0, ue->common_vars.rxdata);
+    nr_pdcch_blind_monitor_autodiscover_step(rxdataF_disc[0], fp->ofdm_symbol_size, fp->N_RB_DL,
+                                             fp->first_carrier_offset, (uint16_t)fp->Nid_cell,
+                                             proc->nr_slot_rx, disc_symbol, abs_slot_now);
+    return;  // geometry not ready (or just became ready this call) -- no candidate decode this call
+  }
+
   const uint32_t gate_slot = (uint32_t)proc->frame_rx * fp->slots_per_frame + (uint32_t)proc->nr_slot_rx;
   // BUG FIXED 2026-09-04 (found while investigating 0 blind SI-RNTI accepts on CORESET#0): this
   // gate checked ONLY the single slot at ss_monitoring_slot_offset, ignoring ss_duration entirely
@@ -946,6 +1039,55 @@ void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_pr
       LOG_W(PHY, "SENSING: IDXCHK n_rb=%d stride=%d ncand=%d %s\n",
             n_rb, llr_stride, rel15->number_of_candidates, rep);
       s_idx_left--;
+    }
+  }
+
+  /* ---- PHASE 3 (2026-09-04): Technique C, dci_length histogram sweep ---------------------------
+   * Runs ONCE (guarded by g_length_swept) after Technique A has confirmed the dedicated CORESET's
+   * geometry but before its dci_length is known -- placed here, AFTER pdcch_e_rx[] is populated,
+   * so the candidate list below walks the SAME e_rx_cand_idx cursor the pre-pass loop further down
+   * uses (Step 4's own warning: not a second, independently-wrong indexing scheme). Does not
+   * disturb the pre-pass loop's own walk -- this is a separate, throwaway replay of the identical
+   * boundary arithmetic (a pure function of L[]/number_of_candidates, independent of dci_length). */
+  if (cfg->autodiscover && nr_pdcch_blind_monitor_autodiscover_done() && !g_length_swept) {
+    nr_pdcch_autodiscover_cand_t disc_cand[64];
+    int disc_n_cand = 0;
+    {
+      int idx = 0;
+      for (int c = 0; c < rel15->number_of_candidates && disc_n_cand < 64; c++) {
+        const int L         = rel15->L[c];
+        const int n_re_cand = NR_PDCCH_BLIND_RE_PER_RB_OUT_DMRS * L * 6;
+        disc_cand[disc_n_cand].e_rx = &pdcch_e_rx[idx];
+        disc_cand[disc_n_cand].L    = (uint8_t)L;
+        disc_n_cand++;
+        idx += n_re_cand;
+      }
+    }
+    if (disc_n_cand > 0) {
+      uint16_t bootstrap_rnti = 0;
+      uint8_t  bootstrap_class = 0xFF;
+      uint32_t age = 0;
+      nr_pdcch_blind_monitor_confirmed_rnti(abs_slot, &bootstrap_rnti, &bootstrap_class, &age);
+      nr_pdcch_autodiscover_sweep_ctx_t sweep_ctx = {
+          .cand                = disc_cand,
+          .n_cand              = disc_n_cand,
+          .bwp_size            = (uint16_t)cfg->bwp_size,
+          .dmrs_typeA_position = (uint8_t)cfg->dmrs_typeA_position,
+          .rnti_min            = cfg->rnti_min,
+          .rnti_max            = cfg->rnti_max,
+          .extract_opts        = &cfg->extract,
+          .scrambling_rnti     = rel15->coreset.scrambling_rnti,
+          .dmrs_scrambling_id  = rel15->coreset.pdcch_dmrs_scrambling_id,
+      };
+      // DCI 1_1 lengths land in roughly 30-70 bits on any deployment this project has seen
+      // (nr_pdcch_dci_length_sweep.h's own file comment) -- same bounds the plan brief specifies.
+      const int found_len = nr_pdcch_dci_length_sweep(nr_pdcch_autodiscover_length_scorer, &sweep_ctx, 30, 70,
+                                                      bootstrap_rnti);
+      if (found_len > 0) {
+        nr_pdcch_blind_monitor_autodiscover_set_dci_length(found_len);
+        g_length_swept = true;
+        LOG_A(PHY, "SENSING: Phase 3 autodiscover -- dci_length locked at %d\n", found_len);
+      }
     }
   }
 

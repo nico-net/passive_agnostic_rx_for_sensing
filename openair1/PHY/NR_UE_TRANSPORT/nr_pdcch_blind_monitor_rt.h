@@ -262,6 +262,13 @@ typedef struct {
    * Default 0: an existing config describes the DEDICATED search space, and replacing it with the
    * common one trades a dense data-aided source for a sparse SIB1 one -- never do that unasked. */
   int autoconf;
+
+  /* PHASE 3 (2026-09-04): recover the DEDICATED CORESET/search space by DM-RS correlation
+   * (Technique A, nr_pdcch_coreset_map_scan()) + dci_length histogram sweep (Technique C,
+   * nr_pdcch_dci_length_sweep()) instead of reading pdcch_blind_monitor_coreset/_ss/_bwp by hand.
+   * Default 0, every existing deployment untouched. Requires autoconf above to already be 1 --
+   * the bootstrap RNTI this depends on comes from that path's own CSS0/SIB1 grants. */
+  int autodiscover;
 } nr_pdcch_blind_monitor_cfg_t;
 
 #ifdef __cplusplus

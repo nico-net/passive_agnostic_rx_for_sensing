@@ -355,6 +355,33 @@ bool nr_pdcch_blind_monitor_autoconf_css0(int num_rbs,
                                           int rb_offset,
                                           int dmrs_typea_position);
 
+/* PHASE 3: recover the DEDICATED CORESET/search space by search (Techniques A + C) instead of
+ * reading pdcch_blind_monitor_coreset/_ss/_bwp by hand. See the definition-site comment in
+ * nr_pdcch_blind_monitor.c for the full design (why this is NOT gated on g_cfg.bwp_size == 0). */
+
+/* Non-zero once nr_pdcch_blind_monitor_autodiscover_step() has confirmed the dedicated CORESET's
+ * footprint and populated g_cfg for it. Distinct from g_cfg.bwp_size, which CSS0 autoconf above
+ * may already have set for the COMMON search space by the time this is first checked. */
+bool nr_pdcch_blind_monitor_autodiscover_done(void);
+
+/* Technique A (whole-carrier DM-RS correlation): call once per symbol while autodiscover is on and
+ * nr_pdcch_blind_monitor_autodiscover_done() is still false. `rxdataF_symbol` is one antenna's
+ * already-FEP'd frequency-domain samples for exactly this (slot, symbol), indexed [0,
+ * ofdm_symbol_size) -- `const void*` rather than `const c16_t*` so this header stays free of the
+ * PHY-heavy c16_t definition (nr_pdcch_coreset_map.h pulls in PHY/impl_defs_top.h; the .c file casts
+ * internally). Returns true once the footprint is confirmed and g_cfg is populated for it.
+ * `abs_slot` feeds nr_pdcch_blind_monitor_confirmed_rnti() for the bootstrap-RNTI log line. */
+bool nr_pdcch_blind_monitor_autodiscover_step(const void* rxdataF_symbol, int ofdm_symbol_size, int n_rb_carrier,
+                                              int first_carrier_offset, uint16_t pci, int slot, int symbol,
+                                              uint32_t abs_slot);
+
+/* Technique C's result: called by the RT tap once nr_pdcch_dci_length_sweep() (driven from
+ * nr_pdcch_blind_monitor_rt.c, which has the real candidate LLR stream this pure/offline-testable
+ * header does not) returns a winning length. g_cfg is owned by nr_pdcch_blind_monitor.c, so the RT
+ * tap -- which only ever sees the const nr_pdcch_blind_monitor_get_cfg() accessor -- needs this
+ * setter rather than writing g_cfg.dci_length_override directly. */
+void nr_pdcch_blind_monitor_autodiscover_set_dci_length(int dci_length);
+
 /**
  * @brief DCI format 1_1 payload bit-width under this module's fixed MVP assumption set (see the
  * file-level comment). Derived field-by-field from openair2/LAYER2/NR_MAC_COMMON/nr_mac_common.c's
