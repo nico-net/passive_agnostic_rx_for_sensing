@@ -328,9 +328,48 @@ bool nr_pdcch_blind_monitor_autodiscover_step(const void* rxdataF_symbol, int of
                                         // own comment in autoconf_css0() for why this field matters
   g_cfg.coreset_freq_domain     = span_rb / 6;
   g_cfg.bwp_start               = s_last_rb_offset;
-  g_cfg.bwp_size                = span_rb;
+  /* bwp_size is the DL BWP size (drives the RIV/frequency-allocation field-width computation), NOT
+   * the discovered CORESET span -- a dedicated CORESET is normally a subset of its BWP. The real
+   * RRC-configured dedicated BWP is ciphered and unavailable to a passive receiver (the same
+   * reasoning that makes this whole feature necessary), so use the full carrier width, exactly as
+   * this project's own manual ground-truth dedicated config does
+   * (tests/passive_rx/ota/nrue.passive_rx.conf: "bwp = 0:273:...", the full 273 PRB carrier). The
+   * discovered footprint stays only in bwp_start/coreset_freq_domain above. */
+  g_cfg.bwp_size                = n_rb_carrier;
   g_cfg.coreset_pdcch_dmrs_scrambling_id = pci;
   g_cfg.coreset_shift_index     = pci;
+
+  /* CSS0 autoconf (a hard prerequisite for this feature's bootstrap RNTI -- see the autodiscover
+   * conf knob's own comment) runs first and populates these SAME g_cfg fields for CORESET#0/SIB1.
+   * Since this function overwrites g_cfg IN PLACE, anything CSS0 set that isn't touched here stays
+   * leaked from the common search space into what is now a dedicated-CORESET search, where it is
+   * actively wrong (a SIB1-only RNTI pin, format-1_0-only scanning, AL4/AL8-pinned candidates,
+   * CSS0's own energy-gate-off choice). Reset every one of them to the values this project's own
+   * known-working manual dedicated config uses
+   * (tests/passive_rx/ota/nrue.passive_rx.conf's pdcch_blind_monitor_{ss,rnti_range,dci10,
+   * noise_gates} lines), not CSS0's CORESET#0/SIB1-specific choices. */
+  g_cfg.ss_al_candidates[0] = 0;  // adaptive/auto, not CSS0's AL1/AL2-disabled {-1,-1,4,2} -- this
+  g_cfg.ss_al_candidates[1] = 0;  // cell's dedicated grants are measured ~99.997% AL2 (CLAUDE.md),
+  g_cfg.ss_al_candidates[2] = 0;  // i.e. exactly the level CSS0's pin disables
+  g_cfg.ss_al_candidates[3] = 0;
+  g_cfg.rnti_min = NR_PDCCH_BLIND_RNTI_MIN_DEFAULT;  // wide dynamic C-RNTI range, not CSS0's
+  g_cfg.rnti_max = NR_PDCCH_BLIND_RNTI_MAX_DEFAULT;  // SI-RNTI-only pin (rnti_min=rnti_max=0xFFFF)
+  g_cfg.dci10_scan        = 1;  // scan BOTH 1_0 and 1_1 -- CSS0 pins 2 (1_0-only, correct for a
+                                // SIB1-only common search space), but this feature exists to
+                                // recover DEDICATED 1_1 decode, so 1_1 scanning must not stay off
+  g_cfg.dci10_ss_type     = 0;  // UE-specific (NR_BLIND_SS_UE_SPECIFIC), not CSS0's _COMMON
+  g_cfg.dci10_n_rb_riv    = 0;  // auto: bwp_size above, not CORESET#0's own span
+  g_cfg.dci10_rb_offset   = -1; // auto: bwp_start above, not CORESET#0's rb_offset=0
+  g_cfg.dci10_mux_pattern = 0;  // only consulted for SIB1, meaningless here
+  g_cfg.dci10_sib1        = 0;  // this is not SIB1 -- leaving CSS0's sib1=1 would apply the
+                                // mux-pattern default TDRA table to a dedicated 1_0 decode
+  g_cfg.energy_adapt_factor = 3.0f; // CSS0 zeroes this because CORESET#0's every-candidate-overlaps
+  g_cfg.energy_min          = 0.0f; // -a-grant density (8 CCEs/20ms SIB1) breaks the floor estimator
+                                     // (see autoconf_css0()'s own comment) -- that reasoning does not
+                                     // apply to a dedicated CORESET's far larger, sparser candidate
+                                     // population, where the gate is needed and this project's own
+                                     // manual dedicated config (noise_gates "0:2:500:0:3.0") runs it
+                                     // at 3x the measured noise floor.
 
   /* Fields Technique A cannot determine (it detects OCCUPANCY, not CORESET/SS structure) but that
    * nr_pdcch_blind_monitor_process()'s existing occasion gate and run_occasion()'s CORESET builder

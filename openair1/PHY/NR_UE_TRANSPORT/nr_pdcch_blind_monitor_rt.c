@@ -545,11 +545,18 @@ void nr_pdcch_blind_monitor_process(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t 
     // ponytail: fixed at symbol 0 rather than rotating through the slot. This deployment's
     // dedicated CORESETs are always 1 symbol starting at 0 (see nr_pdcch_blind_monitor.c's
     // coreset_duration=1 comment); upgrade to a rotating symbol index if a future cell's dedicated
-    // CORESET does not start at symbol 0. symbol=0 also keeps the FEP buffer below single-symbol
-    // sized (nr_slot_fep() writes at `symbol * ofdm_symbol_size` within it).
+    // CORESET does not start at symbol 0.
     const int disc_symbol = 0;
-    __attribute__((aligned(32))) c16_t rxdataF_disc[fp->nb_antennas_rx][((fp->ofdm_symbol_size + 7) / 8) * 8];
-    nr_slot_fep(ue, fp, proc->nr_slot_rx, disc_symbol, rxdataF_disc, link_type_dl, 0, ue->common_vars.rxdata);
+    // Technique A only ever reads antenna 0 (nr_pdcch_coreset_map_scan() takes one c16_t* symbol
+    // buffer), so FEP only antenna 0 -- nr_slot_fep_ant() rather than nr_slot_fep(), which would
+    // needlessly FEP every antenna. Sized/indexed EXACTLY as nr_slot_fep_ant()'s own declared type
+    // requires: `c16_t rxdataF[][frame_parms->samples_per_slot_wCP]`, one row (ant=0), a full
+    // slot's row length (it writes at `rxdataF[ant][ofdm_symbol_size * symbol]`, not at a
+    // single-symbol-sized offset 0 -- a smaller row here is a stack buffer overflow the moment
+    // symbol/row indexing sees the real row stride, exactly as the review found).
+    __attribute__((aligned(32))) c16_t rxdataF_disc[1][fp->samples_per_slot_wCP];
+    nr_slot_fep_ant(ue, fp, proc->nr_slot_rx, disc_symbol, 0 /* ant */, rxdataF_disc, link_type_dl, 0,
+                    ue->common_vars.rxdata);
     nr_pdcch_blind_monitor_autodiscover_step(rxdataF_disc[0], fp->ofdm_symbol_size, fp->N_RB_DL,
                                              fp->first_carrier_offset, (uint16_t)fp->Nid_cell,
                                              proc->nr_slot_rx, disc_symbol, abs_slot_now);
@@ -1080,13 +1087,28 @@ void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_pr
           .dmrs_scrambling_id  = rel15->coreset.pdcch_dmrs_scrambling_id,
       };
       // DCI 1_1 lengths land in roughly 30-70 bits on any deployment this project has seen
-      // (nr_pdcch_dci_length_sweep.h's own file comment) -- same bounds the plan brief specifies.
-      const int found_len = nr_pdcch_dci_length_sweep(nr_pdcch_autodiscover_length_scorer, &sweep_ctx, 30, 70,
+      // (nr_pdcch_dci_length_sweep.h's own file comment), but this codebase itself rejects any
+      // dci_length > 63 before ever decoding -- so the upper bound is 63, not 70: lengths 64-70
+      // are guaranteed-wasted trials (7 of 41 hypotheses, ~17% of the sweep's budget, for zero
+      // possible acceptance).
+      const int found_len = nr_pdcch_dci_length_sweep(nr_pdcch_autodiscover_length_scorer, &sweep_ctx, 30, 63,
                                                       bootstrap_rnti);
+      // Attempt the (expensive -- up to 34*64 real polar decodes) sweep EXACTLY ONCE, success or
+      // not, the moment an occasion actually offers real candidates (disc_n_cand > 0, checked
+      // above) -- not gated on found_len > 0. Gating on success would let a single occasion's weak/
+      // absent traffic re-trigger the full sweep every subsequent occasion forever, turning a
+      // one-shot bootstrap cost into a permanent per-occasion RT-thread-budget violation.
+      // ponytail: exactly-once rather than a bounded retry budget -- simplest fix that cannot loop
+      // indefinitely; revisit with a small retry cap if live capture shows the first
+      // candidate-bearing occasion after geometry-lock is unreliable.
+      g_length_swept = true;
       if (found_len > 0) {
         nr_pdcch_blind_monitor_autodiscover_set_dci_length(found_len);
-        g_length_swept = true;
         LOG_A(PHY, "SENSING: Phase 3 autodiscover -- dci_length locked at %d\n", found_len);
+      } else {
+        LOG_W(PHY, "SENSING: Phase 3 autodiscover -- dci_length sweep found nothing significant "
+                   "(n_cand=%d this occasion); NOT retried, dci_length stays at the formula default\n",
+              disc_n_cand);
       }
     }
   }
