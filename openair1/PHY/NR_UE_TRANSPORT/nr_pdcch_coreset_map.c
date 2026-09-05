@@ -24,6 +24,8 @@
  */
 #include <math.h>
 #include <string.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include "nr_pdcch_coreset_map.h"
 
 /* Real current signatures (openair1/PHY/NR_REFSIG/nr_refsig.h) -- do NOT copy the task brief's
@@ -65,6 +67,18 @@ int nr_pdcch_coreset_map_scan(const c16_t* rxdataF,
   nr_pdcch_dmrs_ref(gold, pilot, (unsigned short)n_rb_carrier);
 
   int found = 0;
+  /* TEMPORARY DIAGNOSTIC (2026-09-05, Task 5 live validation): zero candidates ever cleared the
+   * significance bar on live air over 2800+ calls. Track raw max/rb0 correlation regardless of
+   * threshold, rate-limited, to see how close (or far) live air gets vs the 0.836 bar and vs the
+   * synthetic test's 0.8-0.95 assumption. */
+  static int s_diag = -1;
+  if (s_diag < 0)
+    s_diag = (getenv("ISAC_DISCOVER_DIAG") != NULL) ? 1 : 0;
+  static int s_calls = 0;
+  s_calls++;
+  double diag_max_corr = 0.0;
+  int diag_max_rb = -1;
+  double diag_rb0_corr = -1.0;
   for (int w = 0; w < n_windows; w++) {
     const int rb_offset = w * 6;
     double cr = 0.0, ci = 0.0, py = 0.0, px = 0.0;
@@ -81,6 +95,10 @@ int nr_pdcch_coreset_map_scan(const c16_t* rxdataF,
     }
     const double denom = sqrt(py * px);
     const double corr = (denom > 0.0) ? sqrt(cr * cr + ci * ci) / denom : 0.0;
+    if (s_diag) {
+      if (rb_offset == 0) diag_rb0_corr = corr;
+      if (corr > diag_max_corr) { diag_max_corr = corr; diag_max_rb = rb_offset; }
+    }
     if (corr >= CORESET_MAP_CORR_THRESHOLD) {
       if (found < max_candidates) {
         candidates_out[found].rb_offset = rb_offset;
@@ -88,6 +106,11 @@ int nr_pdcch_coreset_map_scan(const c16_t* rxdataF,
         found++;
       }
     }
+  }
+  if (s_diag && (s_calls % 200) == 1) {
+    printf("COREMAPDIAG calls=%d rb0_corr=%.4f max_corr=%.4f max_rb=%d thresh=%.3f\n", s_calls,
+          diag_rb0_corr, diag_max_corr, diag_max_rb, CORESET_MAP_CORR_THRESHOLD);
+    fflush(stdout);
   }
 
   // Insertion sort by descending corr -- found is small (<= max_candidates), no need for qsort.

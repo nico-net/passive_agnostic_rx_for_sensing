@@ -285,6 +285,28 @@ bool nr_pdcch_blind_monitor_autodiscover_step(const void* rxdataF_symbol, int of
   const int n = nr_pdcch_coreset_map_scan((const c16_t*)rxdataF_symbol, ofdm_symbol_size, n_rb_carrier,
                                           first_carrier_offset, pci, slot, symbol, candidates,
                                           NR_PDCCH_MAX_CANDIDATE_WINDOWS);
+  {
+    /* TEMPORARY DIAGNOSTIC (2026-09-05, Task 5 live validation): zero convergence observed over a
+     * 150s+ live capture on a cell with continuous DL/UL traffic and a known-good dedicated CORESET
+     * -- need to see whether nr_pdcch_coreset_map_scan() is finding candidates at all (n>0 but never
+     * reaching AUTODISCOVER_STABLE_VOTES) vs never finding any (n==0 every call, e.g. a live-SNR or
+     * threshold-calibration problem the synthetic test couldn't expose). Rate-limited to avoid
+     * flooding the RT thread's own log volume. */
+    static int s_diag = -1;
+    if (s_diag < 0)
+      s_diag = (getenv("ISAC_DISCOVER_DIAG") != NULL) ? 1 : 0;
+    static int s_calls = 0;
+    s_calls++;
+    if (s_diag && (n > 0 || (s_calls % 200) == 1)) {
+      if (n > 0) {
+        printf("DISCOVERDIAG calls=%d n=%d top_rb=%d top_corr=%.3f\n", s_calls, n,
+              candidates[0].rb_offset, candidates[0].corr);
+      } else {
+        printf("DISCOVERDIAG calls=%d n=0\n", s_calls);
+      }
+      fflush(stdout);
+    }
+  }
   if (n == 0) {
     return false;  // nothing occupied this symbol -- not an error, most symbols carry no PDCCH
   }

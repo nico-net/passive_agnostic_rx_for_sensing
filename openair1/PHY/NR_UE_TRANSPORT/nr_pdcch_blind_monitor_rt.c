@@ -485,10 +485,30 @@ void nr_pdcch_blind_monitor_process(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t 
    *
    * So the two are now independent: configure pdcch_blind_monitor_* and the passive receiver runs
    * with sensing.enable = 0. The ISAC-sourced paths below stay gated on nr_isac_enabled(). */
+  {
+    static int s_entry_diag = -1;
+    if (s_entry_diag < 0)
+      s_entry_diag = (getenv("ISAC_DISCOVER_DIAG") != NULL) ? 1 : 0;
+    static int s_entry_calls = 0;
+    s_entry_calls++;
+    if (s_entry_diag && s_entry_calls == 1) {
+      printf("DISCOVERDIAG ENTRY enabled=%d\n", nr_pdcch_blind_monitor_enabled()); fflush(stdout);
+    }
+  }
   if (!nr_pdcch_blind_monitor_enabled()) {
     return;
   }
   const nr_pdcch_blind_monitor_cfg_t *cfg = nr_pdcch_blind_monitor_get_cfg();
+  {
+    static int s_cfg_diag = -1;
+    if (s_cfg_diag < 0)
+      s_cfg_diag = (getenv("ISAC_DISCOVER_DIAG") != NULL) ? 1 : 0;
+    static int s_cfg_calls = 0;
+    s_cfg_calls++;
+    if (s_cfg_diag && s_cfg_calls == 1) {
+      printf("DISCOVERDIAG CFG autodiscover=%d pdsch_decode=%d\n", cfg->autodiscover, cfg->pdsch_decode); fflush(stdout);
+    }
+  }
 
   // What this occasion is for. The tap used to run only for the DM-RS source; the passive
   // data-aided path (pdsch_decode) is a second, independent reason to scan the same candidates, and
