@@ -2413,6 +2413,17 @@ if(ENABLE_TESTS)
   target_link_libraries(test_nr_pdcch_coreset_map PRIVATE nr_common UTIL GTest::gtest)
   add_dependencies(tests test_nr_pdcch_coreset_map)
   add_test(NAME test_nr_pdcch_coreset_map COMMAND ./test_nr_pdcch_coreset_map)
+
+  # Phase 3 Technique C (roadmap artifact "Cell-Agnostic Passive Receiver"): dci_length histogram
+  # sweep, tested against a synthetic scorer stub -- exercises both false-accept traps this
+  # project has already paid for once (upper-8-bits-zero alone, and a degenerate invariant
+  # payload) via a fixture engineered to tempt each of them independently.
+  add_executable(test_nr_pdcch_dci_length_sweep ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_dci_length_sweep_test.cc
+                                                 ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_dci_length_sweep.c)
+  target_include_directories(test_nr_pdcch_dci_length_sweep PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
+  target_link_libraries(test_nr_pdcch_dci_length_sweep PRIVATE UTIL GTest::gtest)
+  add_dependencies(tests test_nr_pdcch_dci_length_sweep)
+  add_test(NAME test_nr_pdcch_dci_length_sweep COMMAND ./test_nr_pdcch_dci_length_sweep)
 endif()
 
 add_subdirectory(common)
