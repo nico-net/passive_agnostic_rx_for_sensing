@@ -2388,6 +2388,13 @@ if(ENABLE_TESTS)
   target_include_directories(test_occ_clean PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_ISAC)
   target_link_libraries(test_occ_clean PRIVATE NR_UE_ISAC UTIL GTest::gtest)
   add_dependencies(tests test_occ_clean)
+  # Phase 3 Technique B (roadmap artifact "Cell-Agnostic Passive Receiver"): C-RNTI bootstrap
+  # state machine, tested independently of any live RT capture.
+  add_executable(test_nr_pdcch_blind_rnti_bootstrap ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_blind_rnti_bootstrap_test.cc)
+  target_include_directories(test_nr_pdcch_blind_rnti_bootstrap PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
+  target_link_libraries(test_nr_pdcch_blind_rnti_bootstrap PRIVATE nr_pdcch_blind_monitor nr_common MAC_NR_COMMON polar crc_byte UTIL asn1_nr_rrc_hdrs asn1_lte_rrc_hdrs GTest::gtest)
+  add_dependencies(tests test_nr_pdcch_blind_rnti_bootstrap)
+  add_test(NAME test_nr_pdcch_blind_rnti_bootstrap COMMAND ./test_nr_pdcch_blind_rnti_bootstrap)
   add_test(NAME test_occ_clean COMMAND ./test_occ_clean)
 endif()
 
@@ -2415,11 +2422,3 @@ endif()
 if(PACKAGING_LTE OR PACKAGING_NR OR PACKAGING_COMMON OR PACKAGING_USRP OR PACKAGING_PHYSIM)
   include("tools/packages/packages.cmake")
 endif()
-
-  # Phase 3 Technique B (roadmap artifact "Cell-Agnostic Passive Receiver"): C-RNTI bootstrap
-  # state machine, tested independently of any live RT capture.
-  add_executable(test_nr_pdcch_blind_rnti_bootstrap ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_blind_rnti_bootstrap_test.cc)
-  target_include_directories(test_nr_pdcch_blind_rnti_bootstrap PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
-  target_link_libraries(test_nr_pdcch_blind_rnti_bootstrap PRIVATE nr_pdcch_blind_monitor nr_common MAC_NR_COMMON polar crc_byte UTIL asn1_nr_rrc_hdrs asn1_lte_rrc_hdrs GTest::gtest)
-  add_dependencies(tests test_nr_pdcch_blind_rnti_bootstrap)
-  add_test(NAME test_nr_pdcch_blind_rnti_bootstrap COMMAND ./test_nr_pdcch_blind_rnti_bootstrap)
