@@ -24,17 +24,20 @@ detailed status; the sections below it are the investigation history that produc
 | Step | What it does | Status |
 |---|---|---|
 | 1. CORESET footprint | DM-RS correlation, histogram-accumulated across occasions (Technique A) | **IMPLEMENTED, LIVE-VALIDATED.** Converges to the exact known-good footprint (`rb_offset=0`) repeatedly; span coverage varies with how much real traffic is seen in the observation window (216-252/270 RB in good captures). |
-| 2. dci_length discovery | Accumulating CRC-based length sweep (Technique C, rewritten 2026-09-06) | **IMPLEMENTED, UNIT-TESTED (5/5), NOT YET LIVE-CONFIRMED.** The one-shot design was proven statistically unable to work (see below); the rewrite fixes that on paper and in synthetic tests, but has never yet found a real length live because every attempt since the rewrite hit `VOID_DL_ZERO`/`VOID_CFO_MISLOCK`, and the cell currently has zero DL PDSCH traffic to test against (see "Traffic-generation architecture" below). |
+| 2. dci_length discovery | Accumulating CRC-based length sweep (Technique C, rewritten 2026-09-06) | **IMPLEMENTED, UNIT-TESTED (5/5), STILL NOT LIVE-CONFIRMED FINDING A REAL LENGTH -- and "waiting for DL traffic" is no longer the explanation.** Real DL PDSCH traffic is CONFIRMED present (~30% of slots, see "Traffic-generation architecture" below -- an earlier "zero DL traffic" claim here was a grep bug, retracted), yet the sweep still gives up after 500 occasions on every capture. Genuine open problem, not an external dependency. |
 | 3. C-RNTI bootstrap | Persistence-based RNTI confirmation from `run_occasion()`'s own accept path (Technique B) | **IMPLEMENTED, STRUCTURALLY SOUND, NEVER OBSERVED FIRING LIVE.** Cannot produce a sighting until Step 2 has already found the right length and produced at least one real accept — a real chicken-and-egg gap, mitigated (Step 2 no longer *needs* it, since it can bootstrap from CRC alone) but not eliminated. |
 | 4. Genuine accept / FULLCRC decode counting at the bootstrapped RNTI | Shared decode/accept machinery, same code path the manual conf already proves works | **CODE PATH EXISTS AND IS PROVEN IN ISOLATION** (the manual conf gets 20-48% TB decode rates through the identical decode/accept logic) **but the full autodiscover chain (1→2→3→4 all succeeding together, unattended) has never been observed end to end.** This is the actual "is Phase 3 done" question, and it is open. |
 
-**What's needed to close DL**: real, sustained DL PDSCH traffic on the target cell for one clean
-capture (mechanical — no new code). If that capture shows Step 2 locking a length and Step 4
-producing genuine accepts, DL is functionally complete. If Step 2 *still* fails to converge with
-real traffic present, the accumulation redesign itself needs revisiting (e.g. the chance-pass-rate
-assumption baked into `CHANCE_PASS_RATE=1/256` may not hold for this exact CORESET/candidate
-config, or the observation window/give-up cap may need retuning against a REAL traffic pattern
-rather than the synthetic one the unit tests use).
+**What's needed to close DL, UPDATED 2026-09-06 — the "just needs real DL traffic" hypothesis is
+now falsified.** Real DL PDSCH traffic was confirmed present (~30% of slots) for a fresh 3x200s
+capture, and Step 2 STILL gave up after 500 occasions with zero accepts on every try. The
+accumulation redesign itself needs revisiting: candidates the chance-pass-rate assumption baked
+into `CHANCE_PASS_RATE=1/256` may not hold for this exact CORESET/candidate config; the
+observation window/give-up cap may need retuning against a REAL traffic pattern rather than the
+synthetic one the unit tests use; or there is a genuine bug elsewhere in the autodiscover chain
+(e.g. the candidates the sweep is fed may not actually correspond to slots/CCEs carrying the real
+DL traffic that IS present, an indexing or timing mismatch between what Technique A/the RT tap
+scans and what the scheduler is actually using this occasion). Not yet root-caused.
 
 ### UL (DCI format 0_1 → PUSCH), by step
 
@@ -101,13 +104,29 @@ enough information to pin every field boundary uniquely.
 ### Traffic-generation architecture (baseline, corrected 2026-09-06)
 
 The active UE is a real phone attached to this gNB's cell (not an OAI test-harness UE), running a
-bidirectional iperf3 test to an EXTERNAL server on the internet — there is no local iperf3 server
-in this picture (a local `iperf3.service` on sens4 was found unused throughout this whole
-investigation and has been stopped). As of this writing the phone's upload leg reaches the cell
-(steady UL PUSCH on the current RNTI) but its download leg generates zero PDSCH scheduling
-activity — worth checking the iperf command/flags or the external server's reverse-direction
-behaviour before assuming a receiver defect; see "Steps 2-4 attempt" below for the exact
-measurement.
+bidirectional/reverse-mode iperf3 test to an EXTERNAL server on the internet — there is no local
+iperf3 server in this picture (a local `iperf3.service` on sens4 was found unused throughout this
+whole investigation and has been stopped).
+
+**"Zero DL PDSCH traffic" (an earlier version of this section, and of "Steps 2-4 attempt" below)
+IS RETRACTED 2026-09-06 — it was a measurement bug, not a fact about the cell.** The grep pattern
+used to check `gnb.log`'s own `Slot decisions ... (N PDSCHs, N PUSCHs, ...)` summary line required
+the LITERAL plural `PDSCHs` (trailing 's'); this gNB's log uses ENGLISH SINGULAR/PLURAL GRAMMAR
+(`"1 PDSCH,"` with no 's', `"0 PDSCHs,"`/`"2 PDSCHs,"` with one) — so every slot carrying EXACTLY
+ONE PDSCH silently failed to match and was dropped from the count entirely, rather than counted.
+Re-measured with a corrected pattern (`PDSCHs?`) over a properly time-bounded window (a
+BYTE-count `tail` on this log can span under 2 seconds of real time despite being tens of MB, due
+to extremely verbose per-symbol fronthaul debug lines — size the window by checking its own first/
+last timestamp, not by assuming N bytes = N seconds): **~30% of sampled slots (2181/7372 in one
+21-second window) DO carry a real DL PDSCH grant.** DL traffic was very likely present through
+some or all of this investigation's earlier "zero DL traffic" captures too — that framing should
+not be trusted for anything captured before 2026-09-06's correction.
+
+**Re-run after the correction: STILL zero accepts (`VOID_DL_ZERO`, 3/3 tries, `accepts=0`,
+`dci_length sweep gave up after 500 occasions`) with DL traffic now CONFIRMED present.** This
+means the actual remaining blocker is a genuine decode/config problem, not absent traffic as
+previously concluded — re-opened, not yet root-caused. See the top status callout of this document
+for the current investigation state.
 
 ---
 
@@ -262,44 +281,29 @@ external to this code) was identified:
 (5/5) but NOT yet live-confirmed finding a real length** — every attempted live capture after the
 rewrite hit `VOID_DL_ZERO`/`VOID_CFO_MISLOCK`/gave up after the bounded 500-occasion cap.
 
-**THE ACTUAL REMAINING BLOCKER, confirmed directly against the gNB's own log, not guessed:
-this cell currently has ZERO dedicated DL PDSCH traffic.** `grep -c 'UE PDSCH'` over the most
-recent ~2 GB of `gnb.log` (sens4) returned **0**, against **12384** for `UE PUSCH` (uplink) in the
-same window — the gNB is scheduling UL grants only. This explains every remaining symptom without
-needing a code defect:
-- Technique A still finds real PDCCH energy (its correlation does not distinguish DL 1_1 from UL
-  0_1 DCI formats -- UL-only traffic still lights up real CORESET occupancy), so footprint
-  discovery keeps finding SOME real windows (though a narrower span than earlier captures, tracking
-  the declining traffic).
-- Technique C's DL-specific sweep and Step 3-4's DL-specific accept/FULLCRC scoring have nothing to
-  find, at any dci_length, because there are no DL grants on the air to decode.
-- The PROVEN-WORKING manual conf's own DL decode rate ALSO declined across this session's captures
-  (48.5% -> 22-24% TB rate) in step with the same traffic falloff -- not a receiver regression.
+**"ZERO dedicated DL PDSCH traffic" (this section's own claim, several paragraphs, dated
+2026-09-06 earlier the same day) IS RETRACTED.** It was a grep bug, not a fact about the cell: the
+pattern used required the literal plural `PDSCHs` (trailing 's'), but this gNB's log uses English
+singular/plural grammar (`"1 PDSCH,"` with no 's'), so every slot with EXACTLY ONE PDSCH silently
+failed to match and was dropped from the count rather than counted as nonzero. Re-measured with a
+corrected pattern (`PDSCHs?`) over a properly time-bounded window (a byte-count `tail` on this log
+can span under 2 seconds of real time despite being tens of MB -- verify the window's own first/
+last timestamp, never assume N bytes ~ N seconds on this log): **~30% of sampled slots (2181/7372
+in one 21-second window) DO carry a real DL PDSCH grant.** DL traffic was very likely present
+through some or all of the "declining traffic" narrative above too -- do not trust any DL-traffic
+absence/decline claim from earlier in this document dated before this correction.
 
-**TRAFFIC-GENERATION ARCHITECTURE, corrected 2026-09-06 (baseline going forward -- an earlier
-version of this section wrongly assumed a local `iperf3` server on sens4 was the traffic source):
-the active UE is a REAL PHONE, attached to this gNB's cell exactly as any normal 5G UE would be,
-running a BIDIRECTIONAL iperf3 test from the phone to an EXTERNAL server somewhere on the
-internet.** There is no local iperf3 server on sens4 in this picture at all -- the phone's own
-uplink/downlink data path is what should generate the UL PUSCH / DL PDSCH grants this feature
-needs to observe. (A local `iperf3.service` WAS found running on sens4, systemd-managed, up since
-2026-09-02 -- confirmed via `ss`/`systemctl` to have zero established connections throughout this
-whole investigation, i.e. an unrelated leftover from some earlier, different test setup, not part
-of this architecture. Stopped 2026-09-06; `systemctl status iperf3` on sens4 to check if it's
-needed again -- it is left enabled at boot, only stopped, unless told to disable it too.)
-Re-diagnosed with that corrected picture: the gNB-log check above still holds -- the currently
-active RNTI (`0x46b9`, live-confirmed, current at the time of writing) shows a STEADY stream of UL
-PUSCH grants (1/slot, continuously) but genuinely ZERO PDSCH scheduling decisions, verified via the
-gNB's own per-slot `(N PDSCHs, N PUSCHs, ...)` summary counter (837/837 sampled slots read
-`0 PDSCHs`) -- not a string-match artifact, and not an idle/dropped connection (no RRC
-release/reestablish/out-of-sync events in the same window). **So with the corrected architecture,
-the observation is unchanged, but the explanation shifts: the phone's bidirectional iperf test's
-UPLOAD leg is clearly reaching this cell (steady UL PUSCH), but its DOWNLOAD leg is not generating
-any scheduler activity at all** -- worth checking the iperf command/flags and the external server's
-own willingness to send data back (a one-way NAT/firewall on the reverse direction would produce
-exactly this signature) before assuming a receiver-side defect. **Steps 2-4's live validation needs
-real DL traffic restored before it can proceed further; this is an external dependency, not a code
-defect in this branch.**
+**Traffic-generation architecture (this part of the correction stands): the active UE is a real
+phone attached to this gNB's cell, running a bidirectional/reverse-mode iperf3 test to an EXTERNAL
+server** -- no local iperf3 server on sens4 is involved (one WAS found running there, unused
+throughout this whole investigation, confirmed via `ss`/`systemctl` to have zero established
+connections; stopped 2026-09-06, left enabled at boot).
+
+**Re-run after the traffic correction: STILL zero accepts.** Three fresh 200s captures, all
+`VOID_DL_ZERO`, `accepts=0`, `dci_length sweep gave up after 500 occasions` -- with DL traffic now
+CONFIRMED present via the corrected measurement. **This means the actual remaining blocker is a
+genuine decode/config problem, not absent traffic. Re-opened, not yet root-caused** -- do not
+re-close this as an external/traffic issue without new evidence.
 
 ## Files changed by this follow-up (2026-09-06, on top of the reversal commit)
 
