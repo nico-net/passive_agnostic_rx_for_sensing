@@ -223,7 +223,22 @@ End state of the whole "zero decode" investigation, each step measured against t
    suggested one came from NOISE accepts in the AL1-only run, not from real grants.
 3. **PDSCH-side config is CORRECT too**: `mcs_table=1` (both sides), TDA `S=1/L=13`
    (gNB `symb=[1..14)`), DM-RS `0x884` = symbols 2/7/11 (gNB `dl_dmrs_symb_pos`).
-4. **Why PDSCH CRC is 0%: the gNB serves this UE at 256QAM MCS 23-25** — measured
+4. **RETRACTED 2026-09-06 (same evening): the MCS explanation below is WRONG.** `xcheck1`, which
+   decoded at **82.8% PDSCH CRC**, was decoding the SAME grants -- its own decoded-MCS histogram is
+   `mcs=25` x16, `mcs=24` x6, identical to the failing runs. So 256QAM MCS 25 is demonstrably
+   decodable by this receiver and is NOT the differentiator. Keep the paragraph below only as a
+   record of the wrong turn.
+   **What IS established:** PDSCH CRC broke exactly at the gNB restart (17:03:46) and the break is
+   NOT autodiscover-specific -- the MANUAL conf shows the same cliff: xcheck1 14:25 = 82.8%,
+   control1 15:26 = 48.6%, then manualbase 18:40 = 0.0% and solve 19:38 = 0.0%, with the receiver
+   binary and its conf unchanged across that boundary. PDCCH/DCI decode is unaffected and still
+   perfect. So a gNB-side PDSCH parameter changed at the restart that the conf no longer matches.
+   Current gNB values, all 3916/3916 consistent, for whoever picks this up:
+   `ref_point=0 nid_pdsch=2 nscid=0 num_dmrs_cdm_grps_no_data=1 pdsch_dmrs_scrambling_id=2`,
+   `dl_dmrs_symb_pos=0x884` (symbols 2/7/11), `mcs_table=1`, `symb=[1..14)`. The pre-restart values
+   could not be compared because the gNB log appears to have been truncated at restart. NOT yet
+   root-caused -- do not assume MCS, and do not assume link budget.
+   (superseded) Original claim: the gNB serves this UE at 256QAM MCS 23-25 — measured
    3344x `mod=256QAM mcs_index=25`, 408x MCS 24, 7x MCS 23, i.e. 100% of grants. MCS 25 on
    `mcs_table=1` is ~0.78 code rate at 8 bits/symbol, needing roughly mid-20s dB SNR. The gNB picks
    it because the SERVED phone is close with excellent SNR; a passive receiver at a different
