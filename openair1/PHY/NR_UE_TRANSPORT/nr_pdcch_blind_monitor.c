@@ -1591,9 +1591,17 @@ static uint32_t blind_polar_decode(const int16_t* llr,
      * pinned probe only sees the window where the guess happened to be live. Logging every crc with
      * upper==0 finds real DCIs no matter which RNTI they carry. */
     if (s_fullcrc && (crc >> 16) == 0)
-      printf("FULLCRC L=%u dci_len=%u crc=0x%x upper=0x%x in_range=%d\n",
+      /* payload= is the RAW decoded bits, printed here rather than in DCIGT because DCIGT sits
+       * DOWNSTREAM of the accept gate: when the per-field widths are wrong the payload is rejected
+       * as an implausible DCI 1_1 and DCIGT never fires, which is exactly the case that needs the
+       * dump. Combined with `crc` equal to the C-RNTI read from the gNB log at capture time, these
+       * lines are a ground-truth-scorable record of real grants that the field-width solve can be
+       * run against offline (the method CLAUDE.md section 12 used). MSB-first: bit i of the
+       * dci_length-bit payload is bit (dci_length-1-i) of the value. */
+      printf("FULLCRC L=%u dci_len=%u crc=0x%x upper=0x%x in_range=%d payload=0x%016llx\n",
              (unsigned)aggregation_level, (unsigned)dci_length, crc, crc >> 16,
-             (crc >= rnti_min && crc <= rnti_max) ? 1 : 0);
+             (crc >= rnti_min && crc <= rnti_max) ? 1 : 0,
+             (unsigned long long)dci_estimation[0]);
   }
   return crc;
 }

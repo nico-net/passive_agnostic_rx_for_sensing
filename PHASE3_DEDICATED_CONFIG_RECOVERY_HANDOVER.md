@@ -205,6 +205,37 @@ failing fast. Items 2-4 stand as written, with item 2's "cannot run until (1) is
 literally true in the good sense — (1) is resolved, so Steps 2-4 are unblocked, just not yet
 scored on a VALID run.
 
+## RESOLVED 2026-09-06: PDCCH+DCI work; PDSCH 0% CRC is the gNB's 256QAM MCS 25, not a bug
+
+End state of the whole "zero decode" investigation, each step measured against the gNB's own log:
+
+1. **PDCCH/DCI decode WORKS.** 795 genuine payloads recovered at the live C-RNTI in one 200 s
+   capture (`FULLCRC ... crc=0x4604 upper=0x0`), all at `L=2 dci_len=47`.
+2. **The DCI 1_1 field layout is CORRECT.** Solved by hand from the raw payload dump
+   (`payload=0x494c599e2280`, 47 bits MSB-first) against gNB ground truth:
+   `format identifier = bit46 = 1`; `MCS = bits[28:24] = 0b11001 = 25` (gNB: `mcs_index=25`);
+   `RV = bits[22:21] = 0` (gNB: `rv_idx=0` on 3560/3560). The widths also sum to exactly 47 and
+   each matches srsRAN's defaults. **There is no field-width bug** — the `skip_rv=249` that
+   suggested one came from NOISE accepts in the AL1-only run, not from real grants.
+3. **PDSCH-side config is CORRECT too**: `mcs_table=1` (both sides), TDA `S=1/L=13`
+   (gNB `symb=[1..14)`), DM-RS `0x884` = symbols 2/7/11 (gNB `dl_dmrs_symb_pos`).
+4. **Why PDSCH CRC is 0%: the gNB serves this UE at 256QAM MCS 23-25** — measured
+   3344x `mod=256QAM mcs_index=25`, 408x MCS 24, 7x MCS 23, i.e. 100% of grants. MCS 25 on
+   `mcs_table=1` is ~0.78 code rate at 8 bits/symbol, needing roughly mid-20s dB SNR. The gNB picks
+   it because the SERVED phone is close with excellent SNR; a passive receiver at a different
+   position does not have that margin. This is the SAME wall already documented for the uplink in
+   `passive-pusch-decode-works-mcs-limited` ("the wall is ~20 dB of link margin, not a bug").
+
+**So this is an operating-point limitation, not a defect.** The documented lever, already used by
+this project before, is to cap the gNB's `max_ue_mcs` (see `harq-combining-has-nothing-to-combine`,
+which capped it at 10) — a gNB-side config change. Do NOT keep hunting receiver bugs for this
+symptom.
+
+**Caution on one earlier claim in this document:** an `ENERGYPROBE` measurement was used to
+"refute link budget". That measured PDCCH CANDIDATE energy, which is a different question from
+PDSCH decodability at rate 0.78 — PDCCH (AL2, low rate) decodes fine while PDSCH at MCS 25 does
+not. Both facts are consistent; the refutation was scoped too broadly.
+
 ## THE RECEIVER IS DECODING. "accepts=0" NEVER MEANT "no decode". READ THIS FIRST.
 
 **Measured 2026-09-06 late evening, and it retracts the AL1 section below plus most of this
