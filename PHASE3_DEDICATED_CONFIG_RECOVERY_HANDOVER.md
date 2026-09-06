@@ -86,6 +86,117 @@ failing fast. Items 2-4 stand as written, with item 2's "cannot run until (1) is
 literally true in the good sense — (1) is resolved, so Steps 2-4 are unblocked, just not yet
 scored on a VALID run.
 
+## Steps 2-4 attempt (2026-09-06, same day): three more real bugs found and fixed, then blocked
+## on missing DL traffic — read this before attempting Steps 2-4 again
+
+Disabled `[sensing] enable` (ISAC+AoA pipeline) in `nrue.passive_rx.autodiscover.conf` per this
+file's own header comment (it had been left ON from an earlier, unrelated measurement, and its own
+header already documented the cost: 10847 RF discontinuities / 672 SIB1 NACKs per 120s with it on
+vs 100/0 off). This alone did not fix the `VOID_DL_ZERO` (zero dedicated PDSCH decodes) result
+every autodiscover capture was hitting — three further real defects were found and fixed in the
+same investigation, all live-measured, before the actual remaining blocker (missing DL traffic,
+external to this code) was identified:
+
+1. **`coreset_shift_index` was leaking `pci` instead of the manual conf's ground-truth `0`**
+   (already committed as a small preceding fix, `5808e7397f`-equivalent commit in this same
+   session) — confirmed inert for Technique A (not one of its parameters) but real drift from the
+   established manual config, same class as the `coreset_interleaver_size` fix from the prior
+   review wave.
+2. **AL1 was left "auto" instead of matching the manual conf's explicit AL1-DISABLED setting.**
+   `nr_pdcch_blind_monitor.c`'s autodiscover block set `ss_al_candidates = {0,0,0,0}` (all-auto)
+   with a comment asserting AL1 is this cell's dominant level — but the PROVEN-WORKING manual conf
+   (`tests/passive_rx/ota/nrue.passive_rx.conf`) explicitly sets AL1=-1 (disabled), and CLAUDE.md's
+   own later §10 records this gNB's dedicated SS as `nrofCandidates: AL2=2, AL1/4/8/16 all 0` — the
+   comment this replaces was stale. On a 270 RB/45-CCE CORESET, auto-scanning AL1 (up to 45
+   candidates) can alone exhaust the shared candidate/RE budget (see the allocation-order comment
+   in the code), starving AL2/4/8 where real grants land. Fixed to `{-1,0,0,0}`, matching ground
+   truth exactly. Live-measured before the fix: zero genuine PDCCH accepts across three 200s
+   captures despite Technique A confirming strong, real DM-RS energy throughout.
+3. **The dci_length sweep (Technique C) was structurally unable to succeed on live air, root cause
+   found via the gNB's own scheduler log, not guessed:** `nr_pdcch_blind_dci_size()`'s fallback
+   formula returns 48 for this bwp_size, but the PROVEN-WORKING manual conf needs 47 (this cell's
+   DCI field widths shifted after the documented 2026-08-28 4x4/QAM256 reconfiguration — an older
+   CLAUDE.md entry's "48 confirmed via the gNB's own log" predates that change and no longer
+   applies). Since the sweep never overrides the fallback, EVERY decode attempt in an entire
+   200s/461000-occasion capture used the wrong length — measured via the monitor's own summary
+   line: `held[energy=10063801 persist=0 snr=0 mismatch=0]` (the energy gate passes plenty of real
+   candidates through, proportionally matching the working manual-conf run) yet `accepts=0` and
+   `last_reject="CRC-recovered value outside plausible RNTI range"` on literally every one of
+   78199 real decode attempts — the exact signature of a length-misaligned decode, not a dead
+   channel.
+   - **Deeper cause of why the sweep itself never found 47: it was a ONE-SHOT test scored from a
+     SINGLE occasion's ~20-40 candidates**, with `trial_idx % n_cand` cycling the SAME small real
+     set to fill a fixed 64-trial budget. Without a bootstrap RNTI (which cannot exist yet — see
+     item 5 above), significance required >=3 real decodable candidates in that ONE occasion; at
+     this cell's own measured ~2% real accept rate (2801/138000 on the working manual-conf path),
+     one occasion essentially never contains enough real exposure.
+   - **Fixed by rewriting Technique C to accumulate across many occasions**, mirroring the same
+     "instantaneous vote" -> "observed history" shift already applied to Technique A:
+     `nr_pdcch_dci_length_sweep_feed()` replaces the old one-shot `nr_pdcch_dci_length_sweep()`,
+     called once per candidate-bearing occasion, accumulating per-length `(trials, passes,
+     bootstrap_hits, distinct payload hashes)` in a persistent `nr_pdcch_dci_length_sweep_state_t`.
+     This introduces a NEW trap the old design never had to guard against: a FIXED absolute pass
+     floor (the old `MIN_SIGNIFICANT_PASSES=3`, calibrated for ~64 total trials) is trivially
+     clearable BY CHANCE ALONE once accumulated trials per length reach the hundreds (at this
+     project's own measured ~1/256 chance-pass rate for the `plausible` gate, ~700 accumulated
+     trials already has an expected ~2.7 chance passes). Fixed by scoring against a floor that
+     SCALES with accumulated trial count — `mean + 6*sigma` of the expected chance-binomial
+     distribution — rather than a constant. Bootstrap-hit significance is unaffected (still
+     near-certain regardless of sample size). 5/5 offline tests pass, including two new regression
+     cases added specifically for this rewrite: one proving accumulation finds a real-but-sparse
+     signal a single occasion could not, one proving the scaled test does NOT false-trigger even
+     after ~800 accumulated pure-noise trials/length (the exact scenario that would have broken the
+     old fixed floor). Bounded by a new `AUTODISCOVER_LENGTH_SWEEP_MAX_OCCASIONS=500` give-up cap,
+     replacing the old one-shot "try exactly once" bound.
+4. **Also disabled the UL DCI 0_1 / passive-PUSCH pipeline** (`pdcch_blind_monitor_dci01` and
+   everything gated behind it) in the autodiscover conf, matching the manual conf's own leaner
+   config, after measuring 0/10 valid captures on the autodiscover conf across four attempts in
+   this session (2 explicit CFO mislocks, the rest zero-accept) vs 4/4 valid manual-conf control
+   captures in the SAME session window — pointing at conf-specific load as a live confound, not
+   pure rig-luck. This did NOT, by itself, change the outcome (see below) — the actual remaining
+   blocker was found separately.
+
+**Live-validated after items 1-2 (AL1 + shift_index): Step 1 still converges correctly**
+(`rb_offset=0, span_rb=252` on one capture — even wider coverage than the earlier reversal's
+216 — confirming the AL1 fix does not regress Technique A). **Step 2's rewrite is unit-tested
+(5/5) but NOT yet live-confirmed finding a real length** — every attempted live capture after the
+rewrite hit `VOID_DL_ZERO`/`VOID_CFO_MISLOCK`/gave up after the bounded 500-occasion cap.
+
+**THE ACTUAL REMAINING BLOCKER, confirmed directly against the gNB's own log, not guessed:
+this cell currently has ZERO dedicated DL PDSCH traffic.** `grep -c 'UE PDSCH'` over the most
+recent ~2 GB of `gnb.log` (sens4) returned **0**, against **12384** for `UE PUSCH` (uplink) in the
+same window — the gNB is scheduling UL grants only. This explains every remaining symptom without
+needing a code defect:
+- Technique A still finds real PDCCH energy (its correlation does not distinguish DL 1_1 from UL
+  0_1 DCI formats -- UL-only traffic still lights up real CORESET occupancy), so footprint
+  discovery keeps finding SOME real windows (though a narrower span than earlier captures, tracking
+  the declining traffic).
+- Technique C's DL-specific sweep and Step 3-4's DL-specific accept/FULLCRC scoring have nothing to
+  find, at any dci_length, because there are no DL grants on the air to decode.
+- The PROVEN-WORKING manual conf's own DL decode rate ALSO declined across this session's captures
+  (48.5% -> 22-24% TB rate) in step with the same traffic falloff -- not a receiver regression.
+`iperf3` is still running as a server on sens4 (`ps aux` confirmed), but nothing is currently
+driving DL-direction traffic through it. **Steps 2-4's live validation needs real DL traffic
+restored before it can proceed further; this is an external dependency, not a code defect in this
+branch.**
+
+## Files changed by this follow-up (2026-09-06, on top of the reversal commit)
+
+- `openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c` — AL1 disable fix (item 2 above).
+- `openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_dci_length_sweep.h`/`.c` — accumulate-across-occasions
+  rewrite (item 3 above); `nr_pdcch_dci_length_sweep()` (one-shot) replaced by
+  `nr_pdcch_dci_length_sweep_reset()`/`nr_pdcch_dci_length_sweep_feed()` (stateful).
+- `openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_dci_length_sweep_test.cc` — rewritten for the
+  stateful API; 5 tests (was 3), including the two new regression cases described above.
+- `openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c` — call site updated to feed the
+  sweep every candidate-bearing occasion via persistent static state, with the new
+  `AUTODISCOVER_LENGTH_SWEEP_MAX_OCCASIONS=500` bounded give-up.
+- `/home/sens/NICOLA/nrue.passive_rx.autodiscover.conf` (NOT in git -- a runtime conf file outside
+  the repo) — `[sensing] enable=0` and `pdcch_blind_monitor_dci01` commented out.
+
+Verified: 71/71 offline tests pass (was 69 -- +2 net from the sweep test rewrite), nr-uesoftmodem
+builds and links clean.
+
 ---
 
 ## ORIGINAL INVESTIGATION RECORD (2026-09-05, SUPERSEDED BY THE REVERSAL ABOVE)
@@ -179,6 +290,12 @@ section 12 for the exact prior bug shape (total DCI length correct, two field wi
 CRC while RNTI cross-checks still passed). This remains moot until Technique A converges.
 
 ## Still open
+
+**CURRENT STATUS (2026-09-06): the only real remaining blocker is external — see "Steps 2-4
+attempt" above.** The list below is the ORIGINAL (superseded) investigation's own still-open
+list; item 1 is resolved (see the REVERSAL section), and Steps 2-4 have their own up-to-date
+status in the section above this one, including the confirmed-against-the-gNB-log missing-DL-
+traffic blocker. Read that section before treating anything below as current.
 
 1. **The actual root cause of Technique A's live-air non-convergence.** Two concrete next
    experiments, in priority order:

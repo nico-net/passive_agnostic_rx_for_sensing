@@ -107,10 +107,18 @@ static void build_coreset_bitmap(int num_groups, uint8_t bitmap[6])
 #define NR_PDCCH_BLIND_SUMMARY_PERIOD_OCC 1000
 static uint64_t    g_occasions_run  = 0;
 static uint64_t    g_candidates_run = 0;
-// Phase 3 autodiscover (2026-09-04): Technique C's dci_length sweep has succeeded once. Guards
-// nr_pdcch_dci_length_sweep() from re-running every occasion once the length is locked -- see the
-// autodiscover branch in nr_pdcch_blind_monitor_run_occasion() below.
+// Phase 3 autodiscover (2026-09-04): Technique C's dci_length sweep has succeeded, OR given up
+// (see AUTODISCOVER_LENGTH_SWEEP_MAX_OCCASIONS). Guards nr_pdcch_dci_length_sweep_feed() from
+// running every occasion forever -- see the autodiscover branch in
+// nr_pdcch_blind_monitor_run_occasion() below.
 static bool         g_length_swept  = false;
+// Bounded give-up cap (2026-09-06) on accumulated sweep occasions -- see that branch's own comment
+// for why this must accumulate across many occasions rather than fire once. Not derived from a
+// rate (Technique A's own AUTODISCOVER_OBS_CALLS=1000 counts raw per-symbol scan calls, a
+// different, faster-ticking counter than this one's real candidate-bearing occasions); a real
+// length has been reached within tens of occasions in every live capture measured so far, so this
+// is generous headroom, not a tuned minimum.
+#define AUTODISCOVER_LENGTH_SWEEP_MAX_OCCASIONS 500
 static int         g_constdiag_left = 20; // TEMPORARY, see CONSTDIAG below
 static uint64_t    g_ul_accepts     = 0; // DCI 0_1 accepts (UL grants recovered)
 static uint64_t    g_ul_rejects     = 0; // DCI 0_1 candidates whose CRC was in range but whose
@@ -1118,13 +1126,25 @@ void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_pr
     }
   }
 
-  /* ---- PHASE 3 (2026-09-04): Technique C, dci_length histogram sweep ---------------------------
-   * Runs ONCE (guarded by g_length_swept) after Technique A has confirmed the dedicated CORESET's
+  /* ---- PHASE 3 (2026-09-04, REWRITTEN 2026-09-06): Technique C, dci_length histogram sweep -----
+   * ACCUMULATES across occasions (guarded by g_length_swept once it succeeds, and by a bounded
+   * occasions-fed cap if it never does) after Technique A has confirmed the dedicated CORESET's
    * geometry but before its dci_length is known -- placed here, AFTER pdcch_e_rx[] is populated,
    * so the candidate list below walks the SAME e_rx_cand_idx cursor the pre-pass loop further down
    * uses (Step 4's own warning: not a second, independently-wrong indexing scheme). Does not
    * disturb the pre-pass loop's own walk -- this is a separate, throwaway replay of the identical
-   * boundary arithmetic (a pure function of L[]/number_of_candidates, independent of dci_length). */
+   * boundary arithmetic (a pure function of L[]/number_of_candidates, independent of dci_length).
+   *
+   * Live-measured 2026-09-06 why this must accumulate rather than fire once: this cell's real
+   * accept rate is ~2% of occasions (measured on the proven-working manual-conf path,
+   * 2801/138000), so a SINGLE occasion's ~20-40 candidates essentially never contains the real,
+   * decodable candidates needed to reach significance without a bootstrap RNTI to anchor on --
+   * and Technique B's bootstrap_rnti cannot be nonzero yet this early regardless (it can only
+   * accumulate from run_occasion()'s own accept path, which needs the correct length to ever
+   * accept anything -- see the handover doc's still-open item 5). Per-call cost (34 lengths x this
+   * occasion's own real candidate count, typically ~20-40) is actually LOWER than the original
+   * one-shot design's fixed 34*64 budget, so calling this every candidate-bearing occasion until
+   * it converges is not a new order of magnitude of RT cost, just spread over more occasions. */
   if (cfg->autodiscover && nr_pdcch_blind_monitor_autodiscover_done() && !g_length_swept) {
     nr_pdcch_autodiscover_cand_t disc_cand[64];
     int disc_n_cand = 0;
@@ -1148,6 +1168,9 @@ void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_pr
       // all three out-params (see nr_pdcch_blind_rnti_bootstrap.c), so these two can't be NULL.
       (void)bootstrap_class;
       (void)age;
+
+      static nr_pdcch_dci_length_sweep_state_t s_sweep_state; // zero-initialized static storage,
+                                                               // equivalent to an explicit reset()
       nr_pdcch_autodiscover_sweep_ctx_t sweep_ctx = {
           .cand                = disc_cand,
           .n_cand              = disc_n_cand,
@@ -1164,24 +1187,21 @@ void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_pr
       // dci_length > 63 before ever decoding -- so the upper bound is 63, not 70: lengths 64-70
       // are guaranteed-wasted trials (7 of 41 hypotheses, ~17% of the sweep's budget, for zero
       // possible acceptance).
-      const int found_len = nr_pdcch_dci_length_sweep(nr_pdcch_autodiscover_length_scorer, &sweep_ctx, 30, 63,
-                                                      bootstrap_rnti);
-      // Attempt the (expensive -- up to 34*64 real polar decodes) sweep EXACTLY ONCE, success or
-      // not, the moment an occasion actually offers real candidates (disc_n_cand > 0, checked
-      // above) -- not gated on found_len > 0. Gating on success would let a single occasion's weak/
-      // absent traffic re-trigger the full sweep every subsequent occasion forever, turning a
-      // one-shot bootstrap cost into a permanent per-occasion RT-thread-budget violation.
-      // ponytail: exactly-once rather than a bounded retry budget -- simplest fix that cannot loop
-      // indefinitely; revisit with a small retry cap if live capture shows the first
-      // candidate-bearing occasion after geometry-lock is unreliable.
-      g_length_swept = true;
+      const int found_len = nr_pdcch_dci_length_sweep_feed(&s_sweep_state, nr_pdcch_autodiscover_length_scorer,
+                                                            &sweep_ctx, disc_n_cand, 30, 63, bootstrap_rnti);
       if (found_len > 0) {
         nr_pdcch_blind_monitor_autodiscover_set_dci_length(found_len);
-        LOG_A(PHY, "SENSING: Phase 3 autodiscover -- dci_length locked at %d\n", found_len);
-      } else {
-        LOG_W(PHY, "SENSING: Phase 3 autodiscover -- dci_length sweep found nothing significant "
-                   "(n_cand=%d this occasion); NOT retried, dci_length stays at the formula default\n",
-              disc_n_cand);
+        g_length_swept = true;
+        LOG_A(PHY, "SENSING: Phase 3 autodiscover -- dci_length locked at %d (bootstrap_rnti=0x%x, "
+                   "occasions_fed=%d)\n", found_len, bootstrap_rnti, s_sweep_state.occasions_fed);
+      } else if (s_sweep_state.occasions_fed >= AUTODISCOVER_LENGTH_SWEEP_MAX_OCCASIONS) {
+        // Bounded give-up (mirrors this file's other bounded-cost designs): a cell where the
+        // sweep genuinely never reaches significance (e.g. real accept rate far below what even
+        // this many occasions can establish) must not run this indefinitely.
+        g_length_swept = true;
+        LOG_W(PHY, "SENSING: Phase 3 autodiscover -- dci_length sweep gave up after %d occasions "
+                   "(bootstrap_rnti=0x%x); NOT found, dci_length stays at the formula default\n",
+              s_sweep_state.occasions_fed, bootstrap_rnti);
       }
     }
   }

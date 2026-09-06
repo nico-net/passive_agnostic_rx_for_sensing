@@ -390,10 +390,21 @@ bool nr_pdcch_blind_monitor_autodiscover_step(const void* rxdataF_symbol, int of
    * known-working manual dedicated config uses
    * (tests/passive_rx/ota/nrue.passive_rx.conf's pdcch_blind_monitor_{ss,rnti_range,dci10,
    * noise_gates} lines), not CSS0's CORESET#0/SIB1-specific choices. */
-  g_cfg.ss_al_candidates[0] = 0;  // adaptive/auto, not CSS0's AL1/AL2-disabled {-1,-1,4,2} -- this
-  g_cfg.ss_al_candidates[1] = 0;  // cell's dedicated grants are measured ~99.997% AL1 (CLAUDE.md),
-  g_cfg.ss_al_candidates[2] = 0;  // i.e. exactly the level CSS0's pin disables
-  g_cfg.ss_al_candidates[3] = 0;
+  // AL1 DISABLED (2026-09-06, reversing the previous "adaptive/auto" choice here): matches the
+  // manual ground-truth conf's own field exactly (tests/passive_rx/ota/nrue.passive_rx.conf's
+  // pdcch_blind_monitor_ss "1:0:1:0:-1:0:0:0" -- AL1=-1). The comment this replaces asserted AL1
+  // is this cell's dominant level per an OLDER CLAUDE.md measurement and left it auto, but that
+  // contradicts the manual conf it cites as ground truth, and CLAUDE.md's own later §10 records
+  // this gNB's dedicated SS as "nrofCandidates: AL2=2, AL1/4/8/16 all 0" -- i.e. AL1 has ZERO
+  // configured candidates on the ACTUAL scheduler config, not 99.997% of them. On a 270 RB/45-CCE
+  // CORESET, auto-scanning AL1 (up to 45 candidates) can alone exhaust the shared candidate/RE
+  // budget (see the allocation-order comment above this block), starving AL2/4/8 where this cell's
+  // real grants land -- live-measured 2026-09-06: with AL1 auto, zero genuine PDCCH accepts across
+  // three 200s captures despite Technique A confirming real, strong DM-RS energy throughout.
+  g_cfg.ss_al_candidates[0] = -1; // AL1 disabled, matching ground truth -- not auto
+  g_cfg.ss_al_candidates[1] = 0;  // AL2 auto
+  g_cfg.ss_al_candidates[2] = 0;  // AL4 auto
+  g_cfg.ss_al_candidates[3] = 0;  // AL8 auto
   g_cfg.rnti_min = NR_PDCCH_BLIND_RNTI_MIN_DEFAULT;  // wide dynamic C-RNTI range, not CSS0's
   g_cfg.rnti_max = NR_PDCCH_BLIND_RNTI_MAX_DEFAULT;  // SI-RNTI-only pin (rnti_min=rnti_max=0xFFFF)
   g_cfg.dci10_scan        = 1;  // scan BOTH 1_0 and 1_1 -- CSS0 pins 2 (1_0-only, correct for a
