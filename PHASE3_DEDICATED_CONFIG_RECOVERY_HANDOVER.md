@@ -205,6 +205,42 @@ failing fast. Items 2-4 stand as written, with item 2's "cannot run until (1) is
 literally true in the good sense — (1) is resolved, so Steps 2-4 are unblocked, just not yet
 scored on a VALID run.
 
+## PDSCH 0% CRC after the 2026-09-06 17:03 gNB restart — ELIMINATION TABLE
+
+**The break is gNB-side and cannot be diffed.** `gnb.log` was RECREATED at the restart (its first
+line is `2026-09-06T17:03:47`), so the pre-restart PDSCH parameters are gone. Everything below is
+what was swept on the RECEIVER side, all with the same binary and conf that scored 82.8% before
+the restart. **None of it restores decoding** — do not re-run these.
+
+| # | hypothesis | test | result |
+|---|---|---|---|
+| 1 | wrong DL/UL traffic present | gNB slot-decision counters | REFUTED — DL grants present, ~30% of slots |
+| 2 | aggregation level (AL1 vs AL2) | AL1-only vs AL2/4/8 conf | REFUTED — `dci_aggregation_level` is log2(L); real grants are L=2, AL1-only recovers the C-RNTI ZERO times |
+| 3 | wrong `dci_length` | gNB `payload_size` + FULLCRC | REFUTED — 47 both sides, decodes land at `dci_len=47` |
+| 4 | wrong DCI 1_1 field widths | payload solve vs gNB log | REFUTED — format=1, RIV=9521=`vrbs=[33..273)`, MCS=25, RV=0 all correct at the assumed offsets |
+| 5 | extraction geometry / pointing | `PDCCHCFG` trace + per-slot energy | REFUTED — every derived index matches; energy peaks on the gNB's grant slots |
+| 6 | 256QAM MCS 23-25 too demanding | decoded-MCS histogram | REFUTED — `xcheck1` decoded the SAME mcs=25/24 grants at 82.8% |
+| 7 | 4-antenna RT-budget / combining | `NANT=1 MRC=0` | PARTIAL — moves CRC off zero (0 -> 38 -> 182) but stays ~0.1% |
+| 8 | front-end overload (level rose ~9-16x) | `RXG=25`, level restored to 75.7 vs 53.9 when working | REFUTED — CRC still 0.0% |
+| 9 | residual CFO across symbols 1-13 | `CONTFO=1` | PARTIAL — 182 -> 299, still ~0.1% |
+
+**What remains TRUE and load-bearing:** PDCCH/DCI decode is healthy and in fact BETTER than when
+PDSCH worked (26,496 genuine C-RNTI recoveries vs 11,475 accepts in the working run). PDCCH lives
+on symbol 0; PDSCH spans symbols 1-13 at 256QAM. Real PDSCH decodes fell ~50x while the LDPC path
+is flooded with noise (`seg_fail` 7,880 -> 307,761), i.e. the accept gate now admits mostly false
+candidates AND genuine ones no longer decode.
+
+**Best remaining lead (NOT tested):** something in the PDSCH-specific chain — channel estimation
+from PDSCH DM-RS, or a PDSCH parameter the conf pins that the restarted gNB changed. Current gNB
+values, all 3916/3916 consistent, for whoever diffs against a future known-good period:
+`ref_point=0 nid_pdsch=2 nscid=0 num_dmrs_cdm_grps_no_data=1 pdsch_dmrs_scrambling_id=2`,
+`dl_dmrs_symb_pos=0x884` (symbols 2/7/11), `mcs_table=1`, `symb=[1..14)`, `num_layers=1`,
+`precoding pm_index=11 prg_size=273`.
+
+**Method note worth keeping:** judge PDSCH health by `LDPCDIAG ok=`/`seg_fail=` and PDCCH health by
+`FULLCRC` with BOTH `upper=0x0` AND `crc` equal to the C-RNTI read from the gNB log at capture
+time. `accepts=` and the run verdict cannot see either correctly.
+
 ## RESOLVED 2026-09-06: PDCCH+DCI work; PDSCH 0% CRC is the gNB's 256QAM MCS 25, not a bug
 
 End state of the whole "zero decode" investigation, each step measured against the gNB's own log:
