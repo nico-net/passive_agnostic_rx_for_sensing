@@ -263,13 +263,26 @@ bool nr_pdcch_blind_monitor_autodiscover_done(void)
 }
 
 #define NR_PDCCH_MAX_CANDIDATE_WINDOWS (273 / 6)  // generous headroom for a 273 PRB carrier
-#define AUTODISCOVER_STABLE_VOTES 5  // consecutive symbols agreeing on the same rb_offset cluster
 
-// ponytail: the brief's starter design carried a per-window vote-tally struct
-// (nr_pdcch_autodiscover_state_t) alongside this macro; the simpler "last rb_offset + consecutive
-// count" static pair below (inside the function) is enough to implement AUTODISCOVER_STABLE_VOTES
-// and was kept instead of an unused struct -- add the tally back if a future revision needs to
-// distinguish "clearly one winner" from "several windows tied", which the current scheme does not.
+/* CONVERGENCE CRITERION (rewritten 2026-09-06 -- see the handover doc's reversal section for the
+ * live measurement that forced this). The original design required the SAME rb_offset to win
+ * AUTODISCOVER_STABLE_VOTES=5 consecutive calls before trusting it. Live validation found the
+ * correlation math itself is fine (0.9-0.999 hits, comfortably above the 0.836 bar) but on a busy,
+ * WIDE (270 RB) dedicated CORESET the winning window legitimately changes call to call -- different
+ * grants land on different CCEs -- so no single window dominates enough to win 5 straight (measured:
+ * the single most common window still only topped ~19% of ~19700 calls in one 90s capture, several
+ * others close behind). A 5-in-a-row streak at that hit rate is vanishingly unlikely, which is
+ * exactly why the original design saw it "never converge" even once the underlying signal chain was
+ * healthy. Fixed by ACCUMULATING which windows repeatedly clear the threshold over many calls
+ * instead of requiring one to dominate a single instant -- the same shift from "instantaneous vote"
+ * to "observed history" that this project's own rnti_persistence_check() already uses for RNTI
+ * sightings, just with a longer dwell (a CORESET's occupied windows shift call to call; an RNTI
+ * does not). */
+#define AUTODISCOVER_OBS_CALLS 1000  // ~4-5s of DL-slot dwell on this cell's occasion rate --
+                                     // long enough to average over occasion-to-occasion CCE hopping
+#define AUTODISCOVER_MIN_HITS  3     // measured: a real window clears the raw 0.836 threshold (not
+                                     // just "wins outright") on a large fraction of calls; a window
+                                     // that never once does so in 1000 calls is noise, not signal
 
 /* Phase 3: orchestrate Techniques A/B/C into a self-contained "recover the dedicated CORESET"
  * attempt. Called from the RT path (nr_pdcch_blind_monitor_rt.c) once per symbol while
@@ -287,12 +300,10 @@ bool nr_pdcch_blind_monitor_autodiscover_step(const void* rxdataF_symbol, int of
                                           NR_PDCCH_MAX_CANDIDATE_WINDOWS);
   {
     /* DIAGNOSTIC (env-gated, kept permanently -- same convention as this project's other ISAC_*
-     * debug flags) (2026-09-05, Task 5 live validation): zero convergence observed over a
-     * 150s+ live capture on a cell with continuous DL/UL traffic and a known-good dedicated CORESET
-     * -- need to see whether nr_pdcch_coreset_map_scan() is finding candidates at all (n>0 but never
-     * reaching AUTODISCOVER_STABLE_VOTES) vs never finding any (n==0 every call, e.g. a live-SNR or
-     * threshold-calibration problem the synthetic test couldn't expose). Rate-limited to avoid
-     * flooding the RT thread's own log volume. */
+     * debug flags). Originally added 2026-09-05 to debug a then-zero-convergence result; kept
+     * because it is what surfaced the real picture 2026-09-06 (see this function's convergence-
+     * criterion comment above): n>0 with strong (0.9+) correlation on most calls, but the winning
+     * window changing call to call. Rate-limited to avoid flooding the RT thread's own log volume. */
     static int s_diag = -1;
     if (s_diag < 0)
       s_diag = (getenv("ISAC_DISCOVER_DIAG") != NULL) ? 1 : 0;
@@ -308,49 +319,51 @@ bool nr_pdcch_blind_monitor_autodiscover_step(const void* rxdataF_symbol, int of
       fflush(stdout);
     }
   }
-  if (n == 0) {
-    return false;  // nothing occupied this symbol -- not an error, most symbols carry no PDCCH
+  // Accumulate hits toward the observation window regardless of n==0 -- a genuinely idle call is
+  // itself informative (real windows stay at 0 too on an idle call), and returning early here would
+  // under-count elapsed dwell against AUTODISCOVER_OBS_CALLS.
+  static uint16_t s_hit_count[NR_PDCCH_MAX_CANDIDATE_WINDOWS];
+  static int s_obs_calls = 0;
+  for (int c = 0; c < n; c++) {
+    const int w = candidates[c].rb_offset / 6;
+    if (w >= 0 && w < NR_PDCCH_MAX_CANDIDATE_WINDOWS) {
+      s_hit_count[w]++;
+    }
   }
-  // Vote for the STRONGEST candidate window this symbol. A single symbol is not enough (the
-  // roadmap's own figure schematic shows the footprint spanning multiple slots/symbols); require
-  // AUTODISCOVER_STABLE_VOTES consecutive agreeing votes before trusting it, the same discipline
-  // rnti_persistence_check() applies to RNTI sightings.
-  static int s_last_rb_offset = -1;
-  static int s_consecutive = 0;
-  if (candidates[0].rb_offset == s_last_rb_offset) {
-    s_consecutive++;
-  } else {
-    s_last_rb_offset = candidates[0].rb_offset;
-    s_consecutive = 1;
-  }
-  if (s_consecutive < AUTODISCOVER_STABLE_VOTES) {
+  s_obs_calls++;
+  if (s_obs_calls < AUTODISCOVER_OBS_CALLS) {
     return false;
   }
 
-  // Footprint stable -- how many CONSECUTIVE occupied 6-RB windows does it span, starting at
-  // s_last_rb_offset? Reuse the SAME `candidates[]` array already computed above -- one scan
-  // already covers the whole carrier at this (slot, symbol), so re-invoking
-  // nr_pdcch_coreset_map_scan() again here would recompute all n_rb_carrier/6 windows a second
-  // time for no new information (it is a pure function of the same inputs).
-  int span_rb = 6;
-  for (int w = 1; w < n_rb_carrier / 6; w++) {
-    bool extends = false;
-    for (int c = 0; c < n; c++) {
-      if (candidates[c].rb_offset == s_last_rb_offset + span_rb) {
-        extends = true;
-        break;
+  // Decision point: which windows repeatedly cleared the threshold over the observation window?
+  // first_w/last_w of the confirmed set, NOT requiring every window in between to also be
+  // confirmed -- the same "generous, scan-everything" philosophy this function already applies
+  // below to fields it cannot determine precisely. A short internal gap of unconfirmed windows
+  // (a CCE range this dwell just didn't happen to use) is still safely inside a real CORESET's span.
+  int first_w = -1, last_w = -1;
+  for (int w = 0; w < n_rb_carrier / 6 && w < NR_PDCCH_MAX_CANDIDATE_WINDOWS; w++) {
+    if (s_hit_count[w] >= AUTODISCOVER_MIN_HITS) {
+      if (first_w < 0) {
+        first_w = w;
       }
+      last_w = w;
     }
-    if (!extends) {
-      break;
-    }
-    span_rb += 6;
   }
+  if (first_w < 0) {
+    // Nothing confirmed this observation window -- reset and keep trying rather than declaring
+    // failure permanently (the caller re-invokes this every DL slot for as long as autodiscover
+    // stays unconverged; see the handover doc's note on this cost being unbounded).
+    memset(s_hit_count, 0, sizeof(s_hit_count));
+    s_obs_calls = 0;
+    return false;
+  }
+  const int rb_offset = first_w * 6;
+  const int span_rb   = (last_w - first_w + 1) * 6;
 
   g_cfg.coreset_type            = 0;  // PDCCH-Config (dedicated), NOT MIB/SIB1 -- see coreset_type's
                                         // own comment in autoconf_css0() for why this field matters
   g_cfg.coreset_freq_domain     = span_rb / 6;
-  g_cfg.bwp_start               = s_last_rb_offset;
+  g_cfg.bwp_start               = rb_offset;
   /* bwp_size is the DL BWP size (drives the RIV/frequency-allocation field-width computation), NOT
    * the discovered CORESET span -- a dedicated CORESET is normally a subset of its BWP. The real
    * RRC-configured dedicated BWP is ciphered and unavailable to a passive receiver (the same
@@ -449,7 +462,7 @@ bool nr_pdcch_blind_monitor_autodiscover_step(const void* rxdataF_symbol, int of
   s_dedicated_found = true;
 
   LOG_A(PHY, "SENSING: Phase 3 autodiscover -- CORESET footprint rb_offset=%d span_rb=%d "
-            "bootstrap_rnti=0x%x\n", s_last_rb_offset, span_rb, bootstrap_rnti);
+            "bootstrap_rnti=0x%x\n", rb_offset, span_rb, bootstrap_rnti);
   return true;  // g_cfg's CORESET fields are now populated; dci_length sweep is the caller's next step
 }
 

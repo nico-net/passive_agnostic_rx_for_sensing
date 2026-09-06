@@ -1,9 +1,100 @@
 # Phase 3 — recover the dedicated config by search — HANDOVER
 
-**Status: PARTIAL. Techniques B and C's own logic are unit-tested and correct; Technique A does
-NOT converge on live air, and Task 5's live validation did not reach Steps 2-4 as a result.**
+**Status (REVISED 2026-09-06 — READ THIS FIRST, IT REVERSES THE ORIGINAL CONCLUSION BELOW):
+Technique A DOES converge on live air once the convergence CRITERION is fixed. The original
+"Technique A does not converge" finding was correct as a symptom but wrong on cause: it blamed
+the correlation math / receive chain, when the actual defect was the convergence ALGORITHM
+(required one 6-RB window to win 5 consecutive calls, which a busy wideband CORESET's real,
+CCE-hopping occupancy pattern essentially never does). See "REVERSAL (2026-09-06)" below before
+reading the rest of this document, which is the ORIGINAL (now superseded) investigation record,
+kept for the method and the still-valid eliminations.**
 **Branch:** total-passive-rx-UL-DL-graphics
 **Host:** sens6 · **Repo:** /home/sens/NICOLA/openairinterface5g-total-passive-ue
+
+## REVERSAL (2026-09-06)
+
+Re-opened this investigation with live gNB+iperf traffic available, working through the two
+"Still open item 1" experiments below in priority order.
+
+1. **Branch-FO hypothesis (still-open item 1's second bullet): REFUTED, measured.** Added a
+   diagnostic logging `nr_ue_get_branch_fo_hz(0)` (the per-branch FO term `nr_slot_fep_ant()`
+   applies — added 2026-09-03 for an unrelated branch-coherence fix — that plain `nr_slot_fep()`,
+   the proven-working candidate-scan path, never applies). It read exactly `0.00` throughout a
+   live run. Not the cause.
+2. **Direct cross-check, decisive: Technique A's correlation math is CORRECT.** Added a second
+   diagnostic (`XCHECK`, in `nr_pdcch_blind_monitor_rt.c`'s `run_occasion()`) that runs
+   `nr_pdcch_coreset_map_scan()` — the SAME function Technique A calls — on the FEP output of the
+   proven-working MANUAL-conf decode path (known-correct config, genuinely decodes real DCIs).
+   Result: correlation **0.88-0.999**, constantly, across the whole run. This directly contradicts
+   the original finding below ("0.02-0.39... at or below the pure-noise floor") — the math, the
+   pilot generation, and the RE-indexing formula are all fine.
+3. **Re-ran the actual autodiscover path with a finer per-call diagnostic: it is ALSO finding
+   strong hits, not zero.** `DISCOVERDIAG` (unchanged instrument) now shows `n>0` with
+   `top_corr` in the 0.9-0.999 range on most calls — a different picture from the original
+   capture's flat `n=0`. The signal-chain health that the original investigation blamed evidently
+   improved between that capture and this one (plausibly the CFO/branch-coherence work visible
+   elsewhere in this project's history around the same window) — but that turned out not to be
+   the reason it still failed to converge.
+4. **Root cause of the non-convergence, found: the winning window legitimately changes call to
+   call, so "same window 5 times running" (`AUTODISCOVER_STABLE_VOTES`) essentially never fires.**
+   Measured over one 90s capture (19,663 calls): the `top_rb` distribution spans ~20 distinct 6-RB
+   windows, all multiples of 6 inside the real CORESET's true 0-269 RB span, with the single most
+   common window (RB 204) topping only ~19% of calls (3807/19663) — several others (RB 6, 48, 192,
+   174, 144, 210) close behind. RB 0, the location the old stability-vote design implicitly favours
+   as "the" footprint, was the LEAST-hit real position (39/19663). At a ~19% per-call top-win rate,
+   a 5-in-a-row streak has probability ~0.19^5 ≈ 2.5e-4 per call — consistent with never being
+   observed in a 90-200s capture. This is exactly what a real, BUSY, WIDE (270 RB) dedicated
+   CORESET looks like: different grants use different CCEs, so no single 6-RB window dominates a
+   short window of calls, even though the underlying signal is real and strong.
+5. **Fix: replaced the stability vote with histogram accumulation.** Instead of requiring one
+   window to win `AUTODISCOVER_STABLE_VOTES` consecutive calls, `nr_pdcch_blind_monitor.c` now
+   accumulates a per-window hit count over `AUTODISCOVER_OBS_CALLS=1000` calls (~4-5s dwell) and
+   declares the confirmed span as `[first, last]` of every window that cleared the threshold
+   `AUTODISCOVER_MIN_HITS=3` times or more in that window — the same "instantaneous vote" →
+   "observed history" shift this project's own `rnti_persistence_check()` already uses for RNTI
+   sightings, just with a longer dwell (a CORESET's occupied windows shift call to call; an RNTI
+   does not).
+6. **Live-validated: converges, and lands on the exact known-good answer.** Two consecutive
+   90-150s captures (`xcheck3_143723`, `xcheck3_144011`) both produced
+   `SENSING: Phase 3 autodiscover -- CORESET footprint rb_offset=0 span_rb=216 bootstrap_rnti=0x0`
+   — `rb_offset=0` is an EXACT match to ground truth (dedicated CORESET starts at RB 0);
+   `span_rb=216` (36 of the true 45 windows) is a partial-coverage under-estimate, not a wrong
+   answer — the 1000-call/~4-5s observation window does not necessarily see every one of the 45
+   windows get used at least 3 times, so the confirmed span is a (correct, conservative) LOWER
+   BOUND on the true footprint rather than its exact extent. `bootstrap_rnti=0x0` at the moment of
+   convergence is expected and inert (see still-open item 5 below, unchanged): Technique B can only
+   start accumulating sightings once `run_occasion()` starts running, which happens only AFTER
+   Step 1 converges — a one-time chicken-and-egg gap at the exact convergence instant, not a
+   standing defect.
+7. **Both validating captures were `VOID_DL_ZERO`** (this rig's own verdict for zero PDSCH
+   decodes that window — a known, Technique-A-unrelated CFO/link-health bimodality this project's
+   CLAUDE.md documents extensively) — SIB1 still decoded in both (`sib1=1`), consistent with the
+   receive chain being healthy enough for PDCCH/CORESET#0 but not for this particular window's
+   dedicated PDSCH. **Steps 2-4 (dci_length score, FULLCRC decode count at the bootstrapped RNTI)
+   still need a VALID run to actually exercise** — Step 1 (footprint) is now proven; Steps 2-4 are
+   unblocked in principle (the code path is reachable) but not yet scored on a healthy capture.
+   One `dci_length sweep found nothing significant` line was observed on the `VOID_DL_ZERO`
+   captures, consistent with the sweep needing real PDSCH decode attempts it didn't get that
+   window, not a new defect.
+
+**What this means for "Still open" below**: item 1 is RESOLVED (branch-FO refuted, root cause
+found and fixed, live-validated). Item 5 stands largely as originally written but is now less
+severe — bootstrap_rnti reaching a nonzero value is now actually reachable post-convergence rather
+than permanently inert. Item 6 (unbounded per-slot cost while unconverged) is UNCHANGED and, if
+anything, more relevant now that convergence takes a deliberate ~1000-call/4-5s dwell rather than
+failing fast. Items 2-4 stand as written, with item 2's "cannot run until (1) is resolved" now
+literally true in the good sense — (1) is resolved, so Steps 2-4 are unblocked, just not yet
+scored on a VALID run.
+
+---
+
+## ORIGINAL INVESTIGATION RECORD (2026-09-05, SUPERSEDED BY THE REVERSAL ABOVE)
+
+The section below is preserved for its method (the elimination list is still valid; the specific
+measured correlation values were an artifact of that capture's own receive-chain state, not of a
+Technique A defect) and because "Still open" items 2-6 below are still accurate. Do not treat its
+headline conclusion ("Technique A does NOT converge... root cause investigated, not found") as
+current — see the REVERSAL above.
 
 ## What this phase adds
 

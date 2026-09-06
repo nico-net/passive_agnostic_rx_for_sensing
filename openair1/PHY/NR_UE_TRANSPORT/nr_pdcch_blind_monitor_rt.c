@@ -38,6 +38,7 @@
 #include "PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.h"
 #include "PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.h"
 #include "PHY/NR_UE_TRANSPORT/nr_pdcch_dci_length_sweep.h" // Phase 3 Technique C
+#include "PHY/NR_UE_TRANSPORT/nr_pdcch_coreset_map.h"      // Phase 3 Technique A cross-check (XCHECK diag)
 
 #include <string.h>
 #include <time.h> // clock_gettime for the rnti_seen correlation line below
@@ -580,6 +581,22 @@ void nr_pdcch_blind_monitor_process(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t 
     __attribute__((aligned(32))) c16_t rxdataF_disc[1][fp->samples_per_slot_wCP];
     nr_slot_fep_ant(ue, fp, proc->nr_slot_rx, disc_symbol, 0 /* ant */, rxdataF_disc, link_type_dl, 0,
                     ue->common_vars.rxdata);
+    /* XCHECK follow-up (2026-09-06): nr_slot_fep_ant() applies common_fo_hz + a PER-BRANCH FO term
+     * (nr_ue_get_branch_fo_hz(ant), added 2026-09-03 for the branch-coherence fix) that plain
+     * nr_slot_fep() -- the path the XCHECK diagnostic above just proved gets 0.88-0.999 correlation
+     * on this exact cell/config -- never applies. If branch 0's measured FO is nonzero/wrong here,
+     * this residual per-subcarrier phase rotation would decorrelate Technique A's magnitude-of-
+     * complex-sum measurement while leaving phase-insensitive measurements (RF power) unaffected --
+     * exactly this handover's still-open symptom. */
+    if (getenv("ISAC_DISCOVER_DIAG") != NULL) {
+      extern double nr_ue_get_branch_fo_hz(int ant);
+      static int s_fo_calls = 0;
+      s_fo_calls++;
+      if ((s_fo_calls % 200) == 1) {
+        printf("BRANCHFO calls=%d branch0_fo_hz=%.2f\n", s_fo_calls, nr_ue_get_branch_fo_hz(0));
+        fflush(stdout);
+      }
+    }
     nr_pdcch_blind_monitor_autodiscover_step(rxdataF_disc[0], fp->ofdm_symbol_size, fp->N_RB_DL,
                                              fp->first_carrier_offset, (uint16_t)fp->Nid_cell,
                                              proc->nr_slot_rx, disc_symbol, abs_slot_now);
@@ -991,6 +1008,35 @@ void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_pr
                          rel15->coreset.duration, rxdataF_symb, pdcch_llr);
   }
   btim_add(BTIM_FEP_LLR, btim_t_fep);
+
+  /* XCHECK diagnostic (2026-09-06, Task 5 follow-up): run Technique A's own correlation function
+   * on THIS FEP output -- the manual, live-verified ground-truth config's own receive chain, which
+   * genuinely decodes real DCIs here -- rather than the discovery tap's separate single-antenna
+   * FEP call. If corr at rb_offset==0 is high here, Technique A's correlation math is fine and the
+   * bug is specific to the discovery tap's own FEP/plumbing (nr_pdcch_blind_monitor_rt.c's
+   * nr_slot_fep_ant call in the autodiscover_step path). If it's ALSO near-zero here, the bug is in
+   * nr_pdcch_coreset_map_scan()/nr_pdcch_dmrs_ref() itself, isolated from any autodiscover-specific
+   * config or wiring issue -- this path's config is proven correct by the FULLCRC decodes it
+   * produces. Env-gated on the same ISAC_DISCOVER_DIAG flag as the discovery-side diagnostics. */
+  static int s_xcheck_diag = -1;
+  if (s_xcheck_diag < 0)
+    s_xcheck_diag = (getenv("ISAC_DISCOVER_DIAG") != NULL) ? 1 : 0;
+  if (s_xcheck_diag) {
+#define XCHECK_MAX_CANDIDATE_WINDOWS (273 / 6) // generous headroom for a 273 PRB carrier, mirrors nr_pdcch_blind_monitor.c
+    nr_pdcch_coreset_candidate_t xcheck_cand[XCHECK_MAX_CANDIDATE_WINDOWS];
+    const int xcheck_n = nr_pdcch_coreset_map_scan(&rxdataF[0][cfg->ss_first_symbol * fp->ofdm_symbol_size],
+                                                   fp->ofdm_symbol_size, fp->N_RB_DL, fp->first_carrier_offset,
+                                                   cfg->coreset_pdcch_dmrs_scrambling_id, proc->nr_slot_rx,
+                                                   cfg->ss_first_symbol, xcheck_cand,
+                                                   XCHECK_MAX_CANDIDATE_WINDOWS);
+    static int s_xcheck_calls = 0;
+    s_xcheck_calls++;
+    if (xcheck_n > 0 || (s_xcheck_calls % 50) == 1) {
+      LOG_A(PHY, "XCHECK calls=%d n=%d best_corr=%.4f best_rb=%d (manual-conf FEP, scrambling_id=%u)\n",
+           s_xcheck_calls, xcheck_n, xcheck_n > 0 ? xcheck_cand[0].corr : -1.0,
+           xcheck_n > 0 ? xcheck_cand[0].rb_offset : -1, cfg->coreset_pdcch_dmrs_scrambling_id);
+    }
+  }
 
   // ---- Demapping/deinterleaving + per-candidate unscrambling/decode. Mirrors dci_nr.c's own
   // nr_pdcch_dci_indication()/nr_dci_decoding_procedure(), minus the own-RNTI equality gate --
