@@ -360,7 +360,13 @@ bool nr_pdcch_blind_monitor_autodiscover_step(const void* rxdataF_symbol, int of
    * discovered footprint stays only in bwp_start/coreset_freq_domain above. */
   g_cfg.bwp_size                = n_rb_carrier;
   g_cfg.coreset_pdcch_dmrs_scrambling_id = pci;
-  g_cfg.coreset_shift_index     = pci;
+  // shift_index=0, not pci: matches the manual ground-truth dedicated conf's own field 5
+  // (tests/passive_rx/ota/nrue.passive_rx.conf: "45:1:0:0:0:2"), same reasoning as
+  // coreset_interleaver_size below -- inert either way given reg_bundle_size=0 (both
+  // nr_pdcch_demapping_deinterleaving() and cce_to_reg_interleaving() take the identity path
+  // and never read ShiftIndex when non-interleaved), but 0 is the value that's actually
+  // correct here, not a default guess of pci.
+  g_cfg.coreset_shift_index     = 0;
 
   /* CSS0 autoconf (a hard prerequisite for this feature's bootstrap RNTI -- see the autodiscover
    * conf knob's own comment) runs first and populates these SAME g_cfg fields for CORESET#0/SIB1.
