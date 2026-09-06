@@ -205,6 +205,63 @@ failing fast. Items 2-4 stand as written, with item 2's "cannot run until (1) is
 literally true in the good sense — (1) is resolved, so Steps 2-4 are unblocked, just not yet
 scored on a VALID run.
 
+## AGGREGATION LEVEL — the real blocker, found 2026-09-06 evening. READ THIS FIRST.
+
+**This cell sends 100% of its DL DCI 1_1 grants at AGGREGATION LEVEL 1, and the scanner was not
+looking at AL1 at all.** Ground truth is the gNB's own PDCCH PDU log line:
+
+```
+cce_index=4 dci_aggregation_level=1 payload_size=47 nid_pdcch_data=2 nid_pdcch_dmrs=2
+nrnti_pdcch_data=0 freq_domain_resource=<45 ones> NON INTERLEAVED reg_bundle_sz=6
+```
+
+`dci_aggregation_level=1` on **5277 of 5277** sampled DL grants (payload_size=47). Zero at any
+other level. This matches CLAUDE.md's own memory `blind-pdcch-needs-al1-scanning` ("cell sends
+99.997% at AL1") — which an earlier revision of this document wrongly overrode.
+
+**Two distinct defects, both confirmed live:**
+
+1. **AL1 was explicitly DISABLED** in both the manual ground-truth conf
+   (`pdcch_blind_monitor_ss = "1:0:1:0:-1:0:0:0"`, AL1=-1) and — after a mistaken "match the manual
+   conf" edit earlier the same day — in the autodiscover path too. With AL1 disabled the scanner
+   cannot see a single real grant on this cell. Symptom: **zero accepts across 312,000 occasions**
+   while Technique A simultaneously reported 0.98-0.99 DM-RS correlation. That combination —
+   strong correlation, zero accepts — is the signature of this exact mistake.
+2. **`ss_al_candidates[AL1] = 0` ("auto") is NOT sufficient, and this is a real allocator bug.**
+   The adaptive budget splitter allocates in the order AL2, AL4, AL8, **AL1 last**, against a
+   64-candidate / 8192-RE cap. Measured ladder line with AL1 on "auto":
+   `(AL1=0 AL2=13 AL4=6 AL8=3)` — **AL1 received ZERO candidates**, i.e. "auto" silently produced
+   the same behaviour as "disabled". Only by disabling AL2/4/8 does AL1 get the budget:
+   `(AL1=45 AL2=0 AL4=0 AL8=0) accepts_per_al=[593 0 0 0]`.
+
+**Conf that actually scans this cell** (`nrue.passive_rx.al1.conf`):
+`pdcch_blind_monitor_ss = "1:0:1:0:0:-1:-1:-1"` — AL1 auto (full 45-CCE sweep), AL2/4/8 disabled.
+
+**Timeline that explains "it worked before":** every working capture predates the gNB restart at
+**17:03:46** (xcheck1 14:25 → 11475 accepts / 82.8% PDSCH CRC; control1 15:26 → 2801 / 48.6%).
+After that restart the scheduler settled on AL1 and every capture — manual conf included — dropped
+to zero. The receiver did not regress; the cell changed.
+
+### Still open after the AL1 fix (do NOT re-close these as "traffic" or "link budget")
+
+With AL1 swept (45/45 CCEs every occasion), accepts appear at AL1 (`accepts_per_al=[593 0 0 0]`)
+but **PDSCH CRC stays at 0.0%** and only a handful of accepts reach PDSCH decode
+(`pdsch_decode[try=14 crc_ok=0 skip_rv=249]`). Two explanations were tested and BOTH REFUTED:
+
+- **Not a wrong TDA field width.** The gNB does use a third time-domain allocation
+  (`symb=[2..14)`), but it belongs to `rnti=0xffff` (SI-RNTI) on `bwp=[0..48)` — the CORESET#0
+  COMMON path, not the dedicated 273-RB BWP. The dedicated TDRA list is still 2 entries, so the
+  TDA field is 1 bit and `dci_length=47` (which matches the gNB's own `payload_size=47`) is right.
+- **Not a link-budget limit.** `ENERGYPROBE` measured AL1 candidate energy at **7.2-15.5x the
+  noise floor** (`floor=1.16 al1=15.51`). The AL1 PDCCH is strong and unambiguously present.
+
+So: correct geometry, correct length, correct scrambling, strong signal, AL1 swept — and the
+decode still fails. That points at the blind PDCCH RX chain for AL1 specifically (demap →
+unscramble → polar decode), and is the next thing to investigate. Related prior art:
+CLAUDE.md's `sib1-oracle-proves-pdcch-rx-chain-broken` memory. Note `sib1=1` in the run verdicts
+does NOT exonerate this path — SIB1 is acquired by the stock OAI receive chain, not by the blind
+monitor.
+
 ## Steps 2-4 attempt (2026-09-06, same day): three more real bugs found and fixed, then blocked
 ## on missing DL traffic — read this before attempting Steps 2-4 again
 

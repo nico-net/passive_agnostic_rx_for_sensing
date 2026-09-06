@@ -41,6 +41,8 @@
 #include "nr_pdcch_dci_length_sweep.h"
 #include <string.h>
 #include <math.h>
+#include <stdio.h>
+#include <stdlib.h>
 
 // Empirically measured false-accept rate of nr_pdcch_blind_decode_and_extract_ex()'s "plausible"
 // gate on this project's own prior data (42k/10.9M candidates -- see this file's header and
@@ -139,6 +141,33 @@ int nr_pdcch_dci_length_sweep_feed(nr_pdcch_dci_length_sweep_state_t* state,
     if (score > best_score) {
       best_score = score;
       best_len   = len;
+    }
+  }
+
+  /* DIAGNOSTIC (2026-09-06, env-gated): the accumulate-across-occasions rewrite still never
+   * converges even with confirmed real DL traffic present -- need to see whether length 47 (this
+   * deployment's known-correct value) is accumulating ANY real passes at all, or whether the
+   * candidates reaching this function never include it (a wiring/indexing issue upstream) vs.
+   * genuinely never passing decode+plausibility at 47 specifically (a DSP/parameter issue). */
+  if (getenv("ISAC_DISCOVER_DIAG") != NULL) {
+    static int s_feed_calls = 0;
+    s_feed_calls++;
+    if ((s_feed_calls % 50) == 1 || best_len > 0) {
+      int max_len_seen = -1, max_passes = -1, max_trials = 0;
+      for (int len = min_len; len <= max_len && len < NR_PDCCH_DCI_LENGTH_SWEEP_MAX_LEN; len++) {
+        if (state->passes[len] > max_passes) {
+          max_passes = state->passes[len];
+          max_len_seen = len;
+          max_trials = state->trials[len];
+        }
+      }
+      const int len47 = (47 >= min_len && 47 <= max_len && 47 < NR_PDCCH_DCI_LENGTH_SWEEP_MAX_LEN) ? 47 : -1;
+      printf("SWEEPDIAG feed=%d occ=%d best_len=%d max_len=%d max_passes=%d/%d len47_trials=%d "
+            "len47_passes=%d len47_distinct=%d len47_bshits=%d\n",
+            s_feed_calls, state->occasions_fed, best_len, max_len_seen, max_passes, max_trials,
+            len47 > 0 ? state->trials[47] : -1, len47 > 0 ? state->passes[47] : -1,
+            len47 > 0 ? state->n_distinct[47] : -1, len47 > 0 ? state->bootstrap_hits[47] : -1);
+      fflush(stdout);
     }
   }
   return best_len;

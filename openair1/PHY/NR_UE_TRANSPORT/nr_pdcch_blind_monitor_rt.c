@@ -41,6 +41,7 @@
 #include "PHY/NR_UE_TRANSPORT/nr_pdcch_coreset_map.h"      // Phase 3 Technique A cross-check (XCHECK diag)
 
 #include <string.h>
+#include <stdlib.h> // getenv/atoi for the env-gated diagnostics in this file
 #include <time.h> // clock_gettime for the rnti_seen correlation line below
 
 #include "common/utils/LOG/log.h"
@@ -1145,6 +1146,25 @@ void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_pr
    * occasion's own real candidate count, typically ~20-40) is actually LOWER than the original
    * one-shot design's fixed 34*64 budget, so calling this every candidate-bearing occasion until
    * it converges is not a new order of magnitude of RT cost, just spread over more occasions. */
+  /* DIAGNOSTIC (2026-09-06, env-gated ISAC_FORCE_DCI_LEN=<n>): pin dci_length instead of sweeping
+   * for it. Separates two hypotheses that the "0 accepts under autodiscover" symptom cannot
+   * distinguish on its own: (a) the rest of the autodiscover-derived config is sound and only the
+   * SWEEP fails to find the right length, vs (b) something ELSE in that config breaks decode, in
+   * which case even the known-correct length recovers nothing. The manual conf decodes this cell at
+   * 48.6-82.8% PDSCH CRC with dci_length=47, so forcing 47 here is a like-for-like test. */
+  if (cfg->autodiscover && nr_pdcch_blind_monitor_autodiscover_done() && !g_length_swept) {
+    static int s_force_len = -1;
+    if (s_force_len < 0) {
+      const char *e = getenv("ISAC_FORCE_DCI_LEN");
+      s_force_len = (e != NULL) ? atoi(e) : 0;
+    }
+    if (s_force_len > 0) {
+      nr_pdcch_blind_monitor_autodiscover_set_dci_length(s_force_len);
+      g_length_swept = true;
+      LOG_A(PHY, "SENSING: Phase 3 autodiscover -- dci_length FORCED to %d (ISAC_FORCE_DCI_LEN), "
+                 "sweep skipped\n", s_force_len);
+    }
+  }
   if (cfg->autodiscover && nr_pdcch_blind_monitor_autodiscover_done() && !g_length_swept) {
     nr_pdcch_autodiscover_cand_t disc_cand[64];
     int disc_n_cand = 0;
