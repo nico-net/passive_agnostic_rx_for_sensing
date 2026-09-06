@@ -1078,6 +1078,7 @@ set(NR_UE_ISAC_SRC
   ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/isac_sync.cc
   ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/target_tracker.cc
   ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/multi_target_tracker.cc
+  ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/hierarchical_tracker.cc
   ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/matrix_complete.cc
   ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/sparse_doppler.cc
   ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/clean_deconv.cc
@@ -2326,6 +2327,13 @@ if(ENABLE_TESTS)
   target_link_libraries(test_multi_target_tracker PRIVATE NR_UE_ISAC UTIL GTest::gtest)
   add_dependencies(tests test_multi_target_tracker)
   add_test(NAME test_multi_target_tracker COMMAND ./test_multi_target_tracker)
+
+  # Hierarchical Global 3D Tracker (hierarchical_tracker.{h,cc})
+  add_executable(test_hierarchical_tracker ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/tests/hierarchical_tracker_test.cc)
+  target_include_directories(test_hierarchical_tracker PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_ISAC)
+  target_link_libraries(test_hierarchical_tracker PRIVATE NR_UE_ISAC UTIL GTest::gtest)
+  add_dependencies(tests test_hierarchical_tracker)
+  add_test(NAME test_hierarchical_tracker COMMAND ./test_hierarchical_tracker)
 
   # Low-rank CFR matrix completion (matrix_complete.{h,cc}): recovery accuracy, data consistency, and
   # amplitude-gating Doppler-harmonic removal. Only needs isac_fft's icf_t; link the whole lib anyway

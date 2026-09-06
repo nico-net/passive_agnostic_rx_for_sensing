@@ -108,11 +108,18 @@ struct sensing_track_t {
   bool   azimuth_valid = false;
   float  azimuth_deg   = 0.0f;  ///< ENU bearing, deg CCW from east, of the last accepted detection
   float  azimuth_std_deg = 0.0f;
-  // World-frame position from ray-ellipse intersection (range + bearing, ONE Tx-Rx pair). Only set
-  // when azimuth_valid and the intersection is in front of the receiver.
+  // World-frame position from ray-ellipse intersection or 3D EKF (ONE Tx-Rx pair).
   bool   pos_valid     = false;
   float  pos_x         = 0.0f;
   float  pos_y         = 0.0f;
+  float  pos_z         = 0.0f;
+  float  vel_x         = 0.0f;
+  float  vel_y         = 0.0f;
+  float  vel_z         = 0.0f;
+
+  bool   elevation_valid = false;
+  float  elevation_deg   = 0.0f;
+  float  elevation_std_deg = 0.0f;
 };
 
 /**

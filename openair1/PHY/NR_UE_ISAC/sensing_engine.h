@@ -49,6 +49,7 @@
 #include "range_doppler.h"
 #include "target_tracker.h"
 #include "multi_target_tracker.h"
+#include "hierarchical_tracker.h"
 #include "matrix_complete.h"
 
 namespace nr_isac {
@@ -242,6 +243,7 @@ private:
   // estimates that coast through missed CPIs. Single-target operation is the special case
   // track_max_tracks=1, track_confirm_m=1. Gated on args.track_enable.
   std::unique_ptr<multi_target_tracker> tracker;
+  std::unique_ptr<hierarchical_tracker> hier_tracker;
   std::vector<sensing_track_t>          last_tracks;
   int64_t                         prev_cpi_time_ns = 0;
   los_residual_t        last_los_residual;

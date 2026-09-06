@@ -157,12 +157,16 @@ std::string build_detection_report_json(const detection_report_t& rep)
   append_json_double(out, rep.tx_pos_x);
   out += ',';
   append_json_double(out, rep.tx_pos_y);
+  out += ',';
+  append_json_double(out, rep.tx_pos_z);
   out += ']';
 
   out += ",\"rx_position\":[";
   append_json_double(out, rep.rx_pos_x);
   out += ',';
   append_json_double(out, rep.rx_pos_y);
+  out += ',';
+  append_json_double(out, rep.rx_pos_z);
   out += ']';
 
   out += ",\"cpi_start_time_utc_ns\":";
@@ -297,6 +301,12 @@ std::string build_detection_report_json(const detection_report_t& rep)
         out += ",\"azimuth_std_deg\":";
         append_json_double(out, t.azimuth_std_deg);
       }
+      if (t.elevation_valid) {
+        out += ",\"elevation_deg\":";
+        append_json_double(out, t.elevation_deg);
+        out += ",\"elevation_std_deg\":";
+        append_json_double(out, t.elevation_std_deg);
+      }
       // Omitted, never zeroed, when the track has no bearing: (0,0) is the receiver's own position
       // and would plot as a real fix at the origin.
       if (t.pos_valid) {
@@ -304,6 +314,15 @@ std::string build_detection_report_json(const detection_report_t& rep)
         append_json_double(out, t.pos_x);
         out += ',';
         append_json_double(out, t.pos_y);
+        out += ',';
+        append_json_double(out, t.pos_z);
+        out += ']';
+        out += ",\"velocity\":[";
+        append_json_double(out, t.vel_x);
+        out += ',';
+        append_json_double(out, t.vel_y);
+        out += ',';
+        append_json_double(out, t.vel_z);
         out += ']';
       }
       out += '}';

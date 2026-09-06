@@ -56,8 +56,10 @@ struct detection_report_t {
   std::string ref_type;                     ///< Illuminator.ref_type: "csi_rs" | "pdsch_dmrs" | "pdsch_data"
   float       tx_pos_x              = 0.0f;  ///< tx_position[0], surveyed ENU metres
   float       tx_pos_y              = 0.0f;  ///< tx_position[1], surveyed ENU metres
+  float       tx_pos_z              = 0.0f;  ///< tx_position[2], surveyed ENU metres
   float       rx_pos_x              = 0.0f;  ///< rx_position[0], surveyed ENU metres
   float       rx_pos_y              = 0.0f;  ///< rx_position[1], surveyed ENU metres
+  float       rx_pos_z              = 0.0f;  ///< rx_position[2], surveyed ENU metres
   int64_t     cpi_start_time_utc_ns = 0;     ///< cpi_start_time_utc_ns (system-clock stand-in)
   int64_t     cpi_duration_ns       = 0;     ///< cpi_duration_ns
   double      fc_hz                 = 0.0;   ///< fc_hz (illuminator centre frequency)

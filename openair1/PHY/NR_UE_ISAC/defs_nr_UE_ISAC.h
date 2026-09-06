@@ -709,9 +709,11 @@ struct nr_isac_args_t {
   std::string rx_id          = "rx1";  ///< Logical receiver id (DetectionReport.rx_id)
   float       rx_pos_x       = 0.0f;   ///< Surveyed receiver ENU x, metres
   float       rx_pos_y       = 0.0f;   ///< Surveyed receiver ENU y, metres
+  float       rx_pos_z       = 0.0f;   ///< Surveyed receiver ENU z, metres
   std::string illuminator_id = "gnb1"; ///< Logical illuminator id for Tx<->Rx pairing (Illuminator.id)
   float       tx_pos_x       = 0.0f;   ///< Surveyed transmitter ENU x, metres
   float       tx_pos_y       = 0.0f;   ///< Surveyed transmitter ENU y, metres
+  float       tx_pos_z       = 0.0f;   ///< Surveyed transmitter ENU z, metres
   std::string report_path    = "";     ///< DetectionReport JSON-lines path. Empty -> "<out_path>_reports.jsonl"
   std::string report_endpoint = "";    ///< Optional ZeroMQ PUB bind endpoint (e.g. "tcp://127.0.0.1:5556")
 };
@@ -742,9 +744,12 @@ struct sensing_detection_t {
   // Receive-array AoA (isac_aoa.h). azimuth_valid == false => this receiver has no array, or the
   // estimate failed its quality gate; the DetectionReport then simply omits the azimuth fields and
   // the central node treats the detection as a plain 2-D range/rate measurement.
-  bool     azimuth_valid   = false;
-  float    azimuth_deg     = 0.0f; ///< ENU bearing from this receiver, deg CCW from east
-  float    azimuth_std_deg = 0.0f; ///< 1-sigma (CRB) uncertainty of the above
+  bool     azimuth_valid     = false;
+  float    azimuth_deg       = 0.0f; ///< ENU bearing from this receiver, deg CCW from east
+  float    azimuth_std_deg   = 0.0f; ///< 1-sigma (CRB) uncertainty of the above
+  bool     elevation_valid   = false;
+  float    elevation_deg     = 0.0f; ///< ENU elevation from this receiver, deg
+  float    elevation_std_deg = 0.0f; ///< 1-sigma uncertainty of elevation
   /// P(real target | this detection's evidence), from the adaptive gate in det_quality.h. NEGATIVE
   /// when that gate did not run (det_quality_adapt off), in which case the field is OMITTED from the
   /// DetectionReport and the central node treats every detection as equally credible -- i.e. exactly

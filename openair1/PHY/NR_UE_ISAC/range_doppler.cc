@@ -21,6 +21,7 @@
 
 #include "range_doppler.h"
 #include "detection_report.h"
+#include "hierarchical_tracker.h"
 
 #include <algorithm>
 #include <cmath>
@@ -384,7 +385,8 @@ void range_doppler::process(const icf_t*                       h_cpi,
                             sensing_rvm_t&                    rvm,
                             std::vector<sensing_detection_t>& detections,
                             const double*                     row_time_slots,
-                            const uint8_t*                    occ_mask)
+                            const uint8_t*                    occ_mask,
+                            const hierarchical_tracker*       feedback_tracker)
 {
   detections.clear();
   if (h_cpi == nullptr || nof_slow < 2 || nof_subc < 2 || comb_spacing == 0) {
@@ -563,7 +565,7 @@ void range_doppler::process(const icf_t*                       h_cpi,
   if (args.clean_deconv && args.clean_occ_aware && occ_mask != nullptr) {
     clean_occ_aware(work.data(), nof_slow, nof_subc, nof_range, nof_dopp, occ_mask, row_comb,
                     row_time_slots, period_slots, use_nudft_early, rvm);
-    cfar(rvm, detections, nof_slow, row_time_slots, period_slots);
+    cfar(rvm, detections, nof_slow, row_time_slots, period_slots, feedback_tracker);
     clean_prev_raw_det_ = (uint32_t)detections.size();
     return;
   }
@@ -852,7 +854,7 @@ void range_doppler::process(const icf_t*                       h_cpi,
   }
 
   // 2D CA-CFAR detection + non-max suppression
-  cfar(rvm, detections, nof_slow, row_time_slots, period_slots);
+  cfar(rvm, detections, nof_slow, row_time_slots, period_slots, feedback_tracker);
 
   // Auto-budget feedback: record this CPI's raw detection count so the next CPI can size CLEAN's
   // component budget from measured scene occupancy (same "measure, don't guess" pattern as mc_rank).
@@ -1157,8 +1159,13 @@ void range_doppler::clean_occ_aware(const icf_t* work_grid, uint32_t nof_slow, u
 }
 
 void range_doppler::cfar(const sensing_rvm_t& rvm, std::vector<sensing_detection_t>& detections,
-                         uint32_t nof_slow, const double* row_time_slots, float period_slots)
+                         uint32_t nof_slow, const double* row_time_slots, float period_slots,
+                         const hierarchical_tracker* feedback_tracker)
 {
+  std::vector<bistatic_tracklet> priors;
+  if (feedback_tracker != nullptr) {
+    priors = feedback_tracker->get_prior_confirmed_tracklets();
+  }
   const uint32_t R   = rvm.nof_range_bins;
   const uint32_t D   = rvm.nof_doppler_bins;
   const int      g   = (int)args.cfar_guard;
@@ -1283,7 +1290,29 @@ void range_doppler::cfar(const sensing_rvm_t& rvm, std::vector<sensing_detection
         }
       }
 
-      if (cell > thr && (!args.cfar_per_column || cell > thr_col) && (!args.cfar_per_row || cell > thr_row)) {
+      double eff_thr = thr;
+      if (feedback_tracker != nullptr && !priors.empty()) {
+        const double cell_r = (double)r * (double)rvm.range_res_m;
+        const double cell_v = -(((double)d) - (double)half_d) * (double)rvm.vel_res_mps;
+        bool near_prior = false;
+        for (const auto& trk : priors) {
+          double dr = std::abs(cell_r - trk.x[0]);
+          double dv = std::abs(cell_v - trk.x[1]);
+          double sig_r = std::max(std::sqrt(trk.p[0][0]), (double)rvm.range_res_m);
+          double sig_v = std::max(std::sqrt(trk.p[1][1]), (double)rvm.vel_res_mps);
+          if ((dr / (3.0 * sig_r)) * (dr / (3.0 * sig_r)) + (dv / (3.0 * sig_v)) * (dv / (3.0 * sig_v)) <= 1.0) {
+            near_prior = true;
+            break;
+          }
+        }
+        if (near_prior) {
+          eff_thr *= 0.7079; // -1.5 dB sensitivity boost inside track gate
+        } else {
+          eff_thr *= 1.4125; // +1.5 dB clutter suppression in untracked space
+        }
+      }
+
+      if (cell > eff_thr && (!args.cfar_per_column || cell > thr_col) && (!args.cfar_per_row || cell > thr_row)) {
         sensing_detection_t det;
         det.range_bin   = r;
         det.doppler_bin = d;
@@ -1348,6 +1377,15 @@ void range_doppler::cfar(const sensing_rvm_t& rvm, std::vector<sensing_detection
           snr_noise = row_noise;
         }
         det.snr_db      = 10.0f * std::log10((float)(cell / snr_noise));
+
+        if (feedback_tracker != nullptr) {
+          bool near_trk = false;
+          if (feedback_tracker->should_reject_detection(det.range_m, det.vel_mps, det.snr_db,
+                                                        rvm.range_res_m, rvm.vel_res_mps, near_trk)) {
+            continue; // rejected by sidelobe / multipath / clutter map
+          }
+        }
+
         detections.push_back(det);
         if (detections.size() >= 8192) {
           break; // safety cap on raw detections before suppression

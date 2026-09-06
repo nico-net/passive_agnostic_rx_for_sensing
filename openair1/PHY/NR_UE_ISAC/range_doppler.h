@@ -38,6 +38,8 @@
 
 namespace nr_isac {
 
+class hierarchical_tracker;
+
 /// Phase 6a (ota_sync_passive_ue.md): a known impairment to apply to the synthetic LOS/reference
 /// path itself, parsed from `args.selftest_los = "STO_US:CFO_HZ:SFO_PPM"`. Distinct from
 /// `sensing_target_t` (which describes an echo/target, not the reference path).
@@ -107,14 +109,15 @@ public:
                sensing_rvm_t&                    rvm,
                std::vector<sensing_detection_t>& detections,
                const double*                     row_time_slots = nullptr,
-               const uint8_t*                    occ_mask       = nullptr);
+               const uint8_t*                    occ_mask       = nullptr,
+               const hierarchical_tracker*       feedback_tracker = nullptr);
 
 private:
   bool ensure_plans(uint32_t nof_range, uint32_t nof_slow);
   void inject_selftest(icf_t* work, uint32_t nof_slow, uint32_t nof_subc, double df_comb, double t_slow, double fc,
                        uint32_t comb_spacing);
   void cfar(const sensing_rvm_t& rvm, std::vector<sensing_detection_t>& detections, uint32_t nof_slow,
-            const double* row_time_slots, float period_slots);
+            const double* row_time_slots, float period_slots, const hierarchical_tracker* feedback_tracker = nullptr);
   // CLEAN deconvolution helpers (clean_deconv). build_clean_kernels fills clean_kr/clean_kd for the
   // current CPI geometry; clean_components_budget picks the per-CPI component budget (manual or auto).
   void     build_clean_kernels(uint32_t nof_range, uint32_t nof_dopp, bool use_nudft);

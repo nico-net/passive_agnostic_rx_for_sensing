@@ -123,6 +123,10 @@ sensing_engine::sensing_engine(const nr_isac_args_t& args_, uint32_t max_prb_) :
 
   rd.reset(new range_doppler(args));
   if (args.track_enable) {
+    bistatic_geometry_3d_t geom(vec3_t(args.tx_pos_x, args.tx_pos_y, args.tx_pos_z),
+                                vec3_t(args.rx_pos_x, args.rx_pos_y, args.rx_pos_z));
+    hierarchical_tracker_config_t hier_cfg;
+    hier_tracker.reset(new hierarchical_tracker(geom, hier_cfg));
     tracker.reset(new multi_target_tracker(args));
   }
 }
@@ -826,7 +830,8 @@ void sensing_engine::process_cpi()
   rd->process(h_cpi_uniform.data(), args.cpi_slots, nof_subc, cpi_grid_comb, cpi_carrier,
               (float)cpi_period_slots, row_comb_uniform.data(), rvm, detections,
               (args.doppler_nudft || args.doppler_sparse || mf || occ_clean) ? cpi_row_time.data() : nullptr,
-              (mf || occ_clean) ? occ_all.data() : nullptr);
+              (mf || occ_clean) ? occ_all.data() : nullptr,
+              hier_tracker.get());
 
   // CPI-quality gate (see defs_nr_UE_ISAC.h): T_slot (= cpi_period_slots, the mean row spacing) is
   // compared to a running EMA of "typical" T_slot. A CPI whose spacing is much larger is "starved" --
@@ -834,13 +839,11 @@ void sensing_engine::process_cpi()
   // amplitude-gating aliases/ghosts with no real reference to reject them against. Drop the whole
   // CPI's detections and let the tracker coast. The EMA updates from EVERY CPI (gated or not) so the
   // baseline tracks the cell's own traffic pattern rather than a hand-picked absolute T_slot.
-  bool cpi_gated = false;
   if (args.cpi_quality_gate) {
     if (tslot_ema_ < 0.0) {
       tslot_ema_ = cpi_period_slots; // seed on first CPI
     }
     if (cpi_period_slots > (double)args.cpi_quality_max_ratio * tslot_ema_) {
-      cpi_gated = true;
       LOG_I(PHY, "SENSING: cpi-quality GATE CPI #%u T_slot=%.3f > %.2f x EMA=%.3f -> %zu detections dropped\n",
             cpi_count, cpi_period_slots, (double)args.cpi_quality_max_ratio, tslot_ema_, detections.size());
       detections.clear();
@@ -960,7 +963,7 @@ void sensing_engine::process_cpi()
   // Per-CPI target track. dt comes from the CPI start timestamps (irregular by design -- a CPI
   // closes when enough reference occurrences have accumulated, which depends on DL traffic), which
   // is precisely why a Kalman gain is used rather than fixed alpha-beta gains.
-  if (tracker) {
+  if (hier_tracker || tracker) {
     // dt must be SIMULATED elapsed time (the time base the target actually moves in), NOT wall clock.
     // cpi_start_time_utc_ns is a host-clock stamp, and under rfsimulator the host runs far slower
     // than the simulated air interface (measured ~44x on this harness), so feeding it here made the
@@ -986,34 +989,49 @@ void sensing_engine::process_cpi()
     have_prev_anchor_    = true;
     const double dt_s    = dt_slots * slot_dur_s;
     prev_cpi_time_ns  = cpi_start_time_utc_ns;
-    last_tracks       = tracker->update(detections, dt_s, &rvm);
-    // Single-receiver fusion: ONE Tx-Rx pair plus a bearing is enough for a position, via the exact
-    // ray-ellipse closed form already used for the per-detection anchor (isac_aoa.h aoa_localize).
-    // Without a bearing a lone pair fixes only the ellipse, so pos_valid stays false and the track
-    // remains a range/rate-only measurement -- which is the pre-AoA behaviour, unchanged.
-    for (sensing_track_t& t : last_tracks) {
-      double px = 0.0, py = 0.0;
-      t.pos_valid = t.azimuth_valid &&
-                    aoa_localize(args.tx_pos_x, args.tx_pos_y, args.rx_pos_x, args.rx_pos_y,
-                                 t.range_m, t.azimuth_deg, px, py);
-      t.pos_x = (float)px;
-      t.pos_y = (float)py;
-    }
-    for (const sensing_track_t& t : last_tracks) {
-      LOG_I(PHY,
-            "SENSING: track CPI #%u track_id=%u range=%.2f m rate=%+.2f m/s sigma=%.2f m %s "
-            "innov=%+.2f m nis=%.2f qmult=%.2f coast=%u\n",
-            cpi_count, t.track_id, t.range_m, t.range_rate_mps, t.sigma_range_m,
-            t.updated ? "updated" : "COASTED", t.innovation_m, t.nis, t.q_mult, t.coast_count);
-    }
-    // Visibility into the auto-derived M-of-N confirmation threshold (defs_nr_UE_ISAC.h's
-    // track_confirm_m==0 path): logged whenever auto mode is active so a scene whose measured
-    // false-alarm density has drifted shows up here, not just as unexplained track churn.
-    if (args.track_confirm_m == 0) {
-      LOG_I(PHY,
-            "SENSING: mot confirm CPI #%u auto_M=%u/N=%u mean_det_per_cpi=%.1f p_hit=%.5f target_pfa=%.1e\n",
-            cpi_count, tracker->last_confirm_m(), args.track_confirm_n, tracker->mean_detections_ewma(),
-            tracker->last_p_hit(), (double)args.track_confirm_target_pfa);
+
+    if (hier_tracker) {
+      const double time_s = (double)cpi_anchor_abs_ * slot_dur_s;
+      const double dwell_s = (double)args.cpi_slots * slot_dur_s;
+      last_tracks = hier_tracker->update(detections, time_s, (double)rvm.range_res_m, (double)rvm.vel_res_mps, dwell_s);
+      for (const sensing_track_t& t : last_tracks) {
+        LOG_I(PHY,
+              "SENSING: hier-track CPI #%u track_id=%u pos=[%.1f, %.1f, %.1f]m vel=[%+.1f, %+.1f, %+.1f]m/s "
+              "range=%.2f m rate=%+.2f m/s az=%.1f deg %s coast=%u\n",
+              cpi_count, t.track_id, t.pos_x, t.pos_y, t.pos_z, t.vel_x, t.vel_y, t.vel_z,
+              t.range_m, t.range_rate_mps, t.azimuth_deg,
+              t.updated ? "updated" : "COASTED", t.coast_count);
+      }
+    } else if (tracker) {
+      last_tracks       = tracker->update(detections, dt_s, &rvm);
+      // Single-receiver fusion: ONE Tx-Rx pair plus a bearing is enough for a position, via the exact
+      // ray-ellipse closed form already used for the per-detection anchor (isac_aoa.h aoa_localize).
+      // Without a bearing a lone pair fixes only the ellipse, so pos_valid stays false and the track
+      // remains a range/rate-only measurement -- which is the pre-AoA behaviour, unchanged.
+      for (sensing_track_t& t : last_tracks) {
+        double px = 0.0, py = 0.0;
+        t.pos_valid = t.azimuth_valid &&
+                      aoa_localize(args.tx_pos_x, args.tx_pos_y, args.rx_pos_x, args.rx_pos_y,
+                                   t.range_m, t.azimuth_deg, px, py);
+        t.pos_x = (float)px;
+        t.pos_y = (float)py;
+      }
+      for (const sensing_track_t& t : last_tracks) {
+        LOG_I(PHY,
+              "SENSING: track CPI #%u track_id=%u range=%.2f m rate=%+.2f m/s sigma=%.2f m %s "
+              "innov=%+.2f m nis=%.2f qmult=%.2f coast=%u\n",
+              cpi_count, t.track_id, t.range_m, t.range_rate_mps, t.sigma_range_m,
+              t.updated ? "updated" : "COASTED", t.innovation_m, t.nis, t.q_mult, t.coast_count);
+      }
+      // Visibility into the auto-derived M-of-N confirmation threshold (defs_nr_UE_ISAC.h's
+      // track_confirm_m==0 path): logged whenever auto mode is active so a scene whose measured
+      // false-alarm density has drifted shows up here, not just as unexplained track churn.
+      if (args.track_confirm_m == 0) {
+        LOG_I(PHY,
+              "SENSING: mot confirm CPI #%u auto_M=%u/N=%u mean_det_per_cpi=%.1f p_hit=%.5f target_pfa=%.1e\n",
+              cpi_count, tracker->last_confirm_m(), args.track_confirm_n, tracker->mean_detections_ewma(),
+              tracker->last_p_hit(), (double)args.track_confirm_target_pfa);
+      }
     }
   }
 
@@ -1136,8 +1154,10 @@ void sensing_engine::write_report_json()
   rep.ref_type              = nr_isac_sources_to_ref_type(args.sources_mask);
   rep.tx_pos_x              = args.tx_pos_x;
   rep.tx_pos_y              = args.tx_pos_y;
+  rep.tx_pos_z              = args.tx_pos_z;
   rep.rx_pos_x              = args.rx_pos_x;
   rep.rx_pos_y              = args.rx_pos_y;
+  rep.rx_pos_z              = args.rx_pos_z;
   rep.cpi_start_time_utc_ns = cpi_start_time_utc_ns;
   rep.cpi_duration_ns       = (int64_t)((double)slot_dur_ns * cpi_rows_slots);
   rep.fc_hz                 = (double)cpi_carrier.dl_center_hz;
