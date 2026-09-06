@@ -175,10 +175,31 @@ needing a code defect:
   find, at any dci_length, because there are no DL grants on the air to decode.
 - The PROVEN-WORKING manual conf's own DL decode rate ALSO declined across this session's captures
   (48.5% -> 22-24% TB rate) in step with the same traffic falloff -- not a receiver regression.
-`iperf3` is still running as a server on sens4 (`ps aux` confirmed), but nothing is currently
-driving DL-direction traffic through it. **Steps 2-4's live validation needs real DL traffic
-restored before it can proceed further; this is an external dependency, not a code defect in this
-branch.**
+
+**TRAFFIC-GENERATION ARCHITECTURE, corrected 2026-09-06 (baseline going forward -- an earlier
+version of this section wrongly assumed a local `iperf3` server on sens4 was the traffic source):
+the active UE is a REAL PHONE, attached to this gNB's cell exactly as any normal 5G UE would be,
+running a BIDIRECTIONAL iperf3 test from the phone to an EXTERNAL server somewhere on the
+internet.** There is no local iperf3 server on sens4 in this picture at all -- the phone's own
+uplink/downlink data path is what should generate the UL PUSCH / DL PDSCH grants this feature
+needs to observe. (A local `iperf3.service` WAS found running on sens4, systemd-managed, up since
+2026-09-02 -- confirmed via `ss`/`systemctl` to have zero established connections throughout this
+whole investigation, i.e. an unrelated leftover from some earlier, different test setup, not part
+of this architecture. Stopped 2026-09-06; `systemctl status iperf3` on sens4 to check if it's
+needed again -- it is left enabled at boot, only stopped, unless told to disable it too.)
+Re-diagnosed with that corrected picture: the gNB-log check above still holds -- the currently
+active RNTI (`0x46b9`, live-confirmed, current at the time of writing) shows a STEADY stream of UL
+PUSCH grants (1/slot, continuously) but genuinely ZERO PDSCH scheduling decisions, verified via the
+gNB's own per-slot `(N PDSCHs, N PUSCHs, ...)` summary counter (837/837 sampled slots read
+`0 PDSCHs`) -- not a string-match artifact, and not an idle/dropped connection (no RRC
+release/reestablish/out-of-sync events in the same window). **So with the corrected architecture,
+the observation is unchanged, but the explanation shifts: the phone's bidirectional iperf test's
+UPLOAD leg is clearly reaching this cell (steady UL PUSCH), but its DOWNLOAD leg is not generating
+any scheduler activity at all** -- worth checking the iperf command/flags and the external server's
+own willingness to send data back (a one-way NAT/firewall on the reverse direction would produce
+exactly this signature) before assuming a receiver-side defect. **Steps 2-4's live validation needs
+real DL traffic restored before it can proceed further; this is an external dependency, not a code
+defect in this branch.**
 
 ## Files changed by this follow-up (2026-09-06, on top of the reversal commit)
 
