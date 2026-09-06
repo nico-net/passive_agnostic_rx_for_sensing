@@ -390,25 +390,24 @@ bool nr_pdcch_blind_monitor_autodiscover_step(const void* rxdataF_symbol, int of
    * known-working manual dedicated config uses
    * (tests/passive_rx/ota/nrue.passive_rx.conf's pdcch_blind_monitor_{ss,rnti_range,dci10,
    * noise_gates} lines), not CSS0's CORESET#0/SIB1-specific choices. */
-  /* AL1 MUST STAY SCANNED (2026-09-06, second revision -- the "AL1 disabled to match the manual
-   * conf" version of this block, written earlier the same day, was WRONG and is reverted here).
-   * Read this before ever disabling AL1 again:
-   *   - The gNB's OWN PDCCH PDU log lines are the ground truth, and they say
-   *     `dci_aggregation_level=1` on 5277 of 5277 DL DCI 1_1 grants (payload_size=47) sampled over
-   *     a 300 MB window -- i.e. 100% AL1, nothing at any other level.
-   *   - That matches CLAUDE.md's own memory (blind-pdcch-needs-al1-scanning): "AL2-only scan caught
-   *     zero real grants (cell sends 99.997% at AL1)". The earlier revision overrode that correct,
-   *     measured note with an inference from the manual conf's own AL1=-1 field -- but the manual
-   *     conf is stale on this point, and stopped decoding anything itself the moment the gNB
-   *     restarted (2026-09-06 17:03) and its scheduler settled on AL1.
-   *   - Symptom when AL1 is disabled: zero genuine accepts on EVERY path (normal scan AND the
-   *     Technique C sweep at every hypothesised length), while Technique A still reports strong
-   *     0.98-0.99 DM-RS correlation -- because the PDCCH is really there, just at an aggregation
-   *     level nothing is looking at. That combination is the signature of this exact mistake.
-   * The budget concern in the allocation-order comment above is real but is what `0` (auto) exists
-   * to handle: AL1 is allocated LAST from what the other levels leave, and the adaptive weighting
-   * shifts budget toward whichever level actually produces accepts. */
-  g_cfg.ss_al_candidates[0] = 0;  // AL1 auto -- this cell's grants are 100% AL1, never disable it
+  /* ALL AGGREGATION LEVELS AUTO. Read the units warning before changing any of these.
+   *
+   * srsRAN's `dci_aggregation_level=N` in the gNB log is **log2(L), NOT L**. This cell logs
+   * `dci_aggregation_level=1`, which is **L=2 (AL2)**, not AL1. Verified against the receiver's own
+   * FULLCRC probe, which is the only metric that can see a real decode: every genuine recovery of
+   * the live C-RNTI 0x4604 came out at **L=2** (36x `L=2 dci_len=47` for the DL 1_1 grants, 9x
+   * `L=2 dci_len=43` for the UL 0_1 grants). An AL1-ONLY conf recovered the live C-RNTI ZERO times
+   * in the same conditions, while an AL2/4/8 conf recovered it 26496 times.
+   *
+   * An earlier revision of this block on 2026-09-06 read that log field as a literal AL, concluded
+   * "this cell is 100% AL1", and is RETRACTED. The `blind-pdcch-needs-al1-scanning` memory makes
+   * the same units mistake -- do not quote its "99.997% at AL1" without re-checking.
+   *
+   * Leaving AL1 at `0` (auto) rather than `-1` is harmless and slightly more robust: the allocator
+   * fills AL2/AL4/AL8 first and AL1 last, so on this 45-CCE CORESET AL1 receives zero candidates
+   * anyway (measured ladder: `AL1=0 AL2=13 AL4=6 AL8=3`). If a future deployment really does use
+   * AL1, it needs the OTHER levels capped/disabled to free budget -- "auto" alone will not do it. */
+  g_cfg.ss_al_candidates[0] = 0;  // AL1 auto (gets no budget here; real grants are AL2 on this cell)
   g_cfg.ss_al_candidates[1] = 0;  // AL2 auto
   g_cfg.ss_al_candidates[2] = 0;  // AL4 auto
   g_cfg.ss_al_candidates[3] = 0;  // AL8 auto

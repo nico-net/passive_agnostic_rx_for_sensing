@@ -205,7 +205,43 @@ failing fast. Items 2-4 stand as written, with item 2's "cannot run until (1) is
 literally true in the good sense — (1) is resolved, so Steps 2-4 are unblocked, just not yet
 scored on a VALID run.
 
-## AGGREGATION LEVEL — the real blocker, found 2026-09-06 evening. READ THIS FIRST.
+## THE RECEIVER IS DECODING. "accepts=0" NEVER MEANT "no decode". READ THIS FIRST.
+
+**Measured 2026-09-06 late evening, and it retracts the AL1 section below plus most of this
+document's "zero accepts" framing.** Using `ISAC_PDCCH_FULLCRC=1` — the only metric that can see a
+real decode — against the C-RNTI read from the gNB log at capture time (`0x4604`):
+
+| capture | conf | genuine `crc=0x4604` decodes |
+|---|---|---|
+| `manualbase_184004` | manual (AL2/4/8) | **26,496** |
+| `step234j_182511` | **autodiscover** | **509** |
+| `step234g_180043` | autodiscover | 26 |
+| `al1test_184356` | AL1-only | **0** |
+
+Every one of those runs was reported as a total failure (`accepts=0`, `crc_ok=0.0%`, verdict
+`VOID_DL_ZERO`). They were decoding real dedicated grants the whole time. **The `accepts` counter
+measures "a valid DCI 1_1 payload", not "a DCI was decoded"** — everything after the CRC parses the
+payload as 1_1 and rejects on format-indicator / antenna-ports / reserved-MCS. This is already
+documented in the `sib1-oracle-proves-pdcch-rx-chain-broken` memory; it was not applied here in
+time.
+
+**Aggregation level: srsRAN's `dci_aggregation_level` is log2(L), NOT L.** The gNB's
+`dci_aggregation_level=1` means **L=2 (AL2)**. Confirmed receiver-side: every genuine C-RNTI
+recovery is at **L=2** (36x `L=2 dci_len=47` DL 1_1, 9x `L=2 dci_len=43` UL 0_1). An AL1-only conf
+recovers the live C-RNTI **zero** times. **So the original conf (`AL1=-1`, AL2/4/8 auto) was
+correct all along**, the manual conf and `nrue.passive_rx.al1.conf` edits have been reverted, and
+the AL1 section below is RETRACTED — kept only as a record of the wrong turn.
+
+**What is actually still open, correctly framed:** PDCCH/DCI decode WORKS (correct CRC, correct
+C-RNTI, correct L=2, correct dci_len=47). What fails is parsing that correctly-decoded 47-bit
+payload into fields: `skip_rv=249` (rv!=0 on a link with no retransmissions) is the signature
+CLAUDE.md section 12 documents for **wrong per-field widths**, and it is why PDSCH CRC is 0%. The
+next step is the field-width solve described there (that history fixed `bwp_indicator` 1->0 and
+`time_domain_assignment` 4->2), scored with `ISAC_PDCCH_DCIGT=1` against the gNB's own logged
+h_id/ndi/rv/mcs. Do NOT re-investigate geometry, slot alignment, aggregation level, link budget or
+the receive chain — all are measured correct or exonerated.
+
+## RETRACTED — AGGREGATION LEVEL section (2026-09-06 evening; kept as a record of the wrong turn)
 
 **This cell sends 100% of its DL DCI 1_1 grants at AGGREGATION LEVEL 1, and the scanner was not
 looking at AL1 at all.** Ground truth is the gNB's own PDCCH PDU log line:
