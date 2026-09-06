@@ -214,8 +214,12 @@ End state of the whole "zero decode" investigation, each step measured against t
 2. **The DCI 1_1 field layout is CORRECT.** Solved by hand from the raw payload dump
    (`payload=0x494c599e2280`, 47 bits MSB-first) against gNB ground truth:
    `format identifier = bit46 = 1`; `MCS = bits[28:24] = 0b11001 = 25` (gNB: `mcs_index=25`);
-   `RV = bits[22:21] = 0` (gNB: `rv_idx=0` on 3560/3560). The widths also sum to exactly 47 and
-   each matches srsRAN's defaults. **There is no field-width bug** — the `skip_rv=249` that
+   `RV = bits[22:21] = 0` (gNB: `rv_idx=0` on 3560/3560); and `RIV = bits[45:30] = 9521`, which by
+   the TS 38.214 formula at N_BWP=273 is `RB_start=33, L=240` -- i.e. the gNB's own
+   `vrbs=[33..273)`, an allocation it used 134 times in the same window (its distribution is
+   3743x `[0..273)`, 134x `[33..273)`, 17x `[10..273)`, 2x `[0..240)`). NOTE: do not expect RIV=545
+   on every grant -- that is only the full-band value, and allocations vary. The widths also sum to
+   exactly 47 and each matches srsRAN's defaults. **There is no field-width bug** — the `skip_rv=249` that
    suggested one came from NOISE accepts in the AL1-only run, not from real grants.
 3. **PDSCH-side config is CORRECT too**: `mcs_table=1` (both sides), TDA `S=1/L=13`
    (gNB `symb=[1..14)`), DM-RS `0x884` = symbols 2/7/11 (gNB `dl_dmrs_symb_pos`).
