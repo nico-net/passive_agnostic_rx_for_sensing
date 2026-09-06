@@ -222,7 +222,7 @@ the restart. **None of it restores decoding** — do not re-run these.
 | 6 | 256QAM MCS 23-25 too demanding | decoded-MCS histogram | REFUTED — `xcheck1` decoded the SAME mcs=25/24 grants at 82.8% |
 | 7 | 4-antenna RT-budget / combining | `NANT=1 MRC=0` | PARTIAL — moves CRC off zero (0 -> 38 -> 182) but stays ~0.1% |
 | 8 | front-end overload (level rose ~9-16x) | `RXG=25`, level restored to 75.7 vs 53.9 when working | REFUTED — CRC still 0.0% |
-| 9 | residual CFO across symbols 1-13 | `CONTFO=1` | PARTIAL — 182 -> 299, still ~0.1% |
+| 9 | residual CFO across symbols 1-13 | `CONTFO=1` | PARTIAL - best post-restart result (ok=317/344, vs 182 without it and 0 at four antennas) AND it eliminated the CFO mislocks entirely (2/2 tries clean, cfotrk 7 and 0, where most other arms today hit VOID_CFO_MISLOCK). Still only ~0.1%, so it is not the fix. **Use CONTFO=1 NANT=1 MRC=0 as the capture default going forward** - strictly better on both lock stability and decode count. |
 
 **What remains TRUE and load-bearing:** PDCCH/DCI decode is healthy and in fact BETTER than when
 PDSCH worked (26,496 genuine C-RNTI recoveries vs 11,475 accepts in the working run). PDCCH lives
