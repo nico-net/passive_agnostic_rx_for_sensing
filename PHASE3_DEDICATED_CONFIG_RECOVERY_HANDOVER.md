@@ -11,6 +11,106 @@ kept for the method and the still-valid eliminations.**
 **Branch:** total-passive-rx-UL-DL-graphics
 **Host:** sens6 · **Repo:** /home/sens/NICOLA/openairinterface5g-total-passive-ue
 
+## FULL ADAPTIVE PASSIVE RX (DL + UL) — COMPLETION STATUS (2026-09-06)
+
+**Overall: ~25-30% of a fully automatic, no-manual-config, no-ground-truth-log passive receiver.**
+DL is the more advanced half (~55-60% of ITS OWN scope); UL adaptive discovery has not been
+started at all (0%) — everything UL-side today is hand-solved against this one cell's own gNB
+scheduler log, which will not exist on a real deployment. This section is the authoritative,
+detailed status; the sections below it are the investigation history that produced it.
+
+### DL (dedicated PDCCH → DCI format 1_1 → PDSCH), by step
+
+| Step | What it does | Status |
+|---|---|---|
+| 1. CORESET footprint | DM-RS correlation, histogram-accumulated across occasions (Technique A) | **IMPLEMENTED, LIVE-VALIDATED.** Converges to the exact known-good footprint (`rb_offset=0`) repeatedly; span coverage varies with how much real traffic is seen in the observation window (216-252/270 RB in good captures). |
+| 2. dci_length discovery | Accumulating CRC-based length sweep (Technique C, rewritten 2026-09-06) | **IMPLEMENTED, UNIT-TESTED (5/5), NOT YET LIVE-CONFIRMED.** The one-shot design was proven statistically unable to work (see below); the rewrite fixes that on paper and in synthetic tests, but has never yet found a real length live because every attempt since the rewrite hit `VOID_DL_ZERO`/`VOID_CFO_MISLOCK`, and the cell currently has zero DL PDSCH traffic to test against (see "Traffic-generation architecture" below). |
+| 3. C-RNTI bootstrap | Persistence-based RNTI confirmation from `run_occasion()`'s own accept path (Technique B) | **IMPLEMENTED, STRUCTURALLY SOUND, NEVER OBSERVED FIRING LIVE.** Cannot produce a sighting until Step 2 has already found the right length and produced at least one real accept — a real chicken-and-egg gap, mitigated (Step 2 no longer *needs* it, since it can bootstrap from CRC alone) but not eliminated. |
+| 4. Genuine accept / FULLCRC decode counting at the bootstrapped RNTI | Shared decode/accept machinery, same code path the manual conf already proves works | **CODE PATH EXISTS AND IS PROVEN IN ISOLATION** (the manual conf gets 20-48% TB decode rates through the identical decode/accept logic) **but the full autodiscover chain (1→2→3→4 all succeeding together, unattended) has never been observed end to end.** This is the actual "is Phase 3 done" question, and it is open. |
+
+**What's needed to close DL**: real, sustained DL PDSCH traffic on the target cell for one clean
+capture (mechanical — no new code). If that capture shows Step 2 locking a length and Step 4
+producing genuine accepts, DL is functionally complete. If Step 2 *still* fails to converge with
+real traffic present, the accumulation redesign itself needs revisiting (e.g. the chance-pass-rate
+assumption baked into `CHANCE_PASS_RATE=1/256` may not hold for this exact CORESET/candidate
+config, or the observation window/give-up cap may need retuning against a REAL traffic pattern
+rather than the synthetic one the unit tests use).
+
+### UL (DCI format 0_1 → PUSCH), by step
+
+| Step | What it does | Status |
+|---|---|---|
+| 1. CORESET footprint | — | **IMPLICITLY SHARED with DL** (Technique A's correlation doesn't distinguish DCI format), but never separately exercised/scored for UL specifically. |
+| 2. UL DCI length discovery | — | **NOT IMPLEMENTED.** No UL equivalent of Technique C exists. Mechanically straightforward to add (port the same accumulating-sweep mechanism to format 0_1 candidates — needs a `decode_one_candidate` adapter for 0_1, mirroring the existing 1_1 one; the sweep/significance-test code itself is format-agnostic). |
+| 3. UL field-BOUNDARY / semantic recovery (which bits are MCS vs antenna-ports vs TDRA-index, etc.) | — | **NOT IMPLEMENTED, AND NOT FEASIBLE with the CURRENT method on a real commercial cell.** Today's UL config (`pdcch_blind_monitor_ul_dci_bits` etc.) was solved OFFLINE by replaying 17812 real payloads and cross-checking candidate field-width assignments against the gNB's OWN logged scheduler ground truth (h_id/ndi/rv/mcs/tpc/dai/mimo/ant) until one assignment matched consistently. A real/commercial gNB exposes no such log. See "Why this is structurally hard" below. |
+| 4. UL C-RNTI bootstrap / genuine accept counting | — | **NOT WIRED**, though Technique B's existing bootstrap RNTI could in principle feed UL scoring too (same RNTI, same UE) once (2)+(3) exist. |
+
+### Why UL field-boundary recovery is structurally harder than DL length recovery
+
+Total-length recovery (DL Step 2, and the UL Step 2 that could be built the same way) has a hard,
+free oracle: a polar-coded payload's CRC-24 either verifies or it doesn't, and that is a property
+of `(received signal, hypothesised length)` ALONE — accumulating trials and comparing against the
+expected chance-pass rate is enough to find the right length with no external ground truth needed
+(this is exactly what the 2026-09-06 rewrite does).
+
+Field BOUNDARIES have no equivalent oracle. The CRC is computed over, and verifies, the SAME raw
+bit sequence regardless of how that sequence is later carved into named fields — two different
+field-width assignments of an IDENTICAL, CRC-verified bit sequence produce two different
+"MCS"/"HARQ ID"/etc. values that are EQUALLY CRC-valid. This project's own prior UL solve
+demonstrates this directly: "of 3963 assignments summing to 43, exactly 60 satisfied every gNB
+invariant... and all 60 decode IDENTICALLY, because they differ only in where zero-valued padding
+sits" — i.e. even WITH gNB ground truth to filter against, multiple splits were provably
+indistinguishable and had to be broken by spec-plausibility assumption, not measurement. Without
+that ground truth at all, there is nothing to filter the search with.
+
+DL 1_1 mostly avoids this problem because TS 38.212's canonical field ORDER is public and most
+field WIDTHS are derivable from carrier parameters a passive receiver can already discover (BWP
+size via Technique A, antenna config from what it observes) — the sweep only has to patch a small
+residual (1-3 bits, from the ONE thing that formula can't know: the RRC-configured TDRA table
+size). UL 0_1 has MORE such RRC-configured-only unknowns (SRS-resource-count-dependent SRI width,
+CSI-trigger-state-dependent CSI-request width, frequency-hopping flag presence, antenna-port table
+selection), so the un-derivable residual is bigger, not smaller, and total length alone is not
+enough information to pin every field boundary uniquely.
+
+### Possible path to closing UL (not started, real engineering effort, not a small extension)
+
+1. **UL length discovery** (tractable, same mechanism as DL): port the 2026-09-06 accumulating
+   sweep to DCI format 0_1 candidates. No algorithmic changes needed.
+2. **Field-boundary recovery without a gNB log — replace the ground truth, don't remove the
+   check.** The gNB's logged scheduler decisions were used to verify a candidate split's decoded
+   field VALUES were self-consistent over many grants. The same self-consistency check can be
+   built from OBSERVATIONS THE RECEIVER CAN MAKE ITSELF, using the PUSCH transmission that a UL
+   grant actually triggers as the ground truth instead of an internal log:
+   - Blind RB-occupancy detection on the resulting PUSCH: does the frequency range the receiver
+     actually sees ENERGY/DM-RS on match the RB allocation a candidate RIV-field-width
+     interpretation predicts?
+   - Blind modulation/MCS classification: does the observed constellation/TBS on that PUSCH match
+     a candidate MCS-field interpretation?
+   - DMRS pattern cross-check: does the observed DMRS symbol position/sequence match a candidate
+     antenna-ports/DMRS-config field interpretation?
+   None of these DSP primitives exist in this codebase today. This is comparable in scope to the
+   existing NR_UE_ISAC channel-estimation/CFR work, not a small addition — it is the single
+   largest remaining gap for a genuinely commercial-capable (no ground truth, no manual per-cell
+   config) adaptive receiver, DL or UL.
+3. **Residual RRC-only unknowns even after (2)**: some UL field widths (SRS-resource-count,
+   CSI-trigger-state-count) depend on configuration a passive receiver cannot observe even via
+   PUSCH cross-checking (e.g. an SRS resource set's own configuration, or CSI-RS trigger states) —
+   closing this fully would need blind discovery of THOSE configs too, an even deeper problem,
+   flagged here but not scoped further.
+
+### Traffic-generation architecture (baseline, corrected 2026-09-06)
+
+The active UE is a real phone attached to this gNB's cell (not an OAI test-harness UE), running a
+bidirectional iperf3 test to an EXTERNAL server on the internet — there is no local iperf3 server
+in this picture (a local `iperf3.service` on sens4 was found unused throughout this whole
+investigation and has been stopped). As of this writing the phone's upload leg reaches the cell
+(steady UL PUSCH on the current RNTI) but its download leg generates zero PDSCH scheduling
+activity — worth checking the iperf command/flags or the external server's reverse-direction
+behaviour before assuming a receiver defect; see "Steps 2-4 attempt" below for the exact
+measurement.
+
+---
+
 ## REVERSAL (2026-09-06)
 
 Re-opened this investigation with live gNB+iperf traffic available, working through the two
