@@ -242,6 +242,37 @@ other level. This matches CLAUDE.md's own memory `blind-pdcch-needs-al1-scanning
 After that restart the scheduler settled on AL1 and every capture — manual conf included — dropped
 to zero. The receiver did not regress; the cell changed.
 
+### The 2026-08-20 "pointing problem" is RESOLVED — both halves re-measured 2026-09-06
+
+The memory `four-rx-mrc-skip-blocks-passive-pdcch` concluded on 2026-08-20 that "the
+dedicated-CORESET extraction is not reading the REs that carry the grants... a pointing problem:
+wrong REs, wrong symbol, or wrong slot alignment", and prescribed one never-executed next step.
+Both halves have now been measured and **neither reproduces**:
+
+**Slot alignment — correct.** Correlating the gNB's own dedicated-grant slot distribution against
+this receiver's per-slot `ENERGYPROBE` ratio (452 samples/slot):
+
+| slots | gNB grants each | our mean AL1 energy |
+|---|---|---|
+| 0-7, 10-17 (DL) | 294-471 | **10.9-16.2x floor** |
+| 8, 9, 18, 19 | **none** | **4.2-7.1x** |
+
+Elevated energy lands exactly on the grant-bearing slots and drops in the slots with no grants.
+The 2026-08-20 observation (flat energy at the gNB's busiest slots 14/15, elevated only at
+`csirs_monitor` offsets) does NOT reproduce — slot 15 is now 13.45x and slot 14 is 11.44x.
+
+**RE-level indices — correct.** The prescribed `ISAC_PDCCH_CFGTRACE=1` comparison (log tag is
+`PDCCHCFG`, not "CFGTRACE") against the gNB's own PDCCH PDU line:
+
+```
+PDCCHCFG s=5 ss=0 type=1 n_rb=270 cset_start=0 rb_offset=0 dmrs_ref=0 scr_id=2
+         BWPStart=0 BWPSize=273 dur=1 bundle=0 ilv=0 shift=0 ncand=45
+```
+
+Every field matches ground truth: 270 RB / 45 groups, BWP [0..273), symbol 0 (dur=1),
+non-interleaved (bundle=0, ilv=0, shift=0), `nid_pdcch_dmrs=2` -> scr_id=2, type=1
+(PDCCH_CONFIG = dedicated), 45 AL1 candidates. **Stop suspecting the extraction geometry.**
+
 ### Still open after the AL1 fix (do NOT re-close these as "traffic" or "link budget")
 
 With AL1 swept (45/45 CCEs every occasion), accepts appear at AL1 (`accepts_per_al=[593 0 0 0]`)
