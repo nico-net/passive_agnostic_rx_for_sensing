@@ -322,6 +322,11 @@ static _Atomic uint64_t g_nsym[3][2] = {{0, 0}, {0, 0}, {0, 0}};
 /* Set by passive_ldpc_decode() for the TB it just processed; read by the caller once the outcome is
  * known. Thread-local because several consumers decode concurrently. */
 static __thread uint32_t t_seg_K = 0, t_seg_F = 0, t_seg_C = 0, t_seg_Z = 0;
+/* Rate-matching / decoder inputs, carried out of passive_ldpc_decode() for the PIPEDIAG census.
+ * These are the quantities that decide WHICH LLRs each segment is handed; everything upstream of
+ * them has now been eliminated by measurement (EVM identical at 9.9 % and 78.1 % CRC), so if the
+ * fault is a stream-offset problem it must show as one of these differing by outcome. */
+static __thread uint32_t t_seg_E = 0, t_seg_R = 0, t_seg_lbrm = 0, t_seg_BG = 0;
 
 static _Atomic int64_t  g_llr_sgnsum[2] = {0, 0};
 static _Atomic uint64_t g_llr_pos[2]    = {0, 0};
@@ -346,6 +351,33 @@ static _Atomic uint64_t g_ldpc_ok       = 0;
 static _Atomic uint64_t g_ldpc_iface_err = 0;
 static _Atomic uint64_t g_seg_ok_sum    = 0; // segments that decoded, summed over failing TBs
 static _Atomic uint64_t g_seg_tot_sum   = 0; // C, summed over the same TBs
+/* Per-SEGMENT-INDEX outcome, over every multi-segment TB. The aggregate says only that 18.5 % of
+ * segments converge on a failing TB; it cannot distinguish the two explanations, which point at
+ * completely different code:
+ *   failures concentrated at HIGH r  -> the LLR stream is being consumed with a drifting offset,
+ *                                       i.e. rate de-matching / E / k0 / segment extraction
+ *   failures UNIFORM across r        -> every segment sees equally bad soft input, i.e. the fault
+ *                                       is common to the TB and not an indexing walk
+ * Recorded for every decoded TB, not just failing ones, so the rate is per-index and not a
+ * histogram of where failures happen to be dense. */
+#define NR_PDSCH_SEGIDX_MAX 32
+static _Atomic uint64_t g_segidx_tot[NR_PDSCH_SEGIDX_MAX];
+static _Atomic uint64_t g_segidx_fail[NR_PDSCH_SEGIDX_MAX];
+
+/* ---- PIPEDIAG: outcome-attributed census of the WHOLE downstream chain -----------------------
+ * Everything from the equaliser onwards, split DECODED vs FAILED, so the stage where the two
+ * populations diverge names itself instead of being guessed at. Upstream is already excluded by
+ * measurement: EVM is ~10 % in BOTH a 9.9 % and a 78.1 % CRC run, residual CFO is +31 Hz, SFO
+ * +2.2 ppm, and int8 clipping is HIGHER in the best run than the worst.
+ * The load-bearing entry is llr_have vs G: G is what nr_get_G() budgets and what the rate matcher
+ * consumes, while llr_have is how many LLRs nr_rx_pdsch() actually produced. If those disagree,
+ * every segment after the shortfall is fed stale or zero soft input -- which is exactly the
+ * signature seen (healthy magnitudes, catastrophic non-convergence, tb_fail = 0). */
+#define PIPE_N_FIELDS 14
+static _Atomic uint64_t g_pipe_n[2];
+static _Atomic uint64_t g_pipe_sum[2][PIPE_N_FIELDS];
+static const char *const kPipeName[PIPE_N_FIELDS] = {
+    "G", "llr_have", "valid_re", "re_x_Qm_Nl", "C", "K", "Z", "F", "E", "R", "lbrm", "Qm", "Nl", "nsym"};
 
 void nr_pdsch_passive_ldpc_stats_dump(void)
 {
@@ -441,6 +473,43 @@ void nr_pdsch_passive_ldpc_stats_dump(void)
     }
     if (u > 0) {
       LOG_I(PHY, "SENSING: RBHIST crc_ok%% by PRB alloc: %s\n", hb);
+    }
+  }
+  {
+    /* PIPEDIAG: one line per outcome, every downstream quantity as a mean. Read it by DIFFING the
+     * two rows: any field that differs between DECODED and FAILED is the stage that matters, and
+     * every field that matches is eliminated. */
+    for (int k = 1; k >= 0; k--) {
+      const uint64_t n = atomic_load(&g_pipe_n[k]);
+      if (n == 0) {
+        continue;
+      }
+      char pb[512];
+      size_t u = 0;
+      for (int f = 0; f < PIPE_N_FIELDS && u < sizeof(pb) - 32; f++) {
+        u += snprintf(pb + u, sizeof(pb) - u, "%s=%.1f ", kPipeName[f],
+                      (double)atomic_load(&g_pipe_sum[k][f]) / (double)n);
+      }
+      LOG_I(PHY, "SENSING: PIPEDIAG %s n=%lu %s\n", k ? "DECODED" : "FAILED  ",
+            (unsigned long)n, pb);
+    }
+  }
+  {
+    /* SEGIDX: per-segment-index failure rate. A rising trend with r means the LLR stream is being
+     * walked with a drifting offset (rate de-matching / E / k0); a flat profile means every segment
+     * gets equally bad input and the indexing is fine. */
+    char sb[420];
+    size_t u = 0;
+    for (int r = 0; r < NR_PDSCH_SEGIDX_MAX && u < sizeof(sb) - 24; r++) {
+      const uint64_t t = atomic_load(&g_segidx_tot[r]);
+      if (t < 100) {
+        continue;  // too few samples at this index to read a rate from
+      }
+      u += snprintf(sb + u, sizeof(sb) - u, "r%d:%.0f%%(%lu) ", r,
+                    100.0 * (double)atomic_load(&g_segidx_fail[r]) / (double)t, (unsigned long)t);
+    }
+    if (u > 0) {
+      LOG_I(PHY, "SENSING: SEGIDX fail%% by segment index: %s\n", sb);
     }
   }
   LOG_I(PHY,
@@ -594,6 +663,10 @@ static bool passive_ldpc_decode(PHY_VARS_NR_UE *ue,
   t_seg_F = TB_parameters.F;
   t_seg_C = TB_parameters.C;
   t_seg_Z = TB_parameters.Z;
+  t_seg_E    = TB_parameters.E;
+  t_seg_R    = TB_parameters.R;
+  t_seg_lbrm = TB_parameters.tbslbrm;
+  t_seg_BG   = TB_parameters.BG;
   TB_parameters.E = nr_get_E(TB_parameters.G, TB_parameters.C, TB_parameters.Qm, TB_parameters.nb_layers, 0);
   TB_parameters.E2 = TB_parameters.E;
   TB_parameters.first_rE2 = TB_parameters.C;
@@ -655,6 +728,12 @@ static bool passive_ldpc_decode(PHY_VARS_NR_UE *ue,
     for (uint32_t r = 0; r < TB_parameters.C; r++) {
       if (TB_parameters.decodeSuccess[r]) {
         seg_ok++;
+      }
+      if (r < NR_PDSCH_SEGIDX_MAX) {
+        atomic_fetch_add(&g_segidx_tot[r], 1);
+        if (!TB_parameters.decodeSuccess[r]) {
+          atomic_fetch_add(&g_segidx_fail[r], 1);
+        }
       }
     }
     if (seg_ok != TB_parameters.C) {
@@ -1780,6 +1859,30 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
       /* 1 = decoded with data, 0 = zero_tb, 2 = seg_fail. `out->status` is not set yet here, so the
        * zero/seg distinction comes from the counters passive_ldpc_decode just bumped. */
       const int sk = ldpc_ok ? 1 : ((atomic_load(&g_ldpc_zero_tb) != zero_before) ? 0 : 2);
+      {
+        /* llr_have: index one past the last NON-ZERO LLR. An exactly-zero LLR is possible but
+         * vanishingly rare in real soft output, so the last nonzero is a good proxy for how far
+         * nr_rx_pdsch() actually filled the buffer -- and a shortfall against G is the thing being
+         * hunted. Scanned backwards so a full buffer costs one comparison. */
+        uint32_t llr_have = 0;
+        for (int i = (int)G - 1; i >= 0; i--) {
+          if (llr[i] != 0) { llr_have = (uint32_t)i + 1; break; }
+        }
+        uint32_t vre = 0;
+        for (int m = dlsch_config->start_symbol;
+             m < dlsch_config->start_symbol + dlsch_config->number_symbols && m < NR_SYMBOLS_PER_SLOT; m++) {
+          vre += dl_valid_re[m];
+        }
+        const int pk = (sk == 1) ? 1 : 0;  // 1 = decoded, 0 = did not decode (zero_tb or seg_fail)
+        const uint64_t v[PIPE_N_FIELDS] = {
+            G, llr_have, vre, (uint64_t)vre * cw->qamModOrder * cw->Nl,
+            t_seg_C, t_seg_K, t_seg_Z, t_seg_F, t_seg_E, t_seg_R, t_seg_lbrm,
+            cw->qamModOrder, cw->Nl, (uint64_t)dlsch_config->number_symbols};
+        atomic_fetch_add(&g_pipe_n[pk], 1);
+        for (int f = 0; f < PIPE_N_FIELDS; f++) {
+          atomic_fetch_add(&g_pipe_sum[pk][f], v[f]);
+        }
+      }
       atomic_fetch_add(&g_shape_n[sk], 1);
       atomic_fetch_add(&g_shape_tbs[sk], (uint64_t)cw->TBS);
       atomic_fetch_add(&g_shape_rb[sk], (uint64_t)freq_alloc->num_rbs);
