@@ -363,6 +363,13 @@ static _Atomic uint64_t g_seg_tot_sum   = 0; // C, summed over the same TBs
 #define NR_PDSCH_SEGIDX_MAX 32
 static _Atomic uint64_t g_segidx_tot[NR_PDSCH_SEGIDX_MAX];
 static _Atomic uint64_t g_segidx_fail[NR_PDSCH_SEGIDX_MAX];
+/* Same histogram CONDITIONED ON C. Unconditioned, index and TB size are confounded: r0 is counted
+ * over every TB while r>=3 exists only in C>=4 TBs, so the apparent "r3-r5 fail at 80 % whatever
+ * the run does" could equally be "large TBs fail". Three buckets: C<=2, C in 3..4, C>=5. */
+#define NR_PDSCH_CBUCKETS 3
+static _Atomic uint64_t g_segidxc_tot[NR_PDSCH_CBUCKETS][NR_PDSCH_SEGIDX_MAX];
+static _Atomic uint64_t g_segidxc_fail[NR_PDSCH_CBUCKETS][NR_PDSCH_SEGIDX_MAX];
+static inline int nr_pdsch_cbucket(uint32_t C) { return (C <= 2) ? 0 : ((C <= 4) ? 1 : 2); }
 
 /* ---- PIPEDIAG: outcome-attributed census of the WHOLE downstream chain -----------------------
  * Everything from the equaliser onwards, split DECODED vs FAILED, so the stage where the two
@@ -510,6 +517,25 @@ void nr_pdsch_passive_ldpc_stats_dump(void)
     }
     if (u > 0) {
       LOG_I(PHY, "SENSING: SEGIDX fail%% by segment index: %s\n", sb);
+    }
+    /* Within one C bucket the TBs are the same size, so any remaining trend with r is a genuine
+     * index effect and not the size confound. */
+    static const char *const kCB[NR_PDSCH_CBUCKETS] = {"C<=2", "C=3-4", "C>=5"};
+    for (int cb = 0; cb < NR_PDSCH_CBUCKETS; cb++) {
+      char cbuf[300];
+      size_t v = 0;
+      for (int r = 0; r < NR_PDSCH_SEGIDX_MAX && v < sizeof(cbuf) - 24; r++) {
+        const uint64_t t = atomic_load(&g_segidxc_tot[cb][r]);
+        if (t < 100) {
+          continue;
+        }
+        v += snprintf(cbuf + v, sizeof(cbuf) - v, "r%d:%.0f%%(%lu) ", r,
+                      100.0 * (double)atomic_load(&g_segidxc_fail[cb][r]) / (double)t,
+                      (unsigned long)t);
+      }
+      if (v > 0) {
+        LOG_I(PHY, "SENSING: SEGIDXC %s %s\n", kCB[cb], cbuf);
+      }
     }
   }
   LOG_I(PHY,
@@ -663,15 +689,18 @@ static bool passive_ldpc_decode(PHY_VARS_NR_UE *ue,
   t_seg_F = TB_parameters.F;
   t_seg_C = TB_parameters.C;
   t_seg_Z = TB_parameters.Z;
-  t_seg_E    = TB_parameters.E;
-  t_seg_R    = TB_parameters.R;
-  t_seg_lbrm = TB_parameters.tbslbrm;
-  t_seg_BG   = TB_parameters.BG;
   TB_parameters.E = nr_get_E(TB_parameters.G, TB_parameters.C, TB_parameters.Qm, TB_parameters.nb_layers, 0);
   TB_parameters.E2 = TB_parameters.E;
   TB_parameters.first_rE2 = TB_parameters.C;
   TB_parameters.R = nr_get_R_ldpc_decoder(TB_parameters.rv_index, TB_parameters.E, TB_parameters.BG, TB_parameters.Z,
                                           &h->llrLen, 0 /* DLround: always the first, see above */);
+  /* Copied HERE, not next to K/F/C/Z above: E and R are ASSIGNED a few lines up from this point,
+   * so the earlier copy read them before they existed and PIPEDIAG printed E=0.0 R=0.0 for a whole
+   * campaign. The code rate had to be recovered as (K-F)*C/G instead. */
+  t_seg_E    = TB_parameters.E;
+  t_seg_R    = TB_parameters.R;
+  t_seg_lbrm = TB_parameters.tbslbrm;
+  t_seg_BG   = TB_parameters.BG;
   for (uint32_t r = 1; r < TB_parameters.C; r++) {
     const int Er = nr_get_E(TB_parameters.G, TB_parameters.C, TB_parameters.Qm, TB_parameters.nb_layers, r);
     if (Er != TB_parameters.E) {
@@ -730,9 +759,12 @@ static bool passive_ldpc_decode(PHY_VARS_NR_UE *ue,
         seg_ok++;
       }
       if (r < NR_PDSCH_SEGIDX_MAX) {
+        const int cb = nr_pdsch_cbucket(TB_parameters.C);
         atomic_fetch_add(&g_segidx_tot[r], 1);
+        atomic_fetch_add(&g_segidxc_tot[cb][r], 1);
         if (!TB_parameters.decodeSuccess[r]) {
           atomic_fetch_add(&g_segidx_fail[r], 1);
+          atomic_fetch_add(&g_segidxc_fail[cb][r], 1);
         }
       }
     }

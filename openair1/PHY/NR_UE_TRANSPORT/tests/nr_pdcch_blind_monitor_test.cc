@@ -52,6 +52,7 @@ extern "C" {
 #include "common/utils/nr/nr_common.h"
 #include "openair2/LAYER2/NR_MAC_COMMON/nr_mac_common.h" // NR_tda_info_t, get_dl_tda_info(), TYPE_C_RNTI_
 #include "nr_pdcch_blind_monitor.h"
+#include "nr_pdsch_config_sweep.h"
 #include "nr_pdcch_blind_monitor_rt.h"
 #include "executables/softmodem-common.h"
 }
@@ -2085,6 +2086,28 @@ TEST_F(BlindPdcchTest, InterleavedCoreset0CandidateRoundTrips) {
 // The true CORESET must CONTAIN every observed window, and candidate 0 must stay the legacy
 // snap-to-carrier answer so a cell where that was already right cannot regress.
 
+TEST(ExtentCandidates, SnapsToCarrierWhenTheSpanIsWideEvenIfFirstWindowIsNotZero) {
+  // The 2026-09-07 live failure: traffic thinned, windows 0-1 fell under the hit floor, and the
+  // footprint came out 2..37 (36 of 45 windows = 80 %) against a truth of 0..44. Snapping must
+  // depend on the SPAN, not on first_w happening to be 0, or a silent edge window is enough to
+  // put the CORESET in the wrong place and nothing downstream can recover.
+  nr_pdcch_extent_cand_t c[8];
+  const int n = nr_pdcch_extent_candidates(2, 37, 45, c, 8);
+  ASSERT_GE(n, 1);
+  EXPECT_EQ(c[0].first_w, 0);
+  EXPECT_EQ(c[0].last_w, 44);
+}
+
+TEST(ExtentCandidates, DoesNotSnapANarrowFootprint) {
+  // A genuinely narrow CORESET must be left alone; snapping it to the carrier would be the same
+  // class of error in the other direction.
+  nr_pdcch_extent_cand_t c[8];
+  const int n = nr_pdcch_extent_candidates(2, 8, 45, c, 8);
+  ASSERT_GE(n, 1);
+  EXPECT_EQ(c[0].first_w, 2);
+  EXPECT_EQ(c[0].last_w, 8);
+}
+
 TEST(ExtentCandidates, FirstCandidateIsTheLegacySnapAnswer) {
   // This cell: 45 windows, occupancy observed over [0..43] -> the legacy rule snaps to the carrier.
   nr_pdcch_extent_cand_t c[8];
@@ -2136,6 +2159,43 @@ TEST(ExtentCandidates, RejectsInvalidInputAndRespectsTheCap) {
   EXPECT_EQ(nr_pdcch_extent_candidates(0, 45, 45, c, 8), 0);  // last outside the carrier
   EXPECT_EQ(nr_pdcch_extent_candidates(0, 43, 45, c, 0), 0);  // no room
   EXPECT_EQ(nr_pdcch_extent_candidates(0, 0, 64, c, 3), 3);   // capped, not overrun
+}
+
+// ---- Technique D: does the search actually contain, and correctly realise, the truth? ---------
+// Offline ground truth for THIS cell, from the gNB's own config/log:
+//   pdsch TDA S=1 L=13 - dmrs additionalPosition 2, maxLength 1 - mcs_table qam256
+//   dl_dmrs_symb_pos = 0x884  (symbols 2, 7, 11)
+
+TEST(TechniqueD, HypothesisSetContainsThisCellsTruth) {
+  // If the truth is not enumerated, the sweep can never converge however long it runs -- and it
+  // would report "undecided" forever rather than failing loudly.
+  nr_pdsch_config_sweep_state_t st;
+  const int n = nr_pdsch_config_sweep_init(&st, 2);
+  bool found = false;
+  for (int i = 0; i < n; i++) {
+    if (st.hyp[i].tda_start == 1 && st.hyp[i].tda_length == 13 && st.hyp[i].dmrs_add_pos == 2
+        && st.hyp[i].dmrs_max_len == 1 && st.hyp[i].mcs_table == 1) {
+      found = true;
+    }
+  }
+  EXPECT_TRUE(found) << "this deployment's real config is not among the swept hypotheses";
+}
+
+TEST(TechniqueD, TruthHypothesisRealisesTheGnbsOwnDmrsMask) {
+  // The sweep only helps if applying a hypothesis reproduces the real PDU. dmrs_TypeA_Position is
+  // the ASN.1 ENUM (pos2 = 0), the trap that cost a whole earlier investigation.
+  const int32_t mask = nr_pdcch_blind_dmrs_mask(0 /* pos2 */, 13 /* L */, 1 /* S */,
+                                                0 /* mapping type A */, 2 /* add_pos */, 1 /* len */);
+  EXPECT_EQ(mask, 0x884) << "hypothesis does not reproduce the gNB's dl_dmrs_symb_pos";
+}
+
+TEST(TechniqueD, AWrongHypothesisDoesNotReproduceTheRealMask) {
+  // Sanity on the discriminator itself: if every hypothesis produced the same mask, the TB-CRC
+  // oracle would have nothing to separate.
+  const int32_t m_addpos = nr_pdcch_blind_dmrs_mask(0, 13, 1, 0, 0 /* add_pos 0 */, 1);
+  EXPECT_NE(m_addpos, 0x884);
+  const int32_t m_tda = nr_pdcch_blind_dmrs_mask(0, 7 /* L=7 */, 1, 0, 2, 1);
+  EXPECT_NE(m_tda, 0x884);
 }
 
 int main(int argc, char** argv)

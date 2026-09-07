@@ -101,6 +101,10 @@ typedef struct {
   /// FO (Hz) sampled on the RECEIVE thread with these samples; replayed by the consumer
   /// via nr_slot_fep_fo_override_hz. NAN would mean "read live", which is the bug.
   double fo_hz;
+  /// Technique D hypothesis this grant was extracted under, or -1. Carried in the JOB rather than
+  /// thread-local storage: the decode runs on a consumer thread, so a TLS value set by the producer
+  /// is not visible where the TB CRC becomes known, and the sweep would score the wrong hypothesis.
+  int sweep_idx;
 } nr_pdsch_passive_job_t;
 
 /// Per-run census. Every field is a reason a job did NOT become a decode, so a shortfall in

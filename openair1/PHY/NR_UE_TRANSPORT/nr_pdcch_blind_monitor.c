@@ -256,6 +256,42 @@ bool nr_pdcch_blind_monitor_autoconf_css0(int num_rbs,
  * (s_dedicated_found below), separate from anything CSS0 writes. */
 static bool s_dedicated_found = false;
 
+/* Offsets already tried and found undecodable. A footprint that produces no DCI of ANY length is
+ * wrong, and re-discovering without excluding it just converges to the same wrong answer again --
+ * the histogram has not changed. Small and fixed: a carrier has 45 windows and the search gives up
+ * long before that many are blacklisted. */
+#define NR_PDCCH_MAX_BAD_OFFSETS 8
+static int s_bad_offset[NR_PDCCH_MAX_BAD_OFFSETS];
+static int s_n_bad_offset = 0;
+
+bool nr_pdcch_blind_monitor_autodiscover_offset_rejected(int rb_offset)
+{
+  for (int i = 0; i < s_n_bad_offset; i++) {
+    if (s_bad_offset[i] == rb_offset) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/* Called when Technique C exhausts its budget. A length sweep tries EVERY length, so if the
+ * geometry were right one of them would have reached significance; failing at all of them is
+ * evidence about the FOOTPRINT, not about the length. Re-arm Technique A instead of running on
+ * with geometry that is known not to decode.
+ * MEASURED 2026-09-07 (capture val_d1_151203): traffic changed, the histogram's first occupied
+ * window moved off zero, Technique A converged to rb_offset=12 against a truth of 0, and the run
+ * then produced 30 genuine decodes in 200 s instead of ~200k. Nothing downstream could recover,
+ * because the extent check is gated on the length being found -- a deadlock. */
+void nr_pdcch_blind_monitor_autodiscover_retry(int failed_rb_offset)
+{
+  if (s_n_bad_offset < NR_PDCCH_MAX_BAD_OFFSETS) {
+    s_bad_offset[s_n_bad_offset++] = failed_rb_offset;
+  }
+  s_dedicated_found = false;
+  LOG_W(PHY, "SENSING: Phase 3 autodiscover -- rb_offset=%d produced no decodable DCI at ANY "
+             "length; blacklisting it and re-discovering the footprint\n", failed_rb_offset);
+}
+
 bool nr_pdcch_blind_monitor_autodiscover_done(void)
 {
   return s_dedicated_found;
@@ -304,10 +340,23 @@ int nr_pdcch_extent_candidates(int first_w, int last_w, int nw_total,
   }
   /* Candidate 0 is the pre-2026-09-07 heuristic's OWN answer, so a cell where it was already right
    * locks with no added dwell and this can never regress. */
-  const int snap_l = (first_w == 0 && last_w >= (nw_total * 3) / 4) ? (nw_total - 1) : last_w;
+  /* SNAP ON SPAN, NOT ON first_w == 0.
+   * A CORESET is CONTIGUOUS, so if the observed occupancy spans most of the carrier the CORESET is
+   * full-band and the exact edges are merely unobserved -- PDCCH DM-RS exists only where a PDCCH was
+   * actually transmitted, so an edge window is silent whenever the scheduler did not use it.
+   * Requiring first_w == 0 made the snap depend on the single most fragile statistic in the
+   * histogram: the position of the LOWEST window that happened to clear a fixed 3-hit floor.
+   * MEASURED 2026-09-07 (capture val_d1_151203): traffic thinned after the UE re-attached, windows
+   * 0 and 1 fell under the floor, and Technique A declared rb_offset=12 span_rb=216 against a truth
+   * of 0/270. The span was 36 of 45 windows -- 80 %, comfortably over the threshold -- so snapping
+   * on span alone would have returned the right answer; only the first_w == 0 guard prevented it.
+   * Nothing downstream could recover, because the extent check is gated on the dci_length being
+   * found and the length sweep cannot succeed under a wrong footprint. */
+  const int span_w = last_w - first_w + 1;
+  const int snap   = (span_w >= (nw_total * 3) / 4);
   int n = 0;
-  out[n].first_w = first_w;
-  out[n].last_w  = snap_l;
+  out[n].first_w = snap ? 0 : first_w;
+  out[n].last_w  = snap ? (nw_total - 1) : last_w;
   n++;
   /* SPAN ONLY -- `first_w` is deliberately NOT swept, and that is a KNOWN INCOMPLETENESS rather
    * than an oversight. A nonzero CORESET offset cannot currently be APPLIED correctly: this
@@ -508,11 +557,24 @@ bool nr_pdcch_blind_monitor_autodiscover_step(const void* rxdataF_symbol, int of
   last_w  = s_ext_cand[0].last_w;
   const int rb_offset = first_w * 6;
   const int span_rb   = (last_w - first_w + 1) * 6;
+  if (nr_pdcch_blind_monitor_autodiscover_offset_rejected(rb_offset)) {
+    /* Already tried and proven undecodable. Keep observing rather than re-declaring it. */
+    memset(s_hit_count, 0, sizeof(s_hit_count));
+    s_obs_calls = 0;
+    return false;
+  }
 
   g_cfg.coreset_type            = 0;  // PDCCH-Config (dedicated), NOT MIB/SIB1 -- see coreset_type's
                                         // own comment in autoconf_css0() for why this field matters
   g_cfg.coreset_freq_domain     = span_rb / 6;
-  g_cfg.bwp_start               = rb_offset;
+  /* The CORESET's own offset, in ITS OWN frame. It used to be written into bwp_start, which is a
+   * DIFFERENT frame of reference: BWPStart moves the bandwidth part, and with it RIV interpretation
+   * and dci_length, so a nonzero CORESET offset silently corrupted the frequency allocation of
+   * every grant. Inert on this cell (the dedicated CORESET starts at RB 0, so both were 0) -- and
+   * that is exactly why it survived: it is only reachable once a footprint with a nonzero offset is
+   * discovered, which is what the extent sweep would have started producing. */
+  g_cfg.coreset_rb_offset       = rb_offset;
+  g_cfg.bwp_start               = 0;  // full-carrier BWP; see above
   /* bwp_size is the DL BWP size (drives the RIV/frequency-allocation field-width computation), NOT
    * the discovered CORESET span -- a dedicated CORESET is normally a subset of its BWP. The real
    * RRC-configured dedicated BWP is ciphered and unavailable to a passive receiver (the same
@@ -699,6 +761,18 @@ bool nr_pdcch_blind_monitor_autodiscover_extent_step(uint32_t abs_slot)
         s_ext_idx, s_ext_n, NR_PDCCH_EXTENT_VERIFY_OCC, g_cfg.bwp_start,
         g_cfg.coreset_freq_domain * 6);
   return true;
+}
+
+static int32_t blind_fill_dmrs_mask(int dmrs_TypeA_Position, int NrOfSymbols, int startSymbol,
+                                    mappingType_t mappingtype, int add_pos, int length);
+
+/* int-only wrapper: mappingType_t is not visible in this module's public header, and pulling the
+ * PHY type in just for one argument would widen that header's dependencies for every consumer. */
+int32_t nr_pdcch_blind_dmrs_mask(int dmrs_TypeA_Position, int NrOfSymbols, int startSymbol,
+                                 int mapping_type_is_b, int add_pos, int length)
+{
+  return blind_fill_dmrs_mask(dmrs_TypeA_Position, NrOfSymbols, startSymbol,
+                              mapping_type_is_b ? typeB : typeA, add_pos, length);
 }
 
 static int parse_coreset(const char* s)
@@ -1271,6 +1345,14 @@ void nr_pdcch_blind_monitor_init(void)
         "pdcch_blind_monitor_autoconf=1 (Phase 1) to have a working common search space first -- "
         "the bootstrap RNTI comes from THAT path's own grants.",
         0, .iptr = &g_cfg.autodiscover, .defintval = 0, TYPE_INT, 0},
+      {"pdcch_blind_monitor_full_auto",
+        "1 = also auto-discover PAYLOAD INTERPRETATION (Technique D: TDA/DM-RS-position/MCS-table, "
+        "TB-CRC-scored) instead of using pdcch_blind_monitor_tda/_dmrs/_pdsch's hand-written values. "
+        "Default 0 -- the DEFAULT behaviour is already 'manual conf, auto-extracted gNB values': "
+        "CORESET geometry, dci_length and live RNTIs are self-discovered whenever autodiscover=1 "
+        "regardless of this flag, only the payload FIELD LAYOUT stays human-supplied until this is "
+        "set. This is also where UL payload-interpretation auto mode will attach once it exists.",
+        0, .iptr = &g_cfg.dl_full_auto, .defintval = 0, TYPE_INT, 0},
       {"pdcch_blind_monitor_dci10",
         "DCI format 1_0 scanning; scan[:ss_type[:n_rb_riv[:rb_offset[:length_override[:class_mask"
         "[:mux_pattern[:sib1]]]]]]] (scan 0=format 1_1 only, 1=both, 2=1_0 only; ss_type 0=UE-specific, "

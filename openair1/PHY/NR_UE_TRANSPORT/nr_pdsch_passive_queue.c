@@ -45,6 +45,7 @@
  */
 
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.h"
+#include "PHY/NR_UE_TRANSPORT/nr_pdsch_config_sweep.h" // Technique D scoring
 
 #include <pthread.h>
 #include <stdatomic.h>
@@ -160,6 +161,11 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
 
     if (st != NR_PDSCH_PASSIVE_DECODE_ERROR && st != NR_PDSCH_PASSIVE_DECODE_UNSUPPORTED) {
       atomic_fetch_add_explicit(&g_decoded, 1, memory_order_relaxed);
+      /* Technique D scoring: the TB CRC is the only oracle that can tell a right payload
+       * interpretation from a wrong one, and this is the one place it is known. */
+      if (job.sweep_idx >= 0) {
+        nr_pdsch_config_sweep_feed_global(job.sweep_idx, st == NR_PDSCH_PASSIVE_DECODE_CRC_OK);
+      }
       if (st == NR_PDSCH_PASSIVE_DECODE_CRC_OK) {
         atomic_fetch_add_explicit(&g_crc_ok, 1, memory_order_relaxed);
         if (job.want_data) {

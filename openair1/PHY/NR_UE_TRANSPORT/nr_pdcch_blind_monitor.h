@@ -364,6 +364,12 @@ bool nr_pdcch_blind_monitor_autoconf_css0(int num_rbs,
  * may already have set for the COMMON search space by the time this is first checked. */
 bool nr_pdcch_blind_monitor_autodiscover_done(void);
 
+/** Technique C exhausted its budget under the current footprint: treat that as evidence the
+ * FOOTPRINT is wrong (a length sweep tries every length) and re-arm Technique A, excluding the
+ * offset that failed. */
+void nr_pdcch_blind_monitor_autodiscover_retry(int failed_rb_offset);
+bool nr_pdcch_blind_monitor_autodiscover_offset_rejected(int rb_offset);
+
 /* Technique A (whole-carrier DM-RS correlation): call once per symbol while autodiscover is on and
  * nr_pdcch_blind_monitor_autodiscover_done() is still false. `rxdataF_symbol` is one antenna's
  * already-FEP'd frequency-domain samples for exactly this (slot, symbol), indexed [0,
@@ -682,6 +688,12 @@ typedef struct { int first_w; int last_w; } nr_pdcch_extent_cand_t;
  * CORESET must CONTAIN every observed window, so only `last_w' is swept upward; `out[0]' is always
  * the legacy snap-to-carrier answer. Returns the number written, 0 on invalid input. Pure --
  * exported so it is unit-testable. */
+/** TS 38.211 7.4.1.1.2 DM-RS symbol mask, or -1 if the combination is illegal. Exported for
+ * Technique D: a payload-interpretation hypothesis changes the TDA, so the mask that goes with it
+ * has to be recomputed rather than reused from the DCI extraction. */
+int32_t nr_pdcch_blind_dmrs_mask(int dmrs_TypeA_Position, int NrOfSymbols, int startSymbol,
+                                 int mapping_type_is_b, int add_pos, int length);
+
 int nr_pdcch_extent_candidates(int first_w, int last_w, int nw_total,
                                nr_pdcch_extent_cand_t* out, int max_out);
 
@@ -691,7 +703,16 @@ int nr_pdcch_extent_candidates(int first_w, int last_w, int nw_total,
  * Returns true when it has just changed the applied extent. */
 bool nr_pdcch_blind_monitor_autodiscover_extent_step(uint32_t abs_slot);
 
+/** Maximum simultaneously tracked UEs. A passive receiver hears every UE on the cell, so this is
+ * the ceiling on how many it can follow at once, not a property of the deployment. */
+#define NR_PDCCH_BLIND_MAX_UE 16
+
 void nr_pdcch_blind_rnti_bootstrap_record(uint16_t rnti, uint8_t rnti_class, uint32_t abs_slot);
+
+/** All currently confirmed, non-stale C-RNTIs. Returns how many were written. */
+int nr_pdcch_blind_monitor_confirmed_rnti_set(uint32_t now_abs_slot, uint16_t *out, int max_out);
+/** Is this RNTI a confirmed, non-stale UE? */
+bool nr_pdcch_blind_monitor_rnti_confirmed(uint32_t now_abs_slot, uint16_t rnti);
 
 /* Non-zero (true) when a persistence-confirmed C-RNTI or TC-RNTI exists and is not stale as of
  * now_abs_slot (the caller's own current absolute slot -- this function has no other way to know

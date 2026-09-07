@@ -28,21 +28,55 @@
  */
 
 #include "nr_pdcch_blind_monitor.h"
+#include <string.h>
 
-// ---- Phase 3 Technique B: C-RNTI bootstrap --------------------------------------------------
-// Two consecutive sightings of the SAME rnti confirm it, mirroring rnti_persistence_check()'s own
-// "a real UE's RNTI recurs; a noise accept is (almost always) a one-off" rationale -- deliberately
-// NOT re-implemented against a persistence window here, because THIS state only needs "have we
-// seen this RNTI at least twice, ever" rather than a bounded time window; the age check below is
-// what prevents an old confirmation from anchoring the scan forever.
+// ---- Phase 3 Technique B: C-RNTI bootstrap, MULTI-UE ----------------------------------------
+// A cell carries many UEs and a passive receiver hears all of them, so tracking ONE C-RNTI threw
+// away every grant addressed to anyone else. This keeps a table.
+//
+// Confirmation is still "seen at least twice", because one sighting is indistinguishable from a
+// false CRC pass. What changed on 2026-09-07 is that a confirmed entry is no longer DISPLACED by a
+// newcomer: measured that day, the real C-RNTI 0x463d (194,460 genuine decodes) lost its slot to
+// 0x8e6d -- a value the gNB never transmitted, 146 false passes -- because two of them happened to
+// land consecutively, and the run then collected roughly half the grants it should have. With a
+// table, a newcomer takes a FREE slot instead of the incumbent's, and eviction (when full) removes
+// the weakest-evidenced entry rather than the oldest arrival.
 #define RNTI_BOOTSTRAP_STALE_SLOTS 20000u  // ~10 s at this deployment's ~2000 slots/s
 
-static uint16_t g_boot_rnti          = 0;
-static uint8_t  g_boot_class         = 0xFF;
-static uint32_t g_boot_last_slot     = 0;
-static int      g_boot_confirmed     = 0;  // 0 = not confirmed, 1+ = confirmed (sighting count)
-static uint16_t g_boot_pending_rnti  = 0;
-static uint8_t  g_boot_pending_class = 0xFF;
+typedef struct {
+  uint16_t rnti;
+  uint8_t  cls;
+  uint32_t last_slot;
+  uint32_t sightings;  ///< 0 = free slot; 1 = pending; >=2 = confirmed
+} nr_boot_entry_t;
+
+static nr_boot_entry_t g_boot[NR_PDCCH_BLIND_MAX_UE];
+
+static int boot_find(uint16_t rnti, uint8_t cls)
+{
+  for (int i = 0; i < NR_PDCCH_BLIND_MAX_UE; i++) {
+    if (g_boot[i].sightings > 0 && g_boot[i].rnti == rnti && g_boot[i].cls == cls) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+/// Free slot, else the weakest-evidenced entry. Never evicts on age alone: a UE that is quiet for a
+/// moment is still a real UE, whereas a noise RNTI never accumulates sightings.
+static int boot_slot_for_new(void)
+{
+  int worst = 0;
+  for (int i = 0; i < NR_PDCCH_BLIND_MAX_UE; i++) {
+    if (g_boot[i].sightings == 0) {
+      return i;
+    }
+    if (g_boot[i].sightings < g_boot[worst].sightings) {
+      worst = i;
+    }
+  }
+  return worst;
+}
 
 void nr_pdcch_blind_rnti_bootstrap_record(uint16_t rnti, uint8_t rnti_class, uint32_t abs_slot)
 {
@@ -51,55 +85,78 @@ void nr_pdcch_blind_rnti_bootstrap_record(uint16_t rnti, uint8_t rnti_class, uin
   if (rnti_class != NR_BLIND_RNTI_CLASS_C && rnti_class != NR_BLIND_RNTI_CLASS_TC) {
     return;
   }
-
-  // Check if this is a second sighting of the pending RNTI
-  if (rnti == g_boot_pending_rnti && rnti_class == g_boot_pending_class && g_boot_pending_rnti != 0) {
-    // Second sighting of the same pending RNTI -> confirm it
-    g_boot_rnti      = rnti;
-    g_boot_class     = rnti_class;
-    g_boot_last_slot = abs_slot;
-    g_boot_confirmed = 1;  // Mark as confirmed
+  const int i = boot_find(rnti, rnti_class);
+  if (i >= 0) {
+    if (g_boot[i].sightings < UINT32_MAX) {
+      g_boot[i].sightings++;
+    }
+    g_boot[i].last_slot = abs_slot;
     return;
   }
-
-  // Check if this is a repeat sighting of an already-confirmed RNTI
-  if (rnti == g_boot_rnti && rnti_class == g_boot_class && g_boot_confirmed > 0) {
-    // Already confirmed; a further sighting just refreshes staleness.
-    g_boot_last_slot = abs_slot;
-    g_boot_confirmed++;  // Track further sightings
-    return;
-  }
-
-  // First sighting of a NEW candidate -- park it as pending, do not confirm on one sighting.
-  g_boot_pending_rnti  = rnti;
-  g_boot_pending_class = rnti_class;
+  const int n = boot_slot_for_new();
+  g_boot[n].rnti      = rnti;
+  g_boot[n].cls       = rnti_class;
+  g_boot[n].last_slot = abs_slot;
+  g_boot[n].sightings = 1;  // pending; a single sighting is not evidence
 }
 
+static bool boot_entry_live(const nr_boot_entry_t *e, uint32_t now)
+{
+  if (e->sightings < 2) {
+    return false;  // pending, not confirmed
+  }
+  const uint32_t age = (now >= e->last_slot) ? (now - e->last_slot) : 0;
+  return age <= RNTI_BOOTSTRAP_STALE_SLOTS;
+}
+
+int nr_pdcch_blind_monitor_confirmed_rnti_set(uint32_t now_abs_slot, uint16_t *out, int max_out)
+{
+  if (out == NULL || max_out <= 0) {
+    return 0;
+  }
+  int n = 0;
+  for (int i = 0; i < NR_PDCCH_BLIND_MAX_UE && n < max_out; i++) {
+    if (boot_entry_live(&g_boot[i], now_abs_slot)) {
+      out[n++] = g_boot[i].rnti;
+    }
+  }
+  return n;
+}
+
+bool nr_pdcch_blind_monitor_rnti_confirmed(uint32_t now_abs_slot, uint16_t rnti)
+{
+  for (int i = 0; i < NR_PDCCH_BLIND_MAX_UE; i++) {
+    if (g_boot[i].rnti == rnti && boot_entry_live(&g_boot[i], now_abs_slot)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/// Best-evidenced live entry. Kept for the single-RNTI consumers (Technique C's sweep and the
+/// footprint log line), which want one representative UE rather than the whole set.
 bool nr_pdcch_blind_monitor_confirmed_rnti(uint32_t now_abs_slot, uint16_t* rnti_out, uint8_t* class_out,
                                            uint32_t* age_slots_out)
 {
-  if (g_boot_confirmed < 1) {
+  int best = -1;
+  for (int i = 0; i < NR_PDCCH_BLIND_MAX_UE; i++) {
+    if (!boot_entry_live(&g_boot[i], now_abs_slot)) {
+      continue;
+    }
+    if (best < 0 || g_boot[i].sightings > g_boot[best].sightings) {
+      best = i;
+    }
+  }
+  if (best < 0) {
     return false;
   }
-  // now_abs_slot >= g_boot_last_slot always holds in real RT use (slots only advance), but do not
-  // assume it in a unit-testable function -- a caller passing an out-of-order "now" gets a benign
-  // "not stale" answer via the unsigned-wrap guard below rather than an undefined huge age.
-  const uint32_t age = (now_abs_slot >= g_boot_last_slot) ? (now_abs_slot - g_boot_last_slot) : 0;
-  if (age > RNTI_BOOTSTRAP_STALE_SLOTS) {
-    return false;
-  }
-  *rnti_out = g_boot_rnti;
-  *class_out = g_boot_class;
-  *age_slots_out = age;
+  *rnti_out = g_boot[best].rnti;
+  *class_out = g_boot[best].cls;
+  *age_slots_out = (now_abs_slot >= g_boot[best].last_slot) ? (now_abs_slot - g_boot[best].last_slot) : 0;
   return true;
 }
 
 void nr_pdcch_blind_rnti_bootstrap_reset_for_test(void)
 {
-  g_boot_rnti = 0;
-  g_boot_class = 0xFF;
-  g_boot_last_slot = 0;
-  g_boot_confirmed = 0;
-  g_boot_pending_rnti = 0;
-  g_boot_pending_class = 0xFF;
+  memset(g_boot, 0, sizeof(g_boot));
 }

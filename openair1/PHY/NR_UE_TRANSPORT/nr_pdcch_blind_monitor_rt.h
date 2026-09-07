@@ -48,6 +48,11 @@
 /// nr_pdcch_blind_monitor.c; read-only access for RT code via nr_pdcch_blind_monitor_get_cfg().
 typedef struct {
   int      coreset_freq_domain; // num_groups: contiguous 6-PRB frequency-domain groups from group 0
+  /** CORESET frequency offset in RB, in the CORESET's OWN frame -- NOT bwp_start. Keeping these
+   * separate is the point: BWPStart moves the bandwidth part and with it RIV interpretation and
+   * dci_length, so folding a CORESET offset into it corrupts the frequency allocation of every
+   * grant. 0 on every deployment captured so far, which is why the conflation went unnoticed. */
+  int      coreset_rb_offset;
   int      coreset_duration;
   int      coreset_reg_bundle_size;
   int      coreset_interleaver_size;
@@ -269,6 +274,19 @@ typedef struct {
    * Default 0, every existing deployment untouched. Requires autoconf above to already be 1 --
    * the bootstrap RNTI this depends on comes from that path's own CSS0/SIB1 grants. */
   int autodiscover;
+
+  /* MASTER SWITCH for payload-INTERPRETATION auto mode (Technique D onward). Default 0: the
+   * receiver still self-discovers WHERE the dedicated CORESET is, HOW LONG the DCI is, and WHICH
+   * RNTIs are live (all of the above, unconditionally, whenever autodiscover=1) -- but HOW TO READ
+   * the payload (TDA list, DM-RS additionalPosition, MCS table) stays exactly what
+   * pdcch_blind_monitor_tda/_dmrs/_pdsch say, because that is the one class of parameter this
+   * project's own field solves got wrong silently (dmrs_TypeA_Position's enum-vs-symbol confusion,
+   * the DCI field-width gap) and a human-verified value is safer until proven otherwise on a given
+   * deployment. Set to 1 to let Technique D (TB-CRC-scored sweep) discover those too, overriding
+   * the hand-written values once it converges. UL payload interpretation has no Technique yet
+   * (see nr_pdcch_blind_extract_opts_t's UL section); this flag is where that work attaches when
+   * it exists, so a deployment need not learn a second flag name later. */
+  int dl_full_auto;
 } nr_pdcch_blind_monitor_cfg_t;
 
 #ifdef __cplusplus
