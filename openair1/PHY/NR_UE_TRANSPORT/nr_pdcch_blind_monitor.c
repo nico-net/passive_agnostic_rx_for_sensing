@@ -147,10 +147,9 @@ bool nr_pdcch_blind_monitor_autoconf_css0(int num_rbs,
 
   g_cfg.bwp_start = cset_start_rb;
   g_cfg.bwp_size  = num_rbs;
-  g_cfg.dmrs_typeA_position = dmrs_typea_position; // MIB dmrs-TypeA-Position (2 or 3); feeds the
-                                                   // passive PDSCH-extraction path's l0/DM-RS mask
-                                                   // (blind_fill_dmrs_mask()) -- unset here left it
-                                                   // at its zero default, an illegal value.
+  // MIB dmrs-TypeA-Position, the ASN.1 ENUM (pos2 = 0, pos3 = 1) exactly as mac->dmrs_TypeA_Position
+  // carries it -- NOT the symbol number 2/3. Feeds blind_fill_dmrs_mask()/blind_ul_dmrs_mask().
+  g_cfg.dmrs_typeA_position = dmrs_typea_position;
 
   g_cfg.ss_monitoring_slot_periodicity = (ss_period_slots > 0) ? ss_period_slots : 1;
   /* `ss_slot` must already carry the frame term for mux pattern 1 -- the caller computes it the
@@ -280,7 +279,11 @@ bool nr_pdcch_blind_monitor_autodiscover_done(void)
  * does not). */
 #define AUTODISCOVER_OBS_CALLS 1000  // ~4-5s of DL-slot dwell on this cell's occasion rate --
                                      // long enough to average over occasion-to-occasion CCE hopping
-#define AUTODISCOVER_MIN_HITS  3     // measured: a real window clears the raw 0.836 threshold (not
+#define AUTODISCOVER_MIN_HITS  3
+#define AUTODISCOVER_HITS_PER_WINDOW 30   // mean hits/window required before deciding --
+                                          // makes MIN_HITS a real floor rather than noise
+#define AUTODISCOVER_MAX_OBS_CALLS 400000 // safety stop (~3 min of DL occasions) so an
+                                          // absent CORESET cannot accumulate forever     // measured: a real window clears the raw 0.836 threshold (not
                                      // just "wins outright") on a large fraction of calls; a window
                                      // that never once does so in 1000 calls is noise, not signal
 
@@ -331,8 +334,61 @@ bool nr_pdcch_blind_monitor_autodiscover_step(const void* rxdataF_symbol, int of
     }
   }
   s_obs_calls++;
-  if (s_obs_calls < AUTODISCOVER_OBS_CALLS) {
+  /* TERMINATION IS HIT-DRIVEN, NOT CALL-DRIVEN (fixed 2026-09-07). A fixed observation length in
+   * CALLS silently changes meaning with offered load: this function is invoked on every DL
+   * occasion (~2000/s) but only accumulates a hit when a PDCCH is actually present, so at 38
+   * grants/s only ~2 % of calls contribute. MEASURED at that load: 1000 calls yielded total_hits
+   * of 94 and 4 in two consecutive observation windows, against 45 windows to populate -- so which
+   * windows cleared AUTODISCOVER_MIN_HITS was decided by noise, and three consecutive live runs
+   * converged to three different footprints (84/168, 240/12, 12/240) against a truth of 0/270.
+   *
+   * Wait for enough EVIDENCE instead: a real full-band CORESET populates every window, so require
+   * the histogram to hold AUTODISCOVER_HITS_PER_WINDOW hits per window on average before deciding.
+   * That makes AUTODISCOVER_MIN_HITS a meaningful floor (a real window then expects ~10 hits, not
+   * ~2) and makes the dwell self-scaling: it ends quickly on a busy cell and simply waits longer on
+   * a quiet one, instead of returning a confident wrong answer. The call cap is a safety stop so a
+   * dead/absent CORESET cannot spin forever; reaching it resets and retries. */
+  int obs_total_hits = 0;
+  for (int w = 0; w < NR_PDCCH_MAX_CANDIDATE_WINDOWS; w++) {
+    obs_total_hits += s_hit_count[w];
+  }
+  const int obs_nw = (n_rb_carrier / 6 > 0) ? (n_rb_carrier / 6) : 1;
+  const int obs_hits_needed = obs_nw * AUTODISCOVER_HITS_PER_WINDOW;
+  if (s_obs_calls >= AUTODISCOVER_MAX_OBS_CALLS && obs_total_hits < obs_hits_needed) {
+    /* Waited long enough and the evidence never arrived -- reset rather than decide on noise. */
+    memset(s_hit_count, 0, sizeof(s_hit_count));
+    s_obs_calls = 0;
     return false;
+  }
+  if (s_obs_calls < AUTODISCOVER_OBS_CALLS || obs_total_hits < obs_hits_needed) {
+    return false;
+  }
+
+  /* DISCOVERHIST (ISAC_DISCOVER_DIAG=1): dump the WHOLE per-window hit histogram at the decision
+   * point. Added 2026-09-07 because three consecutive live runs converged to three DIFFERENT
+   * footprints (84/168, 240/12, 12/240) against a known truth of rb_offset=0 span_rb=270, all of
+   * them ending at RB 252 -- which the first_w/last_w rule alone cannot explain. Whether the fix is
+   * "the MIN_HITS threshold is too strict" or "there is a real artifact at the top of the band"
+   * depends on the SHAPE of this histogram, so measure it before changing the rule. */
+  {
+    static int s_hist_diag = -1;
+    if (s_hist_diag < 0) {
+      s_hist_diag = (getenv("ISAC_DISCOVER_DIAG") != NULL) ? 1 : 0;
+    }
+    if (s_hist_diag) {
+      char h[1400];
+      int p = 0, tot = 0;
+      const int nw = n_rb_carrier / 6;
+      for (int w = 0; w < nw && w < NR_PDCCH_MAX_CANDIDATE_WINDOWS; w++) {
+        tot += s_hit_count[w];
+        if (p < (int)sizeof(h) - 12) {
+          p += snprintf(h + p, sizeof(h) - p, "%u ", (unsigned)s_hit_count[w]);
+        }
+      }
+      printf("DISCOVERHIST calls=%d nw=%d total_hits=%d min_hits=%d hits: %s\n",
+             s_obs_calls, nw, tot, AUTODISCOVER_MIN_HITS, h);
+      fflush(stdout);
+    }
   }
 
   // Decision point: which windows repeatedly cleared the threshold over the observation window?
@@ -356,6 +412,26 @@ bool nr_pdcch_blind_monitor_autodiscover_step(const void* rxdataF_symbol, int of
     memset(s_hit_count, 0, sizeof(s_hit_count));
     s_obs_calls = 0;
     return false;
+  }
+  /* EXTENT IS NOT DIRECTLY OBSERVABLE (2026-09-07). PDCCH DM-RS exists only in the REGs of an
+   * ACTUALLY TRANSMITTED PDCCH, so this histogram measures the CCEs the scheduler used, NOT the
+   * configured CORESET width. MEASURED at 1350 hits (30/window): windows 8-11, 16-19, 24-29, 32-35
+   * and 42-44 are HARD ZERO while 0-7, 12-15, 20-23, 36-41 carry 19-142 hits each -- and the gNB's
+   * own log shows every grant at cce=0/cce=4, i.e. low CCEs only. More dwell cannot fill the gaps:
+   * the information is not on the air.
+   *
+   * But CCE numbering is computed over the CORESET's TOTAL REG count, so the width must be exact or
+   * every candidate's CCE index is wrong. Since the observed groups are scattered from window 0
+   * across most of the carrier, the allocation is a full-carrier CORESET whose unused groups simply
+   * went unobserved -- so snap the extent to the carrier when the evidence spans most of it.
+   *
+   * ponytail: this is a HEURISTIC, not a measurement, and it is only right for a full-band CORESET.
+   * The principled version is to SWEEP the extent (like Technique C already sweeps dci_length) and
+   * keep the value that yields genuine CRC-passing DCIs -- scoring by real decodes rather than by
+   * correlation. Do that before trusting this on a cell with a narrow dedicated CORESET. */
+  const int nw_total = n_rb_carrier / 6;
+  if (first_w == 0 && last_w >= (nw_total * 3) / 4) {
+    last_w = nw_total - 1;
   }
   const int rb_offset = first_w * 6;
   const int span_rb   = (last_w - first_w + 1) * 6;
@@ -422,13 +498,20 @@ bool nr_pdcch_blind_monitor_autodiscover_step(const void* rxdataF_symbol, int of
   g_cfg.dci10_mux_pattern = 0;  // only consulted for SIB1, meaningless here
   g_cfg.dci10_sib1        = 0;  // this is not SIB1 -- leaving CSS0's sib1=1 would apply the
                                 // mux-pattern default TDRA table to a dedicated 1_0 decode
-  g_cfg.energy_adapt_factor = 3.0f; // CSS0 zeroes this because CORESET#0's every-candidate-overlaps
-  g_cfg.energy_min          = 0.0f; // -a-grant density (8 CCEs/20ms SIB1) breaks the floor estimator
-                                     // (see autoconf_css0()'s own comment) -- that reasoning does not
-                                     // apply to a dedicated CORESET's far larger, sparser candidate
-                                     // population, where the gate is needed and this project's own
-                                     // manual dedicated config (noise_gates "0:2:500:0:3.0") runs it
-                                     // at 3x the measured noise floor.
+  /* ENERGY GATE: DELIBERATELY NOT SET HERE (2026-09-07). This used to hardcode
+   * energy_adapt_factor = 3.0f, which silently OVERRODE whatever pdcch_blind_monitor_noise_gates
+   * said in the conf -- so disabling the gate in the conf had no effect on the autodiscover path
+   * and was impossible to diagnose from the config surface.
+   *
+   * MEASURED with the override in place, energy gate nominally disabled in the conf:
+   * held[energy=17296703] persist=0 snr=0, accepts=0 -- the gate rejected EVERY candidate for a
+   * whole 240 s run, while the same run's raw decodes recovered 158899 genuine C-RNTI (0x462d)
+   * payloads. The adaptive floor estimator does not survive this cell's dedicated-CORESET
+   * candidate population, so a 3x-floor threshold throws away all the real grants.
+   *
+   * g_cfg already holds the conf's parsed value at this point, so leaving both fields untouched
+   * makes the gate an OPERATOR decision (parse_noise_gates()) rather than something autodiscover
+   * asserts. The manual dedicated conf still runs it at 3.0 by saying so explicitly. */
 
   /* Fields Technique A cannot determine (it detects OCCUPANCY, not CORESET/SS structure) but that
    * nr_pdcch_blind_monitor_process()'s existing occasion gate and run_occasion()'s CORESET builder
@@ -444,8 +527,9 @@ bool nr_pdcch_blind_monitor_autodiscover_step(const void* rxdataF_symbol, int of
    *    derive the real dedicated SS periodicity from occupancy alone, and scanning every slot is
    *    always a superset of any real (sparser) schedule -- costs CPU, not correctness.
    *  - ss_first_symbol = the symbol Technique A actually locked onto.
-   *  - dmrs_typeA_position=2: TS 38.331 spec default, same fallback this module uses elsewhere
-   *    when no dedicated PDSCH config is known (fill_dmrs_mask()'s own documented behaviour).
+   *  - dmrs_typeA_position: left exactly as CSS0 autoconf/the conf set it. It is the ASN.1 enum
+   *    (pos2 = 0), so the zero default is already the TS 38.331 spec default -- see the block
+   *    further down where an earlier "fix it up to 2" made it illegal.
    * ponytail: fixed "scan every slot" ceiling -- ~2000 extra occasions/s of CPU on a cell whose
    * real dedicated SS periodicity is sparser. Upgrade path: derive periodicity from the actual
    * inter-occupancy gap Technique A already measures, once that's shown to matter live. */
@@ -463,9 +547,13 @@ bool nr_pdcch_blind_monitor_autodiscover_step(const void* rxdataF_symbol, int of
   g_cfg.ss_monitoring_slot_offset        = 0;
   g_cfg.ss_duration                      = 1;
   g_cfg.ss_first_symbol                  = symbol;
-  if (g_cfg.dmrs_typeA_position == 0) {
-    g_cfg.dmrs_typeA_position = 2;
-  }
+  /* dmrs_typeA_position is the ASN.1 ENUM (NR_MIB__dmrs_TypeA_Position_pos2 = 0, pos3 = 1), NOT a
+   * symbol index. 0 IS the spec default (pos2), so it needs no fixing up -- and writing 2 here made
+   * blind_fill_dmrs_mask() match neither enum branch and return -1, rejecting EVERY genuine grant
+   * with "DM-RS symbol mask undefined for this TDRA entry / additional-position". Measured
+   * 2026-09-07 with ISAC_DCI_WATCH_RNTI: 100 % of real C-RNTI decodes rejected there in auto,
+   * while the manual conf (which pins 0 via pdcch_blind_monitor_bwp field 3) accepted 29,331.
+   * Leave the parsed/CSS0 value alone. */
 
   uint16_t bootstrap_rnti = 0;
   uint8_t  bootstrap_class = 0xFF;
@@ -2084,7 +2172,7 @@ bool nr_pdcch_blind_decode_and_extract(const int16_t* llr,
                                               rnti_min, rnti_max, NULL /* spec defaults */, out);
 }
 
-bool nr_pdcch_blind_decode_and_extract_ex(const int16_t* llr,
+static bool blind_decode_and_extract_11_inner(const int16_t* llr,
                                           uint8_t         aggregation_level,
                                           uint16_t        dci_length,
                                           uint16_t        bwp_size,
@@ -2262,6 +2350,48 @@ bool nr_pdcch_blind_decode_and_extract_ex(const int16_t* llr,
   return true;
 }
 
+/* ISAC_DCI_WATCH_RNTI=0x<rnti>: print WHY a GENUINE candidate is rejected. The existing
+ * last_reject= summary is useless for this because noise candidates that clear the RNTI range
+ * check outnumber real grants ~100:1, so it always reports a noise RNTI. Filtering on the live
+ * C-RNTI (re-read from the gNB log at capture time -- it churns on re-attach) makes the reason
+ * read off real grants only. Zero cost when unset: one cached getenv plus an integer compare. */
+bool nr_pdcch_blind_decode_and_extract_ex(const int16_t* llr,
+                                          uint8_t         aggregation_level,
+                                          uint16_t        dci_length,
+                                          uint16_t        bwp_size,
+                                          uint8_t         dmrs_typeA_position,
+                                          uint16_t        rnti_min,
+                                          uint16_t        rnti_max,
+                                          const nr_pdcch_blind_extract_opts_t* opts,
+                                          nr_pdcch_blind_result_t* out)
+{
+  const bool ok = blind_decode_and_extract_11_inner(llr, aggregation_level, dci_length, bwp_size,
+                                                    dmrs_typeA_position, rnti_min, rnti_max, opts, out);
+  static int s_watch = -1;
+  if (s_watch < 0) {
+    const char* e = getenv("ISAC_DCI_WATCH_RNTI");
+    s_watch = (e != NULL) ? (int)strtol(e, NULL, 0) : 0;
+  }
+  if (s_watch > 0 && out->rnti == (uint16_t)s_watch) {
+    static unsigned long n_hit = 0, n_ok = 0;
+    n_hit++;
+    if (ok) {
+      n_ok++;
+    }
+    if (n_hit <= 20 || (n_hit % 2000) == 0) {
+      printf("DCIWATCH n=%lu ok=%lu L=%u dci_len=%u bwp=%u tda_cnt=%d dmrs_pos=%u "
+             "reason=\"%s\" mcs=%u rv=%u ant=%u tda_idx=%u rb=[%u..%u)\n",
+             n_hit, n_ok, (unsigned)aggregation_level, (unsigned)dci_length, (unsigned)bwp_size,
+             (opts != NULL) ? opts->tda_count : -1, (unsigned)dmrs_typeA_position,
+             ok ? "ACCEPT" : (out->reject_reason ? out->reject_reason : "(null)"),
+             out->mcs, out->rv, out->n_dmrs_cdm_groups, out->tda_index,
+             out->start_rb, out->start_rb + out->num_rb);
+      fflush(stdout);
+    }
+  }
+  return ok;
+}
+
 // =============================================================================================
 // UPLINK: DCI formats 0_1 and 0_0. See the header's UL section for why this exists and, more
 // importantly, for why the field WIDTHS here must be reconciled against the deployment rather
@@ -2345,7 +2475,11 @@ static int32_t blind_ul_dmrs_mask(uint8_t num_symbols,
     return -1;
   }
   int col = add_pos + (mapping_type_is_b ? 4 : 0);
-  const int l0 = (dmrs_typeA_position == 2) ? 2 : 3;
+  // ASN.1 ENUM, not a symbol index: pos2 = 0, pos3 = 1 (NR_MIB__dmrs_TypeA_Position_pos2/_pos3),
+  // which is what mac->dmrs_TypeA_Position carries into autoconf_css0(). The old `== 2 ? 2 : 3`
+  // read it as a symbol number and so mapped pos2 (0) to l0 = 3 -- see the DL twin of this bug
+  // fixed 2026-09-07 in blind_fill_dmrs_mask()'s caller.
+  const int l0 = (dmrs_typeA_position == NR_ServingCellConfigCommon__dmrs_TypeA_Position_pos3) ? 3 : 2;
   int32_t l_prime;
   int32_t l0_shift;
   if (max_length <= 1) {

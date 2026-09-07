@@ -207,6 +207,58 @@ scored on a VALID run.
 
 ## PDSCH 0% CRC after the 2026-09-06 17:03 gNB restart — ELIMINATION TABLE
 
+### CORRECTION 2026-09-07 — the premise of this table is WRONG. Read this before using it.
+
+The table below is framed as "PDSCH broke at the 2026-09-06 17:03 gNB restart". Measured today,
+that framing does not survive: what changed is the **offered DL load**, not a gNB PDSCH parameter.
+
+Measured from the LIVE gNB log (resolved from the running process via `/proc/<pid>/fd` — the
+`/home/sens/gnb.log` on sens4 is a STALE July 8 file and reads as "no traffic"):
+
+| quantity | 82.8% run (xcheck1, 14:25) | 2026-09-07 |
+|---|---|---|
+| gNB DL grant rate | ~50-57 /s (receiver-side proxy) | **1385 /s** (7362 grants in 5.315 s, gNB timestamps) |
+| receiver PDSCH decode attempts | 11,446 / 200 s = 57 /s | 308,144 / 200 s = **1540 /s** |
+| crc_ok | 82.8 % | 0.1-0.2 % |
+
+The receiver is tracking essentially ALL of the real grants (1540/s observed vs 1385/s scheduled),
+so the 27x rise in `try` is NOT a flood of false accepts — it is real traffic. ~1400 grants/s is the
+already-root-caused pathological regime (see memory `passive-crc-bimodality-is-offered-load` and
+`bimodality-is-the-timing-runaway`: healthy 8/8 at 165 grants/s, and at ~1500 grants/s PBCH will not
+acquire at all). The gNB yaml is UNCHANGED since 2026-09-03 14:27, consistent with this: nothing
+about the cell config changed, the phone's iperf simply got heavier.
+
+Corrections to specific rows:
+- Row 7 ("4-antenna RT budget, PARTIAL") and row 9 ("residual CFO, PARTIAL") were reading a
+  load-limited receiver; their small improvements are real but were never going to close a 25x
+  overload.
+- The "best remaining lead" (a PDSCH-specific gNB parameter changed at the restart) is
+  DE-PRIORITISED — there is no evidence any PDSCH parameter changed, and the load delta is measured.
+
+Also retracted from this session, so it is not repeated:
+- "All recent runs are VOID, so the 0% is unreadable" — WRONG. `VOID_NO_CPI` is VACUOUS for these
+  confs: `sensing.enable = 0` forces `cpis=0`, and the 82.8% reference run xcheck1 carries the same
+  VOID_NO_CPI verdict. Do not use the run verdict to accept or reject a manual-conf CRC number.
+- "The RV field is read at the wrong bit offset (100% skip_rv)" — WRONG, and it came from reading
+  `try=0` runs that never got started. On runs that actually ran, `skip_rv` is <=2% of accepts
+  (578/26920, 52/307967), the gNB sends rv=0 on 4005/4011 grants, and gNB `payload_size=47` matches
+  the receiver's `dci_length=47`. The DCI layout is fine.
+
+NOT yet confirmed: that dropping the offered load back to ~150 grants/s restores ~80%. That is the
+one experiment that would close this, and it needs the traffic source throttled, not a code change.
+Acquisition CFO also varies -12711..-15156 Hz across these runs (~2.4 kHz spread, and
+`cfo-estimate-is-the-bimodality-root-cause` records >2600 Hz error giving exactly 0%), so CFO
+mis-lock remains a co-factor the load test must control for.
+
+**Thread placement (the 2026-09-07 instruction "move every kind of decoding and printing OUT of the
+PHY receive thread") is DONE for the manual conf and is NOT the cause:** `nrue.passive_rx.conf` now
+carries `pdcch_blind_monitor_pdsch = "1:1:0:1:16:3:20:9"` (3 consumers, depth 20, cores 9-11) and
+`pdcch_blind_monitor_scan_thread = "1:8:8"`, both confirmed live (`scanq[queued=316116 done=314999]`
+and the PDSCH pool start line). It carries no `pdcch_blind_monitor_dci01`, so no UL decode runs
+inline; `sensing.enable = 0`, so no ISAC tap runs; and the remaining `printf`s on that path are all
+one-shot or env-gated diagnostics. CRC stayed ~0% with all of it deferred, which is what rules the
+thread budget out as the current limiter.
+
 **The break is gNB-side and cannot be diffed.** `gnb.log` was RECREATED at the restart (its first
 line is `2026-09-06T17:03:47`), so the pre-restart PDSCH parameters are gone. Everything below is
 what was swept on the RECEIVER side, all with the same binary and conf that scored 82.8% before
@@ -680,3 +732,461 @@ counter increment per call, same convention as this project's other `ISAC_*` deb
   `nr_pdcch_coreset_map.c`, printing the raw correlation at the known-good RB 0 and the
   carrier-wide maximum regardless of whether either clears the significance bar — the instrument
   that produced this handover's decisive measurement.
+
+## CFO pre-seeding (`INITFO` / `--initial-fo`) — 2026-09-07
+
+### The defect
+
+This rig's true carrier offset is **~-13.6 kHz** (measured -13580..-13774 Hz on 4 consecutive good
+locks; -13.6 kHz at 3.45 GHz = **3.9 ppm**, which is large for an X410 and suggests an undisciplined
+reference on one end). A PSS/SSS estimator is unambiguous only within **+/- SCS/2 = +/-15 kHz** at
+30 kHz SCS, so the receiver was acquiring at **91 % of its estimator's unambiguous range** — the
+most fragile operating point available.
+
+Measured consequence, one 5-run arm at healthy load (2026-09-07, `throttle10`):
+
+| run | acquisition CFO | dl_tb |
+|---|---|---|
+| 1 | -13635 | 49 % |
+| 2 | -13580 | 83 % |
+| 3 | **-4933** | **0.0 %** (auto-rejected `VOID_NO_SIB1`, `cfotrk=4`) |
+| 4 | -13618 | 46 % |
+| 5 | -13774 | 42 % |
+
+and, from earlier arms the same day, two estimates that landed **outside** +/-15 kHz entirely
+(-15043, -15156), both scoring ~0.1 %. One run in five is lost to a mis-lock.
+
+### The fix, and why the sign is what it is
+
+`--initial-fo <hz>` (`executables/nr-uesoftmodem.h:78` -> `nrUE_params.initial_fo` ->
+`UE->initial_fo` -> `ssbInfo->freqOffset` at `nr_initial_sync.c:614`).
+
+It is NOT a hardware pre-tune. It is the CFO **accumulator seed**, and it means "the correction
+already applied". Two lines decide the semantics, and both were read before choosing the sign:
+
+- `nr_initial_sync.c:426-427` — `if (ssbInfo->freqOffset) compensate_freq_offset(rxdata, ...)`:
+  the scan buffer is **derotated by the seed** before the PSS/SSS search runs.
+- `nr_initial_sync.c:483` — `ssbInfo->freqOffset += pss_res.freq_offset + sss_res.freq_offset`:
+  the measured value **accumulates onto** the seed; it does not replace it.
+
+So the seed carries the **same sign as the offset the log reports**: `--initial-fo -13600` derotates
+the buffer by -13600, the search then measures a near-zero **residual** in the centre of its range,
+and the total comes out at ~-13600. Setting the opposite sign would drive the total to ~-27 kHz,
+far outside the unambiguous range — so do not "correct" the sign without re-reading those two lines.
+
+Harness knob (`captures/run_arm.sh`): `INITFO=-13600`, emitted as `${INITFO:+--initial-fo $INITFO}`.
+Unset = previous behaviour exactly.
+
+### Making it ADAPTIVE (not yet done — this is the point of the doc)
+
+The -13600 is a **pinned constant for this rig at this carrier**, and it is exactly the kind of
+hand-set number this project has been burned by before (see `[[los-bin-must-always-be-adaptive]]`
+and the `zero_range_guard` 7-vs-2 episode: a constant that was correct when written and silently
+wrong after the axis changed). It MUST NOT be inherited into another rig, carrier, or X410, and it
+will drift with temperature and with any reference change on either end.
+
+The value is already measured on every single run, so the adaptive version is cheap:
+
+1. Every acquisition prints `[UE %d] Measured Carrier Frequency offset %d Hz`
+   (`nr_initial_sync.c:767`), which the harness already greps as `Frequency offset <n> Hz`.
+2. **Derive, don't pin**: on the first try of an arm, run with no `INITFO`, read that number, and
+   use it as `INITFO` for the remaining tries of the same arm. That is a 3-line change in
+   `run_arm.sh`'s retry loop and needs no receiver change at all.
+3. **Reject the outlier, don't average it**: seed from the MEDIAN of the good locks, never the mean
+   — run 3 above (-4933) would drag a mean by ~1.7 kHz. A lock is "good" if it is within ~2.6 kHz
+   of the running median (the error beyond which decoding is exactly 0 %, per
+   `[[cfo-estimate-is-the-bimodality-root-cause]]`).
+4. **Persist across sessions** in a small file next to the harness (e.g. `captures/.cfo_seed`),
+   keyed by carrier + device serial, refreshed whenever a run's good-lock median moves more than a
+   few hundred Hz. Keyed, so it cannot silently follow the operator to a different cell.
+5. **The real fix is upstream of all of this**: the CFO is estimated ONCE at acquisition and never
+   revisited (`[[cfo-estimate-is-the-bimodality-root-cause]]`). Seeding makes acquisition land in
+   the robust centre; it does not track drift during the run. Continuous tracking off CSI-RS/DM-RS
+   is the structural answer, and `--cont-fo-comp` is only a partial one.
+
+### What this does NOT fix
+
+Nothing about the 42-83 % spread among runs that already locked correctly (runs 1/2/4/5 above), and
+nothing about full-band allocations, where a TB carries ~30 code blocks and TB-CRC collapses as
+q^n. Seeding removes the ~1-in-5 total-loss run; it does not raise the ceiling.
+
+### VALIDATED 2026-09-07 — `INITFO=-13600` is the standing interim fix
+
+5-run arm `initfo` (manual conf, `NANT=1 MRC=0 CONTFO=1 INITFO=-13600`, DUR=200), against the
+unseeded `throttle10` arm run immediately before it at the same load:
+
+| | unseeded | seeded |
+|---|---|---|
+| good locks | 4/5 (one at **-4933 Hz**, 8.7 kHz off, 0.0 %) | **5/5** |
+| acquisition CFO spread | 8.7 kHz outlier | **117 Hz** (-13710 .. -13827) |
+| mis-lock total-loss runs | 1 in 5 | **0 in 5** |
+
+**The mis-lock failure mode is eliminated.** Use `INITFO=-13600` on every run on this rig until the
+adaptive derivation below is built.
+
+Do NOT read the `dl_tb` columns of the two arms as a comparison: the unseeded arm's first two runs
+ran at the 10M traffic level (`dl_ldpc_ok` 13374 / 75413) and the seeded arm entirely at 2M
+(2348-2855). At matched load it is unseeded 42/46 % vs seeded 35-43 % — overlapping, and n is far
+too small to claim a difference either way. Seeding buys LOCK RELIABILITY, which is what it was for;
+it does not change decode quality and was never expected to.
+
+**Blocking measurement gap found in the same arm:** every run reports
+`pdsch_decode[try=0 crc_ok=0 (0.0%)]` because the deferred PDSCH consumer pool does not increment
+the in-line counters. Per-TB CRC — the ONLY honest score here, since `dl_tb` is segment-level and
+inflated by false-candidate decodes — is therefore unmeasurable on any deferred run. Fix that
+counter before running another arm, or every future result reads 0.0 % regardless of quality. This
+already cost most of 2026-09-07.
+
+## Adaptive DL chain — 2026-09-07 session record
+
+### FIXED (measured, reproducible)
+
+**1. CFO mis-lock — see the "CFO pre-seeding" section above.** `INITFO=-13600`, 5/5 good locks vs
+4/5, spread 117 Hz. Standing interim fix; adaptive derivation designed, not built.
+
+**2. Technique A convergence — was deciding on noise.** The observation window was a fixed 1000
+CALLS, but this function is invoked every DL occasion (~2000/s) and only accumulates a hit when a
+PDCCH is actually present. At 38 grants/s that is ~2 % of calls, so 1000 calls yielded `total_hits`
+of 94 and 4 in two consecutive windows against 45 windows to populate. Three consecutive runs
+converged to three DIFFERENT footprints (84/168, 240/12, 12/240) against a truth of 0/270.
+Fixed by making termination HIT-driven (`AUTODISCOVER_HITS_PER_WINDOW`, mean hits/window before
+deciding) with a call cap as a safety stop. Result: **0/270 exact, reproducible 2/2**, dwell
+self-scaling to 7,602-22,906 calls depending on load.
+
+**3. The energy gate could not be turned off from the conf.** `nr_pdcch_blind_monitor_autodiscover_step()`
+hardcoded `g_cfg.energy_adapt_factor = 3.0f` AFTER convergence, silently overriding
+`pdcch_blind_monitor_noise_gates`. MEASURED with the override live: `held[energy]=17,296,703`,
+`accepts=0` for a whole 240 s run, while the SAME run's polar decode recovered **158,899 genuine
+C-RNTI payloads**. Removed the override; the gate is now an operator decision. After the fix
+`held[energy]=0`.
+
+### STILL BROKEN — the single remaining blocker
+
+**Payloads pass the polar CRC but are never ACCEPTED.** With every gate off
+(`held[energy/persist/snr/mismatch]` all 0), `accepts=0` — yet FULLCRC shows 158,899 decodes whose
+CRC equals the live C-RNTI. The loss is inside `nr_pdcch_blind_decode_and_extract_ex()`, between
+"CRC recovered" and "accepted". The `dci_length` sweep fails at the identical place
+(`len47_passes=0/21648`, `best_len=-1`) even though every genuine decode in the same run lands at
+`dci_len=47` -- so these are very likely ONE bug, and fixing it unblocks steps 3, 4 and 5 together.
+
+Eliminated so far, do not re-test: the `plausible` field-sanity check (`implausible=0`, never
+fires); uninitialised LLRs (`pdcch_e_rx` filled at :1085, sweep reads at :1196); candidate stride
+(both walks use the same `n_re_cand`); in-place equalisation (the `eqp`/`eq` pointers are read-only
+diagnostics); the extraction field model (`g_cfg.extract` is NOT reset by autodiscover, `bwp_size`
+=273, `tda_count`=2 -> 47 bits, matching the manual conf exactly); and the RNTI range check
+(`out->rnti` truncates to 16 bits in logs while the check uses the full 24-bit CRC -- a noise
+candidate's nonzero upper bits are correctly rejected, so a log line showing an in-range `rnti=`
+with reason "outside plausible RNTI range" is NOT a contradiction).
+
+Next diagnostic: log `reject_reason` on the MAIN path (not just the sweep's SCOREDIAG) for
+candidates whose CRC upper bits are 0 -- i.e. only for genuine decodes -- so the reason is read off
+real grants rather than the empty CCEs that dominate any unfiltered sample.
+
+### Scoring traps that cost time today
+
+- **Re-read the live C-RNTI before EVERY scoring pass.** It changed 0x4625 -> 0x462d mid-session;
+  a stale grep reported "0 genuine decodes" on a run that had 158,899. See
+  `[[gnb-rnti-recheck-every-prompt]]`.
+- **`accepts=` is not a decode count and `try=0` is not "nothing decoded"**: under thread deferral
+  the in-line `pdsch_decode[try=/crc_ok=]` counters stay 0 because the consumer pool does not
+  increment them, so every deferred run reads 0.0 % regardless of quality. Fix that counter before
+  running another scored arm.
+- `VOID_NO_CPI` is vacuous when `sensing.enable = 0` -- the 82.8 % reference run carries it too.
+
+### Status
+
+DL adaptive ~65 %: steps 1 (sync) and 2 (CORESET position) fixed and reproducible; step 3 (DCI
+decode) recovers 158,899 genuine payloads but nothing downstream consumes them; steps 4 (RNTI
+bootstrap) and 5 (PDSCH) have never run end to end. UL adaptive 0 %.
+
+**Caveat on step 2, deliberately not hidden:** the full-carrier extent is a HEURISTIC (snap to the
+carrier when `first_w == 0` and the span covers >= 3/4 of it), not a measurement -- PDCCH DM-RS
+exists only where a PDCCH was actually transmitted, so the configured CORESET width is not
+observable at low load (windows 8-11, 16-19, 24-29, 32-35, 42-44 measured HARD ZERO at 1350 hits
+while the gNB scheduled every grant at cce=0/4). It is correct only for a full-band CORESET, and it
+does not fire at all when `first_w != 0` -- which happened in 1 of 2 runs once the energy gate was
+disabled and noise entered the histogram. The principled version sweeps the extent and scores by
+genuine decodes, like Technique C does for `dci_length`.
+
+---
+
+# RESOLVED 2026-09-07 (later) — "THE ONE QUESTION" is ANSWERED, and steps 1-4 now run unattended
+
+**Read this before the section below it, which is the (still-accurate) statement of the problem
+this section closes.**
+
+## Root cause: `dmrs_typeA_position` is an ASN.1 ENUM, not a symbol index
+
+`NR_MIB__dmrs_TypeA_Position_pos2 = 0`, `pos3 = 1` — and `mac->dmrs_TypeA_Position` carries exactly
+that enum into `autoconf_css0()`. The autodiscover convergence block "fixed up" a zero to **2**,
+believing 2 meant symbol 2 (`if (g_cfg.dmrs_typeA_position == 0) g_cfg.dmrs_typeA_position = 2;`).
+`blind_fill_dmrs_mask()` matches neither enum branch on 2 and returns `-1`, so EVERY genuine grant
+died at `"DM-RS symbol mask undefined for this TDRA entry / additional-position"`. The manual conf
+pins **0** through `pdcch_blind_monitor_bwp = "0:273:0:47"` (field 3) — that single value is the
+entire manual-vs-auto difference.
+
+**None of this document's three ranked suspects was it.** `tda_count` was 2 in both confs, the size
+check passed, and the field-value checks were never reached. Suspect 3 named the right FIELD for the
+wrong reason.
+
+Two sibling defects from the same units confusion, fixed in the same pass:
+- `blind_ul_dmrs_mask()` used `(dmrs_typeA_position == 2) ? 2 : 3`, i.e. it mapped pos2 (enum 0) to
+  `l0 = 3` — the same bug INVERTED, on the UL path.
+- Two comments asserting the field is "2 or 3".
+
+## The diagnostic that found it, and why the existing one could not
+
+New `ISAC_DCI_WATCH_RNTI=0x<rnti>` (a thin wrapper around
+`nr_pdcch_blind_decode_and_extract_ex()`): prints `out.reject_reason` plus the extracted fields ONLY
+for candidates whose CRC-recovered RNTI matches the live C-RNTI. **This filter is the whole point** —
+noise candidates that clear the RNTI range check outnumber real grants ~100:1, which is why the
+pre-existing `last_reject=` periodic summary always reported a noise RNTI and was useless here.
+Wired into `captures/run_arm.sh` as `DCIWATCH=<rnti>` (plus `FORCEDCILEN=`, which was previously
+not passed through `sudo env`'s scrub).
+
+Measured, before and after, same rig, same cell, same C-RNTI `0x462d`:
+
+| | before | after |
+|---|---|---|
+| genuine candidates | **100 % rejected**, `mcs=0 rv=0 rb=[0..0)` (rejected before any field populated) | **100 % ACCEPT**, `mcs=25 rv=0 ant=1` |
+
+`mcs=25 rv=0` matches the gNB's own logged grants.
+
+## Technique C (dci_length) needed NO fix — it was the same bug
+
+The sweep calls the same extractor with the same `cfg->dmrs_typeA_position`, so it inherited the fix
+exactly as this document predicted ("treat them as ONE bug"). Was `len47_passes=0/21648`,
+`best_len=-1`. Now, with NO `dci_length_override` and NO bootstrap RNTI:
+
+```
+SENSING: Phase 3 autodiscover -- CORESET footprint rb_offset=0 span_rb=270 bootstrap_rnti=0x0
+SENSING: Phase 3 autodiscover -- dci_length locked at 47 (bootstrap_rnti=0x0, occasions_fed=50)
+```
+
+`47` matches the gNB's own `payload_size=47`, found in 50-63 occasions from the accumulated
+chance-floor significance test ALONE. The chicken-and-egg with Technique B is therefore not on the
+critical path: the sweep does not need a bootstrap RNTI on this cell.
+
+## Technique B had NO CONSUMER — that, not the chicken-and-egg, is why it was inert
+
+`bootstrap_rnti` was read in exactly two places (`nr_pdcch_dci_length_sweep_feed()`'s call site and
+the CORESET-footprint log line), and **both run BEFORE it can possibly latch**. So even once accepts
+started working it confirmed an RNTI and nothing ever used it. Fixed by adding the missing consumer
+in `run_occasion()`: once confirmed, DCI **1_1 and 0_1** acceptance narrows from the 65518-wide
+plausibility range to an **equality check** — the same test the live non-blind path uses. Format 1_0
+is deliberately left wide (it carries SI-/RA-/P-RNTI, which are not this UE's C-RNTI).
+
+**Self-healing by construction, so it needs no knob and cannot be left pinned**: only a real sighting
+refreshes the confirmation, so when the UE re-attaches under a new C-RNTI the old one stops being
+seen, goes stale after `RNTI_BOOTSTRAP_STALE_SLOTS` (~10 s), and the scan reverts to the configured
+wide range and re-bootstraps.
+
+Live, fully automatic (300 s, `nrue.passive_rx.autodiscover.conf`, no override of any kind):
+
+```
+SENSING: blind PDCCH -- C-RNTI bootstrapped to 0x462d (class=0); DCI 1_1/0_1 acceptance
+         narrowed from [0x1..0xffef] to an equality check
+```
+
+`0x462d` is EXACTLY the live C-RNTI read from the gNB log at capture time — self-discovered with no
+gNB log and no manual config.
+
+| | auto, before the consumer | auto, with the consumer |
+|---|---|---|
+| `accepts` | 232,573 | 213,639 |
+| genuine `crc=0x462d upper=0x0` | 215,241 | 212,755 |
+| **false accepts** | 17,332 (7.5 %) | **884 (0.41 %)** — 18x fewer |
+| `held[persist]` | 8,379 | 171 |
+| `held[mismatch]` | 9,156 | 777 |
+| `LDPCDIAG ok / seg_fail` | 49,337 / 165,091 | 125,735 / 86,533 |
+
+**Read the LDPC row with care.** The false-accept collapse is directly attributable (same binary,
+same conf, only the consumer differing). The LDPC improvement is CONSISTENT with no longer feeding
+PDSCH garbage allocations derived from false DCIs, but these are two separate captures and this rig's
+offered load moves between runs — do NOT quote it as a measured effect size without an alternating
+A/B. See `[[passive-rx-needs-5-runs-per-arm]]`.
+
+## Status after this session
+
+Steps 1-4 (footprint -> dci_length -> C-RNTI bootstrap -> genuine accept + PDSCH decode) now run
+**end to end, unattended, with every discovered value matching ground truth exactly** — the "is
+Phase 3 done" question this document opens with. What remains open is unchanged and listed below:
+the full-carrier extent is still a HEURISTIC (not a measurement), `pdsch_decode[try=]` still reads 0
+on any deferred run (the consumer pool does not increment the in-line counter, so score PDSCH by
+`LDPCDIAG` only), the full-band TB-CRC ceiling (q^n) is a separate problem, and UL adaptive discovery
+is still 0 %.
+
+Files changed (worktree `openairinterface5g-total-passive-ue`):
+- `openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c` — the enum fix; the inverted UL twin in
+  `blind_ul_dmrs_mask()`; two corrected comments; the `ISAC_DCI_WATCH_RNTI` wrapper.
+- `openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c` — the Technique B consumer.
+- `tests/passive_rx/captures/run_arm.sh` — `DCIWATCH` / `FORCEDCILEN` passthrough
+  (backup `run_arm.sh.bak-dciwatch`).
+
+71/71 offline tests pass; `nr-uesoftmodem` builds and links clean.
+
+---
+
+# HANDOVER 2026-09-07 — THE ONE QUESTION: why does MANUAL accept and AUTO not, when AUTO's extracted values are correct?
+
+**Read this section first. Everything else in this document is context for it.**
+
+## The observation, measured back-to-back on the same rig, same cell, same minute
+
+| | manual (`nrue.passive_rx.conf`) | autodiscover (`nrue.passive_rx.autodiscover.conf`) |
+|---|---|---|
+| run | `captures/manctl_112113` | `captures/final_111450` |
+| `accepts=` | **29,331** | **0** |
+| genuine decodes (`FULLCRC upper=0x0` AND `crc==live C-RNTI 0x462d`) | 27,434 | **127,242** |
+| `held[energy]` | 8,934,876 (gate ON) | **0** (every gate OFF) |
+| `held[persist/snr/mismatch]` | 1013 / 0 / 0 | **0 / 0 / 0** |
+| `dci_length` | 47 (pinned by conf) | 47 (`ISAC_FORCE_DCI_LEN=47`, confirmed in log: "dci_length FORCED to 47") |
+| PDSCH | `LDPCDIAG ok=0 seg_fail=28197` | `ok=0 seg_fail=0` |
+
+**AUTO DECODES 4.6x MORE GENUINE PAYLOADS THAN MANUAL AND ACCEPTS NONE OF THEM.** 127,242 payloads
+whose polar CRC equals the live C-RNTI, at the known-correct `dci_length=47`, with NOT ONE gate
+enabled (every `held[]` counter is zero), produce `accepts=0`. The rejection is therefore INSIDE
+`nr_pdcch_blind_decode_and_extract_ex()` (`nr_pdcch_blind_monitor.c`, ~line 2180-2260), between
+"CRC recovered" and "accepted", and it is NOT a gate, NOT the radio, NOT the signal, NOT the CFO,
+and NOT the decoder.
+
+## What this rules out (do not re-test — each was measured this session)
+
+- **The radio / rig / signal.** Manual accepts 29,331 on the SAME radio minutes apart. Closed.
+- **CFO.** `INITFO=-13600` gives 5/5 good locks; both runs locked at ~-13.7 kHz.
+- **The energy gate.** Now genuinely off in auto (`held[energy]=0`, was 17,296,703 — see the
+  override bug fixed this session). Auto still accepts 0 with it off; manual accepts 29,331 with it
+  ON. The gate is not the differentiator in either direction.
+- **`dci_length`.** Forced to 47 in auto and confirmed in the log; every genuine decode in every run
+  lands at 47. The formula fallback of 48 is NOT what these runs used.
+- **The `plausible` flag.** `implausible=0` — that check never fires.
+- **Uninitialised / stale LLRs.** `pdcch_e_rx` is filled at `nr_pdcch_blind_monitor_rt.c:1085`; the
+  sweep reads it at :1196; the main path at :1274+.
+- **Candidate stride.** The sweep's walk and the main path's `e_rx_cand_idx` walk use an identical
+  `n_re_cand`.
+- **In-place equalisation.** The `eqp`/`eq` pointers near :1362 are read-only diagnostics.
+- **The RNTI range check.** `out->rnti` is TRUNCATED to 16 bits for logging while the check uses the
+  full 24-bit CRC, so a log line showing an in-range `rnti=` beside reason "outside plausible RNTI
+  range" is NOT a contradiction — that is a noise candidate with nonzero CRC upper bits, correctly
+  rejected.
+- **`g_cfg.extract` being reset by autodiscover.** It is NOT reset; the conf's `tda`/`dci_bits`/
+  `dmrs` survive into the auto path.
+
+## The remaining suspect list, in priority order
+
+The extractor's own rejection points are at `nr_pdcch_blind_monitor.c:2125, 2130, 2155, 2186, 2199,
+2226`, and EVERY ONE sets `out->reject_reason`. The reason string for a GENUINE candidate is the
+single fact that closes this. Candidates, most likely first:
+
+1. **`"configured DCI field widths exceed dci_length"`** (:2199). Fires when
+   `nr_pdcch_blind_dci_size_ex(bwp_size, opts) > dci_length`. With the conf's opts this computes
+   15 + riv 16 + tda 1 + harq 4 + dai 2 + pdsch_to_harq 3 + ant_ports 4 + srs 2 = **47**, which is
+   NOT > 47 and should pass. **But that arithmetic assumes `opts->tda_count == 2`.** If the auto
+   path reaches the extractor with `tda_count == 0`, `f.tda` DEFAULTS TO 4 (`blind_field_bits()`),
+   the total becomes 50 > 47, and EVERY genuine candidate is rejected with this exact reason. This
+   fits the symptom perfectly (systematic, 100 %, independent of signal quality).
+2. **Field-value checks after extraction** — `riv_to_prb_alloc()` bounds
+   (`num_rb < 1 || num_rb > n_RB_DLBWP - start_rb`), the TDA index vs `tda_count`, and the
+   antenna-ports table (4 bits = 0..15 indexing a 12-row table `g_table_7_3_2_3_3_1`, so 12-15 are
+   invalid). A wrong `bwp_size` or `tda_count` makes these reject systematically.
+3. **`dmrs_typeA_position`.** Auto hardcodes `2` (spec default) at ~`nr_pdcch_blind_monitor.c:533`;
+   manual sets `pdcch_blind_monitor_dmrs = "2:1"`. CONFIRM these resolve to the same value — they
+   are parsed by different code paths and have not been compared.
+
+## The next two steps, in order (both are prepared)
+
+**Step 1 — diff the EFFECTIVE derived config, manual vs auto.** The `PDCCHCFG` trace already exists
+(`CFGTRACE=<slot>` in `captures/run_arm.sh`). Run both confs with it and diff field by field:
+`bwp_size`, `bwp_start`, `dci_length`, `tda_count`, `dmrs_typeA_position`, `coreset_freq_domain`,
+`coreset_duration`, `coreset_reg_bundle_size`, `ss_*`. They should agree; one will not, and that is
+the bug. This is cheaper than any instrumentation and most likely names the field outright.
+
+**Step 2 — if the diff is clean, log the reject reason for the GENUINE candidate only.** A patch is
+written but NOT built:
+`/tmp/claude-1000/-home-sens-NICOLA/245fb5e5-eead-4728-a059-9c3a60dae92f/scratchpad/patch_watch.py`
+(also reproducible in ten lines). It adds `ISAC_DCI_WATCH_RNTI=0x462d` at
+`nr_pdcch_blind_monitor_rt.c:1541` and prints `out.reject_reason` plus the extracted fields ONLY for
+candidates whose recovered RNTI matches. **This filter is essential**: noise candidates outnumber
+genuine ones ~100:1, which is exactly why the existing `last_reject=` periodic summary is useless
+here (it reported an empty reason and a noise RNTI `0x548a`).
+
+Repro:
+```
+# auto  (0 accepts)
+ARM=x CONF=/home/sens/NICOLA/nrue.passive_rx.autodiscover.conf DUR=180 TRIES=1 \
+  NANT=1 MRC=0 CONTFO=1 INITFO=-13600 FORCEDCILEN=47 FULLCRC=1 DISCOVERDIAG=1 bash run_arm.sh
+# manual (29,331 accepts)
+ARM=y CONF=/home/sens/NICOLA/nrue.passive_rx.conf DUR=180 TRIES=1 \
+  NANT=1 MRC=0 CONTFO=1 INITFO=-13600 FULLCRC=1 bash run_arm.sh
+```
+
+## Scoring rules the next agent MUST follow (each of these cost real time today)
+
+- **Re-read the live C-RNTI from the gNB log before EVERY scoring pass.** It changed 0x4625 ->
+  0x462d mid-session and a stale grep reported "0 genuine decodes" on a run that had 158,899.
+  Resolve the log from the RUNNING PROCESS (`/proc/<pid>/fd` on sens4 -> currently
+  `/home/sens/NICOLA/gnbLogs/gnb.log`); `/home/sens/gnb.log` is a STALE July 8 file that reads as
+  "no traffic".
+- **`accepts=` is not a decode count, and `try=0` does not mean "nothing decoded".** Under thread
+  deferral the in-line `pdsch_decode[try=/crc_ok=]` counters stay 0 because the consumer pool never
+  increments them, so a deferred run reads 0.0 % regardless of quality. **Fixing that counter is a
+  prerequisite for any scored PDSCH arm.**
+- **Score decodes ONLY by `FULLCRC` with BOTH `upper=0x0` AND `crc == live C-RNTI`.**
+- **`VOID_NO_CPI` is vacuous when `sensing.enable = 0`** — the 82.8 % reference run carries it too.
+- Never build during a capture; `pgrep -x nr-uesoftmodem` must be empty.
+
+## PIPELINE STATUS
+
+### Working
+1. **Sync / CFO acquisition** — `INITFO=-13600` seeds acquisition off the +/-SCS/2 ambiguity edge
+   (this rig sits at 91 % of it). 5/5 good locks vs 4/5, spread 8.7 kHz -> 117 Hz. Documented in the
+   "CFO pre-seeding" section, including the adaptive derivation (not built).
+2. **Technique A — CORESET position** — hit-driven termination replaced the fixed 1000-CALL window.
+   Converges to `rb_offset=0 span_rb=270` EXACTLY and reproducibly (2/2), dwell self-scaling
+   7,602-22,906 calls with load. Was three runs / three different wrong answers.
+3. **DCI decode (raw)** — 127,242-158,899 genuine C-RNTI payloads per 180-240 s run in AUTO,
+   4.6x manual's rate. The decoder is not the problem.
+4. **Manual DL path** — 29,331 accepts, still works end to end at the DCI level.
+
+### Missing / broken
+1. **AUTO accept: 0.** THE blocker above. Blocks 2, 3 and 4 below.
+2. **RNTI bootstrap (Technique B)** — `bootstrap_rnti=0x0` always. It is fed at
+   `nr_pdcch_blind_monitor_rt.c:1609`, which is AFTER the accept path, so it cannot latch while
+   accepts are 0. Expected to fix itself once 1 is fixed; unverified.
+3. **`dci_length` sweep (Technique C)** — `len47_passes=0/21648`, `best_len=-1`, while every genuine
+   decode in the same run is at 47. It fails at the SAME extractor call as 1, so treat them as ONE
+   bug. Currently bypassed with `ISAC_FORCE_DCI_LEN=47`.
+4. **PDSCH under autodiscover** — `LDPCDIAG ok=0 seg_fail=0`, never invoked (no accepts to feed it).
+5. **PDSCH generally** — 0 % on the manual control too, but that run had a bad lock
+   (`cfotrk=7 nack=1075 VOID_NO_SIB1`), so it is a degraded capture and NOT evidence. Needs a clean
+   manual rerun. Note the seed reduces mis-locks but does not eliminate them.
+6. **UL adaptive** — 0 %, not started.
+7. **Full-band PDSCH ceiling (separate problem, do not conflate).** Per-code-block quality is
+   q ~= 0.82 and has been stable all along; TB-CRC = q^n, and n goes 1 -> ~30 when the scheduler
+   switches to full-band allocations under load, which is why TB CRC collapses 82.8 % -> 0.15 %
+   while the receiver is unchanged. Throttling traffic hides this by shrinking TBs; it does not fix
+   it. The real fix is PER-CODE-BLOCK data-aided reconstruction (accept the CBs that pass their own
+   CRC, mask the rest) — for sensing you need X at the REs, not a delivered TB, so 29/30 good CBs
+   are 97 % usable. NOT built.
+
+### Caveat that must not be lost
+**Technique A's full-carrier extent is a HEURISTIC, not a measurement** (snap to the carrier when
+`first_w == 0` and the span covers >= 3/4 of it). PDCCH DM-RS exists ONLY where a PDCCH was actually
+transmitted, so the CONFIGURED CORESET width is not observable at low load: at 1350 hits, windows
+8-11, 16-19, 24-29, 32-35 and 42-44 measured HARD ZERO while the gNB scheduled every grant at
+cce=0/4. It is correct only for a full-band CORESET, and it does NOT fire when `first_w != 0` —
+which happened in 1 of 2 runs once the energy gate was disabled and noise entered the histogram.
+The principled version sweeps the extent and scores by genuine decodes, exactly as Technique C is
+meant to do for `dci_length`.
+
+## Code changed this session (worktree `openairinterface5g-total-passive-ue`, uncommitted)
+- `nr_pdcch_blind_monitor.c` — hit-driven autodiscover termination
+  (`AUTODISCOVER_HITS_PER_WINDOW=30`, `AUTODISCOVER_MAX_OBS_CALLS`); `DISCOVERHIST` per-window
+  histogram dump; full-carrier extent snap; **removed the `energy_adapt_factor = 3.0f` override that
+  silently ignored `pdcch_blind_monitor_noise_gates` in the auto path**.
+- `nr_pdcch_blind_monitor_rt.c` — `SCOREDIAG` sweep rejection breakdown (now inert when
+  `ISAC_FORCE_DCI_LEN` is set, since that skips the sweep).
+- `captures/run_arm.sh` — new `INITFO` knob (`--initial-fo`) and `DCIFIELDS` knob. Backups:
+  `run_arm.sh.bak-initfo`, `.bak-dcifields`.
+- `nrue.passive_rx.autodiscover.conf` — energy gate disabled (`noise_gates = "0:2:500:0:0"`).
+  Backup: `.bak-gate`.

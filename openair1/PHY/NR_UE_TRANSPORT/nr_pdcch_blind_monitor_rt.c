@@ -392,6 +392,34 @@ static bool nr_pdcch_autodiscover_length_scorer(int dci_length, int trial_idx, u
   const bool ok = nr_pdcch_blind_decode_and_extract_ex(tmp_e, c->L, (uint16_t)dci_length, ctx->bwp_size,
                                                        ctx->dmrs_typeA_position, ctx->rnti_min, ctx->rnti_max,
                                                        ctx->extract_opts, &out);
+  /* SCOREDIAG (ISAC_DISCOVER_DIAG=1), added 2026-09-07. The sweep reports len47_passes=0 out of
+   * 21648 trials while the MAIN decode path recovers genuine C-RNTI payloads at dci_len=47 in the
+   * same run -- so the two disagree about the same length on the same LLRs. The main path accepts
+   * on CRC alone; this scorer additionally demands out.plausible. Split the two rejection reasons
+   * so the next run says which one fires, instead of guessing at the field-sanity check. */
+  {
+    static int s_sd = -1;
+    if (s_sd < 0) {
+      s_sd = (getenv("ISAC_DISCOVER_DIAG") != NULL) ? 1 : 0;
+    }
+    if (s_sd && dci_length == 47) {
+      static unsigned long n_try = 0, n_notok = 0, n_notplaus = 0, n_pass = 0;
+      n_try++;
+      if (!ok) {
+        n_notok++;
+      } else if (!out.plausible) {
+        n_notplaus++;
+      } else {
+        n_pass++;
+      }
+      if ((n_try % 5000) == 1) {
+        printf("SCOREDIAG len47 try=%lu decode_fail=%lu implausible=%lu pass=%lu rnti=0x%x reason=%s\n",
+               n_try, n_notok, n_notplaus, n_pass, (unsigned)out.rnti,
+               out.reject_reason ? out.reject_reason : "(none)");
+        fflush(stdout);
+      }
+    }
+  }
   if (!ok || !out.plausible) {
     return false;
   }
@@ -1241,6 +1269,39 @@ void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_pr
   // comment for why the two cannot share a decode). rel15->CCE[64]/L[64] bounds the candidate count.
   nr_pdcch_blind_cand_task_t cand_task[128];
   int nof_tasks = 0;
+
+  /* ---- Technique B CONSUMER (2026-09-07). Until now nothing downstream read the bootstrapped
+   * C-RNTI: its only two consumers (the dci_length sweep and the CORESET-footprint log line) both
+   * run BEFORE it can possibly latch, so it confirmed an RNTI and then sat inert. Once the live
+   * C-RNTI is known, the plausibility RANGE check collapses to an EQUALITY check for the two
+   * formats addressed to that UE (1_1 DL, 0_1 UL) -- which is what the live, non-blind path does.
+   * That takes the false-accept rate from the "plausible" field-sanity heuristic over a 65518-wide
+   * range down to a genuine CRC match.
+   *
+   * Format 1_0 is deliberately LEFT WIDE: it carries SI-/RA-/P-RNTI, which are not this UE's
+   * C-RNTI and would be rejected outright by a narrowed range.
+   *
+   * SELF-HEALING, so it needs no escape hatch: only a real sighting refreshes the confirmation, so
+   * when the UE re-attaches under a new C-RNTI the old one stops being seen, goes stale after
+   * RNTI_BOOTSTRAP_STALE_SLOTS (~10 s), and the scan reverts to the configured wide range and
+   * re-bootstraps. Never pinned. */
+  uint16_t boot_rnti = 0;
+  {
+    uint16_t r = 0;
+    uint8_t  cls = 0xFF;
+    uint32_t age = 0;
+    if (nr_pdcch_blind_monitor_confirmed_rnti(abs_slot, &r, &cls, &age)) {
+      boot_rnti = r;
+      static uint16_t s_announced = 0;
+      if (r != s_announced) {
+        s_announced = r;
+        LOG_A(PHY,
+              "SENSING: blind PDCCH -- C-RNTI bootstrapped to 0x%x (class=%u); DCI 1_1/0_1 "
+              "acceptance narrowed from [0x%x..0x%x] to an equality check\n",
+              r, (unsigned)cls, cfg->rnti_min, cfg->rnti_max);
+      }
+    }
+  }
   const uint64_t btim_t_pre = btim_on ? btim_now() : 0;
   {
     int e_rx_cand_idx = 0;
@@ -1386,7 +1447,12 @@ constdiag_done:;
           .dci10_ctx           = NULL,
       };
       if (scan_11 && nof_tasks < (int)(sizeof(cand_task) / sizeof(cand_task[0]))) {
-        cand_task[nof_tasks++] = base_task;
+        cand_task[nof_tasks] = base_task;
+        if (boot_rnti != 0) {  // see the Technique B CONSUMER comment above
+          cand_task[nof_tasks].rnti_min = boot_rnti;
+          cand_task[nof_tasks].rnti_max = boot_rnti;
+        }
+        nof_tasks++;
       }
       if (scan_10 && nof_tasks < (int)(sizeof(cand_task) / sizeof(cand_task[0]))) {
         cand_task[nof_tasks]            = base_task;
@@ -1400,6 +1466,10 @@ constdiag_done:;
         cand_task[nof_tasks].dci_length = dci01_length;
         cand_task[nof_tasks].ul_scan    = 1;
         cand_task[nof_tasks].ul_opts    = &cfg->ul;
+        if (boot_rnti != 0) {  // same UE, same C-RNTI -- see the comment above
+          cand_task[nof_tasks].rnti_min = boot_rnti;
+          cand_task[nof_tasks].rnti_max = boot_rnti;
+        }
         nof_tasks++;
       }
       e_rx_cand_idx += n_re_cand;
