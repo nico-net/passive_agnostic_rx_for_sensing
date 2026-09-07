@@ -277,6 +277,17 @@ static _Atomic uint64_t g_llr_sat[2]   = {0, 0};
 static _Atomic uint64_t g_shape_n[3]   = {0, 0, 0};
 static _Atomic uint64_t g_shape_tbs[3] = {0, 0, 0};
 static _Atomic uint64_t g_shape_rb[3]  = {0, 0, 0};
+/* Per-TB outcome histogram over ALLOCATION SIZE (2026-09-07). The SHAPE means above already show
+ * that failing TBs are the SMALLER allocations in every run measured, which REFUTES the `q^n`
+ * code-block-count explanation (failures have FEWER blocks, not more). What a mean cannot answer is
+ * the shape of that dependence, and the two candidates predict different pictures:
+ *   link margin       -> a smooth gradient, and the crossover MOVES between runs
+ *   a code/shape bug  -> a step, and the decodable set is the SAME set every run
+ * The second is what the run-to-run data hints at: across a 3.4x CRC swing the DECODED population
+ * barely moved (mean_prb 21.2/21.5/18.4/20.8) while the FAILED one grew (11.9 -> 17.0). 16 buckets
+ * of 18 RB spans the 273 PRB carrier. */
+#define NR_PDSCH_RBHIST_BINS 16
+static _Atomic uint64_t g_rbhist[3][NR_PDSCH_RBHIST_BINS];
 static _Atomic uint64_t g_shape_rv[3]  = {0, 0, 0};
 static _Atomic uint64_t g_shape_G[3]   = {0, 0, 0};
 /* Segmentation parameters, binned by outcome. §34.4's hypothesis: filler bits F are ZEROS by
@@ -395,6 +406,25 @@ void nr_pdsch_passive_ldpc_stats_dump(void)
           k ? "DECODED" : "FAILED  ",
           100.0 * (double)atomic_load(&g_llr_posbit[k][0]) / (double)ns,
           100.0 * (double)atomic_load(&g_llr_posbit[k][1]) / (double)nm);
+  }
+  {
+    /* RBHIST: per-TB CRC as a FUNCTION of allocation size, not as a mean. Read the rate column --
+     * a smooth ramp is a link-margin gradient, a step is a shape bug. */
+    char hb[512];
+    size_t u = 0;
+    for (int b = 0; b < NR_PDSCH_RBHIST_BINS && u < sizeof(hb) - 40; b++) {
+      const uint64_t okn = atomic_load(&g_rbhist[1][b]);
+      const uint64_t fn  = atomic_load(&g_rbhist[2][b]) + atomic_load(&g_rbhist[0][b]);
+      if (okn + fn == 0) {
+        continue;
+      }
+      u += snprintf(hb + u, sizeof(hb) - u, "%d-%d:%.0f%%(%lu) ",
+                    b * 273 / NR_PDSCH_RBHIST_BINS, (b + 1) * 273 / NR_PDSCH_RBHIST_BINS - 1,
+                    100.0 * (double)okn / (double)(okn + fn), (unsigned long)(okn + fn));
+    }
+    if (u > 0) {
+      LOG_I(PHY, "SENSING: RBHIST crc_ok%% by PRB alloc: %s\n", hb);
+    }
   }
   LOG_I(PHY,
         "SENSING: LDPCDIAG ok=%lu seg_fail=%lu tb_fail=%lu zero_tb=%lu iface_err=%lu "
@@ -1491,6 +1521,12 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
       atomic_fetch_add(&g_shape_n[sk], 1);
       atomic_fetch_add(&g_shape_tbs[sk], (uint64_t)cw->TBS);
       atomic_fetch_add(&g_shape_rb[sk], (uint64_t)freq_alloc->num_rbs);
+      {
+        int rb_bin = (int)freq_alloc->num_rbs * NR_PDSCH_RBHIST_BINS / 273;
+        if (rb_bin < 0) rb_bin = 0;
+        if (rb_bin >= NR_PDSCH_RBHIST_BINS) rb_bin = NR_PDSCH_RBHIST_BINS - 1;
+        atomic_fetch_add(&g_rbhist[sk][rb_bin], 1);
+      }
       atomic_fetch_add(&g_shape_G[sk], (uint64_t)G);
       atomic_fetch_add(&g_shape_rv[sk], (uint64_t)grant->rv);
       atomic_fetch_add(&g_shape_K[sk], (uint64_t)t_seg_K);

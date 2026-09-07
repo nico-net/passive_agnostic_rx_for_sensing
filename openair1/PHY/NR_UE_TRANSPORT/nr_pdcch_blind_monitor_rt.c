@@ -113,6 +113,17 @@ static uint64_t    g_candidates_run = 0;
 // running every occasion forever -- see the autodiscover branch in
 // nr_pdcch_blind_monitor_run_occasion() below.
 static bool         g_length_swept  = false;
+/* DISTINCT from g_length_swept, which is set by BOTH the success and the give-up branch and so
+ * cannot tell them apart. Everything downstream of the DCI length is meaningless while the length
+ * is wrong, because nothing genuine decodes.
+ * MEASURED 2026-09-07, captures pdsch5_1_122600 and pdsch5_3_123646 -- two DEAF runs (49 and 113
+ * genuine C-RNTI decodes against run 2's 217,838 in the same batch, this rig's documented bimodal
+ * behaviour) in which the sweep was STARVED rather than wrong. The consequences were not confined
+ * to the length: the extent verification then rejected BOTH extent candidates and reported "extent
+ * NOT verified", blaming geometry for a signal outage, and Technique B confirmed a succession of
+ * NOISE RNTIs (0xbaa8, then 0xa1bd / 0xf35e / 0xe2a6) which the acceptance-narrowing consumer
+ * pinned to in turn. A deaf run must degrade to "no conclusion", never to a confident wrong one. */
+static bool         g_length_found  = false;
 // Bounded give-up cap (2026-09-06) on accumulated sweep occasions -- see that branch's own comment
 // for why this must accumulate across many occasions rather than fire once. Not derived from a
 // rate (Technique A's own AUTODISCOVER_OBS_CALLS=1000 counts raw per-symbol scan calls, a
@@ -1189,6 +1200,7 @@ void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_pr
     if (s_force_len > 0) {
       nr_pdcch_blind_monitor_autodiscover_set_dci_length(s_force_len);
       g_length_swept = true;
+      g_length_found = true;  // an operator-supplied length is as trustworthy as a swept one
       LOG_A(PHY, "SENSING: Phase 3 autodiscover -- dci_length FORCED to %d (ISAC_FORCE_DCI_LEN), "
                  "sweep skipped\n", s_force_len);
     }
@@ -1240,6 +1252,7 @@ void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_pr
       if (found_len > 0) {
         nr_pdcch_blind_monitor_autodiscover_set_dci_length(found_len);
         g_length_swept = true;
+        g_length_found = true;
         LOG_A(PHY, "SENSING: Phase 3 autodiscover -- dci_length locked at %d (bootstrap_rnti=0x%x, "
                    "occasions_fed=%d)\n", found_len, bootstrap_rnti, s_sweep_state.occasions_fed);
       } else if (s_sweep_state.occasions_fed >= AUTODISCOVER_LENGTH_SWEEP_MAX_OCCASIONS) {
@@ -1287,7 +1300,9 @@ void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_pr
    * re-bootstraps. Never pinned. */
   /* Extent verification runs BEFORE the confirmed-RNTI read below, so a candidate change takes
    * effect on the next occasion rather than being scored against the geometry it just replaced. */
-  if (cfg->autodiscover) {
+  if (cfg->autodiscover && g_length_found) {
+    /* Gated on the length being FOUND, not merely swept: verifying geometry against a decoder that
+     * cannot decode tests nothing, and its "not verified" verdict would name the wrong component. */
     nr_pdcch_blind_monitor_autodiscover_extent_step(abs_slot);
   }
 
@@ -1654,7 +1669,12 @@ constdiag_done:;
          proc->frame_rx, proc->nr_slot_rx, out.rnti, out.start_rb, out.start_rb + out.num_rb, out.start_symbol,
          out.start_symbol + out.num_symbols, out.dl_dmrs_symb_pos);
 
-    nr_pdcch_blind_rnti_bootstrap_record(out.rnti, out.rnti_class, abs_slot);
+    /* Do NOT let an unresolved DCI length seed the C-RNTI bootstrap: at the formula-default length
+     * the accepts are noise, two of them agreeing is enough to CONFIRM, and the consumer below then
+     * narrows acceptance to a value that was never on the air. */
+    if (!cfg->autodiscover || g_length_found) {
+      nr_pdcch_blind_rnti_bootstrap_record(out.rnti, out.rnti_class, abs_slot);
+    }
     // ---- Cross-receiver RNTI consistency (offline, post-hoc -- see tests/passive_rx/rnti_gate.py):
     // this line's sole purpose is a wall-clock anchor to correlate accepts across INDEPENDENT
     // receiver PROCESSES that share no RT state. A real active UE's RNTI is legitimately accepted by
