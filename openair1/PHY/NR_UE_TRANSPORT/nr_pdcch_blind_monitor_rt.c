@@ -1285,6 +1285,12 @@ void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_pr
    * when the UE re-attaches under a new C-RNTI the old one stops being seen, goes stale after
    * RNTI_BOOTSTRAP_STALE_SLOTS (~10 s), and the scan reverts to the configured wide range and
    * re-bootstraps. Never pinned. */
+  /* Extent verification runs BEFORE the confirmed-RNTI read below, so a candidate change takes
+   * effect on the next occasion rather than being scored against the geometry it just replaced. */
+  if (cfg->autodiscover) {
+    nr_pdcch_blind_monitor_autodiscover_extent_step(abs_slot);
+  }
+
   uint16_t boot_rnti = 0;
   {
     uint16_t r = 0;

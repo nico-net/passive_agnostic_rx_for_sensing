@@ -279,6 +279,23 @@ bool nr_pdcch_blind_monitor_autodiscover_done(void)
  * does not). */
 #define AUTODISCOVER_OBS_CALLS 1000  // ~4-5s of DL-slot dwell on this cell's occasion rate --
                                      // long enough to average over occasion-to-occasion CCE hopping
+/* ---- Extent-candidate state (see the EXTENT CANDIDATES comment in the convergence function). --
+ * Bounded so the verification cannot run unboundedly on a cell where nothing ever decodes: once
+ * every candidate has been tried the search stops and keeps candidate 0, i.e. exactly the
+ * behaviour that existed before this was added. */
+#define NR_PDCCH_EXTENT_MAX_CAND 8
+/* Occasions each candidate is given to produce a Technique B confirmation before moving on. Sized
+ * from this cell's own measured accept rate (~700 accepts/s at ~2000 occasions/s, and a
+ * confirmation needs two sightings of the same RNTI), with a wide margin for a quieter cell. */
+#define NR_PDCCH_EXTENT_VERIFY_OCC 4000
+
+typedef struct { int first_w; int last_w; } nr_pdcch_extent_cand_t;
+static nr_pdcch_extent_cand_t s_ext_cand[NR_PDCCH_EXTENT_MAX_CAND];
+static int  s_ext_n        = 0;
+static int  s_ext_idx      = 0;
+static bool s_ext_verified = false;
+static int  s_ext_occ      = 0;
+
 #define AUTODISCOVER_MIN_HITS  3
 #define AUTODISCOVER_HITS_PER_WINDOW 30   // mean hits/window required before deciding --
                                           // makes MIN_HITS a real floor rather than noise
@@ -430,9 +447,48 @@ bool nr_pdcch_blind_monitor_autodiscover_step(const void* rxdataF_symbol, int of
    * keep the value that yields genuine CRC-passing DCIs -- scoring by real decodes rather than by
    * correlation. Do that before trusting this on a cell with a narrow dedicated CORESET. */
   const int nw_total = n_rb_carrier / 6;
-  if (first_w == 0 && last_w >= (nw_total * 3) / 4) {
-    last_w = nw_total - 1;
+
+  /* ---- EXTENT CANDIDATES, verified by real decodes (2026-09-07) --------------------------------
+   * The histogram measures OCCUPANCY, not the configured width (see the comment above), so the
+   * extent is not directly observable. But it is tightly CONSTRAINED: the true CORESET must
+   * CONTAIN every observed window, so the only admissible hypotheses are (f, l) with f <= first_w
+   * and l >= last_w. On this cell that is two candidates (observed 0..43 plus the full carrier),
+   * not a search.
+   *
+   * The heuristic this replaces -- snap to the carrier when first_w == 0 and the span covers >= 3/4
+   * of it -- was right here BY LUCK OF THIS CELL BEING FULL-BAND, and silently wrong on a narrow
+   * dedicated CORESET (get the width wrong and CCE numbering, which is computed over the CORESET's
+   * TOTAL REG count, puts every candidate at the wrong index, so NOTHING decodes). Its answer is
+   * kept as candidate 0, so a cell where it was already right locks in exactly the same time as
+   * before and this can only ever be an improvement, never a regression.
+   *
+   * Verification uses NO new threshold: a candidate is accepted iff Technique B CONFIRMS a C-RNTI
+   * while it is applied. That is the right oracle precisely because noise does not repeat -- the
+   * confirmation needs the same RNTI twice -- so it distinguishes a decoding geometry from a
+   * non-decoding one without asking anyone to calibrate an accept count. */
+  s_ext_n = 0;
+  {
+    const int snap_l = (first_w == 0 && last_w >= (nw_total * 3) / 4) ? (nw_total - 1) : last_w;
+    s_ext_cand[s_ext_n].first_w = first_w;   // candidate 0 = the previous heuristic's own answer
+    s_ext_cand[s_ext_n].last_w  = snap_l;
+    s_ext_n++;
+    for (int l = last_w; l < nw_total && s_ext_n < NR_PDCCH_EXTENT_MAX_CAND; l++) {
+      for (int f = first_w; f >= 0 && s_ext_n < NR_PDCCH_EXTENT_MAX_CAND; f--) {
+        if (f == s_ext_cand[0].first_w && l == s_ext_cand[0].last_w) {
+          continue;  // already candidate 0
+        }
+        s_ext_cand[s_ext_n].first_w = f;
+        s_ext_cand[s_ext_n].last_w  = l;
+        s_ext_n++;
+      }
+    }
   }
+  s_ext_idx      = 0;
+  s_ext_verified = false;
+  s_ext_occ      = 0;
+
+  first_w = s_ext_cand[0].first_w;
+  last_w  = s_ext_cand[0].last_w;
   const int rb_offset = first_w * 6;
   const int span_rb   = (last_w - first_w + 1) * 6;
 
@@ -576,6 +632,56 @@ bool nr_pdcch_blind_monitor_autodiscover_step(const void* rxdataF_symbol, int of
 void nr_pdcch_blind_monitor_autodiscover_set_dci_length(int dci_length)
 {
   g_cfg.dci_length_override = dci_length;
+}
+
+/* Called once per candidate-bearing occasion once the footprint is found. Returns true when it
+ * has just CHANGED the applied extent, so the caller can rebuild anything derived from it. */
+bool nr_pdcch_blind_monitor_autodiscover_extent_step(uint32_t abs_slot)
+{
+  if (!s_dedicated_found || s_ext_verified || s_ext_n <= 0) {
+    return false;
+  }
+  uint16_t r = 0;
+  uint8_t  cls = 0xFF;
+  uint32_t age = 0;
+  if (nr_pdcch_blind_monitor_confirmed_rnti(abs_slot, &r, &cls, &age)) {
+    /* A repeated C-RNTI decoded under this extent. No accept-count threshold is involved: noise
+     * does not produce the SAME RNTI twice. */
+    s_ext_verified = true;
+    LOG_A(PHY, "SENSING: Phase 3 autodiscover -- extent VERIFIED rb_offset=%d span_rb=%d "
+               "(candidate %d/%d, confirmed by C-RNTI 0x%x)\n",
+          s_ext_cand[s_ext_idx].first_w * 6,
+          (s_ext_cand[s_ext_idx].last_w - s_ext_cand[s_ext_idx].first_w + 1) * 6,
+          s_ext_idx + 1, s_ext_n, r);
+    return false;
+  }
+  if (++s_ext_occ < NR_PDCCH_EXTENT_VERIFY_OCC) {
+    return false;
+  }
+  s_ext_occ = 0;
+  if (s_ext_idx + 1 >= s_ext_n) {
+    /* Every hypothesis tried and none decoded. Keep candidate 0 (the pre-2026-09-07 heuristic's own
+     * answer) and stop: continuing would re-test the same list forever, and the cause is then not
+     * the extent. */
+    s_ext_verified = true;
+    g_cfg.bwp_start           = s_ext_cand[0].first_w * 6;
+    g_cfg.coreset_freq_domain = s_ext_cand[0].last_w - s_ext_cand[0].first_w + 1;
+    LOG_W(PHY, "SENSING: Phase 3 autodiscover -- extent NOT verified by any of %d candidates; "
+               "keeping rb_offset=%d span_rb=%d. The extent is probably not the fault.\n",
+          s_ext_n, g_cfg.bwp_start, g_cfg.coreset_freq_domain * 6);
+    return true;
+  }
+  s_ext_idx++;
+  g_cfg.bwp_start           = s_ext_cand[s_ext_idx].first_w * 6;
+  g_cfg.coreset_freq_domain = s_ext_cand[s_ext_idx].last_w - s_ext_cand[s_ext_idx].first_w + 1;
+  /* Drop any RNTI state accumulated under the REJECTED extent so it cannot vouch for the next one.
+   * (The reset helper is named _for_test only because this is its first non-test caller.) */
+  nr_pdcch_blind_rnti_bootstrap_reset_for_test();
+  LOG_W(PHY, "SENSING: Phase 3 autodiscover -- extent candidate %d/%d produced no confirmed C-RNTI "
+             "in %d occasions; trying rb_offset=%d span_rb=%d\n",
+        s_ext_idx, s_ext_n, NR_PDCCH_EXTENT_VERIFY_OCC, g_cfg.bwp_start,
+        g_cfg.coreset_freq_domain * 6);
+  return true;
 }
 
 static int parse_coreset(const char* s)

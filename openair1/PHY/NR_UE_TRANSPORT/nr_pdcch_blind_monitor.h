@@ -675,6 +675,12 @@ bool nr_pdcch_blind_extract_00(uint64_t       payload,
 /* Phase 3 Technique B: bootstrap the dedicated C-RNTI from sightings the accept path already
  * classifies (nr_blind_rnti_class_t). Recording is idempotent and RT-safe (no allocation, no
  * lock) -- call it from the same point the accept path already logs DCIGT. */
+/** Phase 3 Technique A, extent verification. Call once per candidate-bearing occasion after the
+ * footprint is found: it scores the currently applied CORESET extent by whether Technique B
+ * confirms a C-RNTI under it, and advances to the next admissible extent hypothesis if not.
+ * Returns true when it has just changed the applied extent. */
+bool nr_pdcch_blind_monitor_autodiscover_extent_step(uint32_t abs_slot);
+
 void nr_pdcch_blind_rnti_bootstrap_record(uint16_t rnti, uint8_t rnti_class, uint32_t abs_slot);
 
 /* Non-zero (true) when a persistence-confirmed C-RNTI or TC-RNTI exists and is not stale as of
