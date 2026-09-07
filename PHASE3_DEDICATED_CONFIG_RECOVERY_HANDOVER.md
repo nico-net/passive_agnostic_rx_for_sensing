@@ -75,31 +75,123 @@ CSI-trigger-state-dependent CSI-request width, frequency-hopping flag presence, 
 selection), so the un-derivable residual is bigger, not smaller, and total length alone is not
 enough information to pin every field boundary uniquely.
 
-### Possible path to closing UL (not started, real engineering effort, not a small extension)
+## FULL UL ADAPTIVE CATALOGUE (2026-09-07) — every candidate implementation, none built
 
-1. **UL length discovery** (tractable, same mechanism as DL): port the 2026-09-06 accumulating
-   sweep to DCI format 0_1 candidates. No algorithmic changes needed.
-2. **Field-boundary recovery without a gNB log — replace the ground truth, don't remove the
-   check.** The gNB's logged scheduler decisions were used to verify a candidate split's decoded
-   field VALUES were self-consistent over many grants. The same self-consistency check can be
-   built from OBSERVATIONS THE RECEIVER CAN MAKE ITSELF, using the PUSCH transmission that a UL
-   grant actually triggers as the ground truth instead of an internal log:
-   - Blind RB-occupancy detection on the resulting PUSCH: does the frequency range the receiver
-     actually sees ENERGY/DM-RS on match the RB allocation a candidate RIV-field-width
-     interpretation predicts?
-   - Blind modulation/MCS classification: does the observed constellation/TBS on that PUSCH match
-     a candidate MCS-field interpretation?
-   - DMRS pattern cross-check: does the observed DMRS symbol position/sequence match a candidate
-     antenna-ports/DMRS-config field interpretation?
-   None of these DSP primitives exist in this codebase today. This is comparable in scope to the
-   existing NR_UE_ISAC channel-estimation/CFR work, not a small addition — it is the single
-   largest remaining gap for a genuinely commercial-capable (no ground truth, no manual per-cell
-   config) adaptive receiver, DL or UL.
-3. **Residual RRC-only unknowns even after (2)**: some UL field widths (SRS-resource-count,
-   CSI-trigger-state-count) depend on configuration a passive receiver cannot observe even via
-   PUSCH cross-checking (e.g. an SRS resource set's own configuration, or CSI-RS trigger states) —
-   closing this fully would need blind discovery of THOSE configs too, an even deeper problem,
-   flagged here but not scoped further.
+**Written in response to a direct question: is the FULL UL pipeline for adaptive passive RX
+already in this document? No. What existed before this section was a 4-step status table and ONE
+proposed path. This section replaces "one path" with every architecturally distinct approach this
+project could take, graded by what it costs and what it cannot do, so a future session picks
+deliberately instead of re-deriving the option space from scratch. Nothing below is implemented.**
+
+### The four unknowns, restated precisely
+
+A fully adaptive UL needs, in order: (1) WHERE the dedicated CORESET is (shared with DL, already
+solved), (2) HOW LONG the DCI 0_1 payload is, (3) HOW TO CARVE that payload into fields (the hard
+one — see "why UL is structurally harder" above), (4) WHICH RNTIs are live (shared with DL via the
+multi-UE table, already solved). Every approach below is a way to close (2) and/or (3).
+
+### A. Port Technique C's length sweep to format 0_1 — mechanical, do this first regardless of
+what else gets built
+
+`nr_pdcch_dci_length_sweep_feed()` is already format-agnostic (it takes a scorer callback); DL's
+`nr_pdcch_autodiscover_length_scorer()` is the only format-specific piece. Write the 0_1 analogue
+calling `nr_pdcch_blind_decode_and_extract_01()` instead of the 1_1 entry point, sharing the same
+accumulation/significance-test state machine. Closes unknown (2) with the same guarantee DL got:
+a CRC oracle needs no field-boundary knowledge at all, so the length is recoverable independent of
+every question below. Effort: small, no new algorithm.
+
+### B. Field-boundary recovery via PUSCH cross-observation — the path already sketched above,
+detailed here
+
+Once (2) is closed, `nr_pdcch_blind_ul_opts_t`'s per-field bit widths remain unknown because
+several of them depend on RRC config a passive receiver never sees (SRS resource count → `sri_bits`,
+CSI trigger states → `csi_request_bits`, frequency-hopping flag, antenna-port table selection). The
+CRC oracle cannot separate field-width assignments of an identical bit sequence (this project's own
+prior UL solve found 60 of 3963 assignments CRC-identical, differing only in padding placement). The
+proposed replacement ground truth is the PUSCH the grant actually triggers:
+- **Blind RB-occupancy detection**: does the frequency range with real energy/DM-RS on the resulting
+  PUSCH match the RIV a candidate field-width interpretation predicts? Needs energy detection across
+  the UL BWP at the k2-offset slot — a new DSP primitive, comparable in scope to CFR estimation.
+- **Blind modulation/MCS classification**: does the observed constellation/TBS match a candidate MCS
+  field interpretation? Needs a modulation classifier (cumulant- or EVM-based) with no known TBS to
+  anchor against — harder than the DL case, where TBS is read from an already-correct DCI.
+- **DM-RS pattern cross-check**: does the observed DM-RS symbol/sequence position match a candidate
+  antenna-ports/DM-RS-config interpretation? Reuses machinery closer to what already exists
+  (`nr_pdcch_blind_dmrs_mask`'s UL twin, `blind_ul_dmrs_mask()`), so this sub-piece is the cheapest
+  of the three.
+None of these three DSP primitives exist in this codebase today. Effort: large — comparable to the
+NR_UE_ISAC channel-estimation work, not a small extension. Ceiling: even with all three, residual
+unknowns (SRS-resource-count-dependent widths, CSI-trigger-state widths) may still need blind
+discovery of the RRC config that drives them — an even deeper problem, out of scope for this
+catalogue.
+
+### C. TB-CRC-scored field-boundary sweep (UL analogue of Technique D) — feasible ONLY once passive
+UL decode exists
+
+Technique D works because a wrong DL hypothesis still produces a *decodable* PDU with the wrong
+CFR/interpretation and the TB CRC tells the two apart. The same logic applies to UL FIELD
+BOUNDARIES directly, without needing (B)'s three new DSP primitives: enumerate candidate
+`(harq_pid_bits, sri_bits, antenna_ports_bits, ...)` splits of the known total length, apply each to
+a decoded PUSCH, and let the transport-block CRC pick the winner — exactly Technique D's
+interleave-per-grant, refuse-when-undecidable design, ported to a much larger and more
+combinatorially structured hypothesis space (splits of a fixed total into N fields, not a small
+enumerated table).
+**Hard prerequisite this project has not built**: a receiver that can DECODE passive UL PUSCH from
+a BLINDLY-EXTRACTED grant at all. `passive_pusch_decode_works_mcs_limited` and
+`passive_ul_csi_on_pusch_is_the_residual` (project memory) establish that UL PUSCH decode works —
+but under a HAND-SOLVED field layout, which is exactly what this approach would be discovering. So
+(C) is not circular in principle (decode uses today's fixed hand-solved layout as ground truth ONLY
+to validate the search algorithm offline against a KNOWN split, then the live version explores
+splits the hand-solved layout was never told), but it needs the passive PUSCH decode path
+generalized to accept a swept field-width vector instead of the current fixed one before any live
+sweep can run. Effort: medium once the fixed-layout PUSCH decode is parameterized; the search
+algorithm itself is a direct reuse of Technique D's already-tested state machine (interleaving,
+undecidable-refusal, minimum-trial gating all carry over unchanged).
+**This is the recommended next step, not (B)**: it reuses proven code (Technique D's sweep engine,
+today's working PUSCH decoder) instead of building three new DSP primitives from nothing, and it
+has an oracle (TB CRC) that (B)'s per-field cross-checks do not — (B) has to build its OWN ground
+truth (RB occupancy, MCS classification) with no CRC to confirm any of it is right, whereas (C)'s
+TB CRC is a binary, already-trusted confirm/deny signal.
+
+### D. SRS-based synchronization instead of PDCCH-derived UL timing
+
+Distinct axis from A-C: those recover WHAT a grant says; this is about WHETHER the receiver's own
+UL timing reference (k2, TA) is right without ever decoding a DCI. SRS is periodic, UE-specific, and
+its resource config (comb, symbol, bandwidth) is exactly the kind of blind-detectable signal this
+project's own `csirs_monitor` (DL) already demonstrates is tractable for a KNOWN resource config —
+the SRS case is harder because the resource config itself would need to be blindly found (comb
+size, periodicity, frequency-hopping pattern), which has no DL analogue in this codebase. Useful
+primarily as an independent cross-check for (C)'s field-boundary hypotheses (a correct SRS-related
+field guess should predict where SRS actually lands) rather than as a UL solution on its own.
+Not scoped further; flagged because it is a genuinely different information source from A-C, not
+because it is close to buildable.
+
+### E. What NONE of A-D address — residual RRC-only unknowns
+
+Even with (A) + (C) fully working, some UL field widths (SRS-resource-count, CSI-trigger-state
+count — see `nr_pdcch_blind_ul_opts_t`'s `sri_bits`/`csi_request_bits` comments) are driven by RRC
+config a passive receiver structurally cannot observe, because they never appear as fields WITHIN
+the DCI whose width they set — the DCI just has however many bits that config implies. Closing this
+fully needs blind discovery of the RRC config itself (how many SRS resources are configured, how
+many CSI trigger states), which is a strictly harder, unscoped problem — flagged, not attempted, by
+this catalogue either.
+
+### Recommended sequencing, if this work is picked up
+
+1. (A) — trivial, no reason not to do it alongside anything else.
+2. (C) — parameterize the existing passive PUSCH decoder to accept a field-width vector; port
+   Technique D's sweep engine to the UL split-enumeration hypothesis space; validate offline against
+   the CURRENT hand-solved layout as a known-answer test (mirroring Technique D's 3 offline
+   ground-truth tests) before any live capture.
+3. (B) — only if (C) cannot resolve every field (the SRS/CSI-trigger residuals in (E) may force
+   this regardless), since it is the more expensive path and duplicates work (C) does more cheaply
+   where a TB CRC oracle is available.
+4. (D) — opportunistic cross-check, not a blocking dependency of (A)-(C).
+5. `pdcch_blind_monitor_full_auto`'s UL wiring — once (A)+(C) exist, gate them behind the SAME flag
+   this session added for DL (see its header comment: "this flag is where that work attaches when
+   it exists"), keeping one flag name for the whole "fully adaptive DL+UL" concept rather than a
+   second one.
+
 
 ### Traffic-generation architecture (baseline, corrected 2026-09-06)
 
