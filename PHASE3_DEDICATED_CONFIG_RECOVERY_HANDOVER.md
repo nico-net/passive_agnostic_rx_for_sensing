@@ -910,6 +910,86 @@ genuine decodes, like Technique C does for `dci_length`.
 
 ---
 
+# EXTENT VERIFICATION + THE PDSCH RATE, 2026-09-07 (latest — read before the section below)
+
+## CORESET extent: the 3/4 snap is GONE, replaced by verification against real decodes
+
+The extent is not observable (the histogram measures OCCUPANCY -- PDCCH DM-RS exists only where a
+PDCCH was actually transmitted), but it IS tightly CONSTRAINED: the true CORESET must contain every
+observed window, so the only admissible hypotheses are `(f <= first_w, l >= last_w)`. On this cell
+that is **two** candidates, not a search. Implemented as a candidate list scored by real decodes.
+
+- **Candidate 0 is the old heuristic's own answer**, so a cell where it was already right locks in
+  exactly the same time. This can only improve on the previous behaviour, never regress.
+- **No new threshold.** A candidate is accepted iff Technique B confirms a C-RNTI under it -- the
+  right oracle precisely because noise does not repeat (confirmation needs the same RNTI twice).
+- Bounded: once every candidate is tried it keeps candidate 0 and says the extent is probably not
+  the fault, instead of re-testing forever.
+
+Live: `extent VERIFIED rb_offset=0 span_rb=270 (candidate 1/2, confirmed by C-RNTI 0x462d)`.
+
+**`first_w != 0` did NOT reproduce in any run this session** (3/3 converged to `rb_offset=0
+span_rb=270`), so this is insurance for a narrow-CORESET cell that cannot be tested here. What it
+buys today is that a wrong extent announces itself instead of failing silently.
+
+## The PDSCH decode rate: two corrections, and the `q^n` explanation is REFUTED
+
+**Correction 1 -- there is NO "blocking measurement gap".** This document records
+`pdsch_decode[try=0 crc_ok=0 (0.0%)]` under thread deferral as a blocker that must be fixed before
+any PDSCH arm can be scored, and says it "already cost most of 2026-09-07". The consumer has been
+counting `decoded`/`crc_ok` all along and PRINTING them, on the **`PDSCHQ`** line
+(`nr_pdcch_blind_monitor_rt.c`, gated on `nr_pdsch_passive_queue_running()`). It is a
+line-lookup problem, not a missing counter. Score deferred runs from `PDSCHQ`.
+
+**Correction 2 -- do NOT quote a single-run PDSCH number, including any in this document.** Four
+runs this session, all with GOOD CFO locks (-13675 .. -14061 Hz, far inside the +/-2600 Hz mis-lock
+threshold) and near-identical PDCCH performance (accepts 213-214 k, genuine decodes 212-213 k):
+
+| run | acq CFO | TB CRC | max_lag_slots |
+|---|---|---|---|
+| `dcifix_114300` | -13675 | 59.3 % | 23/20 |
+| `bootrnti_115245` | -13925 | 59.1 % | 12/20 |
+| `sweepauto_114636` | -13903 | 23.0 % | 96/20 |
+| `extsweep_120828` | -14061 | **17.5 %** | 16/20 |
+
+A 3.4x swing with the same binary, same conf, good locks, and (except `sweepauto`, whose
+`max_lag_slots=96` against `slots_per_frame=20` makes its 23 % a CAPACITY artifact -- rxdata
+overwritten before the consumer read it) no capacity problem. This is exactly
+`[[passive-rx-needs-5-runs-per-arm]]`. **Any PDSCH conclusion here needs >= 5 runs per arm.**
+
+**The `q^n` full-band-ceiling explanation does not survive.** This document attributes the ceiling
+to `TB-CRC = q^n` with `n -> ~30` on full-band allocations. The failure census says the opposite,
+in all four runs:
+
+| | SEG_FAIL | DECODED |
+|---|---|---|
+| mean PRB (4 runs) | 11.9 / 12.0 / 17.3 / 17.0 | 21.2 / 21.5 / 18.4 / 20.8 |
+| code blocks C | 1.93 | 2.66 |
+
+**Failures are the SMALLER allocations with FEWER code blocks.** Under `q^n` they would have more.
+
+What the census does establish:
+- `tb_fail = 0` in every run -> reassembly, TBS and CRC type are correct; the fault is upstream.
+- On failing TBs only **18.5 %** of segments decode (30,936/167,270) -- 0.36 of a C=1.93 TB. This is
+  catastrophic non-convergence, NOT one marginal code block in a long TB.
+- `LLRDIAG` eliminates two of the three branches in that code's own triage: **not saturated**
+  (0.0000 %) and **not crushed** (zero = 0.10 %), magnitude only 25 % down (272 vs 363). That leaves
+  the third -- the SIGNS, i.e. descrambling -- consistent with `pos = 54.70 %` on failures vs
+  `51.50 %` on successes. **Caveat: TBs that decode are SELECTED for having balanced LLRs, so the
+  sign skew may be an effect of conditioning rather than a cause.** It narrows the search; it does
+  not close it.
+
+**Strongest lead, and it is a shape argument rather than a margin one.** Across the 3.4x CRC swing
+the DECODED population barely moves (mean_prb 21.2/21.5/18.4/20.8, K 6151/6124/5808/6123,
+F 107/109/108/109, C ~2.65) while the FAILED population's size climbs (11.9 -> 17.0). If this were a
+link-margin threshold, a bad run would keep only the strongest grants and DECODED's mean size would
+shift UP. It does not. That is the signature of a FIXED DECODABLE SUBSET of grant shapes plus a
+variable remainder -- pointing at a code/shape bug, not link budget and not MCS. **Confirm with a
+per-TB histogram of num_rb bucketed by outcome** (the `SHAPE` census currently reports means only);
+if decodability is a step function of allocation shape rather than a gradient, that is the bug.
+
+---
+
 # RESOLVED 2026-09-07 (later) — "THE ONE QUESTION" is ANSWERED, and steps 1-4 now run unattended
 
 **Read this before the section below it, which is the (still-accurate) statement of the problem
