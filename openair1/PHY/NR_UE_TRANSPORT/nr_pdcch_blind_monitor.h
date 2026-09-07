@@ -675,6 +675,16 @@ bool nr_pdcch_blind_extract_00(uint64_t       payload,
 /* Phase 3 Technique B: bootstrap the dedicated C-RNTI from sightings the accept path already
  * classifies (nr_blind_rnti_class_t). Recording is idempotent and RT-safe (no allocation, no
  * lock) -- call it from the same point the accept path already logs DCIGT. */
+/** One admissible CORESET extent hypothesis, in 6-RB window indices (inclusive). */
+typedef struct { int first_w; int last_w; } nr_pdcch_extent_cand_t;
+
+/** Enumerate the extent hypotheses admissible given an observed occupancy footprint. The true
+ * CORESET must CONTAIN every observed window, so only `last_w' is swept upward; `out[0]' is always
+ * the legacy snap-to-carrier answer. Returns the number written, 0 on invalid input. Pure --
+ * exported so it is unit-testable. */
+int nr_pdcch_extent_candidates(int first_w, int last_w, int nw_total,
+                               nr_pdcch_extent_cand_t* out, int max_out);
+
 /** Phase 3 Technique A, extent verification. Call once per candidate-bearing occasion after the
  * footprint is found: it scores the currently applied CORESET extent by whether Technique B
  * confirms a C-RNTI under it, and advances to the next admissible extent hypothesis if not.

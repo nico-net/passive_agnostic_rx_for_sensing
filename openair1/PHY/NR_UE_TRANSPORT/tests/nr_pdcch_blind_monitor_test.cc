@@ -2081,6 +2081,63 @@ TEST_F(BlindPdcchTest, InterleavedCoreset0CandidateRoundTrips) {
          "from an oversized synthetic field set, not part of the actual encoded/decoded payload";
 }
 
+// ---- Extent candidate enumeration (Phase 3 Technique A, 2026-09-07) -------------------------
+// The true CORESET must CONTAIN every observed window, and candidate 0 must stay the legacy
+// snap-to-carrier answer so a cell where that was already right cannot regress.
+
+TEST(ExtentCandidates, FirstCandidateIsTheLegacySnapAnswer) {
+  // This cell: 45 windows, occupancy observed over [0..43] -> the legacy rule snaps to the carrier.
+  nr_pdcch_extent_cand_t c[8];
+  const int n = nr_pdcch_extent_candidates(0, 43, 45, c, 8);
+  ASSERT_GE(n, 1);
+  EXPECT_EQ(c[0].first_w, 0);
+  EXPECT_EQ(c[0].last_w, 44);  // snapped, i.e. span_rb = 270
+  // Exactly the two hypotheses the histogram admits: the snap, and the observed extent itself.
+  EXPECT_EQ(n, 2);
+  EXPECT_EQ(c[1].last_w, 43);
+}
+
+TEST(ExtentCandidates, EveryCandidateContainsTheObservedFootprint) {
+  nr_pdcch_extent_cand_t c[8];
+  const int n = nr_pdcch_extent_candidates(2, 5, 20, c, 8);
+  ASSERT_GT(n, 0);
+  for (int i = 0; i < n; i++) {
+    EXPECT_LE(c[i].first_w, 2) << "candidate " << i << " excludes an observed window";
+    EXPECT_GE(c[i].last_w, 5) << "candidate " << i << " excludes an observed window";
+    EXPECT_LT(c[i].last_w, 20);
+  }
+}
+
+TEST(ExtentCandidates, NoDuplicates) {
+  nr_pdcch_extent_cand_t c[8];
+  const int n = nr_pdcch_extent_candidates(0, 43, 45, c, 8);
+  for (int i = 0; i < n; i++) {
+    for (int j = i + 1; j < n; j++) {
+      EXPECT_FALSE(c[i].first_w == c[j].first_w && c[i].last_w == c[j].last_w);
+    }
+  }
+}
+
+TEST(ExtentCandidates, OffsetIsDeliberatelyNotSwept) {
+  // Sweeping first_w would emit geometries this module cannot currently APPLY: the FAPI builder
+  // hardcodes coreset.rb_offset = 0, so a nonzero offset is carried through BWPStart and moves the
+  // BWP frame instead. Assert the restriction so removing it is a deliberate act, not a slip.
+  nr_pdcch_extent_cand_t c[8];
+  const int n = nr_pdcch_extent_candidates(3, 6, 20, c, 8);
+  ASSERT_GT(n, 0);
+  for (int i = 0; i < n; i++) {
+    EXPECT_EQ(c[i].first_w, 3);
+  }
+}
+
+TEST(ExtentCandidates, RejectsInvalidInputAndRespectsTheCap) {
+  nr_pdcch_extent_cand_t c[8];
+  EXPECT_EQ(nr_pdcch_extent_candidates(5, 3, 45, c, 8), 0);   // last before first
+  EXPECT_EQ(nr_pdcch_extent_candidates(0, 45, 45, c, 8), 0);  // last outside the carrier
+  EXPECT_EQ(nr_pdcch_extent_candidates(0, 43, 45, c, 0), 0);  // no room
+  EXPECT_EQ(nr_pdcch_extent_candidates(0, 0, 64, c, 3), 3);   // capped, not overrun
+}
+
 int main(int argc, char** argv)
 {
   logInit();

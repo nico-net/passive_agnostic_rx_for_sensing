@@ -289,12 +289,45 @@ bool nr_pdcch_blind_monitor_autodiscover_done(void)
  * confirmation needs two sightings of the same RNTI), with a wide margin for a quieter cell. */
 #define NR_PDCCH_EXTENT_VERIFY_OCC 4000
 
-typedef struct { int first_w; int last_w; } nr_pdcch_extent_cand_t;
 static nr_pdcch_extent_cand_t s_ext_cand[NR_PDCCH_EXTENT_MAX_CAND];
 static int  s_ext_n        = 0;
 static int  s_ext_idx      = 0;
 static bool s_ext_verified = false;
 static int  s_ext_occ      = 0;
+
+int nr_pdcch_extent_candidates(int first_w, int last_w, int nw_total,
+                               nr_pdcch_extent_cand_t* out, int max_out)
+{
+  if (out == NULL || max_out <= 0 || nw_total <= 0 || first_w < 0 || last_w < first_w
+      || last_w >= nw_total) {
+    return 0;
+  }
+  /* Candidate 0 is the pre-2026-09-07 heuristic's OWN answer, so a cell where it was already right
+   * locks with no added dwell and this can never regress. */
+  const int snap_l = (first_w == 0 && last_w >= (nw_total * 3) / 4) ? (nw_total - 1) : last_w;
+  int n = 0;
+  out[n].first_w = first_w;
+  out[n].last_w  = snap_l;
+  n++;
+  /* SPAN ONLY -- `first_w` is deliberately NOT swept, and that is a KNOWN INCOMPLETENESS rather
+   * than an oversight. A nonzero CORESET offset cannot currently be APPLIED correctly: this
+   * module's FAPI builder hardcodes `rel15->coreset.rb_offset = 0` and starts
+   * build_coreset_bitmap() at group 0, so the offset is carried only through `BWPStart` -- which
+   * moves the BWP frame and therefore also changes RIV interpretation and dci_length. That is the
+   * dual-frame-of-reference issue this feature's handover already lists as latent. Emitting
+   * offset candidates before it is fixed would burn a verification dwell on a geometry that cannot
+   * decode even when it is the right answer, and would report "extent not verified" for the wrong
+   * reason. Sweep the offset once rb_offset is plumbed through properly. */
+  for (int l = last_w; l < nw_total && n < max_out; l++) {
+    if (l == out[0].last_w) {
+      continue;  // already candidate 0
+    }
+    out[n].first_w = first_w;
+    out[n].last_w  = l;
+    n++;
+  }
+  return n;
+}
 
 #define AUTODISCOVER_MIN_HITS  3
 #define AUTODISCOVER_HITS_PER_WINDOW 30   // mean hits/window required before deciding --
@@ -466,23 +499,7 @@ bool nr_pdcch_blind_monitor_autodiscover_step(const void* rxdataF_symbol, int of
    * while it is applied. That is the right oracle precisely because noise does not repeat -- the
    * confirmation needs the same RNTI twice -- so it distinguishes a decoding geometry from a
    * non-decoding one without asking anyone to calibrate an accept count. */
-  s_ext_n = 0;
-  {
-    const int snap_l = (first_w == 0 && last_w >= (nw_total * 3) / 4) ? (nw_total - 1) : last_w;
-    s_ext_cand[s_ext_n].first_w = first_w;   // candidate 0 = the previous heuristic's own answer
-    s_ext_cand[s_ext_n].last_w  = snap_l;
-    s_ext_n++;
-    for (int l = last_w; l < nw_total && s_ext_n < NR_PDCCH_EXTENT_MAX_CAND; l++) {
-      for (int f = first_w; f >= 0 && s_ext_n < NR_PDCCH_EXTENT_MAX_CAND; f--) {
-        if (f == s_ext_cand[0].first_w && l == s_ext_cand[0].last_w) {
-          continue;  // already candidate 0
-        }
-        s_ext_cand[s_ext_n].first_w = f;
-        s_ext_cand[s_ext_n].last_w  = l;
-        s_ext_n++;
-      }
-    }
-  }
+  s_ext_n = nr_pdcch_extent_candidates(first_w, last_w, nw_total, s_ext_cand, NR_PDCCH_EXTENT_MAX_CAND);
   s_ext_idx      = 0;
   s_ext_verified = false;
   s_ext_occ      = 0;
