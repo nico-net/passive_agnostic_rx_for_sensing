@@ -261,6 +261,19 @@ static _Atomic uint64_t g_llr_n[2]    = {0, 0}; // [0] = TB failed, [1] = TB dec
 static _Atomic uint64_t g_llr_absum[2] = {0, 0};
 static _Atomic uint64_t g_llr_zero[2]  = {0, 0};
 static _Atomic uint64_t g_llr_sat[2]   = {0, 0};
+/* Clipping at the INT8 rail, which is the one that actually applies. g_llr_sat above counts
+ * |llr| >= 32767, but nothing ever reaches the int16 rail -- and it is not the limit anyway:
+ * nrLDPC_coding_segment_decoder.c packs the int16 LLRs down to int8 with simde_mm_packs_epi16(),
+ * a SATURATING pack, so every |llr| > 127 is flattened to +-127 before the decoder sees it. A
+ * clipped LLR is a hard decision, and belief propagation on hard decisions cannot correct
+ * anything. Measured mean |llr| on this receiver is 232-498, i.e. 2-4x that rail. */
+static _Atomic uint64_t g_llr_clip8[2] = {0, 0};
+
+/* The DMRSFO tracker's current SFO estimate, in ppm, for the correction stage below. Read-mostly
+ * across consumer threads; a torn double would only mean one grant corrected with a slightly stale
+ * value, which is why this is a plain double and not a lock. */
+static double g_sfo_ppm_ema = 0.0;
+static double nr_pdsch_passive_sfo_ppm(void) { return g_sfo_ppm_ema; }
 /* SIGNED sum, and the count of positive LLRs. mean|LLR| (above) is BLIND to a sign bias, and a bias
  * is exactly what would explain the dominant failure mode: all-zeros is a valid codeword for any
  * linear code, so LDPC settles on it whenever the LLRs systematically favour 0-bits. With one UE on
@@ -354,6 +367,10 @@ void nr_pdsch_passive_ldpc_stats_dump(void)
           100.0 * (double)atomic_load(&g_llr_pos[k]) / (double)n,
           100.0 * (double)atomic_load(&g_llr_zero[k]) / (double)n,
           100.0 * (double)atomic_load(&g_llr_sat[k]) / (double)n);
+    LOG_I(PHY, "SENSING: LLRCLIP %s clipped_at_int8=%.2f%% (|llr|>127 is flattened to +-127 by "
+               "simde_mm_packs_epi16 before the decoder)\n",
+          k ? "DECODED" : "FAILED  ",
+          100.0 * (double)atomic_load(&g_llr_clip8[k]) / (double)n);
   }
   {
     /* The direct test: all-zero RATE for short versus long grants. If short grants are dramatically
@@ -1096,7 +1113,7 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
       }
     }
     const uint32_t kmid = (kmin <= kmax) ? (kmin + kmax) / 2 : 0;
-    double re[2] = {0.0, 0.0}, im[2] = {0.0, 0.0}, ksum[2] = {0.0, 0.0};
+    double re[2] = {0.0, 0.0}, im[2] = {0.0, 0.0}, ksum[2] = {0.0, 0.0}, magsum[2] = {0.0, 0.0};
     uint32_t kn[2] = {0, 0};
     for (uint32_t k = 0; k < N; k++) {
       const double rr = (double)h1[k].r * h0[k].r + (double)h1[k].i * h0[k].i;
@@ -1108,9 +1125,39 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
       re[h] += rr;
       im[h] += ii;
       ksum[h] += (double)k;
+      /* |H1|.|H0| per subcarrier: the magnitude the coherent sum WOULD reach if every subcarrier
+       * agreed in phase. Its ratio to |sum| is the validity gate below. */
+      magsum[h] += sqrt(((double)h1[k].r * h1[k].r + (double)h1[k].i * h1[k].i)
+                        * ((double)h0[k].r * h0[k].r + (double)h0[k].i * h0[k].i));
       kn[h]++;
     }
-    if (kn[0] + kn[1] > 0) {
+    /* ---- VALIDITY GATE ---------------------------------------------------------------------
+     * COHERENCE, not energy. |sum(H1.conj(H0))| / sum(|H1||H0|) is 1 when every subcarrier reports
+     * the same phase difference (a real, common CFO/SFO) and falls to ~1/sqrt(n) when the phases
+     * are random, which is what noise looks like. It is dimensionless and self-normalising, so it
+     * needs no reference level and no per-rig calibration -- the same reason this project prefers
+     * dimensionless gates elsewhere.
+     * MEASURED 2026-09-07: on a DEAF capture (4 TBs decoded, EVM 70 %, no signal on air) the
+     * ungated estimator published cfo = -224 Hz and sfo = -12.24 ppm from pure noise, against
+     * +40 Hz / +2.2 ppm on healthy runs. With the correction stage enabled that garbage would have
+     * been applied to every later grant in the run. An estimator that cannot say "I do not know"
+     * is a liability once anything consumes it. */
+    const double coh_num = sqrt((re[0] + re[1]) * (re[0] + re[1]) + (im[0] + im[1]) * (im[0] + im[1]));
+    const double coh_den = magsum[0] + magsum[1];
+    const double coherence = (coh_den > 0.0) ? (coh_num / coh_den) : 0.0;
+    /* 0.3 is far above the ~1/sqrt(n) a random-phase population reaches at these n (n >= 28 gives
+     * ~0.19, and the real populations here run several hundred), and far below the ~0.9+ a genuine
+     * common rotation produces. Anything in between is not trustworthy enough to steer a
+     * correction with. */
+    static _Atomic uint64_t s_dfo_rej = 0;
+    if (kn[0] + kn[1] > 0 && coherence < 0.30) {
+      const uint64_t nrej = atomic_fetch_add(&s_dfo_rej, 1);
+      if ((nrej % 500) == 0) {
+        LOG_I(PHY, "SENSING: DMRSFO REJECTED n=%lu coh=%.3f (< 0.30) n_sc=%u/%u -- estimate "
+                   "withheld, not published\n", (unsigned long)nrej + 1, coherence, kn[0], kn[1]);
+      }
+    }
+    if (kn[0] + kn[1] > 0 && coherence >= 0.30) {
       const double cfo_hz = atan2(im[0] + im[1], re[0] + re[1]) / (2.0 * M_PI * dt_d);
       double sfo_ppm = 0.0;
       if (kn[0] > 16 && kn[1] > 16) {
@@ -1129,6 +1176,7 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
       const uint64_t dn = atomic_fetch_add(&s_dfo_n, 1);
       s_cfo_ema = (dn == 0) ? cfo_hz : (0.99 * s_cfo_ema + 0.01 * cfo_hz);
       s_sfo_ema = (dn == 0) ? sfo_ppm : (0.99 * s_sfo_ema + 0.01 * sfo_ppm);
+      g_sfo_ppm_ema = s_sfo_ema;  // published for the SFO correction stage
       static int s_apply = -1;
       if (s_apply < 0) {
         const char *e = getenv("ISAC_DMRS_FO_APPLY");
@@ -1145,8 +1193,8 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
       if ((dn % 500) == 0) {
         LOG_I(PHY,
               "SENSING: DMRSFO cfo=%+.1f Hz (ema %+.1f) sfo=%+.2f ppm (ema %+.2f) "
-              "sym %d->%d n_sc=%u/%u unambiguous=+/-%.0f Hz apply=%d\n",
-              cfo_hz, s_cfo_ema, sfo_ppm, s_sfo_ema, dmrs_first, dmrs_last, kn[0], kn[1],
+              "sym %d->%d n_sc=%u/%u coh=%.2f unambiguous=+/-%.0f Hz apply=%d\n",
+              cfo_hz, s_cfo_ema, sfo_ppm, s_sfo_ema, dmrs_first, dmrs_last, kn[0], kn[1], coherence,
               1.0 / (2.0 * dt_d), s_apply);
       }
     }
@@ -1433,9 +1481,69 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
     first_symbol_with_data++;
   }
 
+  /* ---- RESIDUAL SFO CORRECTION (ISAC_SFO_CORRECT=1, default off) ------------------------------
+   * WHAT IS UNCORRECTED. nr_rx_pdsch() equalises EVERY data symbol against ONE DM-RS symbol's
+   * estimate -- dl_ch_estimates[..][validDmrsEst * ofdm_symbol_size], chosen by
+   * get_valid_dmrs_idx_for_channel_est() -- with no interpolation in time. A sampling-clock offset
+   * eps makes the timing drift by eps*dt between that reference symbol and the data symbol, and a
+   * timing shift tau is a phase ramp exp(-j*2*pi*k*df*tau) across subcarriers. So after
+   * equalisation the residual is exactly
+   *     exp(-j*2*pi*k*df*eps*(t_m - t_ref))
+   * and nothing in this receive path removes it. The DMRSFO tracker above measures eps directly
+   * (~2.4 ppm on this rig), which over symbols 2->11 is ~13 degrees at the band edge -- small for
+   * QPSK, not small for the 256QAM this gNB actually schedules.
+   *
+   * HOW. Rotate the channel estimate rather than the data: the estimate is this decode's own
+   * thread-local buffer (allocCast2D above), whereas rxdataF is shared with every other consumer
+   * and must not be touched. Rotating H by the SAME phase the data drifted makes Y/H land back on
+   * X. Each DM-RS slot carries its own applied-rotation accumulator, so a slot is always brought to
+   * exactly (m - d) symbol periods however the reference switches between symbols -- setting the
+   * absolute rotation, never blindly stepping, which would drift out of phase with the reference.
+   *
+   * SECOND-ORDER, and stated as such: the dominant defect on this receiver is LLR clipping at the
+   * int8 rail (see LLRCLIP), which destroys information outright. This only stops a real but
+   * smaller error accumulating across a slot. Opt-in until an A/B shows it earns its place. */
+  static int s_sfo_corr = -1;
+  if (s_sfo_corr < 0) {
+    const char *e = getenv("ISAC_SFO_CORRECT");
+    s_sfo_corr = (e != NULL && atoi(e) != 0) ? 1 : 0;
+  }
+  double sfo_applied[NR_SYMBOLS_PER_SLOT] = {0};  // symbol-periods of rotation already applied, per slot
+  const double sfo_eps = s_sfo_corr ? (nr_pdsch_passive_sfo_ppm() * 1.0e-6) : 0.0;
+  const double sfo_tsym = (1.0e-3 / (double)fp->slots_per_subframe) / (double)fp->symbols_per_slot;
+
   const uint64_t pdt_dem = pdtim_on ? pdtim_now() : 0;
   bool demod_ok = true;
   for (int m = dlsch_config->start_symbol; m < dlsch_config->start_symbol + dlsch_config->number_symbols; m++) {
+    if (sfo_eps != 0.0) {
+      /* Bring every DM-RS slot to the rotation this symbol needs. Cheap: at most 3 slots on this
+       * cell, and only the ones that actually differ are touched. */
+      for (int d = 0; d < fp->symbols_per_slot && d < NR_SYMBOLS_PER_SLOT; d++) {
+        if (!((dlsch_config->dlDmrsSymbPos >> d) & 1)) {
+          continue;
+        }
+        const double want = (double)(m - d);
+        const double delta = want - sfo_applied[d];
+        if (delta == 0.0) {
+          continue;
+        }
+        sfo_applied[d] = want;
+        const double c = -2.0 * M_PI * (double)fp->subcarrier_spacing * sfo_eps * delta * sfo_tsym;
+        for (int r = 0; r < fp->nb_antennas_rx * NR_MAX_NB_LAYERS; r++) {
+          c16_t *h = (c16_t *)&pdsch_dl_ch_estimates[r][fp->ofdm_symbol_size * d];
+          for (uint32_t k = 0; k < fp->ofdm_symbol_size; k++) {
+            if (h[k].r == 0 && h[k].i == 0) {
+              continue;
+            }
+            const double ph = c * (double)k;
+            const double cs = cos(ph), sn = sin(ph);
+            const double hr = (double)h[k].r, hi = (double)h[k].i;
+            h[k].r = (int16_t)lround(hr * cs - hi * sn);
+            h[k].i = (int16_t)lround(hr * sn + hi * cs);
+          }
+        }
+      }
+    }
     if (nr_rx_pdsch(ue, proc, &dlsch, freq_alloc, dlsch_config, &harq, (unsigned char)m,
                     m == first_symbol_with_data, (unsigned char)dlsch_config->harq_process_nbr, pdsch_est_size,
                     pdsch_dl_ch_estimates, llr, dl_valid_re, rxdataF, &log2_maxh, rx_size_symbol,
@@ -1524,7 +1632,7 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
     /* Measured BEFORE unscrambling: descrambling only flips signs, so magnitudes are identical
      * either side of it and taking them here keeps this independent of whether the scrambling
      * sequence is the suspect. */
-    uint64_t llr_n = 0, llr_absum = 0, llr_zero = 0, llr_sat = 0, llr_pos = 0;
+    uint64_t llr_n = 0, llr_absum = 0, llr_zero = 0, llr_sat = 0, llr_pos = 0, llr_clip8 = 0;
     int64_t  llr_sgnsum = 0;
     for (uint32_t i = 0; i < G; i += 32) {
       const int v = llr[i] < 0 ? -llr[i] : llr[i];
@@ -1535,6 +1643,45 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
       }
       if (v >= 32767) {
         llr_sat++;
+      }
+      if (v > 127) {
+        llr_clip8++;   // the rail the LDPC decoder actually imposes
+      }
+    }
+
+    /* ---- LLR RESCALE TO THE INT8 RAIL (ISAC_LLR_SCALE=<target mean |llr|>, 0/unset = off) -----
+     * The decoder's own input stage saturates at +-127. With a measured mean |llr| of 232-498,
+     * most of the distribution is clipped to a hard decision before belief propagation starts,
+     * which is why healthy-magnitude LLRs fail to converge and why the failure rate tracks the
+     * per-run LLR SCALE rather than the channel (EVM is normalised by measured RMS, so it is blind
+     * to scale by construction and reads a clean 10 % on runs that decode 26 %).
+     *
+     * Rescale by the ratio of a target mean to the measured mean of THIS transport block, so the
+     * correction follows whatever the per-run scale happens to be instead of assuming it. A target
+     * well below the rail leaves headroom for the tail; the mean is a robust statistic here because
+     * the distribution has no heavy tail once it is not clipped.
+     *
+     * NOT the root fix. The scale is wrong because nvar is wrong (see ISAC_RX_NVAR_FIX and this
+     * project's own "nvar ~4x too small" finding); this only stops the wrongness reaching a rail
+     * where information is destroyed rather than merely mis-weighted. Opt-in so the default path
+     * stays bit-identical until an A/B says otherwise. */
+    {
+      static int s_llr_scale = -1;
+      if (s_llr_scale < 0) {
+        const char *e = getenv("ISAC_LLR_SCALE");
+        s_llr_scale = (e != NULL) ? atoi(e) : 0;
+      }
+      if (s_llr_scale > 0 && llr_n > 0 && llr_absum > 0) {
+        const double mean_abs = (double)llr_absum / (double)llr_n;
+        const double f = (double)s_llr_scale / mean_abs;
+        if (f < 0.999 || f > 1.001) {
+          for (uint32_t i = 0; i < G; i++) {
+            int v = (int)lround((double)llr[i] * f);
+            if (v > 32767) v = 32767;
+            if (v < -32768) v = -32768;
+            llr[i] = (int16_t)v;
+          }
+        }
       }
     }
 
@@ -1656,6 +1803,7 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
       atomic_fetch_add(&g_llr_absum[k], llr_absum);
       atomic_fetch_add(&g_llr_zero[k], llr_zero);
       atomic_fetch_add(&g_llr_sat[k], llr_sat);
+      atomic_fetch_add(&g_llr_clip8[k], llr_clip8);
       atomic_fetch_add(&g_llr_sgnsum[k], llr_sgnsum);
       atomic_fetch_add(&g_llr_pos[k], llr_pos);
       for (int b = 0; b < 2; b++) {
