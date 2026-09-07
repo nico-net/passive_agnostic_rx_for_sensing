@@ -1037,6 +1037,121 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
    * ISAC_RX_BRANCH_FO=1 additionally APPLIES the estimate (nr_ue_set_branch_fo_hz -> the per-branch
    * de-rotation in nr_slot_fep_ant). Default is measure-and-log ONLY: correcting on the strength of
    * an unvalidated estimate is exactly the mistake this file's history is full of. */
+  /* ---- DM-RS PHASE-SLOPE CFO/SFO TRACKER (2026-09-07) -----------------------------------------
+   * WHY THIS EXISTS. The carrier frequency offset is estimated ONCE at acquisition and never
+   * revisited (the CFO trim loop in phy_procedures_nr_ue.c measures but does not apply, and
+   * --cont-fo-comp's PI loop is gated on a PBCH decode, so it updates at SSB rate, 20 ms, not per
+   * slot). SAMPLING frequency offset is not estimated at ALL anywhere in this receive path -- the
+   * only SFO code in the tree is NR_UE_ISAC's cpi_sfo_tracker, and the passive confs run with
+   * sensing.enable = 0. Both errors accumulate ACROSS SYMBOLS WITHIN A SLOT, which is the shape of
+   * the symptom: PDCCH lives on symbol 0 and decodes near-perfectly, PDSCH spans symbols 1-13 and
+   * swings 5-78 % between otherwise identical runs.
+   *
+   * WHY IT IS ESSENTIALLY FREE HERE. This gNB sends dl_dmrs_symb_pos = 0x884, i.e. DM-RS on symbols
+   * 2, 7 and 11 of every grant, and the loop above ALREADY channel-estimates each of them. So the
+   * estimate costs one pass over an array that is already in cache, per grant, with ~200k grants a
+   * run to average over. No new reference signal, no extra FFT, no PT-RS (which this cell does not
+   * configure anyway).
+   *
+   * THE SEPARATION, which is the whole point of using a SLOPE rather than a mean. Between two
+   * pilot-bearing symbols separated by dt:
+   *     dphi(k) = arg( H_last[k] . conj(H_first[k]) ) = 2*pi*f_cfo*dt  -  2*pi*k*df*eps*dt
+   * CFO is a CONSTANT phase on every subcarrier; SFO is a phase RAMP linear in the subcarrier index
+   * k. Fit phase against k and the INTERCEPT is the CFO while the SLOPE is the SFO -- one
+   * measurement yields both, and neither can masquerade as the other. (Standard result; see e.g.
+   * US7224666B2 / EP1363435A2.)
+   *
+   * Rather than a full least-squares fit, the ramp is taken from the two halves of the occupied
+   * band (negative-k and positive-k about DC) and differenced. One subtraction, no matrix, and the
+   * noise averages over ~half the allocation on each side. A full LS fit is the upgrade path if the
+   * slope ever needs more precision than this.
+   *
+   * MEASURE-ONLY BY DEFAULT, and that is not timidity: retuning the radio on an unvalidated
+   * estimate killed it 2/2 on this rig, which is why the existing trim loop is two-stage too.
+   * ISAC_DMRS_FO_APPLY=1 applies the CFO as a DIGITAL de-rotation through the same per-branch hook
+   * nr_slot_fep_ant already uses -- never a hardware retune. SFO is reported only; correcting it
+   * needs a per-subcarrier ramp in the equaliser, which is a bigger change than this. */
+  if (dmrs_first >= 0 && dmrs_last > dmrs_first) {
+    static _Atomic uint64_t s_dfo_n = 0;
+    static double s_cfo_ema = 0.0, s_sfo_ema = 0.0;
+    const double dt_d = (1.0e-3 / (double)fp->slots_per_subframe) / (double)fp->symbols_per_slot
+                        * (double)(dmrs_last - dmrs_first);
+    const uint32_t N = fp->ofdm_symbol_size;
+    const c16_t *h0 = (const c16_t *)&pdsch_dl_ch_estimates[0][N * dmrs_first];
+    const c16_t *h1 = (const c16_t *)&pdsch_dl_ch_estimates[0][N * dmrs_last];
+    /* Split at the midpoint of the OCCUPIED band, not at DC.
+     * MEASURED 2026-09-07: splitting at N/2 put EVERY occupied subcarrier on one side
+     * (n_sc = 0/292) and the slope estimator never ran -- SFO read 0.00 ppm in every grant of a
+     * whole capture, which looks exactly like "no SFO" rather than like a broken estimator. The
+     * grant lives in one contiguous stretch of the FFT array, so a DC split is not guaranteed to
+     * divide it at all.
+     * The ORIGIN of k does not matter for the slope: shifting k by k0 leaves d(phi)/dk unchanged
+     * and moves only the intercept, by 2*pi*k0*df*eps*dt, which at these eps is far below the CFO
+     * term it lands in. Any two well-separated groups of subcarriers give the same SFO. */
+    uint32_t kmin = N, kmax = 0;
+    for (uint32_t k = 0; k < N; k++) {
+      if (h0[k].r != 0 || h0[k].i != 0 || h1[k].r != 0 || h1[k].i != 0) {
+        if (k < kmin) kmin = k;
+        if (k > kmax) kmax = k;
+      }
+    }
+    const uint32_t kmid = (kmin <= kmax) ? (kmin + kmax) / 2 : 0;
+    double re[2] = {0.0, 0.0}, im[2] = {0.0, 0.0}, ksum[2] = {0.0, 0.0};
+    uint32_t kn[2] = {0, 0};
+    for (uint32_t k = 0; k < N; k++) {
+      const double rr = (double)h1[k].r * h0[k].r + (double)h1[k].i * h0[k].i;
+      const double ii = (double)h1[k].i * h0[k].r - (double)h1[k].r * h0[k].i;
+      if (rr == 0.0 && ii == 0.0) {
+        continue;  // unallocated subcarrier
+      }
+      const int h = (k <= kmid) ? 0 : 1;
+      re[h] += rr;
+      im[h] += ii;
+      ksum[h] += (double)k;
+      kn[h]++;
+    }
+    if (kn[0] + kn[1] > 0) {
+      const double cfo_hz = atan2(im[0] + im[1], re[0] + re[1]) / (2.0 * M_PI * dt_d);
+      double sfo_ppm = 0.0;
+      if (kn[0] > 16 && kn[1] > 16) {
+        const double p_lo = atan2(im[0], re[0]), p_hi = atan2(im[1], re[1]);
+        const double k_lo = ksum[0] / (double)kn[0], k_hi = ksum[1] / (double)kn[1];
+        double dphi = p_hi - p_lo;
+        while (dphi > M_PI)  dphi -= 2.0 * M_PI;   // the ramp must not alias across the branch cut
+        while (dphi < -M_PI) dphi += 2.0 * M_PI;
+        const double dk = k_hi - k_lo;
+        if (dk != 0.0) {
+          /* dphi/dk = -2*pi*df*eps*dt  ->  eps = -(dphi/dk) / (2*pi*df*dt) */
+          const double df = (double)fp->subcarrier_spacing;
+          sfo_ppm = -(dphi / dk) / (2.0 * M_PI * df * dt_d) * 1.0e6;
+        }
+      }
+      const uint64_t dn = atomic_fetch_add(&s_dfo_n, 1);
+      s_cfo_ema = (dn == 0) ? cfo_hz : (0.99 * s_cfo_ema + 0.01 * cfo_hz);
+      s_sfo_ema = (dn == 0) ? sfo_ppm : (0.99 * s_sfo_ema + 0.01 * sfo_ppm);
+      static int s_apply = -1;
+      if (s_apply < 0) {
+        const char *e = getenv("ISAC_DMRS_FO_APPLY");
+        s_apply = (e != NULL && atoi(e) != 0) ? 1 : 0;
+      }
+      {
+        if (s_apply) {
+          /* Digital de-rotation only, applied to every branch in common. NOT nrue_ru_set_freq(). */
+          for (int a = 0; a < fp->nb_antennas_rx && a < NR_DL_CHEST_MAX_ANT; a++) {
+            nr_ue_set_branch_fo_hz(a, -s_cfo_ema);
+          }
+        }
+      }
+      if ((dn % 500) == 0) {
+        LOG_I(PHY,
+              "SENSING: DMRSFO cfo=%+.1f Hz (ema %+.1f) sfo=%+.2f ppm (ema %+.2f) "
+              "sym %d->%d n_sc=%u/%u unambiguous=+/-%.0f Hz apply=%d\n",
+              cfo_hz, s_cfo_ema, sfo_ppm, s_sfo_ema, dmrs_first, dmrs_last, kn[0], kn[1],
+              1.0 / (2.0 * dt_d), s_apply);
+      }
+    }
+  }
+
   if (fp->nb_antennas_rx > 1 && dmrs_first >= 0 && dmrs_last > dmrs_first) {
     static _Atomic uint64_t s_fo_n = 0;
     static double s_fo_ema[NR_DL_CHEST_MAX_ANT];
