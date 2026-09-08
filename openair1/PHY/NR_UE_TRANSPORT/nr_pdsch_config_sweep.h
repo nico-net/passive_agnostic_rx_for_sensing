@@ -67,8 +67,29 @@ typedef struct {
 
 /** Build the hypothesis set. `tda_count` comes from Technique C (the solved dci_length pins the
  * TDA field width, hence the list size), so the search is over the CONTENTS of a list whose LENGTH
- * is already known. Returns the number of hypotheses enumerated. */
-int nr_pdsch_config_sweep_init(nr_pdsch_config_sweep_state_t *st, int tda_count);
+ * is already known. `dmrs_typeA_position` is the cell's own MIB-derived value (ASN.1 enum: pos2=0,
+ * pos3=1) -- NOT swept, but needed to filter illegal (S,L,add_pos,max_len) combinations OUT of the
+ * enumeration.
+ *
+ * ILLEGAL COMBINATIONS MUST BE FILTERED HERE, NOT LEFT FOR THE CALLER TO SCORE AS 0%. MEASURED
+ * 2026-09-08: a 200s capture on this cell (195,003 decoded, 20.6% overall TB-CRC, Technique D
+ * armed the whole run) produced ZERO convergence. Root cause: nr_pdsch_config_sweep_feed() will
+ * not decide until EVERY enumerated hypothesis has >= SWEEP_MIN_TRIALS. A hypothesis whose DM-RS
+ * mask is illegal per TS 38.211 (e.g. a short allocation that cannot fit dmrs-AdditionalPosition=3)
+ * was being caught downstream -- the caller resets sweep_idx to -1 and never calls feed() for it --
+ * so its trial count is stuck at 0 FOREVER and the "wait for all" gate can never pass, on ANY cell,
+ * for as long as even one of the enumerated combinations happens to be unrealisable. Filtering here
+ * means every hypothesis this function hands out is guaranteed feedable. Returns the number of
+ * (now all-legal) hypotheses enumerated. */
+/** Signature matches nr_pcch_blind_dmrs_mask()'s real one exactly (mapping_type_is_b fixed at 0,
+ * mapping type A, since that is the only mapping this sweep enumerates). Returns > 0 for a legal
+ * DM-RS mask, <= 0 otherwise. A NULL legality_fn disables filtering (for pure-algorithm tests that
+ * have no real cell context and don't care about 3GPP-table legality). */
+typedef int32_t (*nr_pdsch_legality_fn_t)(int dmrs_typeA_position, int tda_length, int tda_start,
+                                          int mapping_type_is_b, int add_pos, int max_len);
+
+int nr_pdsch_config_sweep_init(nr_pdsch_config_sweep_state_t *st, int tda_count, int dmrs_typeA_position,
+                               nr_pdsch_legality_fn_t legality_fn);
 
 /** Next hypothesis to try, round-robin. Returns its index and fills *out. */
 int nr_pdsch_config_sweep_next(nr_pdsch_config_sweep_state_t *st, nr_pdsch_cfg_hypothesis_t *out);
@@ -86,7 +107,8 @@ int nr_pdsch_config_sweep_winner(const nr_pdsch_config_sweep_state_t *st);
  * either one. The functions above stay pure and unit-testable; these are the thin shared layer.
  * Counters are plain: a torn read costs at most one mis-attributed trial out of thousands, which is
  * far cheaper than serialising the decode path. */
-void nr_pdsch_config_sweep_enable_global(int tda_count);
+void nr_pdsch_config_sweep_enable_global(int tda_count, int dmrs_typeA_position,
+                                         nr_pdsch_legality_fn_t legality_fn);
 int  nr_pdsch_config_sweep_next_global(nr_pdsch_cfg_hypothesis_t *out);
 int  nr_pdsch_config_sweep_feed_global(int idx, bool tb_crc_ok);
 int  nr_pdsch_config_sweep_winner_global(void);

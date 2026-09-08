@@ -2200,7 +2200,8 @@ TEST(TechniqueD, HypothesisSetContainsThisCellsTruth) {
   // If the truth is not enumerated, the sweep can never converge however long it runs -- and it
   // would report "undecided" forever rather than failing loudly.
   nr_pdsch_config_sweep_state_t st;
-  const int n = nr_pdsch_config_sweep_init(&st, 2);
+  const int n = nr_pdsch_config_sweep_init(&st, 2, 0 /* pos2, this cell's real dmrs_typeA_position */,
+                                            nr_pdcch_blind_dmrs_mask);
   bool found = false;
   for (int i = 0; i < n; i++) {
     if (st.hyp[i].tda_start == 1 && st.hyp[i].tda_length == 13 && st.hyp[i].dmrs_add_pos == 2
@@ -2209,6 +2210,33 @@ TEST(TechniqueD, HypothesisSetContainsThisCellsTruth) {
     }
   }
   EXPECT_TRUE(found) << "this deployment's real config is not among the swept hypotheses";
+}
+
+TEST(TechniqueD, TheRealFilterExcludesEveryIllegalCombinationOnThisCell) {
+  // Confirms the legality filter isn't a no-op on this deployment. MEASURED 2026-09-08 (a
+  // dedicated diagnostic dump, since retracted): of the first 64 unfiltered candidates, 13 are
+  // TS-38.211-illegal at pos2 -- every one of them is dmrs_max_len=2 combined with
+  // dmrs_add_pos>=2, which that spec table simply does not define. Those 13 are exactly the class
+  // of hypothesis that deadlocked live convergence on 2026-09-08 (195,003 decoded, 20.6% CRC, no
+  // verdict for a whole 200s capture): unfed forever, so the "wait for all" gate never passed.
+  //
+  // NOTE what this test does NOT check: unfiltered and filtered enumeration both hit the 64-entry
+  // cap (verified separately) -- filtering does not shrink the COUNT, because there are 192 total
+  // combinations and skipped illegal ones are backfilled from later in the table. Count comparison
+  // is therefore the WRONG assertion (an earlier version of this test asserted count and failed
+  // for exactly that reason); the property that actually matters is that no illegal survivor
+  // reaches the sweep, checked directly below.
+  nr_pdsch_config_sweep_state_t st;
+  const int n = nr_pdsch_config_sweep_init(&st, 2, 0, nr_pdcch_blind_dmrs_mask);
+  ASSERT_GT(n, 0);
+  int illegal_survivors = 0;
+  for (int i = 0; i < n; i++) {
+    const auto &h = st.hyp[i];
+    if (nr_pdcch_blind_dmrs_mask(0, h.tda_length, h.tda_start, 0, h.dmrs_add_pos, h.dmrs_max_len) <= 0) {
+      illegal_survivors++;
+    }
+  }
+  EXPECT_EQ(illegal_survivors, 0) << "an illegal hypothesis survived filtering into the live set";
 }
 
 TEST(TechniqueD, TruthHypothesisRealisesTheGnbsOwnDmrsMask) {

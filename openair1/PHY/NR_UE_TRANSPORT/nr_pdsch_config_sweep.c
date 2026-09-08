@@ -31,7 +31,8 @@
  * a runner-up that decodes nothing at all. */
 #define SWEEP_MIN_RATE 0.02
 
-int nr_pdsch_config_sweep_init(nr_pdsch_config_sweep_state_t *st, int tda_count)
+int nr_pdsch_config_sweep_init(nr_pdsch_config_sweep_state_t *st, int tda_count, int dmrs_typeA_position,
+                               nr_pdsch_legality_fn_t legality_fn)
 {
   if (st == NULL) {
     return 0;
@@ -61,6 +62,14 @@ int nr_pdsch_config_sweep_init(nr_pdsch_config_sweep_state_t *st, int tda_count)
         for (unsigned d = 0; d < sizeof(kMcsTab); d++) {
           if (st->n_hyp >= NR_PDSCH_SWEEP_MAX_HYP) {
             return st->n_hyp;
+          }
+          /* Skip combinations TS 38.211's own DM-RS table does not define (e.g. a short
+           * allocation cannot fit a high additional-position count). An unfeedable hypothesis
+           * would otherwise deadlock the sweep forever -- see the header comment. */
+          if (legality_fn != NULL
+              && legality_fn(dmrs_typeA_position, kSL[a][1], kSL[a][0], 0 /* mapping type A */,
+                             kAddPos[b], kMaxLen[c]) <= 0) {
+            continue;
           }
           nr_pdsch_cfg_hypothesis_t *h = &st->hyp[st->n_hyp];
           h->tda_start    = kSL[a][0];
@@ -144,9 +153,10 @@ int nr_pdsch_config_sweep_winner(const nr_pdsch_config_sweep_state_t *st)
 static nr_pdsch_config_sweep_state_t g_sweep;
 static int g_sweep_on = 0;
 
-void nr_pdsch_config_sweep_enable_global(int tda_count)
+void nr_pdsch_config_sweep_enable_global(int tda_count, int dmrs_typeA_position,
+                                         nr_pdsch_legality_fn_t legality_fn)
 {
-  nr_pdsch_config_sweep_init(&g_sweep, tda_count);
+  nr_pdsch_config_sweep_init(&g_sweep, tda_count, dmrs_typeA_position, legality_fn);
   g_sweep_on = 1;
 }
 

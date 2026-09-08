@@ -82,6 +82,28 @@ int nr_dlsch_planned_branch(int nbRx, int nl)
   if (nr_dlsch_forced_branch >= 0 && nr_dlsch_forced_branch < nbRx) {
     return nr_dlsch_forced_branch; // the retry has pinned one
   }
+  if (nr_dlsch_forced_mask >= 0) {
+    /* BUG FOUND 2026-09-08: this function did not know about the subset-scan mask at all, so it
+     * fell through to the ISAC_RX_MRC_MODE env check below and returned BRANCH 0 for every one of
+     * the 15 subsets regardless of which branches were actually selected -- {1} alone got branch
+     * 0's nvar (too optimistic for a weaker branch), {0,1,2,3} got it too (far too small for a
+     * 4-way coherent sum), and only {0} happened to get the RIGHT value by coincidence. Measured
+     * consequence: SUBSET read 0% on all 15 subsets while the primary decode scored 87.7% on the
+     * SAME transport blocks -- impossible if the scan were faithful.
+     * The existing scale-preserving substitution only has a formula for ONE branch's raw nvar
+     * standing in for the mean, so it is applied only when the mask selects exactly one branch;
+     * a multi-branch mask keeps the cross-antenna mean, which is what production MRC mode 2/3
+     * combining already uses (covariance-aware multi-branch nvar is a separate, unstarted piece
+     * of work, not silently approximated here). */
+    if ((nr_dlsch_forced_mask & (nr_dlsch_forced_mask - 1)) == 0) { // exactly one bit set
+      for (int b = 0; b < nbRx; b++) {
+        if (nr_dlsch_forced_mask & (1 << b)) {
+          return b;
+        }
+      }
+    }
+    return -1;
+  }
   const char *e = getenv("ISAC_RX_MRC_MODE");
   const int mode = (e != NULL) ? atoi(e) : 0;
   return (mode == 0) ? 0 : -1;
@@ -1135,6 +1157,21 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
       // Publish the branch actually used, so the passive decoder's retry knows which one to skip.
       nr_dlsch_used_branch = (t_mrc_nb_rx == 1) ? t_mrc_rx_index : -1;
 
+      /* SUBSETDIAG (ISAC_SUBSET_DIAG=1): the state this decision actually resolved to, printed for
+       * EVERY call so a force_mask={0} call and a primary mode-0 call on the same TB can be diffed
+       * line by line. Added 2026-09-08 because {0} via force_mask reads 0 % CRC while primary mode
+       * 0 (electrically identical in theory -- a zeroed channel estimate contributes exactly zero
+       * to both the MRC signal and gain sums) reads 87.7 % on the SAME transport blocks, and static
+       * reading of the zeroing/shift/accumulate path found no discrepancy. */
+      if (getenv("ISAC_SUBSET_DIAG") != NULL) {
+        LOG_I(PHY,
+              "SENSING: SUBSETDIAG forced_mask=%d forced_branch=%d mode=%d nb_rx=%d rx_index=%d "
+              "live_mask=0x%x avgs=%d best=%d shift_src=%s\n",
+              nr_dlsch_forced_mask, nr_dlsch_forced_branch, t_mrc_mode, mrc_nb_rx, mrc_rx_index,
+              t_mrc_live_mask, avgs, best,
+              (nr_dlsch_forced_mask >= 0) ? "mask-branch" : (t_mrc_mode == 0) ? "mode0" : "other");
+      }
+
       /* RXBRANCH: the per-branch powers this decision is made from. §12.7 records that CHESTDIAG's
        * equivalent field was declared, printed and never written, which is why the imbalance stayed
        * invisible for so long -- so this one prints the raw values, not a derived summary. dB are
@@ -1182,7 +1219,15 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
        * their estimates, so charging it log2(nbRx) bits would spend 2 bits of LLR dynamic range to
        * protect a sum that only ever has popcount(live_mask) non-zero terms. */
       int contributing = mrc_nb_rx;
-      if (nbRx == 4 && t_mrc_mode == 3) {
+      /* The live-branch count must follow the mask WHOEVER set it. Gating this on t_mrc_mode == 3
+       * alone meant the subset scan (which drives the same live_mask through nr_dlsch_force_mask()
+       * while mode stays 0) got a shift sized for FOUR contributing branches even when one was
+       * live -- over-scaling the equaliser output and destroying the decoder's soft input while
+       * leaving the constellation itself intact, exactly the failure the L2MAXH comment below
+       * describes. Measured 2026-09-08: every one of the 15 subsets read 0 % CRC, including {0},
+       * on transport blocks the primary path decoded at 87.7 %. Same class as the nvar bug fixed
+       * the same day -- a correction that knew about mode 3 but not about forced_mask. */
+      if (nbRx == 4 && (t_mrc_mode == 3 || nr_dlsch_forced_mask >= 0)) {
         contributing = 0;
         for (int aarx = 0; aarx < nbRx; aarx++) {
           if (t_mrc_live_mask & (1 << aarx)) {

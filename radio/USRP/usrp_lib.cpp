@@ -2391,6 +2391,21 @@ extern "C" {
             cfg->rx_gain_offset[i],
             cfg->rx_gain[i] - cfg->rx_gain_offset[i],
             gain_range.stop());
+      /* RFGAIN AT THE REAL CALL SITE. trx_usrp_set_gains() below (same file) was instrumented
+       * first and never fires: device_init() -- HERE -- is the gain path this checkout actually
+       * uses, confirmed 2026-09-08 by RFGAIN printing 0 lines on a live capture while RFCHAN
+       * (right below this block) showed gains already at 40 dB. Requested vs CLAMPED vs
+       * READBACK, so a silent UHD clamp (the risk ISAC_RX_GAIN_TRIM introduces once a branch's
+       * requested gain exceeds this device's range) is visible instead of inferred. */
+      {
+        const double got = s->usrp->get_rx_gain(i + choffset);
+        LOG_I(HW,
+              "RFGAIN ch%d requested=%.2f clamped_to=%.2f applied_readback=%.2f range=[%.1f..%.1f] "
+              "%s\n",
+              i + choffset, cfg->rx_gain[i] - cfg->rx_gain_offset[i], gain, got,
+              gain_range.start(), gain_range.stop(),
+              (fabs(got - gain) > 0.6) ? "<<< HARDWARE DID NOT APPLY THE REQUESTED GAIN" : "ok");
+      }
       // Bistatic sensing UE: force RX onto a connector physically separate from the one TX uses,
       // improving TX->RX isolation. OAI otherwise leaves the antenna at the UHD default, which
       // shares one port for both directions on a B2x0.

@@ -148,6 +148,7 @@ static bool         g_length_found  = false;
  * unresolved nothing decodes, every hypothesis scores zero, and the sweep would (correctly but
  * uselessly) burn its whole trial budget being unable to tell them apart. */
 static bool g_pdsch_sweep_on = false;
+static bool g_pdsch_sweep_reported = false;  // Technique D verdict logged exactly once
 static void pdsch_sweep_maybe_enable(const nr_pdcch_blind_monitor_cfg_t *cfg)
 {
   /* ISAC_PDSCH_CFG_SWEEP is a TEST-ONLY override (offline captures, before the conf surface
@@ -159,10 +160,28 @@ static void pdsch_sweep_maybe_enable(const nr_pdcch_blind_monitor_cfg_t *cfg)
     s_env = (e != NULL && atoi(e) != 0) ? 1 : 0;
   }
   if ((s_env || cfg->dl_full_auto) && !g_pdsch_sweep_on && g_length_found) {
-    nr_pdsch_config_sweep_enable_global(cfg->extract.tda_count);
+    nr_pdsch_config_sweep_enable_global(cfg->extract.tda_count, cfg->dmrs_typeA_position,
+                                           nr_pdcch_blind_dmrs_mask);
     g_pdsch_sweep_on = true;
     LOG_A(PHY, "SENSING: Technique D -- PDSCH config sweep ARMED (TB-CRC scored, "
                "hypotheses interleaved per grant)\n");
+  }
+  /* VERDICT VISIBILITY. The sweep decides internally (nr_pdsch_config_sweep_feed_global(), called
+   * from the PDSCH consumer thread every scored decode) but until now nothing ever READ that
+   * decision back -- nr_pdsch_config_sweep_winner_global()/_result_global() were defined and
+   * called from nowhere. MEASURED 2026-09-08: a 200s capture fed ~190k decodes through the sweep,
+   * ~2900 trials/hypothesis against a 300-trial minimum, and still produced zero visible outcome,
+   * because there was no visibility to produce. Polled here (once/occasion, alongside the arming
+   * check) rather than in the consumer thread, so this stays off the PDSCH decode path; a single
+   * atomic load per occasion is negligible next to a full LDPC decode. */
+  if (g_pdsch_sweep_on && !g_pdsch_sweep_reported) {
+    nr_pdsch_cfg_hypothesis_t hy;
+    if (nr_pdsch_config_sweep_result_global(&hy)) {
+      g_pdsch_sweep_reported = true;
+      LOG_A(PHY, "SENSING: Technique D -- PDSCH config CONVERGED: TDA S=%u L=%u dmrs_add_pos=%u "
+                 "dmrs_max_len=%u mcs_table=%u\n",
+            hy.tda_start, hy.tda_length, hy.dmrs_add_pos, hy.dmrs_max_len, hy.mcs_table);
+    }
   }
 }
 // Bounded give-up cap (2026-09-06) on accumulated sweep occasions -- see that branch's own comment
@@ -1302,12 +1321,15 @@ void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_pr
         // sweep genuinely never reaches significance (e.g. real accept rate far below what even
         // this many occasions can establish) must not run this indefinitely.
         g_length_swept = true;
+        /* Capture the count BEFORE reset() zeroes it -- reset() ran first in the original code,
+         * so this log line always printed occasions=0 regardless of the true trigger value. */
+        const int gave_up_after = s_sweep_state.occasions_fed;
         nr_pdcch_blind_monitor_autodiscover_retry(cfg->bwp_start + cfg->coreset_rb_offset);
         nr_pdcch_dci_length_sweep_reset(&s_sweep_state);
         g_length_swept = false;  // the next footprint gets its own sweep budget
         LOG_W(PHY, "SENSING: Phase 3 autodiscover -- dci_length sweep gave up after %d occasions "
                    "(bootstrap_rnti=0x%x); NOT found, dci_length stays at the formula default\n",
-              s_sweep_state.occasions_fed, bootstrap_rnti);
+              gave_up_after, bootstrap_rnti);
       }
     }
   }
