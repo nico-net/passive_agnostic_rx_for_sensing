@@ -559,6 +559,20 @@ static unsigned int passive_ul_fep_offset(const NR_DL_FRAME_PARMS *fp, unsigned 
   return off;
 }
 
+/* nr_symbol_fep_ul() performs its ring subtraction through an unsigned accumulator and therefore
+ * requires a canonical non-negative offset.  Delay refinement can legitimately move the window
+ * through zero (for example TA 1600 - delay 2042 = -442); passing that value directly underflows
+ * the wrap branch and turns its split-window memcpy length into several gigabytes. */
+static int passive_ul_normalize_fep_offset(const NR_DL_FRAME_PARMS *fp, int64_t sample_offset)
+{
+  const int64_t ring = fp->samples_per_frame;
+  AssertFatal(ring > 0, "passive UL FEP requires a positive RX ring length\n");
+  int64_t normalized = sample_offset % ring;
+  if (normalized < 0)
+    normalized += ring;
+  return (int)normalized;
+}
+
 /* De-rotate one symbol's worth of samples into scratch, then DFT it. Mirrors nr_symbol_fep_ul()'s
  * wrap handling against samples_per_frame. */
 static void passive_ul_fep_fo(const NR_DL_FRAME_PARMS *fp, const c16_t *rxdata, c16_t *rxdataF,
@@ -706,6 +720,7 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
 #define PASSIVE_UL_FEP(off_)                                                                       \
   do {                                                                                             \
     const double fo_hz_ = fo_hz;                                                                   \
+    const int sample_offset_ = passive_ul_normalize_fep_offset(fp, (int64_t)(off_));                \
     const int s0_ = g->start_symbol;                                                               \
     const int s1_ = g->start_symbol + g->num_symbols;                                              \
     for (int a_ = 0; a_ < nant; a_++) {                                                            \
@@ -713,9 +728,10 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
       for (int sym_ = s0_; sym_ < s1_ && sym_ < sps; sym_++) {                                     \
         c16_t *dst_ = &gnb->common_vars.rxdataF[a_][slot_off + sym_ * symsz];                      \
         if (fo_hz_ != 0.0) {                                                                       \
-          passive_ul_fep_fo(fp, rx_, dst_, (unsigned char)sym_, (unsigned char)slot, (off_), fo_hz_);\
+          passive_ul_fep_fo(fp, rx_, dst_, (unsigned char)sym_, (unsigned char)slot,                     \
+                            sample_offset_, fo_hz_);                                                    \
         } else {                                                                                   \
-          nr_symbol_fep_ul(fp, rx_, dst_, (unsigned char)sym_, (unsigned char)slot, (off_));       \
+          nr_symbol_fep_ul(fp, rx_, dst_, (unsigned char)sym_, (unsigned char)slot, sample_offset_);    \
         }                                                                                          \
         apply_nr_rotation_symbol_RX(fp->symbols_per_slot, fp->slots_per_subframe,                  \
                                     fp->timeshift_symbol_rotation, fp->first_carrier_offset,       \
