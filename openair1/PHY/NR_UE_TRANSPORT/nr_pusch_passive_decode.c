@@ -654,8 +654,9 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
   /* One-shot STAGE markers. The first live run entered the decode and never returned, and with no
    * gdb on this host and every thread sleeping rather than spinning, the log is the only instrument
    * that can say WHERE. Each prints once; the last one printed is the stage that blocked. */
-  static int s_stage = 1;
-#define PUSCH_STAGE(n, what) do { if (s_stage) { LOG_I(PHY, "SENSING: PUSCHSTAGE %d %s\n", (n), (what)); } } while (0)
+  static _Atomic int s_stage_once = 1;
+  const int stage_diag = atomic_exchange_explicit(&s_stage_once, 0, memory_order_relaxed);
+#define PUSCH_STAGE(n, what) do { if (stage_diag) { LOG_I(PHY, "SENSING: PUSCHSTAGE %d %s\n", (n), (what)); } } while (0)
   PUSCH_STAGE(1, "guards passed");
   const int      utim = utim_enabled();
   const uint64_t t_all = utim ? utim_now() : 0;
@@ -1069,7 +1070,6 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
                (fp->slots_per_frame > 0) ? (10000000ull / (uint64_t)fp->slots_per_frame) : 0);
   }
   PUSCH_STAGE(6, "ulsch_decoding returned");
-  s_stage = 0;
 #undef PUSCH_STAGE
 
   out->qam_mod_order = pdu.qam_mod_order;

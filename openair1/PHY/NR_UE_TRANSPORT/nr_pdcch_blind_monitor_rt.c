@@ -1457,9 +1457,17 @@ constdiag_done:;
       const nr_pdcch_blind_ul_result_t *u = &cand_task[ti].ul_out;
       if (cand_task[ti].ok) {
         g_ul_accepts++;
-        /* Park it for the slot its PUSCH occupies. The DCI is in a DOWNLINK slot; the PUSCH is k2
-         * slots later in an UPLINK one, where nothing runs today. */
-        nr_pusch_grant_book_add(u, cand_task[ti].frame, cand_task[ti].slot, fp->slots_per_frame);
+        /* A CRC-plausible blind decode is not yet a trustworthy UE identity. Random candidates
+         * occasionally recover an in-range 16-bit RNTI and previously reached the grant book on
+         * their first sighting, creating bogus PUSCH CFR rows. Apply the same recurrence test as
+         * the DL path before routing a grant; genuine UE RNTIs recur within a few slots. */
+        if (!rnti_persistence_check(u->rnti, abs_slot, persist_window_slots, cfg->rnti_persist_k)) {
+          g_held_persist++;
+        } else {
+          /* Park it for the slot its PUSCH occupies. The DCI is in a DOWNLINK slot; the PUSCH is k2
+           * slots later in an UPLINK one, where nothing runs today. */
+          nr_pusch_grant_book_add(u, cand_task[ti].frame, cand_task[ti].slot, fp->slots_per_frame);
+        }
       } else {
         g_ul_rejects++;
       }
