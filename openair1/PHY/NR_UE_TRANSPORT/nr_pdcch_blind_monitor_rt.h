@@ -246,7 +246,7 @@ typedef struct {
   // stream. Format 0_1 has its own RRC-derived width (43 bits on this cell against 1_1's 47), so
   // unlike 0_0 -- which is size-aligned with 1_0 and therefore free -- it needs its own polar
   // decode. Budget roughly one extra 1_0-scan's worth of CPU per candidate.
-  int dci01_scan;            // 0 = off (default, bit-identical to before), 1 = scan DCI 0_1
+  int dci01_scan;            // Validated operator intent: 0 = off, 1 = enabled in a dedicated USS
   int dci01_length_override; // 0 = use nr_pdcch_blind_dci01_size(&ul). SET THIS: the formula's
                              // defaults are a starting point, not the pinned layout -- see the UL
                              // section of nr_pdcch_blind_monitor.h. 43 is the live-verified value
@@ -289,6 +289,14 @@ typedef struct {
    * for compatibility with existing callers; the config key is pdcch_blind_monitor_full_auto. */
   int dl_full_auto;
 } nr_pdcch_blind_monitor_cfg_t;
+
+/* Keep validated operator intent separate from temporary CSS0 suppression. Both manual
+ * and automatic 0_1 paths must use this gate: 0_1 is a dedicated-USS format. */
+static inline bool nr_pdcch_blind_monitor_ul_scan_enabled(const nr_pdcch_blind_monitor_cfg_t *cfg)
+{
+  return cfg && cfg->dci01_scan == 1 && cfg->coreset_type == 0
+      && cfg->dci10_ss_type == NR_BLIND_SS_UE_SPECIFIC && cfg->ul.bwp_size > 0;
+}
 
 #ifdef __cplusplus
 extern "C" {

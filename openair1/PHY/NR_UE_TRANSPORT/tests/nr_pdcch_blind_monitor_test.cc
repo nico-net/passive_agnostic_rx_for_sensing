@@ -1893,7 +1893,8 @@ TEST(Css0Autoconf, TurnsOffEverySettingThatDescribesTheDedicatedSearchSpace) {
   EXPECT_FLOAT_EQ(c->energy_min, 0.0f);
 
   // Already-established behaviour, asserted here so a future edit cannot silently drop it.
-  EXPECT_EQ(c->dci01_scan, 0);
+  EXPECT_EQ(c->dci01_scan, 1); // preserve intent, suppress effective scanning in CSS0
+  EXPECT_FALSE(nr_pdcch_blind_monitor_ul_scan_enabled(c));
   EXPECT_EQ(c->rnti_min, 0xFFFF);
   EXPECT_EQ(c->rnti_max, 0xFFFF);
 

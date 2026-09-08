@@ -208,8 +208,10 @@ bool nr_pdcch_blind_monitor_autoconf_css0(int num_rbs,
    *   occasions=7000 candidates=199 dci10[accepts=0] dci01[accepts=0 rejects=199]
    * and it was doing so at THIS cell's dedicated 0_1 payload length, a value that has no meaning on
    * another gNB. Anything the operator configured for the dedicated search space has to be switched
-   * off here, not just left unread. */
-  g_cfg.dci01_scan = 0;
+   * off for this context. Preserve the validated operator intent: the runtime
+   * nr_pdcch_blind_monitor_ul_scan_enabled() gate suppresses 0_1 on CSS0 and
+   * automatically re-allows it after dedicated-USS discovery. Clearing dci01_scan
+   * here permanently disabled UL even after successful dedicated acquisition. */
 
   /* The ADAPTIVE ENERGY GATE describes the dedicated CORESET and must be switched OFF here, for the
    * same reason dci01_scan is: leaving a dedicated-path setting on does active harm, not nothing.

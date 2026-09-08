@@ -151,3 +151,43 @@ TEST(DlAdaptive, ExtentCatalogContainsEveryAdmissibleContiguousGeometry) {
   EXPECT_EQ(got.size(),static_cast<size_t>(n));
   for(int f=0;f<=20;f++) for(int l=20;l<45;l++) EXPECT_EQ(got.count({f,l}),1u);
 }
+
+TEST_F(DlGeometry, UlScanIntentSurvivesCss0AndRealDedicatedDiscovery) {
+  auto *cfg=const_cast<nr_pdcch_blind_monitor_cfg_t *>(nr_pdcch_blind_monitor_get_cfg());
+  const auto saved=*cfg;
+  for(int requested : {0,1}) {
+    cfg->dci01_scan=requested;
+    cfg->ul.bwp_size=273;
+    for(int cycle=0;cycle<2;cycle++) {
+      nr_pdcch_blind_monitor_autodiscover_reset();
+      ASSERT_TRUE(nr_pdcch_blind_monitor_autoconf_css0(48,1,0,12,40,0,2,0,1,2,12,0));
+      EXPECT_EQ(cfg->coreset_type,1);
+      EXPECT_FALSE(nr_pdcch_blind_monitor_ul_scan_enabled(cfg));
+      ASSERT_NO_FATAL_FAILURE(discover_single_window());
+      ASSERT_EQ(cfg->coreset_type,0);
+      EXPECT_EQ(cfg->dci01_scan,requested) << "request=" << requested << " cycle=" << cycle;
+      EXPECT_EQ(nr_pdcch_blind_monitor_ul_scan_enabled(cfg),requested==1);
+    }
+  }
+  *cfg=saved;
+}
+
+TEST(UlScanContext, RejectsCommonDisabledAndMalformedContextsEvenWithAutoEnabled) {
+  nr_pdcch_blind_monitor_cfg_t cfg{};
+  cfg.dl_full_auto=1;
+  cfg.dci01_scan=1;
+  cfg.ul.bwp_size=273;
+  cfg.dci10_ss_type=NR_BLIND_SS_UE_SPECIFIC;
+  EXPECT_TRUE(nr_pdcch_blind_monitor_ul_scan_enabled(&cfg));
+  cfg.dci10_ss_type=NR_BLIND_SS_COMMON;
+  EXPECT_FALSE(nr_pdcch_blind_monitor_ul_scan_enabled(&cfg));
+  cfg.dci10_ss_type=NR_BLIND_SS_UE_SPECIFIC;
+  cfg.ul.bwp_size=0;
+  EXPECT_FALSE(nr_pdcch_blind_monitor_ul_scan_enabled(&cfg));
+  cfg.ul.bwp_size=273;
+  for(int disabled : {-1,0,2}) {
+    cfg.dci01_scan=disabled;
+    EXPECT_FALSE(nr_pdcch_blind_monitor_ul_scan_enabled(&cfg));
+  }
+  EXPECT_FALSE(nr_pdcch_blind_monitor_ul_scan_enabled(nullptr));
+}

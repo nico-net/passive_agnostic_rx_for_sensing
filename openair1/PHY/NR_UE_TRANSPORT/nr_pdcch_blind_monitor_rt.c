@@ -1028,7 +1028,7 @@ void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_pr
    * (read-only) by every candidate task. ---- */
   const bool scan_11 = (cfg->dci10_scan != 2);
   const bool scan_10 = (cfg->dci10_scan >= 1);
-  const bool scan_01 = (cfg->dci01_scan >= 1);
+  const bool scan_01 = nr_pdcch_blind_monitor_ul_scan_enabled(cfg);
   uint16_t   dci01_length = 0;
   if (scan_01) {
     dci01_length = cfg->dci01_length_override > 0 ? (uint16_t)cfg->dci01_length_override
