@@ -11,10 +11,12 @@
 #include "common/utils/LOG/log.h"
 #include "common/utils/nr/nr_common.h"
 
-/* Ring indexed by target slot. k2 is 4 on this cell and cannot exceed 32 by the config parser's own
- * bound, so 64 entries covers every in-flight grant with margin and makes lookup O(1) rather than a
- * scan. A slot is claimed by at most one grant here: this receiver decodes one PUSCH per slot. */
+/* Ring indexed by target slot. k2 cannot exceed 32 by the config parser's own bound, so 64 buckets
+ * cover every in-flight grant with margin and make lookup O(1). A scheduler can place one PUSCH per
+ * UE in the same target slot. Keep one lane per supported UE instead of overwriting all but the last
+ * grant, which made multi-UE UL sensing silently collapse to a single UE. */
 #define BOOK_SIZE 64
+#define BOOK_GRANTS_PER_SLOT 4
 
 typedef struct {
   nr_pdcch_blind_ul_result_t g;
@@ -23,14 +25,14 @@ typedef struct {
   bool     valid;
 } book_entry_t;
 
-static book_entry_t g_book[BOOK_SIZE];
+static book_entry_t g_book[BOOK_SIZE][BOOK_GRANTS_PER_SLOT];
 /* Producer (the PDCCH tap) and consumer (the UL-slot hook) are BOTH on the PHY receive thread when
  * the scan runs in-line, which is the default -- but pdcch_blind_monitor_pdsch's scan_thread field
  * can move the scan to a consumer thread, and then they are not. One mutex rather than an
  * assumption about which configuration is in use; it is held for a struct copy. */
 static pthread_mutex_t g_book_lock = PTHREAD_MUTEX_INITIALIZER;
 
-static _Atomic uint64_t g_parked, g_claimed, g_expired, g_overwritten;
+static _Atomic uint64_t g_parked, g_claimed, g_expired, g_overwritten, g_duplicate, g_full;
 
 /* Published in executables/nr-ue.c immediately BEFORE nrue_ru_read() fills that slot's rxdata. */
 extern _Atomic long nr_ue_diag_producer_absolute_slot;
@@ -56,20 +58,53 @@ void nr_pusch_grant_book_add(const nr_pdcch_blind_ul_result_t *g, int frame, int
   const int target_frame = (frame + total / slots_per_frame) % 1024;
   const int idx = target_slot % BOOK_SIZE;
 
-  pthread_mutex_lock(&g_book_lock);
-  if (g_book[idx].valid && (g_book[idx].target_slot != target_slot
-                            || g_book[idx].target_frame != target_frame)) {
-    /* A stale entry for a DIFFERENT slot still occupying this bucket means the previous grant was
-     * never claimed -- counted rather than silently replaced, because a rising count here means the
-     * UL hook is not running when it should (wrong slot map, or the hook not reached at all). */
-    atomic_fetch_add_explicit(&g_overwritten, 1, memory_order_relaxed);
+  const nr_pdcch_blind_monitor_cfg_t *cfg = nr_pdcch_blind_monitor_get_cfg();
+  int cap = (cfg != NULL && cfg->ul_pusch_max_per_slot > 0) ? cfg->ul_pusch_max_per_slot : 1;
+  if (cap > BOOK_GRANTS_PER_SLOT) {
+    cap = BOOK_GRANTS_PER_SLOT;
   }
-  g_book[idx].g            = *g;
-  g_book[idx].target_slot  = target_slot;
-  g_book[idx].target_frame = target_frame;
-  g_book[idx].valid        = true;
+
+  bool inserted = false;
+  bool duplicate = false;
+  pthread_mutex_lock(&g_book_lock);
+  for (int lane = 0; lane < BOOK_GRANTS_PER_SLOT; lane++) {
+    book_entry_t *e = &g_book[idx][lane];
+    if (e->valid && (e->target_slot != target_slot || e->target_frame != target_frame)) {
+      /* A stale entry for a different visit to this bucket was never claimed. Clear every lane so
+       * stale grants cannot consume the capacity needed by a later frame. */
+      e->valid = false;
+      atomic_fetch_add_explicit(&g_overwritten, 1, memory_order_relaxed);
+    }
+  }
+  for (int lane = 0; lane < cap; lane++) {
+    const book_entry_t *e = &g_book[idx][lane];
+    if (e->valid && e->target_slot == target_slot && e->target_frame == target_frame
+        && e->g.rnti == g->rnti) {
+      duplicate = true;
+      break;
+    }
+  }
+  if (!duplicate) {
+    for (int lane = 0; lane < cap; lane++) {
+      book_entry_t *e = &g_book[idx][lane];
+      if (!e->valid) {
+        e->g            = *g;
+        e->target_slot  = target_slot;
+        e->target_frame = target_frame;
+        e->valid        = true;
+        inserted        = true;
+        break;
+      }
+    }
+  }
   pthread_mutex_unlock(&g_book_lock);
-  atomic_fetch_add_explicit(&g_parked, 1, memory_order_relaxed);
+  if (duplicate) {
+    atomic_fetch_add_explicit(&g_duplicate, 1, memory_order_relaxed);
+  } else if (inserted) {
+    atomic_fetch_add_explicit(&g_parked, 1, memory_order_relaxed);
+  } else {
+    atomic_fetch_add_explicit(&g_full, 1, memory_order_relaxed);
+  }
 }
 
 /* TS 38.213 4.2 / nr_common.c's get_nr_N_TA_offset: N_TA_offset is 25600*Tc in FR1, expressed here
@@ -91,25 +126,27 @@ void nr_pusch_passive_monitor_process(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_
   }
   const int idx = proc->nr_slot_rx % BOOK_SIZE;
 
-  nr_pdcch_blind_ul_result_t g;
-  bool have = false;
+  nr_pdcch_blind_ul_result_t grants[BOOK_GRANTS_PER_SLOT];
+  int n_grants = 0;
   pthread_mutex_lock(&g_book_lock);
-  if (g_book[idx].valid && g_book[idx].target_slot == (int)proc->nr_slot_rx) {
-    if (g_book[idx].target_frame == (int)proc->frame_rx) {
-      g = g_book[idx].g;
-      have = true;
-    } else {
-      /* Right slot, wrong frame: parked a frame ago and its slot came round again without this
-       * hook running. Counted, not silently reused. */
-      atomic_fetch_add_explicit(&g_expired, 1, memory_order_relaxed);
+  for (int lane = 0; lane < BOOK_GRANTS_PER_SLOT; lane++) {
+    book_entry_t *e = &g_book[idx][lane];
+    if (e->valid && e->target_slot == (int)proc->nr_slot_rx) {
+      if (e->target_frame == (int)proc->frame_rx) {
+        grants[n_grants++] = e->g;
+      } else {
+        /* Right slot, wrong frame: parked a frame ago and its slot came round again without this
+         * hook running. Counted, not silently reused. */
+        atomic_fetch_add_explicit(&g_expired, 1, memory_order_relaxed);
+      }
+      e->valid = false;
     }
-    g_book[idx].valid = false;
   }
   pthread_mutex_unlock(&g_book_lock);
-  if (!have) {
+  if (n_grants == 0) {
     return;
   }
-  atomic_fetch_add_explicit(&g_claimed, 1, memory_order_relaxed);
+  atomic_fetch_add_explicit(&g_claimed, (uint64_t)n_grants, memory_order_relaxed);
 
   const int32_t ta = (cfg->ul_ta_offset_samples != 0) ? cfg->ul_ta_offset_samples
                                                       : n_ta_offset_samples(&ue->frame_parms);
@@ -119,8 +156,8 @@ void nr_pusch_passive_monitor_process(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_
   static int s_first = 1;
   if (s_first) {
     s_first = 0;
-    LOG_I(PHY, "SENSING: PUSCHDIAG entering first decode %d.%d rnti=0x%x\n",
-          proc->frame_rx, proc->nr_slot_rx, g.rnti);
+    LOG_I(PHY, "SENSING: PUSCHDIAG entering first decode %d.%d grants=%d first_rnti=0x%x\n",
+          proc->frame_rx, proc->nr_slot_rx, n_grants, grants[0].rnti);
   }
   /* ---- Deferred decode (nr_pusch_passive_queue.h). UTIM measured this decode at 1065 us mean
    * against a 500 us slot, over_slot 16830/16907 = 99.5 %: in-line, every uplink grant overruns its
@@ -154,37 +191,41 @@ void nr_pusch_passive_monitor_process(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_
     abs_slot = prod - lag;
   }
 
-  nr_pusch_passive_out_t out;
   /* Sampled HERE, on the receive thread, in the same call that captured these samples -- see
    * nr_pusch_passive_job_t::fo_hz. A consumer reading ue-> later would get a newer value. */
   const double fo_hz = ue->cont_fo_comp ? (ue->dl_Doppler_shift + ue->freq_offset) : 0.0;
-  if (nr_pusch_passive_queue_running()) {
-    nr_pusch_passive_job_t job = {.grant             = g,
-                                  .frame_rx          = (int)proc->frame_rx,
-                                  .nr_slot_rx        = (int)proc->nr_slot_rx,
-                                  .ta_offset_samples = ta,
-                                  .absolute_slot     = abs_slot,
-                                  .cfr_only          = (cfg->ul_pusch_decode == 2),
-                                  .fo_hz             = fo_hz};
-    nr_pusch_passive_queue_enqueue(&job);
-    /* Nothing more to report per grant here: the outcome belongs to the consumer, and the census
-     * (pusch_passive[...] / puschq[...]) is where it is read. Deliberately NOT decoded in-line on a
-     * failed enqueue -- that would reintroduce the deadline overrun this exists to remove. */
-    return;
+  for (int i = 0; i < n_grants; i++) {
+    const nr_pdcch_blind_ul_result_t *g = &grants[i];
+    if (nr_pusch_passive_queue_running()) {
+      nr_pusch_passive_job_t job = {.grant             = *g,
+                                    .frame_rx          = (int)proc->frame_rx,
+                                    .nr_slot_rx        = (int)proc->nr_slot_rx,
+                                    .ta_offset_samples = ta,
+                                    .absolute_slot     = abs_slot,
+                                    .cfr_only          = (cfg->ul_pusch_decode == 2),
+                                    .fo_hz             = fo_hz};
+      nr_pusch_passive_queue_enqueue(&job);
+      /* Nothing more to report per grant here: the outcome belongs to the consumer, and the census
+       * (pusch_passive[...] / puschq[...]) is where it is read. Deliberately NOT decoded in-line on
+       * a failed enqueue -- that would reintroduce the deadline overrun this exists to remove. */
+      continue;
+    }
+    nr_pusch_passive_out_t out;
+    nr_pusch_passive_decode(ue, 0, proc->frame_rx, proc->nr_slot_rx, g, ta, (uint64_t)abs_slot,
+                            cfg->ul_pusch_decode == 2, fo_hz, &out);
   }
-  nr_pusch_passive_decode(ue, 0, proc->frame_rx, proc->nr_slot_rx, &g, ta, (uint64_t)abs_slot,
-                          cfg->ul_pusch_decode == 2, fo_hz, &out);
-
 }
 
 void nr_pusch_grant_book_stats_dump(void)
 {
   LOG_I(PHY,
-        "SENSING: pusch_book[parked=%lu claimed=%lu expired=%lu overwritten=%lu]\n",
+        "SENSING: pusch_book[parked=%lu claimed=%lu expired=%lu overwritten=%lu duplicate=%lu full=%lu]\n",
         (unsigned long)atomic_load_explicit(&g_parked, memory_order_relaxed),
         (unsigned long)atomic_load_explicit(&g_claimed, memory_order_relaxed),
         (unsigned long)atomic_load_explicit(&g_expired, memory_order_relaxed),
-        (unsigned long)atomic_load_explicit(&g_overwritten, memory_order_relaxed));
+        (unsigned long)atomic_load_explicit(&g_overwritten, memory_order_relaxed),
+        (unsigned long)atomic_load_explicit(&g_duplicate, memory_order_relaxed),
+        (unsigned long)atomic_load_explicit(&g_full, memory_order_relaxed));
   if (nr_pusch_passive_queue_running()) {
     nr_pusch_passive_queue_stats_t q;
     nr_pusch_passive_queue_get_stats(&q);

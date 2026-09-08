@@ -778,7 +778,8 @@ static int parse_ul_pusch(const char* s)
   g_cfg.ul_ta_offset_samples  = 0;
   const int n = sscanf(s, "%d:%d:%d", &g_cfg.ul_pusch_decode, &g_cfg.ul_pusch_max_per_slot,
                        &g_cfg.ul_ta_offset_samples);
-  if (n < 1 || g_cfg.ul_pusch_decode < 0 || g_cfg.ul_pusch_decode > 2) {
+  if (n < 1 || g_cfg.ul_pusch_decode < 0 || g_cfg.ul_pusch_decode > 2
+      || g_cfg.ul_pusch_max_per_slot < 0 || g_cfg.ul_pusch_max_per_slot > 4) {
     return 0;
   }
   return 1;
@@ -2762,4 +2763,3 @@ bool nr_pdcch_blind_extract_00(uint64_t       payload,
   out->nscid = 0; // TS 38.211 6.4.1.1.1: n_SCID = 0 for a DCI 0_0 scheduled PUSCH
   return true;
 }
-
