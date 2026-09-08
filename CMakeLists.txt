@@ -1088,6 +1088,10 @@ set(NR_UE_ISAC_SRC
   ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/nr_isac.cc
   ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/nr_isac_ssb_axis.c
   )
+if(ENABLE_CHANNEL_SIM_CUDA)
+  list(APPEND NR_UE_ISAC_SRC
+       ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/sync_correction_cuda.cu)
+endif()
 # Passive receiver vs sensing pipeline. The blind PDCCH -> DCI -> PDSCH receiver only ever hands
 # channel estimates TO the sensing engine and never reads anything back, so on a receiver-only build
 # the whole library is replaced by no-ops (nr_isac_stub.c) and the receive path is unchanged.
@@ -1103,6 +1107,12 @@ else()
   message(STATUS "NR_UE_ISAC: sensing pipeline DISABLED (no-op stub; passive receiver only)")
 endif()
 target_link_libraries(NR_UE_ISAC PRIVATE UTIL)
+if(ENABLE_CHANNEL_SIM_CUDA AND ENABLE_ISAC_SENSING)
+  target_compile_definitions(NR_UE_ISAC PRIVATE NR_ISAC_CUDA_ACCELERATION)
+  target_link_libraries(NR_UE_ISAC PRIVATE CUDA::cufft CUDA::cudart)
+  set_target_properties(NR_UE_ISAC PROPERTIES CUDA_STANDARD 17 CUDA_STANDARD_REQUIRED ON)
+  message(STATUS "NR_UE_ISAC: CUDA sync front end enabled")
+endif()
 find_library(ZMQ_LIB zmq)
 if(ZMQ_LIB AND ENABLE_ISAC_SENSING)
   target_compile_definitions(NR_UE_ISAC PRIVATE ENABLE_ZEROMQ)
@@ -2288,6 +2298,15 @@ if(ENABLE_TESTS)
     target_link_libraries(test_nr_isac_python_parity PRIVATE NR_UE_ISAC UTIL)
     add_dependencies(tests test_nr_isac_python_parity)
     add_test(NAME test_nr_isac_python_parity COMMAND ./test_nr_isac_python_parity)
+    if(ENABLE_CHANNEL_SIM_CUDA)
+      add_executable(test_nr_isac_cuda_sync
+                     ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/tests/cuda_sync_test.cc)
+      target_include_directories(test_nr_isac_cuda_sync PRIVATE
+                                 ${OPENAIR1_DIR}/PHY/NR_UE_ISAC)
+      target_link_libraries(test_nr_isac_cuda_sync PRIVATE NR_UE_ISAC UTIL)
+      add_dependencies(tests test_nr_isac_cuda_sync)
+      add_test(NAME test_nr_isac_cuda_sync COMMAND ./test_nr_isac_cuda_sync)
+    endif()
   endif()
 
   # Phase 3 (TOTAL_PASSIVE_UE_HANDOVER.md): offline blind PDCCH/DCI-1_1 decode + extract, synthetic

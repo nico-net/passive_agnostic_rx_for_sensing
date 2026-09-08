@@ -2,8 +2,12 @@
 #include "sensing_engine.h"
 
 #include "aoa.h"
+#include "cuda_support.h"
 #include "detector.h"
 #include "sync_correction.h"
+#ifdef NR_ISAC_CUDA_ACCELERATION
+#include "sync_correction_cuda.h"
+#endif
 
 #include <algorithm>
 #include <chrono>
@@ -178,6 +182,30 @@ SensingEngine::~SensingEngine() { stop(); }
 void SensingEngine::start()
 {
   std::lock_guard<std::mutex> lock(submission_mutex_);
+  if (running_.load(std::memory_order_relaxed)) return;
+  if (config_.sync_enable) {
+#ifdef NR_ISAC_CUDA_ACCELERATION
+    if (cuda_required() && environment_flag_enabled("NR_ISAC_DISABLE_CUDA_SYNC"))
+      throw std::runtime_error("NR_ISAC_REQUIRE_CUDA=1 conflicts with NR_ISAC_DISABLE_CUDA_SYNC=1");
+    if (!environment_flag_enabled("NR_ISAC_DISABLE_CUDA_SYNC")) {
+      std::string error;
+      if (!warmup_sync_cuda(config_.maximum_rows, maximum_prb_ * 12u, &error)) {
+        if (cuda_required())
+          throw std::runtime_error("required CUDA sync warmup failed: " + error);
+        std::fprintf(stderr, "SENSING: CUDA sync warmup failed (%s); CPU fallback remains available\n",
+                     error.c_str());
+      } else {
+        std::fprintf(stderr,
+                     "SENSING: CUDA sync context and plan ready before CFR admission "
+                     "(capacity_rows=%u, subcarriers=%u)\n",
+                     config_.maximum_rows, maximum_prb_ * 12u);
+      }
+    }
+#else
+    if (cuda_required())
+      throw std::runtime_error("NR_ISAC_REQUIRE_CUDA=1 but CUDA sync support was not built");
+#endif
+  }
   if (running_.exchange(true)) return;
   windows_.reopen();
   processing_worker_ = std::thread(&SensingEngine::processing_run, this);

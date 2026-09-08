@@ -1,18 +1,26 @@
 /* SPDX-License-Identifier: OAI-Public-License-1.1 */
 #include "sync_correction.h"
 
+#include "cuda_support.h"
 #include "fft.h"
 #include "robust_stats.h"
+#ifdef NR_ISAC_CUDA_ACCELERATION
+#include "sync_correction_cuda.h"
+#endif
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <complex>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <map>
 #include <numeric>
 #include <stdexcept>
 #include <tuple>
+#include <utility>
 
 namespace nr_isac {
 namespace {
@@ -138,21 +146,16 @@ double tone_rss(const std::vector<std::complex<double>>& samples,
   return rss;
 }
 
-} // namespace
-
-SyncEstimate estimate_sync(const CfrWindow& window)
+void compute_cir_power_cpu(const CfrWindow& window,
+                           uint32_t fft_n,
+                           std::vector<std::vector<double>>& cir_power,
+                           std::vector<double>& mean_profile)
 {
-  if (!window.valid() || window.rows < 3 || window.subcarriers < 3)
-    throw std::invalid_argument("sync estimation needs a valid >=3x3 CFR window");
-  const uint32_t rows = window.rows, subcarriers = window.subcarriers;
-  const int exponent = std::min(4, std::max(1, static_cast<int>(std::ceil(std::log2(std::sqrt(rows))))));
-  const uint32_t oversample = 1u << exponent;
-  const uint32_t fft_n = subcarriers * oversample;
-  std::vector<std::vector<double>> cir_power(rows, std::vector<double>(fft_n));
-  std::vector<double> mean_profile(fft_n, 0.0);
-  for (uint32_t r = 0; r < rows; ++r) {
+  cir_power.assign(window.rows, std::vector<double>(fft_n));
+  mean_profile.assign(fft_n, 0.0);
+  for (uint32_t r = 0; r < window.rows; ++r) {
     std::vector<std::complex<double>> row(fft_n);
-    for (uint32_t k = 0; k < subcarriers; ++k)
+    for (uint32_t k = 0; k < window.subcarriers; ++k)
       if (window.observed[window.cell(r, k)])
         row[k] = window.values[window.sample(0, r, k)];
     fft_inplace(row, true);
@@ -163,41 +166,101 @@ SyncEstimate estimate_sync(const CfrWindow& window)
     }
     energy = std::max(energy, static_cast<double>(std::numeric_limits<float>::min()));
     for (uint32_t i = 0; i < fft_n; ++i)
-      mean_profile[i] += cir_power[r][i] / energy / rows;
+      mean_profile[i] += cir_power[r][i] / energy / window.rows;
   }
-  std::vector<double> coarse(subcarriers, 0.0);
-  for (uint32_t k = 0; k < subcarriers; ++k)
-    for (uint32_t j = 0; j < oversample; ++j)
-      coarse[k] += mean_profile[(size_t)k * oversample + j];
-  const uint32_t anchor_unsigned = static_cast<uint32_t>(std::max_element(coarse.begin(), coarse.end()) - coarse.begin());
-  const int anchor = anchor_unsigned <= subcarriers / 2 ? static_cast<int>(anchor_unsigned)
-                                                        : static_cast<int>(anchor_unsigned) - static_cast<int>(subcarriers);
-  const int halfwidth = profile_halfwidth(coarse, anchor_unsigned);
-  const int64_t fine_center = static_cast<int64_t>(anchor_unsigned) * oversample;
-  std::vector<double> delays(rows), contrasts(rows), peak_powers(rows);
-  for (uint32_t r = 0; r < rows; ++r) {
-    int64_t best_index = fine_center;
-    double best_power = -1.0;
-    for (int64_t offset = -static_cast<int64_t>(halfwidth * oversample);
-         offset <= static_cast<int64_t>(halfwidth * oversample); ++offset) {
-      int64_t candidate = (fine_center + offset) % fft_n;
-      if (candidate < 0) candidate += fft_n;
-      if (cir_power[r][candidate] > best_power) {
-        best_power = cir_power[r][candidate]; best_index = candidate;
-      }
+}
+
+#ifdef NR_ISAC_CUDA_ACCELERATION
+bool force_cpu_sync()
+{
+  return environment_flag_enabled("NR_ISAC_DISABLE_CUDA_SYNC");
+}
+#endif
+
+} // namespace
+
+SyncEstimate estimate_sync(const CfrWindow& window)
+{
+  if (!window.valid() || window.rows < 3 || window.subcarriers < 3)
+    throw std::invalid_argument("sync estimation needs a valid >=3x3 CFR window");
+  const uint32_t rows = window.rows, subcarriers = window.subcarriers;
+  const int exponent = std::min(4, std::max(1, static_cast<int>(std::ceil(std::log2(std::sqrt(rows))))));
+  const uint32_t oversample = 1u << exponent;
+  const uint32_t fft_n = subcarriers * oversample;
+  uint32_t anchor_unsigned = 0;
+  int anchor = 0, halfwidth = 0;
+  std::vector<double> delays, contrasts, peak_powers;
+  bool used_cuda = false;
+#ifdef NR_ISAC_CUDA_ACCELERATION
+  static std::atomic<bool> cuda_failed{false};
+  if (cuda_required() && force_cpu_sync())
+    throw std::runtime_error("NR_ISAC_REQUIRE_CUDA=1 conflicts with NR_ISAC_DISABLE_CUDA_SYNC=1");
+  if (!force_cpu_sync() && !cuda_failed.load(std::memory_order_relaxed)) {
+    std::string error;
+    CudaSyncFrontEnd front_end;
+    used_cuda = compute_sync_frontend_cuda(window, oversample, front_end, &error);
+    if (!used_cuda) {
+      cuda_failed.store(true, std::memory_order_relaxed);
+      if (cuda_required())
+        throw std::runtime_error("required CUDA sync front end failed: " + error);
+      std::fprintf(stderr, "SENSING: CUDA sync front end failed (%s); using the CPU fallback\n",
+                   error.c_str());
+    } else {
+      static std::atomic<bool> cuda_logged{false};
+      if (!cuda_logged.exchange(true, std::memory_order_relaxed))
+        std::fprintf(stderr,
+                     "SENSING: CUDA sync front end active (complex64 cuFFT/CUB, rows=%u, subcarriers=%u)\n",
+                     rows, subcarriers);
+      anchor_unsigned = front_end.anchor_unsigned;
+      anchor = front_end.anchor;
+      halfwidth = front_end.halfwidth;
+      delays = std::move(front_end.delays);
+      contrasts = std::move(front_end.contrasts);
+      peak_powers = std::move(front_end.peak_powers);
     }
-    const double left = cir_power[r][(best_index + fft_n - 1) % fft_n];
-    const double centre = cir_power[r][best_index];
-    const double right = cir_power[r][(best_index + 1) % fft_n];
-    const double den = left - 2.0 * centre + right;
-    const double delta = std::abs(den) > std::numeric_limits<float>::min()
-                             ? std::clamp(0.5 * (left - right) / den, -0.5, 0.5) : 0.0;
-    const int64_t signed_peak = best_index <= fft_n / 2 ? best_index : best_index - fft_n;
-    delays[r] = (signed_peak + delta) / oversample;
-    const double floor = median(cir_power[r]);
-    contrasts[r] = std::log(std::max(centre, static_cast<double>(std::numeric_limits<float>::min())))
-                   - std::log(std::max(floor, static_cast<double>(std::numeric_limits<float>::min())));
-    peak_powers[r] = centre;
+  }
+#else
+  if (cuda_required())
+    throw std::runtime_error("NR_ISAC_REQUIRE_CUDA=1 but CUDA sync support was not built");
+#endif
+  if (!used_cuda) {
+    std::vector<std::vector<double>> cir_power;
+    std::vector<double> mean_profile;
+    compute_cir_power_cpu(window, fft_n, cir_power, mean_profile);
+    std::vector<double> coarse(subcarriers, 0.0);
+    for (uint32_t k = 0; k < subcarriers; ++k)
+      for (uint32_t j = 0; j < oversample; ++j)
+        coarse[k] += mean_profile[(size_t)k * oversample + j];
+    anchor_unsigned = static_cast<uint32_t>(std::max_element(coarse.begin(), coarse.end()) - coarse.begin());
+    anchor = anchor_unsigned <= subcarriers / 2 ? static_cast<int>(anchor_unsigned)
+                                                : static_cast<int>(anchor_unsigned) - static_cast<int>(subcarriers);
+    halfwidth = profile_halfwidth(coarse, anchor_unsigned);
+    const int64_t fine_center = static_cast<int64_t>(anchor_unsigned) * oversample;
+    delays.resize(rows); contrasts.resize(rows); peak_powers.resize(rows);
+    for (uint32_t r = 0; r < rows; ++r) {
+      int64_t best_index = fine_center;
+      double best_power = -1.0;
+      for (int64_t offset = -static_cast<int64_t>(halfwidth * oversample);
+           offset <= static_cast<int64_t>(halfwidth * oversample); ++offset) {
+        int64_t candidate = (fine_center + offset) % fft_n;
+        if (candidate < 0) candidate += fft_n;
+        if (cir_power[r][candidate] > best_power) {
+          best_power = cir_power[r][candidate]; best_index = candidate;
+        }
+      }
+      const double left = cir_power[r][(best_index + fft_n - 1) % fft_n];
+      const double centre = cir_power[r][best_index];
+      const double right = cir_power[r][(best_index + 1) % fft_n];
+      const double den = left - 2.0 * centre + right;
+      const double delta = std::abs(den) > std::numeric_limits<float>::min()
+                               ? std::clamp(0.5 * (left - right) / den, -0.5, 0.5) : 0.0;
+      const int64_t signed_peak = best_index <= fft_n / 2 ? best_index : best_index - fft_n;
+      delays[r] = (signed_peak + delta) / oversample;
+      const double floor = median(cir_power[r]);
+      contrasts[r] = std::log(std::max(centre, static_cast<double>(std::numeric_limits<float>::min())))
+                     - std::log(std::max(floor, static_cast<double>(std::numeric_limits<float>::min())));
+      peak_powers[r] = centre;
+    }
   }
   const double med_contrast = median(contrasts);
   const double mad_contrast = median_absolute_deviation(contrasts, med_contrast);
