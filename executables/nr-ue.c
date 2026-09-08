@@ -12,6 +12,7 @@
 #endif
 #include "executables/nr-ue-ru.h"
 #include "executables/nr-uesoftmodem.h"
+#include "executables/passive-ul-channel.h"
 #include "PHY/NR_UE_ESTIMATION/nr_estimation.h"
 #include "PHY/INIT/nr_phy_init.h"
 #include "NR_MAC_UE/mac_proto.h"
@@ -39,9 +40,11 @@
 
 static uint64_t shared_sfn_absolute_slot(uint32_t sfn_slot, uint32_t cycle_slots)
 {
-  static uint64_t epoch_slots;
-  static uint32_t previous_slot;
+  static pthread_mutex_t clock_mutex = PTHREAD_MUTEX_INITIALIZER;
+  static uint64_t newest_absolute_slot;
   static bool initialized;
+  pthread_mutex_lock(&clock_mutex);
+  uint64_t absolute_slot;
   if (!initialized) {
     uint32_t reference_slot = sfn_slot;
     const char *path = getenv("CIR_SFN_REFERENCE_PATH");
@@ -73,14 +76,20 @@ static uint64_t shared_sfn_absolute_slot(uint32_t sfn_slot, uint32_t cycle_slots
     }
     reference_slot %= cycle_slots;
     const uint32_t forward_slots = (sfn_slot + cycle_slots - reference_slot) % cycle_slots;
-    epoch_slots = (uint64_t)reference_slot + forward_slots - sfn_slot;
-    previous_slot = sfn_slot;
+    absolute_slot = (uint64_t)reference_slot + forward_slots;
+    newest_absolute_slot = absolute_slot;
     initialized = true;
-  } else if (sfn_slot + cycle_slots / 2U < previous_slot) {
-    epoch_slots += cycle_slots;
+  } else {
+    absolute_slot = newest_absolute_slot / cycle_slots * cycle_slots + sfn_slot;
+    if (absolute_slot + cycle_slots / 2U < newest_absolute_slot)
+      absolute_slot += cycle_slots;
+    else if (absolute_slot > newest_absolute_slot + cycle_slots / 2U && absolute_slot >= cycle_slots)
+      absolute_slot -= cycle_slots;
+    if (absolute_slot > newest_absolute_slot)
+      newest_absolute_slot = absolute_slot;
   }
-  previous_slot = sfn_slot;
-  return epoch_slots + sfn_slot;
+  pthread_mutex_unlock(&clock_mutex);
+  return absolute_slot;
 }
 #endif
 
@@ -457,6 +466,14 @@ static void RU_write(nr_rxtx_thread_data_t *rxtxD, bool sl_tx_action, c16_t **tx
                          writeBlockSize);
   }
 
+#ifdef ENABLE_SIONNA_RK_PLUGINS
+  if (passive_ul_channel_requested()) {
+    const uint32_t cycle = 1024U * fp->slots_per_frame;
+    const uint32_t sfn_slot = (uint32_t)proc->frame_tx * fp->slots_per_frame + (uint32_t)proc->nr_slot_tx;
+    const uint64_t radio_slot = shared_sfn_absolute_slot(sfn_slot, cycle);
+    passive_ul_channel_register_write(writeTimestamp, radio_slot);
+  }
+#endif
   int tmp = nrue_ru_write_reorder(UE, writeTimestamp, (void **)txp, writeBlockSize, fp->nb_antennas_tx, flags);
   AssertFatal(tmp == writeBlockSize, "write to reorder function failed %d", tmp);
 }
@@ -1360,6 +1377,24 @@ void *UE_thread(void *arg)
                                 cir_data);
     }
 #endif
+    if (IS_PASSIVE_RX_MODE(get_softmodem_params())) {
+      c16_t *slot_samples[fp->nb_antennas_rx];
+      const int slot_offset = get_samples_slot_timestamp(fp, slot_nr);
+      for (int ant = 0; ant < fp->nb_antennas_rx; ++ant)
+        slot_samples[ant] = &UE->common_vars.rxdata[ant][slot_offset];
+      const int samples_this_slot = get_samples_per_slot(slot_nr, fp);
+      const openair0_timestamp_t slot_timestamp = rx_timestamp - firstSymSamp;
+      const int ul_added = nrue_ru_add_passive_ul(UE,
+                                                  slot_timestamp,
+                                                  (void **)slot_samples,
+                                                  samples_this_slot,
+                                                  fp->nb_antennas_rx);
+      AssertFatal(ul_added == 0 || ul_added == samples_this_slot,
+                  "passive UL routing failed for frame.slot %d.%d (ret=%d)\n",
+                  curMsg.proc.frame_rx,
+                  curMsg.proc.nr_slot_rx,
+                  ul_added);
+    }
     // ---- RF SAMPLE-STREAM CONTINUITY (2026-08-06) --------------------------------------------
     // Matching software slot counters (the producer/consumer lag check above) prove the PIPELINE
     // is keeping up; they say nothing about whether consecutive reads returned CONSECUTIVE RF

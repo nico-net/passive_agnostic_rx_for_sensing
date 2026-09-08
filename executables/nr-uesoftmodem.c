@@ -26,6 +26,7 @@
 #include "PHY/CODING/nrLDPC_coding/nrLDPC_coding_interface.h"
 #include "PHY/phy_vars_nr_ue.h"
 #include "PHY/NR_UE_TRANSPORT/nr_transport_proto_ue.h"
+#include "executables/passive-ul-channel.h"
 
 #include "PHY_INTERFACE/phy_interface_vars.h"
 #include "NR_IF_Module.h"
@@ -424,9 +425,12 @@ int main(int argc, char **argv)
   }
 
 #ifdef ENABLE_SIONNA_RK_PLUGINS
-  /* Passive receivers apply their receiver-local Sionna CIR after common RFsim transport. */
-  if (IS_PASSIVE_RX_MODE(get_softmodem_params()))
+  /* Passive receivers load the DL bank. Active simulation UEs optionally load exactly one
+   * UE-specific UL bank used only to publish an observed copy; their normal network UL is intact. */
+  if (IS_PASSIVE_RX_MODE(get_softmodem_params()) || passive_ul_channel_requested())
     init_plugins(&nrPHY_vars_UE_g[0][0]->frame_parms);
+  if (passive_ul_channel_requested())
+    passive_ul_channel_init(&nrPHY_vars_UE_g[0][0]->frame_parms);
 #endif
 
   nrue_init_openair0();
@@ -504,7 +508,8 @@ int main(int argc, char **argv)
   free_nrLDPC_coding_interface(&nrLDPC_coding_interface);
 
 #ifdef ENABLE_SIONNA_RK_PLUGINS
-  if (IS_PASSIVE_RX_MODE(get_softmodem_params()))
+  passive_ul_channel_shutdown();
+  if (IS_PASSIVE_RX_MODE(get_softmodem_params()) || passive_ul_channel_requested())
     free_plugins();
 #endif
 
