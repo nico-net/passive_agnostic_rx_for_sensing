@@ -562,7 +562,7 @@ static unsigned int passive_ul_fep_offset(const NR_DL_FRAME_PARMS *fp, unsigned 
 
 /* De-rotate one symbol's worth of samples into scratch, then DFT it. Mirrors nr_symbol_fep_ul()'s
  * wrap handling against samples_per_frame. */
-static void passive_ul_fep_fo(const NR_DL_FRAME_PARMS *fp, const c16_t *rxdata, c16_t *rxdataF,
+void nr_pusch_passive_fep_symbol(const NR_DL_FRAME_PARMS *fp, const c16_t *rxdata, c16_t *rxdataF,
                               unsigned char symbol, unsigned char slot, int sample_offset, double fo_hz)
 {
   const int N = fp->ofdm_symbol_size;
@@ -713,7 +713,7 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
       for (int sym_ = s0_; sym_ < s1_ && sym_ < sps; sym_++) {                                     \
         c16_t *dst_ = &gnb->common_vars.rxdataF[a_][slot_off + sym_ * symsz];                      \
         if (fo_hz_ != 0.0) {                                                                       \
-          passive_ul_fep_fo(fp, rx_, dst_, (unsigned char)sym_, (unsigned char)slot, (off_), fo_hz_);\
+          nr_pusch_passive_fep_symbol(fp, rx_, dst_, (unsigned char)sym_, (unsigned char)slot, (off_), fo_hz_);\
         } else {                                                                                   \
           nr_symbol_fep_ul(fp, rx_, dst_, (unsigned char)sym_, (unsigned char)slot, (off_));       \
         }                                                                                          \

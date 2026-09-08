@@ -16,7 +16,7 @@
 #include <sys/stat.h>
 #include <math.h>
 
-#define REPLAY_FRAMES 8
+#define REPLAY_FRAMES 16
 #define REPLAY_SLOTS (REPLAY_FRAMES * 160)
 #define REPLAY_UL 2048
 #define REPLAY_DL 512
@@ -40,6 +40,7 @@ typedef struct {
   replay_ul_t ul[REPLAY_UL];
   replay_dl_t dl[REPLAY_DL];
 } replay_header_t;
+#include "nr_passive_replay_probe.h"
 static replay_header_t *header;
 static unsigned char *iq;
 static char *output;
@@ -70,23 +71,29 @@ static bool write_all(int fd, const void *data, size_t bytes)
 static void *write_capture(void *unused)
 {
   (void)unused;
-  pthread_mutex_lock(&writer_lock);
-  while (atomic_load(&state)!=RP_WRITING) pthread_cond_wait(&writer_cv,&writer_lock);
-  pthread_mutex_unlock(&writer_lock);
-  pthread_mutex_lock(&record_lock);
-  bool valid=header->n_ul>=8 && header->n_dl>0;
-  pthread_mutex_unlock(&record_lock);
-  if (!valid) {
-    LOG_E(PHY,"REPLAY VOID: insufficient raw UL or live DL controls (%u/%u)\n",header->n_ul,header->n_dl);
-    atomic_store(&state,RP_VOID); return NULL;
+  for (;;) {
+    pthread_mutex_lock(&writer_lock);
+    while (atomic_load(&state)!=RP_WRITING) pthread_cond_wait(&writer_cv,&writer_lock);
+    pthread_mutex_unlock(&writer_lock);
+    pthread_mutex_lock(&record_lock);
+    bool valid=header->n_ul>0 && header->n_dl>0;
+    if (!valid) {
+      unsigned n_ul=header->n_ul,n_dl=header->n_dl;
+      header->n_ul=header->n_dl=0;
+      atomic_store(&state,RP_ARMED);
+      pthread_mutex_unlock(&record_lock);
+      LOG_W(PHY,"REPLAY window VOID: no coincident UL/DL control (%u/%u); re-armed\n",n_ul,n_dl);
+      continue;
+    }
+    pthread_mutex_unlock(&record_lock);
+    int fd=open(output,O_WRONLY|O_CREAT|O_EXCL,0600);
+    bool ok=fd>=0 && write_all(fd,header,sizeof(*header)) && write_all(fd,iq,header->iq_bytes);
+    if (fd>=0) { if (fsync(fd)) ok=false; if (close(fd)) ok=false; }
+    LOG_I(PHY,"REPLAY %s: %s slots=%u UL=%u DL-controls=%u IQ=%lu bytes\n",
+          ok?"READY":"VOID",output,header->slots,header->n_ul,header->n_dl,(unsigned long)header->iq_bytes);
+    atomic_store(&state,ok?RP_DONE:RP_VOID);
+    return NULL;
   }
-  int fd=open(output,O_WRONLY|O_CREAT|O_EXCL,0600);
-  bool ok=fd>=0 && write_all(fd,header,sizeof(*header)) && write_all(fd,iq,header->iq_bytes);
-  if (fd>=0) { if (fsync(fd)) ok=false; if (close(fd)) ok=false; }
-  LOG_I(PHY,"REPLAY %s: %s slots=%u UL=%u DL-controls=%u IQ=%lu bytes\n",
-        ok?"READY":"VOID",output,header->slots,header->n_ul,header->n_dl,(unsigned long)header->iq_bytes);
-  atomic_store(&state,ok?RP_DONE:RP_VOID);
-  return NULL;
 }
 void nr_passive_replay_init(PHY_VARS_NR_UE *ue)
 {
@@ -169,7 +176,7 @@ static bool recordable(long source)
   if (s!=RP_CAPTURING && s!=RP_DRAINING) return false;
   long relative=source-header->start;
   /* One full preceding frame for negative UL TA; three following frames for k2. */
-  return relative>=header->fp.slots_per_frame && relative<5*header->fp.slots_per_frame;
+  return relative>=header->fp.slots_per_frame && relative<(REPLAY_FRAMES-3)*header->fp.slots_per_frame;
 }
 void nr_passive_replay_ul(long source, uint16_t rnti, unsigned length, uint64_t payload)
 {
@@ -187,7 +194,7 @@ void nr_passive_replay_dl(const nr_pdsch_passive_job_t *job,
 {
   if (atomic_load(&state)==RP_DISABLED || result->status!=NR_PDSCH_PASSIVE_DECODE_CRC_OK || !result->tb)
     return;
-  if (job->sweep_ticket.settled && atomic_load(&ul_seen)) {
+  if (job->sweep_ticket.generation && atomic_load(&ul_seen)) {
     int expected=RP_ARMED;
     atomic_compare_exchange_strong(&state,&expected,RP_REQUESTED);
   }
@@ -210,7 +217,7 @@ int nr_passive_replay_read(PHY_VARS_NR_UE *ue, const char *path)
   ok=ok && h->magic==UINT64_C(0x314951525041534e) && h->version==1 &&
      h->header_bytes==sizeof(*h) && h->job_bytes==sizeof(nr_pdsch_passive_job_t) &&
      h->fp_bytes==sizeof(*fp) && h->n_dl>0 && h->n_dl<=REPLAY_DL &&
-     h->n_ul>=8 && h->n_ul<=REPLAY_UL && fp->nb_antennas_rx>0 && fp->nb_antennas_rx<=4 &&
+     h->n_ul>0 && h->n_ul<=REPLAY_UL && fp->nb_antennas_rx>0 && fp->nb_antennas_rx<=4 &&
      fp->slots_per_frame>0 && fp->slots_per_frame<=160 && h->slots==REPLAY_FRAMES*fp->slots_per_frame &&
      fp->samples_per_frame==allocated->samples_per_frame &&
      fp->ofdm_symbol_size==allocated->ofdm_symbol_size &&
@@ -262,8 +269,10 @@ int nr_passive_replay_read(PHY_VARS_NR_UE *ue, const char *path)
   for (unsigned i=0;i<h->n_ul;++i)
     printf("REPLAY-RAW-UL source=%ld rnti=%04x bits=%u payload=%016lx\n",
            h->ul[i].source,h->ul[i].rnti,h->ul[i].length,(unsigned long)h->ul[i].payload);
+  if (h->n_ul<8) printf("UL-SEARCH UNRESOLVED: fewer than eight raw observations; no UL convergence claim\n");
   printf("REPLAY %s: identical DL controls=%u failed=%u raw UL=%u; no radio opened\n",
          failed?"VOID":"PASS",matches,failed,h->n_ul);
+  if (!failed && getenv("ISAC_PASSIVE_REPLAY_UL_PROBE")) replay_probe_ul(ue,h,samples);
   free(rxF); free(samples); free(h);
   return failed?2:0;
 }

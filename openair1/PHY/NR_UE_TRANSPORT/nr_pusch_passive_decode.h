@@ -108,6 +108,12 @@ bool nr_pusch_passive_decode(PHY_VARS_NR_UE *ue,
                              double   fo_hz,
                              nr_pusch_passive_out_t *out);
 
+/* Actual production UL FFT, shared by immutable measurement diagnostics.
+ * Positive sample_offset advances the window; fo_hz uses the receiver convention.
+ * Output is before the symbol rotation applied by the full PUSCH decoder. */
+void nr_pusch_passive_fep_symbol(const NR_DL_FRAME_PARMS *fp, const c16_t *rxdata, c16_t *rxdataF,
+                                unsigned char symbol, unsigned char slot, int sample_offset, double fo_hz);
+
 /// Release the minimal gNB context. Safe to call when it was never built.
 void nr_pusch_passive_decode_free(void);
 
