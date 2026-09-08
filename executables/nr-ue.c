@@ -5,6 +5,11 @@
 #include "PHY/defs_nr_common.h"
 #define _GNU_SOURCE // For pthread_setname_np
 #include <pthread.h>
+#ifdef ENABLE_SIONNA_RK_PLUGINS
+#include <errno.h>
+#include <fcntl.h>
+#include <unistd.h>
+#endif
 #include "executables/nr-ue-ru.h"
 #include "executables/nr-uesoftmodem.h"
 #include "PHY/NR_UE_ESTIMATION/nr_estimation.h"
@@ -28,6 +33,56 @@
 #include "common/utils/time_manager/time_manager.h"
 #include "log.h"
 #include <stdatomic.h>
+#ifdef ENABLE_SIONNA_RK_PLUGINS
+#include "openair1/PHY/defs_RU.h"
+#include "plugins/common/src/plugins.h"
+
+static uint64_t shared_sfn_absolute_slot(uint32_t sfn_slot, uint32_t cycle_slots)
+{
+  static uint64_t epoch_slots;
+  static uint32_t previous_slot;
+  static bool initialized;
+  if (!initialized) {
+    uint32_t reference_slot = sfn_slot;
+    const char *path = getenv("CIR_SFN_REFERENCE_PATH");
+    if (path != NULL && path[0] != '\0') {
+      int fd = open(path, O_WRONLY | O_CREAT | O_EXCL, 0666);
+      if (fd >= 0) {
+        char value[32];
+        const int length = snprintf(value, sizeof(value), "%u\n", sfn_slot);
+        if (write(fd, value, (size_t)length) != length)
+          LOG_W(PHY, "CIR clock: failed to write complete SFN reference %s\n", path);
+        fsync(fd);
+        close(fd);
+      } else if (errno == EEXIST) {
+        bool loaded = false;
+        for (int attempt = 0; attempt < 100 && !loaded; ++attempt) {
+          FILE *stream = fopen(path, "r");
+          if (stream != NULL) {
+            loaded = fscanf(stream, "%u", &reference_slot) == 1;
+            fclose(stream);
+          }
+          if (!loaded)
+            usleep(10000);
+        }
+        if (!loaded)
+          LOG_W(PHY, "CIR clock: could not read shared SFN reference %s; using local epoch\n", path);
+      } else {
+        LOG_W(PHY, "CIR clock: cannot create shared SFN reference %s: %s\n", path, strerror(errno));
+      }
+    }
+    reference_slot %= cycle_slots;
+    const uint32_t forward_slots = (sfn_slot + cycle_slots - reference_slot) % cycle_slots;
+    epoch_slots = (uint64_t)reference_slot + forward_slots - sfn_slot;
+    previous_slot = sfn_slot;
+    initialized = true;
+  } else if (sfn_slot + cycle_slots / 2U < previous_slot) {
+    epoch_slots += cycle_slots;
+  }
+  previous_slot = sfn_slot;
+  return epoch_slots + sfn_slot;
+}
+#endif
 
 /// Defined in nr_adjust_synch_ue.c -- freezes the timing integrator during a stream outage.
 extern _Atomic int nr_ue_rf_signal_absent;
@@ -1284,6 +1339,27 @@ void *UE_thread(void *arg)
       atomic_store_explicit(&nr_ue_diag_producer_wall_ns,
                             (long)diag_ts.tv_sec * 1000000000L + diag_ts.tv_nsec, memory_order_relaxed);
     }
+#ifdef ENABLE_SIONNA_RK_PLUGINS
+    /* RFsim transports the common waveform only. Apply this passive receiver's immutable Sionna
+     * bank at decoded radio time so process scheduling cannot advance the channel clock. */
+    if (IS_PASSIVE_RX_MODE(get_softmodem_params()) && is_channel_emulation_enabled()) {
+      RU_t channel_ru = {0};
+      channel_ru.common.rxdata = (int32_t **)UE->common_vars.rxdata;
+      const uint32_t cycle = 1024U * fp->slots_per_frame;
+      const uint32_t sfn_slot = (uint32_t)curMsg.proc.frame_rx * fp->slots_per_frame
+                                + (uint32_t)curMsg.proc.nr_slot_rx;
+      const uint64_t radio_slot = shared_sfn_absolute_slot(sfn_slot, cycle);
+      const void *cir_data = channel_emulator_cir_read_and_apply_at_slot(radio_slot);
+      chn_emu_interface.compute(&channel_ru,
+                                slot_nr,
+                                (NR_DL_FRAME_PARMS *)fp,
+                                fp->ofdm_symbol_size + fp->nb_prefix_samples0,
+                                fp->ofdm_symbol_size + fp->nb_prefix_samples,
+                                "rx",
+                                get_samples_slot_timestamp(fp, slot_nr),
+                                cir_data);
+    }
+#endif
     // ---- RF SAMPLE-STREAM CONTINUITY (2026-08-06) --------------------------------------------
     // Matching software slot counters (the producer/consumer lag check above) prove the PIPELINE
     // is keeping up; they say nothing about whether consecutive reads returned CONSECUTIVE RF

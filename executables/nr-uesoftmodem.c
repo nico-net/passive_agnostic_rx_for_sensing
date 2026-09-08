@@ -32,6 +32,9 @@
 #include "openair1/SIMULATION/TOOLS/sim.h"
 #include "openair2/RRC/NR_UE/L2_interface_ue.h"
 #include "openair1/PHY/phy_extern_nr_ue.h"
+#ifdef ENABLE_SIONNA_RK_PLUGINS
+#include "plugins/common/src/plugins.h"
+#endif
 
 #ifdef SMBV
 #include "PHY/TOOLS/smbv.h"
@@ -420,6 +423,12 @@ int main(int argc, char **argv)
     }
   }
 
+#ifdef ENABLE_SIONNA_RK_PLUGINS
+  /* Passive receivers apply their receiver-local Sionna CIR after common RFsim transport. */
+  if (IS_PASSIVE_RX_MODE(get_softmodem_params()))
+    init_plugins(&nrPHY_vars_UE_g[0][0]->frame_parms);
+#endif
+
   nrue_init_openair0();
 
   lock_memory_to_ram();
@@ -493,6 +502,11 @@ int main(int argc, char **argv)
   nrue_ru_end();
 
   free_nrLDPC_coding_interface(&nrLDPC_coding_interface);
+
+#ifdef ENABLE_SIONNA_RK_PLUGINS
+  if (IS_PASSIVE_RX_MODE(get_softmodem_params()))
+    free_plugins();
+#endif
 
   time_manager_finish();
 
