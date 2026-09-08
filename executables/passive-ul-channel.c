@@ -208,6 +208,12 @@ void passive_ul_channel_after_normal_write(PHY_VARS_NR_UE *ue,
               nsamps,
               slot,
               slot_samples);
+  AssertFatal((size_t)data_offset + (size_t)nsamps <= (size_t)g_frame_parms.samples_per_frame,
+              "passive UL source %d write crosses the UE TX ring: offset=%td samples=%d frame=%d\n",
+              g_source_id,
+              data_offset,
+              nsamps,
+              g_frame_parms.samples_per_frame);
 
   pthread_mutex_lock(&g_channel_mutex);
   c16_t *work = (c16_t *)g_observed_data[0];
