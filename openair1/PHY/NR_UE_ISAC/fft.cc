@@ -5,7 +5,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <map>
 #include <stdexcept>
+#include <utility>
 
 namespace nr_isac {
 namespace {
@@ -56,32 +58,56 @@ void radix2(std::vector<std::complex<double>>& a, bool inverse)
       value /= static_cast<double>(n);
 }
 
+struct BluesteinPlan {
+  size_t convolution_size = 0;
+  std::vector<std::complex<double>> chirp;
+  std::vector<std::complex<double>> kernel_spectrum;
+};
+
+const BluesteinPlan& bluestein_plan(size_t n, bool inverse)
+{
+  // A transform length and direction have an invariant chirp and convolution kernel.  The sensing
+  // detector executes thousands of equal-length transforms per CPI; rebuilding and FFTing this
+  // kernel for every row is pure setup work.  A thread-local cache preserves the original scalar
+  // FFT operation order while avoiding locks in the single causal sensing worker.
+  thread_local std::map<std::pair<size_t, bool>, BluesteinPlan> plans;
+  const auto key = std::make_pair(n, inverse);
+  const auto found = plans.find(key);
+  if (found != plans.end())
+    return found->second;
+
+  BluesteinPlan plan;
+  plan.convolution_size = next_power_of_two(2 * n - 1);
+  plan.chirp.resize(n);
+  plan.kernel_spectrum.assign(plan.convolution_size, {});
+  const double sign = inverse ? 1.0 : -1.0;
+  for (size_t i = 0; i < n; ++i) {
+    const uint64_t square_mod = (static_cast<uint64_t>(i) * i) % (2u * static_cast<uint64_t>(n));
+    const double angle = sign * PI * static_cast<double>(square_mod) / static_cast<double>(n);
+    plan.chirp[i] = {std::cos(angle), std::sin(angle)};
+    const std::complex<double> inverse_chirp = std::conj(plan.chirp[i]);
+    plan.kernel_spectrum[i] = inverse_chirp;
+    if (i != 0)
+      plan.kernel_spectrum[plan.convolution_size - i] = inverse_chirp;
+  }
+  radix2(plan.kernel_spectrum, false);
+  return plans.emplace(key, std::move(plan)).first->second;
+}
+
 void bluestein(std::vector<std::complex<double>>& values, bool inverse)
 {
   const size_t n = values.size();
-  const size_t m = next_power_of_two(2 * n - 1);
-  const double sign = inverse ? 1.0 : -1.0;
-  std::vector<std::complex<double>> a(m), b(m);
-  for (size_t i = 0; i < n; ++i) {
-    // Reduce i^2 modulo 2N before conversion to avoid loss for large indices.
-    const uint64_t square_mod = (static_cast<uint64_t>(i) * i) % (2u * static_cast<uint64_t>(n));
-    const double angle = sign * PI * static_cast<double>(square_mod) / static_cast<double>(n);
-    const std::complex<double> chirp(std::cos(angle), std::sin(angle));
-    const std::complex<double> inv_chirp = std::conj(chirp);
-    a[i] = values[i] * chirp;
-    b[i] = inv_chirp;
-    if (i != 0)
-      b[m - i] = inv_chirp;
-  }
+  const BluesteinPlan& plan = bluestein_plan(n, inverse);
+  const size_t m = plan.convolution_size;
+  std::vector<std::complex<double>> a(m);
+  for (size_t i = 0; i < n; ++i)
+    a[i] = values[i] * plan.chirp[i];
   radix2(a, false);
-  radix2(b, false);
   for (size_t i = 0; i < m; ++i)
-    a[i] *= b[i];
+    a[i] *= plan.kernel_spectrum[i];
   radix2(a, true);
   for (size_t i = 0; i < n; ++i) {
-    const uint64_t square_mod = (static_cast<uint64_t>(i) * i) % (2u * static_cast<uint64_t>(n));
-    const double angle = sign * PI * static_cast<double>(square_mod) / static_cast<double>(n);
-    values[i] = a[i] * std::complex<double>(std::cos(angle), std::sin(angle));
+    values[i] = a[i] * plan.chirp[i];
     if (inverse)
       values[i] /= static_cast<double>(n);
   }
