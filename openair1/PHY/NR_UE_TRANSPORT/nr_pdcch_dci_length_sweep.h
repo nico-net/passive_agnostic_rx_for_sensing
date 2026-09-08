@@ -91,6 +91,23 @@ typedef struct {
   int      occasions_fed;
 } nr_pdcch_dci_length_sweep_state_t;
 
+/* A caller-serialized bank. Interleaved UEs never reset one another; geometry
+ * epoch changes invalidate all entries. Eviction discards evidence, never reuses it. */
+#define NR_PDCCH_LENGTH_CONTEXTS 16
+typedef struct {
+  nr_pdcch_dci_length_sweep_state_t state;
+  uint16_t rnti;
+  int found;
+  bool exhausted;
+  uint64_t touched;
+} nr_pdcch_dci_length_context_t;
+typedef struct {
+  nr_pdcch_dci_length_context_t ue[NR_PDCCH_LENGTH_CONTEXTS];
+  uint64_t epoch, clock;
+} nr_pdcch_dci_length_bank_t;
+nr_pdcch_dci_length_context_t *nr_pdcch_dci_length_context(
+    nr_pdcch_dci_length_bank_t *bank, uint64_t epoch, uint16_t rnti);
+
 void nr_pdcch_dci_length_sweep_reset(nr_pdcch_dci_length_sweep_state_t* state);
 
 /**

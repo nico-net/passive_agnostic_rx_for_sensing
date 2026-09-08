@@ -35,13 +35,18 @@ typedef struct {
   bool initialized, refused;
 } search_t;
 static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
-static search_t widths, interp;
-static nr_pdcch_blind_ul_opts_t baseline;
-static uint16_t target_rnti, target_length;
-static uint64_t generation = 1;
-static uint64_t samples[UL_DISCOVERY_SAMPLES];
-static int nsamples, sample_cursor, tda_index = -1;
-static bool logged_width, logged_interp;
+#define UL_DISCOVERY_CONTEXTS NR_PDCCH_BLIND_MAX_UE
+typedef struct {
+  search_t widths, interp;
+  nr_pdcch_blind_ul_opts_t baseline;
+  uint16_t target_rnti, target_length;
+  uint64_t generation, touched;
+  uint64_t samples[UL_DISCOVERY_SAMPLES];
+  int nsamples, sample_cursor, tda_index;
+  bool logged_width, logged_interp;
+} ul_context_t;
+static ul_context_t contexts[UL_DISCOVERY_CONTEXTS];
+static uint64_t generation_counter = 1, context_clock;
 
 static void clear_search(search_t *s)
 {
@@ -49,26 +54,29 @@ static void clear_search(search_t *s)
   memset(s,0,sizeof(*s));
   s->engine.winner=-1;
 }
-static void reset_locked(void)
+static void reset_locked(ul_context_t *c)
 {
-  clear_search(&widths); clear_search(&interp);
-  target_rnti=target_length=0; nsamples=sample_cursor=0; tda_index=-1;
-  logged_width=logged_interp=false;
-  ++generation;
+  clear_search(&c->widths); clear_search(&c->interp);
+  memset(c, 0, sizeof(*c));
+  c->widths.engine.winner = c->interp.engine.winner = -1;
+  c->tda_index = -1;
+  c->generation = ++generation_counter;
 }
 void nr_pdcch_ul_discovery_reset(void)
 {
-  pthread_mutex_lock(&lock); reset_locked(); pthread_mutex_unlock(&lock);
+  pthread_mutex_lock(&lock);
+  for (int i=0; i<UL_DISCOVERY_CONTEXTS; ++i) reset_locked(&contexts[i]);
+  pthread_mutex_unlock(&lock);
 }
-typedef struct { nr_pdcch_blind_ul_opts_t opts; bool interpretation; } apply_ctx_t;
+typedef struct { nr_pdcch_blind_ul_opts_t opts; bool interpretation; ul_context_t *owner; } apply_ctx_t;
 static bool extract(const nr_hyp_t *h, const uint64_t *p, const apply_ctx_t *ctx,
                     nr_pdcch_blind_ul_result_t *out)
 {
   nr_pdcch_blind_ul_opts_t o=ctx->opts;
   if (ctx->interpretation) {
-    if (!nr_pdcch_ul_interp_sweep_apply(h,tda_index,&o)) return false;
+    if (!nr_pdcch_ul_interp_sweep_apply(h,ctx->owner->tda_index,&o)) return false;
   } else nr_pdcch_ul_field_sweep_apply(h,&o);
-  return nr_pdcch_blind_extract_01(*p,target_length,target_rnti,&o,out);
+  return nr_pdcch_blind_extract_01(*p,ctx->owner->target_length,ctx->owner->target_rnti,&o,out);
 }
 static bool equivalent(const nr_hyp_t *a, const nr_hyp_t *b, const void *sample, void *ctx)
 {
@@ -91,11 +99,11 @@ static bool init_search(search_t *s, apply_ctx_t *ctx)
   if (!s->raw) { s->refused=true; LOG_E(PHY,"UL discovery: hypothesis allocation failed\n"); return false; }
   s->n_raw=ctx->interpretation
       ? nr_pdcch_ul_interp_sweep_generate(s->raw,NR_HYP_SWEEP_MAX_RAW)
-      : nr_pdcch_ul_field_sweep_generate(&ctx->opts,target_length,s->raw,NR_HYP_SWEEP_MAX_RAW);
+      : nr_pdcch_ul_field_sweep_generate(&ctx->opts,ctx->owner->target_length,s->raw,NR_HYP_SWEEP_MAX_RAW);
   const void *observations[UL_DISCOVERY_SAMPLES];
-  for (int i=0;i<nsamples;++i) observations[i]=&samples[i];
+  for (int i=0;i<ctx->owner->nsamples;++i) observations[i]=&ctx->owner->samples[i];
   int classes=s->n_raw>0 ? nr_hyp_sweep_init(&s->engine,s->raw,s->n_raw,NULL,NULL,
-                                           equivalent,observations,nsamples,ctx) : s->n_raw;
+                                           equivalent,observations,ctx->owner->nsamples,ctx) : s->n_raw;
   if (classes<=0) {
     LOG_E(PHY,"UL discovery %s refused: raw=%d classes/error=%d; configuration unresolved\n",
           ctx->interpretation?"interpretation":"width",s->n_raw,classes);
@@ -103,7 +111,7 @@ static bool init_search(search_t *s, apply_ctx_t *ctx)
   }
   s->initialized=true;
   LOG_A(PHY,"UL discovery %s armed: raw=%d classes=%d rnti=0x%x\n",
-        ctx->interpretation?"interpretation":"width",s->n_raw,classes,target_rnti);
+        ctx->interpretation?"interpretation":"width",s->n_raw,classes,ctx->owner->target_rnti);
   return true;
 }
 static bool still_equivalent(search_t *s, const uint64_t *p, apply_ctx_t *ctx)
@@ -122,62 +130,72 @@ bool nr_pdcch_ul_discovery_grant(const nr_pdcch_blind_ul_opts_t *fixed, uint16_t
 {
   if (!fixed || !out || !rnti || !len || len>63) return false;
   pthread_mutex_lock(&lock);
-  bool ok=false;
-  if (target_rnti!=rnti || target_length!=len || memcmp(&baseline,fixed,sizeof(baseline))) {
-    reset_locked(); baseline=*fixed; target_rnti=rnti; target_length=len;
+  ul_context_t *c = NULL, *oldest = &contexts[0];
+  for (int i=0; i<UL_DISCOVERY_CONTEXTS; ++i) {
+    if (contexts[i].target_rnti == rnti) { c=&contexts[i]; break; }
+    if (contexts[i].touched < oldest->touched) oldest=&contexts[i];
   }
-  /* No geometry or TDA width inferred from DCI total length alone. The current opts
+  if (!c) { c=oldest; reset_locked(c); }
+  bool ok=false;
+  if (c->target_rnti!=rnti || c->target_length!=len || memcmp(&c->baseline,fixed,sizeof(c->baseline))) {
+    reset_locked(c); c->baseline=*fixed; c->target_rnti=rnti; c->target_length=len;
+  }
+  c->touched = ++context_clock;
+  bool novel=true;
+  for (int i=0;i<c->nsamples;++i) if(c->samples[i]==payload) novel=false;
+  if (novel) {
+    /* No geometry or TDA width inferred from DCI total length alone. The current opts
    * contract still supplies these facts; a default/unknown dedicated TDA list is unresolved. */
   if (fixed->bwp_size==0 || fixed->tda_count<1 || fixed->tda_count>16) {
-    if (!widths.refused) LOG_E(PHY,"UL discovery unresolved: UL BWP and TDA field width required\n");
-    widths.refused=true;
+    if (!c->widths.refused) LOG_E(PHY,"UL discovery unresolved: UL BWP and TDA field width required\n");
+    c->widths.refused=true;
     goto done;
   }
-  bool novel=true;
-  for (int i=0;i<nsamples;++i) if(samples[i]==payload) novel=false;
-  if (novel) {
-    samples[sample_cursor]=payload;
-    sample_cursor=(sample_cursor+1)%UL_DISCOVERY_SAMPLES;
-    if(nsamples<UL_DISCOVERY_SAMPLES) ++nsamples;
+  if(c->nsamples<UL_DISCOVERY_SAMPLES)
+      LOG_I(PHY,"UL raw sample rnti=0x%x len=%u payload=0x%lx sample=%d/%d; interpretation unresolved\n",
+            rnti,len,(unsigned long)payload,c->nsamples+1,UL_DISCOVERY_SAMPLES);
+    c->samples[c->sample_cursor]=payload;
+    c->sample_cursor=(c->sample_cursor+1)%UL_DISCOVERY_SAMPLES;
+    if(c->nsamples<UL_DISCOVERY_SAMPLES) ++c->nsamples;
   }
-  if(nsamples<UL_DISCOVERY_SAMPLES || widths.refused || interp.refused) goto done;
-  apply_ctx_t ctx={.opts=baseline};
-  if (!widths.initialized && !init_search(&widths,&ctx)) goto done;
+  if(c->nsamples<UL_DISCOVERY_SAMPLES || c->widths.refused || c->interp.refused) goto done;
+  apply_ctx_t ctx={.opts=c->baseline,.owner=c};
+  if (!c->widths.initialized && !init_search(&c->widths,&ctx)) goto done;
   /* Finite-sample equivalence is provisional. New distinguishing traffic invalidates
    * old class scores and queued feedback; never keep a convenient representative silently. */
-  if (!still_equivalent(&widths,&payload,&ctx)) {
+  if (!still_equivalent(&c->widths,&payload,&ctx)) {
     LOG_W(PHY,"UL width classes split on new payload; invalidating search evidence\n");
-    clear_search(&widths); clear_search(&interp); ++generation;
-    logged_width=logged_interp=false;
+    clear_search(&c->widths); clear_search(&c->interp); c->generation=++generation_counter;
+    c->logged_width=c->logged_interp=false;
     goto done;
   }
   nr_hyp_t chosen;
-  int wi=nr_hyp_sweep_next(&widths.engine,&payload,plausible,&ctx,&chosen);
+  int wi=nr_hyp_sweep_next(&c->widths.engine,&payload,plausible,&ctx,&chosen);
   if(wi<0) goto done;
   nr_pdcch_ul_field_sweep_apply(&chosen,&ctx.opts);
   int ii=-1;
-  if(nr_hyp_sweep_winner(&widths.engine)>=0) {
-    if(!logged_width) { LOG_A(PHY,"UL width search converged: class=%d\n",wi); logged_width=true; }
+  if(nr_hyp_sweep_winner(&c->widths.engine)>=0) {
+    if(!c->logged_width) { LOG_A(PHY,"UL width search converged: class=%d\n",wi); c->logged_width=true; }
     nr_pdcch_blind_ul_result_t probe;
     if(!nr_pdcch_blind_extract_01(payload,len,rnti,&ctx.opts,&probe)) goto done;
-    if(tda_index<0) tda_index=probe.tda_index;
-    if(probe.tda_index!=tda_index) {
+    if(c->tda_index<0) c->tda_index=probe.tda_index;
+    if(probe.tda_index!=c->tda_index) {
       /* Per-index interpretation state is not yet implemented. Never apply entry zero
        * to traffic using another index or pool the CRC evidence of different entries. */
-      if(!interp.refused) LOG_E(PHY,"UL interpretation unresolved: multiple observed TDA indices\n");
-      interp.refused=true; goto done;
+      if(!c->interp.refused) LOG_E(PHY,"UL interpretation unresolved: multiple observed TDA indices\n");
+      c->interp.refused=true; goto done;
     }
     ctx.interpretation=true;
-    if(!interp.initialized && !init_search(&interp,&ctx)) goto done;
-    if(!still_equivalent(&interp,&payload,&ctx)) {
+    if(!c->interp.initialized && !init_search(&c->interp,&ctx)) goto done;
+    if(!still_equivalent(&c->interp,&payload,&ctx)) {
       LOG_W(PHY,"UL interpretation classes split; invalidating search evidence\n");
-      clear_search(&interp); ++generation; logged_interp=false; goto done;
+      clear_search(&c->interp); c->generation=++generation_counter; c->logged_interp=false; goto done;
     }
-    ii=nr_hyp_sweep_next(&interp.engine,&payload,plausible,&ctx,&chosen);
-    if(ii<0 || !nr_pdcch_ul_interp_sweep_apply(&chosen,tda_index,&ctx.opts)) goto done;
-    if(nr_hyp_sweep_winner(&interp.engine)>=0 && !logged_interp) {
-      LOG_A(PHY,"UL interpretation search converged: class=%d tda=%d\n",ii,tda_index);
-      logged_interp=true;
+    ii=nr_hyp_sweep_next(&c->interp.engine,&payload,plausible,&ctx,&chosen);
+    if(ii<0 || !nr_pdcch_ul_interp_sweep_apply(&chosen,c->tda_index,&ctx.opts)) goto done;
+    if(nr_hyp_sweep_winner(&c->interp.engine)>=0 && !c->logged_interp) {
+      LOG_A(PHY,"UL interpretation search converged: class=%d tda=%d\n",ii,c->tda_index);
+      c->logged_interp=true;
     }
   }
   /* The existing receiver cannot resolve these antenna-port tables/DFT-s-OFDM.
@@ -190,9 +208,9 @@ bool nr_pdcch_ul_discovery_grant(const nr_pdcch_blind_ul_opts_t *fixed, uint16_t
     ok=false;
   }
   if(ok) {
-    out->width_hyp_class=nr_hyp_sweep_winner(&widths.engine)<0?wi:-1;
-    out->interp_hyp_class=ii>=0 && nr_hyp_sweep_winner(&interp.engine)<0?ii:-1;
-    out->hyp_generation=generation;
+    out->width_hyp_class=nr_hyp_sweep_winner(&c->widths.engine)<0?wi:-1;
+    out->interp_hyp_class=ii>=0 && nr_hyp_sweep_winner(&c->interp.engine)<0?ii:-1;
+    out->hyp_generation=c->generation;
   }
 done:
   pthread_mutex_unlock(&lock);
@@ -200,13 +218,16 @@ done:
 }
 void nr_pdcch_ul_discovery_feedback(const nr_pdcch_blind_ul_result_t *g, bool ok)
 {
-  if(!g || !g->hyp_generation) return;
+  if (!g || !g->hyp_generation) return;
   pthread_mutex_lock(&lock);
-  if(g->hyp_generation==generation && g->rnti==target_rnti) {
-    if(widths.initialized && g->width_hyp_class>=0)
-      nr_hyp_sweep_feed(&widths.engine,g->width_hyp_class,ok);
-    if(interp.initialized && g->interp_hyp_class>=0)
-      nr_hyp_sweep_feed(&interp.engine,g->interp_hyp_class,ok);
+  for (int i=0; i<UL_DISCOVERY_CONTEXTS; ++i) {
+    ul_context_t *c=&contexts[i];
+    if (g->hyp_generation != c->generation || g->rnti != c->target_rnti) continue;
+    if (c->widths.initialized && g->width_hyp_class>=0)
+      nr_hyp_sweep_feed(&c->widths.engine,g->width_hyp_class,ok);
+    if (c->interp.initialized && g->interp_hyp_class>=0)
+      nr_hyp_sweep_feed(&c->interp.engine,g->interp_hyp_class,ok);
+    break;
   }
   pthread_mutex_unlock(&lock);
 }
@@ -214,10 +235,14 @@ void nr_pdcch_ul_discovery_feedback(const nr_pdcch_blind_ul_result_t *g, bool ok
 nr_pdcch_ul_discovery_snapshot_t nr_pdcch_ul_discovery_snapshot(void)
 {
   pthread_mutex_lock(&lock);
-  nr_pdcch_ul_discovery_snapshot_t s={.generation=generation,
-      .width_classes=widths.engine.n_classes,.interp_classes=interp.engine.n_classes};
-  for(int i=0;i<widths.engine.n_classes;++i) s.width_trials+=widths.engine.classes[i].trials;
-  for(int i=0;i<interp.engine.n_classes;++i) s.interp_trials+=interp.engine.classes[i].trials;
+  nr_pdcch_ul_discovery_snapshot_t s={.generation=generation_counter};
+  for (int k=0; k<UL_DISCOVERY_CONTEXTS; ++k) {
+    const ul_context_t *c=&contexts[k];
+    s.width_classes+=c->widths.engine.n_classes;
+    s.interp_classes+=c->interp.engine.n_classes;
+    for(int i=0;i<c->widths.engine.n_classes;++i) s.width_trials+=c->widths.engine.classes[i].trials;
+    for(int i=0;i<c->interp.engine.n_classes;++i) s.interp_trials+=c->interp.engine.classes[i].trials;
+  }
   pthread_mutex_unlock(&lock);
   return s;
 }

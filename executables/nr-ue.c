@@ -1,3 +1,4 @@
+#include "nr_rx_continuity.h"
 #include <dlfcn.h>
 /*
  * SPDX-License-Identifier: LicenseRef-CSSL-1.0
@@ -664,11 +665,11 @@ static int UE_dl_preprocessing(PHY_VARS_NR_UE *UE,
     /* UPLINK slot. Nothing used to run here -- a UE has no reason to process one. A passive
      * receiver does: this is where another UE's PUSCH actually is, k2 slots after the DCI that
      * scheduled it. No-op unless [sensing] pdcch_blind_monitor_ul_pusch is configured. */
-    if (proc->rx_slot_type == NR_UPLINK_SLOT) {
-      nr_pusch_passive_monitor_process(UE, proc);
-    }
     ue_ta_procedures(UE, proc->nr_slot_tx, proc->frame_tx);
   }
+
+  if (IS_PASSIVE_RX_MODE(get_softmodem_params()))
+    nr_pusch_passive_monitor_process(UE, proc);
 
   TracyCZoneEnd(ctx);
   return sampleShift;
@@ -920,6 +921,7 @@ void *UE_thread(void *arg)
   const NR_DL_FRAME_PARMS *fp = &UE->frame_parms;
   //  int tx_enabled = 0;
   enum stream_status_e stream_status = STREAM_STATUS_UNSYNC;
+  nr_rx_continuity_t rx_continuity = {0};
   fapi_nr_config_request_t *cfg = &UE->nrUE_config;
   sl_nr_phy_config_request_t *sl_cfg = NULL;
   if (UE->sl_mode == 2) {
@@ -1024,6 +1026,9 @@ void *UE_thread(void *arg)
     AssertFatal(!syncRunning, "At this point synchronization can't be running\n");
 
     if (!UE->is_synchronized) {
+      /* Acquisition consumes frames outside the slot-read accounting. Never compare
+       * a new lock against the final timestamp of the previous lock. */
+      nr_rx_continuity_reset(&rx_continuity);
       if (get_nrUE_params()->time_sync_I)
         UE->max_pos_acc = ntn_init_time_drift * 1e-6 * fp->samples_per_frame / get_nrUE_params()->time_sync_I;
       else
@@ -1223,6 +1228,7 @@ void *UE_thread(void *arg)
         LOG_W(PHY, "SENSING: REBASE applying coarse timing rebase of %ld samples at frame boundary\n", d);
         syncInFrame(UE, &sync_timestamp, duration_rx_to_tx, (openair0_timestamp_t)d);
         nrue_ru_write_reorder_clear_context(UE);
+        nr_rx_continuity_reset(&rx_continuity);
         UE->max_pos_acc = 0;
         UE->max_pos_iir = 0;
         shiftForNextFrame = 0;
@@ -1322,13 +1328,12 @@ void *UE_thread(void *arg)
     // Accounting note: this iteration may consume MORE than readBlockSize -- the short-read retries
     // just below, and the extra first_symbols read at end-of-frame -- so the expected next
     // timestamp is accumulated in rx_samples_consumed and only committed at the end of the reads.
-    static openair0_timestamp_t s_rxts_prev = 0;
     static long s_rxts_prev_consumed = 0;
     static long s_rxts_discont_total = 0;
     long rx_samples_consumed = 0;
-    if (s_rxts_prev_consumed > 0) {
-      const openair0_timestamp_t expected = s_rxts_prev + s_rxts_prev_consumed;
-      if (rx_timestamp != expected) {
+    if (rx_continuity.valid) {
+      const openair0_timestamp_t expected = rx_continuity.next_timestamp;
+      if (!nr_rx_continuity_check(&rx_continuity, rx_timestamp)) {
         // ---- RF DISCONTINUITY => INVALIDATE SYNCHRONISATION (2026-08-06) --------------------
         // Measured root cause: at 4x122.88 MS/s the host periodically fails to consume samples
         // fast enough, UHD overflows and the stream resumes SECONDS later. OAI previously advanced
@@ -1365,11 +1370,15 @@ void *UE_thread(void *arg)
           atomic_store_explicit(&nr_ue_pending_rebase_valid, 0, memory_order_relaxed);
           decoded_frame_rx = MAX_FRAME_NUMBER - 1;
           trashed_frames = 0;
+          nr_rx_continuity_reset(&rx_continuity);
           LOG_W(PHY, "SENSING: RXDISCONT sync invalidated, timing state cleared, reacquiring\n");
+          /* No RX/TX job has been allocated for this slot yet. Dispatching it would
+           * feed invalid samples to discovery and overwrite UNSYNC with SYNCED below. */
+          if (IS_PASSIVE_RX_MODE(get_softmodem_params()))
+            continue;
         }
       }
     }
-    s_rxts_prev = rx_timestamp;
     rx_samples_consumed += (tmp > 0) ? tmp : readBlockSize;
     atomic_store_explicit(&nr_ue_diag_rf_timestamp, (long)rx_timestamp, memory_order_relaxed);
     metadata meta = {.slot =  curMsg.proc.nr_slot_rx, .frame =  curMsg.proc.frame_rx};
@@ -1404,6 +1413,7 @@ void *UE_thread(void *arg)
 
     // Every read of this iteration is now counted; commit for the next iteration's continuity test.
     s_rxts_prev_consumed = rx_samples_consumed;
+    nr_rx_continuity_commit(&rx_continuity, rx_timestamp, rx_samples_consumed);
     /* Sub-sampled mean |I|+|Q| of this slot, antenna 0. Every 64th sample keeps the cost
      * negligible on the RT thread while still averaging hundreds of points per slot. */
     {
@@ -1924,7 +1934,8 @@ void *UE_thread(void *arg)
                            tx_wait_for_dlsch[slot] + wait_for_prev_slot,
                            start_process_slot_tx,
                            newTx);
-    stream_status = STREAM_STATUS_SYNCED;
+    if (UE->is_synchronized)
+      stream_status = STREAM_STATUS_SYNCED;
     tx_wait_for_dlsch[slot] = 0;
   }
   LOG_W(NR_PHY, "UE main thread is ending\n");

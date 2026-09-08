@@ -172,3 +172,26 @@ int nr_pdcch_dci_length_sweep_feed(nr_pdcch_dci_length_sweep_state_t* state,
   }
   return best_len;
 }
+
+nr_pdcch_dci_length_context_t *nr_pdcch_dci_length_context(
+    nr_pdcch_dci_length_bank_t *bank, uint64_t epoch, uint16_t rnti)
+{
+  if (!bank || !rnti) return NULL;
+  if (bank->epoch != epoch) {
+    memset(bank, 0, sizeof(*bank));
+    bank->epoch = epoch;
+  }
+  nr_pdcch_dci_length_context_t *oldest=&bank->ue[0];
+  for (int i=0; i<NR_PDCCH_LENGTH_CONTEXTS; ++i) {
+    nr_pdcch_dci_length_context_t *c=&bank->ue[i];
+    if (c->rnti == rnti) {
+      c->touched=++bank->clock;
+      return c;
+    }
+    if (c->touched < oldest->touched) oldest=c;
+  }
+  memset(oldest, 0, sizeof(*oldest));
+  oldest->rnti=rnti;
+  oldest->touched=++bank->clock;
+  return oldest;
+}

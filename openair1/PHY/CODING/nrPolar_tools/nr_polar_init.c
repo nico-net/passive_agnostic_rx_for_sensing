@@ -38,12 +38,28 @@ static void nr_polar_delete_list(t_nrPolar_params *polarParams)
   free(polarParams);
 }
 
-static void nr_polar_delete(void)
+bool nr_polar_try_cleanup(void)
 {
   pthread_mutex_lock(&PolarListMutex);
+  /* exit() can run on a radio/decoder worker while other threads still use or
+   * initialize published nodes. The list mutex does not protect that work.
+   * Never free a busy node: leave the cache for the OS at process termination.
+   * Clean shutdown (all callers returned their nodes) still releases it normally. */
+  for (const t_nrPolar_params *p=PolarList; p; p=p->nextPtr) {
+    if (p->busy) {
+      pthread_mutex_unlock(&PolarListMutex);
+      return false;
+    }
+  }
   nr_polar_delete_list(PolarList);
   PolarList = NULL;
   pthread_mutex_unlock(&PolarListMutex);
+  return true;
+}
+
+static void nr_polar_delete(void)
+{
+  (void)nr_polar_try_cleanup();
 }
 
 t_nrPolar_params *nr_polar_params(int8_t messageType, uint16_t messageLength, uint8_t aggregation_level)

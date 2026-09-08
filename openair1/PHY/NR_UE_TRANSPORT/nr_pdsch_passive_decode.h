@@ -66,6 +66,8 @@ extern "C" {
 /// allocation alone, plus the two deployment constants (MCS table, xOverhead) a blind receiver must
 /// be told rather than read off the air.
 typedef struct {
+  bool check_sample_lifetime; ///< deferred IQ must survive the complete FEP
+  long source_absolute_slot; ///< original RF slot, never re-stamped by consumers
   uint16_t rnti;      ///< CRC-recovered RNTI: the PDSCH scrambling sequence depends on it
   uint8_t  mcs;       ///< MCS index from the DCI
   uint8_t  rv;        ///< redundancy version from the DCI

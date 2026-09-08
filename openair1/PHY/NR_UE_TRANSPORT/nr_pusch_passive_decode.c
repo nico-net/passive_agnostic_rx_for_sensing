@@ -1,3 +1,4 @@
+#include "nr_passive_sample_lifetime.h"
 /* See nr_pusch_passive_decode.h for why this file constructs a gNB by hand. */
 
 #include <stdlib.h>
@@ -725,6 +726,14 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
   } while (0)
 
   PASSIVE_UL_FEP(ul_sample_offset);
+  if (abs_slot && !nr_passive_samples_valid(
+      atomic_load_explicit(&nr_ue_diag_producer_absolute_slot,memory_order_relaxed),
+      (long)abs_slot,fp->slots_per_frame)) {
+    out->status=NR_PUSCH_PASSIVE_UNSUPPORTED;
+    out->reject_reason="IQ expired during PUSCH FEP";
+    return false;
+  }
+
 
   /* ---- TBS, then the receive chain, exactly as the gNB runs it. ---- */
   if (utim) {
@@ -793,6 +802,14 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
     if (d != 0 && (d > PASSIVE_UL_DELAY_TOL || d < -PASSIVE_UL_DELAY_TOL)) {
       atomic_fetch_add_explicit(&g_ta_refined, 1, memory_order_relaxed);
       PASSIVE_UL_FEP(ul_sample_offset - d);
+  if (abs_slot && !nr_passive_samples_valid(
+      atomic_load_explicit(&nr_ue_diag_producer_absolute_slot,memory_order_relaxed),
+      (long)abs_slot,fp->slots_per_frame)) {
+    out->status=NR_PUSCH_PASSIVE_UNSUPPORTED;
+    out->reject_reason="IQ expired during PUSCH FEP";
+    return false;
+  }
+
       nr_rx_pusch_group_tp(gnb, &pvp, &pdup, &unavp, 1, frame, slot);
       out->est_delay_pre = d;
     }

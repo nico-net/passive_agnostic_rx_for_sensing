@@ -1522,7 +1522,7 @@ void nr_pdcch_blind_monitor_init(void)
   }
   /* An UL scan with no UL BWP cannot size a RIV and would sweep a wrong width silently -- the same
    * class of failure the 1_0 path guards with its n_rb_riv check. */
-  if (g_cfg.dci01_scan && g_cfg.ul.bwp_size < 1) {
+  if (g_cfg.dci01_scan && !g_cfg.dl_full_auto && g_cfg.ul.bwp_size < 1) {
     g_cfg.dci01_scan = 0;
     LOG_E(PHY, "SENSING: pdcch_blind_monitor_dci01 is on but pdcch_blind_monitor_ul_bwp is unset; "
                "UL DCI 0_1 scanning disabled\n");
@@ -2378,42 +2378,47 @@ bool nr_pdcch_blind_decode_and_extract(const int16_t* llr,
                                               rnti_min, rnti_max, NULL /* spec defaults */, out);
 }
 
-static bool blind_decode_and_extract_11_inner(const int16_t* llr,
-                                          uint8_t         aggregation_level,
-                                          uint16_t        dci_length,
-                                          uint16_t        bwp_size,
-                                          uint8_t         dmrs_typeA_position,
-                                          uint16_t        rnti_min,
-                                          uint16_t        rnti_max,
-                                          const nr_pdcch_blind_extract_opts_t* opts,
-                                          nr_pdcch_blind_result_t* out)
+bool nr_pdcch_blind_decode_raw_11(const int16_t *llr, uint8_t aggregation_level,
+                                 uint16_t dci_length, uint16_t rnti_min, uint16_t rnti_max,
+                                 nr_pdcch_blind_raw_result_t *out)
 {
+  if (!out) return false;
+  memset(out,0,sizeof(*out));
+  if (!llr || dci_length<1 || dci_length>63 || !rnti_min || rnti_min>rnti_max ||
+      (aggregation_level!=1 && aggregation_level!=2 && aggregation_level!=4 &&
+       aggregation_level!=8 && aggregation_level!=16)) {
+    out->reject_reason="invalid raw DL decode arguments";
+    return false;
+  }
+  uint64_t bits[2]={0};
+  const uint32_t crc=blind_polar_decode(llr,aggregation_level,dci_length,rnti_min,rnti_max,bits);
+  out->payload=bits[0]; out->rnti=(uint16_t)crc;
+  if(crc<rnti_min || crc>rnti_max) {
+    out->reject_reason="CRC-recovered value outside plausible RNTI range";
+    return false;
+  }
+  if(((bits[0]>>(dci_length-1))&1)==0) {
+    out->reject_reason="format indicator=0 (UL grant, not DL)";
+    return false;
+  }
+  out->mismatched_bits=blind_mismatched_bits(llr,bits,crc,aggregation_level,dci_length);
+  return true;
+}
+
+bool nr_pdcch_blind_extract_11(const nr_pdcch_blind_raw_result_t *raw,
+                               uint16_t dci_length, uint16_t bwp_size,
+                               uint8_t dmrs_typeA_position,
+                               const nr_pdcch_blind_extract_opts_t *opts,
+                               nr_pdcch_blind_result_t *out)
+{
+  if (!out) return false;
   memset(out, 0, sizeof(*out));
-  out->plausible = false;
-
-  if (dci_length == 0 || dci_length > 63 || bwp_size < 1) {
-    out->reject_reason = "invalid dci_length/bwp_size argument";
+  if (!raw || !dci_length || dci_length > 63 || !bwp_size) {
+    out->reject_reason = "invalid raw DCI/extraction arguments";
     return false;
   }
-
-  // ---- Step 1: RNTI-independent polar decode; the CRC-recovered value IS the candidate RNTI.
-  // Shared with the format 1_0 entry point (blind_polar_decode() also carries the FULLCRC probe). ----
-  uint64_t       dci_estimation[2] = {0};
-  const uint32_t crc = blind_polar_decode(llr, aggregation_level, dci_length, rnti_min, rnti_max, dci_estimation);
-
-  // ---- Step 2: RNTI plausibility -- range check instead of the live path's equality check. This
-  // is the entire "blind" widening; see dci_nr.c:538-541 (reference only, not modified). ----
-  if (crc < rnti_min || crc > rnti_max) {
-    out->rnti = (uint16_t)crc;
-    out->reject_reason = "CRC-recovered value outside plausible RNTI range";
-    return false;
-  }
-  out->rnti = (uint16_t)crc;
-
-  // ---- Step 2b: mismatched-bits false-detection measure. See blind_mismatched_bits(), which owns
-  // the rationale and is shared with the format 1_0 entry point. The caller owns the threshold. ----
-  out->mismatched_bits = blind_mismatched_bits(llr, dci_estimation, crc, aggregation_level, dci_length);
-
+  out->rnti = raw->rnti;
+  out->mismatched_bits = raw->mismatched_bits;
   // ---- Step 3: field extraction, in TS 38.212 spec order (MSB-first, matches
   // nr_mac_common.c's nr_dci_size() accumulation order and nr_ue_procedures.c's readBits()).
   // NOTE: this does NOT re-check dci_length against nr_pdcch_blind_dci_size(bwp_size) -- it used to,
@@ -2437,7 +2442,7 @@ static bool blind_decode_and_extract_11_inner(const int16_t* llr,
   }
 
   int            pos     = (int)dci_length;
-  const uint64_t payload = dci_estimation[0];
+  const uint64_t payload = raw->payload;
 
   const uint32_t format_indicator = read_field(payload, &pos, 1);
   (void)read_field(payload, &pos, 0);           // carrier indicator (no cross-carrier scheduling)
@@ -2554,6 +2559,26 @@ static bool blind_decode_and_extract_11_inner(const int16_t* llr,
   out->plausible          = true;
   out->reject_reason      = NULL;
   return true;
+}
+
+static bool blind_decode_and_extract_11_inner(const int16_t* llr,
+                                          uint8_t         aggregation_level,
+                                          uint16_t        dci_length,
+                                          uint16_t        bwp_size,
+                                          uint8_t         dmrs_typeA_position,
+                                          uint16_t        rnti_min,
+                                          uint16_t        rnti_max,
+                                          const nr_pdcch_blind_extract_opts_t* opts,
+                                          nr_pdcch_blind_result_t* out)
+{
+  nr_pdcch_blind_raw_result_t raw;
+  if (!nr_pdcch_blind_decode_raw_11(llr, aggregation_level, dci_length, rnti_min, rnti_max, &raw)) {
+    memset(out, 0, sizeof(*out));
+    out->rnti = raw.rnti;
+    out->reject_reason = raw.reject_reason;
+    return false;
+  }
+  return nr_pdcch_blind_extract_11(&raw, dci_length, bwp_size, dmrs_typeA_position, opts, out);
 }
 
 /* ISAC_DCI_WATCH_RNTI=0x<rnti>: print WHY a GENUINE candidate is rejected. The existing
@@ -2813,6 +2838,10 @@ static bool blind_ul_finish(const nr_pdcch_blind_ul_opts_t* opts,
                             int      force_add_pos,
                             nr_pdcch_blind_ul_result_t* out)
 {
+  if (opts->numerology > 5 || opts->dmrs_typeA_position > 1) {
+    out->reject_reason = "invalid measured UL numerology or MIB DMRS position";
+    return false;
+  }
   uint16_t start_rb, num_rb;
   if (!riv_to_prb_alloc(riv, opts->bwp_size, &start_rb, &num_rb)) {
     out->reject_reason = "RIV decodes to a PRB allocation outside the UL BWP";
@@ -2827,7 +2856,7 @@ static bool blind_ul_finish(const nr_pdcch_blind_ul_opts_t* opts,
   }
 
   uint8_t S, L, mapping_is_b, k2;
-  if (!blind_ul_tda(opts, tda_idx, 1 /* mu: 30 kHz, the only numerology this monitor runs at */,
+  if (!blind_ul_tda(opts, tda_idx, opts->numerology,
                     &S, &L, &mapping_is_b, &k2)) {
     out->reject_reason = "time-domain assignment index past the pusch-TimeDomainAllocationList";
     return false;
@@ -2839,7 +2868,7 @@ static bool blind_ul_finish(const nr_pdcch_blind_ul_opts_t* opts,
                           ? force_add_pos
                           : ((opts->dmrs_add_pos >= 0) ? opts->dmrs_add_pos : 2);
   const int max_len = (opts->dmrs_max_length > 0) ? opts->dmrs_max_length : 1;
-  const int32_t mask = blind_ul_dmrs_mask(L, S, mapping_is_b, add_pos, max_len, 2 /* dmrs-TypeA-Position */);
+  const int32_t mask = blind_ul_dmrs_mask(L, S, mapping_is_b, add_pos, max_len, opts->dmrs_typeA_position);
   if (mask < 0) {
     out->reject_reason = "no valid PUSCH DM-RS position for this allocation length";
     return false;
@@ -3148,4 +3177,89 @@ bool nr_pdcch_blind_extract_00(uint64_t       payload,
   }
   out->nscid = 0; // TS 38.211 6.4.1.1.1: n_SCID = 0 for a DCI 0_0 scheduled PUSCH
   return true;
+}
+
+int nr_pdcch_blind_dl_layout_candidates(const nr_pdcch_blind_raw_result_t *raw,
+                                        uint16_t len, uint16_t bwp, uint8_t typeA,
+                                        nr_pdcch_blind_result_t out[3], uint8_t ids[3])
+{
+  if (!raw || !out || !ids || !bwp || bwp>275 || !len || len>63) return 0;
+  int count=0;
+  /* Initial supported profile: type-1 RA, one codeword, type-1/len1 port table,
+   * no cross-carrier/optional rate-matching fields. These are hypotheses, NOT
+   * learned RRC facts. Unknown BWP-indicator and TDA-index widths are enumerated.
+   * TB CRC remains the authority; unsupported layouts stay unresolved. */
+  for (int bw=0; bw<=2; ++bw) {
+    for (int td=0; td<=4; ++td) {
+      nr_pdcch_blind_extract_opts_t o={0};
+      o.bwp_indicator_bits=bw;
+      o.harq_pid_bits=4;
+      o.dai_bits=2;
+      o.pdsch_to_harq_bits=3;
+      o.antenna_ports_bits=4;
+      o.srs_request_bits=2;
+      o.tda_count=1<<td;
+      o.dmrs_add_pos=0;
+      o.dmrs_max_length=1;
+      if (nr_pdcch_blind_dci_size_ex(bwp,&o)!=len) continue;
+      /* S/L is deliberately a legal parser scaffold, never an applied hypothesis:
+       * runtime MUST replace it through Technique D before decoding a transport block.
+       * The inferred index width is not a claim about the dedicated list's entry count. */
+      for (int i=0;i<o.tda_count;++i) {
+        o.tda_start[i]=1; o.tda_length[i]=13; o.tda_mapping[i]=0;
+      }
+      nr_pdcch_blind_result_t parsed;
+      if (!nr_pdcch_blind_extract_11(raw,len,bwp,typeA,&o,&parsed)) continue;
+      if (count==3) return 0; // at most one TDA width per BWP width at an exact length
+      out[count]=parsed;
+      ids[count++]=(uint8_t)(bw*5+td);
+    }
+  }
+  return count;
+}
+
+static pthread_mutex_t common_facts_lock=PTHREAD_MUTEX_INITIALIZER;
+static nr_pdcch_blind_common_config_t common_facts;
+static bool common_facts_valid;
+static bool common_tda_valid(int count, const uint8_t *start, const uint8_t *length,
+                             const uint8_t *mapping)
+{
+  if (count<0 || count>16) return false;
+  for(int i=0;i<count;++i)
+    if (!length[i] || start[i]+length[i]>14 || mapping[i]>1) return false;
+  return true;
+}
+bool nr_pdcch_blind_publish_common(const nr_pdcch_blind_common_config_t *f)
+{
+  if (!f || f->pci>1007 || !f->dl_bwp_size || f->dl_bwp_start+f->dl_bwp_size>275
+      || f->ul_bwp_start+f->ul_bwp_size>275 || f->dl_mu>4 || f->ul_mu>4
+      || !common_tda_valid(f->dl_count,f->dl_start,f->dl_length,f->dl_mapping)
+      || !common_tda_valid(f->ul_count,f->ul_start,f->ul_length,f->ul_mapping))
+    return false;
+  pthread_mutex_lock(&common_facts_lock);
+  const bool changed=!common_facts_valid || memcmp(&common_facts,f,sizeof(*f));
+  common_facts=*f;
+  common_facts_valid=true;
+  pthread_mutex_unlock(&common_facts_lock);
+  if(changed)
+    LOG_I(PHY,"PASSIVE: SIB1 common facts PCI=%u DL-BWP=%u+%u DL-TDAs=%u "
+              "UL-BWP=%u+%u UL-TDAs=%u; dedicated config remains a hypothesis\n",
+          f->pci,f->dl_bwp_start,f->dl_bwp_size,f->dl_count,f->ul_bwp_start,f->ul_bwp_size,f->ul_count);
+  return true;
+}
+bool nr_pdcch_blind_get_common(uint16_t pci, nr_pdcch_blind_common_config_t *f)
+{
+  if (!f) return false;
+  pthread_mutex_lock(&common_facts_lock);
+  const bool ok=common_facts_valid && common_facts.pci==pci;
+  if(ok) *f=common_facts; else memset(f,0,sizeof(*f));
+  pthread_mutex_unlock(&common_facts_lock);
+  return ok;
+}
+void nr_pdcch_blind_reset_common(void)
+{
+  pthread_mutex_lock(&common_facts_lock);
+  common_facts_valid=false;
+  memset(&common_facts,0,sizeof(common_facts));
+  pthread_mutex_unlock(&common_facts_lock);
 }

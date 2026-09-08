@@ -22,7 +22,7 @@
 #ifndef NR_PDCCH_UL_DISCOVERY_H
 #define NR_PDCCH_UL_DISCOVERY_H
 #include "nr_pdcch_blind_monitor.h"
-/* Thread-safe controller. Owns one bootstrapped UE at a time; identity/context changes
+/* Thread-safe controller. Keeps independent contexts for up to 16 bootstrapped UEs; identity/context changes
  * discard evidence and advance the generation echoed through the grant book. */
 typedef struct {
   uint64_t generation, width_trials, interp_trials;

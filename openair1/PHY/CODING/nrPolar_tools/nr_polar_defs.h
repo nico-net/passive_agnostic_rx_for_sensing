@@ -158,6 +158,8 @@ void build_decoder_tree(t_nrPolar_params *pp);
 void build_polar_tables(t_nrPolar_params *polarParams);
 
 void nr_polar_print_polarParams(void);
+/* Returns false without freeing anything while a decoder/encoder owns a node. */
+bool nr_polar_try_cleanup(void);
 
 t_nrPolar_params *nr_polar_params(int8_t messageType, uint16_t messageLength, uint8_t aggregation_level);
 

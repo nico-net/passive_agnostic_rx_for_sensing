@@ -27,10 +27,9 @@ extern "C" {
 
 /// Park a recovered UL grant for the slot its PUSCH occupies (now + k2).
 /// Called from the blind PDCCH tap when a DCI 0_1 is accepted.
-void nr_pusch_grant_book_add(const nr_pdcch_blind_ul_result_t *g, int frame, int slot,
-                             int slots_per_frame);
+void nr_pusch_grant_book_add(const nr_pdcch_blind_ul_result_t *g, long source_absolute_slot);
 
-/// Process any PUSCH due in this slot. Called from nr-ue.c for NR_UPLINK_SLOT.
+/// Process any PUSCH due in this slot. Called from nr-ue.c for every received slot (late/mixed slots included).
 /// No-op unless [sensing] pdcch_blind_monitor_ul_pusch enables it.
 void nr_pusch_passive_monitor_process(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc);
 

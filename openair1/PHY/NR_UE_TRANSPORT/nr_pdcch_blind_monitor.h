@@ -117,6 +117,29 @@ typedef enum {
 /// a C-RNTI/TC-RNTI one when both are admissible in the same common search space.
 #define NR_PDCCH_BLIND_RA_RNTI_MAX 17920
 
+/* CRC-decoded SIB1 common facts, kept separate from dedicated-UE hypotheses.
+ * In particular, a common TDA list does not prove the dedicated list is identical. */
+typedef struct {
+  uint16_t pci, dl_bwp_start, dl_bwp_size, ul_bwp_start, ul_bwp_size;
+  uint8_t dl_mu, ul_mu, dl_count, ul_count;
+  uint8_t dl_start[16], dl_length[16], dl_mapping[16], dl_k0[16];
+  uint8_t ul_start[16], ul_length[16], ul_mapping[16], ul_k2[16];
+} nr_pdcch_blind_common_config_t;
+bool nr_pdcch_blind_publish_common(const nr_pdcch_blind_common_config_t *facts);
+bool nr_pdcch_blind_get_common(uint16_t pci, nr_pdcch_blind_common_config_t *facts);
+void nr_pdcch_blind_reset_common(void);
+
+/* Raw length evidence is independent of every RRC interpretation field. */
+typedef struct {
+  uint64_t payload;
+  uint16_t rnti;
+  uint16_t mismatched_bits;
+  const char *reject_reason;
+} nr_pdcch_blind_raw_result_t;
+bool nr_pdcch_blind_decode_raw_11(const int16_t *llr, uint8_t aggregation_level,
+                                 uint16_t dci_length, uint16_t rnti_min, uint16_t rnti_max,
+                                 nr_pdcch_blind_raw_result_t *out);
+
 /// Result of one blind decode+extract attempt. Fields beyond `plausible`/`reject_reason` are
 /// only meaningful when `plausible == true`.
 typedef struct {
@@ -316,12 +339,26 @@ bool nr_pdcch_blind_decode_and_extract_10(const int16_t* llr,
                                           const nr_pdcch_blind_extract_opts_t* opts,
                                           nr_pdcch_blind_result_t* out);
 
+/* Bounded initial layout family. Returned grants contain a legal S/L scaffold;
+ * never decode them without a Technique D selection. No layout is declared correct here. */
+int nr_pdcch_blind_dl_layout_candidates(const nr_pdcch_blind_raw_result_t *raw,
+                                        uint16_t len, uint16_t bwp, uint8_t typeA,
+                                        nr_pdcch_blind_result_t out[3], uint8_t ids[3]);
+
 /// Total DCI-1_1 payload width implied by `opts` at `bwp_size`. With `opts == NULL` this is
 /// identical to nr_pdcch_blind_dci_size(). Its real job is to CHECK a configuration: if this
 /// disagrees with the live-verified `dci_length_override`, the per-field widths are wrong and every
 /// field after the frequency-domain assignment will be read from the wrong offset -- the exact
 /// failure described above, which a total-length-only check cannot see.
 uint16_t nr_pdcch_blind_dci_size_ex(uint16_t bwp_size, const nr_pdcch_blind_extract_opts_t* opts);
+
+/// Interpret already CRC-verified DL bits under one explicit layout hypothesis.
+/// Does not repeat polar decoding; plausibility is NOT evidence that a layout is correct.
+bool nr_pdcch_blind_extract_11(const nr_pdcch_blind_raw_result_t *raw,
+                               uint16_t dci_length, uint16_t bwp_size,
+                               uint8_t dmrs_typeA_position,
+                               const nr_pdcch_blind_extract_opts_t *opts,
+                               nr_pdcch_blind_result_t *out);
 
 /**
  * @brief Parse the [sensing] pdcch_blind_monitor_* config keys. Safe to call once at UE start-up;
@@ -590,6 +627,9 @@ typedef struct {
   // ---- UL BWP ----
   uint16_t bwp_start;        ///< UL BWP start in CRBs
   uint16_t bwp_size;         ///< UL BWP size in PRBs; also the RIV reference (resource alloc type 1)
+
+  uint8_t numerology;       ///< actual UL SCS index; drives the default-table k2 offset
+  uint8_t dmrs_typeA_position; ///< MIB ASN.1 enum: 0=pos2, 1=pos3
 
   // ---- pusch-TimeDomainAllocationList. k2 is here and nowhere else. ----
   int     tda_count;         ///< 0 = use the TS 38.214 Table 6.1.2.1.1-2 default table (16 entries)

@@ -1,3 +1,4 @@
+#include "nr_passive_sample_lifetime.h"
 /*
  * Licensed to the OpenAirInterface (OAI) Software Alliance under one or more
  * contributor license agreements.  See the NOTICE file distributed with
@@ -113,12 +114,13 @@ static void *nr_pdcch_passive_queue_thread(void *arg)
     if (lag > (long)atomic_load_explicit(&g_max_lag, memory_order_relaxed)) {
       atomic_store_explicit(&g_max_lag, (uint64_t)(lag > 0 ? lag : 0), memory_order_relaxed);
     }
-    if (prod >= 0 && lag >= slots_per_frame - NR_PDCCH_PASSIVE_QUEUE_MARGIN_SLOTS) {
+    if (!nr_passive_samples_valid(prod, job.absolute_slot, slots_per_frame)) {
       atomic_fetch_add_explicit(&g_dropped_stale, 1, memory_order_relaxed);
       continue;
     }
 
     /* Replay the offset captured with these samples (see nr_slot_fep_fo_override_hz). */
+    const double saved_fo = nr_slot_fep_fo_override_hz;
     nr_slot_fep_fo_override_hz = job.fo_hz;
 
     UE_nr_rxtx_proc_t proc = {0};
@@ -126,7 +128,8 @@ static void *nr_pdcch_passive_queue_thread(void *arg)
     proc.nr_slot_rx = job.nr_slot_rx;
     proc.gNB_id     = job.gNB_id;
 
-    nr_pdcch_blind_monitor_run_occasion(ue, &proc, true /* already off the RT thread */);
+    nr_pdcch_blind_monitor_run_occasion(ue, &proc, true /* already off the RT thread */, job.absolute_slot);
+    nr_slot_fep_fo_override_hz = saved_fo;
     atomic_fetch_add_explicit(&g_processed, 1, memory_order_relaxed);
   }
 

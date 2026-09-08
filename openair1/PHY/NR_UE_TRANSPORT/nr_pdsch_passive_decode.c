@@ -1,3 +1,5 @@
+#include "nr_passive_sample_lifetime.h"
+extern _Atomic long nr_ue_diag_producer_absolute_slot;
 /*
  * Licensed to the OpenAirInterface (OAI) Software Alliance under one or more
  * contributor license agreements.  See the NOTICE file distributed with
@@ -857,6 +859,7 @@ static bool passive_ldpc_decode(PHY_VARS_NR_UE *ue,
  * this exists. rxdataF_flat/stride reconstruct the VLA-typed pointer nr_slot_fep_ant() expects;
  * a plain struct field cannot carry a runtime-sized array type directly. */
 typedef struct {
+  double fo_hz;
   PHY_VARS_NR_UE *ue;
   const NR_DL_FRAME_PARMS *fp;
   unsigned int slot;
@@ -874,7 +877,7 @@ static void nr_slot_fep_ant_task(void *arg)
   nr_slot_fep_ant_task_t *a = (nr_slot_fep_ant_task_t *)arg;
   c16_t(*rxdataF)[a->stride] = (c16_t(*)[a->stride])a->rxdataF_flat;
   for (int m = a->start_symbol; m < a->start_symbol + a->number_symbols; m++) {
-    nr_slot_fep_ant(a->ue, a->fp, a->slot, m, a->ant, rxdataF, link_type_dl, 0, a->rxdata);
+    nr_slot_fep_ant_snapshot(a->ue, a->fp, a->slot, m, a->ant, rxdataF, link_type_dl, 0, a->rxdata, a->fo_hz);
   }
   completed_task_ans(a->ans);
 }
@@ -1038,12 +1041,15 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
    * slot_fep_nr.c. Each antenna's FEP is independent, so dispatch one per antenna across the
    * thread pool instead of looping them serially. nb_antennas_rx==1 skips the pool and matches
    * the previous behaviour exactly. */
+  const double fep_fo = isnan(nr_slot_fep_fo_override_hz)
+      ? (ue->cont_fo_comp ? ue->dl_Doppler_shift + ue->freq_offset : 0.0)
+      : nr_slot_fep_fo_override_hz;
   if (fp->nb_antennas_rx > 1) {
     nr_slot_fep_ant_task_t fep_tasks[fp->nb_antennas_rx];
     task_ans_t fep_ans;
     init_task_ans(&fep_ans, fp->nb_antennas_rx);
     for (unsigned int ant = 0; ant < (unsigned int)fp->nb_antennas_rx; ant++) {
-      fep_tasks[ant] = (nr_slot_fep_ant_task_t){.ue = ue,
+      fep_tasks[ant] = (nr_slot_fep_ant_task_t){.fo_hz = fep_fo, .ue = ue,
                                                 .fp = fp,
                                                 .slot = proc->nr_slot_rx,
                                                 .start_symbol = dlsch_config->start_symbol,
@@ -1063,6 +1069,13 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
     }
   }
   pdtim_add(PDTIM_FEP, pdt_fep);
+
+  if (grant->check_sample_lifetime && !nr_passive_samples_valid(
+          atomic_load_explicit(&nr_ue_diag_producer_absolute_slot, memory_order_relaxed),
+          grant->source_absolute_slot, fp->slots_per_frame)) {
+    out->status = NR_PDSCH_PASSIVE_DECODE_UNSUPPORTED;
+    return out->status; /* overwritten IQ is not CRC evidence */
+  }
 
   // ---- Channel estimation on the DM-RS symbols. ----
   const uint64_t pdt_che = pdtim_on ? pdtim_now() : 0;

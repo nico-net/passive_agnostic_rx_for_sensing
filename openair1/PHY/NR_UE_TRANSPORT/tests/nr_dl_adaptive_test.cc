@@ -183,11 +183,64 @@ TEST(UlScanContext, RejectsCommonDisabledAndMalformedContextsEvenWithAutoEnabled
   EXPECT_FALSE(nr_pdcch_blind_monitor_ul_scan_enabled(&cfg));
   cfg.dci10_ss_type=NR_BLIND_SS_UE_SPECIFIC;
   cfg.ul.bwp_size=0;
+  EXPECT_TRUE(nr_pdcch_blind_monitor_ul_scan_enabled(&cfg)); // raw auto recovery needs no BWP
+  cfg.dl_full_auto=0;
   EXPECT_FALSE(nr_pdcch_blind_monitor_ul_scan_enabled(&cfg));
+  cfg.dl_full_auto=1;
   cfg.ul.bwp_size=273;
   for(int disabled : {-1,0,2}) {
     cfg.dci01_scan=disabled;
     EXPECT_FALSE(nr_pdcch_blind_monitor_ul_scan_enabled(&cfg));
   }
   EXPECT_FALSE(nr_pdcch_blind_monitor_ul_scan_enabled(nullptr));
+}
+
+#include "../nr_passive_sample_lifetime.h"
+TEST(DlAdaptive, DeferredSamplesExpireDuringFepAndMustNotScore) {
+  EXPECT_TRUE(nr_passive_samples_valid(1017,1000,20));
+  EXPECT_FALSE(nr_passive_samples_valid(1018,1000,20));
+  EXPECT_FALSE(nr_passive_samples_valid(1020,1000,20));
+  EXPECT_FALSE(nr_passive_samples_valid(999,1000,20)); // resync/rebase
+  EXPECT_FALSE(nr_passive_samples_valid(-1,-1,20));
+  EXPECT_FALSE(nr_passive_samples_valid(0,0,2));
+  EXPECT_TRUE(nr_passive_samples_valid(20481,20479,20)); // SFN wrap, same epoch
+}
+
+#include "../nr_passive_ul_grant_book.h"
+TEST(UlGrantBook, KeepsThreeUesInOneSlotAndAcceptsLateDci) {
+  nr_passive_ul_book_t book{};
+  nr_pdcch_blind_ul_result_t grant{};
+  grant.plausible=true;grant.k2=4;
+  for(int u=0;u<3;u++) {
+    grant.rnti=0x200+u;grant.raw_payload=10+u;
+    ASSERT_EQ(nr_passive_ul_book_put(&book,&grant,20476),1);
+  }
+  EXPECT_EQ(nr_passive_ul_book_put(&book,&grant,20476),0);
+  nr_passive_ul_book_entry_t entry{};unsigned expired=0;
+  EXPECT_FALSE(nr_passive_ul_book_take(&book,20479,20,&entry,&expired));
+  std::set<int> rntis;
+  for(int i=0;i<3;i++) {
+    ASSERT_TRUE(nr_passive_ul_book_take(&book,20483,20,&entry,&expired));
+    EXPECT_EQ(entry.target,20480);rntis.insert(entry.grant.rnti);
+  }
+  EXPECT_EQ(rntis.size(),3u);EXPECT_EQ(expired,0u);
+  EXPECT_FALSE(nr_passive_ul_book_take(&book,20483,20,&entry,&expired));
+  // A DCI decoded after its target slot still delivers the original IQ, not next frame's.
+  EXPECT_EQ(nr_passive_ul_book_put(&book,&grant,20476),1);
+  EXPECT_TRUE(nr_passive_ul_book_take(&book,20484,20,&entry,&expired));
+  EXPECT_EQ(entry.target,20480);
+}
+TEST(UlGrantBook, ExpiredAndCapacityDropsNeverOverwriteAnotherUe) {
+  nr_passive_ul_book_t book{};nr_pdcch_blind_ul_result_t g{};
+  g.plausible=true;g.k2=0;g.rnti=0x345;
+  for(int i=0;i<NR_PASSIVE_UL_BOOK_CAPACITY;i++) {
+    g.raw_payload=i;
+    ASSERT_EQ(nr_passive_ul_book_put(&book,&g,1000),1);
+  }
+  g.raw_payload=9999;
+  EXPECT_EQ(nr_passive_ul_book_put(&book,&g,1000),-1);
+  nr_passive_ul_book_entry_t e{};unsigned expired=0;
+  EXPECT_FALSE(nr_passive_ul_book_take(&book,1018,20,&e,&expired));
+  EXPECT_EQ(expired,NR_PASSIVE_UL_BOOK_CAPACITY);
+  EXPECT_EQ(nr_passive_ul_book_put(&book,&g,1020),1);
 }

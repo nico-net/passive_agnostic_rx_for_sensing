@@ -1,3 +1,4 @@
+#include "nr_passive_sample_lifetime.h"
 /*
  * Licensed to the OpenAirInterface (OAI) Software Alliance under one or more
  * contributor license agreements.  See the NOTICE file distributed with
@@ -138,7 +139,7 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
     if (lag > (long)atomic_load_explicit(&g_max_lag, memory_order_relaxed)) {
       atomic_store_explicit(&g_max_lag, (uint64_t)(lag > 0 ? lag : 0), memory_order_relaxed);
     }
-    if (prod >= 0 && lag >= slots_per_frame - NR_PDSCH_PASSIVE_QUEUE_MARGIN_SLOTS) {
+    if (!nr_passive_samples_valid(prod, job.absolute_slot, slots_per_frame)) {
       atomic_fetch_add_explicit(&g_dropped_stale, 1, memory_order_relaxed);
       continue;
     }
@@ -153,11 +154,20 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
     c16_t (*rxdataF)[rxdataF_sz] = (c16_t (*)[rxdataF_sz])g_rxdataF[idx];
 
     /* Replay the offset captured with these samples (see nr_slot_fep_fo_override_hz). */
+    const double saved_fo = nr_slot_fep_fo_override_hz;
     nr_slot_fep_fo_override_hz = job.fo_hz;
+    job.grant.check_sample_lifetime = true;
+    job.grant.source_absolute_slot = job.absolute_slot;
 
     nr_pdsch_passive_decode_result_t dec;
     const nr_pdsch_passive_decode_status_t st =
         nr_pdsch_passive_decode(ue, &proc, &job.dlsch_pdu, &job.freq_alloc, &job.grant, rxdataF, &dec);
+
+    nr_slot_fep_fo_override_hz = saved_fo;
+    if (st == NR_PDSCH_PASSIVE_DECODE_UNSUPPORTED && !nr_passive_samples_valid(
+            atomic_load_explicit(&nr_ue_diag_producer_absolute_slot, memory_order_relaxed),
+            job.absolute_slot, slots_per_frame))
+      atomic_fetch_add_explicit(&g_dropped_stale, 1, memory_order_relaxed);
 
     if (st != NR_PDSCH_PASSIVE_DECODE_ERROR && st != NR_PDSCH_PASSIVE_DECODE_UNSUPPORTED) {
       atomic_fetch_add_explicit(&g_decoded, 1, memory_order_relaxed);
@@ -185,6 +195,19 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
 
   LOG_I(PHY, "SENSING: passive PDSCH decode consumer %d exiting\n", idx);
   return NULL;
+}
+
+static void report_sweep(const nr_pdsch_sweep_report_t *r)
+{
+  if (r->operational)
+    LOG_I(PHY,"Technique D operational rnti=0x%x config=%lx tda=%u crc=%lu/%lu\n",
+          r->rnti,(unsigned long)r->configuration,r->tda,(unsigned long)r->passes,(unsigned long)r->trials);
+  else
+    LOG_I(PHY,"Technique D evidence rnti=0x%x config=%lx tda=%u outcomes=%lu min_trials=%u "
+              "best=%lu/%lu S=%u L=%u mask=0x%x table=%u winner=%d\n",
+          r->rnti,(unsigned long)r->configuration,r->tda,(unsigned long)r->outcomes,r->minimum,
+          (unsigned long)r->passes,(unsigned long)r->trials,r->hypothesis.tda_start,
+          r->hypothesis.tda_length,r->hypothesis.dmrs_mask,r->hypothesis.mcs_table,r->winner);
 }
 
 bool nr_pdsch_passive_queue_start(PHY_VARS_NR_UE *ue, int depth, int n_consumers, int affinity)
@@ -216,6 +239,7 @@ bool nr_pdsch_passive_queue_start(PHY_VARS_NR_UE *ue, int depth, int n_consumers
     }
   }
 
+  nr_pdsch_config_sweep_set_reporter(report_sweep);
   g_ue       = ue;
   g_depth    = depth;
   g_head     = 0;

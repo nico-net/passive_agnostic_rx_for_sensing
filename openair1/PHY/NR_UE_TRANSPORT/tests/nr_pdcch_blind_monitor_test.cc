@@ -211,6 +211,7 @@ std::vector<int16_t> EncodeToLLR(uint64_t payload, uint16_t rnti, uint16_t dci_l
 {
   t_nrPolar_params* params      = nr_polar_params(NR_POLAR_DCI_MESSAGE_TYPE, dci_length, agg_level);
   const uint16_t    encoder_len = params->encoderLength;
+  polarReturn(params);
 
   std::vector<uint32_t> out((encoder_len + 31) / 32, 0);
   polar_encoder_fast(&payload, out.data(), (int32_t)rnti, /*ones_flag=*/1, NR_POLAR_DCI_MESSAGE_TYPE, dci_length,
@@ -629,6 +630,7 @@ TEST_F(BlindPdcchTest, PureNoiseFalseAcceptRateIsBounded) {
 
   t_nrPolar_params* params      = nr_polar_params(NR_POLAR_DCI_MESSAGE_TYPE, dci_length, kAggregationLevel);
   const uint16_t    encoder_len = params->encoderLength;
+  polarReturn(params);
 
   constexpr int kTrials = 3000;
   int           accepted = 0;
@@ -1986,6 +1988,7 @@ std::vector<c16_t> BuildInterleavedCandidateLlr(uint64_t packed, uint16_t rnti, 
                                                 int n_shift) {
   t_nrPolar_params* params = nr_polar_params(NR_POLAR_DCI_MESSAGE_TYPE, dci_length, agg_level);
   const uint16_t encoder_len = params->encoderLength;
+  polarReturn(params);
 
   std::vector<uint32_t> out((encoder_len + 31) / 32, 0);
   polar_encoder_fast(&packed, out.data(), (int32_t)rnti, /*ones_flag=*/1, NR_POLAR_DCI_MESSAGE_TYPE,
@@ -2342,4 +2345,199 @@ int main(int argc, char** argv)
   logInit();
   testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();
+}
+
+TEST_F(BlindPdcchTest, RawDlLengthRecoveryDoesNotRequireAnInterpretation) {
+  for(int len : {37,47,55}) {
+    const uint64_t payload=(UINT64_C(1)<<(len-1)) | UINT64_C(0x1a3b5c7d);
+    auto llr=EncodeToLLR(payload,0x4b31,len,2,40.0,rng_);
+    nr_pdcch_blind_raw_result_t raw{};
+    ASSERT_TRUE(nr_pdcch_blind_decode_raw_11(llr.data(),2,len,0x4b31,0x4b31,&raw));
+    EXPECT_EQ(raw.rnti,0x4b31);
+    EXPECT_EQ(raw.payload,payload);
+    EXPECT_EQ(raw.mismatched_bits,0);
+    nr_pdcch_blind_extract_opts_t wrong=DefaultOpts();
+    wrong.tda_count=16; wrong.tb2_bits=8;
+    nr_pdcch_blind_result_t parsed{};
+    EXPECT_FALSE(nr_pdcch_blind_decode_and_extract_ex(llr.data(),2,len,273,0,
+                                                     0x4b31,0x4b31,&wrong,&parsed));
+    nr_pdcch_blind_ul_result_t ul{};
+    EXPECT_FALSE(nr_pdcch_blind_decode_raw_01(llr.data(),2,len,0x4b31,0x4b31,&ul));
+  }
+}
+TEST_F(BlindPdcchTest, RawDlRejectsUlDirectionAndInvalidInputs) {
+  auto llr=EncodeToLLR(UINT64_C(0x13579),0x4b31,47,2,40.0,rng_);
+  nr_pdcch_blind_raw_result_t raw{};
+  EXPECT_FALSE(nr_pdcch_blind_decode_raw_11(llr.data(),2,47,0x4b31,0x4b31,&raw));
+  EXPECT_FALSE(nr_pdcch_blind_decode_raw_11(nullptr,2,47,1,65519,&raw));
+  EXPECT_FALSE(nr_pdcch_blind_decode_raw_11(llr.data(),3,47,1,65519,&raw));
+  EXPECT_FALSE(nr_pdcch_blind_decode_raw_11(llr.data(),2,64,1,65519,&raw));
+  EXPECT_FALSE(nr_pdcch_blind_decode_raw_11(llr.data(),2,47,2,1,&raw));
+}
+
+TEST_F(BlindPdcchTest, UlControllerKeepsThreeInterleavedUesAndTheirQueuedFeedback) {
+  const auto opts=LiveUlOpts();
+  const uint16_t len=nr_pdcch_blind_dci01_size(&opts);
+  nr_pdcch_ul_discovery_reset();
+  nr_pdcch_blind_ul_result_t grant[3]{};
+  for(int i=0;i<8;++i) {
+    for(int u=0;u<3;++u) {
+      UlGroundTruth gt;
+      gt.rnti=0x1234+u; gt.riv=273*(i+1); gt.mcs=i+2; gt.harq_pid=i; gt.ndi=i%2;
+      bool got=nr_pdcch_ul_discovery_grant(&opts,len,gt.rnti,PackUlPayload(gt,opts),&grant[u]);
+      if(i==7) { ASSERT_TRUE(got) << "UE " << u << " lost its accumulated samples"; }
+    }
+  }
+  EXPECT_NE(grant[0].hyp_generation,grant[1].hyp_generation);
+  EXPECT_NE(grant[1].hyp_generation,grant[2].hyp_generation);
+  EXPECT_EQ(nr_pdcch_ul_discovery_snapshot().width_trials,0u);
+  // Feedback arrives after all three UEs were selected, deliberately out of order.
+  for(int u : {2,0,1}) nr_pdcch_ul_discovery_feedback(&grant[u],u!=1);
+  EXPECT_EQ(nr_pdcch_ul_discovery_snapshot().width_trials,3u);
+  nr_pdcch_ul_discovery_reset();
+  for(auto &g:grant) nr_pdcch_ul_discovery_feedback(&g,true);
+  EXPECT_EQ(nr_pdcch_ul_discovery_snapshot().width_trials,0u);
+}
+
+TEST_F(BlindPdcchTest, UlControllerEvictionDiscardsOnlyEvictedUeFeedback) {
+  const auto opts=LiveUlOpts();
+  const uint16_t len=nr_pdcch_blind_dci01_size(&opts);
+  nr_pdcch_ul_discovery_reset();
+  nr_pdcch_blind_ul_result_t first{},last{};
+  for(int u=0;u<=NR_PDCCH_BLIND_MAX_UE;++u) {
+    for(int i=0;i<8;++i) {
+      UlGroundTruth gt;
+      gt.rnti=0x2000+u; gt.riv=273*(i+1); gt.mcs=i+2; gt.harq_pid=i; gt.ndi=i%2;
+      bool got=nr_pdcch_ul_discovery_grant(&opts,len,gt.rnti,PackUlPayload(gt,opts),&last);
+      if(i==7) { ASSERT_TRUE(got); }
+    }
+    if(u==0) first=last;
+  }
+  nr_pdcch_ul_discovery_feedback(&first,true);
+  EXPECT_EQ(nr_pdcch_ul_discovery_snapshot().width_trials,0u);
+  nr_pdcch_ul_discovery_feedback(&last,true);
+  EXPECT_EQ(nr_pdcch_ul_discovery_snapshot().width_trials,1u);
+  nr_pdcch_ul_discovery_reset();
+}
+
+#include "executables/nr_rx_continuity.h"
+TEST(RxContinuity, ReacquisitionDoesNotCauseAnInfiniteFalseGapLoop) {
+  nr_rx_continuity_t s{};
+  EXPECT_TRUE(nr_rx_continuity_check(&s,1000));
+  nr_rx_continuity_commit(&s,1000,100);
+  EXPECT_TRUE(nr_rx_continuity_check(&s,1100));
+  EXPECT_FALSE(nr_rx_continuity_check(&s,1150)); // genuine unannounced loss
+  nr_rx_continuity_reset(&s); // actual receiver does this before acquisition
+  EXPECT_TRUE(nr_rx_continuity_check(&s,1000000)); // acquisition's discarded frames
+  nr_rx_continuity_commit(&s,1000000,100);
+  EXPECT_TRUE(nr_rx_continuity_check(&s,1000100));
+  EXPECT_FALSE(nr_rx_continuity_check(&s,1000101)); // reset must not hide later loss
+}
+TEST(RxContinuity, PrefixReadsAndExplicitRebasesHaveDifferentContracts) {
+  nr_rx_continuity_t s{};
+  nr_rx_continuity_commit(&s,5000,100+8);
+  EXPECT_FALSE(nr_rx_continuity_check(&s,5100));
+  EXPECT_TRUE(nr_rx_continuity_check(&s,5108));
+  nr_rx_continuity_reset(&s);
+  EXPECT_TRUE(nr_rx_continuity_check(&s,5300));
+  nr_rx_continuity_commit(&s,5300,0);
+  EXPECT_FALSE(s.valid);
+}
+
+TEST_F(BlindPdcchTest, DlLayoutFamilyRecoversVaryingFrontWidthsWithoutManualHints) {
+  for(int bw=0;bw<=2;++bw) for(int td=0;td<=4;++td) {
+    auto opts=DefaultOpts();
+    opts.bwp_indicator_bits=bw;
+    opts.tda_count=1<<td;
+    for(int i=0;i<opts.tda_count;++i) { opts.tda_start[i]=1; opts.tda_length[i]=13; }
+    GroundTruth gt;
+    gt.bwp_size=273; gt.riv=273*20+7; gt.mcs=13; gt.rv=0; gt.ndi=1;
+    gt.harq_pid=9; gt.time_domain_assignment=opts.tda_count-1;
+    const uint16_t len=nr_pdcch_blind_dci_size_ex(273,&opts);
+    const auto payload=PackPayload(gt,16,&opts);
+    auto llr=EncodeToLLR(payload,gt.rnti,len,2,40.0,rng_);
+    nr_pdcch_blind_raw_result_t raw{};
+    ASSERT_TRUE(nr_pdcch_blind_decode_raw_11(llr.data(),2,len,gt.rnti,gt.rnti,&raw));
+    nr_pdcch_blind_result_t candidates[3]{};
+    uint8_t ids[3]{};
+    const int n=nr_pdcch_blind_dl_layout_candidates(&raw,len,273,0,candidates,ids);
+    bool found=false;
+    for(int i=0;i<n;++i) if(ids[i]==bw*5+td) {
+      found=true;
+      EXPECT_EQ(candidates[i].start_rb,7);
+      EXPECT_EQ(candidates[i].num_rb,21);
+      EXPECT_EQ(candidates[i].mcs,13);
+      EXPECT_EQ(candidates[i].harq_pid,9);
+      EXPECT_EQ(candidates[i].tda_index,opts.tda_count-1);
+    }
+    EXPECT_TRUE(found) << "widths " << bw << "/" << td;
+  }
+}
+TEST_F(BlindPdcchTest, DlLayoutCandidatesDoNotDeclareAUniqueConfiguration) {
+  nr_pdcch_blind_raw_result_t raw{};
+  raw.rnti=0x1234;
+  raw.payload=UINT64_C(1)<<46; // 47-bit payload with ambiguous all-zero fields
+  nr_pdcch_blind_result_t candidates[3]{};
+  uint8_t ids[3]{};
+  EXPECT_EQ(nr_pdcch_blind_dl_layout_candidates(&raw,47,273,0,candidates,ids),2);
+  EXPECT_EQ(nr_pdcch_blind_dl_layout_candidates(&raw,30,273,0,candidates,ids),0);
+  EXPECT_EQ(nr_pdcch_blind_dl_layout_candidates(nullptr,47,273,0,candidates,ids),0);
+}
+
+TEST_F(BlindPdcchTest, PolarCleanupCannotFreeAnInFlightDecoderCacheEntry) {
+  t_nrPolar_params *held=nr_polar_params(NR_POLAR_DCI_MESSAGE_TYPE,47,2);
+  ASSERT_NE(held,nullptr);
+  ASSERT_FALSE(nr_polar_try_cleanup());
+  EXPECT_EQ(held->payloadBits,47);
+  EXPECT_EQ(held->n_pc_wm,0);
+  polarReturn(held);
+  EXPECT_TRUE(nr_polar_try_cleanup());
+  // Re-initialize and exercise the actual codec after a clean cache release.
+  const uint64_t p=(UINT64_C(1)<<46)|12345;
+  auto llr=EncodeToLLR(p,0x3210,47,2,40.0,rng_);
+  nr_pdcch_blind_raw_result_t raw{};
+  ASSERT_TRUE(nr_pdcch_blind_decode_raw_11(llr.data(),2,47,0x3210,0x3210,&raw));
+  EXPECT_EQ(raw.payload,p);
+}
+
+TEST(OverTheAirCommonConfig, KeepsCommonFactsSeparateFromDedicatedHypotheses) {
+  nr_pdcch_blind_reset_common();
+  nr_pdcch_blind_common_config_t f{},got{};
+  f.pci=42; f.dl_bwp_size=106; f.ul_bwp_start=2; f.ul_bwp_size=100;
+  f.dl_mu=f.ul_mu=1; f.dl_count=1; f.ul_count=2;
+  f.dl_start[0]=2; f.dl_length[0]=12;
+  f.ul_start[0]=0; f.ul_length[0]=14; f.ul_k2[0]=3;
+  f.ul_start[1]=4; f.ul_length[1]=10; f.ul_mapping[1]=1; f.ul_k2[1]=6;
+  const auto before=*nr_pdcch_blind_monitor_get_cfg();
+  ASSERT_TRUE(nr_pdcch_blind_publish_common(&f));
+  ASSERT_TRUE(nr_pdcch_blind_get_common(42,&got));
+  EXPECT_EQ(memcmp(&f,&got,sizeof(f)),0);
+  EXPECT_EQ(memcmp(&before,nr_pdcch_blind_monitor_get_cfg(),sizeof(before)),0)
+      << "SIB1 common config must not overwrite dedicated assumptions";
+  EXPECT_FALSE(nr_pdcch_blind_get_common(43,&got));
+  EXPECT_EQ(got.ul_bwp_size,0);
+  f.ul_length[1]=11; // 4+11 exceeds a slot
+  EXPECT_FALSE(nr_pdcch_blind_publish_common(&f));
+  nr_pdcch_blind_reset_common();
+  EXPECT_FALSE(nr_pdcch_blind_get_common(42,&got));
+}
+
+TEST_F(BlindPdcchTest, UlDefaultK2AndDmrsUseMeasuredCellParameters) {
+  auto opts=LiveUlOpts();
+  opts.tda_count=0; opts.numerology=2; opts.dmrs_typeA_position=1;
+  opts.phy_cell_id=317;
+  UlGroundTruth gt; gt.rnti=0x721;gt.tda_index=0;gt.riv=273*7;
+  nr_pdcch_blind_ul_result_t out{};
+  const auto len=nr_pdcch_blind_dci01_size(&opts);
+  ASSERT_TRUE(nr_pdcch_blind_extract_01(PackUlPayload(gt,opts),len,gt.rnti,&opts,&out));
+  EXPECT_EQ(out.k2,2); // default table first row: j; mu=2 => j=2
+  EXPECT_NE(out.ul_dmrs_symb_pos & (1<<3),0);
+  EXPECT_EQ(out.ul_dmrs_symb_pos & (1<<2),0);
+  EXPECT_EQ(out.data_scrambling_id,317);
+  EXPECT_EQ(out.ul_dmrs_scrambling_id,317);
+  opts.numerology=3;
+  ASSERT_TRUE(nr_pdcch_blind_extract_01(PackUlPayload(gt,opts),len,gt.rnti,&opts,&out));
+  EXPECT_EQ(out.k2,3);
+  opts.numerology=6;
+  EXPECT_FALSE(nr_pdcch_blind_extract_01(PackUlPayload(gt,opts),len,gt.rnti,&opts,&out));
 }

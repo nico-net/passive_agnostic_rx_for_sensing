@@ -12,65 +12,22 @@
 #include "common/utils/LOG/log.h"
 #include "common/utils/nr/nr_common.h"
 
-/* Ring indexed by target slot. k2 is 4 on this cell and cannot exceed 32 by the config parser's own
- * bound, so 64 entries covers every in-flight grant with margin and makes lookup O(1) rather than a
- * scan. A slot is claimed by at most one grant here: this receiver decodes one PUSCH per slot. */
-#define BOOK_SIZE 64
 
-typedef struct {
-  nr_pdcch_blind_ul_result_t g;
-  int      target_slot;   ///< the PUSCH's own slot, as the receive path will see it
-  int      target_frame;
-  bool     valid;
-} book_entry_t;
-
-static book_entry_t g_book[BOOK_SIZE];
-/* Producer (the PDCCH tap) and consumer (the UL-slot hook) are BOTH on the PHY receive thread when
- * the scan runs in-line, which is the default -- but pdcch_blind_monitor_pdsch's scan_thread field
- * can move the scan to a consumer thread, and then they are not. One mutex rather than an
- * assumption about which configuration is in use; it is held for a struct copy. */
-static pthread_mutex_t g_book_lock = PTHREAD_MUTEX_INITIALIZER;
-
-static _Atomic uint64_t g_parked, g_claimed, g_expired, g_overwritten;
-
-/* Published in executables/nr-ue.c immediately BEFORE nrue_ru_read() fills that slot's rxdata. */
+#include "nr_passive_ul_grant_book.h"
+#define HISTORY_SLOTS 160 /* maximum supported slots/frame at mu=4 */
+static nr_passive_ul_book_t g_book;
+static pthread_mutex_t g_book_lock=PTHREAD_MUTEX_INITIALIZER;
+static _Atomic uint64_t g_parked,g_claimed,g_expired,g_overwritten;
 extern _Atomic long nr_ue_diag_producer_absolute_slot;
-
-void nr_pusch_grant_book_add(const nr_pdcch_blind_ul_result_t *g, int frame, int slot,
-                             int slots_per_frame)
+typedef struct {long source;double fo_hz;bool valid;} ul_sample_history_t;
+static ul_sample_history_t g_history[HISTORY_SLOTS];
+void nr_pusch_grant_book_add(const nr_pdcch_blind_ul_result_t *g, long source_absolute_slot)
 {
-  if (g == NULL || !g->plausible || slots_per_frame <= 0) {
-    return;
-  }
-  /* Key on the PROCESSED slot (proc->frame_rx / proc->nr_slot_rx), NOT on
-   * nr_ue_diag_producer_absolute_slot. That counter belongs to the RF PRODUCER and runs AHEAD of
-   * the slot the receive path is working on, by however deep the pipeline happens to be. Using it
-   * on both sides looks symmetric and is not: the producer would park a grant against a slot number
-   * the consumer never sees, and every grant would expire unclaimed.
-   *
-   * The 1024-frame wrap that makes frame*slots_per_frame + slot unsafe as a monotonic clock does
-   * not bite here, because nothing subtracts two of these: the pair is only compared for equality,
-   * and k2 <= 32 by the config parser's own bound, so a parked grant is claimed within a couple of
-   * slots or not at all. */
-  const int total = slot + (int)g->k2;
-  const int target_slot  = total % slots_per_frame;
-  const int target_frame = (frame + total / slots_per_frame) % 1024;
-  const int idx = target_slot % BOOK_SIZE;
-
   pthread_mutex_lock(&g_book_lock);
-  if (g_book[idx].valid && (g_book[idx].target_slot != target_slot
-                            || g_book[idx].target_frame != target_frame)) {
-    /* A stale entry for a DIFFERENT slot still occupying this bucket means the previous grant was
-     * never claimed -- counted rather than silently replaced, because a rising count here means the
-     * UL hook is not running when it should (wrong slot map, or the hook not reached at all). */
-    atomic_fetch_add_explicit(&g_overwritten, 1, memory_order_relaxed);
-  }
-  g_book[idx].g            = *g;
-  g_book[idx].target_slot  = target_slot;
-  g_book[idx].target_frame = target_frame;
-  g_book[idx].valid        = true;
+  const int status=nr_passive_ul_book_put(&g_book,g,source_absolute_slot);
   pthread_mutex_unlock(&g_book_lock);
-  atomic_fetch_add_explicit(&g_parked, 1, memory_order_relaxed);
+  if(status>0) atomic_fetch_add_explicit(&g_parked,1,memory_order_relaxed);
+  if(status<0) atomic_fetch_add_explicit(&g_overwritten,1,memory_order_relaxed);
 }
 
 /* TS 38.213 4.2 / nr_common.c's get_nr_N_TA_offset: N_TA_offset is 25600*Tc in FR1, expressed here
@@ -84,34 +41,11 @@ static int32_t n_ta_offset_samples(const NR_DL_FRAME_PARMS *fp)
   return (int32_t)(((uint64_t)25600 * (uint64_t)fp->samples_per_subframe) / (4096ull * 480ull));
 }
 
-void nr_pusch_passive_monitor_process(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc)
+static void passive_ul_deliver(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc,
+    const nr_pdcch_blind_monitor_cfg_t *cfg, const nr_pdcch_blind_ul_result_t *grant,
+    long abs_slot, double fo_hz)
 {
-  const nr_pdcch_blind_monitor_cfg_t *cfg = nr_pdcch_blind_monitor_get_cfg();
-  if (cfg == NULL || cfg->ul_pusch_decode == 0) {
-    return;
-  }
-  const int idx = proc->nr_slot_rx % BOOK_SIZE;
-
-  nr_pdcch_blind_ul_result_t g;
-  bool have = false;
-  pthread_mutex_lock(&g_book_lock);
-  if (g_book[idx].valid && g_book[idx].target_slot == (int)proc->nr_slot_rx) {
-    if (g_book[idx].target_frame == (int)proc->frame_rx) {
-      g = g_book[idx].g;
-      have = true;
-    } else {
-      /* Right slot, wrong frame: parked a frame ago and its slot came round again without this
-       * hook running. Counted, not silently reused. */
-      atomic_fetch_add_explicit(&g_expired, 1, memory_order_relaxed);
-    }
-    g_book[idx].valid = false;
-  }
-  pthread_mutex_unlock(&g_book_lock);
-  if (!have) {
-    return;
-  }
-  atomic_fetch_add_explicit(&g_claimed, 1, memory_order_relaxed);
-
+  const nr_pdcch_blind_ul_result_t g=*grant;
   const int32_t ta = (cfg->ul_ta_offset_samples != 0) ? cfg->ul_ta_offset_samples
                                                       : n_ta_offset_samples(&ue->frame_parms);
   /* A one-shot marker on ENTRY, so that "the decode hung" and "the decode was never called" are
@@ -139,26 +73,7 @@ void nr_pusch_passive_monitor_process(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_
     }
   }
 
-  /* The producer's monotonic slot for THIS uplink slot. Computed here, on the receive thread, and
-   * carried in the job: it is both the staleness reference and the CFR's slow-time index, and a
-   * consumer recomputing it would read a producer counter that has moved on since these samples
-   * were taken. Phase-align the producer counter to this slot -- both advance one per slot, so
-   * subtracting the phase difference modulo the wrap gives this slot's value on the producer
-   * timeline. */
-  long abs_slot;
-  {
-    const long prod = atomic_load_explicit(&nr_ue_diag_producer_absolute_slot, memory_order_relaxed);
-    const long spf  = (long)ue->frame_parms.slots_per_frame;
-    const long wrap = spf * 1024;
-    const long fd   = (long)proc->frame_rx * spf + (long)proc->nr_slot_rx;
-    const long lag  = ((prod - fd) % wrap + wrap) % wrap;
-    abs_slot = prod - lag;
-  }
-
   nr_pusch_passive_out_t out;
-  /* Sampled HERE, on the receive thread, in the same call that captured these samples -- see
-   * nr_pusch_passive_job_t::fo_hz. A consumer reading ue-> later would get a newer value. */
-  const double fo_hz = ue->cont_fo_comp ? (ue->dl_Doppler_shift + ue->freq_offset) : 0.0;
   if (nr_pusch_passive_queue_running()) {
     nr_pusch_passive_job_t job = {.grant             = g,
                                   .frame_rx          = (int)proc->frame_rx,
@@ -180,6 +95,44 @@ void nr_pusch_passive_monitor_process(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_
       nr_pdcch_ul_discovery_feedback(&g,out.status==NR_PUSCH_PASSIVE_OK);
 
 
+}
+
+/* Called on every received slot, including mixed slots and slots after a late DCI. */
+void nr_pusch_passive_monitor_process(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc)
+{
+  const nr_pdcch_blind_monitor_cfg_t *cfg=nr_pdcch_blind_monitor_get_cfg();
+  if(!cfg || !cfg->ul_pusch_decode) return;
+  const long spf=ue->frame_parms.slots_per_frame;
+  const long now=((long)proc->hfn_rx*1024+proc->frame_rx)*spf+proc->nr_slot_rx;
+  static long previous=-1;
+  if(previous>=0 && (now<=previous || now-previous>1)) {
+    pthread_mutex_lock(&g_book_lock);
+    memset(&g_book,0,sizeof(g_book));
+    memset(g_history,0,sizeof(g_history));
+    pthread_mutex_unlock(&g_book_lock);
+  }
+  previous=now;
+  g_history[now%HISTORY_SLOTS]=(ul_sample_history_t){.source=now,
+    .fo_hz=ue->cont_fo_comp?ue->dl_Doppler_shift+ue->freq_offset:0.0,.valid=true};
+  for(int n=0;n<NR_PASSIVE_UL_BOOK_CAPACITY;n++) {
+    nr_passive_ul_book_entry_t entry;
+    unsigned expired=0;
+    pthread_mutex_lock(&g_book_lock);
+    bool have=nr_passive_ul_book_take(&g_book,now,spf,&entry,&expired);
+    pthread_mutex_unlock(&g_book_lock);
+    atomic_fetch_add_explicit(&g_expired,expired,memory_order_relaxed);
+    if(!have) break;
+    const ul_sample_history_t *sample=&g_history[entry.target%HISTORY_SLOTS];
+    if(!sample->valid || sample->source!=entry.target) {
+      atomic_fetch_add_explicit(&g_expired,1,memory_order_relaxed); continue;
+    }
+    UE_nr_rxtx_proc_t target=*proc;
+    target.nr_slot_rx=entry.target%spf;
+    target.frame_rx=(entry.target/spf)%1024;
+    target.hfn_rx=(entry.target/spf)/1024;
+    atomic_fetch_add_explicit(&g_claimed,1,memory_order_relaxed);
+    passive_ul_deliver(ue,&target,cfg,&entry.grant,entry.target,sample->fo_hz);
+  }
 }
 
 void nr_pusch_grant_book_stats_dump(void)

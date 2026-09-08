@@ -18,6 +18,7 @@
 #include "RRC/NR_UE/verify_RRC.h"
 #include "RRC/NR_UE/L2_interface_ue.h"
 #include "oai_asn1.h"
+#include "PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.h"
 
 #define ASIGN_P_VAL(dst, src) \
   do {                        \
@@ -2158,6 +2159,40 @@ void nr_rrc_mac_config_req_sib1(module_id_t module_id, int cc_idP, NR_SIB1_t *si
   if (scc->uplinkConfigCommon) {
     mac->timeAlignmentTimerCommon = scc->uplinkConfigCommon->timeAlignmentTimerCommon;
     configure_common_BWP_ul(mac, bwp_id, &scc->uplinkConfigCommon->initialUplinkBWP);
+  }
+  if (IS_PASSIVE_RX_MODE(get_softmodem_params())) {
+    nr_pdcch_blind_common_config_t facts={.pci=mac->physCellId};
+    const NR_UE_DL_BWP_t *dl=get_dl_bwp_structure(mac,0,false);
+    const NR_UE_UL_BWP_t *ul=get_ul_bwp_structure(mac,0,false);
+    if (dl) {
+      facts.dl_bwp_start=dl->BWPStart; facts.dl_bwp_size=dl->BWPSize; facts.dl_mu=dl->scs;
+      const int n=dl->tdaList_Common?dl->tdaList_Common->list.count:0;
+      if(n>=0 && n<=16) {
+        facts.dl_count=n;
+        for(int i=0;i<n;++i) {
+          const NR_PDSCH_TimeDomainResourceAllocation_t *e=dl->tdaList_Common->list.array[i];
+          int S,L;
+          SLIV2SL(e->startSymbolAndLength,&S,&L);
+          facts.dl_start[i]=S; facts.dl_length[i]=L; facts.dl_mapping[i]=e->mappingType;
+          facts.dl_k0[i]=e->k0?*e->k0:0;
+        }
+      }
+    }
+    if (ul && scc->uplinkConfigCommon) {
+      facts.ul_bwp_start=ul->BWPStart; facts.ul_bwp_size=ul->BWPSize; facts.ul_mu=ul->scs;
+      const int n=ul->tdaList_Common?ul->tdaList_Common->list.count:0;
+      if(n>=0 && n<=16) {
+        facts.ul_count=n;
+        for(int i=0;i<n;++i) {
+          const NR_PUSCH_TimeDomainResourceAllocation_t *e=ul->tdaList_Common->list.array[i];
+          int S,L;
+          SLIV2SL(e->startSymbolAndLength,&S,&L);
+          facts.ul_start[i]=S; facts.ul_length[i]=L; facts.ul_mapping[i]=e->mappingType;
+          facts.ul_k2[i]=e->k2?*e->k2:get_j_for_k2(ul->scs);
+        }
+      }
+    }
+    nr_pdcch_blind_publish_common(&facts);
   }
   // set current BWP only if coming from non-connected state
   // otherwise it is just a periodically update of the SIB1 content

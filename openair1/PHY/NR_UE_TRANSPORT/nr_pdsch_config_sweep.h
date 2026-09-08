@@ -55,6 +55,20 @@ typedef struct {
   uint8_t mcs_table;   ///< 0 = 64QAM, 1 = 256QAM, 2 = 64QAM-LowSE
 } nr_pdsch_cfg_hypothesis_t;
 
+/* Optional non-reentrant diagnostics: callback must not call the sweep API.
+ * Pure/offline users have no logger dependency. */
+typedef struct {
+  uint64_t configuration,outcomes,passes,trials;
+  uint16_t rnti;
+  uint8_t tda;
+  uint32_t minimum;
+  bool operational;
+  int winner;
+  nr_pdsch_cfg_hypothesis_t hypothesis;
+} nr_pdsch_sweep_report_t;
+typedef void (*nr_pdsch_sweep_reporter_t)(const nr_pdsch_sweep_report_t *);
+void nr_pdsch_config_sweep_set_reporter(nr_pdsch_sweep_reporter_t);
+
 #define NR_PDSCH_SWEEP_MAX_HYP 192
 #define NR_PDSCH_SWEEP_MAX_CONTEXTS (16 * 16)
 
@@ -106,6 +120,7 @@ bool nr_pdsch_config_sweep_select(uint64_t configuration, uint16_t rnti, uint8_t
 /** Returns true exactly once on convergence; fills winner when supplied. */
 bool nr_pdsch_config_sweep_feedback(const nr_pdsch_sweep_ticket_t *ticket, bool crc_ok,
                                    nr_pdsch_cfg_hypothesis_t *winner);
+bool nr_pdsch_config_sweep_is_settled(uint64_t configuration, uint16_t rnti, uint8_t tda, int typeA);
 void nr_pdsch_config_sweep_reset_all(void);
 /** Consistent snapshot for diagnostics/offline regression tests. */
 bool nr_pdsch_config_sweep_snapshot(const nr_pdsch_sweep_ticket_t *ticket,

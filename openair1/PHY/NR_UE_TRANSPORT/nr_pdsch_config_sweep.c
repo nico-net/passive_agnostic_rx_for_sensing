@@ -166,10 +166,16 @@ typedef struct {
   uint8_t tda;
   int tda_count, typeA;
   bool reported;
+  uint64_t outcomes, locked_trials, locked_passes;
   nr_pdsch_config_sweep_state_t state;
 } sweep_context_t;
 static sweep_context_t g_contexts[NR_PDSCH_SWEEP_MAX_CONTEXTS];
 static uint64_t g_generation, g_clock;
+static nr_pdsch_sweep_reporter_t g_reporter;
+void nr_pdsch_config_sweep_set_reporter(nr_pdsch_sweep_reporter_t reporter)
+{
+  pthread_mutex_lock(&g_lock); g_reporter=reporter; pthread_mutex_unlock(&g_lock);
+}
 
 static sweep_context_t *ticket_context(const nr_pdsch_sweep_ticket_t *t)
 {
@@ -231,6 +237,31 @@ bool nr_pdsch_config_sweep_feedback(const nr_pdsch_sweep_ticket_t *ticket, bool 
   bool announced = false;
   if (c) {
     int w = nr_pdsch_config_sweep_feed(&c->state, ticket->hypothesis, crc_ok);
+    ++c->outcomes;
+    if (ticket->settled) {
+      ++c->locked_trials; c->locked_passes += crc_ok;
+      if (g_reporter && c->locked_trials % 1000 == 0) {
+        nr_pdsch_sweep_report_t r={.configuration=c->configuration,.rnti=c->rnti,.tda=c->tda,
+          .operational=true,.passes=c->locked_passes,.trials=c->locked_trials};
+        g_reporter(&r);
+      }
+    }
+    if (c->outcomes % 10000 == 0 || (crc_ok && !c->reported)) {
+      const nr_pdsch_config_sweep_state_t *s=&c->state;
+      int best=0; uint32_t minimum=UINT32_MAX;
+      for(int i=0;i<s->n_hyp;i++) {
+        if(s->trials[i]<minimum) minimum=s->trials[i];
+        if((double)s->ok[i]/(s->trials[i]?s->trials[i]:1)
+            >(double)s->ok[best]/(s->trials[best]?s->trials[best]:1)) best=i;
+      }
+      const nr_pdsch_cfg_hypothesis_t *h=&s->hyp[best];
+      if (g_reporter) {
+        nr_pdsch_sweep_report_t r={.configuration=c->configuration,.rnti=c->rnti,.tda=c->tda,
+          .outcomes=c->outcomes,.minimum=minimum,.passes=s->ok[best],.trials=s->trials[best],
+          .hypothesis=*h,.winner=w};
+        g_reporter(&r);
+      }
+    }
     if (w >= 0 && !c->reported) {
       c->reported = true;
       announced = true;
@@ -240,6 +271,22 @@ bool nr_pdsch_config_sweep_feedback(const nr_pdsch_sweep_ticket_t *ticket, bool 
   }
   pthread_mutex_unlock(&g_lock);
   return announced;
+}
+
+bool nr_pdsch_config_sweep_is_settled(uint64_t configuration, uint16_t rnti, uint8_t tda, int typeA)
+{
+  pthread_mutex_lock(&g_lock);
+  bool settled=false;
+  for (int i=0;i<NR_PDSCH_SWEEP_MAX_CONTEXTS;++i) {
+    const sweep_context_t *c=&g_contexts[i];
+    if (c->generation && c->configuration==configuration && c->rnti==rnti
+        && c->tda==tda && c->tda_count==0 && c->typeA==typeA && c->state.winner>=0) {
+      settled=true;
+      break;
+    }
+  }
+  pthread_mutex_unlock(&g_lock);
+  return settled;
 }
 
 void nr_pdsch_config_sweep_reset_all(void)

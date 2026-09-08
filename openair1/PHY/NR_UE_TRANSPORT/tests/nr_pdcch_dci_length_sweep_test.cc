@@ -210,3 +210,33 @@ TEST(NrPdcchDciLengthSweep, IndependentStatesAndReset) {
   EXPECT_EQ(dl.passes[47],saved.passes[47]);
   EXPECT_EQ(dl.passes[43],0);
 }
+
+TEST(DciLengthBank, InterleavedUesKeepDifferentLengthsAndBudgets) {
+  nr_pdcch_dci_length_bank_t bank{};
+  for(int occasion=0;occasion<20;++occasion)
+    for(int u=0;u<3;++u) {
+      auto *c=nr_pdcch_dci_length_context(&bank,101,0x3001+u);
+      ASSERT_NE(c,nullptr);
+      EXPECT_EQ(c->state.occasions_fed,occasion);
+      ++c->state.occasions_fed;
+      c->found=41+2*u;
+    }
+  for(int u=0;u<3;++u) {
+    auto *c=nr_pdcch_dci_length_context(&bank,101,0x3001+u);
+    EXPECT_EQ(c->found,41+2*u);
+    EXPECT_EQ(c->state.occasions_fed,20);
+  }
+  auto *fresh=nr_pdcch_dci_length_context(&bank,102,0x3001);
+  EXPECT_EQ(fresh->found,0);
+  EXPECT_EQ(fresh->state.occasions_fed,0);
+  EXPECT_EQ(nr_pdcch_dci_length_context(&bank,102,0x3002)->found,0);
+}
+TEST(DciLengthBank, EvictionAndInvalidKeysDoNotInventEvidence) {
+  nr_pdcch_dci_length_bank_t bank{};
+  for(int u=1;u<=NR_PDCCH_LENGTH_CONTEXTS+1;++u)
+    nr_pdcch_dci_length_context(&bank,8,u)->found=40+u;
+  EXPECT_EQ(nr_pdcch_dci_length_context(&bank,8,2)->found,42);
+  EXPECT_EQ(nr_pdcch_dci_length_context(&bank,8,1)->found,0);
+  EXPECT_EQ(nr_pdcch_dci_length_context(nullptr,8,1),nullptr);
+  EXPECT_EQ(nr_pdcch_dci_length_context(&bank,8,0),nullptr);
+}

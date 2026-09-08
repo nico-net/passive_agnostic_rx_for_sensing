@@ -1,3 +1,4 @@
+#include "nr_passive_sample_lifetime.h"
 #include "nr_pdcch_ul_discovery.h"
 /*
  * Licensed to the OpenAirInterface (OAI) Software Alliance under one or more
@@ -113,7 +114,7 @@ static void *nr_pusch_passive_queue_thread(void *arg)
     if (lag > (long)atomic_load_explicit(&g_max_lag, memory_order_relaxed)) {
       atomic_store_explicit(&g_max_lag, (uint64_t)(lag > 0 ? lag : 0), memory_order_relaxed);
     }
-    if (prod >= 0 && lag >= slots_per_frame - NR_PUSCH_PASSIVE_QUEUE_MARGIN_SLOTS) {
+    if (!nr_passive_samples_valid(prod, job.absolute_slot, slots_per_frame)) {
       atomic_fetch_add_explicit(&g_dropped_stale, 1, memory_order_relaxed);
       continue;
     }

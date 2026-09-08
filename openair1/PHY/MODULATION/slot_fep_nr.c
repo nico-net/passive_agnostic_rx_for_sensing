@@ -398,3 +398,20 @@ void nr_ofdm_demod_and_rx_rotation(c16_t **rxdata,
     }
   }
 }
+
+int nr_slot_fep_ant_snapshot(PHY_VARS_NR_UE *ue,
+                    const NR_DL_FRAME_PARMS *frame_parms,
+                    unsigned int slot,
+                    unsigned int symbol,
+                    unsigned int ant,
+                    c16_t rxdataF[][frame_parms->samples_per_slot_wCP],
+                    enum nr_Link linktype,
+                    uint32_t sample_offset,
+                    c16_t **rxdata, double fo_hz)
+{
+  const double saved_fo = nr_slot_fep_fo_override_hz;
+  nr_slot_fep_fo_override_hz = fo_hz;
+  const int ret = nr_slot_fep_ant(ue, frame_parms, slot, symbol, ant, rxdataF, linktype, sample_offset, rxdata);
+  nr_slot_fep_fo_override_hz = saved_fo;
+  return ret;
+}

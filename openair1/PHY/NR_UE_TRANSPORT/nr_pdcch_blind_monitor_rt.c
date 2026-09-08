@@ -1,3 +1,4 @@
+#include "nr_passive_sample_lifetime.h"
 /*
  * Licensed to the OpenAirInterface (OAI) Software Alliance under one or more
  * contributor license agreements.  See the NOTICE file distributed with
@@ -449,10 +450,7 @@ static bool ul_length_score(int len, int trial, uint16_t *rnti, uint32_t *hash, 
   *hash=(uint32_t)out.raw_payload ^ (uint32_t)(out.raw_payload>>32);
   return true;
 }
-static nr_pdcch_dci_length_sweep_state_t ul_length_state;
-static int ul_discovered_length;
-static bool ul_length_exhausted;
-static uint16_t ul_length_rnti;
+static nr_pdcch_dci_length_bank_t ul_lengths;
 static uint64_t ul_geometry;
 static pthread_mutex_t ul_length_lock=PTHREAD_MUTEX_INITIALIZER;
 
@@ -483,47 +481,15 @@ static bool nr_pdcch_autodiscover_length_scorer(int dci_length, int trial_idx, u
   int16_t tmp_e[16 * 108];
   nr_pdcch_unscrambling((c16_t *)c->e_rx, ctx->scrambling_rnti, (uint32_t)(c->L * 108), ctx->dmrs_scrambling_id,
                         tmp_e);
-  nr_pdcch_blind_result_t out;
-  const bool ok = nr_pdcch_blind_decode_and_extract_ex(tmp_e, c->L, (uint16_t)dci_length, ctx->bwp_size,
-                                                       ctx->dmrs_typeA_position, ctx->rnti_min, ctx->rnti_max,
-                                                       ctx->extract_opts, &out);
-  /* SCOREDIAG (ISAC_DISCOVER_DIAG=1), added 2026-09-07. The sweep reports len47_passes=0 out of
-   * 21648 trials while the MAIN decode path recovers genuine C-RNTI payloads at dci_len=47 in the
-   * same run -- so the two disagree about the same length on the same LLRs. The main path accepts
-   * on CRC alone; this scorer additionally demands out.plausible. Split the two rejection reasons
-   * so the next run says which one fires, instead of guessing at the field-sanity check. */
-  {
-    static int s_sd = -1;
-    if (s_sd < 0) {
-      s_sd = (getenv("ISAC_DISCOVER_DIAG") != NULL) ? 1 : 0;
-    }
-    if (s_sd && dci_length == 47) {
-      static unsigned long n_try = 0, n_notok = 0, n_notplaus = 0, n_pass = 0;
-      n_try++;
-      if (!ok) {
-        n_notok++;
-      } else if (!out.plausible) {
-        n_notplaus++;
-      } else {
-        n_pass++;
-      }
-      if ((n_try % 5000) == 1) {
-        printf("SCOREDIAG len47 try=%lu decode_fail=%lu implausible=%lu pass=%lu rnti=0x%x reason=%s\n",
-               n_try, n_notok, n_notplaus, n_pass, (unsigned)out.rnti,
-               out.reject_reason ? out.reject_reason : "(none)");
-        fflush(stdout);
-      }
-    }
-  }
-  if (!ok || !out.plausible) {
+  nr_pdcch_blind_raw_result_t out;
+  if(!nr_pdcch_blind_decode_raw_11(tmp_e,c->L,(uint16_t)dci_length,ctx->rnti_min,ctx->rnti_max,&out))
     return false;
-  }
-  *rnti_out = out.rnti;
-  // Cheap fingerprint of the decoded fields -- varies with genuine traffic, stays constant for a
-  // degenerate fixed point, per nr_pdcch_dci_length_scorer_fn's own contract (any deterministic
-  // function of the decode suffices; this one packs the fields Step 4's brief itself suggested).
-  *payload_hash_out = ((uint32_t)out.start_rb << 20) ^ ((uint32_t)out.num_rb << 12) ^ ((uint32_t)out.mcs << 4)
-                    ^ (uint32_t)out.rv;
+  /* Never ask a layout-dependent extractor to judge a length. An unknown TDA
+   * width previously rejected genuine CRC-recovered 47-bit grants against a
+   * presumed 51-bit field list, so discovery could never reach interpretation. */
+  *rnti_out=out.rnti;
+  *payload_hash_out=(uint32_t)out.payload ^ (uint32_t)(out.payload>>32);
+
   return true;
 }
 
@@ -560,6 +526,9 @@ typedef struct {
   /* UPLINK. A separate flag rather than a third value of `format`, so that no existing switch or
      comparison over nr_blind_dci_format_t silently acquires a new reachable case -- the DL path
      must be unable to see this task kind at all. */
+  bool         dl_auto;
+  uint64_t     dl_layout_configuration;
+  nr_pdcch_blind_raw_result_t dl_raw;
   bool         ul_auto; // raw decode; sequential controller interprets the CRC-verified bits
   uint8_t      ul_scan; // 1 = interpret this candidate as DCI 0_1; `format` is then meaningless
   const nr_pdcch_blind_ul_opts_t *ul_opts;
@@ -582,6 +551,9 @@ static void nr_pdcch_blind_cand_worker_body(nr_pdcch_blind_cand_task_t *t)
   } else if (t->format == NR_BLIND_DCI_FORMAT_1_0) {
     t->ok = nr_pdcch_blind_decode_and_extract_10(tmp_e, t->L, t->dci_length, t->dci10_ctx, t->rnti_min, t->rnti_max,
                                                  t->extract_opts, &t->out);
+  } else if (t->dl_auto) {
+    t->ok = nr_pdcch_blind_decode_raw_11(tmp_e, t->L, t->dci_length,
+                                        t->rnti_min, t->rnti_max, &t->dl_raw);
   } else {
     t->ok = nr_pdcch_blind_decode_and_extract_ex(tmp_e, t->L, t->dci_length, t->bwp_size, t->dmrs_typeA_position,
                                                  t->rnti_min, t->rnti_max, t->extract_opts, &t->out);
@@ -798,17 +770,24 @@ void nr_pdcch_blind_monitor_process(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t 
     return; // the consumer runs the occasion; the receive thread is done here
   }
 
-  nr_pdcch_blind_monitor_run_occasion(ue, proc, false /* on the RT thread: fan out as before */);
+  nr_pdcch_blind_monitor_run_occasion(ue, proc, false /* on the RT thread: fan out as before */, mono_slot);
 }
 
 /* The occasion body. Runs on a scan consumer when the pool is up, and on the PHY receive thread
  * otherwise -- identical code either way, which is what makes the deferral A/B-able with one config
  * field. `abs_slot_monotonic` is the producer's un-wrapped slot counter for this occasion. */
 void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc,
-                                         bool serial_candidates)
+                                         bool serial_candidates, long source_absolute_slot)
 {
   const nr_pdcch_blind_monitor_cfg_t *cfg = nr_pdcch_blind_monitor_get_cfg();
   NR_DL_FRAME_PARMS *fp = &ue->frame_parms;
+  nr_pdcch_blind_ul_opts_t ul_opts = cfg->ul;
+  ul_opts.phy_cell_id = fp->Nid_cell;
+  ul_opts.numerology = fp->numerology_index;
+  ul_opts.dmrs_typeA_position = cfg->dmrs_typeA_position;
+  nr_pdcch_blind_common_config_t common;
+  if (nr_pdcch_blind_get_common(fp->Nid_cell, &common) && common.ul_bwp_size)
+    ul_opts.numerology = common.ul_mu;
   static uint64_t previous_geometry;
   const uint64_t geometry = nr_pdcch_blind_monitor_autodiscover_generation();
   if (cfg->autodiscover && geometry != previous_geometry) {
@@ -1032,7 +1011,7 @@ void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_pr
   uint16_t   dci01_length = 0;
   if (scan_01) {
     dci01_length = cfg->dci01_length_override > 0 ? (uint16_t)cfg->dci01_length_override
-                                                  : nr_pdcch_blind_dci01_size(&cfg->ul);
+                                                  : nr_pdcch_blind_dci01_size(&ul_opts);
   }
   nr_pdcch_blind_dci10_ctx_t dci10_ctx;
   memset(&dci10_ctx, 0, sizeof(dci10_ctx));
@@ -1077,7 +1056,7 @@ void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_pr
             (cfg->dci10_ss_type == NR_BLIND_SS_COMMON) ? "common" : "ue-specific",
             (unsigned)dci10_ctx.rnti_class_mask, (unsigned)dci10_ctx.mux_pattern, (unsigned)dci10_ctx.sib1);
       if (scan_01) {
-        const uint16_t derived = nr_pdcch_blind_dci01_size(&cfg->ul);
+        const uint16_t derived = nr_pdcch_blind_dci01_size(&ul_opts);
         LOG_I(PHY,
               "SENSING: blind PDCCH formats: 0_1=on (len=%u derived=%u ul_bwp=%u+%u tda=%d tp=%d "
               "mcs_tbl=%d add_pos=%d)\n",
@@ -1147,6 +1126,10 @@ void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_pr
                          rel15->coreset.duration, rxdataF_symb, pdcch_llr);
   }
   btim_add(BTIM_FEP_LLR, btim_t_fep);
+  if (!nr_passive_samples_valid(
+          atomic_load_explicit(&nr_ue_diag_producer_absolute_slot, memory_order_relaxed),
+          source_absolute_slot, fp->slots_per_frame))
+    return; /* No discovery/CRC evidence from an overwritten CORESET window. */
 
   /* XCHECK diagnostic (2026-09-06, Task 5 follow-up): run Technique A's own correlation function
    * on THIS FEP output -- the manual, live-verified ground-truth config's own receive chain, which
@@ -1407,22 +1390,14 @@ void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_pr
    * is applied as a GATE after extraction (see g_held_rnti_set below), which is what makes
    * discovery and filtering coexist. */
   uint16_t boot_rnti = 0;
-  {
-    uint16_t r = 0;
-    uint8_t  cls = 0xFF;
-    uint32_t age = 0;
-    if (nr_pdcch_blind_monitor_confirmed_rnti(abs_slot, &r, &cls, &age)) {
-      boot_rnti = r;
-      static uint16_t s_announced = 0;
-      if (r != s_announced) {
-        s_announced = r;
-        LOG_A(PHY,
-              "SENSING: blind PDCCH -- C-RNTI bootstrapped to 0x%x (class=%u); DCI 1_1/0_1 "
-              "acceptance narrowed from [0x%x..0x%x] to an equality check\n",
-              r, (unsigned)cls, cfg->rnti_min, cfg->rnti_max);
-      }
-    }
-  }
+  uint16_t known_ul[NR_PDCCH_BLIND_MAX_UE];
+  const int n_known_ul = nr_pdcch_blind_monitor_confirmed_rnti_set(abs_slot,
+      known_ul, NR_PDCCH_BLIND_MAX_UE);
+  static uint32_t ul_ue_cursor;
+  /* Bounded round-robin: one UL candidate set per occasion, fair across confirmed UEs.
+   * Each UE owns its length and interpretation state; newest sighting cannot erase it. */
+  if (n_known_ul > 0)
+    boot_rnti = known_ul[(ul_ue_cursor++) % n_known_ul];
 
   /* full_auto=0 never feeds a search or replaces a manual UL option/length.
    * Auto has no silent fallback: unresolved searches do not emit guessed grants. */
@@ -1435,14 +1410,16 @@ void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_pr
       rel15->coreset.scrambling_rnti,rel15->coreset.pdcch_dmrs_scrambling_id};
   for(unsigned i=0;i<sizeof(geometry_fields)/sizeof(geometry_fields[0]);++i)
     geom=(geom^(uint32_t)geometry_fields[i])*UINT64_C(1099511628211);
-  if(!cfg->dl_full_auto || !scan_01 || !boot_rnti || boot_rnti!=ul_length_rnti || geom!=ul_geometry) {
-    nr_pdcch_dci_length_sweep_reset(&ul_length_state);
-    ul_discovered_length=0; ul_length_exhausted=false;
+  geom ^= nr_pdcch_blind_monitor_autodiscover_generation();
+  if (!cfg->dl_full_auto || !scan_01 || geom != ul_geometry) {
+    memset(&ul_lengths, 0, sizeof(ul_lengths));
     nr_pdcch_ul_discovery_reset();
-    ul_length_rnti=boot_rnti; ul_geometry=geom;
+    ul_geometry=geom;
   }
-  if(cfg->dl_full_auto && scan_01 && boot_rnti && (!cfg->autodiscover || nr_pdcch_blind_monitor_autodiscover_done())) {
-    if(!ul_discovered_length && !ul_length_exhausted) {
+  nr_pdcch_dci_length_context_t *ulc = boot_rnti
+      ? nr_pdcch_dci_length_context(&ul_lengths, geom, boot_rnti) : NULL;
+  if(cfg->dl_full_auto && scan_01 && boot_rnti && (!cfg->autodiscover || nr_pdcch_blind_monitor_autodiscover_extent_verified())) {
+    if(!ulc->found && !ulc->exhausted) {
       nr_pdcch_autodiscover_cand_t candidates[64];
       int count=0, offset=0;
       for(int c=0;c<rel15->number_of_candidates && count<64;++c) {
@@ -1454,26 +1431,26 @@ void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_pr
         ul_length_ctx_t ctx={.cand=candidates,.count=count,.rnti=boot_rnti,
                             .scrambling_rnti=rel15->coreset.scrambling_rnti,
                             .dmrs_id=rel15->coreset.pdcch_dmrs_scrambling_id};
-        const int found=nr_pdcch_dci_length_sweep_feed(&ul_length_state,ul_length_score,&ctx,
+        const int found=nr_pdcch_dci_length_sweep_feed(&ulc->state,ul_length_score,&ctx,
                                                      count,30,63,boot_rnti);
         /* A single matching decode cannot rule out a degenerate polar fixed point.
          * Require distinct UL payloads before trusting the shared engine's shortcut. */
         int supported_lengths=0;
         for(int len=30;len<=63;++len)
-          if(ul_length_state.n_distinct[len]>1 && ul_length_state.bootstrap_hits[len]>=3)
+          if(ulc->state.n_distinct[len]>1 && ulc->state.bootstrap_hits[len]>=3)
             ++supported_lengths;
-        if(found>0 && supported_lengths==1 && ul_length_state.n_distinct[found]>1 &&
-           ul_length_state.bootstrap_hits[found]>=3) {
-          ul_discovered_length=found;
+        if(found>0 && supported_lengths==1 && ulc->state.n_distinct[found]>1 &&
+           ulc->state.bootstrap_hits[found]>=3) {
+          ulc->found=found;
           LOG_A(PHY,"UL automatic DCI length locked: %d rnti=0x%x\n",found,boot_rnti);
-        } else if(ul_length_state.occasions_fed>=AUTODISCOVER_LENGTH_SWEEP_MAX_OCCASIONS) {
-          ul_length_exhausted=true;
-          LOG_W(PHY,"UL automatic length unresolved after %d occasions\n",ul_length_state.occasions_fed);
+        } else if(ulc->state.occasions_fed>=AUTODISCOVER_LENGTH_SWEEP_MAX_OCCASIONS) {
+          ulc->exhausted=true;
+          LOG_W(PHY,"UL automatic length unresolved after %d occasions\n",ulc->state.occasions_fed);
         }
       }
     }
-    ul_ready=ul_discovered_length>0;
-    if(ul_ready) dci01_length=ul_discovered_length;
+    ul_ready=ulc->found>0;
+    if(ul_ready) dci01_length=ulc->found;
   }
   pthread_mutex_unlock(&ul_length_lock);
   const uint64_t btim_t_pre = btim_on ? btim_now() : 0;
@@ -1619,6 +1596,7 @@ constdiag_done:;
           .cce                 = rel15->CCE[c],
           .format              = NR_BLIND_DCI_FORMAT_1_1,
           .dci10_ctx           = NULL,
+          .dl_auto             = cfg->dl_full_auto != 0,
       };
       if (scan_11 && nof_tasks < (int)(sizeof(cand_task) / sizeof(cand_task[0]))) {
         cand_task[nof_tasks] = base_task;
@@ -1635,7 +1613,7 @@ constdiag_done:;
         cand_task[nof_tasks]            = base_task;
         cand_task[nof_tasks].dci_length = dci01_length;
         cand_task[nof_tasks].ul_scan    = 1;
-        cand_task[nof_tasks].ul_opts    = &cfg->ul;
+        cand_task[nof_tasks].ul_opts    = &ul_opts;
         cand_task[nof_tasks].ul_auto    = cfg->dl_full_auto != 0;
         if(cfg->dl_full_auto) {
           cand_task[nof_tasks].rnti_min=boot_rnti;
@@ -1697,7 +1675,7 @@ constdiag_done:;
     if (cand_task[ti].ul_scan) {
       if(cand_task[ti].ok && cand_task[ti].ul_auto) {
         nr_pdcch_blind_ul_result_t discovered;
-        cand_task[ti].ok=nr_pdcch_ul_discovery_grant(&cfg->ul,dci01_length,boot_rnti,
+        cand_task[ti].ok=nr_pdcch_ul_discovery_grant(&ul_opts,dci01_length,boot_rnti,
                                                     cand_task[ti].ul_out.raw_payload,&discovered);
         if(cand_task[ti].ok) cand_task[ti].ul_out=discovered;
       }
@@ -1706,7 +1684,7 @@ constdiag_done:;
         g_ul_accepts++;
         /* Park it for the slot its PUSCH occupies. The DCI is in a DOWNLINK slot; the PUSCH is k2
          * slots later in an UPLINK one, where nothing runs today. */
-        nr_pusch_grant_book_add(u, cand_task[ti].frame, cand_task[ti].slot, fp->slots_per_frame);
+        nr_pusch_grant_book_add(u, source_absolute_slot);
       } else {
         g_ul_rejects++;
       }
@@ -1755,6 +1733,46 @@ constdiag_done:;
       }
       continue;
     }
+    if (cand_task[ti].dl_auto && cand_task[ti].format == NR_BLIND_DCI_FORMAT_1_1) {
+      if (!cand_task[ti].ok || (cfg->autodiscover && !g_length_found))
+        continue;
+      const nr_pdcch_blind_raw_result_t *raw = &cand_task[ti].dl_raw;
+      ue->dci_thres = (ue->dci_thres + raw->mismatched_bits) / 2;
+      if (raw->mismatched_bits > ue->dci_thres + 30
+          || !rnti_persistence_check(raw->rnti, abs_slot, persist_window_slots, cfg->rnti_persist_k))
+        continue;
+      nr_pdcch_blind_rnti_bootstrap_record(raw->rnti, NR_BLIND_RNTI_CLASS_C, abs_slot);
+      if (cfg->autodiscover) {
+        const long mono = source_absolute_slot;
+        nr_pdcch_blind_monitor_autodiscover_observe(raw->rnti,
+            mono >= 0 ? (uint32_t)mono : abs_slot, raw->payload);
+      }
+      static uint64_t raw_dl_count;
+      if (++raw_dl_count <= 12 || raw_dl_count % 2000 == 0)
+        LOG_I(PHY, "SENSING: DL raw evidence n=%lu len=%u rnti=0x%x payload=0x%lx mm=%u; "
+                   "layout requires TB-CRC evidence\n",
+              (unsigned long)raw_dl_count, cand_task[ti].dci_length, raw->rnti,
+              (unsigned long)raw->payload, raw->mismatched_bits);
+      if (!g_pdsch_sweep_on) continue;
+      nr_pdcch_blind_result_t layouts[3];
+      uint8_t layout_ids[3];
+      const int n=nr_pdcch_blind_dl_layout_candidates(raw, cand_task[ti].dci_length,
+          cfg->bwp_size, cfg->dmrs_typeA_position, layouts, layout_ids);
+      if (!n) continue;
+      uint64_t keys[3];
+      int settled=-1, n_settled=0;
+      for (int i=0;i<n;++i) {
+        keys[i]=(g_pdsch_configuration ^ (uint64_t)(layout_ids[i]+1)) * UINT64_C(1099511628211);
+        if (nr_pdsch_config_sweep_is_settled(keys[i],raw->rnti,layouts[i].tda_index,cfg->dmrs_typeA_position)) {
+          settled=i; ++n_settled;
+        }
+      }
+      if (n_settled>1) continue; // ambiguous layouts are not a unique operational solution
+      static uint32_t layout_cursor[65536]; // independent RR cursors, indexed by recovered RNTI
+      const int selected=settled>=0 ? settled : layout_cursor[raw->rnti]++ % n;
+      cand_task[ti].out=layouts[selected];
+      cand_task[ti].dl_layout_configuration=keys[selected];
+    }
     const nr_pdcch_blind_result_t out = cand_task[ti].out;
     if (!cand_task[ti].ok) {
       g_last_reject_reason = out.reject_reason; // TEMPORARY diagnostic, see periodic summary below
@@ -1799,6 +1817,7 @@ constdiag_done:;
     // not a fixed constant); a candidate mismatching more than dci_thres+30 bits is rejected.
     // Default ON (NRSniffer runs this unconditionally); no new config knob added given time
     // constraints -- flag for follow-up if it needs to be independently disable-able.
+    if (!cand_task[ti].dl_auto || is_dci10) {
     ue->dci_thres = (ue->dci_thres + out.mismatched_bits) / 2;
     {
       /* ISAC_PDCCH_NO_MISMATCH_GATE=1 bypasses this gate. It has no config knob (see the note above),
@@ -1828,8 +1847,9 @@ constdiag_done:;
       const uint64_t fingerprint = (uint64_t)out.start_rb | ((uint64_t)out.num_rb << 9)
           | ((uint64_t)out.mcs << 18) | ((uint64_t)out.rv << 23) | ((uint64_t)out.ndi << 25)
           | ((uint64_t)out.harq_pid << 26) | ((uint64_t)out.tda_index << 30);
-      const long mono = atomic_load_explicit(&nr_ue_diag_producer_absolute_slot, memory_order_relaxed);
+      const long mono = source_absolute_slot;
       nr_pdcch_blind_monitor_autodiscover_observe(out.rnti, mono >= 0 ? (uint32_t)mono : abs_slot, fingerprint);
+    }
     }
 
     /* ---- Gate 3: confirmed-UE set. Once ANY UE is confirmed, a candidate whose CRC-recovered RNTI
@@ -1970,8 +1990,8 @@ constdiag_done:;
           || decodes_this_occasion >= cfg->pdsch_max_per_slot)
         continue;
       nr_pdsch_cfg_hypothesis_t hy;
-      if (!nr_pdsch_config_sweep_select(g_pdsch_configuration, out.rnti, out.tda_index,
-                                       cfg->extract.tda_count, cfg->dmrs_typeA_position,
+      if (!nr_pdsch_config_sweep_select(cand_task[ti].dl_auto ? cand_task[ti].dl_layout_configuration : g_pdsch_configuration,
+                                       out.rnti, out.tda_index, cand_task[ti].dl_auto ? 0 : cfg->extract.tda_count, cfg->dmrs_typeA_position,
                                        nr_pdcch_blind_dmrs_mask, &sweep_ticket, &hy))
         continue; /* Unsupported auto context is not a guessed manual success. */
       nr_pdsch_adaptive_apply(&hy, &dlsch_pdu, &grant_mcs_table, &grant_mcs_table_lbrm);
@@ -2022,11 +2042,13 @@ constdiag_done:;
       job.frame_rx      = proc->frame_rx;
       job.nr_slot_rx    = proc->nr_slot_rx;
       job.gNB_id        = proc->gNB_id;
-      job.absolute_slot = atomic_load_explicit(&nr_ue_diag_producer_absolute_slot, memory_order_relaxed);
+      job.absolute_slot = source_absolute_slot;
       job.rnti          = out.rnti;
       job.harq_pid_tag  = blind_harq_tag(abs_slot, out.rnti, out.harq_pid);
       job.want_data     = want_data;
-      job.fo_hz         = ue->cont_fo_comp ? (ue->dl_Doppler_shift + ue->freq_offset) : 0.0;  /* receive-thread sample; see nr_slot_fep_fo_override_hz */
+      job.fo_hz         = isnan(nr_slot_fep_fo_override_hz)
+                  ? (ue->cont_fo_comp ? ue->dl_Doppler_shift + ue->freq_offset : 0.0)
+                  : nr_slot_fep_fo_override_hz;  /* receive-thread sample; see nr_slot_fep_fo_override_hz */
       job.sweep_ticket  = sweep_ticket;
       nr_pdsch_passive_queue_enqueue(&job);
       continue;
@@ -2201,19 +2223,14 @@ constdiag_done:;
               job.frame_rx      = proc->frame_rx;
               job.nr_slot_rx    = proc->nr_slot_rx;
               job.gNB_id        = proc->gNB_id;
-              /* READ the producer's clock; do NOT reconstruct it. proc->frame_rx WRAPS at 1024
-               * while nr_ue_diag_producer_absolute_slot is monotonic, so the obvious
-               * `frame_rx * slots_per_frame + slot` is a DIFFERENT quantity and differencing the two
-               * yields nonsense -- measured 2026-08-24 as max_lag_slots = 20491 against a
-               * slots_per_frame of 20, which let genuinely stale jobs through the staleness check
-               * and produced crc_ok = 0/3757. This tap runs inside UE_dl_preprocessing() for the
-               * very slot the producer published at nr-ue.c:1148 before reading it, so loading it
-               * here IS this job's own absolute slot, on the same clock by construction. */
-              job.absolute_slot = atomic_load_explicit(&nr_ue_diag_producer_absolute_slot, memory_order_relaxed);
+              /* Preserve the original RF slot across PDCCH -> PDSCH deferral. */
+              job.absolute_slot = source_absolute_slot;
               job.rnti          = out.rnti;
               job.harq_pid_tag  = blind_harq_tag(abs_slot, out.rnti, out.harq_pid);
               job.want_data     = want_data;
-              job.fo_hz         = ue->cont_fo_comp ? (ue->dl_Doppler_shift + ue->freq_offset) : 0.0;  /* receive-thread sample */
+              job.fo_hz         = isnan(nr_slot_fep_fo_override_hz)
+                  ? (ue->cont_fo_comp ? ue->dl_Doppler_shift + ue->freq_offset : 0.0)
+                  : nr_slot_fep_fo_override_hz;  /* receive-thread sample */
               job.sweep_ticket  = sweep_ticket;
               nr_pdsch_passive_queue_enqueue(&job);
               /* The per-candidate channel-estimate allocation is freed at the BOTTOM of this loop,

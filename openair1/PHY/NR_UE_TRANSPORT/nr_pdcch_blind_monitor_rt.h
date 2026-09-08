@@ -295,7 +295,7 @@ typedef struct {
 static inline bool nr_pdcch_blind_monitor_ul_scan_enabled(const nr_pdcch_blind_monitor_cfg_t *cfg)
 {
   return cfg && cfg->dci01_scan == 1 && cfg->coreset_type == 0
-      && cfg->dci10_ss_type == NR_BLIND_SS_UE_SPECIFIC && cfg->ul.bwp_size > 0;
+      && cfg->dci10_ss_type == NR_BLIND_SS_UE_SPECIFIC && (cfg->dl_full_auto || cfg->ul.bwp_size > 0);
 }
 
 #ifdef __cplusplus
@@ -342,7 +342,7 @@ void nr_pdcch_blind_monitor_process(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t 
  *        identical 38-candidate workload.
  */
 void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc,
-                                         bool serial_candidates);
+                                         bool serial_candidates, long source_absolute_slot);
 
 #ifdef __cplusplus
 }

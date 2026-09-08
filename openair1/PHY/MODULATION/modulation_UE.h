@@ -60,6 +60,17 @@ int nr_slot_fep_ant(PHY_VARS_NR_UE *ue,
                     uint32_t sample_offset,
                     c16_t **rxdata);
 
+// Deferred FEP: carry the common CFO across thread boundaries, restore worker TLS.
+int nr_slot_fep_ant_snapshot(PHY_VARS_NR_UE *ue,
+                    const NR_DL_FRAME_PARMS *frame_parms,
+                    unsigned int slot,
+                    unsigned int symbol,
+                    unsigned int ant,
+                    c16_t rxdataF[][frame_parms->samples_per_slot_wCP],
+                    enum nr_Link linktype,
+                    uint32_t sample_offset,
+                    c16_t **rxdata, double fo_hz);
+
 // TEMPORARY DIAGNOSTIC (2026-08-05): see slot_fep_nr.c's definition-site comment. Valid only
 // immediately after a synchronous nr_slot_fep() call on the same thread.
 /// See slot_fep_nr.c. NAN = read the offset from `ue` (default for every thread).
