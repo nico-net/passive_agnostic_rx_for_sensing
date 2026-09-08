@@ -243,6 +243,21 @@ void test_validation_report_compatibility()
           "validation report lost source-count compatibility vector");
   require(json.find("\"azimuth_deg\":12.5")!=std::string::npos,
           "validation report lost top-level detection AoA compatibility");
+
+  PipelineConfig captured=c;captured.capture_rvm=true;
+  r.detector.axes.range_bins=2;r.detector.axes.rate_bins=3;
+  r.detector.initial_likelihood={1,2,3,4,5,6};
+  r.detector.initial_dl_likelihood={6,5,4,3,2,1};
+  r.detector.dl_observed_re_count=42;
+  const std::string capture_json=build_report_json(r,captured);
+  require(capture_json.find("\"dl_rvm_layout\":\"doppler_major_range_minor\"")!=std::string::npos,
+          "captured report lost DL-only RDM layout");
+  require(capture_json.find("\"dl_rvm_source_mask\":15")!=std::string::npos,
+          "captured report lost exact Python DL source policy");
+  require(capture_json.find("\"dl_rvm_observed_re_count\":42")!=std::string::npos,
+          "captured report lost DL-only observation count");
+  require(capture_json.find("\"dl_rvm_blob\":[6,3,5,2,4,1]")!=std::string::npos,
+          "captured report lost Doppler-major DL-only RDM payload");
 }
 
 void test_causal_cpi_pipeline()

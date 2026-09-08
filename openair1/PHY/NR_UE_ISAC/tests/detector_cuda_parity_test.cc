@@ -77,7 +77,12 @@ int main()
     config.maximum_objects = 1;
     config.maximum_range_m = 300.0;
     config.maximum_target_speed_mps = 50.0;
-    const auto window = fixture();
+    config.capture_rvm = true;
+    auto window = fixture();
+    for (uint32_t row = 0; row < window.rows; ++row)
+      window.row_source_mask[row] = row % 4 == 0
+          ? 1u << NR_ISAC_SRC_PUSCH_DATA
+          : 1u << NR_ISAC_SRC_PDSCH_DATA;
     setenv("NR_ISAC_CUDA_DETECTOR", "0", 1);
     const auto cpu = detect_clean(window, config);
     setenv("NR_ISAC_CUDA_DETECTOR", "1", 1);
@@ -88,6 +93,12 @@ int main()
     require(cpu.objects.size() == cuda.objects.size(), "CPU/CUDA object count differs");
     require(cpu.initial_likelihood.size() == cuda.initial_likelihood.size(),
             "CPU/CUDA initial map shape differs");
+    require(cpu.initial_dl_likelihood.size() == cuda.initial_dl_likelihood.size()
+                && cpu.initial_dl_likelihood.size() == cpu.initial_likelihood.size(),
+            "CPU/CUDA DL-only map shape differs");
+    require(cpu.dl_observed_re_count == cuda.dl_observed_re_count
+                && cpu.dl_observed_re_count > 0,
+            "CPU/CUDA DL-only observed-RE count differs");
     double map_scale = 0.0, map_error = 0.0;
     for (size_t index = 0; index < cpu.initial_likelihood.size(); ++index) {
       const double expected = cpu.initial_likelihood[index];
@@ -102,6 +113,20 @@ int main()
     }
     require(map_error <= 5e-5 * std::max(map_scale, 1.0),
             "CPU/CUDA initial likelihood exceeds complex64 tolerance");
+    double dl_map_scale = 0.0, dl_map_error = 0.0;
+    for (size_t index = 0; index < cpu.initial_dl_likelihood.size(); ++index) {
+      const double expected_dl = cpu.initial_dl_likelihood[index];
+      const double actual_dl = cuda.initial_dl_likelihood[index];
+      if (!std::isfinite(expected_dl) || !std::isfinite(actual_dl)) {
+        require(std::isfinite(expected_dl) == std::isfinite(actual_dl),
+                "CPU/CUDA DL-only map support differs");
+        continue;
+      }
+      dl_map_scale = std::max(dl_map_scale, std::abs(expected_dl));
+      dl_map_error = std::max(dl_map_error, std::abs(actual_dl - expected_dl));
+    }
+    require(dl_map_error <= 5e-5 * std::max(dl_map_scale, 1.0),
+            "CPU/CUDA DL-only likelihood exceeds complex64 tolerance");
     const auto& expected = cpu.components.front();
     const auto& actual = cuda.components.front();
     close(actual.range_bin, expected.range_bin, 3e-4, 0.0, "continuous range parity");

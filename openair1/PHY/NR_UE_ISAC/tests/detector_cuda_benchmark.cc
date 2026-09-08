@@ -8,6 +8,9 @@
  */
 #include "detector.h"
 #include "detector_cuda.h"
+#include "report_writer.h"
+#include "sync_correction.h"
+#include "sync_correction_cuda.h"
 
 #include <algorithm>
 #include <chrono>
@@ -94,14 +97,18 @@ int main()
   config.maximum_objects = 8;
   config.maximum_range_m = 312.283810417;
   config.maximum_target_speed_mps = 50.0;
+  config.capture_rvm = true;
   const CfrWindow window = dense_window();
   auto run = [&]() {
     const auto started = std::chrono::steady_clock::now();
     const auto result = detect_clean(window, config);
     const auto stopped = std::chrono::steady_clock::now();
-    if (result.components.size() != config.maximum_components || result.initial_likelihood.empty()) {
-      std::fprintf(stderr, "dense CUDA detector returned %zu components and %zu map cells\n",
-                   result.components.size(), result.initial_likelihood.size());
+    if (result.components.size() != config.maximum_components || result.initial_likelihood.empty()
+        || result.initial_dl_likelihood.size() != result.initial_likelihood.size()) {
+      std::fprintf(stderr,
+                   "dense CUDA detector returned %zu components, %zu fused and %zu DL map cells\n",
+                   result.components.size(), result.initial_likelihood.size(),
+                   result.initial_dl_likelihood.size());
       std::exit(EXIT_FAILURE);
     }
     for (const auto& component : result.components)
@@ -123,6 +130,77 @@ int main()
               warmup_ms, samples.front(), median_ms, samples.back(), limit_ms);
   if (!(median_ms < limit_ms)) {
     std::fprintf(stderr, "CUDA detector misses required steady-state CPI throughput\n");
+    return EXIT_FAILURE;
+  }
+
+  std::string sync_error;
+  if (!warmup_sync_cuda(512, window.subcarriers, &sync_error)) {
+    std::fprintf(stderr, "CUDA sync warmup failed before full-CPI benchmark: %s\n",
+                 sync_error.c_str());
+    return EXIT_FAILURE;
+  }
+  struct FullSample {
+    double total = 0.0, copy = 0.0, sync = 0.0, correction = 0.0;
+    double alignment = 0.0, variance = 0.0, detector = 0.0, report = 0.0;
+  };
+  auto run_full_cpi = [&]() {
+    const auto started = std::chrono::steady_clock::now();
+    CfrWindow corrected = window;
+    const auto copied = std::chrono::steady_clock::now();
+    const SyncEstimate sync = estimate_sync(window);
+    const auto synchronized = std::chrono::steady_clock::now();
+    apply_sync_correction(corrected, sync, 0.0, std::nullopt);
+    const auto corrected_at = std::chrono::steady_clock::now();
+    align_allocation_families(corrected, true);
+    const auto allocation_aligned = std::chrono::steady_clock::now();
+    (void)estimate_current_cpi_variance(corrected);
+    const auto aligned = std::chrono::steady_clock::now();
+    PipelineReport report;
+    report.sync = sync;
+    report.detector = detect_clean(corrected, config);
+    const auto detected = std::chrono::steady_clock::now();
+    const std::string json = build_report_json(report, config);
+    const auto stopped = std::chrono::steady_clock::now();
+    if (json.find("\"dl_rvm_blob\":[") == std::string::npos)
+      std::exit(EXIT_FAILURE);
+    const auto elapsed = [](auto end, auto begin) {
+      return std::chrono::duration<double, std::milli>(end - begin).count();
+    };
+    return FullSample{elapsed(stopped, started), elapsed(copied, started),
+                      elapsed(synchronized, copied), elapsed(corrected_at, synchronized),
+                      elapsed(allocation_aligned, corrected_at),
+                      elapsed(aligned, allocation_aligned), elapsed(detected, aligned),
+                      elapsed(stopped, detected)};
+  };
+  const FullSample full_warmup = run_full_cpi();
+  std::vector<FullSample> full_samples;
+  for (uint32_t repetition = 0; repetition < 5; ++repetition)
+    full_samples.push_back(run_full_cpi());
+  const auto median_field = [&](double FullSample::*field) {
+    std::vector<double> values;
+    for (const auto& sample : full_samples) values.push_back(sample.*field);
+    std::sort(values.begin(), values.end());
+    return values[values.size() / 2];
+  };
+  const double full_median_ms = median_field(&FullSample::total);
+  const auto [minimum_full, maximum_full] = std::minmax_element(
+      full_samples.begin(), full_samples.end(),
+      [](const FullSample& left, const FullSample& right) { return left.total < right.total; });
+  const char* configured_full_limit = std::getenv("NR_ISAC_CUDA_FULL_CPI_MAX_MS");
+  const double full_limit_ms = configured_full_limit
+                                   ? std::strtod(configured_full_limit, nullptr) : 300.0;
+  std::printf("CUDA full CPI (copy+sync+correction+alignment+variance+detector+dual-map JSON): "
+              "warmup=%.3f ms min=%.3f ms median=%.3f ms max=%.3f ms limit=%.3f ms\n",
+              full_warmup.total, minimum_full->total, full_median_ms,
+              maximum_full->total, full_limit_ms);
+  std::printf("CUDA full CPI median stages: copy=%.3f sync=%.3f correction=%.3f "
+              "alignment=%.3f variance=%.3f detector=%.3f report=%.3f ms\n",
+              median_field(&FullSample::copy), median_field(&FullSample::sync),
+              median_field(&FullSample::correction),
+              median_field(&FullSample::alignment), median_field(&FullSample::variance),
+              median_field(&FullSample::detector), median_field(&FullSample::report));
+  if (!(full_median_ms < full_limit_ms)) {
+    std::fprintf(stderr, "CUDA full pipeline misses required bounded-backlog CPI throughput\n");
     return EXIT_FAILURE;
   }
   return EXIT_SUCCESS;

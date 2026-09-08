@@ -84,7 +84,18 @@ std::string sources_name(uint32_t mask)
 
 std::string build_report_json(const PipelineReport& r, const PipelineConfig& c)
 {
-  std::string out; out.reserve(c.capture_rvm ? r.detector.initial_likelihood.size() * 12 : 8192);
+  const size_t expected_map_cells = static_cast<size_t>(r.detector.axes.range_bins)
+                                    * r.detector.axes.rate_bins;
+  if (c.capture_rvm
+      && (r.detector.initial_likelihood.size() != expected_map_cells
+          || r.detector.initial_dl_likelihood.size() != expected_map_cells
+          || r.detector.dl_observed_re_count == 0))
+    throw std::invalid_argument("captured fused/DL range-Doppler map is absent or malformed");
+  std::string out;
+  out.reserve(c.capture_rvm
+                  ? (r.detector.initial_likelihood.size()
+                     + r.detector.initial_dl_likelihood.size()) * 12
+                  : 8192);
   out += "{\"schema\":\"oai.native_python_parity.v1\",\"rx_id\":"; string_value(out,c.rx_id);
   out += ",\"illuminator_id\":"; string_value(out,c.illuminator_id);
   out += ",\"cpi_sequence\":" + std::to_string(r.cpi_sequence);
@@ -173,6 +184,14 @@ std::string build_report_json(const PipelineReport& r, const PipelineConfig& c)
     bool first_value=true;for(uint32_t d=0;d<r.detector.axes.rate_bins;++d)for(uint32_t q=0;q<r.detector.axes.range_bins;++q){
       if(!first_value)out.push_back(',');
       first_value=false;const double value=r.detector.initial_likelihood[(size_t)q*r.detector.axes.rate_bins+d];
+      number(out,std::isfinite(value)&&value>0.0?value:0.0);}out+=']';
+    out += ",\"dl_rvm_layout\":\"doppler_major_range_minor\""
+        ",\"dl_rvm_source_mask\":" + std::to_string(DL_SOURCE_BITS)
+        + ",\"dl_rvm_observed_re_count\":" + std::to_string(r.detector.dl_observed_re_count)
+        + ",\"dl_rvm_blob\":[";
+    first_value=true;for(uint32_t d=0;d<r.detector.axes.rate_bins;++d)for(uint32_t q=0;q<r.detector.axes.range_bins;++q){
+      if(!first_value)out.push_back(',');
+      first_value=false;const double value=r.detector.initial_dl_likelihood[(size_t)q*r.detector.axes.rate_bins+d];
       number(out,std::isfinite(value)&&value>0.0?value:0.0);}out+=']';}
   out += "}\n";return out;
 }

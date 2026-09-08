@@ -16,6 +16,12 @@ namespace nr_isac {
 
 constexpr double C_MPS = 299792458.0;
 constexpr double PI = 3.141592653589793238462643383279502884;
+// Keep this definition identical to gpu_pipeline.py: CSI-RS, decoded PDSCH DM-RS,
+// PDSCH data, and blind PDSCH DM-RS are the DL measurement families.
+constexpr uint32_t DL_SOURCE_BITS = (1u << NR_ISAC_SRC_CSI_RS)
+                                    | (1u << NR_ISAC_SRC_PDSCH_DMRS)
+                                    | (1u << NR_ISAC_SRC_PDSCH_DATA)
+                                    | (1u << NR_ISAC_SRC_PDSCH_DMRS_BLIND);
 constexpr uint32_t UL_SOURCE_BITS = (1u << NR_ISAC_SRC_PUSCH_DMRS) | (1u << NR_ISAC_SRC_PUSCH_DATA);
 
 struct CfrWindow {
@@ -153,6 +159,10 @@ struct DetectorResult {
   std::vector<CleanComponent> components;
   std::vector<CleanComponent> objects;
   std::vector<double> initial_likelihood; // range-major [range][Doppler], raw score
+  // Diagnostic-only map made from DL rows on the same range/Doppler axes. It never feeds CLEAN,
+  // thresholding, AoA, or tracking and exists specifically for auditable DL-only visualizations.
+  std::vector<double> initial_dl_likelihood;
+  uint64_t dl_observed_re_count = 0;
   double initial_weighted_energy = 0.0;
   double final_weighted_energy = 0.0;
   double initial_residual_scale = 0.0;

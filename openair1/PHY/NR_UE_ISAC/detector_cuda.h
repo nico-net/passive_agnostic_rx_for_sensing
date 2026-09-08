@@ -64,6 +64,13 @@ public:
   std::vector<double> likelihood_map(const std::vector<std::complex<double>>& residual,
                                      uint32_t minimum_range_bin);
 
+  /** Evaluate a diagnostic map from the already-uploaded pre-CLEAN residual with alternate
+   * observation weights. This does not alter the detector's weights, residual, or CLEAN state.
+   */
+  std::vector<double> diagnostic_likelihood_map(const std::vector<double>& weights,
+                                                double denominator,
+                                                uint32_t minimum_range_bin);
+
   /** Evaluate objective, gradient, Hessian, and per-antenna coherent sums at one point. */
   CudaRefinementEvaluation evaluate(double range_bin, double doppler_bin);
 

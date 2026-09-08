@@ -44,6 +44,12 @@ std::vector<double> CudaDetectorBackend::likelihood_map(
   throw std::runtime_error("CUDA detector support was not compiled");
 }
 
+std::vector<double> CudaDetectorBackend::diagnostic_likelihood_map(
+    const std::vector<double>&, double, uint32_t)
+{
+  throw std::runtime_error("CUDA detector support was not compiled");
+}
+
 CudaRefinementEvaluation CudaDetectorBackend::evaluate(double, double)
 {
   throw std::runtime_error("CUDA detector support was not compiled");

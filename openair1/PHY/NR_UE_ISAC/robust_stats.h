@@ -21,7 +21,18 @@ inline double quantile(std::vector<double> values, double q)
   return values[lo] * (1.0 - frac) + values[hi] * frac;
 }
 
-inline double median(std::vector<double> values) { return quantile(std::move(values), 0.5); }
+inline double median(std::vector<double> values)
+{
+  if (values.empty()) throw std::invalid_argument("invalid median input");
+  const size_t upper = values.size() / 2;
+  std::nth_element(values.begin(), values.begin() + upper, values.end());
+  const double upper_value = values[upper];
+  if (values.size() & 1u) return upper_value;
+  // nth_element guarantees every preceding value is <= the selected upper median. The largest
+  // member of that partition is therefore exactly the lower median without an O(N log N) sort.
+  const double lower_value = *std::max_element(values.begin(), values.begin() + upper);
+  return 0.5 * (lower_value + upper_value);
+}
 
 inline double median_absolute_deviation(const std::vector<double>& values, double centre)
 {

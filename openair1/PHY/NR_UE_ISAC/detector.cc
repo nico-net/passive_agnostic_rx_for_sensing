@@ -15,6 +15,7 @@
 #include <limits>
 #include <memory>
 #include <numeric>
+#include <optional>
 #include <stdexcept>
 #include <vector>
 
@@ -450,6 +451,22 @@ DetectorResult detect_clean(const CfrWindow& window,
       residual[(size_t)a * cells + i] = window.observed[i] ? window.values[(size_t)a * cells + i]
                                                            : std::complex<float>();
 
+  std::optional<Plan> dl_capture_plan;
+  if (config.capture_rvm) {
+    dl_capture_plan = plan;
+    dl_capture_plan->denominator = 0.0;
+    for (uint32_t row = 0; row < window.rows; ++row) {
+      const bool use_dl_row = (window.row_source_mask[row] & DL_SOURCE_BITS) != 0;
+      for (uint32_t subcarrier = 0; subcarrier < window.subcarriers; ++subcarrier) {
+        const size_t cell = static_cast<size_t>(row) * window.subcarriers + subcarrier;
+        if (!use_dl_row) dl_capture_plan->weights[cell] = 0.0;
+        dl_capture_plan->denominator += dl_capture_plan->weights[cell];
+      }
+    }
+    if (!(dl_capture_plan->denominator > 0.0))
+      throw std::runtime_error("DL-only range-Doppler capture requested for a CPI without DL rows");
+  }
+
   CudaDetectorBackend* cuda_backend = nullptr;
   const bool require_cuda = cuda_required();
   const bool have_cuda = detector_cuda_available();
@@ -536,6 +553,14 @@ DetectorResult detect_clean(const CfrWindow& window,
     const auto map_finished = DetectorClock::now();
     if (iteration == 0) {
       result.initial_likelihood = map;
+      if (dl_capture_plan) {
+        result.dl_observed_re_count = static_cast<uint64_t>(dl_capture_plan->denominator);
+        result.initial_dl_likelihood = cuda_backend
+            ? cuda_backend->diagnostic_likelihood_map(
+                  dl_capture_plan->weights, dl_capture_plan->denominator, minimum_range_bin)
+            : likelihood_map_scaled(residual, window.antennas, window.rows, window.subcarriers,
+                                    window.fc_hz, *dl_capture_plan, minimum_range_bin);
+      }
       if (cuda_backend) {
         result.initial_weighted_energy = cuda_backend->weighted_energy();
         result.initial_residual_scale = result.initial_weighted_energy / detector_denominator;
