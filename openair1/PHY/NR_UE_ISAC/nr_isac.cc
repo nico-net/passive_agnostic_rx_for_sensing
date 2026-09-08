@@ -140,7 +140,7 @@ extern "C" void nr_isac_init(void)
   int p_enable=0,p_num_ues=1,p_sync=1,p_family_static=1,p_track=1,p_hierarchical=1;
   int p_aoa=0,p_aoa_ul=0,p_capture=0,p_min_rows=16,p_max_rows=512,p_bootstrap=3,p_pending_mib=2048;
   int p_max_components=8,p_max_objects=8,p_train_r=12,p_train_d=12,p_guard_r=2,p_guard_d=2;
-  int p_subslot_symbols=0,p_subslot_min_re=600;
+  int p_subslot_symbols=0,p_subslot_min_re=600,p_admission_start=0,p_admission_slots=0;
   double p_min_dwell=.006,p_max_dwell=.032,p_k_sigma=3.0,p_migration=.5,p_phase=PI/4.0;
   double p_max_speed=50.0,p_max_range=312.283810417,p_path_delay=312.283810417;
   double p_path_doppler=0.0,p_significance=-10.0,p_false_intensity=0.01/0.0305;
@@ -192,6 +192,8 @@ extern "C" void nr_isac_init(void)
     integer("subslot_symbols","sub-slot CFR sampling groups",0,&p_subslot_symbols,0),
     integer("subslot_min_re","minimum REs per sub-slot row",0,&p_subslot_min_re,600),
     real("subslot_min_snr_db","minimum sub-slot SNR",&p_subslot_snr,0.0),
+    integer("admission_start_slot","absolute RF slot at which sensing FIFO admission opens",0,&p_admission_start,0),
+    integer("admission_num_slots","finite RF-slot admission span; zero disables the gate",0,&p_admission_slots,0),
   };
   config_get(config_get_if(),params,sizeof(params)/sizeof(params[0]),"sensing");
   if (!p_enable) return;
@@ -226,6 +228,18 @@ extern "C" void nr_isac_init(void)
   pipeline.illuminator_id=p_illum?p_illum:"gnb1";pipeline.report_path=p_report?p_report:"";
   pipeline.report_endpoint=p_endpoint?p_endpoint:"";pipeline.subslot_symbols=std::max(0,p_subslot_symbols);
   pipeline.subslot_min_re=std::max(0,p_subslot_min_re);pipeline.subslot_min_snr_db=p_subslot_snr;
+  if (p_admission_start < 0 || p_admission_slots < 0) {
+    LOG_E(PHY,"SENSING: admission_start_slot and admission_num_slots must be non-negative\\n"); return;
+  }
+  if (p_admission_slots > 0) {
+    const uint64_t start = static_cast<uint64_t>(p_admission_start);
+    const uint64_t slots = static_cast<uint64_t>(p_admission_slots);
+    if (start > std::numeric_limits<uint64_t>::max() - slots) {
+      LOG_E(PHY,"SENSING: admission slot range overflows\\n"); return;
+    }
+    pipeline.admission_window_enabled=true;pipeline.admission_start_slot=start;
+    pipeline.admission_end_slot=start+slots;
+  }
   try { engine=std::make_unique<SensingEngine>(pipeline,275,aoa_antennas?aoa_antennas:1); }
   catch(const std::exception& e){LOG_E(PHY,"SENSING: invalid native configuration: %s\n",e.what());return;}
   enabled.store(true,std::memory_order_release);

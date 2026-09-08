@@ -279,11 +279,50 @@ void test_causal_cpi_pipeline()
   require(reports==8,"causal close/drain/restart did not preserve all eight expected CPIs");
   std::remove(path.c_str());
 }
+
+void test_finite_admission_window()
+{
+  const std::string path="/tmp/nr_isac_admission_window_test.jsonl";
+  std::remove(path.c_str());
+  PipelineConfig c;
+  c.sources_mask=1u<<NR_ISAC_SRC_CSI_RS;
+  c.duration_bank_s={0.001};c.bootstrap_duration_index=0;
+  c.minimum_dwell_s=0.001;c.maximum_dwell_s=0.001;
+  c.minimum_rows=2;c.maximum_rows=4;
+  c.sync_enable=false;c.family_static=false;c.tracker_enable=false;
+  c.maximum_components=1;c.maximum_objects=1;
+  c.report_path=path;c.out_path.clear();
+  c.admission_window_enabled=true;c.admission_start_slot=20;c.admission_end_slot=24;
+  nr_isac_carrier_t carrier{};
+  carrier.nof_prb=2;carrier.scs_hz=30000;carrier.dl_center_hz=3499440000;
+  carrier.slots_per_frame=20;carrier.pci=1;
+  std::vector<std::complex<float>> h(24,{1.0f,0.0f});
+  std::vector<uint32_t> k(24),symbol(24,2);
+  for(uint32_t i=0;i<24;++i)k[i]=i;
+  {
+    SensingEngine engine(c,2,1);engine.start();
+    for(uint32_t slot=0;slot<30;++slot)
+      engine.submit(slot,0.0f,NR_ISAC_SRC_CSI_RS,carrier,h.data(),1,
+                    k.data(),symbol.data(),h.size(),1.0f);
+    engine.stop();
+  }
+  std::ifstream input(path);require(input.good(),"admission-gated pipeline emitted no report file");
+  std::string line;uint32_t reports=0;
+  while(std::getline(input,line)) {
+    ++reports;
+    require(line.find("\"first_row_time_ns\":10000000")!=std::string::npos,
+            "admission gate admitted a row before its configured start slot");
+    require(line.find("\"sensing_admission\":{\"enabled\":true,\"start_radio_slot\":20,\"end_radio_slot_exclusive\":24")!=std::string::npos,
+            "admission configuration is not attested in the report");
+  }
+  require(reports==1,"finite admission window emitted an unexpected CPI count");
+  std::remove(path.c_str());
+}
 }
 
 int main()
 {
-  try {test_fft();test_adaptive_threshold();test_detector();test_aoa();test_enu_geometry();test_variable_cpi();test_validation_report_compatibility();test_causal_cpi_pipeline();}
+  try {test_fft();test_adaptive_threshold();test_detector();test_aoa();test_enu_geometry();test_variable_cpi();test_validation_report_compatibility();test_causal_cpi_pipeline();test_finite_admission_window();}
   catch(const std::exception& e){std::fprintf(stderr,"python parity test failed: %s\n",e.what());return EXIT_FAILURE;}
   std::puts("native sensing golden parity checks passed");return EXIT_SUCCESS;
 }

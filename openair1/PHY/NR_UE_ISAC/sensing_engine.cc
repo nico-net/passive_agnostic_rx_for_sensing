@@ -33,6 +33,7 @@ int64_t row_key(int64_t absolute_slot, double fraction)
 
 struct SensingEngine::Snapshot {
   uint32_t slot = 0;
+  int64_t absolute_slot = 0;
   float fraction = 0.0f;
   nr_isac_source_t source = NR_ISAC_SRC_CSI_RS;
   nr_isac_carrier_t carrier{};
@@ -205,6 +206,15 @@ void SensingEngine::submit(uint32_t slot, float fraction, nr_isac_source_t sourc
   std::lock_guard<std::mutex> admission(submission_mutex_);
   if (!running_.load(std::memory_order_relaxed) || !cfr || !subcarrier || !symbol
       || !re || re > maximum_re_) return;
+  // Do this while holding submission_mutex_: the callbacks originate from several PHY workers,
+  // whereas the old accumulator-only unwrap happens too late to prevent warm-up rows entering
+  // the bounded snapshot FIFO.  The stamped value also preserves the absolute clock when the
+  // first admitted raw SFN slot is after a 1024-frame wrap.
+  const int64_t absolute_slot = unwrap_submission_slot(slot, carrier);
+  if (config_.admission_window_enabled
+      && (absolute_slot < static_cast<int64_t>(config_.admission_start_slot)
+          || absolute_slot >= static_cast<int64_t>(config_.admission_end_slot)))
+    return;
   Snapshot* value = nullptr;
   if (!free_.try_pop(value) || !value) {
     const uint64_t dropped = dropped_.fetch_add(1, std::memory_order_relaxed) + 1;
@@ -214,7 +224,8 @@ void SensingEngine::submit(uint32_t slot, float fraction, nr_isac_source_t sourc
                    static_cast<unsigned long long>(dropped));
     return;
   }
-  value->slot = slot; value->fraction = fraction >= 0.0f && fraction < 1.0f ? fraction : 0.0f;
+  value->slot = slot; value->absolute_slot = absolute_slot;
+  value->fraction = fraction >= 0.0f && fraction < 1.0f ? fraction : 0.0f;
   value->source = source; value->carrier = carrier;
   value->antennas = std::min(std::max(1u, antennas), requested_antennas_);
   value->resource_elements = re; value->noise_variance = noise;
@@ -281,7 +292,7 @@ void SensingEngine::finish_pending_windows()
   wait_for_processing();
 }
 
-int64_t SensingEngine::unwrap_slot(uint32_t raw, const nr_isac_carrier_t& carrier)
+int64_t SensingEngine::unwrap_submission_slot(uint32_t raw, const nr_isac_carrier_t& carrier)
 {
   const uint32_t slots_per_frame = carrier.slots_per_frame
       ? carrier.slots_per_frame
@@ -304,7 +315,8 @@ void SensingEngine::begin_geometry(const nr_isac_carrier_t& carrier)
 {
   carrier_ = carrier; have_geometry_ = true; rows_.clear(); active_plan_.reset();
   pending_row_bytes_ = 0;
-  have_slot_clock_ = false; latest_absolute_slot_ = 0; latest_raw_slot_ = 0;
+  // Slot unwrapping is deliberately retained across geometry construction.  Admission can start
+  // after the raw SFN clock wraps; resetting here would relabel the first admitted row as slot 0.
   air_origin_slots_.reset(); last_closed_slots_.reset();
   clock_tracker_.reset(); planner_.reset();
   std::lock_guard<std::mutex> lock(tracker_mutex_);
@@ -373,7 +385,7 @@ void SensingEngine::consume(const Snapshot& s)
     finish_pending_windows();
     begin_geometry(s.carrier);
   }
-  const int64_t absolute_slot = unwrap_slot(s.slot, s.carrier);
+  const int64_t absolute_slot = s.absolute_slot;
   const double fraction = std::clamp(static_cast<double>(s.fraction), 0.0,
                                      std::nextafter(1.0, 0.0));
   const int64_t key = row_key(absolute_slot, fraction);

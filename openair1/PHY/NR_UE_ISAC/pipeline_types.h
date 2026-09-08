@@ -243,6 +243,11 @@ struct PipelineConfig {
   std::string report_path;
   std::string report_endpoint;
   bool capture_rvm = false;
+  // The RF/CIR clock is allowed to warm up before sensing starts.  When enabled, snapshots outside
+  // [admission_start_slot, admission_end_slot) are rejected before they enter the sensing FIFO.
+  bool admission_window_enabled = false;
+  uint64_t admission_start_slot = 0;
+  uint64_t admission_end_slot = 0;
   uint32_t subslot_symbols = 0;
   uint32_t subslot_min_re = 600;
   float subslot_min_snr_db = 0.0f;

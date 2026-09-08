@@ -112,6 +112,11 @@ std::string build_report_json(const PipelineReport& r, const PipelineConfig& c)
   out += ",\"aoa_policy\":{\"master\":" + std::string(c.aoa_enable?"true":"false")
       + ",\"uplink_requested\":" + std::string(c.aoa_ul_enable_requested?"true":"false")
       + ",\"uplink\":" + std::string(c.aoa_ul_enable?"true":"false") + '}';
+  out += ",\"sensing_admission\":{\"enabled\":"
+      + std::string(c.admission_window_enabled?"true":"false")
+      + ",\"start_radio_slot\":" + std::to_string(c.admission_start_slot)
+      + ",\"end_radio_slot_exclusive\":" + std::to_string(c.admission_end_slot)
+      + ",\"subslot_symbols\":" + std::to_string(c.subslot_symbols) + '}';
   out += ",\"sync\":{\"rows\":"+std::to_string(r.sync.rows)+",\"admitted_rows\":"
       +std::to_string(r.sync.admitted_rows)+",\"los_bins\":";number(out,r.sync.los_bins);
   out += ",\"sto\":{\"mean_frac_bin\":";number(out,r.sync.sto_bins);out += ",\"applied\":";

@@ -73,7 +73,7 @@ private:
   void make_pending_row_room(size_t incoming_bytes);
   void erase_rows(const std::vector<int64_t>& keys);
   void consume(const Snapshot& snapshot);
-  int64_t unwrap_slot(uint32_t slot, const nr_isac_carrier_t& carrier);
+  int64_t unwrap_submission_slot(uint32_t slot, const nr_isac_carrier_t& carrier);
   void begin_geometry(const nr_isac_carrier_t& carrier);
   void ensure_plan();
   void close_ready_windows(bool flush);
