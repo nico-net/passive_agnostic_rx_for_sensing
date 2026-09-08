@@ -77,6 +77,47 @@ SensingEngine::Snapshot* SensingEngine::PointerQueue::wait_pop()
   Snapshot* value = queue_.front(); queue_.pop_front(); return value;
 }
 
+void SensingEngine::WindowQueue::push(std::unique_ptr<WindowTask> value)
+{
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (closed_)
+      throw std::logic_error("cannot enqueue a CPI after shutdown");
+    if (!queue_.empty())
+      throw std::logic_error("causal CPI queue already contains a window");
+    queue_.push_back(std::move(value));
+  }
+  condition_.notify_one();
+}
+
+std::unique_ptr<SensingEngine::WindowTask> SensingEngine::WindowQueue::wait_pop()
+{
+  std::unique_lock<std::mutex> lock(mutex_);
+  condition_.wait(lock, [&] { return closed_ || !queue_.empty(); });
+  if (queue_.empty())
+    return {};
+  auto value = std::move(queue_.front());
+  queue_.pop_front();
+  return value;
+}
+
+void SensingEngine::WindowQueue::close()
+{
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    closed_ = true;
+  }
+  condition_.notify_all();
+}
+
+void SensingEngine::WindowQueue::reopen()
+{
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (!queue_.empty())
+    throw std::logic_error("cannot reopen a CPI queue before it drains");
+  closed_ = false;
+}
+
 SensingEngine::SensingEngine(PipelineConfig config, uint32_t maximum_prb,
                              uint32_t requested_antennas)
     : config_(std::move(config)), maximum_prb_(maximum_prb),
@@ -103,6 +144,8 @@ SensingEngine::SensingEngine(PipelineConfig config, uint32_t maximum_prb,
       || !(std::isfinite(config_.false_object_intensity_per_s)
            && config_.false_object_intensity_per_s > 0.0))
     throw std::invalid_argument("invalid CUT-excluded adaptive-threshold configuration");
+  if (config_.pending_row_budget_bytes < 64ULL * 1024ULL * 1024ULL)
+    throw std::invalid_argument("pending-row backlog budget must be at least 64 MiB");
   if (config_.aoa_ul_enable && !config_.aoa_enable)
     throw std::invalid_argument("AOA_UL_ENABLE cannot be active when AOA_ENABLE is off");
   const bool surveyed_baseline = norm(config_.tx_position - config_.rx_position) > 0.0;
@@ -133,15 +176,24 @@ SensingEngine::~SensingEngine() { stop(); }
 
 void SensingEngine::start()
 {
+  std::lock_guard<std::mutex> lock(submission_mutex_);
   if (running_.exchange(true)) return;
-  worker_ = std::thread(&SensingEngine::run, this);
+  windows_.reopen();
+  processing_worker_ = std::thread(&SensingEngine::processing_run, this);
+  accumulation_worker_ = std::thread(&SensingEngine::accumulation_run, this);
 }
 
 void SensingEngine::stop()
 {
-  if (!running_.exchange(false)) return;
-  ready_.push(nullptr);
-  if (worker_.joinable()) worker_.join();
+  {
+    std::lock_guard<std::mutex> lock(submission_mutex_);
+    if (!running_.exchange(false)) return;
+    // Admission is closed while the FIFO sentinel is inserted, so a producer can never queue a
+    // snapshot behind it and leave that snapshot unconsumed during shutdown.
+    ready_.push(nullptr);
+  }
+  if (accumulation_worker_.joinable()) accumulation_worker_.join();
+  if (processing_worker_.joinable()) processing_worker_.join();
 }
 
 void SensingEngine::submit(uint32_t slot, float fraction, nr_isac_source_t source,
@@ -150,25 +202,17 @@ void SensingEngine::submit(uint32_t slot, float fraction, nr_isac_source_t sourc
                            const uint32_t* subcarrier, const uint32_t* symbol,
                            uint32_t re, float noise)
 {
+  std::lock_guard<std::mutex> admission(submission_mutex_);
   if (!running_.load(std::memory_order_relaxed) || !cfr || !subcarrier || !symbol
       || !re || re > maximum_re_) return;
   Snapshot* value = nullptr;
   if (!free_.try_pop(value) || !value) {
-    /* Detection is intentionally single-threaded because tracker state is ordered.  Under overload,
-     * retaining the oldest queued occurrence makes the live report clock fall farther behind on
-     * every CPI while every current observation is discarded.  Reuse the oldest not-yet-consumed
-     * snapshot instead: the drop count remains exact, but the next CPI is built from current air
-     * time and the real-time tracker can recover after a long CLEAN evaluation. */
-    Snapshot* oldest = nullptr;
-    const bool evicted = ready_.try_pop(oldest);
-    if (!evicted || !oldest) {
-      if (evicted)
-        ready_.push(nullptr); // Preserve the stop sentinel if submit raced shutdown.
-      dropped_.fetch_add(1, std::memory_order_relaxed);
-      return;
-    }
-    value = oldest;
-    dropped_.fetch_add(1, std::memory_order_relaxed);
+    const uint64_t dropped = dropped_.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (dropped == 1 || (dropped & (dropped - 1)) == 0)
+      std::fprintf(stderr,
+                   "SENSING: CFR snapshot pool exhausted; run is incomplete (total=%llu)\n",
+                   static_cast<unsigned long long>(dropped));
+    return;
   }
   value->slot = slot; value->fraction = fraction >= 0.0f && fraction < 1.0f ? fraction : 0.0f;
   value->source = source; value->carrier = carrier;
@@ -182,7 +226,7 @@ void SensingEngine::submit(uint32_t slot, float fraction, nr_isac_source_t sourc
   ready_.push(value);
 }
 
-void SensingEngine::run()
+void SensingEngine::accumulation_run()
 {
   for (;;) {
     Snapshot* value = ready_.wait_pop();
@@ -191,8 +235,50 @@ void SensingEngine::run()
     catch (const std::exception& e) { std::fprintf(stderr, "SENSING: dropped CFR occurrence: %s\n", e.what()); }
     value->cfr.clear(); value->subcarrier.clear(); value->symbol.clear(); free_.push(value);
   }
-  try { close_ready_windows(true); }
+  try { finish_pending_windows(); }
   catch (const std::exception& e) { std::fprintf(stderr, "SENSING: final window failed: %s\n", e.what()); }
+  windows_.close();
+}
+
+void SensingEngine::processing_run()
+{
+  while (auto task = windows_.wait_pop()) {
+    try {
+      process_window(std::move(task->window), task->plan, task->air_origin_slots,
+                     task->sequence);
+    }
+    catch (const std::exception& e) {
+      dropped_cpis_.fetch_add(1, std::memory_order_relaxed);
+      std::fprintf(stderr, "SENSING: dropped complete CPI #%llu: %s\n",
+                   static_cast<unsigned long long>(task->sequence), e.what());
+    }
+    {
+      std::lock_guard<std::mutex> lock(processing_mutex_);
+      processing_in_flight_ = false;
+    }
+    processing_condition_.notify_one();
+  }
+}
+
+bool SensingEngine::processing_in_flight() const
+{
+  std::lock_guard<std::mutex> lock(processing_mutex_);
+  return processing_in_flight_;
+}
+
+void SensingEngine::wait_for_processing()
+{
+  std::unique_lock<std::mutex> lock(processing_mutex_);
+  processing_condition_.wait(lock, [&] { return !processing_in_flight_; });
+}
+
+void SensingEngine::finish_pending_windows()
+{
+  while (!rows_.empty()) {
+    wait_for_processing();
+    close_ready_windows(true);
+  }
+  wait_for_processing();
 }
 
 int64_t SensingEngine::unwrap_slot(uint32_t raw, const nr_isac_carrier_t& carrier)
@@ -217,34 +303,97 @@ int64_t SensingEngine::unwrap_slot(uint32_t raw, const nr_isac_carrier_t& carrie
 void SensingEngine::begin_geometry(const nr_isac_carrier_t& carrier)
 {
   carrier_ = carrier; have_geometry_ = true; rows_.clear(); active_plan_.reset();
+  pending_row_bytes_ = 0;
   have_slot_clock_ = false; latest_absolute_slot_ = 0; latest_raw_slot_ = 0;
   air_origin_slots_.reset(); last_closed_slots_.reset();
   clock_tracker_.reset(); planner_.reset();
+  std::lock_guard<std::mutex> lock(tracker_mutex_);
   if (motion_tracker_) motion_tracker_->reset();
   if (hierarchical_tracker_) hierarchical_tracker_->reset();
+}
+
+size_t SensingEngine::pending_row_storage_bytes(const PendingRow& row) const
+{
+  return row.cfr.capacity() * sizeof(std::complex<float>)
+         + row.weights.capacity() * sizeof(float);
+}
+
+void SensingEngine::make_pending_row_room(size_t incoming)
+{
+  if (pending_row_bytes_ + incoming <= config_.pending_row_budget_bytes)
+    return;
+  const uint64_t low_watermark = config_.pending_row_budget_bytes * 3 / 4;
+  uint64_t discarded = 0;
+  double last_discarded = 0.0;
+  while (!rows_.empty() && pending_row_bytes_ + incoming > low_watermark) {
+    auto oldest = rows_.begin();
+    const size_t bytes = pending_row_storage_bytes(oldest->second);
+    pending_row_bytes_ = bytes <= pending_row_bytes_ ? pending_row_bytes_ - bytes : 0;
+    last_discarded = oldest->second.time_slots;
+    rows_.erase(oldest);
+    ++discarded;
+  }
+  if (!discarded)
+    throw std::runtime_error("one pending CFR row exceeds the configured backlog budget");
+  last_closed_slots_ = std::max(last_closed_slots_.value_or(last_discarded), last_discarded);
+  active_plan_.reset();
+  const uint64_t rows = discarded_pending_rows_.fetch_add(discarded, std::memory_order_relaxed)
+                        + discarded;
+  const uint64_t intervals = discarded_pending_intervals_.fetch_add(1, std::memory_order_relaxed) + 1;
+  std::fprintf(stderr,
+               "SENSING: discarded %llu oldest unplanned rows at the backlog ceiling "
+               "(rows=%llu intervals=%llu); run is incomplete\n",
+               static_cast<unsigned long long>(discarded),
+               static_cast<unsigned long long>(rows),
+               static_cast<unsigned long long>(intervals));
+}
+
+void SensingEngine::erase_rows(const std::vector<int64_t>& keys)
+{
+  for (int64_t key : keys) {
+    auto found = rows_.find(key);
+    if (found == rows_.end())
+      continue;
+    const size_t bytes = pending_row_storage_bytes(found->second);
+    pending_row_bytes_ = bytes <= pending_row_bytes_ ? pending_row_bytes_ - bytes : 0;
+    rows_.erase(found);
+  }
 }
 
 void SensingEngine::consume(const Snapshot& s)
 {
   const uint32_t subcarriers = s.carrier.nof_prb * 12u;
   if (!subcarriers || !s.carrier.scs_hz || !s.carrier.dl_center_hz) return;
-  if (!have_geometry_ || carrier_.nof_prb != s.carrier.nof_prb
-      || carrier_.scs_hz != s.carrier.scs_hz || carrier_.dl_center_hz != s.carrier.dl_center_hz
-      || carrier_.pci != s.carrier.pci) begin_geometry(s.carrier);
+  if (!have_geometry_) {
+    begin_geometry(s.carrier);
+  } else if (carrier_.nof_prb != s.carrier.nof_prb
+             || carrier_.scs_hz != s.carrier.scs_hz
+             || carrier_.dl_center_hz != s.carrier.dl_center_hz
+             || carrier_.pci != s.carrier.pci) {
+    finish_pending_windows();
+    begin_geometry(s.carrier);
+  }
   const int64_t absolute_slot = unwrap_slot(s.slot, s.carrier);
   const double fraction = std::clamp(static_cast<double>(s.fraction), 0.0,
                                      std::nextafter(1.0, 0.0));
   const int64_t key = row_key(absolute_slot, fraction);
   const double time_slots = absolute_slot + fraction;
-  if (last_closed_slots_ && time_slots <= *last_closed_slots_ + 1e-9) { ++stale_; return; }
+  if (last_closed_slots_ && time_slots <= *last_closed_slots_ + 1e-9) {
+    stale_.fetch_add(1, std::memory_order_relaxed);
+    return;
+  }
   auto found = rows_.find(key);
   if (found == rows_.end()) {
+    const size_t incoming = (size_t)requested_antennas_ * subcarriers
+                            * (sizeof(std::complex<float>) + sizeof(float));
+    make_pending_row_room(incoming);
     PendingRow row;
     row.time_slots = time_slots; row.raw_slot = s.slot; row.slot_fraction = fraction;
     row.first_utc_ns = s.utc_ns;
     row.cfr.assign((size_t)requested_antennas_ * subcarriers, {});
     row.weights.assign((size_t)requested_antennas_ * subcarriers, 0.0f);
     found = rows_.emplace(key, std::move(row)).first;
+    pending_row_bytes_ += pending_row_storage_bytes(found->second);
   }
   PendingRow& row = found->second;
   row.source_mask |= 1u << static_cast<uint32_t>(s.source);
@@ -267,14 +416,39 @@ void SensingEngine::consume(const Snapshot& s)
       row.weights[index] = total;
     }
   }
-  ensure_plan(); close_ready_windows(false);
+  close_ready_windows(false);
 }
 
 TrackSnapshot SensingEngine::planning_snapshot(double time) const
 {
+  std::lock_guard<std::mutex> lock(tracker_mutex_);
   if (hierarchical_tracker_) return hierarchical_tracker_->predict_to(time);
   if (motion_tracker_) return motion_tracker_->predict_to(time);
   TrackSnapshot value; value.status = "uninitialized"; value.air_time_s = time; return value;
+}
+
+void SensingEngine::enqueue_window(CfrWindow window, const CpiPlan& plan)
+{
+  auto task = std::make_unique<WindowTask>();
+  task->window = std::move(window);
+  task->plan = plan;
+  task->air_origin_slots = air_origin_slots_.value_or(0.0);
+  task->sequence = ++cpi_sequence_;
+  {
+    std::lock_guard<std::mutex> lock(processing_mutex_);
+    if (processing_in_flight_)
+      throw std::logic_error("cannot plan a CPI before the prior tracker update");
+    processing_in_flight_ = true;
+  }
+  try { windows_.push(std::move(task)); }
+  catch (...) {
+    {
+      std::lock_guard<std::mutex> lock(processing_mutex_);
+      processing_in_flight_ = false;
+    }
+    processing_condition_.notify_one();
+    throw;
+  }
 }
 
 void SensingEngine::ensure_plan()
@@ -296,34 +470,38 @@ void SensingEngine::ensure_plan()
 void SensingEngine::close_ready_windows(bool flush)
 {
   for (;;) {
+    if (processing_in_flight()) return;
     ensure_plan(); if (!active_plan_ || rows_.empty()) return;
     const double first = rows_.begin()->second.time_slots;
     const double cutoff = first + active_plan_->target_dwell_s / slot_duration_s(carrier_.scs_hz);
     auto after = rows_.upper_bound(static_cast<int64_t>(
         std::floor(cutoff * ROW_TICKS_PER_SLOT + 1e-6)));
-    bool row_ceiling = rows_.size() > active_plan_->maximum_rows;
-    if (!flush && after == rows_.end() && !row_ceiling) return;
+    const bool row_ceiling = rows_.size() >= active_plan_->maximum_rows;
+    const bool dwell_ready = after != rows_.end();
+    if (!flush && !dwell_ready && !row_ceiling) return;
     std::vector<int64_t> keys;
-    if (row_ceiling) {
+    if (dwell_ready) {
+      for (auto it = rows_.begin(); it != after && keys.size() < active_plan_->maximum_rows; ++it)
+        keys.push_back(it->first);
+    } else if (row_ceiling) {
       auto it = rows_.begin();
       for (uint32_t n = 0; n < active_plan_->maximum_rows && it != rows_.end(); ++n, ++it)
         keys.push_back(it->first);
-    } else if (flush) {
-      for (const auto& item : rows_) keys.push_back(item.first);
     } else {
-      for (auto it = rows_.begin(); it != after; ++it) keys.push_back(it->first);
+      for (const auto& item : rows_) keys.push_back(item.first);
     }
     if (keys.empty()) return;
     const double span = rows_.at(keys.back()).time_slots - rows_.at(keys.front()).time_slots;
     if (keys.size() >= active_plan_->minimum_rows && span > 0.0) {
       CfrWindow window = build_window(keys);
       const CpiPlan plan = *active_plan_;
-      for (int64_t key : keys) rows_.erase(key);
+      erase_rows(keys);
       last_closed_slots_ = window.row_time_slots.back(); active_plan_.reset();
-      process_window(std::move(window), plan);
+      enqueue_window(std::move(window), plan);
+      return; // Python parity: plan the next CPI only after this tracker update finishes.
     } else {
       const double last_time_slots = rows_.at(keys.back()).time_slots;
-      for (int64_t key : keys) rows_.erase(key);
+      erase_rows(keys);
       last_closed_slots_ = last_time_slots;
       active_plan_.reset();
     }
@@ -374,20 +552,27 @@ AdaptiveClutterMap* SensingEngine::clutter_map()
   return motion_tracker_ ? &motion_tracker_->clutter_map() : nullptr;
 }
 
-void SensingEngine::process_window(CfrWindow window, const CpiPlan& plan)
+void SensingEngine::process_window(CfrWindow window, const CpiPlan& plan,
+                                   double air_origin_slots, uint64_t sequence)
 {
-  PipelineReport report; report.cpi_sequence = ++cpi_sequence_; report.start_utc_ns = window.start_utc_ns;
+  PipelineReport report; report.cpi_sequence = sequence; report.start_utc_ns = window.start_utc_ns;
   const double slot_ns = slot_duration_s(window.scs_hz) * 1e9;
   report.first_row_time_ns = std::llround(window.row_time_slots.front() * slot_ns);
   report.last_row_time_ns = std::llround(window.row_time_slots.back() * slot_ns);
   report.cpi_duration_ns = std::max<int64_t>(0, report.last_row_time_ns - report.first_row_time_ns);
-  report.plan = plan; report.dropped_submissions = dropped_.load(std::memory_order_relaxed); report.stale_submissions = stale_;
+  report.plan = plan;
+  report.dropped_submissions = dropped_.load(std::memory_order_relaxed);
+  report.dropped_cpis = dropped_cpis_.load(std::memory_order_relaxed);
+  report.discarded_pending_rows = discarded_pending_rows_.load(std::memory_order_relaxed);
+  report.discarded_pending_intervals = discarded_pending_intervals_.load(std::memory_order_relaxed);
+  report.stale_submissions = stale_.load(std::memory_order_relaxed);
   for (uint32_t mask : window.row_source_mask) {
     report.sources_mask |= mask;
   }
   report.source_occurrences = window.source_occurrences;
   const double midpoint_slots = 0.5 * (window.row_time_slots.front() + window.row_time_slots.back());
-  report.midpoint_air_time_s = (midpoint_slots - *air_origin_slots_) * slot_duration_s(window.scs_hz);
+  report.midpoint_air_time_s = (midpoint_slots - air_origin_slots)
+                               * slot_duration_s(window.scs_hz);
   CfrWindow corrected = window;
   report.sync.rows = window.rows;
   if (config_.sync_enable && window.rows >= 3) {
@@ -444,15 +629,18 @@ void SensingEngine::process_window(CfrWindow window, const CpiPlan& plan)
     report.detections.push_back(std::move(d));
   }
   attach_aoa(corrected, report.detector.components, report.detector.axes, config_, report.detections);
-  if (hierarchical_tracker_) {
-    hierarchical_tracker_->update(report.midpoint_air_time_s, report.detections,
-        report.detector.axes.range_res_m, report.detector.axes.rate_res_mps,
-        report.cpi_sequence, report.detector.axes.dwell_s);
-    report.tracks = hierarchical_tracker_->snapshots();
-  } else if (motion_tracker_) {
-    motion_tracker_->update(report.midpoint_air_time_s, report.detections,
-        report.detector.axes.range_res_m, report.detector.axes.rate_res_mps, report.cpi_sequence);
-    report.tracks = motion_tracker_->snapshots();
+  {
+    std::lock_guard<std::mutex> tracker_lock(tracker_mutex_);
+    if (hierarchical_tracker_) {
+      hierarchical_tracker_->update(report.midpoint_air_time_s, report.detections,
+          report.detector.axes.range_res_m, report.detector.axes.rate_res_mps,
+          report.cpi_sequence, report.detector.axes.dwell_s);
+      report.tracks = hierarchical_tracker_->snapshots();
+    } else if (motion_tracker_) {
+      motion_tracker_->update(report.midpoint_air_time_s, report.detections,
+          report.detector.axes.range_res_m, report.detector.axes.rate_res_mps, report.cpi_sequence);
+      report.tracks = motion_tracker_->snapshots();
+    }
   }
   writer_->emit(report);
 }

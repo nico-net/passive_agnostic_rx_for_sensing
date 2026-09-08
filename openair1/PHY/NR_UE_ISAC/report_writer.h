@@ -22,6 +22,9 @@ struct PipelineReport {
   uint32_t sources_mask = 0;
   std::array<uint64_t, NR_ISAC_SRC_COUNT> source_occurrences{};
   uint64_t dropped_submissions = 0;
+  uint64_t dropped_cpis = 0;
+  uint64_t discarded_pending_rows = 0;
+  uint64_t discarded_pending_intervals = 0;
   uint64_t stale_submissions = 0;
   uint32_t covariance_family_count = 0;
   uint64_t covariance_difference_count = 0;

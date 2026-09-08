@@ -138,7 +138,7 @@ extern "C" void nr_isac_init(void)
 {
   if (enabled.load(std::memory_order_relaxed)) return;
   int p_enable=0,p_num_ues=1,p_sync=1,p_family_static=1,p_track=1,p_hierarchical=1;
-  int p_aoa=0,p_aoa_ul=0,p_capture=0,p_min_rows=16,p_max_rows=512,p_bootstrap=3;
+  int p_aoa=0,p_aoa_ul=0,p_capture=0,p_min_rows=16,p_max_rows=512,p_bootstrap=3,p_pending_mib=2048;
   int p_max_components=8,p_max_objects=8,p_train_r=12,p_train_d=12,p_guard_r=2,p_guard_d=2;
   int p_subslot_symbols=0,p_subslot_min_re=600;
   double p_min_dwell=.006,p_max_dwell=.032,p_k_sigma=3.0,p_migration=.5,p_phase=PI/4.0;
@@ -158,6 +158,7 @@ extern "C" void nr_isac_init(void)
     real("maximum_dwell_s","maximum legal coherent dwell",&p_max_dwell,.032),
     integer("minimum_rows","minimum measured rows",0,&p_min_rows,16),
     integer("maximum_rows","measured row buffer ceiling",0,&p_max_rows,512),
+    integer("pending_row_budget_mib","unplanned-row backlog memory ceiling",0,&p_pending_mib,2048),
     real("k_sigma","planner uncertainty multiplier",&p_k_sigma,3.0),
     real("migration_eta_bins","permitted range migration",&p_migration,.5),
     real("phase_error_max_rad","permitted residual acceleration phase",&p_phase,PI/4.0),
@@ -199,6 +200,7 @@ extern "C" void nr_isac_init(void)
   pipeline.duration_bank_s=duration_bank(p_durations);pipeline.bootstrap_duration_index=std::max(0,p_bootstrap);
   pipeline.minimum_dwell_s=p_min_dwell;pipeline.maximum_dwell_s=p_max_dwell;
   pipeline.minimum_rows=std::max(2,p_min_rows);pipeline.maximum_rows=std::max(pipeline.minimum_rows,(uint32_t)std::max(2,p_max_rows));
+  pipeline.pending_row_budget_bytes=(uint64_t)std::max(64,p_pending_mib)*1024ULL*1024ULL;
   pipeline.k_sigma=p_k_sigma;pipeline.migration_eta_bins=p_migration;pipeline.phase_error_max_rad=p_phase;
   pipeline.maximum_target_speed_mps=p_max_speed;pipeline.maximum_range_m=p_max_range;
   pipeline.maximum_components=p_max_components>0?static_cast<uint32_t>(p_max_components):0;

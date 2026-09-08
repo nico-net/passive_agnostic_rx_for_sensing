@@ -206,6 +206,8 @@ struct PipelineConfig {
   double maximum_dwell_s = 0.032;
   uint32_t minimum_rows = 16;
   uint32_t maximum_rows = 512;
+  // Bounds raw, not-yet-planned rows while the causal detector/tracker worker is busy.
+  uint64_t pending_row_budget_bytes = 2048ULL * 1024ULL * 1024ULL;
   double k_sigma = 3.0;
   double migration_eta_bins = 0.5;
   double phase_error_max_rad = PI / 4.0;

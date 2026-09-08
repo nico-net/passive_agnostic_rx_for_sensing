@@ -6,6 +6,7 @@
 #include "enu_tracker.h"
 #include "fft.h"
 #include "report_writer.h"
+#include "sensing_engine.h"
 #include "sync_correction.h"
 #include "variable_cpi.h"
 
@@ -13,7 +14,9 @@
 #include <complex>
 #include <cstdio>
 #include <cstdlib>
+#include <fstream>
 #include <stdexcept>
+#include <string>
 #include <vector>
 
 using namespace nr_isac;
@@ -200,6 +203,7 @@ void test_validation_report_compatibility()
   PipelineConfig c;
   PipelineReport r;
   r.start_utc_ns=123;r.cpi_duration_ns=7500000;
+  r.dropped_cpis=9;r.discarded_pending_rows=11;r.discarded_pending_intervals=2;
   r.first_row_time_ns=50000000;r.last_row_time_ns=57500000;
   r.source_occurrences={1,2,3,4,5,6,7};
   Detection d;d.aoa.valid=true;d.aoa.azimuth_deg=12.5;d.aoa.elevation_deg=-3.0;
@@ -211,16 +215,75 @@ void test_validation_report_compatibility()
           "validation report lost first radio-row time");
   require(json.find("\"last_row_time_ns\":57500000")!=std::string::npos,
           "validation report lost last radio-row time");
+  require(json.find("\"dropped_cpis\":9")!=std::string::npos,
+          "validation report lost complete-CPI backpressure count");
+  require(json.find("\"discarded_pending_rows\":11")!=std::string::npos,
+          "validation report lost bounded-backlog row count");
+  require(json.find("\"discarded_pending_intervals\":2")!=std::string::npos,
+          "validation report lost bounded-backlog interval count");
   require(json.find("\"src_occ\":[1,2,3,4,5,6,7]")!=std::string::npos,
           "validation report lost source-count compatibility vector");
   require(json.find("\"azimuth_deg\":12.5")!=std::string::npos,
           "validation report lost top-level detection AoA compatibility");
 }
+
+void test_causal_cpi_pipeline()
+{
+  const std::string path="/tmp/nr_isac_causal_cpi_test.jsonl";
+  std::remove(path.c_str());
+  PipelineConfig c;
+  c.sources_mask=1u<<NR_ISAC_SRC_CSI_RS;
+  c.duration_bank_s={0.001};c.bootstrap_duration_index=0;
+  c.minimum_dwell_s=0.001;c.maximum_dwell_s=0.001;
+  c.minimum_rows=2;c.maximum_rows=4;
+  c.sync_enable=false;c.family_static=false;c.tracker_enable=false;
+  c.maximum_components=1;c.maximum_objects=1;
+  c.report_path=path;c.out_path.clear();
+  nr_isac_carrier_t carrier{};
+  carrier.nof_prb=2;carrier.scs_hz=30000;carrier.dl_center_hz=3499440000;
+  carrier.slots_per_frame=20;carrier.pci=1;
+  std::vector<std::complex<float>> h(24);
+  std::vector<uint32_t> k(24),symbol(24,2);
+  for(uint32_t i=0;i<24;++i)k[i]=i;
+  {
+    SensingEngine engine(c,2,1);engine.start();
+    for(uint32_t slot=0;slot<20;++slot){
+      for(uint32_t i=0;i<24;++i)
+        h[i]=std::polar(1.0f,static_cast<float>(-.2*i+.1*slot));
+      engine.submit(slot,0.0f,NR_ISAC_SRC_CSI_RS,carrier,h.data(),1,
+                    k.data(),symbol.data(),h.size(),1.0f);
+    }
+    engine.stop();
+    engine.start();
+    for(uint32_t slot=20;slot<23;++slot){
+      for(uint32_t i=0;i<24;++i)
+        h[i]=std::polar(1.0f,static_cast<float>(-.2*i+.1*slot));
+      engine.submit(slot,0.0f,NR_ISAC_SRC_CSI_RS,carrier,h.data(),1,
+                    k.data(),symbol.data(),h.size(),1.0f);
+    }
+    engine.stop();
+  }
+  std::ifstream input(path);require(input.good(),"causal CPI pipeline emitted no report file");
+  std::string line;uint32_t reports=0;
+  while(std::getline(input,line)){
+    ++reports;
+    const std::string sequence="\"cpi_sequence\":"+std::to_string(reports);
+    require(line.find(sequence)!=std::string::npos,"causal CPI sequence is not ordered");
+    require(line.find("\"dropped_submissions\":0")!=std::string::npos,
+            "causal accumulator lost an input row");
+    require(line.find("\"dropped_cpis\":0")!=std::string::npos,
+            "causal processor lost a complete CPI");
+    require(line.find("\"discarded_pending_rows\":0")!=std::string::npos,
+            "causal accumulator discarded pending rows");
+  }
+  require(reports==8,"causal close/drain/restart did not preserve all eight expected CPIs");
+  std::remove(path.c_str());
+}
 }
 
 int main()
 {
-  try {test_fft();test_adaptive_threshold();test_detector();test_aoa();test_enu_geometry();test_variable_cpi();test_validation_report_compatibility();}
+  try {test_fft();test_adaptive_threshold();test_detector();test_aoa();test_enu_geometry();test_variable_cpi();test_validation_report_compatibility();test_causal_cpi_pipeline();}
   catch(const std::exception& e){std::fprintf(stderr,"python parity test failed: %s\n",e.what());return EXIT_FAILURE;}
   std::puts("native sensing golden parity checks passed");return EXIT_SUCCESS;
 }

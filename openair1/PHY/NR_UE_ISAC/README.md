@@ -24,6 +24,14 @@ through `nr_isac_submit_cfr_multi`; every operation after that boundary is imple
    UL off, UL rows remain available to detection but cannot enter AoA.
 10. Emit detections, native range-Doppler maps, and stage-1/global tracks as JSONL/ZeroMQ reports.
 
+CFR submission, CPI formation, and detector/tracker processing are deliberately separated. The
+real-time-facing snapshot queue is drained by a lightweight accumulator while one complete CPI is
+processed. CPI formation is causal: the next plan is created only after the preceding detector and
+tracker update, matching the Python plan -> detect -> update loop. Processing failures are counted
+as `dropped_cpis`. The unplanned-row backlog is capped by `pending_row_budget_mib`; reaching it
+skips one explicit oldest interval and reports `discarded_pending_rows`/`intervals`. Validation
+runs require all three loss counters to remain zero.
+
 The old OAI detector (FFT/CA-CFAR, global zero-Doppler notch, ECA variants, greedy tracker, and
 legacy CLEAN) is intentionally absent.
 

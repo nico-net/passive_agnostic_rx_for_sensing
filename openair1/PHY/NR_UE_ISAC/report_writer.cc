@@ -160,6 +160,9 @@ std::string build_report_json(const PipelineReport& r, const PipelineConfig& c)
     out += ",\"azimuth_deg\":";number(out,t.azimuth_deg);out += ",\"elevation_deg\":";number(out,t.elevation_deg);
     out += ",\"coast_count\":"+std::to_string(t.coast_count)+'}';}out+=']';
   out += ",\"dropped_submissions\":"+std::to_string(r.dropped_submissions)
+      +",\"dropped_cpis\":"+std::to_string(r.dropped_cpis)
+      +",\"discarded_pending_rows\":"+std::to_string(r.discarded_pending_rows)
+      +",\"discarded_pending_intervals\":"+std::to_string(r.discarded_pending_intervals)
       +",\"stale_submissions\":"+std::to_string(r.stale_submissions);
   if(c.capture_rvm){out += ",\"rvm_layout\":\"doppler_major_range_minor\",\"rvm_blob\":[";
     bool first_value=true;for(uint32_t d=0;d<r.detector.axes.rate_bins;++d)for(uint32_t q=0;q<r.detector.axes.range_bins;++q){
