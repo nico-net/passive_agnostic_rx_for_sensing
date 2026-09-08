@@ -2141,15 +2141,45 @@ TEST(ExtentCandidates, NoDuplicates) {
   }
 }
 
-TEST(ExtentCandidates, OffsetIsDeliberatelyNotSwept) {
-  // Sweeping first_w would emit geometries this module cannot currently APPLY: the FAPI builder
-  // hardcodes coreset.rb_offset = 0, so a nonzero offset is carried through BWPStart and moves the
-  // BWP frame instead. Assert the restriction so removing it is a deliberate act, not a slip.
+TEST(ExtentCandidates, OffsetIsNowSwept) {
+  // The offset is searched, not assumed: dci_nr.c uses cset_start + coreset->rb_offset both for the
+  // RE index and to index the PDCCH DM-RS sequence, so a wrong offset yields a wrong pilot sequence
+  // and reads as a dead channel. It was previously excluded only because it could not be APPLIED.
   nr_pdcch_extent_cand_t c[8];
   const int n = nr_pdcch_extent_candidates(3, 6, 20, c, 8);
-  ASSERT_GT(n, 0);
+  ASSERT_GT(n, 1);
+  bool saw_smaller_offset = false;
   for (int i = 0; i < n; i++) {
-    EXPECT_EQ(c[i].first_w, 3);
+    if (c[i].first_w < 3) {
+      saw_smaller_offset = true;
+    }
+  }
+  EXPECT_TRUE(saw_smaller_offset) << "offset never varied, so a mis-placed CORESET is unrecoverable";
+}
+
+TEST(ExtentCandidates, NearestHypothesesComeFirst) {
+  // The histogram is a LOWER BOUND on the footprint and usually a tight one, so the verification
+  // dwell must be spent near the observation rather than on the widest geometry.
+  nr_pdcch_extent_cand_t c[8];
+  const int n = nr_pdcch_extent_candidates(3, 6, 20, c, 8);
+  ASSERT_GE(n, 3);
+  int prev = -1;
+  for (int i = 1; i < n; i++) {
+    const int d = (3 - c[i].first_w) + (c[i].last_w - 6);
+    EXPECT_GE(d, prev) << "candidate " << i << " is nearer than one tried before it";
+    prev = d;
+  }
+}
+
+TEST(ExtentCandidates, EveryOffsetCandidateStillContainsTheObservation) {
+  // Expanding must never EXCLUDE an observed window: those windows carried real PDCCH DM-RS.
+  nr_pdcch_extent_cand_t c[8];
+  const int n = nr_pdcch_extent_candidates(3, 6, 20, c, 8);
+  for (int i = 0; i < n; i++) {
+    EXPECT_LE(c[i].first_w, 3);
+    EXPECT_GE(c[i].last_w, 6);
+    EXPECT_GE(c[i].first_w, 0);
+    EXPECT_LT(c[i].last_w, 20);
   }
 }
 

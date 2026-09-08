@@ -358,22 +358,41 @@ int nr_pdcch_extent_candidates(int first_w, int last_w, int nw_total,
   out[n].first_w = snap ? 0 : first_w;
   out[n].last_w  = snap ? (nw_total - 1) : last_w;
   n++;
-  /* SPAN ONLY -- `first_w` is deliberately NOT swept, and that is a KNOWN INCOMPLETENESS rather
-   * than an oversight. A nonzero CORESET offset cannot currently be APPLIED correctly: this
-   * module's FAPI builder hardcodes `rel15->coreset.rb_offset = 0` and starts
-   * build_coreset_bitmap() at group 0, so the offset is carried only through `BWPStart` -- which
-   * moves the BWP frame and therefore also changes RIV interpretation and dci_length. That is the
-   * dual-frame-of-reference issue this feature's handover already lists as latent. Emitting
-   * offset candidates before it is fixed would burn a verification dwell on a geometry that cannot
-   * decode even when it is the right answer, and would report "extent not verified" for the wrong
-   * reason. Sweep the offset once rb_offset is plumbed through properly. */
-  for (int l = last_w; l < nw_total && n < max_out; l++) {
-    if (l == out[0].last_w) {
-      continue;  // already candidate 0
+  /* OFFSET AND SPAN. The offset used to be excluded because it could not be APPLIED: the FAPI
+   * builder hardcoded rel15->coreset.rb_offset = 0 and the offset rode on BWPStart, which also
+   * moves RIV interpretation and dci_length. That is now plumbed through its own field, and
+   * dci_nr.c consumes it as `cset_start + coreset->rb_offset` -- for the RE index AND for indexing
+   * the DM-RS sequence (nr_pdcch_dmrs_ref over n_rb + rb_offset), so a wrong offset corrupts the
+   * pilot sequence and reads as a dead channel rather than a weak one. Hence it must be searched,
+   * not assumed.
+   *
+   * The true CORESET must CONTAIN the observed occupancy, so admissible hypotheses are exactly
+   * (f <= first_w, l >= last_w). Enumerated in order of TOTAL EXPANSION from what was observed, so
+   * the nearest hypotheses are tried first and the verification dwell is spent where the answer
+   * most likely is -- the histogram is a lower bound on the footprint, and it is usually a tight
+   * one. */
+  for (int d = 0; d <= first_w + (nw_total - 1 - last_w) && n < max_out; d++) {
+    for (int df = 0; df <= d && n < max_out; df++) {
+      const int dl = d - df;
+      const int f = first_w - df;
+      const int l = last_w + dl;
+      if (f < 0 || l >= nw_total) {
+        continue;
+      }
+      bool dup = false;
+      for (int i = 0; i < n; i++) {
+        if (out[i].first_w == f && out[i].last_w == l) {
+          dup = true;
+          break;
+        }
+      }
+      if (dup) {
+        continue;
+      }
+      out[n].first_w = f;
+      out[n].last_w  = l;
+      n++;
     }
-    out[n].first_w = first_w;
-    out[n].last_w  = l;
-    n++;
   }
   return n;
 }
@@ -743,22 +762,25 @@ bool nr_pdcch_blind_monitor_autodiscover_extent_step(uint32_t abs_slot)
      * answer) and stop: continuing would re-test the same list forever, and the cause is then not
      * the extent. */
     s_ext_verified = true;
-    g_cfg.bwp_start           = s_ext_cand[0].first_w * 6;
+    /* coreset_rb_offset, NOT bwp_start: the convergence path above moved the CORESET offset into
+     * its own frame, and writing bwp_start here would put it back into the BWP frame -- changing
+     * RIV interpretation and dci_length for every grant. */
+    g_cfg.coreset_rb_offset   = s_ext_cand[0].first_w * 6;
     g_cfg.coreset_freq_domain = s_ext_cand[0].last_w - s_ext_cand[0].first_w + 1;
     LOG_W(PHY, "SENSING: Phase 3 autodiscover -- extent NOT verified by any of %d candidates; "
                "keeping rb_offset=%d span_rb=%d. The extent is probably not the fault.\n",
-          s_ext_n, g_cfg.bwp_start, g_cfg.coreset_freq_domain * 6);
+          s_ext_n, g_cfg.coreset_rb_offset, g_cfg.coreset_freq_domain * 6);
     return true;
   }
   s_ext_idx++;
-  g_cfg.bwp_start           = s_ext_cand[s_ext_idx].first_w * 6;
+  g_cfg.coreset_rb_offset   = s_ext_cand[s_ext_idx].first_w * 6;  // own frame; see above
   g_cfg.coreset_freq_domain = s_ext_cand[s_ext_idx].last_w - s_ext_cand[s_ext_idx].first_w + 1;
   /* Drop any RNTI state accumulated under the REJECTED extent so it cannot vouch for the next one.
    * (The reset helper is named _for_test only because this is its first non-test caller.) */
   nr_pdcch_blind_rnti_bootstrap_reset_for_test();
   LOG_W(PHY, "SENSING: Phase 3 autodiscover -- extent candidate %d/%d produced no confirmed C-RNTI "
              "in %d occasions; trying rb_offset=%d span_rb=%d\n",
-        s_ext_idx, s_ext_n, NR_PDCCH_EXTENT_VERIFY_OCC, g_cfg.bwp_start,
+        s_ext_idx, s_ext_n, NR_PDCCH_EXTENT_VERIFY_OCC, g_cfg.coreset_rb_offset,
         g_cfg.coreset_freq_domain * 6);
   return true;
 }

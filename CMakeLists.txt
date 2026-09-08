@@ -2431,6 +2431,13 @@ if(ENABLE_TESTS)
   target_link_libraries(test_nr_pdcch_dci_length_sweep PRIVATE UTIL GTest::gtest)
   add_dependencies(tests test_nr_pdcch_dci_length_sweep)
   add_test(NAME test_nr_pdcch_dci_length_sweep COMMAND ./test_nr_pdcch_dci_length_sweep)
+
+  add_executable(test_nr_pdsch_config_sweep ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_pdsch_config_sweep_test.cc
+                                            ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_config_sweep.c)
+  target_include_directories(test_nr_pdsch_config_sweep PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
+  target_link_libraries(test_nr_pdsch_config_sweep PRIVATE UTIL GTest::gtest)
+  add_dependencies(tests test_nr_pdsch_config_sweep)
+  add_test(NAME test_nr_pdsch_config_sweep COMMAND ./test_nr_pdsch_config_sweep)
 endif()
 
 add_subdirectory(common)
