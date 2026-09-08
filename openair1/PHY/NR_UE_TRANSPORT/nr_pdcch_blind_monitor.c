@@ -612,6 +612,7 @@ static int parse_pdsch(const char* s)
   const int n = sscanf(s, "%d:%d:%d:%d:%d:%d:%d:%d", &g_cfg.pdsch_decode, &g_cfg.pdsch_mcs_table,
                        &g_cfg.pdsch_xoverhead, &g_cfg.pdsch_rv0_only, &g_cfg.pdsch_max_per_slot,
                        &g_cfg.pdsch_thread, &g_cfg.pdsch_queue_depth, &g_cfg.pdsch_thread_core);
+  g_cfg.extract.mcs_table = g_cfg.pdsch_mcs_table;
   return n >= 1;
 }
 
@@ -929,6 +930,7 @@ void nr_pdcch_blind_monitor_init(void)
   // behaviour unless the corresponding config lines are present.
   g_cfg.extract.tda_count      = 0;
   g_cfg.extract.tda_common_count = 0;
+  g_cfg.extract.mcs_table      = 0;
   // Format 1_0 scanning off => the module behaves exactly as before.
   g_cfg.dci10_scan             = 0;
   g_cfg.dci10_rb_offset        = -1;
@@ -2180,14 +2182,13 @@ bool nr_pdcch_blind_decode_and_extract_ex(const int16_t* llr,
     out->reject_reason = "antenna_ports field outside Table 7.3.1.2.2-1's 12 valid rows";
     return false;
   }
-  // MCS 28-31 (64QAM table, Table 5.1.3.1-1) are reserved for retransmissions -- a UE already knows
-  // the modulation from the initial transmission in that case, so a NEW/first grant should never
-  // carry one. NOT independently re-verified against this deployment's actual mcs-Table RRC config
-  // this session (same caveat as several other field assumptions in this file) -- if real grants are
-  // being rejected here, check whether 256QAM or the low-SE table is configured instead, which shift
-  // this boundary.
-  if (mcs >= 28) {
-    out->reject_reason = "MCS in the reserved retransmission-only range (28-31)";
+  // Table 0/2 have valid entries through index 28; table 1 (qam256) stops at 27. This is the same
+  // rule used by gNB_scheduler_dlsch.c. The deployment supplies the table together with the other
+  // DCI 1_1 facts; NULL opts retain the table-0 default.
+  const uint32_t mcs_table = (opts != NULL) ? (uint32_t)opts->mcs_table : 0u;
+  const uint32_t mcs_reserved_from = (mcs_table == 1u) ? 28u : 29u;
+  if (mcs >= mcs_reserved_from) {
+    out->reject_reason = "MCS in the reserved retransmission-only range for the configured PDSCH table";
     return false;
   }
   uint16_t start_rb, num_rb;
@@ -2251,6 +2252,7 @@ bool nr_pdcch_blind_decode_and_extract_ex(const int16_t* llr,
                                        | (g_table_7_3_2_3_3_1[antenna_ports][4] << 3));
   out->nscid              = (uint8_t)dmrs_seq_init;
   out->mcs                = (uint8_t)mcs;
+  out->mcs_table          = (uint8_t)mcs_table;
   out->rv                 = (uint8_t)rv;
   out->ndi                = (uint8_t)ndi;
   out->harq_pid           = (uint8_t)harq_pid;

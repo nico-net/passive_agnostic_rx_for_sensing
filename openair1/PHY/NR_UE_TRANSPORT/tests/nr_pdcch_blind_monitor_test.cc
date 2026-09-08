@@ -172,6 +172,7 @@ uint64_t PackPayload(const GroundTruth& gt, int riv_bits, const nr_pdcch_blind_e
 nr_pdcch_blind_extract_opts_t DefaultOpts()
 {
   nr_pdcch_blind_extract_opts_t o = {};
+  o.mcs_table           = 0;
   o.dmrs_add_pos        = -1;
   o.dmrs_max_length     = 0;
   o.bwp_indicator_bits  = -1;
@@ -289,6 +290,34 @@ TEST(DciSize, MatchesHandDerivedValues) {
 
 TEST(DciSize, ZeroBwpIsInvalid) {
   EXPECT_EQ(nr_pdcch_blind_dci_size(0), 0);
+}
+
+TEST_F(BlindPdcchTest, Dci11AcceptsMcs28ForQam64AndRejectsItForQam256) {
+  const uint16_t bwp_size = 106;
+  nr_pdcch_blind_extract_opts_t opts = DefaultOpts();
+  const uint16_t len = nr_pdcch_blind_dci_size_ex(bwp_size, &opts);
+  GroundTruth gt;
+  gt.rnti = 0x51a0;
+  gt.bwp_size = bwp_size;
+  gt.riv = (uint32_t)PRBalloc_to_locationandbandwidth0(20, 10, bwp_size);
+  gt.mcs = 28;
+  auto llr = EncodeToLLR(PackPayload(gt, RivBitsFor(bwp_size), &opts), gt.rnti, len,
+                          kAggregationLevel, 40.0, rng_);
+  nr_pdcch_blind_result_t out;
+  ASSERT_TRUE(nr_pdcch_blind_decode_and_extract_ex(llr.data(), kAggregationLevel, len, bwp_size,
+                                                    kDmrsTypeAPositionPos2,
+                                                    NR_PDCCH_BLIND_RNTI_MIN_DEFAULT,
+                                                    NR_PDCCH_BLIND_RNTI_MAX_DEFAULT, &opts, &out))
+      << (out.reject_reason ? out.reject_reason : "");
+  EXPECT_EQ(out.mcs, 28);
+  EXPECT_EQ(out.mcs_table, 0);
+
+  opts.mcs_table = 1;
+  EXPECT_FALSE(nr_pdcch_blind_decode_and_extract_ex(llr.data(), kAggregationLevel, len, bwp_size,
+                                                     kDmrsTypeAPositionPos2,
+                                                     NR_PDCCH_BLIND_RNTI_MIN_DEFAULT,
+                                                     NR_PDCCH_BLIND_RNTI_MAX_DEFAULT, &opts, &out));
+  ASSERT_NE(out.reject_reason, nullptr);
 }
 
 // The decomposition of the long-standing "dci_length_override is 3 bits below the formula" gap,
