@@ -1704,6 +1704,46 @@ int openair0_set_rx_frequencies(openair0_device_t *device, openair0_config_t *op
  * \param openair0_cfg RF frontend parameters set by application
  * \returns 0 in success
  */
+/* ---- UHD RX POWER REFERENCE ------------------------------------------------------------------
+ * get_rx_power_reference() is NOT a live power meter -- no such thing exists on this hardware. It
+ * is the device's CALIBRATION mapping: the RF input power, in dBm, that corresponds to digital
+ * FULL SCALE at the gain currently in force. Combined with the per-branch digital level the UE
+ * already measures (RFPOW, mean(I^2+Q^2) in dBFS), it gives absolute input power:
+ *       P_rf(dBm) = P_digital(dBFS) + reference(dBm)
+ * which is the independent, RF-side number that a normalised digital amplitude ratio can never
+ * provide -- a quiet antenna, a gain that never landed and a wrong port all look identical in
+ * ANTPOW, and differ here.
+ *
+ * It is GAIN-DEPENDENT, so it is refreshed on every gain change as well as at init. It requires
+ * calibration data on the device: an uncalibrated X410 throws, which is caught and reported as
+ * unavailable rather than silently yielding a wrong dBm. NaN means "no reference", never 0.
+ *
+ * Published through dlsym rather than a direct call: this driver is a dlopen'd plugin, so the
+ * executable cannot link against it at build time. */
+static double g_rx_pwr_ref_dbm[8] = {NAN, NAN, NAN, NAN, NAN, NAN, NAN, NAN};
+
+extern "C" double openair0_rx_power_reference_dbm(int ch)
+{
+  return (ch >= 0 && ch < 8) ? g_rx_pwr_ref_dbm[ch] : NAN;
+}
+
+static void usrp_refresh_power_reference(usrp_state_t *s, int nch)
+{
+  for (int ch = 0; ch < nch && ch < 8; ch++) {
+    double v = NAN;
+    try {
+      if (s->usrp->has_rx_power_reference(ch)) {
+        v = s->usrp->get_rx_power_reference(ch);
+      }
+    } catch (const std::exception &e) {
+      /* Uncalibrated device, or the API is unsupported for this frontend. Reported once per
+       * refresh as unavailable; the digital level stays valid on its own. */
+      v = NAN;
+    }
+    g_rx_pwr_ref_dbm[ch] = v;
+  }
+}
+
 int trx_usrp_set_gains(openair0_device_t *device,
                        openair0_config_t *openair0_cfg)
 {
@@ -1723,11 +1763,42 @@ int trx_usrp_set_gains(openair0_device_t *device,
   /* PER CHANNEL. The single-argument set_rx_gain() applies to EVERY channel, which silently
    * flattened any per-branch trim device_init() had set up (it already calls the per-channel
    * overload in a loop). Same call, addressed. */
+  /* PER-CHANNEL RANGE CHECK AND READBACK.
+   * The guard above tests ONLY channel 0 and then returns, so channels 1-3 were handed to UHD with
+   * no bounds check at all. That matters as soon as a per-branch trim exists: ISAC_RX_GAIN_TRIM
+   * pushes a weak branch to base+trim (e.g. 40 + 13.1 = 53.1 dB), and if that exceeds this
+   * device's range UHD CLAMPS IT SILENTLY -- the trim then partially or entirely fails to land and
+   * the branch levels do not flatten, which is exactly the unexplained observation of 2026-09-07.
+   * Nothing in this path ever read the gain back, so a clamp was invisible.
+   * Readback is the point: `requested` is what we asked for, `applied` is what the hardware has. */
   for (int ch = 0; ch < openair0_cfg[0].rx_num_channels; ch++) {
-    const double g = openair0_cfg[0].rx_gain[ch] - openair0_cfg[0].rx_gain_offset[ch];
+    const double want = openair0_cfg[0].rx_gain[ch] - openair0_cfg[0].rx_gain_offset[ch];
+    ::uhd::gain_range_t gr = s->usrp->get_rx_gain_range(ch);
+    double g = want;
+    if (g > gr.stop()) {
+      g = gr.stop();
+    }
+    if (g < gr.start()) {
+      g = gr.start();
+    }
     s->usrp->set_rx_gain(g, ch);
-    LOG_I(HW,"Setting USRP RX gain ch%d to %f (rx_gain %f,gain_range.stop() %f)\n",
-          ch, g, openair0_cfg[0].rx_gain[ch], gain_range.stop());
+    const double got = s->usrp->get_rx_gain(ch);
+    LOG_I(HW,
+          "RFGAIN ch%d requested=%.2f clamped_to=%.2f applied_readback=%.2f range=[%.1f..%.1f] "
+          "%s\n",
+          ch, want, g, got, gr.start(), gr.stop(),
+          (fabs(got - want) > 0.6) ? "<<< HARDWARE DID NOT APPLY THE REQUESTED GAIN" : "ok");
+  }
+  /* The mapping moves with gain, so re-read it here rather than only at init. */
+  usrp_refresh_power_reference(s, openair0_cfg[0].rx_num_channels);
+  for (int ch = 0; ch < openair0_cfg[0].rx_num_channels && ch < 8; ch++) {
+    if (std::isnan(g_rx_pwr_ref_dbm[ch])) {
+      LOG_W(HW, "RFPWRREF ch%d UNAVAILABLE (device has no RX power calibration) -- absolute dBm "
+                "cannot be reported, digital dBFS remains valid\n", ch);
+    } else {
+      LOG_I(HW, "RFPWRREF ch%d full_scale=%.2f dBm (RF input power = dBFS + this)\n",
+            ch, g_rx_pwr_ref_dbm[ch]);
+    }
   }
   return(0);
 }
@@ -2336,6 +2407,25 @@ extern "C" {
       } else if (device->type == USRP_X400_DEV) {
         rx_ant = "RX1"; // X410: TX stays on TX/RX0, so RX1 is the separate-connector choice
       }
+      /* RFCHAN: everything that decides what a channel actually receives, read back FROM THE
+       * DEVICE after configuration rather than echoed from our own config struct. An imbalance
+       * between branches is only attributable once the port, gain and tuning actually in force are
+       * known -- ANTPOW measures digital sample level and cannot distinguish a quiet antenna from a
+       * gain that never landed or a port that is not the one the cable is in. */
+      usrp_refresh_power_reference(s, i + choffset + 1);
+            LOG_I(HW,
+            "RFCHAN ch%d subdev=%s port=%s gain=%.2f range=[%.1f..%.1f] freq=%.6f MHz "
+            "rate=%.6f Msps bw=%.6f MHz\n",
+            i + choffset,
+            s->usrp->get_rx_subdev_name(i + choffset).c_str(),
+            s->usrp->get_rx_antenna(i + choffset).c_str(),
+            s->usrp->get_rx_gain(i + choffset),
+            s->usrp->get_rx_gain_range(i + choffset).start(),
+            s->usrp->get_rx_gain_range(i + choffset).stop(),
+            s->usrp->get_rx_freq(i + choffset) / 1e6,
+            s->usrp->get_rx_rate(i + choffset) / 1e6,
+            s->usrp->get_rx_bandwidth(i + choffset) / 1e6);
+
       if (rx_ant != NULL) {
         s->usrp->set_rx_antenna(rx_ant, i + choffset);
         LOG_I(HW, "RX antenna forced to %s on channel %d\n",

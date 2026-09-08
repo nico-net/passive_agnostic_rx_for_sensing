@@ -268,6 +268,25 @@ static _Atomic uint64_t g_llr_sat[2]   = {0, 0};
  * clipped LLR is a hard decision, and belief propagation on hard decisions cannot correct
  * anything. Measured mean |llr| on this receiver is 232-498, i.e. 2-4x that rail. */
 static _Atomic uint64_t g_llr_clip8[2] = {0, 0};
+/* ---- SAME-CAPTURE ANTENNA SUBSET SCAN (ISAC_SUBSET_SCAN=<every Nth TB>, 0/unset = off) --------
+ * Replays ONE captured transport block through all 15 non-empty subsets of the four receive
+ * branches, reusing the identical samples, channel estimates, noise estimate, grant and decoder
+ * settings -- only the set of branches entering the combiner differs. Comparing separate live runs
+ * cannot answer whether four branches hurt: propagation, gain state and this rig's own 5-88 % CRC
+ * swing all move between runs, and that confound has already produced several wrong conclusions.
+ * Subsets are indexed by BIT POSITION = PHYSICAL branch, so {3} is physical channel 3's samples and
+ * estimates, never a silent remap onto channel 0. */
+#define NR_PDSCH_SUBSET_N 15
+static const uint8_t kSubsetMask[NR_PDSCH_SUBSET_N] = {
+    0x1, 0x2, 0x4, 0x8,                     /* {0} {1} {2} {3} */
+    0x3, 0x5, 0x9, 0x6, 0xA, 0xC,           /* {0,1} {0,2} {0,3} {1,2} {1,3} {2,3} */
+    0x7, 0xB, 0xD, 0xE,                     /* {0,1,2} {0,1,3} {0,2,3} {1,2,3} */
+    0xF};                                   /* {0,1,2,3} */
+static const char *const kSubsetName[NR_PDSCH_SUBSET_N] = {
+    "{0}", "{1}", "{2}", "{3}", "{0,1}", "{0,2}", "{0,3}", "{1,2}", "{1,3}", "{2,3}",
+    "{0,1,2}", "{0,1,3}", "{0,2,3}", "{1,2,3}", "{0,1,2,3}"};
+static _Atomic uint64_t g_subset_try[NR_PDSCH_SUBSET_N];
+static _Atomic uint64_t g_subset_ok[NR_PDSCH_SUBSET_N];
 
 /* The DMRSFO tracker's current SFO estimate, in ppm, for the correction stage below. Read-mostly
  * across consumer threads; a torn double would only mean one grant corrected with a slightly stale
@@ -480,6 +499,25 @@ void nr_pdsch_passive_ldpc_stats_dump(void)
     }
     if (u > 0) {
       LOG_I(PHY, "SENSING: RBHIST crc_ok%% by PRB alloc: %s\n", hb);
+    }
+  }
+  {
+    /* SUBSET: every subset scored on the SAME transport blocks, so the comparison isolates the
+     * combiner. Read {0} as the single-branch reference: any subset BELOW it is a case of adding a
+     * branch making decoding worse. Same-board pairs vs cross-board pairs is the discriminator for
+     * the per-daughterboard frequency-offset hypothesis (X410: ch0/1 on board A, ch2/3 on board B).*/
+    char sb[520];
+    size_t u = 0;
+    for (int k = 0; k < NR_PDSCH_SUBSET_N && u < sizeof(sb) - 34; k++) {
+      const uint64_t t = atomic_load(&g_subset_try[k]);
+      if (t == 0) {
+        continue;
+      }
+      u += snprintf(sb + u, sizeof(sb) - u, "%s=%.0f%%(%lu) ", kSubsetName[k],
+                    100.0 * (double)atomic_load(&g_subset_ok[k]) / (double)t, (unsigned long)t);
+    }
+    if (u > 0) {
+      LOG_I(PHY, "SENSING: SUBSET crc_ok%% on identical TBs: %s\n", sb);
     }
   }
   {
@@ -1885,6 +1923,48 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
         nvar = nvar_saved; // restore: the next retry (and anything downstream) expects the mean
       }
       nr_dlsch_force_branch(-1); // never leave a pin set: the next TB must re-decide normally
+    }
+
+    /* ---- Subset scan. Runs AFTER the normal decode so it can never change this TB's own result:
+     * ldpc_ok is saved and restored, and the pin is always cleared. Sampled (1 in N) because it
+     * costs 15 extra demod+decode passes per scanned TB, which is far beyond the RT budget if run
+     * on every grant. Deliberately NOT restricted to TBs that some subset decoded -- selecting on
+     * success would bias every rate it reports. */
+    {
+      static int s_subset_n = -1;
+      if (s_subset_n < 0) {
+        const char *e = getenv("ISAC_SUBSET_SCAN");
+        s_subset_n = (e != NULL) ? atoi(e) : 0;
+      }
+      static __thread unsigned long s_subset_seen = 0;
+      if (s_subset_n > 0 && fp->nb_antennas_rx == 4 && cw->Nl == 1
+          && (s_subset_seen++ % (unsigned long)s_subset_n) == 0) {
+        const bool ldpc_ok_saved = ldpc_ok;
+        for (int k = 0; k < NR_PDSCH_SUBSET_N; k++) {
+          nr_dlsch_force_mask(kSubsetMask[k]);
+          memset(llr, 0, rx_llr_buf_sz * sizeof(*llr));
+          bool ok = true;
+          for (int m = dlsch_config->start_symbol;
+               m < dlsch_config->start_symbol + dlsch_config->number_symbols; m++) {
+            if (nr_rx_pdsch(ue, proc, &dlsch, freq_alloc, dlsch_config, &harq, (unsigned char)m,
+                            m == first_symbol_with_data, (unsigned char)dlsch_config->harq_process_nbr,
+                            pdsch_est_size, pdsch_dl_ch_estimates, llr, dl_valid_re, rxdataF,
+                            &log2_maxh, rx_size_symbol, fp->nb_antennas_rx, rxdataF_comp, dl_ch_mag,
+                            dl_ch_magb, dl_ch_magr, ptrs_phase_per_slot, ptrs_re_per_slot, nvar,
+                            &scope_req, NULL) < 0) {
+              ok = false;
+              break;
+            }
+          }
+          atomic_fetch_add(&g_subset_try[k], 1);
+          if (ok && passive_ldpc_decode(ue, proc, &g_harq, cw, dlsch_config, llr,
+                                        freq_alloc->num_rbs, G)) {
+            atomic_fetch_add(&g_subset_ok[k], 1);
+          }
+        }
+        nr_dlsch_force_mask(-1);  // never leave a mask pinned
+        ldpc_ok = ldpc_ok_saved;  // the scan is diagnostic; this TB's own outcome stands
+      }
     }
 
     {

@@ -363,6 +363,8 @@ int nr_pbch_decode(PHY_VARS_NR_UE *ue,
  * nr_dlsch_last_branch() returns the branch the previous decode actually used, or -1 if it
  * combined. Both are thread-local: concurrent consumers decode different TBs. */
 void nr_dlsch_force_branch(int ant);
+/** Force a receive-branch MASK for the same-capture subset scan; -1 restores normal selection. */
+void nr_dlsch_force_mask(int mask);
 int nr_dlsch_last_branch(void);
 /* The branch the rank-1 four-RX path will decode, known BEFORE the demodulator runs (-1 if it
  * cannot be predicted). Lets the caller match nvar to the branch actually decoded -- see the

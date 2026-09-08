@@ -1,3 +1,4 @@
+#include <dlfcn.h>
 /*
  * SPDX-License-Identifier: LicenseRef-CSSL-1.0
  */
@@ -803,6 +804,32 @@ static long g_census_pow_n;
  * not a shape four elements at lambda/2 looking at the same gNB should produce. */
 #define CENSUS_MAX_ANT 4
 static double g_census_pow_ant[CENSUS_MAX_ANT];
+/* TRUE per-antenna POWER, mean(I^2 + Q^2), unnormalised and in float before squaring.
+ * ANTPOW above accumulates mean(|I|+|Q|) -- an AMPLITUDE -- and prints it normalised to the
+ * strongest branch, so it yields a RATIO and never an absolute level. That is enough to see that
+ * branches differ and useless for saying why: a quiet antenna, a gain that never landed, and a
+ * port that is not the one the cable is in all produce the same ratio.
+ * Reported in dB relative to FULL SCALE for int16 samples (32767^2 per component, two components),
+ * so the number is comparable across runs and against the ADC ceiling -- NOT an RF-input power and
+ * NOT an SNR. Clipping is counted separately, because a clipped branch reads HIGH while being the
+ * most damaged. */
+static double   g_census_pw2_ant[CENSUS_MAX_ANT];
+static uint64_t g_census_clip_ant[CENSUS_MAX_ANT];
+static uint64_t g_census_pw2_n;
+
+/* RX power reference, resolved from the USRP driver at runtime. The driver is a dlopen'd plugin,
+ * so the executable cannot link against it -- dlsym is the only way to reach it, and a NULL result
+ * simply means a non-USRP radio or an older driver, in which case only dBFS is reported. */
+static double (*g_pwr_ref_fn)(int) = NULL;
+static int g_pwr_ref_looked_up = 0;
+static double nr_ue_rx_power_reference_dbm(int ch)
+{
+  if (!g_pwr_ref_looked_up) {
+    g_pwr_ref_looked_up = 1;
+    g_pwr_ref_fn = (double (*)(int))dlsym(RTLD_DEFAULT, "openair0_rx_power_reference_dbm");
+  }
+  return g_pwr_ref_fn ? g_pwr_ref_fn(ch) : NAN;
+}
 /* ULPROBE (ISAC_UL_PROBE=1, default OFF): the three Phase-0 questions the UL work is gated on, and
  * none of them can be answered from an existing capture.
  *   1. Does this receiver even KNOW the TDD pattern? nr_ue_slot_select() returns NR_DOWNLINK_SLOT
@@ -1405,6 +1432,29 @@ void *UE_thread(void *arg)
           acca += (double)(ar + ai);
           cnta++;
         }
+        {
+          /* Second, independent accumulator: squares, in double, over the SAME sub-sampled window
+           * so the two are directly comparable. Kept separate from acca rather than replacing it,
+           * to avoid changing a metric other diagnostics are already calibrated against. */
+          double accp = 0.0;
+          uint64_t clip = 0;
+          for (int i = 0; i < n; i += 64) {
+            const double xr = (double)rxp[a2][i].r;
+            const double xi = (double)rxp[a2][i].i;
+            accp += xr * xr + xi * xi;
+            if (rxp[a2][i].r >= 32767 || rxp[a2][i].r <= -32768
+                || rxp[a2][i].i >= 32767 || rxp[a2][i].i <= -32768) {
+              clip++;
+            }
+          }
+          if (cnta) {
+            g_census_pw2_ant[a2] += accp / (double)cnta;
+            g_census_clip_ant[a2] += clip;
+            if (a2 == 0) {
+              g_census_pw2_n++;
+            }
+          }
+        }
         if (cnta) {
           g_census_pow_ant[a2] += acca / cnta;
           if (g_ulprobe_on > 0) {
@@ -1579,6 +1629,68 @@ void *UE_thread(void *arg)
         /* ANTPOW: raw per-antenna receive power and its dB spread, to be read ALONGSIDE RXBRANCH's
          * pw[]. If these are flat and pw[] is not, the imbalance is in the estimation path, not the
          * antennas. */
+        if (g_census_pw2_n > 0) {
+          /* RFPOW: absolute per-branch level, no normalisation. Full scale for a complex int16
+           * sample pair is 2*32767^2. */
+          const double fs = 2.0 * 32767.0 * 32767.0;
+          char rb[320];
+          size_t u = 0;
+          const int na = (UE->frame_parms.nb_antennas_rx < CENSUS_MAX_ANT)
+                             ? UE->frame_parms.nb_antennas_rx : CENSUS_MAX_ANT;
+          for (int a2 = 0; a2 < na && u < sizeof(rb) - 48; a2++) {
+            const double mp = g_census_pw2_ant[a2] / (double)g_census_pw2_n;
+            const double dbfs = (mp > 0.0) ? 10.0 * log10(mp / fs) : -199.0;
+            /* Absolute RF input power where the device can supply the calibration mapping. This is
+             * the ONLY number here that is an RF-side quantity; dBFS alone cannot separate a quiet
+             * antenna from a gain that never landed. NaN prints as "--", never as 0 dBm. */
+            const double ref = nr_ue_rx_power_reference_dbm(a2);
+            if (isnan(ref)) {
+              u += snprintf(rb + u, sizeof(rb) - u, "ch%d=%.2fdBFS(rf=--,clip=%lu) ", a2, dbfs,
+                            (unsigned long)g_census_clip_ant[a2]);
+            } else {
+              u += snprintf(rb + u, sizeof(rb) - u, "ch%d=%.2fdBFS(rf=%.2fdBm,clip=%lu) ", a2, dbfs,
+                            dbfs + ref, (unsigned long)g_census_clip_ant[a2]);
+            }
+          }
+          LOG_I(PHY, "SENSING: RFPOW mean(I^2+Q^2) absolute, absolute; rf= is TRUE RF input power via the UHD power reference, -- when uncalibrated: %s\n", rb);
+
+          /* ---- BRSNR: per-branch signal-to-noise, from the only valid noise window available ----
+           * NOT from nr_dl_chest_nvar_ant[]. That array is |dl_ls_est - dl_ch|^2 -- the residual
+           * between the raw LS estimate and the FILTERED one -- so it is noise PLUS filter
+           * mismatch, and the mismatch term scales with |H|. Using it as an SNR denominator gives a
+           * denominator that tracks its own numerator: measured pw/resid = 2.3 on three branches at
+           * once while raw power said those branches clearly differed. It cannot separate a branch
+           * that is quiet from a branch that is noisy, which is the entire question here.
+           *
+           * The gNB does not transmit in the UL slots of this TDD pattern, so UL-slot receive power
+           * is a genuine per-branch NOISE FLOOR, measured on the same samples and the same scale as
+           * the DL power directly above it. SNR is then (P_dl - P_ul) / P_ul per branch.
+           *
+           * CONTAMINATION, stated rather than hidden: the served UE transmits in those UL slots, so
+           * P_ul is noise PLUS whatever of that UE's uplink reaches this receiver. That inflates
+           * P_ul and makes this an SNR LOWER BOUND. It is common-mode across branches, so the
+           * RELATIVE ordering between branches -- which is what the imbalance question needs -- is
+           * far more trustworthy than the absolute value. Requires ISAC_UL_PROBE=1.
+           * The two accumulators use the same sub-sampling and the same window, so no rescaling. */
+          if (g_ulprobe_on > 0 && g_ulprobe_n[0] > 0 && g_ulprobe_n[1] > 0) {
+            char sb[300];
+            size_t v = 0;
+            for (int a2 = 0; a2 < na && v < sizeof(sb) - 40; a2++) {
+              const double pdl = g_ulprobe_pow[0][a2] / (double)g_ulprobe_n[0];
+              const double pul = g_ulprobe_pow[1][a2] / (double)g_ulprobe_n[1];
+              /* These are mean(|I|+|Q|) amplitudes, so square before forming a power ratio. */
+              const double sdl = pdl * pdl, sul = pul * pul;
+              const double snr = (sul > 0.0 && sdl > sul) ? 10.0 * log10((sdl - sul) / sul) : -99.0;
+              v += snprintf(sb + v, sizeof(sb) - v, "ch%d=%.1fdB(n=%.0f) ", a2, snr, pul);
+            }
+            if (v > 0) {
+              LOG_I(PHY,
+                    "SENSING: BRSNR per-branch SNR lower bound from UL-slot noise floor "
+                    "(NOT from chest nvar, which is invalid here); n= is the noise amplitude: %s\n",
+                    sb);
+            }
+          }
+        }
         if (g_census_pow_ant_n > 0) {
           double pa[CENSUS_MAX_ANT], mx = 0.0;
           const int nant = (UE->frame_parms.nb_antennas_rx < CENSUS_MAX_ANT) ? UE->frame_parms.nb_antennas_rx
@@ -1634,9 +1746,13 @@ void *UE_thread(void *arg)
         g_census_ssb_slots = 0;
         g_census_pow = 0.0;
         g_census_pow_n = 0;
-        for (int a2 = 0; a2 < CENSUS_MAX_ANT; a2++)
+        for (int a2 = 0; a2 < CENSUS_MAX_ANT; a2++) {
           g_census_pow_ant[a2] = 0.0;
+          g_census_pw2_ant[a2] = 0.0;
+          g_census_clip_ant[a2] = 0;
+        }
         g_census_pow_ant_n = 0;
+        g_census_pw2_n = 0;
         /* Two consecutive windows (2 s) before acting: one window is enough to be sure given how
          * far apart the two levels sit, but the stall is permanent and a spurious reacquisition
          * costs a real capture gap, so require it to persist. */

@@ -34,7 +34,20 @@
  * different transport block, and a shared pin would make one consumer's retry silently change
  * another's branch mid-TB. */
 __thread int nr_dlsch_forced_branch = -1;
+/* Forced receive-branch MASK for the same-capture subset scan. -1 = inactive (default), so every
+ * existing path is bit-identical. When set, the combiner uses ALL branches as its contiguous slice
+ * and the branches absent from the mask are zeroed, which is exactly how mode 3 already excludes a
+ * branch -- MRC weights by h*, so h == 0 contributes precisely zero signal and zero noise.
+ * This exists so 15 antenna subsets can be replayed against ONE captured transport block: comparing
+ * separate live runs cannot answer whether four branches hurt, because propagation, gain state and
+ * this rig's own 5-88 % CRC swing all change between runs. */
+__thread int nr_dlsch_forced_mask = -1;
 __thread int nr_dlsch_used_branch = -1;
+
+void nr_dlsch_force_mask(int mask)
+{
+  nr_dlsch_forced_mask = mask;
+}
 
 void nr_dlsch_force_branch(int ant)
 {
@@ -1057,7 +1070,22 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
        * measured it at 0.0 % across six runs while branch 3 held the highest |h| -- power ranking
        * does not predict decodability here, so the retry walks branches by index instead and lets
        * the CRC decide. */
-      if (nr_dlsch_forced_branch >= 0 && nr_dlsch_forced_branch < nbRx) {
+      if (nr_dlsch_forced_mask >= 0) {
+        /* Subset scan: combine exactly the masked branches. The shift still comes from the
+         * strongest branch PRESENT IN THE MASK, not the strongest overall -- otherwise every subset
+         * would inherit branch 0's scaling and the comparison would measure the shift, not the
+         * subset. */
+        t_mrc_nb_rx = nbRx;
+        t_mrc_rx_index = 0;
+        t_mrc_live_mask = nr_dlsch_forced_mask;
+        int mbest = -1;
+        for (int aarx = 0; aarx < nbRx; aarx++) {
+          if ((nr_dlsch_forced_mask & (1 << aarx)) && (mbest < 0 || avg[aarx] > avg[mbest])) {
+            mbest = aarx;
+          }
+        }
+        avgs = (mbest >= 0) ? avg[mbest] : avg[best];
+      } else if (nr_dlsch_forced_branch >= 0 && nr_dlsch_forced_branch < nbRx) {
         t_mrc_nb_rx = 1;
         t_mrc_rx_index = nr_dlsch_forced_branch;
         avgs = avg[nr_dlsch_forced_branch];
@@ -1213,7 +1241,7 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
    * dl_ch_estimates_ext is rebuilt by nr_dlsch_extract_rbs() on each call, so a mask applied once
    * would be undone for every symbol after the first. The decision itself is made once (at
    * first_symbol_flag, from the true unzeroed powers) and carried in thread-local state. */
-  if (nl == 1 && nbRx == 4 && t_mrc_mode == 3 && t_mrc_live_mask != 0xF) {
+  if (nl == 1 && nbRx == 4 && (nr_dlsch_forced_mask >= 0 || t_mrc_mode == 3) && t_mrc_live_mask != 0xF) {
     for (int aarx = 0; aarx < nbRx; aarx++) {
       if (!(t_mrc_live_mask & (1 << aarx))) {
         memset(chFext[0][aarx], 0, rx_size_symbol * sizeof(c16_t));
