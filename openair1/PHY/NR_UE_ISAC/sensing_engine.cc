@@ -153,7 +153,23 @@ void SensingEngine::submit(uint32_t slot, float fraction, nr_isac_source_t sourc
   if (!running_.load(std::memory_order_relaxed) || !cfr || !subcarrier || !symbol
       || !re || re > maximum_re_) return;
   Snapshot* value = nullptr;
-  if (!free_.try_pop(value) || !value) { dropped_.fetch_add(1, std::memory_order_relaxed); return; }
+  if (!free_.try_pop(value) || !value) {
+    /* Detection is intentionally single-threaded because tracker state is ordered.  Under overload,
+     * retaining the oldest queued occurrence makes the live report clock fall farther behind on
+     * every CPI while every current observation is discarded.  Reuse the oldest not-yet-consumed
+     * snapshot instead: the drop count remains exact, but the next CPI is built from current air
+     * time and the real-time tracker can recover after a long CLEAN evaluation. */
+    Snapshot* oldest = nullptr;
+    const bool evicted = ready_.try_pop(oldest);
+    if (!evicted || !oldest) {
+      if (evicted)
+        ready_.push(nullptr); // Preserve the stop sentinel if submit raced shutdown.
+      dropped_.fetch_add(1, std::memory_order_relaxed);
+      return;
+    }
+    value = oldest;
+    dropped_.fetch_add(1, std::memory_order_relaxed);
+  }
   value->slot = slot; value->fraction = fraction >= 0.0f && fraction < 1.0f ? fraction : 0.0f;
   value->source = source; value->carrier = carrier;
   value->antennas = std::min(std::max(1u, antennas), requested_antennas_);

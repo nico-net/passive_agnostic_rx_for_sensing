@@ -104,18 +104,28 @@ std::vector<double> likelihood_map_scaled(const std::vector<std::complex<double>
   const double denominator = plan.denominator * antennas;
   std::vector<double> result((size_t)range_bins * rows, -std::numeric_limits<double>::infinity());
   if (!(denominator > 0.0)) return result;
+  /* The nonuniform slow-time steering depends only on Doppler and row, not on range or antenna.
+   * Precompute it once per map exactly as NumPy materializes steering_conjugate; recomputing the
+   * same sin/cos pair inside q*a*d*r dominated every live CLEAN iteration. */
+  std::vector<std::complex<double>> slow_steering((size_t)rows * rows);
+  for (uint32_t d = 0; d < rows; ++d) {
+    if (!plan.rate_allowed[d]) continue;
+    const double rate = plan.axes.rate_axis_mps[d];
+    for (uint32_t r = 0; r < rows; ++r) {
+      const double phase = 2.0 * PI * rate * fc_hz * plan.times[r] / C_MPS;
+      slow_steering[(size_t)d * rows + r] =
+          std::complex<double>(std::cos(phase), std::sin(phase));
+    }
+  }
   for (uint32_t q = minimum_range_bin; q < range_bins; ++q)
     for (uint32_t d = 0; d < rows; ++d) {
       if (!plan.rate_allowed[d]) continue;
-      const double rate = plan.axes.rate_axis_mps[d];
       double power = 0.0;
       for (uint32_t a = 0; a < antennas; ++a) {
         std::complex<double> coherent(0.0, 0.0);
-        for (uint32_t r = 0; r < rows; ++r) {
-          const double phase = 2.0 * PI * rate * fc_hz * plan.times[r] / C_MPS;
+        for (uint32_t r = 0; r < rows; ++r)
           coherent += projected[((size_t)a * rows + r) * range_bins + q]
-                      * std::complex<double>(std::cos(phase), std::sin(phase));
-        }
+                      * slow_steering[(size_t)d * rows + r];
         power += std::norm(coherent);
       }
       const double score = power / denominator;
