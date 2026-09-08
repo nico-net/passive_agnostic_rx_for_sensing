@@ -107,5 +107,39 @@ int main()
     std::fputs("CUDA family processing misses required CPI throughput\n", stderr);
     return EXIT_FAILURE;
   }
+
+  auto run_dual = [&]() {
+    CfrWindow fused = input;
+    CfrWindow dl_only = input;
+    // Exercise distinct provenance-preserved DL contents and occupancy; this must not collapse
+    // into the fused tensor merely to improve timing.
+    for (uint32_t row = 0; row < dl_only.rows; ++row)
+      for (uint32_t subcarrier = 0; subcarrier < dl_only.subcarriers; ++subcarrier) {
+        if (row % 7 == 6) dl_only.observed[dl_only.cell(row, subcarrier)] = 0;
+        for (uint32_t antenna = 0; antenna < dl_only.antennas; ++antenna)
+          dl_only.values[dl_only.sample(antenna, row, subcarrier)] *=
+              std::polar(0.81f, static_cast<float>(0.002 * row - 0.0001 * subcarrier));
+      }
+    const auto started = std::chrono::steady_clock::now();
+    const auto stats = align_allocation_families_pair(fused, dl_only, true);
+    const auto done = std::chrono::steady_clock::now();
+    if (stats.first.aligned_rows == 0 || stats.second.aligned_rows == 0) std::abort();
+    return std::chrono::duration<double, std::milli>(done - started).count();
+  };
+  (void)run_dual();
+  std::vector<double> dual_samples;
+  for (uint32_t repetition = 0; repetition < 7; ++repetition) dual_samples.push_back(run_dual());
+  std::sort(dual_samples.begin(), dual_samples.end());
+  const double dual_median = dual_samples[dual_samples.size() / 2];
+  const char* configured_dual_limit = std::getenv("NR_ISAC_CUDA_DUAL_FAMILY_BENCHMARK_MAX_MS");
+  const double dual_limit_ms = configured_dual_limit
+      ? std::strtod(configured_dual_limit, nullptr) : 30.0;
+  std::printf("CUDA dual family 4x192x3276: min_combined=%.3f ms median_combined=%.3f ms "
+              "max_combined=%.3f ms limit=%.3f ms\n",
+              dual_samples.front(), dual_median, dual_samples.back(), dual_limit_ms);
+  if (!(dual_median < dual_limit_ms)) {
+    std::fputs("CUDA dual family alignment misses required combined throughput\n", stderr);
+    return EXIT_FAILURE;
+  }
   return EXIT_SUCCESS;
 }

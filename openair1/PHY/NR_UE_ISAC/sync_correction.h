@@ -4,6 +4,7 @@
 #include "pipeline_types.h"
 
 #include <optional>
+#include <utility>
 
 namespace nr_isac {
 
@@ -38,6 +39,9 @@ struct FamilyAlignmentStats {
 
 /** Python align_allocation_families_gpu, with identical family keys and per-antenna mean removal. */
 FamilyAlignmentStats align_allocation_families(CfrWindow& window, bool subtract_static_reference);
+/** Align two independent CFR views using one CUDA batch when available. */
+std::pair<FamilyAlignmentStats, FamilyAlignmentStats> align_allocation_families_pair(
+    CfrWindow& fused, CfrWindow& dl_only, bool subtract_static_reference);
 void subtract_allocation_family_static(CfrWindow& window);
 
 /** Robust homoscedastic current-CPI variance used by the Python diagonal-weight path. */

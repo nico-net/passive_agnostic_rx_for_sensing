@@ -4,6 +4,7 @@
 #include "pipeline_types.h"
 
 #include <cstdint>
+#include <utility>
 #include <vector>
 
 namespace nr_isac {
@@ -17,6 +18,17 @@ FamilyAlignmentStats align_allocation_families_cuda(
     CfrWindow& window,
     bool subtract_static_reference,
     const std::vector<std::vector<uint32_t>>& family_rows);
+
+/**
+ * Align fused and provenance-preserved DL views in one CUDA job stream.  The two views keep
+ * independent samples, masks, and family keys; only launch/setup and device residency are shared.
+ */
+std::pair<FamilyAlignmentStats, FamilyAlignmentStats> align_allocation_families_cuda_pair(
+    CfrWindow& fused,
+    CfrWindow& dl_only,
+    bool subtract_static_reference,
+    const std::vector<std::vector<uint32_t>>& fused_family_rows,
+    const std::vector<std::vector<uint32_t>>& dl_family_rows);
 
 double estimate_current_cpi_variance_cuda(
     const CfrWindow& window,

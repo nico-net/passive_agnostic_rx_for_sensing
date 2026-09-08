@@ -101,6 +101,38 @@ int main()
       compare_values(cuda, cpu, 2e-5);
     }
 
+    // The dual path must be decision-equivalent to two independent alignments even when its
+    // provenance-preserved DL view has different complex samples and occupancy.
+    CfrWindow cpu_fused = fixture();
+    CfrWindow cpu_dl = fixture();
+    for (uint32_t row = 0; row < cpu_dl.rows; ++row)
+      for (uint32_t subcarrier = 0; subcarrier < cpu_dl.subcarriers; ++subcarrier) {
+        if (row % 4 == 3) cpu_dl.observed[cpu_dl.cell(row, subcarrier)] = 0;
+        for (uint32_t antenna = 0; antenna < cpu_dl.antennas; ++antenna)
+          cpu_dl.values[cpu_dl.sample(antenna, row, subcarrier)] *=
+              std::polar(0.73f, static_cast<float>(0.03 * row - 0.001 * subcarrier));
+      }
+    CfrWindow cuda_fused = cpu_fused;
+    CfrWindow cuda_dl = cpu_dl;
+    setenv("NR_ISAC_REQUIRE_CUDA", "0", 1);
+    setenv("NR_ISAC_CUDA_DETECTOR", "0", 1);
+    const auto expected_fused = align_allocation_families(cpu_fused, true);
+    const auto expected_dl = align_allocation_families(cpu_dl, true);
+    setenv("NR_ISAC_REQUIRE_CUDA", "1", 1);
+    setenv("NR_ISAC_CUDA_DETECTOR", "1", 1);
+    const auto actual_pair = align_allocation_families_pair(cuda_fused, cuda_dl, true);
+    require(actual_pair.first.families == expected_fused.families
+                && actual_pair.first.repeated_families == expected_fused.repeated_families
+                && actual_pair.first.aligned_rows == expected_fused.aligned_rows
+                && actual_pair.first.singleton_rows == expected_fused.singleton_rows
+                && actual_pair.second.families == expected_dl.families
+                && actual_pair.second.repeated_families == expected_dl.repeated_families
+                && actual_pair.second.aligned_rows == expected_dl.aligned_rows
+                && actual_pair.second.singleton_rows == expected_dl.singleton_rows,
+            "dual CUDA family statistics differ from sequential CPU alignment");
+    compare_values(cuda_fused, cpu_fused, 2e-5);
+    compare_values(cuda_dl, cpu_dl, 2e-5);
+
     const CfrWindow covariance = fixture();
     uint32_t cpu_families = 0, cuda_families = 0;
     uint64_t cpu_samples = 0, cuda_samples = 0;

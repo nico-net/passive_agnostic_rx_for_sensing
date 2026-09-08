@@ -611,6 +611,44 @@ FamilyAlignmentStats align_allocation_families(CfrWindow& window, bool subtract_
   return stats;
 }
 
+std::pair<FamilyAlignmentStats, FamilyAlignmentStats> align_allocation_families_pair(
+    CfrWindow& fused, CfrWindow& dl_only, bool subtract_static)
+{
+  if (!fused.valid() || !dl_only.valid())
+    throw std::invalid_argument("invalid dual allocation-family window");
+  if (fused.antennas != dl_only.antennas || fused.rows != dl_only.rows
+      || fused.subcarriers != dl_only.subcarriers)
+    throw std::invalid_argument("dual allocation-family windows have incompatible dimensions");
+  const auto fused_grouped = families(fused);
+  const auto dl_grouped = families(dl_only);
+#ifdef NR_ISAC_CUDA_DETECTOR
+  if (detector_cuda_available()) {
+    std::vector<std::vector<uint32_t>> fused_rows, dl_rows;
+    fused_rows.reserve(fused_grouped.size()); dl_rows.reserve(dl_grouped.size());
+    for (const auto& item : fused_grouped) fused_rows.push_back(item.second);
+    for (const auto& item : dl_grouped) dl_rows.push_back(item.second);
+    try {
+      return align_allocation_families_cuda_pair(
+          fused, dl_only, subtract_static, fused_rows, dl_rows);
+    } catch (const std::exception& error) {
+      if (cuda_required()) throw;
+      std::fprintf(stderr,
+                   "NR_ISAC: CUDA dual family alignment failed; using CPU fallback: %s\n",
+                   error.what());
+    }
+  } else if (cuda_required()) {
+    throw std::runtime_error("NR_ISAC_REQUIRE_CUDA=1 but CUDA dual family alignment is unavailable");
+  }
+#else
+  if (cuda_required())
+    throw std::runtime_error("NR_ISAC_REQUIRE_CUDA=1 but CUDA dual family alignment was not built");
+#endif
+  // Preserve the established CPU semantics exactly when CUDA is unavailable or optional CUDA
+  // fails.  Each view remains independent; no DL sample is replaced with a fused value.
+  return {align_allocation_families(fused, subtract_static),
+          align_allocation_families(dl_only, subtract_static)};
+}
+
 void subtract_allocation_family_static(CfrWindow& window)
 {
   if (!window.valid()) throw std::invalid_argument("invalid family-static window");

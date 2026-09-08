@@ -701,9 +701,13 @@ void SensingEngine::process_window(CfrWindow window, std::optional<CfrWindow> dl
   report.current_cpi_variance = estimate_current_cpi_variance(
       corrected, &report.covariance_family_count, &report.covariance_difference_count);
   CfrWindow detector_input = corrected;
-  report.detector_alignment = align_allocation_families(detector_input, config_.family_static);
-  if (dl_window)
-    (void)align_allocation_families(*dl_window, config_.family_static);
+  if (dl_window) {
+    const auto alignments = align_allocation_families_pair(
+        detector_input, *dl_window, config_.family_static);
+    report.detector_alignment = alignments.first;
+  } else {
+    report.detector_alignment = align_allocation_families(detector_input, config_.family_static);
+  }
   const double dwell = (detector_input.row_time_slots.back() - detector_input.row_time_slots.front())
                        * slot_duration_s(detector_input.scs_hz);
   const RateGate gate = finalize_search_gate(plan, detector_input.rows, dwell,
