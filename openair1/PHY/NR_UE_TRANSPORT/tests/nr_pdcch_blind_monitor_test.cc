@@ -2541,3 +2541,20 @@ TEST_F(BlindPdcchTest, UlDefaultK2AndDmrsUseMeasuredCellParameters) {
   opts.numerology=6;
   EXPECT_FALSE(nr_pdcch_blind_extract_01(PackUlPayload(gt,opts),len,gt.rnti,&opts,&out));
 }
+
+TEST_F(BlindPdcchTest, UlRawEvidenceSurvivesUnknownInterpretation) {
+  nr_pdcch_ul_discovery_reset();
+  auto packing=LiveUlOpts();
+  auto unknown=packing;unknown.bwp_size=0;unknown.tda_count=0;
+  const auto len=nr_pdcch_blind_dci01_size(&packing);
+  nr_pdcch_blind_ul_result_t result{};
+  for(int i=0;i<8;i++) {
+    UlGroundTruth gt;gt.riv=273*(i+1);gt.mcs=i+2;
+    EXPECT_FALSE(nr_pdcch_ul_discovery_grant(&unknown,len,gt.rnti,PackUlPayload(gt,packing),&result));
+  }
+  const auto snapshot=nr_pdcch_ul_discovery_snapshot();
+  EXPECT_EQ(snapshot.raw_samples,8);
+  EXPECT_EQ(snapshot.width_trials,0u);
+  EXPECT_EQ(snapshot.interp_trials,0u);
+  nr_pdcch_ul_discovery_reset();
+}

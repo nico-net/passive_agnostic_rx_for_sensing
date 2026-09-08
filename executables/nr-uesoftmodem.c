@@ -1,3 +1,4 @@
+#include "PHY/NR_UE_TRANSPORT/nr_passive_replay_capture.h"
 /*
  * SPDX-License-Identifier: LicenseRef-CSSL-1.0
  */
@@ -420,7 +421,18 @@ int main(int argc, char **argv)
     }
   }
 
+  /* Offline replay exits before any radio initialization. */
+  const char *replay_input = getenv("ISAC_PASSIVE_REPLAY_INPUT");
+  if (replay_input || getenv("ISAC_PASSIVE_REPLAY_CAPTURE")) {
+    AssertFatal(IS_PASSIVE_RX_MODE(get_softmodem_params()), "Replay requires --passive-rx\n");
+    if (replay_input)
+      return nr_passive_replay_read(nrPHY_vars_UE_g[0][0], replay_input);
+    nr_passive_replay_init(nrPHY_vars_UE_g[0][0]);
+  }
+
   nrue_init_openair0();
+
+
 
   lock_memory_to_ram();
 

@@ -38,6 +38,7 @@ sudo -n env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
   ISAC_DISC_NO_RESYNC=0 ISAC_RF_STALL_MAX_REINIT=0 ISAC_CFO_TRACK_HZ=1 ISAC_CFO_TRACK_PERIOD=20 \
   ISAC_PDCCH_TIMING=1 ISAC_PUSCH_TIMING=1 ISAC_PUSCH_DIAG=1 \
   ISAC_UL_TA_SWEEP=0:0:0 ISAC_SENSE_COMB=0 ISAC_TSYNC_RESET=0 \
+  ISAC_PASSIVE_REPLAY_CAPTURE="$OUT/replay.bin" \
   LD_LIBRARY_PATH="$BUILD:/usr/local/lib" \
   timeout --signal=TERM --kill-after=10s 480s taskset -c 0-7 "$BUILD/nr-uesoftmodem" \
   --usrp-args type=x4xx,addr=192.168.20.2,mgmt_addr=128.178.122.174 \

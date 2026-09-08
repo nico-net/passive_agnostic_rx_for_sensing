@@ -144,19 +144,19 @@ bool nr_pdcch_ul_discovery_grant(const nr_pdcch_blind_ul_opts_t *fixed, uint16_t
   bool novel=true;
   for (int i=0;i<c->nsamples;++i) if(c->samples[i]==payload) novel=false;
   if (novel) {
-    /* No geometry or TDA width inferred from DCI total length alone. The current opts
-   * contract still supplies these facts; a default/unknown dedicated TDA list is unresolved. */
-  if (fixed->bwp_size==0 || fixed->tda_count<1 || fixed->tda_count>16) {
-    if (!c->widths.refused) LOG_E(PHY,"UL discovery unresolved: UL BWP and TDA field width required\n");
-    c->widths.refused=true;
-    goto done;
-  }
   if(c->nsamples<UL_DISCOVERY_SAMPLES)
       LOG_I(PHY,"UL raw sample rnti=0x%x len=%u payload=0x%lx sample=%d/%d; interpretation unresolved\n",
             rnti,len,(unsigned long)payload,c->nsamples+1,UL_DISCOVERY_SAMPLES);
     c->samples[c->sample_cursor]=payload;
     c->sample_cursor=(c->sample_cursor+1)%UL_DISCOVERY_SAMPLES;
     if(c->nsamples<UL_DISCOVERY_SAMPLES) ++c->nsamples;
+  }
+  /* No geometry or TDA width inferred from DCI total length alone. The current opts
+   * contract still supplies these facts; a default/unknown dedicated TDA list is unresolved. */
+  if (fixed->bwp_size==0 || fixed->tda_count<1 || fixed->tda_count>16) {
+    if (!c->widths.refused) LOG_E(PHY,"UL discovery unresolved: UL BWP and TDA field width required\n");
+    c->widths.refused=true;
+    goto done;
   }
   if(c->nsamples<UL_DISCOVERY_SAMPLES || c->widths.refused || c->interp.refused) goto done;
   apply_ctx_t ctx={.opts=c->baseline,.owner=c};
@@ -238,6 +238,7 @@ nr_pdcch_ul_discovery_snapshot_t nr_pdcch_ul_discovery_snapshot(void)
   nr_pdcch_ul_discovery_snapshot_t s={.generation=generation_counter};
   for (int k=0; k<UL_DISCOVERY_CONTEXTS; ++k) {
     const ul_context_t *c=&contexts[k];
+    s.raw_samples+=c->nsamples;
     s.width_classes+=c->widths.engine.n_classes;
     s.interp_classes+=c->interp.engine.n_classes;
     for(int i=0;i<c->widths.engine.n_classes;++i) s.width_trials+=c->widths.engine.classes[i].trials;

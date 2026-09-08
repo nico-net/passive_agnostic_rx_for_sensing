@@ -26,7 +26,7 @@
  * discard evidence and advance the generation echoed through the grant book. */
 typedef struct {
   uint64_t generation, width_trials, interp_trials;
-  int width_classes, interp_classes;
+  int width_classes, interp_classes, raw_samples;
 } nr_pdcch_ul_discovery_snapshot_t;
 nr_pdcch_ul_discovery_snapshot_t nr_pdcch_ul_discovery_snapshot(void);
 void nr_pdcch_ul_discovery_reset(void);

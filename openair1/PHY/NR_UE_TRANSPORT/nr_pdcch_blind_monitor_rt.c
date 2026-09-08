@@ -1,3 +1,4 @@
+#include "PHY/NR_UE_TRANSPORT/nr_passive_replay_capture.h"
 #include "nr_passive_sample_lifetime.h"
 /*
  * Licensed to the OpenAirInterface (OAI) Software Alliance under one or more
@@ -1674,6 +1675,8 @@ constdiag_done:;
      * this point reads a DL result and would misinterpret a UL one. ---- */
     if (cand_task[ti].ul_scan) {
       if(cand_task[ti].ok && cand_task[ti].ul_auto) {
+        nr_passive_replay_ul(source_absolute_slot, boot_rnti, dci01_length,
+                             cand_task[ti].ul_out.raw_payload);
         nr_pdcch_blind_ul_result_t discovered;
         cand_task[ti].ok=nr_pdcch_ul_discovery_grant(&ul_opts,dci01_length,boot_rnti,
                                                     cand_task[ti].ul_out.raw_payload,&discovered);

@@ -1,3 +1,4 @@
+#include "PHY/NR_UE_TRANSPORT/nr_passive_replay_capture.h"
 #include "nr_rx_continuity.h"
 #include <dlfcn.h>
 /*
@@ -668,8 +669,10 @@ static int UE_dl_preprocessing(PHY_VARS_NR_UE *UE,
     ue_ta_procedures(UE, proc->nr_slot_tx, proc->frame_tx);
   }
 
-  if (IS_PASSIVE_RX_MODE(get_softmodem_params()))
+  if (IS_PASSIVE_RX_MODE(get_softmodem_params())) {
+    nr_passive_replay_slot(UE, proc);
     nr_pusch_passive_monitor_process(UE, proc);
+  }
 
   TracyCZoneEnd(ctx);
   return sampleShift;

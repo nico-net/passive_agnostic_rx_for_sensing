@@ -1,3 +1,4 @@
+#include "PHY/NR_UE_TRANSPORT/nr_passive_replay_capture.h"
 #include "nr_passive_sample_lifetime.h"
 /*
  * Licensed to the OpenAirInterface (OAI) Software Alliance under one or more
@@ -163,6 +164,7 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
     const nr_pdsch_passive_decode_status_t st =
         nr_pdsch_passive_decode(ue, &proc, &job.dlsch_pdu, &job.freq_alloc, &job.grant, rxdataF, &dec);
 
+    nr_passive_replay_dl(&job, &dec);
     nr_slot_fep_fo_override_hz = saved_fo;
     if (st == NR_PDSCH_PASSIVE_DECODE_UNSUPPORTED && !nr_passive_samples_valid(
             atomic_load_explicit(&nr_ue_diag_producer_absolute_slot, memory_order_relaxed),
