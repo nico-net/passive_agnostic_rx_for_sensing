@@ -12,6 +12,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <thread>
 #include <vector>
 
@@ -34,6 +35,7 @@ private:
   struct PendingRow;
   struct WindowTask {
     CfrWindow window;
+    std::optional<CfrWindow> dl_window;
     CpiPlan plan;
     double air_origin_slots = 0.0;
     uint64_t sequence = 0;
@@ -68,7 +70,7 @@ private:
   bool processing_in_flight() const;
   void wait_for_processing();
   void finish_pending_windows();
-  void enqueue_window(CfrWindow window, const CpiPlan& plan);
+  void enqueue_window(CfrWindow window, std::optional<CfrWindow> dl_window, const CpiPlan& plan);
   size_t pending_row_storage_bytes(const PendingRow& row) const;
   void make_pending_row_room(size_t incoming_bytes);
   void erase_rows(const std::vector<int64_t>& keys);
@@ -77,8 +79,10 @@ private:
   void begin_geometry(const nr_isac_carrier_t& carrier);
   void ensure_plan();
   void close_ready_windows(bool flush);
-  CfrWindow build_window(const std::vector<int64_t>& keys) const;
-  void process_window(CfrWindow window, const CpiPlan& plan, double air_origin_slots,
+  CfrWindow build_window(const std::vector<int64_t>& keys, bool dl_only,
+                         uint32_t forced_antennas = 0) const;
+  void process_window(CfrWindow window, std::optional<CfrWindow> dl_window,
+                      const CpiPlan& plan, double air_origin_slots,
                       uint64_t sequence);
   TrackSnapshot planning_snapshot(double time_s) const;
   std::vector<ConfirmedTrackView> confirmed_tracks() const;

@@ -351,11 +351,124 @@ void test_finite_admission_window()
   require(reports==1,"finite admission window emitted an unexpected CPI count");
   std::remove(path.c_str());
 }
+
+std::vector<double> json_number_array(const std::string& line, const std::string& key)
+{
+  const std::string prefix = "\"" + key + "\":[";
+  const size_t begin = line.find(prefix);
+  require(begin != std::string::npos, "mixed-row capture report is missing an RDM field");
+  const char* cursor = line.c_str() + begin + prefix.size();
+  std::vector<double> values;
+  while (*cursor != ']') {
+    char* end = nullptr;
+    const double value = std::strtod(cursor, &end);
+    require(end != cursor && std::isfinite(value), "mixed-row capture RDM contains an invalid value");
+    values.push_back(value);
+    cursor = end;
+    if (*cursor == ',') ++cursor;
+    else require(*cursor == ']', "mixed-row capture RDM has invalid JSON separators");
+  }
+  require(!values.empty(), "mixed-row capture RDM is empty");
+  return values;
+}
+
+double map_energy(const std::vector<double>& values)
+{
+  double total = 0.0;
+  for (double value : values) total += value;
+  return total;
+}
+
+std::pair<std::vector<double>, std::vector<double>> mixed_row_capture(float ul_amplitude,
+                                                                         const std::string& path)
+{
+  std::remove(path.c_str());
+  PipelineConfig c;
+  c.sources_mask = (1u << NR_ISAC_SRC_CSI_RS) | (1u << NR_ISAC_SRC_PUSCH_DMRS);
+  c.duration_bank_s = {0.001}; c.bootstrap_duration_index = 0;
+  c.minimum_dwell_s = 0.001; c.maximum_dwell_s = 0.001;
+  c.minimum_rows = 2; c.maximum_rows = 4;
+  c.sync_enable = false; c.family_static = false; c.tracker_enable = false;
+  c.maximum_components = 1; c.maximum_objects = 1; c.capture_rvm = true;
+  c.maximum_range_m = 200.0; c.report_path = path; c.out_path.clear();
+  nr_isac_carrier_t carrier{};
+  carrier.nof_prb = 2; carrier.scs_hz = 30000; carrier.dl_center_hz = 3499440000;
+  carrier.slots_per_frame = 20; carrier.pci = 1;
+  std::vector<std::complex<float>> dl(24, {1.0f, 0.0f});
+  std::vector<std::complex<float>> ul(24, {ul_amplitude, 0.0f});
+  std::vector<uint32_t> k(24), symbol(24, 2);
+  for (uint32_t i = 0; i < k.size(); ++i) k[i] = i;
+  {
+    SensingEngine engine(c, 2, 1); engine.start();
+    for (uint32_t slot = 0; slot < 10; ++slot) {
+      // Same slot/fraction/re means PendingRow would formerly average these into one value and
+      // retain only an ORed source mask.  The report DL map must now remain invariant to UL.
+      engine.submit(slot, 0.0f, NR_ISAC_SRC_CSI_RS, carrier, dl.data(), 1,
+                    k.data(), symbol.data(), dl.size(), 1.0f);
+      engine.submit(slot, 0.0f, NR_ISAC_SRC_PUSCH_DMRS, carrier, ul.data(), 1,
+                    k.data(), symbol.data(), ul.size(), 1.0f);
+    }
+    engine.stop();
+  }
+  std::ifstream input(path); require(input.good(), "mixed-row capture emitted no report");
+  std::string line; require(static_cast<bool>(std::getline(input, line)), "mixed-row capture report is empty");
+  require(line.find("\"dl_rvm_source_mask\":15") != std::string::npos,
+          "mixed-row capture does not attest the DL source mask");
+  auto fused = json_number_array(line, "rvm_blob");
+  auto dl_only = json_number_array(line, "dl_rvm_blob");
+  require(fused.size() == dl_only.size(), "mixed-row fused/DL RDM shapes differ");
+  std::remove(path.c_str());
+  return {std::move(fused), std::move(dl_only)};
+}
+
+void test_mixed_row_dl_rdm_isolation()
+{
+  const auto quiet = mixed_row_capture(0.0f, "/tmp/nr_isac_mixed_row_quiet.jsonl");
+  const auto loud = mixed_row_capture(8.0f, "/tmp/nr_isac_mixed_row_loud.jsonl");
+  require(std::abs(map_energy(quiet.first) - map_energy(loud.first)) > 1e-4,
+          "UL energy did not affect the fused mixed-row RDM");
+  require(quiet.second.size() == loud.second.size(), "DL-only mixed-row RDM shape changed with UL");
+  for (size_t i = 0; i < quiet.second.size(); ++i)
+    close(quiet.second[i], loud.second[i], 1e-10,
+          "UL energy leaked into the exact DL-only mixed-row RDM");
+}
+
+void test_dl_capture_fails_closed_without_dl()
+{
+  const std::string path = "/tmp/nr_isac_ul_only_capture.jsonl";
+  std::remove(path.c_str());
+  PipelineConfig c;
+  c.sources_mask = 1u << NR_ISAC_SRC_PUSCH_DMRS;
+  c.duration_bank_s = {0.001}; c.bootstrap_duration_index = 0;
+  c.minimum_dwell_s = 0.001; c.maximum_dwell_s = 0.001;
+  c.minimum_rows = 2; c.maximum_rows = 4;
+  c.sync_enable = false; c.family_static = false; c.tracker_enable = false;
+  c.maximum_components = 1; c.maximum_objects = 1; c.capture_rvm = true;
+  c.report_path = path; c.out_path.clear();
+  nr_isac_carrier_t carrier{};
+  carrier.nof_prb = 2; carrier.scs_hz = 30000; carrier.dl_center_hz = 3499440000;
+  carrier.slots_per_frame = 20; carrier.pci = 1;
+  std::vector<std::complex<float>> h(24, {1.0f, 0.0f});
+  std::vector<uint32_t> k(24), symbol(24, 2);
+  for (uint32_t i = 0; i < k.size(); ++i) k[i] = i;
+  {
+    SensingEngine engine(c, 2, 1); engine.start();
+    for (uint32_t slot = 0; slot < 6; ++slot)
+      engine.submit(slot, 0.0f, NR_ISAC_SRC_PUSCH_DMRS, carrier, h.data(), 1,
+                    k.data(), symbol.data(), h.size(), 1.0f);
+    engine.stop();
+  }
+  std::ifstream input(path);
+  std::string line;
+  require(!input.good() || !std::getline(input, line),
+          "DL RDM capture emitted a report despite having no provenance-proven DL samples");
+  std::remove(path.c_str());
+}
 }
 
 int main()
 {
-  try {test_fft();test_adaptive_threshold();test_detector();test_required_cuda_contract();test_aoa();test_enu_geometry();test_variable_cpi();test_validation_report_compatibility();test_causal_cpi_pipeline();test_finite_admission_window();}
+  try {test_fft();test_adaptive_threshold();test_detector();test_required_cuda_contract();test_aoa();test_enu_geometry();test_variable_cpi();test_causal_cpi_pipeline();test_finite_admission_window();test_mixed_row_dl_rdm_isolation();test_dl_capture_fails_closed_without_dl();test_validation_report_compatibility();}
   catch(const std::exception& e){std::fprintf(stderr,"python parity test failed: %s\n",e.what());return EXIT_FAILURE;}
   std::puts("native sensing golden parity checks passed");return EXIT_SUCCESS;
 }

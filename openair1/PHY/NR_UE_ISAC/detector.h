@@ -12,10 +12,21 @@ struct RateGate {
   std::optional<double> half_width_mps;
 };
 
+struct DiagnosticLikelihoodMap {
+  Axes axes;
+  std::vector<double> likelihood; // range-major [range][Doppler], raw score
+};
+
 /** Native equivalent of clean_components_gpu + collapse_clean_multipath. */
 DetectorResult detect_clean(const CfrWindow& window,
                             const PipelineConfig& config,
                             const RateGate& rate_gate = {},
                             uint32_t minimum_range_bin = 0);
+
+// First-pass RDM only: no CLEAN, detector state, or tracker side effects.
+DiagnosticLikelihoodMap diagnostic_likelihood_map(const CfrWindow& window,
+                                                  const PipelineConfig& config,
+                                                  const RateGate& rate_gate = {},
+                                                  uint32_t minimum_range_bin = 0);
 
 } // namespace nr_isac

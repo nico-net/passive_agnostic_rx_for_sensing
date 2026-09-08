@@ -103,12 +103,9 @@ int main()
     const auto started = std::chrono::steady_clock::now();
     const auto result = detect_clean(window, config);
     const auto stopped = std::chrono::steady_clock::now();
-    if (result.components.size() != config.maximum_components || result.initial_likelihood.empty()
-        || result.initial_dl_likelihood.size() != result.initial_likelihood.size()) {
-      std::fprintf(stderr,
-                   "dense CUDA detector returned %zu components, %zu fused and %zu DL map cells\n",
-                   result.components.size(), result.initial_likelihood.size(),
-                   result.initial_dl_likelihood.size());
+    if (result.components.size() != config.maximum_components || result.initial_likelihood.empty()) {
+      std::fprintf(stderr, "dense CUDA detector returned %zu components and %zu map cells\n",
+                   result.components.size(), result.initial_likelihood.size());
       std::exit(EXIT_FAILURE);
     }
     for (const auto& component : result.components)
@@ -141,23 +138,30 @@ int main()
   }
   struct FullSample {
     double total = 0.0, copy = 0.0, sync = 0.0, correction = 0.0;
-    double alignment = 0.0, variance = 0.0, detector = 0.0, report = 0.0;
+    double variance = 0.0, alignment = 0.0, detector = 0.0, report = 0.0;
   };
   auto run_full_cpi = [&]() {
     const auto started = std::chrono::steady_clock::now();
     CfrWindow corrected = window;
+    CfrWindow dl_corrected = window;
     const auto copied = std::chrono::steady_clock::now();
     const SyncEstimate sync = estimate_sync(window);
     const auto synchronized = std::chrono::steady_clock::now();
     apply_sync_correction(corrected, sync, 0.0, std::nullopt);
+    apply_sync_correction(dl_corrected, sync, 0.0, std::nullopt);
     const auto corrected_at = std::chrono::steady_clock::now();
-    align_allocation_families(corrected, true);
-    const auto allocation_aligned = std::chrono::steady_clock::now();
     (void)estimate_current_cpi_variance(corrected);
-    const auto aligned = std::chrono::steady_clock::now();
+    const auto variance_estimated = std::chrono::steady_clock::now();
+    CfrWindow detector_input = corrected;
+    align_allocation_families(detector_input, true);
+    align_allocation_families(dl_corrected, true);
+    const auto allocation_aligned = std::chrono::steady_clock::now();
     PipelineReport report;
     report.sync = sync;
-    report.detector = detect_clean(corrected, config);
+    report.detector = detect_clean(detector_input, config);
+    const auto dl = diagnostic_likelihood_map(dl_corrected, config);
+    report.detector.initial_dl_likelihood = dl.likelihood;
+    report.detector.dl_observed_re_count = dl.axes.observed_re_count;
     const auto detected = std::chrono::steady_clock::now();
     const std::string json = build_report_json(report, config);
     const auto stopped = std::chrono::steady_clock::now();
@@ -168,8 +172,9 @@ int main()
     };
     return FullSample{elapsed(stopped, started), elapsed(copied, started),
                       elapsed(synchronized, copied), elapsed(corrected_at, synchronized),
-                      elapsed(allocation_aligned, corrected_at),
-                      elapsed(aligned, allocation_aligned), elapsed(detected, aligned),
+                      elapsed(variance_estimated, corrected_at),
+                      elapsed(allocation_aligned, variance_estimated),
+                      elapsed(detected, allocation_aligned),
                       elapsed(stopped, detected)};
   };
   const FullSample full_warmup = run_full_cpi();
@@ -189,15 +194,15 @@ int main()
   const char* configured_full_limit = std::getenv("NR_ISAC_CUDA_FULL_CPI_MAX_MS");
   const double full_limit_ms = configured_full_limit
                                    ? std::strtod(configured_full_limit, nullptr) : 300.0;
-  std::printf("CUDA full CPI (copy+sync+correction+alignment+variance+detector+dual-map JSON): "
+  std::printf("CUDA full CPI (copy+sync+correction+variance+alignment+detector+dual-map JSON): "
               "warmup=%.3f ms min=%.3f ms median=%.3f ms max=%.3f ms limit=%.3f ms\n",
               full_warmup.total, minimum_full->total, full_median_ms,
               maximum_full->total, full_limit_ms);
   std::printf("CUDA full CPI median stages: copy=%.3f sync=%.3f correction=%.3f "
-              "alignment=%.3f variance=%.3f detector=%.3f report=%.3f ms\n",
+              "variance=%.3f alignment=%.3f detector=%.3f report=%.3f ms\n",
               median_field(&FullSample::copy), median_field(&FullSample::sync),
               median_field(&FullSample::correction),
-              median_field(&FullSample::alignment), median_field(&FullSample::variance),
+              median_field(&FullSample::variance), median_field(&FullSample::alignment),
               median_field(&FullSample::detector), median_field(&FullSample::report));
   if (!(full_median_ms < full_limit_ms)) {
     std::fprintf(stderr, "CUDA full pipeline misses required bounded-backlog CPI throughput\n");

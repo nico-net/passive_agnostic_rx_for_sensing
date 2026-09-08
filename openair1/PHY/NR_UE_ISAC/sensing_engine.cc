@@ -57,11 +57,17 @@ struct SensingEngine::PendingRow {
   uint32_t raw_slot = 0;
   double slot_fraction = 0.0;
   uint32_t source_mask = 0;
+  uint32_t dl_source_mask = 0;
   std::array<uint64_t, NR_ISAC_SRC_COUNT> source_occurrences{};
+  std::array<uint64_t, NR_ISAC_SRC_COUNT> dl_source_occurrences{};
   int64_t first_utc_ns = 0;
   uint32_t available_antennas = 0;
   std::vector<std::complex<float>> cfr; // [antenna][subcarrier]
   std::vector<float> weights;           // same shape; inverse-variance sum
+  // Exact DL samples must remain separate from cfr/weights.  source_mask alone cannot unmix a
+  // simultaneous DL+UL observation after weighted fusion.
+  std::vector<std::complex<float>> dl_cfr;
+  std::vector<float> dl_weights;
 };
 
 void SensingEngine::PointerQueue::push(Snapshot* value)
@@ -307,7 +313,8 @@ void SensingEngine::processing_run()
 {
   while (auto task = windows_.wait_pop()) {
     try {
-      process_window(std::move(task->window), task->plan, task->air_origin_slots,
+      process_window(std::move(task->window), std::move(task->dl_window), task->plan,
+                     task->air_origin_slots,
                      task->sequence);
     }
     catch (const std::exception& e) {
@@ -379,7 +386,9 @@ void SensingEngine::begin_geometry(const nr_isac_carrier_t& carrier)
 size_t SensingEngine::pending_row_storage_bytes(const PendingRow& row) const
 {
   return row.cfr.capacity() * sizeof(std::complex<float>)
-         + row.weights.capacity() * sizeof(float);
+         + row.weights.capacity() * sizeof(float)
+         + row.dl_cfr.capacity() * sizeof(std::complex<float>)
+         + row.dl_weights.capacity() * sizeof(float);
 }
 
 void SensingEngine::make_pending_row_room(size_t incoming)
@@ -448,20 +457,33 @@ void SensingEngine::consume(const Snapshot& s)
   }
   auto found = rows_.find(key);
   if (found == rows_.end()) {
-    const size_t incoming = (size_t)requested_antennas_ * subcarriers
-                            * (sizeof(std::complex<float>) + sizeof(float));
+    const size_t view_bytes = (size_t)requested_antennas_ * subcarriers
+                              * (sizeof(std::complex<float>) + sizeof(float));
+    const size_t incoming = config_.capture_rvm ? 2 * view_bytes : view_bytes;
     make_pending_row_room(incoming);
     PendingRow row;
     row.time_slots = time_slots; row.raw_slot = s.slot; row.slot_fraction = fraction;
     row.first_utc_ns = s.utc_ns;
     row.cfr.assign((size_t)requested_antennas_ * subcarriers, {});
     row.weights.assign((size_t)requested_antennas_ * subcarriers, 0.0f);
+    if (config_.capture_rvm) {
+      row.dl_cfr.assign((size_t)requested_antennas_ * subcarriers, {});
+      row.dl_weights.assign((size_t)requested_antennas_ * subcarriers, 0.0f);
+    }
     found = rows_.emplace(key, std::move(row)).first;
     pending_row_bytes_ += pending_row_storage_bytes(found->second);
   }
   PendingRow& row = found->second;
   row.source_mask |= 1u << static_cast<uint32_t>(s.source);
   ++row.source_occurrences[static_cast<uint32_t>(s.source)];
+  const bool is_dl = (DL_SOURCE_BITS & (1u << static_cast<uint32_t>(s.source))) != 0;
+  if (is_dl && config_.capture_rvm) {
+    row.dl_source_mask |= 1u << static_cast<uint32_t>(s.source);
+    ++row.dl_source_occurrences[static_cast<uint32_t>(s.source)];
+    if (row.dl_cfr.size() != row.cfr.size()
+        || row.dl_weights.size() != row.weights.size())
+      throw std::runtime_error("DL-only diagnostic capture state is unavailable");
+  }
   row.available_antennas = std::max(row.available_antennas, s.antennas);
   const float weight = s.noise_variance > 0.0f ? 1.0f / s.noise_variance : 1.0f;
   for (uint32_t i = 0; i < s.resource_elements; ++i) {
@@ -474,10 +496,14 @@ void SensingEngine::consume(const Snapshot& s)
     if (!finite) continue;
     for (uint32_t a = 0; a < s.antennas; ++a) {
       const size_t index = (size_t)a * subcarriers + k;
-      const float old_weight = row.weights[index], total = old_weight + weight;
-      row.cfr[index] = (row.cfr[index] * old_weight
-                        + s.cfr[(size_t)a * s.resource_elements + i] * weight) / total;
-      row.weights[index] = total;
+      const auto value = s.cfr[(size_t)a * s.resource_elements + i];
+      auto accumulate = [&](std::vector<std::complex<float>>& cfr, std::vector<float>& weights) {
+        const float old_weight = weights[index], total = old_weight + weight;
+        cfr[index] = (cfr[index] * old_weight + value * weight) / total;
+        weights[index] = total;
+      };
+      accumulate(row.cfr, row.weights);
+      if (is_dl && config_.capture_rvm) accumulate(row.dl_cfr, row.dl_weights);
     }
   }
   close_ready_windows(false);
@@ -491,10 +517,12 @@ TrackSnapshot SensingEngine::planning_snapshot(double time) const
   TrackSnapshot value; value.status = "uninitialized"; value.air_time_s = time; return value;
 }
 
-void SensingEngine::enqueue_window(CfrWindow window, const CpiPlan& plan)
+void SensingEngine::enqueue_window(CfrWindow window, std::optional<CfrWindow> dl_window,
+                                   const CpiPlan& plan)
 {
   auto task = std::make_unique<WindowTask>();
   task->window = std::move(window);
+  task->dl_window = std::move(dl_window);
   task->plan = plan;
   task->air_origin_slots = air_origin_slots_.value_or(0.0);
   task->sequence = ++cpi_sequence_;
@@ -557,11 +585,14 @@ void SensingEngine::close_ready_windows(bool flush)
     if (keys.empty()) return;
     const double span = rows_.at(keys.back()).time_slots - rows_.at(keys.front()).time_slots;
     if (keys.size() >= active_plan_->minimum_rows && span > 0.0) {
-      CfrWindow window = build_window(keys);
+      CfrWindow window = build_window(keys, false);
+      std::optional<CfrWindow> dl_window;
+      if (config_.capture_rvm)
+        dl_window = build_window(keys, true, window.antennas);
       const CpiPlan plan = *active_plan_;
       erase_rows(keys);
       last_closed_slots_ = window.row_time_slots.back(); active_plan_.reset();
-      enqueue_window(std::move(window), plan);
+      enqueue_window(std::move(window), std::move(dl_window), plan);
       return; // Python parity: plan the next CPI only after this tracker update finishes.
     } else {
       const double last_time_slots = rows_.at(keys.back()).time_slots;
@@ -572,13 +603,19 @@ void SensingEngine::close_ready_windows(bool flush)
   }
 }
 
-CfrWindow SensingEngine::build_window(const std::vector<int64_t>& keys) const
+CfrWindow SensingEngine::build_window(const std::vector<int64_t>& keys, bool dl_only,
+                                      uint32_t forced_antennas) const
 {
   CfrWindow w;
   w.rows = keys.size(); w.subcarriers = carrier_.nof_prb * 12u;
-  w.antennas = requested_antennas_;
-  for (int64_t key : keys) w.antennas = std::min(w.antennas, rows_.at(key).available_antennas);
-  w.antennas = std::max(1u, w.antennas); w.scs_hz = carrier_.scs_hz;
+  if (forced_antennas) {
+    w.antennas = forced_antennas;
+  } else {
+    w.antennas = requested_antennas_;
+    for (int64_t key : keys) w.antennas = std::min(w.antennas, rows_.at(key).available_antennas);
+    w.antennas = std::max(1u, w.antennas);
+  }
+  w.scs_hz = carrier_.scs_hz;
   w.fc_hz = carrier_.dl_center_hz; w.pci = carrier_.pci;
   w.start_utc_ns = rows_.at(keys.front()).first_utc_ns;
   const size_t cells = (size_t)w.rows * w.subcarriers;
@@ -588,16 +625,23 @@ CfrWindow SensingEngine::build_window(const std::vector<int64_t>& keys) const
   for (uint32_t r = 0; r < w.rows; ++r) {
     const PendingRow& row = rows_.at(keys[r]);
     for (uint32_t i = 0; i < NR_ISAC_SRC_COUNT; ++i)
-      w.source_occurrences[i] += row.source_occurrences[i];
+      w.source_occurrences[i] += dl_only ? row.dl_source_occurrences[i] : row.source_occurrences[i];
     w.row_time_slots[r] = row.time_slots; w.row_slot_idx[r] = row.raw_slot;
-    w.row_slot_frac[r] = row.slot_fraction; w.row_source_mask[r] = row.source_mask;
+    w.row_slot_frac[r] = row.slot_fraction;
+    w.row_source_mask[r] = dl_only ? row.dl_source_mask : row.source_mask;
+    const auto& row_weights = dl_only ? row.dl_weights : row.weights;
+    const auto& row_cfr = dl_only ? row.dl_cfr : row.cfr;
+    if (row_weights.size() != (size_t)requested_antennas_ * w.subcarriers
+        || row_cfr.size() != (size_t)requested_antennas_ * w.subcarriers)
+      throw std::runtime_error(dl_only ? "DL-only diagnostic CFR view is unavailable"
+                                       : "fused CFR view is malformed");
     for (uint32_t k = 0; k < w.subcarriers; ++k) {
       bool common = true;
       for (uint32_t a = 0; a < w.antennas; ++a)
-        common = common && row.weights[(size_t)a * w.subcarriers + k] > 0.0f;
+        common = common && row_weights[(size_t)a * w.subcarriers + k] > 0.0f;
       w.observed[w.cell(r, k)] = common;
       if (common) for (uint32_t a = 0; a < w.antennas; ++a)
-        w.values[w.sample(a, r, k)] = row.cfr[(size_t)a * w.subcarriers + k];
+        w.values[w.sample(a, r, k)] = row_cfr[(size_t)a * w.subcarriers + k];
     }
   }
   if (!w.valid()) throw std::runtime_error("internal measured-window construction failed");
@@ -616,7 +660,8 @@ AdaptiveClutterMap* SensingEngine::clutter_map()
   return motion_tracker_ ? &motion_tracker_->clutter_map() : nullptr;
 }
 
-void SensingEngine::process_window(CfrWindow window, const CpiPlan& plan,
+void SensingEngine::process_window(CfrWindow window, std::optional<CfrWindow> dl_window,
+                                   const CpiPlan& plan,
                                    double air_origin_slots, uint64_t sequence)
 {
   PipelineReport report; report.cpi_sequence = sequence; report.start_utc_ns = window.start_utc_ns;
@@ -638,6 +683,8 @@ void SensingEngine::process_window(CfrWindow window, const CpiPlan& plan,
   report.midpoint_air_time_s = (midpoint_slots - air_origin_slots)
                                * slot_duration_s(window.scs_hz);
   CfrWindow corrected = window;
+  if (config_.capture_rvm && !dl_window)
+    throw std::runtime_error("DL-only diagnostic RDM was requested without a provenance-preserving CFR view");
   report.sync.rows = window.rows;
   if (config_.sync_enable && window.rows >= 3) {
     report.sync = estimate_sync(window);
@@ -648,16 +695,30 @@ void SensingEngine::process_window(CfrWindow window, const CpiPlan& plan,
         && norm(config_.tx_position - config_.rx_position) > 0.0)
       los = surveyed_los_steering(config_.array, config_.tx_position, config_.rx_position, window.fc_hz);
     apply_sync_correction(corrected, report.sync, 0.0, los);
+    if (dl_window)
+      apply_sync_correction(*dl_window, report.sync, 0.0, los);
   }
   report.current_cpi_variance = estimate_current_cpi_variance(
       corrected, &report.covariance_family_count, &report.covariance_difference_count);
   CfrWindow detector_input = corrected;
   report.detector_alignment = align_allocation_families(detector_input, config_.family_static);
+  if (dl_window)
+    (void)align_allocation_families(*dl_window, config_.family_static);
   const double dwell = (detector_input.row_time_slots.back() - detector_input.row_time_slots.front())
                        * slot_duration_s(detector_input.scs_hz);
   const RateGate gate = finalize_search_gate(plan, detector_input.rows, dwell,
                                               detector_input.fc_hz, config_);
   report.detector = detect_clean(detector_input, config_, gate, 0);
+  if (dl_window) {
+    const auto dl = diagnostic_likelihood_map(*dl_window, config_, gate, 0);
+    if (dl.axes.range_bins != report.detector.axes.range_bins
+        || dl.axes.rate_bins != report.detector.axes.rate_bins
+        || dl.likelihood.size() != report.detector.initial_likelihood.size()
+        || dl.axes.observed_re_count == 0)
+      throw std::runtime_error("DL-only diagnostic RDM has incompatible axes or no observed DL samples");
+    report.detector.initial_dl_likelihood = dl.likelihood;
+    report.detector.dl_observed_re_count = dl.axes.observed_re_count;
+  }
   const auto priors = confirmed_tracks();
   AdaptiveClutterMap* clutter = clutter_map();
   for (const CleanComponent& object : report.detector.objects) {

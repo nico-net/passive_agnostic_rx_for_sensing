@@ -15,7 +15,6 @@
 #include <limits>
 #include <memory>
 #include <numeric>
-#include <optional>
 #include <stdexcept>
 #include <vector>
 
@@ -433,6 +432,63 @@ std::vector<CleanComponent> collapse(std::vector<CleanComponent> remaining,
 
 } // namespace
 
+DiagnosticLikelihoodMap diagnostic_likelihood_map(const CfrWindow& window,
+                                                  const PipelineConfig& config,
+                                                  const RateGate& rate_gate,
+                                                  uint32_t minimum_range_bin)
+{
+  const Plan plan = prepare(window, config, rate_gate);
+  if (minimum_range_bin >= plan.axes.range_bins)
+    throw std::invalid_argument("diagnostic minimum range bin outside detector support");
+  if (!(plan.denominator > 0.0))
+    throw std::runtime_error("DL-only diagnostic RDM has no observed resource elements");
+  const size_t cells = (size_t)window.rows * window.subcarriers;
+  std::vector<std::complex<double>> residual((size_t)window.antennas * cells);
+  for (uint32_t a = 0; a < window.antennas; ++a)
+    for (size_t i = 0; i < cells; ++i)
+      residual[(size_t)a * cells + i] = window.observed[i]
+          ? window.values[(size_t)a * cells + i] : std::complex<float>();
+
+  const bool require_cuda = cuda_required();
+  const bool have_cuda = detector_cuda_available();
+  if (require_cuda && !have_cuda)
+    throw std::runtime_error("NR_ISAC_REQUIRE_CUDA=1 but no usable CUDA detector is available");
+  if (have_cuda) {
+    // Do not reuse the fused CLEAN backend: resetting it for the diagnostic map would overwrite
+    // its device residual and change fused detection/tracker results.
+    struct CachedDiagnosticBackend {
+      uint32_t antennas = 0, rows = 0, subcarriers = 0, range_bins = 0;
+      std::unique_ptr<CudaDetectorBackend> backend;
+    };
+    static thread_local CachedDiagnosticBackend cached;
+    const bool shape_matches = cached.backend && cached.antennas == window.antennas
+        && cached.rows == window.rows && cached.subcarriers == window.subcarriers
+        && cached.range_bins == plan.axes.range_bins;
+    try {
+      if (!shape_matches) {
+        cached = {};
+        cached.antennas = window.antennas; cached.rows = window.rows;
+        cached.subcarriers = window.subcarriers; cached.range_bins = plan.axes.range_bins;
+        cached.backend = std::make_unique<CudaDetectorBackend>(
+            window.antennas, window.rows, window.subcarriers, plan.axes.range_bins,
+            window.fc_hz, plan.denominator, plan.weights, plan.times, plan.axes.rate_axis_mps,
+            plan.rate_allowed, plan.axes.rate_res_mps);
+      } else {
+        cached.backend->reset_cpi(window.fc_hz, plan.denominator, plan.weights, plan.times,
+                                  plan.axes.rate_axis_mps, plan.rate_allowed,
+                                  plan.axes.rate_res_mps);
+      }
+      return {plan.axes, cached.backend->likelihood_map(residual, minimum_range_bin)};
+    } catch (...) {
+      if (require_cuda) throw;
+      std::fprintf(stderr, "NR_ISAC: DL-only diagnostic CUDA likelihood failed; using CPU fallback\n");
+    }
+  }
+  return {plan.axes, likelihood_map_scaled(residual, window.antennas, window.rows,
+                                            window.subcarriers, window.fc_hz, plan,
+                                            minimum_range_bin)};
+}
+
 DetectorResult detect_clean(const CfrWindow& window,
                             const PipelineConfig& config,
                             const RateGate& rate_gate,
@@ -450,22 +506,6 @@ DetectorResult detect_clean(const CfrWindow& window,
     for (size_t i = 0; i < cells; ++i)
       residual[(size_t)a * cells + i] = window.observed[i] ? window.values[(size_t)a * cells + i]
                                                            : std::complex<float>();
-
-  std::optional<Plan> dl_capture_plan;
-  if (config.capture_rvm) {
-    dl_capture_plan = plan;
-    dl_capture_plan->denominator = 0.0;
-    for (uint32_t row = 0; row < window.rows; ++row) {
-      const bool use_dl_row = (window.row_source_mask[row] & DL_SOURCE_BITS) != 0;
-      for (uint32_t subcarrier = 0; subcarrier < window.subcarriers; ++subcarrier) {
-        const size_t cell = static_cast<size_t>(row) * window.subcarriers + subcarrier;
-        if (!use_dl_row) dl_capture_plan->weights[cell] = 0.0;
-        dl_capture_plan->denominator += dl_capture_plan->weights[cell];
-      }
-    }
-    if (!(dl_capture_plan->denominator > 0.0))
-      throw std::runtime_error("DL-only range-Doppler capture requested for a CPI without DL rows");
-  }
 
   CudaDetectorBackend* cuda_backend = nullptr;
   const bool require_cuda = cuda_required();
@@ -553,14 +593,6 @@ DetectorResult detect_clean(const CfrWindow& window,
     const auto map_finished = DetectorClock::now();
     if (iteration == 0) {
       result.initial_likelihood = map;
-      if (dl_capture_plan) {
-        result.dl_observed_re_count = static_cast<uint64_t>(dl_capture_plan->denominator);
-        result.initial_dl_likelihood = cuda_backend
-            ? cuda_backend->diagnostic_likelihood_map(
-                  dl_capture_plan->weights, dl_capture_plan->denominator, minimum_range_bin)
-            : likelihood_map_scaled(residual, window.antennas, window.rows, window.subcarriers,
-                                    window.fc_hz, *dl_capture_plan, minimum_range_bin);
-      }
       if (cuda_backend) {
         result.initial_weighted_energy = cuda_backend->weighted_energy();
         result.initial_residual_scale = result.initial_weighted_energy / detector_denominator;

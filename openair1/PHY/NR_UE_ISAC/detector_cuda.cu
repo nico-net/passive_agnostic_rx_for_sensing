@@ -281,7 +281,6 @@ struct CudaDetectorBackend::Impl {
   cufftComplex* projected = nullptr;
   double* weights = nullptr;
   float* weights_float = nullptr;
-  float* diagnostic_weights_float = nullptr;
   double* times = nullptr;
   cufftComplex* slow_steering = nullptr;
   cufftDoubleComplex* refinement_range_steering = nullptr;
@@ -309,7 +308,6 @@ struct CudaDetectorBackend::Impl {
     cudaFree(refinement_range_steering);
     cudaFree(slow_steering);
     cudaFree(times);
-    cudaFree(diagnostic_weights_float);
     cudaFree(weights_float);
     cudaFree(weights);
     cudaFree(projected);
@@ -406,9 +404,6 @@ CudaDetectorBackend::CudaDetectorBackend(uint32_t antennas,
   cuda_check(cudaMalloc(&p.weights, p.cells * sizeof(*p.weights)), "cudaMalloc weights");
   cuda_check(cudaMalloc(&p.weights_float, p.cells * sizeof(*p.weights_float)),
              "cudaMalloc float weights");
-  cuda_check(cudaMalloc(&p.diagnostic_weights_float,
-                        p.cells * sizeof(*p.diagnostic_weights_float)),
-             "cudaMalloc diagnostic float weights");
   cuda_check(cudaMalloc(&p.times, rows * sizeof(*p.times)), "cudaMalloc times");
   cuda_check(cudaMalloc(&p.slow_steering,
                         static_cast<size_t>(rows) * rows * sizeof(*p.slow_steering)),
@@ -522,37 +517,6 @@ std::vector<double> CudaDetectorBackend::likelihood_map(
                         cudaMemcpyDeviceToHost), "download detector likelihood");
   std::vector<double> result(p.host_likelihood.begin(), p.host_likelihood.end());
   return result;
-}
-
-std::vector<double> CudaDetectorBackend::diagnostic_likelihood_map(
-    const std::vector<double>& host_weights,
-    double denominator,
-    uint32_t minimum_range_bin)
-{
-  auto& p = *impl_;
-  if (!p.residual_loaded || host_weights.size() != p.cells
-      || !(denominator > 0.0) || minimum_range_bin >= p.range_bins)
-    throw std::invalid_argument("CUDA diagnostic likelihood shape/denominator mismatch");
-  std::vector<float> float_weights(host_weights.begin(), host_weights.end());
-  cuda_check(cudaMemcpy(p.diagnostic_weights_float, float_weights.data(),
-                        p.cells * sizeof(*p.diagnostic_weights_float), cudaMemcpyHostToDevice),
-             "upload diagnostic detector weights");
-  const uint32_t blocks = static_cast<uint32_t>(std::min<size_t>(65535, (p.samples + 255) / 256));
-  project_weighted<<<blocks, 256>>>(p.residual, p.projected, p.diagnostic_weights_float,
-                                    p.cells, p.samples);
-  cuda_check(cudaGetLastError(), "launch diagnostic detector weighting kernel");
-  cufft_check(cufftExecC2C(p.range_plan, p.projected, p.projected, CUFFT_INVERSE),
-              "execute diagnostic detector range transform");
-  const size_t map_cells = static_cast<size_t>(p.range_bins) * p.rows;
-  const uint32_t map_blocks = static_cast<uint32_t>(std::min<size_t>(65535, (map_cells + 127) / 128));
-  likelihood_kernel<<<map_blocks, 128>>>(p.projected, p.slow_steering, p.rate_allowed,
-                                        p.likelihood, p.antennas, p.rows, p.subcarriers,
-                                        p.range_bins, minimum_range_bin,
-                                        static_cast<float>(denominator * p.antennas));
-  cuda_check(cudaGetLastError(), "launch diagnostic detector likelihood kernel");
-  cuda_check(cudaMemcpy(p.host_likelihood.data(), p.likelihood, map_cells * sizeof(float),
-                        cudaMemcpyDeviceToHost), "download diagnostic detector likelihood");
-  return std::vector<double>(p.host_likelihood.begin(), p.host_likelihood.end());
 }
 
 CudaRefinementEvaluation CudaDetectorBackend::evaluate(double range_bin, double doppler_bin)
