@@ -37,14 +37,16 @@ CfrWindow dense_window()
   window.row_time_slots.resize(window.rows);
   window.row_slot_idx.resize(window.rows);
   window.row_slot_frac.resize(window.rows);
-  window.row_source_mask.resize(window.rows, (1u << NR_ISAC_SRC_PDSCH_DATA)
-                                              | (1u << NR_ISAC_SRC_PUSCH_DATA));
+  window.row_source_mask.resize(window.rows);
   // 192 allocation rows distributed across the 32 ms CPI, as in the retained traffic capture.
   for (uint32_t row = 0; row < window.rows; ++row) {
     const double slot = row * (63.5 / (window.rows - 1));
     window.row_time_slots[row] = slot;
     window.row_slot_idx[row] = static_cast<uint32_t>(slot);
     window.row_slot_frac[row] = slot - std::floor(slot);
+    window.row_source_mask[row] = row % 4 == 0
+                                      ? 1u << NR_ISAC_SRC_PUSCH_DATA
+                                      : 1u << NR_ISAC_SRC_PDSCH_DATA;
   }
   const double dwell = (window.row_time_slots.back() - window.row_time_slots.front())
                        * slot_duration_s(window.scs_hz);
@@ -79,16 +81,38 @@ CfrWindow dense_window()
     }
   return window;
 }
+
+CfrWindow dl_only_view(const CfrWindow& fused)
+{
+  CfrWindow dl = fused;
+  for (uint32_t row = 0; row < dl.rows; ++row) {
+    if ((dl.row_source_mask[row] & DL_SOURCE_BITS) != 0) continue;
+    dl.row_source_mask[row] = 0;
+    for (uint32_t subcarrier = 0; subcarrier < dl.subcarriers; ++subcarrier) {
+      dl.observed[dl.cell(row, subcarrier)] = 0;
+      for (uint32_t antenna = 0; antenna < dl.antennas; ++antenna)
+        dl.values[dl.sample(antenna, row, subcarrier)] = {};
+    }
+  }
+  return dl;
+}
 } // namespace
 
 int main()
 {
-  if (!detector_cuda_available()) {
+  const bool cpu_baseline = std::getenv("NR_ISAC_BENCHMARK_FORCE_CPU") != nullptr;
+  if (cpu_baseline) {
+    setenv("NR_ISAC_REQUIRE_CUDA", "0", 1);
+    setenv("NR_ISAC_CUDA_DETECTOR", "0", 1);
+    setenv("NR_ISAC_DISABLE_CUDA_SYNC", "1", 1);
+  } else if (!detector_cuda_available()) {
     std::puts("CUDA detector benchmark skipped: no enabled CUDA device");
     return 77;
   }
-  setenv("NR_ISAC_REQUIRE_CUDA", "1", 1);
-  detector_cuda_warmup();
+  if (!cpu_baseline) {
+    setenv("NR_ISAC_REQUIRE_CUDA", "1", 1);
+    detector_cuda_warmup();
+  }
   PipelineConfig config;
   const char* configured_components = std::getenv("NR_ISAC_CUDA_BENCHMARK_COMPONENTS");
   config.maximum_components = configured_components
@@ -99,6 +123,7 @@ int main()
   config.maximum_target_speed_mps = 50.0;
   config.capture_rvm = true;
   const CfrWindow window = dense_window();
+  const CfrWindow dl_window = dl_only_view(window);
   auto run = [&]() {
     const auto started = std::chrono::steady_clock::now();
     const auto result = detect_clean(window, config);
@@ -115,26 +140,31 @@ int main()
       }
     return std::chrono::duration<double, std::milli>(stopped - started).count();
   };
-  const double warmup_ms = run();
-  std::vector<double> samples;
-  for (uint32_t repetition = 0; repetition < 5; ++repetition)
-    samples.push_back(run());
-  std::sort(samples.begin(), samples.end());
-  const double median_ms = samples[samples.size() / 2];
-  const char* configured_limit = std::getenv("NR_ISAC_CUDA_BENCHMARK_MAX_MS");
-  const double limit_ms = configured_limit ? std::strtod(configured_limit, nullptr) : 200.0;
-  std::printf("CUDA detector dense CPI: warmup=%.3f ms min=%.3f ms median=%.3f ms max=%.3f ms limit=%.3f ms\n",
-              warmup_ms, samples.front(), median_ms, samples.back(), limit_ms);
-  if (!(median_ms < limit_ms)) {
-    std::fprintf(stderr, "CUDA detector misses required steady-state CPI throughput\n");
-    return EXIT_FAILURE;
+  if (!cpu_baseline) {
+    const double warmup_ms = run();
+    std::vector<double> samples;
+    for (uint32_t repetition = 0; repetition < 5; ++repetition)
+      samples.push_back(run());
+    std::sort(samples.begin(), samples.end());
+    const double median_ms = samples[samples.size() / 2];
+    const char* configured_limit = std::getenv("NR_ISAC_CUDA_BENCHMARK_MAX_MS");
+    const double limit_ms = configured_limit ? std::strtod(configured_limit, nullptr) : 200.0;
+    std::printf("CUDA detector dense CPI: warmup=%.3f ms min=%.3f ms median=%.3f ms "
+                "max=%.3f ms limit=%.3f ms\n",
+                warmup_ms, samples.front(), median_ms, samples.back(), limit_ms);
+    if (!(median_ms < limit_ms)) {
+      std::fprintf(stderr, "CUDA detector misses required steady-state CPI throughput\n");
+      return EXIT_FAILURE;
+    }
   }
 
-  std::string sync_error;
-  if (!warmup_sync_cuda(512, window.subcarriers, &sync_error)) {
-    std::fprintf(stderr, "CUDA sync warmup failed before full-CPI benchmark: %s\n",
-                 sync_error.c_str());
-    return EXIT_FAILURE;
+  if (!cpu_baseline) {
+    std::string sync_error;
+    if (!warmup_sync_cuda(512, window.subcarriers, &sync_error)) {
+      std::fprintf(stderr, "CUDA sync warmup failed before full-CPI benchmark: %s\n",
+                   sync_error.c_str());
+      return EXIT_FAILURE;
+    }
   }
   struct FullSample {
     double total = 0.0, copy = 0.0, sync = 0.0, correction = 0.0;
@@ -143,7 +173,7 @@ int main()
   auto run_full_cpi = [&]() {
     const auto started = std::chrono::steady_clock::now();
     CfrWindow corrected = window;
-    CfrWindow dl_corrected = window;
+    CfrWindow dl_corrected = dl_window;
     const auto copied = std::chrono::steady_clock::now();
     const SyncEstimate sync = estimate_sync(window);
     const auto synchronized = std::chrono::steady_clock::now();
@@ -158,10 +188,7 @@ int main()
     const auto allocation_aligned = std::chrono::steady_clock::now();
     PipelineReport report;
     report.sync = sync;
-    report.detector = detect_clean(detector_input, config);
-    const auto dl = diagnostic_likelihood_map(dl_corrected, config);
-    report.detector.initial_dl_likelihood = dl.likelihood;
-    report.detector.dl_observed_re_count = dl.axes.observed_re_count;
+    report.detector = detect_clean_with_diagnostic(detector_input, dl_corrected, config);
     const auto detected = std::chrono::steady_clock::now();
     const std::string json = build_report_json(report, config);
     const auto stopped = std::chrono::steady_clock::now();
@@ -177,9 +204,10 @@ int main()
                       elapsed(detected, allocation_aligned),
                       elapsed(stopped, detected)};
   };
-  const FullSample full_warmup = run_full_cpi();
+  const FullSample full_warmup = cpu_baseline ? FullSample{} : run_full_cpi();
   std::vector<FullSample> full_samples;
-  for (uint32_t repetition = 0; repetition < 5; ++repetition)
+  const uint32_t repetitions = cpu_baseline ? 1 : 5;
+  for (uint32_t repetition = 0; repetition < repetitions; ++repetition)
     full_samples.push_back(run_full_cpi());
   const auto median_field = [&](double FullSample::*field) {
     std::vector<double> values;
@@ -193,19 +221,22 @@ int main()
       [](const FullSample& left, const FullSample& right) { return left.total < right.total; });
   const char* configured_full_limit = std::getenv("NR_ISAC_CUDA_FULL_CPI_MAX_MS");
   const double full_limit_ms = configured_full_limit
-                                   ? std::strtod(configured_full_limit, nullptr) : 300.0;
-  std::printf("CUDA full CPI (copy+sync+correction+variance+alignment+detector+dual-map JSON): "
+                                   ? std::strtod(configured_full_limit, nullptr) : 200.0;
+  std::printf("%s full CPI (copy+sync+correction+variance+alignment+detector+dual-map JSON): "
               "warmup=%.3f ms min=%.3f ms median=%.3f ms max=%.3f ms limit=%.3f ms\n",
-              full_warmup.total, minimum_full->total, full_median_ms,
+              cpu_baseline ? "CPU" : "CUDA", full_warmup.total,
+              minimum_full->total, full_median_ms,
               maximum_full->total, full_limit_ms);
-  std::printf("CUDA full CPI median stages: copy=%.3f sync=%.3f correction=%.3f "
-              "variance=%.3f alignment=%.3f detector=%.3f report=%.3f ms\n",
-              median_field(&FullSample::copy), median_field(&FullSample::sync),
+  std::printf("%s full CPI median stages: copy=%.3f sync=%.3f correction=%.3f "
+              "variance=%.3f alignment=%.3f fused_plus_dl_detector=%.3f report=%.3f ms\n",
+              cpu_baseline ? "CPU" : "CUDA", median_field(&FullSample::copy),
+              median_field(&FullSample::sync),
               median_field(&FullSample::correction),
               median_field(&FullSample::variance), median_field(&FullSample::alignment),
               median_field(&FullSample::detector), median_field(&FullSample::report));
   if (!(full_median_ms < full_limit_ms)) {
-    std::fprintf(stderr, "CUDA full pipeline misses required bounded-backlog CPI throughput\n");
+    std::fprintf(stderr, "%s full pipeline misses required bounded-backlog CPI throughput\n",
+                 cpu_baseline ? "CPU" : "CUDA");
     return EXIT_FAILURE;
   }
   return EXIT_SUCCESS;

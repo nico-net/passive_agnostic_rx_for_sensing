@@ -58,13 +58,25 @@ also use a reusable CUDA workspace. Family keys and row order are still construc
 host implementation, while CUDA preserves the sequential phase unwrap, weighted delay fit,
 complex-gain normalization, exact positive-sample filtering, and exact median decision. A failed
 optional alignment download is staged and cannot partially overwrite the host window before CPU
-fallback.
+fallback. Per-column phase/weight preparation is parallel; unwrap and every decision-bearing sum
+retain their original order.
+
+When DL RDM capture is enabled, the provenance-preserving DL view uses an independent map-only
+CUDA workspace. It uploads the native complex64 CFR directly, applies the exact DL observation
+mask on-device, and overlaps the first-pass DL map with fused CLEAN on a nonblocking stream. It
+does not load, reset, or subtract from the fused residual. Optional-mode failures fall back to the
+unchanged CPU diagnostic; `NR_ISAC_REQUIRE_CUDA=1` propagates every launch/completion failure and
+the CPI is rejected before tracker admission.
 
 `test_nr_isac_cuda_detector_parity` compares map support, component decisions, local statistics,
 and energies with the CPU implementation. `benchmark_nr_isac_cuda_detector` exercises a
 deterministic 4x192x3276 CPI with eight CLEAN passes and fails when its five-run steady-state median
 is not below 200 ms (override only for diagnostics with `NR_ISAC_CUDA_BENCHMARK_MAX_MS`). Setting
 `NR_ISAC_DETECTOR_TIMING=1` prints per-iteration map/refinement/subtraction timings.
+The same benchmark also exercises a mixed UL/DL provenance view, both family alignments, the
+concurrent DL-only map, and dual-map JSON; its full-path median must remain below 200 ms (override
+with `NR_ISAC_CUDA_FULL_CPI_MAX_MS`). `NR_ISAC_BENCHMARK_FORCE_CPU=1` disables all CUDA paths and
+runs one full-size CPU comparison sample without a warm-up.
 
 `test_nr_isac_cuda_family_processing` compares aligned tensors, diagnostics, within-family
 variance, and the raw-power fallback against the CPU path. The deterministic

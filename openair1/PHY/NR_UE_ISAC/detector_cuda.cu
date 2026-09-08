@@ -57,6 +57,20 @@ __global__ void project_weighted(const cufftDoubleComplex* residual,
   }
 }
 
+__global__ void weight_projected(cufftComplex* projected,
+                                 const float* weights,
+                                 size_t cells,
+                                 size_t samples)
+{
+  for (size_t index = blockIdx.x * blockDim.x + threadIdx.x;
+       index < samples;
+       index += static_cast<size_t>(blockDim.x) * gridDim.x) {
+    const float weight = weights[index % cells];
+    projected[index].x *= weight;
+    projected[index].y *= weight;
+  }
+}
+
 __global__ void likelihood_kernel(const cufftComplex* projected,
                                   const cufftComplex* slow_steering,
                                   const uint8_t* rate_allowed,
@@ -276,6 +290,9 @@ struct CudaDetectorBackend::Impl {
   size_t samples = 0;
   cufftHandle range_plan{};
   bool plan_valid = false;
+  bool diagnostic_only = false;
+  bool diagnostic_pending = false;
+  cudaStream_t diagnostic_stream = nullptr;
   bool residual_loaded = false;
   cufftDoubleComplex* residual = nullptr;
   cufftComplex* projected = nullptr;
@@ -290,6 +307,11 @@ struct CudaDetectorBackend::Impl {
   double* refinement = nullptr;
   cufftDoubleComplex* alpha = nullptr;
   double* energy = nullptr;
+  cufftComplex* pinned_samples = nullptr;
+  float* pinned_weights = nullptr;
+  cufftComplex* pinned_slow_steering = nullptr;
+  uint8_t* pinned_rate_allowed = nullptr;
+  float* pinned_likelihood = nullptr;
   std::vector<float> host_likelihood;
   std::vector<double> host_refinement;
   std::array<double, ENERGY_BLOCKS * 2> host_energy{};
@@ -298,7 +320,14 @@ struct CudaDetectorBackend::Impl {
 
   ~Impl()
   {
+    if (diagnostic_stream) cudaStreamSynchronize(diagnostic_stream);
     if (plan_valid) cufftDestroy(range_plan);
+    if (diagnostic_stream) cudaStreamDestroy(diagnostic_stream);
+    cudaFreeHost(pinned_likelihood);
+    cudaFreeHost(pinned_rate_allowed);
+    cudaFreeHost(pinned_slow_steering);
+    cudaFreeHost(pinned_weights);
+    cudaFreeHost(pinned_samples);
     cudaFree(refinement);
     cudaFree(energy);
     cudaFree(alpha);
@@ -337,6 +366,8 @@ void detector_cuda_warmup()
     cuda_check(cudaFree(nullptr), "initialize CUDA detector context");
     cudaFuncAttributes attributes{};
     cuda_check(cudaFuncGetAttributes(&attributes, project_weighted), "load weighting kernel");
+    cuda_check(cudaFuncGetAttributes(&attributes, weight_projected),
+               "load diagnostic weighting kernel");
     cuda_check(cudaFuncGetAttributes(&attributes, likelihood_kernel), "load likelihood kernel");
     cuda_check(cudaFuncGetAttributes(&attributes, refinement_templates), "load refinement-template kernel");
     cuda_check(cudaFuncGetAttributes(&attributes, refinement_partials), "load refinement kernel");
@@ -380,7 +411,8 @@ CudaDetectorBackend::CudaDetectorBackend(uint32_t antennas,
                                          const std::vector<double>& host_times,
                                          const std::vector<double>& host_rates,
                                          const std::vector<uint8_t>& host_rate_allowed,
-                                         double rate_res_mps)
+                                         double rate_res_mps,
+                                         bool diagnostic_only)
     : impl_(std::make_unique<Impl>())
 {
   if (!antennas || !rows || !subcarriers || !range_bins || range_bins > subcarriers
@@ -393,36 +425,59 @@ CudaDetectorBackend::CudaDetectorBackend(uint32_t antennas,
   p.rows = rows;
   p.subcarriers = subcarriers;
   p.range_bins = range_bins;
+  p.diagnostic_only = diagnostic_only;
   p.cells = static_cast<size_t>(rows) * subcarriers;
   p.samples = p.cells * antennas;
-  p.host_likelihood.resize(static_cast<size_t>(range_bins) * rows);
-  p.host_refinement.resize(static_cast<size_t>(antennas) * REFINEMENT_BLOCKS_PER_ANTENNA
-                           * REFINEMENT_TERMS * 2);
-
-  cuda_check(cudaMalloc(&p.residual, p.samples * sizeof(*p.residual)), "cudaMalloc residual");
+  if (!diagnostic_only) {
+    p.host_likelihood.resize(static_cast<size_t>(range_bins) * rows);
+    p.host_refinement.resize(static_cast<size_t>(antennas) * REFINEMENT_BLOCKS_PER_ANTENNA
+                             * REFINEMENT_TERMS * 2);
+    cuda_check(cudaMalloc(&p.residual, p.samples * sizeof(*p.residual)), "cudaMalloc residual");
+  }
   cuda_check(cudaMalloc(&p.projected, p.samples * sizeof(*p.projected)), "cudaMalloc FFT workspace");
-  cuda_check(cudaMalloc(&p.weights, p.cells * sizeof(*p.weights)), "cudaMalloc weights");
+  if (!diagnostic_only)
+    cuda_check(cudaMalloc(&p.weights, p.cells * sizeof(*p.weights)), "cudaMalloc weights");
   cuda_check(cudaMalloc(&p.weights_float, p.cells * sizeof(*p.weights_float)),
              "cudaMalloc float weights");
-  cuda_check(cudaMalloc(&p.times, rows * sizeof(*p.times)), "cudaMalloc times");
+  if (!diagnostic_only)
+    cuda_check(cudaMalloc(&p.times, rows * sizeof(*p.times)), "cudaMalloc times");
   cuda_check(cudaMalloc(&p.slow_steering,
                         static_cast<size_t>(rows) * rows * sizeof(*p.slow_steering)),
              "cudaMalloc slow-time steering");
-  cuda_check(cudaMalloc(&p.refinement_range_steering,
-                        subcarriers * sizeof(*p.refinement_range_steering)),
-             "cudaMalloc refinement range steering");
-  cuda_check(cudaMalloc(&p.refinement_doppler_steering,
-                        rows * sizeof(*p.refinement_doppler_steering)),
-             "cudaMalloc refinement Doppler steering");
+  if (!diagnostic_only) {
+    cuda_check(cudaMalloc(&p.refinement_range_steering,
+                          subcarriers * sizeof(*p.refinement_range_steering)),
+               "cudaMalloc refinement range steering");
+    cuda_check(cudaMalloc(&p.refinement_doppler_steering,
+                          rows * sizeof(*p.refinement_doppler_steering)),
+               "cudaMalloc refinement Doppler steering");
+  }
   cuda_check(cudaMalloc(&p.rate_allowed, rows * sizeof(*p.rate_allowed)), "cudaMalloc rate mask");
   cuda_check(cudaMalloc(&p.likelihood,
                         static_cast<size_t>(range_bins) * rows * sizeof(*p.likelihood)),
              "cudaMalloc likelihood");
-  cuda_check(cudaMalloc(&p.refinement, p.host_refinement.size() * sizeof(*p.refinement)),
-             "cudaMalloc refinement partials");
-  cuda_check(cudaMalloc(&p.alpha, antennas * sizeof(*p.alpha)), "cudaMalloc CLEAN amplitudes");
-  cuda_check(cudaMalloc(&p.energy, p.host_energy.size() * sizeof(*p.energy)),
-             "cudaMalloc energy partials");
+  if (!diagnostic_only) {
+    cuda_check(cudaMalloc(&p.refinement, p.host_refinement.size() * sizeof(*p.refinement)),
+               "cudaMalloc refinement partials");
+    cuda_check(cudaMalloc(&p.alpha, antennas * sizeof(*p.alpha)), "cudaMalloc CLEAN amplitudes");
+    cuda_check(cudaMalloc(&p.energy, p.host_energy.size() * sizeof(*p.energy)),
+               "cudaMalloc energy partials");
+  } else {
+    cuda_check(cudaStreamCreateWithFlags(&p.diagnostic_stream, cudaStreamNonBlocking),
+               "create diagnostic CUDA stream");
+    cuda_check(cudaMallocHost(&p.pinned_samples, p.samples * sizeof(*p.pinned_samples)),
+               "allocate pinned diagnostic samples");
+    cuda_check(cudaMallocHost(&p.pinned_weights, p.cells * sizeof(*p.pinned_weights)),
+               "allocate pinned diagnostic weights");
+    cuda_check(cudaMallocHost(&p.pinned_slow_steering,
+                              static_cast<size_t>(rows) * rows * sizeof(*p.pinned_slow_steering)),
+               "allocate pinned diagnostic steering");
+    cuda_check(cudaMallocHost(&p.pinned_rate_allowed, rows * sizeof(*p.pinned_rate_allowed)),
+               "allocate pinned diagnostic rate mask");
+    cuda_check(cudaMallocHost(&p.pinned_likelihood,
+                              static_cast<size_t>(range_bins) * rows * sizeof(*p.pinned_likelihood)),
+               "allocate pinned diagnostic likelihood");
+  }
   int dimensions[] = {static_cast<int>(subcarriers)};
   cufft_check(cufftPlanMany(&p.range_plan, 1, dimensions,
                            nullptr, 1, static_cast<int>(subcarriers),
@@ -430,8 +485,15 @@ CudaDetectorBackend::CudaDetectorBackend(uint32_t antennas,
                            CUFFT_C2C, static_cast<int>(antennas * rows)),
               "cufftPlanMany detector range transform");
   p.plan_valid = true;
-  reset_cpi(fc_hz, denominator, host_weights, host_times, host_rates, host_rate_allowed,
-            rate_res_mps);
+  if (diagnostic_only) {
+    cufft_check(cufftSetStream(p.range_plan, p.diagnostic_stream),
+                "bind diagnostic cuFFT stream");
+    reset_diagnostic_cpi(fc_hz, denominator, host_weights, host_times, host_rates,
+                         host_rate_allowed, rate_res_mps);
+  } else {
+    reset_cpi(fc_hz, denominator, host_weights, host_times, host_rates, host_rate_allowed,
+              rate_res_mps);
+  }
 }
 
 CudaDetectorBackend::~CudaDetectorBackend() = default;
@@ -445,6 +507,8 @@ void CudaDetectorBackend::reset_cpi(double fc_hz,
                                     double rate_res_mps)
 {
   auto& p = *impl_;
+  if (p.diagnostic_only)
+    throw std::logic_error("full detector reset requested from diagnostic-only backend");
   if (host_weights.size() != p.cells || host_times.size() != p.rows
       || host_rates.size() != p.rows || host_rate_allowed.size() != p.rows)
     throw std::invalid_argument("CUDA detector reset shape mismatch");
@@ -477,10 +541,79 @@ void CudaDetectorBackend::reset_cpi(double fc_hz,
              "upload detector rate mask");
 }
 
+void CudaDetectorBackend::reset_diagnostic_cpi(
+    double fc_hz,
+    double denominator,
+    const std::vector<double>& host_weights,
+    const std::vector<double>& host_times,
+    const std::vector<double>& host_rates,
+    const std::vector<uint8_t>& host_rate_allowed,
+    double rate_res_mps)
+{
+  auto& p = *impl_;
+  if (!p.diagnostic_only)
+    throw std::logic_error("diagnostic reset requested from full detector backend");
+  if (p.diagnostic_pending)
+    throw std::logic_error("diagnostic reset requested while a map is pending");
+  if (host_weights.size() != p.cells || host_times.size() != p.rows
+      || host_rates.size() != p.rows || host_rate_allowed.size() != p.rows)
+    throw std::invalid_argument("CUDA diagnostic reset shape mismatch");
+  p.fc_hz = fc_hz;
+  p.denominator = denominator * p.antennas;
+  p.rate_res_mps = rate_res_mps;
+  p.residual_loaded = false;
+  for (size_t cell = 0; cell < p.cells; ++cell)
+    p.pinned_weights[cell] = static_cast<float>(host_weights[cell]);
+  for (uint32_t doppler = 0; doppler < p.rows; ++doppler)
+    for (uint32_t row = 0; row < p.rows; ++row) {
+      const double phase = 2.0 * PI * host_rates[doppler] * fc_hz * host_times[row] / C_MPS;
+      p.pinned_slow_steering[static_cast<size_t>(doppler) * p.rows + row] = {
+          static_cast<float>(std::cos(phase)), static_cast<float>(std::sin(phase))};
+    }
+  std::memcpy(p.pinned_rate_allowed, host_rate_allowed.data(), p.rows);
+  try {
+    cuda_check(cudaMemcpyAsync(p.weights_float, p.pinned_weights,
+                               p.cells * sizeof(*p.weights_float), cudaMemcpyHostToDevice,
+                               p.diagnostic_stream),
+               "upload diagnostic weights");
+    cuda_check(cudaMemcpyAsync(p.slow_steering, p.pinned_slow_steering,
+                               static_cast<size_t>(p.rows) * p.rows * sizeof(*p.slow_steering),
+                               cudaMemcpyHostToDevice, p.diagnostic_stream),
+               "upload diagnostic slow-time steering");
+    cuda_check(cudaMemcpyAsync(p.rate_allowed, p.pinned_rate_allowed,
+                               p.rows * sizeof(*p.rate_allowed), cudaMemcpyHostToDevice,
+                               p.diagnostic_stream),
+               "upload diagnostic rate mask");
+  } catch (...) {
+    cudaStreamSynchronize(p.diagnostic_stream);
+    throw;
+  }
+}
+
+template<typename DetectorState>
+std::vector<double> finish_likelihood_map(DetectorState& p, uint32_t minimum_range_bin)
+{
+  cufft_check(cufftExecC2C(p.range_plan, p.projected, p.projected, CUFFT_INVERSE),
+              "execute detector range transform");
+  const size_t map_cells = static_cast<size_t>(p.range_bins) * p.rows;
+  const uint32_t map_blocks = static_cast<uint32_t>(
+      std::min<size_t>(65535, (map_cells + 127) / 128));
+  likelihood_kernel<<<map_blocks, 128>>>(p.projected, p.slow_steering, p.rate_allowed,
+                                        p.likelihood, p.antennas, p.rows, p.subcarriers,
+                                        p.range_bins, minimum_range_bin,
+                                        static_cast<float>(p.denominator));
+  cuda_check(cudaGetLastError(), "launch detector likelihood kernel");
+  cuda_check(cudaMemcpy(p.host_likelihood.data(), p.likelihood, map_cells * sizeof(float),
+                        cudaMemcpyDeviceToHost), "download detector likelihood");
+  return std::vector<double>(p.host_likelihood.begin(), p.host_likelihood.end());
+}
+
 std::vector<double> CudaDetectorBackend::likelihood_map(
     const std::vector<std::complex<double>>& host_residual, uint32_t minimum_range_bin)
 {
   auto& p = *impl_;
+  if (p.diagnostic_only)
+    throw std::logic_error("CLEAN likelihood requested from diagnostic-only backend");
   if (host_residual.size() != p.samples || minimum_range_bin >= p.range_bins)
     throw std::invalid_argument("CUDA detector residual shape mismatch");
   if (!p.residual_loaded) {
@@ -504,19 +637,72 @@ std::vector<double> CudaDetectorBackend::likelihood_map(
   const uint32_t blocks = static_cast<uint32_t>(std::min<size_t>(65535, (p.samples + 255) / 256));
   project_weighted<<<blocks, 256>>>(p.residual, p.projected, p.weights_float, p.cells, p.samples);
   cuda_check(cudaGetLastError(), "launch detector weighting kernel");
-  cufft_check(cufftExecC2C(p.range_plan, p.projected, p.projected, CUFFT_INVERSE),
-              "execute detector range transform");
+  return finish_likelihood_map(p, minimum_range_bin);
+}
+
+std::vector<double> CudaDetectorBackend::diagnostic_likelihood_map(
+    const std::vector<std::complex<float>>& host_samples,
+    uint32_t minimum_range_bin)
+{
+  begin_diagnostic_likelihood_map(host_samples, minimum_range_bin);
+  return finish_diagnostic_likelihood_map();
+}
+
+void CudaDetectorBackend::begin_diagnostic_likelihood_map(
+    const std::vector<std::complex<float>>& host_samples,
+    uint32_t minimum_range_bin)
+{
+  auto& p = *impl_;
+  if (!p.diagnostic_only)
+    throw std::logic_error("diagnostic map requested from full detector backend");
+  if (p.diagnostic_pending)
+    throw std::logic_error("a diagnostic map is already pending");
+  if (host_samples.size() != p.samples || minimum_range_bin >= p.range_bins)
+    throw std::invalid_argument("CUDA diagnostic samples shape mismatch");
+  static_assert(sizeof(std::complex<float>) == sizeof(cufftComplex));
+  std::memcpy(p.pinned_samples, host_samples.data(), p.samples * sizeof(*p.pinned_samples));
+  p.diagnostic_pending = true;
+  try {
+    cuda_check(cudaMemcpyAsync(p.projected, p.pinned_samples,
+                               p.samples * sizeof(*p.projected), cudaMemcpyHostToDevice,
+                               p.diagnostic_stream),
+               "upload diagnostic complex64 samples");
+    const uint32_t blocks = static_cast<uint32_t>(
+        std::min<size_t>(65535, (p.samples + 255) / 256));
+    weight_projected<<<blocks, 256, 0, p.diagnostic_stream>>>(
+        p.projected, p.weights_float, p.cells, p.samples);
+    cuda_check(cudaGetLastError(), "launch diagnostic weighting kernel");
+    cufft_check(cufftExecC2C(p.range_plan, p.projected, p.projected, CUFFT_INVERSE),
+                "execute diagnostic range transform");
+    const size_t map_cells = static_cast<size_t>(p.range_bins) * p.rows;
+    const uint32_t map_blocks = static_cast<uint32_t>(
+        std::min<size_t>(65535, (map_cells + 127) / 128));
+    likelihood_kernel<<<map_blocks, 128, 0, p.diagnostic_stream>>>(
+        p.projected, p.slow_steering, p.rate_allowed, p.likelihood, p.antennas,
+        p.rows, p.subcarriers, p.range_bins, minimum_range_bin,
+        static_cast<float>(p.denominator));
+    cuda_check(cudaGetLastError(), "launch diagnostic likelihood kernel");
+    cuda_check(cudaMemcpyAsync(p.pinned_likelihood, p.likelihood,
+                               map_cells * sizeof(*p.pinned_likelihood), cudaMemcpyDeviceToHost,
+                               p.diagnostic_stream),
+               "download diagnostic likelihood");
+  } catch (...) {
+    cudaStreamSynchronize(p.diagnostic_stream);
+    p.diagnostic_pending = false;
+    throw;
+  }
+}
+
+std::vector<double> CudaDetectorBackend::finish_diagnostic_likelihood_map()
+{
+  auto& p = *impl_;
+  if (!p.diagnostic_only || !p.diagnostic_pending)
+    throw std::logic_error("no diagnostic map is pending");
+  const cudaError_t status = cudaStreamSynchronize(p.diagnostic_stream);
+  p.diagnostic_pending = false;
+  cuda_check(status, "synchronize diagnostic likelihood");
   const size_t map_cells = static_cast<size_t>(p.range_bins) * p.rows;
-  const uint32_t map_blocks = static_cast<uint32_t>(std::min<size_t>(65535, (map_cells + 127) / 128));
-  likelihood_kernel<<<map_blocks, 128>>>(p.projected, p.slow_steering, p.rate_allowed,
-                                        p.likelihood, p.antennas, p.rows, p.subcarriers,
-                                        p.range_bins, minimum_range_bin,
-                                        static_cast<float>(p.denominator));
-  cuda_check(cudaGetLastError(), "launch detector likelihood kernel");
-  cuda_check(cudaMemcpy(p.host_likelihood.data(), p.likelihood, map_cells * sizeof(float),
-                        cudaMemcpyDeviceToHost), "download detector likelihood");
-  std::vector<double> result(p.host_likelihood.begin(), p.host_likelihood.end());
-  return result;
+  return std::vector<double>(p.pinned_likelihood, p.pinned_likelihood + map_cells);
 }
 
 CudaRefinementEvaluation CudaDetectorBackend::evaluate(double range_bin, double doppler_bin)

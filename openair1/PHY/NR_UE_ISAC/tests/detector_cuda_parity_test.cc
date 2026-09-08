@@ -88,23 +88,43 @@ int main()
       if ((dl_window.row_source_mask[row] & DL_SOURCE_BITS) == 0)
         for (uint32_t subcarrier = 0; subcarrier < dl_window.subcarriers; ++subcarrier)
           dl_window.observed[dl_window.cell(row, subcarrier)] = 0;
+    setenv("NR_ISAC_REQUIRE_CUDA", "0", 1);
     setenv("NR_ISAC_CUDA_DETECTOR", "0", 1);
-    const auto cpu = detect_clean(window, config);
-    const auto cpu_dl = diagnostic_likelihood_map(dl_window, config);
+    const auto cpu = detect_clean_with_diagnostic(window, dl_window, config);
+    setenv("NR_ISAC_REQUIRE_CUDA", "1", 1);
     setenv("NR_ISAC_CUDA_DETECTOR", "1", 1);
     detector_cuda_warmup();
-    const auto cuda = detect_clean(window, config);
-    const auto cuda_dl = diagnostic_likelihood_map(dl_window, config);
+    const auto cuda = detect_clean_with_diagnostic(window, dl_window, config);
+    const auto cuda_fused_only = detect_clean(window, config);
+    const auto cuda_dl_only = diagnostic_likelihood_map(dl_window, config);
+    require(cuda.initial_likelihood == cuda_fused_only.initial_likelihood
+                && cuda.initial_weighted_energy == cuda_fused_only.initial_weighted_energy
+                && cuda.final_weighted_energy == cuda_fused_only.final_weighted_energy,
+            "concurrent diagnostic changed fused CUDA detector results");
+    require(cuda.components.size() == cuda_fused_only.components.size(),
+            "concurrent diagnostic changed fused component count");
+    for (size_t index = 0; index < cuda.components.size(); ++index) {
+      const auto& concurrent = cuda.components[index];
+      const auto& isolated = cuda_fused_only.components[index];
+      require(concurrent.range_bin == isolated.range_bin
+                  && concurrent.doppler_bin == isolated.doppler_bin
+                  && concurrent.score == isolated.score
+                  && concurrent.raw_score == isolated.raw_score
+                  && concurrent.local.z == isolated.local.z,
+              "concurrent diagnostic changed a fused component");
+    }
+    require(cuda.initial_dl_likelihood == cuda_dl_only.likelihood,
+            "concurrent and standalone CUDA diagnostic maps differ");
     require(cpu.components.size() == 1 && cuda.components.size() == 1,
             "CPU/CUDA component count differs");
     require(cpu.objects.size() == cuda.objects.size(), "CPU/CUDA object count differs");
     require(cpu.initial_likelihood.size() == cuda.initial_likelihood.size(),
             "CPU/CUDA initial map shape differs");
-    require(cpu_dl.likelihood.size() == cuda_dl.likelihood.size()
-                && cpu_dl.likelihood.size() == cpu.initial_likelihood.size(),
+    require(cpu.initial_dl_likelihood.size() == cuda.initial_dl_likelihood.size()
+                && cpu.initial_dl_likelihood.size() == cpu.initial_likelihood.size(),
             "CPU/CUDA DL-only map shape differs");
-    require(cpu_dl.axes.observed_re_count == cuda_dl.axes.observed_re_count
-                && cpu_dl.axes.observed_re_count > 0,
+    require(cpu.dl_observed_re_count == cuda.dl_observed_re_count
+                && cpu.dl_observed_re_count > 0,
             "CPU/CUDA DL-only observed-RE count differs");
     double map_scale = 0.0, map_error = 0.0;
     for (size_t index = 0; index < cpu.initial_likelihood.size(); ++index) {
@@ -121,9 +141,9 @@ int main()
     require(map_error <= 5e-5 * std::max(map_scale, 1.0),
             "CPU/CUDA initial likelihood exceeds complex64 tolerance");
     double dl_map_scale = 0.0, dl_map_error = 0.0;
-    for (size_t index = 0; index < cpu_dl.likelihood.size(); ++index) {
-      const double expected_dl = cpu_dl.likelihood[index];
-      const double actual_dl = cuda_dl.likelihood[index];
+    for (size_t index = 0; index < cpu.initial_dl_likelihood.size(); ++index) {
+      const double expected_dl = cpu.initial_dl_likelihood[index];
+      const double actual_dl = cuda.initial_dl_likelihood[index];
       if (!std::isfinite(expected_dl) || !std::isfinite(actual_dl)) {
         require(std::isfinite(expected_dl) == std::isfinite(actual_dl),
                 "CPU/CUDA DL-only map support differs");

@@ -20,7 +20,8 @@ CudaDetectorBackend::CudaDetectorBackend(uint32_t,
                                          const std::vector<double>&,
                                          const std::vector<double>&,
                                          const std::vector<uint8_t>&,
-                                         double)
+                                         double,
+                                         bool)
 {
   throw std::runtime_error("CUDA detector support was not compiled");
 }
@@ -38,8 +39,36 @@ void CudaDetectorBackend::reset_cpi(double,
   throw std::runtime_error("CUDA detector support was not compiled");
 }
 
+void CudaDetectorBackend::reset_diagnostic_cpi(double,
+                                               double,
+                                               const std::vector<double>&,
+                                               const std::vector<double>&,
+                                               const std::vector<double>&,
+                                               const std::vector<uint8_t>&,
+                                               double)
+{
+  throw std::runtime_error("CUDA detector support was not compiled");
+}
+
 std::vector<double> CudaDetectorBackend::likelihood_map(
     const std::vector<std::complex<double>>&, uint32_t)
+{
+  throw std::runtime_error("CUDA detector support was not compiled");
+}
+
+std::vector<double> CudaDetectorBackend::diagnostic_likelihood_map(
+    const std::vector<std::complex<float>>&, uint32_t)
+{
+  throw std::runtime_error("CUDA detector support was not compiled");
+}
+
+void CudaDetectorBackend::begin_diagnostic_likelihood_map(
+    const std::vector<std::complex<float>>&, uint32_t)
+{
+  throw std::runtime_error("CUDA detector support was not compiled");
+}
+
+std::vector<double> CudaDetectorBackend::finish_diagnostic_likelihood_map()
 {
   throw std::runtime_error("CUDA detector support was not compiled");
 }

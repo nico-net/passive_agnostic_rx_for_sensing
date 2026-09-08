@@ -712,16 +712,11 @@ void SensingEngine::process_window(CfrWindow window, std::optional<CfrWindow> dl
                        * slot_duration_s(detector_input.scs_hz);
   const RateGate gate = finalize_search_gate(plan, detector_input.rows, dwell,
                                               detector_input.fc_hz, config_);
-  report.detector = detect_clean(detector_input, config_, gate, 0);
   if (dl_window) {
-    const auto dl = diagnostic_likelihood_map(*dl_window, config_, gate, 0);
-    if (dl.axes.range_bins != report.detector.axes.range_bins
-        || dl.axes.rate_bins != report.detector.axes.rate_bins
-        || dl.likelihood.size() != report.detector.initial_likelihood.size()
-        || dl.axes.observed_re_count == 0)
-      throw std::runtime_error("DL-only diagnostic RDM has incompatible axes or no observed DL samples");
-    report.detector.initial_dl_likelihood = dl.likelihood;
-    report.detector.dl_observed_re_count = dl.axes.observed_re_count;
+    report.detector = detect_clean_with_diagnostic(detector_input, *dl_window,
+                                                   config_, gate, 0);
+  } else {
+    report.detector = detect_clean(detector_input, config_, gate, 0);
   }
   const auto priors = confirmed_tracks();
   AdaptiveClutterMap* clutter = clutter_map();

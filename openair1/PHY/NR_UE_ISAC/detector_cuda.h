@@ -43,7 +43,8 @@ public:
                       const std::vector<double>& times,
                       const std::vector<double>& rate_axis_mps,
                       const std::vector<uint8_t>& rate_allowed,
-                      double rate_res_mps);
+                      double rate_res_mps,
+                      bool diagnostic_only = false);
   ~CudaDetectorBackend();
 
   CudaDetectorBackend(const CudaDetectorBackend&) = delete;
@@ -60,9 +61,35 @@ public:
                  const std::vector<uint8_t>& rate_allowed,
                  double rate_res_mps);
 
+  /** Rebind only the coordinates needed by a map-only diagnostic. This deliberately avoids
+   * uploading the double-precision CLEAN weights/times owned by the independent fused backend.
+   */
+  void reset_diagnostic_cpi(double fc_hz,
+                            double denominator,
+                            const std::vector<double>& weights,
+                            const std::vector<double>& times,
+                            const std::vector<double>& rate_axis_mps,
+                            const std::vector<uint8_t>& rate_allowed,
+                            double rate_res_mps);
+
   /** Upload the current CLEAN residual and return range-major [range][Doppler] likelihood. */
   std::vector<double> likelihood_map(const std::vector<std::complex<double>>& residual,
                                      uint32_t minimum_range_bin);
+
+  /** Map-only complex64 input path. Observation weights isolate excluded rows on the device;
+   * the CLEAN residual and its energy state are neither uploaded nor modified.
+   */
+  std::vector<double> diagnostic_likelihood_map(
+      const std::vector<std::complex<float>>& samples,
+      uint32_t minimum_range_bin);
+
+  /** Start/finish split used to overlap the independent DL-only map with fused CLEAN. Only a
+   * backend constructed with diagnostic_only=true accepts these calls.
+   */
+  void begin_diagnostic_likelihood_map(
+      const std::vector<std::complex<float>>& samples,
+      uint32_t minimum_range_bin);
+  std::vector<double> finish_diagnostic_likelihood_map();
 
   /** Evaluate objective, gradient, Hessian, and per-antenna coherent sums at one point. */
   CudaRefinementEvaluation evaluate(double range_bin, double doppler_bin);

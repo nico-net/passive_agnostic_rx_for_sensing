@@ -430,6 +430,51 @@ std::vector<CleanComponent> collapse(std::vector<CleanComponent> remaining,
   return objects;
 }
 
+struct CachedDiagnosticBackend {
+  uint32_t antennas = 0, rows = 0, subcarriers = 0, range_bins = 0;
+  std::unique_ptr<CudaDetectorBackend> backend;
+};
+
+CudaDetectorBackend& prepare_diagnostic_cuda_backend(const CfrWindow& window,
+                                                     const Plan& plan)
+{
+  static thread_local CachedDiagnosticBackend cached;
+  const bool shape_matches = cached.backend && cached.antennas == window.antennas
+      && cached.rows == window.rows && cached.subcarriers == window.subcarriers
+      && cached.range_bins == plan.axes.range_bins;
+  if (!shape_matches) {
+    cached = {};
+    cached.antennas = window.antennas;
+    cached.rows = window.rows;
+    cached.subcarriers = window.subcarriers;
+    cached.range_bins = plan.axes.range_bins;
+    cached.backend = std::make_unique<CudaDetectorBackend>(
+        window.antennas, window.rows, window.subcarriers, plan.axes.range_bins,
+        window.fc_hz, plan.denominator, plan.weights, plan.times, plan.axes.rate_axis_mps,
+        plan.rate_allowed, plan.axes.rate_res_mps, true);
+  } else {
+    cached.backend->reset_diagnostic_cpi(
+        window.fc_hz, plan.denominator, plan.weights, plan.times,
+        plan.axes.rate_axis_mps, plan.rate_allowed, plan.axes.rate_res_mps);
+  }
+  return *cached.backend;
+}
+
+DiagnosticLikelihoodMap diagnostic_likelihood_map_cpu(const CfrWindow& window,
+                                                       const Plan& plan,
+                                                       uint32_t minimum_range_bin)
+{
+  const size_t cells = (size_t)window.rows * window.subcarriers;
+  std::vector<std::complex<double>> residual((size_t)window.antennas * cells);
+  for (uint32_t a = 0; a < window.antennas; ++a)
+    for (size_t i = 0; i < cells; ++i)
+      residual[(size_t)a * cells + i] = window.observed[i]
+          ? window.values[(size_t)a * cells + i] : std::complex<float>();
+  return {plan.axes, likelihood_map_scaled(residual, window.antennas, window.rows,
+                                            window.subcarriers, window.fc_hz, plan,
+                                            minimum_range_bin)};
+}
+
 } // namespace
 
 DiagnosticLikelihoodMap diagnostic_likelihood_map(const CfrWindow& window,
@@ -442,51 +487,20 @@ DiagnosticLikelihoodMap diagnostic_likelihood_map(const CfrWindow& window,
     throw std::invalid_argument("diagnostic minimum range bin outside detector support");
   if (!(plan.denominator > 0.0))
     throw std::runtime_error("DL-only diagnostic RDM has no observed resource elements");
-  const size_t cells = (size_t)window.rows * window.subcarriers;
-  std::vector<std::complex<double>> residual((size_t)window.antennas * cells);
-  for (uint32_t a = 0; a < window.antennas; ++a)
-    for (size_t i = 0; i < cells; ++i)
-      residual[(size_t)a * cells + i] = window.observed[i]
-          ? window.values[(size_t)a * cells + i] : std::complex<float>();
-
   const bool require_cuda = cuda_required();
   const bool have_cuda = detector_cuda_available();
   if (require_cuda && !have_cuda)
     throw std::runtime_error("NR_ISAC_REQUIRE_CUDA=1 but no usable CUDA detector is available");
   if (have_cuda) {
-    // Do not reuse the fused CLEAN backend: resetting it for the diagnostic map would overwrite
-    // its device residual and change fused detection/tracker results.
-    struct CachedDiagnosticBackend {
-      uint32_t antennas = 0, rows = 0, subcarriers = 0, range_bins = 0;
-      std::unique_ptr<CudaDetectorBackend> backend;
-    };
-    static thread_local CachedDiagnosticBackend cached;
-    const bool shape_matches = cached.backend && cached.antennas == window.antennas
-        && cached.rows == window.rows && cached.subcarriers == window.subcarriers
-        && cached.range_bins == plan.axes.range_bins;
     try {
-      if (!shape_matches) {
-        cached = {};
-        cached.antennas = window.antennas; cached.rows = window.rows;
-        cached.subcarriers = window.subcarriers; cached.range_bins = plan.axes.range_bins;
-        cached.backend = std::make_unique<CudaDetectorBackend>(
-            window.antennas, window.rows, window.subcarriers, plan.axes.range_bins,
-            window.fc_hz, plan.denominator, plan.weights, plan.times, plan.axes.rate_axis_mps,
-            plan.rate_allowed, plan.axes.rate_res_mps);
-      } else {
-        cached.backend->reset_cpi(window.fc_hz, plan.denominator, plan.weights, plan.times,
-                                  plan.axes.rate_axis_mps, plan.rate_allowed,
-                                  plan.axes.rate_res_mps);
-      }
-      return {plan.axes, cached.backend->likelihood_map(residual, minimum_range_bin)};
+      auto& backend = prepare_diagnostic_cuda_backend(window, plan);
+      return {plan.axes, backend.diagnostic_likelihood_map(window.values, minimum_range_bin)};
     } catch (...) {
       if (require_cuda) throw;
       std::fprintf(stderr, "NR_ISAC: DL-only diagnostic CUDA likelihood failed; using CPU fallback\n");
     }
   }
-  return {plan.axes, likelihood_map_scaled(residual, window.antennas, window.rows,
-                                            window.subcarriers, window.fc_hz, plan,
-                                            minimum_range_bin)};
+  return diagnostic_likelihood_map_cpu(window, plan, minimum_range_bin);
 }
 
 DetectorResult detect_clean(const CfrWindow& window,
@@ -658,6 +672,72 @@ DetectorResult detect_clean(const CfrWindow& window,
     std::fprintf(stderr, "NR_ISAC detector CPI: initialize=%.3f ms total=%.3f ms\n",
                  std::chrono::duration<double, std::milli>(initialized_at - detector_started).count(),
                  std::chrono::duration<double, std::milli>(DetectorClock::now() - detector_started).count());
+  return result;
+}
+
+DetectorResult detect_clean_with_diagnostic(const CfrWindow& window,
+                                            const CfrWindow& dl_window,
+                                            const PipelineConfig& config,
+                                            const RateGate& rate_gate,
+                                            uint32_t minimum_range_bin)
+{
+  const Plan dl_plan = prepare(dl_window, config, rate_gate);
+  if (minimum_range_bin >= dl_plan.axes.range_bins)
+    throw std::invalid_argument("diagnostic minimum range bin outside detector support");
+  if (!(dl_plan.denominator > 0.0))
+    throw std::runtime_error("DL-only diagnostic RDM has no observed resource elements");
+
+  const bool require_cuda = cuda_required();
+  const bool have_cuda = detector_cuda_available();
+  if (require_cuda && !have_cuda)
+    throw std::runtime_error("NR_ISAC_REQUIRE_CUDA=1 but no usable CUDA detector is available");
+  CudaDetectorBackend* diagnostic_backend = nullptr;
+  if (have_cuda) {
+    try {
+      diagnostic_backend = &prepare_diagnostic_cuda_backend(dl_window, dl_plan);
+      diagnostic_backend->begin_diagnostic_likelihood_map(dl_window.values,
+                                                          minimum_range_bin);
+    } catch (...) {
+      if (require_cuda) throw;
+      diagnostic_backend = nullptr;
+      std::fprintf(stderr,
+                   "NR_ISAC: asynchronous DL diagnostic launch failed; using CPU fallback\n");
+    }
+  }
+
+  DetectorResult result;
+  try {
+    result = detect_clean(window, config, rate_gate, minimum_range_bin);
+  } catch (...) {
+    if (diagnostic_backend) {
+      try {
+        (void)diagnostic_backend->finish_diagnostic_likelihood_map();
+      } catch (...) {
+      }
+    }
+    throw;
+  }
+
+  DiagnosticLikelihoodMap dl;
+  if (diagnostic_backend) {
+    try {
+      dl = {dl_plan.axes, diagnostic_backend->finish_diagnostic_likelihood_map()};
+    } catch (...) {
+      if (require_cuda) throw;
+      std::fprintf(stderr,
+                   "NR_ISAC: asynchronous DL diagnostic completion failed; using CPU fallback\n");
+      dl = diagnostic_likelihood_map_cpu(dl_window, dl_plan, minimum_range_bin);
+    }
+  } else {
+    dl = diagnostic_likelihood_map_cpu(dl_window, dl_plan, minimum_range_bin);
+  }
+  if (dl.axes.range_bins != result.axes.range_bins
+      || dl.axes.rate_bins != result.axes.rate_bins
+      || dl.likelihood.size() != result.initial_likelihood.size()
+      || dl.axes.observed_re_count == 0)
+    throw std::runtime_error("DL-only diagnostic RDM has incompatible axes or no observed DL samples");
+  result.initial_dl_likelihood = std::move(dl.likelihood);
+  result.dl_observed_re_count = dl.axes.observed_re_count;
   return result;
 }
 
