@@ -23,6 +23,7 @@
 #include <stdbool.h>
 #include <errno.h>
 #include <sys/epoll.h>
+#include <sys/stat.h>
 #include <netdb.h>
 
 #include <common/utils/assertions.h>
@@ -78,11 +79,18 @@ typedef enum { SIMU_ROLE_SERVER = 1, SIMU_ROLE_CLIENT } simuRole;
 #define RFSIMU_BEAM_MAP "beam_map"
 #define RFSIMU_BEAM_GAINS "beam_gains"
 #define RFSIMU_BEAM_IDS "beam_ids"
+#define RFSIMU_PASSIVE_UL_CAPTURE_DIR "passive_ul_capture_dir"
+#define RFSIMU_PASSIVE_UL_CAPTURE_MAX_BYTES "passive_ul_capture_max_bytes"
+
+#define RFSIM_OPTION_FLAG_PASSIVE_UL_SINK (1u << 28)
+#define RFSIM_OPTION_FLAG_RELAYED_UL (1u << 29)
 
 #define RFSIM_CONFIG_HELP_OPTIONS                                                                  \
   " list of comma separated options to enable rf simulator functionalities. Available options: \n" \
   "        chanmod:   enable channel modelisation\n"                                               \
-  "        saviq:     enable saving written iqs to a file\n"
+  "        saviq:     enable saving written iqs to a file\n"                                      \
+  "        passive-ul-relay:    relay active UE uplink blocks to passive-ul-observer clients\n"    \
+  "        passive-ul-observer: mark a normal --passive-rx client as an uplink IQ observer\n"
 
 #define simOpt PARAMFLAG_NOFREE | PARAMFLAG_CMDLINE_NOPREFIXENABLED
 #define simBool PARAMFLAG_BOOL | PARAMFLAG_NOFREE | PARAMFLAG_CMDLINE_NOPREFIXENABLED
@@ -107,6 +115,8 @@ typedef enum { SIMU_ROLE_SERVER = 1, SIMU_ROLE_CLIENT } simuRole;
   UINT64PARAM(RFSIMU_BEAM_MAP,          "<initial beam map>\n",                     simOpt, NULL,                             1),                     \
   STRINGPARAM(RFSIMU_BEAM_IDS,          "<initial beam ids>\n",                     simOpt, NULL,                             NULL),                  \
   STRINGPARAM(RFSIMU_BEAM_GAINS,        "<beam gain matrix in toeplitz form>\n",    simOpt, NULL,                             NULL),                  \
+  STRINGPARAM(RFSIMU_PASSIVE_UL_CAPTURE_DIR, "<optional directory for relayed passive UL waveform capture>\n", simOpt, NULL,                    NULL),                  \
+  UINT64PARAM(RFSIMU_PASSIVE_UL_CAPTURE_MAX_BYTES, "<maximum passive UL IQ bytes; 0 means unlimited>\n", simOpt, NULL,                    0),                     \
 };
 // clang-format on
 static void getset_currentchannels_type(char *buf, int debug, webdatadef_t *tdata, telnet_printfunc_t prnt);
@@ -163,6 +173,7 @@ typedef struct buffer_s {
   size_t payload_sz;
   size_t remainToTransferBeam;
   std::queue<rfsim_packet_t *> received_packets;
+  bool passive_ul_sink;
 } buffer_t;
 
 typedef struct {
@@ -200,6 +211,15 @@ typedef struct {
   int wait_timeout;
   double prop_delay_ms;
   rfsim_beam_ctrl_t *beam_ctrl;
+  bool passive_ul_relay;
+  bool passive_ul_sink;
+  char *passive_ul_capture_dir;
+  FILE *passive_ul_capture_waveform;
+  FILE *passive_ul_capture_index;
+  uint64_t passive_ul_capture_next_block_id;
+  uint64_t passive_ul_capture_max_bytes;
+  uint64_t passive_ul_relayed_bytes;
+  bool passive_ul_capture_open_failed;
 } rfsimulator_state_t;
 
 /**
@@ -313,6 +333,132 @@ static void clear_old_packets(std::queue<rfsim_packet_t *> &received_packets, ui
       break;
     }
   }
+}
+
+static void fullwrite(int fd, const void *_buf, ssize_t count, rfsimulator_state_t *t);
+
+static bool passive_ul_is_sink_registration(const rfsim_packet_t *pkt)
+{
+  return (pkt->header.option_flag & RFSIM_OPTION_FLAG_PASSIVE_UL_SINK) != 0;
+}
+
+static bool passive_ul_is_relayed(const rfsim_packet_t *pkt)
+{
+  return (pkt->header.option_flag & RFSIM_OPTION_FLAG_RELAYED_UL) != 0;
+}
+
+static size_t rfsim_packet_payload_bytes(const samplesBlockHeader_t *h)
+{
+  const int num_beams = __builtin_popcountll(h->beam_map);
+  return sampleToByte(h->size, h->nbAnt) * num_beams;
+}
+
+static bool passive_ul_payload_has_signal(const rfsim_packet_t *pkt)
+{
+  const size_t payload_bytes = rfsim_packet_payload_bytes(&pkt->header);
+  const uint32_t *iq = (const uint32_t *)pkt->payload;
+  for (size_t i = 0; i < payload_bytes / sizeof(*iq); ++i)
+    if (iq[i] != 0)
+      return true;
+  return false;
+}
+
+static void passive_ul_capture_packet(rfsimulator_state_t *t, const char *source, const buffer_t *b, const rfsim_packet_t *pkt)
+{
+  if (t->passive_ul_capture_dir == nullptr || t->passive_ul_capture_dir[0] == '\0' || t->passive_ul_capture_open_failed)
+    return;
+
+  const size_t payload_bytes = rfsim_packet_payload_bytes(&pkt->header);
+  if (!passive_ul_payload_has_signal(pkt))
+    return;
+
+  if (t->passive_ul_capture_waveform == nullptr || t->passive_ul_capture_index == nullptr) {
+    mkdir(t->passive_ul_capture_dir, 0777);
+
+    char path[768];
+    snprintf(path, sizeof(path), "%s/passive_ul_waveform.c16", t->passive_ul_capture_dir);
+    t->passive_ul_capture_waveform = fopen(path, "ab");
+
+    snprintf(path, sizeof(path), "%s/passive_ul_waveform_index.csv", t->passive_ul_capture_dir);
+    t->passive_ul_capture_index = fopen(path, "a+");
+
+    if (t->passive_ul_capture_waveform == nullptr || t->passive_ul_capture_index == nullptr) {
+      LOG_E(HW, "RFsim passive UL capture: failed to open capture files under %s\n", t->passive_ul_capture_dir);
+      if (t->passive_ul_capture_waveform != nullptr) {
+        fclose(t->passive_ul_capture_waveform);
+        t->passive_ul_capture_waveform = nullptr;
+      }
+      if (t->passive_ul_capture_index != nullptr) {
+        fclose(t->passive_ul_capture_index);
+        t->passive_ul_capture_index = nullptr;
+      }
+      t->passive_ul_capture_open_failed = true;
+      return;
+    }
+
+    fseek(t->passive_ul_capture_index, 0, SEEK_END);
+    if (ftell(t->passive_ul_capture_index) == 0)
+      fprintf(t->passive_ul_capture_index,
+              "capture_block_id,source,role,conn_sock,timestamp,nsamps,nb_ant,beam_map,option_flag,"
+              "payload_byte_offset,payload_bytes\n");
+  }
+
+  fseek(t->passive_ul_capture_waveform, 0, SEEK_END);
+  const long payload_byte_offset = ftell(t->passive_ul_capture_waveform);
+  if (payload_byte_offset < 0)
+    return;
+  if (t->passive_ul_capture_max_bytes > 0
+      && (uint64_t)payload_byte_offset + payload_bytes > t->passive_ul_capture_max_bytes)
+    return;
+
+  fwrite(pkt->payload, 1, payload_bytes, t->passive_ul_capture_waveform);
+  const uint64_t block_id = ++t->passive_ul_capture_next_block_id;
+  fprintf(t->passive_ul_capture_index,
+          "%" PRIu64 ",%s,%s,%d,%" PRIu64 ",%u,%u,%" PRIu64 ",%u,%ld,%zu\n",
+          block_id,
+          source,
+          t->role == SIMU_ROLE_SERVER ? "server" : "client",
+          b->conn_sock,
+          pkt->header.timestamp,
+          pkt->header.size,
+          pkt->header.nbAnt,
+          pkt->header.beam_map,
+          pkt->header.option_flag,
+          payload_byte_offset,
+          payload_bytes);
+  fflush(t->passive_ul_capture_index);
+}
+
+static void passive_ul_relay_packet(rfsimulator_state_t *t, const buffer_t *src, const rfsim_packet_t *pkt)
+{
+  if (!t->passive_ul_relay || t->role != SIMU_ROLE_SERVER || passive_ul_is_sink_registration(pkt) || passive_ul_is_relayed(pkt))
+    return;
+
+  samplesBlockHeader_t header = pkt->header;
+  header.option_flag &= ~RFSIM_OPTION_FLAG_PASSIVE_UL_SINK;
+  header.option_flag |= RFSIM_OPTION_FLAG_RELAYED_UL;
+  const size_t payload_bytes = rfsim_packet_payload_bytes(&header);
+  if (!passive_ul_payload_has_signal(pkt))
+    return;
+  if (t->passive_ul_capture_max_bytes > 0
+      && t->passive_ul_relayed_bytes + payload_bytes > t->passive_ul_capture_max_bytes)
+    return;
+
+  // The gNB transmit thread uses the same socket for normal DL blocks. Keep each relayed header and
+  // payload contiguous on the wire; otherwise the two writers can interleave and corrupt framing.
+  mutexlock(t->Sockmutex);
+  bool relayed = false;
+  for (int i = 0; i < MAX_FD_RFSIMU; i++) {
+    buffer_t *dst = &t->buf[i];
+    if (dst->conn_sock < 0 || dst == src || !dst->passive_ul_sink)
+      continue;
+    fullwrite(dst->conn_sock, &header, sizeof(header), t);
+    fullwrite(dst->conn_sock, pkt->payload, payload_bytes, t);
+    relayed = true;
+  }
+  if (relayed)
+    t->passive_ul_relayed_bytes += payload_bytes;
+  mutexunlock(t->Sockmutex);
 }
 
 static bool flushInput(rfsimulator_state_t *t, int timeout, bool first_time);
@@ -429,14 +575,14 @@ static int setblocking(int sock, enum blocking_t active)
   return 0;
 }
 
-static void fullwrite(int fd, void *_buf, ssize_t count, rfsimulator_state_t *t)
+static void fullwrite(int fd, const void *_buf, ssize_t count, rfsimulator_state_t *t)
 {
   if (t->saveIQfile != -1) {
     if (write(t->saveIQfile, _buf, count) != count)
       LOG_E(HW, "write() in save iq file failed (%d)\n", errno);
   }
 
-  char *buf = static_cast<char *>(_buf);
+  const char *buf = static_cast<const char *>(_buf);
   ssize_t l;
 
   while (count) {
@@ -554,6 +700,12 @@ static void rfsimulator_readconfig(rfsimulator_state_t *rfsimulator)
   rfsimulator->chan_offset = *(gpd(rfsimuParam, sizeofArray(rfsimuParams), RFSIMU_OFFSET)->u64ptr);
   rfsimulator->prop_delay_ms = *(gpd(rfsimuParam, sizeofArray(rfsimuParams), RFSIMU_PROP_DELAY)->dblptr);
   rfsimulator->wait_timeout = *(gpd(rfsimuParam, sizeofArray(rfsimuParams), RFSIMU_WAIT_TIMEOUT)->iptr);
+  char **passive_ul_capture_dir =
+      gpd(rfsimuParam, sizeofArray(rfsimuParams), RFSIMU_PASSIVE_UL_CAPTURE_DIR)->strptr;
+  if (passive_ul_capture_dir != nullptr && *passive_ul_capture_dir != nullptr && (*passive_ul_capture_dir)[0] != '\0')
+    rfsimulator->passive_ul_capture_dir = strdup(*passive_ul_capture_dir);
+  rfsimulator->passive_ul_capture_max_bytes =
+      *(gpd(rfsimuParam, sizeofArray(rfsimuParams), RFSIMU_PASSIVE_UL_CAPTURE_MAX_BYTES)->u64ptr);
 
   rfsim_beam_ctrl_t *beam_ctrl = rfsimulator->beam_ctrl;
   beam_ctrl->enable_beams = *(gpd(rfsimuParam, sizeofArray(rfsimuParams), RFSIMU_ENABLE_BEAMS)->iptr);
@@ -573,8 +725,6 @@ static void rfsimulator_readconfig(rfsimulator_state_t *rfsimulator)
         LOG_E(HW, "open(%s) failed for IQ saving, errno(%d)\n", saveF, errno);
         exit(-1);
       }
-
-      break;
     } else if (strcmp(rfsimuParam[p].strlistptr[i], "chanmod") == 0) {
       init_channelmod();
       load_channellist(rfsimulator->tx_num_channels,
@@ -583,6 +733,10 @@ static void rfsimulator_readconfig(rfsimulator_state_t *rfsimulator)
                        rfsimulator->rx_freq,
                        rfsimulator->tx_bw);
       rfsimulator->channelmod = true;
+    } else if (strcmp(rfsimuParam[p].strlistptr[i], "passive-ul-relay") == 0) {
+      rfsimulator->passive_ul_relay = true;
+    } else if (strcmp(rfsimuParam[p].strlistptr[i], "passive-ul-observer") == 0) {
+      rfsimulator->passive_ul_sink = true;
     } else {
       fprintf(stderr, "unknown rfsimulator option: %s\n", rfsimuParam[p].strlistptr[i]);
       exit(-1);
@@ -614,6 +768,14 @@ static void rfsimulator_readconfig(rfsimulator_state_t *rfsimulator)
     rfsimulator->role = SIMU_ROLE_SERVER;
   else
     rfsimulator->role = SIMU_ROLE_CLIENT;
+
+  if (rfsimulator->passive_ul_relay)
+    LOG_I(HW, "RFsim passive UL relay enabled: active UE uplink blocks will be mirrored to passive-ul-observer clients\n");
+  if (rfsimulator->passive_ul_sink)
+    LOG_I(HW, "RFsim passive UL observer enabled: normal --passive-rx PHY remains synchronization-only\n");
+  if (rfsimulator->passive_ul_capture_dir != nullptr)
+    LOG_I(HW, "RFsim passive UL waveform capture directory: %s (max=%" PRIu64 " bytes)\n",
+          rfsimulator->passive_ul_capture_dir, rfsimulator->passive_ul_capture_max_bytes);
 }
 
 static int rfsimu_set_beam(char *buff, int debug, telnet_printfunc_t prnt, void *arg)
@@ -978,7 +1140,12 @@ static int rfsimulator_write_internal(rfsimulator_state_t *t,
     buffer_t *b = &t->buf[i];
 
     if (b->conn_sock >= 0) {
-      samplesBlockHeader_t header = {(uint32_t)nsamps, (uint32_t)nbAnt, (uint64_t)timestamp, 0, 0, beams_to_beam_map(tx_beams)};
+      samplesBlockHeader_t header = {(uint32_t)nsamps,
+                                     (uint32_t)nbAnt,
+                                     (uint64_t)timestamp,
+                                     0,
+                                     t->passive_ul_sink ? RFSIM_OPTION_FLAG_PASSIVE_UL_SINK : 0,
+                                     beams_to_beam_map(tx_beams)};
       fullwrite(b->conn_sock, &header, sizeof(header), t);
       int num_beams = tx_beams.size();
       // Send beams in order of beam index. This is required for beam_map to work correctly on the receiver side.
@@ -1105,11 +1272,20 @@ static void process_recv_header(rfsimulator_state_t *t, buffer_t *b, bool first_
 {
   b->headerMode = false; // We got the header
   AssertFatal(b->th.nbAnt != 0, "Number of antennas not set\n");
+  if (t->role == SIMU_ROLE_SERVER && (b->th.option_flag & RFSIM_OPTION_FLAG_PASSIVE_UL_SINK) != 0 && !b->passive_ul_sink) {
+    b->passive_ul_sink = true;
+    LOG_I(HW, "RFsim passive UL observer registered on socket %d\n", b->conn_sock);
+  }
   if (b->nbAnt != b->th.nbAnt) {
     LOG_A(HW, "RFsim: Number of antennas changed from %d to %d\n", b->nbAnt, b->th.nbAnt);
     b->nbAnt = b->th.nbAnt;
   }
-  if (first_time) {
+  const bool relayed_ul_header = (b->th.option_flag & RFSIM_OPTION_FLAG_RELAYED_UL) != 0;
+  if (relayed_ul_header) {
+    // Relayed UL is an out-of-band capture record on the passive client's DL socket.
+    // Its timestamp must not advance or invalidate the normal DL receive timeline.
+    b->trashingPacket = false;
+  } else if (first_time) {
     b->lastReceivedTS = b->th.timestamp;
     b->trashingPacket = true;
   } else {
@@ -1272,10 +1448,27 @@ static bool flushInput(rfsimulator_state_t *t, int timeout, bool first_time)
         b->transferPtr = (char *)&b->th;
         b->remainToTransfer = sizeof(samplesBlockHeader_t);
 
-        if (!b->trashingPacket) {
+        const bool passive_sink_packet = passive_ul_is_sink_registration(b->packet_ptr);
+        const bool relayed_ul_packet = passive_ul_is_relayed(b->packet_ptr);
+        if (relayed_ul_packet)
+          // This file is deliberately labelled TRANSPORT, not receiver IQ. The independent
+          // UE->passive-RX channel is applied by the passive receiver before it writes observed
+          // IQ or attempts DM-RS/PUSCH processing.
+          passive_ul_capture_packet(t, "ue_tx_relay_transport", b, b->packet_ptr);
+
+        if (relayed_ul_packet) {
+          free(b->packet_ptr);
+        } else if (!b->trashingPacket) {
           b->lastReceivedTS = b->th.timestamp + b->th.size;
           LOG_D(HW, "UEsock: %d Set b->lastReceivedTS %ld\n", b->conn_sock, b->lastReceivedTS);
-          b->received_packets.emplace(b->packet_ptr);
+          if (passive_sink_packet || relayed_ul_packet) {
+            free(b->packet_ptr);
+          } else {
+            if (t->role == SIMU_ROLE_SERVER)
+              passive_ul_capture_packet(t, "server_ul_rx", b, b->packet_ptr);
+            passive_ul_relay_packet(t, b, b->packet_ptr);
+            b->received_packets.emplace(b->packet_ptr);
+          }
         } else {
           free(b->packet_ptr);
         }
@@ -1302,7 +1495,7 @@ static void rfsimulator_read_internal(rfsimulator_state_t *t,
   for (int sock = 0; sock < MAX_FD_RFSIMU; sock++) {
     buffer_t *ptr = &t->buf[sock];
 
-    if (ptr->conn_sock != -1 && !ptr->received_packets.empty()) {
+    if (ptr->conn_sock != -1 && !ptr->passive_ul_sink && !ptr->received_packets.empty()) {
       AssertFatal(ptr->nbAnt != 0, "Number of antennas not set\n");
       bool reGenerateChannel = false;
 
@@ -1409,6 +1602,11 @@ static int rfsimulator_read_beams(openair0_device_t *device,
   // check if a UE is connected
   int first_sock;
 
+  /* A passive observer still sends the normal all-zero RFsim pacing blocks. They carry no RF
+   * signal and remain excluded from rfsimulator_read_internal()'s sample summation, but they must
+   * participate in the server receive-clock wait set. Excluding the only passive client here
+   * deadlocked simulated time when the recorder was armed before the active UE: the gNB never
+   * advanced, so the passive receiver could not acquire PBCH. */
   for (first_sock = 0; first_sock < MAX_FD_RFSIMU; first_sock++)
     if (t->buf[first_sock].conn_sock != -1)
       break;
@@ -1461,7 +1659,7 @@ static int rfsimulator_read_beams(openair0_device_t *device,
   for (int sock = 0; sock < MAX_FD_RFSIMU; sock++) {
     buffer_t *ptr = &t->buf[sock];
 
-    if (ptr->conn_sock != -1 && ptr->channel_model != NULL) {
+    if (ptr->conn_sock != -1 && !ptr->passive_ul_sink && ptr->channel_model != NULL) {
       update_channel_model(ptr->channel_model, nsamps, t->nextRxTstamp);
     }
   }
@@ -1523,7 +1721,7 @@ static int rfsimulator_read_beams(openair0_device_t *device,
   for (int sock = 0; sock < MAX_FD_RFSIMU; sock++) {
     buffer_t *ptr = &t->buf[sock];
 
-    if (ptr->conn_sock != -1 && !ptr->received_packets.empty()) {
+    if (ptr->conn_sock != -1 && !ptr->passive_ul_sink && !ptr->received_packets.empty()) {
       openair0_timestamp_t timestamp_to_free = t->nextRxTstamp - 1;
       if (ptr->channel_model) {
         timestamp_to_free -=
@@ -1561,6 +1759,11 @@ static void rfsimulator_end(openair0_device_t *device)
     if (b->conn_sock >= 0)
       removeCirBuf(s, b);
   }
+  if (s->passive_ul_capture_waveform != nullptr)
+    fclose(s->passive_ul_capture_waveform);
+  if (s->passive_ul_capture_index != nullptr)
+    fclose(s->passive_ul_capture_index);
+  free(s->passive_ul_capture_dir);
   clear_beam_queue(&s->beam_ctrl->tx, INT64_MAX);
   clear_beam_queue(&s->beam_ctrl->rx, INT64_MAX);
   delete s->beam_ctrl;
