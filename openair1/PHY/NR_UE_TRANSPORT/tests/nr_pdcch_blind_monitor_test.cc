@@ -1713,12 +1713,31 @@ TEST_F(BlindPdcchTest, Dci01RejectsANonZeroPrecodingCodePoint) {
 }
 
 TEST_F(BlindPdcchTest, Dci01RejectsTheReservedUlMcsRange) {
-  nr_pdcch_blind_ul_opts_t o = LiveUlOpts(); // mcs_table = 0 (qam64) -> 28..31 reserved
+  nr_pdcch_blind_ul_opts_t o = LiveUlOpts(); // mcs_table = 0 (qam64) -> 29..31 reserved
   const uint16_t len = nr_pdcch_blind_dci01_size(&o);
   UlGroundTruth gt;
   gt.mcs = 29;
   auto llr = EncodeToLLR(PackUlPayload(gt, o), gt.rnti, len, kAggregationLevel, 40.0, rng_);
   nr_pdcch_blind_ul_result_t out;
+  EXPECT_FALSE(nr_pdcch_blind_decode_and_extract_01(llr.data(), kAggregationLevel, len, &o, 0x0001, 0xFFEF, &out));
+  ASSERT_NE(out.reject_reason, nullptr);
+}
+
+TEST_F(BlindPdcchTest, Dci01AcceptsMcs28ForQam64AndRejectsItForQam256) {
+  nr_pdcch_blind_ul_opts_t o = LiveUlOpts();
+  UlGroundTruth gt;
+  gt.mcs = 28;
+
+  uint16_t len = nr_pdcch_blind_dci01_size(&o);
+  auto llr = EncodeToLLR(PackUlPayload(gt, o), gt.rnti, len, kAggregationLevel, 40.0, rng_);
+  nr_pdcch_blind_ul_result_t out;
+  ASSERT_TRUE(nr_pdcch_blind_decode_and_extract_01(llr.data(), kAggregationLevel, len, &o, 0x0001, 0xFFEF, &out))
+      << (out.reject_reason ? out.reject_reason : "");
+  EXPECT_EQ(out.mcs, 28);
+
+  o.mcs_table = 1;
+  len = nr_pdcch_blind_dci01_size(&o);
+  llr = EncodeToLLR(PackUlPayload(gt, o), gt.rnti, len, kAggregationLevel, 40.0, rng_);
   EXPECT_FALSE(nr_pdcch_blind_decode_and_extract_01(llr.data(), kAggregationLevel, len, &o, 0x0001, 0xFFEF, &out));
   ASSERT_NE(out.reject_reason, nullptr);
 }

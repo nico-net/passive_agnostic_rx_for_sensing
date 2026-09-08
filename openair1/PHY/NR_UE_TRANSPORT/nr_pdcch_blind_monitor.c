@@ -2479,9 +2479,10 @@ static bool blind_ul_finish(const nr_pdcch_blind_ul_opts_t* opts,
     out->reject_reason = "RIV decodes to a PRB allocation outside the UL BWP";
     return false;
   }
-  // MCS 28-31 are reserved for retransmissions on the 64QAM table (TS 38.214 Table 6.1.4.1-1);
-  // 29-31 on the 256QAM table. A grant carrying one has almost certainly been misparsed.
-  const uint32_t mcs_reserved_from = (opts->mcs_table == 1) ? 29u : 28u;
+  // MCS 29-31 are reserved for retransmissions on the 64QAM table (TS 38.214 Table 6.1.4.1-1);
+  // 28-31 on the 256QAM table (Table 6.1.4.1-2). Keep this in lockstep with the gNB scheduler's
+  // max_mcs_table rule: table 0/2 permit index 28, while table 1 stops at index 27.
+  const uint32_t mcs_reserved_from = (opts->mcs_table == 1) ? 28u : 29u;
   if (mcs >= mcs_reserved_from) {
     out->reject_reason = "UL MCS in the reserved retransmission-only range";
     return false;
