@@ -2,7 +2,11 @@
 #include "sync_correction.h"
 
 #include "cuda_support.h"
+#include "detector_cuda.h"
 #include "fft.h"
+#ifdef NR_ISAC_CUDA_DETECTOR
+#include "family_processing_cuda.h"
+#endif
 #include "robust_stats.h"
 #ifdef NR_ISAC_CUDA_ACCELERATION
 #include "sync_correction_cuda.h"
@@ -477,6 +481,22 @@ FamilyAlignmentStats align_allocation_families(CfrWindow& window, bool subtract_
     throw std::invalid_argument("invalid allocation-family window");
   FamilyAlignmentStats stats;
   const auto grouped = families(window);
+#ifdef NR_ISAC_CUDA_DETECTOR
+  if (detector_cuda_available()) {
+    std::vector<std::vector<uint32_t>> rows;
+    rows.reserve(grouped.size());
+    for (const auto& item : grouped) rows.push_back(item.second);
+    try {
+      return align_allocation_families_cuda(window, subtract_static, rows);
+    } catch (const std::exception& error) {
+      if (cuda_required()) throw;
+      std::fprintf(stderr, "NR_ISAC: CUDA family alignment failed; using CPU fallback: %s\n",
+                   error.what());
+    }
+  } else if (cuda_required()) {
+    throw std::runtime_error("NR_ISAC_REQUIRE_CUDA=1 but CUDA family alignment is unavailable");
+  }
+#endif
   stats.families = grouped.size();
   for (const auto& item : grouped) {
     const auto& rows = item.second;
@@ -586,6 +606,22 @@ double estimate_current_cpi_variance(const CfrWindow& window, uint32_t* family_c
   if (!window.valid()) throw std::invalid_argument("invalid covariance window");
   const auto grouped = families(window);
   if (family_count) *family_count = grouped.size();
+#ifdef NR_ISAC_CUDA_DETECTOR
+  if (detector_cuda_available()) {
+    std::vector<std::vector<uint32_t>> rows;
+    rows.reserve(grouped.size());
+    for (const auto& item : grouped) rows.push_back(item.second);
+    try {
+      return estimate_current_cpi_variance_cuda(window, rows, differenced_samples);
+    } catch (const std::exception& error) {
+      if (cuda_required()) throw;
+      std::fprintf(stderr, "NR_ISAC: CUDA current-CPI variance failed; using CPU fallback: %s\n",
+                   error.what());
+    }
+  } else if (cuda_required()) {
+    throw std::runtime_error("NR_ISAC_REQUIRE_CUDA=1 but CUDA current-CPI variance is unavailable");
+  }
+#endif
   uint64_t count = 0;
   std::vector<double> powers;
   for (const auto& item : grouped) {

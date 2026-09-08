@@ -1091,7 +1091,8 @@ set(NR_UE_ISAC_SRC
 if(ENABLE_CHANNEL_SIM_CUDA)
   list(APPEND NR_UE_ISAC_SRC
        ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/sync_correction_cuda.cu
-       ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/detector_cuda.cu)
+       ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/detector_cuda.cu
+       ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/family_processing_cuda.cu)
 else()
   list(APPEND NR_UE_ISAC_SRC ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/detector_cuda_stub.cc)
 endif()
@@ -2321,6 +2322,18 @@ if(ENABLE_TESTS)
       target_link_libraries(test_nr_isac_cuda_detector_parity PRIVATE NR_UE_ISAC UTIL)
       add_dependencies(tests test_nr_isac_cuda_detector_parity)
       add_test(NAME test_nr_isac_cuda_detector_parity COMMAND ./test_nr_isac_cuda_detector_parity)
+      add_executable(test_nr_isac_cuda_family_processing
+                     ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/tests/family_processing_cuda_test.cc)
+      target_include_directories(test_nr_isac_cuda_family_processing PRIVATE
+                                 ${OPENAIR1_DIR}/PHY/NR_UE_ISAC)
+      target_link_libraries(test_nr_isac_cuda_family_processing PRIVATE NR_UE_ISAC UTIL)
+      add_dependencies(tests test_nr_isac_cuda_family_processing)
+      add_test(NAME test_nr_isac_cuda_family_processing COMMAND ./test_nr_isac_cuda_family_processing)
+      add_executable(benchmark_nr_isac_cuda_family_processing
+                     ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/tests/family_processing_cuda_benchmark.cc)
+      target_include_directories(benchmark_nr_isac_cuda_family_processing PRIVATE
+                                 ${OPENAIR1_DIR}/PHY/NR_UE_ISAC)
+      target_link_libraries(benchmark_nr_isac_cuda_family_processing PRIVATE NR_UE_ISAC UTIL)
     endif()
   endif()
 

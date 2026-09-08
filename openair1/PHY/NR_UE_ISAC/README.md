@@ -53,11 +53,24 @@ Campaigns must set `NR_ISAC_REQUIRE_CUDA=1`: startup then fails before CFR admis
 device/warm-up is unavailable, and backend initialization or first-map failures cannot silently
 fall back to CPU.
 
+The allocation-family alignment/static-reference subtraction and current-CPI variance estimator
+also use a reusable CUDA workspace. Family keys and row order are still constructed by the shared
+host implementation, while CUDA preserves the sequential phase unwrap, weighted delay fit,
+complex-gain normalization, exact positive-sample filtering, and exact median decision. A failed
+optional alignment download is staged and cannot partially overwrite the host window before CPU
+fallback.
+
 `test_nr_isac_cuda_detector_parity` compares map support, component decisions, local statistics,
 and energies with the CPU implementation. `benchmark_nr_isac_cuda_detector` exercises a
 deterministic 4x192x3276 CPI with eight CLEAN passes and fails when its five-run steady-state median
 is not below 200 ms (override only for diagnostics with `NR_ISAC_CUDA_BENCHMARK_MAX_MS`). Setting
 `NR_ISAC_DETECTOR_TIMING=1` prints per-iteration map/refinement/subtraction timings.
+
+`test_nr_isac_cuda_family_processing` compares aligned tensors, diagnostics, within-family
+variance, and the raw-power fallback against the CPU path. The deterministic
+`benchmark_nr_isac_cuda_family_processing` exercises a 4x192x3276 CPI and requires the warmed
+combined alignment/variance median to remain below 40 ms (override for diagnostics with
+`NR_ISAC_CUDA_FAMILY_BENCHMARK_MAX_MS`).
 
 `sensing.num_ues` is one variable with the supported range **1 through 4**. It does not reduce the
 number of UEs in a scenario; it records and validates the deployment count while the existing
