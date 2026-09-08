@@ -63,6 +63,8 @@
  * read the SAME counter rather than rebuild one from the wrapping frame number. */
 extern _Atomic long nr_ue_diag_producer_absolute_slot;
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_data_aided.h"      // shared re-encode + Ĥ=Y/X submit
+#include "nr_pdcch_ul_discovery.h"
+#include <pthread.h>
 #include "PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.h" // passive UPLINK PUSCH receive census
 #include "PHY/NR_UE_TRANSPORT/nr_pusch_passive_monitor_rt.h" // UL grant book
 #include "nfapi/open-nFAPI/nfapi/public_inc/fapi_nr_ue_constants.h" // FAPI_NR_CCE_REG_MAPPING_TYPE_*
@@ -414,6 +416,32 @@ typedef struct {
   const c16_t *e_rx;
   uint8_t      L;
 } nr_pdcch_autodiscover_cand_t;
+/* UL length evidence is independent of both the DL sweep and field interpretation. */
+typedef struct {
+  const nr_pdcch_autodiscover_cand_t *cand;
+  int count;
+  uint16_t rnti, scrambling_rnti, dmrs_id;
+} ul_length_ctx_t;
+static bool ul_length_score(int len, int trial, uint16_t *rnti, uint32_t *hash, void *opaque)
+{
+  const ul_length_ctx_t *ctx=opaque;
+  const nr_pdcch_autodiscover_cand_t *c=&ctx->cand[trial%ctx->count];
+  int16_t llr[16*108];
+  nr_pdcch_unscrambling((c16_t *)c->e_rx,ctx->scrambling_rnti,c->L*108,ctx->dmrs_id,llr);
+  nr_pdcch_blind_ul_result_t out;
+  /* Use a confirmed RNTI, not a DL-calibrated plausibility false-alarm floor. */
+  if(!nr_pdcch_blind_decode_raw_01(llr,c->L,len,ctx->rnti,ctx->rnti,&out)) return false;
+  *rnti=out.rnti;
+  *hash=(uint32_t)out.raw_payload ^ (uint32_t)(out.raw_payload>>32);
+  return true;
+}
+static nr_pdcch_dci_length_sweep_state_t ul_length_state;
+static int ul_discovered_length;
+static bool ul_length_exhausted;
+static uint16_t ul_length_rnti;
+static uint64_t ul_geometry;
+static pthread_mutex_t ul_length_lock=PTHREAD_MUTEX_INITIALIZER;
+
 
 typedef struct {
   const nr_pdcch_autodiscover_cand_t *cand;
@@ -518,6 +546,7 @@ typedef struct {
   /* UPLINK. A separate flag rather than a third value of `format`, so that no existing switch or
      comparison over nr_blind_dci_format_t silently acquires a new reachable case -- the DL path
      must be unable to see this task kind at all. */
+  bool         ul_auto; // raw decode; sequential controller interprets the CRC-verified bits
   uint8_t      ul_scan; // 1 = interpret this candidate as DCI 0_1; `format` is then meaningless
   const nr_pdcch_blind_ul_opts_t *ul_opts;
   nr_pdcch_blind_ul_result_t ul_out; // OUTPUT when ul_scan
@@ -534,8 +563,8 @@ static void nr_pdcch_blind_cand_worker_body(nr_pdcch_blind_cand_task_t *t)
   int16_t tmp_e[16 * 108];
   nr_pdcch_unscrambling((c16_t *)t->e_rx, t->scrambling_rnti, (uint32_t)(t->L * 108), t->dmrs_scrambling_id, tmp_e);
   if (t->ul_scan) {
-    t->ok = nr_pdcch_blind_decode_and_extract_01(tmp_e, t->L, t->dci_length, t->ul_opts, t->rnti_min, t->rnti_max,
-                                                 &t->ul_out);
+    t->ok = nr_pdcch_blind_decode_01_mode(t->ul_auto,tmp_e,t->L,t->dci_length,t->ul_opts,
+                                          t->rnti_min,t->rnti_max,&t->ul_out);
   } else if (t->format == NR_BLIND_DCI_FORMAT_1_0) {
     t->ok = nr_pdcch_blind_decode_and_extract_10(tmp_e, t->L, t->dci_length, t->dci10_ctx, t->rnti_min, t->rnti_max,
                                                  t->extract_opts, &t->out);
@@ -1377,6 +1406,59 @@ void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_pr
       }
     }
   }
+
+  /* full_auto=0 never feeds a search or replaces a manual UL option/length.
+   * Auto has no silent fallback: unresolved searches do not emit guessed grants. */
+  bool ul_ready=false;
+  pthread_mutex_lock(&ul_length_lock);
+  uint64_t geom=UINT64_C(1469598103934665603);
+  const int geometry_fields[]={cfg->bwp_start,cfg->bwp_size,cfg->coreset_rb_offset,
+      cfg->coreset_freq_domain,cfg->coreset_duration,cfg->coreset_reg_bundle_size,
+      cfg->coreset_interleaver_size,cfg->coreset_shift_index,cfg->ul.phy_cell_id,
+      rel15->coreset.scrambling_rnti,rel15->coreset.pdcch_dmrs_scrambling_id};
+  for(unsigned i=0;i<sizeof(geometry_fields)/sizeof(geometry_fields[0]);++i)
+    geom=(geom^(uint32_t)geometry_fields[i])*UINT64_C(1099511628211);
+  if(!cfg->dl_full_auto || !scan_01 || !boot_rnti || boot_rnti!=ul_length_rnti || geom!=ul_geometry) {
+    nr_pdcch_dci_length_sweep_reset(&ul_length_state);
+    ul_discovered_length=0; ul_length_exhausted=false;
+    nr_pdcch_ul_discovery_reset();
+    ul_length_rnti=boot_rnti; ul_geometry=geom;
+  }
+  if(cfg->dl_full_auto && scan_01 && boot_rnti && (!cfg->autodiscover || nr_pdcch_blind_monitor_autodiscover_done())) {
+    if(!ul_discovered_length && !ul_length_exhausted) {
+      nr_pdcch_autodiscover_cand_t candidates[64];
+      int count=0, offset=0;
+      for(int c=0;c<rel15->number_of_candidates && count<64;++c) {
+        const int L=rel15->L[c];
+        candidates[count++]=(nr_pdcch_autodiscover_cand_t){.e_rx=&pdcch_e_rx[offset],.L=L};
+        offset+=NR_PDCCH_BLIND_RE_PER_RB_OUT_DMRS*L*6;
+      }
+      if(count) {
+        ul_length_ctx_t ctx={.cand=candidates,.count=count,.rnti=boot_rnti,
+                            .scrambling_rnti=rel15->coreset.scrambling_rnti,
+                            .dmrs_id=rel15->coreset.pdcch_dmrs_scrambling_id};
+        const int found=nr_pdcch_dci_length_sweep_feed(&ul_length_state,ul_length_score,&ctx,
+                                                     count,30,63,boot_rnti);
+        /* A single matching decode cannot rule out a degenerate polar fixed point.
+         * Require distinct UL payloads before trusting the shared engine's shortcut. */
+        int supported_lengths=0;
+        for(int len=30;len<=63;++len)
+          if(ul_length_state.n_distinct[len]>1 && ul_length_state.bootstrap_hits[len]>=3)
+            ++supported_lengths;
+        if(found>0 && supported_lengths==1 && ul_length_state.n_distinct[found]>1 &&
+           ul_length_state.bootstrap_hits[found]>=3) {
+          ul_discovered_length=found;
+          LOG_A(PHY,"UL automatic DCI length locked: %d rnti=0x%x\n",found,boot_rnti);
+        } else if(ul_length_state.occasions_fed>=AUTODISCOVER_LENGTH_SWEEP_MAX_OCCASIONS) {
+          ul_length_exhausted=true;
+          LOG_W(PHY,"UL automatic length unresolved after %d occasions\n",ul_length_state.occasions_fed);
+        }
+      }
+    }
+    ul_ready=ul_discovered_length>0;
+    if(ul_ready) dci01_length=ul_discovered_length;
+  }
+  pthread_mutex_unlock(&ul_length_lock);
   const uint64_t btim_t_pre = btim_on ? btim_now() : 0;
   {
     int e_rx_cand_idx = 0;
@@ -1532,11 +1614,16 @@ constdiag_done:;
         cand_task[nof_tasks].dci10_ctx  = &dci10_ctx;
         nof_tasks++;
       }
-      if (scan_01 && nof_tasks < (int)(sizeof(cand_task) / sizeof(cand_task[0]))) {
+      if (scan_01 && (!cfg->dl_full_auto || ul_ready) && nof_tasks < (int)(sizeof(cand_task) / sizeof(cand_task[0]))) {
         cand_task[nof_tasks]            = base_task;
         cand_task[nof_tasks].dci_length = dci01_length;
         cand_task[nof_tasks].ul_scan    = 1;
         cand_task[nof_tasks].ul_opts    = &cfg->ul;
+        cand_task[nof_tasks].ul_auto    = cfg->dl_full_auto != 0;
+        if(cfg->dl_full_auto) {
+          cand_task[nof_tasks].rnti_min=boot_rnti;
+          cand_task[nof_tasks].rnti_max=boot_rnti;
+        }
         nof_tasks++;
       }
       e_rx_cand_idx += n_re_cand;
@@ -1591,6 +1678,12 @@ constdiag_done:;
     /* ---- UPLINK candidates are handled here and nothing below runs for them: every line after
      * this point reads a DL result and would misinterpret a UL one. ---- */
     if (cand_task[ti].ul_scan) {
+      if(cand_task[ti].ok && cand_task[ti].ul_auto) {
+        nr_pdcch_blind_ul_result_t discovered;
+        cand_task[ti].ok=nr_pdcch_ul_discovery_grant(&cfg->ul,dci01_length,boot_rnti,
+                                                    cand_task[ti].ul_out.raw_payload,&discovered);
+        if(cand_task[ti].ok) cand_task[ti].ul_out=discovered;
+      }
       const nr_pdcch_blind_ul_result_t *u = &cand_task[ti].ul_out;
       if (cand_task[ti].ok) {
         g_ul_accepts++;

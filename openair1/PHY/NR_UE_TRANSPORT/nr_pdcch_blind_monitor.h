@@ -513,6 +513,11 @@ typedef struct {
   uint16_t crc_rnti;         ///< CRC-recovered RNTI (NOT range-checked; see `rnti` for the checked one)
   uint16_t mismatched_bits;  ///< re-encode-vs-LLR-polarity false-detection measure (as the DL path)
 
+  int width_hyp_class;       ///< -1 when no width search owns this grant
+  int interp_hyp_class;      ///< -1 when no interpretation search owns this grant
+  uint64_t hyp_generation;   ///< reject feedback from an earlier discovery context
+  uint8_t carrier_indicator, ul_sul_indicator; ///< preserve carrier identity for search equivalence
+
   // ---- valid only when plausible ----
   uint16_t rnti;             ///< CRC-recovered RNTI, range-checked
   uint8_t  ul_dci_format;    ///< nr_blind_ul_dci_format_t
@@ -633,6 +638,19 @@ typedef struct {
 /// the per-field widths are wrong and every field after the frequency-domain assignment is read
 /// from the wrong offset. Returns 0 when opts is NULL or bwp_size < 1.
 uint16_t nr_pdcch_blind_dci01_size(const nr_pdcch_blind_ul_opts_t* opts);
+
+bool nr_pdcch_blind_decode_01_mode(bool automatic, const int16_t *llr, uint8_t aggregation_level,
+                                   uint16_t dci_length, const nr_pdcch_blind_ul_opts_t *opts,
+                                   uint16_t rnti_min, uint16_t rnti_max,
+                                   nr_pdcch_blind_ul_result_t *out);
+
+/* Full CRC/UL-identifier recovery, independent of field widths and PUSCH semantics.
+ * Success is raw-bit evidence, not a usable grant. */
+bool nr_pdcch_blind_decode_raw_01(const int16_t *llr, uint8_t aggregation_level,
+                                uint16_t dci_length, uint16_t rnti_min, uint16_t rnti_max,
+                                nr_pdcch_blind_ul_result_t *out);
+bool nr_pdcch_blind_extract_01(uint64_t payload, uint16_t dci_length, uint16_t rnti,
+                             const nr_pdcch_blind_ul_opts_t *opts, nr_pdcch_blind_ul_result_t *out);
 
 /**
  * @brief Decode one PDCCH candidate blindly as DCI format 0_1 and extract its PUSCH grant.

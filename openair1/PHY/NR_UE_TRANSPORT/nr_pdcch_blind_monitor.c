@@ -1373,7 +1373,9 @@ void nr_pdcch_blind_monitor_init(void)
         "Default 0 -- the DEFAULT behaviour is already 'manual conf, auto-extracted gNB values': "
         "CORESET geometry, dci_length and live RNTIs are self-discovered whenever autodiscover=1 "
         "regardless of this flag, only the payload FIELD LAYOUT stays human-supplied until this is "
-        "set. This is also where UL payload-interpretation auto mode will attach once it exists.",
+        "set. For UL, 0 keeps the manual DCI length/widths/TDA/DM-RS settings; 1 enables the "
+        "experimental independent UL length, field-width and interpretation searches. Unresolved "
+        "or oversized UL searches refuse grants, never silently fall back to manual settings.",
         0, .iptr = &g_cfg.dl_full_auto, .defintval = 0, TYPE_INT, 0},
       {"pdcch_blind_monitor_dci10",
         "DCI format 1_0 scanning; scan[:ss_type[:n_rb_riv[:rb_offset[:length_override[:class_mask"
@@ -2913,20 +2915,32 @@ static bool blind_ul_finish(const nr_pdcch_blind_ul_opts_t* opts,
   return true;
 }
 
-bool nr_pdcch_blind_decode_and_extract_01(const int16_t* llr,
+bool nr_pdcch_blind_decode_01_mode(bool automatic, const int16_t *llr, uint8_t aggregation_level,
+                                   uint16_t dci_length, const nr_pdcch_blind_ul_opts_t *opts,
+                                   uint16_t rnti_min, uint16_t rnti_max,
+                                   nr_pdcch_blind_ul_result_t *out)
+{
+  return automatic ? nr_pdcch_blind_decode_raw_01(llr,aggregation_level,dci_length,rnti_min,rnti_max,out)
+                   : nr_pdcch_blind_decode_and_extract_01(llr,aggregation_level,dci_length,opts,rnti_min,rnti_max,out);
+}
+
+bool nr_pdcch_blind_decode_raw_01(const int16_t* llr,
                                           uint8_t        aggregation_level,
                                           uint16_t       dci_length,
-                                          const nr_pdcch_blind_ul_opts_t* opts,
                                           uint16_t       rnti_min,
                                           uint16_t       rnti_max,
                                           nr_pdcch_blind_ul_result_t* out)
 {
+  if (!out) return false;
   memset(out, 0, sizeof(*out));
+  out->width_hyp_class = out->interp_hyp_class = -1;
   out->plausible      = false;
   out->ul_dci_format  = NR_BLIND_UL_DCI_FORMAT_0_1;
   out->dci_length     = dci_length;
 
-  if (opts == NULL || dci_length == 0 || dci_length > 63 || opts->bwp_size < 1) {
+  if (!llr || dci_length == 0 || dci_length > 63 || rnti_min == 0 || rnti_min > rnti_max ||
+      (aggregation_level != 1 && aggregation_level != 2 && aggregation_level != 4 &&
+       aggregation_level != 8 && aggregation_level != 16)) {
     out->reject_reason = "invalid dci_length/opts argument";
     return false;
   }
@@ -2948,6 +2962,41 @@ bool nr_pdcch_blind_decode_and_extract_01(const int16_t* llr,
   out->rnti = (uint16_t)crc;
   out->mismatched_bits = blind_mismatched_bits(llr, dci_estimation, crc, aggregation_level, dci_length);
 
+  if ((out->raw_payload >> (dci_length - 1)) & 1) {
+    out->reject_reason = "format indicator=1 (DL assignment, not an UL grant)";
+    return false;
+  }
+  return true;
+}
+
+bool nr_pdcch_blind_decode_and_extract_01(const int16_t *llr, uint8_t aggregation_level,
+                                        uint16_t dci_length, const nr_pdcch_blind_ul_opts_t *opts,
+                                        uint16_t rnti_min, uint16_t rnti_max,
+                                        nr_pdcch_blind_ul_result_t *out)
+{
+  if (!nr_pdcch_blind_decode_raw_01(llr, aggregation_level, dci_length, rnti_min, rnti_max, out))
+    return false;
+  const uint16_t mismatch = out->mismatched_bits;
+  const bool ok = nr_pdcch_blind_extract_01(out->raw_payload, dci_length, out->rnti, opts, out);
+  out->mismatched_bits = mismatch;
+  return ok;
+}
+
+bool nr_pdcch_blind_extract_01(uint64_t payload, uint16_t dci_length, uint16_t rnti,
+                             const nr_pdcch_blind_ul_opts_t *opts, nr_pdcch_blind_ul_result_t *out)
+{
+  if (!out) return false;
+  memset(out, 0, sizeof(*out));
+  out->width_hyp_class = out->interp_hyp_class = -1;
+  out->raw_payload = payload;
+  out->dci_length = dci_length;
+  out->rnti = out->crc_rnti = rnti;
+  out->ul_dci_format = NR_BLIND_UL_DCI_FORMAT_0_1;
+  if (!opts || opts->bwp_size < 1 || opts->bwp_size > 275 || opts->tda_count < 0 ||
+      opts->tda_count > 16 || dci_length == 0 || dci_length > 63) {
+    out->reject_reason = "invalid UL payload/opts";
+    return false;
+  }
   const blind_ul_field_bits_t f = blind_ul_field_bits(opts);
   if (nr_pdcch_blind_dci01_size(opts) > dci_length) {
     out->reject_reason = "configured UL DCI field widths exceed dci_length";
@@ -2959,11 +3008,10 @@ bool nr_pdcch_blind_decode_and_extract_01(const int16_t* llr,
   // the HARQ process before the carrier indicator, the packer emits the carrier indicator first).
   // Totals agree either way; OFFSETS follow the packer, and offsets are what a decoder needs. ----
   int            pos     = (int)dci_length;
-  const uint64_t payload = dci_estimation[0];
 
   const uint32_t format_indicator = read_field(payload, &pos, 1);
-  (void)read_field(payload, &pos, f.carrier_ind);
-  (void)read_field(payload, &pos, f.ul_sul);
+  out->carrier_indicator = read_field(payload, &pos, f.carrier_ind);
+  out->ul_sul_indicator = read_field(payload, &pos, f.ul_sul);
   const uint32_t bwp_indicator = read_field(payload, &pos, f.bwp_ind);
   const uint32_t riv           = read_field(payload, &pos, f.riv);
   const uint32_t tda_idx       = read_field(payload, &pos, f.tda);
@@ -3052,6 +3100,7 @@ bool nr_pdcch_blind_extract_00(uint64_t       payload,
                                nr_pdcch_blind_ul_result_t* out)
 {
   memset(out, 0, sizeof(*out));
+  out->width_hyp_class = out->interp_hyp_class = -1;
   out->plausible     = false;
   out->ul_dci_format = NR_BLIND_UL_DCI_FORMAT_0_0;
   out->dci_length    = dci_length;
@@ -3123,4 +3172,3 @@ bool nr_pdcch_blind_extract_00(uint64_t       payload,
   out->nscid = 0; // TS 38.211 6.4.1.1.1: n_SCID = 0 for a DCI 0_0 scheduled PUSCH
   return true;
 }
-

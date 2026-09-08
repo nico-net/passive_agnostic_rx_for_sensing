@@ -1,3 +1,4 @@
+#include "nr_pdcch_ul_discovery.h"
 /*
  * Licensed to the OpenAirInterface (OAI) Software Alliance under one or more
  * contributor license agreements.  See the NOTICE file distributed with
@@ -120,6 +121,10 @@ static void *nr_pusch_passive_queue_thread(void *arg)
     nr_pusch_passive_out_t out;
     nr_pusch_passive_decode(ue, idx, (uint32_t)job.frame_rx, (uint8_t)job.nr_slot_rx, &job.grant,
                             job.ta_offset_samples, (uint64_t)job.absolute_slot, job.cfr_only, job.fo_hz, &out);
+    if(!job.cfr_only && (out.status==NR_PUSCH_PASSIVE_OK ||
+        out.status==NR_PUSCH_PASSIVE_CRC_FAIL || out.status==NR_PUSCH_PASSIVE_ZERO_TB))
+      nr_pdcch_ul_discovery_feedback(&job.grant,out.status==NR_PUSCH_PASSIVE_OK);
+
 
     if (out.status != NR_PUSCH_PASSIVE_UNSUPPORTED && out.status != NR_PUSCH_PASSIVE_ERROR) {
       atomic_fetch_add_explicit(&g_decoded, 1, memory_order_relaxed);

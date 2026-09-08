@@ -53,6 +53,8 @@ extern "C" {
 #include "openair2/LAYER2/NR_MAC_COMMON/nr_mac_common.h" // NR_tda_info_t, get_dl_tda_info(), TYPE_C_RNTI_
 #include "nr_pdcch_blind_monitor.h"
 #include "nr_pdsch_config_sweep.h"
+#include "nr_pdcch_ul_field_sweep.h"
+#include "nr_pdcch_ul_discovery.h"
 #include "nr_pdcch_blind_monitor_rt.h"
 #include "executables/softmodem-common.h"
 }
@@ -2226,6 +2228,113 @@ TEST(TechniqueD, AWrongHypothesisDoesNotReproduceTheRealMask) {
   EXPECT_NE(m_addpos, 0x884);
   const int32_t m_tda = nr_pdcch_blind_dmrs_mask(0, 7 /* L=7 */, 1, 0, 2, 1);
   EXPECT_NE(m_tda, 0x884);
+}
+
+
+TEST_F(BlindPdcchTest, UlAutoFlagSeparatesRawDiscoveryFromManualInterpretation) {
+  auto configured=LiveUlOpts();
+  UlGroundTruth gt;
+  gt.riv=1200; gt.mcs=10; gt.ndi=1;
+  const auto len=nr_pdcch_blind_dci01_size(&configured);
+  auto llr=EncodeToLLR(PackUlPayload(gt,configured),gt.rnti,len,kAggregationLevel,40.0,rng_);
+  nr_pdcch_blind_ul_result_t manual,auto_raw;
+  ASSERT_TRUE(nr_pdcch_blind_decode_01_mode(false,llr.data(),kAggregationLevel,len,
+                                          &configured,gt.rnti,gt.rnti,&manual));
+  EXPECT_TRUE(manual.plausible);
+  EXPECT_EQ(manual.width_hyp_class,-1);
+  EXPECT_EQ(manual.interp_hyp_class,-1);
+  EXPECT_EQ(manual.hyp_generation,0u);
+  /* Unknown interpretation deliberately wrong: a real CRC still identifies the length. */
+  configured.tda_count=16;
+  configured.bwp_size=0;
+  ASSERT_TRUE(nr_pdcch_blind_decode_01_mode(true,llr.data(),kAggregationLevel,len,
+                                          &configured,gt.rnti,gt.rnti,&auto_raw));
+  EXPECT_FALSE(auto_raw.plausible); // raw evidence is never a claimed usable grant
+  EXPECT_EQ(auto_raw.raw_payload,manual.raw_payload);
+  EXPECT_EQ(auto_raw.rnti,gt.rnti);
+  EXPECT_FALSE(nr_pdcch_blind_decode_01_mode(false,llr.data(),kAggregationLevel,len,
+                                           &configured,gt.rnti,gt.rnti,&manual));
+}
+TEST_F(BlindPdcchTest, UlRawOracleRejectsDlAndWrongRnti) {
+  GroundTruth dl;
+  auto dl_len=nr_pdcch_blind_dci_size(dl.bwp_size);
+  auto dlllr=EncodeToLLR(PackPayload(dl,RivBitsFor(dl.bwp_size)),dl.rnti,dl_len,
+                         kAggregationLevel,40.0,rng_);
+  nr_pdcch_blind_ul_result_t out;
+  EXPECT_FALSE(nr_pdcch_blind_decode_raw_01(dlllr.data(),kAggregationLevel,dl_len,dl.rnti,dl.rnti,&out));
+  auto opts=LiveUlOpts();
+  UlGroundTruth ul;
+  auto len=nr_pdcch_blind_dci01_size(&opts);
+  auto llr=EncodeToLLR(PackUlPayload(ul,opts),ul.rnti,len,kAggregationLevel,40.0,rng_);
+  EXPECT_FALSE(nr_pdcch_blind_decode_raw_01(llr.data(),kAggregationLevel,len,ul.rnti+1,ul.rnti+1,&out));
+  EXPECT_FALSE(nr_pdcch_blind_decode_raw_01(llr.data(),3,len,ul.rnti,ul.rnti,&out));
+}
+
+
+TEST_F(BlindPdcchTest, UlWidthEquivalenceUsesActualExtractedGrantsAcrossPayloads) {
+  auto opts=LiveUlOpts();
+  const uint16_t len=nr_pdcch_blind_dci01_size(&opts);
+  std::vector<nr_hyp_t> raw(NR_HYP_SWEEP_MAX_RAW);
+  const int count=nr_pdcch_ul_field_sweep_generate(&opts,len,raw.data(),raw.size());
+  ASSERT_EQ(count,87);
+  struct Context { nr_pdcch_blind_ul_opts_t opts; uint16_t len; } context{opts,len};
+  std::vector<uint64_t> payloads;
+  for(int i=0;i<8;++i) {
+    UlGroundTruth gt; gt.riv=273*(i+1); gt.mcs=i+2; gt.harq_pid=i; gt.ndi=i%2;
+    payloads.push_back(PackUlPayload(gt,opts));
+  }
+  const void *samples[8];
+  for(int i=0;i<8;++i) samples[i]=&payloads[i];
+  auto equivalent=[](const nr_hyp_t *a,const nr_hyp_t *b,const void *sample,void *opaque)->bool {
+    auto *c=static_cast<Context*>(opaque);
+    auto oa=c->opts,ob=c->opts;
+    nr_pdcch_ul_field_sweep_apply(a,&oa); nr_pdcch_ul_field_sweep_apply(b,&ob);
+    nr_pdcch_blind_ul_result_t ga,gb;
+    uint64_t p=*static_cast<const uint64_t*>(sample);
+    if(!nr_pdcch_blind_extract_01(p,c->len,0x1234,&oa,&ga) ||
+       !nr_pdcch_blind_extract_01(p,c->len,0x1234,&ob,&gb)) return false;
+    return !memcmp(&ga,&gb,sizeof(ga));
+  };
+  nr_hyp_sweep_state_t st;
+  int classes=nr_hyp_sweep_init(&st,raw.data(),count,nullptr,nullptr,equivalent,samples,8,&context);
+  EXPECT_TRUE(classes>0 || classes==NR_HYP_SWEEP_CLASS_OVERFLOW);
+  if(classes>0) {
+    for(int a=0;a<count;++a)
+      for(int b=0;b<a;++b)
+        if(st.class_of_raw[a]==st.class_of_raw[b])
+          for(auto sample:samples) { EXPECT_TRUE(equivalent(&raw[a],&raw[b],sample,&context)); }
+  } else { EXPECT_EQ(nr_hyp_sweep_winner(&st),-1); }
+  printf("UL real-extractor equivalence: raw=%d classes_or_refusal=%d samples=8\n",count,classes);
+}
+
+
+TEST_F(BlindPdcchTest, UlControllerAttributesFeedbackAndRejectsPreviousGeneration) {
+  auto opts=LiveUlOpts();
+  uint16_t len=nr_pdcch_blind_dci01_size(&opts);
+  auto prime=[&](nr_pdcch_blind_ul_result_t *out)->bool {
+    bool got=false;
+    for(int i=0;i<8;++i) {
+      UlGroundTruth gt; gt.riv=273*(i+1); gt.mcs=i+2; gt.harq_pid=i; gt.ndi=i%2;
+      got=nr_pdcch_ul_discovery_grant(&opts,len,gt.rnti,PackUlPayload(gt,opts),out);
+    }
+    return got;
+  };
+  nr_pdcch_ul_discovery_reset();
+  nr_pdcch_blind_ul_result_t old_grant{},new_grant{};
+  ASSERT_TRUE(prime(&old_grant));
+  ASSERT_GE(old_grant.width_hyp_class,0);
+  ASSERT_GT(old_grant.hyp_generation,0u);
+  EXPECT_EQ(nr_pdcch_ul_discovery_snapshot().width_trials,0u);
+  nr_pdcch_ul_discovery_feedback(&old_grant,true);
+  EXPECT_EQ(nr_pdcch_ul_discovery_snapshot().width_trials,1u);
+  nr_pdcch_ul_discovery_reset();
+  ASSERT_TRUE(prime(&new_grant));
+  EXPECT_NE(old_grant.hyp_generation,new_grant.hyp_generation);
+  nr_pdcch_ul_discovery_feedback(&old_grant,true);
+  EXPECT_EQ(nr_pdcch_ul_discovery_snapshot().width_trials,0u);
+  nr_pdcch_ul_discovery_feedback(&new_grant,false);
+  EXPECT_EQ(nr_pdcch_ul_discovery_snapshot().width_trials,1u);
+  nr_pdcch_ul_discovery_reset();
 }
 
 int main(int argc, char** argv)

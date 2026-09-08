@@ -192,3 +192,21 @@ int main(int argc, char** argv)
   testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();
 }
+
+static bool independent_length(int len,int trial,uint16_t *rnti,uint32_t *hash,void *ctx) {
+  if(len!=*static_cast<int*>(ctx)) return false;
+  *rnti=0x1234; *hash=trial; return true;
+}
+TEST(NrPdcchDciLengthSweep, IndependentStatesAndReset) {
+  nr_pdcch_dci_length_sweep_state_t dl{},ul{};
+  int dl_length=47,ul_length=43;
+  nr_pdcch_dci_length_sweep_feed(&dl,independent_length,&dl_length,20,30,63,0x1234);
+  EXPECT_EQ(ul.occasions_fed,0);
+  EXPECT_EQ(nr_pdcch_dci_length_sweep_feed(&ul,independent_length,&ul_length,20,30,63,0x1234),43);
+  const auto saved=dl;
+  nr_pdcch_dci_length_sweep_reset(&ul);
+  EXPECT_EQ(ul.occasions_fed,0);
+  EXPECT_EQ(dl.occasions_fed,saved.occasions_fed);
+  EXPECT_EQ(dl.passes[47],saved.passes[47]);
+  EXPECT_EQ(dl.passes[43],0);
+}

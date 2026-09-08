@@ -1,3 +1,4 @@
+#include "nr_pdcch_ul_discovery.h"
 #include <stdatomic.h>
 #include <string.h>
 #include <pthread.h>
@@ -174,6 +175,10 @@ void nr_pusch_passive_monitor_process(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_
   }
   nr_pusch_passive_decode(ue, 0, proc->frame_rx, proc->nr_slot_rx, &g, ta, (uint64_t)abs_slot,
                           cfg->ul_pusch_decode == 2, fo_hz, &out);
+    if(!(cfg->ul_pusch_decode == 2) && (out.status==NR_PUSCH_PASSIVE_OK ||
+        out.status==NR_PUSCH_PASSIVE_CRC_FAIL || out.status==NR_PUSCH_PASSIVE_ZERO_TB))
+      nr_pdcch_ul_discovery_feedback(&g,out.status==NR_PUSCH_PASSIVE_OK);
+
 
 }
 

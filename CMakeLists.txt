@@ -1101,7 +1101,9 @@ if(ENABLE_ISAC_SENSING)
   add_library(NR_UE_ISAC ${NR_UE_ISAC_SRC})
   message(STATUS "NR_UE_ISAC: sensing pipeline ENABLED")
 else()
-  add_library(NR_UE_ISAC ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/nr_isac_stub.c)
+  # The DL PBCH path calls this geometry helper even in receiver-only builds.
+  add_library(NR_UE_ISAC ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/nr_isac_stub.c
+                        ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/nr_isac_ssb_axis.c)
   message(STATUS "NR_UE_ISAC: sensing pipeline DISABLED (no-op stub; passive receiver only)")
 endif()
 target_link_libraries(NR_UE_ISAC PRIVATE UTIL)
@@ -1446,7 +1448,7 @@ target_link_libraries(NR_L2_UE PRIVATE nr_nas)
 # executables (see the test_nr_pdcch_coreset_map/test_nr_pdcch_dci_length_sweep targets below) --
 # nothing wired them into any library nr-uesoftmodem links, so the first real (non-test) caller
 # failed at link time with "undefined reference" until they were added here.
-add_library(nr_pdcch_blind_monitor ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_rnti_bootstrap.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_coreset_map.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_dci_length_sweep.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_config_sweep.c)
+add_library(nr_pdcch_blind_monitor ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_rnti_bootstrap.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_coreset_map.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_dci_length_sweep.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_config_sweep.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_hyp_sweep.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_field_sweep.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_interp_sweep.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_discovery.c)
 target_include_directories(nr_pdcch_blind_monitor PRIVATE
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT
   ${NFAPI_DIR}/nfapi/public_inc
@@ -2368,6 +2370,13 @@ if(ENABLE_TESTS)
   # any live-air attempt. See nr_pdcch_blind_monitor.c's file-level comment for the reuse-vs-
   # duplication decisions and /home/sens/.claude/plans/zesty-baking-thompson.md for the design record.
   add_executable(test_nr_pdcch_blind_monitor ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_blind_monitor_test.cc ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/dci_nr.c ${OPENAIR1_DIR}/PHY/NR_REFSIG/refsig.c ${OPENAIR_DIR}/common/utils/ds/hashtable.c)
+  target_sources(test_nr_pdcch_blind_monitor PRIVATE
+    ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_ul_field_sweep_test.cc
+    ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_ul_interp_sweep_test.cc)
+  add_custom_target(test_nr_pdcch_ul_field_sweep DEPENDS test_nr_pdcch_blind_monitor)
+  add_custom_target(test_nr_pdcch_ul_interp_sweep DEPENDS test_nr_pdcch_blind_monitor)
+  add_test(NAME test_nr_pdcch_ul_field_sweep COMMAND test_nr_pdcch_blind_monitor --gtest_filter=UlFieldSweep.*)
+  add_test(NAME test_nr_pdcch_ul_interp_sweep COMMAND test_nr_pdcch_blind_monitor --gtest_filter=UlInterpSweep.*)
   target_include_directories(test_nr_pdcch_blind_monitor PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT ${OPENAIR_DIR}/common/utils/ds)
   target_link_libraries(test_nr_pdcch_blind_monitor PRIVATE nr_pdcch_blind_monitor nr_common MAC_NR_COMMON polar crc_byte UTIL asn1_nr_rrc_hdrs asn1_lte_rrc_hdrs GTest::gtest)
   add_dependencies(tests test_nr_pdcch_blind_monitor)
@@ -2431,6 +2440,12 @@ if(ENABLE_TESTS)
   target_link_libraries(test_nr_pdcch_dci_length_sweep PRIVATE UTIL GTest::gtest)
   add_dependencies(tests test_nr_pdcch_dci_length_sweep)
   add_test(NAME test_nr_pdcch_dci_length_sweep COMMAND ./test_nr_pdcch_dci_length_sweep)
+  add_executable(test_nr_hyp_sweep ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_hyp_sweep_test.cc
+                                  ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_hyp_sweep.c)
+  target_include_directories(test_nr_hyp_sweep PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
+  target_link_libraries(test_nr_hyp_sweep PRIVATE UTIL GTest::gtest)
+  add_dependencies(tests test_nr_hyp_sweep)
+  add_test(NAME test_nr_hyp_sweep COMMAND ./test_nr_hyp_sweep)
 
   add_executable(test_nr_pdsch_config_sweep ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_pdsch_config_sweep_test.cc
                                             ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_config_sweep.c)

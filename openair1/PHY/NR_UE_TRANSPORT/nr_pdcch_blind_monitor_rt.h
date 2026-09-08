@@ -283,9 +283,10 @@ typedef struct {
    * project's own field solves got wrong silently (dmrs_TypeA_Position's enum-vs-symbol confusion,
    * the DCI field-width gap) and a human-verified value is safer until proven otherwise on a given
    * deployment. Set to 1 to let Technique D (TB-CRC-scored sweep) discover those too, overriding
-   * the hand-written values once it converges. UL payload interpretation has no Technique yet
-   * (see nr_pdcch_blind_extract_opts_t's UL section); this flag is where that work attaches when
-   * it exists, so a deployment need not learn a second flag name later. */
+   * the hand-written values once it converges. Also gates the experimental UL length/width/
+   * interpretation pipeline. Zero preserves the manual UL path; unresolved automatic searches
+   * do not fall back to manually configured values. The historical C member name is retained
+   * for compatibility with existing callers; the config key is pdcch_blind_monitor_full_auto. */
   int dl_full_auto;
 } nr_pdcch_blind_monitor_cfg_t;
 
