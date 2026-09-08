@@ -2069,7 +2069,7 @@ static void rfsimulator_end(openair0_device_t *device)
   clear_beam_queue(&s->beam_ctrl->rx, INT64_MAX);
   delete s->beam_ctrl;
   close(s->epollfd);
-  free(s);
+  delete s;
 }
 
 static void stopServer(openair0_device_t *device)
@@ -2107,7 +2107,11 @@ extern "C" __attribute__((__visibility__("default"))) int device_init(openair0_d
 {
   // to change the log level, use this on command line
   // --log_config.hw_log_level debug
-  rfsimulator_state_t *rfsimulator = static_cast<rfsimulator_state_t *>(calloc(sizeof(rfsimulator_state_t), 1));
+  // This state owns std::queue members (both the normal socket queues and the per-source
+  // passive-UL queues).  calloc leaves those C++ objects unconstructed, so the first relayed UL
+  // emplace dereferences a null deque map.  Value-initializing with new preserves zero defaults for
+  // scalar fields while running every queue constructor.
+  rfsimulator_state_t *rfsimulator = new rfsimulator_state_t{};
   // initialize channel simulation
   rfsimulator->ru_id = openair0_cfg->ru_id;
   rfsimulator->tx_num_channels = openair0_cfg->tx_num_channels;
