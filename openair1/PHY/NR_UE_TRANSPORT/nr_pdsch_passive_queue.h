@@ -59,6 +59,7 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include "nr_pdsch_config_sweep.h"
 
 #include "common/utils/bits.h" // freq_alloc_bitmap_t
 #include "PHY/defs_nr_UE.h"
@@ -101,10 +102,9 @@ typedef struct {
   /// FO (Hz) sampled on the RECEIVE thread with these samples; replayed by the consumer
   /// via nr_slot_fep_fo_override_hz. NAN would mean "read live", which is the bug.
   double fo_hz;
-  /// Technique D hypothesis this grant was extracted under, or -1. Carried in the JOB rather than
-  /// thread-local storage: the decode runs on a consumer thread, so a TLS value set by the producer
-  /// is not visible where the TB CRC becomes known, and the sweep would score the wrong hypothesis.
-  int sweep_idx;
+  /// Value-only RNTI/TDA/context-generation ticket; zero generation means manual/unscored.
+  /// Resets/evictions cannot redirect an old queued outcome into a new hypothesis context.
+  nr_pdsch_sweep_ticket_t sweep_ticket;
 } nr_pdsch_passive_job_t;
 
 /// Per-run census. Every field is a reason a job did NOT become a decode, so a shortfall in

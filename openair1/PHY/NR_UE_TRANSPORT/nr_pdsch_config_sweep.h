@@ -51,10 +51,12 @@ typedef struct {
   uint8_t tda_length;  ///< L: number of PDSCH symbols
   uint8_t dmrs_add_pos;///< dmrs-AdditionalPosition, 0..3
   uint8_t dmrs_max_len;///< maxLength, 1 or 2
+  uint16_t dmrs_mask; ///< validated effective mask, zero only in legacy pure tests
   uint8_t mcs_table;   ///< 0 = 64QAM, 1 = 256QAM, 2 = 64QAM-LowSE
 } nr_pdsch_cfg_hypothesis_t;
 
-#define NR_PDSCH_SWEEP_MAX_HYP 64
+#define NR_PDSCH_SWEEP_MAX_HYP 192
+#define NR_PDSCH_SWEEP_MAX_CONTEXTS (16 * 16)
 
 typedef struct {
   nr_pdsch_cfg_hypothesis_t hyp[NR_PDSCH_SWEEP_MAX_HYP];
@@ -65,9 +67,9 @@ typedef struct {
   int      winner;    ///< -1 until decided
 } nr_pdsch_config_sweep_state_t;
 
-/** Build the hypothesis set. `tda_count` comes from Technique C (the solved dci_length pins the
- * TDA field width, hence the list size), so the search is over the CONTENTS of a list whose LENGTH
- * is already known. Returns the number of hypotheses enumerated. */
+/** Build the complete supported mapping-A catalog for pure algorithm tests.
+ * Runtime uses init_legal() with the real cell DMRS table. TDA field width remains an
+ * extraction input: total DCI length alone does not determine it. */
 int nr_pdsch_config_sweep_init(nr_pdsch_config_sweep_state_t *st, int tda_count);
 
 /** Next hypothesis to try, round-robin. Returns its index and fills *out. */
@@ -80,12 +82,40 @@ int nr_pdsch_config_sweep_feed(nr_pdsch_config_sweep_state_t *st, int idx, bool 
 /** Winner, or -1 if undecided. */
 int nr_pdsch_config_sweep_winner(const nr_pdsch_config_sweep_state_t *st);
 
+typedef int32_t (*nr_pdsch_legality_fn_t)(int, int, int, int, int, int);
+/** Enumerates the complete catalog, excludes undefined masks, merges identical effective PDUs.
+ * The caller-owned pure state is not internally synchronized. */
+int nr_pdsch_config_sweep_init_legal(nr_pdsch_config_sweep_state_t *st, int tda_count,
+                                   int typeA, nr_pdsch_legality_fn_t legality);
+
+/** Value-only feedback identity. A zero generation is never scored. */
+typedef struct {
+  uint64_t generation;
+  uint16_t context_slot;
+  uint16_t rnti;
+  uint8_t tda_index;
+  int hypothesis;
+  bool settled; ///< this selection uses an already-converged context
+} nr_pdsch_sweep_ticket_t;
+
+/** Thread-safe per-(configuration,RNTI,TDA) controller. No allocation or decoder work under lock.
+ * Context exhaustion evicts the least recently selected context; stale queued feedback is ignored. */
+bool nr_pdsch_config_sweep_select(uint64_t configuration, uint16_t rnti, uint8_t tda_index,
+                                 int tda_count, int typeA, nr_pdsch_legality_fn_t legality,
+                                 nr_pdsch_sweep_ticket_t *ticket, nr_pdsch_cfg_hypothesis_t *out);
+/** Returns true exactly once on convergence; fills winner when supplied. */
+bool nr_pdsch_config_sweep_feedback(const nr_pdsch_sweep_ticket_t *ticket, bool crc_ok,
+                                   nr_pdsch_cfg_hypothesis_t *winner);
+void nr_pdsch_config_sweep_reset_all(void);
+/** Consistent snapshot for diagnostics/offline regression tests. */
+bool nr_pdsch_config_sweep_snapshot(const nr_pdsch_sweep_ticket_t *ticket,
+                                   nr_pdsch_config_sweep_state_t *out);
+
 /* ---- Process-wide singleton -------------------------------------------------------------------
  * The hypothesis is chosen on the PHY receive thread and scored on a PDSCH consumer thread, i.e.
  * in two different translation units and two different threads, so the state cannot be a static in
  * either one. The functions above stay pure and unit-testable; these are the thin shared layer.
- * Counters are plain: a torn read costs at most one mis-attributed trial out of thousands, which is
- * far cheaper than serialising the decode path. */
+ * Legacy compatibility helpers below serialize access; production uses keyed tickets above. */
 void nr_pdsch_config_sweep_enable_global(int tda_count);
 int  nr_pdsch_config_sweep_next_global(nr_pdsch_cfg_hypothesis_t *out);
 int  nr_pdsch_config_sweep_feed_global(int idx, bool tb_crc_ok);

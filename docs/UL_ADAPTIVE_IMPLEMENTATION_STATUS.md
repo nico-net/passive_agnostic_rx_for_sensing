@@ -121,3 +121,10 @@ Never build on sens6 while nr-uesoftmodem captures are running.
   they provide no validation. The rebuilt equivalents each ran and passed.
 - Verification ran in the isolated local source snapshot because sens6 had active captures.
   No OTA run was started, stopped, or scored by this change.
+
+## DL follow-up
+
+The subsequent DL-only fixes on this branch are documented in
+[DL_ADAPTIVE_FIX_STATUS.md](DL_ADAPTIVE_FIX_STATUS.md). The initial UL implementation
+above is unchanged; the earlier statement that Technique D was untouched describes
+commit 770f19f6b6, not the current branch tip.

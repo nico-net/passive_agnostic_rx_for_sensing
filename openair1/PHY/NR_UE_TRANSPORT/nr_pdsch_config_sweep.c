@@ -17,6 +17,7 @@
 
 #include "nr_pdsch_config_sweep.h"
 #include <string.h>
+#include <pthread.h>
 
 /* Minimum trials before a hypothesis may be declared. At the measured working rate (~76 % TB CRC)
  * and a wrong-hypothesis rate of ~0, a few hundred trials is already overwhelming; this is set for
@@ -33,36 +34,53 @@
 
 int nr_pdsch_config_sweep_init(nr_pdsch_config_sweep_state_t *st, int tda_count)
 {
+  return nr_pdsch_config_sweep_init_legal(st, tda_count, 0, NULL);
+}
+
+int nr_pdsch_config_sweep_init_legal(nr_pdsch_config_sweep_state_t *st, int tda_count,
+                                   int typeA, nr_pdsch_legality_fn_t legality)
+{
   if (st == NULL) {
     return 0;
   }
   memset(st, 0, sizeof(*st));
   st->winner = -1;
-  (void)tda_count;  /* The list LENGTH is pinned by Technique C's dci_length; only the CONTENTS of
-                     * the entry actually referenced by the grants under test are searched here.
-                     * Sweeping every entry of a multi-entry list would need traffic that exercises
-                     * every index, which is not something a passive receiver can arrange. */
+  (void)tda_count; /* Contexts are isolated by the observed index; list width is not inferred here. */
 
-  /* TS 38.214 Table 5.1.2.1-1 shapes that a real deployment actually uses, plus this deployment's
-   * own observed S=1/L=13. Enumerated rather than swept exhaustively over (S, L): most (S, L)
-   * combinations are illegal for mapping type A (which requires S + L >= 2 and the DM-RS to fall
-   * inside the allocation), and an illegal entry is rejected before it ever reaches a decode, so
-   * spending trials on it wastes the round-robin budget. */
+  /* Supported mapping-A catalog. Enumerate all entries, never a deployment-biased prefix. */
   static const uint8_t kSL[][2] = {
       {1, 13}, {0, 14}, {2, 12}, {1, 12}, {0, 13}, {2, 10}, {1, 7}, {0, 7},
   };
   static const uint8_t kAddPos[] = {0, 1, 2, 3};
   static const uint8_t kMaxLen[] = {1, 2};
-  static const uint8_t kMcsTab[] = {1, 0, 2};  /* 256QAM first: this cell schedules MCS 24-25 */
+  static const uint8_t kMcsTab[] = {0, 1, 2};
 
   for (unsigned a = 0; a < sizeof(kSL) / sizeof(kSL[0]); a++) {
     for (unsigned b = 0; b < sizeof(kAddPos); b++) {
       for (unsigned c = 0; c < sizeof(kMaxLen); c++) {
         for (unsigned d = 0; d < sizeof(kMcsTab); d++) {
+          int32_t mask = 0;
+          if (legality) {
+            mask = legality(typeA, kSL[a][1], kSL[a][0], 0, kAddPos[b], kMaxLen[c]);
+            if (mask <= 0)
+              continue;
+            bool equivalent = false;
+            for (int i = 0; i < st->n_hyp; ++i) {
+              const nr_pdsch_cfg_hypothesis_t *h = &st->hyp[i];
+              if (h->tda_start == kSL[a][0] && h->tda_length == kSL[a][1]
+                  && h->dmrs_mask == mask && h->mcs_table == kMcsTab[d])
+                equivalent = true;
+            }
+            if (equivalent)
+              continue;
+          }
+          /* Fail closed if the catalog ever grows beyond its declared bound. */
           if (st->n_hyp >= NR_PDSCH_SWEEP_MAX_HYP) {
-            return st->n_hyp;
+            st->n_hyp = 0;
+            return 0;
           }
           nr_pdsch_cfg_hypothesis_t *h = &st->hyp[st->n_hyp];
+          h->dmrs_mask = (uint16_t)mask;
           h->tda_start    = kSL[a][0];
           h->tda_length   = kSL[a][1];
           h->dmrs_add_pos = kAddPos[b];
@@ -140,37 +158,148 @@ int nr_pdsch_config_sweep_winner(const nr_pdsch_config_sweep_state_t *st)
   return (st != NULL) ? st->winner : -1;
 }
 
-/* ---- Process-wide singleton (see the header) --------------------------------------------------- */
-static nr_pdsch_config_sweep_state_t g_sweep;
-static int g_sweep_on = 0;
+/* All shared accesses, including winner publication and reset, use one short mutex. */
+static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
+typedef struct {
+  uint64_t configuration, generation, touched;
+  uint16_t rnti;
+  uint8_t tda;
+  int tda_count, typeA;
+  bool reported;
+  nr_pdsch_config_sweep_state_t state;
+} sweep_context_t;
+static sweep_context_t g_contexts[NR_PDSCH_SWEEP_MAX_CONTEXTS];
+static uint64_t g_generation, g_clock;
 
+static sweep_context_t *ticket_context(const nr_pdsch_sweep_ticket_t *t)
+{
+  if (!t || !t->generation || t->context_slot >= NR_PDSCH_SWEEP_MAX_CONTEXTS)
+    return NULL;
+  sweep_context_t *c = &g_contexts[t->context_slot];
+  return c->generation == t->generation && c->rnti == t->rnti && c->tda == t->tda_index
+         && t->hypothesis >= 0 && t->hypothesis < c->state.n_hyp ? c : NULL;
+}
+
+bool nr_pdsch_config_sweep_select(uint64_t configuration, uint16_t rnti, uint8_t tda_index,
+                                 int tda_count, int typeA, nr_pdsch_legality_fn_t legality,
+                                 nr_pdsch_sweep_ticket_t *ticket, nr_pdsch_cfg_hypothesis_t *out)
+{
+  if (ticket)
+    memset(ticket, 0, sizeof(*ticket));
+  if (!ticket || !out || !legality || !rnti || tda_index >= 16
+      || tda_count < 0 || tda_count > 16 || (tda_count && tda_index >= tda_count))
+    return false;
+  pthread_mutex_lock(&g_lock);
+  int found = -1, victim = 0;
+  for (int i = 0; i < NR_PDSCH_SWEEP_MAX_CONTEXTS; ++i) {
+    sweep_context_t *c = &g_contexts[i];
+    if (c->generation && c->configuration == configuration && c->rnti == rnti
+        && c->tda == tda_index && c->tda_count == tda_count && c->typeA == typeA) {
+      found = i;
+      break;
+    }
+    if (c->touched < g_contexts[victim].touched)
+      victim = i;
+  }
+  if (found < 0) {
+    found = victim;
+    sweep_context_t *c = &g_contexts[found];
+    memset(c, 0, sizeof(*c));
+    c->configuration = configuration;
+    c->generation = ++g_generation;
+    c->rnti = rnti;
+    c->tda = tda_index;
+    c->tda_count = tda_count;
+    c->typeA = typeA;
+    nr_pdsch_config_sweep_init_legal(&c->state, tda_count, typeA, legality);
+  }
+  sweep_context_t *c = &g_contexts[found];
+  c->touched = ++g_clock;
+  const int h = nr_pdsch_config_sweep_next(&c->state, out);
+  if (h >= 0)
+    *ticket = (nr_pdsch_sweep_ticket_t){.generation=c->generation, .context_slot=found,
+                                       .rnti=rnti, .tda_index=tda_index, .hypothesis=h, .settled=c->state.winner >= 0};
+  pthread_mutex_unlock(&g_lock);
+  return h >= 0;
+}
+
+bool nr_pdsch_config_sweep_feedback(const nr_pdsch_sweep_ticket_t *ticket, bool crc_ok,
+                                   nr_pdsch_cfg_hypothesis_t *winner)
+{
+  pthread_mutex_lock(&g_lock);
+  sweep_context_t *c = ticket_context(ticket);
+  bool announced = false;
+  if (c) {
+    int w = nr_pdsch_config_sweep_feed(&c->state, ticket->hypothesis, crc_ok);
+    if (w >= 0 && !c->reported) {
+      c->reported = true;
+      announced = true;
+      if (winner)
+        *winner = c->state.hyp[w];
+    }
+  }
+  pthread_mutex_unlock(&g_lock);
+  return announced;
+}
+
+void nr_pdsch_config_sweep_reset_all(void)
+{
+  pthread_mutex_lock(&g_lock);
+  memset(g_contexts, 0, sizeof(g_contexts));
+  /* Do not rewind generation: in-flight jobs from before reset must remain invalid. */
+  pthread_mutex_unlock(&g_lock);
+}
+
+bool nr_pdsch_config_sweep_snapshot(const nr_pdsch_sweep_ticket_t *ticket,
+                                   nr_pdsch_config_sweep_state_t *out)
+{
+  if (!out)
+    return false;
+  pthread_mutex_lock(&g_lock);
+  sweep_context_t *c = ticket_context(ticket);
+  if (c)
+    *out = c->state;
+  pthread_mutex_unlock(&g_lock);
+  return c != NULL;
+}
+
+/* Compatibility for pure legacy tests; not used by the receive pipeline. */
+static nr_pdsch_config_sweep_state_t g_sweep;
+static bool g_sweep_on;
 void nr_pdsch_config_sweep_enable_global(int tda_count)
 {
+  pthread_mutex_lock(&g_lock);
   nr_pdsch_config_sweep_init(&g_sweep, tda_count);
-  g_sweep_on = 1;
+  g_sweep_on = true;
+  pthread_mutex_unlock(&g_lock);
 }
-
 int nr_pdsch_config_sweep_next_global(nr_pdsch_cfg_hypothesis_t *out)
 {
-  return g_sweep_on ? nr_pdsch_config_sweep_next(&g_sweep, out) : -1;
+  pthread_mutex_lock(&g_lock);
+  int r = g_sweep_on ? nr_pdsch_config_sweep_next(&g_sweep, out) : -1;
+  pthread_mutex_unlock(&g_lock);
+  return r;
 }
-
 int nr_pdsch_config_sweep_feed_global(int idx, bool tb_crc_ok)
 {
-  return g_sweep_on ? nr_pdsch_config_sweep_feed(&g_sweep, idx, tb_crc_ok) : -1;
+  pthread_mutex_lock(&g_lock);
+  int r = g_sweep_on ? nr_pdsch_config_sweep_feed(&g_sweep, idx, tb_crc_ok) : -1;
+  pthread_mutex_unlock(&g_lock);
+  return r;
 }
-
 int nr_pdsch_config_sweep_winner_global(void)
 {
-  return g_sweep_on ? nr_pdsch_config_sweep_winner(&g_sweep) : -1;
+  pthread_mutex_lock(&g_lock);
+  int r = g_sweep_on ? g_sweep.winner : -1;
+  pthread_mutex_unlock(&g_lock);
+  return r;
 }
-
 bool nr_pdsch_config_sweep_result_global(nr_pdsch_cfg_hypothesis_t *out)
 {
-  const int w = nr_pdsch_config_sweep_winner_global();
-  if (w < 0 || out == NULL) {
-    return false;
-  }
-  *out = g_sweep.hyp[w];
-  return true;
+  pthread_mutex_lock(&g_lock);
+  bool ok = out && g_sweep_on && g_sweep.winner >= 0;
+  if (ok)
+    *out = g_sweep.hyp[g_sweep.winner];
+  pthread_mutex_unlock(&g_lock);
+  return ok;
 }

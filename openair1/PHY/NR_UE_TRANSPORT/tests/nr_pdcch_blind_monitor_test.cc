@@ -1939,7 +1939,6 @@ void nr_pdcch_unscrambling(c16_t *e_rx, uint16_t scrambling_RNTI, uint32_t lengt
 // implementations pull in heavy PHY estimation/FFT dependencies for code this test never runs;
 // same sidestep convention this file already uses for get_softmodem_params()/uniqCfg above.
 extern "C" {
-void nr_pdcch_dmrs_ref(void) {}
 void nr_pdcch_channel_estimation(void) {}
 void nr_channel_level(void) {}
 uint8_t log2_approx(uint32_t x) { (void)x; return 0; }

@@ -359,15 +359,15 @@ bool nr_pdcch_blind_monitor_autoconf_css0(int num_rbs,
  * reading pdcch_blind_monitor_coreset/_ss/_bwp by hand. See the definition-site comment in
  * nr_pdcch_blind_monitor.c for the full design (why this is NOT gated on g_cfg.bwp_size == 0). */
 
-/* Non-zero once nr_pdcch_blind_monitor_autodiscover_step() has confirmed the dedicated CORESET's
- * footprint and populated g_cfg for it. Distinct from g_cfg.bwp_size, which CSS0 autoconf above
+/* Non-zero once nr_pdcch_blind_monitor_autodiscover_step() has selected a candidate footprint
+ * and populated g_cfg for it. This is NOT a verification verdict. Distinct from g_cfg.bwp_size, which CSS0 autoconf above
  * may already have set for the COMMON search space by the time this is first checked. */
 bool nr_pdcch_blind_monitor_autodiscover_done(void);
 
-/** Technique C exhausted its budget under the current footprint: treat that as evidence the
- * FOOTPRINT is wrong (a length sweep tries every length) and re-arm Technique A, excluding the
- * offset that failed. */
+/** Advance the current geometry after an inconclusive length budget. The offset is not
+ * blacklisted: other widths and future observations remain eligible. */
 void nr_pdcch_blind_monitor_autodiscover_retry(int failed_rb_offset);
+/** Compatibility query: always false; offsets are no longer blacklisted. */
 bool nr_pdcch_blind_monitor_autodiscover_offset_rejected(int rb_offset);
 
 /* Technique A (whole-carrier DM-RS correlation): call once per symbol while autodiscover is on and
@@ -375,7 +375,7 @@ bool nr_pdcch_blind_monitor_autodiscover_offset_rejected(int rb_offset);
  * already-FEP'd frequency-domain samples for exactly this (slot, symbol), indexed [0,
  * ofdm_symbol_size) -- `const void*` rather than `const c16_t*` so this header stays free of the
  * PHY-heavy c16_t definition (nr_pdcch_coreset_map.h pulls in PHY/impl_defs_top.h; the .c file casts
- * internally). Returns true once the footprint is confirmed and g_cfg is populated for it.
+ * internally). Returns true once a candidate footprint is selected and g_cfg is populated.
  * `abs_slot` feeds nr_pdcch_blind_monitor_confirmed_rnti() for the bootstrap-RNTI log line. */
 bool nr_pdcch_blind_monitor_autodiscover_step(const void* rxdataF_symbol, int ofdm_symbol_size, int n_rb_carrier,
                                               int first_carrier_offset, uint16_t pci, int slot, int symbol,
@@ -702,10 +702,9 @@ bool nr_pdcch_blind_extract_00(uint64_t       payload,
 /** One admissible CORESET extent hypothesis, in 6-RB window indices (inclusive). */
 typedef struct { int first_w; int last_w; } nr_pdcch_extent_cand_t;
 
-/** Enumerate the extent hypotheses admissible given an observed occupancy footprint. The true
- * CORESET must CONTAIN every observed window, so only `last_w' is swept upward; `out[0]' is always
- * the legacy snap-to-carrier answer. Returns the number written, 0 on invalid input. Pure --
- * exported so it is unit-testable. */
+/** Enumerate contiguous CORESET extents containing the observed occupancy.
+ * Offset and width both vary; the legacy snap is only the first hypothesis.
+ * Returns the number written, capped by caller capacity (runtime reserves the complete catalog). */
 /** TS 38.211 7.4.1.1.2 DM-RS symbol mask, or -1 if the combination is illegal. Exported for
  * Technique D: a payload-interpretation hypothesis changes the TDA, so the mask that goes with it
  * has to be recomputed rather than reused from the DCI extraction. */
@@ -740,6 +739,11 @@ bool nr_pdcch_blind_monitor_confirmed_rnti(uint32_t now_abs_slot, uint16_t* rnti
 
 /* Test-only: clears bootstrap state between gtest cases. Not for RT use. */
 void nr_pdcch_blind_rnti_bootstrap_reset_for_test(void);
+/** Producer-thread-only geometry epoch and fresh-evidence interface. */
+uint64_t nr_pdcch_blind_monitor_autodiscover_generation(void);
+bool nr_pdcch_blind_monitor_autodiscover_extent_verified(void);
+void nr_pdcch_blind_monitor_autodiscover_observe(uint16_t rnti, uint32_t slot, uint64_t payload);
+void nr_pdcch_blind_monitor_autodiscover_reset(void);
 
 #ifdef __cplusplus
 }

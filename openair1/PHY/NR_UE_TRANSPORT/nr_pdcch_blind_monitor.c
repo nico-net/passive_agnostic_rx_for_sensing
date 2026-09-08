@@ -256,40 +256,18 @@ bool nr_pdcch_blind_monitor_autoconf_css0(int num_rbs,
  * (s_dedicated_found below), separate from anything CSS0 writes. */
 static bool s_dedicated_found = false;
 
-/* Offsets already tried and found undecodable. A footprint that produces no DCI of ANY length is
- * wrong, and re-discovering without excluding it just converges to the same wrong answer again --
- * the histogram has not changed. Small and fixed: a carrier has 45 windows and the search gives up
- * long before that many are blacklisted. */
-#define NR_PDCCH_MAX_BAD_OFFSETS 8
-static int s_bad_offset[NR_PDCCH_MAX_BAD_OFFSETS];
-static int s_n_bad_offset = 0;
-
+/* No offset blacklist: lack of evidence for (offset,width) says nothing about
+ * other widths at that offset, and a quiet interval proves no geometry wrong. */
+static bool extent_advance(void);
 bool nr_pdcch_blind_monitor_autodiscover_offset_rejected(int rb_offset)
 {
-  for (int i = 0; i < s_n_bad_offset; i++) {
-    if (s_bad_offset[i] == rb_offset) {
-      return true;
-    }
-  }
+  (void)rb_offset;
   return false;
 }
-
-/* Called when Technique C exhausts its budget. A length sweep tries EVERY length, so if the
- * geometry were right one of them would have reached significance; failing at all of them is
- * evidence about the FOOTPRINT, not about the length. Re-arm Technique A instead of running on
- * with geometry that is known not to decode.
- * MEASURED 2026-09-07 (capture val_d1_151203): traffic changed, the histogram's first occupied
- * window moved off zero, Technique A converged to rb_offset=12 against a truth of 0, and the run
- * then produced 30 genuine decodes in 200 s instead of ~200k. Nothing downstream could recover,
- * because the extent check is gated on the length being found -- a deadlock. */
 void nr_pdcch_blind_monitor_autodiscover_retry(int failed_rb_offset)
 {
-  if (s_n_bad_offset < NR_PDCCH_MAX_BAD_OFFSETS) {
-    s_bad_offset[s_n_bad_offset++] = failed_rb_offset;
-  }
-  s_dedicated_found = false;
-  LOG_W(PHY, "SENSING: Phase 3 autodiscover -- rb_offset=%d produced no decodable DCI at ANY "
-             "length; blacklisting it and re-discovering the footprint\n", failed_rb_offset);
+  if (s_dedicated_found && failed_rb_offset == g_cfg.bwp_start + g_cfg.coreset_rb_offset)
+    extent_advance();
 }
 
 bool nr_pdcch_blind_monitor_autodiscover_done(void)
@@ -297,7 +275,9 @@ bool nr_pdcch_blind_monitor_autodiscover_done(void)
   return s_dedicated_found;
 }
 
-#define NR_PDCCH_MAX_CANDIDATE_WINDOWS (273 / 6)  // generous headroom for a 273 PRB carrier
+#define NR_PDCCH_MAX_CANDIDATE_WINDOWS (273 / 6)
+static uint16_t s_hit_count[NR_PDCCH_MAX_CANDIDATE_WINDOWS];
+static int s_obs_calls;
 
 /* CONVERGENCE CRITERION (rewritten 2026-09-06 -- see the handover doc's reversal section for the
  * live measurement that forced this). The original design required the SAME rb_offset to win
@@ -315,11 +295,9 @@ bool nr_pdcch_blind_monitor_autodiscover_done(void)
  * does not). */
 #define AUTODISCOVER_OBS_CALLS 1000  // ~4-5s of DL-slot dwell on this cell's occasion rate --
                                      // long enough to average over occasion-to-occasion CCE hopping
-/* ---- Extent-candidate state (see the EXTENT CANDIDATES comment in the convergence function). --
- * Bounded so the verification cannot run unboundedly on a cell where nothing ever decodes: once
- * every candidate has been tried the search stops and keeps candidate 0, i.e. exactly the
- * behaviour that existed before this was added. */
-#define NR_PDCCH_EXTENT_MAX_CAND 8
+/* Complete bounded catalog of contiguous intervals over at most 45 six-RB windows.
+ * Exhaustion is inconclusive and starts a fresh occupancy epoch, never a verified fallback. */
+#define NR_PDCCH_EXTENT_MAX_CAND (45 * 46 / 2)
 /* Occasions each candidate is given to produce a Technique B confirmation before moving on. Sized
  * from this cell's own measured accept rate (~700 accepts/s at ~2000 occasions/s, and a
  * confirmation needs two sightings of the same RNTI), with a wide margin for a quieter cell. */
@@ -330,6 +308,82 @@ static int  s_ext_n        = 0;
 static int  s_ext_idx      = 0;
 static bool s_ext_verified = false;
 static int  s_ext_occ      = 0;
+static uint64_t s_ext_generation;
+typedef struct {
+  uint16_t rnti;
+  uint32_t slot;
+  uint64_t payload;
+} extent_evidence_t;
+static extent_evidence_t s_ext_evidence[NR_PDCCH_BLIND_MAX_UE];
+
+static void extent_clear_evidence(void)
+{
+  memset(s_ext_evidence, 0, sizeof(s_ext_evidence));
+  s_ext_verified = false;
+  s_ext_occ = 0;
+  ++s_ext_generation;
+}
+uint64_t nr_pdcch_blind_monitor_autodiscover_generation(void)
+{
+  return s_ext_generation;
+}
+bool nr_pdcch_blind_monitor_autodiscover_extent_verified(void)
+{
+  return s_dedicated_found && s_ext_verified;
+}
+void nr_pdcch_blind_monitor_autodiscover_observe(uint16_t rnti, uint32_t slot, uint64_t payload)
+{
+  /* Called ONLY for a CRC/plausibility-accepted dedicated DL DCI in the current geometry.
+   * Bootstrap history is deliberately not an input. Repeated candidates in one slot or
+   * a repeated fixed payload cannot verify a geometry. */
+  if (!s_dedicated_found || s_ext_verified || !rnti)
+    return;
+  int victim = 0;
+  for (int i = 0; i < NR_PDCCH_BLIND_MAX_UE; ++i) {
+    extent_evidence_t *e = &s_ext_evidence[i];
+    if (e->rnti == rnti) {
+      if (slot > e->slot && payload != e->payload) {
+        s_ext_verified = true;
+        LOG_A(PHY, "SENSING: CORESET VERIFIED by fresh dedicated DCI: offset=%d span=%d rnti=0x%x\n",
+              g_cfg.coreset_rb_offset, g_cfg.coreset_freq_domain * 6, rnti);
+      }
+      return;
+    }
+    if (!e->rnti || e->slot < s_ext_evidence[victim].slot)
+      victim = i;
+  }
+  s_ext_evidence[victim] = (extent_evidence_t){rnti, slot, payload};
+}
+static bool extent_advance(void)
+{
+  if (!s_dedicated_found || s_ext_verified || s_ext_n <= 0)
+    return false;
+  extent_clear_evidence();
+  g_cfg.dci_length_override = 0;
+  if (++s_ext_idx >= s_ext_n) {
+    /* Inconclusive, never "verified" and never a fallback to candidate zero.
+     * Re-observe the live occupancy on a new epoch; no permanent quiet-link blacklist. */
+    s_dedicated_found = false;
+    s_ext_n = 0;
+    LOG_W(PHY, "SENSING: CORESET candidates exhausted without evidence; restarting occupancy discovery\n");
+    return true;
+  }
+  g_cfg.coreset_rb_offset = s_ext_cand[s_ext_idx].first_w * 6;
+  g_cfg.coreset_freq_domain = s_ext_cand[s_ext_idx].last_w - s_ext_cand[s_ext_idx].first_w + 1;
+  LOG_I(PHY, "SENSING: CORESET candidate %d/%d: offset=%d span=%d (unverified)\n",
+        s_ext_idx + 1, s_ext_n, g_cfg.coreset_rb_offset, g_cfg.coreset_freq_domain * 6);
+  return true;
+}
+void nr_pdcch_blind_monitor_autodiscover_reset(void)
+{
+  s_dedicated_found = false;
+  s_ext_n = s_ext_idx = 0;
+  memset(s_hit_count, 0, sizeof(s_hit_count));
+  s_obs_calls = 0;
+  g_cfg.dci_length_override = 0;
+  extent_clear_evidence();
+}
+
 
 int nr_pdcch_extent_candidates(int first_w, int last_w, int nw_total,
                                nr_pdcch_extent_cand_t* out, int max_out)
@@ -443,8 +497,6 @@ bool nr_pdcch_blind_monitor_autodiscover_step(const void* rxdataF_symbol, int of
   // Accumulate hits toward the observation window regardless of n==0 -- a genuinely idle call is
   // itself informative (real windows stay at 0 too on an idle call), and returning early here would
   // under-count elapsed dwell against AUTODISCOVER_OBS_CALLS.
-  static uint16_t s_hit_count[NR_PDCCH_MAX_CANDIDATE_WINDOWS];
-  static int s_obs_calls = 0;
   for (int c = 0; c < n; c++) {
     const int w = candidates[c].rb_offset / 6;
     if (w >= 0 && w < NR_PDCCH_MAX_CANDIDATE_WINDOWS) {
@@ -531,57 +583,22 @@ bool nr_pdcch_blind_monitor_autodiscover_step(const void* rxdataF_symbol, int of
     s_obs_calls = 0;
     return false;
   }
-  /* EXTENT IS NOT DIRECTLY OBSERVABLE (2026-09-07). PDCCH DM-RS exists only in the REGs of an
-   * ACTUALLY TRANSMITTED PDCCH, so this histogram measures the CCEs the scheduler used, NOT the
-   * configured CORESET width. MEASURED at 1350 hits (30/window): windows 8-11, 16-19, 24-29, 32-35
-   * and 42-44 are HARD ZERO while 0-7, 12-15, 20-23, 36-41 carry 19-142 hits each -- and the gNB's
-   * own log shows every grant at cce=0/cce=4, i.e. low CCEs only. More dwell cannot fill the gaps:
-   * the information is not on the air.
-   *
-   * But CCE numbering is computed over the CORESET's TOTAL REG count, so the width must be exact or
-   * every candidate's CCE index is wrong. Since the observed groups are scattered from window 0
-   * across most of the carrier, the allocation is a full-carrier CORESET whose unused groups simply
-   * went unobserved -- so snap the extent to the carrier when the evidence spans most of it.
-   *
-   * ponytail: this is a HEURISTIC, not a measurement, and it is only right for a full-band CORESET.
-   * The principled version is to SWEEP the extent (like Technique C already sweeps dci_length) and
-   * keep the value that yields genuine CRC-passing DCIs -- scoring by real decodes rather than by
-   * correlation. Do that before trusting this on a cell with a narrow dedicated CORESET. */
+  /* Occupancy is a lower bound, not the CORESET boundary. Search all containing
+   * contiguous intervals; the legacy full-carrier snap affects trial order only. */
   const int nw_total = n_rb_carrier / 6;
 
-  /* ---- EXTENT CANDIDATES, verified by real decodes (2026-09-07) --------------------------------
-   * The histogram measures OCCUPANCY, not the configured width (see the comment above), so the
-   * extent is not directly observable. But it is tightly CONSTRAINED: the true CORESET must
-   * CONTAIN every observed window, so the only admissible hypotheses are (f, l) with f <= first_w
-   * and l >= last_w. On this cell that is two candidates (observed 0..43 plus the full carrier),
-   * not a search.
-   *
-   * The heuristic this replaces -- snap to the carrier when first_w == 0 and the span covers >= 3/4
-   * of it -- was right here BY LUCK OF THIS CELL BEING FULL-BAND, and silently wrong on a narrow
-   * dedicated CORESET (get the width wrong and CCE numbering, which is computed over the CORESET's
-   * TOTAL REG count, puts every candidate at the wrong index, so NOTHING decodes). Its answer is
-   * kept as candidate 0, so a cell where it was already right locks in exactly the same time as
-   * before and this can only ever be an improvement, never a regression.
-   *
-   * Verification uses NO new threshold: a candidate is accepted iff Technique B CONFIRMS a C-RNTI
-   * while it is applied. That is the right oracle precisely because noise does not repeat -- the
-   * confirmation needs the same RNTI twice -- so it distinguishes a decoding geometry from a
-   * non-decoding one without asking anyone to calibrate an accept count. */
+  /* Geometry verification uses only fresh dedicated DCI evidence collected in this epoch. */
   s_ext_n = nr_pdcch_extent_candidates(first_w, last_w, nw_total, s_ext_cand, NR_PDCCH_EXTENT_MAX_CAND);
-  s_ext_idx      = 0;
-  s_ext_verified = false;
-  s_ext_occ      = 0;
+  s_ext_idx = 0;
+  extent_clear_evidence();
 
   first_w = s_ext_cand[0].first_w;
   last_w  = s_ext_cand[0].last_w;
   const int rb_offset = first_w * 6;
   const int span_rb   = (last_w - first_w + 1) * 6;
-  if (nr_pdcch_blind_monitor_autodiscover_offset_rejected(rb_offset)) {
-    /* Already tried and proven undecodable. Keep observing rather than re-declaring it. */
-    memset(s_hit_count, 0, sizeof(s_hit_count));
-    s_obs_calls = 0;
-    return false;
-  }
+  /* Start a new occupancy window for any later inconclusive retry. */
+  memset(s_hit_count, 0, sizeof(s_hit_count));
+  s_obs_calls = 0;
 
   g_cfg.coreset_type            = 0;  // PDCCH-Config (dedicated), NOT MIB/SIB1 -- see coreset_type's
                                         // own comment in autoconf_css0() for why this field matters
@@ -736,53 +753,11 @@ void nr_pdcch_blind_monitor_autodiscover_set_dci_length(int dci_length)
  * has just CHANGED the applied extent, so the caller can rebuild anything derived from it. */
 bool nr_pdcch_blind_monitor_autodiscover_extent_step(uint32_t abs_slot)
 {
-  if (!s_dedicated_found || s_ext_verified || s_ext_n <= 0) {
+  (void)abs_slot;
+  if (!s_dedicated_found || s_ext_verified || s_ext_n <= 0)
     return false;
-  }
-  uint16_t r = 0;
-  uint8_t  cls = 0xFF;
-  uint32_t age = 0;
-  if (nr_pdcch_blind_monitor_confirmed_rnti(abs_slot, &r, &cls, &age)) {
-    /* A repeated C-RNTI decoded under this extent. No accept-count threshold is involved: noise
-     * does not produce the SAME RNTI twice. */
-    s_ext_verified = true;
-    LOG_A(PHY, "SENSING: Phase 3 autodiscover -- extent VERIFIED rb_offset=%d span_rb=%d "
-               "(candidate %d/%d, confirmed by C-RNTI 0x%x)\n",
-          s_ext_cand[s_ext_idx].first_w * 6,
-          (s_ext_cand[s_ext_idx].last_w - s_ext_cand[s_ext_idx].first_w + 1) * 6,
-          s_ext_idx + 1, s_ext_n, r);
-    return false;
-  }
-  if (++s_ext_occ < NR_PDCCH_EXTENT_VERIFY_OCC) {
-    return false;
-  }
-  s_ext_occ = 0;
-  if (s_ext_idx + 1 >= s_ext_n) {
-    /* Every hypothesis tried and none decoded. Keep candidate 0 (the pre-2026-09-07 heuristic's own
-     * answer) and stop: continuing would re-test the same list forever, and the cause is then not
-     * the extent. */
-    s_ext_verified = true;
-    /* coreset_rb_offset, NOT bwp_start: the convergence path above moved the CORESET offset into
-     * its own frame, and writing bwp_start here would put it back into the BWP frame -- changing
-     * RIV interpretation and dci_length for every grant. */
-    g_cfg.coreset_rb_offset   = s_ext_cand[0].first_w * 6;
-    g_cfg.coreset_freq_domain = s_ext_cand[0].last_w - s_ext_cand[0].first_w + 1;
-    LOG_W(PHY, "SENSING: Phase 3 autodiscover -- extent NOT verified by any of %d candidates; "
-               "keeping rb_offset=%d span_rb=%d. The extent is probably not the fault.\n",
-          s_ext_n, g_cfg.coreset_rb_offset, g_cfg.coreset_freq_domain * 6);
-    return true;
-  }
-  s_ext_idx++;
-  g_cfg.coreset_rb_offset   = s_ext_cand[s_ext_idx].first_w * 6;  // own frame; see above
-  g_cfg.coreset_freq_domain = s_ext_cand[s_ext_idx].last_w - s_ext_cand[s_ext_idx].first_w + 1;
-  /* Drop any RNTI state accumulated under the REJECTED extent so it cannot vouch for the next one.
-   * (The reset helper is named _for_test only because this is its first non-test caller.) */
-  nr_pdcch_blind_rnti_bootstrap_reset_for_test();
-  LOG_W(PHY, "SENSING: Phase 3 autodiscover -- extent candidate %d/%d produced no confirmed C-RNTI "
-             "in %d occasions; trying rb_offset=%d span_rb=%d\n",
-        s_ext_idx, s_ext_n, NR_PDCCH_EXTENT_VERIFY_OCC, g_cfg.coreset_rb_offset,
-        g_cfg.coreset_freq_domain * 6);
-  return true;
+  /* Independent of DCI-length convergence. Wrong geometry must not prevent trying the next one. */
+  return ++s_ext_occ >= NR_PDCCH_EXTENT_VERIFY_OCC ? extent_advance() : false;
 }
 
 static int32_t blind_fill_dmrs_mask(int dmrs_TypeA_Position, int NrOfSymbols, int startSymbol,

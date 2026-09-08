@@ -276,15 +276,18 @@ static _Atomic uint64_t g_llr_clip8[2] = {0, 0};
  * swing all move between runs, and that confound has already produced several wrong conclusions.
  * Subsets are indexed by BIT POSITION = PHYSICAL branch, so {3} is physical channel 3's samples and
  * estimates, never a silent remap onto channel 0. */
-#define NR_PDSCH_SUBSET_N 15
+#define NR_PDSCH_SUBSET_N 16
 static const uint8_t kSubsetMask[NR_PDSCH_SUBSET_N] = {
     0x1, 0x2, 0x4, 0x8,                     /* {0} {1} {2} {3} */
     0x3, 0x5, 0x9, 0x6, 0xA, 0xC,           /* {0,1} {0,2} {0,3} {1,2} {1,3} {2,3} */
     0x7, 0xB, 0xD, 0xE,                     /* {0,1,2} {0,1,3} {0,2,3} {1,2,3} */
-    0xF};                                   /* {0,1,2,3} */
+    0xF,                                    /* {0,1,2,3} */
+    0x0};  /* CONTROL: no forcing at all -- byte-for-byte the primary path. If this reads 0 % while
+            * the primary decode of the SAME TB read 77-87 %, then re-running the demod+decode chain
+            * a second time is itself what fails, and every subset number is meaningless. */
 static const char *const kSubsetName[NR_PDSCH_SUBSET_N] = {
     "{0}", "{1}", "{2}", "{3}", "{0,1}", "{0,2}", "{0,3}", "{1,2}", "{1,3}", "{2,3}",
-    "{0,1,2}", "{0,1,3}", "{0,2,3}", "{1,2,3}", "{0,1,2,3}"};
+    "{0,1,2}", "{0,1,3}", "{0,2,3}", "{1,2,3}", "{0,1,2,3}", "REPLAY-CTL"};
 static _Atomic uint64_t g_subset_try[NR_PDSCH_SUBSET_N];
 static _Atomic uint64_t g_subset_ok[NR_PDSCH_SUBSET_N];
 
@@ -1916,6 +1919,17 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
             break;
           }
         }
+        /* DESCRAMBLE. nr_dlsch_unscrambling() mutates llr IN PLACE and is applied exactly once on
+         * the primary path, BEFORE the first decode -- so any path that regenerates llr by
+         * re-running nr_rx_pdsch() must descramble it again or it hands the LDPC decoder scrambled
+         * soft bits and fails 100 %% of the time, whatever the antennas are doing.
+         * Found 2026-09-08 by a no-mask REPLAY CONTROL in the subset scan: forcing nothing at all,
+         * i.e. reproducing the primary path exactly, still read 0 %% on TBs the primary decoded at
+         * 49.7 %%. That isolated the fault to the REPLAY rather than to branch selection, after two
+         * earlier fixes (per-subset nvar, the mask-aware shift) had been aimed at the wrong thing. */
+        if (redemod_ok) {
+          nr_dlsch_unscrambling(llr, G, 0 /* codeword */, dlsch_config->dlDataScramblingId, grant->rnti);
+        }
         if (redemod_ok && passive_ldpc_decode(ue, proc, &g_harq, cw, dlsch_config, llr, freq_alloc->num_rbs, G)) {
           ldpc_ok = true;
           atomic_fetch_add(&g_branch_ok[b], 1);
@@ -1940,8 +1954,16 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
       if (s_subset_n > 0 && fp->nb_antennas_rx == 4 && cw->Nl == 1
           && (s_subset_seen++ % (unsigned long)s_subset_n) == 0) {
         const bool ldpc_ok_saved = ldpc_ok;
-        for (int k = 0; k < NR_PDSCH_SUBSET_N; k++) {
-          nr_dlsch_force_mask(kSubsetMask[k]);
+        /* The diagnostic decoder reuses g_harq.b. Preserving only ldpc_ok would publish
+         * the final subset's bytes as if they were the primary CRC-verified TB. */
+        const size_t saved_tb_size = (lenWithCrc(1, cw->TBS) + 7u) / 8u;
+        uint8_t *saved_tb = ldpc_ok_saved ? malloc(saved_tb_size) : NULL;
+        if (saved_tb)
+          memcpy(saved_tb, g_harq.b, saved_tb_size);
+        /* On allocation failure skip the diagnostic, never risk the production payload. */
+        for (int k = 0; (!ldpc_ok_saved || saved_tb) && k < NR_PDSCH_SUBSET_N; k++) {
+          /* mask 0 is the control: force nothing, so selection follows the normal mode-0 path. */
+          nr_dlsch_force_mask(kSubsetMask[k] ? kSubsetMask[k] : -1);
           memset(llr, 0, rx_llr_buf_sz * sizeof(*llr));
           bool ok = true;
           for (int m = dlsch_config->start_symbol;
@@ -1956,6 +1978,12 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
               break;
             }
           }
+          if (ok) {
+            // Same reason as the retry loop above: llr has just been regenerated, so it is
+            // scrambled again and must be descrambled before the decoder sees it.
+            nr_dlsch_unscrambling(llr, G, 0 /* codeword */, dlsch_config->dlDataScramblingId,
+                                  grant->rnti);
+          }
           atomic_fetch_add(&g_subset_try[k], 1);
           if (ok && passive_ldpc_decode(ue, proc, &g_harq, cw, dlsch_config, llr,
                                         freq_alloc->num_rbs, G)) {
@@ -1963,7 +1991,11 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
           }
         }
         nr_dlsch_force_mask(-1);  // never leave a mask pinned
-        ldpc_ok = ldpc_ok_saved;  // the scan is diagnostic; this TB's own outcome stands
+        if (saved_tb) {
+          memcpy(g_harq.b, saved_tb, saved_tb_size);
+          free(saved_tb);
+        }
+        ldpc_ok = ldpc_ok_saved;  // both outcome and payload now match the primary/retry result
       }
     }
 
