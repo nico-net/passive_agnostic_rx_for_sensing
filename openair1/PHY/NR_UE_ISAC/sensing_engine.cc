@@ -1,6 +1,8 @@
 /* SPDX-License-Identifier: OAI-Public-License-1.1 */
 #include "sensing_engine.h"
 
+#include "detector_cuda.h"
+
 #include "aoa.h"
 #include "cuda_support.h"
 #include "detector.h"
@@ -183,14 +185,18 @@ void SensingEngine::start()
 {
   std::lock_guard<std::mutex> lock(submission_mutex_);
   if (running_.load(std::memory_order_relaxed)) return;
+  const bool require_cuda = cuda_required();
+  const bool have_detector_cuda = detector_cuda_available();
+  if (require_cuda && !have_detector_cuda)
+    throw std::runtime_error("NR_ISAC_REQUIRE_CUDA=1 but no usable CUDA detector is available");
   if (config_.sync_enable) {
 #ifdef NR_ISAC_CUDA_ACCELERATION
-    if (cuda_required() && environment_flag_enabled("NR_ISAC_DISABLE_CUDA_SYNC"))
+    if (require_cuda && environment_flag_enabled("NR_ISAC_DISABLE_CUDA_SYNC"))
       throw std::runtime_error("NR_ISAC_REQUIRE_CUDA=1 conflicts with NR_ISAC_DISABLE_CUDA_SYNC=1");
     if (!environment_flag_enabled("NR_ISAC_DISABLE_CUDA_SYNC")) {
       std::string error;
       if (!warmup_sync_cuda(config_.maximum_rows, maximum_prb_ * 12u, &error)) {
-        if (cuda_required())
+        if (require_cuda)
           throw std::runtime_error("required CUDA sync warmup failed: " + error);
         std::fprintf(stderr, "SENSING: CUDA sync warmup failed (%s); CPU fallback remains available\n",
                      error.c_str());
@@ -202,11 +208,25 @@ void SensingEngine::start()
       }
     }
 #else
-    if (cuda_required())
+    if (require_cuda)
       throw std::runtime_error("NR_ISAC_REQUIRE_CUDA=1 but CUDA sync support was not built");
 #endif
   }
-  if (running_.exchange(true)) return;
+  if (have_detector_cuda) {
+    bool warmup_complete = true;
+    try {
+      detector_cuda_warmup();
+    } catch (const std::exception& error) {
+      if (require_cuda) throw;
+      warmup_complete = false;
+      std::fprintf(stderr, "SENSING: CUDA detector warmup failed; CPU fallback remains available: %s\n",
+                   error.what());
+    }
+    if (warmup_complete)
+      std::fprintf(stderr, "SENSING: CUDA detector enabled; warm-up complete (%s mode)\n",
+                   require_cuda ? "required" : "optional");
+  }
+  running_.store(true, std::memory_order_release);
   windows_.reopen();
   processing_worker_ = std::thread(&SensingEngine::processing_run, this);
   accumulation_worker_ = std::thread(&SensingEngine::accumulation_run, this);

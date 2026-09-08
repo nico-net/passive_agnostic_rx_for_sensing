@@ -3,6 +3,7 @@
 #include "adaptive_threshold.h"
 #include "aoa.h"
 #include "detector.h"
+#include "detector_cuda.h"
 #include "enu_tracker.h"
 #include "fft.h"
 #include "report_writer.h"
@@ -95,6 +96,23 @@ void test_detector()
   require(zero_doppler.components.size()==1,"zero-Doppler CUT was incorrectly notched");
   close(zero_doppler.components[0].range_bin,8.5,2e-4,"zero-Doppler range parity");
   close(zero_doppler.components[0].doppler_bin,32.0,2e-4,"zero-Doppler bin must remain searchable");
+}
+
+void test_required_cuda_contract()
+{
+  if (detector_cuda_available()) return;
+  PipelineConfig config;
+  config.maximum_components = 1;
+  config.maximum_objects = 1;
+  setenv("NR_ISAC_REQUIRE_CUDA", "1", 1);
+  bool rejected = false;
+  try {
+    (void)detect_clean(fractional_component(), config);
+  } catch (const std::runtime_error&) {
+    rejected = true;
+  }
+  unsetenv("NR_ISAC_REQUIRE_CUDA");
+  require(rejected, "NR_ISAC_REQUIRE_CUDA did not reject the CPU fallback");
 }
 
 void test_aoa()
@@ -322,7 +340,7 @@ void test_finite_admission_window()
 
 int main()
 {
-  try {test_fft();test_adaptive_threshold();test_detector();test_aoa();test_enu_geometry();test_variable_cpi();test_validation_report_compatibility();test_causal_cpi_pipeline();test_finite_admission_window();}
+  try {test_fft();test_adaptive_threshold();test_detector();test_required_cuda_contract();test_aoa();test_enu_geometry();test_variable_cpi();test_validation_report_compatibility();test_causal_cpi_pipeline();test_finite_admission_window();}
   catch(const std::exception& e){std::fprintf(stderr,"python parity test failed: %s\n",e.what());return EXIT_FAILURE;}
   std::puts("native sensing golden parity checks passed");return EXIT_SUCCESS;
 }

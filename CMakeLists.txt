@@ -1090,7 +1090,10 @@ set(NR_UE_ISAC_SRC
   )
 if(ENABLE_CHANNEL_SIM_CUDA)
   list(APPEND NR_UE_ISAC_SRC
-       ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/sync_correction_cuda.cu)
+       ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/sync_correction_cuda.cu
+       ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/detector_cuda.cu)
+else()
+  list(APPEND NR_UE_ISAC_SRC ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/detector_cuda_stub.cc)
 endif()
 # Passive receiver vs sensing pipeline. The blind PDCCH -> DCI -> PDSCH receiver only ever hands
 # channel estimates TO the sensing engine and never reads anything back, so on a receiver-only build
@@ -1108,10 +1111,10 @@ else()
 endif()
 target_link_libraries(NR_UE_ISAC PRIVATE UTIL)
 if(ENABLE_CHANNEL_SIM_CUDA AND ENABLE_ISAC_SENSING)
-  target_compile_definitions(NR_UE_ISAC PRIVATE NR_ISAC_CUDA_ACCELERATION)
+  target_compile_definitions(NR_UE_ISAC PRIVATE NR_ISAC_CUDA_ACCELERATION NR_ISAC_CUDA_DETECTOR)
   target_link_libraries(NR_UE_ISAC PRIVATE CUDA::cufft CUDA::cudart)
   set_target_properties(NR_UE_ISAC PROPERTIES CUDA_STANDARD 17 CUDA_STANDARD_REQUIRED ON)
-  message(STATUS "NR_UE_ISAC: CUDA sync front end enabled")
+  message(STATUS "NR_UE_ISAC: native CUDA sync and detector enabled")
 endif()
 find_library(ZMQ_LIB zmq)
 if(ZMQ_LIB AND ENABLE_ISAC_SENSING)
@@ -2306,6 +2309,18 @@ if(ENABLE_TESTS)
       target_link_libraries(test_nr_isac_cuda_sync PRIVATE NR_UE_ISAC UTIL)
       add_dependencies(tests test_nr_isac_cuda_sync)
       add_test(NAME test_nr_isac_cuda_sync COMMAND ./test_nr_isac_cuda_sync)
+      add_executable(benchmark_nr_isac_cuda_detector
+                     ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/tests/detector_cuda_benchmark.cc)
+      target_include_directories(benchmark_nr_isac_cuda_detector PRIVATE
+                                 ${OPENAIR1_DIR}/PHY/NR_UE_ISAC)
+      target_link_libraries(benchmark_nr_isac_cuda_detector PRIVATE NR_UE_ISAC UTIL)
+      add_executable(test_nr_isac_cuda_detector_parity
+                     ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/tests/detector_cuda_parity_test.cc)
+      target_include_directories(test_nr_isac_cuda_detector_parity PRIVATE
+                                 ${OPENAIR1_DIR}/PHY/NR_UE_ISAC)
+      target_link_libraries(test_nr_isac_cuda_detector_parity PRIVATE NR_UE_ISAC UTIL)
+      add_dependencies(tests test_nr_isac_cuda_detector_parity)
+      add_test(NAME test_nr_isac_cuda_detector_parity COMMAND ./test_nr_isac_cuda_detector_parity)
     endif()
   endif()
 

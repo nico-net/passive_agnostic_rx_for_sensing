@@ -247,7 +247,18 @@ extern "C" void nr_isac_init(void)
         pipeline.num_ues,pipeline.sources_mask,AOA_ENABLE,AOA_UL_ENABLE);
 }
 
-extern "C" void nr_isac_start(void){if(enabled.load()&&engine&&!started.exchange(true))engine->start();}
+extern "C" void nr_isac_start(void)
+{
+  bool expected = false;
+  if (!enabled.load() || !engine || !started.compare_exchange_strong(expected, true)) return;
+  try {
+    engine->start();
+  } catch (const std::exception& error) {
+    started.store(false);
+    enabled.store(false);
+    LOG_E(PHY, "SENSING: startup failed before CFR admission: %s\n", error.what());
+  }
+}
 extern "C" void nr_isac_stop(void){if(engine&&started.exchange(false))engine->stop();}
 extern "C" int nr_isac_enabled(void){return enabled.load(std::memory_order_relaxed);}
 extern "C" int nr_isac_source(void){for(int i=0;i<NR_ISAC_SRC_COUNT;++i)if(pipeline.sources_mask&(1u<<i))return i;return NR_ISAC_SRC_CSI_RS;}

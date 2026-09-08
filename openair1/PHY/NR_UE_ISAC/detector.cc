@@ -2,12 +2,18 @@
 #include "detector.h"
 
 #include "adaptive_threshold.h"
+#include "cuda_support.h"
+#include "detector_cuda.h"
 #include "fft.h"
 
 #include <algorithm>
 #include <cmath>
+#include <chrono>
 #include <complex>
+#include <cstdio>
+#include <cstdlib>
 #include <limits>
+#include <memory>
 #include <numeric>
 #include <stdexcept>
 #include <vector>
@@ -160,7 +166,8 @@ Refined refine(const std::vector<std::complex<double>>& residual,
                Peak coarse,
                uint32_t minimum_range_bin,
                const RateGate& gate,
-               double maximum_abs_rate_mps)
+               double maximum_abs_rate_mps,
+               CudaDetectorBackend*& cuda_backend)
 {
   const uint32_t antennas = window.antennas, rows = window.rows, subcarriers = window.subcarriers;
   const size_t cells = (size_t)rows * subcarriers;
@@ -187,6 +194,15 @@ Refined refine(const std::vector<std::complex<double>>& residual,
     std::vector<std::complex<double>> coherent;
   };
   auto evaluate = [&](const std::array<double, 2>& point) {
+    if (cuda_backend) {
+      const auto accelerated = cuda_backend->evaluate(point[0], point[1]);
+      Eval e;
+      e.objective = accelerated.objective;
+      e.gradient = accelerated.gradient;
+      e.hessian = accelerated.hessian;
+      e.coherent = accelerated.coherent;
+      return e;
+    }
     Eval e;
     e.steering.resize(cells);
     e.coherent.assign(antennas, {});
@@ -285,18 +301,30 @@ Refined refine(const std::vector<std::complex<double>>& residual,
   out.localization.iterations = iterations;
   out.localization.convergence = convergence;
 
-  double fit_energy = 0.0, signal_scale = 0.0;
-  for (uint32_t a = 0; a < antennas; ++a) {
-    const auto alpha = out.coherent[a] / std::max(plan.denominator, std::numeric_limits<double>::min());
-    for (size_t i = 0; i < cells; ++i) {
-      fit_energy += plan.weights[i] * std::norm(residual[(size_t)a * cells + i] - alpha * out.steering[i]);
-      signal_scale += std::norm(residual[(size_t)a * cells + i]);
-    }
-  }
   const uint64_t observed_cells = std::count_if(plan.weights.begin(), plan.weights.end(), [](double w){ return w > 0.0; });
+  double fit_energy = 0.0, signal_scale = 0.0;
+  if (cuda_backend && out.steering.empty()) {
+    // Weighted least squares with unit-magnitude steering removes ||coherent||^2/sum(weights).
+    // Keep the unweighted residual scale separately because unobserved cells can hold fitted
+    // components after prior CLEAN iterations, exactly as in the Python CUDA implementation.
+    fit_energy = std::max(0.0, cuda_backend->weighted_energy()
+                                  - current.objective
+                                        / std::max(plan.denominator,
+                                                   std::numeric_limits<double>::min()));
+    signal_scale = cuda_backend->unweighted_energy()
+                   / std::max<uint64_t>(1, (uint64_t)antennas * observed_cells);
+  } else {
+    for (uint32_t a = 0; a < antennas; ++a) {
+      const auto alpha = out.coherent[a] / std::max(plan.denominator, std::numeric_limits<double>::min());
+      for (size_t i = 0; i < cells; ++i) {
+        fit_energy += plan.weights[i] * std::norm(residual[(size_t)a * cells + i] - alpha * out.steering[i]);
+        signal_scale += std::norm(residual[(size_t)a * cells + i]);
+      }
+    }
+    signal_scale /= std::max<uint64_t>(1, (uint64_t)antennas * observed_cells);
+  }
   const uint64_t dof = std::max<uint64_t>(1, (uint64_t)antennas * observed_cells - antennas - 2);
   double variance = fit_energy / dof;
-  signal_scale /= std::max<uint64_t>(1, (uint64_t)antennas * observed_cells);
   variance = std::max(variance, std::numeric_limits<float>::epsilon() * std::numeric_limits<float>::epsilon()
                                 * std::max(signal_scale, std::numeric_limits<double>::min()));
   const double scale = std::max(plan.denominator * variance, std::numeric_limits<double>::min());
@@ -409,6 +437,9 @@ DetectorResult detect_clean(const CfrWindow& window,
                             const RateGate& rate_gate,
                             uint32_t minimum_range_bin)
 {
+  using DetectorClock = std::chrono::steady_clock;
+  const bool timing_enabled = std::getenv("NR_ISAC_DETECTOR_TIMING") != nullptr;
+  const auto detector_started = DetectorClock::now();
   const Plan plan = prepare(window, config, rate_gate);
   if (minimum_range_bin >= plan.axes.range_bins)
     throw std::invalid_argument("minimum range bin outside detector support");
@@ -418,18 +449,98 @@ DetectorResult detect_clean(const CfrWindow& window,
     for (size_t i = 0; i < cells; ++i)
       residual[(size_t)a * cells + i] = window.observed[i] ? window.values[(size_t)a * cells + i]
                                                            : std::complex<float>();
+
+  CudaDetectorBackend* cuda_backend = nullptr;
+  const bool require_cuda = cuda_required();
+  const bool have_cuda = detector_cuda_available();
+  if (require_cuda && !have_cuda)
+    throw std::runtime_error("NR_ISAC_REQUIRE_CUDA=1 but no usable CUDA detector is available");
+  if (have_cuda) {
+    try {
+      struct CachedBackend {
+        uint32_t antennas = 0, rows = 0, subcarriers = 0, range_bins = 0;
+        uint64_t last_used = 0;
+        std::unique_ptr<CudaDetectorBackend> backend;
+      };
+      static thread_local std::vector<CachedBackend> cache;
+      static thread_local uint64_t use_sequence = 0;
+      ++use_sequence;
+      auto found = std::find_if(cache.begin(), cache.end(), [&](const CachedBackend& entry) {
+        return entry.antennas == window.antennas && entry.rows == window.rows
+               && entry.subcarriers == window.subcarriers
+               && entry.range_bins == plan.axes.range_bins;
+      });
+      if (found == cache.end()) {
+        // Live scheduler row counts vary slightly around each duration bank. Retain a bounded LRU
+        // of plans/workspaces so common shapes reuse all cudaMalloc and cuFFT planning state.
+        constexpr size_t maximum_cached_shapes = 8;
+        if (cache.size() == maximum_cached_shapes) {
+          found = std::min_element(cache.begin(), cache.end(), [](const auto& left, const auto& right) {
+            return left.last_used < right.last_used;
+          });
+          cache.erase(found);
+        }
+        CachedBackend entry;
+        entry.antennas = window.antennas;
+        entry.rows = window.rows;
+        entry.subcarriers = window.subcarriers;
+        entry.range_bins = plan.axes.range_bins;
+        entry.last_used = use_sequence;
+        entry.backend = std::make_unique<CudaDetectorBackend>(
+            window.antennas, window.rows, window.subcarriers, plan.axes.range_bins,
+            window.fc_hz, plan.denominator, plan.weights, plan.times, plan.axes.rate_axis_mps,
+            plan.rate_allowed, plan.axes.rate_res_mps);
+        cache.push_back(std::move(entry));
+        cuda_backend = cache.back().backend.get();
+      } else {
+        found->last_used = use_sequence;
+        found->backend->reset_cpi(window.fc_hz, plan.denominator, plan.weights, plan.times,
+                                  plan.axes.rate_axis_mps, plan.rate_allowed,
+                                  plan.axes.rate_res_mps);
+        cuda_backend = found->backend.get();
+      }
+    } catch (const std::exception& error) {
+      if (require_cuda) throw;
+      std::fprintf(stderr, "NR_ISAC: CUDA detector initialization failed; using CPU fallback: %s\n",
+                   error.what());
+    }
+  }
+  const auto initialized_at = DetectorClock::now();
   DetectorResult result;
   result.axes = plan.axes;
-  result.initial_weighted_energy = residual_energy(residual, window.antennas, plan);
   const double detector_denominator = plan.denominator * window.antennas;
-  result.initial_residual_scale = result.initial_weighted_energy / detector_denominator;
+  if (!cuda_backend) {
+    result.initial_weighted_energy = residual_energy(residual, window.antennas, plan);
+    result.initial_residual_scale = result.initial_weighted_energy / detector_denominator;
+  }
   const double budget = false_object_budget(config.false_object_intensity_per_s, plan.axes.dwell_s);
   result.adaptive_threshold = adaptive_z_threshold(budget, config.maximum_components);
 
   for (uint32_t iteration = 0; iteration < config.maximum_components; ++iteration) {
-    auto map = likelihood_map_scaled(residual, window.antennas, window.rows, window.subcarriers,
-                                     window.fc_hz, plan, minimum_range_bin);
-    if (iteration == 0) result.initial_likelihood = map;
+    const auto map_started = DetectorClock::now();
+    std::vector<double> map;
+    if (cuda_backend) {
+      try {
+        map = cuda_backend->likelihood_map(residual, minimum_range_bin);
+      } catch (const std::exception& error) {
+        if (require_cuda || iteration != 0)
+          throw; // Host residual is stale after a device-side CLEAN subtraction: never mix states.
+        std::fprintf(stderr, "NR_ISAC: initial CUDA likelihood failed; using CPU fallback: %s\n",
+                     error.what());
+        cuda_backend = nullptr;
+      }
+    }
+    if (!cuda_backend)
+      map = likelihood_map_scaled(residual, window.antennas, window.rows, window.subcarriers,
+                                  window.fc_hz, plan, minimum_range_bin);
+    const auto map_finished = DetectorClock::now();
+    if (iteration == 0) {
+      result.initial_likelihood = map;
+      if (cuda_backend) {
+        result.initial_weighted_energy = cuda_backend->weighted_energy();
+        result.initial_residual_scale = result.initial_weighted_energy / detector_denominator;
+      }
+    }
     const Peak peak = strongest(map, window.rows);
     if (!peak.valid) break;
     LocalStatistic local = cut_excluded_local_statistic(
@@ -437,8 +548,8 @@ DetectorResult detect_clean(const CfrWindow& window,
         config.adaptive_training_range_bins, config.adaptive_training_doppler_bins,
         config.adaptive_guard_range_bins, config.adaptive_guard_doppler_bins);
     Refined refined = refine(residual, window, plan, peak, minimum_range_bin, rate_gate,
-                             2.0 * config.maximum_target_speed_mps);
-    const double before = residual_energy(residual, window.antennas, plan);
+                             2.0 * config.maximum_target_speed_mps, cuda_backend);
+    const auto refine_finished = DetectorClock::now();
     CleanComponent component;
     component.range_bin = refined.range_bin; component.doppler_bin = refined.doppler_bin;
     component.coarse_range_bin = peak.r; component.coarse_doppler_bin = peak.d;
@@ -453,20 +564,43 @@ DetectorResult detect_clean(const CfrWindow& window,
       const auto alpha = refined.coherent[a] / std::max(plan.denominator, std::numeric_limits<double>::min());
       component.array_response[a] = alpha;
       alpha_power += std::norm(alpha);
-      for (size_t i = 0; i < cells; ++i)
-        residual[(size_t)a * cells + i] -= alpha * refined.steering[i];
+    }
+    double before = 0.0, after = 0.0;
+    if (cuda_backend) {
+      const auto energy = cuda_backend->subtract_component(
+          refined.range_bin, refined.doppler_bin, component.array_response);
+      before = energy[0];
+      after = energy[1];
+    } else {
+      before = residual_energy(residual, window.antennas, plan);
+      for (uint32_t a = 0; a < window.antennas; ++a)
+        for (size_t i = 0; i < cells; ++i)
+          residual[(size_t)a * cells + i] -= component.array_response[a] * refined.steering[i];
+      after = residual_energy(residual, window.antennas, plan);
     }
     const auto alpha0 = component.array_response.front();
     component.amplitude_abs = std::sqrt(alpha_power / window.antennas);
     component.amplitude_phase_rad = std::arg(alpha0);
     component.fitted_weighted_energy = alpha_power * plan.denominator;
-    const double after = residual_energy(residual, window.antennas, plan);
+    const auto update_finished = DetectorClock::now();
     component.weighted_energy_removed = std::max(0.0, before - after);
     result.components.push_back(std::move(component));
+    if (timing_enabled)
+      std::fprintf(stderr, "NR_ISAC detector iteration %u: map=%.3f ms refine=%.3f ms update=%.3f ms\n",
+                   iteration + 1,
+                   std::chrono::duration<double, std::milli>(map_finished - map_started).count(),
+                   std::chrono::duration<double, std::milli>(refine_finished - map_finished).count(),
+                   std::chrono::duration<double, std::milli>(update_finished - refine_finished).count());
   }
-  result.final_weighted_energy = residual_energy(residual, window.antennas, plan);
+  result.final_weighted_energy = cuda_backend
+                                     ? cuda_backend->weighted_energy()
+                                     : residual_energy(residual, window.antennas, plan);
   result.objects = collapse(result.components, plan, window, config);
   if (result.objects.size() > config.maximum_objects) result.objects.resize(config.maximum_objects);
+  if (timing_enabled)
+    std::fprintf(stderr, "NR_ISAC detector CPI: initialize=%.3f ms total=%.3f ms\n",
+                 std::chrono::duration<double, std::milli>(initialized_at - detector_started).count(),
+                 std::chrono::duration<double, std::milli>(DetectorClock::now() - detector_started).count());
   return result;
 }
 

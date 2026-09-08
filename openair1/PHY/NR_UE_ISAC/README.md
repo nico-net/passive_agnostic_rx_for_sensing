@@ -35,6 +35,30 @@ runs require all three loss counters to remain zero.
 The old OAI detector (FFT/CA-CFAR, global zero-Doppler notch, ECA variants, greedy tracker, and
 legacy CLEAN) is intentionally absent.
 
+## CUDA detector backend
+
+With `ENABLE_CHANNEL_SIM_CUDA=ON`, the same native detector control flow uses a CUDA workspace for
+the operations implemented by `gpu_pipeline.py`: complex64 batched range IFFTs, the precomputed
+irregular slow-time coherent projection, continuous-refinement sufficient statistics, and
+device-resident sequential CLEAN subtraction. The map copied into `initial_likelihood`, every
+component, the CUT-excluded local statistic, localization covariance, and multipath collapse are
+still produced through the same public `detect_clean` result contract. CLEAN remains sequential,
+uses all configured components and rows, and retains continuous Newton refinement.
+
+`SensingEngine::start()` performs the one-time CUDA/cuFFT warm-up before it admits CFR snapshots.
+If CUDA was not built, no device is present, or `NR_ISAC_CUDA_DETECTOR=0`, the unchanged CPU path is
+used. A CUDA failure before the first map may fall back to CPU; a failure after device-side CLEAN
+has changed the residual fails the CPI rather than mixing stale host and device state.
+Campaigns must set `NR_ISAC_REQUIRE_CUDA=1`: startup then fails before CFR admission when the CUDA
+device/warm-up is unavailable, and backend initialization or first-map failures cannot silently
+fall back to CPU.
+
+`test_nr_isac_cuda_detector_parity` compares map support, component decisions, local statistics,
+and energies with the CPU implementation. `benchmark_nr_isac_cuda_detector` exercises a
+deterministic 4x192x3276 CPI with eight CLEAN passes and fails when its five-run steady-state median
+is not below 200 ms (override only for diagnostics with `NR_ISAC_CUDA_BENCHMARK_MAX_MS`). Setting
+`NR_ISAC_DETECTOR_TIMING=1` prints per-iteration map/refinement/subtraction timings.
+
 `sensing.num_ues` is one variable with the supported range **1 through 4**. It does not reduce the
 number of UEs in a scenario; it records and validates the deployment count while the existing
 passive PDCCH/PDSCH/PUSCH paths decode the configured UE traffic. The submitted CFR contract is
