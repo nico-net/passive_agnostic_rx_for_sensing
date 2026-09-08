@@ -365,10 +365,11 @@ SyncEstimate estimate_sync(const CfrWindow& window)
   return out;
 }
 
-void apply_sync_correction(CfrWindow& window,
-                           const SyncEstimate& estimate,
-                           double delay_reference_bin,
-                           const std::optional<std::array<std::complex<double>, 4>>& los_spatial)
+static void apply_sync_correction_cpu(
+    CfrWindow& window,
+    const SyncEstimate& estimate,
+    double delay_reference_bin,
+    const std::optional<std::array<std::complex<double>, 4>>& los_spatial)
 {
   if (!window.valid() || !std::isfinite(delay_reference_bin))
     throw std::invalid_argument("invalid sync-correction input");
@@ -440,6 +441,38 @@ void apply_sync_correction(CfrWindow& window,
                              - (usable.empty() ? 0.0 : applied_phase[r]);
         window.values[index] *= std::complex<float>(std::cos(angle), std::sin(angle));
       }
+}
+
+void apply_sync_correction(CfrWindow& window,
+                           const SyncEstimate& estimate,
+                           double delay_reference_bin,
+                           const std::optional<std::array<std::complex<double>, 4>>& los_spatial)
+{
+#ifdef NR_ISAC_CUDA_ACCELERATION
+  if (cuda_required() && force_cpu_sync())
+    throw std::runtime_error("NR_ISAC_REQUIRE_CUDA=1 conflicts with NR_ISAC_DISABLE_CUDA_SYNC=1");
+  static std::atomic<bool> cuda_failed{false};
+  if (!force_cpu_sync() && !cuda_failed.load(std::memory_order_relaxed)) {
+    std::string error;
+    if (apply_sync_correction_cuda(window, estimate, delay_reference_bin, los_spatial, &error)) {
+      static std::atomic<bool> cuda_logged{false};
+      if (!cuda_logged.exchange(true, std::memory_order_relaxed))
+        std::fprintf(stderr,
+                     "SENSING: CUDA common-mode sync correction active "
+                     "(complex64 output, double LOS evidence)\n");
+      return;
+    }
+    cuda_failed.store(true, std::memory_order_relaxed);
+    if (cuda_required())
+      throw std::runtime_error("required CUDA sync correction failed: " + error);
+    std::fprintf(stderr, "SENSING: CUDA sync correction failed (%s); using the CPU fallback\n",
+                 error.c_str());
+  }
+#else
+  if (cuda_required())
+    throw std::runtime_error("NR_ISAC_REQUIRE_CUDA=1 but CUDA sync support was not built");
+#endif
+  apply_sync_correction_cpu(window, estimate, delay_reference_bin, los_spatial);
 }
 
 SyncEstimate IndependentClockTracker::update(const SyncEstimate& measurement,

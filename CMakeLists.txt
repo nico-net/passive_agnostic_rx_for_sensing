@@ -2315,6 +2315,11 @@ if(ENABLE_TESTS)
       target_include_directories(benchmark_nr_isac_cuda_detector PRIVATE
                                  ${OPENAIR1_DIR}/PHY/NR_UE_ISAC)
       target_link_libraries(benchmark_nr_isac_cuda_detector PRIVATE NR_UE_ISAC UTIL)
+      add_executable(benchmark_nr_isac_cuda_sync_correction
+                     ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/tests/sync_correction_cuda_benchmark.cc)
+      target_include_directories(benchmark_nr_isac_cuda_sync_correction PRIVATE
+                                 ${OPENAIR1_DIR}/PHY/NR_UE_ISAC)
+      target_link_libraries(benchmark_nr_isac_cuda_sync_correction PRIVATE NR_UE_ISAC UTIL)
       add_executable(test_nr_isac_cuda_detector_parity
                      ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/tests/detector_cuda_parity_test.cc)
       target_include_directories(test_nr_isac_cuda_detector_parity PRIVATE

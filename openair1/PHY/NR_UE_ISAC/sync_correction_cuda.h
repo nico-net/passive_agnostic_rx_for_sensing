@@ -4,6 +4,7 @@
 #include "pipeline_types.h"
 
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -33,5 +34,19 @@ bool compute_sync_frontend_cuda(const CfrWindow& window,
 
 /** Allocate the process-wide CUDA context, buffers, and cuFFT plan before CFR admission. */
 bool warmup_sync_cuda(uint32_t maximum_rows, uint32_t subcarriers, std::string* error);
+
+/** Apply Python's BIC-selected common-mode STO/CPE/SFO correction on CUDA. */
+bool apply_sync_correction_cuda(
+    CfrWindow& window,
+    const SyncEstimate& estimate,
+    double delay_reference_bin,
+    const std::optional<std::array<std::complex<double>, 4>>& los_spatial_steering,
+    std::string* error);
+
+/** Preallocate the dense correction workspace before CFR admission. */
+bool warmup_sync_correction_cuda(uint32_t maximum_rows,
+                                 uint32_t subcarriers,
+                                 uint32_t antennas,
+                                 std::string* error);
 
 } // namespace nr_isac

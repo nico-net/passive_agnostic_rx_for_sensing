@@ -195,16 +195,20 @@ void SensingEngine::start()
       throw std::runtime_error("NR_ISAC_REQUIRE_CUDA=1 conflicts with NR_ISAC_DISABLE_CUDA_SYNC=1");
     if (!environment_flag_enabled("NR_ISAC_DISABLE_CUDA_SYNC")) {
       std::string error;
-      if (!warmup_sync_cuda(config_.maximum_rows, maximum_prb_ * 12u, &error)) {
+      const bool front_end_ready = warmup_sync_cuda(
+          config_.maximum_rows, maximum_prb_ * 12u, &error);
+      const bool correction_ready = front_end_ready && warmup_sync_correction_cuda(
+          config_.maximum_rows, maximum_prb_ * 12u, requested_antennas_, &error);
+      if (!front_end_ready || !correction_ready) {
         if (require_cuda)
           throw std::runtime_error("required CUDA sync warmup failed: " + error);
         std::fprintf(stderr, "SENSING: CUDA sync warmup failed (%s); CPU fallback remains available\n",
                      error.c_str());
       } else {
         std::fprintf(stderr,
-                     "SENSING: CUDA sync context and plan ready before CFR admission "
-                     "(capacity_rows=%u, subcarriers=%u)\n",
-                     config_.maximum_rows, maximum_prb_ * 12u);
+                     "SENSING: CUDA sync context, plan, and correction workspace ready before "
+                     "CFR admission (capacity_rows=%u, subcarriers=%u, antennas=%u)\n",
+                     config_.maximum_rows, maximum_prb_ * 12u, requested_antennas_);
       }
     }
 #else

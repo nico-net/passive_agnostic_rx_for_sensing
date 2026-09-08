@@ -2,6 +2,8 @@
 #include "sync_correction.h"
 #include "sync_correction_cuda.h"
 
+#include <algorithm>
+#include <array>
 #include <cmath>
 #include <complex>
 #include <cstdio>
@@ -13,15 +15,19 @@ using namespace nr_isac;
 
 namespace {
 
+const std::array<std::complex<double>, 4> LOS_SPATIAL{
+    std::polar(1.0, 0.0), std::polar(1.0, .23),
+    std::polar(1.0, -.41), std::polar(1.0, .68)};
+
 CfrWindow sync_fixture()
 {
   CfrWindow window;
-  window.antennas = 1;
+  window.antennas = 4;
   window.rows = 8;
   window.subcarriers = 13;
   window.scs_hz = 30000.0;
   window.fc_hz = 3.5e9;
-  window.values.resize(static_cast<size_t>(window.rows) * window.subcarriers);
+  window.values.resize(static_cast<size_t>(window.antennas) * window.rows * window.subcarriers);
   window.observed.assign(static_cast<size_t>(window.rows) * window.subcarriers, 1);
   window.row_time_slots.resize(window.rows);
   window.row_slot_idx.resize(window.rows);
@@ -33,8 +39,13 @@ CfrWindow sync_fixture()
     for (uint32_t carrier = 0; carrier < window.subcarriers; ++carrier) {
       const float phase = -2.0f * static_cast<float>(PI) * 2.25f * carrier / window.subcarriers
                           + 0.003f * row;
-      window.values[window.sample(0, row, carrier)] =
-          std::polar(1.0f + 0.001f * (carrier % 7), phase);
+      for (uint32_t antenna = 0; antenna < window.antennas; ++antenna) {
+        const std::complex<double> value = LOS_SPATIAL[antenna]
+                                           * std::polar(1.0 + 0.001 * (carrier % 7),
+                                                        static_cast<double>(phase));
+        window.values[window.sample(antenna, row, carrier)] = {
+            static_cast<float>(value.real()), static_cast<float>(value.imag())};
+      }
     }
   }
   window.observed[window.cell(2, 4)] = 0;
@@ -74,6 +85,29 @@ int main()
   require_close(cuda.sto_bins, cpu.sto_bins, 2e-4, "STO");
   require_close(cuda.sfo_ppm, cpu.sfo_ppm, 1e-3, "SFO");
   require_close(cuda.cfo_hz, cpu.cfo_hz, 1e-3, "CFO");
+
+  SyncEstimate correction = cuda;
+  correction.sto_applied = true;
+  correction.sfo_applied = true;
+  correction.sfo_ppm = .15;
+  correction.cfo_applied = true;
+  correction.cfo_hz = 17.0;
+  CfrWindow cpu_corrected = window;
+  setenv("NR_ISAC_DISABLE_CUDA_SYNC", "1", 1);
+  apply_sync_correction(cpu_corrected, correction, 0.0, LOS_SPATIAL);
+  unsetenv("NR_ISAC_DISABLE_CUDA_SYNC");
+  setenv("NR_ISAC_REQUIRE_CUDA", "1", 1);
+  CfrWindow cuda_corrected = window;
+  apply_sync_correction(cuda_corrected, correction, 0.0, LOS_SPATIAL);
+  unsetenv("NR_ISAC_REQUIRE_CUDA");
+  double maximum_correction_error = 0.0;
+  for (size_t index = 0; index < cpu_corrected.values.size(); ++index)
+    maximum_correction_error = std::max(
+        maximum_correction_error,
+        std::abs(static_cast<std::complex<double>>(cpu_corrected.values[index])
+                 - static_cast<std::complex<double>>(cuda_corrected.values[index])));
+  require_close(maximum_correction_error, 0.0, 2e-4, "common-mode sync correction");
+
   setenv("NR_ISAC_DISABLE_CUDA_SYNC", "1", 1);
   setenv("NR_ISAC_REQUIRE_CUDA", "1", 1);
   bool rejected_conflict = false;
