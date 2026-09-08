@@ -361,6 +361,10 @@ AdaptiveClutterMap* SensingEngine::clutter_map()
 void SensingEngine::process_window(CfrWindow window, const CpiPlan& plan)
 {
   PipelineReport report; report.cpi_sequence = ++cpi_sequence_; report.start_utc_ns = window.start_utc_ns;
+  const double slot_ns = slot_duration_s(window.scs_hz) * 1e9;
+  report.first_row_time_ns = std::llround(window.row_time_slots.front() * slot_ns);
+  report.last_row_time_ns = std::llround(window.row_time_slots.back() * slot_ns);
+  report.cpi_duration_ns = std::max<int64_t>(0, report.last_row_time_ns - report.first_row_time_ns);
   report.plan = plan; report.dropped_submissions = dropped_.load(std::memory_order_relaxed); report.stale_submissions = stale_;
   for (uint32_t mask : window.row_source_mask) {
     report.sources_mask |= mask;

@@ -89,6 +89,9 @@ std::string build_report_json(const PipelineReport& r, const PipelineConfig& c)
   out += ",\"illuminator_id\":"; string_value(out,c.illuminator_id);
   out += ",\"cpi_sequence\":" + std::to_string(r.cpi_sequence);
   out += ",\"cpi_start_time_utc_ns\":" + std::to_string(r.start_utc_ns);
+  out += ",\"cpi_duration_ns\":" + std::to_string(r.cpi_duration_ns);
+  out += ",\"first_row_time_ns\":" + std::to_string(r.first_row_time_ns);
+  out += ",\"last_row_time_ns\":" + std::to_string(r.last_row_time_ns);
   out += ",\"midpoint_air_time_s\":"; number(out,r.midpoint_air_time_s);
   out += ",\"actual_row_count\":" + std::to_string(r.detector.axes.rate_bins);
   out += ",\"observed_re_count\":" + std::to_string(r.detector.axes.observed_re_count);
@@ -98,6 +101,9 @@ std::string build_report_json(const PipelineReport& r, const PipelineConfig& c)
     if(!first)out.push_back(',');
     first=false;string_value(out,source_name(static_cast<nr_isac_source_t>(i)));
     out.push_back(':');out+=std::to_string(r.source_occurrences[i]);} out+='}';
+  out += ",\"src_occ\":[";
+  for(uint32_t i=0;i<NR_ISAC_SRC_COUNT;++i){if(i)out.push_back(',');out+=std::to_string(r.source_occurrences[i]);}
+  out += ']';
   out += ",\"range_res_m\":"; number(out,r.detector.axes.range_res_m);
   out += ",\"range_max_m\":"; number(out,r.detector.axes.range_bins*r.detector.axes.range_res_m);
   out += ",\"vel_res_mps\":"; number(out,r.detector.axes.rate_res_mps);
@@ -135,6 +141,8 @@ std::string build_report_json(const PipelineReport& r, const PipelineConfig& c)
     out += ",\"score\":";number(out,d.score);out += ",\"decision_statistic\":";number(out,d.decision_statistic);
     out += ",\"decision_threshold\":";number(out,d.decision_threshold);out += ",\"effective_decision_threshold\":";
     number(out,d.effective_decision_threshold);out += ",\"source_component_iteration\":"+std::to_string(d.source_component_iteration);
+    if(d.aoa.valid){out += ",\"azimuth_deg\":";number(out,d.aoa.azimuth_deg);
+      out += ",\"elevation_deg\":";number(out,d.aoa.elevation_deg);}
     out += ",\"range_rate_covariance\":";if(d.covariance_valid)matrix(out,d.range_rate_covariance);else out+="null";
     out += ",\"aoa\":{\"valid\":";out += d.aoa.valid?"true":"false";out += ",\"reason\":";string_value(out,d.aoa.reason);
     out += ",\"azimuth_deg\":";number(out,d.aoa.azimuth_deg);out += ",\"elevation_deg\":";number(out,d.aoa.elevation_deg);

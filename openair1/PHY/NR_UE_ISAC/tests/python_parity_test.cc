@@ -5,6 +5,7 @@
 #include "detector.h"
 #include "enu_tracker.h"
 #include "fft.h"
+#include "report_writer.h"
 #include "sync_correction.h"
 #include "variable_cpi.h"
 
@@ -193,11 +194,33 @@ void test_variable_cpi()
   close(*p.a_q_mps2,50.6,1e-12,"variable-CPI acceleration envelope parity");
   require(p.full_search(),"active Python baseline must use full Doppler search");
 }
+
+void test_validation_report_compatibility()
+{
+  PipelineConfig c;
+  PipelineReport r;
+  r.start_utc_ns=123;r.cpi_duration_ns=7500000;
+  r.first_row_time_ns=50000000;r.last_row_time_ns=57500000;
+  r.source_occurrences={1,2,3,4,5,6,7};
+  Detection d;d.aoa.valid=true;d.aoa.azimuth_deg=12.5;d.aoa.elevation_deg=-3.0;
+  r.detections.push_back(d);
+  const std::string json=build_report_json(r,c);
+  require(json.find("\"cpi_duration_ns\":7500000")!=std::string::npos,
+          "validation report lost CPI duration");
+  require(json.find("\"first_row_time_ns\":50000000")!=std::string::npos,
+          "validation report lost first radio-row time");
+  require(json.find("\"last_row_time_ns\":57500000")!=std::string::npos,
+          "validation report lost last radio-row time");
+  require(json.find("\"src_occ\":[1,2,3,4,5,6,7]")!=std::string::npos,
+          "validation report lost source-count compatibility vector");
+  require(json.find("\"azimuth_deg\":12.5")!=std::string::npos,
+          "validation report lost top-level detection AoA compatibility");
+}
 }
 
 int main()
 {
-  try {test_fft();test_adaptive_threshold();test_detector();test_aoa();test_enu_geometry();test_variable_cpi();}
+  try {test_fft();test_adaptive_threshold();test_detector();test_aoa();test_enu_geometry();test_variable_cpi();test_validation_report_compatibility();}
   catch(const std::exception& e){std::fprintf(stderr,"python parity test failed: %s\n",e.what());return EXIT_FAILURE;}
   std::puts("native sensing golden parity checks passed");return EXIT_SUCCESS;
 }

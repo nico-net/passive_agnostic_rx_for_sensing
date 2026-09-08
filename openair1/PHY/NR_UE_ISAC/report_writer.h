@@ -15,6 +15,9 @@ namespace nr_isac {
 struct PipelineReport {
   uint64_t cpi_sequence = 0;
   int64_t start_utc_ns = 0;
+  int64_t cpi_duration_ns = 0;
+  int64_t first_row_time_ns = 0;
+  int64_t last_row_time_ns = 0;
   double midpoint_air_time_s = 0.0;
   uint32_t sources_mask = 0;
   std::array<uint64_t, NR_ISAC_SRC_COUNT> source_occurrences{};
