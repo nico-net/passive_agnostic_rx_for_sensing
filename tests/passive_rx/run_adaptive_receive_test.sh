@@ -33,23 +33,64 @@ echo "OUTPUT=$OUT"
 cd "$BUILD"
 # CFO seed from the preceding passive-receiver measurement, not a gNB hint.
 # Upstream continuous compensation is distinct from disabled DM-RS/SFO feedback.
+# ---- ACQUISITION VALIDITY WATCHDOG -------------------------------------------------------------
+# Roughly half the captures on this rig mis-lock the CFO at acquisition. The receiver still looks
+# healthy -- PBCH decodes 50/50, no RFSTALL, no NIC loss -- but SIB1 never decodes, so the blind
+# monitor never leaves CORESET#0 and re-derives the CSS0 config every slot forever. Measured
+# 2026-09-09: a VOID run settled at CFO -24334 Hz with zero "SIB1 common facts" lines and 474,202
+# CSS0-autoconf lines in 4 minutes, against -14965 Hz / 1 / 284 on the VALID run beside it.
+#
+# So SIB1 is the acquisition go/no-go, and it lands in the first seconds or not at all. Probe for
+# it, and on failure kill and RETRY rather than spending the whole DURATION on a dead capture.
+# Deliberately NOT a live CFO retune: doing that killed the radio 2/2 times previously.
+# Each void attempt's log is kept as evidence, never silently discarded.
+run_modem() {
+  sudo -n env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin ISAC_RX_MRC_MODE=2 ISAC_DMRS_FO_APPLY=0 ISAC_SFO_CORRECT=0 \
+    ISAC_RX_BRANCH_FO=0 ISAC_RX_GAIN_TRIM=0,0,0,0 \
+    ISAC_DISC_NO_RESYNC=0 ISAC_RF_STALL_MAX_REINIT=0 ISAC_CFO_TRACK_HZ=1 ISAC_CFO_TRACK_PERIOD=20 \
+    ISAC_PDCCH_TIMING=1 ISAC_PUSCH_TIMING=1 ISAC_PUSCH_DIAG=1 \
+    ISAC_UL_TA_SWEEP=0:0:0 ISAC_SENSE_COMB=0 ISAC_TSYNC_RESET=0 \
+    ISAC_PASSIVE_REPLAY_CAPTURE="$OUT/replay.bin" \
+    LD_LIBRARY_PATH="$BUILD:/usr/local/lib" \
+    timeout --signal=TERM --kill-after=10s "${DURATION:-480}s" taskset -c 0-7 "$BUILD/nr-uesoftmodem" \
+    --usrp-args type=x4xx,addr=192.168.20.2,mgmt_addr=128.178.122.174 \
+    -O "$OUT/receiver.conf" -r 273 --numerology 1 --band 78 -C 3450000000 --ssb 150 \
+    --ue-rxgain 40 --ue-nb-ant-rx 4 --ue-nb-ant-tx 4 --passive-rx \
+    --ue-fo-compensation --cont-fo-comp 1 --freq-sync-P 0.05 --freq-sync-I 0.001 \
+    --initial-fo -16480 --thread-pool 0,1,6,7 --time-sync-I 0.01 \
+    --ntn-initial-time-drift -4.25 -A 90 > "$OUT/run.log" 2>&1
+}
+
+ACQ_TIMEOUT_S=${ACQ_TIMEOUT_S:-120}
+ATTEMPTS=${ATTEMPTS:-4}
+rc=1
+verdict=VOID_NO_SIB1
 set +e
-sudo -n env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin ISAC_RX_MRC_MODE=2 ISAC_DMRS_FO_APPLY=0 ISAC_SFO_CORRECT=0 \
-  ISAC_RX_BRANCH_FO=0 ISAC_RX_GAIN_TRIM=0,0,0,0 \
-  ISAC_DISC_NO_RESYNC=0 ISAC_RF_STALL_MAX_REINIT=0 ISAC_CFO_TRACK_HZ=1 ISAC_CFO_TRACK_PERIOD=20 \
-  ISAC_PDCCH_TIMING=1 ISAC_PUSCH_TIMING=1 ISAC_PUSCH_DIAG=1 \
-  ISAC_UL_TA_SWEEP=0:0:0 ISAC_SENSE_COMB=0 ISAC_TSYNC_RESET=0 \
-  ISAC_PASSIVE_REPLAY_CAPTURE="$OUT/replay.bin" \
-  LD_LIBRARY_PATH="$BUILD:/usr/local/lib" \
-  timeout --signal=TERM --kill-after=10s "${DURATION:-480}s" taskset -c 0-7 "$BUILD/nr-uesoftmodem" \
-  --usrp-args type=x4xx,addr=192.168.20.2,mgmt_addr=128.178.122.174 \
-  -O "$OUT/receiver.conf" -r 273 --numerology 1 --band 78 -C 3450000000 --ssb 150 \
-  --ue-rxgain 40 --ue-nb-ant-rx 4 --ue-nb-ant-tx 4 --passive-rx \
-  --ue-fo-compensation --cont-fo-comp 1 --freq-sync-P 0.05 --freq-sync-I 0.001 \
-  --initial-fo -16480 --thread-pool 0,1,6,7 --time-sync-I 0.01 \
-  --ntn-initial-time-drift -4.25 -A 90 > "$OUT/run.log" 2>&1
-rc=$?
+for attempt in $(seq 1 "$ATTEMPTS"); do
+  : > "$OUT/run.log"
+  run_modem &
+  modem_wait=$!
+  acquired=0
+  for _ in $(seq 1 "$((ACQ_TIMEOUT_S / 5))"); do
+    sleep 5
+    if grep -qa 'SIB1 common facts' "$OUT/run.log" 2>/dev/null; then acquired=1; break; fi
+    kill -0 "$modem_wait" 2>/dev/null || break
+  done
+  if [ "$acquired" = 1 ]; then
+    echo "attempt $attempt: SIB1 acquired, running the full ${DURATION:-480}s"
+    wait "$modem_wait"; rc=$?
+    verdict=VALID
+    break
+  fi
+  cfo=$(grep -aoE 'current=-?[0-9]+' "$OUT/run.log" | tail -1)
+  echo "attempt $attempt VOID: no SIB1 within ${ACQ_TIMEOUT_S}s (${cfo:-cfo=?}); retrying acquisition"
+  cp -- "$OUT/run.log" "$OUT/void_attempt${attempt}.log"
+  sudo -n pkill -TERM -x nr-uesoftmodem 2>/dev/null
+  wait "$modem_wait" 2>/dev/null
+  sleep 5
+done
 set -e
 printf '%s\n' "$rc" > "$OUT/process_exit.txt"
+printf '%s\n' "$verdict" > "$OUT/validity.txt"
 cat /sys/class/net/enp129s0f0np0/statistics/rx_missed_errors > "$OUT/nic_missed_after.txt"
-echo "Process exit=$rc; inspect receiver evidence before any verdict. OUTPUT=$OUT"
+echo "verdict=$verdict exit=$rc; inspect receiver evidence before any further verdict. OUTPUT=$OUT"
