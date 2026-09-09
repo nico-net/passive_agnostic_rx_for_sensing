@@ -191,6 +191,14 @@ static void pdsch_sweep_maybe_enable(const nr_pdcch_blind_monitor_cfg_t *cfg)
 // is generous headroom, not a tuned minimum.
 #define AUTODISCOVER_LENGTH_SWEEP_MAX_OCCASIONS 500
 static int         g_constdiag_left = 20; // TEMPORARY, see CONSTDIAG below
+/* Why these three exist (2026-09-09): the gNB's own log shows 746 format-1_1 and 147 format-0_1
+ * DCIs in the same CORESET, same search space, same al=2, same rnti -- and this receiver converges
+ * Technique D off the 1_1 stream while reporting dci01 accepts=0. "accepts" is measured AFTER the
+ * discovery controller, so it cannot distinguish "the polar decode never recovered the RNTI" from
+ * "it did, and the width search has not converged yet". These split that. */
+static uint64_t    g_ul_sched       = 0; // DCI 0_1 candidates actually scheduled for decode
+static uint64_t    g_ul_crc_hit     = 0; // ... whose polar CRC recovered the targeted RNTI
+static uint64_t    g_ul_disc_call   = 0; // ... that reached the discovery controller
 static uint64_t    g_ul00_accepts   = 0; // DCI 0_0 accepts (UL grants recovered off the 1_0 scan)
 static uint64_t    g_ul00_rejects   = 0; // confirmed-RNTI 1_0 rejects that were not a valid 0_0
 static uint64_t    g_ul_accepts     = 0; // DCI 0_1 accepts (UL grants recovered)
@@ -1714,7 +1722,11 @@ constdiag_done:;
     /* ---- UPLINK candidates are handled here and nothing below runs for them: every line after
      * this point reads a DL result and would misinterpret a UL one. ---- */
     if (cand_task[ti].ul_scan) {
+      g_ul_sched++;
+      /* rnti is written only after the in-range CRC check, so non-zero IS that check. */
+      if (cand_task[ti].ul_out.rnti != 0) g_ul_crc_hit++;
       if(cand_task[ti].ok && cand_task[ti].ul_auto) {
+        g_ul_disc_call++;
         nr_passive_replay_ul(source_absolute_slot, boot_rnti, dci01_length,
                              cand_task[ti].ul_out.raw_payload);
         nr_pdcch_blind_ul_result_t discovered;
@@ -2386,7 +2398,7 @@ constdiag_done:;
     LOG_I(PHY,
          "SENSING: blind PDCCH monitor summary: occasions=%lu candidates=%lu accepts=%lu "
          "dci10[accepts=%lu C=%lu TC=%lu SI=%lu RA=%lu P=%lu] dci01[accepts=%lu rejects=%lu] "
-         "dci00[accepts=%lu rejects=%lu] "
+         "dci00[accepts=%lu rejects=%lu] ulscan[sched=%lu crc_hit=%lu disc=%lu] "
          "held[energy=%lu persist=%lu snr=%lu mismatch=%lu rnti_set=%lu] efloor=%.2f cfr_submits=%lu "
          "pdsch_decode[try=%lu crc_ok=%lu (%.1f%%) skip_rv=%lu unsup=%lu over_cap=%lu data_submits=%lu] "
          "scanq[queued=%lu done=%lu drop_full=%lu drop_stale=%lu maxlag=%lu] "
@@ -2400,6 +2412,7 @@ constdiag_done:;
          (unsigned long)g_accepts_class[NR_BLIND_RNTI_CLASS_P],
          (unsigned long)g_ul_accepts, (unsigned long)g_ul_rejects,
          (unsigned long)g_ul00_accepts, (unsigned long)g_ul00_rejects,
+         (unsigned long)g_ul_sched, (unsigned long)g_ul_crc_hit, (unsigned long)g_ul_disc_call,
          (unsigned long)g_held_energy, (unsigned long)g_held_persist, (unsigned long)g_held_snr,
          (unsigned long)g_held_mismatch, (unsigned long)g_held_rnti_set,
          g_energy_floor,
