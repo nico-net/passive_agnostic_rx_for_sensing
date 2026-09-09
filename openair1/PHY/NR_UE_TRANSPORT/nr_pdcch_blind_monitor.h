@@ -186,6 +186,12 @@ typedef struct {
   uint8_t     short_messages;     ///< P-RNTI only: the 8-bit short message
   bool        plausible;          ///< false => caller MUST discard this result
   const char* reject_reason;      ///< non-NULL iff !plausible; static string, do not free
+  /// The polar-decoded payload word, right-aligned to dci_length. Filled by the format-1_0 entry
+  /// point BEFORE any field interpretation, so it is valid even when `plausible == false` -- the
+  /// same convention nr_pdcch_blind_ul_result_t::raw_payload already uses, and for the same reason:
+  /// a REJECTED 1_0 payload with identifier=0 is a format-0_0 UL grant, and re-reading it costs no
+  /// second polar decode. Zero on the format-1_1 paths, which have their own raw result struct.
+  uint64_t    payload;
 } nr_pdcch_blind_result_t;
 
 /// Deployment facts a blind receiver cannot read off the air but CAN read off the gNB's own

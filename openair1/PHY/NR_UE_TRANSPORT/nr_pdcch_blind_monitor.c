@@ -2296,6 +2296,9 @@ bool nr_pdcch_blind_decode_and_extract_10(const int16_t*                       l
   uint64_t       dci_estimation[2] = {0};
   const uint32_t crc = blind_polar_decode(llr, aggregation_level, dci_length, rnti_min, rnti_max, dci_estimation);
   out->rnti          = (uint16_t)crc;
+  // Kept even when this candidate is about to be rejected: TS 38.212 7.3.1.0 size-aligns 0_0 with
+  // 1_0, so this same word IS the format-0_0 payload when the identifier bit is 0.
+  out->payload       = dci_estimation[0];
 
   // ---- Step 2: which classes are admissible for this CRC-recovered value. The broadcast RNTIs are
   // FIXED by TS 38.321 Table 7.1-1 (SI-RNTI = 0xFFFF, P-RNTI = 0xFFFE) and sit outside the dynamic
@@ -2361,6 +2364,8 @@ bool nr_pdcch_blind_decode_and_extract_10(const int16_t*                       l
     out->rnti            = saved_rnti;
     out->mismatched_bits = saved_mismatches;
     out->reject_reason   = last_reason;
+    // The decoded word survives every class hypothesis -- it is what the format-0_0 reader needs.
+    out->payload         = dci_estimation[0];
   }
   return false;
 }

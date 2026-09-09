@@ -191,6 +191,8 @@ static void pdsch_sweep_maybe_enable(const nr_pdcch_blind_monitor_cfg_t *cfg)
 // is generous headroom, not a tuned minimum.
 #define AUTODISCOVER_LENGTH_SWEEP_MAX_OCCASIONS 500
 static int         g_constdiag_left = 20; // TEMPORARY, see CONSTDIAG below
+static uint64_t    g_ul00_accepts   = 0; // DCI 0_0 accepts (UL grants recovered off the 1_0 scan)
+static uint64_t    g_ul00_rejects   = 0; // confirmed-RNTI 1_0 rejects that were not a valid 0_0
 static uint64_t    g_ul_accepts     = 0; // DCI 0_1 accepts (UL grants recovered)
 static uint64_t    g_ul_rejects     = 0; // DCI 0_1 candidates whose CRC was in range but whose
                                          // fields failed a plausibility check. Reported next to the
@@ -1774,6 +1776,45 @@ constdiag_done:;
       }
       continue;
     }
+    /* ---- DCI 0_0: the UL grants this scan was already decoding and throwing away. ----
+     * TS 38.212 7.3.1.0 size-aligns 0_0 with 1_0, so the polar decode that just ran for this 1_0
+     * candidate ALREADY produced the 0_0 payload -- an identifier bit of 0 is precisely what
+     * nr_pdcch_blind_decode_and_extract_10() rejects with "DCI-1_0 identifier=0 (format 0_0 UL
+     * grant, not a PDSCH DCI)". There is no second decode here and no new config knob.
+     *
+     * This is a genuinely different problem from 0_1, not a shortcut around it: format 0_0 has NO
+     * RRC-derived field widths at all (identifier 1, FDRA=RIV, TDA 4, hopping 1, MCS 5, NDI 1,
+     * RV 2, HARQ 4, TPC 2 -- all spec-fixed), so it needs no width hypothesis, no interpretation
+     * hypothesis and no TB-CRC oracle to converge. It only needs a UL BWP for the RIV, which SIB1
+     * supplies. On a cell scheduling with fallback formats -- this one accepts format 1_0 and
+     * nothing else -- 0_0 is where the UL grants actually are.
+     *
+     * Two gates, both reusing what is already here: extract_00 re-reads the identifier bit itself,
+     * so a real 1_0 that failed for any other reason is REJECTED rather than mis-parsed; and the
+     * RNTI must be one the bootstrap has already confirmed, which is the same ~4000x-tighter test
+     * the UL 0_1 scan applies, and keeps noise decodes out of the grant book. */
+    if (scan_01 && !cand_task[ti].ok && cand_task[ti].format == NR_BLIND_DCI_FORMAT_1_0
+        && ul_opts.bwp_size > 0 && cand_task[ti].out.rnti != 0) {
+      bool confirmed = false;
+      for (int k = 0; k < n_known_ul && !confirmed; k++)
+        confirmed = (known_ul[k] == cand_task[ti].out.rnti);
+      if (confirmed) {
+        nr_pdcch_blind_ul_result_t ul00;
+        if (nr_pdcch_blind_extract_00(cand_task[ti].out.payload, cand_task[ti].dci_length,
+                                      cand_task[ti].out.rnti, &ul_opts, &ul00)) {
+          g_ul00_accepts++;
+          static uint64_t logged00;
+          if (++logged00 <= 8)
+            LOG_A(PHY, "SENSING: DCI 0_0 UL grant rnti=0x%x prb=%u+%u sym=%u+%u k2=%u mcs=%u\n",
+                  ul00.rnti, (unsigned)ul00.start_rb, (unsigned)ul00.num_rb,
+                  (unsigned)ul00.start_symbol, (unsigned)ul00.num_symbols,
+                  (unsigned)ul00.k2, (unsigned)ul00.mcs);
+          nr_pusch_grant_book_add(&ul00, source_absolute_slot);
+        } else {
+          g_ul00_rejects++;
+        }
+      }
+    }
     if (cand_task[ti].dl_auto && cand_task[ti].format == NR_BLIND_DCI_FORMAT_1_1) {
       if (!cand_task[ti].ok || (cfg->autodiscover && !g_length_found))
         continue;
@@ -2345,6 +2386,7 @@ constdiag_done:;
     LOG_I(PHY,
          "SENSING: blind PDCCH monitor summary: occasions=%lu candidates=%lu accepts=%lu "
          "dci10[accepts=%lu C=%lu TC=%lu SI=%lu RA=%lu P=%lu] dci01[accepts=%lu rejects=%lu] "
+         "dci00[accepts=%lu rejects=%lu] "
          "held[energy=%lu persist=%lu snr=%lu mismatch=%lu rnti_set=%lu] efloor=%.2f cfr_submits=%lu "
          "pdsch_decode[try=%lu crc_ok=%lu (%.1f%%) skip_rv=%lu unsup=%lu over_cap=%lu data_submits=%lu] "
          "scanq[queued=%lu done=%lu drop_full=%lu drop_stale=%lu maxlag=%lu] "
@@ -2357,6 +2399,7 @@ constdiag_done:;
          (unsigned long)g_accepts_class[NR_BLIND_RNTI_CLASS_RA],
          (unsigned long)g_accepts_class[NR_BLIND_RNTI_CLASS_P],
          (unsigned long)g_ul_accepts, (unsigned long)g_ul_rejects,
+         (unsigned long)g_ul00_accepts, (unsigned long)g_ul00_rejects,
          (unsigned long)g_held_energy, (unsigned long)g_held_persist, (unsigned long)g_held_snr,
          (unsigned long)g_held_mismatch, (unsigned long)g_held_rnti_set,
          g_energy_floor,

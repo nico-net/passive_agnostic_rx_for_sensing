@@ -2620,3 +2620,56 @@ TEST_F(BlindPdcchTest, UlDefaultTdaTableArmsTheWidthSearch) {
   EXPECT_EQ(nr_pdcch_ul_discovery_snapshot().width_classes, 0);
   nr_pdcch_ul_discovery_reset();
 }
+
+/* DCI 0_0 is size-aligned with 1_0 (TS 38.212 7.3.1.0), so the SAME polar decode yields both. The
+ * 1_0 path rejects identifier=0 -- and those rejects are UL grants. This pins the contract the RT
+ * path now relies on: the rejected 1_0 result still carries its decoded payload, and that payload
+ * re-reads as a valid 0_0 grant with no second decode and no field-width hypothesis. */
+TEST_F(BlindPdcchTest, Dci00RidesTheSame10Decode) {
+  const uint16_t bwp = 273;
+  const int riv_bits = RivBitsFor(bwp);
+  const uint16_t len = nr_pdcch_blind_dci10_size(bwp);
+  ASSERT_EQ(len, 28 + riv_bits);
+
+  auto ul = LiveUlOpts();                       // bwp_size 273, tda_count 2, entry 0 = S:0 L:14 k2:4
+  const uint32_t riv = PRBalloc_to_locationandbandwidth0(24, 8, bwp);
+  const uint16_t rnti = 0x4656;
+
+  // Pack a real format-0_0 payload, MSB-first, with the size-alignment padding left at zero.
+  uint64_t payload = 0; int pos = len;
+  auto put = [&](uint64_t v, int w) { pos -= w; payload |= (v & ((1ULL << w) - 1ULL)) << pos; };
+  put(0, 1);            // identifier: 0 = UL
+  put(riv, riv_bits);
+  put(0, 4);            // TDA index 0
+  put(0, 1);            // no frequency hopping
+  put(10, 5);           // MCS 10
+  put(1, 1);            // NDI
+  put(0, 2);            // RV 0
+  put(3, 4);            // HARQ pid
+  put(1, 2);            // TPC
+  ASSERT_EQ(pos, 8) << "0_0 should leave exactly the 1_0 - 0_0 size difference as padding";
+
+  auto llr = EncodeToLLR(payload, rnti, len, kAggregationLevel, 40.0, rng_);
+  auto ctx = Dci10Ctx(NR_BLIND_SS_UE_SPECIFIC, bwp);
+  nr_pdcch_blind_result_t dl{};
+  EXPECT_FALSE(nr_pdcch_blind_decode_and_extract_10(llr.data(), kAggregationLevel, len, &ctx,
+                                                    0x0001, 0xFFEF, nullptr, &dl));
+  EXPECT_EQ(dl.rnti, rnti);
+  ASSERT_EQ(dl.payload, payload) << "the rejected 1_0 result must still expose its decoded payload";
+
+  nr_pdcch_blind_ul_result_t ul00{};
+  ASSERT_TRUE(nr_pdcch_blind_extract_00(dl.payload, len, dl.rnti, &ul, &ul00))
+      << (ul00.reject_reason ? ul00.reject_reason : "-");
+  EXPECT_EQ(ul00.rnti, rnti);
+  EXPECT_EQ(ul00.start_rb, 8);
+  EXPECT_EQ(ul00.num_rb, 24);
+  EXPECT_EQ(ul00.mcs, 10);
+  EXPECT_EQ(ul00.harq_pid, 3);
+  EXPECT_EQ(ul00.k2, 4);
+  EXPECT_EQ(ul00.ul_dci_format, NR_BLIND_UL_DCI_FORMAT_0_0);
+
+  // A genuine DL 1_0 must NOT be mis-read as a UL grant: extract_00 re-checks the identifier.
+  uint64_t dl_payload = payload | (1ULL << (len - 1));
+  nr_pdcch_blind_ul_result_t not_ul{};
+  EXPECT_FALSE(nr_pdcch_blind_extract_00(dl_payload, len, rnti, &ul, &not_ul));
+}
