@@ -84,12 +84,29 @@ int nr_hyp_sweep_next(nr_hyp_sweep_state_t *st, const void *cand,
       *out = st->classes[c].hyp;
       return c;
     }
+    st->classes[c].skipped++;
   }
   return -1;
 }
 static double rate(const nr_hyp_class_t *c)
 {
   return c->trials ? (double)c->passes / c->trials : 0.0;
+}
+/* A hypothesis that cannot even INTERPRET the observed payloads is disproved by that alone: the
+ * true field layout must yield a valid grant for every real DCI, so a class that fails extraction
+ * on every candidate cannot be the right one. Such a class is never selected, so it never accrues
+ * trials, and the "every class must reach MIN_TRIALS" gate below would wait for it forever.
+ *
+ * Measured live 2026-09-09: 101 classes, 8000 trials accumulated, and the slowest class still at
+ * 0/300 -- the search could not have converged in any run length.
+ *
+ * Retiring these does NOT weaken the oracle. It removes candidates that failed a NECESSARY
+ * condition, and only after MIN_TRIALS separate opportunities to interpret something, which is the
+ * same evidence threshold every other decision here uses. A class with even one successful
+ * extraction is never retired. */
+static bool eliminated(const nr_hyp_class_t *c)
+{
+  return c->trials == 0 && c->skipped >= NR_HYP_SWEEP_MIN_TRIALS;
 }
 int nr_hyp_sweep_feed(nr_hyp_sweep_state_t *st, int idx, bool ok)
 {
@@ -98,14 +115,17 @@ int nr_hyp_sweep_feed(nr_hyp_sweep_state_t *st, int idx, bool ok)
   if (st->classes[idx].trials == UINT64_MAX) return -1;
   st->classes[idx].trials++;
   st->classes[idx].passes += ok;
-  int best = 0;
+  int best = -1;
   for (int c = 0; c < st->n_classes; ++c) {
+    if (eliminated(&st->classes[c])) continue;
     if (st->classes[c].trials < NR_HYP_SWEEP_MIN_TRIALS) return -1;
-    if (rate(&st->classes[c]) > rate(&st->classes[best])) best = c;
+    if (best < 0 || rate(&st->classes[c]) > rate(&st->classes[best])) best = c;
   }
+  if (best < 0) return -1; // every class retired: nothing interpreted anything, stay unresolved
   double second = 0.0;
   for (int c = 0; c < st->n_classes; ++c)
-    if (c != best && rate(&st->classes[c]) > second) second = rate(&st->classes[c]);
+    if (c != best && !eliminated(&st->classes[c]) && rate(&st->classes[c]) > second)
+      second = rate(&st->classes[c]);
   if (rate(&st->classes[best]) >= NR_HYP_SWEEP_MIN_RATE &&
       rate(&st->classes[best]) >= NR_HYP_SWEEP_WIN_RATIO * second)
     st->winner = best;

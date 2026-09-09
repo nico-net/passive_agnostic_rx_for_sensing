@@ -130,3 +130,33 @@ TEST(UlFieldSweep, LiveConfigAdmissibleSetsFitTheClassCap) {
    * set by construction. */
 }
 
+
+/* A class that is never plausible is never selected, so its trials stay 0 -- and the winner gate
+ * requires EVERY class to reach MIN_TRIALS. Measured live 2026-09-09: 101 classes, 8000 trials
+ * accumulated, slowest class still 0/300. The search could not have converged in ANY run length.
+ * Such a class is disproved anyway: the true layout must interpret every real DCI. */
+TEST(UlFieldSweep, NeverInterpretableClassCannotBlockConvergence) {
+  auto fixed=facts(); std::vector<nr_hyp_t> raw(NR_HYP_SWEEP_MAX_RAW);
+  const int n=nr_pdcch_ul_field_sweep_generate(&fixed,39,raw.data(),raw.size());
+  ASSERT_GT(n,2);
+  nr_hyp_sweep_state_t st; nr_hyp_t chosen;
+  // Plausibility depends only on the hypothesis: class 0's representative never interprets anything.
+  struct Ctx { const nr_hyp_t *dead; };
+  auto never_for_first=[](const nr_hyp_t *h,const void *,void *c)->bool{
+    const Ctx *x=(const Ctx *)c;
+    return !(h->len==x->dead->len && !memcmp(h->bytes,x->dead->bytes,h->len));
+  };
+  ASSERT_EQ(nr_hyp_sweep_init(&st,raw.data(),n,nullptr,nullptr,nullptr,nullptr,0,nullptr),n);
+  Ctx ctx{&st.classes[0].hyp};
+  const int truth = 1;
+  int winner=-1;
+  for(int t=0;t<n*NR_HYP_SWEEP_MIN_TRIALS*4 && winner<0;++t) {
+    int idx=nr_hyp_sweep_next(&st,nullptr,never_for_first,&ctx,&chosen);
+    ASSERT_GE(idx,0) << "every class became unselectable";
+    ASSERT_NE(idx,0) << "the never-plausible class must never be selected";
+    winner=nr_hyp_sweep_feed(&st,idx,idx==truth && st.classes[idx].trials%4!=0);
+  }
+  EXPECT_EQ(winner,truth) << "a starved class blocked the winner gate";
+  EXPECT_EQ(st.classes[0].trials,0u);
+  EXPECT_GE(st.classes[0].skipped,(uint64_t)NR_HYP_SWEEP_MIN_TRIALS);
+}

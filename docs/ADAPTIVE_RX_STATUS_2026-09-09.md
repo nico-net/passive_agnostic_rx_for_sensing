@@ -374,3 +374,84 @@ layout cannot be in the length-43 set, because those same widths total 42 with t
 
 **Not yet validated on air.** A 2400 s capture is running to see whether a winner is
 declared.
+
+## Validation round 1: item 1 CONFIRMED on air, two new defects found
+
+### Item 1 (sample freeze) — works
+`armed=1 split=0` on a 13-minute capture, against 38 arms / 36 invalidations before.
+Aggregate PUSCH CRC rose from **0.3 % to 2.3 %** (health 0.9 % -> 4.2 %) purely because a
+stable search lets the right hypotheses accumulate trials instead of being reset.
+
+### Defect A — I ran a stale binary (my own process error)
+The capture reported `raw=252` where the source predicts 199. After adding the last two
+admissibility rules I rebuilt only the TEST targets, never `nr-uesoftmodem`, so a
+40-minute capture validated the previous build. Caught only because the live number
+disagreed with a test.
+
+`source_commit.txt`, `source.patch` and the binary sha256 all describe the SOURCE, and the
+source was correct -- the BINARY was behind, which none of them can see. The runner now
+refuses to start if any tracked source file is newer than `nr-uesoftmodem` (`c602a1bcff`).
+
+### Defect B — an AssertFatal killed the receiver, and the harness called it VALID
+The next capture aborted 3 minutes in, exit 134, core dumped:
+
+```
+Assertion (p > -1) failed! In get_dmrs_port() nr_common.c:627
+No dmrs port corresponding to layer 0 found     (rnti=0x461e, a length-45 UE)
+```
+
+`antenna_ports` is a RAW payload field and the width sweep tries 2..5 bits for it, so
+values up to 31 reach a closed form defined only over Table 7.3.1.1.2-8's FOUR rows.
+`antenna_ports=14` gives `1u<<12` -- a port bitmap with no port below 12 -- and
+`get_dmrs_port()` answers that with AssertFatal. Values above 17 truncate to 0 in the
+uint16_t and read silently as "DCI 1_0, port 0", which is worse.
+
+**The landmine was reachable all along and had never been stepped on**: length-45 UEs used
+to overflow the class cap and never emitted a grant, so nothing ever fed these code points
+to the decoder. Fixing item 2 is what exposed it.
+
+Fixed by rejecting the code point (plus a belt-and-braces check on the resolved bitmap), a
+test walking all 32 values, and -- separately -- the harness bug it revealed: the watchdog
+called a CRASHED run VALID because it only checked SIB1 acquisition. Acquiring is not
+surviving; a healthy run exits 124 and anything else is now `VOID_ABNORMAL_EXIT_<rc>`.
+
+### Open, not chased: the claimed -> try gap
+`claimed=12367` but `try=3189` -- ~74 % of claimed grants never become decode attempts, a
+4x lever on convergence time. Drops ARE counted (`g_dropped_full` in the UL queue) but
+**never printed** -- there is no `puschq[...]` census line, so the loss is invisible.
+Capacity is not obviously the limit either: 2 consumer threads should manage far more than
+the observed 4.1 decodes/s. Instrument before tuning.
+
+## RETRACTION + the real throughput limit
+
+**"The UL queue drops are uninstrumented" was WRONG.** The census exists and always did; it
+is labelled `PUSCHQ` and my grep looked for `puschq[`. A failed grep read as absence --
+the same trap as reading a plural-only pattern as "no traffic". Always confirm a label
+before concluding a counter is missing.
+
+The real numbers, from the runs already captured:
+
+```
+1lxMai:  PUSCHQ queued=12367 decoded=1751 crc_ok=72 dropped[full=0 stale=2415] max_lag_slots=216/5
+wFHFMQ:  PUSCHQ queued=49318 decoded=3204 crc_ok=27 dropped[full=0 stale=10323] max_lag_slots=216/5
+```
+
+- `dropped_full=0` -- the ring NEVER overflows, so queue depth is not the constraint.
+- `max_lag_slots=216` against a sample-lifetime margin of **5**: the consumer runs so far
+  behind that the IQ it needs has been overwritten. That is what `dropped_stale` counts.
+- Throughput is **1751 decodes / ~780 s = 2.2/s on 2 consumer threads, i.e. ~0.9 s per
+  grant** at 273 PRB x 4 antennas, against a cell offering ~27 UL grants/s.
+
+**This, not `ul_pusch_max_per_slot`, is the convergence bottleneck**, and it bounds
+everything: 90 classes x 300 trials at 2.2/s is ~3.4 hours. A 90-minute capture cannot
+converge no matter what the search does.
+
+Two levers, both untried:
+1. **The consumers are on the wrong cores.** `ul_thread = "2:32:6"` places them on cores
+   6-7, which OVERLAP the DL scan thread-pool (`--thread-pool 0,1,6,7`) -- they contend with
+   the path that feeds them. sens6 has 12 cores, the receiver is pinned to 0-7 and measured
+   at ~291 % CPU (~3 cores), so cores 2-5 look free. More consumers, off the DL pool.
+2. Decode cost itself is dominated by 4-antenna FEP + channel estimation at 273 PRB. The
+   CRC oracle only needs to rank hypotheses, and may not need 4-antenna combining to do it.
+
+Neither should be changed while a capture is in flight, and not both at once.

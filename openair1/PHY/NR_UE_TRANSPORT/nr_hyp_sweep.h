@@ -47,7 +47,11 @@
 #define NR_HYP_SWEEP_CLASS_OVERFLOW (-2)
 #define NR_HYP_SWEEP_INVALID (-3)
 typedef struct { uint8_t bytes[NR_HYP_BYTES]; int len; } nr_hyp_t;
-typedef struct { nr_hyp_t hyp; uint64_t trials, passes; int members; } nr_hyp_class_t;
+/* `skipped` counts candidates this class could not even interpret. A class that is never
+ * plausible is never selected, so its `trials` stay 0 forever -- and the winner gate below
+ * requires EVERY class to reach MIN_TRIALS, which made convergence unreachable. See
+ * nr_hyp_sweep_feed(). */
+typedef struct { nr_hyp_t hyp; uint64_t trials, passes, skipped; int members; } nr_hyp_class_t;
 typedef struct {
   nr_hyp_class_t classes[NR_HYP_SWEEP_MAX_CLASSES];
   int n_classes, cursor, winner;
