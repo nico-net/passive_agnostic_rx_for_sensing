@@ -27,6 +27,7 @@ cp -- "$SCRIPT_DIR/adaptive_no_hints.conf" "$OUT/receiver.conf"
 git -C "$REPO" rev-parse HEAD > "$OUT/source_commit.txt"
 git -C "$REPO" diff --binary > "$OUT/source.patch"
 sha256sum "$BUILD/nr-uesoftmodem" "$BUILD/liboai_usrpdevif.so" "$OUT/receiver.conf" > "$OUT/checksums.txt"
+printf '%s\n' "${DURATION:-480}" > "$OUT/duration_s.txt"
 cat /sys/class/net/enp129s0f0np0/statistics/rx_missed_errors > "$OUT/nic_missed_before.txt"
 echo "OUTPUT=$OUT"
 cd "$BUILD"
@@ -40,7 +41,7 @@ sudo -n env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
   ISAC_UL_TA_SWEEP=0:0:0 ISAC_SENSE_COMB=0 ISAC_TSYNC_RESET=0 \
   ISAC_PASSIVE_REPLAY_CAPTURE="$OUT/replay.bin" \
   LD_LIBRARY_PATH="$BUILD:/usr/local/lib" \
-  timeout --signal=TERM --kill-after=10s 480s taskset -c 0-7 "$BUILD/nr-uesoftmodem" \
+  timeout --signal=TERM --kill-after=10s "${DURATION:-480}s" taskset -c 0-7 "$BUILD/nr-uesoftmodem" \
   --usrp-args type=x4xx,addr=192.168.20.2,mgmt_addr=128.178.122.174 \
   -O "$OUT/receiver.conf" -r 273 --numerology 1 --band 78 -C 3450000000 --ssb 150 \
   --ue-rxgain 40 --ue-nb-ant-rx 4 --ue-nb-ant-tx 4 --passive-rx \

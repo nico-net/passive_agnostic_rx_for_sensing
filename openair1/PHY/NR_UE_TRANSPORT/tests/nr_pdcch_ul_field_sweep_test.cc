@@ -75,11 +75,30 @@ TEST(UlFieldSweep, SyntheticOracleConvergesOnBoundedGeneratedSet) {
     EXPECT_EQ(nr_hyp_sweep_winner(&st),truth);
   }
 }
+/* The prerequisite that is genuinely unknown is the UL BWP: it is the RIV reference AND it sets
+ * the frequency-domain field's width, so nothing can be interpreted without it.
+ *
+ * This test used to use tda_count == 0 as its "unknown" case. That was never right --
+ * nr_pdcch_blind_dci01_size() reads 0 as the TS 38.214 Table 6.1.2.1.1-2 default 16-entry table,
+ * i.e. a 4-bit field and a COMPLETE interpretation -- and it only kept passing because the search
+ * hit NR_HYP_SWEEP_CLASS_OVERFLOW at the old 64-class cap and refused for an unrelated reason.
+ * Raising that cap unmasked it. Both halves are asserted below so neither can hide the other
+ * again. */
 TEST(UlFieldSweep, UnknownPrerequisitesDoNotEmitGuessedGrants) {
   nr_pdcch_ul_discovery_reset();
-  auto o=facts(); o.tda_count=0;
+  auto unknown=facts(); unknown.bwp_size=0;
   nr_pdcch_blind_ul_result_t out{};
-  for(int p=1;p<12;++p) EXPECT_FALSE(nr_pdcch_ul_discovery_grant(&o,43,0x1234,p,&out));
+  for(int p=1;p<12;++p) EXPECT_FALSE(nr_pdcch_ul_discovery_grant(&unknown,43,0x1234,p,&out));
+  EXPECT_EQ(nr_pdcch_ul_discovery_snapshot().width_classes,0);
   nr_pdcch_ul_discovery_feedback(&out,true);
+  nr_pdcch_ul_discovery_reset();
+}
+TEST(UlFieldSweep, DefaultTdaTableIsResolvedAndArmsTheSearch) {
+  nr_pdcch_ul_discovery_reset();
+  auto resolved=facts(); resolved.tda_count=0;   // default 16-entry table => 4-bit TDA field
+  nr_pdcch_blind_ul_result_t out{};
+  for(int p=1;p<12;++p) nr_pdcch_ul_discovery_grant(&resolved,43,0x1234,p,&out);
+  EXPECT_GT(nr_pdcch_ul_discovery_snapshot().width_classes,0)
+      << "the default TDRA table is a complete interpretation, not an unknown";
   nr_pdcch_ul_discovery_reset();
 }
