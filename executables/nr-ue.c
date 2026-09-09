@@ -8,8 +8,14 @@
 #include "PHY/defs_nr_common.h"
 #define _GNU_SOURCE // For pthread_setname_np
 #include <pthread.h>
+#ifdef ENABLE_SIONNA_RK_PLUGINS
+#include <errno.h>
+#include <fcntl.h>
+#include <unistd.h>
+#endif
 #include "executables/nr-ue-ru.h"
 #include "executables/nr-uesoftmodem.h"
+#include "executables/passive-ul-channel.h"
 #include "PHY/NR_UE_ESTIMATION/nr_estimation.h"
 #include "PHY/INIT/nr_phy_init.h"
 #include "NR_MAC_UE/mac_proto.h"
@@ -31,6 +37,64 @@
 #include "common/utils/time_manager/time_manager.h"
 #include "log.h"
 #include <stdatomic.h>
+#ifdef ENABLE_SIONNA_RK_PLUGINS
+#include "openair1/PHY/defs_RU.h"
+#include "plugins/common/src/plugins.h"
+
+static uint64_t shared_sfn_absolute_slot(uint32_t sfn_slot, uint32_t cycle_slots)
+{
+  static pthread_mutex_t clock_mutex = PTHREAD_MUTEX_INITIALIZER;
+  static uint64_t newest_absolute_slot;
+  static bool initialized;
+  pthread_mutex_lock(&clock_mutex);
+  uint64_t absolute_slot;
+  if (!initialized) {
+    uint32_t reference_slot = sfn_slot;
+    const char *path = getenv("CIR_SFN_REFERENCE_PATH");
+    if (path != NULL && path[0] != '\0') {
+      int fd = open(path, O_WRONLY | O_CREAT | O_EXCL, 0666);
+      if (fd >= 0) {
+        char value[32];
+        const int length = snprintf(value, sizeof(value), "%u\n", sfn_slot);
+        if (write(fd, value, (size_t)length) != length)
+          LOG_W(PHY, "CIR clock: failed to write complete SFN reference %s\n", path);
+        fsync(fd);
+        close(fd);
+      } else if (errno == EEXIST) {
+        bool loaded = false;
+        for (int attempt = 0; attempt < 100 && !loaded; ++attempt) {
+          FILE *stream = fopen(path, "r");
+          if (stream != NULL) {
+            loaded = fscanf(stream, "%u", &reference_slot) == 1;
+            fclose(stream);
+          }
+          if (!loaded)
+            usleep(10000);
+        }
+        if (!loaded)
+          LOG_W(PHY, "CIR clock: could not read shared SFN reference %s; using local epoch\n", path);
+      } else {
+        LOG_W(PHY, "CIR clock: cannot create shared SFN reference %s: %s\n", path, strerror(errno));
+      }
+    }
+    reference_slot %= cycle_slots;
+    const uint32_t forward_slots = (sfn_slot + cycle_slots - reference_slot) % cycle_slots;
+    absolute_slot = (uint64_t)reference_slot + forward_slots;
+    newest_absolute_slot = absolute_slot;
+    initialized = true;
+  } else {
+    absolute_slot = newest_absolute_slot / cycle_slots * cycle_slots + sfn_slot;
+    if (absolute_slot + cycle_slots / 2U < newest_absolute_slot)
+      absolute_slot += cycle_slots;
+    else if (absolute_slot > newest_absolute_slot + cycle_slots / 2U && absolute_slot >= cycle_slots)
+      absolute_slot -= cycle_slots;
+    if (absolute_slot > newest_absolute_slot)
+      newest_absolute_slot = absolute_slot;
+  }
+  pthread_mutex_unlock(&clock_mutex);
+  return absolute_slot;
+}
+#endif
 
 /// Defined in nr_adjust_synch_ue.c -- freezes the timing integrator during a stream outage.
 extern _Atomic int nr_ue_rf_signal_absent;
@@ -405,6 +469,14 @@ static void RU_write(nr_rxtx_thread_data_t *rxtxD, bool sl_tx_action, c16_t **tx
                          writeBlockSize);
   }
 
+#ifdef ENABLE_SIONNA_RK_PLUGINS
+  if (passive_ul_channel_requested()) {
+    const uint32_t cycle = 1024U * fp->slots_per_frame;
+    const uint32_t sfn_slot = (uint32_t)proc->frame_tx * fp->slots_per_frame + (uint32_t)proc->nr_slot_tx;
+    const uint64_t radio_slot = shared_sfn_absolute_slot(sfn_slot, cycle);
+    passive_ul_channel_register_write(writeTimestamp, radio_slot);
+  }
+#endif
   int tmp = nrue_ru_write_reorder(UE, writeTimestamp, (void **)txp, writeBlockSize, fp->nb_antennas_tx, flags);
   AssertFatal(tmp == writeBlockSize, "write to reorder function failed %d", tmp);
 }
@@ -1319,6 +1391,45 @@ void *UE_thread(void *arg)
       atomic_store_explicit(&nr_ue_diag_producer_absolute_slot, absolute_slot, memory_order_relaxed);
       atomic_store_explicit(&nr_ue_diag_producer_wall_ns,
                             (long)diag_ts.tv_sec * 1000000000L + diag_ts.tv_nsec, memory_order_relaxed);
+    }
+#ifdef ENABLE_SIONNA_RK_PLUGINS
+    /* RFsim transports the common waveform only. Apply this passive receiver's immutable Sionna
+     * bank at decoded radio time so process scheduling cannot advance the channel clock. */
+    if (IS_PASSIVE_RX_MODE(get_softmodem_params()) && is_channel_emulation_enabled()) {
+      RU_t channel_ru = {0};
+      channel_ru.common.rxdata = (int32_t **)UE->common_vars.rxdata;
+      const uint32_t cycle = 1024U * fp->slots_per_frame;
+      const uint32_t sfn_slot = (uint32_t)curMsg.proc.frame_rx * fp->slots_per_frame
+                                + (uint32_t)curMsg.proc.nr_slot_rx;
+      const uint64_t radio_slot = shared_sfn_absolute_slot(sfn_slot, cycle);
+      const void *cir_data = channel_emulator_cir_read_and_apply_at_slot(radio_slot);
+      chn_emu_interface.compute(&channel_ru,
+                                slot_nr,
+                                (NR_DL_FRAME_PARMS *)fp,
+                                fp->ofdm_symbol_size + fp->nb_prefix_samples0,
+                                fp->ofdm_symbol_size + fp->nb_prefix_samples,
+                                "rx",
+                                get_samples_slot_timestamp(fp, slot_nr),
+                                cir_data);
+    }
+#endif
+    if (IS_PASSIVE_RX_MODE(get_softmodem_params())) {
+      c16_t *slot_samples[fp->nb_antennas_rx];
+      const int slot_offset = get_samples_slot_timestamp(fp, slot_nr);
+      for (int ant = 0; ant < fp->nb_antennas_rx; ++ant)
+        slot_samples[ant] = &UE->common_vars.rxdata[ant][slot_offset];
+      const int samples_this_slot = get_samples_per_slot(slot_nr, fp);
+      const openair0_timestamp_t slot_timestamp = rx_timestamp - firstSymSamp;
+      const int ul_added = nrue_ru_add_passive_ul(UE,
+                                                  slot_timestamp,
+                                                  (void **)slot_samples,
+                                                  samples_this_slot,
+                                                  fp->nb_antennas_rx);
+      AssertFatal(ul_added == 0 || ul_added == samples_this_slot,
+                  "passive UL routing failed for frame.slot %d.%d (ret=%d)\n",
+                  curMsg.proc.frame_rx,
+                  curMsg.proc.nr_slot_rx,
+                  ul_added);
     }
     // ---- RF SAMPLE-STREAM CONTINUITY (2026-08-06) --------------------------------------------
     // Matching software slot counters (the producer/consumer lag check above) prove the PIPELINE

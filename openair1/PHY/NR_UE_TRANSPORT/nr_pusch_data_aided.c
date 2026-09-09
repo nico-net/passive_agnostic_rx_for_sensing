@@ -183,7 +183,8 @@ void nr_isac_pusch_data_aided_submit(PHY_VARS_NR_UE *ue,
         if (mod_idx >= expected || nof_re >= cap) {
           break;
         }
-        const int k_abs = ((g->start_rb + g->bwp_start) * 12 + rb * 12 + sc) % symsz;
+        const int k_grid = (g->start_rb + g->bwp_start) * 12 + rb * 12 + sc;
+        const int k_fft = (fp->first_carrier_offset + k_grid) % symsz;
 
         const c16_t  xs = mod_syms[mod_idx++];
         const double xr = (double)xs.r, xi = (double)xs.i;
@@ -194,13 +195,15 @@ void nr_isac_pusch_data_aided_submit(PHY_VARS_NR_UE *ue,
 
         for (uint32_t a = 0; a < nant; a++) {
           const c16_t *rf = &gnb->common_vars.rxdataF[a][slot_off + l * symsz];
-          const double yr = (double)rf[k_abs].r, yi = (double)rf[k_abs].i;
+          const double yr = (double)rf[k_fft].r, yi = (double)rf[k_fft].i;
           /* H = Y/X = Y * conj(X) / |X|^2 */
           const size_t o = 2 * ((size_t)a * cap + nof_re);
           h_buf[o]       = (float)((yr * xr + yi * xi) / p);
           h_buf[o + 1]   = (float)((yi * xr - yr * xi) / p);
         }
-        k_buf[nof_re] = (uint32_t)k_abs;
+        /* The sensing engine indexes a logical CRB/Point-A grid. The FFT rotation is only used
+         * above to address rxdataF and must not leak into this coordinate. */
+        k_buf[nof_re] = (uint32_t)k_grid;
         l_buf[nof_re] = (uint32_t)l;
         nof_re++;
       }

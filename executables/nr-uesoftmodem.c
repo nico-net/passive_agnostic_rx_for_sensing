@@ -27,12 +27,16 @@
 #include "PHY/CODING/nrLDPC_coding/nrLDPC_coding_interface.h"
 #include "PHY/phy_vars_nr_ue.h"
 #include "PHY/NR_UE_TRANSPORT/nr_transport_proto_ue.h"
+#include "executables/passive-ul-channel.h"
 
 #include "PHY_INTERFACE/phy_interface_vars.h"
 #include "NR_IF_Module.h"
 #include "openair1/SIMULATION/TOOLS/sim.h"
 #include "openair2/RRC/NR_UE/L2_interface_ue.h"
 #include "openair1/PHY/phy_extern_nr_ue.h"
+#ifdef ENABLE_SIONNA_RK_PLUGINS
+#include "plugins/common/src/plugins.h"
+#endif
 
 #ifdef SMBV
 #include "PHY/TOOLS/smbv.h"
@@ -429,6 +433,14 @@ int main(int argc, char **argv)
       return nr_passive_replay_read(nrPHY_vars_UE_g[0][0], replay_input);
     nr_passive_replay_init(nrPHY_vars_UE_g[0][0]);
   }
+#ifdef ENABLE_SIONNA_RK_PLUGINS
+  /* Passive receivers load the DL bank. Active simulation UEs optionally load exactly one
+   * UE-specific UL bank used only to publish an observed copy; their normal network UL is intact. */
+  if (IS_PASSIVE_RX_MODE(get_softmodem_params()) || passive_ul_channel_requested())
+    init_plugins(&nrPHY_vars_UE_g[0][0]->frame_parms);
+  if (passive_ul_channel_requested())
+    passive_ul_channel_init(&nrPHY_vars_UE_g[0][0]->frame_parms);
+#endif
 
   nrue_init_openair0();
 
@@ -505,6 +517,12 @@ int main(int argc, char **argv)
   nrue_ru_end();
 
   free_nrLDPC_coding_interface(&nrLDPC_coding_interface);
+
+#ifdef ENABLE_SIONNA_RK_PLUGINS
+  passive_ul_channel_shutdown();
+  if (IS_PASSIVE_RX_MODE(get_softmodem_params()) || passive_ul_channel_requested())
+    free_plugins();
+#endif
 
   time_manager_finish();
 

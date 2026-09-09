@@ -439,7 +439,9 @@ function tabTracking(v) {
       ["Δrange", fmt(t.bistatic_range_m,1)+" m"],
       ["range rate", fmt(t.bistatic_velocity_mps,2)+" m/s"],
       ["bearing", t.azimuth_deg!=null ? `${fmt(t.azimuth_deg,1)}° ±${fmt(t.azimuth_std_deg,1)}°` : "— (no AoA)"],
-      ["position", t.position ? `${fmt(t.position[0],0)}, ${fmt(t.position[1],0)} m` : "no fix"],
+      ...(t.elevation_deg!=null ? [["elevation", `${fmt(t.elevation_deg,1)}° ±${fmt(t.elevation_std_deg,1)}°`]] : []),
+      ["pos (ENU)", t.position ? (t.position.length >= 3 ? `${fmt(t.position[0],1)}, ${fmt(t.position[1],1)}, ${fmt(t.position[2],1)} m` : `${fmt(t.position[0],1)}, ${fmt(t.position[1],1)} m`) : "no fix"],
+      ...(t.velocity ? [["vel (ENU)", `${fmt(t.velocity[0],1)}, ${fmt(t.velocity[1],1)}, ${fmt(t.velocity[2],1)} m/s`]] : []),
       ["σ range / coast", `${fmt(t.sigma_range_m,1)} m / ${t.coast_count}`],
     ]));
     side.appendChild(p);

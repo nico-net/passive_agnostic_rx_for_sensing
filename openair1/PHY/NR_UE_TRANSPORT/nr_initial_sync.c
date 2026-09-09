@@ -234,45 +234,6 @@ static void do_time_to_freq(nr_ssb_search_params_t *params, uint32_t sample_offs
     for (unsigned char aa = 0; aa < params->nb_antennas_rx; aa++) {
       c16_t *rxF = rxdataF[symb][aa];
       dft(dftsize, (int16_t *)&params->rxdata[aa][rx_offset], (int16_t *)rxF, 1);
-
-      // TEMPORARY DIAGNOSTIC (2026-08-05): matches phy_procedures_nr_ue.c's tracking-path FEPDIAG --
-      // same 3 stages, so the two paths' amplitude at each stage can be compared directly for the
-      // same nominal SSB position. do_time_to_freq() has no equivalent nb_prefix_samples0 (this
-      // path never uses the long/first-symbol CP length at all -- see this function's rx_offset
-      // formula above), logged as 0 to make that asymmetry explicit rather than omitting the field.
-      if (aa == 0) {
-        static int s_fepdiag_acq_left = 40;
-        if (s_fepdiag_acq_left > 0) {
-          const c16_t *rxd = params->rxdata[0];
-          double s1_sum = 0.0, s1_sumsq = 0.0;
-          const int s1_n = (int)(params->nb_prefix_samples + params->ofdm_symbol_size);
-          for (int i = 0; i < s1_n; i++) {
-            const double m = hypot((double)rxd[rx_offset - params->nb_prefix_samples + i].r,
-                                   (double)rxd[rx_offset - params->nb_prefix_samples + i].i);
-            s1_sum += m;
-            s1_sumsq += m * m;
-          }
-          double s2_sum = 0.0, s2_sumsq = 0.0;
-          for (int i = 0; i < params->ofdm_symbol_size; i++) {
-            const double m = hypot((double)rxd[rx_offset + i].r, (double)rxd[rx_offset + i].i);
-            s2_sum += m;
-            s2_sumsq += m * m;
-          }
-          double s3_sum = 0.0, s3_sumsq = 0.0;
-          for (int i = 0; i < params->ofdm_symbol_size; i++) {
-            const double m = hypot((double)rxF[i].r, (double)rxF[i].i);
-            s3_sum += m;
-            s3_sumsq += m * m;
-          }
-          LOG_W(PHY,
-                "SENSING: FEPDIAG path=acquisition slot=- symbol=%d rx_offset=%u nb_prefix=%u nb_prefix0=0 "
-                "is_sync=0 s1_mean=%.2f s1_rms=%.2f s2_mean=%.2f s2_rms=%.2f s3_mean=%.2f s3_rms=%.2f\n",
-                symb, rx_offset, params->nb_prefix_samples, s1_sum / s1_n, sqrt(s1_sumsq / s1_n),
-                s2_sum / params->ofdm_symbol_size, sqrt(s2_sumsq / params->ofdm_symbol_size),
-                s3_sum / params->ofdm_symbol_size, sqrt(s3_sumsq / params->ofdm_symbol_size));
-          s_fepdiag_acq_left--;
-        }
-      }
       apply_nr_rotation_symbol_RX(params->symbols_per_slot,
                                   params->slots_per_subframe,
                                   timeshift_symbol_rotation,
@@ -325,7 +286,9 @@ bool nr_search_ssb_common(nr_ssb_search_params_t *params)
 #endif
 
     // Check that SSB fits within buffer
-    if (ssb_time_offset + NR_N_SYMBOLS_SSB * (params->ofdm_symbol_size + params->nb_prefix_samples) >= params->rxdata_size) {
+    if (ssb_time_offset < 0
+        || ssb_time_offset + NR_N_SYMBOLS_SSB * (params->ofdm_symbol_size + params->nb_prefix_samples)
+               >= params->rxdata_size) {
       LOG_D(PHY,
             "SSB extends beyond buffer boundary (sync_pos %d, ssb_time_offset %d, buffer_size %d)\n",
             sync_pos,

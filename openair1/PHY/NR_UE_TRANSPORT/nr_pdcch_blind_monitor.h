@@ -229,6 +229,7 @@ typedef struct {
 /// misaligned ones) -- were still correct. It surfaced the moment the MCS/RV fields were needed:
 /// 74 % of accepted grants decoded as rv != 0 on a link that has essentially no retransmissions.
 typedef struct {
+  int     mcs_table;        ///< DCI 1_1 PDSCH MCS table: 0 = qam64, 1 = qam256, 2 = qam64LowSE
   int     tda_count;        ///< 0 = use the spec default TDRA table (old behaviour)
   uint8_t tda_start[16];    ///< per-index PDSCH start symbol S
   uint8_t tda_length[16];   ///< per-index PDSCH symbol count L

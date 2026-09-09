@@ -50,11 +50,12 @@ TEST(HypSweep, ConstraintsAndEverySample) {
 }
 TEST(HypSweep, RefusalClearsOldWinnerAndChecksBounds) {
   nr_hyp_sweep_state_t st{};
-  std::vector<nr_hyp_t> raw(65,hyp(0));
-  EXPECT_EQ(nr_hyp_sweep_init(&st,raw.data(),65,nullptr,nullptr,nullptr,nullptr,0,nullptr),-2);
+  const int over = NR_HYP_SWEEP_MAX_CLASSES + 1;
+  std::vector<nr_hyp_t> raw(over,hyp(0));
+  EXPECT_EQ(nr_hyp_sweep_init(&st,raw.data(),over,nullptr,nullptr,nullptr,nullptr,0,nullptr),-2);
   EXPECT_EQ(nr_hyp_sweep_winner(&st),-1);
   EXPECT_EQ(st.n_classes,0);
-  EXPECT_EQ(nr_hyp_sweep_init(&st,raw.data(),8193,nullptr,nullptr,nullptr,nullptr,0,nullptr),-1);
+  EXPECT_EQ(nr_hyp_sweep_init(&st,raw.data(),NR_HYP_SWEEP_MAX_RAW+1,nullptr,nullptr,nullptr,nullptr,0,nullptr),-1);
   raw[0].len=NR_HYP_BYTES+1;
   EXPECT_EQ(nr_hyp_sweep_init(&st,raw.data(),1,nullptr,nullptr,nullptr,nullptr,0,nullptr),-3);
 }

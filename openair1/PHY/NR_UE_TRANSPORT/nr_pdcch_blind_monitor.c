@@ -896,6 +896,7 @@ static int parse_pdsch(const char* s)
   const int n = sscanf(s, "%d:%d:%d:%d:%d:%d:%d:%d", &g_cfg.pdsch_decode, &g_cfg.pdsch_mcs_table,
                        &g_cfg.pdsch_xoverhead, &g_cfg.pdsch_rv0_only, &g_cfg.pdsch_max_per_slot,
                        &g_cfg.pdsch_thread, &g_cfg.pdsch_queue_depth, &g_cfg.pdsch_thread_core);
+  g_cfg.extract.mcs_table = g_cfg.pdsch_mcs_table;
   return n >= 1;
 }
 
@@ -1067,7 +1068,8 @@ static int parse_ul_pusch(const char* s)
   g_cfg.ul_ta_offset_samples  = 0;
   const int n = sscanf(s, "%d:%d:%d", &g_cfg.ul_pusch_decode, &g_cfg.ul_pusch_max_per_slot,
                        &g_cfg.ul_ta_offset_samples);
-  if (n < 1 || g_cfg.ul_pusch_decode < 0 || g_cfg.ul_pusch_decode > 2) {
+  if (n < 1 || g_cfg.ul_pusch_decode < 0 || g_cfg.ul_pusch_decode > 2
+      || g_cfg.ul_pusch_max_per_slot < 0 || g_cfg.ul_pusch_max_per_slot > 4) {
     return 0;
   }
   return 1;
@@ -1217,6 +1219,7 @@ void nr_pdcch_blind_monitor_init(void)
   // behaviour unless the corresponding config lines are present.
   g_cfg.extract.tda_count      = 0;
   g_cfg.extract.tda_common_count = 0;
+  g_cfg.extract.mcs_table      = 0;
   // Format 1_0 scanning off => the module behaves exactly as before.
   g_cfg.dci10_scan             = 0;
   g_cfg.dci10_rb_offset        = -1;
@@ -2488,10 +2491,13 @@ bool nr_pdcch_blind_extract_11(const nr_pdcch_blind_raw_result_t *raw,
     out->reject_reason = "antenna_ports field outside Table 7.3.1.2.2-1's 12 valid rows";
     return false;
   }
-  // Table selection is still unknown here. MCS 28 is valid in tables 0 and 2;
-  // the actual PDSCH decoder checks the selected table's nonzero code rate.
-  if (mcs >= 29) {
-    out->reject_reason = "MCS reserved in every supported DL table (29-31)";
+  // Table 0/2 have valid entries through index 28; table 1 (qam256) stops at 27. This is the same
+  // rule used by gNB_scheduler_dlsch.c. The deployment supplies the table together with the other
+  // DCI 1_1 facts; NULL opts retain the table-0 default.
+  const uint32_t mcs_table = (opts != NULL) ? (uint32_t)opts->mcs_table : 0u;
+  const uint32_t mcs_reserved_from = (mcs_table == 1u) ? 28u : 29u;
+  if (mcs >= mcs_reserved_from) {
+    out->reject_reason = "MCS in the reserved retransmission-only range for the configured PDSCH table";
     return false;
   }
   uint16_t start_rb, num_rb;
@@ -2555,6 +2561,7 @@ bool nr_pdcch_blind_extract_11(const nr_pdcch_blind_raw_result_t *raw,
                                        | (g_table_7_3_2_3_3_1[antenna_ports][4] << 3));
   out->nscid              = (uint8_t)dmrs_seq_init;
   out->mcs                = (uint8_t)mcs;
+  out->mcs_table          = (uint8_t)mcs_table;
   out->rv                 = (uint8_t)rv;
   out->ndi                = (uint8_t)ndi;
   out->harq_pid           = (uint8_t)harq_pid;
@@ -2862,7 +2869,6 @@ static bool blind_ul_finish(const nr_pdcch_blind_ul_opts_t* opts,
   const int table = opts->mcs_table < 0 ? 0 : opts->mcs_table;
   if (table > 4 || mcs > 31 || nr_get_code_rate_ul(mcs, table) == 0) {
     out->reject_reason = "UL MCS reserved or invalid in the selected table";
-
     return false;
   }
 

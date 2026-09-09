@@ -566,6 +566,20 @@ static unsigned int passive_ul_fep_offset(const NR_DL_FRAME_PARMS *fp, unsigned 
   return (unsigned int)off;
 }
 
+/* nr_symbol_fep_ul() performs its ring subtraction through an unsigned accumulator and therefore
+ * requires a canonical non-negative offset.  Delay refinement can legitimately move the window
+ * through zero (for example TA 1600 - delay 2042 = -442); passing that value directly underflows
+ * the wrap branch and turns its split-window memcpy length into several gigabytes. */
+static int passive_ul_normalize_fep_offset(const NR_DL_FRAME_PARMS *fp, int64_t sample_offset)
+{
+  const int64_t ring = fp->samples_per_frame;
+  AssertFatal(ring > 0, "passive UL FEP requires a positive RX ring length\n");
+  int64_t normalized = sample_offset % ring;
+  if (normalized < 0)
+    normalized += ring;
+  return (int)normalized;
+}
+
 /* De-rotate one symbol's worth of samples into scratch, then DFT it. Mirrors nr_symbol_fep_ul()'s
  * wrap handling against samples_per_frame. */
 void nr_pusch_passive_fep_symbol(const NR_DL_FRAME_PARMS *fp, const c16_t *rxdata, c16_t *rxdataF,
@@ -661,8 +675,9 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
   /* One-shot STAGE markers. The first live run entered the decode and never returned, and with no
    * gdb on this host and every thread sleeping rather than spinning, the log is the only instrument
    * that can say WHERE. Each prints once; the last one printed is the stage that blocked. */
-  static int s_stage = 1;
-#define PUSCH_STAGE(n, what) do { if (s_stage) { LOG_I(PHY, "SENSING: PUSCHSTAGE %d %s\n", (n), (what)); } } while (0)
+  static _Atomic int s_stage_once = 1;
+  const int stage_diag = atomic_exchange_explicit(&s_stage_once, 0, memory_order_relaxed);
+#define PUSCH_STAGE(n, what) do { if (stage_diag) { LOG_I(PHY, "SENSING: PUSCHSTAGE %d %s\n", (n), (what)); } } while (0)
   PUSCH_STAGE(1, "guards passed");
   const int      utim = utim_enabled();
   const uint64_t t_all = utim ? utim_now() : 0;
@@ -712,6 +727,7 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
 #define PASSIVE_UL_FEP(off_)                                                                       \
   do {                                                                                             \
     const double fo_hz_ = fo_hz;                                                                   \
+    const int sample_offset_ = passive_ul_normalize_fep_offset(fp, (int64_t)(off_));                \
     const int s0_ = g->start_symbol;                                                               \
     const int s1_ = g->start_symbol + g->num_symbols;                                              \
     for (int a_ = 0; a_ < nant; a_++) {                                                            \
@@ -719,9 +735,10 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
       for (int sym_ = s0_; sym_ < s1_ && sym_ < sps; sym_++) {                                     \
         c16_t *dst_ = &gnb->common_vars.rxdataF[a_][slot_off + sym_ * symsz];                      \
         if (fo_hz_ != 0.0) {                                                                       \
-          nr_pusch_passive_fep_symbol(fp, rx_, dst_, (unsigned char)sym_, (unsigned char)slot, (off_), fo_hz_);\
+          nr_pusch_passive_fep_symbol(fp, rx_, dst_, (unsigned char)sym_, (unsigned char)slot,          \
+                                      sample_offset_, fo_hz_);                                          \
         } else {                                                                                   \
-          nr_symbol_fep_ul(fp, rx_, dst_, (unsigned char)sym_, (unsigned char)slot, (off_));       \
+          nr_symbol_fep_ul(fp, rx_, dst_, (unsigned char)sym_, (unsigned char)slot, sample_offset_);    \
         }                                                                                          \
         apply_nr_rotation_symbol_RX(fp->symbols_per_slot, fp->slots_per_subframe,                  \
                                     fp->timeshift_symbol_rotation, fp->first_carrier_offset,       \
@@ -837,7 +854,7 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
    * data-aided UL CFR is the one that needs a CRC-verified TB; this one does not.
    *
    * Layout: ul_ch_estimates[nl * num_sp_streams + antenna] is a per-symbol buffer indexed
-   * [ofdm_symbol_size * symbol + k], with k an ABSOLUTE subcarrier. num_sp_streams is
+   * [ofdm_symbol_size * symbol + k], with k relative to the PUSCH allocation. num_sp_streams is
    * param_v4.numSpatialStreamIndices -- the same field whose being zero deadlocked this function,
    * so it is read back from the PDU rather than assumed equal to nant.
    *
@@ -857,8 +874,8 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
         break;
       }
     }
-    const int start_sc = ((g->bwp_start + g->start_rb) * NR_NB_SC_PER_RB + fp->first_carrier_offset)
-                         % fp->ofdm_symbol_size;
+    const int logical_start_sc = (g->bwp_start + g->start_rb) * NR_NB_SC_PER_RB;
+    const int fft_start_sc = (logical_start_sc + fp->first_carrier_offset) % fp->ofdm_symbol_size;
     const int num_sc = g->num_rb * NR_NB_SC_PER_RB;
     if (dmrs_sym >= 0 && num_sp > 0 && num_sc > 0) {
       static __thread float    *ul_h = NULL;
@@ -884,13 +901,14 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
           const c16_t *h0 = (const c16_t *)&pvp->ul_ch_estimates[0][fp->ofdm_symbol_size * dmrs_sym];
           double e_rel = 0.0, e_abs = 0.0;
           for (int j = 0; j < num_sc; j++) {
-            const int ka = (start_sc + j) % fp->ofdm_symbol_size;
+            const int ka = (fft_start_sc + j) % fp->ofdm_symbol_size;
             e_rel += (double)h0[j].r * h0[j].r + (double)h0[j].i * h0[j].i;
             e_abs += (double)h0[ka].r * h0[ka].r + (double)h0[ka].i * h0[ka].i;
           }
           LOG_I(PHY,
-                "SENSING: ULCFRIDX dmrs_sym=%d start_sc=%d num_sc=%d num_sp=%d E_rel=%.3e E_abs=%.3e\n",
-                dmrs_sym, start_sc, num_sc, num_sp, e_rel, e_abs);
+                "SENSING: ULCFRIDX dmrs_sym=%d fft_start_sc=%d grid_start_sc=%d num_sc=%d "
+                "num_sp=%d E_rel=%.3e E_abs=%.3e\n",
+                dmrs_sym, fft_start_sc, logical_start_sc, num_sc, num_sp, e_rel, e_abs);
         }
       }
       uint32_t nof_re = 0;
@@ -910,10 +928,11 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
        * 256-PRB grants gave pw=[13333 579 58538 53579] (wrong, but believable) and 7-PRB grants
        * gave pw=[0 0 0 0] over 308628 REs, which is what made it visible at all.
        *
-       * The REPORTED subcarrier (ul_k below) stays ABSOLUTE and CRB-referenced -- that is what the
-       * CPI grid indexes on, and it was always correct. Only the read index was wrong. */
+       * The REPORTED subcarrier (ul_k below) is the logical CRB/Point-A carrier-grid coordinate,
+       * 0..N_RB_UL*12-1. first_carrier_offset belongs only to the FFT-buffer address and must never
+       * enter the sensing-grid coordinate. */
       for (int j = 0; j < num_sc && nof_re < ul_cap; j++) {
-        const int k_abs = (start_sc + j) % fp->ofdm_symbol_size;
+        const int k_grid = logical_start_sc + j;
         for (uint32_t a = 0; a < nof_ant_cfr; a++) {
           /* layer 0 only: this receiver rejects multi-layer PUSCH upstream, and a second layer
            * would need its own submission rather than being folded into this one. */
@@ -929,7 +948,7 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
             ant_pw[a] += p2;
           }
         }
-        ul_k[nof_re] = (uint32_t)k_abs;
+        ul_k[nof_re] = (uint32_t)k_grid;
         ul_l[nof_re] = (uint32_t)dmrs_sym;
         nof_re++;
       }
@@ -1184,7 +1203,6 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
                (fp->slots_per_frame > 0) ? (10000000ull / (uint64_t)fp->slots_per_frame) : 0);
   }
   PUSCH_STAGE(6, "ulsch_decoding returned");
-  s_stage = 0;
 #undef PUSCH_STAGE
 
   out->qam_mod_order = pdu.qam_mod_order;

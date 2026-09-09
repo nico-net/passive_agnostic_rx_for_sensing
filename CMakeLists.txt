@@ -1071,26 +1071,33 @@ target_compile_definitions(PHY_NR_NO_AVX_256 PUBLIC USE_128BIT)
 add_library(PHY_NR_UE ${PHY_NR_UE_SRC})
 target_link_libraries(PHY_NR_UE PRIVATE asn1_nr_rrc_hdrs nr_phy_common nr_common UTIL polar smallblock)
 
-# ISAC / passive-radar sensing pipeline (OAI-UE). Faithful port of the srsUE sensing engine
-# (repos/srs-ue-isac-dmd). Off-RT DSP + DetectionReport emission compliant with the central node
-# (repos/isac). Compiled as C++; exposes a C API to the RT PHY procedures.
+# Native C++ transcription of the validated Python passive-sensing pipeline. The RT PHY only
+# submits CFR rows through the C ABI; all DSP, detection, tracking and AoA work runs off-thread.
 set(NR_UE_ISAC_SRC
-  ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/isac_fft.cc
-  ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/isac_sync.cc
-  ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/target_tracker.cc
-  ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/multi_target_tracker.cc
-  ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/matrix_complete.cc
-  ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/sparse_doppler.cc
-  ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/clean_deconv.cc
-  ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/det_quality.cc
-  ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/isac_aoa.cc
-  ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/eca_clutter.cc
-  ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/range_doppler.cc
-  ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/detection_report.cc
+  ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/fft.cc
+  ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/adaptive_threshold.cc
+  ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/adaptive_clutter_map.cc
+  ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/sync_correction.cc
+  ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/detector.cc
+  ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/motion_tracker.cc
+  ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/variable_cpi.cc
+  ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/enu_tracker.cc
+  ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/hierarchical_tracker.cc
+  ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/cross_leg_fusion.cc
+  ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/aoa.cc
+  ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/report_writer.cc
   ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/sensing_engine.cc
   ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/nr_isac.cc
   ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/nr_isac_ssb_axis.c
   )
+if(ENABLE_CHANNEL_SIM_CUDA)
+  list(APPEND NR_UE_ISAC_SRC
+       ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/sync_correction_cuda.cu
+       ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/detector_cuda.cu
+       ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/family_processing_cuda.cu)
+else()
+  list(APPEND NR_UE_ISAC_SRC ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/detector_cuda_stub.cc)
+endif()
 # Passive receiver vs sensing pipeline. The blind PDCCH -> DCI -> PDSCH receiver only ever hands
 # channel estimates TO the sensing engine and never reads anything back, so on a receiver-only build
 # the whole library is replaced by no-ops (nr_isac_stub.c) and the receive path is unchanged.
@@ -1108,6 +1115,12 @@ else()
   message(STATUS "NR_UE_ISAC: sensing pipeline DISABLED (no-op stub; passive receiver only)")
 endif()
 target_link_libraries(NR_UE_ISAC PRIVATE UTIL)
+if(ENABLE_CHANNEL_SIM_CUDA AND ENABLE_ISAC_SENSING)
+  target_compile_definitions(NR_UE_ISAC PRIVATE NR_ISAC_CUDA_ACCELERATION NR_ISAC_CUDA_DETECTOR)
+  target_link_libraries(NR_UE_ISAC PRIVATE CUDA::cufft CUDA::cudart)
+  set_target_properties(NR_UE_ISAC PROPERTIES CUDA_STANDARD 17 CUDA_STANDARD_REQUIRED ON)
+  message(STATUS "NR_UE_ISAC: native CUDA sync and detector enabled")
+endif()
 find_library(ZMQ_LIB zmq)
 if(ZMQ_LIB AND ENABLE_ISAC_SENSING)
   target_compile_definitions(NR_UE_ISAC PRIVATE ENABLE_ZEROMQ)
@@ -1989,6 +2002,7 @@ add_executable(nr-uesoftmodem
   ${OPENAIR_DIR}/executables/position_interface.c
   ${OPENAIR_DIR}/executables/nr-ue.c
   ${OPENAIR_DIR}/executables/nr-ue-ru.c
+  ${OPENAIR_DIR}/executables/passive-ul-channel.c
   ${OPENAIR1_DIR}/PHY/TOOLS/phy_scope_interface.c
   ${NFAPI_USER_DIR}/nfapi.c
   ${PHY_INTERFACE_DIR}/queue_t.c
@@ -2243,6 +2257,9 @@ if (${T_TRACER})
 endif (${T_TRACER})
 
 set(ENABLE_TESTS OFF CACHE STRING "Activate build of tests")
+set(ENABLE_PLUGINS ON CACHE BOOL "Activate Sionna-RK plugins when a plugin tree is provided")
+set(SIONNA_RK_PLUGINS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/plugins" CACHE PATH
+    "Path to the Sionna-RK plugins directory")
 set_property(CACHE ENABLE_TESTS PROPERTY TYPE BOOL)
 set(ENABLE_PHYSIM_TESTS OFF CACHE STRING "Activate build of physim tests")
 set_property(CACHE ENABLE_PHYSIM_TESTS PROPERTY TYPE BOOL)
@@ -2280,91 +2297,54 @@ if(ENABLE_TESTS)
   endif()
 endif()
 
-# ota_sync_passive_ue.md Phase 6a: offline STO/CFO/SFO/closed-loop self-test. No scratchpad/*_test.cc
-# existed to extend (Phase 0 confirmed), so this is a new, gtest-based target matching the existing
-# common/utils/nr/tests convention (add_executable + GTest::gtest + add_dependencies(tests ...) +
-# add_test(...)). Must come after the `tests` custom target + GTest::gtest are defined above. See
-# openair1/PHY/NR_UE_ISAC/tests/isac_sync_test.cc's file header for design notes.
 if(ENABLE_TESTS)
-  add_executable(test_isac_sync ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/tests/isac_sync_test.cc)
-  target_include_directories(test_isac_sync PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_ISAC)
-  # uniqCfg/exit_function (needed by LOG/CONFIG_LIB) are defined directly in isac_sync_test.cc,
-  # not via minimal_lib -- static-archive link order made minimal_lib's stubs unreliable here.
-  target_link_libraries(test_isac_sync PRIVATE NR_UE_ISAC UTIL GTest::gtest)
-  add_dependencies(tests test_isac_sync)
-  add_test(NAME test_isac_sync COMMAND ./test_isac_sync)
-
-  # tests/ota_sync_bench/ (cheap-office OTA sync validation, no gNB/RU needed): replays a CFR
-  # grid built from a real two-SDR RF capture (tests/ota_sync_bench/process_capture.py) through
-  # the same production tracker classes as test_isac_sync above, instead of a synthetic grid.
-  # Not a gtest (takes a required --grid file argument), so no add_test() registration.
-  add_executable(isac_sync_replay ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/tools/isac_sync_replay.cc)
-  target_include_directories(isac_sync_replay PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_ISAC)
-  target_link_libraries(isac_sync_replay PRIVATE NR_UE_ISAC UTIL)
-  add_dependencies(tests isac_sync_replay)
-
-  # ECA/ECA+ clutter-cancellation offline self-test (ECA_CLUTTER_HANDOVER.md rollout step 2/4):
-  # validates the CFR-domain oblique projection in isolation (mean-subtraction equivalence + mirror
-  # -ghost suppression) before RT/engine wiring, same pattern as test_isac_sync above.
-  add_executable(test_eca_clutter ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/tests/eca_clutter_test.cc)
-  target_include_directories(test_eca_clutter PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_ISAC)
-  target_link_libraries(test_eca_clutter PRIVATE NR_UE_ISAC UTIL GTest::gtest)
-  add_dependencies(tests test_eca_clutter)
-
-  # Per-CPI Kalman target track (target_tracker.{h,cc}): validates sub-bin accuracy vs the quantized
-  # detections it is fed, gating/association against false alarms, coast-and-reacquire, and filter
-  # consistency (mean NIS). Same standalone pattern as the two above.
-  add_executable(test_target_tracker ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/tests/target_tracker_test.cc)
-  target_include_directories(test_target_tracker PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_ISAC)
-  target_link_libraries(test_target_tracker PRIVATE NR_UE_ISAC UTIL GTest::gtest)
-  add_dependencies(tests test_target_tracker)
-  add_test(NAME test_target_tracker COMMAND ./test_target_tracker)
-  add_test(NAME test_eca_clutter COMMAND ./test_eca_clutter)
-
-  # Multi-object tracking (multi_target_tracker.{h,cc}): a bank of per-track filters + global greedy
-  # association + M-of-N initiation. Validates two-target association, track-ID stability across a
-  # range crossing, and spurious-track rejection. Same standalone pattern as the tests above.
-  add_executable(test_multi_target_tracker ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/tests/multi_target_tracker_test.cc)
-  target_include_directories(test_multi_target_tracker PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_ISAC)
-  target_link_libraries(test_multi_target_tracker PRIVATE NR_UE_ISAC UTIL GTest::gtest)
-  add_dependencies(tests test_multi_target_tracker)
-  add_test(NAME test_multi_target_tracker COMMAND ./test_multi_target_tracker)
-
-  # Low-rank CFR matrix completion (matrix_complete.{h,cc}): recovery accuracy, data consistency, and
-  # amplitude-gating Doppler-harmonic removal. Only needs isac_fft's icf_t; link the whole lib anyway
-  # for consistency with the other ISAC tests.
-  add_executable(test_matrix_complete ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/tests/matrix_complete_test.cc)
-  target_include_directories(test_matrix_complete PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_ISAC)
-  target_link_libraries(test_matrix_complete PRIVATE NR_UE_ISAC UTIL GTest::gtest)
-  add_dependencies(tests test_matrix_complete)
-  add_test(NAME test_matrix_complete COMMAND ./test_matrix_complete)
-
-  # Receive-array AoA (isac_aoa.{h,cc}, PHASE3_AOA_MULTISTATIC_HANDOVER 5.4): array parsing +
-  # ambiguity flags, bearing recovery across the field of view for beamscan/interferometry/MUSIC, the
-  # SNR gate, CRB behaviour, and direct-path self-calibration. Same standalone pattern as the tests
-  # above.
-  add_executable(test_det_quality ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/tests/det_quality_test.cc)
-  target_include_directories(test_det_quality PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_ISAC)
-  target_link_libraries(test_det_quality PRIVATE NR_UE_ISAC UTIL GTest::gtest)
-  add_dependencies(tests test_det_quality)
-  add_test(NAME test_det_quality COMMAND ./test_det_quality)
-
-  add_executable(test_isac_aoa ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/tests/isac_aoa_test.cc)
-  target_include_directories(test_isac_aoa PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_ISAC)
-  target_link_libraries(test_isac_aoa PRIVATE NR_UE_ISAC UTIL GTest::gtest)
-  add_dependencies(tests test_isac_aoa)
-  add_test(NAME test_isac_aoa COMMAND ./test_isac_aoa)
-
-  # Phase 2 (roadmap artifact "Cell-Agnostic Passive Receiver"): type-system plumbing for the SSB
-  # CFR source (NR_ISAC_SRC_SSB), tested in isolation from the RT tap.
-  add_executable(test_nr_isac_ssb_source ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/tests/nr_isac_ssb_source_test.cc
-                                        ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/nr_isac.cc
-                                        ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/detection_report.cc
-                                        ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/nr_isac_ssb_axis.c)
-  target_include_directories(test_nr_isac_ssb_source PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_ISAC)
-  target_link_libraries(test_nr_isac_ssb_source PRIVATE NR_UE_ISAC UTIL GTest::gtest_main)
-  add_dependencies(tests test_nr_isac_ssb_source)
-  add_test(NAME test_nr_isac_ssb_source COMMAND ./test_nr_isac_ssb_source)
+  if(ENABLE_ISAC_SENSING)
+    add_executable(test_nr_isac_python_parity
+                   ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/tests/python_parity_test.cc)
+    target_include_directories(test_nr_isac_python_parity PRIVATE
+                               ${OPENAIR1_DIR}/PHY/NR_UE_ISAC)
+    target_link_libraries(test_nr_isac_python_parity PRIVATE NR_UE_ISAC UTIL)
+    add_dependencies(tests test_nr_isac_python_parity)
+    add_test(NAME test_nr_isac_python_parity COMMAND ./test_nr_isac_python_parity)
+    if(ENABLE_CHANNEL_SIM_CUDA)
+      add_executable(test_nr_isac_cuda_sync
+                     ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/tests/cuda_sync_test.cc)
+      target_include_directories(test_nr_isac_cuda_sync PRIVATE
+                                 ${OPENAIR1_DIR}/PHY/NR_UE_ISAC)
+      target_link_libraries(test_nr_isac_cuda_sync PRIVATE NR_UE_ISAC UTIL)
+      add_dependencies(tests test_nr_isac_cuda_sync)
+      add_test(NAME test_nr_isac_cuda_sync COMMAND ./test_nr_isac_cuda_sync)
+      add_executable(benchmark_nr_isac_cuda_detector
+                     ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/tests/detector_cuda_benchmark.cc)
+      target_include_directories(benchmark_nr_isac_cuda_detector PRIVATE
+                                 ${OPENAIR1_DIR}/PHY/NR_UE_ISAC)
+      target_link_libraries(benchmark_nr_isac_cuda_detector PRIVATE NR_UE_ISAC UTIL)
+      add_executable(benchmark_nr_isac_cuda_sync_correction
+                     ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/tests/sync_correction_cuda_benchmark.cc)
+      target_include_directories(benchmark_nr_isac_cuda_sync_correction PRIVATE
+                                 ${OPENAIR1_DIR}/PHY/NR_UE_ISAC)
+      target_link_libraries(benchmark_nr_isac_cuda_sync_correction PRIVATE NR_UE_ISAC UTIL)
+      add_executable(test_nr_isac_cuda_detector_parity
+                     ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/tests/detector_cuda_parity_test.cc)
+      target_include_directories(test_nr_isac_cuda_detector_parity PRIVATE
+                                 ${OPENAIR1_DIR}/PHY/NR_UE_ISAC)
+      target_link_libraries(test_nr_isac_cuda_detector_parity PRIVATE NR_UE_ISAC UTIL)
+      add_dependencies(tests test_nr_isac_cuda_detector_parity)
+      add_test(NAME test_nr_isac_cuda_detector_parity COMMAND ./test_nr_isac_cuda_detector_parity)
+      add_executable(test_nr_isac_cuda_family_processing
+                     ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/tests/family_processing_cuda_test.cc)
+      target_include_directories(test_nr_isac_cuda_family_processing PRIVATE
+                                 ${OPENAIR1_DIR}/PHY/NR_UE_ISAC)
+      target_link_libraries(test_nr_isac_cuda_family_processing PRIVATE NR_UE_ISAC UTIL)
+      add_dependencies(tests test_nr_isac_cuda_family_processing)
+      add_test(NAME test_nr_isac_cuda_family_processing COMMAND ./test_nr_isac_cuda_family_processing)
+      add_executable(benchmark_nr_isac_cuda_family_processing
+                     ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/tests/family_processing_cuda_benchmark.cc)
+      target_include_directories(benchmark_nr_isac_cuda_family_processing PRIVATE
+                                 ${OPENAIR1_DIR}/PHY/NR_UE_ISAC)
+      target_link_libraries(benchmark_nr_isac_cuda_family_processing PRIVATE NR_UE_ISAC UTIL)
+    endif()
+  endif()
 
   # Phase 3 (TOTAL_PASSIVE_UE_HANDOVER.md): offline blind PDCCH/DCI-1_1 decode + extract, synthetic
   # DCI injection against known ground truth -- required by this project's own testing plan before
@@ -2386,28 +2366,6 @@ if(ENABLE_TESTS)
   add_dependencies(tests test_nr_pdcch_blind_monitor)
   add_test(NAME test_nr_pdcch_blind_monitor COMMAND ./test_nr_pdcch_blind_monitor)
 
-  # L1/FISTA sparse Doppler recovery (sparse_doppler.{h,cc}): peak-to-harmonic ratio vs. dense NUDFT
-  # on a gappy tone, and preservation of a genuine second weaker target.
-  add_executable(test_sparse_doppler ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/tests/sparse_doppler_test.cc)
-  target_include_directories(test_sparse_doppler PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_ISAC)
-  target_link_libraries(test_sparse_doppler PRIVATE NR_UE_ISAC UTIL GTest::gtest)
-  add_dependencies(tests test_sparse_doppler)
-  add_test(NAME test_sparse_doppler COMMAND ./test_sparse_doppler)
-
-  # CLEAN deconvolution (clean_deconv.{h,cc}): a strong scatterer's window-PSF skirt is removed while
-  # a nearby weaker target buried in that skirt is recovered as a clean peak.
-  add_executable(test_clean_deconv ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/tests/clean_deconv_test.cc)
-  target_include_directories(test_clean_deconv PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_ISAC)
-  target_link_libraries(test_clean_deconv PRIVATE NR_UE_ISAC UTIL GTest::gtest)
-  add_dependencies(tests test_clean_deconv)
-  add_test(NAME test_clean_deconv COMMAND ./test_clean_deconv)
-
-  # Occupancy-aware forward-model CLEAN (range_doppler clean_occ_aware): end-to-end suppression of a
-  # gated Doppler harmonic through the real occupancy operator.
-  add_executable(test_occ_clean ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/tests/occ_clean_test.cc)
-  target_include_directories(test_occ_clean PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_ISAC)
-  target_link_libraries(test_occ_clean PRIVATE NR_UE_ISAC UTIL GTest::gtest)
-  add_dependencies(tests test_occ_clean)
   # Phase 3 Technique B (roadmap artifact "Cell-Agnostic Passive Receiver"): C-RNTI bootstrap
   # state machine, tested independently of any live RT capture.
   add_executable(test_nr_pdcch_blind_rnti_bootstrap ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_blind_rnti_bootstrap_test.cc)
@@ -2415,8 +2373,6 @@ if(ENABLE_TESTS)
   target_link_libraries(test_nr_pdcch_blind_rnti_bootstrap PRIVATE nr_pdcch_blind_monitor nr_common MAC_NR_COMMON polar crc_byte UTIL asn1_nr_rrc_hdrs asn1_lte_rrc_hdrs GTest::gtest)
   add_dependencies(tests test_nr_pdcch_blind_rnti_bootstrap)
   add_test(NAME test_nr_pdcch_blind_rnti_bootstrap COMMAND ./test_nr_pdcch_blind_rnti_bootstrap)
-  add_test(NAME test_occ_clean COMMAND ./test_occ_clean)
-
   # Phase 3 Technique A (roadmap artifact "Cell-Agnostic Passive Receiver"): full-carrier PDCCH
   # DM-RS correlation mapping. Closed-loop synthetic test (regenerates its own known-good DM-RS to
   # verify against) plus a pure-noise negative control. Needs the REAL nr_gold_pdcch (refsig.c) and
@@ -2468,6 +2424,26 @@ add_subdirectory(openair2)
 add_subdirectory(openair3)
 add_subdirectory(radio)
 add_subdirectory(tests)
+if(ENABLE_PLUGINS AND EXISTS "${SIONNA_RK_PLUGINS_DIR}/CMakeLists.txt")
+  if(SIONNA_CHANNEL_EMULATION_LOADER_ONLY)
+    set(SIONNA_CHANNEL_EMULATION_ONLY OFF CACHE BOOL
+        "Build only Sionna-RK channel emulation for the sensing integration" FORCE)
+  else()
+    set(SIONNA_CHANNEL_EMULATION_ONLY ON CACHE BOOL
+        "Build only Sionna-RK channel emulation for the sensing integration" FORCE)
+  endif()
+  get_filename_component(SIONNA_RK_ROOT_DIR "${SIONNA_RK_PLUGINS_DIR}" DIRECTORY)
+  foreach(sionna_oai_target nr-softmodem nr-uesoftmodem)
+    if(TARGET ${sionna_oai_target})
+      target_compile_definitions(${sionna_oai_target} PRIVATE ENABLE_SIONNA_RK_PLUGINS)
+      target_include_directories(${sionna_oai_target} PRIVATE "${SIONNA_RK_ROOT_DIR}")
+    endif()
+  endforeach()
+  add_subdirectory("${SIONNA_RK_PLUGINS_DIR}" "${CMAKE_BINARY_DIR}/sionna_plugins")
+  target_include_directories(plugins_plugins PUBLIC "${SIONNA_RK_ROOT_DIR}")
+elseif(ENABLE_PLUGINS)
+  message(STATUS "Sionna-RK plugins not found at ${SIONNA_RK_PLUGINS_DIR}; channel-emulation hook disabled")
+endif()
 
 add_boolean_option(OAI_RU_FRONTHAUL OFF "Whether to configure OAI fronthaul library" OFF)
 if(OAI_RU_FRONTHAUL)

@@ -5,6 +5,7 @@
 #include <unistd.h>
 #include "nr-ue-ru.h"
 #include "nr-uesoftmodem.h"
+#include "passive-ul-channel.h"
 #include "PHY/NR_UE_TRANSPORT/nr_transport_proto_ue.h"
 #include "common/config/config_paramdesc.h"
 #include "common/config/config_userapi.h"
@@ -560,10 +561,24 @@ int nrue_ru_read(PHY_VARS_NR_UE *UE, openair0_timestamp_t *ptimestamp, void **bu
   return ret;
 }
 
+int nrue_ru_add_passive_ul(PHY_VARS_NR_UE *UE,
+                           openair0_timestamp_t timestamp,
+                           void **buff,
+                           int nsamps,
+                           int num_antennas)
+{
+  openair0_device_t *dev = &openair0_dev[UE->rf_map.card];
+  if (dev->trx_add_passive_ul_func == NULL)
+    return 0;
+  return dev->trx_add_passive_ul_func(dev, timestamp + dev->firstTS, buff, nsamps, num_antennas);
+}
+
 int nrue_ru_write(PHY_VARS_NR_UE *UE, openair0_timestamp_t timestamp, void **buff, int nsamps, int num_antennas, int flags)
 {
   openair0_device_t *dev = &openair0_dev[UE->rf_map.card];
   int ret = dev->trx_write_func(dev, timestamp + dev->firstTS, buff, nsamps, num_antennas, flags);
+  if (ret == nsamps)
+    passive_ul_channel_after_normal_write(UE, dev, timestamp, buff, nsamps, num_antennas);
 
   if (UE->Mod_id != 0)
     return ret;
@@ -600,4 +615,5 @@ void nrue_ru_write_reorder_clear_context(PHY_VARS_NR_UE *UE)
 {
   openair0_device_t *device = &openair0_dev[UE->rf_map.card];
   openair0_write_reorder_clear_context(device);
+  passive_ul_channel_clear_pending();
 }
