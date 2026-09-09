@@ -202,6 +202,73 @@ double wrap_phase(double value)
 
 } // namespace
 
+void apply_array_calibration(CfrWindow& window, const ArrayCalibration& calibration)
+{
+  if (!calibration.configured) return;
+  if (!window.valid() || window.antennas != 4)
+    throw std::invalid_argument("array calibration requires a valid four-channel CFR window");
+  std::array<uint8_t, 4> seen{};
+  for (size_t physical = 0; physical < 4; ++physical) {
+    const uint32_t observed = calibration.physical_to_observed[physical];
+    if (observed >= 4 || seen[observed]++)
+      throw std::invalid_argument("array calibration channel permutation is invalid");
+    if (!(std::isfinite(calibration.gain[physical]) && calibration.gain[physical] > 0.0)
+        || !std::isfinite(calibration.phase_rad[physical])
+        || !std::isfinite(calibration.delay_s[physical]))
+      throw std::invalid_argument("array calibration coefficients must be finite with positive gain");
+  }
+  const std::vector<std::complex<float>> observed_values = window.values;
+  for (uint32_t physical = 0; physical < 4; ++physical) {
+    const uint32_t observed = calibration.physical_to_observed[physical];
+    for (uint32_t row = 0; row < window.rows; ++row)
+      for (uint32_t subcarrier = 0; subcarrier < window.subcarriers; ++subcarrier) {
+        const double offset_hz = (subcarrier - 0.5 * (window.subcarriers - 1.0))
+                                 * window.scs_hz;
+        const double phase = calibration.phase_rad[physical]
+                             + 2.0 * PI * offset_hz * calibration.delay_s[physical];
+        const std::complex<double> correction = std::polar(calibration.gain[physical], phase);
+        window.values[window.sample(physical, row, subcarrier)] =
+            static_cast<std::complex<float>>(
+                static_cast<std::complex<double>>(
+                    observed_values[window.sample(observed, row, subcarrier)]) * correction);
+      }
+  }
+}
+
+AoaEstimate admit_aoa_for_tracking(AoaEstimate estimate, const AoaQualityPolicy& policy)
+{
+  if (!estimate.valid) return estimate;
+  auto reject = [&](const char* reason) {
+    estimate.valid = false;
+    estimate.reason = reason;
+    return estimate;
+  };
+  if (estimate.visible_region_clipped)
+    return reject("AoA direction lies outside the physical visible region");
+  if (!std::isfinite(estimate.relative_manifold_residual_energy)
+      || estimate.relative_manifold_residual_energy
+             > policy.maximum_relative_manifold_residual_energy)
+    return reject("AoA single-manifold residual exceeds admission limit");
+  if (!std::isfinite(estimate.phase_fit_residual_rms_rad)
+      || estimate.phase_fit_residual_rms_rad > policy.maximum_phase_fit_residual_rms_rad)
+    return reject("AoA phase-fit residual exceeds admission limit");
+  if (!estimate.covariance_valid || estimate.covariance_rad2.rows() != 2
+      || estimate.covariance_rad2.cols() != 2)
+    return reject("AoA covariance is unavailable");
+  const double azimuth_sigma_deg =
+      std::sqrt(std::max(0.0, estimate.covariance_rad2(0, 0))) * 180.0 / PI;
+  const double elevation_sigma_deg =
+      std::sqrt(std::max(0.0, estimate.covariance_rad2(1, 1))) * 180.0 / PI;
+  if (!std::isfinite(azimuth_sigma_deg)
+      || azimuth_sigma_deg > policy.maximum_azimuth_stddev_deg)
+    return reject("AoA azimuth uncertainty exceeds admission limit");
+  if (!std::isfinite(elevation_sigma_deg)
+      || elevation_sigma_deg > policy.maximum_elevation_stddev_deg)
+    return reject("AoA elevation uncertainty exceeds admission limit");
+  estimate.reason.clear();
+  return estimate;
+}
+
 std::array<Complex, 4> surveyed_los_steering(const ArrayGeometry& geometry,
                                              Vec3 tx, Vec3 rx, double fc)
 {
@@ -610,7 +677,8 @@ void attach_aoa(CfrWindow aligned, const std::vector<CleanComponent>& components
   for (auto& d : detections) {
     const auto direct_response = project_array_response(projected, projected.observed,
                                                          d.range_m, d.range_rate_mps);
-    AoaEstimate direct = grid_free_upa_aoa(direct_response, config.array, aligned.fc_hz);
+    AoaEstimate direct = admit_aoa_for_tracking(
+        grid_free_upa_aoa(direct_response, config.array, aligned.fc_hz), config.aoa_quality);
     AoaIsolation isolation;
     if (los)
       isolation = isolate_target_response(aligned, aligned.observed,
@@ -619,8 +687,10 @@ void attach_aoa(CfrWindow aligned, const std::vector<CleanComponent>& components
       isolation.reason = "surveyed illuminator geometry unavailable";
     AoaEstimate isolated;
     if (isolation.valid)
-      isolated = grid_free_upa_aoa(isolation.response, config.array, aligned.fc_hz,
-          isolation.phase_covariance_valid ? &isolation.baseline_phase_covariance : nullptr);
+      isolated = admit_aoa_for_tracking(
+          grid_free_upa_aoa(isolation.response, config.array, aligned.fc_hz,
+              isolation.phase_covariance_valid ? &isolation.baseline_phase_covariance : nullptr),
+          config.aoa_quality);
     else isolated.reason = isolation.reason;
     const bool prefer_isolated = std::abs(d.range_m) < axes.range_res_m && isolation.valid;
     AoaEstimate preferred = prefer_isolated ? isolated : direct;

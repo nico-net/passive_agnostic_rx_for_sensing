@@ -127,6 +127,35 @@ bool parse_array(const char* spec, double rotation_deg, const char* broadside_sp
   out->broadside=broadside;out->configured=true;return true;
 }
 
+bool parse_array_calibration(const char* spec, ArrayCalibration* out)
+{
+  if (!out) return false;
+  if (!spec || !*spec) { *out = ArrayCalibration{}; return true; }
+  std::stringstream stream(spec); std::string token; size_t physical = 0;
+  ArrayCalibration parsed;
+  std::array<uint8_t, 4> seen{};
+  while (std::getline(stream, token, ';')) {
+    if (physical >= 4) return false;
+    unsigned observed = 0; double gain = 0.0, phase = 0.0, delay_ns = 0.0; int consumed = 0;
+    if (std::sscanf(token.c_str(), " %u , %lf , %lf , %lf %n",
+                    &observed, &gain, &phase, &delay_ns, &consumed) != 4
+        || token.find_first_not_of(" \t", static_cast<size_t>(consumed)) != std::string::npos
+        || observed >= 4 || seen[observed]++
+        || !(std::isfinite(gain) && gain > 0.0)
+        || !std::isfinite(phase) || !std::isfinite(delay_ns))
+      return false;
+    parsed.physical_to_observed[physical] = observed;
+    parsed.gain[physical] = gain;
+    parsed.phase_rad[physical] = phase;
+    parsed.delay_s[physical] = delay_ns * 1e-9;
+    ++physical;
+  }
+  if (physical != 4) return false;
+  parsed.configured = true;
+  *out = parsed;
+  return true;
+}
+
 int environment_bool(const char* name, int fallback)
 {
   const char* value = std::getenv(name); return value ? (std::atoi(value) != 0) : fallback;
@@ -145,7 +174,10 @@ extern "C" void nr_isac_init(void)
   double p_max_speed=50.0,p_max_range=312.283810417,p_path_delay=312.283810417;
   double p_path_doppler=0.0,p_significance=-10.0,p_false_intensity=0.01/0.0305;
   double p_rx_x=0,p_rx_y=0,p_rx_z=0,p_tx_x=0,p_tx_y=0,p_tx_z=0,p_rotation=0,p_subslot_snr=0;
+  double p_aoa_max_manifold=.25,p_aoa_max_phase=PI/4.0,p_aoa_max_az_sigma=45.0;
+  double p_aoa_max_el_sigma=45.0;
   char *p_source=nullptr,*p_sources=nullptr,*p_durations=nullptr,*p_array=nullptr,*p_broadside=nullptr;
+  char *p_array_calibration=nullptr;
   char *p_out=nullptr,*p_rx_id=nullptr,*p_illum=nullptr,*p_report=nullptr,*p_endpoint=nullptr;
   paramdef_t params[] = {
     integer("enable","enable native passive sensing",PARAMFLAG_BOOL,&p_enable,0),
@@ -183,6 +215,17 @@ extern "C" void nr_isac_init(void)
     text("rx_array","exactly four x,y[,z] element offsets separated by semicolons",&p_array,""),
     real("rx_array_boresight_deg","rotate legacy x,y array coordinates in ENU",&p_rotation,0.0),
     text("rx_array_broadside_enu","explicit broadside x,y,z; empty derives from geometry",&p_broadside,""),
+    text("rx_array_calibration",
+         "four physical-to-observed correction tuples observed,gain,phase_rad,delay_ns",
+         &p_array_calibration,""),
+    real("aoa_max_manifold_residual","maximum unexplained single-manifold energy fraction",
+         &p_aoa_max_manifold,.25),
+    real("aoa_max_phase_fit_rms_rad","maximum array phase-fit residual RMS",
+         &p_aoa_max_phase,PI/4.0),
+    real("aoa_max_azimuth_stddev_deg","maximum admitted azimuth standard uncertainty",
+         &p_aoa_max_az_sigma,45.0),
+    real("aoa_max_elevation_stddev_deg","maximum admitted elevation standard uncertainty",
+         &p_aoa_max_el_sigma,45.0),
     real("rx_pos_x","receiver ENU east",&p_rx_x,0),real("rx_pos_y","receiver ENU north",&p_rx_y,0),real("rx_pos_z","receiver ENU up",&p_rx_z,0),
     real("tx_pos_x","transmitter ENU east",&p_tx_x,0),real("tx_pos_y","transmitter ENU north",&p_tx_y,0),real("tx_pos_z","transmitter ENU up",&p_tx_z,0),
     integer("capture","include native range-Doppler raster in reports",PARAMFLAG_BOOL,&p_capture,0),
@@ -217,9 +260,17 @@ extern "C" void nr_isac_init(void)
   AOA_ENABLE=environment_bool("AOA_ENABLE",p_aoa);const int requested=environment_bool("AOA_UL_ENABLE",p_aoa_ul);
   AOA_UL_ENABLE=AOA_ENABLE&&requested;pipeline.aoa_enable=AOA_ENABLE;pipeline.aoa_ul_enable_requested=requested;
   pipeline.aoa_ul_enable=AOA_UL_ENABLE;
+  pipeline.aoa_quality.maximum_relative_manifold_residual_energy=p_aoa_max_manifold;
+  pipeline.aoa_quality.maximum_phase_fit_residual_rms_rad=p_aoa_max_phase;
+  pipeline.aoa_quality.maximum_azimuth_stddev_deg=p_aoa_max_az_sigma;
+  pipeline.aoa_quality.maximum_elevation_stddev_deg=p_aoa_max_el_sigma;
   if (pipeline.aoa_enable) {
     if (!parse_array(p_array,p_rotation,p_broadside,pipeline.tx_position,pipeline.rx_position,&pipeline.array)) {
       LOG_E(PHY,"SENSING: aoa_enable requires a valid surveyed rank-two four-element array; sensing disabled\n");
+      AOA_ENABLE=AOA_UL_ENABLE=0;return;
+    }
+    if (!parse_array_calibration(p_array_calibration,&pipeline.array_calibration)) {
+      LOG_E(PHY,"SENSING: rx_array_calibration must contain four unique observed,gain,phase_rad,delay_ns tuples; sensing disabled\n");
       AOA_ENABLE=AOA_UL_ENABLE=0;return;
     }
     aoa_antennas=4;
@@ -243,8 +294,9 @@ extern "C" void nr_isac_init(void)
   try { engine=std::make_unique<SensingEngine>(pipeline,275,aoa_antennas?aoa_antennas:1); }
   catch(const std::exception& e){LOG_E(PHY,"SENSING: invalid native configuration: %s\n",e.what());return;}
   enabled.store(true,std::memory_order_release);
-  LOG_I(PHY,"SENSING: native Python-parity pipeline enabled, num_ues=%u sources=0x%x separate_DL_UL=1 AoA=%d UL-AoA=%d\n",
-        pipeline.num_ues,pipeline.sources_mask,AOA_ENABLE,AOA_UL_ENABLE);
+  LOG_I(PHY,"SENSING: native Python-parity pipeline enabled, num_ues=%u sources=0x%x separate_DL_UL=1 AoA=%d UL-AoA=%d array_calibration=%d\n",
+        pipeline.num_ues,pipeline.sources_mask,AOA_ENABLE,AOA_UL_ENABLE,
+        pipeline.array_calibration.configured);
 }
 
 extern "C" void nr_isac_start(void)

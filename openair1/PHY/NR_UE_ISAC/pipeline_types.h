@@ -206,6 +206,31 @@ struct ArrayGeometry {
   bool configured = false;
 };
 
+/** Fixed receive-chain correction, indexed by physical array element.
+ *
+ * physical_to_observed[p] names the SDR channel connected to physical element p.  The complex
+ * correction applied at baseband offset f is
+ *
+ *   gain[p] * exp(j * (phase_rad[p] + 2*pi*f*delay_s[p])).
+ *
+ * Values are relative to element zero; a common gain/phase/delay is immaterial to AoA.
+ */
+struct ArrayCalibration {
+  bool configured = false;
+  std::array<uint32_t, 4> physical_to_observed{0, 1, 2, 3};
+  std::array<double, 4> gain{1.0, 1.0, 1.0, 1.0};
+  std::array<double, 4> phase_rad{};
+  std::array<double, 4> delay_s{};
+};
+
+/** Admission limits for using an otherwise finite AoA measurement in tracking. */
+struct AoaQualityPolicy {
+  double maximum_relative_manifold_residual_energy = 0.25;
+  double maximum_phase_fit_residual_rms_rad = PI / 4.0;
+  double maximum_azimuth_stddev_deg = 45.0;
+  double maximum_elevation_stddev_deg = 45.0;
+};
+
 struct PipelineConfig {
   uint32_t num_ues = 1; // supported runtime range: 1..4; decoding stays UE-agnostic here
   uint32_t sources_mask = 1u << NR_ISAC_SRC_CSI_RS;
@@ -244,6 +269,8 @@ struct PipelineConfig {
   bool aoa_ul_enable_requested = false;
   bool aoa_ul_enable = false;
   ArrayGeometry array;
+  ArrayCalibration array_calibration;
+  AoaQualityPolicy aoa_quality;
   Vec3 tx_position;
   Vec3 rx_position;
   std::string rx_id = "rx1";

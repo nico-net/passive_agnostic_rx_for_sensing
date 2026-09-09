@@ -9,6 +9,14 @@
 
 namespace nr_isac {
 
+/** Reorder receive channels into physical-element order and apply fixed complex calibration. */
+void apply_array_calibration(CfrWindow& window, const ArrayCalibration& calibration);
+
+/** Convert a numerically finite estimate into a tracker-usable measurement only when its
+ * measured single-manifold fit and propagated angular uncertainty satisfy the configured limits.
+ */
+AoaEstimate admit_aoa_for_tracking(AoaEstimate estimate, const AoaQualityPolicy& policy);
+
 struct AoaIsolation {
   bool valid = false;
   std::string reason;

@@ -11,7 +11,9 @@ through `nr_isac_submit_cfr_multi`; every operation after that boundary is imple
 1. Keep measured row timestamps, occupancy, source bits, and sub-slot fractions. DL and UL CFRs
    are retained as independent illuminator views; their complex phase histories are never averaged.
    No slow-time interpolation or fabricated REs are introduced.
-2. Estimate and apply statistically selected STO/SFO and per-row LOS phase using the current CPI.
+2. If supplied, reorder the four receive channels and apply fixed per-chain gain, phase, and group-
+   delay correction. Then estimate and apply statistically selected STO/SFO and per-row LOS phase
+   using the current CPI.
 3. Align identical scheduler/allocation families and subtract their per-antenna family mean.
 4. Estimate the current-CPI homoscedastic variance from within-family first differences.
 5. Form the masked, irregular-slow-time likelihood noncoherently over all receive antennas.
@@ -20,11 +22,12 @@ through `nr_isac_submit_cfr_multi`; every operation after that boundary is imple
    The two-bin Doppler guard excludes training cells around the CUT; it never zeros Doppler zero.
 8. Apply independent causal clutter/confirmed-track feedback to the DL and UL range/rate trackers,
    using global Hungarian association inside each detector stream.
-9. Estimate 3-D receive direction from the surveyed rank-two 2x2 UPA and feed the hierarchical
-   ENU EKF. DL detections create 3-D tracks. Independently detected UL range/rate measurements may
-   update an existing DL-born EKF using the surveyed UE geometry, but never create a 3-D track
-   without AoA. `aoa_enable` is the master switch; `aoa_ul_enable` is subordinate. With master on
-   and UL off, DL AoA remains active and UL AoA is not evaluated.
+9. Estimate 3-D receive direction from the surveyed rank-two 2x2 UPA. Reject clipped directions,
+   poor single-manifold fits, and excessive angular covariance before the hierarchical ENU EKF can
+   create or update a global track. DL detections with admitted AoA create 3-D tracks. UL currently
+   remains an independent auxiliary range/rate tracker because its transmitter position is not
+   known; no oracle UE position is present. `aoa_enable` is the master switch and `aoa_ul_enable`
+   is subordinate. With master on and UL off, DL AoA remains active and UL AoA is not evaluated.
 10. Emit detections, native range-Doppler maps, and stage-1/global tracks as JSONL/ZeroMQ reports.
 
 CFR submission, CPI formation, and detector/tracker processing are deliberately separated. The
@@ -37,6 +40,27 @@ runs require all three loss counters to remain zero.
 
 The old OAI detector (FFT/CA-CFAR, global zero-Doppler notch, ECA variants, greedy tracker, and
 legacy CLEAN) is intentionally absent.
+
+## Array calibration and AoA admission
+
+`sensing.rx_array_calibration` accepts four semicolon-separated tuples in physical-element order:
+
+```
+observed_channel,gain_correction,phase_correction_rad,delay_correction_ns;...
+```
+
+The correction at baseband offset `f` is
+`gain * exp(j * (phase + 2*pi*f*delay))`. An empty option is the identity correction. The matching
+Python replay option is `--array-calibration calibration.json`; both paths apply the correction
+before synchronization, detector alignment, and AoA. Calibration is target-blind and must come
+from a separate target-absent/cabled measurement. A fixed single LOS cannot identify wiring order
+when arbitrary cable phase and delay are unknown, so known SDR serialization is retained unless
+multiple independently surveyed look directions identify the permutation.
+
+The default AoA admission limits are manifold residual `0.25`, phase-fit RMS `pi/4`, and `45`
+degrees standard uncertainty on each angle. They are configurable with
+`sensing.aoa_max_manifold_residual`, `sensing.aoa_max_phase_fit_rms_rad`,
+`sensing.aoa_max_azimuth_stddev_deg`, and `sensing.aoa_max_elevation_stddev_deg`.
 
 ## CUDA detector backend
 

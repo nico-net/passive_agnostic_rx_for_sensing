@@ -131,6 +131,26 @@ std::string build_report_json(const PipelineReport& r, const PipelineConfig& c)
   out += ",\"aoa_policy\":{\"master\":" + std::string(c.aoa_enable?"true":"false")
       + ",\"uplink_requested\":" + std::string(c.aoa_ul_enable_requested?"true":"false")
       + ",\"uplink\":" + std::string(c.aoa_ul_enable?"true":"false") + '}';
+  out += ",\"aoa_quality_policy\":{\"maximum_relative_manifold_residual_energy\":";
+  number(out,c.aoa_quality.maximum_relative_manifold_residual_energy);
+  out += ",\"maximum_phase_fit_residual_rms_rad\":";
+  number(out,c.aoa_quality.maximum_phase_fit_residual_rms_rad);
+  out += ",\"maximum_azimuth_stddev_deg\":";
+  number(out,c.aoa_quality.maximum_azimuth_stddev_deg);
+  out += ",\"maximum_elevation_stddev_deg\":";
+  number(out,c.aoa_quality.maximum_elevation_stddev_deg);out += '}';
+  out += ",\"array_calibration\":{\"configured\":"
+      + std::string(c.array_calibration.configured?"true":"false")
+      + ",\"correction_convention\":\"gain*exp(j*(phase_rad+2*pi*f_offset_hz*delay_s))\""
+        ",\"physical_to_observed\":[";
+  for(size_t i=0;i<4;++i){if(i)out.push_back(',');out+=std::to_string(c.array_calibration.physical_to_observed[i]);}
+  out += "],\"gain\":[";
+  for(size_t i=0;i<4;++i){if(i)out.push_back(',');number(out,c.array_calibration.gain[i]);}
+  out += "],\"phase_rad\":[";
+  for(size_t i=0;i<4;++i){if(i)out.push_back(',');number(out,c.array_calibration.phase_rad[i]);}
+  out += "],\"delay_s\":[";
+  for(size_t i=0;i<4;++i){if(i)out.push_back(',');number(out,c.array_calibration.delay_s[i]);}
+  out += "]}";
   out += ",\"sensing_admission\":{\"enabled\":"
       + std::string(c.admission_window_enabled?"true":"false")
       + ",\"start_radio_slot\":" + std::to_string(c.admission_start_slot)
@@ -174,6 +194,7 @@ std::string build_report_json(const PipelineReport& r, const PipelineConfig& c)
     out += ",\"covariance_rad2\":";if(d.aoa.covariance_valid)matrix(out,d.aoa.covariance_rad2);else out+="null";
     out += ",\"phase_fit_residual_rms_rad\":";number(out,d.aoa.phase_fit_residual_rms_rad);
     out += ",\"relative_manifold_residual_energy\":";number(out,d.aoa.relative_manifold_residual_energy);
+    out += ",\"visible_region_clipped\":";out += d.aoa.visible_region_clipped?"true":"false";
     out += ",\"phase_wraps_tested\":"+std::to_string(d.aoa.phase_wraps_tested)+'}';out+='}';}out+=']';
   out += ",\"uplink\":{\"present\":";
   out += r.uplink_present ? "true" : "false";

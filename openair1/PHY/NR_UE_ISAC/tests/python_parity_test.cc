@@ -129,6 +129,50 @@ void test_aoa()
   close(estimate.azimuth_deg,35.0,1e-8,"grid-free AoA azimuth parity");
   close(estimate.elevation_deg,20.0,1e-8,"grid-free AoA elevation parity");
   require(estimate.covariance_valid,"grid-free AoA covariance missing");
+  require(admit_aoa_for_tracking(estimate, {}).valid,
+          "AoA quality admission rejected an exact physical response");
+  AoaEstimate poor_fit = estimate;
+  poor_fit.relative_manifold_residual_energy = 0.6;
+  require(!admit_aoa_for_tracking(poor_fit, {}).valid,
+          "AoA quality admission accepted excessive manifold residual");
+  AoaEstimate uncertain = estimate;
+  uncertain.covariance_rad2(0,0) = std::pow(104.0 * PI / 180.0, 2);
+  uncertain.covariance_rad2(1,1) = std::pow(52.0 * PI / 180.0, 2);
+  require(!admit_aoa_for_tracking(uncertain, {}).valid,
+          "AoA quality admission accepted unusable angular uncertainty");
+
+  CfrWindow calibrated; calibrated.antennas=4;calibrated.rows=2;calibrated.subcarriers=5;
+  calibrated.scs_hz=30000;calibrated.fc_hz=fc;calibrated.values.resize(40);
+  calibrated.observed.assign(10,1);calibrated.row_time_slots={0,1};
+  calibrated.row_slot_idx={0,1};calibrated.row_slot_frac={0,0};
+  calibrated.row_source_mask={1,1};
+  ArrayCalibration coefficients;coefficients.configured=true;
+  coefficients.physical_to_observed={2,0,3,1};
+  coefficients.gain={1.0,1.2,.8,1.4};
+  coefficients.phase_rad={0.0,-.4,.7,-1.1};
+  coefficients.delay_s={0.0,3.2e-9,-2.4e-9,5.1e-9};
+  std::vector<std::complex<float>> ideal(calibrated.values.size());
+  for(uint32_t physical=0;physical<4;++physical)
+    for(uint32_t row=0;row<calibrated.rows;++row)
+      for(uint32_t subcarrier=0;subcarrier<calibrated.subcarriers;++subcarrier){
+        const auto value=std::polar(1.0f+0.1f*physical,
+                                   static_cast<float>(.2*row-.1*subcarrier+.3*physical));
+        ideal[calibrated.sample(physical,row,subcarrier)]=value;
+        const double offset_hz=(subcarrier-.5*(calibrated.subcarriers-1.0))*calibrated.scs_hz;
+        const auto correction=std::polar(coefficients.gain[physical],
+            coefficients.phase_rad[physical]+2*PI*offset_hz*coefficients.delay_s[physical]);
+        calibrated.values[calibrated.sample(coefficients.physical_to_observed[physical],row,subcarrier)]=
+            static_cast<std::complex<float>>(static_cast<std::complex<double>>(value)/correction);
+      }
+  apply_array_calibration(calibrated,coefficients);
+  for(size_t i=0;i<ideal.size();++i)
+    require(std::abs(calibrated.values[i]-ideal[i])<5e-7,
+            "gain/phase/delay/channel-order calibration differs from reference");
+  ArrayCalibration malformed=coefficients;malformed.physical_to_observed={0,0,2,3};
+  bool malformed_rejected=false;
+  try {apply_array_calibration(calibrated,malformed);}
+  catch(const std::invalid_argument&){malformed_rejected=true;}
+  require(malformed_rejected,"duplicate array-calibration channel was not rejected");
 
   CfrWindow policy;policy.antennas=4;policy.rows=2;policy.subcarriers=2;policy.scs_hz=30000;
   policy.fc_hz=fc;policy.values.assign(16,{1,0});policy.observed.assign(4,1);
@@ -259,6 +303,12 @@ void test_validation_report_compatibility()
           "validation report lost source-count compatibility vector");
   require(json.find("\"azimuth_deg\":12.5")!=std::string::npos,
           "validation report lost top-level detection AoA compatibility");
+  require(json.find("\"aoa_quality_policy\"")!=std::string::npos,
+          "validation report lost AoA quality policy provenance");
+  require(json.find("\"array_calibration\"")!=std::string::npos,
+          "validation report lost receive-chain calibration provenance");
+  require(json.find("\"visible_region_clipped\":false")!=std::string::npos,
+          "validation report lost AoA visible-region diagnostic");
 
   PipelineConfig captured=c;captured.capture_rvm=true;
   r.detector.axes.range_bins=2;r.detector.axes.rate_bins=3;

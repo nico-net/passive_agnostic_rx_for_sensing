@@ -168,6 +168,32 @@ SensingEngine::SensingEngine(PipelineConfig config, uint32_t maximum_prb,
     throw std::invalid_argument("pending-row backlog budget must be at least 64 MiB");
   if (config_.aoa_ul_enable && !config_.aoa_enable)
     throw std::invalid_argument("AOA_UL_ENABLE cannot be active when AOA_ENABLE is off");
+  if (!(std::isfinite(config_.aoa_quality.maximum_relative_manifold_residual_energy)
+        && config_.aoa_quality.maximum_relative_manifold_residual_energy >= 0.0
+        && config_.aoa_quality.maximum_relative_manifold_residual_energy <= 1.0)
+      || !(std::isfinite(config_.aoa_quality.maximum_phase_fit_residual_rms_rad)
+           && config_.aoa_quality.maximum_phase_fit_residual_rms_rad > 0.0)
+      || !(std::isfinite(config_.aoa_quality.maximum_azimuth_stddev_deg)
+           && config_.aoa_quality.maximum_azimuth_stddev_deg > 0.0)
+      || !(std::isfinite(config_.aoa_quality.maximum_elevation_stddev_deg)
+           && config_.aoa_quality.maximum_elevation_stddev_deg > 0.0))
+    throw std::invalid_argument("AoA quality limits are invalid");
+  if (config_.array_calibration.configured) {
+    if (requested_antennas_ != 4)
+      throw std::invalid_argument("array calibration requires four receive channels");
+    std::array<uint8_t, 4> seen{};
+    for (size_t physical = 0; physical < 4; ++physical) {
+      const uint32_t observed = config_.array_calibration.physical_to_observed[physical];
+      if (observed >= 4 || seen[observed]++)
+        throw std::invalid_argument("array calibration channel permutation is invalid");
+      if (!(std::isfinite(config_.array_calibration.gain[physical])
+            && config_.array_calibration.gain[physical] > 0.0)
+          || !std::isfinite(config_.array_calibration.phase_rad[physical])
+          || !std::isfinite(config_.array_calibration.delay_s[physical]))
+        throw std::invalid_argument(
+            "array calibration coefficients must be finite with positive gain");
+    }
+  }
   const bool surveyed_baseline = norm(config_.tx_position - config_.rx_position) > 0.0;
   if (config_.aoa_enable
       && (!config_.array.configured || requested_antennas_ != 4 || !surveyed_baseline))
@@ -695,6 +721,11 @@ void SensingEngine::process_window(CfrWindow dl_window, std::optional<CfrWindow>
                                    const CpiPlan& plan,
                                    double air_origin_slots, uint64_t sequence)
 {
+  // The correction is hardware-specific and target-blind. Apply it before common-mode clock
+  // correction, family alignment, noncoherent detection, and AoA so every downstream block sees
+  // channels in physical-element order with the same calibrated gain/phase/delay convention.
+  apply_array_calibration(dl_window, config_.array_calibration);
+  if (ul_window) apply_array_calibration(*ul_window, config_.array_calibration);
   PipelineReport report;
   report.cpi_sequence = sequence;
   report.start_utc_ns = dl_window.start_utc_ns;
