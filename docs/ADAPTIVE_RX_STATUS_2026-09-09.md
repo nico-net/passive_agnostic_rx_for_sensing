@@ -155,3 +155,31 @@ footprints once and reusing them cheaply. Without the demux this run would sit n
 - **60 % target**: 54.9 % is the closest measured, on one UE, uplink only.
 - **The conditioned-rate defect in the width search** (in-search 16.9 % vs pinned 2.5 % for
   the same class) remains unfixed, and it is what decides which layout the search would crown.
+
+## RIG DOWN: X410 RX path stopped receiving (2026-09-09, end of session)
+
+The manual run that produced the 54.9 % figure ended `VOID_ABNORMAL_EXIT_3` -- the
+receiver's own RFSTALL detector firing, not a crash:
+
+```
+RFSTALL RF stream stalled (rf_pow=8.30 ref=1127.10 pbch_ok=0 pbch_fail=50)
+RFSTALL -- stopping capture (exit 3); restart the run
+```
+
+RF power collapsed 1127 -> 8.3 (~21 dB) across all four antennas. **The operator confirms
+the LEDs near the antennas are OFF**, so this is the RX path itself, not a CFO mis-lock.
+
+Ruled out by measurement, so do not repeat:
+- **Not a stale MPM claim.** After all processes were killed, `uhd_find_devices` reports
+  `claimed: False`. The device is reachable and unclaimed.
+- **Not fixed by restarting the process.** Four acquisition attempts failed against it, and a
+  later partial run produced `try=2072 crc_ok=0`.
+
+So the 54.9 % on UE 0x4cf4 is **measured but UNVALIDATED** -- its run is VOID by this
+harness's own rule, and it could not be reproduced before RF died. Treat it as the best
+available estimate, not a result. Re-run manual mode first thing once RF is back.
+
+Queue when the radio returns:
+1. Manual mode re-run for a VALID health number (expect ~50-55 %).
+2. Sensing: rebuild with `ENABLE_ISAC_SENSING=ON`, relax the runner's OFF assertion, set
+   `ul_pusch` mode 2 so CFR is actually submitted (`cfr_submits` has been 0 all session).
