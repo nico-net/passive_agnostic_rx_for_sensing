@@ -54,7 +54,6 @@ typedef struct {
   int num_rx_errors;
   //! Number of TX errors
   int num_tx_errors;
-
   //! timestamp of current TX
   uint64_t tx_current_ts;
   //! timestamp of current RX
@@ -113,11 +112,15 @@ static int trx_brf_start(openair0_device_t *device)
 
   brf->meta_tx.flags = 0;
 
-  status = bladerf_sync_config(brf->dev, BLADERF_CHANNEL_TX(0), brf->format,
-                               brf->num_buffers, brf->buffer_size, brf->num_transfers, brf->tx_timeout_ms);
-  BLADERF_CHECK(status == 0,
-                "Set TX sync interface num_buffers %u, buffer_size %u, num_transfer %u, tx_timeout_ms %u",
-                brf->num_buffers, brf->buffer_size, brf->num_transfers, brf->tx_timeout_ms);
+  if (device->openair0_cfg->tx_num_channels > 0) {
+    status = bladerf_sync_config(brf->dev, BLADERF_CHANNEL_TX(0), brf->format,
+                                 brf->num_buffers, brf->buffer_size, brf->num_transfers, brf->tx_timeout_ms);
+    BLADERF_CHECK(status == 0,
+                  "Set TX sync interface num_buffers %u, buffer_size %u, num_transfer %u, tx_timeout_ms %u",
+                  brf->num_buffers, brf->buffer_size, brf->num_transfers, brf->tx_timeout_ms);
+  } else {
+    LOG_I(HW, "Skip TX sync interface in RX-only mode\n");
+  }
 
   status = bladerf_sync_config(brf->dev, BLADERF_CHANNEL_RX(0), brf->format,
                                brf->num_buffers, brf->buffer_size, brf->num_transfers, brf->rx_timeout_ms);
@@ -127,8 +130,12 @@ static int trx_brf_start(openair0_device_t *device)
 
   /* We must always enable the TX module after calling bladerf_sync_config(), and
    * before  attempting to TX samples via  bladerf_sync_tx(). */
-  status = bladerf_enable_module(brf->dev, BLADERF_CHANNEL_TX(0), true);
-  BLADERF_CHECK(status == 0, "Enable TX0 module");
+  if (device->openair0_cfg->tx_num_channels > 0) {
+    status = bladerf_enable_module(brf->dev, BLADERF_CHANNEL_TX(0), true);
+    BLADERF_CHECK(status == 0, "Enable TX0 module");
+  } else {
+    LOG_I(HW, "Skip TX0 module enable in RX-only mode\n");
+  }
 
   /* We must always enable the RX module after calling bladerf_sync_config(), and
    * before  attempting to RX samples via  bladerf_sync_rx(). */
@@ -154,6 +161,8 @@ static int trx_brf_start(openair0_device_t *device)
 static int trx_brf_write(openair0_device_t *device, openair0_timestamp_t ptimestamp, void **buff, int nsamps, int cc, int flags)
 {
   brf_state_t *brf = device->priv;
+  if (device->openair0_cfg->tx_num_channels == 0)
+    return nsamps;
 
   /* BRF has only 1 rx/tx chaine : is it correct? TODO: now, handle also two! */
   int16_t *samples = (int16_t *)buff[0];
@@ -168,7 +177,7 @@ static int trx_brf_write(openair0_device_t *device, openair0_timestamp_t ptimest
   }
   ptimestamp -= device->openair0_cfg->command_line_sample_advance - device->openair0_cfg->tx_sample_advance;
 
-  // When  BLADERF_META_FLAG_TX_NOW is used the timestamp is not used, so one can't schedule a tx
+  // When BLADERF_META_FLAG_TX_NOW is used the timestamp is not used, so one can't schedule a tx
   if (brf->meta_tx.flags == 0)
     brf->meta_tx.flags = BLADERF_META_FLAG_TX_BURST_START;
   brf->meta_tx.timestamp = (uint64_t)(ptimestamp);
@@ -234,8 +243,8 @@ static int trx_brf_read(openair0_device_t *device, openair0_timestamp_t *ptimest
           "%d RX overrun is detected. timestamp %ld. Requested %u but got %u samples\n",
           brf->num_overflows,
           brf->meta_rx.timestamp,
-          brf->meta_rx.actual_count,
-          nsamps);
+          nsamps,
+          brf->meta_rx.actual_count);
   }
 
   if (brf->meta_rx.actual_count != nsamps) {
@@ -525,17 +534,21 @@ int device_init(openair0_device_t *device, openair0_config_t *openair0_cfg)
   // Note also that the doc says that get_gain_range() should be called after
   // setting the frequency, but the gain should normally come from outside, so
   // be set by user and independent of the exact frequency.
-  const struct bladerf_range *g = NULL;
-  status = bladerf_get_gain_range(brf.dev, BLADERF_CHANNEL_TX(0), &g);
-  BLADERF_CHECK(status == 0 && g != NULL, "Get TX0 gain range");
-  channel_config_t tx_chan = {
-    .channel = BLADERF_CHANNEL_TX(0),
-    .frequency = openair0_cfg->tx_freq[0],
-    .sample_rate = openair0_cfg->sample_rate,
-    .bandwidth = brf.use_sc8 ? 0 : openair0_cfg->tx_bw,
-    .gain = g->max - openair0_cfg->tx_gain[0], // see comment above
-  };
-  configure_channel(brf.dev, &tx_chan);
+  if (openair0_cfg->tx_num_channels > 0) {
+    const struct bladerf_range *g = NULL;
+    status = bladerf_get_gain_range(brf.dev, BLADERF_CHANNEL_TX(0), &g);
+    BLADERF_CHECK(status == 0 && g != NULL, "Get TX0 gain range");
+    channel_config_t tx_chan = {
+      .channel = BLADERF_CHANNEL_TX(0),
+      .frequency = openair0_cfg->tx_freq[0],
+      .sample_rate = openair0_cfg->sample_rate,
+      .bandwidth = brf.use_sc8 ? 0 : openair0_cfg->tx_bw,
+      .gain = g->max - openair0_cfg->tx_gain[0], // see comment above
+    };
+    configure_channel(brf.dev, &tx_chan);
+  } else {
+    LOG_I(HW, "Skip TX0 channel configuration in RX-only mode\n");
+  }
 
   LOG_I(HW, "BLADERF: Initializing device done\n");
   device->type             = BLADERF_DEV;
