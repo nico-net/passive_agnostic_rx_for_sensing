@@ -42,6 +42,7 @@ AoaEstimate grid_free_upa_aoa(
 void attach_aoa(CfrWindow aligned_unprojected,
                 const std::vector<CleanComponent>& all_components,
                 const Axes& axes, const PipelineConfig& config,
-                std::vector<Detection>& detections);
+                std::vector<Detection>& detections,
+                bool surveyed_los_available = true);
 
 } // namespace nr_isac

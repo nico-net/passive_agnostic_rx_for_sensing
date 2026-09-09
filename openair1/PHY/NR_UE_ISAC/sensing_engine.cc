@@ -164,9 +164,6 @@ SensingEngine::SensingEngine(PipelineConfig config, uint32_t maximum_prb,
   if (has_uplink && config_.num_ues != 1)
     throw std::invalid_argument(
         "UL sensing currently requires num_ues=1 because CFR submissions do not carry UE identity");
-  if (has_uplink && config_.tracker_enable && config_.hierarchical_tracker_enable
-      && !config_.ul_tx_position_configured)
-    throw std::invalid_argument("UL/DL ENU fusion requires the surveyed UL transmitter position");
   if (config_.pending_row_budget_bytes < 64ULL * 1024ULL * 1024ULL)
     throw std::invalid_argument("pending-row backlog budget must be at least 64 MiB");
   if (config_.aoa_ul_enable && !config_.aoa_enable)
@@ -811,19 +808,13 @@ void SensingEngine::process_window(CfrWindow dl_window, std::optional<CfrWindow>
       ul_corrected = *ul_window;
       report.uplink_sync.rows = ul_window->rows;
       PipelineConfig ul_config = config_;
-      ul_config.tx_position = config_.ul_tx_position;
       ul_config.aoa_enable = config_.aoa_ul_enable;
       if (config_.sync_enable && ul_window->rows >= 3) {
         report.uplink_sync = estimate_sync(*ul_window);
         report.uplink_sync = ul_clock_tracker_.update(
             report.uplink_sync, report.midpoint_air_time_s,
             ul_window->subcarriers, ul_window->scs_hz);
-        std::optional<std::array<std::complex<double>, 4>> los;
-        if (ul_window->antennas == 4 && config_.array.configured
-            && config_.ul_tx_position_configured)
-          los = surveyed_los_steering(config_.array, config_.ul_tx_position,
-                                      config_.rx_position, ul_window->fc_hz);
-        apply_sync_correction(*ul_corrected, report.uplink_sync, 0.0, los);
+        apply_sync_correction(*ul_corrected, report.uplink_sync, 0.0, std::nullopt);
       }
       report.uplink_current_cpi_variance = estimate_current_cpi_variance(
           *ul_corrected, &report.uplink_covariance_family_count,
@@ -847,7 +838,7 @@ void SensingEngine::process_window(CfrWindow dl_window, std::optional<CfrWindow>
       report.uplink_detections = accept(
           report.uplink_detector, ul_detector_input, ul_priors, ul_clutter);
       attach_aoa(*ul_corrected, report.uplink_detector.components,
-                 report.uplink_detector.axes, ul_config, report.uplink_detections);
+                 report.uplink_detector.axes, ul_config, report.uplink_detections, false);
       report.uplink_valid = true;
     } catch (const std::exception& error) {
       report.uplink_error = error.what();
@@ -863,8 +854,7 @@ void SensingEngine::process_window(CfrWindow dl_window, std::optional<CfrWindow>
         hierarchical_tracker_->update_auxiliary(
             report.midpoint_air_time_s, report.uplink_detections,
             report.uplink_detector.axes.range_res_m,
-            report.uplink_detector.axes.rate_res_mps, report.cpi_sequence,
-            BistaticGeometry{config_.ul_tx_position, config_.rx_position});
+            report.uplink_detector.axes.rate_res_mps, report.cpi_sequence);
         report.uplink_tracks = hierarchical_tracker_->auxiliary_snapshots();
       }
       report.tracks = hierarchical_tracker_->snapshots();

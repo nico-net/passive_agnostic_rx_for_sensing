@@ -182,8 +182,6 @@ std::string build_report_json(const PipelineReport& r, const PipelineConfig& c)
   out += ",\"error\":";
   string_value(out, r.uplink_error);
   if (r.uplink_valid) {
-    out += ",\"tx_position_enu_m\":[";number(out,c.ul_tx_position.x);out.push_back(',');
-    number(out,c.ul_tx_position.y);out.push_back(',');number(out,c.ul_tx_position.z);out.push_back(']');
     out += ",\"actual_row_count\":" + std::to_string(r.uplink_detector.axes.rate_bins);
     out += ",\"observed_re_count\":" + std::to_string(r.uplink_detector.axes.observed_re_count);
     out += ",\"range_res_m\":";number(out,r.uplink_detector.axes.range_res_m);

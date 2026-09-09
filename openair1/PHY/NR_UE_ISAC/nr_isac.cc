@@ -145,8 +145,6 @@ extern "C" void nr_isac_init(void)
   double p_max_speed=50.0,p_max_range=312.283810417,p_path_delay=312.283810417;
   double p_path_doppler=0.0,p_significance=-10.0,p_false_intensity=0.01/0.0305;
   double p_rx_x=0,p_rx_y=0,p_rx_z=0,p_tx_x=0,p_tx_y=0,p_tx_z=0,p_rotation=0,p_subslot_snr=0;
-  double p_ul_tx_x=0,p_ul_tx_y=0,p_ul_tx_z=0;
-  int p_ul_tx_configured=0;
   char *p_source=nullptr,*p_sources=nullptr,*p_durations=nullptr,*p_array=nullptr,*p_broadside=nullptr;
   char *p_out=nullptr,*p_rx_id=nullptr,*p_illum=nullptr,*p_report=nullptr,*p_endpoint=nullptr;
   paramdef_t params[] = {
@@ -187,8 +185,6 @@ extern "C" void nr_isac_init(void)
     text("rx_array_broadside_enu","explicit broadside x,y,z; empty derives from geometry",&p_broadside,""),
     real("rx_pos_x","receiver ENU east",&p_rx_x,0),real("rx_pos_y","receiver ENU north",&p_rx_y,0),real("rx_pos_z","receiver ENU up",&p_rx_z,0),
     real("tx_pos_x","transmitter ENU east",&p_tx_x,0),real("tx_pos_y","transmitter ENU north",&p_tx_y,0),real("tx_pos_z","transmitter ENU up",&p_tx_z,0),
-    integer("ul_tx_position_configured","surveyed single-UE UL transmitter position is present",PARAMFLAG_BOOL,&p_ul_tx_configured,0),
-    real("ul_tx_pos_x","UL transmitter ENU east",&p_ul_tx_x,0),real("ul_tx_pos_y","UL transmitter ENU north",&p_ul_tx_y,0),real("ul_tx_pos_z","UL transmitter ENU up",&p_ul_tx_z,0),
     integer("capture","include native range-Doppler raster in reports",PARAMFLAG_BOOL,&p_capture,0),
     text("out_path","output prefix",&p_out,"/tmp/oaiue_sensing"),text("rx_id","receiver id",&p_rx_id,"rx1"),
     text("illuminator_id","illuminator id",&p_illum,"gnb1"),text("report_path","JSONL report path",&p_report,""),
@@ -218,8 +214,6 @@ extern "C" void nr_isac_init(void)
   pipeline.sync_enable=p_sync!=0;pipeline.family_static=p_family_static!=0;pipeline.tracker_enable=p_track!=0;
   pipeline.hierarchical_tracker_enable=p_hierarchical!=0;pipeline.capture_rvm=p_capture!=0;
   pipeline.rx_position={p_rx_x,p_rx_y,p_rx_z};pipeline.tx_position={p_tx_x,p_tx_y,p_tx_z};
-  pipeline.ul_tx_position={p_ul_tx_x,p_ul_tx_y,p_ul_tx_z};
-  pipeline.ul_tx_position_configured=p_ul_tx_configured!=0;
   AOA_ENABLE=environment_bool("AOA_ENABLE",p_aoa);const int requested=environment_bool("AOA_UL_ENABLE",p_aoa_ul);
   AOA_UL_ENABLE=AOA_ENABLE&&requested;pipeline.aoa_enable=AOA_ENABLE;pipeline.aoa_ul_enable_requested=requested;
   pipeline.aoa_ul_enable=AOA_UL_ENABLE;

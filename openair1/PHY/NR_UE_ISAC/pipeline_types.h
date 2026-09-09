@@ -245,10 +245,6 @@ struct PipelineConfig {
   bool aoa_ul_enable = false;
   ArrayGeometry array;
   Vec3 tx_position;
-  // One-UE UL illuminator geometry. Multiple routed UEs require an explicit UE identity on every
-  // CFR submission before their measurements can be fused without mixing bistatic geometries.
-  Vec3 ul_tx_position;
-  bool ul_tx_position_configured = false;
   Vec3 rx_position;
   std::string rx_id = "rx1";
   std::string illuminator_id = "gnb1";

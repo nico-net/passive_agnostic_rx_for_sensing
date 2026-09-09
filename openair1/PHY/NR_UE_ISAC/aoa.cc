@@ -9,6 +9,7 @@
 #include <complex>
 #include <limits>
 #include <map>
+#include <optional>
 #include <set>
 #include <stdexcept>
 #include <tuple>
@@ -579,7 +580,7 @@ AoaEstimate grid_free_upa_aoa(const std::array<Complex, 4>& response,
 
 void attach_aoa(CfrWindow aligned, const std::vector<CleanComponent>& components,
                 const Axes& axes, const PipelineConfig& config,
-                std::vector<Detection>& detections)
+                std::vector<Detection>& detections, bool surveyed_los_available)
 {
   if (detections.empty()) return;
   if (!config.aoa_enable || !config.array.configured || aligned.antennas != 4) {
@@ -595,7 +596,10 @@ void attach_aoa(CfrWindow aligned, const std::vector<CleanComponent>& components
   align_allocation_families(aligned, false);
   CfrWindow projected = aligned;
   subtract_allocation_family_static(projected);
-  const auto los = surveyed_los_steering(config.array, config.tx_position, config.rx_position, aligned.fc_hz);
+  std::optional<std::array<Complex, 4>> los;
+  if (surveyed_los_available)
+    los = surveyed_los_steering(
+        config.array, config.tx_position, config.rx_position, aligned.fc_hz);
   std::set<uint32_t> selected_iterations;
   for (const auto& d : detections) selected_iterations.insert(d.source_component_iteration);
   std::vector<std::pair<double, double>> nuisance;
@@ -607,8 +611,12 @@ void attach_aoa(CfrWindow aligned, const std::vector<CleanComponent>& components
     const auto direct_response = project_array_response(projected, projected.observed,
                                                          d.range_m, d.range_rate_mps);
     AoaEstimate direct = grid_free_upa_aoa(direct_response, config.array, aligned.fc_hz);
-    const AoaIsolation isolation = isolate_target_response(aligned, aligned.observed,
-        d.range_m, d.range_rate_mps, nuisance, los, 0.0);
+    AoaIsolation isolation;
+    if (los)
+      isolation = isolate_target_response(aligned, aligned.observed,
+          d.range_m, d.range_rate_mps, nuisance, *los, 0.0);
+    else
+      isolation.reason = "surveyed illuminator geometry unavailable";
     AoaEstimate isolated;
     if (isolation.valid)
       isolated = grid_free_upa_aoa(isolation.response, config.array, aligned.fc_hz,

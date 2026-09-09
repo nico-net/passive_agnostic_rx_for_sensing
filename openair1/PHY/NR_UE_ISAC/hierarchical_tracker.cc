@@ -27,61 +27,17 @@ HierarchicalEnuTracker::HierarchicalEnuTracker(BistaticGeometry geometry,
 void HierarchicalEnuTracker::reset()
 {
   motion_tracker_.reset(); auxiliary_motion_tracker_.reset(); global_tracks_.clear();
-  stage1_to_global_.clear(); auxiliary_to_global_.clear();
+  stage1_to_global_.clear();
   valid_aoa_cache_.clear(); next_global_id_ = 1;
 }
 
 void HierarchicalEnuTracker::update_auxiliary(
     double time, const std::vector<Detection>& detections, double range_res,
-    double rate_res, uint64_t sequence, const BistaticGeometry& geometry)
+    double rate_res, uint64_t sequence)
 {
-  geometry.validate();
+  // The passive receiver does not know a UE transmitter position a priori. Keep UL measurements
+  // as independent Stage-1 range/rate tracks; never inject oracle geometry into the DL ENU EKFs.
   auxiliary_motion_tracker_.update(time, detections, range_res, rate_res, sequence);
-  for (auto& item : global_tracks_) item.second->predict(time);
-  const auto active = auxiliary_motion_tracker_.active_tracks();
-  std::set<uint64_t> active_ids;
-  std::set<uint64_t> used_global;
-  for (const auto& view : active) active_ids.insert(view.snapshot.track_id);
-  for (const auto& view : active) {
-    const TrackSnapshot& local = view.snapshot;
-    if (!local.updated || !view.associated_index || *view.associated_index >= detections.size())
-      continue;
-    const bool confirmed = local.status == "confirmed" || local.confirmed_update_count >= 1
-                           || local.total_update_count >= config_.confirm_updates;
-    if (!confirmed) continue;
-    const Detection& detection = detections[*view.associated_index];
-    uint64_t selected_id = 0;
-    const auto binding = auxiliary_to_global_.find(local.track_id);
-    if (binding != auxiliary_to_global_.end() && global_tracks_.count(binding->second)
-        && !used_global.count(binding->second)) {
-      const EnuInnovation fit = global_tracks_.at(binding->second)->innovation_for_geometry(
-          detection, range_res, rate_res, true, geometry);
-      if (fit.valid && fit.nis <= config_.gate_chi2_2d) selected_id = binding->second;
-    }
-    if (!selected_id) {
-      double best_nis = std::numeric_limits<double>::infinity();
-      for (const auto& candidate : global_tracks_) {
-        if (used_global.count(candidate.first)) continue;
-        const EnuInnovation fit = candidate.second->innovation_for_geometry(
-            detection, range_res, rate_res, true, geometry);
-        if (fit.valid && fit.nis <= config_.gate_chi2_2d && fit.nis < best_nis) {
-          selected_id = candidate.first;
-          best_nis = fit.nis;
-        }
-      }
-    }
-    if (selected_id && global_tracks_.at(selected_id)->update_for_geometry(
-                           detection, range_res, rate_res, geometry)) {
-      auxiliary_to_global_[local.track_id] = selected_id;
-      used_global.insert(selected_id);
-    }
-  }
-  for (auto it = auxiliary_to_global_.begin(); it != auxiliary_to_global_.end();) {
-    if (!active_ids.count(it->first) || !global_tracks_.count(it->second))
-      it = auxiliary_to_global_.erase(it);
-    else
-      ++it;
-  }
 }
 
 TrackSnapshot HierarchicalEnuTracker::predict_to(double time) const
