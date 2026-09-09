@@ -1071,6 +1071,18 @@ void *UE_thread(void *arg)
         tsync_cap = (e != NULL) ? atoi(e) : 0;
       }
       double drift = elapsed_frames * (double)UE->max_pos_acc * get_nrUE_params()->time_sync_I;
+      // bladeRF has no GPSDO-disciplined clock, so max_pos_acc (populated by steady-state
+      // tracking) is not yet meaningful this early -- predict the same drift directly from the
+      // CFO measured during acquisition instead. Runs through the same cap/log/sign-convention
+      // logic below unchanged.
+      if (nrue_ru_get_device_type(UE) == BLADERF_DEV && fp->dl_CarrierFreq > 0) {
+        drift = -(double)UE->common_vars.freq_offset * elapsed_frames * fp->samples_per_frame / fp->dl_CarrierFreq;
+        LOG_I(PHY,
+              "bladeRF initial-sync drift compensation: CFO %d Hz, elapsed %d frames, drift %.3f samples\n",
+              UE->common_vars.freq_offset,
+              elapsed_frames,
+              drift);
+      }
       if (tsync_cap) {
         /* Same switch, same reason: unvalidated. At the measured 0.11 ppm this link drifts ~0.14
          * samples/frame, so one sample per frame is an order of magnitude of headroom -- but a cap

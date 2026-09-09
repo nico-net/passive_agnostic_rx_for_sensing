@@ -422,6 +422,11 @@ int nrue_ru_reinit(void)
   return 0;
 }
 
+int nrue_ru_get_device_type(const PHY_VARS_NR_UE *UE)
+{
+  return openair0_dev[UE->rf_map.card].type;
+}
+
 void nrue_ru_end(void)
 {
   for (openair0_device_t *ru = openair0_dev; ru < openair0_dev + nrue_ru_count; ru++) {
