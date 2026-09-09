@@ -220,14 +220,22 @@ void EnuTrack::predict(double time)
 
 EnuInnovation EnuTrack::innovation(const Detection& d, double rr, double vr, bool force_2d) const
 {
+  return innovation_for_geometry(d, rr, vr, force_2d, geometry_);
+}
+
+EnuInnovation EnuTrack::innovation_for_geometry(const Detection& d, double rr, double vr,
+                                                bool force_2d,
+                                                const BistaticGeometry& geometry) const
+{
   EnuInnovation out;
   try {
+    geometry.validate();
     auto pair = measurement_and_noise(d, rr, vr, force_2d, &out.with_angles);
-    const auto predicted = enu_measurement_model(x_, geometry_, out.with_angles);
+    const auto predicted = enu_measurement_model(x_, geometry, out.with_angles);
     out.residual.resize(pair.first.size());
     for (size_t i = 0; i < out.residual.size(); ++i) out.residual[i] = pair.first[i] - predicted[i];
     if (out.with_angles) out.residual[2] = wrap_radians(out.residual[2]);
-    out.jacobian = enu_measurement_jacobian(x_, geometry_, out.with_angles);
+    out.jacobian = enu_measurement_jacobian(x_, geometry, out.with_angles);
     out.noise = pair.second;
     const Matrix s = out.jacobian * p_ * out.jacobian.transposed() + out.noise;
     out.nis = quadratic(out.residual, pseudoinverse_symmetric(s));
@@ -239,11 +247,13 @@ EnuInnovation EnuTrack::innovation(const Detection& d, double rr, double vr, boo
 bool EnuTrack::update(const Detection& d, double rr, double vr, std::optional<size_t> index,
                       std::optional<double> stage1_range, std::optional<double> stage1_rate)
 {
-  EnuInnovation selected = innovation(d, rr, vr, false);
+  EnuInnovation selected = innovation_for_geometry(d, rr, vr, false, geometry_);
   if (!selected.valid || selected.nis > (selected.with_angles ? config_.gate_chi2_4d
                                                               : config_.gate_chi2_2d))
-    selected = innovation(d, rr, vr, true);
-  if (!selected.valid || selected.nis > config_.gate_chi2_2d) { coast(); return false; }
+    selected = innovation_for_geometry(d, rr, vr, true, geometry_);
+  const double selected_gate = selected.with_angles ? config_.gate_chi2_4d
+                                                     : config_.gate_chi2_2d;
+  if (!selected.valid || selected.nis > selected_gate) { coast(); return false; }
   const auto old_velocity = std::vector<double>{x_[3], x_[4], x_[5]};
   const Matrix s = selected.jacobian * p_ * selected.jacobian.transposed() + selected.noise;
   Matrix gain = p_ * selected.jacobian.transposed() * pseudoinverse_symmetric(s);
@@ -274,6 +284,33 @@ bool EnuTrack::update(const Detection& d, double rr, double vr, std::optional<si
   if (recent_.size() > config_.confirm_window) recent_.erase(recent_.begin());
   if (stage1_range) stage1_range_m_ = stage1_range;
   if (stage1_rate) stage1_rate_mps_ = stage1_rate;
+  return true;
+}
+
+bool EnuTrack::update_for_geometry(const Detection& d, double rr, double vr,
+                                   const BistaticGeometry& geometry)
+{
+  EnuInnovation selected = innovation_for_geometry(d, rr, vr, true, geometry);
+  if (!selected.valid || selected.nis > config_.gate_chi2_2d)
+    return false;
+  const Matrix s = selected.jacobian * p_ * selected.jacobian.transposed() + selected.noise;
+  const Matrix gain = p_ * selected.jacobian.transposed() * pseudoinverse_symmetric(s);
+  const auto dx = gain * selected.residual;
+  for (size_t i = 0; i < 6; ++i) x_[i] += dx[i];
+  const Matrix factor = Matrix::identity(6) - gain * selected.jacobian;
+  p_ = positive_semidefinite(factor * p_ * factor.transposed()
+                              + gain * selected.noise * gain.transposed());
+  last_update_time_s_ = time_s_;
+  nis_ = selected.nis;
+  nis_ewma_ = nis_ewma_ ? (1.0 - config_.adaptation_alpha) * *nis_ewma_
+                          + config_.adaptation_alpha * *nis_ : *nis_;
+  coasts_ = 0;
+  ++total_updates_;
+  ++confirmed_updates_;
+  updated_ = true;
+  status_ = "confirmed";
+  recent_.push_back(1);
+  if (recent_.size() > config_.confirm_window) recent_.erase(recent_.begin());
   return true;
 }
 

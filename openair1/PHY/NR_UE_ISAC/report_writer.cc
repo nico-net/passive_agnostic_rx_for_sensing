@@ -90,13 +90,18 @@ std::string build_report_json(const PipelineReport& r, const PipelineConfig& c)
       && (r.detector.initial_likelihood.size() != expected_map_cells
           || r.detector.initial_dl_likelihood.size() != expected_map_cells
           || r.detector.dl_observed_re_count == 0))
-    throw std::invalid_argument("captured fused/DL range-Doppler map is absent or malformed");
+    throw std::invalid_argument("captured DL range-Doppler map is absent or malformed");
+  const size_t expected_ul_map_cells = static_cast<size_t>(r.uplink_detector.axes.range_bins)
+                                       * r.uplink_detector.axes.rate_bins;
+  if (c.capture_rvm && r.uplink_valid
+      && r.uplink_detector.initial_likelihood.size() != expected_ul_map_cells)
+    throw std::invalid_argument("captured UL range-Doppler map is absent or malformed");
   std::string out;
   out.reserve(c.capture_rvm
                   ? (r.detector.initial_likelihood.size()
                      + r.detector.initial_dl_likelihood.size()) * 12
                   : 8192);
-  out += "{\"schema\":\"oai.native_python_parity.v1\",\"rx_id\":"; string_value(out,c.rx_id);
+  out += "{\"schema\":\"oai.native_python_parity.v2\",\"rx_id\":"; string_value(out,c.rx_id);
   out += ",\"illuminator_id\":"; string_value(out,c.illuminator_id);
   out += ",\"cpi_sequence\":" + std::to_string(r.cpi_sequence);
   out += ",\"cpi_start_time_utc_ns\":" + std::to_string(r.start_utc_ns);
@@ -115,6 +120,9 @@ std::string build_report_json(const PipelineReport& r, const PipelineConfig& c)
   out += ",\"src_occ\":[";
   for(uint32_t i=0;i<NR_ISAC_SRC_COUNT;++i){if(i)out.push_back(',');out+=std::to_string(r.source_occurrences[i]);}
   out += ']';
+  out += ",\"illumination_processing\":{\"coherent_ul_dl_fusion\":false,"
+      "\"dl_detector\":true,\"ul_detector\":"
+      + std::string(r.uplink_valid ? "true" : "false") + '}';
   out += ",\"range_res_m\":"; number(out,r.detector.axes.range_res_m);
   out += ",\"range_max_m\":"; number(out,r.detector.axes.range_bins*r.detector.axes.range_res_m);
   out += ",\"vel_res_mps\":"; number(out,r.detector.axes.rate_res_mps);
@@ -167,6 +175,61 @@ std::string build_report_json(const PipelineReport& r, const PipelineConfig& c)
     out += ",\"phase_fit_residual_rms_rad\":";number(out,d.aoa.phase_fit_residual_rms_rad);
     out += ",\"relative_manifold_residual_energy\":";number(out,d.aoa.relative_manifold_residual_energy);
     out += ",\"phase_wraps_tested\":"+std::to_string(d.aoa.phase_wraps_tested)+'}';out+='}';}out+=']';
+  out += ",\"uplink\":{\"present\":";
+  out += r.uplink_present ? "true" : "false";
+  out += ",\"valid\":";
+  out += r.uplink_valid ? "true" : "false";
+  out += ",\"error\":";
+  string_value(out, r.uplink_error);
+  if (r.uplink_valid) {
+    out += ",\"tx_position_enu_m\":[";number(out,c.ul_tx_position.x);out.push_back(',');
+    number(out,c.ul_tx_position.y);out.push_back(',');number(out,c.ul_tx_position.z);out.push_back(']');
+    out += ",\"actual_row_count\":" + std::to_string(r.uplink_detector.axes.rate_bins);
+    out += ",\"observed_re_count\":" + std::to_string(r.uplink_detector.axes.observed_re_count);
+    out += ",\"range_res_m\":";number(out,r.uplink_detector.axes.range_res_m);
+    out += ",\"vel_res_mps\":";number(out,r.uplink_detector.axes.rate_res_mps);
+    out += ",\"dwell_s\":";number(out,r.uplink_detector.axes.dwell_s);
+    out += ",\"adaptive_threshold\":";number(out,r.uplink_detector.adaptive_threshold);
+    out += ",\"sync\":{\"rows\":"+std::to_string(r.uplink_sync.rows)
+        +",\"admitted_rows\":"+std::to_string(r.uplink_sync.admitted_rows)+",\"los_bins\":";
+    number(out,r.uplink_sync.los_bins);out += ",\"sto\":{\"mean_frac_bin\":";
+    number(out,r.uplink_sync.sto_bins);out += ",\"applied\":";
+    out += r.uplink_sync.sto_applied?"true":"false";out += "},\"sfo\":{\"sfo_ppm\":";
+    number(out,r.uplink_sync.sfo_ppm);out += ",\"applied\":";
+    out += r.uplink_sync.sfo_applied?"true":"false";out += "},\"cfo\":{\"cfo_hz\":";
+    number(out,r.uplink_sync.cfo_hz);out += ",\"applied\":";
+    out += r.uplink_sync.cfo_applied?"true":"false";out += "},\"reject_reason\":";
+    string_value(out,r.uplink_sync.reject_reason);out += '}';
+    out += ",\"allocation_alignment\":{\"families\":"
+        +std::to_string(r.uplink_detector_alignment.families)
+        +",\"repeated_families\":"+std::to_string(r.uplink_detector_alignment.repeated_families)
+        +",\"aligned_rows\":"+std::to_string(r.uplink_detector_alignment.aligned_rows)
+        +",\"singleton_rows\":"+std::to_string(r.uplink_detector_alignment.singleton_rows)+'}';
+    out += ",\"covariance\":{\"policy\":\"current_cpi_global_within_family_first_difference\",\"variance\":";
+    number(out,r.uplink_current_cpi_variance);out += ",\"families\":"
+        +std::to_string(r.uplink_covariance_family_count)+",\"difference_samples\":"
+        +std::to_string(r.uplink_covariance_difference_count)+'}';
+    out += ",\"detections\":[";
+    for(size_t i=0;i<r.uplink_detections.size();++i){const auto&d=r.uplink_detections[i];if(i)out.push_back(',');
+      out += "{\"bistatic_range_m\":";number(out,d.range_m);out += ",\"bistatic_velocity_mps\":";number(out,d.range_rate_mps);
+      out += ",\"score\":";number(out,d.score);out += ",\"decision_statistic\":";number(out,d.decision_statistic);
+      out += ",\"decision_threshold\":";number(out,d.decision_threshold);out += ",\"effective_decision_threshold\":";
+      number(out,d.effective_decision_threshold);out += ",\"source_component_iteration\":"+std::to_string(d.source_component_iteration);
+      out += ",\"aoa\":{\"valid\":";out += d.aoa.valid?"true":"false";out += ",\"reason\":";
+      string_value(out,d.aoa.reason);out += "}}";}out+=']';
+    out += ",\"tracks\":[";
+    for(size_t i=0;i<r.uplink_tracks.size();++i){const auto&t=r.uplink_tracks[i];if(i)out.push_back(',');
+      out += "{\"track_id\":"+std::to_string(t.track_id)+",\"status\":";string_value(out,t.status);
+      out += ",\"updated_this_cpi\":";out += t.updated?"true":"false";
+      out += ",\"bistatic_range_m\":";number(out,t.range_m);out += ",\"bistatic_velocity_mps\":";
+      number(out,t.range_rate_mps);out += ",\"coast_count\":"+std::to_string(t.coast_count)+'}';}out+=']';
+    if(c.capture_rvm){out += ",\"ul_rvm_layout\":\"doppler_major_range_minor\",\"ul_rvm_blob\":[";
+      bool first_ul=true;for(uint32_t d=0;d<r.uplink_detector.axes.rate_bins;++d)
+        for(uint32_t q=0;q<r.uplink_detector.axes.range_bins;++q){if(!first_ul)out.push_back(',');first_ul=false;
+          const double value=r.uplink_detector.initial_likelihood[(size_t)q*r.uplink_detector.axes.rate_bins+d];
+          number(out,std::isfinite(value)&&value>0.0?value:0.0);}out+=']';}
+  }
+  out += '}';
   out += ",\"tracks\":[";
   for(size_t i=0;i<r.tracks.size();++i){const auto&t=r.tracks[i];if(i)out.push_back(',');out += "{\"track_id\":"+std::to_string(t.track_id)+",\"status\":";
     string_value(out,t.status);out += ",\"updated_this_cpi\":";out += t.updated?"true":"false";

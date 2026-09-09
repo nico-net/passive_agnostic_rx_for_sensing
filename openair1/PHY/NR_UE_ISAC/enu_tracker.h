@@ -63,10 +63,17 @@ public:
   void predict(double time_s);
   EnuInnovation innovation(const Detection& measurement, double range_resolution_m,
                            double rate_resolution_mps, bool force_2d) const;
+  EnuInnovation innovation_for_geometry(const Detection& measurement,
+                                        double range_resolution_m,
+                                        double rate_resolution_mps, bool force_2d,
+                                        const BistaticGeometry& geometry) const;
   bool update(const Detection& measurement, double range_resolution_m,
               double rate_resolution_mps, std::optional<size_t> detection_index,
               std::optional<double> stage1_range_m,
               std::optional<double> stage1_rate_mps);
+  bool update_for_geometry(const Detection& measurement, double range_resolution_m,
+                           double rate_resolution_mps,
+                           const BistaticGeometry& geometry);
   void coast();
   TrackSnapshot snapshot() const;
   void cap_birth_uncertainty(double maximum_velocity_variance,

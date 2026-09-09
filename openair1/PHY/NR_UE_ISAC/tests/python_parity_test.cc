@@ -201,6 +201,22 @@ void test_enu_geometry()
   const double step=1e-5;for(size_t c=0;c<6;++c){auto plus=state,minus=state;plus[c]+=step;minus[c]-=step;
     const auto zp=enu_measurement_model(plus,geometry,true),zm=enu_measurement_model(minus,geometry,true);
     for(size_t r=0;r<4;++r)close(h(r,c),(zp[r]-zm[r])/(2*step),2e-7,"ENU analytic Jacobian parity");}
+
+  Detection birth; birth.range_m=z[0];birth.range_rate_mps=z[1];birth.dwell_s=.032;
+  birth.aoa.valid=true;birth.aoa.azimuth_deg=z[2]*180.0/PI;
+  birth.aoa.elevation_deg=z[3]*180.0/PI;birth.aoa.covariance_rad2=Matrix(2,2);
+  birth.aoa.covariance_rad2(0,0)=.01;birth.aoa.covariance_rad2(1,1)=.01;
+  EnuTrackerConfig config;
+  EnuTrack track(1,0.0,birth,geometry,3.0,1.0,.032,config,0);
+  Detection candidate=birth;bool found=false;
+  for(int i=1;i<=20000&&!found;++i){
+    candidate.range_m=birth.range_m+i*.01;
+    const auto fit=track.innovation(candidate,3.0,1.0,false);
+    found=fit.valid&&fit.with_angles&&fit.nis>config.gate_chi2_2d&&fit.nis<config.gate_chi2_4d;
+  }
+  require(found,"could not construct a 4-D-only admissible ENU innovation");
+  require(track.update(candidate,3.0,1.0,0,std::nullopt,std::nullopt),
+          "4-D innovation inside the 4-D gate was incorrectly rejected by the 2-D gate");
 }
 
 void test_variable_cpi()
@@ -379,8 +395,8 @@ double map_energy(const std::vector<double>& values)
   return total;
 }
 
-std::pair<std::vector<double>, std::vector<double>> mixed_row_capture(float ul_amplitude,
-                                                                         const std::string& path)
+std::array<std::vector<double>, 3> mixed_row_capture(float ul_amplitude,
+                                                     const std::string& path)
 {
   std::remove(path.c_str());
   PipelineConfig c;
@@ -414,23 +430,67 @@ std::pair<std::vector<double>, std::vector<double>> mixed_row_capture(float ul_a
   std::string line; require(static_cast<bool>(std::getline(input, line)), "mixed-row capture report is empty");
   require(line.find("\"dl_rvm_source_mask\":15") != std::string::npos,
           "mixed-row capture does not attest the DL source mask");
-  auto fused = json_number_array(line, "rvm_blob");
+  auto primary = json_number_array(line, "rvm_blob");
   auto dl_only = json_number_array(line, "dl_rvm_blob");
-  require(fused.size() == dl_only.size(), "mixed-row fused/DL RDM shapes differ");
+  auto ul_only = json_number_array(line, "ul_rvm_blob");
+  require(primary.size() == dl_only.size(), "mixed-row primary/DL RDM shapes differ");
+  require(primary.size() == ul_only.size(), "mixed-row DL/UL RDM shapes differ");
   std::remove(path.c_str());
-  return {std::move(fused), std::move(dl_only)};
+  return {std::move(primary), std::move(dl_only), std::move(ul_only)};
 }
 
 void test_mixed_row_dl_rdm_isolation()
 {
-  const auto quiet = mixed_row_capture(0.0f, "/tmp/nr_isac_mixed_row_quiet.jsonl");
+  const auto quiet = mixed_row_capture(0.25f, "/tmp/nr_isac_mixed_row_quiet.jsonl");
   const auto loud = mixed_row_capture(8.0f, "/tmp/nr_isac_mixed_row_loud.jsonl");
-  require(std::abs(map_energy(quiet.first) - map_energy(loud.first)) > 1e-4,
-          "UL energy did not affect the fused mixed-row RDM");
-  require(quiet.second.size() == loud.second.size(), "DL-only mixed-row RDM shape changed with UL");
-  for (size_t i = 0; i < quiet.second.size(); ++i)
-    close(quiet.second[i], loud.second[i], 1e-10,
-          "UL energy leaked into the exact DL-only mixed-row RDM");
+  require(std::abs(map_energy(quiet[2]) - map_energy(loud[2])) > 1e-4,
+          "UL energy did not affect the independent UL RDM");
+  require(quiet[0].size() == loud[0].size(), "primary DL RDM shape changed with UL");
+  for (size_t i = 0; i < quiet[0].size(); ++i) {
+    close(quiet[0][i], quiet[1][i], 1e-10,
+          "primary detector input differs from provenance-clean DL input");
+    close(quiet[0][i], loud[0][i], 1e-10,
+          "UL energy leaked into the primary DL detector RDM");
+  }
+}
+
+void test_invalid_ul_does_not_suppress_dl()
+{
+  const std::string path = "/tmp/nr_isac_invalid_ul.jsonl";
+  std::remove(path.c_str());
+  PipelineConfig c;
+  c.sources_mask = (1u << NR_ISAC_SRC_CSI_RS) | (1u << NR_ISAC_SRC_PUSCH_DMRS);
+  c.duration_bank_s = {0.001}; c.bootstrap_duration_index = 0;
+  c.minimum_dwell_s = 0.001; c.maximum_dwell_s = 0.001;
+  c.minimum_rows = 2; c.maximum_rows = 4;
+  c.sync_enable = false; c.family_static = false; c.tracker_enable = false;
+  c.maximum_components = 1; c.maximum_objects = 1; c.capture_rvm = true;
+  c.maximum_range_m = 200.0; c.report_path = path; c.out_path.clear();
+  nr_isac_carrier_t carrier{};
+  carrier.nof_prb = 2; carrier.scs_hz = 30000; carrier.dl_center_hz = 3499440000;
+  carrier.slots_per_frame = 20; carrier.pci = 1;
+  std::vector<std::complex<float>> dl(24, {1.0f, 0.0f});
+  std::vector<std::complex<float>> invalid_ul(24, {0.0f, 0.0f});
+  std::vector<uint32_t> k(24), symbol(24, 2);
+  for (uint32_t i = 0; i < k.size(); ++i) k[i] = i;
+  {
+    SensingEngine engine(c, 2, 1); engine.start();
+    for (uint32_t slot = 0; slot < 10; ++slot) {
+      engine.submit(slot, 0.0f, NR_ISAC_SRC_CSI_RS, carrier, dl.data(), 1,
+                    k.data(), symbol.data(), dl.size(), 1.0f);
+      engine.submit(slot, 0.0f, NR_ISAC_SRC_PUSCH_DMRS, carrier, invalid_ul.data(), 1,
+                    k.data(), symbol.data(), invalid_ul.size(), 1.0f);
+    }
+    engine.stop();
+  }
+  std::ifstream input(path); require(input.good(), "invalid UL suppressed the DL report file");
+  std::string line; require(static_cast<bool>(std::getline(input, line)),
+                            "invalid UL suppressed the valid DL report");
+  require(line.find("\"uplink\":{\"present\":true,\"valid\":false") != std::string::npos,
+          "invalid UL is not explicitly marked invalid");
+  require(line.find("\"dl_rvm_blob\":[") != std::string::npos,
+          "invalid UL removed the valid DL map");
+  std::remove(path.c_str());
 }
 
 void test_dl_capture_fails_closed_without_dl()
@@ -468,7 +528,7 @@ void test_dl_capture_fails_closed_without_dl()
 
 int main()
 {
-  try {test_fft();test_adaptive_threshold();test_detector();test_required_cuda_contract();test_aoa();test_enu_geometry();test_variable_cpi();test_causal_cpi_pipeline();test_finite_admission_window();test_mixed_row_dl_rdm_isolation();test_dl_capture_fails_closed_without_dl();test_validation_report_compatibility();}
+  try {test_fft();test_adaptive_threshold();test_detector();test_required_cuda_contract();test_aoa();test_enu_geometry();test_variable_cpi();test_causal_cpi_pipeline();test_finite_admission_window();test_mixed_row_dl_rdm_isolation();test_invalid_ul_does_not_suppress_dl();test_dl_capture_fails_closed_without_dl();test_validation_report_compatibility();}
   catch(const std::exception& e){std::fprintf(stderr,"python parity test failed: %s\n",e.what());return EXIT_FAILURE;}
   std::puts("native sensing golden parity checks passed");return EXIT_SUCCESS;
 }

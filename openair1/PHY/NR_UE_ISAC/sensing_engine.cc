@@ -58,16 +58,19 @@ struct SensingEngine::PendingRow {
   double slot_fraction = 0.0;
   uint32_t source_mask = 0;
   uint32_t dl_source_mask = 0;
+  uint32_t ul_source_mask = 0;
   std::array<uint64_t, NR_ISAC_SRC_COUNT> source_occurrences{};
   std::array<uint64_t, NR_ISAC_SRC_COUNT> dl_source_occurrences{};
+  std::array<uint64_t, NR_ISAC_SRC_COUNT> ul_source_occurrences{};
   int64_t first_utc_ns = 0;
   uint32_t available_antennas = 0;
-  std::vector<std::complex<float>> cfr; // [antenna][subcarrier]
-  std::vector<float> weights;           // same shape; inverse-variance sum
-  // Exact DL samples must remain separate from cfr/weights.  source_mask alone cannot unmix a
-  // simultaneous DL+UL observation after weighted fusion.
-  std::vector<std::complex<float>> dl_cfr;
-  std::vector<float> dl_weights;
+  // Never average distinct illuminators into one complex CFR cell. cfr/weights is the DL view;
+  // ul_cfr/ul_weights is the single-UE UL view. Their bistatic phase histories and geometries are
+  // different even when their submissions have the same slot/fraction/resource element.
+  std::vector<std::complex<float>> cfr; // DL [antenna][subcarrier]
+  std::vector<float> weights;
+  std::vector<std::complex<float>> ul_cfr;
+  std::vector<float> ul_weights;
 };
 
 void SensingEngine::PointerQueue::push(Snapshot* value)
@@ -157,6 +160,13 @@ SensingEngine::SensingEngine(PipelineConfig config, uint32_t maximum_prb,
       || !(std::isfinite(config_.false_object_intensity_per_s)
            && config_.false_object_intensity_per_s > 0.0))
     throw std::invalid_argument("invalid CUT-excluded adaptive-threshold configuration");
+  const bool has_uplink = (config_.sources_mask & UL_SOURCE_BITS) != 0;
+  if (has_uplink && config_.num_ues != 1)
+    throw std::invalid_argument(
+        "UL sensing currently requires num_ues=1 because CFR submissions do not carry UE identity");
+  if (has_uplink && config_.tracker_enable && config_.hierarchical_tracker_enable
+      && !config_.ul_tx_position_configured)
+    throw std::invalid_argument("UL/DL ENU fusion requires the surveyed UL transmitter position");
   if (config_.pending_row_budget_bytes < 64ULL * 1024ULL * 1024ULL)
     throw std::invalid_argument("pending-row backlog budget must be at least 64 MiB");
   if (config_.aoa_ul_enable && !config_.aoa_enable)
@@ -180,7 +190,10 @@ SensingEngine::SensingEngine(PipelineConfig config, uint32_t maximum_prb,
     if (config_.hierarchical_tracker_enable && norm(config_.tx_position - config_.rx_position) > 0.0)
       hierarchical_tracker_ = std::make_unique<HierarchicalEnuTracker>(
           BistaticGeometry{config_.tx_position, config_.rx_position}, HierarchicalTrackerConfig{}, inner);
-    else motion_tracker_ = std::make_unique<MotionTracker>(inner);
+    else {
+      motion_tracker_ = std::make_unique<MotionTracker>(inner);
+      if (has_uplink) ul_motion_tracker_ = std::make_unique<MotionTracker>(inner);
+    }
   }
   writer_ = std::make_unique<ReportWriter>(config_);
 }
@@ -313,7 +326,7 @@ void SensingEngine::processing_run()
 {
   while (auto task = windows_.wait_pop()) {
     try {
-      process_window(std::move(task->window), std::move(task->dl_window), task->plan,
+      process_window(std::move(task->dl_window), std::move(task->ul_window), task->plan,
                      task->air_origin_slots,
                      task->sequence);
     }
@@ -377,9 +390,10 @@ void SensingEngine::begin_geometry(const nr_isac_carrier_t& carrier)
   // Slot unwrapping is deliberately retained across geometry construction.  Admission can start
   // after the raw SFN clock wraps; resetting here would relabel the first admitted row as slot 0.
   air_origin_slots_.reset(); last_closed_slots_.reset();
-  clock_tracker_.reset(); planner_.reset();
+  dl_clock_tracker_.reset(); ul_clock_tracker_.reset(); planner_.reset();
   std::lock_guard<std::mutex> lock(tracker_mutex_);
   if (motion_tracker_) motion_tracker_->reset();
+  if (ul_motion_tracker_) ul_motion_tracker_->reset();
   if (hierarchical_tracker_) hierarchical_tracker_->reset();
 }
 
@@ -387,8 +401,8 @@ size_t SensingEngine::pending_row_storage_bytes(const PendingRow& row) const
 {
   return row.cfr.capacity() * sizeof(std::complex<float>)
          + row.weights.capacity() * sizeof(float)
-         + row.dl_cfr.capacity() * sizeof(std::complex<float>)
-         + row.dl_weights.capacity() * sizeof(float);
+         + row.ul_cfr.capacity() * sizeof(std::complex<float>)
+         + row.ul_weights.capacity() * sizeof(float);
 }
 
 void SensingEngine::make_pending_row_room(size_t incoming)
@@ -459,17 +473,15 @@ void SensingEngine::consume(const Snapshot& s)
   if (found == rows_.end()) {
     const size_t view_bytes = (size_t)requested_antennas_ * subcarriers
                               * (sizeof(std::complex<float>) + sizeof(float));
-    const size_t incoming = config_.capture_rvm ? 2 * view_bytes : view_bytes;
+    const size_t incoming = 2 * view_bytes;
     make_pending_row_room(incoming);
     PendingRow row;
     row.time_slots = time_slots; row.raw_slot = s.slot; row.slot_fraction = fraction;
     row.first_utc_ns = s.utc_ns;
     row.cfr.assign((size_t)requested_antennas_ * subcarriers, {});
     row.weights.assign((size_t)requested_antennas_ * subcarriers, 0.0f);
-    if (config_.capture_rvm) {
-      row.dl_cfr.assign((size_t)requested_antennas_ * subcarriers, {});
-      row.dl_weights.assign((size_t)requested_antennas_ * subcarriers, 0.0f);
-    }
+    row.ul_cfr.assign((size_t)requested_antennas_ * subcarriers, {});
+    row.ul_weights.assign((size_t)requested_antennas_ * subcarriers, 0.0f);
     found = rows_.emplace(key, std::move(row)).first;
     pending_row_bytes_ += pending_row_storage_bytes(found->second);
   }
@@ -477,12 +489,12 @@ void SensingEngine::consume(const Snapshot& s)
   row.source_mask |= 1u << static_cast<uint32_t>(s.source);
   ++row.source_occurrences[static_cast<uint32_t>(s.source)];
   const bool is_dl = (DL_SOURCE_BITS & (1u << static_cast<uint32_t>(s.source))) != 0;
-  if (is_dl && config_.capture_rvm) {
+  if (is_dl) {
     row.dl_source_mask |= 1u << static_cast<uint32_t>(s.source);
     ++row.dl_source_occurrences[static_cast<uint32_t>(s.source)];
-    if (row.dl_cfr.size() != row.cfr.size()
-        || row.dl_weights.size() != row.weights.size())
-      throw std::runtime_error("DL-only diagnostic capture state is unavailable");
+  } else {
+    row.ul_source_mask |= 1u << static_cast<uint32_t>(s.source);
+    ++row.ul_source_occurrences[static_cast<uint32_t>(s.source)];
   }
   row.available_antennas = std::max(row.available_antennas, s.antennas);
   const float weight = s.noise_variance > 0.0f ? 1.0f / s.noise_variance : 1.0f;
@@ -502,8 +514,8 @@ void SensingEngine::consume(const Snapshot& s)
         cfr[index] = (cfr[index] * old_weight + value * weight) / total;
         weights[index] = total;
       };
-      accumulate(row.cfr, row.weights);
-      if (is_dl && config_.capture_rvm) accumulate(row.dl_cfr, row.dl_weights);
+      if (is_dl) accumulate(row.cfr, row.weights);
+      else accumulate(row.ul_cfr, row.ul_weights);
     }
   }
   close_ready_windows(false);
@@ -517,12 +529,12 @@ TrackSnapshot SensingEngine::planning_snapshot(double time) const
   TrackSnapshot value; value.status = "uninitialized"; value.air_time_s = time; return value;
 }
 
-void SensingEngine::enqueue_window(CfrWindow window, std::optional<CfrWindow> dl_window,
+void SensingEngine::enqueue_window(CfrWindow dl_window, std::optional<CfrWindow> ul_window,
                                    const CpiPlan& plan)
 {
   auto task = std::make_unique<WindowTask>();
-  task->window = std::move(window);
   task->dl_window = std::move(dl_window);
+  task->ul_window = std::move(ul_window);
   task->plan = plan;
   task->air_origin_slots = air_origin_slots_.value_or(0.0);
   task->sequence = ++cpi_sequence_;
@@ -583,16 +595,28 @@ void SensingEngine::close_ready_windows(bool flush)
       for (const auto& item : rows_) keys.push_back(item.first);
     }
     if (keys.empty()) return;
-    const double span = rows_.at(keys.back()).time_slots - rows_.at(keys.front()).time_slots;
-    if (keys.size() >= active_plan_->minimum_rows && span > 0.0) {
-      CfrWindow window = build_window(keys, false);
-      std::optional<CfrWindow> dl_window;
-      if (config_.capture_rvm)
-        dl_window = build_window(keys, true, window.antennas);
+    auto viable = [&](bool uplink) {
+      size_t count = 0;
+      double first_time = 0.0, last_time = 0.0;
+      for (int64_t key : keys) {
+        const PendingRow& row = rows_.at(key);
+        const uint32_t mask = uplink ? row.ul_source_mask : row.dl_source_mask;
+        if (!mask) continue;
+        if (!count) first_time = row.time_slots;
+        last_time = row.time_slots;
+        ++count;
+      }
+      return count >= active_plan_->minimum_rows && last_time > first_time;
+    };
+    if (viable(false)) {
+      CfrWindow dl_window = build_window(keys, false);
+      std::optional<CfrWindow> ul_window;
+      if (viable(true)) ul_window = build_window(keys, true, dl_window.antennas);
       const CpiPlan plan = *active_plan_;
+      const double last_time_slots = rows_.at(keys.back()).time_slots;
       erase_rows(keys);
-      last_closed_slots_ = window.row_time_slots.back(); active_plan_.reset();
-      enqueue_window(std::move(window), std::move(dl_window), plan);
+      last_closed_slots_ = last_time_slots; active_plan_.reset();
+      enqueue_window(std::move(dl_window), std::move(ul_window), plan);
       return; // Python parity: plan the next CPI only after this tracker update finishes.
     } else {
       const double last_time_slots = rows_.at(keys.back()).time_slots;
@@ -603,38 +627,48 @@ void SensingEngine::close_ready_windows(bool flush)
   }
 }
 
-CfrWindow SensingEngine::build_window(const std::vector<int64_t>& keys, bool dl_only,
+CfrWindow SensingEngine::build_window(const std::vector<int64_t>& keys, bool uplink,
                                       uint32_t forced_antennas) const
 {
+  std::vector<int64_t> selected_keys;
+  selected_keys.reserve(keys.size());
+  for (int64_t key : keys) {
+    const PendingRow& row = rows_.at(key);
+    if (uplink ? row.ul_source_mask : row.dl_source_mask) selected_keys.push_back(key);
+  }
+  if (selected_keys.empty())
+    throw std::runtime_error(uplink ? "UL measured window has no rows"
+                                    : "DL measured window has no rows");
   CfrWindow w;
-  w.rows = keys.size(); w.subcarriers = carrier_.nof_prb * 12u;
+  w.rows = selected_keys.size(); w.subcarriers = carrier_.nof_prb * 12u;
   if (forced_antennas) {
     w.antennas = forced_antennas;
   } else {
     w.antennas = requested_antennas_;
-    for (int64_t key : keys) w.antennas = std::min(w.antennas, rows_.at(key).available_antennas);
+    for (int64_t key : selected_keys)
+      w.antennas = std::min(w.antennas, rows_.at(key).available_antennas);
     w.antennas = std::max(1u, w.antennas);
   }
   w.scs_hz = carrier_.scs_hz;
   w.fc_hz = carrier_.dl_center_hz; w.pci = carrier_.pci;
-  w.start_utc_ns = rows_.at(keys.front()).first_utc_ns;
+  w.start_utc_ns = rows_.at(selected_keys.front()).first_utc_ns;
   const size_t cells = (size_t)w.rows * w.subcarriers;
   w.values.assign(cells * w.antennas, {}); w.observed.assign(cells, 0);
   w.row_time_slots.resize(w.rows); w.row_slot_idx.resize(w.rows);
   w.row_slot_frac.resize(w.rows); w.row_source_mask.resize(w.rows);
   for (uint32_t r = 0; r < w.rows; ++r) {
-    const PendingRow& row = rows_.at(keys[r]);
+    const PendingRow& row = rows_.at(selected_keys[r]);
     for (uint32_t i = 0; i < NR_ISAC_SRC_COUNT; ++i)
-      w.source_occurrences[i] += dl_only ? row.dl_source_occurrences[i] : row.source_occurrences[i];
+      w.source_occurrences[i] += uplink ? row.ul_source_occurrences[i]
+                                        : row.dl_source_occurrences[i];
     w.row_time_slots[r] = row.time_slots; w.row_slot_idx[r] = row.raw_slot;
     w.row_slot_frac[r] = row.slot_fraction;
-    w.row_source_mask[r] = dl_only ? row.dl_source_mask : row.source_mask;
-    const auto& row_weights = dl_only ? row.dl_weights : row.weights;
-    const auto& row_cfr = dl_only ? row.dl_cfr : row.cfr;
+    w.row_source_mask[r] = uplink ? row.ul_source_mask : row.dl_source_mask;
+    const auto& row_weights = uplink ? row.ul_weights : row.weights;
+    const auto& row_cfr = uplink ? row.ul_cfr : row.cfr;
     if (row_weights.size() != (size_t)requested_antennas_ * w.subcarriers
         || row_cfr.size() != (size_t)requested_antennas_ * w.subcarriers)
-      throw std::runtime_error(dl_only ? "DL-only diagnostic CFR view is unavailable"
-                                       : "fused CFR view is malformed");
+      throw std::runtime_error(uplink ? "UL CFR view is malformed" : "DL CFR view is malformed");
     for (uint32_t k = 0; k < w.subcarriers; ++k) {
       bool common = true;
       for (uint32_t a = 0; a < w.antennas; ++a)
@@ -660,14 +694,16 @@ AdaptiveClutterMap* SensingEngine::clutter_map()
   return motion_tracker_ ? &motion_tracker_->clutter_map() : nullptr;
 }
 
-void SensingEngine::process_window(CfrWindow window, std::optional<CfrWindow> dl_window,
+void SensingEngine::process_window(CfrWindow dl_window, std::optional<CfrWindow> ul_window,
                                    const CpiPlan& plan,
                                    double air_origin_slots, uint64_t sequence)
 {
-  PipelineReport report; report.cpi_sequence = sequence; report.start_utc_ns = window.start_utc_ns;
-  const double slot_ns = slot_duration_s(window.scs_hz) * 1e9;
-  report.first_row_time_ns = std::llround(window.row_time_slots.front() * slot_ns);
-  report.last_row_time_ns = std::llround(window.row_time_slots.back() * slot_ns);
+  PipelineReport report;
+  report.cpi_sequence = sequence;
+  report.start_utc_ns = dl_window.start_utc_ns;
+  const double slot_ns = slot_duration_s(dl_window.scs_hz) * 1e9;
+  report.first_row_time_ns = std::llround(dl_window.row_time_slots.front() * slot_ns);
+  report.last_row_time_ns = std::llround(dl_window.row_time_slots.back() * slot_ns);
   report.cpi_duration_ns = std::max<int64_t>(0, report.last_row_time_ns - report.first_row_time_ns);
   report.plan = plan;
   report.dropped_submissions = dropped_.load(std::memory_order_relaxed);
@@ -675,94 +711,173 @@ void SensingEngine::process_window(CfrWindow window, std::optional<CfrWindow> dl
   report.discarded_pending_rows = discarded_pending_rows_.load(std::memory_order_relaxed);
   report.discarded_pending_intervals = discarded_pending_intervals_.load(std::memory_order_relaxed);
   report.stale_submissions = stale_.load(std::memory_order_relaxed);
-  for (uint32_t mask : window.row_source_mask) {
-    report.sources_mask |= mask;
-  }
-  report.source_occurrences = window.source_occurrences;
-  const double midpoint_slots = 0.5 * (window.row_time_slots.front() + window.row_time_slots.back());
+  auto record_sources = [&](const CfrWindow& view) {
+    for (uint32_t mask : view.row_source_mask) report.sources_mask |= mask;
+    for (uint32_t i = 0; i < NR_ISAC_SRC_COUNT; ++i)
+      report.source_occurrences[i] += view.source_occurrences[i];
+  };
+  record_sources(dl_window);
+  if (ul_window) record_sources(*ul_window);
+  const double midpoint_slots = 0.5 * (dl_window.row_time_slots.front()
+                                       + dl_window.row_time_slots.back());
   report.midpoint_air_time_s = (midpoint_slots - air_origin_slots)
-                               * slot_duration_s(window.scs_hz);
-  CfrWindow corrected = window;
-  if (config_.capture_rvm && !dl_window)
-    throw std::runtime_error("DL-only diagnostic RDM was requested without a provenance-preserving CFR view");
-  report.sync.rows = window.rows;
-  if (config_.sync_enable && window.rows >= 3) {
-    report.sync = estimate_sync(window);
-    report.sync = clock_tracker_.update(report.sync, report.midpoint_air_time_s,
-                                        window.subcarriers, window.scs_hz);
+                               * slot_duration_s(dl_window.scs_hz);
+  CfrWindow dl_corrected = dl_window;
+  report.sync.rows = dl_window.rows;
+  if (config_.sync_enable && dl_window.rows >= 3) {
+    report.sync = estimate_sync(dl_window);
+    report.sync = dl_clock_tracker_.update(report.sync, report.midpoint_air_time_s,
+                                           dl_window.subcarriers, dl_window.scs_hz);
     std::optional<std::array<std::complex<double>, 4>> los;
-    if (window.antennas == 4 && config_.array.configured
+    if (dl_window.antennas == 4 && config_.array.configured
         && norm(config_.tx_position - config_.rx_position) > 0.0)
-      los = surveyed_los_steering(config_.array, config_.tx_position, config_.rx_position, window.fc_hz);
-    apply_sync_correction(corrected, report.sync, 0.0, los);
-    if (dl_window)
-      apply_sync_correction(*dl_window, report.sync, 0.0, los);
+      los = surveyed_los_steering(
+          config_.array, config_.tx_position, config_.rx_position, dl_window.fc_hz);
+    apply_sync_correction(dl_corrected, report.sync, 0.0, los);
   }
   report.current_cpi_variance = estimate_current_cpi_variance(
-      corrected, &report.covariance_family_count, &report.covariance_difference_count);
-  CfrWindow detector_input = corrected;
-  if (dl_window) {
-    const auto alignments = align_allocation_families_pair(
-        detector_input, *dl_window, config_.family_static);
-    report.detector_alignment = alignments.first;
-  } else {
-    report.detector_alignment = align_allocation_families(detector_input, config_.family_static);
-  }
-  const double dwell = (detector_input.row_time_slots.back() - detector_input.row_time_slots.front())
-                       * slot_duration_s(detector_input.scs_hz);
-  const RateGate gate = finalize_search_gate(plan, detector_input.rows, dwell,
-                                              detector_input.fc_hz, config_);
-  if (dl_window) {
-    report.detector = detect_clean_with_diagnostic(detector_input, *dl_window,
-                                                   config_, gate, 0);
-  } else {
-    report.detector = detect_clean(detector_input, config_, gate, 0);
-  }
-  const auto priors = confirmed_tracks();
-  AdaptiveClutterMap* clutter = clutter_map();
-  for (const CleanComponent& object : report.detector.objects) {
-    Detection d;
-    d.range_m = object.range_bin * report.detector.axes.range_res_m;
-    d.range_rate_mps = -(object.doppler_bin - detector_input.rows / 2.0)
-                       * report.detector.axes.rate_res_mps;
-    if (std::abs(d.range_rate_mps) > config_.maximum_target_speed_mps) continue;
-    d.score = object.score; d.decision_statistic = object.local.z;
-    d.decision_threshold = object.local_threshold; d.effective_decision_threshold = object.local_threshold;
-    d.source_component_iteration = object.iteration; d.object_component_count = object.object_component_count;
-    d.dwell_s = report.detector.axes.dwell_s;
-    if (object.localization.covariance_valid) {
-      d.covariance_valid = true; d.range_rate_covariance = object.localization.covariance_range_rate;
+      dl_corrected, &report.covariance_family_count, &report.covariance_difference_count);
+  CfrWindow dl_detector_input = dl_corrected;
+  report.detector_alignment = align_allocation_families(
+      dl_detector_input, config_.family_static);
+  const double dl_dwell = (dl_detector_input.row_time_slots.back()
+                           - dl_detector_input.row_time_slots.front())
+                          * slot_duration_s(dl_detector_input.scs_hz);
+  const RateGate dl_gate = finalize_search_gate(
+      plan, dl_detector_input.rows, dl_dwell, dl_detector_input.fc_hz, config_);
+  report.detector = detect_clean(dl_detector_input, config_, dl_gate, 0);
+  // Backward-compatible capture fields now both name the same provenance-clean DL detector map.
+  report.detector.initial_dl_likelihood = report.detector.initial_likelihood;
+  report.detector.dl_observed_re_count = report.detector.axes.observed_re_count;
+
+  auto accept = [&](const DetectorResult& detector, const CfrWindow& input,
+                    const std::vector<ConfirmedTrackView>& priors,
+                    AdaptiveClutterMap* clutter) {
+    std::vector<Detection> accepted;
+    for (const CleanComponent& object : detector.objects) {
+      Detection d;
+      d.range_m = object.range_bin * detector.axes.range_res_m;
+      d.range_rate_mps = -(object.doppler_bin - input.rows / 2.0)
+                         * detector.axes.rate_res_mps;
+      if (std::abs(d.range_rate_mps) > config_.maximum_target_speed_mps) continue;
+      d.score = object.score;
+      d.decision_statistic = object.local.z;
+      d.decision_threshold = object.local_threshold;
+      d.effective_decision_threshold = object.local_threshold;
+      d.source_component_iteration = object.iteration;
+      d.object_component_count = object.object_component_count;
+      d.dwell_s = detector.axes.dwell_s;
+      if (object.localization.covariance_valid) {
+        d.covariance_valid = true;
+        d.range_rate_covariance = object.localization.covariance_range_rate;
+      }
+      bool near = false, artifact = false;
+      for (const auto& track : priors) {
+        const double sr = std::max(track.sigma_range_m, detector.axes.range_res_m);
+        const double sv = std::max(track.sigma_rate_mps, detector.axes.rate_res_mps);
+        const double dr = std::abs(d.range_m - track.range_m);
+        const double dv = std::abs(d.range_rate_mps - track.rate_mps);
+        if (std::pow(dr / (3.0 * sr), 2.0) + std::pow(dv / (3.0 * sv), 2.0) <= 1.0)
+          near = true;
+        else if (is_aperture_sidelobe(d, track, detector.axes.range_res_m,
+                                      detector.axes.rate_res_mps)
+                 || is_multipath_shadow(d, track, detector.axes.range_res_m,
+                                        detector.axes.rate_res_mps)) {
+          artifact = true;
+          break;
+        }
+      }
+      if (artifact) continue;
+      if (!priors.empty()) d.effective_decision_threshold += near ? -0.2 : 0.5;
+      if (!near && clutter && clutter->is_static(
+              d.range_m, d.range_rate_mps, d.score, detector.axes.range_res_m,
+              detector.axes.rate_res_mps, false))
+        continue;
+      if (d.decision_statistic > d.effective_decision_threshold)
+        accepted.push_back(std::move(d));
     }
-    bool near = false, artifact = false;
-    for (const auto& track : priors) {
-      const double sr = std::max(track.sigma_range_m, report.detector.axes.range_res_m);
-      const double sv = std::max(track.sigma_rate_mps, report.detector.axes.rate_res_mps);
-      const double dr = std::abs(d.range_m - track.range_m), dv = std::abs(d.range_rate_mps - track.rate_mps);
-      if (std::pow(dr / (3.0 * sr), 2.0) + std::pow(dv / (3.0 * sv), 2.0) <= 1.0) near = true;
-      else if (is_aperture_sidelobe(d, track, report.detector.axes.range_res_m,
-                                    report.detector.axes.rate_res_mps)
-               || is_multipath_shadow(d, track, report.detector.axes.range_res_m,
-                                      report.detector.axes.rate_res_mps)) { artifact = true; break; }
+    return accepted;
+  };
+
+  report.detections = accept(
+      report.detector, dl_detector_input, confirmed_tracks(), clutter_map());
+  attach_aoa(dl_corrected, report.detector.components, report.detector.axes,
+             config_, report.detections);
+
+  std::optional<CfrWindow> ul_corrected;
+  if (ul_window) {
+    report.uplink_present = true;
+    try {
+      ul_corrected = *ul_window;
+      report.uplink_sync.rows = ul_window->rows;
+      PipelineConfig ul_config = config_;
+      ul_config.tx_position = config_.ul_tx_position;
+      ul_config.aoa_enable = config_.aoa_ul_enable;
+      if (config_.sync_enable && ul_window->rows >= 3) {
+        report.uplink_sync = estimate_sync(*ul_window);
+        report.uplink_sync = ul_clock_tracker_.update(
+            report.uplink_sync, report.midpoint_air_time_s,
+            ul_window->subcarriers, ul_window->scs_hz);
+        std::optional<std::array<std::complex<double>, 4>> los;
+        if (ul_window->antennas == 4 && config_.array.configured
+            && config_.ul_tx_position_configured)
+          los = surveyed_los_steering(config_.array, config_.ul_tx_position,
+                                      config_.rx_position, ul_window->fc_hz);
+        apply_sync_correction(*ul_corrected, report.uplink_sync, 0.0, los);
+      }
+      report.uplink_current_cpi_variance = estimate_current_cpi_variance(
+          *ul_corrected, &report.uplink_covariance_family_count,
+          &report.uplink_covariance_difference_count);
+      CfrWindow ul_detector_input = *ul_corrected;
+      report.uplink_detector_alignment = align_allocation_families(
+          ul_detector_input, config_.family_static);
+      const double ul_dwell = (ul_detector_input.row_time_slots.back()
+                               - ul_detector_input.row_time_slots.front())
+                              * slot_duration_s(ul_detector_input.scs_hz);
+      const RateGate ul_gate = finalize_search_gate(
+          plan, ul_detector_input.rows, ul_dwell, ul_detector_input.fc_hz, config_);
+      report.uplink_detector = detect_clean(ul_detector_input, config_, ul_gate, 0);
+      const std::vector<ConfirmedTrackView> ul_priors = hierarchical_tracker_
+          ? hierarchical_tracker_->auxiliary_confirmed_tracks()
+          : (ul_motion_tracker_ ? ul_motion_tracker_->confirmed_tracks()
+                                : std::vector<ConfirmedTrackView>{});
+      AdaptiveClutterMap* ul_clutter = hierarchical_tracker_
+          ? &hierarchical_tracker_->auxiliary_clutter_map()
+          : (ul_motion_tracker_ ? &ul_motion_tracker_->clutter_map() : nullptr);
+      report.uplink_detections = accept(
+          report.uplink_detector, ul_detector_input, ul_priors, ul_clutter);
+      attach_aoa(*ul_corrected, report.uplink_detector.components,
+                 report.uplink_detector.axes, ul_config, report.uplink_detections);
+      report.uplink_valid = true;
+    } catch (const std::exception& error) {
+      report.uplink_error = error.what();
     }
-    if (artifact) continue;
-    if (!priors.empty()) d.effective_decision_threshold += near ? -0.2 : 0.5;
-    if (!near && clutter && clutter->is_static(d.range_m, d.range_rate_mps, d.score,
-                                                report.detector.axes.range_res_m,
-                                                report.detector.axes.rate_res_mps, false)) continue;
-    if (!(d.decision_statistic > d.effective_decision_threshold)) continue;
-    report.detections.push_back(std::move(d));
   }
-  attach_aoa(corrected, report.detector.components, report.detector.axes, config_, report.detections);
   {
     std::lock_guard<std::mutex> tracker_lock(tracker_mutex_);
     if (hierarchical_tracker_) {
       hierarchical_tracker_->update(report.midpoint_air_time_s, report.detections,
           report.detector.axes.range_res_m, report.detector.axes.rate_res_mps,
           report.cpi_sequence, report.detector.axes.dwell_s);
+      if (report.uplink_valid) {
+        hierarchical_tracker_->update_auxiliary(
+            report.midpoint_air_time_s, report.uplink_detections,
+            report.uplink_detector.axes.range_res_m,
+            report.uplink_detector.axes.rate_res_mps, report.cpi_sequence,
+            BistaticGeometry{config_.ul_tx_position, config_.rx_position});
+        report.uplink_tracks = hierarchical_tracker_->auxiliary_snapshots();
+      }
       report.tracks = hierarchical_tracker_->snapshots();
     } else if (motion_tracker_) {
       motion_tracker_->update(report.midpoint_air_time_s, report.detections,
           report.detector.axes.range_res_m, report.detector.axes.rate_res_mps, report.cpi_sequence);
+      if (report.uplink_valid && ul_motion_tracker_) {
+        ul_motion_tracker_->update(
+            report.midpoint_air_time_s, report.uplink_detections,
+            report.uplink_detector.axes.range_res_m,
+            report.uplink_detector.axes.rate_res_mps, report.cpi_sequence);
+        report.uplink_tracks = ul_motion_tracker_->snapshots();
+      }
       report.tracks = motion_tracker_->snapshots();
     }
   }

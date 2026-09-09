@@ -34,6 +34,17 @@ struct PipelineReport {
   CpiPlan plan;
   DetectorResult detector;
   std::vector<Detection> detections;
+  bool uplink_present = false;
+  bool uplink_valid = false;
+  std::string uplink_error;
+  SyncEstimate uplink_sync;
+  uint32_t uplink_covariance_family_count = 0;
+  uint64_t uplink_covariance_difference_count = 0;
+  double uplink_current_cpi_variance = 0.0;
+  FamilyAlignmentStats uplink_detector_alignment;
+  DetectorResult uplink_detector;
+  std::vector<Detection> uplink_detections;
+  std::vector<TrackSnapshot> uplink_tracks;
   std::vector<TrackSnapshot> tracks;
 };
 
