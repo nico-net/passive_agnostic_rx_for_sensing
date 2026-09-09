@@ -19,6 +19,7 @@
 #include <sys/time.h>
 #include "openair1/SCHED_NR/sched_nr.h"
 #include "executables/softmodem-common.h" // IS_PASSIVE_RX_MODE, for the passive-only branch restriction below
+#include "nr_ulsch_passive_branch.h"
 
 /* PASSIVE-RX UL RECEIVE-BRANCH RESTRICTION (2026-09-03).
  *
@@ -39,10 +40,12 @@ static int nr_ulsch_passive_keep_branch(int nb_rx_ant)
   if (nb_rx_ant <= 1 || !IS_PASSIVE_RX_MODE(get_softmodem_params())) {
     return -1;
   }
-  static int s_keep = -2; // -2 = unparsed
+  static __thread int s_keep = -2; // each consumer caches its immutable environment without a race
   if (s_keep == -2) {
     const char *e = getenv("ISAC_UL_RX_BRANCH");
-    s_keep = (e != NULL) ? atoi(e) : 0; // default branch 0, mirroring the DL default
+    /* The former unconditional branch-0 default silently ignored MRC mode 2.
+     * Retain explicit diagnostic/manual overrides, and the legacy no-mode default. */
+    s_keep = nr_ulsch_passive_branch_selection(true, nb_rx_ant, e, getenv("ISAC_RX_MRC_MODE"));
     LOG_W(PHY, "SENSING: UL restricted to receive branch %d (ISAC_UL_RX_BRANCH, -1 = all branches)\n", s_keep);
   }
   return (s_keep >= 0 && s_keep < nb_rx_ant) ? s_keep : -1;

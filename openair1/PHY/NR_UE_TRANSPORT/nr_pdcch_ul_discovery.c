@@ -44,6 +44,15 @@ typedef struct {
   uint64_t samples[UL_DISCOVERY_SAMPLES];
   int nsamples, sample_cursor, tda_index;
   uint64_t feedbacks, grants, late_splits;
+  /* Per-RNTI evidence inside a POOLED context. Pooling by DCI length is what lets a re-attached
+   * UE inherit evidence, but equal DCI lengths do NOT prove equal RRC configurations: two UEs can
+   * share a length and differ in layout. Without this, a busy UE's layout could win the pool and
+   * then be applied to the other UE's grants -- confidently wrong, which is worse than not
+   * converging. A winner must therefore be corroborated by EVERY contributing identity. */
+  uint16_t contrib_rnti[NR_PDCCH_BLIND_MAX_UE];
+  uint64_t contrib_trials[NR_PDCCH_BLIND_MAX_UE];
+  uint64_t contrib_passes[NR_PDCCH_BLIND_MAX_UE];
+  int      n_contrib;
   bool logged_width, logged_interp;
 } ul_context_t;
 static ul_context_t contexts[UL_DISCOVERY_CONTEXTS];
@@ -161,6 +170,36 @@ static bool still_equivalent(search_t *s, const uint64_t *p, apply_ctx_t *ctx)
   }
   return true;
 }
+/* Record this identity's own outcome inside the pooled context. */
+static void contrib_record_locked(ul_context_t *c, uint16_t rnti, bool ok)
+{
+  int at = -1;
+  for (int i = 0; i < c->n_contrib; ++i) if (c->contrib_rnti[i] == rnti) { at = i; break; }
+  if (at < 0) {
+    if (c->n_contrib >= NR_PDCCH_BLIND_MAX_UE) return;
+    at = c->n_contrib++;
+    c->contrib_rnti[at] = rnti;
+  }
+  c->contrib_trials[at]++;
+  c->contrib_passes[at] += ok ? 1 : 0;
+}
+
+/* A pooled winner is only trustworthy if every identity that contributed meaningful evidence also
+ * decodes under it. One UE decoding while another does not is exactly the "same DCI length,
+ * different RRC config" case, and the honest answer is to stay unresolved rather than impose the
+ * busier UE's layout on both. Identities with too little evidence are ignored, never counted
+ * against it -- absence of evidence is not disagreement. */
+static bool pooled_winner_corroborated_locked(const ul_context_t *c)
+{
+  int informative = 0;
+  for (int i = 0; i < c->n_contrib; ++i) {
+    if (c->contrib_trials[i] < NR_HYP_SWEEP_MIN_TRIALS / 4) continue;
+    informative++;
+    if (c->contrib_passes[i] * 100 < c->contrib_trials[i] * 2) return false; // <2 %: not decoding
+  }
+  return informative > 0;
+}
+
 bool nr_pdcch_ul_discovery_grant(const nr_pdcch_blind_ul_opts_t *fixed, uint16_t len,
                                  uint16_t rnti, uint64_t payload, nr_pdcch_blind_ul_result_t *out)
 {
@@ -252,6 +291,17 @@ bool nr_pdcch_ul_discovery_grant(const nr_pdcch_blind_ul_opts_t *fixed, uint16_t
   if(wi<0) goto done;
   nr_pdcch_ul_field_sweep_apply(&chosen,&ctx.opts);
   int ii=-1;
+  if(nr_hyp_sweep_winner(&c->widths.engine)>=0 && !pooled_winner_corroborated_locked(c)) {
+    /* The engine has a winner, but the identities that fed it do not agree. Equal DCI lengths do
+     * NOT prove equal RRC configurations, so imposing the busier UE's layout on the other one
+     * would be confidently wrong -- worse than not converging. Stay unresolved. */
+    if(!c->logged_width) {
+      LOG_W(PHY,"UL width winner NOT corroborated across %d pooled identities; equal DCI length "
+                "does not prove equal RRC config -- staying unresolved\n", c->n_contrib);
+      c->logged_width=true;
+    }
+    goto done;
+  }
   if(nr_hyp_sweep_winner(&c->widths.engine)>=0) {
     if(!c->logged_width) { LOG_A(PHY,"UL width search converged: class=%d\n",wi); c->logged_width=true; }
     nr_pdcch_blind_ul_result_t probe;
@@ -316,6 +366,21 @@ static void log_progress_locked(const search_t *s, const char *what, uint16_t rn
         what, rnti, e->n_classes, (unsigned long)total, (unsigned long)min_trials,
         NR_HYP_SWEEP_MIN_TRIALS, best, (unsigned long)e->classes[best].passes,
         (unsigned long)e->classes[best].trials, e->winner);
+  /* Print the leading WIDTH hypothesis in pdcch_blind_monitor_ul_dci_bits order, so the search's
+   * current best answer can be pinned as a manual configuration without reverse-engineering a class
+   * index. That is the only way to get a CLEAN uplink CRC number: every UL decode in a full_auto run
+   * comes from a stream that is ~99 % deliberately-wrong hypotheses, so it cannot say whether the
+   * decode chain works. Leading, NOT converged -- quote it as a candidate, never as a result. */
+  if (what[0] == 'w' && e->classes[best].hyp.len == (int)sizeof(nr_pdcch_ul_field_widths_t)) {
+    nr_pdcch_ul_field_widths_t w;
+    memcpy(&w, e->classes[best].hyp.bytes, sizeof(w));
+    LOG_I(PHY, "UL leading widths (class%d, %lu/%lu) ul_dci_bits=\"%d:%d:%d:%d:%d:%d:%d:%d:%d:%d:%d:%d:%d:%d:%d:%d\"\n",
+          best, (unsigned long)e->classes[best].passes, (unsigned long)e->classes[best].trials,
+          w.carrier_indicator_bits, w.ul_sul_bits, w.bwp_indicator_bits, w.freq_hopping_bits,
+          w.harq_pid_bits, w.dai1_bits, w.dai2_bits, w.sri_bits, w.precoding_info_bits,
+          w.antenna_ports_bits, w.srs_request_bits, w.csi_request_bits, w.cbg_bits,
+          w.ptrs_dmrs_bits, w.beta_offset_bits, w.dmrs_seq_init_bits);
+  }
 }
 
 void nr_pdcch_ul_discovery_feedback(const nr_pdcch_blind_ul_result_t *g, bool ok)
@@ -333,6 +398,7 @@ void nr_pdcch_ul_discovery_feedback(const nr_pdcch_blind_ul_result_t *g, bool ok
       nr_hyp_sweep_feed(&c->widths.engine,g->width_hyp_class,ok);
     if (c->interp.initialized && g->interp_hyp_class>=0)
       nr_hyp_sweep_feed(&c->interp.engine,g->interp_hyp_class,ok);
+    contrib_record_locked(c, g->rnti, ok);
     if ((++c->feedbacks % 2000) == 0) {
       log_progress_locked(&c->widths,"width",c->target_rnti);
       log_progress_locked(&c->interp,"interp",c->target_rnti);

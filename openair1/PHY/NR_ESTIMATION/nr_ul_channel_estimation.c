@@ -15,6 +15,9 @@
 #include "PHY/NR_TRANSPORT/nr_sch_dmrs.h"
 #include "PHY/NR_REFSIG/ul_ref_seq_nr.h"
 #include "executables/softmodem-common.h"
+#include "PHY/NR_TRANSPORT/nr_ulsch_passive_branch.h"
+#include "PHY/NR_TRANSPORT/nr_ulsch_passive_timing.h"
+#include "PHY/nr_phy_common/inc/nr_passive_delay.h"
 #include "nr_phy_common.h"
 #include "openair1/PHY/TOOLS/phy_scope_interface.h"
 #include "T.h"
@@ -168,7 +171,10 @@ static void nr_pusch_antenna_processing(void *arg)
         pilot_cnt += 2;
       }
       c16_t ch_estimates_time[frame_parms->ofdm_symbol_size] __attribute__((aligned(32)));
-      nr_est_delay(frame_parms->ofdm_symbol_size, ul_ls_est, ch_estimates_time, delay);
+      if (IS_PASSIVE_RX_MODE(get_softmodem_params()))
+        nr_passive_est_delay(frame_parms->ofdm_symbol_size, ul_ls_est, ch_estimates_time, delay);
+      else
+        nr_est_delay(frame_parms->ofdm_symbol_size, ul_ls_est, ch_estimates_time, delay);
       if (rdata->scope && antenna == 0) {
         metadata mt = {.slot = -1, .frame = -1};
         scopeData_t *tmp = rdata->scope;
@@ -270,7 +276,10 @@ static void nr_pusch_antenna_processing(void *arg)
 
       // Delay compensation
       c16_t ch_estimates_time[frame_parms->ofdm_symbol_size] __attribute__((aligned(32)));
-      nr_est_delay(frame_parms->ofdm_symbol_size, ul_ls_est, ch_estimates_time, delay);
+      if (IS_PASSIVE_RX_MODE(get_softmodem_params()))
+        nr_passive_est_delay(frame_parms->ofdm_symbol_size, ul_ls_est, ch_estimates_time, delay);
+      else
+        nr_est_delay(frame_parms->ofdm_symbol_size, ul_ls_est, ch_estimates_time, delay);
       if (rdata->scope && antenna == 0) {
         metadata mt = {.slot = -1, .frame = -1};
         scopeData_t *tmp = rdata->scope;
@@ -613,11 +622,25 @@ int nr_pusch_channel_estimation(PHY_VARS_gNB *gNB,
     noise_amp2 += noise_amp2_arr[aarx];
     nest_count += nest_count_arr[aarx];
   }
-  // get the maximum delay
+  /* The active gNB retains its existing arrival-time aggregation. Passive RX
+   * uses this result to move its FFT window, so a weak antenna's large positive
+   * delay must not override a stronger antenna's measured arrival. */
   *delay = delay_arr[0];
-  for (int aarx = 1; aarx < nb_antennas_rx; aarx++) {
-    if (delay_arr[aarx].est_delay >= delay->est_delay) {
-      *delay = delay_arr[aarx];
+  if (IS_PASSIVE_RX_MODE(get_softmodem_params())) {
+    int peak_power[nb_antennas_rx];
+    for (int a=0;a<nb_antennas_rx;++a) peak_power[a]=delay_arr[a].delay_max_val;
+    const int keep=nr_ulsch_passive_branch_selection(true,nb_antennas_rx,
+                       getenv("ISAC_UL_RX_BRANCH"),getenv("ISAC_RX_MRC_MODE"));
+    const int best=nr_ulsch_passive_timing_branch(nb_antennas_rx,keep,peak_power);
+    if (best>=0) *delay=delay_arr[best];
+    if (getenv("ISAC_UL_TIMING_DIAG"))
+      LOG_I(PHY,"UL-TIMING rnti=%04x slot=%u sym=%u branch=%d delay=%d peak=%d\n",
+            pusch_pdu->rnti,Ns,symbol,best,delay->est_delay,delay->delay_max_val);
+  } else {
+    for (int aarx = 1; aarx < nb_antennas_rx; aarx++) {
+      if (delay_arr[aarx].est_delay >= delay->est_delay) {
+        *delay = delay_arr[aarx];
+      }
     }
   }
 

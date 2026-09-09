@@ -830,10 +830,21 @@ void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_pr
       static bool ul_seed_logged;
       if (!ul_seed_logged) {
         ul_seed_logged = true;
+        /* Print the ENTRIES, not just the count. The TDA list sets the TDA field width and hence the
+         * whole DCI layout, so reproducing this seed in a manual configuration requires the actual
+         * start/length/k2/mapping values -- and there is no other way to read them off the air. The
+         * format matches pdcch_blind_monitor_ul_tda so the line can be pasted directly. */
+        char tda[256];
+        int n = 0;
+        for (int i = 0; i < ul_opts.tda_count && n < (int)sizeof(tda) - 20; i++)
+          n += snprintf(tda + n, sizeof(tda) - n, "%s%u:%u:%u:%u", i ? "," : "",
+                        ul_opts.tda_start[i], ul_opts.tda_length[i],
+                        ul_opts.tda_k2[i], ul_opts.tda_mapping[i]);
         LOG_A(PHY,
-              "UL discovery seeded from SIB1: UL-BWP=%u+%u TDAs=%d -- HYPOTHESIS for the dedicated "
-              "config, not a claim about it; TB CRC decides\n",
-              ul_opts.bwp_start, ul_opts.bwp_size, ul_opts.tda_count);
+              "UL discovery seeded from SIB1: UL-BWP=%u+%u TDAs=%d ul_bwp=\"%u:%u\" ul_tda=\"%s\" "
+              "-- HYPOTHESIS for the dedicated config, not a claim about it; TB CRC decides\n",
+              ul_opts.bwp_start, ul_opts.bwp_size, ul_opts.tda_count,
+              ul_opts.bwp_start, ul_opts.bwp_size, tda);
       }
     }
   }

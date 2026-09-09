@@ -30,11 +30,18 @@ sudo -n true
 DISCOVERY=$(timeout 10s uhd_find_devices --args type=x4xx,addr=192.168.20.2,mgmt_addr=128.178.122.174,serial=327C1F2 2>&1)
 printf '%s\n' "$DISCOVERY" | grep -q 'claimed: False' || { echo "BLOCKED: X410 does not report unclaimed"; exit 3; }
 OUT=$(mktemp -d /home/sens/NICOLA/captures/adaptive_ul_dl_mrc2.XXXXXX)
-cp -- "$SCRIPT_DIR/adaptive_no_hints.conf" "$OUT/receiver.conf"
+# CONF selects the receiver config, so a diagnostic variant does not need a copy of this
+# script -- copying it elsewhere breaks the repo-root derivation and every guard above it.
+cp -- "$SCRIPT_DIR/${CONF:-adaptive_no_hints.conf}" "$OUT/receiver.conf"
 git -C "$REPO" rev-parse HEAD > "$OUT/source_commit.txt"
 git -C "$REPO" diff --binary > "$OUT/source.patch"
+(cd "$REPO" && git ls-files -z --cached --others --exclude-standard -- openair1 openair2 executables radio tests/passive_rx |
+  while IFS= read -r -d '' source_file; do
+    if [ -f "$source_file" ]; then sha256sum -- "$source_file"; fi
+  done) > "$OUT/source_files.sha256"
 sha256sum "$BUILD/nr-uesoftmodem" "$BUILD/liboai_usrpdevif.so" "$OUT/receiver.conf" > "$OUT/checksums.txt"
 printf '%s\n' "${DURATION:-480}" > "$OUT/duration_s.txt"
+printf 'MRC=%s UL_BRANCH=%s RXGAIN=%s CONF=%s\n' "${MRC:-2}" "${UL_BRANCH:-unset}" "${RXGAIN:-40}" "${CONF:-adaptive_no_hints.conf}" > "$OUT/arm.txt"
 cat /sys/class/net/enp129s0f0np0/statistics/rx_missed_errors > "$OUT/nic_missed_before.txt"
 echo "OUTPUT=$OUT"
 cd "$BUILD"
@@ -52,17 +59,19 @@ cd "$BUILD"
 # Deliberately NOT a live CFO retune: doing that killed the radio 2/2 times previously.
 # Each void attempt's log is kept as evidence, never silently discarded.
 run_modem() {
-  sudo -n env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin ISAC_RX_MRC_MODE=2 ISAC_DMRS_FO_APPLY=0 ISAC_SFO_CORRECT=0 \
+  sudo -n env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+    ISAC_RX_MRC_MODE="${MRC:-2}" ISAC_UL_RX_BRANCH="${UL_BRANCH:-}" \
+    ISAC_DMRS_FO_APPLY=0 ISAC_SFO_CORRECT=0 \
     ISAC_RX_BRANCH_FO=0 ISAC_RX_GAIN_TRIM=0,0,0,0 \
     ISAC_DISC_NO_RESYNC=0 ISAC_RF_STALL_MAX_REINIT=0 ISAC_CFO_TRACK_HZ=1 ISAC_CFO_TRACK_PERIOD=20 \
     ISAC_PDCCH_TIMING=1 ISAC_PUSCH_TIMING=1 ISAC_PUSCH_DIAG=1 \
     ISAC_UL_TA_SWEEP=0:0:0 ISAC_SENSE_COMB=0 ISAC_TSYNC_RESET=0 \
-    ISAC_PASSIVE_REPLAY_CAPTURE="$OUT/replay.bin" \
+    ISAC_PASSIVE_REPLAY_CAPTURE="$OUT/replay.bin" ISAC_PASSIVE_REPLAY_FAILURES=1 \
     LD_LIBRARY_PATH="$BUILD:/usr/local/lib" \
     timeout --signal=TERM --kill-after=10s "${DURATION:-480}s" taskset -c 0-7 "$BUILD/nr-uesoftmodem" \
     --usrp-args type=x4xx,addr=192.168.20.2,mgmt_addr=128.178.122.174 \
     -O "$OUT/receiver.conf" -r 273 --numerology 1 --band 78 -C 3450000000 --ssb 150 \
-    --ue-rxgain 40 --ue-nb-ant-rx 4 --ue-nb-ant-tx 4 --passive-rx \
+    --ue-rxgain ${RXGAIN:-40} --ue-nb-ant-rx 4 --ue-nb-ant-tx 4 --passive-rx \
     --ue-fo-compensation --cont-fo-comp 1 --freq-sync-P 0.05 --freq-sync-I 0.001 \
     --initial-fo -16480 --thread-pool 0,1,6,7 --time-sync-I 0.01 \
     --ntn-initial-time-drift -4.25 -A 90 > "$OUT/run.log" 2>&1
@@ -96,12 +105,26 @@ for attempt in $(seq 1 "$ATTEMPTS"); do
   cfo=$(grep -aoE 'current=-?[0-9]+' "$OUT/run.log" | tail -1)
   echo "attempt $attempt VOID: no SIB1 within ${ACQ_TIMEOUT_S}s (${cfo:-cfo=?}); retrying acquisition"
   cp -- "$OUT/run.log" "$OUT/void_attempt${attempt}.log"
-  sudo -n pkill -TERM -x nr-uesoftmodem 2>/dev/null
+  # Resolve our exact receiver by its unique copied config path. Never signal
+  # an unrelated modem that happens to share the executable name.
+  for candidate in $(pgrep -x nr-uesoftmodem); do
+    if sudo -n sh -c 'tr "\000" "\n" < "$1"' sh "/proc/$candidate/cmdline" 2>/dev/null |
+        grep -Fxq -- "$OUT/receiver.conf"; then
+      sudo -n kill -TERM "$candidate" 2>/dev/null
+    fi
+  done
   wait "$modem_wait" 2>/dev/null
   sleep 5
 done
 set -e
 printf '%s\n' "$rc" > "$OUT/process_exit.txt"
-printf '%s\n' "$verdict" > "$OUT/validity.txt"
 cat /sys/class/net/enp129s0f0np0/statistics/rx_missed_errors > "$OUT/nic_missed_after.txt"
+if [ "$verdict" = VALID ]; then
+  if ! cmp -s "$OUT/nic_missed_before.txt" "$OUT/nic_missed_after.txt"; then
+    verdict=VOID_NIC_MISSED
+  elif grep -qaE 'RXDISCONT|RFSTALL' "$OUT/run.log"; then
+    verdict=VOID_RF_DISCONTINUITY
+  fi
+fi
+printf '%s\n' "$verdict" > "$OUT/validity.txt"
 echo "verdict=$verdict exit=$rc; inspect receiver evidence before any further verdict. OUTPUT=$OUT"

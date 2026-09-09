@@ -1917,7 +1917,11 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
          * is actually being decoded. Falls back to the mean if this branch produced no estimate. */
         const uint32_t nvar_saved = nvar;
         if (b < NR_DL_CHEST_MAX_ANT && nr_dl_chest_nvar_ant[b] > 0) {
-          nvar = nr_dl_chest_nvar_ant[b];
+          const uint64_t scaled = (uint64_t)nr_dl_chest_nvar_ant[b] * (uint64_t)(n_dmrs_sym * cw->Nl);
+          const uint32_t nvar_branch = (uint32_t)(scaled / nvar_den);
+          if (nvar_branch > 0) {
+            nvar = nvar_branch;
+          }
         }
         memset(llr, 0, rx_llr_buf_sz * sizeof(*llr));
         bool redemod_ok = true;

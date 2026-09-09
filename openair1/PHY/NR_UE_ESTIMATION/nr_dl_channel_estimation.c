@@ -13,6 +13,8 @@
 #include "PHY/NR_REFSIG/nr_mod_table.h"
 #include "PHY/NR_TRANSPORT/nr_sch_dmrs.h"
 #include "nr_phy_common.h"
+#include "PHY/nr_phy_common/inc/nr_passive_delay.h"
+#include "executables/softmodem-common.h"
 #include "filt16a_32.h"
 #include "T.h"
 #include <openair1/PHY/TOOLS/phy_scope_interface.h>
@@ -929,7 +931,10 @@ static void NFAPI_NR_DMRS_TYPE1_linear_interp(NR_DL_FRAME_PARMS *frame_parms,
     last_processed_rb = block_end + 1;
   }
   c16_t ch_estimates_time[frame_parms->ofdm_symbol_size] __attribute__((aligned(32)));
-  nr_est_delay(frame_parms->ofdm_symbol_size, dl_ls_est, ch_estimates_time, delay);
+  if (IS_PASSIVE_RX_MODE(get_softmodem_params()))
+    nr_passive_est_delay(frame_parms->ofdm_symbol_size, dl_ls_est, ch_estimates_time, delay);
+  else
+    nr_est_delay(frame_parms->ofdm_symbol_size, dl_ls_est, ch_estimates_time, delay);
   int delay_idx = get_delay_idx(delay->est_delay, MAX_DELAY_COMP);
   c16_t *dl_delay_table = frame_parms->delay_table[delay_idx];
 
@@ -1104,7 +1109,10 @@ void NFAPI_NR_DMRS_TYPE2_linear_interp(NR_DL_FRAME_PARMS *frame_parms,
   }
 
   c16_t ch_estimates_time[frame_parms->ofdm_symbol_size] __attribute__((aligned(32)));
-  nr_est_delay(frame_parms->ofdm_symbol_size, dl_ls_est, ch_estimates_time, delay);
+  if (IS_PASSIVE_RX_MODE(get_softmodem_params()))
+    nr_passive_est_delay(frame_parms->ofdm_symbol_size, dl_ls_est, ch_estimates_time, delay);
+  else
+    nr_est_delay(frame_parms->ofdm_symbol_size, dl_ls_est, ch_estimates_time, delay);
   int delay_idx = get_delay_idx(delay->est_delay, MAX_DELAY_COMP);
   c16_t *dl_delay_table = frame_parms->delay_table[delay_idx];
   // kept the same as before but unclear why  would it be nb_rb_pdsch / 2 and not / 3

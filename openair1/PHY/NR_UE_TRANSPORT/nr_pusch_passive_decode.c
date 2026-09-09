@@ -1,4 +1,6 @@
 #include "nr_passive_sample_lifetime.h"
+#include "nr_passive_uci_probe.h"
+#include "nr_passive_uci_learn.h"
 /* See nr_pusch_passive_decode.h for why this file constructs a gNB by hand. */
 
 #include <stdlib.h>
@@ -1051,38 +1053,122 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
   int ulsch_id = 0;
   int rc = nr_ulsch_decoding(gnb, fp, frame, slot, &ulsch_id, 1);
 
-  /* ---- UCI-ON-PUSCH RESERVATION SEARCH ---------------------------------------------------------
-   * If the first attempt failed, the grant may have carried HARQ-ACK that rate-matched the ULSCH
-   * down. Try the O_ACK values consistent with the DAI this DCI carried; see the block comment on
-   * passive_ul_unav_res() for why the DAI pins O_ACK only modulo 4 and why the transport-block CRC
-   * is the right oracle for the rest.
-   *
-   * ponytail: reservation-only. It shrinks G but does not DEMULTIPLEX the UCI REs out of the LLR
-   * stream, so it can only rescue grants whose UCI punctures (O_ACK <= 2). The CSI-Part-1 case --
-   * measured as the single largest UL residual -- needs LLR compaction at the CSI positions and a
-   * deterministic E_CSI1, not a search. See docs/UL_UCI_DEMUX_PARKED.md. */
-  const nr_pdcch_blind_monitor_cfg_t *ucfg = nr_pdcch_blind_monitor_get_cfg();
-  if (rc == 0 && hp_crc_failed(ulsch) && ucfg != NULL && ucfg->ul_uci_search > 0) {
-    const uint8_t bg = pdu.maintenance_parms_v3.ldpcBaseGraph;
-    for (int t = 0; t < ucfg->ul_uci_search; t++) {
-      /* Dynamic codebook: DAI = (V_T_DAI - 1) mod 4, so the candidates are dai+1, +5, +9, ... */
-      const uint32_t o_ack = (uint32_t)g->dai + 1u + 4u * (uint32_t)t;
-      const uint32_t unav  = passive_ul_unav_res(g, tbs, bg, o_ack, ucfg->ul_uci_beta, ucfg->ul_uci_alpha);
-      if (unav == 0) {
-        continue;
+  /* Expensive, bounded OFFLINE diagnostic, never enabled by full_auto alone.
+   * Preserve descrambled LLRs and remove actual interleaved UCI positions.
+   * A CRC win identifies a footprint candidate, not O_ACK/CSI/RRC configuration. */
+  if (getenv("ISAC_PASSIVE_REPLAY_INPUT") && getenv("ISAC_PASSIVE_REPLAY_UL_UCI")
+      && rc==0 && hp_crc_failed(ulsch) && g->nrOfLayers==1) {
+    const uint32_t full_bits=out->G;
+    int16_t *original=malloc(full_bits*sizeof(*original));
+    if (original) {
+      memcpy(original,pvp->llr,full_bits*sizeof(*original));
+      bool rescued=false;
+      for(int csi=0;csi<2 && !rescued;++csi) {
+        for(unsigned re=1;re<=1024u/pdu.qam_mod_order;++re) {
+          const uint32_t data_bits=nr_passive_uci_probe_demux(original,full_bits,pvp->llr,
+              g->num_rb,g->start_symbol,g->num_symbols,g->ul_dmrs_symb_pos,
+              nb_dmrs_re_per_rb,pdu.qam_mod_order,re,csi);
+          if(!data_bits) continue;
+          ulsch->unav_res=re;
+          ulsch->harq_process->harq_to_be_cleared=true;
+          rc=nr_ulsch_decoding(gnb,fp,frame,slot,&ulsch_id,1);
+          if(rc==0 && !hp_crc_failed(ulsch)) {
+            rescued=true;
+            out->G=data_bits;
+            out->uci_ack_re=csi?0:re;
+            LOG_I(PHY,"REPLAY-UCI source=%lu rnti=%04x kind=%s re=%u bits=%u tbs=%u CRC candidate\n",
+                  (unsigned long)abs_slot,g->rnti,csi?"CSI":"ACK",re,full_bits-data_bits,tbs>>3);
+            break;
+          }
+        }
       }
-      atomic_fetch_add_explicit(&g_uci_trials, 1, memory_order_relaxed);
-      ulsch->unav_res = unav;
-      ulsch->harq_process->harq_to_be_cleared = true; // else `d` accumulates across attempts
-      nr_rx_pusch_group_tp(gnb, &pvp, &pdup, &unavp, 1, frame, slot);
-      rc = nr_ulsch_decoding(gnb, fp, frame, slot, &ulsch_id, 1);
-      if (rc == 0 && !hp_crc_failed(ulsch)) {
-        atomic_fetch_add_explicit(&g_uci_rescued, 1, memory_order_relaxed);
-        out->o_ack = (uint8_t)o_ack;
-        out->uci_ack_re = (uint16_t)unav;
-        break;
+      if(!rescued) {
+        memcpy(pvp->llr,original,full_bits*sizeof(*original));
+        ulsch->unav_res=0;
+        ulsch->harq_process->harq_to_be_cleared=true;
+        rc=nr_ulsch_decoding(gnb,fp,frame,slot,&ulsch_id,1);
       }
+      free(original);
     }
+  }
+
+  /* ---- LIVE UCI-ON-PUSCH RECOVERY ---------------------------------------------------------------
+   * The previous reservation-only retry could not work and is gone: it changed `unav_res`, which
+   * demodulation then overwrote, and it never removed the interleaved UCI positions from the LLR
+   * stream. CSI Part 1 is ALWAYS rate-matched (G_ulsch = G - E_CSI1 - E_CSI2), so the LLRs must be
+   * COMPACTED at the UCI positions, never merely truncated.
+   *
+   * nr_passive_uci_probe_demux() does that inversion. What it lacks is an affordable live policy --
+   * its offline sweep tries every RE count up to 1024 coded bits per failed grant. The footprint is
+   * fixed by the UE's report configuration and beta offsets, so it REPEATS: measured offline on this
+   * cell only a few distinct values occur (ACK 17/22 RE, CSI 38/33 RE). So try what has worked for
+   * this RNTI first, and pay for a wide sweep on only one failure in `explore_every`.
+   *
+   * A recovered RE count is an inferred FOOTPRINT, not a known O_ACK, CSI report size or beta
+   * offset, and it is never written into configuration. Single-layer, no-PTRS scope, matching the
+   * inverse it uses; combined ACK+CSI layouts and small-ACK puncturing are not covered. */
+  const nr_pdcch_blind_monitor_cfg_t *ucfg = nr_pdcch_blind_monitor_get_cfg();
+  if (rc == 0 && hp_crc_failed(ulsch) && ucfg != NULL && ucfg->ul_uci_search > 0
+      && g->nrOfLayers == 1 && out->G > 0) {
+    const uint32_t full_bits = out->G;
+    int16_t *original = malloc((size_t)full_bits * sizeof(*original));
+    if (original == NULL) {
+      out->status = NR_PUSCH_PASSIVE_ERROR;
+      out->reject_reason = "UCI recovery scratch allocation failed";
+      return false;
+    }
+    memcpy(original, pvp->llr, (size_t)full_bits * sizeof(*original));
+
+    /* try(): one demux + one LDPC attempt at a candidate footprint. */
+    bool rescued = false;
+    uint32_t won_bits = 0; unsigned won_re = 0; int won_csi = 0;
+    #define UCI_ATTEMPT(RE, CSI)                                                                   \
+      do {                                                                                         \
+        const uint32_t db = nr_passive_uci_probe_demux(original, full_bits, pvp->llr,               \
+            g->num_rb, g->start_symbol, g->num_symbols, g->ul_dmrs_symb_pos,                        \
+            nb_dmrs_re_per_rb, pdu.qam_mod_order, (RE), (CSI));                                     \
+        if (db) {                                                                                   \
+          atomic_fetch_add_explicit(&g_uci_trials, 1, memory_order_relaxed);                        \
+          ulsch->unav_res = (RE);                                                                   \
+          ulsch->harq_process->harq_to_be_cleared = true;                                           \
+          rc = nr_ulsch_decoding(gnb, fp, frame, slot, &ulsch_id, 1);                               \
+          if (rc == 0 && !hp_crc_failed(ulsch)) {                                                   \
+            rescued = true; won_bits = db; won_re = (RE); won_csi = (CSI);                          \
+          }                                                                                         \
+        }                                                                                           \
+      } while (0)
+
+    /* 1. What already worked for this UE, most successful first. A couple of attempts. */
+    nr_uci_footprint_t known[NR_UCI_LEARN_FOOTPRINTS];
+    const int n_known = nr_passive_uci_learn_get(g->rnti, known, NR_UCI_LEARN_FOOTPRINTS);
+    for (int i = 0; i < n_known && !rescued; i++) UCI_ATTEMPT(known[i].re, known[i].csi != 0);
+
+    /* 2. Otherwise explore, rate-limited, within a bounded RE budget. */
+    if (!rescued && nr_passive_uci_learn_should_explore(g->rnti, (unsigned)ucfg->ul_uci_explore_every)) {
+      const unsigned cap = (unsigned)ucfg->ul_uci_search;
+      for (int csi = 0; csi < 2 && !rescued; ++csi)
+        for (unsigned re = 1; re <= cap && !rescued; ++re) UCI_ATTEMPT(re, csi);
+    }
+    #undef UCI_ATTEMPT
+
+    if (rescued) {
+      atomic_fetch_add_explicit(&g_uci_rescued, 1, memory_order_relaxed);
+      nr_passive_uci_learn_record(g->rnti, (uint16_t)won_re, won_csi != 0);
+      out->G = won_bits;
+      out->uci_ack_re = (uint16_t)won_re;   /* inferred footprint; CSI vs ACK distinguished below */
+      out->o_ack = 0;                        /* unknown: a footprint is not an O_ACK */
+      static uint64_t logged;
+      if (++logged <= 12 || (logged % 500) == 0)
+        LOG_I(PHY, "SENSING: UCI recovered rnti=%04x kind=%s re=%u removed_bits=%u (learned)\n",
+              g->rnti, won_csi ? "CSI" : "ACK", won_re, full_bits - won_bits);
+    } else {
+      /* Restore the untouched stream and re-run, so a failed search leaves no trace in the result. */
+      memcpy(pvp->llr, original, (size_t)full_bits * sizeof(*original));
+      ulsch->unav_res = 0;
+      ulsch->harq_process->harq_to_be_cleared = true;
+      rc = nr_ulsch_decoding(gnb, fp, frame, slot, &ulsch_id, 1);
+    }
+    free(original);
   }
 
   if (utim) {

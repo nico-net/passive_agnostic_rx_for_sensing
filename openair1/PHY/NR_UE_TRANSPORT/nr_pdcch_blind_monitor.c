@@ -911,8 +911,13 @@ static int parse_ul_uci(const char* s)
 {
   g_cfg.ul_uci_beta  = 11;  // ~20, a mid-table default; override from the gNB's own betaOffsets
   g_cfg.ul_uci_alpha = 0;   // 0.5, what this deployment logs
-  const int n = sscanf(s, "%d:%d:%d", &g_cfg.ul_uci_search, &g_cfg.ul_uci_beta, &g_cfg.ul_uci_alpha);
-  if (n < 1 || g_cfg.ul_uci_search < 0) {
+  /* 32: a failed grant costs at most a couple of cached attempts, and only one failure in 32 pays
+   * for the wide sweep. The footprint is a property of the UE's report config, so once learned it
+   * serves every later grant -- that is what makes online recovery affordable at all. */
+  g_cfg.ul_uci_explore_every = 32;
+  const int n = sscanf(s, "%d:%d:%d:%d", &g_cfg.ul_uci_search, &g_cfg.ul_uci_beta,
+                       &g_cfg.ul_uci_alpha, &g_cfg.ul_uci_explore_every);
+  if (n < 1 || g_cfg.ul_uci_search < 0 || g_cfg.ul_uci_explore_every < 0) {
     g_cfg.ul_uci_search = 0;
     return 0;
   }

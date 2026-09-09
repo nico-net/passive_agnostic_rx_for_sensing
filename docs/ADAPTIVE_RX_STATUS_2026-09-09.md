@@ -1,457 +1,78 @@
-# Adaptive UL/DL passive RX — session record 2026-09-09 (later)
 
-Branch/worktree: `adaptive-rx-UL-DL` on sens6. Supersedes nothing; extends
-`ADAPTIVE_RX_VALIDATION_2026-09-09.md`. Receiver-only OTA, authorised.
+## Target: >=60 % CRC (excluding empty TBs) on DL and UL, all UEs. NOT met. What has been ruled out.
 
-## Headline
+The correct metric already exists and should be the ONLY one quoted:
+`health = crc_ok / (crc_ok + seg_fail)`, which excludes empty grants by construction. Its own
+code comment records that quoting `crc_ok/try` misled the downlink investigation once. Note
+that empty TBs are NOT the explanation for the low uplink figure: `health` has read
+0.8-4.2 % throughout, and the best arm measured `zero_tb=0`.
 
-DL is autonomous and works. **UL is not, and the reason is NOT what the previous
-sessions' architecture assumed.** Everything the UL width/interpretation search
-needs is now in place and correct, and it still never sees a single format-0_1
-grant, on a cell that the gNB's own log proves is sending them.
-
-## Fixed this session
-
-1. **The tree did not build.** `nr_pusch_passive_decode.c` included
-   `nr_passive_uci_demux.h` and called `nr_passive_uci_ack_demux()`; neither exists
-   in the tree or as an untracked file. Reverted that hunk, kept the six real
-   fixes in the same uncommitted diff. Reasoning: `docs/UL_UCI_DEMUX_PARKED.md`.
-2. **UL joint initialisation** (`fe74ce576c`). `nr_pdcch_ul_discovery_grant()`
-   refused every grant unless `bwp_size` and `tda_count >= 1` were configured, and
-   nothing supplied either in full_auto. Two defects: `tda_count == 0` is the
-   TS 38.214 default 16-entry table, a COMPLETE interpretation that
-   `nr_pdcch_blind_dci01_size()` already reads as a 4-bit field, so refusing it
-   treated a resolved case as unresolved; and SIB1's common initial UL BWP and
-   `pusch-TimeDomainAllocationList` were already decoded and published, with only
-   `ul_mu` being read off them. Now seeded as a HYPOTHESIS -- the TB CRC stays the
-   authority, so a differing dedicated config fails to converge exactly as an
-   unseeded search would, and the seed can only add reach.
-   **Live: `UL discovery seeded from SIB1: UL-BWP=0+273 TDAs=6`.**
-3. **DCI 0_0 recovered off the 1_0 scan** (`1fd296e9b4`). `nr_pdcch_blind_extract_00()`
-   had existed since 2026-08-25 with no caller: 0_0 is size-aligned with 1_0, so
-   the polar decode already produced its payload and the 1_0 path rejected it at
-   the identifier bit. Also fixed a real defect the new test found -- extract_10's
-   class-retry loop `memset`s the result between hypotheses and restored only
-   rnti/format/mismatches, wiping the decoded payload.
-   **Live: `dci00[accepts=2 rejects=1310]` over 480 s.** It works.
-
-## RETRACTED, same session — read this before reusing the 0_0 rationale
-
-The 0_0 commit message argues this cell "schedules with fallback formats", from
-the census showing 13,610 format-1_0 accepts and zero 1_1. **That is wrong.**
-Two independent measurements refute it:
-
-- `dci00[accepts=2 rejects=1310]`: if the cell were scheduling UL with 0_0, that
-  accept count would be in the thousands, not 2.
-- The gNB's own log, last 20 MB: **746 `format=1_1` and 147 `format=0_1`, both at
-  `al=2`, and no fallback at all.** Payload sizes across the last 200 MB:
-  `payload_size=47` x3813 (DL 1_1), `=43` x1005 (UL 0_1), `=45` x11, `=39` x18.
-
-So the receiver's 13,610 "dci10 accepts" are not what the gNB is sending, and the
-0_0 work -- while a genuine gap, correctly closed, and live-verified -- is NOT the
-reason UL sits at zero. Keep the code; discard the rationale.
-
-## The actual open blocker, stated precisely
-
-Over 480 s the receiver scans ~5.4M format-0_1 candidates and accepts **zero**,
-while on the same cell, in the same CORESET, the same UE-specific search space,
-the same aggregation level and the same RNTI, it converges Technique D off the
-format-1_1 stream and produces CRC-verified PDSCH.
-
-Everything the 0_1 path needs has now been checked against the gNB and is right:
-
-| input | receiver | gNB log | agree |
-|---|---|---|---|
-| DCI 0_1 payload size | 43 (locked automatically) | `payload_size=43` | yes |
-| target RNTI | 0x4656 (bootstrapped) | `rnti=0x4656`, 5306 sightings | yes |
-| aggregation level | candidate list (1_1 works on it) | `dci_aggregation_level=1` = AL2 | yes |
-| CORESET | 1 symbol, full 273, non-interleaved | `symb=[0..1)`, 45 ones, NON INTERLEAVED `reg_bundle_sz=6` | yes |
-| DM-RS / data scrambling | PCI 2 | `nid_pdcch_data=2 nid_pdcch_dmrs=2` | yes |
-| UL BWP | 0+273 (SIB1) | `bwp=[0..273)` | yes |
-
-Active UEs on the cell: 0x4656 (5306), 0x464f (133), 0x4690 (125).
-
-`dci01[accepts=...]` is counted AFTER the discovery controller, so it could not
-distinguish "the polar decode never recovered the RNTI" from "it did, and the
-width search has not converged". New counters
-`ulscan[sched= crc_hit= disc=]` split exactly that. Result below.
-
-## Method notes worth keeping
-
-- The X410 100 GbE data link had **no IPv4 address** again (not reboot-persistent,
-  as always). Every capture would have run over the 1 GbE mgmt path and been
-  invalid. Re-check `ip -br -4 addr show enp129s0f0np0` before every session.
-- All three captures VALID: exit 124 as designed, NIC `rx_missed_errors` delta 0,
-  zero RXDISCONT/RFSTALL.
-- sens4's clock is ~29 min behind sens6. Do not compare timestamps across them.
-
-## ROOT CAUSE FOUND — it was an array bound, not the radio
-
-Capture `adaptive_ul_dl_mrc2.AFIAsQ` (480 s, VALID) with the new counters:
-
-```
-dci01[accepts=0 rejects=1887904]
-ulscan[sched=1887904 crc_hit=19094 disc=19094]
-UL raw sample rnti=0x4656 len=43 payload=0x48604222a1 sample=1/8 ... sample=8/8
-UL discovery width refused: raw=400 classes/error=-2
-```
-
-Read in order:
-
-1. **The polar decode works.** 19,094 real format-0_1 DCIs for rnti 0x4656 at length 43
-   were recovered and handed to the discovery controller. `crc_hit == disc`, so not one
-   was lost between decode and controller.
-2. **The SIB1 seed works.** The controller collected all 8 raw samples it needs.
-3. **`error=-2` is `NR_HYP_SWEEP_CLASS_OVERFLOW`.** With SIB1's real 6-entry
-   `pusch-TimeDomainAllocationList` (a 3-bit TDA field) at DCI length 43, the generator
-   emits **400** admissible width vectors, and against those 8 real payloads they do NOT
-   collapse below `NR_HYP_SWEEP_MAX_CLASSES = 64`. The search refuses, and `refused` is
-   sticky for the rest of the run.
-
-So autonomous UL was never a decode, length, RNTI, aggregation-level or DCI-format problem.
-`dci01[accepts=]` being counted after the controller is what hid it: it reported the same
-zero whether the polar decode failed or the search declined to start.
-
-**Fix**: `NR_HYP_SWEEP_MAX_CLASSES` 64 -> 512, sized from the measurement above and with it
-recorded in the header. This is NOT the "raise the caps to manufacture convergence" that
-`ADAPTIVE_RX_VALIDATION_2026-09-09.md` warns against: `MIN_TRIALS`, `WIN_RATIO` and
-`MIN_RATE` are untouched, so nothing converges on weaker evidence than before. It only lets
-the search RUN instead of declining to start.
-
-## The next wall, predicted before spending the capture
-
-`nr_hyp_sweep_feed()` requires EVERY class to reach `NR_HYP_SWEEP_MIN_TRIALS = 300` before
-any winner is declared, and those trials are PUSCH transport-block CRCs. So convergence
-costs `MIN_TRIALS * n_classes` decoded uplink TBs -- 512 x 300 = 153,600, roughly an hour
-at this cell's ~40 UL grants/s -- **and it needs a non-zero pass rate.**
-
-The gNB runs `pusch: max_ue_mcs: 25` and the UL DCIs carry `mcs=25`. This receiver has
-previously measured **0/58,829 at MCS 25** and **76 % with PUSCH pinned to MCS 10**
-(`[[passive-pusch-decode-works-mcs-limited]]`). If the pass rate is zero the search
-correctly never converges, because there is genuinely no evidence to converge on.
-
-`pusch_book[parked=0]` and `pusch_passive[try=0]` in every capture so far: with the
-controller refusing, **the passive UL decode chain has not executed once on this branch.**
-Measure its real rate before proposing any gNB change.
-
-## The class cap is raised — and the first run after it was VOID, for an unrelated reason
-
-`NR_HYP_SWEEP_MAX_CLASSES` 64 -> 512 landed (`e182373203`), and the very next capture
-looked like a regression caused by it. It was not. **Bisect before blaming your own
-changes** paid for itself here.
-
-Back to back, same rig, same binary class:
-
-| | VALID (`AFIAsQ`) | VOID (`pl9Wpp`) |
+### Ruled out by measurement today
+| lever | expectation | measured |
 |---|---|---|
-| CFO settled at | **-14965 Hz** | **-24334 Hz** |
-| `SIB1 common facts` | 1 | **0** |
-| CSS0-autoconf lines | 284 | **474,202 in 4 min** |
-| census lines / occasions | 749 / 751k | **0 / 0** |
-| pbch_ok | 50/50 | 50/50 |
-| RFSTALL / RXDISCONT / NIC missed | 0 / 0 / 0 | 0 / 0 / 0 |
+| Antenna combining (MRC mode 2 -> 0) | recorded 54-71 % at mode 0 | **3.6 %** (234/(234+6258)); mode 2 was 1-4 %. No lever. |
+| Link margin / MCS | low CRC from high MCS | REFUTED: MCS 4 fails 897/897, MCS 6 928/928, from close UEs |
+| Segment-index rate-matching defect | gradient 81 %->100 % | REFUTED: `SEGIDXC C>=5` fails uniformly; it was a selection effect |
+| Equivalence too fine (oracle-invisible fields) | class count collapses | REFUTED: 101 -> 99 |
 
-**The void run passes every check the harness had.** PBCH is robust enough to ride out a
-~9 kHz offset; PDCCH and SIB1 are not. With no SIB1 there is no dedicated config, so the
-blind monitor never leaves CORESET#0 and re-derives the CSS0 config **every slot** --
-~500 kB/s of logging, which then starves the very thread that might have recovered.
+The recorded 54-71 % single-branch figure came with an nvar fix that is itself recorded as
+having failed to replicate (p=0.07, default OFF), so it should not have been trusted as a
+target. Inheriting it cost a run.
 
-This is the known acquisition CFO mis-lock (`[[cfo-estimate-is-the-bimodality-root-cause]]`,
-`[[passive-rx-runs-need-a-validity-verdict]]`): estimated once at acquisition, and roughly
-half of runs on this rig get it wrong. My first three captures were the lucky draws.
+### Currently testing
+`--ue-rxgain 40 -> 25`. Basis: the uplink is 20-26 dB STRONGER than the downlink at this
+receiver, so a DL-set gain compresses the UL; dropping to 25 previously moved the ceiling
+from ~MCS 3 to ~MCS 9. **First observation: at 273 PRB, rxgain 25 does not acquire SIB1** --
+the documented tension is real ("the receiver needs the WEAK downlink to sync and the STRONG
+uplink to decode; one gain cannot serve both"), and 273 PRB needs more DL gain than the
+20 MHz configuration that measurement came from. An intermediate value is the next test.
+`RXGAIN`, `MRC` and `UL_BRANCH` are now runner env knobs, and each capture records its arm in
+`arm.txt` so a result cannot be attributed to the wrong configuration.
 
-**Fix (`03af4c581d`): an acquisition-validity watchdog.** SIB1 is the go/no-go and it lands
-in the first seconds or not at all, so the runner probes for it and on failure kills and
-RETRIES instead of spending the whole DURATION on a dead capture. Each void attempt keeps
-its own log; `validity.txt` carries VALID / VOID_NO_SIB1. Deliberately NOT a live CFO
-retune -- that killed the radio 2/2 times previously
-(`[[cfo-mislock-abort-dont-retune]]`).
+## Scope finding: `--ue-scan-carrier` is NOT band/carrier discovery
 
-Without this gate the failure reads exactly like a code regression, on the first run after
-a commit. Any future "it broke after my change" on this rig must check `validity.txt` first.
+It calls `get_scan_ssb_first_sc(fp->dl_CarrierFreq, fp->N_RB_DL, nrue_get_band(UE),
+fp->numerology_index, ...)` -- it sweeps GSCN INSIDE an already-specified carrier, band,
+bandwidth and numerology. So of the five CLI acquisition inputs it removes exactly one:
 
-## The search ARMS — measured class count is 108
+- `--ssb` -- **free**, just enable the existing scan.
+- `--band`, `-C`, `--numerology`, `-r` -- **a real project**: true discovery means retuning
+  across bands at several sample rates and numerologies, i.e. a new acquisition state machine.
+  Bandwidth is the worst of them: SIB1 carries the true carrier bandwidth, but a sample rate
+  is required BEFORE SIB1 can be decoded, so it needs acquire-narrow-then-retune.
 
-Capture `adaptive_ul_dl_mrc2.wFHFMQ` (DURATION=1800, watchdog acquired SIB1 on its
-attempt):
+Cheap middle ground worth doing regardless: MIB and SIB1 are already decoded, so the receiver
+can CROSS-CHECK the supplied `-r`/`--numerology`/carrier against what the air reports and fail
+loudly on mismatch. That is exactly the class of defect that silently broke sync when an
+`--ssb` value was carried over from a 106-PRB configuration.
 
-```
-UL discovery seeded from SIB1: UL-BWP=0+273 TDAs=6
-UL discovery width armed: raw=400 classes=108 rnti=0x4728
-UL discovery width refused: raw=4145 classes/error=-2   <- a DIFFERENT UE, at length 45
-```
+## LLR clipping: measured, and it is a SYMPTOM not a cause
 
-**400 admissible width vectors collapse to 108 equivalence classes** against 8 real
-captured payloads. That is the number the old cap of 64 was rejecting, and it settles the
-root cause with a measurement rather than an inference. Convergence therefore costs
-108 x 300 = **32,400** transport-block CRCs, not the 153,600 worst case.
+There is an existing diagnostic, `LLRCLIP`, and it looked damning: 57-79 % of LLRs flattened
+to +-127 by the int8 pack, with `llr_mean` swinging 13 -> 837 (60x) between grants.
 
-Still open in the same line: a second UE whose DCI 0_1 length is **45** generates **4145**
-raw hypotheses and still overflows 512 classes. Per-length behaviour, expected from the
-documented width-vector table (length 45 admits far more layouts than 43). It refuses
-cleanly rather than guessing, which is correct, but that UE cannot converge as things
-stand. Do not "fix" it by raising the cap again -- 4145 raw would need thousands of
-classes and millions of TB-CRCs. It needs the hypothesis space CONSTRAINED, not the cap
-lifted.
+Split by outcome it inverts:
 
-## First passive UL transport-block decodes on this branch
-
-`pusch_passive[try=3440 crc_ok=14 (0.4%)]` at ~4 min into `wFHFMQ`.
-
-Every prior capture read `pusch_book[parked=0]` / `pusch_passive[try=0]` -- with the
-controller refusing every grant, the passive UL decode chain had never executed once. It
-is now running end to end: blind DCI 0_1 -> discovery controller -> grant book -> PUSCH
-FEP/chest/equalise/descramble/LDPC -> TB CRC -> feedback.
-
-**Do not read 0.4 % as a link-quality figure.** It is an aggregate over 108 competing
-width hypotheses, of which at most ONE is correct; the other 107 are deliberately wrong
-and must fail. If the successes belong to a single class, that class's own rate is
-roughly 14 / (3440/108) = 44 %, which is what the oracle actually scores against
-`NR_HYP_SWEEP_MIN_RATE = 0.02` and `WIN_RATIO = 3.0`. The per-class split is the number to
-report, not the aggregate.
-
-Convergence needs every class at 300 trials = 32,400, and the observed rate is ~14 trials/s,
-so ~38 min against this run's 1800 s. This capture may fall just short.
-
-## AUTONOMOUS UL GRANT RECOVERY WORKS (2026-09-09, capture `wFHFMQ`)
-
-At ~13 min into the 1800 s run:
-
-```
-dci01[accepts=28728 rejects=13927488]
-pusch_book[parked=28728 claimed=28724 expired=4]
-pusch_passive[try=5524 crc_ok=20 (0.4%)]
-```
-
-**28,728 UL grants accepted, against exactly 0 in every capture before today.** The whole
-chain now runs unattended, with no dedicated-configuration input:
-
-  SSB/MIB -> SIB1 (UL BWP + TDA list) -> CORESET/DCI-length autodiscovery ->
-  blind DCI 0_1 polar decode -> width-hypothesis controller -> grant book ->
-  PUSCH FEP / channel estimate / equalise / descramble / LDPC -> TB CRC -> feedback
-
-`parked=28728 claimed=28724 expired=4` says the k2 slot bookkeeping is right: grants are
-parked in the DL slot and claimed in the uplink slot they point at, with 4 lost to
-expiry (0.01 %).
-
-### What is NOT yet established
-
-- **The width search has not converged.** It needs every one of its 108 classes at 300
-  trials = 32,400; the observed rate is ~7 decode attempts/s, so ~77 min against this
-  run's 30. This capture will end short. Not a failure -- a duration.
-- **0.4 % aggregate CRC is not a link figure** and must not be quoted as one. At most one
-  of 108 competing hypotheses is correct and the other 107 are required to fail. The
-  per-class split is the number that matters and is not yet instrumented (staged).
-- **`try=5524` against `claimed=28724`**: only ~19 % of claimed grants become decode
-  attempts. `pdcch_blind_monitor_ul_pusch = "1:1:0"` caps decodes at 1 per slot, and the
-  decoder also declines unsupported modes. Raising that cap is the obvious lever on
-  convergence time and changes no oracle semantics -- more trials, same evidence rule.
-
-## The width search NEVER CONVERGES — it is torn down every ~30 s
-
-Measured over the 1800 s `wFHFMQ` capture:
-
-```
-UL discovery width armed:            26
-UL width classes split on payload:   25
-UL width search converged:            0
-class counts across re-arms:  108 -> 122 -> 130 -> 134 -> 135 -> 138 -> 222
-```
-
-The controller keeps admitting novel payloads into its 8-entry sample ring, and ANY payload
-that distinguishes two previously-merged hypotheses discards **all** accumulated evidence for
-**every** class. Live traffic is an endless supply of distinct payloads, so that condition
-fires forever and the search restarts before it can reach `MIN_TRIALS` on any class. The
-class count also drifts (108 -> 222) because the ring rotates underneath the classing.
-
-The original design assumed a finite sample set. It is not one.
-
-**This, not the trial rate, is why convergence is at zero** -- so stopping one of the two
-active UEs (which would roughly double the per-UE trial rate) would not have helped: 2x zero
-is zero. Worth recording, because that was the obvious next lever and it was wrong.
-
-**Fix**: freeze the sample set once the width search arms, and treat a later distinguishing
-payload as a DIAGNOSTIC (`late_splits`) rather than grounds to discard evidence. Two things
-keep that honest: the counter makes an unreliable classing visible instead of silent, and a
-merged-but-wrong winner is self-limiting because every grant it emits is scored by that
-grant's own PUSCH transport-block CRC. Equivalence was always documented as finite-sample
-evidence, never proof.
-
-Also measured, full UL decode census at 7819 attempts:
-`seg_fail=2698 zero_tb=44 ta_refined=6139 unsup=2257 setup_fail=0` -- `ta_refined` shows the
-per-grant timing-advance refinement working, and `unsup=2257` are modes the passive decoder
-declines (transform precoding, DM-RS type/length outside its support). Those are correctly
-NOT counted as CRC failures.
-
-## gNB logging dropped to warning level (2026-09-09, mid-session)
-
-Debug-level logging crashed the gNB after a while, so it now runs at warning. Every gNB-side
-cross-check in this report -- the 1_1/0_1 format census, `payload_size=43`/`47`, the CORESET
-dump, per-RNTI sighting counts -- came from debug-level lines and is **no longer
-re-derivable**. Those measurements stand as a record; do not plan new ones.
-
-Consequences to carry forward:
-- `[[gnb-rnti-recheck-every-prompt]]` cannot be satisfied from gnb.log any more. The
-  receiver's own `rnti_seen` lines are the substitute.
-- A gNB crash mid-capture voids a run exactly as a CFO mis-lock does, and the acquisition
-  watchdog only checks receiver-side SIB1. **Known gap, not yet closed.**
-
-## The length-45 overflow is half the fleet, not one odd UE
-
-Over `wFHFMQ` the receiver bootstrapped four UEs and locked a DCI 0_1 length for each,
-unaided:
-
-| RNTI | locked length | raw hypotheses | outcome |
-|---|---|---|---|
-| 0x4728 | 43 | 400 | armed (108 -> 222 classes across re-arms) |
-| 0x472a | 43 | 400 | armed |
-| 0x4690 | 45 | 4145 | CLASS_OVERFLOW at 512 |
-| 0x461e | 45 | 4145 | CLASS_OVERFLOW at 512 |
-
-So the 4145-hypothesis case is **half the UEs on this cell**, not an outlier. Raising the
-cap again is the wrong answer -- 4145 raw would need thousands of classes and millions of
-TB-CRCs at `MIN_TRIALS` each. That path needs the hypothesis space CONSTRAINED. Note also
-that the RNTIs turn over as UEs re-attach, so per-RNTI search state is repeatedly rebuilt
-from scratch; long convergence budgets and short RNTI lifetimes are in tension, and that
-tension is not yet addressed.
-
-Run hygiene confirmed for this capture despite a gNB restart earlier in the session:
-`Initial sync successful` x1 and `SIB1 common facts` x1, i.e. the receiver never lost the
-cell mid-run, and all 26 arm / 25 split events belong to a SINGLE RNTI's context. The churn
-diagnosis is therefore payload-driven, not an artefact of re-acquisition or RNTI turnover.
-
-## Items 1-3 FIXED (commit `aa7f82aced`) — 7/7 focused CTests pass
-
-### 1. Sample-set freeze
-The search armed 38 times and was invalidated 36 times in one 1800 s capture, converging
-0 times, with the class count drifting 108 -> 222. Frozen once armed; a later
-distinguishing payload is now a counter (`late_splits`), not a teardown. Sampled 1-in-256
-because the check costs two extractions per raw hypothesis.
-
-### 2. Spec-derived admissibility — measured reduction
-Cross-axis rules from TS 38.212 7.3.1.1.2 and TS 38.214 only. No gNB configuration is
-consulted, so nothing here trades autonomy for the reduction.
-
-| rule | basis |
+| | mean clipped_at_int8 |
 |---|---|
-| `ul_sul=1 => srs_request=3` | SUL-configured UEs get a 3-bit SRS request |
-| `dai2!=0 => dai1=2` | two sub-codebooks require a dynamic codebook |
-| `dmrs_seq_init=0 => ptrs_dmrs=0` | both are 0 iff the transform precoder is enabled |
-| `ptrs_dmrs != 1` | the field is "0 or 2 bits" |
-| `cbg != 1` | CBGTI is "0, 2, 4, 6 or 8 bits" |
-| `precoding>0 => sri<=1` | codebook tx allows at most 2 SRS resources |
+| DECODED | **64.6 %** (n=116) |
+| FAILED  | **~35 %** |
 
-All are ONE-WAY implications, never the biconditionals they resemble: a spare hypothesis
-only costs trials, a missing one can never win.
+Failures clip LESS. Heavy clipping accompanies a STRONG signal (large LLRs -> more clipping
+AND more likely to decode); weak signal gives small LLRs, little clipping, and failure. So
+the int8 pack is not what is breaking the decode.
 
-| config | before | after |
-|---|---|---|
-| live (BWP 273, 6 TDA), length 43 | 400 | **199** |
-| live, length 45 | 4145 | **1480** |
-| TDA width 1, length 40 | 87 | **53** |
-| TDA width 1, length 39 | 13 | **10** |
+## RETRACTION: "MCS 4 fails 897/897, therefore not link margin" is INVALID
 
-Length 45 now fits the raw cap, and at the observed class ratio (~27 %) should fit the
-512-class cap too -- so the UEs that could never arm now can. **Convergence TIME at
-length 45 is still long** (~400 classes x 300 trials); that is a rate problem, not a
-refusal, and `ul_pusch_max_per_slot` is the untouched lever.
+That MCS value was read out of a WRONG WIDTH HYPOTHESIS. Those grants are not MCS 4 -- they
+are misparsed DCIs pointing at the wrong PRBs, so the receiver equalises the wrong REs and
+gets noise. The conclusion was drawn from the hypothesis-contaminated UL stream after
+explicitly warning that this stream cannot answer chain questions.
 
-### 3. Evidence pooled by DCI length, not RNTI
-Convergence needs ~32,400 transport-block CRCs (~1 h) while four distinct RNTIs appeared
-inside one 30-minute capture, so per-RNTI state could never finish. The width layout is a
-property of the RRC configuration behind a DCI size, not of the identity carrying it, so
-contexts are now keyed on (length, baseline geometry): UEs at one length pool evidence and
-a re-attached UE inherits it. Degrades safely -- genuinely different UEs at one length
-flatten the pooled rate and `WIN_RATIO` simply never declares a winner.
-Known cost recorded in code: mixing UEs makes a TDA-index clash likelier, which refuses the
-INTERPRETATION search only; width is unaffected.
+**Standing rule for this work: the ONLY uplink numbers that mean anything come from a
+converged or manually-pinned layout. Every field in an exploratory grant -- MCS, PRB, TDA --
+is as wrong as the hypothesis that produced it.**
 
-Two tests encoded the old "does not pool" contract and were **rewritten, not deleted**,
-keeping their generation-tagging safety intent, plus a new test that pooling must not merge
-two different DCI lengths. A test bug of mine was caught on the way: the known-good 40-bit
-layout cannot be in the length-43 set, because those same widths total 42 with this cell's
-3-bit TDA field.
-
-**Not yet validated on air.** A 2400 s capture is running to see whether a winner is
-declared.
-
-## Validation round 1: item 1 CONFIRMED on air, two new defects found
-
-### Item 1 (sample freeze) — works
-`armed=1 split=0` on a 13-minute capture, against 38 arms / 36 invalidations before.
-Aggregate PUSCH CRC rose from **0.3 % to 2.3 %** (health 0.9 % -> 4.2 %) purely because a
-stable search lets the right hypotheses accumulate trials instead of being reset.
-
-### Defect A — I ran a stale binary (my own process error)
-The capture reported `raw=252` where the source predicts 199. After adding the last two
-admissibility rules I rebuilt only the TEST targets, never `nr-uesoftmodem`, so a
-40-minute capture validated the previous build. Caught only because the live number
-disagreed with a test.
-
-`source_commit.txt`, `source.patch` and the binary sha256 all describe the SOURCE, and the
-source was correct -- the BINARY was behind, which none of them can see. The runner now
-refuses to start if any tracked source file is newer than `nr-uesoftmodem` (`c602a1bcff`).
-
-### Defect B — an AssertFatal killed the receiver, and the harness called it VALID
-The next capture aborted 3 minutes in, exit 134, core dumped:
-
-```
-Assertion (p > -1) failed! In get_dmrs_port() nr_common.c:627
-No dmrs port corresponding to layer 0 found     (rnti=0x461e, a length-45 UE)
-```
-
-`antenna_ports` is a RAW payload field and the width sweep tries 2..5 bits for it, so
-values up to 31 reach a closed form defined only over Table 7.3.1.1.2-8's FOUR rows.
-`antenna_ports=14` gives `1u<<12` -- a port bitmap with no port below 12 -- and
-`get_dmrs_port()` answers that with AssertFatal. Values above 17 truncate to 0 in the
-uint16_t and read silently as "DCI 1_0, port 0", which is worse.
-
-**The landmine was reachable all along and had never been stepped on**: length-45 UEs used
-to overflow the class cap and never emitted a grant, so nothing ever fed these code points
-to the decoder. Fixing item 2 is what exposed it.
-
-Fixed by rejecting the code point (plus a belt-and-braces check on the resolved bitmap), a
-test walking all 32 values, and -- separately -- the harness bug it revealed: the watchdog
-called a CRASHED run VALID because it only checked SIB1 acquisition. Acquiring is not
-surviving; a healthy run exits 124 and anything else is now `VOID_ABNORMAL_EXIT_<rc>`.
-
-### Open, not chased: the claimed -> try gap
-`claimed=12367` but `try=3189` -- ~74 % of claimed grants never become decode attempts, a
-4x lever on convergence time. Drops ARE counted (`g_dropped_full` in the UL queue) but
-**never printed** -- there is no `puschq[...]` census line, so the loss is invisible.
-Capacity is not obviously the limit either: 2 consumer threads should manage far more than
-the observed 4.1 decodes/s. Instrument before tuning.
-
-## RETRACTION + the real throughput limit
-
-**"The UL queue drops are uninstrumented" was WRONG.** The census exists and always did; it
-is labelled `PUSCHQ` and my grep looked for `puschq[`. A failed grep read as absence --
-the same trap as reading a plural-only pattern as "no traffic". Always confirm a label
-before concluding a counter is missing.
-
-The real numbers, from the runs already captured:
-
-```
-1lxMai:  PUSCHQ queued=12367 decoded=1751 crc_ok=72 dropped[full=0 stale=2415] max_lag_slots=216/5
-wFHFMQ:  PUSCHQ queued=49318 decoded=3204 crc_ok=27 dropped[full=0 stale=10323] max_lag_slots=216/5
-```
-
-- `dropped_full=0` -- the ring NEVER overflows, so queue depth is not the constraint.
-- `max_lag_slots=216` against a sample-lifetime margin of **5**: the consumer runs so far
-  behind that the IQ it needs has been overwritten. That is what `dropped_stale` counts.
-- Throughput is **1751 decodes / ~780 s = 2.2/s on 2 consumer threads, i.e. ~0.9 s per
-  grant** at 273 PRB x 4 antennas, against a cell offering ~27 UL grants/s.
-
-**This, not `ul_pusch_max_per_slot`, is the convergence bottleneck**, and it bounds
-everything: 90 classes x 300 trials at 2.2/s is ~3.4 hours. A 90-minute capture cannot
-converge no matter what the search does.
-
-Two levers, both untried:
-1. **The consumers are on the wrong cores.** `ul_thread = "2:32:6"` places them on cores
-   6-7, which OVERLAP the DL scan thread-pool (`--thread-pool 0,1,6,7`) -- they contend with
-   the path that feeds them. sens6 has 12 cores, the receiver is pinned to 0-7 and measured
-   at ~291 % CPU (~3 cores), so cores 2-5 look free. More consumers, off the DL pool.
-2. Decode cost itself is dominated by 4-antenna FEP + channel estimation at 273 PRB. The
-   CRC oracle only needs to rank hypotheses, and may not need 4-antenna combining to do it.
-
-Neither should be changed while a capture is in flight, and not both at once.
+With that removed, the surviving evidence (failed decodes carry WEAKER LLRs) points back at
+signal level, which is what the rxgain arm tests. `-31 dBFS` with `clip=0` at rxgain 40 says
+there are ~31 dB of unused ADC range.

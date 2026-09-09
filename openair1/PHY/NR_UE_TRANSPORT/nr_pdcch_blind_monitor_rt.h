@@ -204,7 +204,9 @@ typedef struct {
   // O_ACK is not in the uplink DCI -- the DAI pins it only modulo 4 -- so the candidates consistent
   // with the observed DAI are tried and the transport-block CRC decides. See the block comment on
   // passive_ul_unav_res() in nr_pusch_passive_decode.c.
-  int   ul_uci_search;     // max candidates to try per failed grant; 0 = disabled
+  int   ul_uci_search;     // max UCI RE footprint to sweep when exploring; 0 = disabled
+  int   ul_uci_explore_every; // wide sweep on 1 CRC failure in N (0 = cache only). The
+                              // footprint repeats, so exploration is amortised, not per-grant.
   int   ul_uci_beta;       // betaOffsets HARQ-ACK index (TS 38.213 Table 9.3-1)
   int   ul_uci_alpha;      // alpha-scaling index: 0=0.5 1=0.65 2=0.8 3=1.0
 

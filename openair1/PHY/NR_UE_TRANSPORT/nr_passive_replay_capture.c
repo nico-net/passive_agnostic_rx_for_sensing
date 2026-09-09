@@ -41,6 +41,8 @@ typedef struct {
   replay_dl_t dl[REPLAY_DL];
 } replay_header_t;
 #include "nr_passive_replay_probe.h"
+#include "nr_passive_replay_ul_config.h"
+#include "nr_passive_delay_contract.h"
 static replay_header_t *header;
 static unsigned char *iq;
 static char *output;
@@ -76,7 +78,9 @@ static void *write_capture(void *unused)
     while (atomic_load(&state)!=RP_WRITING) pthread_cond_wait(&writer_cv,&writer_lock);
     pthread_mutex_unlock(&writer_lock);
     pthread_mutex_lock(&record_lock);
-    bool valid=header->n_ul>0 && header->n_dl>0;
+    unsigned controls=0;
+    for(unsigned i=0;i<header->n_dl;++i) controls+=header->dl[i].tb_bytes>0;
+    bool valid=header->n_ul>0 && controls>0;
     if (!valid) {
       unsigned n_ul=header->n_ul,n_dl=header->n_dl;
       header->n_ul=header->n_dl=0;
@@ -111,7 +115,8 @@ void nr_passive_replay_init(PHY_VARS_NR_UE *ue)
   }
   memset(iq,0,bytes); /* Prefault before RF start, never page in 157 MB at capture time. */
   header->magic=UINT64_C(0x314951525041534e);
-  header->version=1; header->header_bytes=sizeof(*header);
+  header->version=getenv("ISAC_PASSIVE_REPLAY_FAILURES")?2:1;
+  header->header_bytes=sizeof(*header);
   header->job_bytes=sizeof(nr_pdsch_passive_job_t); header->fp_bytes=sizeof(*fp);
   header->iq_bytes=bytes; header->slots=REPLAY_FRAMES*fp->slots_per_frame;
   memcpy(&header->fp,fp,sizeof(*fp));
@@ -192,29 +197,43 @@ void nr_passive_replay_ul(long source, uint16_t rnti, unsigned length, uint64_t 
 void nr_passive_replay_dl(const nr_pdsch_passive_job_t *job,
                           const nr_pdsch_passive_decode_result_t *result)
 {
-  if (atomic_load(&state)==RP_DISABLED || result->status!=NR_PDSCH_PASSIVE_DECODE_CRC_OK || !result->tb)
+  if (atomic_load(&state)==RP_DISABLED) return;
+  const bool success=result->status==NR_PDSCH_PASSIVE_DECODE_CRC_OK && result->tb;
+  const bool failures=header->version>=2;
+  if(!success && !(failures && job->sweep_ticket.settled &&
+                  result->status==NR_PDSCH_PASSIVE_DECODE_CRC_FAIL))
     return;
-  if (job->sweep_ticket.generation && atomic_load(&ul_seen)) {
+  if (success && job->sweep_ticket.generation && (!failures || job->sweep_ticket.settled)
+      && atomic_load(&ul_seen)) {
     int expected=RP_ARMED;
     atomic_compare_exchange_strong(&state,&expected,RP_REQUESTED);
   }
   pthread_mutex_lock(&record_lock);
   if (recordable(job->absolute_slot) && header->n_dl<REPLAY_DL) {
+    unsigned failed_records=0;
+    for(unsigned i=0;i<header->n_dl;++i) failed_records+=header->dl[i].tb_bytes==0;
+    if(!success && failed_records>=64) { pthread_mutex_unlock(&record_lock); return; }
     replay_dl_t *r=&header->dl[header->n_dl++];
-    r->job=*job; r->tb_bytes=(result->cw.TBS+7)/8;
-    r->tb_hash=hash_tb(result->tb,r->tb_bytes);
+    r->job=*job;
+    r->tb_bytes=success?(result->cw.TBS+7)/8:0;
+    r->tb_hash=success?hash_tb(result->tb,r->tb_bytes):0;
   }
   pthread_mutex_unlock(&record_lock);
 }
 
 int nr_passive_replay_read(PHY_VARS_NR_UE *ue, const char *path)
 {
+  /* Replay bypasses UE_thread(), which normally initializes the CFO LUT.
+   * A nonzero-CFO FEP otherwise multiplies samples by the zero-initialized LUT. */
+  InitSinLUT();
   FILE *f=fopen(path,"rb");
+  if (!strcmp(path,"@delay-contract")) return replay_delay_contract();
   replay_header_t *h=malloc(sizeof(*h));
   if (!f || !h) { fprintf(stderr,"REPLAY VOID: cannot open input\n"); return 2; }
   bool ok=fread(h,sizeof(*h),1,f)==1;
   const NR_DL_FRAME_PARMS *fp=&h->fp, *allocated=&ue->frame_parms;
-  ok=ok && h->magic==UINT64_C(0x314951525041534e) && h->version==1 &&
+  ok=ok && h->magic==UINT64_C(0x314951525041534e) &&
+     (h->version==1 || h->version==2) &&
      h->header_bytes==sizeof(*h) && h->job_bytes==sizeof(nr_pdsch_passive_job_t) &&
      h->fp_bytes==sizeof(*fp) && h->n_dl>0 && h->n_dl<=REPLAY_DL &&
      h->n_ul>0 && h->n_ul<=REPLAY_UL && fp->nb_antennas_rx>0 && fp->nb_antennas_rx<=4 &&
@@ -244,7 +263,7 @@ int nr_passive_replay_read(PHY_VARS_NR_UE *ue, const char *path)
     if (index<fp->slots_per_frame || index>=h->slots ||
         r->job.nr_slot_rx!=index%fp->slots_per_frame ||
         r->job.frame_rx!=(r->job.absolute_slot/fp->slots_per_frame)%1024 ||
-        !r->tb_bytes || r->tb_bytes>1024*1024) { ++failed; continue; }
+        (!r->tb_bytes && h->version<2) || r->tb_bytes>1024*1024) { ++failed; continue; }
     size_t frame=index/fp->slots_per_frame;
     unsigned end=get_samples_slot_timestamp(fp,r->job.nr_slot_rx)+get_samples_per_slot(r->job.nr_slot_rx,fp);
     for (unsigned a=0;a<fp->nb_antennas_rx;++a) {
@@ -260,12 +279,21 @@ int nr_passive_replay_read(PHY_VARS_NR_UE *ue, const char *path)
     nr_pdsch_passive_decode_result_t result;
     nr_pdsch_passive_decode_status_t status=nr_pdsch_passive_decode(ue,&proc,&r->job.dlsch_pdu,
         &r->job.freq_alloc,&r->job.grant,rxF,&result);
+    if(!r->tb_bytes) {
+      printf("DL-REPLAY-FAILURE rnti=%04x source=%ld mcs=%u rb=%u sym=%u+%u dmrs=%x "
+             "status=%d tbs=%u\n",r->job.rnti,r->job.absolute_slot,r->job.grant.mcs,
+             r->job.freq_alloc.num_rbs,r->job.dlsch_pdu.start_symbol,
+             r->job.dlsch_pdu.number_symbols,r->job.dlsch_pdu.dlDmrsSymbPos,
+             status,result.cw.TBS);
+      continue;
+    }
     bool match=status==NR_PDSCH_PASSIVE_DECODE_CRC_OK && (result.cw.TBS+7)/8==r->tb_bytes &&
                hash_tb(result.tb,r->tb_bytes)==r->tb_hash;
     matches+=match; failed+=!match;
     printf("REPLAY-CONTROL rnti=%04x source=%ld status=%d identical=%d\n",r->job.rnti,r->job.absolute_slot,status,match);
   }
   nr_slot_fep_fo_override_hz=NAN;
+  if(!matches) ++failed; /* A failure-only recording is not a replay control. */
   for (unsigned i=0;i<h->n_ul;++i)
     printf("REPLAY-RAW-UL source=%ld rnti=%04x bits=%u payload=%016lx\n",
            h->ul[i].source,h->ul[i].rnti,h->ul[i].length,(unsigned long)h->ul[i].payload);
@@ -273,6 +301,7 @@ int nr_passive_replay_read(PHY_VARS_NR_UE *ue, const char *path)
   printf("REPLAY %s: identical DL controls=%u failed=%u raw UL=%u; no radio opened\n",
          failed?"VOID":"PASS",matches,failed,h->n_ul);
   if (!failed && getenv("ISAC_PASSIVE_REPLAY_UL_PROBE")) replay_probe_ul(ue,h,samples);
+  if (!failed && getenv("ISAC_PASSIVE_REPLAY_UL_CONFIG")) replay_ul_config(ue,h,samples);
   free(rxF); free(samples); free(h);
   return failed?2:0;
 }
