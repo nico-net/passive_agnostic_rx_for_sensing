@@ -79,15 +79,50 @@ static bool extract(const nr_hyp_t *h, const uint64_t *p, const apply_ctx_t *ctx
   } else nr_pdcch_ul_field_sweep_apply(h,&o);
   return nr_pdcch_blind_extract_01(*p,ctx->owner->target_length,ctx->owner->target_rnti,&o,out);
 }
+/* Equivalence must be defined over what the ORACLE can distinguish, and the oracle is the PUSCH
+ * transport-block CRC. Comparing the whole decoded grant with memcmp partitions more finely than
+ * that: `tpc`, `csi_request`, `srs_request`, `precoding_info` and the raw `antenna_ports_field` are
+ * never consumed by nr_pusch_passive_decode(), so two layouts differing ONLY in where those bits
+ * land decode bit-identically and can never be separated by any number of transport blocks.
+ *
+ * Measured live 2026-09-09: with the full-struct comparison, 101 classes and two of them
+ * (class0 and class1) permanently tied at ~11 % pass rate, the leader alternating between them
+ * every progress report. NR_HYP_SWEEP_WIN_RATIO demands 3x the runner-up, so the search could not
+ * converge in ANY run length -- it was waiting for evidence that does not exist.
+ *
+ * Merging them is not a relaxation. It is refusing to draw a distinction the measurement cannot
+ * support; the members remain individually recorded, and every field the decode actually reads is
+ * still compared exactly. `dai` IS included: nr_pusch_passive_decode() reads it to seed the
+ * UCI reservation search, so it changes decodability whenever that search is enabled. */
+static bool decode_equivalent(const nr_pdcch_blind_ul_result_t *x, const nr_pdcch_blind_ul_result_t *y)
+{
+  return x->start_rb == y->start_rb && x->num_rb == y->num_rb
+      && x->bwp_start == y->bwp_start && x->bwp_size == y->bwp_size
+      && x->tda_index == y->tda_index && x->start_symbol == y->start_symbol
+      && x->num_symbols == y->num_symbols && x->mapping_type == y->mapping_type
+      && x->k2 == y->k2 && x->mcs == y->mcs && x->mcs_table == y->mcs_table
+      && x->nrOfLayers == y->nrOfLayers
+      && x->ul_dmrs_symb_pos == y->ul_dmrs_symb_pos
+      && x->dmrs_config_type == y->dmrs_config_type
+      && x->n_dmrs_cdm_groups == y->n_dmrs_cdm_groups
+      && x->dmrs_ports == y->dmrs_ports && x->nscid == y->nscid
+      && x->transform_precoding == y->transform_precoding
+      && x->frequency_hopping == y->frequency_hopping
+      && x->data_scrambling_id == y->data_scrambling_id
+      && x->ul_dmrs_scrambling_id == y->ul_dmrs_scrambling_id
+      && x->rv == y->rv && x->ndi == y->ndi && x->harq_pid == y->harq_pid
+      && x->dai == y->dai
+      && x->ulsch_indicator == y->ulsch_indicator
+      && x->carrier_indicator == y->carrier_indicator
+      && x->ul_sul_indicator == y->ul_sul_indicator;
+}
 static bool equivalent(const nr_hyp_t *a, const nr_hyp_t *b, const void *sample, void *ctx)
 {
   nr_pdcch_blind_ul_result_t ga,gb;
   /* Two failures are NOT equal grants. In particular, unsupported modes cannot be
    * collapsed away as if they had been proved observationally equivalent. */
   if (!extract(a,sample,ctx,&ga) || !extract(b,sample,ctx,&gb)) return false;
-  /* extract zero-initializes the entire struct; reject_reason is NULL on success.
-   * Compare all decoded fields (including UCI), not just PRB shape or MCS. */
-  return memcmp(&ga,&gb,sizeof(ga))==0;
+  return decode_equivalent(&ga,&gb);
 }
 static bool plausible(const nr_hyp_t *h, const void *candidate, void *ctx)
 {
