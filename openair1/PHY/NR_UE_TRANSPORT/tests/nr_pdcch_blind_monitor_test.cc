@@ -2558,3 +2558,36 @@ TEST_F(BlindPdcchTest, UlRawEvidenceSurvivesUnknownInterpretation) {
   EXPECT_EQ(snapshot.interp_trials,0u);
   nr_pdcch_ul_discovery_reset();
 }
+
+TEST_F(BlindPdcchTest, UlDmrsMaskLookupRejectsInvalidGeometryWithoutAborting) {
+  EXPECT_EQ(nr_pdcch_blind_ul_dmrs_mask(14,0,0,2,1,0),0x884);
+  EXPECT_EQ(nr_pdcch_blind_ul_dmrs_mask(10,4,0,2,1,0),-1);
+  EXPECT_EQ(nr_pdcch_blind_ul_dmrs_mask(0,0,0,2,1,0),-1);
+  EXPECT_EQ(nr_pdcch_blind_ul_dmrs_mask(14,255,0,2,1,0),-1);
+  EXPECT_EQ(nr_pdcch_blind_ul_dmrs_mask(14,0,2,2,1,0),-1);
+  EXPECT_EQ(nr_pdcch_blind_ul_dmrs_mask(14,0,0,2,3,0),-1);
+  EXPECT_EQ(nr_pdcch_blind_ul_dmrs_mask(14,0,0,2,1,2),-1);
+}
+
+TEST_F(BlindPdcchTest, UlMcsBoundaryUsesActualSelectedTable) {
+  for(int table=0;table<3;++table) {
+    auto opts=LiveUlOpts(); opts.mcs_table=table;
+    UlGroundTruth gt; gt.mcs=28; gt.riv=273;
+    nr_pdcch_blind_ul_result_t result{};
+    bool ok=nr_pdcch_blind_extract_01(PackUlPayload(gt,opts),nr_pdcch_blind_dci01_size(&opts),gt.rnti,&opts,&result);
+    EXPECT_EQ(ok,table!=1) << table;
+    EXPECT_EQ(nr_get_code_rate_ul(28,table)>0,table!=1);
+    gt.mcs=29;
+    EXPECT_FALSE(nr_pdcch_blind_extract_01(PackUlPayload(gt,opts),nr_pdcch_blind_dci01_size(&opts),gt.rnti,&opts,&result));
+  }
+}
+TEST_F(BlindPdcchTest, DlMcs28SurvivesUntilTableInterpretation) {
+  GroundTruth gt; gt.bwp_size=106; gt.riv=PRBalloc_to_locationandbandwidth0(24,8,106);
+  gt.time_domain_assignment=1; gt.mcs=28;
+  auto len=nr_pdcch_blind_dci_size(gt.bwp_size);
+  auto llr=EncodeToLLR(PackPayload(gt,RivBitsFor(gt.bwp_size)),gt.rnti,len,kAggregationLevel,40.0,rng_);
+  nr_pdcch_blind_result_t result{};
+  EXPECT_TRUE(nr_pdcch_blind_decode_and_extract(llr.data(),kAggregationLevel,len,gt.bwp_size,
+      kDmrsTypeAPositionPos2,NR_PDCCH_BLIND_RNTI_MIN_DEFAULT,NR_PDCCH_BLIND_RNTI_MAX_DEFAULT,&result));
+  EXPECT_EQ(result.mcs,28);
+}

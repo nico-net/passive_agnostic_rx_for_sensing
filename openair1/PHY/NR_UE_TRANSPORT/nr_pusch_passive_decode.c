@@ -99,7 +99,9 @@ static _Atomic uint64_t g_uci_trials, g_uci_rescued;
 static inline bool hp_crc_failed(const NR_gNB_ULSCH_t *u)
 {
   const NR_UL_gNB_HARQ_t *h = u->harq_process;
-  return (h == NULL) || (h->C == 0) || (h->processedSegments != h->C);
+  if (!h || !h->C || h->processedSegments!=h->C) return true;
+  const uint32_t bits=h->ulsch_pdu.pusch_data.tb_size*8u;
+  return h->C>1 && !check_crc(h->b,lenWithCrc(1,bits),crcType(1,bits));
 }
 
 /* ---- TIMING-ADVANCE SWEEP (ISAC_UL_TA_SWEEP="start:step:count", default off) ------------------
@@ -315,7 +317,7 @@ static uint32_t passive_ul_unav_res(const nr_pdcch_blind_ul_result_t *g, uint32_
     return 0;
   }
   uint32_t C = 0, K = 0, Z = 0, F = 0;
-  nr_segmentation(NULL, NULL, lenWithCrc(1, tbs_bits >> 3), &C, &K, &Z, &F, bg);
+  nr_segmentation(NULL, NULL, lenWithCrc(1, tbs_bits), &C, &K, &Z, &F, bg);
   const uint32_t sum_kr = K * C;
 
   const uint16_t mask     = g->ul_dmrs_symb_pos;
@@ -350,6 +352,7 @@ static bool passive_gnb_prepare(PHY_VARS_NR_UE *ue, int ctx)
     return true;
   }
   const NR_DL_FRAME_PARMS *ufp = &ue->frame_parms;
+  if (ufp->N_RB_UL < 1 || ufp->N_RB_UL > 275) return false;
   const int nant = (ufp->nb_antennas_rx < PASSIVE_UL_MAX_ANT) ? ufp->nb_antennas_rx : PASSIVE_UL_MAX_ANT;
 
   PHY_VARS_gNB *gnb = (PHY_VARS_gNB *)calloc(1, sizeof(PHY_VARS_gNB));
@@ -361,7 +364,7 @@ static bool passive_gnb_prepare(PHY_VARS_NR_UE *ue, int ctx)
    * passive receiver must demodulate the uplink on the SAME grid it demodulates the downlink on,
    * not on one derived independently. */
   gnb->frame_parms = *ufp;
-  gnb->frame_parms.N_RB_UL = ufp->N_RB_DL;
+  gnb->frame_parms.N_RB_UL = ufp->N_RB_UL;
 
   gnb->gNB_config.carrier_config.num_rx_ant.value = nant;
   gnb->gNB_config.cell_config.phy_cell_id.value   = ufp->Nid_cell;
@@ -458,15 +461,16 @@ void nr_pusch_passive_decode_free(void)
 
 /* Fill the FAPI PUSCH PDU from a recovered UL grant. Everything here either came from the DCI or
  * from the deployment config carried alongside it -- nothing is invented. */
-static void fill_pusch_pdu(const nr_pdcch_blind_ul_result_t *g, int nant, nfapi_nr_pusch_pdu_t *p)
+static void fill_pusch_pdu(const nr_pdcch_blind_ul_result_t *g, int nant,
+                           const NR_DL_FRAME_PARMS *fp, nfapi_nr_pusch_pdu_t *p)
 {
   memset(p, 0, sizeof(*p));
   p->pdu_bit_map        = PUSCH_PDU_BITMAP_PUSCH_DATA;
   p->rnti               = g->rnti;
   p->bwp_start          = g->bwp_start;
   p->bwp_size           = g->bwp_size;
-  p->subcarrier_spacing = 1;   // mu = 1 (30 kHz); this monitor runs at one numerology
-  p->cyclic_prefix      = 0;
+  p->subcarrier_spacing = fp->numerology_index;
+  p->cyclic_prefix      = fp->Ncp;
 
   p->mcs_index          = g->mcs;
   p->mcs_table          = g->mcs_table;
@@ -550,14 +554,14 @@ static unsigned int passive_ul_fep_offset(const NR_DL_FRAME_PARMS *fp, unsigned 
                                           int sample_offset)
 {
   uint32_t prefix_length = get_samples_symbol_duration(fp, slot, symbol, 1) - fp->ofdm_symbol_size;
-  unsigned int off = get_samples_slot_timestamp(fp, slot) + get_samples_symbol_timestamp(fp, slot, symbol) + prefix_length;
-  off -= (fp->nb_prefix_samples / fp->ofdm_offset_divisor);
-  if (off >= (unsigned int)sample_offset) {
-    off -= sample_offset;
-  } else {
-    off += fp->samples_per_frame - sample_offset;
-  }
-  return off;
+  int64_t off = (int64_t)get_samples_slot_timestamp(fp, slot)
+      + get_samples_symbol_timestamp(fp, slot, symbol) + prefix_length
+      - fp->nb_prefix_samples / fp->ofdm_offset_divisor - (int64_t)sample_offset;
+  /* Delay refinement can legitimately make the advance negative. Mixing it
+   * with unsigned offsets previously made the wrap-copy length enormous. */
+  off %= (int64_t)fp->samples_per_frame;
+  if (off < 0) off += fp->samples_per_frame;
+  return (unsigned int)off;
 }
 
 /* De-rotate one symbol's worth of samples into scratch, then DFT it. Mirrors nr_symbol_fep_ul()'s
@@ -742,7 +746,10 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
   }
   PUSCH_STAGE(3, "FEP done");
   nfapi_nr_pusch_pdu_t pdu;
-  fill_pusch_pdu(g, nant, &pdu);
+  fill_pusch_pdu(g, nant, fp, &pdu);
+  /* The reused estimator takes its pilot seed from this private context.
+   * Keep physical PCI in frame_parms separate from the grant's DM-RS identity. */
+  gnb->gNB_config.cell_config.phy_cell_id.value = g->ul_dmrs_scrambling_id;
 
   const int n_dmrs_sym = __builtin_popcount((unsigned)g->ul_dmrs_symb_pos
                                             & (((1u << g->num_symbols) - 1u) << g->start_symbol));
@@ -1050,10 +1057,10 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
    * passive_ul_unav_res() for why the DAI pins O_ACK only modulo 4 and why the transport-block CRC
    * is the right oracle for the rest.
    *
-   * Ordered cheapest-first, and entered only on failure, so a grant that decodes without UCI pays
-   * nothing. unav_res feeds BOTH nr_rx_pusch_group_tp()'s scrambling-sequence length and the
-   * decoder's G, so the whole receive chain is re-run per candidate rather than just the LDPC --
-   * that is what makes the trial count worth bounding. */
+   * ponytail: reservation-only. It shrinks G but does not DEMULTIPLEX the UCI REs out of the LLR
+   * stream, so it can only rescue grants whose UCI punctures (O_ACK <= 2). The CSI-Part-1 case --
+   * measured as the single largest UL residual -- needs LLR compaction at the CSI positions and a
+   * deterministic E_CSI1, not a search. See docs/UL_UCI_DEMUX_PARKED.md. */
   const nr_pdcch_blind_monitor_cfg_t *ucfg = nr_pdcch_blind_monitor_get_cfg();
   if (rc == 0 && hp_crc_failed(ulsch) && ucfg != NULL && ucfg->ul_uci_search > 0) {
     const uint8_t bg = pdu.maintenance_parms_v3.ldpcBaseGraph;
@@ -1072,6 +1079,7 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
       if (rc == 0 && !hp_crc_failed(ulsch)) {
         atomic_fetch_add_explicit(&g_uci_rescued, 1, memory_order_relaxed);
         out->o_ack = (uint8_t)o_ack;
+        out->uci_ack_re = (uint16_t)unav;
         break;
       }
     }
@@ -1116,10 +1124,10 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
       atomic_fetch_add_explicit(&g_ta_ok[ta_idx], 1, memory_order_relaxed);
     }
   }
-  if (hp->C == 0 || hp->processedSegments != hp->C) {
+  if (hp_crc_failed(ulsch)) {
     atomic_fetch_add_explicit(&g_seg_fail, 1, memory_order_relaxed);
     out->status = NR_PUSCH_PASSIVE_CRC_FAIL;
-    out->reject_reason = "segment CRC failed";
+    out->reject_reason = "segment or final transport-block CRC failed";
     return false;
   }
 
@@ -1155,7 +1163,7 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
    * bits this receiver never decodes; reconstructing X there would be a guess, and a guess in the
    * numerator of Y/X is indistinguishable from a measurement downstream. Those grants keep
    * contributing through the DM-RS source, which does not depend on the payload at all. */
-  if (out->o_ack == 0) {
+  if (out->uci_ack_re == 0) {
     nr_isac_pusch_data_aided_submit(ue, gnb, &pdu, g, hp->b,
                                     NR_PUSCH_PASSIVE_DA_TAG_BASE + (uint32_t)ctx,
                                     passive_ul_slow_time_idx(fp, frame, slot, abs_slot),

@@ -677,6 +677,10 @@ typedef struct {
 /// live-verified length, exactly as nr_pdcch_blind_dci_size_ex() does for 1_1: if the two disagree
 /// the per-field widths are wrong and every field after the frequency-domain assignment is read
 /// from the wrong offset. Returns 0 when opts is NULL or bwp_size < 1.
+/* Non-aborting standards-table lookup for joint interpretation hypotheses. */
+int32_t nr_pdcch_blind_ul_dmrs_mask(uint8_t num_symbols, uint8_t start_symbol,
+    int mapping_type_is_b, int add_pos, int max_length, uint8_t dmrs_typeA_position);
+
 uint16_t nr_pdcch_blind_dci01_size(const nr_pdcch_blind_ul_opts_t* opts);
 
 bool nr_pdcch_blind_decode_01_mode(bool automatic, const int16_t *llr, uint8_t aggregation_level,

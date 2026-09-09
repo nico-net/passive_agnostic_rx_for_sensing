@@ -2478,14 +2478,10 @@ bool nr_pdcch_blind_extract_11(const nr_pdcch_blind_raw_result_t *raw,
     out->reject_reason = "antenna_ports field outside Table 7.3.1.2.2-1's 12 valid rows";
     return false;
   }
-  // MCS 28-31 (64QAM table, Table 5.1.3.1-1) are reserved for retransmissions -- a UE already knows
-  // the modulation from the initial transmission in that case, so a NEW/first grant should never
-  // carry one. NOT independently re-verified against this deployment's actual mcs-Table RRC config
-  // this session (same caveat as several other field assumptions in this file) -- if real grants are
-  // being rejected here, check whether 256QAM or the low-SE table is configured instead, which shift
-  // this boundary.
-  if (mcs >= 28) {
-    out->reject_reason = "MCS in the reserved retransmission-only range (28-31)";
+  // Table selection is still unknown here. MCS 28 is valid in tables 0 and 2;
+  // the actual PDSCH decoder checks the selected table's nonzero code rate.
+  if (mcs >= 29) {
+    out->reject_reason = "MCS reserved in every supported DL table (29-31)";
     return false;
   }
   uint16_t start_rb, num_rb;
@@ -2690,14 +2686,17 @@ static const int32_t g_table_6_4_1_1_3_4[12][8] = {
 /// that function AssertFatal()s on an invalid (ld, column) pair -- aborting the softmodem -- this
 /// one returns -1, because a blind decoder must be able to REJECT a candidate that a real UE could
 /// never have been given.
-static int32_t blind_ul_dmrs_mask(uint8_t num_symbols,
+int32_t nr_pdcch_blind_ul_dmrs_mask(uint8_t num_symbols,
                                   uint8_t start_symbol,
                                   int     mapping_type_is_b,
                                   int     add_pos,
                                   int     max_length,
                                   uint8_t dmrs_typeA_position)
 {
-  if (add_pos < 0 || add_pos > 3) {
+  if (!num_symbols || start_symbol + num_symbols > 14 ||
+      mapping_type_is_b < 0 || mapping_type_is_b > 1 ||
+      max_length < 1 || max_length > 2 || dmrs_typeA_position > 1 ||
+      add_pos < 0 || add_pos > 3) {
     return -1;
   }
   const int ld  = mapping_type_is_b ? num_symbols : (num_symbols + start_symbol);
@@ -2723,7 +2722,10 @@ static int32_t blind_ul_dmrs_mask(uint8_t num_symbols,
   if (l_prime < 0) {
     return -1;
   }
-  return mapping_type_is_b ? (l_prime << start_symbol) : (l_prime | l0_shift);
+  const uint32_t mask = mapping_type_is_b ? (l_prime << start_symbol) : (l_prime | l0_shift);
+  const uint32_t allocation = ((1u << num_symbols) - 1u) << start_symbol;
+  if (!mask || (mask & ~allocation)) return -1;
+  return (int32_t)mask;
 }
 
 // Per-field widths actually used by the UL extraction, resolving each override against the
@@ -2847,11 +2849,10 @@ static bool blind_ul_finish(const nr_pdcch_blind_ul_opts_t* opts,
     out->reject_reason = "RIV decodes to a PRB allocation outside the UL BWP";
     return false;
   }
-  // MCS 28-31 are reserved for retransmissions on the 64QAM table (TS 38.214 Table 6.1.4.1-1);
-  // 29-31 on the 256QAM table. A grant carrying one has almost certainly been misparsed.
-  const uint32_t mcs_reserved_from = (opts->mcs_table == 1) ? 29u : 28u;
-  if (mcs >= mcs_reserved_from) {
-    out->reject_reason = "UL MCS in the reserved retransmission-only range";
+  const int table = opts->mcs_table < 0 ? 0 : opts->mcs_table;
+  if (table > 4 || mcs > 31 || nr_get_code_rate_ul(mcs, table) == 0) {
+    out->reject_reason = "UL MCS reserved or invalid in the selected table";
+
     return false;
   }
 
@@ -2868,7 +2869,7 @@ static bool blind_ul_finish(const nr_pdcch_blind_ul_opts_t* opts,
                           ? force_add_pos
                           : ((opts->dmrs_add_pos >= 0) ? opts->dmrs_add_pos : 2);
   const int max_len = (opts->dmrs_max_length > 0) ? opts->dmrs_max_length : 1;
-  const int32_t mask = blind_ul_dmrs_mask(L, S, mapping_is_b, add_pos, max_len, opts->dmrs_typeA_position);
+  const int32_t mask = nr_pdcch_blind_ul_dmrs_mask(L, S, mapping_is_b, add_pos, max_len, opts->dmrs_typeA_position);
   if (mask < 0) {
     out->reject_reason = "no valid PUSCH DM-RS position for this allocation length";
     return false;
