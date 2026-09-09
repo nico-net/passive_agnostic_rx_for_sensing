@@ -164,10 +164,12 @@ struct MotionTracker::Track {
     else status="tentative";
     source_sequence=sequence;source_midpoint=time_s;last_score=d.score;associated_index=original;
   }
-  bool coast(double rate_resolution) {
+  bool coast(double rate_resolution, bool ul_motion_active=false) {
     ++coasts;recent.push_back(0);if(recent.size()>config.confirm_window)recent.erase(recent.begin());updated=false;associated_index.reset();
     const double guard=std::max(config.notch_guard_mps,1.5*rate_resolution);
-    const uint32_t maximum=config.maximum_coasts+(std::abs(x[1])<=guard?config.notch_coast_extension:0);
+    const uint32_t maximum=config.maximum_coasts
+        +(std::abs(x[1])<=guard?config.notch_coast_extension:0)
+        +(ul_motion_active?config.ul_coast_extension:0);
     if(coasts>maximum){status="lost";return false;}status="coasting";return true;
   }
   TrackSnapshot snapshot() const {
@@ -236,7 +238,8 @@ std::vector<Stage1TrackView> MotionTracker::active_tracks() const
 }
 
 void MotionTracker::update(double air_time_s,const std::vector<Detection>& detections,
-                           double range_res,double rate_res,uint64_t sequence)
+                           double range_res,double rate_res,uint64_t sequence,
+                           bool ul_motion_active)
 {
   const double sigma_r=std::hypot(range_res/std::sqrt(12.0),config_.range_floor_m);
   const double sigma_v=std::hypot(rate_res/std::sqrt(12.0),config_.rate_floor_mps);
@@ -276,7 +279,7 @@ void MotionTracker::update(double air_time_s,const std::vector<Detection>& detec
   std::set<size_t> assigned_t,assigned_d;
   for(auto [t,d]:hungarian(costs))if(costs(t,d)<=config_.gate_chi2){tracks_[t].update_measurement(candidates[d],noises[d],innovations.at({t,d}),sequence,original[d]);assigned_t.insert(t);assigned_d.insert(d);}
   std::vector<Track> survivors;bool lost=false;
-  for(size_t t=0;t<tracks_.size();++t){if(!assigned_t.count(t)&&!tracks_[t].coast(rate_res)){lost=true;continue;}survivors.push_back(std::move(tracks_[t]));}
+  for(size_t t=0;t<tracks_.size();++t){if(!assigned_t.count(t)&&!tracks_[t].coast(rate_res,ul_motion_active)){lost=true;continue;}survivors.push_back(std::move(tracks_[t]));}
   last_lost_=lost&&survivors.empty();
   if(!lost)for(size_t d:order){if(assigned_d.count(d)||multipath[d]||sidelobe[d]||static_leak[d]||candidates[d].score<config_.birth_score_threshold)continue;
     if(survivors.size()>=config_.maximum_tracks)break;

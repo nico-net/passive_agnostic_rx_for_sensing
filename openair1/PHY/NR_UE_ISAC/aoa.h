@@ -17,6 +17,13 @@ void apply_array_calibration(CfrWindow& window, const ArrayCalibration& calibrat
  */
 AoaEstimate admit_aoa_for_tracking(AoaEstimate estimate, const AoaQualityPolicy& policy);
 
+/** Combine significant CLEAN-component bearings as an angular mixture. Between-component
+ * disagreement is retained as systematic covariance rather than divided by the sample count.
+ */
+AoaEstimate combine_aoa_estimates(const std::vector<AoaEstimate>& estimates,
+                                  const std::vector<double>& weights,
+                                  const AoaQualityPolicy& policy);
+
 struct AoaIsolation {
   bool valid = false;
   std::string reason;

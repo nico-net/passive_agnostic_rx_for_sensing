@@ -21,13 +21,17 @@ through `nr_isac_submit_cfr_multi`; every operation after that boundary is imple
 7. Collapse measured-lattice multipath components, then apply CUT-excluded local log-MAD CFAR.
    The two-bin Doppler guard excludes training cells around the CUT; it never zeros Doppler zero.
 8. Apply independent causal clutter/confirmed-track feedback to the DL and UL range/rate trackers,
-   using global Hungarian association inside each detector stream.
+   using global Hungarian association inside each detector stream. UL motion may extend DL coasting
+   and confirm a new DL birth, but without UL AoA it cannot reject an individual DL candidate.
 9. Estimate 3-D receive direction from the surveyed rank-two 2x2 UPA. Reject clipped directions,
-   poor single-manifold fits, and excessive angular covariance before the hierarchical ENU EKF can
-   create or update a global track. DL detections with admitted AoA create 3-D tracks. UL currently
-   remains an independent auxiliary range/rate tracker because its transmitter position is not
-   known; no oracle UE position is present. `aoa_enable` is the master switch and `aoa_ul_enable`
-   is subordinate. With master on and UL off, DL AoA remains active and UL AoA is not evaluated.
+   poor single-manifold fits, excessive component-to-component angular spread, and physically
+   impossible temporal jumps before the hierarchical ENU EKF can create or update a global track.
+   With UL AoA enabled, matching receive bearings provide repeated candidate-specific confirmation;
+   an admitted UL bearing may fill a DL angular fade using a bearing-only update with an explicit
+   cross-leg covariance floor. UL remains an independent range/rate tracker, and its bistatic
+   range/rate never enters the DL EKF because its transmitter position is unknown. No oracle UE
+   position is present. `aoa_enable` is the master switch and `aoa_ul_enable` is subordinate. With
+   master on and UL off, DL AoA remains active and UL AoA is not evaluated.
 10. Emit detections, native range-Doppler maps, and stage-1/global tracks as JSONL/ZeroMQ reports.
 
 CFR submission, CPI formation, and detector/tracker processing are deliberately separated. The
@@ -61,6 +65,20 @@ The default AoA admission limits are manifold residual `0.25`, phase-fit RMS `pi
 degrees standard uncertainty on each angle. They are configurable with
 `sensing.aoa_max_manifold_residual`, `sensing.aoa_max_phase_fit_rms_rad`,
 `sensing.aoa_max_azimuth_stddev_deg`, and `sensing.aoa_max_elevation_stddev_deg`.
+
+For a collapsed extended target, significant CLEAN components inside the dominant peak's two-bin
+range/Doppler NMS ball are reprojected independently. Their power-weighted receive directions are
+combined, and their between-component spread is added to the angular covariance without division
+by component count. The ENU tracker also limits one-CPI direction changes using the declared
+50 m/s maximum tangential speed plus three standard deviations of measured angular uncertainty.
+Neither gate reads target class, target position, scorer output, or UE position.
+
+Cross-leg bearing association uses a 99% two-angle chi-square gate and a 3-degree systematic
+standard-deviation floor. One matching CPI labels evidence but does not delete alternatives; a new
+global track requires two candidate-specific matches in the latest three observations. UL without
+AoA supplies scene-level birth/coast support only. Existing DL tracks accept UL bearing-only EKF
+updates only when DL AoA is absent or quality/temporal rejected. A valid but jointly inconsistent
+DL AoA is not silently overridden by UL.
 
 ## CUDA detector backend
 

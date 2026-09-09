@@ -4,6 +4,7 @@
 #include "detector_cuda.h"
 
 #include "aoa.h"
+#include "cross_leg_fusion.h"
 #include "cuda_support.h"
 #include "detector.h"
 #include "sync_correction.h"
@@ -210,10 +211,12 @@ SensingEngine::SensingEngine(PipelineConfig config, uint32_t maximum_prb,
   }
   if (config_.tracker_enable) {
     MotionTrackerConfig inner;
-    if (config_.hierarchical_tracker_enable && norm(config_.tx_position - config_.rx_position) > 0.0)
+    if (config_.hierarchical_tracker_enable && norm(config_.tx_position - config_.rx_position) > 0.0) {
+      HierarchicalTrackerConfig hierarchical;
+      hierarchical.maximum_tangential_speed_mps = config_.maximum_target_speed_mps;
       hierarchical_tracker_ = std::make_unique<HierarchicalEnuTracker>(
-          BistaticGeometry{config_.tx_position, config_.rx_position}, HierarchicalTrackerConfig{}, inner);
-    else {
+          BistaticGeometry{config_.tx_position, config_.rx_position}, hierarchical, inner);
+    } else {
       motion_tracker_ = std::make_unique<MotionTracker>(inner);
       if (has_uplink) ul_motion_tracker_ = std::make_unique<MotionTracker>(inner);
     }
@@ -878,9 +881,6 @@ void SensingEngine::process_window(CfrWindow dl_window, std::optional<CfrWindow>
   {
     std::lock_guard<std::mutex> tracker_lock(tracker_mutex_);
     if (hierarchical_tracker_) {
-      hierarchical_tracker_->update(report.midpoint_air_time_s, report.detections,
-          report.detector.axes.range_res_m, report.detector.axes.rate_res_mps,
-          report.cpi_sequence, report.detector.axes.dwell_s);
       if (report.uplink_valid) {
         hierarchical_tracker_->update_auxiliary(
             report.midpoint_air_time_s, report.uplink_detections,
@@ -888,6 +888,20 @@ void SensingEngine::process_window(CfrWindow dl_window, std::optional<CfrWindow>
             report.uplink_detector.axes.rate_res_mps, report.cpi_sequence);
         report.uplink_tracks = hierarchical_tracker_->auxiliary_snapshots();
       }
+      CrossLegFusionResult fusion;
+      if (report.uplink_valid)
+        fusion = confirm_and_fuse_dl_with_ul(
+            report.detections, report.uplink_detections, config_.aoa_ul_enable);
+      else
+        fusion.dl_measurements = report.detections;
+      report.detections = std::move(fusion.dl_measurements);
+      hierarchical_tracker_->update(
+          report.midpoint_air_time_s, report.detections,
+          report.detector.axes.range_res_m, report.detector.axes.rate_res_mps,
+          report.cpi_sequence, report.detector.axes.dwell_s,
+          fusion.diagnostics.ul_motion_active, fusion.auxiliary_ul_aoa,
+          report.uplink_valid,
+          report.uplink_valid && config_.aoa_ul_enable);
       report.tracks = hierarchical_tracker_->snapshots();
     } else if (motion_tracker_) {
       motion_tracker_->update(report.midpoint_air_time_s, report.detections,

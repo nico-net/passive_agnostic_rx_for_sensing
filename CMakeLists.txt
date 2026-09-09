@@ -1082,6 +1082,7 @@ set(NR_UE_ISAC_SRC
   ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/variable_cpi.cc
   ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/enu_tracker.cc
   ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/hierarchical_tracker.cc
+  ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/cross_leg_fusion.cc
   ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/aoa.cc
   ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/report_writer.cc
   ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/sensing_engine.cc

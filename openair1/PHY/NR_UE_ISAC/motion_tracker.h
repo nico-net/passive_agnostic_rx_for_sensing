@@ -24,6 +24,7 @@ struct MotionTrackerConfig {
   double adaptive_jerk_floor = 0.2;
   uint32_t notch_coast_extension = 3;
   double notch_guard_mps = 1.5;
+  uint32_t ul_coast_extension = 4;
   uint32_t maximum_tracks = 16;
   double birth_score_threshold = 100.0;
   double multipath_shadow_range_m = 12.0;
@@ -71,7 +72,8 @@ public:
   void reset();
   TrackSnapshot predict_to(double air_time_s) const;
   void update(double air_time_s, const std::vector<Detection>& detections,
-              double range_res_m, double rate_res_mps, uint64_t cpi_sequence);
+              double range_res_m, double rate_res_mps, uint64_t cpi_sequence,
+              bool ul_motion_active = false);
   TrackSnapshot snapshot() const;
   std::vector<TrackSnapshot> snapshots() const;
   std::vector<ConfirmedTrackView> confirmed_tracks() const;

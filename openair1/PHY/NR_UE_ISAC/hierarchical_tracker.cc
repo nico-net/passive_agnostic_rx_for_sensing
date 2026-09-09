@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <numeric>
 #include <set>
 #include <stdexcept>
 #include <tuple>
@@ -20,7 +21,12 @@ HierarchicalEnuTracker::HierarchicalEnuTracker(BistaticGeometry geometry,
   if (!(config_.gate_chi2_2d > 0.0) || !(config_.gate_chi2_4d > 0.0)
       || !(config_.adaptation_alpha > 0.0 && config_.adaptation_alpha <= 1.0)
       || !(config_.maximum_acceleration_variance > 0.0)
-      || !(config_.initial_maximum_velocity_variance > 0.0))
+      || !(config_.initial_maximum_velocity_variance > 0.0)
+      || !(config_.maximum_tangential_speed_mps > 0.0)
+      || !(config_.aoa_temporal_sigma > 0.0)
+      || !(config_.minimum_aoa_temporal_stddev_deg > 0.0)
+      || config_.ul_confirmation_hits < 1
+      || config_.ul_confirmation_hits > config_.ul_confirmation_window)
     throw std::invalid_argument("invalid hierarchical tracker configuration");
 }
 
@@ -28,7 +34,7 @@ void HierarchicalEnuTracker::reset()
 {
   motion_tracker_.reset(); auxiliary_motion_tracker_.reset(); global_tracks_.clear();
   stage1_to_global_.clear();
-  valid_aoa_cache_.clear(); next_global_id_ = 1;
+  valid_aoa_cache_.clear(); ul_confirmation_history_.clear(); next_global_id_ = 1;
 }
 
 void HierarchicalEnuTracker::update_auxiliary(
@@ -47,9 +53,12 @@ TrackSnapshot HierarchicalEnuTracker::predict_to(double time) const
 
 void HierarchicalEnuTracker::update(double time, const std::vector<Detection>& detections,
                                     double range_res, double rate_res, uint64_t sequence,
-                                    double dwell)
+                                    double dwell, bool ul_motion_active,
+                                    const std::vector<AoaEstimate>& auxiliary_aoa_measurements,
+                                    bool require_ul_confirmation_for_birth,
+                                    bool require_candidate_ul_confirmation_for_birth)
 {
-  motion_tracker_.update(time, detections, range_res, rate_res, sequence);
+  motion_tracker_.update(time, detections, range_res, rate_res, sequence, ul_motion_active);
   for (auto& item : global_tracks_) item.second->predict(time);
   const auto active = motion_tracker_.active_tracks();
   std::set<uint64_t> active_ids;
@@ -59,6 +68,16 @@ void HierarchicalEnuTracker::update(double time, const std::vector<Detection>& d
       const Detection& d = detections[*view.associated_index];
       if (d.aoa.valid && d.aoa.covariance_rad2.rows() == 2)
         valid_aoa_cache_[s.track_id] = d;
+      std::optional<uint8_t> confirmation;
+      if (d.ul_confirmation_candidate_specific)
+        confirmation = d.ul_confirmation_supported ? 1 : 0;
+      else if (d.ul_confirmation_status == "no_cross_leg_bearing_match_preserved")
+        confirmation = 0;
+      if (confirmation) {
+        auto& history = ul_confirmation_history_[s.track_id];
+        history.push_back(*confirmation);
+        if (history.size() > config_.ul_confirmation_window) history.erase(history.begin());
+      }
     }
   }
 
@@ -82,6 +101,9 @@ void HierarchicalEnuTracker::update(double time, const std::vector<Detection>& d
   enu_config.confirm_window = config_.confirm_window;
   enu_config.adaptation_alpha = config_.adaptation_alpha;
   enu_config.adapt_acceleration_variance = false;
+  enu_config.maximum_tangential_speed_mps = config_.maximum_tangential_speed_mps;
+  enu_config.aoa_temporal_sigma = config_.aoa_temporal_sigma;
+  enu_config.minimum_aoa_temporal_stddev_deg = config_.minimum_aoa_temporal_stddev_deg;
 
   for (const auto& view : active) {
     const TrackSnapshot& s = view.snapshot;
@@ -126,6 +148,13 @@ void HierarchicalEnuTracker::update(double time, const std::vector<Detection>& d
       if (cache != valid_aoa_cache_.end() && cache->second.aoa.valid) birth = &cache->second;
     }
     if (!birth) continue;
+    if (require_ul_confirmation_for_birth && !ul_motion_active) continue;
+    const auto confirmation = ul_confirmation_history_.find(s.track_id);
+    const uint32_t confirmation_hits = confirmation == ul_confirmation_history_.end()
+        ? 0 : std::accumulate(confirmation->second.begin(), confirmation->second.end(), 0u);
+    if (require_candidate_ul_confirmation_for_birth
+        && confirmation_hits < config_.ul_confirmation_hits)
+      continue;
     try {
       const uint64_t id = next_global_id_++;
       auto track = std::make_unique<EnuTrack>(id, time, *birth, geometry_, range_res,
@@ -141,9 +170,37 @@ void HierarchicalEnuTracker::update(double time, const std::vector<Detection>& d
     }
   }
 
+  // An UL reflection reaches the same receive array, so its admitted direction is a bearing-only
+  // observation of an existing DL track. UL bistatic range/rate is deliberately excluded because
+  // its measurement model would require the unknown UE transmitter position.
+  std::vector<std::tuple<double, uint64_t, size_t>> auxiliary_pairs;
+  for (const auto& item : global_tracks_) {
+    const auto& track = *item.second;
+    if (track.last_update_used_angles() || !track.auxiliary_aoa_allowed()) continue;
+    for (size_t index = 0; index < auxiliary_aoa_measurements.size(); ++index) {
+      const EnuInnovation fit = track.angle_innovation(auxiliary_aoa_measurements[index]);
+      if (fit.valid && fit.nis <= config_.gate_chi2_2d)
+        auxiliary_pairs.emplace_back(fit.nis, item.first, index);
+    }
+  }
+  std::sort(auxiliary_pairs.begin(), auxiliary_pairs.end());
+  std::set<uint64_t> used_global;
+  std::set<size_t> used_auxiliary;
+  for (const auto& [nis, global_id, auxiliary_index] : auxiliary_pairs) {
+    (void)nis;
+    if (used_global.count(global_id) || used_auxiliary.count(auxiliary_index)) continue;
+    if (global_tracks_.at(global_id)->update_angles(
+            auxiliary_aoa_measurements[auxiliary_index])) {
+      used_global.insert(global_id);
+      used_auxiliary.insert(auxiliary_index);
+      updated_global.insert(global_id);
+    }
+  }
+
+  const uint32_t maximum_coasts = config_.maximum_3d_coasts + (ul_motion_active ? 4 : 0);
   for (auto it = global_tracks_.begin(); it != global_tracks_.end();) {
-    if (!updated_global.count(it->first)) it->second->coast();
-    if (it->second->coasts() > config_.maximum_3d_coasts) it = global_tracks_.erase(it);
+    if (!updated_global.count(it->first)) it->second->coast(ul_motion_active);
+    if (it->second->coasts() > maximum_coasts) it = global_tracks_.erase(it);
     else ++it;
   }
   for (auto it = stage1_to_global_.begin(); it != stage1_to_global_.end();) {
@@ -152,6 +209,9 @@ void HierarchicalEnuTracker::update(double time, const std::vector<Detection>& d
   }
   for (auto it = valid_aoa_cache_.begin(); it != valid_aoa_cache_.end();) {
     if (!active_ids.count(it->first)) it = valid_aoa_cache_.erase(it); else ++it;
+  }
+  for (auto it = ul_confirmation_history_.begin(); it != ul_confirmation_history_.end();) {
+    if (!active_ids.count(it->first)) it = ul_confirmation_history_.erase(it); else ++it;
   }
 }
 

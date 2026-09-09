@@ -201,9 +201,13 @@ EnuTrack::EnuTrack(uint64_t id, double time, const Detection& d,
                    std::optional<double> stage1_range, std::optional<double> stage1_rate)
     : id_(id), geometry_(geometry), config_(config), time_s_(time), birth_time_s_(time),
       last_update_time_s_(time), associated_index_(index), stage1_range_m_(stage1_range),
-      stage1_rate_mps_(stage1_rate)
+      stage1_rate_mps_(stage1_rate), last_aoa_gate_time_s_(time)
 {
   geometry_.validate();
+  if (!(config_.maximum_tangential_speed_mps > 0.0)
+      || !(config_.aoa_temporal_sigma > 0.0)
+      || !(config_.minimum_aoa_temporal_stddev_deg > 0.0))
+    throw std::invalid_argument("AoA temporal gate parameters must be positive");
   std::tie(x_, p_, acceleration_variance_) = initial_state_covariance(d, geometry_, rr, vr, dwell);
 }
 
@@ -216,6 +220,43 @@ void EnuTrack::predict(double time)
   x_ = f * x_; p_ = positive_semidefinite(f * p_ * f.transposed()
                                            + enu_process_noise(dt, acceleration_variance_));
   time_s_ = time; updated_ = false; associated_index_.reset(); nis_.reset();
+  last_update_used_angles_ = false;
+  auxiliary_aoa_allowed_ = true;
+}
+
+Detection EnuTrack::temporally_gated_measurement(const Detection& measurement)
+{
+  Detection result = measurement;
+  if (!result.aoa.valid || !result.aoa.covariance_valid
+      || result.aoa.covariance_rad2.rows() != 2 || result.aoa.covariance_rad2.cols() != 2)
+    return result;
+  const Matrix covariance = symmetrized(result.aoa.covariance_rad2);
+  for (size_t r = 0; r < 2; ++r)
+    for (size_t c = 0; c < 2; ++c)
+      if (!std::isfinite(covariance(r, c))) return result;
+  const double dt = std::max(0.0, time_s_ - last_aoa_gate_time_s_);
+  last_aoa_gate_time_s_ = time_s_;
+  const auto predicted = enu_measurement_model(x_, geometry_, true);
+  const Vec3 expected_direction = direction_from_angles(predicted[2], predicted[3]);
+  const Vec3 measured_direction = direction_from_angles(
+      result.aoa.azimuth_deg * PI / 180.0, result.aoa.elevation_deg * PI / 180.0);
+  const double separation = std::acos(std::clamp(
+      dot(expected_direction, measured_direction), -1.0, 1.0));
+  const Vec3 position{x_[0], x_[1], x_[2]};
+  const double receiver_range = std::max(
+      norm(position - geometry_.rx), std::numeric_limits<double>::min());
+  const double physical_allowance = std::atan2(
+      config_.maximum_tangential_speed_mps * dt, receiver_range);
+  const auto eigenvalues = eigenvalues_symmetric_2x2(
+      covariance(0, 0), covariance(0, 1), covariance(1, 1));
+  const double reported_sigma = std::sqrt(std::max({0.0, eigenvalues[0], eigenvalues[1]}));
+  const double uncertainty_allowance = config_.aoa_temporal_sigma * std::max(
+      reported_sigma, config_.minimum_aoa_temporal_stddev_deg * PI / 180.0);
+  if (separation <= physical_allowance + uncertainty_allowance) return result;
+  result.aoa.valid = false;
+  result.aoa.reason = "AoA change exceeds physical temporal-consistency gate";
+  ++temporal_aoa_rejections_;
+  return result;
 }
 
 EnuInnovation EnuTrack::innovation(const Detection& d, double rr, double vr, bool force_2d) const
@@ -247,19 +288,22 @@ EnuInnovation EnuTrack::innovation_for_geometry(const Detection& d, double rr, d
 bool EnuTrack::update(const Detection& d, double rr, double vr, std::optional<size_t> index,
                       std::optional<double> stage1_range, std::optional<double> stage1_rate)
 {
-  EnuInnovation selected = innovation_for_geometry(d, rr, vr, false, geometry_);
+  const Detection gated = temporally_gated_measurement(d);
+  EnuInnovation selected = innovation_for_geometry(gated, rr, vr, false, geometry_);
   if (!selected.valid || selected.nis > (selected.with_angles ? config_.gate_chi2_4d
                                                               : config_.gate_chi2_2d))
-    selected = innovation_for_geometry(d, rr, vr, true, geometry_);
+    selected = innovation_for_geometry(gated, rr, vr, true, geometry_);
   const double selected_gate = selected.with_angles ? config_.gate_chi2_4d
                                                      : config_.gate_chi2_2d;
-  if (!selected.valid || selected.nis > selected_gate) { coast(); return false; }
+  if (!selected.valid || selected.nis > selected_gate) {
+    last_update_used_angles_ = false;
+    auxiliary_aoa_allowed_ = !gated.aoa.valid;
+    coast();
+    return false;
+  }
   const auto old_velocity = std::vector<double>{x_[3], x_[4], x_[5]};
   const Matrix s = selected.jacobian * p_ * selected.jacobian.transposed() + selected.noise;
   Matrix gain = p_ * selected.jacobian.transposed() * pseudoinverse_symmetric(s);
-  if (selected.with_angles)
-    for (size_t r = 3; r < 6; ++r)
-      for (size_t c = 2; c < 4; ++c) gain(r, c) = 0.0;
   const auto dx = gain * selected.residual;
   for (size_t i = 0; i < 6; ++i) x_[i] += dx[i];
   const Matrix factor = Matrix::identity(6) - gain * selected.jacobian;
@@ -281,9 +325,70 @@ bool EnuTrack::update(const Detection& d, double rr, double vr, std::optional<si
                           + config_.adaptation_alpha * *nis_ : *nis_;
   coasts_ = 0; ++total_updates_; ++confirmed_updates_; updated_ = true;
   associated_index_ = index; status_ = "confirmed"; recent_.push_back(1);
+  last_update_used_angles_ = selected.with_angles;
+  // UL bearing fills only an absent/quality/temporal-rejected DL angle. A valid DL angle that
+  // failed the joint NIS is conflicting evidence and must not be immediately overridden.
+  auxiliary_aoa_allowed_ = !selected.with_angles && !gated.aoa.valid;
   if (recent_.size() > config_.confirm_window) recent_.erase(recent_.begin());
   if (stage1_range) stage1_range_m_ = stage1_range;
   if (stage1_rate) stage1_rate_mps_ = stage1_rate;
+  return true;
+}
+
+EnuInnovation EnuTrack::angle_innovation(const AoaEstimate& aoa) const
+{
+  EnuInnovation out;
+  if (!aoa.valid || !aoa.covariance_valid || aoa.covariance_rad2.rows() != 2
+      || aoa.covariance_rad2.cols() != 2)
+    return out;
+  try {
+    const auto predicted = enu_measurement_model(x_, geometry_, true);
+    out.residual = {
+        wrap_radians(aoa.azimuth_deg * PI / 180.0 - predicted[2]),
+        aoa.elevation_deg * PI / 180.0 - predicted[3]};
+    const Matrix full = enu_measurement_jacobian(x_, geometry_, true);
+    out.jacobian = Matrix(2, 6);
+    for (size_t r = 0; r < 2; ++r)
+      for (size_t c = 0; c < 6; ++c) out.jacobian(r, c) = full(r + 2, c);
+    out.noise = symmetrized(aoa.covariance_rad2);
+    const Matrix s = out.jacobian * p_ * out.jacobian.transposed() + out.noise;
+    out.nis = quadratic(out.residual, pseudoinverse_symmetric(s));
+    out.valid = std::isfinite(out.nis);
+    out.with_angles = true;
+  } catch (...) {
+    out.valid = false;
+  }
+  return out;
+}
+
+bool EnuTrack::update_angles(const AoaEstimate& aoa)
+{
+  Detection measurement;
+  measurement.aoa = aoa;
+  const auto observable = enu_measurement_model(x_, geometry_, true);
+  measurement.range_m = observable[0];
+  measurement.range_rate_mps = observable[1];
+  const Detection gated = temporally_gated_measurement(measurement);
+  if (!gated.aoa.valid) return false;
+  const EnuInnovation selected = angle_innovation(gated.aoa);
+  if (!selected.valid || selected.nis > config_.gate_chi2_2d) return false;
+  const Matrix s = selected.jacobian * p_ * selected.jacobian.transposed() + selected.noise;
+  const Matrix gain = p_ * selected.jacobian.transposed() * pseudoinverse_symmetric(s);
+  const auto dx = gain * selected.residual;
+  for (size_t i = 0; i < 6; ++i) x_[i] += dx[i];
+  const Matrix factor = Matrix::identity(6) - gain * selected.jacobian;
+  p_ = positive_semidefinite(factor * p_ * factor.transposed()
+                              + gain * selected.noise * gain.transposed());
+  last_update_time_s_ = time_s_;
+  nis_ = selected.nis;
+  coasts_ = 0;
+  ++total_updates_;
+  ++confirmed_updates_;
+  updated_ = true;
+  status_ = "confirmed";
+  last_update_used_angles_ = true;
+  auxiliary_aoa_allowed_ = false;
+  ++auxiliary_aoa_updates_;
   return true;
 }
 
@@ -314,12 +419,13 @@ bool EnuTrack::update_for_geometry(const Detection& d, double rr, double vr,
   return true;
 }
 
-void EnuTrack::coast()
+void EnuTrack::coast(bool ul_motion_active)
 {
   ++coasts_; recent_.push_back(0);
   if (recent_.size() > config_.confirm_window) recent_.erase(recent_.begin());
   updated_ = false; associated_index_.reset();
-  if (coasts_ >= config_.confirm_updates) status_ = "coasting";
+  const uint32_t confirm_limit = config_.confirm_updates + (ul_motion_active ? 2 : 0);
+  if (coasts_ >= confirm_limit) status_ = "coasting";
 }
 
 void EnuTrack::cap_birth_uncertainty(double max_velocity_variance,
@@ -351,6 +457,9 @@ TrackSnapshot EnuTrack::snapshot() const
   s.has_nis_ewma = nis_ewma_.has_value(); s.nis_ewma = nis_ewma_.value_or(0.0);
   s.coast_count = coasts_; s.confirmed_update_count = confirmed_updates_;
   s.total_update_count = total_updates_;
+  s.last_update_used_angles = last_update_used_angles_;
+  s.temporal_aoa_rejections = temporal_aoa_rejections_;
+  s.auxiliary_aoa_updates = auxiliary_aoa_updates_;
   return s;
 }
 

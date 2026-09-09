@@ -269,6 +269,85 @@ AoaEstimate admit_aoa_for_tracking(AoaEstimate estimate, const AoaQualityPolicy&
   return estimate;
 }
 
+AoaEstimate combine_aoa_estimates(const std::vector<AoaEstimate>& estimates,
+                                  const std::vector<double>& weights,
+                                  const AoaQualityPolicy& policy)
+{
+  if (estimates.size() != weights.size())
+    throw std::invalid_argument("AoA mixture weights must match estimates");
+  std::vector<size_t> usable;
+  double total_weight = 0.0;
+  Vec3 mean{};
+  for (size_t i = 0; i < estimates.size(); ++i) {
+    const auto& estimate = estimates[i];
+    bool covariance_finite = estimate.covariance_valid
+        && estimate.covariance_rad2.rows() == 2 && estimate.covariance_rad2.cols() == 2;
+    for (size_t r = 0; covariance_finite && r < 2; ++r)
+      for (size_t c = 0; c < 2; ++c)
+        covariance_finite = covariance_finite
+            && std::isfinite(estimate.covariance_rad2(r, c));
+    if (!estimate.valid || !covariance_finite || !std::isfinite(weights[i])
+        || !(weights[i] > 0.0))
+      continue;
+    const double direction_norm = norm(estimate.direction);
+    if (!(direction_norm > std::numeric_limits<double>::min())) continue;
+    const Vec3 direction = estimate.direction / direction_norm;
+    mean = mean + direction * weights[i];
+    total_weight += weights[i];
+    usable.push_back(i);
+  }
+  if (usable.empty() || !(total_weight > 0.0)) {
+    AoaEstimate rejected;
+    rejected.reason = "no valid component AoA estimates";
+    return rejected;
+  }
+  mean = mean / total_weight;
+  const double coherence = norm(mean);
+  if (!(coherence > std::numeric_limits<double>::min())) {
+    AoaEstimate rejected;
+    rejected.reason = "component AoAs have no resultant direction";
+    return rejected;
+  }
+  const Vec3 direction = mean / coherence;
+  const double azimuth = std::atan2(direction.y, direction.x);
+  const double elevation = std::asin(std::clamp(direction.z, -1.0, 1.0));
+  Matrix mixture(2, 2);
+  double weighted_separation2 = 0.0;
+  double maximum_separation = 0.0;
+  size_t strongest = usable.front();
+  for (size_t i : usable) {
+    if (weights[i] > weights[strongest]) strongest = i;
+    const auto& estimate = estimates[i];
+    const double probability = weights[i] / total_weight;
+    const Vec3 component = normalized(estimate.direction);
+    const double component_azimuth = std::atan2(component.y, component.x);
+    const double component_elevation = std::asin(std::clamp(component.z, -1.0, 1.0));
+    const std::array<double, 2> displacement{
+        wrap_phase(component_azimuth - azimuth), component_elevation - elevation};
+    for (size_t r = 0; r < 2; ++r)
+      for (size_t c = 0; c < 2; ++c)
+        mixture(r, c) += probability * (estimate.covariance_rad2(r, c)
+                                         + displacement[r] * displacement[c]);
+    const double separation = std::acos(std::clamp(dot(component, direction), -1.0, 1.0));
+    weighted_separation2 += probability * separation * separation;
+    maximum_separation = std::max(maximum_separation, separation);
+  }
+  AoaEstimate result = estimates[strongest];
+  result.valid = true;
+  result.reason.clear();
+  result.direction = direction;
+  result.azimuth_deg = azimuth * 180.0 / PI;
+  result.elevation_deg = elevation * 180.0 / PI;
+  result.covariance_rad2 = positive_semidefinite(symmetrized(mixture));
+  result.covariance_valid = true;
+  result.component_aoa_count = usable.size();
+  result.component_direction_coherence = coherence;
+  result.component_direction_rms_deg = std::sqrt(weighted_separation2) * 180.0 / PI;
+  result.component_direction_max_deg = maximum_separation * 180.0 / PI;
+  result.covariance_status = "component_mixture_total_covariance";
+  return admit_aoa_for_tracking(std::move(result), policy);
+}
+
 std::array<Complex, 4> surveyed_los_steering(const ArrayGeometry& geometry,
                                              Vec3 tx, Vec3 rx, double fc)
 {
@@ -642,6 +721,8 @@ AoaEstimate grid_free_upa_aoa(const std::array<Complex, 4>& response,
   out.direction_covariance = positive_semidefinite(direction_cov);
   out.covariance_rad2 = positive_semidefinite(angle_cov, std::numeric_limits<double>::epsilon());
   out.covariance_valid = true; out.valid = true;
+  out.component_aoa_count = 1;
+  out.covariance_status = "single_response_propagated_covariance";
   return out;
 }
 
@@ -697,7 +778,36 @@ void attach_aoa(CfrWindow aligned, const std::vector<CleanComponent>& components
     const AoaEstimate& fallback = prefer_isolated ? direct : isolated;
     const bool fallback_admissible = prefer_isolated || isolation.valid;
     if (!preferred.valid && fallback_admissible && fallback.valid) preferred = fallback;
-    d.aoa = std::move(preferred); d.dwell_s = axes.dwell_s;
+    d.aoa = std::move(preferred);
+
+    // A collapsed object may contain several scattering centres. A coherent sum can fit one plane
+    // wave while hiding their directional disagreement, so reproject significant components in
+    // the dominant-centred NMS ball and retain their spread as systematic angular covariance.
+    const auto dominant = std::find_if(components.begin(), components.end(), [&](const auto& c) {
+      return c.iteration == d.source_component_iteration;
+    });
+    if (dominant != components.end()) {
+      std::vector<AoaEstimate> component_estimates;
+      std::vector<double> component_weights;
+      for (const auto& component : components) {
+        const double dr = (component.range_bin - dominant->range_bin) / 2.0;
+        const double dd = (component.doppler_bin - dominant->doppler_bin) / 2.0;
+        if (component.score < 0.1 * dominant->score || dr * dr + dd * dd > 1.0) continue;
+        const double component_range = component.range_bin * axes.range_res_m;
+        const double component_rate = -(component.doppler_bin - aligned.rows / 2.0)
+                                      * axes.rate_res_mps;
+        component_estimates.push_back(admit_aoa_for_tracking(
+            grid_free_upa_aoa(project_array_response(
+                projected, projected.observed, component_range, component_rate),
+                config.array, aligned.fc_hz),
+            config.aoa_quality));
+        component_weights.push_back(component.score);
+      }
+      if (component_estimates.size() >= 2)
+        d.aoa = combine_aoa_estimates(
+            component_estimates, component_weights, config.aoa_quality);
+    }
+    d.dwell_s = axes.dwell_s;
   }
 }
 

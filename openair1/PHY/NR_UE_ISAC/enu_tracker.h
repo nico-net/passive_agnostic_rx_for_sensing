@@ -27,6 +27,9 @@ struct EnuTrackerConfig {
   // hierarchical_tracker.py freezes the birth-derived acceleration variance; the standalone
   // enu_tracker.py updates it from successive velocity corrections.
   bool adapt_acceleration_variance = true;
+  double maximum_tangential_speed_mps = 50.0;
+  double aoa_temporal_sigma = 3.0;
+  double minimum_aoa_temporal_stddev_deg = 1.0;
 };
 
 double wrap_radians(double value);
@@ -74,7 +77,9 @@ public:
   bool update_for_geometry(const Detection& measurement, double range_resolution_m,
                            double rate_resolution_mps,
                            const BistaticGeometry& geometry);
-  void coast();
+  EnuInnovation angle_innovation(const AoaEstimate& aoa) const;
+  bool update_angles(const AoaEstimate& aoa);
+  void coast(bool ul_motion_active = false);
   TrackSnapshot snapshot() const;
   void cap_birth_uncertainty(double maximum_velocity_variance,
                              double maximum_acceleration_variance);
@@ -85,8 +90,13 @@ public:
   bool updated() const { return updated_; }
   const std::vector<double>& state() const { return x_; }
   const Matrix& covariance() const { return p_; }
+  bool last_update_used_angles() const { return last_update_used_angles_; }
+  bool auxiliary_aoa_allowed() const { return auxiliary_aoa_allowed_; }
+  uint32_t temporal_aoa_rejections() const { return temporal_aoa_rejections_; }
+  uint32_t auxiliary_aoa_updates() const { return auxiliary_aoa_updates_; }
 
 private:
+  Detection temporally_gated_measurement(const Detection& measurement);
   uint64_t id_ = 0;
   BistaticGeometry geometry_;
   EnuTrackerConfig config_;
@@ -107,6 +117,11 @@ private:
   std::optional<size_t> associated_index_;
   std::optional<double> stage1_range_m_;
   std::optional<double> stage1_rate_mps_;
+  double last_aoa_gate_time_s_ = 0.0;
+  bool last_update_used_angles_ = true;
+  bool auxiliary_aoa_allowed_ = false;
+  uint32_t temporal_aoa_rejections_ = 0;
+  uint32_t auxiliary_aoa_updates_ = 0;
 };
 
 } // namespace nr_isac

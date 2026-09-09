@@ -137,6 +137,11 @@ struct AoaEstimate {
   double relative_manifold_residual_energy = 0.0;
   uint32_t phase_wraps_tested = 0;
   bool visible_region_clipped = false;
+  uint32_t component_aoa_count = 0;
+  double component_direction_coherence = 1.0;
+  double component_direction_rms_deg = 0.0;
+  double component_direction_max_deg = 0.0;
+  std::string covariance_status;
 };
 
 struct Detection {
@@ -152,6 +157,9 @@ struct Detection {
   uint32_t object_component_count = 1;
   AoaEstimate aoa;
   double dwell_s = 0.0;
+  bool ul_confirmation_supported = false;
+  bool ul_confirmation_candidate_specific = false;
+  std::string ul_confirmation_status;
 };
 
 struct DetectorResult {
@@ -187,6 +195,9 @@ struct TrackSnapshot {
   uint32_t coast_count = 0;
   uint32_t confirmed_update_count = 0;
   uint32_t total_update_count = 0;
+  bool last_update_used_angles = false;
+  uint32_t temporal_aoa_rejections = 0;
+  uint32_t auxiliary_aoa_updates = 0;
   uint64_t source_cpi_sequence = 0;
   double source_cpi_midpoint_s = 0.0;
   double propagation_age_s = 0.0;

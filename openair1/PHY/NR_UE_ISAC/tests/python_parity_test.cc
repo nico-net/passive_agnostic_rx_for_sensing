@@ -2,9 +2,11 @@
 /** Deterministic golden checks against the Python reference named in ../README.md. */
 #include "adaptive_threshold.h"
 #include "aoa.h"
+#include "cross_leg_fusion.h"
 #include "detector.h"
 #include "detector_cuda.h"
 #include "enu_tracker.h"
+#include "hierarchical_tracker.h"
 #include "fft.h"
 #include "report_writer.h"
 #include "sensing_engine.h"
@@ -233,6 +235,60 @@ void test_aoa()
           "duplicate target/nuisance columns must be non-identifiable");
 }
 
+void test_aoa_component_mixture_and_cross_leg_fusion()
+{
+  auto estimate = [](double azimuth_deg, double elevation_deg = 5.0) {
+    AoaEstimate value;
+    value.valid = value.covariance_valid = true;
+    value.azimuth_deg = azimuth_deg;
+    value.elevation_deg = elevation_deg;
+    value.direction = direction_from_angles(azimuth_deg * PI / 180.0,
+                                             elevation_deg * PI / 180.0);
+    value.covariance_rad2(0, 0) = std::pow(0.5 * PI / 180.0, 2);
+    value.covariance_rad2(1, 1) = std::pow(0.5 * PI / 180.0, 2);
+    value.phase_fit_residual_rms_rad = 0.01;
+    value.relative_manifold_residual_energy = 0.01;
+    return value;
+  };
+  const AoaEstimate mixture = combine_aoa_estimates(
+      {estimate(10.0), estimate(12.0), estimate(40.0)}, {100.0, 100.0, 10.0}, {});
+  require(mixture.valid && mixture.azimuth_deg > 10.0 && mixture.azimuth_deg < 14.0,
+          "component AoA mixture direction differs from Python");
+  require(mixture.component_aoa_count == 3 && mixture.component_direction_rms_deg > 5.0,
+          "component AoA mixture lost between-scatterer uncertainty");
+  require(std::sqrt(mixture.covariance_rad2(0, 0)) * 180.0 / PI > 5.0,
+          "component AoA mixture incorrectly divided systematic spread by sample count");
+  require(!combine_aoa_estimates(
+      {estimate(-70.0), estimate(70.0)}, {1.0, 1.0}, {}).valid,
+      "spatially uninformative component disagreement was admitted");
+
+  Detection dl_match, dl_alternative, ul;
+  dl_match.range_m = 20.0;
+  dl_match.aoa = estimate(10.0);
+  dl_alternative.range_m = 50.0;
+  dl_alternative.aoa = estimate(80.0);
+  ul.aoa = estimate(11.0);
+  const auto fused = confirm_and_fuse_dl_with_ul(
+      {dl_match, dl_alternative}, {ul}, true);
+  require(fused.dl_measurements.size() == 2
+              && fused.diagnostics.suppressed_dl_candidates == 0,
+          "one-CPI UL evidence deleted a DL alternative");
+  require(fused.dl_measurements[0].ul_confirmation_candidate_specific
+              && !fused.dl_measurements[1].ul_confirmation_candidate_specific,
+          "UL bearing was not paired to the agreeing DL candidate");
+  require(fused.auxiliary_ul_aoa.size() == 1
+              && fused.auxiliary_ul_aoa[0].covariance_rad2(0, 0)
+                     > ul.aoa.covariance_rad2(0, 0),
+          "UL auxiliary bearing lacks the cross-leg systematic covariance floor");
+
+  ul.aoa.valid = false;
+  const auto scene = confirm_and_fuse_dl_with_ul({dl_match, dl_alternative}, {ul}, false);
+  require(scene.dl_measurements.size() == 2 && scene.auxiliary_ul_aoa.empty()
+              && scene.dl_measurements[0].ul_confirmation_supported
+              && !scene.dl_measurements[0].ul_confirmation_candidate_specific,
+          "UL without AoA pretended to provide per-candidate observability");
+}
+
 void test_enu_geometry()
 {
   BistaticGeometry geometry{{0,0,0},{100,0,0}};geometry.validate();
@@ -247,7 +303,7 @@ void test_enu_geometry()
     for(size_t r=0;r<4;++r)close(h(r,c),(zp[r]-zm[r])/(2*step),2e-7,"ENU analytic Jacobian parity");}
 
   Detection birth; birth.range_m=z[0];birth.range_rate_mps=z[1];birth.dwell_s=.032;
-  birth.aoa.valid=true;birth.aoa.azimuth_deg=z[2]*180.0/PI;
+  birth.aoa.valid=true;birth.aoa.covariance_valid=true;birth.aoa.azimuth_deg=z[2]*180.0/PI;
   birth.aoa.elevation_deg=z[3]*180.0/PI;birth.aoa.covariance_rad2=Matrix(2,2);
   birth.aoa.covariance_rad2(0,0)=.01;birth.aoa.covariance_rad2(1,1)=.01;
   EnuTrackerConfig config;
@@ -261,6 +317,56 @@ void test_enu_geometry()
   require(found,"could not construct a 4-D-only admissible ENU innovation");
   require(track.update(candidate,3.0,1.0,0,std::nullopt,std::nullopt),
           "4-D innovation inside the 4-D gate was incorrectly rejected by the 2-D gate");
+
+  EnuTrack temporal(2,0.0,birth,geometry,3.0,1.0,.032,config,0);
+  temporal.predict(0.04);
+  Detection impossible=birth;
+  impossible.aoa.azimuth_deg += 70.0;
+  require(temporal.update(impossible,3.0,1.0,0,std::nullopt,std::nullopt),
+          "temporal AoA rejection incorrectly discarded valid range/rate");
+  require(!temporal.snapshot().last_update_used_angles
+              && temporal.snapshot().temporal_aoa_rejections == 1,
+          "coherent but physically impossible AoA jump entered the ENU state");
+
+  temporal.predict(0.08);
+  Detection angular_fade=birth;
+  angular_fade.aoa.valid=false;
+  require(temporal.update(angular_fade,3.0,1.0,0,std::nullopt,std::nullopt),
+          "DL angular fade incorrectly discarded range/rate");
+  require(temporal.update_angles(birth.aoa)
+              && temporal.snapshot().auxiliary_aoa_updates == 1,
+          "UL bearing-only fallback did not update a DL angular fade");
+}
+
+void test_repeated_ul_confirmation_gates_global_birth()
+{
+  BistaticGeometry geometry{{0, 0, 0}, {100, 0, 0}};
+  const std::vector<double> state{45.0, 30.0, 8.0, 0.0, 0.0, 0.0};
+  const auto measurement = enu_measurement_model(state, geometry, true);
+  HierarchicalEnuTracker tracker(geometry);
+  for (uint64_t step = 0; step < 4; ++step) {
+    Detection detection;
+    detection.range_m = measurement[0];
+    detection.range_rate_mps = measurement[1];
+    detection.score = 1000.0;
+    detection.dwell_s = 0.032;
+    detection.aoa.valid = detection.aoa.covariance_valid = true;
+    detection.aoa.azimuth_deg = measurement[2] * 180.0 / PI;
+    detection.aoa.elevation_deg = measurement[3] * 180.0 / PI;
+    detection.aoa.direction = direction_from_angles(measurement[2], measurement[3]);
+    detection.aoa.covariance_rad2(0, 0) = std::pow(1.0 * PI / 180.0, 2);
+    detection.aoa.covariance_rad2(1, 1) = std::pow(1.0 * PI / 180.0, 2);
+    detection.ul_confirmation_candidate_specific = step >= 2;
+    detection.ul_confirmation_supported = step >= 2;
+    detection.ul_confirmation_status = step >= 2
+        ? "candidate_specific_bearing_match" : "no_cross_leg_bearing_match_preserved";
+    tracker.update(step * 0.04, {detection}, 3.0, 1.0, step, 0.032, true, {}, true, true);
+    if (step < 3)
+      require(tracker.snapshots().empty(),
+              "global track birthed before repeated candidate-specific UL support");
+  }
+  require(tracker.snapshots().size() == 1,
+          "repeated candidate-specific UL support did not admit global-track birth");
 }
 
 void test_variable_cpi()
@@ -578,7 +684,7 @@ void test_dl_capture_fails_closed_without_dl()
 
 int main()
 {
-  try {test_fft();test_adaptive_threshold();test_detector();test_required_cuda_contract();test_aoa();test_enu_geometry();test_variable_cpi();test_causal_cpi_pipeline();test_finite_admission_window();test_mixed_row_dl_rdm_isolation();test_invalid_ul_does_not_suppress_dl();test_dl_capture_fails_closed_without_dl();test_validation_report_compatibility();}
+  try {test_fft();test_adaptive_threshold();test_detector();test_required_cuda_contract();test_aoa();test_aoa_component_mixture_and_cross_leg_fusion();test_enu_geometry();test_repeated_ul_confirmation_gates_global_birth();test_variable_cpi();test_causal_cpi_pipeline();test_finite_admission_window();test_mixed_row_dl_rdm_isolation();test_invalid_ul_does_not_suppress_dl();test_dl_capture_fails_closed_without_dl();test_validation_report_compatibility();}
   catch(const std::exception& e){std::fprintf(stderr,"python parity test failed: %s\n",e.what());return EXIT_FAILURE;}
   std::puts("native sensing golden parity checks passed");return EXIT_SUCCESS;
 }

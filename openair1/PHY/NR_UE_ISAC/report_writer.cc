@@ -195,7 +195,17 @@ std::string build_report_json(const PipelineReport& r, const PipelineConfig& c)
     out += ",\"phase_fit_residual_rms_rad\":";number(out,d.aoa.phase_fit_residual_rms_rad);
     out += ",\"relative_manifold_residual_energy\":";number(out,d.aoa.relative_manifold_residual_energy);
     out += ",\"visible_region_clipped\":";out += d.aoa.visible_region_clipped?"true":"false";
-    out += ",\"phase_wraps_tested\":"+std::to_string(d.aoa.phase_wraps_tested)+'}';out+='}';}out+=']';
+    out += ",\"phase_wraps_tested\":"+std::to_string(d.aoa.phase_wraps_tested);
+    out += ",\"component_aoa_count\":"+std::to_string(d.aoa.component_aoa_count);
+    out += ",\"component_direction_coherence\":";number(out,d.aoa.component_direction_coherence);
+    out += ",\"component_direction_rms_deg\":";number(out,d.aoa.component_direction_rms_deg);
+    out += ",\"component_direction_max_deg\":";number(out,d.aoa.component_direction_max_deg);
+    out += ",\"covariance_status\":";string_value(out,d.aoa.covariance_status);out+='}';
+    out += ",\"ul_confirmation\":{\"supported\":";
+    out += d.ul_confirmation_supported?"true":"false";
+    out += ",\"candidate_specific\":";
+    out += d.ul_confirmation_candidate_specific?"true":"false";
+    out += ",\"status\":";string_value(out,d.ul_confirmation_status);out+="}";out+='}';}out+=']';
   out += ",\"uplink\":{\"present\":";
   out += r.uplink_present ? "true" : "false";
   out += ",\"valid\":";
@@ -256,7 +266,10 @@ std::string build_report_json(const PipelineReport& r, const PipelineConfig& c)
     out += ",\"position\":";if(t.position_valid){out.push_back('[');number(out,t.position_enu_m.x);out.push_back(',');number(out,t.position_enu_m.y);out.push_back(',');number(out,t.position_enu_m.z);out.push_back(']');}else out+="null";
     out += ",\"velocity\":";if(t.position_valid){out.push_back('[');number(out,t.velocity_enu_mps.x);out.push_back(',');number(out,t.velocity_enu_mps.y);out.push_back(',');number(out,t.velocity_enu_mps.z);out.push_back(']');}else out+="null";
     out += ",\"azimuth_deg\":";number(out,t.azimuth_deg);out += ",\"elevation_deg\":";number(out,t.elevation_deg);
-    out += ",\"coast_count\":"+std::to_string(t.coast_count)+'}';}out+=']';
+    out += ",\"coast_count\":"+std::to_string(t.coast_count);
+    out += ",\"last_update_used_angles\":";out += t.last_update_used_angles?"true":"false";
+    out += ",\"temporal_aoa_rejections\":"+std::to_string(t.temporal_aoa_rejections);
+    out += ",\"auxiliary_aoa_updates\":"+std::to_string(t.auxiliary_aoa_updates)+'}';}out+=']';
   out += ",\"dropped_submissions\":"+std::to_string(r.dropped_submissions)
       +",\"dropped_cpis\":"+std::to_string(r.dropped_cpis)
       +",\"discarded_pending_rows\":"+std::to_string(r.discarded_pending_rows)

@@ -19,6 +19,11 @@ struct HierarchicalTrackerConfig {
   double maximum_acceleration_variance = 100.0;
   double initial_maximum_velocity_variance = 100.0;
   double adaptation_alpha = 0.25;
+  double maximum_tangential_speed_mps = 50.0;
+  double aoa_temporal_sigma = 3.0;
+  double minimum_aoa_temporal_stddev_deg = 1.0;
+  uint32_t ul_confirmation_hits = 2;
+  uint32_t ul_confirmation_window = 3;
 };
 
 /** Native transcription of hierarchical_tracker.py: Stage-1 range/rate plus persistent ENU EKFs. */
@@ -31,7 +36,11 @@ public:
   TrackSnapshot predict_to(double air_time_s) const;
   void update(double air_time_s, const std::vector<Detection>& detections,
               double range_resolution_m, double rate_resolution_mps,
-              uint64_t cpi_sequence, double dwell_s);
+              uint64_t cpi_sequence, double dwell_s,
+              bool ul_motion_active = false,
+              const std::vector<AoaEstimate>& auxiliary_aoa_measurements = {},
+              bool require_ul_confirmation_for_birth = false,
+              bool require_candidate_ul_confirmation_for_birth = false);
   void update_auxiliary(double air_time_s, const std::vector<Detection>& detections,
                         double range_resolution_m, double rate_resolution_mps,
                         uint64_t cpi_sequence);
@@ -55,6 +64,7 @@ private:
   std::map<uint64_t, std::unique_ptr<EnuTrack>> global_tracks_;
   std::map<uint64_t, uint64_t> stage1_to_global_;
   std::map<uint64_t, Detection> valid_aoa_cache_;
+  std::map<uint64_t, std::vector<uint8_t>> ul_confirmation_history_;
   uint64_t next_global_id_ = 1;
 };
 
