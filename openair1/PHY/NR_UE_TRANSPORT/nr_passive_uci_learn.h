@@ -104,7 +104,13 @@ static inline bool nr_passive_uci_learn_should_explore(uint16_t rnti, unsigned e
   pthread_mutex_lock(&g_uci_learn_lock);
   nr_uci_learn_ue_t *u = nr_uci_learn_slot(rnti);
   u->touched = ++g_uci_learn_clock;
-  const bool go = (u->failures % every) == 0;
+  /* An identity must EARN a sweep. The first version gave every unknown RNTI a free exploration,
+   * which is ruinous when the UL scan runs a wide RNTI range: transient noise-accepted identities
+   * each bought a full sweep. Measured live: 354,119 demux+LDPC attempts for 9 rescues, ~95 per
+   * grant against the ~4 intended, which starved the UL consumers and dragged health from 36.5 %
+   * down to 16.1 %. Requiring `every` failures first means only a persistent identity -- a real
+   * UE -- ever pays for exploration. */
+  const bool go = u->failures >= every && (u->failures % every) == 0;
   u->failures++;
   pthread_mutex_unlock(&g_uci_learn_lock);
   return go;
