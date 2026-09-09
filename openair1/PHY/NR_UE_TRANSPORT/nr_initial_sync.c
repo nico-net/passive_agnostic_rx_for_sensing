@@ -325,7 +325,9 @@ bool nr_search_ssb_common(nr_ssb_search_params_t *params)
 #endif
 
     // Check that SSB fits within buffer
-    if (ssb_time_offset + NR_N_SYMBOLS_SSB * (params->ofdm_symbol_size + params->nb_prefix_samples) >= params->rxdata_size) {
+    if (ssb_time_offset < 0
+        || ssb_time_offset + NR_N_SYMBOLS_SSB * (params->ofdm_symbol_size + params->nb_prefix_samples)
+               >= params->rxdata_size) {
       LOG_D(PHY,
             "SSB extends beyond buffer boundary (sync_pos %d, ssb_time_offset %d, buffer_size %d)\n",
             sync_pos,
