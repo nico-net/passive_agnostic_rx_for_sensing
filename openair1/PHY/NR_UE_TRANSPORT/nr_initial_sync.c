@@ -310,14 +310,35 @@ bool nr_search_ssb_common(nr_ssb_search_params_t *params)
   // and it takes into account the values already applied previously during the loop.
   int f_off_to_comp = 0;
 
+  // Cross-attempt CFO smoothing (2026-09-09): a single PSS-based estimate is noisy enough
+  // (measured +/-1-10 kHz swing call to call on a bladeRF's free-running TCXO) to sink PBCH's
+  // polar decode even though PSS/SSS themselves lock fine on the swing-tolerant raw estimate.
+  // Nothing else here persists across nr_search_ssb_common() calls, so a simple process-lifetime
+  // EMA is enough: gated on an SSS-VALIDATED hit only (a real cell match, not a false PSS peak on
+  // the wrong Nid2), so it only ever learns from the true cell's oscillator error. Blend the EMA
+  // into THIS attempt's compensation before SSS/PBCH ever run -- the estimate a given attempt
+  // gets to use is thus informed by every prior validated attempt, not just its own noisy sample.
+  static double s_cfo_ema_hz = 0.0;
+  static int s_cfo_ema_n = 0;
+
   for (int p = 0; p < NUMBER_PSS_SEQUENCE; p++) {
     pss_detection_result_t *pss_res = &pss_info.pss_elem_info[p];
     if (!pss_res->success)
       continue;
 
     int freq_offset_pss = pss_res->freq_offset;
+    const int freq_offset_pss_raw = freq_offset_pss;
+    if (s_cfo_ema_n > 0)
+      freq_offset_pss = (int)lround(0.5 * s_cfo_ema_hz + 0.5 * freq_offset_pss_raw);
     int sync_pos = pss_res->pos;
-    LOG_I(PHY, "CFODIAG: Nid2=%d freq_offset_pss=%d Hz sync_pos=%d\n", p, freq_offset_pss, sync_pos);
+    LOG_I(PHY,
+          "CFODIAG: Nid2=%d freq_offset_pss_raw=%d Hz smoothed=%d Hz (ema=%.0f n=%d) sync_pos=%d\n",
+          p,
+          freq_offset_pss_raw,
+          freq_offset_pss,
+          s_cfo_ema_hz,
+          s_cfo_ema_n,
+          sync_pos);
 
     const int ssb_time_offset = sync_pos - params->nb_prefix_samples;
 
@@ -363,6 +384,10 @@ bool nr_search_ssb_common(nr_ssb_search_params_t *params)
     if (!params->sss_res.success || params->sss_res.nid_cell < 0) {
       continue;
     }
+
+    // SSS just validated this Nid2 as a real cell, not a stray PSS peak -- safe to learn from.
+    s_cfo_ema_hz = (s_cfo_ema_n == 0) ? freq_offset_pss_raw : 0.8 * s_cfo_ema_hz + 0.2 * freq_offset_pss_raw;
+    s_cfo_ema_n++;
 
     params->pss_res = *pss_res;
     return true;
