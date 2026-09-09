@@ -319,3 +319,58 @@ Run hygiene confirmed for this capture despite a gNB restart earlier in the sess
 `Initial sync successful` x1 and `SIB1 common facts` x1, i.e. the receiver never lost the
 cell mid-run, and all 26 arm / 25 split events belong to a SINGLE RNTI's context. The churn
 diagnosis is therefore payload-driven, not an artefact of re-acquisition or RNTI turnover.
+
+## Items 1-3 FIXED (commit `aa7f82aced`) — 7/7 focused CTests pass
+
+### 1. Sample-set freeze
+The search armed 38 times and was invalidated 36 times in one 1800 s capture, converging
+0 times, with the class count drifting 108 -> 222. Frozen once armed; a later
+distinguishing payload is now a counter (`late_splits`), not a teardown. Sampled 1-in-256
+because the check costs two extractions per raw hypothesis.
+
+### 2. Spec-derived admissibility — measured reduction
+Cross-axis rules from TS 38.212 7.3.1.1.2 and TS 38.214 only. No gNB configuration is
+consulted, so nothing here trades autonomy for the reduction.
+
+| rule | basis |
+|---|---|
+| `ul_sul=1 => srs_request=3` | SUL-configured UEs get a 3-bit SRS request |
+| `dai2!=0 => dai1=2` | two sub-codebooks require a dynamic codebook |
+| `dmrs_seq_init=0 => ptrs_dmrs=0` | both are 0 iff the transform precoder is enabled |
+| `ptrs_dmrs != 1` | the field is "0 or 2 bits" |
+| `cbg != 1` | CBGTI is "0, 2, 4, 6 or 8 bits" |
+| `precoding>0 => sri<=1` | codebook tx allows at most 2 SRS resources |
+
+All are ONE-WAY implications, never the biconditionals they resemble: a spare hypothesis
+only costs trials, a missing one can never win.
+
+| config | before | after |
+|---|---|---|
+| live (BWP 273, 6 TDA), length 43 | 400 | **199** |
+| live, length 45 | 4145 | **1480** |
+| TDA width 1, length 40 | 87 | **53** |
+| TDA width 1, length 39 | 13 | **10** |
+
+Length 45 now fits the raw cap, and at the observed class ratio (~27 %) should fit the
+512-class cap too -- so the UEs that could never arm now can. **Convergence TIME at
+length 45 is still long** (~400 classes x 300 trials); that is a rate problem, not a
+refusal, and `ul_pusch_max_per_slot` is the untouched lever.
+
+### 3. Evidence pooled by DCI length, not RNTI
+Convergence needs ~32,400 transport-block CRCs (~1 h) while four distinct RNTIs appeared
+inside one 30-minute capture, so per-RNTI state could never finish. The width layout is a
+property of the RRC configuration behind a DCI size, not of the identity carrying it, so
+contexts are now keyed on (length, baseline geometry): UEs at one length pool evidence and
+a re-attached UE inherits it. Degrades safely -- genuinely different UEs at one length
+flatten the pooled rate and `WIN_RATIO` simply never declares a winner.
+Known cost recorded in code: mixing UEs makes a TDA-index clash likelier, which refuses the
+INTERPRETATION search only; width is unaffected.
+
+Two tests encoded the old "does not pool" contract and were **rewritten, not deleted**,
+keeping their generation-tagging safety intent, plus a new test that pooling must not merge
+two different DCI lengths. A test bug of mine was caught on the way: the known-good 40-bit
+layout cannot be in the length-43 set, because those same widths total 42 with this cell's
+3-bit TDA field.
+
+**Not yet validated on air.** A 2400 s capture is running to see whether a winner is
+declared.

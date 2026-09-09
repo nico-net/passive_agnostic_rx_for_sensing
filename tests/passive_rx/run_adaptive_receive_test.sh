@@ -6,6 +6,13 @@ BUILD=$REPO/cmake_targets/ran_build/build
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 test "$(git -C "$REPO" branch --show-current)" = adaptive-rx-UL-DL
 test -x "$BUILD/nr-uesoftmodem"
+# The binary must not predate the tree. Measured 2026-09-09: two admissibility rules were added and
+# only the TEST targets were rebuilt, so a 40-minute capture ran the previous nr-uesoftmodem and
+# reported the pre-fix hypothesis count. Nothing in the recorded commit/patch/sha256 identity catches
+# that -- they describe the SOURCE, and the source was correct; it was the binary that was behind.
+if find "$REPO/openair1" "$REPO/openair2" "$REPO/executables" "$REPO/radio"      \( -name '*.c' -o -name '*.h' -o -name '*.cpp' -o -name '*.cc' \)      -newer "$BUILD/nr-uesoftmodem" -print -quit 2>/dev/null | grep -q .; then
+  echo "BLOCKED: nr-uesoftmodem is older than tracked source -- rebuild before capturing"; exit 3
+fi
 grep -qx "ENABLE_ISAC_SENSING:BOOL=OFF" "$BUILD/CMakeCache.txt"
 test "$(readlink "$BUILD/liboai_device.so")" = liboai_usrpdevif.so
 exec 9>/tmp/adaptive-rx-UL-DL.radio.lock
