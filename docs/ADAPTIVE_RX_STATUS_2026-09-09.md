@@ -112,3 +112,46 @@ Not a better pinned number -- a demonstration that the receiver RE-LEARNS an uns
 layout with no hints. That is the actual deliverable (agnosticity + adaptiveness), and it is
 worth more than a good CRC from a hand-pinned configuration that expires the next time a UE
 re-attaches.
+
+## BEST UL RESULT: 54.9 % health, manual pinned layout, one UE
+
+Manual mode (`full_auto=0`), pinned layout `0:0:0:0:4:2:0:0:0:3:2:0:0:0:0:1`, UCI recovery
+active. Per-UE, which is how the target is defined:
+
+| identity | ok / n | health |
+|---|---:|---:|
+| **0x4cf4** | 48210 / 87795 | **54.9 %** |
+| 0x74be | 0 / 253 | 0.0 % (noise) |
+| 0x74a9 | 0 / 176 | 0.0 % (noise) |
+
+`zero_tb=0` throughout, so this is clean `health`, not inflated by empty grants.
+
+### The UCI demux is carrying about a quarter of it
+
+| attempts | health | UCI rescue share |
+|---:|---:|---:|
+| 23,734 | 51.2 % | 22.5 % |
+| 52,215 | 51.9 % | 23.0 % |
+| 82,235 | 54.2 % | 26.3 % |
+
+Health rises AS the rescue share rises -- the footprint cache learning this cell's UCI
+footprints once and reusing them cheaply. Without the demux this run would sit near 40 %.
+
+### Corrections to my own earlier reading
+
+- I attributed the jump from 2.5 % to ~54 % to "the UE population". WRONG: this window has
+  ONE UE with volume. The correct statement is that the pinned layout FITS 0x4cf4 and does
+  NOT fit 0x4bd1 -- still direct evidence for "equal DCI length, different RRC config", but
+  between two single UEs, not a population effect.
+- Earlier I read 2.5 % as evidence the LAYOUT was wrong. The more likely reading is that a
+  pinned layout matches some UEs and not others, which is exactly why per-UE learning (and
+  the pooled-winner corroboration gate) matter.
+
+### Still open
+
+- **A genuine MULTI-UE measurement.** Only one UE produces recoverable PUSCH volume in this
+  capture; the other identities are noise. Two UEs on iperf did not yield two decodable
+  grant streams, and why is not established.
+- **60 % target**: 54.9 % is the closest measured, on one UE, uplink only.
+- **The conditioned-rate defect in the width search** (in-search 16.9 % vs pinned 2.5 % for
+  the same class) remains unfixed, and it is what decides which layout the search would crown.
