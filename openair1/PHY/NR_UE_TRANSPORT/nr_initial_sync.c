@@ -331,14 +331,19 @@ bool nr_search_ssb_common(nr_ssb_search_params_t *params)
     if (s_cfo_ema_n > 0)
       freq_offset_pss = (int)lround(0.5 * s_cfo_ema_hz + 0.5 * freq_offset_pss_raw);
     int sync_pos = pss_res->pos;
+    const double pss_snr_db = pss_res->avg > 0 ? 10.0 * log10((double)pss_res->peak / (double)pss_res->avg) : -999.0;
     LOG_I(PHY,
-          "CFODIAG: Nid2=%d freq_offset_pss_raw=%d Hz smoothed=%d Hz (ema=%.0f n=%d) sync_pos=%d\n",
+          "CFODIAG: Nid2=%d freq_offset_pss_raw=%d Hz smoothed=%d Hz (ema=%.0f n=%d) sync_pos=%d pss_peak=%d pss_avg=%d "
+          "pss_snr=%.1f dB\n",
           p,
           freq_offset_pss_raw,
           freq_offset_pss,
           s_cfo_ema_hz,
           s_cfo_ema_n,
-          sync_pos);
+          sync_pos,
+          pss_res->peak,
+          pss_res->avg,
+          pss_snr_db);
 
     const int ssb_time_offset = sync_pos - params->nb_prefix_samples;
 
@@ -380,6 +385,13 @@ bool nr_search_ssb_common(nr_ssb_search_params_t *params)
     c16_t(*rxdataF)[params->nb_antennas_rx][params->ofdm_symbol_size] =
         (c16_t(*)[params->nb_antennas_rx][params->ofdm_symbol_size])params->rxdataF;
     params->sss_res = rx_sss_nr(&p_sss, pss_res, -1, rxdataF);
+    LOG_I(PHY,
+          "CFODIAG: Nid2=%d sss success=%d nid_cell=%d metric=%d sss_freq_offset=%d Hz\n",
+          p,
+          params->sss_res.success,
+          params->sss_res.nid_cell,
+          params->sss_res.metric,
+          params->sss_res.freq_offset);
 
     if (!params->sss_res.success || params->sss_res.nid_cell < 0) {
       continue;

@@ -437,6 +437,22 @@ int device_init(openair0_device_t *device, openair0_config_t *openair0_cfg)
       brf.use_sc8 = true;
       break;
 
+    case 61440000:
+      // 106 PRB / 30 kHz SCS (band78, 50 MHz-class). Added 2026-09-09: this rate is right at
+      // bladeRF 2 micro's normal (non-oversample) ADC ceiling and was previously missing from
+      // this table entirely (any -r requiring it hit the "unknown sampling rate" default case).
+      // Plain SC16, no oversample -- see the 122880000 case's SC8/oversample path, which this
+      // session isolated (via a standalone libbladeRF probe, independent of OAI) as returning
+      // noise uncorrelated with the tuned RF frequency regardless of gain/bandwidth/rate/FPGA
+      // version, while this exact same hardware in plain SC16 mode shows a clean, strong,
+      // frequency-correlated signal. Use this rate until that oversample defect is root-caused.
+      openair0_cfg->samples_per_packet = 32768;
+      openair0_cfg->tx_sample_advance = 0;
+      brf.num_buffers = 32;
+      brf.num_transfers = 16;
+      brf.rx_timeout_ms = 2000;
+      break;
+
     case 46080000:
       openair0_cfg->samples_per_packet = 32768;
       openair0_cfg->tx_sample_advance = 0;
