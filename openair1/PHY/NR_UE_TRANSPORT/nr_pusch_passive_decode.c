@@ -1108,8 +1108,14 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
    * offset, and it is never written into configuration. Single-layer, no-PTRS scope, matching the
    * inverse it uses; combined ACK+CSI layouts and small-ACK puncturing are not covered. */
   const nr_pdcch_blind_monitor_cfg_t *ucfg = nr_pdcch_blind_monitor_get_cfg();
+  /* Only once the field layout is SETTLED. While the width search is still exploring, most grants
+   * carry a deliberately wrong layout, so their failures have nothing to do with UCI and no
+   * footprint can rescue them -- the search would just burn LDPC attempts on noise and learn
+   * nothing. Measured live during exploration: 104,235 UCI attempts, ~16 per grant, ZERO rescues.
+   * A grant whose width hypothesis is still under test carries width_hyp_class >= 0; a settled one
+   * carries -1, which is the condition used here. */
   if (rc == 0 && hp_crc_failed(ulsch) && ucfg != NULL && ucfg->ul_uci_search > 0
-      && g->nrOfLayers == 1 && out->G > 0) {
+      && g->nrOfLayers == 1 && out->G > 0 && g->width_hyp_class < 0) {
     const uint32_t full_bits = out->G;
     int16_t *original = malloc((size_t)full_bits * sizeof(*original));
     if (original == NULL) {

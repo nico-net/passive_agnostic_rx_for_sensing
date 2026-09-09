@@ -76,3 +76,39 @@ is as wrong as the hypothesis that produced it.**
 With that removed, the surviving evidence (failed decodes carry WEAKER LLRs) points back at
 signal level, which is what the rxgain arm tests. `-31 dBFS` with `clip=0` at rxgain 40 says
 there are ~31 dB of unused ADC range.
+
+## A pinned layout expires when the UE population changes — measured
+
+The 36.5 % clean UL figure was real but it was a property of the UE POPULATION it was
+learned from, not of the receiver. When the UEs on the cell were swapped, the same pinned
+layout gave:
+
+| run | UL accepts | health |
+|---|---:|---:|
+| pinned, original UEs (0x4xxx) | 185,057 | **36.5 %** |
+| pinned, population shifting | 21,890 | 8.9 % |
+| pinned, new UE only (0x73fd dominant) | 1,832 | **0 %** |
+
+**Read the ACCEPT count, not the CRC.** A wrong field layout does not merely decode badly --
+it stops recognising grants at all, and accepts fell ~100x. That is the cleanest available
+signature of "this layout does not belong to this UE", and it is visible long before any
+CRC statistic settles.
+
+This is the same principle as the pooled-winner corroboration gate added earlier: equal DCI
+length does not prove equal RRC configuration. Here it applies to a HAND-PINNED layout
+rather than a pooled one.
+
+### RETRACTED: the UCI sweep-range conclusion
+
+Widening the sweep 64 -> 256 RE was reasoned from "14 sweeps, 1792 valid demuxes, zero
+rescues, so the footprint must be out of range". With the layout wrong for the UE, every
+grant fails for reasons the UCI inverse cannot address, so zero rescues says nothing about
+the range. **The 256 value is UNPROVEN, not validated.** Re-test it only once a layout that
+matches the current UE is in place.
+
+### What this makes the right experiment
+
+Not a better pinned number -- a demonstration that the receiver RE-LEARNS an unseen UE's
+layout with no hints. That is the actual deliverable (agnosticity + adaptiveness), and it is
+worth more than a good CRC from a hand-pinned configuration that expires the next time a UE
+re-attaches.
