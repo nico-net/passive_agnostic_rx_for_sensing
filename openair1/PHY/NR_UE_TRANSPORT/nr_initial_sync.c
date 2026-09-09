@@ -317,6 +317,7 @@ bool nr_search_ssb_common(nr_ssb_search_params_t *params)
 
     int freq_offset_pss = pss_res->freq_offset;
     int sync_pos = pss_res->pos;
+    LOG_I(PHY, "CFODIAG: Nid2=%d freq_offset_pss=%d Hz sync_pos=%d\n", p, freq_offset_pss, sync_pos);
 
     const int ssb_time_offset = sync_pos - params->nb_prefix_samples;
 

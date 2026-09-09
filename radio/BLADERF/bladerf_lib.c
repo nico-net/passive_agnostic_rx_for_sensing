@@ -225,40 +225,70 @@ static int trx_brf_read(openair0_device_t *device, openair0_timestamp_t *ptimest
     wire_samples = brf->rx_conversion_buffer;
   }
 
-  brf->meta_rx.actual_count = 0;
-  brf->meta_rx.flags = BLADERF_META_FLAG_RX_NOW;
-  int status = bladerf_sync_rx(brf->dev, wire_samples, (unsigned int)nsamps, &brf->meta_rx, 2 * brf->rx_timeout_ms);
+  // BLADERF_META_FLAG_RX_NOW returns whatever is CURRENTLY buffered, up to the
+  // requested count -- it does not block until the full amount arrives. A single
+  // call at 100 MHz reliably returns only a few percent of a large nsamps request
+  // (measured: ~1016 of 61440, independent of buffer_size/num_buffers/num_transfers,
+  // which rules those out as the cause), and the caller here used to treat that
+  // partial delivery as a fatal-looking overrun. The fix is not to abandon RX_NOW
+  // (removing it makes bladerf_sync_rx schedule off the metadata timestamp instead,
+  // which needs continuity tracking this driver does not do and which failed
+  // immediately with "Requested timestamp is in the past") -- it is to use RX_NOW
+  // the way it is meant to be used: loop, accumulating successive partial returns
+  // into the destination buffer, until the full nsamps has arrived.
+  const size_t bytes_per_sample = brf->use_sc8 ? sizeof(int8_t) * 2 : sizeof(int16_t) * 2;
+  uint8_t *dst = (uint8_t *)wire_samples;
+  unsigned int total_got = 0;
+  int status = 0;
+  bool overrun_seen = false;
+  uint64_t first_ts = 0;
+  // Generous iteration cap: a healthy link fills nsamps in a handful of RX_NOW
+  // calls (measured ~60 at 100 MHz for a 61440-sample request); this cap only
+  // protects against a genuinely dead stream, not normal operation.
+  const int max_iterations = 8192;
+  for (int iter = 0; total_got < (unsigned int)nsamps && iter < max_iterations; iter++) {
+    const unsigned int remaining = (unsigned int)nsamps - total_got;
+    brf->meta_rx.actual_count = 0;
+    brf->meta_rx.flags = BLADERF_META_FLAG_RX_NOW;
+    status = bladerf_sync_rx(brf->dev,
+                              dst + (size_t)total_got * bytes_per_sample,
+                              remaining,
+                              &brf->meta_rx,
+                              2 * brf->rx_timeout_ms);
+    if (status != 0) {
+      LOG_E(HW, "RX failed: %s\n", bladerf_strerror(status));
+      brf->num_rx_errors++;
+      break;
+    }
+    if (total_got == 0)
+      first_ts = brf->meta_rx.timestamp;
+    if (brf->meta_rx.status & BLADERF_META_STATUS_OVERRUN)
+      overrun_seen = true;
+    total_got += brf->meta_rx.actual_count;
+  }
 
   if (brf->use_sc8 && status == 0) {
     for (int i = 0; i < 2 * nsamps; ++i)
       samples[i] = (int16_t)brf->rx_conversion_buffer[i] * 16;
   }
 
-  if (status != 0) {
-    LOG_E(HW, "RX failed: %s\n", bladerf_strerror(status));
-    brf->num_rx_errors++;
-  } else if (brf->meta_rx.status & BLADERF_META_STATUS_OVERRUN) {
+  if (overrun_seen) {
     brf->num_overflows++;
-    LOG_W(HW,
-          "%d RX overrun is detected. timestamp %ld. Requested %u but got %u samples\n",
-          brf->num_overflows,
-          brf->meta_rx.timestamp,
-          nsamps,
-          brf->meta_rx.actual_count);
+    LOG_W(HW, "%d RX overrun is detected (accumulated %u/%d samples across the read)\n", brf->num_overflows, total_got, nsamps);
   }
 
-  if (brf->meta_rx.actual_count != nsamps) {
-    LOG_E(HW, "RX bad samples count, wanted %d, got %d\n", nsamps, brf->meta_rx.actual_count);
+  if (total_got != (unsigned int)nsamps) {
+    LOG_E(HW, "RX bad samples count, wanted %d, got %u\n", nsamps, total_got);
   }
 
-  brf->rx_current_ts = brf->meta_rx.timestamp;
-  brf->rx_actual_nsamps += brf->meta_rx.actual_count;
+  brf->rx_current_ts = first_ts;
+  brf->rx_actual_nsamps += total_got;
   brf->rx_nsamps += nsamps;
   brf->rx_count++;
 
-  *ptimestamp = brf->meta_rx.timestamp;
+  *ptimestamp = first_ts;
 
-  return nsamps; // brf->meta_rx.actual_count;
+  return nsamps; // total_got
 }
 
 /*! \brief Terminate operation of the BladeRF transceiver -- free all associated resources
@@ -393,27 +423,34 @@ int device_init(openair0_device_t *device, openair0_config_t *openair0_cfg)
 
   switch ((long) openair0_cfg->sample_rate) {
     case 122880000:
-      openair0_cfg->samples_per_packet = 16384;
+      // Buffering re-tuned 2026-09-09: the previous 16384-sample buffers with 128
+      // buffers/32 transfers overran ~98% of every read against real hardware (isolated
+      // against bare `bladeRF-cli` streaming the SAME rate with ZERO errors using ITS
+      // defaults -- 32768 samples/buffer, 32 buffers, 16 transfers -- proving the link
+      // itself is healthy and this driver's own buffer sizing was the defect). Matched
+      // to that proven-good shape rather than guessed.
+      openair0_cfg->samples_per_packet = 32768;
       openair0_cfg->tx_sample_advance = 0;
-      brf.num_buffers = 128;
-      brf.num_transfers = 32;
+      brf.num_buffers = 32;
+      brf.num_transfers = 16;
       brf.rx_timeout_ms = 2000;
       brf.use_sc8 = true;
       break;
 
     case 46080000:
-      openair0_cfg->samples_per_packet = 8192;
+      openair0_cfg->samples_per_packet = 32768;
       openair0_cfg->tx_sample_advance = 0;
-      brf.num_buffers = 128;
-      brf.num_transfers = 32;
+      brf.num_buffers = 32;
+      brf.num_transfers = 16;
       brf.rx_timeout_ms = 2000;
       break;
 
     case 30720000:
-      openair0_cfg->samples_per_packet = 4096;
+      // Same re-tuning as the 122880000 case above -- see that comment.
+      openair0_cfg->samples_per_packet = 32768;
       openair0_cfg->tx_sample_advance = 0;
-      brf.num_buffers = 128;
-      brf.num_transfers = 32;
+      brf.num_buffers = 32;
+      brf.num_transfers = 16;
       brf.rx_timeout_ms = 2000;
       break;
 
