@@ -153,8 +153,13 @@ bool nr_pdcch_ul_discovery_grant(const nr_pdcch_blind_ul_opts_t *fixed, uint16_t
   }
   /* No geometry or TDA width inferred from DCI total length alone. The current opts
    * contract still supplies these facts; a default/unknown dedicated TDA list is unresolved. */
-  if (fixed->bwp_size==0 || fixed->tda_count<1 || fixed->tda_count>16) {
-    if (!c->widths.refused) LOG_E(PHY,"UL discovery unresolved: UL BWP and TDA field width required\n");
+  /* tda_count == 0 means the TS 38.214 Table 6.1.2.1.1-2 default 16-entry table -- a COMPLETE
+   * interpretation with a 4-bit field, which nr_pdcch_blind_dci01_size() already derives. Refusing
+   * it treated a resolved case as unresolved. The UL BWP genuinely is required: it is the RIV
+   * reference and sets the frequency-domain field's width. It is seeded from SIB1's common initial
+   * UL BWP in full_auto (see nr_pdcch_blind_monitor_rt.c) as a hypothesis the TB CRC then judges. */
+  if (fixed->bwp_size==0 || fixed->tda_count<0 || fixed->tda_count>16) {
+    if (!c->widths.refused) LOG_E(PHY,"UL discovery unresolved: no UL BWP (SIB1 not decoded, and none configured)\n");
     c->widths.refused=true;
     goto done;
   }

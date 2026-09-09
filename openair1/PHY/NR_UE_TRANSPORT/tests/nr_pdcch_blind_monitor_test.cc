@@ -2591,3 +2591,32 @@ TEST_F(BlindPdcchTest, DlMcs28SurvivesUntilTableInterpretation) {
       kDmrsTypeAPositionPos2,NR_PDCCH_BLIND_RNTI_MIN_DEFAULT,NR_PDCCH_BLIND_RNTI_MAX_DEFAULT,&result));
   EXPECT_EQ(result.mcs,28);
 }
+
+/* tda_count == 0 is the TS 38.214 default 16-entry table -- a COMPLETE interpretation, not an
+ * unknown. It used to be refused alongside a missing BWP, which is why autonomous UL never made a
+ * single attempt. A UL BWP is still genuinely required (it is the RIV reference). */
+TEST_F(BlindPdcchTest, UlDefaultTdaTableArmsTheWidthSearch) {
+  nr_pdcch_ul_discovery_reset();
+  auto packing = LiveUlOpts();
+  packing.tda_count = 0;                       // default table => 4-bit TDA field
+  auto seeded = packing;                       // BWP known (SIB1-seeded at runtime), TDA defaulted
+  const auto len = nr_pdcch_blind_dci01_size(&packing);
+  nr_pdcch_blind_ul_result_t result{};
+  for (int i = 0; i < 8; i++) {
+    UlGroundTruth gt; gt.riv = 273 * (i + 1); gt.mcs = i + 2;
+    nr_pdcch_ul_discovery_grant(&seeded, len, gt.rnti, PackUlPayload(gt, packing), &result);
+  }
+  const auto armed = nr_pdcch_ul_discovery_snapshot();
+  EXPECT_EQ(armed.raw_samples, 8);
+  EXPECT_GT(armed.width_classes, 0) << "default-TDA search refused to arm";
+
+  // ... and a missing UL BWP must still refuse: it is the RIV reference, not a defaultable field.
+  nr_pdcch_ul_discovery_reset();
+  auto no_bwp = packing; no_bwp.bwp_size = 0;
+  for (int i = 0; i < 8; i++) {
+    UlGroundTruth gt; gt.riv = 273 * (i + 1); gt.mcs = i + 2;
+    EXPECT_FALSE(nr_pdcch_ul_discovery_grant(&no_bwp, len, gt.rnti, PackUlPayload(gt, packing), &result));
+  }
+  EXPECT_EQ(nr_pdcch_ul_discovery_snapshot().width_classes, 0);
+  nr_pdcch_ul_discovery_reset();
+}

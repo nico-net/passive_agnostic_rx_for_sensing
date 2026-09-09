@@ -787,8 +787,46 @@ void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_pr
   ul_opts.numerology = fp->numerology_index;
   ul_opts.dmrs_typeA_position = cfg->dmrs_typeA_position;
   nr_pdcch_blind_common_config_t common;
-  if (nr_pdcch_blind_get_common(fp->Nid_cell, &common) && common.ul_bwp_size)
+  if (nr_pdcch_blind_get_common(fp->Nid_cell, &common) && common.ul_bwp_size) {
     ul_opts.numerology = common.ul_mu;
+    /* JOINT UL INITIALISATION. The UL width/interpretation search cannot score anything until it
+     * has a UL BWP (the RIV reference, and the frequency-domain field's width) and a TDA list --
+     * and nothing on the air discloses the DEDICATED PUSCH-Config, which travels ciphered. Without
+     * a seed the controller refuses every grant, which is exactly why autonomous UL sat at zero
+     * attempts.
+     *
+     * SIB1's common initial UL BWP and pusch-TimeDomainAllocationList ARE decoded OTA facts. They
+     * are seeded here as the search's STARTING HYPOTHESIS -- never asserted as dedicated
+     * configuration. The transport-block CRC stays the authority: if the dedicated list differs,
+     * the search simply fails to converge, which is the same outcome as not seeding at all. So the
+     * seed can only add reach, never manufacture a false convergence.
+     *
+     * Only in full_auto, and only where the operator configured nothing. */
+    if (cfg->dl_full_auto && ul_opts.bwp_size == 0) {
+      ul_opts.bwp_start = common.ul_bwp_start;
+      ul_opts.bwp_size  = common.ul_bwp_size;
+      /* tda_count == 0 is NOT "unknown": nr_pdcch_blind_dci01_size() reads it as the TS 38.214
+       * Table 6.1.2.1.1-2 default 16-entry table, i.e. a 4-bit field and a complete interpretation.
+       * Only override it when SIB1 actually carried a list. */
+      if (ul_opts.tda_count == 0 && common.ul_count > 0) {
+        ul_opts.tda_count = common.ul_count;
+        for (int i = 0; i < common.ul_count; i++) {
+          ul_opts.tda_start[i]   = common.ul_start[i];
+          ul_opts.tda_length[i]  = common.ul_length[i];
+          ul_opts.tda_mapping[i] = common.ul_mapping[i];
+          ul_opts.tda_k2[i]      = common.ul_k2[i];
+        }
+      }
+      static bool ul_seed_logged;
+      if (!ul_seed_logged) {
+        ul_seed_logged = true;
+        LOG_A(PHY,
+              "UL discovery seeded from SIB1: UL-BWP=%u+%u TDAs=%d -- HYPOTHESIS for the dedicated "
+              "config, not a claim about it; TB CRC decides\n",
+              ul_opts.bwp_start, ul_opts.bwp_size, ul_opts.tda_count);
+      }
+    }
+  }
   static uint64_t previous_geometry;
   const uint64_t geometry = nr_pdcch_blind_monitor_autodiscover_generation();
   if (cfg->autodiscover && geometry != previous_geometry) {
