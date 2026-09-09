@@ -50,6 +50,43 @@ void nr_pdcch_ul_field_sweep_apply(const nr_hyp_t *h, nr_pdcch_blind_ul_opts_t *
   o->beta_offset_bits = w.beta_offset_bits;
   o->dmrs_seq_init_bits = w.dmrs_seq_init_bits;
 }
+/* Cross-axis admissibility, from TS 38.212 7.3.1.1.2 ALONE -- no gNB configuration is consulted,
+ * so nothing here can smuggle in side information about this particular deployment.
+ *
+ * The generator enumerates all 16 width axes independently and lets only the TOTAL length couple
+ * them. But several combinations are forbidden by the spec's own field definitions, and at DCI
+ * length 45 the unconstrained set is 4145 vectors -- which overflows the class cap and leaves half
+ * the UEs on this cell permanently unable to converge.
+ *
+ * Every rule below is a ONE-WAY implication that the spec guarantees. Deliberately NOT the
+ * biconditionals they look like: excluding the truth would be far worse than carrying extra
+ * hypotheses, since a hypothesis merely costs trials while a missing one cannot ever win.
+ *
+ *  - UL/SUL indicator is 1 bit only for a UE configured with supplementaryUplink, and such a UE
+ *    also gets a 3-bit SRS request. So ul_sul=1 => srs_request=3. The converse is NOT asserted:
+ *    a SUL-configured UE can still carry 0 UL/SUL bits.
+ *  - The 2nd downlink assignment index is 2 bits only for a dynamic HARQ-ACK codebook with two
+ *    sub-codebooks, and a dynamic codebook makes the 1st DAI 2 bits. So dai2=2 => dai1=2.
+ *  - UL-SCH DM-RS sequence initialisation is 0 bits iff the transform precoder is ENABLED, and an
+ *    enabled transform precoder also forces PTRS-DMRS association to 0. So dmrs_seq_init=0 =>
+ *    ptrs_dmrs=0.
+ *  - PTRS-DMRS association is "0 or 2 bits". A width of 1 is not a legal field size at all. */
+static bool widths_admissible(const int *v)
+{
+  const int ul_sul = v[1], dai1 = v[5], dai2 = v[6];
+  const int srs_request = v[10], ptrs_dmrs = v[13], dmrs_seq_init = v[15];
+  if (ul_sul == 1 && srs_request != 3) return false;
+  if (dai2 != 0 && dai1 != 2) return false;
+  if (dmrs_seq_init == 0 && ptrs_dmrs != 0) return false;
+  if (ptrs_dmrs == 1) return false;
+  /* CBG transmission information is "0, 2, 4, 6 or 8 bits" -- 1 is not a legal field size. */
+  if (v[12] == 1) return false;
+  /* Precoding information is non-zero only for CODEBOOK-based transmission, and TS 38.214 allows a
+   * codebook SRS resource set at most 2 resources, so its SRS resource indicator is 0 or 1 bit.
+   * One-way again: a 0-bit precoding field says nothing about the SRI width. */
+  if (v[8] > 0 && v[7] > 1) return false;
+  return true;
+}
 static nr_hyp_t pack(const int *v)
 {
   nr_pdcch_ul_field_widths_t w = {
@@ -84,6 +121,7 @@ static bool enumerate(generation_t *g, int axis, int remaining)
 {
   if (remaining < g->minimum[axis] || remaining > g->maximum[axis]) return true;
   if (axis == 16) {
+    if (!widths_admissible(g->v)) return true;
     if (g->count == g->capacity) return false;
     nr_hyp_t h = pack(g->v);
     nr_pdcch_blind_ul_opts_t o = *g->fixed;

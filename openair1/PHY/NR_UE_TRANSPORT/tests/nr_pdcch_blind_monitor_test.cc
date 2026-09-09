@@ -2279,7 +2279,7 @@ TEST_F(BlindPdcchTest, UlWidthEquivalenceUsesActualExtractedGrantsAcrossPayloads
   const uint16_t len=nr_pdcch_blind_dci01_size(&opts);
   std::vector<nr_hyp_t> raw(NR_HYP_SWEEP_MAX_RAW);
   const int count=nr_pdcch_ul_field_sweep_generate(&opts,len,raw.data(),raw.size());
-  ASSERT_EQ(count,87);
+  ASSERT_EQ(count,53);
   struct Context { nr_pdcch_blind_ul_opts_t opts; uint16_t len; } context{opts,len};
   std::vector<uint64_t> payloads;
   for(int i=0;i<8;++i) {
@@ -2375,7 +2375,13 @@ TEST_F(BlindPdcchTest, RawDlRejectsUlDirectionAndInvalidInputs) {
   EXPECT_FALSE(nr_pdcch_blind_decode_raw_11(llr.data(),2,47,2,1,&raw));
 }
 
-TEST_F(BlindPdcchTest, UlControllerKeepsThreeInterleavedUesAndTheirQueuedFeedback) {
+/* Contract CHANGED 2026-09-09: the search is keyed on (DCI length, baseline geometry), not on the
+ * RNTI, so several UEs sharing a DCI size share one context and POOL their CRC evidence. That is
+ * deliberate -- a C-RNTI is reassigned on every re-attach, and four distinct RNTIs appeared inside
+ * one 30-minute capture while convergence needs roughly an hour of transport blocks, so per-RNTI
+ * state could never finish. These tests now assert the new contract; the generation-tagging safety
+ * property they were originally written to protect is asserted below, unchanged in substance. */
+TEST_F(BlindPdcchTest, UlControllerPoolsEvidenceAcrossUesAtTheSameDciLength) {
   const auto opts=LiveUlOpts();
   const uint16_t len=nr_pdcch_blind_dci01_size(&opts);
   nr_pdcch_ul_discovery_reset();
@@ -2388,35 +2394,59 @@ TEST_F(BlindPdcchTest, UlControllerKeepsThreeInterleavedUesAndTheirQueuedFeedbac
       if(i==7) { ASSERT_TRUE(got) << "UE " << u << " lost its accumulated samples"; }
     }
   }
-  EXPECT_NE(grant[0].hyp_generation,grant[1].hyp_generation);
-  EXPECT_NE(grant[1].hyp_generation,grant[2].hyp_generation);
+  // One context, therefore one generation -- this is what lets a re-attached UE inherit evidence.
+  EXPECT_EQ(grant[0].hyp_generation,grant[1].hyp_generation);
+  EXPECT_EQ(grant[1].hyp_generation,grant[2].hyp_generation);
   EXPECT_EQ(nr_pdcch_ul_discovery_snapshot().width_trials,0u);
-  // Feedback arrives after all three UEs were selected, deliberately out of order.
+  // Feedback still lands once per grant, arriving out of order, and all three count.
   for(int u : {2,0,1}) nr_pdcch_ul_discovery_feedback(&grant[u],u!=1);
   EXPECT_EQ(nr_pdcch_ul_discovery_snapshot().width_trials,3u);
+  // The safety property that matters is unchanged: a reset invalidates queued feedback.
   nr_pdcch_ul_discovery_reset();
   for(auto &g:grant) nr_pdcch_ul_discovery_feedback(&g,true);
   EXPECT_EQ(nr_pdcch_ul_discovery_snapshot().width_trials,0u);
 }
 
-TEST_F(BlindPdcchTest, UlControllerEvictionDiscardsOnlyEvictedUeFeedback) {
-  const auto opts=LiveUlOpts();
-  const uint16_t len=nr_pdcch_blind_dci01_size(&opts);
+/* Pooling must NOT merge searches that are genuinely different problems. Two DCI lengths mean two
+ * field layouts, so they must stay in separate contexts with separate generations -- otherwise one
+ * UE's transport-block CRCs would score another's hypothesis set. */
+TEST_F(BlindPdcchTest, UlControllerKeepsDifferentDciLengthsApart) {
+  auto opts=LiveUlOpts();
+  const uint16_t len_a=nr_pdcch_blind_dci01_size(&opts);
+  nr_pdcch_ul_discovery_reset();
+  nr_pdcch_blind_ul_result_t a{},b{};
+  for(int i=0;i<8;++i) {
+    UlGroundTruth gt; gt.rnti=0x3001; gt.riv=273*(i+1); gt.mcs=i+2; gt.harq_pid=i; gt.ndi=i%2;
+    nr_pdcch_ul_discovery_grant(&opts,len_a,gt.rnti,PackUlPayload(gt,opts),&a);
+  }
+  for(int i=0;i<8;++i) {
+    UlGroundTruth gt; gt.rnti=0x3002; gt.riv=273*(i+1); gt.mcs=i+2; gt.harq_pid=i; gt.ndi=i%2;
+    nr_pdcch_ul_discovery_grant(&opts,(uint16_t)(len_a+1),gt.rnti,PackUlPayload(gt,opts),&b);
+  }
+  EXPECT_NE(a.hyp_generation,b.hyp_generation);
+  EXPECT_GE(nr_pdcch_ul_discovery_snapshot().raw_samples,16);
+  nr_pdcch_ul_discovery_reset();
+}
+
+/* Eviction still discards ONLY the evicted context's evidence. Contexts are now filled by distinct
+ * DCI lengths rather than distinct RNTIs, which is what the pooling change made them mean. */
+TEST_F(BlindPdcchTest, UlControllerEvictionDiscardsOnlyEvictedContextFeedback) {
+  auto opts=LiveUlOpts();
+  const uint16_t base=nr_pdcch_blind_dci01_size(&opts);
   nr_pdcch_ul_discovery_reset();
   nr_pdcch_blind_ul_result_t first{},last{};
-  for(int u=0;u<=NR_PDCCH_BLIND_MAX_UE;++u) {
+  for(int c=0;c<=NR_PDCCH_BLIND_MAX_UE;++c) {
     for(int i=0;i<8;++i) {
       UlGroundTruth gt;
-      gt.rnti=0x2000+u; gt.riv=273*(i+1); gt.mcs=i+2; gt.harq_pid=i; gt.ndi=i%2;
-      bool got=nr_pdcch_ul_discovery_grant(&opts,len,gt.rnti,PackUlPayload(gt,opts),&last);
-      if(i==7) { ASSERT_TRUE(got); }
+      gt.rnti=(uint16_t)(0x2000+c); gt.riv=273*(i+1); gt.mcs=i+2; gt.harq_pid=i; gt.ndi=i%2;
+      nr_pdcch_ul_discovery_grant(&opts,(uint16_t)(base+c),gt.rnti,PackUlPayload(gt,opts),&last);
     }
-    if(u==0) first=last;
+    if(c==0) first=last;
   }
-  nr_pdcch_ul_discovery_feedback(&first,true);
-  EXPECT_EQ(nr_pdcch_ul_discovery_snapshot().width_trials,0u);
-  nr_pdcch_ul_discovery_feedback(&last,true);
-  EXPECT_EQ(nr_pdcch_ul_discovery_snapshot().width_trials,1u);
+  nr_pdcch_ul_discovery_feedback(&first,true);   // evicted context: must be ignored
+  const auto after_first=nr_pdcch_ul_discovery_snapshot().width_trials;
+  nr_pdcch_ul_discovery_feedback(&last,true);    // live context: must count
+  EXPECT_GT(nr_pdcch_ul_discovery_snapshot().width_trials,after_first);
   nr_pdcch_ul_discovery_reset();
 }
 

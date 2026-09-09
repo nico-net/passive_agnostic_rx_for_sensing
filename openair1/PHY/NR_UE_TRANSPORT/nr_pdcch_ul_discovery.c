@@ -43,6 +43,7 @@ typedef struct {
   uint64_t generation, touched;
   uint64_t samples[UL_DISCOVERY_SAMPLES];
   int nsamples, sample_cursor, tda_index;
+  uint64_t feedbacks, grants, late_splits;
   bool logged_width, logged_interp;
 } ul_context_t;
 static ul_context_t contexts[UL_DISCOVERY_CONTEXTS];
@@ -130,18 +131,48 @@ bool nr_pdcch_ul_discovery_grant(const nr_pdcch_blind_ul_opts_t *fixed, uint16_t
 {
   if (!fixed || !out || !rnti || !len || len>63) return false;
   pthread_mutex_lock(&lock);
+  /* Key the search on (DCI length, baseline geometry) rather than on the RNTI.
+   *
+   * The field-width LAYOUT is a property of the RRC configuration behind a DCI size, not of the
+   * identity carrying it -- two UEs whose format 0_1 is the same length were configured the same
+   * way. Keying on the RNTI cost this twice over: evidence could not be pooled across UEs, and a
+   * C-RNTI is reassigned on every re-attach, so a search restarted from zero long before it could
+   * finish. Measured 2026-09-09: convergence needs ~32,400 transport-block CRCs (roughly an hour),
+   * while four distinct RNTIs appeared inside a single 30-minute capture. Those two numbers cannot
+   * both be satisfied with per-RNTI state.
+   *
+   * It degrades safely rather than converging falsely: if two UEs at the same length really do
+   * differ, their pooled pass rate flattens and NR_HYP_SWEEP_WIN_RATIO simply never declares a
+   * winner. The oracle is unchanged. Known cost: mixing UEs makes it likelier that two different
+   * observed TDA indices meet in one context, which the existing guard answers by refusing the
+   * INTERPRETATION search -- the width search is unaffected. */
   ul_context_t *c = NULL, *oldest = &contexts[0];
   for (int i=0; i<UL_DISCOVERY_CONTEXTS; ++i) {
-    if (contexts[i].target_rnti == rnti) { c=&contexts[i]; break; }
+    if (contexts[i].target_length == len && contexts[i].nsamples > 0
+        && !memcmp(&contexts[i].baseline, fixed, sizeof(contexts[i].baseline))) {
+      c=&contexts[i];
+      break;
+    }
     if (contexts[i].touched < oldest->touched) oldest=&contexts[i];
   }
-  if (!c) { c=oldest; reset_locked(c); }
   bool ok=false;
-  if (c->target_rnti!=rnti || c->target_length!=len || memcmp(&c->baseline,fixed,sizeof(c->baseline))) {
-    reset_locked(c); c->baseline=*fixed; c->target_rnti=rnti; c->target_length=len;
+  if (!c) {
+    c=oldest;
+    reset_locked(c);
+    c->baseline=*fixed;
+    c->target_length=len;
   }
+  c->target_rnti=rnti; // most recent identity seen at this length; for logging/attribution only
   c->touched = ++context_clock;
-  bool novel=true;
+  /* FREEZE the sample set once the width search is armed. Measured 2026-09-09 on live traffic:
+   * the ring kept admitting novel payloads, every payload that distinguished two previously-merged
+   * hypotheses invalidated ALL accumulated evidence, and the search was torn down and rebuilt every
+   * ~30 s -- 26 arms, 25 invalidations, 0 convergences in a 30 min capture, with the class count
+   * drifting 108 -> 222 as the sample set rotated underneath it. Real traffic is an endless supply
+   * of distinct payloads, so that condition fires forever; the original design assumed a finite
+   * sample set. Equivalence classes were always documented as finite-sample EVIDENCE, not proof --
+   * freezing makes the class definition stable enough for the CRC oracle to finish scoring it. */
+  bool novel = !c->widths.initialized;
   for (int i=0;i<c->nsamples;++i) if(c->samples[i]==payload) novel=false;
   if (novel) {
   if(c->nsamples<UL_DISCOVERY_SAMPLES)
@@ -166,13 +197,20 @@ bool nr_pdcch_ul_discovery_grant(const nr_pdcch_blind_ul_opts_t *fixed, uint16_t
   if(c->nsamples<UL_DISCOVERY_SAMPLES || c->widths.refused || c->interp.refused) goto done;
   apply_ctx_t ctx={.opts=c->baseline,.owner=c};
   if (!c->widths.initialized && !init_search(&c->widths,&ctx)) goto done;
-  /* Finite-sample equivalence is provisional. New distinguishing traffic invalidates
-   * old class scores and queued feedback; never keep a convenient representative silently. */
-  if (!still_equivalent(&c->widths,&payload,&ctx)) {
-    LOG_W(PHY,"UL width classes split on new payload; invalidating search evidence\n");
-    clear_search(&c->widths); clear_search(&c->interp); c->generation=++generation_counter;
-    c->logged_width=c->logged_interp=false;
-    goto done;
+  /* Finite-sample equivalence is provisional, and that is now REPORTED rather than acted on.
+   * Discarding every class's evidence whenever one later payload split a class made convergence
+   * impossible under live traffic (see the freeze comment above). Two safeguards keep this honest:
+   * `late_splits` counts how often a later payload WOULD have split a class, so an unreliable
+   * classing is visible instead of silent; and a merged-but-wrong winner is self-limiting, because
+   * every grant it emits is scored by that grant's own PUSCH transport-block CRC.
+   * The check is sampled rather than run per grant -- it costs 2 extractions per raw hypothesis
+   * (800 here) and its value is statistical, not per-grant. */
+  ++c->grants;
+  if ((c->grants % 256) == 0 && !still_equivalent(&c->widths,&payload,&ctx)) {
+    if ((++c->late_splits % 16) == 1)
+      LOG_W(PHY,"UL width classing: %lu/%lu sampled payloads split a class (rnti=0x%x); "
+                "equivalence is finite-sample evidence, the TB CRC remains the authority\n",
+            (unsigned long)c->late_splits,(unsigned long)(c->grants/256),c->target_rnti);
   }
   nr_hyp_t chosen;
   int wi=nr_hyp_sweep_next(&c->widths.engine,&payload,plausible,&ctx,&chosen);
@@ -221,17 +259,49 @@ done:
   pthread_mutex_unlock(&lock);
   return ok;
 }
+/* Convergence needs EVERY class at NR_HYP_SWEEP_MIN_TRIALS before a winner can be declared, so
+ * the aggregate CRC rate says nothing useful -- at most one of N classes is correct and the rest
+ * MUST fail. Report the laggard (what sets the remaining time) and the leader (what the oracle
+ * actually scores), so a run can be judged while it is still going. */
+static void log_progress_locked(const search_t *s, const char *what, uint16_t rnti)
+{
+  const nr_hyp_sweep_state_t *e = &s->engine;
+  if (!s->initialized || e->n_classes <= 0) return;
+  uint64_t min_trials = UINT64_MAX, total = 0;
+  int best = 0;
+  for (int c = 0; c < e->n_classes; ++c) {
+    if (e->classes[c].trials < min_trials) min_trials = e->classes[c].trials;
+    total += e->classes[c].trials;
+    const double r  = e->classes[c].trials ? (double)e->classes[c].passes / e->classes[c].trials : 0.0;
+    const double rb = e->classes[best].trials ? (double)e->classes[best].passes / e->classes[best].trials : 0.0;
+    if (r > rb) best = c;
+  }
+  LOG_I(PHY, "UL %s progress rnti=0x%x classes=%d trials=%lu min_per_class=%lu/%d "
+             "best=class%d %lu/%lu winner=%d\n",
+        what, rnti, e->n_classes, (unsigned long)total, (unsigned long)min_trials,
+        NR_HYP_SWEEP_MIN_TRIALS, best, (unsigned long)e->classes[best].passes,
+        (unsigned long)e->classes[best].trials, e->winner);
+}
+
 void nr_pdcch_ul_discovery_feedback(const nr_pdcch_blind_ul_result_t *g, bool ok)
 {
   if (!g || !g->hyp_generation) return;
   pthread_mutex_lock(&lock);
   for (int i=0; i<UL_DISCOVERY_CONTEXTS; ++i) {
     ul_context_t *c=&contexts[i];
-    if (g->hyp_generation != c->generation || g->rnti != c->target_rnti) continue;
+    /* Generation alone identifies the context: generation_counter increments on every reset, so
+     * no two live contexts share one. Matching the RNTI as well would now DISCARD valid evidence,
+     * because the context is shared by every UE at this DCI length and target_rnti only records
+     * whichever was seen most recently. */
+    if (g->hyp_generation != c->generation) continue;
     if (c->widths.initialized && g->width_hyp_class>=0)
       nr_hyp_sweep_feed(&c->widths.engine,g->width_hyp_class,ok);
     if (c->interp.initialized && g->interp_hyp_class>=0)
       nr_hyp_sweep_feed(&c->interp.engine,g->interp_hyp_class,ok);
+    if ((++c->feedbacks % 2000) == 0) {
+      log_progress_locked(&c->widths,"width",c->target_rnti);
+      log_progress_locked(&c->interp,"interp",c->target_rnti);
+    }
     break;
   }
   pthread_mutex_unlock(&lock);
