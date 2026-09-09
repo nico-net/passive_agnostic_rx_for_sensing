@@ -2885,6 +2885,19 @@ static bool blind_ul_finish(const nr_pdcch_blind_ul_opts_t* opts,
   // maxLength1 / rank-1 case (TS 38.212 Table 7.3.1.1.2-8), which is the only combination this
   // deployment produces. Verified against the live gNB 2026-08-25: it logs `ant=2` on every UL DCI
   // and dumps `num_dmrs_cdm_grps_no_data=2 dmrs_ports=1`, which is exactly what val=2 gives here.
+  /* `antenna_ports` is a RAW payload field, and the width sweep tries 2..5 bits for it, so values
+   * up to 31 reach this point. The closed form below is defined ONLY over Table 7.3.1.1.2-8's four
+   * rows (transform precoder disabled, DM-RS type 1, maxLength 1, rank 1) -- the sole combination
+   * this path supports and the only one its caller emits. Outside that domain it produces nonsense.
+   * Measured 2026-09-09: antenna_ports=14 yields 1u<<12, a port bitmap with no port below 12, which
+   * AssertFatal()s inside get_dmrs_port() ("No dmrs port corresponding to layer 0 found") and
+   * killed the entire softmodem mid-capture. Values above 17 are worse still -- they truncate to 0
+   * in a uint16_t and read silently as "DCI 1_0, port 0".
+   * A blind decoder must REJECT a code point it cannot interpret, never abort and never guess. */
+  if (antenna_ports > 3) {
+    out->reject_reason = "antenna-ports code point outside Table 7.3.1.1.2-8's four rows";
+    return false;
+  }
   uint8_t  cdm_groups;
   uint16_t ports;
   if (opts->transform_precoding == 1) {
@@ -2899,6 +2912,29 @@ static bool blind_ul_finish(const nr_pdcch_blind_ul_opts_t* opts,
     // produce a confident wrong port set.
     out->reject_reason = "multi-layer PUSCH not supported by this monitor";
     return false;
+  }
+
+  /* The DM-RS port bitmap must actually name a port for every layer, within 0..11. get_dmrs_port()
+   * AssertFatal()s otherwise -- it is gNB code, written for a scheduler that only ever hands it its
+   * own valid configuration -- and an AssertFatal on a blind receive path kills the softmodem over
+   * a hypothesis that was merely wrong. Measured 2026-09-09: a length-45 UE (0x461e) reached a
+   * width hypothesis whose antenna-ports code point produced a bitmap with no bit below 12, and the
+   * run aborted with "No dmrs port corresponding to layer 0 found". Those UEs had never emitted a
+   * grant before -- they used to overflow the class cap -- so this landmine was reachable all along
+   * and simply never stepped on. Same rule as nr_pdcch_blind_ul_dmrs_mask(): a blind decoder
+   * REJECTS an implausible candidate, it does not abort. */
+  {
+    const int layers = (nrOfLayers < 1) ? 1 : nrOfLayers;
+    int usable = 0;
+    for (int i = 0; i < 12; i++) {
+      if ((ports >> i) & 1) {
+        usable++;
+      }
+    }
+    if (ports != 0 && usable < layers) {
+      out->reject_reason = "DM-RS port bitmap names no usable port in 0..11 for every layer";
+      return false;
+    }
   }
 
   out->start_rb          = start_rb;

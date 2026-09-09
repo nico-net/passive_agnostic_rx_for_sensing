@@ -2703,3 +2703,34 @@ TEST_F(BlindPdcchTest, Dci00RidesTheSame10Decode) {
   nr_pdcch_blind_ul_result_t not_ul{};
   EXPECT_FALSE(nr_pdcch_blind_extract_00(dl_payload, len, rnti, &ul, &not_ul));
 }
+
+/* A blind width hypothesis feeds RAW field values into the antenna-ports closed form, which is
+ * only defined over Table 7.3.1.1.2-8's four rows. Out-of-domain values used to reach
+ * get_dmrs_port(), whose AssertFatal killed the softmodem mid-capture (measured 2026-09-09,
+ * antenna_ports=14 -> port bitmap 1<<12 -> "No dmrs port corresponding to layer 0 found").
+ * Every out-of-domain code point must be REJECTED, and every in-domain one must still work. */
+TEST_F(BlindPdcchTest, UlAntennaPortsCodePointOutsideItsTableIsRejected) {
+  auto opts = LiveUlOpts();
+  opts.antenna_ports_bits = 5;                 // the sweep really does try 5 bits
+  const auto len = nr_pdcch_blind_dci01_size(&opts);
+  for (uint32_t ap = 0; ap < 32; ++ap) {
+    UlGroundTruth gt;
+    gt.riv = PRBalloc_to_locationandbandwidth0(24, 8, 273);
+    gt.mcs = 10;
+    gt.antenna_ports = ap;
+    nr_pdcch_blind_ul_result_t out{};
+    const bool ok = nr_pdcch_blind_extract_01(PackUlPayload(gt, opts), len, gt.rnti, &opts, &out);
+    if (ap <= 3) {
+      EXPECT_TRUE(ok) << "in-domain antenna_ports=" << ap << " must still decode: "
+                      << (out.reject_reason ? out.reject_reason : "-");
+      if (ok) {
+        // Whatever it resolves to must name a port get_dmrs_port() can actually find.
+        int low = 0;
+        for (int i = 0; i < 12; i++) if ((out.dmrs_ports >> i) & 1) low++;
+        EXPECT_GE(low, out.nrOfLayers) << "antenna_ports=" << ap << " left layer 0 without a port";
+      }
+    } else {
+      EXPECT_FALSE(ok) << "out-of-domain antenna_ports=" << ap << " must be rejected, not asserted";
+    }
+  }
+}

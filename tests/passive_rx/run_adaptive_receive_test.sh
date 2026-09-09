@@ -86,7 +86,11 @@ for attempt in $(seq 1 "$ATTEMPTS"); do
   if [ "$acquired" = 1 ]; then
     echo "attempt $attempt: SIB1 acquired, running the full ${DURATION:-480}s"
     wait "$modem_wait"; rc=$?
-    verdict=VALID
+    # Acquiring is not surviving. A healthy run is ended by `timeout`, i.e. exit 124; anything else
+    # is the receiver dying early. Measured 2026-09-09: an AssertFatal inside get_dmrs_port() aborted
+    # a capture (exit 134, core dumped) minutes in, and this script still called it VALID because it
+    # only looked at SIB1. A crashed run reported as VALID is worse than no run at all.
+    if [ "$rc" = 124 ]; then verdict=VALID; else verdict="VOID_ABNORMAL_EXIT_$rc"; fi
     break
   fi
   cfo=$(grep -aoE 'current=-?[0-9]+' "$OUT/run.log" | tail -1)
