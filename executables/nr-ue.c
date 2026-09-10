@@ -215,10 +215,15 @@ static void UE_synch(void *arg) {
         ((ret.rx_offset << 1) / fp->samples_per_subframe * fp->slots_per_subframe)
         + round((float)((ret.rx_offset << 1) % fp->samples_per_subframe) / fp->samples_per_slot0);
 
-    UE->freq_offset = freq_offset - UE->dl_Doppler_shift;
+    /* freq_offset is measured against the CURRENT LO, but nr_rf_card_config_freq()
+     * always derives the new LO from the nominal dl_carrier. Passing the raw
+     * measurement therefore discards every correction applied so far: after a
+     * resync the residual reads near zero, the LO snaps back to nominal, and the
+     * full offset returns. Accumulate instead, as trs_freq_correction() does. */
+    UE->freq_offset += freq_offset - UE->dl_Doppler_shift;
     if (!get_nrUE_params()->cont_fo_comp) {
       // rerun with new cell parameters and frequency-offset
-      nrue_ru_set_freq(UE, ul_carrier, dl_carrier, freq_offset);
+      nrue_ru_set_freq(UE, ul_carrier, dl_carrier, UE->freq_offset);
     }
 
     if (get_nrUE_params()->agc) {
@@ -874,11 +879,14 @@ void *UE_thread(void *arg)
       bladeRF_timing_diag_count = 0;
       if (nrue_ru_get_device_type(UE) == BLADERF_DEV && fp->dl_CarrierFreq > 0) {
         const int elapsed_frames = UE->init_sync_frame + trashed_frames + 2;
-        bladeRF_sample_drift_per_frame = -(double)UE->common_vars.freq_offset * fp->samples_per_frame / fp->dl_CarrierFreq;
+        /* Use the accumulated offset, not the last measurement: retuning the LO
+         * removes the carrier offset but not the sample-clock error that causes
+         * it, so the per-frame drift stays proportional to the TOTAL ppm error. */
+        bladeRF_sample_drift_per_frame = -(double)UE->freq_offset * fp->samples_per_frame / fp->dl_CarrierFreq;
         sync_sample_drift = lround(bladeRF_sample_drift_per_frame * elapsed_frames);
         LOG_I(PHY,
-              "bladeRF initial-sync drift compensation: CFO %d Hz, elapsed %d frames, correction %+d samples, per-frame drift %.3f samples\n",
-              UE->common_vars.freq_offset,
+              "bladeRF initial-sync drift compensation: CFO %.0f Hz, elapsed %d frames, correction %+d samples, per-frame drift %.3f samples\n",
+              UE->freq_offset,
               elapsed_frames,
               sync_sample_drift,
               bladeRF_sample_drift_per_frame);
