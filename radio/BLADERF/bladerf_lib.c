@@ -478,6 +478,21 @@ static int configure_channel(struct bladerf *dev, channel_config_t *c)
   if (c->bandwidth > 0) {
     status = bladerf_set_bandwidth(dev, c->channel, c->bandwidth, &actual_value);
     BLADERF_CHECK(status == 0, "Set %s bandwidth %u (is %u)", dir, c->bandwidth, actual_value);
+    /* bladerf_set_bandwidth() reports Success and then silently clamps to the
+     * AD9361's 56 MHz maximum, in oversample mode too. At 122.88 Msps you get
+     * the SAMPLE RATE for a 100 MHz carrier but not the ANALOG BANDWIDTH, and
+     * the shortfall is invisible unless it is said out loud: measured on a
+     * 273-PRB band 78 carrier, SNR holds at 14-19 dB from -38 to +26 MHz and
+     * collapses to 3-6 dB beyond that, so roughly 64 MHz of the 100 MHz is
+     * usable. Narrow or low-rate allocations (SSB, CORESET#0, SIB1) are fine;
+     * full-band high-MCS transport blocks lose their edge code blocks. */
+    if (actual_value < c->bandwidth)
+      LOG_W(HW,
+            "%s analog bandwidth clamped to %u Hz, %u Hz was requested: the carrier is wider than "
+            "this radio can pass, expect the band edges to be unusable\n",
+            dir,
+            actual_value,
+            c->bandwidth);
   }
 
   status = bladerf_set_gain(dev, c->channel, c->gain);
@@ -538,6 +553,29 @@ static int brf_open_and_configure(brf_state_t *brf, openair0_config_t *openair0_
     .gain = openair0_cfg->rx_gain[0],
   };
   configure_channel(brf->dev, &rx_chan);
+
+  /* Say out loud when the carrier is wider than the radio can actually pass.
+   * The AD9361's RX analog bandwidth is hard-capped at 56 MHz -- in oversample
+   * mode too, where bladerf_set_bandwidth() reports Success for 61.44, 80, 100
+   * and 122.88 MHz and clamps every one of them to 56 MHz. At 122.88 Msps you
+   * therefore get the SAMPLE RATE for a 100 MHz carrier but not the ANALOG
+   * BANDWIDTH. Measured on a live 273-PRB band 78 carrier: SNR holds at
+   * 14-19 dB from -38 to +26 MHz of the centre and collapses to 3-6 dB outside
+   * that, i.e. roughly 64 MHz of the 100 MHz is usable. Narrow or low-rate
+   * allocations (SSB, CORESET#0, SIB1) decode fine; a full-band high-MCS
+   * transport block loses the code blocks that land on the edges. */
+  bladerf_bandwidth applied_rx_bw = 0;
+  if (bladerf_get_bandwidth(brf->dev, BLADERF_CHANNEL_RX(0), &applied_rx_bw) == 0 && openair0_cfg->num_rb_dl > 0) {
+    /* num_rb_dl RBs of 12 subcarriers, subcarrier spacing from the sample rate's numerology */
+    const double carrier_hz = openair0_cfg->num_rb_dl * 12.0 * (openair0_cfg->sample_rate / 4096.0);
+    if (carrier_hz > applied_rx_bw * 1.05)
+      LOG_W(HW,
+            "carrier is ~%.1f MHz but the RX analog bandwidth is %.1f MHz (AD9361 maximum): the band "
+            "edges will be attenuated and noisy. Sync, MIB, SIB1 and narrow or low-rate grants are "
+            "unaffected; full-bandwidth high-MCS PDSCH will lose its edge code blocks\n",
+            carrier_hz / 1e6,
+            applied_rx_bw / 1e6);
+  }
 
   // This is a hack. The USRP library currently does max_gain-tx_gain (tx_gain
   // is the attenuation, so completely illogical), but let's keep what users
