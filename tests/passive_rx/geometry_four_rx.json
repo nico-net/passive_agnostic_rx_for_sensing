@@ -1,0 +1,14 @@
+{
+  "schema": "p01.geometry_profile.v1",
+  "surveyed": false,
+  "frame": null,
+  "rx": [
+    {"rx_id": 0, "physical_channel": null, "pos_m": null, "pos_std_m": null},
+    {"rx_id": 1, "physical_channel": null, "pos_m": null, "pos_std_m": null},
+    {"rx_id": 2, "physical_channel": null, "pos_m": null, "pos_std_m": null},
+    {"rx_id": 3, "physical_channel": null, "pos_m": null, "pos_std_m": null}
+  ],
+  "gnb_pos_m": null,
+  "height_constraint": null,
+  "reason": "no survey performed as of 2026-09-10 (adaptive_RX_pipeline_progress.md 'Current status' table: 'Separated-antenna survey: Not provided or verified'; adaptive_RX_pipeline.md section 5.4 requires a surveyed geometry_four_rx.json before Stage 5 DL fusion)"
+}

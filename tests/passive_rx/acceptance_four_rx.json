@@ -1,0 +1,53 @@
+{
+  "schema": "p01.acceptance_profile.v1",
+  "profile_version": 1,
+  "frozen_date": null,
+  "frozen_scope_note": "Frozen for the plan's EXACT invariants only (adaptive_RX_pipeline.md sections 3.3/4/5.4 and the 2026-09-11 TESTING MODE RULE amendment). Every deployment-dependent limit below is UNSET; an UNSET limit means the gate is incomplete, not an automatic pass. Do not invent favorable limits after viewing results (section 3.3).",
+  "exact_invariants": {
+    "exact_source_config_binary_identity": {
+      "value": true,
+      "rationale": "adaptive_RX_pipeline.md section 3.3: 'A gate passes only with source/config/binary identity, exact command, retained artifacts, explicit assertions and reviewable results.' Enforced via tests/passive_rx/baseline_manifest.sh + check_manifest.py."
+    },
+    "zero_unexplained_baseline_sample_loss": {
+      "value": true,
+      "rationale": "adaptive_RX_pipeline_progress.md 'Acceptance-profile record': 'Acquisition and sample continuity requirements' = 'Exact identity; no unexplained baseline sample loss'. G0 exit (section 4) requires reproducible baseline captures with explained loss only."
+    },
+    "baseline_launcher_exit_code": {
+      "value": 124,
+      "rationale": "tests/passive_rx/run_adaptive_receive_test.sh's own VALID verdict requires the bounded 'timeout' wrapper to end the run (exit 124 = timeout fired, i.e. the receiver survived to its declared duration rather than exiting early/abnormally); any other exit is recorded VOID_ABNORMAL_EXIT_<rc>."
+    },
+    "no_rf_tx_calls_in_passive_mode": {
+      "value": true,
+      "rationale": "adaptive_RX_pipeline.md section 1: 'The receiver remains passive.' Section 4 Stage 6 tests: 'no RF TX calls in passive mode'."
+    },
+    "single_hardware_owner": {
+      "value": true,
+      "rationale": "adaptive_RX_pipeline.md section 1: 'One process/component owns hardware acquisition... Four modem processes must not compete for the X410.' Section 3.1: AcquisitionOwner owns UHD reads."
+    },
+    "ul_fusion_enable_default": {
+      "value": false,
+      "rationale": "adaptive_RX_pipeline.md section 5.4 proposed config concepts and section 8.2 (U00): 'Add a runtime flag, proposed name ul_fusion_enable, default false.'"
+    },
+    "full_auto_must_be_zero": {
+      "value": true,
+      "rationale": "adaptive_RX_pipeline.md section 1 TESTING MODE RULE (added 2026-09-11, user instruction): 'every test, replay and OTA capture under this plan MUST use MANUAL mode only -- pdcch_blind_monitor_full_auto = 0 ... A run executed in full-auto mode is VOID for every gate in this plan regardless of its result.'"
+    }
+  },
+  "deployment_dependent_limits": {
+    "profile_path_hash_freeze_date": {"value": null, "status": "UNSET", "rationale": null},
+    "experiment_purpose_and_active_rx_set": {"value": null, "status": "UNSET", "rationale": null},
+    "surveyed_geometry_coordinate_frame_uncertainty": {"value": null, "status": "UNSET", "rationale": null},
+    "supported_traffic_layer_waveform_scope_denominators": {"value": null, "status": "UNSET", "rationale": null},
+    "capture_duration_minimum_eligible_event_count": {"value": null, "status": "UNSET", "rationale": null},
+    "queue_latency_memory_limits_and_rationale": {"value": null, "status": "UNSET", "rationale": null},
+    "detector_range_and_doppler_scoring_thresholds": {"value": null, "status": "UNSET", "rationale": null},
+    "dl_position_velocity_availability_criteria": {"value": null, "status": "UNSET", "rationale": null},
+    "ul_reference_association_quality_criteria": {"value": null, "status": "UNSET", "rationale": null},
+    "rank_tolerance_state_scaling_conditioning_policy": {"value": null, "status": "UNSET", "rationale": null},
+    "ul_position_velocity_availability_criteria": {"value": null, "status": "UNSET", "rationale": null},
+    "catastrophic_error_definition_robustness_targets": {"value": null, "status": "UNSET", "rationale": null},
+    "covariance_coverage_calibration_procedure": {"value": null, "status": "UNSET", "rationale": null},
+    "calibration_vs_held_out_evaluation_allocation": {"value": null, "status": "UNSET", "rationale": null}
+  },
+  "source_table": "adaptive_RX_pipeline_progress.md 'Acceptance-profile record -- fill before evaluated captures' table (rows other than 'Acquisition and sample continuity requirements', which is the exact invariant zero_unexplained_baseline_sample_loss above)"
+}
