@@ -557,22 +557,27 @@ static int brf_open_and_configure(brf_state_t *brf, openair0_config_t *openair0_
   /* Say out loud when the carrier is wider than the radio can actually pass.
    * The AD9361's RX analog bandwidth is hard-capped at 56 MHz -- in oversample
    * mode too, where bladerf_set_bandwidth() reports Success for 61.44, 80, 100
-   * and 122.88 MHz and clamps every one of them to 56 MHz. At 122.88 Msps you
-   * therefore get the SAMPLE RATE for a 100 MHz carrier but not the ANALOG
-   * BANDWIDTH. Measured on a live 273-PRB band 78 carrier: SNR holds at
-   * 14-19 dB from -38 to +26 MHz of the centre and collapses to 3-6 dB outside
-   * that, i.e. roughly 64 MHz of the 100 MHz is usable. Narrow or low-rate
-   * allocations (SSB, CORESET#0, SIB1) decode fine; a full-band high-MCS
-   * transport block loses the code blocks that land on the edges. */
+   * and 122.88 MHz and clamps every one of them to 56 MHz. The 8-bit oversample
+   * feature raises the SAMPLE RATE to 122.88 Msps, which is what is needed to
+   * represent a 100 MHz carrier, but it does not widen this filter.
+   *
+   * Measured end to end by sweeping the LO so one fixed RF component lands at
+   * different baseband offsets (level relative to band centre, symmetric):
+   *   offset  0    +/-10  +/-20  +/-30  +/-40  +/-50 MHz
+   *   level   0    -0.3   -1.0   -3.2   -8.6   -11.3 dB
+   * a clean lowpass with its -3 dB corner at ~29 MHz, i.e. the 56 MHz RF
+   * bandwidth the API reports. A 273-PRB carrier spans +/-49 MHz, so its outer
+   * PRBs arrive about 11 dB below the centre ones. The whole 100 MHz IS
+   * received and processed; it simply arrives tilted. */
   bladerf_bandwidth applied_rx_bw = 0;
   if (bladerf_get_bandwidth(brf->dev, BLADERF_CHANNEL_RX(0), &applied_rx_bw) == 0 && openair0_cfg->num_rb_dl > 0) {
     /* num_rb_dl RBs of 12 subcarriers, subcarrier spacing from the sample rate's numerology */
     const double carrier_hz = openair0_cfg->num_rb_dl * 12.0 * (openair0_cfg->sample_rate / 4096.0);
     if (carrier_hz > applied_rx_bw * 1.05)
       LOG_W(HW,
-            "carrier is ~%.1f MHz but the RX analog bandwidth is %.1f MHz (AD9361 maximum): the band "
-            "edges will be attenuated and noisy. Sync, MIB, SIB1 and narrow or low-rate grants are "
-            "unaffected; full-bandwidth high-MCS PDSCH will lose its edge code blocks\n",
+            "carrier is ~%.1f MHz but the RX analog bandwidth is %.1f MHz (AD9361 maximum): measured "
+            "roll-off is -3 dB at +/-30 MHz and about -11 dB at the edge of a 100 MHz carrier, so the "
+            "outer PRBs arrive that much weaker than the centre ones\n",
             carrier_hz / 1e6,
             applied_rx_bw / 1e6);
   }
