@@ -299,7 +299,11 @@ void nrue_init_openair0(void)
 
     cfg->ru_id = ru_id;
     cfg->num_rb_dl = frame_parms->N_RB_DL;
-    cfg->tx_num_channels = min(4, frame_parms->nb_antennas_tx);
+    /* rx_only leaves tx_num_channels at 0, which every radio driver reads as
+     * "do not configure, enable or write to the TX chain". On the bladeRF a
+     * 273-PRB carrier is 122.88 Msps per direction and TX+RX (245.76 Msps)
+     * exceeds what the device sustains, so a passive receiver must not open it. */
+    cfg->tx_num_channels = get_nrUE_params()->rx_only ? 0 : min(4, frame_parms->nb_antennas_tx);
     cfg->rx_num_channels = min(4, frame_parms->nb_antennas_rx);
 
     LOG_I(PHY,
