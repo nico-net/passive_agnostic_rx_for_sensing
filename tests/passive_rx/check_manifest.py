@@ -11,7 +11,8 @@ Usage:
   check_manifest.py --selftest               self-check: (a) fresh manifest passes, (b) a copy
                                               with one binary hash altered fails, (c) the shipped
                                               acceptance/geometry files fail, (d) a copy whose
-                                              selected_test_conf full_auto=1 fails.
+                                              selected_test_conf full_auto=1 fails, (e) a copy with
+                                              one citation's line range shifted fails.
 """
 import glob
 import hashlib
@@ -47,6 +48,52 @@ def cache_get(cache_path, key):
             if line.startswith(key + ":"):
                 return line.rstrip("\n").split("=", 1)[1]
     return None
+
+
+_CITATION_KEYS = {"file", "line_start", "line_end", "token"}
+
+
+def find_citations(obj, path=""):
+    """Yield (json_path, citation_dict) for every {file,line_start,line_end,token} object
+    reachable inside obj (the generator's structured citations, wherever they're nested)."""
+    if isinstance(obj, dict):
+        if set(obj.keys()) == _CITATION_KEYS:
+            yield path, obj
+            return
+        for k, v in obj.items():
+            yield from find_citations(v, f"{path}.{k}" if path else k)
+    elif isinstance(obj, list):
+        for i, v in enumerate(obj):
+            yield from find_citations(v, f"{path}[{i}]")
+
+
+def check_citations(manifest_obj):
+    """Re-verify every structured citation's `token` still occurs within its recorded
+    [line_start, line_end] range of the LIVE file. Returns a list of mismatch strings."""
+    mismatches = []
+    for path, cit in find_citations(manifest_obj):
+        rel = cit.get("file")
+        full = os.path.join(REPO, rel) if rel else None
+        if not full or not os.path.isfile(full):
+            mismatches.append(f"citation {path}: file does not exist on the live tree: {rel!r}")
+            continue
+        ls, le, token = cit.get("line_start"), cit.get("line_end"), cit.get("token")
+        try:
+            with open(full, errors="replace") as f:
+                lines = f.readlines()
+        except OSError as e:
+            mismatches.append(f"citation {path}: could not read {rel!r}: {e}")
+            continue
+        found = False
+        if isinstance(ls, int) and isinstance(le, int) and ls >= 1 and le >= ls:
+            for ln in range(ls, le + 1):
+                if 1 <= ln <= len(lines) and token in lines[ln - 1]:
+                    found = True
+                    break
+        if not found:
+            mismatches.append(
+                f"citation {path}: token {token!r} not found within {rel}:{ls}-{le} on the live tree")
+    return mismatches
 
 
 def conf_full_auto(conf_path):
@@ -112,8 +159,12 @@ def check_identity(manifest_path):
     drv_path = os.path.join(build, "liboai_usrpdevif.so")
     cmp("build.nr_uesoftmodem.sha256", m["build"]["nr_uesoftmodem"]["sha256"], sha256_file(bin_path))
     cmp("build.liboai_usrpdevif.sha256", m["build"]["liboai_usrpdevif"]["sha256"], sha256_file(drv_path))
-    live_symlink = os.readlink(os.path.join(build, "liboai_device.so"))
-    cmp("build.liboai_device_so_symlink_target", m["build"]["liboai_device_so_symlink_target"], live_symlink)
+    device_so = os.path.join(build, "liboai_device.so")
+    try:
+        live_symlink = os.readlink(device_so)
+        cmp("build.liboai_device_so_symlink_target", m["build"]["liboai_device_so_symlink_target"], live_symlink)
+    except OSError as e:
+        mismatches.append(f"build.liboai_device_so_symlink_target: could not readlink {device_so}: {e}")
 
     # ---- cmake cache ----
     cache_path = os.path.join(build, "CMakeCache.txt")
@@ -165,6 +216,10 @@ def check_identity(manifest_path):
             mismatches.append(
                 f"selected_test_conf {sel['conf']!r} now measures full_auto={live_fa} on the live "
                 f"tree (manifest recorded 0)")
+
+    # ---- every file:line citation in the manifest (antenna_mapping_and_geometry,
+    # timestamp_units, rank_two_array_check, ...): re-verify its token is still where it says. ----
+    mismatches.extend(check_citations(m))
 
     return mismatches
 
@@ -264,6 +319,21 @@ def selftest():
     if not passed_d:
         ok = False
     os.unlink(bad_mode_path)
+
+    # (e) a copy with one citation's line range shifted off its real token must FAIL
+    def _shift_citation(d):
+        cit = d["antenna_mapping_and_geometry"]["known_from_source"]["usrp_args_citation"]
+        cit["line_start"] += 500
+        cit["line_end"] += 500
+
+    bad_citation_path = _mutate_json(latest, _shift_citation)
+    mism_e = check_identity(bad_citation_path)
+    passed_e = bool(mism_e) and any("citation" in line for line in mism_e)
+    print(f"(e) manifest with a shifted citation line range expected FAIL: "
+          f"{'PASS' if passed_e else 'FAIL (checker did not detect the shifted citation)'}")
+    if not passed_e:
+        ok = False
+    os.unlink(bad_citation_path)
 
     print()
     print("SELFTEST OVERALL: " + ("PASS" if ok else "FAIL"))

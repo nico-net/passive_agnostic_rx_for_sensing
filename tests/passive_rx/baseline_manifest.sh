@@ -20,6 +20,52 @@ jesc() { printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' | sed -e ':a;N;$
 jstr() { if [ -z "${1+x}" ] || [ "$1" = "__NULL__" ]; then printf 'null'; else printf '"%s"' "$(jesc "$1")"; fi; }
 jnum_or_null() { if [ -z "$1" ]; then printf 'null'; else printf '%s' "$1"; fi; }
 
+# ---- citations: every file:line reference in this manifest is DERIVED by grep at generation
+# time, never hand-typed, per the P01 review's Important finding (hand-typed ranges drifted: e.g.
+# a prior "2485-2494" for a call that actually runs to 2496). Each citation is stored as a
+# structured {file, line_start, line_end, token} object; check_manifest.py re-verifies that
+# `token` still occurs within [line_start, line_end] of the live file.
+#
+# citation FILE START_TOKEN [END_TOKEN] [MAX_SPAN=20]
+#   Prints a TSV: file<TAB>line_start<TAB>line_end<TAB>token (token = START_TOKEN, exactly as
+#   grepped for -- this IS the string check_manifest.py re-searches for). Single-line citation if
+#   END_TOKEN is omitted. Fails loudly (CITATION_ERROR to stderr, causing `set -e`-visible garbage
+#   line numbers of 0) if START_TOKEN isn't found -- never silently emits a stale/guessed range.
+citation() {
+  local file="$1" start_token="$2" end_token="${3:-}" max_span="${4:-20}"
+  local abs="$REPO/$file"
+  local start_line
+  start_line=$(grep -nF -- "$start_token" "$abs" | head -1 | cut -d: -f1)
+  if [ -z "$start_line" ]; then
+    echo "CITATION_ERROR: token not found in $file: $start_token" >&2
+    printf '%s\t%s\t%s\t%s' "$file" "0" "0" "$start_token"
+    return
+  fi
+  local end_line="$start_line"
+  if [ -n "$end_token" ]; then
+    local rel
+    rel=$(sed -n "$((start_line + 1)),$((start_line + max_span))p" "$abs" \
+          | grep -nF -- "$end_token" | head -1 | cut -d: -f1)
+    if [ -n "$rel" ]; then
+      end_line=$((start_line + rel))
+    else
+      # Loud, not silent: falling back to a single-line range here would still pass
+      # check_manifest.py's re-verification (it only re-checks start_token, which IS at
+      # line_start) while quietly recording a too-narrow range. Surface it instead.
+      echo "CITATION_ERROR: end_token not found within $max_span lines of $file:$start_line: $end_token" >&2
+    fi
+  fi
+  printf '%s\t%s\t%s\t%s' "$file" "$start_line" "$end_line" "$start_token"
+}
+
+# Turns a `citation` TSV result into a compact JSON object.
+citation_json() {
+  local tsv="$1" cfile cstart cend ctoken
+  IFS=$'\t' read -r cfile cstart cend ctoken <<< "$tsv"
+  printf '{"file":%s,"line_start":%s,"line_end":%s,"token":%s}' \
+    "$(jstr "$cfile")" "$cstart" "$cend" "$(jstr "$ctoken")"
+}
+
 BRANCH=$(git branch --show-current)
 COMMIT=$(git rev-parse HEAD)
 COMMIT7=${COMMIT:0:7}
@@ -239,22 +285,46 @@ PYEOF
 RANK_VERDICT="unverified"
 if printf '%s' "$RANK_CHECK_OUT" | grep -q 'FAIL (rank<2'; then RANK_VERDICT="verified_fails_rank_two"; fi
 if printf '%s' "$RANK_CHECK_OUT" | grep -q 'PASS (rank==2'; then RANK_VERDICT="verified_passes_rank_two"; fi
-RANK_EXTRA=$(printf ',"rank_two_array_check":{"rx_array_raw":%s,"parser_file":"openair1/PHY/NR_UE_ISAC/nr_isac.cc","parser_function":"parse_array","parser_lines":"102-125","rank_two_condition_line":118,"independent_check_method":"Gaussian elimination on the 3 baseline vectors p1-p0,p2-p0,p3-p0 (stdlib only); collinearity (rank<2) is a sufficient condition for the cited eigenvalue test to fail regardless of its numerical tolerance","verdict":%s,"raw_output":%s}' \
-  "$(jstr "$RX_ARRAY_RAW")" "$(jstr "$RANK_VERDICT")" "$(jstr "$RANK_CHECK_OUT")")
+
+PARSER_CITATION=$(citation_json "$(citation openair1/PHY/NR_UE_ISAC/nr_isac.cc \
+  'bool parse_array(const char* spec, double rotation_deg, const char* broadside_spec,' \
+  'out->broadside=broadside;out->configured=true;return true;' 30)")
+CONDITION_CITATION=$(citation_json "$(citation openair1/PHY/NR_UE_ISAC/nr_isac.cc \
+  'if (!(eig.values[1] > tol) || eig.values[0] > tol) return false;')")
+
+RANK_EXTRA=$(printf ',"rank_two_array_check":{"rx_array_raw":%s,"parser_function":"parse_array","parser_citation":%s,"parser_citation_note":"line_end is the last body statement, one line before the closing brace -- a bare closing brace alone is not a uniquely locatable token","rank_two_condition_citation":%s,"independent_check_method":"Gaussian elimination on the 3 baseline vectors p1-p0,p2-p0,p3-p0 (stdlib only); collinearity (rank<2) is a sufficient condition for the cited eigenvalue test to fail regardless of its numerical tolerance","verdict":%s,"raw_output":%s}' \
+  "$(jstr "$RX_ARRAY_RAW")" "$PARSER_CITATION" "$CONDITION_CITATION" "$(jstr "$RANK_VERDICT")" "$(jstr "$RANK_CHECK_OUT")")
 AOA_TRACK_JSON=$(inject "$AOA_TRACK_JSON" "$RANK_EXTRA")
 
 ACQ_ONLY_JSON='{"conf":null,"reason":"no config exists"}'
 
-# ---- antenna mapping / geometry (source-derived facts only; the physical survey does not exist) ----
-USRP_ARGS_LINE=$(grep -n 'usrp-args type=x4xx' "$SCRIPT_DIR/run_adaptive_receive_test.sh" | head -1 | cut -d: -f1)
-CHANLIST_LINE=$(grep -n 'ue-nb-ant-rx' "$SCRIPT_DIR/run_adaptive_receive_test.sh" | head -1 | cut -d: -f1)
+# ---- antenna mapping / geometry (source-derived facts only; the physical survey does not exist).
+# Every citation below is derived by `citation()` (grep at generation time), not hand-typed. ----
+USRP_ARGS_CITATION=$(citation_json "$(citation tests/passive_rx/run_adaptive_receive_test.sh \
+  '--usrp-args type=x4xx,addr=192.168.20.2,mgmt_addr=128.178.122.174')")
+CHANLIST_CITATION=$(citation_json "$(citation tests/passive_rx/run_adaptive_receive_test.sh \
+  '--ue-nb-ant-rx 4 --ue-nb-ant-tx 4 --passive-rx')")
+RFCHAN_CITATION=$(citation_json "$(citation radio/USRP/usrp_lib.cpp \
+  'RFCHAN ch%d subdev=%s port=%s gain=%.2f range=[%.1f..%.1f] freq=%.6f MHz ' \
+  'get_rx_bandwidth(i + choffset) / 1e6);')")
 
-# ---- timestamp units (grep'd, not inferred) ----
-UTC_NS_SUBMIT_LINES=$(grep -n 'system_clock::now' openair1/PHY/NR_UE_ISAC/sensing_engine.cc | head -1 | cut -d: -f1)
-UTC_NS_FIELD_LINE=$(grep -n '^\s*int64_t utc_ns' openair1/PHY/NR_UE_ISAC/sensing_engine.cc | head -1 | cut -d: -f1)
-ROW_TIME_LINE=$(grep -n 'report.first_row_time_ns' openair1/PHY/NR_UE_ISAC/sensing_engine.cc | head -1 | cut -d: -f1)
-MIDPOINT_LINE=$(grep -n 'report.midpoint_air_time_s = ' openair1/PHY/NR_UE_ISAC/sensing_engine.cc | head -1 | cut -d: -f1)
-REPORT_JSON_UTC_LINE=$(grep -n 'cpi_start_time_utc_ns' openair1/PHY/NR_UE_ISAC/report_writer.cc | head -1 | cut -d: -f1)
+# ---- timestamp units: every citation derived by grep at generation time (see `citation()`) ----
+SUBMIT_DEF_CITATION=$(citation_json "$(citation openair1/PHY/NR_UE_ISAC/sensing_engine.cc \
+  'void SensingEngine::submit(uint32_t slot, float fraction, nr_isac_source_t source,' \
+  'uint32_t re, float noise)')")
+UTC_NS_ASSIGN_CITATION=$(citation_json "$(citation openair1/PHY/NR_UE_ISAC/sensing_engine.cc \
+  'value->utc_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(' \
+  'std::chrono::system_clock::now().time_since_epoch()).count();')")
+UTC_NS_FIELD_CITATION=$(citation_json "$(citation openair1/PHY/NR_UE_ISAC/sensing_engine.cc \
+  'int64_t utc_ns = 0;')")
+REPORT_JSON_UTC_CITATION=$(citation_json "$(citation openair1/PHY/NR_UE_ISAC/report_writer.cc \
+  'cpi_start_time_utc_ns')")
+ROW_TIME_CITATION=$(citation_json "$(citation openair1/PHY/NR_UE_ISAC/sensing_engine.cc \
+  'report.first_row_time_ns = std::llround(dl_window.row_time_slots.front() * slot_ns);' \
+  'report.cpi_duration_ns = std::max<int64_t>(0, report.last_row_time_ns - report.first_row_time_ns);')")
+MIDPOINT_CITATION=$(citation_json "$(citation openair1/PHY/NR_UE_ISAC/sensing_engine.cc \
+  'const double midpoint_slots = 0.5 * (dl_window.row_time_slots.front()' \
+  '* slot_duration_s(dl_window.scs_hz);')")
 
 cat > "$MANIFEST.tmp" <<JSONDOC
 {
@@ -323,12 +393,11 @@ cat > "$MANIFEST.tmp" <<JSONDOC
   "reason": "No separated-antenna physical survey has been performed or supplied as of $DATE_TAG (adaptive_RX_pipeline_progress.md 'Current status' table: 'Separated-antenna survey: Not provided or verified'). Do not infer physical channel-to-position mapping from source or config alone.",
   "known_from_source": {
     "usrp_args": "type=x4xx,addr=192.168.20.2,mgmt_addr=128.178.122.174",
-    "usrp_args_citation": "tests/passive_rx/run_adaptive_receive_test.sh:$USRP_ARGS_LINE",
+    "usrp_args_citation": $USRP_ARGS_CITATION,
     "channel_list_flags": "--ue-nb-ant-rx 4 --ue-nb-ant-tx 4 --passive-rx",
-    "channel_list_citation": "tests/passive_rx/run_adaptive_receive_test.sh:$CHANLIST_LINE",
+    "channel_list_citation": $CHANLIST_CITATION,
     "rfchan_diagnostic": {
-      "file": "radio/USRP/usrp_lib.cpp",
-      "lines": "2485-2494",
+      "citation": $RFCHAN_CITATION,
       "log_tag": "RFCHAN",
       "fields_read_back_from_device": "subdev, rx_antenna (port), gain, gain_range, freq, rate, bandwidth -- read back FROM THE DEVICE post-configuration, not echoed from the config struct"
     }
@@ -338,17 +407,17 @@ cat > "$MANIFEST.tmp" <<JSONDOC
   "cpi_start_time_utc_ns": {
     "unit": "nanoseconds since Unix epoch",
     "clock_source": "host wall clock, std::chrono::system_clock::now(), captured at CFR SUBMISSION time inside SensingEngine::submit() -- i.e. AFTER producer/decoder latency, not at hardware acquisition time",
-    "citations": ["openair1/PHY/NR_UE_ISAC/sensing_engine.cc:297 (SensingEngine::submit definition)", "openair1/PHY/NR_UE_ISAC/sensing_engine.cc:$UTC_NS_SUBMIT_LINES-$((UTC_NS_SUBMIT_LINES+1)) (system_clock::now() call, assigned to Snapshot::utc_ns)", "openair1/PHY/NR_UE_ISAC/sensing_engine.cc:$UTC_NS_FIELD_LINE (Snapshot::utc_ns field declaration)", "openair1/PHY/NR_UE_ISAC/report_writer.cc:$REPORT_JSON_UTC_LINE (emitted as JSON field cpi_start_time_utc_ns)"]
+    "citations": [$SUBMIT_DEF_CITATION, $UTC_NS_ASSIGN_CITATION, $UTC_NS_FIELD_CITATION, $REPORT_JSON_UTC_CITATION]
   },
   "first_row_time_ns_last_row_time_ns_cpi_duration_ns": {
     "unit": "nanoseconds, RELATIVE (not an absolute epoch)",
     "clock_source": "slot/sample clock: CfrWindow.row_time_slots (absolute unwrapped slot count) times slot_duration_s(scs_hz)*1e9 -- derived from the RF slot timeline, independent of host wall clock",
-    "citations": ["openair1/PHY/NR_UE_ISAC/sensing_engine.cc:$ROW_TIME_LINE-$((ROW_TIME_LINE+2))"]
+    "citations": [$ROW_TIME_CITATION]
   },
   "midpoint_air_time_s": {
     "unit": "seconds, RELATIVE to an arbitrary per-run air_origin_slots reference (not an absolute epoch, not wall clock)",
     "clock_source": "slot/sample clock: 0.5*(row_time_slots.front()+row_time_slots.back()) minus air_origin_slots, times slot_duration_s(scs_hz); this is the time axis actually consumed by the sync/clock trackers and local/global trackers downstream",
-    "citations": ["openair1/PHY/NR_UE_ISAC/sensing_engine.cc:$MIDPOINT_LINE-$((MIDPOINT_LINE+2))"]
+    "citations": [$MIDPOINT_CITATION]
   },
   "note": "Two distinct, non-interchangeable clock domains are emitted per CPI report: (1) a wall-clock UTC submission timestamp measured AFTER producer/decoder delay (cpi_start_time_utc_ns), and (2) slot-clock-derived relative timings actually used for physical CPI/tracking math (first/last_row_time_ns, cpi_duration_ns, midpoint_air_time_s). Matches plan section 2.3's retraction: 'Report UTC is acquisition UTC' is INCORRECT -- submission UTC includes worker latency."
 },

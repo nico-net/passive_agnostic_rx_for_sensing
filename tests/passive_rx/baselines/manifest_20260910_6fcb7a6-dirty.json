@@ -1,43 +1,39 @@
 {
     "schema": "p01.baseline_manifest.v1",
-    "generated_at_utc": "2026-09-10T23:39:18Z",
+    "generated_at_utc": "2026-09-10T23:58:38Z",
     "experiment_purpose": "P01 baseline identity; no capture",
     "host": "sens6",
     "tree": "/home/sens/NICOLA/adaptive-rx-sensing",
     "git": {
         "branch": "merge/adaptive-sensing",
-        "commit": "50c8312fa46f17850aeee579abfb0a745f8465ff",
+        "commit": "6fcb7a6c319d7ae7ad4b6cb03c075de0e2f7a77a",
         "status_short": [
             " M executables/nr-ue-ru.c",
             " M executables/nr-ue.c",
             " M openair1/PHY/NR_UE_TRANSPORT/nr_initial_sync.c",
             " M openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c",
             " M radio/USRP/usrp_lib.cpp",
+            " M tests/passive_rx/baseline_manifest.sh",
+            "D  tests/passive_rx/baselines/manifest_20260910_50c8312-dirty.json",
+            "D  tests/passive_rx/baselines/manifest_20260910_50c8312-dirty_tracked.patch",
+            " M tests/passive_rx/check_manifest.py",
             " M tests/passive_rx/monitor/monitor.html",
             " M tests/passive_rx/monitor/monitor.py",
             " M tests/passive_rx/run_adaptive_receive_test.sh",
             "?? adaptive_RX_pipeline.md",
             "?? adaptive_RX_pipeline_progress.md",
             "?? tests/passive_rx/MANUAL_DL_UL.md",
-            "?? tests/passive_rx/acceptance_four_rx.json",
             "?? tests/passive_rx/adaptive_manual_dlul.conf",
             "?? tests/passive_rx/aoa_track_dl.conf",
-            "?? tests/passive_rx/baseline_manifest.sh",
-            "?? tests/passive_rx/check_manifest.py",
-            "?? tests/passive_rx/geometry_four_rx.json",
             "?? tests/passive_rx/run_manual_x410.sh"
         ],
-        "tracked_diff_patch_path": "tests/passive_rx/baselines/manifest_20260910_50c8312-dirty_tracked.patch",
-        "tracked_diff_patch_sha256": "f078f2db56c2206386d891e3b9d3a21bca72576c91b718561297869d7ebc1368",
-        "tracked_diff_patch_line_count": 787,
+        "tracked_diff_patch_path": "tests/passive_rx/baselines/manifest_20260910_6fcb7a6-dirty_tracked.patch",
+        "tracked_diff_patch_sha256": "e450b55e050cfce8fb6f2d972b2bb66713cb99765b03e0dfbf56db99f11021e3",
+        "tracked_diff_patch_line_count": 1054,
         "scoped_files": [
             {
                 "path": "tests/passive_rx/MANUAL_DL_UL.md",
                 "sha256": "34af06df912e9bf9316d0c4c0ca03901b9e7b61b0acb82558d9e643b62e0545e"
-            },
-            {
-                "path": "tests/passive_rx/acceptance_four_rx.json",
-                "sha256": "57896964efde38903a8c4537dd09cc6d92e7c2f565a101bbf1778cbc42e6ad8b"
             },
             {
                 "path": "tests/passive_rx/adaptive_manual_dlul.conf",
@@ -48,20 +44,8 @@
                 "sha256": "55c348e93a59ec846a3b09712de82420abf3b16b35e04334868f5956943c38e2"
             },
             {
-                "path": "tests/passive_rx/baseline_manifest.sh",
-                "sha256": "d36babf399af548342d7d763304f002a9d6eac22dbb4a4616f9ec246ce557a29"
-            },
-            {
-                "path": "tests/passive_rx/baselines/manifest_20260910_50c8312-dirty_tracked.patch",
-                "sha256": "f078f2db56c2206386d891e3b9d3a21bca72576c91b718561297869d7ebc1368"
-            },
-            {
-                "path": "tests/passive_rx/check_manifest.py",
-                "sha256": "b9d95071d01d8a696fee6486f34f8fd5aeb8d4df83d1fb136bad72e5d5459f1a"
-            },
-            {
-                "path": "tests/passive_rx/geometry_four_rx.json",
-                "sha256": "f27963008c0d63279c25f3fdc3af846d43563b6fffa4af05181940b2532bcdb1"
+                "path": "tests/passive_rx/baselines/manifest_20260910_6fcb7a6-dirty_tracked.patch",
+                "sha256": "e450b55e050cfce8fb6f2d972b2bb66713cb99765b03e0dfbf56db99f11021e3"
             },
             {
                 "path": "tests/passive_rx/run_manual_x410.sh",
@@ -7716,6 +7700,10 @@
                 "sha256": "e0f500d07de26a76a94edda4efdba7f4ee041acb22d65f3b146ad12f4b8230a4"
             },
             {
+                "path": "tests/passive_rx/acceptance_four_rx.json",
+                "sha256": "57896964efde38903a8c4537dd09cc6d92e7c2f565a101bbf1778cbc42e6ad8b"
+            },
+            {
                 "path": "tests/passive_rx/adaptive_manual_diag.conf",
                 "sha256": "86559555d95505b1d45c710c71bf5cbce97fde55e2e8cb2d423a0619332dba18"
             },
@@ -7730,6 +7718,10 @@
             {
                 "path": "tests/passive_rx/allocbench.c",
                 "sha256": "7329e080d3903a8a803a0262f6c59c0d551b071b656f5e869c27c278364be797"
+            },
+            {
+                "path": "tests/passive_rx/baseline_manifest.sh",
+                "sha256": "398f12a4fa740730d082d8f0bb8b4fcc5d06f2f4604c49a293c0aacaa4d7fa55"
             },
             {
                 "path": "tests/passive_rx/captures/ab_10m.sh",
@@ -7816,6 +7808,10 @@
                 "sha256": "298bb17772f9205ae6f9450b713f2950d75e661465d764b3555e97bb39a188f2"
             },
             {
+                "path": "tests/passive_rx/check_manifest.py",
+                "sha256": "2fedfc4543d35d0f1b68b8002c662720c3e54e5ea39778fffb12a8a7ca714fc3"
+            },
+            {
                 "path": "tests/passive_rx/d1_probe.py",
                 "sha256": "6c991bec2074a25fb0b4f0b1fa68e73989253117db19b508ba43a40170529225"
             },
@@ -7826,6 +7822,10 @@
             {
                 "path": "tests/passive_rx/e0_axis.py",
                 "sha256": "7f501e27f4ece3513ce3f8ad7652eabac2a8e6fc4f29644b7ef989ab7834b431"
+            },
+            {
+                "path": "tests/passive_rx/geometry_four_rx.json",
+                "sha256": "f27963008c0d63279c25f3fdc3af846d43563b6fffa4af05181940b2532bcdb1"
             },
             {
                 "path": "tests/passive_rx/gnb.sa.rfsim.100mhz.conf",
@@ -8200,10 +8200,20 @@
                     },
                     "rank_two_array_check": {
                         "rx_array_raw": "0,0;0.0434,0;0.0868,0;0.1302,0",
-                        "parser_file": "openair1/PHY/NR_UE_ISAC/nr_isac.cc",
                         "parser_function": "parse_array",
-                        "parser_lines": "102-125",
-                        "rank_two_condition_line": 118,
+                        "parser_citation": {
+                            "file": "openair1/PHY/NR_UE_ISAC/nr_isac.cc",
+                            "line_start": 102,
+                            "line_end": 127,
+                            "token": "bool parse_array(const char* spec, double rotation_deg, const char* broadside_spec,"
+                        },
+                        "parser_citation_note": "line_end is the last body statement, one line before the closing brace -- a bare closing brace alone is not a uniquely locatable token",
+                        "rank_two_condition_citation": {
+                            "file": "openair1/PHY/NR_UE_ISAC/nr_isac.cc",
+                            "line_start": 118,
+                            "line_end": 118,
+                            "token": "if (!(eig.values[1] > tol) || eig.values[0] > tol) return false;"
+                        },
                         "independent_check_method": "Gaussian elimination on the 3 baseline vectors p1-p0,p2-p0,p3-p0 (stdlib only); collinearity (rank<2) is a sufficient condition for the cited eigenvalue test to fail regardless of its numerical tolerance",
                         "verdict": "verified_fails_rank_two",
                         "raw_output": "points=[[0.0, 0.0, 0.0], [0.0434, 0.0, 0.0], [0.0868, 0.0, 0.0], [0.1302, 0.0, 0.0]]\nbaseline_vectors=[[0.0434, 0.0, 0.0], [0.0868, 0.0, 0.0], [0.1302, 0.0, 0.0]]\ngaussian_elimination_rank=1\nrank_two_array_parser_condition_would=FAIL (rank<2, matches plan's claim)"
@@ -8251,12 +8261,26 @@
         "reason": "No separated-antenna physical survey has been performed or supplied as of 20260910 (adaptive_RX_pipeline_progress.md 'Current status' table: 'Separated-antenna survey: Not provided or verified'). Do not infer physical channel-to-position mapping from source or config alone.",
         "known_from_source": {
             "usrp_args": "type=x4xx,addr=192.168.20.2,mgmt_addr=128.178.122.174",
-            "usrp_args_citation": "tests/passive_rx/run_adaptive_receive_test.sh:87",
+            "usrp_args_citation": {
+                "file": "tests/passive_rx/run_adaptive_receive_test.sh",
+                "line_start": 87,
+                "line_end": 87,
+                "token": "--usrp-args type=x4xx,addr=192.168.20.2,mgmt_addr=128.178.122.174"
+            },
             "channel_list_flags": "--ue-nb-ant-rx 4 --ue-nb-ant-tx 4 --passive-rx",
-            "channel_list_citation": "tests/passive_rx/run_adaptive_receive_test.sh:89",
+            "channel_list_citation": {
+                "file": "tests/passive_rx/run_adaptive_receive_test.sh",
+                "line_start": 89,
+                "line_end": 89,
+                "token": "--ue-nb-ant-rx 4 --ue-nb-ant-tx 4 --passive-rx"
+            },
             "rfchan_diagnostic": {
-                "file": "radio/USRP/usrp_lib.cpp",
-                "lines": "2485-2494",
+                "citation": {
+                    "file": "radio/USRP/usrp_lib.cpp",
+                    "line_start": 2486,
+                    "line_end": 2496,
+                    "token": "RFCHAN ch%d subdev=%s port=%s gain=%.2f range=[%.1f..%.1f] freq=%.6f MHz "
+                },
                 "log_tag": "RFCHAN",
                 "fields_read_back_from_device": "subdev, rx_antenna (port), gain, gain_range, freq, rate, bandwidth -- read back FROM THE DEVICE post-configuration, not echoed from the config struct"
             }
@@ -8267,24 +8291,54 @@
             "unit": "nanoseconds since Unix epoch",
             "clock_source": "host wall clock, std::chrono::system_clock::now(), captured at CFR SUBMISSION time inside SensingEngine::submit() -- i.e. AFTER producer/decoder latency, not at hardware acquisition time",
             "citations": [
-                "openair1/PHY/NR_UE_ISAC/sensing_engine.cc:297 (SensingEngine::submit definition)",
-                "openair1/PHY/NR_UE_ISAC/sensing_engine.cc:330-331 (system_clock::now() call, assigned to Snapshot::utc_ns)",
-                "openair1/PHY/NR_UE_ISAC/sensing_engine.cc:50 (Snapshot::utc_ns field declaration)",
-                "openair1/PHY/NR_UE_ISAC/report_writer.cc:107 (emitted as JSON field cpi_start_time_utc_ns)"
+                {
+                    "file": "openair1/PHY/NR_UE_ISAC/sensing_engine.cc",
+                    "line_start": 297,
+                    "line_end": 301,
+                    "token": "void SensingEngine::submit(uint32_t slot, float fraction, nr_isac_source_t source,"
+                },
+                {
+                    "file": "openair1/PHY/NR_UE_ISAC/sensing_engine.cc",
+                    "line_start": 329,
+                    "line_end": 330,
+                    "token": "value->utc_ns = std::chrono::duration_cast<std::chrono::nanoseconds>("
+                },
+                {
+                    "file": "openair1/PHY/NR_UE_ISAC/sensing_engine.cc",
+                    "line_start": 50,
+                    "line_end": 50,
+                    "token": "int64_t utc_ns = 0;"
+                },
+                {
+                    "file": "openair1/PHY/NR_UE_ISAC/report_writer.cc",
+                    "line_start": 107,
+                    "line_end": 107,
+                    "token": "cpi_start_time_utc_ns"
+                }
             ]
         },
         "first_row_time_ns_last_row_time_ns_cpi_duration_ns": {
             "unit": "nanoseconds, RELATIVE (not an absolute epoch)",
             "clock_source": "slot/sample clock: CfrWindow.row_time_slots (absolute unwrapped slot count) times slot_duration_s(scs_hz)*1e9 -- derived from the RF slot timeline, independent of host wall clock",
             "citations": [
-                "openair1/PHY/NR_UE_ISAC/sensing_engine.cc:736-738"
+                {
+                    "file": "openair1/PHY/NR_UE_ISAC/sensing_engine.cc",
+                    "line_start": 736,
+                    "line_end": 738,
+                    "token": "report.first_row_time_ns = std::llround(dl_window.row_time_slots.front() * slot_ns);"
+                }
             ]
         },
         "midpoint_air_time_s": {
             "unit": "seconds, RELATIVE to an arbitrary per-run air_origin_slots reference (not an absolute epoch, not wall clock)",
             "clock_source": "slot/sample clock: 0.5*(row_time_slots.front()+row_time_slots.back()) minus air_origin_slots, times slot_duration_s(scs_hz); this is the time axis actually consumed by the sync/clock trackers and local/global trackers downstream",
             "citations": [
-                "openair1/PHY/NR_UE_ISAC/sensing_engine.cc:754-756"
+                {
+                    "file": "openair1/PHY/NR_UE_ISAC/sensing_engine.cc",
+                    "line_start": 752,
+                    "line_end": 755,
+                    "token": "const double midpoint_slots = 0.5 * (dl_window.row_time_slots.front()"
+                }
             ]
         },
         "note": "Two distinct, non-interchangeable clock domains are emitted per CPI report: (1) a wall-clock UTC submission timestamp measured AFTER producer/decoder delay (cpi_start_time_utc_ns), and (2) slot-clock-derived relative timings actually used for physical CPI/tracking math (first/last_row_time_ns, cpi_duration_ns, midpoint_air_time_s). Matches plan section 2.3's retraction: 'Report UTC is acquisition UTC' is INCORRECT -- submission UTC includes worker latency."
