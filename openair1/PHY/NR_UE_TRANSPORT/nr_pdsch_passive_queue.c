@@ -60,6 +60,7 @@
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_data_aided.h"
 #include "PHY/NR_UE_ISAC/nr_isac.h"
 #include "PHY/MODULATION/modulation_UE.h"
+#include "PHY/NR_UE_TRANSPORT/nr_passive_pcap.h"
 
 /* The RF producer's own position, published in executables/nr-ue.c immediately BEFORE nrue_ru_read()
  * fills that slot's region of rxdata. */
@@ -181,6 +182,10 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
               job.sweep_ticket.rnti, job.sweep_ticket.tda_index, winner.tda_start, winner.tda_length,
               winner.dmrs_mask, winner.mcs_table);
       if (st == NR_PDSCH_PASSIVE_DECODE_CRC_OK) {
+        /* Same capture hook as the inline path, so a deferred decode is not silently dropped. */
+        nr_passive_pcap_write(false, job.rnti, job.rnti == 0xFFFF, job.frame_rx, job.nr_slot_rx,
+                              (int)(job.harq_pid_tag >= 3000 ? job.harq_pid_tag - 3000 : job.harq_pid_tag),
+                              dec.tb, (int)dec.cw.TBS);
         atomic_fetch_add_explicit(&g_crc_ok, 1, memory_order_relaxed);
         if (job.want_data) {
           /* Publish THIS job's monotonic slot so the CPI grid indexes it correctly. Without this the

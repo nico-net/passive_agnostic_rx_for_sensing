@@ -40,6 +40,7 @@
 #include "PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.h"
 #include "PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.h"
 #include "PHY/NR_UE_TRANSPORT/nr_pdcch_dci_length_sweep.h" // Phase 3 Technique C
+#include "PHY/NR_UE_TRANSPORT/nr_passive_pcap.h"
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_adaptive_config.h"
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_config_sweep.h" // Phase 3 Technique D
 #include "PHY/NR_UE_TRANSPORT/nr_pdcch_coreset_map.h"      // Phase 3 Technique A cross-check (XCHECK diag)
@@ -2365,6 +2366,10 @@ constdiag_done:;
                 g_dec_ok++;
                 LOG_D(PHY, "SENSING: passive PDSCH decode OK (%d.%d) rnti=0x%x mcs=%u rv=%u TBS=%u\n",
                       proc->frame_rx, proc->nr_slot_rx, out.rnti, out.mcs, out.rv, dec.cw.TBS);
+                /* The verified bytes exist here and were previously only counted. Hand them to the
+                 * capture file when one is configured; no-op otherwise. */
+                nr_passive_pcap_write(false, out.rnti, out.rnti == 0xFFFF, proc->frame_rx, proc->nr_slot_rx,
+                                      out.harq_pid, dec.tb, (int)dec.cw.TBS);
                 if (want_data) {
                   // The reconstruction chain the attached UE uses, unchanged -- the ONLY difference
                   // is where the verified transport block came from.
