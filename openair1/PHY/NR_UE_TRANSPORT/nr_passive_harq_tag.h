@@ -64,16 +64,23 @@ extern "C" {
 /// below can be checked where the stride is defined).
 #define NR_PDSCH_PASSIVE_HARQ_TAG_BASE 2000u
 
-/// Ids reserved per branch inside that range. 16 = the full span of the DCI HARQ-process-number
-/// field (4 bits, 3GPP TS 38.212 7.3.1.2.1), so no two HARQ processes of one branch can alias.
-#define NR_PDSCH_PASSIVE_HARQ_BRANCH_STRIDE 16u
+/// Ids reserved per branch inside that range. 32 = the full span of the DCI HARQ-process-number
+/// field at its WIDEST configurable width: the field is 4 bits by default but 5 with
+/// harq-ProcessNumberSizeDCI-1-1, and this receiver's own DCI parser is told which
+/// (`nr_pdcch_blind_monitor.h:263` `harq_pid_bits`, "default 4; 5 with
+/// harq-ProcessNumberSizeDCI-1-1", the 7th operator-settable field of
+/// `pdcch_blind_monitor_dci_bits`, read at that width by `nr_pdcch_blind_monitor.c:2475`).
+/// Striding at 16 would therefore alias harq process 0 with harq process 16 ON THE SAME BRANCH on
+/// any deployment that configures the 5-bit field -- the same collision this header exists to
+/// remove, one axis over -- and would also break the branch-0 legacy-tag identity above hpn 15.
+#define NR_PDSCH_PASSIVE_HARQ_BRANCH_STRIDE 32u
 
 /* Bound, done as arithmetic rather than by picking a comfortable-looking constant:
  *   highest id = BASE + (NR_RX_BRANCH_MAX - 1) * STRIDE + (STRIDE - 1)
- *              = 2000 + 3 * 16 + 15 = 2063
- * and the next submitter type starts at BASE + SPAN = 3000, so 2063 < 3000 holds with 937 ids of
+ *              = 2000 + 3 * 32 + 31 = 2127
+ * and the next submitter type starts at BASE + SPAN = 3000, so 2127 < 3000 holds with 873 ids of
  * headroom. The assert is what keeps that true if NR_RX_BRANCH_MAX or the stride is ever raised
- * (NR_RX_BRANCH_MAX would have to reach 63 before it fails). */
+ * (NR_RX_BRANCH_MAX would have to reach 31 before it fails). */
 static_assert((NR_RX_BRANCH_MAX - 1) * NR_PDSCH_PASSIVE_HARQ_BRANCH_STRIDE
                       + (NR_PDSCH_PASSIVE_HARQ_BRANCH_STRIDE - 1)
                   < NR_PASSIVE_HARQ_NAMESPACE_SPAN,

@@ -297,7 +297,8 @@ TEST(PassiveHarqTag, SameProcessDifferentBranchesDoNotAlias) {
 
 TEST(PassiveHarqTag, AllBranchProcessPairsAreDistinct) {
   /* Stronger than the above: the whole (branch x harq process) product must be injective, since
-   * two branches decoding DIFFERENT grants concurrently is just as common as the same one. */
+   * two branches decoding DIFFERENT grants concurrently is just as common as the same one. The
+   * harq-process loop runs to STRIDE-1 = 31, i.e. the 5-bit DCI field's full range. */
   bool used[NR_PASSIVE_HARQ_NAMESPACE_SPAN] = {false};
   for (int b = 0; b < NR_RX_BRANCH_MAX; b++) {
     for (int h = 0; h < (int)NR_PDSCH_PASSIVE_HARQ_BRANCH_STRIDE; h++) {
@@ -312,8 +313,11 @@ TEST(PassiveHarqTag, AllBranchProcessPairsAreDistinct) {
 
 TEST(PassiveHarqTag, BranchZeroReproducesTheLegacyTag) {
   /* Regression pin. Legacy / single-branch mode must emit the literal pre-P09 expression,
-   * 2000 + harq_process_nbr -- this is what the P02 replay's byte-identical result rests on. */
-  for (int h = 0; h < 16; h++)
+   * 2000 + harq_process_nbr -- this is what the P02 replay's byte-identical result rests on.
+   * Looped to 31, not 15: the DCI HARQ-process-number field is 5 bits wide when the cell sets
+   * harq-ProcessNumberSizeDCI-1-1 (nr_pdcch_blind_monitor.h:263), and the old formula had no
+   * modulo, so a stride narrower than 32 would silently diverge from it above hpn 15. */
+  for (int h = 0; h < 32; h++)
     EXPECT_EQ(nr_pdsch_passive_harq_tag(0, (uint8_t)h), 2000u + (uint32_t)h);
 }
 
@@ -344,7 +348,7 @@ TEST(PassiveHarqTag, StrideBoundHoldsForTheConfiguredBranchCount) {
       NR_PDSCH_PASSIVE_HARQ_TAG_BASE
       + (NR_RX_BRANCH_MAX - 1) * NR_PDSCH_PASSIVE_HARQ_BRANCH_STRIDE
       + (NR_PDSCH_PASSIVE_HARQ_BRANCH_STRIDE - 1);
-  EXPECT_EQ(highest, 2063u); // 2000 + 3*16 + 15, with NR_RX_BRANCH_MAX == 4
+  EXPECT_EQ(highest, 2127u); // 2000 + 3*32 + 31, with NR_RX_BRANCH_MAX == 4
   EXPECT_LT(highest, NR_PDSCH_PASSIVE_HARQ_TAG_BASE + NR_PASSIVE_HARQ_NAMESPACE_SPAN);
   EXPECT_EQ(highest, nr_pdsch_passive_harq_tag(NR_RX_BRANCH_MAX - 1,
                                                NR_PDSCH_PASSIVE_HARQ_BRANCH_STRIDE - 1));

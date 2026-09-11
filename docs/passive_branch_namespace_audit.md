@@ -47,12 +47,12 @@ four axes the brief names: **branch x direction x decode-vs-reconstruction x UE/
 
 | # | Site | Expression | Range | Unique? | Collision scenario if NO |
 |---|------|-----------|-------|---------|--------------------------|
-| 1 | `nr_pdsch_passive_decode.c:712` (was `:703`) | `nr_pdsch_passive_harq_tag(t_view_branch, harq_process_nbr)` = `2000 + branch*16 + hpn%16` | 2000-2063 | **YES (after this task)** | Was `2000 + harq_process_nbr`: see section 3. FIXED. |
+| 1 | `nr_pdsch_passive_decode.c:712` (was `:703`) | `nr_pdsch_passive_harq_tag(t_view_branch, harq_process_nbr)` = `2000 + branch*32 + hpn%32` | 2000-2127 | **YES (after this task)** | Was `2000 + harq_process_nbr`: see section 3. FIXED. |
 | 2 | `nr_pdcch_blind_monitor_rt.c:110` `blind_harq_tag()` | `3000 + ue_slot*16 + harq_pid%16` | 3000-3255 | **NO (branch axis)** | Passive DL *re-encode*. Namespaced by UE and by type, not by branch. P06a fans one occasion to N branches; each branch's job carries the same `(rnti, harq_pid)` and therefore the same tag. Recorded, not fixed: `nr_isac_pdsch_data_aided_submit()` reaches `nr_pdsch_data_aided.c:128`, which is an **encode** call, and per section 1 no backend in this tree indexes state by an encode-side id. Fixing it also requires the P10 CFR-ABI change (`nr_pdsch_passive_queue.c:231` already carries a `TODO(P10)`), so it is deliberately left to P10 rather than half-done here. |
 | 3 | `phy_procedures_nr_ue.c:2137` | `1000 + dlsch_config->harq_process_nbr` | 1000-1015 | YES | Attached-UE DL re-encode. One session, one HARQ array, no branch fan-out on the attached path. Out of scope per the brief. |
 | 4 | `nr_dlsch_decoding.c:76` | `2 * harq_pid + cw_idx` | 0-31 | YES for its own users | Attached-UE DL decode (upstream OAI). Collides with sites 5 and 6 below, which is the finding in section 4.1. |
-| 5 | `nr_ulsch_decoding.c:129` | `= ULSCH_id` | 0-5 as called | **NO** | Passive UL decode. See section 4.1 -- a real present-day collision, recorded not fixed (UL is P08). |
-| 6 | `nr_dlsch_coding.c:171` / `nr_ulsch_coding.c:137` | `= i` / `2*harq_pid + ULSCH_id` | small | n/a | Upstream OAI encode paths, unreachable under `--passive-rx`. Listed for completeness. |
+| 5 | `openair1/PHY/NR_TRANSPORT/nr_ulsch_decoding.c:129` | `= ULSCH_id` | 0-5 as called | **NO** | Passive UL decode. See section 4.1 -- a real present-day collision, recorded not fixed (UL is P08). |
+| 6 | `NR_TRANSPORT/nr_dlsch_coding.c:171` / `NR_UE_TRANSPORT/nr_ulsch_coding.c:137` | `= i` / `2*harq_pid + ULSCH_id` | small | n/a | Upstream OAI encode paths, unreachable under `--passive-rx`. Listed for completeness. |
 | 7 | `nr_pusch_passive_decode.c:1278` | `NR_PUSCH_PASSIVE_DA_TAG_BASE + ctx` | 4000-4005 | YES on its own axes | Passive UL re-encode, strided by decode-context index. No UL branch fan-out exists yet (P08). |
 | 8 | `nr_pusch_data_aided.c:89` | `TB.harq_unique_pid = harq_pid_tag` | pass-through | n/a | Consumes site 7's value. |
 | 9 | `nr_pdsch_data_aided.c:128` | `TB_parameters.harq_unique_pid = harq_pid_tag` | pass-through | n/a | Consumes site 2's value (via `nr_pdsch_passive_job_t::harq_pid_tag`). |
@@ -88,20 +88,28 @@ harq_unique_pid = NR_PDSCH_PASSIVE_HARQ_TAG_BASE
                 + (harq_process_nbr % NR_PDSCH_PASSIVE_HARQ_BRANCH_STRIDE);
 ```
 
-**Stride bound, as arithmetic.** The stride is 16 because that is the full span of the DCI
-HARQ-process-number field (4 bits, TS 38.212 7.3.1.2.1) -- anything smaller would alias two HARQ
-processes of the SAME branch, which is the collision being removed, only one axis over.
+**Stride bound, as arithmetic.** The stride is **32**, the full span of the DCI
+HARQ-process-number field at its WIDEST configurable width. The field is 4 bits by default
+(TS 38.212 7.3.1.2.1) but **5 bits when the cell configures `harq-ProcessNumberSizeDCI-1-1`**, and
+this receiver's own DCI parser is told which: `nr_pdcch_blind_monitor.h:263` declares
+`harq_pid_bits` as "default 4; 5 with harq-ProcessNumberSizeDCI-1-1", it is the 7th
+operator-settable field of `pdcch_blind_monitor_dci_bits` (`adaptive_manual_dlul.conf:16` sets it
+to 4 on this deployment), and `nr_pdcch_blind_monitor.c:2475` reads `harq_pid` at exactly that
+width. A stride of 16 would therefore alias harq process 0 with harq process 16 **on the same
+branch** on any deployment that turns the 5-bit field on -- the same collision this section
+removes, one axis over -- and would additionally break the branch-0 legacy-tag identity above
+hpn 15, since the pre-P09 formula had no modulo and was correct all the way to 2031.
 
 ```
 highest id = BASE + (NR_RX_BRANCH_MAX - 1) * STRIDE + (STRIDE - 1)
-           = 2000 + (4 - 1) * 16 + 15
-           = 2000 + 48 + 15
-           = 2063
+           = 2000 + (4 - 1) * 32 + 31
+           = 2000 + 96 + 31
+           = 2127
 next type's base = BASE + NR_PASSIVE_HARQ_NAMESPACE_SPAN = 3000
-2063 < 3000, headroom 937 ids.
+2127 < 3000, headroom 873 ids.
 ```
 
-The bound is a `static_assert` in `nr_passive_harq_tag.h`, so raising `NR_RX_BRANCH_MAX` past 62
+The bound is a `static_assert` in `nr_passive_harq_tag.h`, so raising `NR_RX_BRANCH_MAX` past 30
 (or the stride past 250) fails the build rather than silently spilling into the 3000 re-encode
 range. It is also restated at runtime in `PassiveHarqTag.StrideBoundHoldsForTheConfiguredBranchCount`
 so the suite reports it, not only the compiler.
@@ -110,7 +118,9 @@ Both arguments are reduced modulo their declared ranges rather than trusted: `ha
 arrives from a blindly decoded DCI and `branch_id` from a producer-filled job, so a malformed value
 must stay inside this submitter type's namespace (where it can at worst alias another passive DL
 decode) rather than reach the 3000 range (where it would alias a different submitter). This mirrors
-`blind_harq_tag()`'s existing `harq_pid % 16`.
+`blind_harq_tag()`'s existing `harq_pid % 16`. (That site's own 16 is NOT widened here: it is
+the 3000 re-encode range, left to P10 per section 4.2 -- but it carries the same 5-bit exposure
+and must be widened to 32 when P10 touches it.)
 
 **branch_id = 0 reproduces the pre-P09 value exactly** (`2000 + hpn`), which is why the legacy
 replay is byte-identical; it is pinned by `PassiveHarqTag.BranchZeroReproducesTheLegacyTag`.
@@ -130,7 +140,7 @@ untouched.
 
 `nr_pusch_passive_decode.c:1072` declares `int ulsch_id = 0;` and passes it to
 `nr_ulsch_decoding()`, which does `TB_parameters->harq_unique_pid = ULSCH_id`
-(`nr_ulsch_decoding.c:129`). So **every** passive UL decode is tagged `0`, in every one of the up
+(`openair1/PHY/NR_TRANSPORT/nr_ulsch_decoding.c:129`). So **every** passive UL decode is tagged `0`, in every one of the up
 to `NR_PUSCH_PASSIVE_MAX_CTX` = 6 concurrent decode contexts, and `0` is also what
 `nr_dlsch_decoding.c:76` emits for attached `harq_pid=0, cw_idx=0`. The file's own
 `PASSIVE_UL_HARQ_TAG_BASE 4000` (site 10) was written to prevent exactly this and is never
@@ -230,7 +240,7 @@ Stated plainly, because the replay harness cannot exercise the failure this fix 
   jobs with the same `harq_process_nbr` exist concurrently in one process. The harness as it stands
   cannot produce the collision, therefore it cannot demonstrate its removal. The branch-view runs
   DO exercise non-zero `branch_id` (views 1/2/3 resolve `branch_id = phys` via
-  `nr_pdsch_passive_branch_view_resolve()`'s no-branch-set path, so they ran on tags 2016+/2032+/2048+
+  `nr_pdsch_passive_branch_view_resolve()`'s no-branch-set path, so they ran on tags 2032+/2064+/2096+
   and produced payloads identical to the reference) -- that shows the new tag values are harmless,
   not that the collision is gone.
 * **And it could not be observed even if it were reachable in replay**, because the backend linked
