@@ -1431,7 +1431,20 @@ int nr_process_pbch_symbol(
     // stride -- dl_ch_estimates[aarx] are separate allocations, not one contiguous block, so pack
     // them into a stack buffer rather than assuming a stride across dl_ch_estimates itself.
     float h_packed[2 * (NR_PBCH_NUM_RB * NR_NB_SC_PER_RB) * NR_ISAC_SSB_MAX_ANT];
-    const uint32_t nof_ant_clamped = nof_ant > NR_ISAC_SSB_MAX_ANT ? NR_ISAC_SSB_MAX_ANT : nof_ant;
+    uint32_t nof_ant_clamped = nof_ant > NR_ISAC_SSB_MAX_ANT ? NR_ISAC_SSB_MAX_ANT : nof_ant;
+    // adaptive_RX_pipeline.md P10b: the same submission plan the CSI-RS and blind DM-RS taps use.
+    // One active branch -> one untagged submission of nof_ant_clamped planes, exactly as before;
+    // several -> one single-antenna submission per branch, sliced out of this same packed buffer.
+    nr_isac_submit_plan_t plan[NR_RX_BRANCH_MAX];
+    uint32_t pack_ant = 0;
+    const uint32_t avail_ant = (uint32_t)fp->nb_antennas_rx < NR_ISAC_SSB_MAX_ANT
+                                   ? (uint32_t)fp->nb_antennas_rx
+                                   : (uint32_t)NR_ISAC_SSB_MAX_ANT;
+    const int nof_plan =
+        nr_isac_submit_plan(plan, NR_RX_BRANCH_MAX, nof_ant_clamped, avail_ant, &pack_ant);
+    if (nof_plan > 0 && pack_ant > 0) {
+      nof_ant_clamped = pack_ant;
+    }
     for (uint32_t a = 0; a < nof_ant_clamped; a++) {
       const c16_t* est = (const c16_t*)dl_ch_estimates[a];
       for (uint32_t i = 0; i < NR_PBCH_NUM_RB * NR_NB_SC_PER_RB; i++) {
@@ -1456,17 +1469,21 @@ int nr_process_pbch_symbol(
     // lines over a 150 s ssb-only capture, root-caused by inspecting sensing_engine.cc + the
     // csi_rs tap's slot_idx computation for comparison).
     const uint32_t ssb_abs_slot = (uint32_t)(proc->frame_rx * fp->slots_per_frame + proc->nr_slot_rx);
-    nr_isac_submit_cfr_multi(ssb_abs_slot,
-                             0.0f,
-                             NR_ISAC_SRC_SSB,
-                             &carrier,
-                             h_packed,
-                             nof_ant_clamped,
-                             NR_PBCH_NUM_RB * NR_NB_SC_PER_RB,
-                             k_abs,
-                             l_sym,
-                             NR_PBCH_NUM_RB * NR_NB_SC_PER_RB,
-                             0.0f);
+    for (int p = 0; p < nof_plan; p++) {
+      nr_isac_submit_cfr_multi_branch(ssb_abs_slot,
+                                      0.0f,
+                                      NR_ISAC_SRC_SSB,
+                                      &carrier,
+                                      &h_packed[2 * (size_t)plan[p].first_ant
+                                                * (NR_PBCH_NUM_RB * NR_NB_SC_PER_RB)],
+                                      plan[p].nof_ant,
+                                      NR_PBCH_NUM_RB * NR_NB_SC_PER_RB,
+                                      k_abs,
+                                      l_sym,
+                                      NR_PBCH_NUM_RB * NR_NB_SC_PER_RB,
+                                      0.0f,
+                                      plan[p].branch_id);
+    }
   }
 
   // Copy current symbol estimate for FO estimation

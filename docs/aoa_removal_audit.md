@@ -64,11 +64,11 @@ This is the row the plan wants replaced by branch-aware routing. All four produc
 switch "how many antennas may I extract", which is exactly the coupling P10/P13 remove.
 | file:line | what it does | breaks if removed now? | stage |
 |---|---|---|---|
-| `nr_isac.cc:341`, `nr_isac.h:113`, `nr_isac_stub.c:36` | the accessor itself (returns 4 when AoA is on, else 0) | YES for all four producers below | B |
-| `PHY/NR_UE_TRANSPORT/csi_rx.c:965` (+ comments :28,:942,:1155) | CSI-RS sensing tap antenna count | YES - falls to one antenna | B |
-| `PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2229` (+ comments :95,:2220-2227) | blind-PDCCH DM-RS tap antenna count | YES | B |
-| `PHY/NR_UE_TRANSPORT/nr_pdsch_data_aided.c:210` (+ comments :206,:216) | data-aided PDSCH tap antenna count | YES | B |
-| `SCHED_NR_UE/phy_procedures_nr_ue.c:1425-1426` | attached-UE PDSCH tap antenna count, clamped to `fp->nb_antennas_rx` | YES | B |
+| `nr_isac.cc:341`, `nr_isac.h:113`, `nr_isac_stub.c:36` | the accessor itself (returns 4 when AoA is on, else 0) | YES for all four producers below | ~~B~~ **C** - corrected by P10b: this is the live co-located-array AoA path's antenna count, not a branch-routing artefact. It dies with row 1, in Stage C item 4 |
+| `PHY/NR_UE_TRANSPORT/csi_rx.c:965` (+ comments :28,:942,:1155) | CSI-RS sensing tap antenna count | YES - falls to one antenna | **B DONE (P10b)** - branch-aware via `nr_isac_submit_plan()`; the AoA count is still what a single-branch receiver submits |
+| `PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2229` (+ comments :95,:2220-2227) | blind-PDCCH DM-RS tap antenna count | YES | **B DONE (P10b)** - same plan; `g_cfr_submits` deliberately still counts CANDIDATES, not branches |
+| `PHY/NR_UE_TRANSPORT/nr_pdsch_data_aided.c:210` (+ comments :206,:216) | data-aided PDSCH tap antenna count | YES | **B DONE (P10a + P07)** - the single-branch view already gives it `nb_antennas_rx = 1` on the branch's own plane, and P10a tags it from `nr_pdsch_passive_view_branch()`. No plan needed |
+| `SCHED_NR_UE/phy_procedures_nr_ue.c:1425-1426` | attached-UE PDSCH tap antenna count, clamped to `fp->nb_antennas_rx` | YES | **B DONE (P10b)** - the SSB/PBCH tap, same plan |
 | comment-only references: `nr_pdsch_passive_decode.c:1281,:2091`, `nr_pusch_passive_decode.c:91`, `nr_pusch_data_aided.h:45`, `nr_pdsch_passive_queue.c:99` | explain why the per-antenna buffers are heap, not thread-local | NO - prose only. The heap decision must SURVIVE (it fixed a real AVX alignment fault); only the wording needs updating | B (wording) |
 
 `PHY/NR_UE_ESTIMATION/nr_dl_channel_estimation.c:467` (`prs_meas[rxAnt]->dl_aoa = rsc_id`) is
@@ -79,7 +79,7 @@ upstream OAI PRS reporting, unrelated to this subsystem. Out of scope. Do not to
 |---|---|---|
 | `nr_isac.cc` `parse_array()` (used at :291) with `p_array`/`p_rotation`/`p_broadside` | parses and validates the four-element rank-two array and its broadside | C |
 | `nr_isac.cc:290-299` | the whole "AoA needs a valid array or sensing is disabled" block, and `aoa_antennas = 4` | C |
-| `nr_isac.cc:317` `SensingEngine(pipeline, 275, aoa_antennas?aoa_antennas:1)` | the engine's channel count is decided by the AoA switch - the same coupling as row 3, at engine level | B (this is exactly what P13's per-branch engines replace) |
+| ~~`nr_isac.cc:317`~~ (stale citation; P13a moved this into the per-branch construction loop) `SensingEngine(..., 275, branch_antennas)` | the engine's channel count | **B DONE (P10b)**: derived from `branch_active_count()` when >1 branch, still `aoa_antennas` at one branch |
 | `pipeline_types.h` array geometry struct and its `:231` comment | representation | C |
 
 ### Row 5 - DL/UL bearing confirmation, bearing-only EKF updates
@@ -147,13 +147,44 @@ duplicate implementation, an AoA-only CMake target, an AoA-only CUDA path, or a 
 no consumer that is not also part of the schema version P16 owns.
 
 ### Stage B - needs P13 (one engine per branch) first (5 items, in order)
-1. `nr_isac.cc:317` - engine channel count from the branch set instead of `aoa_antennas`.
-   Must come first: it is what makes a per-branch antenna count meaningful at all.
-2. Row 3's four producers (`csi_rx.c:965`, `nr_pdcch_blind_monitor_rt.c:2229`,
-   `nr_pdsch_data_aided.c:210`, `phy_procedures_nr_ue.c:1425`) - branch-aware routing; then
-   `nr_isac_aoa_antennas()` (`nr_isac.cc:341`, `nr_isac.h:113`, `nr_isac_stub.c:36`) is dead and
-   goes with them, in the same commit. Stage A item 2's comment rewrite rides along here.
-3. Row 8 - per-branch decode provenance for the data-aided CFR.
+1. **DONE (P10b).** `nr_isac.cc` engine channel count from the branch set instead of `aoa_antennas`.
+   The audit's `:317` citation predated P13a and was stale: P13a had already moved the construction
+   into a per-branch loop, so what remained was the ARGUMENT, not the site. P10b makes it
+   `branch_active_count(branches) > 1 ? 1 : (aoa_antennas ? aoa_antennas : 1)` inside that loop -- a
+   physically separated branch is one antenna by P03's 1:1 branch:physical map, and asking for four
+   would reserve four planes per row in EVERY engine (4x the CFR working set, in a pipeline with a
+   documented `std::bad_alloc` history) to hold three planes no producer can fill. With one active
+   branch the expression is literally the previous one, so the AoA path is untouched.
+2. **DONE (P10b) for the routing; `nr_isac_aoa_antennas()` deliberately NOT removed.** Row 3's four
+   producers now derive their submissions from `nr_isac_submit_plan()`
+   (`nr_isac.h`, `pipeline_types.h`'s `build_submit_plan()`): one untagged multi-antenna submission
+   at <= 1 active branch -- byte-identical to the previous call -- and one SINGLE-ANTENNA submission
+   per active branch otherwise, each reading that branch's own `physical_channel` (a pointer offset
+   into the same packed antenna-major buffer, never a second pack) and tagged with its `branch_id`
+   so P13a's router delivers it to that branch's own engine.
+   `nr_pdsch_data_aided.c` needed NO change here: P10a already tags it via
+   `nr_pdsch_passive_view_branch()`, and P07's single-branch view sets `nb_antennas_rx = 1` with
+   `rxdata` pointing at the branch's own plane, so its `nr_isac_aoa_antennas()` clamp already
+   resolves to that one physical channel. Its `:210` row is closed by the view mechanism, not by the
+   plan.
+   **This document's claim that "`nr_isac_aoa_antennas()` is dead and goes with them, in the same
+   commit" is WRONG and is corrected here.** The accessor is what still selects the four-element
+   co-located-array extraction, which is the live, validated AoA path and the ONLY thing feeding the
+   global ENU tracker an angle. It is dead only once AoA's compact-array code itself is deleted --
+   **Stage C item 4**, not Stage B. Removing it here would silently drop every AoA deployment to one
+   antenna, which is exactly the regression this document's own Stage C rationale forbids.
+   **Real gap found while doing this, NOT closed**: the configuration surface does not reject
+   `aoa_enable` together with `rx_branches` naming more than one branch. They are mutually exclusive
+   deployment models (co-located array on one branch vs physically separated single-antenna
+   receivers) and they cannot be served by one engine -- `sensing_engine.cc`'s `build_window()` takes
+   the MINIMUM available antenna count across rows, so a mixture collapses the window to one antenna
+   and silently disables AoA. P10b therefore makes multi-branch mode SKIP the AoA submission (it does
+   not run both paths) and `nr_isac_init()` now logs `LOG_E` naming the combination. Turning that
+   into a hard rejection is an operator call -- it would refuse to start a receiver that starts
+   today -- and is left open.
+   Stage A item 2's comment rewrite still rides along here and is still NOT done.
+3. Row 8 - per-branch decode provenance for the data-aided CFR. NOT done (P10b touched the
+   submission plan, not the shared-decode coupling).
 4. Row 10 - lift `rx_array_calibration` out from behind `aoa_enable` into per-branch chain
    metadata. REFACTOR. Must precede any removal of the `rx_array*` keys, or the calibration is
    lost together with the geometry.

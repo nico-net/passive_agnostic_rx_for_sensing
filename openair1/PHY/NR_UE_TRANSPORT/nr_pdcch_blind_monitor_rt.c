@@ -2236,6 +2236,21 @@ constdiag_done:;
       if (nof_ant > NR_PDCCH_BLIND_MAX_ANT) {
         nof_ant = NR_PDCCH_BLIND_MAX_ANT;
       }
+      // adaptive_RX_pipeline.md P10b: same submission plan as csi_rx.c's CSI-RS tap -- one untagged
+      // multi-antenna submission at one active branch (unchanged), one single-antenna submission per
+      // branch otherwise. The SNR gate below stays on packed plane 0: it decides whether this blind
+      // PDCCH candidate is credible at all, which is a receiver-wide decision about the grant, not a
+      // per-branch measurement, and gating each branch separately would make one branch's fade
+      // silently change another branch's row count.
+      nr_isac_submit_plan_t plan[NR_RX_BRANCH_MAX];
+      uint32_t pack_ant = 0;
+      const uint32_t avail_ant = (uint32_t)fp->nb_antennas_rx < NR_PDCCH_BLIND_MAX_ANT
+                                     ? (uint32_t)fp->nb_antennas_rx
+                                     : (uint32_t)NR_PDCCH_BLIND_MAX_ANT;
+      const int nof_plan = nr_isac_submit_plan(plan, NR_RX_BRANCH_MAX, nof_ant, avail_ant, &pack_ant);
+      if (nof_plan > 0 && pack_ant > 0) {
+        nof_ant = pack_ant;
+      }
       static __thread float    isac_h[NR_PDCCH_BLIND_MAX_ANT * 2 * 273 * NR_NB_SC_PER_RB];
       static __thread uint32_t isac_k[273 * NR_NB_SC_PER_RB];
       static __thread uint32_t isac_l[273 * NR_NB_SC_PER_RB];
@@ -2272,9 +2287,18 @@ constdiag_done:;
                                        .dl_center_hz    = fp->dl_CarrierFreq,
                                        .pci             = fp->Nid_cell,
                                        .slots_per_frame = fp->slots_per_frame};
-          nr_isac_submit_cfr_multi(abs_slot, 0.0f, NR_ISAC_SRC_PDSCH_DMRS_BLIND, &carrier, isac_h, nof_ant,
-                                   273 * NR_NB_SC_PER_RB, isac_k, isac_l, nof_re, (float)nvar);
-          g_cfr_submits++;
+          for (int p = 0; p < nof_plan; p++) {
+            nr_isac_submit_cfr_multi_branch(abs_slot, 0.0f, NR_ISAC_SRC_PDSCH_DMRS_BLIND, &carrier,
+                                            &isac_h[2 * (size_t)plan[p].first_ant * (273 * NR_NB_SC_PER_RB)],
+                                            plan[p].nof_ant, 273 * NR_NB_SC_PER_RB, isac_k, isac_l,
+                                            nof_re, (float)nvar, plan[p].branch_id);
+          }
+          // One CANDIDATE produced CFR, however many branches measured it -- this counter is the
+          // blind monitor's accept-to-submit ratio (see the 1:1 accepts/cfr_submits check in
+          // PHASE3_BLIND_PDCCH_LIVE_WIRING_HANDOVER.md) and must not start counting branches.
+          if (nof_plan > 0) {
+            g_cfr_submits++;
+          }
         }
 
         // ---- Passive data-aided PDSCH (PASSIVE_PDSCH_DATA_AIDED_HANDOVER.md Part B). Deliberately

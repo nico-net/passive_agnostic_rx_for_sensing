@@ -407,6 +407,44 @@ inline int branch_engine_index(const nr_rx_branch_set_t& set, uint8_t branch_id)
   return branch_is_active(set, branch_id) ? static_cast<int>(branch_id) : -1;
 }
 
+/* P10b: the submission-plan derivation, as a free function for exactly the reason the four helpers
+ * above are free functions -- the legacy-identity regression is the safety-critical property and it
+ * has to be pinnable from the parity test, which cannot reach nr_isac_init(). nr_isac.cc's
+ * nr_isac_submit_plan() is a thin C wrapper over this that supplies the process-wide branch set and
+ * counts the skips. See nr_isac.h for the contract. */
+inline int build_submit_plan(const nr_rx_branch_set_t* set, nr_isac_submit_plan_t* out, int max,
+                             uint32_t legacy_nof_ant, uint32_t available_antennas,
+                             uint32_t* pack_antennas)
+{
+  if (pack_antennas) *pack_antennas = 0;
+  if (!out || max < 1) return 0;
+  const int active = set ? branch_active_count(*set) : 0;
+  if (active <= 1) {
+    // THE REGRESSION PIN. Legacy nof_ant verbatim -- the producer has already clamped it against
+    // its own buffer and nb_antennas_rx, and re-clamping here would silently change the AoA path.
+    out[0].first_ant = 0;
+    out[0].nof_ant = legacy_nof_ant;
+    out[0].branch_id = NR_ISAC_BRANCH_NONE;
+    if (pack_antennas) *pack_antennas = legacy_nof_ant;
+    return 1;
+  }
+  if (active > max) return -1;  // never fan out to a silent subset
+  int n = 0;
+  uint32_t pack = 0;
+  for (int b = 0; b < NR_RX_BRANCH_MAX; ++b) {
+    if (!branch_is_active(*set, b)) continue;
+    const uint32_t physical = static_cast<uint32_t>(set->b[b].physical_channel);  // >= 0 by the predicate
+    if (physical >= available_antennas) continue;  // the wrapper counts and logs this
+    out[n].first_ant = physical;
+    out[n].nof_ant = 1;
+    out[n].branch_id = static_cast<uint8_t>(b);
+    if (physical + 1u > pack) pack = physical + 1u;
+    ++n;
+  }
+  if (pack_antennas) *pack_antennas = pack;
+  return n;
+}
+
 inline double slot_duration_s(double scs_hz)
 { return 1e-3 / std::max(1.0, scs_hz / 15000.0); }
 

@@ -727,6 +727,86 @@ void test_branch_engine_routing()
           "an empty branch set must route nothing");
 }
 
+// ---------------------------------------------------------------------------------------------
+// adaptive_RX_pipeline.md P10b (AoA-removal audit Stage B item 2): the CFR producers' submission
+// plan. Two properties, in order of how much damage getting them wrong would do:
+//   (a) THE REGRESSION PIN -- with <= 1 active branch the plan is EXACTLY the call the producer
+//       made before P10b: one submission, antenna plane 0, the producer's own antenna count
+//       verbatim, branch identity explicitly ABSENT. Every producer routes through this one
+//       function, so this single assertion is the structural proof for all of them.
+//   (b) with several branches, one SINGLE-ANTENNA submission per branch reading THAT branch's own
+//       physical channel and tagged with its branch id -- never another branch's plane, never a
+//       fabricated branch 0.
+// The drop-not-misroute guarantee itself is NOT re-tested here: every entry this plan produces is
+// submitted through nr_isac_submit_cfr_multi_branch(), which test_branch_engine_routing() above
+// already pins.
+void test_branch_submit_plan()
+{
+  nr_isac_submit_plan_t plan[NR_RX_BRANCH_MAX];
+  uint32_t pack = 0;
+
+  // (a) No branch set at all (sensing's stub/legacy shape) and a single branch, AoA's four antennas.
+  require(build_submit_plan(nullptr, plan, NR_RX_BRANCH_MAX, 4, 4, &pack) == 1
+              && plan[0].first_ant == 0 && plan[0].nof_ant == 4
+              && plan[0].branch_id == NR_ISAC_BRANCH_NONE && pack == 4,
+          "with no branch set the plan must be the legacy untagged submission, antennas unchanged");
+  for (int id : {0, 3}) {
+    const nr_rx_branch_set_t one = branch_set({id});
+    require(build_submit_plan(&one, plan, NR_RX_BRANCH_MAX, 4, 4, &pack) == 1
+                && plan[0].first_ant == 0 && plan[0].nof_ant == 4
+                && plan[0].branch_id == NR_ISAC_BRANCH_NONE && pack == 4,
+            "one active branch must keep the legacy multi-antenna AoA submission, untagged");
+    // The producer's own clamp is authoritative and must pass through untouched, even when it
+    // exceeds what this layer would consider available -- re-clamping here would silently change
+    // the live AoA path.
+    require(build_submit_plan(&one, plan, NR_RX_BRANCH_MAX, 1, 4, &pack) == 1
+                && plan[0].nof_ant == 1 && pack == 1,
+            "the single-branch plan must carry the producer's antenna count verbatim");
+  }
+
+  // (b) Two branches on physical channels 0 and 1: one single-antenna submission each, tagged.
+  const nr_rx_branch_set_t two = branch_set({0, 2});  // branch 0 -> phys 0, branch 2 -> phys 1
+  require(build_submit_plan(&two, plan, NR_RX_BRANCH_MAX, 4, 4, &pack) == 2,
+          "two active branches must produce one submission each");
+  require(plan[0].branch_id == 0 && plan[0].first_ant == 0 && plan[0].nof_ant == 1,
+          "a branch submission must be single-antenna and read its own physical channel");
+  require(plan[1].branch_id == 2 && plan[1].first_ant == 1 && plan[1].nof_ant == 1,
+          "the second branch must read ITS physical channel, and be tagged by branch id not ordinal");
+  require(pack == 2, "the producer must pack exactly the planes the plan reads");
+  require(plan[0].branch_id != NR_ISAC_BRANCH_NONE && plan[1].branch_id != NR_ISAC_BRANCH_NONE,
+          "a multi-branch submission must never be untagged: untagged rows all land on one engine");
+
+  // A branch mapped to a physical channel the producer cannot reach is SKIPPED, not folded into
+  // another branch's plane and not silently read out of bounds.
+  require(build_submit_plan(&two, plan, NR_RX_BRANCH_MAX, 4, 1, &pack) == 1
+              && plan[0].branch_id == 0 && plan[0].first_ant == 0 && pack == 1,
+          "a branch whose physical channel exceeds the producer's buffer must be dropped");
+  require(build_submit_plan(&two, plan, NR_RX_BRANCH_MAX, 4, 0, &pack) == 0 && pack == 0,
+          "with no reachable antenna the producer must submit nothing at all");
+
+  // Never fan out to a silent subset -- the same rule nr_rx_branch_set_dispatch() states.
+  require(build_submit_plan(&two, plan, 1, 4, 4, &pack) == -1,
+          "a plan that does not fit the caller's array must fail, not drop a branch quietly");
+
+  // A mapped-but-DISABLED slot is not a branch, and must not acquire a submission.
+  nr_rx_branch_set_t half = branch_set({0, 1});
+  half.b[1].state = NR_RXB_DISABLED;
+  require(build_submit_plan(&half, plan, NR_RX_BRANCH_MAX, 4, 4, &pack) == 1
+              && plan[0].branch_id == NR_ISAC_BRANCH_NONE,
+          "with the second branch disabled the set is single-branch again: back to the legacy plan");
+
+  // Four branches, identity map: the plan must be exhaustive and collision-free.
+  const nr_rx_branch_set_t all = branch_set({0, 1, 2, 3});
+  require(build_submit_plan(&all, plan, NR_RX_BRANCH_MAX, 4, 4, &pack) == 4 && pack == 4,
+          "every active branch must get its own submission");
+  uint32_t seen = 0;
+  for (int i = 0; i < 4; ++i) {
+    require(plan[i].branch_id == (uint8_t)i && plan[i].nof_ant == 1, "branch order must be by id");
+    require(!(seen & (1u << plan[i].first_ant)), "no two branches may read the same antenna plane");
+    seen |= 1u << plan[i].first_ant;
+  }
+}
+
 void test_branch_output_identity()
 {
   PipelineConfig base;
@@ -1001,7 +1081,7 @@ void test_obsolete_aoa_env_rejected()
 
 int main()
 {
-  try {test_fft();test_adaptive_threshold();test_detector();test_required_cuda_contract();test_aoa();test_aoa_component_mixture_and_cross_leg_fusion();test_enu_geometry();test_repeated_ul_confirmation_gates_global_birth();test_variable_cpi();test_causal_cpi_pipeline();test_finite_admission_window();test_mixed_row_dl_rdm_isolation();test_invalid_ul_does_not_suppress_dl();test_dl_capture_fails_closed_without_dl();test_validation_report_compatibility();test_branch_identity_report();test_branch_engine_routing();test_branch_output_identity();test_branch_engines_are_independent();test_obsolete_aoa_env_rejected();}
+  try {test_fft();test_adaptive_threshold();test_detector();test_required_cuda_contract();test_aoa();test_aoa_component_mixture_and_cross_leg_fusion();test_enu_geometry();test_repeated_ul_confirmation_gates_global_birth();test_variable_cpi();test_causal_cpi_pipeline();test_finite_admission_window();test_mixed_row_dl_rdm_isolation();test_invalid_ul_does_not_suppress_dl();test_dl_capture_fails_closed_without_dl();test_validation_report_compatibility();test_branch_identity_report();test_branch_engine_routing();test_branch_submit_plan();test_branch_output_identity();test_branch_engines_are_independent();test_obsolete_aoa_env_rejected();}
   catch(const std::exception& e){std::fprintf(stderr,"python parity test failed: %s\n",e.what());return EXIT_FAILURE;}
   std::puts("native sensing golden parity checks passed");return EXIT_SUCCESS;
 }

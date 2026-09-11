@@ -115,6 +115,49 @@ void nr_isac_submit_cfr_multi_branch(uint32_t slot_idx,
                                      uint8_t branch_id);
 
 uint32_t nr_isac_aoa_antennas(void);
+
+/* adaptive_RX_pipeline.md P10b (AoA-removal audit Stage B item 2): ONE CFR submission's antenna
+ * slice and branch identity. A producer packs its per-antenna channel estimates ONCE, antenna-major
+ * with a fixed stride, and then submits one slice per plan entry -- `first_ant` is a pointer offset
+ * into that buffer, never a second pack. */
+typedef struct nr_isac_submit_plan_s {
+  uint32_t first_ant;  /* index of the first antenna plane this submission reads */
+  uint32_t nof_ant;    /* how many consecutive planes from first_ant */
+  uint8_t branch_id;   /* NR_ISAC_BRANCH_NONE on the legacy single-engine submission */
+} nr_isac_submit_plan_t;
+
+/* Fills out[] with the submissions a CFR producer must make this slot, and *pack_antennas (may be
+ * NULL) with how many antenna planes it must pack to serve all of them.
+ *
+ * With ONE active receive branch -- today's default, and the co-located-array AoA deployment -- this
+ * returns exactly ONE entry {first_ant = 0, nof_ant = legacy_nof_ant, branch_id = BRANCH_NONE}, i.e.
+ * the call the producer makes today, with the identity explicitly absent. That is the whole reason
+ * the legacy path is unchanged rather than merely tested unchanged.
+ *
+ * With SEVERAL active branches (physically separated single-antenna receivers) it returns one
+ * SINGLE-ANTENNA entry per active branch, reading that branch's own `physical_channel` and tagged
+ * with its branch_id, so each branch's rows reach its own SensingEngine. The multi-antenna AoA
+ * submission is NOT also made: mixing 1-antenna and 4-antenna rows in one engine collapses that
+ * engine's coherent window to one antenna (sensing_engine.cc's build_window() takes the MINIMUM
+ * available antenna count across rows) and silently disables AoA rather than fusing anything. AoA
+ * and multi-branch are mutually exclusive deployment modes; nr_isac_init() now says so loudly when
+ * both are configured.
+ *
+ * `available_antennas` is the producer's own bound -- min(frame_parms->nb_antennas_rx, the
+ * producer's packing-buffer capacity), and 1 when the producer holds a single-plane buffer. A
+ * branch whose physical_channel is at or beyond it is SKIPPED (counted, logged once): reading a
+ * plane the producer does not have would be an out-of-bounds read, and folding that branch into
+ * another one is the misrouting P13a exists to prevent.
+ *
+ * Returns the number of entries written, 0 when sensing is off or no branch is serviceable, or -1
+ * when `max` is smaller than the active branch count -- following nr_rx_branch_set_dispatch()'s
+ * rule that a caller must never fan out to a silent subset. A producer treats <= 0 as "submit
+ * nothing this slot". */
+int nr_isac_submit_plan(nr_isac_submit_plan_t *out,
+                        int max,
+                        uint32_t legacy_nof_ant,
+                        uint32_t available_antennas,
+                        uint32_t *pack_antennas);
 uint32_t nr_isac_subslot_config(uint32_t *min_re, float *min_snr_db);
 
 /* adaptive_RX_pipeline.md P03: [sensing] rx_branches / rx_branch_phys_map, parsed by

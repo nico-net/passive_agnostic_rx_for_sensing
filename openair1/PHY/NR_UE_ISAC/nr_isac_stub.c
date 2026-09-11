@@ -32,6 +32,22 @@ void nr_isac_submit_cfr_multi_branch(uint32_t s, float f, int t, const nr_isac_c
                                      uint8_t b)
 { (void)s; (void)f; (void)t; (void)c; (void)h; (void)a; (void)z; (void)k; (void)l; (void)n; (void)v; (void)b; }
 uint32_t nr_isac_aoa_antennas(void) { return 0; }
+/* P10b: must exist here too, for the same reason nr_isac_submit_cfr_multi_branch() does -- the
+ * producers call it unconditionally and PHY_NR_UE links regardless of ENABLE_ISAC_SENSING. Returns
+ * the legacy single submission so a stub build's producers behave exactly as they did; they are
+ * gated on nr_isac_enabled() (0 here) and never reach the submit anyway. */
+int nr_isac_submit_plan(nr_isac_submit_plan_t *out, int max, uint32_t legacy_nof_ant,
+                        uint32_t available_antennas, uint32_t *pack_antennas)
+{
+  (void)available_antennas;
+  if (pack_antennas) *pack_antennas = 0;
+  if (out == NULL || max < 1) return 0;
+  out[0].first_ant = 0;
+  out[0].nof_ant = legacy_nof_ant;
+  out[0].branch_id = NR_ISAC_BRANCH_NONE;
+  if (pack_antennas) *pack_antennas = legacy_nof_ant;
+  return 1;
+}
 uint32_t nr_isac_subslot_config(uint32_t *min_re, float *min_snr_db)
 { if (min_re) *min_re = 0; if (min_snr_db) *min_snr_db = 0.0f; return 0; }
 const nr_rx_branch_set_t *nr_isac_rx_branches(void) { return NULL; }

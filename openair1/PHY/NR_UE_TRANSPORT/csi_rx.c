@@ -970,6 +970,26 @@ static void nr_isac_submit_csirs_ls(const NR_DL_FRAME_PARMS *frame_parms,
   if (nof_ant > NR_ISAC_CSIRS_MAX_ANT)
     nof_ant = NR_ISAC_CSIRS_MAX_ANT;
 
+  // adaptive_RX_pipeline.md P10b: who consumes this row. With one active receive branch -- the
+  // default, and the co-located-array AoA deployment -- this is ONE untagged submission of exactly
+  // the antenna count computed above, i.e. the call that was here before. With several branches it
+  // is one SINGLE-ANTENNA submission per branch, each reading its own physical channel's plane out
+  // of the same packed buffer (a pointer offset, not a second pack) and tagged with its branch id.
+  // `ant_stride == 0` means the caller handed a single-plane estimate, so only physical channel 0
+  // is reachable; a branch mapped elsewhere is skipped and counted inside nr_isac_submit_plan().
+  nr_isac_submit_plan_t plan[NR_RX_BRANCH_MAX];
+  uint32_t pack_ant = 0;
+  const uint32_t avail_ant =
+      (ant_stride == 0)
+          ? 1u
+          : ((uint32_t)frame_parms->nb_antennas_rx < NR_ISAC_CSIRS_MAX_ANT
+                 ? (uint32_t)frame_parms->nb_antennas_rx
+                 : (uint32_t)NR_ISAC_CSIRS_MAX_ANT);
+  const int nof_plan = nr_isac_submit_plan(plan, NR_RX_BRANCH_MAX, nof_ant, avail_ant, &pack_ant);
+  if (nof_plan <= 0 || pack_ant == 0)
+    return;
+  nof_ant = pack_ant;  // pack once, exactly the planes the plan reads (== the old value at 1 branch)
+
   static __thread float    isac_h[NR_ISAC_CSIRS_MAX_ANT * 2 * NR_ISAC_CSIRS_MAX_RE];
   static __thread uint32_t isac_k[NR_ISAC_CSIRS_MAX_RE];
   static __thread uint32_t isac_l[NR_ISAC_CSIRS_MAX_RE];
@@ -1051,8 +1071,14 @@ static void nr_isac_submit_csirs_ls(const NR_DL_FRAME_PARMS *frame_parms,
                                  .pci             = frame_parms->Nid_cell,
                                  .slots_per_frame = frame_parms->slots_per_frame};
     const uint32_t slot_idx = (uint32_t)(proc->frame_rx * frame_parms->slots_per_frame + proc->nr_slot_rx);
-    nr_isac_submit_cfr_multi(slot_idx, 0.0f, NR_ISAC_SRC_CSI_RS, &carrier, isac_h, nof_ant, NR_ISAC_CSIRS_MAX_RE,
-                             isac_k, isac_l, nof_re, (float)noise_power);
+    for (int p = 0; p < nof_plan; p++) {
+      // Slice, not copy: the buffer is antenna-major with stride NR_ISAC_CSIRS_MAX_RE, so this
+      // branch's own plane is a pointer offset into it.
+      nr_isac_submit_cfr_multi_branch(slot_idx, 0.0f, NR_ISAC_SRC_CSI_RS, &carrier,
+                                      &isac_h[2 * (size_t)plan[p].first_ant * NR_ISAC_CSIRS_MAX_RE],
+                                      plan[p].nof_ant, NR_ISAC_CSIRS_MAX_RE, isac_k, isac_l, nof_re,
+                                      (float)noise_power, plan[p].branch_id);
+    }
   }
 }
 

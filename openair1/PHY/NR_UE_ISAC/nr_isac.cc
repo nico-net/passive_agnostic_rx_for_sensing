@@ -49,6 +49,10 @@ std::atomic<uint64_t> dropped_unrouted{0};
 std::atomic<uint32_t> logged_unrouted{0};
 std::atomic<uint64_t> untagged_submissions{0};
 std::atomic<bool> logged_untagged_fanin{false};
+// P10b: a branch whose physical channel a producer cannot reach contributes NOTHING rather than
+// being folded into another branch. Same drop-and-say-so rule as the routing refusal above.
+std::atomic<uint64_t> plan_skipped_branches{0};
+std::atomic<bool> logged_plan_skip{false};
 
 // adaptive_RX_pipeline.md P03: [sensing] rx_branches / rx_branch_phys_map, foundation only (not
 // yet consulted by the RT read loop -- see nr_isac.h's nr_isac_rx_branches() comment).
@@ -338,17 +342,44 @@ extern "C" void nr_isac_init(void)
   for (auto& slot : engines) slot.reset();
   engines_built = 0;
   dropped_unrouted.store(0, std::memory_order_relaxed);
+  plan_skipped_branches.store(0, std::memory_order_relaxed);
+  logged_plan_skip.store(false, std::memory_order_relaxed);
   logged_unrouted.store(0, std::memory_order_relaxed);
   untagged_submissions.store(0, std::memory_order_relaxed);
   logged_untagged_fanin.store(false, std::memory_order_relaxed);
+  // P10b: the configuration surface does NOT reject aoa_enable together with several receive
+  // branches -- aoa_enable/rx_array and rx_branches are parsed independently above -- yet the two
+  // are mutually exclusive deployment models: AoA needs one CO-LOCATED four-element array on ONE
+  // branch, multi-branch needs physically separated single-antenna receivers. The combination is
+  // now REFUSED, but by SensingEngine's own pre-existing "AoA requires four channels" guard a few
+  // lines below, which on its own gives the operator no idea why they suddenly have one channel.
+  // This is that explanation, and it must be printed BEFORE the loop that fails -- a message after
+  // the loop would be unreachable in exactly the configuration it describes. Making it a config
+  // parse-time rejection instead is an operator call (it changes which configurations start) and
+  // is deliberately left open; see docs/aoa_removal_audit.md Stage B item 2.
+  if (pipeline.aoa_enable && branch_active_count(branches) > 1)
+    LOG_E(PHY,"SENSING: aoa_enable is set but %d receive branches are active. AoA needs a co-located "
+              "four-element array on ONE branch; a multi-branch receiver measures one antenna per "
+              "branch, so each engine is built with ONE channel and the AoA guard below will refuse "
+              "this configuration. Use one branch for AoA, or drop aoa_enable\n",
+          branch_active_count(branches));
   for (uint8_t b = 0; b < NR_RX_BRANCH_MAX; ++b) {
     // branch_is_active(), the SAME predicate branch_pipeline_config() counts and
     // branch_engine_index() routes by. Using a different one here is precisely how a set could
     // build N engines while deriving one unsuffixed output identity for all of them.
     if (!branch_is_active(branches, b)) continue;
     try {
+      // P10b (AoA-removal audit Stage B item 1, the audit's stale `nr_isac.cc:317` citation): the
+      // channel count comes from the BRANCH SET once there is more than one branch. A physically
+      // separated branch is one antenna by construction (P03's branch:physical map is 1:1), so
+      // asking for four here would reserve four planes per row in every engine -- 4x the CFR
+      // working set, in a pipeline with a documented allocation-failure history -- to hold three
+      // planes that no producer can fill. With ONE active branch this is exactly the previous
+      // expression, which is what keeps the co-located-array AoA path untouched.
+      const uint32_t branch_antennas =
+          branch_active_count(branches) > 1 ? 1u : (aoa_antennas ? aoa_antennas : 1u);
       engines[b] = std::make_unique<SensingEngine>(branch_pipeline_config(pipeline, branches, b),
-                                                   275, aoa_antennas ? aoa_antennas : 1);
+                                                   275, branch_antennas);
     } catch (const std::exception& e) {
       // A partially built array is not a usable receiver: one branch silently missing would look
       // like a coverage result rather than a configuration error.
@@ -393,14 +424,40 @@ extern "C" void nr_isac_stop(void)
   for (auto& slot : engines) if (slot) slot->stop();
   const unsigned long long unrouted = dropped_unrouted.load(std::memory_order_relaxed);
   const unsigned long long untagged = untagged_submissions.load(std::memory_order_relaxed);
-  if (unrouted || (untagged && engines_built > 1))
-    LOG_I(PHY, "SENSING: branch routing census: engines=%u dropped_unrouted=%llu untagged=%llu\n",
-          engines_built, unrouted, untagged);
+  const unsigned long long plan_skips = plan_skipped_branches.load(std::memory_order_relaxed);
+  if (unrouted || plan_skips || (untagged && engines_built > 1))
+    LOG_I(PHY, "SENSING: branch routing census: engines=%u dropped_unrouted=%llu untagged=%llu "
+               "plan_skipped_branches=%llu\n",
+          engines_built, unrouted, untagged, plan_skips);
 }
 extern "C" int nr_isac_enabled(void){return enabled.load(std::memory_order_relaxed);}
 extern "C" int nr_isac_source(void){for(int i=0;i<NR_ISAC_SRC_COUNT;++i)if(pipeline.sources_mask&(1u<<i))return i;return NR_ISAC_SRC_CSI_RS;}
 extern "C" int nr_isac_source_enabled(int source){return enabled.load()&&source>=0&&source<NR_ISAC_SRC_COUNT&&(pipeline.sources_mask&(1u<<source));}
 extern "C" uint32_t nr_isac_aoa_antennas(void){return enabled.load()&&pipeline.aoa_enable?aoa_antennas:0;}
+extern "C" int nr_isac_submit_plan(nr_isac_submit_plan_t* out,int max,uint32_t legacy_nof_ant,
+                                    uint32_t available_antennas,uint32_t* pack_antennas)
+{
+  if(!enabled.load(std::memory_order_relaxed)||!engines_built){
+    if(pack_antennas)*pack_antennas=0;
+    return 0;
+  }
+  const nr_rx_branch_set_t* set=branches_valid?&branches:nullptr;
+  const int written=build_submit_plan(set,out,max,legacy_nof_ant,available_antennas,pack_antennas);
+  // A branch that produced no entry measured nothing this slot. Silence here would look like
+  // coverage; it is a configuration error (a physical channel the producer cannot reach).
+  if(written>0&&set){
+    const int active=branch_active_count(*set);
+    if(active>1&&written<active){
+      plan_skipped_branches.fetch_add((unsigned)(active-written),std::memory_order_relaxed);
+      if(!logged_plan_skip.exchange(true,std::memory_order_relaxed))
+        LOG_E(PHY,"SENSING: %d of %d active branches name a physical channel this CFR producer "
+                  "cannot reach (available=%u); their rows are DROPPED, never folded into another "
+                  "branch\n",active-written,active,available_antennas);
+    }
+  }
+  return written;
+}
+
 extern "C" uint32_t nr_isac_subslot_config(uint32_t* min_re,float* min_snr){if(!enabled.load())return 0;if(min_re)*min_re=pipeline.subslot_min_re;if(min_snr)*min_snr=pipeline.subslot_min_snr_db;return pipeline.subslot_symbols;}
 extern "C" const nr_rx_branch_set_t* nr_isac_rx_branches(void){return (enabled.load()&&branches_valid)?&branches:nullptr;}
 extern "C" nr_rx_branch_set_t* nr_isac_rx_branches_mutable(void){return (enabled.load()&&branches_valid)?&branches:nullptr;}
