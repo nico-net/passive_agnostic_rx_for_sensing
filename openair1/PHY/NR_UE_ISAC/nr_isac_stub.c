@@ -4,8 +4,6 @@
                     // the branch-set accessors were added (P03).
 #include "PHY/NR_UE_ISAC/nr_isac.h"
 
-int AOA_ENABLE = 0;
-int AOA_UL_ENABLE = 0;
 
 void nr_isac_init(void) {}
 void nr_isac_start(void) {}

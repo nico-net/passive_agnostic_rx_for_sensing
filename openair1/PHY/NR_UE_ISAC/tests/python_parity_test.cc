@@ -7,6 +7,7 @@
 #include "detector_cuda.h"
 #include "enu_tracker.h"
 #include "hierarchical_tracker.h"
+#include "nr_isac.h"
 #include "fft.h"
 #include "report_writer.h"
 #include "sensing_engine.h"
@@ -758,11 +759,25 @@ void test_dl_capture_fails_closed_without_dl()
           "DL RDM capture emitted a report despite having no provenance-proven DL samples");
   std::remove(path.c_str());
 }
+
+/** P14 Stage A: the AoA environment override is removed, so the keys must be REPORTED, never
+ *  honoured. Counting them (rather than only logging) is what makes the removal testable. */
+void test_obsolete_aoa_env_rejected()
+{
+  ::unsetenv("AOA_ENABLE"); ::unsetenv("AOA_UL_ENABLE");
+  require(nr_isac_obsolete_env_keys()==0,"a clean environment must report no obsolete AoA keys");
+  ::setenv("AOA_ENABLE","1",1);
+  require(nr_isac_obsolete_env_keys()==1,"AOA_ENABLE must be reported obsolete, not honoured");
+  ::setenv("AOA_UL_ENABLE","0",1);
+  require(nr_isac_obsolete_env_keys()==2,"AOA_UL_ENABLE must be reported obsolete even when zero");
+  ::unsetenv("AOA_ENABLE"); ::unsetenv("AOA_UL_ENABLE");
+  require(nr_isac_obsolete_env_keys()==0,"obsolete AoA key reporting must not be sticky");
+}
 }
 
 int main()
 {
-  try {test_fft();test_adaptive_threshold();test_detector();test_required_cuda_contract();test_aoa();test_aoa_component_mixture_and_cross_leg_fusion();test_enu_geometry();test_repeated_ul_confirmation_gates_global_birth();test_variable_cpi();test_causal_cpi_pipeline();test_finite_admission_window();test_mixed_row_dl_rdm_isolation();test_invalid_ul_does_not_suppress_dl();test_dl_capture_fails_closed_without_dl();test_validation_report_compatibility();test_branch_identity_report();}
+  try {test_fft();test_adaptive_threshold();test_detector();test_required_cuda_contract();test_aoa();test_aoa_component_mixture_and_cross_leg_fusion();test_enu_geometry();test_repeated_ul_confirmation_gates_global_birth();test_variable_cpi();test_causal_cpi_pipeline();test_finite_admission_window();test_mixed_row_dl_rdm_isolation();test_invalid_ul_does_not_suppress_dl();test_dl_capture_fails_closed_without_dl();test_validation_report_compatibility();test_branch_identity_report();test_obsolete_aoa_env_rejected();}
   catch(const std::exception& e){std::fprintf(stderr,"python parity test failed: %s\n",e.what());return EXIT_FAILURE;}
   std::puts("native sensing golden parity checks passed");return EXIT_SUCCESS;
 }

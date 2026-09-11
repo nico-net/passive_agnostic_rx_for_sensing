@@ -21,8 +21,6 @@ extern "C" {
 #include "common/utils/LOG/log.h"
 }
 
-int AOA_ENABLE = 0;
-int AOA_UL_ENABLE = 0;
 
 namespace {
 using namespace nr_isac;
@@ -162,10 +160,6 @@ bool parse_array_calibration(const char* spec, ArrayCalibration* out)
   return true;
 }
 
-int environment_bool(const char* name, int fallback)
-{
-  const char* value = std::getenv(name); return value ? (std::atoi(value) != 0) : fallback;
-}
 
 } // namespace
 
@@ -249,6 +243,10 @@ extern "C" void nr_isac_init(void)
          &p_rx_branch_phys_map,"0:0"),
   };
   config_get(config_get_if(),params,sizeof(params)/sizeof(params[0]),"sensing");
+  // P14 Stage A: the AoA environment override is gone; a stale launcher must be told, not ignored.
+  if (nr_isac_obsolete_env_keys() > 0)
+    LOG_E(PHY,"SENSING: AOA_ENABLE/AOA_UL_ENABLE are obsolete environment keys and are IGNORED; "
+              "use the [sensing] aoa_enable / aoa_ul_enable configuration keys instead\n");
   if (!p_enable) return;
   branches_valid=false;
   if (nr_rx_branch_set_parse(&branches,p_rx_branches,p_rx_branch_phys_map,p_rx_id?p_rx_id:"rx")!=0) {
@@ -280,9 +278,8 @@ extern "C" void nr_isac_init(void)
   pipeline.sync_enable=p_sync!=0;pipeline.family_static=p_family_static!=0;pipeline.tracker_enable=p_track!=0;
   pipeline.hierarchical_tracker_enable=p_hierarchical!=0;pipeline.capture_rvm=p_capture!=0;
   pipeline.rx_position={p_rx_x,p_rx_y,p_rx_z};pipeline.tx_position={p_tx_x,p_tx_y,p_tx_z};
-  AOA_ENABLE=environment_bool("AOA_ENABLE",p_aoa);const int requested=environment_bool("AOA_UL_ENABLE",p_aoa_ul);
-  AOA_UL_ENABLE=AOA_ENABLE&&requested;pipeline.aoa_enable=AOA_ENABLE;pipeline.aoa_ul_enable_requested=requested;
-  pipeline.aoa_ul_enable=AOA_UL_ENABLE;
+  pipeline.aoa_enable=p_aoa!=0;pipeline.aoa_ul_enable_requested=p_aoa_ul!=0;
+  pipeline.aoa_ul_enable=pipeline.aoa_enable&&pipeline.aoa_ul_enable_requested;
   pipeline.aoa_quality.maximum_relative_manifold_residual_energy=p_aoa_max_manifold;
   pipeline.aoa_quality.maximum_phase_fit_residual_rms_rad=p_aoa_max_phase;
   pipeline.aoa_quality.maximum_azimuth_stddev_deg=p_aoa_max_az_sigma;
@@ -290,11 +287,11 @@ extern "C" void nr_isac_init(void)
   if (pipeline.aoa_enable) {
     if (!parse_array(p_array,p_rotation,p_broadside,pipeline.tx_position,pipeline.rx_position,&pipeline.array)) {
       LOG_E(PHY,"SENSING: aoa_enable requires a valid surveyed rank-two four-element array; sensing disabled\n");
-      AOA_ENABLE=AOA_UL_ENABLE=0;return;
+      pipeline.aoa_enable=pipeline.aoa_ul_enable=false;return;
     }
     if (!parse_array_calibration(p_array_calibration,&pipeline.array_calibration)) {
       LOG_E(PHY,"SENSING: rx_array_calibration must contain four unique observed,gain,phase_rad,delay_ns tuples; sensing disabled\n");
-      AOA_ENABLE=AOA_UL_ENABLE=0;return;
+      pipeline.aoa_enable=pipeline.aoa_ul_enable=false;return;
     }
     aoa_antennas=4;
   }
@@ -318,7 +315,7 @@ extern "C" void nr_isac_init(void)
   catch(const std::exception& e){LOG_E(PHY,"SENSING: invalid native configuration: %s\n",e.what());return;}
   enabled.store(true,std::memory_order_release);
   LOG_I(PHY,"SENSING: native Python-parity pipeline enabled, num_ues=%u sources=0x%x separate_DL_UL=1 AoA=%d UL-AoA=%d array_calibration=%d\n",
-        pipeline.num_ues,pipeline.sources_mask,AOA_ENABLE,AOA_UL_ENABLE,
+        pipeline.num_ues,pipeline.sources_mask,(int)pipeline.aoa_enable,(int)pipeline.aoa_ul_enable,
         pipeline.array_calibration.configured);
 }
 
@@ -338,7 +335,7 @@ extern "C" void nr_isac_stop(void){if(engine&&started.exchange(false))engine->st
 extern "C" int nr_isac_enabled(void){return enabled.load(std::memory_order_relaxed);}
 extern "C" int nr_isac_source(void){for(int i=0;i<NR_ISAC_SRC_COUNT;++i)if(pipeline.sources_mask&(1u<<i))return i;return NR_ISAC_SRC_CSI_RS;}
 extern "C" int nr_isac_source_enabled(int source){return enabled.load()&&source>=0&&source<NR_ISAC_SRC_COUNT&&(pipeline.sources_mask&(1u<<source));}
-extern "C" uint32_t nr_isac_aoa_antennas(void){return enabled.load()&&AOA_ENABLE?aoa_antennas:0;}
+extern "C" uint32_t nr_isac_aoa_antennas(void){return enabled.load()&&pipeline.aoa_enable?aoa_antennas:0;}
 extern "C" uint32_t nr_isac_subslot_config(uint32_t* min_re,float* min_snr){if(!enabled.load())return 0;if(min_re)*min_re=pipeline.subslot_min_re;if(min_snr)*min_snr=pipeline.subslot_min_snr_db;return pipeline.subslot_symbols;}
 extern "C" const nr_rx_branch_set_t* nr_isac_rx_branches(void){return (enabled.load()&&branches_valid)?&branches:nullptr;}
 extern "C" nr_rx_branch_set_t* nr_isac_rx_branches_mutable(void){return (enabled.load()&&branches_valid)?&branches:nullptr;}

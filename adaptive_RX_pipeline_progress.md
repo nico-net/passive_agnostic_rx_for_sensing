@@ -45,7 +45,7 @@ Dates use `YYYY-MM-DD` in Europe/Zurich. Check an implementation item only when 
 | [ ] | P11 | Support / allocation provenance | NOT_STARTED | — | — |
 | [ ] | P12 | Physical time / reference contract | NOT_STARTED | — | — |
 | [ ] | P13 | Four independent sensing engines | NOT_STARTED | — | — |
-| [ ] | P14 | AoA removal / migration | NOT_STARTED | — | — |
+| [ ] | P14 | AoA removal / migration | IN_PROGRESS (audit + Stage A item 1 only) | 2026-09-11 | `docs/aoa_removal_audit.md`: full touchpoint audit by section 2.4 row + A/B/C staged order. Stage A item 1 DONE (AOA_ENABLE/AOA_UL_ENABLE env override + globals removed, obsolete keys rejected loudly). Stage B blocked on P13, Stage C blocked on Stage 5 (P17-P19) — see the session entry. |
 | [ ] | P15 | UL scene-support preservation | NOT_STARTED | — | — |
 | [ ] | P16 | Reports / consumers | NOT_STARTED | — | — |
 | [ ] | P17 | DL geometry / Jacobians / rank | NOT_STARTED | — | — |
@@ -1865,3 +1865,133 @@ Status: IN_PROGRESS (P10 row, ABI slice only), and NOT a gate pass. G3 not passe
 Validity reasons and affected intervals: offline only. No radio was touched — the X410 is unreachable
   for this session by the controller's own statement, and every run here is the replay path, which each
   run's "no radio opened" verdict restates.
+
+## Session — 2026-09-11: P14-audit AoA removal audit, staged plan, first safe removal (Stage 4, P14 IN_PROGRESS)
+
+Date/time (Europe/Zurich): 2026-09-11.
+Task IDs / gate: P14 (Stage 4, G4). AUDIT + STAGED PLAN + Stage A item 1 only. NOT a gate pass;
+  G3 is not passed and G4 is not approached by this session.
+
+Intended falsifiable claim: the `AOA_ENABLE` / `AOA_UL_ENABLE` environment override named in the
+  plan's section 2.4 removal table can be deleted TODAY without touching the AoA DSP, the global
+  tracker, the report schema or any CFR producer, and without changing either recorded replay
+  baseline — and every other row of that table cannot, for a reason stated per row.
+
+Branch / full commit / dirty patch / untracked-file manifest: `merge/adaptive-sensing`, parent
+  `3241cca0ba956c2eecb45c6f2c6a6bdd51de34e1`. Manifest regenerated for this round (see hashes).
+  Pre-existing untracked file `tests/passive_rx/aoa_track_dl.conf` predates this session, is not
+  referenced by anything this session touched, and was deliberately left alone.
+
+Files modified / added / removed:
+  ADD  `docs/aoa_removal_audit.md`  — the deliverable: full touchpoint audit by section 2.4 row
+       (file:line, what it does, whether removal breaks a passing test / the global tracker, and
+       the stage it must wait for), plus the A/B/C staged removal order.
+  ADD  `openair1/PHY/NR_UE_ISAC/nr_isac_env.c` — `nr_isac_obsolete_env_keys()`, `getenv()` only.
+  MOD  `openair1/PHY/NR_UE_ISAC/nr_isac.cc` — removed `environment_bool()`, the two globals and the
+       env override; `PipelineConfig` is now the single source of truth for the AoA switch; one
+       `LOG_E` naming both obsolete keys when either is still set.
+  MOD  `openair1/PHY/NR_UE_ISAC/nr_isac.h` — dropped `extern int AOA_ENABLE/AOA_UL_ENABLE`,
+       declared `nr_isac_obsolete_env_keys()`.
+  MOD  `openair1/PHY/NR_UE_ISAC/nr_isac_stub.c` — dropped the two globals (P10a touched this file;
+       its `nr_isac_submit_cfr_multi_branch()` stub and `<stddef.h>` fix are untouched).
+  MOD  `CMakeLists.txt` — `nr_isac_env.c` added to BOTH `NR_UE_ISAC_SRC` and the
+       `ENABLE_ISAC_SENSING=OFF` stub library, so one definition serves both configurations.
+  MOD  `openair1/PHY/NR_UE_ISAC/tests/python_parity_test.cc` — `test_obsolete_aoa_env_rejected()`.
+  MOD  `tests/passive_rx/baselines/fixtures.json` — binary sha + note.
+  MOD  this ledger.
+  NOT TOUCHED, by controller ruling and by design: `aoa.cc/.h`, `hierarchical_tracker.{cc,h}`,
+  `enu_tracker.{cc,h}`, `cross_leg_fusion.{cc,h}`, `report_writer.cc`, `pipeline_types.h`,
+  `sensing_engine.{cc,h}`, `sync_correction.{cc,h}`, `csi_rx.c`, `nr_pdcch_blind_monitor_rt.c`,
+  `nr_pdsch_data_aided.c`, `phy_procedures_nr_ue.c`, and P07's `t_view_branch` mechanism in
+  `nr_pdsch_passive_decode.c` (distinct from AoA; explicitly checked, no coupling).
+
+Executable / driver / config / geometry / acceptance hashes:
+  `nr-uesoftmodem` sha256 `fffb56a2dfa61e978a89c1d5bc4851f54e00f33e90014ce6b3a9a618fb1e7a35`
+  `liboai_usrpdevif.so` UNCHANGED (not rebuilt; nothing in it was touched).
+  fixture `/home/sens/NICOLA/captures/sensing_manual_fixed.UtvBT7`.
+
+Exact commands:
+  `cmake .` then `make nr-uesoftmodem test_nr_isac_python_parity -j8`  (exit 0; the only 3 warnings
+    are the pre-existing ones in files this session did not touch: `nr_pusch_passive_decode.c:315`,
+    `phy_procedures_nr_ue.c:2030`, `nr_pdcch_blind_monitor_rt.c:1291`)
+  `./test_nr_isac_python_parity`
+  `sudo -n env ISAC_PASSIVE_REPLAY_INPUT=<fixture>/replay.bin LD_LIBRARY_PATH=$(pwd):/usr/local/lib
+    ./nr-uesoftmodem -O <fixture>/receiver.conf -r 273 ... -A 90`   (the registered replay command)
+  `sudo -n bash tests/passive_rx/replay_branch_view.sh`
+  `pgrep -x nr-uesoftmodem` (empty) before building.
+
+Artifact paths: `/tmp/p14_cmake.log`, `/tmp/p14_build.log`, `/tmp/p14_legacy.log`,
+  `/tmp/p14_bview.log`.
+
+Baseline and comparison definition: the P07/P06a/P09/P10a recorded baselines, byte-for-byte —
+  legacy `REPLAY PASS: identical DL controls=34 failed=0 raw UL=24; no radio opened` (exit 0), and
+  `replay_branch_view.sh` 34/34/31/34/34 crc_ok of 38 with `data_submits == own crc_ok` per view.
+  Any change to either was a declared STOP condition.
+
+Predeclared assertions / thresholds: parity test passes with the new case; both replay baselines
+  reproduce EXACTLY; the new case is proven non-vacuous by deliberate falsification.
+
+Observed result, with denominators:
+  `test_nr_isac_python_parity` PASS, 16 cases (15 pre-existing + `test_obsolete_aoa_env_rejected`).
+  NON-VACUOUS BY FALSIFICATION: neutering the counter's `++present` in `nr_isac_env.c` made it fail
+  with `AOA_ENABLE must be reported obsolete, not honoured` (exit 1); restoring it passed again.
+  Legacy replay exit 0, verdict line identical, `REPLAY-VIEW phys=-1 branch=0 records=38 crc_ok=34
+  crc_fail=4 unsupported=0 error=0 unsupported_multilayer=0 data_submits=34`.
+  `replay_branch_view.sh` exit 0: legacy/view0/view1/view2/view3 crc_ok 34/34/31/34/34 of 38,
+  `data_submits` equal to own crc_ok on every view — the recorded baseline reproduced exactly.
+
+Status (PASS / FAIL / VOID / BLOCKED): IN_PROGRESS (P14 row, audit + Stage A item 1 only).
+  NOT a gate pass. **Stages B and C are NOT done and are NOT safe to attempt yet**:
+  * Stage B (5 items: engine channel count, the four `nr_isac_aoa_antennas()` producers + the
+    accessor, per-branch decode provenance, the `rx_array_calibration` refactor, the P16 report
+    schema version) needs P13 (one engine per branch) to exist first. Every one of those items
+    replaces "how many antennas does the AoA switch allow" with "which branches are active", and
+    there is no per-branch engine to route to yet. Removing the accessor now drops all four
+    producers to one antenna.
+  * Stage C (4 items, ending in the deletion of `aoa.cc/.h`, the `aoa_*`/`rx_array*` keys and the
+    `AoaEstimate` model) needs Stage 5 (P17-P19, AoA-free fusion) to EXIST first.
+    `hierarchical_tracker.cc:145` births a global track only from a detection carrying a valid AoA.
+    Cutting the angle before the replacement model exists takes global fusion output to zero, with
+    no offline harness able to show any replacement is equivalent — the exact regression the plan's
+    own G4/G5 gating forbids ("Fusion cannot begin before this gate").
+
+Validity reasons and affected intervals: offline only. No radio was touched — the X410 is
+  unreachable for this session by the controller's own statement, and every run here is the replay
+  path, whose own verdict line restates "no radio opened".
+
+Hypotheses supported / contradicted:
+  SUPPORTED — the section 2.4 table's `AOA_ENABLE`/`AOA_UL_ENABLE` names are NOT stale, but they
+  are not configuration keys either: they were ENVIRONMENT variables silently overriding the real
+  `[sensing] aoa_enable` / `aoa_ul_enable` keys (`nr_isac.cc:283`, via `environment_bool()` at
+  `:165`). Both spellings coexisted. Nothing in the repository set them, and the two exported
+  globals they wrote had no reader outside `nr_isac.cc` — measured across all
+  `.sh/.py/.conf/.md/.c/.cc/.h`, not assumed. The two `AOA_ENABLE` strings in the parity test are
+  assertion MESSAGES for `aoa_observed_mask()`, not symbol uses.
+  CONTRADICTED — the brief's expectation that the config-key row would be the obvious Stage A item
+  because "this repo's confs still use that literal spelling". They do not: eight
+  `tests/passive_rx/ue.passive*.conf` set the lowercase `aoa_enable`, which is LIVE and must not be
+  rejected until Stage C. Only the environment half was obsolete.
+  CONTRADICTED — the brief's file list implies a CUDA AoA path to audit ("CPU/CUDA synchronization
+  paths"). There is no `aoa` reference in any `.cu` file; the only sync-side symbol is
+  `aoa_observed_mask()` in `sync_correction.cc:725`, a pure row-mask helper.
+  CONTRADICTED — the working assumption that a removal sweep would find dead or duplicated AoA
+  code to delete cheaply. Every public symbol in `aoa.h` has a production caller AND a parity-test
+  case. There is no "unused" AoA code in this tree.
+  Filename correction for the docs: the file is `aoa.cc`, not `isac_aoa.cc`; the stale name
+  survives in `SIMULATION/TOOLS/sensing_channel.c:632` and in several project documents.
+
+Retraction, if any: none.
+
+Remaining limitation: the removal executed here is a configuration-surface back door, not any part
+  of the AoA measurement path — by design. The audit is a static one: it resolves every symbol to
+  its callers and every config key to its consumers, but it did not run an AoA-enabled capture
+  (no radio, and the replay path cannot start the sensing engine — see P10a's measured note at
+  `nr-uesoftmodem.c:437` vs `:474`). A definition of `nr_isac_obsolete_env_keys()` inside
+  `nr_isac.cc` was tried first and does not link the offline test (it pulls `nr_isac.o` in, which
+  needs `config_get`/`uniqCfg`/`exit_function`/the branch-set parser); the separate translation
+  unit is that constraint, not a preference.
+
+Next highest-value action: P13 (one engine per branch). It is the unlock for all five Stage B
+  items, and four of them are literally the same edit repeated at four producers.
+
+Reviewer / accomplishment date if gate passed: n/a — not a gate pass.

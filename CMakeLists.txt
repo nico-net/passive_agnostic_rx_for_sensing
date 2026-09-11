@@ -1091,6 +1091,7 @@ set(NR_UE_ISAC_SRC
   ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/sensing_engine.cc
   ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/nr_isac.cc
   ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/nr_isac_ssb_axis.c
+  ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/nr_isac_env.c
   )
 if(ENABLE_CHANNEL_SIM_CUDA)
   list(APPEND NR_UE_ISAC_SRC
@@ -1113,7 +1114,8 @@ if(ENABLE_ISAC_SENSING)
 else()
   # The DL PBCH path calls this geometry helper even in receiver-only builds.
   add_library(NR_UE_ISAC ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/nr_isac_stub.c
-                        ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/nr_isac_ssb_axis.c)
+                        ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/nr_isac_ssb_axis.c
+                        ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/nr_isac_env.c)
   message(STATUS "NR_UE_ISAC: sensing pipeline DISABLED (no-op stub; passive receiver only)")
 endif()
 target_link_libraries(NR_UE_ISAC PRIVATE UTIL)

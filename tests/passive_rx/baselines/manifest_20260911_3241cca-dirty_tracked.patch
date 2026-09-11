@@ -1,0 +1,336 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 2f0aefd2b2..e60f616a1b 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -1091,6 +1091,7 @@ set(NR_UE_ISAC_SRC
+   ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/sensing_engine.cc
+   ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/nr_isac.cc
+   ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/nr_isac_ssb_axis.c
++  ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/nr_isac_env.c
+   )
+ if(ENABLE_CHANNEL_SIM_CUDA)
+   list(APPEND NR_UE_ISAC_SRC
+@@ -1113,7 +1114,8 @@ if(ENABLE_ISAC_SENSING)
+ else()
+   # The DL PBCH path calls this geometry helper even in receiver-only builds.
+   add_library(NR_UE_ISAC ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/nr_isac_stub.c
+-                        ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/nr_isac_ssb_axis.c)
++                        ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/nr_isac_ssb_axis.c
++                        ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/nr_isac_env.c)
+   message(STATUS "NR_UE_ISAC: sensing pipeline DISABLED (no-op stub; passive receiver only)")
+ endif()
+ target_link_libraries(NR_UE_ISAC PRIVATE UTIL)
+diff --git a/adaptive_RX_pipeline_progress.md b/adaptive_RX_pipeline_progress.md
+index 0eedef6efd..dd6947e126 100644
+--- a/adaptive_RX_pipeline_progress.md
++++ b/adaptive_RX_pipeline_progress.md
+@@ -45,7 +45,7 @@ Dates use `YYYY-MM-DD` in Europe/Zurich. Check an implementation item only when
+ | [ ] | P11 | Support / allocation provenance | NOT_STARTED | — | — |
+ | [ ] | P12 | Physical time / reference contract | NOT_STARTED | — | — |
+ | [ ] | P13 | Four independent sensing engines | NOT_STARTED | — | — |
+-| [ ] | P14 | AoA removal / migration | NOT_STARTED | — | — |
++| [ ] | P14 | AoA removal / migration | IN_PROGRESS (audit + Stage A item 1 only) | 2026-09-11 | `docs/aoa_removal_audit.md`: full touchpoint audit by section 2.4 row + A/B/C staged order. Stage A item 1 DONE (AOA_ENABLE/AOA_UL_ENABLE env override + globals removed, obsolete keys rejected loudly). Stage B blocked on P13, Stage C blocked on Stage 5 (P17-P19) — see the session entry. |
+ | [ ] | P15 | UL scene-support preservation | NOT_STARTED | — | — |
+ | [ ] | P16 | Reports / consumers | NOT_STARTED | — | — |
+ | [ ] | P17 | DL geometry / Jacobians / rank | NOT_STARTED | — | — |
+@@ -1865,3 +1865,133 @@ Status: IN_PROGRESS (P10 row, ABI slice only), and NOT a gate pass. G3 not passe
+ Validity reasons and affected intervals: offline only. No radio was touched — the X410 is unreachable
+   for this session by the controller's own statement, and every run here is the replay path, which each
+   run's "no radio opened" verdict restates.
++
++## Session — 2026-09-11: P14-audit AoA removal audit, staged plan, first safe removal (Stage 4, P14 IN_PROGRESS)
++
++Date/time (Europe/Zurich): 2026-09-11.
++Task IDs / gate: P14 (Stage 4, G4). AUDIT + STAGED PLAN + Stage A item 1 only. NOT a gate pass;
++  G3 is not passed and G4 is not approached by this session.
++
++Intended falsifiable claim: the `AOA_ENABLE` / `AOA_UL_ENABLE` environment override named in the
++  plan's section 2.4 removal table can be deleted TODAY without touching the AoA DSP, the global
++  tracker, the report schema or any CFR producer, and without changing either recorded replay
++  baseline — and every other row of that table cannot, for a reason stated per row.
++
++Branch / full commit / dirty patch / untracked-file manifest: `merge/adaptive-sensing`, parent
++  `3241cca0ba956c2eecb45c6f2c6a6bdd51de34e1`. Manifest regenerated for this round (see hashes).
++  Pre-existing untracked file `tests/passive_rx/aoa_track_dl.conf` predates this session, is not
++  referenced by anything this session touched, and was deliberately left alone.
++
++Files modified / added / removed:
++  ADD  `docs/aoa_removal_audit.md`  — the deliverable: full touchpoint audit by section 2.4 row
++       (file:line, what it does, whether removal breaks a passing test / the global tracker, and
++       the stage it must wait for), plus the A/B/C staged removal order.
++  ADD  `openair1/PHY/NR_UE_ISAC/nr_isac_env.c` — `nr_isac_obsolete_env_keys()`, `getenv()` only.
++  MOD  `openair1/PHY/NR_UE_ISAC/nr_isac.cc` — removed `environment_bool()`, the two globals and the
++       env override; `PipelineConfig` is now the single source of truth for the AoA switch; one
++       `LOG_E` naming both obsolete keys when either is still set.
++  MOD  `openair1/PHY/NR_UE_ISAC/nr_isac.h` — dropped `extern int AOA_ENABLE/AOA_UL_ENABLE`,
++       declared `nr_isac_obsolete_env_keys()`.
++  MOD  `openair1/PHY/NR_UE_ISAC/nr_isac_stub.c` — dropped the two globals (P10a touched this file;
++       its `nr_isac_submit_cfr_multi_branch()` stub and `<stddef.h>` fix are untouched).
++  MOD  `CMakeLists.txt` — `nr_isac_env.c` added to BOTH `NR_UE_ISAC_SRC` and the
++       `ENABLE_ISAC_SENSING=OFF` stub library, so one definition serves both configurations.
++  MOD  `openair1/PHY/NR_UE_ISAC/tests/python_parity_test.cc` — `test_obsolete_aoa_env_rejected()`.
++  MOD  `tests/passive_rx/baselines/fixtures.json` — binary sha + note.
++  MOD  this ledger.
++  NOT TOUCHED, by controller ruling and by design: `aoa.cc/.h`, `hierarchical_tracker.{cc,h}`,
++  `enu_tracker.{cc,h}`, `cross_leg_fusion.{cc,h}`, `report_writer.cc`, `pipeline_types.h`,
++  `sensing_engine.{cc,h}`, `sync_correction.{cc,h}`, `csi_rx.c`, `nr_pdcch_blind_monitor_rt.c`,
++  `nr_pdsch_data_aided.c`, `phy_procedures_nr_ue.c`, and P07's `t_view_branch` mechanism in
++  `nr_pdsch_passive_decode.c` (distinct from AoA; explicitly checked, no coupling).
++
++Executable / driver / config / geometry / acceptance hashes:
++  `nr-uesoftmodem` sha256 `fffb56a2dfa61e978a89c1d5bc4851f54e00f33e90014ce6b3a9a618fb1e7a35`
++  `liboai_usrpdevif.so` UNCHANGED (not rebuilt; nothing in it was touched).
++  fixture `/home/sens/NICOLA/captures/sensing_manual_fixed.UtvBT7`.
++
++Exact commands:
++  `cmake .` then `make nr-uesoftmodem test_nr_isac_python_parity -j8`  (exit 0; the only 3 warnings
++    are the pre-existing ones in files this session did not touch: `nr_pusch_passive_decode.c:315`,
++    `phy_procedures_nr_ue.c:2030`, `nr_pdcch_blind_monitor_rt.c:1291`)
++  `./test_nr_isac_python_parity`
++  `sudo -n env ISAC_PASSIVE_REPLAY_INPUT=<fixture>/replay.bin LD_LIBRARY_PATH=$(pwd):/usr/local/lib
++    ./nr-uesoftmodem -O <fixture>/receiver.conf -r 273 ... -A 90`   (the registered replay command)
++  `sudo -n bash tests/passive_rx/replay_branch_view.sh`
++  `pgrep -x nr-uesoftmodem` (empty) before building.
++
++Artifact paths: `/tmp/p14_cmake.log`, `/tmp/p14_build.log`, `/tmp/p14_legacy.log`,
++  `/tmp/p14_bview.log`.
++
++Baseline and comparison definition: the P07/P06a/P09/P10a recorded baselines, byte-for-byte —
++  legacy `REPLAY PASS: identical DL controls=34 failed=0 raw UL=24; no radio opened` (exit 0), and
++  `replay_branch_view.sh` 34/34/31/34/34 crc_ok of 38 with `data_submits == own crc_ok` per view.
++  Any change to either was a declared STOP condition.
++
++Predeclared assertions / thresholds: parity test passes with the new case; both replay baselines
++  reproduce EXACTLY; the new case is proven non-vacuous by deliberate falsification.
++
++Observed result, with denominators:
++  `test_nr_isac_python_parity` PASS, 16 cases (15 pre-existing + `test_obsolete_aoa_env_rejected`).
++  NON-VACUOUS BY FALSIFICATION: neutering the counter's `++present` in `nr_isac_env.c` made it fail
++  with `AOA_ENABLE must be reported obsolete, not honoured` (exit 1); restoring it passed again.
++  Legacy replay exit 0, verdict line identical, `REPLAY-VIEW phys=-1 branch=0 records=38 crc_ok=34
++  crc_fail=4 unsupported=0 error=0 unsupported_multilayer=0 data_submits=34`.
++  `replay_branch_view.sh` exit 0: legacy/view0/view1/view2/view3 crc_ok 34/34/31/34/34 of 38,
++  `data_submits` equal to own crc_ok on every view — the recorded baseline reproduced exactly.
++
++Status (PASS / FAIL / VOID / BLOCKED): IN_PROGRESS (P14 row, audit + Stage A item 1 only).
++  NOT a gate pass. **Stages B and C are NOT done and are NOT safe to attempt yet**:
++  * Stage B (5 items: engine channel count, the four `nr_isac_aoa_antennas()` producers + the
++    accessor, per-branch decode provenance, the `rx_array_calibration` refactor, the P16 report
++    schema version) needs P13 (one engine per branch) to exist first. Every one of those items
++    replaces "how many antennas does the AoA switch allow" with "which branches are active", and
++    there is no per-branch engine to route to yet. Removing the accessor now drops all four
++    producers to one antenna.
++  * Stage C (4 items, ending in the deletion of `aoa.cc/.h`, the `aoa_*`/`rx_array*` keys and the
++    `AoaEstimate` model) needs Stage 5 (P17-P19, AoA-free fusion) to EXIST first.
++    `hierarchical_tracker.cc:145` births a global track only from a detection carrying a valid AoA.
++    Cutting the angle before the replacement model exists takes global fusion output to zero, with
++    no offline harness able to show any replacement is equivalent — the exact regression the plan's
++    own G4/G5 gating forbids ("Fusion cannot begin before this gate").
++
++Validity reasons and affected intervals: offline only. No radio was touched — the X410 is
++  unreachable for this session by the controller's own statement, and every run here is the replay
++  path, whose own verdict line restates "no radio opened".
++
++Hypotheses supported / contradicted:
++  SUPPORTED — the section 2.4 table's `AOA_ENABLE`/`AOA_UL_ENABLE` names are NOT stale, but they
++  are not configuration keys either: they were ENVIRONMENT variables silently overriding the real
++  `[sensing] aoa_enable` / `aoa_ul_enable` keys (`nr_isac.cc:283`, via `environment_bool()` at
++  `:165`). Both spellings coexisted. Nothing in the repository set them, and the two exported
++  globals they wrote had no reader outside `nr_isac.cc` — measured across all
++  `.sh/.py/.conf/.md/.c/.cc/.h`, not assumed. The two `AOA_ENABLE` strings in the parity test are
++  assertion MESSAGES for `aoa_observed_mask()`, not symbol uses.
++  CONTRADICTED — the brief's expectation that the config-key row would be the obvious Stage A item
++  because "this repo's confs still use that literal spelling". They do not: eight
++  `tests/passive_rx/ue.passive*.conf` set the lowercase `aoa_enable`, which is LIVE and must not be
++  rejected until Stage C. Only the environment half was obsolete.
++  CONTRADICTED — the brief's file list implies a CUDA AoA path to audit ("CPU/CUDA synchronization
++  paths"). There is no `aoa` reference in any `.cu` file; the only sync-side symbol is
++  `aoa_observed_mask()` in `sync_correction.cc:725`, a pure row-mask helper.
++  CONTRADICTED — the working assumption that a removal sweep would find dead or duplicated AoA
++  code to delete cheaply. Every public symbol in `aoa.h` has a production caller AND a parity-test
++  case. There is no "unused" AoA code in this tree.
++  Filename correction for the docs: the file is `aoa.cc`, not `isac_aoa.cc`; the stale name
++  survives in `SIMULATION/TOOLS/sensing_channel.c:632` and in several project documents.
++
++Retraction, if any: none.
++
++Remaining limitation: the removal executed here is a configuration-surface back door, not any part
++  of the AoA measurement path — by design. The audit is a static one: it resolves every symbol to
++  its callers and every config key to its consumers, but it did not run an AoA-enabled capture
++  (no radio, and the replay path cannot start the sensing engine — see P10a's measured note at
++  `nr-uesoftmodem.c:437` vs `:474`). A definition of `nr_isac_obsolete_env_keys()` inside
++  `nr_isac.cc` was tried first and does not link the offline test (it pulls `nr_isac.o` in, which
++  needs `config_get`/`uniqCfg`/`exit_function`/the branch-set parser); the separate translation
++  unit is that constraint, not a preference.
++
++Next highest-value action: P13 (one engine per branch). It is the unlock for all five Stage B
++  items, and four of them are literally the same edit repeated at four producers.
++
++Reviewer / accomplishment date if gate passed: n/a — not a gate pass.
+diff --git a/openair1/PHY/NR_UE_ISAC/nr_isac.cc b/openair1/PHY/NR_UE_ISAC/nr_isac.cc
+index 51de20570e..3c5f89f6c0 100644
+--- a/openair1/PHY/NR_UE_ISAC/nr_isac.cc
++++ b/openair1/PHY/NR_UE_ISAC/nr_isac.cc
+@@ -21,8 +21,6 @@ extern "C" {
+ #include "common/utils/LOG/log.h"
+ }
+ 
+-int AOA_ENABLE = 0;
+-int AOA_UL_ENABLE = 0;
+ 
+ namespace {
+ using namespace nr_isac;
+@@ -162,10 +160,6 @@ bool parse_array_calibration(const char* spec, ArrayCalibration* out)
+   return true;
+ }
+ 
+-int environment_bool(const char* name, int fallback)
+-{
+-  const char* value = std::getenv(name); return value ? (std::atoi(value) != 0) : fallback;
+-}
+ 
+ } // namespace
+ 
+@@ -249,6 +243,10 @@ extern "C" void nr_isac_init(void)
+          &p_rx_branch_phys_map,"0:0"),
+   };
+   config_get(config_get_if(),params,sizeof(params)/sizeof(params[0]),"sensing");
++  // P14 Stage A: the AoA environment override is gone; a stale launcher must be told, not ignored.
++  if (nr_isac_obsolete_env_keys() > 0)
++    LOG_E(PHY,"SENSING: AOA_ENABLE/AOA_UL_ENABLE are obsolete environment keys and are IGNORED; "
++              "use the [sensing] aoa_enable / aoa_ul_enable configuration keys instead\n");
+   if (!p_enable) return;
+   branches_valid=false;
+   if (nr_rx_branch_set_parse(&branches,p_rx_branches,p_rx_branch_phys_map,p_rx_id?p_rx_id:"rx")!=0) {
+@@ -280,9 +278,8 @@ extern "C" void nr_isac_init(void)
+   pipeline.sync_enable=p_sync!=0;pipeline.family_static=p_family_static!=0;pipeline.tracker_enable=p_track!=0;
+   pipeline.hierarchical_tracker_enable=p_hierarchical!=0;pipeline.capture_rvm=p_capture!=0;
+   pipeline.rx_position={p_rx_x,p_rx_y,p_rx_z};pipeline.tx_position={p_tx_x,p_tx_y,p_tx_z};
+-  AOA_ENABLE=environment_bool("AOA_ENABLE",p_aoa);const int requested=environment_bool("AOA_UL_ENABLE",p_aoa_ul);
+-  AOA_UL_ENABLE=AOA_ENABLE&&requested;pipeline.aoa_enable=AOA_ENABLE;pipeline.aoa_ul_enable_requested=requested;
+-  pipeline.aoa_ul_enable=AOA_UL_ENABLE;
++  pipeline.aoa_enable=p_aoa!=0;pipeline.aoa_ul_enable_requested=p_aoa_ul!=0;
++  pipeline.aoa_ul_enable=pipeline.aoa_enable&&pipeline.aoa_ul_enable_requested;
+   pipeline.aoa_quality.maximum_relative_manifold_residual_energy=p_aoa_max_manifold;
+   pipeline.aoa_quality.maximum_phase_fit_residual_rms_rad=p_aoa_max_phase;
+   pipeline.aoa_quality.maximum_azimuth_stddev_deg=p_aoa_max_az_sigma;
+@@ -290,11 +287,11 @@ extern "C" void nr_isac_init(void)
+   if (pipeline.aoa_enable) {
+     if (!parse_array(p_array,p_rotation,p_broadside,pipeline.tx_position,pipeline.rx_position,&pipeline.array)) {
+       LOG_E(PHY,"SENSING: aoa_enable requires a valid surveyed rank-two four-element array; sensing disabled\n");
+-      AOA_ENABLE=AOA_UL_ENABLE=0;return;
++      pipeline.aoa_enable=pipeline.aoa_ul_enable=false;return;
+     }
+     if (!parse_array_calibration(p_array_calibration,&pipeline.array_calibration)) {
+       LOG_E(PHY,"SENSING: rx_array_calibration must contain four unique observed,gain,phase_rad,delay_ns tuples; sensing disabled\n");
+-      AOA_ENABLE=AOA_UL_ENABLE=0;return;
++      pipeline.aoa_enable=pipeline.aoa_ul_enable=false;return;
+     }
+     aoa_antennas=4;
+   }
+@@ -318,7 +315,7 @@ extern "C" void nr_isac_init(void)
+   catch(const std::exception& e){LOG_E(PHY,"SENSING: invalid native configuration: %s\n",e.what());return;}
+   enabled.store(true,std::memory_order_release);
+   LOG_I(PHY,"SENSING: native Python-parity pipeline enabled, num_ues=%u sources=0x%x separate_DL_UL=1 AoA=%d UL-AoA=%d array_calibration=%d\n",
+-        pipeline.num_ues,pipeline.sources_mask,AOA_ENABLE,AOA_UL_ENABLE,
++        pipeline.num_ues,pipeline.sources_mask,(int)pipeline.aoa_enable,(int)pipeline.aoa_ul_enable,
+         pipeline.array_calibration.configured);
+ }
+ 
+@@ -338,7 +335,7 @@ extern "C" void nr_isac_stop(void){if(engine&&started.exchange(false))engine->st
+ extern "C" int nr_isac_enabled(void){return enabled.load(std::memory_order_relaxed);}
+ extern "C" int nr_isac_source(void){for(int i=0;i<NR_ISAC_SRC_COUNT;++i)if(pipeline.sources_mask&(1u<<i))return i;return NR_ISAC_SRC_CSI_RS;}
+ extern "C" int nr_isac_source_enabled(int source){return enabled.load()&&source>=0&&source<NR_ISAC_SRC_COUNT&&(pipeline.sources_mask&(1u<<source));}
+-extern "C" uint32_t nr_isac_aoa_antennas(void){return enabled.load()&&AOA_ENABLE?aoa_antennas:0;}
++extern "C" uint32_t nr_isac_aoa_antennas(void){return enabled.load()&&pipeline.aoa_enable?aoa_antennas:0;}
+ extern "C" uint32_t nr_isac_subslot_config(uint32_t* min_re,float* min_snr){if(!enabled.load())return 0;if(min_re)*min_re=pipeline.subslot_min_re;if(min_snr)*min_snr=pipeline.subslot_min_snr_db;return pipeline.subslot_symbols;}
+ extern "C" const nr_rx_branch_set_t* nr_isac_rx_branches(void){return (enabled.load()&&branches_valid)?&branches:nullptr;}
+ extern "C" nr_rx_branch_set_t* nr_isac_rx_branches_mutable(void){return (enabled.load()&&branches_valid)?&branches:nullptr;}
+diff --git a/openair1/PHY/NR_UE_ISAC/nr_isac.h b/openair1/PHY/NR_UE_ISAC/nr_isac.h
+index c737b8a908..fce5d261a0 100644
+--- a/openair1/PHY/NR_UE_ISAC/nr_isac.h
++++ b/openair1/PHY/NR_UE_ISAC/nr_isac.h
+@@ -39,9 +39,11 @@ typedef struct nr_isac_carrier_s {
+   uint16_t slots_per_frame;
+ } nr_isac_carrier_t;
+ 
+-/* Process-wide policy values requested by the deployment. The UL flag is always subordinate. */
+-extern int AOA_ENABLE;
+-extern int AOA_UL_ENABLE;
++/* P14 Stage A (removal table 2.4, row 2): the AOA_ENABLE/AOA_UL_ENABLE environment override and
++ * the process-wide globals it drove are gone. AoA is requested only by the `[sensing] aoa_enable`
++ * / `aoa_ul_enable` configuration keys, whose parsed values live in PipelineConfig. The obsolete
++ * environment keys are rejected loudly instead of silently ignored; returns how many were set. */
++int nr_isac_obsolete_env_keys(void);
+ 
+ void nr_isac_init(void);
+ void nr_isac_start(void);
+diff --git a/openair1/PHY/NR_UE_ISAC/nr_isac_stub.c b/openair1/PHY/NR_UE_ISAC/nr_isac_stub.c
+index b8ecf0a4b7..d9a06a3b12 100644
+--- a/openair1/PHY/NR_UE_ISAC/nr_isac_stub.c
++++ b/openair1/PHY/NR_UE_ISAC/nr_isac_stub.c
+@@ -4,8 +4,6 @@
+                     // the branch-set accessors were added (P03).
+ #include "PHY/NR_UE_ISAC/nr_isac.h"
+ 
+-int AOA_ENABLE = 0;
+-int AOA_UL_ENABLE = 0;
+ 
+ void nr_isac_init(void) {}
+ void nr_isac_start(void) {}
+diff --git a/openair1/PHY/NR_UE_ISAC/tests/python_parity_test.cc b/openair1/PHY/NR_UE_ISAC/tests/python_parity_test.cc
+index 0826ca7ac1..a321f3538b 100644
+--- a/openair1/PHY/NR_UE_ISAC/tests/python_parity_test.cc
++++ b/openair1/PHY/NR_UE_ISAC/tests/python_parity_test.cc
+@@ -7,6 +7,7 @@
+ #include "detector_cuda.h"
+ #include "enu_tracker.h"
+ #include "hierarchical_tracker.h"
++#include "nr_isac.h"
+ #include "fft.h"
+ #include "report_writer.h"
+ #include "sensing_engine.h"
+@@ -758,11 +759,25 @@ void test_dl_capture_fails_closed_without_dl()
+           "DL RDM capture emitted a report despite having no provenance-proven DL samples");
+   std::remove(path.c_str());
+ }
++
++/** P14 Stage A: the AoA environment override is removed, so the keys must be REPORTED, never
++ *  honoured. Counting them (rather than only logging) is what makes the removal testable. */
++void test_obsolete_aoa_env_rejected()
++{
++  ::unsetenv("AOA_ENABLE"); ::unsetenv("AOA_UL_ENABLE");
++  require(nr_isac_obsolete_env_keys()==0,"a clean environment must report no obsolete AoA keys");
++  ::setenv("AOA_ENABLE","1",1);
++  require(nr_isac_obsolete_env_keys()==1,"AOA_ENABLE must be reported obsolete, not honoured");
++  ::setenv("AOA_UL_ENABLE","0",1);
++  require(nr_isac_obsolete_env_keys()==2,"AOA_UL_ENABLE must be reported obsolete even when zero");
++  ::unsetenv("AOA_ENABLE"); ::unsetenv("AOA_UL_ENABLE");
++  require(nr_isac_obsolete_env_keys()==0,"obsolete AoA key reporting must not be sticky");
++}
+ }
+ 
+ int main()
+ {
+-  try {test_fft();test_adaptive_threshold();test_detector();test_required_cuda_contract();test_aoa();test_aoa_component_mixture_and_cross_leg_fusion();test_enu_geometry();test_repeated_ul_confirmation_gates_global_birth();test_variable_cpi();test_causal_cpi_pipeline();test_finite_admission_window();test_mixed_row_dl_rdm_isolation();test_invalid_ul_does_not_suppress_dl();test_dl_capture_fails_closed_without_dl();test_validation_report_compatibility();test_branch_identity_report();}
++  try {test_fft();test_adaptive_threshold();test_detector();test_required_cuda_contract();test_aoa();test_aoa_component_mixture_and_cross_leg_fusion();test_enu_geometry();test_repeated_ul_confirmation_gates_global_birth();test_variable_cpi();test_causal_cpi_pipeline();test_finite_admission_window();test_mixed_row_dl_rdm_isolation();test_invalid_ul_does_not_suppress_dl();test_dl_capture_fails_closed_without_dl();test_validation_report_compatibility();test_branch_identity_report();test_obsolete_aoa_env_rejected();}
+   catch(const std::exception& e){std::fprintf(stderr,"python parity test failed: %s\n",e.what());return EXIT_FAILURE;}
+   std::puts("native sensing golden parity checks passed");return EXIT_SUCCESS;
+ }
+diff --git a/tests/passive_rx/baselines/fixtures.json b/tests/passive_rx/baselines/fixtures.json
+index 38b0781e31..3388780043 100644
+--- a/tests/passive_rx/baselines/fixtures.json
++++ b/tests/passive_rx/baselines/fixtures.json
+@@ -65,9 +65,10 @@
+         "9b3b3b43a2b60ffc469c9351fe091b453e971e39b3fcf6da2b7ed395275e8d6e",
+         "6607a1da4085604b8a4aee86946f9c3cb4bbb29611949dffa6eb9cd363a743de",
+         "6cc3f0689be2807d6e036349ab82e026f8f567f07d2801ccf9416ab24ee019e2",
+-        "24a81dc52c9adafe9a7f21d383cd18ae58efdf5a18a8b6e90e21f63945284018"
++        "24a81dc52c9adafe9a7f21d383cd18ae58efdf5a18a8b6e90e21f63945284018",
++        "fffb56a2dfa61e978a89c1d5bc4851f54e00f33e90014ce6b3a9a618fb1e7a35"
+       ],
+-      "verified_with_binary_note": "P07 (2026-09-11): binary built from HEAD d1b563f511 + the then-uncommitted nr-ue.c edits (committed mid-session by their owner as be65aa8764) + the P07 DL branch-view change; legacy replay still 'REPLAY PASS: identical DL controls=34 failed=0 raw UL=24; no radio opened' with every REPLAY-CONTROL/DL-REPLAY-FAILURE/REPLAY-RAW-UL line byte-identical to the producing binary's. producing_binary_sha256 is deliberately NOT overwritten: the fixture was produced by c3810019.... check_manifest.py --fixtures accepts either. Fix round 1 (2026-09-11): binary 5a036ca4... (env caching + untagged-job LOG_W), legacy replay re-proven identical. P06a (2026-09-11): binary b0ba7544 (branch lifecycle hooks + DL job fan-out) re-ran the legacy replay command below to REPLAY PASS: identical DL controls=34 failed=0 raw UL=24, and tests/passive_rx/replay_branch_view.sh to 34/34/31/34/34 as before; sizeof(nr_pdsch_passive_job_t) still 384 with the two new epoch fields in former padding (gdb ptype /o). P06a fix round 1 (2026-09-11): binary 08d39124 (MAC-resync lifecycle hook, stale-drop ordering), legacy replay re-proven identical. NOTE FOR FUTURE WRITERS: this file is serialised as json.dumps(obj, indent=2) + \"\\n\" with key order preserved; using any other indent reserialises all ~674 lines and makes the diff unreviewable. P06a fix round 2 (2026-09-11): binary 0d011b9c (comment-only change to the MAC-resync reachability note), legacy replay re-proven identical. || P09 (2026-09-11): binary cd89de4928 built from HEAD 2566d256d2 + the P09 per-branch harq_unique_pid change (nr_passive_harq_tag.h + nr_pdsch_passive_decode.c). Legacy replay still 'REPLAY PASS: identical DL controls=34 failed=0 raw UL=24; no radio opened' exit 0, and replay_branch_view.sh still 34/34/31/34/34 of 38 -- branch_id=0 reproduces the pre-P09 tag exactly (2000 + harq_process_nbr), pinned by gtest PassiveHarqTag.BranchZeroReproducesTheLegacyTag. NOTE: views 1-3 DID run on non-zero branch tags (2016+/2032+/2048+) and produced payloads identical to the reference, but the harness runs ONE VIEW PER PROCESS, so it does not and cannot exercise two branches' jobs concurrently under the same harq_process_nbr -- see docs/passive_branch_namespace_audit.md sec 6. || P09 fix round 1 (2026-09-11): binary 9b3b3b43a2 -- the per-branch HARQ stride widened 16 -> 32 because the DCI HARQ-process-number field is 5 bits when the cell sets harq-ProcessNumberSizeDCI-1-1 (nr_pdcch_blind_monitor.h:263 / .c:2475); at stride 16 hpn 0 and hpn 16 aliased on the SAME branch and the branch-0 legacy pin broke above hpn 15. New bound 2000+3*32+31 = 2127 < 3000. Both replays re-run and still identical: legacy 34/0/24 exit 0, branch view 34/34/31/34/34. || P08a (2026-09-11): binary 6607a1da40 built from HEAD ec24e5d749 + the per-context UL harq_unique_pid change (PHY_VARS_gNB::harq_unique_pid_base, nr_ulsch_decoding.c:133, nr_passive_harq_tag.h's 5000 range). Legacy replay still 'REPLAY PASS: identical DL controls=34 failed=0 raw UL=24; no radio opened' exit 0 and replay_branch_view.sh still 34/34/31/34/34 of 38. NEW, and it corrects an earlier claim in this file and in docs/passive_branch_namespace_audit.md: the passive UL DECODE *is* reachable from this fixture, via ISAC_PASSIVE_REPLAY_UL_CONFIG=1 (nr_passive_replay_ul_config.h:37/42 calls nr_pusch_passive_decode(ue, 0, ...)), so the changed line was exercised on 24 real UL grants -- measured before AND after by rebuilding the pre-change binary from a git stash, not assumed: both 'UL-CONFIG REPEATABLE: crc=9/24 rejected=0 repeat_mismatches=0' with all 24 per-grant UL-CONFIG lines byte-identical under diff. It exercises ONE context (ctx=0) only, so it shows the new id does not perturb the decode; it cannot show the collision is gone. || P08a fix round 1 (2026-09-11): binary 6cc3f0689b -- documentation + one added gtest only (the accelerator id-pruning caveat in nr_passive_harq_tag.h and audit sec 2, the zero-init precision fix, two citation fixes, and a C shim pinning PHY_VARS_gNB::harq_unique_pid_base == 0 on the real struct). No behavioural change; both replays re-run on this binary anyway rather than assumed: legacy 34/0/24 exit 0, branch view 34/34/31/34/34, and the UL-CONFIG replay again crc=9/24 rejected=0 repeat_mismatches=0 with all 24 per-grant lines still byte-identical to the PRE-change baseline binary 252df29ea0. || P10a (2026-09-11): binary 24a81dc5 (additive branch-identity slot on the CFR ABI: nr_isac_submit_cfr_multi_branch(), with nr_isac_submit_cfr_multi() reduced to a one-line wrapper passing NR_ISAC_BRANCH_NONE, plus the branch tag carried through the CPI accumulator to an omitted-when-unset report field). Legacy replay re-proven identical -- 'REPLAY PASS: identical DL controls=34 failed=0 raw UL=24; no radio opened', exit 0 -- and tests/passive_rx/replay_branch_view.sh 34/34/31/34/34 of 38 with data_submits == own crc_ok on every view, unchanged. MEASURED AND WORTH RECORDING: this replay can never write a sensing report, whatever the fixture's duration -- nr-uesoftmodem.c:437 returns from nr_passive_replay_read() before nr_isac_start() at :474, so SensingEngine::submit() drops every row on !running_. The report-side branch field is therefore pinned by test_nr_isac_python_parity's new test_branch_identity_report(), not by a replay artifact. P10a fix round 1 (2026-09-11): binary 24a81dc5 (missing ENABLE_ISAC_SENSING=OFF stub for nr_isac_submit_cfr_multi_branch(), a static_assert that branch ids fit the 32-bit mask, and a pre-existing missing <stddef.h> in nr_isac_stub.c found while proving the OFF build links); both replays re-proven identical.",
++      "verified_with_binary_note": "P07 (2026-09-11): binary built from HEAD d1b563f511 + the then-uncommitted nr-ue.c edits (committed mid-session by their owner as be65aa8764) + the P07 DL branch-view change; legacy replay still 'REPLAY PASS: identical DL controls=34 failed=0 raw UL=24; no radio opened' with every REPLAY-CONTROL/DL-REPLAY-FAILURE/REPLAY-RAW-UL line byte-identical to the producing binary's. producing_binary_sha256 is deliberately NOT overwritten: the fixture was produced by c3810019.... check_manifest.py --fixtures accepts either. Fix round 1 (2026-09-11): binary 5a036ca4... (env caching + untagged-job LOG_W), legacy replay re-proven identical. P06a (2026-09-11): binary b0ba7544 (branch lifecycle hooks + DL job fan-out) re-ran the legacy replay command below to REPLAY PASS: identical DL controls=34 failed=0 raw UL=24, and tests/passive_rx/replay_branch_view.sh to 34/34/31/34/34 as before; sizeof(nr_pdsch_passive_job_t) still 384 with the two new epoch fields in former padding (gdb ptype /o). P06a fix round 1 (2026-09-11): binary 08d39124 (MAC-resync lifecycle hook, stale-drop ordering), legacy replay re-proven identical. NOTE FOR FUTURE WRITERS: this file is serialised as json.dumps(obj, indent=2) + \"\\n\" with key order preserved; using any other indent reserialises all ~674 lines and makes the diff unreviewable. P06a fix round 2 (2026-09-11): binary 0d011b9c (comment-only change to the MAC-resync reachability note), legacy replay re-proven identical. || P09 (2026-09-11): binary cd89de4928 built from HEAD 2566d256d2 + the P09 per-branch harq_unique_pid change (nr_passive_harq_tag.h + nr_pdsch_passive_decode.c). Legacy replay still 'REPLAY PASS: identical DL controls=34 failed=0 raw UL=24; no radio opened' exit 0, and replay_branch_view.sh still 34/34/31/34/34 of 38 -- branch_id=0 reproduces the pre-P09 tag exactly (2000 + harq_process_nbr), pinned by gtest PassiveHarqTag.BranchZeroReproducesTheLegacyTag. NOTE: views 1-3 DID run on non-zero branch tags (2016+/2032+/2048+) and produced payloads identical to the reference, but the harness runs ONE VIEW PER PROCESS, so it does not and cannot exercise two branches' jobs concurrently under the same harq_process_nbr -- see docs/passive_branch_namespace_audit.md sec 6. || P09 fix round 1 (2026-09-11): binary 9b3b3b43a2 -- the per-branch HARQ stride widened 16 -> 32 because the DCI HARQ-process-number field is 5 bits when the cell sets harq-ProcessNumberSizeDCI-1-1 (nr_pdcch_blind_monitor.h:263 / .c:2475); at stride 16 hpn 0 and hpn 16 aliased on the SAME branch and the branch-0 legacy pin broke above hpn 15. New bound 2000+3*32+31 = 2127 < 3000. Both replays re-run and still identical: legacy 34/0/24 exit 0, branch view 34/34/31/34/34. || P08a (2026-09-11): binary 6607a1da40 built from HEAD ec24e5d749 + the per-context UL harq_unique_pid change (PHY_VARS_gNB::harq_unique_pid_base, nr_ulsch_decoding.c:133, nr_passive_harq_tag.h's 5000 range). Legacy replay still 'REPLAY PASS: identical DL controls=34 failed=0 raw UL=24; no radio opened' exit 0 and replay_branch_view.sh still 34/34/31/34/34 of 38. NEW, and it corrects an earlier claim in this file and in docs/passive_branch_namespace_audit.md: the passive UL DECODE *is* reachable from this fixture, via ISAC_PASSIVE_REPLAY_UL_CONFIG=1 (nr_passive_replay_ul_config.h:37/42 calls nr_pusch_passive_decode(ue, 0, ...)), so the changed line was exercised on 24 real UL grants -- measured before AND after by rebuilding the pre-change binary from a git stash, not assumed: both 'UL-CONFIG REPEATABLE: crc=9/24 rejected=0 repeat_mismatches=0' with all 24 per-grant UL-CONFIG lines byte-identical under diff. It exercises ONE context (ctx=0) only, so it shows the new id does not perturb the decode; it cannot show the collision is gone. || P08a fix round 1 (2026-09-11): binary 6cc3f0689b -- documentation + one added gtest only (the accelerator id-pruning caveat in nr_passive_harq_tag.h and audit sec 2, the zero-init precision fix, two citation fixes, and a C shim pinning PHY_VARS_gNB::harq_unique_pid_base == 0 on the real struct). No behavioural change; both replays re-run on this binary anyway rather than assumed: legacy 34/0/24 exit 0, branch view 34/34/31/34/34, and the UL-CONFIG replay again crc=9/24 rejected=0 repeat_mismatches=0 with all 24 per-grant lines still byte-identical to the PRE-change baseline binary 252df29ea0. || P10a (2026-09-11): binary 24a81dc5 (additive branch-identity slot on the CFR ABI: nr_isac_submit_cfr_multi_branch(), with nr_isac_submit_cfr_multi() reduced to a one-line wrapper passing NR_ISAC_BRANCH_NONE, plus the branch tag carried through the CPI accumulator to an omitted-when-unset report field). Legacy replay re-proven identical -- 'REPLAY PASS: identical DL controls=34 failed=0 raw UL=24; no radio opened', exit 0 -- and tests/passive_rx/replay_branch_view.sh 34/34/31/34/34 of 38 with data_submits == own crc_ok on every view, unchanged. MEASURED AND WORTH RECORDING: this replay can never write a sensing report, whatever the fixture's duration -- nr-uesoftmodem.c:437 returns from nr_passive_replay_read() before nr_isac_start() at :474, so SensingEngine::submit() drops every row on !running_. The report-side branch field is therefore pinned by test_nr_isac_python_parity's new test_branch_identity_report(), not by a replay artifact. P10a fix round 1 (2026-09-11): binary 24a81dc5 (missing ENABLE_ISAC_SENSING=OFF stub for nr_isac_submit_cfr_multi_branch(), a static_assert that branch ids fit the 32-bit mask, and a pre-existing missing <stddef.h> in nr_isac_stub.c found while proving the OFF build links); both replays re-proven identical. || P14-audit (2026-09-11): binary fffb56a2df -- AoA removal audit + Stage A item 1 only (the AOA_ENABLE/AOA_UL_ENABLE environment override and its two exported globals removed; PipelineConfig is now the single source of truth; obsolete env keys reported by the new nr_isac_env.c and logged once by nr_isac.cc). No AoA DSP, tracker, report-schema or CFR-producer code was touched. Both replays re-run on this binary rather than assumed: legacy REPLAY PASS: identical DL controls=34 failed=0 raw UL=24; no radio opened (exit 0), and replay_branch_view.sh 34/34/31/34/34 of 38 with data_submits == own crc_ok on every view.",
+       "branch_view_replay": {
+         "script": "tests/passive_rx/replay_branch_view.sh (ctest dl_branch_view_replay)",
+         "date": "2026-09-11",

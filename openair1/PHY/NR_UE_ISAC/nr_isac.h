@@ -39,9 +39,11 @@ typedef struct nr_isac_carrier_s {
   uint16_t slots_per_frame;
 } nr_isac_carrier_t;
 
-/* Process-wide policy values requested by the deployment. The UL flag is always subordinate. */
-extern int AOA_ENABLE;
-extern int AOA_UL_ENABLE;
+/* P14 Stage A (removal table 2.4, row 2): the AOA_ENABLE/AOA_UL_ENABLE environment override and
+ * the process-wide globals it drove are gone. AoA is requested only by the `[sensing] aoa_enable`
+ * / `aoa_ul_enable` configuration keys, whose parsed values live in PipelineConfig. The obsolete
+ * environment keys are rejected loudly instead of silently ignored; returns how many were set. */
+int nr_isac_obsolete_env_keys(void);
 
 void nr_isac_init(void);
 void nr_isac_start(void);
