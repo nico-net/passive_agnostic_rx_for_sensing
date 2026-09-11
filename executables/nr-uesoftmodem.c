@@ -245,6 +245,10 @@ int main(int argc, char **argv)
   CONFIG_CLEARRTFLAG(CONFIG_NOEXITONHELP);
 
   // ISAC / passive-radar sensing pipeline: parse the [sensing] config section (no-op if disabled).
+  // P06a: publish the live receive-antenna count FIRST so nr_isac_init()'"'"'s P03 cross-check can run
+  // (docs/passive_branch_globals_audit.md names this call site): a branch decodes from exactly one
+  // antenna, so rx_branches naming more branches than --ue-nb-ant-rx supplies is fatal there.
+  nr_isac_set_nb_antennas_rx(get_nrUE_params()->nb_antennas_rx);
   nr_isac_init();
   // UE-agnostic CSI-RS sensing monitors (cell-common / other-UE resources); no-op if unset.
   nr_csirs_monitor_init();

@@ -81,6 +81,13 @@ static _Atomic uint64_t g_dropped_full  = 0; // evicted oldest to admit a newer 
 static _Atomic uint64_t g_dropped_stale = 0;
 static _Atomic uint64_t g_max_lag       = 0;
 
+/* P06a per-branch census, indexed by P03 branch_id. Grants are shared (one discovery, fanned out),
+ * payloads/CRC are per branch. */
+static _Atomic uint64_t g_br_queued[NR_RX_BRANCH_MAX];
+static _Atomic uint64_t g_br_decoded[NR_RX_BRANCH_MAX];
+static _Atomic uint64_t g_br_crc_ok[NR_RX_BRANCH_MAX];
+static _Atomic uint64_t g_br_stale_epoch[NR_RX_BRANCH_MAX];
+
 static _Atomic int g_running   = 0;
 static _Atomic int g_stop      = 0;
 static int         g_nthreads  = 0;
@@ -160,6 +167,24 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
     job.grant.check_sample_lifetime = true;
     job.grant.source_absolute_slot = job.absolute_slot;
 
+    /* P06a: the branch may have lost lock or hit an RF discontinuity between this job's fan-out
+     * and now. Its samples then belong to an epoch this branch has moved past, so the result must
+     * not be mixed into the current one -- P05's "no old/new mixing", counted per branch rather
+     * than silently decoded. Jobs carrying epoch 0/0 from a legacy producer are exempt: a set that
+     * never ticked has nothing to be stale against. */
+    {
+      const nr_rx_branch_set_t *bset = nr_isac_rx_branches();
+      const nr_rx_branch_dispatch_t d = {.branch_id = job.branch_id,
+                                         .physical_channel = job.physical_channel,
+                                         .lock_epoch = job.lock_epoch,
+                                         .acq_epoch = job.acq_epoch};
+      if (bset != NULL && bset->n_active > 1 && nr_rx_branch_dispatch_is_stale(bset, &d)) {
+        atomic_fetch_add_explicit(&g_br_stale_epoch[job.branch_id & (NR_RX_BRANCH_MAX - 1)], 1,
+                                  memory_order_relaxed);
+        continue;
+      }
+    }
+
     /* P07 independent mode: resolve which branch this job is decoded FOR, and hand the whole chain
      * (decode AND data-aided submit) the same single-antenna view of the UE. Legacy: vue == ue. */
     const int view_phys = nr_pdsch_passive_branch_view_resolve(ue, job.physical_channel, &job.branch_id);
@@ -184,6 +209,8 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
 
     if (st != NR_PDSCH_PASSIVE_DECODE_ERROR && st != NR_PDSCH_PASSIVE_DECODE_UNSUPPORTED) {
       atomic_fetch_add_explicit(&g_decoded, 1, memory_order_relaxed);
+      atomic_fetch_add_explicit(&g_br_decoded[job.branch_id & (NR_RX_BRANCH_MAX - 1)], 1,
+                                memory_order_relaxed);
       /* Technique D scoring: the TB CRC is the only oracle that can tell a right payload
        * interpretation from a wrong one, and this is the one place it is known. */
       nr_pdsch_cfg_hypothesis_t winner;
@@ -193,6 +220,8 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
               winner.dmrs_mask, winner.mcs_table);
       if (st == NR_PDSCH_PASSIVE_DECODE_CRC_OK) {
         atomic_fetch_add_explicit(&g_crc_ok, 1, memory_order_relaxed);
+        atomic_fetch_add_explicit(&g_br_crc_ok[job.branch_id & (NR_RX_BRANCH_MAX - 1)], 1,
+                                  memory_order_relaxed);
         if (job.want_data) {
           /* Publish THIS job's monotonic slot so the CPI grid indexes it correctly. Without this the
            * submit derives the index from proc->frame_rx, which wraps at 1024 -- harmless in order,
@@ -305,7 +334,44 @@ bool nr_pdsch_passive_queue_enqueue(const nr_pdsch_passive_job_t *job)
   pthread_cond_signal(&g_cv);
   pthread_mutex_unlock(&g_lock);
   atomic_fetch_add_explicit(&g_queued, 1, memory_order_relaxed);
+  atomic_fetch_add_explicit(&g_br_queued[job->branch_id & (NR_RX_BRANCH_MAX - 1)], 1,
+                            memory_order_relaxed);
   return true;
+}
+
+int nr_pdsch_passive_queue_enqueue_fanout(const nr_pdsch_passive_job_t *job)
+{
+  if (job == NULL)
+    return 0;
+  nr_rx_branch_dispatch_t d[NR_RX_BRANCH_MAX];
+  const nr_rx_branch_set_t *bset = nr_isac_rx_branches();
+  const int n = nr_rx_branch_set_dispatch(bset, d, NR_RX_BRANCH_MAX);
+  if (n <= 1) {
+    /* No branch set, or exactly one active branch: the legacy single job, with the identity the
+     * single branch (or the caller) already carries. Bit-identical to the pre-P06a producer. */
+    nr_pdsch_passive_job_t one = *job;
+    if (n == 1) {
+      one.branch_id = d[0].branch_id;
+      one.physical_channel = d[0].physical_channel;
+      one.lock_epoch = d[0].lock_epoch;
+      one.acq_epoch = d[0].acq_epoch;
+    }
+    return nr_pdsch_passive_queue_enqueue(&one) ? 1 : 0;
+  }
+  /* One decode per branch of the SAME grant. The queue is a fixed ring, so N branches cost N slots
+   * and the drop-oldest eviction is N times more likely -- that is a real, measured cost of
+   * independent mode, reported through dropped[full], never hidden by growing the ring. */
+  int accepted = 0;
+  for (int i = 0; i < n; i++) {
+    nr_pdsch_passive_job_t copy = *job;
+    copy.branch_id = d[i].branch_id;
+    copy.physical_channel = d[i].physical_channel;
+    copy.lock_epoch = d[i].lock_epoch;
+    copy.acq_epoch = d[i].acq_epoch;
+    if (nr_pdsch_passive_queue_enqueue(&copy))
+      accepted++;
+  }
+  return accepted;
 }
 
 void nr_pdsch_passive_queue_get_stats(nr_pdsch_passive_queue_stats_t *out)
@@ -319,6 +385,13 @@ void nr_pdsch_passive_queue_get_stats(nr_pdsch_passive_queue_stats_t *out)
   out->dropped_full  = atomic_load_explicit(&g_dropped_full, memory_order_relaxed);
   out->dropped_stale = atomic_load_explicit(&g_dropped_stale, memory_order_relaxed);
   out->max_lag_slots = atomic_load_explicit(&g_max_lag, memory_order_relaxed);
+  for (int b = 0; b < NR_RX_BRANCH_MAX; b++) {
+    out->per_branch[b].queued  = atomic_load_explicit(&g_br_queued[b], memory_order_relaxed);
+    out->per_branch[b].decoded = atomic_load_explicit(&g_br_decoded[b], memory_order_relaxed);
+    out->per_branch[b].crc_ok  = atomic_load_explicit(&g_br_crc_ok[b], memory_order_relaxed);
+    out->per_branch[b].dropped_stale_epoch =
+        atomic_load_explicit(&g_br_stale_epoch[b], memory_order_relaxed);
+  }
 }
 
 void nr_pdsch_passive_queue_stop(void)

@@ -2166,7 +2166,9 @@ constdiag_done:;
       job.gNB_id        = proc->gNB_id;
       job.absolute_slot = source_absolute_slot;
       job.rnti          = out.rnti;
-      job.branch_id     = 0; // P07: legacy identity until P06 assigns branches per grant stream
+      /* P06a: identity is stamped per branch by the fan-out enqueue below; these are the
+       * legacy defaults it overwrites (and keeps, with one active branch). */
+      job.branch_id     = 0;
       job.physical_channel = 0;
       job.harq_pid_tag  = blind_harq_tag(abs_slot, out.rnti, out.harq_pid);
       job.want_data     = want_data;
@@ -2174,7 +2176,7 @@ constdiag_done:;
                   ? (ue->cont_fo_comp ? ue->dl_Doppler_shift + ue->freq_offset : 0.0)
                   : nr_slot_fep_fo_override_hz;  /* receive-thread sample; see nr_slot_fep_fo_override_hz */
       job.sweep_ticket  = sweep_ticket;
-      nr_pdsch_passive_queue_enqueue(&job);
+      nr_pdsch_passive_queue_enqueue_fanout(&job);
       continue;
     }
 
@@ -2350,7 +2352,9 @@ constdiag_done:;
               /* Preserve the original RF slot across PDCCH -> PDSCH deferral. */
               job.absolute_slot = source_absolute_slot;
               job.rnti          = out.rnti;
-              job.branch_id     = 0; // P07: legacy identity until P06 assigns branches per grant stream
+              /* P06a: identity is stamped per branch by the fan-out enqueue below; these are the
+               * legacy defaults it overwrites (and keeps, with one active branch). */
+              job.branch_id     = 0;
               job.physical_channel = 0;
               job.harq_pid_tag  = blind_harq_tag(abs_slot, out.rnti, out.harq_pid);
               job.want_data     = want_data;
@@ -2358,7 +2362,7 @@ constdiag_done:;
                   ? (ue->cont_fo_comp ? ue->dl_Doppler_shift + ue->freq_offset : 0.0)
                   : nr_slot_fep_fo_override_hz;  /* receive-thread sample */
               job.sweep_ticket  = sweep_ticket;
-              nr_pdsch_passive_queue_enqueue(&job);
+              nr_pdsch_passive_queue_enqueue_fanout(&job);
               /* The per-candidate channel-estimate allocation is freed at the BOTTOM of this loop,
                * which `continue` skips -- ~917 kB per job at 273 PRB x 4 antennas, and mlockall()
                * makes every byte of it count against RLIMIT_MEMLOCK. Free it here. */
@@ -2498,6 +2502,33 @@ constdiag_done:;
             qs.decoded ? (100.0 * (double)qs.crc_ok / (double)qs.decoded) : 0.0,
             (unsigned long)qs.dropped_full, (unsigned long)qs.dropped_stale,
             (unsigned long)qs.max_lag_slots, fp->slots_per_frame);
+      /* P06a per-branch columns. GRANTS ARE SHARED: the blind monitor discovers each grant ONCE
+       * and fans it out, so br<n>.q is the same grant counted once per branch and the four q
+       * columns are expected to be equal. PAYLOADS AND CRC ARE PER BRANCH -- each is decoded from
+       * that branch's own antenna alone, so dec/ok are what actually differ between branches, and
+       * stale is the count discarded because the branch changed epoch after fan-out. Printed only
+       * in independent mode (n_active > 1); in legacy mode the aggregate line above already says
+       * everything. */
+      {
+        const nr_rx_branch_set_t *bset = nr_isac_rx_branches();
+        if (bset != NULL && bset->n_active > 1) {
+          char bl[256];
+          size_t u = 0;
+          for (int b = 0; b < NR_RX_BRANCH_MAX && u < sizeof(bl) - 64; b++) {
+            if (bset->b[b].physical_channel < 0)
+              continue;
+            u += snprintf(bl + u, sizeof(bl) - u, "br%d[phys=%d q=%lu dec=%lu ok=%lu stale=%lu] ",
+                          (int)bset->b[b].branch_id, (int)bset->b[b].physical_channel,
+                          (unsigned long)qs.per_branch[b].queued,
+                          (unsigned long)qs.per_branch[b].decoded,
+                          (unsigned long)qs.per_branch[b].crc_ok,
+                          (unsigned long)qs.per_branch[b].dropped_stale_epoch);
+          }
+          LOG_I(PHY, "SENSING: PDSCHQ-BRANCH (grants shared, payloads/CRC per branch) %s\n", bl);
+          LOG_I(PHY, "SENSING: PDSCHQ-BRANCH multilayer_rejected=%s\n",
+                nr_pdsch_passive_view_unsupported_multilayer_str());
+        }
+      }
     }
 
     if (btim_on && (g_occasions_run % NR_PDCCH_BLIND_SUMMARY_PERIOD_OCC) == 0) {

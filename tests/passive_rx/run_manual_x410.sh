@@ -36,6 +36,22 @@ PY
 OUT=$(mktemp -d /home/sens/NICOLA/captures/sensing_manual_fixed.XXXXXX)
 chmod 755 "$OUT"
 sed "s|@OUT@|$OUT|g" "$REPO/tests/passive_rx/adaptive_manual_dlul.conf" > "$OUT/receiver.conf"
+# adaptive_RX_pipeline.md P06a: optional per-branch receive. RX_BRANCHES unset leaves the rendered
+# conf byte-identical to the tracked one (legacy, one branch). When set, the active branch list and
+# an IDENTITY branch:physical map are appended inside the sensing block of the RENDERED COPY only --
+# the tracked conf is never modified.
+RX_BRANCHES=${RX_BRANCHES:-}
+if [[ -n $RX_BRANCHES ]]; then
+  [[ $RX_BRANCHES =~ ^[0-3](,[0-3])*$ ]] || { echo 'BLOCKED: RX_BRANCHES must be a comma list of 0..3'; exit 3; }
+  RX_BRANCH_PHYS_MAP=$(printf '%s' "$RX_BRANCHES" | tr ',' '\n' | sed 's/^\(.\)$/\1:\1/' | paste -sd,)
+  # Insert before the sensing block's closing brace (line 42 of the tracked conf is "};").
+  awk -v br="$RX_BRANCHES" -v pm="$RX_BRANCH_PHYS_MAP" '
+    /^};$/ && !done { printf "  rx_branches = \"%s\";\n  rx_branch_phys_map = \"%s\";\n", br, pm; done=1 }
+    { print }' "$OUT/receiver.conf" > "$OUT/receiver.conf.tmp"
+  mv "$OUT/receiver.conf.tmp" "$OUT/receiver.conf"
+fi
+printf 'RX_BRANCHES=%s\nRX_BRANCH_PHYS_MAP=%s\nDURATION=%s\n' \
+  "${RX_BRANCHES:-<unset:legacy>}" "${RX_BRANCH_PHYS_MAP:-<unset:legacy>}" "$DURATION" > "$OUT/arm.txt"
 sha256sum "$BUILD/nr-uesoftmodem" "$BUILD/liboai_usrpdevif.so" "$OUT/receiver.conf" > "$OUT/checksums.txt"
 read_counter() {
   local value

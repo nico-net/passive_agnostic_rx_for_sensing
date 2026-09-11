@@ -138,6 +138,10 @@ PHY_VARS_NR_UE *nr_pdsch_passive_branch_view(PHY_VARS_NR_UE *ue, int phys, uint8
 /// layers (plan sec 2.3 retraction). Reported separately from CRC failure.
 uint64_t nr_pdsch_passive_view_unsupported_multilayer(void);
 
+/// P06a: the same counter split per branch, formatted as "br0=<n> br1=<n> ..." for the periodic
+/// PDSCHQ-BRANCH log line. Returns a pointer to a static buffer (one periodic caller).
+const char *nr_pdsch_passive_view_unsupported_multilayer_str(void);
+
 /// ISAC_PDSCH_VERDICT_TRACE=1: one stdout line per DL job, "PDSCH-VERDICT job=.. rnti=.. crc=..
 /// reason=.. Nl=.. branch=.. phys=..". Off by default (no output, no cost beyond one getenv).
 void nr_pdsch_passive_verdict_trace(uint64_t job_idx, uint16_t rnti, uint8_t branch_id, int phys,

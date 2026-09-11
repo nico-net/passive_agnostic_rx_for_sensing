@@ -93,6 +93,15 @@ uint32_t nr_isac_subslot_config(uint32_t *min_re, float *min_snr_db);
  * every other fatal [sensing] parse failure in this file). */
 const nr_rx_branch_set_t *nr_isac_rx_branches(void);
 
+/* adaptive_RX_pipeline.md P06a: the same set, writable, for the ONE owner of branch lifecycle --
+ * the nr-ue.c read loop (AcquisitionOwner). Every other reader uses the const accessor above.
+ * The epochs it mutates are plain aligned uint32 counters read without a lock by the DL decode
+ * consumers: they only ever increase, a torn read is not possible on an aligned 32-bit load, and
+ * a consumer that reads one epoch late merely discards one more job than strictly necessary --
+ * which is the safe direction. Returns NULL under exactly the same conditions as the const
+ * accessor. */
+nr_rx_branch_set_t *nr_isac_rx_branches_mutable(void);
+
 /* Sets the live UE receive-antenna count nr_isac_init() checks rx_branches against (P03's "more
  * branches than antennas" reject). Must be called BEFORE nr_isac_init() to take effect; default
  * is 0 ("unknown"), under which the antenna-count check is skipped rather than fatally rejecting

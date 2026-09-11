@@ -1,32 +1,44 @@
 {
     "schema": "p01.baseline_manifest.v1",
-    "generated_at_utc": "2026-09-11T13:36:21Z",
-    "experiment_purpose": "P07 fix round 1; replay only, no capture",
+    "generated_at_utc": "2026-09-11T13:52:48Z",
+    "experiment_purpose": "P01 baseline identity; no capture",
     "host": "sens6",
     "tree": "/home/sens/NICOLA/adaptive-rx-sensing",
     "git": {
         "branch": "merge/adaptive-sensing",
-        "commit": "5213dfe26fb153281326ce217d6c36579ed164b0",
+        "commit": "0667e4dd09308c12cdf84416ec702fe124fbaa9f",
         "status_short": [
             "M  adaptive_RX_pipeline_progress.md",
+            "M  executables/nr-ue.c",
+            "M  executables/nr-uesoftmodem.c",
+            "M  openair1/PHY/NR_UE_ISAC/nr_isac.cc",
+            "M  openair1/PHY/NR_UE_ISAC/nr_isac.h",
+            "M  openair1/PHY/NR_UE_ISAC/nr_isac_stub.c",
+            "M  openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c",
             "M  openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c",
+            "M  openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.h",
+            "M  openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c",
+            "M  openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.h",
+            "M  openair1/PHY/NR_UE_TRANSPORT/nr_rx_branch.c",
+            "M  openair1/PHY/NR_UE_TRANSPORT/nr_rx_branch.h",
+            "M  openair1/PHY/NR_UE_TRANSPORT/tests/nr_rx_branch_test.cc",
             "M  tests/passive_rx/baselines/fixtures.json",
-            "D  tests/passive_rx/baselines/manifest_20260911_be65aa8-dirty.json",
-            "D  tests/passive_rx/baselines/manifest_20260911_be65aa8-dirty_tracked.patch",
-            "M  tests/passive_rx/replay_branch_view.sh",
+            " D tests/passive_rx/baselines/manifest_20260911_5213dfe-dirty.json",
+            " D tests/passive_rx/baselines/manifest_20260911_5213dfe-dirty_tracked.patch",
+            "M  tests/passive_rx/run_manual_x410.sh",
             "?? tests/passive_rx/aoa_track_dl.conf"
         ],
-        "tracked_diff_patch_path": "tests/passive_rx/baselines/manifest_20260911_5213dfe-dirty_tracked.patch",
-        "tracked_diff_patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-        "tracked_diff_patch_line_count": 0,
+        "tracked_diff_patch_path": "tests/passive_rx/baselines/manifest_20260911_0667e4d-dirty_tracked.patch",
+        "tracked_diff_patch_sha256": "73f60e715f84cacc42834bc872da63d61c4f9d891a230ca4aed5c56edf5b5587",
+        "tracked_diff_patch_line_count": 8403,
         "scoped_files": [
             {
                 "path": "tests/passive_rx/aoa_track_dl.conf",
                 "sha256": "55c348e93a59ec846a3b09712de82420abf3b16b35e04334868f5956943c38e2"
             },
             {
-                "path": "tests/passive_rx/baselines/manifest_20260911_5213dfe-dirty_tracked.patch",
-                "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+                "path": "tests/passive_rx/baselines/manifest_20260911_0667e4d-dirty_tracked.patch",
+                "sha256": "73f60e715f84cacc42834bc872da63d61c4f9d891a230ca4aed5c56edf5b5587"
             },
             {
                 "path": "executables/CMakeLists.txt",
@@ -122,11 +134,11 @@
             },
             {
                 "path": "executables/nr-ue.c",
-                "sha256": "e90ac6800395e944644e4470a715839e51ae48fd2555b026ef9d50f24f2ab5e3"
+                "sha256": "cd53fdc4d8b4728090e143b998e9639a5a55ca2500067af740029f4d13c250eb"
             },
             {
                 "path": "executables/nr-uesoftmodem.c",
-                "sha256": "55b6badfcc2b2f4c82dc4afa5009eb7a336c5ef96d4c442a86dda4db28bcb98d"
+                "sha256": "b97f0d6103c96eac58e66a6131ae2a48caffb7b347c9f689ef4d1a0d021f91f6"
             },
             {
                 "path": "executables/nr-uesoftmodem.h",
@@ -1734,11 +1746,11 @@
             },
             {
                 "path": "openair1/PHY/NR_UE_ISAC/nr_isac.cc",
-                "sha256": "7c08f201ac67b317ce52e91f26dc54e85ef50c6e8b0fd55a868f77447338050c"
+                "sha256": "3dc18555f0e7ef17cb08d280d1d4a3697109429dd8cdcba7dff3118b7c5e5288"
             },
             {
                 "path": "openair1/PHY/NR_UE_ISAC/nr_isac.h",
-                "sha256": "2b88a07e9c1cf36374087cc0b9a780f7e8cd4c0c69c7ad52fdc17a0b3b1eba30"
+                "sha256": "68abc9dc2af2d7dd273d6e27b5777992504bdccf8ab5b295fae3183859f996c0"
             },
             {
                 "path": "openair1/PHY/NR_UE_ISAC/nr_isac_ssb_axis.c",
@@ -1750,7 +1762,7 @@
             },
             {
                 "path": "openair1/PHY/NR_UE_ISAC/nr_isac_stub.c",
-                "sha256": "7083c63c246126cb5d296f63cdf2c0d255eb219eb7f5eb4ba596e29c5e3f96da"
+                "sha256": "3302b447e4ffc23b767a8a12c42a5c0ef45e0e9b5f08e7d0ed054f758fe5d7b8"
             },
             {
                 "path": "openair1/PHY/NR_UE_ISAC/pipeline_types.h",
@@ -1934,7 +1946,7 @@
             },
             {
                 "path": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c",
-                "sha256": "bdaa60663d8655be95ce7df277ffdae3bf18c5fb4eb321012afbe39c8e360118"
+                "sha256": "90cc0da45ec82766d2b9f012b737dbbebf4d235bce2d73ccb4e0d09a0184edcc"
             },
             {
                 "path": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.h",
@@ -2014,19 +2026,19 @@
             },
             {
                 "path": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c",
-                "sha256": "b915357dbdc2243d2c2539959fd2e74c295070eca023b98e89f8d4dc6172189b"
+                "sha256": "286c0cd3d3746c70f843adc989d54b316921818516a9a2b4819d9d2860c119a6"
             },
             {
                 "path": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.h",
-                "sha256": "fd9d45eeae3fd2ffa6dd9159ccddad9f2ed9d733d2c5408bae434029950dab43"
+                "sha256": "a1d6466ecb43f426272d260612ce41d6e55018ce19931cc4345324587e9b0b4d"
             },
             {
                 "path": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c",
-                "sha256": "4f9c6b26839b47969a04c45464984d8a3d53319c4f861f5cbd9e0561a3fe458a"
+                "sha256": "8b5fa6b7a21e8a1f1a7843eaed54909bd33174edcc8aaa1674c6c849fb530422"
             },
             {
                 "path": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.h",
-                "sha256": "0cbd90c762dafeef4bce2de72092df7a5e86addf5fd538c33eaed70590e3019b"
+                "sha256": "df2b4d7ab6cde85cab6e5955848c395b217548faf1cbcbd7b96a3b0bc711baa0"
             },
             {
                 "path": "openair1/PHY/NR_UE_TRANSPORT/nr_prach.c",
@@ -2074,11 +2086,11 @@
             },
             {
                 "path": "openair1/PHY/NR_UE_TRANSPORT/nr_rx_branch.c",
-                "sha256": "3c2169861d5ad48a485fd82be0231e451dd0cc89e9efcc1d9eed22f6caf327ea"
+                "sha256": "ac7d666836e2b47f2d9a5d01a76781f937bfd0b68ad561c27dbdcb43e2df5e5c"
             },
             {
                 "path": "openair1/PHY/NR_UE_TRANSPORT/nr_rx_branch.h",
-                "sha256": "768fddaaad342b00bf55c306561701db013e8cd8654faf19ae30cf1c56469d86"
+                "sha256": "e78d8278e0d2cd5c97dae40823c426f049a07e6ece774eba443feca796df693f"
             },
             {
                 "path": "openair1/PHY/NR_UE_TRANSPORT/nr_rx_branch_sync.c",
@@ -2174,7 +2186,7 @@
             },
             {
                 "path": "openair1/PHY/NR_UE_TRANSPORT/tests/nr_rx_branch_test.cc",
-                "sha256": "bd5a1e25cfd58d642820cbe244f7052648cb565ae5cb43fb04f63fe2004833ee"
+                "sha256": "2e57fb89c6afafa08fcb10d506d0eb6ec5053eb0c0adf902974afc6ec1a46680"
             },
             {
                 "path": "openair1/PHY/NR_UE_TRANSPORT/tests/nr_rx_span_pool_test.cc",
@@ -7750,7 +7762,7 @@
             },
             {
                 "path": "tests/passive_rx/baselines/fixtures.json",
-                "sha256": "4e277bcf2320efa1d889fa368722b026b74b4a6ccf24cec6e9e5a447842ef031"
+                "sha256": "20167402edb36cd3884651cdd499061a69fa48d286821bcca20b7392f97fda7a"
             },
             {
                 "path": "tests/passive_rx/captures/ab_10m.sh",
@@ -7982,7 +7994,7 @@
             },
             {
                 "path": "tests/passive_rx/run_manual_x410.sh",
-                "sha256": "f1987b1ca82ab2332941fea14ab1a7964df393d9d427015a89597a82ca1e6676"
+                "sha256": "731b04368a1b0f61ecba17aa6a3ae933988055cf49a16a8b0b3bc809bcc4c6bf"
             },
             {
                 "path": "tests/passive_rx/run_passive_rx.sh",
@@ -8109,10 +8121,10 @@
     "build": {
         "nr_uesoftmodem": {
             "path": "cmake_targets/ran_build/build/nr-uesoftmodem",
-            "sha256": "5a036ca4974c611bcaf8b4c54c6f55d61d8d28b58b779b5d9ad0ece0b01ef351",
-            "size_bytes": 62870720,
-            "mtime_utc": "2026-09-11T13:35:42Z",
-            "mtime_epoch": 1789133742
+            "sha256": "b0ba754472c437c192d023d844a10cde205a43cccbe7279233f87d78825f1038",
+            "size_bytes": 62899168,
+            "mtime_utc": "2026-09-11T13:48:58Z",
+            "mtime_epoch": 1789134538
         },
         "liboai_usrpdevif": {
             "path": "cmake_targets/ran_build/build/liboai_usrpdevif.so",

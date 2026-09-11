@@ -209,3 +209,39 @@ void nr_rx_branch_reset(nr_rx_branch_t *b)
   /* branch_id, physical_channel, rx_id, acq_epoch, lock_epoch: untouched -- identity and epochs
    * are never reset, epochs must never go backwards. */
 }
+
+int nr_rx_branch_set_dispatch(const nr_rx_branch_set_t *set, nr_rx_branch_dispatch_t *out, int max)
+{
+  if (!set || !out || max < 1)
+    return -1;
+  int n = 0;
+  for (int i = 0; i < NR_RX_BRANCH_MAX; i++) {
+    const nr_rx_branch_t *b = &set->b[i];
+    if (b->physical_channel < 0)
+      continue;
+    if (n >= max) {
+      LOG_E(PHY, "nr_rx_branch_set_dispatch: %d active branches exceed caller capacity %d\n",
+            (int)set->n_active, max);
+      return -1;
+    }
+    out[n].branch_id = b->branch_id;
+    out[n].physical_channel = b->physical_channel;
+    out[n].lock_epoch = b->lock_epoch;
+    out[n].acq_epoch = b->acq_epoch;
+    n++;
+  }
+  return n;
+}
+
+int nr_rx_branch_dispatch_is_stale(const nr_rx_branch_set_t *set, const nr_rx_branch_dispatch_t *d)
+{
+  if (!set || !d)
+    return 1;
+  for (int i = 0; i < NR_RX_BRANCH_MAX; i++) {
+    const nr_rx_branch_t *b = &set->b[i];
+    if (b->physical_channel < 0 || b->branch_id != d->branch_id)
+      continue;
+    return (b->lock_epoch != d->lock_epoch || b->acq_epoch != d->acq_epoch) ? 1 : 0;
+  }
+  return 1; /* names no active branch: cannot be shown fresh, so it is stale */
+}

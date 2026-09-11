@@ -894,7 +894,11 @@ static void nr_slot_fep_ant_task(void *arg)
 static __thread PHY_VARS_NR_UE *t_view_ue = NULL;
 static __thread c16_t *t_view_rxdata[1];
 static __thread int t_view_phys = -1;   // >= 0 while a view is armed on this thread
+static __thread uint8_t t_view_branch = 0; // P06a: which branch the armed view decodes FOR
 static _Atomic uint64_t g_view_unsupported_multilayer = 0;
+/* P06a: the same rejection, attributed to the branch whose view was armed. The aggregate above is
+ * kept as-is so every existing reader (replay summary, BRANCHVIEW line) is unchanged. */
+static _Atomic uint64_t g_view_unsupported_multilayer_br[NR_RX_BRANCH_MAX];
 
 static inline bool view_active(void) { return t_view_phys >= 0; }
 
@@ -952,7 +956,7 @@ int nr_pdsch_passive_branch_view_resolve(const PHY_VARS_NR_UE *ue, int8_t job_ph
 
 PHY_VARS_NR_UE *nr_pdsch_passive_branch_view(PHY_VARS_NR_UE *ue, int phys, uint8_t branch_id)
 {
-  (void)branch_id; // identity travels on the job; TODO(P10): carry it into the CFR submission ABI
+  t_view_branch = branch_id; // P06a: attribute this thread's multilayer rejections to this branch
   t_view_phys = -1;
   if (phys < 0 || phys >= ue->frame_parms.nb_antennas_rx) {
     return ue;
@@ -992,6 +996,18 @@ PHY_VARS_NR_UE *nr_pdsch_passive_branch_view(PHY_VARS_NR_UE *ue, int phys, uint8
   t_view_ue->common_vars.rxdata = t_view_rxdata;
   t_view_phys = phys;
   return t_view_ue;
+}
+
+const char *nr_pdsch_passive_view_unsupported_multilayer_str(void)
+{
+  /* Static buffer, single-line diagnostic printed from one periodic call site. */
+  static char s_buf[128];
+  size_t u = 0;
+  for (int b = 0; b < NR_RX_BRANCH_MAX && u < sizeof(s_buf) - 24; b++)
+    u += snprintf(s_buf + u, sizeof(s_buf) - u, "br%d=%lu ", b,
+                  (unsigned long)atomic_load_explicit(&g_view_unsupported_multilayer_br[b],
+                                                      memory_order_relaxed));
+  return s_buf;
 }
 
 uint64_t nr_pdsch_passive_view_unsupported_multilayer(void)
@@ -1059,6 +1075,8 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
      * counted apart from CRC failure, never silently decoded on one antenna. */
     if (view_active() && n_ports > 1) {
       atomic_fetch_add_explicit(&g_view_unsupported_multilayer, 1, memory_order_relaxed);
+      atomic_fetch_add_explicit(&g_view_unsupported_multilayer_br[t_view_branch & (NR_RX_BRANCH_MAX - 1)],
+                                1, memory_order_relaxed);
       out->reason = "multilayer_in_branch_view";
     } else {
       out->reason = (n_ports < 1) ? "no_dmrs_port" : "layers_exceed_antennas";

@@ -131,6 +131,36 @@ void nr_rx_branch_set_rf_discontinuity(nr_rx_branch_set_t *set);
  * rx_id) and both epochs are left untouched -- epochs must never go backwards. */
 void nr_rx_branch_reset(nr_rx_branch_t *b);
 
+/* adaptive_RX_pipeline.md P06a: one dispatch descriptor per branch a piece of work must be
+ * fanned out to. Carries the branch identity AND the epoch snapshot taken at fan-out time, which
+ * is what nr_rx_branch_dispatch_is_stale() later tests -- the same "no old/new mixing" rule
+ * nr_rx_branch_sync_is_stale() states for nr_rx_branch_sync_t, expressed for a work item that
+ * travels through a queue instead of living next to the branch. */
+typedef struct {
+  uint8_t branch_id;
+  int8_t physical_channel;
+  uint32_t lock_epoch;
+  uint32_t acq_epoch;
+} nr_rx_branch_dispatch_t;
+
+/* Fills out[] with one descriptor per ACTIVE branch (physical_channel >= 0), in branch-id order,
+ * each stamped with that branch's CURRENT lock_epoch/acq_epoch. Returns the number written, or -1
+ * on a NULL argument / max < 1 (nothing written). Writes at most max entries and returns -1 if the
+ * set has more active branches than max, rather than silently fanning out to a subset: a caller
+ * that drops branches without knowing it produces per-branch coverage numbers that are wrong in a
+ * way no downstream counter can reveal.
+ *
+ * A NULL set is NOT an error for the caller's purposes but cannot be answered here, so it returns
+ * -1 and the caller decides what "no branch set" means (for the DL producer: the single legacy
+ * job, branch 0 / physical channel 0 -- see nr_pdsch_passive_queue_enqueue_fanout()). */
+int nr_rx_branch_set_dispatch(const nr_rx_branch_set_t *set, nr_rx_branch_dispatch_t *out, int max);
+
+/* True (1) iff d's epoch snapshot no longer matches the branch it names in *set -- i.e. that
+ * branch lost lock and/or hit an RF discontinuity since the work item was created, so its result
+ * must be discarded rather than mixed into the current epoch. Fails safe (returns 1, "stale") on a
+ * NULL argument or when d names no active branch. */
+int nr_rx_branch_dispatch_is_stale(const nr_rx_branch_set_t *set, const nr_rx_branch_dispatch_t *d);
+
 #ifdef __cplusplus
 }
 #endif

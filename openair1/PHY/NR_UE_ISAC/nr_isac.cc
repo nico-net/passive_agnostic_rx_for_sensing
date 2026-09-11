@@ -255,12 +255,13 @@ extern "C" void nr_isac_init(void)
     LOG_E(PHY,"SENSING: rx_branches/rx_branch_phys_map invalid; sensing disabled\n");
     return;
   }
-  if (expected_nb_antennas_rx>0
-      && nr_rx_branch_set_check_antennas(&branches,expected_nb_antennas_rx)!=0) {
-    LOG_E(PHY,"SENSING: rx_branches names more branches than the configured receive antennas; "
-              "sensing disabled\n");
-    return;
-  }
+  // P06a: FATAL, not "sensing disabled". Every branch names a receive antenna it will decode
+  // from; naming more branches than antennas cannot be honoured, and continuing with sensing
+  // silently off produces a capture that looks merely empty instead of misconfigured.
+  AssertFatal(!(expected_nb_antennas_rx>0
+                && nr_rx_branch_set_check_antennas(&branches,expected_nb_antennas_rx)!=0),
+              "SENSING: rx_branches names %d branches but only %d receive antennas are configured "
+              "(--ue-nb-ant-rx)\n",(int)branches.n_active,expected_nb_antennas_rx);
   branches_valid=true;
   pipeline = PipelineConfig{};
   pipeline.num_ues=p_num_ues>0?static_cast<uint32_t>(p_num_ues):0;pipeline.sources_mask=sources_mask(p_sources,p_source);
@@ -340,6 +341,7 @@ extern "C" int nr_isac_source_enabled(int source){return enabled.load()&&source>
 extern "C" uint32_t nr_isac_aoa_antennas(void){return enabled.load()&&AOA_ENABLE?aoa_antennas:0;}
 extern "C" uint32_t nr_isac_subslot_config(uint32_t* min_re,float* min_snr){if(!enabled.load())return 0;if(min_re)*min_re=pipeline.subslot_min_re;if(min_snr)*min_snr=pipeline.subslot_min_snr_db;return pipeline.subslot_symbols;}
 extern "C" const nr_rx_branch_set_t* nr_isac_rx_branches(void){return (enabled.load()&&branches_valid)?&branches:nullptr;}
+extern "C" nr_rx_branch_set_t* nr_isac_rx_branches_mutable(void){return (enabled.load()&&branches_valid)?&branches:nullptr;}
 extern "C" void nr_isac_set_nb_antennas_rx(int nb_antennas_rx){expected_nb_antennas_rx=nb_antennas_rx;}
 
 extern "C" void nr_isac_submit_cfr(uint32_t slot,int source,const nr_isac_carrier_t* carrier,const float* h,

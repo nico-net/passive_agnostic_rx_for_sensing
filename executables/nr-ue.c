@@ -37,6 +37,7 @@
 #include "common/utils/time_manager/time_manager.h"
 #include "log.h"
 #include <stdatomic.h>
+#include "openair1/PHY/NR_UE_ISAC/nr_isac.h" // P06a: branch set accessor (lifecycle hooks below)
 #ifdef ENABLE_SIONNA_RK_PLUGINS
 #include "openair1/PHY/defs_RU.h"
 #include "plugins/common/src/plugins.h"
@@ -997,6 +998,64 @@ void trs_freq_correction(PHY_VARS_NR_UE *ue, int cfo)
   }
 }
 
+/* ---- adaptive_RX_pipeline.md P06a: branch lifecycle hooks -------------------------------------
+ * The read loop is the AcquisitionOwner (docs/passive_branch_wiring_plan.md): it owns the one
+ * radio read, the RF-continuity detector and the device re-init paths, so it is the only writer of
+ * the P03 branch set's lifecycle state. Plan sec 3.1 explicitly allows ONE shared acquisition/sync
+ * initially ("Preserve the present shared per-branch plan ... initially"), so the SHARED
+ * UE->is_synchronized transition is applied to every active branch IDENTICALLY here. Independent
+ * per-branch acquisition (one PHY_VARS_NR_UE per branch) is the wiring plan's "Yes" rows and is
+ * NOT this step.
+ * These are no-ops when sensing is off or the branch config failed to parse (accessor returns
+ * NULL), so the legacy path is untouched. */
+static void ue_branches_lock(uint64_t absolute_slot)
+{
+  nr_rx_branch_set_t *set = nr_isac_rx_branches_mutable();
+  if (!set)
+    return;
+  for (int i = 0; i < NR_RX_BRANCH_MAX; i++)
+    if (set->b[i].physical_channel >= 0)
+      nr_rx_branch_lock(&set->b[i], absolute_slot);
+}
+
+static void ue_branches_lose_lock(void)
+{
+  nr_rx_branch_set_t *set = nr_isac_rx_branches_mutable();
+  if (!set)
+    return;
+  for (int i = 0; i < NR_RX_BRANCH_MAX; i++)
+    if (set->b[i].physical_channel >= 0)
+      nr_rx_branch_lose_lock(&set->b[i]);
+}
+
+/* Common-mode by construction (nr_rx_branch_set_rf_discontinuity bumps acq_epoch on every active
+ * branch): a stream gap belongs to the shared physical read, not to one branch. */
+static void ue_branches_discontinuity(void)
+{
+  nr_rx_branch_set_t *set = nr_isac_rx_branches_mutable();
+  if (set)
+    nr_rx_branch_set_rf_discontinuity(set);
+}
+
+/* "b<id>:L<lock_epoch>/A<acq_epoch>/s<state>" per active branch, for the periodic RFCENSUS line.
+ * Static buffer: one caller, one thread (the read loop). */
+static const char *ue_branches_epoch_str(void)
+{
+  static char buf[128];
+  const nr_rx_branch_set_t *set = nr_isac_rx_branches();
+  size_t u = 0;
+  buf[0] = 0;
+  if (!set)
+    return "none";
+  for (int i = 0; i < NR_RX_BRANCH_MAX && u < sizeof(buf) - 32; i++) {
+    if (set->b[i].physical_channel < 0)
+      continue;
+    u += snprintf(buf + u, sizeof(buf) - u, "b%d:L%u/A%u/s%d ", (int)set->b[i].branch_id,
+                  set->b[i].lock_epoch, set->b[i].acq_epoch, (int)set->b[i].state);
+  }
+  return buf;
+}
+
 void *UE_thread(void *arg)
 {
   //this thread should be over the processing thread to keep in real time
@@ -1013,6 +1072,7 @@ void *UE_thread(void *arg)
   }
 
   UE->is_synchronized = 0;
+  ue_branches_lose_lock(); // P06a: shared sync state is applied to every branch (plan sec 3.1)
   InitSinLUT();
 
   notifiedFIFO_t nf;
@@ -1050,6 +1110,7 @@ void *UE_thread(void *arg)
 
   if (get_softmodem_params()->sync_ref && UE->sl_mode == 2) {
     UE->is_synchronized = 1;
+    ue_branches_lock(0);
   } else {
     //warm up the RF board
     openair0_timestamp_t tmp;
@@ -1075,6 +1136,7 @@ void *UE_thread(void *arg)
             delNotifiedFIFO_elt(elt);
             decoded_frame_rx = mac->mib_frame;
           }
+          ue_branches_lock((uint64_t)absolute_slot); // P06a: one shared lock, applied to all branches
           LOG_A(PHY,
                 "UE synchronized! decoded_frame_rx=%d UE->init_sync_frame=%d trashed_frames=%d\n",
                 decoded_frame_rx,
@@ -1481,6 +1543,10 @@ void *UE_thread(void *arg)
         // samples belong to. The anchor remains for ordinary coarse errors and must not conceal
         // stream loss. Event-driven, no line cap.
         s_rxts_discont_total++;
+        /* P06a: the RF-continuity detector is the AcquisitionOwner-level discontinuity event, so it
+         * bumps every active branch's acq_epoch here -- BEFORE the ISAC_DISC_NO_RESYNC switch,
+         * because the stream gap happened whether or not this build chooses to reacquire. */
+        ue_branches_discontinuity();
         const long long jump = (long long)(rx_timestamp - expected);
         LOG_E(PHY,
               "SENSING: RXDISCONT abs_slot=%d frame=%d slot=%d expected=%llu actual=%llu "
@@ -1493,6 +1559,7 @@ void *UE_thread(void *arg)
           s_disc_invalidate = (getenv("ISAC_DISC_NO_RESYNC") && atoi(getenv("ISAC_DISC_NO_RESYNC"))) ? 0 : 1;
         if (s_disc_invalidate && UE->is_synchronized) {
           UE->is_synchronized = 0;
+          ue_branches_lose_lock();
           stream_status = STREAM_STATUS_UNSYNC;
           UE->max_pos_acc = 0;
           UE->max_pos_iir = 0;
@@ -1765,9 +1832,9 @@ void *UE_thread(void *arg)
         }
         LOG_I(PHY,
               "SENSING: RFCENSUS slots=%ld ssb_slots=%ld pbch_ok=%lu pbch_fail=%lu rf_pow=%.2f "
-              "ref=%.2f bad=%d shiftForNextFrame=%d max_pos_acc=%d frame=%d\n",
+              "ref=%.2f bad=%d shiftForNextFrame=%d max_pos_acc=%d frame=%d branches=[%s]\n",
               g_census_slots, g_census_ssb_slots, pbch_ok, pbch_fail, w, s_ref, s_bad,
-              shiftForNextFrame, UE->max_pos_acc, curMsg.proc.frame_rx);
+              shiftForNextFrame, UE->max_pos_acc, curMsg.proc.frame_rx, ue_branches_epoch_str());
         /* ANTPOW: raw per-antenna receive power and its dB spread, to be read ALONGSIDE RXBRANCH's
          * pw[]. If these are flat and pw[] is not, the imbalance is in the estimation path, not the
          * antennas. */
@@ -1958,6 +2025,7 @@ void *UE_thread(void *arg)
             }
             if (s_reinits < s_reinit_cap && nrue_ru_reinit() == 0) {
               s_reinits++;
+              ue_branches_discontinuity(); // P06a: a device re-init is an RF discontinuity
               LOG_W(PHY, "SENSING: RFSTALL recovered by full device re-init (n=%d)\n", s_reinits);
             } else {
               /* Exiting is the correct outcome. Every sample from here on is a constant near-zero
@@ -1977,6 +2045,7 @@ void *UE_thread(void *arg)
             }
           }
           UE->is_synchronized = 0;
+          ue_branches_lose_lock();
           stream_status = STREAM_STATUS_UNSYNC;
           UE->max_pos_acc = 0;
           UE->max_pos_iir = 0;
@@ -2026,7 +2095,9 @@ void *UE_thread(void *arg)
       if (nrue_ru_reinit() != 0) {
         LOG_E(PHY, "SENSING: CFOTRK device re-init FAILED; the offset is set but the stream may not recover\n");
       }
+      ue_branches_discontinuity(); // P06a: retune + re-init breaks stream continuity for every branch
       UE->is_synchronized = 0;
+      ue_branches_lose_lock();
       stream_status = STREAM_STATUS_UNSYNC;
       UE->max_pos_acc = 0;
       UE->max_pos_iir = 0;

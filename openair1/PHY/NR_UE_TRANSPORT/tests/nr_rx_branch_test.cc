@@ -213,6 +213,70 @@ TEST(RxBranchLifecycle, ResetOfDisabledBranchStaysDisabled) {
   EXPECT_EQ(set.b[2].physical_channel, -1);
 }
 
+
+/* ---- adaptive_RX_pipeline.md P06a: fan-out dispatch + epoch staleness ------------------------ */
+
+TEST(RxBranchDispatch, OneDescriptorPerActiveBranchWithCurrentEpochs) {
+  nr_rx_branch_set_t set;
+  ASSERT_EQ(nr_rx_branch_set_parse(&set, "0,1,2,3", "0:0,1:1,2:2,3:3", nullptr), 0);
+  nr_rx_branch_lose_lock(&set.b[2]);          // b2 lock_epoch -> 1
+  nr_rx_branch_set_rf_discontinuity(&set);    // every branch acq_epoch -> 1
+
+  nr_rx_branch_dispatch_t d[NR_RX_BRANCH_MAX];
+  ASSERT_EQ(nr_rx_branch_set_dispatch(&set, d, NR_RX_BRANCH_MAX), 4);
+  for (int i = 0; i < 4; i++) {
+    EXPECT_EQ(d[i].branch_id, i);
+    EXPECT_EQ(d[i].physical_channel, i);
+    EXPECT_EQ(d[i].acq_epoch, 1u);
+    EXPECT_EQ(d[i].lock_epoch, (i == 2) ? 1u : 0u);
+  }
+}
+
+TEST(RxBranchDispatch, SingleBranchGivesExactlyOneLegacyDescriptor) {
+  nr_rx_branch_set_t set;
+  ASSERT_EQ(nr_rx_branch_set_parse(&set, "0", "0:0", nullptr), 0);
+  nr_rx_branch_dispatch_t d[NR_RX_BRANCH_MAX];
+  ASSERT_EQ(nr_rx_branch_set_dispatch(&set, d, NR_RX_BRANCH_MAX), 1);
+  EXPECT_EQ(d[0].branch_id, 0);
+  EXPECT_EQ(d[0].physical_channel, 0);
+  EXPECT_EQ(d[0].lock_epoch, 0u);
+  EXPECT_EQ(d[0].acq_epoch, 0u);
+}
+
+TEST(RxBranchDispatch, RejectsRatherThanTruncatesWhenCapacityIsTooSmall) {
+  nr_rx_branch_set_t set;
+  ASSERT_EQ(nr_rx_branch_set_parse(&set, "0,1,2", "0:0,1:1,2:2", nullptr), 0);
+  nr_rx_branch_dispatch_t d[NR_RX_BRANCH_MAX];
+  EXPECT_EQ(nr_rx_branch_set_dispatch(&set, d, 2), -1); // silently dropping a branch would make
+                                                        // per-branch coverage wrong invisibly
+  EXPECT_EQ(nr_rx_branch_set_dispatch(nullptr, d, NR_RX_BRANCH_MAX), -1);
+  EXPECT_EQ(nr_rx_branch_set_dispatch(&set, nullptr, NR_RX_BRANCH_MAX), -1);
+}
+
+TEST(RxBranchDispatch, StaleAfterLoseLockOrDiscontinuityAndFailsSafe) {
+  nr_rx_branch_set_t set;
+  ASSERT_EQ(nr_rx_branch_set_parse(&set, "0,1", "0:0,1:1", nullptr), 0);
+  nr_rx_branch_dispatch_t d[NR_RX_BRANCH_MAX];
+  ASSERT_EQ(nr_rx_branch_set_dispatch(&set, d, NR_RX_BRANCH_MAX), 2);
+  EXPECT_EQ(nr_rx_branch_dispatch_is_stale(&set, &d[0]), 0);
+  EXPECT_EQ(nr_rx_branch_dispatch_is_stale(&set, &d[1]), 0);
+
+  nr_rx_branch_lose_lock(&set.b[1]);
+  EXPECT_EQ(nr_rx_branch_dispatch_is_stale(&set, &d[0]), 0); // branch-local, not common-mode
+  EXPECT_EQ(nr_rx_branch_dispatch_is_stale(&set, &d[1]), 1);
+
+  nr_rx_branch_set_rf_discontinuity(&set);
+  EXPECT_EQ(nr_rx_branch_dispatch_is_stale(&set, &d[0]), 1); // common-mode: now every branch
+
+  nr_rx_branch_dispatch_t unknown;
+  std::memset(&unknown, 0, sizeof(unknown));
+  unknown.branch_id = 3;
+  unknown.physical_channel = 3;
+  EXPECT_EQ(nr_rx_branch_dispatch_is_stale(&set, &unknown), 1); // names no active branch
+  EXPECT_EQ(nr_rx_branch_dispatch_is_stale(nullptr, &d[0]), 1);
+  EXPECT_EQ(nr_rx_branch_dispatch_is_stale(&set, nullptr), 1);
+}
+
 int main(int argc, char **argv)
 {
   logInit();
