@@ -32,9 +32,9 @@ definitions, not a claim the original authors intended this taxonomy.
 
 | Line(s) | Symbol | Class | Why |
 |---|---|---|---|
-| 100 | `extern _Atomic int nr_ue_rf_signal_absent;` (defined `openair1/PHY/NR_UE_ESTIMATION/nr_adjust_synch_ue.c:18`) | H | Freezes the shared timing integrator during a stream outage; the integrator it freezes (`max_pos_acc`) drives `shiftForNextFrame`, which per P05 must not move the common hardware frequency/sample origin without going through AcquisitionOwner. |
+| 100 | `extern _Atomic int nr_ue_rf_signal_absent;` (defined at openair1/PHY/NR_UE_ESTIMATION/nr_adjust_synch_ue.c:18) | H | Freezes the shared timing integrator during a stream outage; the integrator it freezes (`max_pos_acc`) drives `shiftForNextFrame`, which per P05 must not move the common hardware frequency/sample origin without going through AcquisitionOwner. |
 | 115-116 | `_Atomic long nr_ue_diag_producer_absolute_slot`, `nr_ue_diag_producer_wall_ns` | B | Diagnostic producer/consumer lag between the RT read loop (producer) and the async `dl_actors` decode workers (consumer, `phy_procedures_nr_ue.c`'s `nr_process_pbch_symbol()`). Once there are 4 independent read loops, each needs its own producer timestamp -- today it is a single instance because there is a single loop. |
-| 278-279 | `extern _Atomic int nr_ue_cfo_resync_request;`, `extern int nr_ue_cfo_resync_hz;` (defined `openair1/SCHED_NR_UE/phy_procedures_nr_ue.c:65-66`) | H | CFO trim loop request/value that ultimately retunes the shared RF chain -- explicitly the kind of "no branch-local correction may move the common hardware frequency" state P05 calls out. |
+| 278-279 | `extern _Atomic int nr_ue_cfo_resync_request;`, `extern int nr_ue_cfo_resync_hz;` (defined at openair1/SCHED_NR_UE/phy_procedures_nr_ue.c:65-66) | H | CFO trim loop request/value that ultimately retunes the shared RF chain -- explicitly the kind of "no branch-local correction may move the common hardware frequency" state P05 calls out. |
 | 842-852 | `_Atomic long nr_ue_pending_rebase_delta`, `_Atomic int nr_ue_pending_rebase_valid`, `_Atomic int nr_ue_rebase_epoch`, `_Atomic long nr_ue_diag_rf_timestamp`, `_Atomic long nr_ue_diag_samples_consumed` | H | The literal "coarse timing rebase" mechanism: `nr_ue_rebase_epoch` is this codebase's existing analogue of the plan's schema "RF continuity epoch" (sec 3.2), applied "through the same discard path acquisition uses to move the stream origin" per the file's own comment at line ~833-841. |
 | 878-879 | `static double g_census_pow; static long g_census_pow_n;` | B | Absolute RF power off the just-read time-domain slot buffer; diagnostic input to the RFSTALL watchdog (below), which is per-loop today. |
 | 888, 898-900 | `static double g_census_pow_ant[CENSUS_MAX_ANT]`, `g_census_pw2_ant[CENSUS_MAX_ANT]`, `static uint64_t g_census_clip_ant[CENSUS_MAX_ANT]`, `g_census_pw2_n` | B | RAW per-ANTENNA receive power/clip census (`CENSUS_MAX_ANT`=4). Already antenna-indexed, structurally close to per-branch, but implemented as flat arrays with cross-antenna normalization ("printed... normalised to the strongest branch") -- a branch reading another's array element is exactly the kind of cross-branch leakage G2's tests are designed to catch once this is wired per-branch. |
@@ -47,10 +47,10 @@ ENABLE_SIONNA_RK_PLUGINS` only):**
 
 | Line(s) | Symbol | Class | Why |
 |---|---|---|---|
-| 44-48 | `shared_sfn_absolute_slot()`'s `static pthread_mutex_t clock_mutex`, `static uint64_t newest_absolute_slot`, `static bool initialized` | B | Mutex-guarded process-wide SFN-to-absolute-slot reference (conditionally compiled, Sionna RT co-sim plugin only). Directly the kind of "synchronization... timing state" P03 asks to make per-branch, if this build config is ever exercised on this project. |
+| 44-48 | Inside shared_sfn_absolute_slot(): `static pthread_mutex_t clock_mutex`, `static uint64_t newest_absolute_slot`, `static bool initialized` | B | Mutex-guarded process-wide SFN-to-absolute-slot reference (conditionally compiled, Sionna RT co-sim plugin only). Directly the kind of "synchronization... timing state" P03 asks to make per-branch, if this build config is ever exercised on this project. |
 | 430 | `static unsigned int deadline_warning_rate_limit` | W | TX-deadline-miss log rate limiter; trivial, but needs its own instance per RX/TX loop. |
-| 857 | `static int left = 200;` (inside `nr_ue_timing_mutation_log()`) | W | Log-line budget for the rebase-mutation logger; shared budget across whatever calls it today. |
-| 1007 | `nr_rx_continuity_t rx_continuity` (local, not `static`, but the single instance of `UE_thread`'s only invocation is today's stand-in for one branch) | H (detector) / B (reaction) | `nr_rx_continuity_check()`/`_commit()` (`executables/nr_rx_continuity.h`) detect a genuine UHD-timestamp gap -- an AcquisitionOwner-level event, matching exactly what `nr_rx_branch_set_rf_discontinuity()` (this task's new `nr_rx_branch.c`) is for. But its CONSEQUENCE in this code -- `UE->is_synchronized=0`, `stream_status=STREAM_STATUS_UNSYNC`, `shiftForNextFrame=0`, clearing the pending rebase (lines 1483-1503) -- is branch-owned sync state today entangled with the same detection. This is the concrete instance of P03's "separate hardware ownership... from fields that currently couple receiver state to ... retune". |
+| 857 | `static int left = 200;` (inside nr_ue_timing_mutation_log()) | W | Log-line budget for the rebase-mutation logger; shared budget across whatever calls it today. |
+| 1007 | `nr_rx_continuity_t rx_continuity` (local, not static, but the single instance of UE_thread's only invocation is today's stand-in for one branch) | B | Counted as (B), the branch-owned REACTION side, though the DETECTION side is arguably (H): `nr_rx_continuity_check()`/`_commit()` (`executables/nr_rx_continuity.h`) detect a genuine UHD-timestamp gap -- an AcquisitionOwner-level event, matching exactly what `nr_rx_branch_set_rf_discontinuity()` (this task's new `nr_rx_branch.c`) is for. But its CONSEQUENCE in this code -- `UE->is_synchronized=0`, `stream_status=STREAM_STATUS_UNSYNC`, `shiftForNextFrame=0`, clearing the pending rebase (lines 1483-1503) -- is branch-owned sync state today entangled with the same detection. This is the concrete instance of P03's "separate hardware ownership... from fields that currently couple receiver state to ... retune", and it is the ONE symbol in this whole audit genuinely split across both buckets -- counted once, under (B), for the summary table below. |
 | 1046 | `int shiftForNextFrame` (local) | B | Per-loop incremental timing correction (`UE->max_pos_acc * time_sync_I`); becomes per-branch once branches sync independently (P05). |
 | 1158, 1228 | `static int tsync_cap`, `static int tsync_reset` | S | `getenv()`-cached feature-toggle constants, resolved once and read-only afterward; uniform across the process, not branch-specific. |
 | 1346 | `static int s_map_done` | W | One-shot "print the TDD slot map" diagnostic guard. |
@@ -116,8 +116,8 @@ struct to hardware ownership and is the concrete field P03 asks to separate out.
 | 281-282 | `static uint16_t s_hit_count[NR_PDCCH_MAX_CANDIDATE_WINDOWS]; static int s_obs_calls;` | B | Per-6RB-window hit-count accumulator feeding CORESET-offset autodiscovery (`AUTODISCOVER_OBS_CALLS`-windowed convergence, see the file's own comment at ~line 290-303). |
 | 308-313 | `static nr_pdcch_extent_cand_t s_ext_cand[NR_PDCCH_EXTENT_MAX_CAND]; static int s_ext_n, s_ext_idx; static bool s_ext_verified; static int s_ext_occ; static uint64_t s_ext_generation;` | B | PDCCH occasion-extent autodiscovery candidate catalog/state. |
 | 319 | `static extent_evidence_t s_ext_evidence[NR_PDCCH_BLIND_MAX_UE];` | B | Per-UE-slot confirmation evidence for the extent search. |
-| 1728, 1773, 1788, 2657, 2665, 2675, 2689 | `static const uint8_t/int32_t g_table_*[...]` (7 tables, incl. `g_ul_tda_j[6]`) | S | 3GPP-spec lookup tables (TDRA S/L tables, TDA-j table, etc.) -- `static const`, never written after initialization. Exactly the "tables, LUTs" the brief's (S) bucket names. |
-| 3276-3278 | `static pthread_mutex_t common_facts_lock; static nr_pdcch_blind_common_config_t common_facts; static bool common_facts_valid;` | S (with a caveat) | SIB1-decoded "common facts" (PCI, DL/UL BWP, TDA tables), published via `nr_pdcch_blind_publish_common()` / read via `nr_pdcch_blind_get_common(pci,...)` (PCI-checked) / cleared via `nr_pdcch_blind_reset_common()`. All 4 branches observe the SAME cell, so a single SIB1 decode legitimately applies to all of them -- this is an example of the codebase ALREADY implementing the plan's "Worker pools and immutable code/tables may be shared" principle correctly, with a proper lock and a PCI-keyed validity check. Flagged (S) rather than (B), but worth re-confirming once branches can genuinely observe different PCIs (should not happen in this project's single-cell deployment, but the PCI check exists precisely to catch it if it ever does). |
+| 1728, 1773, 1788, 2657, 2665, 2675, 2689 | `g_table_7_3_2_3_3_1[12][5]`, `g_table_7_4_1_1_2_3[13][8]`, `g_table_7_4_1_1_2_4[12][8]`, `g_table_6_1_2_1_1_2[16][4]`, `g_ul_tda_j[6]`, `g_table_6_4_1_1_3_3[12][8]`, `g_table_6_4_1_1_3_4[12][8]` | S | 3GPP-spec lookup tables (TDRA S/L tables, TDA-j table, etc.), all `static const`, never written after initialization. Exactly the "tables, LUTs" the brief's (S) bucket names. |
+| 3276-3278 | `static pthread_mutex_t common_facts_lock; static nr_pdcch_blind_common_config_t common_facts; static bool common_facts_valid;` | S | SIB1-decoded "common facts" (PCI, DL/UL BWP, TDA tables), published via `nr_pdcch_blind_publish_common()` / read via `nr_pdcch_blind_get_common(pci,...)` (PCI-checked) / cleared via `nr_pdcch_blind_reset_common()`. All 4 branches observe the SAME cell, so a single SIB1 decode legitimately applies to all of them -- this is an example of the codebase ALREADY implementing the plan's "Worker pools and immutable code/tables may be shared" principle correctly, with a proper lock and a PCI-keyed validity check. Flagged (S) rather than (B) WITH A CAVEAT: worth re-confirming once branches can genuinely observe different PCIs (should not happen in this project's single-cell deployment, but the PCI check exists precisely to catch it if it ever does). |
 
 ---
 
@@ -146,7 +146,7 @@ Structurally identical to the PDCCH queue above (ring + lock/cv + atomics + thre
 | 74-75 | `g_lock`, `g_cv` | B |
 | 77-82 | `g_queued`, `g_decoded`, `g_crc_ok`, `g_dropped_full`, `g_dropped_stale`, `g_max_lag` | B |
 | 84-86 | `g_running`, `g_stop`, `g_nthreads` | B |
-| 87-88 | `g_threads[]`, `g_ue` (single `PHY_VARS_NR_UE*`) | B |
+| 87-88 | `g_threads[]`, `g_ue` (single PHY_VARS_NR_UE*) | B |
 | 95 | `static c16_t *g_rxdataF[NR_PDSCH_PASSIVE_QUEUE_MAX_CONSUMERS];` | W | Per-CONSUMER (not per-branch) frequency-domain scratch, **deliberately heap-allocated, not `__thread`** -- the file's own comment (line 91-94) cites `PASSIVE_RX_ONLY_HANDOVER.md`'s "shifted `__thread` layout producing an AVX alignment fault" as the reason. Already the right pattern per the plan's TLS warning; still needs branch-tagging once one consumer can service more than one branch back to back. |
 | 100 | `g_args[]` | B |
 
@@ -162,14 +162,15 @@ counter (all confirmed by reading their usage, not just their declaration):
 |---|---|---|---|
 | 2 | `extern _Atomic long nr_ue_diag_producer_absolute_slot;` | B | Same producer-lag symbol. |
 | 46 | `extern __thread uint32_t nr_dl_chest_nvar_ant[];` (defined elsewhere) | W | Per-antenna noise-variance estimate, already TLS. Antenna == future `physical_channel`, so this is directly branch-relevant, but the queue's thread pool (above) is generic, not antenna-pinned -- exactly the "worker later processes another branch" case the plan warns needs an explicit clear. |
-| 76-81 | `kPdtimName[]` (S, `static const char*const`), `g_pdtim_ns/n/max[PDTIM_N]`, `g_pdtim_calls`, `g_pdtim_on` | S / W | Per-stage (fep/chest/alloc/demod/ldpc) wall-time histogram; perf diagnostic. |
+| 76 | `kPdtimName[]` (static const char*const) | S | Per-stage (fep/chest/alloc/demod/ldpc) name table for the histogram below; `static const`, never written after init. |
+| 77-81 | `g_pdtim_ns[PDTIM_N]`, `g_pdtim_n[PDTIM_N]`, `g_pdtim_max[PDTIM_N]`, `g_pdtim_calls`, `g_pdtim_on` | W | Per-stage wall-time histogram; perf diagnostic. |
 | 149-152 | `static parmset_t g_parmset[PARMSET_MAX]; static int g_parmset_n; static uint64_t g_parmset_other; static pthread_mutex_t g_parmset_lock;` | B | Lock-protected census of distinct (mcs,tbl,Qm,bg,nl,cdm,...) grant "shapes" seen -- a diagnostic dedup table, but aggregated with no branch attribution. |
 | 247-248 | `static _Atomic uint64_t g_branch_try[NR_DL_CHEST_MAX_ANT], g_branch_ok[NR_DL_CHEST_MAX_ANT];` | B | Per-antenna chest-retry try/ok counters -- note the pre-existing name "branch" here means "per-antenna chest retry branch", unrelated to this plan's `ReceiverBranch`, but conceptually the same axis (per-antenna = per future branch). |
-| 262-395 | `g_llr_n/absum/zero/sat/clip8[2]`, `g_subset_try/ok[NR_PDSCH_SUBSET_N]`, `g_shape_n/tbs/rb/rv/G/K/F/C/Z[3]`, `g_rbhist[3][NR_PDSCH_RBHIST_BINS]`, `g_nsym[3][2]`, `g_llr_sgnsum/pos[2]`, `g_llr_posbit/nbit[2][2]`, `g_llr_tb[2]`, `g_ldpc_seg_fail/tb_fail/zero_tb/ok/iface_err`, `g_seg_ok_sum/tot_sum`, `g_segidx_tot/fail[NR_PDSCH_SEGIDX_MAX]`, `g_segidxc_tot/fail[NR_PDSCH_CBUCKETS][...]`, `g_pipe_n/sum[2][...]` | B | All cross-branch AGGREGATE decode/LDPC/LLR diagnostic counters, all `_Atomic`, none branch-attributed. Exactly the class of state G2 test 5 ("exercise failed TB CRC... verify exact admitted pilot/data paths and counters") needs disaggregated once there are 4 branches. |
+| 262-395 | `g_llr_n[2]`, `g_llr_absum[2]`, `g_llr_zero[2]`, `g_llr_sat[2]`, `g_llr_clip8[2]`, `g_subset_try[N]`, `g_subset_ok[N]`, `g_shape_n[3]`, `g_shape_tbs[3]`, `g_shape_rb[3]`, `g_rbhist[3][BINS]`, `g_shape_rv[3]`, `g_shape_G[3]`, `g_shape_K[3]`, `g_shape_F[3]`, `g_shape_C[3]`, `g_shape_Z[3]`, `g_nsym[3][2]`, `g_llr_sgnsum[2]`, `g_llr_pos[2]`, `g_llr_posbit[2][2]`, `g_llr_nbit[2][2]`, `g_llr_tb[2]`, `g_ldpc_seg_fail`, `g_ldpc_tb_fail`, `g_ldpc_zero_tb`, `g_ldpc_ok`, `g_ldpc_iface_err`, `g_seg_ok_sum`, `g_seg_tot_sum`, `g_segidx_tot[MAX]`, `g_segidx_fail[MAX]`, `g_segidxc_tot[CBUCKETS][MAX]`, `g_segidxc_fail[CBUCKETS][MAX]`, `g_pipe_n[2]`, `g_pipe_sum[2][FIELDS]` | B | All 36 cross-branch AGGREGATE decode/LDPC/LLR diagnostic counters in this range (every `static _Atomic` declaration at source lines 262-395; verified by direct `grep -n "^static _Atomic\|^static uint\|^static int" | wc -l` over that range = 36, not by the shorthand grouping alone), none branch-attributed. Exactly the class of state G2 test 5 ("exercise failed TB CRC... verify exact admitted pilot/data paths and counters") needs disaggregated once there are 4 branches. |
 | 299 | `static double g_sfo_ppm_ema;` | B | SFO EMA -- genuine per-branch synchronization state (each branch's own RF observations will differ), currently a single scalar. |
 | 348, 353 | `static __thread uint32_t t_seg_K, t_seg_F, t_seg_C, t_seg_Z, t_seg_E, t_seg_R, t_seg_lbrm, t_seg_BG;` | W | Segmentation-parameter scratch cached per-thread for post-decode logging/shape counters; reused across jobs on the same worker thread. |
-| 637 | `static __thread passive_harq_t g_harq; // zero-initialised per thread` | W (high priority) | Per-thread HARQ/decode scratch. Comment "zero-initialised per thread" means C's TLS zero-init runs ONCE at thread start, not between jobs -- if the same worker thread later decodes a DIFFERENT branch's transport block, nothing clears this between jobs. This is the concrete instance of P07's "consume only one branch's samples" / P09's "restore reused-worker state even on errors" requirement. |
-| 1099, 1590-1591, 1619-1625 | `static __thread fourDimArray_t *toFree/toFree2..5; static __thread int16_t *llr; static __thread uint32_t llr_cap;` | W | Heap-backed (not raw TLS array) scratch buffers, resized on demand -- same "avoid the AVX alignment fault" pattern as `g_rxdataF` above; still needs job-boundary awareness once shared across branches. |
+| 637 | `static __thread passive_harq_t g_harq;` (zero-initialised per thread) | W | HIGH PRIORITY (flagged, not a separate class): per-thread HARQ/decode scratch. Comment "zero-initialised per thread" means C's TLS zero-init runs ONCE at thread start, not between jobs -- if the same worker thread later decodes a DIFFERENT branch's transport block, nothing clears this between jobs. This is the concrete instance of P07's "consume only one branch's samples" / P09's "restore reused-worker state even on errors" requirement. |
+| 1099, 1590-1591, 1619-1625 | `toFree`, `toFree2`, `toFree3`, `toFree4`, `toFree5` (each static __thread fourDimArray_t *), `llr` (static __thread int16_t *), `llr_cap` (static __thread uint32_t) | W | Heap-backed (not raw TLS array) scratch buffers, resized on demand -- same "avoid the AVX alignment fault" pattern as `g_rxdataF` above; still needs job-boundary awareness once shared across branches. |
 | 1257, 1317, 1369 | `static _Atomic uint64_t s_dfo_n, s_dfo_rej, s_fo_n;` | B | CFO/frequency-offset-related diagnostic counters, per-branch sync state once disaggregated. |
 | 770, 1742, 1970 | `static __thread unsigned long s_sd_n, s_evm_n, s_subset_seen;` | W | Per-thread one-shot/rate-limited diagnostic counters. |
 
@@ -184,7 +185,8 @@ counter (all confirmed by reading their usage, not just their declaration):
 | 90 | `static int g_gnb_nant;` | B | Antenna count used to configure each pooled gNB context. |
 | 91-92, 96-97, 233, 239-240 | `g_try`, `g_crc_ok`, `g_rej_unsup`, `g_rej_setup`, `g_seg_fail`, `g_zero_tb`, `g_ta_refined`, `g_uci_trials`, `g_uci_rescued`, `g_cfr_submits`, `g_cfr_re`, `g_ant_pw[PASSIVE_UL_MAX_ANT]`, `g_ant_n` | B | Same pattern as the PDSCH file: cross-branch aggregate UL decode/CFR-submit counters, no attribution. |
 | 122-127 | `static int g_ta_sweep_n; static int32_t g_ta_sweep_start, g_ta_sweep_step; static _Atomic uint32_t g_ta_sweep_seq; static _Atomic uint64_t g_ta_try[TA_SWEEP_MAX], g_ta_ok[TA_SWEEP_MAX];` | B | Timing-advance sweep search state -- sync/timing state, explicitly in scope per plan sec 3.2's schema and P05. |
-| 167-175 | `kUtimName[]` (S), `g_utim_ns/n/max[UTIM_N]`, `g_utim_hist[8]`, `g_utim_over_slot`, `g_utim_on` | S / W | Per-stage wall-time histogram, perf diagnostic. |
+| 167 | `kUtimName[]` | S | Per-stage name table for the histogram below; `static const`, never written after init. |
+| 168-175 | `g_utim_ns[UTIM_N]`, `g_utim_n[UTIM_N]`, `g_utim_max[UTIM_N]`, `g_utim_hist[8]`, `g_utim_over_slot`, `g_utim_on` | W | Per-stage wall-time histogram, perf diagnostic. |
 | 678 | `static _Atomic int s_stage_once;` | W | One-shot diagnostic-stage flag. |
 | 881-883, 898 | `static __thread float *ul_h; static __thread uint32_t *ul_k, *ul_l, ul_cap; static __thread int s_audit;` | W | Heap-backed (not fixed-array) TLS CFR-submission scratch, same pattern as the PDSCH file's `toFree*`/`llr`. |
 
@@ -200,7 +202,7 @@ Structurally identical to the two DL passive queues above; same classification, 
 | 50-54 | `g_ring[]`, `g_depth`, `g_head`, `g_tail`, `g_count` | B |
 | 56-57 | `g_lock`, `g_cv` | B |
 | 59-64 | `g_queued`, `g_decoded`, `g_crc_ok`, `g_dropped_full`, `g_dropped_stale`, `g_max_lag` | B |
-| 66-70 | `g_running`, `g_stop`, `g_nthreads`, `g_threads[]`, `g_ue` (single `PHY_VARS_NR_UE*`) | B |
+| 66-70 | `g_running`, `g_stop`, `g_nthreads`, `g_threads[]`, `g_ue` (single PHY_VARS_NR_UE*) | B |
 | 75 | `g_args[]` | B |
 
 ---
@@ -209,7 +211,7 @@ Structurally identical to the two DL passive queues above; same classification, 
 
 | Line(s) | Symbol | Class | Why |
 |---|---|---|---|
-| 24-25 | `int AOA_ENABLE = 0; int AOA_UL_ENABLE = 0;` (extern, non-static, true global linkage; declared in `nr_isac.h`) | S | "Process-wide policy values requested by the deployment" per the file's own comment -- set once at `nr_isac_init()`, read-only afterward. Fits (S)'s technical criteria, but note: P14 ("AoA removal/migration") will restructure this into a per-branch-aware design, so treat this classification as provisional pending P14, not as "no work needed." |
+| 24-25 | `int AOA_ENABLE = 0; int AOA_UL_ENABLE = 0;` (extern, non-static, true global linkage; declared in nr_isac.h) | S | "Process-wide policy values requested by the deployment" per the file's own comment -- set once at `nr_isac_init()`, read-only afterward. Fits (S)'s technical criteria, but note: P14 ("AoA removal/migration") will restructure this into a per-branch-aware design, so treat this classification as provisional pending P14, not as "no work needed." |
 | 30 | `std::unique_ptr<SensingEngine> engine;` | B | **The sensing-engine singleton the brief names explicitly.** Plan sec 3.1: "Each branch owns a `SensingEngine` configured for one antenna" -- today there is exactly one, for the whole process. |
 | 31 | `PipelineConfig pipeline;` | B | The single `[sensing]`-derived pipeline config the one `engine` above is constructed from; becomes per-branch alongside `engine`. |
 | 32 | `std::atomic<bool> enabled, started;` | B | Lifecycle flags for the single `engine`; tied 1:1 to it. |
@@ -275,25 +277,50 @@ not depend on this wiring to be verifiable.
 
 ## Summary counts (H / B / S / W, symbols not lines)
 
+**Fix round 1 (this revision): every count below is EXACT, not approximate, and recomputed
+programmatically rather than by eye.** Method: every row's Symbol(s) cell in every table above was
+rewritten so it contains ONLY backtick-quoted declared symbol names (no file:line citations,
+function-name cross-references, or bare type annotations left in backticks -- those, where useful,
+are now plain unquoted parenthetical text in the same cell instead, which the counter ignores), and
+every "N/M/K[...]"-shorthand grouping (e.g. `g_llr_n/absum/zero/sat/clip8[2]`) was expanded into
+its individual names. `docs/count_audit_symbols.py` (checked in alongside this doc) then parses
+this document's own tables: for each row it extracts every backtick-quoted span in the Symbol(s)
+column, splits each span on `;` and then on top-level `,` (bracket-depth-aware, so `g_rbhist[3][N]`
+is not split at its internal commas), counts the resulting declarators, and sums by Class column
+per file section. Run: `python3 docs/count_audit_symbols.py docs/passive_branch_globals_audit.md`.
+The one dual-natured symbol in the whole audit (`rx_continuity`, `executables/nr-ue.c:1007`,
+detection is H-flavored but its coded reaction is B) is counted once, under B -- see that row's Why
+column. The original review that caught this round's errors: recomputing
+`nr_pdcch_passive_queue.c` by the same method independently (`grep -c "^static\|^\s*static "`-style
+count over the source file directly) gives 19, matching the row-sum below exactly, and
+`nr_pdsch_passive_queue.c` gives ~20, also matching.
+
 | File | H | B | S | W |
 |---|---|---|---|---|
-| `executables/nr-ue.c` | 8 | 15 | 3 | 3 |
-| `executables/nr-ue-ru.c` | 6 | 3 | 0 | 0 |
-| `nr_pdcch_blind_monitor_rt.c` | 0 | ~30 | 0 | 4 |
-| `nr_pdcch_blind_monitor.c` | 0 | 13 | 8 | 0 |
-| `nr_pdcch_passive_queue.c` | 0 | 12 | 0 | 0 |
-| `nr_pdsch_passive_queue.c` | 0 | 11 | 0 | 1 |
-| `nr_pdsch_passive_decode.c` | 0 | ~55 | 2 | ~15 |
-| `nr_pusch_passive_queue.c` | 0 | 11 | 0 | 0 |
-| `nr_pusch_passive_decode.c` | 0 | ~20 | 2 | 7 |
-| `nr_isac.cc` (pre-P03) | 0 | 4 | 2 | 0 |
+| `executables/nr-ue.c` | 12 | 25 | 3 | 3 |
+| `executables/nr-ue-ru.c` | 4 | 3 | 0 | 0 |
+| `nr_pdcch_blind_monitor_rt.c` | 0 | 40 | 0 | 12 |
+| `nr_pdcch_blind_monitor.c` | 0 | 13 | 10 | 0 |
+| `nr_pdcch_passive_queue.c` | 0 | 19 | 0 | 0 |
+| `nr_pdsch_passive_queue.c` | 0 | 20 | 0 | 1 |
+| `nr_pdsch_passive_decode.c` | 0 | 47 | 1 | 25 |
+| `nr_pusch_passive_queue.c` | 0 | 20 | 0 | 0 |
+| `nr_pusch_passive_decode.c` | 0 | 22 | 1 | 12 |
+| `nr_isac.cc` (pre-P03) | 0 | 5 | 2 | 0 |
 | `nr_initial_sync.c` | 0 | 0 | 0 | 1 |
 
-Counts are approximate for the largest files (`nr_pdcch_blind_monitor_rt.c`,
-`nr_pdsch_passive_decode.c`, `nr_pusch_passive_decode.c`) where dozens of `_Atomic` diagnostic
-counters follow one repeated pattern (per-class/per-bucket LLR/LDPC/shape histograms) --
-every symbol is still listed with its line number(s) in the tables above; the count rolls up
-near-identical rows rather than omitting them.
+No file in this table is a sample of a larger population -- every distinct declared symbol found
+by the original file:line grep pass is listed in its file's detail table above and counted exactly
+once here. The "approximate" qualifier from the previous revision is retracted in full: it was
+covering up two distinct bugs (rows undercounted by grouping several declarators under one row
+without expanding them, e.g. `nr_pdcch_passive_queue.c`'s true 19 read as 12; and stray extra
+backtick spans -- a file:line citation, a function name, a bare type annotation -- silently adding
+phantom "symbols" to a handful of other rows), not a genuine sampling decision. The single largest
+correction this round: `nr_pdsch_passive_decode.c`'s 262-395 grouped row was previously read as
+"~55" B by eye; fully expanding its shorthand and cross-checking against
+`grep -n "^static _Atomic\|^static uint\|^static int" openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c`
+over that exact line range gives exactly 36 declarators (all B), not ~55 -- three independent counts
+(shorthand expansion, direct source grep, and this doc's own script) now agree.
 
 ## Cross-cutting observations
 

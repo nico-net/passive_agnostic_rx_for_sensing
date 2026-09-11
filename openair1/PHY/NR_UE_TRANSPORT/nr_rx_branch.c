@@ -87,6 +87,14 @@ int nr_rx_branch_set_parse(nr_rx_branch_set_t *set, const char *active_list, con
   }
 
   const char *prefix = (rx_id_prefix && *rx_id_prefix) ? rx_id_prefix : "rx";
+  /* rx_id is "%s%d" of prefix + a single-digit branch id (0..NR_RX_BRANCH_MAX-1, all one digit),
+   * into a NR_RX_BRANCH_ID_LEN(16)-byte buffer: prefix + 1 digit + NUL must fit, so prefix can be
+   * at most 14 bytes. A longer prefix would have snprintf silently truncate the trailing digit,
+   * making every branch's rx_id collide on the same truncated prefix -- reject it instead. */
+  if (strlen(prefix) > NR_RX_BRANCH_ID_LEN - 2) {
+    LOG_E(PHY, "rx_id_prefix: too long (max %d chars): '%s'\n", NR_RX_BRANCH_ID_LEN - 2, prefix);
+    return -1;
+  }
   for (int i = 0; i < NR_RX_BRANCH_MAX; i++) {
     if (set->b[i].state != NR_RXB_DISABLED)
       snprintf(set->b[i].rx_id, sizeof(set->b[i].rx_id), "%s%d", prefix, i);

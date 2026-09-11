@@ -86,7 +86,7 @@ typedef struct {
 
 /* Parses "0,1,2,3"-style active_list and "0:0,1:1,2:2,3:3"-style branch:physical phys_map
  * (comma-separated, order-independent) into *set. rx_id_prefix defaults to "rx" when NULL/empty;
- * each active branch gets rx_id = "<prefix><branch_id>".
+ * each active branch gets rx_id = "<prefix><branch_id>" (branch_id is always one digit, 0..3).
  *
  * Rejects (returns -1, logs LOG_E(PHY, ...) naming the offending key and value; *set is still
  * fully zero-initialized/safe to read on failure):
@@ -95,6 +95,9 @@ typedef struct {
  *   - a branch id repeated in active_list, or repeated as a phys_map key
  *   - a physical channel value used by two phys_map entries
  *   - an active branch (named in active_list) with no phys_map entry
+ *   - rx_id_prefix longer than NR_RX_BRANCH_ID_LEN-2 (14) chars -- past that, "%s%d" into the
+ *     rx_id buffer would truncate the trailing branch digit and every branch's rx_id would
+ *     silently collide on the same truncated prefix
  * Returns 0 on success. On success every active branch is NR_RXB_ACQUIRING with epochs at 0;
  * every inactive slot is NR_RXB_DISABLED with physical_channel -1. set->run_id is left at 0 --
  * callers set it themselves. */

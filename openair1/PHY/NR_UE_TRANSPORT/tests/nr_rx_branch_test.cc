@@ -84,6 +84,17 @@ TEST(RxBranchParse, RejectsMissingMappingForActiveBranch) {
   EXPECT_EQ(nr_rx_branch_set_parse(&set, "0,1", "0:0", nullptr), -1);
 }
 
+TEST(RxBranchParse, RejectsOverlongRxIdPrefix) {
+  nr_rx_branch_set_t set;
+  // NR_RX_BRANCH_ID_LEN(16) - 2 = 14 is the longest prefix that still leaves room for the
+  // 1-digit branch id and the NUL terminator; 15 must be rejected, not silently truncated into a
+  // collision (every branch's rx_id would read the same truncated string).
+  EXPECT_EQ(nr_rx_branch_set_parse(&set, "0", "0:0", "012345678901234"), -1);  // 15 chars
+  ASSERT_EQ(nr_rx_branch_set_parse(&set, "0,1", "0:0,1:1", "01234567890123"), 0);  // 14 chars: OK
+  EXPECT_STREQ(set.b[0].rx_id, "012345678901230");
+  EXPECT_STREQ(set.b[1].rx_id, "012345678901231");
+}
+
 TEST(RxBranchParse, RejectsEmptyOrNullInputs) {
   nr_rx_branch_set_t set;
   EXPECT_EQ(nr_rx_branch_set_parse(&set, nullptr, "0:0", nullptr), -1);
