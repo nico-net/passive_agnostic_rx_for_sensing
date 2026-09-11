@@ -1191,3 +1191,46 @@ For optional UL comparisons, list every 2-RX pair, 3-RX triple and 4-RX set for 
 - Distinguish existing source blocks from newly validated four-branch behavior.
 - Keep optional UL completion separate from required DL pipeline completion.
 - No full completion claim until all required gates have dated, reviewable evidence.
+
+## nr-ue.c audit and commit (2026-09-11)
+
+Audited the uncommitted `executables/nr-ue.c` diff (7 hunks, +29/-3, from the 2026-09-10 manual DL/UL
+port; `nr-ue-ru.c` read as context only, not committed). Committed as `be65aa8764c3`, that one file only.
+
+| Hunk | What it does | Verdict |
+|---|---|---|
+| readFrame short read | short/failed read -> `oai_exit=1`, free trash buf, return (no acquisition on partial IQ) | OK; CONCERN: all modes, not passive-only (no-op on rfsim, which always returns nsamps); no early-out on entry, so warm-up loop may re-read a dead radio up to 49x before exit |
+| syncInFrame | `return` when `oai_exit` after read | OK |
+| UE_thread acquisition | `break` after readFrame if `oai_exit` | OK |
+| first-symbol read after sync | `break` on `oai_exit || ret<0` | OK |
+| slot read | `break` on `oai_exit || tmp<0` before RXDISCONT test/dispatch | OK |
+| next-frame symbol read | same guard | OK |
+| RFSTALL exit | `oai_exit=1; nrue_ru_stop(); nrue_ru_end();` before `exit(3)` | OK (`trx_usrp_end` idempotent); CONCERN: attached mode only -- a UL actor writing between `nrue_ru_end` and `exit(3)` would deref `priv==NULL`; also `nrue_ru_end` may block for UHD RPC timeouts on a dead claim (bounded, try/catch) |
+
+Compile-level: `nrue_ru_stop/end/read` signatures match `nr-ue-ru.h`, header included, `oai_exit` via
+`softmodem-common.h`; no build run (another agent may be building / capture may be live). The live
+manual-profile capture (`sensing_manual_fixed.UtvBT7`) covers compilation and the happy path of the read
+guards in `--passive-rx`; it does NOT exercise the error branches, attached mode, or rfsim.
+
+## Dirty-tree audit and commits (2026-09-11)
+
+Remaining uncommitted tracked files from the 2026-09-10 manual DL/UL port, audited file by file
+(no build run), one commit per file on `merge/adaptive-sensing`. Full per-hunk analysis:
+`.superpowers/sdd/adaptive_RX_pipeline/dirty-tree-audit-report.md` (local machine).
+
+| file | hunks | verdict | SHA / reason not committed |
+|---|---|---|---|
+| `executables/nr-ue-ru.c` | 4 | OK (2 CONCERN) | `6e5b9f332a` |
+| `openair1/PHY/NR_UE_TRANSPORT/nr_initial_sync.c` | 2 | OK | `0153a129e1` (amended, message only) |
+| `openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c` | 2 | OK | `4ea9131417` |
+| `radio/USRP/usrp_lib.cpp` | 16 | OK (3 CONCERN) | `88b19dac4a` |
+| `tests/passive_rx/monitor/monitor.py` | 2 | OK (py_compile passes) | `3d4ad602ec` |
+| `tests/passive_rx/monitor/monitor.html` | 8 | OK | `2a7db652e1` |
+| `tests/passive_rx/run_adaptive_receive_test.sh` | 3 | OK (2 CONCERN, bash -n passes) | `f9fd0fe636` |
+
+Top concerns (behaviour outside `--passive-rx`, none exercised by `sensing_manual_fixed.UtvBT7`):
+`trx_usrp_read` now treats ANY UHD metadata error (overflow/timeout) as fatal -> `oai_exit`, so an
+attached-UE B210 dies on a single recoverable 'O'; `trx_usrp_end` takes the non-recursive
+`rx_mutex`, so an `exit_function()` entered on the producer thread while it holds the lock
+(iqrecorder limit, SIGINT delivered to the UE thread) deadlocks instead of exiting; a full
+`nrue_ru_reinit` now re-issues `set_gpio_src` on X410 (caught, returns -1, no core dump).
