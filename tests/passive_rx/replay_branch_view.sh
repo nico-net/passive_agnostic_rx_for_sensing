@@ -12,7 +12,11 @@
 #         payload the 4-antenna reference recorded (the binary's own "identical DL controls=N"
 #         hash check, N == the view's crc_ok). The binary exits 2 ("REPLAY VOID") whenever a view
 #         accepts FEWER TBs than the reference -- that is the expected coverage loss, so exit 2 is
-#         accepted for a view; any other non-zero exit, a missing verdict line or N != crc_ok fails;
+#         accepted for a view; any other non-zero exit, a missing verdict line or N != crc_ok fails.
+#         DELIBERATE DEVIATION from the P07 brief's "(i) ... exit 0": the replay binary's exit code
+#         encodes "identical to the 4-antenna reference" (0) vs "REPLAY VOID" (2), and a single
+#         branch that accepts fewer TBs than the reference is exactly the coverage loss this test
+#         exists to record -- requiring exit 0 would have made any honest coverage loss a failure;
 #   (ii)  the legacy path is UNCHANGED: "REPLAY PASS: identical DL controls=34 failed=0 raw UL=24";
 #   (iii) a branch's data-aided submissions == that branch's own CRC-OK count (a branch with
 #         0 CRC-OK has 0 submits) -- G2 test 3: no branch obtains data-aided CFR from another

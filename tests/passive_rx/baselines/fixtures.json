@@ -56,9 +56,10 @@
         "no_ground_truth_timing_used": "Verified by reading nr_passive_replay_read() (nr_passive_replay_capture.c:225-303): the replay path consumes only the file's own recorded header/IQ/job metadata (source-index continuity check at :266-269, per-slot FO override at nr_slot_fep_fo_override_hz) -- no gNB log, no GT file, no wall-clock alignment of any kind is opened or read anywhere in this function or its callee nr_pdsch_passive_decode()."
       },
       "verified_with_binary_sha256": [
-        "6bfe2c785d99718b9cddc5f18ee2fb710aee70962faefad0009b6a415a140573"
+        "6bfe2c785d99718b9cddc5f18ee2fb710aee70962faefad0009b6a415a140573",
+        "5a036ca4974c611bcaf8b4c54c6f55d61d8d28b58b779b5d9ad0ece0b01ef351"
       ],
-      "verified_with_binary_note": "P07 (2026-09-11): binary built from HEAD d1b563f511 + the then-uncommitted nr-ue.c edits (committed mid-session by their owner as be65aa8764) + the P07 DL branch-view change; legacy replay still 'REPLAY PASS: identical DL controls=34 failed=0 raw UL=24; no radio opened' with every REPLAY-CONTROL/DL-REPLAY-FAILURE/REPLAY-RAW-UL line byte-identical to the producing binary's. producing_binary_sha256 is deliberately NOT overwritten: the fixture was produced by c3810019.... check_manifest.py --fixtures accepts either.",
+      "verified_with_binary_note": "P07 (2026-09-11): binary built from HEAD d1b563f511 + the then-uncommitted nr-ue.c edits (committed mid-session by their owner as be65aa8764) + the P07 DL branch-view change; legacy replay still 'REPLAY PASS: identical DL controls=34 failed=0 raw UL=24; no radio opened' with every REPLAY-CONTROL/DL-REPLAY-FAILURE/REPLAY-RAW-UL line byte-identical to the producing binary's. producing_binary_sha256 is deliberately NOT overwritten: the fixture was produced by c3810019.... check_manifest.py --fixtures accepts either. Fix round 1 (2026-09-11): binary 5a036ca4... (env caching + untagged-job LOG_W), legacy replay re-proven identical.",
       "branch_view_replay": {
         "script": "tests/passive_rx/replay_branch_view.sh (ctest dl_branch_view_replay)",
         "date": "2026-09-11",

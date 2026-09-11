@@ -1,65 +1,32 @@
 {
     "schema": "p01.baseline_manifest.v1",
-    "generated_at_utc": "2026-09-11T13:18:02Z",
-    "experiment_purpose": "P07 single-branch DL decode view; replay only, no capture",
+    "generated_at_utc": "2026-09-11T13:36:21Z",
+    "experiment_purpose": "P07 fix round 1; replay only, no capture",
     "host": "sens6",
     "tree": "/home/sens/NICOLA/adaptive-rx-sensing",
     "git": {
         "branch": "merge/adaptive-sensing",
-        "commit": "be65aa8764c3fe320761b526d3b6f23d0017d9fb",
+        "commit": "5213dfe26fb153281326ce217d6c36579ed164b0",
         "status_short": [
-            "M  CMakeLists.txt",
-            "MM adaptive_RX_pipeline_progress.md",
-            "A  docs/passive_dl_branch_view_audit.md",
-            " M executables/nr-ue-ru.c",
-            " M openair1/PHY/NR_UE_TRANSPORT/nr_initial_sync.c",
-            "M  openair1/PHY/NR_UE_TRANSPORT/nr_passive_replay_capture.c",
-            " M openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c",
-            "M  openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c",
-            "M  openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_data_aided.c",
-            "M  openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_data_aided.h",
+            "M  adaptive_RX_pipeline_progress.md",
             "M  openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c",
-            "M  openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.h",
-            "M  openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c",
-            "M  openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.h",
-            " M radio/USRP/usrp_lib.cpp",
             "M  tests/passive_rx/baselines/fixtures.json",
-            "D  tests/passive_rx/baselines/manifest_20260911_b90276d-dirty.json",
-            "D  tests/passive_rx/baselines/manifest_20260911_b90276d-dirty_tracked.patch",
-            "M  tests/passive_rx/check_manifest.py",
-            " M tests/passive_rx/monitor/monitor.html",
-            " M tests/passive_rx/monitor/monitor.py",
-            "A  tests/passive_rx/replay_branch_view.sh",
-            " M tests/passive_rx/run_adaptive_receive_test.sh",
-            "?? adaptive_RX_pipeline.md",
-            "?? tests/passive_rx/MANUAL_DL_UL.md",
-            "?? tests/passive_rx/adaptive_manual_dlul.conf",
-            "?? tests/passive_rx/aoa_track_dl.conf",
-            "?? tests/passive_rx/run_manual_x410.sh"
+            "D  tests/passive_rx/baselines/manifest_20260911_be65aa8-dirty.json",
+            "D  tests/passive_rx/baselines/manifest_20260911_be65aa8-dirty_tracked.patch",
+            "M  tests/passive_rx/replay_branch_view.sh",
+            "?? tests/passive_rx/aoa_track_dl.conf"
         ],
-        "tracked_diff_patch_path": "tests/passive_rx/baselines/manifest_20260911_be65aa8-dirty_tracked.patch",
-        "tracked_diff_patch_sha256": "47ff8fc9aa92f9023cf199f9bc4ae4dfed1a1ebfa5931744b8981cef36c51689",
-        "tracked_diff_patch_line_count": 730,
+        "tracked_diff_patch_path": "tests/passive_rx/baselines/manifest_20260911_5213dfe-dirty_tracked.patch",
+        "tracked_diff_patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "tracked_diff_patch_line_count": 0,
         "scoped_files": [
-            {
-                "path": "tests/passive_rx/MANUAL_DL_UL.md",
-                "sha256": "34af06df912e9bf9316d0c4c0ca03901b9e7b61b0acb82558d9e643b62e0545e"
-            },
-            {
-                "path": "tests/passive_rx/adaptive_manual_dlul.conf",
-                "sha256": "b34930f3ffc5da20173cfc78a45628839883be322e6529d4c43fa391ce5627cc"
-            },
             {
                 "path": "tests/passive_rx/aoa_track_dl.conf",
                 "sha256": "55c348e93a59ec846a3b09712de82420abf3b16b35e04334868f5956943c38e2"
             },
             {
-                "path": "tests/passive_rx/baselines/manifest_20260911_be65aa8-dirty_tracked.patch",
-                "sha256": "47ff8fc9aa92f9023cf199f9bc4ae4dfed1a1ebfa5931744b8981cef36c51689"
-            },
-            {
-                "path": "tests/passive_rx/run_manual_x410.sh",
-                "sha256": "f1987b1ca82ab2332941fea14ab1a7964df393d9d427015a89597a82ca1e6676"
+                "path": "tests/passive_rx/baselines/manifest_20260911_5213dfe-dirty_tracked.patch",
+                "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
             },
             {
                 "path": "executables/CMakeLists.txt",
@@ -2047,7 +2014,7 @@
             },
             {
                 "path": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c",
-                "sha256": "09624fff629b5350d8d17a4b6c01aa86cf8e7acdca702e7c9370aff0762e9edd"
+                "sha256": "b915357dbdc2243d2c2539959fd2e74c295070eca023b98e89f8d4dc6172189b"
             },
             {
                 "path": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.h",
@@ -7718,6 +7685,10 @@
                 "sha256": "b5f63b537981936c78523116a7a6828e39f7293867bf2cc3c829e92460e66d57"
             },
             {
+                "path": "tests/passive_rx/MANUAL_DL_UL.md",
+                "sha256": "34af06df912e9bf9316d0c4c0ca03901b9e7b61b0acb82558d9e643b62e0545e"
+            },
+            {
                 "path": "tests/passive_rx/README.100mhz_tuning.md",
                 "sha256": "7cdb8dc5f7f05fd3668168d926cc0b42a30fa25f23136d12e0a7a61cd156cd44"
             },
@@ -7754,6 +7725,10 @@
                 "sha256": "86559555d95505b1d45c710c71bf5cbce97fde55e2e8cb2d423a0619332dba18"
             },
             {
+                "path": "tests/passive_rx/adaptive_manual_dlul.conf",
+                "sha256": "b34930f3ffc5da20173cfc78a45628839883be322e6529d4c43fa391ce5627cc"
+            },
+            {
                 "path": "tests/passive_rx/adaptive_no_hints.conf",
                 "sha256": "22a290cd9f896b15ec5ccf1f2b20b00f1a123a2bc2ff021b124d695b8621713e"
             },
@@ -7775,7 +7750,7 @@
             },
             {
                 "path": "tests/passive_rx/baselines/fixtures.json",
-                "sha256": "216ba634fff5c16f4e2cc213d6208a572bfeb06152d2ef1fee880560db8562cc"
+                "sha256": "4e277bcf2320efa1d889fa368722b026b74b4a6ccf24cec6e9e5a447842ef031"
             },
             {
                 "path": "tests/passive_rx/captures/ab_10m.sh",
@@ -7991,7 +7966,7 @@
             },
             {
                 "path": "tests/passive_rx/replay_branch_view.sh",
-                "sha256": "9e1700898c060755c76dda9363dd679498c7769a50662c88cc124efe0382d534"
+                "sha256": "4b2dad45d59791a21aeabd9380cfee62d7db08ad4c2003e090519148aaf3cdb7"
             },
             {
                 "path": "tests/passive_rx/replay_header.py",
@@ -8004,6 +7979,10 @@
             {
                 "path": "tests/passive_rx/run_adaptive_receive_test.sh",
                 "sha256": "1ca89c92b078755ad77b0c0844e8154f16de851a426c29a6cc18abf38dc0b30d"
+            },
+            {
+                "path": "tests/passive_rx/run_manual_x410.sh",
+                "sha256": "f1987b1ca82ab2332941fea14ab1a7964df393d9d427015a89597a82ca1e6676"
             },
             {
                 "path": "tests/passive_rx/run_passive_rx.sh",
@@ -8130,10 +8109,10 @@
     "build": {
         "nr_uesoftmodem": {
             "path": "cmake_targets/ran_build/build/nr-uesoftmodem",
-            "sha256": "6bfe2c785d99718b9cddc5f18ee2fb710aee70962faefad0009b6a415a140573",
-            "size_bytes": 62864312,
-            "mtime_utc": "2026-09-11T13:12:07Z",
-            "mtime_epoch": 1789132327
+            "sha256": "5a036ca4974c611bcaf8b4c54c6f55d61d8d28b58b779b5d9ad0ece0b01ef351",
+            "size_bytes": 62870720,
+            "mtime_utc": "2026-09-11T13:35:42Z",
+            "mtime_epoch": 1789133742
         },
         "liboai_usrpdevif": {
             "path": "cmake_targets/ran_build/build/liboai_usrpdevif.so",

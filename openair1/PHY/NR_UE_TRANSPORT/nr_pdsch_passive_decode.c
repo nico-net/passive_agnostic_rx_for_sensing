@@ -904,17 +904,17 @@ int nr_pdsch_passive_branch_view_resolve(const PHY_VARS_NR_UE *ue, int8_t job_ph
   const int nb_rx = ue->frame_parms.nb_antennas_rx;
   const nr_rx_branch_set_t *bs = nr_isac_rx_branches(); // NULL when sensing is off / stubbed
   int phys = -1;
-  const char *e = getenv("ISAC_DL_BRANCH_VIEW");
-  if (e != NULL && *e != '\0') {
-    phys = atoi(e);
-    if (phys < 0 || phys >= nb_rx) {
-      static __thread bool warned = false;
-      if (!warned) {
-        warned = true;
-        LOG_E(PHY, "SENSING: ISAC_DL_BRANCH_VIEW=%s is outside [0,%d): ignored, legacy path\n", e, nb_rx);
-      }
-      phys = -1;
+  static int s_env_phys = -2; // -2 = not read yet; -1 = unset/empty/invalid; else the value (cached like the file's other envs)
+  if (s_env_phys == -2) {
+    const char *e = getenv("ISAC_DL_BRANCH_VIEW");
+    s_env_phys = (e != NULL && *e != '\0') ? atoi(e) : -1;
+    if (e != NULL && *e != '\0' && (s_env_phys < 0 || s_env_phys >= nb_rx)) {
+      LOG_E(PHY, "SENSING: ISAC_DL_BRANCH_VIEW=%s is outside [0,%d): ignored, legacy path\n", e, nb_rx);
+      s_env_phys = -1;
     }
+  }
+  if (s_env_phys >= 0) {
+    phys = s_env_phys;
   } else if (bs != NULL && bs->n_active > 1) {
     /* Independent mode. Pre-P06 producers tag every job 0/0 (nr_pdcch_blind_monitor_rt.c), so an
      * untagged job lands on physical channel 0 if it is active, else on the lowest active branch. */
@@ -925,7 +925,18 @@ int nr_pdsch_passive_branch_view_resolve(const PHY_VARS_NR_UE *ue, int8_t job_ph
       if (pc == job_physical_channel) { phys = pc; break; }
       if (lowest < 0) lowest = pc;
     }
-    if (phys < 0) phys = lowest;
+    if (phys < 0) {
+      phys = lowest;
+      /* One-shot: a job whose tag names no active branch is being ATTRIBUTED, not routed. Expected
+       * before P06 (producer tags 0/0); on a deployed conf it means the branch map and the grant
+       * producer disagree, which must be visible without the trace env. */
+      static _Atomic bool s_warned_untagged = false;
+      if (!atomic_exchange(&s_warned_untagged, true)) {
+        LOG_W(PHY, "SENSING: branch view: job physical_channel=%d matches no active branch; remapped to "
+                   "lowest active physical channel %d (expected until P06 tags jobs per branch)\n",
+              (int)job_physical_channel, phys);
+      }
+    }
   }
   uint8_t bid = 0;
   if (phys >= 0 && bs != NULL) {
