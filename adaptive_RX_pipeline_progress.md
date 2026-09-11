@@ -42,8 +42,8 @@ Dates use `YYYY-MM-DD` in Europe/Zurich. Check an implementation item only when 
 | [ ] | P08 | Independent UL decoding / context pool | NOT_STARTED | — | — |
 | [ ] | P09 | Namespace / TLS / concurrency audit | IN_PROGRESS | — | Session 2026-09-11 (P09) below. DELIVERED: `docs/passive_branch_namespace_audit.md` (10 identifier-assignment sites classified over branch x direction x decode-vs-reconstruction x UE-session, plus a full `__thread` classification of the 7 named files); ONE concrete collision FIXED — the passive DL decode's `harq_unique_pid` was `2000 + harq_process_nbr`, identical for every branch P06a fans one occasion out to, and is now `2000 + branch_id*32 + hpn%32` (new header `openair1/PHY/NR_UE_TRANSPORT/nr_passive_harq_tag.h`, `static_assert` bound 2127 < 3000, 5 new gtest cases, `nr_rx_branch_test` 24/24). Stride 32, not 16: the DCI HARQ-process-number field is 5 bits when the cell sets `harq-ProcessNumberSizeDCI-1-1` (`nr_pdcch_blind_monitor.h:263`, the 7th field of `pdcch_blind_monitor_dci_bits`, read at that width by `nr_pdcch_blind_monitor.c:2475`), so 16 would alias hpn 0 with hpn 16 on the SAME branch and break the branch-0 legacy pin above hpn 15 (found in fix round 1). `sizeof(nr_pdsch_passive_job_t)` unchanged at 384 (the fix reads the existing `t_view_branch`, no new field). Legacy replay `REPLAY PASS: identical DL controls=34 failed=0 raw UL=24` and `replay_branch_view.sh` 34/34/31/34/34 of 38 both unchanged. RECORDED NOT FIXED (audit secs 4.1/4.2): the passive UL decode tags EVERY TB `0` (`nr_pusch_passive_decode.c:1072` → `openair1/PHY/NR_TRANSPORT/nr_ulsch_decoding.c:129`) across up to 6 concurrent contexts, and its own `PASSIVE_UL_HARQ_TAG_BASE 4000` is dead code — → P08; the passive DL re-encode (3000 range) is not branch-strided — → P10 with the CFR ABI. **NOT VALIDATED END-TO-END: `replay_branch_view.sh` runs ONE VIEW PER PROCESS, so no harness here can put two branches' jobs with the same `harq_process_nbr` in one process concurrently; and the linked soft-decoder backend keeps no per-id state, so the corruption is unobservable offline even if it were reachable. The fix rests on code inspection (`nrLDPC_coding_aal.c:654`) plus an isolated arithmetic unit test.** NOT DONE: the sanitizer/race half of G2 test 7, and G2 test 6 (branch-local noise/timing under distinct per-channel impairments) — both need either a sanitizer build or live RF |
 | [ ] | P10 | CFR ABI and producer migration | IN_PROGRESS (ABI slice only) | 2026-09-11 | Session 2026-09-11 (P10a) below. DELIVERED, controller-scoped to the ABI slice: `nr_isac_submit_cfr_multi_branch()` (new entry point with a `uint8_t branch_id` tail argument) in `nr_isac.{h,cc}`, with the pre-existing `nr_isac_submit_cfr_multi()` reduced to a ONE-LINE wrapper passing `NR_ISAC_BRANCH_NONE` (0xFF) -- that wrapper, not an argument audit, is the structural reason the other 8 producer call sites are unchanged; the tag threaded `Snapshot.branch_id` -> `PendingRow.branch_mask` -> `CfrWindow.branch_mask` -> `PipelineReport.branch_mask` (accumulated exactly like `source_mask`, since one PendingRow merges every co-timed submission); a report field OMITTED WHOLESALE when no producer tagged a branch (`branch_mask`, plus `branch_id` only when the CPI is unambiguously ONE branch -- a fused CPI is never made to name one of its branches, and an untagged CPI is never made to claim branch 0, which is a REAL branch under P03's map); `nr_pdsch_passive_view_branch()` exported from `nr_pdsch_passive_decode.{h,c}` (the P06a/P07 thread-local view identity, `NR_ISAC_BRANCH_NONE` when no view is armed); and ONE producer migrated -- `nr_pdsch_data_aided.c`, all four of its submissions, closing the `TODO(P10)` P07 left at that ABI. `test_nr_isac_python_parity` gains `test_branch_identity_report()` (untagged CPI carries NO branch field; single-branch CPI reports mask+id; two-branch CPI reports the mask and does NOT name one; and the tagged report line with only the two branch fields removed is CHARACTER-IDENTICAL to the untagged one bar the wall clock -- i.e. carrying identity changes no numeric result). Both replay baselines re-proven byte-identical: legacy `REPLAY PASS: identical DL controls=34 failed=0 raw UL=24`, `replay_branch_view.sh` 34/34/31/34/34 of 38 with data_submits == own crc_ok. NOT DONE (remaining P10/Stage 3, and P13): the other 8 producers (CSI-RS, SSB, blind PDSCH DM-RS, PUSCH pilot/data, attached-UE) still submit untagged; nothing routes, groups, windows or fuses by branch (still ONE engine -- P13's engine-per-branch is separate); acquisition time is not carried alongside identity; and the passive DL re-encode's 3000-range `harq_unique_pid` is still not branch-strided (`docs/passive_branch_namespace_audit.md` sec 4.2). G3 NOT passed |
-| [ ] | P11 | Support / allocation provenance | NOT_STARTED | — | — |
-| [ ] | P12 | Physical time / reference contract | NOT_STARTED | — | — |
+| [ ] | P11 | Support / allocation provenance | IN_PROGRESS (audit + contract only) | 2026-09-11 | Session 2026-09-11 (P11+P12) below. Deliverable: `docs/cfr_support_and_reference_contract.md` Part P11 — all six CFR producers audited line-by-line on (a) `k_abs` coordinate, (b) `l_sym`/`slot_frac` symbol time, (c) `noise_var` provenance, (d) allocation/branch membership, (e) symbol-level-Doppler wording risk. RESULT: (a) correct in VALUE at 6/6 but UNENFORCED — an out-of-grid `k_abs` is dropped one RE at a time at `sensing_engine.cc:543` with no counter — and SSB normalises modulo `ofdm_symbol_size` not `nof_prb*12` (`nr_isac_ssb_axis.c:11`, inert today); support is also OVERSTATED by SSB (240 claimed from ~60 measured PBCH DM-RS) and PUSCH DM-RS (comb-1 claimed from comb-2), and CSI-RS at `csi_type!=0` reports an RB-aggregate. (b) `l_sym` is DEAD — assigned at `sensing_engine.cc:339`, never read — and 4 of 6 producers pass `slot_frac = 0.0f`, so their rows are timestamped at the slot boundary (assumed, up to ~464 us at 30 kHz); the one producer that computes it uses a uniform 1/14-slot model. (c) NOT per-branch, and P10a's `branch_id` does not change it: 3 producers pass an ANTENNA-AVERAGED scalar, 2 pass literal `1.0f`, SSB passes `0.0f` — while the per-antenna value already exists and is discarded (`nr_dl_chest_nvar_ant[]`, `nr_dl_channel_estimation.c:31`, already consumed per branch by `nr_pdsch_passive_decode.c:1366-1378`); separately the four producer-side noise quantities are in four unrelated scales yet drive a `1/sigma^2` merge weight (`sensing_engine.cc:541`). (d) source-class and branch membership ARE tracked; per-TRANSMISSION (RNTI/allocation/HARQ) membership is NOT and the ABI cannot express it (`nr_isac.h:102-113`). (e) no symbol-level Doppler claim exists; one PRF wording over-claim noted at `nr_pdsch_data_aided.c:375`. NOTHING FIXED — every finding needs an ABI/DSP change (P13) or a rebuild+test cycle; see the session entry's "Nothing fixed, and why". G3 NOT passed |
+| [ ] | P12 | Physical time / reference contract | IN_PROGRESS (audit + contract only) | 2026-09-11 | Session 2026-09-11 (P11+P12) below. Deliverable: `docs/cfr_support_and_reference_contract.md` Part P12. RESULT: `detections[].bistatic_range_m` has THREE meanings under one field name. `sensing_engine.cc:807` computes `range_bin * range_res_m` and subtracts nothing, but `apply_sync_correction(..., delay_reference_bin = 0.0, ...)` (`sensing_engine.cc:784`) shifts the whole window by `-los_bins` when `sto_applied || sfo_applied` (`sync_correction.cc:378-379`), i.e. it puts the admitted direct path on bin 0 IN THE CFR DOMAIN. So (C) sync admitted = bistatic EXCESS path; (B) sync ran, admission failed = raw receiver-window-origin delay with `reject_reason` set; (A) `sync_enable=false` or `rows<3` = raw delay with `reject_reason` the EMPTY STRING and `los_bins` a DEFAULT not a measurement. This CORRECTS the inherited note that "range_m subtracts no LOS reference" — the subtraction exists, conditionally, one layer upstream of the formula. G3 test 5: the CPI-level validity record IS exported and is near-complete (`report_writer.cc:171-177`), but there is NO invalid-reference status — `detect_clean()` runs unconditionally (`sensing_engine.cc:796`) and `range_m` is written for every component (`:801-810`) with no reference check, so an unreferenced detection is byte-indistinguishable from a referenced one apart from a boolean four fields away. "A reflected dominant path is not automatically LOS": the code assumes it IS — `sync_correction.cc:236-238` takes the arg-max of the mean CIR profile, no geometry check, no earliest-arrival preference (the same mechanism as the already-CLOSED 2026-08-11 range-bias root cause, one layer up). "Consistent physical definitions, not identical offsets": NOT YET and structurally blocked — one engine, one `dl_clock_tracker_`, one `report.sync`, rows from different branches pooled into one `PendingRow`, so today it is ONE offset fitted from pooled multi-branch data, which is worse than the error the clause anticipates; needs P13's engine-per-branch. The "~40 m range-axis bias" was re-read as CLOSED, not re-derived, and is recorded as closed. NOTHING FIXED: an omit-on-invalid guard would delete all output from the legitimate `sync_enable=false` mode, and the additive `range_reference` status field is a schema change owned by P16 whose downstream compatibility cannot be verified without a radio. G3 NOT passed |
 | [ ] | P13 | Four independent sensing engines | NOT_STARTED | — | — |
 | [ ] | P14 | AoA removal / migration | IN_PROGRESS (audit + Stage A item 1 only) | 2026-09-11 | `docs/aoa_removal_audit.md`: full touchpoint audit by section 2.4 row + A/B/C staged order. Stage A item 1 DONE (AOA_ENABLE/AOA_UL_ENABLE env override + globals removed, obsolete keys rejected loudly). Stage B blocked on P13, Stage C blocked on Stage 5 (P17-P19) — see the session entry. |
 | [ ] | P15 | UL scene-support preservation | NOT_STARTED | — | — |
@@ -72,7 +72,7 @@ Dates use `YYYY-MM-DD` in Europe/Zurich. Check an implementation item only when 
 | G0 | Reproducible baseline and acceptance profile | IN_PROGRESS | — | P02's own sub-condition now MET (2026-09-11, Fix round 2): a reproducible supported DL+UL replay fixture exists (`sensing_manual_fixed.UtvBT7`, `REPLAY PASS: identical DL controls=34 failed=0 raw UL=24; no radio opened`), registered and checker-verified. G0 as a WHOLE still cannot PASS, because P01's own manifest remains IN_PROGRESS on survey/limits (every `deployment_dependent_limits` entry UNSET, `geometry.surveyed=false` -- unchanged by P02, not this task's scope). State plainly: G0 = IN_PROGRESS, blocked only on P01's outstanding survey/acceptance-limit work, not on P02 any longer |
 | G1 | Acquisition routing, time and branch isolation | IN_PROGRESS | — | Tests 1-4 exist and PASS in pure/standalone form across P03 (`nr_rx_branch_test`), P04 (`nr_rx_span_pool_test`) and P05 (`nr_rx_branch_sync_test`'s `RxBranchSyncG1Test4`); P05 additionally adds a hardware-isolation guard (`branch_hw_isolation`/`branch_hw_isolation_selftest` ctest entries) covering the "no unauthorized hardware operation" half of the exit criterion at the SOURCE level. G1 as a WHOLE cannot PASS: test 5 (standalone-replay comparison) and end-to-end live-worker isolation require the `nr-ue.c`/`nr-ue-ru.c` read-loop wiring, which no session has done yet (controller-scoped, blocked on that file's owning session committing first). **UPDATED 2026-09-11 (P06a): the LIFECYCLE part of that wiring is now live in `nr-ue.c`** — branch lock / loss-of-lock / RF-discontinuity epoch transitions are driven from the real read loop's own sync, RXDISCONT, RFSTALL and CFOTRK sites, the `nb_antennas_rx` cross-check is wired and fatal, and branch epochs appear on the periodic RFCENSUS line. Still outstanding for G1: test 5 (standalone-replay comparison) and per-branch acquisition/digital-correction state (one `PHY_VARS_NR_UE` / `nr_rx_branch_sync_t` per branch); and NOTHING of the new wiring has live evidence (X410 unreachable 2026-09-11) |
 | G2 | Independent supported DL/UL decoding | IN_PROGRESS | — | P07 (DL side) delivers G2 tests 1 and 3 in replay form (`dl_branch_view_replay`: per-view CRC verdicts and reconstructed TBs match the 4-antenna reference wherever the view decodes, a branch's data-aided submissions == its own CRC-OK count). G2 as a whole cannot pass: P06 (PDCCH isolation), P08 (UL), P09 (namespace audit) pending; test 5's failure-class cases are only partly exercised (CRC fail 4-7/38 and multilayer rejection path built but 0/38 on this fixture); no parallel four-view run. Unsupported traffic fraction, live: the cell measured num_layers=4 on ~97 % of grants (decoder's own note), so live independent mode is expected to report ~97 % `unsupported_multilayer_in_branch_view` -- the replay's 0/38 must not be read as the live figure. **UPDATED 2026-09-11 (P06a): still NOT MEASURED.** The path that would measure it is now built (per-branch fan-out + per-branch `unsupported_multilayer` attribution on the `PDSCHQ-BRANCH` line), but the live capture was not attempted — X410 unreachable (`uhd_find_devices`: No UHD Devices Found, 13:48 UTC). Do not read ~97 % as measured; it remains the decoder's inference from the cell's own scheduling. **UPDATED 2026-09-11 (P09) — exit item "no resource namespace collision": the `harq_unique_pid` class is now FIXED for the DL fan-out path** (per-branch stride, `nr_passive_harq_tag.h`, bound asserted at compile time and in test). Two classes remain OPEN and are recorded in `docs/passive_branch_namespace_audit.md`: the passive UL decode tags every transport block `0` across up to 6 concurrent contexts (sec 4.1, → P08) and the passive DL re-encode's 3000 range is not branch-strided (sec 4.2, → P10). The TLS half of the audit found NO thread-local whose branch-dependent content survives into another job (sec 5); `t_view_branch`/`t_view_ue` are the correctly-scoped pattern. So this exit item is PARTIALLY met, and deliberately not claimed as met: the fix is not backed by an observed failure-then-pass, only by code inspection + unit test, because the harness runs one branch view per process and the linked LDPC backend keeps no per-id state. |
-| G3 | CFR identity, support and physical references | NOT_STARTED | — | — |
+| G3 | CFR identity, support and physical references | IN_PROGRESS | — | Contract document exists as of 2026-09-11 (`docs/cfr_support_and_reference_contract.md`, P11+P12 audit); the five G3 tests are INVENTORIED, not implemented. **Coverage: 0 of 5 covered, 2 PARTIAL, 3 not covered.** Test 1 (worker-delay invariance) PARTIAL — the invariant holds STRUCTURALLY (every physical time derives from the producer's `slot_idx + slot_frac`, never wall clock; the deferred PDSCH path publishes the producer's monotonic slot via `nr_isac_abs_slot_override`) and `test_causal_cpi_pipeline()` (`python_parity_test.cc:436`) covers close/drain/restart, but no test varies delay or compares two runs; residual violation: `start_utc_ns` is stamped at `submit()`, on the CONSUMER thread for deferred paths, so it is a PROCESSING time where P16 requires an acquisition-derived one. Test 2 (wrap/reorder/duplicate/RNTI/epoch) PARTIAL — wrap and reorder ARE implemented (`unwrap_submission_slot()`, `sensing_engine.cc:399-412`) and duplicates merge by design on `row_key`, but no test exercises any of them, and RNTI reassignment / epoch reset are invisible at this layer (the ABI carries neither). Test 3 (allocation/pilot sweep vs frequency axis, support masks, symbol timestamps) NOT COVERED — nothing sweeps producer-side support; the mask cannot express interpolated-vs-measured and silently loses out-of-grid REs; symbol timestamps do not exist to verify. Test 4 (known timing/CFO/SFO perturbation) NOT COVERED — `cuda_sync_test.cc:76-101` is a CPU-vs-CUDA PARITY test, not an accuracy test, and the `selftest`/`selftest_los` injection mechanism from older project history DOES NOT EXIST in this tree (zero `selftest` hits under `openair1/`); offline-testable today via `python_parity_test.cc`'s existing synthetic-`CfrWindow` pattern, and judged the highest-value missing test. Test 5 (deliberate admission failure) NOT COVERED and the property does NOT hold — there is no invalid-reference status to assert, so it cannot pass until that field exists. G3 exit also requires reconstruction scope to be explicit, which it is not: findings P11-A3 (interpolated REs reported as measured support), P11-C1 (no per-branch noise), P11-D1 (no allocation membership) and P12-4 (one pooled reference across branches) are all open and all need ABI/engine changes at P13. **G3 NOT PASSED** |
 | G4 | Four detectors, AoA removed, UL support retained | NOT_STARTED | — | — |
 | G5 | Observable AoA-free DL global fusion | NOT_STARTED | — | — |
 | G6 | Sustained operation and required OTA release | NOT_STARTED | — | — |
@@ -1993,5 +1993,201 @@ Remaining limitation: the removal executed here is a configuration-surface back 
 
 Next highest-value action: P13 (one engine per branch). It is the unlock for all five Stage B
   items, and four of them are literally the same edit repeated at four producers.
+
+Reviewer / accomplishment date if gate passed: n/a — not a gate pass.
+
+## Session — 2026-09-11: P11+P12 CFR support/reconstruction and range-reference contract audit (Stage 3, G3 inventory)
+
+Date/time (Europe/Zurich): 2026-09-11.
+Task IDs / gate: P11 + P12 (Stage 3, G3). AUDIT + CONTRACT DOCUMENT + G3 TEST INVENTORY only,
+  controller-scoped (mirrors the P03/P09/P14-audit pattern). NOT a gate pass; G3 remains NOT PASSED.
+  No code changed. No radio (X410 unreachable).
+
+Intended falsifiable claim: for each of the six CFR producers and for the reported range axis, every
+  clause of the plan's P11 and P12 paragraphs is either already true in this tree — provable by
+  citing the line that makes it true — or is not, in which case the exact line and the reason are
+  named. Specifically: (i) `k_abs` is the CRB/Point-A coordinate at every producer; (ii) the row's
+  physical measurement time is a MEASURED symbol time, not an assumed slot boundary; (iii) `noise_var`
+  is per-branch now that P10a's `branch_id` exists; (iv) allocation membership is tracked per CPI;
+  (v) `bistatic_range_m` has ONE defined physical reference; (vi) admission failure yields an invalid
+  reference status rather than a confident number. Claims (ii), (iii), (iv) and (vi) are REFUTED;
+  (i) is upheld in value but is unenforced and one producer normalises against the wrong modulus;
+  (v) is refuted in the specific sense that the field has THREE possible meanings, selected by a
+  boolean elsewhere in the report.
+
+Branch / full commit / dirty patch / untracked-file manifest: `merge/adaptive-sensing`, parent
+  `57ec7dccaaa752d54a6d89f22a0f29665ecc85b3`. No binary produced, no build run, so no manifest
+  regeneration and no `fixtures.json` append (the one-pair rule is not engaged — nothing was
+  compiled). Pre-existing untracked `tests/passive_rx/aoa_track_dl.conf` predates this session, is
+  not referenced by anything here, and was deliberately left alone (same disposition as P14-audit).
+
+Files modified / added / removed:
+  ADD  `docs/cfr_support_and_reference_contract.md` — the deliverable. Part P11 (support and
+       reconstruction) covers all six producers on (a) `k_abs` coordinate, (b) `l_sym`/`slot_frac`
+       symbol-time semantics, (c) `noise_var` provenance, (d) allocation/branch membership, and
+       (e) a search for symbol-level Doppler claims. Part P12 (range/frequency reference) states the
+       range-reference contract, the three regimes it has today, the admission-failure behaviour,
+       the dominant-tap-is-LOS assumption, and why per-branch references are blocked on P13. Ends
+       with a 13-row findings summary, the G3 five-test inventory, and an explicit "what was not
+       fixed and why".
+  MOD  `adaptive_RX_pipeline_progress.md` — this entry, the P11/P12 rows, and the G3 gate row.
+
+Executable / driver / config / geometry / acceptance hashes: n/a — nothing built, nothing run.
+
+Exact commands: read-only inspection on `sens6` (`grep -n` / `sed -n` over
+  `openair1/PHY/NR_UE_ISAC/`, `openair1/PHY/NR_UE_TRANSPORT/`, `openair1/PHY/NR_UE_ESTIMATION/`,
+  `openair1/SCHED_NR_UE/`). Every line number in the deliverable was re-checked against the file
+  after drafting; six citations were wrong on first pass and were corrected (`sensing_engine.cc`
+  531→543 and 525→541, `csi_rx.c` 988→989, `nr_dl_channel_estimation.c` 643→644,
+  `report_writer.cc` 181-185→178-182, `phy_procedures_nr_ue.c` 1470→1469).
+
+Artifact paths: `docs/cfr_support_and_reference_contract.md` (in-tree, committed).
+
+Baseline and comparison definition: n/a — no measurement. This is a source audit; its evidence is
+  the cited lines, and its falsification method is re-reading them.
+
+Predeclared assertions / thresholds: n/a.
+
+Observed result, with denominators:
+  P11 (a) `k_abs` — CORRECT IN VALUE at 6/6 producers. NOT enforced anywhere: an out-of-grid `k_abs`
+    is dropped one RE at a time at `sensing_engine.cc:543` with no counter and no log, so a wrong
+    producer coordinate shrinks the row's support invisibly. One producer, SSB
+    (`nr_isac_ssb_axis.c:11`), normalises modulo `ofdm_symbol_size` (4096 at 273 PRB) rather than
+    the declared `nof_prb*12` (3276); inert for every in-carrier SSB placement, latent otherwise.
+    Separately, measured support is overstated by 2 producers: SSB claims 240 REs from a PBCH DM-RS
+    interpolation that measures ~60, and PUSCH DM-RS claims comb-1 from a comb-2 interpolation;
+    CSI-RS at `csi_type != 0` reports an RB-aggregate at `k = rb*12` (`csi_rx.c:313-314`).
+  P11 (b) symbol time — `l_sym` is DEAD: assigned at `sensing_engine.cc:339` and never read
+    anywhere in that file (`consume()` from `:482` reads `s.subcarrier[i]` only; `PendingRow` has no
+    symbol field). The only time coordinate is `slot_idx + slot_frac`, and 4 of 6 producers pass
+    `slot_frac = 0.0f`, i.e. their rows are timestamped at the slot boundary — an assumption of up to
+    13/14 slot (~464 us at 30 kHz). The one producer that computes it (`nr_pdsch_data_aided.c:415`)
+    uses a uniform 1/14-slot model that ignores the long cyclic prefix. SSB additionally passes a
+    PBCH-RELATIVE symbol index (0..2), which is the wrong domain and is harmless only because
+    nothing reads it.
+  P11 (c) branch-specific noise — NO, and P10a does not change it. All 6 producers pass a single
+    scalar: 3 pass an ANTENNA-AVERAGED value (`csi_rx.c:426` divides by `nb_antennas_rx*ports`;
+    `nr_dl_channel_estimation.c:1486` returns `nvar_acc/nvar_ant_count`), 2 pass the literal `1.0f`,
+    and SSB passes `0.0f`. The per-antenna value ALREADY EXISTS and is discarded one call earlier:
+    `nr_dl_chest_nvar_ant[]` (`nr_dl_channel_estimation.c:31`, written at `:1310`/`:1476`) is already
+    consumed per branch by `nr_pdsch_passive_decode.c:1366-1378`. Second, separate finding: the
+    engine uses `weight = 1/noise_var` (`sensing_engine.cc:541`) as an inverse-variance merge weight,
+    but the four producer-side quantities are in four unrelated scales, so any CPI mixing sources
+    combines them by a ratio set by units rather than by SNR.
+  P11 (d) allocation membership — SOURCE-class and BRANCH membership are tracked (`PendingRow`'s
+    `source_mask`/`source_occurrences[]`/`dl_branch_mask`/`ul_branch_mask`,
+    `sensing_engine.cc:57-80`; window-level `branch_mask`, `pipeline_types.h:40-45`; report at
+    `report_writer.cc:128-134`). Per-TRANSMISSION membership is NOT: no RNTI, no `(start_rb,num_rb)`,
+    no HARQ/TB key anywhere, and `nr_isac_submit_cfr_multi_branch()` (`nr_isac.h:102-113`) has no
+    parameter that could carry one. `align_allocation_families()` counts families INFERRED from the
+    observed support pattern; that is an inference, not recorded membership.
+  P11 (e) symbol-level Doppler — NO such claim found (searched every `doppler` hit under
+    `NR_UE_TRANSPORT/`, `SCHED_NR_UE/`, `executables/` — all are NTN ephemeris pre-compensation —
+    and every `per-symbol`/`symbol-level`/`single symbol` hit under `NR_UE_ISAC/` and `docs/`). One
+    wording over-claim reported as such, not as a violation: `nr_pdsch_data_aided.c:375` says
+    sub-slot grouping multiplies "the effective PRF", which is a uniform-sampling statement about a
+    strongly non-uniform sequence. The code is correct (the axis is built from `row_time_slots`,
+    not an assumed PRF); only the comment over-claims.
+  P12 range reference — `bistatic_range_m` has THREE meanings today under one field name.
+    `sensing_engine.cc:807` computes `range_bin * range_res_m` and subtracts nothing; but
+    `apply_sync_correction(..., delay_reference_bin = 0.0, ...)` (`sensing_engine.cc:784`) shifts the
+    whole window by `-los_bins` when `sto_applied || sfo_applied` (`sync_correction.cc:378-379`),
+    i.e. it moves the admitted direct path onto bin 0 IN THE CFR DOMAIN. So: (C) sync admitted =
+    bistatic EXCESS path; (B) sync ran and admission failed = raw receiver-window-origin delay,
+    `reject_reason` set; (A) `sync_enable=false` or `rows<3` (`sensing_engine.cc:775`) = raw delay,
+    `reject_reason` the EMPTY STRING and `los_bins` a default rather than a measurement. This
+    reconciles, and corrects, the note carried in project history that "range_m subtracts no LOS
+    reference" — the subtraction exists, it is just conditional and one layer upstream of the formula.
+  P12 admission failure (G3 test 5) — the CPI-level validity record IS published and is more complete
+    than the brief assumed (`report_writer.cc:171-177`: `rows`, `admitted_rows`, `los_bins`,
+    `sto/sfo/cfo` values + `applied` flags, `reject_reason`; UL mirror at `:234-243`). What does not
+    exist is an invalid-reference STATUS: `detect_clean()` runs unconditionally
+    (`sensing_engine.cc:796`) and `range_m` is written for every component (`:801-810`) with no
+    reference check, so a regime-A/B detection is byte-indistinguishable from a regime-C one apart
+    from a boolean four fields away.
+  P12 "a reflected dominant path is not automatically LOS" — the code assumes it IS:
+    `sync_correction.cc:236-238` takes the arg-max of the mean CIR power profile as the anchor, with
+    no geometry check and no earliest-arrival preference. Directly analogous to the already-closed
+    2026-08-11 range-bias root cause (a target as strong as the direct path captured the UE's own
+    timing loop), one layer up.
+  P12 per-branch references — NOT YET, and structurally blocked: one `SensingEngine`, one
+    `dl_clock_tracker_` (`sensing_engine.cc:777`), one `report.sync` per CPI, and rows from different
+    branches merged into the same `PendingRow`. So the current state is not "identical offsets across
+    branches" (the error the plan clause anticipates) but one offset fitted from POOLED multi-branch
+    data. Unfixable at the reference layer; needs P13's engine-per-branch.
+  G3 test inventory — 0 of 5 covered, 2 of 5 PARTIAL, 3 of 5 not covered:
+    1 (worker-delay invariance) PARTIAL — the invariant holds structurally (every physical time
+      derives from producer `slot_idx + slot_frac`, never wall clock; the deferred path publishes the
+      producer's monotonic slot via `nr_isac_abs_slot_override`), and `test_causal_cpi_pipeline()`
+      (`python_parity_test.cc:436`) covers close/drain/restart ordering, but no test varies delay or
+      compares two runs. Residual violation: `start_utc_ns` is stamped at `submit()`, on the CONSUMER
+      thread for deferred paths, so it is a processing time reported where P16 requires an
+      acquisition-derived one.
+    2 (wrap/reorder/duplicate/RNTI/epoch) PARTIAL — wrap and reorder ARE implemented
+      (`unwrap_submission_slot()`, `sensing_engine.cc:399-412`, signed delta folded to +/-cycle/2)
+      and duplicates merge by design on `row_key`; but no test exercises any of them, and RNTI
+      reassignment / epoch reset are invisible at this layer (finding P11-D1).
+    3 (support/frequency-axis/symbol-timestamp sweep) NOT COVERED — nothing sweeps producer-side
+      support; the support mask cannot express interpolated-vs-measured (P11-A3) and silently loses
+      out-of-grid REs (P11-A2); symbol timestamps do not exist to verify (P11-B1).
+    4 (known timing/CFO/SFO perturbation) NOT COVERED — `cuda_sync_test.cc:76-101` is a CPU-vs-CUDA
+      PARITY test, not an accuracy test; the two benchmarks are timing harnesses. No estimator-
+      accuracy test exists. The `selftest`/`selftest_los` injection mechanism from older project
+      history does NOT exist in this tree (grepped `openair1/` for `selftest`: zero hits) — that
+      pipeline was rewritten. Offline-testable TODAY via the existing synthetic-`CfrWindow` pattern
+      in `python_parity_test.cc`; judged the single highest-value missing test.
+    5 (deliberate admission failure) NOT COVERED, and the property does not hold — there is no
+      invalid-reference status to assert, so the test cannot pass until the field of P12-2a exists.
+
+Status (PASS / FAIL / VOID / BLOCKED): IN_PROGRESS for P11 and P12 (contract documented and
+  G3 inventoried; the contract clauses themselves are largely NOT met by the code). NOT a gate pass.
+  G3 = NOT PASSED, 0/5 covered.
+
+Validity reasons and affected intervals: n/a — source audit, no capture, no interval.
+
+Hypotheses supported / contradicted:
+  CONTRADICTED — "P11's CRB/Point-A convention may already be satisfied, so there may be nothing to
+    do": satisfied in value, but unenforced, undetectably violated at the accumulator, and wrong in
+    modulus at one producer.
+  CONTRADICTED — "P10a's `branch_id` may have made noise per-branch": it did not; `branch_id` is an
+    identity tag and never touches `noise_var`.
+  CONTRADICTED — "`range_m` subtracts no LOS reference" (carried in project history): it does,
+    conditionally, in the CFR domain at `sensing_engine.cc:784` + `sync_correction.cc:378-379`.
+  SUPPORTED — "P12 may already be partially satisfied by `los_bins`/`sto`/`sync`": the CPI-level
+    correction values and validity ARE exported and are near-complete; only the per-detection
+    reference STATUS is missing.
+  SUPPORTED — "branch-consistent definitions may legitimately be blocked on Stage B/P13": confirmed,
+    and for a stronger reason than expected (one pooled reference, not four identical ones).
+
+Retraction, if any: none of this session's own. One inherited claim is corrected rather than
+  retracted (the "range_m subtracts no LOS reference" note, above). The "~40 m range-axis bias" was
+  re-read as CLOSED and is explicitly recorded as closed in the deliverable, per the standing
+  instruction; it was NOT re-derived and NOT cited as a live defect.
+
+Remaining limitation: this is an audit. Not one of the 13 findings is fixed, and three of them
+  (P11-C1 per-branch noise, P11-D1 allocation membership, P12-4 per-branch references) require ABI
+  or engine changes that belong to P13. The deliverable's contract statements are normative text,
+  not enforced invariants — nothing in the build fails if a future producer violates them.
+
+Nothing fixed, and why (deliverable 3, deliberately declined): three candidates were considered.
+  (1) OMIT `bistatic_range_m` on invalid reference — the brief's own suggested example — was
+  rejected because regime A (`sync_enable=false`) is a legitimate configuration used by every
+  `tests/sensing_sim` scene conf, so omitting there would delete all detection output from those
+  runs; it is also a schema behaviour change that P16 owns. (2) ADD a `range_reference` status field
+  now — additive and cheap, but a schema change without P16's version bump, and its downstream
+  compatibility cannot be verified from this task (no radio; the replay path cannot start the
+  sensing engine), so claiming it safe would be exactly the unmeasured-inherited-claim failure this
+  project has been burned by. (3) COUNT the silently dropped out-of-grid REs (P11-A2) — genuinely
+  worth doing, but it touches `sensing_engine.{h,cc}` and the report, needs a rebuild plus manifest
+  regeneration under the one-pair rule, and needs its own test; it belongs with G3 test 3, where the
+  assertion that consumes the counter gets written at the same time. Audit + inventory alone is the
+  correct outcome and is recorded as such.
+
+Next highest-value action: G3 test 4 (inject a known delay/CFO/SFO into a synthetic `CfrWindow` and
+  assert recovery). It needs no new mechanism — `python_parity_test.cc` already builds synthetic
+  windows and drives the public API — it is the only test that can tell whether the sync estimator
+  is CORRECT rather than merely self-consistent, and P12's entire range contract rests on it.
+  Second: the `range_reference` status field (P12-2a), scheduled with P16's schema version bump,
+  which unblocks G3 test 5.
 
 Reviewer / accomplishment date if gate passed: n/a — not a gate pass.
