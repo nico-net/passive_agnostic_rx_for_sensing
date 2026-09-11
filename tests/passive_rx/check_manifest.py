@@ -8,11 +8,18 @@ Usage:
   check_manifest.py --acceptance ACC.json --geometry GEO.json
                                               exit non-zero if any deployment-dependent limit is
                                               UNSET or the geometry is not surveyed.
+  check_manifest.py --fixtures FIXTURES.json exit non-zero if admissible_fixtures is empty, or if
+                                              any fixture's replay.bin/receiver.conf/run.log sha256,
+                                              producing binary sha256, or full_auto value no longer
+                                              match the live tree/build/filesystem.
   check_manifest.py --selftest               self-check: (a) fresh manifest passes, (b) a copy
                                               with one binary hash altered fails, (c) the shipped
                                               acceptance/geometry files fail, (d) a copy whose
                                               selected_test_conf full_auto=1 fails, (e) a copy with
-                                              one citation's line range shifted fails.
+                                              one citation's line range shifted fails, (f) a
+                                              synthetic single-fixture registry passes, an altered
+                                              hash in it fails, and the shipped (empty) P02
+                                              fixtures.json fails.
 """
 import glob
 import hashlib
@@ -247,6 +254,60 @@ def check_profile(acceptance_path, geometry_path):
     return reasons
 
 
+def check_fixtures(fixtures_path):
+    """P02: verify a fixtures.json registry of admissible baseline replay fixtures.
+    Returns a list of mismatch/incompleteness reasons (empty = all admissible fixtures verified).
+    An EMPTY admissible_fixtures list is itself a failing reason -- G0 requires at least one
+    reproducible supported DL and UL case, and a registry recording zero is honest, not silent."""
+    with open(fixtures_path) as f:
+        data = json.load(f)
+    reasons = []
+    admissible = data.get("admissible_fixtures", [])
+    if not admissible:
+        reasons.append(
+            "fixtures.json: admissible_fixtures is empty -- no reproducible baseline replay "
+            "fixture is currently registered (see the file's status/blocker fields)")
+        return reasons
+
+    build = os.path.join(REPO, "cmake_targets", "ran_build", "build")
+    try:
+        live_bin_sha = sha256_file(os.path.join(build, "nr-uesoftmodem"))
+    except OSError as e:
+        reasons.append(f"could not hash live nr-uesoftmodem binary: {e}")
+        live_bin_sha = None
+
+    for i, fx in enumerate(admissible):
+        label = f"admissible_fixtures[{i}] ({fx.get('path', '?')})"
+        fdir = fx.get("path")
+        for fname, key in (("replay.bin", "replay_bin_sha256"),
+                           ("receiver.conf", "receiver_conf_sha256"),
+                           ("run.log", "run_log_sha256")):
+            recorded = fx.get(key)
+            if not recorded:
+                reasons.append(f"{label}: missing recorded {key}")
+                continue
+            full = os.path.join(fdir, fname) if fdir else None
+            try:
+                live = sha256_file(full) if full else None
+            except OSError as e:
+                reasons.append(f"{label}: could not hash {fname} at {full!r}: {e}")
+                continue
+            if live != recorded:
+                reasons.append(f"{label}: {fname} sha256 registered={recorded} live={live}")
+
+        recorded_bin = fx.get("producing_binary_sha256")
+        if recorded_bin != live_bin_sha:
+            reasons.append(
+                f"{label}: producing_binary_sha256 registered={recorded_bin!r} "
+                f"live_current_build={live_bin_sha!r}")
+
+        fa = fx.get("full_auto")
+        if fa != 0:
+            reasons.append(f"{label}: full_auto={fa!r} (must be 0 -- TESTING MODE RULE)")
+
+    return reasons
+
+
 def _mutate_json(src_path, mutate_fn):
     with open(src_path) as f:
         data = json.load(f)
@@ -335,6 +396,76 @@ def selftest():
         ok = False
     os.unlink(bad_citation_path)
 
+    # (f) P02 fixtures.json checker: a synthetic single-fixture registry must PASS, an altered
+    # hash in a copy of it must FAIL, and the real shipped (currently empty) fixtures.json must
+    # FAIL too -- mirrors (c)'s "shipped incomplete profile is honestly rejected" pattern.
+    build = os.path.join(REPO, "cmake_targets", "ran_build", "build")
+    try:
+        live_bin_sha = sha256_file(os.path.join(build, "nr-uesoftmodem"))
+    except OSError:
+        live_bin_sha = None
+    fx_dir = tempfile.mkdtemp(prefix="p02_fixture_selftest_")
+    try:
+        contents = {"replay.bin": b"synthetic replay bytes for selftest only",
+                    "receiver.conf": b"pdcch_blind_monitor_full_auto = 0;\n",
+                    "run.log": b"synthetic run.log for selftest only\n"}
+        for fname, data in contents.items():
+            with open(os.path.join(fx_dir, fname), "wb") as fh:
+                fh.write(data)
+        good_registry = {"admissible_fixtures": [{
+            "path": fx_dir,
+            "replay_bin_sha256": hashlib.sha256(contents["replay.bin"]).hexdigest(),
+            "receiver_conf_sha256": hashlib.sha256(contents["receiver.conf"]).hexdigest(),
+            "run_log_sha256": hashlib.sha256(contents["run.log"]).hexdigest(),
+            "producing_binary_sha256": live_bin_sha,
+            "full_auto": 0,
+        }]}
+        fd, good_path = tempfile.mkstemp(suffix=".json")
+        with os.fdopen(fd, "w") as fh:
+            json.dump(good_registry, fh)
+
+        reasons_f1 = check_fixtures(good_path)
+        passed_f1 = not reasons_f1
+        print(f"(f1) synthetic single-fixture registry expected PASS: "
+              f"{'PASS' if passed_f1 else 'FAIL'}")
+        if not passed_f1:
+            ok = False
+            for line in reasons_f1:
+                print("    " + line)
+        os.unlink(good_path)
+
+        bad_registry = json.loads(json.dumps(good_registry))
+        bad_registry["admissible_fixtures"][0]["replay_bin_sha256"] = "0" * 64
+        fd, bad_path = tempfile.mkstemp(suffix=".json")
+        with os.fdopen(fd, "w") as fh:
+            json.dump(bad_registry, fh)
+        reasons_f2 = check_fixtures(bad_path)
+        passed_f2 = bool(reasons_f2)
+        print(f"(f2) synthetic registry with altered replay.bin hash expected FAIL: "
+              f"{'PASS' if passed_f2 else 'FAIL (checker did not detect the alteration)'}")
+        if not passed_f2:
+            ok = False
+        os.unlink(bad_path)
+    finally:
+        for fname in os.listdir(fx_dir):
+            os.unlink(os.path.join(fx_dir, fname))
+        os.rmdir(fx_dir)
+
+    shipped_fixtures_path = os.path.join(SCRIPT_DIR, "baselines", "fixtures.json")
+    if os.path.isfile(shipped_fixtures_path):
+        reasons_f3 = check_fixtures(shipped_fixtures_path)
+        passed_f3 = bool(reasons_f3)
+        print(f"(f3) shipped fixtures.json expected FAIL (no admissible fixture registered yet): "
+              f"{'PASS' if passed_f3 else 'FAIL (checker accepted an empty registry)'}")
+        if not passed_f3:
+            ok = False
+        else:
+            for line in reasons_f3:
+                print("    " + line)
+    else:
+        print("(f3) shipped fixtures.json: SKIPPED (file not found)")
+        ok = False
+
     print()
     print("SELFTEST OVERALL: " + ("PASS" if ok else "FAIL"))
     return 0 if ok else 1
@@ -343,6 +474,20 @@ def selftest():
 def main(argv):
     if "--selftest" in argv:
         return selftest()
+    if "--fixtures" in argv:
+        try:
+            fx = argv[argv.index("--fixtures") + 1]
+        except IndexError:
+            print("usage: check_manifest.py --fixtures FIXTURES.json", file=sys.stderr)
+            return 2
+        reasons = check_fixtures(fx)
+        if reasons:
+            print(f"FIXTURES REJECTED ({len(reasons)}):")
+            for r in reasons:
+                print("  " + r)
+            return 1
+        print("FIXTURES OK: all registered admissible fixtures match the live tree/build/filesystem")
+        return 0
     if "--acceptance" in argv or "--geometry" in argv:
         try:
             acc = argv[argv.index("--acceptance") + 1]

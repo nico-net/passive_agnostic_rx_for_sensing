@@ -1,0 +1,525 @@
+{
+  "_comment": "P02 baseline replay fixture registry. admissible_fixtures is the list check_manifest.py --fixtures verifies (path + sha256 + producing binary + full_auto); it is currently EMPTY -- see status/blocker. candidates_considered records every replay.bin examined and why none qualifies, per the task brief's audit requirement.",
+  "generated_utc": "2026-09-11T00:23:20Z",
+  "generated_by": "tests/passive_rx/replay_header.py + check_manifest.py (P02)",
+  "tree": "/home/sens/NICOLA/adaptive-rx-sensing",
+  "branch": "merge/adaptive-sensing",
+  "commit_at_generation": "e4c8cadd5f22b40605f82f6adedc838ee8e056f5",
+  "current_build_nr_uesoftmodem_sha256": "b064c9957bc1b68d717543eb2bac28c4b2616115bc675f5fed38685f008742fe",
+  "manifest_reference": "tests/passive_rx/baselines/manifest_20260910_6fcb7a6-dirty.json",
+  "status": "BLOCKED",
+  "admissible_fixtures": [],
+  "blocker": {
+    "summary": "No admissible fixture exists. The 22 pre-existing replay.bin captures were all produced by another tree/binary AND all used pdcch_blind_monitor_full_auto=1 (VOID under the plan's TESTING MODE RULE). A new bounded capture was collected with the current binary through the manual launcher in the required full_auto=0 manual mode (see new_capture_attempts[1]) and is RF-valid (SIB1 seen, DL crc_ok 91.8%, UL crc_ok 83.2%, clean exit, no RXDISCONT/RFSTALL, binary matches the current build) -- but it produced NO replay.bin, and this is a structural, deterministic property of the current recorder code under manual mode, not RF variance: further capture attempts cannot change the outcome.",
+    "root_cause": "nr_passive_replay_capture.c's nr_passive_replay_dl() only arms the recorder (RP_ARMED -> RP_REQUESTED) when a successful DL job carries job->sweep_ticket.generation != 0 (nr_passive_replay_capture.c:206-210, condition checked at line 206). sweep_ticket is populated ONLY inside the block gated by `if (g_pdsch_sweep_on && !is_dci10)` (nr_pdcch_blind_monitor_rt.c:2100-2107); outside that block every job's sweep_ticket is left zero-initialized (nr_pdcch_blind_monitor_rt.c:2098, `nr_pdsch_sweep_ticket_t sweep_ticket = {0};`). g_pdsch_sweep_on is set in pdsch_sweep_maybe_enable() to `ready = cfg->dl_full_auto && (...)` (nr_pdcch_blind_monitor_rt.c:164-184) -- i.e. it can only be true when pdcch_blind_monitor_full_auto=1. Under the plan's mandatory manual mode (pdcch_blind_monitor_full_auto=0, adaptive_manual_dlul.conf), cfg->dl_full_auto is always false, so g_pdsch_sweep_on is always false, so sweep_ticket.generation is always 0 for every DL job, so the recorder can never leave RP_ARMED and replay.bin is never written -- proven by reading the single call site of nr_pdsch_config_sweep_select() (nr_pdcch_blind_monitor_rt.c:2108, the only place sweep_ticket.generation is ever assigned a nonzero value), not inferred from this run alone.",
+    "citations": [
+      {
+        "file": "openair1/PHY/NR_UE_TRANSPORT/nr_passive_replay_capture.c",
+        "line_start": 203,
+        "line_end": 211,
+        "token": "sweep_ticket.generation"
+      },
+      {
+        "file": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c",
+        "line_start": 2098,
+        "line_end": 2098,
+        "token": "nr_pdsch_sweep_ticket_t sweep_ticket = {0};"
+      },
+      {
+        "file": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c",
+        "line_start": 2100,
+        "line_end": 2100,
+        "token": "if (g_pdsch_sweep_on && !is_dci10)"
+      },
+      {
+        "file": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c",
+        "line_start": 164,
+        "line_end": 166,
+        "token": "cfg->dl_full_auto"
+      }
+    ],
+    "why_not_fixed_here": "P02's mandate is a narrow launcher opt-in (REPLAY=1 env passthrough) plus fixture audit/registration/checker infrastructure, not a change to production PDCCH/replay decode logic. Relaxing the arm condition for manual mode is a real design decision (what does 'settled' mean for a job with no sweep at all?) belonging to whoever owns nr_passive_replay_capture.c / nr_pdcch_blind_monitor_rt.c, and the plan explicitly forbids tuning code/config to manufacture a pass. Reported here as BLOCKED rather than patched.",
+    "attempts_exhausted_early": "ATTEMPTS is capped at 3 per the brief, but only 2 were used: attempt 1 was VOID_RF_OR_ASSERT (RFSTALL overflow at USRP_RX_START, zero SIB1 -- ordinary cold-start RF variance) and attempt 2 was RF-valid but structurally cannot produce a replay.bin per root_cause above. A 3rd attempt would re-run the identical deterministic code path and cannot produce a different outcome; running it anyway would be indistinguishable from tuning/retrying to force a pass, which the plan forbids."
+  },
+  "new_capture_attempts": [
+    {
+      "attempt": 1,
+      "path": "/home/sens/NICOLA/captures/sensing_manual_fixed.XmtvnI",
+      "command": "sudo -n env REPLAY=1 DURATION=180 MONITOR_PORT=8090 bash tests/passive_rx/run_manual_x410.sh",
+      "validity": "VOID_RF_OR_ASSERT",
+      "stop_reason": "VOID_RF_OR_ASSERT",
+      "process_exit": 0,
+      "cleanup_status": "CLEAN",
+      "sib1_common_facts_count": 0,
+      "rfstall_count": 2,
+      "rxdiscont_count": 0,
+      "note": "RFSTALL USRP_RX_START ERROR_CODE_OVERFLOW at stream start; zero SIB1; kept as evidence per the memory rule, not retried further at this RF state."
+    },
+    {
+      "attempt": 2,
+      "path": "/home/sens/NICOLA/captures/sensing_manual_fixed.JPdoGb",
+      "command": "sudo -n env REPLAY=1 DURATION=180 MONITOR_PORT=8091 bash tests/passive_rx/run_manual_x410.sh",
+      "validity": "RF_VALID_REQUIRES_DL_UL_CRC_EVIDENCE",
+      "stop_reason": "DURATION_COMPLETE",
+      "process_exit": 0,
+      "cleanup_status": "CLEAN",
+      "sib1_common_facts_count": 1,
+      "rfstall_count": 0,
+      "rxdiscont_count": 0,
+      "nic_missed_before": 27520822,
+      "nic_missed_after": 27520822,
+      "full_auto": 0,
+      "producing_binary_sha256": "b064c9957bc1b68d717543eb2bac28c4b2616115bc675f5fed38685f008742fe",
+      "binary_matches_current_build": true,
+      "receiver_conf_sha256": "a39e40f00e4ad0f456cb2b5c947f6e1e6bdbdadef069306231ef3075349ade92",
+      "run_log_sha256": "b9618723f3440b3832599c6b205a87d053937fdf2bac5b3c6ff6fdc48f830a6b",
+      "last_pusch_passive_line": "SENSING: pusch_passive[try=12694 crc_ok=10562 (83.2%) seg_fail=2132 zero_tb=0 (0.0%) ta_refined=9178 uci[trials=21176 rescued=4939] health=83.2% unsup=1 setup_fail=0] ul_cfr[submits=0 re=0]",
+      "last_pdschq_line": "SENSING: PDSCHQ queued=90774 decoded=42014 crc_ok=38583 (91.8%) dropped[full=4166 stale=44560] max_lag_slots=180780/20",
+      "replay_bin_produced": false,
+      "replay_log_lines_found": 0,
+      "note": "RF-valid, DL/UL CRC evidence present, full_auto=0 confirmed in receiver.conf, binary matches current build -- but ISAC_PASSIVE_REPLAY_CAPTURE never armed (zero occurrences of the string 'replay' anywhere in run.log, case-insensitive). See blocker.root_cause."
+    }
+  ],
+  "pre_existing_captures_considered": [
+    {
+      "name": "adaptive_ul_dl_mrc2.1lxMai",
+      "path": "/home/sens/NICOLA/captures/adaptive_ul_dl_mrc2.1lxMai",
+      "replay_bin_size_bytes": 316268528,
+      "source_commit": "aa7f82acedf35e21925c84e4a19e79c2e320f1e3",
+      "producing_binary_sha256": "cf76b3bc833331788115f492072f2feb31ef8db40fe2255977e634fdbf1fa830",
+      "binary_matches_current_build": false,
+      "full_auto": 1,
+      "header_version": 1,
+      "n_ul": 32,
+      "n_dl_records": 1,
+      "dl_records_success_tb_bytes_gt0": 1,
+      "dl_records_failure_tb_bytes_eq0": 0,
+      "verdict": "INADMISSIBLE",
+      "first_failing_reason": "producing binary sha256 does not match the current build (b064c995...)",
+      "all_failing_reasons": [
+        "producing binary sha256 does not match the current build (b064c995...)",
+        "receiver.conf pdcch_blind_monitor_full_auto=1 (VOID under TESTING MODE RULE)"
+      ]
+    },
+    {
+      "name": "adaptive_ul_dl_mrc2.3aBLA3",
+      "path": "/home/sens/NICOLA/captures/adaptive_ul_dl_mrc2.3aBLA3",
+      "replay_bin_size_bytes": 316268528,
+      "source_commit": "dc859c8fa66b3bc59b4ec30cf8afdcb1ec6941ee",
+      "producing_binary_sha256": "0b3031533ec956aeaa52da50aac159ce0e0c6b548861b6ad148516a223c6c476",
+      "binary_matches_current_build": false,
+      "full_auto": 1,
+      "header_version": 2,
+      "n_ul": 21,
+      "n_dl_records": 56,
+      "dl_records_success_tb_bytes_gt0": 20,
+      "dl_records_failure_tb_bytes_eq0": 36,
+      "verdict": "INADMISSIBLE",
+      "first_failing_reason": "producing binary sha256 does not match the current build (b064c995...)",
+      "all_failing_reasons": [
+        "producing binary sha256 does not match the current build (b064c995...)",
+        "receiver.conf pdcch_blind_monitor_full_auto=1 (VOID under TESTING MODE RULE)"
+      ]
+    },
+    {
+      "name": "adaptive_ul_dl_mrc2.Av693P",
+      "path": "/home/sens/NICOLA/captures/adaptive_ul_dl_mrc2.Av693P",
+      "replay_bin_size_bytes": 316268528,
+      "source_commit": "dc859c8fa66b3bc59b4ec30cf8afdcb1ec6941ee",
+      "producing_binary_sha256": "f8b1f401d85f669280a7e1101bb8d8b3d85d09a2ba063040e1624e1096393f9f",
+      "binary_matches_current_build": false,
+      "full_auto": 1,
+      "header_version": 1,
+      "n_ul": 18,
+      "n_dl_records": 1,
+      "dl_records_success_tb_bytes_gt0": 1,
+      "dl_records_failure_tb_bytes_eq0": 0,
+      "verdict": "INADMISSIBLE",
+      "first_failing_reason": "producing binary sha256 does not match the current build (b064c995...)",
+      "all_failing_reasons": [
+        "producing binary sha256 does not match the current build (b064c995...)",
+        "receiver.conf pdcch_blind_monitor_full_auto=1 (VOID under TESTING MODE RULE)"
+      ]
+    },
+    {
+      "name": "adaptive_ul_dl_mrc2.HqNljS",
+      "path": "/home/sens/NICOLA/captures/adaptive_ul_dl_mrc2.HqNljS",
+      "replay_bin_size_bytes": 316268528,
+      "source_commit": "dc859c8fa66b3bc59b4ec30cf8afdcb1ec6941ee",
+      "producing_binary_sha256": "c26ad701751ee7d172861e66183dc0624446eecc5c8594b5cfab818ce951c95d",
+      "binary_matches_current_build": false,
+      "full_auto": 1,
+      "header_version": 1,
+      "n_ul": 28,
+      "n_dl_records": 1,
+      "dl_records_success_tb_bytes_gt0": 1,
+      "dl_records_failure_tb_bytes_eq0": 0,
+      "verdict": "INADMISSIBLE",
+      "first_failing_reason": "producing binary sha256 does not match the current build (b064c995...)",
+      "all_failing_reasons": [
+        "producing binary sha256 does not match the current build (b064c995...)",
+        "receiver.conf pdcch_blind_monitor_full_auto=1 (VOID under TESTING MODE RULE)"
+      ]
+    },
+    {
+      "name": "adaptive_ul_dl_mrc2.LYKfRD",
+      "path": "/home/sens/NICOLA/captures/adaptive_ul_dl_mrc2.LYKfRD",
+      "replay_bin_size_bytes": 316268528,
+      "source_commit": "30fdbd69e8eeb2517e3160905fdebb14c806cfde",
+      "producing_binary_sha256": "4cc0de88410d29662c9df2b47204a1e595fd66a30f833289ed87ef2bbc82f59e",
+      "binary_matches_current_build": false,
+      "full_auto": 1,
+      "header_version": 1,
+      "n_ul": 24,
+      "n_dl_records": 1,
+      "dl_records_success_tb_bytes_gt0": 1,
+      "dl_records_failure_tb_bytes_eq0": 0,
+      "verdict": "INADMISSIBLE",
+      "first_failing_reason": "producing binary sha256 does not match the current build (b064c995...)",
+      "all_failing_reasons": [
+        "producing binary sha256 does not match the current build (b064c995...)",
+        "receiver.conf pdcch_blind_monitor_full_auto=1 (VOID under TESTING MODE RULE)"
+      ]
+    },
+    {
+      "name": "adaptive_ul_dl_mrc2.NoxMgb",
+      "path": "/home/sens/NICOLA/captures/adaptive_ul_dl_mrc2.NoxMgb",
+      "replay_bin_size_bytes": 316268528,
+      "source_commit": "dc859c8fa66b3bc59b4ec30cf8afdcb1ec6941ee",
+      "producing_binary_sha256": "f91663fe5b890e0e91cc394893d618ccc72e51e4f4771688d2119098767eb5e3",
+      "binary_matches_current_build": false,
+      "full_auto": 1,
+      "header_version": 1,
+      "n_ul": 25,
+      "n_dl_records": 2,
+      "dl_records_success_tb_bytes_gt0": 2,
+      "dl_records_failure_tb_bytes_eq0": 0,
+      "verdict": "INADMISSIBLE",
+      "first_failing_reason": "producing binary sha256 does not match the current build (b064c995...)",
+      "all_failing_reasons": [
+        "producing binary sha256 does not match the current build (b064c995...)",
+        "receiver.conf pdcch_blind_monitor_full_auto=1 (VOID under TESTING MODE RULE)"
+      ]
+    },
+    {
+      "name": "adaptive_ul_dl_mrc2.QACZSc",
+      "path": "/home/sens/NICOLA/captures/adaptive_ul_dl_mrc2.QACZSc",
+      "replay_bin_size_bytes": 316268528,
+      "source_commit": "1fd296e9b4fdc51115a085588bc3327be614c657",
+      "producing_binary_sha256": "47332fc6640aad5ca2d56ff9a0cacb8607acb12d7c5825b768a6a1c6b5114613",
+      "binary_matches_current_build": false,
+      "full_auto": 1,
+      "header_version": 1,
+      "n_ul": 16,
+      "n_dl_records": 1,
+      "dl_records_success_tb_bytes_gt0": 1,
+      "dl_records_failure_tb_bytes_eq0": 0,
+      "verdict": "INADMISSIBLE",
+      "first_failing_reason": "producing binary sha256 does not match the current build (b064c995...)",
+      "all_failing_reasons": [
+        "producing binary sha256 does not match the current build (b064c995...)",
+        "receiver.conf pdcch_blind_monitor_full_auto=1 (VOID under TESTING MODE RULE)"
+      ]
+    },
+    {
+      "name": "adaptive_ul_dl_mrc2.SFFMM9",
+      "path": "/home/sens/NICOLA/captures/adaptive_ul_dl_mrc2.SFFMM9",
+      "replay_bin_size_bytes": 316268528,
+      "source_commit": "51ecd85c1be7bcb5a42cba2dc4252dcdc2cf9baf",
+      "producing_binary_sha256": "09a1dfa0b184ba7350f3bf3d51b7848e7f3256e5ce28f4495a5f8fabaf2ab56d",
+      "binary_matches_current_build": false,
+      "full_auto": 1,
+      "header_version": 2,
+      "n_ul": 23,
+      "n_dl_records": 141,
+      "dl_records_success_tb_bytes_gt0": 125,
+      "dl_records_failure_tb_bytes_eq0": 16,
+      "verdict": "INADMISSIBLE",
+      "first_failing_reason": "producing binary sha256 does not match the current build (b064c995...)",
+      "all_failing_reasons": [
+        "producing binary sha256 does not match the current build (b064c995...)",
+        "receiver.conf pdcch_blind_monitor_full_auto=1 (VOID under TESTING MODE RULE)"
+      ]
+    },
+    {
+      "name": "adaptive_ul_dl_mrc2.XJn8TI",
+      "path": "/home/sens/NICOLA/captures/adaptive_ul_dl_mrc2.XJn8TI",
+      "replay_bin_size_bytes": 316268528,
+      "source_commit": "dc859c8fa66b3bc59b4ec30cf8afdcb1ec6941ee",
+      "producing_binary_sha256": "6ea1e6bd63ec4386ee6089d1dabe35eb5f1e0f2fad59084a7dbdfb9e01b6292b",
+      "binary_matches_current_build": false,
+      "full_auto": 1,
+      "header_version": 1,
+      "n_ul": 32,
+      "n_dl_records": 1,
+      "dl_records_success_tb_bytes_gt0": 1,
+      "dl_records_failure_tb_bytes_eq0": 0,
+      "verdict": "INADMISSIBLE",
+      "first_failing_reason": "producing binary sha256 does not match the current build (b064c995...)",
+      "all_failing_reasons": [
+        "producing binary sha256 does not match the current build (b064c995...)",
+        "receiver.conf pdcch_blind_monitor_full_auto=1 (VOID under TESTING MODE RULE)"
+      ]
+    },
+    {
+      "name": "adaptive_ul_dl_mrc2.dKSWou",
+      "path": "/home/sens/NICOLA/captures/adaptive_ul_dl_mrc2.dKSWou",
+      "replay_bin_size_bytes": 316268528,
+      "source_commit": "9a7816458c1e5d221adc460f1b60c429464be50a",
+      "producing_binary_sha256": "a7df2f104d74eda0d4ffb2ccda1b0f50564a956b371dcffb1f17725336a90464",
+      "binary_matches_current_build": false,
+      "full_auto": 1,
+      "header_version": 1,
+      "n_ul": 18,
+      "n_dl_records": 1,
+      "dl_records_success_tb_bytes_gt0": 1,
+      "dl_records_failure_tb_bytes_eq0": 0,
+      "verdict": "INADMISSIBLE",
+      "first_failing_reason": "producing binary sha256 does not match the current build (b064c995...)",
+      "all_failing_reasons": [
+        "producing binary sha256 does not match the current build (b064c995...)",
+        "receiver.conf pdcch_blind_monitor_full_auto=1 (VOID under TESTING MODE RULE)"
+      ]
+    },
+    {
+      "name": "adaptive_ul_dl_mrc2.full.gH58Un",
+      "path": "/home/sens/NICOLA/captures/adaptive_ul_dl_mrc2.full.gH58Un",
+      "replay_bin_size_bytes": 316268528,
+      "source_commit": null,
+      "producing_binary_sha256": null,
+      "binary_matches_current_build": false,
+      "full_auto": 1,
+      "header_version": 2,
+      "n_ul": 20,
+      "n_dl_records": 86,
+      "dl_records_success_tb_bytes_gt0": 22,
+      "dl_records_failure_tb_bytes_eq0": 64,
+      "verdict": "INADMISSIBLE",
+      "first_failing_reason": "producing binary sha256 does not match the current build (b064c995...)",
+      "all_failing_reasons": [
+        "producing binary sha256 does not match the current build (b064c995...)",
+        "receiver.conf pdcch_blind_monitor_full_auto=1 (VOID under TESTING MODE RULE)"
+      ]
+    },
+    {
+      "name": "adaptive_ul_dl_mrc2.noGySh",
+      "path": "/home/sens/NICOLA/captures/adaptive_ul_dl_mrc2.noGySh",
+      "replay_bin_size_bytes": 316268528,
+      "source_commit": "4fff09b4045bb9c63af37acb0f453751c81eb5ee",
+      "producing_binary_sha256": "0739598447e2bf7c6a4bb4eead576cca0300c29ae5a3d7fa5da5ae3352d7d982",
+      "binary_matches_current_build": false,
+      "full_auto": 1,
+      "header_version": 1,
+      "n_ul": 32,
+      "n_dl_records": 1,
+      "dl_records_success_tb_bytes_gt0": 1,
+      "dl_records_failure_tb_bytes_eq0": 0,
+      "verdict": "INADMISSIBLE",
+      "first_failing_reason": "producing binary sha256 does not match the current build (b064c995...)",
+      "all_failing_reasons": [
+        "producing binary sha256 does not match the current build (b064c995...)",
+        "receiver.conf pdcch_blind_monitor_full_auto=1 (VOID under TESTING MODE RULE)"
+      ]
+    },
+    {
+      "name": "adaptive_ul_dl_mrc2.tTftbV",
+      "path": "/home/sens/NICOLA/captures/adaptive_ul_dl_mrc2.tTftbV",
+      "replay_bin_size_bytes": 316268528,
+      "source_commit": "9a7816458c1e5d221adc460f1b60c429464be50a",
+      "producing_binary_sha256": "a7df2f104d74eda0d4ffb2ccda1b0f50564a956b371dcffb1f17725336a90464",
+      "binary_matches_current_build": false,
+      "full_auto": 1,
+      "header_version": 1,
+      "n_ul": 32,
+      "n_dl_records": 1,
+      "dl_records_success_tb_bytes_gt0": 1,
+      "dl_records_failure_tb_bytes_eq0": 0,
+      "verdict": "INADMISSIBLE",
+      "first_failing_reason": "producing binary sha256 does not match the current build (b064c995...)",
+      "all_failing_reasons": [
+        "producing binary sha256 does not match the current build (b064c995...)",
+        "receiver.conf pdcch_blind_monitor_full_auto=1 (VOID under TESTING MODE RULE)"
+      ]
+    },
+    {
+      "name": "adaptive_ul_dl_mrc2.wFHFMQ",
+      "path": "/home/sens/NICOLA/captures/adaptive_ul_dl_mrc2.wFHFMQ",
+      "replay_bin_size_bytes": 316268528,
+      "source_commit": "03af4c581dec37e3e33a7e0f972dc9e0116c9086",
+      "producing_binary_sha256": "938a0e6223a1bc9bdbbe7f5b4063d30c3c4e93530823a1479779dbc557d58c29",
+      "binary_matches_current_build": false,
+      "full_auto": 1,
+      "header_version": 1,
+      "n_ul": 19,
+      "n_dl_records": 1,
+      "dl_records_success_tb_bytes_gt0": 1,
+      "dl_records_failure_tb_bytes_eq0": 0,
+      "verdict": "INADMISSIBLE",
+      "first_failing_reason": "producing binary sha256 does not match the current build (b064c995...)",
+      "all_failing_reasons": [
+        "producing binary sha256 does not match the current build (b064c995...)",
+        "receiver.conf pdcch_blind_monitor_full_auto=1 (VOID under TESTING MODE RULE)"
+      ]
+    },
+    {
+      "name": "adaptive_ul_dl_mrc2.za4Dat",
+      "path": "/home/sens/NICOLA/captures/adaptive_ul_dl_mrc2.za4Dat",
+      "replay_bin_size_bytes": 316268528,
+      "source_commit": "21626c0108d103d66f3b3eeec47789b8157fa3b9",
+      "producing_binary_sha256": "b5e68dd43dfb25f3e0392cc84e69906f7259ce5a1681b7eb58a8e706eb196616",
+      "binary_matches_current_build": false,
+      "full_auto": 1,
+      "header_version": 1,
+      "n_ul": 24,
+      "n_dl_records": 1,
+      "dl_records_success_tb_bytes_gt0": 1,
+      "dl_records_failure_tb_bytes_eq0": 0,
+      "verdict": "INADMISSIBLE",
+      "first_failing_reason": "producing binary sha256 does not match the current build (b064c995...)",
+      "all_failing_reasons": [
+        "producing binary sha256 does not match the current build (b064c995...)",
+        "receiver.conf pdcch_blind_monitor_full_auto=1 (VOID under TESTING MODE RULE)"
+      ]
+    },
+    {
+      "name": "auto_all_cfr.3yNhzk",
+      "path": "/home/sens/NICOLA/captures/auto_all_cfr.3yNhzk",
+      "replay_bin_size_bytes": 316268528,
+      "source_commit": null,
+      "producing_binary_sha256": "09a1dfa0b184ba7350f3bf3d51b7848e7f3256e5ce28f4495a5f8fabaf2ab56d",
+      "binary_matches_current_build": false,
+      "full_auto": 1,
+      "header_version": 2,
+      "n_ul": 3,
+      "n_dl_records": 20,
+      "dl_records_success_tb_bytes_gt0": 20,
+      "dl_records_failure_tb_bytes_eq0": 0,
+      "verdict": "INADMISSIBLE",
+      "first_failing_reason": "producing binary sha256 does not match the current build (b064c995...)",
+      "all_failing_reasons": [
+        "producing binary sha256 does not match the current build (b064c995...)",
+        "receiver.conf pdcch_blind_monitor_full_auto=1 (VOID under TESTING MODE RULE)"
+      ]
+    },
+    {
+      "name": "auto_crc_pinned.3ufNcO",
+      "path": "/home/sens/NICOLA/captures/auto_crc_pinned.3ufNcO",
+      "replay_bin_size_bytes": 316268528,
+      "source_commit": null,
+      "producing_binary_sha256": "d43349acc4841aa038b62fd26670e46fcab9417fa342bbbc240fe69419128124",
+      "binary_matches_current_build": false,
+      "full_auto": 1,
+      "header_version": 2,
+      "n_ul": 16,
+      "n_dl_records": 37,
+      "dl_records_success_tb_bytes_gt0": 34,
+      "dl_records_failure_tb_bytes_eq0": 3,
+      "verdict": "INADMISSIBLE",
+      "first_failing_reason": "producing binary sha256 does not match the current build (b064c995...)",
+      "all_failing_reasons": [
+        "producing binary sha256 does not match the current build (b064c995...)",
+        "receiver.conf pdcch_blind_monitor_full_auto=1 (VOID under TESTING MODE RULE)"
+      ]
+    },
+    {
+      "name": "auto_ul_baseline_fix.SjPICx",
+      "path": "/home/sens/NICOLA/captures/auto_ul_baseline_fix.SjPICx",
+      "replay_bin_size_bytes": 316268528,
+      "source_commit": null,
+      "producing_binary_sha256": "3ed3da77e0d436d48ab42aaec7050fe85886cc1d8e1d1d34384037f343cfdaa7",
+      "binary_matches_current_build": false,
+      "full_auto": 1,
+      "header_version": 2,
+      "n_ul": 14,
+      "n_dl_records": 33,
+      "dl_records_success_tb_bytes_gt0": 30,
+      "dl_records_failure_tb_bytes_eq0": 3,
+      "verdict": "INADMISSIBLE",
+      "first_failing_reason": "producing binary sha256 does not match the current build (b064c995...)",
+      "all_failing_reasons": [
+        "producing binary sha256 does not match the current build (b064c995...)",
+        "receiver.conf pdcch_blind_monitor_full_auto=1 (VOID under TESTING MODE RULE)"
+      ]
+    },
+    {
+      "name": "auto_ul_evidence_retry.G8BYYc",
+      "path": "/home/sens/NICOLA/captures/auto_ul_evidence_retry.G8BYYc",
+      "replay_bin_size_bytes": 316268528,
+      "source_commit": null,
+      "producing_binary_sha256": "89ed8c355695c1bf5bb86c3b26e735f59c9487e54d27d8cbddaa611ac7823a93",
+      "binary_matches_current_build": false,
+      "full_auto": 1,
+      "header_version": 2,
+      "n_ul": 15,
+      "n_dl_records": 51,
+      "dl_records_success_tb_bytes_gt0": 45,
+      "dl_records_failure_tb_bytes_eq0": 6,
+      "verdict": "INADMISSIBLE",
+      "first_failing_reason": "producing binary sha256 does not match the current build (b064c995...)",
+      "all_failing_reasons": [
+        "producing binary sha256 does not match the current build (b064c995...)",
+        "receiver.conf pdcch_blind_monitor_full_auto=1 (VOID under TESTING MODE RULE)"
+      ]
+    },
+    {
+      "name": "auto_ul_post_reboot.hgledw",
+      "path": "/home/sens/NICOLA/captures/auto_ul_post_reboot.hgledw",
+      "replay_bin_size_bytes": 316268528,
+      "source_commit": null,
+      "producing_binary_sha256": "89ed8c355695c1bf5bb86c3b26e735f59c9487e54d27d8cbddaa611ac7823a93",
+      "binary_matches_current_build": false,
+      "full_auto": 1,
+      "header_version": 2,
+      "n_ul": 11,
+      "n_dl_records": 40,
+      "dl_records_success_tb_bytes_gt0": 38,
+      "dl_records_failure_tb_bytes_eq0": 2,
+      "verdict": "INADMISSIBLE",
+      "first_failing_reason": "producing binary sha256 does not match the current build (b064c995...)",
+      "all_failing_reasons": [
+        "producing binary sha256 does not match the current build (b064c995...)",
+        "receiver.conf pdcch_blind_monitor_full_auto=1 (VOID under TESTING MODE RULE)"
+      ]
+    },
+    {
+      "name": "auto_ul_rf_restore_retry.cwCFwg",
+      "path": "/home/sens/NICOLA/captures/auto_ul_rf_restore_retry.cwCFwg",
+      "replay_bin_size_bytes": 316268528,
+      "source_commit": null,
+      "producing_binary_sha256": "1858b23425c061b4c09171b18f1861e2742c39af2638a9bf94114553cbaf800e",
+      "binary_matches_current_build": false,
+      "full_auto": 1,
+      "header_version": 2,
+      "n_ul": 19,
+      "n_dl_records": 37,
+      "dl_records_success_tb_bytes_gt0": 33,
+      "dl_records_failure_tb_bytes_eq0": 4,
+      "verdict": "INADMISSIBLE",
+      "first_failing_reason": "producing binary sha256 does not match the current build (b064c995...)",
+      "all_failing_reasons": [
+        "producing binary sha256 does not match the current build (b064c995...)",
+        "receiver.conf pdcch_blind_monitor_full_auto=1 (VOID under TESTING MODE RULE)"
+      ]
+    },
+    {
+      "name": "auto_ul_sched_probe.zfDNuN",
+      "path": "/home/sens/NICOLA/captures/auto_ul_sched_probe.zfDNuN",
+      "replay_bin_size_bytes": 316268528,
+      "source_commit": null,
+      "producing_binary_sha256": "fb1c26f1293e994d32c13c81626dfee310676c9fa182fdcd0597e4644fd9eacc",
+      "binary_matches_current_build": false,
+      "full_auto": 1,
+      "header_version": 2,
+      "n_ul": 13,
+      "n_dl_records": 43,
+      "dl_records_success_tb_bytes_gt0": 36,
+      "dl_records_failure_tb_bytes_eq0": 7,
+      "verdict": "INADMISSIBLE",
+      "first_failing_reason": "producing binary sha256 does not match the current build (b064c995...)",
+      "all_failing_reasons": [
+        "producing binary sha256 does not match the current build (b064c995...)",
+        "receiver.conf pdcch_blind_monitor_full_auto=1 (VOID under TESTING MODE RULE)"
+      ]
+    }
+  ]
+}
