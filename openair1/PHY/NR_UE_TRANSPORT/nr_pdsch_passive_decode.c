@@ -55,6 +55,7 @@ extern __thread uint32_t nr_dl_chest_nvar_ant[];
 #include "PHY/TOOLS/tools_defs.h"
 #include "executables/nr-uesoftmodem.h"
 #include "openair2/LAYER2/NR_MAC_COMMON/nr_mac_common.h"
+#include "PHY/NR_UE_ISAC/nr_isac.h" // nr_isac_rx_branches (P07 branch view)
 
 /* ---- INNER COST BREAKDOWN (ISAC_PDCCH_TIMING=1, shares the blind monitor's switch) -------------
  * The outer probe in nr_pdcch_blind_monitor_rt.c measures this whole function as ONE ~774 us stage,
@@ -412,6 +413,9 @@ static const char *const kPipeName[PIPE_N_FIELDS] = {
 
 void nr_pdsch_passive_ldpc_stats_dump(void)
 {
+  /* P07: unsupported-in-branch-view traffic, reported apart from CRC failure (G2 exit text). */
+  LOG_I(PHY, "SENSING: BRANCHVIEW unsupported_multilayer_in_branch_view=%lu\n",
+        (unsigned long)nr_pdsch_passive_view_unsupported_multilayer());
   const uint64_t sf = atomic_load(&g_ldpc_seg_fail), tf = atomic_load(&g_ldpc_tb_fail);
   const uint64_t zt = atomic_load(&g_ldpc_zero_tb), ok = atomic_load(&g_ldpc_ok);
   const uint64_t ie = atomic_load(&g_ldpc_iface_err);
@@ -882,6 +886,124 @@ static void nr_slot_fep_ant_task(void *arg)
   completed_task_ans(a->ans);
 }
 
+/* ---- Independent (single-branch) DL view (adaptive_RX_pipeline.md P07) ------------------------
+ * See nr_pdsch_passive_decode.h and docs/passive_dl_branch_view_audit.md sec 3 for why this is a
+ * shallow copy of PHY_VARS_NR_UE and not a per-loop antenna mask. Thread-local: the queue runs
+ * several consumers, each must carry its own view; heap-backed rather than a __thread struct
+ * (5.6 MB) for the same TLS-layout reason as g_rxdataF in nr_pdsch_passive_queue.c. */
+static __thread PHY_VARS_NR_UE *t_view_ue = NULL;
+static __thread c16_t *t_view_rxdata[1];
+static __thread int t_view_phys = -1;   // >= 0 while a view is armed on this thread
+static _Atomic uint64_t g_view_unsupported_multilayer = 0;
+
+static inline bool view_active(void) { return t_view_phys >= 0; }
+
+int nr_pdsch_passive_branch_view_resolve(const PHY_VARS_NR_UE *ue, int8_t job_physical_channel,
+                                          uint8_t *branch_id)
+{
+  const int nb_rx = ue->frame_parms.nb_antennas_rx;
+  const nr_rx_branch_set_t *bs = nr_isac_rx_branches(); // NULL when sensing is off / stubbed
+  int phys = -1;
+  const char *e = getenv("ISAC_DL_BRANCH_VIEW");
+  if (e != NULL && *e != '\0') {
+    phys = atoi(e);
+    if (phys < 0 || phys >= nb_rx) {
+      static __thread bool warned = false;
+      if (!warned) {
+        warned = true;
+        LOG_E(PHY, "SENSING: ISAC_DL_BRANCH_VIEW=%s is outside [0,%d): ignored, legacy path\n", e, nb_rx);
+      }
+      phys = -1;
+    }
+  } else if (bs != NULL && bs->n_active > 1) {
+    /* Independent mode. Pre-P06 producers tag every job 0/0 (nr_pdcch_blind_monitor_rt.c), so an
+     * untagged job lands on physical channel 0 if it is active, else on the lowest active branch. */
+    int lowest = -1;
+    for (int b = 0; b < NR_RX_BRANCH_MAX; b++) {
+      const int pc = bs->b[b].physical_channel;
+      if (pc < 0 || pc >= nb_rx) continue;
+      if (pc == job_physical_channel) { phys = pc; break; }
+      if (lowest < 0) lowest = pc;
+    }
+    if (phys < 0) phys = lowest;
+  }
+  uint8_t bid = 0;
+  if (phys >= 0 && bs != NULL) {
+    for (int b = 0; b < NR_RX_BRANCH_MAX; b++) {
+      if (bs->b[b].physical_channel == phys) { bid = bs->b[b].branch_id; break; }
+    }
+  } else if (phys >= 0) {
+    bid = (uint8_t)phys; // no branch set (replay/env-only): identity == physical channel
+  }
+  if (branch_id) *branch_id = bid;
+  return phys;
+}
+
+PHY_VARS_NR_UE *nr_pdsch_passive_branch_view(PHY_VARS_NR_UE *ue, int phys, uint8_t branch_id)
+{
+  (void)branch_id; // identity travels on the job; TODO(P10): carry it into the CFR submission ABI
+  t_view_phys = -1;
+  if (phys < 0 || phys >= ue->frame_parms.nb_antennas_rx) {
+    return ue;
+  }
+  const NR_DL_FRAME_PARMS *fp = &ue->frame_parms;
+  if (t_view_ue == NULL) {
+    /* aligned_alloc, not malloc: the struct carries 32-byte-aligned SIMD members and glibc's malloc
+     * only guarantees 16; size rounded up to the alignment as aligned_alloc requires. */
+    t_view_ue = (PHY_VARS_NR_UE *)aligned_alloc(64, (sizeof(*t_view_ue) + 63) & ~(size_t)63);
+    if (t_view_ue == NULL) {
+      LOG_E(PHY, "SENSING: branch view: cannot allocate the shadow UE, legacy path\n");
+      return ue;
+    }
+    memcpy(t_view_ue, ue, sizeof(*ue));
+  } else {
+    /* Staleness check on the frame-parms fields the chain indexes by: a cell reconfiguration
+     * would otherwise leave this thread's copy describing the previous cell. Cheap per job. */
+    const NR_DL_FRAME_PARMS *vf = &t_view_ue->frame_parms;
+    if (vf->ofdm_symbol_size != fp->ofdm_symbol_size || vf->samples_per_slot_wCP != fp->samples_per_slot_wCP
+        || vf->N_RB_DL != fp->N_RB_DL || vf->first_carrier_offset != fp->first_carrier_offset
+        || vf->Nid_cell != fp->Nid_cell || vf->slots_per_frame != fp->slots_per_frame) {
+      memcpy(t_view_ue, ue, sizeof(*ue));
+    }
+  }
+  /* Mutable scalars the chain reads (docs/passive_dl_branch_view_audit.md sec 3, (a')). Everything
+   * else it touches is either a pointer aliasing the real buffers or config fixed at init. */
+  t_view_ue->is_synchronized = ue->is_synchronized;
+  t_view_ue->cont_fo_comp = ue->cont_fo_comp;
+  t_view_ue->dl_Doppler_shift = ue->dl_Doppler_shift;
+  t_view_ue->freq_offset = ue->freq_offset;
+  t_view_ue->common_vars.freq_offset = ue->common_vars.freq_offset;
+  t_view_ue->chest_freq = ue->chest_freq;
+  t_view_ue->chest_time = ue->chest_time;
+  t_view_ue->do_ml = ue->do_ml;
+  t_view_ue->frame_parms.nb_antennas_rx = 1;
+  t_view_rxdata[0] = ue->common_vars.rxdata[phys];
+  t_view_ue->common_vars.rxdata = t_view_rxdata;
+  t_view_phys = phys;
+  return t_view_ue;
+}
+
+uint64_t nr_pdsch_passive_view_unsupported_multilayer(void)
+{
+  return atomic_load_explicit(&g_view_unsupported_multilayer, memory_order_relaxed);
+}
+
+void nr_pdsch_passive_verdict_trace(uint64_t job_idx, uint16_t rnti, uint8_t branch_id, int phys,
+                                     const nr_pdsch_passive_decode_result_t *out)
+{
+  static int s_on = -1;
+  if (s_on < 0) {
+    s_on = (getenv("ISAC_PDSCH_VERDICT_TRACE") != NULL) ? 1 : 0;
+  }
+  if (!s_on) return;
+  const char *crc = (out->status == NR_PDSCH_PASSIVE_DECODE_CRC_OK) ? "ok"
+                    : (out->status == NR_PDSCH_PASSIVE_DECODE_CRC_FAIL) ? "fail"
+                    : (out->status == NR_PDSCH_PASSIVE_DECODE_UNSUPPORTED) ? "unsupported" : "error";
+  printf("PDSCH-VERDICT job=%lu rnti=%04x crc=%s reason=%s Nl=%u branch=%u phys=%d\n",
+         (unsigned long)job_idx, rnti, crc, out->reason ? out->reason : "?", (unsigned)out->cw.Nl,
+         (unsigned)branch_id, phys);
+}
+
 nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
                                                          const UE_nr_rxtx_proc_t *proc,
                                                          fapi_nr_dl_config_dlsch_pdu_rel15_t *dlsch_config,
@@ -892,15 +1014,18 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
 {
   memset(out, 0, sizeof(*out));
   out->status = NR_PDSCH_PASSIVE_DECODE_UNSUPPORTED;
+  out->reason = "unsupported";
 
   NR_DL_FRAME_PARMS *fp = &ue->frame_parms;
 
   // ---- Scope: mirror nr_isac_pdsch_data_aided_submit()'s own guards. Decoding a grant whose
   // reconstruction we could not use anyway is pure CPU cost. ----
   if (dlsch_config->pduBitmap & 0x1) {
+    out->reason = "ptrs";
     return out->status; // PTRS
   }
   if (dlsch_config->numCsiRsForRateMatching > 0) {
+    out->reason = "csirs_rate_matching";
     return out->status; // CSI-RS rate matching
   }
   int n_ports = 0;
@@ -918,6 +1043,15 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
    * nof_antennas_dl < 4 ("RU number of downlink ports=4 must match the number of transmission
    * antennas"). */
   if (n_ports < 1 || n_ports > fp->nb_antennas_rx) {
+    out->cw.Nl = (uint8_t)n_ports; // for the verdict trace: the layer count that was rejected
+    /* A one-antenna branch view REJECTS multilayer grants explicitly (plan sec 2.3 retraction):
+     * counted apart from CRC failure, never silently decoded on one antenna. */
+    if (view_active() && n_ports > 1) {
+      atomic_fetch_add_explicit(&g_view_unsupported_multilayer, 1, memory_order_relaxed);
+      out->reason = "multilayer_in_branch_view";
+    } else {
+      out->reason = (n_ports < 1) ? "no_dmrs_port" : "layers_exceed_antennas";
+    }
     return out->status; // cannot separate more layers than we have receive antennas
   }
 
@@ -936,6 +1070,7 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
     // a real UE takes them from the initial transmission. A passive receiver has no such history,
     // so such a grant is simply not decodable here. nr_pdcch_blind_decode_and_extract() already
     // rejects those, so reaching this means the MCS table assumption is wrong.
+    out->reason = "reserved_mcs";
     return out->status;
   }
   const uint8_t nb_re_dmrs = get_num_dmrs_re_per_rb(dlsch_config->dmrsConfigType, dlsch_config->n_dmrs_cdm_groups);
@@ -944,6 +1079,7 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
   cw->TBS = nr_compute_tbs(cw->qamModOrder, (uint16_t)R, freq_alloc->num_rbs, dlsch_config->number_symbols,
                            nb_re_dmrs * dmrs_len, grant->nb_rb_oh, grant->tb_scaling, cw->Nl);
   if (cw->TBS == 0) {
+    out->reason = "tbs_zero";
     return out->status;
   }
   cw->ldpcBaseGraph = get_BG(cw->TBS, cw->targetCodeRate);
@@ -980,6 +1116,7 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
   const uint32_t G = nr_get_G(freq_alloc->num_rbs, dlsch_config->number_symbols, nb_re_dmrs, dmrs_len,
                               0 /* unav_res: PTRS/CSI-RM excluded above */, cw->qamModOrder, cw->Nl);
   if (G == 0) {
+    out->reason = "g_zero";
     return out->status;
   }
 /* TBPARM probe (ISAC_PDSCH_TBPARM=1): every transport-block parameter the gNB also prints on its
@@ -1026,6 +1163,7 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
 
   if (!passive_harq_prepare(&g_harq, fp->N_RB_DL)) {
     out->status = NR_PDSCH_PASSIVE_DECODE_ERROR;
+    out->reason = "harq_prepare";
     return out->status;
   }
 
@@ -1074,6 +1212,7 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
           atomic_load_explicit(&nr_ue_diag_producer_absolute_slot, memory_order_relaxed),
           grant->source_absolute_slot, fp->slots_per_frame)) {
     out->status = NR_PDSCH_PASSIVE_DECODE_UNSUPPORTED;
+    out->reason = "stale_samples";
     return out->status; /* overwritten IQ is not CRC evidence */
   }
 
@@ -1127,6 +1266,7 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
     n_dmrs_sym++;
   }
   if (n_dmrs_sym == 0) {
+    out->reason = "no_dmrs_symbol";
     return out->status; // no DM-RS in the allocation: nothing to equalise against
   }
   /* nvar normalisation. ISAC_RX_NVAR_FIX=1 (opt-in, default OFF = bit-identical to before).
@@ -1338,24 +1478,30 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
           sfo_ppm = -(dphi / dk) / (2.0 * M_PI * df * dt_d) * 1.0e6;
         }
       }
-      const uint64_t dn = atomic_fetch_add(&s_dfo_n, 1);
-      s_cfo_ema = (dn == 0) ? cfo_hz : (0.99 * s_cfo_ema + 0.01 * cfo_hz);
-      s_sfo_ema = (dn == 0) ? sfo_ppm : (0.99 * s_sfo_ema + 0.01 * sfo_ppm);
-      g_sfo_ppm_ema = s_sfo_ema;  // published for the SFO correction stage
+      /* P07 branch view: the EMAs and the branch-FO table are PROCESS-WIDE, so feeding them from
+       * one branch's estimate would leak into every other branch's decode (and ISAC_SFO_CORRECT
+       * reads g_sfo_ppm_ema). In view mode the estimate is measured per job and NOT integrated or
+       * applied -- a per-branch tracker is P09's TLS/global audit, not silently shared here. */
+      const uint64_t dn = view_active() ? 0 : atomic_fetch_add(&s_dfo_n, 1);
+      if (!view_active()) {
+        s_cfo_ema = (dn == 0) ? cfo_hz : (0.99 * s_cfo_ema + 0.01 * cfo_hz);
+        s_sfo_ema = (dn == 0) ? sfo_ppm : (0.99 * s_sfo_ema + 0.01 * sfo_ppm);
+        g_sfo_ppm_ema = s_sfo_ema;  // published for the SFO correction stage
+      }
       static int s_apply = -1;
       if (s_apply < 0) {
         const char *e = getenv("ISAC_DMRS_FO_APPLY");
         s_apply = (e != NULL && atoi(e) != 0) ? 1 : 0;
       }
       {
-        if (s_apply) {
+        if (s_apply && !view_active()) {
           /* Digital de-rotation only, applied to every branch in common. NOT nrue_ru_set_freq(). */
           for (int a = 0; a < fp->nb_antennas_rx && a < NR_DL_CHEST_MAX_ANT; a++) {
             nr_ue_set_branch_fo_hz(a, -s_cfo_ema);
           }
         }
       }
-      if ((dn % 500) == 0) {
+      if (!view_active() && (dn % 500) == 0) {
         LOG_I(PHY,
               "SENSING: DMRSFO cfo=%+.1f Hz (ema %+.1f) sfo=%+.2f ppm (ema %+.2f) "
               "sym %d->%d n_sc=%u/%u coh=%.2f unambiguous=+/-%.0f Hz apply=%d\n",
@@ -1674,7 +1820,8 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
     s_sfo_corr = (e != NULL && atoi(e) != 0) ? 1 : 0;
   }
   double sfo_applied[NR_SYMBOLS_PER_SLOT] = {0};  // symbol-periods of rotation already applied, per slot
-  const double sfo_eps = s_sfo_corr ? (nr_pdsch_passive_sfo_ppm() * 1.0e-6) : 0.0;
+  // P07: the published EMA is process-wide (cross-branch); a branch view applies no correction from it.
+  const double sfo_eps = (s_sfo_corr && !view_active()) ? (nr_pdsch_passive_sfo_ppm() * 1.0e-6) : 0.0;
   const double sfo_tsym = (1.0e-3 / (double)fp->slots_per_subframe) / (double)fp->symbols_per_slot;
 
   const uint64_t pdt_dem = pdtim_on ? pdtim_now() : 0;
@@ -2079,11 +2226,14 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
     if (ldpc_ok) {
       out->status = NR_PDSCH_PASSIVE_DECODE_CRC_OK;
       out->tb     = g_harq.b;
+      out->reason = "crc_ok";
     } else {
       out->status = NR_PDSCH_PASSIVE_DECODE_CRC_FAIL;
+      out->reason = "crc_fail";
     }
   } else {
     out->status = NR_PDSCH_PASSIVE_DECODE_ERROR;
+    out->reason = "demod_error";
   }
 
   /* Per-RNTI outcome (ISAC_PDSCH_TBPARM=1). Run inside an ATTACHED UE this splits the decode

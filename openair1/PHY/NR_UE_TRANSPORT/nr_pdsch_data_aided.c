@@ -31,8 +31,10 @@
 
 /* Set by a DEFERRED caller to this job's monotonic absolute slot; 0 = derive from proc. */
 __thread uint64_t nr_isac_abs_slot_override = 0;
+__thread bool nr_isac_data_aided_force = false;
 
 #include <math.h>
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -48,6 +50,18 @@ __thread uint64_t nr_isac_abs_slot_override = 0;
 #include "executables/nr-uesoftmodem.h"
 #include "openair2/LAYER2/NR_MAC_COMMON/nr_mac_common.h"
 
+/* Transport blocks whose reconstruction reached the CFR submission stage (all guards passed and
+ * the RE enumeration matched the rate matcher). Counted once per TB regardless of how many
+ * sub-slot rows it was split into. The engine may still discard the row (not running, admission
+ * gate), so this counts what the DATA-AIDED PATH produced, which is the P07 G2 test-3 quantity:
+ * a branch's submissions must equal that branch's own CRC-OK count and nothing else's. */
+static _Atomic uint64_t g_data_submits = 0;
+
+uint64_t nr_isac_pdsch_data_aided_submits(void)
+{
+  return atomic_load_explicit(&g_data_submits, memory_order_relaxed);
+}
+
 void nr_isac_pdsch_data_aided_submit(PHY_VARS_NR_UE *ue,
                                      const UE_nr_rxtx_proc_t *proc,
                                      const fapi_nr_dl_cw_info_t *cw,
@@ -59,7 +73,9 @@ void nr_isac_pdsch_data_aided_submit(PHY_VARS_NR_UE *ue,
                                      const c16_t rxdataF[][ue->frame_parms.samples_per_slot_wCP],
                                      double nvar)
 {
-  if (!nr_isac_enabled() || !nr_isac_source_enabled(NR_ISAC_SRC_PDSCH_DATA))
+  /* P07 replay: nr_isac_data_aided_force runs the reconstruction even when the engine is not up
+   * (the row then dies inside nr_isac_submit_cfr_multi(), which is the intent -- see the .h). */
+  if (!nr_isac_data_aided_force && (!nr_isac_enabled() || !nr_isac_source_enabled(NR_ISAC_SRC_PDSCH_DATA)))
     return;
 
   /* SINGLE LAYER ONLY -- and this is a correctness guard, not a scope preference.
@@ -327,6 +343,9 @@ void nr_isac_pdsch_data_aided_submit(PHY_VARS_NR_UE *ue,
     return; // contribute nothing rather than corrupt the range profile
   }
 
+  atomic_fetch_add_explicit(&g_data_submits, 1, memory_order_relaxed);
+  // TODO(P10): the CFR ABI below has no branch identity slot; nr_isac_submit_cfr_multi() routes by
+  // source only. The job's branch_id/physical_channel stop at the caller until P10 extends it.
   nr_isac_carrier_t carrier = {.nof_prb         = (uint32_t)fp->N_RB_DL,
                                .scs_hz          = fp->subcarrier_spacing,
                                .dl_center_hz    = fp->dl_CarrierFreq,

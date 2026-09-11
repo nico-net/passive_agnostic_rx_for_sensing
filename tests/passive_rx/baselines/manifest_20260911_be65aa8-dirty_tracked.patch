@@ -1,3 +1,31 @@
+diff --git a/adaptive_RX_pipeline_progress.md b/adaptive_RX_pipeline_progress.md
+index eecf7387d6..ab8152461d 100644
+--- a/adaptive_RX_pipeline_progress.md
++++ b/adaptive_RX_pipeline_progress.md
+@@ -1191,3 +1191,23 @@ For optional UL comparisons, list every 2-RX pair, 3-RX triple and 4-RX set for
+ - Distinguish existing source blocks from newly validated four-branch behavior.
+ - Keep optional UL completion separate from required DL pipeline completion.
+ - No full completion claim until all required gates have dated, reviewable evidence.
++
++## nr-ue.c audit and commit (2026-09-11)
++
++Audited the uncommitted `executables/nr-ue.c` diff (7 hunks, +29/-3, from the 2026-09-10 manual DL/UL
++port; `nr-ue-ru.c` read as context only, not committed). Committed as `be65aa8764c3`, that one file only.
++
++| Hunk | What it does | Verdict |
++|---|---|---|
++| readFrame short read | short/failed read -> `oai_exit=1`, free trash buf, return (no acquisition on partial IQ) | OK; CONCERN: all modes, not passive-only (no-op on rfsim, which always returns nsamps); no early-out on entry, so warm-up loop may re-read a dead radio up to 49x before exit |
++| syncInFrame | `return` when `oai_exit` after read | OK |
++| UE_thread acquisition | `break` after readFrame if `oai_exit` | OK |
++| first-symbol read after sync | `break` on `oai_exit || ret<0` | OK |
++| slot read | `break` on `oai_exit || tmp<0` before RXDISCONT test/dispatch | OK |
++| next-frame symbol read | same guard | OK |
++| RFSTALL exit | `oai_exit=1; nrue_ru_stop(); nrue_ru_end();` before `exit(3)` | OK (`trx_usrp_end` idempotent); CONCERN: attached mode only -- a UL actor writing between `nrue_ru_end` and `exit(3)` would deref `priv==NULL`; also `nrue_ru_end` may block for UHD RPC timeouts on a dead claim (bounded, try/catch) |
++
++Compile-level: `nrue_ru_stop/end/read` signatures match `nr-ue-ru.h`, header included, `oai_exit` via
++`softmodem-common.h`; no build run (another agent may be building / capture may be live). The live
++manual-profile capture (`sensing_manual_fixed.UtvBT7`) covers compilation and the happy path of the read
++guards in `--passive-rx`; it does NOT exercise the error branches, attached mode, or rfsim.
 diff --git a/executables/nr-ue-ru.c b/executables/nr-ue-ru.c
 index 4dbbd6b617..9603f75c0d 100644
 --- a/executables/nr-ue-ru.c
@@ -47,91 +75,6 @@ index 4dbbd6b617..9603f75c0d 100644
    if (!dev->firstTS_initialized) {
      dev->firstTS = tmp_timestamp;
      dev->firstTS_initialized = true;
-diff --git a/executables/nr-ue.c b/executables/nr-ue.c
-index 51e2004092..b62570d83c 100644
---- a/executables/nr-ue.c
-+++ b/executables/nr-ue.c
-@@ -806,8 +806,14 @@ void readFrame(PHY_VARS_NR_UE *UE, openair0_timestamp_t *timestamp, int duration
-       int readBlockSize = get_samples_per_slot(slot_rx, fp);
-       int tmp = nrue_ru_read(UE, timestamp, (void **)rxp, readBlockSize, fp->nb_antennas_rx);
-       UEscopeCopy(UE, ueTimeDomainSamplesBeforeSync, rxp[0], sizeof(c16_t), 1, readBlockSize, 0);
--      if (readBlockSize != tmp)
--        LOG_W(PHY, "readFrame: got %d of %d RF samples\n", tmp, readBlockSize);
-+      if (readBlockSize != tmp) {
-+        if (!oai_exit)
-+          LOG_E(PHY, "SENSING: RFSTALL readFrame got %d of %d RF samples; no acquisition on incomplete IQ\n", tmp, readBlockSize);
-+        oai_exit = 1;
-+        if (toTrash)
-+          free(rxp[0]);
-+        return;
-+      }
- 
-       if (IS_SOFTMODEM_RFSIM) {
-         int slot_tx = (slot_rx + duration_rx_to_tx) % fp->slots_per_frame;
-@@ -937,6 +943,8 @@ static void syncInFrame(PHY_VARS_NR_UE *UE, openair0_timestamp_t *timestamp, int
-     // Set a maximum transfer size. As we usually read/write single slots, we use the size of slot 0 as maximum here.
-     const int unitTransfer = min(get_samples_per_slot(0, fp), size);
-     const int res = nrue_ru_read(UE, timestamp, (void **)UE->common_vars.rxdata, unitTransfer, fp->nb_antennas_rx);
-+    if (oai_exit)
-+      return;
-     if (res <= 0) {
-       LOG_W(PHY, "Unable to read RF samples while resynchronizing\n");
-       break;
-@@ -1110,6 +1118,8 @@ void *UE_thread(void *arg)
-         UE->max_pos_acc = 0;
-       UE->max_pos_iir = 0;
-       readFrame(UE, &sync_timestamp, duration_rx_to_tx, false);
-+      if (oai_exit)
-+        break;
-       notifiedFIFO_elt_t *Msg = newNotifiedFIFO_elt(sizeof(syncData_t), 0, &nf, UE_synch);
-       syncData_t *syncMsg = (syncData_t *)NotifiedFifoData(Msg);
-       *syncMsg = (syncData_t){0};
-@@ -1235,6 +1245,8 @@ void *UE_thread(void *arg)
-                              (void **)UE->common_vars.rxdata,
-                              fp->ofdm_symbol_size + fp->nb_prefix_samples0,
-                              fp->nb_antennas_rx);
-+      if (oai_exit || ret < 0)
-+        break;
-       if (fp->ofdm_symbol_size + fp->nb_prefix_samples0 != ret)
-         LOG_W(PHY, "Initial symbol: got %d RF samples\n", ret);
-       // we have the decoded frame index in the return of the synch process
-@@ -1385,6 +1397,10 @@ void *UE_thread(void *arg)
-     const int readBlockSize = get_readBlockSize(slot_nr, fp) - iq_shift_to_apply;
-     openair0_timestamp_t rx_timestamp;
-     int tmp = nrue_ru_read(UE, &rx_timestamp, (void **)rxp, readBlockSize, fp->nb_antennas_rx);
-+    /* A cancelled read has no timestamp. Do not classify it as RF discontinuity
-+     * or publish it to the decoder/detector while shutdown is in progress. */
-+    if (oai_exit || tmp < 0)
-+      break;
-     {
-       struct timespec diag_ts;
-       clock_gettime(CLOCK_REALTIME, &diag_ts);
-@@ -1511,6 +1527,8 @@ void *UE_thread(void *arg)
-       if (first_symbols > 0) {
-         openair0_timestamp_t ignore_timestamp;
-         int tmp = nrue_ru_read(UE, &ignore_timestamp, (void **)UE->common_vars.rxdata, first_symbols, fp->nb_antennas_rx);
-+        if (oai_exit || tmp < 0)
-+          break;
-         /* This read MUST be counted. It is an EXTRA read on top of readBlockSize, so leaving it out
-          * makes the next iteration's expected timestamp short by exactly first_symbols and the
-          * RXDISCONT continuity test above fires on every frame boundary -- a false positive, not an
-@@ -1946,7 +1964,15 @@ void *UE_thread(void *arg)
-                * level that still produces plausible-looking noise decodes, so continuing would
-                * silently corrupt the capture -- which is exactly how this fault stayed hidden. A
-                * supervisor can restart the run; a contaminated result cannot be fixed afterwards. */
--              LOG_E(PHY, "SENSING: RFSTALL -- stopping capture (exit 3); restart the run\n");
-+              LOG_E(PHY, "SENSING: RFSTALL -- stopping capture (exit 3); releasing radio before exit\n");
-+              /* This is the RX owner, outside trx_read_func(). Stop accepting
-+               * work and release UHD handles before exiting. exit(3) alone
-+               * skips destruction of the heap-owned radio and its streamers.
-+               * Do not use exit_function(): it converts normal exits to zero. */
-+              oai_exit = 1;
-+              nrue_ru_stop();
-+              nrue_ru_end();
-+              LOG_I(PHY, "USRP_RFSTALL_CLEANUP_COMPLETE exit=3\n");
-               exit(3);
-             }
-           }
 diff --git a/openair1/PHY/NR_UE_TRANSPORT/nr_initial_sync.c b/openair1/PHY/NR_UE_TRANSPORT/nr_initial_sync.c
 index 9ad869cad5..4d66245b8b 100644
 --- a/openair1/PHY/NR_UE_TRANSPORT/nr_initial_sync.c
@@ -157,39 +100,6 @@ index 9ad869cad5..4d66245b8b 100644
  
      if (ssbInfo->syncRes.cell_detected) { // we got sss channel
        ssbInfo->syncRes.cell_detected = nr_pbch_detection(ssbInfo->proc,
-diff --git a/openair1/PHY/NR_UE_TRANSPORT/nr_passive_replay_capture.c b/openair1/PHY/NR_UE_TRANSPORT/nr_passive_replay_capture.c
-index 9e705431e3..f0536022ac 100644
---- a/openair1/PHY/NR_UE_TRANSPORT/nr_passive_replay_capture.c
-+++ b/openair1/PHY/NR_UE_TRANSPORT/nr_passive_replay_capture.c
-@@ -105,6 +105,8 @@ void nr_passive_replay_init(PHY_VARS_NR_UE *ue)
-   if (!path || !*path) return;
-   const NR_DL_FRAME_PARMS *fp=&ue->frame_parms;
-   size_t bytes=(size_t)REPLAY_FRAMES*fp->samples_per_frame*fp->nb_antennas_rx*sizeof(c16_t);
-+  LOG_I(PHY,"REPLAY geometry nb_ant=%u samples_per_frame=%u slots_per_frame=%u bytes=%zu\n",
-+        fp->nb_antennas_rx, fp->samples_per_frame, fp->slots_per_frame, bytes);
-   if (!fp->nb_antennas_rx || fp->nb_antennas_rx>4 || !bytes || bytes>REPLAY_MAX_BYTES
-       || !fp->slots_per_frame || fp->slots_per_frame>160) {
-     LOG_E(PHY,"REPLAY VOID: geometry exceeds bounded recorder\n"); return;
-@@ -200,13 +202,16 @@ void nr_passive_replay_dl(const nr_pdsch_passive_job_t *job,
-   if (atomic_load(&state)==RP_DISABLED) return;
-   const bool success=result->status==NR_PDSCH_PASSIVE_DECODE_CRC_OK && result->tb;
-   const bool failures=header->version>=2;
--  if(!success && !(failures && job->sweep_ticket.settled &&
-+  /* Manual mode (TESTING MODE RULE): the layout is fixed, not swept, so generation==0 means
-+   * "no sweep in progress, already settled" -- treat it exactly like a settled ticket. */
-+  if(!success && !(failures && (job->sweep_ticket.generation==0 || job->sweep_ticket.settled) &&
-                   result->status==NR_PDSCH_PASSIVE_DECODE_CRC_FAIL))
-     return;
--  if (success && job->sweep_ticket.generation && (!failures || job->sweep_ticket.settled)
-+  if (success && (job->sweep_ticket.generation==0 || !failures || job->sweep_ticket.settled)
-       && atomic_load(&ul_seen)) {
-     int expected=RP_ARMED;
--    atomic_compare_exchange_strong(&state,&expected,RP_REQUESTED);
-+    if (atomic_compare_exchange_strong(&state,&expected,RP_REQUESTED))
-+      LOG_I(PHY,"REPLAY ARMED at absolute_slot=%ld\n",job->absolute_slot);
-   }
-   pthread_mutex_lock(&record_lock);
-   if (recordable(job->absolute_slot) && header->n_dl<REPLAY_DL) {
 diff --git a/openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c b/openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c
 index de66232138..a1a016f5fa 100644
 --- a/openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c
@@ -212,32 +122,6 @@ index de66232138..a1a016f5fa 100644
    } else {
      LOG_I(PHY, "SENSING: blind PDCCH config deferred to CSS0 autoconf; DCI-1_1 width reconciliation "
                 "not applicable (autoconf scans DCI format 1_0 only)\n");
-diff --git a/openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c b/openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c
-index c64ed215a5..50c313c71c 100644
---- a/openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c
-+++ b/openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c
-@@ -1736,10 +1736,19 @@ constdiag_done:;
-       g_ul_sched++;
-       /* rnti is written only after the in-range CRC check, so non-zero IS that check. */
-       if (cand_task[ti].ul_out.rnti != 0) g_ul_crc_hit++;
--      if(cand_task[ti].ok && cand_task[ti].ul_auto) {
--        g_ul_disc_call++;
-+      /* Manual mode (TESTING MODE RULE): record replay evidence for every ACCEPTED UL
-+       * candidate, not only full-auto ones. ul_auto below gates DISCOVERY (re-interpreting the
-+       * payload via a blind length/field search), not whether an accepted candidate is real --
-+       * boot_rnti/dci01_length/ul_out.raw_payload are all populated identically in the manual
-+       * (pinned) path (nr_pdcch_blind_monitor_rt.c:1071-1074, :1452-1460, :555-556). Coupling the
-+       * recording call to ul_auto left the passive-replay recorder permanently UL-blind in manual
-+       * mode (ul_seen never becomes true), independently of the DL sweep_ticket fix above. */
-+      if (cand_task[ti].ok) {
-         nr_passive_replay_ul(source_absolute_slot, boot_rnti, dci01_length,
-                              cand_task[ti].ul_out.raw_payload);
-+      }
-+      if(cand_task[ti].ok && cand_task[ti].ul_auto) {
-+        g_ul_disc_call++;
-         nr_pdcch_blind_ul_result_t discovered;
-         cand_task[ti].ok=nr_pdcch_ul_discovery_grant(&ul_opts,dci01_length,boot_rnti,
-                                                     cand_task[ti].ul_out.raw_payload,&discovered);
 diff --git a/radio/USRP/usrp_lib.cpp b/radio/USRP/usrp_lib.cpp
 index c9b2122c59..b5c8c3009f 100644
 --- a/radio/USRP/usrp_lib.cpp
@@ -618,183 +502,6 @@ index c9b2122c59..b5c8c3009f 100644
      device->priv = NULL;
    }
    return -1;
-diff --git a/tests/passive_rx/baselines/fixtures.json b/tests/passive_rx/baselines/fixtures.json
-index 4dbbb4e3db..0b4eba5403 100644
---- a/tests/passive_rx/baselines/fixtures.json
-+++ b/tests/passive_rx/baselines/fixtures.json
-@@ -7,8 +7,56 @@
-   "commit_at_generation": "e4c8cadd5f22b40605f82f6adedc838ee8e056f5",
-   "current_build_nr_uesoftmodem_sha256": "b064c9957bc1b68d717543eb2bac28c4b2616115bc675f5fed38685f008742fe",
-   "manifest_reference": "tests/passive_rx/baselines/manifest_20260910_6fcb7a6-dirty.json",
--  "status": "BLOCKED",
--  "admissible_fixtures": [],
-+  "status": "PASS",
-+  "admissible_fixtures": [
-+    {
-+      "path": "/home/sens/NICOLA/captures/sensing_manual_fixed.UtvBT7",
-+      "replay_bin_sha256": "ea24da3ea3a9563b28e996adb870f195a2c7ecfe1992f97dd60ae0bee31bd761",
-+      "receiver_conf_sha256": "5022d875a26f1ec235ee209b1ff04ef3031290c149399702b7ef63d0c3a381ef",
-+      "run_log_sha256": "e56cfa261d27f5e1fbba5a1553096c57fad900765a34570add140a0000cf319c",
-+      "producing_binary_sha256": "c3810019905f3fb661138d12fd5b9b6156d47e36344ae871f08047ba65dc7889",
-+      "producing_liboai_usrpdevif_sha256": "ad0a71c56dbc509149337460af7d0e97c64d4f390f85bec48b8882aa64f64583",
-+      "commit_at_capture": "b90276ded4b421927cfdb2d080068900488ed53a (plus this session's uncommitted DL+UL recorder fixes -- see resolution_summary; committed in this same fix-round-2 commit)",
-+      "full_auto": 0,
-+      "header": {
-+        "magic_match": true,
-+        "version": 2,
-+        "header_bytes": 1695728,
-+        "job_bytes": 384,
-+        "fp_bytes": 1400752,
-+        "iq_bytes": 314572800,
-+        "start": 8880,
-+        "slots": 320,
-+        "n_ul": 24,
-+        "n_dl_records": 38,
-+        "dl_records_success_tb_bytes_gt0": 34,
-+        "dl_records_failure_tb_bytes_eq0": 4,
-+        "file_bytes_match": true
-+      },
-+      "capture": {
-+        "command": "sudo -n env REPLAY=1 DURATION=180 MONITOR_PORT=8096 bash tests/passive_rx/run_manual_x410.sh",
-+        "validity": "RF_VALID_REQUIRES_DL_UL_CRC_EVIDENCE",
-+        "stop_reason": "DURATION_COMPLETE",
-+        "process_exit": 0,
-+        "cleanup_status": "CLEAN",
-+        "sib1_common_facts_count": 1,
-+        "rxdiscont_count": 0,
-+        "rfstall_count": 0,
-+        "nic_missed_before": 27607564,
-+        "nic_missed_after": 27607564,
-+        "replay_armed_line": "REPLAY ARMED at absolute_slot=8852",
-+        "replay_ready_line": "REPLAY READY: .../replay.bin slots=320 UL=24 DL-controls=38 IQ=314572800 bytes"
-+      },
-+      "replay_verification": {
-+        "command": "sudo -n env ISAC_PASSIVE_REPLAY_INPUT=<fixture>/replay.bin LD_LIBRARY_PATH=$(pwd):/usr/local/lib ./nr-uesoftmodem -O <fixture>/receiver.conf -r 273 --numerology 1 --band 78 -C 3450000000 --ssb 150 --ue-rxgain 40 --ue-nb-ant-rx 4 --ue-nb-ant-tx 4 --passive-rx --ue-fo-compensation --cont-fo-comp 1 --freq-sync-P 0.05 --freq-sync-I 0.001 --initial-fo -16480 --thread-pool 0,1,6,7 --time-sync-I 0.01 --ntn-initial-time-drift -4.25 -A 90",
-+        "no_radio_opened": true,
-+        "verdict_line": "REPLAY PASS: identical DL controls=34 failed=0 raw UL=24; no radio opened",
-+        "exit_code": 0,
-+        "wall_time_s": 4.463,
-+        "no_ground_truth_timing_used": "Verified by reading nr_passive_replay_read() (nr_passive_replay_capture.c:225-303): the replay path consumes only the file's own recorded header/IQ/job metadata (source-index continuity check at :266-269, per-slot FO override at nr_slot_fep_fo_override_hz) -- no gNB log, no GT file, no wall-clock alignment of any kind is opened or read anywhere in this function or its callee nr_pdsch_passive_decode()."
-+      }
-+    }
-+  ],
-   "blocker": {
-     "summary": "No admissible fixture exists. The 22 pre-existing replay.bin captures were all produced by another tree/binary AND all used pdcch_blind_monitor_full_auto=1 (VOID under the plan's TESTING MODE RULE). A new bounded capture was collected with the current binary through the manual launcher in the required full_auto=0 manual mode (see new_capture_attempts[1]) and is RF-valid (SIB1 seen, DL crc_ok 91.8%, UL crc_ok 83.2%, clean exit, no RXDISCONT/RFSTALL, binary matches the current build) -- but it produced NO replay.bin, and this is a structural, deterministic property of the current recorder code under manual mode, not RF variance: further capture attempts cannot change the outcome.",
-     "root_cause": "nr_passive_replay_capture.c's nr_passive_replay_dl() only arms the recorder (RP_ARMED -> RP_REQUESTED) when a successful DL job carries job->sweep_ticket.generation != 0 (nr_passive_replay_capture.c:206-210, condition checked at line 206). sweep_ticket is populated ONLY inside the block gated by `if (g_pdsch_sweep_on && !is_dci10)` (nr_pdcch_blind_monitor_rt.c:2100-2107); outside that block every job's sweep_ticket is left zero-initialized (nr_pdcch_blind_monitor_rt.c:2098, `nr_pdsch_sweep_ticket_t sweep_ticket = {0};`). g_pdsch_sweep_on is set in pdsch_sweep_maybe_enable() to `ready = cfg->dl_full_auto && (...)` (nr_pdcch_blind_monitor_rt.c:164-184) -- i.e. it can only be true when pdcch_blind_monitor_full_auto=1. Under the plan's mandatory manual mode (pdcch_blind_monitor_full_auto=0, adaptive_manual_dlul.conf), cfg->dl_full_auto is always false, so g_pdsch_sweep_on is always false, so sweep_ticket.generation is always 0 for every DL job, so the recorder can never leave RP_ARMED and replay.bin is never written -- proven by reading the single call site of nr_pdsch_config_sweep_select() (nr_pdcch_blind_monitor_rt.c:2108, the only place sweep_ticket.generation is ever assigned a nonzero value), not inferred from this run alone.",
-@@ -39,7 +87,8 @@
-       }
-     ],
-     "why_not_fixed_here": "P02's mandate is a narrow launcher opt-in (REPLAY=1 env passthrough) plus fixture audit/registration/checker infrastructure, not a change to production PDCCH/replay decode logic. Relaxing the arm condition for manual mode is a real design decision (what does 'settled' mean for a job with no sweep at all?) belonging to whoever owns nr_passive_replay_capture.c / nr_pdcch_blind_monitor_rt.c, and the plan explicitly forbids tuning code/config to manufacture a pass. Reported here as BLOCKED rather than patched.",
--    "attempts_exhausted_early": "ATTEMPTS is capped at 3 per the brief, but only 2 were used: attempt 1 was VOID_RF_OR_ASSERT (RFSTALL overflow at USRP_RX_START, zero SIB1 -- ordinary cold-start RF variance) and attempt 2 was RF-valid but structurally cannot produce a replay.bin per root_cause above. A 3rd attempt would re-run the identical deterministic code path and cannot produce a different outcome; running it anyway would be indistinguishable from tuning/retrying to force a pass, which the plan forbids."
-+    "attempts_exhausted_early": "ATTEMPTS is capped at 3 per the brief, but only 2 were used: attempt 1 was VOID_RF_OR_ASSERT (RFSTALL overflow at USRP_RX_START, zero SIB1 -- ordinary cold-start RF variance) and attempt 2 was RF-valid but structurally cannot produce a replay.bin per root_cause above. A 3rd attempt would re-run the identical deterministic code path and cannot produce a different outcome; running it anyway would be indistinguishable from tuning/retrying to force a pass, which the plan forbids.",
-+    "status_note": "RESOLVED in fix round 2 -- see resolution_summary and admissible_fixtures[0]. Kept below as the historical root-cause record for the DL-side gate; the UL-side gate (found and fixed in round 2) is documented in resolution_summary, not duplicated here."
-   },
-   "new_capture_attempts": [
-     {
-@@ -78,6 +127,54 @@
-       "replay_bin_produced": false,
-       "replay_log_lines_found": 0,
-       "note": "RF-valid, DL/UL CRC evidence present, full_auto=0 confirmed in receiver.conf, binary matches current build -- but ISAC_PASSIVE_REPLAY_CAPTURE never armed (zero occurrences of the string 'replay' anywhere in run.log, case-insensitive). See blocker.root_cause."
-+    },
-+    {
-+      "attempt": "fix-round-1, #1",
-+      "path": "/home/sens/NICOLA/captures/sensing_manual_fixed.3NB5Ri",
-+      "command": "sudo -n env REPLAY=1 DURATION=180 MONITOR_PORT=8092 bash tests/passive_rx/run_manual_x410.sh",
-+      "binary_sha256": "b81b21e37dae9ad4666319274a6e32134055329eec150af3c75af4a89578c5d7",
-+      "validity": "RF_VALID_REQUIRES_DL_UL_CRC_EVIDENCE",
-+      "sib1_common_facts_count": 1,
-+      "replay_bin_produced": false,
-+      "note": "DL sweep_ticket gate fixed (round 1) but UL ul_auto gate not yet found -- ul_seen never true, recorder stuck at RP_ARMED."
-+    },
-+    {
-+      "attempt": "fix-round-1, #2",
-+      "path": "/home/sens/NICOLA/captures/sensing_manual_fixed.JLDoZc",
-+      "command": "sudo -n env REPLAY=1 DURATION=180 MONITOR_PORT=8093 bash tests/passive_rx/run_manual_x410.sh",
-+      "binary_sha256": "b81b21e37dae9ad4666319274a6e32134055329eec150af3c75af4a89578c5d7",
-+      "validity": "VOID_RF_OR_ASSERT",
-+      "sib1_common_facts_count": 1,
-+      "replay_bin_produced": false,
-+      "note": "RFSTALL (UHD ERROR_CODE_OVERFLOW) at t=157.27s, ordinary late-run RF variance, unrelated to the replay recorder. Used live /proc/<pid>/environ inspection during this run to independently confirm ISAC_PASSIVE_REPLAY_CAPTURE/FAILURES do reach the process."
-+    },
-+    {
-+      "attempt": "diagnostic (not counted against the 2-attempt cap; instrumented build, DURATION=30)",
-+      "path": "/home/sens/NICOLA/captures/sensing_manual_fixed.LH2I9w",
-+      "binary_sha256": "5745d305dcb0a1afeab0942801a9f59575a02955ce135aee749bc8ab816b08e5",
-+      "validity": "RF_VALID_REQUIRES_DL_UL_CRC_EVIDENCE",
-+      "sib1_common_facts_count": 1,
-+      "replay_bin_produced": false,
-+      "note": "First diagnostic build (temporary LOG_A instrumentation, reverted before commit). Showed dl#1-20 with success=1 repeatedly but ul_seen=0 always -- the exact evidence the controller cited in the round-2 ruling."
-+    },
-+    {
-+      "attempt": "diagnostic (not counted against the 2-attempt cap; instrumented build, DURATION=60)",
-+      "path": "/home/sens/NICOLA/captures/sensing_manual_fixed.Ma654f",
-+      "binary_sha256": "74d2b8189241e096c90b7bb7635a44ef7460fe919a8ca3905f9f54f29e0f36c0",
-+      "validity": "RF_VALID_REQUIRES_DL_UL_CRC_EVIDENCE",
-+      "sib1_common_facts_count": 1,
-+      "replay_bin_produced": false,
-+      "note": "Second diagnostic build (one-shot first-UL-seen log added). 'first UL seen' NEVER printed in 60s despite PDSCHQ decoded=7644/crc_ok=7050 and pusch_passive try=6114/crc_ok=5010 -- proved nr_passive_replay_ul() was never called at all, root-causing the UL gate at nr_pdcch_blind_monitor_rt.c:1738-1742 (ul_auto-gated call site)."
-+    },
-+    {
-+      "attempt": "fix-round-2 (final, both DL+UL fixes, diagnostics trimmed to the two permanent lines)",
-+      "path": "/home/sens/NICOLA/captures/sensing_manual_fixed.UtvBT7",
-+      "command": "sudo -n env REPLAY=1 DURATION=180 MONITOR_PORT=8096 bash tests/passive_rx/run_manual_x410.sh",
-+      "binary_sha256": "c3810019905f3fb661138d12fd5b9b6156d47e36344ae871f08047ba65dc7889",
-+      "validity": "RF_VALID_REQUIRES_DL_UL_CRC_EVIDENCE",
-+      "sib1_common_facts_count": 1,
-+      "replay_bin_produced": true,
-+      "note": "SUCCESS. REPLAY ARMED at absolute_slot=8852; REPLAY READY slots=320 UL=24 DL-controls=38 IQ=314572800 bytes. Registered as admissible_fixtures[0]."
-     }
-   ],
-   "pre_existing_captures_considered": [
-@@ -521,5 +618,7 @@
-         "receiver.conf pdcch_blind_monitor_full_auto=1 (VOID under TESTING MODE RULE)"
-       ]
-     }
--  ]
-+  ],
-+  "resolved_utc": "2026-09-11T07:58:00Z",
-+  "resolution_summary": "P02 fix round 2 (controller ruling): two structural gates in the passive-replay recorder both coupled arming to full-auto-only code paths, making it permanently unreachable under the plan's mandatory manual mode (pdcch_blind_monitor_full_auto=0). DL gate fixed in nr_passive_replay_capture.c's nr_passive_replay_dl() (round 1): sweep_ticket.generation==0 (manual mode, no sweep) now treated as an already-settled ticket. UL gate fixed in nr_pdcch_blind_monitor_rt.c's UL candidate loop (round 2, found via live LOG_I instrumentation on capture sensing_manual_fixed.LH2I9w/Ma654f): nr_passive_replay_ul() was called only inside `if(cand_task[ti].ok && cand_task[ti].ul_auto)`, so ul_seen never became true in manual mode; moved to fire on `if (cand_task[ti].ok)` alone, independent of ul_auto. With both fixes, capture sensing_manual_fixed.UtvBT7 (binary c3810019905f3fb661138d12fd5b9b6156d47e36344ae871f08047ba65dc7889) produced 'REPLAY READY ... slots=320 UL=24 DL-controls=38' and replay-verified 'REPLAY PASS: identical DL controls=34 failed=0 raw UL=24; no radio opened' (exit 0, 4.463s wall). This is the fixture registered below."
- }
-\ No newline at end of file
-diff --git a/tests/passive_rx/check_manifest.py b/tests/passive_rx/check_manifest.py
-index a0a05ca3e7..c834937201 100644
---- a/tests/passive_rx/check_manifest.py
-+++ b/tests/passive_rx/check_manifest.py
-@@ -18,8 +18,9 @@ Usage:
-                                               selected_test_conf full_auto=1 fails, (e) a copy with
-                                               one citation's line range shifted fails, (f) a
-                                               synthetic single-fixture registry passes, an altered
--                                              hash in it fails, and the shipped (empty) P02
--                                              fixtures.json fails.
-+                                              hash in it fails, and the shipped P02 fixtures.json
-+                                              passes (it carries >=1 registered admissible fixture
-+                                              as of fix round 2).
- """
- import glob
- import hashlib
-@@ -451,15 +452,18 @@ def selftest():
-             os.unlink(os.path.join(fx_dir, fname))
-         os.rmdir(fx_dir)
- 
-+    # P02 fix round 2: the shipped fixtures.json is now RESOLVED (>=1 admissible fixture, see
-+    # tests/passive_rx/baselines/fixtures.json's resolution_summary) -- this case therefore
-+    # expects PASS, not FAIL. Before the fix it legitimately expected FAIL (empty registry); the
-+    # assertion direction tracks the file's actual state rather than being pinned to history.
-     shipped_fixtures_path = os.path.join(SCRIPT_DIR, "baselines", "fixtures.json")
-     if os.path.isfile(shipped_fixtures_path):
-         reasons_f3 = check_fixtures(shipped_fixtures_path)
--        passed_f3 = bool(reasons_f3)
--        print(f"(f3) shipped fixtures.json expected FAIL (no admissible fixture registered yet): "
--              f"{'PASS' if passed_f3 else 'FAIL (checker accepted an empty registry)'}")
-+        passed_f3 = not reasons_f3
-+        print(f"(f3) shipped fixtures.json expected PASS (>=1 admissible fixture registered): "
-+              f"{'PASS' if passed_f3 else 'FAIL'}")
-         if not passed_f3:
-             ok = False
--        else:
-             for line in reasons_f3:
-                 print("    " + line)
-     else:
 diff --git a/tests/passive_rx/monitor/monitor.html b/tests/passive_rx/monitor/monitor.html
 index 7f7afc8754..522244e80a 100644
 --- a/tests/passive_rx/monitor/monitor.html

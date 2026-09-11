@@ -2166,6 +2166,8 @@ constdiag_done:;
       job.gNB_id        = proc->gNB_id;
       job.absolute_slot = source_absolute_slot;
       job.rnti          = out.rnti;
+      job.branch_id     = 0; // P07: legacy identity until P06 assigns branches per grant stream
+      job.physical_channel = 0;
       job.harq_pid_tag  = blind_harq_tag(abs_slot, out.rnti, out.harq_pid);
       job.want_data     = want_data;
       job.fo_hz         = isnan(nr_slot_fep_fo_override_hz)
@@ -2348,6 +2350,8 @@ constdiag_done:;
               /* Preserve the original RF slot across PDCCH -> PDSCH deferral. */
               job.absolute_slot = source_absolute_slot;
               job.rnti          = out.rnti;
+              job.branch_id     = 0; // P07: legacy identity until P06 assigns branches per grant stream
+              job.physical_channel = 0;
               job.harq_pid_tag  = blind_harq_tag(abs_slot, out.rnti, out.harq_pid);
               job.want_data     = want_data;
               job.fo_hz         = isnan(nr_slot_fep_fo_override_hz)

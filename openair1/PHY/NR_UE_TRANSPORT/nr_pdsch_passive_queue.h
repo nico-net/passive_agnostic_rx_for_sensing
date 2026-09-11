@@ -93,6 +93,13 @@ typedef struct {
   int      gNB_id;        ///< nr_pdsch_data_aided.c: frame_rx, nr_slot_rx, gNB_id and nothing else)
   long     absolute_slot; ///< producer clock at capture: what the staleness check compares against
   uint16_t rnti;
+  /// P07 branch identity (adaptive_RX_pipeline.md): which P03 branch this job belongs to and the
+  /// physical channel its samples come from. 0/0 in legacy mode. Deliberately placed in the two
+  /// padding bytes between rnti and harq_pid_tag so sizeof() is unchanged (the P02 replay fixture
+  /// checks job_bytes == sizeof). Recorded fixtures predate these fields: the replay overwrites
+  /// them from its own view resolution and never trusts the recorded bytes.
+  uint8_t  branch_id;
+  int8_t   physical_channel;
   /// nrLDPC_coding_interface harq_unique_pid, ALREADY namespaced by the producer (3000 + harq_pid
   /// for this path). uint32_t, not uint8_t: the base is 3000, and truncating it to 8 bits would
   /// alias the attached-UE (1000+) and CSI (2000+) namespaces that must stay disjoint so a hardware

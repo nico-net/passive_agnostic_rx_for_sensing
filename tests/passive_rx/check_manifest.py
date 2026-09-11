@@ -18,9 +18,11 @@ Usage:
                                               selected_test_conf full_auto=1 fails, (e) a copy with
                                               one citation's line range shifted fails, (f) a
                                               synthetic single-fixture registry passes, an altered
-                                              hash in it fails, and the shipped P02 fixtures.json
-                                              passes (it carries >=1 registered admissible fixture
-                                              as of fix round 2).
+                                              hash in it fails, a fixture from an older producing
+                                              binary passes only when the live binary is listed in
+                                              verified_with_binary_sha256 (P07), and the shipped
+                                              P02 fixtures.json passes (it carries >=1 registered
+                                              admissible fixture as of fix round 2).
 """
 import glob
 import hashlib
@@ -296,11 +298,17 @@ def check_fixtures(fixtures_path):
             if live != recorded:
                 reasons.append(f"{label}: {fname} sha256 registered={recorded} live={live}")
 
+        # P07: the fixture stays attributed to the binary that PRODUCED it; later binaries that
+        # re-verified it (replay still PASS) are listed under verified_with_binary_sha256 (string or
+        # list). The live build must be one of them -- never overwrite producing_binary_sha256.
         recorded_bin = fx.get("producing_binary_sha256")
-        if recorded_bin != live_bin_sha:
+        verified = fx.get("verified_with_binary_sha256") or []
+        if isinstance(verified, str):
+            verified = [verified]
+        if live_bin_sha != recorded_bin and live_bin_sha not in verified:
             reasons.append(
-                f"{label}: producing_binary_sha256 registered={recorded_bin!r} "
-                f"live_current_build={live_bin_sha!r}")
+                f"{label}: live_current_build={live_bin_sha!r} is neither producing_binary_sha256="
+                f"{recorded_bin!r} nor in verified_with_binary_sha256={verified!r}")
 
         fa = fx.get("full_auto")
         if fa != 0:
@@ -447,6 +455,29 @@ def selftest():
         if not passed_f2:
             ok = False
         os.unlink(bad_path)
+
+        # (f4) P07: a fixture produced by an OLDER binary but re-verified with the live one must
+        # PASS through verified_with_binary_sha256; the same registry WITHOUT that field must FAIL.
+        old_registry = json.loads(json.dumps(good_registry))
+        old_registry["admissible_fixtures"][0]["producing_binary_sha256"] = "1" * 64
+        fd, old_path = tempfile.mkstemp(suffix=".json")
+        with os.fdopen(fd, "w") as fh:
+            json.dump(old_registry, fh)
+        reasons_f4a = check_fixtures(old_path)
+        os.unlink(old_path)
+        old_registry["admissible_fixtures"][0]["verified_with_binary_sha256"] = [live_bin_sha]
+        fd, old_path = tempfile.mkstemp(suffix=".json")
+        with os.fdopen(fd, "w") as fh:
+            json.dump(old_registry, fh)
+        reasons_f4b = check_fixtures(old_path)
+        os.unlink(old_path)
+        passed_f4 = bool(reasons_f4a) and not reasons_f4b
+        print(f"(f4) older producing binary: expected FAIL without / PASS with verified_with_binary_sha256: "
+              f"{'PASS' if passed_f4 else 'FAIL'}")
+        if not passed_f4:
+            ok = False
+            for line in reasons_f4b:
+                print("    " + line)
     finally:
         for fname in os.listdir(fx_dir):
             os.unlink(os.path.join(fx_dir, fname))

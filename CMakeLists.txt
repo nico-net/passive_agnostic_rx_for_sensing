@@ -2462,6 +2462,15 @@ if(ENABLE_TESTS)
   add_test(NAME branch_hw_isolation_selftest
            COMMAND bash ${CMAKE_SOURCE_DIR}/tests/passive_rx/check_branch_hw_isolation.sh --selftest
            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+  # P07 G2 tests 1/3 in replay form: replays the registered P02 fixture through the REAL
+  # nr-uesoftmodem (no radio) once per single-branch view and once legacy; see
+  # tests/passive_rx/replay_branch_view.sh. Skips (exit 77, reported as a ctest SKIP, never a false
+  # PASS) when the fixture or the binary is missing.
+  add_test(NAME dl_branch_view_replay
+           COMMAND bash ${CMAKE_SOURCE_DIR}/tests/passive_rx/replay_branch_view.sh
+           WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+  set_tests_properties(dl_branch_view_replay PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 600)
 endif()
 
 add_subdirectory(common)

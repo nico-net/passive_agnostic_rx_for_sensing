@@ -160,11 +160,22 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
     job.grant.check_sample_lifetime = true;
     job.grant.source_absolute_slot = job.absolute_slot;
 
+    /* P07 independent mode: resolve which branch this job is decoded FOR, and hand the whole chain
+     * (decode AND data-aided submit) the same single-antenna view of the UE. Legacy: vue == ue. */
+    const int view_phys = nr_pdsch_passive_branch_view_resolve(ue, job.physical_channel, &job.branch_id);
+    job.physical_channel = (int8_t)view_phys;
+    PHY_VARS_NR_UE *vue = nr_pdsch_passive_branch_view(ue, view_phys, job.branch_id);
+
     nr_pdsch_passive_decode_result_t dec;
     const nr_pdsch_passive_decode_status_t st =
-        nr_pdsch_passive_decode(ue, &proc, &job.dlsch_pdu, &job.freq_alloc, &job.grant, rxdataF, &dec);
+        nr_pdsch_passive_decode(vue, &proc, &job.dlsch_pdu, &job.freq_alloc, &job.grant, rxdataF, &dec);
 
     nr_passive_replay_dl(&job, &dec);
+    {
+      static _Atomic uint64_t s_job_idx = 0; // trace index only (ISAC_PDSCH_VERDICT_TRACE), never a key
+      nr_pdsch_passive_verdict_trace(atomic_fetch_add_explicit(&s_job_idx, 1, memory_order_relaxed),
+                                     job.rnti, job.branch_id, view_phys, &dec);
+    }
     nr_slot_fep_fo_override_hz = saved_fo;
     if (st == NR_PDSCH_PASSIVE_DECODE_UNSUPPORTED && !nr_passive_samples_valid(
             atomic_load_explicit(&nr_ue_diag_producer_absolute_slot, memory_order_relaxed),
@@ -187,7 +198,9 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
            * submit derives the index from proc->frame_rx, which wraps at 1024 -- harmless in order,
            * fatal once several consumers submit concurrently across a wrap. */
           nr_isac_abs_slot_override = (uint64_t)job.absolute_slot;
-          nr_isac_pdsch_data_aided_submit(ue, &proc, &dec.cw, &job.dlsch_pdu, &job.freq_alloc, job.rnti,
+          /* Same view as the decode: a branch's reconstruction consumes ONLY its own accepted TB and
+           * its own antenna's Y. TODO(P10): carry job.branch_id/physical_channel into the CFR ABI. */
+          nr_isac_pdsch_data_aided_submit(vue, &proc, &dec.cw, &job.dlsch_pdu, &job.freq_alloc, job.rnti,
                                           dec.tb, job.harq_pid_tag, rxdataF, (double)dec.nvar);
           nr_isac_abs_slot_override = 0;
         }

@@ -6,7 +6,7 @@ Canonical location: `sens6:/home/sens/NICOLA/adaptive-rx-sensing/adaptive_RX_pip
 
 ## Current status
 
-**Documentation and read-only inventory complete; P01 (baseline manifest / acceptance profile) IN_PROGRESS as of 2026-09-10 (see session below); P02 (valid DL/UL replay fixtures) PASSED as of 2026-09-11 after two controller-ruled fix rounds to the passive-replay recorder (see P02 session + Fix round 1/2 below) -- the first implementation task under this plan to reach PASS, and the first receiver source changes made under this plan (two small, ruling-scoped gate fixes in `nr_passive_replay_capture.c`/`nr_pdcch_blind_monitor_rt.c`). G0 remains IN_PROGRESS overall, blocked only on P01's outstanding survey/acceptance-limit work. P03 (branch abstraction) IN_PROGRESS as of 2026-09-11: foundation delivered (`docs/passive_branch_globals_audit.md`, `nr_rx_branch.{h,c}`, `[sensing] rx_branches`/`rx_branch_phys_map`, 14/14 gtest) but deliberately not wired into the RT read loop (controller-scoped to P04/P05). P04 (immutable buffer delivery) IN_PROGRESS as of 2026-09-11: standalone `nr_rx_span_pool.{h,c}` delivered (refcounted per-branch spans, no sample copies, per-branch drop policy), 5/5 gtest, also deliberately not wired into the RT read loop (same controller ruling -- `nr-ue.c` is dirty with another session's edits). P05 (independent digital correction/recovery) IN_PROGRESS as of 2026-09-11: standalone `nr_rx_branch_sync.{h,c}` delivered (per-branch CFO accumulator, timing offset, frame-wrap/slot-continuity bookkeeping, lock/acq epoch staleness snapshot), 14/14 gtest including G1 test 4 in pure form; a checked-in hardware-isolation guard (`tests/passive_rx/check_branch_hw_isolation.sh`, registered as two ctest entries, with its own self-test proving the grep both catches a planted violation and does not false-positive on a legitimate `rf_`-substring symbol name); and `docs/passive_branch_wiring_plan.md`, a file:line map of exactly which `nr-ue.c`/`nr-ue-ru.c` statements belong to AcquisitionOwner vs. become per-branch. Still deliberately not wired into the RT read loop (same controller ruling) -- G1 remains IN_PROGRESS: tests 1/3/4 exist in pure form (P04/P05) and test 2 exists in pure form via P03/P04, but test 5 (standalone-replay comparison) and the full G1 exit criterion (including "no unauthorized hardware operation from branch WORKERS" -- there are no live workers yet) cannot pass until the read-loop wiring lands.**
+**Documentation and read-only inventory complete; P01 (baseline manifest / acceptance profile) IN_PROGRESS as of 2026-09-10 (see session below); P02 (valid DL/UL replay fixtures) PASSED as of 2026-09-11 after two controller-ruled fix rounds to the passive-replay recorder (see P02 session + Fix round 1/2 below) -- the first implementation task under this plan to reach PASS, and the first receiver source changes made under this plan (two small, ruling-scoped gate fixes in `nr_passive_replay_capture.c`/`nr_pdcch_blind_monitor_rt.c`). G0 remains IN_PROGRESS overall, blocked only on P01's outstanding survey/acceptance-limit work. P03 (branch abstraction) IN_PROGRESS as of 2026-09-11: foundation delivered (`docs/passive_branch_globals_audit.md`, `nr_rx_branch.{h,c}`, `[sensing] rx_branches`/`rx_branch_phys_map`, 14/14 gtest) but deliberately not wired into the RT read loop (controller-scoped to P04/P05). P04 (immutable buffer delivery) IN_PROGRESS as of 2026-09-11: standalone `nr_rx_span_pool.{h,c}` delivered (refcounted per-branch spans, no sample copies, per-branch drop policy), 5/5 gtest, also deliberately not wired into the RT read loop (same controller ruling -- `nr-ue.c` is dirty with another session's edits). P07 (independent DL decoding) PASS as of 2026-09-11 in REPLAY form (single-branch view of the DL decode chain, `dl_branch_view_replay` ctest on the P02 fixture: legacy 34/38 unchanged, views 0/1/2/3 = 34/31/34/34 of 38 with data-aided submissions == own CRC-OK; live independent mode gated on P06 job tagging and the P10 CFR ABI; G2 IN_PROGRESS). P05 (independent digital correction/recovery) IN_PROGRESS as of 2026-09-11: standalone `nr_rx_branch_sync.{h,c}` delivered (per-branch CFO accumulator, timing offset, frame-wrap/slot-continuity bookkeeping, lock/acq epoch staleness snapshot), 14/14 gtest including G1 test 4 in pure form; a checked-in hardware-isolation guard (`tests/passive_rx/check_branch_hw_isolation.sh`, registered as two ctest entries, with its own self-test proving the grep both catches a planted violation and does not false-positive on a legitimate `rf_`-substring symbol name); and `docs/passive_branch_wiring_plan.md`, a file:line map of exactly which `nr-ue.c`/`nr-ue-ru.c` statements belong to AcquisitionOwner vs. become per-branch. Still deliberately not wired into the RT read loop (same controller ruling) -- G1 remains IN_PROGRESS: tests 1/3/4 exist in pure form (P04/P05) and test 2 exists in pure form via P03/P04, but test 5 (standalone-replay comparison) and the full G1 exit criterion (including "no unauthorized hardware operation from branch WORKERS" -- there are no live workers yet) cannot pass until the read-loop wiring lands.**
 
 | Baseline fact | Value |
 |---|---|
@@ -38,7 +38,7 @@ Dates use `YYYY-MM-DD` in Europe/Zurich. Check an implementation item only when 
 | [ ] | P04 | Immutable channel-buffer delivery | IN_PROGRESS | — | Session 2026-09-11 (P04) below. Standalone module delivered: `openair1/PHY/NR_UE_TRANSPORT/nr_rx_span_pool.{h,c}` (refcounted per-branch span pool, no sample copies, per-branch drop policy), 5/5 gtest (G1 test 1 and test 3 in pure form, plus refcount and epoch-carry cases). NOT done: nothing wired into the nr-ue.c RT read loop (deliberately out of scope, see P04's controller ruling -- that file is dirty with another session's uncommitted edits) -- so G1 stays NOT_STARTED end-to-end. |
 | [ ] | P05 | Independent acquisition / recovery | IN_PROGRESS | — | Session 2026-09-11 (P05) below. Foundation delivered: `openair1/PHY/NR_UE_TRANSPORT/nr_rx_branch_sync.{h,c}` (per-branch CFO accumulator, timing offset, frame-wrap/slot-continuity bookkeeping, lock/acq epoch staleness snapshot, 14/14 gtest incl. G1 test 4 in pure form), `tests/passive_rx/check_branch_hw_isolation.sh` (hardware-isolation guard + self-test, 2 ctest entries), `docs/passive_branch_wiring_plan.md` (file:line wiring map). NOT done: nothing wired into the `nr-ue.c` RT read loop (deliberately out of scope, see P05's controller ruling -- that file remains dirty with another session's uncommitted edits) -- so G1 test 5 and the full end-to-end exit criterion are not met |
 | [ ] | P06 | Branch-local PDCCH discovery / grants | NOT_STARTED | — | — |
-| [ ] | P07 | Independent DL decoding | NOT_STARTED | — | — |
+| [x] | P07 | Independent DL decoding | PASS (replay form; live independent mode gated on P06/P10) | 2026-09-11 | Session 2026-09-11 (P07) below. `docs/passive_dl_branch_view_audit.md` (antenna-axis audit + mechanism decision), single-branch view in `nr_pdsch_passive_decode.{h,c}` (thread-local shadow UE, `nb_antennas_rx=1`, `rxdata={rxdata[phys]}`; MRC/retry/subset/BRANCHFO/planned-branch nvar all off by their own gates, DMRSFO EMA/apply + SFO_CORRECT explicitly gated), `ISAC_DL_BRANCH_VIEW`, `unsupported_multilayer_in_branch_view` counter, `ISAC_PDSCH_VERDICT_TRACE`, per-job `branch_id`/`physical_channel` (sizeof unchanged), `tests/passive_rx/replay_branch_view.sh` = ctest `dl_branch_view_replay` PASS on the P02 fixture: legacy `REPLAY PASS: identical DL controls=34 failed=0 raw UL=24` unchanged (full log byte-identical bar the version banner and the new summary line); views 0/1/2/3 crc_ok 34/31/34/34 of 38 (view1 = 3 TBs coverage loss, recorded not tuned), data_submits == own crc_ok on every view, unsupported_multilayer 0/38 (fixture is all Nl=1). NOT done: live independent mode (producer tags 0/0 until P06; CFR ABI has no branch slot until P10), all-four-in-parallel replay, per-branch DMRSFO/SFO tracker (P09) |
 | [ ] | P08 | Independent UL decoding / context pool | NOT_STARTED | — | — |
 | [ ] | P09 | Namespace / TLS / concurrency audit | NOT_STARTED | — | — |
 | [ ] | P10 | CFR ABI and producer migration | NOT_STARTED | — | — |
@@ -71,7 +71,7 @@ Dates use `YYYY-MM-DD` in Europe/Zurich. Check an implementation item only when 
 |---|---|---|---|---|
 | G0 | Reproducible baseline and acceptance profile | IN_PROGRESS | — | P02's own sub-condition now MET (2026-09-11, Fix round 2): a reproducible supported DL+UL replay fixture exists (`sensing_manual_fixed.UtvBT7`, `REPLAY PASS: identical DL controls=34 failed=0 raw UL=24; no radio opened`), registered and checker-verified. G0 as a WHOLE still cannot PASS, because P01's own manifest remains IN_PROGRESS on survey/limits (every `deployment_dependent_limits` entry UNSET, `geometry.surveyed=false` -- unchanged by P02, not this task's scope). State plainly: G0 = IN_PROGRESS, blocked only on P01's outstanding survey/acceptance-limit work, not on P02 any longer |
 | G1 | Acquisition routing, time and branch isolation | IN_PROGRESS | — | Tests 1-4 exist and PASS in pure/standalone form across P03 (`nr_rx_branch_test`), P04 (`nr_rx_span_pool_test`) and P05 (`nr_rx_branch_sync_test`'s `RxBranchSyncG1Test4`); P05 additionally adds a hardware-isolation guard (`branch_hw_isolation`/`branch_hw_isolation_selftest` ctest entries) covering the "no unauthorized hardware operation" half of the exit criterion at the SOURCE level. G1 as a WHOLE cannot PASS: test 5 (standalone-replay comparison) and end-to-end live-worker isolation require the `nr-ue.c`/`nr-ue-ru.c` read-loop wiring, which no session has done yet (controller-scoped, blocked on that file's owning session committing first) |
-| G2 | Independent supported DL/UL decoding | NOT_STARTED | — | — |
+| G2 | Independent supported DL/UL decoding | IN_PROGRESS | — | P07 (DL side) delivers G2 tests 1 and 3 in replay form (`dl_branch_view_replay`: per-view CRC verdicts and reconstructed TBs match the 4-antenna reference wherever the view decodes, a branch's data-aided submissions == its own CRC-OK count). G2 as a whole cannot pass: P06 (PDCCH isolation), P08 (UL), P09 (namespace audit) pending; test 5's failure-class cases are only partly exercised (CRC fail 4-7/38 and multilayer rejection path built but 0/38 on this fixture); no parallel four-view run. |
 | G3 | CFR identity, support and physical references | NOT_STARTED | — | — |
 | G4 | Four detectors, AoA removed, UL support retained | NOT_STARTED | — | — |
 | G5 | Observable AoA-free DL global fusion | NOT_STARTED | — | — |
@@ -997,6 +997,154 @@ Reviewer / accomplishment date if gate passed: not gated; G1 stays IN_PROGRESS (
   by this session, per the controller's ruling that P05 alone cannot make G1 testable end-to-end).
 ```
 
+## Session — 2026-09-11: P07 independent (single-branch) DL decoding (Stage 2, replay form) (PASS)
+
+```text
+Date/time (Europe/Zurich): 2026-09-11, ~13:40-15:30
+Task IDs / gate: P07 (Stage 2 DL workers); G2 tests 1 and 3 exercised in REPLAY form; G2 as a
+  whole stays IN_PROGRESS (P06/P08/P09 pending, per the controller's scope ruling for this task).
+Intended falsifiable claim: (a) the passive DL decode chain (queue consumer -> nr_pdsch_passive_
+  decode -> FEP -> chest -> nr_rx_pdsch -> LDPC -> data-aided reconstruction) can be made to see
+  EXACTLY ONE receive antenna (a chosen physical channel) end to end, with every cross-branch
+  mechanism (MRC / strongest-branch selection, selection-diversity retry, subset scan, BRANCHFO,
+  DMRSFO EMA/apply, planned-branch nvar substitution, SFO_CORRECT) demonstrably off and the noise
+  estimate that channel's own; (b) the default path is BIT-IDENTICAL to before (proven by replaying
+  the P02 fixture before and after with the same command and diffing every verdict line);
+  (c) per branch, the data-aided reconstruction consumes ONLY that branch's own CRC-accepted TBs
+  (G2 test 3 in replay form: data_submits == crc_ok per view, a view with fewer CRC-OK has
+  correspondingly fewer submits, never the reference's 34); (d) Nl > 1 grants are rejected
+  explicitly in view mode with their own counter rather than decoded on one antenna.
+Branch / full commit / dirty patch / untracked-file manifest: merge/adaptive-sensing,
+  HEAD d1b563f511 when this session started; ANOTHER session committed be65aa8764 ("nr-ue: manual
+  DL/UL profile edits", executables/nr-ue.c only, the same edits that were already in the working
+  tree and hence already in every binary this session built) mid-session, so this session's commit
+  sits on be65aa8764. Pre-existing dirty state untouched and never staged, confirmed by
+  `git status --short` before and after: `M executables/nr-ue-ru.c`,
+  `M executables/nr-ue.c` (until be65aa8764), `M openair1/PHY/NR_UE_TRANSPORT/nr_initial_sync.c`,
+  `M openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c`, `M radio/USRP/usrp_lib.cpp`,
+  `M tests/passive_rx/monitor/monitor.html`, `M tests/passive_rx/monitor/monitor.py`,
+  `M tests/passive_rx/run_adaptive_receive_test.sh`; untracked `adaptive_RX_pipeline.md`,
+  `tests/passive_rx/MANUAL_DL_UL.md`, `tests/passive_rx/adaptive_manual_dlul.conf`,
+  `tests/passive_rx/aoa_track_dl.conf`, `tests/passive_rx/run_manual_x410.sh`. (The plan's own
+  checklist row for P07 lives in the untracked `adaptive_RX_pipeline.md` and was therefore NOT
+  edited -- to be synchronized by its owning session.)
+Files modified / added / removed:
+  Added: `docs/passive_dl_branch_view_audit.md`, `tests/passive_rx/replay_branch_view.sh`,
+  `tests/passive_rx/baselines/manifest_20260911_be65aa8-dirty.json` + `_tracked.patch`
+  (old pair `manifest_20260911_b90276d-dirty.*` removed, one-pair rule; generated with this
+  session's files STAGED, so the tracked patch carries only the other sessions' unstaged edits;
+  `binary_stale_vs_tracked_source` = not_stale).
+  Modified: `openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.{h,c}` (view resolve/arm helpers,
+  `reason` on the result, multilayer counter, DMRSFO/SFO_CORRECT gates, verdict trace, BRANCHVIEW
+  stats line), `nr_pdsch_passive_queue.{h,c}` (job `branch_id`/`physical_channel` in the existing
+  rnti padding -- sizeof 384 unchanged, verified against the fixture's job_bytes; consumer resolves
+  the view and hands the SAME view UE to decode and submit), `nr_passive_replay_capture.c` (view
+  per replay, data-aided path exercised on every CRC-OK TB via `nr_isac_data_aided_force`, per-
+  status counts, `REPLAY-VIEW` summary line), `nr_pdsch_data_aided.{h,c}` (`g_data_submits`
+  counter + getter, replay-only force flag, TODO(P10) at the ABI), `nr_pdcch_blind_monitor_rt.c`
+  (2 x 2 lines: deterministic 0/0 identity on the job -- the fields were uninitialised stack
+  padding before), `CMakeLists.txt` (ctest `dl_branch_view_replay`, SKIP_RETURN_CODE 77),
+  `tests/passive_rx/check_manifest.py` (`verified_with_binary_sha256` accepted alongside
+  `producing_binary_sha256`, new selftest case f4), `tests/passive_rx/baselines/fixtures.json`
+  (`verified_with_binary_sha256` + `branch_view_replay` record; `producing_binary_sha256` kept),
+  this ledger.
+Executable / driver / config / geometry / acceptance hashes: nr-uesoftmodem before
+  c3810019905f3fb661138d12fd5b9b6156d47e36344ae871f08047ba65dc7889 (= the fixture's producing
+  binary), after 6bfe2c785d99718b9cddc5f18ee2fb710aee70962faefad0009b6a415a140573 (built at HEAD
+  d1b563f511 + the then-uncommitted nr-ue.c edits that became be65aa8764 + this session's edits);
+  liboai_usrpdevif.so unchanged ad0a71c56dbc509149337460af7d0e97c64d4f390f85bec48b8882aa64f64583;
+  receiver.conf 5022d875a26f1ec235ee209b1ff04ef3031290c149399702b7ef63d0c3a381ef (the fixture's).
+  Note the rebuilt binary also contains the other sessions' uncommitted edits, exactly as the
+  previous binary did. No geometry/acceptance change.
+Exact commands:
+  ssh sens6 'pgrep -x nr-uesoftmodem'   (empty before each of the three cmake builds)
+  cd cmake_targets/ran_build/build && cmake --build . --target nr-uesoftmodem oai_usrpdevif --parallel 4
+  # legacy replay, before and after, identical args (fixtures.json replay_verification.command,
+  # run as plain user -- replay.bin is 0644):
+  env ISAC_PASSIVE_REPLAY_INPUT=/home/sens/NICOLA/captures/sensing_manual_fixed.UtvBT7/replay.bin \
+      LD_LIBRARY_PATH=$(pwd):/usr/local/lib ./nr-uesoftmodem -O <fixture>/receiver.conf -r 273 \
+      --numerology 1 --band 78 -C 3450000000 --ssb 150 --ue-rxgain 40 --ue-nb-ant-rx 4 \
+      --ue-nb-ant-tx 4 --passive-rx --ue-fo-compensation --cont-fo-comp 1 --freq-sync-P 0.05 \
+      --freq-sync-I 0.001 --initial-fo -16480 --thread-pool 0,1,6,7 --time-sync-I 0.01 \
+      --ntn-initial-time-drift -4.25 -A 90
+  OUT=/tmp/p07/bv3 bash tests/passive_rx/replay_branch_view.sh      (= ctest -R dl_branch_view_replay)
+  ctest -R "dl_branch_view_replay|nr_rx_branch|branch_hw_isolation" --output-on-failure  (5/5 pass)
+  FIXTURE=/nonexistent ctest -R dl_branch_view_replay   (reported "Skipped", not passed)
+  python3 tests/passive_rx/check_manifest.py --fixtures tests/passive_rx/baselines/fixtures.json
+  bash tests/passive_rx/baseline_manifest.sh && python3 tests/passive_rx/check_manifest.py --selftest
+Artifact paths (include raw logs and VOID attempts): /tmp/p07/legacy_before.log (old binary),
+  /tmp/p07/legacy_final.log (new binary, default path), /tmp/p07/bv3/{legacy,view0..3}.log +
+  summary.txt (final binary, trace on). One intermediate run (/tmp/p07/bv1) reported view1 as
+  FAIL(i) because the script's first draft required exit 0 from the replay binary, whose exit 2
+  ("REPLAY VOID") is by construction what a view with FEWER accepted TBs than the reference
+  returns -- the script now requires "no radio opened" + identical-controls == the view's own
+  crc_ok and accepts exit 2 for views only; legacy still requires the exact PASS line and exit 0.
+  Not an RF/logic failure; recorded, not counted as VOID.
+Baseline and comparison definition: the P02 fixture's own 4-antenna replay (34 CRC-OK / 4 CRC-fail
+  of 38 recorded DL grants, 24 raw UL) is the reference; each single-branch view is compared per
+  recorded grant against the SAME recorded TB hash (the binary's identical-controls check), so a
+  view's crc_ok is by construction also its count of payloads identical to the reference.
+Predeclared assertions / thresholds: the brief's (i)-(iii) only -- (i) every view runs to
+  "no radio opened" with every accepted TB identical to the reference; (ii) legacy line unchanged
+  `REPLAY PASS: identical DL controls=34 failed=0 raw UL=24; no radio opened`; (iii) per view
+  data_submits == crc_ok. Single-branch CRC BELOW 34 was predeclared acceptable (coverage loss to
+  record, not tune).
+Observed result, with denominators (38 recorded DL grants, all Nl=1; 24 raw UL untouched):
+  legacy 4-ant: crc_ok 34, crc_fail 4, unsupported 0, unsupported_multilayer 0, data_submits 34,
+    exit 0, verdict line identical to pre-change; full stdout/stderr diff vs the pre-change binary
+    = the [HW] version banner line + the one new REPLAY-VIEW summary line, nothing else.
+  view0 (phys 0): crc_ok 34/38, crc_fail 4, submits 34, identical-to-reference 34, exit 0.
+  view1 (phys 1): crc_ok 31/38, crc_fail 7, submits 31, identical-to-reference 31, exit 2
+    (REPLAY VOID: identical DL controls=31 failed=3) -> 3 TBs of coverage loss vs legacy.
+  view2 (phys 2): crc_ok 34/38, crc_fail 4, submits 34, identical 34, exit 0.
+  view3 (phys 3): crc_ok 34/38, crc_fail 4, submits 34, identical 34, exit 0.
+  unsupported_multilayer_in_branch_view = 0/38 on every view: a DENOMINATOR statement (the fixture
+  carries no Nl>1 grant), not evidence that the counter fires.
+  Evidence the views really are single-antenna and really are different channels: the BRANCHFO
+  line (gated nb_antennas_rx > 1) appears once in legacy and never in any view; CHESTDIAG nvar for
+  the first three grants reads 13/51/13 (view0), 348/616/388 (view2), 246/728/244 (view3).
+  ctest: dl_branch_view_replay PASS (22.4 s); nr_rx_branch_test, nr_rx_branch_sync_test,
+  branch_hw_isolation, branch_hw_isolation_selftest still PASS; missing-fixture path reports
+  "Skipped" (exit 77), not PASS. check_manifest.py --fixtures: FIXTURES OK with the new binary via
+  verified_with_binary_sha256; --selftest: PASS incl. new case f4.
+Status (PASS / FAIL / VOID / BLOCKED): PASS for claims (a)-(d) on the brief's criteria (i)-(iii).
+  Per-branch coverage recorded: view1 decodes 31/34 of the reference's accepted TBs (91 %),
+  views 0/2/3 34/34 -- on THIS fixture branches 2 and 3 are NOT worse than branch 0, contrary to
+  the memory note ("branches 1-3 much worse"); one 38-grant fixture is not a rig characterisation.
+Validity reasons and affected intervals: no live data collected; replay only (no radio opened,
+  verified by the binary's own verdict text and by nr-uesoftmodem.c:428-434 returning before
+  device init).
+Hypotheses supported / contradicted: supports that the view can be delivered without touching any
+  antenna loop in FEP/chest/demod/data-aided code (mechanism (a') in the audit) -- every
+  cross-branch mechanism switched itself off through its existing nb_antennas_rx / nbRx==4 gate,
+  and only the DMRSFO EMA/apply + SFO_CORRECT needed explicit gates. Contradicts the expectation
+  (brief, memory) that single-branch CRC would be well below the 4-antenna count on branches 2/3:
+  measured equal on this fixture; branch 1 is the only weaker one (-3 TBs). Finding worth
+  flagging: the recorded jobs' new identity bytes were uninitialised stack padding in the
+  producer, so ANY consumer trusting them from a pre-P07 fixture would read garbage -- the replay
+  overwrites them unconditionally and the producer now zero-initialises them.
+Retraction, if any: none.
+Remaining limitation: (1) live independent mode is unexercised -- with `rx_branches` naming >1
+  branch the consumer resolves every job to the branch whose physical channel matches the job's
+  tag, and the producer tags 0/0 until P06, so live independent mode today == a branch-0 (or
+  lowest-active-branch) view for every grant; (2) `nr_isac_submit_cfr_multi()` has no branch
+  identity slot (recorded as a P10 requirement in the audit sec 4 and as TODO(P10) in the code),
+  so a multi-branch live run would fold every branch's CFR into one engine; (3) the multilayer
+  rejection path and the failure classes of G2 test 5 beyond plain CRC failure (segment failure,
+  all-zero TB, UCI-rescued, unsupported waveform/RV) are built or pre-existing but NOT exercised
+  by this fixture; (4) no "all four in parallel" replay (the four views ran sequentially in one
+  script, each in its own process); (5) DMRSFO/SFO per-branch tracking is simply OFF in view mode
+  (no shared-EMA leakage, but also no correction) pending P09; (6) the shadow-UE copy refreshes an
+  enumerated list of mutable scalars per job -- a future read of some other runtime-mutable
+  `PHY_VARS_NR_UE` scalar inside the chain would see a snapshot from the thread's first job (the
+  frame-parms staleness check covers cell reconfiguration only).
+Next highest-value action: P06 (branch-local PDCCH discovery tagging each job with its branch) so
+  that independent mode decodes each branch's OWN grant stream live, then P10 so the reconstruction
+  can be routed per branch; screen a fixture with Nl>1 grants to exercise the multilayer counter.
+Reviewer / accomplishment date if gate passed: P07 accomplished 2026-09-11 on the brief's own
+  PASS criterion (replay form); G2 not passed.
+```
+
 ## Session template — copy for each future work session
 
 ```text
@@ -1030,6 +1178,7 @@ Reviewer / accomplishment date if gate passed:
 | sensing_manual_fixed.JLDoZc | 2026-09-11 | P02 / G0 fix round 1 | binary `b81b21e3...`, same conf, REPLAY=1 | VOID_RF_OR_ASSERT | 4 RX, manual/passive-rx | RFSTALL (UHD ERROR_CODE_OVERFLOW) at t=157.27s, ordinary late-run RF variance, unrelated to the recorder; used to live-verify via `/proc/<pid>/environ` that `ISAC_PASSIVE_REPLAY_CAPTURE`/`FAILURES` do reach the process | `/home/sens/NICOLA/captures/sensing_manual_fixed.JLDoZc` |
 | sensing_manual_fixed.LH2I9w | 2026-09-11 | P02 / G0 diagnostic (not counted against the 2-attempt cap; temporary instrumented build, DURATION=30) | binary `5745d305...` | RF_VALID_REQUIRES_DL_UL_CRC_EVIDENCE | 4 RX, manual/passive-rx | First live evidence of the second defect: `dl#1..20` show `success=1` repeatedly but `ul_seen=0` always | `/home/sens/NICOLA/captures/sensing_manual_fixed.LH2I9w` |
 | sensing_manual_fixed.Ma654f | 2026-09-11 | P02 / G0 diagnostic (not counted against the 2-attempt cap; temporary instrumented build, DURATION=60) | binary `74d2b818...` | RF_VALID_REQUIRES_DL_UL_CRC_EVIDENCE | 4 RX, manual/passive-rx | "first UL seen" NEVER printed despite PDSCHQ decoded=7644/crc_ok=7050 and pusch_passive try=6114/crc_ok=5010 -- proved `nr_passive_replay_ul()` was never called, root-causing the `ul_auto`-gated call site at `nr_pdcch_blind_monitor_rt.c:1738-1742` | `/home/sens/NICOLA/captures/sensing_manual_fixed.Ma654f` |
+| replay_branch_view (P07, /tmp/p07/bv3) | 2026-09-11 | P07 / G2 tests 1+3 (replay form) | binary `6bfe2c78...` (d1b563f511 + P07), fixture `sensing_manual_fixed.UtvBT7` (`c3810019...`-produced), receiver.conf `5022d875...`, full_auto=0 | replay PASS (no radio) | 4 RX legacy + single-branch views 0/1/2/3 | legacy 34/38 CRC-OK (line unchanged); view0 34, view1 31, view2 34, view3 34 of 38; data_submits == crc_ok on every view; unsupported_multilayer 0/38 (all Nl=1) | `/tmp/p07/bv3/summary.txt`, per-job trace in `/tmp/p07/bv3/*.log`; recorded in `fixtures.json` `branch_view_replay` |
 | sensing_manual_fixed.UtvBT7 | 2026-09-11 | P02 / G0 fix round 2 (final) | binary `c3810019...` (DL + UL gates both fixed, diagnostics trimmed to the two permanent lines), `adaptive_manual_dlul.conf`, full_auto=0, REPLAY=1 | RF_VALID_REQUIRES_DL_UL_CRC_EVIDENCE, replay PASS | 4 RX, manual/passive-rx | SIB1=1, clean exit, 0 RXDISCONT/RFSTALL. `REPLAY ARMED at absolute_slot=8852`; `REPLAY READY ... slots=320 UL=24 DL-controls=38 IQ=314572800 bytes`. Replay verification (no radio): `REPLAY PASS: identical DL controls=34 failed=0 raw UL=24; no radio opened`, exit 0, wall 4.463s. **P02 PASS.** | `/home/sens/NICOLA/captures/sensing_manual_fixed.UtvBT7` |
 
 For optional UL comparisons, list every 2-RX pair, 3-RX triple and 4-RX set for DTD, DFS and joint modes. Include unobservable modes, failures and missing-data denominators. Do not place placeholder accuracy values in this ledger.

@@ -1,37 +1,45 @@
 {
     "schema": "p01.baseline_manifest.v1",
-    "generated_at_utc": "2026-09-11T08:04:08Z",
-    "experiment_purpose": "P01 baseline identity; no capture",
+    "generated_at_utc": "2026-09-11T13:18:02Z",
+    "experiment_purpose": "P07 single-branch DL decode view; replay only, no capture",
     "host": "sens6",
     "tree": "/home/sens/NICOLA/adaptive-rx-sensing",
     "git": {
         "branch": "merge/adaptive-sensing",
-        "commit": "b90276ded4b421927cfdb2d080068900488ed53a",
+        "commit": "be65aa8764c3fe320761b526d3b6f23d0017d9fb",
         "status_short": [
+            "M  CMakeLists.txt",
+            "MM adaptive_RX_pipeline_progress.md",
+            "A  docs/passive_dl_branch_view_audit.md",
             " M executables/nr-ue-ru.c",
-            " M executables/nr-ue.c",
             " M openair1/PHY/NR_UE_TRANSPORT/nr_initial_sync.c",
-            " M openair1/PHY/NR_UE_TRANSPORT/nr_passive_replay_capture.c",
+            "M  openair1/PHY/NR_UE_TRANSPORT/nr_passive_replay_capture.c",
             " M openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c",
-            " M openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c",
+            "M  openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c",
+            "M  openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_data_aided.c",
+            "M  openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_data_aided.h",
+            "M  openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c",
+            "M  openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.h",
+            "M  openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c",
+            "M  openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.h",
             " M radio/USRP/usrp_lib.cpp",
-            " M tests/passive_rx/baselines/fixtures.json",
-            "D  tests/passive_rx/baselines/manifest_20260910_6fcb7a6-dirty.json",
-            "D  tests/passive_rx/baselines/manifest_20260910_6fcb7a6-dirty_tracked.patch",
-            " M tests/passive_rx/check_manifest.py",
+            "M  tests/passive_rx/baselines/fixtures.json",
+            "D  tests/passive_rx/baselines/manifest_20260911_b90276d-dirty.json",
+            "D  tests/passive_rx/baselines/manifest_20260911_b90276d-dirty_tracked.patch",
+            "M  tests/passive_rx/check_manifest.py",
             " M tests/passive_rx/monitor/monitor.html",
             " M tests/passive_rx/monitor/monitor.py",
+            "A  tests/passive_rx/replay_branch_view.sh",
             " M tests/passive_rx/run_adaptive_receive_test.sh",
             "?? adaptive_RX_pipeline.md",
-            "?? adaptive_RX_pipeline_progress.md",
             "?? tests/passive_rx/MANUAL_DL_UL.md",
             "?? tests/passive_rx/adaptive_manual_dlul.conf",
             "?? tests/passive_rx/aoa_track_dl.conf",
             "?? tests/passive_rx/run_manual_x410.sh"
         ],
-        "tracked_diff_patch_path": "tests/passive_rx/baselines/manifest_20260911_b90276d-dirty_tracked.patch",
-        "tracked_diff_patch_sha256": "6d423511988b82544a1a49e0831ae02de59f13861a14b9e7e184babae88a66b4",
-        "tracked_diff_patch_line_count": 1023,
+        "tracked_diff_patch_path": "tests/passive_rx/baselines/manifest_20260911_be65aa8-dirty_tracked.patch",
+        "tracked_diff_patch_sha256": "47ff8fc9aa92f9023cf199f9bc4ae4dfed1a1ebfa5931744b8981cef36c51689",
+        "tracked_diff_patch_line_count": 730,
         "scoped_files": [
             {
                 "path": "tests/passive_rx/MANUAL_DL_UL.md",
@@ -46,8 +54,8 @@
                 "sha256": "55c348e93a59ec846a3b09712de82420abf3b16b35e04334868f5956943c38e2"
             },
             {
-                "path": "tests/passive_rx/baselines/manifest_20260911_b90276d-dirty_tracked.patch",
-                "sha256": "6d423511988b82544a1a49e0831ae02de59f13861a14b9e7e184babae88a66b4"
+                "path": "tests/passive_rx/baselines/manifest_20260911_be65aa8-dirty_tracked.patch",
+                "sha256": "47ff8fc9aa92f9023cf199f9bc4ae4dfed1a1ebfa5931744b8981cef36c51689"
             },
             {
                 "path": "tests/passive_rx/run_manual_x410.sh",
@@ -1759,11 +1767,11 @@
             },
             {
                 "path": "openair1/PHY/NR_UE_ISAC/nr_isac.cc",
-                "sha256": "c136ffb3d0debf1351c1869b5bc3503b1e4ba5d997e7f82da575a2bc9a0ec221"
+                "sha256": "7c08f201ac67b317ce52e91f26dc54e85ef50c6e8b0fd55a868f77447338050c"
             },
             {
                 "path": "openair1/PHY/NR_UE_ISAC/nr_isac.h",
-                "sha256": "f55843f05dac7bfc731feb641e6aad2d48c7aa8b9187f6bf7f462db32f7346f9"
+                "sha256": "2b88a07e9c1cf36374087cc0b9a780f7e8cd4c0c69c7ad52fdc17a0b3b1eba30"
             },
             {
                 "path": "openair1/PHY/NR_UE_ISAC/nr_isac_ssb_axis.c",
@@ -1775,7 +1783,7 @@
             },
             {
                 "path": "openair1/PHY/NR_UE_ISAC/nr_isac_stub.c",
-                "sha256": "1dbe75a5b719c1e31817d4dcc1ed5f623f0d759eec6ced257e01342fa62ce9fc"
+                "sha256": "7083c63c246126cb5d296f63cdf2c0d255eb219eb7f5eb4ba596e29c5e3f96da"
             },
             {
                 "path": "openair1/PHY/NR_UE_ISAC/pipeline_types.h",
@@ -1915,7 +1923,7 @@
             },
             {
                 "path": "openair1/PHY/NR_UE_TRANSPORT/nr_passive_replay_capture.c",
-                "sha256": "ba03a3d50beed43122a35a78a40039e9e99ee6d255e105c681a207b9fdfd530b"
+                "sha256": "c61e8bed286663b94305572f7ca68daa0ca1af563f74112601de305ac45207b3"
             },
             {
                 "path": "openair1/PHY/NR_UE_TRANSPORT/nr_passive_replay_capture.h",
@@ -1959,7 +1967,7 @@
             },
             {
                 "path": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c",
-                "sha256": "1e1602f3312bbbd483b809d47f0c96cf06861d77aa7703a1ec52685608524434"
+                "sha256": "bdaa60663d8655be95ce7df277ffdae3bf18c5fb4eb321012afbe39c8e360118"
             },
             {
                 "path": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.h",
@@ -2031,27 +2039,27 @@
             },
             {
                 "path": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_data_aided.c",
-                "sha256": "4fd2521e4a1673722738628f5992cc80ca951e283285ac3b65ecb7a5354397d1"
+                "sha256": "0b21b36bd0974e119552a7817332aae39953ef424b6aa69ab5785821c3f2a817"
             },
             {
                 "path": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_data_aided.h",
-                "sha256": "85e9d27041f1d7d7b0da334b90d68413bff94eb8b939dc3e92f613794b6afe7b"
+                "sha256": "d67bc3b604980530fc42054262c5a54c35a353da54efef736665c36e2d2d51ab"
             },
             {
                 "path": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c",
-                "sha256": "82cd82d5e4d78df763209bfdb4d78125f56a6df7d20852bc2196f536d78bdb38"
+                "sha256": "09624fff629b5350d8d17a4b6c01aa86cf8e7acdca702e7c9370aff0762e9edd"
             },
             {
                 "path": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.h",
-                "sha256": "9fd9926c8e0dc29295e544f45f63cad210680ea78455e0e4fcf14a1e8ed8ecb9"
+                "sha256": "fd9d45eeae3fd2ffa6dd9159ccddad9f2ed9d733d2c5408bae434029950dab43"
             },
             {
                 "path": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c",
-                "sha256": "2bf298cea10902f3d0336b25262f25d71dc933acb4d5601582700a06fa5456e6"
+                "sha256": "4f9c6b26839b47969a04c45464984d8a3d53319c4f861f5cbd9e0561a3fe458a"
             },
             {
                 "path": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.h",
-                "sha256": "8fabae9f875c89e071ced779647a55e129b696f310d0e7ab19491f4bf68ba7a9"
+                "sha256": "0cbd90c762dafeef4bce2de72092df7a5e86addf5fd538c33eaed70590e3019b"
             },
             {
                 "path": "openair1/PHY/NR_UE_TRANSPORT/nr_prach.c",
@@ -2096,6 +2104,30 @@
             {
                 "path": "openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_queue.h",
                 "sha256": "e35a307fba79310528410686342f5800a34b8e6a7b5ab93728555864df1150b2"
+            },
+            {
+                "path": "openair1/PHY/NR_UE_TRANSPORT/nr_rx_branch.c",
+                "sha256": "3c2169861d5ad48a485fd82be0231e451dd0cc89e9efcc1d9eed22f6caf327ea"
+            },
+            {
+                "path": "openair1/PHY/NR_UE_TRANSPORT/nr_rx_branch.h",
+                "sha256": "768fddaaad342b00bf55c306561701db013e8cd8654faf19ae30cf1c56469d86"
+            },
+            {
+                "path": "openair1/PHY/NR_UE_TRANSPORT/nr_rx_branch_sync.c",
+                "sha256": "92c882438d8c2132c81e03b08d3fba85540695a05fd426f7f72d812147e701c4"
+            },
+            {
+                "path": "openair1/PHY/NR_UE_TRANSPORT/nr_rx_branch_sync.h",
+                "sha256": "cc601bf4a304726d2c9c80393025e19535d87f3cbccfa788654938ee4e05a4cc"
+            },
+            {
+                "path": "openair1/PHY/NR_UE_TRANSPORT/nr_rx_span_pool.c",
+                "sha256": "941cf351a9876506902c7ff802453a2672621ccd23c2b702e4f6ff42967957dc"
+            },
+            {
+                "path": "openair1/PHY/NR_UE_TRANSPORT/nr_rx_span_pool.h",
+                "sha256": "7139ac702506380b14cf303ebb3d4fc500738ed13bf170398dfc15348defa456"
             },
             {
                 "path": "openair1/PHY/NR_UE_TRANSPORT/nr_transport_proto_ue.h",
@@ -2168,6 +2200,18 @@
             {
                 "path": "openair1/PHY/NR_UE_TRANSPORT/tests/nr_pdsch_config_sweep_test.cc",
                 "sha256": "597907c906aae7a0e6a156f8660687d5e5c727315129079a845863e4797a6e57"
+            },
+            {
+                "path": "openair1/PHY/NR_UE_TRANSPORT/tests/nr_rx_branch_sync_test.cc",
+                "sha256": "5659e19f29ec91e3ddf3622cc1dfdb04544e67ade7130fe5294379ab5cdf9294"
+            },
+            {
+                "path": "openair1/PHY/NR_UE_TRANSPORT/tests/nr_rx_branch_test.cc",
+                "sha256": "bd5a1e25cfd58d642820cbe244f7052648cb565ae5cb43fb04f63fe2004833ee"
+            },
+            {
+                "path": "openair1/PHY/NR_UE_TRANSPORT/tests/nr_rx_span_pool_test.cc",
+                "sha256": "6a52adf1e8d9efb6f04f7e67e9d98bc2bd2d7e916f1f391cdbf60efbe09f8ee7"
             },
             {
                 "path": "openair1/PHY/TOOLS/CMakeLists.txt",
@@ -7731,7 +7775,7 @@
             },
             {
                 "path": "tests/passive_rx/baselines/fixtures.json",
-                "sha256": "26a02eb580e8a502c0033e85773187d79ba33cec29d7202137a700db22b7f75e"
+                "sha256": "216ba634fff5c16f4e2cc213d6208a572bfeb06152d2ef1fee880560db8562cc"
             },
             {
                 "path": "tests/passive_rx/captures/ab_10m.sh",
@@ -7814,12 +7858,16 @@
                 "sha256": "ed1c3182880af903fdf32147116cbeae2117548edaaaf018debac49fd129467b"
             },
             {
+                "path": "tests/passive_rx/check_branch_hw_isolation.sh",
+                "sha256": "29e48c0213629aff6eeca2f92415280fe98ce24690659c6ce51f4b792e177701"
+            },
+            {
                 "path": "tests/passive_rx/check_detection.py",
                 "sha256": "298bb17772f9205ae6f9450b713f2950d75e661465d764b3555e97bb39a188f2"
             },
             {
                 "path": "tests/passive_rx/check_manifest.py",
-                "sha256": "6a545b12cc8aa444c90092a38df2611b10496eb218e8ae5b62b62c6209140ca3"
+                "sha256": "54d813619b90e84e92f81b30a0204d1cd288c0dd2abb341a61a52e1c9df11dd5"
             },
             {
                 "path": "tests/passive_rx/d1_probe.py",
@@ -7940,6 +7988,10 @@
             {
                 "path": "tests/passive_rx/plot_rvm.py",
                 "sha256": "ff2ea7d7b1aaf71e66b76041034ef5ddb3794d42e62f35eab51e55e80a6e706b"
+            },
+            {
+                "path": "tests/passive_rx/replay_branch_view.sh",
+                "sha256": "9e1700898c060755c76dda9363dd679498c7769a50662c88cc124efe0382d534"
             },
             {
                 "path": "tests/passive_rx/replay_header.py",
@@ -8078,10 +8130,10 @@
     "build": {
         "nr_uesoftmodem": {
             "path": "cmake_targets/ran_build/build/nr-uesoftmodem",
-            "sha256": "c3810019905f3fb661138d12fd5b9b6156d47e36344ae871f08047ba65dc7889",
-            "size_bytes": 62807824,
-            "mtime_utc": "2026-09-11T07:53:24Z",
-            "mtime_epoch": 1789113204
+            "sha256": "6bfe2c785d99718b9cddc5f18ee2fb710aee70962faefad0009b6a415a140573",
+            "size_bytes": 62864312,
+            "mtime_utc": "2026-09-11T13:12:07Z",
+            "mtime_epoch": 1789132327
         },
         "liboai_usrpdevif": {
             "path": "cmake_targets/ran_build/build/liboai_usrpdevif.so",
@@ -8217,15 +8269,15 @@
                         "parser_function": "parse_array",
                         "parser_citation": {
                             "file": "openair1/PHY/NR_UE_ISAC/nr_isac.cc",
-                            "line_start": 102,
-                            "line_end": 127,
+                            "line_start": 108,
+                            "line_end": 133,
                             "token": "bool parse_array(const char* spec, double rotation_deg, const char* broadside_spec,"
                         },
                         "parser_citation_note": "line_end is the last body statement, one line before the closing brace -- a bare closing brace alone is not a uniquely locatable token",
                         "rank_two_condition_citation": {
                             "file": "openair1/PHY/NR_UE_ISAC/nr_isac.cc",
-                            "line_start": 118,
-                            "line_end": 118,
+                            "line_start": 124,
+                            "line_end": 124,
                             "token": "if (!(eig.values[1] > tol) || eig.values[0] > tol) return false;"
                         },
                         "independent_check_method": "Gaussian elimination on the 3 baseline vectors p1-p0,p2-p0,p3-p0 (stdlib only); collinearity (rank<2) is a sufficient condition for the cited eigenvalue test to fail regardless of its numerical tolerance",
