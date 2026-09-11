@@ -1558,7 +1558,7 @@ void nr_pdcch_blind_monitor_init(void)
   // TOTAL right while the per-field widths stayed wrong, so every field after the frequency-domain
   // assignment was read from the wrong offset and nobody noticed, because the only fields consumed
   // (RNTI, RIV allocation) happen to precede the damage. ----
-  if (have_manual_coreset) {
+  if (have_manual_coreset && g_cfg.dci10_scan != 2) {
     const uint16_t used_len = g_cfg.dci_length_override > 0 ? (uint16_t)g_cfg.dci_length_override
                                                             : nr_pdcch_blind_dci_size((uint16_t)g_cfg.bwp_size);
     const uint16_t implied  = nr_pdcch_blind_dci_size_ex((uint16_t)g_cfg.bwp_size, &g_cfg.extract);
@@ -1573,6 +1573,8 @@ void nr_pdcch_blind_monitor_init(void)
     } else {
       LOG_I(PHY, "SENSING: blind PDCCH DCI field widths reconcile with the %u-bit payload\n", used_len);
     }
+  } else if (have_manual_coreset) {
+    LOG_I(PHY, "SENSING: manual DCI 1_0-only DL; unused DCI 1_1 field widths are not applied\n");
   } else {
     LOG_I(PHY, "SENSING: blind PDCCH config deferred to CSS0 autoconf; DCI-1_1 width reconciliation "
                "not applicable (autoconf scans DCI format 1_0 only)\n");
