@@ -96,9 +96,11 @@ void nr_isac_submit_cfr_multi(uint32_t slot_idx,
  * function with NR_ISAC_BRANCH_NONE -- that wrapper, not an argument, is what makes every producer
  * that has not migrated structurally unchanged rather than assumed unchanged.
  *
- * Scope of this slice: the identity is carried through the CPI accumulator to the report only. It
- * does NOT group, window, fuse or route anything -- one engine still consumes every branch, exactly
- * as before. Routing a branch to its own engine/detector instance is P13. */
+ * P13 (adaptive_RX_pipeline.md Stage 4) made the identity LOAD-BEARING: this value now selects
+ * which of the per-branch SensingEngine instances consumes the row. A branch_id naming a branch
+ * that is not in `rx_branches` is DROPPED and counted, never folded into another branch's coherent
+ * window; NR_ISAC_BRANCH_NONE goes to the lowest active branch, which with a single active branch
+ * (the legacy and default configuration) is the only engine there is. */
 void nr_isac_submit_cfr_multi_branch(uint32_t slot_idx,
                                      float slot_frac,
                                      int source,

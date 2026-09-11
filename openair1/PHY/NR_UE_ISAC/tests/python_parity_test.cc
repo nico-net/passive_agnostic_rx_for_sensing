@@ -19,6 +19,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -674,6 +675,208 @@ void test_branch_identity_report()
           "a CPI fused from two branches must not name one of them");
 }
 
+// ---------------------------------------------------------------------------------------------
+// adaptive_RX_pipeline.md P13: the per-branch SensingEngine array. Three properties are pinned
+// here, in the order of how much damage getting them wrong would do:
+//   (c) a CFR row tagged with an inactive branch is DROPPED, never routed to another branch;
+//   (a) a single-branch (legacy) receiver's output identity is EXACTLY what it is today;
+//   (b) two engines fed different data produce independent reports -- one's CPI is bit-identical
+//       to what it would have been had the other never existed.
+nr_rx_branch_set_t branch_set(std::initializer_list<int> active)
+{
+  nr_rx_branch_set_t set{};
+  for (int i = 0; i < NR_RX_BRANCH_MAX; ++i) {
+    set.b[i].branch_id = static_cast<uint8_t>(i);
+    set.b[i].physical_channel = -1;
+    set.b[i].state = NR_RXB_DISABLED;
+  }
+  int physical = 0;
+  for (int id : active) {
+    set.b[id].physical_channel = static_cast<int8_t>(physical++);
+    set.b[id].state = NR_RXB_ACQUIRING;
+    ++set.n_active;
+  }
+  return set;
+}
+
+void test_branch_engine_routing()
+{
+  // (c) An inactive, out-of-range or unmapped branch must resolve to "drop" (-1), never to 0.
+  const nr_rx_branch_set_t two = branch_set({0, 2});
+  require(branch_engine_index(two, 0) == 0, "an active branch must route to its own engine");
+  require(branch_engine_index(two, 2) == 2, "the engine array is indexed by branch id, not ordinal");
+  require(branch_engine_index(two, 1) == -1,
+          "a CFR tagged with an INACTIVE branch must be dropped, never misrouted to another engine");
+  require(branch_engine_index(two, 3) == -1, "an unmapped branch must be dropped");
+  require(branch_engine_index(two, NR_RX_BRANCH_MAX) == -1, "an out-of-range branch must be dropped");
+  require(branch_engine_index(two, 200) == -1, "a garbage branch id must be dropped, not wrapped");
+  require(branch_engine_index(two, NR_ISAC_BRANCH_NONE) == 0,
+          "an untagged row belongs to the lowest active branch (the legacy engine)");
+
+  // A single-branch deployment may name any branch id; the sentinel must follow it, not assume 0.
+  const nr_rx_branch_set_t only_two = branch_set({2});
+  require(branch_engine_index(only_two, NR_ISAC_BRANCH_NONE) == 2,
+          "with one active branch the legacy engine is that branch, whatever its id");
+  require(branch_engine_index(only_two, 0) == -1,
+          "branch 0 is not special: unnamed means dropped");
+
+  // With no active branch at all there is nothing to route to; nr_isac_init() refuses this case,
+  // and the router must not invent an engine for it either.
+  const nr_rx_branch_set_t none = branch_set({});
+  require(branch_engine_index(none, NR_ISAC_BRANCH_NONE) == -1 && branch_engine_index(none, 0) == -1,
+          "an empty branch set must route nothing");
+}
+
+void test_branch_output_identity()
+{
+  PipelineConfig base;
+  base.rx_id = "rx1";
+  base.out_path = "/tmp/oaiue_sensing";
+  base.report_path = "/tmp/sensing/reports.jsonl";
+  base.report_endpoint = "tcp://*:5555";
+
+  // (a) THE REGRESSION PIN. One active branch -> every output-identity field byte-identical.
+  for (int id : {0, 3}) {
+    const PipelineConfig single = branch_pipeline_config(base, branch_set({id}), (uint8_t)id);
+    require(single.rx_id == base.rx_id && single.out_path == base.out_path
+                && single.report_path == base.report_path
+                && single.report_endpoint == base.report_endpoint,
+            "a single-branch receiver must keep exactly the configured output identity, unsuffixed");
+  }
+
+  const nr_rx_branch_set_t two = branch_set({0, 1});
+  const PipelineConfig a = branch_pipeline_config(base, two, 0);
+  const PipelineConfig b = branch_pipeline_config(base, two, 1);
+  require(a.rx_id == "rx1_b0" && b.rx_id == "rx1_b1", "each branch must report its own rx_id");
+  require(a.report_path == "/tmp/sensing/reports_b0.jsonl"
+              && b.report_path == "/tmp/sensing/reports_b1.jsonl",
+          "branch report paths must differ, with the suffix before the extension");
+  require(a.out_path == "/tmp/oaiue_sensing_b0" && b.out_path == "/tmp/oaiue_sensing_b1",
+          "an extensionless prefix takes the suffix at the end");
+  require(a.report_endpoint == "tcp://*:5555" && b.report_endpoint == "tcp://*:5556",
+          "ZeroMQ endpoints must be offset by branch id so two engines cannot fight over one port");
+  require(a.report_path != b.report_path && a.out_path != b.out_path
+              && a.report_endpoint != b.report_endpoint && a.rx_id != b.rx_id,
+          "no two branches may share any output identity");
+
+  // A directory containing a dot must not be mistaken for a file extension.
+  PipelineConfig dotted = base;
+  dotted.report_path = "/tmp/run.1/reports";
+  require(branch_pipeline_config(dotted, two, 1).report_path == "/tmp/run.1/reports_b1",
+          "a dot in a directory name is not an extension");
+  PipelineConfig ipc = base;
+  ipc.report_endpoint = "ipc:///tmp/sensing.sock";
+  require(branch_pipeline_config(ipc, two, 1).report_endpoint == "ipc:///tmp/sensing.sock_b1",
+          "an endpoint with no numeric port still has to become distinct");
+}
+
+// (b) Two live engines, started together, fed DIFFERENT CFR. `solo` runs the first engine alone;
+// `paired` runs both. The first engine's report must be identical either way -- i.e. nothing about
+// another engine's existence, submissions or CPI closure reaches it.
+std::string two_engine_capture(bool with_second, const std::string& suffix)
+{
+  const std::string path_a = "/tmp/nr_isac_p13_a_" + suffix + ".jsonl";
+  const std::string path_b = "/tmp/nr_isac_p13_b_" + suffix + ".jsonl";
+  std::remove(path_a.c_str()); std::remove(path_b.c_str());
+  PipelineConfig base;
+  base.sources_mask = (1u << NR_ISAC_SRC_CSI_RS);
+  base.duration_bank_s = {0.001}; base.bootstrap_duration_index = 0;
+  base.minimum_dwell_s = 0.001; base.maximum_dwell_s = 0.001;
+  base.minimum_rows = 2; base.maximum_rows = 4;
+  base.sync_enable = false; base.family_static = false; base.tracker_enable = false;
+  base.maximum_components = 1; base.maximum_objects = 1;
+  base.maximum_range_m = 200.0; base.out_path.clear();
+  PipelineConfig ca = base; ca.report_path = path_a; ca.rx_id = "rxA";
+  PipelineConfig cb = base; cb.report_path = path_b; cb.rx_id = "rxB";
+  nr_isac_carrier_t carrier{};
+  carrier.nof_prb = 2; carrier.scs_hz = 30000; carrier.dl_center_hz = 3499440000;
+  carrier.slots_per_frame = 20; carrier.pci = 1;
+  std::vector<std::complex<float>> ha(24, {1.0f, 0.0f});
+  std::vector<std::complex<float>> hb(24, {0.0f, 9.0f});
+  std::vector<uint32_t> k(24), symbol(24, 2);
+  for (uint32_t i = 0; i < k.size(); ++i) k[i] = i;
+  {
+    SensingEngine engine_a(ca, 2, 1);
+    std::unique_ptr<SensingEngine> engine_b;
+    if (with_second) engine_b = std::make_unique<SensingEngine>(cb, 2, 1);
+    engine_a.start();
+    if (engine_b) engine_b->start();
+    for (uint32_t slot = 0; slot < 10; ++slot) {
+      engine_a.submit(slot, 0.0f, NR_ISAC_SRC_CSI_RS, carrier, ha.data(), 1,
+                      k.data(), symbol.data(), ha.size(), 1.0f, 0);
+      // Deliberately a different slot cadence, different amplitude and a different branch tag:
+      // if any of the accumulator, planner, clutter map, clock tracker or sequence counter were
+      // shared, engine A's single closed CPI could not survive this unchanged.
+      if (engine_b)
+        for (int repeat = 0; repeat < 3; ++repeat)
+          engine_b->submit(slot, 0.25f * repeat, NR_ISAC_SRC_CSI_RS, carrier, hb.data(), 1,
+                           k.data(), symbol.data(), hb.size(), 4.0f, 1);
+    }
+    if (engine_b) engine_b->stop();
+    engine_a.stop();
+  }
+  std::ifstream input(path_a); require(input.good(), "engine A emitted no report");
+  std::string line;
+  require(static_cast<bool>(std::getline(input, line)), "engine A's report is empty");
+  if (with_second) {
+    std::ifstream other(path_b);
+    std::string other_line;
+    require(other.good() && std::getline(other, other_line),
+            "engine B emitted nothing, so the isolation comparison would be vacuous");
+    require(other_line.find("\"rx_id\":\"rxB\"") != std::string::npos
+                && line.find("\"rx_id\":\"rxA\"") != std::string::npos,
+            "each engine must write its own receiver identity to its own file");
+    require(other_line != line, "two engines fed different CFR produced the same report");
+  }
+  std::remove(path_a.c_str()); std::remove(path_b.c_str());
+  return line;
+}
+
+void test_branch_engines_are_independent()
+{
+  const std::string key = "cpi_start_time_utc_ns";
+  const std::string solo = drop_json_field(two_engine_capture(false, "solo"), key);
+  const std::string paired = drop_json_field(two_engine_capture(true, "paired"), key);
+  require(solo == paired,
+          "a second engine's submissions changed the first engine's CPI: the instances share state");
+
+  // And the derived per-branch configuration really is what a live engine writes: the file lands at
+  // the suffixed path and the line carries the suffixed rx_id. This is what ties the pure helper
+  // above to nr_isac.cc's construction loop.
+  PipelineConfig base;
+  base.sources_mask = (1u << NR_ISAC_SRC_CSI_RS);
+  base.duration_bank_s = {0.001}; base.bootstrap_duration_index = 0;
+  base.minimum_dwell_s = 0.001; base.maximum_dwell_s = 0.001;
+  base.minimum_rows = 2; base.maximum_rows = 4;
+  base.sync_enable = false; base.family_static = false; base.tracker_enable = false;
+  base.maximum_components = 1; base.maximum_objects = 1;
+  base.maximum_range_m = 200.0; base.out_path.clear();
+  base.rx_id = "rx1"; base.report_path = "/tmp/nr_isac_p13_derived.jsonl";
+  const PipelineConfig derived = branch_pipeline_config(base, branch_set({0, 1}), 1);
+  require(derived.report_path == "/tmp/nr_isac_p13_derived_b1.jsonl", "derived path");
+  std::remove(derived.report_path.c_str());
+  nr_isac_carrier_t carrier{};
+  carrier.nof_prb = 2; carrier.scs_hz = 30000; carrier.dl_center_hz = 3499440000;
+  carrier.slots_per_frame = 20; carrier.pci = 1;
+  std::vector<std::complex<float>> h(24, {1.0f, 0.0f});
+  std::vector<uint32_t> k(24), symbol(24, 2);
+  for (uint32_t i = 0; i < k.size(); ++i) k[i] = i;
+  {
+    SensingEngine engine(derived, 2, 1); engine.start();
+    for (uint32_t slot = 0; slot < 10; ++slot)
+      engine.submit(slot, 0.0f, NR_ISAC_SRC_CSI_RS, carrier, h.data(), 1,
+                    k.data(), symbol.data(), h.size(), 1.0f, 1);
+    engine.stop();
+  }
+  std::ifstream input(derived.report_path);
+  std::string line;
+  require(input.good() && std::getline(input, line),
+          "a branch engine wrote nothing at its derived report path");
+  require(line.find("\"rx_id\":\"rx1_b1\"") != std::string::npos,
+          "a branch engine must stamp its own branch-qualified receiver id");
+  std::remove(derived.report_path.c_str());
+}
+
 void test_mixed_row_dl_rdm_isolation()
 {
   const auto quiet = mixed_row_capture(0.25f, "/tmp/nr_isac_mixed_row_quiet.jsonl");
@@ -777,7 +980,7 @@ void test_obsolete_aoa_env_rejected()
 
 int main()
 {
-  try {test_fft();test_adaptive_threshold();test_detector();test_required_cuda_contract();test_aoa();test_aoa_component_mixture_and_cross_leg_fusion();test_enu_geometry();test_repeated_ul_confirmation_gates_global_birth();test_variable_cpi();test_causal_cpi_pipeline();test_finite_admission_window();test_mixed_row_dl_rdm_isolation();test_invalid_ul_does_not_suppress_dl();test_dl_capture_fails_closed_without_dl();test_validation_report_compatibility();test_branch_identity_report();test_obsolete_aoa_env_rejected();}
+  try {test_fft();test_adaptive_threshold();test_detector();test_required_cuda_contract();test_aoa();test_aoa_component_mixture_and_cross_leg_fusion();test_enu_geometry();test_repeated_ul_confirmation_gates_global_birth();test_variable_cpi();test_causal_cpi_pipeline();test_finite_admission_window();test_mixed_row_dl_rdm_isolation();test_invalid_ul_does_not_suppress_dl();test_dl_capture_fails_closed_without_dl();test_validation_report_compatibility();test_branch_identity_report();test_branch_engine_routing();test_branch_output_identity();test_branch_engines_are_independent();test_obsolete_aoa_env_rejected();}
   catch(const std::exception& e){std::fprintf(stderr,"python parity test failed: %s\n",e.what());return EXIT_FAILURE;}
   std::puts("native sensing golden parity checks passed");return EXIT_SUCCESS;
 }

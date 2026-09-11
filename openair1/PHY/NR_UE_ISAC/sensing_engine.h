@@ -30,8 +30,10 @@ public:
               const uint32_t* ofdm_symbol, uint32_t resource_elements,
               float noise_variance,
               // P10a: identity of the receive branch this row was measured on, carried to the
-              // report only. NR_ISAC_BRANCH_NONE (the default, and what every unmigrated producer
-              // sends) leaves the row untagged; nothing here routes or fuses by branch (P13).
+              // report. NR_ISAC_BRANCH_NONE (the default, and what every unmigrated producer
+              // sends) leaves the row untagged. Routing by branch happens ONE LAYER UP, in
+              // nr_isac.cc, which owns one engine instance per active branch (P13) -- an engine
+              // never sees a row belonging to another branch, so nothing here needs to filter.
               uint8_t branch_id = NR_ISAC_BRANCH_NONE);
 
 private:

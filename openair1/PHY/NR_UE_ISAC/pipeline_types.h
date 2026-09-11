@@ -7,6 +7,7 @@
 #include <array>
 #include <complex>
 #include <cstdint>
+#include <cstdlib>
 #include <limits>
 #include <optional>
 #include <string>
@@ -303,6 +304,86 @@ struct PipelineConfig {
   uint32_t subslot_min_re = 600;
   float subslot_min_snr_db = 0.0f;
 };
+
+/* adaptive_RX_pipeline.md P13: one independent SensingEngine per ACTIVE receive branch.
+ * nr_rx_branch_set_t::b[] is itself branch_id-indexed, so the engine array is indexed by
+ * branch_id too and there is no second mapping table that can fall out of step with it.
+ *
+ * These four helpers are the ONLY place the per-branch output identity and the routing decision
+ * are derived. They are free functions rather than private detail of nr_isac.cc so the parity test
+ * can pin them directly: the legacy-identity regression and the "never misroute" rule are the two
+ * safety-critical properties of the array, and neither is reachable through nr_isac_init() from a
+ * test (that path needs the live configuration subsystem). */
+
+/* "/x/reports.jsonl" -> "/x/reports_b2.jsonl"; "/x/prefix" -> "/x/prefix_b2". The suffix goes
+ * BEFORE the extension so a consumer globbing "*.jsonl" still finds every branch's stream. */
+inline std::string branch_suffix_path(const std::string& base, uint8_t branch_id)
+{
+  if (base.empty()) return base;
+  const std::string tag = "_b" + std::to_string(static_cast<unsigned>(branch_id));
+  const size_t slash = base.find_last_of('/');
+  const size_t dot = base.find_last_of('.');
+  const bool extension = dot != std::string::npos && dot + 1 < base.size()
+                         && (slash == std::string::npos ? dot > 0 : dot > slash + 1);
+  return extension ? base.substr(0, dot) + tag + base.substr(dot) : base + tag;
+}
+
+/* A TCP bind endpoint ending in a numeric port gets that port plus branch_id (port 5555 becomes
+ * 5557 for branch 2); anything without a trailing numeric port takes the same "_b<id>" suffix as
+ * a path. Offsetting BY branch_id, not by an ordinal,
+ * keeps the ports distinct for any rx_branches list and leaves branch 0 on the configured port. */
+inline std::string branch_suffix_endpoint(const std::string& base, uint8_t branch_id)
+{
+  if (base.empty()) return base;
+  size_t at = base.size();
+  while (at > 0 && base[at - 1] >= '0' && base[at - 1] <= '9') --at;
+  if (at < base.size() && at > 0 && base[at - 1] == ':') {
+    const unsigned long port = std::strtoul(base.c_str() + at, nullptr, 10);
+    return base.substr(0, at) + std::to_string(port + branch_id);
+  }
+  return base + "_b" + std::to_string(static_cast<unsigned>(branch_id));
+}
+
+/* The configuration one branch's engine is constructed with. With ONE active branch this returns
+ * the base configuration UNCHANGED -- that is the legacy bit-identity requirement, and it is
+ * deliberately keyed on set.n_active rather than on "branch_id == 0", because a single-branch
+ * deployment may name any branch id and must still write exactly the configured
+ * rx_id/out_path/report_path. With several, every field a ReportWriter can collide on (its JSONL
+ * path, the out_path that path falls back to, the ZeroMQ bind endpoint, and the rx_id stamped into
+ * every line) is made distinct. */
+inline PipelineConfig branch_pipeline_config(const PipelineConfig& base,
+                                             const nr_rx_branch_set_t& set, uint8_t branch_id)
+{
+  PipelineConfig out = base;
+  if (set.n_active <= 1) return out;
+  out.rx_id = base.rx_id + "_b" + std::to_string(static_cast<unsigned>(branch_id));
+  out.out_path = branch_suffix_path(base.out_path, branch_id);
+  out.report_path = branch_suffix_path(base.report_path, branch_id);
+  out.report_endpoint = branch_suffix_endpoint(base.report_endpoint, branch_id);
+  return out;
+}
+
+/* The routing decision, and the single most safety-critical rule in P13: a CFR row tagged with a
+ * branch that has no engine must be DROPPED, never folded into another branch's CPI -- that would
+ * corrupt the other branch's coherent window with samples it never measured, which is exactly the
+ * hazard the whole per-branch plan exists to prevent. Returns the engine index (== branch_id), or
+ * -1 meaning "drop".
+ *
+ * NR_ISAC_BRANCH_NONE resolves to the LOWEST active branch. That is the legacy path: it is where
+ * the five still-unmigrated CFR producers land, and with one active branch it is the only engine
+ * there is, so behaviour is exactly today's. With several active branches it is an ATTRIBUTION and
+ * not a measurement -- nr_isac.cc says so loudly, once -- and it disappears as P10's continuation
+ * tags the remaining producers. */
+inline int branch_engine_index(const nr_rx_branch_set_t& set, uint8_t branch_id)
+{
+  if (branch_id == NR_ISAC_BRANCH_NONE) {
+    for (int b = 0; b < NR_RX_BRANCH_MAX; ++b)
+      if (set.b[b].physical_channel >= 0) return b;
+    return -1;
+  }
+  if (branch_id >= NR_RX_BRANCH_MAX) return -1;
+  return set.b[branch_id].physical_channel >= 0 ? static_cast<int>(branch_id) : -1;
+}
 
 inline double slot_duration_s(double scs_hz)
 { return 1e-3 / std::max(1.0, scs_hz / 15000.0); }

@@ -5,6 +5,7 @@
 #include "sensing_engine.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cmath>
 #include <complex>
@@ -25,10 +26,29 @@ extern "C" {
 namespace {
 using namespace nr_isac;
 
-std::unique_ptr<SensingEngine> engine;
+// adaptive_RX_pipeline.md P13: one independent SensingEngine per ACTIVE receive branch, indexed
+// by branch_id. A fixed std::array sized to NR_RX_BRANCH_MAX, NOT a vector packed to the active
+// count: nr_rx_branch_set_t::b[] is itself branch_id-indexed, so with this shape the index IS the
+// identity, "is this branch active" is a null test on the slot, and there is no second mapping
+// table that can fall out of step with the branch set. NR_RX_BRANCH_MAX is 4, so the unused slots
+// cost one null pointer each.
+//
+// `pipeline` stays the BASE parsed configuration. The process-wide queries below (sources_mask,
+// sub-slot policy, AoA antenna count) are branch-independent by construction -- they come from one
+// [sensing] section -- while every engine owns its own per-branch copy of the configuration, made
+// by branch_pipeline_config(). No second PipelineConfig array is kept: SensingEngine takes its
+// config BY VALUE, so a retained copy would be a second source of truth serving nobody.
+std::array<std::unique_ptr<SensingEngine>, NR_RX_BRANCH_MAX> engines;
+uint32_t engines_built = 0;
 PipelineConfig pipeline;
 std::atomic<bool> enabled{false}, started{false};
 uint32_t aoa_antennas = 0;
+// P13: misrouting a CFR row into another branch's coherent window is SILENT corruption, so every
+// refusal is counted and the first one per branch id is logged loudly.
+std::atomic<uint64_t> dropped_unrouted{0};
+std::atomic<uint32_t> logged_unrouted{0};
+std::atomic<uint64_t> untagged_submissions{0};
+std::atomic<bool> logged_untagged_fanin{false};
 
 // adaptive_RX_pipeline.md P03: [sensing] rx_branches / rx_branch_phys_map, foundation only (not
 // yet consulted by the RT read loop -- see nr_isac.h's nr_isac_rx_branches() comment).
@@ -311,27 +331,65 @@ extern "C" void nr_isac_init(void)
     pipeline.admission_window_enabled=true;pipeline.admission_start_slot=start;
     pipeline.admission_end_slot=start+slots;
   }
-  try { engine=std::make_unique<SensingEngine>(pipeline,275,aoa_antennas?aoa_antennas:1); }
-  catch(const std::exception& e){LOG_E(PHY,"SENSING: invalid native configuration: %s\n",e.what());return;}
+  // P13: one engine per active branch, each with its OWN PipelineConfig copy so N engines cannot
+  // interleave into one report file or fight over one ZeroMQ bind. With a single active branch
+  // branch_pipeline_config() returns the base configuration untouched -- that is what keeps a
+  // legacy receiver's rx_id/out_path/report_path exactly what they are today.
+  for (auto& slot : engines) slot.reset();
+  engines_built = 0;
+  for (uint8_t b = 0; b < NR_RX_BRANCH_MAX; ++b) {
+    if (branches.b[b].physical_channel < 0) continue;
+    try {
+      engines[b] = std::make_unique<SensingEngine>(branch_pipeline_config(pipeline, branches, b),
+                                                   275, aoa_antennas ? aoa_antennas : 1);
+    } catch (const std::exception& e) {
+      // A partially built array is not a usable receiver: one branch silently missing would look
+      // like a coverage result rather than a configuration error.
+      LOG_E(PHY, "SENSING: invalid native configuration for branch %u: %s\n", (unsigned)b, e.what());
+      for (auto& slot : engines) slot.reset();
+      engines_built = 0;
+      return;
+    }
+    ++engines_built;
+  }
+  if (!engines_built) {
+    LOG_E(PHY, "SENSING: rx_branches names no active receive branch; sensing disabled\n");
+    return;
+  }
   enabled.store(true,std::memory_order_release);
-  LOG_I(PHY,"SENSING: native Python-parity pipeline enabled, num_ues=%u sources=0x%x separate_DL_UL=1 AoA=%d UL-AoA=%d array_calibration=%d\n",
+  LOG_I(PHY,"SENSING: native Python-parity pipeline enabled, num_ues=%u sources=0x%x separate_DL_UL=1 AoA=%d UL-AoA=%d array_calibration=%d engines=%u\n",
         pipeline.num_ues,pipeline.sources_mask,(int)pipeline.aoa_enable,(int)pipeline.aoa_ul_enable,
-        pipeline.array_calibration.configured);
+        pipeline.array_calibration.configured,engines_built);
 }
 
 extern "C" void nr_isac_start(void)
 {
   bool expected = false;
-  if (!enabled.load() || !engine || !started.compare_exchange_strong(expected, true)) return;
+  if (!enabled.load() || !engines_built || !started.compare_exchange_strong(expected, true)) return;
   try {
-    engine->start();
+    // P13: every branch's engine gets its own accumulation and processing threads here. They share
+    // nothing; one branch with no UL data, or no data at all, simply never wakes its own workers
+    // and cannot reach another branch's.
+    for (auto& slot : engines) if (slot) slot->start();
   } catch (const std::exception& error) {
+    // A partial start is not a usable state. stop() on an engine that never started is a no-op by
+    // contract (running_.exchange(false) is already false), so this is safe on the whole array.
+    for (auto& slot : engines) if (slot) slot->stop();
     started.store(false);
     enabled.store(false);
     LOG_E(PHY, "SENSING: startup failed before CFR admission: %s\n", error.what());
   }
 }
-extern "C" void nr_isac_stop(void){if(engine&&started.exchange(false))engine->stop();}
+extern "C" void nr_isac_stop(void)
+{
+  if (!started.exchange(false)) return;
+  for (auto& slot : engines) if (slot) slot->stop();
+  const unsigned long long unrouted = dropped_unrouted.load(std::memory_order_relaxed);
+  const unsigned long long untagged = untagged_submissions.load(std::memory_order_relaxed);
+  if (unrouted || (untagged && engines_built > 1))
+    LOG_I(PHY, "SENSING: branch routing census: engines=%u dropped_unrouted=%llu untagged=%llu\n",
+          engines_built, unrouted, untagged);
+}
 extern "C" int nr_isac_enabled(void){return enabled.load(std::memory_order_relaxed);}
 extern "C" int nr_isac_source(void){for(int i=0;i<NR_ISAC_SRC_COUNT;++i)if(pipeline.sources_mask&(1u<<i))return i;return NR_ISAC_SRC_CSI_RS;}
 extern "C" int nr_isac_source_enabled(int source){return enabled.load()&&source>=0&&source<NR_ISAC_SRC_COUNT&&(pipeline.sources_mask&(1u<<source));}
@@ -356,11 +414,32 @@ extern "C" void nr_isac_submit_cfr_multi_branch(uint32_t slot,float fraction,int
                                                  uint32_t antennas,uint32_t stride,const uint32_t* k,const uint32_t* l,uint32_t n,float noise,
                                                  uint8_t branch)
 {
-  if(!enabled.load(std::memory_order_relaxed)||!engine||!carrier||!h||!k||!l||!n)return;
+  if(!enabled.load(std::memory_order_relaxed)||!engines_built||!carrier||!h||!k||!l||!n)return;
   if(source<0||source>=NR_ISAC_SRC_COUNT)source=nr_isac_source();
   if(!nr_isac_source_enabled(source))return;
+  // P13 routing. Decided BEFORE the CFR is packed, so a refused row costs nothing, and gated on the
+  // ENGINE SLOT as well as on the branch set, so the two can never disagree about what exists.
+  const int index=branch_engine_index(branches,branch);
+  if(index<0||!engines[index]){
+    // Never fall back to branch 0: folding a branch's rows into another branch's coherent window is
+    // exactly the cross-contamination this plan exists to prevent, and it would be invisible
+    // downstream. Drop, count, and say so once per offending branch id.
+    dropped_unrouted.fetch_add(1,std::memory_order_relaxed);
+    const uint32_t bit=branch<32u?(1u<<branch):0x80000000u;
+    if(!(logged_unrouted.fetch_or(bit,std::memory_order_relaxed)&bit))
+      LOG_E(PHY,"SENSING: CFR tagged receive branch %u has no engine (not named in rx_branches); "
+                "those rows are DROPPED, never folded into another branch\n",(unsigned)branch);
+    return;
+  }
+  if(branch==NR_ISAC_BRANCH_NONE){
+    untagged_submissions.fetch_add(1,std::memory_order_relaxed);
+    if(engines_built>1&&!logged_untagged_fanin.exchange(true,std::memory_order_relaxed))
+      LOG_W(PHY,"SENSING: %u branches active but a CFR producer still submits untagged rows; they "
+                "are ATTRIBUTED to branch %d, not measured there. Resolved when P10's remaining "
+                "producers carry branch identity\n",engines_built,index);
+  }
   antennas=std::max(1u,antennas);stride=std::max(stride,n);static thread_local std::vector<std::complex<float>> packed;
   const size_t total=(size_t)antennas*n;if(packed.size()<total)packed.resize(total);
   for(uint32_t a=0;a<antennas;++a){const float* input=h+(size_t)2*a*stride;for(uint32_t i=0;i<n;++i)packed[(size_t)a*n+i]={input[2*i],input[2*i+1]};}
-  engine->submit(slot,fraction,static_cast<nr_isac_source_t>(source),*carrier,packed.data(),antennas,k,l,n,noise,branch);
+  engines[index]->submit(slot,fraction,static_cast<nr_isac_source_t>(source),*carrier,packed.data(),antennas,k,l,n,noise,branch);
 }
