@@ -56,6 +56,7 @@ extern __thread uint32_t nr_dl_chest_nvar_ant[];
 #include "executables/nr-uesoftmodem.h"
 #include "openair2/LAYER2/NR_MAC_COMMON/nr_mac_common.h"
 #include "PHY/NR_UE_ISAC/nr_isac.h" // nr_isac_rx_branches (P07 branch view)
+#include "nr_passive_harq_tag.h" // nr_pdsch_passive_harq_tag (P09 per-branch LDPC id)
 
 /* ---- INNER COST BREAKDOWN (ISAC_PDCCH_TIMING=1, shares the blind monitor's switch) -------------
  * The outer probe in nr_pdcch_blind_monitor_rt.c measures this whole function as ONE ~774 us stage,
@@ -193,10 +194,16 @@ void nr_pdsch_passive_parmset_dump(void)
   pthread_mutex_unlock(&g_parmset_lock);
 }
 
-// Distinct from the attached path's 1000 + harq_pid (phy_procedures_nr_ue.c) and from
-// nr_dlsch_decoding()'s 2*harq_pid + cw_idx, so a hardware LDPC accelerator's per-harq_unique_pid
-// segment buffers can never be shared between a real HARQ process and an overheard one.
-#define NR_PDSCH_PASSIVE_HARQ_TAG_BASE 2000
+// The harq_unique_pid namespace map, the per-branch stride and the bound that keeps this range
+// clear of the next submitter type's now live in nr_passive_harq_tag.h (P09). Kept out of this file
+// so the stride and the bound it has to satisfy are stated in one place.
+
+/* P09: which branch the armed view decodes FOR. Declared up here, rather than with the other
+ * t_view_* thread-locals below, because passive_ldpc_decode() reads it to namespace this job's
+ * harq_unique_pid. Set by nr_pdsch_passive_branch_view() before every decode on this thread; the
+ * in-line (non-deferred) RT path never arms a view and never fans out, so the initialiser 0 is its
+ * correct value -- see docs/passive_branch_namespace_audit.md sec 5.1. */
+static __thread uint8_t t_view_branch = 0;
 
 // ---------------------------------------------------------------------------------------------
 // Private HARQ context. One per decoding thread: the RT tap runs from the UE's per-slot RX thread,
@@ -700,7 +707,9 @@ static bool passive_ldpc_decode(PHY_VARS_NR_UE *ue,
 
   h->processedSegments = 0;
 
-  TB_parameters.harq_unique_pid = NR_PDSCH_PASSIVE_HARQ_TAG_BASE + dlsch_config->harq_process_nbr;
+  /* P09: strided by branch. P06a fans the same occasion out to N branches, each with its own
+   * independently numbered harq_process_nbr, so the un-strided id aliased across branches. */
+  TB_parameters.harq_unique_pid = nr_pdsch_passive_harq_tag(t_view_branch, dlsch_config->harq_process_nbr);
   TB_parameters.G = G;
   TB_parameters.nb_rb = number_rbs;
   TB_parameters.Qm = cw->qamModOrder;
@@ -894,7 +903,7 @@ static void nr_slot_fep_ant_task(void *arg)
 static __thread PHY_VARS_NR_UE *t_view_ue = NULL;
 static __thread c16_t *t_view_rxdata[1];
 static __thread int t_view_phys = -1;   // >= 0 while a view is armed on this thread
-static __thread uint8_t t_view_branch = 0; // P06a: which branch the armed view decodes FOR
+/* t_view_branch (P06a) is declared near NR_PDSCH_PASSIVE_HARQ_TAG_BASE above: the LDPC tag needs it. */
 static _Atomic uint64_t g_view_unsupported_multilayer = 0;
 /* P06a: the same rejection, attributed to the branch whose view was armed. The aggregate above is
  * kept as-is so every existing reader (replay summary, BRANCHVIEW line) is unchanged. */

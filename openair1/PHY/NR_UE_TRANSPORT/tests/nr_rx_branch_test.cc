@@ -23,6 +23,7 @@
 #include <gtest/gtest.h>
 extern "C" {
 #include "nr_rx_branch.h"
+#include "nr_passive_harq_tag.h"
 #include "common/utils/LOG/log.h"
 #include "common/config/config_userapi.h"
 }
@@ -275,6 +276,78 @@ TEST(RxBranchDispatch, StaleAfterLoseLockOrDiscontinuityAndFailsSafe) {
   EXPECT_EQ(nr_rx_branch_dispatch_is_stale(&set, &unknown), 1); // names no active branch
   EXPECT_EQ(nr_rx_branch_dispatch_is_stale(nullptr, &d[0]), 1);
   EXPECT_EQ(nr_rx_branch_dispatch_is_stale(&set, nullptr), 1);
+}
+
+/* ---- P09: per-branch harq_unique_pid namespacing (adaptive_RX_pipeline.md Stage 2) -------------
+ * Lives in this target rather than its own because the identity being folded into the id IS the
+ * branch identity this file already tests, and nr_passive_harq_tag.h is header-only. The property
+ * under test is the one a hardware LDPC accelerator needs: two transport blocks that can be in
+ * flight at the same moment never carry the same id. */
+
+TEST(PassiveHarqTag, SameProcessDifferentBranchesDoNotAlias) {
+  /* The exact P06a fan-out case: one occasion, one grant, N branches. Before P09 every one of
+   * these was 2000 + 7. */
+  uint32_t seen[NR_RX_BRANCH_MAX];
+  for (int b = 0; b < NR_RX_BRANCH_MAX; b++) {
+    seen[b] = nr_pdsch_passive_harq_tag((uint8_t)b, 7);
+    for (int prev = 0; prev < b; prev++)
+      EXPECT_NE(seen[b], seen[prev]) << "branch " << b << " aliases branch " << prev;
+  }
+}
+
+TEST(PassiveHarqTag, AllBranchProcessPairsAreDistinct) {
+  /* Stronger than the above: the whole (branch x harq process) product must be injective, since
+   * two branches decoding DIFFERENT grants concurrently is just as common as the same one. */
+  bool used[NR_PASSIVE_HARQ_NAMESPACE_SPAN] = {false};
+  for (int b = 0; b < NR_RX_BRANCH_MAX; b++) {
+    for (int h = 0; h < (int)NR_PDSCH_PASSIVE_HARQ_BRANCH_STRIDE; h++) {
+      const uint32_t tag = nr_pdsch_passive_harq_tag((uint8_t)b, (uint8_t)h);
+      const uint32_t off = tag - NR_PDSCH_PASSIVE_HARQ_TAG_BASE;
+      ASSERT_LT(off, NR_PASSIVE_HARQ_NAMESPACE_SPAN);
+      EXPECT_FALSE(used[off]) << "collision at branch=" << b << " harq=" << h;
+      used[off] = true;
+    }
+  }
+}
+
+TEST(PassiveHarqTag, BranchZeroReproducesTheLegacyTag) {
+  /* Regression pin. Legacy / single-branch mode must emit the literal pre-P09 expression,
+   * 2000 + harq_process_nbr -- this is what the P02 replay's byte-identical result rests on. */
+  for (int h = 0; h < 16; h++)
+    EXPECT_EQ(nr_pdsch_passive_harq_tag(0, (uint8_t)h), 2000u + (uint32_t)h);
+}
+
+TEST(PassiveHarqTag, OutOfRangeInputsStayInsideThisTypesNamespace) {
+  /* The guard, not the happy path. branch_id comes from a producer-filled job and
+   * harq_process_nbr from a BLINDLY decoded DCI, so neither is trusted: a malformed value must
+   * stay below the next submitter type's base (3000, the passive DL re-encode) rather than
+   * aliasing a different submitter's transport block. */
+  const uint32_t limit = NR_PDSCH_PASSIVE_HARQ_TAG_BASE + NR_PASSIVE_HARQ_NAMESPACE_SPAN;
+  for (int b = 0; b < 256; b++) {
+    for (int h = 0; h < 256; h++) {
+      const uint32_t tag = nr_pdsch_passive_harq_tag((uint8_t)b, (uint8_t)h);
+      EXPECT_GE(tag, NR_PDSCH_PASSIVE_HARQ_TAG_BASE);
+      EXPECT_LT(tag, limit) << "branch=" << b << " harq=" << h << " escaped the namespace";
+    }
+  }
+  /* And an out-of-range branch must not be silently mapped onto branch 0's live ids in a way that
+   * looks legal: it folds, which is the documented behaviour, so assert the fold rather than
+   * pretend it cannot happen. */
+  EXPECT_EQ(nr_pdsch_passive_harq_tag(NR_RX_BRANCH_MAX, 3), nr_pdsch_passive_harq_tag(0, 3));
+}
+
+TEST(PassiveHarqTag, StrideBoundHoldsForTheConfiguredBranchCount) {
+  /* The same arithmetic the header's static_assert makes at compile time, restated at runtime so a
+   * future NR_RX_BRANCH_MAX/stride change is reported by the test suite and not only by a build
+   * failure somebody might "fix" by widening the constant. */
+  const uint32_t highest =
+      NR_PDSCH_PASSIVE_HARQ_TAG_BASE
+      + (NR_RX_BRANCH_MAX - 1) * NR_PDSCH_PASSIVE_HARQ_BRANCH_STRIDE
+      + (NR_PDSCH_PASSIVE_HARQ_BRANCH_STRIDE - 1);
+  EXPECT_EQ(highest, 2063u); // 2000 + 3*16 + 15, with NR_RX_BRANCH_MAX == 4
+  EXPECT_LT(highest, NR_PDSCH_PASSIVE_HARQ_TAG_BASE + NR_PASSIVE_HARQ_NAMESPACE_SPAN);
+  EXPECT_EQ(highest, nr_pdsch_passive_harq_tag(NR_RX_BRANCH_MAX - 1,
+                                               NR_PDSCH_PASSIVE_HARQ_BRANCH_STRIDE - 1));
 }
 
 int main(int argc, char **argv)
