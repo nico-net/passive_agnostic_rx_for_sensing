@@ -68,7 +68,14 @@ extern "C" {
  * data[c * samples_per_buf + n]. */
 typedef struct {
   c16_t *data;               /* n_ch * samples_per_buf, owned by the pool, allocated once at init;
-                                 channel-major: channel c sample n is data[c*samples_per_buf + n] */
+                                 channel-major: channel c sample n is data[c*samples_per_buf + n].
+                                 CONSUMERS MUST GO THROUGH nr_rx_span_channel()/
+                                 nr_rx_span_for_branch() TO READ THIS -- in C, a const
+                                 nr_rx_span_t* (what take() returns) does not make the pointee
+                                 `data` const, so nothing stops code reaching in here directly and
+                                 reading (or writing) another branch's channel. The accessors are
+                                 the only enforcement there is; treat direct access to this field
+                                 outside this module as a bug. */
   uint64_t first_sample_ts;  /* producer-set on acquire; plan sec 3.2 "64-bit first-sample timestamp" */
   uint64_t absolute_slot;    /* producer-set on acquire; plan sec 3.2 "absolute slot" */
   uint32_t acq_epoch;        /* producer-set on acquire; plan sec 3.2 "RF continuity epoch" */
@@ -79,7 +86,18 @@ typedef struct {
                                  signatures */
   int samples_per_buf;       /* set once at pool init, constant; the channel stride */
   int buf_id;                /* index into the pool's buffer array; -1 = invalid/unacquired */
-  int refcount;               /* number of branches currently holding this span */
+  int refcount;               /* number of branches currently holding this span; always equal to
+                                 __builtin_popcount(holders) -- asserted at every point that
+                                 touches either (fix round 1, review IMPORTANT finding) */
+  uint8_t holders;            /* bit b set = branch b currently holds a ref on this span (queued in
+                                 its ring and/or taken-but-not-released). NR_RX_BRANCH_MAX is 4, so
+                                 a byte is enough. This is what makes release() safe: refcount alone
+                                 is one shared integer and cannot tell WHICH branches hold a share,
+                                 so releasing through the wrong (but still active) branch_id would
+                                 silently free a span another branch is still reading. holders is
+                                 the per-branch ownership tag that closes that hole -- publish() sets
+                                 the bit for every active branch, release()/drop_oldest() clear it,
+                                 and both reject/no-op if the bit is already clear. */
 } nr_rx_span_t;
 
 /* Channel pointer + identity triple, returned by nr_rx_span_for_branch() so a branch cannot
@@ -130,7 +148,15 @@ typedef struct {
                                  bookkeeping above -- the RT loop publishes once per slot (~2 kHz),
                                  nowhere near enough to make per-branch lock-free rings worth the
                                  complexity. Revisit if profiling ever shows contention. */
+
+  uint32_t magic;            /* fix round 1 (review MINOR): set to NR_RX_SPAN_POOL_MAGIC on a
+                                 successful init(), cleared to 0 by destroy(). init() on a struct
+                                 that already carries the magic is rejected (-1) instead of leaking
+                                 the live bufs/storage/free_list allocations and re-initializing a
+                                 mutex that may still be locked/in use. */
 } nr_rx_span_pool_t;
+
+#define NR_RX_SPAN_POOL_MAGIC 0x53504e31u /* "SPN1" -- arbitrary, just needs to not be 0 */
 
 /* Allocates bufs/free_list and initializes the pool for n_ch channels, samples_per_buf samples
  * per channel per buffer, n_buf total buffers and hold_budget spans held per active branch.
@@ -141,9 +167,13 @@ typedef struct {
  *
  * Rejects (returns -1, LOG_E(PHY, ...), *pool left zeroed) when: pool/n_ch/samples_per_buf/n_buf/
  * hold_budget are invalid (<=0, hold_budget > NR_RX_SPAN_POOL_MAX_HOLD, n_ch > NR_RX_BRANCH_MAX),
- * active_branches has no bit set or a bit >= NR_RX_BRANCH_MAX, or n_buf < 1 + n_active_branches *
+ * active_branches has no bit set or a bit >= NR_RX_BRANCH_MAX, n_buf < 1 + n_active_branches *
  * hold_budget (the capacity precondition that makes producer starvation impossible by
- * construction -- see nr_rx_span_pool_acquire()).
+ * construction -- see nr_rx_span_pool_acquire()), or pool is already a live/initialized pool
+ * (fix round 1: double-init is rejected rather than leaking the previous bufs/storage/free_list
+ * allocations and re-initializing a mutex that may still be in use -- *pool is left UNTOUCHED,
+ * not zeroed, in this one case, since zeroing it would itself discard the live allocation
+ * pointers needed to ever free them).
  * Returns 0 on success. */
 int nr_rx_span_pool_init(nr_rx_span_pool_t *pool, int n_ch, int samples_per_buf, int n_buf,
                           int hold_budget, uint8_t active_branches, uint64_t sample_rate_hz);
@@ -165,10 +195,11 @@ void nr_rx_span_pool_destroy(nr_rx_span_pool_t *pool);
  * aborting. */
 nr_rx_span_t *nr_rx_span_pool_acquire(nr_rx_span_pool_t *pool);
 
-/* Publishes buf (previously returned by acquire()): sets refcount = n_active_branches and enqueues
- * buf_id into every active branch's ring. Per branch, if that branch's ring is already at
- * hold_budget, the OLDEST entry in THAT branch's ring is released first (refcount--, and if it
- * hits 0 the buffer returns to the free list) and branch.samples_dropped += buf->n_samples,
+/* Publishes buf (previously returned by acquire()): sets refcount = n_active_branches, sets
+ * buf->holders' bit for every active branch, and enqueues buf_id into every active branch's ring.
+ * Per branch, if that branch's ring is already at hold_budget, the OLDEST entry in THAT branch's
+ * ring is released first (that branch's holders bit cleared, refcount--, and if it hits 0 the
+ * buffer returns to the free list) and branch.samples_dropped += buf->n_samples,
  * branch.dropped_spans++ -- other branches' rings are untouched (plan sec 4: "a slow branch must
  * not ... hold all other branches indefinitely"). No-op (LOG_E) if buf is NULL or not a buffer
  * this pool owns. */
@@ -181,9 +212,14 @@ void nr_rx_span_pool_publish(nr_rx_span_pool_t *pool, nr_rx_span_t *buf);
 const nr_rx_span_t *nr_rx_span_pool_take(nr_rx_span_pool_t *pool, uint8_t branch_id);
 
 /* Decrements span's refcount on branch_id's behalf; when it reaches 0 the buffer is returned to
- * the free list. Returns 0 on success, -1 (LOG_E, no state change) if span/pool is NULL, branch_id
- * is out of range, or span's refcount is already 0 (double release / release of a span this branch
- * never took) -- rejected rather than silently underflowing into a double free. */
+ * the free list. Returns 0 on success, -1 (LOG_E naming branch_id and buf_id, no state change) if
+ * span/pool is NULL, branch_id is out of range, OR branch_id's bit in span->holders is already
+ * clear -- this covers both a plain double release AND (fix round 1, review IMPORTANT finding)
+ * releasing through the WRONG active branch_id: refcount alone is one shared integer and cannot
+ * tell which branches hold a share, so without the per-branch holders bitmask a release through
+ * any other active branch_id would have silently decremented a real reference a different branch
+ * still needs -- exactly the stale-read hazard this module exists to prevent. The decrement is
+ * gated on holders, not attempted first and rolled back. */
 int nr_rx_span_pool_release(nr_rx_span_pool_t *pool, uint8_t branch_id, const nr_rx_span_t *span);
 
 /* Returns the channel pointer for branch's own physical_channel within span, plus the

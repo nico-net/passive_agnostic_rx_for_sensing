@@ -32,6 +32,13 @@ int nr_rx_span_pool_init(nr_rx_span_pool_t *pool, int n_ch, int samples_per_buf,
     LOG_E(PHY, "nr_rx_span_pool_init: NULL pool\n");
     return -1;
   }
+  /* fix round 1 (review MINOR): reject double-init instead of leaking the previous bufs/storage/
+   * free_list allocations and re-initializing a mutex that may still be in use. Deliberately does
+   * NOT touch *pool in this one rejection case -- the whole point is to leave the live pool alone. */
+  if (pool->magic == NR_RX_SPAN_POOL_MAGIC) {
+    LOG_E(PHY, "nr_rx_span_pool_init: pool is already initialized (call nr_rx_span_pool_destroy() first)\n");
+    return -1;
+  }
   memset(pool, 0, sizeof(*pool));
 
   if (n_ch <= 0 || n_ch > NR_RX_BRANCH_MAX) {
@@ -104,6 +111,7 @@ int nr_rx_span_pool_init(nr_rx_span_pool_t *pool, int n_ch, int samples_per_buf,
   pool->n_free = n_buf;
 
   pthread_mutex_init(&pool->lock, NULL);
+  pool->magic = NR_RX_SPAN_POOL_MAGIC;
   return 0;
 }
 
@@ -136,6 +144,9 @@ nr_rx_span_t *nr_rx_span_pool_acquire(nr_rx_span_pool_t *pool)
   int buf_id = pool->free_list[--pool->n_free];
   nr_rx_span_t *buf = &pool->bufs[buf_id];
   assert(buf->refcount == 0); /* free list must only ever hold released buffers */
+  assert((int)__builtin_popcount(buf->holders) == buf->refcount); /* fix round 1: refcount/holders
+                                                                       agreement, checked at every
+                                                                       touch point */
   buf->n_samples = 0;
   buf->first_sample_ts = 0;
   buf->absolute_slot = 0;
@@ -144,12 +155,17 @@ nr_rx_span_t *nr_rx_span_pool_acquire(nr_rx_span_pool_t *pool)
   return buf;
 }
 
-/* Caller holds pool->lock. Releases branch bs's oldest ring entry (drop policy). */
-static void drop_oldest(nr_rx_span_pool_t *pool, nr_rx_span_branch_state_t *bs)
+/* Caller holds pool->lock. Releases branch_id's oldest ring entry (drop policy): clears
+ * branch_id's own bit in the dropped buffer's holders mask before decrementing refcount, exactly
+ * like an explicit release() (fix round 1) -- a drop is branch_id relinquishing its own share,
+ * not some other branch's. */
+static void drop_oldest(nr_rx_span_pool_t *pool, nr_rx_span_branch_state_t *bs, uint8_t branch_id)
 {
   int old_id = bs->buf_id[0];
   nr_rx_span_t *old_buf = &pool->bufs[old_id];
+  old_buf->holders &= (uint8_t)~(1u << branch_id);
   old_buf->refcount--;
+  assert((int)__builtin_popcount(old_buf->holders) == old_buf->refcount);
   bs->samples_dropped += old_buf->n_samples;
   bs->dropped_spans++;
   if (old_buf->refcount == 0)
@@ -170,14 +186,17 @@ void nr_rx_span_pool_publish(nr_rx_span_pool_t *pool, nr_rx_span_t *buf)
   }
   pthread_mutex_lock(&pool->lock);
   buf->refcount = pool->n_active_branches;
+  buf->holders = 0;
   for (int i = 0; i < NR_RX_BRANCH_MAX; i++) {
     if (!pool->branch_active[i])
       continue;
     nr_rx_span_branch_state_t *bs = &pool->branch[i];
     if (bs->n_held == pool->hold_budget)
-      drop_oldest(pool, bs);
+      drop_oldest(pool, bs, (uint8_t)i);
     bs->buf_id[bs->n_held++] = buf->buf_id;
+    buf->holders |= (uint8_t)(1u << i);
   }
+  assert((int)__builtin_popcount(buf->holders) == buf->refcount);
   pthread_mutex_unlock(&pool->lock);
 }
 
@@ -212,12 +231,22 @@ int nr_rx_span_pool_release(nr_rx_span_pool_t *pool, uint8_t branch_id, const nr
   }
   pthread_mutex_lock(&pool->lock);
   nr_rx_span_t *buf = &pool->bufs[span->buf_id];
-  if (buf->refcount <= 0) {
+  /* fix round 1 (review IMPORTANT finding): gate the decrement on branch_id's OWN bit in
+   * buf->holders, not just buf->refcount > 0. refcount alone is one shared integer and cannot
+   * tell which branches hold a share -- without this check, releasing through any other ACTIVE
+   * branch_id would silently decrement a reference a different branch still needs (the exact
+   * stale-read hazard this module exists to prevent). This also covers the plain double-release
+   * case: once a branch's bit is cleared, releasing again through the same branch_id is rejected
+   * the same way. */
+  if (!(buf->holders & (1u << branch_id))) {
     pthread_mutex_unlock(&pool->lock);
-    LOG_E(PHY, "nr_rx_span_pool_release: double release of buf_id %d\n", buf->buf_id);
+    LOG_E(PHY, "nr_rx_span_pool_release: branch %u does not hold a ref on buf_id %d (double "
+          "release, or release through the wrong branch_id)\n", branch_id, buf->buf_id);
     return -1;
   }
+  buf->holders &= (uint8_t)~(1u << branch_id);
   buf->refcount--;
+  assert((int)__builtin_popcount(buf->holders) == buf->refcount);
   if (buf->refcount == 0)
     pool->free_list[pool->n_free++] = buf->buf_id;
   pthread_mutex_unlock(&pool->lock);
