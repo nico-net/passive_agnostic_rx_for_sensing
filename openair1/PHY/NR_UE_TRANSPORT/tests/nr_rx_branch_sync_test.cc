@@ -89,22 +89,61 @@ TEST(RxBranchSyncOnSlot, ForwardAdvanceNoWrap) {
 }
 
 // ---- on_slot(): a small backward step that still crosses a frame-index boundary counts as a
-// frame wrap (the class of event G1 test 4 injects), and the state DOES advance.
+// frame wrap (the class of event G1 test 4 injects), is ACCEPTED (return 0), but per fix round 1
+// last_absolute_slot is a HIGH-WATER MARK and must NOT regress to the smaller value.
 TEST(RxBranchSyncOnSlot, SmallBackwardFrameIndexDecreaseCountsAsWrap) {
   nr_rx_branch_sync_t s = {};
   ASSERT_EQ(nr_rx_branch_sync_on_slot(&s, 21, 20), 0); // frame 1
   EXPECT_EQ(nr_rx_branch_sync_on_slot(&s, 19, 20), 0); // frame 0: backward by 2, within 1 frame (20)
-  EXPECT_EQ(s.last_absolute_slot, 19);
+  EXPECT_EQ(s.last_absolute_slot, 21); // high-water mark: does NOT regress to 19
   EXPECT_EQ(s.frame_wraps, 1u);
 }
 
-// ---- on_slot(): a small backward step that does NOT cross a frame-index boundary is not a wrap.
+// ---- on_slot(): a small backward step that does NOT cross a frame-index boundary is not a wrap,
+// and (fix round 1) does not regress the high-water mark either.
 TEST(RxBranchSyncOnSlot, SmallBackwardStepWithinSameFrameIsNotAWrap) {
   nr_rx_branch_sync_t s = {};
   ASSERT_EQ(nr_rx_branch_sync_on_slot(&s, 15, 20), 0); // frame 0
   EXPECT_EQ(nr_rx_branch_sync_on_slot(&s, 12, 20), 0); // frame 0 still
-  EXPECT_EQ(s.last_absolute_slot, 12);
+  EXPECT_EQ(s.last_absolute_slot, 15); // high-water mark: does NOT regress to 12
   EXPECT_EQ(s.frame_wraps, 0u);
+}
+
+// ---- Fix round 1 (controller-ruled): last_absolute_slot never regresses, even across a small
+// backward excursion, and a later NEW HIGH still advances it correctly afterwards.
+TEST(RxBranchSyncOnSlot, HighWaterMarkNeverRegressesOnAcceptedBackwardStep) {
+  nr_rx_branch_sync_t s = {};
+  ASSERT_EQ(nr_rx_branch_sync_on_slot(&s, 100, 20), 0);
+  ASSERT_EQ(nr_rx_branch_sync_on_slot(&s, 90, 20), 0);  // accepted small backward
+  EXPECT_EQ(s.last_absolute_slot, 100);                 // still the mark, not regressed to 90
+  ASSERT_EQ(nr_rx_branch_sync_on_slot(&s, 105, 20), 0); // genuine new high
+  EXPECT_EQ(s.last_absolute_slot, 105);                 // advances correctly
+}
+
+// ---- Fix round 1 (controller-ruled), the actual defect this guards against: the coordinator's
+// literal proposed test -- "advance to slot N, deliver N-2, then deliver N-1 and assert it is
+// rejected" -- cannot be satisfied by ANY monotonic distance-from-high-water-mark tolerance rule:
+// N-1 is numerically CLOSER to the mark (distance 1) than the already-accepted N-2 (distance 2),
+// so a rule that accepts the farther value cannot then reject the closer one without an extra
+// state dimension the ruling's own "exactly as today" / one-sentence-header constraints rule out
+// (see task-P05-report.md's Fix round 1 section for the full argument). This test instead proves
+// the property the ruling's bug description actually describes: after an accepted small-backward
+// excursion, the REJECT BOUNDARY does not silently shift down with a regressed reference. Under
+// the PRE-fix code, last_absolute_slot would become 98 after the second call below, so 79 --
+// really 21 below the true mark of 100, i.e. genuinely out-of-order -- would land only 19 below
+// the (wrongly) regressed 98 and be WRONGLY ACCEPTED. Post-fix, 79 is correctly rejected because
+// the mark never moved off 100.
+TEST(RxBranchSyncOnSlot, HighWaterMarkDoesNotRegressRejectBoundaryAfterSmallBackwardExcursion) {
+  nr_rx_branch_sync_t s = {};
+  ASSERT_EQ(nr_rx_branch_sync_on_slot(&s, 100, 20), 0);       // establish high-water mark = 100
+  ASSERT_EQ(nr_rx_branch_sync_on_slot(&s, 98, 20), 0);        // accepted small backward (per current rule)
+  ASSERT_EQ(s.last_absolute_slot, 100) << "mark must not regress to 98";
+
+  EXPECT_EQ(nr_rx_branch_sync_on_slot(&s, 79, 20), -1) << "79 is 21 below the TRUE mark (100), "
+                                                           "> slots_per_frame=20 -- must reject, "
+                                                           "not be wrongly re-admitted via a "
+                                                           "regressed reference of 98";
+  EXPECT_EQ(s.last_absolute_slot, 100) << "rejected call must not change state";
 }
 
 // ---- on_slot(): backward by MORE than one frame is rejected, -1, and does NOT advance. This is
@@ -122,7 +161,7 @@ TEST(RxBranchSyncOnSlot, ExactlyOneFrameBackwardIsAcceptedNotRejected) {
   nr_rx_branch_sync_t s = {};
   ASSERT_EQ(nr_rx_branch_sync_on_slot(&s, 100, 20), 0);
   EXPECT_EQ(nr_rx_branch_sync_on_slot(&s, 80, 20), 0); // backward by exactly 20 == slots_per_frame
-  EXPECT_EQ(s.last_absolute_slot, 80);
+  EXPECT_EQ(s.last_absolute_slot, 100); // high-water mark: does NOT regress to 80
 }
 
 TEST(RxBranchSyncOnSlot, RejectsNullOrInvalidSlotsPerFrame) {

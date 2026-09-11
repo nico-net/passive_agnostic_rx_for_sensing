@@ -77,9 +77,12 @@ typedef struct {
                                          (executables/nr-ue.c:1046 and callers) -- a per-branch
                                          digital frame-boundary correction. Caller-owned like
                                          timing_offset_samples above; cleared on reset(). */
-  int64_t last_absolute_slot;         /* last absolute_slot seen by nr_rx_branch_sync_on_slot();
-                                         0 before the first call. NOT cleared by reset() -- see
-                                         that function's comment for why. */
+  int64_t last_absolute_slot;         /* HIGH-WATER MARK (fix round 1, controller-ruled): the
+                                         largest absolute_slot ever passed to
+                                         nr_rx_branch_sync_on_slot(); it only advances, never
+                                         regresses -- an accepted small-backward/frame-wrap step
+                                         does NOT lower it. 0 before the first call. NOT cleared by
+                                         reset() -- see that function's comment for why. */
   uint32_t frame_wraps;               /* lifetime count of frame-index decreases observed by
                                          nr_rx_branch_sync_on_slot() (the "inject frame wrap" half
                                          of G1 test 4). NOT cleared by reset(), for the same reason
@@ -118,20 +121,36 @@ typedef struct {
  * call with s == NULL (no-op). */
 void nr_rx_branch_sync_reset(nr_rx_branch_sync_t *s);
 
-/* Advances s->last_absolute_slot to absolute_slot and counts a frame wrap
- * (s->frame_wraps++) whenever the frame index (absolute_slot / slots_per_frame, integer
- * division) is LOWER than the frame index last_absolute_slot was in -- the "inject frame wrap"
- * half of G1 test 4. Rejects (returns -1, LOG_E naming the delta, state UNCHANGED -- neither
- * last_absolute_slot nor frame_wraps advance) when absolute_slot moves backwards by MORE than one
- * frame (i.e. last_absolute_slot - absolute_slot > slots_per_frame): this is the out-of-order-job
- * defect class recorded in memory as "unsigned slot delta breaks concurrent CPI" -- a job that
- * arrived out of sequence from a concurrent producer, not a legitimate frame-boundary event. A
- * small backward step (at most one frame) is treated as an ordinary frame wrap, not an error --
- * this module has no notion of the real SFN's own wrap modulus (e.g. 1024 frames), so it is the
- * CALLER's job to pass an absolute_slot domain in which a backward step of at most one frame is
- * the only way a legitimate wrap can look (see docs/passive_branch_wiring_plan.md for how the
- * real nr-ue.c per-slot loop's absolute_slot maps onto this). Rejects (returns -1, no state
- * change) if s is NULL or slots_per_frame <= 0. Returns 0 on success. */
+/* Counts a frame wrap (s->frame_wraps++) whenever the frame index (absolute_slot /
+ * slots_per_frame, integer division) is LOWER than the frame index s->last_absolute_slot was in
+ * -- the "inject frame wrap" half of G1 test 4. Rejects (returns -1, LOG_E naming the delta,
+ * state UNCHANGED) when absolute_slot moves backwards by MORE than one frame (i.e.
+ * last_absolute_slot - absolute_slot > slots_per_frame): this is the out-of-order-job defect
+ * class recorded in memory as "unsigned slot delta breaks concurrent CPI" -- a job that arrived
+ * out of sequence from a concurrent producer, not a legitimate frame-boundary event. A small
+ * backward step (at most one frame) is accepted (returns 0) and treated as an ordinary frame
+ * wrap, not an error -- this module has no notion of the real SFN's own wrap modulus (e.g. 1024
+ * frames), so it is the CALLER's job to pass an absolute_slot domain in which a backward step of
+ * at most one frame is the only way a legitimate wrap can look (see
+ * docs/passive_branch_wiring_plan.md for how the real nr-ue.c per-slot loop's absolute_slot maps
+ * onto this).
+ *
+ * s->last_absolute_slot ITSELF (fix round 1, controller-ruled) is updated to absolute_slot ONLY
+ * WHEN absolute_slot EXCEEDS its current value -- an accepted small-backward step never lowers
+ * it. Before this rule, an accepted backward step lowered last_absolute_slot, so a later job
+ * whose value fell between the old (higher) and new (lower) one would compute a positive delta
+ * against the lowered reference and be read as ordinary forward progress with no backward check
+ * at all -- re-admitting the exact defect class this function exists to reject (see
+ * nr_rx_branch_sync_t.last_absolute_slot's field comment, and this task's Fix round 1 report for
+ * why the coordinator's literal "N, then N-2, then reject N-1" test cannot be satisfied by any
+ * monotonic distance-from-high-water-mark tolerance rule -- N-1 is numerically CLOSER to the mark
+ * than the already-accepted N-2, so no such rule can reject the closer value while accepting the
+ * farther one; RxBranchSyncOnSlot.HighWaterMarkDoesNotRegressRejectBoundaryAfterSmallBackward
+ * Excursion demonstrates the actual property instead: the reject boundary itself does not
+ * silently shift down after an accepted excursion).
+ *
+ * Rejects (returns -1, no state change) if s is NULL or slots_per_frame <= 0. Returns 0 on
+ * success. */
 int nr_rx_branch_sync_on_slot(nr_rx_branch_sync_t *s, int64_t absolute_slot, int32_t slots_per_frame);
 
 /* True (1) iff s's epoch snapshot (snap_lock_epoch/snap_acq_epoch) no longer matches branch's

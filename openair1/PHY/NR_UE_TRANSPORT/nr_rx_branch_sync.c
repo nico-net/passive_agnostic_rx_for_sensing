@@ -57,7 +57,18 @@ int nr_rx_branch_sync_on_slot(nr_rx_branch_sync_t *s, int64_t absolute_slot, int
   if (new_frame < prev_frame)
     s->frame_wraps++;
 
-  s->last_absolute_slot = absolute_slot;
+  /* Fix round 1 (controller-ruled): last_absolute_slot is a HIGH-WATER MARK -- it only ever
+   * advances, never regresses, even on an accepted small-backward (frame-wrap) step above. Before
+   * this fix, an accepted backward step lowered last_absolute_slot, so a LATER job whose value
+   * fell between the old (higher) and new (lower) value would compute a POSITIVE delta against
+   * the lowered reference and sail through the forward-progress path above with no backward/
+   * out-of-order check at all -- silently re-admitting the exact "unsigned slot delta breaks
+   * concurrent CPI" defect class this function exists to reject. Ratcheting means every future
+   * call is always evaluated against the TRUE historical maximum, so a value below it always
+   * takes the backward/tolerance-checked branch, never the unchecked forward one. See
+   * nr_rx_branch_sync_test.cc's RxBranchSyncOnSlot.HighWaterMark* cases. */
+  if (absolute_slot > s->last_absolute_slot)
+    s->last_absolute_slot = absolute_slot;
   return 0;
 }
 
