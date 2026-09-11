@@ -4,16 +4,31 @@ set -euo pipefail
 REPO=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)
 BUILD=$REPO/cmake_targets/ran_build/build
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-test "$(git -C "$REPO" branch --show-current)" = adaptive-rx-UL-DL
+BRANCH=$(git -C "$REPO" branch --show-current)
+case "$BRANCH" in
+  adaptive-rx-UL-DL|merge/adaptive-sensing) ;;
+  *) echo "BLOCKED: unexpected branch '$BRANCH' (expected adaptive-rx-UL-DL or merge/adaptive-sensing)"; exit 3 ;;
+esac
 test -x "$BUILD/nr-uesoftmodem"
 # The binary must not predate the tree. Measured 2026-09-09: two admissibility rules were added and
 # only the TEST targets were rebuilt, so a 40-minute capture ran the previous nr-uesoftmodem and
 # reported the pre-fix hypothesis count. Nothing in the recorded commit/patch/sha256 identity catches
 # that -- they describe the SOURCE, and the source was correct; it was the binary that was behind.
-if find "$REPO/openair1" "$REPO/openair2" "$REPO/executables" "$REPO/radio"      \( -name '*.c' -o -name '*.h' -o -name '*.cpp' -o -name '*.cc' \)      -newer "$BUILD/nr-uesoftmodem" -print -quit 2>/dev/null | grep -q .; then
+if find "$REPO/openair1" "$REPO/openair2" "$REPO/executables" "$REPO/radio" -path '*/tests/*' -prune -o \( -name '*.c' -o -name '*.h' -o -name '*.cpp' -o -name '*.cc' \) -newer "$BUILD/nr-uesoftmodem" -print -quit 2>/dev/null | grep -q .; then
   echo "BLOCKED: nr-uesoftmodem is older than tracked source -- rebuild before capturing"; exit 3
 fi
-grep -qx "ENABLE_ISAC_SENSING:BOOL=OFF" "$BUILD/CMakeCache.txt"
+# Sensing may now be built IN: this tree merges the sensing pipeline, and an AoA/tracking run
+# requires it. The guard is therefore "the binary matches what the config asks for" rather than
+# "sensing is always off": a config with sensing enabled needs a sensing-enabled build, and one
+# without it must not silently pay for sensing.
+SENSE_CONF="$SCRIPT_DIR/${CONF:-adaptive_no_hints.conf}"
+if grep -qE '^[[:space:]]*enable[[:space:]]*=[[:space:]]*1' "$SENSE_CONF"; then
+  grep -qx "ENABLE_ISAC_SENSING:BOOL=ON" "$BUILD/CMakeCache.txt" || {
+    echo "BLOCKED: $CONF enables sensing but the build has ENABLE_ISAC_SENSING=OFF"; exit 3; }
+else
+  grep -qx "ENABLE_ISAC_SENSING:BOOL=OFF" "$BUILD/CMakeCache.txt" || {
+    echo "BLOCKED: sensing is built in but ${CONF:-adaptive_no_hints.conf} does not enable it"; exit 3; }
+fi
 test "$(readlink "$BUILD/liboai_device.so")" = liboai_usrpdevif.so
 exec 9>/tmp/adaptive-rx-UL-DL.radio.lock
 flock -n 9 || { echo "BLOCKED: another adaptive test holds lock"; exit 3; }
