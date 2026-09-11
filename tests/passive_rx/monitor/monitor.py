@@ -190,6 +190,63 @@ class LogTail:
                     "lines": list(self.lines)[-400:]}
 
 
+
+class DecoderLogTail(LogTail):
+    """Use final worker outcomes and independent timestamps for decoder health."""
+
+    _QUEUE = re.compile(
+        r"\bP(DSCH|USCH)Q queued=(\d+) decoded=(\d+) crc_ok=(\d+)"
+        r"(?: \([\d.]+%\))? dropped\[full=(\d+) stale=(\d+)\]"
+        r" max_lag_slots=(\d+)/(\d+)")
+
+    def __init__(self, path, maxlines=4000):
+        self._decoder_lock = threading.Lock()
+        self._decoder_stats = {}
+        self._decoder_seen = {}
+        self._decoder_previous = {}
+        super().__init__(path, maxlines)
+
+    def _ingest(self, line):
+        super()._ingest(line)
+        match = self._QUEUE.search(line)
+        if not match:
+            return
+        direction = "dl" if match[1] == "DSCH" else "ul"
+        queued, tried, ok, full, stale, lag, margin = map(int, match.groups()[1:])
+        now = time.time()
+        with self._decoder_lock:
+            previous = self._decoder_previous.get(direction)
+            rate = 100.0 * ok / tried if tried else None
+            recent = None
+            if previous and tried > previous[0] and ok >= previous[1]:
+                recent = 100.0 * (ok - previous[1]) / (tried - previous[0])
+            self._decoder_previous[direction] = (tried, ok)
+            self._decoder_seen[direction] = now
+            self._decoder_stats.update({
+                direction + "_queued": queued,
+                direction + "_try": tried,
+                direction + "_ok": ok,
+                direction + "_fail": tried - ok,
+                direction + "_drop_full": full,
+                direction + "_drop_stale": stale,
+                direction + "_max_lag": lag,
+                direction + "_sample_margin": margin,
+                direction + "_recent_rate": recent,
+            })
+            if direction == "dl":
+                self._decoder_stats.update(
+                    dl_tb_rate=rate, pdsch_try=tried, pdsch_ok=ok, pdsch_rate=rate)
+            else:
+                self._decoder_stats["ul_rate"] = rate
+
+    def snapshot(self):
+        result = super().snapshot()
+        with self._decoder_lock:
+            result["stats"].update(self._decoder_stats)
+            result["decoder_seen"] = dict(self._decoder_seen)
+        return result
+
+
 def replay_thread(path, store, rate_hz):
     """Feed a recorded report JSONL through the same store as the live path, for testing the GUI
     with no receiver attached. Same code path as ZMQ from add() onward, so what you see is what a
@@ -324,7 +381,7 @@ def main():
 
     logtail = None
     if args.log:
-        logtail = LogTail(args.log)
+        logtail = DecoderLogTail(args.log)
         threading.Thread(target=logtail.run, daemon=True).start()
 
     html_path = Path(__file__).with_name("monitor.html")
