@@ -1276,14 +1276,35 @@ and in principle replay-observable.
 
 Corrected in the code comment, the design-table row above and the fix-round-1 text above. **No
 logic change**: the hook is correct on both reachability paths — which is precisely why finding
-this changed nothing but the words. Note on the citation: the coordinator's `L2_interface_ue.c:126-130`
-does not exist in this tree; the real dispatch is `config_ue.c:1125`, verified by reading it.
+this changed nothing but the words. Citation note (corrected again in fix round 3): `L2_interface_ue.c:126-130` DOES exist --
+`openair2/RRC/NR_UE/L2_interface_ue.c`, the RRC->MAC dispatch switch whose
+`case NR_MAC_RRC_CONFIG_MIB:` routes the decoded MIB into `nr_rrc_mac_config_req_mib()` -- and it
+is a real step in the same chain. My fix-round-2 claim that it "does not exist in this tree" was
+wrong: I searched only `openair2/LAYER2/NR_MAC_UE/`, where it is not, and concluded from one
+directory. It simply is not the LOAD-BEARING citation for the `cellBarred` trigger itself; that is
+`config_ue.c:1125` / `nr_ue_procedures.c:149-158`, which are correct.
 
 Because a `.c` comment changed, the binary was rebuilt and the replay re-run rather than assuming a
 comment cannot matter: `pgrep -x nr-uesoftmodem` empty → build rc=0 → binary ``0d011b9c3a709ea6b3d90fb9c104d715aa8576f53521de105de6536d1dff1f41`` →
 legacy replay `REPLAY PASS: identical DL controls=34 failed=0 raw UL=24; no radio opened` (exit 0),
 `ctest` 5/5, `nr_rx_branch_test` 19/19, `check_manifest --selftest` PASS / `--fixtures` OK. No
 radio: the X410 is still unreachable.
+
+### Fix round 3 (2026-09-11, same day) — prose only
+
+Fix round 2's own citation dispute was wrong. `L2_interface_ue.c:126-130` DOES exist, at
+`openair2/RRC/NR_UE/L2_interface_ue.c` (`case NR_MAC_RRC_CONFIG_MIB:` →
+`nr_rrc_mac_config_req_mib(instance_id, 0, …mib, …access_barred)`), and it is a real step in the
+same chain — the RRC→MAC dispatch that routes the decoded MIB into the function whose
+`nr_ue_decode_mib()` call reaches the `cellBarred` branch. I had searched only
+`openair2/LAYER2/NR_MAC_UE/` (where the file is not) and concluded "does not exist in this tree"
+from a single directory — the same one-place-looked, whole-claim-made error as fix round 1's
+overstated coverage. It is simply not the LOAD-BEARING citation for the `cellBarred` trigger, which
+is `config_ue.c:1125` / `nr_ue_procedures.c:149-158`, both correct and unchanged.
+
+No code, no ledger-row, no comment change: the reachability finding, the `nr-ue.c` comment and the
+design-table row are all confirmed correct as they stand. Prose only, in this note and in the
+report. No rebuild.
 
 ## Session template — copy for each future work session
 
