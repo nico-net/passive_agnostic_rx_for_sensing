@@ -806,8 +806,14 @@ void readFrame(PHY_VARS_NR_UE *UE, openair0_timestamp_t *timestamp, int duration
       int readBlockSize = get_samples_per_slot(slot_rx, fp);
       int tmp = nrue_ru_read(UE, timestamp, (void **)rxp, readBlockSize, fp->nb_antennas_rx);
       UEscopeCopy(UE, ueTimeDomainSamplesBeforeSync, rxp[0], sizeof(c16_t), 1, readBlockSize, 0);
-      if (readBlockSize != tmp)
-        LOG_W(PHY, "readFrame: got %d of %d RF samples\n", tmp, readBlockSize);
+      if (readBlockSize != tmp) {
+        if (!oai_exit)
+          LOG_E(PHY, "SENSING: RFSTALL readFrame got %d of %d RF samples; no acquisition on incomplete IQ\n", tmp, readBlockSize);
+        oai_exit = 1;
+        if (toTrash)
+          free(rxp[0]);
+        return;
+      }
 
       if (IS_SOFTMODEM_RFSIM) {
         int slot_tx = (slot_rx + duration_rx_to_tx) % fp->slots_per_frame;
@@ -937,6 +943,8 @@ static void syncInFrame(PHY_VARS_NR_UE *UE, openair0_timestamp_t *timestamp, int
     // Set a maximum transfer size. As we usually read/write single slots, we use the size of slot 0 as maximum here.
     const int unitTransfer = min(get_samples_per_slot(0, fp), size);
     const int res = nrue_ru_read(UE, timestamp, (void **)UE->common_vars.rxdata, unitTransfer, fp->nb_antennas_rx);
+    if (oai_exit)
+      return;
     if (res <= 0) {
       LOG_W(PHY, "Unable to read RF samples while resynchronizing\n");
       break;
@@ -1110,6 +1118,8 @@ void *UE_thread(void *arg)
         UE->max_pos_acc = 0;
       UE->max_pos_iir = 0;
       readFrame(UE, &sync_timestamp, duration_rx_to_tx, false);
+      if (oai_exit)
+        break;
       notifiedFIFO_elt_t *Msg = newNotifiedFIFO_elt(sizeof(syncData_t), 0, &nf, UE_synch);
       syncData_t *syncMsg = (syncData_t *)NotifiedFifoData(Msg);
       *syncMsg = (syncData_t){0};
@@ -1235,6 +1245,8 @@ void *UE_thread(void *arg)
                              (void **)UE->common_vars.rxdata,
                              fp->ofdm_symbol_size + fp->nb_prefix_samples0,
                              fp->nb_antennas_rx);
+      if (oai_exit || ret < 0)
+        break;
       if (fp->ofdm_symbol_size + fp->nb_prefix_samples0 != ret)
         LOG_W(PHY, "Initial symbol: got %d RF samples\n", ret);
       // we have the decoded frame index in the return of the synch process
@@ -1385,6 +1397,10 @@ void *UE_thread(void *arg)
     const int readBlockSize = get_readBlockSize(slot_nr, fp) - iq_shift_to_apply;
     openair0_timestamp_t rx_timestamp;
     int tmp = nrue_ru_read(UE, &rx_timestamp, (void **)rxp, readBlockSize, fp->nb_antennas_rx);
+    /* A cancelled read has no timestamp. Do not classify it as RF discontinuity
+     * or publish it to the decoder/detector while shutdown is in progress. */
+    if (oai_exit || tmp < 0)
+      break;
     {
       struct timespec diag_ts;
       clock_gettime(CLOCK_REALTIME, &diag_ts);
@@ -1511,6 +1527,8 @@ void *UE_thread(void *arg)
       if (first_symbols > 0) {
         openair0_timestamp_t ignore_timestamp;
         int tmp = nrue_ru_read(UE, &ignore_timestamp, (void **)UE->common_vars.rxdata, first_symbols, fp->nb_antennas_rx);
+        if (oai_exit || tmp < 0)
+          break;
         /* This read MUST be counted. It is an EXTRA read on top of readBlockSize, so leaving it out
          * makes the next iteration's expected timestamp short by exactly first_symbols and the
          * RXDISCONT continuity test above fires on every frame boundary -- a false positive, not an
@@ -1946,7 +1964,15 @@ void *UE_thread(void *arg)
                * level that still produces plausible-looking noise decodes, so continuing would
                * silently corrupt the capture -- which is exactly how this fault stayed hidden. A
                * supervisor can restart the run; a contaminated result cannot be fixed afterwards. */
-              LOG_E(PHY, "SENSING: RFSTALL -- stopping capture (exit 3); restart the run\n");
+              LOG_E(PHY, "SENSING: RFSTALL -- stopping capture (exit 3); releasing radio before exit\n");
+              /* This is the RX owner, outside trx_read_func(). Stop accepting
+               * work and release UHD handles before exiting. exit(3) alone
+               * skips destruction of the heap-owned radio and its streamers.
+               * Do not use exit_function(): it converts normal exits to zero. */
+              oai_exit = 1;
+              nrue_ru_stop();
+              nrue_ru_end();
+              LOG_I(PHY, "USRP_RFSTALL_CLEANUP_COMPLETE exit=3\n");
               exit(3);
             }
           }
