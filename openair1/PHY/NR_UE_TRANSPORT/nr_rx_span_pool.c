@@ -82,11 +82,16 @@ int nr_rx_span_pool_init(nr_rx_span_pool_t *pool, int n_ch, int samples_per_buf,
   pool->bufs = calloc((size_t)n_buf, sizeof(nr_rx_span_t));
   pool->storage = calloc((size_t)n_buf * n_ch * samples_per_buf, sizeof(c16_t));
   pool->free_list = calloc((size_t)n_buf, sizeof(int));
-  if (!pool->bufs || !pool->storage || !pool->free_list) {
+  /* fix round 2: NR_RX_BRANCH_MAX * n_buf lease-key slots (a few hundred bytes even at the max
+   * branch count and a generous buffer count), zero-initialized = "no outstanding lease", matching
+   * every buffer's holders/refcount starting at 0 too. */
+  pool->lease_keys = calloc((size_t)NR_RX_BRANCH_MAX * (size_t)n_buf, sizeof(uint32_t));
+  if (!pool->bufs || !pool->storage || !pool->free_list || !pool->lease_keys) {
     LOG_E(PHY, "nr_rx_span_pool_init: allocation failed\n");
     free(pool->bufs);
     free(pool->storage);
     free(pool->free_list);
+    free(pool->lease_keys);
     memset(pool, 0, sizeof(*pool));
     return -1;
   }
@@ -124,6 +129,7 @@ void nr_rx_span_pool_destroy(nr_rx_span_pool_t *pool)
   free(pool->bufs);
   free(pool->storage);
   free(pool->free_list);
+  free(pool->lease_keys);
   memset(pool, 0, sizeof(*pool));
 }
 
@@ -200,50 +206,75 @@ void nr_rx_span_pool_publish(nr_rx_span_pool_t *pool, nr_rx_span_t *buf)
   pthread_mutex_unlock(&pool->lock);
 }
 
-const nr_rx_span_t *nr_rx_span_pool_take(nr_rx_span_pool_t *pool, uint8_t branch_id)
+nr_rx_span_lease_t nr_rx_span_pool_take(nr_rx_span_pool_t *pool, uint8_t branch_id)
 {
+  nr_rx_span_lease_t lease = {NULL, 0};
   if (!pool || branch_id >= NR_RX_BRANCH_MAX || !pool->branch_active[branch_id]) {
     LOG_E(PHY, "nr_rx_span_pool_take: invalid or inactive branch_id %u\n", branch_id);
-    return NULL;
+    return lease;
   }
   pthread_mutex_lock(&pool->lock);
   nr_rx_span_branch_state_t *bs = &pool->branch[branch_id];
   if (bs->n_held == 0) {
     pthread_mutex_unlock(&pool->lock);
-    return NULL; /* nothing waiting -- normal poll outcome, not an error */
+    return lease; /* nothing waiting -- normal poll outcome, not an error */
   }
   int buf_id = bs->buf_id[0];
   memmove(&bs->buf_id[0], &bs->buf_id[1], (size_t)(bs->n_held - 1) * sizeof(int));
   bs->n_held--;
+
+  /* fix round 2: mint a fresh, never-repeating key and record it as the CURRENT valid key for
+   * this (branch_id, buf_id) pair -- what release() will check against. */
+  pool->next_lease_key++;
+  if (pool->next_lease_key == 0) /* skip the sentinel on the (practically unreachable) wrap */
+    pool->next_lease_key++;
+  uint32_t key = pool->next_lease_key;
+  pool->lease_keys[(size_t)branch_id * pool->n_buf + buf_id] = key;
+
   pthread_mutex_unlock(&pool->lock);
-  return &pool->bufs[buf_id];
+  lease.span = &pool->bufs[buf_id];
+  lease.key = key;
+  return lease;
 }
 
-int nr_rx_span_pool_release(nr_rx_span_pool_t *pool, uint8_t branch_id, const nr_rx_span_t *span)
+int nr_rx_span_pool_release(nr_rx_span_pool_t *pool, uint8_t branch_id, nr_rx_span_lease_t lease)
 {
-  if (!pool || !span || branch_id >= NR_RX_BRANCH_MAX) {
-    LOG_E(PHY, "nr_rx_span_pool_release: NULL pool/span or invalid branch_id %u\n", branch_id);
+  if (!pool || !lease.span || branch_id >= NR_RX_BRANCH_MAX) {
+    LOG_E(PHY, "nr_rx_span_pool_release: NULL pool/lease.span or invalid branch_id %u\n", branch_id);
     return -1;
   }
-  if (span->buf_id < 0 || span->buf_id >= pool->n_buf || &pool->bufs[span->buf_id] != span) {
-    LOG_E(PHY, "nr_rx_span_pool_release: span does not belong to this pool\n");
+  if (lease.span->buf_id < 0 || lease.span->buf_id >= pool->n_buf
+      || &pool->bufs[lease.span->buf_id] != lease.span) {
+    LOG_E(PHY, "nr_rx_span_pool_release: lease.span does not belong to this pool\n");
     return -1;
   }
   pthread_mutex_lock(&pool->lock);
-  nr_rx_span_t *buf = &pool->bufs[span->buf_id];
-  /* fix round 1 (review IMPORTANT finding): gate the decrement on branch_id's OWN bit in
-   * buf->holders, not just buf->refcount > 0. refcount alone is one shared integer and cannot
-   * tell which branches hold a share -- without this check, releasing through any other ACTIVE
-   * branch_id would silently decrement a reference a different branch still needs (the exact
-   * stale-read hazard this module exists to prevent). This also covers the plain double-release
-   * case: once a branch's bit is cleared, releasing again through the same branch_id is rejected
-   * the same way. */
-  if (!(buf->holders & (1u << branch_id))) {
+  nr_rx_span_t *buf = &pool->bufs[lease.span->buf_id];
+  size_t idx = (size_t)branch_id * pool->n_buf + buf->buf_id;
+  /* fix round 2 (review IMPORTANT finding, round 2): the PRIMARY check is the lease key, not the
+   * holders bit -- a bit alone cannot tell whether this call genuinely came from branch_id (see
+   * nr_rx_span_t.holders' comment for the concrete use-after-free trace that motivated this). A
+   * lease is an identity the caller cannot fabricate: it can only have come from THIS branch_id's
+   * own prior take() of THIS exact buffer occupancy, since the key is per-pool monotonic and
+   * cleared to 0 on release, so neither a wrong branch_id nor a stale lease from an
+   * already-released, since-republished occupant of the same buf_id can match. */
+  if (lease.key == 0 || pool->lease_keys[idx] != lease.key) {
     pthread_mutex_unlock(&pool->lock);
-    LOG_E(PHY, "nr_rx_span_pool_release: branch %u does not hold a ref on buf_id %d (double "
-          "release, or release through the wrong branch_id)\n", branch_id, buf->buf_id);
+    LOG_E(PHY, "nr_rx_span_pool_release: branch %u presented an invalid/stale lease for buf_id %d "
+          "(double release, release through the wrong branch_id, or a lease from an earlier "
+          "occupant of this buffer)\n", branch_id, buf->buf_id);
     return -1;
   }
+  /* Second line of defence (fix round 1, kept per fix round 2 instruction): should always agree
+   * with the key check above given the invariants -- if it doesn't, that is an internal bug in
+   * this module, not a caller error, hence a hard reject rather than silently trusting the key. */
+  if (!(buf->holders & (1u << branch_id))) {
+    pthread_mutex_unlock(&pool->lock);
+    LOG_E(PHY, "nr_rx_span_pool_release: branch %u lease key matched but holders bit was already "
+          "clear for buf_id %d (internal invariant violation)\n", branch_id, buf->buf_id);
+    return -1;
+  }
+  pool->lease_keys[idx] = 0;
   buf->holders &= (uint8_t)~(1u << branch_id);
   buf->refcount--;
   assert((int)__builtin_popcount(buf->holders) == buf->refcount);

@@ -63,14 +63,14 @@ TEST(SpanPoolRouting, ByteExactRoutingIdentityAndPermuted) {
   buf->acq_epoch = 5;
   nr_rx_span_pool_publish(&pool, buf);
 
-  const nr_rx_span_t *taken[4];
+  nr_rx_span_lease_t taken[4];
   for (int b = 0; b < 4; b++) {
     taken[b] = nr_rx_span_pool_take(&pool, b);
-    ASSERT_NE(taken[b], nullptr);
+    ASSERT_NE(taken[b].span, nullptr);
   }
 
   for (int b = 0; b < 4; b++) {
-    nr_rx_span_view_t v_id = nr_rx_span_for_branch(taken[b], &set_id.b[b]);
+    nr_rx_span_view_t v_id = nr_rx_span_for_branch(taken[b].span, &set_id.b[b]);
     ASSERT_NE(v_id.samples, nullptr);
     EXPECT_EQ(v_id.branch_id, b);
     EXPECT_EQ(v_id.physical_channel, set_id.b[b].physical_channel);
@@ -80,7 +80,7 @@ TEST(SpanPoolRouting, ByteExactRoutingIdentityAndPermuted) {
       EXPECT_EQ(v_id.samples[n].r, expect.r) << "branch " << b << " n " << n;
       EXPECT_EQ(v_id.samples[n].i, expect.i) << "branch " << b << " n " << n;
     }
-    nr_rx_span_view_t v_perm = nr_rx_span_for_branch(taken[b], &set_perm.b[b]);
+    nr_rx_span_view_t v_perm = nr_rx_span_for_branch(taken[b].span, &set_perm.b[b]);
     ASSERT_NE(v_perm.samples, nullptr);
     EXPECT_EQ(v_perm.branch_id, b);
     EXPECT_EQ(v_perm.physical_channel, set_perm.b[b].physical_channel);
@@ -119,11 +119,11 @@ TEST(SpanPoolStall, SlowBranchDropsOldestWithoutStarvingProducerOrSiblings) {
 
     // Branches 0, 1, 3 keep up: take + verify + release immediately, every publish.
     for (int b : {0, 1, 3}) {
-      const nr_rx_span_t *s = nr_rx_span_pool_take(&pool, (uint8_t)b);
-      ASSERT_NE(s, nullptr) << "branch " << b << " sp " << sp;
-      EXPECT_EQ(s->data[0].r, sp) << "branch " << b << " sp " << sp << " -- overwritten buffer";
-      EXPECT_EQ(s->absolute_slot, (uint64_t)sp);
-      EXPECT_EQ(s->first_sample_ts, 1000u + (uint64_t)sp);
+      nr_rx_span_lease_t s = nr_rx_span_pool_take(&pool, (uint8_t)b);
+      ASSERT_NE(s.span, nullptr) << "branch " << b << " sp " << sp;
+      EXPECT_EQ(s.span->data[0].r, sp) << "branch " << b << " sp " << sp << " -- overwritten buffer";
+      EXPECT_EQ(s.span->absolute_slot, (uint64_t)sp);
+      EXPECT_EQ(s.span->first_sample_ts, 1000u + (uint64_t)sp);
       EXPECT_EQ(nr_rx_span_pool_release(&pool, (uint8_t)b, s), 0);
     }
     // Branch 2 never takes.
@@ -139,12 +139,12 @@ TEST(SpanPoolStall, SlowBranchDropsOldestWithoutStarvingProducerOrSiblings) {
 
   // Branch 2's surviving ring holds the newest 3 spans (7, 8, 9), oldest-first.
   for (int expect : {7, 8, 9}) {
-    const nr_rx_span_t *s = nr_rx_span_pool_take(&pool, 2);
-    ASSERT_NE(s, nullptr);
-    EXPECT_EQ(s->data[0].r, expect);
+    nr_rx_span_lease_t s = nr_rx_span_pool_take(&pool, 2);
+    ASSERT_NE(s.span, nullptr);
+    EXPECT_EQ(s.span->data[0].r, expect);
     EXPECT_EQ(nr_rx_span_pool_release(&pool, 2, s), 0);
   }
-  EXPECT_EQ(nr_rx_span_pool_take(&pool, 2), nullptr); // ring now empty
+  EXPECT_EQ(nr_rx_span_pool_take(&pool, 2).span, nullptr); // ring now empty
 
   nr_rx_span_pool_destroy(&pool);
 }
@@ -174,44 +174,106 @@ TEST(SpanPoolRefcount, ReturnsToFreeListOnlyAfterAllReleasesAndRejectsDoubleRele
   };
   EXPECT_FALSE(in_free_list(buf_id));
 
-  const nr_rx_span_t *s0 = nr_rx_span_pool_take(&pool, 0);
-  ASSERT_NE(s0, nullptr);
+  nr_rx_span_lease_t s0 = nr_rx_span_pool_take(&pool, 0);
+  ASSERT_NE(s0.span, nullptr);
   ASSERT_EQ(nr_rx_span_pool_release(&pool, 0, s0), 0);
   EXPECT_EQ(pool.bufs[buf_id].refcount, 1);
   EXPECT_FALSE(in_free_list(buf_id)); // branch 1 still holds it
 
-  const nr_rx_span_t *s1 = nr_rx_span_pool_take(&pool, 1);
-  ASSERT_NE(s1, nullptr);
+  nr_rx_span_lease_t s1 = nr_rx_span_pool_take(&pool, 1);
+  ASSERT_NE(s1.span, nullptr);
   ASSERT_EQ(nr_rx_span_pool_release(&pool, 1, s1), 0);
   EXPECT_EQ(pool.bufs[buf_id].refcount, 0);
   EXPECT_TRUE(in_free_list(buf_id));
 
-  // Double release (any branch id) once refcount is already 0 is rejected, not a double free.
+  // ---- Fix round 2, test (b): double release of the SAME lease, once refcount is already 0, is
+  // rejected -- not a double free. (lease_keys[idx] was cleared to 0 by the first release, and 0
+  // never matches a real, nonzero lease key.)
   EXPECT_EQ(nr_rx_span_pool_release(&pool, 1, s1), -1);
   EXPECT_EQ(pool.bufs[buf_id].refcount, 0);
 
   nr_rx_span_pool_destroy(&pool);
 }
 
-// ---- Fix round 1 (review IMPORTANT finding): refcount alone is one shared integer and cannot
-// tell WHICH branch holds a share, so releasing through the WRONG branch_id must be rejected
-// rather than silently spending a different branch's still-needed share.
+// ---- Fix round 2 (review IMPORTANT finding, round 2 -- corrects fix round 1's claim). The
+// re-review traced the concrete hazard a bare per-branch existence bit cannot prevent: if branch 0
+// mistakenly calls release() with branch_id=1 while branch 1's bit is still legitimately set (both
+// branches still genuinely hold their share), the bit-only check cannot tell that call apart from a
+// real branch-1 release -- it succeeds, spending branch 1's share while branch 1 is still reading.
+// Branch 0's own later legitimate release then drops refcount to 0 UNDER branch 1, and the producer
+// can reacquire/overwrite the buffer while branch 1 still reads it: a real use-after-free. Fix round
+// 1's header comment claiming the holders bit alone "closes that hole", and this test file's own
+// prior "does not create a use-after-free either way" structural note, were both WRONG and are
+// retracted by this comment (see nr_rx_span_pool.h's nr_rx_span_t.holders field doc for the same
+// correction in the header).
 //
-// Structural note on what a 1-bit-per-branch holders mask CAN and CANNOT catch (worth recording,
-// not just asserting): the module authenticates a release() call solely by the branch_id
-// argument's bit -- it has no separate notion of "which thread/branch actually made this call".
-// So if BOTH branches still genuinely hold their share (neither has released yet), a call naming
-// branch_id=0 is *indistinguishable* from a real branch-0 release, even if branch 1's code passed
-// 0 by mistake -- bit 0 is legitimately set, so that call correctly succeeds and clears branch 0's
-// own not-yet-spent share. This is not a gap in the fix: it is what happens for ANY correct
-// design gated on a per-branch existence bit rather than a per-take token, and it does not create
-// a use-after-free -- the shared refcount still requires exactly n_active_branches distinct bit
-// clears before the buffer returns to the free list, so a "mislabeled" release still only ever
-// consumes one real outstanding share, never more. What the bit MUST catch, and does, is a
-// release naming a branch_id whose share is ALREADY spent (a real double release, or -- the
-// scenario below -- releasing through a DIFFERENT branch's id after that branch's own share was
-// already legitimately released): that is unambiguous and exactly what silently corrupted
-// accounting under the old bare-integer refcount.
+// The fix is a lease token (nr_rx_span_lease_t): an identity the caller cannot fabricate, which a
+// bit never can be. This test is fix round 2's requested test (a): the impersonation case now
+// REJECTS, in the literal "both branches still hold their share" form that a bare bit could never
+// achieve.
+TEST(SpanPoolRefcount, ImpersonationWhileBothStillHoldIsRejectedByLeaseKey) {
+  const int active_mask = (1 << 0) | (1 << 1);
+  nr_rx_span_pool_t pool = {};
+  ASSERT_EQ(nr_rx_span_pool_init(&pool, /*n_ch=*/1, /*spb=*/1, 1 + 2 * 1, /*hold_budget=*/1,
+                                  active_mask, 0),
+            0);
+
+  nr_rx_span_t *buf = nr_rx_span_pool_acquire(&pool);
+  ASSERT_NE(buf, nullptr);
+  buf->n_samples = 1;
+  buf->data[0] = c16_t{(int16_t)42, (int16_t)42}; // sentinel content, checked "still readable" below
+  const int buf_id = buf->buf_id;
+  nr_rx_span_pool_publish(&pool, buf); // refcount=2, holders={bit0,bit1}
+  ASSERT_EQ(pool.bufs[buf_id].refcount, 2);
+  ASSERT_EQ(pool.bufs[buf_id].holders, (uint8_t)0x3);
+
+  // Both branches take their own copy -- BOTH genuinely still hold their share at this point,
+  // which is exactly the case a bare existence bit cannot arbitrate (bit 0 AND bit 1 are both
+  // legitimately set) but a lease key can, because each branch's key is distinct.
+  nr_rx_span_lease_t lease0 = nr_rx_span_pool_take(&pool, 0);
+  nr_rx_span_lease_t lease1 = nr_rx_span_pool_take(&pool, 1);
+  ASSERT_NE(lease0.span, nullptr);
+  ASSERT_NE(lease1.span, nullptr);
+  ASSERT_NE(lease0.key, lease1.key) << "distinct takes must mint distinct keys";
+  ASSERT_NE(lease0.key, 0u);
+  ASSERT_NE(lease1.key, 0u);
+
+  // Branch 0 mistakenly calls release() with branch_id=1, presenting its OWN lease (lease0). The
+  // key recorded for (branch=1, buf_id) is lease1's key, not lease0's -- mismatch, rejected.
+  EXPECT_EQ(nr_rx_span_pool_release(&pool, 1, lease0), -1);
+  // And, the other direction ("with branch 1's lease it cannot have it" -- branch 0 cannot
+  // release ITS OWN slot with branch 1's lease either): the key recorded for (branch=0, buf_id) is
+  // lease0's key, not lease1's -- also a mismatch, also rejected.
+  EXPECT_EQ(nr_rx_span_pool_release(&pool, 0, lease1), -1);
+
+  // Neither rejected attempt touched anything: the span is still alive for both branches exactly
+  // as before, and branch 1's data is genuinely still readable (not corrupted, not freed, not
+  // reused by the producer).
+  EXPECT_EQ(pool.bufs[buf_id].refcount, 2) << "no rejected release may have decremented";
+  EXPECT_EQ(pool.bufs[buf_id].holders, (uint8_t)0x3) << "both holder bits still set";
+  ASSERT_NE(lease1.span, nullptr);
+  EXPECT_EQ(lease1.span->data[0].r, 42) << "branch 1's span is still alive and readable";
+
+  // The correct releases (each branch with its OWN lease) then free it exactly once.
+  EXPECT_EQ(nr_rx_span_pool_release(&pool, 0, lease0), 0);
+  EXPECT_EQ(pool.bufs[buf_id].refcount, 1);
+  EXPECT_EQ(nr_rx_span_pool_release(&pool, 1, lease1), 0);
+  EXPECT_EQ(pool.bufs[buf_id].refcount, 0);
+  EXPECT_EQ(pool.bufs[buf_id].holders, (uint8_t)0);
+
+  int occurrences = 0;
+  for (int i = 0; i < pool.n_free; i++)
+    if (pool.free_list[i] == buf_id)
+      occurrences++;
+  EXPECT_EQ(occurrences, 1) << "freed exactly once, not double-freed by the rejected attempts";
+  EXPECT_EQ(pool.n_free, 3);
+
+  nr_rx_span_pool_destroy(&pool);
+}
+
+// ---- Still-valid supplementary case from fix round 1 (updated to the lease API): releasing
+// through a branch_id whose own share was ALREADY legitimately spent is also rejected (a stale/
+// zeroed lease slot never matches a real nonzero lease key).
 TEST(SpanPoolRefcount, ReleaseThroughAnAlreadyReleasedBranchIdIsRejectedNotASilentFree) {
   const int active_mask = (1 << 0) | (1 << 1);
   nr_rx_span_pool_t pool = {};
@@ -228,8 +290,8 @@ TEST(SpanPoolRefcount, ReleaseThroughAnAlreadyReleasedBranchIdIsRejectedNotASile
   ASSERT_EQ(pool.bufs[buf_id].holders, (uint8_t)0x3);
 
   // Branch 0 takes and correctly releases its own share first (a normal, legitimate release).
-  const nr_rx_span_t *s0 = nr_rx_span_pool_take(&pool, 0);
-  ASSERT_NE(s0, nullptr);
+  nr_rx_span_lease_t s0 = nr_rx_span_pool_take(&pool, 0);
+  ASSERT_NE(s0.span, nullptr);
   ASSERT_EQ(nr_rx_span_pool_release(&pool, 0, s0), 0);
   ASSERT_EQ(pool.bufs[buf_id].refcount, 1);
   ASSERT_EQ(pool.bufs[buf_id].holders, (uint8_t)0x2); // only branch 1's bit remains
@@ -237,8 +299,8 @@ TEST(SpanPoolRefcount, ReleaseThroughAnAlreadyReleasedBranchIdIsRejectedNotASile
   // Branch 1 takes its own (still outstanding) share -- the span is genuinely still alive
   // (refcount=1, not yet freed) -- but then mistakenly tries to release through branch 0's id
   // (already spent) instead of its own.
-  const nr_rx_span_t *s1 = nr_rx_span_pool_take(&pool, 1);
-  ASSERT_NE(s1, nullptr);
+  nr_rx_span_lease_t s1 = nr_rx_span_pool_take(&pool, 1);
+  ASSERT_NE(s1.span, nullptr);
   EXPECT_EQ(nr_rx_span_pool_release(&pool, 0, s1), -1);
   EXPECT_EQ(pool.bufs[buf_id].refcount, 1) << "wrong-branch release must not have decremented";
   EXPECT_EQ(pool.bufs[buf_id].holders, (uint8_t)0x2) << "branch 1's own bit is still set";
@@ -257,6 +319,51 @@ TEST(SpanPoolRefcount, ReleaseThroughAnAlreadyReleasedBranchIdIsRejectedNotASile
       occurrences++;
   EXPECT_EQ(occurrences, 1);
   EXPECT_EQ(pool.n_free, 3);
+
+  nr_rx_span_pool_destroy(&pool);
+}
+
+// ---- Fix round 2, test (c): a lease from an EARLIER, already-released occupant of a recycled
+// buf_id must not validate against the CURRENT occupant's lease slot. n_buf=2/hold_budget=1/1
+// active branch deterministically reuses the same buf_id on the second acquire() (LIFO free
+// list, only one buffer ever in flight), which is what makes "republish same buf_id" exact rather
+// than probabilistic.
+TEST(SpanPoolRefcount, StaleLeaseFromARepublishedBufferIsRejected) {
+  nr_rx_span_pool_t pool = {};
+  ASSERT_EQ(nr_rx_span_pool_init(&pool, /*n_ch=*/1, /*spb=*/1, /*n_buf=*/2, /*hold_budget=*/1,
+                                  (1 << 0), 0),
+            0);
+
+  nr_rx_span_t *buf1 = nr_rx_span_pool_acquire(&pool);
+  ASSERT_NE(buf1, nullptr);
+  buf1->n_samples = 1;
+  const int buf_id = buf1->buf_id;
+  nr_rx_span_pool_publish(&pool, buf1);
+  nr_rx_span_lease_t lease1 = nr_rx_span_pool_take(&pool, 0);
+  ASSERT_NE(lease1.span, nullptr);
+  ASSERT_EQ(lease1.span->buf_id, buf_id);
+  ASSERT_EQ(nr_rx_span_pool_release(&pool, 0, lease1), 0); // buffer fully released, back on free list
+
+  // Republish: acquire() deterministically returns the SAME buf_id (only one buffer was ever used,
+  // LIFO free list), take() mints a NEW key for this fresh occupancy.
+  nr_rx_span_t *buf2 = nr_rx_span_pool_acquire(&pool);
+  ASSERT_NE(buf2, nullptr);
+  ASSERT_EQ(buf2->buf_id, buf_id) << "test relies on deterministic buf_id reuse";
+  buf2->n_samples = 1;
+  nr_rx_span_pool_publish(&pool, buf2);
+  nr_rx_span_lease_t lease2 = nr_rx_span_pool_take(&pool, 0);
+  ASSERT_NE(lease2.span, nullptr);
+  ASSERT_EQ(lease2.span->buf_id, buf_id);
+  EXPECT_GT(lease2.key, lease1.key) << "keys are per-pool monotonic, never repeat";
+
+  // The OLD lease (from the first, already-released occupancy) must be rejected against the
+  // buffer's CURRENT (second) occupancy -- it is not merely "some branch's bit", it is a stale key.
+  EXPECT_EQ(nr_rx_span_pool_release(&pool, 0, lease1), -1);
+  EXPECT_EQ(pool.bufs[buf_id].refcount, 1) << "stale release must not have decremented the live lease";
+
+  // The correct (current) lease releases it normally.
+  EXPECT_EQ(nr_rx_span_pool_release(&pool, 0, lease2), 0);
+  EXPECT_EQ(pool.bufs[buf_id].refcount, 0);
 
   nr_rx_span_pool_destroy(&pool);
 }
@@ -288,16 +395,16 @@ TEST(SpanPoolEpoch, AcqEpochCarriesThroughWithoutOldNewMixing) {
   b2->acq_epoch = 4;
   nr_rx_span_pool_publish(&pool, b2);
 
-  const nr_rx_span_t *s1 = nr_rx_span_pool_take(&pool, 0);
-  ASSERT_NE(s1, nullptr);
-  EXPECT_EQ(s1->acq_epoch, 3u); // still 3: publishing epoch-4 b2 did not mutate the already-queued b1
+  nr_rx_span_lease_t s1 = nr_rx_span_pool_take(&pool, 0);
+  ASSERT_NE(s1.span, nullptr);
+  EXPECT_EQ(s1.span->acq_epoch, 3u); // still 3: publishing epoch-4 b2 did not mutate the already-queued b1
   set.b[0].acq_epoch = 4; // simulate the branch having since moved to epoch 4
-  EXPECT_NE(s1->acq_epoch, set.b[0].acq_epoch); // consumer's own decision: this span is stale
+  EXPECT_NE(s1.span->acq_epoch, set.b[0].acq_epoch); // consumer's own decision: this span is stale
 
-  const nr_rx_span_t *s2 = nr_rx_span_pool_take(&pool, 0);
-  ASSERT_NE(s2, nullptr);
-  EXPECT_EQ(s2->acq_epoch, 4u);
-  EXPECT_EQ(s2->acq_epoch, set.b[0].acq_epoch); // consumer's own decision: this span is current
+  nr_rx_span_lease_t s2 = nr_rx_span_pool_take(&pool, 0);
+  ASSERT_NE(s2.span, nullptr);
+  EXPECT_EQ(s2.span->acq_epoch, 4u);
+  EXPECT_EQ(s2.span->acq_epoch, set.b[0].acq_epoch); // consumer's own decision: this span is current
 
   EXPECT_EQ(nr_rx_span_pool_release(&pool, 0, s1), 0);
   EXPECT_EQ(nr_rx_span_pool_release(&pool, 0, s2), 0);
@@ -344,8 +451,8 @@ TEST(SpanPoolInit, RejectsDoubleInitAndLeavesLivePoolIntact) {
   nr_rx_span_t *buf = nr_rx_span_pool_acquire(&pool);
   ASSERT_NE(buf, nullptr);
   nr_rx_span_pool_publish(&pool, buf);
-  const nr_rx_span_t *s = nr_rx_span_pool_take(&pool, 0);
-  ASSERT_NE(s, nullptr);
+  nr_rx_span_lease_t s = nr_rx_span_pool_take(&pool, 0);
+  ASSERT_NE(s.span, nullptr);
   EXPECT_EQ(nr_rx_span_pool_release(&pool, 0, s), 0);
 
   nr_rx_span_pool_destroy(&pool);

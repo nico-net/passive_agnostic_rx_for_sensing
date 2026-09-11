@@ -91,14 +91,40 @@ typedef struct {
                                  touches either (fix round 1, review IMPORTANT finding) */
   uint8_t holders;            /* bit b set = branch b currently holds a ref on this span (queued in
                                  its ring and/or taken-but-not-released). NR_RX_BRANCH_MAX is 4, so
-                                 a byte is enough. This is what makes release() safe: refcount alone
-                                 is one shared integer and cannot tell WHICH branches hold a share,
-                                 so releasing through the wrong (but still active) branch_id would
-                                 silently free a span another branch is still reading. holders is
-                                 the per-branch ownership tag that closes that hole -- publish() sets
-                                 the bit for every active branch, release()/drop_oldest() clear it,
-                                 and both reject/no-op if the bit is already clear. */
+                                 a byte is enough. SECOND LINE OF DEFENCE ONLY (fix round 2) -- a
+                                 bare existence bit cannot tell whether a release() call naming
+                                 branch_id actually came from that branch: if branch 0 mistakenly
+                                 calls release() with branch_id=1 while branch 1's bit is still
+                                 legitimately set, the bit-only check cannot distinguish that from a
+                                 real branch-1 release, and it SUCCEEDS -- spending branch 1's share
+                                 while branch 1 is still reading it. Branch 0's own later legitimate
+                                 release then drops refcount to 0 under branch 1, and the producer
+                                 can reacquire/overwrite the buffer while branch 1 is still reading
+                                 it: a real use-after-free, not merely a narrower one. (Fix round 1's
+                                 header comment claimed the holders bit alone "closes that hole" --
+                                 it does not; that claim was wrong and is corrected here.) The actual
+                                 fix is the lease token below (nr_rx_span_pool_t.lease_keys /
+                                 nr_rx_span_lease_t) -- an identity the caller cannot fabricate,
+                                 which a bit never can be. holders/refcount remain as a redundant
+                                 consistency check (asserted against each other, and independently
+                                 gated in release()) but are not what makes release() safe. */
 } nr_rx_span_t;
+
+/* fix round 2 (review IMPORTANT finding, round 2): a lease token returned by
+ * nr_rx_span_pool_take(), required by nr_rx_span_pool_release() to prove the CALLER is the branch
+ * that actually took this specific span -- closing the hole the holders bitmask alone could not
+ * (see nr_rx_span_t.holders' comment above for the concrete UAF trace). key is drawn from a
+ * per-pool monotonically increasing counter (nr_rx_span_pool_t.next_lease_key, never 0) each time
+ * take() succeeds, stored in that (branch_id, buf_id) pair's slot in
+ * nr_rx_span_pool_t.lease_keys, and cleared back to 0 by a successful release(). Because the
+ * counter never repeats for the life of the pool, a lease from an EARLIER occupant of the same
+ * buf_id (already released and since republished) also fails to validate -- release() checks
+ * against the CURRENT stored key, not merely "is this branch's bit set". span is NULL (key is then
+ * meaningless, always 0) when take() had nothing to return. */
+typedef struct {
+  const nr_rx_span_t *span;
+  uint32_t key; /* 0 = no lease (take() returned nothing, or this lease was already released) */
+} nr_rx_span_lease_t;
 
 /* Channel pointer + identity triple, returned by nr_rx_span_for_branch() so a branch cannot
  * trivially read a channel other than its own (plan sec 4 "Channel routing"). */
@@ -139,6 +165,14 @@ typedef struct {
   uint8_t branch_active[NR_RX_BRANCH_MAX]; /* which branch slots participate in publish() */
   uint8_t n_active_branches;
 
+  uint32_t *lease_keys;       /* fix round 2: NR_RX_BRANCH_MAX * n_buf u32 slots, allocated with the
+                                 pool; slot [branch_id * n_buf + buf_id] holds the key take() issued
+                                 for that (branch, buffer) pair, or 0 if branch_id has no outstanding
+                                 taken-but-unreleased lease on buf_id. A few hundred bytes even at
+                                 4 branches * dozens of buffers. */
+  uint32_t next_lease_key;    /* monotonically increasing, never 0 (0 is the sentinel for "no
+                                 lease"); incremented and used fresh on every successful take() */
+
   uint64_t producer_stalls;  /* count of acquire() calls that found no free buffer (should be 0
                                  by construction when n_buf >= 1 + n_branch*hold_budget; the
                                  module asserts rather than silently blocking, since there are no
@@ -158,7 +192,7 @@ typedef struct {
 
 #define NR_RX_SPAN_POOL_MAGIC 0x53504e31u /* "SPN1" -- arbitrary, just needs to not be 0 */
 
-/* Allocates bufs/free_list and initializes the pool for n_ch channels, samples_per_buf samples
+/* Allocates bufs/free_list/lease_keys and initializes the pool for n_ch channels, samples_per_buf samples
  * per channel per buffer, n_buf total buffers and hold_budget spans held per active branch.
  * active_branches (bitmask, bit i = branch i participates in future publish()/take()/release()
  * calls; use nr_rx_branch_set_t.b[i].state != NR_RXB_DISABLED to build it) fixes n_active_branches
@@ -178,7 +212,7 @@ typedef struct {
 int nr_rx_span_pool_init(nr_rx_span_pool_t *pool, int n_ch, int samples_per_buf, int n_buf,
                           int hold_budget, uint8_t active_branches, uint64_t sample_rate_hz);
 
-/* Frees bufs/free_list. Safe to call on an already-freed/zeroed pool. Does not check outstanding
+/* Frees bufs/free_list/lease_keys. Safe to call on an already-freed/zeroed pool. Does not check outstanding
  * refcounts -- caller must ensure no span is held before destroying the pool (same discipline as
  * freeing a buffer while it's in use anywhere else). */
 void nr_rx_span_pool_destroy(nr_rx_span_pool_t *pool);
@@ -205,22 +239,29 @@ nr_rx_span_t *nr_rx_span_pool_acquire(nr_rx_span_pool_t *pool);
  * this pool owns. */
 void nr_rx_span_pool_publish(nr_rx_span_pool_t *pool, nr_rx_span_t *buf);
 
-/* Consumer side. Pops branch_id's oldest ring entry (FIFO -- publish order) and returns a const
- * pointer to it; the returned span's ref is now "held by the caller" (release() must eventually be
- * called exactly once for each take()). Returns NULL if branch_id is inactive/out-of-range or its
- * ring is empty. Does not touch the ring/refcount of any other branch. */
-const nr_rx_span_t *nr_rx_span_pool_take(nr_rx_span_pool_t *pool, uint8_t branch_id);
+/* Consumer side. Pops branch_id's oldest ring entry (FIFO -- publish order) and returns a lease on
+ * it: {span, key} with key freshly drawn from the pool's monotonic counter and recorded as the
+ * CURRENT valid key for (branch_id, span->buf_id). release() must eventually be called exactly
+ * once with this exact lease. Returns {NULL, 0} if branch_id is inactive/out-of-range or its ring
+ * is empty. Does not touch the ring/refcount/lease state of any other branch. */
+nr_rx_span_lease_t nr_rx_span_pool_take(nr_rx_span_pool_t *pool, uint8_t branch_id);
 
-/* Decrements span's refcount on branch_id's behalf; when it reaches 0 the buffer is returned to
- * the free list. Returns 0 on success, -1 (LOG_E naming branch_id and buf_id, no state change) if
- * span/pool is NULL, branch_id is out of range, OR branch_id's bit in span->holders is already
- * clear -- this covers both a plain double release AND (fix round 1, review IMPORTANT finding)
- * releasing through the WRONG active branch_id: refcount alone is one shared integer and cannot
- * tell which branches hold a share, so without the per-branch holders bitmask a release through
- * any other active branch_id would have silently decremented a real reference a different branch
- * still needs -- exactly the stale-read hazard this module exists to prevent. The decrement is
- * gated on holders, not attempted first and rolled back. */
-int nr_rx_span_pool_release(nr_rx_span_pool_t *pool, uint8_t branch_id, const nr_rx_span_t *span);
+/* Decrements the leased span's refcount on branch_id's behalf; when it reaches 0 the buffer is
+ * returned to the free list. Returns 0 on success, -1 (LOG_E naming branch_id and buf_id, no state
+ * change) if pool/lease.span is NULL, branch_id is out of range, OR lease.key does not equal the
+ * CURRENT key recorded for (branch_id, span->buf_id) -- this is the fix round 2 mechanism (review
+ * IMPORTANT finding, round 2) that actually closes the hazard nr_rx_span_t.holders' comment
+ * describes: a plain per-branch existence bit cannot tell whether a release() call genuinely came
+ * from the branch it names, so releasing through the WRONG active branch_id could silently spend a
+ * different branch's still-needed share while that branch keeps reading -- a real use-after-free
+ * once that branch's own later legitimate release (or a drop) hits refcount 0 and the producer
+ * reacquires the buffer. A lease is an identity the caller cannot fabricate (it can only be
+ * obtained from THIS branch's own prior take() call on THIS buffer occupancy -- the key is
+ * per-pool monotonic and never repeats, so a stale lease from an earlier, already-released
+ * occupant of the same recycled buf_id also fails to validate). holders/refcount are kept and
+ * checked as a second, redundant line of defence (should always agree with the key check given the
+ * invariants; asserted, not just checked) -- not the primary guarantee. */
+int nr_rx_span_pool_release(nr_rx_span_pool_t *pool, uint8_t branch_id, nr_rx_span_lease_t lease);
 
 /* Returns the channel pointer for branch's own physical_channel within span, plus the
  * (branch_id, physical_channel) identity, so a branch cannot casually read a different channel's
