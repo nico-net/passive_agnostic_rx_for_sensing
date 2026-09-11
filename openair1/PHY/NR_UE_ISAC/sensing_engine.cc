@@ -522,6 +522,9 @@ void SensingEngine::consume(const Snapshot& s)
   // P10a: branch identity accumulates exactly like the source mask, and for the same reason -- one
   // PendingRow merges every co-timed submission, so the row records WHICH branches contributed, not
   // one of them. NR_ISAC_BRANCH_NONE (and any id past the mask width) leaves the row untagged.
+  static_assert(NR_RX_BRANCH_MAX <= 32,
+                "branch ids no longer fit the 32-bit branch_mask: raising NR_RX_BRANCH_MAX past 32 "
+                "would silently leave ids >= 32 untagged instead of failing here");
   const uint32_t branch_bit = (s.branch_id < 32) ? (1u << s.branch_id) : 0u;
   ++row.source_occurrences[static_cast<uint32_t>(s.source)];
   const bool is_dl = (DL_SOURCE_BITS & (1u << static_cast<uint32_t>(s.source))) != 0;

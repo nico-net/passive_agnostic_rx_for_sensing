@@ -1,4 +1,7 @@
 /* SPDX-License-Identifier: OAI-Public-License-1.1 */
+#include <stddef.h> // NULL -- nr_isac.h pulls in stdint only, and this file is compiled ONLY
+                    // when ENABLE_ISAC_SENSING=OFF, so the omission survived unnoticed since
+                    // the branch-set accessors were added (P03).
 #include "PHY/NR_UE_ISAC/nr_isac.h"
 
 int AOA_ENABLE = 0;
@@ -22,6 +25,14 @@ void nr_isac_submit_cfr_multi(uint32_t s, float f, int t, const nr_isac_carrier_
                               const float *h, uint32_t a, uint32_t z,
                               const uint32_t *k, const uint32_t *l, uint32_t n, float v)
 { (void)s; (void)f; (void)t; (void)c; (void)h; (void)a; (void)z; (void)k; (void)l; (void)n; (void)v; }
+/* P10a: must exist here too. nr_pdsch_data_aided.c calls it unconditionally and PHY_NR_UE links
+ * regardless of ENABLE_ISAC_SENSING (default OFF = the passive-receiver/X410 production config), so
+ * without this stub an OFF build fails at link, not at compile. */
+void nr_isac_submit_cfr_multi_branch(uint32_t s, float f, int t, const nr_isac_carrier_t *c,
+                                     const float *h, uint32_t a, uint32_t z,
+                                     const uint32_t *k, const uint32_t *l, uint32_t n, float v,
+                                     uint8_t b)
+{ (void)s; (void)f; (void)t; (void)c; (void)h; (void)a; (void)z; (void)k; (void)l; (void)n; (void)v; (void)b; }
 uint32_t nr_isac_aoa_antennas(void) { return 0; }
 uint32_t nr_isac_subslot_config(uint32_t *min_re, float *min_snr_db)
 { if (min_re) *min_re = 0; if (min_snr_db) *min_snr_db = 0.0f; return 0; }

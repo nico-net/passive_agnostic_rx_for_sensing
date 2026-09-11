@@ -1754,6 +1754,8 @@ Files modified / added / removed (no file added, no file removed):
   MOD  `openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.{h,c}` (`nr_pdsch_passive_view_branch()`)
   MOD  `openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_data_aided.c` (TODO(P10) closed; all 4 submissions tagged)
   MOD  `tests/passive_rx/baselines/fixtures.json` (binary sha + P10a note)
+  MOD  `openair1/PHY/NR_UE_ISAC/nr_isac_stub.c` (fix round 1: the missing OFF-build stub, plus a
+       pre-existing missing `<stddef.h>` -- see fix round 1 below)
   MOD  `tests/passive_rx/baseline_manifest.sh` (ONE citation end-token, `SensingEngine::submit()`'s last
        parameter, which this task changed -- the generator hard-fails CITATION_ERROR otherwise)
   ADD  `tests/passive_rx/baselines/manifest_20260911_b370bab-dirty.json` + `_tracked.patch`
@@ -1762,7 +1764,7 @@ Files modified / added / removed (no file added, no file removed):
   `nr_pusch_data_aided.c`, `nr_pusch_passive_decode.c`, `phy_procedures_nr_ue.c`) are UNTOUCHED.
 
 Executable / driver / config / geometry hashes:
-  `nr-uesoftmodem` sha256 `5954b11bb614baa013a1477504cf564b45c33c0af8cff68712822f9061bb4c6c`
+  `nr-uesoftmodem` sha256 `24a81dc52c9adafe9a7f21d383cd18ae58efdf5a18a8b6e90e21f63945284018`
   `liboai_usrpdevif.so` sha256 `ad0a71c56dbc509149337460af7d0e97c64d4f390f85bec48b8882aa64f64583` (UNCHANGED,
     not rebuilt, nothing in it was touched)
   fixture `/home/sens/NICOLA/captures/sensing_manual_fixed.UtvBT7`, receiver.conf `5022d875...`, full_auto=0.
@@ -1829,6 +1831,34 @@ Deliberate deviation from the brief, and why: the brief specified the legacy wra
   indistinguishable from an untagged one — which would have broken the brief's OWN requirement that the
   field be OMITTED, not zero, when unset. The structural guarantee the brief actually asked for (one-line
   legacy wrapper, shared body, no signature change at 8 call sites) is unaffected.
+
+Fix round 1 (2026-09-11, controller review: one Critical + 3 Minor):
+  Manifest for this round: `tests/passive_rx/baselines/manifest_20260911_d13a97a-dirty.json`
+  + `..._tracked.patch` (parent `d13a97a1dd05f21e8787f17cc46d70d8d66af424`, the P10a commit).
+  CRITICAL — `openair1/PHY/NR_UE_ISAC/nr_isac_stub.c` (compiled INSTEAD of nr_isac.cc when
+  `ENABLE_ISAC_SENSING=OFF`, which is the CMake DEFAULT and the documented passive-receiver/X410
+  production config) had no `nr_isac_submit_cfr_multi_branch()`, while `nr_pdsch_data_aided.c` calls it
+  unconditionally and `PHY_NR_UE` links regardless of the option. The session's own build directory has
+  sensing ON, so this never showed. Fixed with a no-op stub mirroring the existing
+  `nr_isac_submit_cfr_multi` one. PROVEN BY LINK, not by inspection, in a SEPARATE build directory
+  (`/tmp/p10a_offbuild`, `cmake -DENABLE_ISAC_SENSING=OFF -DENABLE_TESTS=OFF`): without the stub,
+  `make nr-uesoftmodem` fails with three `undefined reference to 'nr_isac_submit_cfr_multi_branch'`
+  naming `nr_pdsch_data_aided.c:419,428,434`; with it, exit 0.
+  SECOND, PRE-EXISTING DEFECT FOUND BY ACTUALLY RUNNING THAT BUILD (this is why the reviewer asked for a
+  link, not an eyeball): `nr_isac_stub.c` DID NOT COMPILE AT ALL under ENABLE_ISAC_SENSING=OFF --
+  `NULL undeclared` at the two branch-set accessors added by P03, because `nr_isac.h` includes
+  `<stdint.h>` but nothing provides `<stddef.h>`. So the OFF configuration has been broken since P03 and
+  nobody noticed, the ON build directory never compiling this file. Fixed with the missing include;
+  the OFF build now reaches a clean link. Not a P10a regression, fixed here because the link proof the
+  review asked for is unobtainable without it.
+  MINOR 2 — `static_assert(NR_RX_BRANCH_MAX <= 32, ...)` next to the branch-bit computation in
+  `sensing_engine.cc`, so raising the branch count past the mask width fails loudly instead of silently
+  leaving ids >= 32 untagged. MINOR 3/4 are report wording only (no code).
+  Re-verified on the fix-round binary `24a81dc5`: parity test 15/15, legacy replay
+  `REPLAY PASS: identical DL controls=34 failed=0 raw UL=24` exit 0 with the fixture directory unchanged,
+  `replay_branch_view.sh` 34/34/31/34/34 with data_submits == own crc_ok. The ON build directory is left
+  in its ON state, matching the manifest; the OFF directory is a scratch tree under /tmp and is not part
+  of the repository.
 
 Status: IN_PROGRESS (P10 row, ABI slice only), and NOT a gate pass. G3 not passed.
 
