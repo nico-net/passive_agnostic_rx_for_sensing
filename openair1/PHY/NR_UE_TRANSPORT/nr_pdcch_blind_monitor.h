@@ -345,6 +345,47 @@ bool nr_pdcch_blind_decode_and_extract_10(const int16_t* llr,
                                           const nr_pdcch_blind_extract_opts_t* opts,
                                           nr_pdcch_blind_result_t* out);
 
+/* Protocol plausibility is not physical validation. A unique candidate remains
+ * UNRESOLVED until independent PDSCH/configuration evidence validates it. */
+typedef enum {
+  NR_DCI_UNRESOLVED, NR_DCI_AMBIGUOUS, NR_DCI_VALIDATED, NR_DCI_REJECTED,
+} nr_dci_interpretation_state_t;
+
+static inline const char *nr_dci_interpretation_state_name(nr_dci_interpretation_state_t state)
+{
+  switch (state) {
+    case NR_DCI_UNRESOLVED: return "UNRESOLVED";
+    case NR_DCI_AMBIGUOUS: return "AMBIGUOUS";
+    case NR_DCI_VALIDATED: return "VALIDATED";
+    case NR_DCI_REJECTED: return "REJECTED";
+    default: return "INVALID_STATE";
+  }
+}
+
+/* Exhaustive only over this parser's enabled RNTI classes for ONE supplied
+ * frequency/TDRA context. Not proof of cell configuration or C-vs-TC identity.
+ * Every attempted candidate retains its allocation or static rejection reason. */
+#define NR_DCI10_MAX_CLASS_CANDIDATES 3
+typedef struct {
+  nr_dci_interpretation_state_t state;
+  unsigned attempted, surviving;
+  int unique_candidate; /* -1 unless exactly one candidate survives */
+  nr_pdcch_blind_result_t candidates[NR_DCI10_MAX_CLASS_CANDIDATES];
+} nr_dci10_interpretation_report_t;
+
+/* Manual: legacy first-match behavior; report is empty and UNRESOLVED.
+ * Auto: ONE polar decode, every enabled class, true only for a unique protocol-
+ * plausible decoding ATTEMPT, never VALIDATED. Ambiguity clears allocation and
+ * plausible but preserves payload/RNTI/mismatches, including format-0_0 input.
+ * report may be NULL without disabling automatic ambiguity protection. */
+bool nr_pdcch_blind_decode_10_mode(bool automatic,
+                                  const int16_t *llr, uint8_t aggregation_level,
+                                  uint16_t dci_length, const nr_pdcch_blind_dci10_ctx_t *ctx,
+                                  uint16_t rnti_min, uint16_t rnti_max,
+                                  const nr_pdcch_blind_extract_opts_t *opts,
+                                  nr_pdcch_blind_result_t *out,
+                                  nr_dci10_interpretation_report_t *report);
+
 /* Bounded initial layout family. Returned grants contain a legal S/L scaffold;
  * never decode them without a Technique D selection. No layout is declared correct here. */
 int nr_pdcch_blind_dl_layout_candidates(const nr_pdcch_blind_raw_result_t *raw,

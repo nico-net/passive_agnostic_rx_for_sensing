@@ -2266,16 +2266,23 @@ static bool dci10_parse(uint64_t                             payload,
   return true;
 }
 
-bool nr_pdcch_blind_decode_and_extract_10(const int16_t*                       llr,
+static bool blind_decode_and_interpret_10(const int16_t*                       llr,
                                           uint8_t                              aggregation_level,
                                           uint16_t                             dci_length,
                                           const nr_pdcch_blind_dci10_ctx_t*    ctx,
                                           uint16_t                             rnti_min,
                                           uint16_t                             rnti_max,
                                           const nr_pdcch_blind_extract_opts_t* opts,
-                                          nr_pdcch_blind_result_t*             out)
+                                          nr_pdcch_blind_result_t*             out,
+                                          nr_dci10_interpretation_report_t*    report)
 {
+  if (report) {
+    memset(report, 0, sizeof(*report));
+    report->state = NR_DCI_REJECTED;
+    report->unique_candidate = -1;
+  }
   memset(out, 0, sizeof(*out));
+
   out->plausible  = false;
   out->dci_format = NR_BLIND_DCI_FORMAT_1_0;
 
@@ -2352,12 +2359,24 @@ bool nr_pdcch_blind_decode_and_extract_10(const int16_t*                       l
   // RNTI and the coded bits, not on which class hypothesis wins. ----
   out->mismatched_bits = blind_mismatched_bits(llr, dci_estimation, crc, aggregation_level, dci_length);
 
-  // ---- Step 3/4: try each admissible class; the first whose every field check passes wins. ----
+  // Manual returns the first passing class. Auto keeps every class: RA reserved
+  // zeros can also be an ordinary C/TC grant. All hypotheses share the same
+  // polar word and re-encode evidence, without repeating the polar decode.
+
   const uint16_t saved_rnti       = out->rnti;
   const uint16_t saved_mismatches = out->mismatched_bits;
   for (int i = 0; i < n_attempts; i++) {
     const char* last_reason = NULL;
-    if (dci10_parse(dci_estimation[0], dci_length, riv_bits, pad_bits, attempts[i], ctx, opts, out)) {
+    out->rnti_class = (uint8_t)attempts[i];
+    const bool parsed = dci10_parse(dci_estimation[0], dci_length, riv_bits, pad_bits, attempts[i], ctx, opts, out);
+    if (report) {
+      report->candidates[report->attempted++] = *out;
+      if (parsed) {
+        report->unique_candidate = i;
+        report->surviving++;
+      }
+    } else if (parsed) {
+
       return true;
     }
     last_reason = out->reject_reason;
@@ -2372,7 +2391,46 @@ bool nr_pdcch_blind_decode_and_extract_10(const int16_t*                       l
     // The decoded word survives every class hypothesis -- it is what the format-0_0 reader needs.
     out->payload         = dci_estimation[0];
   }
+  if (report && report->surviving == 1) {
+    *out = report->candidates[report->unique_candidate];
+    report->state = NR_DCI_UNRESOLVED; // protocol validity is not physical validation
+    return true;
+  }
+  if (report && report->surviving > 1) {
+    report->state = NR_DCI_AMBIGUOUS;
+    report->unique_candidate = -1;
+    out->reject_reason = "ambiguous DCI-1_0 RNTI-class interpretations";
+  }
   return false;
+}
+
+bool nr_pdcch_blind_decode_and_extract_10(const int16_t *llr, uint8_t aggregation_level,
+                                         uint16_t dci_length, const nr_pdcch_blind_dci10_ctx_t *ctx,
+                                         uint16_t rnti_min, uint16_t rnti_max,
+                                         const nr_pdcch_blind_extract_opts_t *opts,
+                                         nr_pdcch_blind_result_t *out)
+{
+  return blind_decode_and_interpret_10(llr, aggregation_level, dci_length, ctx,
+                                        rnti_min, rnti_max, opts, out, NULL);
+}
+
+bool nr_pdcch_blind_decode_10_mode(bool automatic,
+                                  const int16_t *llr, uint8_t aggregation_level,
+                                  uint16_t dci_length, const nr_pdcch_blind_dci10_ctx_t *ctx,
+                                  uint16_t rnti_min, uint16_t rnti_max,
+                                  const nr_pdcch_blind_extract_opts_t *opts,
+                                  nr_pdcch_blind_result_t *out,
+                                  nr_dci10_interpretation_report_t *report)
+{
+  nr_dci10_interpretation_report_t local;
+  if (!automatic && report) {
+    memset(report, 0, sizeof(*report));
+    report->state = NR_DCI_UNRESOLVED;
+    report->unique_candidate = -1;
+  }
+  return blind_decode_and_interpret_10(llr, aggregation_level, dci_length, ctx,
+                                        rnti_min, rnti_max, opts, out,
+                                        automatic ? (report ? report : &local) : NULL);
 }
 
 bool nr_pdcch_blind_decode_and_extract(const int16_t* llr,

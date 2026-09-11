@@ -2734,3 +2734,136 @@ TEST_F(BlindPdcchTest, UlAntennaPortsCodePointOutsideItsTableIsRejected) {
     }
   }
 }
+
+TEST_F(BlindPdcchTest, AutoDci10RetainsRaTcAmbiguityAndNeverExportsAGrant) {
+  // One real polar codeword, two different TS 38.212 7.3.1.2.1 field lists:
+  // C/TC identifier=1,RIV=0; RA RIV=1024. Remaining fields are zero.
+  constexpr uint16_t bwp = 48, rnti = 0x11;
+  const uint16_t len = nr_pdcch_blind_dci10_size(bwp);
+  Dci10Gt gt;
+  const uint64_t payload = PackDci10Crnti(gt, RivBitsFor(bwp));
+  auto llr = EncodeToLLR(payload, rnti, len, kAggregationLevel, 40.0, rng_);
+  auto ctx = Dci10Ctx(NR_BLIND_SS_COMMON, bwp);
+  auto opts = OptsWithTdaLists();
+  nr_pdcch_blind_result_t out{}, manual{};
+  nr_dci10_interpretation_report_t report{};
+  ASSERT_TRUE(nr_pdcch_blind_decode_10_mode(false, llr.data(), kAggregationLevel,
+      len, &ctx, 1, 0xffef, &opts, &manual, nullptr));
+  EXPECT_EQ(manual.rnti_class, NR_BLIND_RNTI_CLASS_RA);
+  EXPECT_FALSE(nr_pdcch_blind_decode_10_mode(true, llr.data(), kAggregationLevel,
+      len, &ctx, 1, 0xffef, &opts, &out, &report));
+  EXPECT_EQ(report.state, NR_DCI_AMBIGUOUS);
+  ASSERT_EQ(report.attempted, 2u);
+  ASSERT_EQ(report.surviving, 2u);
+  EXPECT_EQ(report.unique_candidate, -1);
+  EXPECT_EQ(report.candidates[0].rnti_class, NR_BLIND_RNTI_CLASS_RA);
+  EXPECT_EQ(report.candidates[1].rnti_class, NR_BLIND_RNTI_CLASS_TC);
+  EXPECT_TRUE(report.candidates[0].plausible);
+  EXPECT_TRUE(report.candidates[1].plausible);
+  EXPECT_NE(report.candidates[0].num_rb, report.candidates[1].num_rb);
+  EXPECT_FALSE(out.plausible);
+  EXPECT_EQ(out.num_rb, 0);
+  EXPECT_EQ(out.num_symbols, 0);
+  EXPECT_EQ(out.payload, payload);
+  EXPECT_EQ(out.rnti, rnti);
+  EXPECT_EQ(out.mismatched_bits, manual.mismatched_bits);
+  ASSERT_NE(out.reject_reason, nullptr);
+  EXPECT_NE(std::string(out.reject_reason).find("ambiguous"), std::string::npos);
+  EXPECT_FALSE(nr_pdcch_blind_decode_10_mode(true, llr.data(), kAggregationLevel,
+      len, &ctx, 1, 0xffef, &opts, &out, nullptr));
+}
+
+TEST_F(BlindPdcchTest, AutoDci10UniqueCandidateMatchesManualAcrossContexts) {
+  for (uint16_t bwp : {24, 48, 106, 273}) {
+    for (unsigned rv = 0; rv < 4; ++rv) {
+      Dci10Gt gt;
+      gt.riv = 2 * bwp + 3; // three PRBs, start 3, independently packed
+      gt.tda = rv % 2;
+      gt.mcs = 7 + rv;
+      gt.ndi = rv % 2;
+      gt.rv = rv;
+      gt.harq_pid = 3 + 4 * rv;
+      const uint16_t len = nr_pdcch_blind_dci10_size(bwp);
+      const auto payload = PackDci10Crnti(gt, RivBitsFor(bwp));
+      auto llr = EncodeToLLR(payload, 0x4601, len, kAggregationLevel, 40.0, rng_);
+      auto ctx = Dci10Ctx(NR_BLIND_SS_UE_SPECIFIC, bwp);
+      auto opts = OptsWithTdaLists();
+      nr_pdcch_blind_result_t automatic{}, manual{};
+      nr_dci10_interpretation_report_t report{};
+      ASSERT_TRUE(nr_pdcch_blind_decode_and_extract_10(llr.data(), kAggregationLevel,
+          len, &ctx, 1, 0xffef, &opts, &manual));
+      ASSERT_TRUE(nr_pdcch_blind_decode_10_mode(true, llr.data(), kAggregationLevel,
+          len, &ctx, 1, 0xffef, &opts, &automatic, &report));
+      EXPECT_EQ(report.attempted, 1u);
+      EXPECT_EQ(report.surviving, 1u);
+      EXPECT_EQ(report.unique_candidate, 0);
+      EXPECT_EQ(report.state, NR_DCI_UNRESOLVED);
+      EXPECT_EQ(automatic.start_rb, 3);
+      EXPECT_EQ(automatic.num_rb, 3);
+      EXPECT_EQ(automatic.mcs, gt.mcs);
+      EXPECT_EQ(automatic.rv, gt.rv);
+      EXPECT_EQ(automatic.harq_pid, gt.harq_pid);
+      EXPECT_EQ(automatic.start_rb, manual.start_rb);
+      EXPECT_EQ(automatic.num_rb, manual.num_rb);
+      EXPECT_EQ(automatic.start_symbol, manual.start_symbol);
+      EXPECT_EQ(automatic.num_symbols, manual.num_symbols);
+      EXPECT_EQ(automatic.dl_dmrs_symb_pos, manual.dl_dmrs_symb_pos);
+      EXPECT_EQ(automatic.dmrs_ports, manual.dmrs_ports);
+      EXPECT_EQ(automatic.n_dmrs_cdm_groups, manual.n_dmrs_cdm_groups);
+      EXPECT_EQ(automatic.nscid, manual.nscid);
+      EXPECT_EQ(automatic.mapping_type, manual.mapping_type);
+      EXPECT_EQ(automatic.mcs_table, manual.mcs_table);
+      EXPECT_EQ(automatic.ndi, manual.ndi);
+      EXPECT_EQ(automatic.tb_scaling, manual.tb_scaling);
+    }
+  }
+}
+
+TEST_F(BlindPdcchTest, AutoDci10RetainsEveryRejectionReason) {
+  constexpr uint16_t bwp = 48;
+  Dci10Gt gt;
+  gt.riv = 100;
+  gt.reserved = 1;
+  auto ctx = Dci10Ctx(NR_BLIND_SS_COMMON, bwp);
+  ctx.rnti_class_mask = 1u << NR_BLIND_RNTI_CLASS_RA;
+  auto opts = OptsWithTdaLists();
+  const uint16_t len = nr_pdcch_blind_dci10_size(bwp);
+  auto llr = EncodeToLLR(PackDci10Ra(gt, RivBitsFor(bwp)), 0x11,
+                         len, kAggregationLevel, 40.0, rng_);
+  nr_pdcch_blind_result_t out{};
+  nr_dci10_interpretation_report_t report{};
+  EXPECT_FALSE(nr_pdcch_blind_decode_10_mode(true, llr.data(), kAggregationLevel,
+      len, &ctx, 1, 0xffef, &opts, &out, &report));
+  EXPECT_EQ(report.state, NR_DCI_REJECTED);
+  ASSERT_EQ(report.attempted, 1u);
+  EXPECT_EQ(report.surviving, 0u);
+  EXPECT_EQ(report.unique_candidate, -1);
+  EXPECT_EQ(report.candidates[0].rnti_class, NR_BLIND_RNTI_CLASS_RA);
+  ASSERT_NE(report.candidates[0].reject_reason, nullptr);
+  EXPECT_NE(std::string(report.candidates[0].reject_reason).find("reserved bits"), std::string::npos);
+}
+
+TEST_F(BlindPdcchTest, AutoDci10KeepsUlBitsAndClearsReusedReports) {
+  constexpr uint16_t bwp = 48;
+  Dci10Gt gt;
+  gt.riv = 5;
+  const uint16_t len = nr_pdcch_blind_dci10_size(bwp);
+  const uint64_t payload = PackDci10Crnti(gt, RivBitsFor(bwp), 0);
+  auto llr = EncodeToLLR(payload, 0x4601, len, kAggregationLevel, 40.0, rng_);
+  auto ctx = Dci10Ctx(NR_BLIND_SS_UE_SPECIFIC, bwp);
+  auto opts = OptsWithTdaLists();
+  nr_pdcch_blind_result_t out{};
+  nr_dci10_interpretation_report_t report{};
+  EXPECT_FALSE(nr_pdcch_blind_decode_10_mode(true, llr.data(), kAggregationLevel,
+      len, &ctx, 1, 0xffef, &opts, &out, &report));
+  EXPECT_EQ(out.payload, payload);
+  EXPECT_EQ(out.rnti, 0x4601);
+  EXPECT_EQ(report.state, NR_DCI_REJECTED);
+  EXPECT_EQ(report.attempted, 1u);
+  EXPECT_FALSE(nr_pdcch_blind_decode_10_mode(true, llr.data(), kAggregationLevel,
+      len, nullptr, 1, 0xffef, &opts, &out, &report));
+  EXPECT_EQ(report.state, NR_DCI_REJECTED);
+  EXPECT_EQ(report.attempted, 0u);
+  EXPECT_EQ(report.surviving, 0u);
+  EXPECT_EQ(report.unique_candidate, -1);
+}

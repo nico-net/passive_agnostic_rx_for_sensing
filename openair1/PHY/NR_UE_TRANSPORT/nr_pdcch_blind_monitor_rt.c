@@ -560,8 +560,27 @@ static void nr_pdcch_blind_cand_worker_body(nr_pdcch_blind_cand_task_t *t)
     t->ok = nr_pdcch_blind_decode_01_mode(t->ul_auto,tmp_e,t->L,t->dci_length,t->ul_opts,
                                           t->rnti_min,t->rnti_max,&t->ul_out);
   } else if (t->format == NR_BLIND_DCI_FORMAT_1_0) {
-    t->ok = nr_pdcch_blind_decode_and_extract_10(tmp_e, t->L, t->dci_length, t->dci10_ctx, t->rnti_min, t->rnti_max,
-                                                 t->extract_opts, &t->out);
+    nr_dci10_interpretation_report_t report;
+    t->ok = nr_pdcch_blind_decode_10_mode(t->dl_auto, tmp_e, t->L, t->dci_length,
+                                          t->dci10_ctx, t->rnti_min, t->rnti_max,
+                                          t->extract_opts, &t->out, &report);
+    if (t->dl_auto && report.attempted) {
+      LOG_D(PHY, "DCI_INTERPRET format=1_0 frame=%d slot=%d cce=%d rnti=0x%04x "
+                 "payload=0x%016lx bits=%u candidates=%u surviving=%u state=%s "
+                 "unique=%d evidence=protocol_only scope=supplied_context\n",
+            t->frame, t->slot, t->cce, t->out.rnti, (unsigned long)t->out.payload,
+            t->dci_length, report.attempted, report.surviving,
+            nr_dci_interpretation_state_name(report.state), report.unique_candidate);
+      for (unsigned i = 0; i < report.attempted; ++i) {
+        const nr_pdcch_blind_result_t *h = &report.candidates[i];
+        LOG_D(PHY, "DCI_HYPOTHESIS rnti=0x%04x candidate=%u class=%u protocol=%s "
+                   "reason=%s PRB=%u+%u symbols=%u+%u mcs=%u rv=%u harq=%u dmrs=0x%x\n",
+              t->out.rnti, i, h->rnti_class, h->plausible ? "PASS" : "REJECT",
+              h->reject_reason ? h->reject_reason : "independent_validation_pending",
+              h->start_rb, h->num_rb, h->start_symbol, h->num_symbols,
+              h->mcs, h->rv, h->harq_pid, h->dl_dmrs_symb_pos);
+      }
+    }
   } else if (t->dl_auto) {
     t->ok = nr_pdcch_blind_decode_raw_11(tmp_e, t->L, t->dci_length,
                                         t->rnti_min, t->rnti_max, &t->dl_raw);
