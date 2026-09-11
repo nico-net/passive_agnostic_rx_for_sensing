@@ -2419,9 +2419,15 @@ if(ENABLE_TESTS)
   # adaptive_RX_pipeline.md P03: receiver-branch identity/epoch/lifecycle abstraction, pure and
   # standalone (no OAI PHY dependencies beyond LOG_E), so it is built directly from its own .c
   # rather than pulling in the PHY_NR_UE library it will later be linked into.
+  # P08a fix round 1: nr_passive_harq_tag_gnb_pin.c is a C shim that lets the gtest assert the
+  # zero-default of PHY_VARS_gNB::harq_unique_pid_base on the REAL struct. It cannot be done from
+  # the .cc: defs_gNB.h pulls thread-pool.h, whose `_Atomic(uint64_t)` is C11 syntax that is not
+  # valid C++. The shim uses only the type definition + calloc, so it adds no link dependency.
   add_executable(nr_rx_branch_test ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_rx_branch_test.cc
+                                    ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_passive_harq_tag_gnb_pin.c
                                     ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_rx_branch.c)
-  target_include_directories(nr_rx_branch_test PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
+  target_include_directories(nr_rx_branch_test PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT
+                                                       ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests)
   target_link_libraries(nr_rx_branch_test PRIVATE UTIL GTest::gtest)
   add_dependencies(tests nr_rx_branch_test)
   add_test(NAME nr_rx_branch_test COMMAND ./nr_rx_branch_test)

@@ -25,6 +25,7 @@
 extern "C" {
 #include "nr_rx_branch.h"
 #include "nr_passive_harq_tag.h"
+#include "nr_passive_harq_tag_gnb_pin.h" /* the C shim: PHY_VARS_gNB is not C++-includable */
 #include "common/utils/LOG/log.h"
 #include "common/config/config_userapi.h"
 }
@@ -424,6 +425,22 @@ TEST(PassiveUlHarqTag, StrideBoundHoldsForTheConfiguredContextCount) {
   EXPECT_LT(highest, NR_PUSCH_PASSIVE_HARQ_TAG_BASE + NR_PASSIVE_HARQ_NAMESPACE_SPAN);
   EXPECT_EQ(highest, ul_tag((int)NR_PUSCH_PASSIVE_HARQ_MAX_CTX - 1,
                             NR_PUSCH_PASSIVE_ULSCH_PER_CTX - 1));
+}
+
+TEST(PassiveUlHarqTag, AZeroInitialisedGnbReproducesTheUpstreamTag) {
+  /* The fix is upstream-neutral only because a PHY_VARS_gNB is zero-initialised at every
+   * allocation site in this tree (calloc / calloc_or_fail / malloc16_clear / malloc+memset). That
+   * is the load-bearing property and it lives in the STRUCT, not in the arithmetic above, so pin it
+   * on the real type rather than restating the argument in prose: zero-init must leave
+   * nr_ulsch_decoding.c:133 computing exactly the pre-P08a `= ULSCH_id`. */
+  ASSERT_GT(nr_passive_harq_tag_gnb_size(), 0u) << "the shim did not see the real struct";
+  const uint32_t base = nr_passive_harq_tag_gnb_zero_default();
+  ASSERT_NE(base, UINT32_MAX) << "allocation failed in the shim; the pin proved nothing";
+  EXPECT_EQ(base, 0u);
+  for (uint32_t ulsch_id = 0; ulsch_id < 8; ulsch_id++)
+    EXPECT_EQ(base + ulsch_id, ulsch_id) << "upstream tag moved at ULSCH_id=" << ulsch_id;
+  /* And once a passive context stamps its base, the same expression lands in the 5000 range. */
+  EXPECT_EQ(nr_pusch_passive_harq_tag_base(3) + 0u, 5003u);
 }
 
 int main(int argc, char **argv)

@@ -1568,6 +1568,61 @@ Bound, as arithmetic (not a chosen constant): `5000 + (6-1)*1 + (1-1) = 5005 < 6
 Unlike the DL stride there is no DCI-field width in play here — the second term is an ARRAY INDEX
 whose range is the per-context `ulsch[]` size, which is why it is tied to the allocation instead.
 
+### Fix round 1 (2026-09-11, same day) — reviewer findings addressed
+
+Approved with 1 Important (documentation-only by the reviewer's own ruling) + 4 Minor. No
+behavioural code change this round; one gtest and one C shim added.
+
+IMPORTANT — **the accelerator PRUNES the id, so the base map's disjointness is a SOFTWARE property,
+not a device guarantee.** Verified from source rather than taken on the review's word:
+`nrLDPC_coding_aal.c:654-656` (and `:742-743`) compute
+`segment_offset = harq_unique_pid * NR_LDPC_MAX_NUM_CB + i` with `NR_LDPC_MAX_NUM_CB = 144`
+(`nrLDPCdecoder_defs.h:78`) and then `% active_dev.num_harq_codeblock`, whose default is **512**
+(`nrLDPC_coding_aal.c:1083`, operator-settable). Two ids alias for the same segment index iff
+`144*(p-q) = 0 (mod 512)`; `gcd(144,512) = 16`, so iff `p-q = 0 (mod 32)` — aliasing period
+`num_harq_codeblock / gcd(NR_LDPC_MAX_NUM_CB, num_harq_codeblock)` = 32 at the defaults. The
+review's concrete example holds: `5000 - 1000 = 4000 = 125*32`, so passive UL decode ctx 0 and the
+attached DL re-encode at `harq_process_nbr` 0 prune onto one slot (moot inside a `--passive-rx`
+process; the 1000 range is attached-only). Two further consequences found while doing the
+arithmetic and recorded with it: **P09's DL branch stride is itself 32**, so branch `b` and branch
+`b+1` at the same `harq_process_nbr` alias at the device — the collision that stride removes in
+software; and `512/144 = 3.55`, so a default-configured device holds barely three ids' worth of
+segments and **no base map can make more than that many concurrent ids safe** — the requirement is
+operator-side (`num_harq_codeblock >= 144 * ids in flight`), with co-prime-safe spacing an
+improvement on the margin, not a fix. All of it is inherited from P09's map, out of scope to change
+here, and now documented in `nr_passive_harq_tag.h`'s header comment and a new subsection of the
+audit's sec 2 so the map is never read as a hardware guarantee. Unreachable in this tree either
+way: the linked backend is `nrLDPC_coding_segment`.
+
+MINOR 2 — "every `PHY_VARS_gNB` is `calloc`'d" was imprecise. Corrected to ZERO-INITIALISED
+everywhere it was claimed (`defs_gNB.h`'s field comment, audit sec 4.1, the report), enumerating all
+four spellings: `calloc_or_fail` (`nr-gnb.c:384`, `ulsim.c:727`, `ulsim_mu_mimo.c:538`), `calloc`
+(`dlschsim.c:350`, `ulschsim.c:371`, `pucchsim.c:402`), `malloc16_clear` (`pbchsim.c:386`) and
+`malloc` + `memset` (`dlsim.c:754-755`, `prachsim.c:385-386`).
+
+MINOR 3 — new gtest `PassiveUlHarqTag.AZeroInitialisedGnbReproducesTheUpstreamTag` pins the
+zero-default on the REAL struct (and that `base + ULSCH_id == ULSCH_id` for `ULSCH_id` 0..7, i.e.
+the literal pre-P08a expression). It needed a small C shim,
+`openair1/PHY/NR_UE_TRANSPORT/tests/nr_passive_harq_tag_gnb_pin.{c,h}` (+2 lines of CMake):
+`PHY/defs_gNB.h` pulls `common/utils/threadPool/thread-pool.h`, whose `_Atomic(uint64_t) dead_mask`
+is C11 syntax that does not compile as C++ — found by trying the direct include first. The shim
+uses only the type definition and `calloc`, so it adds no link dependency.
+
+MINOR 4 — no action, as ruled.
+
+MINOR 5 — citations fixed: audit sec 4.1 `nr_ulsch_decoding.c:101-102` -> `:102-103`; report body
+`nr_pusch_passive_decode.c:1072` -> `:1084` (post-edit line; `:1072` was the pre-edit location and
+is what the commit message correctly cites as "was").
+
+Re-run (`nr-uesoftmodem` sha256 `6cc3f0689be2807d6e036349ab82e026f8f567f07d2801ccf9416ab24ee019e2`
+— the binary DID change despite the edit being comment-only, so the replays were re-run rather than
+assumed): `nr_rx_branch_test` **29/29** (was 28); legacy replay `REPLAY PASS: identical DL
+controls=34 failed=0 raw UL=24; no radio opened` exit 0; `replay_branch_view.sh` 34/34/31/34/34 of
+38, exit 0; UL-CONFIG replay `crc=9/24 rejected=0 repeat_mismatches=0` with all 24 per-grant lines
+still byte-identical to the PRE-change baseline binary `252df29ea0`. Manifest for this round:
+`tests/passive_rx/baselines/manifest_20260911_6aedd38-dirty.json` (the `ec24e5d` pair from the
+first commit is kept, not replaced). Artifacts: `/tmp/p08a_r1_bv/`, `/tmp/p08a_r1_ulcfg.log`.
+
 ## Session template — copy for each future work session
 
 ```text

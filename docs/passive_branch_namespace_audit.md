@@ -58,6 +58,41 @@ four axes the brief names: **branch x direction x decode-vs-reconstruction x UE/
 | 9 | `nr_pdsch_data_aided.c:128` | `TB_parameters.harq_unique_pid = harq_pid_tag` | pass-through | n/a | Consumes site 2's value (via `nr_pdsch_passive_job_t::harq_pid_tag`). |
 | 10 | ~~`nr_pusch_passive_decode.c:82` `PASSIVE_UL_HARQ_TAG_BASE 4000`~~ | -- | -- | **REMOVED (P08a)** | Was defined, documented as the UL decode namespace, and **never used** anywhere -- and its 4000 also collided with site 7's UL RE-ENCODE base, so wiring it up as written would have swapped a decode-vs-decode alias for a decode-vs-re-encode one. Deleted; the UL decode namespace is 5000+ in `nr_passive_harq_tag.h`. See 4.1. |
 
+### The accelerator prunes the id (added P08a fix round 1)
+
+Everything above is disjointness in SOFTWARE. The AAL backend does not use `harq_unique_pid`
+unmodified -- `nrLDPC_coding_aal.c:654-656` (and `:742-743`) compute
+
+```
+segment_offset        = harq_unique_pid * NR_LDPC_MAX_NUM_CB + i        # NR_LDPC_MAX_NUM_CB = 144
+pruned_segment_offset = segment_offset % active_dev.num_harq_codeblock  # default 512, :1083
+```
+
+so two ids `p != q` share a device slot for the same segment index iff `144*(p-q) = 0 (mod 512)`.
+With `gcd(144, 512) = 16` that reduces to `p - q = 0 (mod 32)`: **the aliasing period is
+`num_harq_codeblock / gcd(NR_LDPC_MAX_NUM_CB, num_harq_codeblock)` = 32 at the defaults.**
+
+Three consequences, none of them introduced by P08a and none reachable in this tree:
+
+* The 1000-apart base spacing is a multiple of 32, so e.g. **5000** (passive UL decode, ctx 0) and
+  **1000** (attached DL re-encode, `harq_process_nbr` 0) prune onto the same slot. Moot inside a
+  `--passive-rx` process -- the 1000 range is attached-only, the two never coexist -- but the table
+  above should not be read as a device-level guarantee.
+* **The DL branch stride is itself 32** (section 3), so branch `b` and branch `b+1` at the same
+  `harq_process_nbr` differ by exactly 32 and alias after pruning -- the collision that stride
+  removes in software reappears at the device.
+* `512 / 144 = 3.55`: a default-configured device holds barely three ids' worth of segments, so
+  **no choice of bases makes more than that many CONCURRENT ids safe.** The real requirement is
+  operator-side, `num_harq_codeblock >= 144 * (ids in flight)`, and ideally the bases and strides
+  would be co-prime-safe against `num_harq_codeblock / NR_LDPC_MAX_NUM_CB` instead of sitting at a
+  round 1000.
+
+This is a property of P09's whole base map, inherited rather than introduced, and changing the map
+is out of scope for P08a -- it is recorded here and in `nr_passive_harq_tag.h` so the map is not
+mistaken for a hardware guarantee. Section 1's second qualification already said the prune "can
+fold two disjoint ids onto the same buffer"; this section supplies the arithmetic and names the
+pairs it actually folds.
+
 The base map, as it now stands, is centralised in `nr_passive_harq_tag.h`'s header comment: 0-31
 attached DL decode, 1000+ attached DL re-encode, 2000+ passive DL decode, 3000+ passive DL
 re-encode, 4000+ passive UL re-encode, 5000+ passive UL decode (P08a). Bases are 1000 apart; that spacing is now a named constant
@@ -153,7 +188,7 @@ constant; the id would have to be overridden after the fact or the callee taught
 two roles.
 
 **FIXED in P08a (2026-09-11), and that constraint is exactly what shaped the fix.** Confirmed by
-reading `nr_ulsch_decoding.c:101-102`: `ULSCH_id` indexes BOTH `phy_vars_gNB->ulsch[ULSCH_id]` and
+reading `nr_ulsch_decoding.c:102-103`: `ULSCH_id` indexes BOTH `phy_vars_gNB->ulsch[ULSCH_id]` and
 `phy_vars_gNB->pusch_vars[ULSCH_id]`, so it is an ARRAY INDEX and must stay 0 on a passive context
 (which allocates exactly one of each). The id is therefore namespaced by giving the INSTANCE a
 base, not by moving the index:
@@ -166,8 +201,11 @@ gnb->harq_unique_pid_base = nr_pusch_passive_harq_tag_base(ctx);   /* 5000 + ctx
 ```
 
 `harq_unique_pid_base` is a new `uint32_t` on `PHY_VARS_gNB` (`defs_gNB.h:374`) that is **0 for a
-real gNB** -- every `PHY_VARS_gNB` in this tree is `calloc`'d (`executables/nr-gnb.c:384` plus the
-`SIMULATION/NR_PHY` sims) -- so the upstream expression is bit-identical and the behaviour change
+real gNB** -- every `PHY_VARS_gNB` allocation in this tree is ZERO-INITIALISED, by four different
+spellings: `calloc_or_fail` (`executables/nr-gnb.c:384`, `SIMULATION/NR_PHY/ulsim.c:727`,
+`ulsim_mu_mimo.c:538`), `calloc` (`dlschsim.c:350`, `ulschsim.c:371`, `pucchsim.c:402`),
+`malloc16_clear` (`pbchsim.c:386`) and `malloc` + `memset(...,0,...)` (`dlsim.c:754-755`,
+`prachsim.c:385-386`) -- so the upstream expression is bit-identical and the behaviour change
 is confined to the passive receiver, the one caller that runs several `PHY_VARS_gNB` CONCURRENTLY
 against one dlopen'd LDPC coding interface.
 
@@ -271,12 +309,16 @@ thread confinement plus a full per-job rewrite, not by luck.
 
 Stated plainly, because the replay harness cannot exercise the failure this fix removes:
 
-* **P08a, validated by test:** 4 new cases in `nr_rx_branch_test` (28/28, was 24) -- every decode
+* **P08a, validated by test:** 5 new cases in `nr_rx_branch_test` (29/29, was 24) -- every decode
   context pairwise distinct (the property the fix exists for; before P08a all six were 0), no
   context emitting an id inside the attached DL decode's 0..31, the 5000 range disjoint from
   0/31/1000/2000/2127/3000/3255/4000/4005, an out-of-range `ctx` folding inside the namespace
   rather than escaping it, and the 5005 bound. There is no legacy pin here, unlike the DL fix: the
-  pre-P08a value WAS the collision, so preserving it would preserve the defect.
+  pre-P08a value WAS the collision, so preserving it would preserve the defect. The fifth case
+  (fix round 1) pins the zero-default of `PHY_VARS_gNB::harq_unique_pid_base` on the REAL struct --
+  the property that makes the change upstream-neutral lives in the struct, not in the arithmetic --
+  via a small C shim (`tests/nr_passive_harq_tag_gnb_pin.c`), because `defs_gNB.h` pulls
+  `thread-pool.h`, whose `_Atomic(uint64_t)` is C11 syntax that does not compile as C++.
 * **P08a, validated by replay -- and this CORRECTS a claim made earlier in this document and in
   P08a's own brief.** The passive UL decode IS reachable in replay: `nr_passive_replay_ul_config.h`
   (`:37`/`:42`), under `ISAC_PASSIVE_REPLAY_UL_CONFIG=1`, calls `nr_pusch_passive_decode(ue, 0, ...)`

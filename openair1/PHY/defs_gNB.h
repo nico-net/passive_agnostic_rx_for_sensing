@@ -365,8 +365,9 @@ typedef struct PHY_VARS_gNB_s {
   int max_nb_pusch;
 
   /// Base added to ULSCH_id when nr_ulsch_decoding() fills nrLDPC_TB_decoding_parameters_t::
-  /// harq_unique_pid. 0 for a real gNB instance (PHY_VARS_gNB is calloc'd everywhere, and one
-  /// instance's ULSCH_ids are already unique among themselves). The passive receiver runs up to
+  /// harq_unique_pid. 0 for a real gNB instance (every PHY_VARS_gNB allocation in the tree is
+  /// zero-initialised -- calloc/calloc_or_fail/malloc16_clear/malloc+memset -- and one instance's
+  /// ULSCH_ids are already unique among themselves). The passive receiver runs up to
   /// NR_PUSCH_PASSIVE_MAX_CTX of these structs CONCURRENTLY against ONE shared LDPC coding
   /// interface, each with a single ULSCH -- so without a per-context base every passive uplink
   /// transport block in flight carried id 0 and they aliased each other's accelerator state.

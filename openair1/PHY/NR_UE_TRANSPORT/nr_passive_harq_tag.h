@@ -37,6 +37,33 @@
  *   4000..    nr_pusch_data_aided.h:23      passive UL re-encode, + decode-context index
  *   5000..    THIS header                   passive UL decode, + decode-context index
  *
+ * CAVEAT, added P08a fix round 1 -- THE ACCELERATOR PRUNES THIS ID, so the disjointness this map
+ * provides is disjointness in SOFTWARE, not necessarily at the device. nrLDPC_coding_aal.c:654-656:
+ *
+ *     segment_offset        = harq_unique_pid * NR_LDPC_MAX_NUM_CB + i      (NR_LDPC_MAX_NUM_CB 144)
+ *     pruned_segment_offset = segment_offset % active_dev.num_harq_codeblock (default 512,
+ *                             nrLDPC_coding_aal.c:1083, operator-settable)
+ *
+ * Two ids p != q therefore land on the SAME device slot for the same segment index iff
+ * 144*(p-q) == 0 (mod 512); gcd(144,512) = 16, so that is (p-q) == 0 (mod 32). The aliasing period
+ * is num_harq_codeblock / gcd(NR_LDPC_MAX_NUM_CB, num_harq_codeblock) = 32 at the defaults.
+ * Consequences worth knowing before trusting a base on hardware:
+ *   - the 1000-apart base spacing is a multiple of 32, so e.g. 5000 (passive UL decode, ctx 0) and
+ *     1000 (attached DL re-encode, harq_process_nbr 0) alias after pruning. Moot INSIDE a
+ *     --passive-rx process (the 1000 range is attached-only and the two never coexist), but it is
+ *     not the device-level guarantee the map's shape suggests;
+ *   - worse, the DL branch stride is itself 32, so branch b and branch b+1 at the same
+ *     harq_process_nbr differ by exactly 32 and alias at the device -- the very collision that
+ *     stride removes in software;
+ *   - and fundamentally, 512/144 = 3.55, so a default-configured device holds barely three ids'
+ *     worth of segments. No choice of bases makes more than that many CONCURRENT ids safe: the
+ *     operator-side requirement is num_harq_codeblock >= 144 * (concurrent ids in flight).
+ * Ideally the bases (and strides) would be chosen co-prime-safe against
+ * num_harq_codeblock / NR_LDPC_MAX_NUM_CB rather than at a round 1000. That is a change to the
+ * WHOLE map (P09's design, inherited, not introduced by P08a) and is deliberately NOT made here;
+ * it is recorded so nobody reads this map as a hardware guarantee. This tree links
+ * nrLDPC_coding_segment, which keeps no per-id state, so none of it is reachable today.
+ *
  * P08a (adaptive_RX_pipeline.md Stage 2, finishing P09's audit finding 4.1): the passive UL decode
  * had NO namespace at all -- nr_ulsch_decoding.c set harq_unique_pid = ULSCH_id, which the passive
  * path pins at 0 in every one of its NR_PUSCH_PASSIVE_MAX_CTX concurrent decode contexts, so all of
