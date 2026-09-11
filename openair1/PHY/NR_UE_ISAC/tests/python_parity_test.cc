@@ -759,6 +759,24 @@ void test_branch_output_identity()
               && a.report_endpoint != b.report_endpoint && a.rx_id != b.rx_id,
           "no two branches may share any output identity");
 
+  // Fix round 1 / defence in depth: a set whose n_active DISAGREES with what is actually mapped
+  // must still suffix. nr_rx_branch_set_parse() now rejects this at parse (nr_rx_branch_test.cc's
+  // RejectsAPhysicalMappingForAnUnnamedBranch), so it is unreachable through the config surface --
+  // it is asserted here so that if that parser invariant is ever weakened again, the failure is a
+  // suffixed-but-surprising path rather than two engines silently sharing one report file.
+  nr_rx_branch_set_t lying = branch_set({0, 1});
+  lying.n_active = 1;  // what a stale/looser parser could have produced
+  require(branch_active_count(lying) == 2, "the active count must be measured, not trusted");
+  require(branch_pipeline_config(base, lying, 1).report_path == "/tmp/sensing/reports_b1.jsonl"
+              && branch_pipeline_config(base, lying, 0).report_path
+                     != branch_pipeline_config(base, lying, 1).report_path,
+          "two mapped branches must get distinct paths even when n_active claims otherwise");
+  // And the routing predicate must agree with it: a mapped-but-DISABLED slot is not an engine.
+  nr_rx_branch_set_t half = branch_set({0});
+  half.b[1].physical_channel = 1;  // mapped, still NR_RXB_DISABLED
+  require(branch_active_count(half) == 1 && branch_engine_index(half, 1) == -1,
+          "a mapped but disabled branch has no engine and must not be routed to");
+
   // A directory containing a dot must not be mistaken for a file extension.
   PipelineConfig dotted = base;
   dotted.report_path = "/tmp/run.1/reports";
@@ -815,6 +833,9 @@ std::string two_engine_capture(bool with_second, const std::string& suffix)
     if (engine_b) engine_b->stop();
     engine_a.stop();
   }
+  // NOTE: compares the FIRST report line only. These fixtures close exactly one CPI (10 slots at
+  // a 1 ms bank, minimum_rows 2), so the first line IS the whole output; if a future fixture closes
+  // two, this must compare the whole file or it will silently stop covering the later CPIs.
   std::ifstream input(path_a); require(input.good(), "engine A emitted no report");
   std::string line;
   require(static_cast<bool>(std::getline(input, line)), "engine A's report is empty");

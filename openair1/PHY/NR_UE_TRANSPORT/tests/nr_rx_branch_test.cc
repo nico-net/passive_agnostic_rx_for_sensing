@@ -87,6 +87,40 @@ TEST(RxBranchParse, RejectsMissingMappingForActiveBranch) {
   EXPECT_EQ(nr_rx_branch_set_parse(&set, "0,1", "0:0", nullptr), -1);
 }
 
+// P13a: the CONVERSE of the case above, and the one that was accepted. A phys_map entry for a
+// branch rx_branches does not name left physical_channel >= 0 on a DISABLED slot, splitting the
+// two "is this branch active" predicates the receiver uses. Measured consequence before the fix:
+// the sensing layer built TWO engines (physical_channel >= 0) while deriving ONE unsuffixed set of
+// output paths for them (n_active == 1), so two receivers appended into one JSONL under one rx_id
+// and the second ZeroMQ bind was lost -- silently.
+TEST(RxBranchParse, RejectsAPhysicalMappingForAnUnnamedBranch)
+{
+  nr_rx_branch_set_t set;
+  EXPECT_EQ(nr_rx_branch_set_parse(&set, "0", "0:0,1:1", nullptr), -1);
+  EXPECT_EQ(nr_rx_branch_set_parse(&set, "0,2", "0:0,1:1,2:2", nullptr), -1);
+}
+
+// The invariant the rejection above buys, stated as a test so a future parser change cannot
+// weaken it unnoticed: on SUCCESS, physical_channel >= 0 and state != NR_RXB_DISABLED name
+// exactly the same set of branches, and n_active counts exactly that many.
+TEST(RxBranchParse, ActivePredicatesAreEquivalentOnSuccess)
+{
+  const char* lists[][2] = {{"0", "0:0"}, {"2", "2:3"}, {"0,2", "0:0,2:2"},
+                            {"0,1,2,3", "0:1,1:0,2:2,3:3"}};
+  for (const auto& c : lists) {
+    nr_rx_branch_set_t set;
+    ASSERT_EQ(nr_rx_branch_set_parse(&set, c[0], c[1], nullptr), 0) << c[0];
+    int mapped = 0, enabled = 0;
+    for (int i = 0; i < NR_RX_BRANCH_MAX; i++) {
+      mapped += set.b[i].physical_channel >= 0 ? 1 : 0;
+      enabled += set.b[i].state != NR_RXB_DISABLED ? 1 : 0;
+      EXPECT_EQ(set.b[i].physical_channel >= 0, set.b[i].state != NR_RXB_DISABLED) << c[0] << " b" << i;
+    }
+    EXPECT_EQ(mapped, enabled) << c[0];
+    EXPECT_EQ(mapped, (int)set.n_active) << c[0];
+  }
+}
+
 TEST(RxBranchParse, RejectsOverlongRxIdPrefix) {
   nr_rx_branch_set_t set;
   // NR_RX_BRANCH_ID_LEN(16) - 2 = 14 is the longest prefix that still leaves room for the

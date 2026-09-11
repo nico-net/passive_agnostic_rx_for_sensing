@@ -709,7 +709,14 @@ static bool passive_ldpc_decode(PHY_VARS_NR_UE *ue,
 
   /* P09: strided by branch. P06a fans the same occasion out to N branches, each with its own
    * independently numbered harq_process_nbr, so the un-strided id aliased across branches. */
-  TB_parameters.harq_unique_pid = nr_pdsch_passive_harq_tag(t_view_branch, dlsch_config->harq_process_nbr);
+  /* P13a: the HARQ tag needs a LANE, not an identity -- it only has to be unique among concurrent
+   * decoders (nr_passive_harq_tag.h). An untagged view maps to lane 0, which is EXACTLY the value
+   * this site used before P13a for the same configurations, so the id namespace is unchanged.
+   * Without this, NR_ISAC_BRANCH_NONE (255) would fold to lane 255 % NR_RX_BRANCH_MAX == 3 and
+   * silently alias branch 3's lane. */
+  const uint8_t harq_lane_branch =
+      (t_view_branch == (uint8_t)NR_ISAC_BRANCH_NONE) ? 0u : t_view_branch;
+  TB_parameters.harq_unique_pid = nr_pdsch_passive_harq_tag(harq_lane_branch, dlsch_config->harq_process_nbr);
   TB_parameters.G = G;
   TB_parameters.nb_rb = number_rbs;
   TB_parameters.Qm = cw->qamModOrder;
@@ -961,8 +968,24 @@ int nr_pdsch_passive_branch_view_resolve(const PHY_VARS_NR_UE *ue, int8_t job_ph
   }
   uint8_t bid = 0;
   if (phys >= 0 && bs != NULL) {
+    bool matched = false;
     for (int b = 0; b < NR_RX_BRANCH_MAX; b++) {
-      if (bs->b[b].physical_channel == phys) { bid = bs->b[b].branch_id; break; }
+      if (bs->b[b].physical_channel == phys) { bid = bs->b[b].branch_id; matched = true; break; }
+    }
+    if (!matched) {
+      /* P13a: do NOT leave bid at 0 here. Branch 0 is a REAL branch, and since P13a the branch id
+       * is a ROUTING decision, not just a report label -- fabricating 0 would feed this view's CFR
+       * rows into branch 0's coherent window and misattribute real branch-0 content. Reachable
+       * today via ISAC_DL_BRANCH_VIEW=<phys>, which is validated only against nb_antennas_rx above
+       * and not against the branch map. Same omit-rather-than-fabricate rule P10a applied to the
+       * report field. NR_ISAC_BRANCH_NONE routes to the legacy (lowest active) engine and is
+       * reported as untagged, which is the honest answer: this row's branch is unknown. */
+      bid = (uint8_t)NR_ISAC_BRANCH_NONE;
+      static _Atomic bool s_warned_unmapped_view = false;
+      if (!atomic_exchange(&s_warned_unmapped_view, true)) {
+        LOG_W(PHY, "SENSING: branch view: physical channel %d is named by no active branch; its CFR "
+                   "rows are submitted UNTAGGED rather than fabricating branch 0\n", phys);
+      }
     }
   } else if (phys >= 0) {
     bid = (uint8_t)phys; // no branch set (replay/env-only): identity == physical channel

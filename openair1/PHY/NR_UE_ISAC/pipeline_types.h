@@ -315,6 +315,28 @@ struct PipelineConfig {
  * safety-critical properties of the array, and neither is reachable through nr_isac_init() from a
  * test (that path needs the live configuration subsystem). */
 
+/* The ONE "is this branch active" predicate this layer uses. Both halves are tested deliberately:
+ * nr_rx_branch_set_parse() now guarantees they are equivalent (it rejects a phys_map entry for a
+ * branch that rx_branches does not name, and `state` is only ever moved between ACQUIRING/LOCKED/
+ * LOST at runtime, never back to DISABLED), but P13a must not SILENTLY depend on that invariant --
+ * if it is ever weakened again, the failure here has to be a refused row, not two engines sharing
+ * one report file. */
+inline bool branch_is_active(const nr_rx_branch_set_t& set, int branch)
+{
+  return branch >= 0 && branch < NR_RX_BRANCH_MAX && set.b[branch].physical_channel >= 0
+         && set.b[branch].state != NR_RXB_DISABLED;
+}
+
+/* How many engines this set will build. Counted from branch_is_active(), NOT read from
+ * set.n_active: the suffixing decision and the construction loop must agree by CONSTRUCTION, and
+ * they used to be two independent predicates that a malformed phys_map could split. */
+inline int branch_active_count(const nr_rx_branch_set_t& set)
+{
+  int n = 0;
+  for (int b = 0; b < NR_RX_BRANCH_MAX; ++b) n += branch_is_active(set, b) ? 1 : 0;
+  return n;
+}
+
 /* "/x/reports.jsonl" -> "/x/reports_b2.jsonl"; "/x/prefix" -> "/x/prefix_b2". The suffix goes
  * BEFORE the extension so a consumer globbing "*.jsonl" still finds every branch's stream. */
 inline std::string branch_suffix_path(const std::string& base, uint8_t branch_id)
@@ -355,7 +377,7 @@ inline PipelineConfig branch_pipeline_config(const PipelineConfig& base,
                                              const nr_rx_branch_set_t& set, uint8_t branch_id)
 {
   PipelineConfig out = base;
-  if (set.n_active <= 1) return out;
+  if (branch_active_count(set) <= 1) return out;
   out.rx_id = base.rx_id + "_b" + std::to_string(static_cast<unsigned>(branch_id));
   out.out_path = branch_suffix_path(base.out_path, branch_id);
   out.report_path = branch_suffix_path(base.report_path, branch_id);
@@ -378,11 +400,11 @@ inline int branch_engine_index(const nr_rx_branch_set_t& set, uint8_t branch_id)
 {
   if (branch_id == NR_ISAC_BRANCH_NONE) {
     for (int b = 0; b < NR_RX_BRANCH_MAX; ++b)
-      if (set.b[b].physical_channel >= 0) return b;
+      if (branch_is_active(set, b)) return b;
     return -1;
   }
   if (branch_id >= NR_RX_BRANCH_MAX) return -1;
-  return set.b[branch_id].physical_channel >= 0 ? static_cast<int>(branch_id) : -1;
+  return branch_is_active(set, branch_id) ? static_cast<int>(branch_id) : -1;
 }
 
 inline double slot_duration_s(double scs_hz)

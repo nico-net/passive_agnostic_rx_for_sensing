@@ -337,8 +337,15 @@ extern "C" void nr_isac_init(void)
   // legacy receiver's rx_id/out_path/report_path exactly what they are today.
   for (auto& slot : engines) slot.reset();
   engines_built = 0;
+  dropped_unrouted.store(0, std::memory_order_relaxed);
+  logged_unrouted.store(0, std::memory_order_relaxed);
+  untagged_submissions.store(0, std::memory_order_relaxed);
+  logged_untagged_fanin.store(false, std::memory_order_relaxed);
   for (uint8_t b = 0; b < NR_RX_BRANCH_MAX; ++b) {
-    if (branches.b[b].physical_channel < 0) continue;
+    // branch_is_active(), the SAME predicate branch_pipeline_config() counts and
+    // branch_engine_index() routes by. Using a different one here is precisely how a set could
+    // build N engines while deriving one unsuffixed output identity for all of them.
+    if (!branch_is_active(branches, b)) continue;
     try {
       engines[b] = std::make_unique<SensingEngine>(branch_pipeline_config(pipeline, branches, b),
                                                    275, aoa_antennas ? aoa_antennas : 1);

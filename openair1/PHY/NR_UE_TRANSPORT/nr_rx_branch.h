@@ -95,6 +95,11 @@ typedef struct {
  *   - a branch id repeated in active_list, or repeated as a phys_map key
  *   - a physical channel value used by two phys_map entries
  *   - an active branch (named in active_list) with no phys_map entry
+ *   - the converse: a phys_map entry for a branch NOT named in active_list (P13a). Without this
+ *     rejection a DISABLED slot could carry physical_channel >= 0, and the two "active" predicates
+ *     used across the receiver -- `physical_channel >= 0` and `state != NR_RXB_DISABLED`/n_active --
+ *     would disagree, which is a silent output-collision in the per-branch sensing engines. On
+ *     success the two are now EQUIVALENT, and callers may rely on that.
  *   - rx_id_prefix longer than NR_RX_BRANCH_ID_LEN-2 (14) chars -- past that, "%s%d" into the
  *     rx_id buffer would truncate the trailing branch digit and every branch's rx_id would
  *     silently collide on the same truncated prefix

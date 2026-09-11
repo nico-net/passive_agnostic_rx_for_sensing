@@ -149,6 +149,21 @@ int nr_rx_branch_set_parse(nr_rx_branch_set_t *set, const char *active_list, con
       LOG_E(PHY, "rx_branch_phys_map: active branch %d has no physical channel mapping\n", i);
       return -1;
     }
+    /* P13a: and the converse. A mapping for a branch that rx_branches does NOT name left
+     * physical_channel >= 0 on a DISABLED slot, so the two "is this branch active" predicates in
+     * use across the receiver -- `physical_channel >= 0` (nr_rx_branch_set_dispatch(),
+     * nr_pdsch_passive_branch_view_resolve(), nr_isac.cc's engine array) and
+     * `state != NR_RXB_DISABLED` / n_active -- could disagree. Measured consequence before this
+     * check: rx_branches="0" with rx_branch_phys_map="0:0,1:1" parsed, n_active==1, and two slots
+     * carried a physical channel -- so the sensing layer built TWO engines while deriving ONE
+     * (unsuffixed) set of output paths for them, silently interleaving two receivers into one JSONL
+     * and losing the second ZeroMQ bind. Rejecting here makes the equivalence a PARSER INVARIANT,
+     * which every existing consumer of physical_channel already assumed. */
+    if (set->b[i].state == NR_RXB_DISABLED && set->b[i].physical_channel >= 0) {
+      LOG_E(PHY, "rx_branch_phys_map: branch %d is mapped to physical channel %d but is not named "
+                 "in rx_branches\n", i, (int)set->b[i].physical_channel);
+      return -1;
+    }
   }
 
   set->n_active = (uint8_t)n_active;
