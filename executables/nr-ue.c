@@ -1352,8 +1352,18 @@ void *UE_thread(void *arg)
     }
 
     /* check if MAC has sent sync request */
-    if (handle_sync_req_from_mac(UE) == 0)
+    if (handle_sync_req_from_mac(UE) == 0) {
+      /* P06a fix round 1: this is the one loss-of-sync site that is a CALL, not an assignment --
+       * handle_sync_req_from_mac() retunes the radio and clears UE->is_synchronized inside itself
+       * (nr-ue.c, "clean_UE_harq(UE); UE->is_synchronized = 0;"). Without these two lines the
+       * branch epochs would not move across a MAC-driven resync, so DL jobs fanned out before the
+       * retune would still look epoch-fresh and be decoded against post-retune samples -- exactly
+       * the old/new mixing P05's epochs exist to prevent. Attached-UE only (the MAC issues no sync
+       * request under --passive-rx), which is why no replay can observe it. */
+      ue_branches_discontinuity();
+      ue_branches_lose_lock();
       continue;
+    }
 
     // start of normal case, the UE is in sync
     absolute_slot++;

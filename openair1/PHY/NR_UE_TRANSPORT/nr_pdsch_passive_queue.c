@@ -161,12 +161,6 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
 
     c16_t (*rxdataF)[rxdataF_sz] = (c16_t (*)[rxdataF_sz])g_rxdataF[idx];
 
-    /* Replay the offset captured with these samples (see nr_slot_fep_fo_override_hz). */
-    const double saved_fo = nr_slot_fep_fo_override_hz;
-    nr_slot_fep_fo_override_hz = job.fo_hz;
-    job.grant.check_sample_lifetime = true;
-    job.grant.source_absolute_slot = job.absolute_slot;
-
     /* P06a: the branch may have lost lock or hit an RF discontinuity between this job's fan-out
      * and now. Its samples then belong to an epoch this branch has moved past, so the result must
      * not be mixed into the current one -- P05's "no old/new mixing", counted per branch rather
@@ -184,6 +178,12 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
         continue;
       }
     }
+
+    /* Replay the offset captured with these samples (see nr_slot_fep_fo_override_hz). */
+    const double saved_fo = nr_slot_fep_fo_override_hz;
+    nr_slot_fep_fo_override_hz = job.fo_hz;
+    job.grant.check_sample_lifetime = true;
+    job.grant.source_absolute_slot = job.absolute_slot;
 
     /* P07 independent mode: resolve which branch this job is decoded FOR, and hand the whole chain
      * (decode AND data-aided submit) the same single-antenna view of the UE. Legacy: vue == ue. */

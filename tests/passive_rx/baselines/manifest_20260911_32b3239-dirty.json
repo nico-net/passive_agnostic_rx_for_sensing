@@ -1,44 +1,33 @@
 {
     "schema": "p01.baseline_manifest.v1",
-    "generated_at_utc": "2026-09-11T13:52:48Z",
+    "generated_at_utc": "2026-09-11T14:05:53Z",
     "experiment_purpose": "P01 baseline identity; no capture",
     "host": "sens6",
     "tree": "/home/sens/NICOLA/adaptive-rx-sensing",
     "git": {
         "branch": "merge/adaptive-sensing",
-        "commit": "0667e4dd09308c12cdf84416ec702fe124fbaa9f",
+        "commit": "32b3239f5b688b6061de7f4d60bb6a19e21b7b01",
         "status_short": [
             "M  adaptive_RX_pipeline_progress.md",
             "M  executables/nr-ue.c",
-            "M  executables/nr-uesoftmodem.c",
-            "M  openair1/PHY/NR_UE_ISAC/nr_isac.cc",
-            "M  openair1/PHY/NR_UE_ISAC/nr_isac.h",
-            "M  openair1/PHY/NR_UE_ISAC/nr_isac_stub.c",
             "M  openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c",
-            "M  openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c",
-            "M  openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.h",
             "M  openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c",
-            "M  openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.h",
-            "M  openair1/PHY/NR_UE_TRANSPORT/nr_rx_branch.c",
-            "M  openair1/PHY/NR_UE_TRANSPORT/nr_rx_branch.h",
-            "M  openair1/PHY/NR_UE_TRANSPORT/tests/nr_rx_branch_test.cc",
             "M  tests/passive_rx/baselines/fixtures.json",
-            " D tests/passive_rx/baselines/manifest_20260911_5213dfe-dirty.json",
-            " D tests/passive_rx/baselines/manifest_20260911_5213dfe-dirty_tracked.patch",
-            "M  tests/passive_rx/run_manual_x410.sh",
+            " D tests/passive_rx/baselines/manifest_20260911_0667e4d-dirty.json",
+            " D tests/passive_rx/baselines/manifest_20260911_0667e4d-dirty_tracked.patch",
             "?? tests/passive_rx/aoa_track_dl.conf"
         ],
-        "tracked_diff_patch_path": "tests/passive_rx/baselines/manifest_20260911_0667e4d-dirty_tracked.patch",
-        "tracked_diff_patch_sha256": "73f60e715f84cacc42834bc872da63d61c4f9d891a230ca4aed5c56edf5b5587",
-        "tracked_diff_patch_line_count": 8403,
+        "tracked_diff_patch_path": "tests/passive_rx/baselines/manifest_20260911_32b3239-dirty_tracked.patch",
+        "tracked_diff_patch_sha256": "2f76f04f2ec948416d3423dc930ab6a3966d86fe9005017f16f483997ce30114",
+        "tracked_diff_patch_line_count": 16821,
         "scoped_files": [
             {
                 "path": "tests/passive_rx/aoa_track_dl.conf",
                 "sha256": "55c348e93a59ec846a3b09712de82420abf3b16b35e04334868f5956943c38e2"
             },
             {
-                "path": "tests/passive_rx/baselines/manifest_20260911_0667e4d-dirty_tracked.patch",
-                "sha256": "73f60e715f84cacc42834bc872da63d61c4f9d891a230ca4aed5c56edf5b5587"
+                "path": "tests/passive_rx/baselines/manifest_20260911_32b3239-dirty_tracked.patch",
+                "sha256": "2f76f04f2ec948416d3423dc930ab6a3966d86fe9005017f16f483997ce30114"
             },
             {
                 "path": "executables/CMakeLists.txt",
@@ -134,7 +123,7 @@
             },
             {
                 "path": "executables/nr-ue.c",
-                "sha256": "cd53fdc4d8b4728090e143b998e9639a5a55ca2500067af740029f4d13c250eb"
+                "sha256": "6e991094c41957da809aceb8de9bfd7f0cae24094bc313c2a8be1f42b25e5039"
             },
             {
                 "path": "executables/nr-uesoftmodem.c",
@@ -1946,7 +1935,7 @@
             },
             {
                 "path": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c",
-                "sha256": "90cc0da45ec82766d2b9f012b737dbbebf4d235bce2d73ccb4e0d09a0184edcc"
+                "sha256": "362f865aeb8bc490724de67c6534f134d01572184e354c88277b2709e5941ea8"
             },
             {
                 "path": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.h",
@@ -2034,7 +2023,7 @@
             },
             {
                 "path": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c",
-                "sha256": "8b5fa6b7a21e8a1f1a7843eaed54909bd33174edcc8aaa1674c6c849fb530422"
+                "sha256": "7ec3b1a154fb7d5d87c6e4a3f7fd7be4830b49091c99fb06dbdb93dc5fbddb0e"
             },
             {
                 "path": "openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.h",
@@ -7762,7 +7751,7 @@
             },
             {
                 "path": "tests/passive_rx/baselines/fixtures.json",
-                "sha256": "20167402edb36cd3884651cdd499061a69fa48d286821bcca20b7392f97fda7a"
+                "sha256": "893fd3ae472a224f1c3b343a5dd205b68e015dfae041e944d832b61be720a795"
             },
             {
                 "path": "tests/passive_rx/captures/ab_10m.sh",
@@ -8121,10 +8110,10 @@
     "build": {
         "nr_uesoftmodem": {
             "path": "cmake_targets/ran_build/build/nr-uesoftmodem",
-            "sha256": "b0ba754472c437c192d023d844a10cde205a43cccbe7279233f87d78825f1038",
-            "size_bytes": 62899168,
-            "mtime_utc": "2026-09-11T13:48:58Z",
-            "mtime_epoch": 1789134538
+            "sha256": "08d3912439a8216ef37f4691563370e81a69147b87c4c69b18d2ed7c48481ecb",
+            "size_bytes": 62894464,
+            "mtime_utc": "2026-09-11T14:04:56Z",
+            "mtime_epoch": 1789135496
         },
         "liboai_usrpdevif": {
             "path": "cmake_targets/ran_build/build/liboai_usrpdevif.so",

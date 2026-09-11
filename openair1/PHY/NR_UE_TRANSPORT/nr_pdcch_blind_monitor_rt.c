@@ -2494,7 +2494,12 @@ constdiag_done:;
       nr_pdsch_passive_queue_get_stats(&qs);
       /* Every field here is a reason a queued job did NOT become a decode, so a shortfall in
        * `decoded` is attributable rather than merely visible. max_lag is the number that says
-       * whether the configured depth was right: it must stay well under slots_per_frame. */
+       * whether the configured depth was right: it must stay well under slots_per_frame.
+       * P06a exactness caveat at n_active > 1: that accounting is exact only in AGGREGATE.
+       * `dropped_full` and `dropped_stale` are not split per branch (the ring evicts a job before
+       * anything looks at whose branch it was), and a job dropped on a stale epoch DOES count in
+       * its branch's `q` column with no matching per-branch drop column of its own except
+       * `stale` -- so per branch, q - dec - stale is the share of the aggregate dropped_full. */
       LOG_I(PHY,
             "SENSING: PDSCHQ queued=%lu decoded=%lu crc_ok=%lu (%.1f%%) dropped[full=%lu stale=%lu] "
             "max_lag_slots=%lu/%d\n",
