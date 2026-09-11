@@ -138,6 +138,11 @@ PHY_VARS_NR_UE *nr_pdsch_passive_branch_view(PHY_VARS_NR_UE *ue, int phys, uint8
 /// layers (plan sec 2.3 retraction). Reported separately from CRC failure.
 uint64_t nr_pdsch_passive_view_unsupported_multilayer(void);
 
+/// P10a: the branch identity armed on THIS thread by nr_pdsch_passive_branch_view(), or
+/// NR_ISAC_BRANCH_NONE when no view is armed (the attached-UE and legacy 4-antenna paths). Lets the
+/// data-aided CFR tap name its branch without a second thread-local to keep in step with this one.
+uint8_t nr_pdsch_passive_view_branch(void);
+
 /// P06a: the same counter split per branch, formatted as "br0=<n> br1=<n> ..." for the periodic
 /// PDSCHQ-BRANCH log line. Returns a pointer to a static buffer (one periodic caller).
 const char *nr_pdsch_passive_view_unsupported_multilayer_str(void);

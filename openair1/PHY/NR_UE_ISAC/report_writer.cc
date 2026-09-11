@@ -120,6 +120,18 @@ std::string build_report_json(const PipelineReport& r, const PipelineConfig& c)
   out += ",\"src_occ\":[";
   for(uint32_t i=0;i<NR_ISAC_SRC_COUNT;++i){if(i)out.push_back(',');out+=std::to_string(r.source_occurrences[i]);}
   out += ']';
+  // P10a: branch identity. OMITTED WHOLESALE when no producer tagged a branch, so a legacy or
+  // unmigrated receiver's line is byte-identical to before -- an absent tag degrades cleanly, a
+  // fabricated "branch 0" would be wrong (same convention as azimuth_std_deg). branch_id appears
+  // only when the CPI is unambiguously ONE branch; a CPI built from several carries the mask alone
+  // rather than naming one of them. Nothing groups detections by branch yet (P13).
+  if (r.branch_mask) {
+    out += ",\"branch_mask\":" + std::to_string(r.branch_mask);
+    if ((r.branch_mask & (r.branch_mask - 1)) == 0) {
+      uint32_t bid = 0; while (((r.branch_mask >> bid) & 1u) == 0) ++bid;
+      out += ",\"branch_id\":" + std::to_string(bid);
+    }
+  }
   out += ",\"illumination_processing\":{\"coherent_ul_dl_fusion\":false,"
       "\"dl_detector\":true,\"ul_detector\":"
       + std::string(r.uplink_valid ? "true" : "false") + '}';

@@ -311,7 +311,7 @@ RFCHAN_CITATION=$(citation_json "$(citation radio/USRP/usrp_lib.cpp \
 # ---- timestamp units: every citation derived by grep at generation time (see `citation()`) ----
 SUBMIT_DEF_CITATION=$(citation_json "$(citation openair1/PHY/NR_UE_ISAC/sensing_engine.cc \
   'void SensingEngine::submit(uint32_t slot, float fraction, nr_isac_source_t source,' \
-  'uint32_t re, float noise)')")
+  'uint32_t re, float noise, uint8_t branch_id)')")
 UTC_NS_ASSIGN_CITATION=$(citation_json "$(citation openair1/PHY/NR_UE_ISAC/sensing_engine.cc \
   'value->utc_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(' \
   'std::chrono::system_clock::now().time_since_epoch()).count();')")

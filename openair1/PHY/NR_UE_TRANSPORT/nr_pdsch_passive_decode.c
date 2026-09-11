@@ -911,6 +911,14 @@ static _Atomic uint64_t g_view_unsupported_multilayer_br[NR_RX_BRANCH_MAX];
 
 static inline bool view_active(void) { return t_view_phys >= 0; }
 
+uint8_t nr_pdsch_passive_view_branch(void)
+{
+  /* Gated on view_active(), not on t_view_branch alone: t_view_branch retains the last armed id
+   * after nr_pdsch_passive_branch_view() falls back to the legacy path, and branch 0 is a real
+   * branch, so reporting it unconditionally would tag legacy rows. */
+  return view_active() ? t_view_branch : (uint8_t)NR_ISAC_BRANCH_NONE;
+}
+
 int nr_pdsch_passive_branch_view_resolve(const PHY_VARS_NR_UE *ue, int8_t job_physical_channel,
                                           uint8_t *branch_id)
 {

@@ -350,8 +350,14 @@ extern "C" void nr_isac_submit_cfr(uint32_t slot,int source,const nr_isac_carrie
 extern "C" void nr_isac_submit_cfr_at(uint32_t slot,float fraction,int source,const nr_isac_carrier_t* carrier,const float* h,
                                        const uint32_t* k,const uint32_t* l,uint32_t n,float noise)
 {nr_isac_submit_cfr_multi(slot,fraction,source,carrier,h,1,n,k,l,n,noise);}
+/* P10a: every pre-P10 producer routes through here, and this one line is the whole reason none of
+ * them changes behaviour -- same body, branch identity explicitly absent. */
 extern "C" void nr_isac_submit_cfr_multi(uint32_t slot,float fraction,int source,const nr_isac_carrier_t* carrier,const float* h,
                                           uint32_t antennas,uint32_t stride,const uint32_t* k,const uint32_t* l,uint32_t n,float noise)
+{nr_isac_submit_cfr_multi_branch(slot,fraction,source,carrier,h,antennas,stride,k,l,n,noise,NR_ISAC_BRANCH_NONE);}
+extern "C" void nr_isac_submit_cfr_multi_branch(uint32_t slot,float fraction,int source,const nr_isac_carrier_t* carrier,const float* h,
+                                                 uint32_t antennas,uint32_t stride,const uint32_t* k,const uint32_t* l,uint32_t n,float noise,
+                                                 uint8_t branch)
 {
   if(!enabled.load(std::memory_order_relaxed)||!engine||!carrier||!h||!k||!l||!n)return;
   if(source<0||source>=NR_ISAC_SRC_COUNT)source=nr_isac_source();
@@ -359,5 +365,5 @@ extern "C" void nr_isac_submit_cfr_multi(uint32_t slot,float fraction,int source
   antennas=std::max(1u,antennas);stride=std::max(stride,n);static thread_local std::vector<std::complex<float>> packed;
   const size_t total=(size_t)antennas*n;if(packed.size()<total)packed.resize(total);
   for(uint32_t a=0;a<antennas;++a){const float* input=h+(size_t)2*a*stride;for(uint32_t i=0;i<n;++i)packed[(size_t)a*n+i]={input[2*i],input[2*i+1]};}
-  engine->submit(slot,fraction,static_cast<nr_isac_source_t>(source),*carrier,packed.data(),antennas,k,l,n,noise);
+  engine->submit(slot,fraction,static_cast<nr_isac_source_t>(source),*carrier,packed.data(),antennas,k,l,n,noise,branch);
 }

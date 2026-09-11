@@ -38,6 +38,10 @@ struct CfrWindow {
   std::vector<uint32_t> row_slot_idx;
   std::vector<double> row_slot_frac;
   std::vector<uint32_t> row_source_mask;
+  // P10a: bit b set when a row of this window carried branch identity b; 0 = no row was tagged.
+  // Window-level, not per-row: this slice only makes the identity visible in the report, and a
+  // per-row axis would be the first half of the branch-routed windowing that belongs to P13.
+  uint32_t branch_mask = 0;
   std::array<uint64_t, NR_ISAC_SRC_COUNT> source_occurrences{};
 
   size_t cell(uint32_t row, uint32_t subcarrier) const

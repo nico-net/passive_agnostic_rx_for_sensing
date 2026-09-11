@@ -20,6 +20,8 @@ struct PipelineReport {
   int64_t last_row_time_ns = 0;
   double midpoint_air_time_s = 0.0;
   uint32_t sources_mask = 0;
+  // P10a: bit b = receive branch b contributed a CFR row to this CPI; 0 = no producer tagged one.
+  uint32_t branch_mask = 0;
   std::array<uint64_t, NR_ISAC_SRC_COUNT> source_occurrences{};
   uint64_t dropped_submissions = 0;
   uint64_t dropped_cpis = 0;

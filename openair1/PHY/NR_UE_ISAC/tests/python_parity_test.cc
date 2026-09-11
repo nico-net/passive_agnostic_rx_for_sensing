@@ -595,6 +595,84 @@ std::array<std::vector<double>, 3> mixed_row_capture(float ul_amplitude,
   return {std::move(primary), std::move(dl_only), std::move(ul_only)};
 }
 
+// --- P10a: branch identity on the CFR ABI ---------------------------------------------------
+// Pins the three things this slice claims: an untagged CPI's report is unchanged (no branch field
+// at all), a single-branch CPI names its branch, and a CPI fused from several carries the mask
+// without naming one of them. The strongest of the three is the FIRST: the tagged line, with only
+// the two branch fields removed, must be character-for-character the untagged line -- i.e. carrying
+// the identity changes no numeric result anywhere in the pipeline.
+std::string drop_json_field(std::string line, const std::string& key)
+{
+  const std::string needle = ",\"" + key + "\":";
+  const size_t at = line.find(needle);
+  if (at == std::string::npos) return line;
+  size_t end = at + needle.size();
+  while (end < line.size() && line[end] != ',' && line[end] != '}') ++end;
+  return line.erase(at, end - at);
+}
+
+// branch_b < 0 submits one branch only.
+std::string branch_capture(int branch_a, int branch_b, const std::string& path)
+{
+  std::remove(path.c_str());
+  PipelineConfig c;
+  c.sources_mask = (1u << NR_ISAC_SRC_CSI_RS);
+  c.duration_bank_s = {0.001}; c.bootstrap_duration_index = 0;
+  c.minimum_dwell_s = 0.001; c.maximum_dwell_s = 0.001;
+  c.minimum_rows = 2; c.maximum_rows = 4;
+  c.sync_enable = false; c.family_static = false; c.tracker_enable = false;
+  c.maximum_components = 1; c.maximum_objects = 1;
+  c.maximum_range_m = 200.0; c.report_path = path; c.out_path.clear();
+  nr_isac_carrier_t carrier{};
+  carrier.nof_prb = 2; carrier.scs_hz = 30000; carrier.dl_center_hz = 3499440000;
+  carrier.slots_per_frame = 20; carrier.pci = 1;
+  std::vector<std::complex<float>> h(24, {1.0f, 0.0f});
+  std::vector<uint32_t> k(24), symbol(24, 2);
+  for (uint32_t i = 0; i < k.size(); ++i) k[i] = i;
+  {
+    SensingEngine engine(c, 2, 1); engine.start();
+    for (uint32_t slot = 0; slot < 10; ++slot) {
+      engine.submit(slot, 0.0f, NR_ISAC_SRC_CSI_RS, carrier, h.data(), 1,
+                    k.data(), symbol.data(), h.size(), 1.0f,
+                    branch_a < 0 ? NR_ISAC_BRANCH_NONE : static_cast<uint8_t>(branch_a));
+      if (branch_b >= 0)
+        engine.submit(slot, 0.5f, NR_ISAC_SRC_CSI_RS, carrier, h.data(), 1,
+                      k.data(), symbol.data(), h.size(), 1.0f, static_cast<uint8_t>(branch_b));
+    }
+    engine.stop();
+  }
+  std::ifstream input(path); require(input.good(), "branch capture emitted no report");
+  std::string line;
+  require(static_cast<bool>(std::getline(input, line)), "branch capture report is empty");
+  std::remove(path.c_str());
+  return line;
+}
+
+void test_branch_identity_report()
+{
+  const std::string legacy = branch_capture(-1, -1, "/tmp/nr_isac_branch_legacy.jsonl");
+  require(legacy.find("\"branch_mask\"") == std::string::npos
+              && legacy.find("\"branch_id\"") == std::string::npos,
+          "an untagged CPI must carry no branch field at all, not branch 0");
+
+  const std::string tagged = branch_capture(3, -1, "/tmp/nr_isac_branch_single.jsonl");
+  require(tagged.find("\"branch_mask\":8") != std::string::npos,
+          "a single-branch CPI must report its own branch bit");
+  require(tagged.find("\"branch_id\":3") != std::string::npos,
+          "a single-branch CPI must name its branch");
+  // The whole point of the slice: identity is additive. Only the wall clock may differ.
+  const std::string key = "cpi_start_time_utc_ns";
+  require(drop_json_field(drop_json_field(drop_json_field(tagged, "branch_mask"), "branch_id"), key)
+              == drop_json_field(legacy, key),
+          "carrying a branch identity changed something other than the branch fields");
+
+  const std::string fused = branch_capture(1, 2, "/tmp/nr_isac_branch_fused.jsonl");
+  require(fused.find("\"branch_mask\":6") != std::string::npos,
+          "a CPI fused from two branches must report both bits");
+  require(fused.find("\"branch_id\"") == std::string::npos,
+          "a CPI fused from two branches must not name one of them");
+}
+
 void test_mixed_row_dl_rdm_isolation()
 {
   const auto quiet = mixed_row_capture(0.25f, "/tmp/nr_isac_mixed_row_quiet.jsonl");
@@ -684,7 +762,7 @@ void test_dl_capture_fails_closed_without_dl()
 
 int main()
 {
-  try {test_fft();test_adaptive_threshold();test_detector();test_required_cuda_contract();test_aoa();test_aoa_component_mixture_and_cross_leg_fusion();test_enu_geometry();test_repeated_ul_confirmation_gates_global_birth();test_variable_cpi();test_causal_cpi_pipeline();test_finite_admission_window();test_mixed_row_dl_rdm_isolation();test_invalid_ul_does_not_suppress_dl();test_dl_capture_fails_closed_without_dl();test_validation_report_compatibility();}
+  try {test_fft();test_adaptive_threshold();test_detector();test_required_cuda_contract();test_aoa();test_aoa_component_mixture_and_cross_leg_fusion();test_enu_geometry();test_repeated_ul_confirmation_gates_global_birth();test_variable_cpi();test_causal_cpi_pipeline();test_finite_admission_window();test_mixed_row_dl_rdm_isolation();test_invalid_ul_does_not_suppress_dl();test_dl_capture_fails_closed_without_dl();test_validation_report_compatibility();test_branch_identity_report();}
   catch(const std::exception& e){std::fprintf(stderr,"python parity test failed: %s\n",e.what());return EXIT_FAILURE;}
   std::puts("native sensing golden parity checks passed");return EXIT_SUCCESS;
 }

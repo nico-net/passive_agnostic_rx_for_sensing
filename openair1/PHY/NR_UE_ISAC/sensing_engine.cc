@@ -47,6 +47,7 @@ struct SensingEngine::Snapshot {
   uint32_t antennas = 1;
   uint32_t resource_elements = 0;
   float noise_variance = 0.0f;
+  uint8_t branch_id = NR_ISAC_BRANCH_NONE; // P10a
   int64_t utc_ns = 0;
   std::vector<std::complex<float>> cfr;
   std::vector<uint32_t> subcarrier;
@@ -60,6 +61,11 @@ struct SensingEngine::PendingRow {
   uint32_t source_mask = 0;
   uint32_t dl_source_mask = 0;
   uint32_t ul_source_mask = 0;
+  // P10a: bit b = branch b contributed this row; 0 = untagged (every unmigrated producer). Split by
+  // direction for the same reason the source masks are: one PendingRow merges co-timed DL and UL
+  // submissions, so a single mask would let a UL producer's branch tag surface in the DL window.
+  uint32_t dl_branch_mask = 0;
+  uint32_t ul_branch_mask = 0;
   std::array<uint64_t, NR_ISAC_SRC_COUNT> source_occurrences{};
   std::array<uint64_t, NR_ISAC_SRC_COUNT> dl_source_occurrences{};
   std::array<uint64_t, NR_ISAC_SRC_COUNT> ul_source_occurrences{};
@@ -298,7 +304,7 @@ void SensingEngine::submit(uint32_t slot, float fraction, nr_isac_source_t sourc
                            const nr_isac_carrier_t& carrier,
                            const std::complex<float>* cfr, uint32_t antennas,
                            const uint32_t* subcarrier, const uint32_t* symbol,
-                           uint32_t re, float noise)
+                           uint32_t re, float noise, uint8_t branch_id)
 {
   std::lock_guard<std::mutex> admission(submission_mutex_);
   if (!running_.load(std::memory_order_relaxed) || !cfr || !subcarrier || !symbol
@@ -325,7 +331,7 @@ void SensingEngine::submit(uint32_t slot, float fraction, nr_isac_source_t sourc
   value->fraction = fraction >= 0.0f && fraction < 1.0f ? fraction : 0.0f;
   value->source = source; value->carrier = carrier;
   value->antennas = std::min(std::max(1u, antennas), requested_antennas_);
-  value->resource_elements = re; value->noise_variance = noise;
+  value->resource_elements = re; value->noise_variance = noise; value->branch_id = branch_id;
   value->utc_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
       std::chrono::system_clock::now().time_since_epoch()).count();
   value->cfr.assign(cfr, cfr + (size_t)value->antennas * re);
@@ -513,13 +519,19 @@ void SensingEngine::consume(const Snapshot& s)
   }
   PendingRow& row = found->second;
   row.source_mask |= 1u << static_cast<uint32_t>(s.source);
+  // P10a: branch identity accumulates exactly like the source mask, and for the same reason -- one
+  // PendingRow merges every co-timed submission, so the row records WHICH branches contributed, not
+  // one of them. NR_ISAC_BRANCH_NONE (and any id past the mask width) leaves the row untagged.
+  const uint32_t branch_bit = (s.branch_id < 32) ? (1u << s.branch_id) : 0u;
   ++row.source_occurrences[static_cast<uint32_t>(s.source)];
   const bool is_dl = (DL_SOURCE_BITS & (1u << static_cast<uint32_t>(s.source))) != 0;
   if (is_dl) {
     row.dl_source_mask |= 1u << static_cast<uint32_t>(s.source);
+    row.dl_branch_mask |= branch_bit; // P10a
     ++row.dl_source_occurrences[static_cast<uint32_t>(s.source)];
   } else {
     row.ul_source_mask |= 1u << static_cast<uint32_t>(s.source);
+    row.ul_branch_mask |= branch_bit; // P10a
     ++row.ul_source_occurrences[static_cast<uint32_t>(s.source)];
   }
   row.available_antennas = std::max(row.available_antennas, s.antennas);
@@ -690,6 +702,7 @@ CfrWindow SensingEngine::build_window(const std::vector<int64_t>& keys, bool upl
     w.row_time_slots[r] = row.time_slots; w.row_slot_idx[r] = row.raw_slot;
     w.row_slot_frac[r] = row.slot_fraction;
     w.row_source_mask[r] = uplink ? row.ul_source_mask : row.dl_source_mask;
+    w.branch_mask |= uplink ? row.ul_branch_mask : row.dl_branch_mask; // P10a
     const auto& row_weights = uplink ? row.ul_weights : row.weights;
     const auto& row_cfr = uplink ? row.ul_cfr : row.cfr;
     if (row_weights.size() != (size_t)requested_antennas_ * w.subcarriers
@@ -744,6 +757,7 @@ void SensingEngine::process_window(CfrWindow dl_window, std::optional<CfrWindow>
   report.stale_submissions = stale_.load(std::memory_order_relaxed);
   auto record_sources = [&](const CfrWindow& view) {
     for (uint32_t mask : view.row_source_mask) report.sources_mask |= mask;
+    report.branch_mask |= view.branch_mask; // P10a
     for (uint32_t i = 0; i < NR_ISAC_SRC_COUNT; ++i)
       report.source_occurrences[i] += view.source_occurrences[i];
   };

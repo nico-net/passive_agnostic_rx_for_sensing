@@ -41,7 +41,7 @@ Dates use `YYYY-MM-DD` in Europe/Zurich. Check an implementation item only when 
 | [x] | P07 | Independent DL decoding | PASS (replay form; live independent mode gated on P06/P10) | 2026-09-11 | Session 2026-09-11 (P07) below. `docs/passive_dl_branch_view_audit.md` (antenna-axis audit + mechanism decision), single-branch view in `nr_pdsch_passive_decode.{h,c}` (thread-local shadow UE, `nb_antennas_rx=1`, `rxdata={rxdata[phys]}`; MRC/retry/subset/BRANCHFO/planned-branch nvar all off by their own gates, DMRSFO EMA/apply + SFO_CORRECT explicitly gated), `ISAC_DL_BRANCH_VIEW`, `unsupported_multilayer_in_branch_view` counter, `ISAC_PDSCH_VERDICT_TRACE`, per-job `branch_id`/`physical_channel` (sizeof unchanged), `tests/passive_rx/replay_branch_view.sh` = ctest `dl_branch_view_replay` PASS on the P02 fixture: legacy `REPLAY PASS: identical DL controls=34 failed=0 raw UL=24` unchanged (full log byte-identical bar the version banner and the new summary line); views 0/1/2/3 crc_ok 34/31/34/34 of 38 (view1 = 3 TBs coverage loss, recorded not tuned), data_submits == own crc_ok on every view, unsupported_multilayer 0/38 (fixture is all Nl=1). **LIVE CAVEAT: 34/34 is NOT expected live coverage.** This fixture is all Nl=1, but `nr_pdsch_passive_decode.c`'s own measured note records the live srsRAN cell scheduling num_layers=4 on ~97 % of grants (3 on ~2 %, 1-2 on a handful), so a one-antenna branch view will reject ~97 % of live grants as `unsupported_multilayer_in_branch_view` (plan sec 2.3-conformant, explicit, counted apart from CRC failure) -- expected live per-branch data-aided coverage is a few percent of grants until a rank>1 single-antenna scheme exists. UPDATED 2026-09-11 (P06a): the producer no longer tags 0/0 — it fans each grant out to every active branch with real ids/phys/epochs, so live independent mode is now REACHABLE; it has not been RUN (X410 unreachable), so the live multilayer fraction is still unmeasured. NOT done: live independent mode ( CFR ABI has no branch slot until P10), all-four-in-parallel replay, per-branch DMRSFO/SFO tracker (P09) |
 | [ ] | P08 | Independent UL decoding / context pool | NOT_STARTED | — | — |
 | [ ] | P09 | Namespace / TLS / concurrency audit | IN_PROGRESS | — | Session 2026-09-11 (P09) below. DELIVERED: `docs/passive_branch_namespace_audit.md` (10 identifier-assignment sites classified over branch x direction x decode-vs-reconstruction x UE-session, plus a full `__thread` classification of the 7 named files); ONE concrete collision FIXED — the passive DL decode's `harq_unique_pid` was `2000 + harq_process_nbr`, identical for every branch P06a fans one occasion out to, and is now `2000 + branch_id*32 + hpn%32` (new header `openair1/PHY/NR_UE_TRANSPORT/nr_passive_harq_tag.h`, `static_assert` bound 2127 < 3000, 5 new gtest cases, `nr_rx_branch_test` 24/24). Stride 32, not 16: the DCI HARQ-process-number field is 5 bits when the cell sets `harq-ProcessNumberSizeDCI-1-1` (`nr_pdcch_blind_monitor.h:263`, the 7th field of `pdcch_blind_monitor_dci_bits`, read at that width by `nr_pdcch_blind_monitor.c:2475`), so 16 would alias hpn 0 with hpn 16 on the SAME branch and break the branch-0 legacy pin above hpn 15 (found in fix round 1). `sizeof(nr_pdsch_passive_job_t)` unchanged at 384 (the fix reads the existing `t_view_branch`, no new field). Legacy replay `REPLAY PASS: identical DL controls=34 failed=0 raw UL=24` and `replay_branch_view.sh` 34/34/31/34/34 of 38 both unchanged. RECORDED NOT FIXED (audit secs 4.1/4.2): the passive UL decode tags EVERY TB `0` (`nr_pusch_passive_decode.c:1072` → `openair1/PHY/NR_TRANSPORT/nr_ulsch_decoding.c:129`) across up to 6 concurrent contexts, and its own `PASSIVE_UL_HARQ_TAG_BASE 4000` is dead code — → P08; the passive DL re-encode (3000 range) is not branch-strided — → P10 with the CFR ABI. **NOT VALIDATED END-TO-END: `replay_branch_view.sh` runs ONE VIEW PER PROCESS, so no harness here can put two branches' jobs with the same `harq_process_nbr` in one process concurrently; and the linked soft-decoder backend keeps no per-id state, so the corruption is unobservable offline even if it were reachable. The fix rests on code inspection (`nrLDPC_coding_aal.c:654`) plus an isolated arithmetic unit test.** NOT DONE: the sanitizer/race half of G2 test 7, and G2 test 6 (branch-local noise/timing under distinct per-channel impairments) — both need either a sanitizer build or live RF |
-| [ ] | P10 | CFR ABI and producer migration | NOT_STARTED | — | — |
+| [ ] | P10 | CFR ABI and producer migration | IN_PROGRESS (ABI slice only) | 2026-09-11 | Session 2026-09-11 (P10a) below. DELIVERED, controller-scoped to the ABI slice: `nr_isac_submit_cfr_multi_branch()` (new entry point with a `uint8_t branch_id` tail argument) in `nr_isac.{h,cc}`, with the pre-existing `nr_isac_submit_cfr_multi()` reduced to a ONE-LINE wrapper passing `NR_ISAC_BRANCH_NONE` (0xFF) -- that wrapper, not an argument audit, is the structural reason the other 8 producer call sites are unchanged; the tag threaded `Snapshot.branch_id` -> `PendingRow.branch_mask` -> `CfrWindow.branch_mask` -> `PipelineReport.branch_mask` (accumulated exactly like `source_mask`, since one PendingRow merges every co-timed submission); a report field OMITTED WHOLESALE when no producer tagged a branch (`branch_mask`, plus `branch_id` only when the CPI is unambiguously ONE branch -- a fused CPI is never made to name one of its branches, and an untagged CPI is never made to claim branch 0, which is a REAL branch under P03's map); `nr_pdsch_passive_view_branch()` exported from `nr_pdsch_passive_decode.{h,c}` (the P06a/P07 thread-local view identity, `NR_ISAC_BRANCH_NONE` when no view is armed); and ONE producer migrated -- `nr_pdsch_data_aided.c`, all four of its submissions, closing the `TODO(P10)` P07 left at that ABI. `test_nr_isac_python_parity` gains `test_branch_identity_report()` (untagged CPI carries NO branch field; single-branch CPI reports mask+id; two-branch CPI reports the mask and does NOT name one; and the tagged report line with only the two branch fields removed is CHARACTER-IDENTICAL to the untagged one bar the wall clock -- i.e. carrying identity changes no numeric result). Both replay baselines re-proven byte-identical: legacy `REPLAY PASS: identical DL controls=34 failed=0 raw UL=24`, `replay_branch_view.sh` 34/34/31/34/34 of 38 with data_submits == own crc_ok. NOT DONE (remaining P10/Stage 3, and P13): the other 8 producers (CSI-RS, SSB, blind PDSCH DM-RS, PUSCH pilot/data, attached-UE) still submit untagged; nothing routes, groups, windows or fuses by branch (still ONE engine -- P13's engine-per-branch is separate); acquisition time is not carried alongside identity; and the passive DL re-encode's 3000-range `harq_unique_pid` is still not branch-strided (`docs/passive_branch_namespace_audit.md` sec 4.2). G3 NOT passed |
 | [ ] | P11 | Support / allocation provenance | NOT_STARTED | — | — |
 | [ ] | P12 | Physical time / reference contract | NOT_STARTED | — | — |
 | [ ] | P13 | Four independent sensing engines | NOT_STARTED | — | — |
@@ -1716,3 +1716,122 @@ attached-UE B210 dies on a single recoverable 'O'; `trx_usrp_end` takes the non-
 `rx_mutex`, so an `exit_function()` entered on the producer thread while it holds the lock
 (iqrecorder limit, SIGINT delivered to the UE thread) deadlocks instead of exiting; a full
 `nrue_ru_reinit` now re-issues `set_gpio_src` on X410 (caught, returns -1, no core dump).
+
+
+## Session — 2026-09-11: P10a CFR ABI branch-identity slot (Stage 3, P10 IN_PROGRESS)
+
+Date/time (Europe/Zurich): 2026-09-11, ~17:30-19:00 CEST (host clock is UTC; +2h).
+Task IDs / gate: P10 (CFR ABI and producer migration), controller-scoped to the ABI slice only —
+the full producer migration and one-engine-per-branch remain Stage 3 / P13. Feeds G3; G3 NOT passed.
+
+Intended falsifiable claim: branch identity can be added to the CFR submission ABI and carried to the
+report without changing ANY existing numeric result or any unmigrated producer's behaviour.
+Falsifiers, all three checked: (a) either replay baseline moving off 34/0/24 or 34/34/31/34/34;
+(b) a branch field appearing in a report built only from untagged submissions; (c) the tagged report
+line differing from the untagged one anywhere other than the two branch fields (and the wall clock).
+
+Branch / full commit / dirty patch / untracked-file manifest:
+  branch `merge/adaptive-sensing`, parent `b370bab566426bb9ffa55c289cf713b2f58f59e4`;
+  manifest `tests/passive_rx/baselines/manifest_20260911_b370bab-dirty.json` + `..._tracked.patch`;
+  pre-existing untracked file not touched by this task: `tests/passive_rx/aoa_track_dl.conf`.
+
+Files modified / added / removed (no file added, no file removed):
+  MOD  `openair1/PHY/NR_UE_ISAC/nr_isac.h`   (`NR_ISAC_BRANCH_NONE`, `nr_isac_submit_cfr_multi_branch()`)
+  MOD  `openair1/PHY/NR_UE_ISAC/nr_isac.cc`  (new body; legacy entry point becomes a one-line wrapper)
+  MOD  `openair1/PHY/NR_UE_ISAC/sensing_engine.h`  (`SensingEngine::submit()` gains a defaulted `branch_id`)
+  MOD  `openair1/PHY/NR_UE_ISAC/sensing_engine.cc` (`Snapshot::branch_id`, `PendingRow::branch_mask`,
+       accumulation in `consume()`, fold in `build_window()`, fold into the report in `process_window()`).
+       The per-row mask is SPLIT BY DIRECTION (`dl_branch_mask`/`ul_branch_mask`) exactly as the source
+       masks already are, because one PendingRow merges co-timed DL and UL submissions and a single
+       mask would let a UL producer's branch tag surface in the DL window. That case is unreachable
+       today (no UL producer is migrated) and the split is INSPECTION-ONLY, not covered by a test: at
+       report level both windows fold into one `branch_mask`, so no report-level assertion can
+       distinguish the two
+  MOD  `openair1/PHY/NR_UE_ISAC/pipeline_types.h`  (`CfrWindow::branch_mask`)
+  MOD  `openair1/PHY/NR_UE_ISAC/report_writer.h`   (`PipelineReport::branch_mask`)
+  MOD  `openair1/PHY/NR_UE_ISAC/report_writer.cc`  (the omitted-when-unset JSON fields)
+  MOD  `openair1/PHY/NR_UE_ISAC/tests/python_parity_test.cc` (`test_branch_identity_report()`)
+  MOD  `openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.{h,c}` (`nr_pdsch_passive_view_branch()`)
+  MOD  `openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_data_aided.c` (TODO(P10) closed; all 4 submissions tagged)
+  MOD  `tests/passive_rx/baselines/fixtures.json` (binary sha + P10a note)
+  MOD  `tests/passive_rx/baseline_manifest.sh` (ONE citation end-token, `SensingEngine::submit()`'s last
+       parameter, which this task changed -- the generator hard-fails CITATION_ERROR otherwise)
+  ADD  `tests/passive_rx/baselines/manifest_20260911_b370bab-dirty.json` + `_tracked.patch`
+  MOD  this ledger
+  The other 8 `nr_isac_submit_cfr_multi()` call sites (`csi_rx.c`, `nr_pdcch_blind_monitor_rt.c`,
+  `nr_pusch_data_aided.c`, `nr_pusch_passive_decode.c`, `phy_procedures_nr_ue.c`) are UNTOUCHED.
+
+Executable / driver / config / geometry hashes:
+  `nr-uesoftmodem` sha256 `5954b11bb614baa013a1477504cf564b45c33c0af8cff68712822f9061bb4c6c`
+  `liboai_usrpdevif.so` sha256 `ad0a71c56dbc509149337460af7d0e97c64d4f390f85bec48b8882aa64f64583` (UNCHANGED,
+    not rebuilt, nothing in it was touched)
+  fixture `/home/sens/NICOLA/captures/sensing_manual_fixed.UtvBT7`, receiver.conf `5022d875...`, full_auto=0.
+
+Exact commands:
+  make nr-uesoftmodem test_nr_isac_python_parity -j8          (exit 0; the 3 warnings are pre-existing,
+    in files this task did not touch: nr_pusch_passive_decode.c:315, phy_procedures_nr_ue.c:2030,
+    nr_pdcch_blind_monitor_rt.c:1291)
+  ./test_nr_isac_python_parity
+  sudo -n env ISAC_PASSIVE_REPLAY_INPUT=<fixture>/replay.bin LD_LIBRARY_PATH=$(pwd):/usr/local/lib \
+    ./nr-uesoftmodem -O <fixture>/receiver.conf -r 273 ... -A 90     (the registered replay command)
+  sudo -n bash tests/passive_rx/replay_branch_view.sh
+  PURPOSE="P10a: ..." bash tests/passive_rx/baseline_manifest.sh
+  python3 tests/passive_rx/check_manifest.py <manifest> ; python3 tests/passive_rx/check_manifest.py --fixtures ...
+
+Artifact paths: `/tmp/p10a_build.log`, `/tmp/p10a_legacy.log`, `/tmp/replay_branch_view.7jQoH2/`,
+  `/tmp/p10a_rep/` (the report-writing replay experiment below, with its own edited receiver.conf).
+
+Baseline and comparison definition: the P07/P06a/P09 recorded baselines, byte-for-byte — legacy
+  `REPLAY PASS: identical DL controls=34 failed=0 raw UL=24; no radio opened` (exit 0), and
+  `replay_branch_view.sh` 34/34/31/34/34 crc_ok of 38 with data_submits == own crc_ok per view. Any
+  change to either was a declared STOP condition, to be investigated rather than tuned away.
+
+Observed result, with denominators:
+  `test_nr_isac_python_parity` PASS, 15 cases (14 pre-existing + `test_branch_identity_report`).
+  The new case was PROVEN NON-VACUOUS by deliberate falsification: changing its expected id 3 -> 4 made
+  it fail with "a single-branch CPI must name its branch" (exit 1), and it passed again on restore.
+  Legacy replay exit 0, verdict line identical, `REPLAY-VIEW phys=-1 branch=0 records=38 crc_ok=34
+  crc_fail=4 unsupported=0 error=0 unsupported_multilayer=0 data_submits=34`.
+  `replay_branch_view.sh` exit 0: legacy/view0/view1/view2/view3 crc_ok 34/34/31/34/34 of 38,
+  data_submits equal to crc_ok on every view, unsupported_multilayer 0 on every view — the P07/P09
+  baseline reproduced exactly.
+
+Hypotheses supported / contradicted:
+  CONTRADICTED, and it is the main measured finding of this session — the task brief's premise that
+  "`adaptive_manual_dlul.conf` sets report_path/out_path and sensing.enable=1, so the replay genuinely
+  runs the sensing engine and writes reports.jsonl". IT CANNOT, at any fixture duration:
+  `executables/nr-uesoftmodem.c:437` returns from `nr_passive_replay_read()` inside the replay branch,
+  while `nr_isac_start()` is at `:474` — so the engine's accumulation/processing threads never run and
+  `SensingEngine::submit()` drops every row on `!running_.load()`. This is the same fact P07 already
+  relied on when it added `nr_isac_data_aided_force` ("`nr_isac_submit_cfr_multi()` still drops the row
+  when the engine is absent"), stated there from the other direction.
+  Measured rather than inferred, in two steps: (1) the registered replay writes NO file at the fixture's
+  own `report_path` (the fixture directory's file list is identical before and after the run — checked,
+  because writing into a registered fixture would have been a defect of its own); (2) a supplementary
+  run with a COPY of the receiver.conf pointing at a writable `/tmp/p10a_rep/reports.jsonl` AND carrying
+  the surveyed `rx_pos_*`/`tx_pos_*` the original lacks (without them the engine refuses to construct at
+  all: "SENSING: invalid native configuration: hierarchical ENU tracking requires surveyed noncoincident
+  Tx/Rx") still produced 0 report lines, on the legacy path and under `ISAC_DL_BRANCH_VIEW=2`, both with
+  the replay verdict unchanged. So the report-side half of this slice is pinned by the offline
+  `test_branch_identity_report()` — the brief's own stated fallback — and NOT by any replay artifact.
+  Honest consequence for review: the branch tag's journey through the real binary is proven only as far
+  as the submission call (the replay's `data_submits=34` with an untagged `phys=-1` view); the
+  accumulator-to-JSON half is proven in the offline harness, which drives the identical
+  `SensingEngine`/`ReportWriter` code, not a re-implementation.
+  SUPPORTED — the wrapper strategy: the 8 unmigrated producers were not audited argument by argument,
+  they simply cannot change, because `nr_isac_submit_cfr_multi()` is one delegation with the "no
+  identity" value and the body is shared. Both replays are the end-to-end restatement of that.
+
+Deliberate deviation from the brief, and why: the brief specified the legacy wrapper pass `branch_id=0`.
+  It passes `NR_ISAC_BRANCH_NONE` (0xFF) instead. Branch 0 is a REAL physical receive branch under P03's
+  `rx_branches`/`rx_branch_phys_map` (and is the branch `nr_pdsch_passive_branch_view()` arms most often),
+  so "0 == unset" would both make every legacy row claim branch 0 and make a genuine branch-0 row
+  indistinguishable from an untagged one — which would have broken the brief's OWN requirement that the
+  field be OMITTED, not zero, when unset. The structural guarantee the brief actually asked for (one-line
+  legacy wrapper, shared body, no signature change at 8 call sites) is unaffected.
+
+Status: IN_PROGRESS (P10 row, ABI slice only), and NOT a gate pass. G3 not passed.
+
+Validity reasons and affected intervals: offline only. No radio was touched — the X410 is unreachable
+  for this session by the controller's own statement, and every run here is the replay path, which each
+  run's "no radio opened" verdict restates.

@@ -47,6 +47,7 @@ __thread bool nr_isac_data_aided_force = false;
 #include "PHY/MODULATION/nr_modulation.h"
 #include "PHY/NR_TRANSPORT/nr_transport_common_proto.h"
 #include "PHY/NR_UE_ISAC/nr_isac.h"
+#include "nr_pdsch_passive_decode.h" // P10a: nr_pdsch_passive_view_branch()
 #include "executables/nr-uesoftmodem.h"
 #include "openair2/LAYER2/NR_MAC_COMMON/nr_mac_common.h"
 
@@ -344,8 +345,15 @@ void nr_isac_pdsch_data_aided_submit(PHY_VARS_NR_UE *ue,
   }
 
   atomic_fetch_add_explicit(&g_data_submits, 1, memory_order_relaxed);
-  // TODO(P10): the CFR ABI below has no branch identity slot; nr_isac_submit_cfr_multi() routes by
-  // source only. The job's branch_id/physical_channel stop at the caller until P10 extends it.
+  // P10a (closes the former TODO(P10) here): the CFR ABI now carries a branch identity slot, and
+  // every submission below names the branch whose single-antenna view produced this transport block
+  // -- nr_pdsch_passive_view_branch() reads the view P06a/P07 armed on THIS thread, and returns
+  // NR_ISAC_BRANCH_NONE on the attached-UE and legacy 4-antenna paths, which leaves those rows
+  // untagged exactly as before. STILL OPEN, deliberately: the identity is only carried to the
+  // report. One engine still consumes every branch; per-branch engines/detectors and the remaining
+  // 8 producers are P13 / the rest of Stage 3, as is branch-striding the re-encode's own
+  // harq_unique_pid namespace (docs/passive_branch_namespace_audit.md sec 4.2).
+  const uint8_t isac_branch = nr_pdsch_passive_view_branch();
   nr_isac_carrier_t carrier = {.nof_prb         = (uint32_t)fp->N_RB_DL,
                                .scs_hz          = fp->subcarrier_spacing,
                                .dl_center_hz    = fp->dl_CarrierFreq,
@@ -380,8 +388,8 @@ void nr_isac_pdsch_data_aided_submit(PHY_VARS_NR_UE *ue,
   const uint32_t sub_target = nr_isac_subslot_config(&sub_min_re, &sub_min_snr_db);
 
   if (sub_target == 0 || nof_sym <= 1) {
-    nr_isac_submit_cfr_multi(slot_idx, 0.0f, NR_ISAC_SRC_PDSCH_DATA, &carrier, isac_h, isac_nof_ant, isac_max_re,
-                             isac_k, isac_l, nof_re, (float)nvar);
+    nr_isac_submit_cfr_multi_branch(slot_idx, 0.0f, NR_ISAC_SRC_PDSCH_DATA, &carrier, isac_h, isac_nof_ant, isac_max_re,
+                                    isac_k, isac_l, nof_re, (float)nvar, isac_branch);
     return;
   }
 
@@ -408,24 +416,24 @@ void nr_isac_pdsch_data_aided_submit(PHY_VARS_NR_UE *ue,
       const float  frac   = (float)(centre / (double)NR_SYMBOLS_PER_SLOT);
       // Slice, not copy: ant_stride_re stays the FULL buffer stride so antenna a's slice starts at
       // the same symbol offset within its own plane.
-      nr_isac_submit_cfr_multi(slot_idx, frac, NR_ISAC_SRC_PDSCH_DATA, &carrier, &isac_h[2 * sym_start[g_first]],
-                               isac_nof_ant, isac_max_re, &isac_k[sym_start[g_first]], &isac_l[sym_start[g_first]],
-                               g_re, (float)nvar);
+      nr_isac_submit_cfr_multi_branch(slot_idx, frac, NR_ISAC_SRC_PDSCH_DATA, &carrier, &isac_h[2 * sym_start[g_first]],
+                                      isac_nof_ant, isac_max_re, &isac_k[sym_start[g_first]], &isac_l[sym_start[g_first]],
+                                      g_re, (float)nvar, isac_branch);
       emitted++;
       g_first = i + 1;
     } else if (is_last) {
       // Tail that never passed the gates: merge it BACKWARDS by re-emitting from g_first to the end
       // as one row if nothing has been emitted yet, otherwise fold it into the whole-slot fallback.
       if (emitted == 0) {
-        nr_isac_submit_cfr_multi(slot_idx, 0.0f, NR_ISAC_SRC_PDSCH_DATA, &carrier, isac_h, isac_nof_ant, isac_max_re,
-                                 isac_k, isac_l, nof_re, (float)nvar);
+        nr_isac_submit_cfr_multi_branch(slot_idx, 0.0f, NR_ISAC_SRC_PDSCH_DATA, &carrier, isac_h, isac_nof_ant, isac_max_re,
+                                        isac_k, isac_l, nof_re, (float)nvar, isac_branch);
         emitted++;
       } else {
         const double centre = 0.5 * ((double)sym_id[g_first] + (double)sym_id[i]) + 0.5;
         const float  frac   = (float)(centre / (double)NR_SYMBOLS_PER_SLOT);
-        nr_isac_submit_cfr_multi(slot_idx, frac, NR_ISAC_SRC_PDSCH_DATA, &carrier, &isac_h[2 * sym_start[g_first]],
-                                 isac_nof_ant, isac_max_re, &isac_k[sym_start[g_first]], &isac_l[sym_start[g_first]],
-                                 g_re, (float)nvar);
+        nr_isac_submit_cfr_multi_branch(slot_idx, frac, NR_ISAC_SRC_PDSCH_DATA, &carrier, &isac_h[2 * sym_start[g_first]],
+                                        isac_nof_ant, isac_max_re, &isac_k[sym_start[g_first]], &isac_l[sym_start[g_first]],
+                                        g_re, (float)nvar, isac_branch);
       }
     }
   }

@@ -28,7 +28,11 @@ public:
               const nr_isac_carrier_t& carrier, const std::complex<float>* cfr,
               uint32_t antennas, const uint32_t* absolute_subcarrier,
               const uint32_t* ofdm_symbol, uint32_t resource_elements,
-              float noise_variance);
+              float noise_variance,
+              // P10a: identity of the receive branch this row was measured on, carried to the
+              // report only. NR_ISAC_BRANCH_NONE (the default, and what every unmigrated producer
+              // sends) leaves the row untagged; nothing here routes or fuses by branch (P13).
+              uint8_t branch_id = NR_ISAC_BRANCH_NONE);
 
 private:
   struct Snapshot;

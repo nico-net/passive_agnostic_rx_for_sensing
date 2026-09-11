@@ -83,6 +83,33 @@ void nr_isac_submit_cfr_multi(uint32_t slot_idx,
 /* k_abs is always the logical CRB/Point-A carrier-grid coordinate in
  * [0, carrier->nof_prb*12). It is never an FFT-buffer index and excludes first_carrier_offset. */
 
+/* adaptive_RX_pipeline.md P10a: "no branch identity". NOT branch 0 -- branch 0 is a real physical
+ * receive branch under P03's rx_branches/rx_branch_phys_map, so using 0 as the unset value would
+ * make every legacy producer claim to be branch 0. The report omits the branch field for this
+ * value, following the same omit-rather-than-fabricate convention as azimuth_std_deg. */
+#define NR_ISAC_BRANCH_NONE 0xFFu
+
+/* adaptive_RX_pipeline.md P10a: nr_isac_submit_cfr_multi() with an identity slot for the receive
+ * branch the CFR was measured on. nr_isac_submit_cfr_multi() above is a one-line wrapper for this
+ * function with NR_ISAC_BRANCH_NONE -- that wrapper, not an argument, is what makes every producer
+ * that has not migrated structurally unchanged rather than assumed unchanged.
+ *
+ * Scope of this slice: the identity is carried through the CPI accumulator to the report only. It
+ * does NOT group, window, fuse or route anything -- one engine still consumes every branch, exactly
+ * as before. Routing a branch to its own engine/detector instance is P13. */
+void nr_isac_submit_cfr_multi_branch(uint32_t slot_idx,
+                                     float slot_frac,
+                                     int source,
+                                     const nr_isac_carrier_t *carrier,
+                                     const float *h,
+                                     uint32_t nof_ant,
+                                     uint32_t ant_stride_re,
+                                     const uint32_t *k_abs,
+                                     const uint32_t *l_sym,
+                                     uint32_t nof_re,
+                                     float noise_var,
+                                     uint8_t branch_id);
+
 uint32_t nr_isac_aoa_antennas(void);
 uint32_t nr_isac_subslot_config(uint32_t *min_re, float *min_snr_db);
 
