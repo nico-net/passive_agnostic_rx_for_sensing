@@ -173,6 +173,11 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
                                          .lock_epoch = job.lock_epoch,
                                          .acq_epoch = job.acq_epoch};
       if (bset != NULL && bset->n_active > 1 && nr_rx_branch_dispatch_is_stale(bset, &d)) {
+        /* P13a fix round 3: this mask is a CORRECT bounded use, unlike the two below. It reads the
+         * ENQUEUE-time branch_id -- written only by the producer (zero-initialised job, branch 0)
+         * or by enqueue_fanout() from nr_rx_branch_set_dispatch(), which emits only ACTIVE branches
+         * -- and it runs BEFORE the branch-view resolve at the bottom of this block, which is the
+         * only writer that can put NR_ISAC_BRANCH_NONE in the field. Left as-is deliberately. */
         atomic_fetch_add_explicit(&g_br_stale_epoch[job.branch_id & (NR_RX_BRANCH_MAX - 1)], 1,
                                   memory_order_relaxed);
         continue;
@@ -187,6 +192,12 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
 
     /* P07 independent mode: resolve which branch this job is decoded FOR, and hand the whole chain
      * (decode AND data-aided submit) the same single-antenna view of the UE. Legacy: vue == ue. */
+    /* NOTE (P13a fix round 3): this call OVERWRITES job.branch_id, and since P13a fix round 1 it can
+     * write NR_ISAC_BRANCH_NONE (0xFF) -- the honest "this view maps to no active branch" value.
+     * Every per-branch array indexed by job.branch_id AFTER this line must therefore go through
+     * nr_rx_branch_counter_index(), never `& (NR_RX_BRANCH_MAX-1)`: 0xFF & 3 == 3 would silently
+     * credit real branch 3. The two counters above this line read the pre-resolve value and are
+     * bounded by construction. */
     const int view_phys = nr_pdsch_passive_branch_view_resolve(ue, job.physical_channel, &job.branch_id);
     job.physical_channel = (int8_t)view_phys;
     PHY_VARS_NR_UE *vue = nr_pdsch_passive_branch_view(ue, view_phys, job.branch_id);
@@ -209,8 +220,10 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
 
     if (st != NR_PDSCH_PASSIVE_DECODE_ERROR && st != NR_PDSCH_PASSIVE_DECODE_UNSUPPORTED) {
       atomic_fetch_add_explicit(&g_decoded, 1, memory_order_relaxed);
-      atomic_fetch_add_explicit(&g_br_decoded[job.branch_id & (NR_RX_BRANCH_MAX - 1)], 1,
-                                memory_order_relaxed);
+      /* P13a fix round 3: post-resolve, so the sentinel is possible here -- guard, never mask. */
+      const int census_branch = nr_rx_branch_counter_index(job.branch_id);
+      if (census_branch >= 0)
+        atomic_fetch_add_explicit(&g_br_decoded[census_branch], 1, memory_order_relaxed);
       /* Technique D scoring: the TB CRC is the only oracle that can tell a right payload
        * interpretation from a wrong one, and this is the one place it is known. */
       nr_pdsch_cfg_hypothesis_t winner;
@@ -220,8 +233,8 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
               winner.dmrs_mask, winner.mcs_table);
       if (st == NR_PDSCH_PASSIVE_DECODE_CRC_OK) {
         atomic_fetch_add_explicit(&g_crc_ok, 1, memory_order_relaxed);
-        atomic_fetch_add_explicit(&g_br_crc_ok[job.branch_id & (NR_RX_BRANCH_MAX - 1)], 1,
-                                  memory_order_relaxed);
+        if (census_branch >= 0) // same guard as g_br_decoded above; see the NOTE at the resolve
+          atomic_fetch_add_explicit(&g_br_crc_ok[census_branch], 1, memory_order_relaxed);
         if (job.want_data) {
           /* Publish THIS job's monotonic slot so the CPI grid indexes it correctly. Without this the
            * submit derives the index from proc->frame_rx, which wraps at 1024 -- harmless in order,
@@ -334,6 +347,9 @@ bool nr_pdsch_passive_queue_enqueue(const nr_pdsch_passive_job_t *job)
   pthread_cond_signal(&g_cv);
   pthread_mutex_unlock(&g_lock);
   atomic_fetch_add_explicit(&g_queued, 1, memory_order_relaxed);
+  /* P13a fix round 3: bounded for the same reason as g_br_stale_epoch -- enqueue happens before any
+   * branch-view resolve, so branch_id here is always a real id (producer's 0, or a dispatch entry).
+   * Left as-is deliberately; see the comment at the stale-epoch counter in the consumer loop. */
   atomic_fetch_add_explicit(&g_br_queued[job->branch_id & (NR_RX_BRANCH_MAX - 1)], 1,
                             memory_order_relaxed);
   return true;
