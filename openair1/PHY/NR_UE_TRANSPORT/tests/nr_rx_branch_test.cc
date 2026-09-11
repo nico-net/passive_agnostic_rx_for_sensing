@@ -87,6 +87,27 @@ TEST(RxBranchParse, RejectsMissingMappingForActiveBranch) {
   EXPECT_EQ(nr_rx_branch_set_parse(&set, "0,1", "0:0", nullptr), -1);
 }
 
+// P13a fix round 2: a per-branch counter/array index must REFUSE the "no branch" sentinel rather
+// than masking it onto a real branch. nr_pdsch_passive_decode.c:1118 used
+// `t_view_branch & (NR_RX_BRANCH_MAX-1)`, and since fix round 1 t_view_branch can be
+// NR_ISAC_BRANCH_NONE (0xFF) for a view whose physical channel maps to no active branch -- so an
+// unmapped view's multilayer rejections were credited to real branch 3 (0xFF & 3 == 3). The
+// property the call site needs: sentinel in, NO per-branch slot out; only the aggregate counter
+// (which is unconditional and unindexed) may move.
+TEST(RxBranchParse, CounterIndexRefusesTheNoBranchSentinel)
+{
+  for (int b = 0; b < NR_RX_BRANCH_MAX; b++)
+    EXPECT_EQ(nr_rx_branch_counter_index((uint8_t)b), b) << b;
+  // 0xFF is NR_ISAC_BRANCH_NONE (spelled numerically: nr_isac.h is not on this target's include
+  // path, and it includes THIS header, so it cannot be pulled in here anyway).
+  EXPECT_EQ(nr_rx_branch_counter_index(0xFF), -1);
+  EXPECT_NE(nr_rx_branch_counter_index(0xFF), NR_RX_BRANCH_MAX - 1)  // the masking bug, named
+      << "the no-branch sentinel must not be attributed to the last real branch";
+  EXPECT_EQ(nr_rx_branch_counter_index(NR_RX_BRANCH_MAX), -1);
+  for (int id = NR_RX_BRANCH_MAX; id < 256; id++)
+    EXPECT_EQ(nr_rx_branch_counter_index((uint8_t)id), -1) << id;
+}
+
 // P13a: the CONVERSE of the case above, and the one that was accepted. A phys_map entry for a
 // branch rx_branches does not name left physical_channel >= 0 on a DISABLED slot, splitting the
 // two "is this branch active" predicates the receiver uses. Measured consequence before the fix:

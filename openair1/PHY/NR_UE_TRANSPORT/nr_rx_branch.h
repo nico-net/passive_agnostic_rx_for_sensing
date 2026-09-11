@@ -84,6 +84,16 @@ typedef struct {
   uint64_t run_id;   /* caller-assigned; not touched by this module */
 } nr_rx_branch_set_t;
 
+/* P13a fix round 2: the index of branch_id in a per-branch array, or -1 when it names NO branch --
+ * which is what NR_ISAC_BRANCH_NONE (0xFF) is, and what a branch view carries whenever its physical
+ * channel maps to no active branch. Masking instead (`branch_id & (NR_RX_BRANCH_MAX-1)`, the idiom
+ * this replaced) silently attributes the sentinel to a REAL branch: 0xFF & 3 == 3. Deliberately
+ * takes the raw uint8_t and not an enum, because every producer of it is a uint8_t on the wire. */
+static inline int nr_rx_branch_counter_index(uint8_t branch_id)
+{
+  return branch_id < NR_RX_BRANCH_MAX ? (int)branch_id : -1;
+}
+
 /* Parses "0,1,2,3"-style active_list and "0:0,1:1,2:2,3:3"-style branch:physical phys_map
  * (comma-separated, order-independent) into *set. rx_id_prefix defaults to "rx" when NULL/empty;
  * each active branch gets rx_id = "<prefix><branch_id>" (branch_id is always one digit, 0..3).

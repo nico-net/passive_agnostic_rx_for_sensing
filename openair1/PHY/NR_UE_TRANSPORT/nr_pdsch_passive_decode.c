@@ -1115,8 +1115,17 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
      * counted apart from CRC failure, never silently decoded on one antenna. */
     if (view_active() && n_ports > 1) {
       atomic_fetch_add_explicit(&g_view_unsupported_multilayer, 1, memory_order_relaxed);
-      atomic_fetch_add_explicit(&g_view_unsupported_multilayer_br[t_view_branch & (NR_RX_BRANCH_MAX - 1)],
-                                1, memory_order_relaxed);
+      /* P13a fix round 2: the AGGREGATE above is always correct; the PER-BRANCH one below must not
+       * be written for a view that names no branch. Since fix round 1, t_view_branch can be
+       * NR_ISAC_BRANCH_NONE (0xFF) -- the honest "unknown branch" value for a view on a physical
+       * channel no active branch maps -- and the old `& (NR_RX_BRANCH_MAX-1)` mask turned that into
+       * index 3, crediting REAL branch 3's br3= counter with an unmapped view's rejections.
+       * Diagnostic-only (nothing routes on this array), but it is the same fabricated-identity
+       * pattern the round-1 fix removed one layer up, just relocated from br0 to br3. */
+      const int counter_branch = nr_rx_branch_counter_index(t_view_branch);
+      if (counter_branch >= 0)
+        atomic_fetch_add_explicit(&g_view_unsupported_multilayer_br[counter_branch],
+                                  1, memory_order_relaxed);
       out->reason = "multilayer_in_branch_view";
     } else {
       out->reason = (n_ports < 1) ? "no_dmrs_port" : "layers_exceed_antennas";
