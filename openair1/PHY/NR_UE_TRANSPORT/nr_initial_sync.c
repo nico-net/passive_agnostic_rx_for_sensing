@@ -385,7 +385,11 @@ static void nr_scan_ssb(void *arg)
   __attribute__((aligned(32))) c16_t rxdataF[NR_N_SYMBOLS_SSB][fp->nb_antennas_rx][fp->ofdm_symbol_size];
 
   // initial sync performed on two successive frames, if pbch passes on first frame, no need to process second frame
+  /* Each frame is an independent observation of the SAME coarse-corrected
+   * capture. A failed PBCH must not become a CFO seed for the next frame. */
+  const int initial_freq_offset = ssbInfo->freqOffset;
   // only one frame is used for simulation tools
+
   if (ssbInfo->freqOffset)
     compensate_freq_offset(rxdata, fp->nb_antennas_rx, ssbInfo->rxdata_sz, ssbInfo->freqOffset, fp->samples_per_subframe * 1000);
 
@@ -443,7 +447,7 @@ static void nr_scan_ssb(void *arg)
           sss_phase,
           ssbInfo->syncRes.rx_offset);
 #endif
-    ssbInfo->freqOffset += search_params.pss_res.freq_offset + search_params.sss_res.freq_offset;
+    ssbInfo->freqOffset = initial_freq_offset + search_params.pss_res.freq_offset + search_params.sss_res.freq_offset;
 
     if (ssbInfo->syncRes.cell_detected) { // we got sss channel
       ssbInfo->syncRes.cell_detected = nr_pbch_detection(ssbInfo->proc,
