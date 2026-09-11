@@ -97,3 +97,15 @@ feed independently checked PDSCH mapping, coding and temporal evidence. Then
 connect the same generation-aware state to safe raw replay acquisition/recovery.
 
 See `ARCHITECTURE.md` for remaining state, CSI-RS and OTA design requirements.
+
+### Additional raw baselines and reference SSB checker
+
+- Fixed empty-window FFT correlation normalization; retained failing synthetic
+  case and added explicit zero-energy/bounded-score regression tests.
+- Five SSB checker tests pass. Two further independent four-second, four-channel
+  captures saved under `/home/sens/NICOLA/captures/raw_batch.vKkQwC/`; both pass
+  timestamp continuity, sample-count and NIC-loss checks. Radio released.
+- First 40 ms of channel 2 in all three four-second captures show repeated PCI 2
+  PSS/SSS at approximately 20 ms spacing using an explicit frequency reference.
+- PBCH/CSI-RS/full DL-UL coverage and raw full-receiver replay remain unvalidated;
+  no new acceptance gate is claimed. Details: `../raw_baseline/SSB_VALIDATION.md`.
