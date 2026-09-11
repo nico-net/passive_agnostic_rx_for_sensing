@@ -51,16 +51,16 @@ four axes the brief names: **branch x direction x decode-vs-reconstruction x UE/
 | 2 | `nr_pdcch_blind_monitor_rt.c:110` `blind_harq_tag()` | `3000 + ue_slot*16 + harq_pid%16` | 3000-3255 | **NO (branch axis)** | Passive DL *re-encode*. Namespaced by UE and by type, not by branch. P06a fans one occasion to N branches; each branch's job carries the same `(rnti, harq_pid)` and therefore the same tag. Recorded, not fixed: `nr_isac_pdsch_data_aided_submit()` reaches `nr_pdsch_data_aided.c:128`, which is an **encode** call, and per section 1 no backend in this tree indexes state by an encode-side id. Fixing it also requires the P10 CFR-ABI change (`nr_pdsch_passive_queue.c:231` already carries a `TODO(P10)`), so it is deliberately left to P10 rather than half-done here. |
 | 3 | `phy_procedures_nr_ue.c:2137` | `1000 + dlsch_config->harq_process_nbr` | 1000-1015 | YES | Attached-UE DL re-encode. One session, one HARQ array, no branch fan-out on the attached path. Out of scope per the brief. |
 | 4 | `nr_dlsch_decoding.c:76` | `2 * harq_pid + cw_idx` | 0-31 | YES for its own users | Attached-UE DL decode (upstream OAI). Collides with sites 5 and 6 below, which is the finding in section 4.1. |
-| 5 | `openair1/PHY/NR_TRANSPORT/nr_ulsch_decoding.c:129` | `= ULSCH_id` | 0-5 as called | **NO** | Passive UL decode. See section 4.1 -- a real present-day collision, recorded not fixed (UL is P08). |
+| 5 | `openair1/PHY/NR_TRANSPORT/nr_ulsch_decoding.c:133` (was `:129`) | `= gNB->harq_unique_pid_base + ULSCH_id`, i.e. `5000 + ctx` on the passive path and `0 + ULSCH_id` upstream | 5000-5005 passive; unchanged upstream | **YES (after P08a)** | Was `= ULSCH_id`, which the passive path pins at 0 in every one of its contexts: see section 4.1. FIXED in P08a. |
 | 6 | `NR_TRANSPORT/nr_dlsch_coding.c:171` / `NR_UE_TRANSPORT/nr_ulsch_coding.c:137` | `= i` / `2*harq_pid + ULSCH_id` | small | n/a | Upstream OAI encode paths, unreachable under `--passive-rx`. Listed for completeness. |
 | 7 | `nr_pusch_passive_decode.c:1278` | `NR_PUSCH_PASSIVE_DA_TAG_BASE + ctx` | 4000-4005 | YES on its own axes | Passive UL re-encode, strided by decode-context index. No UL branch fan-out exists yet (P08). |
 | 8 | `nr_pusch_data_aided.c:89` | `TB.harq_unique_pid = harq_pid_tag` | pass-through | n/a | Consumes site 7's value. |
 | 9 | `nr_pdsch_data_aided.c:128` | `TB_parameters.harq_unique_pid = harq_pid_tag` | pass-through | n/a | Consumes site 2's value (via `nr_pdsch_passive_job_t::harq_pid_tag`). |
-| 10 | `nr_pusch_passive_decode.c:82` `PASSIVE_UL_HARQ_TAG_BASE 4000` | -- | -- | **DEAD** | Defined, documented as the UL decode namespace, and **never used** anywhere. The UL decode's real id is site 5. See 4.1. |
+| 10 | ~~`nr_pusch_passive_decode.c:82` `PASSIVE_UL_HARQ_TAG_BASE 4000`~~ | -- | -- | **REMOVED (P08a)** | Was defined, documented as the UL decode namespace, and **never used** anywhere -- and its 4000 also collided with site 7's UL RE-ENCODE base, so wiring it up as written would have swapped a decode-vs-decode alias for a decode-vs-re-encode one. Deleted; the UL decode namespace is 5000+ in `nr_passive_harq_tag.h`. See 4.1. |
 
 The base map, as it now stands, is centralised in `nr_passive_harq_tag.h`'s header comment: 0-31
 attached DL decode, 1000+ attached DL re-encode, 2000+ passive DL decode, 3000+ passive DL
-re-encode, 4000+ passive UL re-encode. Bases are 1000 apart; that spacing is now a named constant
+re-encode, 4000+ passive UL re-encode, 5000+ passive UL decode (P08a). Bases are 1000 apart; that spacing is now a named constant
 (`NR_PASSIVE_HARQ_NAMESPACE_SPAN`) with a `static_assert` against it, instead of four comments in
 four `.c` files -- two of which had already drifted into declaring the same base (sites 7 and 10).
 
@@ -136,7 +136,7 @@ untouched.
 
 ## 4. Findings recorded, not fixed
 
-### 4.1 The passive UL decode tags every transport block `0` (Important)
+### 4.1 The passive UL decode tags every transport block `0` (Important) -- FIXED in P08a
 
 `nr_pusch_passive_decode.c:1072` declares `int ulsch_id = 0;` and passes it to
 `nr_ulsch_decoding()`, which does `TB_parameters->harq_unique_pid = ULSCH_id`
@@ -146,12 +146,52 @@ to `NR_PUSCH_PASSIVE_MAX_CTX` = 6 concurrent decode contexts, and `0` is also wh
 `PASSIVE_UL_HARQ_TAG_BASE 4000` (site 10) was written to prevent exactly this and is never
 referenced -- the intent is documented but not wired.
 
-Not fixed here for two reasons, both from the brief: the UL path has no branch fan-out yet (P08),
-and the fix is not the one-line change it looks like -- `ulsch_id` also indexes
+Not fixed in P09 for two reasons, both from that brief: the UL path has no branch fan-out yet
+(P08), and the fix is not the one-line change it looks like -- `ulsch_id` also indexes
 `gnb->ulsch[ulsch_id]` inside `nr_ulsch_decoding()`, so it cannot simply be set to a namespaced
 constant; the id would have to be overridden after the fact or the callee taught to separate the
-two roles. That is a change to UL decode plumbing with no offline test to prove it, i.e. outside
-this task's proven scope. **Recommended for P08.**
+two roles.
+
+**FIXED in P08a (2026-09-11), and that constraint is exactly what shaped the fix.** Confirmed by
+reading `nr_ulsch_decoding.c:101-102`: `ULSCH_id` indexes BOTH `phy_vars_gNB->ulsch[ULSCH_id]` and
+`phy_vars_gNB->pusch_vars[ULSCH_id]`, so it is an ARRAY INDEX and must stay 0 on a passive context
+(which allocates exactly one of each). The id is therefore namespaced by giving the INSTANCE a
+base, not by moving the index:
+
+```c
+/* nr_ulsch_decoding.c:133 */
+TB_parameters->harq_unique_pid = phy_vars_gNB->harq_unique_pid_base + ULSCH_id;
+/* passive_gnb_prepare(), nr_pusch_passive_decode.c */
+gnb->harq_unique_pid_base = nr_pusch_passive_harq_tag_base(ctx);   /* 5000 + ctx */
+```
+
+`harq_unique_pid_base` is a new `uint32_t` on `PHY_VARS_gNB` (`defs_gNB.h:374`) that is **0 for a
+real gNB** -- every `PHY_VARS_gNB` in this tree is `calloc`'d (`executables/nr-gnb.c:384` plus the
+`SIMULATION/NR_PHY` sims) -- so the upstream expression is bit-identical and the behaviour change
+is confined to the passive receiver, the one caller that runs several `PHY_VARS_gNB` CONCURRENTLY
+against one dlopen'd LDPC coding interface.
+
+**Stride, as arithmetic rather than a chosen constant.** The second term is `ULSCH_id`, whose real
+range is the size of the per-context `ulsch[]`/`pusch_vars[]` arrays -- not a DCI field, so the
+5-bit exposure that shaped the DL stride does not apply here. `passive_gnb_prepare()` allocates
+exactly one of each and sets `gnb->max_nb_pusch` from the same `NR_PUSCH_PASSIVE_ULSCH_PER_CTX = 1`
+the stride uses, with a `static_assert` beside the allocation, so the stride cannot drift from the
+allocation by hand.
+
+```
+highest id = BASE + (NR_PUSCH_PASSIVE_MAX_CTX - 1) * ULSCH_PER_CTX + (ULSCH_PER_CTX - 1)
+           = 5000 + 5 * 1 + 0
+           = 5005
+next type's base = BASE + NR_PASSIVE_HARQ_NAMESPACE_SPAN = 6000
+5005 < 6000, headroom 994 ids.
+```
+
+**Why 5000 and not the file's own 4000**: 4000 is already live as site 7's UL RE-ENCODE base
+(`nr_pusch_data_aided.h:23`).
+
+**What P08a does NOT do**: it does not give the UL path a branch-independent decode VIEW (still
+P08), and it adds no branch axis to the UL tag -- there is no UL fan-out to stride over yet. When
+one arrives the UL tag gains a branch term the way the DL one did, inside the headroom above.
 
 ### 4.2 The passive DL re-encode (3000 range) is not branch-strided (Minor today)
 
@@ -227,8 +267,27 @@ thread confinement plus a full per-job rewrite, not by luck.
 
 ## 6. What was and was not validated end-to-end
 
+(P08a bullets added 2026-09-11; the P09 bullets below them are unchanged.)
+
 Stated plainly, because the replay harness cannot exercise the failure this fix removes:
 
+* **P08a, validated by test:** 4 new cases in `nr_rx_branch_test` (28/28, was 24) -- every decode
+  context pairwise distinct (the property the fix exists for; before P08a all six were 0), no
+  context emitting an id inside the attached DL decode's 0..31, the 5000 range disjoint from
+  0/31/1000/2000/2127/3000/3255/4000/4005, an out-of-range `ctx` folding inside the namespace
+  rather than escaping it, and the 5005 bound. There is no legacy pin here, unlike the DL fix: the
+  pre-P08a value WAS the collision, so preserving it would preserve the defect.
+* **P08a, validated by replay -- and this CORRECTS a claim made earlier in this document and in
+  P08a's own brief.** The passive UL decode IS reachable in replay: `nr_passive_replay_ul_config.h`
+  (`:37`/`:42`), under `ISAC_PASSIVE_REPLAY_UL_CONFIG=1`, calls `nr_pusch_passive_decode(ue, 0, ...)`
+  on the fixture's recorded UL grants, which runs the changed `nr_ulsch_decoding.c:133` for real on
+  24 grants. Measured before AND after (the pre-change binary rebuilt from a `git stash` to get the
+  baseline rather than assuming it): both `UL-CONFIG REPEATABLE: crc=9/24 rejected=0
+  repeat_mismatches=0`, and all 24 per-grant `UL-CONFIG` lines byte-identical under `diff`.
+  What that does and does NOT show: it shows the new id does not perturb the decode, on the ONE
+  context (`ctx = 0`) replay drives. It CANNOT show the collision is gone -- replay decodes UL
+  sequentially in a single context, so two contexts never coexist, and the linked backend
+  (`nrLDPC_coding_segment`) keeps no per-id state anyway. Same standing as the DL fix below.
 * **Validated by test:** the tag arithmetic, in isolation -- injectivity over the whole
   (branch x HARQ process) product, the branch-0 legacy pin, the out-of-range guard, and the stride
   bound. 24/24 in `nr_rx_branch_test` (19 before, 5 added).

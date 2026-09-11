@@ -364,6 +364,15 @@ typedef struct PHY_VARS_gNB_s {
   int max_nb_pdsch;
   int max_nb_pusch;
 
+  /// Base added to ULSCH_id when nr_ulsch_decoding() fills nrLDPC_TB_decoding_parameters_t::
+  /// harq_unique_pid. 0 for a real gNB instance (PHY_VARS_gNB is calloc'd everywhere, and one
+  /// instance's ULSCH_ids are already unique among themselves). The passive receiver runs up to
+  /// NR_PUSCH_PASSIVE_MAX_CTX of these structs CONCURRENTLY against ONE shared LDPC coding
+  /// interface, each with a single ULSCH -- so without a per-context base every passive uplink
+  /// transport block in flight carried id 0 and they aliased each other's accelerator state.
+  /// See openair1/PHY/NR_UE_TRANSPORT/nr_passive_harq_tag.h for the namespace map.
+  uint32_t harq_unique_pid_base;
+
   NR_gNB_COMMON common_vars;
   spsc_q_t prach_ru_queue;
   spsc_q_t prach_l1rx_queue;

@@ -28,6 +28,7 @@
 #include "openair2/LAYER2/NR_MAC_COMMON/nr_mac_common.h"
 #include "PHY/NR_UE_ISAC/nr_isac.h" // UL CFR submission
 #include "nr_pdcch_blind_monitor_rt.h" // nr_pdcch_blind_monitor_get_cfg: the UCI search parameters
+#include "nr_passive_harq_tag.h" // the LDPC harq_unique_pid namespace map
 
 /* nr_ulsch_decoding() has no declaration in any header this library exposes -- nr_transport_proto.h
  * declares nr_rx_pusch_group_tp() but not its decoder. Declared here against the definition read
@@ -76,10 +77,12 @@ NR_gNB_PHY_STATS_t *get_phy_stats(PHY_VARS_gNB *gNB, uint16_t rnti)
 }
 
 #define PASSIVE_UL_MAX_ANT 4
-/* HARQ namespace. The DL path already uses 1000+ (attached UE), 2000+ (passive PDSCH decode) and
- * 3000+ (data-aided re-encode) on the SAME dlopen'd LDPC interface. A hardware accelerator keys its
- * internal state on this id, so an overlap would alias two unrelated transport blocks. */
-#define PASSIVE_UL_HARQ_TAG_BASE 4000
+/* HARQ namespace: nr_passive_harq_tag.h, which owns the whole map. What used to sit here was a
+ * PASSIVE_UL_HARQ_TAG_BASE 4000 that was never referenced by anything (so every UL decode really
+ * went out as harq_unique_pid = ULSCH_id = 0) and that had also drifted onto the same 4000 the UL
+ * RE-ENCODE uses. P08a: the decode gets its own 5000 range, strided by decode context. */
+static_assert(NR_PUSCH_PASSIVE_HARQ_MAX_CTX == NR_PUSCH_PASSIVE_MAX_CTX,
+              "nr_passive_harq_tag.h context count drifted from nr_pusch_passive_decode.h");
 
 /* One context per potential concurrent decoder. Every buffer the receive chain writes -- the
  * rxdataF ring, pusch_vars, the ULSCH HARQ, the tpool -- hangs off PHY_VARS_gNB, so sharing one
@@ -370,7 +373,10 @@ static bool passive_gnb_prepare(PHY_VARS_NR_UE *ue, int ctx)
 
   gnb->gNB_config.carrier_config.num_rx_ant.value = nant;
   gnb->gNB_config.cell_config.phy_cell_id.value   = ufp->Nid_cell;
-  gnb->max_nb_pusch                = 1;
+  gnb->max_nb_pusch                = NR_PUSCH_PASSIVE_ULSCH_PER_CTX;
+  /* Every transport block this context decodes is tagged from here (nr_ulsch_decoding.c adds the
+   * ULSCH_id). Without it all NR_PUSCH_PASSIVE_MAX_CTX contexts emit id 0 concurrently. */
+  gnb->harq_unique_pid_base        = nr_pusch_passive_harq_tag_base(ctx);
   gnb->max_ldpc_iterations         = 8;
   gnb->num_pusch_symbols_per_thread = 1;
   gnb->dmrs_num_antennas_per_thread = 1;
@@ -441,7 +447,13 @@ static bool passive_gnb_prepare(PHY_VARS_NR_UE *ue, int ctx)
   pv->llr = (int16_t *)malloc16_clear(8 * ((3 * 8 * 6144) + 12) * sizeof(int16_t));
   pv->ul_valid_re_per_slot = (int16_t *)malloc16_clear(sps * sizeof(int16_t));
 
-  gnb->ulsch = (NR_gNB_ULSCH_t *)malloc16_clear(sizeof(NR_gNB_ULSCH_t));
+  /* pusch_vars above and ulsch here are both indexed by ULSCH_id (nr_ulsch_decoding.c:101-102) and
+   * only element 0 is built, which is what makes the harq-tag stride of one id per context correct.
+   * Assert it rather than comment it: growing either array without growing the stride would put two
+   * contexts' transport blocks back on one accelerator id. */
+  static_assert(NR_PUSCH_PASSIVE_ULSCH_PER_CTX == 1,
+                "only ULSCH/pusch_vars element 0 is allocated per context");
+  gnb->ulsch = (NR_gNB_ULSCH_t *)malloc16_clear(NR_PUSCH_PASSIVE_ULSCH_PER_CTX * sizeof(NR_gNB_ULSCH_t));
   gnb->ulsch[0] = new_gNB_ulsch(gnb->max_ldpc_iterations, gnb->frame_parms.N_RB_UL);
 
   g_gnb[ctx]  = gnb;

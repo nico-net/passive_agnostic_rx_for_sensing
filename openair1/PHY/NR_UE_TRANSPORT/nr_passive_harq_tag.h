@@ -35,6 +35,14 @@
  *   2000..    THIS header                   passive DL decode
  *   3000..    nr_pdcch_blind_monitor_rt.c:96 passive DL re-encode, per-UE stride of 16
  *   4000..    nr_pusch_data_aided.h:23      passive UL re-encode, + decode-context index
+ *   5000..    THIS header                   passive UL decode, + decode-context index
+ *
+ * P08a (adaptive_RX_pipeline.md Stage 2, finishing P09's audit finding 4.1): the passive UL decode
+ * had NO namespace at all -- nr_ulsch_decoding.c set harq_unique_pid = ULSCH_id, which the passive
+ * path pins at 0 in every one of its NR_PUSCH_PASSIVE_MAX_CTX concurrent decode contexts, so all of
+ * them (and the attached DL decode's harq_pid=0/cw=0) shared id 0. The 5000 range below strides it
+ * by decode context. The file's own PASSIVE_UL_HARQ_TAG_BASE 4000 was dead code AND collided with
+ * the UL re-encode base; it is removed rather than revived.
  *
  * P09 (adaptive_RX_pipeline.md Stage 2): the 2000 range was namespaced by submitter type only.
  * P06a's fan-out enqueues the SAME grant to N branches concurrently, and each branch's job carries
@@ -102,6 +110,56 @@ static inline uint32_t nr_pdsch_passive_harq_tag(uint8_t branch_id, uint8_t harq
   return NR_PDSCH_PASSIVE_HARQ_TAG_BASE
          + (uint32_t)(branch_id % NR_RX_BRANCH_MAX) * NR_PDSCH_PASSIVE_HARQ_BRANCH_STRIDE
          + (uint32_t)(harq_process_nbr % NR_PDSCH_PASSIVE_HARQ_BRANCH_STRIDE);
+}
+
+/* ------------------------------------------------------------------------------------------- *
+ * Passive UPLINK decode (5000 range).
+ * ------------------------------------------------------------------------------------------- */
+
+/// Base of the passive UL decode range. 5000 and not 4000: 4000 is already the passive UL
+/// RE-ENCODE base (nr_pusch_data_aided.h:23, in use), which is exactly what the dead
+/// PASSIVE_UL_HARQ_TAG_BASE 4000 in nr_pusch_passive_decode.c would have collided with had anyone
+/// wired it up.
+#define NR_PUSCH_PASSIVE_HARQ_TAG_BASE 5000u
+
+/// Concurrent passive UL decode contexts. Duplicated from nr_pusch_passive_decode.h rather than
+/// included, so this header stays free of PHY/defs_nr_UE.h and can be unit-tested on its own; the
+/// two are static_assert'd equal in nr_pusch_passive_decode.c, where both are visible.
+#define NR_PUSCH_PASSIVE_HARQ_MAX_CTX 6u
+
+/// ULSCH array entries per decode context, i.e. the exact range of the ULSCH_id that
+/// nr_ulsch_decoding.c adds to the base below (it indexes gNB->ulsch[ULSCH_id] and
+/// gNB->pusch_vars[ULSCH_id], so it is an array index and canNOT itself be offset). Not a guess
+/// and not "probably 1": passive_gnb_prepare() builds exactly one ULSCH and one pusch_vars per
+/// context and sets gNB->max_nb_pusch from THIS constant, with a static_assert beside the
+/// allocations. The stride follows the allocation; it does not have to be kept in step by hand.
+#define NR_PUSCH_PASSIVE_ULSCH_PER_CTX 1u
+
+/* Bound, as arithmetic:
+ *   highest id = BASE + (MAX_CTX - 1) * ULSCH_PER_CTX + (ULSCH_PER_CTX - 1)
+ *              = 5000 + 5 * 1 + 0 = 5005
+ * and the next submitter type would start at BASE + SPAN = 6000, so 5005 < 6000 with 994 ids of
+ * headroom. The assert fails the build rather than spilling if either constant is raised. */
+static_assert((NR_PUSCH_PASSIVE_HARQ_MAX_CTX - 1) * NR_PUSCH_PASSIVE_ULSCH_PER_CTX
+                      + (NR_PUSCH_PASSIVE_ULSCH_PER_CTX - 1)
+                  < NR_PASSIVE_HARQ_NAMESPACE_SPAN,
+              "passive UL harq_unique_pid range overflows into the next submitter type's namespace");
+
+/**
+ * @brief harq_unique_pid BASE for one passive UL decode context.
+ * @param ctx decode-context index (0..NR_PUSCH_PASSIVE_MAX_CTX-1), the one thing that is live-
+ *            distinct between two concurrent passive PUSCH decodes: every buffer the chain writes
+ *            hangs off g_gnb[ctx].
+ *
+ * Returns the BASE, not the final id: nr_ulsch_decoding.c adds the ULSCH_id (the ulsch[] array
+ * index) itself, which preserves upstream's "unique among the ULSCHs of one instance" property and
+ * adds the context axis on top of it. ctx is folded into range rather than trusted, so a bad value
+ * can at worst alias another passive UL decode instead of a different submitter type.
+ */
+static inline uint32_t nr_pusch_passive_harq_tag_base(int ctx)
+{
+  const uint32_t c = (uint32_t)(ctx < 0 ? 0 : ctx) % NR_PUSCH_PASSIVE_HARQ_MAX_CTX;
+  return NR_PUSCH_PASSIVE_HARQ_TAG_BASE + c * NR_PUSCH_PASSIVE_ULSCH_PER_CTX;
 }
 
 #ifdef __cplusplus

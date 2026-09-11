@@ -125,8 +125,12 @@ int nr_ulsch_decoding(PHY_VARS_gNB *phy_vars_gNB,
     TB_parameters->G = G;
 
 
-    // The harq_pid is not unique among the active HARQ processes in the instance so we use ULSCH_id instead
-    TB_parameters->harq_unique_pid = ULSCH_id;
+    // The harq_pid is not unique among the active HARQ processes in the instance so we use ULSCH_id
+    // instead, offset by the instance's own namespace base. The base is 0 for a real gNB (so this is
+    // the upstream value unchanged); the passive receiver runs several PHY_VARS_gNB concurrently
+    // against one LDPC coding interface and sets it per decode context, because ULSCH_id alone is
+    // unique only WITHIN one instance. See NR_UE_TRANSPORT/nr_passive_harq_tag.h.
+    TB_parameters->harq_unique_pid = phy_vars_gNB->harq_unique_pid_base + ULSCH_id;
 
     // ------------------------------------------------------------------
     TB_parameters->nb_rb = pusch_pdu->rb_size;

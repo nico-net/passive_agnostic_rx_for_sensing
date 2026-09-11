@@ -20,6 +20,7 @@
  */
 
 #include <cstring>
+#include <set>
 #include <gtest/gtest.h>
 extern "C" {
 #include "nr_rx_branch.h"
@@ -352,6 +353,77 @@ TEST(PassiveHarqTag, StrideBoundHoldsForTheConfiguredBranchCount) {
   EXPECT_LT(highest, NR_PDSCH_PASSIVE_HARQ_TAG_BASE + NR_PASSIVE_HARQ_NAMESPACE_SPAN);
   EXPECT_EQ(highest, nr_pdsch_passive_harq_tag(NR_RX_BRANCH_MAX - 1,
                                                NR_PDSCH_PASSIVE_HARQ_BRANCH_STRIDE - 1));
+}
+
+/* ---------------------------------------------------------------------------------------------
+ * P08a: the passive UPLINK decode's harq_unique_pid.
+ *
+ * There is no legacy value worth pinning here: the pre-P08a id was ULSCH_id, which the passive path
+ * pins at 0 in EVERY decode context, so "preserving" it would be preserving the collision. The
+ * property that matters is that the contexts are pairwise distinct, and that the range does not
+ * reach any other submitter's.
+ *
+ * The tests compose base + ULSCH_id exactly as nr_ulsch_decoding.c:133 does
+ * (harq_unique_pid = phy_vars_gNB->harq_unique_pid_base + ULSCH_id); the helper deliberately
+ * returns only the base, because ULSCH_id is an ARRAY INDEX into gNB->ulsch[]/pusch_vars[] and
+ * cannot itself be offset.
+ * --------------------------------------------------------------------------------------------- */
+
+static uint32_t ul_tag(int ctx, uint32_t ulsch_id)
+{
+  return nr_pusch_passive_harq_tag_base(ctx) + ulsch_id;
+}
+
+TEST(PassiveUlHarqTag, EveryDecodeContextGetsADistinctTag) {
+  /* THE property this fix exists for. Before P08a all six of these were 0. */
+  std::set<uint32_t> seen;
+  for (int ctx = 0; ctx < (int)NR_PUSCH_PASSIVE_HARQ_MAX_CTX; ctx++)
+    for (uint32_t u = 0; u < NR_PUSCH_PASSIVE_ULSCH_PER_CTX; u++)
+      EXPECT_TRUE(seen.insert(ul_tag(ctx, u)).second) << "collision at ctx=" << ctx << " ulsch=" << u;
+  EXPECT_EQ(seen.size(), NR_PUSCH_PASSIVE_HARQ_MAX_CTX * NR_PUSCH_PASSIVE_ULSCH_PER_CTX);
+  EXPECT_EQ(*seen.begin(), NR_PUSCH_PASSIVE_HARQ_TAG_BASE);
+}
+
+TEST(PassiveUlHarqTag, NoContextEmitsTheOldCollidingZero) {
+  /* The old id was also what nr_dlsch_decoding.c:76 emits for attached harq_pid=0/cw=0, i.e. the
+   * collision crossed the direction axis as well as the context axis. */
+  for (int ctx = 0; ctx < (int)NR_PUSCH_PASSIVE_HARQ_MAX_CTX; ctx++) {
+    for (uint32_t u = 0; u < NR_PUSCH_PASSIVE_ULSCH_PER_CTX; u++) {
+      const uint32_t tag = ul_tag(ctx, u);
+      EXPECT_NE(tag, 0u) << "ctx=" << ctx;
+      EXPECT_GT(tag, 31u) << "ctx=" << ctx << " still inside the attached DL decode range 0..31";
+    }
+  }
+}
+
+TEST(PassiveUlHarqTag, RangeIsDisjointFromEveryOtherSubmitterType) {
+  const uint32_t lo = NR_PUSCH_PASSIVE_HARQ_TAG_BASE;
+  const uint32_t hi = NR_PUSCH_PASSIVE_HARQ_TAG_BASE + NR_PASSIVE_HARQ_NAMESPACE_SPAN;
+  /* 4000 = the UL RE-ENCODE base (nr_pusch_data_aided.h:23), which is what the removed dead
+   * PASSIVE_UL_HARQ_TAG_BASE 4000 would have aliased. 2000/3000 = the DL decode/re-encode. */
+  for (uint32_t other : {0u, 31u, 1000u, 2000u, 2127u, 3000u, 3255u, 4000u, 4005u}) {
+    EXPECT_TRUE(other < lo || other >= hi) << other << " falls inside the passive UL decode range";
+  }
+  for (int ctx = -3; ctx < 64; ctx++) {
+    const uint32_t tag = ul_tag(ctx, NR_PUSCH_PASSIVE_ULSCH_PER_CTX - 1);
+    EXPECT_GE(tag, lo) << "ctx=" << ctx;
+    EXPECT_LT(tag, hi) << "ctx=" << ctx << " escaped the namespace";
+  }
+  /* Out-of-range folds onto a live context rather than escaping -- documented behaviour, asserted
+   * rather than assumed. */
+  EXPECT_EQ(nr_pusch_passive_harq_tag_base(NR_PUSCH_PASSIVE_HARQ_MAX_CTX),
+            nr_pusch_passive_harq_tag_base(0));
+}
+
+TEST(PassiveUlHarqTag, StrideBoundHoldsForTheConfiguredContextCount) {
+  /* The header's static_assert arithmetic, restated so the suite reports it too. */
+  const uint32_t highest = NR_PUSCH_PASSIVE_HARQ_TAG_BASE
+                           + (NR_PUSCH_PASSIVE_HARQ_MAX_CTX - 1) * NR_PUSCH_PASSIVE_ULSCH_PER_CTX
+                           + (NR_PUSCH_PASSIVE_ULSCH_PER_CTX - 1);
+  EXPECT_EQ(highest, 5005u); // 5000 + 5*1 + 0, with MAX_CTX == 6 and one ULSCH per context
+  EXPECT_LT(highest, NR_PUSCH_PASSIVE_HARQ_TAG_BASE + NR_PASSIVE_HARQ_NAMESPACE_SPAN);
+  EXPECT_EQ(highest, ul_tag((int)NR_PUSCH_PASSIVE_HARQ_MAX_CTX - 1,
+                            NR_PUSCH_PASSIVE_ULSCH_PER_CTX - 1));
 }
 
 int main(int argc, char **argv)

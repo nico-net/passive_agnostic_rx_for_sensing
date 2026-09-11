@@ -1476,6 +1476,98 @@ Manifest for this round: `tests/passive_rx/baselines/manifest_20260911_535231d-d
 (the 2566d25 pair from the first commit is kept, not replaced). Artifacts: `/tmp/p09r1_build.log`,
 `/tmp/p09r1_legacy.log`, `/tmp/p09r1_bv.log`, `/tmp/replay_branch_view.WvWZni/`.
 
+## Session — 2026-09-11: P08a per-context UL harq_unique_pid namespacing (Stage 2, P09 follow-up, IN_PROGRESS)
+
+```text
+Date/time (Europe/Zurich): 2026-09-11 17:32 CEST (host clock is UTC; 15:32 UTC)
+Task IDs / gate: P08a (offline slice of Stage 2 P08), gate G2 "no resource namespace collision".
+  Finishes P09's audit finding 4.1. NOT a claim of P08 completion: P08's branch-independent UL
+  decode VIEW is untouched, and the UL tag still has no branch axis because there is no UL fan-out.
+Intended falsifiable claim: every concurrent passive UL decode context emits a DISTINCT
+  harq_unique_pid, disjoint from every other submitter type's range, and no other behaviour moves.
+Branch / full commit / dirty patch / untracked-file manifest: merge/adaptive-sensing, parent
+  ec24e5d74922f6532cc6e7ff644b37c74103406e; manifest pair
+  tests/passive_rx/baselines/manifest_20260911_ec24e5d-dirty.json + _tracked.patch. Untracked and
+  deliberately NOT committed: tests/passive_rx/aoa_track_dl.conf (another task's file).
+Files modified / added / removed:
+  openair1/PHY/NR_UE_TRANSPORT/nr_passive_harq_tag.h  (+58: the 5000 UL-decode range)
+  openair1/PHY/defs_gNB.h                             (+9: PHY_VARS_gNB::harq_unique_pid_base)
+  openair1/PHY/NR_TRANSPORT/nr_ulsch_decoding.c       (:133, the one behavioural line)
+  openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c (base wired per ctx; dead define removed)
+  openair1/PHY/NR_UE_TRANSPORT/tests/nr_rx_branch_test.cc (+4 cases)
+  docs/passive_branch_namespace_audit.md              (sites 5+10, sec 4.1, sec 6)
+  tests/passive_rx/baselines/fixtures.json            (append-only; + ul_config_replay record)
+Executable / driver / config / geometry / acceptance hashes:
+  nr-uesoftmodem after  6607a1da4085604b8a4aee86946f9c3cb4bbb29611949dffa6eb9cd363a743de
+  nr-uesoftmodem before 252df29ea0916d9c9ad2f5f983c0dfad7723c55adf6f70f94a74e7c89223ecc0
+    (the pre-change binary, rebuilt from `git stash` purely to measure the baseline)
+  liboai_usrpdevif.so ad0a71c56dbc509149337460af7d0e97c64d4f390f85bec48b8882aa64f64583 (unchanged)
+  fixture sensing_manual_fixed.UtvBT7 (replay.bin ea24da3e..., receiver.conf 5022d875...)
+Exact commands:
+  make -j8 nr_rx_branch_test nr-uesoftmodem      (pgrep -x nr-uesoftmodem empty first)
+  ./nr_rx_branch_test
+  OUT=/tmp/p08a_bv2 bash tests/passive_rx/replay_branch_view.sh
+  env ISAC_PASSIVE_REPLAY_INPUT=$F/replay.bin ISAC_PASSIVE_REPLAY_UL_CONFIG=1 \
+      LD_LIBRARY_PATH=$PWD:/usr/local/lib ./nr-uesoftmodem -O $F/receiver.conf -r 273 ... -A 90
+  python3 tests/passive_rx/check_manifest.py tests/passive_rx/baselines/manifest_20260911_ec24e5d-dirty.json
+Artifact paths (include raw logs and VOID attempts): /tmp/p08a_bv (pre-final build), /tmp/p08a_bv2
+  (final), /tmp/p08a_ulcfg_before.log, /tmp/p08a_ulcfg.log, /tmp/before.txt, /tmp/after.txt.
+  No VOID attempts. One build failure (string literals mangled by a remote heredoc), fixed, not an
+  experiment.
+Baseline and comparison definition: P07/P06a/P09's recorded replay baselines (legacy 34/0/24,
+  branch view 34/34/31/34/34 of 38) and, NEW this session, a before/after pair on the UL-CONFIG
+  replay measured on this session's own pre-change binary rather than inherited.
+Predeclared assertions / thresholds: tags pairwise distinct over ctx 0..5; highest id 5005 < 6000;
+  no tag inside 0..31 (the attached DL decode range); legacy + branch-view replay numbers unchanged.
+Observed result, with denominators:
+  nr_rx_branch_test 28/28 (was 24; 4 new PassiveUlHarqTag cases).
+  Legacy replay: REPLAY PASS: identical DL controls=34 failed=0 raw UL=24; no radio opened, exit 0.
+  replay_branch_view.sh: 34/34/31/34/34 of 38 records, script exit 0 — identical to P07/P06a/P09.
+  UL-CONFIG replay (the path that actually runs the changed line): 24/24 UL grants replayed,
+  crc=9/24 rejected=0 repeat_mismatches=0 BOTH before and after, all 24 per-grant lines
+  byte-identical under diff.
+Status (PASS / FAIL / VOID / BLOCKED): IN_PROGRESS (pending review). No gate is claimed passed.
+Validity reasons and affected intervals: offline only, no radio (X410 unreachable). The replay
+  evidence is valid for what it covers and is explicitly NOT evidence of collision removal.
+Hypotheses supported / contradicted:
+  SUPPORTED — `ulsch_id` cannot be tag-offset: nr_ulsch_decoding.c:101-102 uses it to index BOTH
+    phy_vars_gNB->ulsch[] and ->pusch_vars[], and a passive context allocates exactly one of each,
+    so the brief's "always 0" guess is right AND is a hard constraint, not an accident. The base
+    therefore lives on the INSTANCE (PHY_VARS_gNB::harq_unique_pid_base) and the callee keeps
+    adding the index.
+  CONTRADICTED — "UL has no replay-through-full-decode path" (P08a's brief, echoed from P09/P02).
+    nr_passive_replay_ul_config.h:37/42 calls nr_pusch_passive_decode(ue, 0, ...) under
+    ISAC_PASSIVE_REPLAY_UL_CONFIG=1, so the changed line IS exercised offline on 24 recorded grants.
+    Corrected in the audit doc and fixtures.json rather than left standing.
+  CONTRADICTED — reviving the file's dead PASSIVE_UL_HARQ_TAG_BASE 4000 would have fixed this.
+    4000 is already live as the UL RE-ENCODE base (nr_pusch_data_aided.h:23), so it would have
+    swapped a decode-vs-decode alias for a decode-vs-re-encode one. Deleted; decode owns 5000+.
+Retraction, if any: none of this session's own claims. Two inherited claims corrected (above).
+Remaining limitation: replay drives ONE decode context sequentially and the linked backend
+  (nrLDPC_coding_segment) keeps no per-id state, so no offline instrument in this tree can observe
+  the collision before or its absence after — same standing as P09's DL fix. The DL RE-ENCODE
+  range (3000, blind_harq_tag's `% 16`) is still unstrided and still carries the 5-bit exposure:
+  P10. The UL tag gains no branch term until UL fan-out exists: P08.
+Next highest-value action: P08 proper — the branch-independent UL decode VIEW; then P10's
+  re-encode-side namespacing, which is where the remaining recorded collisions are.
+Reviewer / accomplishment date if gate passed: pending.
+```
+
+### Design, file:line (as committed)
+
+| Piece | Where | Note |
+|---|---|---|
+| `NR_PUSCH_PASSIVE_HARQ_TAG_BASE 5000` + `nr_pusch_passive_harq_tag_base(ctx)` | `nr_passive_harq_tag.h` | returns the BASE only; the callee still adds `ULSCH_id`, so upstream's "unique among one instance's ULSCHs" property is preserved and the context axis is added on top |
+| `uint32_t harq_unique_pid_base` | `openair1/PHY/defs_gNB.h:374` | 0 for a real gNB — every `PHY_VARS_gNB` in the tree is `calloc`'d (`executables/nr-gnb.c:384` + the `SIMULATION/NR_PHY` sims), so upstream is bit-identical |
+| `TB_parameters->harq_unique_pid = phy_vars_gNB->harq_unique_pid_base + ULSCH_id` | `openair1/PHY/NR_TRANSPORT/nr_ulsch_decoding.c:133` | the only behavioural line; the shared file had to be touched because `TBs[]` is its local |
+| `gnb->harq_unique_pid_base = nr_pusch_passive_harq_tag_base(ctx)` | `nr_pusch_passive_decode.c`, `passive_gnb_prepare()` | one base per decode context |
+| `NR_PUSCH_PASSIVE_ULSCH_PER_CTX 1` | `nr_passive_harq_tag.h`, used for `gnb->max_nb_pusch` AND the stride, `static_assert`'d beside the `ulsch`/`pusch_vars` allocation | the stride is DERIVED from the allocation, so the two cannot drift apart by hand |
+| dead `PASSIVE_UL_HARQ_TAG_BASE 4000` | removed from `nr_pusch_passive_decode.c` | never referenced, and collided with the live UL re-encode base |
+
+Bound, as arithmetic (not a chosen constant): `5000 + (6-1)*1 + (1-1) = 5005 < 6000`, headroom 994.
+Unlike the DL stride there is no DCI-field width in play here — the second term is an ARRAY INDEX
+whose range is the per-context `ulsch[]` size, which is why it is tied to the allocation instead.
+
 ## Session template — copy for each future work session
 
 ```text
@@ -1513,6 +1605,8 @@ Reviewer / accomplishment date if gate passed:
 | sensing_manual_fixed.UtvBT7 | 2026-09-11 | P02 / G0 fix round 2 (final) | binary `c3810019...` (DL + UL gates both fixed, diagnostics trimmed to the two permanent lines), `adaptive_manual_dlul.conf`, full_auto=0, REPLAY=1 | RF_VALID_REQUIRES_DL_UL_CRC_EVIDENCE, replay PASS | 4 RX, manual/passive-rx | SIB1=1, clean exit, 0 RXDISCONT/RFSTALL. `REPLAY ARMED at absolute_slot=8852`; `REPLAY READY ... slots=320 UL=24 DL-controls=38 IQ=314572800 bytes`. Replay verification (no radio): `REPLAY PASS: identical DL controls=34 failed=0 raw UL=24; no radio opened`, exit 0, wall 4.463s. **P02 PASS.** | `/home/sens/NICOLA/captures/sensing_manual_fixed.UtvBT7` |
 | p06a_offline (/tmp/p06a) | 2026-09-11 | P06a / G1+G2 (offline only) | binary `b0ba7544...` (0667e4dd09 + P06a), fixture `sensing_manual_fixed.UtvBT7` | replay PASS (no radio); LIVE NOT ATTEMPTED -- X410 unreachable (`uhd_find_devices`: No UHD Devices Found, 13:48 UTC) | 4 RX legacy + 4-branch config parse | legacy replay unchanged (34 identical DL controls / 0 failed / 24 raw UL); replay_branch_view 34/34/31/34/34 of 38; nr_rx_branch_test 19/19 (4 new dispatch cases); sizeof(job) 384 unchanged; rx_branches=0,1,2,3 with --ue-nb-ant-rx 2 aborts at startup as designed, with 4 it replays PASS. NO per-branch live crc_ok, NO live multilayer fraction, NO queue-drop measurement under 4x load. | `/tmp/p06a/legacy_after.log`, `/tmp/p06a/bv/`, `/tmp/p06a/conf4_ant{4,2}.log` |
 | p09_offline (/tmp/p09*) | 2026-09-11 | P09 / G2 (offline only) | binary `cd89de49...` (2566d256d2 + P09), fixture `sensing_manual_fixed.UtvBT7`, manifest `manifest_20260911_2566d25-dirty.json` | replay PASS (no radio); NO LIVE — X410 unreachable | 4 RX legacy + single-branch views 0/1/2/3 | `nr_rx_branch_test` 24/24 (5 new `PassiveHarqTag` cases: cross-branch injectivity over the whole 4x32 product, branch-0 legacy pin `2000+hpn` for hpn 0..31, out-of-range guard stays < 3000, stride bound 2127); legacy replay `REPLAY PASS: identical DL controls=34 failed=0 raw UL=24; no radio opened` exit 0; replay_branch_view 34/34/31/34/34 of 38, script exit 0 — both identical to the P07/P06a baselines. Views 1-3 ran on NON-ZERO branch tags (2032+/2064+/2096+) with payloads identical to the reference. NOT measured: any concurrent two-branch same-`harq_process_nbr` case (one view per process), no sanitizer build, no live RF. | `/tmp/p09_legacy.log`, `/tmp/p09_bv.log`, `/tmp/replay_branch_view.Vhzhhr/`, `/tmp/p09_build.log` |
+
+| p08a_offline (/tmp/p08a*) | 2026-09-11 | P08a / G2 (offline only) | binary `6607a1da...` (ec24e5d749 + P08a), fixture `sensing_manual_fixed.UtvBT7`, manifest `manifest_20260911_ec24e5d-dirty.json` | replay PASS (no radio); NO LIVE — X410 unreachable | 4 RX legacy + views 0/1/2/3 + UL-CONFIG UL decode | `nr_rx_branch_test` 28/28 (4 new `PassiveUlHarqTag` cases: all 6 decode contexts pairwise distinct, none inside the attached DL 0..31, range disjoint from 0/31/1000/2000/2127/3000/3255/4000/4005, bound 5005). Legacy replay 34/0/24 exit 0 and `replay_branch_view` 34/34/31/34/34 of 38 — both unchanged. NEW: the UL decode IS offline-reachable (`ISAC_PASSIVE_REPLAY_UL_CONFIG=1`), 24 grants, `crc=9/24 rejected=0 repeat_mismatches=0` and all 24 per-grant lines byte-identical BEFORE (binary `252df29e...`, rebuilt from stash) and after. NOT measured: any two contexts concurrent (replay is sequential, one ctx), no AAL/bbdev backend, no sanitizer build, no live RF. | `/tmp/p08a_bv2/`, `/tmp/p08a_ulcfg{,_before}.log` |
 
 For optional UL comparisons, list every 2-RX pair, 3-RX triple and 4-RX set for DTD, DFS and joint modes. Include unobservable modes, failures and missing-data denominators. Do not place placeholder accuracy values in this ledger.
 

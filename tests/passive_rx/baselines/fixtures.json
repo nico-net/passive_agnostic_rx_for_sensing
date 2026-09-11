@@ -5,8 +5,8 @@
   "tree": "/home/sens/NICOLA/adaptive-rx-sensing",
   "branch": "merge/adaptive-sensing",
   "commit_at_generation": "e4c8cadd5f22b40605f82f6adedc838ee8e056f5",
-  "current_build_nr_uesoftmodem_sha256": "9b3b3b43a2b60ffc469c9351fe091b453e971e39b3fcf6da2b7ed395275e8d6e",
-  "manifest_reference": "tests/passive_rx/baselines/manifest_20260911_2566d25-dirty.json",
+  "current_build_nr_uesoftmodem_sha256": "6607a1da4085604b8a4aee86946f9c3cb4bbb29611949dffa6eb9cd363a743de",
+  "manifest_reference": "tests/passive_rx/baselines/manifest_20260911_ec24e5d-dirty.json",
   "status": "PASS",
   "admissible_fixtures": [
     {
@@ -62,9 +62,10 @@
         "08d3912439a8216ef37f4691563370e81a69147b87c4c69b18d2ed7c48481ecb",
         "0d011b9c3a709ea6b3d90fb9c104d715aa8576f53521de105de6536d1dff1f41",
         "cd89de4928f8761a83ea494e57f28c9fae2deda32ca16204f3fa72e3f8f01800",
-        "9b3b3b43a2b60ffc469c9351fe091b453e971e39b3fcf6da2b7ed395275e8d6e"
+        "9b3b3b43a2b60ffc469c9351fe091b453e971e39b3fcf6da2b7ed395275e8d6e",
+        "6607a1da4085604b8a4aee86946f9c3cb4bbb29611949dffa6eb9cd363a743de"
       ],
-      "verified_with_binary_note": "P07 (2026-09-11): binary built from HEAD d1b563f511 + the then-uncommitted nr-ue.c edits (committed mid-session by their owner as be65aa8764) + the P07 DL branch-view change; legacy replay still 'REPLAY PASS: identical DL controls=34 failed=0 raw UL=24; no radio opened' with every REPLAY-CONTROL/DL-REPLAY-FAILURE/REPLAY-RAW-UL line byte-identical to the producing binary's. producing_binary_sha256 is deliberately NOT overwritten: the fixture was produced by c3810019.... check_manifest.py --fixtures accepts either. Fix round 1 (2026-09-11): binary 5a036ca4... (env caching + untagged-job LOG_W), legacy replay re-proven identical. P06a (2026-09-11): binary b0ba7544 (branch lifecycle hooks + DL job fan-out) re-ran the legacy replay command below to REPLAY PASS: identical DL controls=34 failed=0 raw UL=24, and tests/passive_rx/replay_branch_view.sh to 34/34/31/34/34 as before; sizeof(nr_pdsch_passive_job_t) still 384 with the two new epoch fields in former padding (gdb ptype /o). P06a fix round 1 (2026-09-11): binary 08d39124 (MAC-resync lifecycle hook, stale-drop ordering), legacy replay re-proven identical. NOTE FOR FUTURE WRITERS: this file is serialised as json.dumps(obj, indent=2) + \"\\n\" with key order preserved; using any other indent reserialises all ~674 lines and makes the diff unreviewable. P06a fix round 2 (2026-09-11): binary 0d011b9c (comment-only change to the MAC-resync reachability note), legacy replay re-proven identical. || P09 (2026-09-11): binary cd89de4928 built from HEAD 2566d256d2 + the P09 per-branch harq_unique_pid change (nr_passive_harq_tag.h + nr_pdsch_passive_decode.c). Legacy replay still 'REPLAY PASS: identical DL controls=34 failed=0 raw UL=24; no radio opened' exit 0, and replay_branch_view.sh still 34/34/31/34/34 of 38 -- branch_id=0 reproduces the pre-P09 tag exactly (2000 + harq_process_nbr), pinned by gtest PassiveHarqTag.BranchZeroReproducesTheLegacyTag. NOTE: views 1-3 DID run on non-zero branch tags (2016+/2032+/2048+) and produced payloads identical to the reference, but the harness runs ONE VIEW PER PROCESS, so it does not and cannot exercise two branches' jobs concurrently under the same harq_process_nbr -- see docs/passive_branch_namespace_audit.md sec 6. || P09 fix round 1 (2026-09-11): binary 9b3b3b43a2 -- the per-branch HARQ stride widened 16 -> 32 because the DCI HARQ-process-number field is 5 bits when the cell sets harq-ProcessNumberSizeDCI-1-1 (nr_pdcch_blind_monitor.h:263 / .c:2475); at stride 16 hpn 0 and hpn 16 aliased on the SAME branch and the branch-0 legacy pin broke above hpn 15. New bound 2000+3*32+31 = 2127 < 3000. Both replays re-run and still identical: legacy 34/0/24 exit 0, branch view 34/34/31/34/34.",
+      "verified_with_binary_note": "P07 (2026-09-11): binary built from HEAD d1b563f511 + the then-uncommitted nr-ue.c edits (committed mid-session by their owner as be65aa8764) + the P07 DL branch-view change; legacy replay still 'REPLAY PASS: identical DL controls=34 failed=0 raw UL=24; no radio opened' with every REPLAY-CONTROL/DL-REPLAY-FAILURE/REPLAY-RAW-UL line byte-identical to the producing binary's. producing_binary_sha256 is deliberately NOT overwritten: the fixture was produced by c3810019.... check_manifest.py --fixtures accepts either. Fix round 1 (2026-09-11): binary 5a036ca4... (env caching + untagged-job LOG_W), legacy replay re-proven identical. P06a (2026-09-11): binary b0ba7544 (branch lifecycle hooks + DL job fan-out) re-ran the legacy replay command below to REPLAY PASS: identical DL controls=34 failed=0 raw UL=24, and tests/passive_rx/replay_branch_view.sh to 34/34/31/34/34 as before; sizeof(nr_pdsch_passive_job_t) still 384 with the two new epoch fields in former padding (gdb ptype /o). P06a fix round 1 (2026-09-11): binary 08d39124 (MAC-resync lifecycle hook, stale-drop ordering), legacy replay re-proven identical. NOTE FOR FUTURE WRITERS: this file is serialised as json.dumps(obj, indent=2) + \"\\n\" with key order preserved; using any other indent reserialises all ~674 lines and makes the diff unreviewable. P06a fix round 2 (2026-09-11): binary 0d011b9c (comment-only change to the MAC-resync reachability note), legacy replay re-proven identical. || P09 (2026-09-11): binary cd89de4928 built from HEAD 2566d256d2 + the P09 per-branch harq_unique_pid change (nr_passive_harq_tag.h + nr_pdsch_passive_decode.c). Legacy replay still 'REPLAY PASS: identical DL controls=34 failed=0 raw UL=24; no radio opened' exit 0, and replay_branch_view.sh still 34/34/31/34/34 of 38 -- branch_id=0 reproduces the pre-P09 tag exactly (2000 + harq_process_nbr), pinned by gtest PassiveHarqTag.BranchZeroReproducesTheLegacyTag. NOTE: views 1-3 DID run on non-zero branch tags (2016+/2032+/2048+) and produced payloads identical to the reference, but the harness runs ONE VIEW PER PROCESS, so it does not and cannot exercise two branches' jobs concurrently under the same harq_process_nbr -- see docs/passive_branch_namespace_audit.md sec 6. || P09 fix round 1 (2026-09-11): binary 9b3b3b43a2 -- the per-branch HARQ stride widened 16 -> 32 because the DCI HARQ-process-number field is 5 bits when the cell sets harq-ProcessNumberSizeDCI-1-1 (nr_pdcch_blind_monitor.h:263 / .c:2475); at stride 16 hpn 0 and hpn 16 aliased on the SAME branch and the branch-0 legacy pin broke above hpn 15. New bound 2000+3*32+31 = 2127 < 3000. Both replays re-run and still identical: legacy 34/0/24 exit 0, branch view 34/34/31/34/34. || P08a (2026-09-11): binary 6607a1da40 built from HEAD ec24e5d749 + the per-context UL harq_unique_pid change (PHY_VARS_gNB::harq_unique_pid_base, nr_ulsch_decoding.c:133, nr_passive_harq_tag.h's 5000 range). Legacy replay still 'REPLAY PASS: identical DL controls=34 failed=0 raw UL=24; no radio opened' exit 0 and replay_branch_view.sh still 34/34/31/34/34 of 38. NEW, and it corrects an earlier claim in this file and in docs/passive_branch_namespace_audit.md: the passive UL DECODE *is* reachable from this fixture, via ISAC_PASSIVE_REPLAY_UL_CONFIG=1 (nr_passive_replay_ul_config.h:37/42 calls nr_pusch_passive_decode(ue, 0, ...)), so the changed line was exercised on 24 real UL grants -- measured before AND after by rebuilding the pre-change binary from a git stash, not assumed: both 'UL-CONFIG REPEATABLE: crc=9/24 rejected=0 repeat_mismatches=0' with all 24 per-grant UL-CONFIG lines byte-identical under diff. It exercises ONE context (ctx=0) only, so it shows the new id does not perturb the decode; it cannot show the collision is gone.",
       "branch_view_replay": {
         "script": "tests/passive_rx/replay_branch_view.sh (ctest dl_branch_view_replay)",
         "date": "2026-09-11",
@@ -152,6 +153,24 @@
           "script_exit_code": 0,
           "verdict": "dl_branch_view_replay: PASS -- identical to the P07 baseline and to the P09 first-cut rerun"
         }
+      },
+      "ul_config_replay": {
+        "script": "nr_passive_replay_ul_config.h via ISAC_PASSIVE_REPLAY_UL_CONFIG=1 on the fixture's replay command",
+        "date": "2026-09-11",
+        "task": "P08a",
+        "why_recorded": "the only offline path in this tree that reaches nr_pusch_passive_decode() -> nr_ulsch_decoding(), i.e. the line P08a changes",
+        "before_binary_sha256": "252df29ea0916d9c9ad2f5f983c0dfad7723c55adf6f70f94a74e7c89223ecc0",
+        "after_binary_sha256": "6607a1da4085604b8a4aee86946f9c3cb4bbb29611949dffa6eb9cd363a743de",
+        "ul_grants_replayed": 24,
+        "verdict_line_before": "UL-CONFIG REPEATABLE: crc=9/24 rejected=0 repeat_mismatches=0; hypothesis only, not convergence",
+        "verdict_line_after": "UL-CONFIG REPEATABLE: crc=9/24 rejected=0 repeat_mismatches=0; hypothesis only, not convergence",
+        "per_grant_lines_diff": "empty (all 24 UL-CONFIG lines byte-identical)",
+        "exit_code": 0,
+        "logs": [
+          "/tmp/p08a_ulcfg_before.log",
+          "/tmp/p08a_ulcfg.log"
+        ],
+        "limitation": "single decode context (ctx=0) driven sequentially, so no two contexts ever coexist; and the linked backend nrLDPC_coding_segment keeps no per-harq_unique_pid state. Proves non-perturbation, not collision removal."
       }
     }
   ],
