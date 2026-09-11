@@ -57,6 +57,17 @@ value outside the declared range `[0, nof_prb*12)` while looking normalised. It 
 in-carrier SSB placement tested here, so this is a latent contract mismatch, not an observed defect.
 Fixing it needs `nof_prb` at that call site, i.e. an ABI change — out of scope for an audit.
 
+A second, independent SSB `k_abs` defect sits at the CALL site rather than in the helper:
+`phy_procedures_nr_ue.c:1417` passes `k_ssb` as a hardcoded literal 0
+(`nr_isac_ssb_k_abs(ssb_start_subcarrier, /*k_ssb=*/0, fp->ofdm_symbol_size, k_abs)`), so the
+`base_sc = ((ssb_start_subcarrier - k_ssb)/12)*12` quoted in the table above is evaluated with the
+wrong `k_ssb` on any cell whose kSSB is nonzero, shifting the whole 240-RE SSB support by up to one
+RB. The source's own comment at `:1408-1416` documents this deliberately — there is no PHY-side
+plumbing path to the MAC's `ssb_subcarrier_offset` at that call site and no field on
+`NR_DL_FRAME_PARMS` carries it — and records that it is correct for this deployment (kSSB = 0) and
+wrong for any future cell. Recorded here because it is the same class as P11-A1 and because a
+reader of the formula alone cannot see that one of its terms is a literal.
+
 **Finding P11-A2 (flagged, not fixed).** The contract has no enforcement point. A submission whose
 `k_abs` is out of grid is **silently discarded, one RE at a time**, at
 `sensing_engine.cc:543` — `const uint32_t k = s.subcarrier[i]; if (k >= subcarriers) continue;` —
@@ -88,7 +99,10 @@ reconstructed REs. **Flagged; it is exactly what P11's "measured support" clause
 ### P11 (b) — "actual OFDM symbol time": what `l_sym` and `slot_frac` mean per producer
 
 **Verdict: `l_sym` is DEAD. It is copied into the engine and never read. The only time coordinate
-the pipeline uses is `slot_idx + slot_frac`, and four of six producers pass `slot_frac = 0.0f`.**
+the pipeline uses is `slot_idx + slot_frac`, and FIVE of six producers pass `slot_frac = 0.0f`
+unconditionally. The sixth, `nr_pdsch_data_aided.c`, computes it only when sub-slot sampling is
+active and otherwise passes `0.0f` too (`:390-391`) — and `subslot_symbols` DEFAULTS TO 0
+(`nr_isac.cc:236`, `pipeline_types.h:302`), so on a default configuration it is six of six.**
 
 Evidence that `l_sym` is unused: `sensing_engine.cc:339` assigns `value->symbol`, and the only
 other occurrences of `symbol` in that file are the declaration (`:54`), the reserve (`:215`),
@@ -99,14 +113,14 @@ the parameter (`:306`) and the null-guard (`:310`). `consume()` (from `:482`) re
 |---|---|---|---|
 | CSI-RS | `csi_rx.c:989` `loverline0` — the true CSI-RS symbol in the slot | `0.0f` (`:1054`) | symbol is real; the TIME the engine uses is assumed = slot start |
 | Blind DM-RS | `nr_pdcch_blind_monitor_rt.c:2255` `dmrs_sym` — the true DM-RS symbol | `0.0f` (`:2275`) | same |
-| PDSCH data-aided | `nr_pdsch_data_aided.c:309` `l` — the true data symbol | **computed**: `:414-415` / `:432-433` `centre = 0.5*(sym_id[first]+sym_id[last]) + 0.5`, `frac = centre / NR_SYMBOLS_PER_SLOT` | the ONLY producer supplying real sub-slot time |
+| PDSCH data-aided | `nr_pdsch_data_aided.c:309` `l` — the true data symbol | **computed**: `:414-415` / `:432-433` `centre = 0.5*(sym_id[first]+sym_id[last]) + 0.5`, `frac = centre / NR_SYMBOLS_PER_SLOT` | the ONLY producer supplying real sub-slot time — but ONLY when sub-slot sampling is on; it falls back to `0.0f` at `:390-391` when `sub_target == 0` (the default) or `nof_sym <= 1` |
 | PUSCH DM-RS | `nr_pusch_passive_decode.c:964` `dmrs_sym` | `0.0f` (`:992`) | assumed |
 | PUSCH data-aided | `nr_pusch_data_aided.c:205` `l` | `0.0f` (`:241`) | assumed |
 | SSB / PBCH | `phy_procedures_nr_ue.c:1419` `relPbchSymb` — **PBCH-RELATIVE (0..2), not the slot symbol index** | `0.0f` (`:1460`) | wrong domain, but harmless today only because nothing reads it |
 
 **Finding P11-B1.** "Actual OFDM symbol time" is currently expressible only through `slot_frac`.
 Every producer already knows its symbol index and passes it, but the value is discarded. Each
-non-`pdsch_data` row is therefore timestamped at its slot boundary, an error of up to
+row that passes `slot_frac = 0.0f` is therefore timestamped at its slot boundary, an error of up to
 13/14 of a slot (~464 us at 30 kHz SCS). For the slow-time axis this is a per-row jitter, not a
 bias, and it is smaller than the inter-row spacing in every measured regime — but it is an
 ASSUMPTION, not a measurement, and the plan clause requires the measurement.
@@ -409,7 +423,7 @@ different excess ranges for the same target; equality would be the bug.
 | P11-A1 | `nr_isac_ssb_axis.c:11` normalises `k_abs` modulo `ofdm_symbol_size`, not `nof_prb*12` | latent, inert today | flagged; needs an ABI change |
 | P11-A2 | out-of-grid `k_abs` silently dropped per-RE at `sensing_engine.cc:543`, no counter | observability | flagged; G3 test 3 |
 | P11-A3 | SSB (240 of ~60 measured) and PUSCH DM-RS (comb-1 of comb-2) report interpolated REs as measured support; CSI-RS `csi_type!=0` reports an RB-aggregate at one `k_abs` | real | flagged; ABI cannot express it |
-| P11-B1 | `l_sym` carried to the engine and never read; 4 of 6 producers pass `slot_frac = 0.0f` | contract gap | flagged; contract stated |
+| P11-B1 | `l_sym` carried to the engine and never read; 5 of 6 producers pass `slot_frac = 0.0f` unconditionally, and the 6th does too unless `subslot_symbols` is set (default 0) | contract gap | flagged; contract stated |
 | P11-B2 | `slot_frac` uses a uniform 1/14-slot symbol model (long CP ignored) | microsecond-scale | documented |
 | P11-C1 | per-antenna `nr_dl_chest_nvar_ant[]` exists and is discarded; taps pass the antenna MEAN | real, branch-relevant | flagged; needs per-branch ABI (P13) |
 | P11-C2 | `noise_var` units differ per producer yet drive a `1/sigma^2` merge weight | real, DSP | flagged; out of scope |
@@ -432,7 +446,7 @@ property; "partial" means a test exercises the machinery but not the property.
 |---|---|---|---|---|
 | 1 | Same CFR at different worker delays yields identical physical measurement times and detections | **PARTIAL** | The invariant holds STRUCTURALLY: every physical time in the report derives from `row_time_slots` = producer `slot_idx + slot_frac` (`sensing_engine.cc:752-753`, `:769-772`, `:791-793`), never from wall clock; the deferred PDSCH path publishes the producer's monotonic slot via `nr_isac_abs_slot_override` (`nr_pdsch_data_aided.c:369-371`). `test_causal_cpi_pipeline()` (`python_parity_test.cc:436`) exercises close/drain/restart ordering and asserts zero drops, but never varies submission delay and never compares two runs. **Gap: no A/B.** One residual violation: `start_utc_ns` (`sensing_engine.cc:335`, `:695`, `:750`) is stamped at `submit()` — on the CONSUMER thread for deferred paths — so it is a PROCESSING time reported as if it were acquisition. P16 requires acquisition-derived times. | YES — drive `SensingEngine::submit()` twice with identical inputs, once with injected jitter, and diff the JSONL with `start_utc_ns` masked |
 | 2 | SFN wrap, reorder, duplicate allocation, RNTI reassignment, epoch reset | **PARTIAL** | Wrap and reorder ARE implemented: `unwrap_submission_slot()` (`sensing_engine.cc:399-412`) uses a signed delta folded into `+/-cycle/2` with `cycle = slots_per_frame*1024`, which handles both. Duplicate/co-timed submissions merge by design into one `PendingRow` keyed on `row_key(absolute_slot, fraction)` (`:498`). Late rows are counted as `stale_` (`:500-502`). **Not covered: no test crosses a wrap, no test reorders, and RNTI reassignment / epoch reset are invisible to this layer entirely** — the ABI carries no RNTI (finding P11-D1) and no acquisition epoch. | Wrap/reorder/duplicate: YES, via `submit()`. RNTI/epoch: NO — nothing to assert against until the ABI carries them |
-| 3 | Sweep known allocation offsets/sizes and pilot patterns; verify frequency axis, support masks, symbol timestamps | **NO** | Nothing sweeps producer-side support. `test_causal_cpi_pipeline()` uses a single fixed `k[i]=i` pattern. Two properties are untestable as written: the support mask silently loses out-of-grid REs (P11-A2) and cannot distinguish measured from interpolated REs (P11-A3); and there is no symbol timestamp to verify (P11-B1 — `l_sym` is dead and `slot_frac` is 0 for 4 of 6 producers). | YES for the frequency axis and support mask (submit known `k_abs` sets and read back `observed` / `observed_re_count`). Symbol timestamps: blocked on P11-B1 |
+| 3 | Sweep known allocation offsets/sizes and pilot patterns; verify frequency axis, support masks, symbol timestamps | **NO** | Nothing sweeps producer-side support. `test_causal_cpi_pipeline()` uses a single fixed `k[i]=i` pattern. Two properties are untestable as written: the support mask silently loses out-of-grid REs (P11-A2) and cannot distinguish measured from interpolated REs (P11-A3); and there is no symbol timestamp to verify (P11-B1 — `l_sym` is dead and `slot_frac` is 0 for 5 of 6 producers unconditionally, 6 of 6 at the default `subslot_symbols = 0`). | YES for the frequency axis and support mask (submit known `k_abs` sets and read back `observed` / `observed_re_count`). Symbol timestamps: blocked on P11-B1 |
 | 4 | Known common timing/CFO/SFO perturbations yield the expected corrected excess range/rate and covariance | **NO** | `cuda_sync_test.cc:76-101` calls `estimate_sync()` and `apply_sync_correction()`, but it is a CPU-vs-CUDA PARITY test — it asserts the two implementations agree, never that either recovers a KNOWN injected impairment. `sync_correction_cuda_benchmark.cc` and `detector_cuda_benchmark.cc` are timing harnesses. **No estimator-accuracy test exists.** Note: the `selftest` / `selftest_los` synthetic-injection mechanism described in older project history **does not exist in this tree** (grepped `openair1/` for `selftest`: zero hits) — the sensing pipeline was rewritten since. | YES, and the vehicle already exists: `python_parity_test.cc` constructs synthetic `CfrWindow`s and drives the public API directly. Build an analytic window with a known delay/CFO/SFO and assert `los_bins`/`sfo_ppm`/`cfo_hz` recovery plus the corrected range. This is the single highest-value missing test |
 | 5 | Fail direct-path admission deliberately; require invalid reference status rather than a confident range | **NO — and the property does not hold today** | Findings P12-2a/b/c. Admission failure sets `reject_reason` and leaves `sto_applied = false` (`sync_correction.cc:283-286`, `:487-489`), but `detect_clean()` runs unconditionally (`sensing_engine.cc:796`) and `range_m` is written for every component (`:807`) with no reference flag on the detection. There is no "invalid reference" status to assert. | YES — starving admission is easy (submit a noise-only window, or fewer than `max(3, ceil(log2(rows)))` admissible rows) and the report is already JSONL. But the test cannot PASS until the status field of P12-2a exists |
 
