@@ -1,0 +1,204 @@
+/*
+ * Licensed to the OpenAirInterface (OAI) Software Alliance under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The OpenAirInterface Software Alliance licenses this file to You under
+ * the OAI Public License, Version 1.1  (the "License"); you may not use this
+ * file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.openairinterface.org/?page_id=698
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ *-------------------------------------------------------------------------------
+ * For more information about the OpenAirInterface (OAI) Software Alliance:
+ *      contact@openairinterface.org
+ */
+
+/* adaptive_RX_pipeline.md, Stage 1 / P04 (immutable buffer delivery, foundation-only). Refcounted,
+ * channel-routed IQ span delivery from a single producer (AcquisitionOwner, plan sec 3.1) to the
+ * NR_RX_BRANCH_MAX consumer branches (P03's nr_rx_branch_t). No sample copies: a published span is
+ * shared by reference and is immutable until every branch holding it releases it.
+ *
+ * Deliberately NOT wired into the nr-ue.c read loop yet -- see the P04 brief's "Controller scope
+ * ruling": that file carries another session's uncommitted edits, so this module ships standalone
+ * with its G1 tests run in pure form (a synthetic producer/consumer harness in the test, not the
+ * real RT loop). Wiring is P05+.
+ *
+ * Field/behaviour -> plan section mapping:
+ *   - nr_rx_span_t.physical_channel_data, n_ch    -> plan sec 3.1 "publishes immutable
+ *                                                     channel-specific sample spans".
+ *   - first_sample_ts, absolute_slot, acq_epoch    -> plan sec 3.2 schema: 64-bit first-sample
+ *                                                     timestamp, absolute slot, RF continuity epoch.
+ *   - hold_budget / per-branch ring + drop counters -> plan sec 4 P04: "bounded ownership/refcounts
+ *                                                     ... a slow branch must not read overwritten
+ *                                                     samples or hold all other branches
+ *                                                     indefinitely. Define and count drop policy
+ *                                                     per branch." G1 test 3.
+ *   - refcount / acquire-publish-take-release        -> plan sec 4 P04: "bounded ownership/refcounts
+ *                                                     or explicit copies", no sample copies chosen.
+ *
+ * No threads created, no hardware access, no globals -- pool state lives entirely in the
+ * caller-owned nr_rx_span_pool_t.
+ */
+#ifndef NR_RX_SPAN_POOL_H
+#define NR_RX_SPAN_POOL_H
+
+#include <stdint.h>
+#include <pthread.h>
+#include "common/platform_types.h"
+#include "nr_rx_branch.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/* Ring depth per branch (plan sec 4: "bounded ownership"). Kept small and fixed -- this is a
+ * delivery pipeline, not a general queue; a branch that cannot keep up with hold_budget spans is,
+ * by policy, meant to drop, not buffer indefinitely. */
+#define NR_RX_SPAN_POOL_MAX_HOLD 8
+
+/* One producer-filled buffer. Immutable to consumers once published (nr_rx_span_pool_take()
+ * returns a const pointer); the producer never reuses a buffer while refcount > 0 (asserted in
+ * nr_rx_span_pool_acquire()). Samples are channel-major: channel c, sample n is at
+ * data[c * samples_per_buf + n]. */
+typedef struct {
+  c16_t *data;               /* n_ch * samples_per_buf, owned by the pool, allocated once at init;
+                                 channel-major: channel c sample n is data[c*samples_per_buf + n] */
+  uint64_t first_sample_ts;  /* producer-set on acquire; plan sec 3.2 "64-bit first-sample timestamp" */
+  uint64_t absolute_slot;    /* producer-set on acquire; plan sec 3.2 "absolute slot" */
+  uint32_t acq_epoch;        /* producer-set on acquire; plan sec 3.2 "RF continuity epoch" */
+  uint32_t n_samples;        /* producer-set on acquire; <= samples_per_buf */
+  int n_ch;                  /* set once at pool init, constant for the buffer's lifetime -- carried
+                                 per-buffer (not looked up via the pool) so nr_rx_span_channel() and
+                                 nr_rx_span_for_branch() can take just the span, per the brief's
+                                 signatures */
+  int samples_per_buf;       /* set once at pool init, constant; the channel stride */
+  int buf_id;                /* index into the pool's buffer array; -1 = invalid/unacquired */
+  int refcount;               /* number of branches currently holding this span */
+} nr_rx_span_t;
+
+/* Channel pointer + identity triple, returned by nr_rx_span_for_branch() so a branch cannot
+ * trivially read a channel other than its own (plan sec 4 "Channel routing"). */
+typedef struct {
+  const c16_t *samples;   /* NULL if branch_id/physical_channel invalid for this span/pool */
+  uint8_t branch_id;
+  int8_t physical_channel;
+} nr_rx_span_view_t;
+
+typedef struct {
+  int buf_id[NR_RX_SPAN_POOL_MAX_HOLD]; /* FIFO ring of held span buf_ids, oldest at head */
+  int n_held;
+  uint64_t samples_dropped;
+  uint64_t dropped_spans;
+} nr_rx_span_branch_state_t;
+
+typedef struct {
+  nr_rx_span_t *bufs;        /* n_buf entries */
+  c16_t *storage;            /* backing store for every bufs[i].data, freed as one block */
+  int n_buf;
+  int n_ch;
+  int samples_per_buf;
+  int hold_budget;           /* <= NR_RX_SPAN_POOL_MAX_HOLD */
+  uint64_t sample_rate_hz;   /* caller-supplied, constant for pool lifetime; plan sec 3.2 "Run /
+                                 hardware" row lists sample rate. A run-wide hardware constant, not
+                                 per-span -- a retune is an RF discontinuity (P05, acq_epoch bump),
+                                 not a mid-run sample-rate change this pool needs to track per
+                                 buffer. Stored here (one field, no per-span cost) purely so a
+                                 consumer can read it back; 0 = not supplied. run_id/rx_id are
+                                 deliberately NOT duplicated here -- they already live on P03's
+                                 nr_rx_branch_set_t/nr_rx_branch_t, which every caller of this pool
+                                 already has. */
+
+  int *free_list;            /* n_buf-capacity stack of free buf_ids */
+  int n_free;
+
+  nr_rx_span_branch_state_t branch[NR_RX_BRANCH_MAX];
+  uint8_t branch_active[NR_RX_BRANCH_MAX]; /* which branch slots participate in publish() */
+  uint8_t n_active_branches;
+
+  uint64_t producer_stalls;  /* count of acquire() calls that found no free buffer (should be 0
+                                 by construction when n_buf >= 1 + n_branch*hold_budget; the
+                                 module asserts rather than silently blocking, since there are no
+                                 threads here to wait on) */
+
+  pthread_mutex_t lock;      /* ponytail: one lock for the whole pool, protecting the ring/refcount
+                                 bookkeeping above -- the RT loop publishes once per slot (~2 kHz),
+                                 nowhere near enough to make per-branch lock-free rings worth the
+                                 complexity. Revisit if profiling ever shows contention. */
+} nr_rx_span_pool_t;
+
+/* Allocates bufs/free_list and initializes the pool for n_ch channels, samples_per_buf samples
+ * per channel per buffer, n_buf total buffers and hold_budget spans held per active branch.
+ * active_branches (bitmask, bit i = branch i participates in future publish()/take()/release()
+ * calls; use nr_rx_branch_set_t.b[i].state != NR_RXB_DISABLED to build it) fixes n_active_branches
+ * for the life of the pool. sample_rate_hz is stored verbatim (plan sec 3.2 schema field; 0 if the
+ * caller doesn't have/need one) and never interpreted by this module.
+ *
+ * Rejects (returns -1, LOG_E(PHY, ...), *pool left zeroed) when: pool/n_ch/samples_per_buf/n_buf/
+ * hold_budget are invalid (<=0, hold_budget > NR_RX_SPAN_POOL_MAX_HOLD, n_ch > NR_RX_BRANCH_MAX),
+ * active_branches has no bit set or a bit >= NR_RX_BRANCH_MAX, or n_buf < 1 + n_active_branches *
+ * hold_budget (the capacity precondition that makes producer starvation impossible by
+ * construction -- see nr_rx_span_pool_acquire()).
+ * Returns 0 on success. */
+int nr_rx_span_pool_init(nr_rx_span_pool_t *pool, int n_ch, int samples_per_buf, int n_buf,
+                          int hold_budget, uint8_t active_branches, uint64_t sample_rate_hz);
+
+/* Frees bufs/free_list. Safe to call on an already-freed/zeroed pool. Does not check outstanding
+ * refcounts -- caller must ensure no span is held before destroying the pool (same discipline as
+ * freeing a buffer while it's in use anywhere else). */
+void nr_rx_span_pool_destroy(nr_rx_span_pool_t *pool);
+
+/* Producer side. Pops a buffer off the free list, asserts its refcount == 0 (a buffer must never
+ * be handed to the producer while a consumer still holds it -- programming error, not a runtime
+ * condition, hence assert not a returned error), resets buf_id/refcount/n_samples and returns its
+ * pointer for the caller to fill (channel-major, up to n_ch * samples_per_buf c16_t) and stamp
+ * first_sample_ts/absolute_slot/acq_epoch/n_samples before calling nr_rx_span_pool_publish().
+ *
+ * Returns NULL and increments pool->producer_stalls if the free list is empty -- unreachable when
+ * n_buf >= 1 + n_active_branches*hold_budget (asserted at init), kept as a real return-NULL path
+ * rather than a second assert so a future caller with a looser capacity margin degrades instead of
+ * aborting. */
+nr_rx_span_t *nr_rx_span_pool_acquire(nr_rx_span_pool_t *pool);
+
+/* Publishes buf (previously returned by acquire()): sets refcount = n_active_branches and enqueues
+ * buf_id into every active branch's ring. Per branch, if that branch's ring is already at
+ * hold_budget, the OLDEST entry in THAT branch's ring is released first (refcount--, and if it
+ * hits 0 the buffer returns to the free list) and branch.samples_dropped += buf->n_samples,
+ * branch.dropped_spans++ -- other branches' rings are untouched (plan sec 4: "a slow branch must
+ * not ... hold all other branches indefinitely"). No-op (LOG_E) if buf is NULL or not a buffer
+ * this pool owns. */
+void nr_rx_span_pool_publish(nr_rx_span_pool_t *pool, nr_rx_span_t *buf);
+
+/* Consumer side. Pops branch_id's oldest ring entry (FIFO -- publish order) and returns a const
+ * pointer to it; the returned span's ref is now "held by the caller" (release() must eventually be
+ * called exactly once for each take()). Returns NULL if branch_id is inactive/out-of-range or its
+ * ring is empty. Does not touch the ring/refcount of any other branch. */
+const nr_rx_span_t *nr_rx_span_pool_take(nr_rx_span_pool_t *pool, uint8_t branch_id);
+
+/* Decrements span's refcount on branch_id's behalf; when it reaches 0 the buffer is returned to
+ * the free list. Returns 0 on success, -1 (LOG_E, no state change) if span/pool is NULL, branch_id
+ * is out of range, or span's refcount is already 0 (double release / release of a span this branch
+ * never took) -- rejected rather than silently underflowing into a double free. */
+int nr_rx_span_pool_release(nr_rx_span_pool_t *pool, uint8_t branch_id, const nr_rx_span_t *span);
+
+/* Returns the channel pointer for branch's own physical_channel within span, plus the
+ * (branch_id, physical_channel) identity, so a branch cannot casually read a different channel's
+ * samples than the one it's authorized for. samples is NULL (branch_id/physical_channel invalid
+ * for this span's channel count, or span/branch NULL) on any misuse. */
+nr_rx_span_view_t nr_rx_span_for_branch(const nr_rx_span_t *span, const nr_rx_branch_t *branch);
+
+/* Direct channel accessor (plan sec 4: "nr_rx_span_channel(span, physical_channel)"). Returns NULL
+ * if span is NULL or physical_channel is out of [0, span->n_ch) -- callers that don't have an
+ * nr_rx_branch_t handy (e.g. tests) can still validate routing this way; nr_rx_span_for_branch()
+ * is the branch-safe wrapper most real callers should use. */
+const c16_t *nr_rx_span_channel(const nr_rx_span_t *span, int physical_channel);
+
+#ifdef __cplusplus
+}
+#endif
+#endif

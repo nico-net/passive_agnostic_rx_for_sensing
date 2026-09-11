@@ -976,6 +976,7 @@ set(PHY_SRC_UE
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/dci_nr.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_rx_branch.c
+  ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_rx_span_pool.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_passive_replay_capture.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c
@@ -2424,6 +2425,18 @@ if(ENABLE_TESTS)
   target_link_libraries(nr_rx_branch_test PRIVATE UTIL GTest::gtest)
   add_dependencies(tests nr_rx_branch_test)
   add_test(NAME nr_rx_branch_test COMMAND ./nr_rx_branch_test)
+
+  # adaptive_RX_pipeline.md P04: refcounted per-branch span pool (immutable IQ delivery), pure and
+  # standalone like P03 -- built directly from its own .c + nr_rx_branch.c rather than pulling in
+  # the PHY_NR_UE library it will later be linked into (see the P04 brief: nr-ue.c read-loop wiring
+  # is a separate step, P05+).
+  add_executable(nr_rx_span_pool_test ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_rx_span_pool_test.cc
+                                       ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_rx_span_pool.c
+                                       ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_rx_branch.c)
+  target_include_directories(nr_rx_span_pool_test PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
+  target_link_libraries(nr_rx_span_pool_test PRIVATE UTIL GTest::gtest)
+  add_dependencies(tests nr_rx_span_pool_test)
+  add_test(NAME nr_rx_span_pool_test COMMAND ./nr_rx_span_pool_test)
 endif()
 
 add_subdirectory(common)

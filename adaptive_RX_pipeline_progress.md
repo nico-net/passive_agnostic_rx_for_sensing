@@ -6,7 +6,7 @@ Canonical location: `sens6:/home/sens/NICOLA/adaptive-rx-sensing/adaptive_RX_pip
 
 ## Current status
 
-**Documentation and read-only inventory complete; P01 (baseline manifest / acceptance profile) IN_PROGRESS as of 2026-09-10 (see session below); P02 (valid DL/UL replay fixtures) PASSED as of 2026-09-11 after two controller-ruled fix rounds to the passive-replay recorder (see P02 session + Fix round 1/2 below) -- the first implementation task under this plan to reach PASS, and the first receiver source changes made under this plan (two small, ruling-scoped gate fixes in `nr_passive_replay_capture.c`/`nr_pdcch_blind_monitor_rt.c`). G0 remains IN_PROGRESS overall, blocked only on P01's outstanding survey/acceptance-limit work. P03 (branch abstraction) IN_PROGRESS as of 2026-09-11: foundation delivered (`docs/passive_branch_globals_audit.md`, `nr_rx_branch.{h,c}`, `[sensing] rx_branches`/`rx_branch_phys_map`, 14/14 gtest) but deliberately not wired into the RT read loop (controller-scoped to P04/P05) -- G1 remains NOT_STARTED.**
+**Documentation and read-only inventory complete; P01 (baseline manifest / acceptance profile) IN_PROGRESS as of 2026-09-10 (see session below); P02 (valid DL/UL replay fixtures) PASSED as of 2026-09-11 after two controller-ruled fix rounds to the passive-replay recorder (see P02 session + Fix round 1/2 below) -- the first implementation task under this plan to reach PASS, and the first receiver source changes made under this plan (two small, ruling-scoped gate fixes in `nr_passive_replay_capture.c`/`nr_pdcch_blind_monitor_rt.c`). G0 remains IN_PROGRESS overall, blocked only on P01's outstanding survey/acceptance-limit work. P03 (branch abstraction) IN_PROGRESS as of 2026-09-11: foundation delivered (`docs/passive_branch_globals_audit.md`, `nr_rx_branch.{h,c}`, `[sensing] rx_branches`/`rx_branch_phys_map`, 14/14 gtest) but deliberately not wired into the RT read loop (controller-scoped to P04/P05). P04 (immutable buffer delivery) IN_PROGRESS as of 2026-09-11: standalone `nr_rx_span_pool.{h,c}` delivered (refcounted per-branch spans, no sample copies, per-branch drop policy), 5/5 gtest, also deliberately not wired into the RT read loop (same controller ruling -- `nr-ue.c` is dirty with another session's edits) -- G1 remains NOT_STARTED.**
 
 | Baseline fact | Value |
 |---|---|
@@ -35,7 +35,7 @@ Dates use `YYYY-MM-DD` in Europe/Zurich. Check an implementation item only when 
 | [ ] | P01 | Baseline manifest / acceptance profile | IN_PROGRESS | — | Session 2026-09-10 (P01) below + "Fix round 1" addendum; current manifest `tests/passive_rx/baselines/manifest_20260910_6fcb7a6-dirty.json` (commit `e4c8cadd5f`), `acceptance_four_rx.json`, `geometry_four_rx.json`. NOT checked/PASS: geometry unsurveyed and every deployment-dependent acceptance limit UNSET are BLOCKED sub-items |
 | [x] | P02 | Valid DL/UL replay fixtures | PASS | 2026-09-11 | Session 2026-09-11 (P02) + Fix round 1 + Fix round 2 below. Audit found all 22 pre-existing `replay.bin` captures INADMISSIBLE (binary mismatch + full_auto=1). Two structural code defects (both coupling the passive-replay recorder's arm condition to full-auto-only paths) fixed under controller ruling: DL gate in `nr_passive_replay_capture.c`'s `nr_passive_replay_dl()` (round 1) and UL gate in `nr_pdcch_blind_monitor_rt.c`'s UL candidate loop (round 2, root-caused via live instrumentation). With both fixes, capture `sensing_manual_fixed.UtvBT7` (binary `c3810019...`) produced `REPLAY READY ... slots=320 UL=24 DL-controls=38` and replay-verified `REPLAY PASS: identical DL controls=34 failed=0 raw UL=24; no radio opened` (exit 0). Registered in `tests/passive_rx/baselines/fixtures.json` (`status:"PASS"`, 1 admissible fixture); `check_manifest.py --fixtures` PASSES; negative selftest cases still correctly FAIL |
 | [ ] | P03 | Branch ownership / lifecycle | IN_PROGRESS | — | Session 2026-09-11 (P03) below. Foundation delivered: `docs/passive_branch_globals_audit.md` (globals audit), `openair1/PHY/NR_UE_TRANSPORT/nr_rx_branch.{h,c}` (pure branch identity/epoch/lifecycle, 14/14 gtest), `[sensing] rx_branches`/`rx_branch_phys_map` config surface in `nr_isac.cc`/`.h`. NOT done: nothing wired into the `nr-ue.c` RT read loop (deliberately out of scope, see P03's controller ruling) and the `nb_antennas_rx` antenna-count cross-check is unwired (setter added, no live caller — see audit doc's "nb_antennas_rx reachability" section) — so G1 is not testable end-to-end from this task alone |
-| [ ] | P04 | Immutable channel-buffer delivery | NOT_STARTED | — | — |
+| [ ] | P04 | Immutable channel-buffer delivery | IN_PROGRESS | — | Session 2026-09-11 (P04) below. Standalone module delivered: `openair1/PHY/NR_UE_TRANSPORT/nr_rx_span_pool.{h,c}` (refcounted per-branch span pool, no sample copies, per-branch drop policy), 5/5 gtest (G1 test 1 and test 3 in pure form, plus refcount and epoch-carry cases). NOT done: nothing wired into the nr-ue.c RT read loop (deliberately out of scope, see P04's controller ruling -- that file is dirty with another session's uncommitted edits) -- so G1 stays NOT_STARTED end-to-end. |
 | [ ] | P05 | Independent acquisition / recovery | NOT_STARTED | — | — |
 | [ ] | P06 | Branch-local PDCCH discovery / grants | NOT_STARTED | — | — |
 | [ ] | P07 | Independent DL decoding | NOT_STARTED | — | — |
@@ -738,6 +738,121 @@ Next highest-value action: P04 (immutable channel-buffer delivery) -- needs the 
   built here as the addressing/epoch substrate for per-branch sample ownership.
 Reviewer / accomplishment date if gate passed: not gated; G1 stays NOT_STARTED (unchanged by this
   session, per the controller's ruling that P03 alone cannot make G1 testable end-to-end).
+```
+
+## Session — 2026-09-11: P04 immutable buffer delivery (Stage 1, foundation) (IN_PROGRESS)
+
+```text
+Date/time (Europe/Zurich): 2026-09-11, ~11:20-12:05
+Task IDs / gate: P04 (Stage 1 immutable buffer delivery); G1 tests 1 and 3 exercised in pure form
+  (see below); G1 as a whole stays NOT_STARTED (unchanged by this session, per the controller's
+  ruling that P04 alone cannot make G1 testable end-to-end without the nr-ue.c read-loop wiring).
+Intended falsifiable claim: a pure, unit-testable refcounted per-branch span pool exists that (a)
+  routes byte-exact channel content to the correct branch under both an identity and a permuted
+  P03 physical-channel map (G1 test 1, pure form), and (b) enforces the declared per-branch drop
+  policy -- a stalled branch drops its own oldest entries and is counted, sibling branches and the
+  producer are unaffected, no consumer ever observes an overwritten buffer (G1 test 3, pure form)
+  -- plus refcount correctness (a span held by N branches returns to the free list only after all
+  N release it; double release is rejected, not a double free) and epoch carry-through (a span's
+  acq_epoch is fixed at acquire time and unaffected by later acquires/publishes under a different
+  epoch). None of this depends on anything running live or on the nr-ue.c RT read loop being
+  touched (out of this task's scope per the controller's ruling in task-P04-brief.md).
+Branch / full commit / dirty patch / untracked-file manifest: merge/adaptive-sensing,
+  HEAD 835481c8596c59eca799c5928d90e0203e7238f6 (unchanged by this session before commit). Pre-
+  existing dirty state unchanged and untouched: `M executables/nr-ue-ru.c`,
+  `M executables/nr-ue.c`, `M openair1/PHY/NR_UE_TRANSPORT/nr_initial_sync.c`,
+  `M openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c`, `M radio/USRP/usrp_lib.cpp`,
+  `M tests/passive_rx/monitor/monitor.html`, `M tests/passive_rx/monitor/monitor.py`,
+  `M tests/passive_rx/run_adaptive_receive_test.sh`, and untracked
+  `tests/passive_rx/MANUAL_DL_UL.md`, `tests/passive_rx/adaptive_manual_dlul.conf`,
+  `tests/passive_rx/aoa_track_dl.conf`, `tests/passive_rx/run_manual_x410.sh`,
+  `adaptive_RX_pipeline.md` -- confirmed via `git status --short` before and after this session's
+  edits; none of these paths were staged.
+Files modified / added / removed:
+  Added: `openair1/PHY/NR_UE_TRANSPORT/nr_rx_span_pool.h`,
+  `openair1/PHY/NR_UE_TRANSPORT/nr_rx_span_pool.c`,
+  `openair1/PHY/NR_UE_TRANSPORT/tests/nr_rx_span_pool_test.cc`.
+  Modified: `CMakeLists.txt` (added `nr_rx_span_pool.c` to `PHY_NR_UE_SRC` next to
+  `nr_rx_branch.c`; registered the `nr_rx_span_pool_test` gtest target mirroring
+  `nr_rx_branch_test`'s pattern -- own .c + `nr_rx_branch.c` linked directly, `UTIL` +
+  `GTest::gtest`, no PHY_NR_UE library dependency), `adaptive_RX_pipeline_progress.md` (this
+  session entry + P04 row + status paragraph).
+Executable / driver / config / geometry / acceptance hashes: not applicable -- no receiver run,
+  no capture; only the gtest binary `nr_rx_span_pool_test` was built and run.
+Exact commands:
+  ssh sens6 'pgrep -x nr-uesoftmodem' (empty, polled before configure and before build)
+  cd /home/sens/NICOLA/adaptive-rx-sensing/cmake_targets/ran_build/build && cmake .
+  cmake --build . --target nr_rx_span_pool_test --parallel 4
+  ctest --test-dir cmake_targets/ran_build/build -R nr_rx_span_pool_test --output-on-failure
+Artifact paths (include raw logs and VOID attempts): none beyond the ctest/gtest console output
+  pasted in task-P04-report.md; no failing intermediate run -- the module built and passed on the
+  first build+run attempt.
+Baseline and comparison definition: not applicable (new module, no prior behavior to compare
+  against; explicitly NOT wired into any existing behavior in this task).
+Predeclared assertions / thresholds: the brief's 4 test groups verbatim -- (1) routing: 4
+  channels, distinct deterministic per-channel sequence, byte-exact `memcmp` under an identity
+  map ("0:0,1:1,2:2,3:3") and a permuted map ("0:3,1:2,2:1,3:0") via P03's
+  `nr_rx_branch_set_parse`, checked against the SAME published span (routing is an accessor-time
+  decision in this design, not a publish-time one); (3) stall: hold_budget=3, 4 active branches,
+  branch 2 never takes across 10 publishes -> branch 2's `dropped_spans==7`, its surviving ring
+  holds spans {7,8,9} oldest-first, branches 0/1/3 (take+release every publish) see 0 drops and
+  all 10 spans in order with correct `absolute_slot`/`first_sample_ts`, `producer_stalls==0`, and
+  every buffer is filled with its own span index on acquire and checked byte-exact on take
+  (overwrite detector); refcount: a span held by 2 branches stays off the free list until both
+  release, a second release once refcount is 0 returns -1 (not a double free); epoch carry: a
+  span's `acq_epoch` set at acquire is unchanged by a later acquire/publish under a different
+  epoch, verified by taking both spans off one branch's ring and comparing each against a
+  simulated branch epoch. Plus one additional init-validation suite (mirroring
+  `nr_rx_branch_test.cc`'s rejection coverage): NULL pool, invalid n_ch/samples_per_buf/n_buf/
+  hold_budget, active_branches with no bit set or an out-of-range bit, and the undersized-pool
+  case `n_buf < 1 + n_active_branches*hold_budget` -- all rejected with -1 and an unchanged pool
+  on the exact-fit boundary case.
+Observed result, with denominators: 5/5 gtest cases pass (`nr_rx_span_pool_test`, 5 suites:
+  SpanPoolRouting, SpanPoolStall, SpanPoolRefcount, SpanPoolEpoch, SpanPoolInit). Hand-verified
+  the stall test's drop arithmetic against the implementation before trusting the assertion
+  (publish i for i>=3 drops exactly one oldest entry per publish under hold_budget=3, giving 7
+  drops over i=3..9 and a final ring of {7,8,9} -- matches). No other target was built or run;
+  `nr-uesoftmodem` was not rebuilt or executed.
+Status (PASS / FAIL / VOID / BLOCKED): PASS for the two falsifiable claims stated above (module
+  builds and its own tests pass, including G1 tests 1 and 3 in pure form). P04 as a WHOLE task
+  remains IN_PROGRESS -- see "Remaining limitation" below; this is a controller-scoped foundation
+  slice of P04, not full P04 completion, and G1 itself is NOT exercised end-to-end by this
+  session (no real producer thread, no nr-ue.c wiring, no live IQ).
+Validity reasons and affected intervals: not applicable (no live data collected).
+Hypotheses supported / contradicted: supports the brief's claimed design property that channel
+  routing can be made an accessor-time decision (via `nr_rx_span_for_branch`/
+  `nr_rx_span_channel` reading `physical_channel` off P03's `nr_rx_branch_t`) fully decoupled
+  from publish-time behavior -- the SAME published span was routed correctly under two different
+  branch-to-physical-channel maps without a second publish. Supports that a per-branch bounded
+  ring with oldest-drop-on-full is sufficient to guarantee "a slow branch cannot hold others
+  indefinitely" (plan sec 4) without any blocking, coordination or backpressure between branches
+  -- verified structurally (drop_oldest only ever touches the stalled branch's own ring/refcount
+  share) and empirically (branches 0/1/3's counters stayed exactly 0 while branch 2 accumulated
+  drops). Contradicts nothing; no prior claim was tested.
+Retraction, if any: none.
+Remaining limitation: nothing in this session is wired into the nr-ue.c RT read loop (by
+  controller ruling, deferred to P05+); there is no real producer thread and no live IQ --
+  `nr_rx_span_pool_acquire`/`publish` were driven directly from the test's main thread, not from
+  a hardware read loop, so the "~2 kHz single-producer" assumption behind the module's one-mutex
+  design (documented as a `ponytail:` comment in the header) is architectural, not load-tested.
+  `sample_rate_hz` was added to the pool as a plain pool-lifetime constant (plan sec 3.2 lists it
+  under "Run / hardware") since it cost one field and no extra logic; `run_id`/`rx_id` were
+  deliberately NOT duplicated into the span/pool -- they already live on P03's
+  `nr_rx_branch_set_t`/`nr_rx_branch_t`, which every real caller of this pool already holds, so
+  duplicating them here would be redundant state that could drift. `nr_rx_span_pool_release()`
+  validates the (pool, span, branch_id) triple's *range* but does not verify that `branch_id`
+  actually holds the specific ref-unit being released -- refcount is a single shared integer, not
+  per-branch-tagged, so a caller could in principle route a release through the wrong branch_id
+  without the module detecting it (it would still be a legitimate decrement of a real outstanding
+  reference, just not from the branch that logically owned it). This matches the brief's stated
+  scope (refcount as a plain count) and is flagged here as a caller-discipline requirement for
+  P05's wiring, not a defect fixed in this session.
+Next highest-value action: P05 (independent digital correction/recovery per branch), which is
+  also the task that finally wires both `nr_rx_branch_t` (P03) and `nr_rx_span_pool_t` (P04) into
+  the real nr-ue.c read loop -- current controller guidance is that this wiring waits on that
+  file's owning session committing its edits first.
+Reviewer / accomplishment date if gate passed: not gated; G1 stays NOT_STARTED (unchanged by this
+  session, per the controller's ruling that P04 alone cannot make G1 testable end-to-end).
 ```
 
 ## Session template — copy for each future work session
