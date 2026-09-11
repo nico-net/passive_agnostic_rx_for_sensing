@@ -69,7 +69,7 @@ canvas{display:block;width:100%;border-radius:6px;border:1px solid var(--soft);b
 
 <script>
 const TABS = ["Link & Sync Health","DL Detections","UL Detections","Tracking","Config / Scene"];
-let tab = 0, state = null, rxId = null;
+let tab = 0, state = null, rxId = null, pollError = null;
 
 const el = (t, cls, txt) => { const e = document.createElement(t); if (cls) e.className = cls; if (txt != null) e.textContent = txt; return e; };
 const fmt = (v, d = 2) => (v == null || Number.isNaN(v)) ? "—" : (+v).toFixed(d);
@@ -130,7 +130,7 @@ function occ() {
   const HIDE = {pdsch_dmrs: 1};
   const LABEL = {blind: "pdsch_dmrs (blind)"};
   r.src_occ.forEach((n,i) => {
-    const k = names[i];
+    const k = names[i] || (i === 6 ? "ssb" : null);
     if (k && !HIDE[k]) out[LABEL[k] || k] = n;
   });
   return out;
@@ -328,7 +328,8 @@ function tabHealth(v) {
   v.appendChild(cards);
 
   const o = occ();
-  const occPanel = panel("CFR occupancy (rows / CPI)");
+  const occPanel = panel("CFR occupancy (rows / CPI)",
+    el("div", "csub", `CPI ${h.cpi_count || 0} | last update ${fmt(age,1)}s ago`));
   if (o) {
     const max = Math.max(1, ...Object.values(o));
     for (const [name,n] of Object.entries(o)) {
@@ -393,7 +394,7 @@ function tabUL(v) {
   meta.appendChild(card("UL rows / CPI", String(ulRows()), ulRows()?"good":"warn", "source: pusch_dmrs"));
   meta.appendChild(card("DL rows / CPI", String(dlRows()), null, "for comparison"));
   const st = state.log && state.log.stats || {};
-  meta.appendChild(card("PDSCH CRC", st.pdsch_rate!=null?fmt(st.pdsch_rate,1)+"%":"—", null, "decode health"));
+  meta.appendChild(card("PDSCH CRC", st.dl_tb_rate!=null?fmt(st.dl_tb_rate,1)+"%":"—", null, "completed DL transport blocks"));
   /* USABLE uplink. crc_ok is the count that can actually feed anything downstream -- a failed
      decode still yields a DM-RS CFR row, but only a CRC-verified TB could ever be re-encoded, and
      only a CRC-verified grant proves the field layout was read correctly. The rate is quoted
@@ -558,6 +559,27 @@ function tabConfig(v) {
   v.appendChild(raw);
 }
 
+
+function decoderPanel() {
+  const log = state.log || {}, s = log.stats || {}, seen = log.decoder_seen || {};
+  const row = el("div", "row");
+  for (const [key, title, rate] of [["dl", "DL decoder", s.dl_tb_rate], ["ul", "UL decoder", s.ul_rate]]) {
+    const age = seen[key] != null ? Math.max(0, state.now - seen[key]) : null;
+    const ok = s[key + "_ok"], tried = s[key + "_try"];
+    const fresh = age != null && age < 5;
+    const count = tried != null ? `${ok} CRC-OK / ${tried} completed TBs` : "waiting for worker counters";
+    const recent = s[key + "_recent_rate"];
+    row.appendChild(card(title, rate != null ? fmt(rate, 1) + "%" : "-",
+      fresh ? "good" : "warn",
+      count + (age != null ? ` | ${fresh ? "LIVE" : "STALE"} ${fmt(age,1)}s` : "") +
+      (recent != null ? ` | recent ${fmt(recent,1)}%` : "")));
+  }
+  const drops = (key) => s[key + "_drop_stale"] == null ? "-" :
+    `${s[key + "_drop_stale"]} stale / ${s[key + "_drop_full"]} full`;
+  row.appendChild(card("Queue drops", "DL / UL", null, `DL ${drops("dl")} | UL ${drops("ul")}`));
+  return row;
+}
+
 const RENDER = [tabHealth, tabDL, tabUL, tabTracking, tabConfig];
 
 function renderChrome() {
@@ -578,6 +600,7 @@ function renderChrome() {
   sel.value = rxId || "";
 
   const st = document.getElementById("status"); st.textContent = "";
+  if (pollError) st.appendChild(chip("chip-red", "DASHBOARD DISCONNECTED"));
   const r = rep(), h = rx();
   const age = h && h.last_seen ? state.now - h.last_seen : null;
   const lim = staleLimit(h);
@@ -600,6 +623,7 @@ function render() {
   const prev = [...v.querySelectorAll(".log")].map(n => ({
     top: n.scrollTop, stick: n.scrollHeight - n.scrollTop - n.clientHeight < 24 }));
   v.textContent = "";
+  if (state && state.log) v.appendChild(decoderPanel());
   if (!state || !Object.keys(state.receivers).length) {
     v.appendChild(el("div","empty","no receiver connected — check --connect matches [sensing] report_endpoint"));
     return;
@@ -613,12 +637,21 @@ function render() {
 }
 
 async function poll() {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 4000);
   try {
-    const res = await fetch("/state");
+    const res = await fetch("/state", {cache: "no-store", signal: controller.signal});
+    if (!res.ok) throw new Error("HTTP " + res.status);
     state = await res.json();
+    pollError = null;
     render();
-  } catch (e) { /* receiver or server restarting; keep the last view */ }
-  setTimeout(poll, 1000);
+  } catch (e) {
+    pollError = String(e);
+    renderChrome();
+  } finally {
+    clearTimeout(timeout);
+    setTimeout(poll, 1000);
+  }
 }
 render(); poll();
 window.addEventListener("resize", () => render());
