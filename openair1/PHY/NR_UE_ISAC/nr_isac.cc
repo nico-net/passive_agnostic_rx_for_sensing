@@ -32,6 +32,12 @@ PipelineConfig pipeline;
 std::atomic<bool> enabled{false}, started{false};
 uint32_t aoa_antennas = 0;
 
+// adaptive_RX_pipeline.md P03: [sensing] rx_branches / rx_branch_phys_map, foundation only (not
+// yet consulted by the RT read loop -- see nr_isac.h's nr_isac_rx_branches() comment).
+nr_rx_branch_set_t branches{};
+bool branches_valid = false;
+int expected_nb_antennas_rx = 0; // 0 = unknown; set via nr_isac_set_nb_antennas_rx() before init
+
 paramdef_t integer(const char* name, const char* help, unsigned flags, int* value, int fallback)
 {
   paramdef_t p{}; std::strncpy(p.optname, name, sizeof(p.optname) - 1);
@@ -178,6 +184,7 @@ extern "C" void nr_isac_init(void)
   double p_aoa_max_el_sigma=45.0;
   char *p_source=nullptr,*p_sources=nullptr,*p_durations=nullptr,*p_array=nullptr,*p_broadside=nullptr;
   char *p_array_calibration=nullptr;
+  char *p_rx_branches=nullptr,*p_rx_branch_phys_map=nullptr;
   char *p_out=nullptr,*p_rx_id=nullptr,*p_illum=nullptr,*p_report=nullptr,*p_endpoint=nullptr;
   paramdef_t params[] = {
     integer("enable","enable native passive sensing",PARAMFLAG_BOOL,&p_enable,0),
@@ -237,9 +244,24 @@ extern "C" void nr_isac_init(void)
     real("subslot_min_snr_db","minimum sub-slot SNR",&p_subslot_snr,0.0),
     integer("admission_start_slot","absolute RF slot at which sensing FIFO admission opens",0,&p_admission_start,0),
     integer("admission_num_slots","finite RF-slot admission span; zero disables the gate",0,&p_admission_slots,0),
+    text("rx_branches","active receiver branch ids, e.g. \"0,1,2,3\"",&p_rx_branches,"0"),
+    text("rx_branch_phys_map","branch:physical channel map, e.g. \"0:0,1:1,2:2,3:3\"",
+         &p_rx_branch_phys_map,"0:0"),
   };
   config_get(config_get_if(),params,sizeof(params)/sizeof(params[0]),"sensing");
   if (!p_enable) return;
+  branches_valid=false;
+  if (nr_rx_branch_set_parse(&branches,p_rx_branches,p_rx_branch_phys_map,p_rx_id?p_rx_id:"rx")!=0) {
+    LOG_E(PHY,"SENSING: rx_branches/rx_branch_phys_map invalid; sensing disabled\n");
+    return;
+  }
+  if (expected_nb_antennas_rx>0
+      && nr_rx_branch_set_check_antennas(&branches,expected_nb_antennas_rx)!=0) {
+    LOG_E(PHY,"SENSING: rx_branches names more branches than the configured receive antennas; "
+              "sensing disabled\n");
+    return;
+  }
+  branches_valid=true;
   pipeline = PipelineConfig{};
   pipeline.num_ues=p_num_ues>0?static_cast<uint32_t>(p_num_ues):0;pipeline.sources_mask=sources_mask(p_sources,p_source);
   pipeline.duration_bank_s=duration_bank(p_durations);pipeline.bootstrap_duration_index=std::max(0,p_bootstrap);
@@ -317,6 +339,8 @@ extern "C" int nr_isac_source(void){for(int i=0;i<NR_ISAC_SRC_COUNT;++i)if(pipel
 extern "C" int nr_isac_source_enabled(int source){return enabled.load()&&source>=0&&source<NR_ISAC_SRC_COUNT&&(pipeline.sources_mask&(1u<<source));}
 extern "C" uint32_t nr_isac_aoa_antennas(void){return enabled.load()&&AOA_ENABLE?aoa_antennas:0;}
 extern "C" uint32_t nr_isac_subslot_config(uint32_t* min_re,float* min_snr){if(!enabled.load())return 0;if(min_re)*min_re=pipeline.subslot_min_re;if(min_snr)*min_snr=pipeline.subslot_min_snr_db;return pipeline.subslot_symbols;}
+extern "C" const nr_rx_branch_set_t* nr_isac_rx_branches(void){return (enabled.load()&&branches_valid)?&branches:nullptr;}
+extern "C" void nr_isac_set_nb_antennas_rx(int nb_antennas_rx){expected_nb_antennas_rx=nb_antennas_rx;}
 
 extern "C" void nr_isac_submit_cfr(uint32_t slot,int source,const nr_isac_carrier_t* carrier,const float* h,
                                     const uint32_t* k,const uint32_t* l,uint32_t n,float noise)

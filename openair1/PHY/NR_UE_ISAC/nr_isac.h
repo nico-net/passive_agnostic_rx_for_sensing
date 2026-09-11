@@ -3,6 +3,7 @@
 #define NR_ISAC_H
 
 #include <stdint.h>
+#include "PHY/NR_UE_TRANSPORT/nr_rx_branch.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -84,6 +85,22 @@ void nr_isac_submit_cfr_multi(uint32_t slot_idx,
 
 uint32_t nr_isac_aoa_antennas(void);
 uint32_t nr_isac_subslot_config(uint32_t *min_re, float *min_snr_db);
+
+/* adaptive_RX_pipeline.md P03: [sensing] rx_branches / rx_branch_phys_map, parsed by
+ * nr_isac_init() into a process-wide nr_rx_branch_set_t. Foundation only -- nothing in the RT
+ * read loop consults this yet (P04/P05). Returns NULL if sensing is disabled or the branch
+ * config failed to parse (nr_isac_init() logs LOG_E and disables sensing in that case, same as
+ * every other fatal [sensing] parse failure in this file). */
+const nr_rx_branch_set_t *nr_isac_rx_branches(void);
+
+/* Sets the live UE receive-antenna count nr_isac_init() checks rx_branches against (P03's "more
+ * branches than antennas" reject). Must be called BEFORE nr_isac_init() to take effect; default
+ * is 0 ("unknown"), under which the antenna-count check is skipped rather than fatally rejecting
+ * a config it cannot evaluate. Not called from anywhere in this task (nr-uesoftmodem.c is out of
+ * this task's file scope) -- see nr_isac.cc's nr_isac_init() comment and
+ * docs/passive_branch_globals_audit.md for where get_nrUE_params()->nb_antennas_rx would supply
+ * a live value once wired. */
+void nr_isac_set_nb_antennas_rx(int nb_antennas_rx);
 
 #ifdef __cplusplus
 }

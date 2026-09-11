@@ -975,6 +975,7 @@ set(PHY_SRC_UE
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_prach.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/dci_nr.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c
+  ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_rx_branch.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_passive_replay_capture.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c
@@ -2413,6 +2414,16 @@ if(ENABLE_TESTS)
   target_link_libraries(test_nr_pdsch_config_sweep PRIVATE UTIL GTest::gtest)
   add_dependencies(tests test_nr_pdsch_config_sweep)
   add_test(NAME test_nr_pdsch_config_sweep COMMAND ./test_nr_pdsch_config_sweep)
+
+  # adaptive_RX_pipeline.md P03: receiver-branch identity/epoch/lifecycle abstraction, pure and
+  # standalone (no OAI PHY dependencies beyond LOG_E), so it is built directly from its own .c
+  # rather than pulling in the PHY_NR_UE library it will later be linked into.
+  add_executable(nr_rx_branch_test ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_rx_branch_test.cc
+                                    ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_rx_branch.c)
+  target_include_directories(nr_rx_branch_test PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
+  target_link_libraries(nr_rx_branch_test PRIVATE UTIL GTest::gtest)
+  add_dependencies(tests nr_rx_branch_test)
+  add_test(NAME nr_rx_branch_test COMMAND ./nr_rx_branch_test)
 endif()
 
 add_subdirectory(common)

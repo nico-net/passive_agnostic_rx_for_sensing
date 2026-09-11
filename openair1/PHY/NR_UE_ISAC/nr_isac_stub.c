@@ -25,3 +25,5 @@ void nr_isac_submit_cfr_multi(uint32_t s, float f, int t, const nr_isac_carrier_
 uint32_t nr_isac_aoa_antennas(void) { return 0; }
 uint32_t nr_isac_subslot_config(uint32_t *min_re, float *min_snr_db)
 { if (min_re) *min_re = 0; if (min_snr_db) *min_snr_db = 0.0f; return 0; }
+const nr_rx_branch_set_t *nr_isac_rx_branches(void) { return NULL; }
+void nr_isac_set_nb_antennas_rx(int nb_antennas_rx) { (void)nb_antennas_rx; }
