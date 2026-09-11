@@ -1212,7 +1212,7 @@ Reviewer / accomplishment date if gate passed: n/a (no gate passed)
 |---|---|---|
 | Branch set instantiated / owned by the read loop | `executables/nr-ue.c` `ue_branches_lock/lose_lock/discontinuity/epoch_str` helpers immediately above `UE_thread()` | They act on the ONE process-wide set parsed by `nr_isac_init()`, reached through the new `nr_isac_rx_branches_mutable()`. No second instance: the read loop is the AcquisitionOwner and the only writer. All four are no-ops when sensing is off / the branch config failed to parse |
 | Shared sync applied to every branch | `ue_branches_lock()` / `ue_branches_lose_lock()` | Plan sec 3.1 ("preserve the present shared per-branch plan initially") — cited in the code comment. Independent per-branch acquisition is the wiring plan's "Yes" rows and is NOT this task |
-| `lose_lock` call sites | `nr-ue.c`: UE_thread entry (`UE->is_synchronized = 0`), RXDISCONT invalidation, RFSTALL invalidation, CFOTRK retune invalidation, and (fix round 1) the `handle_sync_req_from_mac(UE) == 0` branch | **Corrected in fix round 1**: the original claim "every site where the shared `is_synchronized` is cleared inside `UE_thread`" covered only the direct ASSIGNMENTS. `handle_sync_req_from_mac()` retunes the radio and clears the flag inside itself, so it needed a hook at its call site (attached-UE only -- the MAC issues no sync request under `--passive-rx`, so no replay can observe it) |
+| `lose_lock` call sites | `nr-ue.c`: UE_thread entry (`UE->is_synchronized = 0`), RXDISCONT invalidation, RFSTALL invalidation, CFOTRK retune invalidation, and (fix round 1) the `handle_sync_req_from_mac(UE) == 0` branch | **Corrected in fix round 1**: the original claim "every site where the shared `is_synchronized` is cleared inside `UE_thread`" covered only the direct ASSIGNMENTS. `handle_sync_req_from_mac()` retunes the radio and clears the flag inside itself, so it needed a hook at its call site. **Reachability corrected in fix round 2 -- NOT attached-UE-only**: the pending-sync flag is set both by `handle_reconfiguration_with_sync()` (RRC_CONNECTED-gated, never reached under `--passive-rx`) AND by `nr_ue_decode_mib()`'s `cellBarred` branch (`openair2/LAYER2/NR_MAC_UE/nr_ue_procedures.c:149-158`, dispatched from `nr_rrc_mac_config_req_mib()` at `config_ue.c:1125` with no `IS_PASSIVE_RX_MODE` gate on the path), and a passive receiver does decode MIB -- so a `cellBarred` cell reaches this hook under `--passive-rx` as well. The hook is correct on both paths |
 | `lock` call sites | `nr-ue.c`: the `sync_ref` forced-sync branch, and the successful-acquisition block just before the "UE synchronized!" `LOG_A` | `absolute_slot` is the loop counter, passed through as the lock slot |
 | `set_rf_discontinuity` call sites | `nr-ue.c`: the `nr_rx_continuity_check` failure (BEFORE the `ISAC_DISC_NO_RESYNC` switch — the gap happened whether or not this build reacquires), the RFSTALL `nrue_ru_reinit()` success, and the CFOTRK `nrue_ru_reinit()` | Common-mode by construction (P03 bumps `acq_epoch` on every active branch) |
 | `nb_antennas_rx` cross-check | `executables/nr-uesoftmodem.c`, `nr_isac_set_nb_antennas_rx(get_nrUE_params()->nb_antennas_rx)` immediately before `nr_isac_init()` — the single site P03's audit names | The check inside `nr_isac_init()` was changed from "LOG_E + sensing disabled" to `AssertFatal`: a silently-off sensing pipeline on a misconfigured branch list reads as an empty capture instead of a misconfiguration |
@@ -1234,8 +1234,9 @@ Reviewer / accomplishment date if gate passed: n/a (no gate passed)
    where `is_synchronized` is cleared inside `UE_thread`" was overstated — corrected above and in
    the report. Failure it admitted: an attached-UE MAC resync retunes the radio, branch epochs do
    not move, and DL jobs fanned out before the retune stay epoch-FRESH and are decoded against
-   post-retune samples — the exact old/new mixing P05's epochs exist to prevent. Inert under
-   `--passive-rx` (no MAC sync request), which is why no replay could have caught it.
+   post-retune samples — the exact old/new mixing P05's epochs exist to prevent. **The "inert
+   under `--passive-rx`" claim made here was itself wrong and is retracted in fix round 2 below:
+   the `cellBarred` branch of MIB decode reaches this hook under `--passive-rx` too.**
    Fixed at the call site: `if (handle_sync_req_from_mac(UE) == 0) { ue_branches_discontinuity();
    ue_branches_lose_lock(); continue; }`.
 2. MINOR — the consumer's stale-epoch `continue` now sits ABOVE the
@@ -1257,6 +1258,32 @@ Re-verified offline after the fixes (no radio; X410 still unreachable):
 radio opened` (exit 0), `replay_branch_view.sh` 34/34/31/34/34 of 38, `ctest` 5/5,
 `nr_rx_branch_test` 19/19, `check_manifest.py --selftest` PASS / `--fixtures` OK.
 Commit: the "P06a fix round 1" commit on `merge/adaptive-sensing`, the child of `32b3239f5b` (the SHA itself is deliberately not written here -- recording it in this file required an amend, which changed it; `git log --oneline 32b3239f5b..` resolves it).
+
+### Fix round 2 (2026-09-11, same day) — wording only, no logic change
+
+Fix round 1's own justification overstated in the opposite direction. It called the MAC-resync hook
+"attached-UE only … which is why no replay can observe it". **Retracted.** Traced in this session
+rather than taken on trust: `nr_ue_synch_request()` (`openair1/SCHED_NR_UE/fapi_nr_ue_l1.c:403`)
+sets `PHY_VARS_NR_UE.synch_request.received_synch_request`, and it is reached from TWO places —
+`handle_reconfiguration_with_sync()` (genuinely attached-only, RRC_CONNECTED-gated, never reached
+under `--passive-rx`) and `nr_ue_decode_mib()`'s `cellBarred` branch
+(`openair2/LAYER2/NR_MAC_UE/nr_ue_procedures.c:149-158`). The second is dispatched from
+`nr_rrc_mac_config_req_mib()` (`openair2/LAYER2/NR_MAC_UE/config_ue.c:1125`) with **no
+`IS_PASSIVE_RX_MODE` gate anywhere on that path** (the only such gate in that file is at
+`config_ue.c:2163`, on an unrelated path), and a passive receiver decodes MIB. So a gNB signalling
+`cellBarred` fires this hook under `--passive-rx` as well: unlikely on this rig, not impossible,
+and in principle replay-observable.
+
+Corrected in the code comment, the design-table row above and the fix-round-1 text above. **No
+logic change**: the hook is correct on both reachability paths — which is precisely why finding
+this changed nothing but the words. Note on the citation: the coordinator's `L2_interface_ue.c:126-130`
+does not exist in this tree; the real dispatch is `config_ue.c:1125`, verified by reading it.
+
+Because a `.c` comment changed, the binary was rebuilt and the replay re-run rather than assuming a
+comment cannot matter: `pgrep -x nr-uesoftmodem` empty → build rc=0 → binary ``0d011b9c3a709ea6b3d90fb9c104d715aa8576f53521de105de6536d1dff1f41`` →
+legacy replay `REPLAY PASS: identical DL controls=34 failed=0 raw UL=24; no radio opened` (exit 0),
+`ctest` 5/5, `nr_rx_branch_test` 19/19, `check_manifest --selftest` PASS / `--fixtures` OK. No
+radio: the X410 is still unreachable.
 
 ## Session template — copy for each future work session
 

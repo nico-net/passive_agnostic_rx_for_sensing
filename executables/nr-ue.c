@@ -1358,8 +1358,16 @@ void *UE_thread(void *arg)
        * (nr-ue.c, "clean_UE_harq(UE); UE->is_synchronized = 0;"). Without these two lines the
        * branch epochs would not move across a MAC-driven resync, so DL jobs fanned out before the
        * retune would still look epoch-fresh and be decoded against post-retune samples -- exactly
-       * the old/new mixing P05's epochs exist to prevent. Attached-UE only (the MAC issues no sync
-       * request under --passive-rx), which is why no replay can observe it. */
+       * the old/new mixing P05's epochs exist to prevent.
+       * REACHABILITY (corrected in fix round 2 -- it is NOT attached-UE-only): the pending-sync
+       * flag this call consumes is set by nr_ue_synch_request() (fapi_nr_ue_l1.c:403) from two
+       * places. One is handle_reconfiguration_with_sync(), genuinely attached-only (RRC_CONNECTED,
+       * never reached under --passive-rx). The other is nr_ue_decode_mib()'s cellBarred branch
+       * (openair2/LAYER2/NR_MAC_UE/nr_ue_procedures.c:149-158), reached from
+       * nr_rrc_mac_config_req_mib() (config_ue.c:1125) with NO IS_PASSIVE_RX_MODE gate anywhere on
+       * that path -- and a passive receiver decodes MIB. So a gNB signalling cellBarred triggers
+       * this under --passive-rx too. Unlikely on this rig, not impossible; the hook is correct on
+       * both paths either way, which is why no code change was needed when this was found. */
       ue_branches_discontinuity();
       ue_branches_lose_lock();
       continue;
