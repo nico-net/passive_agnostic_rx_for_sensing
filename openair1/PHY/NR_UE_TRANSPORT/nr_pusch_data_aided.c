@@ -158,7 +158,28 @@ void nr_isac_pusch_data_aided_submit(PHY_VARS_NR_UE *ue,
   static __thread uint32_t l_buf[UL_DA_MAX_RE];
 
   const uint32_t cap      = UL_DA_MAX_RE;
-  const uint32_t nant     = (nof_ant > 4) ? 4 : (nof_ant ? nof_ant : 1);
+  const uint32_t avail_ant = (nof_ant > 4) ? 4 : (nof_ant ? nof_ant : 1);
+
+  /* adaptive_RX_pipeline.md P10c: who consumes these rows.
+   *
+   * The DECODE that produced the transport block above combines all `nof_ant` antennas coherently
+   * (nr_rx_pusch_group_tp()s MRC) -- but what is submitted here is NOT that combination. H = Y_a/X
+   * is formed PER ANTENNA below against one common reconstructed X, exactly as the downlink twin
+   * does, so plane `a` is an honest measurement at physical receive channel `a` and carries a real
+   * per-branch identity. That makes this producer the same shape as every DL producer P10a/P10b
+   * migrated: one untagged submission of the producers own antenna count at a single active branch
+   * (the default, and the co-located-array AoA deployment), one single-antenna submission per
+   * branch -- a pointer offset into the same packed buffer, not a second pack -- otherwise.
+   *
+   * The coherent combining stays where it is: it produces the shared REFERENCE (X), not the rows,
+   * and splitting the decode itself per branch is P08s separate, still-open work. */
+  nr_isac_submit_plan_t plan[NR_RX_BRANCH_MAX];
+  uint32_t pack_ant = 0;
+  const int nof_plan = nr_isac_submit_plan(plan, NR_RX_BRANCH_MAX, avail_ant, avail_ant, &pack_ant);
+  if (nof_plan <= 0 || pack_ant == 0) {
+    return;
+  }
+  const uint32_t nant = pack_ant;  /* == avail_ant with one active branch */
   const int      slot_off = (slot % RU_RX_SLOT_DEPTH) * sps * symsz;
   const uint32_t expected = TB.G / (Qm * TB.nb_layers);
 
@@ -238,8 +259,12 @@ void nr_isac_pusch_data_aided_submit(PHY_VARS_NR_UE *ue,
                                .dl_center_hz    = fp->ul_CarrierFreq,
                                .pci             = fp->Nid_cell,
                                .slots_per_frame = fp->slots_per_frame};
-  nr_isac_submit_cfr_multi(ul_slot_idx, 0.0f, NR_ISAC_SRC_PUSCH_DATA, &carrier, h_buf, nant, cap,
-                           k_buf, l_buf, nof_re, 1.0f);
+  for (int pi = 0; pi < nof_plan; pi++) {
+    /* Slice, not copy: h_buf is antenna-major with stride `cap`. */
+    nr_isac_submit_cfr_multi_branch(ul_slot_idx, 0.0f, NR_ISAC_SRC_PUSCH_DATA, &carrier,
+                                    &h_buf[2 * (size_t)plan[pi].first_ant * cap], plan[pi].nof_ant,
+                                    cap, k_buf, l_buf, nof_re, 1.0f, plan[pi].branch_id);
+  }
   atomic_fetch_add_explicit(&g_da_ok, 1, memory_order_relaxed);
   atomic_fetch_add_explicit(&g_da_re, nof_re, memory_order_relaxed);
 }

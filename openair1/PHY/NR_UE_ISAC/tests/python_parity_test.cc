@@ -807,6 +807,38 @@ void test_branch_submit_plan()
   }
 }
 
+// P10c: the two UL producers (nr_pusch_data_aided.c, nr_pusch_passive_decode.c) pass the passive
+// gNB context's OWN allocated plane count as BOTH legacy_nof_ant and available_antennas -- that
+// count is min(nb_antennas_rx, PASSIVE_UL_MAX_ANT), fixed at passive_gnb_prepare() time, not
+// nb_antennas_rx itself. The hazard this pins is UL-specific: a branch mapped past it would slice
+// rxdataF / ul_ch_estimates planes the context never allocated.
+void test_ul_submit_plan()
+{
+  nr_isac_submit_plan_t plan[NR_RX_BRANCH_MAX];
+  uint32_t pack = 0;
+
+  // Legacy identity: whatever the context allocated, one untagged submission of exactly that.
+  for (uint32_t nant = 1; nant <= 4; ++nant) {
+    require(build_submit_plan(nullptr, plan, NR_RX_BRANCH_MAX, nant, nant, &pack) == 1
+                && plan[0].first_ant == 0 && plan[0].nof_ant == nant
+                && plan[0].branch_id == NR_ISAC_BRANCH_NONE && pack == nant,
+            "a UL CFR submission must be untagged and keep the context antenna count at 1 branch");
+  }
+
+  // Multi-branch: per-antenna H = Y_a/X is a real per-branch measurement, so each branch reads its
+  // own plane -- it is NOT attributed to the lowest branch, and NOT dropped.
+  const nr_rx_branch_set_t two = branch_set({0, 2});  // branch 0 -> phys 0, branch 2 -> phys 1
+  require(build_submit_plan(&two, plan, NR_RX_BRANCH_MAX, 4, 4, &pack) == 2
+              && plan[0].branch_id == 0 && plan[0].first_ant == 0
+              && plan[1].branch_id == 2 && plan[1].first_ant == 1,
+          "each UL branch must carry its own identity and read its own antenna plane");
+
+  // A context that allocated only 2 planes must not serve branches mapped to planes 2 and 3.
+  const nr_rx_branch_set_t high = branch_set({0, 1, 2, 3});
+  require(build_submit_plan(&high, plan, NR_RX_BRANCH_MAX, 2, 2, &pack) == 2 && pack == 2,
+          "branches beyond the passive UL context allocated planes must be skipped, not sliced");
+}
+
 void test_branch_output_identity()
 {
   PipelineConfig base;
@@ -1081,7 +1113,7 @@ void test_obsolete_aoa_env_rejected()
 
 int main()
 {
-  try {test_fft();test_adaptive_threshold();test_detector();test_required_cuda_contract();test_aoa();test_aoa_component_mixture_and_cross_leg_fusion();test_enu_geometry();test_repeated_ul_confirmation_gates_global_birth();test_variable_cpi();test_causal_cpi_pipeline();test_finite_admission_window();test_mixed_row_dl_rdm_isolation();test_invalid_ul_does_not_suppress_dl();test_dl_capture_fails_closed_without_dl();test_validation_report_compatibility();test_branch_identity_report();test_branch_engine_routing();test_branch_submit_plan();test_branch_output_identity();test_branch_engines_are_independent();test_obsolete_aoa_env_rejected();}
+  try {test_fft();test_adaptive_threshold();test_detector();test_required_cuda_contract();test_aoa();test_aoa_component_mixture_and_cross_leg_fusion();test_enu_geometry();test_repeated_ul_confirmation_gates_global_birth();test_variable_cpi();test_causal_cpi_pipeline();test_finite_admission_window();test_mixed_row_dl_rdm_isolation();test_invalid_ul_does_not_suppress_dl();test_dl_capture_fails_closed_without_dl();test_validation_report_compatibility();test_branch_identity_report();test_branch_engine_routing();test_branch_submit_plan();test_ul_submit_plan();test_branch_output_identity();test_branch_engines_are_independent();test_obsolete_aoa_env_rejected();}
   catch(const std::exception& e){std::fprintf(stderr,"python parity test failed: %s\n",e.what());return EXIT_FAILURE;}
   std::puts("native sensing golden parity checks passed");return EXIT_SUCCESS;
 }

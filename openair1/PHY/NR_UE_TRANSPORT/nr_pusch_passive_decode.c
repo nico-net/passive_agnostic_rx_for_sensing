@@ -874,7 +874,23 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
    * point of a 4-element array is that the inter-element phase carries the bearing, and combining
    * before submission would destroy exactly that. */
   if (nr_isac_enabled() && nr_isac_source_enabled(NR_ISAC_SRC_PUSCH_DMRS)) {
-    const uint32_t nof_ant_cfr = (uint32_t)nant;
+    /* adaptive_RX_pipeline.md P10c: who consumes these rows. The per-antenna DM-RS channel
+     * estimates are NOT combined here (see the paragraph above -- combining would destroy the
+     * inter-element phase), so plane `a` is an honest measurement at physical receive channel `a`
+     * and carries a real per-branch identity, exactly like every DL producer P10a/P10b migrated.
+     * One untagged submission of nant planes at a single active branch (the default, and the
+     * co-located-array AoA deployment); one single-antenna submission per branch -- a pointer
+     * offset into the same packed buffer -- otherwise. A branch naming a physical channel this
+     * context did not allocate (nant < 4) is skipped and counted inside nr_isac_submit_plan().
+     *
+     * The coherent multi-antenna combining that DOES happen on this path is in the decode
+     * (nr_rx_pusch_group_tp() -> LLRs -> LDPC), which produces the shared reference, not these
+     * rows. Splitting the decode itself per branch is P08s separate, still-open work. */
+    nr_isac_submit_plan_t plan[NR_RX_BRANCH_MAX];
+    uint32_t pack_ant = 0;
+    const int nof_plan =
+        nr_isac_submit_plan(plan, NR_RX_BRANCH_MAX, (uint32_t)nant, (uint32_t)nant, &pack_ant);
+    const uint32_t nof_ant_cfr = pack_ant;  /* == nant with one active branch */
     const int      num_sp      = pdu.param_v4.numSpatialStreamIndices;
     /* First DM-RS symbol inside the allocation. TS 38.211 puts the front-loaded one at l0, and it
      * is the strongest; the additional positions are used by the estimator but one symbol is what
@@ -889,7 +905,7 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
     const int logical_start_sc = (g->bwp_start + g->start_rb) * NR_NB_SC_PER_RB;
     const int fft_start_sc = (logical_start_sc + fp->first_carrier_offset) % fp->ofdm_symbol_size;
     const int num_sc = g->num_rb * NR_NB_SC_PER_RB;
-    if (dmrs_sym >= 0 && num_sp > 0 && num_sc > 0) {
+    if (dmrs_sym >= 0 && num_sp > 0 && num_sc > 0 && nof_plan > 0 && nof_ant_cfr > 0) {
       static __thread float    *ul_h = NULL;
       static __thread uint32_t *ul_k = NULL, *ul_l = NULL;
       static __thread uint32_t  ul_cap = 0;
@@ -989,9 +1005,13 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
          * the producer-timeline value FOR THIS SLOT. Exact while the lag stays under one wrap
          * (~10 slots in practice against a 20480-slot wrap). */
         const uint32_t ul_slot_idx = passive_ul_slow_time_idx(fp, frame, slot, abs_slot);
-        nr_isac_submit_cfr_multi(ul_slot_idx, 0.0f,
-                                 NR_ISAC_SRC_PUSCH_DMRS, &carrier, ul_h, nof_ant_cfr, cap,
-                                 ul_k, ul_l, nof_re, 1.0f);
+        for (int pi = 0; pi < nof_plan; pi++) {
+          /* Slice, not copy: ul_h is antenna-major with stride `cap`. */
+          nr_isac_submit_cfr_multi_branch(ul_slot_idx, 0.0f, NR_ISAC_SRC_PUSCH_DMRS, &carrier,
+                                          &ul_h[2 * (size_t)plan[pi].first_ant * cap],
+                                          plan[pi].nof_ant, cap, ul_k, ul_l, nof_re, 1.0f,
+                                          plan[pi].branch_id);
+        }
         atomic_fetch_add_explicit(&g_cfr_re, nof_re, memory_order_relaxed);
         for (uint32_t a = 0; a < nof_ant_cfr && a < PASSIVE_UL_MAX_ANT; a++) {
           /* Accumulate the SUM and divide once at report time. Dividing per grant and casting to

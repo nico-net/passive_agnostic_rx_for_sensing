@@ -69,6 +69,8 @@ switch "how many antennas may I extract", which is exactly the coupling P10/P13 
 | `PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c:2229` (+ comments :95,:2220-2227) | blind-PDCCH DM-RS tap antenna count | YES | **B DONE (P10b)** - same plan; `g_cfr_submits` deliberately still counts CANDIDATES, not branches |
 | `PHY/NR_UE_TRANSPORT/nr_pdsch_data_aided.c:210` (+ comments :206,:216) | data-aided PDSCH tap antenna count | YES | **B DONE (P10a + P07)** - the single-branch view already gives it `nb_antennas_rx = 1` on the branch's own plane, and P10a tags it from `nr_pdsch_passive_view_branch()`. No plan needed |
 | `SCHED_NR_UE/phy_procedures_nr_ue.c:1425-1426` | attached-UE PDSCH tap antenna count, clamped to `fp->nb_antennas_rx` | YES | **B DONE (P10b)** - the SSB/PBCH tap, same plan |
+| `PHY/NR_UE_TRANSPORT/nr_pusch_data_aided.c:178` | passive UL data-aided tap antenna count (the passive gNB context's own allocated plane count, not `nb_antennas_rx`) | YES | **B DONE (P10c)** - same `nr_isac_submit_plan()`. H = Y_a/X is formed PER ANTENNA against one common reconstructed X, so each plane is a real per-branch measurement |
+| `PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c:892` | passive UL DM-RS tap antenna count | YES | **B DONE (P10c)** - same plan; the per-antenna DM-RS estimates were already kept SEPARATE (the comment at `:873` says why), which is exactly what makes them sliceable per branch |
 | comment-only references: `nr_pdsch_passive_decode.c:1281,:2091`, `nr_pusch_passive_decode.c:91`, `nr_pusch_data_aided.h:45`, `nr_pdsch_passive_queue.c:99` | explain why the per-antenna buffers are heap, not thread-local | NO - prose only. The heap decision must SURVIVE (it fixed a real AVX alignment fault); only the wording needs updating | B (wording) |
 
 `PHY/NR_UE_ESTIMATION/nr_dl_channel_estimation.c:467` (`prs_meas[rxAnt]->dl_aoa = rsc_id`) is
@@ -183,6 +185,28 @@ no consumer that is not also part of the schema version P16 owns.
    into a hard rejection is an operator call -- it would refuse to start a receiver that starts
    today -- and is left open.
    Stage A item 2's comment rewrite still rides along here and is still NOT done.
+2b. **DONE (P10c) - the two UL CFR producers.** `nr_pusch_data_aided.c` and
+   `nr_pusch_passive_decode.c` were the last producers still calling the legacy untagged
+   `nr_isac_submit_cfr_multi()`. They now use the same `nr_isac_submit_plan()`.
+   **They are NOT a special case, and the "coherently combined, therefore not per-branch
+   attributable" argument does not apply to what they submit** - it applies to the DECODE.
+   The decode (`nr_rx_pusch_group_tp()` MRC -> LLRs -> LDPC) does combine up to
+   `PASSIVE_UL_MAX_ANT` antennas, and that combination produces the shared REFERENCE (the
+   re-encoded X, or the estimator state); what reaches the sensing engine is formed PER ANTENNA
+   from it -- `H = Y_a/X` at `nr_pusch_data_aided.c:222`, `ul_ch_estimates[0*num_sp + a]` at
+   `nr_pusch_passive_decode.c:969` -- into an antenna-major buffer whose plane `a` is UE physical
+   receive channel `a` (the UL FEP writes `rxdataF[a] <- ue->common_vars.rxdata[a]`). Both files
+   already refused to combine before submitting, for the AoA inter-element phase. So a UL branch
+   submission is as honest as a DL one, and the multi-branch cases of "attribute it to the
+   lowest branch" versus "drop it" both become moot: it is attributed CORRECTLY.
+   `available_antennas` is the passive gNB context's own allocated plane count
+   (`min(nb_antennas_rx, PASSIVE_UL_MAX_ANT)`, fixed at `passive_gnb_prepare()` time), so a branch
+   mapped past it is skipped and counted rather than slicing a plane that was never allocated.
+   This also closes P10b's review Minor finding 3 (under multi-branch mode the UL submission was
+   silently truncated to plane 0 by `requested_antennas_ = 1`).
+   **P08 is UNAFFECTED and still fully open**: splitting the UL DECODE per branch (a
+   single-antenna UL decode view, the analogue of P07's `t_view_branch`) is a different, larger
+   task with a real SNR-regression risk, and nothing here attempts it.
 3. Row 8 - per-branch decode provenance for the data-aided CFR. NOT done (P10b touched the
    submission plan, not the shared-decode coupling).
 4. Row 10 - lift `rx_array_calibration` out from behind `aoa_enable` into per-branch chain
