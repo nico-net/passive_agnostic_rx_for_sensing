@@ -105,6 +105,8 @@ void nr_passive_replay_init(PHY_VARS_NR_UE *ue)
   if (!path || !*path) return;
   const NR_DL_FRAME_PARMS *fp=&ue->frame_parms;
   size_t bytes=(size_t)REPLAY_FRAMES*fp->samples_per_frame*fp->nb_antennas_rx*sizeof(c16_t);
+  LOG_I(PHY,"REPLAY geometry nb_ant=%u samples_per_frame=%u slots_per_frame=%u bytes=%zu\n",
+        fp->nb_antennas_rx, fp->samples_per_frame, fp->slots_per_frame, bytes);
   if (!fp->nb_antennas_rx || fp->nb_antennas_rx>4 || !bytes || bytes>REPLAY_MAX_BYTES
       || !fp->slots_per_frame || fp->slots_per_frame>160) {
     LOG_E(PHY,"REPLAY VOID: geometry exceeds bounded recorder\n"); return;
@@ -200,13 +202,16 @@ void nr_passive_replay_dl(const nr_pdsch_passive_job_t *job,
   if (atomic_load(&state)==RP_DISABLED) return;
   const bool success=result->status==NR_PDSCH_PASSIVE_DECODE_CRC_OK && result->tb;
   const bool failures=header->version>=2;
-  if(!success && !(failures && job->sweep_ticket.settled &&
+  /* Manual mode (TESTING MODE RULE): the layout is fixed, not swept, so generation==0 means
+   * "no sweep in progress, already settled" -- treat it exactly like a settled ticket. */
+  if(!success && !(failures && (job->sweep_ticket.generation==0 || job->sweep_ticket.settled) &&
                   result->status==NR_PDSCH_PASSIVE_DECODE_CRC_FAIL))
     return;
-  if (success && job->sweep_ticket.generation && (!failures || job->sweep_ticket.settled)
+  if (success && (job->sweep_ticket.generation==0 || !failures || job->sweep_ticket.settled)
       && atomic_load(&ul_seen)) {
     int expected=RP_ARMED;
-    atomic_compare_exchange_strong(&state,&expected,RP_REQUESTED);
+    if (atomic_compare_exchange_strong(&state,&expected,RP_REQUESTED))
+      LOG_I(PHY,"REPLAY ARMED at absolute_slot=%ld\n",job->absolute_slot);
   }
   pthread_mutex_lock(&record_lock);
   if (recordable(job->absolute_slot) && header->n_dl<REPLAY_DL) {

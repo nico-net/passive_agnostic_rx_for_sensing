@@ -7,8 +7,56 @@
   "commit_at_generation": "e4c8cadd5f22b40605f82f6adedc838ee8e056f5",
   "current_build_nr_uesoftmodem_sha256": "b064c9957bc1b68d717543eb2bac28c4b2616115bc675f5fed38685f008742fe",
   "manifest_reference": "tests/passive_rx/baselines/manifest_20260910_6fcb7a6-dirty.json",
-  "status": "BLOCKED",
-  "admissible_fixtures": [],
+  "status": "PASS",
+  "admissible_fixtures": [
+    {
+      "path": "/home/sens/NICOLA/captures/sensing_manual_fixed.UtvBT7",
+      "replay_bin_sha256": "ea24da3ea3a9563b28e996adb870f195a2c7ecfe1992f97dd60ae0bee31bd761",
+      "receiver_conf_sha256": "5022d875a26f1ec235ee209b1ff04ef3031290c149399702b7ef63d0c3a381ef",
+      "run_log_sha256": "e56cfa261d27f5e1fbba5a1553096c57fad900765a34570add140a0000cf319c",
+      "producing_binary_sha256": "c3810019905f3fb661138d12fd5b9b6156d47e36344ae871f08047ba65dc7889",
+      "producing_liboai_usrpdevif_sha256": "ad0a71c56dbc509149337460af7d0e97c64d4f390f85bec48b8882aa64f64583",
+      "commit_at_capture": "b90276ded4b421927cfdb2d080068900488ed53a (plus this session's uncommitted DL+UL recorder fixes -- see resolution_summary; committed in this same fix-round-2 commit)",
+      "full_auto": 0,
+      "header": {
+        "magic_match": true,
+        "version": 2,
+        "header_bytes": 1695728,
+        "job_bytes": 384,
+        "fp_bytes": 1400752,
+        "iq_bytes": 314572800,
+        "start": 8880,
+        "slots": 320,
+        "n_ul": 24,
+        "n_dl_records": 38,
+        "dl_records_success_tb_bytes_gt0": 34,
+        "dl_records_failure_tb_bytes_eq0": 4,
+        "file_bytes_match": true
+      },
+      "capture": {
+        "command": "sudo -n env REPLAY=1 DURATION=180 MONITOR_PORT=8096 bash tests/passive_rx/run_manual_x410.sh",
+        "validity": "RF_VALID_REQUIRES_DL_UL_CRC_EVIDENCE",
+        "stop_reason": "DURATION_COMPLETE",
+        "process_exit": 0,
+        "cleanup_status": "CLEAN",
+        "sib1_common_facts_count": 1,
+        "rxdiscont_count": 0,
+        "rfstall_count": 0,
+        "nic_missed_before": 27607564,
+        "nic_missed_after": 27607564,
+        "replay_armed_line": "REPLAY ARMED at absolute_slot=8852",
+        "replay_ready_line": "REPLAY READY: .../replay.bin slots=320 UL=24 DL-controls=38 IQ=314572800 bytes"
+      },
+      "replay_verification": {
+        "command": "sudo -n env ISAC_PASSIVE_REPLAY_INPUT=<fixture>/replay.bin LD_LIBRARY_PATH=$(pwd):/usr/local/lib ./nr-uesoftmodem -O <fixture>/receiver.conf -r 273 --numerology 1 --band 78 -C 3450000000 --ssb 150 --ue-rxgain 40 --ue-nb-ant-rx 4 --ue-nb-ant-tx 4 --passive-rx --ue-fo-compensation --cont-fo-comp 1 --freq-sync-P 0.05 --freq-sync-I 0.001 --initial-fo -16480 --thread-pool 0,1,6,7 --time-sync-I 0.01 --ntn-initial-time-drift -4.25 -A 90",
+        "no_radio_opened": true,
+        "verdict_line": "REPLAY PASS: identical DL controls=34 failed=0 raw UL=24; no radio opened",
+        "exit_code": 0,
+        "wall_time_s": 4.463,
+        "no_ground_truth_timing_used": "Verified by reading nr_passive_replay_read() (nr_passive_replay_capture.c:225-303): the replay path consumes only the file's own recorded header/IQ/job metadata (source-index continuity check at :266-269, per-slot FO override at nr_slot_fep_fo_override_hz) -- no gNB log, no GT file, no wall-clock alignment of any kind is opened or read anywhere in this function or its callee nr_pdsch_passive_decode()."
+      }
+    }
+  ],
   "blocker": {
     "summary": "No admissible fixture exists. The 22 pre-existing replay.bin captures were all produced by another tree/binary AND all used pdcch_blind_monitor_full_auto=1 (VOID under the plan's TESTING MODE RULE). A new bounded capture was collected with the current binary through the manual launcher in the required full_auto=0 manual mode (see new_capture_attempts[1]) and is RF-valid (SIB1 seen, DL crc_ok 91.8%, UL crc_ok 83.2%, clean exit, no RXDISCONT/RFSTALL, binary matches the current build) -- but it produced NO replay.bin, and this is a structural, deterministic property of the current recorder code under manual mode, not RF variance: further capture attempts cannot change the outcome.",
     "root_cause": "nr_passive_replay_capture.c's nr_passive_replay_dl() only arms the recorder (RP_ARMED -> RP_REQUESTED) when a successful DL job carries job->sweep_ticket.generation != 0 (nr_passive_replay_capture.c:206-210, condition checked at line 206). sweep_ticket is populated ONLY inside the block gated by `if (g_pdsch_sweep_on && !is_dci10)` (nr_pdcch_blind_monitor_rt.c:2100-2107); outside that block every job's sweep_ticket is left zero-initialized (nr_pdcch_blind_monitor_rt.c:2098, `nr_pdsch_sweep_ticket_t sweep_ticket = {0};`). g_pdsch_sweep_on is set in pdsch_sweep_maybe_enable() to `ready = cfg->dl_full_auto && (...)` (nr_pdcch_blind_monitor_rt.c:164-184) -- i.e. it can only be true when pdcch_blind_monitor_full_auto=1. Under the plan's mandatory manual mode (pdcch_blind_monitor_full_auto=0, adaptive_manual_dlul.conf), cfg->dl_full_auto is always false, so g_pdsch_sweep_on is always false, so sweep_ticket.generation is always 0 for every DL job, so the recorder can never leave RP_ARMED and replay.bin is never written -- proven by reading the single call site of nr_pdsch_config_sweep_select() (nr_pdcch_blind_monitor_rt.c:2108, the only place sweep_ticket.generation is ever assigned a nonzero value), not inferred from this run alone.",
@@ -39,7 +87,8 @@
       }
     ],
     "why_not_fixed_here": "P02's mandate is a narrow launcher opt-in (REPLAY=1 env passthrough) plus fixture audit/registration/checker infrastructure, not a change to production PDCCH/replay decode logic. Relaxing the arm condition for manual mode is a real design decision (what does 'settled' mean for a job with no sweep at all?) belonging to whoever owns nr_passive_replay_capture.c / nr_pdcch_blind_monitor_rt.c, and the plan explicitly forbids tuning code/config to manufacture a pass. Reported here as BLOCKED rather than patched.",
-    "attempts_exhausted_early": "ATTEMPTS is capped at 3 per the brief, but only 2 were used: attempt 1 was VOID_RF_OR_ASSERT (RFSTALL overflow at USRP_RX_START, zero SIB1 -- ordinary cold-start RF variance) and attempt 2 was RF-valid but structurally cannot produce a replay.bin per root_cause above. A 3rd attempt would re-run the identical deterministic code path and cannot produce a different outcome; running it anyway would be indistinguishable from tuning/retrying to force a pass, which the plan forbids."
+    "attempts_exhausted_early": "ATTEMPTS is capped at 3 per the brief, but only 2 were used: attempt 1 was VOID_RF_OR_ASSERT (RFSTALL overflow at USRP_RX_START, zero SIB1 -- ordinary cold-start RF variance) and attempt 2 was RF-valid but structurally cannot produce a replay.bin per root_cause above. A 3rd attempt would re-run the identical deterministic code path and cannot produce a different outcome; running it anyway would be indistinguishable from tuning/retrying to force a pass, which the plan forbids.",
+    "status_note": "RESOLVED in fix round 2 -- see resolution_summary and admissible_fixtures[0]. Kept below as the historical root-cause record for the DL-side gate; the UL-side gate (found and fixed in round 2) is documented in resolution_summary, not duplicated here."
   },
   "new_capture_attempts": [
     {
@@ -78,6 +127,54 @@
       "replay_bin_produced": false,
       "replay_log_lines_found": 0,
       "note": "RF-valid, DL/UL CRC evidence present, full_auto=0 confirmed in receiver.conf, binary matches current build -- but ISAC_PASSIVE_REPLAY_CAPTURE never armed (zero occurrences of the string 'replay' anywhere in run.log, case-insensitive). See blocker.root_cause."
+    },
+    {
+      "attempt": "fix-round-1, #1",
+      "path": "/home/sens/NICOLA/captures/sensing_manual_fixed.3NB5Ri",
+      "command": "sudo -n env REPLAY=1 DURATION=180 MONITOR_PORT=8092 bash tests/passive_rx/run_manual_x410.sh",
+      "binary_sha256": "b81b21e37dae9ad4666319274a6e32134055329eec150af3c75af4a89578c5d7",
+      "validity": "RF_VALID_REQUIRES_DL_UL_CRC_EVIDENCE",
+      "sib1_common_facts_count": 1,
+      "replay_bin_produced": false,
+      "note": "DL sweep_ticket gate fixed (round 1) but UL ul_auto gate not yet found -- ul_seen never true, recorder stuck at RP_ARMED."
+    },
+    {
+      "attempt": "fix-round-1, #2",
+      "path": "/home/sens/NICOLA/captures/sensing_manual_fixed.JLDoZc",
+      "command": "sudo -n env REPLAY=1 DURATION=180 MONITOR_PORT=8093 bash tests/passive_rx/run_manual_x410.sh",
+      "binary_sha256": "b81b21e37dae9ad4666319274a6e32134055329eec150af3c75af4a89578c5d7",
+      "validity": "VOID_RF_OR_ASSERT",
+      "sib1_common_facts_count": 1,
+      "replay_bin_produced": false,
+      "note": "RFSTALL (UHD ERROR_CODE_OVERFLOW) at t=157.27s, ordinary late-run RF variance, unrelated to the replay recorder. Used live /proc/<pid>/environ inspection during this run to independently confirm ISAC_PASSIVE_REPLAY_CAPTURE/FAILURES do reach the process."
+    },
+    {
+      "attempt": "diagnostic (not counted against the 2-attempt cap; instrumented build, DURATION=30)",
+      "path": "/home/sens/NICOLA/captures/sensing_manual_fixed.LH2I9w",
+      "binary_sha256": "5745d305dcb0a1afeab0942801a9f59575a02955ce135aee749bc8ab816b08e5",
+      "validity": "RF_VALID_REQUIRES_DL_UL_CRC_EVIDENCE",
+      "sib1_common_facts_count": 1,
+      "replay_bin_produced": false,
+      "note": "First diagnostic build (temporary LOG_A instrumentation, reverted before commit). Showed dl#1-20 with success=1 repeatedly but ul_seen=0 always -- the exact evidence the controller cited in the round-2 ruling."
+    },
+    {
+      "attempt": "diagnostic (not counted against the 2-attempt cap; instrumented build, DURATION=60)",
+      "path": "/home/sens/NICOLA/captures/sensing_manual_fixed.Ma654f",
+      "binary_sha256": "74d2b8189241e096c90b7bb7635a44ef7460fe919a8ca3905f9f54f29e0f36c0",
+      "validity": "RF_VALID_REQUIRES_DL_UL_CRC_EVIDENCE",
+      "sib1_common_facts_count": 1,
+      "replay_bin_produced": false,
+      "note": "Second diagnostic build (one-shot first-UL-seen log added). 'first UL seen' NEVER printed in 60s despite PDSCHQ decoded=7644/crc_ok=7050 and pusch_passive try=6114/crc_ok=5010 -- proved nr_passive_replay_ul() was never called at all, root-causing the UL gate at nr_pdcch_blind_monitor_rt.c:1738-1742 (ul_auto-gated call site)."
+    },
+    {
+      "attempt": "fix-round-2 (final, both DL+UL fixes, diagnostics trimmed to the two permanent lines)",
+      "path": "/home/sens/NICOLA/captures/sensing_manual_fixed.UtvBT7",
+      "command": "sudo -n env REPLAY=1 DURATION=180 MONITOR_PORT=8096 bash tests/passive_rx/run_manual_x410.sh",
+      "binary_sha256": "c3810019905f3fb661138d12fd5b9b6156d47e36344ae871f08047ba65dc7889",
+      "validity": "RF_VALID_REQUIRES_DL_UL_CRC_EVIDENCE",
+      "sib1_common_facts_count": 1,
+      "replay_bin_produced": true,
+      "note": "SUCCESS. REPLAY ARMED at absolute_slot=8852; REPLAY READY slots=320 UL=24 DL-controls=38 IQ=314572800 bytes. Registered as admissible_fixtures[0]."
     }
   ],
   "pre_existing_captures_considered": [
@@ -521,5 +618,7 @@
         "receiver.conf pdcch_blind_monitor_full_auto=1 (VOID under TESTING MODE RULE)"
       ]
     }
-  ]
+  ],
+  "resolved_utc": "2026-09-11T07:58:00Z",
+  "resolution_summary": "P02 fix round 2 (controller ruling): two structural gates in the passive-replay recorder both coupled arming to full-auto-only code paths, making it permanently unreachable under the plan's mandatory manual mode (pdcch_blind_monitor_full_auto=0). DL gate fixed in nr_passive_replay_capture.c's nr_passive_replay_dl() (round 1): sweep_ticket.generation==0 (manual mode, no sweep) now treated as an already-settled ticket. UL gate fixed in nr_pdcch_blind_monitor_rt.c's UL candidate loop (round 2, found via live LOG_I instrumentation on capture sensing_manual_fixed.LH2I9w/Ma654f): nr_passive_replay_ul() was called only inside `if(cand_task[ti].ok && cand_task[ti].ul_auto)`, so ul_seen never became true in manual mode; moved to fire on `if (cand_task[ti].ok)` alone, independent of ul_auto. With both fixes, capture sensing_manual_fixed.UtvBT7 (binary c3810019905f3fb661138d12fd5b9b6156d47e36344ae871f08047ba65dc7889) produced 'REPLAY READY ... slots=320 UL=24 DL-controls=38' and replay-verified 'REPLAY PASS: identical DL controls=34 failed=0 raw UL=24; no radio opened' (exit 0, 4.463s wall). This is the fixture registered below."
 }

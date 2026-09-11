@@ -18,8 +18,9 @@ Usage:
                                               selected_test_conf full_auto=1 fails, (e) a copy with
                                               one citation's line range shifted fails, (f) a
                                               synthetic single-fixture registry passes, an altered
-                                              hash in it fails, and the shipped (empty) P02
-                                              fixtures.json fails.
+                                              hash in it fails, and the shipped P02 fixtures.json
+                                              passes (it carries >=1 registered admissible fixture
+                                              as of fix round 2).
 """
 import glob
 import hashlib
@@ -451,15 +452,18 @@ def selftest():
             os.unlink(os.path.join(fx_dir, fname))
         os.rmdir(fx_dir)
 
+    # P02 fix round 2: the shipped fixtures.json is now RESOLVED (>=1 admissible fixture, see
+    # tests/passive_rx/baselines/fixtures.json's resolution_summary) -- this case therefore
+    # expects PASS, not FAIL. Before the fix it legitimately expected FAIL (empty registry); the
+    # assertion direction tracks the file's actual state rather than being pinned to history.
     shipped_fixtures_path = os.path.join(SCRIPT_DIR, "baselines", "fixtures.json")
     if os.path.isfile(shipped_fixtures_path):
         reasons_f3 = check_fixtures(shipped_fixtures_path)
-        passed_f3 = bool(reasons_f3)
-        print(f"(f3) shipped fixtures.json expected FAIL (no admissible fixture registered yet): "
-              f"{'PASS' if passed_f3 else 'FAIL (checker accepted an empty registry)'}")
+        passed_f3 = not reasons_f3
+        print(f"(f3) shipped fixtures.json expected PASS (>=1 admissible fixture registered): "
+              f"{'PASS' if passed_f3 else 'FAIL'}")
         if not passed_f3:
             ok = False
-        else:
             for line in reasons_f3:
                 print("    " + line)
     else:

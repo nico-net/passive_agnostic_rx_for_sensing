@@ -1736,10 +1736,19 @@ constdiag_done:;
       g_ul_sched++;
       /* rnti is written only after the in-range CRC check, so non-zero IS that check. */
       if (cand_task[ti].ul_out.rnti != 0) g_ul_crc_hit++;
-      if(cand_task[ti].ok && cand_task[ti].ul_auto) {
-        g_ul_disc_call++;
+      /* Manual mode (TESTING MODE RULE): record replay evidence for every ACCEPTED UL
+       * candidate, not only full-auto ones. ul_auto below gates DISCOVERY (re-interpreting the
+       * payload via a blind length/field search), not whether an accepted candidate is real --
+       * boot_rnti/dci01_length/ul_out.raw_payload are all populated identically in the manual
+       * (pinned) path (nr_pdcch_blind_monitor_rt.c:1071-1074, :1452-1460, :555-556). Coupling the
+       * recording call to ul_auto left the passive-replay recorder permanently UL-blind in manual
+       * mode (ul_seen never becomes true), independently of the DL sweep_ticket fix above. */
+      if (cand_task[ti].ok) {
         nr_passive_replay_ul(source_absolute_slot, boot_rnti, dci01_length,
                              cand_task[ti].ul_out.raw_payload);
+      }
+      if(cand_task[ti].ok && cand_task[ti].ul_auto) {
+        g_ul_disc_call++;
         nr_pdcch_blind_ul_result_t discovered;
         cand_task[ti].ok=nr_pdcch_ul_discovery_grant(&ul_opts,dci01_length,boot_rnti,
                                                     cand_task[ti].ul_out.raw_payload,&discovered);

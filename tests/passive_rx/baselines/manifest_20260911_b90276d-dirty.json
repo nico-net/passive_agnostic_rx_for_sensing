@@ -1,21 +1,23 @@
 {
     "schema": "p01.baseline_manifest.v1",
-    "generated_at_utc": "2026-09-10T23:58:38Z",
+    "generated_at_utc": "2026-09-11T08:04:08Z",
     "experiment_purpose": "P01 baseline identity; no capture",
     "host": "sens6",
     "tree": "/home/sens/NICOLA/adaptive-rx-sensing",
     "git": {
         "branch": "merge/adaptive-sensing",
-        "commit": "6fcb7a6c319d7ae7ad4b6cb03c075de0e2f7a77a",
+        "commit": "b90276ded4b421927cfdb2d080068900488ed53a",
         "status_short": [
             " M executables/nr-ue-ru.c",
             " M executables/nr-ue.c",
             " M openair1/PHY/NR_UE_TRANSPORT/nr_initial_sync.c",
+            " M openair1/PHY/NR_UE_TRANSPORT/nr_passive_replay_capture.c",
             " M openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c",
+            " M openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c",
             " M radio/USRP/usrp_lib.cpp",
-            " M tests/passive_rx/baseline_manifest.sh",
-            "D  tests/passive_rx/baselines/manifest_20260910_50c8312-dirty.json",
-            "D  tests/passive_rx/baselines/manifest_20260910_50c8312-dirty_tracked.patch",
+            " M tests/passive_rx/baselines/fixtures.json",
+            "D  tests/passive_rx/baselines/manifest_20260910_6fcb7a6-dirty.json",
+            "D  tests/passive_rx/baselines/manifest_20260910_6fcb7a6-dirty_tracked.patch",
             " M tests/passive_rx/check_manifest.py",
             " M tests/passive_rx/monitor/monitor.html",
             " M tests/passive_rx/monitor/monitor.py",
@@ -27,9 +29,9 @@
             "?? tests/passive_rx/aoa_track_dl.conf",
             "?? tests/passive_rx/run_manual_x410.sh"
         ],
-        "tracked_diff_patch_path": "tests/passive_rx/baselines/manifest_20260910_6fcb7a6-dirty_tracked.patch",
-        "tracked_diff_patch_sha256": "e450b55e050cfce8fb6f2d972b2bb66713cb99765b03e0dfbf56db99f11021e3",
-        "tracked_diff_patch_line_count": 1054,
+        "tracked_diff_patch_path": "tests/passive_rx/baselines/manifest_20260911_b90276d-dirty_tracked.patch",
+        "tracked_diff_patch_sha256": "6d423511988b82544a1a49e0831ae02de59f13861a14b9e7e184babae88a66b4",
+        "tracked_diff_patch_line_count": 1023,
         "scoped_files": [
             {
                 "path": "tests/passive_rx/MANUAL_DL_UL.md",
@@ -44,12 +46,12 @@
                 "sha256": "55c348e93a59ec846a3b09712de82420abf3b16b35e04334868f5956943c38e2"
             },
             {
-                "path": "tests/passive_rx/baselines/manifest_20260910_6fcb7a6-dirty_tracked.patch",
-                "sha256": "e450b55e050cfce8fb6f2d972b2bb66713cb99765b03e0dfbf56db99f11021e3"
+                "path": "tests/passive_rx/baselines/manifest_20260911_b90276d-dirty_tracked.patch",
+                "sha256": "6d423511988b82544a1a49e0831ae02de59f13861a14b9e7e184babae88a66b4"
             },
             {
                 "path": "tests/passive_rx/run_manual_x410.sh",
-                "sha256": "f842355ac68292c96a4de9e5a8af61b4f3458b72285218ed8b5f337da75ce681"
+                "sha256": "f1987b1ca82ab2332941fea14ab1a7964df393d9d427015a89597a82ca1e6676"
             },
             {
                 "path": "executables/CMakeLists.txt",
@@ -1913,7 +1915,7 @@
             },
             {
                 "path": "openair1/PHY/NR_UE_TRANSPORT/nr_passive_replay_capture.c",
-                "sha256": "2b74871001b7ba0048840a13f0e108d9ee2f430bd563a47ac29a39c7ae8f1fca"
+                "sha256": "ba03a3d50beed43122a35a78a40039e9e99ee6d255e105c681a207b9fdfd530b"
             },
             {
                 "path": "openair1/PHY/NR_UE_TRANSPORT/nr_passive_replay_capture.h",
@@ -1957,7 +1959,7 @@
             },
             {
                 "path": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c",
-                "sha256": "ea330d77996f9f65d365b56f20862deaa2bee97e3ebd1d310dcf830ba92d7b08"
+                "sha256": "1e1602f3312bbbd483b809d47f0c96cf06861d77aa7703a1ec52685608524434"
             },
             {
                 "path": "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.h",
@@ -7724,6 +7726,14 @@
                 "sha256": "398f12a4fa740730d082d8f0bb8b4fcc5d06f2f4604c49a293c0aacaa4d7fa55"
             },
             {
+                "path": "tests/passive_rx/baselines/fixture_audit_20260911.md",
+                "sha256": "593903f32f760a2c0294ea9bd95e876e2b69dd446e7c257bbc6a09fad98a9b4d"
+            },
+            {
+                "path": "tests/passive_rx/baselines/fixtures.json",
+                "sha256": "26a02eb580e8a502c0033e85773187d79ba33cec29d7202137a700db22b7f75e"
+            },
+            {
                 "path": "tests/passive_rx/captures/ab_10m.sh",
                 "sha256": "d4159be8748c756cf3687d4c7c26a89d7257c9d04ad83c425d02bea6cd1e78a0"
             },
@@ -7809,7 +7819,7 @@
             },
             {
                 "path": "tests/passive_rx/check_manifest.py",
-                "sha256": "2fedfc4543d35d0f1b68b8002c662720c3e54e5ea39778fffb12a8a7ca714fc3"
+                "sha256": "6a545b12cc8aa444c90092a38df2611b10496eb218e8ae5b62b62c6209140ca3"
             },
             {
                 "path": "tests/passive_rx/d1_probe.py",
@@ -7930,6 +7940,10 @@
             {
                 "path": "tests/passive_rx/plot_rvm.py",
                 "sha256": "ff2ea7d7b1aaf71e66b76041034ef5ddb3794d42e62f35eab51e55e80a6e706b"
+            },
+            {
+                "path": "tests/passive_rx/replay_header.py",
+                "sha256": "4f7c58a260bd4d8761ebf3211d745596b352a208c838b51e6e679bc85e4b32eb"
             },
             {
                 "path": "tests/passive_rx/rnti_gate.py",
@@ -8064,10 +8078,10 @@
     "build": {
         "nr_uesoftmodem": {
             "path": "cmake_targets/ran_build/build/nr-uesoftmodem",
-            "sha256": "b064c9957bc1b68d717543eb2bac28c4b2616115bc675f5fed38685f008742fe",
-            "size_bytes": 62803480,
-            "mtime_utc": "2026-09-10T23:09:00Z",
-            "mtime_epoch": 1789081740
+            "sha256": "c3810019905f3fb661138d12fd5b9b6156d47e36344ae871f08047ba65dc7889",
+            "size_bytes": 62807824,
+            "mtime_utc": "2026-09-11T07:53:24Z",
+            "mtime_epoch": 1789113204
         },
         "liboai_usrpdevif": {
             "path": "cmake_targets/ran_build/build/liboai_usrpdevif.so",
@@ -8258,7 +8272,7 @@
     },
     "antenna_mapping_and_geometry": {
         "status": "UNSURVEYED",
-        "reason": "No separated-antenna physical survey has been performed or supplied as of 20260910 (adaptive_RX_pipeline_progress.md 'Current status' table: 'Separated-antenna survey: Not provided or verified'). Do not infer physical channel-to-position mapping from source or config alone.",
+        "reason": "No separated-antenna physical survey has been performed or supplied as of 20260911 (adaptive_RX_pipeline_progress.md 'Current status' table: 'Separated-antenna survey: Not provided or verified'). Do not infer physical channel-to-position mapping from source or config alone.",
         "known_from_source": {
             "usrp_args": "type=x4xx,addr=192.168.20.2,mgmt_addr=128.178.122.174",
             "usrp_args_citation": {
