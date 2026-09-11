@@ -6,7 +6,7 @@ Canonical location: `sens6:/home/sens/NICOLA/adaptive-rx-sensing/adaptive_RX_pip
 
 ## Current status
 
-**Documentation and read-only inventory complete; P01 (baseline manifest / acceptance profile) IN_PROGRESS as of 2026-09-10 (see session below); P02 (valid DL/UL replay fixtures) PASSED as of 2026-09-11 after two controller-ruled fix rounds to the passive-replay recorder (see P02 session + Fix round 1/2 below) -- the first implementation task under this plan to reach PASS, and the first receiver source changes made under this plan (two small, ruling-scoped gate fixes in `nr_passive_replay_capture.c`/`nr_pdcch_blind_monitor_rt.c`). G0 remains IN_PROGRESS overall, blocked only on P01's outstanding survey/acceptance-limit work. P03 (branch abstraction) IN_PROGRESS as of 2026-09-11: foundation delivered (`docs/passive_branch_globals_audit.md`, `nr_rx_branch.{h,c}`, `[sensing] rx_branches`/`rx_branch_phys_map`, 14/14 gtest) but deliberately not wired into the RT read loop (controller-scoped to P04/P05). P04 (immutable buffer delivery) IN_PROGRESS as of 2026-09-11: standalone `nr_rx_span_pool.{h,c}` delivered (refcounted per-branch spans, no sample copies, per-branch drop policy), 5/5 gtest, also deliberately not wired into the RT read loop (same controller ruling -- `nr-ue.c` is dirty with another session's edits) -- G1 remains NOT_STARTED.**
+**Documentation and read-only inventory complete; P01 (baseline manifest / acceptance profile) IN_PROGRESS as of 2026-09-10 (see session below); P02 (valid DL/UL replay fixtures) PASSED as of 2026-09-11 after two controller-ruled fix rounds to the passive-replay recorder (see P02 session + Fix round 1/2 below) -- the first implementation task under this plan to reach PASS, and the first receiver source changes made under this plan (two small, ruling-scoped gate fixes in `nr_passive_replay_capture.c`/`nr_pdcch_blind_monitor_rt.c`). G0 remains IN_PROGRESS overall, blocked only on P01's outstanding survey/acceptance-limit work. P03 (branch abstraction) IN_PROGRESS as of 2026-09-11: foundation delivered (`docs/passive_branch_globals_audit.md`, `nr_rx_branch.{h,c}`, `[sensing] rx_branches`/`rx_branch_phys_map`, 14/14 gtest) but deliberately not wired into the RT read loop (controller-scoped to P04/P05). P04 (immutable buffer delivery) IN_PROGRESS as of 2026-09-11: standalone `nr_rx_span_pool.{h,c}` delivered (refcounted per-branch spans, no sample copies, per-branch drop policy), 5/5 gtest, also deliberately not wired into the RT read loop (same controller ruling -- `nr-ue.c` is dirty with another session's edits). P05 (independent digital correction/recovery) IN_PROGRESS as of 2026-09-11: standalone `nr_rx_branch_sync.{h,c}` delivered (per-branch CFO accumulator, timing offset, frame-wrap/slot-continuity bookkeeping, lock/acq epoch staleness snapshot), 14/14 gtest including G1 test 4 in pure form; a checked-in hardware-isolation guard (`tests/passive_rx/check_branch_hw_isolation.sh`, registered as two ctest entries, with its own self-test proving the grep both catches a planted violation and does not false-positive on a legitimate `rf_`-substring symbol name); and `docs/passive_branch_wiring_plan.md`, a file:line map of exactly which `nr-ue.c`/`nr-ue-ru.c` statements belong to AcquisitionOwner vs. become per-branch. Still deliberately not wired into the RT read loop (same controller ruling) -- G1 remains IN_PROGRESS: tests 1/3/4 exist in pure form (P04/P05) and test 2 exists in pure form via P03/P04, but test 5 (standalone-replay comparison) and the full G1 exit criterion (including "no unauthorized hardware operation from branch WORKERS" -- there are no live workers yet) cannot pass until the read-loop wiring lands.**
 
 | Baseline fact | Value |
 |---|---|
@@ -36,7 +36,7 @@ Dates use `YYYY-MM-DD` in Europe/Zurich. Check an implementation item only when 
 | [x] | P02 | Valid DL/UL replay fixtures | PASS | 2026-09-11 | Session 2026-09-11 (P02) + Fix round 1 + Fix round 2 below. Audit found all 22 pre-existing `replay.bin` captures INADMISSIBLE (binary mismatch + full_auto=1). Two structural code defects (both coupling the passive-replay recorder's arm condition to full-auto-only paths) fixed under controller ruling: DL gate in `nr_passive_replay_capture.c`'s `nr_passive_replay_dl()` (round 1) and UL gate in `nr_pdcch_blind_monitor_rt.c`'s UL candidate loop (round 2, root-caused via live instrumentation). With both fixes, capture `sensing_manual_fixed.UtvBT7` (binary `c3810019...`) produced `REPLAY READY ... slots=320 UL=24 DL-controls=38` and replay-verified `REPLAY PASS: identical DL controls=34 failed=0 raw UL=24; no radio opened` (exit 0). Registered in `tests/passive_rx/baselines/fixtures.json` (`status:"PASS"`, 1 admissible fixture); `check_manifest.py --fixtures` PASSES; negative selftest cases still correctly FAIL |
 | [ ] | P03 | Branch ownership / lifecycle | IN_PROGRESS | — | Session 2026-09-11 (P03) below. Foundation delivered: `docs/passive_branch_globals_audit.md` (globals audit), `openair1/PHY/NR_UE_TRANSPORT/nr_rx_branch.{h,c}` (pure branch identity/epoch/lifecycle, 14/14 gtest), `[sensing] rx_branches`/`rx_branch_phys_map` config surface in `nr_isac.cc`/`.h`. NOT done: nothing wired into the `nr-ue.c` RT read loop (deliberately out of scope, see P03's controller ruling) and the `nb_antennas_rx` antenna-count cross-check is unwired (setter added, no live caller — see audit doc's "nb_antennas_rx reachability" section) — so G1 is not testable end-to-end from this task alone |
 | [ ] | P04 | Immutable channel-buffer delivery | IN_PROGRESS | — | Session 2026-09-11 (P04) below. Standalone module delivered: `openair1/PHY/NR_UE_TRANSPORT/nr_rx_span_pool.{h,c}` (refcounted per-branch span pool, no sample copies, per-branch drop policy), 5/5 gtest (G1 test 1 and test 3 in pure form, plus refcount and epoch-carry cases). NOT done: nothing wired into the nr-ue.c RT read loop (deliberately out of scope, see P04's controller ruling -- that file is dirty with another session's uncommitted edits) -- so G1 stays NOT_STARTED end-to-end. |
-| [ ] | P05 | Independent acquisition / recovery | NOT_STARTED | — | — |
+| [ ] | P05 | Independent acquisition / recovery | IN_PROGRESS | — | Session 2026-09-11 (P05) below. Foundation delivered: `openair1/PHY/NR_UE_TRANSPORT/nr_rx_branch_sync.{h,c}` (per-branch CFO accumulator, timing offset, frame-wrap/slot-continuity bookkeeping, lock/acq epoch staleness snapshot, 14/14 gtest incl. G1 test 4 in pure form), `tests/passive_rx/check_branch_hw_isolation.sh` (hardware-isolation guard + self-test, 2 ctest entries), `docs/passive_branch_wiring_plan.md` (file:line wiring map). NOT done: nothing wired into the `nr-ue.c` RT read loop (deliberately out of scope, see P05's controller ruling -- that file remains dirty with another session's uncommitted edits) -- so G1 test 5 and the full end-to-end exit criterion are not met |
 | [ ] | P06 | Branch-local PDCCH discovery / grants | NOT_STARTED | — | — |
 | [ ] | P07 | Independent DL decoding | NOT_STARTED | — | — |
 | [ ] | P08 | Independent UL decoding / context pool | NOT_STARTED | — | — |
@@ -70,7 +70,7 @@ Dates use `YYYY-MM-DD` in Europe/Zurich. Check an implementation item only when 
 | Gate | Meaning | Status | Passed date | Artifact / reviewer |
 |---|---|---|---|---|
 | G0 | Reproducible baseline and acceptance profile | IN_PROGRESS | — | P02's own sub-condition now MET (2026-09-11, Fix round 2): a reproducible supported DL+UL replay fixture exists (`sensing_manual_fixed.UtvBT7`, `REPLAY PASS: identical DL controls=34 failed=0 raw UL=24; no radio opened`), registered and checker-verified. G0 as a WHOLE still cannot PASS, because P01's own manifest remains IN_PROGRESS on survey/limits (every `deployment_dependent_limits` entry UNSET, `geometry.surveyed=false` -- unchanged by P02, not this task's scope). State plainly: G0 = IN_PROGRESS, blocked only on P01's outstanding survey/acceptance-limit work, not on P02 any longer |
-| G1 | Acquisition routing, time and branch isolation | NOT_STARTED | — | — |
+| G1 | Acquisition routing, time and branch isolation | IN_PROGRESS | — | Tests 1-4 exist and PASS in pure/standalone form across P03 (`nr_rx_branch_test`), P04 (`nr_rx_span_pool_test`) and P05 (`nr_rx_branch_sync_test`'s `RxBranchSyncG1Test4`); P05 additionally adds a hardware-isolation guard (`branch_hw_isolation`/`branch_hw_isolation_selftest` ctest entries) covering the "no unauthorized hardware operation" half of the exit criterion at the SOURCE level. G1 as a WHOLE cannot PASS: test 5 (standalone-replay comparison) and end-to-end live-worker isolation require the `nr-ue.c`/`nr-ue-ru.c` read-loop wiring, which no session has done yet (controller-scoped, blocked on that file's owning session committing first) |
 | G2 | Independent supported DL/UL decoding | NOT_STARTED | — | — |
 | G3 | CFR identity, support and physical references | NOT_STARTED | — | — |
 | G4 | Four detectors, AoA removed, UL support retained | NOT_STARTED | — | — |
@@ -853,6 +853,148 @@ Next highest-value action: P05 (independent digital correction/recovery per bran
   file's owning session committing its edits first.
 Reviewer / accomplishment date if gate passed: not gated; G1 stays NOT_STARTED (unchanged by this
   session, per the controller's ruling that P04 alone cannot make G1 testable end-to-end).
+```
+
+## Session — 2026-09-11: P05 independent digital correction/recovery (Stage 1, foundation) (IN_PROGRESS)
+
+```text
+Date/time (Europe/Zurich): 2026-09-11, ~13:10-14:40
+Task IDs / gate: P05 (Stage 1 independent digital correction/recovery); G1 test 4 exercised in
+  pure form (below); G1 as a whole stays IN_PROGRESS (unchanged in kind by this session -- tests
+  1/3 were already pure-form-PASS from P04, test 2 from P03/P04; this session adds test 4 pure-
+  form and a source-level hardware-isolation guard, per the controller's ruling that P05 alone
+  still cannot make G1 testable end-to-end without the nr-ue.c read-loop wiring).
+Intended falsifiable claim: (a) a pure, unit-testable per-branch digital correction/recovery
+  state exists (`nr_rx_branch_sync_t`) whose reset() clears exactly the correction fields the
+  brief names (CFO accumulator, timing, synchronized flag) while leaving identity/epoch/slot-
+  continuity state untouched; whose on_slot() advances slot-continuity bookkeeping, counts a
+  frame wrap on a small backward frame-index step, and REJECTS (no state change) a backward step
+  of more than one frame -- the "unsigned slot delta breaks concurrent CPI" defect class; whose
+  is_stale() correctly detects staleness after EITHER an epoch half moves (lock_epoch via
+  nr_rx_branch_lose_lock(), acq_epoch via nr_rx_branch_set_rf_discontinuity()) and fails safe on
+  NULL; and whose apply_cfo() is digital-only by construction (its signature cannot reach any
+  device/retune API, not merely by convention) -- G1 test 4 ("inject frame wrap, sample-counter
+  discontinuity and one-branch re-lock; assert correct epoch transitions and no old/new mixing")
+  in pure form, extending P04's own span-pool-level version of the same test to P03's raw
+  lock_epoch/acq_epoch pair with no span pool involved. (b) branch code structurally cannot reach
+  the radio: a checked-in grep-based guard over the three branch modules
+  (`nr_rx_branch.c`/`nr_rx_branch_sync.c`/`nr_rx_span_pool.c`) for forbidden hardware-access
+  symbols, itself proven (not assumed) to both catch a planted violation and NOT false-positive on
+  a legitimate symbol name containing "rf_" as a substring (`nr_rx_branch_set_rf_discontinuity`).
+  (c) a file:line map of the real nr-ue.c/nr-ue-ru.c per-slot loop exists, separating
+  AcquisitionOwner statements from per-branch ones and naming which new nr_rx_branch_sync_t field
+  replaces each per-branch one -- read-only, no code changed in either file.
+Branch / full commit / dirty patch / untracked-file manifest: merge/adaptive-sensing,
+  HEAD 419f18bf42c2aa732d790ee62f3dcb6beeb64a9e (unchanged by this session before commit). Pre-
+  existing dirty state unchanged and untouched, confirmed via `git status --short` before and
+  after this session's edits (none of these paths were staged): `M executables/nr-ue-ru.c`,
+  `M executables/nr-ue.c`, `M openair1/PHY/NR_UE_TRANSPORT/nr_initial_sync.c`,
+  `M openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c`, `M radio/USRP/usrp_lib.cpp`,
+  `M tests/passive_rx/monitor/monitor.html`, `M tests/passive_rx/monitor/monitor.py`,
+  `M tests/passive_rx/run_adaptive_receive_test.sh`, and untracked `adaptive_RX_pipeline.md`,
+  `tests/passive_rx/MANUAL_DL_UL.md`, `tests/passive_rx/adaptive_manual_dlul.conf`,
+  `tests/passive_rx/aoa_track_dl.conf`, `tests/passive_rx/run_manual_x410.sh`.
+Files modified / added / removed:
+  Added: `openair1/PHY/NR_UE_TRANSPORT/nr_rx_branch_sync.h`,
+  `openair1/PHY/NR_UE_TRANSPORT/nr_rx_branch_sync.c`,
+  `openair1/PHY/NR_UE_TRANSPORT/tests/nr_rx_branch_sync_test.cc`,
+  `tests/passive_rx/check_branch_hw_isolation.sh`, `docs/passive_branch_wiring_plan.md`.
+  Modified: `CMakeLists.txt` (registered the `nr_rx_branch_sync_test` gtest target mirroring
+  `nr_rx_span_pool_test`'s pattern -- own .c + `nr_rx_branch.c` linked directly, `UTIL` +
+  `GTest::gtest`, no PHY_NR_UE library dependency; registered `branch_hw_isolation` and
+  `branch_hw_isolation_selftest` as plain shell-script ctest entries), this ledger (session entry
+  + P05 checklist row + G1 gate row + status paragraph).
+Executable / driver / config / geometry / acceptance hashes: not applicable -- no receiver run,
+  no capture; only the gtest binary `nr_rx_branch_sync_test` and the shell script
+  `check_branch_hw_isolation.sh` were built/run.
+Exact commands:
+  ssh sens6 'pgrep -x nr-uesoftmodem' (empty, polled before configure and before build)
+  cd /home/sens/NICOLA/adaptive-rx-sensing/cmake_targets/ran_build/build && cmake .
+  make nr_rx_branch_sync_test -j8
+  ctest -R "nr_rx_branch|nr_rx_span|branch_hw_isolation" --output-on-failure
+Artifact paths (include raw logs and VOID attempts): none beyond the ctest/gtest console output
+  pasted in task-P05-report.md; no failing intermediate run on the FINAL committed sources -- one
+  intermediate link failure (missing `main()` in the new gtest binary, `GTest::gtest` alone does
+  not provide one, unlike a framework that links `GTest::gtest_main`) was caught and fixed before
+  the first passing build; not an RF/logic failure, not counted as a VOID attempt.
+Baseline and comparison definition: not applicable (new module, no prior behavior to compare
+  against; explicitly NOT wired into any existing behavior in this task).
+Predeclared assertions / thresholds: the brief's 4 module functions verbatim, each with its own
+  gtest suite -- reset() clears cfo_hz/cfo_accum_hz/timing_offset_samples/shift_for_next_frame/
+  synchronized to zero/false while last_absolute_slot/frame_wraps/snap_lock_epoch/snap_acq_epoch
+  are UNCHANGED (2 cases, incl. NULL no-op); on_slot() forward-advance/no-wrap, small-backward-
+  frame-index-decrease-counts-as-wrap-and-advances, small-backward-same-frame-index-not-a-wrap,
+  large-backward (>1 frame) REJECTED with state unchanged, EXACTLY-one-frame-backward accepted
+  (boundary case), NULL/invalid-slots_per_frame rejected (6 cases); is_stale() false when epochs
+  match, true after nr_rx_branch_lose_lock() (lock_epoch), true after
+  nr_rx_branch_set_rf_discontinuity() (acq_epoch), fails safe (1) on either pointer NULL (4
+  cases); apply_cfo() accumulates and records the latest correction, NULL no-op (1 case); plus the
+  dedicated G1-test-4 case building two/three job snapshots under one epoch pair, bumping the
+  branch's epoch via each of the two P03 mechanisms independently, and asserting exactly which job
+  is stale and which is fresh (1 case) -- 14 cases total. The hardware-isolation guard's own
+  self-test (`--selftest`) plants a forbidden symbol (`trx_read_func`) in a temp file and asserts
+  the checker DETECTS it, AND separately plants the real, legitimate
+  `nr_rx_branch_set_rf_discontinuity` symbol name (chosen because it contains "rf_" as a
+  substring, the exact false-positive trap a naive grep would fall into) in a second temp file and
+  asserts the checker does NOT flag it -- both halves are asserted, not just the detection half.
+Observed result, with denominators: 14/14 gtest cases pass (`nr_rx_branch_sync_test`, 5 suites:
+  RxBranchSyncReset, RxBranchSyncCfo, RxBranchSyncOnSlot, RxBranchSyncStale, RxBranchSyncG1Test4).
+  `ctest -R "nr_rx_branch|nr_rx_span|branch_hw_isolation"` -- 5/5 tests pass (`nr_rx_branch_test`,
+  `nr_rx_span_pool_test`, `nr_rx_branch_sync_test`, `branch_hw_isolation`,
+  `branch_hw_isolation_selftest`), confirming no regression to the P03/P04 modules this task links
+  against. The real (non-selftest) `branch_hw_isolation` run against the three actual branch
+  module source files found ZERO forbidden-symbol hits, confirming the false-positive risk
+  (`nr_rx_branch_set_rf_discontinuity`'s "rf_" substring) identified and handled by the
+  word-boundary regex does not currently manifest in the real files either. No other target was
+  built or run; `nr-uesoftmodem` was not rebuilt or executed; `pgrep -x nr-uesoftmodem` was empty
+  immediately before both the cmake reconfigure and the build.
+Status (PASS / FAIL / VOID / BLOCKED): PASS for the three falsifiable claims stated above (module
+  builds and its own tests pass including G1 test 4 in pure form; the hardware-isolation guard
+  detects a planted violation and does not false-positive, proven not assumed; the wiring plan
+  document exists with verified file:line citations against the live tree). P05 as a WHOLE task
+  remains IN_PROGRESS -- see "Remaining limitation" below; this is a controller-scoped foundation
+  slice of P05, not full P05 completion, and G1 test 5 / the full end-to-end exit criterion are
+  NOT exercised by this session (no live worker, no nr-ue.c wiring, no live IQ).
+Validity reasons and affected intervals: not applicable (no live data collected).
+Hypotheses supported / contradicted: supports that the "no old/new mixing" primitive (P05's own
+  wording) generalizes cleanly from P04's span-level epoch carry (a single acq_epoch on a span) to
+  P03's raw per-branch epoch PAIR (lock_epoch AND acq_epoch, independently load-bearing -- tested
+  separately in RxBranchSyncG1Test4 via the two distinct P03 mechanisms that bump each). Supports
+  that "digital-only, no hardware reachable" can be made a STRUCTURAL property of a function's
+  signature (apply_cfo() takes nothing but its own struct and a double) rather than a runtime-
+  checked convention, matching P05's brief text ("must be documented and asserted") more literally
+  than a runtime assert could -- there is nothing to assert against because there is no path to
+  violate. Contradicts nothing; no prior claim was tested. One thing WORTH FLAGGING AS A FINDING,
+  not a contradiction: a naive (non-word-boundary) version of the hardware-isolation grep WOULD
+  have false-positived on the real, already-committed `nr_rx_branch_set_rf_discontinuity` symbol
+  (P03, `nr_rx_branch.c:188`) -- verified empirically (plain `grep -inE` without `\b` DOES match
+  that line) before choosing the word-boundary form, not assumed safe.
+Retraction, if any: none.
+Remaining limitation: nothing in this session is wired into the nr-ue.c RT read loop (by
+  controller ruling, still deferred -- that file remains dirty with another session's uncommitted
+  edits). `docs/passive_branch_wiring_plan.md` records two design choices explicitly left OPEN for
+  the wiring step rather than resolved here (not glossed over): (1) whether `UE->max_pos_iir` (the
+  IIR filter feeding `max_pos_acc`) becomes a second per-branch field alongside
+  `timing_offset_samples` or is folded into it -- the brief's struct does not name a separate IIR
+  field; (2) whether the 3-state `stream_status` enum (`UNSYNC`/`SYNCING`/`SYNCED`) collapses onto
+  the struct's 2-state `synchronized` flag or needs an additional field this task does not
+  provide. The CFO-compensation-fields row is flagged with an honest caveat rather than a false
+  file:line claim: `UE_thread()`'s own per-slot statements (the only ones read for this plan, per
+  the brief's `nr-ue.c`/`nr-ue-ru.c` scope) do not themselves read/write
+  `common_vars.freq_offset`/`freq_off_acc` -- the digital CFO estimation/compensation loop lives
+  downstream in `phy_procedures_nr_ue.c`, outside this task's read. The hardware-isolation guard
+  is a grep over TEXT, not a linker/compiler enforcement -- it catches a forbidden SYMBOL NAME
+  appearing in the branch modules' own source, not e.g. a forbidden symbol reached transitively
+  through a function pointer or macro that expands to one without the literal name appearing; this
+  matches the brief's own specification (a checked-in script, not a build-system-level ban) and is
+  stated here as a known limit of that specification, not discovered as a surprise.
+Next highest-value action: the nr-ue.c/nr-ue-ru.c read-loop wiring itself (blocked on that file's
+  owning session committing its edits first, per the controller's repeated ruling across P03-P05)
+  -- once unblocked, `docs/passive_branch_wiring_plan.md` is the map for exactly what moves where,
+  and the two open design choices in "Remaining limitation" above are the first decisions that
+  wiring step needs to make before G1 test 5 becomes runnable.
+Reviewer / accomplishment date if gate passed: not gated; G1 stays IN_PROGRESS (unchanged in kind
+  by this session, per the controller's ruling that P05 alone cannot make G1 testable end-to-end).
 ```
 
 ## Session template — copy for each future work session

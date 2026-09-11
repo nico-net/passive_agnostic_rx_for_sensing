@@ -2437,6 +2437,31 @@ if(ENABLE_TESTS)
   target_link_libraries(nr_rx_span_pool_test PRIVATE UTIL GTest::gtest)
   add_dependencies(tests nr_rx_span_pool_test)
   add_test(NAME nr_rx_span_pool_test COMMAND ./nr_rx_span_pool_test)
+
+  # adaptive_RX_pipeline.md P05: per-branch digital correction/recovery state (CFO accumulator,
+  # timing offset, frame-wrap/slot-continuity bookkeeping, lock/acq epoch staleness snapshot) --
+  # pure and standalone like P03/P04, built directly from its own .c + nr_rx_branch.c (needed for
+  # the nr_rx_branch_t* argument to nr_rx_branch_sync_is_stale()) rather than pulling in the
+  # PHY_NR_UE library it will later be linked into. See docs/passive_branch_wiring_plan.md for the
+  # (not-yet-done) nr-ue.c read-loop wiring this state is meant to replace.
+  add_executable(nr_rx_branch_sync_test ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_rx_branch_sync_test.cc
+                                         ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_rx_branch_sync.c
+                                         ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_rx_branch.c)
+  target_include_directories(nr_rx_branch_sync_test PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
+  target_link_libraries(nr_rx_branch_sync_test PRIVATE UTIL GTest::gtest)
+  add_dependencies(tests nr_rx_branch_sync_test)
+  add_test(NAME nr_rx_branch_sync_test COMMAND ./nr_rx_branch_sync_test)
+
+  # P05 hardware-isolation guard: greps the branch modules for forbidden radio-access symbols and
+  # fails if any are found (see tests/passive_rx/check_branch_hw_isolation.sh). Registered as a
+  # plain shell-script test, same ctest surface as the two gtest binaries above --
+  # `ctest -R branch_hw_isolation` runs both this and its own self-test (below).
+  add_test(NAME branch_hw_isolation
+           COMMAND bash ${CMAKE_SOURCE_DIR}/tests/passive_rx/check_branch_hw_isolation.sh
+           WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+  add_test(NAME branch_hw_isolation_selftest
+           COMMAND bash ${CMAKE_SOURCE_DIR}/tests/passive_rx/check_branch_hw_isolation.sh --selftest
+           WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 endif()
 
 add_subdirectory(common)
