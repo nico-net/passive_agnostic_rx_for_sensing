@@ -147,6 +147,36 @@ TEST_F(AcqState, SyncLossClearsPbchButKeepsSib1Facts) {
   EXPECT_EQ(nr_passive_acq_snapshot().state, NR_ACQ_SIB1_DECODED);
   EXPECT_EQ(nr_passive_acq_snapshot().pbch_locks, 2u);
 }
+/* The cell every saved capture comes from: 273 PRB mu=1, SSB found at grid subcarrier 150 (the
+ * oracle's own --ssb 150), MIB k_SSB=12, SIB1 offsetToPointA=24, offsetToCarrier=0. Point A must
+ * land exactly on grid subcarrier 0 and the carrier must end exactly at 12*273. */
+TEST_F(AcqState, CarrierVerifiedOnTheKnownCell) {
+  nr_passive_acq_carrier_t c{273, 1, 150, 273, 1, 24, 0, 12};
+  const auto v = nr_passive_acq_verify_carrier(&c);
+  EXPECT_TRUE(v.bw_match); EXPECT_TRUE(v.mu_match); EXPECT_TRUE(v.grid_match);
+  EXPECT_EQ(v.point_a_subcarrier, 0);
+  EXPECT_EQ(v.carrier_end_subcarrier, 12 * 273);
+}
+TEST_F(AcqState, CarrierMismatchesAreEachDetectedSeparately) {
+  nr_passive_acq_carrier_t wrong_bw{273, 1, 150, 106, 1, 24, 0, 12};
+  EXPECT_FALSE(nr_passive_acq_verify_carrier(&wrong_bw).bw_match);
+  nr_passive_acq_carrier_t wrong_mu{273, 1, 150, 273, 0, 24, 0, 12};
+  EXPECT_FALSE(nr_passive_acq_verify_carrier(&wrong_mu).mu_match);
+  nr_passive_acq_carrier_t off_grid{273, 1, 162, 273, 1, 24, 0, 12}; // SSB found one RB higher
+  const auto v = nr_passive_acq_verify_carrier(&off_grid);
+  EXPECT_EQ(v.point_a_subcarrier, 12);
+  EXPECT_FALSE(v.grid_match) << "the started grid is not this carrier";
+  EXPECT_TRUE(v.bw_match) << "bandwidth alone is not enough to call it a match";
+}
+TEST_F(AcqState, CarrierCheckReachesTheSnapshotAndNeedsPhyGeometryFirst) {
+  nr_passive_acq_note_sib1_carrier(273, 1, 24, 0, 12); // PHY never registered: must not decide
+  EXPECT_EQ(nr_passive_acq_snapshot().carrier_verified, 0);
+  nr_passive_acq_set_phy_geometry(273, 1, 150);
+  nr_passive_acq_note_sib1_carrier(273, 1, 24, 0, 12);
+  EXPECT_EQ(nr_passive_acq_snapshot().carrier_verified, 1);
+  nr_passive_acq_note_sib1_carrier(106, 1, 24, 0, 12);
+  EXPECT_EQ(nr_passive_acq_snapshot().carrier_verified, -1);
+}
 TEST_F(AcqState, ResetReturnsToSearchingAndClearsCounters) {
   nr_passive_acq_inputs_t in{}; in.pdcch_length_found = true;
   nr_passive_acq_update(&in);

@@ -976,6 +976,8 @@ set(PHY_SRC_UE
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/dci_nr.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c
+  ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_dmrs_id_estimate.c
+  ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_xoverhead.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_passive_replay_capture.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c
@@ -2457,6 +2459,24 @@ if(ENABLE_TESTS)
   target_link_libraries(test_nr_passive_acq_state PRIVATE UTIL GTest::gtest)
   add_dependencies(tests test_nr_passive_acq_state)
   add_test(NAME test_nr_passive_acq_state COMMAND ./test_nr_passive_acq_state)
+
+  add_executable(test_nr_dmrs_id_estimate ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_dmrs_id_estimate_test.cc
+                                          ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_dmrs_id_estimate.c
+                                          ${OPENAIR1_DIR}/PHY/NR_REFSIG/refsig.c
+                                          ${OPENAIR1_DIR}/PHY/NR_REFSIG/nr_dmrs_rx.c
+                                          ${OPENAIR_DIR}/common/utils/ds/hashtable.c)
+  target_include_directories(test_nr_dmrs_id_estimate PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
+  target_link_libraries(test_nr_dmrs_id_estimate PRIVATE UTIL GTest::gtest m)
+  add_dependencies(tests test_nr_dmrs_id_estimate)
+  add_test(NAME test_nr_dmrs_id_estimate COMMAND ./test_nr_dmrs_id_estimate)
+
+  add_executable(test_nr_pdsch_xoverhead ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_pdsch_xoverhead_test.cc
+                                         ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_xoverhead.c)
+  target_include_directories(test_nr_pdsch_xoverhead PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
+  # MAC_NR_COMMON carries nr_compute_tbs; the same trio the blind-monitor test links for it.
+  target_link_libraries(test_nr_pdsch_xoverhead PRIVATE MAC_NR_COMMON UTIL asn1_nr_rrc_hdrs asn1_lte_rrc_hdrs GTest::gtest m)
+  add_dependencies(tests test_nr_pdsch_xoverhead)
+  add_test(NAME test_nr_pdsch_xoverhead COMMAND ./test_nr_pdsch_xoverhead)
 
   add_executable(test_nr_pdsch_config_sweep ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_pdsch_config_sweep_test.cc
                                             ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_config_sweep.c)

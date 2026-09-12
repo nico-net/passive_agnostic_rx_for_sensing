@@ -42,6 +42,7 @@ static nr_passive_acq_snapshot_t g_snap = { .state = NR_ACQ_SEARCHING };
 /* Event-latched evidence and the last polled inputs, so an event can re-evaluate immediately. */
 static bool g_pbch_locked, g_sib1_decoded;
 static nr_passive_acq_inputs_t g_last_in;
+static nr_passive_acq_carrier_t g_carrier; static bool g_phy_geom_set;
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 
 /* Ordinal progress order. LOST is intentionally excluded (sentinel, ordinal -1): re-acquisition
@@ -162,6 +163,61 @@ void nr_passive_acq_note_sync_loss(void)
   }
   pthread_mutex_unlock(&g_lock);
 }
+nr_passive_acq_carrier_verdict_t nr_passive_acq_verify_carrier(const nr_passive_acq_carrier_t *c)
+{
+  nr_passive_acq_carrier_verdict_t v = {0};
+  v.bw_match = c->sib1_n_rb == c->phy_n_rb;
+  v.mu_match = c->sib1_mu == c->phy_mu;
+  /* FR1: offsetToPointA and k_SSB are in 15 kHz units; the grid is at mu. Convert to grid
+   * subcarriers: one 15 kHz RB = 12 subcarriers of 15 kHz = 12 >> mu subcarriers at mu. Point A =
+   * SSB subcarrier 0 - k_SSB(15k) - 12*offsetToPointA(15k), all expressed in the grid's own SCS. */
+  const int sc15_per_sc = 1 << c->phy_mu;
+  v.point_a_subcarrier = c->phy_ssb_start_subcarrier
+                         - (c->sib1_k_ssb + 12 * c->sib1_offset_to_point_a) / sc15_per_sc;
+  v.carrier_end_subcarrier = v.point_a_subcarrier + 12 * (c->sib1_offset_to_carrier + c->sib1_n_rb);
+  /* The started grid covers exactly [0, 12*N_RB_DL). The carrier is consistent with it when its
+   * first subcarrier (Point A + offsetToCarrier) is the grid's first and its last is the grid's
+   * last -- the receiver was tuned to the cell's carrier, not merely somewhere that contains it. */
+  v.grid_match = (v.point_a_subcarrier + 12 * c->sib1_offset_to_carrier == 0)
+                 && (v.carrier_end_subcarrier == 12 * c->phy_n_rb);
+  return v;
+}
+void nr_passive_acq_set_phy_geometry(int n_rb, int mu, int ssb_start_subcarrier)
+{
+  pthread_mutex_lock(&g_lock);
+  g_carrier.phy_n_rb = n_rb; g_carrier.phy_mu = mu; g_carrier.phy_ssb_start_subcarrier = ssb_start_subcarrier;
+  g_phy_geom_set = true;
+  pthread_mutex_unlock(&g_lock);
+}
+void nr_passive_acq_note_sib1_carrier(int n_rb, int mu, int offset_to_point_a, int offset_to_carrier, int k_ssb)
+{
+  pthread_mutex_lock(&g_lock);
+  g_carrier.sib1_n_rb = n_rb; g_carrier.sib1_mu = mu; g_carrier.sib1_offset_to_point_a = offset_to_point_a;
+  g_carrier.sib1_offset_to_carrier = offset_to_carrier; g_carrier.sib1_k_ssb = k_ssb;
+  if (!g_phy_geom_set) {
+    LOG_W(PHY, "SENSING: ACQ carrier check skipped: PHY geometry never registered\n");
+    pthread_mutex_unlock(&g_lock);
+    return;
+  }
+  const nr_passive_acq_carrier_verdict_t v = nr_passive_acq_verify_carrier(&g_carrier);
+  const bool ok = v.bw_match && v.mu_match && v.grid_match;
+  if (g_snap.carrier_verified == 0 || (ok ? -1 : 1) == g_snap.carrier_verified) {
+    if (ok)
+      LOG_A(PHY, "SENSING: ACQ carrier CONFIRMED from SIB1: %d PRB mu=%d, Point A at grid subcarrier %d, "
+                 "carrier ends at %d = grid end (started with %d PRB mu=%d, SSB found at subcarrier %d)\n",
+            n_rb, mu, v.point_a_subcarrier, v.carrier_end_subcarrier, g_carrier.phy_n_rb, g_carrier.phy_mu,
+            g_carrier.phy_ssb_start_subcarrier);
+    else
+      LOG_E(PHY, "SENSING: ACQ carrier MISMATCH: SIB1 says %d PRB mu=%d (Point A at grid subcarrier %d, "
+                 "offsetToCarrier %d, carrier end %d) but PHY started with %d PRB mu=%d, grid end %d; "
+                 "bw_match=%d mu_match=%d grid_match=%d -- the started sample grid is NOT this cell's carrier\n",
+            n_rb, mu, v.point_a_subcarrier, offset_to_carrier, v.carrier_end_subcarrier,
+            g_carrier.phy_n_rb, g_carrier.phy_mu, 12 * g_carrier.phy_n_rb, v.bw_match, v.mu_match, v.grid_match);
+  }
+  g_snap.carrier_verified = ok ? 1 : -1;
+  g_snap.carrier = v;
+  pthread_mutex_unlock(&g_lock);
+}
 nr_passive_acq_snapshot_t nr_passive_acq_snapshot(void)
 {
   pthread_mutex_lock(&g_lock);
@@ -175,6 +231,7 @@ void nr_passive_acq_reset(void)
   memset(&g_snap, 0, sizeof(g_snap));
   memset(&g_last_in, 0, sizeof(g_last_in));
   g_pbch_locked = g_sib1_decoded = false;
+  memset(&g_carrier, 0, sizeof(g_carrier)); g_phy_geom_set = false;
   g_snap.state = NR_ACQ_SEARCHING;
   pthread_mutex_unlock(&g_lock);
 }

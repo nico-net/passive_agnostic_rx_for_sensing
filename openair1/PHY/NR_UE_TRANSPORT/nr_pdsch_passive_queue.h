@@ -152,4 +152,13 @@ void nr_pdsch_passive_queue_stop(void);
 }
 #endif
 
+#include "PHY/NR_UE_TRANSPORT/nr_dmrs_id_estimate.h"
+#ifdef __cplusplus
+extern "C" {
+#endif
+/* Read-only view of the DL DM-RS identity estimate (diagnostic; plain ints, racy by design). */
+const nr_dmrs_id_state_t *nr_pdsch_passive_dl_dmrs_id(void);
+#ifdef __cplusplus
+}
+#endif
 #endif // NR_PDSCH_PASSIVE_QUEUE_H

@@ -20,6 +20,8 @@
 #include "common/utils/nr/nr_common.h"
 #include "PHY/defs_gNB.h"
 #include "PHY/defs_RU.h"          // RU_RX_SLOT_DEPTH -- the gNB rxdataF ring depth
+#include "PHY/NR_UE_TRANSPORT/nr_dmrs_id_estimate.h" // blind UL DM-RS identity estimate
+#include "PHY/NR_UE_TRANSPORT/nr_pusch_passive_queue.h" // nr_pusch_passive_queue_running()
 #include "PHY/MODULATION/modulation_UE.h"
 #include "PHY/NR_TRANSPORT/nr_transport_proto.h"
 #include "PHY/NR_TRANSPORT/nr_ulsch.h"
@@ -89,6 +91,13 @@ NR_gNB_PHY_STATS_t *get_phy_stats(PHY_VARS_gNB *gNB, uint16_t rnti)
 static PHY_VARS_gNB *g_gnb[NR_PUSCH_PASSIVE_MAX_CTX];
 static int           g_gnb_nant;
 static _Atomic uint64_t g_try, g_crc_ok, g_rej_unsup, g_rej_setup;
+/* UL DM-RS identity estimate (CP-OFDM PUSCH, type 1, port 0): same sequence family as PDSCH
+ * (TS 38.211 6.4.1.1.1.1 vs 7.4.1.1.1), reference point CRB 0, so the PDSCH estimator applies
+ * unchanged. Shared across decode contexts under one lock; CRC-OK grants only. */
+static nr_dmrs_id_state_t g_ul_dmrs_id;
+static bool g_ul_dmrs_id_init;
+static pthread_mutex_t g_ul_dmrs_id_lock = PTHREAD_MUTEX_INITIALIZER;
+const nr_dmrs_id_state_t *nr_pusch_passive_ul_dmrs_id(void) { return &g_ul_dmrs_id; }
 static _Atomic uint64_t g_seg_fail, g_zero_tb;
 /* Residual the channel estimator can absorb on its own: MAX_DELAY_COMP is 20 samples, so anything
  * beyond a comfortable fraction of that is worth re-placing the window for rather than hoping. */
@@ -1248,6 +1257,30 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
   out->status = NR_PUSCH_PASSIVE_OK;
   out->tb     = hp->b;
   atomic_fetch_add_explicit(&g_crc_ok, 1, memory_order_relaxed);
+
+  /* 1024-candidate sweep, milliseconds: only when this decode runs on a queue consumer. When the
+   * queue is not running this function IS the RT thread's in-line decode (monitor_rt.c), where a
+   * millisecond burst is a guaranteed timing-loop hit -- the identity then simply stays unmeasured. */
+  if (nr_pusch_passive_queue_running() && g->dmrs_config_type == 0 && !g->transform_precoding
+      && pthread_mutex_trylock(&g_ul_dmrs_id_lock) == 0) {
+    if (!g_ul_dmrs_id_init) { nr_dmrs_id_init(&g_ul_dmrs_id, "PUSCH", g->ul_dmrs_scrambling_id); g_ul_dmrs_id_init = true; }
+    if (!g_ul_dmrs_id.decided) {
+      int dsym = -1;
+      for (int m_ = g->start_symbol; m_ < g->start_symbol + g->num_symbols; m_++)
+        if (g->ul_dmrs_symb_pos & (1u << m_)) { dsym = m_; break; }
+      if (dsym >= 0) {
+        /* rxdataF is a ring of RU_RX_SLOT_DEPTH slots (see the FEP above); absolute subcarriers. */
+        const int slot_off_ = (slot % RU_RX_SLOT_DEPTH) * fp->symbols_per_slot * fp->ofdm_symbol_size;
+        const c16_t *row = &gnb->common_vars.rxdataF[0][slot_off_ + dsym * fp->ofdm_symbol_size];
+        const int start_sc = fp->first_carrier_offset + (g->bwp_start + g->start_rb) * NR_NB_SC_PER_RB;
+        if (nr_dmrs_id_accumulate(&g_ul_dmrs_id, row, fp->ofdm_symbol_size, start_sc,
+                                  g->bwp_start + g->start_rb, g->num_rb, fp->N_RB_UL, fp->symbols_per_slot,
+                                  slot, dsym, g->nscid, fp->Ncp == NR_NORMAL))
+          nr_dmrs_id_decide(&g_ul_dmrs_id, 16, 10.0);
+      }
+    }
+    pthread_mutex_unlock(&g_ul_dmrs_id_lock);
+  }
 
   /* UPLINK DATA-AIDED CFR. Gated on o_ack == 0, which means this TB decoded on the FIRST attempt --
    * the no-UCI hypothesis -- so the codeword occupies every data RE and X is fully reconstructible.

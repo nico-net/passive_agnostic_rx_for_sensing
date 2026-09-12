@@ -68,6 +68,7 @@ extern _Atomic long nr_ue_diag_producer_absolute_slot;
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_data_aided.h"      // shared re-encode + Ĥ=Y/X submit
 #include "nr_pdcch_ul_discovery.h"
 #include "nr_passive_acq_state.h" // explicit acquisition-state tracker (period-guarded)
+#include "nr_pdsch_xoverhead.h"
 #include <pthread.h>
 #include "PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.h" // passive UPLINK PUSCH receive census
 #include "PHY/NR_UE_TRANSPORT/nr_pusch_passive_monitor_rt.h" // UL grant book
@@ -2537,9 +2538,13 @@ constdiag_done:;
       nr_passive_acq_update(&acq_in);
       const nr_passive_acq_snapshot_t acq = nr_passive_acq_snapshot();
       if (acq_period)
+      {
+      const nr_pdsch_xoverhead_state_t xo = nr_pdsch_xoverhead_snapshot();
+      const nr_dmrs_id_state_t *dd = nr_pdsch_passive_dl_dmrs_id(), *du = nr_pusch_passive_ul_dmrs_id();
       LOG_I(PHY, "SENSING: ACQ state=%s time_in_state=%lu transitions=%lu regressions=%lu "
                  "in[len=%d coreset=%d ul_bwp=%d dl_win=%lu ul_win[w=%lu i=%lu]] "
-                 "uldisc[gen=%lu raw=%d wcls=%d icls=%d wtrials=%lu itrials=%lu rejected_fb=%lu]\n",
+                 "uldisc[gen=%lu raw=%d wcls=%d icls=%d wtrials=%lu itrials=%lu rejected_fb=%lu] "
+                 "carrier=%s xoh[assumed=%u %s crc_ok=%u] dmrs_id[dl=%s%d/%u ul=%s%d/%u]\n",
             nr_passive_acq_state_name(acq.state), (unsigned long)acq.time_in_state,
             (unsigned long)acq.transitions, (unsigned long)acq.consecutive_regressions,
             acq_in.pdcch_length_found, acq_in.coreset_extent_verified, acq_in.ul_bwp_known,
@@ -2547,7 +2552,12 @@ constdiag_done:;
             (unsigned long)acq_in.ul_interp_winners,
             (unsigned long)uls.generation, uls.raw_samples, uls.width_classes, uls.interp_classes,
             (unsigned long)uls.width_trials, (unsigned long)uls.interp_trials,
-            (unsigned long)uls.rejected_feedback);
+            (unsigned long)uls.rejected_feedback,
+            acq.carrier_verified > 0 ? "CONFIRMED" : acq.carrier_verified < 0 ? "MISMATCH" : "unchecked",
+            xo.assumed, xo.confirmed ? "CONFIRMED" : "unresolved", xo.crc_ok_seen,
+            dd->decided ? (dd->best_id == dd->assumed_id ? "CONFIRMED:" : "MISMATCH:") : "pending:", dd->best_id, dd->grants,
+            du->decided ? (du->best_id == du->assumed_id ? "CONFIRMED:" : "MISMATCH:") : "pending:", du->best_id, du->grants);
+      }
     }
 
     if (btim_on && (g_occasions_run % NR_PDCCH_BLIND_SUMMARY_PERIOD_OCC) == 0) {

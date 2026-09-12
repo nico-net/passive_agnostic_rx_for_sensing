@@ -47,6 +47,10 @@
  */
 
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.h"
+#include "PHY/NR_UE_TRANSPORT/nr_pdsch_xoverhead.h"   // reject-only xOverhead elimination by TB CRC
+#include "PHY/NR_UE_TRANSPORT/nr_dmrs_id_estimate.h"  // blind DM-RS scrambling-identity estimate
+#include "PHY/NR_REFSIG/dmrs_nr.h"                     // get_num_dmrs_re_per_rb
+#include "common/utils/nr/nr_common.h"                // get_num_dmrs
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_config_sweep.h" // Technique D scoring
 
 #include <pthread.h>
@@ -77,6 +81,13 @@ static pthread_cond_t  g_cv   = PTHREAD_COND_INITIALIZER;
 static _Atomic uint64_t g_queued        = 0;
 static _Atomic uint64_t g_decoded       = 0;
 static _Atomic uint64_t g_crc_ok        = 0;
+/* DL DM-RS identity estimate: one process-wide accumulator shared by every consumer, so evidence
+ * from all of them adds. The 1024-candidate sweep runs under this lock on the consumer that
+ * happens to hold it -- off the RT thread by construction, since this file IS the consumer. */
+static nr_dmrs_id_state_t g_dl_dmrs_id;
+static bool g_dl_dmrs_id_init;
+static pthread_mutex_t g_dl_dmrs_id_lock = PTHREAD_MUTEX_INITIALIZER;
+const nr_dmrs_id_state_t *nr_pdsch_passive_dl_dmrs_id(void) { return &g_dl_dmrs_id; }
 static _Atomic uint64_t g_dropped_full  = 0; // evicted oldest to admit a newer job
 static _Atomic uint64_t g_dropped_stale = 0;
 static _Atomic uint64_t g_max_lag       = 0;
@@ -173,6 +184,34 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
 
     if (st != NR_PDSCH_PASSIVE_DECODE_ERROR && st != NR_PDSCH_PASSIVE_DECODE_UNSUPPORTED) {
       atomic_fetch_add_explicit(&g_decoded, 1, memory_order_relaxed);
+      {
+        /* Two dedicated-parameter checks that need only what is in hand here, on the consumer.
+         * xOverhead: every CRC-OK decode refutes each alternative whose TBS differs (reject-only,
+         * zero extra trials). DM-RS identity: accumulated on CRC-OK decodes only, so a noise-RNTI
+         * false accept (garbage allocation) cannot pollute the statistic. */
+        const fapi_nr_dl_config_dlsch_pdu_rel15_t *pdu = &job.dlsch_pdu;
+        const bool crc = st == NR_PDSCH_PASSIVE_DECODE_CRC_OK;
+        const uint8_t nb_re_dmrs = get_num_dmrs_re_per_rb(pdu->dmrsConfigType, pdu->n_dmrs_cdm_groups);
+        const uint16_t dmrs_len = get_num_dmrs(pdu->dlDmrsSymbPos);
+        nr_pdsch_xoverhead_observe(dec.cw.qamModOrder, dec.cw.targetCodeRate, job.freq_alloc.num_rbs,
+                                   (uint16_t)pdu->number_symbols, (uint16_t)(nb_re_dmrs * dmrs_len),
+                                   job.grant.nb_rb_oh, job.grant.tb_scaling, dec.cw.Nl, crc);
+        if (crc && pdu->dmrsConfigType == 0 && pdu->dlDmrsSymbPos && pthread_mutex_trylock(&g_dl_dmrs_id_lock) == 0) {
+          if (!g_dl_dmrs_id_init) { nr_dmrs_id_init(&g_dl_dmrs_id, "PDSCH", pdu->dlDmrsScramblingId); g_dl_dmrs_id_init = true; }
+          if (!g_dl_dmrs_id.decided) {
+            const NR_DL_FRAME_PARMS *fp = &ue->frame_parms;
+            const int sym = __builtin_ctz((unsigned)pdu->dlDmrsSymbPos);
+            /* Same two quantities the estimator itself derives (nr_dl_channel_estimation.c). */
+            const int rb_offset = job.freq_alloc.first_rb + (pdu->refPoint ? 0 : pdu->BWPStart);
+            const int start_sc  = fp->first_carrier_offset + (pdu->BWPStart + job.freq_alloc.first_rb) * 12;
+            if (nr_dmrs_id_accumulate(&g_dl_dmrs_id, &rxdataF[0][sym * fp->ofdm_symbol_size], fp->ofdm_symbol_size,
+                                      start_sc, rb_offset, job.freq_alloc.num_rbs, fp->N_RB_DL, fp->symbols_per_slot,
+                                      job.nr_slot_rx, sym, pdu->nscid, fp->Ncp == NR_NORMAL))
+              nr_dmrs_id_decide(&g_dl_dmrs_id, 16, 10.0);
+          }
+          pthread_mutex_unlock(&g_dl_dmrs_id_lock);
+        }
+      }
       /* Technique D scoring: the TB CRC is the only oracle that can tell a right payload
        * interpretation from a wrong one, and this is the one place it is known. */
       nr_pdsch_cfg_hypothesis_t winner;

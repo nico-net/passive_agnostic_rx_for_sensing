@@ -40,6 +40,7 @@ uint16_t nr_pdcch_blind_dci10_size(uint16_t)
   return 0; // the real function's own "invalid" sentinel; unreachable without ISAC_OTA_CFG
 }
 void nr_passive_acq_note_sib1(void) {} // same passive-mode-only site as publish_common
+void nr_passive_acq_note_sib1_carrier(int, int, int, int, int) {} // same gate (ISAC_AUTO_ACQUIRE + passive)
 softmodem_params_t *get_softmodem_params(void)
 {
   return &softmodem_params;

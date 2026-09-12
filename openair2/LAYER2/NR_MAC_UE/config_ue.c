@@ -2195,6 +2195,15 @@ void nr_rrc_mac_config_req_sib1(module_id_t module_id, int cc_idP, NR_SIB1_t *si
     }
     nr_pdcch_blind_publish_common(&facts);
     nr_passive_acq_note_sib1(); // acquisition-state tracker: SIB1 common config published
+    /* Verify the started PHY geometry against what the cell says about itself; the tracker logs
+     * CONFIRMED or MISMATCH once. FrequencyInfoDL-SIB has one scs-SpecificCarrier on every cell this
+     * receiver supports (checked by the acquisition path); index 0 is that carrier. */
+    if (scc->downlinkConfigCommon.frequencyInfoDL.scs_SpecificCarrierList.list.count >= 1) {
+      const NR_SCS_SpecificCarrier_t *car = scc->downlinkConfigCommon.frequencyInfoDL.scs_SpecificCarrierList.list.array[0];
+      nr_passive_acq_note_sib1_carrier((int)car->carrierBandwidth, (int)car->subcarrierSpacing,
+                                       (int)scc->downlinkConfigCommon.frequencyInfoDL.offsetToPointA,
+                                       (int)car->offsetToCarrier, (int)mac->ssb_subcarrier_offset);
+    }
   }
   // set current BWP only if coming from non-connected state
   // otherwise it is just a periodically update of the SIB1 content

@@ -996,6 +996,9 @@ void *UE_thread(void *arg)
             delNotifiedFIFO_elt(elt);
             decoded_frame_rx = mac->mib_frame;
           }
+          /* Post-scan geometry: the SSB position is only known once acquisition found it. */
+          nr_passive_acq_set_phy_geometry(UE->frame_parms.N_RB_DL, UE->frame_parms.numerology_index,
+                                          UE->frame_parms.ssb_start_subcarrier);
           nr_passive_acq_note_pbch_locked(); // acquisition-state tracker: MIB applied, frame known
           LOG_A(PHY,
                 "UE synchronized! decoded_frame_rx=%d UE->init_sync_frame=%d trashed_frames=%d\n",

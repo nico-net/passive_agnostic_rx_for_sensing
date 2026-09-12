@@ -64,8 +64,20 @@ typedef struct {
 } nr_passive_acq_inputs_t;
 
 typedef struct {
+  int phy_n_rb, phy_mu, phy_ssb_start_subcarrier;
+  int sib1_n_rb, sib1_mu, sib1_offset_to_point_a, sib1_offset_to_carrier, sib1_k_ssb;
+} nr_passive_acq_carrier_t;
+typedef struct {
+  bool bw_match, mu_match, grid_match;
+  int  point_a_subcarrier;   // derived Point A position in the started grid (0 = grid start)
+  int  carrier_end_subcarrier;
+} nr_passive_acq_carrier_verdict_t;
+
+typedef struct {
   nr_passive_acq_state_t state;
   uint64_t updates, transitions, sync_losses, pbch_locks, sib1_decodes;
+  int  carrier_verified;     // 0 = not yet checked, 1 = matches, -1 = MISMATCH
+  nr_passive_acq_carrier_verdict_t carrier;
   uint64_t time_in_state;      // consecutive updates spent in the current state
   uint64_t consecutive_regressions; // consecutive updates whose evidence regressed from `state`
 } nr_passive_acq_snapshot_t;
@@ -86,6 +98,24 @@ void nr_passive_acq_update(const nr_passive_acq_inputs_t *in);
  * the most recently polled discovery inputs (all-false until the first poll). */
 void nr_passive_acq_note_pbch_locked(void); // nr-ue.c: MIB applied, frame number known
 void nr_passive_acq_note_sib1(void);        // config_ue.c: common config published (passive mode)
+
+/* SIB1 carrier verification. The receiver is STARTED with a bandwidth, numerology and RF centre
+ * taken from the recorder / command line (there is no PHY re-init after sync), so those were listed
+ * as "assumed" parameters. SIB1 carries the cell's own carrierBandwidth and subcarrierSpacing, and
+ * -- via offsetToPointA and the MIB's k_SSB, measured against where the SSB was actually FOUND in
+ * the started FFT grid -- where the carrier sits inside that grid. This turns the assumption into a
+ * verified fact or a loud mismatch. Pure integer arithmetic, unit-tested.
+ *   phy_*      : what the PHY was started with (fp->N_RB_DL, fp->numerology_index,
+ *                fp->ssb_start_subcarrier = SSB subcarrier 0 relative to the grid's first carrier)
+ *   sib1_*     : carrierBandwidth (PRB), subcarrierSpacing (mu), offsetToPointA (15 kHz RBs, FR1),
+ *                offsetToCarrier (PRB at mu), k_ssb (MIB ssb-SubcarrierOffset, at 15 kHz for FR1)
+ * The carrier is consistent when Point A + offsetToCarrier lands at grid subcarrier 0 and the
+ * carrier ends at N_RB_DL*12, i.e. the started grid IS the cell's carrier. */
+nr_passive_acq_carrier_verdict_t nr_passive_acq_verify_carrier(const nr_passive_acq_carrier_t *c);
+/* PHY registers its started geometry once (nr-uesoftmodem.c); MAC reports SIB1's carrier facts
+ * (config_ue.c). The verdict is logged once and kept in the snapshot. */
+void nr_passive_acq_set_phy_geometry(int n_rb, int mu, int ssb_start_subcarrier);
+void nr_passive_acq_note_sib1_carrier(int n_rb, int mu, int offset_to_point_a, int offset_to_carrier, int k_ssb);
 /* Hard invalidation: the receive stream itself was lost (RXDISCONT), so the frame-to-sample
  * mapping -- and therefore every hypothesis being scored against it -- is invalid NOW. Drops
  * straight to NR_ACQ_LOST with NO hysteresis, unlike nr_passive_acq_update()'s evidence path:
