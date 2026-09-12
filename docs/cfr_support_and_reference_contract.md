@@ -87,13 +87,21 @@ established three things, each traced rather than assumed:
    So the correct coordinate carries no `k_SSB` term and no flooring at all, and the parameter was
    removed rather than plumbed.
 3. **The "no plumbing path / zero hits" claim in the source comment was STALE, and its
-   "this cell's kSSB is 0" claim was WRONG.** A PHY-reachable path does exist:
+   "this cell's kSSB is 0" claim was WRONG (terminology caveat below).** A PHY-reachable path does exist:
    `ue->nrUE_config.ssb_table.ssb_subcarrier_offset` (`fapi_nr_ue_interface.h:666`, "ssbSubcarrierOffset
    or k_SSB (38.211, section 7.4.3.1) Value: 0->31"), written by `config_ue.c:210` from
    `mac->ssb_subcarrier_offset`. It is genuinely absent from `NR_DL_FRAME_PARMS` (re-grepped), which
    is the part of the old claim that held. And the registered fixture runs `--ssb 150`, i.e.
    `150 = 12*12 + 6`, so the old flooring was mislabelling **this deployment's own** SSB rows by 6
    subcarriers — the finding was never inert here, contrary to what the prior note implied.
+
+**Terminology caveat (P11fix fix round 1).** `--ssb` sets `ssb_start_subcarrier` DIRECTLY
+(`nr-uesoftmodem.h:66` → `nr-ue-ru.c:141` → `nr_parms.c:470`); it is **not** a k_SSB value. So
+`150 % 12 == 6` is a property of the fixture's SSB **axis position**, not a recovered k_SSB. What
+the 6 establishes is that the old CRB-flooring formula shifted this deployment's SSB rows down by 6
+subcarriers — which holds however that remainder would be decomposed into `12*prb_offset + k_SSB`.
+The defect, the fix and the "not inert here" conclusion are unchanged; only the causal framing
+needed correcting.
 
 Consequence for anyone reading the old note: do not re-open MAC→PHY plumbing for `ssb_subcarrier_offset`
 on the sensing path. The value is reachable and is not wanted.
@@ -111,6 +119,12 @@ surface the count (see the G3 inventory, test 3).
 **Finding P11-A3 (support, not coordinate).** Two producers report DENSE support they did not
 measure:
 
+- SSB/PBCH, second sub-case (noted P11fix fix round 1, NOT fixed): in the SSS-bearing PBCH symbol
+  (`dmrss == 1`) `nr_pbch_channel_estimation()` jumps `dl_ch += 144` without writing those entries
+  (`nr_dl_channel_estimation.c:731-735`), so 144 of the 240 estimates stay at the initial `memset`
+  zero — yet the tap submits all 240 `k_abs` unconditionally. Those 144 are zero CFR values reported
+  as measured support. Same class as the rest of P11-A3, and the ABI cannot express it either; it is
+  the SSB producer's largest remaining support-provenance gap.
 - SSB/PBCH submits 240 contiguous `k_abs` values (`phy_procedures_nr_ue.c:1421-1424`), but
   `nr_pbch_channel_estimation()` builds `dl_ch_estimates` by INTERPOLATING (the `filt16a_*` kernels
   selected at `nr_dl_channel_estimation.c:659-687`) from PBCH DM-RS that occupy one subcarrier in

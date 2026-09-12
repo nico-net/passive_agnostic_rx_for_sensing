@@ -1414,10 +1414,14 @@ int nr_process_pbch_symbol(
     // nr_isac_ssb_axis.c's header comment). Two corrections to the comment this replaces, both
     // re-verified here rather than inherited: (a) a PHY-side path to the MAC value DOES exist,
     // ue->nrUE_config.ssb_table.ssb_subcarrier_offset (fapi_nr_ue_interface.h:666, written by
-    // config_ue.c:210), so zero hits was stale -- it is simply not wanted; (b) this cell's
-    // kSSB is NOT 0: --ssb 150 gives 150 % 12 == 6, so the old CRB flooring was mislabelling this
-    // deployment's own SSB rows by 6 subcarriers. P11-A1: wrap modulo the carrier grid
-    // (N_RB_DL*12), never modulo the FFT size.
+    // config_ue.c:210), so "zero hits" was stale -- it is simply not wanted; (b) the old
+    // comment's "correct for this deployment" is false: ssb_start_subcarrier % 12 == 6 on the
+    // registered fixture, so the old CRB-flooring formula shifted the axis DOWN by 6 subcarriers
+    // on this deployment's own captures -- independent of how that remainder would be interpreted
+    // as kSSB. NOTE for the next reader: --ssb sets ssb_start_subcarrier DIRECTLY
+    // (nr-uesoftmodem.h:66 -> nr-ue-ru.c:141 -> nr_parms.c:470); it is NOT a kSSB value, so
+    // 150 % 12 is a property of the AXIS, not a recovered kSSB. P11-A1: wrap modulo the carrier
+    // grid (N_RB_DL*12), never modulo the FFT size.
     nr_isac_ssb_k_abs(ssb_start_subcarrier, fp->N_RB_DL * 12, k_abs);
     for (uint32_t i = 0; i < NR_PBCH_NUM_RB * NR_NB_SC_PER_RB; i++) {
       l_sym[i] = (uint32_t)relPbchSymb;

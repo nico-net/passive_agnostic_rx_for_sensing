@@ -1720,6 +1720,44 @@ Next highest-value action: unchanged -- P08 (branch-independent UL decode view) 
 Reviewer / accomplishment date if gate passed: n/a (no gate claimed).
 ```
 
+### P11fix fix round 1 (2026-09-12, reviewer-ruled) — the `--ssb 150` comment framed an axis offset as a k_SSB value
+
+Review: Approved, 0 Critical / 0 Important, 1 Minor + 2 optional notes. The Minor is a terminology
+trap, not a defect: the call-site comment read "this cell's kSSB is NOT 0: --ssb 150 gives
+150 % 12 == 6", but `--ssb` sets `ssb_start_subcarrier` DIRECTLY — traced
+`nr-uesoftmodem.h:66` (`.iptr=&(nrUE_params.ssb_start_subcarrier)`) → `nr-ue-ru.c:141`
+(`.ssb_start = get_nrUE_params()->ssb_start_subcarrier`) → `nr_parms.c:470`
+(`frame_parms->ssb_start_subcarrier = ssb_start_subcarrier`), all three re-read this round, not
+inherited from the review. So 150 is an axis position, and `150 % 12 == 6` says nothing about this
+cell's k_SSB; reading it as one is exactly the confusion the whole P11-A4 investigation was about.
+Reworded to state what the 6 actually establishes (the old CRB-flooring formula shifted the axis
+down by 6 subcarriers on this deployment's own captures, however that remainder decomposes into
+`12*prb_offset + k_SSB`), plus an explicit NOTE that `--ssb` is not a k_SSB knob. The defect, the
+fix, the unit test and the "not inert here" conclusion are all unchanged.
+
+Optional note (a) ACTIONED (docs only): in the SSS-bearing PBCH symbol (`dmrss == 1`)
+`nr_pbch_channel_estimation()` does `dl_ch += 144` without writing those entries
+(`nr_dl_channel_estimation.c:731-735`), so 144 of the 240 estimates stay at the initial `memset`
+zero while the tap submits all 240 `k_abs` unconditionally — 144 zero CFR values reported as
+measured support. Recorded as a second sub-case under P11-A3 in
+`docs/cfr_support_and_reference_contract.md`. NOT fixed: it needs a per-RE occupancy decision at the
+tap, which is the same ABI limitation P11-A3 already records.
+
+Optional note (b) DECLINED with reason: a `static_assert(NR_ISAC_SSB_NOF_RE == NR_PBCH_NUM_RB *
+NR_NB_SC_PER_RB)` is cheap to write but not cheap to land — it is compiled code, so it forces a
+rebuild, which changes the `nr-uesoftmodem` sha256 and therefore obliges a fresh manifest, a fresh
+`fixtures.json` `verified_with_binary_sha256` entry and both replays, for a compile-time tautology
+over two constants that have never disagreed. The reviewer explicitly scoped it "skip if they'd
+need a rebuild". Flagged for the next round that rebuilds for another reason.
+
+Verification: COMMENT-ONLY and DOCS-ONLY, no rebuild, so the P01 manifest one-pair rule is not
+triggered and no binary identity changed. Checked mechanically rather than argued: the
+`phy_procedures_nr_ue.c` diff is 8 added lines, every one of them matching `^\+ *//`, and the whole
+diff contains zero `/*` or `*/`, so no block-comment nesting was introduced.
+`nr-uesoftmodem` stays at `f914159ca4bff8cdce1d2493f58bebb5544074f63998df760e8b762db382cf82`; the
+replay results (legacy 34/0/24, views 34/34/31/34/34) and `test_nr_isac_python_parity` stand from the
+main entry above and were not re-run, because nothing they observe can have changed.
+
 ## Session template — copy for each future work session
 
 ```text
