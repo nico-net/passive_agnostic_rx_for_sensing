@@ -138,3 +138,36 @@ unreviewed and out of this plan's scope, and was deliberately left untouched.
   fresh context from zero — the exact cost the (now-reverted) pooled design was trying to avoid.
   Not re-measured against this cell's actual RNTI churn rate; per `gnb-rnti-recheck-every-prompt`
   practice, the C-RNTI changes on every re-attach, so this is a real, not hypothetical, cost.
+
+## Acquisition state tracker (added 2026-09-12, commit `0e8972973a`)
+
+Gate 4/5 groundwork. `nr_passive_acq_state.{h,c}`: explicit states
+`SEARCHING_PDCCH → PDCCH_LOCKED → CORESET_VERIFIED → CELL_CONFIGURED → {DL,UL}_CONVERGED → TRACKING`
+plus `LOST`. Forward/lateral moves apply immediately; demotion to `LOST` needs 8 consecutive
+regressed updates (hysteresis). Every transition logs at `LOG_A` with the full evidence vector, and
+a `SENSING: ACQ state=...` heartbeat line (which also surfaces the UL-discovery census for the first
+time) prints at the existing period-guarded RT summary cadence — one call site, reads of existing
+counters only, no control-flow change. **No SSB/PBCH state exists**: the call site has no such
+signal, so `SEARCHING_PDCCH` spans "no SSB" through "PDCCH not locked"; adding a PBCH hook is the
+next step, not implied.
+
+Offline: 6/6 gtests (`test_nr_passive_acq_state`); 10/10 relevant ctest targets green.
+
+**Replayed against the saved 120 s raw capture** (`captures/raw_5min_last120.v51DBe/capture_120s`,
+artifact `captures/acq_state_replay_20260912T100720Z`, `VALID_TRANSPORT_REPLAY`, EOF reached,
+0 faults, 238 s wall):
+
+| update | transition | evidence |
+|---|---|---|
+| 1 | `SEARCHING_PDCCH → CELL_CONFIGURED` | DCI length, CORESET extent and SIB1 UL BWP all known by the first summary |
+| 131 | `CELL_CONFIGURED → DL_CONVERGED` | 1 keyed DL PDSCH-interpretation context settled (2 by end) |
+| 182 | `DL_CONVERGED → TRACKING` | UL width search declared a winner: 396 classes, 5,737 trials |
+
+Read the last row carefully: 5,737 trials over 396 classes is far below the
+`MIN_TRIALS × n_classes ≈ 119k` full-oracle budget, so that winner came from the early
+"leader lower-confidence-bound ≥ 0.60, separated from every rival" shortcut in
+`nr_hyp_sweep_feed()`, not from exhausting the catalogue. An earlier 220 s run of the same capture
+(VOID, timed out before EOF) had NOT yet converged UL — convergence landed in the last ~15 s. Whether
+that shortcut's winner is the *correct* layout is not established by this replay (no UL TB decode
+runs under `ISAC_SYNC_ONLY=1`); it establishes that the state machine observes and reports the
+receiver's real progression on real IQ, which is what it is for.
