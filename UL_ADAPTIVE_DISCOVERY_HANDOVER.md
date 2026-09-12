@@ -171,3 +171,47 @@ Read the last row carefully: 5,737 trials over 396 classes is far below the
 that shortcut's winner is the *correct* layout is not established by this replay (no UL TB decode
 runs under `ISAC_SYNC_ONLY=1`); it establishes that the state machine observes and reports the
 receiver's real progression on real IQ, which is what it is for.
+
+### Gate 5 (reacquisition): tested, and the first test FAILED
+
+The tracker above was committed as "gate 4/5 groundwork" before the gate was run. Running it
+showed that claim was wrong, which is the whole reason this section exists.
+
+**Test mechanism** (offline replay only; no live-radio equivalent): `raw_iq_source` gained a
+one-shot sample skip (`ISAC_RAW_IQ_GAP_AT_S` / `ISAC_RAW_IQ_GAP_S`, 0 = disabled = byte-identical
+behaviour). Skipping samples makes the returned timestamp jump, so the receiver's OWN continuity
+test (`nr_rx_continuity_check` → `RXDISCONT`) sees precisely what a real stream loss looks like —
+the stimulus is not simulated at the detector, only at the source. `run_raw_replay.py` gained
+`--gap-at-s` / `--gap-s`, and now scores the gate itself into `result.json`
+(`acceptance_gate_5`): gap injected AND discontinuity detected AND tracker declared `LOST` AND
+tracker recovered.
+
+**First run (before the fix): FAIL.** 3 s gap at 60 s → `RAW_IQ_GAP injected skipped=368640000`,
+`RXDISCONT ... -> INVALIDATING SYNC`, receiver reacquired — and the tracker **stayed in
+`TRACKING` throughout, logging nothing**. Root cause: every input it reads is LATCHED discovery
+state (`g_length_found`, CORESET extent, `bwp_size`, sweep winners); none of it clears on a stream
+loss, so the event was structurally invisible. A state machine that can only move forward is not a
+reacquisition test.
+
+**Fix:** `nr_passive_acq_note_sync_loss()`, called once from `nr-ue.c` at the existing RXDISCONT
+invalidation point. Drops straight to `LOST` with **no** hysteresis — unlike the evidence path, a
+discontinuity is not noisy evidence that might recover, it is proof the frame-to-sample mapping is
+gone (the same reasoning `nr-ue.c`'s own comment gives for not waiting on PBCH failures).
+
+**Second run: PASS**, harness-scored (`captures/gate5_20260912T103129Z`,
+`VALID_FAULT_INJECTION`, EOF, 0 other faults):
+
+```
+verdict: PASS   gap_injected ✓  discontinuity_detected ✓  acq_declared_lost ✓  acq_recovered ✓
+SEARCHING_PDCCH → CELL_CONFIGURED → UL_CONVERGED → LOST → UL_CONVERGED → TRACKING
+```
+
+**Control** (`captures/gate5_control_20260912T103548Z`, same capture, no gap):
+`VALID_TRANSPORT_REPLAY`, verdict `NOT_APPLICABLE`, **zero** `LOST` transitions. That control is
+what makes the PASS mean anything — without an injected gap the tracker never declares `LOST`, so
+the verdict is not trivially true.
+
+**What this gate does NOT establish:** that the receiver's *decoding* recovers correctly, only that
+loss is detected, reported, and followed by re-progression through the discovery states. These
+replays run `ISAC_SYNC_ONLY=1`, so no TB decode is exercised. Gate 5's remaining half — a
+configuration CHANGE (not just a gap) mid-stream — is still untested.
