@@ -215,3 +215,48 @@ the verdict is not trivially true.
 loss is detected, reported, and followed by re-progression through the discovery states. These
 replays run `ISAC_SYNC_ONLY=1`, so no TB decode is exercised. Gate 5's remaining half — a
 configuration CHANGE (not just a gap) mid-stream — is still untested.
+
+## Full offline gate campaign (2026-09-12) — every saved capture, harness-scored
+
+Runner: `tests/passive_rx/raw_baseline/run_gate_campaign.sh` (strictly sequential, one receiver
+at a time, refuses to start while a build or another `nr-uesoftmodem` runs — CPU contention
+produces false RXDISCONT on paced replays). One JSON line per stage in `summary.jsonl`; nothing
+below was judged by eye. Artifacts: `captures/campaign_20260912T{115154,121401,121933,122412}Z`.
+
+| gate | stage | result |
+|---|---|---|
+| 1 manual equivalence | saved-IQ decoder oracle (`/tmp/agnostic-dci10-validation/replay-input.bin`) | **45/45 DL bit-identical, 0 failed, 15 raw UL** — exactly PROGRESS.md's documented figure for this input |
+| 4 raw acquisition | `raw_batch` window_1, window_2, `raw_fullband_4s` (4 s each) | `PASS_RAW_BROADCAST_ACQUISITION`; window_2 **5/5** on rerun after one 1-in-6 miss (marginal length, not a regression — 2 PBCH + SIB1 needed, 4 s is barely enough) |
+| 4 raw acquisition | `raw_long_5min/capture_2s` | FAIL, correctly: tracker shows `PBCH_LOCKED` and nothing after — **minimum acquirable capture is between 2 s and 4 s on this cell** |
+| 5 reacquisition | 3 s gap @ 60 s (×3 incl. regressions), 3 s @ 5 s, **10 s** @ 60 s, **50 ms** @ 60 s | **all PASS**, every run ends in `TRACKING`. Note: even a 50 ms gap costs a full reacquisition — that is the receiver's existing RXDISCONT policy (any timestamp jump invalidates sync), not the tracker's |
+| 5 control | no gap | `NOT_APPLICABLE`, zero `LOST` transitions |
+| 7 regression | full `ctest` (91 tests, first time the whole suite BUILT on this branch) | **90/91**; the one failure is upstream `test_vrtsim_cirdb`, deterministic 3/3 in isolation (server never creates its shm segment at parametrization /1, LOG uninitialised so its error is swallowed), `radio/vrtsim` untouched by this branch |
+
+Gate 7 needed three stale tests fixed first (25914f658c — `make tests` did not build, so every
+earlier "N/N" was a hand-picked subset): `isac_sync_test.cc` + `isac_sync_replay.cc` (a
+`row_illum` argument added in a67f55faec without updating the callers; 9/9 pass once they compile,
+so the break hid no behavioural regression), `sparse_doppler_test.cc` (missing `<algorithm>`),
+`test_nr_ue_ra_procedures.cpp` (stopped linking after CSS0 autoconf; link-only stubs, every call
+site verified gated off).
+
+### Two defects the campaign found in the tracker itself (fixed, 5c8d11caf9)
+
+1. **Blind on short captures.** On every 4 s capture the tracker logged nothing — measured: the
+   blind PDCCH monitor (its only poll site) ran **zero** occasions in 4 s while MIB and SIB1 both
+   decoded. Fixed with event edges at the real sites (`note_pbch_locked` in `nr-ue.c` after the MIB
+   is applied, `note_sib1` in `config_ue.c` at the passive SIB1 publish) and two new early states.
+   Now: `PBCH_LOCKED → SIB1_DECODED` on every 4 s run before any occasion; a 2 s run stops at
+   `PBCH_LOCKED`, which is the diagnosis. The event trace also exposed that the receiver re-syncs on
+   the second SSB (two `pbch_locked` events per short run) — previously invisible.
+2. **HEAD ≠ tested tree.** `41bf02c6d8` had `note_sync_loss()` after an unrelated UL-probe block, not
+   at the RXDISCONT site: a zero-context `git apply --cached` landed a hunk at the right HEAD line
+   but the wrong place, because ~100 lines of foreign uncommitted WIP sit in the same function. All
+   gate-5 numbers were measured on the working-tree binary (correct placement) so they stand; HEAD
+   did not implement them. Fixed by constructing the staged file from HEAD + exact edits and
+   syntax-checking the staged content with the executable's own flags.
+
+### Still not done
+- Gate 5's other half: a configuration **change** mid-stream (BWP/CORESET change), not just a gap.
+- Decode recovery after a gap: all replays run `ISAC_SYNC_ONLY=1`, so TB decode is not exercised.
+- Gate 1 general 1_1 equivalence, gate 2 multiple layouts, gate 3/6 beyond tested scope: unchanged.
+- `test_vrtsim_cirdb` (upstream) and the 2 s-vs-4 s acquisition floor are recorded, not fixed.
