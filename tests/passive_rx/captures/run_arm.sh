@@ -188,6 +188,12 @@ for t in $(seq 1 "$TRIES"); do
     ${TSYNCAUDIT:+ISAC_TSYNC_AUDIT=$TSYNCAUDIT} \
     ISAC_TSYNC_RESET=${TSYNCRESET:-0} \
     ${CPUSET:+CPUSET=$CPUSET} BIN=$BIN \
+    # NB: everything from here to the closing quote is ONE double-quoted string handed to `bash -c`,
+    # and the first line ends the `exec` command -- so NO `#` comments and NO un-backslashed newlines
+    # may go inside it (a `#` there truncates argv; cost us a run of immediate UHD overflows once).
+    # Thread pool = 0,1,4,5,6,7: 6 RT cores, leaving cpu2,3 free. FIFO-97 workers dominate the pool
+    # cores, so the scheduler pushes the CFS UHD control/ZMQ threads onto the idle 2,3 -- that IS the
+    # UHD isolation; do not fill 2,3.
     setsid nohup bash -c "ulimit -c 0; exec timeout $DUR ${CPUSET:+taskset -c $CPUSET} \
     $BIN \
     --usrp-args type=x4xx,addr=$DATA,mgmt_addr=$MGMT${DPDK:+,use_dpdk=$DPDK} \
@@ -195,10 +201,7 @@ for t in $(seq 1 "$TRIES"); do
     --ue-nb-ant-rx $NANT --ue-nb-ant-tx $NANT --passive-rx --ue-fo-compensation \
     ${CONTFO:+--cont-fo-comp $CONTFO --freq-sync-P $FSP --freq-sync-I $FSI} \
     ${OFFDIV:+--offset-divisor $OFFDIV} \
-    # RT pool on 0-5 ONLY: leaves cores 6,7 (inside the 0-7 process mask) free of SCHED_FIFO-97
-    # workers, so the non-RT UHD control/ZMQ threads land there instead of starving on a pool core.
-    # Root-caused 2026-09-12: uhd_ctrl_ep on cpu6 vs Tpool4_6 -> 60 s RCU stall -> MPM timeout -> RFSTALL.
-    --thread-pool 0,1,2,3,4,5 --time-sync-I 0.01 --ntn-initial-time-drift -4.25 -A 90" \
+    --thread-pool 0,1,4,5,6,7 --time-sync-I 0.01 --ntn-initial-time-drift -4.25 -A 90" \
     > "$OUT/run.log" 2>&1 < /dev/null &
   sleep 5
   # NIC DROP TIME SERIES. 2026-09-02: stalls and rx_out_of_buffer correlate across runs
