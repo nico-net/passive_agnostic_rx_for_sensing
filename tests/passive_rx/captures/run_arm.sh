@@ -195,7 +195,10 @@ for t in $(seq 1 "$TRIES"); do
     --ue-nb-ant-rx $NANT --ue-nb-ant-tx $NANT --passive-rx --ue-fo-compensation \
     ${CONTFO:+--cont-fo-comp $CONTFO --freq-sync-P $FSP --freq-sync-I $FSI} \
     ${OFFDIV:+--offset-divisor $OFFDIV} \
-    --thread-pool 0,1,4,5,6,7 --time-sync-I 0.01 --ntn-initial-time-drift -4.25 -A 90" \
+    # RT pool on 0-5 ONLY: leaves cores 6,7 (inside the 0-7 process mask) free of SCHED_FIFO-97
+    # workers, so the non-RT UHD control/ZMQ threads land there instead of starving on a pool core.
+    # Root-caused 2026-09-12: uhd_ctrl_ep on cpu6 vs Tpool4_6 -> 60 s RCU stall -> MPM timeout -> RFSTALL.
+    --thread-pool 0,1,2,3,4,5 --time-sync-I 0.01 --ntn-initial-time-drift -4.25 -A 90" \
     > "$OUT/run.log" 2>&1 < /dev/null &
   sleep 5
   # NIC DROP TIME SERIES. 2026-09-02: stalls and rx_out_of_buffer correlate across runs
