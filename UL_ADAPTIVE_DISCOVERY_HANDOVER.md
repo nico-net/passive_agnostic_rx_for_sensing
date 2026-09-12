@@ -334,3 +334,41 @@ swing; no per-binary comparison is claimed from n = 1.
 Agnosticity count, revised again: **27/35 ≈ 77 %** validated-autonomous. Remaining assumed:
 initial RF tune (scan-time), DMRS type-2 / maxLength-2, transform precoding (refused, not
 estimated), rank > 1, CSI-RS resources.
+
+## First OTA run of the agnostic receiver (2026-09-12, X410, live cell, 2 UEs bidirectional iperf) — `e93f946d0a`
+
+Harness: `tests/passive_rx/captures/run_arm.sh` with `REPO=` pointed at this tree and a conf with
+NO manual layout (`captures/agnostic_ota.conf`). Artifacts `captures/agnostic_ota_*`,
+`rankprobe_*`, `cdmprobe2_*`, `dcigt_*`, `layoutpref_171950` (the VALID one).
+
+| stage | result |
+|---|---|
+| acquisition | PBCH → SIB1 → carrier CONFIRMED → CELL_CONFIGURED, every try |
+| UL | 0_1 length + width search converged; **PUSCH CRC 71–87 %**; this branch previously had zero UL 0_1 accepts |
+| six off-air verdicts | all reproduced OTA (DM-RS id PDSCH ~20 dB, PUSCH ~17 dB) |
+| RNTIs | 0x461e / 0x46ae, confirmed against the gNB log over the byte-bracketed window |
+| DL, first 3 tries | **VOID_DL_RATE**: full-band 13-symbol grants 0/10,000, short grants 8/9 |
+| DL, after fix | **VALID**: family preferred at 8 passes → Technique D converged (S=1 L=13, DM-RS 2/7/11, 256QAM) → **82 % CRC post-convergence**, 58 % over 200 s |
+
+**Hypotheses refuted by measurement, in order** (each one a new probe kept in-tree): rank 2 —
+DM-RS port-pair coherence 1.00 on 16,499 failing grants (and RI is pinned to 1); 2 CDM groups —
+the δ=1 comb carries data on 21,481 failing grants; LBRM layers/table — refuted analytically
+(N_ref never clips at MCS 10), its sweep reverted unrun; link margin — `segs_decoded=1725/1.36M`,
+zero code blocks pass inside failing TBs, so systematic.
+
+**Root cause**: several DCI-1_1 field-width families are valid at one length and the RT path
+round-robined them per grant; the family that decodes got ~1/14 of the grants, so its Technique-D
+context never reached `min_trials`. Overall DL CRC (0.3 / 15 / 26 % across runs) was just that
+share. **Fix**: prefer the family whose context has TB-CRC passes (≥ 8) — reject-only, same
+principle as every other estimator today.
+
+**Also found**: HEAD's `nr_pdsch_config_sweep.h` did not compile (a zero-context-staged
+declaration inside a comment block, from `0e8972973a`). Fixed; the staged tree is now
+syntax-checked per file before every commit.
+
+**Agnosticity, revised**: rank and CDM-group count are now *measured* → **29/35 ≈ 83 %**.
+Remaining assumed: initial RF tune, DMRS type-2 / maxLength-2, transform precoding (refused),
+rank > 1 *decode* (measured but not decodable), CSI-RS resources.
+
+**Not established**: run-to-run repeatability (one VALID run; the rig's own rule is ≥ 5 per arm),
+and both UEs' DL — the VALID run's converged contexts are for 0x47eb only.
