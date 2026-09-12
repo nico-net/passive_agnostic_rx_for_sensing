@@ -322,3 +322,15 @@ transform precoding (receiver refuses rather than estimates), rank > 1, CSI-RS r
 Also recorded from this campaign: decode rates on the same capture read UL 54 % / DL 23 % on one
 replay and 74 % / 32 % on another with an identical binary — the rig's documented run-to-run
 swing; no per-binary comparison is claimed from n = 1.
+
+### Two more verdicts at zero cost (`23f89fffab`)
+- **Data-scrambling IDs, DL and UL** — were "assumed = PCI"; a CRC-OK TB is already the proof
+  (c_init = RNTI·2¹⁵ + n_ID). Now stated once per direction. Live: PDSCH n_id=2, PUSCH n_id=2.
+- **Carrier centre** — the SIB1 check now derives the cell's absolute carrier centre
+  (Point A + 12·offsetToCarrier + 6·BW in the started grid's SCS). Live: 3450.000000 MHz = started.
+  On a mismatch it is logged as the retune target. Still NOT done: the cold-start band walk to find
+  the SSB in the first place (a retune loop a replay cannot exercise).
+
+Agnosticity count, revised again: **27/35 ≈ 77 %** validated-autonomous. Remaining assumed:
+initial RF tune (scan-time), DMRS type-2 / maxLength-2, transform precoding (refused, not
+estimated), rank > 1, CSI-RS resources.
