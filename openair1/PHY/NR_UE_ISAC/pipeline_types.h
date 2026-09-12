@@ -337,6 +337,20 @@ inline int branch_active_count(const nr_rx_branch_set_t& set)
   return n;
 }
 
+/* P13b: aoa_enable and rx_branches describe mutually exclusive receivers -- AoA needs ONE
+ * co-located four-element array on one branch, while a multi-branch set is one antenna per
+ * PHYSICALLY SEPARATED branch (P03's branch:physical map is 1:1). SensingEngine's constructor
+ * already refuses the combination, but only after the configuration has been half-applied and an
+ * engine construction attempted. This is that same decision expressed at the first point it is
+ * knowable, and it is a free function for exactly the reason build_submit_plan() is one: the
+ * LEGACY pin -- aoa_enable with a single active branch stays accepted, byte for byte -- is the
+ * safety-critical half, and it has to be assertable from the parity test, which cannot reach
+ * nr_isac_init(). */
+inline bool aoa_conflicts_with_branches(bool aoa_enable, const nr_rx_branch_set_t& set)
+{
+  return aoa_enable && branch_active_count(set) > 1;
+}
+
 /* "/x/reports.jsonl" -> "/x/reports_b2.jsonl"; "/x/prefix" -> "/x/prefix_b2". The suffix goes
  * BEFORE the extension so a consumer globbing "*.jsonl" still finds every branch's stream. */
 inline std::string branch_suffix_path(const std::string& base, uint8_t branch_id)
@@ -443,6 +457,20 @@ inline int build_submit_plan(const nr_rx_branch_set_t* set, nr_isac_submit_plan_
   }
   if (pack_antennas) *pack_antennas = pack;
   return n;
+}
+
+/* P13b: how many ACTIVE branches build_submit_plan() could not place, i.e. how many named a
+ * physical channel this CFR producer cannot reach. Split out of nr_isac_submit_plan() because the
+ * condition there was `written > 0 && ...`, which skipped the counter AND the log in precisely the
+ * worst case -- written == 0, every active branch unreachable, total data loss for this producer
+ * with a clean-looking census. Zero for the legacy plan (<= 1 active branch: one untagged
+ * submission is the correct answer, nothing is skipped) and zero for a FAILED plan (written < 0,
+ * "does not fit the caller's array", where active - written would be arithmetic nonsense). */
+inline int submit_plan_skipped(const nr_rx_branch_set_t* set, int written)
+{
+  if (set == nullptr || written < 0) return 0;
+  const int active = branch_active_count(*set);
+  return (active > 1 && written < active) ? active - written : 0;
 }
 
 inline double slot_duration_s(double scs_hz)

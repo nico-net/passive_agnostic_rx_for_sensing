@@ -2489,3 +2489,99 @@ The residual case is a branch whose `physical_channel` is beyond what the passiv
 allocated (`nant < 4`). That one IS dropped -- by the shared `nr_isac_submit_plan()`, counted in
 `plan_skipped_branches` and logged once -- which is the pre-existing house rule (P10b), not a new
 UL-specific policy. Slicing a plane the context never allocated would be an out-of-bounds read.
+
+## Session — 2026-09-12: P13b three hardening fixes from prior review rounds (defect closure)
+
+Not a plan task. Three independent, small, offline-only findings that this series' **own** fix/review
+rounds surfaced and explicitly deferred, batched into one session:
+
+| # | Origin | Finding |
+|---|--------|---------|
+| 1 | `task-P13a-report.md` (fix rounds 2-3) | Four separate instances of a raw `branch_id & (NR_RX_BRANCH_MAX-1)` mask aliasing the `NR_ISAC_BRANCH_NONE` sentinel onto real branch 3, each found only by manual review one round apart. That report flagged "a checked-in grep guard (style of `check_branch_hw_isolation.sh`) would enforce the helper — flagged, not done." |
+| 2 | P10b (`nr_isac.cc`'s own comment, and `docs/aoa_removal_audit.md` Stage B item 2) | `aoa_enable` + several `rx_branches` was refused only at RUNTIME, by `SensingEngine`'s constructor, after the configuration had been half-applied. The comment in the code said making it a parse-time rejection "is an operator call ... deliberately left open". |
+| 3 | P10b submission-plan wrapper | `if(written>0&&set)` gated BOTH the skip counter and the `LOG_E`, so `written==0` — every active branch naming an unreachable physical channel, i.e. total data loss for that producer — incremented nothing and logged nothing. |
+
+```text
+Date/time (Europe/Zurich): 2026-09-12, ~04:00-06:30 CEST (host clock UTC).
+Task IDs / gate: none (hardening / defect closure on top of P10b, P13a, P10c). No gate claimed.
+Intended falsifiable claim:
+  (1) a raw branch-id mask re-introduced anywhere in openair1/PHY/NR_UE_TRANSPORT or
+      openair1/PHY/NR_UE_ISAC fails a registered ctest, while the sanctioned helpers, the comments
+      that quote the banned idiom, and the two bounded uses do NOT;
+  (2) aoa_enable with >1 active branch is refused at CONFIG PARSE time with both field names in the
+      message and sensing left OFF, while aoa_enable with ONE branch is byte-for-byte unchanged;
+  (3) submit_plan_skipped(set, 0) with 2 active branches == 2 (pre-fix: 0).
+Branch / commit: merge/adaptive-sensing, parent 99f94438708af52398177aae74d48fed03edcc0f.
+  Untracked before AND after (another session's, untouched): tests/passive_rx/aoa_track_dl.conf.
+Files modified / added:
+  A tests/passive_rx/check_branch_id_masking.sh        (item 1, the guard + its --selftest)
+  M CMakeLists.txt                                     (item 1, add_test x2)
+  M openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c  (item 1, `branch-mask-ok` markers x2)
+  M openair1/PHY/NR_UE_ISAC/pipeline_types.h           (items 2+3, two free predicates)
+  M openair1/PHY/NR_UE_ISAC/nr_isac.cc                 (items 2+3, the two call sites)
+  M openair1/PHY/NR_UE_ISAC/tests/python_parity_test.cc (items 2+3, two new cases)
+  M adaptive_RX_pipeline_progress.md, tests/passive_rx/baselines/fixtures.json (+ new manifest)
+Executable hash: nr-uesoftmodem sha256 ce11542f7f50b066812ef3c2f70f653efa5f03b2ba9383739468695d9648f6e9
+Exact commands (all on sens6, tree /home/sens/NICOLA/adaptive-rx-sensing):
+  bash tests/passive_rx/check_branch_id_masking.sh --selftest       -> PASS, 3/3 planted, 0 FP
+  bash tests/passive_rx/check_branch_id_masking.sh                  -> OK, 116 source files clean
+  cmake . && make -j8 nr-uesoftmodem; make -j8 <test targets>
+  ctest -R "branch_id_masking|branch_hw_isolation|nr_rx_branch|nr_rx_span|python_parity" -> 8/8
+  ./test_nr_isac_python_parity                                      -> passed (20 cases, was 18)
+  bash tests/passive_rx/replay_branch_view.sh                       -> PASS
+  bash /tmp/p13b_item2.sh   (three doctored copies of the P02 fixture conf through the replay binary)
+  (cd /tmp/p10a_offbuild && make nr-uesoftmodem -j8)                -> rc=0
+Artifact paths: /tmp/p13b_build2.log, /tmp/p13b_off.log, /tmp/p13b_falsify_build.log,
+  /tmp/replay_branch_view.xPnFG6/, /tmp/p13b_item2.b39Q/ (conflict|legacy|branches .log + .conf).
+Baseline and comparison definition: the parent commit's own replay numbers and parity suite.
+Predeclared assertions / thresholds: legacy replay 34/0/24; branch views 34/34/31/34/34;
+  test_nr_isac_python_parity passes; ENABLE_ISAC_SENSING=OFF links.
+Observed result, with denominators:
+  * legacy "REPLAY PASS: identical DL controls=34 failed=0 raw UL=24"; views 0-3 = 34/31/34/34 of 38
+    recs, data_submits == crc_ok in every view. UNCHANGED.
+  * ctest 8/8; parity 20/20 cases.
+  * FALSIFICATION for item 3 (run, not argued): with submit_plan_skipped() reverted to the pre-fix
+    `written > 0 && ...` expression the suite FAILS with "python parity test failed: with no
+    reachable antenna at all BOTH active branches must be counted as skipped" (rc=1); restored, rc=0.
+  * Item 2 END TO END in the real binary, three doctored copies of the P02 fixture conf:
+    - aoa_enable=1 + rx_branches="0,1": "SENSING: aoa_enable is set together with 2 active
+      rx_branches ... sensing disabled" -- both field names present, refused at parse time, replay
+      still PASS 34/0/24;
+    - aoa_enable=1 alone (the LEGACY pin): falls through to the pre-existing next check verbatim
+      ("aoa_enable requires a valid surveyed rank-two four-element array; sensing disabled") --
+      the new check is invisible to the single-branch AoA deployment;
+    - rx_branches="0,1" without aoa_enable: not refused, replay PASS.
+  * Item 1: the guard found the two LIVE raw masks in nr_pdsch_passive_queue.c (:181, :353). Both
+    are documented-bounded uses from P13a fix round 3 (they read the ENQUEUE-time branch_id, before
+    the only writer that can set the sentinel), so each got an inline `branch-mask-ok` marker with
+    its reason instead of a code change. Opt-out-with-a-reason was chosen over widening the pattern
+    so every exception stays a reviewable line.
+Status: PASS for all three items (offline evidence only; no radio).
+Validity reasons and affected intervals: no capture was taken; nothing on air. The replay evidence
+  is the P02 fixture replayed through the real binary, which opens no radio.
+Hypotheses supported / contradicted:
+  SUPPORTED: the P13a report's claim that a grep guard is feasible for this defect class -- it is,
+    but ONLY with a naming heuristic (a purely syntactic pattern cannot separate `i_ssb & 3` from
+    `branch_id & 3`), and the heuristic's two failure directions are written into the script header.
+  CONTRADICTED (small, mine): my first cut of the guard flagged three COMMENT lines that quote the
+    banned idiom to explain the P13a fix, and its own self-test fixture false-positived because a
+    trailing comment on an unrelated mask contained the word "branch". Both are in the header now as
+    stated limits rather than silently patched away.
+Retraction, if any: none.
+Remaining limitation:
+  * Item 1 is textual: it cannot see a mask split across lines, hidden behind a macro, written as
+    `& 0x3` or `% NR_RX_BRANCH_MAX`, or applied to a differently-named variable assigned from a
+    branch id. It guards against recurrence of the exact idiom that recurred four times.
+  * Item 2's parse-time check makes P10b's pre-loop warning unreachable from the config path; that
+    block was replaced by a comment pointing at the new site. SensingEngine's constructor guard is
+    KEPT (defence in depth, per this project's pattern) and is now the only backstop for any future
+    path that sets aoa_enable without going through nr_isac_config().
+  * Item 3 changes only the CENSUS. A producer whose branches are all unreachable still submits
+    nothing -- that is correct (there is nothing to submit); it is now counted and logged once.
+  * Pre-existing, NOT caused here and NOT fixed here: `make -j8` (all targets) fails on `rftest`
+    (missing `forms.h`) and on `test_nr_ue_ra_procedures` (libMAC_UE_NR referencing
+    `nr_pdcch_blind_*` symbols it does not link). Neither touches any file changed in this session.
+Next highest-value action: unchanged -- P08 (branch-independent UL decode view) and AoA-removal
+  Stage B items 3-5.
+Reviewer / accomplishment date if gate passed: n/a (no gate claimed).
+```

@@ -2471,6 +2471,18 @@ if(ENABLE_TESTS)
            COMMAND bash ${CMAKE_SOURCE_DIR}/tests/passive_rx/check_branch_hw_isolation.sh --selftest
            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
+  # P13b branch-id masking guard: P13a fixed FOUR separate instances of a raw
+  # `branch_id & (NR_RX_BRANCH_MAX-1)` mask aliasing the NR_ISAC_BRANCH_NONE sentinel onto real
+  # branch 3, each found only by manual review. This greps for the idiom so the fifth one fails the
+  # build instead (see tests/passive_rx/check_branch_id_masking.sh). Same shell-script ctest
+  # surface as the P05 hardware-isolation guard above.
+  add_test(NAME branch_id_masking
+           COMMAND bash ${CMAKE_SOURCE_DIR}/tests/passive_rx/check_branch_id_masking.sh
+           WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+  add_test(NAME branch_id_masking_selftest
+           COMMAND bash ${CMAKE_SOURCE_DIR}/tests/passive_rx/check_branch_id_masking.sh --selftest
+           WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
   # P07 G2 tests 1/3 in replay form: replays the registered P02 fixture through the REAL
   # nr-uesoftmodem (no radio) once per single-branch view and once legacy; see
   # tests/passive_rx/replay_branch_view.sh. Skips (exit 77, reported as a ctest SKIP, never a false

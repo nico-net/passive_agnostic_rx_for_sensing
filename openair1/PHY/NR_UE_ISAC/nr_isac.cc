@@ -309,6 +309,19 @@ extern "C" void nr_isac_init(void)
   pipeline.aoa_quality.maximum_azimuth_stddev_deg=p_aoa_max_az_sigma;
   pipeline.aoa_quality.maximum_elevation_stddev_deg=p_aoa_max_el_sigma;
   if (pipeline.aoa_enable) {
+    // P13b: refuse aoa_enable together with several receive branches HERE, at the first point the
+    // combination is knowable (the branch set is parsed above, aoa_enable is decided on the line
+    // above), instead of leaving the operator to infer it from SensingEngine's "AoA requires four
+    // channels" throw during engine construction. Failure handling is identical to the two array
+    // parse failures below -- nothing is applied and sensing stays off, never partially on. The
+    // engine-side guard is deliberately KEPT as defence in depth.
+    if (aoa_conflicts_with_branches(true, branches)) {
+      LOG_E(PHY,"SENSING: aoa_enable is set together with %d active rx_branches. AoA needs a co-located "
+                "four-element array on ONE branch; a multi-branch receiver measures one antenna per "
+                "branch. Use a single branch for aoa_enable, or drop aoa_enable; sensing disabled\n",
+            branch_active_count(branches));
+      pipeline.aoa_enable=pipeline.aoa_ul_enable=false;return;
+    }
     if (!parse_array(p_array,p_rotation,p_broadside,pipeline.tx_position,pipeline.rx_position,&pipeline.array)) {
       LOG_E(PHY,"SENSING: aoa_enable requires a valid surveyed rank-two four-element array; sensing disabled\n");
       pipeline.aoa_enable=pipeline.aoa_ul_enable=false;return;
@@ -347,22 +360,10 @@ extern "C" void nr_isac_init(void)
   logged_unrouted.store(0, std::memory_order_relaxed);
   untagged_submissions.store(0, std::memory_order_relaxed);
   logged_untagged_fanin.store(false, std::memory_order_relaxed);
-  // P10b: the configuration surface does NOT reject aoa_enable together with several receive
-  // branches -- aoa_enable/rx_array and rx_branches are parsed independently above -- yet the two
-  // are mutually exclusive deployment models: AoA needs one CO-LOCATED four-element array on ONE
-  // branch, multi-branch needs physically separated single-antenna receivers. The combination is
-  // now REFUSED, but by SensingEngine's own pre-existing "AoA requires four channels" guard a few
-  // lines below, which on its own gives the operator no idea why they suddenly have one channel.
-  // This is that explanation, and it must be printed BEFORE the loop that fails -- a message after
-  // the loop would be unreachable in exactly the configuration it describes. Making it a config
-  // parse-time rejection instead is an operator call (it changes which configurations start) and
-  // is deliberately left open; see docs/aoa_removal_audit.md Stage B item 2.
-  if (pipeline.aoa_enable && branch_active_count(branches) > 1)
-    LOG_E(PHY,"SENSING: aoa_enable is set but %d receive branches are active. AoA needs a co-located "
-              "four-element array on ONE branch; a multi-branch receiver measures one antenna per "
-              "branch, so each engine is built with ONE channel and the AoA guard below will refuse "
-              "this configuration. Use one branch for AoA, or drop aoa_enable\n",
-          branch_active_count(branches));
+  // P10b's pre-loop warning for aoa_enable + several branches lived here. P13b moved that
+  // rejection to the aoa_enable block above, where the combination is first knowable, so this
+  // point is now unreachable with aoa_enable set and more than one branch active; SensingEngine's
+  // own "AoA requires four channels" guard below remains the defence-in-depth backstop.
   for (uint8_t b = 0; b < NR_RX_BRANCH_MAX; ++b) {
     // branch_is_active(), the SAME predicate branch_pipeline_config() counts and
     // branch_engine_index() routes by. Using a different one here is precisely how a set could
@@ -445,15 +446,17 @@ extern "C" int nr_isac_submit_plan(nr_isac_submit_plan_t* out,int max,uint32_t l
   const int written=build_submit_plan(set,out,max,legacy_nof_ant,available_antennas,pack_antennas);
   // A branch that produced no entry measured nothing this slot. Silence here would look like
   // coverage; it is a configuration error (a physical channel the producer cannot reach).
-  if(written>0&&set){
-    const int active=branch_active_count(*set);
-    if(active>1&&written<active){
-      plan_skipped_branches.fetch_add((unsigned)(active-written),std::memory_order_relaxed);
-      if(!logged_plan_skip.exchange(true,std::memory_order_relaxed))
-        LOG_E(PHY,"SENSING: %d of %d active branches name a physical channel this CFR producer "
-                  "cannot reach (available=%u); their rows are DROPPED, never folded into another "
-                  "branch\n",active-written,active,available_antennas);
-    }
+  // P13b: the guard used to be `written>0&&set`, which skipped BOTH the counter and the log in the
+  // one case that loses everything -- written==0, every active branch naming an unreachable
+  // channel. submit_plan_skipped() answers for written==0 as well (and returns 0 for the legacy
+  // and plan-failed shapes), so the census is now complete.
+  const int skipped=submit_plan_skipped(set,written);
+  if(skipped>0){
+    plan_skipped_branches.fetch_add((unsigned)skipped,std::memory_order_relaxed);
+    if(!logged_plan_skip.exchange(true,std::memory_order_relaxed))
+      LOG_E(PHY,"SENSING: %d of %d active branches name a physical channel this CFR producer "
+                "cannot reach (available=%u); their rows are DROPPED, never folded into another "
+                "branch\n",skipped,branch_active_count(*set),available_antennas);
   }
   return written;
 }

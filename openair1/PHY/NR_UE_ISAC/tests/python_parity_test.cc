@@ -839,6 +839,78 @@ void test_ul_submit_plan()
           "branches beyond the passive UL context allocated planes must be skipped, not sliced");
 }
 
+// P13b item 2: aoa_enable + several active branches is refused at CONFIG PARSE time (nr_isac.cc's
+// aoa_enable block), not only by SensingEngine's constructor deep in engine construction. The
+// predicate is the testable half; the LOG_E and the "return without applying anything" around it
+// are the same shape as the two rx_array parse failures next to it. The single-branch pin is the
+// important assertion here: the co-located-array AoA deployment must be completely unaffected.
+void test_aoa_branch_conflict()
+{
+  const nr_rx_branch_set_t none = branch_set({});
+  const nr_rx_branch_set_t one = branch_set({0});
+  const nr_rx_branch_set_t one_high = branch_set({3});
+  const nr_rx_branch_set_t two = branch_set({0, 2});
+  const nr_rx_branch_set_t all = branch_set({0, 1, 2, 3});
+
+  // THE REGRESSION PIN: the legacy AoA receiver (aoa_enable, one or no branch) is still accepted.
+  require(!aoa_conflicts_with_branches(true, none) && !aoa_conflicts_with_branches(true, one)
+              && !aoa_conflicts_with_branches(true, one_high),
+          "aoa_enable at a single active branch is the co-located-array deployment: stays accepted");
+
+  // The refused combination, at two and at four branches.
+  require(aoa_conflicts_with_branches(true, two) && aoa_conflicts_with_branches(true, all),
+          "aoa_enable together with several active branches must be refused at parse time");
+
+  // Without aoa_enable a multi-branch set is the normal deployment and must never be touched.
+  require(!aoa_conflicts_with_branches(false, two) && !aoa_conflicts_with_branches(false, all),
+          "a multi-branch receiver without aoa_enable must not be refused");
+
+  // A mapped-but-DISABLED slot is not a branch: the same predicate build_submit_plan() uses, so a
+  // set that reads as single-branch there must read as single-branch here too.
+  nr_rx_branch_set_t half = branch_set({0, 1});
+  half.b[1].state = NR_RXB_DISABLED;
+  require(!aoa_conflicts_with_branches(true, half),
+          "with the second branch disabled the set is single-branch again: AoA stays accepted");
+}
+
+// P13b item 3: the submission-plan skip census must fire when the plan places NOTHING. The old
+// condition was "written > 0 && set", so written == 0 -- every active branch naming a physical
+// channel this producer cannot reach, i.e. TOTAL loss for this producer -- incremented no counter
+// and logged nothing. FALSIFICATION: the first two require()s below assert 2 and 4 where the
+// pre-fix expression (written > 0 ? active - written : 0) yields 0, so they fail against the old
+// code; the remaining ones pin the shapes that must keep answering zero.
+void test_submit_plan_skip_census()
+{
+  const nr_rx_branch_set_t two = branch_set({0, 2});
+  const nr_rx_branch_set_t all = branch_set({0, 1, 2, 3});
+  const nr_rx_branch_set_t one = branch_set({0});
+
+  require(submit_plan_skipped(&two, 0) == 2,
+          "with no reachable antenna at all BOTH active branches must be counted as skipped");
+  require(submit_plan_skipped(&all, 0) == 4, "the same at four branches");
+
+  // Partial reachability: the pre-existing behaviour, unchanged.
+  require(submit_plan_skipped(&two, 1) == 1, "one placed of two active branches is one skipped");
+  require(submit_plan_skipped(&two, 2) == 0, "a fully placed plan skips nothing");
+
+  // The legacy shapes answer zero: one untagged submission IS the whole plan there.
+  require(submit_plan_skipped(nullptr, 0) == 0 && submit_plan_skipped(&one, 1) == 0
+              && submit_plan_skipped(&one, 0) == 0,
+          "the legacy single-branch / no-set plan must never report a skipped branch");
+
+  // A FAILED plan (does not fit the caller's array) is not a skip count: active - (-1) would be
+  // arithmetic nonsense and would inflate the census by one on every such call.
+  require(submit_plan_skipped(&two, -1) == 0 && submit_plan_skipped(&all, -1) == 0,
+          "a plan that failed outright must not be counted as skipped branches");
+
+  // End to end against the real plan builder: two branches, zero reachable antennas.
+  nr_isac_submit_plan_t plan[NR_RX_BRANCH_MAX];
+  uint32_t pack = 0;
+  const int written = build_submit_plan(&two, plan, NR_RX_BRANCH_MAX, 4, 0, &pack);
+  require(written == 0 && pack == 0 && submit_plan_skipped(&two, written) == 2,
+          "the plan builder's own total-loss case must be censused as two skipped branches");
+}
+
 void test_branch_output_identity()
 {
   PipelineConfig base;
@@ -1113,7 +1185,7 @@ void test_obsolete_aoa_env_rejected()
 
 int main()
 {
-  try {test_fft();test_adaptive_threshold();test_detector();test_required_cuda_contract();test_aoa();test_aoa_component_mixture_and_cross_leg_fusion();test_enu_geometry();test_repeated_ul_confirmation_gates_global_birth();test_variable_cpi();test_causal_cpi_pipeline();test_finite_admission_window();test_mixed_row_dl_rdm_isolation();test_invalid_ul_does_not_suppress_dl();test_dl_capture_fails_closed_without_dl();test_validation_report_compatibility();test_branch_identity_report();test_branch_engine_routing();test_branch_submit_plan();test_ul_submit_plan();test_branch_output_identity();test_branch_engines_are_independent();test_obsolete_aoa_env_rejected();}
+  try {test_fft();test_adaptive_threshold();test_detector();test_required_cuda_contract();test_aoa();test_aoa_component_mixture_and_cross_leg_fusion();test_enu_geometry();test_repeated_ul_confirmation_gates_global_birth();test_variable_cpi();test_causal_cpi_pipeline();test_finite_admission_window();test_mixed_row_dl_rdm_isolation();test_invalid_ul_does_not_suppress_dl();test_dl_capture_fails_closed_without_dl();test_validation_report_compatibility();test_branch_identity_report();test_branch_engine_routing();test_branch_submit_plan();test_ul_submit_plan();test_aoa_branch_conflict();test_submit_plan_skip_census();test_branch_output_identity();test_branch_engines_are_independent();test_obsolete_aoa_env_rejected();}
   catch(const std::exception& e){std::fprintf(stderr,"python parity test failed: %s\n",e.what());return EXIT_FAILURE;}
   std::puts("native sensing golden parity checks passed");return EXIT_SUCCESS;
 }

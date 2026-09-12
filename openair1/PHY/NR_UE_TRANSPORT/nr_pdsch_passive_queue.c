@@ -178,7 +178,7 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
          * or by enqueue_fanout() from nr_rx_branch_set_dispatch(), which emits only ACTIVE branches
          * -- and it runs BEFORE the branch-view resolve at the bottom of this block, which is the
          * only writer that can put NR_ISAC_BRANCH_NONE in the field. Left as-is deliberately. */
-        atomic_fetch_add_explicit(&g_br_stale_epoch[job.branch_id & (NR_RX_BRANCH_MAX - 1)], 1,
+        atomic_fetch_add_explicit(&g_br_stale_epoch[job.branch_id & (NR_RX_BRANCH_MAX - 1)], 1,  /* branch-mask-ok: pre-resolve id, see above */
                                   memory_order_relaxed);
         continue;
       }
@@ -350,7 +350,7 @@ bool nr_pdsch_passive_queue_enqueue(const nr_pdsch_passive_job_t *job)
   /* P13a fix round 3: bounded for the same reason as g_br_stale_epoch -- enqueue happens before any
    * branch-view resolve, so branch_id here is always a real id (producer's 0, or a dispatch entry).
    * Left as-is deliberately; see the comment at the stale-epoch counter in the consumer loop. */
-  atomic_fetch_add_explicit(&g_br_queued[job->branch_id & (NR_RX_BRANCH_MAX - 1)], 1,
+  atomic_fetch_add_explicit(&g_br_queued[job->branch_id & (NR_RX_BRANCH_MAX - 1)], 1,  /* branch-mask-ok: pre-resolve id, see above */
                             memory_order_relaxed);
   return true;
 }
