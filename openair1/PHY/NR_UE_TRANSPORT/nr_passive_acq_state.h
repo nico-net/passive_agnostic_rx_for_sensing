@@ -27,12 +27,20 @@ extern "C" {
 #endif
 
 /* Explicit acquisition/discovery states for the passive receiver, named after what each one
- * actually observes (not aspirational SSB/PBCH names this module has no signal for -- see the
- * header comment in nr_passive_acq_state.c for exactly which existing counters/booleans drive
- * each transition). Strictly increasing "progress" order; NR_ACQ_LOST is reachable from any state
- * and is not part of that order. */
+ * actually observes. The state is the HIGHEST piece of evidence currently held, not a strict
+ * chain: on this receiver SIB1 lands before any PDCCH-length discovery, so a run legitimately
+ * goes SEARCHING -> PBCH_LOCKED -> SIB1_DECODED -> CELL_CONFIGURED without ever reporting
+ * PDCCH_LOCKED as a state (it is still visible as a boolean in the heartbeat line).
+ *
+ * Two kinds of input feed it. POLLED discovery evidence (nr_passive_acq_update, from the blind
+ * PDCCH monitor's occasion loop) and EVENT edges (nr_passive_acq_note_*), which exist because the
+ * poll site only runs once the PDCCH monitor is configured -- measured on 4 s raw captures where
+ * MIB and SIB1 both decoded while the monitor ran ZERO occasions, so a poll-only tracker reported
+ * nothing at all. NR_ACQ_LOST is reachable from any state and is not part of the order. */
 typedef enum {
-  NR_ACQ_SEARCHING_PDCCH = 0, // no DCI length/CORESET locked yet
+  NR_ACQ_SEARCHING = 0,       // nothing yet: no PBCH lock (renamed from SEARCHING_PDCCH, see below)
+  NR_ACQ_PBCH_LOCKED,         // MIB decoded and applied (event from nr-ue.c's sync path)
+  NR_ACQ_SIB1_DECODED,        // SIB1 common config published (event from config_ue.c)
   NR_ACQ_PDCCH_LOCKED,        // DCI length found, CORESET extent not yet verified
   NR_ACQ_CORESET_VERIFIED,    // CORESET extent verified, UL BWP (SIB1-derived) not yet known
   NR_ACQ_CELL_CONFIGURED,     // UL BWP known; DL/UL field-interpretation searches not converged
@@ -57,7 +65,7 @@ typedef struct {
 
 typedef struct {
   nr_passive_acq_state_t state;
-  uint64_t updates, transitions, sync_losses;
+  uint64_t updates, transitions, sync_losses, pbch_locks, sib1_decodes;
   uint64_t time_in_state;      // consecutive updates spent in the current state
   uint64_t consecutive_regressions; // consecutive updates whose evidence regressed from `state`
 } nr_passive_acq_snapshot_t;
@@ -73,6 +81,11 @@ const char *nr_passive_acq_state_name(nr_passive_acq_state_t s);
  * transition is logged at LOG_A with the evidence that caused it; every update is available via
  * nr_passive_acq_snapshot() regardless of logging. */
 void nr_passive_acq_update(const nr_passive_acq_inputs_t *in);
+/* Event edges from the acquisition path itself, so early progress is reported even before the
+ * blind PDCCH monitor has run its first occasion. Each re-evaluates the state immediately using
+ * the most recently polled discovery inputs (all-false until the first poll). */
+void nr_passive_acq_note_pbch_locked(void); // nr-ue.c: MIB applied, frame number known
+void nr_passive_acq_note_sib1(void);        // config_ue.c: common config published (passive mode)
 /* Hard invalidation: the receive stream itself was lost (RXDISCONT), so the frame-to-sample
  * mapping -- and therefore every hypothesis being scored against it -- is invalid NOW. Drops
  * straight to NR_ACQ_LOST with NO hysteresis, unlike nr_passive_acq_update()'s evidence path:

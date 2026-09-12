@@ -29,7 +29,7 @@ void exit_function(const char *,const char *,int,const char *,int) { std::abort(
 class AcqState : public ::testing::Test { void SetUp() override { nr_passive_acq_reset(); } };
 
 TEST_F(AcqState, StartsSearchingAndProgressesForwardImmediately) {
-  EXPECT_EQ(nr_passive_acq_snapshot().state, NR_ACQ_SEARCHING_PDCCH);
+  EXPECT_EQ(nr_passive_acq_snapshot().state, NR_ACQ_SEARCHING);
   nr_passive_acq_inputs_t in{};
   in.pdcch_length_found = true;
   nr_passive_acq_update(&in);
@@ -122,12 +122,37 @@ TEST_F(AcqState, RepeatedSyncLossCountsOnceIntoTheStateButAlwaysIntoTheCounter) 
   EXPECT_EQ(nr_passive_acq_snapshot().transitions, t) << "already LOST: no second transition";
   EXPECT_EQ(nr_passive_acq_snapshot().sync_losses, 2u);
 }
+TEST_F(AcqState, EarlyEventsReportProgressBeforeAnyPdcchOccasionRuns) {
+  /* Measured on 4 s raw captures: MIB and SIB1 both decode while the blind PDCCH monitor runs
+   * ZERO occasions, so a poll-only tracker reported nothing at all. Events must advance it. */
+  nr_passive_acq_note_pbch_locked();
+  EXPECT_EQ(nr_passive_acq_snapshot().state, NR_ACQ_PBCH_LOCKED);
+  nr_passive_acq_note_sib1();
+  EXPECT_EQ(nr_passive_acq_snapshot().state, NR_ACQ_SIB1_DECODED);
+  EXPECT_EQ(nr_passive_acq_snapshot().transitions, 2u);
+  nr_passive_acq_inputs_t in{}; // first poll, monitor still knows nothing: must not regress
+  nr_passive_acq_update(&in);
+  EXPECT_EQ(nr_passive_acq_snapshot().state, NR_ACQ_SIB1_DECODED);
+  EXPECT_EQ(nr_passive_acq_snapshot().consecutive_regressions, 0u);
+}
+TEST_F(AcqState, SyncLossClearsPbchButKeepsSib1Facts) {
+  nr_passive_acq_note_pbch_locked();
+  nr_passive_acq_note_sib1();
+  nr_passive_acq_note_sync_loss();
+  ASSERT_EQ(nr_passive_acq_snapshot().state, NR_ACQ_LOST);
+  nr_passive_acq_inputs_t in{};
+  nr_passive_acq_update(&in); // cell config survives a gap; the frame mapping does not
+  EXPECT_EQ(nr_passive_acq_snapshot().state, NR_ACQ_SIB1_DECODED);
+  nr_passive_acq_note_pbch_locked(); // re-lock is a lower rung than SIB1: no state change
+  EXPECT_EQ(nr_passive_acq_snapshot().state, NR_ACQ_SIB1_DECODED);
+  EXPECT_EQ(nr_passive_acq_snapshot().pbch_locks, 2u);
+}
 TEST_F(AcqState, ResetReturnsToSearchingAndClearsCounters) {
   nr_passive_acq_inputs_t in{}; in.pdcch_length_found = true;
   nr_passive_acq_update(&in);
   nr_passive_acq_reset();
   const auto s = nr_passive_acq_snapshot();
-  EXPECT_EQ(s.state, NR_ACQ_SEARCHING_PDCCH);
+  EXPECT_EQ(s.state, NR_ACQ_SEARCHING);
   EXPECT_EQ(s.updates, 0u);
   EXPECT_EQ(s.transitions, 0u);
 }

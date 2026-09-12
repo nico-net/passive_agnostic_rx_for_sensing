@@ -10,6 +10,7 @@ extern "C" {
 #include "openair2/LAYER2/nr_rlc/nr_rlc_oai_api.h"
 #include "common/utils/ocp_itti/intertask_interface.h"
 #include "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.h"
+#include "openair1/PHY/NR_UE_TRANSPORT/nr_passive_acq_state.h"
 
 static softmodem_params_t softmodem_params;
 
@@ -38,6 +39,7 @@ uint16_t nr_pdcch_blind_dci10_size(uint16_t)
 {
   return 0; // the real function's own "invalid" sentinel; unreachable without ISAC_OTA_CFG
 }
+void nr_passive_acq_note_sib1(void) {} // same passive-mode-only site as publish_common
 softmodem_params_t *get_softmodem_params(void)
 {
   return &softmodem_params;

@@ -20,25 +20,28 @@
  */
 /* This module has NO PBCH/SSB signal of its own -- the receiver's blind-PDCCH RT path (the only
  * verified call site, nr_pdcch_blind_monitor_rt.c) does not expose one at the point this is
- * called. NR_ACQ_SEARCHING_PDCCH therefore covers everything from "no SSB yet" through "PDCCH not
+ * called. NR_ACQ_SEARCHING therefore covers everything from "no SSB yet" through "PDCCH not
  * yet locked" as ONE state: this module cannot distinguish those without a new hook into PBCH
  * decode, which is out of scope here (see the handover doc's "Not yet done"). Do not read
- * NR_ACQ_SEARCHING_PDCCH as proof of SSB/PBCH failure specifically. */
+ * NR_ACQ_SEARCHING as proof of SSB/PBCH failure specifically. */
 #include "nr_passive_acq_state.h"
 #include "common/utils/LOG/log.h"
 #include <string.h>
 #include <pthread.h>
 
 static const char *state_names[NR_ACQ_NUM_STATES] = {
-  "SEARCHING_PDCCH", "PDCCH_LOCKED", "CORESET_VERIFIED", "CELL_CONFIGURED",
-  "DL_CONVERGED", "UL_CONVERGED", "TRACKING", "LOST",
+  "SEARCHING", "PBCH_LOCKED", "SIB1_DECODED", "PDCCH_LOCKED", "CORESET_VERIFIED",
+  "CELL_CONFIGURED", "DL_CONVERGED", "UL_CONVERGED", "TRACKING", "LOST",
 };
 const char *nr_passive_acq_state_name(nr_passive_acq_state_t s)
 {
   return (s >= 0 && s < NR_ACQ_NUM_STATES) ? state_names[s] : "INVALID";
 }
 
-static nr_passive_acq_snapshot_t g_snap = { .state = NR_ACQ_SEARCHING_PDCCH };
+static nr_passive_acq_snapshot_t g_snap = { .state = NR_ACQ_SEARCHING };
+/* Event-latched evidence and the last polled inputs, so an event can re-evaluate immediately. */
+static bool g_pbch_locked, g_sib1_decoded;
+static nr_passive_acq_inputs_t g_last_in;
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 
 /* Ordinal progress order. LOST is intentionally excluded (sentinel, ordinal -1): re-acquisition
@@ -47,13 +50,15 @@ static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 static int ordinal(nr_passive_acq_state_t s)
 {
   switch (s) {
-    case NR_ACQ_SEARCHING_PDCCH:   return 0;
-    case NR_ACQ_PDCCH_LOCKED:      return 1;
-    case NR_ACQ_CORESET_VERIFIED:  return 2;
-    case NR_ACQ_CELL_CONFIGURED:   return 3;
-    case NR_ACQ_DL_CONVERGED:      return 4;
-    case NR_ACQ_UL_CONVERGED:      return 4; // siblings: either one alone is equal progress
-    case NR_ACQ_TRACKING:          return 5;
+    case NR_ACQ_SEARCHING:         return 0;
+    case NR_ACQ_PBCH_LOCKED:       return 1;
+    case NR_ACQ_SIB1_DECODED:      return 2;
+    case NR_ACQ_PDCCH_LOCKED:      return 3;
+    case NR_ACQ_CORESET_VERIFIED:  return 4;
+    case NR_ACQ_CELL_CONFIGURED:   return 5;
+    case NR_ACQ_DL_CONVERGED:      return 6;
+    case NR_ACQ_UL_CONVERGED:      return 6; // siblings: either one alone is equal progress
+    case NR_ACQ_TRACKING:          return 7;
     default:                       return -1; // NR_ACQ_LOST
   }
 }
@@ -69,12 +74,12 @@ static nr_passive_acq_state_t target_of(const nr_passive_acq_inputs_t *in)
   if (in->ul_bwp_known)             return NR_ACQ_CELL_CONFIGURED;
   if (in->coreset_extent_verified)  return NR_ACQ_CORESET_VERIFIED;
   if (in->pdcch_length_found)       return NR_ACQ_PDCCH_LOCKED;
-  return NR_ACQ_SEARCHING_PDCCH;
+  if (g_sib1_decoded)               return NR_ACQ_SIB1_DECODED;
+  if (g_pbch_locked)                return NR_ACQ_PBCH_LOCKED;
+  return NR_ACQ_SEARCHING;
 }
-void nr_passive_acq_update(const nr_passive_acq_inputs_t *in)
+static void update_locked(const nr_passive_acq_inputs_t *in)
 {
-  if (!in) return;
-  pthread_mutex_lock(&g_lock);
   const nr_passive_acq_state_t prev = g_snap.state;
   const nr_passive_acq_state_t target = target_of(in);
   ++g_snap.updates;
@@ -110,6 +115,33 @@ void nr_passive_acq_update(const nr_passive_acq_inputs_t *in)
   } else {
     ++g_snap.time_in_state;
   }
+}
+void nr_passive_acq_update(const nr_passive_acq_inputs_t *in)
+{
+  if (!in) return;
+  pthread_mutex_lock(&g_lock);
+  g_last_in = *in;
+  update_locked(in);
+  pthread_mutex_unlock(&g_lock);
+}
+void nr_passive_acq_note_pbch_locked(void)
+{
+  pthread_mutex_lock(&g_lock);
+  ++g_snap.pbch_locks;
+  g_pbch_locked = true;
+  LOG_I(PHY, "SENSING: ACQ_EVENT pbch_locked (n=%lu, state=%s)\n", (unsigned long)g_snap.pbch_locks,
+        nr_passive_acq_state_name(g_snap.state));
+  update_locked(&g_last_in);
+  pthread_mutex_unlock(&g_lock);
+}
+void nr_passive_acq_note_sib1(void)
+{
+  pthread_mutex_lock(&g_lock);
+  ++g_snap.sib1_decodes;
+  g_sib1_decoded = true;
+  LOG_I(PHY, "SENSING: ACQ_EVENT sib1_decoded (n=%lu, state=%s)\n", (unsigned long)g_snap.sib1_decodes,
+        nr_passive_acq_state_name(g_snap.state));
+  update_locked(&g_last_in);
   pthread_mutex_unlock(&g_lock);
 }
 void nr_passive_acq_note_sync_loss(void)
@@ -117,6 +149,7 @@ void nr_passive_acq_note_sync_loss(void)
   pthread_mutex_lock(&g_lock);
   const nr_passive_acq_state_t prev = g_snap.state;
   ++g_snap.sync_losses;
+  g_pbch_locked = false; // the frame-to-sample mapping is what was lost; SIB1 facts still hold
   if (prev != NR_ACQ_LOST) {
     LOG_W(PHY, "SENSING: ACQ_STATE %s -> LOST (receive-stream discontinuity, no hysteresis; "
                "losses=%lu updates=%lu time_in_prev=%lu)\n",
@@ -140,6 +173,8 @@ void nr_passive_acq_reset(void)
 {
   pthread_mutex_lock(&g_lock);
   memset(&g_snap, 0, sizeof(g_snap));
-  g_snap.state = NR_ACQ_SEARCHING_PDCCH;
+  memset(&g_last_in, 0, sizeof(g_last_in));
+  g_pbch_locked = g_sib1_decoded = false;
+  g_snap.state = NR_ACQ_SEARCHING;
   pthread_mutex_unlock(&g_lock);
 }

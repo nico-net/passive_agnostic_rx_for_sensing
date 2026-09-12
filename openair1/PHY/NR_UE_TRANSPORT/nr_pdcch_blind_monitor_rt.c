@@ -2500,22 +2500,43 @@ constdiag_done:;
     }
     /* Explicit acquisition/discovery state (Gate 4/5 groundwork). Every input is a read of a
      * counter/boolean that ALREADY exists at this point -- no new measurement, no control-flow
-     * change, and period-guarded exactly like the census lines above (see the PARMSET note on why
-     * per-occasion logging here is not merely untidy). Transitions log themselves at LOG_A inside
-     * nr_passive_acq_update(); this line is the always-present heartbeat so a log can be read
-     * cold. */
-    if ((g_occasions_run % NR_PDCCH_BLIND_SUMMARY_PERIOD_OCC) == 0) {
+     * change. Transitions log themselves at LOG_A inside nr_passive_acq_update(); the heartbeat
+     * below is period-guarded like the census lines above (see the PARMSET note on why
+     * per-occasion logging here is not merely untidy).
+     *
+     * The UPDATE is not tied to that log period any more. It used to be, and on a 4 s raw capture
+     * that meant zero updates: the whole 1000-occasion summary never fired, the state never left
+     * SEARCHING_PDCCH, and nothing was logged. Now three cheap milestone booleans are compared
+     * EVERY occasion (3 compares), and a flip forces a full update -- costlier sweep snapshots
+     * included -- immediately. Flips happen a handful of times per run, so RT cost stays
+     * negligible. Convergence winners are still sampled at the period: they take tens of seconds
+     * to form, so ~0.6 s resolution loses nothing. Unsynchronised statics follow this function's
+     * existing single-caller assumption (g_occasions_run, raw_dl_count). */
+    static bool acq_first_logged = false;
+    if (!acq_first_logged) {
+      acq_first_logged = true;
+      LOG_I(PHY, "SENSING: ACQ first monitored occasion (occasions_run=%lu)\n", (unsigned long)g_occasions_run);
+    }
+    const bool acq_len = g_length_found;
+    const bool acq_cs  = !cfg->autodiscover || nr_pdcch_blind_monitor_autodiscover_extent_verified();
+    const bool acq_bwp = ul_opts.bwp_size > 0;
+    static int acq_last_sig = -1;
+    const int acq_sig = (int)acq_len | ((int)acq_cs << 1) | ((int)acq_bwp << 2);
+    const bool acq_period = (g_occasions_run % NR_PDCCH_BLIND_SUMMARY_PERIOD_OCC) == 0;
+    if (acq_period || acq_sig != acq_last_sig) {
+      acq_last_sig = acq_sig;
       const nr_pdcch_ul_discovery_snapshot_t uls = nr_pdcch_ul_discovery_snapshot();
       const nr_passive_acq_inputs_t acq_in = {
-        .pdcch_length_found      = g_length_found,
-        .coreset_extent_verified = !cfg->autodiscover || nr_pdcch_blind_monitor_autodiscover_extent_verified(),
-        .ul_bwp_known            = ul_opts.bwp_size > 0,
+        .pdcch_length_found      = acq_len,
+        .coreset_extent_verified = acq_cs,
+        .ul_bwp_known            = acq_bwp,
         .dl_search_winners       = (uint64_t)nr_pdsch_config_sweep_settled_count(),
         .ul_width_winners        = (uint64_t)uls.width_winners,
         .ul_interp_winners       = (uint64_t)uls.interp_winners,
       };
       nr_passive_acq_update(&acq_in);
       const nr_passive_acq_snapshot_t acq = nr_passive_acq_snapshot();
+      if (acq_period)
       LOG_I(PHY, "SENSING: ACQ state=%s time_in_state=%lu transitions=%lu regressions=%lu "
                  "in[len=%d coreset=%d ul_bwp=%d dl_win=%lu ul_win[w=%lu i=%lu]] "
                  "uldisc[gen=%lu raw=%d wcls=%d icls=%d wtrials=%lu itrials=%lu rejected_fb=%lu]\n",

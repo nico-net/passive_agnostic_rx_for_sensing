@@ -64,7 +64,7 @@ def gate5_verdict(text, gap_armed):
     states = re.findall(r'ACQ_STATE (\w+) -> (\w+)', text)
     lost_at = next((i for i, (_, to) in enumerate(states) if to == 'LOST'), None)
     recovered = lost_at is not None and any(
-        to not in ('LOST', 'SEARCHING_PDCCH') for _, to in states[lost_at + 1:])
+        to not in ('LOST', 'SEARCHING') for _, to in states[lost_at + 1:])
     final = states[-1][1] if states else None
     ok = injected and detected and lost_at is not None and recovered
     return {'verdict': 'PASS' if ok else 'FAIL',

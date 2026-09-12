@@ -19,6 +19,7 @@
 #include "RRC/NR_UE/L2_interface_ue.h"
 #include "oai_asn1.h"
 #include "PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.h"
+#include "PHY/NR_UE_TRANSPORT/nr_passive_acq_state.h"
 
 #define ASIGN_P_VAL(dst, src) \
   do {                        \
@@ -2193,6 +2194,7 @@ void nr_rrc_mac_config_req_sib1(module_id_t module_id, int cc_idP, NR_SIB1_t *si
       }
     }
     nr_pdcch_blind_publish_common(&facts);
+    nr_passive_acq_note_sib1(); // acquisition-state tracker: SIB1 common config published
   }
   // set current BWP only if coming from non-connected state
   // otherwise it is just a periodically update of the SIB1 content

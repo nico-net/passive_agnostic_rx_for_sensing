@@ -996,6 +996,7 @@ void *UE_thread(void *arg)
             delNotifiedFIFO_elt(elt);
             decoded_frame_rx = mac->mib_frame;
           }
+          nr_passive_acq_note_pbch_locked(); // acquisition-state tracker: MIB applied, frame known
           LOG_A(PHY,
                 "UE synchronized! decoded_frame_rx=%d UE->init_sync_frame=%d trashed_frames=%d\n",
                 decoded_frame_rx,
@@ -1376,6 +1377,9 @@ void *UE_thread(void *arg)
           trashed_frames = 0;
           nr_rx_continuity_reset(&rx_continuity);
           LOG_W(PHY, "SENSING: RXDISCONT sync invalidated, timing state cleared, reacquiring\n");
+          /* The state tracker's other inputs are all latched discovery state and cannot regress
+           * on a stream loss; this edge is the only thing that can tell it the mapping is gone. */
+          nr_passive_acq_note_sync_loss();
           /* No RX/TX job has been allocated for this slot yet. Dispatching it would
            * feed invalid samples to discovery and overwrite UNSYNC with SYNCED below. */
           if (IS_PASSIVE_RX_MODE(get_softmodem_params()))
@@ -1480,9 +1484,6 @@ void *UE_thread(void *arg)
             if (a2 == 0)
               g_ulprobe_n[ul]++;
           }
-          /* The state tracker's other inputs are all latched discovery state and cannot regress
-           * on a stream loss; this edge is the only thing that can tell it the mapping is gone. */
-          nr_passive_acq_note_sync_loss();
         }
       }
       g_census_pow_ant_n++;
