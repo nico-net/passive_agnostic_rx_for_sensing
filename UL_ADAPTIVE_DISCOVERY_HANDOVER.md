@@ -260,3 +260,26 @@ site verified gated off).
 - Decode recovery after a gap: all replays run `ISAC_SYNC_ONLY=1`, so TB decode is not exercised.
 - Gate 1 general 1_1 equivalence, gate 2 multiple layouts, gate 3/6 beyond tested scope: unchanged.
 - `test_vrtsim_cirdb` (upstream) and the 2 s-vs-4 s acquisition floor are recorded, not fixed.
+
+### Corrections (2026-09-12, later the same day)
+- **Retracted:** "these replays run `ISAC_SYNC_ONLY=1`, so TB decode is not exercised" (stated
+  twice above). `ISAC_SYNC_ONLY` is not read by any C source — it is a dead env var in the harness —
+  and the replays decode: gate-5 regression run, UL `pusch_passive try=14359 crc_ok=10562 (73.6%)`,
+  DL `PDSCHQ decoded=150452 crc_ok=47710 (31.7%)`.
+- **Decode recovery after a gap, measured** (same run, cumulative-count deltas either side of the
+  3 s gap at 60 s): UL **85.7 %** CRC on the 3,582 TBs after the gap vs 69.3 % cumulative before;
+  DL 6.1 % → 53.1 % (the DL interpretation search settling late in the run, not the gap). No collapse.
+- **`TRACKING` is overstated.** `ul_converged` is `width_winners>0 || interp_winners>0`, and the
+  interpretation search (Component 3) armed in **zero** replays (`icls=0 itrials=0` in every
+  heartbeat): it only starts when the width winner's CRC upper bound is < 0.60, and the winner decodes
+  at ~74 %. So on every capture on disk `TRACKING` means "width converged + DL settled", never
+  "interpretation resolved". Component 3 is unexercised on real data and cannot be exercised with the
+  captures we have.
+- **Hand-set values introduced by this work, none derived from a measurement:**
+  `NR_PASSIVE_ACQ_LOSS_HYSTERESIS = 8` (never exercised on real data — the real loss path bypasses it);
+  `coreset_extent_verified := !autodiscover || verified` (operator-configured CORESET counted as verified
+  by fiat); the gate-5 verdict's "recovered" = any post-LOST state other than LOST/SEARCHING (too weak:
+  `PBCH_LOCKED` alone would pass — should require regaining at least the pre-loss state);
+  `NR_ISAC_ILLUM_DL` for every row in the repaired ISAC tests (single-illuminator assumption). The
+  gate-1 oracle command pins `-r 273 --numerology 1 --band 78 -C 3450000000 --ssb 150` by design —
+  it is the documented decoder regression, NOT gate-1 inference, and must not be read as agnostic.
