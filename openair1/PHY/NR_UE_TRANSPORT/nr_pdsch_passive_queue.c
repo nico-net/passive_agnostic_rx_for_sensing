@@ -191,6 +191,15 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
          * false accept (garbage allocation) cannot pollute the statistic. */
         const fapi_nr_dl_config_dlsch_pdu_rel15_t *pdu = &job.dlsch_pdu;
         const bool crc = st == NR_PDSCH_PASSIVE_DECODE_CRC_OK;
+        /* dataScramblingIdentityPDSCH is dedicated and assumed = PCI. A CRC-OK transport block IS the
+         * proof: c_init = RNTI*2^15 + n_ID, so any other n_ID descrambles wrongly and LDPC fails.
+         * State the verdict once instead of leaving it an assumption. */
+        static bool s_dl_scr_confirmed;
+        if (crc && !s_dl_scr_confirmed) {
+          s_dl_scr_confirmed = true;
+          LOG_A(PHY, "SENSING: DATA_SCRAMBLING_ID PDSCH CONFIRMED n_id=%u (assumed %u) by TB CRC, rnti=0x%x\n",
+                (unsigned)pdu->dlDataScramblingId, (unsigned)ue->frame_parms.Nid_cell, job.rnti);
+        }
         const uint8_t nb_re_dmrs = get_num_dmrs_re_per_rb(pdu->dmrsConfigType, pdu->n_dmrs_cdm_groups);
         const uint16_t dmrs_len = get_num_dmrs(pdu->dlDmrsSymbPos);
         nr_pdsch_xoverhead_observe(dec.cw.qamModOrder, dec.cw.targetCodeRate, job.freq_alloc.num_rbs,

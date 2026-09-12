@@ -1257,6 +1257,14 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
   out->status = NR_PUSCH_PASSIVE_OK;
   out->tb     = hp->b;
   atomic_fetch_add_explicit(&g_crc_ok, 1, memory_order_relaxed);
+  {
+    /* dataScramblingIdentityPUSCH, same argument as the DL: a CRC-OK TB under this n_ID is proof. */
+    static _Atomic int s_ul_scr_confirmed;
+    int expected = 0;
+    if (atomic_compare_exchange_strong(&s_ul_scr_confirmed, &expected, 1))
+      LOG_A(PHY, "SENSING: DATA_SCRAMBLING_ID PUSCH CONFIRMED n_id=%d (assumed PCI %u) by TB CRC, rnti=0x%x\n",
+            g->data_scrambling_id, (unsigned)fp->Nid_cell, g->rnti);
+  }
 
   /* 1024-candidate sweep, milliseconds: only when this decode runs on a queue consumer. When the
    * queue is not running this function IS the RT thread's in-line decode (monitor_rt.c), where a

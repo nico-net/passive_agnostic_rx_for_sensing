@@ -65,12 +65,15 @@ typedef struct {
 
 typedef struct {
   int phy_n_rb, phy_mu, phy_ssb_start_subcarrier;
+  double phy_dl_carrier_hz;
   int sib1_n_rb, sib1_mu, sib1_offset_to_point_a, sib1_offset_to_carrier, sib1_k_ssb;
 } nr_passive_acq_carrier_t;
 typedef struct {
   bool bw_match, mu_match, grid_match;
   int  point_a_subcarrier;   // derived Point A position in the started grid (0 = grid start)
   int  carrier_end_subcarrier;
+  double derived_centre_hz;   // absolute carrier centre implied by SIB1, 0 if PHY frequency unknown
+  double started_centre_hz;
 } nr_passive_acq_carrier_verdict_t;
 
 typedef struct {
@@ -114,7 +117,9 @@ void nr_passive_acq_note_sib1(void);        // config_ue.c: common config publis
 nr_passive_acq_carrier_verdict_t nr_passive_acq_verify_carrier(const nr_passive_acq_carrier_t *c);
 /* PHY registers its started geometry once (nr-uesoftmodem.c); MAC reports SIB1's carrier facts
  * (config_ue.c). The verdict is logged once and kept in the snapshot. */
-void nr_passive_acq_set_phy_geometry(int n_rb, int mu, int ssb_start_subcarrier);
+/* dl_carrier_hz = the RF centre the PHY was started with; needed to express the SIB1-derived
+ * carrier centre as an absolute frequency (the receiver could retune to it on a mismatch). */
+void nr_passive_acq_set_phy_geometry(int n_rb, int mu, int ssb_start_subcarrier, double dl_carrier_hz);
 void nr_passive_acq_note_sib1_carrier(int n_rb, int mu, int offset_to_point_a, int offset_to_carrier, int k_ssb);
 /* Hard invalidation: the receive stream itself was lost (RXDISCONT), so the frame-to-sample
  * mapping -- and therefore every hypothesis being scored against it -- is invalid NOW. Drops

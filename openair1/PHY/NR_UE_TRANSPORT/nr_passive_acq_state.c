@@ -180,12 +180,21 @@ nr_passive_acq_carrier_verdict_t nr_passive_acq_verify_carrier(const nr_passive_
    * last -- the receiver was tuned to the cell's carrier, not merely somewhere that contains it. */
   v.grid_match = (v.point_a_subcarrier + 12 * c->sib1_offset_to_carrier == 0)
                  && (v.carrier_end_subcarrier == 12 * c->phy_n_rb);
+  /* Absolute centre of the cell's carrier: the started grid's centre is subcarrier 6*N_RB_DL;
+   * the SIB1 carrier's centre is Point A + 12*offsetToCarrier + 6*carrierBandwidth. */
+  v.started_centre_hz = c->phy_dl_carrier_hz;
+  if (c->phy_dl_carrier_hz > 0) {
+    const double scs_hz = 15000.0 * (1 << c->phy_mu);
+    const int sib1_centre_sc = v.point_a_subcarrier + 12 * c->sib1_offset_to_carrier + 6 * c->sib1_n_rb;
+    v.derived_centre_hz = c->phy_dl_carrier_hz + (sib1_centre_sc - 6 * c->phy_n_rb) * scs_hz;
+  }
   return v;
 }
-void nr_passive_acq_set_phy_geometry(int n_rb, int mu, int ssb_start_subcarrier)
+void nr_passive_acq_set_phy_geometry(int n_rb, int mu, int ssb_start_subcarrier, double dl_carrier_hz)
 {
   pthread_mutex_lock(&g_lock);
   g_carrier.phy_n_rb = n_rb; g_carrier.phy_mu = mu; g_carrier.phy_ssb_start_subcarrier = ssb_start_subcarrier;
+  g_carrier.phy_dl_carrier_hz = dl_carrier_hz;
   g_phy_geom_set = true;
   pthread_mutex_unlock(&g_lock);
 }
@@ -204,15 +213,18 @@ void nr_passive_acq_note_sib1_carrier(int n_rb, int mu, int offset_to_point_a, i
   if (g_snap.carrier_verified == 0 || (ok ? -1 : 1) == g_snap.carrier_verified) {
     if (ok)
       LOG_A(PHY, "SENSING: ACQ carrier CONFIRMED from SIB1: %d PRB mu=%d, Point A at grid subcarrier %d, "
-                 "carrier ends at %d = grid end (started with %d PRB mu=%d, SSB found at subcarrier %d)\n",
+                 "carrier ends at %d = grid end (started with %d PRB mu=%d, SSB found at subcarrier %d); "
+                 "derived carrier centre %.6f MHz (started %.6f MHz)\n",
             n_rb, mu, v.point_a_subcarrier, v.carrier_end_subcarrier, g_carrier.phy_n_rb, g_carrier.phy_mu,
-            g_carrier.phy_ssb_start_subcarrier);
+            g_carrier.phy_ssb_start_subcarrier, v.derived_centre_hz / 1e6, v.started_centre_hz / 1e6);
     else
       LOG_E(PHY, "SENSING: ACQ carrier MISMATCH: SIB1 says %d PRB mu=%d (Point A at grid subcarrier %d, "
                  "offsetToCarrier %d, carrier end %d) but PHY started with %d PRB mu=%d, grid end %d; "
-                 "bw_match=%d mu_match=%d grid_match=%d -- the started sample grid is NOT this cell's carrier\n",
+                 "bw_match=%d mu_match=%d grid_match=%d -- the started sample grid is NOT this cell's carrier; "
+                 "the cell's carrier centre is %.6f MHz, receiver started at %.6f MHz (retune target)\n",
             n_rb, mu, v.point_a_subcarrier, offset_to_carrier, v.carrier_end_subcarrier,
-            g_carrier.phy_n_rb, g_carrier.phy_mu, 12 * g_carrier.phy_n_rb, v.bw_match, v.mu_match, v.grid_match);
+            g_carrier.phy_n_rb, g_carrier.phy_mu, 12 * g_carrier.phy_n_rb, v.bw_match, v.mu_match, v.grid_match,
+            v.derived_centre_hz / 1e6, v.started_centre_hz / 1e6);
   }
   g_snap.carrier_verified = ok ? 1 : -1;
   g_snap.carrier = v;
