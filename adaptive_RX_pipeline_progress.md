@@ -70,7 +70,7 @@ Dates use `YYYY-MM-DD` in Europe/Zurich. Check an implementation item only when 
 | Gate | Meaning | Status | Passed date | Artifact / reviewer |
 |---|---|---|---|---|
 | G0 | Reproducible baseline and acceptance profile | IN_PROGRESS | — | P02's own sub-condition now MET (2026-09-11, Fix round 2): a reproducible supported DL+UL replay fixture exists (`sensing_manual_fixed.UtvBT7`, `REPLAY PASS: identical DL controls=34 failed=0 raw UL=24; no radio opened`), registered and checker-verified. G0 as a WHOLE still cannot PASS, because P01's own manifest remains IN_PROGRESS on survey/limits (every `deployment_dependent_limits` entry UNSET, `geometry.surveyed=false` -- unchanged by P02, not this task's scope). State plainly: G0 = IN_PROGRESS, blocked only on P01's outstanding survey/acceptance-limit work, not on P02 any longer |
-| G1 | Acquisition routing, time and branch isolation | IN_PROGRESS | — | Tests 1-4 exist and PASS in pure/standalone form across P03 (`nr_rx_branch_test`), P04 (`nr_rx_span_pool_test`) and P05 (`nr_rx_branch_sync_test`'s `RxBranchSyncG1Test4`); P05 additionally adds a hardware-isolation guard (`branch_hw_isolation`/`branch_hw_isolation_selftest` ctest entries) covering the "no unauthorized hardware operation" half of the exit criterion at the SOURCE level. G1 as a WHOLE cannot PASS: test 5 (standalone-replay comparison) and end-to-end live-worker isolation require the `nr-ue.c`/`nr-ue-ru.c` read-loop wiring, which no session has done yet (controller-scoped, blocked on that file's owning session committing first). **UPDATED 2026-09-11 (P06a): the LIFECYCLE part of that wiring is now live in `nr-ue.c`** — branch lock / loss-of-lock / RF-discontinuity epoch transitions are driven from the real read loop's own sync, RXDISCONT, RFSTALL and CFOTRK sites, the `nb_antennas_rx` cross-check is wired and fatal, and branch epochs appear on the periodic RFCENSUS line. Still outstanding for G1: test 5 (standalone-replay comparison) and per-branch acquisition/digital-correction state (one `PHY_VARS_NR_UE` / `nr_rx_branch_sync_t` per branch); and NOTHING of the new wiring has live evidence (X410 unreachable 2026-09-11) |
+| G1 | Acquisition routing, time and branch isolation | IN_PROGRESS | — | Tests 1-4 exist and PASS in pure/standalone form across P03 (`nr_rx_branch_test`), P04 (`nr_rx_span_pool_test`) and P05 (`nr_rx_branch_sync_test`'s `RxBranchSyncG1Test4`); P05 additionally adds a hardware-isolation guard (`branch_hw_isolation`/`branch_hw_isolation_selftest` ctest entries) covering the "no unauthorized hardware operation" half of the exit criterion at the SOURCE level. G1 as a WHOLE cannot PASS: test 5 (standalone-replay comparison) and end-to-end live-worker isolation require the `nr-ue.c`/`nr-ue-ru.c` read-loop wiring, which no session has done yet (controller-scoped, blocked on that file's owning session committing first). **UPDATED 2026-09-11 (P06a): the LIFECYCLE part of that wiring is now live in `nr-ue.c`** — branch lock / loss-of-lock / RF-discontinuity epoch transitions are driven from the real read loop's own sync, RXDISCONT, RFSTALL and CFOTRK sites, the `nb_antennas_rx` cross-check is wired and fatal, and branch epochs appear on the periodic RFCENSUS line. Still outstanding for G1: test 5 (standalone-replay comparison) and per-branch acquisition/digital-correction state (one `PHY_VARS_NR_UE` / `nr_rx_branch_sync_t` per branch). **RE-AUDITED 2026-09-12 (G1P3audit): test 5 is STILL NOT CLOSABLE, and it is not blocked on a fixture -- the QUANTITY IT COMPARES DOES NOT EXIST YET.** Three independent blockers, each source-verified, not inherited: (a) there is no per-branch ACQUISITION -- `executables/nr-ue.c:1011-1019` fans ONE shared `is_synchronized` transition to every active branch identically, and the source comment at `:1005-1010` says so in terms ("Independent per-branch acquisition (one PHY_VARS_NR_UE per branch) ... is NOT this step"); (b) there is no per-branch DIGITAL CORRECTION -- P05's `nr_rx_branch_sync.c` is NOT in the receiver library source list (`CMakeLists.txt:978-979` carries only `nr_rx_branch.c` and `nr_rx_span_pool.c`; the sync module appears only in its own test executable at `:2455-2461`), so it is not compiled into `nr-uesoftmodem` at all, and inside the DL branch view the corrections are explicitly DISABLED rather than made per-branch (`view_active()` gates the DMRS-FO EMA/apply at `nr_pdsch_passive_decode.c:1563-1582` and the SFO correction at `:1902`, for the stated reason that the EMAs are process-wide); (c) no harness can run more than ONE branch per process -- `nr_passive_replay_capture.c:270-271` resolves a single view for the whole replay and `tests/passive_rx/replay_branch_view.sh` launches one process per view, so only the STANDALONE half of the comparison is realisable offline today. **A pure gtest was deliberately NOT written**: `nr_rx_branch_sync_t` holds no file-scope state, so "instance i is unaffected by instance j" is true by construction and already covered by `RxBranchSyncG1Test4` -- writing it again would assert the absence of a variable, not the isolation of a receiver. What makes test 5 writable, in order: instantiate one `nr_rx_branch_sync_t` per branch driven from that branch's own measurements (P05's remaining half), then extend the replay entry point to resolve N views in one process so a branch's acquisition/correction trace can be diffed against the same channel replayed alone |
 | G2 | Independent supported DL/UL decoding | IN_PROGRESS | — | P07 (DL side) delivers G2 tests 1 and 3 in replay form (`dl_branch_view_replay`: per-view CRC verdicts and reconstructed TBs match the 4-antenna reference wherever the view decodes, a branch's data-aided submissions == its own CRC-OK count). G2 as a whole cannot pass: P06 (PDCCH isolation), P08 (UL), P09 (namespace audit) pending; test 5's failure-class cases are only partly exercised (CRC fail 4-7/38 and multilayer rejection path built but 0/38 on this fixture); no parallel four-view run. Unsupported traffic fraction, live: the cell measured num_layers=4 on ~97 % of grants (decoder's own note), so live independent mode is expected to report ~97 % `unsupported_multilayer_in_branch_view` -- the replay's 0/38 must not be read as the live figure. **UPDATED 2026-09-11 (P06a): still NOT MEASURED.** The path that would measure it is now built (per-branch fan-out + per-branch `unsupported_multilayer` attribution on the `PDSCHQ-BRANCH` line), but the live capture was not attempted — X410 unreachable (`uhd_find_devices`: No UHD Devices Found, 13:48 UTC). Do not read ~97 % as measured; it remains the decoder's inference from the cell's own scheduling. **UPDATED 2026-09-11 (P09) — exit item "no resource namespace collision": the `harq_unique_pid` class is now FIXED for the DL fan-out path** (per-branch stride, `nr_passive_harq_tag.h`, bound asserted at compile time and in test). Two classes remain OPEN and are recorded in `docs/passive_branch_namespace_audit.md`: the passive UL decode tags every transport block `0` across up to 6 concurrent contexts (sec 4.1, → P08) and the passive DL re-encode's 3000 range is not branch-strided (sec 4.2, → P10). The TLS half of the audit found NO thread-local whose branch-dependent content survives into another job (sec 5); `t_view_branch`/`t_view_ue` are the correctly-scoped pattern. So this exit item is PARTIALLY met, and deliberately not claimed as met: the fix is not backed by an observed failure-then-pass, only by code inspection + unit test, because the harness runs one branch view per process and the linked LDPC backend keeps no per-id state. |
 | G3 | CFR identity, support and physical references | IN_PROGRESS | — | Contract document exists as of 2026-09-11 (`docs/cfr_support_and_reference_contract.md`, P11+P12 audit); the five G3 tests are INVENTORIED, not implemented. **Coverage: 0 of 5 covered, 2 PARTIAL, 3 not covered.** Test 1 (worker-delay invariance) PARTIAL — the invariant holds STRUCTURALLY (every physical time derives from the producer's `slot_idx + slot_frac`, never wall clock; the deferred PDSCH path publishes the producer's monotonic slot via `nr_isac_abs_slot_override`) and `test_causal_cpi_pipeline()` (`python_parity_test.cc:436`) covers close/drain/restart, but no test varies delay or compares two runs; residual violation: `start_utc_ns` is stamped at `submit()`, on the CONSUMER thread for deferred paths, so it is a PROCESSING time where P16 requires an acquisition-derived one. Test 2 (wrap/reorder/duplicate/RNTI/epoch) PARTIAL — wrap and reorder ARE implemented (`unwrap_submission_slot()`, `sensing_engine.cc:399-412`) and duplicates merge by design on `row_key`, but no test exercises any of them, and RNTI reassignment / epoch reset are invisible at this layer (the ABI carries neither). Test 3 (allocation/pilot sweep vs frequency axis, support masks, symbol timestamps) NOT COVERED — nothing sweeps producer-side support; the mask cannot express interpolated-vs-measured and silently loses out-of-grid REs; symbol timestamps do not exist to verify. Test 4 (known timing/CFO/SFO perturbation) NOT COVERED — `cuda_sync_test.cc:76-101` is a CPU-vs-CUDA PARITY test, not an accuracy test, and the `selftest`/`selftest_los` injection mechanism from older project history DOES NOT EXIST in this tree (zero `selftest` hits under `openair1/`); offline-testable today via `python_parity_test.cc`'s existing synthetic-`CfrWindow` pattern, and judged the highest-value missing test. Test 5 (deliberate admission failure) NOT COVERED and the property does NOT hold — there is no invalid-reference status to assert, so it cannot pass until that field exists. G3 exit also requires reconstruction scope to be explicit, which it is not: findings P11-A3 (interpolated REs reported as measured support), P11-C1 (no per-branch noise), P11-D1 (no allocation membership) and P12-4 (one pooled reference across branches) are all open and all need ABI/engine changes at P13. **G3 NOT PASSED** |
 | G4 | Four detectors, AoA removed, UL support retained | IN_PROGRESS | — | P13a (2026-09-11) delivered the ENGINE ARRAY: one SensingEngine per active receive branch, branch-id-indexed, with no-misroute routing and per-branch output identity. **Coverage: test 3 PARTIAL (pure form), tests 2/4 PARTIAL (structural), test 6 not addressed.** Test 2 (four-engine replay == four standalone runs) NOT COVERED end to end -- the replay harness runs ONE process per branch view and never starts the sensing engine at all, so no replay can compare four concurrent engines; the in-process analogue IS covered by test_branch_engines_are_independent() (a second live engine fed different CFR leaves the first engine’s closed CPI character-identical). Test 3 (permuting branch ids / delaying one branch cannot alter another’s maps, histories or thresholds) PARTIAL: the routing half is pinned by test_branch_engine_routing() and the state half follows structurally from every accumulator/planner/clutter-map/tracker/counter being a non-static member (audited, cited in the P13a session entry), but nothing yet permutes ids or delays a branch on real data. Test 4 (invalid/missing UL does not suppress valid DL) holds PER ENGINE already (test_invalid_ul_does_not_suppress_dl()) and now holds ACROSS branches by construction -- separate objects, separate threads, no shared state -- but is unmeasured across branches. Test 6 (parser rejects removed AoA-only keys) belongs to P14 and is untouched. G4 exit also requires eight separately identified DL/UL views and no runtime AoA dependency: neither is reached, because the other five CFR producers are still untagged (P10 continuation) and AoA removal is P14 Stage B/C, which this task unblocks but does not perform. **G4 NOT PASSED** |
@@ -2740,3 +2740,106 @@ Verification: `--selftest` 4/4 planted, 0 false positives; real scan OK over 116
 `make -j8 nr_rx_branch_test` rc=0 and ctest 3/3 (the header is C source and the edit splits an
 expression across lines, so it was compiled rather than argued). No behaviour change: comments plus
 a test-only script.
+
+## Session — 2026-09-12: G1P3audit — re-audit of G1 test 5 and AoA-removal Stage B item 3
+
+Pure re-audit. Two previously-open rows were re-assessed against what P06a, P07, P09, P10a/b/c and
+P13a ACTUALLY landed, by reading current source rather than the prior rows' own text. They came out
+in opposite directions, which is the point of re-auditing rather than re-asserting.
+
+```text
+Date/time (Europe/Zurich): 2026-09-12, ~09:00-10:30 CEST (host clock UTC).
+Task IDs / gate: re-audit of G1 test 5 (Stage 1, P05) and docs/aoa_removal_audit.md Stage B item 3
+  (Stage 4, P14). NO gate claimed; G1 stays IN_PROGRESS.
+Intended falsifiable claim:
+  (1) G1 test 5 ("compare branch acquisition and digital correction against standalone replay of the
+      same channel") is NOT closable offline, and the reason is not a missing fixture: neither
+      compared quantity exists in the running receiver yet.
+  (2) AoA-removal Stage B item 3 (row 8, per-branch decode provenance for the data-aided CFR) IS
+      closed for the passive-queue path in multi-branch mode, by P07's single-antenna VIEW rather
+      than by P10's submission plan, with one precisely-scoped residual (the grant).
+  (3) The ledger's P06 row is intact prose, not a truncated entry.
+Branch / commit: merge/adaptive-sensing, parent 9d14799301d6d94e3936742a32c82241d6016768.
+  Untracked before AND after (another session's, untouched): tests/passive_rx/aoa_track_dl.conf.
+Files modified / added:
+  M docs/aoa_removal_audit.md                          (row 8 + Stage B item 3, rewritten w/ evidence)
+  M adaptive_RX_pipeline_progress.md                   (G1 gate row + this entry)
+  M openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c  (COMMENT ONLY: stale TODO(P10))
+Executable hash: n/a -- NOTHING WAS BUILT. The only source edit is entirely inside one existing
+  /* ... */ block (see `git diff`), opens no nested comment and closes none early, so it cannot
+  change a byte of object code. No new test was written (see "Why no test" below), so the brief's
+  build/manifest rule was not triggered and the P01 manifest is unchanged.
+
+Exact commands (all on sens6, tree /home/sens/NICOLA/adaptive-rx-sensing):
+  git log -1 --format="%H %s"
+  bash tests/passive_rx/check_branch_id_masking.sh    -> "OK -- no raw branch-id masks in 116 source file(s)", rc=0
+  bash tests/passive_rx/check_branch_hw_isolation.sh  -> "OK -- no forbidden hardware symbols in 3 branch module(s)", rc=0
+  (the two registered source guards are shell-only and DO scan the edited file, so they are the
+   cheap non-vacuous check that the comment edit did not re-introduce a banned idiom)
+
+Finding 1 -- G1 test 5: STILL NOT CLOSABLE. Three independent blockers, each source-verified:
+  (a) No per-branch ACQUISITION. `executables/nr-ue.c:1011-1019` (`ue_branches_lock`) applies ONE
+      shared `UE->is_synchronized` transition to every active branch identically; the comment at
+      `:1005-1010` states it outright ("Independent per-branch acquisition (one PHY_VARS_NR_UE per
+      branch) ... is NOT this step"). P06a wired branch EPOCHS off the shared acquisition, not four
+      acquisitions. There is no per-branch acquisition state to compare with anything.
+  (b) No per-branch DIGITAL CORRECTION. P05's `nr_rx_branch_sync.c` is not in the receiver library
+      source list -- `CMakeLists.txt:978-979` lists `nr_rx_branch.c` and `nr_rx_span_pool.c` and NOT
+      it; its only appearance is in its own standalone test executable (`:2455-2461`). It is
+      therefore not linked into `nr-uesoftmodem` at all. Independently, inside the DL branch view the
+      corrections are DISABLED rather than made per-branch: `view_active()` gates the DM-RS FO
+      EMA/apply (`nr_pdsch_passive_decode.c:1563-1582`) and the SFO correction
+      (`:1902`), for the stated reason that both EMAs are process-wide. So a branch today performs
+      LESS correction than the legacy path, not a per-branch version of it -- comparing the two
+      would measure a known configuration difference, not isolation.
+  (c) No harness can run more than ONE branch per process. `nr_passive_replay_capture.c:270-271`
+      resolves a single view for the entire replay; `tests/passive_rx/replay_branch_view.sh` launches
+      one process per view. Only the STANDALONE side of test 5's comparison is realisable offline.
+  Why no test was written: `nr_rx_branch_sync_t` has no file-scope state (`nr_rx_branch_sync.c`
+  contains no `static`), so a pure gtest asserting "instance i is unaffected by instance j" is true
+  by construction and is already covered by `RxBranchSyncG1Test4`. It would assert the absence of a
+  variable, not the isolation of a receiver, and the brief explicitly forbids forcing such a test.
+  What makes test 5 writable, in order: (i) instantiate one `nr_rx_branch_sync_t` per branch driven
+  from that branch's own measurements (P05's remaining half, plus per-branch DMRS-FO/SFO trackers
+  instead of the current `view_active()` gates); (ii) extend the replay entry point to resolve N
+  views in one process so one branch's acquisition/correction trace can be diffed against the same
+  channel replayed alone. Neither needs a radio; both are real work, neither is this task.
+
+Finding 2 -- AoA Stage B item 3: CLOSED for the passive-queue path in multi-branch mode, and the old
+  row was measuring the wrong mechanism. Full trace is in `docs/aoa_removal_audit.md` row 8; the
+  short form is that `nr_pdsch_data_aided.c` is never REACHED with more than one antenna in
+  multi-branch mode, because `nr_pdsch_passive_branch_view()` sets `nb_antennas_rx = 1`
+  (`nr_pdsch_passive_decode.c:1034-1036`) and `isac_nof_ant` clamps to it
+  (`nr_pdsch_data_aided.c:210-213`) -- so the "loop over every antenna" the row objects to executes
+  once, on the branch's own plane, against the TB that branch's own view CRC-accepted. Already
+  asserted offline by `replay_branch_view.sh` criterion (iii) (`data_submits == that view's own
+  crc_ok`, 34/31/34/34 of 38). Residual, kept explicit and assigned: the GRANT is still one branch's
+  discovery -- `nr_pdsch_passive_queue_enqueue_fanout()` (`nr_pdsch_passive_queue.c:364-381`) copies
+  one job from the single shared blind PDCCH monitor to every branch, so the allocation that
+  parameterises X is another branch's decode (P06's open core); single-branch/AoA mode retains the
+  shared-X-across-antennas form by design (Stage C item 4); and there is no live multi-branch
+  evidence (X410 unreachable).
+
+Finding 3 -- the P06 ledger row is NOT broken. Read in full: it runs from "Session 2026-09-11 (P06a)
+  below" to "...so none of the above has ANY live verification.** |" and terminates with its closing
+  pipe. The reported mid-sentence cut at "wired into" was a display artefact of a width-truncated
+  grep, not a ledger defect. NOT TOUCHED -- editing it would have been a fabricated fix.
+
+Retraction, if any: `docs/aoa_removal_audit.md` Stage B item 3's previous text ("NOT done -- P10b
+  touched the submission plan, not the shared-decode coupling") is RETRACTED as inaccurate since
+  P07. It was true of the submission plan and false of the receiver: the coupling had already been
+  broken one layer up by the branch view. Also retracted: the `TODO(P10)` comment at
+  `nr_pdsch_passive_queue.c:243`, stale since P10a.
+Remaining limitation:
+  * Everything in finding 2 is source-traced plus the single-view P02 replay. The CONCURRENCY half
+    -- that two branches' views in one process do not disturb each other -- still rests on the
+    thread-local construction of `t_view_ue`/`t_view_phys`/`t_view_branch`
+    (`nr_pdsch_passive_decode.c:910-913`) and on P09's `harq_unique_pid` striding, BY INSPECTION.
+    P09's own row already records that no offline harness can exercise it.
+  * Nothing here has live evidence of any kind; the X410 has been unreachable since 2026-09-11.
+Next highest-value action: unchanged in kind -- P06's branch-owned discovery state (which is now the
+  single named residual in front of both findings above) and P08. For G1 specifically: link
+  `nr_rx_branch_sync.c` into the receiver and give each branch its own instance, which is the
+  smallest step that turns test 5 from unwritable into merely unwired.
+Reviewer / accomplishment date if gate passed: n/a (no gate claimed; G1 remains IN_PROGRESS).
+```

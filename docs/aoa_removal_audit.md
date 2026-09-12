@@ -106,8 +106,48 @@ Stage B, owned by P13, not by this row.
 
 ### Row 8 - Shared decode success used for all antennas' data CFR
 `nr_pdsch_data_aided.c` reconstructs X once from the single accepted decode and measures
-H = Y/X on every antenna (`:206-216`). The coupling is real but it is a BRANCH-independence issue,
-not an AoA one; P13 owns it. Stage B.
+H = Y/X on every antenna (`:208-216`, `:290-305`). The coupling is real but it is a
+BRANCH-independence issue, not an AoA one; P13 owns it. Stage B.
+
+**RE-AUDITED 2026-09-12 (G1P3audit) against P06a/P07/P10a as landed: for the PASSIVE QUEUE path in
+multi-branch mode this row is CLOSED, and it was closed by the branch VIEW, not by the CFR ABI.**
+Traced end to end rather than re-asserted:
+* `nr_pdsch_passive_queue.c:201-203` resolves a branch and arms the single-antenna view for the
+  WHOLE chain; `nr_pdsch_passive_decode.c:1034-1036` sets `nb_antennas_rx = 1` and points
+  `rxdata[0]` at that branch's own physical plane.
+* The FEP loop is bounded by that same `fp->nb_antennas_rx` (`nr_pdsch_passive_decode.c:1263-1284`),
+  so only plane 0 of the consumer's `rxdataF` scratch is written, and it holds the BRANCH's Y.
+* The same `vue` and the same `rxdataF` are handed to the submit
+  (`nr_pdsch_passive_queue.c:251-252`), where `isac_nof_ant` clamps to `fp->nb_antennas_rx == 1`
+  (`nr_pdsch_data_aided.c:210-213`) -- so the ":206-216 loop over every antenna" this row names
+  executes exactly once, on the branch's own plane.
+* X is re-encoded from `dec.tb`, the TB THIS branch's own view CRC-accepted
+  (`nr_pdsch_passive_queue.c:234-252`), and `nvar` is that view's own estimate.
+* Identity is carried by `nr_pdsch_passive_view_branch()` (`nr_pdsch_passive_decode.c:921-927`,
+  gated on `view_active()` so a legacy row is never labelled branch 0) into
+  `nr_isac_submit_cfr_multi_branch()` at all four submissions
+  (`nr_pdsch_data_aided.c:356`, `:391`, `:419`, `:428`, `:434`).
+* The replay harness already asserts the consequence: `tests/passive_rx/replay_branch_view.sh`
+  criterion (iii), `data_submits == that view's own crc_ok` (34/31/34/34 of 38).
+
+**Residual, precisely scoped -- this row is closed, three adjacent things are not:**
+1. **The GRANT is still one branch's discovery.** `nr_pdsch_passive_queue_enqueue_fanout()`
+   (`nr_pdsch_passive_queue.c:364-381`) copies ONE job from the single shared blind PDCCH monitor to
+   every active branch, so `job.dlsch_pdu` / `job.freq_alloc` / `job.rnti` -- which parameterise the
+   reconstruction of X -- are another branch's decode. The TB, the Y and the tag are per-branch; the
+   allocation metadata is not. That is P06's own open core (branch-OWNED discovery state), not this
+   row, and it is the only thing still standing between "per-branch decode provenance" and
+   "per-branch provenance end to end".
+2. **Single-branch / AoA mode keeps the shared-X-across-antennas form, by design.** With
+   `n_active <= 1` no view is armed, `isac_nof_ant` resolves to `nr_isac_aoa_antennas()` and the
+   `:290-305` loop measures `Y_a/X` on all four elements against one X. That is the co-located-array
+   deployment model and is CORRECT there (it is what carries the inter-element phase); it is not a
+   branch-independence defect, and Stage C item 4 owns its eventual removal.
+3. **No live evidence.** Everything above is source-traced plus the P02 replay fixture, which runs
+   ONE VIEW PER PROCESS. No capture has ever run two branches concurrently (X410 unreachable since
+   2026-09-11), so the *concurrency* half -- that two branches' views in one process do not disturb
+   each other -- rests on the thread-local construction of `t_view_ue`/`t_view_phys`/`t_view_branch`
+   (`nr_pdsch_passive_decode.c:910-913`) and on P09's `harq_unique_pid` striding, by inspection.
 
 ### Row 9 - AoA report fields, monitor views, configs, tests, benchmarks
 | file:line | what it does | breaks if removed now? | stage |
@@ -207,8 +247,18 @@ no consumer that is not also part of the schema version P16 owns.
    **P08 is UNAFFECTED and still fully open**: splitting the UL DECODE per branch (a
    single-antenna UL decode view, the analogue of P07's `t_view_branch`) is a different, larger
    task with a real SNR-regression risk, and nothing here attempts it.
-3. Row 8 - per-branch decode provenance for the data-aided CFR. NOT done (P10b touched the
-   submission plan, not the shared-decode coupling).
+3. **DONE (P07 + P06a + P10a), re-audited and confirmed 2026-09-12 (G1P3audit).** Row 8 -
+   per-branch decode provenance for the data-aided CFR. The earlier text here ("NOT done -- P10b
+   touched the submission plan, not the shared-decode coupling") was measuring the wrong mechanism:
+   the shared-decode coupling is broken by P07's single-antenna VIEW, not by the submission plan, and
+   `nr_pdsch_data_aided.c` is therefore never reached with more than one antenna in multi-branch
+   mode. Full file:line trace in Row 8 above. In multi-branch mode a data-aided CFR row carries that
+   branch's own Y (its own physical plane), its own X (the TB its own view CRC-accepted), its own
+   `nvar`, and its own id -- asserted offline by `replay_branch_view.sh`'s criterion (iii).
+   NOT closed by this, and deliberately left in their own rows: the GRANT that parameterises X is
+   still fanned out from one shared PDCCH monitor (**P06's open core**); single-branch/AoA mode
+   retains the shared-X-across-antennas form by design (**Stage C item 4**); and nothing here has
+   live multi-branch evidence (X410 unreachable).
 4. Row 10 - lift `rx_array_calibration` out from behind `aoa_enable` into per-branch chain
    metadata. REFACTOR. Must precede any removal of the `rx_array*` keys, or the calibration is
    lost together with the geometry.

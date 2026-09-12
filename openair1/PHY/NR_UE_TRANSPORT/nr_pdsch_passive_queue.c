@@ -241,7 +241,13 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
            * fatal once several consumers submit concurrently across a wrap. */
           nr_isac_abs_slot_override = (uint64_t)job.absolute_slot;
           /* Same view as the decode: a branch's reconstruction consumes ONLY its own accepted TB and
-           * its own antenna's Y. TODO(P10): carry job.branch_id/physical_channel into the CFR ABI. */
+           * its own antenna's Y. The TODO(P10) that stood here is CLOSED (G1P3audit, 2026-09-12):
+           * nr_pdsch_data_aided.c reads this thread's armed view via nr_pdsch_passive_view_branch()
+           * and submits through nr_isac_submit_cfr_multi_branch(), so the branch identity reaches
+           * the CFR ABI without being passed through this call. STILL SHARED, and NOT a P10 item:
+           * job.dlsch_pdu / job.freq_alloc / job.rnti come from the ONE blind PDCCH monitor and were
+           * copied to every branch by nr_pdsch_passive_queue_enqueue_fanout(), so the grant that
+           * parameterises the reconstruction of X is another branch's discovery -- P06's open core. */
           nr_isac_pdsch_data_aided_submit(vue, &proc, &dec.cw, &job.dlsch_pdu, &job.freq_alloc, job.rnti,
                                           dec.tb, job.harq_pid_tag, rxdataF, (double)dec.nvar);
           nr_isac_abs_slot_override = 0;
