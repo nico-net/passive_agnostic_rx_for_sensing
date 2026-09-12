@@ -350,3 +350,14 @@ bool nr_pdsch_config_sweep_result_global(nr_pdsch_cfg_hypothesis_t *out)
   pthread_mutex_unlock(&g_lock);
   return ok;
 }
+/* Diagnostic only: how many live keyed contexts currently hold a winner. Read by the acquisition
+ * state tracker (nr_passive_acq_state.c) at the RT periodic summary; not a decision input. */
+int nr_pdsch_config_sweep_settled_count(void)
+{
+  pthread_mutex_lock(&g_lock);
+  int n=0;
+  for (int i=0;i<NR_PDSCH_SWEEP_MAX_CONTEXTS;++i)
+    if (g_contexts[i].generation && g_contexts[i].state.winner>=0) ++n;
+  pthread_mutex_unlock(&g_lock);
+  return n;
+}

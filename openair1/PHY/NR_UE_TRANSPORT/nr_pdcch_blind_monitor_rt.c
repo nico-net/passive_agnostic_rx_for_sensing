@@ -67,6 +67,7 @@
 extern _Atomic long nr_ue_diag_producer_absolute_slot;
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_data_aided.h"      // shared re-encode + Ĥ=Y/X submit
 #include "nr_pdcch_ul_discovery.h"
+#include "nr_passive_acq_state.h" // explicit acquisition-state tracker (period-guarded)
 #include <pthread.h>
 #include "PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.h" // passive UPLINK PUSCH receive census
 #include "PHY/NR_UE_TRANSPORT/nr_pusch_passive_monitor_rt.h" // UL grant book
@@ -2496,6 +2497,36 @@ constdiag_done:;
             qs.decoded ? (100.0 * (double)qs.crc_ok / (double)qs.decoded) : 0.0,
             (unsigned long)qs.dropped_full, (unsigned long)qs.dropped_stale,
             (unsigned long)qs.max_lag_slots, fp->slots_per_frame);
+    }
+    /* Explicit acquisition/discovery state (Gate 4/5 groundwork). Every input is a read of a
+     * counter/boolean that ALREADY exists at this point -- no new measurement, no control-flow
+     * change, and period-guarded exactly like the census lines above (see the PARMSET note on why
+     * per-occasion logging here is not merely untidy). Transitions log themselves at LOG_A inside
+     * nr_passive_acq_update(); this line is the always-present heartbeat so a log can be read
+     * cold. */
+    if ((g_occasions_run % NR_PDCCH_BLIND_SUMMARY_PERIOD_OCC) == 0) {
+      const nr_pdcch_ul_discovery_snapshot_t uls = nr_pdcch_ul_discovery_snapshot();
+      const nr_passive_acq_inputs_t acq_in = {
+        .pdcch_length_found      = g_length_found,
+        .coreset_extent_verified = !cfg->autodiscover || nr_pdcch_blind_monitor_autodiscover_extent_verified(),
+        .ul_bwp_known            = ul_opts.bwp_size > 0,
+        .dl_search_winners       = (uint64_t)nr_pdsch_config_sweep_settled_count(),
+        .ul_width_winners        = (uint64_t)uls.width_winners,
+        .ul_interp_winners       = (uint64_t)uls.interp_winners,
+      };
+      nr_passive_acq_update(&acq_in);
+      const nr_passive_acq_snapshot_t acq = nr_passive_acq_snapshot();
+      LOG_I(PHY, "SENSING: ACQ state=%s time_in_state=%lu transitions=%lu regressions=%lu "
+                 "in[len=%d coreset=%d ul_bwp=%d dl_win=%lu ul_win[w=%lu i=%lu]] "
+                 "uldisc[gen=%lu raw=%d wcls=%d icls=%d wtrials=%lu itrials=%lu rejected_fb=%lu]\n",
+            nr_passive_acq_state_name(acq.state), (unsigned long)acq.time_in_state,
+            (unsigned long)acq.transitions, (unsigned long)acq.consecutive_regressions,
+            acq_in.pdcch_length_found, acq_in.coreset_extent_verified, acq_in.ul_bwp_known,
+            (unsigned long)acq_in.dl_search_winners, (unsigned long)acq_in.ul_width_winners,
+            (unsigned long)acq_in.ul_interp_winners,
+            (unsigned long)uls.generation, uls.raw_samples, uls.width_classes, uls.interp_classes,
+            (unsigned long)uls.width_trials, (unsigned long)uls.interp_trials,
+            (unsigned long)uls.rejected_feedback);
     }
 
     if (btim_on && (g_occasions_run % NR_PDCCH_BLIND_SUMMARY_PERIOD_OCC) == 0) {

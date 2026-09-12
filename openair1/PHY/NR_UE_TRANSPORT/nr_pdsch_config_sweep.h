@@ -127,6 +127,8 @@ bool nr_pdsch_config_sweep_snapshot(const nr_pdsch_sweep_ticket_t *ticket,
                                    nr_pdsch_config_sweep_state_t *out);
 
 /* ---- Process-wide singleton -------------------------------------------------------------------
+/** Diagnostic: number of live keyed contexts with a winner (acquisition-state tracker input). */
+int  nr_pdsch_config_sweep_settled_count(void);
  * The hypothesis is chosen on the PHY receive thread and scored on a PDSCH consumer thread, i.e.
  * in two different translation units and two different threads, so the state cannot be a static in
  * either one. The functions above stay pure and unit-testable; these are the thin shared layer.
