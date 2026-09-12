@@ -116,6 +116,31 @@ TEST(DmrsId, EvidenceAccumulatesAcrossGrantsAtLowSnr) {
   EXPECT_TRUE(nr_dmrs_id_decide(&st, 12, 10.0)) << "margin after 12 grants: " << m12;
   EXPECT_EQ(st.best_id, 2);
 }
+TEST(DmrsId, PortPairCoherenceSeparatesOneLayerFromTwo) {
+  std::mt19937 rng(9);
+  auto rx1 = synth(2, 0, 3, 2, 5, 50, 1.0, 20.0, rng);
+  const double c1 = nr_dmrs_port_pair_coherence(rx1.data(), FFT, FIRST_CARRIER + 5 * 12, 5, 50, N_RB, SYMS, 3, 2, 0, 2, 1);
+  EXPECT_GT(c1, 0.9) << "single layer: " << c1;
+  /* Two layers: add port 1 = same pilots with w_f = [+1,-1] over each comb pair, through an
+   * independent channel of similar strength (random phase per RB). */
+  auto rx2 = rx1;
+  std::uniform_real_distribution<double> ph(0, 2 * M_PI);
+  int re = (FIRST_CARRIER + 5 * 12) % FFT;
+  double a = 0;
+  for (int m = 0; m < 6 * 50; ++m) {
+    if (m % 6 == 0) a = ph(rng);
+    const double sgn = (m & 1) ? -1.0 : 1.0;            // w_f for port 1
+    // port-1 tx symbol = sgn * conj(p)/|p| * 256 * e^{j a}; reuse rx1's port-0 symbol as the pilot carrier
+    const double pr = rx1[re].r, pi = rx1[re].i, mag = std::hypot(pr, pi) + 1e-9; // rx1 = conj(p)-ish * 256
+    const double ur = pr / mag * 256.0, ui = pi / mag * 256.0;                  // unit-ish port-0 symbol
+    rx2[re].r = (int16_t)std::lround(rx1[re].r + sgn * (ur * std::cos(a) - ui * std::sin(a)));
+    rx2[re].i = (int16_t)std::lround(rx1[re].i + sgn * (ur * std::sin(a) + ui * std::cos(a)));
+    re = (re + 2) % FFT;
+  }
+  const double c2 = nr_dmrs_port_pair_coherence(rx2.data(), FFT, FIRST_CARRIER + 5 * 12, 5, 50, N_RB, SYMS, 3, 2, 0, 2, 1);
+  EXPECT_LT(c2, 0.5) << "two layers: " << c2;
+  EXPECT_LT(nr_dmrs_port_pair_coherence(nullptr, FFT, 0, 0, 1, N_RB, SYMS, 0, 0, 0, 2, 1), 0.0);
+}
 TEST(DmrsId, RejectsInvalidGeometry) {
   nr_dmrs_id_state_t st; nr_dmrs_id_init(&st, "TEST", 2);
   std::vector<c16_t> rx(FFT);

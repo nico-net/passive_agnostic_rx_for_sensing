@@ -1895,7 +1895,29 @@ constdiag_done:;
       }
       if (n_settled>1) continue; // ambiguous layouts are not a unique operational solution
       static uint32_t layout_cursor[65536]; // independent RR cursors, indexed by recovered RNTI
-      const int selected=settled>=0 ? settled : layout_cursor[raw->rnti]++ % n;
+      /* LAYOUT-FAMILY ELIMINATION (OTA 2026-09-12). With several candidate 1_1 field layouts at one
+       * DCI length, pure round-robin gave the family that actually decodes (8/9 CRC in its own
+       * context) a small, payload-dependent share of the grants -- ~1/14 measured -- so its
+       * Technique-D context never reached min_trials and nothing ever settled; overall DL CRC read
+       * 0.3 %, 15 % or 26 % depending only on that share. A family that has passed CRC is preferred
+       * over one that never has: reject-only, evidence-led, and it collapses to the old behaviour
+       * while no family has evidence. Ties (both decoding) still rotate. */
+      int preferred=-1; uint32_t preferred_ok=0;
+      for (int i=0;i<n;++i) {
+        uint32_t ok=0,tr=0;
+        nr_pdsch_config_sweep_context_stats(keys[i],raw->rnti,layouts[i].tda_index,cfg->dmrs_typeA_position,&ok,&tr);
+        if (ok>preferred_ok) { preferred_ok=ok; preferred=i; }
+        else if (ok==preferred_ok && preferred>=0 && ok>0) preferred=-1; // tie: no preference
+      }
+      if (preferred>=0 && preferred_ok>=8) {
+        static uint8_t s_pref_logged[65536];
+        if (!s_pref_logged[raw->rnti]) {
+          s_pref_logged[raw->rnti]=1;
+          LOG_A(PHY,"SENSING: DL layout family PREFERRED by TB CRC: rnti=0x%x layout_id=%u (%d candidates) passes=%u\n",
+                raw->rnti,(unsigned)layout_ids[preferred],n,preferred_ok);
+        }
+      } else preferred=-1;
+      const int selected=settled>=0 ? settled : preferred>=0 ? preferred : layout_cursor[raw->rnti]++ % n;
       cand_task[ti].out=layouts[selected];
       cand_task[ti].dl_layout_configuration=keys[selected];
     }

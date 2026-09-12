@@ -273,6 +273,20 @@ bool nr_pdsch_config_sweep_feedback(const nr_pdsch_sweep_ticket_t *ticket, bool 
   return announced;
 }
 
+void nr_pdsch_config_sweep_context_stats(uint64_t configuration, uint16_t rnti, uint8_t tda, int typeA,
+                                         uint32_t *passes, uint32_t *trials)
+{
+  *passes = *trials = 0;
+  pthread_mutex_lock(&g_lock);
+  for (int i=0;i<NR_PDSCH_SWEEP_MAX_CONTEXTS;++i) {
+    const sweep_context_t *c=&g_contexts[i];
+    if (c->generation && c->configuration==configuration && c->rnti==rnti && c->tda==tda && c->typeA==typeA) {
+      for (int h=0; h<c->state.n_hyp; ++h) { *passes += c->state.ok[h]; *trials += c->state.trials[h]; }
+      break;
+    }
+  }
+  pthread_mutex_unlock(&g_lock);
+}
 bool nr_pdsch_config_sweep_is_settled(uint64_t configuration, uint16_t rnti, uint8_t tda, int typeA)
 {
   pthread_mutex_lock(&g_lock);

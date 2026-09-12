@@ -121,14 +121,19 @@ bool nr_pdsch_config_sweep_select(uint64_t configuration, uint16_t rnti, uint8_t
 bool nr_pdsch_config_sweep_feedback(const nr_pdsch_sweep_ticket_t *ticket, bool crc_ok,
                                    nr_pdsch_cfg_hypothesis_t *winner);
 bool nr_pdsch_config_sweep_is_settled(uint64_t configuration, uint16_t rnti, uint8_t tda, int typeA);
+/** CRC evidence held by one keyed context: total passes and trials over all its hypotheses.
+ * Zero/zero when the context does not exist. Lets the caller prefer a DL layout FAMILY that has
+ * ever decoded over one that never has, without waiting for the per-hypothesis winner. */
+void nr_pdsch_config_sweep_context_stats(uint64_t configuration, uint16_t rnti, uint8_t tda, int typeA,
+                                         uint32_t *passes, uint32_t *trials);
 void nr_pdsch_config_sweep_reset_all(void);
+/** Diagnostic: number of live keyed contexts with a winner (acquisition-state tracker input). */
+int  nr_pdsch_config_sweep_settled_count(void);
 /** Consistent snapshot for diagnostics/offline regression tests. */
 bool nr_pdsch_config_sweep_snapshot(const nr_pdsch_sweep_ticket_t *ticket,
                                    nr_pdsch_config_sweep_state_t *out);
 
 /* ---- Process-wide singleton -------------------------------------------------------------------
-/** Diagnostic: number of live keyed contexts with a winner (acquisition-state tracker input). */
-int  nr_pdsch_config_sweep_settled_count(void);
  * The hypothesis is chosen on the PHY receive thread and scored on a PDSCH consumer thread, i.e.
  * in two different translation units and two different threads, so the state cannot be a static in
  * either one. The functions above stay pure and unit-testable; these are the thin shared layer.

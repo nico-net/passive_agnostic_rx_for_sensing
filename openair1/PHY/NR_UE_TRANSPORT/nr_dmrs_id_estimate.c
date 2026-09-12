@@ -88,6 +88,35 @@ int nr_dmrs_id_accumulate(nr_dmrs_id_state_t *st, const c16_t *rx_symbol, int of
   return NR_DMRS_ID_CANDIDATES;
 }
 
+double nr_dmrs_port_pair_coherence(const c16_t *rx_symbol, int ofdm_symbol_size, int start_subcarrier,
+                                   int rb_offset, int nb_rb, int N_RB, int symbols_per_slot, int slot,
+                                   int symbol, int nscid, int nid, int normal_cp)
+{
+  if (!rx_symbol || ofdm_symbol_size <= 0 || nb_rb <= 0 || rb_offset < 0 || N_RB <= 0 || nb_rb + rb_offset > N_RB
+      || nid < 0 || nid >= NR_DMRS_ID_CANDIDATES)
+    return -1.0;
+  const int words = ((N_RB * 24) >> 5) + 1, npil = 6 * nb_rb, ntot = 6 * (nb_rb + rb_offset);
+  uint32_t *seq = malloc((size_t)words * sizeof(*seq));
+  c16_t *pilot  = malloc((size_t)ntot * sizeof(*pilot));
+  if (!seq || !pilot) { free(seq); free(pilot); return -1.0; }
+  gold_for(seq, words, symbols_per_slot, slot, symbol, nid, nscid);
+  nr_pdsch_dmrs_rx(normal_cp ? NR_NORMAL : NR_EXTENDED, seq, pilot, 1000, 0, (unsigned short)(nb_rb + rb_offset),
+                   NFAPI_NR_DMRS_TYPE1, 16384);
+  const c16_t *pil = &pilot[6 * rb_offset];
+  int re = ((start_subcarrier % ofdm_symbol_size) + ofdm_symbol_size) % ofdm_symbol_size;
+  double num_r = 0, num_i = 0, den = 0, er = 0, ei = 0;
+  for (int m = 0; m < npil; ++m) {
+    const c16_t h = c16mulShift(pil[m], rx_symbol[re], 15);
+    const double hr = h.r, hi = h.i;
+    den += hr * hr + hi * hi;
+    if (m & 1) { num_r += er * hr + ei * hi; num_i += ei * hr - er * hi; } // h[2n] conj(h[2n+1])
+    else       { er = hr; ei = hi; }
+    re = (re + 2) % ofdm_symbol_size;
+  }
+  free(seq); free(pilot);
+  return den > 0 ? 2.0 * sqrt(num_r * num_r + num_i * num_i) / den : 0.0; // x2: pairs count half the energy
+}
+
 static int cmp_double(const void *a, const void *b)
 {
   const double x = *(const double *)a, y = *(const double *)b;

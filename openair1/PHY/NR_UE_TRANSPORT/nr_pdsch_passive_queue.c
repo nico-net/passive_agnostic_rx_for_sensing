@@ -88,6 +88,9 @@ static nr_dmrs_id_state_t g_dl_dmrs_id;
 static bool g_dl_dmrs_id_init;
 static pthread_mutex_t g_dl_dmrs_id_lock = PTHREAD_MUTEX_INITIALIZER;
 const nr_dmrs_id_state_t *nr_pdsch_passive_dl_dmrs_id(void) { return &g_dl_dmrs_id; }
+static pthread_mutex_t g_dl_rank_lock = PTHREAD_MUTEX_INITIALIZER;
+static uint64_t g_rank_n[4], g_rank_low[4], g_rank_total; static double g_rank_sum[4];
+static uint64_t g_cdm_empty[4]; static double g_cdm_sum[4];
 static _Atomic uint64_t g_dropped_full  = 0; // evicted oldest to admit a newer job
 static _Atomic uint64_t g_dropped_stale = 0;
 static _Atomic uint64_t g_max_lag       = 0;
@@ -205,6 +208,57 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
         nr_pdsch_xoverhead_observe(dec.cw.qamModOrder, dec.cw.targetCodeRate, job.freq_alloc.num_rbs,
                                    (uint16_t)pdu->number_symbols, (uint16_t)(nb_re_dmrs * dmrs_len),
                                    job.grant.nb_rb_oh, job.grant.tb_scaling, dec.cw.Nl, crc);
+        /* RANK PROBE (OTA 2026-09-12: full-band grants 0/10000 CRC, short grants 8/9, gNB has 4 DL
+         * antennas and the decoder assumes one layer). Per-grant even/odd DM-RS pair coherence under
+         * the assumed identity: ~1 single-layer, collapsed two-layer. Censused by size and CRC. */
+        if (pdu->dmrsConfigType == 0 && pdu->dlDmrsSymbPos && pthread_mutex_trylock(&g_dl_rank_lock) == 0) {
+          const NR_DL_FRAME_PARMS *fp = &ue->frame_parms;
+          const int sym = __builtin_ctz((unsigned)pdu->dlDmrsSymbPos);
+          const int rb_offset = job.freq_alloc.first_rb + (pdu->refPoint ? 0 : pdu->BWPStart);
+          const int start_sc  = fp->first_carrier_offset + (pdu->BWPStart + job.freq_alloc.first_rb) * 12;
+          const double coh = nr_dmrs_port_pair_coherence(&rxdataF[0][sym * fp->ofdm_symbol_size], fp->ofdm_symbol_size,
+                                                         start_sc, rb_offset, job.freq_alloc.num_rbs, fp->N_RB_DL,
+                                                         fp->symbols_per_slot, job.nr_slot_rx, sym, pdu->nscid,
+                                                         pdu->dlDmrsScramblingId, fp->Ncp == NR_NORMAL);
+          /* CDM-GROUP PROBE. In the DM-RS symbol the other comb (delta = 1: subcarriers 4n+1, 4n+3)
+           * carries PDSCH data when numDmrsCdmGrpsNoData = 1 and is EMPTY when it is 2. The ratio of
+           * its mean energy to the DM-RS comb's is ~1 in the first case and ~0 in the second. The
+           * receiver derives the group count from the antenna-ports code point; this measures it. */
+          double e_dmrs = 0, e_other = 0;
+          {
+            const c16_t *row = &rxdataF[0][sym * fp->ofdm_symbol_size];
+            int re = ((start_sc % fp->ofdm_symbol_size) + fp->ofdm_symbol_size) % fp->ofdm_symbol_size;
+            for (int m = 0; m < 12 * job.freq_alloc.num_rbs; ++m) {
+              const double e = (double)row[re].r * row[re].r + (double)row[re].i * row[re].i;
+              if (m & 1) e_other += e; else e_dmrs += e;
+              re = (re + 1) % fp->ofdm_symbol_size;
+            }
+          }
+          const double cdm_ratio = e_dmrs > 0 ? e_other / e_dmrs : -1.0;
+          if (coh >= 0) {
+            const int big = job.freq_alloc.num_rbs >= 100, k = big * 2 + crc; // 0 small/fail 1 small/ok 2 big/fail 3 big/ok
+            g_rank_n[k]++; g_rank_sum[k] += coh; if (coh < 0.5) g_rank_low[k]++;
+            g_cdm_sum[k] += cdm_ratio; if (cdm_ratio < 0.25) g_cdm_empty[k]++;
+            if (++g_rank_total % 500 == 0)
+              LOG_I(PHY, "SENSING: DL_RANK_PROBE n=%lu | small/crcfail n=%lu mean_coh=%.2f low=%lu | small/crcok n=%lu mean=%.2f low=%lu"
+                         " | big/crcfail n=%lu mean=%.2f low=%lu | big/crcok n=%lu mean=%.2f low=%lu  (low = coherence<0.5 => 2 ports)\n",
+                    (unsigned long)g_rank_total,
+                    (unsigned long)g_rank_n[0], g_rank_n[0] ? g_rank_sum[0] / g_rank_n[0] : 0.0, (unsigned long)g_rank_low[0],
+                    (unsigned long)g_rank_n[1], g_rank_n[1] ? g_rank_sum[1] / g_rank_n[1] : 0.0, (unsigned long)g_rank_low[1],
+                    (unsigned long)g_rank_n[2], g_rank_n[2] ? g_rank_sum[2] / g_rank_n[2] : 0.0, (unsigned long)g_rank_low[2],
+                    (unsigned long)g_rank_n[3], g_rank_n[3] ? g_rank_sum[3] / g_rank_n[3] : 0.0, (unsigned long)g_rank_low[3]);
+            if (g_rank_total % 500 == 0)
+              LOG_I(PHY, "SENSING: DL_CDM_PROBE other-comb/dmrs-comb energy ratio (1 = data there = 1 CDM group, 0 = empty = 2 groups): "
+                         "small/crcfail mean=%.2f empty=%lu/%lu | small/crcok mean=%.2f empty=%lu/%lu | "
+                         "big/crcfail mean=%.2f empty=%lu/%lu | big/crcok mean=%.2f empty=%lu/%lu | receiver assumes cdm=%u\n",
+                    g_rank_n[0] ? g_cdm_sum[0] / g_rank_n[0] : 0.0, (unsigned long)g_cdm_empty[0], (unsigned long)g_rank_n[0],
+                    g_rank_n[1] ? g_cdm_sum[1] / g_rank_n[1] : 0.0, (unsigned long)g_cdm_empty[1], (unsigned long)g_rank_n[1],
+                    g_rank_n[2] ? g_cdm_sum[2] / g_rank_n[2] : 0.0, (unsigned long)g_cdm_empty[2], (unsigned long)g_rank_n[2],
+                    g_rank_n[3] ? g_cdm_sum[3] / g_rank_n[3] : 0.0, (unsigned long)g_cdm_empty[3], (unsigned long)g_rank_n[3],
+                    (unsigned)pdu->n_dmrs_cdm_groups);
+          }
+          pthread_mutex_unlock(&g_dl_rank_lock);
+        }
         if (crc && pdu->dmrsConfigType == 0 && pdu->dlDmrsSymbPos && pthread_mutex_trylock(&g_dl_dmrs_id_lock) == 0) {
           if (!g_dl_dmrs_id_init) { nr_dmrs_id_init(&g_dl_dmrs_id, "PDSCH", pdu->dlDmrsScramblingId); g_dl_dmrs_id_init = true; }
           if (!g_dl_dmrs_id.decided) {

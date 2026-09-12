@@ -85,6 +85,16 @@ int nr_dmrs_id_accumulate(nr_dmrs_id_state_t *st, const c16_t *rx_symbol, int of
  * the true identity reaches with >= 50 pilots. */
 bool nr_dmrs_id_decide(nr_dmrs_id_state_t *st, uint32_t min_grants, double min_margin_db);
 
+/* RANK PROBE. With DM-RS type 1, ports 0 and 1 share CDM group 0 and are separated by the
+ * frequency-domain OCC w_f = [+1,+1] / [+1,-1] over each comb pair (k' = 0, 1). Under the port-0
+ * pilot, the pair reads (h0 + h1, h0 - h1) when both ports are present and (h0, h0) when only port
+ * 0 is. The even/odd pair coherence |sum_n h[2n] conj(h[2n+1])| / sum |h|^2 is therefore ~1 for a
+ * single-layer grant and collapses for a two-layer one -- a per-grant rank indicator that needs no
+ * decode. Same index conventions as nr_dmrs_id_accumulate; `nid` is the (confirmed) identity. */
+double nr_dmrs_port_pair_coherence(const c16_t *rx_symbol, int ofdm_symbol_size, int start_subcarrier,
+                                   int rb_offset, int nb_rb, int N_RB, int symbols_per_slot, int slot,
+                                   int symbol, int nscid, int nid, int normal_cp);
+
 /* Coherence score of one candidate, and its margin over the median of all 1024 in dB. */
 double nr_dmrs_id_score(const nr_dmrs_id_state_t *st, int id);
 double nr_dmrs_id_margin_db(const nr_dmrs_id_state_t *st, int id);
