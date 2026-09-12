@@ -283,3 +283,42 @@ site verified gated off).
   `NR_ISAC_ILLUM_DL` for every row in the repaired ISAC tests (single-illuminator assumption). The
   gate-1 oracle command pins `-r 273 --numerology 1 --band 78 -C 3450000000 --ssb 150` by design —
   it is the documented decoder regression, NOT gate-1 inference, and must not be read as agnostic.
+
+## Three formerly-assumed parameters now measured off the air (2026-09-12, `d848c29298`)
+
+| parameter | how | live verdict on `raw_5min_last120` (two independent replays) |
+|---|---|---|
+| DM-RS scrambling identity, PDSCH | blind, all 1024 candidates, adjacent-pilot coherence on the receiver's own LS estimate (`nr_dmrs_id_estimate.{h,c}`) | **n_ID = 2 = PCI**; 20.5 / 20.2 dB over median, 15.8 / 14.9 dB over runner-up, 16 CRC-OK grants |
+| DM-RS scrambling identity, PUSCH | same estimator, gNB-style rxdataF ring, consumer-only | **n_ID = 2**; 16.2 / 16.3 dB over median, 11.1 / 11.1 dB over runner-up |
+| xOverhead | reject-only TB-CRC elimination (`nr_pdsch_xoverhead.{h,c}`): a CRC-OK TB refutes every value whose TBS for that allocation differs | **0 CONFIRMED** after the first CRC-OK decode; 6/12/18 each refuted, 0 TBS-indistinct |
+| carrier (BW, numerology, position in the started grid) | SIB1 `carrierBandwidth`/`subcarrierSpacing` exact; `offsetToPointA` + MIB `k_SSB` against where the SSB was *found* must put Point A at grid subcarrier 0 and the carrier end at 12·N_RB | **CONFIRMED**: 273 PRB µ=1, Point A at 0, end 3276 = grid end, SSB at 150 |
+
+Each has a gtest with a known answer (`test_nr_dmrs_id_estimate` 5, `test_nr_pdsch_xoverhead` 5,
+carrier cases in `test_nr_passive_acq_state`), and a **MISMATCH** path that logs at `LOG_E`
+naming both values — the detector these assumptions never had. The ACQ heartbeat line carries all
+three verdicts. Gate-5 regression with the new binary: PASS, verdicts reproduced.
+
+Design notes that are not obvious from the code:
+- The DM-RS score accumulates the complex numerator and real denominator across grants; the
+  first version accumulated per-grant |num|/den and the margin could never grow with evidence
+  (the magnitude of a random walk is biased positive). Decision gate is relative (dB over the
+  median of all 1024), so gain/SNR/allocation size do not enter it. 16 grants + 10 dB are
+  hand-set; the measured margins sit 6–10 dB above the gate.
+- xOverhead is NOT a 4th Technique-D dimension on purpose: that multiplies DL convergence by 4
+  and would not settle inside the 120 s captures (DL settles ~75 s via the full MIN_TRIALS gate;
+  the 60 % LCB shortcut cannot fire at 23–53 % CRC). If the assumed value were wrong nothing
+  passes CRC and Technique D never settles — the fallback (a real 4-way search) is documented,
+  not built.
+- The carrier check is not a PHY re-init (impossible after sync): it converts "started with" into
+  "confirmed from air" or a loud mismatch.
+- The UL estimator is gated on the PUSCH queue running: `nr_pusch_passive_decode()` is also the
+  RT thread's in-line decode, and a millisecond burst there is a timing-loop hit.
+
+**Agnosticity count, revised** (same 35-item list as before): validated-autonomous **24/35 ≈ 69 %**
+(was 20); designed-but-unproven 4; supplied/assumed 7 — remaining: initial RF centre (a scan-time
+problem), DL/UL *data*-scrambling IDs (gated fallback only), DMRS type-2 / maxLength-2 and
+transform precoding (receiver refuses rather than estimates), rank > 1, CSI-RS resources.
+
+Also recorded from this campaign: decode rates on the same capture read UL 54 % / DL 23 % on one
+replay and 74 % / 32 % on another with an identical binary — the rig's documented run-to-run
+swing; no per-binary comparison is claimed from n = 1.
