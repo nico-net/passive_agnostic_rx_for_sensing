@@ -158,6 +158,8 @@ extern "C" {
 #endif
 /* Read-only view of the DL DM-RS identity estimate (diagnostic; plain ints, racy by design). */
 const nr_dmrs_id_state_t *nr_pdsch_passive_dl_dmrs_id(void);
+/* Up to 6 RNTIs with >= 50 decodes, as " 0xRNTI:ok/decoded(pct)" items. */
+void nr_pdsch_passive_queue_rnti_census(char *buf, size_t n);
 #ifdef __cplusplus
 }
 #endif

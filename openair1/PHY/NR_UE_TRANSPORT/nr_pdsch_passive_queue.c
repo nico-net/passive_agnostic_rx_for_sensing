@@ -91,6 +91,21 @@ const nr_dmrs_id_state_t *nr_pdsch_passive_dl_dmrs_id(void) { return &g_dl_dmrs_
 static pthread_mutex_t g_dl_rank_lock = PTHREAD_MUTEX_INITIALIZER;
 static uint64_t g_rank_n[4], g_rank_low[4], g_rank_total; static double g_rank_sum[4];
 static uint64_t g_cdm_empty[4]; static double g_cdm_sum[4];
+/* Per-RNTI DL decode census: "DL converged" is a per-UE statement, and a cell-wide CRC rate can hide
+ * one UE decoding at 80 % and the other at 0 %. Indexed by C-RNTI; printed with the PDSCHQ census. */
+static _Atomic uint32_t g_rnti_dec[65536], g_rnti_ok[65536];
+void nr_pdsch_passive_queue_rnti_census(char *buf, size_t n)
+{
+  size_t off = 0; int shown = 0;
+  for (int r = 1; r < 65536 && off + 40 < n && shown < 6; ++r) {
+    const uint32_t d = atomic_load_explicit(&g_rnti_dec[r], memory_order_relaxed);
+    if (d < 50) continue;
+    const uint32_t ok = atomic_load_explicit(&g_rnti_ok[r], memory_order_relaxed);
+    off += snprintf(buf + off, n - off, " 0x%x:%u/%u(%.0f%%)", r, ok, d, 100.0 * ok / d);
+    ++shown;
+  }
+  if (!shown) snprintf(buf, n, " (none>=50)");
+}
 static _Atomic uint64_t g_dropped_full  = 0; // evicted oldest to admit a newer job
 static _Atomic uint64_t g_dropped_stale = 0;
 static _Atomic uint64_t g_max_lag       = 0;
@@ -187,6 +202,8 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
 
     if (st != NR_PDSCH_PASSIVE_DECODE_ERROR && st != NR_PDSCH_PASSIVE_DECODE_UNSUPPORTED) {
       atomic_fetch_add_explicit(&g_decoded, 1, memory_order_relaxed);
+      atomic_fetch_add_explicit(&g_rnti_dec[job.rnti], 1, memory_order_relaxed);
+      if (st == NR_PDSCH_PASSIVE_DECODE_CRC_OK) atomic_fetch_add_explicit(&g_rnti_ok[job.rnti], 1, memory_order_relaxed);
       {
         /* Two dedicated-parameter checks that need only what is in hand here, on the consumer.
          * xOverhead: every CRC-OK decode refutes each alternative whose TBS differs (reject-only,
