@@ -175,6 +175,14 @@ for t in $(seq 1 "$TRIES"); do
   # measured and small -- the 683 lines/s figure was dominated by the TSYNC_PDCCH flood, which is
   # gated separately on ISAC_TSYNC_AUDIT -- and log rate turns out to track receiver HEALTH rather
   # than harm it (the 2195 lines/s run had zero NIC drops; the 41 lines/s run had 45k).
+  # The launch below is ONE `sudo env ... \`-continued command ending in `setsid nohup bash -c "..."`.
+  # A `#` comment (or an un-backslashed newline) placed ANYWHERE inside it breaks the continuation:
+  # in the outer shell a trailing `\` folds the next line into a comment and detaches the rest (once
+  # made the softmodem run WITHOUT sudo -> couldn't overwrite the root-owned stats log -> assert); and
+  # inside the bash -c string a `#` truncates argv (once dropped --thread-pool -> UHD overflows). So
+  # all rationale stays HERE, outside the command. Thread pool = 0,1,4,5,6,7 (6 RT cores) leaves
+  # cpu2,3 free; FIFO-97 workers dominate the pool cores so the CFS UHD threads land on 2,3 -- that IS
+  # the UHD isolation. Do not fill 2,3, and do not put comments inside the command.
   sudo env ISAC_DISC_NO_RESYNC=1  \
     ISAC_PDCCH_TIMING=1 ISAC_PUSCH_TIMING=1 ISAC_PUSCH_DIAG=1 \
    ${PDCCHTIMING:+ISAC_PDCCH_TIMING=1} ${PUSCHTIMING:+ISAC_PUSCH_TIMING=1} ${PUSCHDIAG:+ISAC_PUSCH_DIAG=1} \
@@ -188,12 +196,6 @@ for t in $(seq 1 "$TRIES"); do
     ${TSYNCAUDIT:+ISAC_TSYNC_AUDIT=$TSYNCAUDIT} \
     ISAC_TSYNC_RESET=${TSYNCRESET:-0} \
     ${CPUSET:+CPUSET=$CPUSET} BIN=$BIN \
-    # NB: everything from here to the closing quote is ONE double-quoted string handed to `bash -c`,
-    # and the first line ends the `exec` command -- so NO `#` comments and NO un-backslashed newlines
-    # may go inside it (a `#` there truncates argv; cost us a run of immediate UHD overflows once).
-    # Thread pool = 0,1,4,5,6,7: 6 RT cores, leaving cpu2,3 free. FIFO-97 workers dominate the pool
-    # cores, so the scheduler pushes the CFS UHD control/ZMQ threads onto the idle 2,3 -- that IS the
-    # UHD isolation; do not fill 2,3.
     setsid nohup bash -c "ulimit -c 0; exec timeout $DUR ${CPUSET:+taskset -c $CPUSET} \
     $BIN \
     --usrp-args type=x4xx,addr=$DATA,mgmt_addr=$MGMT${DPDK:+,use_dpdk=$DPDK} \
