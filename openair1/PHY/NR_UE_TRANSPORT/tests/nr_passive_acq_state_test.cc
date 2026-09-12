@@ -99,6 +99,29 @@ TEST_F(AcqState, DlAndUlConvergedAreEqualRankSiblingsNotARegression) {
   EXPECT_EQ(nr_passive_acq_snapshot().state, NR_ACQ_DL_CONVERGED);
   EXPECT_EQ(nr_passive_acq_snapshot().consecutive_regressions, regressions_before);
 }
+TEST_F(AcqState, SyncLossDropsToLostImmediatelyDespiteLatchedEvidence) {
+  nr_passive_acq_inputs_t in{};
+  in.pdcch_length_found = in.coreset_extent_verified = in.ul_bwp_known = true;
+  in.dl_search_winners = in.ul_width_winners = 1;
+  nr_passive_acq_update(&in);
+  ASSERT_EQ(nr_passive_acq_snapshot().state, NR_ACQ_TRACKING);
+  /* This is the case a 3 s gap injected into a saved raw capture actually produced: the receiver
+   * lost the stream and reacquired, but every FSM input stayed latched, so the evidence path alone
+   * left the state in TRACKING throughout. */
+  nr_passive_acq_note_sync_loss();
+  EXPECT_EQ(nr_passive_acq_snapshot().state, NR_ACQ_LOST);
+  EXPECT_EQ(nr_passive_acq_snapshot().sync_losses, 1u);
+  nr_passive_acq_update(&in); // same latched evidence: recovery is immediate, as it should be
+  EXPECT_EQ(nr_passive_acq_snapshot().state, NR_ACQ_TRACKING);
+}
+TEST_F(AcqState, RepeatedSyncLossCountsOnceIntoTheStateButAlwaysIntoTheCounter) {
+  nr_passive_acq_note_sync_loss();
+  ASSERT_EQ(nr_passive_acq_snapshot().state, NR_ACQ_LOST);
+  const uint64_t t = nr_passive_acq_snapshot().transitions;
+  nr_passive_acq_note_sync_loss();
+  EXPECT_EQ(nr_passive_acq_snapshot().transitions, t) << "already LOST: no second transition";
+  EXPECT_EQ(nr_passive_acq_snapshot().sync_losses, 2u);
+}
 TEST_F(AcqState, ResetReturnsToSearchingAndClearsCounters) {
   nr_passive_acq_inputs_t in{}; in.pdcch_length_found = true;
   nr_passive_acq_update(&in);

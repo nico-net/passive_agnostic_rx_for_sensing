@@ -1,5 +1,6 @@
 #include "PHY/NR_UE_TRANSPORT/nr_passive_replay_capture.h"
 #include "nr_rx_continuity.h"
+#include "PHY/NR_UE_TRANSPORT/nr_passive_acq_state.h" // acquisition-state tracker: hard sync-loss edge
 #include <dlfcn.h>
 /*
  * SPDX-License-Identifier: LicenseRef-CSSL-1.0
@@ -1479,6 +1480,9 @@ void *UE_thread(void *arg)
             if (a2 == 0)
               g_ulprobe_n[ul]++;
           }
+          /* The state tracker's other inputs are all latched discovery state and cannot regress
+           * on a stream loss; this edge is the only thing that can tell it the mapping is gone. */
+          nr_passive_acq_note_sync_loss();
         }
       }
       g_census_pow_ant_n++;

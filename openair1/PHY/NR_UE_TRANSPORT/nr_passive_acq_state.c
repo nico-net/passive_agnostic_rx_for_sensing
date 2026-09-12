@@ -112,6 +112,23 @@ void nr_passive_acq_update(const nr_passive_acq_inputs_t *in)
   }
   pthread_mutex_unlock(&g_lock);
 }
+void nr_passive_acq_note_sync_loss(void)
+{
+  pthread_mutex_lock(&g_lock);
+  const nr_passive_acq_state_t prev = g_snap.state;
+  ++g_snap.sync_losses;
+  if (prev != NR_ACQ_LOST) {
+    LOG_W(PHY, "SENSING: ACQ_STATE %s -> LOST (receive-stream discontinuity, no hysteresis; "
+               "losses=%lu updates=%lu time_in_prev=%lu)\n",
+          nr_passive_acq_state_name(prev), (unsigned long)g_snap.sync_losses,
+          (unsigned long)g_snap.updates, (unsigned long)g_snap.time_in_state);
+    g_snap.state = NR_ACQ_LOST;
+    g_snap.time_in_state = 0;
+    g_snap.consecutive_regressions = 0;
+    ++g_snap.transitions;
+  }
+  pthread_mutex_unlock(&g_lock);
+}
 nr_passive_acq_snapshot_t nr_passive_acq_snapshot(void)
 {
   pthread_mutex_lock(&g_lock);

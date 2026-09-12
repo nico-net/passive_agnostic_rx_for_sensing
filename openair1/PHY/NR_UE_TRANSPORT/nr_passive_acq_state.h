@@ -57,7 +57,7 @@ typedef struct {
 
 typedef struct {
   nr_passive_acq_state_t state;
-  uint64_t updates, transitions;
+  uint64_t updates, transitions, sync_losses;
   uint64_t time_in_state;      // consecutive updates spent in the current state
   uint64_t consecutive_regressions; // consecutive updates whose evidence regressed from `state`
 } nr_passive_acq_snapshot_t;
@@ -73,6 +73,16 @@ const char *nr_passive_acq_state_name(nr_passive_acq_state_t s);
  * transition is logged at LOG_A with the evidence that caused it; every update is available via
  * nr_passive_acq_snapshot() regardless of logging. */
 void nr_passive_acq_update(const nr_passive_acq_inputs_t *in);
+/* Hard invalidation: the receive stream itself was lost (RXDISCONT), so the frame-to-sample
+ * mapping -- and therefore every hypothesis being scored against it -- is invalid NOW. Drops
+ * straight to NR_ACQ_LOST with NO hysteresis, unlike nr_passive_acq_update()'s evidence path:
+ * a discontinuity is not noisy evidence that might recover, it is proof. The discovery state this
+ * module reads is all LATCHED (winners stay settled, bwp_size stays set), so without this call a
+ * sync loss is structurally invisible to the state machine -- measured on a deliberate 3 s gap
+ * injected into a saved raw capture, where the receiver reacquired but the state never left
+ * TRACKING. Safe to call from the RX thread: one lock, no allocation, event-driven (a handful of
+ * calls per run, not per slot). */
+void nr_passive_acq_note_sync_loss(void);
 nr_passive_acq_snapshot_t nr_passive_acq_snapshot(void);
 void nr_passive_acq_reset(void);
 
