@@ -8,6 +8,7 @@
 #include "enu_tracker.h"
 #include "hierarchical_tracker.h"
 #include "nr_isac.h"
+#include "nr_isac_ssb_axis.h"
 #include "fft.h"
 #include "report_writer.h"
 #include "sensing_engine.h"
@@ -1168,6 +1169,46 @@ void test_dl_capture_fails_closed_without_dl()
   std::remove(path.c_str());
 }
 
+/** P11fix: the SSB CFR producer's k_abs axis. Every case here is chosen so the OLD code
+ *  (wrap modulo ofdm_symbol_size, base = ((start - k_ssb)/12)*12) and the new code DISAGREE --
+ *  a non-regression check on values where the two conventions coincide would prove nothing. */
+void test_ssb_k_abs()
+{
+  std::vector<uint32_t> k(NR_ISAC_SSB_NOF_RE);
+  const int prb = 273, grid = prb * 12; /* 3276, vs an FFT size of 4096 at this bandwidth */
+
+  /* P11-A1, the wrap boundary. start=3200 puts REs 76..239 past the end of the carrier grid but
+   * still well inside the FFT size, so the OLD modulus returned 3276..3439 -- outside the range
+   * nr_isac.h:85-86 declares, where sensing_engine.cc:543 drops them one RE at a time in silence. */
+  nr_isac_ssb_k_abs(3200, grid, k.data());
+  require(k[0] == 3200, "SSB k_abs must start at ssb_start_subcarrier");
+  require(k[75] == 3275, "SSB k_abs must reach the last subcarrier of the grid before wrapping");
+  require(k[76] == 0, "SSB k_abs must wrap modulo nof_prb*12, not modulo the FFT size");
+  require(k[239] == 163, "SSB k_abs must stay wrapped after the grid boundary");
+  for (uint32_t i = 0; i < k.size(); ++i)
+    require(k[i] < (uint32_t)grid, "every SSB k_abs must lie in [0, nof_prb*12)");
+
+  /* P11-A4, the kSSB term. This deployment's own fixture runs --ssb 150 == 12*12 + 6, so the old
+   * CRB flooring labelled element 0 as 144 while the estimate at element 0 is the one at 150. */
+  nr_isac_ssb_k_abs(150, grid, k.data());
+  require(k[0] == 150, "SSB k_abs must not floor to the containing CRB");
+  require(k[239] == 389, "SSB k_abs must be 240 contiguous subcarriers from ssb_start_subcarrier");
+
+  /* Boundary case for the REJECTED `k_ssb = ssb_start_subcarrier % 12` recovery: FR1 with
+   * scs_common = 15 kHz leaves k_SSB unshifted (nr_phy_common.c:482-483, `ssb_sco >> scs` with
+   * scs = 0), so its post-shift value reaches 23 -- the max of the 0..23 FR1 range
+   * (TS 38.211 7.4.3.1; the `< 24` guard at nr_ue_dci_configuration.c:502). `% 12` would have
+   * recovered 11, not 23. The axis must be independent of that distinction entirely. */
+  const int start_k23 = 12 * 20 + 23;
+  nr_isac_ssb_k_abs(start_k23, grid, k.data());
+  require(k[0] == (uint32_t)start_k23, "SSB k_abs must be independent of kSSB even at kSSB=23");
+
+  /* Defensive contract: a bad bandwidth must leave the caller's buffer untouched, never divide. */
+  k.assign(k.size(), 0xDEADBEEFu);
+  nr_isac_ssb_k_abs(150, 0, k.data());
+  require(k[0] == 0xDEADBEEFu, "a non-positive carrier bandwidth must write nothing");
+}
+
 /** P14 Stage A: the AoA environment override is removed, so the keys must be REPORTED, never
  *  honoured. Counting them (rather than only logging) is what makes the removal testable. */
 void test_obsolete_aoa_env_rejected()
@@ -1185,7 +1226,7 @@ void test_obsolete_aoa_env_rejected()
 
 int main()
 {
-  try {test_fft();test_adaptive_threshold();test_detector();test_required_cuda_contract();test_aoa();test_aoa_component_mixture_and_cross_leg_fusion();test_enu_geometry();test_repeated_ul_confirmation_gates_global_birth();test_variable_cpi();test_causal_cpi_pipeline();test_finite_admission_window();test_mixed_row_dl_rdm_isolation();test_invalid_ul_does_not_suppress_dl();test_dl_capture_fails_closed_without_dl();test_validation_report_compatibility();test_branch_identity_report();test_branch_engine_routing();test_branch_submit_plan();test_ul_submit_plan();test_aoa_branch_conflict();test_submit_plan_skip_census();test_branch_output_identity();test_branch_engines_are_independent();test_obsolete_aoa_env_rejected();}
+  try {test_fft();test_adaptive_threshold();test_detector();test_required_cuda_contract();test_aoa();test_aoa_component_mixture_and_cross_leg_fusion();test_enu_geometry();test_repeated_ul_confirmation_gates_global_birth();test_variable_cpi();test_causal_cpi_pipeline();test_finite_admission_window();test_mixed_row_dl_rdm_isolation();test_invalid_ul_does_not_suppress_dl();test_dl_capture_fails_closed_without_dl();test_validation_report_compatibility();test_branch_identity_report();test_branch_engine_routing();test_branch_submit_plan();test_ul_submit_plan();test_aoa_branch_conflict();test_submit_plan_skip_census();test_branch_output_identity();test_branch_engines_are_independent();test_obsolete_aoa_env_rejected();test_ssb_k_abs();}
   catch(const std::exception& e){std::fprintf(stderr,"python parity test failed: %s\n",e.what());return EXIT_FAILURE;}
   std::puts("native sensing golden parity checks passed");return EXIT_SUCCESS;
 }

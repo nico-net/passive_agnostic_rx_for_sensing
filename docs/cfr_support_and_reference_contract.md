@@ -22,7 +22,7 @@ today (with evidence) or is currently violated / undocumented (flagged, not fixe
 | 3 | `openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_data_aided.c:391,419,428,434` | `NR_ISAC_SRC_PDSCH_DATA` | `nr_isac_submit_cfr_multi_branch()` |
 | 4 | `openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c:992` (PUSCH DM-RS) | `NR_ISAC_SRC_PUSCH_DMRS` | `nr_isac_submit_cfr_multi()` |
 | 5 | `openair1/PHY/NR_UE_TRANSPORT/nr_pusch_data_aided.c:241` | `NR_ISAC_SRC_PUSCH_DATA` | `nr_isac_submit_cfr_multi()` |
-| 6 | `openair1/SCHED_NR_UE/phy_procedures_nr_ue.c:1459` (PBCH/SSB) | `NR_ISAC_SRC_SSB` | `nr_isac_submit_cfr_multi()` |
+| 6 | `openair1/SCHED_NR_UE/phy_procedures_nr_ue.c:1477` (PBCH/SSB) | `NR_ISAC_SRC_SSB` | `nr_isac_submit_cfr_multi()` |
 
 (`openair1/PHY/NR_UE_ISAC/nr_isac_stub.c` holds the `ENABLE_ISAC_SENSING=OFF` no-ops; not a producer.)
 
@@ -49,24 +49,55 @@ normalises against the wrong modulus.**
 | PDSCH data-aided | `nr_pdsch_data_aided.c:201` `base_sc = (BWPStart + first_rb) * 12` vs `:203` `start_re = (first_carrier_offset + ...)` — the cleanest separation in the tree; the FFT index is a distinct variable used only to address `rxdataF` | YES |
 | PUSCH DM-RS | `nr_pusch_passive_decode.c:947,963` `k_grid = logical_start_sc + j`, with the comment at `:930-945` recording the measured failure (7-PRB grants read untouched memory and returned exactly zero) that produced this separation | YES |
 | PUSCH data-aided | `nr_pusch_data_aided.c:204-206` `k_buf[...] = k_grid`, comment: "the FFT rotation is only used above to address `rxdataF` and must not leak into this coordinate" | YES |
-| SSB / PBCH | `nr_isac_ssb_axis.c:9-14`, `base_sc = ((ssb_start_subcarrier - k_ssb)/12)*12`, then `(base_sc + i) % ofdm_symbol_size`. `ssb_start_subcarrier` IS Point-A-referenced (`nr_pbch.c:45` and `nr_dl_channel_estimation.c:644` both form the FFT address as `first_carrier_offset + ssb_start_subcarrier`) | VALUE yes; **modulus wrong** — see below |
+| SSB / PBCH | `nr_isac_ssb_axis.c`, `k_abs[i] = (ssb_start_subcarrier + i) % (nof_prb*12)` **since P11fix (2026-09-12)**; was `base_sc = ((ssb_start_subcarrier - k_ssb)/12)*12` then `(base_sc + i) % ofdm_symbol_size`. `ssb_start_subcarrier` IS Point-A-referenced (`nr_pbch.c:45` and `nr_dl_channel_estimation.c:644` both form the FFT address as `first_carrier_offset + ssb_start_subcarrier`) | YES (P11-A1 and P11-A4 both FIXED) |
 
-**Finding P11-A1 (flagged, not fixed).** `nr_isac_ssb_axis.c:11` wraps modulo `ofdm_symbol_size`,
-not modulo `nof_prb*12`. The two differ (4096 vs 3276 at 273 PRB), so the function can return a
-value outside the declared range `[0, nof_prb*12)` while looking normalised. It is inert for every
-in-carrier SSB placement tested here, so this is a latent contract mismatch, not an observed defect.
-Fixing it needs `nof_prb` at that call site, i.e. an ABI change — out of scope for an audit.
+**Finding P11-A1 (FIXED, P11fix 2026-09-12).** `nr_isac_ssb_axis.c` wrapped modulo
+`ofdm_symbol_size`, not modulo `nof_prb*12`. The two differ (4096 vs 3276 at 273 PRB), so the
+function could return a value outside the declared range `[0, nof_prb*12)` while looking
+normalised — where `sensing_engine.cc:543` drops it one RE at a time in silence (P11-A2). Fixed by
+replacing the `ofdm_symbol_size` parameter with `carrier_bandwidth_sc`, supplied at the single call
+site as `fp->N_RB_DL * 12` (`phy_procedures_nr_ue.c`). Inert on every placement tested here
+(SSB at `--ssb 150` of 3276 never reaches the wrap), so the proof is a unit test
+(`tests/python_parity_test.cc:test_ssb_k_abs`) at `ssb_start_subcarrier = 3200`, where the old and
+new moduli disagree on REs 76..239; it was falsified by reinstating the old expression and watching
+it fail.
 
-A second, independent SSB `k_abs` defect sits at the CALL site rather than in the helper:
-`phy_procedures_nr_ue.c:1417` passes `k_ssb` as a hardcoded literal 0
-(`nr_isac_ssb_k_abs(ssb_start_subcarrier, /*k_ssb=*/0, fp->ofdm_symbol_size, k_abs)`), so the
-`base_sc = ((ssb_start_subcarrier - k_ssb)/12)*12` quoted in the table above is evaluated with the
-wrong `k_ssb` on any cell whose kSSB is nonzero, shifting the whole 240-RE SSB support by up to one
-RB. The source's own comment at `:1408-1416` documents this deliberately — there is no PHY-side
-plumbing path to the MAC's `ssb_subcarrier_offset` at that call site and no field on
-`NR_DL_FRAME_PARMS` carries it — and records that it is correct for this deployment (kSSB = 0) and
-wrong for any future cell. Recorded here because it is the same class as P11-A1 and because a
-reader of the formula alone cannot see that one of its terms is a literal.
+**Finding P11-A4 (NEW and FIXED, P11fix 2026-09-12) — the `k_ssb` parameter was not merely
+hardcoded, it was measuring the wrong thing.** The prior text below recorded `k_ssb` as a literal 0
+that would be wrong on a nonzero-kSSB cell. Investigating whether the real value was recoverable
+established three things, each traced rather than assumed:
+
+1. **`ssb_start_subcarrier % 12` recovery is an algebraic no-op, not an approximation.** The only
+   use of `k_ssb` was `base_sc = ((ssb_start_subcarrier - k_ssb)/12)*12`. For non-negative `start`,
+   `start - (start % 12) == 12*floor(start/12)`, so `floor((start - start%12)/12) == floor(start/12)`
+   — the value the hardcoded `0` already produced. The proposed recovery would have changed no
+   output on any input. (It is also *wrong* as a recovery: `nr_phy_common.c:482-483` shifts FR1's
+   k_SSB by `>> scs_common`, and at `scs_common = 0` (15 kHz) the post-shift `sc_offset` keeps the
+   full 3GPP TS 38.211 §7.4.3.1 FR1 range 0..23 — the `< 24` guard at
+   `nr_ue_dci_configuration.c:502` is the in-tree witness for that range — so `% 12` would report
+   11 for a true 23. FR2 passes k_SSB through unshifted but its range is 0..11, so only FR1 at
+   15 kHz common SCS exceeds 12.)
+2. **The CRB flooring is itself the defect.** Element `i` of the PBCH channel estimate is the
+   estimate AT subcarrier `ssb_start_subcarrier + i`, not at the start of the CRB containing it.
+   Two independent walkers confirm this: `nr_pbch_channel_estimation()`
+   (`nr_dl_channel_estimation.c:644-773`) starts `re_offset` at `first_carrier_offset +
+   ssb_start_subcarrier` and `dl_ch` at index 0, advancing both by 12 per RB in lockstep (and
+   skipping 144 together for the SSS in symbol 1); `nr_pbch_extract()` (`nr_pbch.c:45-62`) walks
+   `rx_offset = first_carrier_offset + ssb_start_subcarrier` against `dl_ch_estimates` index 0.
+   So the correct coordinate carries no `k_SSB` term and no flooring at all, and the parameter was
+   removed rather than plumbed.
+3. **The "no plumbing path / zero hits" claim in the source comment was STALE, and its
+   "this cell's kSSB is 0" claim was WRONG.** A PHY-reachable path does exist:
+   `ue->nrUE_config.ssb_table.ssb_subcarrier_offset` (`fapi_nr_ue_interface.h:666`, "ssbSubcarrierOffset
+   or k_SSB (38.211, section 7.4.3.1) Value: 0->31"), written by `config_ue.c:210` from
+   `mac->ssb_subcarrier_offset`. It is genuinely absent from `NR_DL_FRAME_PARMS` (re-grepped), which
+   is the part of the old claim that held. And the registered fixture runs `--ssb 150`, i.e.
+   `150 = 12*12 + 6`, so the old flooring was mislabelling **this deployment's own** SSB rows by 6
+   subcarriers — the finding was never inert here, contrary to what the prior note implied.
+
+Consequence for anyone reading the old note: do not re-open MAC→PHY plumbing for `ssb_subcarrier_offset`
+on the sensing path. The value is reachable and is not wanted.
+
 
 **Finding P11-A2 (flagged, not fixed).** The contract has no enforcement point. A submission whose
 `k_abs` is out of grid is **silently discarded, one RE at a time**, at
@@ -80,7 +111,7 @@ surface the count (see the G3 inventory, test 3).
 **Finding P11-A3 (support, not coordinate).** Two producers report DENSE support they did not
 measure:
 
-- SSB/PBCH submits 240 contiguous `k_abs` values (`phy_procedures_nr_ue.c:1417-1421`), but
+- SSB/PBCH submits 240 contiguous `k_abs` values (`phy_procedures_nr_ue.c:1421-1424`), but
   `nr_pbch_channel_estimation()` builds `dl_ch_estimates` by INTERPOLATING (the `filt16a_*` kernels
   selected at `nr_dl_channel_estimation.c:659-687`) from PBCH DM-RS that occupy one subcarrier in
   four. ~60 REs are measured; 240 are claimed.
@@ -116,7 +147,7 @@ the parameter (`:306`) and the null-guard (`:310`). `consume()` (from `:482`) re
 | PDSCH data-aided | `nr_pdsch_data_aided.c:309` `l` — the true data symbol | **computed**: `:414-415` / `:432-433` `centre = 0.5*(sym_id[first]+sym_id[last]) + 0.5`, `frac = centre / NR_SYMBOLS_PER_SLOT` | the ONLY producer supplying real sub-slot time — but ONLY when sub-slot sampling is on; it falls back to `0.0f` at `:390-391` when `sub_target == 0` (the default) or `nof_sym <= 1` |
 | PUSCH DM-RS | `nr_pusch_passive_decode.c:964` `dmrs_sym` | `0.0f` (`:992`) | assumed |
 | PUSCH data-aided | `nr_pusch_data_aided.c:205` `l` | `0.0f` (`:241`) | assumed |
-| SSB / PBCH | `phy_procedures_nr_ue.c:1419` `relPbchSymb` — **PBCH-RELATIVE (0..2), not the slot symbol index** | `0.0f` (`:1460`) | wrong domain, but harmless today only because nothing reads it |
+| SSB / PBCH | `phy_procedures_nr_ue.c:1423` `relPbchSymb` — **PBCH-RELATIVE (0..2), not the slot symbol index** | `0.0f` (`:1478`) | wrong domain, but harmless today only because nothing reads it |
 
 **Finding P11-B1.** "Actual OFDM symbol time" is currently expressible only through `slot_frac`.
 Every producer already knows its symbol index and passes it, but the value is discarded. Each
@@ -156,7 +187,7 @@ and applied per RE at `:559-563` as a running weighted mean. What each producer 
 | PDSCH data-aided | `nvar` (`nr_pdsch_data_aided.c:392` etc.) | same antenna-mean |
 | PUSCH DM-RS | **`1.0f` literal** (`nr_pusch_passive_decode.c:995`) | no noise estimate at all |
 | PUSCH data-aided | **`1.0f` literal** (`nr_pusch_data_aided.c:241`) | no noise estimate at all |
-| SSB / PBCH | **`0.0f` literal** (`phy_procedures_nr_ue.c:1469`) | no estimate; falls into the `weight = 1.0f` branch |
+| SSB / PBCH | **`0.0f` literal** (`phy_procedures_nr_ue.c:1488`) | no estimate; falls into the `weight = 1.0f` branch |
 
 **Finding P11-C1 — the per-branch value ALREADY EXISTS and is thrown away one function call before
 the tap.** `nr_dl_chest_nvar_ant[NR_DL_CHEST_MAX_ANT]` (`nr_dl_channel_estimation.c:31`,
@@ -420,7 +451,8 @@ different excess ranges for the same target; equality would be the bug.
 
 | ID | Finding | Severity | Disposition |
 |---|---|---|---|
-| P11-A1 | `nr_isac_ssb_axis.c:11` normalises `k_abs` modulo `ofdm_symbol_size`, not `nof_prb*12` | latent, inert today | flagged; needs an ABI change |
+| P11-A1 | `nr_isac_ssb_axis.c` normalised `k_abs` modulo `ofdm_symbol_size`, not `nof_prb*12` | latent, inert on tested placements | **FIXED** P11fix 2026-09-12 (signature takes `carrier_bandwidth_sc`); unit-tested at the wrap |
+| P11-A4 | SSB `k_abs` floored to the containing CRB via a `k_ssb` term, but element `i` of the PBCH estimate is subcarrier `ssb_start_subcarrier + i` | real, ACTIVE on this fixture (`--ssb 150`, 6-subcarrier mislabel) | **FIXED** P11fix 2026-09-12 (`k_ssb` parameter removed, not plumbed) |
 | P11-A2 | out-of-grid `k_abs` silently dropped per-RE at `sensing_engine.cc:543`, no counter | observability | flagged; G3 test 3 |
 | P11-A3 | SSB (240 of ~60 measured) and PUSCH DM-RS (comb-1 of comb-2) report interpolated REs as measured support; CSI-RS `csi_type!=0` reports an RB-aggregate at one `k_abs` | real | flagged; ABI cannot express it |
 | P11-B1 | `l_sym` carried to the engine and never read; 5 of 6 producers pass `slot_frac = 0.0f` unconditionally, and the 6th does too unless `subslot_symbols` is set (default 0) | contract gap | flagged; contract stated |

@@ -1407,14 +1407,18 @@ int nr_process_pbch_symbol(
   if (nr_isac_enabled() && nr_isac_source_enabled(NR_ISAC_SRC_SSB)) {
     uint32_t k_abs[NR_PBCH_NUM_RB * NR_NB_SC_PER_RB];
     uint32_t l_sym[NR_PBCH_NUM_RB * NR_NB_SC_PER_RB];
-    // k_ssb hardcoded to 0: there is no PHY-side plumbing path to the MAC's real
-    // ssb_subcarrier_offset at this call site (nr_process_pbch_symbol only receives
-    // PHY_VARS_NR_UE*, never the MAC instance) -- and no field on NR_DL_FRAME_PARMS carries it
-    // either (verified: grepped the whole PHY tree, zero hits). CORRECT for this deployment
-    // (Phase 1 already confirmed this cell's actual kSSB is 0) but WRONG for any future cell
-    // with a nonzero kSSB -- flagged, not fixed; adding real MAC->PHY plumbing for this one
-    // value is out of scope for this task.
-    nr_isac_ssb_k_abs(ssb_start_subcarrier, /*k_ssb=*/0, fp->ofdm_symbol_size, k_abs);
+    // P11fix item 2: the former /*k_ssb=*/0 argument is GONE, not plumbed. Investigated and
+    // recorded in docs/cfr_support_and_reference_contract.md (finding P11-A4): k_ssb existed only
+    // to floor the axis to the CRB containing the SSB, and that is the wrong target -- element i
+    // of dl_ch_estimates is the estimate AT subcarrier ssb_start_subcarrier + i (traced in
+    // nr_isac_ssb_axis.c's header comment). Two corrections to the comment this replaces, both
+    // re-verified here rather than inherited: (a) a PHY-side path to the MAC value DOES exist,
+    // ue->nrUE_config.ssb_table.ssb_subcarrier_offset (fapi_nr_ue_interface.h:666, written by
+    // config_ue.c:210), so zero hits was stale -- it is simply not wanted; (b) this cell's
+    // kSSB is NOT 0: --ssb 150 gives 150 % 12 == 6, so the old CRB flooring was mislabelling this
+    // deployment's own SSB rows by 6 subcarriers. P11-A1: wrap modulo the carrier grid
+    // (N_RB_DL*12), never modulo the FFT size.
+    nr_isac_ssb_k_abs(ssb_start_subcarrier, fp->N_RB_DL * 12, k_abs);
     for (uint32_t i = 0; i < NR_PBCH_NUM_RB * NR_NB_SC_PER_RB; i++) {
       l_sym[i] = (uint32_t)relPbchSymb;
     }

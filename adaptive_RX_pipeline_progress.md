@@ -1623,6 +1623,103 @@ still byte-identical to the PRE-change baseline binary `252df29ea0`. Manifest fo
 `tests/passive_rx/baselines/manifest_20260911_6aedd38-dirty.json` (the `ec24e5d` pair from the
 first commit is kept, not replaced). Artifacts: `/tmp/p08a_r1_bv/`, `/tmp/p08a_r1_ulcfg.log`.
 
+## Session — 2026-09-12: P11fix SSB CFR producer k_abs axis (Stage 3, P11 follow-up, defect closure)
+
+```text
+Date/time (Europe/Zurich): 2026-09-12 08:10-08:30 CEST (host clock UTC)
+Task IDs / gate: P11fix (P11 audit findings P11-A1 and the k_ssb literal). No gate claimed.
+Intended falsifiable claim: the SSB CFR producer's k_abs is the CRB/Point-A carrier-grid coordinate
+  nr_isac.h:85-86 declares -- in [0, nof_prb*12) at the wrap, and equal to ssb_start_subcarrier + i
+  for element i -- and both properties fail on the previous implementation.
+Branch / full commit / dirty patch / untracked-file manifest:
+  merge/adaptive-sensing, parent 8530b707e0505745ac8feefe1f0cf171ca407541.
+  Before: 5 tracked modified + 1 untracked (tests/passive_rx/aoa_track_dl.conf, pre-existing,
+  NOT touched and NOT committed here).
+Files modified / added / removed:
+  MOD openair1/PHY/NR_UE_ISAC/nr_isac_ssb_axis.h    signature: (start, carrier_bandwidth_sc, out);
+                                                     k_ssb and ofdm_symbol_size both gone
+  MOD openair1/PHY/NR_UE_ISAC/nr_isac_ssb_axis.c    k_abs[i] = (start + i) % carrier_bandwidth_sc
+  MOD openair1/SCHED_NR_UE/phy_procedures_nr_ue.c   the one call site: fp->N_RB_DL*12; comment
+                                                     corrected (two of its claims were false)
+  MOD openair1/PHY/NR_UE_ISAC/tests/python_parity_test.cc  new test_ssb_k_abs() (5 assertions)
+  MOD docs/cfr_support_and_reference_contract.md    P11-A1 -> FIXED; new finding P11-A4; five
+                                                     phy_procedures_nr_ue.c line citations
+                                                     re-derived by grep (three were already stale
+                                                     before this session, from P10b's branch loop)
+Executable / driver / config / geometry / acceptance hashes:
+  nr-uesoftmodem sha256 f914159ca4bff8cdce1d2493f58bebb5544074f63998df760e8b762db382cf82
+  fixture sensing_manual_fixed.UtvBT7 (registered, unchanged)
+Exact commands:
+  pgrep -x nr-uesoftmodem                                    EMPTY before every build
+  make -j8 nr-uesoftmodem test_nr_isac_python_parity          rc=0
+  ./test_nr_isac_python_parity                                "native sensing golden parity checks passed"
+  (falsification) reinstate old expression, rebuild, run      rc=1 "SSB k_abs must start at
+                                                              ssb_start_subcarrier"; restored+rebuilt
+  (cd /tmp/p10a_offbuild && make nr-uesoftmodem -j8)          rc=0 (ENABLE_ISAC_SENSING=OFF links)
+  <registered fixture replay command, fixtures.json>          rc=0
+  OUT=/tmp/p11fix_bv bash tests/passive_rx/replay_branch_view.sh   dl_branch_view_replay: PASS
+  bash tests/passive_rx/baseline_manifest.sh ; check_manifest.py
+Artifact paths: /tmp/p11fix_legacy.log, /tmp/p11fix_bv/summary.txt
+Baseline and comparison definition: the P07/P06a/P10c replay baselines (legacy 34/0/24;
+  views 34/34/31/34/34 of 38) and the pre-change parity binary.
+Predeclared assertions / thresholds: both replays byte-identical to baseline; parity PASS; OFF
+  build links; the new test must FAIL against the old expression (else it proves nothing).
+Observed result, with denominators:
+  legacy replay "REPLAY PASS: identical DL controls=34 failed=0 raw UL=24; no radio opened" exit 0
+  replay_branch_view legacy 34 / view0 34 / view1 31 / view2 34 / view3 34 of 38, data_submits ==
+    crc_ok on every view, script exit 0 -- identical to baseline
+  test_nr_isac_python_parity PASS (26 cases, 1 new); falsified as predeclared
+  ENABLE_ISAC_SENSING=OFF nr-uesoftmodem rc=0
+Status (PASS / FAIL / VOID / BLOCKED): PASS (offline only; X410 unreachable, no live RF attempted)
+Validity reasons and affected intervals: every run is the offline replay path, which prints its own
+  "no radio opened" verdict. No radio was opened at any point.
+Hypotheses supported / contradicted:
+  CONTRADICTED (the brief's lead, refuted algebraically): recovering k_ssb as
+    `ssb_start_subcarrier % 12` would have changed NO output. The only use of k_ssb was
+    base_sc = ((start - k_ssb)/12)*12, and for start >= 0, start - (start % 12) == 12*floor(start/12),
+    so floor((start - start%12)/12) == floor(start/12) -- exactly what the hardcoded 0 already gave.
+    The recovery is an identity with the placeholder it would have replaced, not an improvement.
+  CONTRADICTED (secondary, 3GPP field width): even taken at face value, `% 12` is not a valid
+    recovery. nr_phy_common.c:482-483 shifts FR1's k_SSB by `>> scs_common`; at scs_common = 0
+    (15 kHz) the post-shift sc_offset keeps the full TS 38.211 7.4.3.1 FR1 range 0..23 (in-tree
+    witness: the `< 24` guard at nr_ue_dci_configuration.c:502), so `% 12` reports 11 for a true 23.
+    FR2 passes k_SSB unshifted but its range is 0..11. So only FR1 at 15 kHz common SCS exceeds 12 --
+    a real configuration, not a hypothetical.
+  CONTRADICTED (the source comment being replaced, both halves):
+    (a) "no field ... carries it either (verified: grepped the whole PHY tree, zero hits)" -- the
+        NR_DL_FRAME_PARMS half holds (re-grepped, still zero), but a PHY-reachable path DOES exist:
+        ue->nrUE_config.ssb_table.ssb_subcarrier_offset (fapi_nr_ue_interface.h:666, written by
+        config_ue.c:210). The value was never unreachable; it is simply not wanted.
+    (b) "CORRECT for this deployment (Phase 1 already confirmed this cell's actual kSSB is 0)" --
+        the registered fixture runs --ssb 150 == 12*12 + 6, so 150 % 12 == 6. The defect was ACTIVE
+        on this deployment's own captures, mislabelling every SSB row by 6 subcarriers.
+  SUPPORTED (new, traced not assumed): the CRB flooring itself is the defect. Element i of the PBCH
+    channel estimate is the estimate AT subcarrier ssb_start_subcarrier + i. Two independent walkers
+    show it: nr_pbch_channel_estimation() (nr_dl_channel_estimation.c:644-773) starts re_offset at
+    first_carrier_offset + ssb_start_subcarrier and dl_ch at index 0 and advances both by 12 per RB
+    in lockstep (skipping 144 together for the SSS in symbol 1); nr_pbch_extract() (nr_pbch.c:45-62)
+    walks rx_offset = first_carrier_offset + ssb_start_subcarrier against dl_ch_estimates index 0.
+    The correct coordinate therefore carries no k_SSB term and no flooring, so the parameter was
+    REMOVED rather than plumbed -- a shorter diff than either of the brief's two anticipated outcomes.
+Retraction, if any: retracts the two source-comment claims quoted above (both were inherited, both
+  were false when re-measured), and the docs' "inert today" disposition for the k_ssb literal.
+Remaining limitation:
+  * OFFLINE ONLY. The replays exercise the SSB tap's CODE path (the fixture's sources list contains
+    "ssb") but their PASS criteria are CRC/data_submits counts and do not read k_abs at all, so they
+    are a non-regression check, not evidence for the fix. The evidence for the fix is the unit test
+    plus its falsification, nothing more.
+  * No CPI ever closes in replay (nr_isac_start() is not called), so no SSB row has been observed
+    landing at its corrected subcarrier in a real range profile.
+  * The 6-subcarrier correction changes the SSB row's frequency labelling on every past ssb-sourced
+    capture. Any sensing result taken from an "ssb" source before this commit used the wrong axis;
+    none is quoted anywhere in this ledger, but do not inherit one.
+  * P11-A2 is untouched: an out-of-grid k_abs is still dropped silently per RE at
+    sensing_engine.cc:543. This fix removes one producer of such values; it adds no counter.
+Next highest-value action: unchanged -- P08 (branch-independent UL decode view) and AoA-removal
+  Stage B items 3-5.
+Reviewer / accomplishment date if gate passed: n/a (no gate claimed).
+```
+
 ## Session template — copy for each future work session
 
 ```text
