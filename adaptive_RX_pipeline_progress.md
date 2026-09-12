@@ -2585,3 +2585,25 @@ Next highest-value action: unchanged -- P08 (branch-independent UL decode view) 
   Stage B items 3-5.
 Reviewer / accomplishment date if gate passed: n/a (no gate claimed).
 ```
+
+### Fix round 1 (2026-09-12, controller-ruled) — the guards own %-form blind spot
+
+### Fix round 1 (2026-09-12, controller-ruled) — the guard's own %-form blind spot
+
+Review: Approved, 0 Critical / 0 Important, 4 Minor; only MINOR 1 actioned (2-4 judged acceptable
+as-is by the reviewer). The script's header LISTED `branch_id % NR_RX_BRANCH_MAX` as a known miss
+while a LIVE instance of exactly that form sat in a scanned file (`nr_passive_harq_tag.h`) -- a
+declared limitation that is currently reachable is a hole, not a limitation, and it weakened the
+"OK -- no raw branch-id masks" line. Fixed by widening `MASK_PATTERN` with
+`|%[[:space:]]*NR_RX_BRANCH_MAX` (deliberately keyed to that macro, not a bare `% n`: the same header
+line carries a legitimate `harq_process_nbr % NR_PDSCH_PASSIVE_HARQ_BRANCH_STRIDE`), removing `%`
+from the KNOWN LIMIT list, and giving the live instance a `branch-mask-ok` exemption naming the
+call-site guard that makes it safe -- re-traced, not inherited: `nr_pdsch_passive_harq_tag()` has one
+non-test caller and P13a maps `NR_ISAC_BRANCH_NONE` to lane 0 on the line above it, so the reduction
+is a defensive backstop the sentinel never reaches. Self-test extended on both sides (a planted
+`%`-form that must be detected; an exempted `%` line and a `% 32` different-modulus line that must
+not be). The exemption was proven load-bearing by deleting it and watching the scan fail.
+Verification: `--selftest` 4/4 planted, 0 false positives; real scan OK over 116 files;
+`make -j8 nr_rx_branch_test` rc=0 and ctest 3/3 (the header is C source and the edit splits an
+expression across lines, so it was compiled rather than argued). No behaviour change: comments plus
+a test-only script.

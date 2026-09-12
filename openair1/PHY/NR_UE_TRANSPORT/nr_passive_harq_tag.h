@@ -135,7 +135,11 @@ static_assert((NR_RX_BRANCH_MAX - 1) * NR_PDSCH_PASSIVE_HARQ_BRANCH_STRIDE
 static inline uint32_t nr_pdsch_passive_harq_tag(uint8_t branch_id, uint8_t harq_process_nbr)
 {
   return NR_PDSCH_PASSIVE_HARQ_TAG_BASE
-         + (uint32_t)(branch_id % NR_RX_BRANCH_MAX) * NR_PDSCH_PASSIVE_HARQ_BRANCH_STRIDE
+         /* The reduction below is bounded at the CALL SITE: nr_pdsch_passive_decode.c maps
+          * NR_ISAC_BRANCH_NONE to lane 0 before calling (P13a), so the sentinel never reaches
+          * it and it stays a defensive backstop; unguarded it would fold 255 onto branch 3. */
+         + (uint32_t)(branch_id % NR_RX_BRANCH_MAX)  /* branch-mask-ok: see above */
+               * NR_PDSCH_PASSIVE_HARQ_BRANCH_STRIDE
          + (uint32_t)(harq_process_nbr % NR_PDSCH_PASSIVE_HARQ_BRANCH_STRIDE);
 }
 

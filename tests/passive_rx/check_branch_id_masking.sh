@@ -26,18 +26,21 @@
 # fix as the defect would make the guard unusable on its first day.
 #
 # A genuinely bounded use opts out EXPLICITLY, by carrying the marker `branch-mask-ok` on the line
-# with a comment saying why it is bounded. Two exist today, both in nr_pdsch_passive_queue.c: they
-# read the ENQUEUE-time branch_id, written only by a producer or by nr_rx_branch_set_dispatch()
-# (active branches only) and always BEFORE the branch-view resolve that is the only writer able to
-# put NR_ISAC_BRANCH_NONE in the field. Opt-out-with-a-reason is deliberate: it makes each
-# exception a reviewable line rather than a silent hole in the pattern.
+# with a comment saying why it is bounded. Three exist today. Two are in
+# nr_pdsch_passive_queue.c: they read the ENQUEUE-time branch_id, written only by a producer or by
+# nr_rx_branch_set_dispatch() (active branches only) and always BEFORE the branch-view resolve
+# that is the only writer able to put NR_ISAC_BRANCH_NONE in the field. The third is
+# nr_passive_harq_tag.h's `% NR_RX_BRANCH_MAX`, whose sole call site maps the sentinel to lane 0
+# before calling, so the reduction is a defensive backstop that the sentinel never reaches.
+# Opt-out-with-a-reason is deliberate: it makes each exception a reviewable line rather than a
+# silent hole in the pattern.
 #
 # KNOWN LIMIT, stated plainly rather than left implicit: this is a TEXTUAL check over source lines.
 # It catches the mask written literally on one line, next to a branch-named token. It CANNOT see:
 # the mask split across two lines, a mask hidden behind a macro (`#define BR_IDX(x) ((x) & 3)`),
-# an equivalent expression that is not this mask (`branch_id % NR_RX_BRANCH_MAX`, or `& 0x3`
-# written in hex), or an unsafe index computed via a differently-named variable that was assigned
-# from a branch id earlier. Conversely it CAN false-positive: the heuristic reads the whole line,
+# an equivalent expression that is neither covered form (`& 0x3` written in hex, say), or an
+# unsafe index computed via a differently-named variable that was assigned from a branch id
+# earlier. Conversely it CAN false-positive: the heuristic reads the whole line,
 # so an unrelated mask whose trailing comment happens to contain the word `branch` would be flagged
 # (hit while writing this script's own self-test fixture). That direction is cheap to resolve -- a
 # reviewer reads one line and adds the marker or rewords the comment -- which is why the pattern is
@@ -45,8 +48,11 @@
 # exact idiom that recurred four times, not a proof of absence.
 set -u
 
-# `& (NR_RX_BRANCH_MAX - 1)` with any spacing/parenthesisation, or the literal `& 3`.
-MASK_PATTERN='&[[:space:]]*\(?[[:space:]]*(NR_RX_BRANCH_MAX[[:space:]]*-[[:space:]]*1|3)[[:space:]]*\)?'
+# `& (NR_RX_BRANCH_MAX - 1)` with any spacing/parenthesisation, the literal `& 3`, or the
+# equivalent `% NR_RX_BRANCH_MAX` reduction. Fix round 1 added the `%` form: the header used to
+# list it as a known miss, and a LIVE instance exists (nr_passive_harq_tag.h, now exempted with
+# its reason), so listing it as a limitation while it was reachable made the OK line untrustworthy.
+MASK_PATTERN='(&[[:space:]]*\(?[[:space:]]*(NR_RX_BRANCH_MAX[[:space:]]*-[[:space:]]*1|3)[[:space:]]*\)?|%[[:space:]]*NR_RX_BRANCH_MAX)'
 # The naming heuristic: the line must also mention a branch-prefixed token.
 BRANCH_TOKEN='\bbranch'
 # Explicit, reviewed opt-out marker.
@@ -107,6 +113,7 @@ run_selftest() {
     'g_counter[job.branch_id & (NR_RX_BRANCH_MAX - 1)]++;|symbolic mask on job.branch_id'
     'g_counter[branch_id & 3]++;|literal & 3 mask on branch_id'
     'return tab[d->branch_id&(NR_RX_BRANCH_MAX-1)];|no-whitespace symbolic mask'
+    'g_counter[branch_id % NR_RX_BRANCH_MAX]++;|modulo reduction (fix round 1)'
   )
   local i=0 entry line label f ok=0
   for entry in "${plants[@]}"; do
@@ -145,6 +152,8 @@ int nushift(int i_ssb) { return i_ssb & 3; }                 /* an SSB index, no
 int sub(int sc) { return (sc & (4 - 1)) == 1; }              /* a subcarrier index, likewise */
 /* documentation may quote the banned idiom: branch_id & (NR_RX_BRANCH_MAX - 1) is WRONG */
 int bounded(void) { return g_q[job.branch_id & (NR_RX_BRANCH_MAX - 1)]; } /* branch-mask-ok: pre-resolve id */
+int lane(int branch_id, int hpn) { return (branch_id % NR_RX_BRANCH_MAX) * 32 + hpn % 32; } /* branch-mask-ok: sentinel mapped at the call site */
+int stride(int branch_hpn) { return branch_hpn % 32; }          /* a different modulus entirely */
 CLEAN
   echo "check_branch_id_masking: self-test -- non-branch masks, a quoted idiom and an exempt line must NOT be flagged"
   if ! check_files "$cleanfile"; then
