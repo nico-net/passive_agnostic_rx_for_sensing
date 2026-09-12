@@ -27,6 +27,8 @@
 typedef struct {
   uint64_t generation, width_trials, interp_trials;
   int width_classes, interp_classes, raw_samples;
+  int width_winners, interp_winners;
+  uint64_t rejected_feedback;
 } nr_pdcch_ul_discovery_snapshot_t;
 nr_pdcch_ul_discovery_snapshot_t nr_pdcch_ul_discovery_snapshot(void);
 void nr_pdcch_ul_discovery_reset(void);
@@ -34,6 +36,8 @@ bool nr_pdcch_ul_discovery_grant(const nr_pdcch_blind_ul_opts_t *fixed,
                                  uint16_t length, uint16_t confirmed_rnti,
                                  uint64_t payload, nr_pdcch_blind_ul_result_t *out);
 /* Only call for an actual decoded transport block; never for dropped, stale, CFR-only,
- * unsupported, or setup-error jobs. crc_ok must mean non-zero TB with verified CRC. */
+ * unsupported, or setup-error jobs. crc_ok must mean non-zero TB with verified CRC.
+ * Exactly one producer-time class owns the result, including settled grants;
+ * missing/dual owners, identity mismatches and stale generations cannot score. */
 void nr_pdcch_ul_discovery_feedback(const nr_pdcch_blind_ul_result_t *, bool crc_ok);
 #endif

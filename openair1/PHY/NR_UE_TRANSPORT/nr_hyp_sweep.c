@@ -20,8 +20,10 @@
  */
 
 #include "nr_hyp_sweep.h"
+#include "nr_crc_evidence.h"
 #include "common/utils/LOG/log.h"
 #include <string.h>
+#include <math.h>
 
 static int refuse(nr_hyp_sweep_state_t *st, int error)
 {
@@ -60,6 +62,7 @@ int nr_hyp_sweep_init(nr_hyp_sweep_state_t *st, const nr_hyp_t *raw, int n,
       if (st->n_classes == NR_HYP_SWEEP_MAX_CLASSES)
         return refuse(st, NR_HYP_SWEEP_CLASS_OVERFLOW);
       cls = st->n_classes++;
+      st->order[cls] = cls;
       st->classes[cls].hyp = raw[i];
     }
     st->classes[cls].members++;
@@ -67,6 +70,18 @@ int nr_hyp_sweep_init(nr_hyp_sweep_state_t *st, const nr_hyp_t *raw, int n,
   }
   return st->n_classes;
 }
+/* Allocate probes using an anytime Hoeffding confidence bound. A union bound
+ * over both tails, all classes and n>=1 uses delta/[K*(n+1)*(n+2)].
+ * Skipping a statistically inferior probe is NOT a CRC success or a committed
+ * winner. It remains eligible if subsequent leader evidence deteriorates.
+ * Untested classes retain an upper bound of one and are never discarded here. */
+static double probe_radius(const nr_hyp_class_t *c)
+{
+  if (!c->trials) return 1.0;
+  const double n=(double)c->trials;
+  return sqrt(log(2.0*NR_HYP_SWEEP_MAX_CLASSES*(n+1.0)*(n+2.0)/1e-6)/(2.0*n));
+}
+
 int nr_hyp_sweep_next(nr_hyp_sweep_state_t *st, const void *cand,
                      nr_hyp_plausible_fn plausible, void *ctx, nr_hyp_t *out)
 {
@@ -77,9 +92,29 @@ int nr_hyp_sweep_next(nr_hyp_sweep_state_t *st, const void *cand,
     *out = *h;
     return st->winner;
   }
+  double leader_lower=0.0;
+  for (int c=0; c<st->n_classes; ++c) {
+    const nr_hyp_class_t *h=&st->classes[c];
+    if (!h->trials || !h->passes) continue;
+    const double lo=(double)h->passes/h->trials-probe_radius(h);
+    if (lo>leader_lower) leader_lower=lo;
+  }
+  /* Reshuffle at most once per call, only at entry. Doing this inside the loop below
+   * (checked on every candidate) let a wraparound mid-pass reshuffle the very order this
+   * call is iterating -- positions already visited before the wrap could reappear after
+   * it while a class that was never visited got silently skipped, so a call could return
+   * -1 even though a plausible, unpruned class existed but was simply never reached this
+   * pass. A single call always advances the cursor by exactly n_classes steps when it
+   * doesn't return early, i.e. exactly one full lap of a FIXED order array -- reshuffling
+   * only between calls preserves the "every class visited exactly once per call" guarantee
+   * regardless of where in the cycle this call starts. */
+  if (!st->cursor) nr_crc_shuffle(st->order, st->n_classes, &st->random_state);
   for (int t = 0; t < st->n_classes; ++t) {
-    const int c = st->cursor;
-    st->cursor = (c + 1) % st->n_classes;
+    const int c = st->order[st->cursor];
+    st->cursor = (st->cursor + 1) % st->n_classes;
+    const nr_hyp_class_t *h=&st->classes[c];
+    if (h->trials && (double)h->passes/h->trials+probe_radius(h)<leader_lower)
+      continue;
     if (!plausible || plausible(&st->classes[c].hyp, cand, ctx)) {
       *out = st->classes[c].hyp;
       return c;
@@ -111,10 +146,31 @@ static bool eliminated(const nr_hyp_class_t *c)
 int nr_hyp_sweep_feed(nr_hyp_sweep_state_t *st, int idx, bool ok)
 {
   if (!st || idx < 0 || idx >= st->n_classes) return -1;
-  if (st->winner >= 0) return st->winner;
   if (st->classes[idx].trials == UINT64_MAX) return -1;
   st->classes[idx].trials++;
   st->classes[idx].passes += ok;
+  /* Selection does not end measurement. Baseline validation consumes the
+   * selected class's subsequent CRC outcomes, not a frozen exploration score. */
+  if (st->winner >= 0) return st->winner;
+  /* A clearly separated, high-quality candidate need not wait for 300
+   * trials of every incorrect class. Keep the legacy marginal-link gate below. */
+  if ((st->classes[idx].trials % 16) == 0) {
+    int leader=0;
+    for(int c=1;c<st->n_classes;c++)
+      if(rate(&st->classes[c])>rate(&st->classes[leader])) leader=c;
+    double lo,hi;
+    nr_crc_interval(st->classes[leader].passes,st->classes[leader].trials,
+                    NR_HYP_SWEEP_MAX_CLASSES,&lo,&hi);
+    bool separated=st->classes[leader].trials>=64 && lo>=0.60;
+    for(int c=0;c<st->n_classes && separated;c++) {
+      if(c==leader || eliminated(&st->classes[c])) continue;
+      double other_lo,other_hi;
+      nr_crc_interval(st->classes[c].passes,st->classes[c].trials,
+                      NR_HYP_SWEEP_MAX_CLASSES,&other_lo,&other_hi);
+      if(other_hi>=lo) separated=false;
+    }
+    if(separated) { st->winner=leader; return leader; }
+  }
   int best = -1;
   for (int c = 0; c < st->n_classes; ++c) {
     if (eliminated(&st->classes[c])) continue;

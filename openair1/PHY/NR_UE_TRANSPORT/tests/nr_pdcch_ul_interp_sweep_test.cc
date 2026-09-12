@@ -42,12 +42,27 @@ TEST(UlInterpSweep, CatalogueAndObservedIndexIsolation) {
   EXPECT_EQ(o.harq_pid_bits,5);
   EXPECT_FALSE(nr_pdcch_ul_interp_sweep_apply(&raw[found],3,&o));
 }
-TEST(UlInterpSweep, FullCatalogueCannotSilentlyBypassClassCap) {
+/* CONTRACT CHANGED: NR_HYP_SWEEP_MAX_CLASSES was unified with NR_HYP_SWEEP_MAX_RAW
+ * (nr_hyp_sweep.h) so a live UL search stops refusing permanently whenever finite-sample class
+ * splitting pushed a real cell's config past the old, separate 512-class cap -- see that header's
+ * comment for the measured live failure this fixed. Direct consequence, checked here rather than
+ * assumed: a class always holds >=1 of the n raw hypotheses fed to nr_hyp_sweep_init, so
+ * n_classes <= n; n itself is already bounded by NR_HYP_SWEEP_MAX_RAW before init ever runs; so
+ * n_classes <= n <= MAX_RAW == MAX_CLASSES always, and NR_HYP_SWEEP_CLASS_OVERFLOW can no longer
+ * fire from any call that already passed the raw-cap check below. That is not a relaxation of
+ * "refuse loudly, never truncate silently": the raw cap is still enforced, and it is now the ONLY
+ * limit that can trip, because it is tighter than -- and implies -- the old separate class limit.
+ * This test used to assert the opposite: that the full un-collapsed interpretation catalogue (960,
+ * no equivalence merging in this generator) overflowed a lower, separate class cap. That premise no
+ * longer holds by construction; reintroducing it would mean re-lowering MAX_CLASSES below MAX_RAW,
+ * i.e. reintroducing the exact defect nr_hyp_sweep.h's comment documents fixing. */
+TEST(UlInterpSweep, FullCatalogueFitsAndRawCapStillRefusesLoudly) {
   std::vector<nr_hyp_t> raw(NR_HYP_SWEEP_MAX_RAW);
   int n=nr_pdcch_ul_interp_sweep_generate(raw.data(),raw.size());
   nr_hyp_sweep_state_t st;
-  EXPECT_EQ(nr_hyp_sweep_init(&st,raw.data(),n,nullptr,nullptr,nullptr,nullptr,0,nullptr),
-            NR_HYP_SWEEP_CLASS_OVERFLOW);
+  const int classes=nr_hyp_sweep_init(&st,raw.data(),n,nullptr,nullptr,nullptr,nullptr,0,nullptr);
+  ASSERT_EQ(classes,n) << "no equivalence fn supplied: every raw hypothesis must be its own class";
+  EXPECT_LE(classes,NR_HYP_SWEEP_MAX_CLASSES);
   EXPECT_EQ(nr_hyp_sweep_winner(&st),-1);
   EXPECT_EQ(nr_pdcch_ul_interp_sweep_generate(raw.data(),959),NR_HYP_SWEEP_RAW_OVERFLOW);
 }

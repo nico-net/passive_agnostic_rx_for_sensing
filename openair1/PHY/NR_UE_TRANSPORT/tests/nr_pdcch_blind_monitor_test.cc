@@ -2375,13 +2375,19 @@ TEST_F(BlindPdcchTest, RawDlRejectsUlDirectionAndInvalidInputs) {
   EXPECT_FALSE(nr_pdcch_blind_decode_raw_11(llr.data(),2,47,2,1,&raw));
 }
 
-/* Contract CHANGED 2026-09-09: the search is keyed on (DCI length, baseline geometry), not on the
- * RNTI, so several UEs sharing a DCI size share one context and POOL their CRC evidence. That is
- * deliberate -- a C-RNTI is reassigned on every re-attach, and four distinct RNTIs appeared inside
- * one 30-minute capture while convergence needs roughly an hour of transport blocks, so per-RNTI
- * state could never finish. These tests now assert the new contract; the generation-tagging safety
- * property they were originally written to protect is asserted below, unchanged in substance. */
-TEST_F(BlindPdcchTest, UlControllerPoolsEvidenceAcrossUesAtTheSameDciLength) {
+/* CONTRACT CHANGED (superseding the 2026-09-09 note this replaces): nr_pdcch_ul_discovery.c's
+ * context matching now includes the RNTI again, so evidence is no longer pooled across UEs that
+ * merely share a DCI length -- see that file's own comment at the context-matching loop and at
+ * decode_equivalent/same_options. Pooling required a separate "pooled winner corroborated across
+ * every contributing identity" veto to avoid confidently imposing one UE's layout on another UE
+ * that shares a length but not a configuration; that veto and its bookkeeping (contrib_rnti/
+ * contrib_trials/contrib_passes) are gone from the source, not merely untested, so asserting a
+ * shared generation here would be asserting a contract the implementation no longer provides.
+ * Each identity now gets its own context, its own generation, and inherits nothing from another
+ * RNTI at the same length -- re-tested below. The generation-tagging safety property the original
+ * test protected (a reset invalidates queued feedback) is unchanged in substance and re-asserted
+ * at the end, unchanged from before. */
+TEST_F(BlindPdcchTest, UlControllerKeepsEachIdentityIndependentAtTheSameDciLength) {
   const auto opts=LiveUlOpts();
   const uint16_t len=nr_pdcch_blind_dci01_size(&opts);
   nr_pdcch_ul_discovery_reset();
@@ -2394,11 +2400,12 @@ TEST_F(BlindPdcchTest, UlControllerPoolsEvidenceAcrossUesAtTheSameDciLength) {
       if(i==7) { ASSERT_TRUE(got) << "UE " << u << " lost its accumulated samples"; }
     }
   }
-  // One context, therefore one generation -- this is what lets a re-attached UE inherit evidence.
-  EXPECT_EQ(grant[0].hyp_generation,grant[1].hyp_generation);
-  EXPECT_EQ(grant[1].hyp_generation,grant[2].hyp_generation);
-  EXPECT_EQ(nr_pdcch_ul_discovery_snapshot().width_trials,0u);
-  // Feedback still lands once per grant, arriving out of order, and all three count.
+  // Three identities, three independent contexts: no generation is shared with another.
+  EXPECT_NE(grant[0].hyp_generation,grant[1].hyp_generation);
+  EXPECT_NE(grant[1].hyp_generation,grant[2].hyp_generation);
+  EXPECT_NE(grant[0].hyp_generation,grant[2].hyp_generation);
+  // Feedback lands once per grant, arriving out of order, and all three count -- into three
+  // separate contexts' trial totals, not one pooled total.
   for(int u : {2,0,1}) nr_pdcch_ul_discovery_feedback(&grant[u],u!=1);
   EXPECT_EQ(nr_pdcch_ul_discovery_snapshot().width_trials,3u);
   // The safety property that matters is unchanged: a reset invalidates queued feedback.
@@ -2866,4 +2873,138 @@ TEST_F(BlindPdcchTest, AutoDci10KeepsUlBitsAndClearsReusedReports) {
   EXPECT_EQ(report.attempted, 0u);
   EXPECT_EQ(report.surviving, 0u);
   EXPECT_EQ(report.unique_candidate, -1);
+}
+
+#include <cstddef>
+extern "C" {
+#include "nr_pdcch_ul_field_sweep.h"
+}
+static nr_pdcch_blind_ul_opts_t FeedbackIdentityOpts()
+{
+  auto o=LiveUlOpts();
+  nr_pdcch_ul_field_widths_t widths{};
+  widths.harq_pid_bits=4; widths.dai1_bits=1; widths.antenna_ports_bits=2;
+  widths.srs_request_bits=2; widths.dmrs_seq_init_bits=1;
+  nr_hyp_t h{}; h.len=sizeof(widths); memcpy(h.bytes,&widths,sizeof(widths));
+  nr_pdcch_ul_field_sweep_apply(&h,&o);
+  return o;
+}
+static bool FeedbackIdentityGrant(const nr_pdcch_blind_ul_opts_t &opts, int observation,
+                                   nr_pdcch_blind_ul_result_t *grant, nr_pdcch_blind_ul_result_t *truth)
+{
+  const int i=observation%8;
+  UlGroundTruth gt; gt.riv=273*(i+1); gt.mcs=i+2; gt.harq_pid=i; gt.ndi=i%2;
+  const auto len=nr_pdcch_blind_dci01_size(&opts);
+  const auto payload=PackUlPayload(gt,opts);
+  const bool valid=nr_pdcch_blind_extract_01(payload,len,gt.rnti,&opts,truth);
+  EXPECT_TRUE(valid) << "independently packed fixture must be interpretable";
+  if(!valid) return false;
+  return nr_pdcch_ul_discovery_grant(&opts,len,gt.rnti,payload,grant);
+}
+static bool FeedbackIdentityWaveformMatches(const nr_pdcch_blind_ul_result_t &g,
+                                            const nr_pdcch_blind_ul_result_t &t)
+{
+  return g.start_rb==t.start_rb && g.num_rb==t.num_rb && g.bwp_size==t.bwp_size
+      && g.tda_index==t.tda_index && g.start_symbol==t.start_symbol && g.num_symbols==t.num_symbols
+      && g.k2==t.k2 && g.mcs==t.mcs && g.mcs_table==t.mcs_table && g.rv==t.rv
+      && g.ul_dmrs_symb_pos==t.ul_dmrs_symb_pos && g.dmrs_ports==t.dmrs_ports
+      && g.n_dmrs_cdm_groups==t.n_dmrs_cdm_groups && g.nscid==t.nscid
+      && g.nrOfLayers==t.nrOfLayers && g.transform_precoding==t.transform_precoding;
+}
+static nr_pdcch_blind_ul_result_t FeedbackIdentityPrime(const nr_pdcch_blind_ul_opts_t &opts)
+{
+  nr_pdcch_blind_ul_result_t grant{},truth{};
+  bool got=false;
+  for(int i=0;i<8;++i) got=FeedbackIdentityGrant(opts,i,&grant,&truth);
+  EXPECT_TRUE(got);
+  return grant;
+}
+static nr_pdcch_blind_ul_result_t FeedbackIdentityTrain(const nr_pdcch_blind_ul_opts_t &opts)
+{
+  nr_pdcch_blind_ul_result_t grant{},truth{};
+  int settled_samples=0;
+  for(int i=0;i<12000;++i) {
+    if(!FeedbackIdentityGrant(opts,i,&grant,&truth)) continue;
+    nr_pdcch_ul_discovery_feedback(&grant,FeedbackIdentityWaveformMatches(grant,truth));
+    if(nr_pdcch_ul_discovery_snapshot().width_winners>0 && ++settled_samples==64) break;
+  }
+  return grant;
+}
+TEST_F(BlindPdcchTest, UlFeedbackOwnershipSurvivesConvergence) {
+  nr_pdcch_ul_discovery_reset();
+  const auto opts=FeedbackIdentityOpts();
+  const auto grant=FeedbackIdentityTrain(opts);
+  ASSERT_GT(grant.hyp_generation,0u);
+  EXPECT_GE(grant.width_hyp_class,0);
+  EXPECT_EQ(grant.interp_hyp_class,-1);
+  EXPECT_GT(nr_pdcch_ul_discovery_snapshot().width_winners,0);
+  const auto before=nr_pdcch_ul_discovery_snapshot();
+  nr_pdcch_ul_discovery_feedback(&grant,true);
+  EXPECT_EQ(nr_pdcch_ul_discovery_snapshot().width_trials,before.width_trials+1);
+  nr_pdcch_ul_discovery_reset();
+}
+TEST_F(BlindPdcchTest, UlFeedbackOwnershipRejectsMissingOwnerAfterConvergence) {
+  nr_pdcch_ul_discovery_reset();
+  const auto opts=FeedbackIdentityOpts();
+  auto grant=FeedbackIdentityTrain(opts);
+  const auto before=nr_pdcch_ul_discovery_snapshot();
+  grant.width_hyp_class=grant.interp_hyp_class=-1;
+  nr_pdcch_ul_discovery_feedback(&grant,true);
+  const auto after=nr_pdcch_ul_discovery_snapshot();
+  EXPECT_EQ(after.width_trials,before.width_trials);
+  EXPECT_EQ(after.interp_trials,before.interp_trials);
+  EXPECT_EQ(after.rejected_feedback,before.rejected_feedback+1);
+  nr_pdcch_ul_discovery_reset();
+}
+TEST_F(BlindPdcchTest, UlFeedbackOwnershipRejectsTwoOwners) {
+  nr_pdcch_ul_discovery_reset();
+  const auto opts=FeedbackIdentityOpts();
+  auto grant=FeedbackIdentityPrime(opts);
+  ASSERT_GE(grant.width_hyp_class,0);
+  const auto before=nr_pdcch_ul_discovery_snapshot();
+  grant.interp_hyp_class=0;
+  nr_pdcch_ul_discovery_feedback(&grant,true);
+  const auto after=nr_pdcch_ul_discovery_snapshot();
+  EXPECT_EQ(after.width_trials,before.width_trials);
+  EXPECT_EQ(after.interp_trials,before.interp_trials);
+  EXPECT_EQ(after.rejected_feedback,before.rejected_feedback+1);
+  nr_pdcch_ul_discovery_reset();
+}
+TEST_F(BlindPdcchTest, UlFeedbackOwnershipRejectsAnotherRntiWithCopiedGeneration) {
+  nr_pdcch_ul_discovery_reset();
+  const auto opts=FeedbackIdentityOpts();
+  auto grant=FeedbackIdentityPrime(opts);
+  const auto before=nr_pdcch_ul_discovery_snapshot();
+  grant.rnti^=1;
+  nr_pdcch_ul_discovery_feedback(&grant,true);
+  const auto after=nr_pdcch_ul_discovery_snapshot();
+  EXPECT_EQ(after.width_trials,before.width_trials);
+  EXPECT_EQ(after.rejected_feedback,before.rejected_feedback+1);
+  nr_pdcch_ul_discovery_reset();
+}
+TEST_F(BlindPdcchTest, UlFeedbackOwnershipIgnoresConfigurationPadding) {
+  nr_pdcch_ul_discovery_reset();
+  auto a=FeedbackIdentityOpts(),b=a;
+  const size_t begin=offsetof(nr_pdcch_blind_ul_opts_t,dmrs_typeA_position)+sizeof(a.dmrs_typeA_position);
+  const size_t end=offsetof(nr_pdcch_blind_ul_opts_t,tda_count);
+  ASSERT_LT(begin,end) << "this ABI fixture needs the alignment padding before tda_count";
+  auto bytes=reinterpret_cast<unsigned char*>(&b);
+  for(size_t i=begin;i<end;++i) bytes[i]^=0xff;
+  ASSERT_NE(memcmp(&a,&b,sizeof(a)),0);
+  auto first=FeedbackIdentityPrime(a);
+  nr_pdcch_ul_discovery_feedback(&first,true);
+  auto same=FeedbackIdentityPrime(b);
+  EXPECT_EQ(first.hyp_generation,same.hyp_generation);
+  EXPECT_EQ(nr_pdcch_ul_discovery_snapshot().raw_samples,8);
+  EXPECT_EQ(nr_pdcch_ul_discovery_snapshot().width_trials,1u);
+  nr_pdcch_ul_discovery_reset();
+}
+TEST_F(BlindPdcchTest, UlFeedbackOwnershipStillSeparatesActualOptionChanges) {
+  nr_pdcch_ul_discovery_reset();
+  auto a=FeedbackIdentityOpts(),b=a;
+  b.mcs_table=(a.mcs_table+1)%3;
+  auto first=FeedbackIdentityPrime(a),changed=FeedbackIdentityPrime(b);
+  EXPECT_NE(first.hyp_generation,changed.hyp_generation);
+  EXPECT_EQ(nr_pdcch_ul_discovery_snapshot().raw_samples,16);
+  nr_pdcch_ul_discovery_reset();
 }

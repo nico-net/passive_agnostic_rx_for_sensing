@@ -20,6 +20,7 @@
  */
 
 #include "nr_pdcch_ul_discovery.h"
+#include "nr_crc_evidence.h"
 #include "nr_pdcch_ul_field_sweep.h"
 #include "nr_pdcch_ul_interp_sweep.h"
 #include "common/utils/LOG/log.h"
@@ -44,19 +45,34 @@ typedef struct {
   uint64_t samples[UL_DISCOVERY_SAMPLES];
   int nsamples, sample_cursor, tda_index;
   uint64_t feedbacks, grants, late_splits;
-  /* Per-RNTI evidence inside a POOLED context. Pooling by DCI length is what lets a re-attached
-   * UE inherit evidence, but equal DCI lengths do NOT prove equal RRC configurations: two UEs can
-   * share a length and differ in layout. Without this, a busy UE's layout could win the pool and
-   * then be applied to the other UE's grants -- confidently wrong, which is worse than not
-   * converging. A winner must therefore be corroborated by EVERY contributing identity. */
-  uint16_t contrib_rnti[NR_PDCCH_BLIND_MAX_UE];
-  uint64_t contrib_trials[NR_PDCCH_BLIND_MAX_UE];
-  uint64_t contrib_passes[NR_PDCCH_BLIND_MAX_UE];
-  int      n_contrib;
+  /* Evidence belongs to one identity and one baseline, never to competing UEs. */
   bool logged_width, logged_interp;
 } ul_context_t;
 static ul_context_t contexts[UL_DISCOVERY_CONTEXTS];
 static uint64_t generation_counter = 1, context_clock;
+static uint64_t rejected_feedback;
+/* Struct padding is not a network configuration value. Compare only declared
+ * members, retaining the existing conservative identity of every option. */
+static bool same_options(const nr_pdcch_blind_ul_opts_t *a, const nr_pdcch_blind_ul_opts_t *b)
+{
+#define SAME(field) (a->field == b->field)
+  return SAME(bwp_start) && SAME(bwp_size) && SAME(numerology) && SAME(dmrs_typeA_position)
+      && SAME(tda_count)
+      && !memcmp(a->tda_start,b->tda_start,sizeof(a->tda_start))
+      && !memcmp(a->tda_length,b->tda_length,sizeof(a->tda_length))
+      && !memcmp(a->tda_mapping,b->tda_mapping,sizeof(a->tda_mapping))
+      && !memcmp(a->tda_k2,b->tda_k2,sizeof(a->tda_k2))
+      && SAME(dmrs_config_type) && SAME(dmrs_add_pos) && SAME(dmrs_max_length)
+      && SAME(transform_precoding) && SAME(mcs_table) && SAME(data_scrambling_id)
+      && SAME(ul_dmrs_scrambling_id) && SAME(phy_cell_id)
+      && SAME(carrier_indicator_bits) && SAME(ul_sul_bits) && SAME(bwp_indicator_bits)
+      && SAME(freq_hopping_bits) && SAME(harq_pid_bits) && SAME(dai1_bits) && SAME(dai2_bits)
+      && SAME(sri_bits) && SAME(precoding_info_bits) && SAME(antenna_ports_bits)
+      && SAME(srs_request_bits) && SAME(csi_request_bits) && SAME(cbg_bits)
+      && SAME(ptrs_dmrs_bits) && SAME(beta_offset_bits) && SAME(dmrs_seq_init_bits);
+#undef SAME
+}
+
 
 static void clear_search(search_t *s)
 {
@@ -76,6 +92,7 @@ void nr_pdcch_ul_discovery_reset(void)
 {
   pthread_mutex_lock(&lock);
   for (int i=0; i<UL_DISCOVERY_CONTEXTS; ++i) reset_locked(&contexts[i]);
+  rejected_feedback=0;
   pthread_mutex_unlock(&lock);
 }
 typedef struct { nr_pdcch_blind_ul_opts_t opts; bool interpretation; ul_context_t *owner; } apply_ctx_t;
@@ -88,21 +105,18 @@ static bool extract(const nr_hyp_t *h, const uint64_t *p, const apply_ctx_t *ctx
   } else nr_pdcch_ul_field_sweep_apply(h,&o);
   return nr_pdcch_blind_extract_01(*p,ctx->owner->target_length,ctx->owner->target_rnti,&o,out);
 }
-/* Equivalence must be defined over what the ORACLE can distinguish, and the oracle is the PUSCH
- * transport-block CRC. Comparing the whole decoded grant with memcmp partitions more finely than
- * that: `tpc`, `csi_request`, `srs_request`, `precoding_info` and the raw `antenna_ports_field` are
- * never consumed by nr_pusch_passive_decode(), so two layouts differing ONLY in where those bits
- * land decode bit-identically and can never be separated by any number of transport blocks.
+/* Compare the waveform and sample interpretation that the standalone CRC
+ * oracle can distinguish, not every decoded DCI metadata field.
  *
- * Measured live 2026-09-09: with the full-struct comparison, 101 classes and two of them
- * (class0 and class1) permanently tied at ~11 % pass rate, the leader alternating between them
- * every progress report. NR_HYP_SWEEP_WIN_RATIO demands 3x the runner-up, so the search could not
- * converge in ANY run length -- it was waiting for evidence that does not exist.
- *
- * Merging them is not a relaxation. It is refusing to draw a distinction the measurement cannot
- * support; the members remain individually recorded, and every field the decode actually reads is
- * still compared exactly. `dai` IS included: nr_pusch_passive_decode() reads it to seed the
- * UCI reservation search, so it changes decodability whenever that search is enabled. */
+ * This path rejects RV!=0 and decodes fresh transport blocks without HARQ
+ * combining. nr_ulsch_decoding identifies its storage by ULSCH_id, not the
+ * DCI HARQ PID; NDI does not affect a fresh decode. Online UCI recovery
+ * infers the footprint from CRC evidence and does not consume DAI.
+ * Consequently HARQ/NDI/DAI alternatives remain members of one decoder-
+ * equivalent class. A winning class does NOT resolve those metadata bits.
+ * If HARQ combining or DAI-based UCI is introduced, revise this contract.
+ * Later waveform differences still split classes without inventing evidence.
+ */
 static bool decode_equivalent(const nr_pdcch_blind_ul_result_t *x, const nr_pdcch_blind_ul_result_t *y)
 {
   return x->start_rb == y->start_rb && x->num_rb == y->num_rb
@@ -119,8 +133,7 @@ static bool decode_equivalent(const nr_pdcch_blind_ul_result_t *x, const nr_pdcc
       && x->frequency_hopping == y->frequency_hopping
       && x->data_scrambling_id == y->data_scrambling_id
       && x->ul_dmrs_scrambling_id == y->ul_dmrs_scrambling_id
-      && x->rv == y->rv && x->ndi == y->ndi && x->harq_pid == y->harq_pid
-      && x->dai == y->dai
+      && x->rv == y->rv
       && x->ulsch_indicator == y->ulsch_indicator
       && x->carrier_indicator == y->carrier_indicator
       && x->ul_sul_indicator == y->ul_sul_indicator;
@@ -133,10 +146,37 @@ static bool equivalent(const nr_hyp_t *a, const nr_hyp_t *b, const void *sample,
   if (!extract(a,sample,ctx,&ga) || !extract(b,sample,ctx,&gb)) return false;
   return decode_equivalent(&ga,&gb);
 }
-static bool plausible(const nr_hyp_t *h, const void *candidate, void *ctx)
+/* Initial merging requires equal decoded grants. Refinement instead needs
+ * a contradictory observation: two extraction failures do not distinguish
+ * layouts, and a representative can never split away from itself. */
+static bool distinguishes(const nr_hyp_t *a, const nr_hyp_t *b, const void *sample, void *ctx)
 {
+  if(a->len==b->len && !memcmp(a->bytes,b->bytes,a->len)) return false;
+  nr_pdcch_blind_ul_result_t ga,gb;
+  const bool va=extract(a,sample,ctx,&ga), vb=extract(b,sample,ctx,&gb);
+  return va!=vb || (va && !decode_equivalent(&ga,&gb));
+}
+static bool supported(const nr_hyp_t *h, void *context)
+{
+  const apply_ctx_t *ctx=context;
+  nr_pdcch_blind_ul_opts_t opts=ctx->opts;
+  if(ctx->interpretation) {
+    if(!nr_pdcch_ul_interp_sweep_apply(h,ctx->owner->tda_index,&opts)) return false;
+  } else nr_pdcch_ul_field_sweep_apply(h,&opts);
+  /* These modes are already refused by the delivery path. Refuse them
+   * before selection so they cannot await CRC feedback that never arrives.
+   * This is receiver scope, not evidence that the network mode is invalid. */
+  return !opts.transform_precoding && opts.dmrs_config_type==0 && opts.dmrs_max_length<=1;
+}
+static bool plausible(const nr_hyp_t *h, const void *candidate, void *context)
+{
+  if(!supported(h,context)) return false;
   nr_pdcch_blind_ul_result_t out;
-  return extract(h,candidate,ctx,&out);
+  /* The standalone TB oracle has no HARQ history. RV!=0 is unsupported,
+   * not a CRC trial; skip it before queueing rather than waiting for feedback
+   * that the decoder deliberately never emits. */
+  return extract(h,candidate,context,&out) && !out.carrier_indicator && !out.ul_sul_indicator
+      && out.rv==0;
 }
 static bool init_search(search_t *s, apply_ctx_t *ctx)
 {
@@ -147,7 +187,7 @@ static bool init_search(search_t *s, apply_ctx_t *ctx)
       : nr_pdcch_ul_field_sweep_generate(&ctx->opts,ctx->owner->target_length,s->raw,NR_HYP_SWEEP_MAX_RAW);
   const void *observations[UL_DISCOVERY_SAMPLES];
   for (int i=0;i<ctx->owner->nsamples;++i) observations[i]=&ctx->owner->samples[i];
-  int classes=s->n_raw>0 ? nr_hyp_sweep_init(&s->engine,s->raw,s->n_raw,NULL,NULL,
+  int classes=s->n_raw>0 ? nr_hyp_sweep_init(&s->engine,s->raw,s->n_raw,supported,ctx,
                                            equivalent,observations,ctx->owner->nsamples,ctx) : s->n_raw;
   if (classes<=0) {
     LOG_E(PHY,"UL discovery %s refused: raw=%d classes/error=%d; configuration unresolved\n",
@@ -166,64 +206,21 @@ static bool still_equivalent(search_t *s, const uint64_t *p, apply_ctx_t *ctx)
     if (c<0 || s->engine.classes[c].members==1) continue;
     const nr_hyp_t *rep=&s->engine.classes[c].hyp;
     if (rep->len==s->raw[i].len && !memcmp(rep->bytes,s->raw[i].bytes,rep->len)) continue;
-    if (!equivalent(rep,&s->raw[i],p,ctx)) return false;
+    if (distinguishes(rep,&s->raw[i],p,ctx)) return false;
   }
   return true;
 }
-/* Record this identity's own outcome inside the pooled context. */
-static void contrib_record_locked(ul_context_t *c, uint16_t rnti, bool ok)
-{
-  int at = -1;
-  for (int i = 0; i < c->n_contrib; ++i) if (c->contrib_rnti[i] == rnti) { at = i; break; }
-  if (at < 0) {
-    if (c->n_contrib >= NR_PDCCH_BLIND_MAX_UE) return;
-    at = c->n_contrib++;
-    c->contrib_rnti[at] = rnti;
-  }
-  c->contrib_trials[at]++;
-  c->contrib_passes[at] += ok ? 1 : 0;
-}
-
-/* A pooled winner is only trustworthy if every identity that contributed meaningful evidence also
- * decodes under it. One UE decoding while another does not is exactly the "same DCI length,
- * different RRC config" case, and the honest answer is to stay unresolved rather than impose the
- * busier UE's layout on both. Identities with too little evidence are ignored, never counted
- * against it -- absence of evidence is not disagreement. */
-static bool pooled_winner_corroborated_locked(const ul_context_t *c)
-{
-  int informative = 0;
-  for (int i = 0; i < c->n_contrib; ++i) {
-    if (c->contrib_trials[i] < NR_HYP_SWEEP_MIN_TRIALS / 4) continue;
-    informative++;
-    if (c->contrib_passes[i] * 100 < c->contrib_trials[i] * 2) return false; // <2 %: not decoding
-  }
-  return informative > 0;
-}
-
 bool nr_pdcch_ul_discovery_grant(const nr_pdcch_blind_ul_opts_t *fixed, uint16_t len,
                                  uint16_t rnti, uint64_t payload, nr_pdcch_blind_ul_result_t *out)
 {
   if (!fixed || !out || !rnti || !len || len>63) return false;
   pthread_mutex_lock(&lock);
-  /* Key the search on (DCI length, baseline geometry) rather than on the RNTI.
-   *
-   * The field-width LAYOUT is a property of the RRC configuration behind a DCI size, not of the
-   * identity carrying it -- two UEs whose format 0_1 is the same length were configured the same
-   * way. Keying on the RNTI cost this twice over: evidence could not be pooled across UEs, and a
-   * C-RNTI is reassigned on every re-attach, so a search restarted from zero long before it could
-   * finish. Measured 2026-09-09: convergence needs ~32,400 transport-block CRCs (roughly an hour),
-   * while four distinct RNTIs appeared inside a single 30-minute capture. Those two numbers cannot
-   * both be satisfied with per-RNTI state.
-   *
-   * It degrades safely rather than converging falsely: if two UEs at the same length really do
-   * differ, their pooled pass rate flattens and NR_HYP_SWEEP_WIN_RATIO simply never declares a
-   * winner. The oracle is unchanged. Known cost: mixing UEs makes it likelier that two different
-   * observed TDA indices meet in one context, which the existing guard answers by refusing the
-   * INTERPRETATION search -- the width search is unaffected. */
+  /* Equal DCI lengths do not prove equal dedicated configurations. Keep
+   * each identity's CRC evidence independent; no pooled-probe winner veto. */
   ul_context_t *c = NULL, *oldest = &contexts[0];
   for (int i=0; i<UL_DISCOVERY_CONTEXTS; ++i) {
-    if (contexts[i].target_length == len && contexts[i].nsamples > 0
-        && !memcmp(&contexts[i].baseline, fixed, sizeof(contexts[i].baseline))) {
+    if (contexts[i].target_rnti == rnti && contexts[i].target_length == len && contexts[i].nsamples > 0
+        && same_options(&contexts[i].baseline, fixed)) {
       c=&contexts[i];
       break;
     }
@@ -236,7 +233,7 @@ bool nr_pdcch_ul_discovery_grant(const nr_pdcch_blind_ul_opts_t *fixed, uint16_t
     c->baseline=*fixed;
     c->target_length=len;
   }
-  c->target_rnti=rnti; // most recent identity seen at this length; for logging/attribution only
+  c->target_rnti=rnti;
   c->touched = ++context_clock;
   /* FREEZE the sample set once the width search is armed. Measured 2026-09-09 on live traffic:
    * the ring kept admitting novel payloads, every payload that distinguished two previously-merged
@@ -271,38 +268,54 @@ bool nr_pdcch_ul_discovery_grant(const nr_pdcch_blind_ul_opts_t *fixed, uint16_t
   if(c->nsamples<UL_DISCOVERY_SAMPLES || c->widths.refused || c->interp.refused) goto done;
   apply_ctx_t ctx={.opts=c->baseline,.owner=c};
   if (!c->widths.initialized && !init_search(&c->widths,&ctx)) goto done;
-  /* Finite-sample equivalence is provisional, and that is now REPORTED rather than acted on.
-   * Discarding every class's evidence whenever one later payload split a class made convergence
-   * impossible under live traffic (see the freeze comment above). Two safeguards keep this honest:
-   * `late_splits` counts how often a later payload WOULD have split a class, so an unreliable
-   * classing is visible instead of silent; and a merged-but-wrong winner is self-limiting, because
-   * every grant it emits is scored by that grant's own PUSCH transport-block CRC.
-   * The check is sampled rather than run per grant -- it costs 2 extractions per raw hypothesis
-   * (800 here) and its value is statistical, not per-grant. */
+  /* Refine provisional classes without discarding measurements of their
+   * actual representatives. A new member starts with zero CRC evidence. */
   ++c->grants;
-  if ((c->grants % 256) == 0 && !still_equivalent(&c->widths,&payload,&ctx)) {
-    if ((++c->late_splits % 16) == 1)
-      LOG_W(PHY,"UL width classing: %lu/%lu sampled payloads split a class (rnti=0x%x); "
-                "equivalence is finite-sample evidence, the TB CRC remains the authority\n",
-            (unsigned long)c->late_splits,(unsigned long)(c->grants/256),c->target_rnti);
+  if ((c->grants % 64) == 0) {
+    search_t *s=&c->widths;
+    for(int raw=0;raw<s->n_raw;raw++) {
+      int cls=s->engine.class_of_raw[raw];
+      if(cls<0 || s->engine.classes[cls].members<=1 ||
+          !distinguishes(&s->engine.classes[cls].hyp,&s->raw[raw],&payload,&ctx)) continue;
+      if(s->engine.n_classes>=NR_HYP_SWEEP_MAX_CLASSES) {
+        s->refused=true;
+        LOG_E(PHY,"UL width refinement exceeds class capacity; unresolved\n");
+        goto done;
+      }
+      int fresh=s->engine.n_classes++;
+      s->engine.classes[cls].members--;
+      memset(&s->engine.classes[fresh],0,sizeof(s->engine.classes[fresh]));
+      s->engine.classes[fresh].hyp=s->raw[raw];
+      s->engine.classes[fresh].members=1;
+      s->engine.class_of_raw[raw]=fresh;
+      s->engine.order[fresh]=fresh;
+      s->engine.cursor=0; s->engine.winner=-1;
+      c->logged_width=false;
+      ++c->late_splits;
+    }
   }
   nr_hyp_t chosen;
   int wi=nr_hyp_sweep_next(&c->widths.engine,&payload,plausible,&ctx,&chosen);
   if(wi<0) goto done;
   nr_pdcch_ul_field_sweep_apply(&chosen,&ctx.opts);
   int ii=-1;
-  if(nr_hyp_sweep_winner(&c->widths.engine)>=0 && !pooled_winner_corroborated_locked(c)) {
-    /* The engine has a winner, but the identities that fed it do not agree. Equal DCI lengths do
-     * NOT prove equal RRC configurations, so imposing the busier UE's layout on the other one
-     * would be confidently wrong -- worse than not converging. Stay unresolved. */
-    if(!c->logged_width) {
-      LOG_W(PHY,"UL width winner NOT corroborated across %d pooled identities; equal DCI length "
-                "does not prove equal RRC config -- staying unresolved\n", c->n_contrib);
-      c->logged_width=true;
-    }
-    goto done;
+  double baseline_lo=0,baseline_hi=1;
+  if(nr_hyp_sweep_winner(&c->widths.engine)>=0)
+    nr_crc_interval(c->widths.engine.classes[wi].passes,c->widths.engine.classes[wi].trials,
+                    NR_HYP_SWEEP_MAX_CLASSES,&baseline_lo,&baseline_hi);
+  const bool baseline_validated=baseline_lo>=0.60;
+  if(baseline_validated && !c->logged_width) {
+    LOG_A(PHY,"UL width and baseline CRC-validated: class=%d rnti=0x%x lower=%.3f "
+              "equivalent_layouts=%d; HARQ/NDI/DAI metadata unresolved\n",
+          wi,rnti,baseline_lo,c->widths.engine.classes[wi].members);
+    c->logged_width=true;
   }
-  if(nr_hyp_sweep_winner(&c->widths.engine)>=0) {
+  /* Uncertain is not failed. Keep measuring the selected baseline while
+   * its interval includes the service target. Only a baseline whose UPPER
+   * bound falls below the target warrants a different interpretation search.
+   * Once started, keep that search separate from baseline CRC evidence. */
+  if(nr_hyp_sweep_winner(&c->widths.engine)>=0 &&
+     (c->interp.initialized || baseline_hi<0.60)) {
     if(!c->logged_width) { LOG_A(PHY,"UL width search converged: class=%d\n",wi); c->logged_width=true; }
     nr_pdcch_blind_ul_result_t probe;
     if(!nr_pdcch_blind_extract_01(payload,len,rnti,&ctx.opts,&probe)) goto done;
@@ -336,8 +349,11 @@ bool nr_pdcch_ul_discovery_grant(const nr_pdcch_blind_ul_opts_t *fixed, uint16_t
     ok=false;
   }
   if(ok) {
-    out->width_hyp_class=nr_hyp_sweep_winner(&c->widths.engine)<0?wi:-1;
-    out->interp_hyp_class=ii>=0 && nr_hyp_sweep_winner(&c->interp.engine)<0?ii:-1;
+    /* Preserve the exact producer-time owner even after convergence. A future
+     * winner or interpretation stage must never inherit this queued result. */
+    out->width_hyp_class=ii<0?wi:-1;
+    out->interp_hyp_class=ii;
+
     out->hyp_generation=c->generation;
   }
 done:
@@ -387,18 +403,28 @@ void nr_pdcch_ul_discovery_feedback(const nr_pdcch_blind_ul_result_t *g, bool ok
 {
   if (!g || !g->hyp_generation) return;
   pthread_mutex_lock(&lock);
+  const bool width_owner=g->width_hyp_class>=0, interp_owner=g->interp_hyp_class>=0;
+  if (width_owner==interp_owner || g->width_hyp_class < -1 || g->interp_hyp_class < -1) {
+    ++rejected_feedback;
+    LOG_W(PHY,"UL_FEEDBACK_REJECT reason=OWNER_NOT_UNIQUE generation=%lu rnti=0x%x\n",
+          (unsigned long)g->hyp_generation,g->rnti);
+    pthread_mutex_unlock(&lock);
+    return;
+  }
   for (int i=0; i<UL_DISCOVERY_CONTEXTS; ++i) {
     ul_context_t *c=&contexts[i];
-    /* Generation alone identifies the context: generation_counter increments on every reset, so
-     * no two live contexts share one. Matching the RNTI as well would now DISCARD valid evidence,
-     * because the context is shared by every UE at this DCI length and target_rnti only records
-     * whichever was seen most recently. */
+    /* Generation, identity, stage and class all belong to the decoded grant. */
     if (g->hyp_generation != c->generation) continue;
-    if (c->widths.initialized && g->width_hyp_class>=0)
-      nr_hyp_sweep_feed(&c->widths.engine,g->width_hyp_class,ok);
-    if (c->interp.initialized && g->interp_hyp_class>=0)
-      nr_hyp_sweep_feed(&c->interp.engine,g->interp_hyp_class,ok);
-    contrib_record_locked(c, g->rnti, ok);
+    search_t *owner=width_owner?&c->widths:&c->interp;
+    const int cls=width_owner?g->width_hyp_class:g->interp_hyp_class;
+    if (g->rnti!=c->target_rnti || g->dci_length!=c->target_length
+        || !owner->initialized || cls>=owner->engine.n_classes) {
+      ++rejected_feedback;
+      LOG_W(PHY,"UL_FEEDBACK_REJECT reason=IDENTITY_OR_CLASS_MISMATCH generation=%lu rnti=0x%x\n",
+            (unsigned long)g->hyp_generation,g->rnti);
+      break;
+    }
+    nr_hyp_sweep_feed(&owner->engine,cls,ok);
     if ((++c->feedbacks % 2000) == 0) {
       log_progress_locked(&c->widths,"width",c->target_rnti);
       log_progress_locked(&c->interp,"interp",c->target_rnti);
@@ -411,10 +437,12 @@ void nr_pdcch_ul_discovery_feedback(const nr_pdcch_blind_ul_result_t *g, bool ok
 nr_pdcch_ul_discovery_snapshot_t nr_pdcch_ul_discovery_snapshot(void)
 {
   pthread_mutex_lock(&lock);
-  nr_pdcch_ul_discovery_snapshot_t s={.generation=generation_counter};
+  nr_pdcch_ul_discovery_snapshot_t s={.generation=generation_counter,.rejected_feedback=rejected_feedback};
   for (int k=0; k<UL_DISCOVERY_CONTEXTS; ++k) {
     const ul_context_t *c=&contexts[k];
     s.raw_samples+=c->nsamples;
+    s.width_winners+=c->widths.initialized && nr_hyp_sweep_winner(&c->widths.engine)>=0;
+    s.interp_winners+=c->interp.initialized && nr_hyp_sweep_winner(&c->interp.engine)>=0;
     s.width_classes+=c->widths.engine.n_classes;
     s.interp_classes+=c->interp.engine.n_classes;
     for(int i=0;i<c->widths.engine.n_classes;++i) s.width_trials+=c->widths.engine.classes[i].trials;
