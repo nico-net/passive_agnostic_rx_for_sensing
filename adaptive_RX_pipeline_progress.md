@@ -2586,8 +2586,6 @@ Next highest-value action: unchanged -- P08 (branch-independent UL decode view) 
 Reviewer / accomplishment date if gate passed: n/a (no gate claimed).
 ```
 
-### Fix round 1 (2026-09-12, controller-ruled) — the guards own %-form blind spot
-
 ### Fix round 1 (2026-09-12, controller-ruled) — the guard's own %-form blind spot
 
 Review: Approved, 0 Critical / 0 Important, 4 Minor; only MINOR 1 actioned (2-4 judged acceptable
