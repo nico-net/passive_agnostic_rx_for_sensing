@@ -79,6 +79,11 @@ struct grid_dump_t {
   double   injected_sto_samples = 0.0, injected_cfo_hz = 0.0, injected_sfo_ppm = 0.0;
 
   std::vector<uint32_t> row_comb;
+  /* Not in the dump format: cpi_sto_tracker::process() gained a per-row illuminator argument
+   * (a67f55faec) after this tool was written. The dumps are single-illuminator DL captures, so
+   * every row is NR_ISAC_ILLUM_DL -- the value sensing_engine.cc initialises cpi_row_illum to.
+   * Filled after load; the on-disk format is deliberately unchanged. */
+  std::vector<uint8_t>  row_illum;
   std::vector<double>   row_time_slots;
   std::vector<icf_t>    h_cpi;
   std::vector<uint8_t>  occ_all;
@@ -115,6 +120,7 @@ bool load_grid_dump(const std::string& path, grid_dump_t& g)
 
   g.row_comb.resize(g.cpi_rows);
   f.read(reinterpret_cast<char*>(g.row_comb.data()), g.cpi_rows * sizeof(uint32_t));
+  g.row_illum.assign(g.cpi_rows, (uint8_t)NR_ISAC_ILLUM_DL);
   g.row_time_slots.resize(g.cpi_rows);
   f.read(reinterpret_cast<char*>(g.row_time_slots.data()), g.cpi_rows * sizeof(double));
 
@@ -201,7 +207,7 @@ int main(int argc, char** argv)
 
   cpi_sto_tracker sto;
   sto_fit_result_t sto_fit = sto.process(g.h_cpi.data(), g.occ_all.data(), g.cpi_rows, g.nof_subc, g.row_comb.data(),
-                                          g.row_time_slots.data(), carrier, /*sfo_ppm_hint=*/0.0,
+                                          g.row_illum.data(), g.row_time_slots.data(), carrier, /*sfo_ppm_hint=*/0.0,
                                           /*apply_corr=*/true, g.nominal_los_range_m);
   cpi_cfo_tracker cfo_tracker;
   cfo_fit_result_t cfo_fit = cfo_tracker.process(g.h_cpi.data(), g.occ_all.data(), g.nof_subc, sto.last_row_estimates());
@@ -234,7 +240,7 @@ int main(int argc, char** argv)
     // should collapse toward 0 if the correction actually worked, not just "estimated something".
     cpi_sto_tracker  sto2;
     sto_fit_result_t sto_fit2 = sto2.process(g.h_cpi.data(), g.occ_all.data(), g.cpi_rows, g.nof_subc,
-                                              g.row_comb.data(), g.row_time_slots.data(), carrier, 0.0, true,
+                                              g.row_comb.data(), g.row_illum.data(), g.row_time_slots.data(), carrier, 0.0, true,
                                               g.nominal_los_range_m);
     cpi_cfo_tracker  cfo_tracker2;
     cfo_fit_result_t cfo_fit2 =

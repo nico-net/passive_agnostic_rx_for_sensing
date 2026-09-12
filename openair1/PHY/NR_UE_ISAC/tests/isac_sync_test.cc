@@ -122,6 +122,12 @@ struct synthetic_cpi_t {
   std::vector<uint8_t> occ_all;
   std::vector<uint32_t> row_comb;
   std::vector<double>  row_time_slots; // in slots, matching sensing_engine's cpi_row_time convention
+  /* Added when cpi_sto_tracker/cpi_sfo_tracker::process() grew a per-row illuminator
+   * argument (a67f55faec, "LOS per illuminator") without these tests being updated, which
+   * left the whole NR_UE_ISAC test target failing to COMPILE. This synthetic grid has ONE
+   * illuminator, so every row carries NR_ISAC_ILLUM_DL -- the value sensing_engine.cc
+   * initialises cpi_row_illum to before any per-row override. */
+  std::vector<uint8_t> row_illum;
   uint32_t              nof_subc = 0;
   double                slot_dur_s = 0.0;
   double               bin_to_delay_s = 0.0;
@@ -157,6 +163,7 @@ synthetic_cpi_t build_synthetic_cpi(uint32_t cpi_rows,
   s.occ_all.assign((size_t)cpi_rows * s.nof_subc, 1); // dense: every subcarrier occupied every row
   s.row_comb.assign(cpi_rows, 1);
   s.row_time_slots.resize(cpi_rows);
+  s.row_illum.assign(cpi_rows, (uint8_t)NR_ISAC_ILLUM_DL);
 
   const double sfo_frac = sfo_ppm * 1.0e-6;
 
@@ -241,7 +248,7 @@ TEST(isac_sync, sto_sweep_recovers_injected_subbin_offset)
 
     cpi_sto_tracker tracker;
     sto_fit_result_t fit = tracker.process(s.h_cpi.data(), s.occ_all.data(), (uint32_t)s.row_time_slots.size(),
-                                           s.nof_subc, s.row_comb.data(), s.row_time_slots.data(), carrier);
+                                           s.nof_subc, s.row_comb.data(), s.row_illum.data(), s.row_time_slots.data(), carrier);
 
     EXPECT_TRUE(fit.is_constant) << "sto_ns=" << sto_ns;
     EXPECT_GT(fit.mean_frac_bin, 0.0) << "sto_ns=" << sto_ns << " (sign check)";
@@ -251,7 +258,7 @@ TEST(isac_sync, sto_sweep_recovers_injected_subbin_offset)
     // injected offset (a strong majority of it removed), even if not exactly zero.
     cpi_sto_tracker tracker2;
     sto_fit_result_t fit2 = tracker2.process(s.h_cpi.data(), s.occ_all.data(), (uint32_t)s.row_time_slots.size(),
-                                             s.nof_subc, s.row_comb.data(), s.row_time_slots.data(), carrier);
+                                             s.nof_subc, s.row_comb.data(), s.row_illum.data(), s.row_time_slots.data(), carrier);
     EXPECT_LT(std::abs(fit2.mean_frac_bin), 0.5 * expected_frac_bin)
         << "sto_ns=" << sto_ns << " (post-correction residual should be well under half the original offset)";
   }
@@ -281,7 +288,7 @@ TEST(isac_sync, sto_walking_tracker_survives_drift_beyond_old_fixed_window)
 
   cpi_sto_tracker  sto;
   sto_fit_result_t fit = sto.process(s.h_cpi.data(), s.occ_all.data(), cpi_rows, s.nof_subc, s.row_comb.data(),
-                                     s.row_time_slots.data(), carrier);
+                                     s.row_illum.data(), s.row_time_slots.data(), carrier);
 
   // Clean synthetic signal, smooth drift (~0.018 bins/row at this ppm/slot_dur) -- comfortably
   // inside WALK_HALFWIN_BINS every step, so the walker should lock almost every row and never fade.
@@ -334,7 +341,7 @@ TEST(isac_sync, sto_flywheel_engages_during_fade_and_relocks_after)
 
   cpi_sto_tracker  sto;
   sto_fit_result_t fit = sto.process(s.h_cpi.data(), s.occ_all.data(), cpi_rows, s.nof_subc, s.row_comb.data(),
-                                     s.row_time_slots.data(), carrier, /*sfo_ppm_hint=*/sfo_ppm);
+                                     s.row_illum.data(), s.row_time_slots.data(), carrier, /*sfo_ppm_hint=*/sfo_ppm);
 
   EXPECT_GE(fit.n_flywheel, fade_len / 2)
       << "expected most of the " << fade_len << "-row fade to be flagged flywheeling, got " << fit.n_flywheel;
@@ -392,7 +399,7 @@ TEST(isac_sync, cfo_sweep_recovers_injected_offset)
 
     cpi_sto_tracker sto;
     sto.process(s.h_cpi.data(), s.occ_all.data(), (uint32_t)s.row_time_slots.size(), s.nof_subc, s.row_comb.data(),
-                s.row_time_slots.data(), carrier);
+                s.row_illum.data(), s.row_time_slots.data(), carrier);
 
     cpi_cfo_tracker cfo_tracker;
     cfo_fit_result_t fit =
@@ -403,7 +410,7 @@ TEST(isac_sync, cfo_sweep_recovers_injected_offset)
     // Re-run on the corrected grid: residual CFO should collapse toward 0.
     cpi_sto_tracker sto2;
     sto2.process(s.h_cpi.data(), s.occ_all.data(), (uint32_t)s.row_time_slots.size(), s.nof_subc, s.row_comb.data(),
-                 s.row_time_slots.data(), carrier);
+                 s.row_illum.data(), s.row_time_slots.data(), carrier);
     cpi_cfo_tracker cfo_tracker2;
     cfo_fit_result_t fit2 =
         cfo_tracker2.process(s.h_cpi.data(), s.occ_all.data(), s.nof_subc, sto2.last_row_estimates());
@@ -517,7 +524,7 @@ TEST(isac_sync, combined_impairment_and_target_survive_correction)
       build_synthetic_cpi(cpi_rows, sto_s, cfo_hz, sfo_ppm, target_delay_s, target_doppler_hz, target_gain);
 
   cpi_sto_tracker sto;
-  sto.process(s.h_cpi.data(), s.occ_all.data(), cpi_rows, s.nof_subc, s.row_comb.data(), s.row_time_slots.data(),
+  sto.process(s.h_cpi.data(), s.occ_all.data(), cpi_rows, s.nof_subc, s.row_comb.data(), s.row_illum.data(), s.row_time_slots.data(),
               carrier);
   cpi_cfo_tracker cfo_tracker;
   cfo_tracker.process(s.h_cpi.data(), s.occ_all.data(), s.nof_subc, sto.last_row_estimates());
@@ -598,7 +605,7 @@ TEST(isac_sync, high_sfo_stress_case_smear_without_correction_absent_with_correc
   // "With correction": run the real Phase 1/3 trackers in place (same order sensing_engine.cc uses).
   cpi_sto_tracker sto;
   sto.process(s_corrected.h_cpi.data(), s_corrected.occ_all.data(), cpi_rows, s_corrected.nof_subc,
-              s_corrected.row_comb.data(), s_corrected.row_time_slots.data(), carrier);
+              s_corrected.row_comb.data(), s_corrected.row_illum.data(), s_corrected.row_time_slots.data(), carrier);
   cpi_sfo_tracker sfo;
   sfo_fit_result_t fit = sfo.process(s_corrected.h_cpi.data(), s_corrected.occ_all.data(), cpi_rows,
                                      s_corrected.nof_subc, s_corrected.row_comb.data(),

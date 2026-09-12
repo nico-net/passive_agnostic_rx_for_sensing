@@ -29,6 +29,7 @@
  * power instead of being erased by the L1 penalty.
  */
 
+#include <algorithm> // std::nth_element (line ~151); was missing, broke the test_sparse_doppler build
 #include <cmath>
 #include <complex>
 #include <random>
