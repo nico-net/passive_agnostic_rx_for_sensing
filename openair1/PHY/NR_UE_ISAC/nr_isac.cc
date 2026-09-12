@@ -203,6 +203,7 @@ extern "C" void nr_isac_init(void)
   char *p_source=nullptr,*p_sources=nullptr,*p_durations=nullptr,*p_array=nullptr,*p_broadside=nullptr;
   char *p_array_calibration=nullptr;
   char *p_rx_branches=nullptr,*p_rx_branch_phys_map=nullptr;
+  char *p_channel_calibration=nullptr;
   char *p_out=nullptr,*p_rx_id=nullptr,*p_illum=nullptr,*p_report=nullptr,*p_endpoint=nullptr;
   paramdef_t params[] = {
     integer("enable","enable native passive sensing",PARAMFLAG_BOOL,&p_enable,0),
@@ -265,6 +266,9 @@ extern "C" void nr_isac_init(void)
     text("rx_branches","active receiver branch ids, e.g. \"0,1,2,3\"",&p_rx_branches,"0"),
     text("rx_branch_phys_map","branch:physical channel map, e.g. \"0:0,1:1,2:2,3:3\"",
          &p_rx_branch_phys_map,"0:0"),
+    text("rx_channel_calibration",
+         "per-branch receive-chain correction tuples branch,gain,delay_ns (no phase; applies with AoA off)",
+         &p_channel_calibration,""),
   };
   config_get(config_get_if(),params,sizeof(params)/sizeof(params[0]),"sensing");
   // P14 Stage A: the AoA environment override is gone; a stale launcher must be told, not ignored.
@@ -308,6 +312,16 @@ extern "C" void nr_isac_init(void)
   pipeline.aoa_quality.maximum_phase_fit_residual_rms_rad=p_aoa_max_phase;
   pipeline.aoa_quality.maximum_azimuth_stddev_deg=p_aoa_max_az_sigma;
   pipeline.aoa_quality.maximum_elevation_stddev_deg=p_aoa_max_el_sigma;
+  // P14calib (AoA-removal audit Stage B item 4): parsed OUTSIDE the aoa_enable block below, which
+  // is the whole point -- gain and fixed group delay are properties of a receive CHAIN and are
+  // wrong to condition on whether anything estimates a bearing. Failure is fatal in the same way
+  // every other [sensing] parse failure here is: nothing applied, sensing off, never partially on.
+  if (!parse_channel_calibration(p_channel_calibration,&pipeline.channel_calibration)) {
+    LOG_E(PHY,"SENSING: rx_channel_calibration must contain one to four unique branch,gain,delay_ns "
+              "tuples (three fields -- rx_array_calibration's four-field form is a different key); "
+              "sensing disabled\n");
+    return;
+  }
   if (pipeline.aoa_enable) {
     // P13b: refuse aoa_enable together with several receive branches HERE, at the first point the
     // combination is knowable (the branch set is parsed above, aoa_enable is decided on the line
@@ -396,9 +410,9 @@ extern "C" void nr_isac_init(void)
     return;
   }
   enabled.store(true,std::memory_order_release);
-  LOG_I(PHY,"SENSING: native Python-parity pipeline enabled, num_ues=%u sources=0x%x separate_DL_UL=1 AoA=%d UL-AoA=%d array_calibration=%d engines=%u\n",
+  LOG_I(PHY,"SENSING: native Python-parity pipeline enabled, num_ues=%u sources=0x%x separate_DL_UL=1 AoA=%d UL-AoA=%d array_calibration=%d channel_calibration=%d engines=%u\n",
         pipeline.num_ues,pipeline.sources_mask,(int)pipeline.aoa_enable,(int)pipeline.aoa_ul_enable,
-        pipeline.array_calibration.configured,engines_built);
+        pipeline.array_calibration.configured,pipeline.channel_calibration.configured,engines_built);
 }
 
 extern "C" void nr_isac_start(void)
@@ -508,5 +522,16 @@ extern "C" void nr_isac_submit_cfr_multi_branch(uint32_t slot,float fraction,int
   antennas=std::max(1u,antennas);stride=std::max(stride,n);static thread_local std::vector<std::complex<float>> packed;
   const size_t total=(size_t)antennas*n;if(packed.size()<total)packed.resize(total);
   for(uint32_t a=0;a<antennas;++a){const float* input=h+(size_t)2*a*stride;for(uint32_t i=0;i<n;++i)packed[(size_t)a*n+i]={input[2*i],input[2*i+1]};}
+  // P14calib: the ONE place the kept (gain + fixed-delay) calibration is applied. This function is
+  // the choke point EVERY CFR producer already routes through -- nr_isac_submit_cfr{,_at,_multi}
+  // are one-line wrappers for it -- so wiring it here covers all of them at once instead of five
+  // times over, and it is downstream of the routing decision, so `index` is the branch the row is
+  // accounted to (for an untagged legacy submission, the lowest active branch it is attributed to)
+  // rather than a second, possibly disagreeing, notion of identity. Left as its own pass over the
+  // packed buffer rather than folded into the loop above: with no calibration configured -- the
+  // default -- channel_calibration_active() is false and the pack loop above is untouched, byte for
+  // byte, which is the bit-identity requirement.
+  apply_channel_calibration(packed.data(),antennas,n,k,carrier->nof_prb*12u,
+                            (double)carrier->scs_hz,pipeline.channel_calibration,index);
   engines[index]->submit(slot,fraction,static_cast<nr_isac_source_t>(source),*carrier,packed.data(),antennas,k,l,n,noise,branch);
 }

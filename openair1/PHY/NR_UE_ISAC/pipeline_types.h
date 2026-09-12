@@ -6,7 +6,9 @@
 
 #include <array>
 #include <complex>
+#include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <limits>
 #include <optional>
@@ -239,6 +241,148 @@ struct ArrayCalibration {
   std::array<double, 4> delay_s{};
 };
 
+/** Fixed receive-CHAIN correction for ONE independent receive branch (adaptive_RX_pipeline.md
+ * P14calib, AoA-removal audit Stage B item 4).  Indexed by BRANCH ID, not by array element.
+ *
+ * This is the AoA-free half of the ArrayCalibration split above.  ArrayCalibration stays exactly
+ * what it always was -- the co-located four-element array's steering/manifold correction, carrying
+ * phase_rad, gated behind aoa_enable, applied only by aoa.cc.  ChannelCalibration carries what a
+ * receive CHAIN has regardless of whether anything estimates a bearing: its gain imbalance and its
+ * fixed (cable/filter/front-end) group delay.  It is parsed unconditionally and applies in BOTH
+ * deployment modes.
+ *
+ * WHY NO PHASE FIELD (the operator's own reasoning, recorded so it is not re-litigated):
+ * four physically separated branches are never coherently combined and no bearing is estimated from
+ * them, so an inter-channel phase offset has nothing to corrupt -- it is a constant multiplier on
+ * one branch's CFR, and every quantity that branch measures (delay profile, Doppler, magnitude) is
+ * invariant to it.  A fixed DELAY is not: it moves that branch's whole range axis.
+ *
+ * WHY DELAY STILL MATTERS EVEN THOUGH IT PARTLY CANCELS: for UL DTD/DFS the measurement is
+ * differential WITHIN one receiver, DTD = tau_target - tau_direct, and a per-RX constant tau_cal
+ * appears identically in both terms and cancels exactly.  So this calibration buys a single
+ * receiver's own differential measurements NOTHING.  Its value is ABSOLUTE range consistency ACROSS
+ * receivers: multi-static fusion (P17+) intersects one receiver's ellipse with another's, and an
+ * uncalibrated per-chain delay offset biases that receiver's ellipse by c*tau_cal with no
+ * within-receiver observable that can reveal it.  Calibrate it, or the fusion geometry is wrong by
+ * a constant nobody can see.
+ *
+ * WHAT IS DELIBERATELY NOT HERE.  Two things the operator's "keep" list names already have owners,
+ * and duplicating them would create a second source of truth:
+ *   - CHANNEL MAPPING is P03's rx_branch_phys_map (nr_rx_branch_t::physical_channel), parsed and
+ *     validated by nr_rx_branch_set_parse().  ArrayCalibration's physical_to_observed exists only
+ *     because a co-located array has no branch set to carry it.
+ *   - PHYSICAL RX POSITION is surveyed receiver geometry (rx_pos_*, P01's geometry_four_rx.json),
+ *     a different concept entirely from receive-chain calibration.
+ *
+ * The complex correction applied to branch b at baseband offset f is
+ *
+ *   gain[b] * exp(+j * 2*pi*f * fixed_delay_s[b])
+ *
+ * -- the SAME form and the SAME sign as ArrayCalibration's, with phase_rad dropped, so a range
+ * measured in AoA mode and one measured in independent-branch mode use one convention.  Both stored
+ * values are what you MULTIPLY BY, not what you measured: a chain that runs 2x hot takes gain=0.5,
+ * and a chain whose cable DELAYS by tau takes fixed_delay_s=+tau (a physical delay is
+ * exp(-j*2*pi*f*tau), so multiplying by exp(+j*2*pi*f*tau) removes it).
+ */
+struct ChannelCalibration {
+  bool configured = false;
+  std::array<double, NR_RX_BRANCH_MAX> gain{1.0, 1.0, 1.0, 1.0};
+  std::array<double, NR_RX_BRANCH_MAX> fixed_delay_s{};
+};
+
+/* Parses the [sensing] rx_channel_calibration value: one to NR_RX_BRANCH_MAX semicolon-separated
+ * branch,gain,delay_ns tuples, e.g. "0,1.0,0;1,0.92,3.4".  Three fields, deliberately NOT four --
+ * it cannot be confused with rx_array_calibration's observed,gain,phase_rad,delay_ns, and a value
+ * pasted from the wrong key is rejected rather than silently reinterpreted.
+ *
+ * An empty/absent value yields the default (configured == false), which is the no-correction path.
+ * A branch absent from a non-empty list keeps gain 1.0 / delay 0 -- naming only the branches you
+ * actually measured is the normal case, not an error.  Returns false (nothing written) on a
+ * malformed tuple, a duplicate or out-of-range branch id, a non-finite value, or gain <= 0. */
+inline bool parse_channel_calibration(const char* spec, ChannelCalibration* out)
+{
+  if (!out) return false;
+  if (!spec || !*spec) { *out = ChannelCalibration{}; return true; }
+  ChannelCalibration parsed;
+  std::array<uint8_t, NR_RX_BRANCH_MAX> seen{};
+  size_t tuples = 0;
+  const std::string text(spec);
+  size_t begin = 0;
+  while (begin <= text.size()) {
+    const size_t end = std::min(text.find(';', begin), text.size());
+    const std::string token = text.substr(begin, end - begin);
+    begin = end + 1;
+    if (tuples >= NR_RX_BRANCH_MAX) return false;
+    unsigned branch = 0; double gain = 0.0, delay_ns = 0.0; int consumed = 0;
+    if (std::sscanf(token.c_str(), " %u , %lf , %lf %n", &branch, &gain, &delay_ns, &consumed) != 3
+        || token.find_first_not_of(" \t", static_cast<size_t>(consumed)) != std::string::npos
+        || branch >= NR_RX_BRANCH_MAX || seen[branch]++
+        || !(std::isfinite(gain) && gain > 0.0) || !std::isfinite(delay_ns))
+      return false;
+    parsed.gain[branch] = gain;
+    parsed.fixed_delay_s[branch] = delay_ns * 1e-9;
+    ++tuples;
+  }
+  if (!tuples) return false;
+  parsed.configured = true;
+  *out = parsed;
+  return true;
+}
+
+/* True when branch `branch` has a correction that is not the identity, i.e. when applying it can
+ * change a single sample.  Everything that would make the correction meaningless or unsafe -- not
+ * configured, a branch id outside the array, a non-finite or non-positive coefficient -- answers
+ * false here, at the ONE point of use, rather than throwing from somewhere far away.  A default
+ * (unset) calibration is therefore bit-identical to no calibration by construction, not by test. */
+inline bool channel_calibration_active(const ChannelCalibration& calibration, int branch)
+{
+  if (!calibration.configured || branch < 0 || branch >= NR_RX_BRANCH_MAX) return false;
+  const double gain = calibration.gain[branch], delay = calibration.fixed_delay_s[branch];
+  if (!(std::isfinite(gain) && gain > 0.0) || !std::isfinite(delay)) return false;
+  return gain != 1.0 || delay != 0.0;
+}
+
+/* The correction factor itself, kept as one expression so aoa.cc's convention and this one cannot
+ * drift apart silently -- tests/python_parity_test.cc pins them equal on a shared vector. */
+inline std::complex<double> channel_calibration_factor(const ChannelCalibration& calibration,
+                                                       int branch, double offset_hz)
+{
+  return std::polar(calibration.gain[branch],
+                    2.0 * PI * offset_hz * calibration.fixed_delay_s[branch]);
+}
+
+/* In-place correction of ONE packed CFR submission (antenna-major, nof_re resource elements per
+ * antenna plane, k_abs[i] the CRB/Point-A carrier-grid subcarrier of element i).
+ *
+ * The frequency reference is the CARRIER centre, (k - (nof_subcarriers-1)/2) * scs, where aoa.cc
+ * uses its WINDOW centre.  The two agree whenever the window spans the carrier, and where they do
+ * not the difference is a delay-dependent CONSTANT phase common to every element of the plane --
+ * which is precisely the quantity an independent branch cannot and need not observe (see the
+ * struct comment).  The carrier centre is used here because a submission is a sparse RE list with
+ * no window of its own, and it is stable across submissions where a per-submission centre is not.
+ *
+ * In AoA mode (four antenna planes on ONE branch) the branch-level factor is common-mode across the
+ * array and therefore immaterial to any bearing; per-ELEMENT correction there is
+ * rx_array_calibration's job, and stays so. */
+inline void apply_channel_calibration(std::complex<float>* values, uint32_t antennas,
+                                      uint32_t nof_re, const uint32_t* k_abs,
+                                      uint32_t nof_subcarriers, double scs_hz,
+                                      const ChannelCalibration& calibration, int branch)
+{
+  if (!values || !k_abs || !nof_re || !antennas || !channel_calibration_active(calibration, branch))
+    return;
+  const double centre = 0.5 * (static_cast<double>(nof_subcarriers) - 1.0);
+  for (uint32_t i = 0; i < nof_re; ++i) {
+    const std::complex<double> factor =
+        channel_calibration_factor(calibration, branch, (k_abs[i] - centre) * scs_hz);
+    for (uint32_t a = 0; a < antennas; ++a) {
+      const size_t at = static_cast<size_t>(a) * nof_re + i;
+      values[at] = static_cast<std::complex<float>>(
+          static_cast<std::complex<double>>(values[at]) * factor);
+    }
+  }
+}
+
 /** Admission limits for using an otherwise finite AoA measurement in tracking. */
 struct AoaQualityPolicy {
   double maximum_relative_manifold_residual_energy = 0.25;
@@ -286,6 +430,7 @@ struct PipelineConfig {
   bool aoa_ul_enable = false;
   ArrayGeometry array;
   ArrayCalibration array_calibration;
+  ChannelCalibration channel_calibration;
   AoaQualityPolicy aoa_quality;
   Vec3 tx_position;
   Vec3 rx_position;

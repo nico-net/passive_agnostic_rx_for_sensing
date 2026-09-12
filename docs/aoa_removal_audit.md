@@ -161,6 +161,9 @@ Traced end to end rather than re-asserted:
 | `tests/nr-cu-nrppa/nr-cu-nrppa.c` | NRPPa "dl_aoa" positioning, upstream OAI | out of scope | - |
 
 ### Row 10 - Array calibration structure (refactor, not delete)
+**UPDATE (P14calib, 2026-09-12): this row is now split - see Stage B item 4 for what landed.** The
+description below is the pre-split state and is kept for context.
+
 `nr_isac.cc:225-226,:295-297` `rx_array_calibration` = four `observed,gain,phase_rad,delay_ns`
 tuples, parsed by `parse_array_calibration()`, stored in `PipelineConfig::array_calibration`,
 echoed in the startup log (`:321`). `pipeline_types.h:231` documents that values are relative to
@@ -259,9 +262,45 @@ no consumer that is not also part of the schema version P16 owns.
    still fanned out from one shared PDCCH monitor (**P06's open core**); single-branch/AoA mode
    retains the shared-X-across-antennas form by design (**Stage C item 4**); and nothing here has
    live multi-branch evidence (X410 unreachable).
-4. Row 10 - lift `rx_array_calibration` out from behind `aoa_enable` into per-branch chain
-   metadata. REFACTOR. Must precede any removal of the `rx_array*` keys, or the calibration is
-   lost together with the geometry.
+4. **DONE (P14calib, 2026-09-12), PARTLY - the structure and the application point are in, the
+   numerical effect is unvalidated.** Row 10 - lift the KEPT half of `rx_array_calibration` out
+   from behind `aoa_enable`. Executed as a SPLIT, not a move, because the two halves are different
+   physical quantities:
+   - `ArrayCalibration` (`pipeline_types.h`) is UNCHANGED and still carries `phase_rad`. It stays
+     the co-located array's steering/manifold correction, still parsed only inside
+     `if (pipeline.aoa_enable)`, still applied only by `aoa.cc`'s `apply_array_calibration()`. That
+     is the part this audit removes for independent-branch mode; it is not deleted, because AoA
+     itself is not being deleted before Stage C.
+   - New `ChannelCalibration` + `[sensing] rx_channel_calibration` (`branch,gain,delay_ns` tuples,
+     THREE fields so the four-field array key cannot be pasted into it by accident) is parsed
+     UNCONDITIONALLY, indexed by BRANCH ID, and carries NO phase field.
+   - Applied in `nr_isac_submit_cfr_multi_branch()`, the one choke point every CFR producer already
+     routes through (`nr_isac_submit_cfr{,_at,_multi}` are one-line wrappers for it), downstream of
+     the P13 routing decision so the branch index is the one the row is actually accounted to. All
+     of P10a-c's branch-tagged producers and all five legacy producers are covered by that single
+     site; none of them was edited.
+   - Two items on the operator's "keep" list were deliberately NOT duplicated into the new struct
+     because they already have owners: CHANNEL MAPPING is P03's `rx_branch_phys_map`
+     (`nr_rx_branch_t::physical_channel`), and PHYSICAL RX POSITION is surveyed geometry
+     (`rx_pos_*`, P01's `geometry_four_rx.json`) - a different concept from chain calibration.
+   - PHYSICS, recorded here and in the struct comment so it is not re-litigated: for independent
+     branches nothing is coherently combined and no bearing is estimated, so an inter-channel PHASE
+     offset is a constant multiplier with nothing to corrupt, while a fixed DELAY moves that
+     branch's whole range axis. And for UL DTD/DFS a per-RX constant `tau_cal` cancels exactly in
+     `DTD = tau_target - tau_direct` - so this calibration buys a single receiver's own differential
+     measurements NOTHING. Its value is ABSOLUTE range consistency ACROSS receivers for multi-static
+     fusion (P17+), where an uncalibrated per-chain delay biases that receiver's ellipse by
+     `c*tau_cal` with no within-receiver observable able to reveal it.
+   - Sign convention, pinned by test against `aoa.cc` on a shared vector: both stored values are
+     what you MULTIPLY BY. `gain` is the reciprocal of the chain's measured excess gain;
+     `fixed_delay_s` is the chain's PHYSICAL excess delay, applied as `exp(+j*2*pi*f*tau)` which
+     removes the `exp(-j*2*pi*f*tau)` the cable imposed. Identical form and sign to
+     `apply_array_calibration()` with `phase_rad` dropped.
+   - NOT done, named follow-up: the new block is not echoed in the report JSON (`report_writer.cc`
+     echoes `array_calibration` only) - additive schema change, P16 owns schema versioning. And no
+     fixture can show the correction IMPROVES anything: offline evidence covers the convention, the
+     parser and the default-off bit-identity only; the numerical benefit needs a radio (X410
+     unreachable since 2026-09-11).
 5. Row 9's report fields - P16 schema version, angular values OMITTED rather than zeroed.
    Requires the `tests/passive_rx/ue.passive*.conf` set to stop asserting `aoa_enable` first.
    `monitor.html` already tolerates a null bearing, so no consumer change is forced.

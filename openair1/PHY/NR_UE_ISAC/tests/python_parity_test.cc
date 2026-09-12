@@ -1209,6 +1209,131 @@ void test_ssb_k_abs()
   require(k[0] == 0xDEADBEEFu, "a non-positive carrier bandwidth must write nothing");
 }
 
+/** P14calib: the per-branch receive-chain calibration parser (rx_channel_calibration). */
+void test_channel_calibration_parse()
+{
+  ChannelCalibration parsed;
+  require(parse_channel_calibration(nullptr,&parsed) && !parsed.configured,
+          "an absent rx_channel_calibration must yield the unconfigured no-correction default");
+  require(parse_channel_calibration("",&parsed) && !parsed.configured,
+          "an empty rx_channel_calibration must yield the unconfigured no-correction default");
+
+  require(parse_channel_calibration(" 0 , 1.0 , 0 ; 2 , 0.5 , -3.25 ",&parsed),
+          "a well-formed two-branch calibration must parse");
+  require(parsed.configured,"a parsed calibration must be marked configured");
+  require(parsed.gain[0]==1.0 && parsed.fixed_delay_s[0]==0.0,
+          "branch 0 must round-trip its own gain/delay");
+  require(std::abs(parsed.gain[2]-0.5)<1e-12 && std::abs(parsed.fixed_delay_s[2]+3.25e-9)<1e-21,
+          "delay_ns must round-trip as seconds on the branch it names, sign preserved");
+  require(parsed.gain[1]==1.0 && parsed.fixed_delay_s[1]==0.0 && parsed.gain[3]==1.0
+              && parsed.fixed_delay_s[3]==0.0,
+          "a branch absent from the list must keep the identity correction, not zero gain");
+  /* The whole point of the split: a branch left at the identity is inert even though the struct
+     as a whole is configured. Without this the "default is bit-identical" claim would only hold
+     for an absent key, not for a partially-specified one. */
+  require(!channel_calibration_active(parsed,1) && channel_calibration_active(parsed,2),
+          "only a branch with a non-identity coefficient may be active");
+  require(!channel_calibration_active(parsed,-1) && !channel_calibration_active(parsed,4)
+              && !channel_calibration_active(ChannelCalibration{},0),
+          "an out-of-range branch or an unconfigured calibration must never be active");
+
+  ChannelCalibration guard;
+  const char* rejected[] = {
+    "0,1.0,0;0,0.9,1",        /* duplicate branch id */
+    "4,1.0,0",                /* branch id out of range */
+    "0,1.0,0,0",              /* rx_array_calibration's FOUR-field form pasted into this key */
+    "0,0,0",                  /* non-positive gain */
+    "0,-1.0,0",               /* negative gain */
+    "0,1.0",                  /* short tuple */
+    "0,1.0,0;",               /* trailing separator, i.e. an empty tuple */
+    "x,1.0,0",                /* malformed branch id */
+    "0,nan,0",                /* non-finite gain */
+    "0,1.0,inf",              /* non-finite delay */
+    "0,1.0,0 junk",           /* trailing garbage */
+    "0,1,0;1,1,0;2,1,0;3,1,0;0,1,0", /* more tuples than branches */
+  };
+  for (const char* spec : rejected) {
+    ChannelCalibration out = guard;
+    require(!parse_channel_calibration(spec,&out),
+            "a malformed rx_channel_calibration tuple must be rejected");
+    require(!out.configured,"a rejected calibration must leave the destination untouched");
+  }
+}
+
+/** P14calib: the kept (gain + fixed-delay) correction must agree NUMERICALLY with the AoA
+ *  steering correction it was split out of. Both paths can measure range from the same hardware;
+ *  if their sign or frequency-reference conventions disagreed, the two modes would report ranges
+ *  offset from each other by 2*c*tau and nothing in either path would reveal it. Pinned on a
+ *  shared vector rather than argued in a comment. */
+void test_channel_calibration_matches_aoa_convention()
+{
+  constexpr uint32_t subcarriers = 9;
+  const std::array<double,4> gain{1.0,1.3,0.7,0.95};
+  const std::array<double,4> delay_s{0.0,4.5e-9,-2.75e-9,1.25e-9};
+
+  CfrWindow window; window.antennas=4; window.rows=1; window.subcarriers=subcarriers;
+  window.scs_hz=30000; window.fc_hz=3.6e9;
+  window.values.resize((size_t)4*subcarriers);
+  window.observed.assign(subcarriers,1);
+  window.row_time_slots={0}; window.row_slot_idx={0}; window.row_slot_frac={0};
+  window.row_source_mask={1u<<NR_ISAC_SRC_CSI_RS};
+  std::vector<std::complex<float>> packed((size_t)4*subcarriers);
+  std::vector<uint32_t> k_abs(subcarriers);
+  for (uint32_t a=0;a<4;++a)
+    for (uint32_t sc=0;sc<subcarriers;++sc) {
+      const auto value = std::polar(0.6f+0.2f*a, static_cast<float>(0.37*sc-0.11*a));
+      window.values[window.sample(a,0,sc)] = value;
+      packed[(size_t)a*subcarriers+sc] = value;
+    }
+  for (uint32_t sc=0;sc<subcarriers;++sc) k_abs[sc]=sc;
+
+  /* The AoA path, with phase_rad zeroed -- the field this split REMOVES -- and the identity
+     channel permutation, so gain and delay are the only things either side applies. */
+  ArrayCalibration array; array.configured=true; array.physical_to_observed={0,1,2,3};
+  array.gain=gain; array.phase_rad={}; array.delay_s=delay_s;
+  apply_array_calibration(window,array);
+
+  /* The independent-branch path: each element is its own single-antenna branch submission, with
+     the carrier chosen to span exactly the window so the two frequency references coincide. */
+  for (uint32_t branch=0;branch<4;++branch) {
+    ChannelCalibration chain; chain.configured=true;
+    chain.gain[branch]=gain[branch]; chain.fixed_delay_s[branch]=delay_s[branch];
+    apply_channel_calibration(packed.data()+(size_t)branch*subcarriers,1,subcarriers,k_abs.data(),
+                              subcarriers,window.scs_hz,chain,(int)branch);
+  }
+  for (uint32_t a=0;a<4;++a)
+    for (uint32_t sc=0;sc<subcarriers;++sc)
+      require(std::abs(packed[(size_t)a*subcarriers+sc]-window.values[window.sample(a,0,sc)])<1e-6,
+              "per-branch gain/delay calibration disagrees with the AoA steering convention");
+
+  /* Sign check that does not depend on aoa.cc at all: the stored delay is what you MULTIPLY BY,
+     so applying +tau then -tau is the identity, and applying +tau to a flat channel produces a
+     phase that ADVANCES with subcarrier index for a positive tau. Getting this backwards would
+     double a cable delay instead of removing it, and would still look like "a correction". */
+  std::vector<std::complex<float>> round_trip{{1.f,0.f},{1.f,0.f},{1.f,0.f}};
+  const std::vector<uint32_t> k3{0,1,2};
+  ChannelCalibration forward; forward.configured=true; forward.fixed_delay_s[0]=5e-9;
+  apply_channel_calibration(round_trip.data(),1,3,k3.data(),3,30000.0,forward,0);
+  require(std::arg(round_trip[2])>std::arg(round_trip[1])
+              && std::arg(round_trip[1])>std::arg(round_trip[0]),
+          "a positive fixed_delay_s must ADVANCE phase with frequency (it removes a delay)");
+  ChannelCalibration inverse; inverse.configured=true; inverse.fixed_delay_s[0]=-5e-9;
+  apply_channel_calibration(round_trip.data(),1,3,k3.data(),3,30000.0,inverse,0);
+  for (size_t i=0;i<round_trip.size();++i)
+    require(std::abs(round_trip[i]-std::complex<float>(1.f,0.f))<1e-6,
+            "equal and opposite fixed delays must compose to the identity");
+
+  /* The bit-identity property itself, asserted rather than assumed: an unset calibration writes
+     nothing at all. This is what makes the default independent-branch path unchanged. */
+  std::vector<std::complex<float>> untouched{{0.25f,-0.5f},{-1.f,2.f},{3.f,0.125f}};
+  const std::vector<std::complex<float>> before = untouched;
+  apply_channel_calibration(untouched.data(),1,3,k3.data(),3,30000.0,ChannelCalibration{},0);
+  ChannelCalibration identity; identity.configured=true;
+  apply_channel_calibration(untouched.data(),1,3,k3.data(),3,30000.0,identity,0);
+  require(untouched==before,
+          "an unset or identity rx_channel_calibration must leave every sample bit-identical");
+}
+
 /** P14 Stage A: the AoA environment override is removed, so the keys must be REPORTED, never
  *  honoured. Counting them (rather than only logging) is what makes the removal testable. */
 void test_obsolete_aoa_env_rejected()
@@ -1226,7 +1351,7 @@ void test_obsolete_aoa_env_rejected()
 
 int main()
 {
-  try {test_fft();test_adaptive_threshold();test_detector();test_required_cuda_contract();test_aoa();test_aoa_component_mixture_and_cross_leg_fusion();test_enu_geometry();test_repeated_ul_confirmation_gates_global_birth();test_variable_cpi();test_causal_cpi_pipeline();test_finite_admission_window();test_mixed_row_dl_rdm_isolation();test_invalid_ul_does_not_suppress_dl();test_dl_capture_fails_closed_without_dl();test_validation_report_compatibility();test_branch_identity_report();test_branch_engine_routing();test_branch_submit_plan();test_ul_submit_plan();test_aoa_branch_conflict();test_submit_plan_skip_census();test_branch_output_identity();test_branch_engines_are_independent();test_obsolete_aoa_env_rejected();test_ssb_k_abs();}
+  try {test_fft();test_adaptive_threshold();test_detector();test_required_cuda_contract();test_aoa();test_aoa_component_mixture_and_cross_leg_fusion();test_enu_geometry();test_repeated_ul_confirmation_gates_global_birth();test_variable_cpi();test_causal_cpi_pipeline();test_finite_admission_window();test_mixed_row_dl_rdm_isolation();test_invalid_ul_does_not_suppress_dl();test_dl_capture_fails_closed_without_dl();test_validation_report_compatibility();test_branch_identity_report();test_branch_engine_routing();test_branch_submit_plan();test_ul_submit_plan();test_aoa_branch_conflict();test_submit_plan_skip_census();test_branch_output_identity();test_branch_engines_are_independent();test_obsolete_aoa_env_rejected();test_ssb_k_abs();test_channel_calibration_parse();test_channel_calibration_matches_aoa_convention();}
   catch(const std::exception& e){std::fprintf(stderr,"python parity test failed: %s\n",e.what());return EXIT_FAILURE;}
   std::puts("native sensing golden parity checks passed");return EXIT_SUCCESS;
 }
