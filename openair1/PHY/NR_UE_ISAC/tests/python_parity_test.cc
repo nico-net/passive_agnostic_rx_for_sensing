@@ -1334,6 +1334,67 @@ void test_channel_calibration_matches_aoa_convention()
           "an unset or identity rx_channel_calibration must leave every sample bit-identical");
 }
 
+/** P14calib, fix round 1: the sign pinned against PHYSICS, not against its own convention.
+ *
+ *  test_channel_calibration_matches_aoa_convention() above is self-referential by construction --
+ *  agreement with aoa.cc, a +tau/-tau round trip and "positive delay advances phase" would all
+ *  stay green if the new code AND aoa.cc were coordinated-wrong (say a refactor redefined the
+ *  stored field as "the correction to apply" and updated both consistently). This one cannot: it
+ *  builds a channel with a KNOWN physical propagation delay and asserts the correction moves that
+ *  delay to zero through the repo's OWN range projection -- the inverse FFT over subcarriers that
+ *  detector.cc:106 performs.
+ *
+ *  A physical delay tau has response H[k] = exp(-j*2*pi*f_k*tau). Choosing tau = m/(N*scs) makes
+ *  the inverse DFT a clean impulse at range bin m. The UNCORRECTED peak is asserted FIRST, because
+ *  a synthetic setup that does not put its target where the physics says it should be cannot be
+ *  trusted to say anything about the corrected case. */
+void test_channel_calibration_removes_a_known_physical_delay()
+{
+  constexpr uint32_t subcarriers = 64;
+  constexpr uint32_t delay_bins = 3;
+  const double scs_hz = 30000.0;
+  const double tau_s = static_cast<double>(delay_bins) / (subcarriers * scs_hz);
+
+  std::vector<uint32_t> k_abs(subcarriers);
+  std::vector<std::complex<float>> channel(subcarriers);
+  for (uint32_t k = 0; k < subcarriers; ++k) {
+    k_abs[k] = k;
+    /* The channel a cable of group delay tau_s imposes: exp(-j*2*pi*f*tau). */
+    channel[k] = static_cast<std::complex<float>>(
+        std::polar(1.0, -2.0 * PI * (k * scs_hz) * tau_s));
+  }
+  /* detector.cc:106's range projection, verbatim in form: inverse FFT over the subcarrier axis. */
+  auto peak_bin = [&](const std::vector<std::complex<float>>& cfr) {
+    std::vector<std::complex<double>> buffer(cfr.begin(), cfr.end());
+    fft_inplace(buffer, true);
+    uint32_t best = 0;
+    for (uint32_t q = 1; q < subcarriers; ++q)
+      if (std::abs(buffer[q]) > std::abs(buffer[best])) best = q;
+    return best;
+  };
+
+  require(peak_bin(channel)==delay_bins,
+          "the synthetic known-delay channel must peak at its own delay bin before anything is "
+          "corrected -- if it does not, nothing below this line means anything");
+
+  ChannelCalibration correct; correct.configured=true; correct.fixed_delay_s[0]=tau_s;
+  std::vector<std::complex<float>> corrected = channel;
+  apply_channel_calibration(corrected.data(),1,subcarriers,k_abs.data(),subcarriers,scs_hz,
+                            correct,0);
+  require(peak_bin(corrected)==0,
+          "a fixed_delay_s equal to the channel's own physical delay must move the peak to bin 0");
+
+  /* The inverted convention does not merely fail to help -- it DOUBLES the delay, which is the
+     failure mode that would otherwise look like a working correction. Asserting the exact wrong
+     answer, not just "not zero", is what makes this diagnostic. */
+  ChannelCalibration inverted; inverted.configured=true; inverted.fixed_delay_s[0]=-tau_s;
+  std::vector<std::complex<float>> doubled = channel;
+  apply_channel_calibration(doubled.data(),1,subcarriers,k_abs.data(),subcarriers,scs_hz,
+                            inverted,0);
+  require(peak_bin(doubled)==2*delay_bins,
+          "an inverted fixed_delay_s must DOUBLE the delay -- the convention is the wrong way round");
+}
+
 /** P14 Stage A: the AoA environment override is removed, so the keys must be REPORTED, never
  *  honoured. Counting them (rather than only logging) is what makes the removal testable. */
 void test_obsolete_aoa_env_rejected()
@@ -1351,7 +1412,7 @@ void test_obsolete_aoa_env_rejected()
 
 int main()
 {
-  try {test_fft();test_adaptive_threshold();test_detector();test_required_cuda_contract();test_aoa();test_aoa_component_mixture_and_cross_leg_fusion();test_enu_geometry();test_repeated_ul_confirmation_gates_global_birth();test_variable_cpi();test_causal_cpi_pipeline();test_finite_admission_window();test_mixed_row_dl_rdm_isolation();test_invalid_ul_does_not_suppress_dl();test_dl_capture_fails_closed_without_dl();test_validation_report_compatibility();test_branch_identity_report();test_branch_engine_routing();test_branch_submit_plan();test_ul_submit_plan();test_aoa_branch_conflict();test_submit_plan_skip_census();test_branch_output_identity();test_branch_engines_are_independent();test_obsolete_aoa_env_rejected();test_ssb_k_abs();test_channel_calibration_parse();test_channel_calibration_matches_aoa_convention();}
+  try {test_fft();test_adaptive_threshold();test_detector();test_required_cuda_contract();test_aoa();test_aoa_component_mixture_and_cross_leg_fusion();test_enu_geometry();test_repeated_ul_confirmation_gates_global_birth();test_variable_cpi();test_causal_cpi_pipeline();test_finite_admission_window();test_mixed_row_dl_rdm_isolation();test_invalid_ul_does_not_suppress_dl();test_dl_capture_fails_closed_without_dl();test_validation_report_compatibility();test_branch_identity_report();test_branch_engine_routing();test_branch_submit_plan();test_ul_submit_plan();test_aoa_branch_conflict();test_submit_plan_skip_census();test_branch_output_identity();test_branch_engines_are_independent();test_obsolete_aoa_env_rejected();test_ssb_k_abs();test_channel_calibration_parse();test_channel_calibration_matches_aoa_convention();test_channel_calibration_removes_a_known_physical_delay();}
   catch(const std::exception& e){std::fprintf(stderr,"python parity test failed: %s\n",e.what());return EXIT_FAILURE;}
   std::puts("native sensing golden parity checks passed");return EXIT_SUCCESS;
 }

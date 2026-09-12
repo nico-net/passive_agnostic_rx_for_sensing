@@ -346,6 +346,16 @@ extern "C" void nr_isac_init(void)
     }
     aoa_antennas=4;
   }
+  // P14calib fix round 1: two operator diagnostics for configurations that are well-formed and
+  // therefore silently accepted, but are almost always a mistake. Neither changes behaviour.
+  if (pipeline.channel_calibration.configured&&pipeline.array_calibration.configured)
+    LOG_W(PHY,"SENSING: rx_array_calibration and rx_channel_calibration are BOTH configured. That "
+              "is legal -- the array values are relative to element zero and the channel values are "
+              "per branch -- but an ABSOLUTE per-chain delay specified in both is applied TWICE\n");
+  for(int b=0;b<NR_RX_BRANCH_MAX;++b)
+    if(channel_calibration_active(pipeline.channel_calibration,b)&&!branch_is_active(branches,b))
+      LOG_W(PHY,"SENSING: rx_channel_calibration names branch %d, which is not in rx_branches; that "
+                "tuple is INERT (check for a typo'd branch id)\n",b);
   pipeline.out_path=p_out?p_out:"/tmp/oaiue_sensing";pipeline.rx_id=p_rx_id?p_rx_id:"rx1";
   pipeline.illuminator_id=p_illum?p_illum:"gnb1";pipeline.report_path=p_report?p_report:"";
   pipeline.report_endpoint=p_endpoint?p_endpoint:"";pipeline.subslot_symbols=std::max(0,p_subslot_symbols);
