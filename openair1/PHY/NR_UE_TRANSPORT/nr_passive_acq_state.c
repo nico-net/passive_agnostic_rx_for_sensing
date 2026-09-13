@@ -226,6 +226,24 @@ void nr_passive_acq_note_sib1_carrier(int n_rb, int mu, int offset_to_point_a, i
             g_carrier.phy_n_rb, g_carrier.phy_mu, 12 * g_carrier.phy_n_rb, v.bw_match, v.mu_match, v.grid_match,
             v.derived_centre_hz / 1e6, v.started_centre_hz / 1e6);
   }
+  if (!ok) {
+    /* BANDWIDTH / CENTRE ADAPTATION. The prose above tells a human the started grid is wrong; this
+     * line tells the SUPERVISOR, which is where the correction belongs. Re-deriving N_RB_DL in
+     * process would mean resizing the sample rate and every PHY buffer mid-stream; the receive chain
+     * is sized once from the launch geometry. config_ue.c's own comment states the intended shape:
+     * stop at broadcast facts and let the supervisor restart with the broadcast geometry. Emitted
+     * once per verdict change, machine-readable, carrying everything a relaunch needs. The values
+     * are SIB1's, i.e. measured off the air -- not the ones the receiver was started with. */
+    static int s_retune_logged;
+    if (!s_retune_logged) {
+      s_retune_logged = 1;
+      LOG_A(PHY, "SENSING: ISAC_ACQ_RETUNE {\"reason\":\"carrier_mismatch\",\"n_rb\":%d,\"mu\":%d,"
+                 "\"centre_hz\":%.0f,\"started_n_rb\":%d,\"started_centre_hz\":%.0f,"
+                 "\"bw_match\":%d,\"mu_match\":%d,\"grid_match\":%d}\n",
+            n_rb, mu, v.derived_centre_hz, g_carrier.phy_n_rb, v.started_centre_hz,
+            v.bw_match, v.mu_match, v.grid_match);
+    }
+  }
   g_snap.carrier_verified = ok ? 1 : -1;
   g_snap.carrier = v;
   pthread_mutex_unlock(&g_lock);

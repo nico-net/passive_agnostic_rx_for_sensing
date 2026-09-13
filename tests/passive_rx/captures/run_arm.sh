@@ -204,7 +204,7 @@ for t in $(seq 1 "$TRIES"); do
     setsid nohup bash -c "ulimit -c 0; exec timeout $DUR ${CPUSET:+taskset -c $CPUSET} \
     $BIN \
     --usrp-args type=x4xx,addr=$DATA,mgmt_addr=$MGMT${DPDK:+,use_dpdk=$DPDK} \
-    -O $CONF -r 273 --numerology 1 --band 78 -C $CARRIER $FREQARGS --ue-rxgain $RXG \
+    -O $CONF -r ${PRB:-273} --numerology 1 --band 78 -C $CARRIER $FREQARGS --ue-rxgain $RXG \
     --ue-nb-ant-rx $NANT --ue-nb-ant-tx $NANT --passive-rx --ue-fo-compensation --initial-fo ${INITIALFO:--15000} \
     ${CONTFO:+--cont-fo-comp $CONTFO --freq-sync-P $FSP --freq-sync-I $FSI} \
     ${OFFDIV:+--offset-divisor $OFFDIV} \
@@ -260,6 +260,25 @@ for t in $(seq 1 "$TRIES"); do
          | awk -F'[= ]' '{ t=$3+$5; if (t>0) printf "%d", 100*$3/t; else print 0 }')
   CLAIM=$(grep -aoE 'claimed=[0-9]+' "$L" | tail -1)
   CFOT=$(grep -ac CFOTRK "$L")
+  # BANDWIDTH / CENTRE ADAPTATION FROM SIB1. The receiver is started with a GUESSED geometry
+  # (-r/-C); SIB1 carries the cell's real carrier bandwidth and Point A. When they disagree the
+  # started sample grid is not this cell's carrier: the SSB is narrow enough to acquire anyway, but
+  # every PDSCH RB index is then computed against the wrong grid, so downlink decode cannot work.
+  # The receiver emits the measured geometry as ISAC_ACQ_RETUNE; re-launch once with it instead of
+  # reporting a failure the operator has to diagnose by hand. ADAPT=0 disables. One retry only --
+  # if the corrected geometry still mismatches, that is a real finding, not something to loop on.
+  if [ "${ADAPT:-1}" = "1" ] && [ -z "$ADAPTED" ] \
+     && grep -aq "ISAC_ACQ_RETUNE" "$OUT/run.log" 2>/dev/null; then
+    RT=$(grep -a -m1 -o 'ISAC_ACQ_RETUNE {[^}]*}' "$OUT/run.log")
+    NRB=$(echo "$RT" | grep -o '"n_rb":[0-9]*' | cut -d: -f2)
+    CTR=$(echo "$RT" | grep -o '"centre_hz":[0-9]*' | cut -d: -f2)
+    if [ -n "$NRB" ] && [ -n "$CTR" ] && [ "$NRB" -gt 0 ] 2>/dev/null; then
+      echo "  ADAPT: SIB1 says ${NRB} PRB @ ${CTR} Hz; started ${PRB:-273} PRB @ ${CARRIER} Hz -- relaunching once with the measured geometry"
+      ADAPTED=1 PRB=$NRB CARRIER=$CTR "$0" "$@"
+      exit $?
+    fi
+    echo "  ADAPT: ISAC_ACQ_RETUNE present but unparseable ($RT) -- not relaunching"
+  fi
   if   [ -f "$OUT/cfo_mislock" ];   then V=VOID_CFO_MISLOCK
   elif [ "$SIB" -eq 0 ];            then V=VOID_NO_SIB1
   elif [ "${DLOK:-0}" -eq 0 ];      then V=VOID_DL_ZERO
