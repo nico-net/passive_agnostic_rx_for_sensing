@@ -117,27 +117,80 @@ class LogTail:
         ("overflow", re.compile(r"[Oo]verflow|OOOO|\bO\b")),
         ("sync_lost", re.compile(r"out.of.sync|sync lost|LOST SYNC", re.I)),
         ("pbch_ok", re.compile(r"PBCH.*(?:decoded|CRC OK)|MIB decoded", re.I)),
+        # ---- Agnostic discovery surface. These are the verdicts the receiver reaches on its own:
+        # what state acquisition is in, and which cell parameters it has PROVEN off the air rather
+        # than been told. They are one-shot or rare lines, so they are captured as state, not rates.
+        ("acq_state", re.compile(r"ACQ_STATE (\w+) -> (\w+)")),
+        ("cell_det", re.compile(r"Cell Detected with GSCN: (\d+), SSB SC offset: (\d+)")),
+        ("cfo", re.compile(r"Measured Carrier Frequency offset (-?\d+) Hz")),
+        ("carrier", re.compile(r"ACQ carrier (CONFIRMED|MISMATCH)")),
+        ("retune", re.compile(r"ISAC_ACQ_RETUNE (\{[^}]*\})")),
+        ("conv", re.compile(r"Technique D CONVERGED rnti=0x([0-9a-f]+) tda=(\d+) S=(\d+) L=(\d+) mask=0x([0-9a-f]+) table=(\d+)")),
+        ("searchspace", re.compile(r"SEARCH_SPACE INFERRED \[([^\]]+)\].*?monitored AL=\{([^}]*)\}")),
+        ("scrambling", re.compile(r"PDCCH_SCRAMBLING_ID CONFIRMED \[([^\]]+)\] n_id=(\d+)")),
+        ("rank", re.compile(r"RANK IDENTIFIED from DCI DM-RS ports: modal_layers=(\d+).*?=> (\w+)")),
+        ("perrnti", re.compile(r"PDSCHQ per-rnti (.+)$")),
+        # Acquisition PROGRESS. Before sync there are no SENSING lines at all, so without these the
+        # dashboard reads "waiting" on every field while the receiver is in fact sweeping hard.
+        ("scan", re.compile(r"Scanning GSCN: (\d+), with SSB offset: (\d+)")),
+        ("polar", re.compile(r"polar decoding wrong")),
+        ("pbch_try", re.compile(r"pbch not decoded on any branch")),
+        ("synch_fail", re.compile(r"synch Failed")),
     ]
 
     def __init__(self, path, maxlines=4000):
         self.last_line_at = None
         self.path = Path(path)
+        self.follow_latest = True   # re-resolve to the newest run.log under the captures tree
         self.lines = deque(maxlen=maxlines)
         self.counters = {"overflow": 0, "sync_lost": 0, "pbch_ok": 0}
         self.stats = {}
         self._lock = threading.Lock()
 
     def run(self):
-        while not self.path.exists():
-            time.sleep(1.0)
-        with self.path.open("r", errors="replace") as f:
-            f.seek(0, 2)
+        """Follow the log, with two behaviours an operator actually needs.
+
+        SEED FROM HISTORY. Seeking straight to EOF means a dashboard opened after a run, or
+        restarted during one, shows an empty panel for a log full of answers. Ingest the tail that
+        already exists first, so the state is right the moment the page loads.
+
+        FOLLOW THE NEWEST CAPTURE. Every run writes a new directory, so a fixed path goes stale as
+        soon as the next arm starts and the dashboard then reports a finished run forever.
+        """
+        cur, f = None, None
+        try:
             while True:
+                nxt = self._latest() or self.path
+                if nxt != cur and nxt.exists():
+                    if f:
+                        f.close()
+                    cur, self.path = nxt, nxt
+                    f = nxt.open("r", errors="replace")
+                    for line in f.readlines()[-self.lines.maxlen:]:
+                        self._ingest(line.rstrip())
+                    f.seek(0, 2)
+                if f is None:
+                    time.sleep(1.0)
+                    continue
                 line = f.readline()
                 if not line:
                     time.sleep(0.25)
                     continue
                 self._ingest(line.rstrip())
+        finally:
+            if f:
+                f.close()
+
+    def _latest(self):
+        """Newest sibling <captures>/*/run.log, or None if that layout does not apply."""
+        if not getattr(self, "follow_latest", True):
+            return None
+        try:
+            root = self.path.parent.parent
+            runs = [d / "run.log" for d in root.iterdir() if (d / "run.log").is_file()]
+        except OSError:
+            return None
+        return max(runs, key=lambda q: q.stat().st_mtime) if runs else None
 
     def _ingest(self, line):
         with self._lock:
@@ -172,7 +225,43 @@ class LogTail:
                     self.stats["blind_submits"] = int(m.group(2))
                 elif name == "occ":
                     self.stats["occ"] = m.group(1)
-            if any(k in line for k in ("SENSING", "ERROR", "WARN", "overflow", "sync")):
+                elif name == "acq_state":
+                    self.stats["acq_state"] = m.group(2)
+                    self.stats.setdefault("acq_path", [])
+                    if not self.stats["acq_path"] or self.stats["acq_path"][-1] != m.group(2):
+                        self.stats["acq_path"] = (self.stats["acq_path"] + [m.group(2)])[-12:]
+                elif name == "cell_det":
+                    self.stats["gscn"] = int(m.group(1))
+                    self.stats["ssb_sc"] = int(m.group(2))
+                elif name == "cfo":
+                    self.stats["cfo_hz"] = int(m.group(1))
+                elif name == "carrier":
+                    self.stats["carrier"] = m.group(1)
+                elif name == "retune":
+                    self.stats["retune"] = m.group(1)
+                elif name == "conv":
+                    self.stats["converged"] = {
+                        "rnti": "0x" + m.group(1), "tda": int(m.group(2)), "S": int(m.group(3)),
+                        "L": int(m.group(4)), "mask": "0x" + m.group(5), "table": int(m.group(6))}
+                elif name == "searchspace":
+                    self.stats.setdefault("search_space", {})[m.group(1)] = m.group(2)
+                elif name == "scrambling":
+                    self.stats.setdefault("scrambling", {})[m.group(1)] = int(m.group(2))
+                elif name == "rank":
+                    self.stats["rank"] = {"layers": int(m.group(1)), "probe": m.group(2)}
+                elif name == "perrnti":
+                    self.stats["per_rnti"] = m.group(1).strip()[:300]
+                elif name == "scan":
+                    self.stats["scan_gscn"] = int(m.group(1))
+                    self.stats["scan_count"] = self.stats.get("scan_count", 0) + 1
+                elif name == "polar":
+                    self.stats["polar_attempts"] = self.stats.get("polar_attempts", 0) + 1
+                elif name == "pbch_try":
+                    self.stats["pbch_attempts"] = self.stats.get("pbch_attempts", 0) + 1
+                elif name == "synch_fail":
+                    self.stats["synch_failed"] = self.stats.get("synch_failed", 0) + 1
+            if any(k in line for k in ("SENSING", "ERROR", "WARN", "overflow", "sync",
+                                       "Scanning GSCN", "Cell Detected", "pbch", "PBCH")):
                 # Wall-clock stamp: the receiver's own lines carry no time, so without this there is
                 # no way to tell a line from this second from one ten minutes old.
                 self.lines.append(time.strftime("%H:%M:%S ") + line[-400:])

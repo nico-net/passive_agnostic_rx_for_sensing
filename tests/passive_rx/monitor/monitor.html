@@ -26,6 +26,21 @@ select{background:var(--raised);color:var(--dim);border:1px solid var(--border);
 .chip-green{background:var(--green-d);color:var(--green)} .chip-amber{background:var(--amber-d);color:var(--amber)}
 .chip-red{background:var(--red-d);color:var(--red)} .chip-grey{background:var(--raised);color:var(--faint)}
 .dot{width:6px;height:6px;border-radius:50%;background:currentColor;flex-shrink:0}
+/* Acquisition chain: the receiver's own state machine, drawn as the path it has actually walked.
+   Reached states are filled; the current one carries the accent ring; unreached stay outlined so
+   the gap between "where we are" and "what is left" is readable without counting. */
+.panel-h{font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--dim);padding:11px 14px 0;font-weight:600}
+.acq{display:flex;flex-wrap:wrap;align-items:center;gap:0;padding:12px 14px}
+.acq .st{font-family:"IBM Plex Mono",monospace;font-size:10.5px;letter-spacing:.04em;padding:5px 9px;border-radius:4px;border:1px solid var(--border);color:var(--faint);white-space:nowrap}
+.acq .st.hit{background:var(--green-d);color:var(--green);border-color:transparent}
+.acq .st.now{background:var(--cyan-d);color:var(--cyan);border-color:var(--cyan);box-shadow:0 0 0 1px var(--cyan) inset}
+.acq .st.lost{background:var(--red-d);color:var(--red);border-color:transparent}
+.acq .arr{color:var(--faint);padding:0 6px;font-size:11px}
+.facts{display:flex;flex-wrap:wrap;gap:8px;padding:0 14px 12px}
+.fact{display:flex;flex-direction:column;gap:3px;background:var(--raised);border:1px solid var(--border);border-radius:5px;padding:8px 10px;min-width:132px}
+.fact .k{font-size:9.5px;letter-spacing:.09em;text-transform:uppercase;color:var(--faint)}
+.fact .v{font-family:"IBM Plex Mono",monospace;font-size:12.5px;color:var(--text)}
+.fact .v.ok{color:var(--green)} .fact .v.bad{color:var(--red)} .fact .v.wait{color:var(--faint)}
 .stat{font-family:"IBM Plex Mono",monospace;font-size:11px;color:var(--faint)} .stat b{color:var(--text);font-weight:500}
 nav{display:flex;gap:4px;padding:0 20px;height:38px;border-bottom:1px solid var(--border);flex-shrink:0}
 nav button{background:none;border:none;border-bottom:2px solid transparent;color:var(--faint);font:500 12.5px/1 inherit;padding:0 15px;cursor:pointer}
@@ -558,6 +573,73 @@ function tabConfig(v) {
 }
 
 
+const ACQ_CHAIN = ["SEARCHING","PBCH_LOCKED","SIB1_DECODED","PDCCH_LOCKED",
+                  "CORESET_VERIFIED","CELL_CONFIGURED","DL_CONVERGED","UL_CONVERGED","TRACKING"];
+
+// What the receiver has worked out for itself. Everything here is a verdict it reached from the
+// air -- not a value it was configured with -- so "waiting" is a real state, not a missing field.
+function discoveryPanel() {
+  const s = (state.log && state.log.stats) || {};
+  const wrap = el("div", "panel");
+  wrap.appendChild(el("div", "panel-h", "Acquisition & blind discovery"));
+
+  const chain = el("div", "acq");
+  const walked = new Set(s.acq_path || []);
+  const now = s.acq_state;
+  ACQ_CHAIN.forEach((name, i) => {
+    if (i) chain.appendChild(el("span", "arr", "\u2192"));
+    let cls = "st";
+    if (name === now) cls += " now"; else if (walked.has(name)) cls += " hit";
+    chain.appendChild(el("span", cls, name));
+  });
+  if (now === "LOST" || walked.has("LOST")) {
+    chain.appendChild(el("span", "arr", "\u2192"));
+    chain.appendChild(el("span", now === "LOST" ? "st lost" : "st lost", "LOST"));
+  }
+  wrap.appendChild(chain);
+
+  const facts = el("div", "facts");
+  const fact = (k, v, cls) => {
+    const d = el("div", "fact");
+    d.appendChild(el("div", "k", k));
+    d.appendChild(el("div", "v " + (cls || (v === "waiting" ? "wait" : "")), v));
+    facts.appendChild(d);
+  };
+  // Scan progress first: before sync this is the only thing moving, and a dashboard that shows
+  // nothing while the receiver sweeps 300 raster points looks broken when it is working.
+  if (s.gscn == null) {
+    fact("Blind scan", s.scan_count ? s.scan_count + " raster pts | at GSCN " + s.scan_gscn : "starting");
+    fact("SSB candidates", s.pbch_attempts ? s.pbch_attempts + " PBCH tries / " + (s.polar_attempts||0) + " polar"
+                                           : "none yet", s.pbch_attempts ? "ok" : "");
+    if (s.synch_failed) fact("Sync attempts failed", String(s.synch_failed), "bad");
+  }
+  fact("Cell", s.gscn != null ? "GSCN " + s.gscn + " sc " + s.ssb_sc : "searching");
+  fact("Carrier offset", s.cfo_hz != null ? s.cfo_hz + " Hz" : "waiting");
+  fact("Carrier check", s.carrier || "waiting", s.carrier === "CONFIRMED" ? "ok" : s.carrier ? "bad" : "");
+  const ss = s.search_space || {};
+  const ssKeys = Object.keys(ss);
+  fact("Search space", ssKeys.length ? ssKeys.map(k => k.replace(/\(.*\)/, "") + " AL{" + ss[k] + "}").join("  ") : "waiting",
+       ssKeys.length ? "ok" : "");
+  const scr = s.scrambling || {};
+  const scrKeys = Object.keys(scr);
+  fact("PDCCH scrambling", scrKeys.length ? "n_id " + scr[scrKeys[0]] + " confirmed" : "waiting", scrKeys.length ? "ok" : "");
+  fact("Rank", s.rank ? s.rank.layers + " layer" + (s.rank.layers > 1 ? "s" : "") + " " + s.rank.probe.toLowerCase() : "waiting",
+       s.rank ? (s.rank.probe === "CORROBORATED" ? "ok" : "bad") : "");
+  fact("DL config", s.converged ? "S" + s.converged.S + " L" + s.converged.L + " mask" + s.converged.mask + " tbl" + s.converged.table : "searching",
+       s.converged ? "ok" : "");
+  if (s.retune) fact("Retune needed", s.retune.replace(/[{}\"]/g, "").slice(0, 60), "bad");
+  wrap.appendChild(facts);
+
+  if (s.per_rnti) {
+    const p = el("div", "facts");
+    const d = el("div", "fact"); d.style.minWidth = "100%";
+    d.appendChild(el("div", "k", "Per-UE downlink (CRC-OK / decoded)"));
+    d.appendChild(el("div", "v", s.per_rnti));
+    p.appendChild(d); wrap.appendChild(p);
+  }
+  return wrap;
+}
+
 function decoderPanel() {
   const log = state.log || {}, s = log.stats || {}, seen = log.decoder_seen || {};
   const row = el("div", "row");
@@ -621,9 +703,13 @@ function render() {
   const prev = [...v.querySelectorAll(".log")].map(n => ({
     top: n.scrollTop, stick: n.scrollHeight - n.scrollTop - n.clientHeight < 24 }));
   v.textContent = "";
+  if (state && state.log) v.appendChild(discoveryPanel());
   if (state && state.log) v.appendChild(decoderPanel());
   if (!state || !Object.keys(state.receivers).length) {
-    v.appendChild(el("div","empty","no receiver connected — check --connect matches [sensing] report_endpoint"));
+    const live = state.log && state.log.last_line_at && (state.now - state.log.last_line_at) < 10;
+    v.appendChild(el("div","empty", live
+      ? "receiver is running and writing logs — no sensing reports yet (CPIs only start after sync; the panel above is live)"
+      : "no receiver activity — no log lines and no sensing reports"));
     return;
   }
   RENDER[tab](v);
@@ -642,7 +728,7 @@ async function poll() {
     if (!res.ok) throw new Error("HTTP " + res.status);
     state = await res.json();
     pollError = null;
-    render();
+    safeRender();
   } catch (e) {
     pollError = String(e);
     renderChrome();
@@ -651,7 +737,37 @@ async function poll() {
     setTimeout(poll, 1000);
   }
 }
-render(); poll();
+// A thrown render() leaves the view cleared, so the page goes blank and the operator has no idea
+// why. Surface the failure where they are looking instead of in a console they may not have open.
+window.addEventListener("error", (e) => {
+  const v = document.getElementById("view");
+  if (!v) return;
+  const box = el("div", "panel");
+  box.appendChild(el("div", "panel-h", "Dashboard error"));
+  const p = el("pre", "log");
+  p.textContent = (e.message || "error") + "\n" + (e.filename || "") + ":" + (e.lineno || "?") +
+                  "\n\nThe receiver is unaffected; this is the page failing to draw.";
+  p.style.cssText = "padding:12px 14px;margin:0;white-space:pre-wrap;color:var(--red)";
+  box.appendChild(p);
+  v.textContent = ""; v.appendChild(box);
+});
+function safeRender() {
+  try { render(); }
+  catch (err) {
+    const v = document.getElementById("view");
+    if (v) {
+      v.textContent = "";
+      const box = el("div", "panel");
+      box.appendChild(el("div", "panel-h", "Dashboard error"));
+      const p = el("pre");
+      p.textContent = String(err && err.stack || err) +
+                      "\n\nThe receiver is unaffected; this is the page failing to draw.";
+      p.style.cssText = "padding:12px 14px;margin:0;white-space:pre-wrap;color:var(--red);font-size:11.5px";
+      box.appendChild(p); v.appendChild(box);
+    }
+  }
+}
+safeRender(); poll();
 window.addEventListener("resize", () => render());
 </script>
 </body>
