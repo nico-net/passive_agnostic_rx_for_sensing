@@ -120,3 +120,27 @@ Only after hardware permission and all offline gates pass: unknown-cell cold
 start, automatic DCI/PDSCH interpretation, sustained tracking, forced loss and
 in-process recovery, and configuration changes. Record the same health metrics
 and ambiguity diagnostics as offline. Do not use gNB hints or external sync.
+
+## Increment: local DL configuration relearning (2026-09-11)
+
+The automatic keyed PDSCH controller no longer keeps a winner forever after
+operational CRC evidence collapses. It freezes the conservative CRC lower bound
+at convergence, counts only settled-winner outcomes, and compares a consecutive
+failure run with that measured reference. A configurable minimum run length and
+summable probability budgets provide hysteresis. CRC failures are a health signal,
+not proof of a BWP/configuration change; correlated RF fading can also trigger it.
+
+Recovery preserves the checked hypothesis catalog, clears old scores, increments
+context generation, and returns that context to unresolved local search. Old
+queued tickets cannot score the new generation. Other RNTI/TDA/configuration
+contexts and the manual parser are unchanged. A successful settled outcome clears
+the failure streak; queued exploration outcomes cannot manufacture operational
+loss. Runtime emits PDSCH_RELEARN with reason, generation transition, streak,
+reference bound and reacquisition count. The policy setter is currently a C API,
+not a new configuration-file or command-line option.
+
+This is controller-level recovery only: raw-IQ interruption recovery, full
+acquisition-state-machine integration, duplicate observation identity, and a
+non-CRC-only interpretation validator remain open. The interpretation catalog
+still has its previously documented scope limitations. Validation evidence is
+recorded in RECOVERY_VALIDATION.md; do not infer full Gate 5 from controller tests.

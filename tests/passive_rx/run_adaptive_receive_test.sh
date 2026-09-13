@@ -13,7 +13,10 @@ test -x "$BUILD/nr-uesoftmodem"
 if find "$REPO/openair1" "$REPO/openair2" "$REPO/executables" "$REPO/radio"      \( -name '*.c' -o -name '*.h' -o -name '*.cpp' -o -name '*.cc' \)      -newer "$BUILD/nr-uesoftmodem" -print -quit 2>/dev/null | grep -q .; then
   echo "BLOCKED: nr-uesoftmodem is older than tracked source -- rebuild before capturing"; exit 3
 fi
-grep -qx "ENABLE_ISAC_SENSING:BOOL=OFF" "$BUILD/CMakeCache.txt"
+# Accepts ON or OFF -- both are valid build states on this branch now that the sensing
+# pipeline (CFO/SFO trackers, LOS baseline, DetectionReport bus) is buildable here; only an
+# UNRECOGNISED/missing cache entry is refused, so a broken configure still fails loudly.
+grep -qE "ENABLE_ISAC_SENSING:BOOL=(ON|OFF)" "$BUILD/CMakeCache.txt"
 test "$(readlink "$BUILD/liboai_device.so")" = liboai_usrpdevif.so
 exec 9>/tmp/adaptive-rx-UL-DL.radio.lock
 flock -n 9 || { echo "BLOCKED: another adaptive test holds lock"; exit 3; }
@@ -60,7 +63,7 @@ cd "$BUILD"
 # Each void attempt's log is kept as evidence, never silently discarded.
 run_modem() {
   sudo -n env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
-    ISAC_RX_MRC_MODE="${MRC:-2}" ISAC_UL_RX_BRANCH="${UL_BRANCH:-}" \
+    ISAC_RX_MRC_MODE="${MRC:-2}" ${UL_BRANCH:+ISAC_UL_RX_BRANCH="$UL_BRANCH"} \
     ISAC_DMRS_FO_APPLY=0 ISAC_SFO_CORRECT=0 \
     ISAC_RX_BRANCH_FO=0 ISAC_RX_GAIN_TRIM=0,0,0,0 \
     ISAC_DISC_NO_RESYNC=0 ISAC_RF_STALL_MAX_REINIT=0 ISAC_CFO_TRACK_HZ=1 ISAC_CFO_TRACK_PERIOD=20 \
@@ -73,7 +76,7 @@ run_modem() {
     -O "$OUT/receiver.conf" -r 273 --numerology 1 --band 78 -C 3450000000 --ssb 150 \
     --ue-rxgain ${RXGAIN:-40} --ue-nb-ant-rx 4 --ue-nb-ant-tx 4 --passive-rx \
     --ue-fo-compensation --cont-fo-comp 1 --freq-sync-P 0.05 --freq-sync-I 0.001 \
-    --initial-fo -16480 --thread-pool 0,1,6,7 --time-sync-I 0.01 \
+    --initial-fo ${INITIAL_FO:--16480} --thread-pool 0,1,6,7 --time-sync-I 0.01 \
     --ntn-initial-time-drift -4.25 -A 90 > "$OUT/run.log" 2>&1
 }
 

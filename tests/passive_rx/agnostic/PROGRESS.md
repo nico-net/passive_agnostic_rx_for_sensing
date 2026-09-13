@@ -109,3 +109,26 @@ See `ARCHITECTURE.md` for remaining state, CSI-RS and OTA design requirements.
   PSS/SSS at approximately 20 ms spacing using an explicit frequency reference.
 - PBCH/CSI-RS/full DL-UL coverage and raw full-receiver replay remain unvalidated;
   no new acceptance gate is claimed. Details: `../raw_baseline/SSB_VALIDATION.md`.
+
+## Current offline baseline and local recovery increment (2026-09-11)
+
+The earlier raw-acquisition NOT RUN entry is historical: the file-only adapter
+now acquires repeated PBCH/MIB and SIB1 from three short raw captures and the
+120-second single-channel baseline, then attempts DL/UL decoding without injected
+PCI, CFO, SSB location, BWP or dedicated scheduling configuration. This is PARTIAL
+Gate 4 evidence, not proof of generalized DCI interpretation or full gate closure.
+
+The long capture is `captures/raw_5min_last120.v51DBe/capture_120s` on sens6.
+Its replay `captures/crc_last120_mlockfix_20260911T125339Z` reached EOF without
+transport faults: final cumulative DL/UL CRC 27.14%/30.04%; final ten reporting
+intervals 76.90%/77.30%. Counter intervals are not asserted equal-time windows.
+Raw replay memory locking was fixed and tested against the pre-fix failure.
+All further development uses recordings; no radio access in this increment.
+
+Local DL hypothesis relearning now invalidates a settled configuration after
+sustained contradictory CRC evidence, preserving its legal catalog and rejecting
+old-generation feedback. Other contexts and manual mode are unchanged. Gate 5
+remains OPEN: controller recovery is not raw-IQ loss/reacquisition. Gate 1 and the
+remaining 1_1/generalization work remain OPEN. Gate 7 must still report the known
+three blind-monitor failures rather than conceal them. See RECOVERY_VALIDATION.md
+for the generated build, unit-test and replay outcomes of this increment.
