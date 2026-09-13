@@ -2132,6 +2132,43 @@ void nr_rrc_mac_start_ra(module_id_t module_id, nr_mac_ra_start_cause_t cause)
   AssertFatal(!ret, "mutex failed %d\n", ret);
 }
 
+/* Probe mode stops at broadcast facts: applying SIB1 to a trial RF window
+ * would incorrectly promote the scan center to the actual carrier center.
+ * The supervisor derives Point A and restarts with the broadcast geometry.
+ * In capture mode the same event revalidates the handoff before declaring LIVE. */
+static bool passive_acquisition_sib1(NR_UE_MAC_INST_t *mac, NR_ServingCellConfigCommonSIB_t *scc)
+{
+  const char *automatic = getenv("ISAC_AUTO_ACQUIRE");
+  if (!IS_PASSIVE_RX_MODE(get_softmodem_params()) || !automatic || strcmp(automatic, "1"))
+    return false;
+  const char *probe_env = getenv("ISAC_ACQ_PROBE");
+  const bool probe = probe_env && !strcmp(probe_env, "1");
+  const NR_FrequencyInfoDL_SIB_t *dl = &scc->downlinkConfigCommon.frequencyInfoDL;
+  const NR_FrequencyInfoUL_SIB_t *ul = scc->uplinkConfigCommon ? &scc->uplinkConfigCommon->frequencyInfoUL : NULL;
+  if (!mac->mib || mac->frequency_range != FR1 || dl->frequencyBandList.list.count < 1
+      || !dl->frequencyBandList.list.array[0]->freqBandIndicatorNR
+      || dl->scs_SpecificCarrierList.list.count != 1 || !ul || ul->scs_SpecificCarrierList.list.count != 1) {
+    LOG_W(NR_MAC, "ISAC_ACQ_UNSUPPORTED: need FR1 with one DL and one UL SCS carrier\n");
+    return probe;
+  }
+  LOG_I(NR_MAC,
+        "ISAC_ACQ_SIB1 {\"pci\":%d,\"band\":%ld,\"mib_mu\":%ld,"
+        "\"dl_mu\":%ld,\"dl_prb\":%ld,\"dl_offset_rb\":%ld,"
+        "\"offset_to_point_a_rb\":%ld,\"k_ssb\":%d,\"tdd\":%d,"
+        "\"ul_mu\":%ld,\"ul_prb\":%ld,\"ul_offset_rb\":%ld,\"ul_point_a_arfcn\":%ld}\n",
+        (int)mac->physCellId, *dl->frequencyBandList.list.array[0]->freqBandIndicatorNR,
+        mac->mib->subCarrierSpacingCommon,
+        dl->scs_SpecificCarrierList.list.array[0]->subcarrierSpacing,
+        dl->scs_SpecificCarrierList.list.array[0]->carrierBandwidth,
+        dl->scs_SpecificCarrierList.list.array[0]->offsetToCarrier,
+        dl->offsetToPointA, mac->ssb_subcarrier_offset, scc->tdd_UL_DL_ConfigurationCommon != NULL,
+        ul->scs_SpecificCarrierList.list.array[0]->subcarrierSpacing,
+        ul->scs_SpecificCarrierList.list.array[0]->carrierBandwidth,
+        ul->scs_SpecificCarrierList.list.array[0]->offsetToCarrier,
+        ul->absoluteFrequencyPointA ? *ul->absoluteFrequencyPointA : -1L);
+  return probe;
+}
+
 void nr_rrc_mac_config_req_sib1(module_id_t module_id, int cc_idP, NR_SIB1_t *sib1, bool can_start_ra)
 {
   NR_UE_MAC_INST_t *mac = get_mac_inst(module_id);
@@ -2145,6 +2182,12 @@ void nr_rrc_mac_config_req_sib1(module_id_t module_id, int cc_idP, NR_SIB1_t *si
   }
   NR_ServingCellConfigCommonSIB_t *scc = sib1->servingCellConfigCommon;
   AssertFatal(scc, "SIB1 SCC should not be NULL\n");
+  if (passive_acquisition_sib1(mac, scc)) {
+    ret = pthread_mutex_unlock(&mac->if_mutex);
+    AssertFatal(!ret, "mutex failed %d\n", ret);
+    return;
+  }
+
   UPDATE_IE(mac->tdd_UL_DL_ConfigurationCommon, scc->tdd_UL_DL_ConfigurationCommon, NR_TDD_UL_DL_ConfigCommon_t);
   configure_si_schedulingInfo(mac, si_SchedulingInfo, si_SchedulingInfo_v1700);
   configure_pcch_config(mac, scc);

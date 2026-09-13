@@ -389,7 +389,79 @@ static uint64_t g_dec_over_cap = 0;
 #define AL_MIN_PROBE 2
 #define AL_PRIOR     1.0
 static _Atomic uint64_t g_al_accepts[4]; // indexed as ss_al_candidates[]: AL 1, 2, 4, 8
-static uint32_t         g_al_rotate[4];  // per-level rotating CCE start, advanced each occasion // skipped: rv != 0 and rv0_only set (not self-decodable, see cfg)
+static _Atomic uint64_t g_al_cand[2][4];    // [0]=CSS0 [1]=dedicated USS; candidates EXAMINED per AL
+static _Atomic uint64_t g_al_confirmed[2][4]; // same split; accepts that PASSED the RNTI-persistence gate
+static uint32_t         g_al_rotate[4];
+/* ---- SEARCH-SPACE (aggregation-level) INFERENCE  (agnosticity gap #1) ---------------------------
+ * The set of monitored CCE aggregation levels is a dedicated-search-space property that the air
+ * does not carry, but it IS inferable: every accept counted in g_al_accepts[] above already passed
+ * the DCI CRC (a recovered, real RNTI) AND the cross-occasion persistence gate, so those grants
+ * land only on the levels the gNB actually schedules. Report the inferred set ONCE, when enough
+ * confirmed grants have accumulated to name it. Honestly bounded and reject-only: a level with no
+ * confirmed grants is reported absent, never assumed; and this is the OBSERVED monitored set with
+ * its per-level share, NOT nrofCandidates or exact CCE positions (which need the SS config itself).*/
+static _Atomic int g_ss_inferred_logged_ss[2]; // one verdict per search space (CSS0, USS)
+#define SS_INFER_MIN_GRANTS 32   /* enough CRC-recovered grants before naming the set */
+#define SS_INFER_SHARE_NUM  1    /* a level carrying >= 20% (1/5) of confirmed grants is "monitored" */
+#define SS_INFER_SHARE_DEN  5
+#define SS_INFER_MIN_CAND   200  /* candidates examined before a level's rate means anything */
+/* CORESET#0 (common) and the dedicated UE-specific search space are DIFFERENT search spaces with
+ * DIFFERENT aggregation levels -- measured on this cell: broadcast SIB1 at AL4 (gNB's own
+ * dci_aggregation_level=2, i.e. log2), dedicated traffic overwhelmingly AL2. Pooling them into one
+ * histogram produces a confidently wrong "monitored AL set", so every count is bucketed by which
+ * search space produced it. cfg->coreset_type: 1 = MIB/SIB1 CORESET#0, 0 = dedicated. */
+static inline int nr_pdcch_ss_bucket(const nr_pdcch_blind_monitor_cfg_t *cfg)
+{
+  return (cfg && cfg->coreset_type == 1) ? 0 : 1;
+}
+static void nr_pdcch_blind_infer_search_space(void)
+{
+  /* Reported PER SEARCH SPACE. CORESET#0 and the dedicated USS are different search spaces with
+   * different aggregation levels (measured here: broadcast AL4, dedicated AL2), so a single pooled
+   * "monitored AL set" is not a well-defined quantity -- it would be confidently wrong. Each bucket
+   * is declared once, independently, as soon as IT has enough evidence. */
+  static const char *kSsName[2] = {"CSS0(common)", "USS(dedicated)"};
+  for (int ss = 0; ss < 2; ++ss) {
+    if (atomic_load_explicit(&g_ss_inferred_logged_ss[ss], memory_order_relaxed))
+      continue;
+    uint64_t a[4], c[4], tot = 0;
+    for (int i = 0; i < 4; ++i) {
+      a[i] = atomic_load_explicit(&g_al_confirmed[ss][i], memory_order_relaxed);
+      c[i] = atomic_load_explicit(&g_al_cand[ss][i], memory_order_relaxed);
+      tot += a[i];
+    }
+    if (tot < SS_INFER_MIN_GRANTS)
+      continue;
+    /* RATE, not raw count: the adaptive allocator feeds budget to whichever level already produced
+     * accepts, so raw counts are self-confirming. A level whose denominator is too small to support
+     * a conclusion is reported UNDERSAMPLED, never silently declared absent. */
+    double rate[4]; double rmax = 0.0;
+    for (int i = 0; i < 4; ++i) {
+      rate[i] = (c[i] > 0) ? ((double)a[i] / (double)c[i]) : 0.0;
+      if (rate[i] > rmax) rmax = rate[i];
+    }
+    const int lvl[4] = {1, 2, 4, 8};
+    char al_set[64]; int u = 0;
+    char weak[64];   int w = 0;
+    for (int i = 0; i < 4; ++i) {
+      if (c[i] < SS_INFER_MIN_CAND)
+        w += snprintf(weak + w, sizeof(weak) - w, "%s%d", w ? "," : "", lvl[i]);
+      else if (rmax > 0.0 && rate[i] * SS_INFER_SHARE_DEN >= rmax * SS_INFER_SHARE_NUM)
+        u += snprintf(al_set + u, sizeof(al_set) - u, "%s%d", u ? "," : "", lvl[i]);
+    }
+    if (!u) continue; /* nothing adequately sampled in this bucket yet */
+    atomic_store_explicit(&g_ss_inferred_logged_ss[ss], 1, memory_order_relaxed);
+    LOG_A(PHY, "SENSING: SEARCH_SPACE INFERRED [%s] by CRC-recovered grants: monitored AL={%s}%s%s "
+               "confirmed/examined[AL1=%llu/%llu AL2=%llu/%llu AL4=%llu/%llu AL8=%llu/%llu] "
+               "total_confirmed=%llu (accepts per candidate EXAMINED; levels below %d candidates are "
+               "undersampled, not shown absent; nrofCandidates/CCE positions bounded, not exact)\n",
+          kSsName[ss], al_set, w ? " undersampled=" : "", w ? weak : "",
+          (unsigned long long)a[0], (unsigned long long)c[0], (unsigned long long)a[1], (unsigned long long)c[1],
+          (unsigned long long)a[2], (unsigned long long)c[2], (unsigned long long)a[3], (unsigned long long)c[3],
+          (unsigned long long)tot, SS_INFER_MIN_CAND);
+  }
+}
+  // per-level rotating CCE start, advanced each occasion // skipped: rv != 0 and rv0_only set (not self-decodable, see cfg)
 static uint64_t g_dec_unsup = 0; // skipped: grant outside the decode/reconstruction scope
 static uint64_t g_data_submits = 0; // reconstructed CFRs submitted as NR_ISAC_SRC_PDSCH_DATA
 
@@ -1041,6 +1113,7 @@ void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_pr
       used_re += need;
     }
     g_al_rotate[idx] = start + (uint32_t)added;
+    atomic_fetch_add_explicit(&g_al_cand[nr_pdcch_ss_bucket(cfg)][idx], (uint64_t)added, memory_order_relaxed);
   }
 
   /* One-shot visibility. A ladder that silently fails to cover the level the deployment actually
@@ -1868,6 +1941,15 @@ constdiag_done:;
           || !rnti_persistence_check(raw->rnti, abs_slot, persist_window_slots, cfg->rnti_persist_k))
         continue;
       nr_pdcch_blind_rnti_bootstrap_record(raw->rnti, NR_BLIND_RNTI_CLASS_C, abs_slot);
+      { /* Corroborated AL census for DCI 1_1 -- the dominant traffic. This branch does its OWN
+         * persistence check above and then continues on its own path, so accepts here never reach
+         * the generic Gate 2 where the census was originally placed. MEASURED 2026-09-13: 51,498
+         * 1_1 grants produced ZERO confirmed counts while only stray non-1_1 accepts were tallied,
+         * so the search-space inference never reached its 32-grant threshold and never fired. */
+        const int Lc3 = cand_task[ti].L;
+        const int li3 = (Lc3 == 1) ? 0 : (Lc3 == 2) ? 1 : (Lc3 == 4) ? 2 : 3;
+        atomic_fetch_add_explicit(&g_al_confirmed[nr_pdcch_ss_bucket(cfg)][li3], 1, memory_order_relaxed);
+      }
       if (cfg->autodiscover) {
         const long mono = source_absolute_slot;
         nr_pdcch_blind_monitor_autodiscover_observe(raw->rnti,
@@ -1985,6 +2067,36 @@ constdiag_done:;
     if (!rnti_persistence_check(out.rnti, abs_slot, persist_window_slots, cfg->rnti_persist_k)) {
       g_held_persist++;
       continue;
+    }
+
+    { /* Corroborated AL census: this accept's RNTI recurred, so it is not a one-off false accept.
+       * The RAW census above is fed by every accept and is therefore dominated by the blind
+       * false-accept floor, which scales with how many candidates a level is given -- useless for
+       * inferring what the CELL does. This one only counts accepts that survived the gate. */
+      const int Lc2 = cand_task[ti].L;
+      const int li2 = (Lc2 == 1) ? 0 : (Lc2 == 2) ? 1 : (Lc2 == 4) ? 2 : 3;
+      atomic_fetch_add_explicit(&g_al_confirmed[nr_pdcch_ss_bucket(cfg)][li2], 1, memory_order_relaxed);
+    }
+
+    { /* ---- PDCCH SCRAMBLING IDENTITY VERDICT  (agnosticity #5) ----------------------------
+       * pdcch-DMRS-ScramblingID is assumed = PCI (mandated for CORESET#0, but DEDICATED CORESETs
+       * may carry a configured value, and nothing verified ours). A CRC-recovered RNTI IS the
+       * proof: the DM-RS sequence generated from this identity is what de-scrambles the candidate,
+       * so a WRONG identity yields no accepts at all rather than degraded ones. State it once per
+       * search space instead of leaving it an unexamined assumption -- and say plainly that this
+       * confirms the value IN USE, it does not search the 1024-value domain for an override. */
+      const int ssb_ = nr_pdcch_ss_bucket(cfg);
+      static _Atomic int s_scr_logged[2];
+      int expect_ = 0;
+      if (atomic_compare_exchange_strong_explicit(&s_scr_logged[ssb_], &expect_, 1,
+                                                  memory_order_relaxed, memory_order_relaxed)) {
+        LOG_A(PHY, "SENSING: PDCCH_SCRAMBLING_ID CONFIRMED [%s] n_id=%u (assumed = PCI %u) by "
+                   "CRC-recovered RNTI 0x%x -- a wrong identity yields zero accepts, so this is "
+                   "proof of the value in use, not a search of the identity domain\n",
+              ssb_ ? "USS(dedicated)" : "CSS0(common)",
+              (unsigned)cfg->coreset_pdcch_dmrs_scrambling_id,
+              (unsigned)ue->frame_parms.Nid_cell, out.rnti);
+      }
     }
 
     /* Record new-UE evidence before membership gating, otherwise a confirmed UE prevents
@@ -2560,6 +2672,7 @@ constdiag_done:;
         .ul_interp_winners       = (uint64_t)uls.interp_winners,
       };
       nr_passive_acq_update(&acq_in);
+      nr_pdcch_blind_infer_search_space();
       const nr_passive_acq_snapshot_t acq = nr_passive_acq_snapshot();
       if (acq_period)
       {

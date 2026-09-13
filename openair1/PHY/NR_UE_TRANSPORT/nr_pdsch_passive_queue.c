@@ -91,6 +91,55 @@ const nr_dmrs_id_state_t *nr_pdsch_passive_dl_dmrs_id(void) { return &g_dl_dmrs_
 static pthread_mutex_t g_dl_rank_lock = PTHREAD_MUTEX_INITIALIZER;
 static uint64_t g_rank_n[4], g_rank_low[4], g_rank_total; static double g_rank_sum[4];
 static uint64_t g_cdm_empty[4]; static double g_cdm_sum[4];
+
+/* ---- RANK / CDM-GROUP VERDICT  (agnosticity #4) ------------------------------------------------
+ * Rank is NOT assumed here: cw->Nl comes from the DM-RS port count carried in the blindly decoded
+ * DCI 1_1 antenna-ports field, and the decoder separates up to nb_antennas_rx layers. So the layer
+ * count is DERIVED. What was missing is a stated verdict that cross-checks that derivation against
+ * an INDEPENDENT physical observable, which is what the probes below already measure:
+ *   - port-pair coherence ~1 => the DM-RS pair carries one symbol => ONE port; collapsed (<0.5) =>
+ *     at least TWO ports are active. Honest bound: a PAIR test says "more than one", never how many,
+ *     so it corroborates Nl>1 but cannot by itself distinguish 2 from 4. Nl does that; this checks it.
+ *   - other-comb energy ratio ~1 => that comb carries PDSCH => numDmrsCdmGrpsNoData = 1; ~0 => 2.
+ * Counted over CRC-OK grants only: a failed decode's DM-RS may not even belong to this cell. */
+static _Atomic uint64_t g_nl_ok[8];
+static _Atomic int      g_rank_verdict_logged;
+#define RANK_VERDICT_MIN_OK 200
+void nr_pdsch_passive_rank_verdict(void)
+{
+  if (atomic_load_explicit(&g_rank_verdict_logged, memory_order_relaxed))
+    return;
+  uint64_t tot = 0, best_n = 0; int best = 0;
+  for (int i = 1; i < 8; i++) {
+    const uint64_t v = atomic_load_explicit(&g_nl_ok[i], memory_order_relaxed);
+    tot += v;
+    if (v > best_n) { best_n = v; best = i; }
+  }
+  if (tot < RANK_VERDICT_MIN_OK)
+    return;
+  /* Independent corroboration from the coherence probe, CRC-OK buckets only (k=1 small, k=3 big). */
+  double coh_low_frac = -1.0; uint64_t coh_n = 0;
+  if (pthread_mutex_trylock(&g_dl_rank_lock) == 0) {
+    coh_n = g_rank_n[1] + g_rank_n[3];
+    if (coh_n) coh_low_frac = (double)(g_rank_low[1] + g_rank_low[3]) / (double)coh_n;
+    pthread_mutex_unlock(&g_dl_rank_lock);
+  }
+  const char *agree = "unresolved";
+  if (coh_low_frac >= 0) {
+    const bool probe_multi = coh_low_frac >= 0.5;
+    agree = (probe_multi == (best > 1)) ? "CORROBORATED" : "CONTRADICTED";
+  }
+  atomic_store_explicit(&g_rank_verdict_logged, 1, memory_order_relaxed);
+  LOG_A(PHY, "SENSING: RANK IDENTIFIED from DCI DM-RS ports: modal_layers=%d over %llu CRC-OK grants "
+             "hist[1=%llu 2=%llu 3=%llu 4=%llu] | probe: pair-coherence low(<0.5)=%.0f%% of %llu => %s "
+             "(pair test proves >1 port, not how many; Nl gives the count)\n",
+        best, (unsigned long long)tot,
+        (unsigned long long)atomic_load_explicit(&g_nl_ok[1], memory_order_relaxed),
+        (unsigned long long)atomic_load_explicit(&g_nl_ok[2], memory_order_relaxed),
+        (unsigned long long)atomic_load_explicit(&g_nl_ok[3], memory_order_relaxed),
+        (unsigned long long)atomic_load_explicit(&g_nl_ok[4], memory_order_relaxed),
+        coh_low_frac >= 0 ? coh_low_frac * 100.0 : -1.0, (unsigned long long)coh_n, agree);
+}
 /* Per-RNTI DL decode census: "DL converged" is a per-UE statement, and a cell-wide CRC rate can hide
  * one UE decoding at 80 % and the other at 0 %. Indexed by C-RNTI; printed with the PDSCHQ census. */
 static _Atomic uint32_t g_rnti_dec[65536], g_rnti_ok[65536];
@@ -192,7 +241,6 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
     nr_pdsch_passive_decode_result_t dec;
     const nr_pdsch_passive_decode_status_t st =
         nr_pdsch_passive_decode(ue, &proc, &job.dlsch_pdu, &job.freq_alloc, &job.grant, rxdataF, &dec);
-
     nr_passive_replay_dl(&job, &dec);
     nr_slot_fep_fo_override_hz = saved_fo;
     if (st == NR_PDSCH_PASSIVE_DECODE_UNSUPPORTED && !nr_passive_samples_valid(
@@ -225,6 +273,9 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
         nr_pdsch_xoverhead_observe(dec.cw.qamModOrder, dec.cw.targetCodeRate, job.freq_alloc.num_rbs,
                                    (uint16_t)pdu->number_symbols, (uint16_t)(nb_re_dmrs * dmrs_len),
                                    job.grant.nb_rb_oh, job.grant.tb_scaling, dec.cw.Nl, crc);
+        if (crc && dec.cw.Nl < 8)
+          atomic_fetch_add_explicit(&g_nl_ok[dec.cw.Nl], 1, memory_order_relaxed);
+        nr_pdsch_passive_rank_verdict();
         /* RANK PROBE (OTA 2026-09-12: full-band grants 0/10000 CRC, short grants 8/9, gNB has 4 DL
          * antennas and the decoder assumes one layer). Per-grant even/odd DM-RS pair coherence under
          * the assumed identity: ~1 single-layer, collapsed two-layer. Censused by size and CRC. */
@@ -320,7 +371,17 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
 
 static void report_sweep(const nr_pdsch_sweep_report_t *r)
 {
+  if (r->invalidated) {
+    LOG_W(PHY,"PDSCH_RELEARN reason=CRC_EVIDENCE_LOSS config=%lx rnti=0x%x tda=%u "
+              "generation=%lu->%lu reacquisitions=%lu consecutive_failures=%lu "
+              "reference_crc_lower=%.6f action=LOCAL_HYPOTHESIS_SEARCH state=UNRESOLVED\n",
+          (unsigned long)r->configuration,r->rnti,r->tda,
+          (unsigned long)r->previous_generation,(unsigned long)r->generation,
+          (unsigned long)r->reacquisitions,(unsigned long)r->failure_streak,r->reference_crc_lower);
+    return;
+  }
   if (r->operational)
+
     LOG_I(PHY,"Technique D operational rnti=0x%x config=%lx tda=%u crc=%lu/%lu\n",
           r->rnti,(unsigned long)r->configuration,r->tda,(unsigned long)r->passes,(unsigned long)r->trials);
   else

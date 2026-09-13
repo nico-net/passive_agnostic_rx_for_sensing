@@ -137,6 +137,28 @@ bool nr_pdcch_blind_monitor_autoconf_css0(int num_rbs,
     return false;
   }
 
+  /* IDEMPOTENT. This is called from the MIB-derivation path, which re-runs on every
+   * re-acquisition -- and re-applying it is NOT harmless: the block below overwrites LIVE discovery
+   * state, pinning rnti_min/max back to SI-RNTI only and zeroing the energy gate. MEASURED
+   * 2026-09-13: with ISAC_AUTO_ACQUIRE=1 the auto_timing re-acquisition loop drove this to 765,195
+   * calls (vs 385 without it), so the RNTI window was slammed back to SI-RNTI continuously and the
+   * receiver could never graduate from the common search space to the dedicated one -- SI-RNTI
+   * accepts flowed (SI=250) while C-RNTI grants, PDSCH and Technique-D convergence stayed at zero.
+   * Apply on the FIRST call and on a genuine config CHANGE; otherwise leave the running config
+   * alone. Comparing the inputs (not a "done" flag) keeps a real cell reconfiguration working. */
+  {
+    static bool s_applied;
+    static int  s_prev[12];
+    const int now[12] = {num_rbs, num_symbols, cset_start_rb, ssb_offset_point_a, ss_period_slots,
+                         ss_slot, ss_duration, ss_first_symbol, mux_pattern, pci, rb_offset,
+                         dmrs_typea_position};
+    if (s_applied && memcmp(s_prev, now, sizeof(now)) == 0) {
+      return true; // identical derivation, already live -- do not disturb discovery state
+    }
+    memcpy(s_prev, now, sizeof(now));
+    s_applied = true;
+  }
+
   g_cfg.coreset_type                     = 1; // MIB/SIB1 CORESET#0
   g_cfg.coreset_freq_domain              = num_rbs / 6; // the monitor counts 6-RB groups
   g_cfg.coreset_duration                 = num_symbols;
@@ -3318,6 +3340,58 @@ int nr_pdcch_blind_dl_layout_candidates(const nr_pdcch_blind_raw_result_t *raw,
       if (count==3) return 0; // at most one TDA width per BWP width at an exact length
       out[count]=parsed;
       ids[count++]=(uint8_t)(bw*5+td);
+    }
+  }
+  if (count) return count;
+
+  /* ---- OPTIONAL-FIELD FALLBACK  (agnosticity #6) ---------------------------------------------
+   * The profile above fixes every optional DCI-1_1 field at its "not configured" width. When that
+   * explains the observed payload length, it is the answer and we never get here -- so this pass
+   * cannot change the behaviour of a deployment that already works. It runs ONLY when NO standard
+   * layout reproduces the length, which is exactly the case the ledger called "general
+   * optional-field/BWP/type-0 support missing": a gNB that configures dynamic PRB bundling,
+   * rate-matching groups, ZP-CSI-RS or VRB-to-PRB interleaving carries extra bits the standard
+   * profile cannot account for, and today that DCI is simply unexplainable.
+   * Widths are the legal alternatives from TS 38.212 7.3.1.2.2, and the exact-length filter plus
+   * the TB-CRC authority downstream remain the arbiter -- these are hypotheses, not learned facts.
+   * Ambiguity is still refused (>3 surviving layouts return 0) rather than guessed. */
+  static const int kPrbBundling[2] = {0, 1};
+  static const int kRateMatch[3]   = {0, 1, 2};
+  static const int kZpCsi[3]       = {0, 1, 2};
+  static const int kVrbToPrb[2]    = {0, 1};
+  for (int bw=0; bw<=2; ++bw) {
+    for (int td=0; td<=4; ++td) {
+      for (unsigned pb=0; pb<2; ++pb) {
+        for (unsigned rm=0; rm<3; ++rm) {
+          for (unsigned zp=0; zp<3; ++zp) {
+            for (unsigned vp=0; vp<2; ++vp) {
+              if (!kPrbBundling[pb] && !kRateMatch[rm] && !kZpCsi[zp] && !kVrbToPrb[vp])
+                continue; // already covered by the standard pass above
+              nr_pdcch_blind_extract_opts_t o={0};
+              o.bwp_indicator_bits=bw;
+              o.harq_pid_bits=4;
+              o.dai_bits=2;
+              o.pdsch_to_harq_bits=3;
+              o.antenna_ports_bits=4;
+              o.srs_request_bits=2;
+              o.tda_count=1<<td;
+              o.dmrs_add_pos=0;
+              o.dmrs_max_length=1;
+              o.prb_bundling_bits=kPrbBundling[pb];
+              o.rate_matching_bits=kRateMatch[rm];
+              o.zp_csirs_bits=kZpCsi[zp];
+              o.vrb_to_prb_bits=kVrbToPrb[vp];
+              if (nr_pdcch_blind_dci_size_ex(bwp,&o)!=len) continue;
+              for (int i=0;i<o.tda_count;++i) { o.tda_start[i]=1; o.tda_length[i]=13; o.tda_mapping[i]=0; }
+              nr_pdcch_blind_result_t parsed;
+              if (!nr_pdcch_blind_extract_11(raw,len,bwp,typeA,&o,&parsed)) continue;
+              if (count==3) return 0; // ambiguous optional-field layouts are not a unique solution
+              out[count]=parsed;
+              ids[count++]=(uint8_t)(64 + ((bw*5+td)&0x1f));
+            }
+          }
+        }
+      }
     }
   }
   return count;

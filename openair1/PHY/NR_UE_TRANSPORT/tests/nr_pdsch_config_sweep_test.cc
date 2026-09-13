@@ -116,16 +116,16 @@ static nr_pdsch_sweep_ticket_t select_context(uint64_t config, uint16_t rnti, ui
   EXPECT_TRUE(nr_pdsch_config_sweep_select(config,rnti,tda,2,0,test_legal,&ticket,&h));
   return ticket;
 }
-TEST(PdschConfigSweep, SeparatesUesTdaAndConfiguration) {
+TEST(PdschConfigSweep, PoolsRntiButSeparatesTdaAndConfiguration) {
   nr_pdsch_config_sweep_reset_all();
   const auto a=select_context(1,0x4601,0), b=select_context(1,0x4602,0),
              c=select_context(1,0x4601,1), d=select_context(2,0x4601,0);
-  nr_pdsch_config_sweep_feedback(&a,true,nullptr);
-  for(auto ticket : {a,b,c,d}) {
-    nr_pdsch_config_sweep_state_t state{};
-    ASSERT_TRUE(nr_pdsch_config_sweep_snapshot(&ticket,&state));
-    EXPECT_EQ(state.trials[ticket.hypothesis], ticket.generation==a.generation ? 1u : 0u);
-  }
+  // Same configuration+tda, different RNTI -> ONE shared context (evidence pools across UEs).
+  EXPECT_EQ(b.context_slot, a.context_slot);
+  EXPECT_EQ(b.generation, a.generation);
+  // Different tda, or different configuration -> distinct contexts.
+  EXPECT_NE(c.context_slot, a.context_slot);
+  EXPECT_NE(d.context_slot, a.context_slot);
 }
 TEST(PdschConfigSweep, StaleQueuedFeedbackCannotScoreAfterResetOrEviction) {
   nr_pdsch_config_sweep_reset_all();
@@ -154,16 +154,16 @@ TEST(PdschConfigSweep, ConcurrentConsumerFeedbackLosesNoTrials) {
   EXPECT_EQ(state.ok[ticket.hypothesis],30000u);
   EXPECT_EQ(state.winner,-1); // other hypotheses received no trials
 }
-TEST(PdschConfigSweep, IndependentContextsCanConvergeToDifferentConfigurations) {
+TEST(PdschConfigSweep, IndependentConfigsAndTdasConvergeSeparately) {
   nr_pdsch_config_sweep_reset_all();
   for(int i=0;i<400*NR_PDSCH_SWEEP_MAX_HYP;i++) {
     for(int ctx=0;ctx<3;ctx++) {
-      auto ticket=select_context(1,ctx==1 ? 0x4602 : 0x4601,ctx==2 ? 1 : 0);
+      auto ticket=select_context(ctx==1 ? 2 : 1,0x4601,ctx==2 ? 1 : 0);
       nr_pdsch_config_sweep_feedback(&ticket,ticket.hypothesis==ctx+2,nullptr);
     }
   }
   for(int ctx=0;ctx<3;ctx++) {
-    auto ticket=select_context(1,ctx==1 ? 0x4602 : 0x4601,ctx==2 ? 1 : 0);
+    auto ticket=select_context(ctx==1 ? 2 : 1,0x4601,ctx==2 ? 1 : 0);
     nr_pdsch_config_sweep_state_t state{};
     ASSERT_TRUE(nr_pdsch_config_sweep_snapshot(&ticket,&state));
     EXPECT_EQ(state.winner,ctx+2);
@@ -182,4 +182,120 @@ int main(int argc, char **argv)
 {
   testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();
+}
+
+/* Recovery fixtures use three independently identifiable MCS-table hypotheses.
+ * CRC outcomes model a stationary link or an explicit change, not a layout hint. */
+static int32_t recovery_legal(int, int length, int start, int, int add, int maxlen)
+{
+  return start==1 && length==13 && add==0 && maxlen==1 ? 4 : 0;
+}
+static nr_pdsch_sweep_ticket_t recovery_select(uint64_t config=800, uint16_t rnti=0x4601)
+{
+  nr_pdsch_sweep_ticket_t ticket{};
+  nr_pdsch_cfg_hypothesis_t hypothesis{};
+  EXPECT_TRUE(nr_pdsch_config_sweep_select(config,rnti,0,0,0,recovery_legal,&ticket,&hypothesis));
+  return ticket;
+}
+static nr_pdsch_sweep_ticket_t recovery_settle(int truth, int success_period=1,
+                                               uint64_t config=800, uint16_t rnti=0x4601)
+{
+  unsigned truth_trials=0;
+  for (int i=0;i<12000;++i) {
+    auto ticket=recovery_select(config,rnti);
+    if (ticket.settled) return ticket;
+    const bool pass=ticket.hypothesis==truth && truth_trials++%success_period==0;
+    nr_pdsch_config_sweep_feedback(&ticket,pass,nullptr);
+  }
+  ADD_FAILURE() << "fixture did not converge";
+  return {};
+}
+static nr_pdsch_sweep_report_t last_recovery_report{};
+static void recovery_report(const nr_pdsch_sweep_report_t *r)
+{
+  if (r->invalidated) last_recovery_report=*r;
+}
+struct PdschRecovery : testing::Test {
+  void SetUp() override {
+    nr_pdsch_config_sweep_reset_all();
+    ASSERT_TRUE(nr_pdsch_config_sweep_set_recovery_policy(32,1e-6));
+    last_recovery_report={};
+    nr_pdsch_config_sweep_set_reporter(recovery_report);
+  }
+  void TearDown() override {
+    nr_pdsch_config_sweep_set_reporter(nullptr);
+    nr_pdsch_config_sweep_set_recovery_policy(32,1e-6);
+    nr_pdsch_config_sweep_reset_all();
+  }
+};
+TEST_F(PdschRecovery, SustainedLossReopensOnlyAffectedContextAndRejectsStaleFeedback) {
+  const auto old=recovery_settle(0), other=recovery_settle(1,1,801,0x4602);
+  ASSERT_TRUE(old.settled && other.settled);
+  unsigned failures=0;
+  for (;failures<5000 && nr_pdsch_config_sweep_is_settled(800,0x4601,0,0);++failures) {
+    auto t=recovery_select();
+    nr_pdsch_config_sweep_feedback(&t,false,nullptr);
+  }
+  ASSERT_LT(failures,5000u);
+  EXPECT_GE(failures,32u);
+  EXPECT_TRUE(last_recovery_report.invalidated);
+  EXPECT_EQ(last_recovery_report.previous_generation,old.generation);
+  EXPECT_EQ(last_recovery_report.failure_streak,failures);
+  EXPECT_EQ(last_recovery_report.reacquisitions,1u);
+  EXPECT_GT(last_recovery_report.reference_crc_lower,0);
+  EXPECT_FALSE(nr_pdsch_config_sweep_is_settled(800,0x4601,0,0));
+  EXPECT_TRUE(nr_pdsch_config_sweep_is_settled(801,0x4602,0,0));
+  const auto fresh=recovery_select();
+  EXPECT_NE(fresh.generation,old.generation);
+  EXPECT_FALSE(fresh.settled);
+  EXPECT_FALSE(nr_pdsch_config_sweep_feedback(&old,true,nullptr));
+  nr_pdsch_config_sweep_state_t state{};
+  EXPECT_FALSE(nr_pdsch_config_sweep_snapshot(&old,&state));
+  ASSERT_TRUE(nr_pdsch_config_sweep_snapshot(&fresh,&state));
+  for(int i=0;i<state.n_hyp;++i) { EXPECT_EQ(state.trials[i],0u); EXPECT_EQ(state.ok[i],0u); }
+  const auto changed=recovery_settle(2);
+  EXPECT_TRUE(changed.settled);
+  EXPECT_EQ(changed.hypothesis,2);
+  EXPECT_EQ(changed.generation,fresh.generation);
+}
+TEST_F(PdschRecovery, IntermittentFailuresDoNotResetAWorkingContext) {
+  const auto initial=recovery_settle(0);
+  for(int i=0;i<300;++i) {
+    auto t=recovery_select();
+    nr_pdsch_config_sweep_feedback(&t,i%3!=0,nullptr);
+  }
+  auto final=recovery_select();
+  EXPECT_TRUE(final.settled);
+  EXPECT_EQ(final.generation,initial.generation);
+  EXPECT_FALSE(last_recovery_report.invalidated);
+}
+TEST_F(PdschRecovery, MarginalLinkIsNotJudgedAgainstAHighRateAssumption) {
+  const auto initial=recovery_settle(0,20);
+  ASSERT_TRUE(initial.settled);
+  for(int i=0;i<64;++i) {
+    auto t=recovery_select();
+    nr_pdsch_config_sweep_feedback(&t,false,nullptr);
+  }
+  auto final=recovery_select();
+  EXPECT_TRUE(final.settled);
+  EXPECT_EQ(final.generation,initial.generation);
+  EXPECT_FALSE(last_recovery_report.invalidated);
+}
+TEST_F(PdschRecovery, QueuedExplorationFailuresAreNotOperationalLossEvidence) {
+  std::vector<nr_pdsch_sweep_ticket_t> probes;
+  for(int i=0;i<100;++i) probes.push_back(recovery_select());
+  const auto initial=recovery_settle(0);
+  ASSERT_TRUE(initial.settled);
+  for(const auto &t:probes) nr_pdsch_config_sweep_feedback(&t,false,nullptr);
+  auto final=recovery_select();
+  EXPECT_TRUE(final.settled);
+  EXPECT_EQ(final.generation,initial.generation);
+  EXPECT_FALSE(last_recovery_report.invalidated);
+}
+TEST_F(PdschRecovery, PolicyRejectsInvalidValuesWithoutDisablingRecovery) {
+  EXPECT_FALSE(nr_pdsch_config_sweep_set_recovery_policy(0,1e-6));
+  EXPECT_FALSE(nr_pdsch_config_sweep_set_recovery_policy(32,0));
+  EXPECT_FALSE(nr_pdsch_config_sweep_set_recovery_policy(32,1));
+  EXPECT_FALSE(nr_pdsch_config_sweep_set_recovery_policy(32,-0.1));
+  EXPECT_TRUE(nr_pdsch_config_sweep_set_recovery_policy(64,1e-7));
 }

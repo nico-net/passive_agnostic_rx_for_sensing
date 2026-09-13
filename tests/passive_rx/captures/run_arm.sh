@@ -154,7 +154,12 @@ for t in $(seq 1 "$TRIES"); do
     echo "  (X410 unreachable or FORCE_HWD set -- restarting usrp-hwd)"
     ssh -o BatchMode=yes -o StrictHostKeyChecking=no root@$MGMT "systemctl restart usrp-hwd" >/dev/null 2>&1
     sudo rm -rf /var/run/dpdk/* /dev/hugepages/* 2>/dev/null
-    sleep 40
+    # SETTLE, do not just wait for MPM to answer. MEASURED 2026-09-13: with the old 40 s the receiver
+    # failed to acquire 0-for-5+ in a row -- PSS/SSS found the SSB every time but PBCH never decoded
+    # (`pbch not decoded on any branch` -> `synch Failed` -> rescan), which mimics a CFO/code fault and
+    # cost a day of misdirected debugging. The front end sits near the noise floor for a while after
+    # an MPM restart; giving it ~3 min produced a first-try lock repeatedly. Override with SETTLE_S.
+    sleep ${SETTLE_S:-180}
   fi
   for a in 1 2 3 4; do
     timeout 45 uhd_usrp_probe --args "type=x4xx,addr=$DATA,mgmt_addr=$MGMT" 2>&1 \
@@ -186,7 +191,7 @@ for t in $(seq 1 "$TRIES"); do
   sudo env ISAC_DISC_NO_RESYNC=1  \
     ISAC_PDCCH_TIMING=1 ISAC_PUSCH_TIMING=1 ISAC_PUSCH_DIAG=1 \
    ${PDCCHTIMING:+ISAC_PDCCH_TIMING=1} ${PUSCHTIMING:+ISAC_PUSCH_TIMING=1} ${PUSCHDIAG:+ISAC_PUSCH_DIAG=1} \
-    ISAC_CFO_TRACK_HZ=800 ISAC_CFO_TRACK_PERIOD=20 ${CFOAPPLY:+ISAC_CFO_TRACK_APPLY=1} \
+    ISAC_CFO_TRACK_HZ=${CFOTRKHZ:-800} ISAC_CFO_TRACK_PERIOD=20 ${CFOAPPLY:+ISAC_CFO_TRACK_APPLY=1} \
     ISAC_UL_TA_SWEEP=${TASWEEP:-0:0:0} ${ULPROBE:+ISAC_UL_PROBE=1} \
     ${GAINTRIM:+ISAC_RX_GAIN_TRIM=$GAINTRIM} \
     ${MRC:+ISAC_RX_MRC_MODE=$MRC} ${BRMIN:+ISAC_RX_BRANCH_MIN_DB=$BRMIN} ${RXBRANCH:+ISAC_RX_BRANCH=$RXBRANCH} ${NVARFIX:+ISAC_RX_NVAR_FIX=$NVARFIX} ${BRFO:+ISAC_RX_BRANCH_FO=$BRFO} ${FULLCRC:+ISAC_PDCCH_FULLCRC=1} ${CFGTRACE:+ISAC_PDCCH_CFGTRACE=1 ISAC_PDCCH_CFGTRACE_SLOT=$CFGTRACE} ${LLRPROBE:+ISAC_PDCCH_LLRPROBE=1 ISAC_PDCCH_LLRPROBE_SLOT=$LLRPROBE} ${DCIGT:+ISAC_PDCCH_DCIGT=1} ${OTACFG:+ISAC_OTA_CFG=1} ${SIB1DIAG:+ISAC_SIB1_DIAG=1} ${DISCOVERDIAG:+ISAC_DISCOVER_DIAG=1} ${EVMPROBE:+ISAC_PDSCH_EVM=1} ${LLRSCALE:+ISAC_LLR_SCALE=$LLRSCALE} ${SFOCORR:+ISAC_SFO_CORRECT=1} ${CFGSWEEP:+ISAC_PDSCH_CFG_SWEEP=1} ${SUBSETSCAN:+ISAC_SUBSET_SCAN=$SUBSETSCAN} ${DCIWATCH:+ISAC_DCI_WATCH_RNTI=$DCIWATCH} ${FORCEDCILEN:+ISAC_FORCE_DCI_LEN=$FORCEDCILEN} \
@@ -194,13 +199,13 @@ for t in $(seq 1 "$TRIES"); do
     ${SENSECOMB:+ISAC_SENSE_COMB=$SENSECOMB} ${SLOTPOOL:+ISAC_SLOT_POOL=$SLOTPOOL} \
     ${SYNCONLY:+ISAC_SYNC_ONLY=$SYNCONLY} \
     ${TSYNCAUDIT:+ISAC_TSYNC_AUDIT=$TSYNCAUDIT} \
-    ISAC_TSYNC_RESET=${TSYNCRESET:-0} \
+    ISAC_TSYNC_RESET=${TSYNCRESET:-0} ISAC_AUTO_ACQUIRE=${AUTOACQ:-0} ISAC_ACQ_CFO_MAX_HZ=${ACQCFOMAX:-60000} \
     ${CPUSET:+CPUSET=$CPUSET} BIN=$BIN \
     setsid nohup bash -c "ulimit -c 0; exec timeout $DUR ${CPUSET:+taskset -c $CPUSET} \
     $BIN \
     --usrp-args type=x4xx,addr=$DATA,mgmt_addr=$MGMT${DPDK:+,use_dpdk=$DPDK} \
     -O $CONF -r 273 --numerology 1 --band 78 -C $CARRIER $FREQARGS --ue-rxgain $RXG \
-    --ue-nb-ant-rx $NANT --ue-nb-ant-tx $NANT --passive-rx --ue-fo-compensation \
+    --ue-nb-ant-rx $NANT --ue-nb-ant-tx $NANT --passive-rx --ue-fo-compensation --initial-fo ${INITIALFO:--15000} \
     ${CONTFO:+--cont-fo-comp $CONTFO --freq-sync-P $FSP --freq-sync-I $FSI} \
     ${OFFDIV:+--offset-divisor $OFFDIV} \
     --thread-pool 0,1,4,5,6,7 --time-sync-I 0.01 --ntn-initial-time-drift -4.25 -A 90" \
@@ -220,11 +225,17 @@ for t in $(seq 1 "$TRIES"); do
     done > "$OUT/nic.csv" ) &
   # CFO MIS-LOCK WATCHDOG. The trim loop's own gate (streak >= 5 agreeing windows, spread < 500 Hz,
   # |ema| > thr) is what CFOAPPLY used to fire on. It discriminates correctly: it said stable=yes on
-  # both measured mis-locks and withheld on a noisy-but-recoverable lock. But ACTING on it means
-  # nrue_ru_reinit(), which killed the radio in 2 of 2 runs (once rpc::timeout on rfdc_set_nco_freq,
-  # once left deaf at the noise floor). Retrying costs 4 minutes, so abort instead of retuning.
+  # both measured mis-locks and withheld on a noisy-but-recoverable lock. Acting on it USED TO kill
+  # the radio in 2 of 2 runs, which is why this aborts instead of retuning -- but that was caused by
+  # the apply path failing to seed the re-acquisition with the correction it had just made, so the
+  # re-acquisition measured the RESIDUAL and applied it as the TOTAL, undoing the fix. With that seed
+  # restored (nr-ue.c), a forced retune completed -16325 -> -16209 Hz and the receiver recovered all
+  # the way to TRACKING with six UEs decoding at 32-44 %. So this abort is ONLY correct when the
+  # operator has NOT armed the retune: with CFOAPPLY set the retune is intentional and killing the
+  # run on `stable=yes` discards a good capture (measured: a successful forced retune was stamped
+  # VOID_CFO_MISLOCK). Skip the abort when CFOAPPLY is set.
   ( while pgrep -x nr-uesoftmodem >/dev/null; do
-      if [ -z "$CONTFO" ] && grep -aq "CFOTRK .*stable=yes" "$OUT/run.log" 2>/dev/null; then
+      if [ -z "$CONTFO" ] && [ -z "$CFOAPPLY" ] && grep -aq "CFOTRK .*stable=yes" "$OUT/run.log" 2>/dev/null; then
         touch "$OUT/cfo_mislock"; sudo pkill -9 -x nr-uesoftmodem; break
       fi
       sleep 5

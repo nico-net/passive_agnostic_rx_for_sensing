@@ -36,6 +36,8 @@
 #include <sys/resource.h>
 #include <thread>
 #include <atomic>
+#include <chrono>
+#include <new>
 #include <mutex>
 #include <condition_variable>
 #include <deque>
@@ -665,6 +667,14 @@ typedef struct {
   int64_t tx_count;
   int64_t rx_count;
   int wait_for_first_pps;
+  std::atomic<bool> rx_stop_requested{false};
+  std::mutex rx_mutex;
+  bool rx_started = false;
+  bool gpio_configured = false;
+  uint64_t previous_rx_timestamp = 0;
+  int previous_rx_samples = 0;
+  uint64_t rx_discontinuities = 0;
+
   int use_gps;
   //int first_tx;
   //int first_rx;
@@ -865,6 +875,8 @@ static void trx_usrp_start_generic_gpio(usrp_state_t *s)
 /*! \brief Called to start the USRP transceiver. Return 0 if OK, < 0 if error
     @param device pointer to the device structure specific to the RF hardware target
 */
+static void trx_usrp_finish_rx(usrp_state_t *s);
+
 static int trx_usrp_start_impl(openair0_device_t *device)
 {
   usrp_state_t *s = (usrp_state_t *)device->priv;
@@ -876,9 +888,14 @@ static int trx_usrp_start_impl(openair0_device_t *device)
    * which is uncaught and aborts the process. MEASURED: the recovery reproduced the stall, fired
    * correctly, then core-dumped here. Everything below this block is genuine stream state and
    * must still run on every start. */
-  static bool s_gpio_configured = false;
-  if (!s_gpio_configured) {
-    s_gpio_configured = true;
+  std::lock_guard<std::mutex> receive_guard(s->rx_mutex);
+  if (s->rx_started)
+    trx_usrp_finish_rx(s);
+  s->rx_stop_requested.store(false);
+  s->previous_rx_samples = 0;
+  s->rx_discontinuities = 0;
+  if (!s->gpio_configured) {
+    s->gpio_configured = true;
     s->gpio_bank = (char *) "FP0"; //good for B210, X310 and N310
 
 #if UHD_VERSION>4000000
@@ -914,7 +931,12 @@ static int trx_usrp_start_impl(openair0_device_t *device)
     //wait for next pps
   uhd::time_spec_t last_pps = s->usrp->get_time_last_pps();
   uhd::time_spec_t current_pps = s->usrp->get_time_last_pps();
+  const auto pps_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
   while(current_pps == last_pps) {
+    if (s->rx_stop_requested.load() || std::chrono::steady_clock::now() >= pps_deadline) {
+      LOG_E(HW, "SENSING: RFSTALL USRP PPS/start wait cancelled or expired\n");
+      return -1;
+    }
     boost::this_thread::sleep(boost::posix_time::milliseconds(1));
     current_pps = s->usrp->get_time_last_pps();
   }
@@ -925,6 +947,8 @@ static int trx_usrp_start_impl(openair0_device_t *device)
   cmd.time_spec = uhd::time_spec_t(current_pps+1.0);
   cmd.stream_now = false; // start at constant delay
   s->rx_stream->issue_stream_cmd(cmd);
+  s->rx_started = true;
+  LOG_I(HW, "USRP_RX_START scheduled=%.9f\n", cmd.time_spec.get_real_secs());
 
   return 0;
 }
@@ -953,7 +977,7 @@ static int trx_usrp_start(openair0_device_t *device)
 static void trx_usrp_send_end_of_burst(usrp_state_t *s)
 {
   // if last packet sent was end of burst no need to do anything. otherwise send end of burst packet
-  if (s->tx_md.end_of_burst)
+  if (!s->tx_stream || s->tx_count == 0 || s->tx_md.end_of_burst)
     return;
   s->tx_md.end_of_burst = true;
   s->tx_md.start_of_burst = false;
@@ -963,37 +987,35 @@ static void trx_usrp_send_end_of_burst(usrp_state_t *s)
 
 static void trx_usrp_finish_rx(usrp_state_t *s)
 {
-  /* finish rx by sending STREAM_MODE_STOP_CONTINUOUS */
+  if (!s->rx_stream)
+    return;
+  /* Receive calls are serialized with the producer, including on fatal exit. */
   uhd::stream_cmd_t cmd(uhd::stream_cmd_t::STREAM_MODE_STOP_CONTINUOUS);
+  cmd.stream_now = true;
   s->rx_stream->issue_stream_cmd(cmd);
-
-  /* Collect the samples still in flight, so the next start_rx begins on a clean stream.
-   *
-   * BOUNDED, and that is load-bearing: this loop used to be an unbounded
-   * "do { recv } while (samples > 0)". On an X410 (RFNoC) the stream does not reliably run dry
-   * after STOP_CONTINUOUS, so recv keeps returning samples and the loop never exits. MEASURED:
-   * the UE completed initial sync against a live 100 MHz cell, then hit this during its first
-   * resync and froze permanently -- UEthread_0 parked in recv(), every other thread idle, not one
-   * further line of log output, and no error anywhere. It looks exactly like a protocol/decode
-   * problem and is not one. Stop on the first timeout/error, and cap the iteration count so a
-   * device that keeps producing can never wedge the UE. */
-  size_t samples;
-  uint8_t buf[1024];
-  std::vector<void *> buff_ptrs;
-  for (size_t i = 0; i < s->usrp->get_rx_num_channels(); i++) buff_ptrs.push_back(buf);
-  const int max_drain_iterations = 10000;
-  int iterations = 0;
+  s->rx_started = false;
+  const size_t count = s->rx_stream->get_max_num_samps();
+  std::vector<std::vector<int32_t>> buffers(s->rx_stream->get_num_channels(), std::vector<int32_t>(count));
+  std::vector<void *> pointers;
+  for (auto &buffer : buffers)
+    pointers.push_back(buffer.data());
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+  size_t drained = 0;
+  bool dry = false;
   do {
-    samples = s->rx_stream->recv(buff_ptrs, sizeof(buf) / 4, s->rx_md, 0.01);
-    if (s->rx_md.error_code != uhd::rx_metadata_t::ERROR_CODE_NONE) {
-      break; // timeout (stream is dry) or a real error -- either way, stop draining
+    uhd::rx_metadata_t metadata;
+    const size_t received = s->rx_stream->recv(pointers, count, metadata, 0.01, true);
+    drained += received;
+    if (received == 0 || metadata.error_code != uhd::rx_metadata_t::ERROR_CODE_NONE) {
+      dry = metadata.error_code == uhd::rx_metadata_t::ERROR_CODE_TIMEOUT || received == 0;
+      break;
     }
-  } while (samples > 0 && ++iterations < max_drain_iterations);
-
-  if (iterations >= max_drain_iterations) {
-    LOG_W(HW, "RX stream still delivering after %d drain iterations, continuing anyway\n", max_drain_iterations);
-  }
+  } while (std::chrono::steady_clock::now() < deadline);
+  LOG_I(HW, "USRP_RX_STOP drained=%zu dry=%d\n", drained, dry);
+  if (!dry)
+    LOG_W(HW, "USRP RX drain deadline/error; releasing streamer instead of waiting indefinitely\n");
 }
+
 
 static void trx_usrp_write_reset(openair0_thread_t *wt);
 
@@ -1007,7 +1029,10 @@ static void trx_usrp_end(openair0_device_t *device)
 
   usrp_state_t *s = (usrp_state_t *)device->priv;
 
-  AssertFatal(s != NULL, "%s() called on uninitialized USRP\n", __func__);
+  /* Device initialization may already have released priv. Cleanup must be
+   * idempotent; asserting here recursively re-enters the shutdown handler. */
+  if (s == NULL)
+    return;
   iqrecorder_end(device);
 
   LOG_I(HW, "releasing USRP\n");
@@ -1019,13 +1044,21 @@ static void trx_usrp_end(openair0_device_t *device)
    * talks to the device can throw. An uncaught throw here would abort the receiver during the very
    * recovery meant to save it. Dropping the shared_ptrs below is what actually releases the claim,
    * so it must happen even if the graceful stop fails. */
+  s->rx_stop_requested.store(true);
   try {
     trx_usrp_send_end_of_burst(s);
-    trx_usrp_finish_rx(s);
-  } catch (const std::exception &e) {
-    LOG_W(HW, "trx_usrp_end: graceful stop failed (%s); releasing device anyway\n", e.what());
   } catch (...) {
-    LOG_W(HW, "trx_usrp_end: graceful stop failed; releasing device anyway\n");
+    LOG_W(HW, "trx_usrp_end: TX stop failed; still stopping RX\n");
+  }
+  {
+    std::lock_guard<std::mutex> receive_guard(s->rx_mutex);
+    try {
+      trx_usrp_finish_rx(s);
+    } catch (const std::exception &e) {
+      LOG_W(HW, "trx_usrp_end: RX stop failed (%s); releasing device anyway\n", e.what());
+    } catch (...) {
+      LOG_W(HW, "trx_usrp_end: RX stop failed; releasing device anyway\n");
+    }
   }
   /* set tx_stream, rx_stream, and usrp to NULL to clear/free them */
   try {
@@ -1042,7 +1075,7 @@ static void trx_usrp_end(openair0_device_t *device)
   free(s->decim_il_stage1_re); free(s->decim_il_stage1_im);
   free(s->decim_il_stage2_re); free(s->decim_il_stage2_im);
   delete s->decim_pool; // safe on NULL (never created if decim_ratio never exceeded 1)
-  free(s);
+  delete s;
   device->priv = NULL;
   device->trx_start_func = NULL;
   device->trx_get_stats_func = NULL;
@@ -1399,6 +1432,12 @@ static void usrp_decim_ensure_scratch(usrp_state_t *s, int ch, int cc, int nsamp
 static int trx_usrp_read(openair0_device_t *device, openair0_timestamp_t *ptimestamp, void **buff, int nsamps, int cc)
 {
   usrp_state_t *s = (usrp_state_t *)device->priv;
+  *ptimestamp = 0;
+  if (!s)
+    return -1;
+  std::unique_lock<std::mutex> receive_guard(s->rx_mutex);
+  if (s->rx_stop_requested.load() || !s->rx_stream)
+    return -1;
   int samples_received=0;
   int nsamps2; // aligned to upper 32 or 16 byte boundary
   nsamps2 = (nsamps+7)>>3;
@@ -1429,33 +1468,63 @@ static int trx_usrp_read(openair0_device_t *device, openair0_timestamp_t *ptimes
       usrp_decim_ensure_scratch(s, i, cc, nsamps);
   }
 
-  samples_received=0;
-  while (samples_received != recv_target) {
-
-    if (cc>1) {
-      // receive multiple channels (e.g. RF A and RF B)
-      std::vector<void *> buff_ptrs;
-
-      for (int i=0; i<cc; i++) {
-        void *dst = (decim > 1) ? (void *)(s->decim_raw_buf[i] + 2 * samples_received)
-                                 : (void *)((int32_t *)buff_tmp[i] + samples_received);
-        buff_ptrs.push_back(dst);
-      }
-      samples_received += s->rx_stream->recv(buff_ptrs, recv_target-samples_received, s->rx_md);
+  samples_received = 0;
+  const bool first_buffer = s->wait_for_first_pps != 0;
+  const auto deadline = std::chrono::steady_clock::now()
+      + std::chrono::seconds(first_buffer ? 3 : 1);
+  uhd::rx_metadata_t first_metadata;
+  std::vector<void *> pointers(cc);
+  auto receive_failure = [&](const char *reason) {
+    LOG_E(HW, "SENSING: RFSTALL USRP_RX_%s reason=%s received=%d requested=%d metadata=%s\n",
+          first_buffer ? "START" : "READ", reason, samples_received, recv_target,
+          s->rx_md.to_pp_string(true).c_str());
+    s->rx_stop_requested.store(true);
+    return -1; // never publish a partial/invalid buffer or a fabricated timestamp
+  };
+  while (samples_received < recv_target) {
+    if (s->rx_stop_requested.load())
+      return -1;
+    if (std::chrono::steady_clock::now() >= deadline)
+      return receive_failure("receive deadline expired");
+    for (int i = 0; i < cc; ++i)
+      pointers[i] = decim > 1 ? (void *)(s->decim_raw_buf[i] + 2 * samples_received)
+                               : (void *)((int32_t *)buff_tmp[i] + samples_received);
+    size_t received;
+    try {
+      // A timed START legitimately produces no data before its scheduled epoch.
+      // One-packet startup reads bound each wait and preserve the first timestamp.
+      // Steady-state reads retain UHD's efficient multi-packet buffering.
+      received = s->rx_stream->recv(pointers, recv_target - samples_received, s->rx_md, 0.1, first_buffer);
+    } catch (const std::exception &error) {
+      return receive_failure(error.what());
+    }
+    if (s->rx_stop_requested.load())
+      return -1;
+    if (s->rx_md.error_code == uhd::rx_metadata_t::ERROR_CODE_TIMEOUT
+        && first_buffer && samples_received == 0)
+      continue;
+    if (s->rx_md.error_code != uhd::rx_metadata_t::ERROR_CODE_NONE)
+      return receive_failure("UHD metadata error");
+    if (!received)
+      continue;
+    if (!s->rx_md.has_time_spec)
+      return receive_failure("missing hardware timestamp");
+    if (samples_received == 0) {
+      first_metadata = s->rx_md;
     } else {
-      // receive a single channel (e.g. from connector RF A)
-      void *dst = (decim > 1) ? (void *)(s->decim_raw_buf[0] + 2 * samples_received)
-                               : (void *)((int32_t *)buff_tmp[0] + samples_received);
-      samples_received += s->rx_stream->recv(dst, recv_target-samples_received, s->rx_md);
+      const double raw_rate = s->sample_rate * decim;
+      const auto expected = first_metadata.time_spec.to_ticks(raw_rate) + samples_received;
+      if (s->rx_md.time_spec.to_ticks(raw_rate) != expected)
+        return receive_failure("non-contiguous fragments");
     }
-    if  ((s->wait_for_first_pps == 0) && (s->rx_md.error_code!=uhd::rx_metadata_t::ERROR_CODE_NONE))
-      break;
-
-    if ((s->wait_for_first_pps == 1) && (samples_received != recv_target)) {
-      printf("sleep...\n"); //usleep(100);
-    }
+    samples_received += received;
   }
-  if (samples_received == recv_target) s->wait_for_first_pps=0;
+  s->rx_md = first_metadata;
+  s->wait_for_first_pps = 0;
+  if (first_buffer)
+    LOG_I(HW, "USRP_RX_FIRST_BUFFER samples=%d timestamp=%.9f\n",
+          samples_received, first_metadata.time_spec.get_real_secs());
+
 
   // How many LOGICAL (post-decimation) samples we actually have to hand downstream. Equals nsamps
   // on a full/normal receive; on a short read while decimating, only whole decimation windows of
@@ -1591,9 +1660,9 @@ static int trx_usrp_read(openair0_device_t *device, openair0_timestamp_t *ptimes
    * and the UHD error/fragment flags. */
   {
     static_assert(sizeof(s->rx_timestamp) == 8, "Unexpected raw RF timestamp width");
-    static uint64_t s_prev_raw_ts = 0;
-    static int s_prev_returned = 0;
-    static uint64_t s_disc_count = 0;
+    uint64_t &s_prev_raw_ts = s->previous_rx_timestamp;
+    int &s_prev_returned = s->previous_rx_samples;
+    uint64_t &s_disc_count = s->rx_discontinuities;
     const uint64_t cur = (uint64_t)s->rx_timestamp;
     if (s_prev_returned > 0) {
       const uint64_t expect = s_prev_raw_ts + (uint64_t)s_prev_returned;
@@ -1808,17 +1877,15 @@ int trx_usrp_set_gains(openair0_device_t *device,
  */
 int trx_usrp_stop(openair0_device_t *device)
 {
-  /* Deliberately a NO-OP. An earlier version of the RFSTALL work made this drain the RX stream so
-   * a stall could be recovered by a stop/start -- but nrue_ru_stop() is ALSO called on NORMAL
-   * shutdown (nr-uesoftmodem.c:114 and :471), immediately before nrue_ru_end(), which drains
-   * again. On an X410 the drain is documented right here as not reliably running dry after
-   * STOP_CONTINUOUS, and it is bounded at 10000 iterations x 10 ms; doing it twice per exit hung
-   * the receiver at shutdown for minutes and left a zombie that wedged the capture harness.
-   * MEASURED: one run sat unreaped for ~28 minutes. Stall recovery goes straight to a full device
-   * re-init (nrue_ru_reinit), which is the tier that actually worked in every observed case. */
-  UNUSED(device);
+  if (device && device->priv) {
+    auto *s = static_cast<usrp_state_t *>(device->priv);
+    /* No competing recv() here. Wake the producer via its bounded waits;
+     * normal shutdown joins it before end() sends STOP and drains once. */
+    s->rx_stop_requested.store(true);
+  }
   return 0;
 }
+
 
 /*! \brief USRPB210 RX calibration table */
 rx_gain_calib_table_t calib_table_b210[] = {
@@ -1983,7 +2050,7 @@ extern "C" {
     int choffset = 0;
 
     if ( device->priv == NULL) {
-      s=(usrp_state_t *)calloc(1, sizeof(usrp_state_t));
+      s = new (std::nothrow) usrp_state_t{};
       device->priv=s;
       AssertFatal( s!=NULL,"USRP device: memory allocation failure\n");
     } else {
@@ -2029,11 +2096,13 @@ extern "C" {
 
     if (device_adds.size() == 0) {
       LOG_E(HW,"No USRP Device Found.\n ");
-      free(s);
+      delete s;
+      device->priv = NULL;
       return -1;
     } else if (device_adds.size() > 1) {
       LOG_E(HW,"More than one USRP Device Found. Please specify device more precisely in config file.\n");
-      free(s);
+      delete s;
+      device->priv = NULL;
       return -1;
     }
 
@@ -2523,6 +2592,9 @@ extern "C" {
       usrp_sync_pps(s);
     } else {
       s->usrp->set_time_next_pps(uhd::time_spec_t(0.0));
+      /* Let the local epoch reset latch before creating RFNoC streamers.
+       * No external clock or gNB timing is involved. */
+      std::this_thread::sleep_for(std::chrono::milliseconds(1100));
     }
 
     if (s->usrp->get_clock_source(0) == "external") {
@@ -2673,7 +2745,7 @@ int device_init(openair0_device_t *device, openair0_config_t *openair0_cfg)
     LOG_E(HW, "device_init failed: unknown exception\n");
   }
   if (device != NULL && device->priv != NULL) {
-    free(device->priv);
+    delete static_cast<usrp_state_t *>(device->priv);
     device->priv = NULL;
   }
   return -1;

@@ -497,8 +497,15 @@ int nrue_ru_adjust_rx_gain(PHY_VARS_NR_UE *UE, int gain_change)
 int nrue_ru_read(PHY_VARS_NR_UE *UE, openair0_timestamp_t *ptimestamp, void **buff, int nsamps, int num_antennas)
 {
   openair0_device_t *dev = &openair0_dev[UE->rf_map.card];
-  openair0_timestamp_t tmp_timestamp;
+  openair0_timestamp_t tmp_timestamp = 0;
   int ret = dev->trx_read_func(dev, &tmp_timestamp, buff, nsamps, num_antennas);
+  if (ret < 0) {
+    *ptimestamp = 0;
+    if (!oai_exit)
+      LOG_E(HW, "SENSING: RFSTALL radio read failed; refusing invalid IQ\n");
+    oai_exit = 1;
+    return ret;
+  }
   openair0_timestamp_t first_timestamp = tmp_timestamp;
   bool have_timestamp = ret > 0;
 
@@ -511,6 +518,13 @@ int nrue_ru_read(PHY_VARS_NR_UE *UE, openair0_timestamp_t *ptimestamp, void **bu
 
       openair0_timestamp_t retry_timestamp;
       int got = dev->trx_read_func(dev, &retry_timestamp, retry_buf, nsamps - ret, num_antennas);
+      if (got < 0 || (got > 0 && have_timestamp && retry_timestamp != first_timestamp + ret)) {
+        *ptimestamp = 0;
+        if (!oai_exit)
+          LOG_E(HW, "SENSING: RFSTALL failed/non-contiguous short-read continuation\n");
+        oai_exit = 1;
+        return -1;
+      }
       if (got > 0) {
         if (!have_timestamp) {
           first_timestamp = retry_timestamp;
@@ -523,8 +537,11 @@ int nrue_ru_read(PHY_VARS_NR_UE *UE, openair0_timestamp_t *ptimestamp, void **bu
       LOG_W(HW, "Short RX read remains: got %d of %d samples\n", ret, nsamps);
   }
 
-  if (have_timestamp)
-    tmp_timestamp = first_timestamp;
+  if (!have_timestamp) {
+    *ptimestamp = 0;
+    return ret;
+  }
+  tmp_timestamp = first_timestamp;
   if (!dev->firstTS_initialized) {
     dev->firstTS = tmp_timestamp;
     dev->firstTS_initialized = true;

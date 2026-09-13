@@ -210,6 +210,7 @@ typedef struct {
   nr_gscn_info_t gscnInfo[MAX_GSCN_BAND];
   int numGscn;
   int rx_offset;
+  openair0_timestamp_t capture_end;
 } syncData_t;
 
 extern _Atomic int nr_ue_cfo_resync_request; // set by the CFO trim loop (phy_procedures_nr_ue.c)
@@ -735,8 +736,14 @@ void readFrame(PHY_VARS_NR_UE *UE, openair0_timestamp_t *timestamp, int duration
       int readBlockSize = get_samples_per_slot(slot_rx, fp);
       int tmp = nrue_ru_read(UE, timestamp, (void **)rxp, readBlockSize, fp->nb_antennas_rx);
       UEscopeCopy(UE, ueTimeDomainSamplesBeforeSync, rxp[0], sizeof(c16_t), 1, readBlockSize, 0);
-      if (readBlockSize != tmp)
-        LOG_W(PHY, "readFrame: got %d of %d RF samples\n", tmp, readBlockSize);
+      if (readBlockSize != tmp) {
+        if (!oai_exit)
+          LOG_E(PHY, "SENSING: RFSTALL readFrame got %d of %d RF samples; no acquisition on incomplete IQ\n", tmp, readBlockSize);
+        oai_exit = 1;
+        if (toTrash)
+          free(rxp[0]);
+        return;
+      }
 
       if (IS_SOFTMODEM_RFSIM) {
         int slot_tx = (slot_rx + duration_rx_to_tx) % fp->slots_per_frame;
@@ -866,6 +873,8 @@ static void syncInFrame(PHY_VARS_NR_UE *UE, openair0_timestamp_t *timestamp, int
     // Set a maximum transfer size. As we usually read/write single slots, we use the size of slot 0 as maximum here.
     const int unitTransfer = min(get_samples_per_slot(0, fp), size);
     const int res = nrue_ru_read(UE, timestamp, (void **)UE->common_vars.rxdata, unitTransfer, fp->nb_antennas_rx);
+    if (oai_exit)
+      return;
     if (res <= 0) {
       LOG_W(PHY, "Unable to read RF samples while resynchronizing\n");
       break;
@@ -966,6 +975,15 @@ void *UE_thread(void *arg)
   }
   int shiftForNextFrame = 0;
   int intialSyncOffset = 0;
+  const char *auto_acquire_env = getenv("ISAC_AUTO_ACQUIRE");
+  const bool auto_timing = IS_PASSIVE_RX_MODE(get_softmodem_params())
+                           && auto_acquire_env && !strcmp(auto_acquire_env, "1");
+  bool auto_anchor_valid = false, auto_drift_ready = false;
+  openair0_timestamp_t auto_anchor_timestamp = 0;
+  int auto_anchor_frame = 0, auto_anchor_pci = -1;
+  double auto_drift_samples_per_frame = 0;
+  nr_gscn_info_t auto_anchor_ssb = {0};
+
   openair0_timestamp_t sync_timestamp;
   bool stats_printed = false;
 
@@ -990,10 +1008,19 @@ void *UE_thread(void *arg)
             decoded_frame_rx = UE->SL_UE_PHY_PARAMS.sync_params.DFN;
           else {
             // We must wait the RRC layer decoded the MIB and sent us the frame number
-            notifiedFIFO_elt_t *elt = pullNotifiedFIFO(&mac->input_nf);
-            AssertFatal(elt != NULL, "fifo error while waiting for MIB");
-            process_msg_rcc_to_mac(NotifiedFifoData(elt), UE->Mod_id);
-            delNotifiedFIFO_elt(elt);
+            /* RRC may queue SCHED_SIB after CONFIG_MIB. A later acquisition
+             * must not mistake that scheduling message for a fresh MIB.
+             * Process every message, preserving FIFO order, until the actual
+             * MIB configuration has been applied. */
+            bool received_mib = false;
+            do {
+              notifiedFIFO_elt_t *elt = pullNotifiedFIFO(&mac->input_nf);
+              AssertFatal(elt != NULL, "fifo error while waiting for MIB");
+              nr_mac_rrc_message_t *message = NotifiedFifoData(elt);
+              received_mib = message->payload_type == NR_MAC_RRC_CONFIG_MIB;
+              process_msg_rcc_to_mac(message, UE->Mod_id);
+              delNotifiedFIFO_elt(elt);
+            } while (!received_mib);
             decoded_frame_rx = mac->mib_frame;
           }
           /* Post-scan geometry: the SSB position is only known once acquisition found it. */
@@ -1005,9 +1032,62 @@ void *UE_thread(void *arg)
                 decoded_frame_rx,
                 UE->init_sync_frame,
                 trashed_frames);
+          syncData_t *syncMsg = (syncData_t *)NotifiedFifoData(res);
+          if (auto_timing && !auto_drift_ready) {
+            /* Timestamp of the frame whose SFN was decoded from THIS PBCH.
+             * init_sync_frame includes both capture frame index and offset wrap.
+             * Use hardware sample time, never host wall time or CFO/frequency. */
+            const openair0_timestamp_t anchor = syncMsg->capture_end
+                - (openair0_timestamp_t)(UE->init_sync_frame + 1) * fp->samples_per_frame
+                + syncMsg->rx_offset;
+            if (auto_anchor_valid && auto_anchor_pci == fp->Nid_cell) {
+              const int64_t delta_samples = anchor - auto_anchor_timestamp;
+              const int64_t delta_frames = llround((double)delta_samples / fp->samples_per_frame);
+              const int sfn_delta = (decoded_frame_rx - auto_anchor_frame + MAX_FRAME_NUMBER) % MAX_FRAME_NUMBER;
+              if (delta_frames >= 2 && delta_frames % MAX_FRAME_NUMBER == sfn_delta) {
+                const double measured = (double)delta_samples / delta_frames - fp->samples_per_frame;
+                const double ppm = measured * 1e6 / fp->samples_per_frame;
+                if (isfinite(ppm) && fabs(ppm) <= 200.0 && get_nrUE_params()->time_sync_I > 0) {
+                  auto_drift_samples_per_frame = measured;
+                  auto_drift_ready = true;
+                  /* Steady-state readBlockSize subtracts shiftForNextFrame;
+                   * shiftForNextFrame = -I*max_pos_acc. Positive drift therefore
+                   * requires a positive integral and MORE samples per frame. */
+                  /* NEGATED: measured drift is +samples/frame, but the timing integrator's
+                   * steady state for that drift is NEGATIVE. Measured on this rig: auto_timing
+                   * reads samples_per_frame = +5.2242 while the working (non-auto) loop converges
+                   * to max_pos_acc = -522 == -(5.2242/0.01) -- same magnitude, opposite sign. The
+                   * unnegated seed started the loop at double the error in the wrong direction:
+                   * the FFT window walked off, PBCH still correlated (timing-tolerant) but SIB1's
+                   * PDSCH extraction never landed, so acquisition stuck at PBCH_LOCKED forever. */
+                  UE->max_pos_acc = -lround(measured / get_nrUE_params()->time_sync_I);
+                  UE->max_pos_iir = 0;
+                  LOG_I(PHY,
+                        "ISAC_ACQ_DRIFT {\"pci\":%d,\"delta_frames\":%ld,\"delta_samples\":%ld,"
+                        "\"samples_per_frame\":%.6f,\"sfo_ppm\":%.6f}\n",
+                        fp->Nid_cell, (long)delta_frames, (long)delta_samples, measured, ppm);
+                }
+              }
+            }
+            if (!auto_drift_ready) {
+              LOG_I(PHY, "ISAC_ACQ_TIMING_ANCHOR pci=%d sfn=%d timestamp=%ld; requesting fresh PBCH\n",
+                    fp->Nid_cell, decoded_frame_rx, (long)anchor);
+              auto_anchor_valid = true;
+              auto_anchor_timestamp = anchor;
+              auto_anchor_frame = decoded_frame_rx;
+              auto_anchor_pci = fp->Nid_cell;
+              auto_anchor_ssb = (nr_gscn_info_t){.ssbFirstSC = fp->ssb_start_subcarrier};
+              for (int i = 0; i < syncMsg->numGscn; ++i)
+                if (syncMsg->gscnInfo[i].ssbFirstSC == fp->ssb_start_subcarrier)
+                  auto_anchor_ssb = syncMsg->gscnInfo[i];
+              UE->is_synchronized = 0;
+              delNotifiedFIFO_elt(res);
+              stream_status = STREAM_STATUS_UNSYNC;
+              continue;
+            }
+          }
           // shift the frame index with all the frames we trashed meanwhile we perform the synch search
           decoded_frame_rx = (decoded_frame_rx + UE->init_sync_frame + trashed_frames) % MAX_FRAME_NUMBER;
-          syncData_t *syncMsg = (syncData_t *)NotifiedFifoData(res);
           intialSyncOffset = syncMsg->rx_offset;
         }
         delNotifiedFIFO_elt(res);
@@ -1037,16 +1117,27 @@ void *UE_thread(void *arg)
       /* Acquisition consumes frames outside the slot-read accounting. Never compare
        * a new lock against the final timestamp of the previous lock. */
       nr_rx_continuity_reset(&rx_continuity);
+      if (auto_timing && auto_drift_ready) {
+        auto_drift_ready = false;
+        auto_anchor_valid = false;
+      }
       if (get_nrUE_params()->time_sync_I)
         UE->max_pos_acc = ntn_init_time_drift * 1e-6 * fp->samples_per_frame / get_nrUE_params()->time_sync_I;
       else
         UE->max_pos_acc = 0;
       UE->max_pos_iir = 0;
       readFrame(UE, &sync_timestamp, duration_rx_to_tx, false);
+      if (oai_exit)
+        break;
       notifiedFIFO_elt_t *Msg = newNotifiedFIFO_elt(sizeof(syncData_t), 0, &nf, UE_synch);
       syncData_t *syncMsg = (syncData_t *)NotifiedFifoData(Msg);
       *syncMsg = (syncData_t){0};
-      if (UE->UE_scan_carrier) {
+      syncMsg->capture_end = sync_timestamp + get_samples_per_slot(fp->slots_per_subframe - 1, fp);
+      if (auto_timing && auto_anchor_valid) {
+        // The second timing observation searches only the SSB just measured OTA.
+        syncMsg->gscnInfo[0] = auto_anchor_ssb;
+        syncMsg->numGscn = 1;
+      } else if (UE->UE_scan_carrier) {
         // Get list of GSCN in this band for UE's bandwidth and center frequency.
         LOG_W(PHY, "UE set to scan all GSCN in current bandwidth\n");
         syncMsg->numGscn =
@@ -1095,8 +1186,22 @@ void *UE_thread(void *arg)
           drift = -drift_cap;
         }
       }
-      const int initial_drift_shift = -round(drift);
-      const int corrected_sync_offset = intialSyncOffset + initial_drift_shift;
+      const int initial_drift_shift = auto_timing && auto_drift_ready
+          ? lround((elapsed_frames - 1) * auto_drift_samples_per_frame) : -round(drift);
+      int corrected_sync_offset = intialSyncOffset + initial_drift_shift;
+      if (auto_timing && auto_drift_ready) {
+        const int period = lround(fp->samples_per_frame + auto_drift_samples_per_frame);
+        while (corrected_sync_offset < 0) {
+          corrected_sync_offset += period;
+          decoded_frame_rx = (decoded_frame_rx + MAX_FRAME_NUMBER - 1) % MAX_FRAME_NUMBER;
+        }
+        while (corrected_sync_offset >= period) {
+          corrected_sync_offset -= period;
+          decoded_frame_rx = (decoded_frame_rx + 1) % MAX_FRAME_NUMBER;
+        }
+        LOG_I(PHY, "ISAC_ACQ_TIMING_HANDOFF age_frames=%d drift_shift=%d offset=%d integral=%d\n",
+              elapsed_frames - 1, initial_drift_shift, corrected_sync_offset, UE->max_pos_acc);
+      }
       if (corrected_sync_offset >= 0) {
         syncInFrame(UE, &sync_timestamp, duration_rx_to_tx, corrected_sync_offset);
       } else {
@@ -1168,6 +1273,8 @@ void *UE_thread(void *arg)
                              (void **)UE->common_vars.rxdata,
                              fp->ofdm_symbol_size + fp->nb_prefix_samples0,
                              fp->nb_antennas_rx);
+      if (oai_exit || ret < 0)
+        break;
       if (fp->ofdm_symbol_size + fp->nb_prefix_samples0 != ret)
         LOG_W(PHY, "Initial symbol: got %d RF samples\n", ret);
       // we have the decoded frame index in the return of the synch process
@@ -1318,6 +1425,10 @@ void *UE_thread(void *arg)
     const int readBlockSize = get_readBlockSize(slot_nr, fp) - iq_shift_to_apply;
     openair0_timestamp_t rx_timestamp;
     int tmp = nrue_ru_read(UE, &rx_timestamp, (void **)rxp, readBlockSize, fp->nb_antennas_rx);
+    /* Cancellation has no sample timestamp and must never reach continuity
+     * checks or the decoder/sensing consumers. */
+    if (oai_exit || tmp < 0)
+      break;
     {
       struct timespec diag_ts;
       clock_gettime(CLOCK_REALTIME, &diag_ts);
@@ -1408,6 +1519,8 @@ void *UE_thread(void *arg)
       if (first_symbols > 0) {
         openair0_timestamp_t ignore_timestamp;
         int tmp = nrue_ru_read(UE, &ignore_timestamp, (void **)UE->common_vars.rxdata, first_symbols, fp->nb_antennas_rx);
+        if (oai_exit || tmp < 0)
+          break;
         /* This read MUST be counted. It is an EXTRA read on top of readBlockSize, so leaving it out
          * makes the next iteration's expected timestamp short by exactly first_symbols and the
          * RXDISCONT continuity test above fires on every frame boundary -- a false positive, not an
@@ -1843,7 +1956,15 @@ void *UE_thread(void *arg)
                * level that still produces plausible-looking noise decodes, so continuing would
                * silently corrupt the capture -- which is exactly how this fault stayed hidden. A
                * supervisor can restart the run; a contaminated result cannot be fixed afterwards. */
-              LOG_E(PHY, "SENSING: RFSTALL -- stopping capture (exit 3); restart the run\n");
+              LOG_E(PHY, "SENSING: RFSTALL -- stopping capture (exit 3); releasing radio before exit\n");
+              /* This is the RX owner, outside trx_read_func(). Stop accepting
+               * work and release UHD handles before exiting. exit(3) alone
+               * skips destruction of the heap-owned radio and its streamers.
+               * Do not use exit_function(): it converts normal exits to zero. */
+              oai_exit = 1;
+              nrue_ru_stop();
+              nrue_ru_end();
+              LOG_I(PHY, "USRP_RFSTALL_CLEANUP_COMPLETE exit=3\n");
               exit(3);
             }
           }
@@ -1883,6 +2004,7 @@ void *UE_thread(void *arg)
             UE->common_vars.freq_offset, nr_ue_cfo_resync_hz);
       nrue_ru_set_freq(UE, ul_carrier, dl_carrier, nr_ue_cfo_resync_hz);
       UE->common_vars.freq_offset = nr_ue_cfo_resync_hz;
+      UE->initial_fo = nr_ue_cfo_resync_hz; /* the seed the comment below demands; was MISSING */
       /* SEED THE RE-ACQUISITION WITH THE CORRECTION WE JUST APPLIED.
        * Without this the fix silently undoes itself. MEASURED (F2_r7): acquisition #1 gave -20234,
        * the loop correctly retuned to -15066, and the re-acquisition then measured -1176 -- the

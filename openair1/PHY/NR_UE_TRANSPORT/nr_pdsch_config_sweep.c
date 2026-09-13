@@ -16,6 +16,7 @@
  */
 
 #include "nr_pdsch_config_sweep.h"
+#include "nr_crc_evidence.h"
 #include <string.h>
 #include <pthread.h>
 
@@ -86,6 +87,7 @@ int nr_pdsch_config_sweep_init_legal(nr_pdsch_config_sweep_state_t *st, int tda_
           h->dmrs_add_pos = kAddPos[b];
           h->dmrs_max_len = kMaxLen[c];
           h->mcs_table    = kMcsTab[d];
+          st->order[st->n_hyp] = st->n_hyp;
           st->n_hyp++;
         }
       }
@@ -103,7 +105,8 @@ int nr_pdsch_config_sweep_next(nr_pdsch_config_sweep_state_t *st, nr_pdsch_cfg_h
     *out = st->hyp[st->winner];
     return st->winner;
   }
-  const int idx = st->cursor;
+  if (!st->cursor) nr_crc_shuffle(st->order, st->n_hyp, &st->random_state);
+  const int idx = st->order[st->cursor];
   st->cursor = (st->cursor + 1) % st->n_hyp;
   *out = st->hyp[idx];
   return idx;
@@ -127,6 +130,28 @@ int nr_pdsch_config_sweep_feed(nr_pdsch_config_sweep_state_t *st, int idx, bool 
     st->ok[idx]++;
   }
 
+  if ((st->trials[idx] % 16) == 0) {
+    int leader=0;
+    for(int i=1;i<st->n_hyp;i++)
+      if(rate_of(st,i)>rate_of(st,leader)) leader=i;
+    double lo,hi;
+    nr_crc_interval(st->ok[leader],st->trials[leader],NR_PDSCH_SWEEP_MAX_HYP,&lo,&hi);
+    /* The absolute floor was 0.60, which silently assumed the TRUE config decodes at >=60 %.
+     * MEASURED OTA 2026-09-13: the winning hypothesis decodes at 124/311 = 40 %, so its Wilson
+     * lower bound can never reach 0.60 -- early separation could NEVER fire on this link and every
+     * acquisition paid the full fallback of SWEEP_MIN_TRIALS x n_hyp (~300 x 233 = 70,000 grants,
+     * ~11 min). The pairwise test below is the one that actually carries the evidence: the leader's
+     * lower bound must clear EVERY other hypothesis's upper bound. Keep only a token floor so a
+     * dead link (everything near zero) cannot "separate", and let the separation test decide. */
+    bool separated=st->trials[leader]>=64 && lo>=SWEEP_MIN_RATE;
+    for(int i=0;i<st->n_hyp && separated;i++) {
+      if(i==leader) continue;
+      double other_lo,other_hi;
+      nr_crc_interval(st->ok[i],st->trials[i],NR_PDSCH_SWEEP_MAX_HYP,&other_lo,&other_hi);
+      if(other_hi>=lo) separated=false;
+    }
+    if(separated) { st->winner=leader; return leader; }
+  }
   /* Decide only when EVERY hypothesis has had a fair shot -- otherwise the first one to reach the
    * threshold wins by being early in the rotation rather than by being right. */
   for (int i = 0; i < st->n_hyp; i++) {
@@ -167,11 +192,63 @@ typedef struct {
   int tda_count, typeA;
   bool reported;
   uint64_t outcomes, locked_trials, locked_passes;
+  uint64_t failure_streak, reacquisitions;
+  double reference_crc_lower;
   nr_pdsch_config_sweep_state_t state;
 } sweep_context_t;
 static sweep_context_t g_contexts[NR_PDSCH_SWEEP_MAX_CONTEXTS];
 static uint64_t g_generation, g_clock;
 static nr_pdsch_sweep_reporter_t g_reporter;
+static uint32_t g_recovery_minimum_failures = 32;
+static double g_recovery_probability_budget = 1e-6;
+bool nr_pdsch_config_sweep_set_recovery_policy(uint32_t minimum_failures, double probability_budget)
+{
+  if (!minimum_failures || !isfinite(probability_budget)
+      || probability_budget <= 0 || probability_budget >= 1)
+    return false;
+  pthread_mutex_lock(&g_lock);
+  g_recovery_minimum_failures = minimum_failures;
+  g_recovery_probability_budget = probability_budget;
+  pthread_mutex_unlock(&g_lock);
+  return true;
+}
+
+/* Compare a run of failures with the frozen conservative rate at convergence.
+ * Use summable budgets over feedback positions and generations, shared across
+ * contexts. Correlated fading can also trigger this: only reopen local search,
+ * never claim that CRC evidence alone identified a configuration change. */
+static bool recovery_needed(const sweep_context_t *c)
+{
+  if (c->failure_streak < g_recovery_minimum_failures || c->reference_crc_lower <= 0)
+    return false;
+  const double n = (double)c->locked_trials, generation = (double)c->generation;
+  const double budget = log(g_recovery_probability_budget) - log(NR_PDSCH_SWEEP_MAX_CONTEXTS)
+                        - log(n + 1) - log(n + 2) - log(generation + 1) - log(generation + 2);
+  return (double)c->failure_streak * log1p(-c->reference_crc_lower) <= budget;
+}
+
+static void reopen_context(sweep_context_t *c)
+{
+  const uint64_t previous = c->generation;
+  nr_pdsch_sweep_report_t report = {
+      .configuration=c->configuration, .rnti=c->rnti, .tda=c->tda,
+      .outcomes=c->outcomes, .passes=c->locked_passes, .trials=c->locked_trials,
+      .winner=-1, .invalidated=true, .previous_generation=previous,
+      .generation=++g_generation, .reacquisitions=++c->reacquisitions,
+      .failure_streak=c->failure_streak, .reference_crc_lower=c->reference_crc_lower};
+  c->generation = report.generation;
+  c->reported = false;
+  c->outcomes = c->locked_trials = c->locked_passes = c->failure_streak = 0;
+  c->reference_crc_lower = 0;
+  /* Keep the already checked legal catalog, but discard stale decoding evidence. */
+  memset(c->state.trials, 0, sizeof(c->state.trials));
+  memset(c->state.ok, 0, sizeof(c->state.ok));
+  c->state.winner = -1;
+  c->state.cursor = 0;
+  for (int i=0; i<c->state.n_hyp; ++i) c->state.order[i] = i;
+  if (g_reporter) g_reporter(&report);
+}
+
 void nr_pdsch_config_sweep_set_reporter(nr_pdsch_sweep_reporter_t reporter)
 {
   pthread_mutex_lock(&g_lock); g_reporter=reporter; pthread_mutex_unlock(&g_lock);
@@ -182,7 +259,10 @@ static sweep_context_t *ticket_context(const nr_pdsch_sweep_ticket_t *t)
   if (!t || !t->generation || t->context_slot >= NR_PDSCH_SWEEP_MAX_CONTEXTS)
     return NULL;
   sweep_context_t *c = &g_contexts[t->context_slot];
-  return c->generation == t->generation && c->rnti == t->rnti && c->tda == t->tda_index
+  /* Key is config+tda, NOT rnti: two UEs sharing a cell config + layout family carry the same
+   * configuration key and refine one shared sweep (evidence pools -> converges N x faster with N UEs).
+   * generation+slot+tda identify the context; the ticket rnti is informational only. */
+  return c->generation == t->generation && c->tda == t->tda_index
          && t->hypothesis >= 0 && t->hypothesis < c->state.n_hyp ? c : NULL;
 }
 
@@ -199,7 +279,7 @@ bool nr_pdsch_config_sweep_select(uint64_t configuration, uint16_t rnti, uint8_t
   int found = -1, victim = 0;
   for (int i = 0; i < NR_PDSCH_SWEEP_MAX_CONTEXTS; ++i) {
     sweep_context_t *c = &g_contexts[i];
-    if (c->generation && c->configuration == configuration && c->rnti == rnti
+    if (c->generation && c->configuration == configuration
         && c->tda == tda_index && c->tda_count == tda_count && c->typeA == typeA) {
       found = i;
       break;
@@ -238,8 +318,15 @@ bool nr_pdsch_config_sweep_feedback(const nr_pdsch_sweep_ticket_t *ticket, bool 
   if (c) {
     int w = nr_pdsch_config_sweep_feed(&c->state, ticket->hypothesis, crc_ok);
     ++c->outcomes;
-    if (ticket->settled) {
+    if (ticket->settled && ticket->hypothesis == w) {
       ++c->locked_trials; c->locked_passes += crc_ok;
+      c->failure_streak = crc_ok ? 0 : c->failure_streak + 1;
+      if (recovery_needed(c)) {
+        reopen_context(c);
+        pthread_mutex_unlock(&g_lock);
+        return false;
+      }
+
       if (g_reporter && c->locked_trials % 1000 == 0) {
         nr_pdsch_sweep_report_t r={.configuration=c->configuration,.rnti=c->rnti,.tda=c->tda,
           .operational=true,.passes=c->locked_passes,.trials=c->locked_trials};
@@ -264,6 +351,10 @@ bool nr_pdsch_config_sweep_feedback(const nr_pdsch_sweep_ticket_t *ticket, bool 
     }
     if (w >= 0 && !c->reported) {
       c->reported = true;
+      double reference_upper;
+      nr_crc_interval(c->state.ok[w], c->state.trials[w], NR_PDSCH_SWEEP_MAX_HYP,
+                      &c->reference_crc_lower, &reference_upper);
+
       announced = true;
       if (winner)
         *winner = c->state.hyp[w];
@@ -280,7 +371,7 @@ void nr_pdsch_config_sweep_context_stats(uint64_t configuration, uint16_t rnti, 
   pthread_mutex_lock(&g_lock);
   for (int i=0;i<NR_PDSCH_SWEEP_MAX_CONTEXTS;++i) {
     const sweep_context_t *c=&g_contexts[i];
-    if (c->generation && c->configuration==configuration && c->rnti==rnti && c->tda==tda && c->typeA==typeA) {
+    if (c->generation && c->configuration==configuration && c->tda==tda && c->typeA==typeA) {
       for (int h=0; h<c->state.n_hyp; ++h) { *passes += c->state.ok[h]; *trials += c->state.trials[h]; }
       break;
     }
@@ -293,7 +384,7 @@ bool nr_pdsch_config_sweep_is_settled(uint64_t configuration, uint16_t rnti, uin
   bool settled=false;
   for (int i=0;i<NR_PDSCH_SWEEP_MAX_CONTEXTS;++i) {
     const sweep_context_t *c=&g_contexts[i];
-    if (c->generation && c->configuration==configuration && c->rnti==rnti
+    if (c->generation && c->configuration==configuration
         && c->tda==tda && c->tda_count==0 && c->typeA==typeA && c->state.winner>=0) {
       settled=true;
       break;
@@ -301,6 +392,17 @@ bool nr_pdsch_config_sweep_is_settled(uint64_t configuration, uint16_t rnti, uin
   }
   pthread_mutex_unlock(&g_lock);
   return settled;
+}
+/* Diagnostic only: how many live keyed contexts currently hold a winner. Read by the acquisition
+ * state tracker (nr_passive_acq_state.c) at the RT periodic summary; not a decision input. */
+int nr_pdsch_config_sweep_settled_count(void)
+{
+  pthread_mutex_lock(&g_lock);
+  int n=0;
+  for (int i=0;i<NR_PDSCH_SWEEP_MAX_CONTEXTS;++i)
+    if (g_contexts[i].generation && g_contexts[i].state.winner>=0) ++n;
+  pthread_mutex_unlock(&g_lock);
+  return n;
 }
 
 void nr_pdsch_config_sweep_reset_all(void)
@@ -363,15 +465,4 @@ bool nr_pdsch_config_sweep_result_global(nr_pdsch_cfg_hypothesis_t *out)
     *out = g_sweep.hyp[g_sweep.winner];
   pthread_mutex_unlock(&g_lock);
   return ok;
-}
-/* Diagnostic only: how many live keyed contexts currently hold a winner. Read by the acquisition
- * state tracker (nr_passive_acq_state.c) at the RT periodic summary; not a decision input. */
-int nr_pdsch_config_sweep_settled_count(void)
-{
-  pthread_mutex_lock(&g_lock);
-  int n=0;
-  for (int i=0;i<NR_PDSCH_SWEEP_MAX_CONTEXTS;++i)
-    if (g_contexts[i].generation && g_contexts[i].state.winner>=0) ++n;
-  pthread_mutex_unlock(&g_lock);
-  return n;
 }

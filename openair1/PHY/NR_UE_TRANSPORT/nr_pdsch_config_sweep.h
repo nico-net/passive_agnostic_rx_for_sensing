@@ -63,6 +63,10 @@ typedef struct {
   uint8_t tda;
   uint32_t minimum;
   bool operational;
+  bool invalidated; ///< local health loss, NOT proof of a network configuration change
+  uint64_t previous_generation, generation, reacquisitions;
+  uint64_t failure_streak;
+  double reference_crc_lower;
   int winner;
   nr_pdsch_cfg_hypothesis_t hypothesis;
 } nr_pdsch_sweep_report_t;
@@ -77,7 +81,9 @@ typedef struct {
   uint32_t trials[NR_PDSCH_SWEEP_MAX_HYP];
   uint32_t ok[NR_PDSCH_SWEEP_MAX_HYP];
   int      n_hyp;
-  int      cursor;    ///< round-robin position
+  int      order[NR_PDSCH_SWEEP_MAX_HYP];
+  uint32_t random_state;
+  int      cursor;    ///< position in the shuffled, balanced round
   int      winner;    ///< -1 until decided
 } nr_pdsch_config_sweep_state_t;
 
@@ -126,9 +132,16 @@ bool nr_pdsch_config_sweep_is_settled(uint64_t configuration, uint16_t rnti, uin
  * ever decoded over one that never has, without waiting for the per-hypothesis winner. */
 void nr_pdsch_config_sweep_context_stats(uint64_t configuration, uint16_t rnti, uint8_t tda, int typeA,
                                          uint32_t *passes, uint32_t *trials);
-void nr_pdsch_config_sweep_reset_all(void);
 /** Diagnostic: number of live keyed contexts with a winner (acquisition-state tracker input). */
 int  nr_pdsch_config_sweep_settled_count(void);
+void nr_pdsch_config_sweep_reset_all(void);
+/** Local recovery policy; never changes the hypothesis winner/validation criteria.
+ * A failure streak must exceed the minimum AND contradict the conservative learned
+ * CRC lower bound. This is a health trigger, not an inferred BWP-change assertion.
+ * Defaults: 32 failures minimum, 1e-6 run probability budget. Process-wide, locked.
+ * Invalid arguments leave the active policy unchanged. */
+bool nr_pdsch_config_sweep_set_recovery_policy(uint32_t minimum_failures, double probability_budget);
+
 /** Consistent snapshot for diagnostics/offline regression tests. */
 bool nr_pdsch_config_sweep_snapshot(const nr_pdsch_sweep_ticket_t *ticket,
                                    nr_pdsch_config_sweep_state_t *out);

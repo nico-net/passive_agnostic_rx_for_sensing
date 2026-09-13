@@ -1091,25 +1091,17 @@ static void find_gscn_to_scan(const double startFreq,
   const double scs = MU_SCS(gscn.scs_index) * 1e3;
   const double ssbBW = 20 * NR_NB_SC_PER_RB * scs;
 
-  for (int g = gscn.first_gscn; g < gscn.last_gscn; g += gscn.step_gscn) {
+  /* Include both raster endpoints and represent an empty window explicitly.
+   * Never manufacture GSCN 0 or an SSB outside the sampled bandwidth. */
+  *scanGscnStart = 0;
+  *scanGscnStop = -1;
+  for (int g = gscn.first_gscn; g <= gscn.last_gscn; g += gscn.step_gscn) {
     const double centerSSBFreq = get_ssref_from_gscn(g);
-    const double startSSBFreq = centerSSBFreq - ssbBW / 2;
-    if (startSSBFreq < startFreq)
+    if (centerSSBFreq - ssbBW / 2 < startFreq || centerSSBFreq + ssbBW / 2 - 1 > stopFreq)
       continue;
-
-    *scanGscnStart = g;
-    break;
-  }
-  *scanGscnStop = *scanGscnStart;
-
-  for (int g = gscn.last_gscn; g > gscn.first_gscn; g -= gscn.step_gscn) {
-    const double centerSSBFreq = get_ssref_from_gscn(g);
-    const double stopSSBFreq = centerSSBFreq + ssbBW / 2 - 1;
-    if (stopSSBFreq > stopFreq)
-      continue;
-
+    if (*scanGscnStart == 0)
+      *scanGscnStart = g;
     *scanGscnStop = g;
-    break;
   }
 }
 
