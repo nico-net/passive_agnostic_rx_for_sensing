@@ -1,0 +1,96 @@
+/*
+ * Licensed to the OpenAirInterface (OAI) Software Alliance under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The OpenAirInterface Software Alliance licenses this file to You under
+ * the OAI Public License, Version 1.1  (the "License"); you may not use this
+ * file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.openairinterface.org/?page_id=698
+ */
+
+/*! \file openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_dci11_layout_sweep.h
+ * \brief Derive the DCI 1_1 FIELD LAYOUT from the air, instead of assuming it.
+ *
+ * THE GAP THIS CLOSES. Technique A-C recover where the PDCCH is, how long the DCI is and which
+ * RNTI it carries; Technique D recovers three payload-interpretation fields (TDRA entry, DM-RS
+ * additional position, MCS table). Everything else about the DCI 1_1 layout is a FIXED ASSUMPTION
+ * SET in nr_pdcch_blind_dci_size() -- ~15 field widths, each annotated as traceable to one specific
+ * fact about the lab cell. On any other gNB those facts differ.
+ *
+ * AND A CORRECT TOTAL LENGTH DOES NOT IMPLY A CORRECT LAYOUT. This has already cost a campaign:
+ * two widths were wrong (bwp_indicator 1->0, time_domain_assignment 4->2) while the total was
+ * right, so every field after the frequency-domain assignment was read at the wrong bit offset.
+ * The RNTI still matched (it comes from the CRC, not the payload) and the allocations still looked
+ * plausible (RIV precedes both errors), so nothing looked wrong except 0/83 transport blocks.
+ *
+ * WHY THE SEARCH IS SMALL. Two structural facts collapse it:
+ *
+ *  1. The ~15 widths are not 15 free parameters. They are decided by a handful of RRC switches
+ *     (pdsch_Config present, tci_PresentInDCI, supplementaryUplink, CBG transmission, n_dl_bwp,
+ *     DM-RS type/maxLength, dl_DataToUL_ACK size, DAI codebook). Sweeping switches rather than
+ *     widths is the difference between an intractable product and a list.
+ *
+ *  2. Extraction only cares about the OFFSETS of the fields actually read -- RIV, TDA, MCS/RV,
+ *     antenna ports, DM-RS sequence init. Fields between two of those contribute only through
+ *     their SUM. So the searchable state is four group sums plus the antenna-port width, not the
+ *     individual switches. Two layouts with the same sums are indistinguishable to the receiver
+ *     AND decode identically, so collapsing them loses nothing.
+ *
+ * Then the already-derived TOTAL LENGTH pins the last group exactly, removing a whole dimension:
+ * a candidate whose widths do not sum to the observed payload size is rejected before a single
+ * grant is spent on it.
+ *
+ * TWO-STAGE SCORING, because the TB CRC is expensive. A wrong layout usually reads a nonsensical
+ * MCS or RV, which costs nothing to check -- no channel estimate, no equaliser, no LDPC. Stage 1
+ * scores plausibility over accepted DCIs and prunes hard; stage 2 hands the survivors to the
+ * TB-CRC oracle, exactly as Technique D does.
+ *
+ * Field order is TS 38.212 7.3.1.2.2. Carrier indicator is fixed at 0 (no cross-carrier
+ * scheduling is representable here, and modelling it needs a second serving cell anyway).
+ */
+
+#ifndef __NR_PDCCH_DCI11_LAYOUT_SWEEP_H__
+#define __NR_PDCCH_DCI11_LAYOUT_SWEEP_H__
+
+#include <stdbool.h>
+#include <stdint.h>
+
+/// One layout hypothesis, in the only terms extraction can distinguish.
+typedef struct {
+  uint8_t bwp_ind;      ///< BWP indicator width: 0, 1 or 2 (n_dl_bwp)
+  uint8_t pre_mcs;      ///< vrb_to_prb + prb_bundling + rate_matching + zp_csirs  (0..6)
+  uint8_t pre_ant;      ///< tb2 + harq_pid + dai + tpc + pucch_ri + pdsch_to_harq (harq/tpc/ri fixed)
+  uint8_t ant_ports;    ///< 4, 5 or 6 (DM-RS type x maxLength)
+  uint8_t post_ant;     ///< tci + srs + cbg + cbg_flush (0..14)
+} nr_dci11_layout_t;
+
+#define NR_DCI11_LAYOUT_MAX 512
+
+/// Bit offsets (MSB-first, as read_field() counts) of every field the extraction consumes.
+typedef struct {
+  uint16_t riv, tda, mcs, rv, ant_ports, dmrs_init, total;
+  /* The antenna-ports WIDTH, carried explicitly. It cannot be recovered from the offsets:
+   * dmrs_init - ant_ports is width + post_ant, and using that as the width made the
+   * antenna-ports plausibility check silently never fire for any layout with TCI/SRS/CBG bits. */
+  uint8_t ant_ports_bits;
+} nr_dci11_offsets_t;
+
+/** Offsets implied by a layout. `tda_bits` comes from the TDRA list Technique D already recovers,
+ * `riv_bits` from the BWP size. Returns false if the layout is self-inconsistent. Pure. */
+bool nr_dci11_layout_offsets(const nr_dci11_layout_t *l, uint16_t riv_bits, uint8_t tda_bits,
+                             nr_dci11_offsets_t *out);
+
+/** Every layout whose total width equals `observed_len`, written to `out` (up to `max`).
+ * Returns the count, or -1 on bad arguments. This is the whole point: the derived DCI length is a
+ * hard constraint that most of the switch space fails. Pure. */
+int nr_dci11_layout_enumerate(uint16_t riv_bits, uint8_t tda_bits, uint16_t observed_len,
+                              nr_dci11_layout_t *out, int max);
+
+/** Stage-1 oracle: is this payload PLAUSIBLE under this layout? Checks the fields a wrong offset
+ * corrupts first -- MCS not in the reserved rows, RV in range, and a RIV inside the BWP. Costs no
+ * decode. A right layout passes nearly always; a wrong one fails most of the time. Pure. */
+bool nr_dci11_layout_plausible(const nr_dci11_offsets_t *off, uint64_t payload, uint16_t bwp_size);
+
+#endif /* __NR_PDCCH_DCI11_LAYOUT_SWEEP_H__ */
