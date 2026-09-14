@@ -1600,6 +1600,66 @@ configuration change, duplicate evidence, and multi-illuminator separation
 falsifiable before downstream performance is interpreted.
 
 
+## 19. Implementation map and references
+
+### 19.1 Source entry points
+
+| Area | Principal implementation |
+|---|---|
+| Acquisition and RF lifecycle | [nr_initial_sync.c](openair1/PHY/NR_UE_TRANSPORT/nr_initial_sync.c), [nr-ue.c](executables/nr-ue.c), [nr-ue-ru.c](executables/nr-ue-ru.c), [usrp_lib.cpp](radio/USRP/usrp_lib.cpp) |
+| Autonomous outer loop | [auto_acquire.py](tests/passive_rx/auto_acquire.py), [AUTONOMOUS_ACQUISITION.md](tests/passive_rx/AUTONOMOUS_ACQUISITION.md), [config_ue.c](openair2/LAYER2/NR_MAC_UE/config_ue.c) |
+| Native acquisition state | [nr_passive_acq_state.c](openair1/PHY/NR_UE_TRANSPORT/nr_passive_acq_state.c) |
+| PDCCH discovery and interpretation | [nr_pdcch_blind_monitor.c](openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c), [nr_pdcch_blind_monitor_rt.c](openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c) |
+| CORESET, length, RNTI | [nr_pdcch_coreset_map.c](openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_coreset_map.c), [nr_pdcch_dci_length_sweep.c](openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_dci_length_sweep.c), [nr_pdcch_blind_rnti_bootstrap.c](openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_rnti_bootstrap.c) |
+| Search and confidence | [nr_hyp_sweep.c](openair1/PHY/NR_UE_TRANSPORT/nr_hyp_sweep.c), [nr_crc_evidence.h](openair1/PHY/NR_UE_TRANSPORT/nr_crc_evidence.h), [nr_pdsch_config_sweep.c](openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_config_sweep.c) |
+| DCI field-layout derivation | [nr_pdcch_dci11_layout_sweep.c](openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_dci11_layout_sweep.c), [nr_pdcch_dci01_layout_sweep.c](openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_dci01_layout_sweep.c) |
+| Blind CSI-RS recovery | [nr_csirs_blind_search.c](openair1/PHY/NR_UE_TRANSPORT/nr_csirs_blind_search.c), [nr_csirs_blind_rt.c](openair1/PHY/NR_UE_TRANSPORT/nr_csirs_blind_rt.c) |
+| Slot direction and search-space set | [nr_tdd_pattern.c](openair1/PHY/NR_UE_TRANSPORT/nr_tdd_pattern.c), [nr_pdcch_ss_registry.c](openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ss_registry.c) |
+| PT-RS resource accounting | [nr_pdsch_ptrs_unav.c](openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_ptrs_unav.c) |
+| DL decode, queue, reconstruction | [nr_pdsch_passive_decode.c](openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c), [nr_pdsch_passive_queue.c](openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c), [nr_pdsch_data_aided.c](openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_data_aided.c) |
+| UL discovery | [nr_pdcch_ul_discovery.c](openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_discovery.c), [nr_pdcch_ul_field_sweep.c](openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_field_sweep.c), [nr_pdcch_ul_interp_sweep.c](openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_interp_sweep.c) |
+| UL scheduling and decode | [nr_passive_ul_grant_book.h](openair1/PHY/NR_UE_TRANSPORT/nr_passive_ul_grant_book.h), [nr_pusch_passive_monitor_rt.c](openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_monitor_rt.c), [nr_pusch_passive_queue.c](openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_queue.c), [nr_pusch_passive_decode.c](openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c) |
+| UCI and UL reconstruction | [nr_passive_uci_probe.h](openair1/PHY/NR_UE_TRANSPORT/nr_passive_uci_probe.h), [nr_passive_uci_learn.h](openair1/PHY/NR_UE_TRANSPORT/nr_passive_uci_learn.h), [nr_pusch_data_aided.c](openair1/PHY/NR_UE_TRANSPORT/nr_pusch_data_aided.c) |
+| Waveform diagnostics | [nr_dmrs_id_estimate.c](openair1/PHY/NR_UE_TRANSPORT/nr_dmrs_id_estimate.c), [nr_pdsch_xoverhead.c](openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_xoverhead.c), [nr_passive_delay_contract.h](openair1/PHY/NR_UE_TRANSPORT/nr_passive_delay_contract.h) |
+| CFR API and CSI-RS | [nr_isac.cc](openair1/PHY/NR_UE_ISAC/nr_isac.cc), [nr_csirs_monitor.c](openair1/PHY/NR_UE_TRANSPORT/nr_csirs_monitor.c), [csi_rx.c](openair1/PHY/NR_UE_TRANSPORT/csi_rx.c) |
+| CPI and synchronization | [sensing_engine.cc](openair1/PHY/NR_UE_ISAC/sensing_engine.cc), [isac_sync.cc](openair1/PHY/NR_UE_ISAC/isac_sync.cc) |
+| DSP algorithms | [range_doppler.cc](openair1/PHY/NR_UE_ISAC/range_doppler.cc), [eca_clutter.cc](openair1/PHY/NR_UE_ISAC/eca_clutter.cc), [matrix_complete.cc](openair1/PHY/NR_UE_ISAC/matrix_complete.cc), [sparse_doppler.cc](openair1/PHY/NR_UE_ISAC/sparse_doppler.cc), [clean_deconv.cc](openair1/PHY/NR_UE_ISAC/clean_deconv.cc) |
+| Quality, AoA, tracking, reports | [det_quality.cc](openair1/PHY/NR_UE_ISAC/det_quality.cc), [isac_aoa.cc](openair1/PHY/NR_UE_ISAC/isac_aoa.cc), [target_tracker.cc](openair1/PHY/NR_UE_ISAC/target_tracker.cc), [multi_target_tracker.cc](openair1/PHY/NR_UE_ISAC/multi_target_tracker.cc), [detection_report.cc](openair1/PHY/NR_UE_ISAC/detection_report.cc) |
+
+### 19.2 Standards and research attribution
+
+The normative anchors used here are specific versions, not a claim that the
+receiver implements every feature of those releases:
+
+- [TS 38.211 V18.2.0](https://www.etsi.org/deliver/etsi_ts/138200_138299/138211/18.02.00_60/ts_138211v180200p.pdf): resource grid, waveforms, reference sequences, and scrambling-ID domains.
+- [TS 38.212 V17.9.0](https://www.etsi.org/deliver/etsi_ts/138200_138299/138212/17.09.00_60/ts_138212v170900p.pdf): DCI field definitions, CRC/coding and multiplexing.
+- [TS 38.213 V18.2.0](https://www.etsi.org/deliver/etsi_ts/138200_138299/138213/18.02.00_60/ts_138213v180200p.pdf): control monitoring, broadcast control acquisition, and control procedures.
+- [TS 38.214 V18.2.0](https://www.etsi.org/deliver/etsi_ts/138200_138299/138214/18.02.00_60/ts_138214v180200p.pdf): data allocation, MCS/TBS and related receive procedures.
+
+Before submission, pin a consistent supported-release profile and audit relevant
+TS 38.331 ASN.1 configuration domains and TS 38.104 raster/bandwidth tables against
+the repository tables. Mixing reference releases in this source audit is not a
+formal conformance assessment.
+
+The receiver combines established polar/LDPC decoding, LS channel estimation,
+FFT/NUDFT processing, CFAR, subspace cancellation, low-rank completion, sparse
+recovery, MUSIC, and Kalman filtering with project-specific passive inference and
+integration. A paper must cite the original algorithm literature and OAI software
+provenance rather than claim these building blocks as new. The code identifies
+FISTA, singular-value-projection-style completion, and complex fractional-peak
+interpolation families; verify the exact publication/variant before assigning
+named-algorithm equivalence. Novelty claims require a separate related-work study.
+
+### 19.3 Paper-ready claims versus open claims
+
+Defensible architecture claims concern receive-only software operation, explicit
+bounded configuration search, generation-aware feedback, measured per-grant UL
+timing, UCI-footprint recovery, and heterogeneous CFR processing with stated
+capability limits. Performance claims require the §17 artifact reconciliation and
+evaluation. “Fully agnostic across NR,” “all identities learned,” “all UEs tracked,”
+“zero false locks,” “calibrated `p_real`,” and “autonomous multi-illuminator sensing”
+remain open until their acceptance gates pass.
+
 ## 20. Configuration-derivation modules added 2026-09-13/14
 
 This section records six modules that convert assumed configuration into derived
@@ -1921,63 +1981,3 @@ This qualifies any conclusion drawn from that file as ground truth. In particula
 observation that pinning the layout moved the same binary from 16 to 76 percent CRC may have
 compared one wrong layout against a differently wrong layout rather than against a correct one.
 That comparison should be repeated against a layout derived from the air.
-
-## 19. Implementation map and references
-
-### 19.1 Source entry points
-
-| Area | Principal implementation |
-|---|---|
-| Acquisition and RF lifecycle | [nr_initial_sync.c](openair1/PHY/NR_UE_TRANSPORT/nr_initial_sync.c), [nr-ue.c](executables/nr-ue.c), [nr-ue-ru.c](executables/nr-ue-ru.c), [usrp_lib.cpp](radio/USRP/usrp_lib.cpp) |
-| Autonomous outer loop | [auto_acquire.py](tests/passive_rx/auto_acquire.py), [AUTONOMOUS_ACQUISITION.md](tests/passive_rx/AUTONOMOUS_ACQUISITION.md), [config_ue.c](openair2/LAYER2/NR_MAC_UE/config_ue.c) |
-| Native acquisition state | [nr_passive_acq_state.c](openair1/PHY/NR_UE_TRANSPORT/nr_passive_acq_state.c) |
-| PDCCH discovery and interpretation | [nr_pdcch_blind_monitor.c](openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c), [nr_pdcch_blind_monitor_rt.c](openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c) |
-| CORESET, length, RNTI | [nr_pdcch_coreset_map.c](openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_coreset_map.c), [nr_pdcch_dci_length_sweep.c](openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_dci_length_sweep.c), [nr_pdcch_blind_rnti_bootstrap.c](openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_rnti_bootstrap.c) |
-| Search and confidence | [nr_hyp_sweep.c](openair1/PHY/NR_UE_TRANSPORT/nr_hyp_sweep.c), [nr_crc_evidence.h](openair1/PHY/NR_UE_TRANSPORT/nr_crc_evidence.h), [nr_pdsch_config_sweep.c](openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_config_sweep.c) |
-| DCI field-layout derivation | [nr_pdcch_dci11_layout_sweep.c](openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_dci11_layout_sweep.c), [nr_pdcch_dci01_layout_sweep.c](openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_dci01_layout_sweep.c) |
-| Blind CSI-RS recovery | [nr_csirs_blind_search.c](openair1/PHY/NR_UE_TRANSPORT/nr_csirs_blind_search.c), [nr_csirs_blind_rt.c](openair1/PHY/NR_UE_TRANSPORT/nr_csirs_blind_rt.c) |
-| Slot direction and search-space set | [nr_tdd_pattern.c](openair1/PHY/NR_UE_TRANSPORT/nr_tdd_pattern.c), [nr_pdcch_ss_registry.c](openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ss_registry.c) |
-| PT-RS resource accounting | [nr_pdsch_ptrs_unav.c](openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_ptrs_unav.c) |
-| DL decode, queue, reconstruction | [nr_pdsch_passive_decode.c](openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c), [nr_pdsch_passive_queue.c](openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c), [nr_pdsch_data_aided.c](openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_data_aided.c) |
-| UL discovery | [nr_pdcch_ul_discovery.c](openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_discovery.c), [nr_pdcch_ul_field_sweep.c](openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_field_sweep.c), [nr_pdcch_ul_interp_sweep.c](openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_interp_sweep.c) |
-| UL scheduling and decode | [nr_passive_ul_grant_book.h](openair1/PHY/NR_UE_TRANSPORT/nr_passive_ul_grant_book.h), [nr_pusch_passive_monitor_rt.c](openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_monitor_rt.c), [nr_pusch_passive_queue.c](openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_queue.c), [nr_pusch_passive_decode.c](openair1/PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.c) |
-| UCI and UL reconstruction | [nr_passive_uci_probe.h](openair1/PHY/NR_UE_TRANSPORT/nr_passive_uci_probe.h), [nr_passive_uci_learn.h](openair1/PHY/NR_UE_TRANSPORT/nr_passive_uci_learn.h), [nr_pusch_data_aided.c](openair1/PHY/NR_UE_TRANSPORT/nr_pusch_data_aided.c) |
-| Waveform diagnostics | [nr_dmrs_id_estimate.c](openair1/PHY/NR_UE_TRANSPORT/nr_dmrs_id_estimate.c), [nr_pdsch_xoverhead.c](openair1/PHY/NR_UE_TRANSPORT/nr_pdsch_xoverhead.c), [nr_passive_delay_contract.h](openair1/PHY/NR_UE_TRANSPORT/nr_passive_delay_contract.h) |
-| CFR API and CSI-RS | [nr_isac.cc](openair1/PHY/NR_UE_ISAC/nr_isac.cc), [nr_csirs_monitor.c](openair1/PHY/NR_UE_TRANSPORT/nr_csirs_monitor.c), [csi_rx.c](openair1/PHY/NR_UE_TRANSPORT/csi_rx.c) |
-| CPI and synchronization | [sensing_engine.cc](openair1/PHY/NR_UE_ISAC/sensing_engine.cc), [isac_sync.cc](openair1/PHY/NR_UE_ISAC/isac_sync.cc) |
-| DSP algorithms | [range_doppler.cc](openair1/PHY/NR_UE_ISAC/range_doppler.cc), [eca_clutter.cc](openair1/PHY/NR_UE_ISAC/eca_clutter.cc), [matrix_complete.cc](openair1/PHY/NR_UE_ISAC/matrix_complete.cc), [sparse_doppler.cc](openair1/PHY/NR_UE_ISAC/sparse_doppler.cc), [clean_deconv.cc](openair1/PHY/NR_UE_ISAC/clean_deconv.cc) |
-| Quality, AoA, tracking, reports | [det_quality.cc](openair1/PHY/NR_UE_ISAC/det_quality.cc), [isac_aoa.cc](openair1/PHY/NR_UE_ISAC/isac_aoa.cc), [target_tracker.cc](openair1/PHY/NR_UE_ISAC/target_tracker.cc), [multi_target_tracker.cc](openair1/PHY/NR_UE_ISAC/multi_target_tracker.cc), [detection_report.cc](openair1/PHY/NR_UE_ISAC/detection_report.cc) |
-
-### 19.2 Standards and research attribution
-
-The normative anchors used here are specific versions, not a claim that the
-receiver implements every feature of those releases:
-
-- [TS 38.211 V18.2.0](https://www.etsi.org/deliver/etsi_ts/138200_138299/138211/18.02.00_60/ts_138211v180200p.pdf): resource grid, waveforms, reference sequences, and scrambling-ID domains.
-- [TS 38.212 V17.9.0](https://www.etsi.org/deliver/etsi_ts/138200_138299/138212/17.09.00_60/ts_138212v170900p.pdf): DCI field definitions, CRC/coding and multiplexing.
-- [TS 38.213 V18.2.0](https://www.etsi.org/deliver/etsi_ts/138200_138299/138213/18.02.00_60/ts_138213v180200p.pdf): control monitoring, broadcast control acquisition, and control procedures.
-- [TS 38.214 V18.2.0](https://www.etsi.org/deliver/etsi_ts/138200_138299/138214/18.02.00_60/ts_138214v180200p.pdf): data allocation, MCS/TBS and related receive procedures.
-
-Before submission, pin a consistent supported-release profile and audit relevant
-TS 38.331 ASN.1 configuration domains and TS 38.104 raster/bandwidth tables against
-the repository tables. Mixing reference releases in this source audit is not a
-formal conformance assessment.
-
-The receiver combines established polar/LDPC decoding, LS channel estimation,
-FFT/NUDFT processing, CFAR, subspace cancellation, low-rank completion, sparse
-recovery, MUSIC, and Kalman filtering with project-specific passive inference and
-integration. A paper must cite the original algorithm literature and OAI software
-provenance rather than claim these building blocks as new. The code identifies
-FISTA, singular-value-projection-style completion, and complex fractional-peak
-interpolation families; verify the exact publication/variant before assigning
-named-algorithm equivalence. Novelty claims require a separate related-work study.
-
-### 19.3 Paper-ready claims versus open claims
-
-Defensible architecture claims concern receive-only software operation, explicit
-bounded configuration search, generation-aware feedback, measured per-grant UL
-timing, UCI-footprint recovery, and heterogeneous CFR processing with stated
-capability limits. Performance claims require the §17 artifact reconciliation and
-evaluation. “Fully agnostic across NR,” “all identities learned,” “all UEs tracked,”
-“zero false locks,” “calibrated `p_real`,” and “autonomous multi-illuminator sensing”
-remain open until their acceptance gates pass.
