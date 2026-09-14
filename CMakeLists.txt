@@ -980,6 +980,7 @@ set(PHY_SRC_UE
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_tdd_pattern.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_dci11_layout_sweep.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_dci01_layout_sweep.c
+  ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_ss_registry.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_csirs_blind_search.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_dmrs_id_estimate.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_xoverhead.c
@@ -2525,6 +2526,13 @@ if(ENABLE_TESTS)
   target_link_libraries(test_nr_pdcch_dci01_layout_sweep PRIVATE UTIL GTest::gtest)
   add_dependencies(tests test_nr_pdcch_dci01_layout_sweep)
   add_test(NAME test_nr_pdcch_dci01_layout_sweep COMMAND ./test_nr_pdcch_dci01_layout_sweep)
+
+  add_executable(test_nr_pdcch_ss_registry ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_ss_registry_test.cc
+                                           ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_ss_registry.c)
+  target_include_directories(test_nr_pdcch_ss_registry PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
+  target_link_libraries(test_nr_pdcch_ss_registry PRIVATE UTIL GTest::gtest)
+  add_dependencies(tests test_nr_pdcch_ss_registry)
+  add_test(NAME test_nr_pdcch_ss_registry COMMAND ./test_nr_pdcch_ss_registry)
 endif()
 
 add_subdirectory(common)
