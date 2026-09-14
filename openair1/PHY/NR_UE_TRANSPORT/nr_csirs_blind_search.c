@@ -116,3 +116,127 @@ int nr_csirs_blind_format(const nr_csirs_candidate_t *c, uint16_t period, uint16
                          c->cdm_type, c->freq_density, c->scramb_id, period, offset);
   return (n > 0 && n < out_len) ? n : 0;
 }
+
+
+/* ---- candidate enumeration and scheduling ------------------------------------------------------ */
+
+#include <string.h>
+
+/* Rows worth searching -- see the header for why the wide-port rows are excluded.
+ * Row 1: 1 port, density 3, one symbol. Row 2: 1 port, density 1. Row 4: 4 ports, density 1. */
+static const uint8_t kRows[]    = {1, 2, 4};
+static const uint8_t kDensity[] = {3, 2, 2};   /* per row: 3 = three, 2 = one */
+static const uint8_t kCdm[]     = {0, 0, 1};   /* per row: noCDM, noCDM, fd-CDM2 */
+/* Frequency-domain bitmap width differs per row; a one-hot sweep over the legal positions is what
+ * a real configuration always is. Row 1 has 3 positions, rows 2 and 4 have 12 and 3. */
+static const uint8_t kFdBits[]  = {3, 12, 3};
+
+#define CSIRS_DETECT_MARGIN 3.0   /* a hit must beat the null MEDIAN by this factor */
+#define CSIRS_MIN_HITS      3
+
+int nr_csirs_blind_enumerate(nr_csirs_candidate_t *out, int max, uint16_t n_rb, uint16_t scramb_id)
+{
+  if (out == NULL || max <= 0 || n_rb == 0) {
+    return -1;
+  }
+  int n = 0;
+  for (unsigned r = 0; r < sizeof(kRows) / sizeof(kRows[0]); r++) {
+    for (uint8_t b = 0; b < kFdBits[r]; b++) {
+      /* symb_l0 runs over the symbols a CSI-RS may start on. Symbol 0 and 1 are excluded: a CORESET
+       * occupies the start of the slot and no cell places a measurement resource under it. */
+      for (uint8_t l0 = 2; l0 < 13; l0++) {
+        if (n >= max) {
+          return n;
+        }
+        nr_csirs_candidate_t *c = &out[n++];
+        memset(c, 0, sizeof(*c));
+        c->row = kRows[r];
+        c->freq_domain = (uint16_t)(1u << b);   /* one-hot: what a real configuration carries */
+        c->symb_l0 = l0;
+        c->symb_l1 = 0;
+        c->cdm_type = kCdm[r];
+        c->freq_density = kDensity[r];
+        c->scramb_id = scramb_id;
+        c->start_rb = 0;
+        c->nr_of_rbs = n_rb;
+      }
+    }
+  }
+  return n;
+}
+
+int nr_csirs_blind_init(nr_csirs_blind_state_t *st, uint16_t n_rb, uint16_t scramb_id)
+{
+  if (st == NULL) {
+    return 0;
+  }
+  memset(st, 0, sizeof(*st));
+  st->confirmed = -1;
+  const int n = nr_csirs_blind_enumerate(st->cand, NR_CSIRS_BLIND_MAX_CAND, n_rb, scramb_id);
+  if (n <= 0) {
+    return 0;
+  }
+  st->n = n;
+  return n;
+}
+
+int nr_csirs_blind_next(nr_csirs_blind_state_t *st)
+{
+  if (st == NULL || st->n <= 0) {
+    return -1;
+  }
+  if (st->confirmed >= 0) {
+    return st->confirmed;
+  }
+  const int idx = st->cursor;
+  st->cursor = (st->cursor + 1) % st->n;
+  return idx;
+}
+
+bool nr_csirs_blind_feed(nr_csirs_blind_state_t *st, int idx, uint32_t absolute_slot,
+                         double rho, double rho_null)
+{
+  if (st == NULL || idx < 0 || idx >= st->n) {
+    return false;
+  }
+  if (st->confirmed >= 0) {
+    return true;
+  }
+  st->tried[idx]++;
+  if (rho > st->best_rho[idx]) {
+    st->best_rho[idx] = rho;
+  }
+  /* RELATIVE bar. rho_null is what the other candidates are scoring right now, so the test is
+   * "does this stand out from its own population", which needs no per-deployment calibration.
+   * A negative rho (unscorable candidate) can never pass, which is the point of returning -1
+   * rather than 0 from the correlator. */
+  if (rho <= 0.0 || rho_null <= 0.0 || rho < CSIRS_DETECT_MARGIN * rho_null) {
+    return false;
+  }
+  if (st->n_hit_slot[idx] < 8) {
+    st->hit_slot[idx][st->n_hit_slot[idx]++] = absolute_slot;
+  }
+  st->hits[idx]++;
+  if (st->n_hit_slot[idx] < CSIRS_MIN_HITS) {
+    return false;
+  }
+  uint16_t p = 0, o = 0;
+  if (!nr_csirs_blind_infer_period(st->hit_slot[idx], st->n_hit_slot[idx], CSIRS_MIN_HITS, &p, &o)) {
+    return false;   /* scoring high is not enough -- it must also be PERIODIC */
+  }
+  st->confirmed = idx;
+  st->period = p;
+  st->offset = o;
+  return true;
+}
+
+const nr_csirs_candidate_t *nr_csirs_blind_confirmed(const nr_csirs_blind_state_t *st,
+                                                     uint16_t *period, uint16_t *offset)
+{
+  if (st == NULL || st->confirmed < 0) {
+    return NULL;
+  }
+  if (period) *period = st->period;
+  if (offset) *offset = st->offset;
+  return &st->cand[st->confirmed];
+}

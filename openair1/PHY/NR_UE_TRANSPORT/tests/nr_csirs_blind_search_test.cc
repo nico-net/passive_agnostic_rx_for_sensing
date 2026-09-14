@@ -1,5 +1,6 @@
 #include <cmath>
 #include <cstdlib>
+#include <string>
 #include <vector>
 #include <gtest/gtest.h>
 extern "C" {
@@ -146,6 +147,82 @@ TEST(CsirsBlindFormat, EmitsAParsableMonitorEntry) {
   // must refuse rather than truncate into a silently wrong config line
   char tiny[8];
   EXPECT_EQ(nr_csirs_blind_format(&c, 20, 13, tiny, sizeof(tiny)), 0);
+}
+
+// ---- enumeration and scheduling ----------------------------------------------------------------
+
+TEST(CsirsBlindEnum, EnumeratesRealConfigurationsOnly) {
+  std::vector<nr_csirs_candidate_t> c(NR_CSIRS_BLIND_MAX_CAND);
+  const int n = nr_csirs_blind_enumerate(c.data(), NR_CSIRS_BLIND_MAX_CAND, 273, 2);
+  ASSERT_GT(n, 0);
+  for (int i = 0; i < n; i++) {
+    EXPECT_TRUE(c[i].row == 1 || c[i].row == 2 || c[i].row == 4);
+    EXPECT_EQ(c[i].scramb_id, 2);
+    EXPECT_EQ(c[i].nr_of_rbs, 273);
+    // one-hot frequency-domain bitmap: a real configuration selects one position, and allowing
+    // arbitrary bitmaps would multiply the search by 2^12 for combinations no gNB emits.
+    EXPECT_EQ(c[i].freq_domain & (c[i].freq_domain - 1), 0) << "bitmap is not one-hot";
+    EXPECT_NE(c[i].freq_domain, 0);
+    // symbols 0-1 are excluded: the CORESET occupies the start of the slot.
+    EXPECT_GE(c[i].symb_l0, 2);
+    EXPECT_LE(c[i].symb_l0, 12);
+  }
+  EXPECT_EQ(nr_csirs_blind_enumerate(nullptr, 10, 273, 2), -1);
+  EXPECT_EQ(nr_csirs_blind_enumerate(c.data(), 10, 0, 2), -1);
+}
+
+TEST(CsirsBlindEnum, RoundRobinVisitsEveryCandidate) {
+  // Every candidate must see statistically the same channel -- the same reason Technique D
+  // interleaves per grant rather than testing in blocks.
+  nr_csirs_blind_state_t st{};
+  const int n = nr_csirs_blind_init(&st, 273, 2);
+  ASSERT_GT(n, 1);
+  std::vector<int> seen(n, 0);
+  for (int i = 0; i < n * 3; i++) seen[nr_csirs_blind_next(&st)]++;
+  for (int i = 0; i < n; i++) EXPECT_EQ(seen[i], 3) << "candidate " << i << " was not visited evenly";
+}
+
+TEST(CsirsBlindFeed, NeedsToStandOutFromItsOwnPopulation) {
+  nr_csirs_blind_state_t st{};
+  ASSERT_GT(nr_csirs_blind_init(&st, 273, 2), 3);
+  // A high score that does NOT beat the null population is not a detection: on a loud channel
+  // everything scores high, and an absolute bar would fire on all of it.
+  EXPECT_FALSE(nr_csirs_blind_feed(&st, 0, 10, 0.80, 0.70));
+  EXPECT_EQ(st.hits[0], 0u);
+  // An unscorable candidate (-1 from the correlator) can never pass -- the reason it is -1 and not 0.
+  EXPECT_FALSE(nr_csirs_blind_feed(&st, 0, 10, -1.0, 0.01));
+  EXPECT_EQ(st.hits[0], 0u);
+}
+
+TEST(CsirsBlindFeed, ScoringHighIsNotEnoughWithoutPeriodicity) {
+  // A one-off correlation spike is not a resource. Requiring a PERIOD is what separates a real
+  // configuration from a lucky slot, and it costs nothing extra to demand.
+  nr_csirs_blind_state_t st{};
+  ASSERT_GT(nr_csirs_blind_init(&st, 273, 2), 3);
+  EXPECT_FALSE(nr_csirs_blind_feed(&st, 0, 7, 0.95, 0.05));
+  EXPECT_FALSE(nr_csirs_blind_feed(&st, 0, 7, 0.95, 0.05));   // same slot: zero span
+  EXPECT_EQ(nr_csirs_blind_confirmed(&st, nullptr, nullptr), nullptr);
+}
+
+TEST(CsirsBlindFeed, ConfirmsAPeriodicResourceAndReportsIt) {
+  nr_csirs_blind_state_t st{};
+  ASSERT_GT(nr_csirs_blind_init(&st, 273, 2), 3);
+  bool done = false;
+  for (int k = 0; k < 6 && !done; k++) {
+    done = nr_csirs_blind_feed(&st, 2, (uint32_t)(20 * k + 13), 0.92, 0.04);
+  }
+  ASSERT_TRUE(done);
+  uint16_t p = 0, o = 0;
+  const nr_csirs_candidate_t *c = nr_csirs_blind_confirmed(&st, &p, &o);
+  ASSERT_NE(c, nullptr);
+  EXPECT_EQ(p, 20);
+  EXPECT_EQ(o, 13);
+  // Once confirmed the scheduler stops rotating -- there is nothing left to search for.
+  EXPECT_EQ(nr_csirs_blind_next(&st), 2);
+  // And it formats straight back out as a csirs_monitor line.
+  char buf[128];
+  ASSERT_GT(nr_csirs_blind_format(c, p, o, buf, sizeof(buf)), 0);
+  EXPECT_NE(std::string(buf).find(":20:13"), std::string::npos);
 }
 
 int main(int argc, char **argv)

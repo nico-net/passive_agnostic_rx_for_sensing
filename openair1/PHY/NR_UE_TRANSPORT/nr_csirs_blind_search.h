@@ -98,4 +98,57 @@ bool nr_csirs_blind_infer_period(const uint32_t *hit_slots, int n_hits, int min_
 int nr_csirs_blind_format(const nr_csirs_candidate_t *c, uint16_t period, uint16_t offset,
                           char *out, int out_len);
 
+/* ---- CANDIDATE ENUMERATION AND SCHEDULING -----------------------------------------------------
+ * The primitives above are the oracle and the periodicity test. What follows is the search itself.
+ *
+ * SCOPE, STATED UP FRONT. Only the 1-port rows (1, 2) and the 4-port row 4 are enumerated. Those
+ * cover a TRS pair and the ordinary CQI resource, which is what a cell actually broadcasts for
+ * measurement; the 8/12/16/24/32-port rows exist but a passive receiver gains nothing from
+ * recovering them that the 4-port row does not already give, and each multiplies the search.
+ * Widening the row set is a one-line change to kRows if that judgement turns out wrong.
+ *
+ * scramblingID is NOT swept by default. It is almost always the PCI, which acquisition already
+ * gives us, and sweeping 1024 values would multiply the space by three orders of magnitude for a
+ * parameter we can simply try first and fall back on.
+ */
+
+#define NR_CSIRS_BLIND_MAX_CAND 256
+
+typedef struct {
+  nr_csirs_candidate_t cand[NR_CSIRS_BLIND_MAX_CAND];
+  uint32_t             hits[NR_CSIRS_BLIND_MAX_CAND];
+  uint32_t             tried[NR_CSIRS_BLIND_MAX_CAND];
+  double               best_rho[NR_CSIRS_BLIND_MAX_CAND];
+  uint32_t             hit_slot[NR_CSIRS_BLIND_MAX_CAND][8]; ///< first 8 hit slots, for the period test
+  uint8_t              n_hit_slot[NR_CSIRS_BLIND_MAX_CAND];
+  int                  n;
+  int                  cursor;
+  int                  confirmed;   ///< index of a resolved resource, or -1
+  uint16_t             period, offset;
+} nr_csirs_blind_state_t;
+
+/** Enumerate candidate resources for a cell. `scramb_id` is normally the PCI.
+ * Returns the count, or -1 on bad arguments. */
+int nr_csirs_blind_enumerate(nr_csirs_candidate_t *out, int max, uint16_t n_rb, uint16_t scramb_id);
+
+/** Initialise a search state from an enumeration. Returns the candidate count. */
+int nr_csirs_blind_init(nr_csirs_blind_state_t *st, uint16_t n_rb, uint16_t scramb_id);
+
+/** Which candidate to test in this slot. Round-robin, so every candidate sees statistically the
+ * same channel -- the same reason Technique D interleaves per grant. Returns -1 when empty. */
+int nr_csirs_blind_next(nr_csirs_blind_state_t *st);
+
+/** Record the correlation a candidate scored in `absolute_slot`.
+ * `rho_null` is the median score of the OTHER candidates tested recently: the detection bar is
+ * relative to that, never an absolute number, because the right absolute threshold depends on
+ * occupancy, gain and bandwidth and would have to be recalibrated per deployment -- exactly the
+ * kind of constant this project replaces with a measured one.
+ * Returns true once the resource is confirmed (a periodicity has been inferred). */
+bool nr_csirs_blind_feed(nr_csirs_blind_state_t *st, int idx, uint32_t absolute_slot,
+                         double rho, double rho_null);
+
+/** The confirmed resource, or NULL. Fills period/offset when non-NULL. */
+const nr_csirs_candidate_t *nr_csirs_blind_confirmed(const nr_csirs_blind_state_t *st,
+                                                     uint16_t *period, uint16_t *offset);
+
 #endif /* __NR_CSIRS_BLIND_SEARCH_H__ */
