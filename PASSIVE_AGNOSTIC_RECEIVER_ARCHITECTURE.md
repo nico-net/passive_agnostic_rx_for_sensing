@@ -1660,324 +1660,259 @@ evaluation. “Fully agnostic across NR,” “all identities learned,” “all
 “zero false locks,” “calibrated `p_real`,” and “autonomous multi-illuminator sensing”
 remain open until their acceptance gates pass.
 
-## 20. Configuration-derivation modules added 2026-09-13/14
+## 20. Configuration derivation by constrained search
 
-This section records six modules that convert assumed configuration into derived
-configuration, the SFO-estimator defects found while doing so, and the on-air state of
-each. "Tested" and "validated" are kept apart throughout: every module below carries an
-offline test suite, and only the two marked *wired* have executed against a live cell.
+Sections 5-9 identify where control information is carried, how long it is, and which
+identities address it. This section covers the remaining class of unknown: how a payload is
+*interpreted*, and how resources that carry no error-detecting code are identified at all.
+The mechanisms differ from the earlier ones in their oracle, not in their structure.
 
-### 20.1 Why the DCI field layout was the dominant gap
+### 20.1 Length identification does not imply layout identification
 
-Techniques A-C recover where the PDCCH is, how long the DCI is, and which RNTI it carries.
-Technique D recovers three payload-interpretation fields. Everything else about the DCI 1_1
-layout was a fixed assumption set in `nr_pdcch_blind_dci_size()` - roughly fifteen field
-widths, each annotated as traceable to one fact about the laboratory cell.
+A DCI payload of the correct total length can still be read with every field displaced. The
+identity is recovered from the CRC mask rather than from the payload, and the frequency-domain
+assignment precedes most of the fields whose widths are configuration-dependent, so a
+misplaced layout yields CRC-valid control information and allocations of plausible extent.
+The only observable consequence is that no transport block decodes.
 
-A correct total length does not imply a correct layout, and the failure is silent. The RNTI
-is recovered from the CRC rather than the payload, and the frequency-domain assignment
-precedes most of the fields that can be displaced, so allocations remain plausible and the
-only symptom is that no transport block decodes. A prior campaign was lost to exactly this:
-`bwp_indicator` 1 to 0 and `time_domain_assignment` 4 to 2, with the total length correct
-throughout.
+This makes layout a separate identification problem from length, with a separate oracle. The
+transport-block CRC is that oracle, for the same reason it serves the TDRA and DM-RS
+semantics of section 9: a wrong interpretation of correct bits produces a decode failure that
+is statistically unambiguous, whereas the polar CRC validates the bits and says nothing about
+their meaning.
 
-Two structural facts make the search tractable rather than combinatorial:
+### 20.2 Reduction of the layout search
 
-1. The field widths are not independent parameters. They are determined by approximately
-   eight RRC switches - `pdsch_Config` presence, `tci_PresentInDCI`, `supplementaryUplink`,
-   CBG transmission, `n_dl_bwp`, DM-RS type and maxLength, `dl_DataToUL_ACK` cardinality,
-   and DAI codebook type. Enumerating switches rather than widths is the difference between
-   an intractable product and a list.
-2. Extraction depends only on the offsets of the fields actually read - RIV, TDA, MCS, RV,
-   antenna ports, DM-RS sequence initialisation. Fields lying between two of those
-   contribute only through their sum. Two layouts with equal group sums are
-   indistinguishable to the receiver and decode identically, so collapsing them is lossless.
+A direct enumeration of per-field widths is intractable and, more importantly, unfaithful: it
+generates combinations no radio-resource configuration can produce. Three reductions make the
+problem finite and keep every candidate a realisable configuration.
 
-The already-derived DCI length then removes a further dimension: a candidate whose widths do
-not sum to the observed payload cannot describe this cell and is rejected before any grant
-is spent on it.
+**Switch enumeration.** The field widths of DCI 1_1 are not free parameters. They are
+determined by a small set of configuration switches - presence of a dedicated PDSCH
+configuration, transmission-configuration indication in DCI, supplementary uplink, code-block-group
+transmission, the number of configured downlink bandwidth parts, DM-RS type and maximum length,
+the cardinality of the HARQ-feedback timing list, and the assignment-index codebook type.
+Enumerating switches rather than widths bounds the space by the product of those cardinalities
+and guarantees that each member is a configuration some radio-resource control state could emit.
 
-Measured funnel, 273 PRB and a 47-bit payload:
+**Offset equivalence.** Extraction depends only on the bit offsets of the fields the receiver
+reads: the frequency-domain assignment, the time-domain assignment, the modulation and coding
+scheme, the redundancy version, the antenna ports, and the DM-RS sequence initialisation.
+Fields lying between two read fields affect extraction only through their sum. Layouts sharing
+all such group sums are therefore indistinguishable to the receiver *and* decode identically,
+so quotienting the enumeration by that equivalence is lossless. The searchable state reduces to
+a small number of group sums plus the antenna-port width.
 
-| Stage | Candidates | Factor |
-|---|---|---|
-| Switch combinations collapsed to group sums, all plausible lengths | 10,037 | - |
-| Constrained to the observed DCI length | 60 | 167x |
-| After stage-1 plausibility, which costs no decode | 8 | 7.5x |
+**The length constraint.** The total payload width is already identified by the length search of
+section 7. A candidate whose widths do not sum to it cannot describe the cell and is rejected
+before any grant is spent on it. This is the dominant reduction, and it is free: it consumes no
+observation.
 
-Stage 1 tests what a displaced field corrupts first and what costs nothing to check:
-reserved MCS rows 28-31, a RIV inside the BWP, and the antenna-port codepoint against the
-twelve defined rows of Table 7.3.1.2.2-1. No channel estimate, no equaliser, no LDPC.
+Let `W` denote the switch product, `E` the number of equivalence classes it induces, and `L`
+the classes consistent with the identified length. For the 273-PRB configuration used
+throughout this document, with a 47-bit payload, `W` collapses to `E = 10,037` classes across
+plausible lengths and to `L = 60` at the identified one. These are enumeration cardinalities,
+not measured execution times.
 
-### 20.2 Uplink DCI 0_1
+### 20.3 Two-stage scoring
 
-`pdcch_blind_monitor_ul_*` widths were all -1, meaning the module's documented assumption.
-A long-standing project record described UL 0_1 as accepting zero grants; that record is
-superseded. Re-measured on `captures/sfooff_r1_191752`: `dci01[accepts=23933]`,
-`ulscan crc_hit=23947`, and PUSCHDIAG decoding real grants partially (`seg=3/7`, SNR
-17.9-55 dB, MCS 5-19, coherent PRB spans). The acceptance blocker is closed; what remained
-was the layout.
+The transport-block CRC is an expensive oracle: it requires channel estimation, equalisation,
+demodulation and decoding for each hypothesis tested. A cheaper predicate removes most
+candidates first.
 
-DCI 0_1's field order (TS 38.212 7.3.1.1.2) differs materially: a UL/SUL indicator and a
-frequency-hopping flag precede the MCS, and SRS resource indication, precoding and layers,
-CSI request, PT-RS/DM-RS association and beta-offset all lie between the RV and the antenna
-ports. The switch space is larger - SRI, precoding and CSI request each admit up to seven
-values - so the length constraint carries more weight, not less: 9,280 layouts across
-lengths 30-80 collapse to 272 at the observed length and to 72 after stage 1.
+**Stage one** examines the payload alone. A displaced layout reads nonsensical values in fields
+whose admissible ranges are known: the modulation and coding scheme lands in a row reserved for
+retransmission, the resource indication value exceeds what the bandwidth part can address, or
+the antenna-port codepoint indexes an undefined row of the applicable table. None of these
+requires a decode. For the configuration above, stage one reduces `L = 60` to 8.
 
-The two-stage resolver is reused rather than duplicated. It reads only offsets, and DCI 0_1
-exposes the same five fields to extraction.
+**Stage two** scores the survivors on the transport-block CRC, interleaved per grant rather than
+tested in blocks. Interleaving is required rather than preferred: the decoding rate of this
+receiver varies on a timescale of minutes with traffic and propagation, so testing one hypothesis
+before another compares them across that variation.
 
-**One defect this exposed, invisible on air.** The antenna-port plausibility test applied the
-downlink table's twelve-of-sixteen rule whenever the width was four. DCI 0_1 indexes a
-different family of tables (7.3.1.1.2-6 to 23, varying with transform precoding, DM-RS type
-and maxLength), so the downlink rule rejects valid uplink grants: it deleted the true DCI
-0_1 layout during stage 1, after which the resolver could not converge on anything. The row
-count is now carried per format, with zero meaning "do not test". Uplink sets zero until
-those tables are verified in-tree - the same discipline already applied to downlink widths
-five and six.
+Three properties of stage one are structural rather than tuning choices:
 
-### 20.3 Blind NZP CSI-RS recovery
+- Reserved modulation-and-coding rows are a *soft* signal. A cell that retransmits emits them
+  legitimately, so treating them as an invariant discards the correct layout on exactly those
+  deployments that exercise hybrid ARQ. Resource-indication range and antenna-port validity are
+  invariants and carry the discrimination.
+- Elimination is irreversible, so the decision threshold is applied to a confidence bound rather
+  than to a point estimate. A candidate whose true admissibility rate lies above the bar can
+  otherwise be removed by ordinary sampling noise, and cannot return.
+- The candidate set is never emptied. An empty set cannot converge, and the receiver would have
+  no path back.
 
-CSI-RS was the last parameter requiring hand-written `csirs_monitor` values copied from a DU
-log, which cannot be done against an unknown deployment.
+### 20.4 Uplink layout
 
-Techniques A-D all score on a CRC. CSI-RS carries none, and its configuration is dedicated
-RRC, so it is not broadcast. What it does have is a known sequence: the gold sequence is a
-function of `(N_RB, symbols_per_slot, slot, symbol, scramblingID)` alone, while the row,
-frequency-domain bitmap and density determine only which resource elements carry it. The
-oracle is therefore correlation - the same test already used for PDCCH DM-RS.
+The uplink grant admits the same reduction with a different field order: an uplink/supplementary
+-uplink indicator and a frequency-hopping flag precede the modulation and coding scheme, and
+sounding-reference indication, precoding and layer count, channel-state request, phase-tracking
+association and beta-offset lie between the redundancy version and the antenna ports. The switch
+product is larger, so the length constraint carries proportionally more of the reduction.
 
-Design decisions that are load-bearing rather than incidental:
+The resolver is shared with the downlink because it consumes offsets only. The *plausibility
+predicate* is not shareable: the uplink antenna-port tables are a different family from the
+downlink one, so a validity rule derived from the downlink table rejects admissible uplink
+grants. Table row counts are therefore carried per format, with an explicit "not tested" state
+for tables whose cardinality has not been established. Applying a plausibility rule outside the
+domain it was derived from removes the correct hypothesis, which is the one failure mode an
+elimination search cannot survive.
 
-- **The reference is produced by `nr_generate_csi_rs()`, not re-derived.** The
-  resource-element to sequence-index mapping is row-dependent (k-prime and l-prime, CDM
-  groups, density-0.5 parity) and a subtly wrong reference does not resemble a weak signal;
-  it resembles a dead channel, which is the misdiagnosis the module exists to prevent.
-- **Detection is relative, never an absolute correlation threshold.** A candidate must
-  exceed the running median of the other candidates' recent scores. The correct absolute
-  bar depends on occupancy, gain and bandwidth and would require recalibration per
-  deployment.
-- **Periodicity is required for confirmation.** A single high correlation is not a resource.
-- **The period is the LARGEST consistent periodicity, not the smallest.** Every divisor of
-  the true period also satisfies "same slot modulo P", so hits at period 20 are equally
-  consistent with 4, 5 and 10 and a smallest-first rule degenerates to 4 almost always. Only
-  periods longer than the truth are self-rejecting, by placing hits at different phases. A
-  GCD over the deltas was rejected outright: one missed occurrence makes a delta a multiple
-  of the period and the GCD returns 1.
-- **Unscorable is distinct from zero.** The correlator returns -1 for a candidate that maps
-  no resource element, so it can never rank alongside a genuine mismatch.
+### 20.5 Identification without an error-detecting code
 
-### 20.4 PT-RS grants are decodable rather than refused
+Non-zero-power channel-state reference signals carry no cyclic redundancy check, and their
+configuration is dedicated rather than broadcast. Neither the CRC oracles of sections 7-9 nor
+the broadcast parsing of section 6 applies.
 
-`nr_pdsch_passive_decode()` returned early on `pduBitmap & 0x1`, and `nr_get_G()` was called
-with `unav_res = 0` on the strength of that guard. Refusing was correct given the guard -
-PT-RS removes resource elements from PDSCH, so a zero `unav_res` hands the rate matcher the
-wrong G - but it discarded the grant entirely: no TB-CRC evidence for Technique D or the
-layout sweeps, and no data-aided row.
+The applicable oracle is sequence correlation, and it is available because of a factorisation:
+the reference sequence is a function of carrier size, slot, symbol and scrambling identity
+alone, while the row, frequency-domain bitmap and density determine only *which* resource
+elements carry it. A candidate resource therefore predicts both a set of elements and the values
+on them, and the normalised inner product between prediction and observation separates a correct
+hypothesis from an incorrect one at a magnitude set by the occupied element count.
 
-The densities derive from `ptrs-DensityRecommendationDL`, which is dedicated RRC and
-invisible here. The densities it selects, however, form a six-element set: K in {2,4} and L
-in {1,2,4}. This is the same shape as every other unknown in this receiver - a small
-discrete set the TB CRC can arbitrate - and a wrong density yields a wrong G and simply
-fails to decode, which cannot corrupt anything.
+Four properties of this oracle are load-bearing:
 
-Two counting details, both of which under-count G silently if wrong: one PT-RS subcarrier
-per K resource blocks **rounded up**, since a partial group still carries one and 273 is a
-multiple of neither K; and the L-th-symbol cadence **restarts after each DM-RS symbol**
-rather than running from the allocation start, because PT-RS is not mapped on a DM-RS symbol
-and the phase reference is re-established there. A blind stride mis-counts on every cell
-with `additionalPosition > 0`.
+- **The prediction is generated by the transmitter-side mapping routine, not re-derived.** The
+  element-to-sequence-index relation is row-dependent through the code-division group structure,
+  the pair indices, and density-one-half parity. A subtly incorrect prediction does not resemble
+  a weak signal; it resembles an absent one, which is the diagnosis the identification exists to
+  avoid.
+- **Detection is relative.** The decision compares a candidate against the concurrent score
+  distribution of the other candidates rather than against a fixed correlation value. An absolute
+  threshold is a function of occupancy, gain and bandwidth, and would require per-deployment
+  calibration - the property this architecture avoids elsewhere by the same means.
+- **Unscorable is distinct from scored-zero.** A candidate mapping no element in the observed
+  symbol yields no measurement, and must not rank alongside one that was measured and disagreed.
+- **Confirmation requires periodicity.** A single high correlation is not a resource. Requiring
+  the accepted occasions to be consistent with an admissible periodicity costs no additional
+  observation, since the occasions are already recorded.
 
-CSI-RS rate matching remains refused, and this is not merely unimplemented: it requires the
-ZP CSI-RS resource configuration to know which elements were skipped. That is dedicated RRC
-with no small discrete set to sweep - row, bitmap, symbols and density would all have to be
-recovered first, which is what 20.3 exists to do.
+Periodicity is identified as the **largest** admissible period under which every accepted
+occasion falls in the same position of the cycle. Every divisor of the true period satisfies that
+test, so a smallest-first rule degenerates to the shortest admissible period; periods longer than
+the truth are self-rejecting because their occasions fall at differing positions. A greatest
+common divisor over inter-occasion intervals is not usable: a single missed occasion makes one
+interval a multiple of the period and collapses the estimate.
 
-### 20.5 TDD slot direction and the multi-CORESET registry
+### 20.6 Resource accounting for phase-tracking reference signals
 
-`tdd-UL-DL-ConfigurationCommon` is broadcast in SIB1, which this receiver already decodes on
-its way to CELL_CONFIGURED. Unlike every dedicated parameter it requires no sweep and no
-oracle - only parsing and application. Knowing which slots carry no downlink allows the
-monitor to skip them, which both saves work on a receiver already measured at approximately
-881 us of decode against a 500 us slot, and removes a source of false accepts, since a blind
-search over an uplink slot still occasionally recovers an in-range RNTI. On the common DDDSU
-pattern one slot in five is unmonitorable.
+Phase-tracking reference signals displace resource elements from the shared channel, so the
+rate-matching size must account for them. Their density derives from dedicated configuration and
+is not observable, but the densities that configuration can select form a six-element set - two
+frequency densities by three time densities. This is again a small discrete set an existing
+oracle can arbitrate, and an incorrect selection produces a rate-matching size mismatch that
+fails to decode rather than a corrupted measurement.
 
-Four details are enforced rather than assumed, each of which silently disables monitoring if
-wrong: periodicity is taken in tenths of a millisecond, because three of the seven legal
-values are not whole milliseconds and would truncate to zero; a periodicity that is not a
-whole number of slots at the given numerology is refused rather than rounded, since a rounded
-pattern never matches the cell and would mark real downlink slots as uplink; the mixed slot
-exists only when it has symbols, so counting it unconditionally rejects a legal pure pattern
-that fills its period exactly; and flexible slots, together with an unknown or invalid
-configuration, are treated as downlink. Failing safe dominates here - a missed downlink slot
-loses real grants, whereas scanning a slot that proves to be uplink costs only the work the
-mechanism was intended to save.
+Two accounting properties determine correctness and both under-count silently if mistaken: one
+reference subcarrier per frequency-density group **rounded upward**, since a partial group still
+carries one; and a time-density cadence that **restarts at each DM-RS symbol**, since the
+reference is not mapped on those symbols and the phase reference is re-established there. A
+uniform stride mis-counts on every configuration with more than one DM-RS position.
 
-The CORESET, search-space and BWP **registry** is deliberately not a sweep. Every other
-unknown in this receiver is a set of mutually exclusive hypotheses, so they are swept and the
-losers discarded. CORESETs are not mutually exclusive: several are genuinely active
-simultaneously, and discarding the runner-up loses real grants. Entries are therefore scored
-and retained, and the question asked of each is whether it ever yields a real DCI rather than
-whether it is the answer. Retirement is driven by **confirmed** accepts - an RNTI seen more
-than once - because a raw accept is not evidence: a blind search over noise produces an
-in-range RNTI occasionally, which is precisely how a spurious CORESET appears alive.
+Rate matching around zero-power channel-state resources remains outside the identified set. It
+requires the zero-power resource configuration to determine which elements were skipped, which is
+dedicated, not broadcast, and admits no small discrete set; it becomes tractable only once
+section 20.5 identifies such resources.
 
-Four safeguards, each unrecoverable if omitted: the last live entry is never retired, since a
-receiver monitoring nothing cannot produce the evidence that would restore an entry; an entry
-with any confirmed evidence is never retired regardless of rarity; duplicates are rejected on
-geometry rather than on CORESET identifier, because two entries with different identifiers
-but identical occasions double the scan cost and split one search space's evidence across two
-counters; and configurations that can never monitor anything are refused at registration.
+### 20.7 Slot direction from broadcast configuration
 
-### 20.6 Sweep convergence: the cell-wide prior
+The uplink/downlink slot pattern is carried in system information and therefore requires
+identification by parsing rather than by search. Slots with no downlink allocation need not be
+monitored, which reduces both computational load and the false-acceptance rate, since a blind
+search over an uplink slot still occasionally recovers an identity in the admissible range.
 
-A sweep context is keyed `(configuration, tda_index, tda_count, typeA)` and each enumerated
-`(S,L) x dmrs_add_pos x dmrs_max_len x mcs_table`. Only `(S,L)` belongs to the TDRA entry;
-`dmrs-AdditionalPosition`, `maxLength` and `mcs-Table` derive from the cell's DM-RS and PDSCH
-configuration and are identical across entries of the same configuration. Every sibling TDA
-context was re-deriving those three from scratch.
+The safe direction of failure is asymmetric and determines the design: an unmonitored downlink
+slot loses real control information irrecoverably, whereas monitoring an uplink slot costs only
+the work the mechanism was intended to save. Flexible slots, an unparsed pattern, and a pattern
+that fails validation are therefore all treated as downlink. Validation refuses rather than
+rounds - a periodicity that is not an integral number of slots at the operating numerology, or a
+pattern longer than its own period, would alias and mark downlink slots as uplink.
 
-Measured on air, `captures/sfooff_r1_191752`:
+### 20.8 Retained sets versus eliminating searches
 
-```
-Technique D evidence rnti=0x461a tda=0 outcomes=30000 best=74/158 S=1 L=13 mask=0x884 table=1 winner=13
-Technique D evidence rnti=0x465a tda=1 outcomes=7805  best=27/61  S=1 L=7  mask=0x84  table=1 winner=-1
-```
+The searches of sections 7-9 and 20.2-20.6 resolve *mutually exclusive* hypotheses: one length,
+one layout, one time-domain entry, one density is correct, and the alternatives are discarded.
 
-The first context converged on `S=1 L=13`, matching the hand-written configuration, and ran
-at 54 percent operational CRC. The second had 7,805 outcomes but only 61 trials on its leader,
-because approximately 192 hypotheses were dividing them.
+Control-resource sets, search spaces and bandwidth parts are not of that kind. A cell configures
+several and uses them concurrently, so an eliminating search would discard configurations that
+carry real control information. The architecture therefore distinguishes two population types,
+and applies retention rather than elimination to the second: entries are scored and kept, and the
+question asked of each is whether it ever yields real control information, not whether it is the
+answer.
 
-The first context to converge now publishes `{mcs_table, dmrs_add_pos, dmrs_max_len}`, scoped
-to its configuration key, and a newly opened sibling prunes its catalogue to matching entries.
-Measured offline: **33,601 to 1,145 outcomes to converge, 29.3x**, consistent with the 192/8
-catalogue narrowing plus early separation.
+Retirement, when a configuration is to be removed from the monitored set, is driven by *confirmed*
+observations - an identity observed more than once - rather than by raw acceptances. A single
+acceptance is not evidence of a real configuration, since a blind search over noise produces an
+admissible identity occasionally, which is indistinguishable from a sparsely used search space on
+one observation. The last remaining entry is never retired: a receiver monitoring nothing cannot
+generate the evidence that would restore it.
 
-It remains a prior rather than an assumption, with three escapes: pruning to an empty set
-leaves the full catalogue; a pruned context that cannot raise any hypothesis above
-`SWEEP_MIN_RATE` within its probation window restores the full catalogue and invalidates the
-prior globally; and the recovery path restores the full catalogue, a stale prior being the
-most probable cause when a converged context begins failing.
+### 20.9 Evidence pooling across contexts
 
-**Two hazards found by the tests, both of which would delete the correct answer.** MCS 28-31
-are reserved retransmission rows, so a cell that retransmits emits them legitimately and the
-reserved-MCS test flags the true layout on those grants; treating that as an invariant deletes
-the answer on exactly the cells that exercise HARQ. And the stage-1 drop originally used a
-point estimate: at a true rate of 0.80 and n = 64, ordinary binomial noise places the sample
-below the bar approximately one time in six, so a 20 percent retransmission rate deleted the
-true layout outright. The drop now requires the Wilson upper bound to lie below the threshold -
-the question is not whether a candidate is below the bar now, but whether it can still be above
-it.
+Search contexts are keyed by configuration and time-domain index, which correctly separates
+hypotheses that may differ. It also separates parameters that cannot. The DM-RS additional
+position, DM-RS maximum length and modulation-and-coding table are properties of the cell's
+shared configuration and are invariant across time-domain entries of the same configuration, so
+an unmodified per-context search re-derives them independently in each context.
 
-### 20.7 SFO estimator: three defects, all biasing the same direction
+Publishing those cell-scoped parameters on first identification, and restricting later contexts to
+hypotheses consistent with them, reduces a sibling context's catalogue by the ratio of the full
+product to the per-entry axis alone. The mechanism remains a prior rather than an assumption: a
+restricted context that cannot raise any hypothesis above the admissibility floor within a bounded
+observation window restores the full catalogue and invalidates the published parameters, and the
+recovery path of section 9 does likewise, a stale prior being the most probable explanation when a
+converged context begins to fail.
 
-Found while testing whether uncorrected SFO explains the SEGIDX failure gradient. All three
-bias the published `g_sfo_ppm_ema`, which is the value `ISAC_SFO_CORRECT` consumes.
+This is an instance of a general property of the architecture: identification cost is reduced by
+exploiting the scope over which a parameter is constant, not by narrowing the hypothesis space on
+belief.
 
-1. **The EMA update raced.** `s_cfo_ema` and `s_sfo_ema` were plain statics under a
-   read-modify-write while the function executes on N consumer threads. The symptom appears
-   directly in captured logs: `cfo=-41.3 Hz (ema +248.2)`, an average unrelated to any sample
-   feeding it. The existing comment justifying a torn read by a consumer does not justify a
-   torn update.
-2. **An unmeasurable SFO was recorded as zero.** `sfo_ppm` is initialised to 0.0 and computed
-   only when both slope groups exceed sixteen subcarriers, yet was fed to the EMA
-   unconditionally. Measured on `captures/sfooff_r1_191752`: **49 of 107 DMRSFO samples, 46
-   percent, had kn <= 16 and every one published `sfo=+0.00`**, so the reported EMA of
-   +4.33 ppm was averaged with 46 percent fabricated zeros and understates the true value.
-3. **The coherence gate measures the SFO, not the noise.** This is the non-obvious defect.
-   `|sum(H1 conj(H0))| / sum(|H1||H0|)` is described as a noise test, but a real SFO ramps the
-   phase difference linearly across k, so the coherent sum cancels by `|sinc(PHI/2)|` where PHI
-   is the total ramp `2 pi df eps dt K`. At 273 PRB, 30 kHz and dt = 321 us, PHI = 198,486 eps:
+### 20.10 What a gating statistic measures
 
-   | SFO ppm | 2.4 | 4.2 | 8 | 12 | 24 |
-   |---|---|---|---|---|---|
-   | predicted coherence | 0.99 | 0.97 | 0.90 | 0.78 | 0.29 |
+Estimators in this receiver publish only when a validity statistic indicates the estimate is
+trustworthy. The choice of statistic must account for the impairment being estimated, or the gate
+becomes a function of that impairment rather than of the noise.
 
-   The rig reports coherence 0.97 at a reported 4.2 ppm - the sinc prediction to two decimals.
-   The noise floor at n = 3276 is 1/sqrt(n) = 0.017, so the 0.30 threshold sits seventeen times
-   above noise and noise never reaches it. What trips the gate is a **large real SFO**, from
-   approximately 23.7 ppm upward. The estimator therefore refused to publish precisely when the
-   impairment it exists to measure was worst, and logged "estimate withheld", which is
-   indistinguishable from a dead channel. A wide-grant rejection observed at coherence 0.077
-   with `n_sc=1628/1628` is consistent with roughly 30 ppm, not with noise.
+The frequency- and sampling-offset estimator of section 4 illustrates the requirement. It measures
+a phase difference between two reference symbols across subcarriers; a carrier offset appears as a
+constant term and a sampling offset as a term linear in subcarrier index. The natural validity
+statistic is the coherence of the phase population, `|Σ H₁·conj(H₀)| / Σ|H₁||H₀|`, which is unity
+when every subcarrier reports the same difference and falls toward `n^{-1/2}` when the population
+is random.
 
-   The gate is now per-half: each half spans half the band and therefore suffers only
-   `sinc(PHI/4)` - 0.78 rather than 0.29 at 24 ppm - and it validates precisely the two phases
-   the slope is constructed from, which also closes the prior hole whereby one half could be
-   noise while a strong other half carried the combined sum past the threshold.
+A sampling offset, however, makes the difference vary linearly by construction. The coherent sum
+over the occupied band is then `|sinc(Φ/2)|` in the total accumulated ramp `Φ = 2π·Δf·ε·Δt·K`, so
+the statistic decreases monotonically with the sampling offset itself. A threshold placed far above
+the random-population floor is therefore never reached by noise and is reached only by a large real
+offset: the estimator withholds its estimate precisely where the impairment is largest, and reports
+a state indistinguishable from an absent signal.
 
-The SFO's own aliasing limit, `1/(2 df dt dk)`, is now reported. The slope derives from a phase
-difference wrapped to (-pi, pi], so beyond that limit it aliases and reports a **small** value,
-indistinguishable from a clean clock.
+The correction is to evaluate coherence over sub-bands rather than the full occupied band. Each
+sub-band accumulates a proportionally smaller ramp, and the sub-band statistics validate exactly
+the phase quantities the slope estimate is constructed from, which the aggregate statistic does not.
 
-### 20.8 On-air state
+Two further properties follow from the same analysis and apply to any estimator of this class. An
+estimate that could not be formed must be distinguished from an estimate of zero, or the published
+average is biased toward zero in proportion to how often the geometry prevents measurement. And a
+slope recovered from a wrapped phase difference is unambiguous only up to `1/(2·Δf·Δt·Δk)`; beyond
+it the estimate aliases to a *small* value, indistinguishable from a well-disciplined clock, so the
+ambiguity limit belongs in the reported output alongside the estimate.
 
-| Module | Offline tests | Wired to RT path | Executed on air |
-|---|---|---|---|
-| DCI 1_1 layout enumeration, resolver, handover | 17 | Stage 1 only | Armed: 15 layouts consistent with `dci_length=47`, `riv=16`, `tda=4` |
-| DCI 0_1 uplink layout | 7 | No | No |
-| Blind CSI-RS search | 17 | Yes, observe-only | Armed: 198 candidates, `N_RB=273`, `scramb_id=2` |
-| PT-RS resource-element count | 8 | Opt-in via `ISAC_PTRS_K/L` | No |
-| TDD slot direction | 8 | No | No |
-| CORESET/search-space registry | 8 | No | No |
-| Cell-wide sweep prior | 4 | Yes | Convergence not yet observed on air |
-| SFO estimator fixes | - | Yes | Confirmed live: `unamb +/-31.6`, `ema over 5222`, per-half coherence reported |
+### 20.11 Remaining qualifications
 
-Both wired modules self-configured from parameters recovered from the air - `dci_length`,
-`N_RB` and PCI - rather than from configuration.
+The mechanisms of this section identify interpretation and resource configuration within stated
+domains. They do not close the following, which section 18's gates should continue to treat as open:
 
-### 20.9 Two defects found by running, not by testing
-
-Both lived entirely in the wiring, and neither was reachable by the offline suites, which
-exercise the pure functions against synthetic buffers and never invoke the real generator.
-This is the argument for wiring one module at a time rather than landing several and then
-attributing a failure.
-
-1. **Segmentation fault on the first run after wiring.** The candidate set includes row 4,
-   which defines four CSI-RS ports, but `nr_generate_csi_rs()` was handed a one-element port
-   array. It writes `dataF[p]` for every port the row defines, so row 4 wrote through
-   `dataF[1..3]` and killed the receiver 31 seconds in.
-2. **Per-slot allocation on the PHY receive thread.** The first version called
-   `calloc()`/`free()` every slot for up to four 229 kB buffers - approximately 900 kB of churn
-   per slot, gigabytes per second at this slot rate, on the one thread that must keep draining
-   the USRP. That is the shape of fault that prevents the host consuming the stream in time,
-   and on this X410 a single RX overflow halts the stream permanently rather than recovering.
-   Now thread-local and grow-only, with an explicit `memset` replacing calloc's zeroing:
-   `nr_generate_csi_rs()` writes only the elements its row occupies, so a reused buffer would
-   retain the previous candidate's symbols and the correlator would score a mixture of two
-   hypotheses - a wrong answer rather than a crash.
-
-### 20.10 RFSTALL: three candidate causes refuted
-
-Analysed offline across today's captures, without rig access.
-
-| Hypothesis | Test | Outcome |
-|---|---|---|
-| Host NIC packet loss | `rx_missed_errors` delta per run | Refuted - zero in every run, stalled and clean alike |
-| Receiver over its real-time budget | `over_slot` and per-grant cost against outcome | Refuted - the 43 percent over-budget run with 13.7 ms per grant was clean; a 2 percent run stalled |
-| Elapsed time since the previous run | Inter-run gap against outcome | Refuted - clean at 54 s, stalled at 497 s |
-
-What the evidence positively shows: `received=0` with `ERROR_CODE_OVERFLOW (Out of sequence
-error)` at **`RX_START`**, together with zero host-side loss and a packet rate of 697 per
-second against approximately 243,000 per second on a healthy run. The stream is therefore
-already broken when the session opens, before the receiver has performed any work, and the
-packets were never produced rather than lost in transit. This is consistent with the
-documented RFNoC behaviour whereby a single RX overflow halts the stream permanently, and with
-`run_arm.sh`'s own note that SIGKILL never permits UHD to close cleanly - every harness script
-in use issues `kill -9` between arms. Confirming it requires a controlled comparison of clean
-termination against SIGKILL, which needs the rig.
-
-### 20.11 A stale reference configuration
-
-`captures/sensing_manual_fixed.3NB5Ri/receiver.conf`, used as the known-good reference in
-earlier manual-versus-agnostic comparisons, specifies `pdcch_blind_monitor_dmrs = "2:1"` -
-DM-RS on symbols 2 and 11. Technique D converged on air to `mask=0x884`, symbols 2, 7 and 11,
-that is `additionalPosition = 2`. The two disagree, and the hand-written file is wrong for the
-current cell.
-
-This qualifies any conclusion drawn from that file as ground truth. In particular the
-observation that pinning the layout moved the same binary from 16 to 76 percent CRC may have
-compared one wrong layout against a differently wrong layout rather than against a correct one.
-That comparison should be repeated against a layout derived from the air.
+- Stage-two layout scoring is blind to layouts differing only after the last field the receiver
+  reads, and to antenna-port tables whose cardinality is not established. Both classes are carried
+  explicitly as "not discriminated" rather than silently accepted.
+- Uplink layout identification requires a plausibility predicate derived from uplink tables; the
+  downlink predicate is not transferable.
+- Rate matching around zero-power channel-state resources, multiple concurrent bandwidth parts with
+  differing sizes, cross-carrier scheduling, two-codeword transmission, and soft combination across
+  retransmissions remain outside the identified set.
+- Configuration change during a capture is handled per context by the recovery path of section 9;
+  there is no cell-scoped invalidation that propagates a configuration change across all mechanisms
+  simultaneously.
