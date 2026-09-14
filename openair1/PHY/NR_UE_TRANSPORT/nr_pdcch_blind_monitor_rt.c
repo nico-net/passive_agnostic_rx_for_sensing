@@ -658,6 +658,9 @@ void nr_pdcch_blind_monitor_process(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t 
               "SENSING: passive PDSCH decode DEFERRED to %d consumer thread(s) (depth=%d core=%d) -- "
               "775us mean decode no longer runs on the PHY receive thread\n",
               n_cons, depth, cfg->pdsch_thread_core);
+        if (cfg->pdsch_combine)
+          LOG_I(PHY, "SENSING: passive PDSCH decode COMBINED across every real receive antenna -- "
+                     "one LDPC decode per grant, tagged per antenna downstream, not one per branch\n");
       }
     }
   }
@@ -2176,7 +2179,10 @@ constdiag_done:;
                   ? (ue->cont_fo_comp ? ue->dl_Doppler_shift + ue->freq_offset : 0.0)
                   : nr_slot_fep_fo_override_hz;  /* receive-thread sample; see nr_slot_fep_fo_override_hz */
       job.sweep_ticket  = sweep_ticket;
-      nr_pdsch_passive_queue_enqueue_fanout(&job);
+      if (cfg->pdsch_combine)
+        nr_pdsch_passive_queue_enqueue_combined(&job);
+      else
+        nr_pdsch_passive_queue_enqueue_fanout(&job);
       continue;
     }
 
@@ -2386,7 +2392,10 @@ constdiag_done:;
                   ? (ue->cont_fo_comp ? ue->dl_Doppler_shift + ue->freq_offset : 0.0)
                   : nr_slot_fep_fo_override_hz;  /* receive-thread sample */
               job.sweep_ticket  = sweep_ticket;
-              nr_pdsch_passive_queue_enqueue_fanout(&job);
+              if (cfg->pdsch_combine)
+                nr_pdsch_passive_queue_enqueue_combined(&job);
+              else
+                nr_pdsch_passive_queue_enqueue_fanout(&job);
               /* The per-candidate channel-estimate allocation is freed at the BOTTOM of this loop,
                * which `continue` skips -- ~917 kB per job at 273 PRB x 4 antennas, and mlockall()
                * makes every byte of it count against RLIMIT_MEMLOCK. Free it here. */

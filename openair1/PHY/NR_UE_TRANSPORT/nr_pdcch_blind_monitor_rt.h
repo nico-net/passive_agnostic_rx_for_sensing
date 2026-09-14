@@ -166,6 +166,16 @@ typedef struct {
                             // of --thread-pool's cores -- the point is to stop competing with the
                             // receive path, and sharing a core with the candidate-decode pool would
                             // partly undo that.
+  // Antenna-combining producer (adaptive_RX_pipeline.md, 2026-09-14): with multiple branches
+  // active, the fanout producer (pdsch_thread's own consumer pool, above) enqueues ONE decode job
+  // PER BRANCH -- N independent single-antenna LDPC decodes of the SAME transport block. Measured
+  // live: with N=4 branches this oversubscribes the (unchanged) 2-consumer pool 4x, and the ring's
+  // deterministic branch-ascending enqueue order (nr_rx_branch_set_dispatch()) systematically
+  // starves the last-enqueued branch (65% vs 9% decode completion on the same load). DEFAULT 0 =
+  // the previous fanout behaviour, byte-identical. 1 = decode ONCE against every real antenna
+  // (nr_pdsch_passive_queue_enqueue_combined()), then tag each real antenna's own Ĥ = Y/X with its
+  // own branch id in nr_pdsch_data_aided.c -- one LDPC decode per grant instead of N.
+  int   pdsch_combine;
 
   /* ---- Deferred blind-PDCCH SCAN. Distinct from pdsch_thread above: that defers the PDSCH DECODE
    * of an already-accepted grant; this defers the SCAN that finds the grant at all -- the full-slot

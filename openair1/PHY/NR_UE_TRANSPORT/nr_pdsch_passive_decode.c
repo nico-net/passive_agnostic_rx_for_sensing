@@ -926,6 +926,11 @@ uint8_t nr_pdsch_passive_view_branch(void)
   return view_active() ? t_view_branch : (uint8_t)NR_ISAC_BRANCH_NONE;
 }
 
+bool nr_pdsch_passive_view_active(void)
+{
+  return view_active();
+}
+
 int nr_pdsch_passive_branch_view_resolve(const PHY_VARS_NR_UE *ue, int8_t job_physical_channel,
                                           uint8_t *branch_id)
 {

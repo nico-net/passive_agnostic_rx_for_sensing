@@ -69,8 +69,20 @@ if [[ -n $DISABLE_HIERARCHICAL_TRACKER ]]; then
     { print }' "$OUT/receiver.conf" > "$OUT/receiver.conf.tmp"
   mv "$OUT/receiver.conf.tmp" "$OUT/receiver.conf"
 fi
-printf 'RX_BRANCHES=%s\nRX_BRANCH_PHYS_MAP=%s\nRX_GAIN_TRIM=%s\nDISABLE_HIERARCHICAL_TRACKER=%s\nDURATION=%s\n' \
-  "${RX_BRANCHES:-<unset:legacy>}" "${RX_BRANCH_PHYS_MAP:-<unset:legacy>}" "${RX_GAIN_TRIM:-0,0,0,0}" "${DISABLE_HIERARCHICAL_TRACKER:-<unset>}" "$DURATION" > "$OUT/arm.txt"
+# 2026-09-14: branch-fanout decode oversubscribes the (unchanged) pdsch_thread consumer pool N x
+# once N branches are active -- measured live, 66% of jobs dropped/stale, and the ring's
+# deterministic branch-ascending enqueue order starves the last branch (65% vs 9% decode
+# completion). PDSCH_COMBINE=1 appends ":1" (the new 9th field) to the tracked
+# pdcch_blind_monitor_pdsch line on the RENDERED COPY ONLY, switching to decode-once-combined
+# (nr_pdsch_passive_queue_enqueue_combined()): one LDPC decode per grant against every real
+# antenna, then per-antenna branch-tagged CFR downstream. Unset leaves the rendered conf
+# byte-identical, same convention as RX_BRANCHES/DISABLE_HIERARCHICAL_TRACKER.
+PDSCH_COMBINE=${PDSCH_COMBINE:-}
+if [[ -n $PDSCH_COMBINE ]]; then
+  sed -i -E 's/^(\s*pdcch_blind_monitor_pdsch\s*=\s*"[^"]*)"/\1:1"/' "$OUT/receiver.conf"
+fi
+printf 'RX_BRANCHES=%s\nRX_BRANCH_PHYS_MAP=%s\nRX_GAIN_TRIM=%s\nDISABLE_HIERARCHICAL_TRACKER=%s\nPDSCH_COMBINE=%s\nDURATION=%s\n' \
+  "${RX_BRANCHES:-<unset:legacy>}" "${RX_BRANCH_PHYS_MAP:-<unset:legacy>}" "${RX_GAIN_TRIM:-0,0,0,0}" "${DISABLE_HIERARCHICAL_TRACKER:-<unset>}" "${PDSCH_COMBINE:-<unset>}" "$DURATION" > "$OUT/arm.txt"
 sha256sum "$BUILD/nr-uesoftmodem" "$BUILD/liboai_usrpdevif.so" "$OUT/receiver.conf" > "$OUT/checksums.txt"
 read_counter() {
   local value

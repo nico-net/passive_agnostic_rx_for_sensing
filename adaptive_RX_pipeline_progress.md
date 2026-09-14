@@ -3011,3 +3011,298 @@ Next highest-value action: unchanged in kind -- P06's branch-owned discovery sta
   smallest step that turns test 5 from unwritable into merely unwired.
 Reviewer / accomplishment date if gate passed: n/a (no gate claimed; G1 remains IN_PROGRESS).
 ```
+
+## Session — 2026-09-13: Live X410 4-branch validation, hierarchical-tracker root cause, gain-trim investigation (manual mode, user-authorized live testing)
+
+```text
+Date/time (Europe/Zurich): 2026-09-13, evening session
+Task IDs / gate: none formal (user-directed live validation: "the x410 is available, validate
+  everything you need" + "can we allocate differently the gain on the antennas?" + "fix everything
+  you need and find necessary and tell me if the passive rx itself (without sensing) can be used to
+  mount detector on top of it")
+Intended falsifiable claim: (a) does the sensing engine actually initialize, live or replay, under
+  the tracked `tests/passive_rx/adaptive_manual_dlul.conf`; (b) does a launcher-side fix let all 4
+  per-branch SensingEngine instances initialize and emit reports live; (c) does per-channel RX gain
+  trim (`ISAC_RX_GAIN_TRIM`) land on hardware; (d) does a gain trim sized from one run's ANTPOW
+  deltas causally improve the trimmed branch's CRC; (e) is the passive decode chain independent of
+  the sensing engine (so a different detector could be mounted at the same CFR tap points); (f) root
+  cause of the previously-unexplained 4-engine shutdown hang.
+Branch / full commit / dirty patch / untracked-file manifest: commit `bc29cdb16441aba7453bb092`
+  (working tree), dirty: `tests/passive_rx/run_manual_x410.sh` (M, local uncommitted patches, see
+  below); untracked `tests/passive_rx/aoa_track_dl.conf` (not created by this session, not touched).
+  Binary `cmake_targets/ran_build/build/nr-uesoftmodem` sha256 prefix `874a0100f81d5352`.
+Files modified / added / removed: `tests/passive_rx/run_manual_x410.sh` only, two uncommitted local
+  patches (NOT yet committed — no commit was requested this session):
+  (1) `DISABLE_HIERARCHICAL_TRACKER` env override — awk-inserts `hierarchical_tracker_enable = 0;`
+      into the RENDERED conf copy only (tracked `adaptive_manual_dlul.conf` untouched), same
+      unset-is-byte-identical convention as the existing `RX_BRANCHES` override.
+  (2) Extended `stop_receiver()`'s shutdown wait from ~18s to ~18s-then-up-to-90s-more (~108s total),
+      and added a diagnostic capture at the OLD 18s mark: `gdb -p $PID -batch -ex 'thread apply all
+      bt'` (fallback: per-task `/proc/$PID/task/*/stack`) written to
+      `$OUT/shutdown_stall_backtrace.txt`. Also made `ISAC_RX_GAIN_TRIM` overridable via a new
+      `RX_GAIN_TRIM` env var (was hardcoded `0,0,0,0`), and extended `arm.txt` to record
+      `RX_GAIN_TRIM`/`DISABLE_HIERARCHICAL_TRACKER`.
+Exact commands: `sudo -n env RX_BRANCHES=0,1,2,3 DISABLE_HIERARCHICAL_TRACKER=1
+  [RX_GAIN_TRIM=16,19,0,0] DURATION=<90|120|180> MONITOR_PORT=<free> bash
+  tests/passive_rx/run_manual_x410.sh`, launched from `~/NICOLA/adaptive-rx-sensing`.
+Artifact paths (include raw logs and VOID attempts):
+  `/home/sens/NICOLA/captures/sensing_manual_fixed.{IysROU,KlmAtD,nbW9ed,DYkWCG,8MG5J0,2uUrvP,PrT3TB}`
+Baseline and comparison definition: per-branch CRC = PDSCHQ-BRANCH `ok/dec` from the LAST such log
+  line in `run.log` before process end. Trim arm: `RX_GAIN_TRIM=16,19,0,0` (br0/br1 boosted by the
+  dB deficit measured against br2 in IysROU's ANTPOW lines, br2/br3 untouched). Control arm: trim
+  unset (default `0,0,0,0`).
+Predeclared assertions / thresholds: none formal; per this rig's own documented standard
+  (`Passive-RX needs ≥5 runs per arm`), a single-run-per-arm comparison was treated as suggestive
+  only, not as evidence of a causal trim effect.
+
+Observed result, with denominators:
+  (i) Finding (a) — CONFIRMED, source + live. `adaptive_manual_dlul.conf` carries no
+      `rx_pos_*`/`tx_pos_*` (both default (0,0,0)) and `hierarchical_tracker_enable` defaults on;
+      `SensingEngine`'s constructor throws `"hierarchical ENU tracking requires surveyed
+      noncoincident Tx/Rx"` for every branch unconditionally. `nr_isac_init()` runs before the
+      replay/live branch in `nr-uesoftmodem.c`, so this affected every replay run done earlier this
+      session identically to a live run — the sensing engine had never actually reached
+      `enabled.store(true)` via this conf, replay or live, before today.
+  (ii) Finding (b) — CONFIRMED live. With `DISABLE_HIERARCHICAL_TRACKER=1`: `engines=4` built, and
+      `reports_b0.jsonl`..`reports_b3.jsonl` were produced with real, distinct content per branch
+      (distinct `rx_id`, `cpi_sequence`, `actual_row_count`) — e.g. capture `PrT3TB`:
+      290/114/90/112 lines respectively, schema `oai.native_python_parity.v2`.
+  (iii) Finding (c) — CONFIRMED live via UHD readback, capture `KlmAtD`: log lines `SENSING: RX gain
+      trim = [16.0 19.0 0.0 0.0] dB (added per branch)`, `HW: Configuring channel 0: ... rx_gain 56`
+      / `channel 1: ... rx_gain 59`, `RX Gain 0 56.000000 ... => 56.000000 (max 60.000000)`, `Actual
+      RX gain: 56.000000` / `59.000000` — requested values landed exactly, no clamping (range
+      [0..60], well inside headroom).
+  (iv) Finding (d) — NOT ESTABLISHED, confounded. Per-branch final CRC across 4 valid same-conf runs:
+        baseline (earlier, pre-this-session, no trim): br0=60.3% br1=11.0% br2=71.7% br3=68.2%
+        trim run `KlmAtD` (+16,+19,0,0, killed by external PID collision mid-run, see below):
+          br0=60.4% br1=62.1% br2=82.1% br3=70.5%
+        trim run `nbW9ed` (+16,+19,0,0, killed mid-run, further along): br0=44.7% br1=84.4%
+          br2=85.3% br3=76.4%
+        control run `PrT3TB` (no trim, clean CRC data, forced-kill at shutdown only — see (vi)):
+          br0=2.85% br1=73.9% br2=84.2% br3=5.76%
+      br0 (trimmed +16dB both trim runs) moved 60%→45% between the two trim runs; br2/br3 (never
+      trimmed) moved up by comparable magnitude to br1 across the trim runs; the control run (no
+      trim at all) shows a DIFFERENT pair of branches (br0+br3, not br1) collapsed to single digits.
+      The per-branch CRC pattern is not stable run-to-run under an unchanged config, and its
+      variance is larger than any plausible trim effect — consistent with this rig's own
+      already-documented per-run CFO/sync-lock dependence
+      ("CFO estimate is the bimodality root cause" memory) rather than a fixed physical gain
+      imbalance a dB trim could compensate. A ≥5-run-per-arm campaign would be needed to settle this
+      properly; per explicit user decision (AskUserQuestion, 2026-09-13) this was NOT pursued
+      further this session — the architecture question (below) was judged sufficient.
+  (v) Finding (e) — CONFIRMED, same-day live evidence: blind-PDCCH/PDSCH decode produced real CRC
+      data (e.g. 100% DL CRC on the very first legacy-mode capture of the day, `wQ0N2b`) while the
+      sensing engine had NOT YET initialized (finding (i), not fixed until later the same session) —
+      i.e. the decode chain ran correctly all day independent of whether the sensing engine ever
+      started. Retraction: this session's own earlier in-conversation claim that the 100% DL CRC
+      result "confirms the whole branch-independence architecture is confirmed live, real-RF
+      bit-identical" was TOO STRONG and was retracted in-conversation at the time — DL decode's
+      independence from the sensing engine stands, but that specific framing did not.
+  (vi) Finding (f) — ROOT-CAUSED via a live gdb backtrace (capture `8MG5J0`,
+      `shutdown_stall_backtrace.txt`, ~39KB, 44 threads). NOT a deadlock. Main thread blocked in
+      `SensingEngine::stop()` (`sensing_engine.cc:299`) for engine 0, called from `nr_isac_stop()`
+      (`nr_isac.cc:449`) from `main()` (`nr-uesoftmodem.c:497`). That engine's consumer thread was
+      blocked in `finish_pending_windows()`'s `wait_for_processing()` (`sensing_engine.cc:387,393`),
+      waiting on a SEPARATE worker thread that was, at the moment of capture, actively EXECUTING
+      `nr_isac::detect_clean()` → `refine()` (`detector.cc:288,622`) — a real, in-progress,
+      UNACCELERATED (`cuda_backend=0x0`) CPU-bound detection pass over a 98280-sample residual.
+      Engines 1-3's threads were all idle (`wait_pop`, already drained). The whole process runs
+      `taskset -c 0-7` — 8 logical cores shared between real-time PHY threads (Tpool0-3, DL/UL
+      actors) AND 8 SensingEngine worker threads across 4 engines — so a slow unaccelerated
+      detection pass on one engine, especially with backlog (this specific run also hit a mid-run
+      RFSTALL at t=70.36s, capture `8MG5J0`, likely adding backlog), can legitimately exceed even a
+      108s shutdown budget under that contention. This capture's own `verdict=VOID_RF_OR_ASSERT` (the
+      mid-run RFSTALL) means its CRC numbers are NOT valid evidence for finding (d) above, but the
+      backtrace itself is valid, general evidence for the shutdown mechanism, independent of that
+      RFSTALL.
+Status (PASS / FAIL / VOID / BLOCKED):
+  (a) PASS (root cause confirmed). (b) PASS (fix verified live). (c) PASS (readback-verified).
+  (d) INCONCLUSIVE / NOT ESTABLISHED, explicitly not pursued further by user decision.
+  (e) PASS (architecture question the user asked, live-answered: yes, a different/additional
+      detector can be mounted at the same CFR tap points — decode is independent of sensing).
+  (f) PASS (root cause found; no code fix applied — the launcher's extended-timeout +
+      backtrace-diagnostic mitigation is uncommitted, see Files modified above).
+Validity reasons and affected intervals: `KlmAtD`/`nbW9ed` were killed mid-run by an EXTERNAL
+  process (see Operational finding below), not a fault in this session's code or launcher patches —
+  the CRC data logged before the kill is still a valid, real (not corrupted) snapshot, since the
+  PDSCHQ-BRANCH counters are cumulative running totals flushed to the log periodically, not
+  end-of-run-only. `8MG5J0`'s CRC data is INVALID for cross-run comparison from the RFSTALL point
+  (t=70.36s) onward — two branches show anomalously collapsed CRC (2.1%/4.5%) consistent with the
+  overflow corrupting IQ mid-run, not a gain/branch effect. `DYkWCG`/`2uUrvP` produced zero usable
+  data (RFSTALL at `USRP_RX_START`, before any data flowed) — a known, already-documented,
+  intermittent X410 startup failure mode, recovered by simple retry both times.
+Hypotheses supported / contradicted:
+  SUPPORTED: this rig's per-branch CRC is dominated by a per-run effect (best explained by the
+  already-documented per-run CFO/sync-lock estimate) large enough to swamp a targeted ~16-19dB
+  per-channel gain trim.
+  CONTRADICTED: the working hypothesis going into this session's gain-trim test — that br1's
+  baseline 11% CRC reflected a STABLE physical antenna-power deficit fixable with a matching fixed
+  dB trim. br0's own trimmed-channel CRC moving in the OPPOSITE direction between the two trim runs
+  (60.4%→44.7%) while untrimmed br2/br3 moved WITH br1 is evidence against a stable, trim-fixable
+  physical imbalance being the dominant effect.
+Retraction, if any: see (v) above — the mid-session "confirms the whole branch-independence
+  architecture is confirmed live" framing, retracted at the time it was said.
+Remaining limitation:
+  * Finding (d) needs a real ≥5-run-per-arm campaign to settle; not done, by explicit user decision.
+  * Finding (f)'s mitigation (extended shutdown timeout + backtrace capture) is a diagnostic/safety
+    net, not a fix — it does not address WHY a single unaccelerated `detect_clean::refine()` pass
+    can run long enough to matter under `taskset -c 0-7`'s contention; a real fix (wider taskset,
+    reduced per-engine compute, or a CUDA backend) was not investigated or applied.
+  * Both `run_manual_x410.sh` patches remain UNCOMMITTED on sens6 (dirty working tree) — not yet
+    ledgered as a formal SDD task/commit, per no commit having been requested this session.
+  * `pusch_passive[try=0]` (zero actual UL PUSCH decode attempts) persisted across every capture
+    today despite `crc_hit=1300+` on blind UL RNTI scans — still entirely uninvestigated, unchanged
+    from before this session.
+Next highest-value action: either (i) a real ≥5-run-per-arm gain-trim campaign if the question is
+  revisited, or (ii) investigate the UL PUSCH `try=0` gap, or (iii) commit the two launcher patches
+  (with a proper SDD task brief) if they're to be kept long-term.
+Reviewer / accomplishment date if gate passed: n/a (no formal gate; user-directed live validation
+  session, self-reviewed against live evidence only).
+```
+
+**Operational finding (not a code defect, but materially affected this session and future ones
+sharing this X410):** the concurrent `adaptive-rx-UL-DL` worktree's own automated A/B test loop
+(captures named `ab2_old_r2_*`/`ab2_new_r2_*`) performs an INDISCRIMINATE `sudo kill -9 <PID> <PID>`
+on whatever `nr-uesoftmodem` PID(s) `pgrep` finds immediately before starting each new arm, with NO
+ownership/tree check. It killed two of this session's own captures mid-run today
+(`journalctl`-confirmed: `21:35:20 ... PWD=.../ab2_new_r2_212920 ; COMMAND=/usr/bin/kill -9 1825815
+1825817` — those were this session's PIDs, not theirs; and again `21:41:21 ... PWD=.../
+ab2_new_r2_213520 ; COMMAND=/usr/bin/kill -9 1830049 1830051`). Their loop cycles roughly every
+5-11 minutes. This session never touched their process in return (per standing discipline); this is
+recorded here purely so a future session sharing this X410 with that loop isn't surprised by an
+unexplained `exit=137`/`Killed` on an otherwise-healthy capture — check `sudo journalctl --since
+"<window>" | grep "kill -9"` for `PWD=.../ab2_*` before assuming a new bug.
+
+## Session — 2026-09-14: antenna-combining passive PDSCH decode (fixes branch-fanout oversubscription)
+
+```text
+Date/time (Europe/Zurich): 2026-09-14, evening session (continuation of the 2026-09-13 live
+  validation session)
+Task IDs / gate: none formal; user-directed implementation following live investigation of the
+  branch decode-completion disparity found during 2026-09-13's validation ("br0 65% vs br3 9%
+  decode completion under identical load")
+Intended falsifiable claim: does replacing the per-branch decode fanout (one independent LDPC
+  decode per branch, same grant, 4x redundant) with a single combined-antenna decode (one LDPC
+  decode per grant across every real receive antenna, then per-antenna branch-tagged CFR
+  downstream) relieve the measured queue oversubscription, live, without breaking per-branch CFR
+  routing.
+Branch / full commit / dirty patch: commit bc29cdb16441aba7453bb092 (working tree) + the
+  2026-09-13 launcher-patch commit eecce1cab9, dirty on top.
+Files modified: `openair1/PHY/NR_UE_TRANSPORT/{nr_pdsch_passive_queue.{h,c},
+  nr_pdsch_passive_decode.{h,c}, nr_pdsch_data_aided.c, nr_pdcch_blind_monitor_rt.{h,c},
+  nr_pdcch_blind_monitor.c}`, `tests/passive_rx/run_manual_x410.sh`.
+  - `nr_pdsch_passive_queue.h/.c`: new sentinel `NR_PDSCH_PASSIVE_COMBINED (-2)` for
+    `job.physical_channel`, new `nr_pdsch_passive_queue_enqueue_combined()` (one job/grant,
+    `branch_id=NR_ISAC_BRANCH_NONE`). Consumer loop: skip the branch-view resolve for combined
+    jobs (`nr_pdsch_passive_branch_view(ue, -1, ...)` already returns `ue` unmodified for
+    `phys<0`, no new function needed there) and skip the per-branch epoch-staleness check (which
+    would otherwise treat every combined job as stale -- `NR_ISAC_BRANCH_NONE` matches no active
+    branch's dispatch entry).
+  - `nr_pdsch_passive_decode.h/.c`: new one-line accessor `nr_pdsch_passive_view_active()`
+    (exports the existing static `view_active()`), needed so `nr_pdsch_data_aided.c` can tell
+    "combined, no view" apart from "per-branch view active" without a second thread-local.
+  - `nr_pdsch_data_aided.c`: `isac_nof_ant` now uses the real `fp->nb_antennas_rx` (not
+    `nr_isac_aoa_antennas()`, which defaults to 0/1 with no `rx_array` configured -- would have
+    silently collapsed combined mode back to one antenna) whenever multiple branches are active
+    AND no single-branch view is active. New `branch_for_antenna()` (physical channel -> branch
+    id via `nr_isac_rx_branches()`) and `isac_submit_rows()` (loops per real antenna in combined
+    mode, one `nr_isac_submit_cfr_multi_branch()` call per antenna with `antennas=1` and that
+    antenna's own branch id; byte-identical single call otherwise) replace the 4 direct call
+    sites.
+  - `nr_pdcch_blind_monitor_rt.h/.c`, `nr_pdcch_blind_monitor.c`: new `pdsch_combine` config field,
+    9th (appended, optional) field of `pdcch_blind_monitor_pdsch` -- default 0 = previous fanout
+    behaviour, byte-identical. Both call sites that used to unconditionally
+    `nr_pdsch_passive_queue_enqueue_fanout(&job)` now branch on `cfg->pdsch_combine`.
+  - `run_manual_x410.sh`: new `PDSCH_COMBINE=1` env override, sed-appends `:1` to the tracked
+    conf's `pdcch_blind_monitor_pdsch` line on the RENDERED COPY only (tracked conf untouched,
+    same convention as `RX_BRANCHES`/`DISABLE_HIERARCHICAL_TRACKER`).
+Exact commands: `sudo -n env RX_BRANCHES=0,1,2,3 DISABLE_HIERARCHICAL_TRACKER=1 PDSCH_COMBINE=1
+  DURATION=120 MONITOR_PORT=<free> bash tests/passive_rx/run_manual_x410.sh`
+Artifact paths: `/home/sens/NICOLA/captures/sensing_manual_fixed.{kNjV6g,w14jo1,NHbIvB}` (combined
+  mode, valid); `.{NjoxjN,K6g58z,lyokVS}` (VOID_RF_OR_ASSERT, startup RFSTALL, zero data, known
+  intermittent X410 issue, not code-related). Pre-fix baseline for comparison:
+  `.UqLU5M` (2026-09-13, 4x fanout, no combine).
+Baseline and comparison definition: aggregate `PDSCHQ queued=/decoded=/dropped[full=/stale=]/
+  max_lag_slots=` log line, same RX_BRANCHES=0,1,2,3 / DISABLE_HIERARCHICAL_TRACKER=1 config,
+  PDSCH_COMBINE unset (fanout, baseline) vs =1 (combined, treatment).
+Observed result, with denominators:
+  Build: clean (`nr-uesoftmodem`, `oai_usrpdevif`), 2 pre-existing unrelated warnings only.
+  Offline: `nr_rx_branch_test` 32/32, `test_nr_pdcch_blind_monitor` 115/115,
+  `test_nr_isac_python_parity` golden parity -- all pass, both before and after the masking-bug
+  fix below.
+  OTA run 1 (`kNjV6g`, VOID_SHUTDOWN_TIMEOUT/FORCED_KILL -- the already-known CPU-contention
+  shutdown hang, no mid-run RFSTALL, decode data valid): `PDSCHQ queued=69297 decoded=7576
+  crc_ok=1608 (21.2%) dropped[full=36779 stale=24922] max_lag_slots=98/20`. `reports_b0..b3.jsonl`
+  produced, 338-633 kB each, real distinct content. `PDSCHQ-BRANCH` line showed the WHOLE q=69297
+  attributed to br3 alone, br0/1/2 at 0 -- a bug, see below.
+  Masking bug found live: `nr_pdsch_passive_queue_enqueue()`'s per-branch diagnostic counter used
+  `job->branch_id & (NR_RX_BRANCH_MAX-1)` -- for a combined job `branch_id=NR_ISAC_BRANCH_NONE
+  (0xFF)`, `0xFF & 3 == 3`, silently crediting br3. Real CFR routing (via
+  `branch_for_antenna()`/`nr_isac_submit_cfr_multi_branch()`'s own `branch_engine_index()` lookup)
+  was NOT affected -- confirmed separately, this counter is diagnostic-only. Fixed with a
+  `nr_rx_branch_counter_index()` guard, matching this file's own established pattern elsewhere.
+  Rebuilt; all 3 offline suites re-passed unchanged.
+  OTA run 2 (`w14jo1`, post-fix, VOID_SHUTDOWN_TIMEOUT/FORCED_KILL, no mid-run RFSTALL):
+  `PDSCHQ-BRANCH` now shows `q=0` for every branch (correct -- combined jobs are intentionally
+  unattributed by design). Aggregate: `queued=75587 decoded=16915 crc_ok=3315 (19.6%)
+  dropped[full=164 stale=58500] max_lag_slots=28122/20`. `reports_b0..b3.jsonl` produced,
+  300-595 kB each, real distinct content.
+  OTA run 3 (`NHbIvB`, post-fix, VOID_SHUTDOWN_TIMEOUT/FORCED_KILL, no mid-run RFSTALL, the "last
+  run" requested to report final metrics): `PDSCHQ queued=121801 decoded=30057 crc_ok=4595
+  (15.3%) dropped[full=508 (0.4%) stale=91219 (75%)] max_lag_slots=20287/20`. UL (unrelated to
+  this fix, already correctly single-pipeline-combined+per-branch-tagged before tonight, see
+  retraction below): `pusch_passive[try=14871 crc_ok=4007 (26.9%) ...] ul_cfr[submits=14585]`,
+  `PUSCHQ dropped[full=0 stale=476]` (healthy, never oversubscribed). Shared RT-thread health:
+  `RFCENSUS ... pbch_ok=50 pbch_fail=0 bad=0` (zero stalled/bad frames). UL's own decode-cost
+  metric `over_slot=14585/14585` (100% of UL decodes exceed the 500us slot budget on their OWN,
+  already-deferred consumer thread -- a cost fact, not an RT-thread stall).
+  Baseline for comparison (`UqLU5M`, pre-fix, 2026-09-13): `queued=234756 decoded=67287
+  dropped[full=66361 (28.3%) stale=101056 (43%)] max_lag_slots=87472/20`.
+Status (PASS / FAIL / VOID / BLOCKED): PASS. Combined-antenna decode confirmed correct and
+  effective across 2 independent post-fix OTA runs: `dropped[full]` 28.3% (baseline) -> 0.2-0.4%
+  (both post-fix runs); `max_lag_slots` 87472 (baseline) -> 98 / 28122 (both far below baseline,
+  large run-to-run variance as expected on this rig); per-branch CFR routing intact
+  (`reports_b0..b3.jsonl` real and distinct in every run); per-branch diagnostic counter fixed and
+  reads correctly (q=0 across all branches for combined jobs).
+Hypotheses supported / contradicted: SUPPORTED -- branch-fanout's 4x redundant LDPC decode was the
+  oversubscription's structural cause, not link quality or traffic volume (2026-09-13's leading
+  hypotheses at the time); removing the redundancy (not adding threads, not adding compute)
+  relieved it.
+Retraction, if any: I (the assistant) told the user "UL decode runs in-line on the RT thread" in
+  this same session, inherited from a stale project memory note without re-verification --
+  RETRACTED, explicitly, to the user. Verified via source (`nr_pusch_passive_queue.c`'s own
+  comment: "The --cont-fo-comp refusal that used to live here is GONE, and the hazard it named is
+  fixed rather than avoided") AND tonight's own live logs (`passivePusch0`/`passivePusch1`
+  consumer threads confirmed running in every capture tonight, including before this session's
+  code changes) that UL PUSCH decode has been deferred off the RT thread all along. No UL code
+  change was needed or made.
+  Separately, NOT a retraction but a live finding requiring no action: UL's existing
+  `nr_isac_submit_plan()` (in `nr_pusch_passive_decode.c`) already does exactly what this
+  session's new `branch_for_antenna()`/`isac_submit_rows()` in `nr_pdsch_data_aided.c` does --
+  decode once combined, tag per real antenna downstream. Not discovered until after the DL fix
+  was written and OTA-validated; the two should arguably be unified into one shared helper, not
+  done this session.
+Remaining limitation:
+  * DL decode-attempt throughput is still capped by the unchanged 2-consumer `pdsch_thread` pool:
+    `dropped[stale]` stayed at 75-77% of queued jobs across every post-fix run -- the structural
+    4x redundancy is gone, but 2 consumers still cannot attempt every real grant at this cell's
+    offered load. Raising `pdsch_thread` was not attempted this session (a different, CPU-budget
+    trade-off against the already-contended `taskset -c 0-7` set).
+  * The CFO trim loop (`ISAC_CFO_TRACK_HZ`, unrelated to this fix, investigated same session on
+    user request after a "why is CRC low" question) has NEVER had `ISAC_CFO_TRACK_APPLY` set in
+    any launch this session -- confirmed structurally (code) and live (every `CFOTRK` log line
+    tonight reads "(no action)"). Measured residual drift stayed small (max 33.5 Hz across a full
+    run, vs this same code's own documented 600 Hz catastrophic-failure threshold), so this gap
+    does NOT appear to explain the observed 15-27% CRC range this session -- flagged, not fixed,
+    and the true CRC-rate driver for this deployment remains unestablished.
+  * `branch_for_antenna()`/`isac_submit_rows()` (this session, DL) and `nr_isac_submit_plan()`
+    (pre-existing, UL) are duplicate logic doing the same job -- a candidate for later
+    unification, not done.
+Next highest-value action: unify the DL and UL per-antenna branch-tagging helpers; investigate the
+  actual CRC-rate driver for this deployment (CFO trim loop is measured NOT to explain it; link
+  margin was disputed by the user in-session and not yet re-investigated with a concrete
+  alternative hypothesis); consider raising `pdsch_thread` if decode-attempt coverage (not just
+  oversubscription) needs to improve.
+Reviewer / accomplishment date if gate passed: n/a (no formal gate; user-directed
+  implementation + live OTA validation, 2 independent post-fix runs).
+```

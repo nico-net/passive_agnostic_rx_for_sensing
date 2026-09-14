@@ -884,18 +884,21 @@ static int parse_dci_bits(const char* s)
 
 // "decode:mcs_table:xoverhead:rv0_only:max_per_slot" -- see the field comments in
 // nr_pdcch_blind_monitor_rt.h.
-// "decode:mcs_table:xoverhead:rv0_only:max_per_slot[:thread[:queue_depth[:thread_core]]]".
-// The three deferred-decode fields are appended rather than given their own config line so an
+// "decode:mcs_table:xoverhead:rv0_only:max_per_slot[:thread[:queue_depth[:thread_core[:combine]]]]".
+// The deferred-decode fields are appended rather than given their own config line so an
 // existing conf keeps working unchanged and reads as the in-line default -- see
-// nr_pdcch_blind_monitor_rt.h's pdsch_thread comment for why the default must stay 0.
+// nr_pdcch_blind_monitor_rt.h's pdsch_thread/pdsch_combine comments for why the defaults must
+// stay 0.
 static int parse_pdsch(const char* s)
 {
   g_cfg.pdsch_thread      = 0;
   g_cfg.pdsch_queue_depth = 0;
   g_cfg.pdsch_thread_core = -1;
-  const int n = sscanf(s, "%d:%d:%d:%d:%d:%d:%d:%d", &g_cfg.pdsch_decode, &g_cfg.pdsch_mcs_table,
+  g_cfg.pdsch_combine     = 0;
+  const int n = sscanf(s, "%d:%d:%d:%d:%d:%d:%d:%d:%d", &g_cfg.pdsch_decode, &g_cfg.pdsch_mcs_table,
                        &g_cfg.pdsch_xoverhead, &g_cfg.pdsch_rv0_only, &g_cfg.pdsch_max_per_slot,
-                       &g_cfg.pdsch_thread, &g_cfg.pdsch_queue_depth, &g_cfg.pdsch_thread_core);
+                       &g_cfg.pdsch_thread, &g_cfg.pdsch_queue_depth, &g_cfg.pdsch_thread_core,
+                       &g_cfg.pdsch_combine);
   g_cfg.extract.mcs_table = g_cfg.pdsch_mcs_table;
   return n >= 1;
 }

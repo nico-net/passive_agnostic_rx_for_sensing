@@ -172,7 +172,15 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
                                          .physical_channel = job.physical_channel,
                                          .lock_epoch = job.lock_epoch,
                                          .acq_epoch = job.acq_epoch};
-      if (bset != NULL && bset->n_active > 1 && nr_rx_branch_dispatch_is_stale(bset, &d)) {
+      /* Combined-antenna jobs (job.physical_channel == NR_PDSCH_PASSIVE_COMBINED) carry no single
+       * branch's lock/acq epoch to compare against -- d.branch_id is NR_ISAC_BRANCH_NONE, which
+       * matches no active branch's dispatch entry and would make nr_rx_branch_dispatch_is_stale()
+       * unconditionally report stale (its own "names no active branch" fallback), dropping every
+       * combined job. The producer-wide nr_passive_samples_valid() check below already covers
+       * whether this job's underlying RF samples are still live; that is the right staleness test
+       * for a job that spans every branch, not a single branch's epoch. */
+      if (job.physical_channel != NR_PDSCH_PASSIVE_COMBINED &&
+          bset != NULL && bset->n_active > 1 && nr_rx_branch_dispatch_is_stale(bset, &d)) {
         /* P13a fix round 3: this mask is a CORRECT bounded use, unlike the two below. It reads the
          * ENQUEUE-time branch_id -- written only by the producer (zero-initialised job, branch 0)
          * or by enqueue_fanout() from nr_rx_branch_set_dispatch(), which emits only ACTIVE branches
@@ -198,7 +206,18 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
      * nr_rx_branch_counter_index(), never `& (NR_RX_BRANCH_MAX-1)`: 0xFF & 3 == 3 would silently
      * credit real branch 3. The two counters above this line read the pre-resolve value and are
      * bounded by construction. */
-    const int view_phys = nr_pdsch_passive_branch_view_resolve(ue, job.physical_channel, &job.branch_id);
+    /* Antenna-combining producer (nr_pdsch_passive_queue_enqueue_combined()): skip the single-branch
+     * view entirely. nr_pdsch_passive_branch_view(ue, -1, ...) returns ue UNCHANGED (see its own
+     * phys < 0 early return), so decode runs against every real receive antenna via nr_rx_pdsch's
+     * own equaliser -- one LDPC decode for the whole grant, not one per branch. Per-antenna CFR
+     * branch tagging happens in nr_pdsch_data_aided.c, downstream of this call, not here. */
+    int view_phys;
+    if (job.physical_channel == NR_PDSCH_PASSIVE_COMBINED) {
+      view_phys = -1;
+      job.branch_id = (uint8_t)NR_ISAC_BRANCH_NONE;
+    } else {
+      view_phys = nr_pdsch_passive_branch_view_resolve(ue, job.physical_channel, &job.branch_id);
+    }
     job.physical_channel = (int8_t)view_phys;
     PHY_VARS_NR_UE *vue = nr_pdsch_passive_branch_view(ue, view_phys, job.branch_id);
 
@@ -353,11 +372,16 @@ bool nr_pdsch_passive_queue_enqueue(const nr_pdsch_passive_job_t *job)
   pthread_cond_signal(&g_cv);
   pthread_mutex_unlock(&g_lock);
   atomic_fetch_add_explicit(&g_queued, 1, memory_order_relaxed);
-  /* P13a fix round 3: bounded for the same reason as g_br_stale_epoch -- enqueue happens before any
-   * branch-view resolve, so branch_id here is always a real id (producer's 0, or a dispatch entry).
-   * Left as-is deliberately; see the comment at the stale-epoch counter in the consumer loop. */
-  atomic_fetch_add_explicit(&g_br_queued[job->branch_id & (NR_RX_BRANCH_MAX - 1)], 1,  /* branch-mask-ok: pre-resolve id, see above */
-                            memory_order_relaxed);
+  /* P13a fix round 3's invariant ("branch_id here is always a real id, producer's 0 or a dispatch
+   * entry") held until the antenna-combining producer (nr_pdsch_passive_queue_enqueue_combined(),
+   * 2026-09-14): that caller writes NR_ISAC_BRANCH_NONE (0xFF) here on purpose -- a combined job
+   * names no single branch. Masking it (0xFF & 3 == 3) would silently credit real branch 3's
+   * per-branch queued count, the exact fabricated-identity pattern this file's OWN comments
+   * elsewhere (nr_rx_branch_counter_index()) already guard against -- caught live 2026-09-14: every
+   * combined job's q showed up under br3 alone. Guard, never mask, same as everywhere else. */
+  const int br_idx = nr_rx_branch_counter_index(job->branch_id);
+  if (br_idx >= 0)
+    atomic_fetch_add_explicit(&g_br_queued[br_idx], 1, memory_order_relaxed);
   return true;
 }
 
@@ -394,6 +418,16 @@ int nr_pdsch_passive_queue_enqueue_fanout(const nr_pdsch_passive_job_t *job)
       accepted++;
   }
   return accepted;
+}
+
+bool nr_pdsch_passive_queue_enqueue_combined(const nr_pdsch_passive_job_t *job)
+{
+  if (job == NULL)
+    return false;
+  nr_pdsch_passive_job_t copy = *job;
+  copy.branch_id = (uint8_t)NR_ISAC_BRANCH_NONE; // resolved per-antenna downstream, not per-job
+  copy.physical_channel = NR_PDSCH_PASSIVE_COMBINED;
+  return nr_pdsch_passive_queue_enqueue(&copy);
 }
 
 void nr_pdsch_passive_queue_get_stats(nr_pdsch_passive_queue_stats_t *out)

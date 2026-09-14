@@ -179,6 +179,25 @@ bool nr_pdsch_passive_queue_enqueue(const nr_pdsch_passive_job_t *job);
  */
 int nr_pdsch_passive_queue_enqueue_fanout(const nr_pdsch_passive_job_t *job);
 
+/// Sentinel for nr_pdsch_passive_job_t.physical_channel meaning "combined-antenna decode": the
+/// consumer must NOT apply a single-branch view (nr_pdsch_passive_branch_view_resolve() never sees
+/// this value; the consumer checks for it first). Distinct from every real physical channel (>= 0)
+/// and from the legacy "unset" convention (also >= 0, resolved against the branch map) -- negative
+/// and reserved so it can never collide with either.
+#define NR_PDSCH_PASSIVE_COMBINED (-2)
+
+/**
+ * @brief Antenna-combining producer (adaptive_RX_pipeline.md: decode once, tag per antenna).
+ *        Enqueues exactly ONE job carrying NR_PDSCH_PASSIVE_COMBINED, so the consumer decodes
+ *        against the REAL, unrestricted ue (every active receive antenna via nr_rx_pdsch's own
+ *        equaliser) instead of a single-antenna branch view. One LDPC decode per grant instead of
+ *        one per branch -- the fix for the branch-fanout queue oversubscription measured live
+ *        2026-09-14 (br0 65% vs br3 9% decode completion under identical load). Per-antenna CFR
+ *        branch tagging happens downstream in nr_pdsch_data_aided.c, not here.
+ * @return true if the ring accepted the job.
+ */
+bool nr_pdsch_passive_queue_enqueue_combined(const nr_pdsch_passive_job_t *job);
+
 void nr_pdsch_passive_queue_get_stats(nr_pdsch_passive_queue_stats_t *out);
 
 /// Stop and join the consumer. Called from the monitor's own teardown.

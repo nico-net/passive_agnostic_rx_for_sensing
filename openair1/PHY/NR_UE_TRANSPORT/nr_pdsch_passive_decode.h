@@ -143,6 +143,14 @@ uint64_t nr_pdsch_passive_view_unsupported_multilayer(void);
 /// data-aided CFR tap name its branch without a second thread-local to keep in step with this one.
 uint8_t nr_pdsch_passive_view_branch(void);
 
+/// True while a single-branch view is armed on THIS thread (nr_pdsch_passive_view_branch() would
+/// return a real branch or NR_ISAC_BRANCH_NONE-for-unmapped, as opposed to NR_ISAC_BRANCH_NONE
+/// because no view is active at all -- the attached-UE/legacy path and the antenna-combining
+/// producer both look like "no view" here, which is exactly the distinction
+/// nr_pdsch_data_aided.c's per-antenna branch tagging needs: tag every real antenna itself only
+/// when NO view restricted this decode to one.
+bool nr_pdsch_passive_view_active(void);
+
 /// P06a: the same counter split per branch, formatted as "br0=<n> br1=<n> ..." for the periodic
 /// PDSCHQ-BRANCH log line. Returns a pointer to a static buffer (one periodic caller).
 const char *nr_pdsch_passive_view_unsupported_multilayer_str(void);
