@@ -2484,6 +2484,13 @@ if(ENABLE_TESTS)
   target_link_libraries(test_nr_pdsch_config_sweep PRIVATE UTIL GTest::gtest)
   add_dependencies(tests test_nr_pdsch_config_sweep)
   add_test(NAME test_nr_pdsch_config_sweep COMMAND ./test_nr_pdsch_config_sweep)
+
+  add_executable(test_nr_csirs_blind_search ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_csirs_blind_search_test.cc
+                                            ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_csirs_blind_search.c)
+  target_include_directories(test_nr_csirs_blind_search PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
+  target_link_libraries(test_nr_csirs_blind_search PRIVATE UTIL GTest::gtest)
+  add_dependencies(tests test_nr_csirs_blind_search)
+  add_test(NAME test_nr_csirs_blind_search COMMAND ./test_nr_csirs_blind_search)
 endif()
 
 add_subdirectory(common)
