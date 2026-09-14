@@ -88,7 +88,7 @@ extern const uint16_t nr_csirs_blind_periods[NR_CSIRS_BLIND_N_PERIODS];
  *
  * Requires at least `min_hits` hits, and rejects the degenerate case where the span of the hits is
  * shorter than the period it would claim (one occurrence proves nothing about periodicity).
- * Returns true and fills *period/*offset on success. Pure. */
+ * Returns true and fills the period and offset outputs on success. Pure. */
 bool nr_csirs_blind_infer_period(const uint32_t *hit_slots, int n_hits, int min_hits,
                                  uint16_t *period, uint16_t *offset);
 

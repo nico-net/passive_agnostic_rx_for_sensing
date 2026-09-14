@@ -21,6 +21,9 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* Max CSI-RS ports over the rows kRows enumerates (row 4). */
+#define NR_CSIRS_BLIND_RT_MAX_PORTS 4
+
 static nr_csirs_blind_state_t g_st;
 static int      g_on = -1;      /* -1 = not read, 0 = off, 1 = on */
 static int      g_armed;
@@ -81,11 +84,46 @@ void nr_csirs_blind_rt_slot(const PHY_VARS_NR_UE *ue, int slot, uint32_t absolut
    * does not look like a weak signal -- it looks like a dead channel, which is the misdiagnosis
    * this whole module exists to avoid. */
   const uint32_t n_re = (uint32_t)fp->ofdm_symbol_size * NR_SYMBOLS_PER_SLOT;
-  c16_t *ref = (c16_t *)calloc(n_re, sizeof(c16_t));
-  if (ref == NULL) {
-    return;
+  /* ONE BUFFER PER PORT, not one buffer. nr_generate_csi_rs() writes dataF[p] for every port the
+   * ROW defines, so handing it a single-element array made row 4 (4 ports) write through
+   * dataF[1..3] and segfault the receiver -- caught on air, first run after wiring.
+   * The count is taken from the row rather than assumed: rows 1 and 2 are single-port, row 4 is
+   * four-port, and a future row added to kRows must extend this table with it. */
+  int n_ports = 1;
+  switch (c->row) {
+    case 4: n_ports = 4; break;
+    case 1:
+    case 2:
+    default: n_ports = 1; break;
   }
-  c16_t *refp[1] = {ref};
+
+  /* ---- ALLOCATED ONCE, NOT PER SLOT -----------------------------------------------------------
+   * This runs on the PHY receive thread. The first version called calloc()/free() every slot for
+   * up to 4 x 229 KB -- roughly 900 KB of allocation churn per slot, gigabytes per second at this
+   * slot rate, on the one thread that must keep draining the USRP. That is precisely the shape of
+   * fault that stops the host consuming the stream in time, and on this X410 a single RX overflow
+   * halts the stream permanently rather than recovering.
+   * Thread-local and grow-only: each consumer keeps its own buffers, and the zeroing that calloc
+   * used to provide is done explicitly below -- nr_generate_csi_rs() writes only the REs its row
+   * occupies, so a stale buffer would leave the PREVIOUS candidate's symbols in place and the
+   * correlator would score a mixture of two hypotheses. */
+  static __thread c16_t *t_refbuf[NR_CSIRS_BLIND_RT_MAX_PORTS];
+  static __thread uint32_t t_refbuf_re;
+  if (t_refbuf_re < n_re) {
+    for (int p = 0; p < NR_CSIRS_BLIND_RT_MAX_PORTS; p++) {
+      c16_t *nb = (c16_t *)realloc(t_refbuf[p], (size_t)n_re * sizeof(c16_t));
+      if (nb == NULL) {
+        return;   /* keep whatever we had; a short buffer is never used because t_refbuf_re stands */
+      }
+      t_refbuf[p] = nb;
+    }
+    t_refbuf_re = n_re;
+  }
+  for (int p = 0; p < n_ports; p++) {
+    memset(t_refbuf[p], 0, (size_t)n_re * sizeof(c16_t));
+  }
+  c16_t *ref = t_refbuf[0];
+  c16_t **refp = t_refbuf;
   const csi_mapping_parms_t parms = get_csi_mapping_parms(c->row, c->freq_domain, c->symb_l0,
                                                           c->symb_l1);
   nr_generate_csi_rs(fp, &parms, AMP, slot, c->freq_density, c->start_rb, c->nr_of_rbs,
@@ -98,7 +136,6 @@ void nr_csirs_blind_rt_slot(const PHY_VARS_NR_UE *ue, int slot, uint32_t absolut
   const double rho = nr_csirs_blind_correlate((const int16_t *)&rxdataF_ant0[off],
                                               (const int16_t *)&ref[off],
                                               fp->ofdm_symbol_size);
-  free(ref);
   if (rho < 0.0) {
     return;   /* unscorable: this candidate maps no RE in this symbol */
   }
