@@ -42,6 +42,7 @@
 #include "PHY/NR_UE_TRANSPORT/nr_pdcch_dci_length_sweep.h" // Phase 3 Technique C
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_adaptive_config.h"
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_config_sweep.h" // Phase 3 Technique D
+#include "PHY/NR_UE_TRANSPORT/nr_pdcch_dci11_layout_sweep.h" // DCI 1_1 layout, stage 1
 #include "PHY/NR_UE_TRANSPORT/nr_pdcch_coreset_map.h"      // Phase 3 Technique A cross-check (XCHECK diag)
 
 #include <string.h>
@@ -151,6 +152,83 @@ static bool         g_length_found  = false;
 
 /* Manual/auto is authoritative: disabled means no hypothesis application or scoring. */
 static bool g_pdsch_sweep_on;
+
+/* ---- DCI 1_1 LAYOUT CONSISTENCY (stage 1 of nr_pdcch_dci11_layout_sweep) ---------------------
+ * The configured field layout is a set of ASSUMPTIONS. A wrong one still yields CRC-valid DCIs
+ * with plausible-looking allocations -- the RNTI comes from the CRC and not the payload, and the
+ * RIV precedes most of the fields that can be misplaced -- so nothing looks wrong except that no
+ * transport block decodes. That is precisely how a whole campaign was lost to bwp_indicator 1->0
+ * and time_domain_assignment 4->2 while the TOTAL length was right.
+ *
+ * Stage 1 costs NO decode: it reads the payload only. It enumerates every layout consistent with
+ * the observed DCI length, drops the ones the payloads contradict, and reports whether the
+ * CONFIGURED layout is still among the survivors. It cannot repair the layout on its own --
+ * rotating the extractor across candidates is stage 2 and needs air to validate -- but it converts
+ * a silent wrong assumption into a loud one, which is the expensive half of that failure.
+ *
+ * Lazily armed: bwp_size and the DCI length are not known until the monitor is configured. */
+static nr_dci11_resolver_t g_dci11_resolver;
+static int      g_dci11_state;   /* 0 = not tried, 1 = armed, -1 = unavailable */
+static uint64_t g_dci11_seen;
+
+static void nr_pdcch_dci11_layout_observe(const nr_pdcch_blind_monitor_cfg_t *cfg,
+                                          uint16_t dci_length, uint64_t payload)
+{
+  if (g_dci11_state < 0 || cfg == NULL || dci_length == 0 || cfg->bwp_size == 0) {
+    return;
+  }
+  if (g_dci11_state == 0) {
+    const double span = ((double)cfg->bwp_size * (double)(cfg->bwp_size + 1)) / 2.0;
+    const uint16_t riv_bits = (uint16_t)ceil(log2(span));
+    uint8_t tda_bits = 4;   /* the spec-default 16-entry table */
+    if (cfg->extract.tda_count > 0) {
+      tda_bits = 0;
+      while ((1 << tda_bits) < cfg->extract.tda_count) {
+        tda_bits++;
+      }
+    }
+    const int n = nr_dci11_resolver_init(&g_dci11_resolver, cfg->bwp_size, riv_bits, tda_bits,
+                                         dci_length);
+    if (n <= 0) {
+      /* NOT a resolver failure. It means no legal switch combination sums to the observed length,
+       * so one of bwp_size / tda_count / dci_length disagrees with this cell -- which is itself
+       * worth saying out loud, once. */
+      LOG_W(PHY, "SENSING: DCI11_LAYOUT no legal layout sums to dci_length=%u at bwp_size=%u "
+                 "tda_bits=%u -- one of those three is wrong for this cell\n",
+            dci_length, (unsigned)cfg->bwp_size, tda_bits);
+      g_dci11_state = -1;
+      return;
+    }
+    LOG_I(PHY, "SENSING: DCI11_LAYOUT armed: %d layouts consistent with dci_length=%u "
+               "(riv=%u bits, tda=%u bits)\n", n, dci_length, riv_bits, tda_bits);
+    g_dci11_state = 1;
+  }
+  nr_dci11_resolver_observe(&g_dci11_resolver, payload);
+  if ((++g_dci11_seen % 4000) != 0) {
+    return;
+  }
+  const nr_dci11_resolver_t *r = &g_dci11_resolver;
+  const int cfg_bwp = (cfg->extract.bwp_indicator_bits >= 0) ? cfg->extract.bwp_indicator_bits : 1;
+  const int cfg_ap  = (cfg->extract.antenna_ports_bits >= 0) ? cfg->extract.antenna_ports_bits : 4;
+  int cfg_alive = 0;
+  for (int i = 0; i < r->n_hyp; i++) {
+    if (!r->alive[i]) {
+      continue;
+    }
+    nr_dci11_field_bits_t f;
+    if (nr_dci11_layout_to_field_bits(&r->hyp[i], &f)
+        && f.bwp_indicator_bits == cfg_bwp && f.antenna_ports_bits == cfg_ap) {
+      cfg_alive = 1;
+      break;
+    }
+  }
+  LOG_A(PHY, "SENSING: DCI11_LAYOUT n=%llu observed | %d of %d layouts still plausible | "
+             "configured (bwp_ind=%d ant_ports=%d) %s\n",
+        (unsigned long long)g_dci11_seen, r->n_alive, r->n_hyp, cfg_bwp, cfg_ap,
+        cfg_alive ? "IS among the survivors"
+                  : "IS NOT among the survivors -- the assumed widths contradict the air");
+}
+
 static uint64_t g_pdsch_configuration;
 static nr_pdcch_dci_length_sweep_state_t g_dl_length_state;
 
@@ -1961,6 +2039,7 @@ constdiag_done:;
                    "layout requires TB-CRC evidence\n",
               (unsigned long)raw_dl_count, cand_task[ti].dci_length, raw->rnti,
               (unsigned long)raw->payload, raw->mismatched_bits);
+      nr_pdcch_dci11_layout_observe(cfg, cand_task[ti].dci_length, raw->payload);
       if (!g_pdsch_sweep_on) continue;
       nr_pdcch_blind_result_t layouts[3];
       uint8_t layout_ids[3];
