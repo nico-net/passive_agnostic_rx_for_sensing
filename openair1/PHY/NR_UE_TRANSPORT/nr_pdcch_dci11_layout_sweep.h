@@ -75,6 +75,14 @@ typedef struct {
    * dmrs_init - ant_ports is width + post_ant, and using that as the width made the
    * antenna-ports plausibility check silently never fire for any layout with TCI/SRS/CBG bits. */
   uint8_t ant_ports_bits;
+  /* How many codepoints the antenna-ports table actually defines, or 0 for "do not test".
+   * FORMAT-SPECIFIC and not optional: DCI 1_1 indexes TS 38.212 Table 7.3.1.2.2-1, where 12 of 16
+   * rows exist at width 4, but DCI 0_1 indexes a completely different family of tables
+   * (7.3.1.1.2-6..23, varying with transform precoding / DM-RS type / maxLength). Applying the
+   * downlink rule to an uplink payload REJECTS VALID GRANTS -- measured: it deleted the true DCI
+   * 0_1 layout during stage 1. Uplink therefore sets 0 until those row counts are verified
+   * in-tree, exactly as widths 5/6 already are on the downlink side. */
+  uint8_t ap_valid_rows;
 } nr_dci11_offsets_t;
 
 /** Offsets implied by a layout. `tda_bits` comes from the TDRA list Technique D already recovers,
@@ -124,6 +132,14 @@ typedef struct {
  * not a resolver failure). */
 int nr_dci11_resolver_init(nr_dci11_resolver_t *r, uint16_t bwp_size, uint16_t riv_bits,
                            uint8_t tda_bits, uint16_t observed_len);
+
+/** Build a resolver directly from a caller-supplied offsets list, for a DCI format other than 1_1.
+ * The resolver only ever reads offsets, so it is format-agnostic: DCI 0_1 exposes the same fields
+ * to extraction (RIV, TDA, MCS, RV, antenna ports, DM-RS init) and reuses this rather than
+ * duplicating two hundred lines of pruning and Wilson scoring. `hyp[]` is left zeroed -- a caller
+ * using this owns its own layout descriptors and must not read back nr_dci11_layout_t. */
+int nr_dci_resolver_init_from_offsets(nr_dci11_resolver_t *r, uint16_t bwp_size,
+                                      const nr_dci11_offsets_t *offsets, int n);
 
 /** STAGE 1. Offer one accepted DCI payload. Every live candidate is scored for plausibility; one
  * that has been implausible too often is dropped. Costs no decode. Returns the number still alive.

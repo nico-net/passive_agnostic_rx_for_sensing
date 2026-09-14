@@ -48,6 +48,8 @@ bool nr_dci11_layout_offsets(const nr_dci11_layout_t *l, uint16_t riv_bits, uint
   p += l->pre_ant;                                  /* tb2 | harq pid | dai | tpc | ri | p2h */
   out->ant_ports = p;      p += l->ant_ports;
   out->ant_ports_bits = l->ant_ports;
+  /* Only width 4 has a row count verified in-tree (g_table_7_3_2_3_3_1, 12 rows). */
+  out->ap_valid_rows = (l->ant_ports == 4) ? 12 : 0;
   p += l->post_ant;                                 /* tci | srs | cbg | cbg flush */
   out->dmrs_init = p;      p += DCI11_DMRS_INIT;
   out->total = p;
@@ -191,9 +193,9 @@ bool nr_dci11_layout_plausible(const nr_dci11_offsets_t *off, uint64_t payload, 
    * nr_pdcch_blind_monitor.c. So a quarter of misplaced reads land on an undefined row, for free.
    * Applied ONLY at width 4: the wider tables' row counts are not independently verified here, and
    * guessing them would invent rejections. */
-  if (off->ant_ports_bits == 4) {
-    const uint32_t ap = peek(payload, off->total, off->ant_ports, 4);
-    if (ap >= 12) {
+  if (off->ap_valid_rows > 0 && off->ant_ports_bits > 0) {
+    const uint32_t ap = peek(payload, off->total, off->ant_ports, off->ant_ports_bits);
+    if (ap >= off->ap_valid_rows) {
       return false;
     }
   }
@@ -267,6 +269,30 @@ int nr_dci11_resolver_init(nr_dci11_resolver_t *r, uint16_t bwp_size, uint16_t r
     }
     r->alive[i] = true;
   }
+  r->n_hyp = n;
+  r->n_alive = n;
+  return n;
+}
+
+int nr_dci_resolver_init_from_offsets(nr_dci11_resolver_t *r, uint16_t bwp_size,
+                                      const nr_dci11_offsets_t *offsets, int n)
+{
+  if (r == NULL || offsets == NULL || n <= 0 || n > NR_DCI11_LAYOUT_MAX) {
+    return 0;
+  }
+  memset(r, 0, sizeof(*r));
+  r->winner = -1;
+  r->bwp_size = bwp_size;
+  for (int i = 0; i < n; i++) {
+    /* An offsets list that disagrees with itself about the payload size would make stage 1 read
+     * past the end of some candidates, so reject the whole list rather than score part of it. */
+    if (offsets[i].total != offsets[0].total || offsets[i].total == 0) {
+      return 0;
+    }
+    r->off[i] = offsets[i];
+    r->alive[i] = true;
+  }
+  r->observed_len = offsets[0].total;
   r->n_hyp = n;
   r->n_alive = n;
   return n;

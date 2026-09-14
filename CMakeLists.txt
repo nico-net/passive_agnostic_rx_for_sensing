@@ -978,6 +978,9 @@ set(PHY_SRC_UE
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_ptrs_unav.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_tdd_pattern.c
+  ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_dci11_layout_sweep.c
+  ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_dci01_layout_sweep.c
+  ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_csirs_blind_search.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_dmrs_id_estimate.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_xoverhead.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_passive_replay_capture.c
@@ -2514,6 +2517,14 @@ if(ENABLE_TESTS)
   target_link_libraries(test_nr_tdd_pattern PRIVATE UTIL GTest::gtest)
   add_dependencies(tests test_nr_tdd_pattern)
   add_test(NAME test_nr_tdd_pattern COMMAND ./test_nr_tdd_pattern)
+
+  add_executable(test_nr_pdcch_dci01_layout_sweep ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_dci01_layout_sweep_test.cc
+                                                  ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_dci01_layout_sweep.c
+                                                  ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_dci11_layout_sweep.c)
+  target_include_directories(test_nr_pdcch_dci01_layout_sweep PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
+  target_link_libraries(test_nr_pdcch_dci01_layout_sweep PRIVATE UTIL GTest::gtest)
+  add_dependencies(tests test_nr_pdcch_dci01_layout_sweep)
+  add_test(NAME test_nr_pdcch_dci01_layout_sweep COMMAND ./test_nr_pdcch_dci01_layout_sweep)
 endif()
 
 add_subdirectory(common)
