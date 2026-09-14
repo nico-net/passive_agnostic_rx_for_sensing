@@ -1255,6 +1255,17 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
    * needs a per-subcarrier ramp in the equaliser, which is a bigger change than this. */
   if (dmrs_first >= 0 && dmrs_last > dmrs_first) {
     static _Atomic uint64_t s_dfo_n = 0;
+    /* SFO is counted separately from CFO: a grant too narrow to fit two slope groups yields a CFO
+     * but NO SFO, and the two populations are not the same size (measured 46 % narrow on
+     * captures/sfooff_r1_191752). Sharing one counter is what let an unmeasured SFO be folded in
+     * as if it were a measurement -- see the gate below. */
+    static _Atomic uint64_t s_sfo_n = 0;
+    /* The EMA updates are READ-MODIFY-WRITE and this function runs on N consumer threads
+     * (nr_pdsch_passive_queue.c starts several). Plain statics raced: a capture showed
+     * "cfo=-41.3 Hz (ema +248.2)", an average nowhere near the samples feeding it. The comment on
+     * g_sfo_ppm_ema justifies a torn READ by a consumer, which is fine and unchanged; it does not
+     * justify a torn update. The critical section is a few flops. */
+    static pthread_mutex_t s_dfo_lock = PTHREAD_MUTEX_INITIALIZER;
     static double s_cfo_ema = 0.0, s_sfo_ema = 0.0;
     const double dt_d = (1.0e-3 / (double)fp->slots_per_subframe) / (double)fp->symbols_per_slot
                         * (double)(dmrs_last - dmrs_first);
@@ -1325,6 +1336,7 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
     if (kn[0] + kn[1] > 0 && coherence >= 0.30) {
       const double cfo_hz = atan2(im[0] + im[1], re[0] + re[1]) / (2.0 * M_PI * dt_d);
       double sfo_ppm = 0.0;
+      bool sfo_measured = false;
       if (kn[0] > 16 && kn[1] > 16) {
         const double p_lo = atan2(im[0], re[0]), p_hi = atan2(im[1], re[1]);
         const double k_lo = ksum[0] / (double)kn[0], k_hi = ksum[1] / (double)kn[1];
@@ -1336,12 +1348,29 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
           /* dphi/dk = -2*pi*df*eps*dt  ->  eps = -(dphi/dk) / (2*pi*df*dt) */
           const double df = (double)fp->subcarrier_spacing;
           sfo_ppm = -(dphi / dk) / (2.0 * M_PI * df * dt_d) * 1.0e6;
+          sfo_measured = true;
         }
       }
       const uint64_t dn = atomic_fetch_add(&s_dfo_n, 1);
+      /* A grant with fewer than two usable slope groups produced NO SFO estimate. Folding the
+       * initialiser 0.0 into the average records "unmeasurable" as "zero", which is not a neutral
+       * default -- it drags the published value toward zero in proportion to how many narrow
+       * grants the cell schedules. MEASURED on captures/sfooff_r1_191752: 49 of 107 DMRSFO samples
+       * (46 %) had kn <= 16 and every one of them published sfo=+0.00, so the reported ema of
+       * +4.33 ppm was averaged with ~46 % fabricated zeros and UNDERSTATES the true SFO. The
+       * correction stage consumes exactly this value. Same distinction the CSI-RS correlator makes
+       * between "cannot score" and "scored zero". */
+      double sfo_pub;
+      pthread_mutex_lock(&s_dfo_lock);
       s_cfo_ema = (dn == 0) ? cfo_hz : (0.99 * s_cfo_ema + 0.01 * cfo_hz);
-      s_sfo_ema = (dn == 0) ? sfo_ppm : (0.99 * s_sfo_ema + 0.01 * sfo_ppm);
-      g_sfo_ppm_ema = s_sfo_ema;  // published for the SFO correction stage
+      if (sfo_measured) {
+        const uint64_t sn = atomic_fetch_add(&s_sfo_n, 1);
+        s_sfo_ema = (sn == 0) ? sfo_ppm : (0.99 * s_sfo_ema + 0.01 * sfo_ppm);
+        g_sfo_ppm_ema = s_sfo_ema;  // published for the SFO correction stage
+      }
+      sfo_pub = s_sfo_ema;
+      const double cfo_pub = s_cfo_ema;
+      pthread_mutex_unlock(&s_dfo_lock);
       static int s_apply = -1;
       if (s_apply < 0) {
         const char *e = getenv("ISAC_DMRS_FO_APPLY");
@@ -1351,16 +1380,34 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
         if (s_apply) {
           /* Digital de-rotation only, applied to every branch in common. NOT nrue_ru_set_freq(). */
           for (int a = 0; a < fp->nb_antennas_rx && a < NR_DL_CHEST_MAX_ANT; a++) {
-            nr_ue_set_branch_fo_hz(a, -s_cfo_ema);
+            nr_ue_set_branch_fo_hz(a, -cfo_pub);
           }
         }
       }
       if ((dn % 500) == 0) {
+        char sfo_txt[64];
+        if (sfo_measured) {
+          /* The slope is recovered from a phase difference wrapped to (-pi, pi], so the SFO is
+           * unambiguous only up to |eps| = 1 / (2 * df * dt * dk). Beyond that it ALIASES and
+           * reports a small value -- indistinguishable from a clean clock. The CFO line has always
+           * printed its own limit; the SFO never did, which matters now that the published figure
+           * is suspected of understating the truth. */
+          const double dk_lo = ksum[0] / (double)kn[0], dk_hi = ksum[1] / (double)kn[1];
+          const double dk_abs = (dk_hi > dk_lo) ? (dk_hi - dk_lo) : (dk_lo - dk_hi);
+          const double eps_max = (dk_abs > 0.0)
+                                     ? 1.0e6 / (2.0 * (double)fp->subcarrier_spacing * dt_d * dk_abs)
+                                     : 0.0;
+          snprintf(sfo_txt, sizeof(sfo_txt), "%+.2f ppm (unamb +/-%.1f)", sfo_ppm, eps_max);
+        } else {
+          /* NOT "0.00": this grant was too narrow to fit two slope groups. Printing a zero here is
+           * what made a broken estimator look like a quiet channel. */
+          snprintf(sfo_txt, sizeof(sfo_txt), "n/a (kn<=16)");
+        }
         LOG_I(PHY,
-              "SENSING: DMRSFO cfo=%+.1f Hz (ema %+.1f) sfo=%+.2f ppm (ema %+.2f) "
+              "SENSING: DMRSFO cfo=%+.1f Hz (ema %+.1f) sfo=%s (ema %+.2f over %lu) "
               "sym %d->%d n_sc=%u/%u coh=%.2f unambiguous=+/-%.0f Hz apply=%d\n",
-              cfo_hz, s_cfo_ema, sfo_ppm, s_sfo_ema, dmrs_first, dmrs_last, kn[0], kn[1], coherence,
-              1.0 / (2.0 * dt_d), s_apply);
+              cfo_hz, cfo_pub, sfo_txt, sfo_pub, (unsigned long)atomic_load(&s_sfo_n),
+              dmrs_first, dmrs_last, kn[0], kn[1], coherence, 1.0 / (2.0 * dt_d), s_apply);
       }
     }
   }
