@@ -43,6 +43,7 @@
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_adaptive_config.h"
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_config_sweep.h" // Phase 3 Technique D
 #include "PHY/NR_UE_TRANSPORT/nr_pdcch_dci11_layout_sweep.h" // DCI 1_1 layout, stage 1
+#include "PHY/NR_UE_TRANSPORT/nr_csirs_blind_rt.h" // blind CSI-RS search, observe-only
 #include "PHY/NR_UE_TRANSPORT/nr_pdcch_coreset_map.h"      // Phase 3 Technique A cross-check (XCHECK diag)
 
 #include <string.h>
@@ -1362,6 +1363,15 @@ void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_pr
           atomic_load_explicit(&nr_ue_diag_producer_absolute_slot, memory_order_relaxed),
           source_absolute_slot, fp->slots_per_frame))
     return; /* No discovery/CRC evidence from an overwritten CORESET window. */
+
+  /* Blind CSI-RS search, observe-only (ISAC_CSIRS_BLIND=1, default off). Placed HERE, after the
+   * sample-lifetime check, deliberately: scoring a candidate against a window the producer has
+   * already overwritten would feed the correlator next frame's samples and manufacture hits that
+   * no periodicity test could distinguish from a real resource. It reads rxdataF and writes
+   * nothing the decoder consumes, so it cannot affect decoding. */
+  nr_csirs_blind_rt_slot(ue, proc->nr_slot_rx,
+                         source_absolute_slot >= 0 ? (uint32_t)source_absolute_slot : 0u,
+                         &rxdataF[0][0]);
 
   /* XCHECK diagnostic (2026-09-06, Task 5 follow-up): run Technique A's own correlation function
    * on THIS FEP output -- the manual, live-verified ground-truth config's own receive chain, which
