@@ -1407,6 +1407,11 @@ void nr_pdsch_channel_estimation(PHY_VARS_NR_UE *ue,
       pushTpool(&get_nrUE_params()->Tpool, t);
     }
     join_task_ans(&chest_ans);
+    /* nr_dl_chest_nvar_ant[] is __thread. The task wrote it into the POOL thread's copy; the reader
+     * (nr_pdsch_passive_decode's per-branch nvar substitution) runs on THIS thread and was seeing the
+     * zero from the pre-loop clear on every multi-antenna decode. Publish the per-antenna values here. */
+    for (int aarx = 0; aarx < fp->nb_antennas_rx && aarx < NR_DL_CHEST_MAX_ANT; aarx++)
+      nr_dl_chest_nvar_ant[aarx] = chest_tasks[aarx].nvar_out;
     if (nvar) {
       for (int aarx = 0; aarx < fp->nb_antennas_rx; aarx++) {
         if (chest_tasks[aarx].nvar_out > 0) {

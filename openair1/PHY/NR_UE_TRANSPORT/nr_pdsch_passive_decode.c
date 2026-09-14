@@ -44,6 +44,7 @@ extern _Atomic long nr_ue_diag_producer_absolute_slot;
  * inside an #ifdef __cplusplus block, and a declaration placed there is silently invisible to C. */
 #define NR_DL_CHEST_MAX_ANT 8
 extern __thread uint32_t nr_dl_chest_nvar_ant[];
+extern __thread int nr_dlsch_chest_per_symbol; // nr_dlsch_demodulation.c: read the estimate at the data symbol itself
 
 #include "PHY/CODING/coding_defs.h"
 #include "PHY/NR_REFSIG/dmrs_nr.h" // get_num_dmrs_re_per_rb, nr_chest_time_domain_avg
@@ -326,6 +327,9 @@ static _Atomic uint64_t g_shape_rb[3]  = {0, 0, 0};
  * of 18 RB spans the 273 PRB carrier. */
 #define NR_PDSCH_RBHIST_BINS 16
 static _Atomic uint64_t g_rbhist[3][NR_PDSCH_RBHIST_BINS];
+/* MCSHIST: CRC by MCS index, split narrow (<128 PRB) / wide (>=128 PRB). Separates link margin
+ * (wide fails only at high MCS) from a width bug (wide fails at every MCS). */
+static _Atomic uint64_t g_mcshist[2][3][32];
 static _Atomic uint64_t g_shape_rv[3]  = {0, 0, 0};
 static _Atomic uint64_t g_shape_G[3]   = {0, 0, 0};
 /* Segmentation parameters, binned by outcome. §34.4's hypothesis: filler bits F are ZEROS by
@@ -506,6 +510,20 @@ void nr_pdsch_passive_ldpc_stats_dump(void)
     if (u > 0) {
       LOG_I(PHY, "SENSING: RBHIST crc_ok%% by PRB alloc: %s\n", hb);
     }
+  }
+  for (int w = 0; w < 2; w++) {
+    char mb[640];
+    size_t u = 0;
+    for (int m = 0; m < 32 && u < sizeof(mb) - 32; m++) {
+      const uint64_t okn = atomic_load(&g_mcshist[w][1][m]);
+      const uint64_t fn  = atomic_load(&g_mcshist[w][2][m]) + atomic_load(&g_mcshist[w][0][m]);
+      if (okn + fn == 0)
+        continue;
+      u += snprintf(mb + u, sizeof(mb) - u, "%d:%.0f%%(%lu) ", m, 100.0 * (double)okn / (double)(okn + fn),
+                    (unsigned long)(okn + fn));
+    }
+    if (u > 0)
+      LOG_I(PHY, "SENSING: MCSHIST %s crc_ok%% by mcs: %s\n", w ? "WIDE(>=128prb)" : "NARROW(<128prb)", mb);
   }
   {
     /* SUBSET: every subset scored on the SAME transport blocks, so the comparison isolates the
@@ -1161,6 +1179,60 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
   if (n_dmrs_sym == 0) {
     return out->status; // no DM-RS in the allocation: nothing to equalise against
   }
+  /* ---- TIME INTERPOLATION OF THE CHANNEL ESTIMATE (ISAC_CHEST_TINTERP=1, default off) ----------
+   * nr_rx_pdsch() equalises each data symbol against the PREVIOUS DM-RS symbol's estimate
+   * (get_valid_dmrs_idx_for_channel_est), up to 4 symbols away on this cell (DM-RS at 2/7/11). A
+   * residual CFO of ~100 Hz (DMRSFO, measured) rotates the channel by ~5 deg over that gap, and a
+   * 5 ppm SFO drifts it by ~10 deg at the band edge: an EVM floor of 7-10 % that MCS 18-19 tolerates
+   * and 256QAM at MCS 25 (needs < ~3.5 %) does not. Measured floor in the flat band: 6-7 % against a
+   * raw SNR of 33 dB. Linear complex interpolation between the bracketing DM-RS symbols (extrapolation
+   * past the last / before the first) removes both to first order, using estimates we already have.
+   * Written into the data symbol's own slot of pdsch_dl_ch_estimates; nr_dlsch_chest_per_symbol makes
+   * nr_rx_pdsch read that slot. */
+  static int s_tinterp = -1;
+  if (s_tinterp < 0) {
+    const char *e = getenv("ISAC_CHEST_TINTERP");
+    s_tinterp = (e != NULL && atoi(e) != 0) ? 1 : 0;
+  }
+  if (s_tinterp) {
+    int dsym[NR_SYMBOLS_PER_SLOT], nd = 0;
+    for (int m = 0; m < NR_SYMBOLS_PER_SLOT; m++)
+      if ((dlsch_config->dlDmrsSymbPos >> m) & 1)
+        dsym[nd++] = m;
+    const int s0 = dlsch_config->start_symbol, s1 = s0 + dlsch_config->number_symbols;
+    for (int m = s0; m < s1 && nd >= 1; m++) {
+      if ((dlsch_config->dlDmrsSymbPos >> m) & 1)
+        continue;
+      int a, b;
+      if (nd == 1) {
+        a = b = dsym[0];
+      } else {
+        int i = 0;
+        while (i + 1 < nd - 1 && dsym[i + 1] <= m) // last pair with dsym[i] <= m (or the first pair)
+          i++;
+        if (dsym[i] > m) i = 0;
+        a = dsym[i]; b = dsym[i + 1];
+      }
+      const double t = (b == a) ? 0.0 : (double)(m - a) / (double)(b - a);
+      for (int nl = 0; nl < cw->Nl; nl++) {
+        for (int aarx = 0; aarx < fp->nb_antennas_rx; aarx++) {
+          const int r = nl * fp->nb_antennas_rx + aarx;
+          const c16_t *ha = (const c16_t *)&pdsch_dl_ch_estimates[r][fp->ofdm_symbol_size * a];
+          const c16_t *hb = (const c16_t *)&pdsch_dl_ch_estimates[r][fp->ofdm_symbol_size * b];
+          c16_t *hm = (c16_t *)&pdsch_dl_ch_estimates[r][fp->ofdm_symbol_size * m];
+          for (uint32_t k = 0; k < fp->ofdm_symbol_size; k++) {
+            const double re = ha[k].r + t * ((double)hb[k].r - ha[k].r);
+            const double im = ha[k].i + t * ((double)hb[k].i - ha[k].i);
+            hm[k].r = (int16_t)lround(re);
+            hm[k].i = (int16_t)lround(im);
+          }
+        }
+      }
+    }
+    nr_dlsch_chest_per_symbol = 1;
+  } else {
+    nr_dlsch_chest_per_symbol = 0;
+  }
   /* nvar normalisation. ISAC_RX_NVAR_FIX=1 (opt-in, default OFF = bit-identical to before).
    *
    * The loop above accumulates (n_dmrs_sym x Nl) terms, each one already a PER-ANTENNA MEAN of
@@ -1529,7 +1601,14 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
       const double d = fo[a] - fo[0];
       s_fo_ema[a] = (n == 0) ? d : (0.99 * s_fo_ema[a] + 0.01 * d);
       if (getenv("ISAC_RX_BRANCH_FO") != NULL && atoi(getenv("ISAC_RX_BRANCH_FO")) != 0) {
-        nr_ue_set_branch_fo_hz(a, -s_fo_ema[a]); // de-rotate by the negative of the observed drift
+        /* INTEGRATE. `d` is the residual AFTER the correction already in the FEP, so the correction
+         * must accumulate it, not be replaced by it -- replacing settled at half the offset (measured
+         * -350..-700 Hz residual with the loop "on"). Gain 0.05/grant, clamp to the aliasing limit. */
+        static double s_fo_corr[NR_DL_CHEST_MAX_ANT];
+        s_fo_corr[a] -= 0.05 * d;
+        if (s_fo_corr[a] > 1500.0) s_fo_corr[a] = 1500.0;
+        if (s_fo_corr[a] < -1500.0) s_fo_corr[a] = -1500.0;
+        nr_ue_set_branch_fo_hz(a, s_fo_corr[a]);
       }
     }
     if ((n % 500) == 0) {
@@ -1814,7 +1893,7 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
     s_sfo_corr = (e != NULL && atoi(e) != 0) ? 1 : 0;
   }
   double sfo_applied[NR_SYMBOLS_PER_SLOT] = {0};  // symbol-periods of rotation already applied, per slot
-  const double sfo_eps = s_sfo_corr ? (nr_pdsch_passive_sfo_ppm() * 1.0e-6) : 0.0;
+  const double sfo_eps = (s_sfo_corr && !nr_dlsch_chest_per_symbol) ? (nr_pdsch_passive_sfo_ppm() * 1.0e-6) : 0.0;
   const double sfo_tsym = (1.0e-3 / (double)fp->slots_per_subframe) / (double)fp->symbols_per_slot;
 
   const uint64_t pdt_dem = pdtim_on ? pdtim_now() : 0;
@@ -1840,7 +1919,11 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
             if (h[k].r == 0 && h[k].i == 0) {
               continue;
             }
-            const double ph = c * (double)k;
+            /* The ramp is on the SIGNED subcarrier index: FFT bins >= N/2 are negative
+             * frequencies. Raw k would put an extra 2*pi*fs*tau on that half of the band
+             * (~0.2 turns at 5 ppm over 9 symbols), splitting the band at DC. */
+            const long ks = (k < fp->ofdm_symbol_size / 2) ? (long)k : (long)k - (long)fp->ofdm_symbol_size;
+            const double ph = c * (double)ks;
             const double cs = cos(ph), sn = sin(ph);
             const double hr = (double)h[k].r, hi = (double)h[k].i;
             h[k].r = (int16_t)lround(hr * cs - hi * sn);
@@ -1983,6 +2066,15 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
                 acc += (double)H[i].r * H[i].r + (double)H[i].i * H[i].i;
               const double rms = (i1 > i0) ? sqrt(acc / (double)(i1 - i0)) : 0.0;
               uh += snprintf(hb + uh, sizeof(hb) - uh, "%s%.0f", q ? " " : "", rms);
+            }
+            /* Per-RB raw |H| for the first 20 RBs of the allocation, keyed by ABSOLUTE start RB, so a
+             * narrow and a wide grant covering the same RBs can be compared estimate-to-estimate. */
+            uh += snprintf(hb + uh, sizeof(hb) - uh, "] start_rb=%d hrb[", start_rb_abs);
+            for (int rb = 0; rb < 20 && rb < freq_alloc->num_rbs && uh < (int)sizeof(hb) - 24; rb++) {
+              double acc = 0.0;
+              for (int i = rb * NR_NB_SC_PER_RB; i < (rb + 1) * NR_NB_SC_PER_RB; i++)
+                acc += (double)H[i].r * H[i].r + (double)H[i].i * H[i].i;
+              uh += snprintf(hb + uh, sizeof(hb) - uh, "%s%.0f", rb ? " " : "", sqrt(acc / NR_NB_SC_PER_RB));
             }
           }
         }
@@ -2258,6 +2350,7 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
         if (rb_bin >= NR_PDSCH_RBHIST_BINS) rb_bin = NR_PDSCH_RBHIST_BINS - 1;
         atomic_fetch_add(&g_rbhist[sk][rb_bin], 1);
       }
+      atomic_fetch_add(&g_mcshist[freq_alloc->num_rbs >= 128 ? 1 : 0][sk][grant->mcs & 31], 1);
       atomic_fetch_add(&g_shape_G[sk], (uint64_t)G);
       atomic_fetch_add(&g_shape_rv[sk], (uint64_t)grant->rv);
       atomic_fetch_add(&g_shape_K[sk], (uint64_t)t_seg_K);

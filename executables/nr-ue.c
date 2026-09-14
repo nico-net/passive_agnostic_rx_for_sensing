@@ -1643,6 +1643,19 @@ void *UE_thread(void *arg)
     *curMsgRx = (nr_rxtx_thread_data_t){.proc = curMsg.proc, .UE = UE};
     int ret = UE_dl_preprocessing(UE, &curMsgRx->proc, tx_wait_for_dlsch, &curMsgRx->phy_data, &stats_printed);
     if (ret != INT_MAX) {
+      /* ISAC_PBCH_SHIFT_CLAMP=<samples> (default 0 = off): the PBCH-based timing step is read off a
+       * peaky multipath CIR and jumps +/-50 samples per SSB (TSYNC_OBS corr_pos swings +/-200) while
+       * the true drift is ~6 samples/frame (5 ppm SFO; the per-frame estimator reads 5-8). Unclamped,
+       * the loop walks off the CP in ~30 % of starts ("timing runaway"). Clamp the step, keep the sign. */
+      static int s_clamp = -1;
+      if (s_clamp < 0) {
+        const char *e = getenv("ISAC_PBCH_SHIFT_CLAMP");
+        s_clamp = (e != NULL) ? atoi(e) : 0;
+      }
+      if (s_clamp > 0) {
+        if (ret > s_clamp) ret = s_clamp;
+        if (ret < -s_clamp) ret = -s_clamp;
+      }
       const int b = shiftForNextFrame;
       shiftForNextFrame = ret;
       LOG_TIMEMUT("shiftForNextFrame(pbch)", b, shiftForNextFrame);

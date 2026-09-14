@@ -46,7 +46,17 @@ int nr_adjust_synch_ue(const NR_DL_FRAME_PARMS *frame_parms,
     int temp = 0;
 
     int j = (i < 0) ? (i + frame_parms->ofdm_symbol_size) : i;
+    /* ISAC_SYNC_ANT_MASK (bitmask, default all): which branches feed the timing peak search. OTA
+     * 2026-09-14: branch 2 carries a strong long-delay path (chest nvar 5000x branch 0, SSB peak
+     * alternating +/-200 samples), and summing it in made 4-antenna starts lock only ~1 in 4. */
+    static int s_mask = -1;
+    if (s_mask < 0) {
+      const char *e = getenv("ISAC_SYNC_ANT_MASK");
+      s_mask = (e != NULL) ? (int)strtol(e, NULL, 0) : 0xFFFF;
+    }
     for (int aa = 0; aa < frame_parms->nb_antennas_rx; aa++) {
+      if (!((s_mask >> aa) & 1))
+        continue;
       int Re = dl_ch_estimates_time[aa][j].r;
       int Im = dl_ch_estimates_time[aa][j].i;
       temp += (Re*Re/2) + (Im*Im/2);

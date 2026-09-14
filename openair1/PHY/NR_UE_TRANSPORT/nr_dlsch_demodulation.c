@@ -42,6 +42,7 @@ __thread int nr_dlsch_forced_branch = -1;
  * separate live runs cannot answer whether four branches hurt, because propagation, gain state and
  * this rig's own 5-88 % CRC swing all change between runs. */
 __thread int nr_dlsch_forced_mask = -1;
+__thread int nr_dlsch_chest_per_symbol = 0; // set by nr_pdsch_passive_decode when it has time-interpolated the estimate
 __thread int nr_dlsch_used_branch = -1;
 
 void nr_dlsch_force_mask(int mask)
@@ -284,7 +285,9 @@ static void nr_dlsch_extract_rbs(uint32_t rxdataF_sz,
   uint32_t dmrs_csi_overlap_even = csi_res_even | dmrs_rb_bitmap;
   uint32_t dmrs_csi_overlap_odd = csi_res_odd | dmrs_rb_bitmap;
   int8_t validDmrsEst;
-  if (chest_time_type == 0)
+  if (nr_dlsch_chest_per_symbol)
+    validDmrsEst = symbol; // passive path filled every data symbol's slot by time interpolation
+  else if (chest_time_type == 0)
     validDmrsEst = get_valid_dmrs_idx_for_channel_est(dlsch_config->dlDmrsSymbPos, symbol);
   else
     validDmrsEst = get_next_dmrs_symbol_in_slot(dlsch_config->dlDmrsSymbPos, 0, 14); // get first dmrs symbol index
@@ -1206,6 +1209,39 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
         }
       }
     }
+    /* ISAC_L2MAXH_PEAK=1 (default off): size the shift from the PEAK per-RB channel level over
+     * the allocation instead of the MEAN. Measured OTA 2026-09-14 (EQDIAG, 273 PRB, X410 4-ch):
+     * the front end has ~5 dB of in-band tilt (low edge 1.4-1.7x the band median), and every RE
+     * whose |H| exceeds ~1.4x the allocation mean saturates in Y.H* -> int16: EVM 6-7 % below the
+     * knee, 45-87 % above it, in 100 % of >=255-PRB grants and ~1 % of <=33-PRB ones (a narrow
+     * grant's mean is local). The single guard bit covers the 256QAM constellation peak, not the
+     * channel's own spread. Same RB-mean primitive as nr_channel_level so the two scale alike;
+     * per-RB means rather than per-RE so one noisy RE cannot steal a bit from the whole grant. */
+    static int s_l2_peak = -1;
+    if (s_l2_peak < 0) {
+      const char *e = getenv("ISAC_L2MAXH_PEAK");
+      s_l2_peak = (e != NULL && atoi(e) != 0) ? 1 : 0;
+    }
+    if (s_l2_peak && nl == 1) {
+      int32_t peak = 0;
+      c16_t (*ext)[rx_size_symbol] = (c16_t (*)[rx_size_symbol])dl_ch_estimates_ext;
+      for (int aarx = 0; aarx < nbRx; aarx++) {
+        if (nbRx == 4 && (t_mrc_mode == 3 || nr_dlsch_forced_mask >= 0) && !(t_mrc_live_mask & (1 << aarx)))
+          continue;
+        for (uint32_t re = 0; re + 12 <= nb_re_pdsch; re += 12) {
+          const int32_t rb = simde_mm_average((simde__m128i *)&ext[aarx][re], 12, 2, 3);
+          if (rb > peak)
+            peak = rb;
+        }
+      }
+      static __thread unsigned long s_l2n = 0;
+      if ((s_l2n++ % 500) == 0)
+        LOG_A(PHY, "SENSING: L2PEAK nb_rb=%d avgs(mean)=%d peak_rb=%d ratio=%.2f shift_delta=%d\n",
+              nb_rb_pdsch, avgs, peak, avgs > 0 ? (double)peak / avgs : 0.0,
+              (log2_approx(peak > avgs ? peak : avgs) >> 1) - (log2_approx(avgs) >> 1));
+      if (peak > avgs)
+        avgs = peak;
+    }
     // Output shift: half channel energy (log2|h|^2/2) + MRC antenna gain.
     // Single-layer adds +1 guard bit (raw peak); multi-layer uses median so no guard needed.
     /* MRC headroom. `log2_approx(n >> 1)` gives 1 for n = 4, but a coherent sum of 4 branches grows
@@ -1242,6 +1278,23 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
     }
     else
       *log2_maxh = (log2_approx(avgs) >> 1) + log2_approx(nbRx >> 1);
+    /* ISAC_L2MAXH_DELTA (signed bits, default 0): the shift above makes Y.H* >> shift ~ |Y|/2, i.e.
+     * the equaliser OUTPUT sits at a few LSB whatever the RX gain (measured OTA 2026-09-14: EVM floor
+     * 7 % = ~25 dB at both 40 and 49 dB gain, rawmean 4 -> 11). Every LLR is quantised at that
+     * resolution. A negative delta keeps more bits; pair it with ISAC_LLR_SCALE so the int8 pack
+     * stays calibrated. Saturation guard: |H|^2 >> shift must stay well under 32767. */
+    {
+      static int s_l2d = -9999;
+      if (s_l2d == -9999) {
+        const char *e = getenv("ISAC_L2MAXH_DELTA");
+        s_l2d = (e != NULL) ? atoi(e) : 0;
+      }
+      if (s_l2d != 0) {
+        *log2_maxh += s_l2d;
+        if (*log2_maxh < 0)
+          *log2_maxh = 0;
+      }
+    }
     LOG_D(PHY, "[DLSCH] AbsSubframe %d.%d log2_maxh = %d (%d)\n", frame % 1024, nr_slot_rx, *log2_maxh, avgs);
     /* L2MAXH (ISAC_RX_BRANCH=1): the fixed-point shift the equaliser scales its output -- and hence
      * the QAM LLR decision thresholds -- by. This is the one quantity that can leave the CONSTELLATION
