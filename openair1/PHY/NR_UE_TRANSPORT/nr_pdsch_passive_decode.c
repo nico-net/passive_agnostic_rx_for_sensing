@@ -1771,7 +1771,19 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
         ms /= (double)nlev;
         const double ideal_pow = 2.0 * ms;
         const double scale = (p > 0.0) ? sqrt(ideal_pow / p) : 0.0;
-        double errsum = 0.0;
+        /* Split by FREQUENCY POSITION within the allocation. rxdataF_comp holds this symbol's valid
+         * data REs in increasing-subcarrier order, so quartile q covers the q-th quarter of the
+         * allocated band. This is the one axis SEGIDX cannot see: rate matching + interleaving
+         * smear frequency across every segment index, which is exactly why SEGIDX reads uniform.
+         *   EVM FLAT across quartiles -> the estimate is equally good/bad everywhere; the loss is
+         *                                broadband (link margin, or a fault common to the TB).
+         *   EVM RISING with quartile   -> the estimate degrades with distance from its reference;
+         *                                that is an indexing / reference-point error, and it also
+         *                                explains why narrow grants decode and wide ones do not.
+         * One shared scale for all four, so the quartiles are directly comparable. */
+#define EQDIAG_NBIN 16
+        double errsum = 0.0, errq[EQDIAG_NBIN] = {0.0};
+        uint32_t nq[EQDIAG_NBIN] = {0};
         for (uint32_t i = 0; i < n; i++) {
           const double vi = (double)z[i].r * scale;
           const double vq = (double)z[i].i * scale;
@@ -1782,13 +1794,66 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
           if (si < -lmax) si = -lmax;
           if (sq > lmax) sq = lmax;
           if (sq < -lmax) sq = -lmax;
-          errsum += (vi - si) * (vi - si) + (vq - sq) * (vq - sq);
+          const double e = (vi - si) * (vi - si) + (vq - sq) * (vq - sq);
+          errsum += e;
+          uint32_t q = (uint32_t)(((uint64_t)i * (uint64_t)EQDIAG_NBIN) / n);
+          if (q >= EQDIAG_NBIN)
+            q = EQDIAG_NBIN - 1;
+          errq[q] += e;
+          nq[q]++;
         }
         const double evm = sqrt((errsum / (double)n) / ideal_pow) * 100.0;
+        /* Absolute FFT bin of allocation index 0, so a bad bin can be named in the receiver's own
+         * frequency frame rather than in units of my bin width. The allocation wraps the FFT, so
+         * index i sits at (start_re + i) % ofdm_symbol_size. */
+        const int start_rb_abs = freq_alloc->first_rb + dlsch_config->BWPStart;
+        const int start_re_abs =
+            (fp->first_carrier_offset + start_rb_abs * NR_NB_SC_PER_RB) % fp->ofdm_symbol_size;
+        char eb[768];
+        int ub = 0;
+        for (int q = 0; q < EQDIAG_NBIN && ub < (int)sizeof(eb) - 24; q++) {
+          const double v = nq[q] ? sqrt((errq[q] / (double)nq[q]) / ideal_pow) * 100.0 : -1.0;
+          ub += snprintf(eb + ub, sizeof(eb) - ub, "%s%.0f", q ? " " : "", v);
+        }
+        /* |H| over the SAME frequency bins. EVM alone cannot tell "the estimate is wrong here" from
+         * "there is no signal here": both raise it. |H| separates them --
+         *   |H| collapses where EVM spikes -> no signal / notch / the estimate found nothing there
+         *   |H| flat while EVM spikes      -> signal present and the estimate is simply WRONG there
+         * nr_pdsch_channel_estimation() writes dl_ch from index 0 relative to the allocation, at
+         * ch_offset = ofdm_symbol_size * <DM-RS symbol> (verified by reading its writers), so index
+         * i below is allocation subcarrier i -- the same axis the EVM bins use. */
+        char hb[768];
+        int uh = 0;
+        {
+          int dsym = -1;
+          for (int m2 = 0; m2 < NR_SYMBOLS_PER_SLOT; m2++) {
+            if (dlsch_config->dlDmrsSymbPos & (1u << m2)) {
+              dsym = m2;
+              break;
+            }
+          }
+          const int nsc = freq_alloc->num_rbs * NR_NB_SC_PER_RB;
+          if (dsym >= 0 && nsc >= EQDIAG_NBIN) {
+            const c16_t *H = (const c16_t *)&pdsch_dl_ch_estimates[0][fp->ofdm_symbol_size * dsym];
+            for (int q = 0; q < EQDIAG_NBIN && uh < (int)sizeof(hb) - 24; q++) {
+              const int i0 = (int)(((long)q * nsc) / EQDIAG_NBIN);
+              const int i1 = (int)(((long)(q + 1) * nsc) / EQDIAG_NBIN);
+              double acc = 0.0;
+              for (int i = i0; i < i1; i++)
+                acc += (double)H[i].r * H[i].r + (double)H[i].i * H[i].i;
+              const double rms = (i1 > i0) ? sqrt(acc / (double)(i1 - i0)) : 0.0;
+              uh += snprintf(hb + uh, sizeof(hb) - uh, "%s%.0f", q ? " " : "", rms);
+            }
+          }
+        }
         LOG_I(NR_PHY,
-              "SENSING: EQDIAG rnti=0x%x Qm=%u sym=%d n=%u evm=%.1f%% (ref: 29.7%% -> 90.7%% CRC, "
-              "42.6%% -> ~0%%, PASSIVE_RX_ONLY_HANDOVER.md §12.1)\n",
-              grant->rnti, (unsigned)cw->qamModOrder, best_m, n, evm);
+              "SENSING: EQDIAG rnti=0x%x Qm=%u sym=%d n=%u prb=%u start_re=%d nbin=%d evm=%.1f%% | "
+              "evm_by_freq_bin[%s] hrms_by_freq_bin[%s] (each bin = %u REs starting at FFT bin "
+              "(start_re + bin*%u) mod %u; EVM spike with |H| flat = the estimate is wrong there, "
+              "EVM spike with |H| collapsed = no signal there)\n",
+              grant->rnti, (unsigned)cw->qamModOrder, best_m, n, (unsigned)freq_alloc->num_rbs,
+              start_re_abs, EQDIAG_NBIN, evm, eb, uh ? hb : "n/a", n / EQDIAG_NBIN,
+              n / EQDIAG_NBIN, (unsigned)fp->ofdm_symbol_size);
       }
     }
   }
