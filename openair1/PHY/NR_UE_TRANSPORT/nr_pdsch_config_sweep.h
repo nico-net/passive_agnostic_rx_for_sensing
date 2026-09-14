@@ -108,6 +108,30 @@ typedef int32_t (*nr_pdsch_legality_fn_t)(int, int, int, int, int, int);
 int nr_pdsch_config_sweep_init_legal(nr_pdsch_config_sweep_state_t *st, int tda_count,
                                    int typeA, nr_pdsch_legality_fn_t legality);
 
+/* ---- CELL-WIDE PRIOR ------------------------------------------------------------------------
+ * A context enumerates (S,L) x dmrs_add_pos x dmrs_max_len x mcs_table, but only (S,L) is a
+ * property of the TDRA ENTRY. dmrs-AdditionalPosition, maxLength and mcs-Table come from the
+ * cell's DM-RS/PDSCH config and are identical for every entry of the same configuration key.
+ * MEASURED OTA 2026-09-13: tda=0 converged on S=1 L=13 while tda=1 of the SAME cell still had 61
+ * trials on its leader after 7805 outcomes -- it was re-deriving those three cell-wide fields from
+ * scratch. Publishing them once cuts a later context's catalog from ~233 entries to the ~8 (S,L)
+ * ones, so evidence per hypothesis rises ~29x at no cost in assumptions.
+ * It stays a PRIOR, never an assumption: a pruned context that cannot raise any hypothesis above
+ * SWEEP_MIN_RATE within its probation window restores the full catalog AND invalidates the prior,
+ * so one bad publication cannot poison the rest of the run. */
+
+/** Restrict a catalog to one set of cell-wide fields, discarding evidence.
+ *  Returns the new hypothesis count, or 0 leaving the state untouched when nothing matches. */
+int nr_pdsch_config_sweep_prune_to(nr_pdsch_config_sweep_state_t *st, uint8_t mcs_table,
+                                   uint8_t dmrs_add_pos, uint8_t dmrs_max_len);
+
+/** Drop the published prior (tests, and any external evidence that the cell changed). */
+void nr_pdsch_config_sweep_prior_reset(void);
+
+/** True when a prior is published; fills any non-NULL outputs. */
+bool nr_pdsch_config_sweep_prior_get(uint64_t *configuration, uint8_t *mcs_table,
+                                     uint8_t *dmrs_add_pos, uint8_t *dmrs_max_len);
+
 /** Value-only feedback identity. A zero generation is never scored. */
 typedef struct {
   uint64_t generation;

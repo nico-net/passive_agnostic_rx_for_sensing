@@ -96,6 +96,40 @@ int nr_pdsch_config_sweep_init_legal(nr_pdsch_config_sweep_state_t *st, int tda_
   return st->n_hyp;
 }
 
+int nr_pdsch_config_sweep_prune_to(nr_pdsch_config_sweep_state_t *st, uint8_t mcs_table,
+                                   uint8_t dmrs_add_pos, uint8_t dmrs_max_len)
+{
+  if (st == NULL || st->n_hyp <= 0) {
+    return 0;
+  }
+  nr_pdsch_cfg_hypothesis_t keep[NR_PDSCH_SWEEP_MAX_HYP];
+  int n = 0;
+  for (int i = 0; i < st->n_hyp; i++) {
+    const nr_pdsch_cfg_hypothesis_t *h = &st->hyp[i];
+    if (h->mcs_table == mcs_table && h->dmrs_add_pos == dmrs_add_pos
+        && h->dmrs_max_len == dmrs_max_len) {
+      keep[n++] = *h;
+    }
+  }
+  /* Nothing matched: the prior does not describe this catalog at all. Leave the full catalog in
+   * place rather than emptying it -- a context with no hypotheses can never converge. */
+  if (n <= 0) {
+    return 0;
+  }
+  memcpy(st->hyp, keep, (size_t)n * sizeof(keep[0]));
+  st->n_hyp = n;
+  /* Evidence is per-index and the indices have just moved; keeping it would attribute one
+   * hypothesis's trials to another. */
+  memset(st->trials, 0, sizeof(st->trials));
+  memset(st->ok, 0, sizeof(st->ok));
+  for (int i = 0; i < n; i++) {
+    st->order[i] = i;
+  }
+  st->cursor = 0;
+  st->winner = -1;
+  return n;
+}
+
 int nr_pdsch_config_sweep_next(nr_pdsch_config_sweep_state_t *st, nr_pdsch_cfg_hypothesis_t *out)
 {
   if (st == NULL || out == NULL || st->n_hyp <= 0) {
@@ -194,8 +228,23 @@ typedef struct {
   uint64_t outcomes, locked_trials, locked_passes;
   uint64_t failure_streak, reacquisitions;
   double reference_crc_lower;
+  /* Kept so a context pruned by the cell-wide prior can rebuild its full catalog without the
+   * caller having to hand the legality function back. */
+  nr_pdsch_legality_fn_t legality;
+  bool priored;
   nr_pdsch_config_sweep_state_t state;
 } sweep_context_t;
+
+/* Outcomes a pruned context may spend before the prior is judged wrong for it. ~250 per hypothesis
+ * at the pruned width -- ample to clear SWEEP_MIN_RATE if the prior is right, and 35x cheaper than
+ * the ~70,000 the full catalog costs if it is not. */
+#define PRIOR_PROBATION 2000
+
+static struct {
+  bool valid;
+  uint64_t configuration;
+  uint8_t mcs_table, dmrs_add_pos, dmrs_max_len;
+} g_prior;
 static sweep_context_t g_contexts[NR_PDSCH_SWEEP_MAX_CONTEXTS];
 static uint64_t g_generation, g_clock;
 static nr_pdsch_sweep_reporter_t g_reporter;
@@ -240,6 +289,13 @@ static void reopen_context(sweep_context_t *c)
   c->reported = false;
   c->outcomes = c->locked_trials = c->locked_passes = c->failure_streak = 0;
   c->reference_crc_lower = 0;
+  /* A reopen says this context's evidence is no longer trusted. If its catalog had been pruned by
+   * the cell-wide prior, restore the full one: the prior is the most likely thing to be wrong when
+   * a previously converged context starts failing. */
+  if (c->priored && c->legality) {
+    nr_pdsch_config_sweep_init_legal(&c->state, c->tda_count, c->typeA, c->legality);
+    c->priored = false;
+  }
   /* Keep the already checked legal catalog, but discard stale decoding evidence. */
   memset(c->state.trials, 0, sizeof(c->state.trials));
   memset(c->state.ok, 0, sizeof(c->state.ok));
@@ -252,6 +308,28 @@ static void reopen_context(sweep_context_t *c)
 void nr_pdsch_config_sweep_set_reporter(nr_pdsch_sweep_reporter_t reporter)
 {
   pthread_mutex_lock(&g_lock); g_reporter=reporter; pthread_mutex_unlock(&g_lock);
+}
+
+void nr_pdsch_config_sweep_prior_reset(void)
+{
+  pthread_mutex_lock(&g_lock);
+  g_prior.valid = false;
+  pthread_mutex_unlock(&g_lock);
+}
+
+bool nr_pdsch_config_sweep_prior_get(uint64_t *configuration, uint8_t *mcs_table,
+                                     uint8_t *dmrs_add_pos, uint8_t *dmrs_max_len)
+{
+  pthread_mutex_lock(&g_lock);
+  const bool v = g_prior.valid;
+  if (v) {
+    if (configuration) *configuration = g_prior.configuration;
+    if (mcs_table)     *mcs_table     = g_prior.mcs_table;
+    if (dmrs_add_pos)  *dmrs_add_pos  = g_prior.dmrs_add_pos;
+    if (dmrs_max_len)  *dmrs_max_len  = g_prior.dmrs_max_len;
+  }
+  pthread_mutex_unlock(&g_lock);
+  return v;
 }
 
 static sweep_context_t *ticket_context(const nr_pdsch_sweep_ticket_t *t)
@@ -297,7 +375,15 @@ bool nr_pdsch_config_sweep_select(uint64_t configuration, uint16_t rnti, uint8_t
     c->tda = tda_index;
     c->tda_count = tda_count;
     c->typeA = typeA;
+    c->legality = legality;
     nr_pdsch_config_sweep_init_legal(&c->state, tda_count, typeA, legality);
+    /* Scoped to the same configuration key: a different cell config is a different DM-RS/PDSCH
+     * setup and its prior says nothing here. */
+    if (g_prior.valid && g_prior.configuration == configuration
+        && nr_pdsch_config_sweep_prune_to(&c->state, g_prior.mcs_table, g_prior.dmrs_add_pos,
+                                          g_prior.dmrs_max_len) > 0) {
+      c->priored = true;
+    }
   }
   sweep_context_t *c = &g_contexts[found];
   c->touched = ++g_clock;
@@ -318,6 +404,29 @@ bool nr_pdsch_config_sweep_feedback(const nr_pdsch_sweep_ticket_t *ticket, bool 
   if (c) {
     int w = nr_pdsch_config_sweep_feed(&c->state, ticket->hypothesis, crc_ok);
     ++c->outcomes;
+    if (c->priored && c->state.winner < 0 && c->outcomes >= PRIOR_PROBATION) {
+      double best_rate = 0.0;
+      for (int i = 0; i < c->state.n_hyp; i++) {
+        const double r = c->state.trials[i]
+                             ? (double)c->state.ok[i] / (double)c->state.trials[i]
+                             : 0.0;
+        if (r > best_rate) {
+          best_rate = r;
+        }
+      }
+      if (best_rate < SWEEP_MIN_RATE) {
+        /* The prior does not hold for this context. Restore the full search and stop applying the
+         * prior anywhere -- publishing it was the error, and leaving it valid would make every
+         * later context pay the same probation. */
+        if (c->legality) {
+          nr_pdsch_config_sweep_init_legal(&c->state, c->tda_count, c->typeA, c->legality);
+        }
+        c->priored = false;
+        c->outcomes = 0;
+        g_prior.valid = false;
+        w = -1;
+      }
+    }
     if (ticket->settled && ticket->hypothesis == w) {
       ++c->locked_trials; c->locked_passes += crc_ok;
       c->failure_streak = crc_ok ? 0 : c->failure_streak + 1;
@@ -356,6 +465,16 @@ bool nr_pdsch_config_sweep_feedback(const nr_pdsch_sweep_ticket_t *ticket, bool 
                       &c->reference_crc_lower, &reference_upper);
 
       announced = true;
+      /* Publish the cell-wide fields so sibling TDA contexts do not re-derive them. Only the first
+       * converged context publishes: later ones are already cheap, and re-publishing would let a
+       * context that converged under a prior reinforce that same prior. */
+      if (!g_prior.valid) {
+        g_prior.valid = true;
+        g_prior.configuration = c->configuration;
+        g_prior.mcs_table = c->state.hyp[w].mcs_table;
+        g_prior.dmrs_add_pos = c->state.hyp[w].dmrs_add_pos;
+        g_prior.dmrs_max_len = c->state.hyp[w].dmrs_max_len;
+      }
       if (winner)
         *winner = c->state.hyp[w];
     }
@@ -409,6 +528,9 @@ void nr_pdsch_config_sweep_reset_all(void)
 {
   pthread_mutex_lock(&g_lock);
   memset(g_contexts, 0, sizeof(g_contexts));
+  /* The prior is evidence derived from those contexts; keeping it across a reset would let a
+   * cleared run inherit conclusions it can no longer justify. */
+  g_prior.valid = false;
   /* Do not rewind generation: in-flight jobs from before reset must remain invalid. */
   pthread_mutex_unlock(&g_lock);
 }
