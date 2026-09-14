@@ -394,3 +394,63 @@ int nr_dci11_resolver_winner(const nr_dci11_resolver_t *r)
 {
   return (r != NULL) ? r->winner : -1;
 }
+
+
+/* ---- handing a resolved layout back to the extractor ------------------------------------------ */
+
+bool nr_dci11_layout_to_field_bits(const nr_dci11_layout_t *l, nr_dci11_field_bits_t *out)
+{
+  if (l == NULL || out == NULL) {
+    return false;
+  }
+  /* TPC (2) and the PUCCH resource indicator (3) sit inside pre_ant here but are counted as
+   * CONSTANTS by nr_pdcch_blind_dci_size_ex(), so they must be removed before the remainder is
+   * handed over -- otherwise the payload grows by 5 bits and every field after the MCS shifts. */
+  const int pre_ant_variable = (int)l->pre_ant - (DCI11_TPC + DCI11_PUCCH_RI);
+  if (pre_ant_variable < 0) {
+    return false;
+  }
+  out->bwp_indicator_bits = l->bwp_ind;
+  out->vrb_to_prb_bits    = l->pre_mcs;
+  out->prb_bundling_bits  = 0;
+  out->rate_matching_bits = 0;
+  out->zp_csirs_bits      = 0;
+  out->tb2_bits           = pre_ant_variable;
+  out->harq_pid_bits      = 0;
+  out->dai_bits           = 0;
+  out->pdsch_to_harq_bits = 0;
+  out->antenna_ports_bits = l->ant_ports;
+  out->tci_bits           = l->post_ant;
+  out->srs_request_bits   = 0;
+  out->cbg_bits           = 0;
+  return true;
+}
+
+bool nr_dci11_layout_apply_roundtrip(const nr_dci11_layout_t *l, uint16_t riv_bits, uint8_t tda_bits)
+{
+  nr_dci11_offsets_t want;
+  if (!nr_dci11_layout_offsets(l, riv_bits, tda_bits, &want)) {
+    return false;
+  }
+  nr_dci11_field_bits_t f;
+  if (!nr_dci11_layout_to_field_bits(l, &f)) {
+    return false;
+  }
+  /* Rebuild the offsets the way nr_pdcch_blind_dci_size_ex() accumulates them: the constants it
+   * owns (identifier, MCS/NDI/RV, TPC, PUCCH-RI, DM-RS init) plus the per-field widths. If this
+   * disagrees with `want`, the handover silently shifts a field and the decode dies with no
+   * diagnostic -- which is exactly how the original bwp_indicator/TDA bug behaved. */
+  uint16_t p = DCI11_FIXED_ID;
+  p += f.bwp_indicator_bits;
+  const uint16_t riv = p; p += riv_bits;
+  const uint16_t tda = p; p += tda_bits;
+  p += f.vrb_to_prb_bits + f.prb_bundling_bits + f.rate_matching_bits + f.zp_csirs_bits;
+  const uint16_t mcs = p; p += DCI11_MCS_BITS + DCI11_NDI_BITS;
+  const uint16_t rv = p; p += DCI11_RV_BITS;
+  p += f.tb2_bits + f.harq_pid_bits + f.dai_bits + DCI11_TPC + DCI11_PUCCH_RI + f.pdsch_to_harq_bits;
+  const uint16_t ap = p; p += f.antenna_ports_bits;
+  p += f.tci_bits + f.srs_request_bits + f.cbg_bits;
+  const uint16_t di = p; p += DCI11_DMRS_INIT;
+  return riv == want.riv && tda == want.tda && mcs == want.mcs && rv == want.rv
+         && ap == want.ant_ports && di == want.dmrs_init && p == want.total;
+}

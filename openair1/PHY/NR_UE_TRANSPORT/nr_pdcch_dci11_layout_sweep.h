@@ -142,4 +142,29 @@ int nr_dci11_resolver_feed(nr_dci11_resolver_t *r, int idx, bool tb_crc_ok);
 /** Winner index, or -1. */
 int nr_dci11_resolver_winner(const nr_dci11_resolver_t *r);
 
+/** Per-field bit widths that reproduce a layout, for handing back to
+ * nr_pdcch_blind_extract_opts_t. Only the SUMS matter to extraction, so a group's total is carried
+ * on ONE member of that group and the rest are zero -- these are therefore NOT the gNB's real
+ * per-field widths and must not be logged as if they were. What they are guaranteed to be is
+ * offset-identical to the layout, which is the only property the extractor depends on and which
+ * nr_dci11_layout_apply_roundtrip() checks directly. */
+typedef struct {
+  int bwp_indicator_bits;
+  int vrb_to_prb_bits;      ///< carries pre_mcs (vrb + prb bundling + rate match + zp csirs)
+  int prb_bundling_bits, rate_matching_bits, zp_csirs_bits;   ///< always 0, see above
+  int tb2_bits;             ///< carries pre_ant minus the constant TPC(2) + PUCCH-RI(3)
+  int harq_pid_bits, dai_bits, pdsch_to_harq_bits;            ///< always 0, see above
+  int antenna_ports_bits;
+  int tci_bits;             ///< carries post_ant (tci + srs + cbg + flush)
+  int srs_request_bits, cbg_bits;                             ///< always 0, see above
+} nr_dci11_field_bits_t;
+
+/** Translate a layout into those widths. Returns false if the layout cannot be represented
+ * (pre_ant below the constant TPC+PUCCH-RI floor, which no legal layout produces). Pure. */
+bool nr_dci11_layout_to_field_bits(const nr_dci11_layout_t *l, nr_dci11_field_bits_t *out);
+
+/** Self-check: do those widths rebuild exactly the layout's offsets? Pure, and the reason the
+ * mapping above can be trusted without reading it twice. */
+bool nr_dci11_layout_apply_roundtrip(const nr_dci11_layout_t *l, uint16_t riv_bits, uint8_t tda_bits);
+
 #endif /* __NR_PDCCH_DCI11_LAYOUT_SWEEP_H__ */

@@ -359,6 +359,50 @@ TEST(Dci11Resolver, PinsTheWinnerOnceDecided) {
   }
 }
 
+// ---- handover to the extractor ----------------------------------------------------------------
+
+TEST(Dci11Handover, EveryEnumeratedLayoutRoundTripsToFieldBits) {
+  // The mapping carries group TOTALS on one member each, so it is exactly the kind of arithmetic
+  // that shifts a field by a few bits and produces a decode that fails with no diagnostic -- how
+  // the original bwp_indicator/TDA bug behaved. Check it on EVERY candidate, not a sample.
+  for (uint16_t rb : {(uint16_t)riv_bits_for(106), (uint16_t)riv_bits_for(273)}) {
+    for (uint8_t tda : {(uint8_t)0, (uint8_t)2, (uint8_t)4}) {
+      std::vector<nr_dci11_layout_t> c(NR_DCI11_LAYOUT_MAX);
+      int checked = 0;
+      for (uint16_t len = 30; len <= 70; len++) {
+        const int n = nr_dci11_layout_enumerate(rb, tda, len, c.data(), NR_DCI11_LAYOUT_MAX);
+        for (int i = 0; i < n; i++) {
+          EXPECT_TRUE(nr_dci11_layout_apply_roundtrip(&c[i], rb, tda))
+              << "layout " << i << " at riv=" << rb << " tda=" << (int)tda << " len=" << len
+              << " does not survive the handover";
+          checked++;
+        }
+      }
+      EXPECT_GT(checked, 0);
+    }
+  }
+}
+
+TEST(Dci11Handover, TheConstantTpcAndPucchFieldsAreNotDoubleCounted) {
+  // pre_ant includes TPC(2) + PUCCH-RI(3), but nr_pdcch_blind_dci_size_ex() counts those itself.
+  // Handing the raw pre_ant over would grow the payload by 5 bits and shift everything after the
+  // MCS -- so the subtraction is load-bearing, and this pins it.
+  nr_dci11_layout_t l{};
+  l.bwp_ind = 0; l.pre_mcs = 0; l.pre_ant = 11; l.ant_ports = 4; l.post_ant = 4;
+  nr_dci11_field_bits_t f{};
+  ASSERT_TRUE(nr_dci11_layout_to_field_bits(&l, &f));
+  EXPECT_EQ(f.tb2_bits, 11 - 5) << "TPC and PUCCH-RI were double counted";
+  EXPECT_TRUE(nr_dci11_layout_apply_roundtrip(&l, 16, 2));
+}
+
+TEST(Dci11Handover, RefusesALayoutItCannotRepresent) {
+  nr_dci11_layout_t l{};
+  l.bwp_ind = 0; l.pre_mcs = 0; l.pre_ant = 3; l.ant_ports = 4; l.post_ant = 0;  // below TPC+RI
+  nr_dci11_field_bits_t f{};
+  EXPECT_FALSE(nr_dci11_layout_to_field_bits(&l, &f));
+  EXPECT_FALSE(nr_dci11_layout_apply_roundtrip(&l, 16, 2));
+}
+
 int main(int argc, char **argv)
 {
   ::testing::InitGoogleTest(&argc, argv);
