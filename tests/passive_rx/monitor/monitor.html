@@ -720,6 +720,20 @@ function render() {
   });
 }
 
+// Liveness banner. The panel used to show the last numbers it saw whether the receiver was
+// running, settling, stalled or absent, so "frozen dashboard" and "nothing is happening" looked
+// the same. State it explicitly instead of leaving it to be inferred.
+function livenessNote() {
+  const lg = (state && state.log) || {};
+  const age = lg.age_s, alive = lg.proc_alive;
+  if (age === null || age === undefined) return {cls: "warn", txt: "no log data yet"};
+  if (alive === 0 && age > 10)  return {cls: "bad",  txt: `no receiver process — log idle ${age.toFixed(0)}s`};
+  if (alive === -1)             return {cls: "warn", txt: `receiver state unknown — log idle ${age.toFixed(0)}s`};
+  if (age > 30)                 return {cls: "bad",  txt: `receiver alive but log STATIC for ${age.toFixed(0)}s — stream stalled?`};
+  if (age > 5)                  return {cls: "warn", txt: `log idle ${age.toFixed(0)}s`};
+  return {cls: "ok", txt: `live — last line ${age.toFixed(1)}s ago`};
+}
+
 async function poll() {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 4000);
@@ -729,6 +743,18 @@ async function poll() {
     state = await res.json();
     pollError = null;
     safeRender();
+    const ln = livenessNote();
+    let bar = document.getElementById("liveness");
+    if (!bar) {
+      bar = document.createElement("div");
+      bar.id = "liveness";
+      bar.style.cssText = "padding:6px 12px;font:600 13px system-ui;border-radius:6px;margin:8px 0";
+      document.body.insertBefore(bar, document.body.firstChild);
+    }
+    const col = {ok: ["#0a3", "#eafaf0"], warn: ["#a60", "#fff6e5"], bad: ["#b00", "#fdecec"]}[ln.cls];
+    bar.style.color = col[0];
+    bar.style.background = col[1];
+    bar.textContent = ln.txt + (state.log && state.log.path ? "   ·   " + state.log.path : "");
   } catch (e) {
     pollError = String(e);
     renderChrome();

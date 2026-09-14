@@ -15,6 +15,7 @@ endpoints are shown side by side, never fused.
 import argparse
 import json
 import re
+import subprocess
 import threading
 import time
 from collections import deque
@@ -98,6 +99,25 @@ class ReportStore:
                     "trails": {k: list(v) for k, v in st["trails"].items()},
                 }
             return out
+
+
+_PROC_CACHE = {"t": 0.0, "n": 0}
+
+
+def _softmodem_alive():
+    """Number of running receiver processes, cached for a second.
+
+    The page polls at 1 Hz; forking a process scan per request would be silly, and the answer
+    cannot change meaningfully faster than that."""
+    now = time.time()
+    if now - _PROC_CACHE["t"] > 1.0:
+        try:
+            out = subprocess.run(["pgrep", "-cx", "nr-uesoftmodem"], capture_output=True, text=True)
+            _PROC_CACHE["n"] = int(out.stdout.strip() or 0)
+        except Exception:
+            _PROC_CACHE["n"] = -1   # unknown, which must not be reported as zero
+        _PROC_CACHE["t"] = now
+    return _PROC_CACHE["n"]
 
 
 class LogTail:
@@ -277,7 +297,17 @@ class LogTail:
 
     def snapshot(self):
         with self._lock:
+            # LIVENESS, not just the last values. A panel that keeps displaying the final numbers
+            # of a dead run is indistinguishable from a live one that has not changed, and that
+            # ambiguity has cost real debugging time: a stalled receiver, a run still settling and
+            # a healthy idle cell all looked identical. Publish what the operator has to know --
+            # which file is being read, how long since it grew, and whether a receiver process
+            # exists at all -- so the page can say which of those it is.
+            age = (time.time() - self.last_line_at) if self.last_line_at else None
             return {"counters": dict(self.counters), "stats": dict(self.stats),
+                    "path": str(self.path),
+                    "age_s": age,
+                    "proc_alive": _softmodem_alive(),
                     # When the receiver last wrote ANYTHING. The report stream only proves a CPI
                     # closed, and a receiver can be up, streaming and visibly unwell without
                     # closing one -- an arm that loses PBCH lock in a few seconds emits one CPI and
