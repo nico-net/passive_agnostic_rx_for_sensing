@@ -101,7 +101,10 @@ static uint64_t g_cdm_empty[4]; static double g_cdm_sum[4];
  *     at least TWO ports are active. Honest bound: a PAIR test says "more than one", never how many,
  *     so it corroborates Nl>1 but cannot by itself distinguish 2 from 4. Nl does that; this checks it.
  *   - other-comb energy ratio ~1 => that comb carries PDSCH => numDmrsCdmGrpsNoData = 1; ~0 => 2.
- * Counted over CRC-OK grants only: a failed decode's DM-RS may not even belong to this cell. */
+ * Counted over every ACCEPTED grant, not CRC-OK ones: Nl is read out of the DCI, and the DCI's own
+ * RNTI-masked CRC is what proves the grant belongs to this cell -- the TB CRC says nothing about how
+ * many layers the scheduler declared. Gating this on TB CRC made the verdict unable to speak in
+ * exactly the case it is most needed (rank high, decode failing), which is a defect, not caution. */
 static _Atomic uint64_t g_nl_ok[8];
 static _Atomic int      g_rank_verdict_logged;
 #define RANK_VERDICT_MIN_OK 200
@@ -120,8 +123,15 @@ void nr_pdsch_passive_rank_verdict(void)
   /* Independent corroboration from the coherence probe, CRC-OK buckets only (k=1 small, k=3 big). */
   double coh_low_frac = -1.0; uint64_t coh_n = 0;
   if (pthread_mutex_trylock(&g_dl_rank_lock) == 0) {
+    /* CRC-OK buckets are the clean ones, but they are empty precisely when the decode is failing --
+     * fall back to all buckets so the probe can still corroborate. The coherence test reads the DM-RS
+     * directly and does not depend on the TB decoding. */
     coh_n = g_rank_n[1] + g_rank_n[3];
     if (coh_n) coh_low_frac = (double)(g_rank_low[1] + g_rank_low[3]) / (double)coh_n;
+    else {
+      coh_n = g_rank_n[0] + g_rank_n[2];
+      if (coh_n) coh_low_frac = (double)(g_rank_low[0] + g_rank_low[2]) / (double)coh_n;
+    }
     pthread_mutex_unlock(&g_dl_rank_lock);
   }
   const char *agree = "unresolved";
@@ -130,7 +140,7 @@ void nr_pdsch_passive_rank_verdict(void)
     agree = (probe_multi == (best > 1)) ? "CORROBORATED" : "CONTRADICTED";
   }
   atomic_store_explicit(&g_rank_verdict_logged, 1, memory_order_relaxed);
-  LOG_A(PHY, "SENSING: RANK IDENTIFIED from DCI DM-RS ports: modal_layers=%d over %llu CRC-OK grants "
+  LOG_A(PHY, "SENSING: RANK IDENTIFIED from DCI DM-RS ports: modal_layers=%d over %llu accepted grants "
              "hist[1=%llu 2=%llu 3=%llu 4=%llu] | probe: pair-coherence low(<0.5)=%.0f%% of %llu => %s "
              "(pair test proves >1 port, not how many; Nl gives the count)\n",
         best, (unsigned long long)tot,
@@ -273,7 +283,7 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
         nr_pdsch_xoverhead_observe(dec.cw.qamModOrder, dec.cw.targetCodeRate, job.freq_alloc.num_rbs,
                                    (uint16_t)pdu->number_symbols, (uint16_t)(nb_re_dmrs * dmrs_len),
                                    job.grant.nb_rb_oh, job.grant.tb_scaling, dec.cw.Nl, crc);
-        if (crc && dec.cw.Nl < 8)
+        if (dec.cw.Nl > 0 && dec.cw.Nl < 8)
           atomic_fetch_add_explicit(&g_nl_ok[dec.cw.Nl], 1, memory_order_relaxed);
         nr_pdsch_passive_rank_verdict();
         /* RANK PROBE (OTA 2026-09-12: full-band grants 0/10000 CRC, short grants 8/9, gNB has 4 DL
