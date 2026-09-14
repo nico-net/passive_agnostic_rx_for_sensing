@@ -1321,23 +1321,52 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
     const double coh_num = sqrt((re[0] + re[1]) * (re[0] + re[1]) + (im[0] + im[1]) * (im[0] + im[1]));
     const double coh_den = magsum[0] + magsum[1];
     const double coherence = (coh_den > 0.0) ? (coh_num / coh_den) : 0.0;
+    /* ---- THE COMBINED COHERENCE MEASURES THE SFO, NOT THE NOISE -----------------------------
+     * A real SFO makes the phase difference ramp LINEARLY across k, so a coherent sum over the
+     * whole occupied band partially cancels: the value is |sinc(PHI/2)| where PHI is the total
+     * ramp, 2*pi*df*eps*dt*K. At this geometry (df=30 kHz, dt=321 us, K=3276) PHI is 198486*eps,
+     * so the combined coherence is a monotone function of the SFO:
+     *     2.4 ppm -> 0.99    4.2 ppm -> 0.97    12 ppm -> 0.78    24 ppm -> 0.29
+     * MEASURED on this rig: coh=0.97 at a reported 4.2 ppm -- the sinc prediction to two decimals.
+     * The noise floor at n=3276 is 1/sqrt(n) = 0.017, so the 0.30 threshold sits 17x above noise
+     * and is nowhere near it: what actually trips the gate is a LARGE REAL SFO, from ~24 ppm up.
+     * That is backwards -- the estimator refuses exactly when the impairment it exists to measure
+     * is worst, and reports "withheld" rather than "large". A wide-grant rejection observed at
+     * coh=0.077 (n_sc=1628/1628) is consistent with ~30 ppm, not with a dead channel.
+     *
+     * PER-HALF coherence is the right gate. Each half spans half the band, so it suffers only
+     * sinc(PHI/4) -- at 24 ppm that is 0.78 rather than 0.29 -- and it validates precisely the two
+     * phases the slope is built from, which the combined figure never did (one half could be pure
+     * noise while a strong other half carried the sum past the threshold). */
+    const double coh_h[2] = {
+        (magsum[0] > 0.0) ? sqrt(re[0] * re[0] + im[0] * im[0]) / magsum[0] : 0.0,
+        (magsum[1] > 0.0) ? sqrt(re[1] * re[1] + im[1] * im[1]) / magsum[1] : 0.0};
+    const double coh_min = (coh_h[0] < coh_h[1]) ? coh_h[0] : coh_h[1];
+    /* Fall back to the combined figure when a half is too thin for its own coherence to mean
+     * anything (1/sqrt(n) rises fast at small n, and a spurious rejection is as bad as a spurious
+     * accept). 8 keeps the per-half floor at ~0.35 worst case. */
+    const bool halves_usable = (kn[0] >= 8 && kn[1] >= 8);
+    const double coh_gate = halves_usable ? coh_min : coherence;
     /* 0.3 is far above the ~1/sqrt(n) a random-phase population reaches at these n (n >= 28 gives
      * ~0.19, and the real populations here run several hundred), and far below the ~0.9+ a genuine
      * common rotation produces. Anything in between is not trustworthy enough to steer a
      * correction with. */
     static _Atomic uint64_t s_dfo_rej = 0;
-    if (kn[0] + kn[1] > 0 && coherence < 0.30) {
+    if (kn[0] + kn[1] > 0 && coh_gate < 0.30) {
       const uint64_t nrej = atomic_fetch_add(&s_dfo_rej, 1);
       if ((nrej % 500) == 0) {
-        LOG_I(PHY, "SENSING: DMRSFO REJECTED n=%lu coh=%.3f (< 0.30) n_sc=%u/%u -- estimate "
-                   "withheld, not published\n", (unsigned long)nrej + 1, coherence, kn[0], kn[1]);
+        /* Print BOTH: a low combined with healthy halves is a large SFO, not a dead channel, and
+         * the two were previously indistinguishable in this line. */
+        LOG_I(PHY, "SENSING: DMRSFO REJECTED n=%lu coh=%.3f (halves %.3f/%.3f, gate %.3f < 0.30) "
+                   "n_sc=%u/%u -- estimate withheld, not published\n",
+              (unsigned long)nrej + 1, coherence, coh_h[0], coh_h[1], coh_gate, kn[0], kn[1]);
       }
     }
-    if (kn[0] + kn[1] > 0 && coherence >= 0.30) {
+    if (kn[0] + kn[1] > 0 && coh_gate >= 0.30) {
       const double cfo_hz = atan2(im[0] + im[1], re[0] + re[1]) / (2.0 * M_PI * dt_d);
       double sfo_ppm = 0.0;
       bool sfo_measured = false;
-      if (kn[0] > 16 && kn[1] > 16) {
+      if (kn[0] > 16 && kn[1] > 16 && coh_h[0] >= 0.30 && coh_h[1] >= 0.30) {
         const double p_lo = atan2(im[0], re[0]), p_hi = atan2(im[1], re[1]);
         const double k_lo = ksum[0] / (double)kn[0], k_hi = ksum[1] / (double)kn[1];
         double dphi = p_hi - p_lo;
@@ -1405,9 +1434,10 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
         }
         LOG_I(PHY,
               "SENSING: DMRSFO cfo=%+.1f Hz (ema %+.1f) sfo=%s (ema %+.2f over %lu) "
-              "sym %d->%d n_sc=%u/%u coh=%.2f unambiguous=+/-%.0f Hz apply=%d\n",
+              "sym %d->%d n_sc=%u/%u coh=%.2f (halves %.2f/%.2f) unambiguous=+/-%.0f Hz apply=%d\n",
               cfo_hz, cfo_pub, sfo_txt, sfo_pub, (unsigned long)atomic_load(&s_sfo_n),
-              dmrs_first, dmrs_last, kn[0], kn[1], coherence, 1.0 / (2.0 * dt_d), s_apply);
+              dmrs_first, dmrs_last, kn[0], kn[1], coherence, coh_h[0], coh_h[1],
+              1.0 / (2.0 * dt_d), s_apply);
       }
     }
   }
