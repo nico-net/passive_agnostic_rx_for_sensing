@@ -50,8 +50,27 @@ if [[ -n $RX_BRANCHES ]]; then
     { print }' "$OUT/receiver.conf" > "$OUT/receiver.conf.tmp"
   mv "$OUT/receiver.conf.tmp" "$OUT/receiver.conf"
 fi
-printf 'RX_BRANCHES=%s\nRX_BRANCH_PHYS_MAP=%s\nDURATION=%s\n' \
-  "${RX_BRANCHES:-<unset:legacy>}" "${RX_BRANCH_PHYS_MAP:-<unset:legacy>}" "$DURATION" > "$OUT/arm.txt"
+# 2026-09-13, found during the first live multi-branch capture: adaptive_manual_dlul.conf carries
+# no surveyed rx_pos_*/tx_pos_* (both default to (0,0,0)), and hierarchical_tracker_enable defaults
+# on -- SensingEngine's own constructor throws "hierarchical ENU tracking requires surveyed
+# noncoincident Tx/Rx" for EVERY branch, unconditionally, so nr_isac_init() never reaches
+# enabled.store(true) and the sensing engine has never actually started via this conf, live or
+# replay (nr_isac_init() runs before the replay/live branch in nr-uesoftmodem.c, so this affects
+# both paths identically -- see adaptive_RX_pipeline_progress.md). DISABLE_HIERARCHICAL_TRACKER
+# unset leaves the rendered conf byte-identical to today (same convention as RX_BRANCHES). Set to
+# disable only the OPTIONAL global/multi-static ENU tracker -- the one feature that needs real
+# surveyed geometry, which does not exist yet (P01: geometry.surveyed=false) -- while leaving local
+# per-branch detection/tracking on. This does not invent a position; it turns off the feature that
+# needs one.
+DISABLE_HIERARCHICAL_TRACKER=${DISABLE_HIERARCHICAL_TRACKER:-}
+if [[ -n $DISABLE_HIERARCHICAL_TRACKER ]]; then
+  awk '
+    /^};$/ && !done { printf "  hierarchical_tracker_enable = 0;\n"; done=1 }
+    { print }' "$OUT/receiver.conf" > "$OUT/receiver.conf.tmp"
+  mv "$OUT/receiver.conf.tmp" "$OUT/receiver.conf"
+fi
+printf 'RX_BRANCHES=%s\nRX_BRANCH_PHYS_MAP=%s\nRX_GAIN_TRIM=%s\nDISABLE_HIERARCHICAL_TRACKER=%s\nDURATION=%s\n' \
+  "${RX_BRANCHES:-<unset:legacy>}" "${RX_BRANCH_PHYS_MAP:-<unset:legacy>}" "${RX_GAIN_TRIM:-0,0,0,0}" "${DISABLE_HIERARCHICAL_TRACKER:-<unset>}" "$DURATION" > "$OUT/arm.txt"
 sha256sum "$BUILD/nr-uesoftmodem" "$BUILD/liboai_usrpdevif.so" "$OUT/receiver.conf" > "$OUT/checksums.txt"
 read_counter() {
   local value
@@ -70,13 +89,39 @@ printf '%s\n' "$!" > "$OUT/dashboard.pid"
 PID=
 rc=0
 cleanup_status=CLEAN
+# 2026-09-13: found live, first multi-branch run -- a 4-engine SensingEngine array did not
+# shut down within the previous 15s window (2x SIGINT + 3s + 12x1s), forcing VOID_SHUTDOWN_TIMEOUT
+# every time. The single-engine legacy path shut down clean twice the same day, so this budget was
+# never sized for N engines' worker threads. Widened to ~105s (generous, not unbounded) rather than
+# guessing a smaller number; if it is STILL not enough, that is itself evidence worth having, not a
+# number to keep tuning blind. At the OLD 15s mark, dump every thread's user-space backtrace (gdb if
+# present, else the kernel stack per task) to $OUT/shutdown_stall_backtrace.txt BEFORE any longer
+# wait -- if the process is still alive later, this is the one artifact that can tell WHY, since a
+# forced kill destroys that evidence.
 stop_receiver() {
   [[ -n $PID ]] || return 0
   if kill -0 "$PID" 2>/dev/null; then
     kill -INT "$PID" 2>/dev/null || true
     sleep 3
     kill -INT "$PID" 2>/dev/null || true
-    for ((n=0;n<12;n++)); do
+    for ((n=0;n<15;n++)); do
+      kill -0 "$PID" 2>/dev/null || break
+      sleep 1
+    done
+    if kill -0 "$PID" 2>/dev/null; then
+      {
+        echo "shutdown still not complete after ~18s, capturing thread state before continuing to wait"
+        if command -v gdb >/dev/null 2>&1; then
+          gdb -p "$PID" -batch -ex 'thread apply all bt' 2>&1
+        else
+          for t in /proc/"$PID"/task/*; do
+            echo "--- tid $(basename "$t") ---"
+            cat "$t/stack" 2>/dev/null || echo "(no kernel stack -- thread is in user space, not a syscall)"
+          done
+        fi
+      } > "$OUT/shutdown_stall_backtrace.txt" 2>&1 || true
+    fi
+    for ((n=0;n<90;n++)); do
       kill -0 "$PID" 2>/dev/null || break
       sleep 1
     done
@@ -97,7 +142,7 @@ replay_env=()
 [[ ${REPLAY:-} == 1 ]] && replay_env=(ISAC_PASSIVE_REPLAY_CAPTURE="$OUT/replay.bin" ISAC_PASSIVE_REPLAY_FAILURES=1)
 env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
   ISAC_RX_MRC_MODE=2 ISAC_UL_RX_BRANCH=-1 \
-  ISAC_DMRS_FO_APPLY=0 ISAC_SFO_CORRECT=0 ISAC_RX_BRANCH_FO=0 ISAC_RX_GAIN_TRIM=0,0,0,0 \
+  ISAC_DMRS_FO_APPLY=0 ISAC_SFO_CORRECT=0 ISAC_RX_BRANCH_FO=0 ISAC_RX_GAIN_TRIM="${RX_GAIN_TRIM:-0,0,0,0}" \
   ISAC_DISC_NO_RESYNC=0 ISAC_RF_STALL_MAX_REINIT=0 ISAC_CFO_TRACK_HZ=1 ISAC_CFO_TRACK_PERIOD=20 \
   ISAC_PDCCH_TIMING=1 ISAC_PUSCH_TIMING=1 ISAC_PUSCH_DIAG=1 \
   ISAC_UL_TA_SWEEP=0:0:0 ISAC_SENSE_COMB=0 ISAC_TSYNC_RESET=0 \
