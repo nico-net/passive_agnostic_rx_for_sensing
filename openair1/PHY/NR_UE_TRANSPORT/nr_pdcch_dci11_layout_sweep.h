@@ -93,4 +93,53 @@ int nr_dci11_layout_enumerate(uint16_t riv_bits, uint8_t tda_bits, uint16_t obse
  * decode. A right layout passes nearly always; a wrong one fails most of the time. Pure. */
 bool nr_dci11_layout_plausible(const nr_dci11_offsets_t *off, uint64_t payload, uint16_t bwp_size);
 
+/* ---- STATEFUL RESOLVER ------------------------------------------------------------------------
+ * Holds the candidate set for one cell configuration and narrows it in the two stages the header
+ * describes. Deliberately shaped like nr_pdsch_config_sweep so the two behave the same way under
+ * the same conditions: hypotheses are INTERLEAVED per grant rather than tested in blocks, because
+ * this receiver's TB-CRC drifts on a timescale of minutes and testing A now against B later
+ * compares them across that drift -- the confound that produced several wrong conclusions before.
+ */
+
+typedef struct {
+  nr_dci11_layout_t hyp[NR_DCI11_LAYOUT_MAX];
+  nr_dci11_offsets_t off[NR_DCI11_LAYOUT_MAX];
+  uint32_t seen[NR_DCI11_LAYOUT_MAX];   ///< stage-1 payloads examined
+  uint32_t pass[NR_DCI11_LAYOUT_MAX];   ///< stage-1 payloads found plausible
+  uint32_t trials[NR_DCI11_LAYOUT_MAX]; ///< stage-2 decodes attempted
+  uint32_t ok[NR_DCI11_LAYOUT_MAX];     ///< stage-2 decodes that passed the TB CRC
+  bool     alive[NR_DCI11_LAYOUT_MAX];  ///< still a candidate
+  int      n_hyp;
+  int      n_alive;
+  int      cursor;                      ///< round-robin position for stage 2
+  int      winner;                      ///< -1 until decided
+  uint16_t riv_bits;
+  uint8_t  tda_bits;
+  uint16_t observed_len;
+  uint16_t bwp_size;
+} nr_dci11_resolver_t;
+
+/** Build the candidate set for a cell. Returns the number of candidates, 0 if none fit the
+ * observed length (which means one of riv_bits/tda_bits/observed_len is wrong -- a real signal,
+ * not a resolver failure). */
+int nr_dci11_resolver_init(nr_dci11_resolver_t *r, uint16_t bwp_size, uint16_t riv_bits,
+                           uint8_t tda_bits, uint16_t observed_len);
+
+/** STAGE 1. Offer one accepted DCI payload. Every live candidate is scored for plausibility; one
+ * that has been implausible too often is dropped. Costs no decode. Returns the number still alive.
+ * Never drops the last candidate: an empty set can never converge, and a run of unlucky payloads
+ * must not be able to erase the answer. */
+int nr_dci11_resolver_observe(nr_dci11_resolver_t *r, uint64_t payload);
+
+/** STAGE 2. Pick the next live candidate to decode under, round-robin. Returns its index and fills
+ * *out, or -1 when the set is empty. Once a winner exists it is returned every time. */
+int nr_dci11_resolver_next(nr_dci11_resolver_t *r, nr_dci11_offsets_t *out);
+
+/** STAGE 2 feedback: the TB CRC outcome of a grant decoded under candidate `idx`.
+ * Returns the winning index once one separates, else -1. */
+int nr_dci11_resolver_feed(nr_dci11_resolver_t *r, int idx, bool tb_crc_ok);
+
+/** Winner index, or -1. */
+int nr_dci11_resolver_winner(const nr_dci11_resolver_t *r);
+
 #endif /* __NR_PDCCH_DCI11_LAYOUT_SWEEP_H__ */

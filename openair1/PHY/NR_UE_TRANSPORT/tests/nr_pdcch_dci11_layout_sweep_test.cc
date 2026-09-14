@@ -216,6 +216,149 @@ TEST(Dci11Layout, AWrongLayoutIsRejectedMoreOftenThanARightOne) {
   }
 }
 
+// ---- stateful resolver -----------------------------------------------------------------------
+
+// Drive the resolver end to end against a known truth: stage-1 payloads, then stage-2 TB outcomes
+// where only the true layout decodes. Returns the winner index, or -1.
+static int drive_resolver(nr_dci11_resolver_t &r, int truth, double p_true, int n_obs, int n_dec,
+                          uint16_t riv_bits, unsigned seed = 5)
+{
+  // stage 1: payloads a gNB would emit under the truth
+  for (int i = 0; i < n_obs; i++) {
+    uint64_t p = 0;
+    for (int b = 0; b < r.off[truth].total; b++) p |= (uint64_t)(rand_r(&seed) & 1) << b;
+    const nr_dci11_offsets_t &t = r.off[truth];
+    const uint64_t riv_mask = ((1ULL << riv_bits) - 1ULL) << (t.total - t.riv - riv_bits);
+    const uint64_t mcs_mask = 31ULL << (t.total - t.mcs - 5);
+    const uint64_t ap_mask = ((1ULL << t.ant_ports_bits) - 1ULL)
+                             << (t.total - t.ant_ports - t.ant_ports_bits);
+    p &= ~(riv_mask | mcs_mask | ap_mask);
+    p |= (uint64_t)(rand_r(&seed) % (273 * 274 / 2)) << (t.total - t.riv - riv_bits);
+    p |= (uint64_t)(rand_r(&seed) % 28) << (t.total - t.mcs - 5);
+    p |= (uint64_t)(rand_r(&seed) % 12) << (t.total - t.ant_ports - t.ant_ports_bits);
+    nr_dci11_resolver_observe(&r, p);
+  }
+  // stage 2: only the truth decodes
+  for (int i = 0; i < n_dec; i++) {
+    nr_dci11_offsets_t o{};
+    const int idx = nr_dci11_resolver_next(&r, &o);
+    if (idx < 0) return -1;
+    const double u = (double)rand_r(&seed) / (double)RAND_MAX;
+    const int w = nr_dci11_resolver_feed(&r, idx, idx == truth && u < p_true);
+    if (w >= 0) return w;
+  }
+  return nr_dci11_resolver_winner(&r);
+}
+
+TEST(Dci11Resolver, InitRefusesWhenNoLayoutFitsTheLength) {
+  nr_dci11_resolver_t r{};
+  // 9 bits cannot hold a 16-bit RIV plus the fixed fields -- no layout can sum to it. That is a
+  // real signal (riv_bits / tda_bits / observed_len disagree), not a resolver failure.
+  EXPECT_EQ(nr_dci11_resolver_init(&r, 273, 16, 2, 9), 0);
+  nr_dci11_offsets_t o{};
+  EXPECT_EQ(nr_dci11_resolver_next(&r, &o), -1);
+}
+
+TEST(Dci11Resolver, Stage1NarrowsButNeverEmptiesTheSet) {
+  nr_dci11_resolver_t r{};
+  const uint16_t rb = riv_bits_for(273);
+  const int n = nr_dci11_resolver_init(&r, 273, rb, 2, 47);
+  ASSERT_GT(n, 1);
+  unsigned seed = 3;
+  // Feed payloads consistent with candidate 0.
+  for (int i = 0; i < 600; i++) {
+    uint64_t p = 0;
+    for (int b = 0; b < r.off[0].total; b++) p |= (uint64_t)(rand_r(&seed) & 1) << b;
+    const nr_dci11_offsets_t &t = r.off[0];
+    p &= ~(((1ULL << rb) - 1ULL) << (t.total - t.riv - rb));
+    p &= ~(31ULL << (t.total - t.mcs - 5));
+    // ALSO constrain the antenna-ports codepoint. Leaving it random made this payload stream
+    // inconsistent with candidate 0 itself, and stage 1 correctly deleted the very layout the test
+    // claimed to be emulating -- a test bug that looked exactly like a resolver bug.
+    p &= ~(((1ULL << t.ant_ports_bits) - 1ULL) << (t.total - t.ant_ports - t.ant_ports_bits));
+    p |= (uint64_t)(rand_r(&seed) % (273 * 274 / 2)) << (t.total - t.riv - rb);
+    p |= (uint64_t)(rand_r(&seed) % 28) << (t.total - t.mcs - 5);
+    p |= (uint64_t)(rand_r(&seed) % 12) << (t.total - t.ant_ports - t.ant_ports_bits);
+    nr_dci11_resolver_observe(&r, p);
+  }
+  EXPECT_LT(r.n_alive, n) << "stage 1 pruned nothing";
+  EXPECT_GE(r.n_alive, 1) << "stage 1 emptied the set -- it can then never converge";
+  EXPECT_TRUE(r.alive[0]) << "stage 1 dropped the layout the payloads were built from";
+  std::cerr << "[ MEASURED ] resolver stage 1: " << n << " -> " << r.n_alive << " live\n";
+}
+
+TEST(Dci11Resolver, ARetransmittingCellDoesNotDeleteTheTruth) {
+  // MCS 28-31 are reserved retransmission rows. On a cell that retransmits, the TRUE layout emits
+  // them legitimately and the reserved-MCS test flags it. If stage 1 treated that as an invariant
+  // it would delete the answer on exactly the cells that exercise HARQ.
+  nr_dci11_resolver_t r{};
+  const uint16_t rb = riv_bits_for(273);
+  const int n = nr_dci11_resolver_init(&r, 273, rb, 2, 47);
+  ASSERT_GT(n, 1);
+  const int truth = 3;
+  unsigned seed = 21;
+  for (int i = 0; i < 1200; i++) {
+    uint64_t p = 0;
+    for (int b = 0; b < r.off[truth].total; b++) p |= (uint64_t)(rand_r(&seed) & 1) << b;
+    const nr_dci11_offsets_t &t = r.off[truth];
+    p &= ~(((1ULL << rb) - 1ULL) << (t.total - t.riv - rb));
+    p &= ~(31ULL << (t.total - t.mcs - 5));
+    p &= ~(((1ULL << t.ant_ports_bits) - 1ULL) << (t.total - t.ant_ports - t.ant_ports_bits));
+    // 20 % of grants are retransmissions carrying a reserved MCS row
+    const uint32_t mcs = (rand_r(&seed) % 100 < 20) ? (28 + rand_r(&seed) % 4)
+                                                    : (uint32_t)(rand_r(&seed) % 28);
+    p |= (uint64_t)(rand_r(&seed) % (273 * 274 / 2)) << (t.total - t.riv - rb);
+    p |= (uint64_t)mcs << (t.total - t.mcs - 5);
+    p |= (uint64_t)(rand_r(&seed) % 12) << (t.total - t.ant_ports - t.ant_ports_bits);
+    nr_dci11_resolver_observe(&r, p);
+  }
+  EXPECT_TRUE(r.alive[truth]) << "a 20 % retransmission rate deleted the true layout";
+  std::cerr << "[ MEASURED ] with 20% retransmissions: " << n << " -> " << r.n_alive
+            << " live, truth survived\n";
+}
+
+TEST(Dci11Resolver, FindsTheTruthEndToEnd) {
+  nr_dci11_resolver_t r{};
+  const uint16_t rb = riv_bits_for(273);
+  const int n = nr_dci11_resolver_init(&r, 273, rb, 2, 47);
+  ASSERT_GT(n, 1);
+  const int truth = n / 2;
+  const int w = drive_resolver(r, truth, 0.40, 800, 40000, rb);
+  EXPECT_EQ(w, truth);
+  std::cerr << "[ MEASURED ] resolver converged on candidate " << w << " of " << n << "\n";
+}
+
+TEST(Dci11Resolver, DoesNotConvergeWhenNothingDecodes) {
+  // A dead link must not let elimination promote a layout that never decoded anything.
+  nr_dci11_resolver_t r{};
+  const uint16_t rb = riv_bits_for(273);
+  ASSERT_GT(nr_dci11_resolver_init(&r, 273, rb, 2, 47), 1);
+  unsigned seed = 9;
+  for (int i = 0; i < 20000; i++) {
+    nr_dci11_offsets_t o{};
+    const int idx = nr_dci11_resolver_next(&r, &o);
+    ASSERT_GE(idx, 0);
+    nr_dci11_resolver_feed(&r, idx, false);
+  }
+  EXPECT_EQ(nr_dci11_resolver_winner(&r), -1);
+  (void)seed;
+}
+
+TEST(Dci11Resolver, PinsTheWinnerOnceDecided) {
+  nr_dci11_resolver_t r{};
+  const uint16_t rb = riv_bits_for(273);
+  const int n = nr_dci11_resolver_init(&r, 273, rb, 2, 47);
+  ASSERT_GT(n, 1);
+  const int truth = 0;
+  const int w = drive_resolver(r, truth, 0.60, 800, 40000, rb);
+  ASSERT_EQ(w, truth);
+  for (int i = 0; i < 50; i++) {
+    nr_dci11_offsets_t o{};
+    EXPECT_EQ(nr_dci11_resolver_next(&r, &o), truth);
+    EXPECT_EQ(nr_dci11_resolver_feed(&r, truth, false), truth) << "a settled winner must not move";
+  }
+}
+
 int main(int argc, char **argv)
 {
   ::testing::InitGoogleTest(&argc, argv);

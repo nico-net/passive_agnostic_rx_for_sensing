@@ -16,6 +16,7 @@
 
 #include "nr_pdcch_dci11_layout_sweep.h"
 
+#include <math.h>    // sqrt, for the Wilson interval
 #include <stddef.h>  // NULL
 
 /* TS 38.212 7.3.1.2.2, fields at fixed width regardless of any RRC switch:
@@ -197,4 +198,199 @@ bool nr_dci11_layout_plausible(const nr_dci11_offsets_t *off, uint64_t payload, 
     }
   }
   return true;
+}
+
+
+/* ---- STATEFUL RESOLVER ------------------------------------------------------------------------ */
+
+#include <string.h>
+
+/* Stage 1 drops a candidate whose plausibility rate falls far below what the TRUE layout must
+ * show. The true layout is plausible on essentially every payload (it is what the gNB emitted), so
+ * the bar can be high -- but not 100 %: a cell WITH retransmissions legitimately emits MCS 28-31,
+ * and a single such grant must not delete the answer. */
+#define DCI11_S1_MIN_SEEN  64     /* evidence before a candidate may be dropped at all */
+/* 0.75, NOT ~1.0, and the margin is load-bearing. Two effects make the TRUE layout look
+ * implausible on a minority of payloads, and deleting it is unrecoverable:
+ *   - MCS 28-31 are reserved retransmission rows, so a cell that RETRANSMITS emits them
+ *     legitimately. The reserved-MCS test is therefore a soft signal, not an invariant.
+ *   - blind-accepted DCIs include occasional false accepts (a random payload whose CRC happened to
+ *     mask to an in-range RNTI); those are noise under EVERY layout, the true one included.
+ * The RIV-range and antenna-ports tests ARE invariants for the true layout, which is why the bar
+ * can still sit far above the ~0.66 mean a wrong layout scores. */
+#define DCI11_S1_MIN_RATE  0.75
+
+/* Stage 2 mirrors Technique D: enough trials on the leader, and its Wilson lower bound must clear
+ * every rival's upper bound. Constants intentionally the same, for the same measured reason -- the
+ * true configuration decodes at ~40 % on this link, so an absolute floor near 0.6 could never fire. */
+#define DCI11_S2_MIN_TRIALS 64
+#define DCI11_S2_MIN_RATE   0.02
+
+/* Wilson score interval, same form nr_crc_interval uses, kept local so this file stays pure. */
+static void wilson(uint32_t ok, uint32_t n, double *lo, double *hi)
+{
+  if (n == 0) {
+    *lo = 0.0;
+    *hi = 1.0;
+    return;
+  }
+  const double z = 1.96, nn = (double)n, p = (double)ok / nn;
+  const double d = 1.0 + z * z / nn;
+  const double c = p + z * z / (2.0 * nn);
+  const double s = z * sqrt(p * (1.0 - p) / nn + z * z / (4.0 * nn * nn));
+  *lo = (c - s) / d;
+  *hi = (c + s) / d;
+  if (*lo < 0.0) *lo = 0.0;
+  if (*hi > 1.0) *hi = 1.0;
+}
+
+int nr_dci11_resolver_init(nr_dci11_resolver_t *r, uint16_t bwp_size, uint16_t riv_bits,
+                           uint8_t tda_bits, uint16_t observed_len)
+{
+  if (r == NULL) {
+    return 0;
+  }
+  memset(r, 0, sizeof(*r));
+  r->winner = -1;
+  r->bwp_size = bwp_size;
+  r->riv_bits = riv_bits;
+  r->tda_bits = tda_bits;
+  r->observed_len = observed_len;
+  const int n = nr_dci11_layout_enumerate(riv_bits, tda_bits, observed_len, r->hyp,
+                                          NR_DCI11_LAYOUT_MAX);
+  if (n <= 0) {
+    return 0;
+  }
+  for (int i = 0; i < n; i++) {
+    if (!nr_dci11_layout_offsets(&r->hyp[i], riv_bits, tda_bits, &r->off[i])) {
+      return 0;
+    }
+    r->alive[i] = true;
+  }
+  r->n_hyp = n;
+  r->n_alive = n;
+  return n;
+}
+
+int nr_dci11_resolver_observe(nr_dci11_resolver_t *r, uint64_t payload)
+{
+  if (r == NULL || r->n_hyp <= 0) {
+    return 0;
+  }
+  if (r->winner >= 0) {
+    return 1;
+  }
+  for (int i = 0; i < r->n_hyp; i++) {
+    if (!r->alive[i]) {
+      continue;
+    }
+    r->seen[i]++;
+    if (nr_dci11_layout_plausible(&r->off[i], payload, r->bwp_size)) {
+      r->pass[i]++;
+    }
+  }
+  /* Drop in a second pass, and never drop the last one. Dropping inside the loop above would make
+   * the outcome depend on candidate order; and an empty set can never converge, so a run of
+   * unlucky payloads must not be able to erase the answer. */
+  for (int i = 0; i < r->n_hyp && r->n_alive > 1; i++) {
+    if (!r->alive[i] || r->seen[i] < DCI11_S1_MIN_SEEN) {
+      continue;
+    }
+    /* Drop on the UPPER confidence bound, not the point estimate. A drop is IRREVERSIBLE, so the
+     * question is not "is this candidate below the bar right now" but "can it still be above it".
+     * The point estimate answered the wrong one: at a true rate of 0.80 and n = 64, ordinary
+     * binomial noise puts the sample under 0.75 about one time in six -- and that deleted the true
+     * layout outright on any cell that retransmits. Requiring the optimistic bound to be under the
+     * bar costs only a little more evidence and cannot delete a candidate that is really above it. */
+    double lo, hi;
+    wilson(r->pass[i], r->seen[i], &lo, &hi);
+    if (hi < DCI11_S1_MIN_RATE) {
+      r->alive[i] = false;
+      r->n_alive--;
+    }
+  }
+  return r->n_alive;
+}
+
+int nr_dci11_resolver_next(nr_dci11_resolver_t *r, nr_dci11_offsets_t *out)
+{
+  if (r == NULL || out == NULL || r->n_hyp <= 0 || r->n_alive <= 0) {
+    return -1;
+  }
+  if (r->winner >= 0) {
+    *out = r->off[r->winner];
+    return r->winner;
+  }
+  /* Round-robin over the LIVE set only. Walking the full array and skipping dead entries keeps the
+   * rotation uniform as candidates are removed. */
+  for (int step = 0; step < r->n_hyp; step++) {
+    const int idx = (r->cursor + step) % r->n_hyp;
+    if (r->alive[idx]) {
+      r->cursor = (idx + 1) % r->n_hyp;
+      *out = r->off[idx];
+      return idx;
+    }
+  }
+  return -1;
+}
+
+int nr_dci11_resolver_feed(nr_dci11_resolver_t *r, int idx, bool tb_crc_ok)
+{
+  if (r == NULL || idx < 0 || idx >= r->n_hyp) {
+    return (r != NULL) ? r->winner : -1;
+  }
+  if (r->winner >= 0) {
+    return r->winner;
+  }
+  r->trials[idx]++;
+  if (tb_crc_ok) {
+    r->ok[idx]++;
+  }
+  /* One live candidate left is the answer by elimination -- but only once it has actually decoded
+   * something, so "everything else was dropped" cannot promote a layout that never worked. */
+  if (r->n_alive == 1 && r->ok[idx] > 0 && r->alive[idx]) {
+    r->winner = idx;
+    return idx;
+  }
+  if ((r->trials[idx] % 16) != 0) {
+    return -1;
+  }
+  int leader = -1;
+  for (int i = 0; i < r->n_hyp; i++) {
+    if (!r->alive[i]) {
+      continue;
+    }
+    const double ri = r->trials[i] ? (double)r->ok[i] / (double)r->trials[i] : 0.0;
+    const double rl = (leader < 0 || !r->trials[leader])
+                          ? -1.0
+                          : (double)r->ok[leader] / (double)r->trials[leader];
+    if (leader < 0 || ri > rl) {
+      leader = i;
+    }
+  }
+  if (leader < 0 || r->trials[leader] < DCI11_S2_MIN_TRIALS) {
+    return -1;
+  }
+  double lo, hi;
+  wilson(r->ok[leader], r->trials[leader], &lo, &hi);
+  if (lo < DCI11_S2_MIN_RATE) {
+    return -1;   /* a dead link must not be able to "separate" */
+  }
+  for (int i = 0; i < r->n_hyp; i++) {
+    if (i == leader || !r->alive[i]) {
+      continue;
+    }
+    double olo, ohi;
+    wilson(r->ok[i], r->trials[i], &olo, &ohi);
+    if (ohi >= lo) {
+      return -1;   /* not separated from this rival yet */
+    }
+  }
+  r->winner = leader;
+  return leader;
+}
+
+int nr_dci11_resolver_winner(const nr_dci11_resolver_t *r)
+{
+  return (r != NULL) ? r->winner : -1;
 }
