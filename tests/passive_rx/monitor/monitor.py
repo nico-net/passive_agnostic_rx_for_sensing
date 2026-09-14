@@ -106,7 +106,12 @@ class LogTail:
     nothing about whether the radio is actually alive -- which is the failure mode that matters."""
 
     PATTERNS = [
-        ("pdsch_crc", re.compile(r"pdsch_decode\[try=(\d+) crc_ok=(\d+)")),
+        # PDSCHQ, not pdsch_decode[]. DL decoding runs through the QUEUE, so the in-line
+        # counter reads near-zero by construction and the panel showed 0.06 % against a
+        # real 1.3 %. Same counter trap the runbook documents; the dashboard had it too.
+        ("pdsch_crc", re.compile(r"PDSCHQ queued=\d+ decoded=(\d+) crc_ok=(\d+)")),
+        # Kept so an in-line-path run (no queue) still reports something rather than nothing.
+        ("pdsch_crc_inline", re.compile(r"pdsch_decode\[try=(\d+) crc_ok=(\d+)")),
         # DL TRANSPORT-BLOCK rate. NOT segs_decoded: those counters are summed only over FAILING
         # TBs (nr_pdsch_passive_decode.c:302-303), so that ratio FALLS as decoding improves.
         ("ldpc", re.compile(r"LDPCDIAG ok=(\d+) seg_fail=(\d+) tb_fail=(\d+) zero_tb=(\d+)")),
@@ -202,8 +207,11 @@ class LogTail:
                     self.counters[name] += 1
                 elif name == "pdsch_crc":
                     try_n, ok_n = int(m.group(1)), int(m.group(2))
-                    self.stats["pdsch_try"] = try_n
-                    self.stats["pdsch_ok"] = ok_n
+                    # A queue-path sample always wins: an in-line counter of 0/0 must never
+                    # overwrite a real queue measurement on a run that uses both.
+                    if name == "pdsch_crc" or self.stats.get("pdsch_try", 0) == 0:
+                        self.stats["pdsch_try"] = try_n
+                        self.stats["pdsch_ok"] = ok_n
                     self.stats["pdsch_rate"] = (100.0 * ok_n / try_n) if try_n else None
                 elif name == "ldpc":
                     ok, sf, tf, zt = (int(m.group(i)) for i in (1, 2, 3, 4))

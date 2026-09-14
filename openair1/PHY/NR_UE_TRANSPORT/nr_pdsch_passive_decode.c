@@ -1396,7 +1396,7 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
     }
     if (kn[0] + kn[1] > 0 && coh_gate >= 0.30) {
       const double cfo_hz = atan2(im[0] + im[1], re[0] + re[1]) / (2.0 * M_PI * dt_d);
-      double sfo_ppm = 0.0;
+      double sfo_ppm = 0.0, sfo_dk = 0.0;
       bool sfo_measured = false;
       if (kn[0] > 16 && kn[1] > 16 && coh_h[0] >= 0.30 && coh_h[1] >= 0.30) {
         const double p_lo = atan2(im[0], re[0]), p_hi = atan2(im[1], re[1]);
@@ -1409,6 +1409,7 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
           /* dphi/dk = -2*pi*df*eps*dt  ->  eps = -(dphi/dk) / (2*pi*df*dt) */
           const double df = (double)fp->subcarrier_spacing;
           sfo_ppm = -(dphi / dk) / (2.0 * M_PI * df * dt_d) * 1.0e6;
+          sfo_dk = (dk < 0.0) ? -dk : dk;
           sfo_measured = true;
         }
       }
@@ -1425,8 +1426,38 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
       pthread_mutex_lock(&s_dfo_lock);
       s_cfo_ema = (dn == 0) ? cfo_hz : (0.99 * s_cfo_ema + 0.01 * cfo_hz);
       if (sfo_measured) {
+        /* ---- WEIGHT BY PRECISION, NOT EQUALLY -------------------------------------------------
+         * The slope is recovered from the phase difference between two subcarrier groups whose
+         * centres are dk apart, so its variance goes as 1/dk^2. dk is set by the GRANT's
+         * allocation, and this cell schedules everything from a couple of resource blocks to the
+         * full carrier -- a factor of ~30 in dk, so a factor of ~1000 in variance.
+         *
+         * Equal weighting therefore let a narrow grant, whose own unambiguous range is
+         * +/-1000 ppm and which resolves nothing at the few-ppm scale being measured, move the
+         * average as much as a full-band grant. MEASURED: the published EMA reached -45.65 ppm
+         * while instantaneous full-band estimates read +4.3 ppm -- outside the +/-31.6 ppm
+         * unambiguous range of the very grants that dominate the population, which is impossible
+         * for an average of valid measurements and is what exposed this.
+         *
+         * Inverse-variance weighting is the standard answer and needs no threshold: the step is
+         * scaled by (dk/dk_ref)^2, unity for a full-band grant. A narrow grant still contributes,
+         * in proportion to the information it actually carries. */
+        const double dk_ref = (double)fp->N_RB_DL * 12.0 / 2.0;  /* full-band group separation */
+        double rel = (dk_ref > 0.0) ? (sfo_dk / dk_ref) : 0.0;
+        rel = rel * rel;
+        if (rel > 1.0) {
+          rel = 1.0;   /* a wider-than-reference separation is not MORE than fully informative */
+        }
+        const double a = 0.01 * rel;
         const uint64_t sn = atomic_fetch_add(&s_sfo_n, 1);
-        s_sfo_ema = (sn == 0) ? sfo_ppm : (0.99 * s_sfo_ema + 0.01 * sfo_ppm);
+        /* Seed from the first FULL-WEIGHT sample rather than the first sample of any width: a
+         * narrow first grant would otherwise set the starting point to a near-meaningless value
+         * that the weighted updates then take a long time to walk away from. */
+        if (sn == 0 || (s_sfo_ema == 0.0 && rel > 0.5)) {
+          s_sfo_ema = sfo_ppm;
+        } else {
+          s_sfo_ema = (1.0 - a) * s_sfo_ema + a * sfo_ppm;
+        }
         g_sfo_ppm_ema = s_sfo_ema;  // published for the SFO correction stage
       }
       sfo_pub = s_sfo_ema;
@@ -1466,9 +1497,9 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
         }
         LOG_I(PHY,
               "SENSING: DMRSFO cfo=%+.1f Hz (ema %+.1f) sfo=%s (ema %+.2f over %lu) "
-              "sym %d->%d n_sc=%u/%u coh=%.2f (halves %.2f/%.2f) unambiguous=+/-%.0f Hz apply=%d\n",
+              "sym %d->%d n_sc=%u/%u coh=%.2f (halves %.2f/%.2f) dk=%.0f unambiguous=+/-%.0f Hz apply=%d\n",
               cfo_hz, cfo_pub, sfo_txt, sfo_pub, (unsigned long)atomic_load(&s_sfo_n),
-              dmrs_first, dmrs_last, kn[0], kn[1], coherence, coh_h[0], coh_h[1],
+              dmrs_first, dmrs_last, kn[0], kn[1], coherence, coh_h[0], coh_h[1], sfo_dk,
               1.0 / (2.0 * dt_d), s_apply);
       }
     }
