@@ -49,6 +49,7 @@ extern __thread uint32_t nr_dl_chest_nvar_ant[];
 #include "PHY/NR_REFSIG/dmrs_nr.h" // get_num_dmrs_re_per_rb, nr_chest_time_domain_avg
 #include "PHY/CODING/nrLDPC_coding/nrLDPC_coding_interface.h"
 #include "PHY/MODULATION/modulation_UE.h" // nr_slot_fep, nr_slot_fep_ant
+#include "nr_pdsch_ptrs_unav.h"
 #include "common/utils/threadPool/task_ans.h" // init_task_ans/join_task_ans/completed_task_ans, for the per-antenna FEP dispatch below
 #include "PHY/NR_UE_ESTIMATION/nr_estimation.h"
 #include "PHY/NR_UE_TRANSPORT/nr_transport_proto_ue.h"
@@ -897,11 +898,41 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
 
   // ---- Scope: mirror nr_isac_pdsch_data_aided_submit()'s own guards. Decoding a grant whose
   // reconstruction we could not use anyway is pure CPU cost. ----
+  /* ---- PT-RS: decodable once G accounts for the REs it steals -------------------------------
+   * This used to return unconditionally, which cost the grant entirely -- no TB CRC evidence for
+   * Technique D or the DCI-1_1 layout sweep, and no data-aided row. PT-RS removes REs from PDSCH,
+   * so the only thing actually needed is the right `unav_res` for nr_get_G().
+   * The densities come from ptrs-DensityRecommendationDL (dedicated RRC, invisible here), but the
+   * densities it SELECTS are a six-element set -- K in {2,4} x L in {1,2,4}. ISAC_PTRS_K/L pin one
+   * for now; sweeping all six against the TB CRC is the agnostic completion and needs air to run.
+   * DEFAULT IS UNCHANGED: with neither set, PT-RS grants are still refused, so this cannot regress
+   * a run that does not ask for it. */
+  uint32_t ptrs_unav = 0;
   if (dlsch_config->pduBitmap & 0x1) {
-    return out->status; // PTRS
+    static int s_ptrs_k = -1, s_ptrs_l = -1;
+    if (s_ptrs_k < 0) {
+      const char *ek = getenv("ISAC_PTRS_K"), *el = getenv("ISAC_PTRS_L");
+      s_ptrs_k = (ek && *ek) ? atoi(ek) : 0;
+      s_ptrs_l = (el && *el) ? atoi(el) : 0;
+    }
+    if (s_ptrs_k <= 0 || s_ptrs_l <= 0) {
+      return out->status; // PT-RS, and no density given to compute G with
+    }
+    ptrs_unav = nr_pdsch_ptrs_unav_res(freq_alloc->num_rbs, dlsch_config->start_symbol,
+                                       dlsch_config->number_symbols, dlsch_config->dlDmrsSymbPos,
+                                       (uint8_t)s_ptrs_k, (uint8_t)s_ptrs_l, 1);
+    if (ptrs_unav == 0) {
+      return out->status; // the density did not describe any PT-RS -- do not guess G
+    }
   }
+  /* ---- CSI-RS rate matching: still refused, and NOT merely unimplemented ---------------------
+   * Rate matching around CSI-RS needs the ZP CSI-RS resource configuration to know WHICH REs were
+   * skipped. That is dedicated RRC and is not broadcast, so unlike PT-RS there is no small
+   * discrete set to sweep -- the resource's row, bitmap, symbols and density would all have to be
+   * recovered first. That is exactly what nr_csirs_blind_search.c exists to do; this becomes
+   * possible once that search is wired and converging, and not before. */
   if (dlsch_config->numCsiRsForRateMatching > 0) {
-    return out->status; // CSI-RS rate matching
+    return out->status;
   }
   int n_ports = 0;
   for (int i = 0; i < 12; i++) {
@@ -978,7 +1009,8 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
   dlsch_config->tbslbrm = nr_compute_tbslbrm(tbl_lbrm, bw_lbrm, (uint8_t)nl_tbslbrm);
 
   const uint32_t G = nr_get_G(freq_alloc->num_rbs, dlsch_config->number_symbols, nb_re_dmrs, dmrs_len,
-                              0 /* unav_res: PTRS/CSI-RM excluded above */, cw->qamModOrder, cw->Nl);
+                              ptrs_unav /* 0 unless a PT-RS density was given; CSI-RM still excluded */,
+                              cw->qamModOrder, cw->Nl);
   if (G == 0) {
     return out->status;
   }
