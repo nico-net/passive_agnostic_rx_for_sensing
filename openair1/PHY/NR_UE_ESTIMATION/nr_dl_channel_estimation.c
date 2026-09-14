@@ -2,6 +2,7 @@
  * SPDX-License-Identifier: LicenseRef-CSSL-1.0
  */
 
+#include <math.h>
 #include <stdlib.h> // getenv (NVAR probe)
 #include "nr_common.h"
 #include <string.h>
@@ -29,6 +30,12 @@
  * estimator concurrently on different transport blocks. 0 = that antenna produced no estimate. */
 #define NR_DL_CHEST_MAX_ANT 8
 __thread uint32_t nr_dl_chest_nvar_ant[NR_DL_CHEST_MAX_ANT];
+/* Consumer-only diagnostics (BRDELAY/PDP). The passive decode consumer sets the request flag on its
+ * thread; the per-antenna pool task inherits it through the task struct. Never set on the RT thread. */
+__thread int nr_dl_chest_diag_request = 0;
+__thread int nr_dl_chest_pdp_compact_pct = -1;
+__thread int nr_dl_chest_pdp_sec_pos = 0;
+__thread int nr_dl_chest_pdp_sec_db = 0;
 // #define DEBUG_PDSCH
 // #define DEBUG_PDCCH
 // #define DEBUG_PBCH(a...) printf(a)
@@ -935,6 +942,27 @@ static void NFAPI_NR_DMRS_TYPE1_linear_interp(NR_DL_FRAME_PARMS *frame_parms,
     nr_passive_est_delay(frame_parms->ofdm_symbol_size, dl_ls_est, ch_estimates_time, delay);
   else
     nr_est_delay(frame_parms->ofdm_symbol_size, dl_ls_est, ch_estimates_time, delay);
+  if (nr_dl_chest_diag_request) {
+    /* PDP shape: % of IDFT energy within +/-8 samples of the peak, and the strongest secondary peak
+     * outside that window (signed position, dB below the main peak). Shape is scale-free. */
+    const int N = frame_parms->ofdm_symbol_size;
+    const int pk = ((delay->delay_max_pos % N) + N) % N;
+    double tot = 0.0, win = 0.0, sec = 0.0;
+    int secpos = 0;
+    for (int i = 0; i < N; i++) {
+      const double e = (double)ch_estimates_time[i].r * ch_estimates_time[i].r + (double)ch_estimates_time[i].i * ch_estimates_time[i].i;
+      tot += e;
+      int dd = i - pk;
+      if (dd > N / 2) dd -= N;
+      if (dd < -N / 2) dd += N;
+      if (dd >= -8 && dd <= 8) win += e;
+      else if (e > sec) { sec = e; secpos = dd; }
+    }
+    const double mainpk = (double)ch_estimates_time[pk].r * ch_estimates_time[pk].r + (double)ch_estimates_time[pk].i * ch_estimates_time[pk].i;
+    nr_dl_chest_pdp_compact_pct = tot > 0.0 ? (int)(100.0 * win / tot) : -1;
+    nr_dl_chest_pdp_sec_pos = secpos;
+    nr_dl_chest_pdp_sec_db = (sec > 0.0 && mainpk > 0.0) ? (int)(10.0 * log10(mainpk / sec)) : 99;
+  }
   int delay_idx = get_delay_idx(delay->est_delay, MAX_DELAY_COMP);
   c16_t *dl_delay_table = frame_parms->delay_table[delay_idx];
 
@@ -1270,6 +1298,8 @@ typedef struct {
   int bwp_start_subcarrier;
   bool want_nvar;
   uint32_t nvar_out;
+  int diag_request;
+  int delay_pos_out, delay_val_out, pdp_compact_out, pdp_sec_pos_out, pdp_sec_db_out;
   task_ans_t *ans;
 } nr_pdsch_chest_ant_task_t;
 
@@ -1291,6 +1321,7 @@ static void nr_pdsch_chest_ant_task(void *arg)
   memset(dl_ch, 0, sizeof(*dl_ch) * fp->ofdm_symbol_size);
 
   delay_t delay = {0};
+  nr_dl_chest_diag_request = a->diag_request;
   if (a->config_type == NFAPI_NR_DMRS_TYPE1 && a->ue->chest_freq == 0) {
     NFAPI_NR_DMRS_TYPE1_linear_interp(fp, rxF, &a->pilot[6 * a->rb_offset], dl_ch, a->bwp_start_subcarrier,
                                       a->freq_alloc, a->dlsch->BWPSize, &delay, nvar_p);
@@ -1306,6 +1337,11 @@ static void nr_pdsch_chest_ant_task(void *arg)
   }
 
   a->nvar_out = nvar_ant;
+  a->delay_pos_out = delay.delay_max_pos;
+  a->delay_val_out = delay.delay_max_val;
+  a->pdp_compact_out = nr_dl_chest_pdp_compact_pct;
+  a->pdp_sec_pos_out = nr_dl_chest_pdp_sec_pos;
+  a->pdp_sec_db_out = nr_dl_chest_pdp_sec_db;
   if (aarx < NR_DL_CHEST_MAX_ANT) {
     nr_dl_chest_nvar_ant[aarx] = nvar_ant; // 0 here matches the pre-loop zeroing this replaces for a no-estimate antenna
   }
@@ -1402,6 +1438,7 @@ void nr_pdsch_channel_estimation(PHY_VARS_NR_UE *ue,
                                                       .delta = delta,
                                                       .bwp_start_subcarrier = bwp_start_subcarrier,
                                                       .want_nvar = (nvar != NULL),
+                                                      .diag_request = nr_dl_chest_diag_request,
                                                       .ans = &chest_ans};
       task_t t = {.func = nr_pdsch_chest_ant_task, .args = &chest_tasks[aarx]};
       pushTpool(&get_nrUE_params()->Tpool, t);
@@ -1412,6 +1449,22 @@ void nr_pdsch_channel_estimation(PHY_VARS_NR_UE *ue,
      * zero from the pre-loop clear on every multi-antenna decode. Publish the per-antenna values here. */
     for (int aarx = 0; aarx < fp->nb_antennas_rx && aarx < NR_DL_CHEST_MAX_ANT; aarx++)
       nr_dl_chest_nvar_ant[aarx] = chest_tasks[aarx].nvar_out;
+    {
+      static __thread unsigned long s_brd_n = 0;
+      if (nr_dl_chest_diag_request && (s_brd_n++ % 2000) == 0 && fp->nb_antennas_rx >= 2) {
+        char pb[120], vb[160], nb[160], cb[240];
+        int up = 0, uv = 0, un = 0, uc = 0;
+        for (int aarx = 0; aarx < fp->nb_antennas_rx && aarx < 4; aarx++) {
+          up += snprintf(pb + up, sizeof(pb) - up, "%s%d", aarx ? " " : "", chest_tasks[aarx].delay_pos_out);
+          uv += snprintf(vb + uv, sizeof(vb) - uv, "%s%d", aarx ? " " : "", chest_tasks[aarx].delay_val_out);
+          un += snprintf(nb + un, sizeof(nb) - un, "%s%u", aarx ? " " : "", chest_tasks[aarx].nvar_out);
+          uc += snprintf(cb + uc, sizeof(cb) - uc, "%s%d%%/%+d@%ddB", aarx ? " " : "", chest_tasks[aarx].pdp_compact_out,
+                         chest_tasks[aarx].pdp_sec_pos_out, chest_tasks[aarx].pdp_sec_db_out);
+        }
+        LOG_A(PHY, "SENSING: BRDELAY sym=%d nb_rb=%d peak_pos=[%s] peak_val=[%s] nvar=[%s] pdp[compact%%/2nd-peak@dB-below]=[%s]\n",
+              symbol, nb_rb_pdsch, pb, vb, nb, cb);
+      }
+    }
     if (nvar) {
       for (int aarx = 0; aarx < fp->nb_antennas_rx; aarx++) {
         if (chest_tasks[aarx].nvar_out > 0) {

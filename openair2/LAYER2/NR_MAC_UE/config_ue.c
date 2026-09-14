@@ -2238,6 +2238,29 @@ void nr_rrc_mac_config_req_sib1(module_id_t module_id, int cc_idP, NR_SIB1_t *si
     }
     nr_pdcch_blind_publish_common(&facts);
     nr_passive_acq_note_sib1(); // acquisition-state tracker: SIB1 common config published
+    if (scc->tdd_UL_DL_ConfigurationCommon || mac->tdd_UL_DL_ConfigurationCommon) {
+      /* Periodicity in 1/8 ms so 0.625 ms stays integer; slots = (x8 << mu) / 8 when it divides. */
+      const NR_TDD_UL_DL_ConfigCommon_t *tc = scc->tdd_UL_DL_ConfigurationCommon ? scc->tdd_UL_DL_ConfigurationCommon : mac->tdd_UL_DL_ConfigurationCommon;
+      const int mu = (int)tc->referenceSubcarrierSpacing;
+      nr_tdd_pattern_t tp[2] = {{0}, {0}};
+      const NR_TDD_UL_DL_Pattern_t *pp[2] = {&tc->pattern1, tc->pattern2};
+      for (int i = 0; i < 2; i++) {
+        if (!pp[i]) continue;
+        static const int x8[8] = {4, 5, 8, 10, 16, 20, 40, 80};
+        int per8 = x8[pp[i]->dl_UL_TransmissionPeriodicity & 7];
+        if (pp[i]->ext1 && pp[i]->ext1->dl_UL_TransmissionPeriodicity_v1530)
+          per8 = (*pp[i]->ext1->dl_UL_TransmissionPeriodicity_v1530 == 0) ? 24 : 32; // ms3 / ms4
+        const int num = per8 << mu;
+        tp[i].period_slots = (num % 8) ? 0 : (uint16_t)(num / 8);
+        tp[i].dl_slots = (uint8_t)pp[i]->nrofDownlinkSlots;
+        tp[i].dl_symbols = (uint8_t)pp[i]->nrofDownlinkSymbols;
+        tp[i].ul_slots = (uint8_t)pp[i]->nrofUplinkSlots;
+        tp[i].ul_symbols = (uint8_t)pp[i]->nrofUplinkSymbols;
+      }
+      nr_passive_acq_note_sib1_tdd(&tp[0], tc->pattern2 ? &tp[1] : NULL);
+    } else {
+      LOG_A(PHY, "SENSING: TDD from SIB1 ABSENT (tdd-UL-DL-ConfigurationCommon not in SIB1 -> FDD or pattern unknown)\n");
+    }
     /* Verify the started PHY geometry against what the cell says about itself; the tracker logs
      * CONFIRMED or MISMATCH once. FrequencyInfoDL-SIB has one scs-SpecificCarrier on every cell this
      * receiver supports (checked by the acquisition path); index 0 is that carrier. */

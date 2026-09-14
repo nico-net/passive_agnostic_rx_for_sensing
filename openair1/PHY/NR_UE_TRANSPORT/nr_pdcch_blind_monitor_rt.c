@@ -962,6 +962,21 @@ void nr_pdcch_blind_monitor_process(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t 
 void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc,
                                          bool serial_candidates, long source_absolute_slot)
 {
+  /* ISAC_TDD_SKIP=1: do not scan slots SIB1 says carry no downlink. Unknown pattern -> scan. */
+  {
+    static int s_tdd_skip = -1;
+    if (s_tdd_skip < 0)
+      s_tdd_skip = (getenv("ISAC_TDD_SKIP") != NULL) ? 1 : 0;
+    static unsigned long s_skipped = 0, s_seen = 0;
+    if (s_tdd_skip && source_absolute_slot >= 0) {
+      s_seen++;
+      if (!nr_passive_acq_tdd_slot_has_downlink((uint32_t)source_absolute_slot)) {
+        if ((++s_skipped % 20000) == 1)
+          LOG_A(PHY, "SENSING: TDD skip: %lu of %lu slots skipped as uplink-only (from SIB1)\n", s_skipped, s_seen);
+        return;
+      }
+    }
+  }
   const nr_pdcch_blind_monitor_cfg_t *cfg = nr_pdcch_blind_monitor_get_cfg();
   NR_DL_FRAME_PARMS *fp = &ue->frame_parms;
   nr_pdcch_blind_ul_opts_t ul_opts = cfg->ul;
@@ -1371,7 +1386,7 @@ void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_pr
    * nothing the decoder consumes, so it cannot affect decoding. */
   nr_csirs_blind_rt_slot(ue, proc->nr_slot_rx,
                          source_absolute_slot >= 0 ? (uint32_t)source_absolute_slot : 0u,
-                         &rxdataF[0][0]);
+                         rxdataF);
 
   /* XCHECK diagnostic (2026-09-06, Task 5 follow-up): run Technique A's own correlation function
    * on THIS FEP output -- the manual, live-verified ground-truth config's own receive chain, which

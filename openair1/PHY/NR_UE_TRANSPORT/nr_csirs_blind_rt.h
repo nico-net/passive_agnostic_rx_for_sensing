@@ -30,7 +30,9 @@
 
 /** Score one candidate against this slot. Safe to call every slot; no-ops unless enabled.
  * `rxdataF` is the frequency-domain slot buffer the monitor already holds. */
-void nr_csirs_blind_rt_slot(const PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot,
-                            const c16_t *rxdataF_ant0);
+/* `rxdataF` is the monitor's per-antenna slot buffer; only the CORESET symbols are populated when
+ * this is called, so the candidate's own symbol is FFT'd here (antenna 0, one symbol per slot). */
+void nr_csirs_blind_rt_slot(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot,
+                            c16_t rxdataF[][ue->frame_parms.samples_per_slot_wCP]);
 
 #endif /* __NR_CSIRS_BLIND_RT_H__ */

@@ -121,6 +121,12 @@ nr_passive_acq_carrier_verdict_t nr_passive_acq_verify_carrier(const nr_passive_
  * carrier centre as an absolute frequency (the receiver could retune to it on a mismatch). */
 void nr_passive_acq_set_phy_geometry(int n_rb, int mu, int ssb_start_subcarrier, double dl_carrier_hz);
 void nr_passive_acq_note_sib1_carrier(int n_rb, int mu, int offset_to_point_a, int offset_to_carrier, int k_ssb);
+/* TDD pattern from SIB1 (tdd-UL-DL-ConfigurationCommon). Slots are in the reference-SCS numbering
+ * of the pattern; the query takes the receiver's absolute slot at the SAME numerology. Unknown -> DL. */
+#include "nr_tdd_pattern.h"
+void nr_passive_acq_note_sib1_tdd(const nr_tdd_pattern_t *p1, const nr_tdd_pattern_t *p2);
+bool nr_passive_acq_tdd_slot_has_downlink(uint32_t absolute_slot);
+bool nr_passive_acq_tdd_known(void);
 /* Hard invalidation: the receive stream itself was lost (RXDISCONT), so the frame-to-sample
  * mapping -- and therefore every hypothesis being scored against it -- is invalid NOW. Drops
  * straight to NR_ACQ_LOST with NO hysteresis, unlike nr_passive_acq_update()'s evidence path:

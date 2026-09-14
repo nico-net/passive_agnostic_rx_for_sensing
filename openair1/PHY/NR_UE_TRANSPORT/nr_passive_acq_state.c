@@ -198,6 +198,26 @@ void nr_passive_acq_set_phy_geometry(int n_rb, int mu, int ssb_start_subcarrier,
   g_phy_geom_set = true;
   pthread_mutex_unlock(&g_lock);
 }
+static nr_tdd_config_t g_tdd;
+void nr_passive_acq_note_sib1_tdd(const nr_tdd_pattern_t *p1, const nr_tdd_pattern_t *p2)
+{
+  nr_tdd_config_t t;
+  const bool ok = nr_tdd_config_init(&t, p1, p2);
+  pthread_mutex_lock(&g_lock);
+  const bool first = !g_tdd.valid;
+  if (ok)
+    g_tdd = t;
+  pthread_mutex_unlock(&g_lock);
+  if (first || !ok)
+    LOG_A(PHY, "SENSING: TDD from SIB1 %s: p1 period=%u slots dl=%u+%usym ul=%u+%usym | p2 period=%u dl=%u+%usym ul=%u+%usym\n",
+          ok ? "DERIVED" : "REJECTED", p1->period_slots, p1->dl_slots, p1->dl_symbols, p1->ul_slots, p1->ul_symbols,
+          p2 ? p2->period_slots : 0, p2 ? p2->dl_slots : 0, p2 ? p2->dl_symbols : 0, p2 ? p2->ul_slots : 0, p2 ? p2->ul_symbols : 0);
+}
+bool nr_passive_acq_tdd_known(void) { return g_tdd.valid; }
+bool nr_passive_acq_tdd_slot_has_downlink(uint32_t absolute_slot)
+{
+  return g_tdd.valid ? nr_tdd_slot_has_downlink(&g_tdd, absolute_slot) : true;
+}
 void nr_passive_acq_note_sib1_carrier(int n_rb, int mu, int offset_to_point_a, int offset_to_carrier, int k_ssb)
 {
   pthread_mutex_lock(&g_lock);

@@ -13,6 +13,7 @@
 /*! \file openair1/PHY/NR_UE_TRANSPORT/nr_csirs_blind_rt.c */
 
 #include "nr_csirs_blind_rt.h"
+#include "PHY/MODULATION/modulation_UE.h"
 #include "nr_csirs_blind_search.h"
 
 #include "PHY/nr_phy_common/inc/nr_phy_common.h"
@@ -51,9 +52,10 @@ static double null_median(void)
   return t[g_null_n / 2];
 }
 
-void nr_csirs_blind_rt_slot(const PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot,
-                            const c16_t *rxdataF_ant0)
+void nr_csirs_blind_rt_slot(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot,
+                            c16_t rxdataF[][ue->frame_parms.samples_per_slot_wCP])
 {
+  const c16_t *rxdataF_ant0 = (rxdataF != NULL) ? &rxdataF[0][0] : NULL;
   if (g_on < 0) {
     const char *e = getenv("ISAC_CSIRS_BLIND");
     g_on = (e != NULL && atoi(e) != 0) ? 1 : 0;
@@ -131,7 +133,10 @@ void nr_csirs_blind_rt_slot(const PHY_VARS_NR_UE *ue, int slot, uint32_t absolut
                      c->cdm_type, refp);
 
   /* Score only the symbol the candidate places its resource on: correlating the whole slot would
-   * dilute the oracle with 13 symbols of unrelated PDSCH. */
+   * dilute the oracle with 13 symbols of unrelated PDSCH. The monitor only FFT'd the CORESET
+   * symbols, so transform this candidate's symbol now (antenna 0) -- without this the search
+   * scored an empty buffer and never fired (OTA 2026-09-14: 15 min, zero progress lines). */
+  nr_slot_fep_ant(ue, fp, (unsigned)slot, (unsigned)c->symb_l0, 0, rxdataF, link_type_dl, 0, ue->common_vars.rxdata);
   const uint32_t off = (uint32_t)c->symb_l0 * (uint32_t)fp->ofdm_symbol_size;
   const double rho = nr_csirs_blind_correlate((const int16_t *)&rxdataF_ant0[off],
                                               (const int16_t *)&ref[off],

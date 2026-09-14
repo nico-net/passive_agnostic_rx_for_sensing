@@ -44,6 +44,7 @@ extern _Atomic long nr_ue_diag_producer_absolute_slot;
  * inside an #ifdef __cplusplus block, and a declaration placed there is silently invisible to C. */
 #define NR_DL_CHEST_MAX_ANT 8
 extern __thread uint32_t nr_dl_chest_nvar_ant[];
+extern __thread int nr_dl_chest_diag_request;
 extern __thread int nr_dlsch_chest_per_symbol; // nr_dlsch_demodulation.c: read the estimate at the data symbol itself
 
 #include "PHY/CODING/coding_defs.h"
@@ -330,6 +331,9 @@ static _Atomic uint64_t g_rbhist[3][NR_PDSCH_RBHIST_BINS];
 /* MCSHIST: CRC by MCS index, split narrow (<128 PRB) / wide (>=128 PRB). Separates link margin
  * (wide fails only at high MCS) from a width bug (wide fails at every MCS). */
 static _Atomic uint64_t g_mcshist[2][3][32];
+static _Atomic uint64_t g_mcs_segs[32], g_mcs_segs_ok[32], g_mcs_tbs[32], g_mcs_rb[32];
+static _Atomic uint64_t g_rv_try[4][32], g_rv_ok[4][32]; // ISAC_RV_RETRY rescues by [rv][mcs]
+static __thread uint32_t t_seg_ok_last = 0; // segments that decoded in the last TB on this thread
 static _Atomic uint64_t g_shape_rv[3]  = {0, 0, 0};
 static _Atomic uint64_t g_shape_G[3]   = {0, 0, 0};
 /* Segmentation parameters, binned by outcome. §34.4's hypothesis: filler bits F are ZEROS by
@@ -519,11 +523,28 @@ void nr_pdsch_passive_ldpc_stats_dump(void)
       const uint64_t fn  = atomic_load(&g_mcshist[w][2][m]) + atomic_load(&g_mcshist[w][0][m]);
       if (okn + fn == 0)
         continue;
-      u += snprintf(mb + u, sizeof(mb) - u, "%d:%.0f%%(%lu) ", m, 100.0 * (double)okn / (double)(okn + fn),
-                    (unsigned long)(okn + fn));
+      const uint64_t sg = atomic_load(&g_mcs_segs[m]), sgok = atomic_load(&g_mcs_segs_ok[m]);
+      u += snprintf(mb + u, sizeof(mb) - u, "%d:%.0f%%(%lu,segs %.0f%%,tbs %lu,rb %lu) ", m, 100.0 * (double)okn / (double)(okn + fn),
+                    (unsigned long)(okn + fn), sg ? 100.0 * (double)sgok / (double)sg : 0.0,
+                    (unsigned long)(atomic_load(&g_mcs_tbs[m]) / (okn + fn)), (unsigned long)(atomic_load(&g_mcs_rb[m]) / (okn + fn)));
     }
     if (u > 0)
       LOG_I(PHY, "SENSING: MCSHIST %s crc_ok%% by mcs: %s\n", w ? "WIDE(>=128prb)" : "NARROW(<128prb)", mb);
+  }
+  {
+    char rb[400];
+    size_t u = 0;
+    for (int m = 0; m < 32 && u < sizeof(rb) - 40; m++) {
+      const uint64_t t2 = atomic_load(&g_rv_try[2][m]);
+      if (t2 == 0)
+        continue;
+      u += snprintf(rb + u, sizeof(rb) - u, "mcs%d: rv2 %lu/%lu rv3 %lu/%lu rv1 %lu/%lu; ", m,
+                    (unsigned long)atomic_load(&g_rv_ok[2][m]), (unsigned long)t2,
+                    (unsigned long)atomic_load(&g_rv_ok[3][m]), (unsigned long)atomic_load(&g_rv_try[3][m]),
+                    (unsigned long)atomic_load(&g_rv_ok[1][m]), (unsigned long)atomic_load(&g_rv_try[1][m]));
+    }
+    if (u > 0)
+      LOG_I(PHY, "SENSING: RVRETRY rescued/tried by mcs: %s\n", rb);
   }
   {
     /* SUBSET: every subset scored on the SAME transport blocks, so the comparison isolates the
@@ -830,6 +851,7 @@ static bool passive_ldpc_decode(PHY_VARS_NR_UE *ue,
         }
       }
     }
+    t_seg_ok_last = seg_ok;
     if (seg_ok != TB_parameters.C) {
       /* LDPC did not converge on at least one segment -> the LLRs feeding it are wrong. */
       atomic_fetch_add(&g_ldpc_seg_fail, 1);
@@ -1169,6 +1191,7 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
     dmrs_last = m;
     for (int nl = 0; nl < cw->Nl; nl++) { // mirrors nr_ue_pdsch_procedures()'s per-layer loop
       uint32_t nvar_tmp = 0;
+      nr_dl_chest_diag_request = 1; // consumer thread only: BRDELAY/PDP diagnostics
       nr_pdsch_channel_estimation(ue, proc, dlsch_config, freq_alloc, nl,
                                   get_dmrs_port(nl, dlsch_config->dmrs_ports), (unsigned char)m, pdsch_est_size,
                                   pdsch_dl_ch_estimates, fp->samples_per_slot_wCP, rxdataF, &nvar_tmp);
@@ -2175,6 +2198,32 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
       }
     }
     bool ldpc_ok = passive_ldpc_decode(ue, proc, &g_harq, cw, dlsch_config, llr, freq_alloc->num_rbs, G);
+    /* ISAC_RV_RETRY=1 (default off): on a failed TB, re-run ONLY the LDPC stage with rv 2, 3, 1 on
+     * the same (already descrambled) LLRs. Tests the hypothesis that some grants are retransmissions
+     * whose RV field the current DCI-1_1 layout misreads as 0 (MCS-24 grants: 0 % of code blocks
+     * decode on 3.5k TBs while MCS 25 gets 49 % -- a lower code rate cannot do that on SNR alone).
+     * A rescue at rv=2 is proof; the counters are printed with MCSHIST. */
+    {
+      static int s_rvr = -1;
+      if (s_rvr < 0) {
+        const char *e = getenv("ISAC_RV_RETRY");
+        s_rvr = (e != NULL && atoi(e) != 0) ? 1 : 0;
+      }
+      if (s_rvr && !ldpc_ok) {
+        static const uint8_t rvs[3] = {2, 3, 1};
+        const uint8_t rv0 = cw->rv;
+        for (int i = 0; i < 3 && !ldpc_ok; i++) {
+          cw->rv = rvs[i];
+          atomic_fetch_add(&g_rv_try[rvs[i]][grant->mcs & 31], 1);
+          if (passive_ldpc_decode(ue, proc, &g_harq, cw, dlsch_config, llr, freq_alloc->num_rbs, G)) {
+            ldpc_ok = true;
+            atomic_fetch_add(&g_rv_ok[rvs[i]][grant->mcs & 31], 1);
+          }
+        }
+        if (!ldpc_ok)
+          cw->rv = rv0;
+      }
+    }
     pdtim_add(PDTIM_LDPC, pdt_ldp);
 
     /* ---- SELECTION DIVERSITY across receive branches (2026-09-03) -------------------------------
@@ -2351,6 +2400,12 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
         atomic_fetch_add(&g_rbhist[sk][rb_bin], 1);
       }
       atomic_fetch_add(&g_mcshist[freq_alloc->num_rbs >= 128 ? 1 : 0][sk][grant->mcs & 31], 1);
+      if (freq_alloc->num_rbs >= 128) {
+        atomic_fetch_add(&g_mcs_tbs[grant->mcs & 31], (uint64_t)cw->TBS);
+        atomic_fetch_add(&g_mcs_rb[grant->mcs & 31], (uint64_t)freq_alloc->num_rbs);
+        atomic_fetch_add(&g_mcs_segs[grant->mcs & 31], (uint64_t)t_seg_C);
+        atomic_fetch_add(&g_mcs_segs_ok[grant->mcs & 31], (uint64_t)t_seg_ok_last);
+      }
       atomic_fetch_add(&g_shape_G[sk], (uint64_t)G);
       atomic_fetch_add(&g_shape_rv[sk], (uint64_t)grant->rv);
       atomic_fetch_add(&g_shape_K[sk], (uint64_t)t_seg_K);
