@@ -283,7 +283,7 @@ until ss -lnt 2>/dev/null | grep -q ':4043 '; do
 done
 echo "  [ok] rfsim server listening on :4043"
 
-# --- 2. active UE(s) ---------------------------------------------------------------------------
+# --- 2. active UE(s) --- ACTIVE_UE_EXTRA: extra active-UE flags (rank 4: "--ue-nb-ant-rx 4 --uecap_file <uecap_ports4.xml>")------------------------------------------------------------------------
 echo "--- starting $NUM_UE ACTIVE UE(s) (attach, carry traffic) ---"
 UE_IPS=()
 for i in "${!UE_CONFS[@]}"; do
@@ -291,12 +291,12 @@ for i in "${!UE_CONFS[@]}"; do
   if [ "$i" -eq 0 ]; then
     echo "  $label: default netns"
     sudo -n $(pin_for ue "$i") "$BUILD_DIR/nr-uesoftmodem" -O "$SCRIPT_DIR/$conf" --rfsim \
-      "${CELL_ARGS[@]}" >"$log" 2>&1 &
+      "${CELL_ARGS[@]}" ${ACTIVE_UE_EXTRA:-} >"$log" 2>&1 &
   else
     echo "  $label: own netns (${UE_NETNS_BY_IDX[$i]}, veth to gNB at ${UE_HOST_IP_BY_IDX[$i]})"
     setup_ue_netns "$i"
     sudo -n ip netns exec "${UE_NETNS_BY_IDX[$i]}" $(pin_for ue "$i") "$BUILD_DIR/nr-uesoftmodem" -O "$SCRIPT_DIR/$conf" --rfsim \
-      "${CELL_ARGS[@]}" >"$log" 2>&1 &
+      "${CELL_ARGS[@]}" ${ACTIVE_UE_EXTRA:-} >"$log" 2>&1 &
   fi
   # 150s for the same reason as the passive receivers below: at 273 PRB with several softmodems
   # already running, initial sync + RA legitimately takes longer than the original 60s. Measured
