@@ -47,6 +47,12 @@ for attempt in 1 2 3 4 5; do
   d=$(ls -dt $CAP/${ARM}_*/ | head -1)
   s1=$(stat -c %s $d/run.log); sleep 120; s2=$(stat -c %s $d/run.log)
   [ "$s2" -le "$s1" ] && { echo "a$attempt: STALLED after lock" >> $ST; kill $RUNPID 2>/dev/null; stop_clean; continue; }
+  # SIB1 decodes within seconds of lock when it decodes at all (8 runs, 2026-09-15: 4/4 misses stayed
+  # at 0 for the whole DUR). Waiting out DUR to learn VOID_NO_SIB1 costs 10 min per miss; 120 s is
+  # already past the 120 s stall window above. SIB1WAIT=0 disables.
+  if [ "${SIB1WAIT:-1}" != "0" ] && ! grep -aq "SIB1 decoded" "$d/run.log"; then
+    echo "a$attempt: NO SIB1 120 s after lock -- retrying" >> $ST; kill $RUNPID 2>/dev/null; stop_clean; continue
+  fi
   echo "a$attempt: SURVIVING, measuring" >> $ST
   wait $RUNPID
   # VOID_NO_CPI is vacuous with sensing off (no CPI can close), so it must not burn an attempt on
