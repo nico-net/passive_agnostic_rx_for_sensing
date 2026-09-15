@@ -3443,6 +3443,28 @@ bool nr_pdcch_blind_publish_common(const nr_pdcch_blind_common_config_t *f)
     LOG_I(PHY,"PASSIVE: SIB1 common facts PCI=%u DL-BWP=%u+%u DL-TDAs=%u "
               "UL-BWP=%u+%u UL-TDAs=%u; dedicated config remains a hypothesis\n",
           f->pci,f->dl_bwp_start,f->dl_bwp_size,f->dl_count,f->ul_bwp_start,f->ul_bwp_size,f->ul_count);
+  /* DL SEED, the mirror of the UL seed in nr_pdcch_blind_monitor_rt.c. With no pdcch_blind_monitor_tda
+   * the extractor and the DCI 1_1 layout resolver assumed the 16-entry default table = a 4-bit TDA
+   * field. On the srsRAN rank-4 cell (OTA 2026-09-15) SIB1 carries 2 DL TDAs = 1 bit, so every one of
+   * the resolver's 15 length-47 hypotheses put 3 phantom bits before MCS/RV/HARQ and the true layout
+   * was not enumerable: 0/76k TB CRC with the layout search "driving". srsRAN's UE search space uses
+   * the common list, so it is the right starting hypothesis; TB CRC remains the authority. */
+  static bool dl_seeded;
+  if (g_cfg.extract.tda_count == 0 && f->dl_count > 0 && f->dl_count <= 16 && !dl_seeded) {
+    dl_seeded = true;
+    g_cfg.extract.tda_count = f->dl_count;
+    for (int i = 0; i < f->dl_count; i++) {
+      g_cfg.extract.tda_start[i]   = f->dl_start[i];
+      g_cfg.extract.tda_length[i]  = f->dl_length[i];
+      g_cfg.extract.tda_mapping[i] = f->dl_mapping[i];
+    }
+    char tda[160];
+    int n = 0;
+    for (int i = 0; i < f->dl_count && n < (int)sizeof(tda) - 16; i++)
+      n += snprintf(tda + n, sizeof(tda) - n, "%s%u:%u:%u", i ? "," : "", f->dl_start[i], f->dl_length[i], f->dl_mapping[i]);
+    LOG_A(PHY, "PASSIVE: DL TDRA seeded from SIB1: %u entries (%u-bit TDA field) tda=\"%s\" -- hypothesis, TB CRC decides\n",
+          f->dl_count, (unsigned)(f->dl_count > 1 ? 32 - __builtin_clz(f->dl_count - 1) : 0), tda);
+  }
   return true;
 }
 bool nr_pdcch_blind_get_common(uint16_t pci, nr_pdcch_blind_common_config_t *f)

@@ -2594,6 +2594,16 @@ constdiag_done:;
         n = nr_pdcch_blind_dl_layout_candidates(raw, cand_task[ti].dci_length,
             cfg->bwp_size, cfg->dmrs_typeA_position, layouts, layout_ids);
       if (!n) continue;
+      {
+        static uint32_t s_cand_n;
+        if ((s_cand_n++ % 2000) == 0) {
+          char cb[160];
+          int u = 0;
+          for (int i = 0; i < n && u < (int)sizeof(cb) - 12; i++)
+            u += snprintf(cb + u, sizeof(cb) - u, "%u:%u/%u/%u ", layout_ids[i], __builtin_popcount(layouts[i].dmrs_ports), layouts[i].mcs, layouts[i].rv);
+          LOG_A(PHY, "SENSING: DL layout candidates n=%d %s ids(ports/mcs/rv)= %s\n", n, from_stage2 ? "stage2" : "fallback", cb);
+        }
+      }
       uint64_t keys[NR_DCI11_STAGE2_MAX_ALIVE + 3];
       int settled=-1, n_settled=0;
       for (int i=0;i<n;++i) {
