@@ -166,3 +166,29 @@ void nr_csirs_blind_rt_slot(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot
           (unsigned long long)g_slots, g_st.n, nullv, g_st.confirmed);
   }
 }
+
+/* RATE MATCHING FROM THE BLIND SEARCH (2026-09-15). The passive PDSCH decoder used to refuse any
+ * grant flagged with CSI-RS rate matching because nothing told it WHICH REs to skip; the blind
+ * search now does, so its confirmed resource is offered as the FAPI PDU the demodulator already
+ * understands. ZP CSI-RS (a pure rate-matching pattern) is still not searched; a cell using one
+ * loses those REs' TBs, which TB CRC will show. */
+bool nr_csirs_blind_rt_rate_match(uint32_t absolute_slot, fapi_nr_dl_config_csirs_pdu_rel15_t *out)
+{
+  if (out == NULL || g_on <= 0 || g_armed == 0 || g_st.confirmed < 0 || g_st.period == 0)
+    return false;
+  if ((absolute_slot % g_st.period) != (g_st.offset % g_st.period))
+    return false;
+  const nr_csirs_candidate_t *c = &g_st.cand[g_st.confirmed];
+  memset(out, 0, sizeof(*out));
+  out->start_rb = c->start_rb;
+  out->nr_of_rbs = c->nr_of_rbs;
+  out->csi_type = 1; /* NZP */
+  out->row = c->row;
+  out->freq_domain = c->freq_domain;
+  out->symb_l0 = c->symb_l0;
+  out->symb_l1 = c->symb_l1;
+  out->cdm_type = c->cdm_type;
+  out->freq_density = c->freq_density;
+  out->scramb_id = c->scramb_id;
+  return true;
+}

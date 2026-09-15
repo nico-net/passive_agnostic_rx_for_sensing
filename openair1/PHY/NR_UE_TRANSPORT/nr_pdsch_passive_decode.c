@@ -1172,14 +1172,13 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
       return out->status; // the density did not describe any PT-RS -- do not guess G
     }
   }
-  /* ---- CSI-RS rate matching: still refused, and NOT merely unimplemented ---------------------
-   * Rate matching around CSI-RS needs the ZP CSI-RS resource configuration to know WHICH REs were
-   * skipped. That is dedicated RRC and is not broadcast, so unlike PT-RS there is no small
-   * discrete set to sweep -- the resource's row, bitmap, symbols and density would all have to be
-   * recovered first. That is exactly what nr_csirs_blind_search.c exists to do; this becomes
-   * possible once that search is wired and converging, and not before. */
+  /* ---- CSI-RS rate matching: from the blind CSI-RS search's confirmed resource (the monitor fills
+   * csiRsForRateMatching on the slots it occurs). The demodulator's own overlap bitmap skips the
+   * REs; here only G needs the unavailable-RE count, from the same routine the attached UE uses. */
+  uint32_t csi_unav = 0;
   if (dlsch_config->numCsiRsForRateMatching > 0) {
-    return out->status;
+    extern uint32_t nr_ue_csi_rm_unav_res(fapi_nr_dl_config_dlsch_pdu_rel15_t *dlsch_config, freq_alloc_bitmap_t *freq_alloc);
+    csi_unav = nr_ue_csi_rm_unav_res(dlsch_config, (freq_alloc_bitmap_t *)freq_alloc);
   }
   int n_ports = 0;
   for (int i = 0; i < 12; i++) {
@@ -1256,7 +1255,7 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
   dlsch_config->tbslbrm = nr_compute_tbslbrm(tbl_lbrm, bw_lbrm, (uint8_t)nl_tbslbrm);
 
   const uint32_t G = nr_get_G(freq_alloc->num_rbs, dlsch_config->number_symbols, nb_re_dmrs, dmrs_len,
-                              ptrs_unav /* 0 unless a PT-RS density was given; CSI-RM still excluded */,
+                              ptrs_unav + csi_unav /* PT-RS from the density sweep; CSI-RS from the blind search */,
                               cw->qamModOrder, cw->Nl);
   if (G == 0) {
     return out->status;

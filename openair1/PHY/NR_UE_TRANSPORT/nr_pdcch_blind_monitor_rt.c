@@ -2905,7 +2905,7 @@ constdiag_done:;
      * cannot tell Type0 from Type0A (other SI messages, si_indicator = 1) -- if Type0A SI ever needs
      * decoding here, gate this on out.si_indicator == 0 as well. */
     dlsch_pdu.refPoint           = (is_dci10 && out.rnti_class == NR_BLIND_RNTI_CLASS_SI) ? 1 : 0;
-    dlsch_pdu.dmrsConfigType     = NFAPI_NR_DMRS_TYPE1;
+    dlsch_pdu.dmrsConfigType     = out.dmrs_config_type ? NFAPI_NR_DMRS_TYPE2 : NFAPI_NR_DMRS_TYPE1; // the table the ports were read under
     dlsch_pdu.n_dmrs_cdm_groups  = out.n_dmrs_cdm_groups;
     dlsch_pdu.dlDmrsScramblingId = fp->Nid_cell;
     dlsch_pdu.nscid              = out.nscid;
@@ -2942,6 +2942,9 @@ constdiag_done:;
     }
     dlsch_pdu.pduBitmap          = 0; // no PTRS: format 1_1 with no dedicated PTRS config
     dlsch_pdu.numCsiRsForRateMatching = 0;
+    /* CSI-RS rate matching from the blind CSI-RS search's confirmed resource, on the slots it occurs. */
+    if (nr_csirs_blind_rt_rate_match(abs_slot, &dlsch_pdu.csiRsForRateMatching[0]))
+      dlsch_pdu.numCsiRsForRateMatching = 1;
 
     const freq_alloc_bitmap_t freq_alloc = set_bitmap_from_start_size(out.start_rb, out.num_rb);
 

@@ -630,7 +630,7 @@ static int nr_ue_pdsch_procedures(PHY_VARS_NR_UE *ue,
   return 0;
 }
 
-static uint32_t compute_csi_rm_unav_res(fapi_nr_dl_config_dlsch_pdu_rel15_t *dlsch_config, freq_alloc_bitmap_t *freq_alloc)
+uint32_t nr_ue_csi_rm_unav_res(fapi_nr_dl_config_dlsch_pdu_rel15_t *dlsch_config, freq_alloc_bitmap_t *freq_alloc)
 {
   uint32_t unav_res = 0;
   for (int i = 0; i < dlsch_config->numCsiRsForRateMatching; i++) {
@@ -2258,7 +2258,7 @@ void pdsch_processing(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc, nr_phy_
       int ptrsSymbPerSlot = get_ptrs_symbols_in_slot(ptrsSymbPos, dlsch_config->start_symbol, dlsch_config->number_symbols);
       unav_res = n_ptrs * ptrsSymbPerSlot;
     }
-    unav_res += compute_csi_rm_unav_res(dlsch_config, &freq_alloc);
+    unav_res += nr_ue_csi_rm_unav_res(dlsch_config, &freq_alloc);
     int G = nr_get_G(freq_alloc.num_rbs,
                      dlsch_config->number_symbols,
                      nb_re_dmrs,

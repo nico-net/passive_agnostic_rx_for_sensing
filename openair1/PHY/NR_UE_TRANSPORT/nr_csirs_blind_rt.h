@@ -35,4 +35,8 @@
 void nr_csirs_blind_rt_slot(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot,
                             c16_t rxdataF[][ue->frame_parms.samples_per_slot_wCP]);
 
+#include "nfapi/open-nFAPI/nfapi/public_inc/fapi_nr_ue_interface.h"
+/** The confirmed cell CSI-RS resource as a FAPI PDU for PDSCH rate matching, if the blind search has
+ *  converged and the resource occurs in `absolute_slot`. Returns true and fills *out; else false. */
+bool nr_csirs_blind_rt_rate_match(uint32_t absolute_slot, fapi_nr_dl_config_csirs_pdu_rel15_t *out);
 #endif /* __NR_CSIRS_BLIND_RT_H__ */
