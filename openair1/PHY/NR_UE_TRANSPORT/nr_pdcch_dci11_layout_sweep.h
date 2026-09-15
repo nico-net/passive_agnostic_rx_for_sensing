@@ -67,6 +67,7 @@ typedef struct {
 } nr_dci11_layout_t;
 
 #define NR_DCI11_LAYOUT_MAX 512
+#define NR_DCI11_HIST_BINS 116   /* mcs 32 | rv 4 | tda 16 | ant ports 64 */
 
 /// Bit offsets (MSB-first, as read_field() counts) of every field the extraction consumes.
 typedef struct {
@@ -83,6 +84,10 @@ typedef struct {
    * 0_1 layout during stage 1. Uplink therefore sets 0 until those row counts are verified
    * in-tree, exactly as widths 5/6 already are on the downlink side. */
   uint8_t ap_valid_rows;
+  /* TDA index width and how many entries the list really has (0 = unknown, do not test). An index
+   * at or beyond the list length is impossible for the true layout and common for a shifted one. */
+  uint8_t tda_bits;
+  uint8_t tda_valid;
 } nr_dci11_offsets_t;
 
 /** Offsets implied by a layout. `tda_bits` comes from the TDRA list Technique D already recovers,
@@ -125,6 +130,14 @@ typedef struct {
   uint8_t  tda_bits;
   uint16_t observed_len;
   uint16_t bwp_size;
+  /* DISTRIBUTIONAL EVIDENCE (stage 1). A correctly aligned field has structure on a live cell --
+   * MCS sits on one or two values under load, RV is overwhelmingly 0, the TDA index uses one to three
+   * entries, the antenna-ports codepoint is constant for a single-layer UE -- while a misaligned read
+   * mixes in HARQ PID, DAI, NDI or RIV bits and looks close to uniform. Per hypothesis, one histogram
+   * per read field, laid out [mcs 32 | rv 4 | tda 16 | ant ports 64]. */
+  uint32_t hist[NR_DCI11_LAYOUT_MAX][NR_DCI11_HIST_BINS];
+  uint32_t n_obs;          ///< payloads offered to observe(), all hypotheses alike
+  uint32_t dropped_dist;   ///< hypotheses removed by the distributional test (diagnostic)
 } nr_dci11_resolver_t;
 
 /** Build the candidate set for a cell. Returns the number of candidates, 0 if none fit the
@@ -146,6 +159,24 @@ int nr_dci_resolver_init_from_offsets(nr_dci11_resolver_t *r, uint16_t bwp_size,
  * Never drops the last candidate: an empty set can never converge, and a run of unlucky payloads
  * must not be able to erase the answer. */
 int nr_dci11_resolver_observe(nr_dci11_resolver_t *r, uint64_t payload);
+
+/** Tell every hypothesis how many entries the TDA list has, enabling the impossible-index test.
+ * 0 = unknown (the test stays off). */
+void nr_dci11_resolver_set_tda_count(nr_dci11_resolver_t *r, uint8_t tda_count);
+
+/** Stage-1 distributional score of hypothesis i, in BITS: how much more compressible the fields it
+ * reads are than uniform, summed over MCS, RV, TDA and antenna ports (n * (log2 K - H), with the
+ * Miller-Madow small-sample correction). Higher = more structure = more likely aligned. Pure. */
+double nr_dci11_resolver_score(const nr_dci11_resolver_t *r, int i);
+
+/** Thompson sampling over n arms: draw p_i ~ Beta(1 + ok_i + prior_i, 1 + trials_i - ok_i) and
+ * return the argmax. Trials go to each arm in proportion to the posterior probability that it is
+ * the best one, so a leading hypothesis gets most grants and settles in tens of trials instead of
+ * the thousands round-robin needs (the 1/N dilution measured at N=14: 0.3 % DL CRC). Nothing is ever
+ * deleted -- a starved arm still gets sampled -- so a 20 % retransmission rate cannot lose the truth.
+ * `prior` may be NULL (all zero). `rng` is caller-held xorshift state, must be non-zero. */
+int nr_dci11_thompson_pick(const uint32_t *ok, const uint32_t *trials, const double *prior, int n,
+                           uint64_t *rng);
 
 /** STAGE 2. Pick the next live candidate to decode under, round-robin. Returns its index and fills
  * *out, or -1 when the set is empty. Once a winner exists it is returned every time. */

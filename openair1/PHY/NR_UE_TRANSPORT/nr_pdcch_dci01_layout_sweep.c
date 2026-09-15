@@ -51,6 +51,8 @@ bool nr_dci01_layout_offsets(const nr_dci01_layout_t *l, uint16_t riv_bits, uint
    * stays fully defined and `total` is never left implicit. */
   out->dmrs_init = p;      p += DCI01_ULSCH;
   out->total = p;
+  out->tda_bits = tda_bits;
+  out->tda_valid = 0;
   return true;
 }
 

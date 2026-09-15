@@ -53,6 +53,8 @@ bool nr_dci11_layout_offsets(const nr_dci11_layout_t *l, uint16_t riv_bits, uint
   p += l->post_ant;                                 /* tci | srs | cbg | cbg flush */
   out->dmrs_init = p;      p += DCI11_DMRS_INIT;
   out->total = p;
+  out->tda_bits = tda_bits;
+  out->tda_valid = 0;
   return true;
 }
 
@@ -199,6 +201,14 @@ bool nr_dci11_layout_plausible(const nr_dci11_offsets_t *off, uint64_t payload, 
       return false;
     }
   }
+  /* TDA index beyond the configured list: impossible for the true layout. Off until the caller has
+   * the list length (tda_valid == 0), because the 16-entry default table would test nothing. */
+  if (off->tda_valid > 0 && off->tda_bits > 0) {
+    const uint32_t tda = peek(payload, off->total, off->tda, off->tda_bits);
+    if (tda >= off->tda_valid) {
+      return false;
+    }
+  }
   return true;
 }
 
@@ -298,6 +308,145 @@ int nr_dci_resolver_init_from_offsets(nr_dci11_resolver_t *r, uint16_t bwp_size,
   return n;
 }
 
+/* Distributional pruning. Constants chosen so the test is DECISIVE, not merely significant, before
+ * it may delete anything: at the gap below, 2000 payloads is a 1000-bit likelihood ratio.
+ * KEEP_MIN is the load-bearing safety: layouts that differ only in bits the true layout also reads
+ * as constant (e.g. pre_ant vs post_ant around a constant pdsch-to-harq field) are GENUINELY tied on
+ * payload statistics -- only a TB CRC can split them -- so the top few are never removed here, and
+ * the model error "the truth is not the most compressible" can at worst demote it, never delete it. */
+#define DCI11_S1_DIST_MIN   2000
+#define DCI11_S1_DIST_EVERY 500
+#define DCI11_S1_DIST_GAP   0.5    /* bits per payload behind the best */
+#define DCI11_S1_KEEP_MIN   4
+
+static void hist_field(const uint32_t *h, int k, uint32_t n, double *bits)
+{
+  if (k <= 1 || n == 0)
+    return;
+  double H = 0.0;
+  int m = 0;
+  for (int v = 0; v < k; v++) {
+    if (h[v] == 0)
+      continue;
+    const double p = (double)h[v] / (double)n;
+    H -= p * log2(p);
+    m++;
+  }
+  H += (double)(m - 1) / (2.0 * (double)n * M_LN2); /* Miller-Madow: plug-in H is biased low */
+  *bits += (double)n * (log2((double)k) - H);
+}
+
+double nr_dci11_resolver_score(const nr_dci11_resolver_t *r, int i)
+{
+  if (r == NULL || i < 0 || i >= r->n_hyp)
+    return 0.0;
+  const nr_dci11_offsets_t *o = &r->off[i];
+  const uint32_t n = r->seen[i];
+  double bits = 0.0;
+  hist_field(&r->hist[i][0], 32, n, &bits);
+  hist_field(&r->hist[i][32], 4, n, &bits);
+  if (o->tda_bits > 0 && o->tda_bits <= 4)
+    hist_field(&r->hist[i][36], 1 << o->tda_bits, n, &bits);
+  const int apb = (o->ant_ports_bits > 6) ? 6 : o->ant_ports_bits;
+  if (apb > 0)
+    hist_field(&r->hist[i][52], 1 << apb, n, &bits);
+  return bits;
+}
+
+void nr_dci11_resolver_set_tda_count(nr_dci11_resolver_t *r, uint8_t tda_count)
+{
+  if (r == NULL)
+    return;
+  for (int i = 0; i < r->n_hyp; i++)
+    r->off[i].tda_valid = (tda_count > 0 && r->off[i].tda_bits > 0 && tda_count < (1u << r->off[i].tda_bits))
+                              ? tda_count : 0;
+}
+
+static void hist_observe(nr_dci11_resolver_t *r, int i, uint64_t payload)
+{
+  const nr_dci11_offsets_t *o = &r->off[i];
+  r->hist[i][peek(payload, o->total, o->mcs, DCI11_MCS_BITS) & 31]++;
+  r->hist[i][32 + (peek(payload, o->total, o->rv, DCI11_RV_BITS) & 3)]++;
+  if (o->tda_bits > 0 && o->tda_bits <= 4)
+    r->hist[i][36 + (peek(payload, o->total, o->tda, o->tda_bits) & 15)]++;
+  const int apb = (o->ant_ports_bits > 6) ? 6 : o->ant_ports_bits;
+  if (apb > 0)
+    r->hist[i][52 + (peek(payload, o->total, o->ant_ports, (uint8_t)apb) & 63)]++;
+}
+
+static void prune_by_distribution(nr_dci11_resolver_t *r)
+{
+  static double score[NR_DCI11_LAYOUT_MAX];
+  double best = -1e300;
+  for (int i = 0; i < r->n_hyp; i++) {
+    if (!r->alive[i])
+      continue;
+    score[i] = nr_dci11_resolver_score(r, i);
+    if (score[i] > best)
+      best = score[i];
+  }
+  for (int i = 0; i < r->n_hyp && r->n_alive > DCI11_S1_KEEP_MIN; i++) {
+    if (!r->alive[i] || r->seen[i] < DCI11_S1_DIST_MIN)
+      continue;
+    int better = 0;
+    for (int j = 0; j < r->n_hyp; j++)
+      if (r->alive[j] && score[j] > score[i])
+        better++;
+    if (better >= DCI11_S1_KEEP_MIN && best - score[i] > DCI11_S1_DIST_GAP * (double)r->seen[i]) {
+      r->alive[i] = false;
+      r->n_alive--;
+      r->dropped_dist++;
+    }
+  }
+}
+
+/* ---- Thompson sampling ------------------------------------------------------------------------ */
+static double ts_u(uint64_t *s)
+{
+  *s ^= *s >> 12; *s ^= *s << 25; *s ^= *s >> 27;
+  return (double)((*s * 2685821657736338717ULL) >> 11) * (1.0 / 9007199254740992.0);
+}
+static double ts_n(uint64_t *s)
+{
+  const double u1 = ts_u(s) + 1e-300, u2 = ts_u(s);
+  return sqrt(-2.0 * log(u1)) * cos(2.0 * M_PI * u2);
+}
+static double ts_gamma(double a, uint64_t *s)   /* Marsaglia-Tsang, a >= 1 */
+{
+  const double d = a - 1.0 / 3.0, c = 1.0 / sqrt(9.0 * d);
+  for (;;) {
+    double x, v;
+    do { x = ts_n(s); v = 1.0 + c * x; } while (v <= 0.0);
+    v = v * v * v;
+    const double u = ts_u(s);
+    if (u < 1.0 - 0.0331 * x * x * x * x)
+      return d * v;
+    if (log(u) < 0.5 * x * x + d * (1.0 - v + log(v)))
+      return d * v;
+  }
+}
+int nr_dci11_thompson_pick(const uint32_t *ok, const uint32_t *trials, const double *prior, int n,
+                           uint64_t *rng)
+{
+  if (ok == NULL || trials == NULL || n <= 0 || rng == NULL)
+    return -1;
+  if (*rng == 0)
+    *rng = 0x9E3779B97F4A7C15ULL;
+  int arg = 0;
+  double bestp = -1.0;
+  for (int i = 0; i < n; i++) {
+    const double a = 1.0 + (double)ok[i] + (prior ? prior[i] : 0.0);
+    const double b = 1.0 + (double)(trials[i] >= ok[i] ? trials[i] - ok[i] : 0);
+    const double x = ts_gamma(a, rng), y = ts_gamma(b, rng);
+    const double p = x / (x + y);
+    if (p > bestp) {
+      bestp = p;
+      arg = i;
+    }
+  }
+  return arg;
+}
+
 int nr_dci11_resolver_observe(nr_dci11_resolver_t *r, uint64_t payload)
 {
   if (r == NULL || r->n_hyp <= 0) {
@@ -311,10 +460,12 @@ int nr_dci11_resolver_observe(nr_dci11_resolver_t *r, uint64_t payload)
       continue;
     }
     r->seen[i]++;
+    hist_observe(r, i, payload);
     if (nr_dci11_layout_plausible(&r->off[i], payload, r->bwp_size)) {
       r->pass[i]++;
     }
   }
+  r->n_obs++;
   /* Drop in a second pass, and never drop the last one. Dropping inside the loop above would make
    * the outcome depend on candidate order; and an empty set can never converge, so a run of
    * unlucky payloads must not be able to erase the answer. */
@@ -335,6 +486,8 @@ int nr_dci11_resolver_observe(nr_dci11_resolver_t *r, uint64_t payload)
       r->n_alive--;
     }
   }
+  if (r->n_obs >= DCI11_S1_DIST_MIN && (r->n_obs % DCI11_S1_DIST_EVERY) == 0)
+    prune_by_distribution(r);
   return r->n_alive;
 }
 

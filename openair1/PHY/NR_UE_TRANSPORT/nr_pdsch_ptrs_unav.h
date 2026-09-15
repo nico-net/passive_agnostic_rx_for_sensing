@@ -53,4 +53,22 @@ uint32_t nr_pdsch_ptrs_unav_res(uint16_t nb_rb, uint8_t start_symbol, uint8_t nb
                                 uint16_t dmrs_symb_pos, uint8_t k_density, uint8_t l_density,
                                 uint8_t n_ports);
 
-#endif /* __NR_PDSCH_PTRS_UNAV_H__ */
+/* ---- PT-RS DENSITY SWEEP ------------------------------------------------------------------------
+ * Whether a grant carries PT-RS, and at which density, is set by dedicated RRC (phaseTrackingRS,
+ * ptrs-DensityRecommendationDL) that a passive receiver never sees. But the choice is a SEVEN-element
+ * set -- absent, or K in {2,4} x L in {1,2,4} -- so it is swept against the TB CRC like everything
+ * else here: each eligible grant is decoded under one arm, arms are chosen by their Wilson UPPER
+ * bound (optimistic, deterministic, concentrates on the winner without deleting anyone), and the
+ * cell-wide answer is LATCHED once one arm's lower bound clears every rival's upper bound. Without
+ * this, a PT-RS cell's wide high-MCS grants cannot decode at all: G is wrong by the PT-RS REs. */
+#define NR_PTRS_ARMS 7
+typedef struct {
+  uint32_t ok[NR_PTRS_ARMS], tr[NR_PTRS_ARMS];
+  int latched;   /* -1 until decided */
+} nr_ptrs_sweep_t;
+void nr_ptrs_sweep_init(nr_ptrs_sweep_t *s);
+int  nr_ptrs_sweep_pick(const nr_ptrs_sweep_t *s);                 /* arm to decode this grant under */
+int  nr_ptrs_sweep_feed(nr_ptrs_sweep_t *s, int arm, bool tb_ok);   /* returns the latched arm or -1 */
+/* arm 0 = no PT-RS; 1..6 = (K, L). Returns false for arm 0 (nothing to set). */
+bool nr_ptrs_sweep_arm(int arm, uint8_t *K, uint8_t *L);
+#endif

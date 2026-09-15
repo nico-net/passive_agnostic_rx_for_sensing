@@ -45,6 +45,7 @@
 #include "PHY/NR_UE_TRANSPORT/nr_pdcch_dci11_layout_sweep.h" // DCI 1_1 layout, stage 1
 #include "PHY/NR_UE_TRANSPORT/nr_pdcch_dci01_layout_sweep.h" // DCI 0_1 layout, stage 1
 #include "PHY/NR_UE_TRANSPORT/nr_pdcch_ss_registry.h"        // CORESET/SS registry, observe-only
+#include "PHY/NR_UE_TRANSPORT/nr_agnostic_v2.h"
 #include "PHY/NR_UE_TRANSPORT/nr_csirs_blind_rt.h" // blind CSI-RS search, observe-only
 #include "PHY/NR_UE_TRANSPORT/nr_pdcch_coreset_map.h"      // Phase 3 Technique A cross-check (XCHECK diag)
 
@@ -206,9 +207,16 @@ static int nr_pdcch_dci11_stage2_candidates(const nr_pdcch_blind_raw_result_t *r
   if (r->n_alive > NR_DCI11_STAGE2_MAX_ALIVE)
     return 0;
   int count = 0;
-  for (int i = 0; i < r->n_hyp && count < max; i++) {
-    if (!r->alive[i])
-      continue;
+  int order[NR_DCI11_LAYOUT_MAX], no = 0;
+  static double sc[NR_DCI11_LAYOUT_MAX];
+  for (int i = 0; i < r->n_hyp; i++)
+    if (r->alive[i]) { sc[i] = nr_dci11_resolver_score(r, i); order[no++] = i; }
+  for (int a = 1; a < no; a++)          /* insertion sort, n_alive <= NR_DCI11_STAGE2_MAX_ALIVE */
+    for (int b = a; b > 0 && sc[order[b]] > sc[order[b - 1]]; b--) {
+      const int t = order[b]; order[b] = order[b - 1]; order[b - 1] = t;
+    }
+  for (int oi = 0; oi < no && count < max; oi++) {
+    const int i = order[oi];
     nr_dci11_field_bits_t f;
     if (!nr_dci11_layout_to_field_bits(&r->hyp[i], &f))
       continue;
@@ -275,6 +283,8 @@ static void nr_pdcch_dci01_layout_observe(uint16_t ul_bwp_size, int ul_tda_count
       g_dci01_state = -1;
       return;
     }
+    if (ul_tda_count > 0 && ul_tda_count < 16)
+      nr_dci11_resolver_set_tda_count(&g_dci01_resolver, (uint8_t)ul_tda_count);
     LOG_I(PHY, "SENSING: DCI01_LAYOUT armed: %d layouts consistent with dci_length=%u (riv=%u bits, tda=%u bits)\n",
           n, dci_length, riv_bits, tda_bits);
     g_dci01_state = 1;
@@ -342,9 +352,16 @@ static void nr_pdcch_ss_registry_occasion(const nr_pdcch_blind_monitor_cfg_t *cf
                     g_ss_reg.entry[i].ss_first_symbol, (unsigned long long)g_ss_reg.occasions[i],
                     (unsigned long long)g_ss_reg.accepts[i], (unsigned long long)g_ss_reg.confirmed[i],
                     g_ss_reg.retired[i] ? " RETIRED" : "");
-    /* Verdict only: a copy is asked what it WOULD retire; the live registry is never pruned here. */
-    nr_pdcch_ss_registry_t probe = g_ss_reg;
-    const int would = nr_pdcch_ss_retire_barren(&probe, 100000);
+    /* Observe-only by default: a copy is asked what it WOULD retire. Under V2 the live registry is
+     * pruned (it never retires its last live entry), and the occasion loop above then probes a
+     * retired entry 1 time in 64 instead of paying full scan cost on it. */
+    int would;
+    if (nr_agnostic_v2()) {
+      would = nr_pdcch_ss_retire_barren(&g_ss_reg, 100000);
+    } else {
+      nr_pdcch_ss_registry_t probe = g_ss_reg;
+      would = nr_pdcch_ss_retire_barren(&probe, 100000);
+    }
     LOG_A(PHY, "SENSING: SS_REGISTRY live=%d/%d would_retire=%d %s\n", nr_pdcch_ss_live(&g_ss_reg), g_ss_reg.n, would, b);
   }
 }
@@ -377,6 +394,8 @@ static void nr_pdcch_dci11_layout_observe(const nr_pdcch_blind_monitor_cfg_t *cf
       g_dci11_state = -1;
       return;
     }
+    if (cfg->extract.tda_count > 0 && cfg->extract.tda_count < 16)
+      nr_dci11_resolver_set_tda_count(&g_dci11_resolver, (uint8_t)cfg->extract.tda_count);
     LOG_I(PHY, "SENSING: DCI11_LAYOUT armed: %d layouts consistent with dci_length=%u "
                "(riv=%u bits, tda=%u bits)\n", n, dci_length, riv_bits, tda_bits);
     g_dci11_state = 1;
@@ -1176,6 +1195,13 @@ void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_pr
   }
   const nr_pdcch_blind_monitor_cfg_t *cfg = nr_pdcch_blind_monitor_get_cfg();
   nr_pdcch_ss_registry_occasion(cfg);
+  if (nr_agnostic_v2()) {
+    const int ssi = nr_pdcch_ss_registry_index(cfg);
+    static _Atomic uint64_t s_probe = 0;
+    if (ssi >= 0 && g_ss_reg.retired[ssi]
+        && (atomic_fetch_add_explicit(&s_probe, 1, memory_order_relaxed) & 63) != 0)
+      return; /* barren configuration: spend 1 occasion in 64 re-checking it, not every one */
+  }
   NR_DL_FRAME_PARMS *fp = &ue->frame_parms;
   nr_pdcch_blind_ul_opts_t ul_opts = cfg->ul;
   ul_opts.phy_cell_id = fp->Nid_cell;
@@ -1452,7 +1478,16 @@ void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_pr
    * is pdsch-ConfigCommon's rather than the dedicated one. Resolved once per occasion, then shared
    * (read-only) by every candidate task. ---- */
   const bool scan_11 = (cfg->dci10_scan != 2);
-  const bool scan_10 = (cfg->dci10_scan >= 1);
+  bool scan_10 = (cfg->dci10_scan >= 1);
+  /* DISCOVERY vs DECODE VOLUME (V2). Scanning format 1_0 next to 1_1 doubles the polar decodes per
+   * candidate, and the scan queue was dropping 34 % of occasions. Once the cell has shown what it
+   * sends -- >= 10000 accepts with 1_0 under 0.5 % of them -- keep 1_0 on 1 occasion in 8: enough
+   * to notice a change (fallback grants, a new UE in its common search space), not enough to cost
+   * the 1_1 decode budget. Evidence-led and self-reversing: the share is re-evaluated every call. */
+  if (scan_10 && scan_11 && nr_agnostic_v2() && g_accepts > 10000 && g_accepts_10 * 200 < g_accepts) {
+    static _Atomic uint64_t s_occ10 = 0;
+    scan_10 = (atomic_fetch_add_explicit(&s_occ10, 1, memory_order_relaxed) & 7) == 0;
+  }
   const bool scan_01 = nr_pdcch_blind_monitor_ul_scan_enabled(cfg);
   uint16_t   dci01_length = 0;
   if (scan_01) {
@@ -2269,8 +2304,9 @@ constdiag_done:;
       nr_pdcch_blind_result_t layouts[NR_DCI11_LAYOUT_MAX];
       uint8_t layout_ids[NR_DCI11_LAYOUT_MAX];
       int n = 0;
-      if (nr_pdcch_dci11_stage2_enabled() && g_dci11_state == 1)
+      if ((nr_pdcch_dci11_stage2_enabled() || nr_agnostic_v2()) && g_dci11_state == 1)
         n = nr_pdcch_dci11_stage2_candidates(raw, cand_task[ti].dci_length, cfg, layouts, layout_ids, NR_DCI11_LAYOUT_MAX);
+      const bool from_stage2 = (n > 0);
       if (!n)
         n = nr_pdcch_blind_dl_layout_candidates(raw, cand_task[ti].dci_length,
             cfg->bwp_size, cfg->dmrs_typeA_position, layouts, layout_ids);
@@ -2293,9 +2329,11 @@ constdiag_done:;
        * over one that never has: reject-only, evidence-led, and it collapses to the old behaviour
        * while no family has evidence. Ties (both decoding) still rotate. */
       int preferred=-1; uint32_t preferred_ok=0;
+      uint32_t ts_ok[NR_DCI11_LAYOUT_MAX], ts_tr[NR_DCI11_LAYOUT_MAX];
       for (int i=0;i<n;++i) {
         uint32_t ok=0,tr=0;
         nr_pdsch_config_sweep_context_stats(keys[i],raw->rnti,layouts[i].tda_index,cfg->dmrs_typeA_position,&ok,&tr);
+        ts_ok[i]=ok; ts_tr[i]=tr;
         if (ok>preferred_ok) { preferred_ok=ok; preferred=i; }
         else if (ok==preferred_ok && preferred>=0 && ok>0) preferred=-1; // tie: no preference
       }
@@ -2307,7 +2345,21 @@ constdiag_done:;
                 raw->rnti,(unsigned)layout_ids[preferred],n,preferred_ok);
         }
       } else preferred=-1;
-      const int selected=settled>=0 ? settled : preferred>=0 ? preferred : layout_cursor[raw->rnti]++ % n;
+      int fallback;
+      if (nr_agnostic_v2() && n > 1) {
+        /* Thompson over the candidates' cell-wide TB-CRC evidence (contexts are keyed without the
+         * RNTI, so every UE's grants inform every other's). Stage-2 candidates arrive best-scored
+         * first; that order becomes a small prior so the first grants go to the stage-1 favourite. */
+        static __thread uint64_t s_rng = 0;
+        if (s_rng == 0) s_rng = 0x9E3779B97F4A7C15ULL ^ (uint64_t)(uintptr_t)&s_rng;
+        double prior[NR_DCI11_LAYOUT_MAX];
+        for (int i=0;i<n;++i) prior[i] = from_stage2 ? 2.0 * (double)(n - i) / (double)n : 0.0;
+        fallback = nr_dci11_thompson_pick(ts_ok, ts_tr, prior, n, &s_rng);
+        if (fallback < 0) fallback = 0;
+      } else {
+        fallback = layout_cursor[raw->rnti]++ % n;
+      }
+      const int selected=settled>=0 ? settled : preferred>=0 ? preferred : fallback;
       cand_task[ti].out=layouts[selected];
       cand_task[ti].dl_layout_configuration=keys[selected];
     }
@@ -2597,6 +2649,8 @@ constdiag_done:;
       const nr_pdsch_passive_grant_t grant_q = {.rnti           = out.rnti,
                                                 .mcs            = out.mcs,
                                                 .rv             = out.rv,
+                                                .ndi            = out.ndi,
+                                                .harq_pid       = out.harq_pid,
                                                 .mcs_table      = grant_mcs_table,
                                                 .nb_rb_oh       = (uint16_t)cfg->pdsch_xoverhead,
                                                 .tb_scaling     = out.tb_scaling,
@@ -2764,6 +2818,8 @@ constdiag_done:;
             const nr_pdsch_passive_grant_t grant = {.rnti       = out.rnti,
                                                     .mcs        = out.mcs,
                                                     .rv         = out.rv,
+                                                    .ndi        = out.ndi,
+                                                    .harq_pid   = out.harq_pid,
                                                     .mcs_table  = grant_mcs_table,
                                                     .nb_rb_oh   = (uint16_t)cfg->pdsch_xoverhead,
                                                     .tb_scaling = out.tb_scaling,

@@ -1,3 +1,5 @@
+#include <cstdlib>
+#include <iostream>
 #include <gtest/gtest.h>
 extern "C" {
 #include "nr_pdsch_ptrs_unav.h"
@@ -90,4 +92,36 @@ int main(int argc, char **argv)
 {
   ::testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();
+}
+
+// ---- PT-RS density sweep (2026-09-15) ---------------------------------------------------------
+TEST(PtrsSweep, ACellWithoutPtrsLatchesAbsent) {
+  nr_ptrs_sweep_t s; nr_ptrs_sweep_init(&s);
+  unsigned seed = 1; int latched = -1;
+  for (int t = 0; t < 2000 && latched < 0; t++) {
+    const int a = nr_ptrs_sweep_pick(&s);
+    const bool ok = (a == 0) && (rand_r(&seed) % 100 < 60);   // only "absent" decodes, at 60 %
+    latched = nr_ptrs_sweep_feed(&s, a, ok);
+  }
+  EXPECT_EQ(latched, 0);
+  std::cerr << "[ MEASURED ] no-PT-RS cell latched 'absent' after " << (s.tr[0]+s.tr[1]+s.tr[2]+s.tr[3]+s.tr[4]+s.tr[5]+s.tr[6])
+            << " grants (wrong arms tried " << (s.tr[1]+s.tr[2]+s.tr[3]+s.tr[4]+s.tr[5]+s.tr[6]) << " times)\n";
+}
+TEST(PtrsSweep, FindsTheConfiguredDensityAtALowDecodeRate) {
+  // A commercial wide-band cell: PT-RS K=2 L=1, and even the right arm decodes only 30 %.
+  nr_ptrs_sweep_t s; nr_ptrs_sweep_init(&s);
+  unsigned seed = 9; int latched = -1;
+  for (int t = 0; t < 5000 && latched < 0; t++) {
+    const int a = nr_ptrs_sweep_pick(&s);
+    latched = nr_ptrs_sweep_feed(&s, a, a == 1 && (rand_r(&seed) % 100 < 30));
+  }
+  EXPECT_EQ(latched, 1);
+  uint8_t K = 0, L = 0;
+  ASSERT_TRUE(nr_ptrs_sweep_arm(latched, &K, &L));
+  EXPECT_EQ(K, 2); EXPECT_EQ(L, 1);
+}
+TEST(PtrsSweep, NeverLatchesWhenNothingDecodes) {
+  nr_ptrs_sweep_t s; nr_ptrs_sweep_init(&s);
+  for (int t = 0; t < 3000; t++) EXPECT_EQ(nr_ptrs_sweep_feed(&s, nr_ptrs_sweep_pick(&s), false), -1);
+  for (int a = 0; a < NR_PTRS_ARMS; a++) EXPECT_GT(s.tr[a], 0u) << "arm " << a << " starved";
 }

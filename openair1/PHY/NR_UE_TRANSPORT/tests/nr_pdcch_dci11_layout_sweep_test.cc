@@ -408,3 +408,127 @@ int main(int argc, char **argv)
   ::testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();
 }
+
+// ---- stage 1: distributional pruning, impossible TDA, Thompson (2026-09-15) --------------------
+
+// Payloads with the field STATISTICS of the loaded lab cell (not uniform random fields): under load
+// the scheduler fills the band (RIV = full-band 545 most of the time), uses MCS 25 with MCS 24 for
+// retransmissions, one or two TDA rows, RV 0 except retransmissions, and a constant antenna-ports
+// codepoint for a single-layer UE. Everything the DCI does not constrain (HARQ PID, DAI, TPC, PUCCH
+// RI, ...) is left random, which is what a misaligned read would pick up.
+static uint64_t cell_payload(const nr_dci11_offsets_t &t, uint16_t rb, unsigned &seed, int retx_pct)
+{
+  uint64_t p = 0;
+  for (int b = 0; b < t.total; b++) p |= (uint64_t)(rand_r(&seed) & 1) << b;
+  auto put = [&](uint16_t off, uint8_t nb, uint64_t v) {
+    const int sh = t.total - off - nb;
+    p &= ~(((1ULL << nb) - 1ULL) << sh);
+    p |= (v & ((1ULL << nb) - 1ULL)) << sh;
+  };
+  const bool retx = (int)(rand_r(&seed) % 100) < retx_pct;
+  put(0, 1, 1);                                                           // identifier: DL
+  put(t.riv, (uint8_t)rb, (rand_r(&seed) % 10) ? 545 : rand_r(&seed) % (273 * 274 / 2));
+  if (t.tda_bits) put(t.tda, t.tda_bits, (rand_r(&seed) % 10) < 7 ? 0 : 1);
+  uint32_t mcs = 25;
+  if (retx) mcs = (rand_r(&seed) % 2) ? 24 : 28 + rand_r(&seed) % 4;
+  put(t.mcs, 5, mcs);
+  put(t.rv, 2, retx ? 2 + rand_r(&seed) % 2 : 0);
+  put(t.ant_ports, t.ant_ports_bits, 0);
+  return p;
+}
+
+static int pick_truth(const nr_dci11_resolver_t &r)
+{
+  for (int i = 0; i < r.n_hyp; i++)
+    if (r.hyp[i].bwp_ind == 1 && r.hyp[i].ant_ports == 4) return i;
+  return 0;
+}
+
+TEST(Dci11Stage1, TheLoadedCellsFieldStructurePrunesToAHandful) {
+  // The OTA failure this fixes: 15 of 15 layouts alive after 1.2M payloads, so stage 2 never
+  // engaged. Same geometry as the lab cell (273 PRB, 16-bit RIV, 4-bit TDA, 47-bit DCI).
+  nr_dci11_resolver_t r{};
+  const uint16_t rb = riv_bits_for(273);
+  const int n = nr_dci11_resolver_init(&r, 273, rb, 4, 47);
+  ASSERT_GT(n, 4);
+  const int truth = pick_truth(r);
+  unsigned seed = 77;
+  for (int i = 0; i < 20000; i++) nr_dci11_resolver_observe(&r, cell_payload(r.off[truth], rb, seed, 10));
+  EXPECT_TRUE(r.alive[truth]) << "distributional pruning deleted the true layout";
+  EXPECT_LE(r.n_alive, 4) << "stage 1 still cannot separate layouts on a structured cell";
+  std::cerr << "[ MEASURED ] loaded-cell statistics: " << n << " -> " << r.n_alive
+            << " live after 20000 payloads (" << r.dropped_dist << " by distribution)\n";
+}
+
+TEST(Dci11Stage1, AHeavilyRetransmittingCellStillKeepsTheTruth) {
+  // A commercial cell with weak UEs retransmits far more than the lab: 35 % retx, so MCS 28-31 and
+  // RV 2/3 are common in the TRUE fields and their histograms are much less peaked.
+  nr_dci11_resolver_t r{};
+  const uint16_t rb = riv_bits_for(273);
+  const int n = nr_dci11_resolver_init(&r, 273, rb, 4, 47);
+  ASSERT_GT(n, 4);
+  const int truth = pick_truth(r);
+  unsigned seed = 91;
+  for (int i = 0; i < 30000; i++) nr_dci11_resolver_observe(&r, cell_payload(r.off[truth], rb, seed, 35));
+  EXPECT_TRUE(r.alive[truth]) << "a 35 % retransmission rate deleted the true layout";
+  EXPECT_GE(r.n_alive, 1);
+  std::cerr << "[ MEASURED ] 35% retransmissions: " << n << " -> " << r.n_alive << " live\n";
+}
+
+TEST(Dci11Stage1, TheTruthScoresAboveEveryPrunedLayout) {
+  nr_dci11_resolver_t r{};
+  const uint16_t rb = riv_bits_for(273);
+  nr_dci11_resolver_init(&r, 273, rb, 4, 47);
+  const int truth = pick_truth(r);
+  unsigned seed = 5;
+  for (int i = 0; i < 5000; i++) nr_dci11_resolver_observe(&r, cell_payload(r.off[truth], rb, seed, 10));
+  const double st = nr_dci11_resolver_score(&r, truth);
+  for (int i = 0; i < r.n_hyp; i++)
+    if (!r.alive[i]) EXPECT_GT(st, nr_dci11_resolver_score(&r, i)) << "pruned layout " << i << " outscored the truth";
+}
+
+TEST(Dci11Stage1, ATdaIndexBeyondTheListIsImpossible) {
+  nr_dci11_layout_t l{};
+  l.bwp_ind = 1; l.ant_ports = 4; l.pre_ant = 11;
+  nr_dci11_offsets_t o{};
+  ASSERT_TRUE(nr_dci11_layout_offsets(&l, 16, 2, &o));
+  o.tda_valid = 3;                                   // three TDA rows configured
+  unsigned seed = 1;
+  uint64_t p = cell_payload(o, 16, seed, 0);
+  const int sh = o.total - o.tda - 2;
+  p &= ~(3ULL << sh);
+  EXPECT_TRUE(nr_dci11_layout_plausible(&o, p | (2ULL << sh), 273));
+  EXPECT_FALSE(nr_dci11_layout_plausible(&o, p | (3ULL << sh), 273)) << "index 3 of a 3-row list accepted";
+  o.tda_valid = 0;
+  EXPECT_TRUE(nr_dci11_layout_plausible(&o, p | (3ULL << sh), 273)) << "the test must stay off when unknown";
+}
+
+TEST(Dci11Thompson, TrialsConcentrateOnTheArmThatDecodes) {
+  // The dilution Thompson replaces: round-robin over N candidates gives the right one 1/N of the
+  // grants. Here the right arm must end up with the large majority, and no arm may be starved of a
+  // first look (nothing is deleted, a 20 % retransmission rate cannot lose the truth).
+  const double rate[6] = {0.02, 0.0, 0.45, 0.0, 0.08, 0.0};
+  uint32_t ok[6] = {0}, tr[6] = {0};
+  uint64_t rng = 12345;
+  unsigned seed = 3;
+  for (int t = 0; t < 3000; t++) {
+    const int a = nr_dci11_thompson_pick(ok, tr, nullptr, 6, &rng);
+    ASSERT_GE(a, 0);
+    tr[a]++;
+    if ((double)rand_r(&seed) / RAND_MAX < rate[a]) ok[a]++;
+  }
+  for (int a = 0; a < 6; a++) EXPECT_GE(tr[a], 1u) << "arm " << a << " never sampled";
+  EXPECT_GT(tr[2], 0.8 * 3000) << "the decoding arm did not get the majority of trials";
+  std::cerr << "[ MEASURED ] Thompson trials per arm: " << tr[0] << " " << tr[1] << " " << tr[2] << " "
+            << tr[3] << " " << tr[4] << " " << tr[5] << " (round-robin would give 500 each)\n";
+}
+
+TEST(Dci11Thompson, AStage1PriorSteersTheFirstGrants) {
+  uint32_t ok[4] = {0}, tr[4] = {0};
+  const double prior[4] = {0.0, 0.0, 4.0, 0.0};
+  uint64_t rng = 7;
+  int hits = 0;
+  for (int t = 0; t < 1000; t++) hits += (nr_dci11_thompson_pick(ok, tr, prior, 4, &rng) == 2);
+  EXPECT_GT(hits, 500) << "a prior-favoured arm was not preferred before any evidence";
+  EXPECT_LT(hits, 1000) << "a prior must bias, not exclude";
+}

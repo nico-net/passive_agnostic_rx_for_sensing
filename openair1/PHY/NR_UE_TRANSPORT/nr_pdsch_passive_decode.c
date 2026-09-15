@@ -52,6 +52,7 @@ extern __thread int nr_dlsch_chest_per_symbol; // nr_dlsch_demodulation.c: read 
 #include "PHY/CODING/nrLDPC_coding/nrLDPC_coding_interface.h"
 #include "PHY/MODULATION/modulation_UE.h" // nr_slot_fep, nr_slot_fep_ant
 #include "nr_pdsch_ptrs_unav.h"
+#include "nr_agnostic_v2.h"
 #include "common/utils/threadPool/task_ans.h" // init_task_ans/join_task_ans/completed_task_ans, for the per-antenna FEP dispatch below
 #include "PHY/NR_UE_ESTIMATION/nr_estimation.h"
 #include "PHY/NR_UE_TRANSPORT/nr_transport_proto_ue.h"
@@ -333,6 +334,12 @@ static _Atomic uint64_t g_rbhist[3][NR_PDSCH_RBHIST_BINS];
 static _Atomic uint64_t g_mcshist[2][3][32];
 static _Atomic uint64_t g_mcs_segs[32], g_mcs_segs_ok[32], g_mcs_tbs[32], g_mcs_rb[32];
 static _Atomic uint64_t g_rv_try[4][32], g_rv_ok[4][32]; // ISAC_RV_RETRY rescues by [rv][mcs]
+/* V2 HARQ soft-combining and PT-RS sweep state, declared here so the periodic report can read it. */
+static _Atomic uint64_t g_hq_retx_try, g_hq_retx_ok, g_hq_tbs_override, g_hq_busy_skip, g_hq_first;
+static nr_ptrs_sweep_t g_ptrs;
+static bool g_ptrs_init = false;
+static pthread_mutex_t g_ptrs_lock = PTHREAD_MUTEX_INITIALIZER;
+static _Atomic int g_ptrs_arm_last = -2; // for the report
 /* RBMAP: which RBs the cell actually allocated, for the dashboard's spectrum strip. One counter per
  * RB, incremented per accepted grant over its allocation, printed as 273 density digits and reset --
  * so the strip shows the LAST window, not the run average. */
@@ -553,6 +560,17 @@ void nr_pdsch_passive_ldpc_stats_dump(void)
     if (u > 0)
       LOG_I(PHY, "SENSING: RVRETRY rescued/tried by mcs: %s\n", rb);
   }
+  if (nr_agnostic_v2()) {
+    LOG_I(PHY, "SENSING: HARQC first=%lu retx_combined=%lu/%lu tbs_from_first=%lu busy_skip=%lu\n",
+          (unsigned long)atomic_load(&g_hq_first), (unsigned long)atomic_load(&g_hq_retx_ok),
+          (unsigned long)atomic_load(&g_hq_retx_try), (unsigned long)atomic_load(&g_hq_tbs_override),
+          (unsigned long)atomic_load(&g_hq_busy_skip));
+    pthread_mutex_lock(&g_ptrs_lock);
+    LOG_I(PHY, "SENSING: PTRS_SWEEP latched=%d ok/trials per arm [absent %u/%u | K2L1 %u/%u K2L2 %u/%u K2L4 %u/%u | K4L1 %u/%u K4L2 %u/%u K4L4 %u/%u]\n",
+          g_ptrs.latched, g_ptrs.ok[0], g_ptrs.tr[0], g_ptrs.ok[1], g_ptrs.tr[1], g_ptrs.ok[2], g_ptrs.tr[2],
+          g_ptrs.ok[3], g_ptrs.tr[3], g_ptrs.ok[4], g_ptrs.tr[4], g_ptrs.ok[5], g_ptrs.tr[5], g_ptrs.ok[6], g_ptrs.tr[6]);
+    pthread_mutex_unlock(&g_ptrs_lock);
+  }
   {
     /* Density per RB as one digit 0-9 relative to the busiest RB in this window, plus the CRC-OK
      * share on the same axis. Reset after printing: the strip is a live picture, not a run total. */
@@ -747,7 +765,61 @@ static bool passive_harq_prepare(passive_harq_t *h, int n_rb_dl)
 /// it reads or writes lives in `h` instead of ue->dl_harq_processes[][], and in that this is always
 /// a first (and only) HARQ round -- a passive receiver has no soft buffer from an earlier grant it
 /// never saw, so there is nothing to combine and `d_to_be_cleared` is unconditionally true.
-static bool passive_ldpc_decode(PHY_VARS_NR_UE *ue,
+/* ---- HARQ SOFT COMBINING (V2) -------------------------------------------------------------------
+ * A stateless receiver cannot decode a retransmission: rv 2/3 alone is mostly parity (measured OTA:
+ * ISAC_RV_RETRY rescued 0 of 150k), and the failed first transmission it should be combined with was
+ * thrown away. The LDPC segment decoder already accumulates into its soft buffer when
+ * d_to_be_cleared is false -- exactly what the attached UE does -- so what was missing is a soft
+ * buffer that SURVIVES between grants. A small shared cache keyed by (rnti, harq pid): a grant whose
+ * NDI did not toggle for that process is a retransmission and is decoded INTO the stored buffer with
+ * the first transmission's TBS. Only the FIRST decode call per TB uses it (retries must not add the
+ * same LLRs twice), and a busy entry is skipped rather than waited on (a consumer must never block
+ * behind another's decode). Evicted least-recently-used; 16 entries covers every live HARQ process
+ * of two UEs, which is what a lab cell has. */
+#define NR_HARQC_N 16
+typedef struct {
+  _Atomic int busy;
+  bool used, soft_valid;
+  uint16_t rnti;
+  uint8_t pid, ndi;
+  uint32_t tbs;
+  uint64_t last;
+  int16_t *d;
+  size_t cap;
+} harqc_entry_t;
+static harqc_entry_t g_harqc[NR_HARQC_N];
+static pthread_mutex_t g_harqc_lock = PTHREAD_MUTEX_INITIALIZER;
+static uint64_t g_harqc_clock;
+static __thread struct { int armed; uint16_t rnti; uint8_t pid, ndi; } t_hq;
+static __thread int16_t *t_hq_d = NULL;
+static __thread bool t_hq_clear = true;
+static __thread uint32_t t_hq_A = 0;
+
+static harqc_entry_t *harqc_acquire(uint16_t rnti, uint8_t pid)
+{
+  pthread_mutex_lock(&g_harqc_lock);
+  harqc_entry_t *hit = NULL, *lru = NULL;
+  for (int i = 0; i < NR_HARQC_N; i++) {
+    harqc_entry_t *e = &g_harqc[i];
+    if (e->used && e->rnti == rnti && e->pid == pid) { hit = e; break; }
+    if (atomic_load(&e->busy)) continue;
+    if (lru == NULL || !e->used || (lru->used && e->last < lru->last)) lru = e;
+  }
+  harqc_entry_t *e = hit ? hit : lru;
+  int expect = 0;
+  if (e == NULL || !atomic_compare_exchange_strong(&e->busy, &expect, 1)) {
+    pthread_mutex_unlock(&g_harqc_lock);
+    return NULL;
+  }
+  if (!hit) {
+    e->used = true; e->rnti = rnti; e->pid = pid; e->soft_valid = false; e->tbs = 0;
+  }
+  e->last = ++g_harqc_clock;
+  pthread_mutex_unlock(&g_harqc_lock);
+  return e;
+}
+
+static bool passive_ldpc_decode_core(PHY_VARS_NR_UE *ue,
                                 const UE_nr_rxtx_proc_t *proc,
                                 passive_harq_t *h,
                                 const fapi_nr_dl_cw_info_t *cw,
@@ -772,7 +844,7 @@ static bool passive_ldpc_decode(PHY_VARS_NR_UE *ue,
   TB_parameters.mcs = cw->mcs;
   TB_parameters.nb_layers = cw->Nl;
   TB_parameters.BG = cw->ldpcBaseGraph;
-  TB_parameters.A = cw->TBS;
+  TB_parameters.A = t_hq_A ? t_hq_A : cw->TBS; // HARQ: a retransmission keeps its first TBS
   TB_parameters.processedSegments = &h->processedSegments;
 
   nr_segmentation(NULL,
@@ -796,7 +868,7 @@ static bool passive_ldpc_decode(PHY_VARS_NR_UE *ue,
 
   TB_parameters.llr = llr;
   TB_parameters.c = h->c;
-  TB_parameters.d = h->d;
+  TB_parameters.d = t_hq_d ? t_hq_d : h->d; // HARQ: a persistent per-(rnti,pid) soft buffer
   t_seg_K = TB_parameters.K;
   t_seg_F = TB_parameters.F;
   t_seg_C = TB_parameters.C;
@@ -849,7 +921,7 @@ static bool passive_ldpc_decode(PHY_VARS_NR_UE *ue,
             (unsigned)TB_parameters.tbslbrm, TB_parameters.nb_rb, h->llrLen);
   }
 
-  TB_parameters.d_to_be_cleared = true;
+  TB_parameters.d_to_be_cleared = t_hq_clear; // false only for a retransmission being combined
   for (uint32_t r = 0; r < TB_parameters.C; r++) {
     TB_parameters.decodeSuccess[r] = false;
   }
@@ -924,6 +996,60 @@ static bool passive_ldpc_decode(PHY_VARS_NR_UE *ue,
   return true;
 }
 
+static bool passive_ldpc_decode(PHY_VARS_NR_UE *ue,
+                                const UE_nr_rxtx_proc_t *proc,
+                                passive_harq_t *h,
+                                const fapi_nr_dl_cw_info_t *cw,
+                                const fapi_nr_dl_config_dlsch_pdu_rel15_t *dlsch_config,
+                                int16_t *llr,
+                                int number_rbs,
+                                uint32_t G)
+{
+  if (!t_hq.armed)
+    return passive_ldpc_decode_core(ue, proc, h, cw, dlsch_config, llr, number_rbs, G);
+  t_hq.armed = 0; /* first call per TB only */
+  harqc_entry_t *e = harqc_acquire(t_hq.rnti, t_hq.pid);
+  if (e == NULL) {
+    atomic_fetch_add(&g_hq_busy_skip, 1);
+    return passive_ldpc_decode_core(ue, proc, h, cw, dlsch_config, llr, number_rbs, G);
+  }
+  const size_t need = (size_t)h->a_segments * 68u * 384u; /* max Kc*Z per segment, the decoder's stride */
+  if (e->cap < need) {
+    free(e->d);
+    e->d = (int16_t *)malloc16(need * sizeof(int16_t));
+    e->cap = e->d ? need : 0;
+    e->soft_valid = false;
+  }
+  if (e->d == NULL) {
+    atomic_store(&e->busy, 0);
+    return passive_ldpc_decode_core(ue, proc, h, cw, dlsch_config, llr, number_rbs, G);
+  }
+  const bool retx = e->soft_valid && e->ndi == t_hq.ndi;
+  uint32_t A = cw->TBS;
+  if (retx && e->tbs != 0 && e->tbs != A) {
+    A = e->tbs;
+    atomic_fetch_add(&g_hq_tbs_override, 1);
+  }
+  t_hq_d = e->d;
+  t_hq_clear = !retx;
+  t_hq_A = A;
+  const bool ok = passive_ldpc_decode_core(ue, proc, h, cw, dlsch_config, llr, number_rbs, G);
+  t_hq_d = NULL;
+  t_hq_clear = true;
+  t_hq_A = 0;
+  if (retx) {
+    atomic_fetch_add(&g_hq_retx_try, 1);
+    if (ok) atomic_fetch_add(&g_hq_retx_ok, 1);
+  } else {
+    atomic_fetch_add(&g_hq_first, 1);
+  }
+  e->ndi = t_hq.ndi;
+  e->tbs = A;
+  e->soft_valid = !ok; /* keep the soft bits only while the TB is still undecoded */
+  atomic_store(&e->busy, 0);
+  return ok;
+}
+
 /* Per-antenna FEP task, dispatched across the thread pool by the FEP loop below when
  * nb_antennas_rx > 1 -- see nr_slot_fep_ant()'s definition-site comment (slot_fep_nr.c) for why
  * this exists. rxdataF_flat/stride reconstruct the VLA-typed pointer nr_slot_fep_ant() expects;
@@ -977,6 +1103,21 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
    * DEFAULT IS UNCHANGED: with neither set, PT-RS grants are still refused, so this cannot regress
    * a run that does not ask for it. */
   uint32_t ptrs_unav = 0;
+  int ptrs_arm = -1;
+  if (nr_agnostic_v2() && !(dlsch_config->pduBitmap & 0x1) && grant->mcs >= 10 && grant->mcs <= 27) {
+    pthread_mutex_lock(&g_ptrs_lock);
+    if (!g_ptrs_init) { nr_ptrs_sweep_init(&g_ptrs); g_ptrs_init = true; }
+    ptrs_arm = nr_ptrs_sweep_pick(&g_ptrs);
+    pthread_mutex_unlock(&g_ptrs_lock);
+    uint8_t K, L;
+    if (nr_ptrs_sweep_arm(ptrs_arm, &K, &L)) {
+      dlsch_config->pduBitmap |= 0x1;
+      dlsch_config->PTRSFreqDensity = K;
+      dlsch_config->PTRSTimeDensity = L;
+      dlsch_config->PTRSPortIndex = 1;
+      dlsch_config->PTRSReOffset = 0;
+    }
+  }
   if (dlsch_config->pduBitmap & 0x1) {
     static int s_ptrs_k = -1, s_ptrs_l = -1;
     if (s_ptrs_k < 0) {
@@ -984,12 +1125,14 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
       s_ptrs_k = (ek && *ek) ? atoi(ek) : 0;
       s_ptrs_l = (el && *el) ? atoi(el) : 0;
     }
-    if (s_ptrs_k <= 0 || s_ptrs_l <= 0) {
+    int pk = s_ptrs_k, pl = s_ptrs_l;
+    if (ptrs_arm > 0) { pk = dlsch_config->PTRSFreqDensity; pl = dlsch_config->PTRSTimeDensity; }
+    if (pk <= 0 || pl <= 0) {
       return out->status; // PT-RS, and no density given to compute G with
     }
     ptrs_unav = nr_pdsch_ptrs_unav_res(freq_alloc->num_rbs, dlsch_config->start_symbol,
                                        dlsch_config->number_symbols, dlsch_config->dlDmrsSymbPos,
-                                       (uint8_t)s_ptrs_k, (uint8_t)s_ptrs_l, 1);
+                                       (uint8_t)pk, (uint8_t)pl, 1);
     if (ptrs_unav == 0) {
       return out->status; // the density did not describe any PT-RS -- do not guess G
     }
@@ -2268,7 +2411,14 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
         llr_pos++;
       }
     }
+    if (nr_agnostic_v2()) {
+      t_hq.armed = 1;
+      t_hq.rnti = grant->rnti;
+      t_hq.pid = grant->harq_pid;
+      t_hq.ndi = grant->ndi;
+    }
     bool ldpc_ok = passive_ldpc_decode(ue, proc, &g_harq, cw, dlsch_config, llr, freq_alloc->num_rbs, G);
+    t_hq.armed = 0;
     /* ISAC_RV_RETRY=1 (default off): on a failed TB, re-run ONLY the LDPC stage with rv 2, 3, 1 on
      * the same (already descrambled) LLRs. Tests the hypothesis that some grants are retransmissions
      * whose RV field the current DCI-1_1 layout misreads as 0 (MCS-24 grants: 0 % of code blocks
@@ -2373,6 +2523,17 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
       nr_dlsch_force_branch(-1); // never leave a pin set: the next TB must re-decide normally
     }
 
+    if (ptrs_arm >= 0) {
+      pthread_mutex_lock(&g_ptrs_lock);
+      const int latched = nr_ptrs_sweep_feed(&g_ptrs, ptrs_arm, ldpc_ok);
+      pthread_mutex_unlock(&g_ptrs_lock);
+      if (latched >= 0 && atomic_exchange(&g_ptrs_arm_last, latched) != latched) {
+        uint8_t K = 0, L = 0;
+        const bool any = nr_ptrs_sweep_arm(latched, &K, &L);
+        LOG_A(PHY, "SENSING: PTRS_SWEEP LATCHED arm=%d (%s K=%u L=%u) from the TB CRC\n", latched,
+              any ? "PT-RS present," : "no PT-RS", K, L);
+      }
+    }
     /* ---- Subset scan. Runs AFTER the normal decode so it can never change this TB's own result:
      * ldpc_ok is saved and restored, and the pin is always cleared. Sampled (1 in N) because it
      * costs 15 extra demod+decode passes per scanned TB, which is far beyond the RT budget if run

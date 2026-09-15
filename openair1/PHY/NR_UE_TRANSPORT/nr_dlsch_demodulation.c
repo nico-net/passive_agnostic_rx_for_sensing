@@ -6,6 +6,8 @@
  * \brief Top-level routines for demodulating the PDSCH physical channel from 38-211, V15.2 2018-06
  */
 
+#include "PHY/NR_UE_TRANSPORT/nr_mrc_weights.h"
+#include "PHY/NR_UE_TRANSPORT/nr_agnostic_v2.h"
 #include "common/platform_constants.h"
 #include "nr_phy_common.h"
 #include "PHY/defs_nr_UE.h"
@@ -42,7 +44,8 @@ __thread int nr_dlsch_forced_branch = -1;
  * separate live runs cannot answer whether four branches hurt, because propagation, gain state and
  * this rig's own 5-88 % CRC swing all change between runs. */
 __thread int nr_dlsch_forced_mask = -1;
-__thread int nr_dlsch_chest_per_symbol = 0; // set by nr_pdsch_passive_decode when it has time-interpolated the estimate
+__thread int nr_dlsch_chest_per_symbol = 0;
+extern __thread uint32_t nr_dl_chest_nvar_ant[]; // per-branch chest noise, published by the chest on this thread // set by nr_pdsch_passive_decode when it has time-interpolated the estimate
 __thread int nr_dlsch_used_branch = -1;
 
 void nr_dlsch_force_mask(int mask)
@@ -880,6 +883,9 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
   static __thread int t_mrc_nb_rx = 0;
   static __thread int t_mrc_rx_index = 0;
   static __thread int t_mrc_live_mask = 0xF; // which receive branches feed the combiner (mode 3)
+  static __thread int t_mrc_weighted = 0;    // V2: noise-weighted MRC active for this TB
+  static __thread int16_t t_mrc_wq15[4] = {32767, 32767, 32767, 32767};
+  static __thread double t_mrc_w[4] = {1, 1, 1, 1};
   static __thread int t_mrc_mode = -1;
   static __thread double t_mrc_min_db = 12.0;
   if (t_mrc_mode < 0) {
@@ -1154,6 +1160,22 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
         t_mrc_live_mask = mask;
         t_mrc_nb_rx = nbRx; // the slice stays contiguous; excluded branches are zeroed instead
         t_mrc_rx_index = 0;
+        /* V2: replace the power threshold with noise weighting. Power is the wrong criterion on this
+         * rig -- branch 2 is the STRONGEST and the noisiest -- so weight by measured chest noise. */
+        t_mrc_weighted = 0;
+        if (nr_agnostic_v2() && nbRx <= 4) {
+          uint32_t nv[4] = {0, 0, 0, 0};
+          for (int aarx = 0; aarx < nbRx; aarx++) nv[aarx] = nr_dl_chest_nvar_ant[aarx];
+          if (nr_mrc_noise_weights(nv, nbRx, t_mrc_w) > 0) {
+            int wm = 0;
+            for (int aarx = 0; aarx < nbRx; aarx++) {
+              t_mrc_wq15[aarx] = (int16_t)lround(t_mrc_w[aarx] * 32767.0);
+              if (t_mrc_w[aarx] > 0.0) wm |= 1 << aarx;
+            }
+            t_mrc_live_mask = wm ? wm : (1 << best);
+            t_mrc_weighted = 1;
+          }
+        }
       }
       mrc_nb_rx = t_mrc_nb_rx;
       mrc_rx_index = t_mrc_rx_index;
@@ -1263,7 +1285,9 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
        * describes. Measured 2026-09-08: every one of the 15 subsets read 0 % CRC, including {0},
        * on transport blocks the primary path decoded at 87.7 %. Same class as the nvar bug fixed
        * the same day -- a correction that knew about mode 3 but not about forced_mask. */
-      if (nbRx == 4 && (t_mrc_mode == 3 || nr_dlsch_forced_mask >= 0)) {
+      if (t_mrc_weighted && nbRx <= 4 && t_mrc_mode == 3 && nr_dlsch_forced_mask < 0) {
+        contributing = nr_mrc_effective_branches(t_mrc_w, nbRx);
+      } else if (nbRx == 4 && (t_mrc_mode == 3 || nr_dlsch_forced_mask >= 0)) {
         contributing = 0;
         for (int aarx = 0; aarx < nbRx; aarx++) {
           if (t_mrc_live_mask & (1 << aarx)) {
@@ -1343,6 +1367,20 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
     for (int aarx = 0; aarx < nbRx; aarx++) {
       if (!(t_mrc_live_mask & (1 << aarx))) {
         memset(chFext[0][aarx], 0, rx_size_symbol * sizeof(c16_t));
+      }
+    }
+  }
+  /* V2 noise-weighted MRC: scale h AND y of each branch by w_a (Q15) every symbol, for the same
+   * reason the mask above is re-applied every symbol (the extraction rebuilds both buffers). */
+  if (nl == 1 && t_mrc_weighted && t_mrc_mode == 3 && nr_dlsch_forced_mask < 0 && nbRx <= 4) {
+    for (int aarx = 0; aarx < nbRx; aarx++) {
+      const int32_t w = t_mrc_wq15[aarx];
+      if (w >= 32767)
+        continue;
+      c16_t *hq = (c16_t *)chFext[0][aarx], *yq = rxdataF_ext[aarx];
+      for (int k = 0; k < rx_size_symbol; k++) {
+        hq[k].r = (int16_t)(((int32_t)hq[k].r * w) >> 15); hq[k].i = (int16_t)(((int32_t)hq[k].i * w) >> 15);
+        yq[k].r = (int16_t)(((int32_t)yq[k].r * w) >> 15); yq[k].i = (int16_t)(((int32_t)yq[k].i * w) >> 15);
       }
     }
   }
