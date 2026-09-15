@@ -1717,6 +1717,30 @@ void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_pr
         pthread_mutex_lock(&g_pbwp_lock);
         nr_pbwp_coreset_observe(&g_pbwp, n_win, base_lo, base_hi, cfg->bwp_start, corr, ref, sym, 0.8f);
         pthread_mutex_unlock(&g_pbwp_lock);
+        /* ISAC_BWP_DIAG=1: every 256 observations, the 4 strongest windows of symbol 0 with their winning
+         * reference -- what the tracker is actually seeing, when no CORESET gets declared. */
+        static int s_bwp_diag = -1;
+        if (s_bwp_diag < 0)
+          s_bwp_diag = getenv("ISAC_BWP_DIAG") ? 1 : 0;
+        static uint32_t s_diag_n;
+        if (s_bwp_diag && sym == 0 && (++s_diag_n % 256) == 0) {
+          char line[256];
+          int u = 0;
+          bool used[NR_PBWP_CS_MAXWIN] = {false};
+          for (int k = 0; k < 4; k++) {
+            int bw = -1;
+            for (int w = 0; w < n_win; w++)
+              if (!used[w] && (bw < 0 || corr[w] > corr[bw]))
+                bw = w;
+            if (bw < 0)
+              break;
+            used[bw] = true;
+            u += snprintf(line + u, sizeof(line) - u, " RB%d:%.2f(ref %d, hits %u)", bw * 6, corr[bw], ref[bw],
+                          g_pbwp.cs.hits[bw][0]);
+          }
+          LOG_A(PHY, "SENSING: BWP_DIAG coreset obs=%u base=[w%d..w%d ref %d]%s\n", g_pbwp.cs.occ, base_lo, base_hi,
+                cfg->bwp_start, line);
+        }
       }
       int cs_start, cs_n, cs_dur, cs_ref;
       pthread_mutex_lock(&g_pbwp_lock);
