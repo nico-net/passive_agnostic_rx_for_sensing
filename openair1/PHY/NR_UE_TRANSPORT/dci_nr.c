@@ -860,27 +860,51 @@ static void nr_rx_pdcch_symbol(PHY_VARS_NR_UE *ue,
      * because the mean here is the empty-CORESET noise floor -- the very thing that mis-scales the
      * stock path. A pure right shift keeps I and Q in the same ratio, so the constellation is
      * scaled rather than rotated. Peaks below the rail are left completely alone. */
-    int peak = 0;
+    /* PERCENTILE, BOTH DIRECTIONS (2026-09-15). Measured on the X410 at 4 RX (PRECLIP): the run that
+     * decoded SIB1 had mean_mag 14-22 with a peak of 66-101; the runs that never did had mean_mag
+     * 4.6-5.6 (LLRs of 0/+-1) or mean 116 / peak 402 (half the REs clipped). One outlier RE set the
+     * old peak-only right shift, and it never scaled UP. The 90th-percentile magnitude is put at
+     * half the +/-31 rail: a shift either way, the top decile clips (nr_pdcch_llr() clips anyway). */
+    uint16_t hist[256] = {0};
+    int n = 0;
     for (int i = 0; i < llr_size_symbol; i++) {
       const int ar = rxdataF_comp[0][i].r < 0 ? -rxdataF_comp[0][i].r : rxdataF_comp[0][i].r;
       const int ai = rxdataF_comp[0][i].i < 0 ? -rxdataF_comp[0][i].i : rxdataF_comp[0][i].i;
-      if (ar > peak) peak = ar;
-      if (ai > peak) peak = ai;
+      const int m = ar > ai ? ar : ai;
+      hist[m > 255 ? 255 : m]++; /* magnitudes >= 255 share the top bin: they need a right shift anyway */
+      n++;
     }
-    int sh = 0;
-    while (peak > 31 && sh < 15) {
-      peak >>= 1;
-      sh++;
+    int p90 = 0, acc = 0;
+    for (int b = 0; b < 256; b++) {
+      acc += hist[b];
+      if (acc * 10 >= n * 9) { p90 = b; break; }
     }
-    if (sh > 0) {
+    int sh = 0; /* >0 right shift, <0 left shift */
+    if (p90 >= 255) {
+      int peak = 0;
       for (int i = 0; i < llr_size_symbol; i++) {
-        rxdataF_comp[0][i].r = (int16_t)(rxdataF_comp[0][i].r >> sh);
-        rxdataF_comp[0][i].i = (int16_t)(rxdataF_comp[0][i].i >> sh);
+        const int ar = rxdataF_comp[0][i].r < 0 ? -rxdataF_comp[0][i].r : rxdataF_comp[0][i].r;
+        const int ai = rxdataF_comp[0][i].i < 0 ? -rxdataF_comp[0][i].i : rxdataF_comp[0][i].i;
+        if (ar > peak) peak = ar;
+        if (ai > peak) peak = ai;
+      }
+      while (peak > 31 && sh < 15) { peak >>= 1; sh++; }
+    } else if (p90 > 24) {
+      while ((p90 >> sh) > 24 && sh < 8) sh++;
+    } else if (p90 > 0) {
+      while ((p90 << (-sh + 1)) <= 24 && sh > -6) sh--;
+    }
+    if (sh != 0) {
+      for (int i = 0; i < llr_size_symbol; i++) {
+        int r = rxdataF_comp[0][i].r, q = rxdataF_comp[0][i].i;
+        if (sh > 0) { r >>= sh; q >>= sh; } else { r <<= -sh; q <<= -sh; }
+        rxdataF_comp[0][i].r = (int16_t)(r > 32767 ? 32767 : r < -32768 ? -32768 : r);
+        rxdataF_comp[0][i].i = (int16_t)(q > 32767 ? 32767 : q < -32768 ? -32768 : q);
       }
       static int s_shift_log_left = 8;
       if (s_shift_log_left > 0) {
-        LOG_W(PHY, "SENSING: PDCCH autoscale slot=%d symb=%d extra_shift=%d (peak now %d)\n",
-              proc->nr_slot_rx, symbol, sh, peak);
+        LOG_W(PHY, "SENSING: PDCCH autoscale slot=%d symb=%d extra_shift=%d (p90 %d -> %d)\n",
+              proc->nr_slot_rx, symbol, sh, p90, sh > 0 ? p90 >> sh : p90 << -sh);
         s_shift_log_left--;
       }
     }
