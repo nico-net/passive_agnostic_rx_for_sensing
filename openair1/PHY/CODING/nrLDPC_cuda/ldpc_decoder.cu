@@ -92,6 +92,8 @@ struct ThreadContext {
     uint8_t* b_bits_dev = nullptr;
     llr_msg_t* b_msg = nullptr;
     llr_accumulator_t* b_total = nullptr;
+    uint32_t* b_done = nullptr;   // per-codeword converged flag (early termination)
+    uint32_t* b_unsat = nullptr;  // per-codeword unsatisfied-check flag, this iteration
 
 #ifdef USE_GRAPHS
     cudaGraphExec_t graphCtx = nullptr;
@@ -213,8 +215,11 @@ static BaseGraph get_basegraph(uint32_t BG, uint32_t Z) {
 __launch_bounds__(UNROLL_NODES*NODE_KERNEL_BLOCK, 3)
 static __global__ void update_cn_kernel(llr_accumulator_t const* __restrict__ llr_total, llr_msg_t* __restrict__ llr_msg,
                                         uint32_t Z, uint32_t const* __restrict__ bg_cn, uint32_t const* __restrict__ bg_cn_degree, uint32_t max_degree, uint32_t num_rows,
-                                        bool first_iter, uint32_t total_stride, uint32_t msg_stride) {
+                                        bool first_iter, uint32_t total_stride, uint32_t msg_stride,
+                                        uint32_t const* __restrict__ done) {
     // batched decode: blockIdx.y selects the codeword (strides 0 = the single-codeword path)
+    if (done && done[blockIdx.y])
+        return; // converged: every check satisfied, messages frozen
     llr_total += blockIdx.y * total_stride;
     llr_msg += (size_t)blockIdx.y * msg_stride;
     uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
@@ -366,7 +371,10 @@ static __global__ void update_cn_kernel(llr_accumulator_t const* __restrict__ ll
 __launch_bounds__(UNROLL_NODES*NODE_KERNEL_BLOCK, 3)
 static __global__ void update_vn_kernel(llr_msg_t const* __restrict__ llr_msg, int8_t const* __restrict__ llr_ch, llr_accumulator_t* __restrict__ llr_total,
                                         uint32_t Z, uint32_t const* __restrict__ bg_vn, uint32_t const* __restrict__ bg_vn_degree, uint32_t max_degree, uint32_t num_cols, uint32_t num_rows,
-                                        uint32_t total_stride, uint32_t msg_stride) {
+                                        uint32_t total_stride, uint32_t msg_stride,
+                                        uint32_t const* __restrict__ done) {
+    if (done && done[blockIdx.y])
+        return;
     llr_msg += (size_t)blockIdx.y * msg_stride;
     llr_ch += blockIdx.y * total_stride;
     llr_total += blockIdx.y * total_stride;
@@ -479,6 +487,38 @@ static __global__ void compute_syndrome_kernel(llr_accumulator_t const* __restri
         syndrome[tid / 32] = sign;
 }
 
+/* Batched syndrome for early termination: unsat[b] |= any unsatisfied check of codeword b. */
+__launch_bounds__(512, 3)
+static __global__ void batch_syndrome_kernel(llr_accumulator_t const* __restrict__ llr_total, uint32_t* __restrict__ unsat,
+                                             uint32_t const* __restrict__ done, uint32_t Z,
+                                             uint32_t const* __restrict__ bg_cn, uint32_t const* __restrict__ bg_cn_degree,
+                                             uint32_t max_degree, uint32_t num_rows, uint32_t total_stride) {
+    const uint32_t b = blockIdx.y;
+    if (done[b])
+        return;
+    llr_total += b * total_stride;
+    const uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    const uint32_t i = tid % Z, idx_row = tid / Z;
+    uint32_t sign = 0;
+    if (idx_row < num_rows) {
+        uint32_t const* check_nodes = &bg_cn[idx_row * max_degree];
+        for (uint32_t ii = 0; ii < bg_cn_degree[idx_row]; ++ii) {
+            const uint32_t cn = check_nodes[ii];
+            sign ^= llr_total[(cn & 0xffffu) * Z + (i + (cn >> 16)) % Z] < 0;
+        }
+    }
+    if (__any_sync(0xffffffff, sign) && (threadIdx.x % 32) == 0)
+        atomicOr(&unsat[b], 1u);
+}
+static __global__ void batch_done_kernel(uint32_t* __restrict__ unsat, uint32_t* __restrict__ done, uint32_t n) {
+    const uint32_t b = blockIdx.x * blockDim.x + threadIdx.x;
+    if (b < n) {
+        if (!done[b] && !unsat[b])
+            done[b] = 1;
+        unsat[b] = 0;
+    }
+}
+
 static const uint32_t PACK_BITS_KERNEL_THREADS = 256;
 
 // START marker-pack-bits
@@ -571,14 +611,14 @@ extern "C" uint32_t ldpc_decode(ThreadContext* context_, cudaStream_t stream, ui
         // note: llr_msg not not read, only written to in first iteration; will be filled with outputs of this function
         update_cn_kernel<<<blocks_cn, threads, 0, stream>>>(
             llr_total, context.llr_msg_buffer,
-            Z, bg.cn, bg.cn_degree, bg.cn_stride, bg.num_rows, i==0, 0, 0);
+            Z, bg.cn, bg.cn_degree, bg.cn_stride, bg.num_rows, i==0, 0, 0, nullptr);
 
         // variable node update
         dim3 blocks_vn(blocks_for(bg.num_cols * Z, threads.x));
         // note: llr_total only written to
         update_vn_kernel<<<blocks_vn, threads, 0, stream>>>(
             context.llr_msg_buffer, mapped_llr_in, context.llr_total_buffer,
-            Z, bg.vn, bg.vn_degree, bg.vn_stride, bg.num_cols, bg.num_rows, 0, 0);
+            Z, bg.vn, bg.vn_degree, bg.vn_stride, bg.num_cols, bg.num_rows, 0, 0, nullptr);
         llr_total = context.llr_total_buffer;
     }
 
@@ -700,7 +740,7 @@ ThreadContext& ldpc_decoder_init_context(int make_stream) {
         CHECK_CUDA(cudaStreamCreateWithPriority(&context.stream, cudaStreamNonBlocking, highPriority));
 
         cudaStreamAttrValue attr = {};
-        attr.syncPolicy = cudaSyncPolicyYield;
+        attr.syncPolicy = cudaSyncPolicyBlockingSync; /* the offload exists to free CPU */
         cudaStreamSetAttribute(context.stream, cudaStreamAttributeSynchronizationPolicy, &attr);
     }
 
@@ -776,6 +816,8 @@ static void ldpc_batch_free(ThreadContext& c) {
     cudaFree(c.b_bits_dev);
     cudaFree(c.b_msg);
     cudaFree(c.b_total);
+    cudaFree(c.b_done);
+    cudaFree(c.b_unsat);
     c.b_cap = 0;
 }
 
@@ -792,6 +834,8 @@ static void ldpc_batch_reserve(ThreadContext& c, uint32_t n) {
     CHECK_CUDA(cudaMalloc(&c.b_bits_dev, (size_t)cap * BATCH_BITS_STRIDE));
     CHECK_CUDA(cudaMalloc(&c.b_msg, (size_t)cap * BATCH_MSG_STRIDE * sizeof(llr_msg_t)));
     CHECK_CUDA(cudaMalloc(&c.b_total, (size_t)cap * BATCH_LLR_STRIDE * sizeof(llr_accumulator_t)));
+    CHECK_CUDA(cudaMalloc(&c.b_done, (size_t)cap * sizeof(uint32_t)));
+    CHECK_CUDA(cudaMalloc(&c.b_unsat, (size_t)cap * sizeof(uint32_t)));
     c.b_cap = cap;
 }
 
@@ -819,16 +863,28 @@ extern "C" uint8_t const* ldpc_batch_decode(uint32_t BG, uint32_t Z, uint32_t fi
     uint8_t* bits_dev = c.b_bits_dev + (size_t)first * BATCH_BITS_STRIDE;
     CHECK_CUDA(cudaMemcpyAsync(llr_dev, c.b_llr_host + (size_t)first * BATCH_LLR_STRIDE, (size_t)n * BATCH_LLR_STRIDE,
                                cudaMemcpyHostToDevice, stream));
+    uint32_t* done = c.b_done + first;
+    uint32_t* unsat = c.b_unsat + first;
+    CHECK_CUDA(cudaMemsetAsync(done, 0, n * sizeof(uint32_t), stream));
+    CHECK_CUDA(cudaMemsetAsync(unsat, 0, n * sizeof(uint32_t), stream));
     dim3 threads(NODE_KERNEL_BLOCK, UNROLL_NODES);
     dim3 blocks_cn(blocks_for(bg.num_rows * Z, threads.x), n);
     dim3 blocks_vn(blocks_for(bg.num_cols * Z, threads.x), n);
+    dim3 blocks_syn(blocks_for(bg.num_rows * Z, 512), n);
     llr_accumulator_t const* llr_total = llr_dev;
     for (uint32_t i = 0; i < num_iter; ++i) {
         update_cn_kernel<<<blocks_cn, threads, 0, stream>>>(llr_total, msg, Z, bg.cn, bg.cn_degree, bg.cn_stride,
-                                                           bg.num_rows, i == 0, BATCH_LLR_STRIDE, BATCH_MSG_STRIDE);
+                                                           bg.num_rows, i == 0, BATCH_LLR_STRIDE, BATCH_MSG_STRIDE, done);
         update_vn_kernel<<<blocks_vn, threads, 0, stream>>>(msg, llr_dev, total, Z, bg.vn, bg.vn_degree, bg.vn_stride,
-                                                           bg.num_cols, bg.num_rows, BATCH_LLR_STRIDE, BATCH_MSG_STRIDE);
+                                                           bg.num_cols, bg.num_rows, BATCH_LLR_STRIDE, BATCH_MSG_STRIDE, done);
         llr_total = total;
+        /* Early termination: a codeword whose hard decisions satisfy every check stops iterating
+         * (its kernels return at entry). Device-side only -- no host round trip per iteration. */
+        if (i + 1 < num_iter) {
+            batch_syndrome_kernel<<<blocks_syn, 512, 0, stream>>>(total, unsat, done, Z, bg.cn, bg.cn_degree,
+                                                                  bg.cn_stride, bg.num_rows, BATCH_LLR_STRIDE);
+            batch_done_kernel<<<blocks_for(n, 128), 128, 0, stream>>>(unsat, done, n);
+        }
     }
     dim3 threads_pack(PACK_BITS_KERNEL_THREADS);
     dim3 blocks_pack(blocks_for(block_length, threads_pack.x), n);
