@@ -268,16 +268,26 @@ int nr_dci11_resolver_init(nr_dci11_resolver_t *r, uint16_t bwp_size, uint16_t r
   r->riv_bits = riv_bits;
   r->tda_bits = tda_bits;
   r->observed_len = observed_len;
-  const int n = nr_dci11_layout_enumerate(riv_bits, tda_bits, observed_len, r->hyp,
-                                          NR_DCI11_LAYOUT_MAX);
+  /* NR_DCI11_TDA_UNKNOWN: the TDRA list size is itself an RRC switch the receiver cannot read (the
+   * dedicated pdsch-TimeDomainAllocationList travels ciphered, and SIB1's common list is only a
+   * hypothesis about it). Enumerate every width 0..4 bits; each hypothesis carries its own
+   * tda_bits in its offsets and the length constraint prunes most combinations. OTA 2026-09-15:
+   * arming with the assumed 4-bit default on a 1-bit cell left no true layout enumerable at all. */
+  const uint8_t tb_lo = (tda_bits == NR_DCI11_TDA_UNKNOWN) ? 0 : tda_bits;
+  const uint8_t tb_hi = (tda_bits == NR_DCI11_TDA_UNKNOWN) ? 4 : tda_bits;
+  int n = 0;
+  for (uint8_t tb = tb_lo; tb <= tb_hi && n < NR_DCI11_LAYOUT_MAX; tb++) {
+    const int m = nr_dci11_layout_enumerate(riv_bits, tb, observed_len, r->hyp + n, NR_DCI11_LAYOUT_MAX - n);
+    for (int i = n; i < n + m; i++) {
+      if (!nr_dci11_layout_offsets(&r->hyp[i], riv_bits, tb, &r->off[i])) {
+        return 0;
+      }
+      r->alive[i] = true;
+    }
+    n += (m > 0) ? m : 0;
+  }
   if (n <= 0) {
     return 0;
-  }
-  for (int i = 0; i < n; i++) {
-    if (!nr_dci11_layout_offsets(&r->hyp[i], riv_bits, tda_bits, &r->off[i])) {
-      return 0;
-    }
-    r->alive[i] = true;
   }
   r->n_hyp = n;
   r->n_alive = n;

@@ -242,7 +242,10 @@ static int nr_pdcch_dci11_stage2_candidates(const nr_pdcch_blind_raw_result_t *r
     o.tci_bits           = f.tci_bits;
     o.srs_request_bits   = f.srs_request_bits;
     o.cbg_bits           = f.cbg_bits;
-    o.tda_count          = (cfg->extract.tda_count > 0) ? cfg->extract.tda_count : 16;
+    /* The TDA width is THIS hypothesis' (searched); a configured list still pins it. tda_count is
+     * the largest count that width can express; S/L are the scaffold Technique D replaces. */
+    const uint8_t htb = r->off[i].tda_bits;
+    o.tda_count          = (cfg->extract.tda_count > 0) ? cfg->extract.tda_count : (htb == 0 ? 1 : (1 << htb));
     o.dmrs_add_pos       = 0;
     o.dmrs_max_length    = 1;
     for (int k = 0; k < o.tda_count && k < 16; ++k) {
@@ -383,7 +386,9 @@ static void nr_pdcch_dci11_layout_observe(const nr_pdcch_blind_monitor_cfg_t *cf
   if (g_dci11_state == 0) {
     const double span = ((double)cfg->bwp_size * (double)(cfg->bwp_size + 1)) / 2.0;
     const uint16_t riv_bits = (uint16_t)ceil(log2(span));
-    uint8_t tda_bits = 4;   /* the spec-default 16-entry table */
+    /* No configured TDRA list -> the field width is UNKNOWN and is searched (0..4 bits), not
+     * assumed to be the 16-entry default. A configured list pins it, as before. */
+    uint8_t tda_bits = NR_DCI11_TDA_UNKNOWN;
     if (cfg->extract.tda_count > 0) {
       tda_bits = 0;
       while ((1 << tda_bits) < cfg->extract.tda_count) {
@@ -405,7 +410,8 @@ static void nr_pdcch_dci11_layout_observe(const nr_pdcch_blind_monitor_cfg_t *cf
     if (cfg->extract.tda_count > 0 && cfg->extract.tda_count < 16)
       nr_dci11_resolver_set_tda_count(&g_dci11_resolver, (uint8_t)cfg->extract.tda_count);
     LOG_I(PHY, "SENSING: DCI11_LAYOUT armed: %d layouts consistent with dci_length=%u "
-               "(riv=%u bits, tda=%u bits)\n", n, dci_length, riv_bits, tda_bits);
+               "(riv=%u bits, tda=%s)\n", n, dci_length, riv_bits,
+          tda_bits == NR_DCI11_TDA_UNKNOWN ? "0..4 bits (searched)" : "configured");
     g_dci11_state = 1;
   }
   nr_dci11_resolver_observe(&g_dci11_resolver, payload);

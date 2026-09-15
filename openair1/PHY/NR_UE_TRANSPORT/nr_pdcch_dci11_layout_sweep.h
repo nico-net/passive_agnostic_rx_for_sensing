@@ -143,6 +143,7 @@ typedef struct {
 /** Build the candidate set for a cell. Returns the number of candidates, 0 if none fit the
  * observed length (which means one of riv_bits/tda_bits/observed_len is wrong -- a real signal,
  * not a resolver failure). */
+#define NR_DCI11_TDA_UNKNOWN 0xFF /* tda_bits: enumerate every width 0..4 (the list size is an RRC switch) */
 int nr_dci11_resolver_init(nr_dci11_resolver_t *r, uint16_t bwp_size, uint16_t riv_bits,
                            uint8_t tda_bits, uint16_t observed_len);
 

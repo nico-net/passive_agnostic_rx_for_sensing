@@ -537,3 +537,27 @@ TEST(Dci11Thompson, AStage1PriorSteersTheFirstGrants) {
   EXPECT_GT(hits, 500) << "a prior-favoured arm was not preferred before any evidence";
   EXPECT_LT(hits, 1000) << "a prior must bias, not exclude";
 }
+
+TEST(Dci11Layout, UnknownTdaWidthEnumeratesEveryWidthAndContainsBothRealCells) {
+  // The TDRA list size is an RRC switch the receiver cannot read. Two real cells, one payload length:
+  // the OAI rfsim cell has 3 entries (2-bit TDA), the srsRAN OTA cell has 2 (1-bit); a layout with
+  // pre_ant = harq4+dai2+tpc2+ri3+k1(3) = 14, ant 4, srs 2 sums to 47 only at 1 bit. With the width
+  // searched, both truths are hypotheses; with the old 4-bit default, neither was (OTA 2026-09-15).
+  const uint16_t rb = riv_bits_for(273);
+  nr_dci11_resolver_t r;
+  const int n = nr_dci11_resolver_init(&r, 273, rb, NR_DCI11_TDA_UNKNOWN, 47);
+  ASSERT_GT(n, 0);
+  bool has_1bit_truth = false, has_2bit = false, widths[5] = {false, false, false, false, false};
+  for (int i = 0; i < n; i++) {
+    EXPECT_EQ(r.off[i].total, 47);
+    widths[r.off[i].tda_bits] = true;
+    if (r.off[i].tda_bits == 1 && r.hyp[i].bwp_ind == 0 && r.hyp[i].pre_mcs == 0 && r.hyp[i].pre_ant == 14
+        && r.hyp[i].ant_ports == 4 && r.hyp[i].post_ant == 2)
+      has_1bit_truth = true;
+    if (r.off[i].tda_bits == 2) has_2bit = true;
+  }
+  EXPECT_TRUE(has_1bit_truth) << "the srsRAN rank-4 cell's layout must be a hypothesis";
+  EXPECT_TRUE(has_2bit) << "the rfsim cell's 2-bit width must still be represented";
+  EXPECT_TRUE(widths[0] || widths[1]) << "narrow widths enumerated";
+  std::cerr << "[ MEASURED ] searched TDA width: " << n << " hypotheses at len 47\n";
+}
