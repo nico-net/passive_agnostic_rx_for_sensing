@@ -1730,7 +1730,17 @@ static void usrp_set_rx_freq_all(usrp_state_t *s, const openair0_config_t *cfg)
   for (int i = 0; i < n; i++) {
     const double f = cfg->rx_freq[i] > 0.0 ? cfg->rx_freq[i] : cfg->rx_freq[0];
     uhd::tune_request_t req(f, cfg->tune_offset);
+    /* A CFO correction (tens of kHz) moves only the DDC NCO: relocking four LOs while streaming
+     * stalled the X410 stream right after "Got synch" on 3/3 runs (2026-09-15). A real frequency
+     * move, or an NCO that cannot land the request (no DDC in the chain), gets the full tune. */
+    const bool nco = std::fabs(f - s->usrp->get_rx_freq(i)) < 0.25 * cfg->sample_rate;
+    if (nco)
+      req.rf_freq_policy = uhd::tune_request_t::POLICY_NONE;
     s->usrp->set_rx_freq(req, i);
+    if (nco && std::fabs(s->usrp->get_rx_freq(i) - f) > 1.0) {
+      LOG_W(HW, "rx ch%d NCO-only retune landed at %.1f Hz for %.1f Hz, full tune\n", i, s->usrp->get_rx_freq(i), f);
+      s->usrp->set_rx_freq(uhd::tune_request_t(f, cfg->tune_offset), i);
+    }
   }
 }
 
