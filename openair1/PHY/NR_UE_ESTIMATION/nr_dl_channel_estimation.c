@@ -33,6 +33,7 @@ __thread uint32_t nr_dl_chest_nvar_ant[NR_DL_CHEST_MAX_ANT];
 /* Consumer-only diagnostics (BRDELAY/PDP). The passive decode consumer sets the request flag on its
  * thread; the per-antenna pool task inherits it through the task struct. Never set on the RT thread. */
 static __thread c16_t t_dft_est[4096];
+static __thread int nr_dl_chest_cur_ant = 0; // set by the per-antenna task before the interp call
 static __thread int t_dft_valid = 0;
 __thread int nr_dl_chest_diag_request = 0;
 __thread int nr_dl_chest_pdp_compact_pct = -1;
@@ -977,7 +978,12 @@ static void NFAPI_NR_DMRS_TYPE1_linear_interp(NR_DL_FRAME_PARMS *frame_parms,
     const char *e = getenv("ISAC_CHEST_DFT_WIN");
     s_dftw = (e != NULL) ? atoi(e) : 0;
   }
-  if (s_dftw > 0) {
+  static int s_dft_apply = -1;
+  if (s_dft_apply < 0)
+    s_dft_apply = (getenv("ISAC_CHEST_DFT_APPLY") != NULL) ? 1 : 0;
+  /* Branch 0 is compact on this rig and the DFT estimate equals the FIR one there (corr 0.999):
+   * when APPLYING, spend the transforms only on the branches that need them. */
+  if (s_dftw > 0 && !(s_dft_apply && nr_dl_chest_cur_ant == 0)) {
     const int N = frame_parms->ofdm_symbol_size;
     int root = 1;
     while (root * root < N) ++root;
@@ -1059,7 +1065,13 @@ static void NFAPI_NR_DMRS_TYPE1_linear_interp(NR_DL_FRAME_PARMS *frame_parms,
     nest_count++;
   }
 
-  if (t_dft_valid == idx && idx > 0) {
+  if (t_dft_valid == idx && idx > 0 && s_dft_apply) {
+    noise_amp2 = 0;
+    for (int k = 0; k < idx; k++) {
+      dl_ch[k] = t_dft_est[k];
+      noise_amp2 += c16amp2(c16sub(dl_ls_est[k], dl_ch[k]));
+    }
+  } else if (t_dft_valid == idx && idx > 0) {
     /* DFT-vs-FIR comparison on the SAME LS input. corr ~1 / phase ~0 / scale ~1 means the two agree;
      * a shift or scale here is what a decode failure with a clean LS check would be hiding. */
     double xr = 0.0, xi = 0.0, e_f = 0.0, e_d = 0.0;
@@ -1074,16 +1086,6 @@ static void NFAPI_NR_DMRS_TYPE1_linear_interp(NR_DL_FRAME_PARMS *frame_parms,
       LOG_A(PHY, "SENSING: CHEST_DFTCMP corr=%.3f phase=%.1fdeg scale(dft/fir)=%.3f nvar_fir=%llu idx=%d\n",
             (e_f > 0.0 && e_d > 0.0) ? hypot(xr, xi) / sqrt(e_f * e_d) : 0.0, atan2(xi, xr) * 180.0 / M_PI,
             e_f > 0.0 ? sqrt(e_d / e_f) : 0.0, (unsigned long long)(nest_count ? noise_amp2 / nest_count : 0), idx);
-    static int s_apply = -1;
-    if (s_apply < 0)
-      s_apply = (getenv("ISAC_CHEST_DFT_APPLY") != NULL) ? 1 : 0;
-    if (s_apply) {
-      noise_amp2 = 0;
-      for (int k = 0; k < idx; k++) {
-        dl_ch[k] = t_dft_est[k];
-        noise_amp2 += c16amp2(c16sub(dl_ls_est[k], dl_ch[k]));
-      }
-    }
   }
   if (nvar && nest_count > 0) {
     /* Per-ANTENNA mean noise. The `/ nb_antennas_rx` that used to be here was wrong twice over:
@@ -1412,6 +1414,7 @@ static void nr_pdsch_chest_ant_task(void *arg)
 
   delay_t delay = {0};
   nr_dl_chest_diag_request = a->diag_request;
+  nr_dl_chest_cur_ant = a->aarx;
   if (a->config_type == NFAPI_NR_DMRS_TYPE1 && a->ue->chest_freq == 0) {
     NFAPI_NR_DMRS_TYPE1_linear_interp(fp, rxF, &a->pilot[6 * a->rb_offset], dl_ch, a->bwp_start_subcarrier,
                                       a->freq_alloc, a->dlsch->BWPSize, &delay, nvar_p);

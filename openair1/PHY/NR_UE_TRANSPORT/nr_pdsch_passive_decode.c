@@ -1180,6 +1180,48 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
 
   uint32_t nvar = 0;
   int n_dmrs_sym = 0;
+  /* XANT (ISAC_XANT=1, default off): time-domain cross-correlation of antenna a vs antenna 0 over
+   * +/-3000 sample lags, on this slot's samples, once every ~60 s. A peak away from lag 0 is a stream
+   * alignment offset between X410 channels -- the one thing every per-branch diagnostic so far
+   * (equal DM-RS peak position, 45 % delay-profile compactness, nvar x4000) is consistent with. */
+  {
+    static int s_xant = -1;
+    if (s_xant < 0)
+      s_xant = (getenv("ISAC_XANT") != NULL) ? 1 : 0;
+    static _Atomic unsigned long s_xant_n = 0;
+    if (s_xant && fp->nb_antennas_rx >= 2 && (atomic_fetch_add(&s_xant_n, 1) % 40000) == 0) {
+      const c16_t **rx = (const c16_t **)ue->common_vars.rxdata;
+      const unsigned total = (unsigned)fp->samples_per_frame;
+      const unsigned base = (get_samples_slot_timestamp(fp, proc->nr_slot_rx) + 2u * (unsigned)(fp->ofdm_symbol_size + fp->nb_prefix_samples)) % total;
+      const int L = 4096, MAXLAG = 3000;
+      char line[200];
+      int u = 0;
+      for (int a = 1; a < fp->nb_antennas_rx && a < 4; a++) {
+        double best = 0.0, e0 = 0.0, ea = 0.0;
+        int bestlag = 0;
+        for (int lag = -MAXLAG; lag <= MAXLAG; lag += 4) {
+          double re = 0.0, im = 0.0;
+          for (int n = 0; n < L; n += 2) {
+            const c16_t x = rx[0][(base + n) % total];
+            const c16_t y = rx[a][(base + n + lag + total) % total];
+            re += (double)x.r * y.r + (double)x.i * y.i;
+            im += (double)x.i * y.r - (double)x.r * y.i;
+          }
+          const double m = re * re + im * im;
+          if (m > best) { best = m; bestlag = lag; }
+        }
+        for (int n = 0; n < L; n += 2) {
+          const c16_t x = rx[0][(base + n) % total];
+          const c16_t y = rx[a][(base + n + bestlag + total) % total];
+          e0 += (double)x.r * x.r + (double)x.i * x.i;
+          ea += (double)y.r * y.r + (double)y.i * y.i;
+        }
+        u += snprintf(line + u, sizeof(line) - u, " ant%d: lag=%+d rho=%.2f", a, bestlag,
+                      (e0 > 0.0 && ea > 0.0) ? sqrt(best) / sqrt(e0 * ea) : 0.0);
+      }
+      LOG_A(PHY, "SENSING: XANT slot=%d (vs ant0, +/-%d lags, step 4):%s\n", proc->nr_slot_rx, MAXLAG, line);
+    }
+  }
   int dmrs_first = -1, dmrs_last = -1; // for the per-branch phase-slope estimator below
   for (int m = dlsch_config->start_symbol; m < dlsch_config->start_symbol + dlsch_config->number_symbols; m++) {
     if (!((dlsch_config->dlDmrsSymbPos >> m) & 1)) {
