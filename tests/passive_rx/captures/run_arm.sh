@@ -121,7 +121,7 @@ SSB=${SSB:-150}
 if [ "$SCAN" = 1 ]; then FREQARGS="--ue-scan-carrier"; else FREQARGS="--ssb $SSB"; fi
 
 for t in $(seq 1 "$TRIES"); do
-  OUT=$BASE/${ARM}_$(date +%H%M%S); mkdir -p "$OUT"
+  CORELIM=${CORE:+unlimited}; OUT=$BASE/${ARM}_$(date +%H%M%S); mkdir -p "$OUT"
   # RELEASE THE X410 CLAIM GRACEFULLY BEFORE PROBING. Root-caused 2026-09-02 from the X410's own
   # MPM journal, which is the only place it is visible:
   #   11:44:02 [MPM.RPCServer] [WARNING] Someone tried to claim this device again (From: <this host>)
@@ -201,7 +201,7 @@ for t in $(seq 1 "$TRIES"); do
     ${TSYNCAUDIT:+ISAC_TSYNC_AUDIT=$TSYNCAUDIT} \
     ISAC_TSYNC_RESET=${TSYNCRESET:-0} ISAC_AUTO_ACQUIRE=${AUTOACQ:-0} ISAC_ACQ_CFO_MAX_HZ=${ACQCFOMAX:-60000} \
     ${CPUSET:+CPUSET=$CPUSET} BIN=$BIN \
-    setsid nohup bash -c "ulimit -c 0; exec timeout $DUR ${CPUSET:+taskset -c $CPUSET} \
+    setsid nohup bash -c "ulimit -c ${CORELIM:-0}; exec timeout $DUR ${CPUSET:+taskset -c $CPUSET} \
     ${GDBRUN:+gdb -q -batch -ex 'handle SIGPIPE SIGUSR1 SIGUSR2 SIG32 SIG33 SIG34 SIG35 nostop noprint pass' -ex run -ex 'bt 30' -ex 'info registers rip' -ex 'thread apply all bt 4' --args} \
     $BIN \
     --usrp-args type=x4xx,addr=$DATA,mgmt_addr=$MGMT${DPDK:+,use_dpdk=$DPDK} \

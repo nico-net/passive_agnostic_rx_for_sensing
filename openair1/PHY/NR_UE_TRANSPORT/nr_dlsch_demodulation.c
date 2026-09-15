@@ -1519,7 +1519,9 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
     /* create LLR layer buffer */
     int max_symb_re = 0;
     GET_ARRAY_MAX(dl_valid_re, NR_SYMBOLS_PER_SLOT, max_symb_re);
-    const int llr_per_symbol = max_symb_re * dlsch->cw_info.qamModOrder;
+    /* Row stride must stay 32-byte aligned: the QAM LLR kernels use aligned AVX2 stores, and a PT-RS
+     * symbol count (e.g. 3276-137 = 3139 REs) times Qm is not a multiple of 16 int16. */
+    const int llr_per_symbol = (max_symb_re * dlsch->cw_info.qamModOrder + 15) & ~15;
     __attribute__((aligned(32))) int16_t layer_llr[NR_SYMBOLS_PER_SLOT][nl][llr_per_symbol];
 
     // Generate LLR from PTRS compensated signal
