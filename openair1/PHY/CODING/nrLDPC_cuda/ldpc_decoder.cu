@@ -981,3 +981,80 @@ NB_MODULE(ldpc_decoder, m) {
 }
 
 #endif
+
+/* ---- Shared GPU pool for dynamic batching (adaptive-rx, 2026-09-15) ------------------------------------
+ * The per-thread batch path is launch-bound: ~40 launches per TB (10 iterations x CN/VN/syndrome/done),
+ * measured 537 us of iterations for 24 already-converged code blocks. Here ONE worker thread decodes the
+ * code blocks of every queued TB in one launch sequence. Host side: a pinned pool of slots (a TB's code
+ * blocks are contiguous slots). Device side: per-launch buffers indexed by launch position b; each
+ * request's slot range is copied to [b0, b0+count) and back, so the batched kernels run unchanged. */
+static const uint32_t POOL_MAX_LAUNCH = 512; /* code blocks per launch: bounds msg memory (~615 MB) */
+static ThreadContext g_pool_ctx;            /* launch buffers + stream, owned by the worker thread */
+static int8_t* g_pool_llr_host;
+static uint8_t* g_pool_bits_host;
+static uint32_t g_pool_cap;
+
+extern "C" int ldpc_pool_init(uint32_t cap) {
+    if (g_pool_cap)
+        return 0;
+    if (!ldpc_decoder_init(1)) /* global base-graph tables */
+        return -1;
+    CHECK_CUDA(cudaStreamCreateWithFlags(&g_pool_ctx.stream, cudaStreamNonBlocking));
+    CHECK_CUDA(cudaHostAlloc(&g_pool_llr_host, (size_t)cap * BATCH_LLR_STRIDE, cudaHostAllocDefault));
+    CHECK_CUDA(cudaHostAlloc(&g_pool_bits_host, (size_t)cap * BATCH_BITS_STRIDE, cudaHostAllocDefault));
+    ldpc_batch_reserve(g_pool_ctx, POOL_MAX_LAUNCH);
+    g_pool_cap = cap;
+    return 0;
+}
+extern "C" int8_t* ldpc_pool_host_llr(void) { return g_pool_llr_host; }
+extern "C" uint8_t* ldpc_pool_host_bits(void) { return g_pool_bits_host; }
+extern "C" uint32_t ldpc_pool_max_launch(void) { return POOL_MAX_LAUNCH; }
+
+/* Decode n_req requests sharing BG/Z/num_iter: request r = slots [first[r], first[r]+count[r]) with
+ * block length K[r]. Sum of counts <= POOL_MAX_LAUNCH. Bits land in the host pool at the same slots. */
+extern "C" void ldpc_pool_decode(uint32_t BG, uint32_t Z, uint32_t num_iter, int n_req, const uint32_t* first,
+                                 const uint32_t* count, const uint32_t* K) {
+    ThreadContext& c = g_pool_ctx;
+    cudaStream_t stream = c.stream;
+    uint32_t n = 0;
+    for (int r = 0; r < n_req; r++) {
+        CHECK_CUDA(cudaMemcpyAsync(c.b_llr_dev + (size_t)n * BATCH_LLR_STRIDE, g_pool_llr_host + (size_t)first[r] * BATCH_LLR_STRIDE,
+                                   (size_t)count[r] * BATCH_LLR_STRIDE, cudaMemcpyHostToDevice, stream));
+        n += count[r];
+    }
+    if (n == 0 || n > POOL_MAX_LAUNCH)
+        return;
+    BaseGraph bg = get_basegraph(BG, Z);
+    CHECK_CUDA(cudaMemsetAsync(c.b_done, 0, n * sizeof(uint32_t), stream));
+    CHECK_CUDA(cudaMemsetAsync(c.b_unsat, 0, n * sizeof(uint32_t), stream));
+    dim3 threads(NODE_KERNEL_BLOCK, UNROLL_NODES);
+    dim3 blocks_cn(blocks_for(bg.num_rows * Z, threads.x), n);
+    dim3 blocks_vn(blocks_for(bg.num_cols * Z, threads.x), n);
+    dim3 blocks_syn(blocks_for(bg.num_rows * Z, 512), n);
+    llr_accumulator_t const* llr_total = c.b_llr_dev;
+    for (uint32_t i = 0; i < num_iter; ++i) {
+        update_cn_kernel<<<blocks_cn, threads, 0, stream>>>(llr_total, c.b_msg, Z, bg.cn, bg.cn_degree, bg.cn_stride,
+                                                           bg.num_rows, i == 0, BATCH_LLR_STRIDE, BATCH_MSG_STRIDE, c.b_done);
+        update_vn_kernel<<<blocks_vn, threads, 0, stream>>>(c.b_msg, c.b_llr_dev, c.b_total, Z, bg.vn, bg.vn_degree,
+                                                           bg.vn_stride, bg.num_cols, bg.num_rows, BATCH_LLR_STRIDE,
+                                                           BATCH_MSG_STRIDE, c.b_done);
+        llr_total = c.b_total;
+        if (i + 1 < num_iter) {
+            batch_syndrome_kernel<<<blocks_syn, 512, 0, stream>>>(c.b_total, c.b_unsat, c.b_done, Z, bg.cn, bg.cn_degree,
+                                                                  bg.cn_stride, bg.num_rows, BATCH_LLR_STRIDE);
+            batch_done_kernel<<<blocks_for(n, 128), 128, 0, stream>>>(c.b_unsat, c.b_done, n);
+        }
+    }
+    uint32_t b0 = 0;
+    for (int r = 0; r < n_req; r++) {
+        dim3 blocks_pack(blocks_for(K[r], PACK_BITS_KERNEL_THREADS), count[r]);
+        pack_bits_kernel<<<blocks_pack, PACK_BITS_KERNEL_THREADS, 0, stream>>>(
+            llr_total + (size_t)b0 * BATCH_LLR_STRIDE, c.b_bits_dev + (size_t)b0 * BATCH_BITS_STRIDE, K[r],
+            BATCH_LLR_STRIDE, BATCH_BITS_STRIDE);
+        CHECK_CUDA(cudaMemcpyAsync(g_pool_bits_host + (size_t)first[r] * BATCH_BITS_STRIDE,
+                                   c.b_bits_dev + (size_t)b0 * BATCH_BITS_STRIDE, (size_t)count[r] * BATCH_BITS_STRIDE,
+                                   cudaMemcpyDeviceToHost, stream));
+        b0 += count[r];
+    }
+    CHECK_CUDA(cudaStreamSynchronize(stream));
+}

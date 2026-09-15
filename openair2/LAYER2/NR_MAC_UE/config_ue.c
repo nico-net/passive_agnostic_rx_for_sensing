@@ -1096,6 +1096,15 @@ void nr_rrc_mac_sched_sib(module_id_t module_id, int sched_sib)
   if (sched_sib == 1) {
     bool const is_c0 = is_cset0_present(mac->frequency_range, mac->ssb_subcarrier_offset);
     mac->get_sib1 = is_c0;
+    /* A passive receiver must survive a cell without SIB1 (e.g. a --phy-test gNB, whose MIB carries no
+     * CORESET 0): it runs from its manual pdcch_blind_monitor_* configuration instead. */
+    if (!is_c0 && IS_PASSIVE_RX_MODE(get_softmodem_params())) {
+      static bool warned;
+      if (!warned)
+        LOG_W(NR_MAC, "Passive RX: MIB indicates no CORESET 0 / SIB1 in this cell -- not scheduling SIB1\n");
+      warned = true;
+      return;
+    }
     AssertFatal(is_c0, "RRC scheduling SIB1 reception but MIB indicates no SIB1 present in current cell\n");
   } else if (sched_sib > 1)
     mac->get_otherSI[sched_sib - 2] = true;
