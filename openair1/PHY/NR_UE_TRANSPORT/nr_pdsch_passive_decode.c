@@ -2720,6 +2720,21 @@ chest_done:
         for (int i = (int)G - 1; i >= 0; i--) {
           if (llr[i] != 0) { llr_have = (uint32_t)i + 1; break; }
         }
+        /* LLRFILL (2026-09-16): per-symbol non-zero LLR counts of the assembled buffer, one shot when
+         * llr_have < 0.9 G -- which symbols/layers come out empty (rank-4 bed: llr_have 3 % of G). */
+        static _Atomic int s_llrfill_left = 3;
+        if (cw->Nl > 1 && llr_have * 10 < G * 9 && atomic_load(&s_llrfill_left) > 0) {
+          atomic_fetch_sub(&s_llrfill_left, 1);
+          char b[400]; int u = 0; uint32_t k = 0;
+          for (int m = dlsch_config->start_symbol; m < dlsch_config->start_symbol + dlsch_config->number_symbols && u < 360; m++) {
+            const uint32_t blk = dl_valid_re[m] * cw->qamModOrder * cw->Nl;
+            uint32_t nz = 0, nzl[4] = {0, 0, 0, 0};
+            for (uint32_t i = 0; i < blk && k + i < G; i++) if (llr[k + i] != 0) { nz++; nzl[(i / cw->qamModOrder) % cw->Nl]++; }
+            u += snprintf(b + u, sizeof(b) - u, " s%d:%u/%u[%u,%u,%u,%u]", m, nz, blk, nzl[0], nzl[1], nzl[2], nzl[3]);
+            k += blk;
+          }
+          LOG_A(PHY, "SENSING: LLRFILL Nl=%u Qm=%u G=%u have=%u%s\n", cw->Nl, cw->qamModOrder, G, llr_have, b);
+        }
         uint32_t vre = 0;
         for (int m = dlsch_config->start_symbol;
              m < dlsch_config->start_symbol + dlsch_config->number_symbols && m < NR_SYMBOLS_PER_SLOT; m++) {
