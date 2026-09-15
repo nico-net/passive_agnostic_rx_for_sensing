@@ -1089,6 +1089,18 @@ static void nr_dci_decoding_procedure(const UE_nr_rxtx_proc_t *proc,
       nr_pdcch_llr_probe("normal", proc->frame_rx, proc->nr_slot_rx, CCEind, L, crc, tmp_e, L * 108);
 
       rnti_t n_rnti = rel15->rnti;
+      /* SI-RNTI census: whether CORESET#0 candidates are being evaluated at all, and how often
+       * they hit. Half of the 2026-09-15 X410 acquisitions never decoded SIB1 with PBCH at 50/50
+       * and nothing said why. Every 500 SI candidates, plus the first hit. */
+      if (is_SI) {
+        static uint32_t s_si_try, s_si_hit;
+        s_si_try++;
+        if (crc == n_rnti)
+          s_si_hit++;
+        if ((s_si_try % 500) == 0 || (crc == n_rnti && s_si_hit == 1))
+          LOG_W(NR_PHY_DCI, "SENSING: SICENSUS si_rnti candidates=%u hits=%u (last: %d.%d L=%d cce=%d len=%d crc=0x%x)\n",
+                s_si_try, s_si_hit, proc->frame_rx, proc->nr_slot_rx, L, CCEind, dci_length, crc);
+      }
       if (crc == n_rnti) {
         LOG_D(NR_PHY_DCI,
               "(%i.%i) Received dci indication (rnti %x,dci format %d,n_CCE %d,payloadSize %d,payload %llx)\n",
