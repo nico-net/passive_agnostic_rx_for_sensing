@@ -186,9 +186,11 @@ for t in $(seq 1 "$TRIES"); do
   # made the softmodem run WITHOUT sudo -> couldn't overwrite the root-owned stats log -> assert); and
   # inside the bash -c string a `#` truncates argv (once dropped --thread-pool -> UHD overflows). So
   # all rationale stays HERE, outside the command. Thread pool = 0,1,4,5,6,7 (6 RT cores) leaves
-  # cpu2,3 free; FIFO-97 workers dominate the pool cores so the CFS UHD threads land on 2,3 -- that IS
-  # the UHD isolation. Do not fill 2,3, and do not put comments inside the command.
-  sudo env ISAC_DISC_NO_RESYNC=1  \
+  # cpu2,3 free. isolcpus=domain keeps the balancer from ever moving a thread onto 2,3, so the RF reader
+  # (UEthread) is pinned there explicitly: unpinned, the 6 GSCN-scan workers (RR 97, same prio) took all
+  # six pool cores, the reader never ran, the NIC dropped 88k packets and the X410 stream halted on
+  # 5/5 attempts (2026-09-15). RTCORE=-1 restores unpinned. Do not put comments inside the command.
+  sudo env ISAC_DISC_NO_RESYNC=1 ISAC_UE_RT_CORE=${RTCORE:-2} \
     ISAC_PDCCH_TIMING=1 ISAC_PUSCH_TIMING=1 ISAC_PUSCH_DIAG=1 \
    ${PDCCHTIMING:+ISAC_PDCCH_TIMING=1} ${PUSCHTIMING:+ISAC_PUSCH_TIMING=1} ${PUSCHDIAG:+ISAC_PUSCH_DIAG=1} \
     ISAC_CFO_TRACK_HZ=${CFOTRKHZ:-800} ISAC_CFO_TRACK_PERIOD=20 ${CFOAPPLY:+ISAC_CFO_TRACK_APPLY=1} \
