@@ -43,6 +43,8 @@
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_adaptive_config.h"
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_config_sweep.h" // Phase 3 Technique D
 #include "PHY/NR_UE_TRANSPORT/nr_pdcch_dci11_layout_sweep.h" // DCI 1_1 layout, stage 1
+#include "PHY/NR_UE_TRANSPORT/nr_pdcch_dci01_layout_sweep.h" // DCI 0_1 layout, stage 1
+#include "PHY/NR_UE_TRANSPORT/nr_pdcch_ss_registry.h"        // CORESET/SS registry, observe-only
 #include "PHY/NR_UE_TRANSPORT/nr_csirs_blind_rt.h" // blind CSI-RS search, observe-only
 #include "PHY/NR_UE_TRANSPORT/nr_pdcch_coreset_map.h"      // Phase 3 Technique A cross-check (XCHECK diag)
 
@@ -171,6 +173,113 @@ static bool g_pdsch_sweep_on;
 static nr_dci11_resolver_t g_dci11_resolver;
 static int      g_dci11_state;   /* 0 = not tried, 1 = armed, -1 = unavailable */
 static uint64_t g_dci11_seen;
+
+static inline int nr_pdcch_ss_bucket(const nr_pdcch_blind_monitor_cfg_t *cfg);
+/* ---- DCI 0_1 layout, stage 1 (observe-only, mirrors the 1_1 observer below). The uplink grant's
+ * field widths are set by RRC switches this receiver cannot read; every layout whose total equals
+ * the observed 0_1 length is a hypothesis and each accepted payload prunes by plausibility. */
+static nr_dci11_resolver_t g_dci01_resolver;
+static int g_dci01_state = 0;   /* 0 = not armed, 1 = armed, -1 = no legal layout at this length */
+static uint64_t g_dci01_seen = 0;
+static void nr_pdcch_dci01_layout_observe(uint16_t ul_bwp_size, int ul_tda_count,
+                                          uint16_t dci_length, uint64_t payload)
+{
+  if (g_dci01_state < 0 || dci_length == 0 || ul_bwp_size == 0) {
+    return;
+  }
+  if (g_dci01_state == 0) {
+    const double span = ((double)ul_bwp_size * (double)(ul_bwp_size + 1)) / 2.0;
+    const uint16_t riv_bits = (uint16_t)ceil(log2(span));
+    uint8_t tda_bits = 4;
+    if (ul_tda_count > 0) {
+      tda_bits = 0;
+      while ((1 << tda_bits) < ul_tda_count) {
+        tda_bits++;
+      }
+    }
+    static nr_dci01_layout_t hyp[NR_DCI11_LAYOUT_MAX];
+    static nr_dci11_offsets_t off[NR_DCI11_LAYOUT_MAX];
+    const int n = nr_dci01_layout_enumerate(riv_bits, tda_bits, dci_length, hyp, off, NR_DCI11_LAYOUT_MAX);
+    if (n <= 0 || nr_dci_resolver_init_from_offsets(&g_dci01_resolver, ul_bwp_size, off, n) <= 0) {
+      LOG_W(PHY, "SENSING: DCI01_LAYOUT no legal layout sums to dci_length=%u at ul_bwp_size=%u "
+                 "tda_bits=%u -- one of those three is wrong for this cell\n",
+            dci_length, (unsigned)ul_bwp_size, tda_bits);
+      g_dci01_state = -1;
+      return;
+    }
+    LOG_I(PHY, "SENSING: DCI01_LAYOUT armed: %d layouts consistent with dci_length=%u (riv=%u bits, tda=%u bits)\n",
+          n, dci_length, riv_bits, tda_bits);
+    g_dci01_state = 1;
+  }
+  nr_dci11_resolver_observe(&g_dci01_resolver, payload);
+  if ((++g_dci01_seen % 4000) == 0) {
+    LOG_A(PHY, "SENSING: DCI01_LAYOUT n=%llu observed | %d of %d layouts still plausible\n",
+          (unsigned long long)g_dci01_seen, g_dci01_resolver.n_alive, g_dci01_resolver.n_hyp);
+  }
+}
+
+/* ---- CORESET / search-space registry, observe-only. Each configuration the monitor scans is
+ * registered on first sight; every occasion and accept is attributed to it; a CONFIRMED accept is
+ * one whose RNTI repeated (noise does not repeat). The retire verdict is LOGGED, not acted on. */
+static nr_pdcch_ss_registry_t g_ss_reg;
+static int g_ss_reg_idx[2] = {-1, -1};
+static uint16_t g_ss_recent_rnti[64];
+static unsigned g_ss_recent_w = 0;
+static int nr_pdcch_ss_registry_index(const nr_pdcch_blind_monitor_cfg_t *cfg)
+{
+  if (cfg == NULL || cfg->bwp_size == 0)
+    return -1; // not configured yet (autoconf before MIB/SIB1)
+  const int b = nr_pdcch_ss_bucket(cfg);
+  if (g_ss_reg_idx[b] < 0) {
+    const int nrb = cfg->coreset_freq_domain; // num_groups of 6 contiguous PRBs
+    nr_pdcch_ss_entry_t e = {.coreset_id = (uint8_t)(b == 0 ? 0 : 1),
+                             .coreset_duration = (uint8_t)cfg->coreset_duration,
+                             .coreset_n_rbs = (uint16_t)(nrb * 6),
+                             .ss_type = (uint8_t)(b == 0 ? 0 : 1),
+                             .ss_first_symbol = (uint8_t)cfg->ss_first_symbol,
+                             .ss_period_slots = 1,
+                             .ss_offset_slots = 0,
+                             .bwp_start = (uint16_t)cfg->bwp_start,
+                             .bwp_size = (uint16_t)cfg->bwp_size,
+                             .al_candidates = {0, 1, 1, 1, 0}}; // AL2/4/8 scanned; the census refines per SS
+    g_ss_reg_idx[b] = nr_pdcch_ss_register(&g_ss_reg, &e);
+  }
+  return g_ss_reg_idx[b];
+}
+static void nr_pdcch_ss_registry_accept(const nr_pdcch_blind_monitor_cfg_t *cfg, uint16_t rnti)
+{
+  const int idx = nr_pdcch_ss_registry_index(cfg);
+  if (idx < 0)
+    return;
+  bool repeated = false;
+  for (int i = 0; i < 64; i++)
+    if (g_ss_recent_rnti[i] == rnti) { repeated = true; break; }
+  g_ss_recent_rnti[g_ss_recent_w++ % 64] = rnti;
+  nr_pdcch_ss_observe(&g_ss_reg, idx, true, repeated);
+}
+static void nr_pdcch_ss_registry_occasion(const nr_pdcch_blind_monitor_cfg_t *cfg)
+{
+  const int idx = nr_pdcch_ss_registry_index(cfg);
+  if (idx < 0)
+    return;
+  g_ss_reg.occasions[idx]++;
+  static uint64_t n;
+  if ((++n % 200000) == 0) {
+    char b[400];
+    int u = 0;
+    for (int i = 0; i < g_ss_reg.n && u < (int)sizeof(b) - 60; i++)
+      u += snprintf(b + u, sizeof(b) - u, "[%s cs%u dur%u %uRB sym%u: occ=%llu acc=%llu conf=%llu%s] ",
+                    g_ss_reg.entry[i].ss_type ? "USS" : "CSS0", g_ss_reg.entry[i].coreset_id,
+                    g_ss_reg.entry[i].coreset_duration, g_ss_reg.entry[i].coreset_n_rbs,
+                    g_ss_reg.entry[i].ss_first_symbol, (unsigned long long)g_ss_reg.occasions[i],
+                    (unsigned long long)g_ss_reg.accepts[i], (unsigned long long)g_ss_reg.confirmed[i],
+                    g_ss_reg.retired[i] ? " RETIRED" : "");
+    /* Verdict only: a copy is asked what it WOULD retire; the live registry is never pruned here. */
+    nr_pdcch_ss_registry_t probe = g_ss_reg;
+    const int would = nr_pdcch_ss_retire_barren(&probe, 100000);
+    LOG_A(PHY, "SENSING: SS_REGISTRY live=%d/%d would_retire=%d %s\n", nr_pdcch_ss_live(&g_ss_reg), g_ss_reg.n, would, b);
+  }
+}
 
 static void nr_pdcch_dci11_layout_observe(const nr_pdcch_blind_monitor_cfg_t *cfg,
                                           uint16_t dci_length, uint64_t payload)
@@ -968,9 +1077,12 @@ void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_pr
     if (s_tdd_skip < 0)
       s_tdd_skip = (getenv("ISAC_TDD_SKIP") != NULL) ? 1 : 0;
     static unsigned long s_skipped = 0, s_seen = 0;
-    if (s_tdd_skip && source_absolute_slot >= 0) {
+    if (s_tdd_skip && proc != NULL) {
       s_seen++;
-      if (!nr_passive_acq_tdd_slot_has_downlink((uint32_t)source_absolute_slot)) {
+      /* Frame-aligned slot: the TDD pattern's phase is relative to the frame, and the producer's
+       * ring counter is not (and can be -1 on this path). */
+      const uint32_t frame_slot = (uint32_t)proc->frame_rx * (uint32_t)ue->frame_parms.slots_per_frame + (uint32_t)proc->nr_slot_rx;
+      if (!nr_passive_acq_tdd_slot_has_downlink(frame_slot)) {
         if ((++s_skipped % 20000) == 1)
           LOG_A(PHY, "SENSING: TDD skip: %lu of %lu slots skipped as uplink-only (from SIB1)\n", s_skipped, s_seen);
         return;
@@ -978,6 +1090,7 @@ void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_pr
     }
   }
   const nr_pdcch_blind_monitor_cfg_t *cfg = nr_pdcch_blind_monitor_get_cfg();
+  nr_pdcch_ss_registry_occasion(cfg);
   NR_DL_FRAME_PARMS *fp = &ue->frame_parms;
   nr_pdcch_blind_ul_opts_t ul_opts = cfg->ul;
   ul_opts.phy_cell_id = fp->Nid_cell;
@@ -1945,6 +2058,7 @@ constdiag_done:;
       const nr_pdcch_blind_ul_result_t *u = &cand_task[ti].ul_out;
       if (cand_task[ti].ok) {
         g_ul_accepts++;
+        nr_pdcch_dci01_layout_observe(ul_opts.bwp_size, ul_opts.tda_count, dci01_length, u->raw_payload);
         /* Park it for the slot its PUSCH occupies. The DCI is in a DOWNLINK slot; the PUSCH is k2
          * slots later in an UPLINK one, where nothing runs today. */
         nr_pusch_grant_book_add(u, source_absolute_slot);
@@ -2053,6 +2167,7 @@ constdiag_done:;
         const int li3 = (Lc3 == 1) ? 0 : (Lc3 == 2) ? 1 : (Lc3 == 4) ? 2 : 3;
         atomic_fetch_add_explicit(&g_al_confirmed[nr_pdcch_ss_bucket(cfg)][li3], 1, memory_order_relaxed);
       }
+      nr_pdcch_ss_registry_accept(cfg, raw->rnti);
       if (cfg->autodiscover) {
         const long mono = source_absolute_slot;
         nr_pdcch_blind_monitor_autodiscover_observe(raw->rnti,
