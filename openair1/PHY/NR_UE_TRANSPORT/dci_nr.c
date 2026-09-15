@@ -323,10 +323,11 @@ static void nr_pdcch_channel_compensation(int arraySz,
 
 static void nr_pdcch_detection_mrc(int nb_ant, int sz, c16_t rxdataF_comp[][sz])
 {
-  /* Four-RX rank-one compatibility mode uses branch 0 to avoid overflow in
-   * the fixed-point MRC accumulator. */
-  if (nb_ant == 4)
-    return;
+  /* The four-RX "branch 0 only" skip that used to sit here is GONE (2026-09-15). Measured on the
+   * X410: 1 RX decodes SIB1 on the 5th SI-RNTI candidate, 2 RX (MRC of the two WEAK antennas) on
+   * the 47th, 4 RX single-branch -- branch 0 or the strongest -- 0 in 36k candidates. The loop
+   * below halves both operands before every add, so it cannot overflow at any branch count; the
+   * overflow argument belonged to nr_pbch's plain-adds loop, not to this one. */
 
   /* NOTE -- an "equal-gain, 32-bit accumulator, divide by nb_ant" rewrite of the loop below is a
    * REGRESSION: the output feeds nr_pdcch_llr(), which CLIPS at +/-31, so absolute amplitude --
@@ -668,40 +669,10 @@ static void nr_rx_pdcch_symbol(PHY_VARS_NR_UE *ue,
   LOG_D(NR_PHY_DCI, "in channel level function (dl_ch_estimates_ext -> dl_ch_estimates_ext)\n");
   int avg[fp->nb_antennas_rx];
   nr_channel_level(0, rx_size, pdcch_dl_ch_estimates_ext, fp->nb_antennas_rx, 1, avg, n_rb * RE_PER_RB_OUT_DMRS);
-  /* Four-RX mode decodes ONE branch (see nr_pdcch_detection_mrc()). It was hard-wired to branch 0,
-   * which on the X410 today is the WEAKEST antenna by 15 dB (ANTPOW dB=[-15.4 -13.4 0.0 -2.6]): SIB1
-   * never decoded at 4 RX (0 SI-RNTI hits in 36k CORESET#0 candidates) while 1 RX decoded it on the
-   * 5th candidate (2026-09-15). Pick the branch with the largest channel level instead; avgs and the
-   * decoder input then still refer to the same branch, as the note below requires. */
-  int best_ant = 0;
-  if (fp->nb_antennas_rx == 4) {
-    for (int i = 1; i < 4; i++)
-      if (avg[i] > avg[best_ant])
-        best_ant = i;
-    if (best_ant != 0) {
-      memcpy(rxdataF_ext[0], rxdataF_ext[best_ant], sizeof(c16_t) * rx_size);
-      memcpy(pdcch_dl_ch_estimates_ext[0], pdcch_dl_ch_estimates_ext[best_ant], sizeof(c16_t) * rx_size);
-      avg[0] = avg[best_ant];
-    }
-    static int s_best_log = 8;
-    if (s_best_log > 0) {
-      s_best_log--;
-      LOG_I(NR_PHY_DCI, "SENSING: PDCCH 4-RX single-branch mode using antenna %d (levels %d %d %d %d)\n", best_ant,
-            avg[0], avg[1], avg[2], avg[3]);
-    }
-  }
   int avgs = avg[0];
-  // The four-RX rank-one mode below skips MRC, so ONLY branch 0 reaches nr_pdcch_llr(). The output
-  // shift must then be derived from branch 0 as well: taking the max over all four branches scales
-  // the compensation for a stronger antenna that is not part of the decoder input, right-shifting
-  // branch 0's REs too far and shrinking every LLR. This mirrors the identical correction the
-  // four-RX commit makes in nr_rx_pdsch() (`if (nl == 1 && nbRx == 4) avgs = avg[0];`), which it
-  // did not carry over to PDCCH. Kept in lockstep with nr_pdcch_detection_mrc()'s own nb_ant == 4
-  // early return -- if that condition is ever changed, change it here too or the shift and the
-  // decoder input silently disagree again.
-  if (fp->nb_antennas_rx != 4)
-    for (int i = 1; i < fp->nb_antennas_rx; i++)
-      avgs = cmax(avgs, avg[i]);
+  // All branches are MRC-combined (see nr_pdcch_detection_mrc()), so the shift is the max over them.
+  for (int i = 1; i < fp->nb_antennas_rx; i++)
+    avgs = cmax(avgs, avg[i]); /* every branch is combined now, at 4 RX too */
   const int log2_maxh = (log2_approx(avgs) / 2) + 5; //+frame_parms->nb_antennas_rx;
   int rx_comp_sz = ceil_mod(llr_size_symbol, 4);
   __attribute__((aligned(32))) c16_t rxdataF_comp[fp->nb_antennas_rx][rx_comp_sz];
