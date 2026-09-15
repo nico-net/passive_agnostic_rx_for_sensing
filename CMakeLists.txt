@@ -981,6 +981,7 @@ set(PHY_SRC_UE
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_dci11_layout_sweep.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_dci01_layout_sweep.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_ss_registry.c
+  ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_passive_bwp.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_csirs_blind_search.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_csirs_blind_rt.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_dmrs_id_estimate.c
@@ -2505,6 +2506,13 @@ if(ENABLE_TESTS)
   target_link_libraries(test_nr_pdcch_dci11_layout_sweep PRIVATE UTIL GTest::gtest)
   add_dependencies(tests test_nr_pdcch_dci11_layout_sweep)
   add_test(NAME test_nr_pdcch_dci11_layout_sweep COMMAND ./test_nr_pdcch_dci11_layout_sweep)
+
+  add_executable(test_nr_passive_bwp ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_passive_bwp_test.cc
+                                     ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_passive_bwp.c)
+  target_include_directories(test_nr_passive_bwp PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
+  target_link_libraries(test_nr_passive_bwp PRIVATE GTest::gtest GTest::gtest_main)
+  add_dependencies(tests test_nr_passive_bwp)
+  add_test(NAME test_nr_passive_bwp COMMAND ./test_nr_passive_bwp)
 
   add_executable(test_nr_mrc_weights ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_mrc_weights_test.cc)
   target_include_directories(test_nr_mrc_weights PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)

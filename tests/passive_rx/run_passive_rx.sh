@@ -270,7 +270,9 @@ wait_for() { # wait_for <file> <pattern> <timeout_s> <label>
 
 # --- 1. gNB ------------------------------------------------------------------------------------
 echo "--- starting gNB (SA, rfsim server, open5gs) ---"
-$(pin_for gnb) "$BUILD_DIR/nr-softmodem" -O "$SCRIPT_DIR/$GNB_CONF" --rfsim >"$GNB_LOG" 2>&1 &
+GNB_CONF="${GNB_CONF_OVERRIDE:-$GNB_CONF}"   # e.g. gnb.sa.rfsim.bwp.conf (dedicated-BWP test)
+# GNB_EXTRA: extra gNB flags, e.g. "--telnetsrv --telnetsrv.shrmod ci" for trigger_bwp_switch.
+$(pin_for gnb) "$BUILD_DIR/nr-softmodem" -O "$SCRIPT_DIR/$GNB_CONF" --rfsim ${GNB_EXTRA:-} >"$GNB_LOG" 2>&1 &
 wait_for "$GNB_LOG" "Received NGSetupResponse" 30 "gNB associated with AMF" || exit 1
 # NGAP comes up BEFORE the RU/L1, so the rfsim server socket is not necessarily listening yet.
 # Starting a UE before it is bound leaves that UE stuck in its connect-retry loop.
