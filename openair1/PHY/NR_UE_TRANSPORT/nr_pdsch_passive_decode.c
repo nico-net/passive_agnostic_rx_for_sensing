@@ -1112,8 +1112,11 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
     uint8_t K, L;
     if (nr_ptrs_sweep_arm(ptrs_arm, &K, &L)) {
       dlsch_config->pduBitmap |= 0x1;
+      /* OAI's encoding, NOT the literal densities: PTRSFreqDensity is K (2|4) but PTRSTimeDensity is
+       * log2(L) -- get_L_ptrs() returns 2/1/0 for L = 4/2/1 and nr_pdsch_ptrs_processing() spaces
+       * PT-RS symbols by 1 << PTRSTimeDensity. Writing L literally put L=4 at a 16-symbol spacing. */
       dlsch_config->PTRSFreqDensity = K;
-      dlsch_config->PTRSTimeDensity = L;
+      dlsch_config->PTRSTimeDensity = (L == 4) ? 2 : (L == 2) ? 1 : 0;
       dlsch_config->PTRSPortIndex = 1;
       dlsch_config->PTRSReOffset = 0;
     }
@@ -1126,7 +1129,7 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
       s_ptrs_l = (el && *el) ? atoi(el) : 0;
     }
     int pk = s_ptrs_k, pl = s_ptrs_l;
-    if (ptrs_arm > 0) { pk = dlsch_config->PTRSFreqDensity; pl = dlsch_config->PTRSTimeDensity; }
+    if (ptrs_arm > 0) { uint8_t K = 0, L = 0; nr_ptrs_sweep_arm(ptrs_arm, &K, &L); pk = K; pl = L; } /* the RE count wants literal L */
     if (pk <= 0 || pl <= 0) {
       return out->status; // PT-RS, and no density given to compute G with
     }
@@ -2039,7 +2042,14 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
   harq.first_rx = 1;
 
   const uint64_t pdt_alc = pdtim_on ? pdtim_now() : 0;
-  const uint32_t rx_llr_buf_sz = ALIGNARRAYSIZE(G, 32);
+  /* Sized from the PT-RS-FREE RE count, not from G. G subtracts the PT-RS REs, but the demodulator
+   * emits LLRs by its own per-symbol RE bookkeeping; when a PT-RS hypothesis is wrong for this cell
+   * (the density sweep tries them) the two disagree and nr_dlsch_layer_demapping() overran a G-sized
+   * buffer -- SIGSEGV in memcpy on the first swept grant, OTA 2026-09-15 under gdb. The upper bound
+   * costs a few hundred bytes; the LDPC still reads exactly G. */
+  const uint32_t G_max = nr_get_G(freq_alloc->num_rbs, dlsch_config->number_symbols, nb_re_dmrs, dmrs_len,
+                                  0, cw->qamModOrder, cw->Nl);
+  const uint32_t rx_llr_buf_sz = ALIGNARRAYSIZE(G_max > G ? G_max : G, 32);
   /* Grow-only, and cleared each call: nr_rx_pdsch writes one symbol's worth at a time and the
    * decoder reads G of them, so stale bytes past this grant's G must not be visible. Clearing is
    * the 75 us the measurement above already accounts for; the allocation is what is being removed. */

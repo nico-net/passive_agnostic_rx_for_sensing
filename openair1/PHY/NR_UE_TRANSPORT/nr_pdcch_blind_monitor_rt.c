@@ -207,8 +207,9 @@ static int nr_pdcch_dci11_stage2_candidates(const nr_pdcch_blind_raw_result_t *r
   if (r->n_alive > NR_DCI11_STAGE2_MAX_ALIVE)
     return 0;
   int count = 0;
-  int order[NR_DCI11_LAYOUT_MAX], no = 0;
-  static double sc[NR_DCI11_LAYOUT_MAX];
+  static __thread int order[NR_DCI11_LAYOUT_MAX];
+  static __thread double sc[NR_DCI11_LAYOUT_MAX];
+  int no = 0;
   for (int i = 0; i < r->n_hyp; i++)
     if (r->alive[i]) { sc[i] = nr_dci11_resolver_score(r, i); order[no++] = i; }
   for (int a = 1; a < no; a++)          /* insertion sort, n_alive <= NR_DCI11_STAGE2_MAX_ALIVE */
@@ -2301,17 +2302,19 @@ constdiag_done:;
               (unsigned long)raw->payload, raw->mismatched_bits);
       nr_pdcch_dci11_layout_observe(cfg, cand_task[ti].dci_length, raw->payload);
       if (!g_pdsch_sweep_on) continue;
-      nr_pdcch_blind_result_t layouts[NR_DCI11_LAYOUT_MAX];
-      uint8_t layout_ids[NR_DCI11_LAYOUT_MAX];
+      /* Sized by the hand-over, NOT by the resolver's 512-entry capacity: this runs on a scan
+       * consumer's stack, and 512 results there overflowed it on the first DL grant (OTA 2026-09-15). */
+      nr_pdcch_blind_result_t layouts[NR_DCI11_STAGE2_MAX_ALIVE + 3];
+      uint8_t layout_ids[NR_DCI11_STAGE2_MAX_ALIVE + 3];
       int n = 0;
       if ((nr_pdcch_dci11_stage2_enabled() || nr_agnostic_v2()) && g_dci11_state == 1)
-        n = nr_pdcch_dci11_stage2_candidates(raw, cand_task[ti].dci_length, cfg, layouts, layout_ids, NR_DCI11_LAYOUT_MAX);
+        n = nr_pdcch_dci11_stage2_candidates(raw, cand_task[ti].dci_length, cfg, layouts, layout_ids, NR_DCI11_STAGE2_MAX_ALIVE);
       const bool from_stage2 = (n > 0);
       if (!n)
         n = nr_pdcch_blind_dl_layout_candidates(raw, cand_task[ti].dci_length,
             cfg->bwp_size, cfg->dmrs_typeA_position, layouts, layout_ids);
       if (!n) continue;
-      uint64_t keys[NR_DCI11_LAYOUT_MAX];
+      uint64_t keys[NR_DCI11_STAGE2_MAX_ALIVE + 3];
       int settled=-1, n_settled=0;
       for (int i=0;i<n;++i) {
         keys[i]=(g_pdsch_configuration ^ (uint64_t)(layout_ids[i]+1)) * UINT64_C(1099511628211);
@@ -2329,7 +2332,7 @@ constdiag_done:;
        * over one that never has: reject-only, evidence-led, and it collapses to the old behaviour
        * while no family has evidence. Ties (both decoding) still rotate. */
       int preferred=-1; uint32_t preferred_ok=0;
-      uint32_t ts_ok[NR_DCI11_LAYOUT_MAX], ts_tr[NR_DCI11_LAYOUT_MAX];
+      uint32_t ts_ok[NR_DCI11_STAGE2_MAX_ALIVE + 3], ts_tr[NR_DCI11_STAGE2_MAX_ALIVE + 3];
       for (int i=0;i<n;++i) {
         uint32_t ok=0,tr=0;
         nr_pdsch_config_sweep_context_stats(keys[i],raw->rnti,layouts[i].tda_index,cfg->dmrs_typeA_position,&ok,&tr);
@@ -2352,7 +2355,7 @@ constdiag_done:;
          * first; that order becomes a small prior so the first grants go to the stage-1 favourite. */
         static __thread uint64_t s_rng = 0;
         if (s_rng == 0) s_rng = 0x9E3779B97F4A7C15ULL ^ (uint64_t)(uintptr_t)&s_rng;
-        double prior[NR_DCI11_LAYOUT_MAX];
+        double prior[NR_DCI11_STAGE2_MAX_ALIVE + 3];
         for (int i=0;i<n;++i) prior[i] = from_stage2 ? 2.0 * (double)(n - i) / (double)n : 0.0;
         fallback = nr_dci11_thompson_pick(ts_ok, ts_tr, prior, n, &s_rng);
         if (fallback < 0) fallback = 0;
