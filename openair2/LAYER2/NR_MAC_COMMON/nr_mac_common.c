@@ -3257,9 +3257,8 @@ uint16_t nr_dci_size(const NR_UE_DL_BWP_t *DL_BWP,
       size += 8;
       // TB2
       long *maxCWperDCI = pdsch_Config ? pdsch_Config->maxNrofCodeWordsScheduledByDCI : NULL;
-      if (maxCWperDCI && (*maxCWperDCI == NR_PDSCH_Config__maxNrofCodeWordsScheduledByDCI_n2)) {
-        size += 8;
-      }
+      const int tb2_bits = (maxCWperDCI && (*maxCWperDCI == NR_PDSCH_Config__maxNrofCodeWordsScheduledByDCI_n2)) ? 8 : 0;
+      size += tb2_bits;
       // HARQ process number – 5 bits if higher layer parameter harq-ProcessNumberSizeDCI-1-1 is configured;
       // otherwise 4 bits. Spec 38.212 Section 7.3.1.2.2
       dci_pdu->harq_pid.nbits = num_dlharqbits;
@@ -3312,6 +3311,21 @@ uint16_t nr_dci_size(const NR_UE_DL_BWP_t *DL_BWP,
       }
       // DMRS sequence init
       size += 1;
+      {
+        /* Ground truth for the passive receiver's DCI-layout search (2026-09-15): the widths this
+         * cell actually uses, once per distinct total. Shared MAC code, so the gNB prints it too. */
+        static int s_logged_size = -1;
+        if (s_logged_size != size) {
+          s_logged_size = size;
+          LOG_A(NR_MAC, "DCI11_WIDTHS total=%d carrier=%d bwp=%d fdra=%d tda=%d vrb=%d bundl=%d rm=%d zp=%d tb2=%d harq=%d dai=%d k1=%d ant=%d tci=%d srs=%d cbg=%d cbgfi=%d\n",
+                size, dci_pdu->carrier_indicator.nbits, dci_pdu->bwp_indicator.nbits, dci_pdu->frequency_domain_assignment.nbits,
+                dci_pdu->time_domain_assignment.nbits, dci_pdu->vrb_to_prb_mapping.nbits, dci_pdu->prb_bundling_size_indicator.nbits,
+                dci_pdu->rate_matching_indicator.nbits, dci_pdu->zp_csi_rs_trigger.nbits, tb2_bits,
+                dci_pdu->harq_pid.nbits, dci_pdu->dai[0].nbits, dci_pdu->pdsch_to_harq_feedback_timing_indicator.nbits,
+                dci_pdu->antenna_ports.nbits, dci_pdu->transmission_configuration_indication.nbits, dci_pdu->srs_request.nbits,
+                dci_pdu->cbgti.nbits, dci_pdu->cbgfi.nbits);
+        }
+      }
       break;
 
     case NR_DL_DCI_FORMAT_2_0:

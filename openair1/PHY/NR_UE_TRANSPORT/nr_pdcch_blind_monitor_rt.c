@@ -220,10 +220,23 @@ static int nr_pdcch_dci11_stage2_candidates(const nr_pdcch_blind_raw_result_t *r
   int no = 0;
   for (int i = 0; i < r->n_hyp; i++)
     if (r->alive[i]) { sc[i] = nr_dci11_resolver_score(r, i); order[no++] = i; }
-  for (int a = 1; a < no; a++)          /* insertion sort, n_alive <= NR_DCI11_STAGE2_MAX_ALIVE */
-    for (int b = a; b > 0 && sc[order[b]] > sc[order[b - 1]]; b--) {
-      const int t = order[b]; order[b] = order[b - 1]; order[b - 1] = t;
-    }
+  if (no <= NR_DCI11_STAGE2_MAX_ALIVE) {
+    for (int a = 1; a < no; a++)          /* insertion sort: a small set is offered best-scored first */
+      for (int b = a; b > 0 && sc[order[b]] > sc[order[b - 1]]; b--) {
+        const int t = order[b]; order[b] = order[b - 1]; order[b - 1] = t;
+      }
+  } else {
+    /* WIDE SET: ROTATE, do not rank. Measured on the rank-4 bed (883 live, constant phy-test DCI):
+     * every offset reads a constant field, so the distributional score ranks nothing, and offering
+     * the same top-8 by that score on every grant meant the true layout was never tried (12k probes,
+     * 0 hits). A rotating window gives every live layout its probe within n_alive/max grants. */
+    static _Atomic uint32_t s_rot;
+    const uint32_t start = atomic_fetch_add_explicit(&s_rot, (uint32_t)max, memory_order_relaxed) % (uint32_t)no;
+    for (int k = 0; k < no; k++) sc[order[k]] = 0.0; /* order[] rotated below; scores unused */
+    static __thread int rot[NR_DCI11_LAYOUT_MAX];
+    for (int k = 0; k < no; k++) rot[k] = order[(start + k) % no];
+    memcpy(order, rot, (size_t)no * sizeof(order[0]));
+  }
   /* Above the hand-over limit only `max` of the live set fit one grant's trial list; rotate the
    * window over the score-sorted list so every hypothesis gets probed, best ones most often. */
   static __thread int s_rot = 0;
