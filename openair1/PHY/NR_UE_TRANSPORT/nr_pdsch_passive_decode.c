@@ -395,6 +395,7 @@ static _Atomic uint64_t g_ldpc_seg_fail = 0;
 static _Atomic uint64_t g_ldpc_tb_fail  = 0;
 static _Atomic uint64_t g_ldpc_zero_tb  = 0;
 static _Atomic uint64_t g_ldpc_ok       = 0;
+static _Atomic uint64_t g_fep_hit = 0, g_fep_miss = 0, g_chest_hit = 0, g_chest_miss = 0; // per-slot sharing
 static _Atomic uint64_t g_ldpc_iface_err = 0;
 static _Atomic uint64_t g_seg_ok_sum    = 0; // segments that decoded, summed over failing TBs
 static _Atomic uint64_t g_seg_tot_sum   = 0; // C, summed over the same TBs
@@ -436,6 +437,9 @@ static const char *const kPipeName[PIPE_N_FIELDS] = {
 void nr_pdsch_passive_ldpc_stats_dump(void)
 {
   const uint64_t sf = atomic_load(&g_ldpc_seg_fail), tf = atomic_load(&g_ldpc_tb_fail);
+  LOG_I(PHY, "SENSING: SLOTSHARE fep hit/miss=%lu/%lu chest hit/miss=%lu/%lu\n",
+        (unsigned long)atomic_load(&g_fep_hit), (unsigned long)atomic_load(&g_fep_miss),
+        (unsigned long)atomic_load(&g_chest_hit), (unsigned long)atomic_load(&g_chest_miss));
   const uint64_t zt = atomic_load(&g_ldpc_zero_tb), ok = atomic_load(&g_ldpc_ok);
   const uint64_t ie = atomic_load(&g_ldpc_iface_err);
   const uint64_t so = atomic_load(&g_seg_ok_sum), st = atomic_load(&g_seg_tot_sum);
@@ -1080,6 +1084,27 @@ static void nr_slot_fep_ant_task(void *arg)
   completed_task_ans(a->ans);
 }
 
+/* ---- PER-SLOT SHARING (2026-09-15). The queue consumer dequeues every grant of one slot as a
+ * group and tells the decoder so: FEP is then done ONCE for the whole slot, and the channel
+ * estimate ONCE over the union of the group's RB ranges (when the DM-RS configuration matches),
+ * with later grants of the group reusing both. Measured before: fep 102 us + chest 324 us of a
+ * ~0.7 ms grant, repeated per grant -- and grants per slot is what grows with UE count.
+ * All state is thread-local; the caches are keyed on the slot and on the DM-RS configuration, so
+ * a mismatch simply misses. ponytail: one-entry caches, a ring of slots if consumers ever
+ * interleave slots within a thread. */
+typedef struct { int on; int rb_lo, rb_n; } nr_pdsch_slot_share_t;
+static __thread nr_pdsch_slot_share_t t_share = {0, 0, 0};
+static __thread struct { long slot; double fo; int valid; } t_fep_cache = {0, 0.0, 0};
+static __thread struct {
+  long slot; uint16_t dmrs_pos; uint8_t cfg_type, nscid, ports_lo, cdm, nl; uint16_t scr;
+  int rb_lo, rb_n; uint32_t nvar, nvar_den; int n_dmrs_sym, dmrs_first, dmrs_last; int valid;
+} t_chest_cache = {0};
+
+void nr_pdsch_passive_set_slot_share(int on, int rb_lo, int rb_n)
+{
+  t_share.on = on; t_share.rb_lo = rb_lo; t_share.rb_n = rb_n;
+}
+
 nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
                                                          const UE_nr_rxtx_proc_t *proc,
                                                          fapi_nr_dl_config_dlsch_pdu_rel15_t *dlsch_config,
@@ -1293,7 +1318,14 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
   const double fep_fo = isnan(nr_slot_fep_fo_override_hz)
       ? (ue->cont_fo_comp ? ue->dl_Doppler_shift + ue->freq_offset : 0.0)
       : nr_slot_fep_fo_override_hz;
-  if (fp->nb_antennas_rx > 1) {
+  const long share_slot = grant->source_absolute_slot;
+  const int fep_hit = t_share.on && t_fep_cache.valid && t_fep_cache.slot == share_slot && t_fep_cache.fo == fep_fo;
+  const int fep_s0 = t_share.on ? 0 : dlsch_config->start_symbol;
+  const int fep_n  = t_share.on ? fp->symbols_per_slot : dlsch_config->number_symbols;
+  atomic_fetch_add(fep_hit ? &g_fep_hit : &g_fep_miss, 1);
+  if (fep_hit) {
+    /* same slot, same offset: this thread transformed it for the previous grant of the group */
+  } else if (fp->nb_antennas_rx > 1) {
     nr_slot_fep_ant_task_t fep_tasks[fp->nb_antennas_rx];
     task_ans_t fep_ans;
     init_task_ans(&fep_ans, fp->nb_antennas_rx);
@@ -1301,8 +1333,8 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
       fep_tasks[ant] = (nr_slot_fep_ant_task_t){.fo_hz = fep_fo, .ue = ue,
                                                 .fp = fp,
                                                 .slot = proc->nr_slot_rx,
-                                                .start_symbol = dlsch_config->start_symbol,
-                                                .number_symbols = dlsch_config->number_symbols,
+                                                .start_symbol = fep_s0,
+                                                .number_symbols = fep_n,
                                                 .ant = ant,
                                                 .rxdataF_flat = &rxdataF[0][0],
                                                 .stride = fp->samples_per_slot_wCP,
@@ -1313,9 +1345,12 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
     }
     join_task_ans(&fep_ans);
   } else {
-    for (int m = dlsch_config->start_symbol; m < dlsch_config->start_symbol + dlsch_config->number_symbols; m++) {
+    for (int m = fep_s0; m < fep_s0 + fep_n; m++) {
       nr_slot_fep(ue, fp, proc->nr_slot_rx, m, rxdataF, link_type_dl, 0, ue->common_vars.rxdata);
     }
+  }
+  if (!fep_hit) {
+    t_fep_cache.slot = share_slot; t_fep_cache.fo = fep_fo; t_fep_cache.valid = t_share.on;
   }
   pdtim_add(PDTIM_FEP, pdt_fep);
 
@@ -1355,7 +1390,7 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
    * dim2 is the stride and is already constant. */
   allocCast2D(pdsch_dl_ch_estimates, int32_t, toFree, fp->nb_antennas_rx * NR_MAX_NB_LAYERS, pdsch_est_size, true);
 
-  uint32_t nvar = 0;
+  uint32_t nvar = 0, nvar_den = 1u; // nvar_den: hoisted divisor, also cached by the slot-share
   int n_dmrs_sym = 0;
   /* XANT (ISAC_XANT=1, default off): time-domain cross-correlation of antenna a vs antenna 0 over
    * +/-3000 sample lags, on this slot's samples, once every ~60 s. A peak away from lag 0 is a stream
@@ -1400,7 +1435,29 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
     }
   }
   int dmrs_first = -1, dmrs_last = -1; // for the per-branch phase-slope estimator below
-  for (int m = dlsch_config->start_symbol; m < dlsch_config->start_symbol + dlsch_config->number_symbols; m++) {
+  const int chest_hit = t_share.on && t_chest_cache.valid && t_chest_cache.slot == share_slot
+      && t_chest_cache.dmrs_pos == dlsch_config->dlDmrsSymbPos && t_chest_cache.cfg_type == dlsch_config->dmrsConfigType
+      && t_chest_cache.nscid == dlsch_config->nscid && t_chest_cache.ports_lo == (uint8_t)dlsch_config->dmrs_ports
+      && t_chest_cache.cdm == dlsch_config->n_dmrs_cdm_groups && t_chest_cache.nl == cw->Nl
+      && t_chest_cache.scr == dlsch_config->dlDmrsScramblingId
+      && t_chest_cache.rb_lo <= (int)freq_alloc->first_rb
+      && (int)(freq_alloc->first_rb + freq_alloc->num_rbs) <= t_chest_cache.rb_lo + t_chest_cache.rb_n;
+  atomic_fetch_add(chest_hit ? &g_chest_hit : &g_chest_miss, 1);
+  /* On a miss, estimate over the group's union of RBs so the slot's next grant can reuse it. */
+  fapi_nr_dl_config_dlsch_pdu_rel15_t chest_cfg = *dlsch_config;
+  freq_alloc_bitmap_t chest_alloc = *freq_alloc;
+  if (t_share.on && t_share.rb_n > 0 && !chest_hit) {
+    const int lo = t_share.rb_lo < (int)freq_alloc->first_rb ? t_share.rb_lo : (int)freq_alloc->first_rb;
+    const int hi0 = t_share.rb_lo + t_share.rb_n, hi1 = (int)(freq_alloc->first_rb + freq_alloc->num_rbs);
+    const int hi = hi0 > hi1 ? hi0 : hi1;
+    chest_alloc = set_bitmap_from_start_size(lo, hi - lo);
+    chest_cfg.start_rb = lo; chest_cfg.number_rbs = hi - lo;
+  }
+  if (chest_hit) {
+    nvar = t_chest_cache.nvar; nvar_den = t_chest_cache.nvar_den; n_dmrs_sym = t_chest_cache.n_dmrs_sym;
+    dmrs_first = t_chest_cache.dmrs_first; dmrs_last = t_chest_cache.dmrs_last;
+  }
+  for (int m = dlsch_config->start_symbol; !chest_hit && m < dlsch_config->start_symbol + dlsch_config->number_symbols; m++) {
     if (!((dlsch_config->dlDmrsSymbPos >> m) & 1)) {
       continue;
     }
@@ -1411,7 +1468,7 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
     for (int nl = 0; nl < cw->Nl; nl++) { // mirrors nr_ue_pdsch_procedures()'s per-layer loop
       uint32_t nvar_tmp = 0;
       nr_dl_chest_diag_request = 1; // consumer thread only: BRDELAY/PDP diagnostics
-      nr_pdsch_channel_estimation(ue, proc, dlsch_config, freq_alloc, nl,
+      nr_pdsch_channel_estimation(ue, proc, &chest_cfg, &chest_alloc, nl,
                                   get_dmrs_port(nl, dlsch_config->dmrs_ports), (unsigned char)m, pdsch_est_size,
                                   pdsch_dl_ch_estimates, fp->samples_per_slot_wCP, rxdataF, &nvar_tmp);
       nvar += nvar_tmp;
@@ -1420,6 +1477,10 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
   }
   if (n_dmrs_sym == 0) {
     return out->status; // no DM-RS in the allocation: nothing to equalise against
+  }
+  if (chest_hit) {
+    pdtim_add(PDTIM_CHEST, pdt_che);
+    goto chest_done;
   }
   /* ---- TIME INTERPOLATION OF THE CHANNEL ESTIMATE (ISAC_CHEST_TINTERP=1, default off) ----------
    * nr_rx_pdsch() equalises each data symbol against the PREVIOUS DM-RS symbol's estimate
@@ -1495,7 +1556,6 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
    * which carries the identical arithmetic -- this is upstream OAI behaviour, not a local slip, and
    * the attached path's gates were tuned against it. Flip it only on an alternated >= 5-run-per-arm
    * A/B at comparable offered load (19.3), never on inspection. */
-  uint32_t nvar_den = 1u; // hoisted: the per-branch substitution below must reuse the SAME divisor
   {
     static int s_nvfix = -1;
     if (s_nvfix < 0) {
@@ -1544,6 +1604,15 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
   }
 
   pdtim_add(PDTIM_CHEST, pdt_che);
+  t_chest_cache.slot = share_slot; t_chest_cache.dmrs_pos = dlsch_config->dlDmrsSymbPos;
+  t_chest_cache.cfg_type = dlsch_config->dmrsConfigType; t_chest_cache.nscid = dlsch_config->nscid;
+  t_chest_cache.ports_lo = (uint8_t)dlsch_config->dmrs_ports; t_chest_cache.cdm = dlsch_config->n_dmrs_cdm_groups;
+  t_chest_cache.nl = cw->Nl; t_chest_cache.scr = dlsch_config->dlDmrsScramblingId;
+  t_chest_cache.rb_lo = chest_alloc.first_rb; t_chest_cache.rb_n = chest_alloc.num_rbs;
+  t_chest_cache.nvar = nvar; t_chest_cache.nvar_den = nvar_den; t_chest_cache.n_dmrs_sym = n_dmrs_sym;
+  t_chest_cache.dmrs_first = dmrs_first; t_chest_cache.dmrs_last = dmrs_last;
+  t_chest_cache.valid = t_share.on;
+chest_done:
 
   /* ---- PER-BRANCH FREQUENCY-OFFSET ESTIMATE (2026-09-03) --------------------------------------
    * THE measurement that decides why branches 1-3 are undecodable. Selection diversity established

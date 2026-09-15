@@ -79,6 +79,9 @@ static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t  g_cv   = PTHREAD_COND_INITIALIZER;
 
 static _Atomic uint64_t g_queued        = 0;
+static _Atomic uint64_t g_slot_groups   = 0; ///< dequeues that took >1 grant of one slot
+#define NR_PDSCH_PASSIVE_SLOT_GROUP_MAX 8
+void nr_pdsch_passive_set_slot_share(int on, int rb_lo, int rb_n);
 static _Atomic uint64_t g_decoded       = 0;
 static _Atomic uint64_t g_crc_ok        = 0;
 /* DL DM-RS identity estimate: one process-wide accumulator shared by every consumer, so evidence
@@ -216,7 +219,31 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
     job    = g_ring[g_tail];
     g_tail = (g_tail + 1) % g_depth;
     g_count--;
+    /* SLOT GROUP: also take every queued job of the SAME slot (the producer enqueues a slot's
+     * grants contiguously), so this thread does that slot's FEP and channel estimate once. */
+    nr_pdsch_passive_job_t more[NR_PDSCH_PASSIVE_SLOT_GROUP_MAX];
+    int n_more = 0;
+    while (g_count > 0 && n_more < NR_PDSCH_PASSIVE_SLOT_GROUP_MAX
+           && g_ring[g_tail].absolute_slot == job.absolute_slot) {
+      more[n_more++] = g_ring[g_tail];
+      g_tail = (g_tail + 1) % g_depth;
+      g_count--;
+    }
     pthread_mutex_unlock(&g_lock);
+    /* Union of RBs over the group members whose DM-RS configuration matches the head job's. */
+    int rb_lo = job.freq_alloc.first_rb, rb_hi = job.freq_alloc.first_rb + job.freq_alloc.num_rbs;
+    for (int k = 0; k < n_more; k++) {
+      const fapi_nr_dl_config_dlsch_pdu_rel15_t *a = &job.dlsch_pdu, *b = &more[k].dlsch_pdu;
+      if (a->dlDmrsSymbPos != b->dlDmrsSymbPos || a->dmrsConfigType != b->dmrsConfigType
+          || a->nscid != b->nscid || a->dmrs_ports != b->dmrs_ports || a->n_dmrs_cdm_groups != b->n_dmrs_cdm_groups
+          || a->dlDmrsScramblingId != b->dlDmrsScramblingId)
+        continue;
+      const int lo = more[k].freq_alloc.first_rb, hi = lo + more[k].freq_alloc.num_rbs;
+      if (lo < rb_lo) rb_lo = lo;
+      if (hi > rb_hi) rb_hi = hi;
+    }
+    nr_pdsch_passive_set_slot_share(n_more > 0, rb_lo, rb_hi - rb_lo);
+    if (n_more > 0) atomic_fetch_add_explicit(&g_slot_groups, 1, memory_order_relaxed);
 
     /* ---- STALENESS CHECK. A job's raw IQ lives in rxdata only until the producer reaches the SAME
      * slot index one frame later, so decoding after that reads the NEXT frame's samples: the CRC
@@ -233,6 +260,8 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
       continue;
     }
 
+    for (int gi = -1; gi < n_more; gi++) {
+    if (gi >= 0) job = more[gi];
     /* Only these three proc fields are read downstream -- verified by inspecting every proc->
      * reference in nr_dl_channel_estimation.c, nr_dlsch_demodulation.c and nr_pdsch_data_aided.c. */
     UE_nr_rxtx_proc_t proc = {0};
@@ -373,6 +402,7 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
         }
       }
     }
+    } /* slot group */
   }
 
   LOG_I(PHY, "SENSING: passive PDSCH decode consumer %d exiting\n", idx);
@@ -496,6 +526,7 @@ void nr_pdsch_passive_queue_get_stats(nr_pdsch_passive_queue_stats_t *out)
   out->dropped_full  = atomic_load_explicit(&g_dropped_full, memory_order_relaxed);
   out->dropped_stale = atomic_load_explicit(&g_dropped_stale, memory_order_relaxed);
   out->max_lag_slots = atomic_load_explicit(&g_max_lag, memory_order_relaxed);
+  out->slot_groups   = atomic_load_explicit(&g_slot_groups, memory_order_relaxed);
 }
 
 void nr_pdsch_passive_queue_stop(void)

@@ -116,6 +116,7 @@ typedef struct {
   uint64_t dropped_full;   ///< producer found the ring full: the consumers are not keeping up
   uint64_t dropped_stale;  ///< dequeued too late; rxdata for that slot was already overwritten
   uint64_t max_lag_slots;  ///< worst observed producer-minus-job lag, in slots
+  uint64_t slot_groups;    ///< dequeues that took >1 grant of one slot (FEP/chest shared)
 } nr_pdsch_passive_queue_stats_t;
 
 /**

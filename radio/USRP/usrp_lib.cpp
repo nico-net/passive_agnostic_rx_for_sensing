@@ -1721,15 +1721,26 @@ static bool is_equal(double a, double b) {
   return std::fabs(a-b) < std::numeric_limits<double>::epsilon();
 }
 
+/* Retune EVERY RX channel. set_rx_freq(req) without a channel tunes UHD channel 0 only, so after
+ * the first CFO retune antennas 1..N-1 stayed at the old frequency: measured OTA 2026-09-15 as
+ * BRANCHFO d_vs_br0 = [0 588 653 652] Hz on the X410, which is why 4-RX MRC never combined. */
+static void usrp_set_rx_freq_all(usrp_state_t *s, const openair0_config_t *cfg)
+{
+  const int n = cfg->rx_num_channels > 0 ? cfg->rx_num_channels : 1;
+  for (int i = 0; i < n; i++) {
+    const double f = cfg->rx_freq[i] > 0.0 ? cfg->rx_freq[i] : cfg->rx_freq[0];
+    uhd::tune_request_t req(f, cfg->tune_offset);
+    s->usrp->set_rx_freq(req, i);
+  }
+}
+
 void *freq_thread(void *arg) {
   openair0_device_t *device=(openair0_device_t *)arg;
   usrp_state_t *s = (usrp_state_t *)device->priv;
   uhd::tune_request_t tx_tune_req(device->openair0_cfg[0].tx_freq[0],
                                   device->openair0_cfg[0].tune_offset);
-  uhd::tune_request_t rx_tune_req(device->openair0_cfg[0].rx_freq[0],
-                                  device->openair0_cfg[0].tune_offset);
   s->usrp->set_tx_freq(tx_tune_req);
-  s->usrp->set_rx_freq(rx_tune_req);
+  usrp_set_rx_freq_all(s, &device->openair0_cfg[0]);
   return NULL;
 }
 /*! \brief Set frequencies (TX/RX). Spawns a thread to handle the frequency change to not block the calling thread
@@ -1744,9 +1755,8 @@ int trx_usrp_set_freq(openair0_device_t *device, openair0_config_t *openair0_cfg
   printf("Setting USRP TX Freq %f, RX Freq %f, tune_offset: %f\n", openair0_cfg[0].tx_freq[0], openair0_cfg[0].rx_freq[0], openair0_cfg[0].tune_offset);
 
   uhd::tune_request_t tx_tune_req(openair0_cfg[0].tx_freq[0], openair0_cfg[0].tune_offset);
-  uhd::tune_request_t rx_tune_req(openair0_cfg[0].rx_freq[0], openair0_cfg[0].tune_offset);
   s->usrp->set_tx_freq(tx_tune_req);
-  s->usrp->set_rx_freq(rx_tune_req);
+  usrp_set_rx_freq_all(s, &openair0_cfg[0]);
 
   return(0);
 }
@@ -1762,9 +1772,8 @@ int openair0_set_rx_frequencies(openair0_device_t *device, openair0_config_t *op
   uhd::tune_request_t rx_tune_req(openair0_cfg[0].rx_freq[0], openair0_cfg[0].tune_offset);
   printf("In openair0_set_rx_frequencies, freq: %f, tune offset: %f\n",
          openair0_cfg[0].rx_freq[0],  openair0_cfg[0].tune_offset);
-  //rx_tune_req.rf_freq_policy = uhd::tune_request_t::POLICY_MANUAL;
-  //rx_tune_req.rf_freq = openair0_cfg[0].rx_freq[0];
-  s->usrp->set_rx_freq(rx_tune_req);
+  (void)rx_tune_req;
+  usrp_set_rx_freq_all(s, &openair0_cfg[0]);
   return(0);
 }
 
