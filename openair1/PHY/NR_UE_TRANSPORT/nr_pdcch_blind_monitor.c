@@ -66,6 +66,7 @@
 #include <string.h>
 
 #include "common/config/config_userapi.h"
+#include <sys/stat.h>
 #include "common/utils/LOG/log.h"
 #include "common/utils/nr/nr_common.h"
 
@@ -3427,6 +3428,7 @@ static bool common_tda_valid(int count, const uint8_t *start, const uint8_t *len
     if (!length[i] || start[i]+length[i]>14 || mapping[i]>1) return false;
   return true;
 }
+static void sib1_cache_store(const nr_pdcch_blind_common_config_t *f);
 bool nr_pdcch_blind_publish_common(const nr_pdcch_blind_common_config_t *f)
 {
   if (!f || f->pci>1007 || !f->dl_bwp_size || f->dl_bwp_start+f->dl_bwp_size>275
@@ -3439,6 +3441,8 @@ bool nr_pdcch_blind_publish_common(const nr_pdcch_blind_common_config_t *f)
   common_facts=*f;
   common_facts_valid=true;
   pthread_mutex_unlock(&common_facts_lock);
+  if(changed)
+    sib1_cache_store(f);
   if(changed)
     LOG_I(PHY,"PASSIVE: SIB1 common facts PCI=%u DL-BWP=%u+%u DL-TDAs=%u "
               "UL-BWP=%u+%u UL-TDAs=%u; dedicated config remains a hypothesis\n",
@@ -3467,13 +3471,68 @@ bool nr_pdcch_blind_publish_common(const nr_pdcch_blind_common_config_t *f)
   }
   return true;
 }
+/* SIB1 facts cache, per PCI. OAI's own SI-RNTI path decodes SIB1 on about half of the X410
+ * acquisitions (2026-09-15: 0 hits in 31k CORESET#0 candidates with PBCH at 50/50, on the same cell
+ * that decoded SIB1 at once one attempt earlier). A real receiver keeps SIB1 per cell too. The
+ * cached facts are loaded only when the live ones are absent, are logged as CACHED, and stay what
+ * they always were: a hypothesis the TB CRC judges. ISAC_SIB1_CACHE=0 disables; the path is
+ * ISAC_SIB1_CACHE_DIR (default /tmp/passive_rx). */
+static void sib1_cache_path(uint16_t pci, char *out, size_t n)
+{
+  const char *dir = getenv("ISAC_SIB1_CACHE_DIR");
+  snprintf(out, n, "%s/sib1_common_pci%u.bin", dir && dir[0] ? dir : "/tmp/passive_rx", pci);
+}
+static bool sib1_cache_enabled(void)
+{
+  const char *e = getenv("ISAC_SIB1_CACHE");
+  return e == NULL || atoi(e) != 0;
+}
+static void sib1_cache_store(const nr_pdcch_blind_common_config_t *f)
+{
+  if (!sib1_cache_enabled()) return;
+  char path[256];
+  sib1_cache_path(f->pci, path, sizeof(path));
+  FILE *fp = fopen(path, "wb");
+  if (fp == NULL) { mkdir("/tmp/passive_rx", 0777); fp = fopen(path, "wb"); }
+  if (fp == NULL) return;
+  const uint32_t magic = 0x53494231u; /* "SIB1" */
+  fwrite(&magic, sizeof(magic), 1, fp);
+  fwrite(f, sizeof(*f), 1, fp);
+  fclose(fp);
+}
+static bool sib1_cache_load(uint16_t pci, nr_pdcch_blind_common_config_t *f)
+{
+  if (!sib1_cache_enabled()) return false;
+  char path[256];
+  sib1_cache_path(pci, path, sizeof(path));
+  FILE *fp = fopen(path, "rb");
+  if (fp == NULL) return false;
+  uint32_t magic = 0;
+  const bool ok = fread(&magic, sizeof(magic), 1, fp) == 1 && magic == 0x53494231u
+                  && fread(f, sizeof(*f), 1, fp) == 1 && f->pci == pci;
+  fclose(fp);
+  return ok;
+}
 bool nr_pdcch_blind_get_common(uint16_t pci, nr_pdcch_blind_common_config_t *f)
 {
   if (!f) return false;
   pthread_mutex_lock(&common_facts_lock);
-  const bool ok=common_facts_valid && common_facts.pci==pci;
+  bool ok=common_facts_valid && common_facts.pci==pci;
   if(ok) *f=common_facts; else memset(f,0,sizeof(*f));
   pthread_mutex_unlock(&common_facts_lock);
+  if (!ok) {
+    static uint16_t s_tried_pci = 0xFFFF;
+    if (s_tried_pci != pci) {
+      s_tried_pci = pci;
+      nr_pdcch_blind_common_config_t c;
+      if (sib1_cache_load(pci, &c)) {
+        LOG_A(PHY, "PASSIVE: SIB1 common facts for PCI %u loaded from CACHE (live SIB1 not decoded yet): "
+                   "DL-BWP=%u+%u DL-TDAs=%u UL-BWP=%u+%u UL-TDAs=%u -- hypothesis, TB CRC decides\n",
+              pci, c.dl_bwp_start, c.dl_bwp_size, c.dl_count, c.ul_bwp_start, c.ul_bwp_size, c.ul_count);
+        if (nr_pdcch_blind_publish_common(&c)) { *f = c; ok = true; }
+      }
+    }
+  }
   return ok;
 }
 void nr_pdcch_blind_reset_common(void)
