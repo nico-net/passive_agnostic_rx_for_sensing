@@ -96,8 +96,11 @@ static void cuda_prepare_segment(void *arg)
     memset(z + Kprime, 127, s->F * sizeof(*z));                      /* filler bits */
     memcpy(z + 2 * Z, s->d, (Kprime - 2 * Z) * sizeof(*z));          /* coded bits before the filler */
     memcpy(z + K, s->d + (K - 2 * Z), (s->Kc * Z - K) * sizeof(*z)); /* skip the filler */
-    for (int i = 0; i < (int)(s->Kc * Z); i++)                       /* saturate to int8 */
-      s->batch_llr[i] = (int8_t)(z[i] > 127 ? 127 : z[i] < -128 ? -128 : z[i]);
+    /* saturate to int8 with the segment decoder's SIMD pack (a scalar loop here cost ~0.5 ms per
+     * 24-segment TB -- more than OAI's whole CPU decode, measured with LDPC_BENCH) */
+    simde__m128i *pv = (simde__m128i *)z, *pl = (simde__m128i *)s->batch_llr;
+    for (int i = 0, j = 0; j < (int)((s->Kc * Z) >> 4); i += 2, j++)
+      pl[j] = simde_mm_packs_epi16(pv[i], pv[i + 1]);
   }
   completed_task_ans(s->ans);
 }
@@ -112,8 +115,10 @@ int32_t nrLDPC_coding_shutdown(void)
   return 0;
 }
 
+static __thread double t_prep_s, t_gpu_s; /* LDPC_BENCH phase split */
 int32_t nrLDPC_coding_decoder_impl(nrLDPC_slot_decoding_parameters_t *slot)
 {
+  const double t_start = ldpc_bench_on() ? ldpc_bench_wall_s() : 0;
   int nb = 0;
   for (int t = 0; t < slot->nb_TBs; t++)
     nb += slot->TBs[t].C;
@@ -155,6 +160,7 @@ int32_t nrLDPC_coding_decoder_impl(nrLDPC_slot_decoding_parameters_t *slot)
     }
   }
   join_task_ans(&ans);
+  const double t_a = ldpc_bench_on() ? ldpc_bench_wall_s() : 0;
 
   /* phase B + C: one GPU batch per TB (all its segments share BG and Z), then the CRC per segment */
   k = 0;
@@ -164,7 +170,10 @@ int32_t nrLDPC_coding_decoder_impl(nrLDPC_slot_decoding_parameters_t *slot)
     const uint32_t Kprime = lenWithCrc(C, tb->A);
     const uint8_t crc_type = crcType(C, tb->A);
     start_meas(&tb->ts_ldpc_decode);
+    const double t_b0 = ldpc_bench_on() ? ldpc_bench_wall_s() : 0;
     const uint8_t *bits = ldpc_batch_decode(tb->BG, tb->Z, k, C, tb->K, 2 * tb->max_ldpc_iterations);
+    if (ldpc_bench_on())
+      t_gpu_s += ldpc_bench_wall_s() - t_b0;
     stop_meas(&tb->ts_ldpc_decode);
     for (int r = 0; r < C; r++, k++) {
       const uint8_t *b = bits + (size_t)r * bits_stride;
@@ -178,6 +187,8 @@ int32_t nrLDPC_coding_decoder_impl(nrLDPC_slot_decoding_parameters_t *slot)
       *tb->processedSegments += ok;
     }
   }
+  if (ldpc_bench_on())
+    t_prep_s += t_a - t_start;
   return 0;
 }
 
@@ -191,5 +202,8 @@ int32_t nrLDPC_coding_decoder(nrLDPC_slot_decoding_parameters_t *p)
   const double w0 = ldpc_bench_wall_s(), c0 = ldpc_bench_cpu_s();
   const int32_t rc = nrLDPC_coding_decoder_impl(p);
   ldpc_bench_add("gpu", ldpc_bench_wall_s() - w0, ldpc_bench_cpu_s() - c0, segs);
+  static __thread long nb;
+  if (++nb % 200 == 0)
+    printf("LDPC_BENCH gpu phases: prep %.1f us/TB, gpu batch %.1f us/TB\n", 1e6 * t_prep_s / nb, 1e6 * t_gpu_s / nb);
   return rc;
 }
