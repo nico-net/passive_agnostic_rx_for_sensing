@@ -83,6 +83,7 @@ static _Atomic uint64_t g_slot_groups   = 0; ///< dequeues that took >1 grant of
 #define NR_PDSCH_PASSIVE_SLOT_GROUP_MAX 8
 void nr_pdsch_passive_set_slot_share(int on, int rb_lo, int rb_n);
 void nr_pdcch_bwp_probe_result(int entry, uint64_t payload, const float *prb_coh); /* nr_pdcch_blind_monitor_rt.c */
+void nr_pdcch_bwp_crc_result(int entry, bool crc_ok);
 #include "nr_dmrs_id_estimate.h"
 #include "PHY/MODULATION/modulation_UE.h" /* nr_slot_fep */
 static _Atomic uint64_t g_decoded       = 0;
@@ -319,6 +320,8 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
     const nr_pdsch_passive_decode_status_t st =
         nr_pdsch_passive_decode(ue, &proc, &job.dlsch_pdu, &job.freq_alloc, &job.grant, rxdataF, &dec);
     nr_passive_replay_dl(&job, &dec);
+    if (job.bwp_entry > 0 && st != NR_PDSCH_PASSIVE_DECODE_ERROR && st != NR_PDSCH_PASSIVE_DECODE_UNSUPPORTED)
+      nr_pdcch_bwp_crc_result(job.bwp_entry, st == NR_PDSCH_PASSIVE_DECODE_CRC_OK);
     nr_slot_fep_fo_override_hz = saved_fo;
     if (st == NR_PDSCH_PASSIVE_DECODE_UNSUPPORTED && !nr_passive_samples_valid(
             atomic_load_explicit(&nr_ue_diag_producer_absolute_slot, memory_order_relaxed),

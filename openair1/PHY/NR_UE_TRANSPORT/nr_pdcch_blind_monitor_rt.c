@@ -934,6 +934,16 @@ static int nr_pbwp_enabled(void)
   }
   return s_on;
 }
+/* TB-CRC outcome of a grant decoded against a DISCOVERED BWP: 32 failures with no pass un-resolve it. */
+void nr_pdcch_bwp_crc_result(int entry, bool crc_ok)
+{
+  pthread_mutex_lock(&g_pbwp_lock);
+  const bool was = nr_pbwp_resolved(&g_pbwp, entry);
+  nr_pbwp_feed_crc(&g_pbwp, entry, crc_ok);
+  if (was && !nr_pbwp_resolved(&g_pbwp, entry))
+    LOG_A(PHY, "SENSING: BWP UNRESOLVED entry=%d: 32 TB-CRC failures, no pass -- rescoring from the DM-RS\n", entry);
+  pthread_mutex_unlock(&g_pbwp_lock);
+}
 void nr_pdcch_bwp_probe_result(int entry, uint64_t payload, const float *prb_coh)
 {
   pthread_mutex_lock(&g_pbwp_lock);
@@ -2800,6 +2810,7 @@ constdiag_done:;
                   ? (ue->cont_fo_comp ? ue->dl_Doppler_shift + ue->freq_offset : 0.0)
                   : nr_slot_fep_fo_override_hz;  /* receive-thread sample; see nr_slot_fep_fo_override_hz */
       job.sweep_ticket  = sweep_ticket;
+      job.bwp_entry     = cand_task[ti].bwp_entry;
       nr_pdsch_passive_queue_enqueue(&job);
       continue;
     }
@@ -2984,6 +2995,7 @@ constdiag_done:;
                   ? (ue->cont_fo_comp ? ue->dl_Doppler_shift + ue->freq_offset : 0.0)
                   : nr_slot_fep_fo_override_hz;  /* receive-thread sample */
               job.sweep_ticket  = sweep_ticket;
+              job.bwp_entry     = cand_task[ti].bwp_entry;
               nr_pdsch_passive_queue_enqueue(&job);
               /* The per-candidate channel-estimate allocation is freed at the BOTTOM of this loop,
                * which `continue` skips -- ~917 kB per job at 273 PRB x 4 antennas, and mlockall()
