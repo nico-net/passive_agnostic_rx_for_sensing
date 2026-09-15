@@ -62,6 +62,8 @@ preflight() {
     || { echo "  preflight: restoring MTU 9000"; sudo ip link set "$NIC" mtu 9000; }
   ethtool -g "$NIC" | awk '/Current hardware/,0' | grep -qE '^RX:[[:space:]]+8192' \
     || { echo "  preflight: restoring rx/tx ring 8192"; sudo ethtool -G "$NIC" rx 8192 tx 8192; }
+  [ "$(sysctl -n net.core.netdev_max_backlog)" = 250000 ] && [ "$(sysctl -n net.core.rmem_default)" = 62500000 ] \
+    || { echo "  preflight: restoring netdev_max_backlog/rmem_default"; sudo sysctl -q -w net.core.netdev_max_backlog=250000 net.core.rmem_default=62500000; }
   # BUILD FRESHNESS. 2026-09-02: a 40-minute baseline was captured against a binary
   # that predated the per-illuminator LOS work and the max_pos_acc anti-windup clamp --
   # the tree had both, ran_build/build did not. Same class as the dlopen'd-plugin trap,
@@ -93,7 +95,9 @@ preflight() {
   # NOSEP=1 disables both halves (for an A/B that needs the stock arm).
   if [ -z "${NOSEP:-}" ]; then
     n=0
-    for i in 152 155 156 157 158 159 160 161 162 163 164 165 166 167; do
+    # The IRQ numbers come from the port itself: the hard-coded list went stale when the NIC changed
+    # slot (2026-09-15) and pinned the idle second port while the live one kept comp0..7 on cpus 0-7.
+    for i in $(ls /sys/class/net/$NIC/device/msi_irqs); do
       [ -e /proc/irq/$i/smp_affinity_list ] || continue
       echo "$(( 8 + n % 6 ))" | sudo tee /proc/irq/$i/smp_affinity_list >/dev/null
       n=$((n+1))
