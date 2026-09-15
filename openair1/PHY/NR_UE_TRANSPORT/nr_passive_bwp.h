@@ -70,8 +70,10 @@ typedef struct {
  * RB -- on OAI it IS the BWP start. */
 typedef struct {
   uint32_t occ;
-  uint32_t hits[NR_PBWP_CS_MAXWIN][2]; /* per window, CORESET symbol 0 / 1 */
-  uint32_t ref_votes[276];             /* winning reference RB of each lit window */
+  uint32_t hits[NR_PBWP_CS_MAXWIN][2];      /* per window, CORESET symbol 0 / 1 */
+  uint32_t base_hits[NR_PBWP_CS_MAXWIN][2]; /* same, inside the configured CORESET at its own reference */
+  int16_t base_lo, base_hi, base_ref;       /* configured CORESET of the last observation */
+  uint32_t ref_votes[276];                  /* winning reference RB of each lit window */
 } nr_pbwp_coreset_t;
 
 typedef struct {

@@ -317,9 +317,17 @@ void nr_pbwp_coreset_observe(nr_pbwp_t *t, int n_win, int base_lo, int base_hi, 
     return;
   if (symbol == 0)
     t->cs.occ++;
+  t->cs.base_lo = base_lo;
+  t->cs.base_hi = base_hi;
+  t->cs.base_ref = base_ref;
   for (int w = 0; w < n_win && w < NR_PBWP_CS_MAXWIN; w++) {
-    if ((w >= base_lo && w <= base_hi && ref[w] == base_ref) || corr[w] < threshold)
+    if (corr[w] < threshold)
       continue;
+    if (w >= base_lo && w <= base_hi && ref[w] == base_ref) {
+      if (t->n > 1) /* only after a new BWP is evidenced: before, the configured CORESET carries everyone */
+        t->cs.base_hits[w][symbol]++;
+      continue;
+    }
     t->cs.hits[w][symbol]++;
     if (symbol == 0 && ref[w] >= 0 && ref[w] < 276)
       t->cs.ref_votes[ref[w]]++;
@@ -330,10 +338,22 @@ bool nr_pbwp_coreset_hypothesis(const nr_pbwp_t *t, int *start_rb, int *n_rb, in
 {
   if (t->cs.occ < NR_PBWP_CS_MIN_OCC)
     return false;
+  /* Once a new BWP is evidenced, a dedicated CORESET inside the configured one AND referenced like it
+   * (CRB 0, measured on OAI rfsim 2026-09-15) is invisible to the reference test. It shows as windows of
+   * the configured range lit at the rate of the hottest one: all DCIs of the moved UEs land there, while
+   * the configured CORESET keeps only common traffic (a median fails: most of a wide range is empty). */
+  const nr_pbwp_coreset_t *cs = &t->cs;
+  uint32_t base_thr = UINT32_MAX;
+  if (t->n > 1 && cs->base_hi >= cs->base_lo) {
+    uint32_t hot = 0;
+    for (int w = cs->base_lo; w <= cs->base_hi && w < NR_PBWP_CS_MAXWIN; w++)
+      hot = cs->base_hits[w][0] > hot ? cs->base_hits[w][0] : hot;
+    base_thr = hot / 2 > NR_PBWP_CS_MIN_HITS ? hot / 2 : NR_PBWP_CS_MIN_HITS;
+  }
   /* largest run of lit windows, one unlit window of slack (DM-RS only where a PDCCH was sent) */
   int best_lo = -1, best_hi = -1, lo = -1, last = -100;
   for (int w = 0; w < NR_PBWP_CS_MAXWIN; w++) {
-    if (t->cs.hits[w][0] < NR_PBWP_CS_MIN_HITS)
+    if (cs->hits[w][0] < NR_PBWP_CS_MIN_HITS && cs->base_hits[w][0] < base_thr)
       continue;
     if (w - last > 2)
       lo = w;
@@ -346,14 +366,19 @@ bool nr_pbwp_coreset_hypothesis(const nr_pbwp_t *t, int *start_rb, int *n_rb, in
   if (best_lo < 0)
     return false;
   uint32_t h0 = 0, h1 = 0;
+  bool own_ref = false; /* the run holds a window at a reference other than the configured one */
   for (int w = best_lo; w <= best_hi; w++) {
-    h0 += t->cs.hits[w][0];
-    h1 += t->cs.hits[w][1];
+    h0 += cs->hits[w][0] + cs->base_hits[w][0];
+    h1 += cs->hits[w][1] + cs->base_hits[w][1];
+    own_ref |= cs->hits[w][0] >= NR_PBWP_CS_MIN_HITS;
   }
-  int r = 0;
-  for (int k = 1; k < 276; k++)
-    if (t->cs.ref_votes[k] > t->cs.ref_votes[r])
-      r = k;
+  if (!own_ref && best_lo <= cs->base_lo && best_hi >= cs->base_hi)
+    return false; /* that is the configured CORESET itself */
+  int r = cs->base_ref;
+  if (own_ref)
+    for (int k = 0; k < 276; k++)
+      if (cs->ref_votes[k] > cs->ref_votes[r])
+        r = k;
   *start_rb = best_lo * 6;
   *n_rb = (best_hi - best_lo + 1) * 6;
   *duration = (h1 * 10 >= h0 * 3) ? 2 : 1; /* symbol 1 lit in >= 30 % of symbol-0 hits */

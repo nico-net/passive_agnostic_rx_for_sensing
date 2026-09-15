@@ -202,7 +202,7 @@ TEST_F(Pbwp, CollidingGeometryIsNotDiscoverable)
  * CORESET on windows [lo, hi] lit where a DCI lands (rate `p` per window), DM-RS referenced to ref_rb;
  * noise windows below threshold. */
 void observe_cs(nr_pbwp_t *t, int n_occ, int lo, int hi, int ref_rb, bool two_symbols, double p, unsigned seed,
-                int base_lo = 0, int base_hi = 3)
+                int base_lo = 0, int base_hi = 3, double base_p = 1.0)
 {
   std::mt19937 rng(seed);
   std::uniform_real_distribution<float> u(0.f, 1.f);
@@ -215,7 +215,8 @@ void observe_cs(nr_pbwp_t *t, int n_occ, int lo, int hi, int ref_rb, bool two_sy
         corr[w] = 0.3f * u(rng);
         ref[w] = (int16_t)(w * 6 - (int)(rng() % 6));
         const bool dci = w >= lo && w <= hi && u(rng) < p && (sym == 0 || two_symbols);
-        if (w <= 3 || dci) { corr[w] = 0.9f + 0.1f * u(rng); ref[w] = w <= 3 ? 0 : (int16_t)ref_rb; }
+        const bool common = w <= 3 && (base_p >= 1.0 || u(rng) < base_p);
+        if (common || dci) { corr[w] = 0.9f + 0.1f * u(rng); ref[w] = common ? 0 : (int16_t)ref_rb; }
       }
       nr_pbwp_coreset_observe(t, n_win, base_lo, base_hi, 0, corr.data(), ref.data(), sym, 0.8f);
     }
@@ -257,6 +258,30 @@ TEST_F(Pbwp, ADedicatedCoresetInsideAWideConfiguredOneIsToldApartByItsReference)
   ASSERT_TRUE(nr_pbwp_coreset_hypothesis(t, &start, &n, &dur, &ref));
   EXPECT_EQ(start, 30);
   EXPECT_EQ(ref, 30);
+}
+
+TEST_F(Pbwp, ASpecReferencedDedicatedCoresetInsideTheConfiguredOneIsFoundByOccupancy)
+{
+  /* Measured on rfsim: the dedicated BWP's CORESET (RB 36-47) is referenced to CRB 0 like the configured
+   * 16-group one around it, so only its occupancy after the switch tells it apart: the moved UEs' DCIs
+   * all land there, the configured CORESET keeps common traffic (5 % here). */
+  nr_pbwp_init(t, 106, 0, 106, 45, 0);
+  ASSERT_EQ(register_len(0x4601, 44), 1);
+  observe_cs(t, 400, 6, 7, 0, true, 0.25, 31, 0, 15, 0.05);
+  int start, n, dur, ref;
+  ASSERT_TRUE(nr_pbwp_coreset_hypothesis(t, &start, &n, &dur, &ref));
+  EXPECT_EQ(start, 36);
+  EXPECT_EQ(n, 12);
+  EXPECT_EQ(dur, 2);
+  EXPECT_EQ(ref, 0);
+}
+
+TEST_F(Pbwp, OccupancyInsideTheConfiguredCoresetMeansNothingBeforeANewBwp)
+{
+  nr_pbwp_init(t, 106, 0, 106, 45, 0);
+  observe_cs(t, 400, 6, 7, 0, true, 0.25, 31, 0, 15, 0.05); /* same traffic, no new DCI length yet */
+  int start, n, dur, ref;
+  EXPECT_FALSE(nr_pbwp_coreset_hypothesis(t, &start, &n, &dur, &ref));
 }
 
 TEST_F(Pbwp, RepetitionProvesAnRntiWhenEveryUeLeftTheBaseBwp)
