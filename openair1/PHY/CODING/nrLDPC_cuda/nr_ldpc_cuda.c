@@ -92,9 +92,12 @@ int32_t LDPCdecoder(t_nrLDPC_dec_params *p_decParams,
     if (!context) // in case no explicit pre-initialization was performed for this thread
         context = ldpc_decoder_init(1);
 
+    /* Flooding min-sum converges ~2x slower than OAI's CPU decoder: measured on sens6 (RTX 4060 Ti,
+     * BG1 K'=8448 R=22/25 Eb/N0 5 dB, 300 blocks) GPU BLER 0.86 at 5 iterations vs CPU 0.12, and
+     * 0/300 from 10 up. Twice the configured budget restores parity. */
     uint32_t num_iter = ldpc_decode(context, 0, p_decParams->BG, p_decParams->Z,
                                     p_llr, p_decParams->Kprime,
-                                    (int8_t *)p_out, p_decParams->numMaxIter,
+                                    (int8_t *)p_out, 2 * p_decParams->numMaxIter,
                                     !p_decParams->check_crc); // additional syndrome check required?
 
     // verify reconstructed output using custom CRC check, if given

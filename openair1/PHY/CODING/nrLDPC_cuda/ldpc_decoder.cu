@@ -84,6 +84,15 @@ struct ThreadContext {
     llr_msg_t* llr_msg_buffer = nullptr;
     llr_accumulator_t* llr_total_buffer = nullptr;
 
+    // batched decode (ldpc_batch_*): capacity in codewords, pinned host I/O, device work buffers
+    uint32_t b_cap = 0;
+    int8_t* b_llr_host = nullptr;
+    uint8_t* b_bits_host = nullptr;
+    int8_t* b_llr_dev = nullptr;
+    uint8_t* b_bits_dev = nullptr;
+    llr_msg_t* b_msg = nullptr;
+    llr_accumulator_t* b_total = nullptr;
+
 #ifdef USE_GRAPHS
     cudaGraphExec_t graphCtx = nullptr;
 #endif
@@ -204,7 +213,10 @@ static BaseGraph get_basegraph(uint32_t BG, uint32_t Z) {
 __launch_bounds__(UNROLL_NODES*NODE_KERNEL_BLOCK, 3)
 static __global__ void update_cn_kernel(llr_accumulator_t const* __restrict__ llr_total, llr_msg_t* __restrict__ llr_msg,
                                         uint32_t Z, uint32_t const* __restrict__ bg_cn, uint32_t const* __restrict__ bg_cn_degree, uint32_t max_degree, uint32_t num_rows,
-                                        bool first_iter) {
+                                        bool first_iter, uint32_t total_stride, uint32_t msg_stride) {
+    // batched decode: blockIdx.y selects the codeword (strides 0 = the single-codeword path)
+    llr_total += blockIdx.y * total_stride;
+    llr_msg += (size_t)blockIdx.y * msg_stride;
     uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
 
     uint32_t i = tid % Z; // for i in range(Z)
@@ -353,7 +365,11 @@ static __global__ void update_cn_kernel(llr_accumulator_t const* __restrict__ ll
 // START marker-vnp-kernel
 __launch_bounds__(UNROLL_NODES*NODE_KERNEL_BLOCK, 3)
 static __global__ void update_vn_kernel(llr_msg_t const* __restrict__ llr_msg, int8_t const* __restrict__ llr_ch, llr_accumulator_t* __restrict__ llr_total,
-                                        uint32_t Z, uint32_t const* __restrict__ bg_vn, uint32_t const* __restrict__ bg_vn_degree, uint32_t max_degree, uint32_t num_cols, uint32_t num_rows) {
+                                        uint32_t Z, uint32_t const* __restrict__ bg_vn, uint32_t const* __restrict__ bg_vn_degree, uint32_t max_degree, uint32_t num_cols, uint32_t num_rows,
+                                        uint32_t total_stride, uint32_t msg_stride) {
+    llr_msg += (size_t)blockIdx.y * msg_stride;
+    llr_ch += blockIdx.y * total_stride;
+    llr_total += blockIdx.y * total_stride;
     uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
 
     uint32_t i = tid % Z; // for i in range(Z)
@@ -467,7 +483,10 @@ static const uint32_t PACK_BITS_KERNEL_THREADS = 256;
 
 // START marker-pack-bits
 __launch_bounds__(PACK_BITS_KERNEL_THREADS, 6)
-static __global__ void pack_bits_kernel(llr_accumulator_t const* __restrict__ llr_total, uint8_t* __restrict__ bits, uint32_t block_length) {
+static __global__ void pack_bits_kernel(llr_accumulator_t const* __restrict__ llr_total, uint8_t* __restrict__ bits, uint32_t block_length,
+                                        uint32_t total_stride, uint32_t bits_stride) {
+    llr_total += blockIdx.y * total_stride;
+    bits += blockIdx.y * bits_stride;
     uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
 
     uint32_t coop_byte = 0;
@@ -552,14 +571,14 @@ extern "C" uint32_t ldpc_decode(ThreadContext* context_, cudaStream_t stream, ui
         // note: llr_msg not not read, only written to in first iteration; will be filled with outputs of this function
         update_cn_kernel<<<blocks_cn, threads, 0, stream>>>(
             llr_total, context.llr_msg_buffer,
-            Z, bg.cn, bg.cn_degree, bg.cn_stride, bg.num_rows, i==0);
+            Z, bg.cn, bg.cn_degree, bg.cn_stride, bg.num_rows, i==0, 0, 0);
 
         // variable node update
         dim3 blocks_vn(blocks_for(bg.num_cols * Z, threads.x));
         // note: llr_total only written to
         update_vn_kernel<<<blocks_vn, threads, 0, stream>>>(
             context.llr_msg_buffer, mapped_llr_in, context.llr_total_buffer,
-            Z, bg.vn, bg.vn_degree, bg.vn_stride, bg.num_cols, bg.num_rows);
+            Z, bg.vn, bg.vn_degree, bg.vn_stride, bg.num_cols, bg.num_rows, 0, 0);
         llr_total = context.llr_total_buffer;
     }
 
@@ -569,7 +588,7 @@ extern "C" uint32_t ldpc_decode(ThreadContext* context_, cudaStream_t stream, ui
     dim3 threads_pack(PACK_BITS_KERNEL_THREADS);
     dim3 blocks_pack(blocks_for(block_length, threads_pack.x));
     pack_bits_kernel<<<blocks_pack, threads_pack, 0, stream>>>(
-        llr_total, mapped_llr_bits_out, block_length);
+        llr_total, mapped_llr_bits_out, block_length, 0, 0);
 #ifndef USE_UNIFIED_MEMORY
     CHECK_CUDA(cudaMemcpyAsync(llr_bits, mapped_llr_bits_out, num_out_bytes, cudaMemcpyDeviceToHost, stream));
 #endif
@@ -736,6 +755,87 @@ extern "C" ThreadContext* ldpc_decoder_init(int make_stream) {
     return &ldpc_decoder_init_context(make_stream);
 }
 
+/* ---- Batched decode (adaptive-rx, 2026-09-15). One launch per iteration decodes every code block of
+ * a TB: per-segment launches measured 88 us/segment at 5 flooding iterations on the RTX 4060 Ti --
+ * slower than OAI's CPU decoder (19 us) -- because each launch is latency-bound. A rank-4, 273-PRB,
+ * MCS-25 TB is ~115 segments, which only a batch keeps the GPU busy with. ---- */
+static const uint32_t BATCH_LLR_STRIDE  = MAX_BG_COLS * MAX_Z;
+static const uint32_t BATCH_BITS_STRIDE = (MAX_BLOCK_LENGTH + 7) / 8;
+static const uint32_t BATCH_MSG_STRIDE  = MAX_BG_ROWS * MAX_BG_COLS * MAX_Z;
+
+static void ldpc_batch_free(ThreadContext& c) {
+    if (!c.b_cap)
+        return;
+    cudaFreeHost(c.b_llr_host);
+    cudaFreeHost(c.b_bits_host);
+    cudaFree(c.b_llr_dev);
+    cudaFree(c.b_bits_dev);
+    cudaFree(c.b_msg);
+    cudaFree(c.b_total);
+    c.b_cap = 0;
+}
+
+static void ldpc_batch_reserve(ThreadContext& c, uint32_t n) {
+    if (n <= c.b_cap)
+        return;
+    uint32_t cap = c.b_cap ? c.b_cap : 16;
+    while (cap < n)
+        cap *= 2;
+    ldpc_batch_free(c);
+    CHECK_CUDA(cudaHostAlloc(&c.b_llr_host, (size_t)cap * BATCH_LLR_STRIDE, cudaHostAllocDefault));
+    CHECK_CUDA(cudaHostAlloc(&c.b_bits_host, (size_t)cap * BATCH_BITS_STRIDE, cudaHostAllocDefault));
+    CHECK_CUDA(cudaMalloc(&c.b_llr_dev, (size_t)cap * BATCH_LLR_STRIDE));
+    CHECK_CUDA(cudaMalloc(&c.b_bits_dev, (size_t)cap * BATCH_BITS_STRIDE));
+    CHECK_CUDA(cudaMalloc(&c.b_msg, (size_t)cap * BATCH_MSG_STRIDE * sizeof(llr_msg_t)));
+    CHECK_CUDA(cudaMalloc(&c.b_total, (size_t)cap * BATCH_LLR_STRIDE * sizeof(llr_accumulator_t)));
+    c.b_cap = cap;
+}
+
+/* Pinned host input for this thread's batch: codeword k's int8 LLRs at k * ldpc_batch_llr_stride(). */
+extern "C" int8_t* ldpc_batch_llr_buffer(uint32_t n) {
+    ThreadContext& c = *ldpc_decoder_init(1);
+    ldpc_batch_reserve(c, n);
+    return c.b_llr_host;
+}
+extern "C" uint32_t ldpc_batch_llr_stride(void) { return BATCH_LLR_STRIDE; }
+extern "C" uint32_t ldpc_batch_bits_stride(void) { return BATCH_BITS_STRIDE; }
+
+/* Decode codewords [first, first+n) of the batch buffer (all the same BG and Z) for num_iter flooding
+ * iterations; returns the pinned host bits, codeword k at k * ldpc_batch_bits_stride(). */
+extern "C" uint8_t const* ldpc_batch_decode(uint32_t BG, uint32_t Z, uint32_t first, uint32_t n,
+                                            uint32_t block_length, uint32_t num_iter) {
+    ThreadContext& c = *ldpc_decoder_init(1);
+    if (n == 0 || first + n > c.b_cap)
+        return c.b_bits_host;
+    cudaStream_t stream = c.stream;
+    BaseGraph bg = get_basegraph(BG, Z);
+    int8_t* llr_dev = c.b_llr_dev + (size_t)first * BATCH_LLR_STRIDE;
+    llr_accumulator_t* total = c.b_total + (size_t)first * BATCH_LLR_STRIDE;
+    llr_msg_t* msg = c.b_msg + (size_t)first * BATCH_MSG_STRIDE;
+    uint8_t* bits_dev = c.b_bits_dev + (size_t)first * BATCH_BITS_STRIDE;
+    CHECK_CUDA(cudaMemcpyAsync(llr_dev, c.b_llr_host + (size_t)first * BATCH_LLR_STRIDE, (size_t)n * BATCH_LLR_STRIDE,
+                               cudaMemcpyHostToDevice, stream));
+    dim3 threads(NODE_KERNEL_BLOCK, UNROLL_NODES);
+    dim3 blocks_cn(blocks_for(bg.num_rows * Z, threads.x), n);
+    dim3 blocks_vn(blocks_for(bg.num_cols * Z, threads.x), n);
+    llr_accumulator_t const* llr_total = llr_dev;
+    for (uint32_t i = 0; i < num_iter; ++i) {
+        update_cn_kernel<<<blocks_cn, threads, 0, stream>>>(llr_total, msg, Z, bg.cn, bg.cn_degree, bg.cn_stride,
+                                                           bg.num_rows, i == 0, BATCH_LLR_STRIDE, BATCH_MSG_STRIDE);
+        update_vn_kernel<<<blocks_vn, threads, 0, stream>>>(msg, llr_dev, total, Z, bg.vn, bg.vn_degree, bg.vn_stride,
+                                                           bg.num_cols, bg.num_rows, BATCH_LLR_STRIDE, BATCH_MSG_STRIDE);
+        llr_total = total;
+    }
+    dim3 threads_pack(PACK_BITS_KERNEL_THREADS);
+    dim3 blocks_pack(blocks_for(block_length, threads_pack.x), n);
+    pack_bits_kernel<<<blocks_pack, threads_pack, 0, stream>>>(llr_total, bits_dev, block_length, BATCH_LLR_STRIDE,
+                                                               BATCH_BITS_STRIDE);
+    uint8_t* bits_host = c.b_bits_host + (size_t)first * BATCH_BITS_STRIDE;
+    CHECK_CUDA(cudaMemcpyAsync(bits_host, bits_dev, (size_t)n * BATCH_BITS_STRIDE, cudaMemcpyDeviceToHost, stream));
+    CHECK_CUDA(cudaStreamSynchronize(stream));
+    return bits_host;
+}
+
 extern "C" void ldpc_decoder_shutdown() {
     cudaDeviceSynchronize();
 
@@ -747,6 +847,7 @@ extern "C" void ldpc_decoder_shutdown() {
         cudaFreeStaging(active_context->llr_bits_out_buffer);
         cudaFree(active_context->llr_total_buffer);
         cudaFreeStaging(active_context->syndrome_buffer);
+        ldpc_batch_free(*active_context);
 #ifndef USE_UNIFIED_MEMORY
         free(active_context->host_syndrome_buffer);
 #endif

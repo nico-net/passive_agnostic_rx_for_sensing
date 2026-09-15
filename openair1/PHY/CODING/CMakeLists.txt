@@ -31,8 +31,13 @@ if(ENABLE_LDPC_CUDA)
   enable_language(CUDA)
   find_package(CUDAToolkit REQUIRED)
   set(LDPC_CUDA_ARCH "89" CACHE STRING "CUDA architecture for libldpc_cuda.so")
+  # Own TB decoder (GPU batch per TB) instead of ldpc_segment's per-segment one: the two define the
+  # same nrLDPC_coding_* symbols, so the segment encoder and rate matching are compiled in directly.
   add_library(ldpc_cuda MODULE
               nrLDPC_encoder/ldpc_encoder_optim8segmulti.c
+              nrLDPC_coding/nrLDPC_coding_segment/nrLDPC_coding_segment_encoder.c
+              nrLDPC_coding/nrLDPC_coding_segment/nr_rate_matching.c
+              nrLDPC_cuda/nrLDPC_coding_cuda_decoder.c
               nrLDPC_cuda/nr_ldpc_cuda.c
               nrLDPC_cuda/ldpc_decoder.cu
   )
@@ -40,7 +45,7 @@ if(ENABLE_LDPC_CUDA)
                         CUDA_ARCHITECTURES "${LDPC_CUDA_ARCH}" POSITION_INDEPENDENT_CODE ON)
   target_include_directories(ldpc_cuda PRIVATE ${CUDAToolkit_INCLUDE_DIRS})
   target_compile_definitions(ldpc_cuda PRIVATE LDPC_CUDA_DISCRETE LDPC_DECODER_NAME="CUDA LDPC decoder")
-  target_link_libraries(ldpc_cuda PRIVATE ldpc_segment CUDA::cudart)
+  target_link_libraries(ldpc_cuda PRIVATE log_headers CUDA::cudart)
   add_dependencies(ldpctest ldpc_cuda)
   add_dependencies(nr-uesoftmodem ldpc_cuda)
 endif()
