@@ -669,10 +669,50 @@ static void nr_rx_pdcch_symbol(PHY_VARS_NR_UE *ue,
   LOG_D(NR_PHY_DCI, "in channel level function (dl_ch_estimates_ext -> dl_ch_estimates_ext)\n");
   int avg[fp->nb_antennas_rx];
   nr_channel_level(0, rx_size, pdcch_dl_ch_estimates_ext, fp->nb_antennas_rx, 1, avg, n_rb * RE_PER_RB_OUT_DMRS);
+  /* BRANCH QUALITY GATE (2026-09-15). PRECLIP_ANT on the X410's CORESET#0: channel levels
+   * a0=1285 a1=7504 a2=611403 a3=198612 while raw power spreads only 15 dB -- the two strong
+   * branches' estimates are not a channel (cv 1.8-1.9 after compensation, noise-like) and they set
+   * the output shift, crushing a0/a1 to mean 1-3. 1 RX (a0) and 2 RX (a0+a1) decode SIB1; 4 RX never
+   * did. Same physics the PDSCH side handles with noise weighting (nr_mrc_noise_weights): a branch is
+   * scored by the roughness of its estimate -- adjacent-subcarrier difference power over mean power,
+   * ~0 for a smooth channel, ~2 for noise -- and branches rougher than 4x the smoothest are ZEROED
+   * (h = 0 adds no signal and no noise to the combine). The shift is the max over the kept ones. */
+  {
+    double rough[fp->nb_antennas_rx];
+    double best_r = 1e30;
+    const int n_re = n_rb * RE_PER_RB_OUT_DMRS;
+    for (int a = 0; a < fp->nb_antennas_rx; a++) {
+      double dp = 0.0, pw = 0.0;
+      const c16_t *h = pdcch_dl_ch_estimates_ext[a];
+      for (int i = 1; i < n_re; i++) {
+        const double dr = (double)h[i].r - h[i - 1].r, di = (double)h[i].i - h[i - 1].i;
+        dp += dr * dr + di * di;
+        pw += (double)h[i].r * h[i].r + (double)h[i].i * h[i].i;
+      }
+      rough[a] = pw > 0.0 ? dp / pw : 1e30;
+      if (rough[a] < best_r) best_r = rough[a];
+    }
+    int kept = 0;
+    for (int a = 0; a < fp->nb_antennas_rx; a++) {
+      if (rough[a] > 4.0 * best_r) {
+        memset(pdcch_dl_ch_estimates_ext[a], 0, sizeof(c16_t) * rx_size);
+        avg[a] = 0;
+      } else {
+        kept |= 1 << a;
+      }
+    }
+    static int s_gate_log = 12;
+    if (s_gate_log > 0 && fp->nb_antennas_rx > 1 && proc->nr_slot_rx == 1) {
+      s_gate_log--;
+      LOG_W(PHY, "SENSING: PDCCH branch gate slot=%d symb=%d kept=0x%x rough=[%.2f %.2f %.2f %.2f]\n",
+            proc->nr_slot_rx, symbol, kept, rough[0], fp->nb_antennas_rx > 1 ? rough[1] : -1.0,
+            fp->nb_antennas_rx > 2 ? rough[2] : -1.0, fp->nb_antennas_rx > 3 ? rough[3] : -1.0);
+    }
+  }
   int avgs = avg[0];
-  // All branches are MRC-combined (see nr_pdcch_detection_mrc()), so the shift is the max over them.
+  // All KEPT branches are MRC-combined (see nr_pdcch_detection_mrc()), so the shift is the max over them.
   for (int i = 1; i < fp->nb_antennas_rx; i++)
-    avgs = cmax(avgs, avg[i]); /* every branch is combined now, at 4 RX too */
+    avgs = cmax(avgs, avg[i]);
   const int log2_maxh = (log2_approx(avgs) / 2) + 5; //+frame_parms->nb_antennas_rx;
   int rx_comp_sz = ceil_mod(llr_size_symbol, 4);
   __attribute__((aligned(32))) c16_t rxdataF_comp[fp->nb_antennas_rx][rx_comp_sz];
