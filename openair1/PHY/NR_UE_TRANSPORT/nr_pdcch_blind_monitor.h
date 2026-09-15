@@ -150,7 +150,8 @@ typedef struct {
   uint8_t     num_symbols;        ///< PDSCH symbol count
   uint16_t    dl_dmrs_symb_pos;   ///< DMRS symbol bitmap (same encoding as fapi_nr_dl_config_dlsch_pdu_rel15_t)
   uint8_t     n_dmrs_cdm_groups;  ///< DMRS CDM groups without data (Table 7.3.1.2.2-1)
-  uint16_t    dmrs_ports;         ///< DMRS port bitmask (Table 7.3.1.2.2-1)
+  uint16_t    dmrs_ports;         ///< DMRS port bitmask (Tables 7.3.1.2.2-1..4)
+  uint8_t     dmrs_config_type;   ///< 0 = type 1, 1 = type 2 (the hypothesis the ports were read under)
   uint8_t     nscid;              ///< DMRS scrambling sequence initialization (fixed 0 for format 1_1 blind MVP)
   // ---- Transport-block parameters. Decoded since 2026-07-30 (previously read and discarded):
   // needed ONLY by the passive data-aided path (nr_pdsch_passive_decode.{h,c}), which must
@@ -247,6 +248,7 @@ typedef struct {
   uint8_t tda_common_mapping[16];
   int     dmrs_add_pos;     ///< dmrs-AdditionalPosition as fill_dmrs_mask()'s column index (0..3); <0 = default (2 = pos2)
   int     dmrs_max_length;  ///< DM-RS maxLength (1 or 2); <=0 = default (1)
+  int     dmrs_config_type; ///< DM-RS type: 0 = type 1 (default), 1 = type 2 -- selects the antenna-ports table
 
   // Per-field bit widths; -1 = this module's built-in assumption. Listed in TS 38.212 payload
   // order, matching nr_dci_size()'s own accumulation order one-for-one.

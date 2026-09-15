@@ -1762,6 +1762,37 @@ static const uint8_t g_table_7_3_2_3_3_2[31][10] = {
     {2,1,1,0,0,1,1,0,0,2}, {2,0,0,1,1,0,0,1,1,2}, {2,1,0,1,0,1,0,1,0,2},
 };
 
+// Table 7.3.1.2.2-3: DM-RS type 2, maxLength 1 (5-bit field, 24 rows). Columns: {cdm_groups, port0..port5}.
+static const uint8_t g_table_7_3_2_3_3_3[24][7] = {
+    {1,1,0,0,0,0,0}, {1,0,1,0,0,0,0}, {1,1,1,0,0,0,0}, {2,1,0,0,0,0,0}, {2,0,1,0,0,0,0}, {2,0,0,1,0,0,0},
+    {2,0,0,0,1,0,0}, {2,1,1,0,0,0,0}, {2,0,0,1,1,0,0}, {2,1,1,1,0,0,0}, {2,1,1,1,1,0,0}, {3,1,0,0,0,0,0},
+    {3,0,1,0,0,0,0}, {3,0,0,1,0,0,0}, {3,0,0,0,1,0,0}, {3,0,0,0,0,1,0}, {3,0,0,0,0,0,1}, {3,1,1,0,0,0,0},
+    {3,0,0,1,1,0,0}, {3,0,0,0,0,1,1}, {3,1,1,1,0,0,0}, {3,0,0,0,1,1,1}, {3,1,1,1,1,0,0}, {3,1,0,1,0,0,0},
+};
+// Table 7.3.1.2.2-4: DM-RS type 2, maxLength 2 (6-bit field, 58 rows). Columns: {cdm_groups, port0..port11, symbols}.
+static const uint8_t g_table_7_3_2_3_3_4[58][14] = {
+    {1,1,0,0,0,0,0,0,0,0,0,0,0,1}, {1,0,1,0,0,0,0,0,0,0,0,0,0,1}, {1,1,1,0,0,0,0,0,0,0,0,0,0,1},
+    {2,1,0,0,0,0,0,0,0,0,0,0,0,1}, {2,0,1,0,0,0,0,0,0,0,0,0,0,1}, {2,0,0,1,0,0,0,0,0,0,0,0,0,1},
+    {2,0,0,0,1,0,0,0,0,0,0,0,0,1}, {2,1,1,0,0,0,0,0,0,0,0,0,0,1}, {2,0,0,1,1,0,0,0,0,0,0,0,0,1},
+    {2,1,1,1,0,0,0,0,0,0,0,0,0,1}, {2,1,1,1,1,0,0,0,0,0,0,0,0,1}, {3,1,0,0,0,0,0,0,0,0,0,0,0,1},
+    {3,0,1,0,0,0,0,0,0,0,0,0,0,1}, {3,0,0,1,0,0,0,0,0,0,0,0,0,1}, {3,0,0,0,1,0,0,0,0,0,0,0,0,1},
+    {3,0,0,0,0,1,0,0,0,0,0,0,0,1}, {3,0,0,0,0,0,1,0,0,0,0,0,0,1}, {3,1,1,0,0,0,0,0,0,0,0,0,0,1},
+    {3,0,0,1,1,0,0,0,0,0,0,0,0,1}, {3,0,0,0,0,1,1,0,0,0,0,0,0,1}, {3,1,1,1,0,0,0,0,0,0,0,0,0,1},
+    {3,0,0,0,1,1,1,0,0,0,0,0,0,1}, {3,1,1,1,1,0,0,0,0,0,0,0,0,1}, {2,1,0,1,0,0,0,0,0,0,0,0,0,1},
+    {3,1,0,0,0,0,0,0,0,0,0,0,0,2}, {3,0,1,0,0,0,0,0,0,0,0,0,0,2}, {3,0,0,1,0,0,0,0,0,0,0,0,0,2},
+    {3,0,0,0,1,0,0,0,0,0,0,0,0,2}, {3,0,0,0,0,1,0,0,0,0,0,0,0,2}, {3,0,0,0,0,0,1,0,0,0,0,0,0,2},
+    {3,0,0,0,0,0,0,1,0,0,0,0,0,2}, {3,0,0,0,0,0,0,0,1,0,0,0,0,2}, {3,0,0,0,0,0,0,0,0,1,0,0,0,2},
+    {3,0,0,0,0,0,0,0,0,0,1,0,0,2}, {3,0,0,0,0,0,0,0,0,0,0,1,0,2}, {3,0,0,0,0,0,0,0,0,0,0,0,1,2},
+    {3,1,1,0,0,0,0,0,0,0,0,0,0,2}, {3,0,0,1,1,0,0,0,0,0,0,0,0,2}, {3,0,0,0,0,1,1,0,0,0,0,0,0,2},
+    {3,0,0,0,0,0,0,1,1,0,0,0,0,2}, {3,0,0,0,0,0,0,0,0,1,1,0,0,2}, {3,0,0,0,0,0,0,0,0,0,0,1,1,2},
+    {3,1,1,0,0,0,0,1,0,0,0,0,0,2}, {3,0,0,1,1,0,0,0,0,1,0,0,0,2}, {3,0,0,0,0,1,1,0,0,0,0,1,0,2},
+    {3,1,1,0,0,0,0,1,1,0,0,0,0,2}, {3,0,0,1,1,0,0,0,0,1,1,0,0,2}, {3,0,0,0,0,1,1,0,0,0,0,1,1,2},
+    {1,1,0,0,0,0,0,0,0,0,0,0,0,2}, {1,0,1,0,0,0,0,0,0,0,0,0,0,2}, {1,0,0,0,0,0,0,1,0,0,0,0,0,2},
+    {1,0,0,0,0,0,0,0,1,0,0,0,0,2}, {1,1,1,0,0,0,0,0,0,0,0,0,0,2}, {1,0,0,0,0,0,0,1,1,0,0,0,0,2},
+    {2,1,1,0,0,0,0,0,0,0,0,0,0,2}, {2,0,0,1,1,0,0,0,0,0,0,0,0,2}, {2,0,0,0,0,0,0,1,1,0,0,0,0,2},
+    {2,0,0,0,0,0,0,0,0,1,1,0,0,2},
+};
+
 /// Read `nbits` starting at the bit position just below `*pos` (spec/TS-38.212-field order, MSB
 /// first) out of a single 64-bit payload word, then advance `*pos` past them. Payloads sized by
 /// nr_pdcch_blind_dci_size() are always well under 64 bits (46-48 for the BWP sizes this project
@@ -2581,12 +2612,22 @@ bool nr_pdcch_blind_extract_11(const nr_pdcch_blind_raw_result_t *raw,
   /* 4-bit field: Table 7.3.1.2.2-1 (type 1, maxLength 1). 5-bit field: Table -2 (type 1, maxLength 2),
    * whose code point also fixes the DM-RS symbol count. Type 2 (5/6 bits, Tables -3/-4) is not
    * decoded: rejected as out of range, so a type-2 hypothesis never produces a grant. */
-  const bool ap_len2 = (f.ant_ports == 5);
-  if (antenna_ports >= (ap_len2 ? 31u : 12u) || f.ant_ports > 5) {
-    out->reject_reason = "antenna_ports field outside Table 7.3.1.2.2-1/-2's valid rows";
+  /* Table by (field width, DM-RS type): 4 bits = type 1 len 1 (-1); 5 bits = type 1 len 2 (-2) or
+   * type 2 len 1 (-3), told apart by the DM-RS type hypothesis; 6 bits = type 2 len 2 (-4). */
+  const int dmrs_t2 = (opts != NULL && opts->dmrs_config_type == 1);
+  int ap_table = 1, ap_rows = 12, ap_nports = 4;
+  if (f.ant_ports == 5 && !dmrs_t2) { ap_table = 2; ap_rows = 31; ap_nports = 8; }
+  else if (f.ant_ports == 5 && dmrs_t2) { ap_table = 3; ap_rows = 24; ap_nports = 6; }
+  else if (f.ant_ports == 6 && dmrs_t2) { ap_table = 4; ap_rows = 58; ap_nports = 12; }
+  else if (f.ant_ports != 4) { out->reject_reason = "antenna_ports width inconsistent with the DM-RS type"; return false; }
+  if (antenna_ports >= (uint32_t)ap_rows) {
+    out->reject_reason = "antenna_ports field outside its table's valid rows";
     return false;
   }
-  const uint8_t *ap_row = ap_len2 ? g_table_7_3_2_3_3_2[antenna_ports] : g_table_7_3_2_3_3_1[antenna_ports];
+  const uint8_t *ap_row = ap_table == 1 ? g_table_7_3_2_3_3_1[antenna_ports]
+                        : ap_table == 2 ? g_table_7_3_2_3_3_2[antenna_ports]
+                        : ap_table == 3 ? g_table_7_3_2_3_3_3[antenna_ports] : g_table_7_3_2_3_3_4[antenna_ports];
+  const int ap_len2 = (ap_table == 2) || (ap_table == 4);
   // Table selection is still unknown here. MCS 28 is valid in tables 0 and 2;
   // the actual PDSCH decoder checks the selected table's nonzero code rate.
   if (mcs >= 29) {
@@ -2634,8 +2675,9 @@ bool nr_pdcch_blind_extract_11(const nr_pdcch_blind_raw_result_t *raw,
   // through a synthetic column instead (fill_dmrs_mask takes no override argument, and adding one
   // would touch the shared MAC path -- see nr_pdcch_blind_extract_opts_t).
   const int add_pos = (opts != NULL && opts->dmrs_add_pos >= 0) ? opts->dmrs_add_pos : 2;
-  const int max_len = ap_len2 ? g_table_7_3_2_3_3_2[antenna_ports][9]
-                              : (opts != NULL && opts->dmrs_max_length > 0) ? opts->dmrs_max_length : 1;
+  const int max_len = ap_table == 2 ? g_table_7_3_2_3_3_2[antenna_ports][9]
+                    : ap_table == 4 ? g_table_7_3_2_3_3_4[antenna_ports][13]
+                    : (opts != NULL && opts->dmrs_max_length > 0) ? opts->dmrs_max_length : 1;
   const int16_t dmrs_mask =
       blind_fill_dmrs_mask(dmrs_typeA_position, tda.nrOfSymbols, tda.startSymbolIndex, tda.mapping_type, add_pos, max_len);
   if (dmrs_mask <= 0) {
@@ -2651,8 +2693,10 @@ bool nr_pdcch_blind_extract_11(const nr_pdcch_blind_raw_result_t *raw,
   out->dl_dmrs_symb_pos   = (uint16_t)dmrs_mask;
   out->n_dmrs_cdm_groups  = ap_row[0];
   out->dmrs_ports         = 0;
-  for (int k = 0; k < (ap_len2 ? 8 : 4); k++)
+  for (int k = 0; k < ap_nports; k++)
     out->dmrs_ports |= (uint16_t)(ap_row[1 + k] << k);
+  out->dmrs_config_type   = (uint8_t)dmrs_t2;
+  (void)ap_len2;
   out->nscid              = (uint8_t)dmrs_seq_init;
   out->mcs                = (uint8_t)mcs;
   out->rv                 = (uint8_t)rv;
