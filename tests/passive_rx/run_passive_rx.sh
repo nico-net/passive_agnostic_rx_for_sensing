@@ -115,7 +115,7 @@ for i in "${!RX_CONFS[@]}"; do
   fi
 done
 
-ALL_UE_CONFS=("ue.active.conf" "ue.active2.conf" "ue.active3.conf")
+ALL_UE_CONFS=("${ACTIVE_CONF_OVERRIDE:-ue.active.conf}" "ue.active2.conf" "ue.active3.conf")
 ALL_UE_LABELS=("ue1" "ue2" "ue3")
 UE_CONFS=("${ALL_UE_CONFS[@]:0:$NUM_UE}")
 UE_LABELS=("${ALL_UE_LABELS[@]:0:$NUM_UE}")

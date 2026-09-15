@@ -2971,8 +2971,24 @@ constdiag_done:;
     dlsch_pdu.pduBitmap          = 0; // no PTRS: format 1_1 with no dedicated PTRS config
     dlsch_pdu.numCsiRsForRateMatching = 0;
     /* CSI-RS rate matching from the blind CSI-RS search's confirmed resource, on the slots it occurs. */
-    if (nr_csirs_blind_rt_rate_match(abs_slot, &dlsch_pdu.csiRsForRateMatching[0]))
-      dlsch_pdu.numCsiRsForRateMatching = 1;
+    if (nr_csirs_blind_rt_rate_match(abs_slot, &dlsch_pdu.csiRsForRateMatching[0])) {
+      /* A CSI-RS hypothesis that lands on one of this grant's DM-RS symbols is wrong for this grant
+       * (the standard forbids the overlap and nr_dlsch_extract_rbs() ASSERTS on it -- which killed
+       * the 4-RX OTA run r4a_223725). Apply it only when it touches no DM-RS symbol. */
+      const fapi_nr_dl_config_csirs_pdu_rel15_t *c = &dlsch_pdu.csiRsForRateMatching[0];
+      static const uint8_t num_l0[18] = {1, 1, 1, 1, 2, 1, 2, 2, 1, 2, 2, 2, 2, 2, 4, 2, 2, 4};
+      bool clash = (c->row < 1 || c->row > 18);
+      for (int k = 0; !clash && k < num_l0[c->row - 1]; k++)
+        if ((dlsch_pdu.dlDmrsSymbPos >> (c->symb_l0 + k)) & 1) clash = true;
+      if (!clash && (c->row == 13 || c->row == 14 || c->row == 16 || c->row == 17))
+        for (int k = 0; !clash && k < 2; k++)
+          if ((dlsch_pdu.dlDmrsSymbPos >> (c->symb_l1 + k)) & 1) clash = true;
+      dlsch_pdu.numCsiRsForRateMatching = clash ? 0 : 1;
+      static _Atomic uint32_t s_clash_n;
+      if (clash && (atomic_fetch_add(&s_clash_n, 1) % 500) == 0)
+        LOG_W(PHY, "SENSING: CSI-RS hypothesis (row %u l0=%u) overlaps this grant's DM-RS symbols (mask 0x%x): not applied\n",
+              c->row, c->symb_l0, dlsch_pdu.dlDmrsSymbPos);
+    }
 
     const freq_alloc_bitmap_t freq_alloc = set_bitmap_from_start_size(out.start_rb, out.num_rb);
 

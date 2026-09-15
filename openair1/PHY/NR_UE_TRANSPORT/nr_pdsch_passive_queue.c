@@ -344,7 +344,7 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
       const double med = ns ? srt[ns / 2] : 1.0;
       uint16_t mask = 0;
       for (int sym = 0; sym < n_sym; sym++)
-        if (prof[sym] > 0.75 && prof[sym] > med + 0.25) mask |= (uint16_t)(1u << sym);
+        if (prof[sym] > 0.68 && prof[sym] > med + 0.18) mask |= (uint16_t)(1u << sym); /* OTA reads 0.75-0.82, floor 0.50 */
       static _Atomic int s_oracle_log = 12;
       if (mask && atomic_load(&s_oracle_log) > 0) {
         atomic_fetch_sub(&s_oracle_log, 1);
