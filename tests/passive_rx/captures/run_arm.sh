@@ -212,7 +212,7 @@ for t in $(seq 1 "$TRIES"); do
     $BIN \
     --usrp-args type=x4xx,addr=$DATA,mgmt_addr=$MGMT${DPDK:+,use_dpdk=$DPDK} \
     -O $CONF -r ${PRB:-273} --numerology 1 --band 78 -C $CARRIER $FREQARGS --ue-rxgain $RXG \
-    --ue-nb-ant-rx $NANT --ue-nb-ant-tx $NANT --passive-rx --ue-fo-compensation --initial-fo ${INITIALFO:--15000} \
+    --ue-nb-ant-rx $NANT --ue-nb-ant-tx ${NTX:-$NANT} --passive-rx --ue-fo-compensation --initial-fo ${INITIALFO:--15000} \
     ${CONTFO:+--cont-fo-comp $CONTFO --freq-sync-P $FSP --freq-sync-I $FSI} \
     ${OFFDIV:+--offset-divisor $OFFDIV} \
     --thread-pool 0,1,4,5,6,7 --time-sync-I 0.01 --ntn-initial-time-drift -4.25 -A 90 ${LDPCV:+--loader.ldpc.shlibversion $LDPCV}" \
