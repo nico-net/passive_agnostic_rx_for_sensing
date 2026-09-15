@@ -94,11 +94,11 @@ TEST_F(Pbwp, LengthTracksTheRivAndIndicatorWidths)
   for (int k = 0; k < t->n_cand; k++) EXPECT_NE(t->cand_len[k], 47);
 }
 
-TEST_F(Pbwp, AnUnprovenRntiCannotRegisterABwp)
+TEST_F(Pbwp, DistinctNoiseRntisCannotRegisterABwp)
 {
   nr_pbwp_init(t, 106, 0, 106, 47, 0);
-  for (int i = 0; i < 100; i++) EXPECT_EQ(nr_pbwp_probe_accept(t, 0x1234, 45), -1);
-  EXPECT_EQ(t->n, 1) << "noise accepts (never-proven RNTIs) must not create BWPs";
+  for (int i = 0; i < 100; i++) EXPECT_EQ(nr_pbwp_probe_accept(t, (uint16_t)(0x2000 + 7 * i), 45), -1);
+  EXPECT_EQ(t->n, 1) << "noise accepts (distinct random RNTIs) must not create BWPs";
 }
 
 TEST_F(Pbwp, AProvenRntiAtANewLengthRegistersOneGroupPerIndicatorWidth)
@@ -201,7 +201,8 @@ TEST_F(Pbwp, CollidingGeometryIsNotDiscoverable)
 /* Synthetic CORESET-symbol observations: base CORESET on windows 0-3 always lit; the dedicated BWP's
  * CORESET on windows [lo, hi] lit where a DCI lands (rate `p` per window), DM-RS referenced to ref_rb;
  * noise windows below threshold. */
-void observe_cs(nr_pbwp_t *t, int n_occ, int lo, int hi, int ref_rb, bool two_symbols, double p, unsigned seed)
+void observe_cs(nr_pbwp_t *t, int n_occ, int lo, int hi, int ref_rb, bool two_symbols, double p, unsigned seed,
+                int base_lo = 0, int base_hi = 3)
 {
   std::mt19937 rng(seed);
   std::uniform_real_distribution<float> u(0.f, 1.f);
@@ -216,7 +217,7 @@ void observe_cs(nr_pbwp_t *t, int n_occ, int lo, int hi, int ref_rb, bool two_sy
         const bool dci = w >= lo && w <= hi && u(rng) < p && (sym == 0 || two_symbols);
         if (w <= 3 || dci) { corr[w] = 0.9f + 0.1f * u(rng); ref[w] = w <= 3 ? 0 : (int16_t)ref_rb; }
       }
-      nr_pbwp_coreset_observe(t, n_win, 0, 3, corr.data(), ref.data(), sym, 0.8f);
+      nr_pbwp_coreset_observe(t, n_win, base_lo, base_hi, 0, corr.data(), ref.data(), sym, 0.8f);
     }
   }
 }
@@ -244,6 +245,30 @@ TEST_F(Pbwp, CoresetWithTheSpecReferenceAndOneSymbol)
   EXPECT_EQ(n, 36);
   EXPECT_EQ(dur, 1);
   EXPECT_EQ(ref, 0);
+}
+
+TEST_F(Pbwp, ADedicatedCoresetInsideAWideConfiguredOneIsToldApartByItsReference)
+{
+  /* The rfsim case that hid it: configured CORESET = 16 groups (RB 0-95) covers the dedicated BWP's CORESET
+   * at RB 30-53; only its DM-RS reference (CRB 30, the BWP start on OAI) distinguishes it. */
+  nr_pbwp_init(t, 106, 0, 106, 45, 0);
+  observe_cs(t, 400, 5, 8, 30, true, 0.25, 21, 0, 15);
+  int start, n, dur, ref;
+  ASSERT_TRUE(nr_pbwp_coreset_hypothesis(t, &start, &n, &dur, &ref));
+  EXPECT_EQ(start, 30);
+  EXPECT_EQ(ref, 30);
+}
+
+TEST_F(Pbwp, RepetitionProvesAnRntiWhenEveryUeLeftTheBaseBwp)
+{
+  nr_pbwp_init(t, 106, 0, 106, 47, 0);
+  int idx = -1;
+  for (int i = 0; i < NR_PBWP_NEW_HITS; i++) idx = nr_pbwp_probe_accept(t, 0x4601, 45); /* never proven */
+  EXPECT_EQ(idx, 1);
+  EXPECT_TRUE(nr_pbwp_rnti_seen(t, 0x4601));
+  nr_pbwp_init(t, 106, 0, 106, 47, 0);
+  for (uint16_t r = 1; r <= 50; r++) EXPECT_EQ(nr_pbwp_probe_accept(t, (uint16_t)(0x1000 + r), 45), -1)
+      << "distinct noise RNTIs must not register a BWP";
 }
 
 TEST_F(Pbwp, NoCoresetIsDeclaredFromNoiseOrTooEarly)

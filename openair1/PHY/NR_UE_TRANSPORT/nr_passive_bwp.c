@@ -169,12 +169,33 @@ uint16_t nr_pbwp_next_probe_len(nr_pbwp_t *t)
 
 int nr_pbwp_probe_accept(nr_pbwp_t *t, uint16_t rnti, uint16_t len)
 {
-  if (!nr_pbwp_rnti_seen(t, rnti) || len_registered(t, len) || t->n >= NR_PBWP_MAX)
+  if (len_registered(t, len) || t->n >= NR_PBWP_MAX)
     return -1;
   int k = 0;
   while (k < t->n_cand && t->cand_len[k] != len)
     k++;
-  if (k == t->n_cand || ++t->cand_hits[k] < NR_PBWP_NEW_HITS)
+  if (k == t->n_cand)
+    return -1;
+  bool enough = false;
+  if (nr_pbwp_rnti_seen(t, rnti)) {
+    enough = ++t->cand_hits[k] >= NR_PBWP_NEW_HITS;
+  } else {
+    int j = 0; /* repetition proof: the same unproven RNTI NR_PBWP_NEW_HITS times at this length */
+    while (j < 4 && !(t->cand_rnti_n[k][j] && t->cand_rnti[k][j] == rnti))
+      j++;
+    if (j == 4) { /* new: replace the least-seen slot */
+      j = 0;
+      for (int q = 1; q < 4; q++)
+        if (t->cand_rnti_n[k][q] < t->cand_rnti_n[k][j])
+          j = q;
+      t->cand_rnti[k][j] = rnti;
+      t->cand_rnti_n[k][j] = 0;
+    }
+    enough = ++t->cand_rnti_n[k][j] >= NR_PBWP_NEW_HITS;
+    if (enough)
+      nr_pbwp_mark_seen(t, rnti);
+  }
+  if (!enough)
     return -1;
   if (!make_groups(t, &t->e[t->n], len))
     return -1;
@@ -289,15 +310,15 @@ int nr_pbwp_indicator(nr_pbwp_t *t, int idx, uint8_t ind_value)
   return idx;
 }
 
-void nr_pbwp_coreset_observe(nr_pbwp_t *t, int n_win, int base_lo, int base_hi, const float *corr,
-                             const int16_t *ref, int symbol, float threshold)
+void nr_pbwp_coreset_observe(nr_pbwp_t *t, int n_win, int base_lo, int base_hi, int base_ref,
+                             const float *corr, const int16_t *ref, int symbol, float threshold)
 {
   if (symbol < 0 || symbol > 1)
     return;
   if (symbol == 0)
     t->cs.occ++;
   for (int w = 0; w < n_win && w < NR_PBWP_CS_MAXWIN; w++) {
-    if ((w >= base_lo && w <= base_hi) || corr[w] < threshold)
+    if ((w >= base_lo && w <= base_hi && ref[w] == base_ref) || corr[w] < threshold)
       continue;
     t->cs.hits[w][symbol]++;
     if (symbol == 0 && ref[w] >= 0 && ref[w] < 276)

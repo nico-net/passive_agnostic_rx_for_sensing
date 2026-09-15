@@ -81,6 +81,8 @@ typedef struct {
   int n;
   uint16_t cand_len[NR_PBWP_MAX_CAND];
   uint32_t cand_hits[NR_PBWP_MAX_CAND];
+  uint16_t cand_rnti[NR_PBWP_MAX_CAND][4];  /* repetition proof: recent RNTIs per candidate length */
+  uint8_t  cand_rnti_n[NR_PBWP_MAX_CAND][4];
   int n_cand, probe_cursor;
   uint8_t ind_map[4];          /* BWP-indicator value -> entry index + 1 (0 = unknown) */
   uint16_t ind_votes[4][NR_PBWP_MAX];
@@ -118,8 +120,10 @@ bool nr_pbwp_on_accept(nr_pbwp_t *t, uint16_t rnti, int idx);
 
 /** Next unregistered candidate length to probe (round robin), 0 if none. */
 uint16_t nr_pbwp_next_probe_len(nr_pbwp_t *t);
-/** An accept at a probe length. Counts only proven RNTIs; registers a new entry after
- *  NR_PBWP_NEW_HITS. Returns the new entry index, or -1. */
+/** An accept at a probe length. Registers a new entry after NR_PBWP_NEW_HITS accepts from proven
+ *  RNTIs, or after NR_PBWP_NEW_HITS accepts from the SAME unproven RNTI (repetition proof: when every UE
+ *  has moved to a dedicated BWP none is ever proven on the base one, and noise accepts carry uniformly
+ *  random RNTIs). Returns the new entry index, or -1. */
 int nr_pbwp_probe_accept(nr_pbwp_t *t, uint16_t rnti, uint16_t len);
 
 /** Score one grant of an unresolved entry from its raw payload. `prb_coh[p]` = DM-RS coherence of
@@ -139,10 +143,12 @@ uint32_t nr_pbwp_translate_riv(uint32_t value, uint8_t cur_bits, uint8_t tgt_bit
 int nr_pbwp_indicator(nr_pbwp_t *t, int idx, uint8_t ind_value);
 
 /** One CORESET-symbol observation. corr[w] = best |corr| of window w (RBs 6w..6w+5) over the reference
- *  hypotheses, ref[w] = the reference RB that achieved it. Windows [base_lo, base_hi] (the configured
- *  CORESET) are ignored. Call with symbol 0 once per observed occasion, then optionally symbol 1. */
-void nr_pbwp_coreset_observe(nr_pbwp_t *t, int n_win, int base_lo, int base_hi, const float *corr,
-                             const int16_t *ref, int symbol, float threshold);
+ *  hypotheses, ref[w] = the reference RB that achieved it. A window inside the configured CORESET
+ *  [base_lo, base_hi] is ignored only when its reference is the configured one (base_ref): a dedicated
+ *  BWP's CORESET may sit INSIDE a wide configured CORESET, and on OAI it is told apart by its DM-RS
+ *  reference (its own BWP start). Call with symbol 0 once per observed occasion, then symbol 1. */
+void nr_pbwp_coreset_observe(nr_pbwp_t *t, int n_win, int base_lo, int base_hi, int base_ref,
+                             const float *corr, const int16_t *ref, int symbol, float threshold);
 /** The discovered CORESET, if any: first RB, size in RB (multiple of 6), duration (1 or 2 symbols) and
  *  the DM-RS reference RB (0 = CRB 0; on OAI the BWP start). */
 bool nr_pbwp_coreset_hypothesis(const nr_pbwp_t *t, int *start_rb, int *n_rb, int *duration, int *ref_rb);

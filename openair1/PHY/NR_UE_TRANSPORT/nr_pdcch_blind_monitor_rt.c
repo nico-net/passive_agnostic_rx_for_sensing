@@ -1715,7 +1715,7 @@ void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_pr
           }
         }
         pthread_mutex_lock(&g_pbwp_lock);
-        nr_pbwp_coreset_observe(&g_pbwp, n_win, base_lo, base_hi, corr, ref, sym, 0.8f);
+        nr_pbwp_coreset_observe(&g_pbwp, n_win, base_lo, base_hi, cfg->bwp_start, corr, ref, sym, 0.8f);
         pthread_mutex_unlock(&g_pbwp_lock);
       }
       int cs_start, cs_n, cs_dur, cs_ref;
