@@ -64,6 +64,7 @@ typedef struct {
   uint8_t pre_ant;      ///< tb2 + harq_pid + dai + tpc + pucch_ri + pdsch_to_harq (harq/tpc/ri fixed)
   uint8_t ant_ports;    ///< 4, 5 or 6 (DM-RS type x maxLength)
   uint8_t post_ant;     ///< tci + srs + cbg + cbg_flush (0..14)
+  uint8_t dmrs_type;    ///< 0 = type 1, 1 = type 2: at 5 bits both are layouts (Tables -2 vs -3)
 } nr_dci11_layout_t;
 
 #define NR_DCI11_LAYOUT_MAX 512
@@ -203,6 +204,7 @@ typedef struct {
   int tb2_bits;             ///< carries pre_ant minus the constant TPC(2) + PUCCH-RI(3)
   int harq_pid_bits, dai_bits, pdsch_to_harq_bits;            ///< always 0, see above
   int antenna_ports_bits;
+  int dmrs_config_type;     ///< 0 = type 1, 1 = type 2 (which antenna-ports table the width means)
   int tci_bits;             ///< carries post_ant (tci + srs + cbg + flush)
   int srs_request_bits, cbg_bits;                             ///< always 0, see above
 } nr_dci11_field_bits_t;

@@ -82,7 +82,7 @@ TEST(Dci11Layout, EveryCandidateIsADistinctLayout) {
     for (int j = i + 1; j < n; j++) {
       const bool same = c[i].bwp_ind == c[j].bwp_ind && c[i].pre_mcs == c[j].pre_mcs
                         && c[i].pre_ant == c[j].pre_ant && c[i].ant_ports == c[j].ant_ports
-                        && c[i].post_ant == c[j].post_ant;
+                        && c[i].post_ant == c[j].post_ant && c[i].dmrs_type == c[j].dmrs_type;
       EXPECT_FALSE(same) << "duplicate layout at " << i << "," << j
                          << " would win a round-robin by appearing more often";
     }
@@ -560,4 +560,22 @@ TEST(Dci11Layout, UnknownTdaWidthEnumeratesEveryWidthAndContainsBothRealCells) {
   EXPECT_TRUE(has_2bit) << "the rfsim cell's 2-bit width must still be represented";
   EXPECT_TRUE(widths[0] || widths[1]) << "narrow widths enumerated";
   std::cerr << "[ MEASURED ] searched TDA width: " << n << " hypotheses at len 47\n";
+}
+
+TEST(Dci11Layout, AFiveBitAntennaPortsFieldIsTwoLayouts) {
+  // Table 7.3.1.2.2-2 (type 1, maxLength 2) and -3 (type 2, maxLength 1) are both 5 bits wide: the
+  // same offsets, different port sets, so the DM-RS type is a layout dimension at that width only.
+  const uint16_t rb = riv_bits_for(106);
+  std::vector<nr_dci11_layout_t> c(NR_DCI11_LAYOUT_MAX);
+  const int n = nr_dci11_layout_enumerate(rb, 2, 45, c.data(), NR_DCI11_LAYOUT_MAX);
+  int five_t1 = 0, five_t2 = 0, four_t2 = 0, six_t1 = 0;
+  for (int i = 0; i < n; i++) {
+    if (c[i].ant_ports == 5) (c[i].dmrs_type ? five_t2 : five_t1)++;
+    if (c[i].ant_ports == 4 && c[i].dmrs_type) four_t2++;
+    if (c[i].ant_ports == 6 && !c[i].dmrs_type) six_t1++;
+  }
+  EXPECT_EQ(five_t1, five_t2);
+  EXPECT_GT(five_t1, 0);
+  EXPECT_EQ(four_t2, 0);
+  EXPECT_EQ(six_t1, 0);
 }

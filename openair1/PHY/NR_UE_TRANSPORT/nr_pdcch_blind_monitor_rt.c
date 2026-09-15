@@ -239,6 +239,7 @@ static int nr_pdcch_dci11_stage2_candidates(const nr_pdcch_blind_raw_result_t *r
     o.dai_bits           = f.dai_bits;
     o.pdsch_to_harq_bits = f.pdsch_to_harq_bits;
     o.antenna_ports_bits = f.antenna_ports_bits;
+    o.dmrs_config_type   = f.dmrs_config_type;
     o.tci_bits           = f.tci_bits;
     o.srs_request_bits   = f.srs_request_bits;
     o.cbg_bits           = f.cbg_bits;

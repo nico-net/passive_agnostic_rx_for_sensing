@@ -88,7 +88,7 @@ static bool already_have(const nr_dci11_layout_t *out, int n, const nr_dci11_lay
 {
   for (int i = 0; i < n; i++) {
     if (out[i].bwp_ind == c->bwp_ind && out[i].pre_mcs == c->pre_mcs && out[i].pre_ant == c->pre_ant
-        && out[i].ant_ports == c->ant_ports && out[i].post_ant == c->post_ant) {
+        && out[i].ant_ports == c->ant_ports && out[i].post_ant == c->post_ant && out[i].dmrs_type == c->dmrs_type) {
       return true;
     }
   }
@@ -120,6 +120,11 @@ int nr_dci11_layout_enumerate(uint16_t riv_bits, uint8_t tda_bits, uint16_t obse
                             if (kCbg[m] == 0 && kCbgFlush[q] != 0) {
                               continue;
                             }
+                            /* A 5-bit antenna-ports field is Table -2 (type 1, len 2) OR Table -3
+                             * (type 2, len 1): same width, different port sets, so two layouts. */
+                            for (int dt = 0; dt < 2; dt++) {
+                              if ((kAnt[i] == 4 && dt == 1) || (kAnt[i] == 6 && dt == 0))
+                                continue;
                             nr_dci11_layout_t cand;
                             cand.bwp_ind   = kBwpInd[a];
                             cand.pre_mcs   = (uint8_t)(kVrb[b] + kBundling[c] + kRateM[d] + kZpCsi[e]);
@@ -127,6 +132,7 @@ int nr_dci11_layout_enumerate(uint16_t riv_bits, uint8_t tda_bits, uint16_t obse
                                                        + DCI11_TPC + DCI11_PUCCH_RI + kP2H[h]);
                             cand.ant_ports = kAnt[i];
                             cand.post_ant  = (uint8_t)(kTci[j] + kSrs[k] + kCbg[m] + kCbgFlush[q]);
+                            cand.dmrs_type = (uint8_t)dt;
                             nr_dci11_offsets_t off;
                             if (!nr_dci11_layout_offsets(&cand, riv_bits, tda_bits, &off)) {
                               continue;
@@ -140,6 +146,7 @@ int nr_dci11_layout_enumerate(uint16_t riv_bits, uint8_t tda_bits, uint16_t obse
                               return n;
                             }
                             out[n++] = cand;
+                            }
                           }
                         }
                       }
@@ -610,6 +617,7 @@ bool nr_dci11_layout_to_field_bits(const nr_dci11_layout_t *l, nr_dci11_field_bi
   out->dai_bits           = 0;
   out->pdsch_to_harq_bits = 0;
   out->antenna_ports_bits = l->ant_ports;
+  out->dmrs_config_type = l->dmrs_type;
   out->tci_bits           = l->post_ant;
   out->srs_request_bits   = 0;
   out->cbg_bits           = 0;
