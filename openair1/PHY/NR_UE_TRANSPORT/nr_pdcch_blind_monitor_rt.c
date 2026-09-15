@@ -1517,6 +1517,8 @@ void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_pr
   memset(pbwp_snap, 0, sizeof(pbwp_snap));
   int pbwp_n = 0, pbwp_probe_entry = 0;
   uint16_t pbwp_probe_len = 0;
+  bool cs_have = false;
+  int cs_start = 0, cs_n = 0, cs_dur = 1, cs_ref = 0;
   if (pbwp_on) {
     pthread_mutex_lock(&g_pbwp_lock);
     const uint8_t base_ind = cfg->extract.bwp_indicator_bits >= 0 ? (uint8_t)cfg->extract.bwp_indicator_bits : 1;
@@ -1539,6 +1541,7 @@ void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_pr
         pbwp_probe_entry = bi;
       }
     }
+    cs_have = nr_pbwp_coreset_hypothesis(&g_pbwp, &cs_start, &cs_n, &cs_dur, &cs_ref);
     static uint32_t s_probe_tick;
     if (!pbwp_probe_len && (++s_probe_tick & 3) == 0) /* discovery: 1 occasion in 4 */
       pbwp_probe_len = nr_pbwp_next_probe_len(&g_pbwp);
@@ -2252,6 +2255,85 @@ constdiag_done:;
       }
       e_rx_cand_idx += n_re_cand;
       g_candidates_run++;
+    }
+  }
+
+  /* ---- Passive BWP: second monitoring pass over the CORESET discovered for a dedicated BWP. Same
+   * PDCCH pipeline (LLRs, demapping, the same scan tasks and result loop); only the CORESET geometry
+   * differs, and only the lengths of discovered BWPs are tried there (the resolved ones + the probe).
+   * DM-RS reference = the voted reference RB: the BWP start on OAI, 0 (CRB 0) per 38.211. ---- */
+  static __thread c16_t s_pdcch_e_rx2[NR_MAX_PDCCH_SIZE];
+  if (pbwp_on && cs_have && scan_11 && (pbwp_n > 1 || pbwp_probe_len) && cs_n >= 6
+      && cs_n <= NR_PDCCH_BLIND_MAX_CORESET_RB && cs_dur <= NR_PDCCH_BLIND_MAX_CORESET_DURATION) {
+    nr_phy_data_t phy_b = local_phy_data;
+    fapi_nr_dl_config_dci_dl_pdu_rel15_t *rb = &phy_b.phy_pdcch_config.pdcch_config[0];
+    rb->BWPStart = (uint16_t)cs_ref;
+    rb->coreset.rb_offset = (uint16_t)(cs_start - cs_ref);
+    rb->coreset.duration = (uint8_t)cs_dur;
+    build_coreset_bitmap(cs_n / 6, rb->coreset.frequency_domain_resource);
+    const int ncce_b = cs_n * cs_dur / 6;
+    static const int al_b[4] = {2, 4, 1, 8};
+    int nc_b = 0, re_b = 0;
+    for (int oi = 0; oi < 4; oi++) {
+      const int L = al_b[oi], need = NR_PDCCH_BLIND_RE_PER_RB_OUT_DMRS * L * 6;
+      for (int cce = 0; cce + L <= ncce_b && nc_b < 48 && re_b + need <= NR_MAX_PDCCH_SIZE; cce += L) {
+        rb->CCE[nc_b] = (uint16_t)cce;
+        rb->L[nc_b] = (uint8_t)L;
+        nc_b++;
+        re_b += need;
+      }
+    }
+    rb->number_of_candidates = (uint8_t)nc_b;
+    const int llr_sym_b = cs_n * NR_PDCCH_BLIND_RE_PER_RB_OUT_DMRS;
+    c16_t pdcch_llr_b[1][1][NR_PDCCH_BLIND_MAX_CORESET_RB * NR_PDCCH_BLIND_MAX_CORESET_DURATION
+                           * NR_PDCCH_BLIND_RE_PER_RB_OUT_DMRS];
+    for (int symbol = cfg->ss_first_symbol; symbol < cfg->ss_first_symbol + cs_dur; symbol++) {
+      if (symbol >= cfg->ss_first_symbol + rel15->coreset.duration)
+        nr_slot_fep(ue, fp, proc->nr_slot_rx, symbol, rxdataF, link_type_dl, 0, ue->common_vars.rxdata);
+      __attribute__((aligned(32))) c16_t rxdataF_symb[fp->nb_antennas_rx][((fp->ofdm_symbol_size + 7) / 8) * 8];
+      for (int ant = 0; ant < fp->nb_antennas_rx; ant++)
+        memcpy(rxdataF_symb[ant], &rxdataF[ant][symbol * fp->ofdm_symbol_size], sizeof(c16_t) * fp->ofdm_symbol_size);
+      nr_pdcch_generate_llr(ue, proc, symbol, &phy_b, llr_sym_b, num_monitoring_occ, rb->coreset.duration,
+                            rxdataF_symb, pdcch_llr_b);
+    }
+    nr_pdcch_demapping_deinterleaving((uint32_t)cs_n, pdcch_llr_b[0][0], s_pdcch_e_rx2, rb->coreset.duration,
+                                      rb->coreset.RegBundleSize, rb->coreset.InterleaverSize, rb->coreset.ShiftIndex,
+                                      rb->number_of_candidates, rb->CCE, rb->L, llr_sym_b);
+    const int cap = (int)(sizeof(cand_task) / sizeof(cand_task[0]));
+    int idx2 = 0;
+    for (int c = 0; c < nc_b; c++) {
+      const nr_pdcch_blind_cand_task_t t2 = {
+          .e_rx = &s_pdcch_e_rx2[idx2],
+          .L = rb->L[c],
+          .dmrs_typeA_position = (uint8_t)cfg->dmrs_typeA_position,
+          .rnti_min = cfg->rnti_min,
+          .rnti_max = cfg->rnti_max,
+          .scrambling_rnti = rb->coreset.scrambling_rnti,
+          .dmrs_scrambling_id = rb->coreset.pdcch_dmrs_scrambling_id,
+          .frame = proc->frame_rx,
+          .slot = proc->nr_slot_rx,
+          .cce = rb->CCE[c],
+          .format = NR_BLIND_DCI_FORMAT_1_1,
+          .dl_auto = false,
+      };
+      for (int bi = 1; bi < pbwp_n && nof_tasks < cap; bi++) {
+        if (pbwp_snap[bi].start < 0)
+          continue;
+        cand_task[nof_tasks] = t2;
+        cand_task[nof_tasks].dci_length = pbwp_snap[bi].len;
+        cand_task[nof_tasks].bwp_size = pbwp_snap[bi].size;
+        cand_task[nof_tasks].extract_opts = &g_pbwp_opts[bi];
+        cand_task[nof_tasks].bwp_entry = (int8_t)bi;
+        nof_tasks++;
+      }
+      if (pbwp_probe_len && nof_tasks < cap) {
+        cand_task[nof_tasks] = t2;
+        cand_task[nof_tasks].dci_length = pbwp_probe_len;
+        cand_task[nof_tasks].bwp_probe = 1;
+        cand_task[nof_tasks].bwp_entry = (int8_t)pbwp_probe_entry;
+        nof_tasks++;
+      }
+      idx2 += NR_PDCCH_BLIND_RE_PER_RB_OUT_DMRS * rb->L[c] * 6;
     }
   }
 
