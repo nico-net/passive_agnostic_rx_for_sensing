@@ -94,6 +94,10 @@ bool nr_dmrs_id_decide(nr_dmrs_id_state_t *st, uint32_t min_grants, double min_m
 double nr_dmrs_port_pair_coherence(const c16_t *rx_symbol, int ofdm_symbol_size, int start_subcarrier,
                                    int rb_offset, int nb_rb, int N_RB, int symbols_per_slot, int slot,
                                    int symbol, int nscid, int nid, int normal_cp);
+/// Per-PRB DM-RS coherence over the whole carrier (CRB0-referenced, port 1000, type 1): out[N_RB].
+void nr_dmrs_prb_coherence(const c16_t *rx_symbol, int ofdm_symbol_size, int first_carrier_offset, int N_RB,
+                           int symbols_per_slot, int slot, int symbol, int nscid, int nid, int normal_cp,
+                           float *out);
 
 /* Coherence score of one candidate, and its margin over the median of all 1024 in dB. */
 double nr_dmrs_id_score(const nr_dmrs_id_state_t *st, int id);

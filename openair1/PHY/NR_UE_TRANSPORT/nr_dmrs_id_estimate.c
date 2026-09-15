@@ -117,6 +117,41 @@ double nr_dmrs_port_pair_coherence(const c16_t *rx_symbol, int ofdm_symbol_size,
   return den > 0 ? 2.0 * sqrt(num_r * num_r + num_i * num_i) / den : 0.0; // x2: pairs count half the energy
 }
 
+/* Per-PRB DM-RS pair coherence over the WHOLE carrier (port 1000, type 1, CRB0-referenced sequence,
+ * i.e. refPoint 0): out[p] = 2|sum h2n conj(h2n+1)| / sum|h|^2 over CRB p's 6 pilots. Close to 1 where
+ * PDSCH DM-RS with this sequence is present -- any UE's -- and small where it is not. Used by the
+ * passive BWP discovery (nr_passive_bwp.h) to place a grant on the carrier. */
+void nr_dmrs_prb_coherence(const c16_t *rx_symbol, int ofdm_symbol_size, int first_carrier_offset, int N_RB,
+                           int symbols_per_slot, int slot, int symbol, int nscid, int nid, int normal_cp,
+                           float *out)
+{
+  const int words = ((N_RB * 24) >> 5) + 1, npil = 6 * N_RB;
+  uint32_t *seq = malloc((size_t)words * sizeof(*seq));
+  c16_t *pilot  = malloc((size_t)npil * sizeof(*pilot));
+  if (!seq || !pilot || N_RB <= 0) {
+    free(seq); free(pilot);
+    for (int p = 0; p < N_RB; p++) out[p] = 0.0f;
+    return;
+  }
+  gold_for(seq, words, symbols_per_slot, slot, symbol, nid, nscid);
+  nr_pdsch_dmrs_rx(normal_cp ? NR_NORMAL : NR_EXTENDED, seq, pilot, 1000, 0, (unsigned short)N_RB,
+                   NFAPI_NR_DMRS_TYPE1, 16384);
+  int re = ((first_carrier_offset % ofdm_symbol_size) + ofdm_symbol_size) % ofdm_symbol_size;
+  for (int p = 0; p < N_RB; p++) {
+    double num_r = 0, num_i = 0, den = 0, er = 0, ei = 0;
+    for (int m = 0; m < 6; m++) {
+      const c16_t h = c16mulShift(pilot[6 * p + m], rx_symbol[re], 15);
+      const double hr = h.r, hi = h.i;
+      den += hr * hr + hi * hi;
+      if (m & 1) { num_r += er * hr + ei * hi; num_i += ei * hr - er * hi; }
+      else       { er = hr; ei = hi; }
+      re = (re + 2) % ofdm_symbol_size;
+    }
+    out[p] = den > 0 ? (float)(2.0 * sqrt(num_r * num_r + num_i * num_i) / den) : 0.0f;
+  }
+  free(seq); free(pilot);
+}
+
 static int cmp_double(const void *a, const void *b)
 {
   const double x = *(const double *)a, y = *(const double *)b;

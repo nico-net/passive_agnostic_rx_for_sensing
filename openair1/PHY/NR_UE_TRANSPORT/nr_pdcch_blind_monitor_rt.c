@@ -40,6 +40,7 @@
 #include "PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.h"
 #include "PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.h"
 #include "PHY/NR_UE_TRANSPORT/nr_pdcch_dci_length_sweep.h" // Phase 3 Technique C
+#include "PHY/NR_UE_TRANSPORT/nr_passive_bwp.h"
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_adaptive_config.h"
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_config_sweep.h" // Phase 3 Technique D
 #include "PHY/NR_UE_TRANSPORT/nr_pdcch_dci11_layout_sweep.h" // DCI 1_1 layout, stage 1
@@ -913,8 +914,35 @@ typedef struct {
   nr_pdcch_blind_ul_result_t ul_out; // OUTPUT when ul_scan
   nr_pdcch_blind_result_t out; // OUTPUT
   bool         ok;             // OUTPUT
+  int8_t       bwp_entry;      // passive BWP entry this length belongs to (0 = the configured BWP)
+  uint8_t      bwp_probe;      // 1 = raw decode only: BWP discovery / DM-RS scoring probe
   task_ans_t  *ans;
 } nr_pdcch_blind_cand_task_t;
+
+/* ---- Passive DL BWP tracking (nr_passive_bwp.h). ISAC_BWP_TRACK=1, or on under V2. The RT thread
+ * registers entries and tracks RNTIs; decode consumers resolve (size, start) from the DM-RS, so every
+ * access is under g_pbwp_lock and the scan works from a per-occasion snapshot. ---- */
+static nr_pbwp_t g_pbwp;
+static pthread_mutex_t g_pbwp_lock = PTHREAD_MUTEX_INITIALIZER;
+static nr_pdcch_blind_extract_opts_t g_pbwp_opts[NR_PBWP_MAX];
+static int nr_pbwp_enabled(void)
+{
+  static int s_on = -1;
+  if (s_on < 0) {
+    const char *e = getenv("ISAC_BWP_TRACK");
+    s_on = (e != NULL) ? (atoi(e) != 0) : nr_agnostic_v2();
+  }
+  return s_on;
+}
+void nr_pdcch_bwp_probe_result(int entry, uint64_t payload, const float *prb_coh)
+{
+  pthread_mutex_lock(&g_pbwp_lock);
+  if (entry > 0 && entry < g_pbwp.n && nr_pbwp_score_grant(&g_pbwp, entry, payload, prb_coh))
+    LOG_A(PHY, "SENSING: BWP RESOLVED entry=%d len=%u size=%u start=%d ind_bits=%u after %u grants\n", entry,
+          g_pbwp.e[entry].dci_len, g_pbwp.e[entry].size, g_pbwp.e[entry].start, g_pbwp.e[entry].ind_bits,
+          g_pbwp.e[entry].grants_scored);
+  pthread_mutex_unlock(&g_pbwp_lock);
+}
 
 /* The candidate body WITHOUT the task_ans handshake, for the serial path. Split rather than passing
  * a flag so the parallel worker keeps exactly its previous shape and the pool contract (every task
@@ -948,7 +976,7 @@ static void nr_pdcch_blind_cand_worker_body(nr_pdcch_blind_cand_task_t *t)
               h->mcs, h->rv, h->harq_pid, h->dl_dmrs_symb_pos);
       }
     }
-  } else if (t->dl_auto) {
+  } else if (t->dl_auto || t->bwp_probe) {
     t->ok = nr_pdcch_blind_decode_raw_11(tmp_e, t->L, t->dci_length,
                                         t->rnti_min, t->rnti_max, &t->dl_raw);
   } else {
@@ -1472,6 +1500,39 @@ void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_pr
   }
   rel15->num_dci_options       = 1;
   rel15->dci_length_options[0] = dci_length;
+  /* Passive BWP tracking: snapshot the resolved entries for this occasion and pick the probe. */
+  const bool pbwp_on = nr_pbwp_enabled() != 0;
+  struct { uint16_t len, size; int16_t start; } pbwp_snap[NR_PBWP_MAX];
+  memset(pbwp_snap, 0, sizeof(pbwp_snap));
+  int pbwp_n = 0, pbwp_probe_entry = 0;
+  uint16_t pbwp_probe_len = 0;
+  if (pbwp_on) {
+    pthread_mutex_lock(&g_pbwp_lock);
+    const uint8_t base_ind = cfg->extract.bwp_indicator_bits >= 0 ? (uint8_t)cfg->extract.bwp_indicator_bits : 1;
+    if (g_pbwp.base_len != dci_length || g_pbwp.base_size != (uint16_t)cfg->bwp_size) {
+      nr_pbwp_init(&g_pbwp, (uint16_t)ue->frame_parms.N_RB_DL, (uint16_t)cfg->bwp_start, (uint16_t)cfg->bwp_size,
+                   dci_length, base_ind);
+      LOG_A(PHY, "SENSING: BWP tracking armed: base len=%u size=%d start=%d ind_bits=%u, %d candidate lengths\n",
+            dci_length, cfg->bwp_size, cfg->bwp_start, base_ind, g_pbwp.n_cand);
+    }
+    pbwp_n = g_pbwp.n;
+    for (int bi = 0; bi < g_pbwp.n; bi++) {
+      pbwp_snap[bi].len = g_pbwp.e[bi].dci_len;
+      pbwp_snap[bi].size = g_pbwp.e[bi].size;
+      pbwp_snap[bi].start = g_pbwp.e[bi].start;
+      if (bi > 0 && g_pbwp.e[bi].start >= 0) {
+        g_pbwp_opts[bi] = cfg->extract;
+        g_pbwp_opts[bi].bwp_indicator_bits = g_pbwp.e[bi].ind_bits;
+      } else if (bi > 0 && !pbwp_probe_len) {
+        pbwp_probe_len = g_pbwp.e[bi].dci_len; /* unresolved: collect DM-RS-scored grants */
+        pbwp_probe_entry = bi;
+      }
+    }
+    static uint32_t s_probe_tick;
+    if (!pbwp_probe_len && (++s_probe_tick & 3) == 0) /* discovery: 1 occasion in 4 */
+      pbwp_probe_len = nr_pbwp_next_probe_len(&g_pbwp);
+    pthread_mutex_unlock(&g_pbwp_lock);
+  }
 
   /* ---- DCI format 1_0 context (TS 38.212 7.3.1.0 / TS 38.214 5.1.2.2.2). Three things change with
    * the search-space kind and NONE of them is cosmetic: the frequency-domain field is sized from
@@ -2094,6 +2155,26 @@ constdiag_done:;
         cand_task[nof_tasks] = base_task;
         nof_tasks++;
       }
+      /* Other resolved BWPs: their own length, RIV width and indicator width. ponytail: extracted with
+       * the manual layout (cfg->extract); the V2 layout sweep is not run per BWP. */
+      for (int bi = 1; scan_11 && pbwp_on && bi < pbwp_n; bi++) {
+        if (pbwp_snap[bi].start < 0 || nof_tasks >= (int)(sizeof(cand_task) / sizeof(cand_task[0])))
+          continue;
+        cand_task[nof_tasks] = base_task;
+        cand_task[nof_tasks].dci_length   = pbwp_snap[bi].len;
+        cand_task[nof_tasks].bwp_size     = pbwp_snap[bi].size;
+        cand_task[nof_tasks].extract_opts = &g_pbwp_opts[bi];
+        cand_task[nof_tasks].dl_auto      = false;
+        cand_task[nof_tasks].bwp_entry    = (int8_t)bi;
+        nof_tasks++;
+      }
+      if (scan_11 && pbwp_on && pbwp_probe_len && nof_tasks < (int)(sizeof(cand_task) / sizeof(cand_task[0]))) {
+        cand_task[nof_tasks] = base_task;
+        cand_task[nof_tasks].dci_length = pbwp_probe_len;
+        cand_task[nof_tasks].bwp_probe  = 1;
+        cand_task[nof_tasks].bwp_entry  = (int8_t)pbwp_probe_entry;
+        nof_tasks++;
+      }
       if (scan_10 && nof_tasks < (int)(sizeof(cand_task) / sizeof(cand_task[0]))) {
         cand_task[nof_tasks]            = base_task;
         cand_task[nof_tasks].dci_length = dci10_length;
@@ -2162,6 +2243,36 @@ constdiag_done:;
   // split, just walking cand_task[] instead of decoding inline. ----
   int decodes_this_occasion = 0; // capped by cfg->pdsch_max_per_slot -- see that field's comment
   for (int ti = 0; ti < nof_tasks; ti++) {
+    if (cand_task[ti].bwp_probe) {
+      const nr_pdcch_blind_raw_result_t *pr = &cand_task[ti].dl_raw;
+      if (cand_task[ti].ok && pr->rnti != 0) {
+        const int be = cand_task[ti].bwp_entry;
+        pthread_mutex_lock(&g_pbwp_lock);
+        const bool proven = nr_pbwp_rnti_seen(&g_pbwp, pr->rnti);
+        const int ne = (be == 0) ? nr_pbwp_probe_accept(&g_pbwp, pr->rnti, cand_task[ti].dci_length) : -1;
+        const int ng = (ne > 0) ? g_pbwp.e[ne].ng : 0;
+        pthread_mutex_unlock(&g_pbwp_lock);
+        if (ne > 0)
+          LOG_A(PHY, "SENSING: BWP NEW entry=%d len=%u from rnti 0x%x (%d indicator-width hypotheses) -- "
+                     "resolving size/start from the DM-RS\n", ne, cand_task[ti].dci_length, pr->rnti, ng);
+        if (be > 0 && proven && nr_pdsch_passive_queue_running()) {
+          nr_pdsch_passive_job_t job;
+          memset(&job, 0, sizeof(job));
+          job.frame_rx = proc->frame_rx;
+          job.nr_slot_rx = proc->nr_slot_rx;
+          job.gNB_id = proc->gNB_id;
+          job.absolute_slot = source_absolute_slot;
+          job.rnti = pr->rnti;
+          job.fo_hz = isnan(nr_slot_fep_fo_override_hz)
+              ? (ue->cont_fo_comp ? ue->dl_Doppler_shift + ue->freq_offset : 0.0)
+              : nr_slot_fep_fo_override_hz;
+          job.bwp_probe_entry = (int8_t)be;
+          job.bwp_probe_payload = pr->payload;
+          nr_pdsch_passive_queue_enqueue(&job);
+        }
+      }
+      continue;
+    }
     /* ---- UPLINK candidates are handled here and nothing below runs for them: every line after
      * this point reads a DL result and would misinterpret a UL one. ---- */
     if (cand_task[ti].ul_scan) {
@@ -2374,6 +2485,18 @@ constdiag_done:;
       continue;
     }
     g_accepts++;
+    if (pbwp_on && out.rnti != 0) {
+      pthread_mutex_lock(&g_pbwp_lock);
+      nr_pbwp_mark_seen(&g_pbwp, out.rnti);
+      const bool sw = out.dci_format == NR_BLIND_DCI_FORMAT_1_1
+                      && nr_pbwp_on_accept(&g_pbwp, out.rnti, cand_task[ti].bwp_entry);
+      const uint32_t nsw = g_pbwp.switches;
+      pthread_mutex_unlock(&g_pbwp_lock);
+      if (sw)
+        LOG_A(PHY, "SENSING: BWP SWITCH rnti=0x%x -> entry %d (len %u, start %d, size %u), switches=%u\n",
+              out.rnti, cand_task[ti].bwp_entry, cand_task[ti].dci_length,
+              pbwp_snap[cand_task[ti].bwp_entry].start, cand_task[ti].bwp_size, nsw);
+    }
     {
       /* Feeds the adaptive ladder above. Counted per AGGREGATION LEVEL of the candidate that
        * produced the accept, which is the quantity the allocation needs -- not per candidate index,
@@ -2393,7 +2516,8 @@ constdiag_done:;
      * For format 1_1, and for 1_0 in a UE-specific search space, all three resolve to what this
      * function used before. ---- */
     const bool    is_dci10        = (out.dci_format == NR_BLIND_DCI_FORMAT_1_0);
-    const int     rb_origin       = is_dci10 ? dci10_rb_base : cfg->bwp_start;
+    const int     rb_origin       = is_dci10 ? dci10_rb_base
+                                  : (cand_task[ti].bwp_entry > 0 ? pbwp_snap[cand_task[ti].bwp_entry].start : cfg->bwp_start);
     uint8_t grant_mcs_table = is_dci10 ? out.mcs_table : (uint8_t)cfg->pdsch_mcs_table;
     if (is_dci10) {
       g_accepts_10++;
@@ -2565,7 +2689,7 @@ constdiag_done:;
     fapi_nr_dl_config_dlsch_pdu_rel15_t dlsch_pdu;
     memset(&dlsch_pdu, 0, sizeof(dlsch_pdu));
     dlsch_pdu.BWPStart           = (uint16_t)rb_origin;
-    dlsch_pdu.BWPSize            = is_dci10 ? dci10_ctx.n_rb_riv : (uint16_t)cfg->bwp_size;
+    dlsch_pdu.BWPSize            = is_dci10 ? dci10_ctx.n_rb_riv : cand_task[ti].bwp_size;
     dlsch_pdu.resource_alloc     = 1; // Type-1/RIV -- the only branch this module ever produces
     /* DM-RS SEQUENCE reference point, TS 38.211 7.4.1.1.2. NOT cosmetic and NOT unread:
      * nr_dl_channel_estimation.c:1249 computes the gold-sequence offset as

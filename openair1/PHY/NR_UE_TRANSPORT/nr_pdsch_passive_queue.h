@@ -105,6 +105,10 @@ typedef struct {
   /// Value-only RNTI/TDA/context-generation ticket; zero generation means manual/unscored.
   /// Resets/evictions cannot redirect an old queued outcome into a new hypothesis context.
   nr_pdsch_sweep_ticket_t sweep_ticket;
+  /// >0: DM-RS coherence probe for an UNRESOLVED passive BWP entry (nr_passive_bwp.h) -- no decode;
+  /// the consumer transforms the DM-RS symbol, scores the carrier and hands back bwp_probe_payload.
+  int8_t   bwp_probe_entry;
+  uint64_t bwp_probe_payload;
 } nr_pdsch_passive_job_t;
 
 /// Per-run census. Every field is a reason a job did NOT become a decode, so a shortfall in

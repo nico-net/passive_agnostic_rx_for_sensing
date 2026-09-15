@@ -82,6 +82,9 @@ static _Atomic uint64_t g_queued        = 0;
 static _Atomic uint64_t g_slot_groups   = 0; ///< dequeues that took >1 grant of one slot
 #define NR_PDSCH_PASSIVE_SLOT_GROUP_MAX 8
 void nr_pdsch_passive_set_slot_share(int on, int rb_lo, int rb_n);
+void nr_pdcch_bwp_probe_result(int entry, uint64_t payload, const float *prb_coh); /* nr_pdcch_blind_monitor_rt.c */
+#include "nr_dmrs_id_estimate.h"
+#include "PHY/MODULATION/modulation_UE.h" /* nr_slot_fep */
 static _Atomic uint64_t g_decoded       = 0;
 static _Atomic uint64_t g_crc_ok        = 0;
 /* DL DM-RS identity estimate: one process-wide accumulator shared by every consumer, so evidence
@@ -293,6 +296,25 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
     job.grant.check_sample_lifetime = true;
     job.grant.source_absolute_slot = job.absolute_slot;
 
+    if (job.bwp_probe_entry > 0) {
+      /* Passive BWP discovery: per-PRB DM-RS coherence on the DM-RS symbol. dmrs-TypeA-Position is
+       * pos2 or pos3 -- score both and keep the one carrying DM-RS (the larger total coherence).
+       * ponytail: mapping type A only; a type-B-only BWP needs the TDA's own DM-RS symbol. */
+      float coh[2][275];
+      double tot[2] = {0, 0};
+      const int nrb = fp->N_RB_DL < 275 ? fp->N_RB_DL : 275;
+      for (int k = 0; k < 2; k++) {
+        const int sym = 2 + k;
+        nr_slot_fep(ue, fp, job.nr_slot_rx, sym, rxdataF, link_type_dl, 0, ue->common_vars.rxdata);
+        nr_dmrs_prb_coherence(&rxdataF[0][sym * fp->ofdm_symbol_size], fp->ofdm_symbol_size,
+                              fp->first_carrier_offset, nrb, fp->symbols_per_slot, job.nr_slot_rx, sym, 0,
+                              fp->Nid_cell, fp->Ncp == NR_NORMAL, coh[k]);
+        for (int p = 0; p < nrb; p++) tot[k] += coh[k][p];
+      }
+      nr_pdcch_bwp_probe_result(job.bwp_probe_entry, job.bwp_probe_payload, tot[1] > tot[0] ? coh[1] : coh[0]);
+      nr_slot_fep_fo_override_hz = saved_fo;
+      continue;
+    }
     nr_pdsch_passive_decode_result_t dec;
     const nr_pdsch_passive_decode_status_t st =
         nr_pdsch_passive_decode(ue, &proc, &job.dlsch_pdu, &job.freq_alloc, &job.grant, rxdataF, &dec);
