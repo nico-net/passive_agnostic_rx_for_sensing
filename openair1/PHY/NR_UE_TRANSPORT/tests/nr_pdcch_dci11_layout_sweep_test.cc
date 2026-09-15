@@ -444,9 +444,10 @@ static int pick_truth(const nr_dci11_resolver_t &r)
   return 0;
 }
 
-TEST(Dci11Stage1, TheLoadedCellsFieldStructurePrunesToAHandful) {
-  // The OTA failure this fixes: 15 of 15 layouts alive after 1.2M payloads, so stage 2 never
-  // engaged. Same geometry as the lab cell (273 PRB, 16-bit RIV, 4-bit TDA, 47-bit DCI).
+TEST(Dci11Stage1, TheDistributionalTestRanksButNeverDeletes) {
+  // OTA 2026-09-15 (v2l): with deletion on, the layout that decodes at 72 % by TB CRC was NOT in
+  // the top 4 by payload statistics and stage 2 drove the sweep with four wrong layouts (0 % CRC).
+  // The score is now a ranking only. Same geometry as the lab cell (273 PRB, 47-bit DCI).
   nr_dci11_resolver_t r{};
   const uint16_t rb = riv_bits_for(273);
   const int n = nr_dci11_resolver_init(&r, 273, rb, 4, 47);
@@ -455,7 +456,9 @@ TEST(Dci11Stage1, TheLoadedCellsFieldStructurePrunesToAHandful) {
   unsigned seed = 77;
   for (int i = 0; i < 20000; i++) nr_dci11_resolver_observe(&r, cell_payload(r.off[truth], rb, seed, 10));
   EXPECT_TRUE(r.alive[truth]) << "distributional pruning deleted the true layout";
-  EXPECT_LE(r.n_alive, 4) << "stage 1 still cannot separate layouts on a structured cell";
+  EXPECT_GT(r.dropped_dist, 0) << "the score should at least RANK on a structured cell";
+  // 15 -> 9 here is the impossible-value test alone; with deletion on this read 4 (KEEP_MIN).
+  EXPECT_GT(r.n_alive, 4) << "payload statistics must never delete a layout (only the TB CRC may)";
   std::cerr << "[ MEASURED ] loaded-cell statistics: " << n << " -> " << r.n_alive
             << " live after 20000 payloads (" << r.dropped_dist << " by distribution)\n";
 }
@@ -483,8 +486,10 @@ TEST(Dci11Stage1, TheTruthScoresAboveEveryPrunedLayout) {
   unsigned seed = 5;
   for (int i = 0; i < 5000; i++) nr_dci11_resolver_observe(&r, cell_payload(r.off[truth], rb, seed, 10));
   const double st = nr_dci11_resolver_score(&r, truth);
+  int better = 0;
   for (int i = 0; i < r.n_hyp; i++)
-    if (!r.alive[i]) EXPECT_GT(st, nr_dci11_resolver_score(&r, i)) << "pruned layout " << i << " outscored the truth";
+    if (i != truth && nr_dci11_resolver_score(&r, i) > st) better++;
+  EXPECT_LT(better, 4) << "under the MODEL the truth ranks top-4; on air it did not, hence rank-only";
 }
 
 TEST(Dci11Stage1, ATdaIndexBeyondTheListIsImpossible) {

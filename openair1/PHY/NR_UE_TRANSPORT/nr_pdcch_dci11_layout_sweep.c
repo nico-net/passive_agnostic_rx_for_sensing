@@ -392,11 +392,12 @@ static void prune_by_distribution(nr_dci11_resolver_t *r)
     for (int j = 0; j < r->n_hyp; j++)
       if (r->alive[j] && score[j] > score[i])
         better++;
-    if (better >= DCI11_S1_KEEP_MIN && best - score[i] > DCI11_S1_DIST_GAP * (double)r->seen[i]) {
-      r->alive[i] = false;
-      r->n_alive--;
+    /* OTA 2026-09-15 (v2l): the configured layout, which decodes at 72 % by TB CRC, was NOT in the
+     * top 4 by this score -- a misaligned layout that reads constant RIV bits as MCS/RV/AP is MORE
+     * compressible than the truth. So the score only RANKS (Thompson prior in the RT monitor);
+     * it never deletes. dropped_dist now counts what it WOULD have dropped, for the report. */
+    if (better >= DCI11_S1_KEEP_MIN && best - score[i] > DCI11_S1_DIST_GAP * (double)r->seen[i])
       r->dropped_dist++;
-    }
   }
 }
 
