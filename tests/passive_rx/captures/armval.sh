@@ -27,7 +27,13 @@ for attempt in 1 2 3 4 5; do
   elif [ -f /tmp/${ARM}_run.log ] && [ -f "$CAP/.${ARM}_lastfo" ]; then
     last=$(grep -a "CFOTRK" $(ls -dt $CAP/${ARM}_*/ 2>/dev/null | head -1)/run.log 2>/dev/null | tail -1 | grep -oE "proposed=-?[0-9]+" | cut -d= -f2)
     seed=$(cat "$CAP/.${ARM}_lastfo")
-    if [ -n "$last" ] && [ "${last#-}" -gt 500 ]; then INITIALFO=$(( seed + last )); echo "a$attempt: CFO seed $seed -> $INITIALFO (proposed $last)" >> $ST; else INITIALFO=$seed; fi
+    # Without CFOTRK the acquisition's own estimate ("carrier off N Hz") is the seed's best successor.
+    # The rig drifted ~1.3 kHz over one afternoon (2026-09-15: -15061 at 12:00, -16351 at 18:00) while
+    # FIXFO pinned -15000; every lock past ~-16270 then failed SIB1 (|residual| > ~300 Hz decides it).
+    meas=$(grep -a "carrier off" $(ls -dt $CAP/${ARM}_*/ 2>/dev/null | head -1)/run.log 2>/dev/null | tail -1 | grep -oE "carrier off -?[0-9]+" | grep -oE "\-?[0-9]+$")
+    if [ -n "$last" ] && [ "${last#-}" -gt 500 ]; then INITIALFO=$(( seed + last )); echo "a$attempt: CFO seed $seed -> $INITIALFO (proposed $last)" >> $ST;
+    elif [ -n "$meas" ] && [ "$meas" -lt 0 ] && [ "$meas" -gt -60000 ]; then INITIALFO=$meas; echo "a$attempt: CFO seed $seed -> $INITIALFO (measured)" >> $ST;
+    else INITIALFO=$seed; fi
   else
     INITIALFO=${INITIALFO:--15000}
   fi
