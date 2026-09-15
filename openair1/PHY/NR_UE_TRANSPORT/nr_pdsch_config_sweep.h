@@ -147,6 +147,11 @@ typedef struct {
 bool nr_pdsch_config_sweep_select(uint64_t configuration, uint16_t rnti, uint8_t tda_index,
                                  int tda_count, int typeA, nr_pdsch_legality_fn_t legality,
                                  nr_pdsch_sweep_ticket_t *ticket, nr_pdsch_cfg_hypothesis_t *out);
+/** Restrict a catalog to the hypotheses whose effective DM-RS mask equals an OBSERVED one; 0 leaves
+ *  it untouched (no match). Pure. */
+int nr_pdsch_config_sweep_prune_mask(nr_pdsch_config_sweep_state_t *st, uint16_t dmrs_mask);
+/** Same, on the ticket's live context (no-op once it has a winner). Returns the surviving count. */
+int nr_pdsch_config_sweep_observe_mask(const nr_pdsch_sweep_ticket_t *ticket, uint16_t dmrs_mask);
 /** Returns true exactly once on convergence; fills winner when supplied. */
 bool nr_pdsch_config_sweep_feedback(const nr_pdsch_sweep_ticket_t *ticket, bool crc_ok,
                                    nr_pdsch_cfg_hypothesis_t *winner);

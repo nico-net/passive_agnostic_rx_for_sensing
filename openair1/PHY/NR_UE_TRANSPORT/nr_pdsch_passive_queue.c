@@ -316,6 +316,45 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
       nr_slot_fep_fo_override_hz = saved_fo;
       continue;
     }
+    /* DM-RS SYMBOL ORACLE (2026-09-15): which symbols of this slot carry DM-RS over the grant's PRBs is
+     * measurable before any decode (per-symbol coherence with that symbol's own DM-RS sequence). The
+     * observed mask prunes the Technique-D catalog to the (S,L,add_pos,max_len) entries that produce
+     * it, so the layout search no longer multiplies with it. Antenna 0, ~14 symbol FFTs; only while
+     * the context is unsettled. */
+    if (!job.sweep_ticket.settled && job.sweep_ticket.generation && job.freq_alloc.num_rbs >= 4) {
+      const int n_sym = fp->symbols_per_slot;
+      float coh[275];
+      double prof[14] = {0};
+      const int rb0 = job.freq_alloc.first_rb, nrb = job.freq_alloc.num_rbs;
+      for (int sym = 0; sym < n_sym && sym < 14; sym++) {
+        nr_slot_fep_ant(ue, fp, job.nr_slot_rx, sym, 0, rxdataF, link_type_dl, 0, ue->common_vars.rxdata);
+        nr_dmrs_prb_coherence(&rxdataF[0][sym * fp->ofdm_symbol_size], fp->ofdm_symbol_size, fp->first_carrier_offset,
+                              fp->N_RB_DL < 275 ? fp->N_RB_DL : 275, n_sym, job.nr_slot_rx, sym,
+                              job.dlsch_pdu.nscid, fp->Nid_cell, fp->Ncp == NR_NORMAL, coh);
+        double m = 0;
+        for (int p = rb0; p < rb0 + nrb && p < fp->N_RB_DL; p++) m += coh[p];
+        prof[sym] = m / nrb;
+      }
+      /* The metric's floor on data symbols is ~0.5 (three random pair-products per PRB), a DM-RS
+       * symbol reads ~0.9 (measured on the rank-4 bed: 0.92 vs 0.47-0.53). Symbols without energy
+       * (the special slot's UL part) read 0 and are left out of the median. */
+      double srt[14]; int ns = 0;
+      for (int sym = 0; sym < n_sym; sym++) if (prof[sym] > 0.05) srt[ns++] = prof[sym];
+      for (int a = 1; a < ns; a++) for (int b = a; b > 0 && srt[b] < srt[b - 1]; b--) { double t = srt[b]; srt[b] = srt[b - 1]; srt[b - 1] = t; }
+      const double med = ns ? srt[ns / 2] : 1.0;
+      uint16_t mask = 0;
+      for (int sym = 0; sym < n_sym; sym++)
+        if (prof[sym] > 0.75 && prof[sym] > med + 0.25) mask |= (uint16_t)(1u << sym);
+      static _Atomic int s_oracle_log = 12;
+      if (mask && atomic_load(&s_oracle_log) > 0) {
+        atomic_fetch_sub(&s_oracle_log, 1);
+        LOG_A(PHY, "SENSING: DMRS_ORACLE slot=%d rb=%d+%d mask=0x%x med=%.2f prof=[%.2f %.2f %.2f %.2f %.2f %.2f %.2f %.2f %.2f %.2f %.2f %.2f %.2f %.2f]\n",
+              job.nr_slot_rx, rb0, nrb, mask, med, prof[0], prof[1], prof[2], prof[3], prof[4], prof[5], prof[6], prof[7],
+              prof[8], prof[9], prof[10], prof[11], prof[12], prof[13]);
+      }
+      if (mask)
+        nr_pdsch_config_sweep_observe_mask(&job.sweep_ticket, mask);
+    }
     nr_pdsch_passive_decode_result_t dec;
     nr_pdsch_passive_probe_mode(job.layout_probe != 0);
     const nr_pdsch_passive_decode_status_t st_raw =

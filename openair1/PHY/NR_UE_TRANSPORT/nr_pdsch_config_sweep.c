@@ -96,6 +96,33 @@ int nr_pdsch_config_sweep_init_legal(nr_pdsch_config_sweep_state_t *st, int tda_
   return st->n_hyp;
 }
 
+/* OBSERVED DM-RS SYMBOL MASK (2026-09-15). The DM-RS symbol pattern of a grant is directly
+ * measurable (per-symbol DM-RS coherence over its PRBs), and it pins (S,L) x add_pos x max_len to the
+ * one or two catalog entries whose effective mask matches -- leaving only mcs_table to the TB CRC.
+ * Measured need: 809 live DCI layouts x ~233 hypotheses here = a joint space no probing converges on.
+ * Nothing matched -> the catalog is left whole (the measurement may be wrong; a decode still can tell). */
+int nr_pdsch_config_sweep_prune_mask(nr_pdsch_config_sweep_state_t *st, uint16_t dmrs_mask)
+{
+  if (st == NULL || st->n_hyp <= 0 || dmrs_mask == 0)
+    return 0;
+  nr_pdsch_cfg_hypothesis_t keep[NR_PDSCH_SWEEP_MAX_HYP];
+  int n = 0;
+  for (int i = 0; i < st->n_hyp; i++)
+    if (st->hyp[i].dmrs_mask == dmrs_mask)
+      keep[n++] = st->hyp[i];
+  if (n <= 0 || n == st->n_hyp)
+    return n == st->n_hyp ? n : 0;
+  memcpy(st->hyp, keep, (size_t)n * sizeof(keep[0]));
+  st->n_hyp = n;
+  memset(st->trials, 0, sizeof(st->trials));
+  memset(st->ok, 0, sizeof(st->ok));
+  for (int i = 0; i < n; i++)
+    st->order[i] = i;
+  st->cursor = 0;
+  st->winner = -1;
+  return n;
+}
+
 int nr_pdsch_config_sweep_prune_to(nr_pdsch_config_sweep_state_t *st, uint8_t mcs_table,
                                    uint8_t dmrs_add_pos, uint8_t dmrs_max_len)
 {
@@ -393,6 +420,19 @@ bool nr_pdsch_config_sweep_select(uint64_t configuration, uint16_t rnti, uint8_t
                                        .rnti=rnti, .tda_index=tda_index, .hypothesis=h, .settled=c->state.winner >= 0};
   pthread_mutex_unlock(&g_lock);
   return h >= 0;
+}
+
+int nr_pdsch_config_sweep_observe_mask(const nr_pdsch_sweep_ticket_t *ticket, uint16_t dmrs_mask)
+{
+  if (ticket == NULL || ticket->generation == 0)
+    return 0;
+  pthread_mutex_lock(&g_lock);
+  sweep_context_t *c = ticket_context(ticket);
+  int n = 0;
+  if (c != NULL && c->state.winner < 0)
+    n = nr_pdsch_config_sweep_prune_mask(&c->state, dmrs_mask);
+  pthread_mutex_unlock(&g_lock);
+  return n;
 }
 
 bool nr_pdsch_config_sweep_feedback(const nr_pdsch_sweep_ticket_t *ticket, bool crc_ok,
