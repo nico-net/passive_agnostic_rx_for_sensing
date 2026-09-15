@@ -163,6 +163,35 @@ int nr_adjust_synch_ue(const NR_DL_FRAME_PARMS *frame_parms,
   // "is the filter/PI loop itself wrong".
   const int corr_pos = force_global ? g_pos : max_pos;
 
+  /* GATED GLOBAL REBASE (2026-09-16). Measured on the X410 at 4 RX: the acquisition placed the FFT
+   * window 342 samples EARLY on every miss (TSYNC global_pos=342, global_val 25x the in-window peak,
+   * e_win_frac 0.06 on all 60 observations; the 4-ch SIB1 hits had e_win_frac 0.99). The +-CP search
+   * above is structurally blind to it, and ISAC_FORCE_GLOBAL_SYNC (always chase the global peak) was
+   * measured to kill healthy locks. So: only when the global peak is out of window AND dominant, for
+   * NR_TSYNC_GLOBAL_N consecutive observations, request ONE deferred rebase by that offset through
+   * the same frame-boundary path the ANCHOR uses (positive = channel later than the window, discard
+   * that many samples). Never fires on a healthy lock (peak in window). ISAC_TSYNC_GLOBAL_REBASE=0
+   * disables. */
+  {
+    extern _Atomic long nr_ue_pending_rebase_delta;
+    extern _Atomic int nr_ue_pending_rebase_valid;
+    static int s_gr_on = -1;
+    if (s_gr_on < 0) {
+      const char *e = getenv("ISAC_TSYNC_GLOBAL_REBASE");
+      s_gr_on = (e == NULL || atoi(e) != 0) ? 1 : 0;
+    }
+    static int s_gr_cnt = 0;
+    const bool dominant = peak_out_of_window && g_pos > 0 && g_val > 8 * (int64_t)(max_val > 0 ? max_val : 1);
+    s_gr_cnt = dominant ? s_gr_cnt + 1 : 0;
+    if (s_gr_on && s_gr_cnt >= 4 && !atomic_load_explicit(&nr_ue_pending_rebase_valid, memory_order_relaxed)) {
+      atomic_store_explicit(&nr_ue_pending_rebase_delta, (long)g_pos, memory_order_relaxed);
+      atomic_store_explicit(&nr_ue_pending_rebase_valid, 1, memory_order_relaxed);
+      LOG_W(PHY, "SENSING: TSYNC_GLOBAL_REBASE requesting deferred rebase of %+d samples (global %d vs in-window %d, e_win_frac %.3f)\n",
+            g_pos, g_val, max_val, e_win_frac);
+      s_gr_cnt = 0;
+    }
+  }
+
   // ---- RELIABILITY GATE + MEASURE-ONLY MODE (2026-08-06) -----------------------------------
   // Two independent controls, both defaulting to the previous behaviour:
   //
