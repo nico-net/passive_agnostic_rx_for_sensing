@@ -108,6 +108,7 @@ typedef struct {
   /// >0: DM-RS coherence probe for an UNRESOLVED passive BWP entry (nr_passive_bwp.h) -- no decode;
   /// the consumer transforms the DM-RS symbol, scores the carrier and hands back bwp_probe_payload.
   int8_t   bwp_probe_entry;
+  uint8_t  layout_probe;   ///< 1 = DCI-layout trial: decode code block 0 only, its CRC is the arm outcome
   /// Passive BWP entry the grant was decoded against (>0): its TB CRC is fed back to the tracker.
   int8_t   bwp_entry;
   uint64_t bwp_probe_payload;

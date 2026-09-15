@@ -317,9 +317,24 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
       continue;
     }
     nr_pdsch_passive_decode_result_t dec;
-    const nr_pdsch_passive_decode_status_t st =
+    nr_pdsch_passive_probe_mode(job.layout_probe != 0);
+    const nr_pdsch_passive_decode_status_t st_raw =
         nr_pdsch_passive_decode(ue, &proc, &job.dlsch_pdu, &job.freq_alloc, &job.grant, rxdataF, &dec);
-    nr_passive_replay_dl(&job, &dec);
+    /* A layout probe's outcome is code block 0's CRC, mapped onto the TB status the feedback below
+     * reads; the TB itself was not decoded and must not be submitted or counted. */
+    const nr_pdsch_passive_decode_status_t st =
+        !job.layout_probe ? st_raw
+        : (st_raw == NR_PDSCH_PASSIVE_DECODE_ERROR || st_raw == NR_PDSCH_PASSIVE_DECODE_UNSUPPORTED) ? st_raw
+        : (nr_pdsch_passive_probe_outcome() ? NR_PDSCH_PASSIVE_DECODE_CRC_OK : NR_PDSCH_PASSIVE_DECODE_CRC_FAIL);
+    nr_pdsch_passive_probe_mode(false);
+    if (job.layout_probe) {
+      static _Atomic uint64_t s_probe_n, s_probe_ok;
+      atomic_fetch_add_explicit(&s_probe_n, 1, memory_order_relaxed);
+      if (st == NR_PDSCH_PASSIVE_DECODE_CRC_OK) atomic_fetch_add_explicit(&s_probe_ok, 1, memory_order_relaxed);
+      if ((atomic_load_explicit(&s_probe_n, memory_order_relaxed) % 2000) == 0)
+        LOG_A(PHY, "SENSING: LAYOUT_PROBE n=%lu cb0_ok=%lu\n", (unsigned long)atomic_load(&s_probe_n), (unsigned long)atomic_load(&s_probe_ok));
+    } else
+      nr_passive_replay_dl(&job, &dec);
     if (job.bwp_entry > 0 && st != NR_PDSCH_PASSIVE_DECODE_ERROR && st != NR_PDSCH_PASSIVE_DECODE_UNSUPPORTED)
       nr_pdcch_bwp_crc_result(job.bwp_entry, st == NR_PDSCH_PASSIVE_DECODE_CRC_OK);
     nr_slot_fep_fo_override_hz = saved_fo;
@@ -430,7 +445,7 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
         LOG_A(PHY, "SENSING: Technique D CONVERGED rnti=0x%x tda=%u S=%u L=%u mask=0x%x table=%u\n",
               job.sweep_ticket.rnti, job.sweep_ticket.tda_index, winner.tda_start, winner.tda_length,
               winner.dmrs_mask, winner.mcs_table);
-      if (st == NR_PDSCH_PASSIVE_DECODE_CRC_OK) {
+      if (st == NR_PDSCH_PASSIVE_DECODE_CRC_OK && !job.layout_probe) {
         atomic_fetch_add_explicit(&g_crc_ok, 1, memory_order_relaxed);
         if (job.want_data) {
           /* Publish THIS job's monotonic slot so the CPI grid indexes it correctly. Without this the

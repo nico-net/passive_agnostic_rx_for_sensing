@@ -67,7 +67,7 @@ typedef struct {
   uint8_t dmrs_type;    ///< 0 = type 1, 1 = type 2: at 5 bits both are layouts (Tables -2 vs -3)
 } nr_dci11_layout_t;
 
-#define NR_DCI11_LAYOUT_MAX 512
+#define NR_DCI11_LAYOUT_MAX 1024 /* searched TDA width x DM-RS type: >512 at len 49 on 273 PRB */
 #define NR_DCI11_HIST_BINS 116   /* mcs 32 | rv 4 | tda 16 | ant ports 64 */
 
 /// Bit offsets (MSB-first, as read_field() counts) of every field the extraction consumes.

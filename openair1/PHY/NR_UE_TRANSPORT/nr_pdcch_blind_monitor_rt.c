@@ -211,8 +211,9 @@ static int nr_pdcch_dci11_stage2_candidates(const nr_pdcch_blind_raw_result_t *r
    * layout-family preference below was built for, measured at N=14 (OTA 2026-09-12: DL CRC 0.3 %).
    * Stage 1 prunes on plausibility at no decode cost, so wait until it has: hand over only when the
    * live set is small enough to converge, and run the hand-picked enumeration until then. */
-  if (r->n_alive > (g_dci11_cfg_alive ? 4 : NR_DCI11_STAGE2_MAX_ALIVE))
-    return 0;
+  /* Stage 2 drives at ANY live count now: above the hand-over limit the trials are first-code-block
+   * PROBES (job.layout_probe, ~1/C of a full decode), so a wide set converges instead of waiting. */
+  (void)g_dci11_cfg_alive;
   int count = 0;
   static __thread int order[NR_DCI11_LAYOUT_MAX];
   static __thread double sc[NR_DCI11_LAYOUT_MAX];
@@ -223,7 +224,11 @@ static int nr_pdcch_dci11_stage2_candidates(const nr_pdcch_blind_raw_result_t *r
     for (int b = a; b > 0 && sc[order[b]] > sc[order[b - 1]]; b--) {
       const int t = order[b]; order[b] = order[b - 1]; order[b - 1] = t;
     }
-  for (int oi = 0; oi < no && count < max; oi++) {
+  /* Above the hand-over limit only `max` of the live set fit one grant's trial list; rotate the
+   * window over the score-sorted list so every hypothesis gets probed, best ones most often. */
+  static __thread int s_rot = 0;
+  const int start = (no > max) ? (s_rot++ % (no - max + 1)) : 0;
+  for (int oi = start; oi < no && count < max; oi++) {
     const int i = order[oi];
     nr_dci11_field_bits_t f;
     if (!nr_dci11_layout_to_field_bits(&r->hyp[i], &f))
@@ -252,11 +257,20 @@ static int nr_pdcch_dci11_stage2_candidates(const nr_pdcch_blind_raw_result_t *r
     for (int k = 0; k < o.tda_count && k < 16; ++k) {
       o.tda_start[k] = 1; o.tda_length[k] = 13; o.tda_mapping[k] = 0; // scaffold: Technique D replaces S/L
     }
-    if (nr_pdcch_blind_dci_size_ex(cfg->bwp_size, &o) != len)
+    static __thread uint32_t s_sz_mismatch, s_rejected, s_diag_n;
+    if (nr_pdcch_blind_dci_size_ex(cfg->bwp_size, &o) != len) {
+      s_sz_mismatch++;
       continue; // the resolver and the extractor disagree on this layout's length: not a candidate
+    }
     nr_pdcch_blind_result_t parsed;
-    if (!nr_pdcch_blind_extract_11(raw, len, cfg->bwp_size, cfg->dmrs_typeA_position, &o, &parsed))
+    if (!nr_pdcch_blind_extract_11(raw, len, cfg->bwp_size, cfg->dmrs_typeA_position, &o, &parsed)) {
+      s_rejected++;
+      if ((++s_diag_n % 5000) == 1)
+        LOG_A(PHY, "SENSING: STAGE2 reject: layout %d (tda_bits %u ap %u bwp %u) len_ex=%u: %s [size_mismatch=%u rejected=%u]\n", i,
+              r->off[i].tda_bits, f.antenna_ports_bits, f.bwp_indicator_bits, nr_pdcch_blind_dci_size_ex(cfg->bwp_size, &o),
+              parsed.reject_reason ? parsed.reject_reason : "?", s_sz_mismatch, s_rejected);
       continue;
+    }
     out[count] = parsed;
     ids[count++] = (uint8_t)i;
   }
@@ -3000,6 +3014,9 @@ constdiag_done:;
                   : nr_slot_fep_fo_override_hz;  /* receive-thread sample; see nr_slot_fep_fo_override_hz */
       job.sweep_ticket  = sweep_ticket;
       job.bwp_entry     = cand_task[ti].bwp_entry;
+      /* Wide layout set: this trial is a first-code-block probe, not a full decode. */
+      job.layout_probe  = (cand_task[ti].dl_auto && g_dci11_state == 1
+                           && g_dci11_resolver.n_alive > NR_DCI11_STAGE2_MAX_ALIVE) ? 1 : 0;
       nr_pdsch_passive_queue_enqueue(&job);
       continue;
     }

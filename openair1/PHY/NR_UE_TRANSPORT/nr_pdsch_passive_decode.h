@@ -158,4 +158,9 @@ void nr_pdsch_passive_ldpc_stats_dump(void);
 }
 #endif
 
+/** Layout-probe mode for the calling thread: decode only code block 0; its CRC comes back through
+ *  nr_pdsch_passive_probe_outcome() and the TB is never reported decoded. */
+void nr_pdsch_passive_probe_mode(bool on);
+bool nr_pdsch_passive_probe_outcome(void);
+
 #endif // NR_PDSCH_PASSIVE_DECODE_H

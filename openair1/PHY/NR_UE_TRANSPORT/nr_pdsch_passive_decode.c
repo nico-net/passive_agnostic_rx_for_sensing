@@ -786,6 +786,7 @@ static bool passive_harq_prepare(passive_harq_t *h, int n_rb_dl)
  * behind another's decode). Evicted least-recently-used; 16 entries covers every live HARQ process
  * of two UEs, which is what a lab cell has. */
 #define NR_HARQC_N 16
+#define NR_HARQC_RV0_EVIDENCE 64 /* same-NDI rv-0 grants on undecoded processes before rv-0 combining is admitted */
 typedef struct {
   _Atomic int busy;
   bool used, soft_valid;
@@ -801,6 +802,10 @@ static pthread_mutex_t g_harqc_lock = PTHREAD_MUTEX_INITIALIZER;
 static uint64_t g_harqc_clock;
 static __thread struct { int armed; uint16_t rnti; uint8_t pid, ndi; } t_hq;
 static __thread int16_t *t_hq_d = NULL;
+static __thread bool t_probe_first_seg = false; /* decode segment 0 only; outcome in t_probe_seg_ok */
+static __thread bool t_probe_seg_ok = false;
+void nr_pdsch_passive_probe_mode(bool on) { t_probe_first_seg = on; t_probe_seg_ok = false; }
+bool nr_pdsch_passive_probe_outcome(void) { return t_probe_seg_ok; }
 static __thread bool t_hq_clear = true;
 static __thread uint32_t t_hq_A = 0;
 
@@ -931,6 +936,14 @@ static bool passive_ldpc_decode_core(PHY_VARS_NR_UE *ue,
   }
 
   TB_parameters.d_to_be_cleared = t_hq_clear; // false only for a retransmission being combined
+  /* LAYOUT PROBE (2026-09-15). A DCI-layout trial does not need the whole transport block: the first
+   * code block's own CRC already says whether the LLRs are right (rank-4 bed: 431 live layouts,
+   * 59 segments and 8.6 ms CPU per TB -- a full decode per trial cannot converge). With
+   * t_probe_first_seg the decoder sees C=1: segment 0 with the E/K/Z the full C gave it. The TB is
+   * NOT reported decoded; the outcome feeds only the layout search. */
+  const uint32_t C_full = TB_parameters.C;
+  if (t_probe_first_seg && C_full > 1)
+    TB_parameters.C = 1;
   for (uint32_t r = 0; r < TB_parameters.C; r++) {
     TB_parameters.decodeSuccess[r] = false;
   }
@@ -962,6 +975,10 @@ static bool passive_ldpc_decode_core(PHY_VARS_NR_UE *ue,
       }
     }
     t_seg_ok_last = seg_ok;
+    if (t_probe_first_seg && C_full > 1) {
+      t_probe_seg_ok = (seg_ok == 1);
+      return false; /* a probe never counts as a decoded TB */
+    }
     if (seg_ok != TB_parameters.C) {
       /* LDPC did not converge on at least one segment -> the LLRs feeding it are wrong. */
       atomic_fetch_add(&g_ldpc_seg_fail, 1);
@@ -1033,9 +1050,19 @@ static bool passive_ldpc_decode(PHY_VARS_NR_UE *ue,
     atomic_store(&e->busy, 0);
     return passive_ldpc_decode_core(ue, proc, h, cw, dlsch_config, llr, number_rbs, G);
   }
-  /* RV 0 is always a fresh TB (retx sequence 0,2,3,1): never combine into it, so a grant parsed under
-   * a wrong layout hypothesis (junk NDI/PID) cannot poison the decode of the right one. */
-  const bool retx = e->soft_valid && e->ndi == t_hq.ndi && cw->rv != 0;
+  /* A retransmission is "same NDI on this HARQ process" (TS 38.321 5.3.2.2); the RV only sets the
+   * circular-buffer start the rate de-matcher already takes from cw->rv. Combining into an rv-0 grant
+   * was withheld so a wrong layout hypothesis (junk NDI/PID) cannot poison a fresh decode; it is
+   * admitted only once THIS cell has shown it retransmits at rv 0 -- same NDI with rv 0 on a still-
+   * undecoded process, seen NR_HARQC_RV0_EVIDENCE times (the census the HARQC line reports). */
+  static _Atomic uint32_t s_rv0_retx_seen;
+  const bool same_ndi = e->soft_valid && e->ndi == t_hq.ndi;
+  /* Evidence needs the TBS to match the stored first transmission too: a junk-layout NDI matches by
+   * chance half the time, a junk TBS does not, so the count cannot be filled by mis-parsed grants. */
+  if (same_ndi && cw->rv == 0 && e->tbs != 0 && e->tbs == cw->TBS)
+    atomic_fetch_add(&s_rv0_retx_seen, 1);
+  const bool rv0_admitted = atomic_load(&s_rv0_retx_seen) >= NR_HARQC_RV0_EVIDENCE;
+  const bool retx = same_ndi && (cw->rv != 0 || rv0_admitted);
   uint32_t A = cw->TBS;
   if (retx && e->tbs != 0 && e->tbs != A) {
     A = e->tbs;
