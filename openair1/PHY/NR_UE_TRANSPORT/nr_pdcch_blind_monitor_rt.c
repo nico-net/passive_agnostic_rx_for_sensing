@@ -1196,6 +1196,7 @@ void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_pr
   }
   const nr_pdcch_blind_monitor_cfg_t *cfg = nr_pdcch_blind_monitor_get_cfg();
   nr_pdcch_ss_registry_occasion(cfg);
+  nr_pdsch_passive_queue_flush(); /* previous slot's grants go to the consumers together */
   if (nr_agnostic_v2()) {
     const int ssi = nr_pdcch_ss_registry_index(cfg);
     static _Atomic uint64_t s_probe = 0;
@@ -2994,11 +2995,12 @@ constdiag_done:;
        * whether the configured depth was right: it must stay well under slots_per_frame. */
       LOG_I(PHY,
             "SENSING: PDSCHQ queued=%lu decoded=%lu crc_ok=%lu (%.1f%%) dropped[full=%lu stale=%lu] "
-            "max_lag_slots=%lu/%d slot_groups=%lu\n",
+            "max_lag_slots=%lu/%d slot_groups=%lu/%lu multi-grant slots dropped_narrow=%lu\n",
             (unsigned long)qs.queued, (unsigned long)qs.decoded, (unsigned long)qs.crc_ok,
             qs.decoded ? (100.0 * (double)qs.crc_ok / (double)qs.decoded) : 0.0,
             (unsigned long)qs.dropped_full, (unsigned long)qs.dropped_stale,
-            (unsigned long)qs.max_lag_slots, fp->slots_per_frame, (unsigned long)qs.slot_groups);
+            (unsigned long)qs.max_lag_slots, fp->slots_per_frame, (unsigned long)qs.slot_groups,
+            (unsigned long)qs.batches_multi, (unsigned long)qs.dropped_narrow);
       char rc[256]; nr_pdsch_passive_queue_rnti_census(rc, sizeof(rc));
       LOG_I(PHY, "SENSING: PDSCHQ per-rnti%s\n", rc);
     }

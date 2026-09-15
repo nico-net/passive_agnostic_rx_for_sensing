@@ -114,9 +114,12 @@ typedef struct {
   uint64_t decoded;
   uint64_t crc_ok;
   uint64_t dropped_full;   ///< producer found the ring full: the consumers are not keeping up
+  uint64_t dropped_narrow; ///< budget: narrow grant refused while the ring was >= 90 % full
   uint64_t dropped_stale;  ///< dequeued too late; rxdata for that slot was already overwritten
   uint64_t max_lag_slots;  ///< worst observed producer-minus-job lag, in slots
   uint64_t slot_groups;    ///< dequeues that took >1 grant of one slot (FEP/chest shared)
+  uint64_t batches;        ///< producer slot batches pushed
+  uint64_t batches_multi;  ///< of which carried >1 grant (slots the cell shares between UEs)
 } nr_pdsch_passive_queue_stats_t;
 
 /**
@@ -143,6 +146,8 @@ bool nr_pdsch_passive_queue_running(void);
  *         in-line -- doing so would reintroduce exactly the deadline overrun this exists to remove.
  */
 bool nr_pdsch_passive_queue_enqueue(const nr_pdsch_passive_job_t *job);
+/// Push the producer's held-back slot batch (call at each occasion start / before stop).
+void nr_pdsch_passive_queue_flush(void);
 
 void nr_pdsch_passive_queue_get_stats(nr_pdsch_passive_queue_stats_t *out);
 

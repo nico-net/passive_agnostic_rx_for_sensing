@@ -169,6 +169,7 @@ void nr_pdsch_passive_queue_rnti_census(char *buf, size_t n)
   if (!shown) snprintf(buf, n, " (none>=50)");
 }
 static _Atomic uint64_t g_dropped_full  = 0; // evicted oldest to admit a newer job
+static _Atomic uint64_t g_dropped_narrow = 0; // budget: narrow grant refused while the ring was nearly full
 static _Atomic uint64_t g_dropped_stale = 0;
 static _Atomic uint64_t g_max_lag       = 0;
 
@@ -241,6 +242,21 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
       const int lo = more[k].freq_alloc.first_rb, hi = lo + more[k].freq_alloc.num_rbs;
       if (lo < rb_lo) rb_lo = lo;
       if (hi > rb_hi) rb_hi = hi;
+    }
+    /* Wide first: the data-aided CFR rows come from what decodes, and a wide grant's row is
+     * worth more to the sensing grid than a narrow one's if the samples go stale mid-group. */
+    if (n_more > 0) {
+      nr_pdsch_passive_job_t all[NR_PDSCH_PASSIVE_SLOT_GROUP_MAX + 1];
+      all[0] = job;
+      for (int k = 0; k < n_more; k++) all[k + 1] = more[k];
+      for (int i = 1; i <= n_more; i++) {
+        nr_pdsch_passive_job_t t = all[i];
+        int j = i - 1;
+        while (j >= 0 && all[j].freq_alloc.num_rbs < t.freq_alloc.num_rbs) { all[j + 1] = all[j]; j--; }
+        all[j + 1] = t;
+      }
+      job = all[0];
+      for (int k = 0; k < n_more; k++) more[k] = all[k + 1];
     }
     nr_pdsch_passive_set_slot_share(n_more > 0, rb_lo, rb_hi - rb_lo);
     if (n_more > 0) atomic_fetch_add_explicit(&g_slot_groups, 1, memory_order_relaxed);
@@ -492,16 +508,80 @@ bool nr_pdsch_passive_queue_running(void)
   return atomic_load_explicit(&g_running, memory_order_acquire) != 0;
 }
 
+static bool enqueue_one(const nr_pdsch_passive_job_t *job);
+
+/* SLOT BATCHING (2026-09-15). The producer hands over one grant at a time and the consumers drain
+ * the ring faster than a slot's grants arrive, so the consumer-side slot group never formed
+ * (rfsim, 3 UEs: SLOTSHARE 0/15689). Jobs are held back on the producer thread until the slot
+ * changes (or the occasion ends), then pushed contiguously under ONE lock and ONE wake-up, so the
+ * consumer that takes the first grant of a slot finds its siblings right behind it. Costs one
+ * slot of latency against a one-frame sample lifetime. */
+static nr_pdsch_passive_job_t g_pending[NR_PDSCH_PASSIVE_SLOT_GROUP_MAX];
+static int g_n_pending = 0;
+static _Atomic uint64_t g_batches = 0, g_batches_multi = 0; ///< producer flushes, and those with >1 grant
+
+void nr_pdsch_passive_queue_flush(void)
+{
+  if (g_n_pending == 0) return;
+  atomic_fetch_add_explicit(&g_batches, 1, memory_order_relaxed);
+  if (g_n_pending > 1) atomic_fetch_add_explicit(&g_batches_multi, 1, memory_order_relaxed);
+  {
+    const uint64_t nb = atomic_load_explicit(&g_batches, memory_order_relaxed);
+    if ((nb % 5000) == 0)
+      LOG_I(PHY, "SENSING: PDSCHQ batches=%lu multi-grant=%lu groups_taken=%lu dropped_narrow=%lu\n",
+            (unsigned long)nb, (unsigned long)atomic_load_explicit(&g_batches_multi, memory_order_relaxed),
+            (unsigned long)atomic_load_explicit(&g_slot_groups, memory_order_relaxed),
+            (unsigned long)atomic_load_explicit(&g_dropped_narrow, memory_order_relaxed));
+  }
+  pthread_mutex_lock(&g_lock); /* ONE lock for the whole slot: no consumer can take the head between pushes */
+  for (int i = 0; i < g_n_pending; i++)
+    enqueue_one(&g_pending[i]);
+  g_n_pending = 0;
+  pthread_cond_broadcast(&g_cv);
+  pthread_mutex_unlock(&g_lock);
+}
+
 bool nr_pdsch_passive_queue_enqueue(const nr_pdsch_passive_job_t *job)
 {
   if (!atomic_load_explicit(&g_running, memory_order_acquire)) {
     return false;
   }
-  pthread_mutex_lock(&g_lock);
+  if (g_n_pending > 0 && (g_pending[0].absolute_slot != job->absolute_slot
+                          || g_n_pending == NR_PDSCH_PASSIVE_SLOT_GROUP_MAX))
+    nr_pdsch_passive_queue_flush();
+  g_pending[g_n_pending++] = *job;
+  return true;
+}
+
+static bool enqueue_one(const nr_pdsch_passive_job_t *job) /* g_lock held by the caller */
+{
+  /* DECODE BUDGET BY SENSING VALUE (2026-09-15). Under overload the sensing pipeline wants the
+   * slot's CFR coverage, so a grant narrower than 1/8 of the band is refused while the ring is
+   * >= 90 % full rather than evicting an older, wider one. Narrow grants of a shared slot still
+   * get in whenever there is room, so multi-UE slots are not hollowed out below the threshold.
+   * ponytail: fixed 1/8 and 90 %; make them coverage-driven if drops stay high. */
+  if (g_count * 10 >= g_depth * 9 && job->freq_alloc.num_rbs * 8 < g_ue->frame_parms.N_RB_DL) {
+    atomic_fetch_add_explicit(&g_dropped_narrow, 1, memory_order_relaxed);
+    return false;
+  }
   if (g_count == g_depth) {
-    /* DROP-OLDEST. The evicted entry is the one whose rxdata samples are closest to being
-     * overwritten, so discarding it is strictly better than refusing the fresh job -- see the file
-     * header for the measurement that forced this (decoded=58384, crc_ok=0 under drop-newest). */
+    /* DROP-OLDEST, PER-RNTI FAIR (2026-09-15). The evicted entry is the oldest job of the RNTI
+     * holding the MOST ring entries, so one UE's burst cannot starve the others' contexts; with a
+     * single RNTI this is exactly the old drop-oldest (the head), whose rationale stands: its
+     * rxdata samples are the closest to being overwritten. Ring depth <= 64, so the scan is cheap
+     * and only runs under overload. */
+    uint16_t top_rnti = g_ring[g_tail].rnti; int top_n = 0;
+    for (int i = 0; i < g_count; i++) {
+      const uint16_t r = g_ring[(g_tail + i) % g_depth].rnti;
+      int n = 0;
+      for (int j = 0; j < g_count; j++) n += g_ring[(g_tail + j) % g_depth].rnti == r;
+      if (n > top_n) { top_n = n; top_rnti = r; }
+    }
+    int victim = 0;
+    while (victim < g_count && g_ring[(g_tail + victim) % g_depth].rnti != top_rnti) victim++;
+    if (victim >= g_count) victim = 0;
+    for (int i = victim; i > 0; i--) /* shift the entries older than the victim up by one */
+      g_ring[(g_tail + i) % g_depth] = g_ring[(g_tail + i - 1) % g_depth];
     g_tail = (g_tail + 1) % g_depth;
     g_count--;
     atomic_fetch_add_explicit(&g_dropped_full, 1, memory_order_relaxed);
@@ -509,8 +589,6 @@ bool nr_pdsch_passive_queue_enqueue(const nr_pdsch_passive_job_t *job)
   g_ring[g_head] = *job;
   g_head         = (g_head + 1) % g_depth;
   g_count++;
-  pthread_cond_signal(&g_cv);
-  pthread_mutex_unlock(&g_lock);
   atomic_fetch_add_explicit(&g_queued, 1, memory_order_relaxed);
   return true;
 }
@@ -524,9 +602,12 @@ void nr_pdsch_passive_queue_get_stats(nr_pdsch_passive_queue_stats_t *out)
   out->decoded       = atomic_load_explicit(&g_decoded, memory_order_relaxed);
   out->crc_ok        = atomic_load_explicit(&g_crc_ok, memory_order_relaxed);
   out->dropped_full  = atomic_load_explicit(&g_dropped_full, memory_order_relaxed);
+  out->dropped_narrow = atomic_load_explicit(&g_dropped_narrow, memory_order_relaxed);
   out->dropped_stale = atomic_load_explicit(&g_dropped_stale, memory_order_relaxed);
   out->max_lag_slots = atomic_load_explicit(&g_max_lag, memory_order_relaxed);
   out->slot_groups   = atomic_load_explicit(&g_slot_groups, memory_order_relaxed);
+  out->batches       = atomic_load_explicit(&g_batches, memory_order_relaxed);
+  out->batches_multi = atomic_load_explicit(&g_batches_multi, memory_order_relaxed);
 }
 
 void nr_pdsch_passive_queue_stop(void)
