@@ -1024,7 +1024,9 @@ static bool passive_ldpc_decode(PHY_VARS_NR_UE *ue,
     atomic_store(&e->busy, 0);
     return passive_ldpc_decode_core(ue, proc, h, cw, dlsch_config, llr, number_rbs, G);
   }
-  const bool retx = e->soft_valid && e->ndi == t_hq.ndi;
+  /* RV 0 is always a fresh TB (retx sequence 0,2,3,1): never combine into it, so a grant parsed under
+   * a wrong layout hypothesis (junk NDI/PID) cannot poison the decode of the right one. */
+  const bool retx = e->soft_valid && e->ndi == t_hq.ndi && cw->rv != 0;
   uint32_t A = cw->TBS;
   if (retx && e->tbs != 0 && e->tbs != A) {
     A = e->tbs;
@@ -2421,7 +2423,7 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
         llr_pos++;
       }
     }
-    if (nr_agnostic_v2()) {
+    if (nr_agnostic_v2() && atomic_load(&g_ldpc_ok) >= 100) { /* only once the layout has bootstrapped */
       t_hq.armed = 1;
       t_hq.rnti = grant->rnti;
       t_hq.pid = grant->harq_pid;
