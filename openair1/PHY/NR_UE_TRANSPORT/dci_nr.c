@@ -685,6 +685,30 @@ static void nr_rx_pdcch_symbol(PHY_VARS_NR_UE *ue,
                                 fp->nb_antennas_rx,
                                 log2_maxh); // log2_maxh+I0_shift
 
+  /* Per-ANTENNA constellation before combining (2026-09-15): at 4 RX the combined CORESET#0 symbols
+   * read cv 1.2-2.2 (noise-like) on every acquisition that never decoded SIB1, and 1/2 RX decode it.
+   * Which branches are QPSK-like, and which are not, is the discriminating fact. 12 shots, slot 1. */
+  {
+    static int s_ant_left = 12;
+    if (s_ant_left > 0 && fp->nb_antennas_rx > 1 && proc->nr_slot_rx == 1) {
+      char b[300];
+      int u = 0;
+      for (int a = 0; a < fp->nb_antennas_rx && u < (int)sizeof(b) - 60; a++) {
+        double sm = 0, sm2 = 0, si = 0, sq = 0;
+        for (int i = 0; i < llr_size_symbol; i++) {
+          const double vi = rxdataF_comp[a][i].r, vq = rxdataF_comp[a][i].i, m = sqrt(vi * vi + vq * vq);
+          sm += m; sm2 += m * m; si += fabs(vi); sq += fabs(vq);
+        }
+        const double n = llr_size_symbol, mean = sm / n, var = sm2 / n - mean * mean;
+        u += snprintf(b + u, sizeof(b) - u, "a%d[lvl=%d mean=%.1f cv=%.2f iq=%.2f] ", a, avg[a], mean,
+                      mean > 0 ? sqrt(var > 0 ? var : 0) / mean : -1, sq > 0 ? si / sq : -1);
+      }
+      if (u > 0) {
+        s_ant_left--;
+        LOG_W(PHY, "SENSING: PRECLIP_ANT slot=%d symb=%d shift=%d %s\n", proc->nr_slot_rx, symbol, log2_maxh, b);
+      }
+    }
+  }
   if (fp->nb_antennas_rx > 1) {
     nr_pdcch_detection_mrc(fp->nb_antennas_rx, rx_comp_sz, rxdataF_comp);
   }
