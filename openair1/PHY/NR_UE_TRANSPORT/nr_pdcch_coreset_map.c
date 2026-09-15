@@ -125,3 +125,37 @@ int nr_pdcch_coreset_map_scan(const c16_t* rxdataF,
   }
   return found;
 }
+
+/* Per-window PDCCH DM-RS correlation with an explicit reference RB (passive BWP/CORESET discovery).
+ * 38.211 7.4.1.3.2 references a PDCCH-Config CORESET's DM-RS to CRB 0 (ref_rb = 0); OAI references it
+ * to the BWP start instead (see nr_pdcch_blind_monitor_rt.h's coreset_type), so a dedicated-BWP
+ * CORESET on an OAI cell only correlates when ref_rb is that BWP's first RB. `pilot` is the
+ * conjugated reference for n_pilot_rb RBs from nr_pdcch_coreset_pilot(), indexed from ref_rb.
+ * Returns |corr| in [0,1], or -1 when the window starts below ref_rb or runs past the pilots. */
+double nr_pdcch_coreset_window_corr(const c16_t *rxdataF, int ofdm_symbol_size, int first_carrier_offset,
+                                    const c16_t *pilot, int n_pilot_rb, int rb_offset, int ref_rb)
+{
+  if (rb_offset < ref_rb || rb_offset - ref_rb + 6 > n_pilot_rb)
+    return -1.0;
+  double cr = 0.0, ci = 0.0, py = 0.0, px = 0.0;
+  for (int rb = rb_offset; rb < rb_offset + 6; rb++) {
+    for (int p = 0; p < 3; p++) {
+      const int k = (first_carrier_offset + rb * 12 + 1 + 4 * p) % ofdm_symbol_size;
+      const c16_t y = rxdataF[k];
+      const c16_t x = pilot[(rb - ref_rb) * 3 + p];
+      cr += (double)y.r * x.r - (double)y.i * x.i;
+      ci += (double)y.r * x.i + (double)y.i * x.r;
+      py += (double)y.r * y.r + (double)y.i * y.i;
+      px += (double)x.r * x.r + (double)x.i * x.i;
+    }
+  }
+  const double denom = sqrt(py * px);
+  return denom > 0.0 ? sqrt(cr * cr + ci * ci) / denom : 0.0;
+}
+
+/* Conjugated PDCCH DM-RS for n_rb RBs of one (slot, symbol), sequence index 0 at the reference RB. */
+void nr_pdcch_coreset_pilot(uint16_t scrambling_id, int slot, int symbol, int n_rb, c16_t *pilot)
+{
+  uint32_t *gold = nr_gold_pdcch(n_rb, 14, scrambling_id, slot, symbol);
+  nr_pdcch_dmrs_ref(gold, pilot, (unsigned short)n_rb);
+}

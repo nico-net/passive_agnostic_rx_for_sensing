@@ -41,6 +41,9 @@ extern "C" {
 #define NR_PBWP_MARGIN     2.0  /* summed-score lead over the runner-up to declare */
 #define NR_PBWP_IND_LEARN  8    /* steady-state DCIs binding a BWP-indicator value to an entry */
 #define NR_PBWP_MAX_CAND   32
+#define NR_PBWP_CS_MAXWIN  46   /* 6-RB windows on a 275-PRB carrier */
+#define NR_PBWP_CS_MIN_OCC 64   /* observed occasions before a CORESET may be declared */
+#define NR_PBWP_CS_MIN_HITS 8   /* above-threshold hits for a window to count as lit */
 
 typedef struct {
   uint8_t  d;                /* BWP-indicator width of this hypothesis group */
@@ -60,6 +63,17 @@ typedef struct {
   int ng;
 } nr_pbwp_entry_t;
 
+/* CORESET discovery for dedicated BWPs: a dedicated BWP's CORESET lives inside that BWP, so the
+ * configured one never sees its DCIs. PDCCH DM-RS is present only where a PDCCH is sent, so each
+ * occasion lights up the 6-RB windows carrying DCIs; over many occasions a CORESET appears as a run of
+ * lit windows. The DM-RS reference (CRB 0 per 38.211, the BWP start on OAI) is voted on as an absolute
+ * RB -- on OAI it IS the BWP start. */
+typedef struct {
+  uint32_t occ;
+  uint32_t hits[NR_PBWP_CS_MAXWIN][2]; /* per window, CORESET symbol 0 / 1 */
+  uint32_t ref_votes[276];             /* winning reference RB of each lit window */
+} nr_pbwp_coreset_t;
+
 typedef struct {
   uint16_t carrier_rbs, base_len, base_size;
   uint8_t base_ind_bits;
@@ -73,6 +87,7 @@ typedef struct {
   uint32_t switches;
   uint8_t rnti_bwp[65536];     /* per-RNTI active entry + 1 (0 = never seen on a 1_1 entry) */
   uint8_t rnti_seen[65536 / 8];/* RNTI proven by an accepted DCI: the new-length evidence */
+  nr_pbwp_coreset_t cs;
 } nr_pbwp_t;
 
 uint8_t nr_pbwp_riv_bits(uint16_t n);
@@ -122,6 +137,15 @@ uint32_t nr_pbwp_translate_riv(uint32_t value, uint8_t cur_bits, uint8_t tgt_bit
  *  v -> idx; once bound, a DCI whose v points at ANOTHER resolved entry is a switch grant for it.
  *  Returns the entry the grant's allocation belongs to (idx when not a switch). */
 int nr_pbwp_indicator(nr_pbwp_t *t, int idx, uint8_t ind_value);
+
+/** One CORESET-symbol observation. corr[w] = best |corr| of window w (RBs 6w..6w+5) over the reference
+ *  hypotheses, ref[w] = the reference RB that achieved it. Windows [base_lo, base_hi] (the configured
+ *  CORESET) are ignored. Call with symbol 0 once per observed occasion, then optionally symbol 1. */
+void nr_pbwp_coreset_observe(nr_pbwp_t *t, int n_win, int base_lo, int base_hi, const float *corr,
+                             const int16_t *ref, int symbol, float threshold);
+/** The discovered CORESET, if any: first RB, size in RB (multiple of 6), duration (1 or 2 symbols) and
+ *  the DM-RS reference RB (0 = CRB 0; on OAI the BWP start). */
+bool nr_pbwp_coreset_hypothesis(const nr_pbwp_t *t, int *start_rb, int *n_rb, int *duration, int *ref_rb);
 
 #ifdef __cplusplus
 }

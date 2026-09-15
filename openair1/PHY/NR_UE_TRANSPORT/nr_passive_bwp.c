@@ -288,3 +288,54 @@ int nr_pbwp_indicator(nr_pbwp_t *t, int idx, uint8_t ind_value)
     t->ind_map[ind_value] = (uint8_t)(idx + 1);
   return idx;
 }
+
+void nr_pbwp_coreset_observe(nr_pbwp_t *t, int n_win, int base_lo, int base_hi, const float *corr,
+                             const int16_t *ref, int symbol, float threshold)
+{
+  if (symbol < 0 || symbol > 1)
+    return;
+  if (symbol == 0)
+    t->cs.occ++;
+  for (int w = 0; w < n_win && w < NR_PBWP_CS_MAXWIN; w++) {
+    if ((w >= base_lo && w <= base_hi) || corr[w] < threshold)
+      continue;
+    t->cs.hits[w][symbol]++;
+    if (symbol == 0 && ref[w] >= 0 && ref[w] < 276)
+      t->cs.ref_votes[ref[w]]++;
+  }
+}
+
+bool nr_pbwp_coreset_hypothesis(const nr_pbwp_t *t, int *start_rb, int *n_rb, int *duration, int *ref_rb)
+{
+  if (t->cs.occ < NR_PBWP_CS_MIN_OCC)
+    return false;
+  /* largest run of lit windows, one unlit window of slack (DM-RS only where a PDCCH was sent) */
+  int best_lo = -1, best_hi = -1, lo = -1, last = -100;
+  for (int w = 0; w < NR_PBWP_CS_MAXWIN; w++) {
+    if (t->cs.hits[w][0] < NR_PBWP_CS_MIN_HITS)
+      continue;
+    if (w - last > 2)
+      lo = w;
+    last = w;
+    if (best_lo < 0 || w - lo > best_hi - best_lo) {
+      best_lo = lo;
+      best_hi = w;
+    }
+  }
+  if (best_lo < 0)
+    return false;
+  uint32_t h0 = 0, h1 = 0;
+  for (int w = best_lo; w <= best_hi; w++) {
+    h0 += t->cs.hits[w][0];
+    h1 += t->cs.hits[w][1];
+  }
+  int r = 0;
+  for (int k = 1; k < 276; k++)
+    if (t->cs.ref_votes[k] > t->cs.ref_votes[r])
+      r = k;
+  *start_rb = best_lo * 6;
+  *n_rb = (best_hi - best_lo + 1) * 6;
+  *duration = (h1 * 10 >= h0 * 3) ? 2 : 1; /* symbol 1 lit in >= 30 % of symbol-0 hits */
+  *ref_rb = r;
+  return true;
+}

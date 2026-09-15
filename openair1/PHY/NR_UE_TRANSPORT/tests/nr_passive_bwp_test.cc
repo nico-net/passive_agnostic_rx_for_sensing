@@ -198,6 +198,65 @@ TEST_F(Pbwp, CollidingGeometryIsNotDiscoverable)
   EXPECT_EQ(register_len(0x4601, 47), -1);
 }
 
+/* Synthetic CORESET-symbol observations: base CORESET on windows 0-3 always lit; the dedicated BWP's
+ * CORESET on windows [lo, hi] lit where a DCI lands (rate `p` per window), DM-RS referenced to ref_rb;
+ * noise windows below threshold. */
+void observe_cs(nr_pbwp_t *t, int n_occ, int lo, int hi, int ref_rb, bool two_symbols, double p, unsigned seed)
+{
+  std::mt19937 rng(seed);
+  std::uniform_real_distribution<float> u(0.f, 1.f);
+  const int n_win = 17; /* 106 PRB */
+  for (int o = 0; o < n_occ; o++) {
+    for (int sym = 0; sym < 2; sym++) {
+      std::vector<float> corr(n_win);
+      std::vector<int16_t> ref(n_win);
+      for (int w = 0; w < n_win; w++) {
+        corr[w] = 0.3f * u(rng);
+        ref[w] = (int16_t)(w * 6 - (int)(rng() % 6));
+        const bool dci = w >= lo && w <= hi && u(rng) < p && (sym == 0 || two_symbols);
+        if (w <= 3 || dci) { corr[w] = 0.9f + 0.1f * u(rng); ref[w] = w <= 3 ? 0 : (int16_t)ref_rb; }
+      }
+      nr_pbwp_coreset_observe(t, n_win, 0, 3, corr.data(), ref.data(), sym, 0.8f);
+    }
+  }
+}
+
+TEST_F(Pbwp, CoresetOfADedicatedBwpIsFoundWithItsOaiReference)
+{
+  /* OAI: BWP 1 = 40 PRB at CRB 30 -> CORESET 24 RB at CRB 30, 2 symbols, DM-RS referenced to CRB 30 */
+  nr_pbwp_init(t, 106, 0, 106, 47, 0);
+  observe_cs(t, 400, 5, 8, 30, true, 0.25, 5);
+  int start, n, dur, ref;
+  ASSERT_TRUE(nr_pbwp_coreset_hypothesis(t, &start, &n, &dur, &ref));
+  EXPECT_EQ(start, 30);
+  EXPECT_EQ(n, 24);
+  EXPECT_EQ(dur, 2);
+  EXPECT_EQ(ref, 30);
+}
+
+TEST_F(Pbwp, CoresetWithTheSpecReferenceAndOneSymbol)
+{
+  nr_pbwp_init(t, 106, 0, 106, 47, 0);
+  observe_cs(t, 400, 9, 14, 0, false, 0.2, 9);
+  int start, n, dur, ref;
+  ASSERT_TRUE(nr_pbwp_coreset_hypothesis(t, &start, &n, &dur, &ref));
+  EXPECT_EQ(start, 54);
+  EXPECT_EQ(n, 36);
+  EXPECT_EQ(dur, 1);
+  EXPECT_EQ(ref, 0);
+}
+
+TEST_F(Pbwp, NoCoresetIsDeclaredFromNoiseOrTooEarly)
+{
+  nr_pbwp_init(t, 106, 0, 106, 47, 0);
+  observe_cs(t, 400, 99, 99, 0, false, 0.0, 3); /* only the base CORESET lit */
+  int start, n, dur, ref;
+  EXPECT_FALSE(nr_pbwp_coreset_hypothesis(t, &start, &n, &dur, &ref));
+  nr_pbwp_init(t, 106, 0, 106, 47, 0);
+  observe_cs(t, 20, 5, 8, 30, true, 0.9, 4); /* lit, but fewer than NR_PBWP_CS_MIN_OCC occasions */
+  EXPECT_FALSE(nr_pbwp_coreset_hypothesis(t, &start, &n, &dur, &ref));
+}
+
 TEST(PassiveBwp, SwitchGrantFdraFollowsTheSpec)
 {
   EXPECT_EQ(nr_pbwp_translate_riv(0x1abc, 13, 11), 0x1abcu & 0x7ff);

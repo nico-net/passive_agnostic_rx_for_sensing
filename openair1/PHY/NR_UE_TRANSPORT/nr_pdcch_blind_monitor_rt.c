@@ -41,6 +41,7 @@
 #include "PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.h"
 #include "PHY/NR_UE_TRANSPORT/nr_pdcch_dci_length_sweep.h" // Phase 3 Technique C
 #include "PHY/NR_UE_TRANSPORT/nr_passive_bwp.h"
+#include "PHY/NR_UE_TRANSPORT/nr_pdcch_coreset_map.h"
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_adaptive_config.h"
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_config_sweep.h" // Phase 3 Technique D
 #include "PHY/NR_UE_TRANSPORT/nr_pdcch_dci11_layout_sweep.h" // DCI 1_1 layout, stage 1
@@ -1680,6 +1681,51 @@ void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_pr
                          rel15->coreset.duration, rxdataF_symb, pdcch_llr);
   }
   btim_add(BTIM_FEP_LLR, btim_t_fep);
+  /* ---- Passive BWP: CORESET discovery (nr_passive_bwp.h). A dedicated BWP's CORESET lives inside that
+   * BWP, so this CORESET never carries its DCIs. Every 8th occasion, correlate each 6-RB window of the
+   * CORESET symbols against the PDCCH DM-RS under the spec reference (CRB 0) and the OAI one (the BWP
+   * start, within 5 RB below the window), and let the tracker find a second CORESET. ~6k MAC/symbol. */
+  if (pbwp_on) {
+    static uint32_t s_cs_tick;
+    static bool s_cs_logged;
+    if ((++s_cs_tick & 7) == 0) {
+      const int n_win = fp->N_RB_DL / 6 < NR_PBWP_CS_MAXWIN ? fp->N_RB_DL / 6 : NR_PBWP_CS_MAXWIN;
+      const int base_lo = (cfg->bwp_start + cfg->coreset_rb_offset) / 6;
+      const int base_hi = base_lo + cfg->coreset_freq_domain - 1;
+      c16_t pilot[fp->N_RB_DL * 3];
+      float corr[NR_PBWP_CS_MAXWIN];
+      int16_t ref[NR_PBWP_CS_MAXWIN];
+      for (int sym = 0; sym < 2; sym++) {
+        const int symbol = cfg->ss_first_symbol + sym;
+        if (sym >= rel15->coreset.duration)
+          nr_slot_fep(ue, fp, proc->nr_slot_rx, symbol, rxdataF, link_type_dl, 0, ue->common_vars.rxdata);
+        nr_pdcch_coreset_pilot(cfg->coreset_pdcch_dmrs_scrambling_id, proc->nr_slot_rx, symbol, fp->N_RB_DL, pilot);
+        const c16_t *y = &rxdataF[0][symbol * fp->ofdm_symbol_size];
+        for (int w = 0; w < n_win; w++) {
+          corr[w] = (float)nr_pdcch_coreset_window_corr(y, fp->ofdm_symbol_size, fp->first_carrier_offset, pilot,
+                                                        fp->N_RB_DL, w * 6, 0);
+          ref[w] = 0;
+          for (int d = 0; d <= 5 && w * 6 - d > 0; d++) {
+            const float c = (float)nr_pdcch_coreset_window_corr(y, fp->ofdm_symbol_size, fp->first_carrier_offset,
+                                                                pilot, fp->N_RB_DL, w * 6, w * 6 - d);
+            if (c > corr[w]) { corr[w] = c; ref[w] = (int16_t)(w * 6 - d); }
+          }
+        }
+        pthread_mutex_lock(&g_pbwp_lock);
+        nr_pbwp_coreset_observe(&g_pbwp, n_win, base_lo, base_hi, corr, ref, sym, 0.8f);
+        pthread_mutex_unlock(&g_pbwp_lock);
+      }
+      int cs_start, cs_n, cs_dur, cs_ref;
+      pthread_mutex_lock(&g_pbwp_lock);
+      const bool have = nr_pbwp_coreset_hypothesis(&g_pbwp, &cs_start, &cs_n, &cs_dur, &cs_ref);
+      pthread_mutex_unlock(&g_pbwp_lock);
+      if (have && !s_cs_logged) {
+        s_cs_logged = true;
+        LOG_A(PHY, "SENSING: BWP CORESET found: RB %d..%d (%d RB), %d symbol(s), DM-RS reference RB %d (%s)\n",
+              cs_start, cs_start + cs_n - 1, cs_n, cs_dur, cs_ref, cs_ref ? "BWP start, OAI-style" : "CRB 0, 38.211");
+      }
+    }
+  }
   if (!nr_passive_samples_valid(
           atomic_load_explicit(&nr_ue_diag_producer_absolute_slot, memory_order_relaxed),
           source_absolute_slot, fp->slots_per_frame))

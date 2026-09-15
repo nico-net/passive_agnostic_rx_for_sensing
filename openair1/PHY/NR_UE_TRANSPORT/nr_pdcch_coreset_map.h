@@ -62,6 +62,13 @@ int nr_pdcch_coreset_map_scan(const c16_t* rxdataF,
                               nr_pdcch_coreset_candidate_t* candidates_out,
                               int          max_candidates);
 
+/** Conjugated PDCCH DM-RS for n_rb RBs of one (slot, symbol); index 0 = the reference RB. */
+void nr_pdcch_coreset_pilot(uint16_t scrambling_id, int slot, int symbol, int n_rb, c16_t *pilot);
+/** |corr| of the 6-RB window at rb_offset against pilots referenced to ref_rb (0 = CRB 0, the spec;
+ *  the BWP start on OAI). -1 when the window is not covered by the pilots. */
+double nr_pdcch_coreset_window_corr(const c16_t *rxdataF, int ofdm_symbol_size, int first_carrier_offset,
+                                    const c16_t *pilot, int n_pilot_rb, int rb_offset, int ref_rb);
+
 #ifdef __cplusplus
 }
 #endif
