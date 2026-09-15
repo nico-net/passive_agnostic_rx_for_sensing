@@ -4,7 +4,9 @@ SPDX-License-Identifier: Apache-2.0
 */
 #include <cuda_runtime.h>
 #include <vector>
+#include <map>
 #include <cstdio>
+#include <cstdlib>
 #include <unistd.h>
 #include <time.h>
 #include <assert.h>
@@ -1025,26 +1027,53 @@ extern "C" void ldpc_pool_decode(uint32_t BG, uint32_t Z, uint32_t num_iter, int
     if (n == 0 || n > POOL_MAX_LAUNCH)
         return;
     BaseGraph bg = get_basegraph(BG, Z);
+    /* The ~4*num_iter iteration launches are replayed from a CUDA graph per (BG, Z, nb, num_iter), nb = n
+     * rounded up to a power of two; codewords [n, nb) are pre-marked done (any non-zero word) so their
+     * blocks exit at once. LDPC_CUDA_GRAPH=0 launches them directly (A/B). */
+    static const bool use_graph = !getenv("LDPC_CUDA_GRAPH") || atoi(getenv("LDPC_CUDA_GRAPH")) != 0;
+    uint32_t nb = n;
+    if (use_graph)
+        for (nb = 1; nb < n; nb <<= 1)
+            ;
     CHECK_CUDA(cudaMemsetAsync(c.b_done, 0, n * sizeof(uint32_t), stream));
-    CHECK_CUDA(cudaMemsetAsync(c.b_unsat, 0, n * sizeof(uint32_t), stream));
-    dim3 threads(NODE_KERNEL_BLOCK, UNROLL_NODES);
-    dim3 blocks_cn(blocks_for(bg.num_rows * Z, threads.x), n);
-    dim3 blocks_vn(blocks_for(bg.num_cols * Z, threads.x), n);
-    dim3 blocks_syn(blocks_for(bg.num_rows * Z, 512), n);
-    llr_accumulator_t const* llr_total = c.b_llr_dev;
-    for (uint32_t i = 0; i < num_iter; ++i) {
-        update_cn_kernel<<<blocks_cn, threads, 0, stream>>>(llr_total, c.b_msg, Z, bg.cn, bg.cn_degree, bg.cn_stride,
-                                                           bg.num_rows, i == 0, BATCH_LLR_STRIDE, BATCH_MSG_STRIDE, c.b_done);
-        update_vn_kernel<<<blocks_vn, threads, 0, stream>>>(c.b_msg, c.b_llr_dev, c.b_total, Z, bg.vn, bg.vn_degree,
-                                                           bg.vn_stride, bg.num_cols, bg.num_rows, BATCH_LLR_STRIDE,
-                                                           BATCH_MSG_STRIDE, c.b_done);
-        llr_total = c.b_total;
-        if (i + 1 < num_iter) {
-            batch_syndrome_kernel<<<blocks_syn, 512, 0, stream>>>(c.b_total, c.b_unsat, c.b_done, Z, bg.cn, bg.cn_degree,
-                                                                  bg.cn_stride, bg.num_rows, BATCH_LLR_STRIDE);
-            batch_done_kernel<<<blocks_for(n, 128), 128, 0, stream>>>(c.b_unsat, c.b_done, n);
+    if (nb > n)
+        CHECK_CUDA(cudaMemsetAsync(c.b_done + n, 1, (nb - n) * sizeof(uint32_t), stream));
+    CHECK_CUDA(cudaMemsetAsync(c.b_unsat, 0, nb * sizeof(uint32_t), stream));
+    static std::map<uint64_t, cudaGraphExec_t> graphs; /* only the pool worker thread gets here */
+    const uint64_t key = (uint64_t)BG << 40 | (uint64_t)Z << 24 | (uint64_t)nb << 8 | num_iter;
+    cudaGraphExec_t& ge = graphs[key];
+    if (use_graph && ge) {
+        CHECK_CUDA(cudaGraphLaunch(ge, stream));
+    } else {
+        if (use_graph)
+            CHECK_CUDA(cudaStreamBeginCapture(stream, cudaStreamCaptureModeThreadLocal));
+        dim3 threads(NODE_KERNEL_BLOCK, UNROLL_NODES);
+        dim3 blocks_cn(blocks_for(bg.num_rows * Z, threads.x), nb);
+        dim3 blocks_vn(blocks_for(bg.num_cols * Z, threads.x), nb);
+        dim3 blocks_syn(blocks_for(bg.num_rows * Z, 512), nb);
+        llr_accumulator_t const* it_total = c.b_llr_dev;
+        for (uint32_t i = 0; i < num_iter; ++i) {
+            update_cn_kernel<<<blocks_cn, threads, 0, stream>>>(it_total, c.b_msg, Z, bg.cn, bg.cn_degree, bg.cn_stride,
+                                                               bg.num_rows, i == 0, BATCH_LLR_STRIDE, BATCH_MSG_STRIDE, c.b_done);
+            update_vn_kernel<<<blocks_vn, threads, 0, stream>>>(c.b_msg, c.b_llr_dev, c.b_total, Z, bg.vn, bg.vn_degree,
+                                                               bg.vn_stride, bg.num_cols, bg.num_rows, BATCH_LLR_STRIDE,
+                                                               BATCH_MSG_STRIDE, c.b_done);
+            it_total = c.b_total;
+            if (i + 1 < num_iter) {
+                batch_syndrome_kernel<<<blocks_syn, 512, 0, stream>>>(c.b_total, c.b_unsat, c.b_done, Z, bg.cn, bg.cn_degree,
+                                                                      bg.cn_stride, bg.num_rows, BATCH_LLR_STRIDE);
+                batch_done_kernel<<<blocks_for(nb, 128), 128, 0, stream>>>(c.b_unsat, c.b_done, nb);
+            }
+        }
+        if (use_graph) {
+            cudaGraph_t g;
+            CHECK_CUDA(cudaStreamEndCapture(stream, &g));
+            CHECK_CUDA(cudaGraphInstantiate(&ge, g, 0));
+            CHECK_CUDA(cudaGraphDestroy(g));
+            CHECK_CUDA(cudaGraphLaunch(ge, stream));
         }
     }
+    llr_accumulator_t const* llr_total = num_iter ? c.b_total : c.b_llr_dev;
     uint32_t b0 = 0;
     for (int r = 0; r < n_req; r++) {
         dim3 blocks_pack(blocks_for(K[r], PACK_BITS_KERNEL_THREADS), count[r]);
