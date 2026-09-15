@@ -24,6 +24,43 @@
 #include "common/utils/LOG/log.h"
 
 #include <stdint.h>
+#include <stdlib.h>
+#include <stdio.h>
+/* LDPC_BENCH=1: per-TB decode wall time and whole-process CPU time (getrusage, so the thread pool's
+ * segment tasks are included), averaged and printed every 200 calls. For comparing libldpc (CPU) and
+ * libldpc_cuda (GPU) on the same workload; off by default. */
+#include <sys/resource.h>
+static int ldpc_bench_on(void)
+{
+  static int on = -1;
+  if (on < 0) {
+    const char *e = getenv("LDPC_BENCH");
+    on = e && atoi(e);
+  }
+  return on;
+}
+static double ldpc_bench_cpu_s(void)
+{
+  struct rusage u;
+  getrusage(RUSAGE_SELF, &u);
+  return u.ru_utime.tv_sec + u.ru_stime.tv_sec + 1e-6 * (u.ru_utime.tv_usec + u.ru_stime.tv_usec);
+}
+static double ldpc_bench_wall_s(void)
+{
+  struct timespec t;
+  clock_gettime(CLOCK_MONOTONIC, &t);
+  return t.tv_sec + 1e-9 * t.tv_nsec;
+}
+static void ldpc_bench_add(const char *who, double wall, double cpu, int segs)
+{
+  static __thread double sw, sc;
+  static __thread long n, ns;
+  sw += wall; sc += cpu; ns += segs;
+  if (++n % 200 == 0)
+    printf("LDPC_BENCH %s: %ld TBs, %.1f segs/TB, wall %.1f us/TB, cpu %.1f us/TB\n", who, n, (double)ns / n,
+           1e6 * sw / n, 1e6 * sc / n);
+}
+
 #include <string.h>
 
 struct ThreadContext;
@@ -75,7 +112,7 @@ int32_t nrLDPC_coding_shutdown(void)
   return 0;
 }
 
-int32_t nrLDPC_coding_decoder(nrLDPC_slot_decoding_parameters_t *slot)
+int32_t nrLDPC_coding_decoder_impl(nrLDPC_slot_decoding_parameters_t *slot)
 {
   int nb = 0;
   for (int t = 0; t < slot->nb_TBs; t++)
@@ -142,4 +179,17 @@ int32_t nrLDPC_coding_decoder(nrLDPC_slot_decoding_parameters_t *slot)
     }
   }
   return 0;
+}
+
+int32_t nrLDPC_coding_decoder(nrLDPC_slot_decoding_parameters_t *p)
+{
+  if (!ldpc_bench_on())
+    return nrLDPC_coding_decoder_impl(p);
+  int segs = 0;
+  for (int t = 0; t < p->nb_TBs; t++)
+    segs += p->TBs[t].C;
+  const double w0 = ldpc_bench_wall_s(), c0 = ldpc_bench_cpu_s();
+  const int32_t rc = nrLDPC_coding_decoder_impl(p);
+  ldpc_bench_add("gpu", ldpc_bench_wall_s() - w0, ldpc_bench_cpu_s() - c0, segs);
+  return rc;
 }

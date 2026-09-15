@@ -725,6 +725,10 @@ extern "C" ThreadContext* ldpc_decoder_init(int make_stream) {
         return &ldpc_decoder_init_context(make_stream);
 
     printf("Initializing LDPC runtime %d\n", (int) gettid());
+    /* Blocking sync: a thread waiting on the GPU sleeps instead of spinning. The point of the offload
+     * is CPU time -- the passive receiver is CPU-bound -- so a spinning waiter would give it back.
+     * Must precede the first CUDA call that creates the context. */
+    cudaSetDeviceFlags(cudaDeviceScheduleBlockingSync);
 
     const uint32_t* table_bg_cn_degree[2][8] = { { BG1_CN_DEGREE_TABLE() }, { BG2_CN_DEGREE_TABLE() } };
     const uint32_t* table_bg_vn_degree[2][8] = { { BG1_VN_DEGREE_TABLE() }, { BG2_VN_DEGREE_TABLE() } };
