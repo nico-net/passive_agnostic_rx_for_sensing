@@ -186,7 +186,12 @@ static uint64_t g_pdsch_configuration;
  * own TB-CRC-scored context (key = configuration ^ layout id) and the settled/preferred/round-robin
  * selection promotes the one that decodes. TB CRC remains the only authority. The hand-picked
  * 3-family enumeration is the fallback while stage 1 is not armed. */
-#define NR_DCI11_STAGE2_MAX_ALIVE 4   /* hand over once stage 1 is down to this many */
+#define NR_DCI11_STAGE2_MAX_ALIVE 8   /* hand over once stage 1 is down to this many */
+/* While the configured layout is still among stage 1's survivors, hand over only at 4 (the measured
+ * dilution limit); once stage 1 has REFUTED it, waiting is pointless -- the hand-picked fallback
+ * enumeration hard-codes antenna_ports=4 bits and can never contain the truth. OTA 2026-09-15 on the
+ * rank-4 cell: 8 survivors, configured layout dead, 0/3793 TB CRC for the whole run. */
+static int g_dci11_cfg_alive = 1;
 static int nr_pdcch_dci11_stage2_enabled(void)
 {
   static int s_on = -1;
@@ -206,7 +211,7 @@ static int nr_pdcch_dci11_stage2_candidates(const nr_pdcch_blind_raw_result_t *r
    * layout-family preference below was built for, measured at N=14 (OTA 2026-09-12: DL CRC 0.3 %).
    * Stage 1 prunes on plausibility at no decode cost, so wait until it has: hand over only when the
    * live set is small enough to converge, and run the hand-picked enumeration until then. */
-  if (r->n_alive > NR_DCI11_STAGE2_MAX_ALIVE)
+  if (r->n_alive > (g_dci11_cfg_alive ? 4 : NR_DCI11_STAGE2_MAX_ALIVE))
     return 0;
   int count = 0;
   static __thread int order[NR_DCI11_LAYOUT_MAX];
@@ -422,12 +427,13 @@ static void nr_pdcch_dci11_layout_observe(const nr_pdcch_blind_monitor_cfg_t *cf
       break;
     }
   }
+  g_dci11_cfg_alive = cfg_alive;
   LOG_A(PHY, "SENSING: DCI11_LAYOUT n=%llu observed | %d of %d layouts still plausible | "
              "configured (bwp_ind=%d ant_ports=%d) %s\n",
         (unsigned long long)g_dci11_seen, r->n_alive, r->n_hyp, cfg_bwp, cfg_ap,
         cfg_alive ? "IS among the survivors"
                   : "IS NOT among the survivors -- the assumed widths contradict the air");
-  if (nr_pdcch_dci11_stage2_enabled()) {
+  if (nr_pdcch_dci11_stage2_enabled() || nr_agnostic_v2()) {
     char eb[400];
     int u = 0;
     for (int i = 0; i < r->n_hyp && u < (int)sizeof(eb) - 40; i++) {
@@ -442,7 +448,7 @@ static void nr_pdcch_dci11_layout_observe(const nr_pdcch_blind_monitor_cfg_t *cf
       u += snprintf(eb + u, sizeof(eb) - u, "[%d bwp%d ap%d: %u/%u] ", i, f.bwp_indicator_bits, f.antenna_ports_bits, ok, tr);
     }
     LOG_A(PHY, "SENSING: DCI11_STAGE2 %s (alive=%d, hands over at <=%d) tb_crc ok/trials per live layout: %s\n",
-          r->n_alive <= NR_DCI11_STAGE2_MAX_ALIVE ? "DRIVING the extractor" : "waiting for stage 1 to prune",
+          r->n_alive <= (g_dci11_cfg_alive ? 4 : NR_DCI11_STAGE2_MAX_ALIVE) ? "DRIVING the extractor" : "waiting for stage 1 to prune",
           r->n_alive, NR_DCI11_STAGE2_MAX_ALIVE, eb);
   }
 }

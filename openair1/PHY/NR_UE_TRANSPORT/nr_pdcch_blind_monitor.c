@@ -1747,6 +1747,19 @@ static const uint8_t g_table_7_3_2_3_3_1[12][5] = {
     {2, 0, 1, 0, 0}, {2, 0, 0, 1, 0}, {2, 0, 0, 0, 1}, {2, 1, 1, 0, 0},
     {2, 0, 0, 1, 1}, {2, 1, 1, 1, 0}, {2, 1, 1, 1, 1}, {2, 1, 0, 1, 0},
 };
+// Table 7.3.1.2.2-2: DM-RS type 1, maxLength 2 -- the 5-bit antenna-ports field a rank-4 cell with
+// 4 DL antennas uses (OTA 2026-09-15). Columns: {cdm_groups, port0..port7, DM-RS symbols (1 or 2)}.
+// Rows 0-11 are Table -1 with one front-loaded symbol; rows 12-30 use the double symbol.
+static const uint8_t g_table_7_3_2_3_3_2[31][10] = {
+    {1,1,0,0,0,0,0,0,0,1}, {1,0,1,0,0,0,0,0,0,1}, {1,1,1,0,0,0,0,0,0,1}, {2,1,0,0,0,0,0,0,0,1},
+    {2,0,1,0,0,0,0,0,0,1}, {2,0,0,1,0,0,0,0,0,1}, {2,0,0,0,1,0,0,0,0,1}, {2,1,1,0,0,0,0,0,0,1},
+    {2,0,0,1,1,0,0,0,0,1}, {2,1,1,1,0,0,0,0,0,1}, {2,1,1,1,1,0,0,0,0,1}, {2,1,0,1,0,0,0,0,0,1},
+    {2,1,0,0,0,0,0,0,0,2}, {2,0,1,0,0,0,0,0,0,2}, {2,0,0,1,0,0,0,0,0,2}, {2,0,0,0,1,0,0,0,0,2},
+    {2,0,0,0,0,1,0,0,0,2}, {2,0,0,0,0,0,1,0,0,2}, {2,0,0,0,0,0,0,1,0,2}, {2,0,0,0,0,0,0,0,1,2},
+    {2,1,1,0,0,0,0,0,0,2}, {2,0,0,1,1,0,0,0,0,2}, {2,0,0,0,0,1,1,0,0,2}, {2,0,0,0,0,0,0,1,1,2},
+    {2,1,0,0,0,1,0,0,0,2}, {2,0,0,1,0,0,0,1,0,2}, {2,1,1,0,0,1,0,0,0,2}, {2,0,0,1,1,0,0,1,0,2},
+    {2,1,1,0,0,1,1,0,0,2}, {2,0,0,1,1,0,0,1,1,2}, {2,1,0,1,0,1,0,1,0,2},
+};
 
 /// Read `nbits` starting at the bit position just below `*pos` (spec/TS-38.212-field order, MSB
 /// first) out of a single 64-bit payload word, then advance `*pos` past them. Payloads sized by
@@ -2564,10 +2577,15 @@ bool nr_pdcch_blind_extract_11(const nr_pdcch_blind_raw_result_t *raw,
     out->reject_reason = "format indicator=0 (UL grant, not a PDSCH DCI)";
     return false;
   }
-  if (antenna_ports >= 12) {
-    out->reject_reason = "antenna_ports field outside Table 7.3.1.2.2-1's 12 valid rows";
+  /* 4-bit field: Table 7.3.1.2.2-1 (type 1, maxLength 1). 5-bit field: Table -2 (type 1, maxLength 2),
+   * whose code point also fixes the DM-RS symbol count. Type 2 (5/6 bits, Tables -3/-4) is not
+   * decoded: rejected as out of range, so a type-2 hypothesis never produces a grant. */
+  const bool ap_len2 = (f.ant_ports == 5);
+  if (antenna_ports >= (ap_len2 ? 31u : 12u) || f.ant_ports > 5) {
+    out->reject_reason = "antenna_ports field outside Table 7.3.1.2.2-1/-2's valid rows";
     return false;
   }
+  const uint8_t *ap_row = ap_len2 ? g_table_7_3_2_3_3_2[antenna_ports] : g_table_7_3_2_3_3_1[antenna_ports];
   // Table selection is still unknown here. MCS 28 is valid in tables 0 and 2;
   // the actual PDSCH decoder checks the selected table's nonzero code rate.
   if (mcs >= 29) {
@@ -2615,7 +2633,8 @@ bool nr_pdcch_blind_extract_11(const nr_pdcch_blind_raw_result_t *raw,
   // through a synthetic column instead (fill_dmrs_mask takes no override argument, and adding one
   // would touch the shared MAC path -- see nr_pdcch_blind_extract_opts_t).
   const int add_pos = (opts != NULL && opts->dmrs_add_pos >= 0) ? opts->dmrs_add_pos : 2;
-  const int max_len = (opts != NULL && opts->dmrs_max_length > 0) ? opts->dmrs_max_length : 1;
+  const int max_len = ap_len2 ? g_table_7_3_2_3_3_2[antenna_ports][9]
+                              : (opts != NULL && opts->dmrs_max_length > 0) ? opts->dmrs_max_length : 1;
   const int16_t dmrs_mask =
       blind_fill_dmrs_mask(dmrs_typeA_position, tda.nrOfSymbols, tda.startSymbolIndex, tda.mapping_type, add_pos, max_len);
   if (dmrs_mask <= 0) {
@@ -2629,10 +2648,10 @@ bool nr_pdcch_blind_extract_11(const nr_pdcch_blind_raw_result_t *raw,
   out->start_symbol       = (uint8_t)tda.startSymbolIndex;
   out->num_symbols        = (uint8_t)tda.nrOfSymbols;
   out->dl_dmrs_symb_pos   = (uint16_t)dmrs_mask;
-  out->n_dmrs_cdm_groups  = g_table_7_3_2_3_3_1[antenna_ports][0];
-  out->dmrs_ports         = (uint16_t)(g_table_7_3_2_3_3_1[antenna_ports][1] | (g_table_7_3_2_3_3_1[antenna_ports][2] << 1)
-                                       | (g_table_7_3_2_3_3_1[antenna_ports][3] << 2)
-                                       | (g_table_7_3_2_3_3_1[antenna_ports][4] << 3));
+  out->n_dmrs_cdm_groups  = ap_row[0];
+  out->dmrs_ports         = 0;
+  for (int k = 0; k < (ap_len2 ? 8 : 4); k++)
+    out->dmrs_ports |= (uint16_t)(ap_row[1 + k] << k);
   out->nscid              = (uint8_t)dmrs_seq_init;
   out->mcs                = (uint8_t)mcs;
   out->rv                 = (uint8_t)rv;
