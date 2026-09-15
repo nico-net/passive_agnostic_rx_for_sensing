@@ -1621,16 +1621,31 @@ static int trx_usrp_read(openair0_device_t *device, openair0_timestamp_t *ptimes
   }
 
   // bring RX data into 12 LSBs for softmodem RX
+  /* ISAC_RX_CHAN_MAP="2,3,0,1": OAI antenna i takes UHD channel map[i]. A/B tool (2026-09-16): on the
+   * X410 the weak daughterboard-A antennas are UHD ch0/ch1 and the strong B ones ch2/ch3; making a
+   * strong channel OAI antenna 0 tells whether the 4-RX CORESET#0 failure follows antenna 0's role. */
+  static int s_map[8] = {0, 1, 2, 3, 4, 5, 6, 7};
+  static int s_map_init = 0;
+  if (!s_map_init) {
+    s_map_init = 1;
+    const char *e = getenv("ISAC_RX_CHAN_MAP");
+    if (e && *e) {
+      int n = 0; const char *q = e;
+      while (*q && n < 8) { s_map[n++] = atoi(q); while (*q && *q != ',') q++; if (*q) q++; }
+      LOG_W(HW, "ISAC_RX_CHAN_MAP: OAI antennas take UHD channels [%d %d %d %d]\n", s_map[0], s_map[1], s_map[2], s_map[3]);
+    }
+  }
   for (int i=0; i<cc; i++) {
+    const int src = (s_map[i] >= 0 && s_map[i] < cc) ? s_map[i] : i;
     for (int j = 0; j < nsamps2; j++) {
       // bring RX data into 12 LSBs for softmodem RX,
       // this keeps the significant bits of B210 and may loose better ADC results,
       // but it makes free bits in MSB for signal processing on int16
       if ((((uintptr_t) buff[i])&0x1F)==0) {
-        ((simde__m256i *)buff[i])[j] = simde_mm256_srai_epi16(buff_tmp[i][j], rxshift);
+        ((simde__m256i *)buff[i])[j] = simde_mm256_srai_epi16(buff_tmp[src][j], rxshift);
       } else {
         // FK: in some cases the buffer might not be 32 byte aligned, so we cannot use avx2
-        simde__m256i tmp = simde_mm256_srai_epi16(buff_tmp[i][j], rxshift);
+        simde__m256i tmp = simde_mm256_srai_epi16(buff_tmp[src][j], rxshift);
         simde_mm256_storeu_si256(((simde__m256i *)buff[i]) + j, tmp);
       }
     }
