@@ -861,8 +861,14 @@ extern "C" uint8_t const* ldpc_batch_decode(uint32_t BG, uint32_t Z, uint32_t fi
     llr_accumulator_t* total = c.b_total + (size_t)first * BATCH_LLR_STRIDE;
     llr_msg_t* msg = c.b_msg + (size_t)first * BATCH_MSG_STRIDE;
     uint8_t* bits_dev = c.b_bits_dev + (size_t)first * BATCH_BITS_STRIDE;
+    static int bench = -1;
+    if (bench < 0) { const char* e = getenv("LDPC_BENCH"); bench = e && atoi(e); }
+    cudaEvent_t ev[4];
+    if (bench) for (int e = 0; e < 4; e++) cudaEventCreate(&ev[e]);
+    if (bench) cudaEventRecord(ev[0], stream);
     CHECK_CUDA(cudaMemcpyAsync(llr_dev, c.b_llr_host + (size_t)first * BATCH_LLR_STRIDE, (size_t)n * BATCH_LLR_STRIDE,
                                cudaMemcpyHostToDevice, stream));
+    if (bench) cudaEventRecord(ev[1], stream);
     uint32_t* done = c.b_done + first;
     uint32_t* unsat = c.b_unsat + first;
     CHECK_CUDA(cudaMemsetAsync(done, 0, n * sizeof(uint32_t), stream));
@@ -886,13 +892,30 @@ extern "C" uint8_t const* ldpc_batch_decode(uint32_t BG, uint32_t Z, uint32_t fi
             batch_done_kernel<<<blocks_for(n, 128), 128, 0, stream>>>(unsat, done, n);
         }
     }
+    if (bench) cudaEventRecord(ev[2], stream);
     dim3 threads_pack(PACK_BITS_KERNEL_THREADS);
     dim3 blocks_pack(blocks_for(block_length, threads_pack.x), n);
     pack_bits_kernel<<<blocks_pack, threads_pack, 0, stream>>>(llr_total, bits_dev, block_length, BATCH_LLR_STRIDE,
                                                                BATCH_BITS_STRIDE);
     uint8_t* bits_host = c.b_bits_host + (size_t)first * BATCH_BITS_STRIDE;
     CHECK_CUDA(cudaMemcpyAsync(bits_host, bits_dev, (size_t)n * BATCH_BITS_STRIDE, cudaMemcpyDeviceToHost, stream));
+    if (bench) cudaEventRecord(ev[3], stream);
     CHECK_CUDA(cudaStreamSynchronize(stream));
+    if (bench) {
+        static __thread double t_in, t_it, t_out; static __thread long nb, n_done, n_cw;
+        float a, b, d;
+        cudaEventElapsedTime(&a, ev[0], ev[1]); cudaEventElapsedTime(&b, ev[1], ev[2]); cudaEventElapsedTime(&d, ev[2], ev[3]);
+        t_in += a; t_it += b; t_out += d;
+        uint32_t h_done[1024]; const uint32_t m = n < 1024 ? n : 1024;
+        cudaMemcpy(h_done, done, m * sizeof(uint32_t), cudaMemcpyDeviceToHost);
+        for (uint32_t k = 0; k < m; k++) n_done += h_done[k];
+        n_cw += m;
+        for (int e = 0; e < 4; e++) cudaEventDestroy(ev[e]);
+        if (++nb % 200 == 0)
+            printf("LDPC_BENCH gpu kernel: copy-in %.1f us, %u iterations %.1f us, pack+copy-out %.1f us per batch; "
+                   "early-terminated %.1f%% of code blocks\n", 1000.0 * t_in / nb, num_iter, 1000.0 * t_it / nb,
+                   1000.0 * t_out / nb, 100.0 * n_done / (n_cw ? n_cw : 1));
+    }
     return bits_host;
 }
 
