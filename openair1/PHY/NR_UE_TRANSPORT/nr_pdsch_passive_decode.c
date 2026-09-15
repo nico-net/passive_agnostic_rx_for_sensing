@@ -333,6 +333,13 @@ static _Atomic uint64_t g_rbhist[3][NR_PDSCH_RBHIST_BINS];
 static _Atomic uint64_t g_mcshist[2][3][32];
 static _Atomic uint64_t g_mcs_segs[32], g_mcs_segs_ok[32], g_mcs_tbs[32], g_mcs_rb[32];
 static _Atomic uint64_t g_rv_try[4][32], g_rv_ok[4][32]; // ISAC_RV_RETRY rescues by [rv][mcs]
+/* RBMAP: which RBs the cell actually allocated, for the dashboard's spectrum strip. One counter per
+ * RB, incremented per accepted grant over its allocation, printed as 273 density digits and reset --
+ * so the strip shows the LAST window, not the run average. */
+#define NR_RBMAP_MAX 275
+static _Atomic uint32_t g_rbmap[NR_RBMAP_MAX];
+static _Atomic uint32_t g_rbmap_ok[NR_RBMAP_MAX];
+static _Atomic uint64_t g_rbmap_grants;
 static __thread uint32_t t_seg_ok_last = 0; // segments that decoded in the last TB on this thread
 static _Atomic uint64_t g_shape_rv[3]  = {0, 0, 0};
 static _Atomic uint64_t g_shape_G[3]   = {0, 0, 0};
@@ -545,6 +552,28 @@ void nr_pdsch_passive_ldpc_stats_dump(void)
     }
     if (u > 0)
       LOG_I(PHY, "SENSING: RVRETRY rescued/tried by mcs: %s\n", rb);
+  }
+  {
+    /* Density per RB as one digit 0-9 relative to the busiest RB in this window, plus the CRC-OK
+     * share on the same axis. Reset after printing: the strip is a live picture, not a run total. */
+    uint32_t occ[NR_RBMAP_MAX], okc[NR_RBMAP_MAX], mx = 0;
+    for (int rb = 0; rb < NR_RBMAP_MAX; rb++) {
+      occ[rb] = atomic_exchange(&g_rbmap[rb], 0);
+      okc[rb] = atomic_exchange(&g_rbmap_ok[rb], 0);
+      if (occ[rb] > mx) mx = occ[rb];
+    }
+    const uint64_t ng = atomic_exchange(&g_rbmap_grants, 0);
+    if (mx > 0) {
+      char ob[NR_RBMAP_MAX + 1], kb[NR_RBMAP_MAX + 1];
+      int n = 0;
+      for (int rb = 0; rb < NR_RBMAP_MAX; rb++, n++) {
+        ob[n] = (char)('0' + (occ[rb] * 9 + mx / 2) / mx);
+        kb[n] = occ[rb] ? (char)('0' + (okc[rb] * 9 + occ[rb] / 2) / occ[rb]) : '0';
+      }
+      ob[n] = kb[n] = '\0';
+      LOG_I(PHY, "SENSING: RBMAP dl grants=%llu peak=%u occ=%s crc=%s\n",
+            (unsigned long long)ng, mx, ob, kb);
+    }
   }
   {
     /* SUBSET: every subset scored on the SAME transport blocks, so the comparison isolates the
@@ -2442,6 +2471,15 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
         atomic_fetch_add(&g_rbhist[sk][rb_bin], 1);
       }
       atomic_fetch_add(&g_mcshist[freq_alloc->num_rbs >= 128 ? 1 : 0][sk][grant->mcs & 31], 1);
+      {
+        const int rb0 = freq_alloc->first_rb, nrb = freq_alloc->num_rbs;
+        for (int rb = rb0; rb < rb0 + nrb && rb < NR_RBMAP_MAX; rb++) {
+          if (rb < 0) continue;
+          atomic_fetch_add(&g_rbmap[rb], 1);
+          if (sk == 1) atomic_fetch_add(&g_rbmap_ok[rb], 1);
+        }
+        atomic_fetch_add(&g_rbmap_grants, 1);
+      }
       if (freq_alloc->num_rbs >= 128) {
         atomic_fetch_add(&g_mcs_tbs[grant->mcs & 31], (uint64_t)cw->TBS);
         atomic_fetch_add(&g_mcs_rb[grant->mcs & 31], (uint64_t)freq_alloc->num_rbs);

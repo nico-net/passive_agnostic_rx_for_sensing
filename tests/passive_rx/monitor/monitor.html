@@ -81,9 +81,10 @@ canvas{display:block;width:100%;border-radius:6px;border:1px solid var(--soft);b
 </header>
 <nav id="tabs"></nav>
 <main id="view"></main>
+<div id="liveWrap"></div>
 
 <script>
-const TABS = ["Link & Sync Health","DL Detections","UL Detections","Tracking","Config / Scene"];
+const TABS = ["Live","Link & Sync Health","DL Detections","UL Detections","Tracking","Config / Scene"];
 let tab = 0, state = null, rxId = null, pollError = null;
 
 const el = (t, cls, txt) => { const e = document.createElement(t); if (cls) e.className = cls; if (txt != null) e.textContent = txt; return e; };
@@ -660,7 +661,7 @@ function decoderPanel() {
   return row;
 }
 
-const RENDER = [tabHealth, tabDL, tabUL, tabTracking, tabConfig];
+const RENDER = [null, tabHealth, tabDL, tabUL, tabTracking, tabConfig];  // index 0 = Live, handled before this table
 
 function renderChrome() {
   const nav = document.getElementById("tabs"); nav.textContent = "";
@@ -698,6 +699,10 @@ function renderChrome() {
 function render() {
   renderChrome();
   const v = document.getElementById("view");
+  const lw = document.getElementById("liveWrap");
+  lw.style.display = (tab === 0) ? "" : "none";
+  v.style.display = (tab === 0) ? "none" : "";
+  if (tab === 0) return;   // the Live panel runs its own 75 ms loop; render() must not touch it
   // Preserve scroll across the rebuild, per pane, in DOM order. `stick` means the user was at the
   // bottom, so keep them there as lines arrive; otherwise hold the exact offset so they can read.
   const prev = [...v.querySelectorAll(".log")].map(n => ({
@@ -796,5 +801,156 @@ function safeRender() {
 safeRender(); poll();
 window.addEventListener("resize", () => render());
 </script>
+<!-- LIVE panel: injected into monitor.html. Polls /fast every 75 ms (one CPI). -->
+<style>
+#live { font: 13px/1.45 system-ui, sans-serif; padding: 12px 14px; }
+#live .row { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 12px; }
+#live .tile { background: #141821; border: 1px solid #263041; border-radius: 8px; padding: 8px 12px; min-width: 116px; }
+#live .tile .k { color: #8b98ad; font-size: 11px; text-transform: uppercase; letter-spacing: .04em; }
+#live .tile .v { font-size: 20px; font-weight: 600; font-variant-numeric: tabular-nums; }
+#live .ok { color: #46d07f; } #live .warn { color: #e8b93c; } #live .bad { color: #ef5f63; } #live .dim { color: #8b98ad; }
+#live .banner { border-radius: 8px; padding: 10px 14px; margin-bottom: 12px; border: 1px solid; }
+#live .banner.bad { background: #2a1114; border-color: #ef5f63; }
+#live .banner.warn { background: #2a2411; border-color: #e8b93c; }
+#live .banner .t { font-weight: 700; margin-bottom: 4px; }
+#live .banner .a { color: #d7dee9; }
+#live .banner .d { color: #8b98ad; font-family: ui-monospace, monospace; font-size: 11px; margin-top: 5px; word-break: break-all; }
+#live .maps { display: grid; grid-template-columns: 1fr; gap: 10px; }
+#live .map { background: #141821; border: 1px solid #263041; border-radius: 8px; padding: 8px 12px 10px; }
+#live .map h4 { margin: 0 0 6px; font-size: 12px; color: #8b98ad; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; }
+#live .map h4 span { float: right; color: #6f7c91; font-weight: 400; text-transform: none; letter-spacing: 0; }
+#live canvas { width: 100%; height: 54px; display: block; image-rendering: pixelated; }
+#live .axis { display: flex; justify-content: space-between; color: #6f7c91; font-size: 10px; margin-top: 2px; }
+#live .legend { color: #6f7c91; font-size: 10px; margin-top: 4px; }
+#live .agn { display: flex; flex-wrap: wrap; gap: 8px; }
+#live .agn .p { background: #141821; border: 1px solid #263041; border-radius: 999px; padding: 4px 10px; font-size: 12px; }
+</style>
+<div id="live">
+  <div id="liveBanner"></div>
+  <div class="row" id="liveTiles"></div>
+  <div class="maps">
+    <div class="map">
+      <h4>Downlink PRB allocation <span id="dlMeta"></span></h4>
+      <canvas id="dlMap" width="546" height="54"></canvas>
+      <div class="axis"><span>PRB 0</span><span>136</span><span>272</span></div>
+    </div>
+    <div class="map">
+      <h4>Uplink PRB allocation <span id="ulMeta"></span></h4>
+      <canvas id="ulMap" width="546" height="54"></canvas>
+      <div class="axis"><span>PRB 0</span><span>136</span><span>272</span></div>
+      <div class="legend">Bar height = share of grants using that PRB in the last window. Colour = TB-CRC success on those grants (red 0% → green 100%). Grey = never allocated.</div>
+    </div>
+  </div>
+  <div class="row" style="margin-top:12px" id="liveAgn"></div>
+</div>
+<script>
+(function () {
+  const $ = (id) => document.getElementById(id);
+  let convergedAt = null, firstDecodeAt = null, lastFault = 0;
+
+  function hhmmss(s) {
+    if (s == null || !isFinite(s)) return "--:--";
+    s = Math.max(0, Math.floor(s));
+    const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), q = s % 60;
+    return (h ? String(h).padStart(2, "0") + ":" : "") + String(m).padStart(2, "0") + ":" + String(q).padStart(2, "0");
+  }
+  function tile(k, v, cls, sub) {
+    return `<div class="tile"><div class="k">${k}</div><div class="v ${cls || ""}">${v}</div>` +
+           (sub ? `<div class="k dim" style="text-transform:none">${sub}</div>` : "") + `</div>`;
+  }
+  /* Colour is the CRC digit, height is the occupancy digit: one strip answers both "was this PRB
+   * used" and "did those grants decode", which is the pair that tells a spectrum story. */
+  function drawMap(cv, occ, crc) {
+    const ctx = cv.getContext("2d"), W = cv.width, H = cv.height;
+    ctx.clearRect(0, 0, W, H);
+    ctx.fillStyle = "#0d1017"; ctx.fillRect(0, 0, W, H);
+    if (!occ) {
+      ctx.fillStyle = "#4a5568"; ctx.font = "12px system-ui";
+      ctx.fillText("no grants in this window", 8, H / 2 + 4);
+      return;
+    }
+    const n = occ.length, bw = W / n;
+    for (let i = 0; i < n; i++) {
+      const o = occ.charCodeAt(i) - 48;
+      if (o <= 0) { ctx.fillStyle = "#1b2230"; ctx.fillRect(i * bw, H - 2, Math.max(1, bw), 2); continue; }
+      const c = crc ? crc.charCodeAt(i) - 48 : 0;
+      const hue = 4 + (c / 9) * 128;           // 4 = red, 132 = green
+      ctx.fillStyle = `hsl(${hue} 72% ${34 + (o / 9) * 18}%)`;
+      const h = Math.max(2, (o / 9) * (H - 4));
+      ctx.fillRect(i * bw, H - h, Math.max(1, bw), h);
+    }
+  }
+
+  async function tick() {
+    let d;
+    try {
+      d = await (await fetch("/fast", {cache: "no-store"})).json();
+    } catch (e) { return; }
+    const st = d.stats || {}, ct = d.counters || {};
+
+    // ---- fault banner -------------------------------------------------------------------
+    const f = d.fault;
+    const stale = d.age_s != null && d.age_s > 30;
+    let bh = "";
+    if (f && (d.now - f.at) < 900) {
+      bh = `<div class="banner bad"><div class="t">⚠ ${f.title}</div>` +
+           `<div class="a">${f.action}</div><div class="d">${f.detail || ""}</div></div>`;
+    } else if (!d.proc_alive) {
+      bh = `<div class="banner bad"><div class="t">No receiver process</div>` +
+           `<div class="a">nr-uesoftmodem is not running. Start a capture (run_arm.sh) — the numbers below are the last run's.</div></div>`;
+    } else if (stale) {
+      bh = `<div class="banner warn"><div class="t">Receiver alive but the log has been static for ${Math.round(d.age_s)} s</div>` +
+           `<div class="a">The process is up and writing nothing: a stalled stream or a lost PBCH lock. Check pbch_ok, then restart the run.</div></div>`;
+    }
+    $("liveBanner").innerHTML = bh;
+
+    // ---- timers -------------------------------------------------------------------------
+    const dec = st.pdsch_try || 0, ok = st.pdsch_ok || 0;
+    if (dec > 0 && firstDecodeAt == null) firstDecodeAt = d.now;
+    // "Converged" = the receiver has derived what it needs AND is decoding: layouts pruned and
+    // a non-trivial CRC rate. Latched, because the interesting number is when it first got there.
+    const rate = dec ? (100 * ok / dec) : 0;
+    if (convergedAt == null && rate > 20 && dec > 2000) convergedAt = d.now;
+    const actS = d.started_at ? d.now - d.started_at : null;
+    const convS = convergedAt ? convergedAt - (d.started_at || convergedAt) : null;
+
+    const rateCls = rate > 50 ? "ok" : rate > 15 ? "warn" : "bad";
+    const pb = ct.pbch_ok || 0;
+    $("liveTiles").innerHTML =
+      tile("Activity", hhmmss(actS), d.proc_alive ? "ok" : "dim", d.proc_alive ? "receiver up" : "stopped") +
+      tile("Time to converge", convergedAt ? hhmmss(convS) : "—", convergedAt ? "ok" : "warn",
+           convergedAt ? "layouts + decode settled" : "not converged yet") +
+      tile("DL TB CRC", rate.toFixed(1) + "%", rateCls, `${ok.toLocaleString()} / ${dec.toLocaleString()}`) +
+      tile("UL CRC", ((st.ul_rate || 0)).toFixed(1) + "%", (st.ul_rate || 0) > 20 ? "ok" : "dim",
+           `${(st.ul_ok || 0).toLocaleString()} / ${(st.ul_try || 0).toLocaleString()}`) +
+      tile("DCI accepts", (st.dci_accepts || 0).toLocaleString(), "dim", "blind PDCCH") +
+      tile("Queue dropped", (st.dl_drop_full || 0).toLocaleString(), (st.dl_drop_full || 0) > 1000 ? "warn" : "dim", "consumers behind") +
+      tile("Log age", d.age_s == null ? "—" : d.age_s.toFixed(1) + " s", stale ? "bad" : "ok", (d.path || "").split("/").slice(-2, -1)[0] || "");
+
+    // ---- RB maps ------------------------------------------------------------------------
+    const rb = d.rbmap, ul = d.ul;
+    drawMap($("dlMap"), rb && rb.occ, rb && rb.crc);
+    drawMap($("ulMap"), ul && ul.occ, ul && ul.crc);
+    $("dlMeta").textContent = rb ? `${rb.grants} grants in window · peak ${rb.peak} on one PRB` : "waiting for the receiver's RBMAP line";
+    $("ulMeta").textContent = ul ? `${ul.grants} grants · peak ${ul.peak}` : "no UL grants seen";
+
+    // ---- what has been derived off the air ----------------------------------------------
+    const a = d.agnostic || {};
+    const pills = [];
+    if (a.tdd_derived) pills.push(["TDD from SIB1", a.tdd_derived]);
+    if (a.csirs_conf) pills.push(["CSI-RS found", a.csirs_conf]);
+    if (a.dci11_layout) pills.push(["DCI 1_1 layouts alive", a.dci11_layout]);
+    if (a.dci01_layout) pills.push(["DCI 0_1 layouts alive", a.dci01_layout]);
+    if (st.acq_state) pills.push(["Acquisition", st.acq_state]);
+    if (st.rank) pills.push(["Rank", (st.rank.layers || "?") + " layer(s)"]);
+    $("liveAgn").innerHTML = `<div class="agn">` +
+      (pills.length ? pills.map(([k, v]) => `<span class="p"><span class="dim">${k}:</span> ${v}</span>`).join("")
+                    : `<span class="p dim">nothing derived yet</span>`) + `</div>`;
+  }
+  setInterval(tick, 75);   // one CPI
+  tick();
+})();
+</script>
+
 </body>
 </html>

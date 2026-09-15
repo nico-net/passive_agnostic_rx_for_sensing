@@ -161,6 +161,16 @@ class LogTail:
         ("polar", re.compile(r"polar decoding wrong")),
         ("pbch_try", re.compile(r"pbch not decoded on any branch")),
         ("synch_fail", re.compile(r"synch Failed")),
+        ("rbmap", re.compile(r"RBMAP dl grants=(\d+) peak=(\d+) occ=(\d+) crc=(\d+)")),
+        ("ulprb", re.compile(r"PUSCHDIAG \S+ rnti=0x([0-9a-f]+) k2=\d+ prb=(\d+)\+(\d+).*?status=(\d)")),
+        ("rfstall", re.compile(r"RFSTALL ([^(]*)\(?")),
+        ("mpm_claim", re.compile(r"ERROR_CODE_OVERFLOW|Out of sequence")),
+        ("radio_open", re.compile(r"can't open the radio device|rx xport timed out")),
+        ("cfo_void", re.compile(r"VOID_CFO_MISLOCK")),
+        ("tdd_derived", re.compile(r"TDD from SIB1 (DERIVED|ABSENT|REJECTED)")),
+        ("csirs_conf", re.compile(r'CSIRS_BLIND CONFIRMED after \d+ slots -- csirs_monitor = "([^"]+)"')),
+        ("dci11_layout", re.compile(r"DCI11_LAYOUT n=\d+ observed \| (\d+) of (\d+) layouts")),
+        ("dci01_layout", re.compile(r"DCI01_LAYOUT n=\d+ observed \| (\d+) of (\d+) layouts")),
     ]
 
     def __init__(self, path, maxlines=4000):
@@ -170,6 +180,13 @@ class LogTail:
         self.lines = deque(maxlen=maxlines)
         self.counters = {"overflow": 0, "sync_lost": 0, "pbch_ok": 0}
         self.stats = {}
+        self.fault = None            # last actionable fault (title/action/detail/at)
+        self.rbmap = None            # DL: density digits per RB, from the receiver's own counter
+        self.ul_occ = [0] * 275      # UL: accumulated per-RB grant count (from PUSCHDIAG)
+        self.ul_ok = [0] * 275
+        self.ul_grants = 0
+        self.agnostic = {}           # what the receiver has derived off the air, with first-seen time
+        self.started_at = time.time()
         self._lock = threading.Lock()
 
     def run(self):
@@ -182,14 +199,14 @@ class LogTail:
         FOLLOW THE NEWEST CAPTURE. Every run writes a new directory, so a fixed path goes stale as
         soon as the next arm starts and the dashboard then reports a finished run forever.
         """
-        cur, f = None, None
+        cur, f, pending = None, None, ""
         try:
             while True:
                 nxt = self._latest() or self.path
                 if nxt != cur and nxt.exists():
                     if f:
                         f.close()
-                    cur, self.path = nxt, nxt
+                    cur, self.path, pending = nxt, nxt, ""
                     f = nxt.open("r", errors="replace")
                     for line in f.readlines()[-self.lines.maxlen:]:
                         self._ingest(line.rstrip())
@@ -197,11 +214,22 @@ class LogTail:
                 if f is None:
                     time.sleep(1.0)
                     continue
-                line = f.readline()
-                if not line:
+                chunk = f.readline()
+                if not chunk:
                     time.sleep(0.25)
                     continue
-                self._ingest(line.rstrip())
+                # PARTIAL LINES. readline() on a file another process is appending to returns
+                # whatever has been flushed -- frequently half a line. Ingesting that half silently
+                # breaks every pattern anchored past the split point: measured 2026-09-15, the
+                # decoder panel froze at the run's first PDSCHQ sample while the log pane kept
+                # scrolling, because the long PDSCHQ lines were the ones being cut. Hold the
+                # remainder until its newline arrives.
+                pending += chunk
+                if not pending.endswith("\n"):
+                    continue
+                for ln in pending.splitlines():
+                    self._ingest(ln)
+                pending = ""
         finally:
             if f:
                 f.close()
@@ -217,11 +245,55 @@ class LogTail:
             return None
         return max(runs, key=lambda q: q.stat().st_mtime) if runs else None
 
+    # X410 / receiver faults the operator can act on, with the action. Keyed by pattern name so a
+    # banner always carries a remedy instead of a log excerpt nobody can act on.
+    FAULTS = {
+        "mpm_claim": ("X410 stream out of sequence (stale MPM claim)",
+                      "A previous receiver was SIGKILLed and left the claim behind. "
+                      "ssh root@128.178.122.174 'systemctl restart usrp-hwd', then wait 200 s before starting."),
+        "radio_open": ("X410 will not open (mgmt_portal timeout / device busy)",
+                       "MPM is still coming up or another process holds the device. "
+                       "Check 'systemctl is-active usrp-hwd' on the X410, kill any nr-uesoftmodem, settle 200 s."),
+        "rfstall":    ("RF stall — stream stopped or the timing loop ran away",
+                       "If pbch_ok is 0 the stream died: restart the run. If power is healthy it is the "
+                       "timing runaway (runbook 4.5) — restart; it is a start-up lottery at 4 antennas."),
+        "cfo_void":   ("CFO mis-lock — this capture is void",
+                       "CFO is estimated once at acquisition; a bad lock reads 0 % CRC for the whole run. "
+                       "Abort and restart (never retune a live radio)."),
+        "overflow":   ("UHD/NIC overflow",
+                       "Host could not keep up with the stream. Check NIC ring/MTU (9000) and CPU load; "
+                       "reduce antennas or probes if it repeats."),
+    }
+
     def _ingest(self, line):
         with self._lock:
             for name, pat in self.PATTERNS:
                 m = pat.search(line)
                 if not m:
+                    continue
+                if name in self.FAULTS and name not in self.counters:
+                    title, action = self.FAULTS[name]
+                    self.fault = {"title": title, "action": action,
+                                  "detail": line.strip()[-160:], "at": time.time()}
+                if name == "rbmap":
+                    self.rbmap = {"grants": int(m.group(1)), "peak": int(m.group(2)),
+                                  "occ": m.group(3), "crc": m.group(4), "at": time.time()}
+                    continue
+                if name == "ulprb":
+                    try:
+                        start, n, ok = int(m.group(2)), int(m.group(3)), m.group(4) == "0"
+                    except ValueError:
+                        continue
+                    for rb in range(start, min(start + n, len(self.ul_occ))):
+                        self.ul_occ[rb] += 1
+                        if ok:
+                            self.ul_ok[rb] += 1
+                    self.ul_grants += 1
+                    continue
+                if name in ("tdd_derived", "csirs_conf", "dci11_layout", "dci01_layout"):
+                    self.agnostic[name] = (m.group(1) if m.lastindex == 1
+                                           else "/".join(m.groups()))
+                    self.agnostic.setdefault(name + "_at", time.time())
                     continue
                 if name in self.counters:
                     self.counters[name] += 1
@@ -314,7 +386,27 @@ class LogTail:
                     # then nothing. Reading that as "no receiver" hides exactly the state an
                     # operator most needs to see, so liveness is tracked separately from reports.
                     "last_line_at": self.last_line_at,
+                    "fault": self.fault,
+                    "rbmap": self.rbmap,
+                    "ul": self._ul_strip(),
+                    "agnostic": dict(self.agnostic),
+                    "started_at": self.started_at,
                     "lines": list(self.lines)[-400:]}
+
+    def _ul_strip(self):
+        """UL occupancy on the same 0-9 axis as the DL map, then DECAY so the strip tracks the
+        recent past rather than the whole run (the DL side gets this for free: the receiver resets
+        its counters when it prints)."""
+        mx = max(self.ul_occ) if self.ul_occ else 0
+        if mx <= 0:
+            return None
+        occ = "".join(str((v * 9 + mx // 2) // mx) for v in self.ul_occ)
+        crc = "".join(str((self.ul_ok[i] * 9 + self.ul_occ[i] // 2) // self.ul_occ[i]) if self.ul_occ[i] else "0"
+                      for i in range(len(self.ul_occ)))
+        out = {"grants": self.ul_grants, "peak": mx, "occ": occ, "crc": crc}
+        self.ul_occ = [v * 3 // 4 for v in self.ul_occ]
+        self.ul_ok = [v * 3 // 4 for v in self.ul_ok]
+        return out
 
 
 
@@ -436,7 +528,27 @@ def make_handler(store, logtail, html_path):
             self.wfile.write(body)
 
         def do_GET(self):
-            if self.path.startswith("/state"):
+            if self.path.startswith("/fast"):
+                # The 75 ms (one CPI) poll. /state carries 400 log lines and every receiver report;
+                # sending that 13x a second is what made the old page feel heavy, so the live panel
+                # polls this instead: counters, the two RB strips, the fault banner, the timers.
+                lg = logtail.snapshot() if logtail else {}
+                payload = {
+                    "now": time.time(),
+                    "stats": lg.get("stats", {}),
+                    "counters": lg.get("counters", {}),
+                    "rbmap": lg.get("rbmap"),
+                    "ul": lg.get("ul"),
+                    "fault": lg.get("fault"),
+                    "agnostic": lg.get("agnostic", {}),
+                    "age_s": lg.get("age_s"),
+                    "proc_alive": lg.get("proc_alive"),
+                    "path": lg.get("path"),
+                    "last_line_at": lg.get("last_line_at"),
+                    "started_at": lg.get("started_at"),
+                }
+                self._send(200, json.dumps(payload).encode(), "application/json")
+            elif self.path.startswith("/state"):
                 payload = {
                     "receivers": store.snapshot(),
                     "log": logtail.snapshot() if logtail else None,

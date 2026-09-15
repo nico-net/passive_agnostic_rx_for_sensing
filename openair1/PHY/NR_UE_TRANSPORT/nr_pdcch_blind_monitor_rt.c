@@ -175,6 +175,74 @@ static int      g_dci11_state;   /* 0 = not tried, 1 = armed, -1 = unavailable *
 static uint64_t g_dci11_seen;
 
 static inline int nr_pdcch_ss_bucket(const nr_pdcch_blind_monitor_cfg_t *cfg);
+static uint64_t g_pdsch_configuration;
+/* ---- DCI 1_1 layout, STAGE 2 (ISAC_DCI11_STAGE2=1, default off). Every layout the stage-1
+ * resolver still holds alive is turned into extract widths (nr_dci11_layout_to_field_bits, which is
+ * offset-identical to the layout by construction -- nr_dci11_layout_apply_roundtrip) and parsed. Each
+ * parse is a candidate allocation; the existing Technique-D machinery below gives every candidate its
+ * own TB-CRC-scored context (key = configuration ^ layout id) and the settled/preferred/round-robin
+ * selection promotes the one that decodes. TB CRC remains the only authority. The hand-picked
+ * 3-family enumeration is the fallback while stage 1 is not armed. */
+#define NR_DCI11_STAGE2_MAX_ALIVE 4   /* hand over once stage 1 is down to this many */
+static int nr_pdcch_dci11_stage2_enabled(void)
+{
+  static int s_on = -1;
+  if (s_on < 0) {
+    const char *e = getenv("ISAC_DCI11_STAGE2");
+    s_on = (e != NULL && atoi(e) != 0) ? 1 : 0;
+  }
+  return s_on;
+}
+static int nr_pdcch_dci11_stage2_candidates(const nr_pdcch_blind_raw_result_t *raw, uint16_t len,
+                                            const nr_pdcch_blind_monitor_cfg_t *cfg,
+                                            nr_pdcch_blind_result_t *out, uint8_t *ids, int max)
+{
+  const nr_dci11_resolver_t *r = &g_dci11_resolver;
+  /* DILUTION GATE. Every candidate offered here gets its own Technique-D context, so N candidates
+   * means each sees 1/N of the grants and none reaches min_trials -- the same failure the
+   * layout-family preference below was built for, measured at N=14 (OTA 2026-09-12: DL CRC 0.3 %).
+   * Stage 1 prunes on plausibility at no decode cost, so wait until it has: hand over only when the
+   * live set is small enough to converge, and run the hand-picked enumeration until then. */
+  if (r->n_alive > NR_DCI11_STAGE2_MAX_ALIVE)
+    return 0;
+  int count = 0;
+  for (int i = 0; i < r->n_hyp && count < max; i++) {
+    if (!r->alive[i])
+      continue;
+    nr_dci11_field_bits_t f;
+    if (!nr_dci11_layout_to_field_bits(&r->hyp[i], &f))
+      continue;
+    nr_pdcch_blind_extract_opts_t o = {0};
+    o.bwp_indicator_bits = f.bwp_indicator_bits;
+    o.vrb_to_prb_bits    = f.vrb_to_prb_bits;
+    o.prb_bundling_bits  = f.prb_bundling_bits;
+    o.rate_matching_bits = f.rate_matching_bits;
+    o.zp_csirs_bits      = f.zp_csirs_bits;
+    o.tb2_bits           = f.tb2_bits;
+    o.harq_pid_bits      = f.harq_pid_bits;
+    o.dai_bits           = f.dai_bits;
+    o.pdsch_to_harq_bits = f.pdsch_to_harq_bits;
+    o.antenna_ports_bits = f.antenna_ports_bits;
+    o.tci_bits           = f.tci_bits;
+    o.srs_request_bits   = f.srs_request_bits;
+    o.cbg_bits           = f.cbg_bits;
+    o.tda_count          = (cfg->extract.tda_count > 0) ? cfg->extract.tda_count : 16;
+    o.dmrs_add_pos       = 0;
+    o.dmrs_max_length    = 1;
+    for (int k = 0; k < o.tda_count && k < 16; ++k) {
+      o.tda_start[k] = 1; o.tda_length[k] = 13; o.tda_mapping[k] = 0; // scaffold: Technique D replaces S/L
+    }
+    if (nr_pdcch_blind_dci_size_ex(cfg->bwp_size, &o) != len)
+      continue; // the resolver and the extractor disagree on this layout's length: not a candidate
+    nr_pdcch_blind_result_t parsed;
+    if (!nr_pdcch_blind_extract_11(raw, len, cfg->bwp_size, cfg->dmrs_typeA_position, &o, &parsed))
+      continue;
+    out[count] = parsed;
+    ids[count++] = (uint8_t)i;
+  }
+  return count;
+}
+
 /* ---- DCI 0_1 layout, stage 1 (observe-only, mirrors the 1_1 observer below). The uplink grant's
  * field widths are set by RRC switches this receiver cannot read; every layout whose total equals
  * the observed 0_1 length is a hypothesis and each accepted payload prunes by plausibility. */
@@ -337,9 +405,26 @@ static void nr_pdcch_dci11_layout_observe(const nr_pdcch_blind_monitor_cfg_t *cf
         (unsigned long long)g_dci11_seen, r->n_alive, r->n_hyp, cfg_bwp, cfg_ap,
         cfg_alive ? "IS among the survivors"
                   : "IS NOT among the survivors -- the assumed widths contradict the air");
+  if (nr_pdcch_dci11_stage2_enabled()) {
+    char eb[400];
+    int u = 0;
+    for (int i = 0; i < r->n_hyp && u < (int)sizeof(eb) - 40; i++) {
+      if (!r->alive[i])
+        continue;
+      nr_dci11_field_bits_t f;
+      if (!nr_dci11_layout_to_field_bits(&r->hyp[i], &f))
+        continue;
+      uint32_t ok = 0, tr = 0;
+      const uint64_t key = (g_pdsch_configuration ^ (uint64_t)(i + 1)) * UINT64_C(1099511628211);
+      nr_pdsch_config_sweep_context_stats(key, 0 /* any rnti */, 0, cfg->dmrs_typeA_position, &ok, &tr);
+      u += snprintf(eb + u, sizeof(eb) - u, "[%d bwp%d ap%d: %u/%u] ", i, f.bwp_indicator_bits, f.antenna_ports_bits, ok, tr);
+    }
+    LOG_A(PHY, "SENSING: DCI11_STAGE2 %s (alive=%d, hands over at <=%d) tb_crc ok/trials per live layout: %s\n",
+          r->n_alive <= NR_DCI11_STAGE2_MAX_ALIVE ? "DRIVING the extractor" : "waiting for stage 1 to prune",
+          r->n_alive, NR_DCI11_STAGE2_MAX_ALIVE, eb);
+  }
 }
 
-static uint64_t g_pdsch_configuration;
 static nr_pdcch_dci_length_sweep_state_t g_dl_length_state;
 
 static void dl_discovery_invalidate(void)
@@ -2181,12 +2266,16 @@ constdiag_done:;
               (unsigned long)raw->payload, raw->mismatched_bits);
       nr_pdcch_dci11_layout_observe(cfg, cand_task[ti].dci_length, raw->payload);
       if (!g_pdsch_sweep_on) continue;
-      nr_pdcch_blind_result_t layouts[3];
-      uint8_t layout_ids[3];
-      const int n=nr_pdcch_blind_dl_layout_candidates(raw, cand_task[ti].dci_length,
-          cfg->bwp_size, cfg->dmrs_typeA_position, layouts, layout_ids);
+      nr_pdcch_blind_result_t layouts[NR_DCI11_LAYOUT_MAX];
+      uint8_t layout_ids[NR_DCI11_LAYOUT_MAX];
+      int n = 0;
+      if (nr_pdcch_dci11_stage2_enabled() && g_dci11_state == 1)
+        n = nr_pdcch_dci11_stage2_candidates(raw, cand_task[ti].dci_length, cfg, layouts, layout_ids, NR_DCI11_LAYOUT_MAX);
+      if (!n)
+        n = nr_pdcch_blind_dl_layout_candidates(raw, cand_task[ti].dci_length,
+            cfg->bwp_size, cfg->dmrs_typeA_position, layouts, layout_ids);
       if (!n) continue;
-      uint64_t keys[3];
+      uint64_t keys[NR_DCI11_LAYOUT_MAX];
       int settled=-1, n_settled=0;
       for (int i=0;i<n;++i) {
         keys[i]=(g_pdsch_configuration ^ (uint64_t)(layout_ids[i]+1)) * UINT64_C(1099511628211);
