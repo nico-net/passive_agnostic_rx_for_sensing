@@ -692,9 +692,15 @@ static void nr_rx_pdcch_symbol(PHY_VARS_NR_UE *ue,
       rough[a] = pw > 0.0 ? dp / pw : 1e30;
       if (rough[a] < best_r) best_r = rough[a];
     }
+    /* ISAC_PDCCH_ANT_MASK=<hex>: force the kept set (A/B tool: 0x3 = branches 0+1, what 2 RX uses). */
+    static int s_force_mask = -1;
+    if (s_force_mask < 0) {
+      const char *e = getenv("ISAC_PDCCH_ANT_MASK");
+      s_force_mask = e ? (int)strtol(e, NULL, 0) : 0;
+    }
     int kept = 0;
     for (int a = 0; a < fp->nb_antennas_rx; a++) {
-      if (rough[a] > 4.0 * best_r) {
+      if ((s_force_mask && !(s_force_mask & (1 << a))) || (!s_force_mask && rough[a] > 4.0 * best_r)) {
         memset(pdcch_dl_ch_estimates_ext[a], 0, sizeof(c16_t) * rx_size);
         avg[a] = 0;
       } else {
