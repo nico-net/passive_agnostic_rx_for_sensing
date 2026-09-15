@@ -187,6 +187,7 @@ class LogTail:
         self.ul_grants = 0
         self.agnostic = {}           # what the receiver has derived off the air, with first-seen time
         self.started_at = time.time()
+        self.skipped_bytes = 0   # backlog dropped to stay live; shown on the page
         self._lock = threading.Lock()
 
     def run(self):
@@ -199,7 +200,7 @@ class LogTail:
         FOLLOW THE NEWEST CAPTURE. Every run writes a new directory, so a fixed path goes stale as
         soon as the next arm starts and the dashboard then reports a finished run forever.
         """
-        cur, f, pending = None, None, ""
+        cur, f, pending, nlines = None, None, "", 0
         try:
             while True:
                 nxt = self._latest() or self.path
@@ -214,6 +215,25 @@ class LogTail:
                 if f is None:
                     time.sleep(1.0)
                     continue
+                # KEEPING UP. The receiver writes ~10k lines/s under load and each line costs a
+                # couple of dozen regex searches, so a tail that insists on reading every line falls
+                # progressively behind and the panel shows minutes-old numbers -- indistinguishable
+                # from a frozen dashboard, and the reason "the CRC is stuck" was reported three
+                # times. A live panel owes the operator the PRESENT: when the backlog passes a few
+                # MB, skip to near the end and resume there. Nothing downstream is cumulative-from-
+                # zero (every stat is an absolute counter printed by the receiver), so dropping
+                # backlog costs no state.
+                nlines += 1
+                if (nlines % 512) == 0:
+                    try:
+                        size, pos = self.path.stat().st_size, f.tell()
+                        if size - pos > 4 << 20:
+                            f.seek(max(0, size - (256 << 10)))
+                            f.readline()          # discard the partial line at the seek point
+                            pending = ""
+                            self.skipped_bytes += size - pos
+                    except OSError:
+                        pass
                 chunk = f.readline()
                 if not chunk:
                     time.sleep(0.25)
@@ -265,7 +285,15 @@ class LogTail:
                        "reduce antennas or probes if it repeats."),
     }
 
+    # Lines that are pure volume and match no pattern. Checked before the regex sweep because at
+    # ~10k lines/s the sweep itself is what makes the tail fall behind.
+    SKIP = ("CSIRS_BLIND", "FEPDIAG", "TIMEMUT", "rnti_seen", "PRECLIP", "TSYNC_OBS")
+
     def _ingest(self, line):
+        for junk in self.SKIP:
+            if junk in line:
+                self.last_line_at = time.time()
+                return
         with self._lock:
             for name, pat in self.PATTERNS:
                 m = pat.search(line)
@@ -391,6 +419,7 @@ class LogTail:
                     "ul": self._ul_strip(),
                     "agnostic": dict(self.agnostic),
                     "started_at": self.started_at,
+                    "skipped_bytes": self.skipped_bytes,
                     "lines": list(self.lines)[-400:]}
 
     def _ul_strip(self):
