@@ -1097,6 +1097,17 @@ void nr_pdcch_blind_monitor_process(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t 
   }
 
   NR_DL_FRAME_PARMS *fp = &ue->frame_parms;
+  /* Consult the SIB1 cache as soon as the cell is known: with OAI's own SIB1 failing at 4 RX, this
+   * is what seeds the DL TDRA list (and the UL seed below) on a cell decoded before. One call per
+   * PCI; the loader itself is idempotent. */
+  {
+    static uint16_t s_cache_pci = 0xFFFF;
+    if (s_cache_pci != fp->Nid_cell) {
+      s_cache_pci = (uint16_t)fp->Nid_cell;
+      nr_pdcch_blind_common_config_t c;
+      (void)nr_pdcch_blind_get_common((uint16_t)fp->Nid_cell, &c);
+    }
+  }
 
   /* ---- PHASE 3 (2026-09-04): recover the DEDICATED CORESET by search, Technique A -------------
    * Runs BEFORE the dedicated-SS occasion gate below, which is keyed on ss_monitoring_slot_* --
