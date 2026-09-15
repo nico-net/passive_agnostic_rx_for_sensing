@@ -396,6 +396,7 @@ static _Atomic uint64_t g_ldpc_tb_fail  = 0;
 static _Atomic uint64_t g_ldpc_zero_tb  = 0;
 static _Atomic uint64_t g_ldpc_ok       = 0;
 static _Atomic uint64_t g_fep_hit = 0, g_fep_miss = 0, g_chest_hit = 0, g_chest_miss = 0; // per-slot sharing
+static _Atomic uint64_t g_rv_census[2][4]; // [mcs>=24][rv]: does this cell retransmit at rv 0? (HARQ gate)
 static _Atomic uint64_t g_ldpc_iface_err = 0;
 static _Atomic uint64_t g_seg_ok_sum    = 0; // segments that decoded, summed over failing TBs
 static _Atomic uint64_t g_seg_tot_sum   = 0; // C, summed over the same TBs
@@ -565,10 +566,14 @@ void nr_pdsch_passive_ldpc_stats_dump(void)
       LOG_I(PHY, "SENSING: RVRETRY rescued/tried by mcs: %s\n", rb);
   }
   if (nr_agnostic_v2()) {
-    LOG_I(PHY, "SENSING: HARQC first=%lu retx_combined=%lu/%lu tbs_from_first=%lu busy_skip=%lu\n",
+    LOG_I(PHY, "SENSING: HARQC first=%lu retx_combined=%lu/%lu tbs_from_first=%lu busy_skip=%lu | rv census mcs<24 [%lu %lu %lu %lu] mcs>=24 [%lu %lu %lu %lu]\n",
           (unsigned long)atomic_load(&g_hq_first), (unsigned long)atomic_load(&g_hq_retx_ok),
           (unsigned long)atomic_load(&g_hq_retx_try), (unsigned long)atomic_load(&g_hq_tbs_override),
-          (unsigned long)atomic_load(&g_hq_busy_skip));
+          (unsigned long)atomic_load(&g_hq_busy_skip),
+          (unsigned long)atomic_load(&g_rv_census[0][0]), (unsigned long)atomic_load(&g_rv_census[0][1]),
+          (unsigned long)atomic_load(&g_rv_census[0][2]), (unsigned long)atomic_load(&g_rv_census[0][3]),
+          (unsigned long)atomic_load(&g_rv_census[1][0]), (unsigned long)atomic_load(&g_rv_census[1][1]),
+          (unsigned long)atomic_load(&g_rv_census[1][2]), (unsigned long)atomic_load(&g_rv_census[1][3]));
     pthread_mutex_lock(&g_ptrs_lock);
     LOG_I(PHY, "SENSING: PTRS_SWEEP latched=%d ok/trials per arm [absent %u/%u | K2L1 %u/%u K2L2 %u/%u K2L4 %u/%u | K4L1 %u/%u K4L2 %u/%u K4L4 %u/%u]\n",
           g_ptrs.latched, g_ptrs.ok[0], g_ptrs.tr[0], g_ptrs.ok[1], g_ptrs.tr[1], g_ptrs.ok[2], g_ptrs.tr[2],
@@ -2492,6 +2497,7 @@ chest_done:
         llr_pos++;
       }
     }
+    atomic_fetch_add(&g_rv_census[grant->mcs >= 24][cw->rv & 3], 1);
     if (nr_agnostic_v2() && atomic_load(&g_ldpc_ok) >= 100) { /* only once the layout has bootstrapped */
       t_hq.armed = 1;
       t_hq.rnti = grant->rnti;
