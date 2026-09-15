@@ -518,10 +518,11 @@ bool nr_pdsch_passive_queue_start(PHY_VARS_NR_UE *ue, int depth, int n_consumers
     snprintf(name, sizeof(name), "passivePdsch%d", i);
     /* Priority deliberately BELOW the RT receive thread's 97: if a consumer ever competes with the
      * receive path it must lose -- losing here costs one deferred decode, losing there costs time
-     * sync, which is the entire problem this module exists to fix. One core each from base_core;
-     * <0 leaves them unpinned. */
+     * sync, which is the entire problem this module exists to fix. Also below PREEMPT_RT's threaded
+     * IRQs (FIFO 50): at an equal 50, consumers pinned to the NIC IRQ cores (6..11 vs IRQs on 8-13 on
+     * the X410 host) held NAPI off until they blocked. One core each from base_core; <0 unpinned. */
     threadCreate(&g_threads[i], nr_pdsch_passive_queue_thread, &g_args[i], name,
-                 (affinity >= 0) ? (affinity + i) : -1, 50);
+                 (affinity >= 0) ? (affinity + i) : -1, 40);
   }
   LOG_I(PHY, "SENSING: passive PDSCH decode pool: %d consumer(s), depth %d, cores %d..%d, drop-oldest\n",
         n_consumers, depth, affinity, (affinity >= 0) ? affinity + n_consumers - 1 : -1);
