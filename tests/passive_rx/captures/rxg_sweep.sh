@@ -14,8 +14,11 @@ cd /home/sens/NICOLA/adaptive-rx-UL-DL/tests/passive_rx/captures || exit 1
 pgrep -x nr-uesoftmodem >/dev/null && { echo "receiver running, abort"; exit 1; }
 echo "# rxg sweep $(date +%F_%T) gains=[$GAINS] dur=$DUR conf=${CONF:-default}" >> "$OUT"
 for g in $GAINS; do
-  ARM=$ARM NIC=enp2s0f0np0 NANT=4 RXG=$g TINTERP=1 AGNV2=1 CHESTDIAG=1 MRC=3 INITIALFO=-16300 DUR=$DUR \
-    ${CONF:+CONF=$CONF} ${XENV:+XENV="$XENV"} bash ./armval.sh > /tmp/${ARM}_val.out 2>&1
+  # env, not a shell assignment-prefix: ${CONF:+CONF=$CONF} as a bare prefix word is NOT recognized
+  # as an assignment by bash (that recognition is syntactic, on the unexpanded token) -- it tries to
+  # execve() the expanded text as the command itself and fails with "No such file or directory".
+  env ARM=$ARM NIC=enp2s0f0np0 NANT=4 RXG=$g TINTERP=1 AGNV2=1 CHESTDIAG=1 MRC=3 INITIALFO=-16300 DUR=$DUR \
+    ${CONF:+CONF="$CONF"} ${XENV:+XENV="$XENV"} bash ./armval.sh > /tmp/${ARM}_val.out 2>&1
   while pgrep -x nr-uesoftmodem >/dev/null; do sleep 5; done
   d=$(ls -td $CAPDIR/${ARM}_* | head -1)
   T() { tr -d "\033" < "$d/run.log"; }

@@ -2,7 +2,7 @@
 # usage: ARM=<name> [SFOCORR=1 ...] armval.sh   -- one MPM-checked, settled, survival-checked run_arm.sh run
 ARM=${ARM:?}; CAP=/home/sens/NICOLA/captures; MGMT=128.178.122.174; ST=/tmp/${ARM}_status
 cd /home/sens/NICOLA/adaptive-rx-UL-DL/tests/passive_rx/captures || exit 1
-export REPO=/home/sens/NICOLA/adaptive-rx-UL-DL CONF=$CAP/cons6_ota.conf SCAN=1 AUTOACQ=0 NANT=${NANT:-4}
+export REPO=/home/sens/NICOLA/adaptive-rx-UL-DL CONF=${CONF:-$CAP/cons6_ota.conf} SCAN=1 AUTOACQ=0 NANT=${NANT:-4}
 echo "$ARM start $(date +%H:%M:%S) env: SFOCORR=${SFOCORR:-}" > $ST
 stop_clean() {
   local p; p=$(pgrep -x nr-uesoftmodem) || return 0
