@@ -123,6 +123,8 @@ CARRIER=${CARRIER:-3450000000}
 SCAN=${SCAN:-0}
 SSB=${SSB:-150}
 if [ "$SCAN" = 1 ]; then FREQARGS="--ue-scan-carrier"; else FREQARGS="--ssb $SSB"; fi
+# NOCARRIER=1: band-wide SSB search -- only --band, no -C (the RX window steps across the raster).
+if [ "${NOCARRIER:-0}" = 1 ]; then FREQARGS="--ue-scan-carrier"; CARRIERARG=""; else CARRIERARG="-C $CARRIER"; fi
 
 for t in $(seq 1 "$TRIES"); do
   CORELIM=${CORE:+unlimited}; OUT=$BASE/${ARM}_$(date +%H%M%S); mkdir -p "$OUT"
@@ -206,12 +208,12 @@ for t in $(seq 1 "$TRIES"); do
     ${SYNCONLY:+ISAC_SYNC_ONLY=$SYNCONLY} \
     ${TSYNCAUDIT:+ISAC_TSYNC_AUDIT=$TSYNCAUDIT} ${CHESTDIAG:+ISAC_CHEST_DIAG=1} ${MMSEFLOAT:+ISAC_MMSE_FLOAT=$MMSEFLOAT} ${S1OFF:+ISAC_DCI11_S1_OFF=1} \
     ISAC_TSYNC_RESET=${TSYNCRESET:-0} ISAC_AUTO_ACQUIRE=${AUTOACQ:-0} ISAC_ACQ_CFO_MAX_HZ=${ACQCFOMAX:-60000} \
-    ${CPUSET:+CPUSET=$CPUSET} BIN=$BIN $XENV \
+    ${CPUSET:+CPUSET=$CPUSET} BIN=$BIN ${XENV:-} \
     setsid nohup bash -c "ulimit -c ${CORELIM:-0}; exec timeout $DUR ${CPUSET:+taskset -c $CPUSET} \
     ${GDBRUN:+gdb -q -batch -ex 'handle SIGPIPE SIGUSR1 SIGUSR2 SIG32 SIG33 SIG34 SIG35 nostop noprint pass' -ex run -ex 'bt 30' -ex 'info registers rip' -ex 'thread apply all bt 4' --args} \
     $BIN \
     --usrp-args type=x4xx,addr=$DATA,mgmt_addr=$MGMT${DPDK:+,use_dpdk=$DPDK} \
-    -O $CONF -r ${PRB:-273} --numerology 1 --band 78 -C $CARRIER $FREQARGS --ue-rxgain $RXG \
+    -O $CONF -r ${PRB:-273} --numerology 1 --band 78 $CARRIERARG $FREQARGS --ue-rxgain $RXG \
     --ue-nb-ant-rx $NANT --ue-nb-ant-tx ${NTX:-$NANT} --passive-rx --ue-fo-compensation --initial-fo ${INITIALFO:--15000} \
     ${CONTFO:+--cont-fo-comp $CONTFO --freq-sync-P $FSP --freq-sync-I $FSI} \
     ${OFFDIV:+--offset-divisor $OFFDIV} \
@@ -281,7 +283,7 @@ for t in $(seq 1 "$TRIES"); do
     CTR=$(echo "$RT" | grep -o '"centre_hz":[0-9]*' | cut -d: -f2)
     if [ -n "$NRB" ] && [ -n "$CTR" ] && [ "$NRB" -gt 0 ] 2>/dev/null; then
       echo "  ADAPT: SIB1 says ${NRB} PRB @ ${CTR} Hz; started ${PRB:-273} PRB @ ${CARRIER} Hz -- relaunching once with the measured geometry"
-      ADAPTED=1 PRB=$NRB CARRIER=$CTR "$0" "$@"
+      ADAPTED=1 NOCARRIER=0 PRB=$NRB CARRIER=$CTR "$0" "$@"
       exit $?
     fi
     echo "  ADAPT: ISAC_ACQ_RETUNE present but unparseable ($RT) -- not relaunching"
