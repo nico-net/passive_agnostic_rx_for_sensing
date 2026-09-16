@@ -120,7 +120,7 @@ int nr_pdcch_dci_length_sweep_feed(nr_pdcch_dci_length_sweep_state_t* state,
   int    best_len   = -1;
   double best_score = 0.0;
   for (int len = min_len; len <= max_len && len < NR_PDCCH_DCI_LENGTH_SWEEP_MAX_LEN; len++) {
-    if (state->passes[len] == 0) {
+    if (state->passes[len] == 0 || len == state->excluded_len) {
       continue;
     }
     // Degenerate fixed point: repeated passes, but every one decodes to the SAME payload. Reject

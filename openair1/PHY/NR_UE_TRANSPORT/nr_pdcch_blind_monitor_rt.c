@@ -2078,6 +2078,7 @@ void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_pr
       // dci_length > 63 before ever decoding -- so the upper bound is 63, not 70: lengths 64-70
       // are guaranteed-wasted trials (7 of 41 hypotheses, ~17% of the sweep's budget, for zero
       // possible acceptance).
+      g_dl_length_state.excluded_len = dci10_length; /* the 1_0/0_0 size is known; the sweep wants the other one */
       const int found_len = nr_pdcch_dci_length_sweep_feed(&g_dl_length_state, nr_pdcch_autodiscover_length_scorer,
                                                             &sweep_ctx, disc_n_cand, 30, 63, bootstrap_rnti);
       if (found_len > 0) {

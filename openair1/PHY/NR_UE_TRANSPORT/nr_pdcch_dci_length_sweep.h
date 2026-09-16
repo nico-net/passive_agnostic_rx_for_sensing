@@ -89,6 +89,10 @@ typedef struct {
   uint32_t hashes[NR_PDCCH_DCI_LENGTH_SWEEP_MAX_LEN][NR_PDCCH_DCI_LENGTH_SWEEP_MAX_HASHES];
   int      n_distinct[NR_PDCCH_DCI_LENGTH_SWEEP_MAX_LEN];
   int      occasions_fed;
+  /* A length known to belong to ANOTHER format pair on the same search space (the derived 1_0/0_0
+   * size): its CRC passes are real but say nothing about the 1_1/0_1 size the sweep is after. The
+   * SA rfsim cell locked 44 = its 1_0 size on 58 format-1_0 accepts (2026-09-16). 0 = none. */
+  int      excluded_len;
 } nr_pdcch_dci_length_sweep_state_t;
 
 /* A caller-serialized bank. Interleaved UEs never reset one another; geometry
