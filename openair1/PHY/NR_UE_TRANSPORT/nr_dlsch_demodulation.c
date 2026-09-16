@@ -672,6 +672,120 @@ static void nr_dlsch_mmse(uint32_t pdsch_buf_size_max,
     }
   }
 
+  /* ISAC_MMSE_FLOAT=1 (default off = stock fixed-point path): solve (H^H H + nvar I) x = H^H y
+   * per RE in double, output the unit-gain estimate at a fixed amplitude A and set the LLR
+   * thresholds from that same A. Written while chasing the rank-4 0 % CRC (2026-09-16); the real
+   * causes turned out to be the rfsim channel (nb_tx sized from the UE's own TX count, see
+   * simulator.cpp) and an ill-conditioned scene -- on a well-conditioned 4x4 channel the fixed-point
+   * adjugate path below decodes 100 % too. Kept opt-in as the A/B reference: it is immune to the
+   * det(G) ~ (|h|^2 >> shift)^4 int16 saturation and puts the LLRs on a scale that does not clip
+   * (fixed-point: 87 % of 256QAM LLRs on the int8 rail; here 20 %). Scalar per RE, a few ms per
+   * 273-PRB rank-4 slot. */
+  static int s_mmse_float = -1;
+  if (s_mmse_float < 0)
+    s_mmse_float = (getenv("ISAC_MMSE_FLOAT") != NULL) ? atoi(getenv("ISAC_MMSE_FLOAT")) : 0;
+  if (s_mmse_float > 0) {
+    const int16_t qa = (mod_order == 4) ? QAM16_n1 : (mod_order == 6) ? QAM64_n1 : (mod_order == 8) ? QAM256_n1 : 0;
+    const int16_t qb = (mod_order == 6) ? QAM64_n2 : (mod_order == 8) ? QAM256_n2 : 0;
+    const int16_t qr = (mod_order == 8) ? QAM256_n3 : 0;
+    for (int i = 0; i < length; i++) {
+      double complex M[nl][nl + 1]; // augmented [G | z]
+      double diag = 0.0;
+      for (int r = 0; r < nl; r++) {
+        for (int c = 0; c < nl; c++) {
+          const c16_t g = conjH_H_elements[0][c][r][i]; // (H^H H)[r][c] is stored at [c][r]
+          M[r][c] = (double)g.r + I * (double)g.i;
+        }
+        M[r][nl] = (double)rxdataF_comp[r][i].r + I * (double)rxdataF_comp[r][i].i;
+        diag += creal(M[r][r]);
+      }
+      bool singular = false;
+      for (int k = 0; k < nl && !singular; k++) {
+        int piv = k;
+        for (int r = k + 1; r < nl; r++)
+          if (cabs(M[r][k]) > cabs(M[piv][k]))
+            piv = r;
+        if (cabs(M[piv][k]) < 1e-9) {
+          singular = true;
+          break;
+        }
+        if (piv != k)
+          for (int c = 0; c <= nl; c++) {
+            const double complex t = M[k][c];
+            M[k][c] = M[piv][c];
+            M[piv][c] = t;
+          }
+        const double complex inv = 1.0 / M[k][k];
+        for (int c = 0; c <= nl; c++)
+          M[k][c] *= inv;
+        for (int r = 0; r < nl; r++) {
+          if (r == k)
+            continue;
+          const double complex f = M[r][k];
+          if (f == 0.0)
+            continue;
+          for (int c = 0; c <= nl; c++)
+            M[r][c] -= f * M[k][c];
+        }
+      }
+      /* Output amplitude. The estimate is unit-gain, so A sets the LLR scale directly: the outermost
+       * 16QAM LLR is 3A/sqrt(10) and the decoder input rail is int8, so A = 128 keeps every
+       * constellation inside +-127 (256QAM outer bit 0.54A = 69, inner step 2A/sqrt(170) = 20 LSB).
+       * tr(G)/nl (~1000 here) put 88 % of the 256QAM LLRs on the rail -> 7.6 % CRC at MCS 25.
+       * ponytail: fixed scale, no per-layer SINR weighting (all layers share dl_ch_mag[0]); add
+       * per-layer 1/[G^-1]_rr weighting only if a rank-4 link is measured to be SINR-limited. */
+      const double A = 128.0;
+      (void)diag;
+      /* MMSEDIAG (ISAC_MMSE_DIAG=1): per-layer EVM of the unit-gain estimate against the nearest
+       * 16/64/256-QAM grid point, one line per 200 calls. Tells "equaliser output is a constellation"
+       * from "it is noise" without any downstream stage in the way. */
+      {
+        static __thread int s_md = -1;
+        static __thread unsigned long s_mdn = 0;
+        static __thread double s_err[4], s_pow[4];
+        if (s_md < 0)
+          s_md = (getenv("ISAC_MMSE_DIAG") != NULL) ? 1 : 0;
+        if (s_md && !singular && mod_order >= 4) {
+          const int lev = 1 << (mod_order / 2 - 1); // 16QAM: 2 levels per axis, 64: 4, 256: 8
+          const double step = 2.0 / sqrt((2.0 / 3.0) * (double)((1 << mod_order) - 1)); // odd-integer grid spacing
+          for (int r = 0; r < nl; r++) {
+            const double re = creal(M[r][nl]), im = cimag(M[r][nl]);
+            double best = 1e30;
+            for (int a = -lev; a < lev; a++)
+              for (int b = -lev; b < lev; b++) {
+                const double dr = re - (2 * a + 1) * step / 2, di = im - (2 * b + 1) * step / 2;
+                const double d = dr * dr + di * di;
+                if (d < best) best = d;
+              }
+            s_err[r] += best;
+            s_pow[r] += re * re + im * im;
+          }
+          if (i == length - 1 && (s_mdn++ % 200) == 0) {
+            LOG_I(PHY, "SENSING: MMSEDIAG nl=%d Qm=%d A=%.0f evm%%=[%.1f %.1f %.1f %.1f] pow=[%.2f %.2f %.2f %.2f]\n", nl,
+                  mod_order, A, 100.0 * sqrt(s_err[0] / (s_pow[0] + 1e-30)), 100.0 * sqrt(s_err[1] / (s_pow[1] + 1e-30)),
+                  100.0 * sqrt(s_err[2] / (s_pow[2] + 1e-30)), 100.0 * sqrt(s_err[3] / (s_pow[3] + 1e-30)),
+                  s_pow[0] / length, s_pow[1] / length, s_pow[2] / length, s_pow[3] / length);
+          }
+          if (i == length - 1)
+            memset(s_err, 0, sizeof(s_err)), memset(s_pow, 0, sizeof(s_pow));
+        }
+      }
+      for (int r = 0; r < nl; r++) {
+        const double complex o = singular ? 0.0 : M[r][nl] * A;
+        const double re = creal(o), im = cimag(o);
+        rxdataF_comp[r][i].r = (int16_t)(re > 32767.0 ? 32767 : re < -32768.0 ? -32768 : lround(re));
+        rxdataF_comp[r][i].i = (int16_t)(im > 32767.0 ? 32767 : im < -32768.0 ? -32768 : lround(im));
+      }
+      const int32_t a16 = (A > 32767.0) ? 32767 : (int32_t)lround(A);
+      const int16_t ma = (int16_t)((a16 * qa + 16384) >> 15), mb = (int16_t)((a16 * qb + 16384) >> 15),
+                    mr = (int16_t)((a16 * qr + 16384) >> 15);
+      dl_ch_mag[0][i].r = dl_ch_mag[0][i].i = ma;
+      dl_ch_magb[0][i].r = dl_ch_magb[0][i].i = mb;
+      dl_ch_magr[0][i].r = dl_ch_magr[0][i].i = mr;
+    }
+    return;
+  }
+
   //Compute the inverse and determinant of the H^*H matrix
   //Allocate the inverse matrix
   c16_t *inv_H_h_H[nl][nl];
@@ -1512,6 +1626,24 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
                              &dlsch->ptrs_symbols,
                              &dlsch->ptrs_symbol_index);
     dl_valid_re[symbol] -= ptrs_re_per_slot[0][symbol];
+    /* nr_ptrs_cpe_estimation() compacts the PT-RS REs out of LAYER 0 only (the "1" above makes it
+     * index rxdataF_comp[symbol][0]). PT-RS REs carry no PDSCH on ANY layer, and the LLR stage
+     * reads dl_valid_re[symbol] contiguous REs from every layer -- so layers 1..nl-1 stayed
+     * misaligned by one RE per PT-RS RE on every PT-RS symbol. Invisible at nl=1; at nl=4 it is
+     * the difference between MCS 9 (no PT-RS) at 100 % and MCS 25 (PT-RS on) at 5 % CRC on a
+     * channel with 1.5 % per-layer EVM (rfsim, 2026-09-16). Same RE rule, no phase rotation: the
+     * PT-RS port is layer 0's, so there is nothing to estimate a CPE from on the other layers. */
+    if (ptrs_re_per_slot[0][symbol] > 0) {
+      const int nre = freq_alloc->num_rbs * NR_NB_SC_PER_RB;
+      for (int l = 1; l < nl; l++) {
+        c16_t *rx = rxdataF_comp[symbol][l];
+        int cnt = 0;
+        for (int re = 0; re < nre; re++)
+          if (!is_ptrs_subcarrier(re, dlsch->rnti, dlsch_config->PTRSFreqDensity, freq_alloc->num_rbs,
+                                  dlsch_config->PTRSReOffset, 0, fp->ofdm_symbol_size))
+            rx[cnt++] = rx[re];
+      }
+    }
   }
 
   /* at last symbol in a slot calculate LLR's for whole slot */

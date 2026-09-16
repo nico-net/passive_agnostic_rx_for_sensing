@@ -1108,6 +1108,31 @@ static void process_recv_header(rfsimulator_state_t *t, buffer_t *b, bool first_
   if (b->nbAnt != b->th.nbAnt) {
     LOG_A(HW, "RFsim: Number of antennas changed from %d to %d\n", b->nbAnt, b->th.nbAnt);
     b->nbAnt = b->th.nbAnt;
+    /* The channel model was sized at load_channellist() from OUR tx count, but its tx dimension is
+     * the PEER's antenna count: rxAddInput() loops over channel_model->nb_tx, so a 1-TX UE facing a
+     * 4-TX gNB convolved only the gNB's antenna 0 and every layer beyond the first was silently
+     * dropped -- rank >1 PDSCH could never decode on rfsim (2026-09-16, nl=1 100 % / nl=2,4 0 %).
+     * Rebuild the descriptor at the peer's width; the sensing scene is re-parsed onto it. */
+    channel_desc_t *cm = b->channel_model;
+    if (cm != NULL && cm->nb_tx != b->nbAnt) {
+      channel_desc_t *nm = new_channel_desc_scm(b->nbAnt, cm->nb_rx, static_cast<SCM_t>(cm->modelid), cm->sampling_rate,
+                                                cm->center_freq, cm->channel_bandwidth, 30e-9, cm->max_Doppler,
+                                                cm->corr_level, cm->forgetting_factor, cm->channel_offset,
+                                                cm->path_loss_dB, cm->noise_power_dB);
+      set_channeldesc_owner(nm, RFSIMU_MODULEID);
+      set_channeldesc_direction(nm, cm->is_uplink);
+      set_channeldesc_name(nm, cm->model_name);
+      random_channel(nm, false);
+      if (cm->sensing_traj != NULL) {
+        sensing_channel_free(cm->sensing_traj);
+        cm->sensing_traj = NULL;
+        nm->sensing_traj = sensing_channel_parse(nm);
+      }
+      LOG_A(HW, "RFsim: channel model %s rebuilt with nb_tx %d (peer antennas) x nb_rx %d\n", nm->model_name, nm->nb_tx,
+            nm->nb_rx);
+      b->channel_model = nm;
+      free_channel_desc_scm(cm);
+    }
   }
   if (first_time) {
     b->lastReceivedTS = b->th.timestamp;

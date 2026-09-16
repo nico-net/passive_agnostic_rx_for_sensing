@@ -1297,12 +1297,14 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
     if (s_tbp)
       LOG_I(PHY,
             "SENSING: TBPARM rnti=0x%x nl=%u mcs=%u tbl=%u Qm=%u R=%u tbs=%u G=%u lbrm=%u bg=%u "
-            "prb=%u+%u nsym=%u dmrs_len=%u nb_re_dmrs=%u\n",
+            "prb=%u+%u nsym=%u dmrs_len=%u nb_re_dmrs=%u ports=0x%x cdm=%u type=%u pos=0x%x nscid=%u\n",
             grant->rnti, (unsigned)cw->Nl, (unsigned)grant->mcs, (unsigned)grant->mcs_table,
             (unsigned)cw->qamModOrder, (unsigned)cw->targetCodeRate, (unsigned)cw->TBS, G,
             (unsigned)dlsch_config->tbslbrm, (unsigned)cw->ldpcBaseGraph, (unsigned)freq_alloc->first_rb,
             (unsigned)freq_alloc->num_rbs, (unsigned)dlsch_config->number_symbols, (unsigned)dmrs_len,
-            (unsigned)nb_re_dmrs);
+            (unsigned)nb_re_dmrs, (unsigned)dlsch_config->dmrs_ports, (unsigned)dlsch_config->n_dmrs_cdm_groups,
+            (unsigned)dlsch_config->dmrsConfigType, (unsigned)dlsch_config->dlDmrsSymbPos,
+            (unsigned)dlsch_config->nscid);
   }
 
   out->cw = *cw;
@@ -2723,7 +2725,7 @@ chest_done:
         /* LLRFILL (2026-09-16): per-symbol non-zero LLR counts of the assembled buffer, one shot when
          * llr_have < 0.9 G -- which symbols/layers come out empty (rank-4 bed: llr_have 3 % of G). */
         static _Atomic int s_llrfill_left = 3;
-        if (cw->Nl > 1 && llr_have * 10 < G * 9 && atomic_load(&s_llrfill_left) > 0) {
+        if (cw->Nl > 1 && (llr_have != G || getenv("ISAC_LLRFILL_ALL")) && atomic_load(&s_llrfill_left) > 0) {
           atomic_fetch_sub(&s_llrfill_left, 1);
           char b[400]; int u = 0; uint32_t k = 0;
           for (int m = dlsch_config->start_symbol; m < dlsch_config->start_symbol + dlsch_config->number_symbols && u < 360; m++) {
