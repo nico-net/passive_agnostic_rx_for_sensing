@@ -1974,9 +1974,9 @@ chest_done:
    * demodulation chain instead. Cheap: one pass over the already-computed estimates. */
   {
     static int s_cd = -1;
-    if (s_cd < 0)
-      s_cd = (getenv("ISAC_PDSCH_TBPARM") != NULL) ? 1 : 0;
-    static int s_cd_left = 12;
+    if (s_cd < 0) // ISAC_CHEST_DIAG=1 gives the 12 CHESTDIAG lines without TBPARM's per-TB volume
+      s_cd = (getenv("ISAC_PDSCH_TBPARM") != NULL || getenv("ISAC_CHEST_DIAG") != NULL) ? 1 : 0;
+    static int s_cd_left = 40;
     if (s_cd && s_cd_left > 0 && cw->Nl >= 1) {
       s_cd_left--;
       const int nsc = freq_alloc->num_rbs * NR_NB_SC_PER_RB;
