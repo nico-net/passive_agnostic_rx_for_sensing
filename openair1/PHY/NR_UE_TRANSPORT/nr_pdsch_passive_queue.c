@@ -329,7 +329,11 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
      * observed mask prunes the Technique-D catalog to the (S,L,add_pos,max_len) entries that produce
      * it, so the layout search no longer multiplies with it. Antenna 0, ~14 symbol FFTs; only while
      * the context is unsettled. */
-    if (!job.sweep_ticket.settled && job.sweep_ticket.generation && job.freq_alloc.num_rbs >= 4) {
+    /* Only in the DCI's OWN slot (k0 = 0 hypothesis): a k0 > 0 job measures slot + k0, where a busy
+     * cell has some other PDSCH -- the rank-4 bed recorded that slot's mask (0x804) with k0 = 1 and
+     * pruned the true entries away (0/10k probes). A mask seen in the DCI's slot proves k0 = 0. */
+    if (!job.sweep_ticket.settled && job.sweep_ticket.generation && job.freq_alloc.num_rbs >= 4
+        && job.sweep_ticket.k0 == 0) {
       const int n_sym = fp->symbols_per_slot;
       float coh[275];
       double prof[14] = {0};
