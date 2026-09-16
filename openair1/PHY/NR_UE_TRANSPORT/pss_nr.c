@@ -98,7 +98,7 @@ void generate_pss_nr_time(int ofdm_symbol_size,
   for (int i=0; i < LENGTH_PSS_NR; i++) {
     if (k >= ofdm_symbol_size)
       k -= ofdm_symbol_size;
-    synchroF_tmp[k] = (c16_t){.r = pss[i] * ((1U << SCALING_PSS_NR) - 1)};
+    synchroF_tmp[k] = (c16_t){.r = (pss[i] * SHRT_MAX) >> SCALING_PSS_NR}; /* Maximum value for type short int ie int16_t */
     k++;
   }
 
