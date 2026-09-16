@@ -48,6 +48,19 @@ if(ENABLE_LDPC_CUDA)
   target_link_libraries(ldpc_cuda PRIVATE log_headers CUDA::cudart)
   add_dependencies(ldpctest ldpc_cuda)
   add_dependencies(nr-uesoftmodem ldpc_cuda)
+  # GPU FEP + chest + MMSE + LLR for the passive PDSCH decoder (libpdsch_gpu.so, dlopen'd when
+  # NR_GPU_FEP=1). Lives in NR_UE_TRANSPORT; built here because this is where CUDA is enabled.
+  add_library(pdsch_gpu MODULE ${CMAKE_CURRENT_SOURCE_DIR}/../NR_UE_TRANSPORT/nr_pdsch_gpu_fep.cu)
+  set_target_properties(pdsch_gpu PROPERTIES LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
+                        CUDA_ARCHITECTURES "${LDPC_CUDA_ARCH}" POSITION_INDEPENDENT_CODE ON)
+  target_include_directories(pdsch_gpu PRIVATE ${CUDAToolkit_INCLUDE_DIRS})
+  target_link_libraries(pdsch_gpu PRIVATE CUDA::cudart CUDA::cufft)
+  add_executable(nr_pdsch_gpu_fep_test ${CMAKE_CURRENT_SOURCE_DIR}/../NR_UE_TRANSPORT/tests/nr_pdsch_gpu_fep_test.cc)
+  target_include_directories(nr_pdsch_gpu_fep_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../NR_UE_TRANSPORT)
+  target_link_libraries(nr_pdsch_gpu_fep_test PRIVATE ${CMAKE_DL_LIBS})
+  set_target_properties(nr_pdsch_gpu_fep_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
+  add_dependencies(nr_pdsch_gpu_fep_test pdsch_gpu)
+  add_dependencies(nr-uesoftmodem pdsch_gpu)
 endif()
 
 add_dependencies(ldpctest ldpc ldpc_orig)
