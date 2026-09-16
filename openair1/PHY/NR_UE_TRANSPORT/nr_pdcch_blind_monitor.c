@@ -399,10 +399,37 @@ void nr_pdcch_blind_monitor_autodiscover_observe(uint16_t rnti, uint32_t slot, u
   }
   s_ext_evidence[victim] = (extent_evidence_t){rnti, slot, payload};
 }
+/* RNTI TAGGING (2026-09-16): before an (extent,mapping) candidate's evidence is wiped by
+ * extent_clear_evidence(), log which RNTI(s) backed its votes. This is deliberately just a
+ * log line over the existing small per-candidate evidence array (NR_PDCCH_BLIND_MAX_UE=16
+ * slots) -- NOT a new per-RNTI search state, see memory per-rnti-contexts-deferred.md. Lets a
+ * later offline pass check whether accepted-but-unverified evidence is split across RNTIs that
+ * imply genuinely different UE configs (one CORESET truth should draw votes from ONE coherent
+ * set of RNTIs, not several unrelated ones), without paying for live per-RNTI contexts now. */
+static void extent_log_evidence_before_clear(void)
+{
+  int n = 0;
+  for (int i = 0; i < NR_PDCCH_BLIND_MAX_UE; ++i) {
+    if (s_ext_evidence[i].rnti)
+      n++;
+  }
+  if (n == 0)
+    return;
+  char buf[16 * 8];
+  int off = 0;
+  for (int i = 0; i < NR_PDCCH_BLIND_MAX_UE && off < (int)sizeof(buf) - 8; ++i) {
+    if (!s_ext_evidence[i].rnti)
+      continue;
+    off += snprintf(buf + off, sizeof(buf) - off, "0x%x ", s_ext_evidence[i].rnti);
+  }
+  LOG_I(PHY, "SENSING: CORESET candidate %d/%d mapping %d/%d abandoned: offset=%d span=%d rnti_votes=%d [%s]\n",
+        s_ext_idx + 1, s_ext_n, s_map_idx + 1, s_map_n, g_cfg.coreset_rb_offset, g_cfg.coreset_freq_domain * 6, n, buf);
+}
 static bool extent_advance(void)
 {
   if (!s_dedicated_found || s_ext_verified || s_ext_n <= 0)
     return false;
+  extent_log_evidence_before_clear();
   extent_clear_evidence();
   g_cfg.dci_length_override = 0;
   if (++s_map_idx < s_map_n) {
