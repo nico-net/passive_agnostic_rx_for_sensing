@@ -406,3 +406,33 @@ TEST(PdschConfigSweepPrior, AWrongPriorIsAbandonedAndTheTruthIsStillFound) {
   ASSERT_GT(n, 0) << "a wrong prior trapped the context: it never converged";
   EXPECT_TRUE(same_hyp(w1, truth1));
 }
+
+/* OTA 2026-09-16: the oracle measured DM-RS at {2,7,11} on every slot, yet every decode used the
+ * add_pos-0 mask, because the layout rotation churned contexts faster than any walked past the
+ * catalog head. An observed mask must prune every context created AFTER the observation. */
+TEST(PdschConfigSweepOracle, ObservedMaskPrunesContextsCreatedLater) {
+  const nr_pdsch_cfg_hypothesis_t truth{1, 13, 2, 1, 0, 1};  // S=1 L=13 add_pos 2
+  const uint16_t truth_mask = (uint16_t)test_legal(0, 13, 1, 0, 2, 1);
+  nr_pdsch_config_sweep_reset_all();
+  nr_pdsch_config_sweep_prior_reset();
+  nr_pdsch_cfg_hypothesis_t w0{};
+  const int alone = drive_context(1, 0x4601, 1, truth, 0.54, 400000, &w0);  // no observation
+  ASSERT_GT(alone, 0);
+  nr_pdsch_config_sweep_reset_all();
+  nr_pdsch_config_sweep_prior_reset();
+  nr_pdsch_sweep_ticket_t t0{};
+  nr_pdsch_cfg_hypothesis_t h0{};
+  ASSERT_TRUE(nr_pdsch_config_sweep_select(1, 0x4601, 0, 2, 0, test_legal, &t0, &h0));
+  ASSERT_GT(nr_pdsch_config_sweep_observe_mask(&t0, truth_mask), 0);
+  // A context created later, for another TDA index, starts already pruned to that mask.
+  nr_pdsch_sweep_ticket_t t1{};
+  nr_pdsch_cfg_hypothesis_t h1{};
+  ASSERT_TRUE(nr_pdsch_config_sweep_select(1, 0x4601, 1, 2, 0, test_legal, &t1, &h1));
+  EXPECT_EQ(h1.dmrs_mask, truth_mask);
+  EXPECT_EQ(h1.dmrs_add_pos, 2);
+  nr_pdsch_cfg_hypothesis_t w{};
+  const int n = drive_context(1, 0x4601, 1, truth, 0.54, 400000, &w);
+  ASSERT_GT(n, 0);
+  EXPECT_TRUE(same_hyp(w, truth));
+  EXPECT_LT(n * 4, alone);  // mcs_table is all that is left to the CRC
+}

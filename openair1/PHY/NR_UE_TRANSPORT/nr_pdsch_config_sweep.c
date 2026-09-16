@@ -123,6 +123,41 @@ int nr_pdsch_config_sweep_prune_mask(nr_pdsch_config_sweep_state_t *st, uint16_t
   return n;
 }
 
+/* DM-RS symbol masks the oracle has MEASURED on this cell (per-symbol coherence, independent of
+ * any hypothesis). A new context is pruned to catalog entries producing one of them. Without this
+ * the observation only reached the one context it was made on, and the layout rotation churns
+ * contexts (keyed by RNTI x observed TDA index) faster than any of them walks past the add_pos 0
+ * entries at the head of the catalog: OTA 2026-09-16, every PARMSET dmrsmask was 0x4 while the
+ * oracle read 0x884 on every slot it looked at. */
+#define OBS_MASKS_MAX 8
+static uint16_t g_obs_mask[OBS_MASKS_MAX];
+static int g_n_obs_mask;
+/* Keep the entries whose mask is in the observed set; untouched if none matches. */
+static int prune_to_observed(nr_pdsch_config_sweep_state_t *st)
+{
+  if (st == NULL || st->n_hyp <= 0 || g_n_obs_mask <= 0)
+    return 0;
+  nr_pdsch_cfg_hypothesis_t keep[NR_PDSCH_SWEEP_MAX_HYP];
+  int n = 0;
+  for (int i = 0; i < st->n_hyp; i++)
+    for (int k = 0; k < g_n_obs_mask; k++)
+      if (st->hyp[i].dmrs_mask == g_obs_mask[k]) {
+        keep[n++] = st->hyp[i];
+        break;
+      }
+  if (n <= 0 || n == st->n_hyp)
+    return n == st->n_hyp ? n : 0;
+  memcpy(st->hyp, keep, (size_t)n * sizeof(keep[0]));
+  st->n_hyp = n;
+  memset(st->trials, 0, sizeof(st->trials));
+  memset(st->ok, 0, sizeof(st->ok));
+  for (int i = 0; i < n; i++)
+    st->order[i] = i;
+  st->cursor = 0;
+  st->winner = -1;
+  return n;
+}
+
 int nr_pdsch_config_sweep_prune_to(nr_pdsch_config_sweep_state_t *st, uint8_t mcs_table,
                                    uint8_t dmrs_add_pos, uint8_t dmrs_max_len)
 {
@@ -411,6 +446,7 @@ bool nr_pdsch_config_sweep_select(uint64_t configuration, uint16_t rnti, uint8_t
                                           g_prior.dmrs_max_len) > 0) {
       c->priored = true;
     }
+    prune_to_observed(&c->state);
   }
   sweep_context_t *c = &g_contexts[found];
   c->touched = ++g_clock;
@@ -431,6 +467,11 @@ int nr_pdsch_config_sweep_observe_mask(const nr_pdsch_sweep_ticket_t *ticket, ui
   int n = 0;
   if (c != NULL && c->state.winner < 0)
     n = nr_pdsch_config_sweep_prune_mask(&c->state, dmrs_mask);
+  bool seen = false;
+  for (int k = 0; k < g_n_obs_mask; k++)
+    seen |= (g_obs_mask[k] == dmrs_mask);
+  if (!seen && g_n_obs_mask < OBS_MASKS_MAX)
+    g_obs_mask[g_n_obs_mask++] = dmrs_mask;
   pthread_mutex_unlock(&g_lock);
   return n;
 }
@@ -568,6 +609,7 @@ void nr_pdsch_config_sweep_reset_all(void)
 {
   pthread_mutex_lock(&g_lock);
   memset(g_contexts, 0, sizeof(g_contexts));
+  g_n_obs_mask = 0;
   /* The prior is evidence derived from those contexts; keeping it across a reset would let a
    * cleared run inherit conclusions it can no longer justify. */
   g_prior.valid = false;
