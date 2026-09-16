@@ -2191,6 +2191,32 @@ void nr_rrc_mac_config_req_sib1(module_id_t module_id, int cc_idP, NR_SIB1_t *si
   }
   NR_ServingCellConfigCommonSIB_t *scc = sib1->servingCellConfigCommon;
   AssertFatal(scc, "SIB1 SCC should not be NULL\n");
+  {
+    static bool logged_once = false;
+    if (!logged_once) {
+      logged_once = true;
+      const NR_FrequencyInfoDL_SIB_t *fdl = &scc->downlinkConfigCommon.frequencyInfoDL;
+      long dl_bw_prb = 0, dl_scs = -1;
+      if (fdl->scs_SpecificCarrierList.list.count > 0) {
+        dl_bw_prb = fdl->scs_SpecificCarrierList.list.array[0]->carrierBandwidth;
+        dl_scs = fdl->scs_SpecificCarrierList.list.array[0]->subcarrierSpacing;
+      }
+      long ul_bw_prb = 0, ul_scs = -1, ul_pointA = -1;
+      if (scc->uplinkConfigCommon) {
+        const NR_FrequencyInfoUL_SIB_t *ful = &scc->uplinkConfigCommon->frequencyInfoUL;
+        if (ful->scs_SpecificCarrierList.list.count > 0) {
+          ul_bw_prb = ful->scs_SpecificCarrierList.list.array[0]->carrierBandwidth;
+          ul_scs = ful->scs_SpecificCarrierList.list.array[0]->subcarrierSpacing;
+        }
+        if (ful->absoluteFrequencyPointA)
+          ul_pointA = *ful->absoluteFrequencyPointA;
+      }
+      LOG_I(NR_MAC,
+            "PASSIVE: cell config extracted from SIB1 -- PCI=%ld DL: %ld PRB @ SCS=%ld offsetToPointA=%ld "
+            "UL: %ld PRB @ SCS=%ld absoluteFrequencyPointA=%ld\n",
+            mac->physCellId, dl_bw_prb, dl_scs, (long)fdl->offsetToPointA, ul_bw_prb, ul_scs, ul_pointA);
+    }
+  }
   if (passive_acquisition_sib1(mac, scc)) {
     ret = pthread_mutex_unlock(&mac->if_mutex);
     AssertFatal(!ret, "mutex failed %d\n", ret);
