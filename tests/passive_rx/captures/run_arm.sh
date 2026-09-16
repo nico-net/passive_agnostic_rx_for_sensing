@@ -206,7 +206,7 @@ for t in $(seq 1 "$TRIES"); do
     ${SYNCONLY:+ISAC_SYNC_ONLY=$SYNCONLY} \
     ${TSYNCAUDIT:+ISAC_TSYNC_AUDIT=$TSYNCAUDIT} ${CHESTDIAG:+ISAC_CHEST_DIAG=1} ${MMSEFLOAT:+ISAC_MMSE_FLOAT=$MMSEFLOAT} ${S1OFF:+ISAC_DCI11_S1_OFF=1} \
     ISAC_TSYNC_RESET=${TSYNCRESET:-0} ISAC_AUTO_ACQUIRE=${AUTOACQ:-0} ISAC_ACQ_CFO_MAX_HZ=${ACQCFOMAX:-60000} \
-    ${CPUSET:+CPUSET=$CPUSET} BIN=$BIN \
+    ${CPUSET:+CPUSET=$CPUSET} BIN=$BIN $XENV \
     setsid nohup bash -c "ulimit -c ${CORELIM:-0}; exec timeout $DUR ${CPUSET:+taskset -c $CPUSET} \
     ${GDBRUN:+gdb -q -batch -ex 'handle SIGPIPE SIGUSR1 SIGUSR2 SIG32 SIG33 SIG34 SIG35 nostop noprint pass' -ex run -ex 'bt 30' -ex 'info registers rip' -ex 'thread apply all bt 4' --args} \
     $BIN \

@@ -39,7 +39,7 @@ for attempt in 1 2 3 4 5; do
   fi
   echo "$INITIALFO" > "$CAP/.${ARM}_lastfo"
   export INITIALFO
-  DUR=${DUR:-1200} TRIES=1 EVMPROBE=1 CSIRSBLIND=1 ARM=$ARM ./run_arm.sh > /tmp/${ARM}_run.log 2>&1 &
+  DUR=${DUR:-1200} TRIES=1 EVMPROBE=1 CSIRSBLIND=${CSIRSBLIND-1} ARM=$ARM ./run_arm.sh > /tmp/${ARM}_run.log 2>&1 &
   RUNPID=$!
   locked=0
   for w in $(seq 1 24); do

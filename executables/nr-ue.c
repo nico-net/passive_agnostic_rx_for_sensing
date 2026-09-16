@@ -827,6 +827,9 @@ static double g_census_pow_ant[CENSUS_MAX_ANT];
  * most damaged. */
 static double   g_census_pw2_ant[CENSUS_MAX_ANT];
 static uint64_t g_census_clip_ant[CENSUS_MAX_ANT];
+static int32_t  g_census_peak_ant[CENSUS_MAX_ANT]; /* max |I|,|Q| seen, int16 full scale */
+static uint64_t g_census_hot_ant[CENSUS_MAX_ANT];  /* samples with |I| or |Q| > 0.9 FS (29490) */
+static uint64_t g_census_smp_ant[CENSUS_MAX_ANT];  /* samples inspected, for the hot fraction */
 static uint64_t g_census_pw2_n;
 
 /* RX power reference, resolved from the USRP driver at runtime. The driver is a dlopen'd plugin,
@@ -1587,6 +1590,13 @@ void *UE_thread(void *arg)
                 || rxp[a2][i].i >= 32767 || rxp[a2][i].i <= -32768) {
               clip++;
             }
+            /* ADC headroom (2026-09-16): the X410 saturates well before an int16 full-scale hit
+             * registers in `clip`, so track the peak and the fraction of samples above 0.9 FS. */
+            const int32_t pk = (int32_t)(xr < 0 ? -xr : xr) > (int32_t)(xi < 0 ? -xi : xi)
+                                   ? (int32_t)(xr < 0 ? -xr : xr) : (int32_t)(xi < 0 ? -xi : xi);
+            if (pk > g_census_peak_ant[a2]) g_census_peak_ant[a2] = pk;
+            if (pk > 29490) g_census_hot_ant[a2]++;
+            g_census_smp_ant[a2]++;
           }
           if (cnta) {
             g_census_pw2_ant[a2] += accp / (double)cnta;
@@ -1807,6 +1817,15 @@ void *UE_thread(void *arg)
             }
           }
           LOG_I(PHY, "SENSING: RFPOW mean(I^2+Q^2) absolute, absolute; rf= is TRUE RF input power via the UHD power reference, -- when uncalibrated: %s\n", rb);
+          {
+            char pb[200];
+            size_t v = 0;
+            for (int a2 = 0; a2 < na && v < sizeof(pb) - 40; a2++)
+              v += snprintf(pb + v, sizeof(pb) - v, "ch%d=%.1fdBFS(hot=%.4f%%) ", a2,
+                            g_census_peak_ant[a2] > 0 ? 20.0 * log10(g_census_peak_ant[a2] / 32767.0) : -199.0,
+                            g_census_smp_ant[a2] ? 100.0 * (double)g_census_hot_ant[a2] / (double)g_census_smp_ant[a2] : 0.0);
+            LOG_I(PHY, "SENSING: ADCPEAK max|I|,|Q| since start; hot = samples above 0.9 full scale: %s\n", pb);
+          }
 
           /* ---- BRSNR: per-branch signal-to-noise, from the only valid noise window available ----
            * NOT from nr_dl_chest_nvar_ant[]. That array is |dl_ls_est - dl_ch|^2 -- the residual
