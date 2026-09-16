@@ -1261,6 +1261,11 @@ void nr_pdcch_blind_monitor_process(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t 
         fflush(stdout);
       }
     }
+    /* Symbol 1 as well, for the duration decision (one more symbol FEP per DL slot, pre-discovery only). */
+    nr_slot_fep_ant(ue, fp, proc->nr_slot_rx, 1, 0 /* ant */, rxdataF_disc, link_type_dl, 0, ue->common_vars.rxdata);
+    nr_pdcch_blind_monitor_autodiscover_observe_symbol1(rxdataF_disc[0] + 1 * fp->ofdm_symbol_size, fp->ofdm_symbol_size,
+                                                        fp->N_RB_DL, fp->first_carrier_offset, (uint16_t)fp->Nid_cell,
+                                                        proc->nr_slot_rx);
     nr_pdcch_blind_monitor_autodiscover_step(rxdataF_disc[0] + disc_symbol * fp->ofdm_symbol_size, fp->ofdm_symbol_size, fp->N_RB_DL,
                                              fp->first_carrier_offset, (uint16_t)fp->Nid_cell,
                                              proc->nr_slot_rx, disc_symbol, abs_slot_now);

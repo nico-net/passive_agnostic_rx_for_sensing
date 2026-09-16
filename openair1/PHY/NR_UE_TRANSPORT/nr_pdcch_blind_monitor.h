@@ -463,6 +463,9 @@ bool nr_pdcch_blind_monitor_autodiscover_offset_rejected(int rb_offset);
  * PHY-heavy c16_t definition (nr_pdcch_coreset_map.h pulls in PHY/impl_defs_top.h; the .c file casts
  * internally). Returns true once a candidate footprint is selected and g_cfg is populated.
  * `abs_slot` feeds nr_pdcch_blind_monitor_confirmed_rnti() for the bootstrap-RNTI log line. */
+void nr_pdcch_blind_monitor_autodiscover_observe_symbol1(const void* rxdataF_symbol, int ofdm_symbol_size,
+                                                          int n_rb_carrier, int first_carrier_offset, uint16_t pci,
+                                                          int slot);
 bool nr_pdcch_blind_monitor_autodiscover_step(const void* rxdataF_symbol, int ofdm_symbol_size, int n_rb_carrier,
                                               int first_carrier_offset, uint16_t pci, int slot, int symbol,
                                               uint32_t abs_slot);

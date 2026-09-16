@@ -302,6 +302,7 @@ bool nr_pdcch_blind_monitor_autodiscover_done(void)
 
 #define NR_PDCCH_MAX_CANDIDATE_WINDOWS (273 / 6)
 static uint16_t s_hit_count[NR_PDCCH_MAX_CANDIDATE_WINDOWS];
+static uint16_t s_hit_count1[NR_PDCCH_MAX_CANDIDATE_WINDOWS]; /* same, CORESET symbol 1: decides the duration */
 static int s_obs_calls;
 
 /* CONVERGENCE CRITERION (rewritten 2026-09-06 -- see the handover doc's reversal section for the
@@ -405,6 +406,7 @@ void nr_pdcch_blind_monitor_autodiscover_reset(void)
   s_dedicated_found = false;
   s_ext_n = s_ext_idx = 0;
   memset(s_hit_count, 0, sizeof(s_hit_count));
+  memset(s_hit_count1, 0, sizeof(s_hit_count1));
   s_obs_calls = 0;
   g_cfg.dci_length_override = 0;
   extent_clear_evidence();
@@ -502,6 +504,24 @@ int nr_pdcch_extent_candidates(int first_w, int last_w, int nw_total,
  * nr_pdcch_blind_monitor_autodiscover_done() above, NOT g_cfg.bwp_size). Cheap to call
  * repeatedly -- it is a no-op once found (checked by the caller, not here, so this function's own
  * logic stays simple: "try once, report success/failure"). */
+/* CORESET DURATION (2026-09-16). Technique A scanned symbol 0 only and the footprint was declared
+ * with duration 1 -- an assumption a commercial cell need not satisfy. The caller also offers symbol
+ * 1; a window lit there at a rate comparable to symbol 0 means the CORESET spans both symbols. */
+void nr_pdcch_blind_monitor_autodiscover_observe_symbol1(const void* rxdataF_symbol, int ofdm_symbol_size,
+                                                          int n_rb_carrier, int first_carrier_offset, uint16_t pci,
+                                                          int slot)
+{
+  nr_pdcch_coreset_candidate_t candidates[NR_PDCCH_MAX_CANDIDATE_WINDOWS];
+  const int n = nr_pdcch_coreset_map_scan((const c16_t*)rxdataF_symbol, ofdm_symbol_size, n_rb_carrier,
+                                          first_carrier_offset, pci, slot, 1, candidates,
+                                          NR_PDCCH_MAX_CANDIDATE_WINDOWS);
+  for (int c = 0; c < n; c++) {
+    const int w = candidates[c].rb_offset / 6;
+    if (w >= 0 && w < NR_PDCCH_MAX_CANDIDATE_WINDOWS)
+      s_hit_count1[w]++;
+  }
+}
+
 bool nr_pdcch_blind_monitor_autodiscover_step(const void* rxdataF_symbol, int ofdm_symbol_size, int n_rb_carrier,
                                               int first_carrier_offset, uint16_t pci, int slot, int symbol,
                                               uint32_t abs_slot)
@@ -586,6 +606,7 @@ bool nr_pdcch_blind_monitor_autodiscover_step(const void* rxdataF_symbol, int of
   if (s_obs_calls >= AUTODISCOVER_MAX_OBS_CALLS && obs_total_hits < obs_hits_needed) {
     /* Waited long enough and the evidence never arrived -- reset rather than decide on noise. */
     memset(s_hit_count, 0, sizeof(s_hit_count));
+  memset(s_hit_count1, 0, sizeof(s_hit_count1));
     s_obs_calls = 0;
     return false;
   }
@@ -639,6 +660,7 @@ bool nr_pdcch_blind_monitor_autodiscover_step(const void* rxdataF_symbol, int of
     // failure permanently (the caller re-invokes this every DL slot for as long as autodiscover
     // stays unconverged; see the handover doc's note on this cost being unbounded).
     memset(s_hit_count, 0, sizeof(s_hit_count));
+  memset(s_hit_count1, 0, sizeof(s_hit_count1));
     s_obs_calls = 0;
     return false;
   }
@@ -657,6 +679,7 @@ bool nr_pdcch_blind_monitor_autodiscover_step(const void* rxdataF_symbol, int of
   const int span_rb   = (last_w - first_w + 1) * 6;
   /* Start a new occupancy window for any later inconclusive retry. */
   memset(s_hit_count, 0, sizeof(s_hit_count));
+  memset(s_hit_count1, 0, sizeof(s_hit_count1));
   s_obs_calls = 0;
 
   g_cfg.coreset_type            = 0;  // PDCCH-Config (dedicated), NOT MIB/SIB1 -- see coreset_type's
@@ -763,7 +786,13 @@ bool nr_pdcch_blind_monitor_autodiscover_step(const void* rxdataF_symbol, int of
    * ponytail: fixed "scan every slot" ceiling -- ~2000 extra occasions/s of CPU on a cell whose
    * real dedicated SS periodicity is sparser. Upgrade path: derive periodicity from the actual
    * inter-occupancy gap Technique A already measures, once that's shown to matter live. */
-  g_cfg.coreset_duration                 = 1;
+  {
+    uint32_t h0 = 0, h1 = 0;
+    for (int w = first_w; w <= last_w && w < NR_PDCCH_MAX_CANDIDATE_WINDOWS; w++) { h0 += s_hit_count[w]; h1 += s_hit_count1[w]; }
+    g_cfg.coreset_duration = (h0 > 0 && h1 * 2 >= h0) ? 2 : 1; /* symbol 1 lit at >= half of symbol 0's rate */
+    LOG_I(PHY, "SENSING: Phase 3 autodiscover -- CORESET duration %d (symbol-0 hits %u, symbol-1 hits %u over the footprint)\n",
+          g_cfg.coreset_duration, h0, h1);
+  }
   g_cfg.coreset_reg_bundle_size          = 0;
   // interleaver_size=0 matches the manual ground-truth dedicated conf's own field 4
   // (tests/passive_rx/ota/nrue.passive_rx.conf: "45:1:0:0:0:2"). Inert either way given
