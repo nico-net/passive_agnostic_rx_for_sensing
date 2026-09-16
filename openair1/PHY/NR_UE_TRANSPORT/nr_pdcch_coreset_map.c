@@ -121,7 +121,11 @@ int nr_pdcch_coreset_map_scan(const c16_t* rxdataF,
     for (int i = 0; i < m; i++) v[i] = fabs(wcorr[i] - med);
     for (int i = 1; i < m; i++) { double x = v[i]; int j = i - 1; while (j >= 0 && v[j] > x) { v[j + 1] = v[j]; j--; } v[j + 1] = x; }
     const double sigma = 1.4826 * v[m / 2];
-    const double adaptive = med + 4.0 * (sigma > 0.02 ? sigma : 0.02);
+    /* Absolute floor 0.35: a window of 18 random pilot products reads ~0.1-0.25 (OTA rb0_corr,
+     * rfsim empty windows) while a real PDCCH reads 0.5 (OTA) to 0.9+ (rfsim); on noiseless rfsim
+     * the MAD is tiny and med + 4 MAD let 0.3 windows through as false CORESET hits. */
+    double adaptive = med + 4.0 * (sigma > 0.02 ? sigma : 0.02);
+    if (adaptive < 0.35) adaptive = 0.35;
     thr = adaptive < CORESET_MAP_CORR_THRESHOLD ? adaptive : CORESET_MAP_CORR_THRESHOLD;
   }
   for (int w = 0; w < n_windows; w++) {
