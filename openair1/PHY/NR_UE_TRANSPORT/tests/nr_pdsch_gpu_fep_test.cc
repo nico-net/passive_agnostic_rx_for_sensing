@@ -37,11 +37,15 @@ static std::vector<uint8_t> gold(uint32_t cinit, int nbits)
 }
 static double pam(int qm, int code)
 {
+  /* 38.211 5.1.x written out per level so the GPU's recursion is checked against a different form */
   const int h = qm / 2;
-  double a = 1;
-  for (int i = h - 1; i >= 1; i--)
-    a = (1 << i) - (1 - 2 * ((code >> i) & 1)) * a;
-  a *= 1 - 2 * (code & 1);
+  const int b[4] = {code & 1, (code >> 1) & 1, (code >> 2) & 1, (code >> 3) & 1}; /* b[i] = b_{2i} of the RE */
+  double a;
+  if (h == 1) a = 1;
+  else if (h == 2) a = 2 - (1 - 2 * b[1]);
+  else if (h == 3) a = 4 - (1 - 2 * b[1]) * (2 - (1 - 2 * b[2]));
+  else a = 8 - (1 - 2 * b[1]) * (4 - (1 - 2 * b[2]) * (2 - (1 - 2 * b[3])));
+  a *= 1 - 2 * b[0];
   return a / sqrt(qm == 2 ? 2 : qm == 4 ? 10 : qm == 6 ? 42 : 170);
 }
 static int dmrs_delta(int type, int port) { return type == 1 ? ((port >> 1) & 1) : 2 * ((port >> 1) % 3); }
@@ -102,7 +106,7 @@ static Scene make_scene(const nr_gpu_pdsch_job_t &j, double snr_db, double fo_hz
             const int ks = k - NRB * 6;                /* signed */
             const int idx = (FCO + k) % N;
             for (int a = 0; a < NANT; a++)
-              Y[a][(size_t)l * N + idx] += H(a, li, ks) * r * (double)(kp ? wf : 1);
+              Y[a][(size_t)l * N + idx] += H(a, li, ks) * r * (double)(kp ? wf : 1) * sqrt((double)j.n_cdm_groups_no_data); /* 38.214 4.1-1 DM-RS boost */
           }
         }
     }

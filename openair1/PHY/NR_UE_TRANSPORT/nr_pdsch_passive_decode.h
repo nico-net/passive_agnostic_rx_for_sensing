@@ -167,4 +167,19 @@ bool nr_pdsch_passive_probe_outcome(void);
  *  7-13 % EVM, and would feed that failure into the searches). Default on. */
 void nr_pdsch_passive_ptrs_sweep_allow(bool on);
 
+/* ---- GPU front end (NR_GPU_FEP=1, libpdsch_gpu.so): the queue does FEP + chest + MMSE + LLR for a
+ * whole slot on the GPU and hands each job its LLRs; nr_pdsch_passive_decode() then skips its own
+ * FEP/chest/demod and runs descramble + LDPC on them. ---- */
+#include "nr_pdsch_gpu_fep.h"
+/** Fill the GPU job for this grant with the same arithmetic the decode uses (ports -> Nl, Qm, TBS ->
+ *  probe horizon). false = the decode would not attempt it either (or the GPU cannot: PT-RS, CSI-RS
+ *  rate matching, Nl > antennas), so the caller leaves it on the CPU. */
+bool nr_pdsch_passive_gpu_job(const PHY_VARS_NR_UE *ue, const fapi_nr_dl_config_dlsch_pdu_rel15_t *dlsch_config,
+                              const freq_alloc_bitmap_t *freq_alloc, const nr_pdsch_passive_grant_t *grant, int slot_rx,
+                              bool probe, nr_gpu_pdsch_job_t *job);
+/** LLRs for the NEXT nr_pdsch_passive_decode() call on this thread (n = 0 clears). */
+void nr_pdsch_passive_set_llr_override(const int16_t *llr, uint32_t n);
+/** The (descrambled) LLR buffer and G of this thread's last decode -- the GPU self-check compares against it. */
+uint32_t nr_pdsch_passive_last_llr(const int16_t **p);
+
 #endif // NR_PDSCH_PASSIVE_DECODE_H

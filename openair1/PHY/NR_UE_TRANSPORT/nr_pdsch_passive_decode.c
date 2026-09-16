@@ -396,6 +396,7 @@ static _Atomic uint64_t g_ldpc_tb_fail  = 0;
 static _Atomic uint64_t g_ldpc_zero_tb  = 0;
 static _Atomic uint64_t g_ldpc_ok       = 0;
 static _Atomic uint64_t g_fep_hit = 0, g_fep_miss = 0, g_chest_hit = 0, g_chest_miss = 0; // per-slot sharing
+static _Atomic uint64_t g_gpu_llr_jobs = 0, g_gpu_cpu_jobs = 0; // decodes fed by the GPU front end vs the CPU chain
 static _Atomic int g_lbrm_nl = 4;        // TBS_LBRM layer term n_L, latched cell-wide by TB CRC (4 = spec ceiling)
 static _Atomic uint64_t g_lbrm_try[5], g_lbrm_ok[5]; // per hypothesised n_L
 /* mean |LLR| the int8 decoder gets: 127/40 ~ 3.2x headroom over the mean for the 256QAM outer bits */
@@ -443,6 +444,8 @@ static const char *const kPipeName[PIPE_N_FIELDS] = {
 void nr_pdsch_passive_ldpc_stats_dump(void)
 {
   const uint64_t sf = atomic_load(&g_ldpc_seg_fail), tf = atomic_load(&g_ldpc_tb_fail);
+  LOG_I(PHY, "SENSING: GPU_FEP jobs gpu=%lu cpu=%lu\n", (unsigned long)atomic_load(&g_gpu_llr_jobs),
+        (unsigned long)atomic_load(&g_gpu_cpu_jobs));
   LOG_I(PHY, "SENSING: SLOTSHARE fep hit/miss=%lu/%lu chest hit/miss=%lu/%lu\n",
         (unsigned long)atomic_load(&g_fep_hit), (unsigned long)atomic_load(&g_fep_miss),
         (unsigned long)atomic_load(&g_chest_hit), (unsigned long)atomic_load(&g_chest_miss));
@@ -819,6 +822,67 @@ void nr_pdsch_passive_probe_mode(bool on) { t_probe_first_seg = on; t_probe_seg_
 static __thread bool t_ptrs_sweep_allow = true;
 void nr_pdsch_passive_ptrs_sweep_allow(bool on) { t_ptrs_sweep_allow = on; }
 bool nr_pdsch_passive_probe_outcome(void) { return t_probe_seg_ok; }
+
+static __thread const int16_t *t_last_llr = NULL;
+static __thread uint32_t t_last_G = 0;
+uint32_t nr_pdsch_passive_last_llr(const int16_t **p) { *p = t_last_llr; return t_last_G; }
+static __thread const int16_t *t_llr_ovr = NULL;
+static __thread uint32_t t_llr_ovr_n = 0;
+void nr_pdsch_passive_set_llr_override(const int16_t *llr, uint32_t n) { t_llr_ovr = n ? llr : NULL; t_llr_ovr_n = n; }
+
+bool nr_pdsch_passive_gpu_job(const PHY_VARS_NR_UE *ue, const fapi_nr_dl_config_dlsch_pdu_rel15_t *pdu,
+                              const freq_alloc_bitmap_t *fa, const nr_pdsch_passive_grant_t *grant, int slot_rx,
+                              bool probe, nr_gpu_pdsch_job_t *job)
+{
+  memset(job, 0, sizeof(*job));
+  const NR_DL_FRAME_PARMS *fp = &ue->frame_parms;
+  /* what the GPU does not model: PT-RS, CSI-RS rate matching (the decode also sweeps PT-RS arms on
+   * agnostic runs -- it clears the override itself when it arms one) */
+  if ((pdu->pduBitmap & 0x1) || pdu->numCsiRsForRateMatching > 0)
+    return false;
+  int nl = 0;
+  for (int i = 0; i < 12 && nl < 4; i++)
+    if ((pdu->dmrs_ports >> i) & 1)
+      job->ports[nl++] = (uint8_t)i;
+  if (nl < 1 || nl > fp->nb_antennas_rx || nl > 4 || __builtin_popcount(pdu->dmrs_ports) != nl)
+    return false;
+  const uint8_t Qm = nr_get_Qm_dl(grant->mcs, grant->mcs_table);
+  const uint32_t R = nr_get_code_rate_dl(grant->mcs, grant->mcs_table);
+  if (Qm == 0 || R == 0 || fa->num_rbs == 0 || pdu->dlDmrsSymbPos == 0)
+    return false;
+  job->start_rb = (uint16_t)(pdu->BWPStart + fa->first_rb); /* CRB0-relative, as nr_pdsch_channel_estimation's start_sc */
+  job->nb_rb = (uint16_t)fa->num_rbs;
+  job->start_symbol = (uint8_t)pdu->start_symbol;
+  job->nb_symbols = (uint8_t)pdu->number_symbols;
+  job->dmrs_mask = (uint16_t)pdu->dlDmrsSymbPos;
+  job->dmrs_type = (uint8_t)(pdu->dmrsConfigType == NFAPI_NR_DMRS_TYPE1 ? 1 : 2);
+  job->n_cdm_groups_no_data = (uint8_t)pdu->n_dmrs_cdm_groups;
+  job->Nl = (uint8_t)nl;
+  job->Qm = Qm;
+  job->dmrs_scrambling_id = pdu->dlDmrsScramblingId;
+  job->nscid = (uint8_t)pdu->nscid;
+  job->dmrs_ref_rb = (uint16_t)(pdu->refPoint ? pdu->BWPStart : 0); /* rb_offset = first_rb + (refPoint ? 0 : BWPStart) */
+  job->slot = (uint8_t)slot_rx; /* n_s,f for c_init, as proc->nr_slot_rx in the CPU chest */
+  {
+    static int s_tinterp = -1;
+    if (s_tinterp < 0) { const char *e = getenv("ISAC_CHEST_TINTERP"); s_tinterp = (e != NULL && atoi(e) != 0) ? 1 : 0; }
+    job->time_interp = (uint8_t)s_tinterp;
+  }
+  if (probe) { /* code block 0 plus one symbol of slack, as the CPU probe horizon */
+    const uint8_t nb_re_dmrs = get_num_dmrs_re_per_rb(pdu->dmrsConfigType, pdu->n_dmrs_cdm_groups);
+    const uint16_t dmrs_len = get_num_dmrs(pdu->dlDmrsSymbPos);
+    const uint32_t tbs = nr_compute_tbs(Qm, (uint16_t)R, fa->num_rbs, pdu->number_symbols, nb_re_dmrs * dmrs_len,
+                                        grant->nb_rb_oh, grant->tb_scaling, (uint8_t)nl);
+    const uint32_t G = nr_get_G(fa->num_rbs, pdu->number_symbols, nb_re_dmrs, dmrs_len, 0, Qm, (uint8_t)nl);
+    if (tbs == 0 || G == 0)
+      return false;
+    const uint32_t Kcb = (get_BG(tbs, (uint16_t)R) == 2) ? 3840u : 8448u, B = tbs + 24u;
+    const uint32_t C = (B <= Kcb) ? 1u : (B + (Kcb - 24u) - 1u) / (Kcb - 24u);
+    if (C > 1)
+      job->max_llr = (G + C - 1) / C + (uint32_t)fa->num_rbs * 12u * Qm * nl;
+  }
+  return true;
+}
 static __thread bool t_hq_clear = true;
 static __thread uint32_t t_hq_A = 0;
 
@@ -1413,6 +1477,13 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
   }
   const int probe_end = (probe_last_sym >= 0) ? probe_last_sym + 1 : dlsch_config->start_symbol + dlsch_config->number_symbols;
 
+  /* GPU LLRs in hand: everything from here to the LLR buffer (FEP, channel estimation, equaliser,
+   * demodulator) is what the GPU already did for this slot. A PT-RS arm or CSI-RS rate matching
+   * armed above changes the RE budget the GPU did not model, so that job stays on the CPU path. */
+  const int16_t *gpu_llr = ((dlsch_config->pduBitmap & 0x1) || csi_unav) ? NULL : t_llr_ovr;
+  const uint32_t gpu_llr_n = gpu_llr ? t_llr_ovr_n : 0;
+  atomic_fetch_add(gpu_llr ? &g_gpu_llr_jobs : &g_gpu_cpu_jobs, 1);
+
   // ---- FEP every symbol of the allocation. The caller keeps this buffer: the data-aided submit
   // needs the SAME Y samples to form Ĥ = Y/X, and re-transforming them would be both wasteful and a
   // chance for the two views to diverge. ----
@@ -1434,7 +1505,9 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
   const int fep_n  = t_share.on ? fp->symbols_per_slot
                      : (probe_last_sym >= 0 ? probe_end - dlsch_config->start_symbol : dlsch_config->number_symbols);
   atomic_fetch_add(fep_hit ? &g_fep_hit : &g_fep_miss, 1);
-  if (fep_hit) {
+  if (gpu_llr) {
+    /* the GPU transformed this slot; nothing here reads rxdataF */
+  } else if (fep_hit) {
     /* same slot, same offset: this thread transformed it for the previous grant of the group */
   } else if (fp->nb_antennas_rx > 1) {
     nr_slot_fep_ant_task_t fep_tasks[fp->nb_antennas_rx];
@@ -1460,7 +1533,7 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
       nr_slot_fep(ue, fp, proc->nr_slot_rx, m, rxdataF, link_type_dl, 0, ue->common_vars.rxdata);
     }
   }
-  if (!fep_hit) {
+  if (!fep_hit && !gpu_llr) {
     t_fep_cache.slot = share_slot; t_fep_cache.fo = fep_fo; t_fep_cache.valid = t_share.on;
   }
   pdtim_add(PDTIM_FEP, pdt_fep);
@@ -1500,6 +1573,8 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
    * the shape vary per grant and force a reallocation (and a "resizing" log line) on every change.
    * dim2 is the stride and is already constant. */
   allocCast2D(pdsch_dl_ch_estimates, int32_t, toFree, fp->nb_antennas_rx * NR_MAX_NB_LAYERS, pdsch_est_size, true);
+  if (gpu_llr)
+    goto gpu_llr_ready; /* after the variably-modified declaration above, which a jump may not cross */
 
   uint32_t nvar = 0, nvar_den = 1u; // nvar_den: hoisted divisor, also cached by the slot-share
   int n_dmrs_sym = 0;
@@ -2212,6 +2287,8 @@ chest_done:
   // out of a NR_UE_DLSCH_t and a NR_DL_UE_HARQ_t; both are stack-local here, deliberately (see the
   // header). `status = NR_ACTIVE` is what makes it apply the PTRS/symbol-span branch consistently
   // with the attached path -- with pduBitmap==0 it only selects the symbol bookkeeping. ----
+gpu_llr_ready:;
+  if (gpu_llr) { nvar = 0; nvar_den = 1u; n_dmrs_sym = 0; } /* skipped by the jump; read only on the guarded retries */
   NR_UE_DLSCH_t dlsch = {0};
   dlsch.cw_info = *cw;
   dlsch.rnti = grant->rnti;
@@ -2328,7 +2405,13 @@ chest_done:
   const uint64_t pdt_dem = pdtim_on ? pdtim_now() : 0;
   bool demod_ok = true;
   const int last_sym = dlsch_config->start_symbol + dlsch_config->number_symbols - 1;
-  for (int m = dlsch_config->start_symbol; m <= last_sym; m++) {
+  if (gpu_llr) {
+    const uint32_t n = gpu_llr_n < rx_llr_buf_sz ? gpu_llr_n : rx_llr_buf_sz;
+    memcpy(llr, gpu_llr, (size_t)n * sizeof(int16_t)); /* the rest stays 0: a probe only needs code block 0 */
+    for (int m = dlsch_config->start_symbol; m <= last_sym; m++)
+      dl_valid_re[m] = 0;
+  }
+  for (int m = dlsch_config->start_symbol; m <= last_sym && !gpu_llr; m++) {
     if (probe_last_sym >= 0 && m > probe_last_sym && m != last_sym)
       continue; /* probe: past the horizon, LLR count stays 0 for this symbol */
     if (sfo_eps != 0.0) {
@@ -2619,6 +2702,7 @@ chest_done:
     const uint64_t zero_before = atomic_load(&g_ldpc_zero_tb);
     const uint64_t pdt_ldp = pdtim_on ? pdtim_now() : 0;
     nr_dlsch_unscrambling(llr, G, 0 /* codeword */, dlsch_config->dlDataScramblingId, grant->rnti);
+    t_last_llr = llr; t_last_G = G; /* for the GPU self-check */
 
     /* SIGN statistics AFTER descrambling -- measuring them before is meaningless, and that was the
      * first version's mistake: the scrambler exists to randomise signs, so an all-zero transport
@@ -2770,7 +2854,7 @@ chest_done:
      * (the standing hypothesis is a per-daughterboard frequency offset: X410 puts ch0/1 on board A
      * and ch2/3 on board B). So walk by index and let the CRC be the judge. The per-branch counters
      * below are the measurement that turns that hypothesis into data. */
-    if (!ldpc_ok && fp->nb_antennas_rx > 1 && cw->Nl == 1 && g_branch_retry_enabled()) {
+    if (!ldpc_ok && !gpu_llr && fp->nb_antennas_rx > 1 && cw->Nl == 1 && g_branch_retry_enabled()) {
       const int first_branch = nr_dlsch_last_branch(); // -1 if the first attempt combined
       for (int b = 0; b < fp->nb_antennas_rx && !ldpc_ok; b++) {
         if (b == first_branch) {
@@ -2846,7 +2930,7 @@ chest_done:
         s_subset_n = (e != NULL) ? atoi(e) : 0;
       }
       static __thread unsigned long s_subset_seen = 0;
-      if (s_subset_n > 0 && fp->nb_antennas_rx == 4 && cw->Nl == 1
+      if (s_subset_n > 0 && !gpu_llr && fp->nb_antennas_rx == 4 && cw->Nl == 1
           && (s_subset_seen++ % (unsigned long)s_subset_n) == 0) {
         const bool ldpc_ok_saved = ldpc_ok;
         /* The diagnostic decoder reuses g_harq.b. Preserving only ldpc_ok would publish

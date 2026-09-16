@@ -179,7 +179,11 @@ __global__ void k_ls(const nr_gpu_pdsch_job_t *__restrict__ jobs, const uint32_t
   const float2 y0 = sym[k0 % N], y1 = sym[k1 % N];
   const float2 r0 = gold_qpsk(g, m0), r1 = gold_qpsk(g, m0 + 1);
   float2 h0 = cmulc(y0, r0), h1 = cmulc(y1, r1);
-  float2 h = make_float2(0.5f * wt * (h0.x + wf * h1.x), 0.5f * wt * (h0.y + wf * h1.y));
+  /* TS 38.214 table 4.1-1: PDSCH EPRE to DM-RS EPRE is 0 / -3 / -4.77 dB for 1 / 2 / 3 CDM groups
+   * without data, so the data sees the DM-RS-measured channel divided by sqrt(groups). Measured
+   * missing on the rank-4 bed (2 groups): every |x| 0.707x, LLR bits b2/b4/b6 75/62/50 % agreement. */
+  const float beta = rsqrtf((float)(job.n_cdm_groups_no_data > 0 ? job.n_cdm_groups_no_data : 1));
+  float2 h = make_float2(0.5f * wt * beta * (h0.x + wf * h1.x), 0.5f * wt * beta * (h0.y + wf * h1.y));
   ls[(((size_t)j * MAX_DMRS_SYM + di) * MAX_PORTS + port_i) * MAX_ANT * MAX_PILOTS + (size_t)ant * MAX_PILOTS + n] = h;
 }
 
@@ -257,10 +261,11 @@ __device__ inline float pam_level(int qm, int code)
 {
   /* 38.211 5.1: I = (1-2b0)[2^(h-1) - (1-2b2)[... - (1-2b_{2h-2})]] / sqrt(norm); bits of the axis packed
    * LSB-first in `code` (bit i of code = b_{2i}). */
+  /* innermost first: 2 pairs with b_{Qm-2} (code bit h-1), 4 with the next, ..., 2^(h-1) with b2 (code bit 1) */
   const int h = qm / 2;
   float a = 1.f;
-  for (int i = h - 1; i >= 1; i--)
-    a = (float)(1 << i) - (1.f - 2.f * ((code >> i) & 1)) * a;
+  for (int i = 1; i < h; i++)
+    a = (float)(1 << i) - (1.f - 2.f * ((code >> (h - i)) & 1)) * a;
   a *= (1.f - 2.f * (code & 1));
   const float norm = qm == 2 ? 2.f : qm == 4 ? 10.f : qm == 6 ? 42.f : 170.f;
   return a * rsqrtf(norm);
