@@ -19,6 +19,8 @@ unaffected.
 
 | Tab | Shows | Read it when |
 |---|---|---|
+| Live | 75 ms tiles + PRB maps, **gNB/cell identity** (PCI, carrier, BW, SCS, GSCN, CFO, CORESET — cell/gNB ID reads *unknown*: the receiver does not log cellIdentity) and the **key-line log tail** (lock, CFO, PREFERRED, PDSCHQ, CHESTDIAG, RFSTALL, discovery, DM-RS oracle, HARQC) | Watching a capture. |
+| Paper stats | The agnostic-receiver paper's statistics, one section per claim (acquisition, PDCCH/DCI, PDSCH, four RX branches, recovery, runtime) and the five figures. Every panel names the log line it is fed from; a statistic the receiver does not yet print shows **"not instrumented: needs …"** instead of a number. `python3 paper_stats.py run.log` prints the same numbers offline. | Writing the paper / checking a run's evidence. |
 | Link & Sync Health | CFO vs the mis-lock band, STO flywheel %, SFO correction state, CFR occupancy per source, PDSCH CRC, X410 overflows, log tail | **First.** A receiver can be alive and producing nothing real; this is where that shows. |
 | DL Detections | Range–Doppler raster + CFAR markers, detection table with bearing/SNR/p(real) | Checking what the gNB-illuminated path sees. |
 | UL Detections | PUSCH row counts and decode health | Checking the UE-illuminated path — see the caveat below. |
@@ -55,6 +57,7 @@ UL tab says so on screen rather than implying otherwise.
 
 ```bash
 python3 test_monitor.py     # geometry round-trip + store behaviour, no deps beyond stdlib
+python3 paper_stats.py      # paper-statistics parser self-check; add a run.log to score it offline
 ```
 
 The geometry test mirrors the C++ `aoa_localize()` closed form: place a target, compute its ΔR and
@@ -69,3 +72,17 @@ the wrong place.
   never fused. Cross-receiver fusion is `repos/isac`'s job and is not present on this host.
 - Track bearing is the last accepted detection's, not a filtered state — position jitters at the
   bearing's own noise. Add a bearing state to the Kalman filter if that matters.
+
+## Paper statistics the receiver does NOT yet log (shown as gaps, never as zeros)
+
+| Statistic | Needs |
+|---|---|
+| Acquisition latency in **sample time** | a frame/slot stamp on `ACQ_EVENT` / `Cell Detected` lines (today: wall-clock at ingest, live lines only) |
+| Unique-TB CRC rate | a per-grant `(rnti, harq_pid, ndi)` line or a `UNIQUE_TB` counter in `PDSCHQ` (today: completed jobs) |
+| DCI interpretation vs manual oracle | an oracle DCI file from the gNB log to diff against |
+| Per-branch TB CRC / P(at least one RX) | per-branch CRC on every grant (`BRANCHSEL` only retries failures) |
+| Stale configuration reused after discontinuity | a `STALE_CONFIG_REUSED` counter after `ACQ_STATE -> LOST` |
+| Injected-gap recovery table | the 50 ms / 500 ms / 3 s / 10 s experiment |
+| p95 stage latency | a histogram line (`PDTIM`/`BTIM` print mean/max) |
+| Real-time factor | slots-processed vs wall-clock line (today: receiver CPU % from `ps`) |
+| Cell / gNB ID | `cellIdentity`/PLMN logged from the SIB1 decode |

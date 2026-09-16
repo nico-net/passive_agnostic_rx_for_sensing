@@ -84,8 +84,8 @@ canvas{display:block;width:100%;border-radius:6px;border:1px solid var(--soft);b
 <div id="liveWrap"></div>
 
 <script>
-const TABS = ["Live","Link & Sync Health","DL Detections","UL Detections","Tracking","Config / Scene"];
-let tab = 0, state = null, rxId = null, pollError = null;
+const TABS = ["Live","Paper stats","Link & Sync Health","DL Detections","UL Detections","Tracking","Config / Scene"];
+let tab = 0, state = null, rxId = null, pollError = null, paper = null;
 
 const el = (t, cls, txt) => { const e = document.createElement(t); if (cls) e.className = cls; if (txt != null) e.textContent = txt; return e; };
 const fmt = (v, d = 2) => (v == null || Number.isNaN(v)) ? "—" : (+v).toFixed(d);
@@ -539,6 +539,162 @@ function tabTracking(v) {
   });
 }
 
+
+/* ---- Paper statistics ----------------------------------------------------------------------------
+   Every panel names the receiver log line it is fed from. A statistic the receiver does not yet
+   print is rendered as an explicit gap ("not instrumented: needs ...") -- never as a zero. */
+const NA = (why) => { const d = el("div","empty"); d.textContent = "not instrumented: " + why.replace(/^not instrumented: /,""); d.style.color = "var(--amber)"; return d; };
+const pc = (a, b) => (b ? (100 * a / b).toFixed(1) + "%" : "—");
+const secs = (v) => v == null ? "—" : v < 0 ? "seen (seeded, no time)" : v < 1 ? (v*1000).toFixed(0) + " ms" : v.toFixed(2) + " s";
+
+function svgEl(tag, attrs, text) {
+  const e = document.createElementNS("http://www.w3.org/2000/svg", tag);
+  for (const k in attrs) e.setAttribute(k, attrs[k]);
+  if (text != null) e.textContent = text;
+  return e;
+}
+/* Figure 3: observations -> surviving DCI-layout hypotheses (log-y). Fed from
+   "DCI11_LAYOUT n=<obs> observed | <alive> of <total> layouts". */
+function convergencePlot(alive, total) {
+  const W = 560, H = 170, L = 50, B = 26, T = 10;
+  const svg = svgEl("svg", {viewBox: `0 0 ${W} ${H}`, width: "100%", height: H});
+  if (!alive || !alive.length) { const d = el("div"); d.appendChild(svg); d.appendChild(el("div","empty","no DCI11_LAYOUT observations yet")); return d; }
+  const xs = alive.map(a => a[0]), ys = alive.map(a => Math.max(1, a[1]));
+  const xmax = Math.max(...xs), ymax = Math.max(total || 1, ...ys);
+  const X = x => L + (x / xmax) * (W - L - 8), Y = y => T + (1 - Math.log10(y) / Math.log10(ymax)) * (H - T - B);
+  for (const g of [1, 8, 10, 100, 1000]) if (g <= ymax) {
+    svg.appendChild(svgEl("line", {x1: L, y1: Y(g), x2: W, y2: Y(g), stroke: g === 8 ? "var(--amber)" : "var(--border)", "stroke-dasharray": "3 3"}));
+    svg.appendChild(svgEl("text", {x: L - 5, y: Y(g) + 3, "text-anchor": "end", fill: "var(--dim)", "font-size": 9.5, "font-family": "IBM Plex Mono,monospace"}, g === 8 ? "8 (stage 2)" : String(g)));
+  }
+  svg.appendChild(svgEl("polyline", {points: alive.map(a => X(a[0]).toFixed(1) + "," + Y(Math.max(1,a[1])).toFixed(1)).join(" "), fill: "none", stroke: "var(--cyan)", "stroke-width": 1.8}));
+  alive.forEach(a => svg.appendChild(svgEl("circle", {cx: X(a[0]), cy: Y(Math.max(1,a[1])), r: 2.2, fill: "var(--cyan)"})));
+  svg.appendChild(svgEl("text", {x: W / 2, y: H - 6, "text-anchor": "middle", fill: "var(--dim)", "font-size": 9.5, "font-family": "IBM Plex Mono,monospace"}, `DCI observations (0 … ${xmax.toLocaleString()})  ·  y = surviving layouts of ${total || "?"} (log)`));
+  const d = el("div"); d.appendChild(svg); return d;
+}
+/* Figure 4 (per-branch) bars. */
+function bars(rows, unit) {
+  const wrap = el("div");
+  const max = Math.max(1, ...rows.map(r => r[1] || 0));
+  rows.forEach(([name, v, sub]) => {
+    const row = el("div"); row.style.cssText = "display:grid;grid-template-columns:150px 1fr 120px;gap:10px;align-items:center;margin-bottom:7px;font-family:'IBM Plex Mono',monospace;font-size:11.5px";
+    row.appendChild(el("span", null, name));
+    const bar = el("div","bar"), fill = el("div"); fill.style.cssText = `width:${100*(v||0)/max}%;background:var(--cyan)`; bar.appendChild(fill); row.appendChild(bar);
+    row.appendChild(el("span", null, (v == null ? "—" : v.toFixed(1) + unit) + (sub ? "  " + sub : "")));
+    wrap.appendChild(row);
+  });
+  return wrap;
+}
+function tabPaper(v) {
+  const P = paper;
+  if (!P || !P.acq) { v.appendChild(el("div","empty","waiting for /paper (start monitor.py with --log)")); return; }
+  const r = P.run || {}, ev = r.events || {}, lat = P.acq.latency || {}, G = P.gaps || {};
+  const id = r.ident || {};
+
+  // ---- header: gNB identity + run ----
+  const head = el("div","row");
+  head.appendChild(card("Cell", id.pci != null ? "PCI " + id.pci : "unknown", id.pci != null ? "good" : "warn",
+    "cell/gNB ID: unknown (not instrumented: needs cellIdentity/PLMN logged from SIB1)"));
+  head.appendChild(card("Carrier", id.fc_mhz ? fmt(id.fc_mhz,2) + " MHz" : (id.ssb_hz ? "SSB " + fmt(id.ssb_hz/1e6,2) + " MHz" : "—"), null,
+    (id.prb ? `${id.prb} PRB · SCS ${15 << (id.mu||0)} kHz` : "BW/SCS: waiting for 'ACQ carrier CONFIRMED'") + (id.gscn ? ` · GSCN ${id.gscn}` : "")));
+  head.appendChild(card("Runs seen", `${P.n_valid} / ${P.n_runs}`, null, `${P.n_timed} with live timing · this monitor session`));
+  head.appendChild(card("CPU (receiver)", P.cpu_pct != null ? P.cpu_pct.toFixed(0) + "%" : "—", null, "sum over nr-uesoftmodem threads · " + G.rtf));
+  v.appendChild(head);
+
+  // ---- 1. Acquisition ----
+  const acq = panel("1 · Acquisition  (Cell Detected / ACQ_EVENT / CORESET VERIFIED / PREFERRED / PDSCHQ crc_ok>0)");
+  const nv = P.n_valid || 0;
+  acq.appendChild(kvRows([
+    ["Cold-start success rate", nv ? `${P.acq.success} / ${nv}  (${pc(P.acq.success, nv)})` : "no valid runs yet", P.acq.success ? "green" : null],
+    ["False-lock rate", nv ? `${P.acq.false_lock} / ${nv}  (${pc(P.acq.false_lock, nv)})  [ACQ carrier MISMATCH | VOID_CFO_MISLOCK]` : "—", P.acq.false_lock ? "red" : null],
+    ["Inconclusive / unsupported-window rate", nv ? `${P.acq.inconclusive} / ${nv}  (${pc(P.acq.inconclusive, nv)})  [run ended, no TB, no false lock]` : "—"],
+    ["Clock", P.acq.clock + "  ·  " + P.acq.gap_sample_time, "amber"],
+  ]));
+  const tl = [["PSS/SSS","pss"],["PBCH/MIB","pbch"],["SIB1","sib1"],["PDCCH discovered","coreset"],["DCI interpreted","dci"],["First valid PDSCH","first_tb"]];
+  acq.appendChild(el("div","ptitle","Figure 1 · acquisition timeline (this run · median / p95 over timed runs)"));
+  acq.appendChild(table(["Milestone","This run","Median","p95","n runs"], tl.map(([n,k]) => [n, secs(ev[k]), secs(lat[k] && lat[k].median), secs(lat[k] && lat[k].p95), String(lat[k] ? lat[k].n : 0)])));
+  v.appendChild(acq);
+
+  // ---- 2. PDCCH / DCI ----
+  const L = r.layouts || {}, vd = L.verdict, pref = L.preferred;
+  const dci = panel("2 · PDCCH / DCI  (SEARCH_SPACE INFERRED / rnti_seen / DCI11_LAYOUT / STAGE2 / PREFERRED)");
+  dci.appendChild(kvRows([
+    ["Distinct valid DCI observations (CRC-confirmed)", r.ss ? `${r.ss.confirmed}  per AL [${r.ss.per_al}]` : "waiting for SEARCH_SPACE INFERRED"],
+    ["DCI-length discovery", L.armed ? `length ${L.armed.dci_len} bits → ${L.armed.layouts} layouts armed` + (r.len_unresolved ? ` · ${r.len_unresolved} CORESET hypotheses exhausted 500 occasions` : "") : "not yet resolved", L.armed ? "green" : null],
+    ["CORESET hypotheses tried", r.coreset_hyp ? `${r.coreset_hyp[0]} / ${r.coreset_hyp[1]}` + (id.coreset_span ? ` → verified offset ${id.coreset_offset} span ${id.coreset_span}` : "") : "—"],
+    ["RNTI recovery / persistence", `${P.rnti.distinct} distinct · ${P.rnti.persistent} seen ≥2×  ` + (P.rnti.top||[]).slice(0,4).map(([k,n]) => `0x${k}:${n}`).join(" ")],
+    ["Hypotheses before / after filtering", vd ? `${vd.total} → ${L.now ? L.now[1] : vd.total}` + (pref ? ` → 1 (layout ${pref.layout_id}, ${pref.passes} TB-CRC passes)` : "") : "—"],
+    ["Observations to convergence (≤8 alive)", L.obs_to_converge != null ? L.obs_to_converge.toLocaleString() + " DCI observations" : (L.now ? `not yet (${L.now[1]} alive after ${L.now[0].toLocaleString()})` : "—")],
+    ["Technique D (S,L)", r.techd ? `S${r.techd.S} L${r.techd.L} tda${r.techd.tda} (rnti ${r.techd.rnti})` : `not converged · DM-RS oracle observations: ${r.oracle_obs || 0}` + (r.probe ? ` · probes ${r.probe[1]}/${r.probe[0]} cb0 ok` : "")],
+    ["PARMSET overflow (contradictory tuples)", r.parmset_overflow ? String(r.parmset_overflow) : "0", r.parmset_overflow ? "amber" : null],
+  ]));
+  dci.appendChild(el("div","ptitle","Figure 2 · DCI interpretation verdicts (layout hypotheses)"));
+  if (vd) {
+    dci.appendChild(table(["Layouts","VALIDATED (TB CRC)","AMBIGUOUS (alive, unproven)","REJECTED (stage 1/2)","UNSUPPORTED jobs","Wrong vs manual oracle"],
+      [[String(vd.total), `${vd.validated}  (${pc(vd.validated, vd.total)})`, `${vd.ambiguous}  (${pc(vd.ambiguous, vd.total)})`,
+        `${vd.rejected}  (${pc(vd.rejected, vd.total)})` + (L.stage2_rejected ? ` · stage-2 RIV rejects ${L.stage2_rejected}` : ""), String(vd.unsupported_jobs), "—"]]));
+    dci.appendChild(NA(G.oracle));
+  } else dci.appendChild(el("div","empty","no layout set armed yet"));
+  dci.appendChild(el("div","ptitle","Figure 3 · hypothesis convergence"));
+  dci.appendChild(convergencePlot(L.alive, L.armed && L.armed.layouts));
+  v.appendChild(dci);
+
+  // ---- 3. PDSCH ----
+  const q = r.pdschq, post = r.post_conv, ld = r.ldpc, hq = r.harqc;
+  const pd = panel("3 · PDSCH  (PDSCHQ = completed jobs, one per grant · LDPCDIAG · HARQC · MCSHIST / RBHIST)");
+  pd.appendChild(kvRows([
+    ["TB CRC rate (completed jobs)", q ? `${q.ok.toLocaleString()} / ${q.decoded.toLocaleString()}  (${pc(q.ok, q.decoded)})` : "—", q && q.ok ? "green" : null],
+    ["Unique-TB CRC rate", G.unique_tb, "amber"],
+    ["Post-convergence TB CRC rate (after PREFERRED)", post ? `${post.ok.toLocaleString()} / ${post.decoded.toLocaleString()}  (${pc(post.ok, post.decoded)})` : (pref ? "no PDSCHQ sample since PREFERRED" : "layout not yet PREFERRED")],
+    ["Retransmissions combined (HARQC)", hq ? `${hq.retx}/${hq.retx_tot} · rv census mcs<24 [${hq.rv_lo.join(" ")}] mcs≥24 [${hq.rv_hi.join(" ")}]` : "—"],
+    ["Empty TBs (gNB padding) / iface errors", ld ? `${ld.zero_tb} / ${ld.iface_err}` : "—"],
+  ]));
+  const mcs = r.mcs || {};
+  for (const k of Object.keys(mcs)) {
+    const rows = mcs[k].filter(x => x[2] >= 20);
+    if (rows.length) { pd.appendChild(el("div","ptitle",`CRC by MCS · ${k} (n ≥ 20)`)); pd.appendChild(bars(rows.map(([m,p,n]) => ["MCS " + m, p, `n=${n}`]), "%")); }
+  }
+  if (r.rb && r.rb.length) { pd.appendChild(el("div","ptitle","CRC by allocation size (PRB)")); pd.appendChild(bars(r.rb.filter(x => x[2] >= 20).map(([a,p,n]) => [a + " PRB", p, `n=${n}`]), "%")); }
+  v.appendChild(pd);
+
+  // ---- 4. Four RX branches ----
+  const br = r.branch;
+  const rx4 = panel("4 · Four RX branches  (BRANCHSEL: per-branch retry when the combined decode failed)");
+  rx4.appendChild(el("div","ptitle","Figure 4 · receiver diversity"));
+  rx4.appendChild(kvRows([["TB CRC rate RX0–RX3 individually", G.branch, "amber"], ["P(at least one RX succeeds)", G.branch, "amber"]]));
+  if (br && br.per && br.per.length) {
+    rx4.appendChild(bars(br.per.map(([b,o,t]) => [`RX${b} rescue`, t ? 100*o/t : 0, `${o}/${t}`]).concat([["any branch", br.tried ? 100*br.rescued/br.tried : 0, `${br.rescued}/${br.tried}`]]), "%"));
+    rx4.appendChild(el("div","csub","fraction of COMBINED-decode failures uniquely recovered by re-decoding one branch alone"));
+  } else rx4.appendChild(el("div","empty","no BRANCHSEL line yet (single-antenna run, or no failed TB retried)"));
+  v.appendChild(rx4);
+
+  // ---- 5. Recovery ----
+  const rc = panel("5 · Recovery  (ACQ_STATE -> LOST / ACQ_EVENT pbch_locked n / RFSTALL)");
+  rc.appendChild(kvRows([
+    ["Reacquisition success", r.lost != null ? `${r.relocks} re-locks / ${r.lost} losses` + (r.lost ? `  (${pc(Math.min(r.relocks, r.lost), r.lost)})` : "") : "—", r.lost && r.relocks < r.lost ? "amber" : null],
+    ["Reacquisition latency median / p95", r.relock_median != null ? `${secs(r.relock_median)} / ${secs(r.relock_p95)}  (wall-clock, n=${(r.relock_s||[]).length})` : "no loss/relock pair timed yet"],
+    ["RF stalls this run", String(r.rfstall || 0), r.rfstall ? "red" : "green"],
+    ["Stale configuration accepted after discontinuity", G.stale, "amber"],
+  ]));
+  rc.appendChild(el("div","ptitle","Figure 5 · injected-gap recovery"));
+  rc.appendChild(table(["Interruption","Recovery success","Median recovery"], [["50 ms","—","—"],["500 ms","—","—"],["3 s","—","—"],["10 s","—","—"]]));
+  rc.appendChild(NA(G.injected_gaps));
+  v.appendChild(rc);
+
+  // ---- 6. Runtime ----
+  const rt = panel("6 · Runtime  (PDTIM / BTIM per-stage timing · PDSCHQ drops · SLOTSHARE)");
+  const stg = (list) => list ? list.map(([s,n,mu,mx]) => [s, n.toLocaleString(), mu.toFixed(0) + " µs", (mx/1000).toFixed(1) + " ms"]) : [];
+  if (r.pdtim) { rt.appendChild(el("div","ptitle","PDSCH decode stages (PDTIM)")); rt.appendChild(table(["stage","n","mean","max"], stg(r.pdtim.stages))); }
+  if (r.btim) { rt.appendChild(el("div","ptitle","PDCCH blind-scan stages (BTIM)")); rt.appendChild(table(["stage","n","mean","max"], stg(r.btim))); }
+  rt.appendChild(kvRows([
+    ["p95 per stage", G.p95, "amber"],
+    ["Queue drops (full / stale) · max lag", q ? `${q.full} / ${q.stale} · ${q.lag}/${q.lag_max} slots` : "—", q && (q.full || q.stale) ? "amber" : null],
+    ["Unsupported jobs (segment cap)", String(r.layouts && r.layouts.verdict ? r.layouts.verdict.unsupported_jobs : 0)],
+    ["Per-slot FEP/chest sharing (hit/miss)", r.slotshare ? `fep ${r.slotshare[0]}/${r.slotshare[1]} · chest ${r.slotshare[2]}/${r.slotshare[3]}` : "—"],
+    ["Real-time factor", G.rtf, "amber"],
+  ]));
+  v.appendChild(rt);
+}
+
 function tabConfig(v) {
   const r = rep();
   if (!r) { v.appendChild(el("div","empty","waiting for data…")); return; }
@@ -661,7 +817,7 @@ function decoderPanel() {
   return row;
 }
 
-const RENDER = [null, tabHealth, tabDL, tabUL, tabTracking, tabConfig];  // index 0 = Live, handled before this table
+const RENDER = [null, tabPaper, tabHealth, tabDL, tabUL, tabTracking, tabConfig];  // index 0 = Live, handled before this table
 
 function renderChrome() {
   const nav = document.getElementById("tabs"); nav.textContent = "";
@@ -710,6 +866,7 @@ function render() {
   v.textContent = "";
   if (state && state.log) v.appendChild(discoveryPanel());
   if (state && state.log) v.appendChild(decoderPanel());
+  if (tab === 1) { RENDER[tab](v); return; }
   if (!state || !Object.keys(state.receivers).length) {
     const live = state.log && state.log.last_line_at && (state.now - state.log.last_line_at) < 10;
     v.appendChild(el("div","empty", live
@@ -746,6 +903,7 @@ async function poll() {
     const res = await fetch("/state", {cache: "no-store", signal: controller.signal});
     if (!res.ok) throw new Error("HTTP " + res.status);
     state = await res.json();
+    try { paper = await (await fetch("/paper", {cache: "no-store"})).json(); } catch (e) { paper = null; }
     pollError = null;
     safeRender();
     const ln = livenessNote();
@@ -842,6 +1000,9 @@ window.addEventListener("resize", () => render());
     </div>
   </div>
   <div class="row" style="margin-top:12px" id="liveAgn"></div>
+  <div class="map" style="margin-top:12px"><h4>gNB / cell <span id="liveIdSub"></span></h4><div class="agn" id="liveId"></div></div>
+  <div class="map" style="margin-top:12px"><h4>Receiver log — key lines <span id="liveLogSub">lock · CFO · PREFERRED · PDSCHQ · CHESTDIAG · RFSTALL · discovery · oracle · HARQC</span></h4>
+    <div class="log" id="liveLog" style="max-height:360px"></div></div>
 </div>
 <script>
 (function () {
@@ -949,6 +1110,24 @@ window.addEventListener("resize", () => render());
   }
   setInterval(tick, 75);   // one CPI
   tick();
+  /* 1 Hz: identity + key log lines come from /paper (too heavy for the 75 ms loop). */
+  async function slow() {
+    let p; try { p = await (await fetch("/paper", {cache: "no-store"})).json(); } catch (e) { return; }
+    const id = (p.run && p.run.ident) || {};
+    const pill = (k, v) => `<span class="p"><span class="dim">${k}:</span> ${v}</span>`;
+    $("liveId").innerHTML =
+      pill("PCI", id.pci != null ? id.pci : "unknown") +
+      pill("cell/gNB ID", "unknown (not logged)") +
+      pill("carrier", id.fc_mhz ? id.fc_mhz.toFixed(2) + " MHz" : (id.ssb_hz ? "SSB " + (id.ssb_hz/1e6).toFixed(2) + " MHz" : "—")) +
+      pill("BW", id.prb ? id.prb + " PRB" : "—") + pill("SCS", id.mu != null ? (15 << id.mu) + " kHz" : "—") +
+      pill("GSCN", id.gscn != null ? id.gscn : "—") + pill("CFO", id.cfo_hz != null ? id.cfo_hz + " Hz" : "—") +
+      pill("CORESET", id.coreset_span ? `rb ${id.coreset_offset}+${id.coreset_span}` : "—");
+    $("liveIdSub").textContent = (p.run && p.run.path || "").split("/").slice(-2, -1)[0] || "";
+    const lg = $("liveLog"), stick = lg.scrollHeight - lg.scrollTop - lg.clientHeight < 24;
+    lg.textContent = (p.key_lines || []).join("\n");
+    if (stick) lg.scrollTop = lg.scrollHeight;
+  }
+  setInterval(slow, 1000); slow();
 })();
 </script>
 

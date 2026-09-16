@@ -24,6 +24,8 @@ from pathlib import Path
 
 import zmq
 
+from paper_stats import PaperStats
+
 # nr_isac_source_t order (nr_isac.h). PUSCH_DMRS is the only uplink source, and its geometry is
 # UE->target->rx, not gNB->target->rx -- which is why the UI reports it separately and never maps it.
 SOURCE_NAMES = ["csi_rs", "pdsch_dmrs", "pdsch_data", "blind", "pusch_dmrs", "pusch_data"]
@@ -101,7 +103,7 @@ class ReportStore:
             return out
 
 
-_PROC_CACHE = {"t": 0.0, "n": 0}
+_PROC_CACHE = {"t": 0.0, "n": 0, "cpu": None}
 
 
 def _softmodem_alive():
@@ -114,6 +116,8 @@ def _softmodem_alive():
         try:
             out = subprocess.run(["pgrep", "-cx", "nr-uesoftmodem"], capture_output=True, text=True)
             _PROC_CACHE["n"] = int(out.stdout.strip() or 0)
+            cpu = subprocess.run(["ps", "-o", "%cpu=", "-C", "nr-uesoftmodem"], capture_output=True, text=True)
+            _PROC_CACHE["cpu"] = sum(float(x) for x in cpu.stdout.split()) if cpu.stdout.strip() else None
         except Exception:
             _PROC_CACHE["n"] = -1   # unknown, which must not be reported as zero
         _PROC_CACHE["t"] = now
@@ -188,6 +192,8 @@ class LogTail:
         self.agnostic = {}           # what the receiver has derived off the air, with first-seen time
         self.started_at = time.time()
         self.skipped_bytes = 0   # backlog dropped to stay live; shown on the page
+        self.paper = PaperStats()
+        self.key_lines = deque(maxlen=120)   # the LIVE pane: only the lines an operator acts on
         self._lock = threading.Lock()
 
     def run(self):
@@ -209,9 +215,21 @@ class LogTail:
                         f.close()
                     cur, self.path, pending = nxt, nxt, ""
                     f = nxt.open("r", errors="replace")
+                    # The paper statistics need the WHOLE file (one-shot lines such as "Cell
+                    # Detected" and "DCI11_LAYOUT armed" sit at the top), ~1 s per 40 MB; the
+                    # health tail only needs the last few thousand lines.
+                    with self._lock:
+                        self.paper.begin_run(nxt, live=False)   # seeded lines carry no time
+                        for line in f:
+                            self.paper.ingest(line)
+                    f.seek(0)
+                    self._paper_pause = True     # the tail below is already counted
                     for line in f.readlines()[-self.lines.maxlen:]:
                         self._ingest(line.rstrip())
+                    self._paper_pause = False
                     f.seek(0, 2)
+                    with self._lock:
+                        self.paper.cur["live"] = True
                 if f is None:
                     time.sleep(1.0)
                     continue
@@ -289,7 +307,16 @@ class LogTail:
     # ~10k lines/s the sweep itself is what makes the tail fall behind.
     SKIP = ("CSIRS_BLIND", "FEPDIAG", "TIMEMUT", "rnti_seen", "PRECLIP", "TSYNC_OBS")
 
+    KEY = re.compile(r"ACQ_STATE|ACQ_EVENT|Cell Detected|Measured Carrier|PREFERRED|PDSCHQ|CHESTDIAG|"
+                     r"RFSTALL|DISCOVER|autodiscover|DMRS_ORACLE|ORACLE_GATE|HARQC|CORESET|SIB1|"
+                     r"DCI11_LAYOUT|VOID|BRANCHFO|RANK IDENTIFIED|Technique D|carrier (CONFIRMED|MISMATCH)")
+
     def _ingest(self, line):
+        with self._lock:
+            if not getattr(self, "_paper_pause", False):
+                self.paper.ingest(line)
+            if self.KEY.search(line):
+                self.key_lines.append(time.strftime("%H:%M:%S ") + line.replace("\033", "")[-300:])
         for junk in self.SKIP:
             if junk in line:
                 self.last_line_at = time.time()
@@ -421,6 +448,15 @@ class LogTail:
                     "started_at": self.started_at,
                     "skipped_bytes": self.skipped_bytes,
                     "lines": list(self.lines)[-400:]}
+
+    def paper_snapshot(self):
+        with self._lock:
+            out = self.paper.snapshot()
+            out["key_lines"] = list(self.key_lines)
+            out["proc_alive"] = _softmodem_alive()
+            out["cpu_pct"] = _PROC_CACHE["cpu"]
+            out["now"] = time.time()
+            return out
 
     def _ul_strip(self):
         """UL occupancy on the same 0-9 axis as the DL map, then DECAY so the strip tracks the
@@ -577,6 +613,9 @@ def make_handler(store, logtail, html_path):
                     "started_at": lg.get("started_at"),
                 }
                 self._send(200, json.dumps(payload).encode(), "application/json")
+            elif self.path.startswith("/paper"):
+                self._send(200, json.dumps(logtail.paper_snapshot() if logtail else {}).encode(),
+                           "application/json")
             elif self.path.startswith("/state"):
                 payload = {
                     "receivers": store.snapshot(),
