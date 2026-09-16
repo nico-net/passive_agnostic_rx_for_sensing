@@ -26,6 +26,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include "nr_pdcch_coreset_map.h"
+#ifndef NR_PDCCH_MAX_CANDIDATE_WINDOWS
+#define NR_PDCCH_MAX_CANDIDATE_WINDOWS 46 /* 6-RB windows on a 275-PRB carrier */
+#endif
 
 /* Real current signatures (openair1/PHY/NR_REFSIG/nr_refsig.h) -- do NOT copy the task brief's
  * approximate forward declarations verbatim. In particular nr_pdcch_dmrs_ref()'s third argument
@@ -79,7 +82,8 @@ int nr_pdcch_coreset_map_scan(const c16_t* rxdataF,
   double diag_max_corr = 0.0;
   int diag_max_rb = -1;
   double diag_rb0_corr = -1.0;
-  for (int w = 0; w < n_windows; w++) {
+  double wcorr[NR_PDCCH_MAX_CANDIDATE_WINDOWS];
+  for (int w = 0; w < n_windows && w < NR_PDCCH_MAX_CANDIDATE_WINDOWS; w++) {
     const int rb_offset = w * 6;
     double cr = 0.0, ci = 0.0, py = 0.0, px = 0.0;
     for (int rb = rb_offset; rb < rb_offset + 6; rb++) {
@@ -95,21 +99,41 @@ int nr_pdcch_coreset_map_scan(const c16_t* rxdataF,
     }
     const double denom = sqrt(py * px);
     const double corr = (denom > 0.0) ? sqrt(cr * cr + ci * ci) / denom : 0.0;
+    wcorr[w] = corr;
     if (s_diag) {
       if (rb_offset == 0) diag_rb0_corr = corr;
       if (corr > diag_max_corr) { diag_max_corr = corr; diag_max_rb = rb_offset; }
     }
-    if (corr >= CORESET_MAP_CORR_THRESHOLD) {
-      if (found < max_candidates) {
-        candidates_out[found].rb_offset = rb_offset;
-        candidates_out[found].corr      = corr;
-        found++;
-      }
+  }
+  /* ADAPTIVE THRESHOLD (2026-09-16). The fixed 0.836 was never reached on the X410 (peaks 0.43-0.52 in
+   * every run, COREMAPDIAG), so no CORESET was ever discovered by correlation. A window carrying a
+   * PDCCH is an OUTLIER against this symbol's own population of 6-RB windows: threshold = median +
+   * 4 x MAD over the windows (MAD scaled to sigma), floored at the old constant only when the
+   * population is so clean that the fixed bar is the lower one. Empty symbols have no outliers and
+   * contribute nothing, as before. */
+  double thr = CORESET_MAP_CORR_THRESHOLD;
+  if (n_windows >= 8) {
+    double v[NR_PDCCH_MAX_CANDIDATE_WINDOWS];
+    int m = n_windows < NR_PDCCH_MAX_CANDIDATE_WINDOWS ? n_windows : NR_PDCCH_MAX_CANDIDATE_WINDOWS;
+    for (int i = 0; i < m; i++) v[i] = wcorr[i];
+    for (int i = 1; i < m; i++) { double x = v[i]; int j = i - 1; while (j >= 0 && v[j] > x) { v[j + 1] = v[j]; j--; } v[j + 1] = x; }
+    const double med = v[m / 2];
+    for (int i = 0; i < m; i++) v[i] = fabs(wcorr[i] - med);
+    for (int i = 1; i < m; i++) { double x = v[i]; int j = i - 1; while (j >= 0 && v[j] > x) { v[j + 1] = v[j]; j--; } v[j + 1] = x; }
+    const double sigma = 1.4826 * v[m / 2];
+    const double adaptive = med + 4.0 * (sigma > 0.02 ? sigma : 0.02);
+    thr = adaptive < CORESET_MAP_CORR_THRESHOLD ? adaptive : CORESET_MAP_CORR_THRESHOLD;
+  }
+  for (int w = 0; w < n_windows; w++) {
+    if (wcorr[w] >= thr && found < max_candidates) {
+      candidates_out[found].rb_offset = w * 6;
+      candidates_out[found].corr      = wcorr[w];
+      found++;
     }
   }
   if (s_diag && (s_calls % 200) == 1) {
-    printf("COREMAPDIAG calls=%d rb0_corr=%.4f max_corr=%.4f max_rb=%d thresh=%.3f\n", s_calls,
-          diag_rb0_corr, diag_max_corr, diag_max_rb, CORESET_MAP_CORR_THRESHOLD);
+    printf("COREMAPDIAG calls=%d rb0_corr=%.4f max_corr=%.4f max_rb=%d thresh=%.3f found=%d\n", s_calls,
+          diag_rb0_corr, diag_max_corr, diag_max_rb, thr, found);
     fflush(stdout);
   }
 

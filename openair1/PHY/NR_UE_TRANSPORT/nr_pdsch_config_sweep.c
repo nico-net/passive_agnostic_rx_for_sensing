@@ -141,8 +141,23 @@ int nr_pdsch_config_sweep_prune_mask(nr_pdsch_config_sweep_state_t *st, uint16_t
  * oracle read 0x884 on every slot it looked at. */
 #define OBS_MASKS_MAX 8
 static uint16_t g_obs_mask[OBS_MASKS_MAX];
+static int8_t   g_obs_last[OBS_MASKS_MAX]; /* last PDSCH symbol measured with that mask, -1 = unknown */
+static int8_t   g_obs_k0[OBS_MASKS_MAX];   /* k0 of the job the mask was measured on, -1 = unknown */
 static int g_n_obs_mask;
-/* Keep the entries whose mask is in the observed set; untouched if none matches. */
+/* An observation is (mask, last symbol, k0); an entry is consistent with it when its mask matches,
+ * its S+L-1 equals the measured last symbol (when measured) and its k0 equals the job's (when the
+ * mask was seen in the DCI's own slot the PDSCH is there: k0 of that job). */
+static bool obs_admits(const nr_pdsch_cfg_hypothesis_t *h, int k)
+{
+  if (h->dmrs_mask != g_obs_mask[k])
+    return false;
+  if (g_obs_last[k] >= 0 && (int)h->tda_start + (int)h->tda_length - 1 != g_obs_last[k])
+    return false;
+  if (g_obs_k0[k] >= 0 && h->k0 != g_obs_k0[k])
+    return false;
+  return true;
+}
+/* Keep the entries admitted by any observation; untouched if none matches. */
 static int prune_to_observed(nr_pdsch_config_sweep_state_t *st)
 {
   if (st == NULL || st->n_hyp <= 0 || g_n_obs_mask <= 0)
@@ -151,7 +166,7 @@ static int prune_to_observed(nr_pdsch_config_sweep_state_t *st)
   int n = 0;
   for (int i = 0; i < st->n_hyp; i++)
     for (int k = 0; k < g_n_obs_mask; k++)
-      if (st->hyp[i].dmrs_mask == g_obs_mask[k]) {
+      if (obs_admits(&st->hyp[i], k)) {
         keep[n++] = st->hyp[i];
         break;
       }
@@ -478,25 +493,41 @@ bool nr_pdsch_config_sweep_select(uint64_t configuration, uint16_t rnti, uint8_t
   const int h = nr_pdsch_config_sweep_next(&c->state, out);
   if (h >= 0)
     *ticket = (nr_pdsch_sweep_ticket_t){.generation=c->generation, .context_slot=found,
-                                       .rnti=rnti, .tda_index=tda_index, .hypothesis=h, .settled=c->state.winner >= 0};
+                                       .rnti=rnti, .tda_index=tda_index, .hypothesis=h, .settled=c->state.winner >= 0,
+                                       .k0=out->k0};
   pthread_mutex_unlock(&g_lock);
   return h >= 0;
 }
 
 int nr_pdsch_config_sweep_observe_mask(const nr_pdsch_sweep_ticket_t *ticket, uint16_t dmrs_mask)
 {
-  if (ticket == NULL || ticket->generation == 0)
+  return nr_pdsch_config_sweep_observe(ticket, dmrs_mask, -1, -1);
+}
+
+int nr_pdsch_config_sweep_observe(const nr_pdsch_sweep_ticket_t *ticket, uint16_t dmrs_mask, int last_symbol, int k0)
+{
+  if (ticket == NULL || ticket->generation == 0 || dmrs_mask == 0)
     return 0;
   pthread_mutex_lock(&g_lock);
+  int k = -1;
+  for (int i = 0; i < g_n_obs_mask; i++)
+    if (g_obs_mask[i] == dmrs_mask) { k = i; break; }
+  if (k < 0 && g_n_obs_mask < OBS_MASKS_MAX) {
+    k = g_n_obs_mask++;
+    g_obs_mask[k] = dmrs_mask;
+    g_obs_last[k] = -1;
+    g_obs_k0[k] = -1;
+  }
+  if (k >= 0) {
+    /* A later, more specific observation refines the record; a contradiction (a different last
+     * symbol under the same mask) relaxes it back to unknown: two TDRA entries can share a mask. */
+    if (last_symbol >= 0) g_obs_last[k] = (g_obs_last[k] < 0 || g_obs_last[k] == last_symbol) ? (int8_t)last_symbol : -1;
+    if (k0 >= 0) g_obs_k0[k] = (g_obs_k0[k] < 0 || g_obs_k0[k] == k0) ? (int8_t)k0 : -1;
+  }
   sweep_context_t *c = ticket_context(ticket);
   int n = 0;
   if (c != NULL && c->state.winner < 0)
-    n = nr_pdsch_config_sweep_prune_mask(&c->state, dmrs_mask);
-  bool seen = false;
-  for (int k = 0; k < g_n_obs_mask; k++)
-    seen |= (g_obs_mask[k] == dmrs_mask);
-  if (!seen && g_n_obs_mask < OBS_MASKS_MAX)
-    g_obs_mask[g_n_obs_mask++] = dmrs_mask;
+    n = prune_to_observed(&c->state);
   pthread_mutex_unlock(&g_lock);
   return n;
 }

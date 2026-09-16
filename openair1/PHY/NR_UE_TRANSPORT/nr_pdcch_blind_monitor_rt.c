@@ -1230,7 +1230,19 @@ void nr_pdcch_blind_monitor_process(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t 
         fflush(stdout);
       }
     }
-    nr_pdcch_blind_monitor_autodiscover_step(rxdataF_disc[0], fp->ofdm_symbol_size, fp->N_RB_DL,
+    if (getenv("ISAC_DISCOVER_DIAG") != NULL) {
+      static uint32_t s_en_n;
+      if ((s_en_n++ % 2000) == 0) {
+        double e = 0; int nz = 0;
+        for (int k = 0; k < fp->ofdm_symbol_size; k++) {
+          const c16_t v = rxdataF_disc[0][disc_symbol * fp->ofdm_symbol_size + k];
+          e += (double)v.r * v.r + (double)v.i * v.i; nz += (v.r | v.i) != 0;
+        }
+        printf("DISCOVERDIAG fep slot=%d sym=%d energy=%.3g nonzero_sc=%d\n", proc->nr_slot_rx, disc_symbol, e, nz);
+        fflush(stdout);
+      }
+    }
+    nr_pdcch_blind_monitor_autodiscover_step(rxdataF_disc[0] + disc_symbol * fp->ofdm_symbol_size, fp->ofdm_symbol_size, fp->N_RB_DL,
                                              fp->first_carrier_offset, (uint16_t)fp->Nid_cell,
                                              proc->nr_slot_rx, disc_symbol, abs_slot_now);
     return;  // geometry not ready (or just became ready this call) -- no candidate decode this call

@@ -436,3 +436,25 @@ TEST(PdschConfigSweepOracle, ObservedMaskPrunesContextsCreatedLater) {
   EXPECT_TRUE(same_hyp(w, truth));
   EXPECT_LT(n * 4, alone);  // mcs_table is all that is left to the CRC
 }
+
+TEST(PdschConfigSweepOracle, MaskLastSymbolAndK0CollapseAContextToTheEndAmbiguity) {
+  // A mask alone leaves every (S,L,k0,mcs) that produces it; the allocation END (last symbol with
+  // energy on the grant's PRBs) and the job's k0 are observable in the same FEP. With test_legal's
+  // synthetic masks (unique per S,L,add,len) the mask already pins (S,L,add,len); the end and k0
+  // observation must then remove the k0 dimension and leave only the 3 MCS tables.
+  nr_pdsch_config_sweep_reset_all();
+  nr_pdsch_config_sweep_prior_reset();
+  nr_pdsch_sweep_ticket_t t{};
+  nr_pdsch_cfg_hypothesis_t h{};
+  ASSERT_TRUE(nr_pdsch_config_sweep_select(0x1234, 0x4601, 0, 2, 0, test_legal, &t, &h));
+  const uint16_t mask = (uint16_t)test_legal(0, 13, 1, 0, 2, 1); // S=1 L=13 add 2 len 1
+  const int n = nr_pdsch_config_sweep_observe(&t, mask, 13, 0);
+  EXPECT_EQ(n, 3);
+  nr_pdsch_sweep_ticket_t t2{};
+  for (int i = 0; i < 12; i++) {
+    ASSERT_TRUE(nr_pdsch_config_sweep_select(0x1234, 0x4601, 0, 2, 0, test_legal, &t2, &h));
+    EXPECT_EQ(h.dmrs_mask, mask);
+    EXPECT_EQ(h.tda_start + h.tda_length - 1, 13);
+    EXPECT_EQ(h.k0, 0);
+  }
+}

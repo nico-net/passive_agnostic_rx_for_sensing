@@ -86,6 +86,7 @@
 // ---------------------------------------------------------------------------------------------
 static nr_pdcch_blind_monitor_cfg_t g_cfg;
 static int                          g_parsed  = 0;
+static bool s_css0_applied; /* CSS0 autoconf idempotency; an autodiscover reset re-arms it (a reset IS a state change) */
 static int                          g_enabled = 0;
 
 const nr_pdcch_blind_monitor_cfg_t* nr_pdcch_blind_monitor_get_cfg(void)
@@ -148,16 +149,15 @@ bool nr_pdcch_blind_monitor_autoconf_css0(int num_rbs,
    * Apply on the FIRST call and on a genuine config CHANGE; otherwise leave the running config
    * alone. Comparing the inputs (not a "done" flag) keeps a real cell reconfiguration working. */
   {
-    static bool s_applied;
     static int  s_prev[12];
     const int now[12] = {num_rbs, num_symbols, cset_start_rb, ssb_offset_point_a, ss_period_slots,
                          ss_slot, ss_duration, ss_first_symbol, mux_pattern, pci, rb_offset,
                          dmrs_typea_position};
-    if (s_applied && memcmp(s_prev, now, sizeof(now)) == 0) {
+    if (s_css0_applied && memcmp(s_prev, now, sizeof(now)) == 0) {
       return true; // identical derivation, already live -- do not disturb discovery state
     }
     memcpy(s_prev, now, sizeof(now));
-    s_applied = true;
+    s_css0_applied = true;
   }
 
   g_cfg.coreset_type                     = 1; // MIB/SIB1 CORESET#0
@@ -401,6 +401,7 @@ static bool extent_advance(void)
 }
 void nr_pdcch_blind_monitor_autodiscover_reset(void)
 {
+  s_css0_applied = false;
   s_dedicated_found = false;
   s_ext_n = s_ext_idx = 0;
   memset(s_hit_count, 0, sizeof(s_hit_count));
@@ -431,12 +432,23 @@ int nr_pdcch_extent_candidates(int first_w, int last_w, int nw_total,
    * on span alone would have returned the right answer; only the first_w == 0 guard prevented it.
    * Nothing downstream could recover, because the extent check is gated on the dci_length being
    * found and the length sweep cannot succeed under a wrong footprint. */
-  const int span_w = last_w - first_w + 1;
-  const int snap   = (span_w >= (nw_total * 3) / 4);
+  /* NO SNAP (2026-09-16). Snapping a >= 75 % span to the full carrier turned a CORRECT 0/240
+   * observation into 0/270 on the OAI rfsim cell (dedicated CORESET = 48-RB-quantised 240 of 273),
+   * and since the walk only ever grows, the truth was never tried: 0 accepts at every candidate.
+   * The observed footprint is hypothesis 1 as observed; the full carrier is hypothesis 2. */
+  const int snap = 0;
   int n = 0;
-  out[n].first_w = snap ? 0 : first_w;
-  out[n].last_w  = snap ? (nw_total - 1) : last_w;
+  out[n].first_w = first_w;
+  out[n].last_w  = last_w;
   n++;
+  /* The full carrier is the second hypothesis whenever it is not the first: the observed footprint
+   * is only where DCIs happened to land in the dwell (rfsim OAI cell: 60 of 273 RB seen, CORESET =
+   * whole BWP), and walking 322 growing dilations at 500 occasions each never reached it. */
+  if (!snap && n < max_out && !(first_w == 0 && last_w == nw_total - 1)) {
+    out[n].first_w = 0;
+    out[n].last_w  = nw_total - 1;
+    n++;
+  }
   /* OFFSET AND SPAN. The offset used to be excluded because it could not be APPLIED: the FAPI
    * builder hardcoded rel15->coreset.rb_offset = 0 and the offset rode on BWPStart, which also
    * moves RIV interpretation and dci_length. That is now plumbed through its own field, and
@@ -547,8 +559,30 @@ bool nr_pdcch_blind_monitor_autodiscover_step(const void* rxdataF_symbol, int of
   for (int w = 0; w < NR_PDCCH_MAX_CANDIDATE_WINDOWS; w++) {
     obs_total_hits += s_hit_count[w];
   }
-  const int obs_nw = (n_rb_carrier / 6 > 0) ? (n_rb_carrier / 6) : 1;
+  /* Evidence needed = HITS_PER_WINDOW on the LIT windows, not on every window of the carrier: the
+   * old n_windows x 30 (1380 on 273 PRB) was sized for a full-carrier CORESET lit every slot; a
+   * narrow dedicated CORESET (rfsim OAI cell: 2 windows at RB 90, corr 0.88, 2026-09-16) or sparse
+   * traffic never reached it and discovery sat at n=0 forever. */
+  /* "Lit" is RELATIVE to the strongest window (>= top/8), not an absolute 3 hits: over a long dwell
+   * noise windows cross 3 and the needed count chased the total forever (rfsim: lit 13 -> 27 while
+   * hits 153 -> 411, needed always ~2x ahead). */
+  int obs_top = 0;
+  for (int w = 0; w < NR_PDCCH_MAX_CANDIDATE_WINDOWS; w++)
+    if (s_hit_count[w] > obs_top) obs_top = s_hit_count[w];
+  const int lit_floor = (obs_top / 8 > AUTODISCOVER_MIN_HITS) ? obs_top / 8 : AUTODISCOVER_MIN_HITS;
+  int obs_lit = 0;
+  for (int w = 0; w < NR_PDCCH_MAX_CANDIDATE_WINDOWS; w++)
+    obs_lit += (s_hit_count[w] >= lit_floor);
+  const int obs_nw = obs_lit > 0 ? obs_lit : 1;
   const int obs_hits_needed = obs_nw * AUTODISCOVER_HITS_PER_WINDOW;
+  {
+    static int s_gate_diag = -1;
+    if (s_gate_diag < 0) s_gate_diag = (getenv("ISAC_DISCOVER_DIAG") != NULL) ? 1 : 0;
+    if (s_gate_diag && (s_obs_calls % 5000) == 0) {
+      printf("DISCOVERGATE calls=%d total_hits=%d top=%d floor=%d lit=%d needed=%d\n", s_obs_calls, obs_total_hits, obs_top, lit_floor, obs_lit, obs_hits_needed);
+      fflush(stdout);
+    }
+  }
   if (s_obs_calls >= AUTODISCOVER_MAX_OBS_CALLS && obs_total_hits < obs_hits_needed) {
     /* Waited long enough and the evidence never arrived -- reset rather than decide on noise. */
     memset(s_hit_count, 0, sizeof(s_hit_count));
@@ -593,7 +627,7 @@ bool nr_pdcch_blind_monitor_autodiscover_step(const void* rxdataF_symbol, int of
   // (a CCE range this dwell just didn't happen to use) is still safely inside a real CORESET's span.
   int first_w = -1, last_w = -1;
   for (int w = 0; w < n_rb_carrier / 6 && w < NR_PDCCH_MAX_CANDIDATE_WINDOWS; w++) {
-    if (s_hit_count[w] >= AUTODISCOVER_MIN_HITS) {
+    if (s_hit_count[w] >= lit_floor) {
       if (first_w < 0) {
         first_w = w;
       }
@@ -3472,6 +3506,7 @@ static bool common_tda_valid(int count, const uint8_t *start, const uint8_t *len
     if (!length[i] || start[i]+length[i]>14 || mapping[i]>1) return false;
   return true;
 }
+static bool sib1_cache_suppressed;
 static void sib1_cache_store(const nr_pdcch_blind_common_config_t *f);
 bool nr_pdcch_blind_publish_common(const nr_pdcch_blind_common_config_t *f)
 {
@@ -3484,6 +3519,7 @@ bool nr_pdcch_blind_publish_common(const nr_pdcch_blind_common_config_t *f)
   const bool changed=!common_facts_valid || memcmp(&common_facts,f,sizeof(*f));
   common_facts=*f;
   common_facts_valid=true;
+  sib1_cache_suppressed=false;
   pthread_mutex_unlock(&common_facts_lock);
   if(changed)
     sib1_cache_store(f);
@@ -3545,7 +3581,7 @@ bool nr_pdcch_blind_get_common(uint16_t pci, nr_pdcch_blind_common_config_t *f)
   bool ok=common_facts_valid && common_facts.pci==pci;
   if(ok) *f=common_facts; else memset(f,0,sizeof(*f));
   pthread_mutex_unlock(&common_facts_lock);
-  if (!ok) {
+  if (!ok && !sib1_cache_suppressed) {
     static uint16_t s_tried_pci = 0xFFFF;
     if (s_tried_pci != pci) {
       s_tried_pci = pci;
@@ -3560,10 +3596,12 @@ bool nr_pdcch_blind_get_common(uint16_t pci, nr_pdcch_blind_common_config_t *f)
   }
   return ok;
 }
+/* sib1_cache_suppressed: a reset means FORGET; the on-disk cache is not reloaded until a new publish. */
 void nr_pdcch_blind_reset_common(void)
 {
   pthread_mutex_lock(&common_facts_lock);
   common_facts_valid=false;
   memset(&common_facts,0,sizeof(common_facts));
+  sib1_cache_suppressed = true;
   pthread_mutex_unlock(&common_facts_lock);
 }

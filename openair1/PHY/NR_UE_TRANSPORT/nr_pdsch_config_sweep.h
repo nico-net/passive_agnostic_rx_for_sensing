@@ -143,6 +143,7 @@ typedef struct {
   int hypothesis;
   bool settled; ///< this selection uses an already-converged context
   uint16_t layout_index; ///< DCI 1_1 layout (resolver index) this trial was decoded under; 0xFFFF = none
+  uint8_t k0;            ///< the selected hypothesis' k0 (the consumer measures the oracle on slot + k0)
 } nr_pdsch_sweep_ticket_t;
 
 /** Thread-safe per-(configuration,RNTI,TDA) controller. No allocation or decoder work under lock.
@@ -155,6 +156,10 @@ bool nr_pdsch_config_sweep_select(uint64_t configuration, uint16_t rnti, uint8_t
 int nr_pdsch_config_sweep_prune_mask(nr_pdsch_config_sweep_state_t *st, uint16_t dmrs_mask);
 /** Same, on the ticket's live context (no-op once it has a winner). Returns the surviving count. */
 int nr_pdsch_config_sweep_observe_mask(const nr_pdsch_sweep_ticket_t *ticket, uint16_t dmrs_mask);
+/** Full oracle observation: the DM-RS mask, the last PDSCH symbol carrying energy on the grant's
+ *  PRBs (-1 = unmeasured) and the k0 of the job it was measured on (-1 = unknown). Records it
+ *  cell-wide and prunes the ticket's context to the admitted entries. */
+int nr_pdsch_config_sweep_observe(const nr_pdsch_sweep_ticket_t *ticket, uint16_t dmrs_mask, int last_symbol, int k0);
 /** Returns true exactly once on convergence; fills winner when supplied. */
 bool nr_pdsch_config_sweep_feedback(const nr_pdsch_sweep_ticket_t *ticket, bool crc_ok,
                                    nr_pdsch_cfg_hypothesis_t *winner);

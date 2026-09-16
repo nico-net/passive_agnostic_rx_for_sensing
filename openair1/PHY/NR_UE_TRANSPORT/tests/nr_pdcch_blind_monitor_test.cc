@@ -616,7 +616,7 @@ TEST_F(BlindPdcchTest, RejectsValidCrcWithOutOfBoundAntennaPorts) {
   // passed and this rejection came from the FIELD-bound check, not a coincidental RNTI failure).
   EXPECT_EQ(out.rnti, gt.rnti);
   ASSERT_NE(out.reject_reason, nullptr);
-  EXPECT_STREQ(out.reject_reason, "antenna_ports field outside Table 7.3.1.2.2-1's 12 valid rows");
+  EXPECT_STREQ(out.reject_reason, "antenna_ports field outside its table's valid rows");
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -2091,16 +2091,20 @@ TEST_F(BlindPdcchTest, InterleavedCoreset0CandidateRoundTrips) {
 // The true CORESET must CONTAIN every observed window, and candidate 0 must stay the legacy
 // snap-to-carrier answer so a cell where that was already right cannot regress.
 
-TEST(ExtentCandidates, SnapsToCarrierWhenTheSpanIsWideEvenIfFirstWindowIsNotZero) {
+TEST(ExtentCandidates, AWideFootprintIsTriedAsObservedThenAsTheFullCarrier) {
   // The 2026-09-07 live failure: traffic thinned, windows 0-1 fell under the hit floor, and the
-  // footprint came out 2..37 (36 of 45 windows = 80 %) against a truth of 0..44. Snapping must
-  // depend on the SPAN, not on first_w happening to be 0, or a silent edge window is enough to
-  // put the CORESET in the wrong place and nothing downstream can recover.
+  // footprint came out 2..37 (36 of 45 windows = 80 %) against a truth of 0..44. The old answer
+  // SNAPPED a wide span to the carrier -- and on the OAI rfsim cell (2026-09-16) that turned a
+  // CORRECT 0..39 observation (a 48-RB-quantised 240-of-273 CORESET) into 0..44, which the
+  // grow-only walk could never undo: 0 accepts at every candidate. Now the observation is tried
+  // as observed and the full carrier is always the SECOND hypothesis, so both cells converge.
   nr_pdcch_extent_cand_t c[8];
   const int n = nr_pdcch_extent_candidates(2, 37, 45, c, 8);
-  ASSERT_GE(n, 1);
-  EXPECT_EQ(c[0].first_w, 0);
-  EXPECT_EQ(c[0].last_w, 44);
+  ASSERT_GE(n, 2);
+  EXPECT_EQ(c[0].first_w, 2);
+  EXPECT_EQ(c[0].last_w, 37);
+  EXPECT_EQ(c[1].first_w, 0);
+  EXPECT_EQ(c[1].last_w, 44);
 }
 
 TEST(ExtentCandidates, DoesNotSnapANarrowFootprint) {
@@ -2113,16 +2117,17 @@ TEST(ExtentCandidates, DoesNotSnapANarrowFootprint) {
   EXPECT_EQ(c[0].last_w, 8);
 }
 
-TEST(ExtentCandidates, FirstCandidateIsTheLegacySnapAnswer) {
-  // This cell: 45 windows, occupancy observed over [0..43] -> the legacy rule snaps to the carrier.
+TEST(ExtentCandidates, TheOaiQuantisedCoresetIsTheFirstHypothesis) {
+  // OAI's dedicated CORESET on 273 PRB is 240 RB (windows 0..39). Observed exactly, it must be the
+  // first hypothesis; the carrier comes second; the walk then grows.
   nr_pdcch_extent_cand_t c[8];
-  const int n = nr_pdcch_extent_candidates(0, 43, 45, c, 8);
-  ASSERT_GE(n, 1);
+  const int n = nr_pdcch_extent_candidates(0, 39, 45, c, 8);
+  ASSERT_GE(n, 3);
   EXPECT_EQ(c[0].first_w, 0);
-  EXPECT_EQ(c[0].last_w, 44);  // snapped, i.e. span_rb = 270
-  // Exactly the two hypotheses the histogram admits: the snap, and the observed extent itself.
-  EXPECT_EQ(n, 2);
-  EXPECT_EQ(c[1].last_w, 43);
+  EXPECT_EQ(c[0].last_w, 39);
+  EXPECT_EQ(c[1].first_w, 0);
+  EXPECT_EQ(c[1].last_w, 44);
+  EXPECT_EQ(c[2].last_w, 40);
 }
 
 TEST(ExtentCandidates, EveryCandidateContainsTheObservedFootprint) {
@@ -2168,8 +2173,13 @@ TEST(ExtentCandidates, NearestHypothesesComeFirst) {
   nr_pdcch_extent_cand_t c[8];
   const int n = nr_pdcch_extent_candidates(3, 6, 20, c, 8);
   ASSERT_GE(n, 3);
+  // Candidate 1 is the FULL CARRIER: the observation is only where DCIs landed in the dwell, and a
+  // BWP-wide CORESET is the common configuration (OAI, srsRAN) -- testing it second costs one
+  // dwell and saved walking 322 dilations on the rfsim cell (2026-09-16). Nearest-first from there.
+  EXPECT_EQ(c[1].first_w, 0);
+  EXPECT_EQ(c[1].last_w, 19);
   int prev = -1;
-  for (int i = 1; i < n; i++) {
+  for (int i = 2; i < n; i++) {
     const int d = (3 - c[i].first_w) + (c[i].last_w - 6);
     EXPECT_GE(d, prev) << "candidate " << i << " is nearer than one tried before it";
     prev = d;
