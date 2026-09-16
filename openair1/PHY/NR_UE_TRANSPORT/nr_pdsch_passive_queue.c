@@ -398,6 +398,9 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
         job.layout_probe = 1;
     }
     nr_pdsch_passive_probe_mode(job.layout_probe != 0);
+    /* PT-RS density sweep only once the layout and the Technique-D context are settled (a pinned
+     * conf has no ticket: generation 0). */
+    nr_pdsch_passive_ptrs_sweep_allow(!job.layout_probe && (job.sweep_ticket.generation == 0 || job.sweep_ticket.settled));
     const nr_pdsch_passive_decode_status_t st_raw =
         nr_pdsch_passive_decode(ue, &proc, &job.dlsch_pdu, &job.freq_alloc, &job.grant, rxdataF, &dec);
     /* A layout probe's outcome is code block 0's CRC, mapped onto the TB status the feedback below

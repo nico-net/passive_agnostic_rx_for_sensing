@@ -810,6 +810,8 @@ static __thread int16_t *t_hq_d = NULL;
 static __thread bool t_probe_first_seg = false; /* decode segment 0 only; outcome in t_probe_seg_ok */
 static __thread bool t_probe_seg_ok = false;
 void nr_pdsch_passive_probe_mode(bool on) { t_probe_first_seg = on; t_probe_seg_ok = false; }
+static __thread bool t_ptrs_sweep_allow = true;
+void nr_pdsch_passive_ptrs_sweep_allow(bool on) { t_ptrs_sweep_allow = on; }
 bool nr_pdsch_passive_probe_outcome(void) { return t_probe_seg_ok; }
 static __thread bool t_hq_clear = true;
 static __thread uint32_t t_hq_A = 0;
@@ -1190,7 +1192,8 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
    * a run that does not ask for it. */
   uint32_t ptrs_unav = 0;
   int ptrs_arm = -1;
-  if (nr_agnostic_v2() && !(dlsch_config->pduBitmap & 0x1) && grant->mcs >= 10 && grant->mcs <= 27) {
+  if (nr_agnostic_v2() && !(dlsch_config->pduBitmap & 0x1) && grant->mcs >= 10 && grant->mcs <= 27
+      && t_ptrs_sweep_allow && !t_probe_first_seg) {
     pthread_mutex_lock(&g_ptrs_lock);
     if (!g_ptrs_init) { nr_ptrs_sweep_init(&g_ptrs); g_ptrs_init = true; }
     ptrs_arm = nr_ptrs_sweep_pick(&g_ptrs);
@@ -2680,7 +2683,7 @@ chest_done:
     /* LBRM layer-term hypotheses: only when the hypothesis would change the bit selection (E beyond
      * the smaller N_ref), never on probes; a pass latches n_L cell-wide. Cost: one extra LDPC pass
      * per failed long TB until latched. */
-    if (!ldpc_ok && !t_probe_first_seg && t_seg_C > 0) {
+    if (!ldpc_ok && t_seg_C > 0) { /* probes too: the phone's n_L is unknown and LBRM binds on code block 0 as well */
       const int nl_now = atomic_load(&g_lbrm_nl);
       const uint32_t E_first = t_seg_E;
       const uint32_t tbs_now = dlsch_config->tbslbrm;
@@ -2700,7 +2703,8 @@ chest_done:
           continue;
         dlsch_config->tbslbrm = lbrm_h;
         atomic_fetch_add(&g_lbrm_try[nl_h], 1);
-        if (passive_ldpc_decode(ue, proc, &g_harq, cw, dlsch_config, llr, freq_alloc->num_rbs, G)) {
+        const bool full_ok = passive_ldpc_decode(ue, proc, &g_harq, cw, dlsch_config, llr, freq_alloc->num_rbs, G);
+        if (full_ok || (t_probe_first_seg && t_probe_seg_ok)) {
           ldpc_ok = true;
           atomic_fetch_add(&g_lbrm_ok[nl_h], 1);
           if (atomic_exchange(&g_lbrm_nl, nl_h) != nl_h)
