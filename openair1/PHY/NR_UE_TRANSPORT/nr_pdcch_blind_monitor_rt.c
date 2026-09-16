@@ -468,9 +468,12 @@ static void nr_pdcch_dci11_layout_observe(const nr_pdcch_blind_monitor_cfg_t *cf
         cfg_alive ? "IS among the survivors"
                   : "IS NOT among the survivors -- the assumed widths contradict the air");
   if (nr_pdcch_dci11_stage2_enabled() || nr_agnostic_v2()) {
-    char eb[400];
+    /* Every live layout, compactly: i t<tda>b<bwp>m<pre_mcs>x<tb2+dai+p2h>a<ant><type>p<post_ant>:ok/trials.
+     * The whole set, not a 400-byte prefix: whether the TRUE layout is still alive is the first
+     * question when nothing decodes, and it cannot be answered from a truncated list. */
+    static char eb[8192];
     int u = 0;
-    for (int i = 0; i < r->n_hyp && u < (int)sizeof(eb) - 40; i++) {
+    for (int i = 0; i < r->n_hyp && u < (int)sizeof(eb) - 48; i++) {
       if (!r->alive[i])
         continue;
       nr_dci11_field_bits_t f;
@@ -479,7 +482,9 @@ static void nr_pdcch_dci11_layout_observe(const nr_pdcch_blind_monitor_cfg_t *cf
       uint32_t ok = 0, tr = 0;
       const uint64_t key = (g_pdsch_configuration ^ (uint64_t)(i + 1)) * UINT64_C(1099511628211);
       nr_pdsch_config_sweep_context_stats(key, 0 /* any rnti */, 0, cfg->dmrs_typeA_position, &ok, &tr);
-      u += snprintf(eb + u, sizeof(eb) - u, "[%d bwp%d ap%d: %u/%u] ", i, f.bwp_indicator_bits, f.antenna_ports_bits, ok, tr);
+      u += snprintf(eb + u, sizeof(eb) - u, "[%d t%ub%dm%dx%da%d%cp%d:%u/%u]", i, (unsigned)r->off[i].tda_bits,
+                    f.bwp_indicator_bits, f.vrb_to_prb_bits, f.tb2_bits, f.antenna_ports_bits,
+                    f.dmrs_config_type ? 'B' : 'A', f.tci_bits, ok, tr);
     }
     LOG_A(PHY, "SENSING: DCI11_STAGE2 %s (alive=%d, hands over at <=%d) tb_crc ok/trials per live layout: %s\n",
           r->n_alive <= (g_dci11_cfg_alive ? 4 : NR_DCI11_STAGE2_MAX_ALIVE) ? "DRIVING the extractor" : "waiting for stage 1 to prune",

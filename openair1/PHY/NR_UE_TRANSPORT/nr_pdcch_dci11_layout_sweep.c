@@ -67,6 +67,7 @@ static const uint8_t kBundling[]= {0, 1};                /* dynamic PRB bundling
 static const uint8_t kRateM[]   = {0, 1, 2};             /* rateMatchPatternGroup1/2 */
 static const uint8_t kZpCsi[]   = {0, 1, 2};             /* aperiodic ZP CSI-RS resource sets */
 static const uint8_t kTb2[]     = {0, 8};                /* maxNrofCodeWordsScheduledByDCI = 2 */
+static const uint8_t kHarq[]    = {4, 5};                /* harq-ProcessNumberSizeDCI-1-1-r17 (32 processes) */
 static const uint8_t kDai[]     = {0, 2, 4};             /* semi-static | dynamic | dynamic+CA */
 static const uint8_t kP2H[]     = {0, 1, 2, 3};          /* ceil(log2(|dl_DataToUL_ACK|)) */
 static const uint8_t kAnt[]     = {4, 5, 6};             /* DM-RS type x maxLength */
@@ -109,6 +110,7 @@ int nr_dci11_layout_enumerate(uint16_t riv_bits, uint8_t tda_bits, uint16_t obse
           for (int e = 0; e < NELEM(kZpCsi); e++) {
             for (int f = 0; f < NELEM(kTb2); f++) {
               for (int g = 0; g < NELEM(kDai); g++) {
+                for (int hq = 0; hq < NELEM(kHarq); hq++) {
                 for (int h = 0; h < NELEM(kP2H); h++) {
                   for (int i = 0; i < NELEM(kAnt); i++) {
                     for (int j = 0; j < NELEM(kTci); j++) {
@@ -128,7 +130,7 @@ int nr_dci11_layout_enumerate(uint16_t riv_bits, uint8_t tda_bits, uint16_t obse
                             nr_dci11_layout_t cand;
                             cand.bwp_ind   = kBwpInd[a];
                             cand.pre_mcs   = (uint8_t)(kVrb[b] + kBundling[c] + kRateM[d] + kZpCsi[e]);
-                            cand.pre_ant   = (uint8_t)(kTb2[f] + DCI11_HARQ_PID + kDai[g]
+                            cand.pre_ant   = (uint8_t)(kTb2[f] + kHarq[hq] + kDai[g]
                                                        + DCI11_TPC + DCI11_PUCCH_RI + kP2H[h]);
                             cand.ant_ports = kAnt[i];
                             cand.post_ant  = (uint8_t)(kTci[j] + kSrs[k] + kCbg[m] + kCbgFlush[q]);
@@ -152,6 +154,7 @@ int nr_dci11_layout_enumerate(uint16_t riv_bits, uint8_t tda_bits, uint16_t obse
                       }
                     }
                   }
+                }
                 }
               }
             }
