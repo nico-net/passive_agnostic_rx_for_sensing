@@ -396,6 +396,8 @@ static _Atomic uint64_t g_ldpc_tb_fail  = 0;
 static _Atomic uint64_t g_ldpc_zero_tb  = 0;
 static _Atomic uint64_t g_ldpc_ok       = 0;
 static _Atomic uint64_t g_fep_hit = 0, g_fep_miss = 0, g_chest_hit = 0, g_chest_miss = 0; // per-slot sharing
+static _Atomic int g_lbrm_nl = 4;        // TBS_LBRM layer term n_L, latched cell-wide by TB CRC (4 = spec ceiling)
+static _Atomic uint64_t g_lbrm_try[5], g_lbrm_ok[5]; // per hypothesised n_L
 static _Atomic uint64_t g_rv_census[2][4]; // [mcs>=24][rv]: does this cell retransmit at rv 0? (HARQ gate)
 static _Atomic uint64_t g_ldpc_iface_err = 0;
 static _Atomic uint64_t g_seg_ok_sum    = 0; // segments that decoded, summed over failing TBs
@@ -566,14 +568,17 @@ void nr_pdsch_passive_ldpc_stats_dump(void)
       LOG_I(PHY, "SENSING: RVRETRY rescued/tried by mcs: %s\n", rb);
   }
   if (nr_agnostic_v2()) {
-    LOG_I(PHY, "SENSING: HARQC first=%lu retx_combined=%lu/%lu tbs_from_first=%lu busy_skip=%lu | rv census mcs<24 [%lu %lu %lu %lu] mcs>=24 [%lu %lu %lu %lu]\n",
+    LOG_I(PHY, "SENSING: HARQC first=%lu retx_combined=%lu/%lu tbs_from_first=%lu busy_skip=%lu | rv census mcs<24 [%lu %lu %lu %lu] mcs>=24 [%lu %lu %lu %lu] | lbrm n_L=%d try/ok 4:%lu/%lu 2:%lu/%lu 1:%lu/%lu\n",
           (unsigned long)atomic_load(&g_hq_first), (unsigned long)atomic_load(&g_hq_retx_ok),
           (unsigned long)atomic_load(&g_hq_retx_try), (unsigned long)atomic_load(&g_hq_tbs_override),
           (unsigned long)atomic_load(&g_hq_busy_skip),
           (unsigned long)atomic_load(&g_rv_census[0][0]), (unsigned long)atomic_load(&g_rv_census[0][1]),
           (unsigned long)atomic_load(&g_rv_census[0][2]), (unsigned long)atomic_load(&g_rv_census[0][3]),
           (unsigned long)atomic_load(&g_rv_census[1][0]), (unsigned long)atomic_load(&g_rv_census[1][1]),
-          (unsigned long)atomic_load(&g_rv_census[1][2]), (unsigned long)atomic_load(&g_rv_census[1][3]));
+          (unsigned long)atomic_load(&g_rv_census[1][2]), (unsigned long)atomic_load(&g_rv_census[1][3]),
+          atomic_load(&g_lbrm_nl), (unsigned long)atomic_load(&g_lbrm_try[4]), (unsigned long)atomic_load(&g_lbrm_ok[4]),
+          (unsigned long)atomic_load(&g_lbrm_try[2]), (unsigned long)atomic_load(&g_lbrm_ok[2]),
+          (unsigned long)atomic_load(&g_lbrm_try[1]), (unsigned long)atomic_load(&g_lbrm_ok[1]));
     pthread_mutex_lock(&g_ptrs_lock);
     LOG_I(PHY, "SENSING: PTRS_SWEEP latched=%d ok/trials per arm [absent %u/%u | K2L1 %u/%u K2L2 %u/%u K2L4 %u/%u | K4L1 %u/%u K4L2 %u/%u K4L4 %u/%u]\n",
           g_ptrs.latched, g_ptrs.ok[0], g_ptrs.tr[0], g_ptrs.ok[1], g_ptrs.tr[1], g_ptrs.ok[2], g_ptrs.tr[2],
@@ -1049,7 +1054,11 @@ static bool passive_ldpc_decode(PHY_VARS_NR_UE *ue,
                                 int number_rbs,
                                 uint32_t G)
 {
-  if (!t_hq.armed)
+  /* A layout PROBE is HARQ-neutral: it neither combines into nor updates a process. A probe returns
+   * "not decoded" by construction, so letting it through marked the entry soft_valid and every
+   * following same-NDI grant was combined into a stale buffer -- segment 0 failed 92 % in probe mode
+   * against 3 % in full mode on the pinned rank-4 bed (2026-09-16). */
+  if (!t_hq.armed || t_probe_first_seg)
     return passive_ldpc_decode_core(ue, proc, h, cw, dlsch_config, llr, number_rbs, G);
   t_hq.armed = 0; /* first call per TB only */
   harqc_entry_t *e = harqc_acquire(t_hq.rnti, t_hq.pid);
@@ -1285,7 +1294,14 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
    * module already takes on trust elsewhere (like csirs_monitor and dci_length_override). 4 is both
    * the spec ceiling and this deployment's value, so it is the default; re-derive per deployment if
    * a cell serves layer-limited UEs. */
-  const int nl_tbslbrm = 4; // = min(maxMIMO-LayersPDSCH, 4); confirmed against the gNB's own print
+  /* ...and it is NOT always 4: the OAI phy-test gNB has no UE capability, set_dl_maxmimolayers()
+   * falls back to 2, and N_ref then binds on every long full-band 256QAM rank-4 TB (C=119:
+   * N_ref 8054 < E 9664, the transmitter wraps its circular buffer 1610 bits early) while short
+   * ones (C=43) and every rank-2 / 64QAM TB stay under N_ref -- the 5-9 % "MCS-25 wall" on the
+   * rfsim rank-4 bed (2026-09-16). It is decided by the TB CRC like every other cell property: a
+   * failed TB whose E exceeds N_ref under a smaller n_L is re-dematched under that n_L (LDPC only,
+   * the LLRs are untouched) and a pass latches it cell-wide (g_lbrm_nl). */
+  const int nl_tbslbrm = atomic_load(&g_lbrm_nl);
   /* TS 38.212 5.4.2.1 sizes N_ref from TBS_LBRM over the carrier's LARGEST configured DL BWP, not
    * over whatever frequency reference this particular grant uses. Measured 2026-08-21: on a
    * CORESET#0 format-1_0 grant BWPSize is 48 and this produced lbrm=229576 against the gNB's own
@@ -1363,7 +1379,9 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
    * skipped (their LLR count stays 0, so segment 0's bits are still the first in the buffer); the
    * allocation's last symbol is still visited because nr_rx_pdsch() emits the LLRs there. */
   int probe_last_sym = -1;
-  if (t_probe_first_seg) {
+  static int s_probe_horizon = -1; /* ISAC_PROBE_HORIZON=0: probe with the whole slot processed (A/B of the horizon) */
+  if (s_probe_horizon < 0) { const char *e = getenv("ISAC_PROBE_HORIZON"); s_probe_horizon = (e && atoi(e) == 0) ? 0 : 1; }
+  if (t_probe_first_seg && s_probe_horizon) {
     const uint32_t Kcb = (cw->ldpcBaseGraph == 2) ? 3840u : 8448u;
     const uint32_t B = cw->TBS + 24u;
     const uint32_t C_est = (B <= Kcb) ? 1u : (B + (Kcb - 24u) - 1u) / (Kcb - 24u);
@@ -2368,6 +2386,43 @@ chest_done:
     if (s_evm < 0)
       s_evm = (getenv("ISAC_PDSCH_EVM") != NULL) ? 1 : 0;
     static __thread unsigned long s_evm_n = 0;
+    /* ISAC_PDSCH_EVM=2: EVM per (symbol, layer) -- the axis the single-symbol probe below cannot see.
+     * Written for the rank-4 bed where 5-symbol grants decode and 12/13-symbol ones do not. */
+    if (s_evm && getenv("ISAC_PDSCH_EVM")[0] == '2' && demod_ok && (s_evm_n % 10) == 0) {
+      const int lmax = (1 << (cw->qamModOrder / 2)) - 1;
+      double ms = 0.0; int nlev = 0;
+      for (int l = 1; l <= lmax; l += 2) { ms += (double)l * l; nlev++; }
+      const double ideal_pow = 2.0 * ms / nlev;
+      char tb[1024]; int ut = 0;
+      for (int m = dlsch_config->start_symbol; m < dlsch_config->start_symbol + dlsch_config->number_symbols && ut < 900; m++) {
+        const uint32_t n = dl_valid_re[m] > 2048 ? 2048 : dl_valid_re[m];
+        ut += snprintf(tb + ut, sizeof(tb) - ut, " s%d:", m);
+        for (int l = 0; l < cw->Nl; l++) {
+          if (n < 64) { ut += snprintf(tb + ut, sizeof(tb) - ut, "-/"); continue; }
+          const c16_t *z = rxdataF_comp[m][l];
+          double pw = 0.0;
+          for (uint32_t i = 0; i < n; i++) pw += (double)z[i].r * z[i].r + (double)z[i].i * z[i].i;
+          pw /= n;
+          const double scale = pw > 0 ? sqrt(ideal_pow / pw) : 0.0;
+          double err = 0.0;
+          for (uint32_t i = 0; i < n; i++) {
+            const double vi = z[i].r * scale, vq = z[i].i * scale;
+            double si = 2.0 * floor(vi / 2.0) + 1.0, sq = 2.0 * floor(vq / 2.0) + 1.0;
+            si = si > lmax ? lmax : si < -lmax ? -lmax : si;
+            sq = sq > lmax ? lmax : sq < -lmax ? -lmax : sq;
+            err += (vi - si) * (vi - si) + (vq - sq) * (vq - sq);
+          }
+          /* scale check: rms of the equalised samples against layer 0's mag threshold (the LLR
+           * kernels use dl_ch_mag[m][0] for EVERY layer) -- a per-layer ratio away from the others
+           * means the LLR thresholds are wrong for that layer even though the EVM is clean */
+          const double mag0 = (double)dl_ch_mag[m][0][n / 2].r;
+          ut += snprintf(tb + ut, sizeof(tb) - ut, "%.0f(%.2f)/", sqrt(err / n / ideal_pow) * 100.0,
+                         mag0 > 0 ? sqrt(pw) / mag0 : -1.0);
+        }
+      }
+      LOG_I(PHY, "SENSING: EQDIAG2 %d.%d rnti=0x%04x Qm=%u Nl=%u nsym=%u first_rb=%u nrb=%u ptrs_arm=%d bitmap=%u csirm=%u evm%%[sym:layer]%s\n", proc->frame_rx, proc->nr_slot_rx, grant->rnti, cw->qamModOrder, cw->Nl,
+            dlsch_config->number_symbols, (unsigned)freq_alloc->first_rb, (unsigned)freq_alloc->num_rbs, ptrs_arm, (unsigned)dlsch_config->pduBitmap, (unsigned)dlsch_config->numCsiRsForRateMatching, tb);
+    }
     if (s_evm && demod_ok && (s_evm_n++ % 200) == 0) {
       /* Sample the symbol carrying the MOST valid data REs: the last symbol of an allocation is
        * often DM-RS with none, and scoring a near-empty symbol reports noise as signal. */
@@ -2620,6 +2675,40 @@ chest_done:
         }
         if (!ldpc_ok)
           cw->rv = rv0;
+      }
+    }
+    /* LBRM layer-term hypotheses: only when the hypothesis would change the bit selection (E beyond
+     * the smaller N_ref), never on probes; a pass latches n_L cell-wide. Cost: one extra LDPC pass
+     * per failed long TB until latched. */
+    if (!ldpc_ok && !t_probe_first_seg && t_seg_C > 0) {
+      const int nl_now = atomic_load(&g_lbrm_nl);
+      const uint32_t E_first = t_seg_E;
+      const uint32_t tbs_now = dlsch_config->tbslbrm;
+      const uint16_t bw_lbrm = grant->bw_tbslbrm > 0 ? grant->bw_tbslbrm : dlsch_config->BWPSize;
+      const uint8_t tbl_lbrm = grant->mcs_table_lbrm >= 0 ? (uint8_t)grant->mcs_table_lbrm : grant->mcs_table;
+      static const int alts[3] = {4, 2, 1};
+      for (int a = 0; a < 3 && !ldpc_ok; a++) {
+        const int nl_h = alts[a];
+        if (nl_h == nl_now)
+          continue;
+        const uint32_t lbrm_h = nr_compute_tbslbrm(tbl_lbrm, bw_lbrm, (uint8_t)nl_h);
+        const uint32_t nref_h = 3u * lbrm_h / (2u * t_seg_C);
+        const uint32_t nref_now = 3u * tbs_now / (2u * t_seg_C);
+        const uint32_t N = (t_seg_BG == 1 ? 66u : 50u) * t_seg_Z;
+        /* the two hypotheses select the same bits unless E reaches past the smaller N_cb */
+        if (E_first <= (nref_h < nref_now ? nref_h : nref_now) || (nref_h >= N && nref_now >= N))
+          continue;
+        dlsch_config->tbslbrm = lbrm_h;
+        atomic_fetch_add(&g_lbrm_try[nl_h], 1);
+        if (passive_ldpc_decode(ue, proc, &g_harq, cw, dlsch_config, llr, freq_alloc->num_rbs, G)) {
+          ldpc_ok = true;
+          atomic_fetch_add(&g_lbrm_ok[nl_h], 1);
+          if (atomic_exchange(&g_lbrm_nl, nl_h) != nl_h)
+            LOG_A(PHY, "SENSING: LBRM layer term n_L=%d latched from the TB CRC (was %d): TBS_LBRM=%u C=%u E=%u N_ref=%u\n",
+                  nl_h, nl_now, lbrm_h, t_seg_C, E_first, nref_h);
+        } else {
+          dlsch_config->tbslbrm = tbs_now;
+        }
       }
     }
     pdtim_add(PDTIM_LDPC, pdt_ldp);

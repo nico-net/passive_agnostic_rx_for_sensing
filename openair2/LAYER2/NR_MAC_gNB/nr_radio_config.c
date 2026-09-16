@@ -667,7 +667,10 @@ static void set_dl_maxmimolayers(NR_PDSCH_ServingCellConfig_t *pdsch_servingcell
     pdsch_servingcellconfig->ext1->maxMIMO_Layers = calloc(1, sizeof(*pdsch_servingcellconfig->ext1->maxMIMO_Layers));
 
   long l = ue_supported_dl_layers(scc, uecap);
-  long ue_supported_layers = l > 1 ? l : 2; // min UE supported layers = 2
+  /* phy-test has no UE capability: take the configured maxMIMO_layers as the UE's, otherwise the
+   * TBS_LBRM layer term stays 2 while 4 layers are scheduled and every long rank-4 256QAM TB is
+   * rate-matched to N_cb < K (374 parity bits per code block) -- undecodable by design, not a UE bug. */
+  long ue_supported_layers = l > 1 ? l : (get_softmodem_params()->phy_test && maxMIMO_layers > 2 ? maxMIMO_layers : 2);
   if (maxMIMO_layers == -1) 
     *pdsch_servingcellconfig->ext1->maxMIMO_Layers = min(NR_MAX_SUPPORTED_DL_LAYERS, ue_supported_layers);
   else 

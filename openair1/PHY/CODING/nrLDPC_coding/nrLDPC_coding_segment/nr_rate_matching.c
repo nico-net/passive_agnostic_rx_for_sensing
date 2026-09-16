@@ -645,8 +645,12 @@ int nr_rate_matching_ldpc_rx(uint32_t Tbslbrm,
          Tbslbrm);
 #endif
 
+  /* Clear the WHOLE circular buffer, not just the N_cb the bit selection can reach: the decoder
+   * reads d up to N (+2Z) whatever N_cb is, so when LBRM binds (N_cb < N) the entries beyond N_cb
+   * kept the previous transport block's soft bits and fed them to the decoder as parity evidence.
+   * Bits beyond N_cb are never transmitted; their LLR is 0. (rank-4 256QAM bed, 2026-09-16) */
   if (clear == 1)
-    memset(d, 0, Ncb * sizeof(int16_t));
+    memset(d, 0, N * sizeof(int16_t));
 
   uint32_t k = 0;
   if (ind < Foffset)

@@ -332,6 +332,12 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
     /* Only in the DCI's OWN slot (k0 = 0 hypothesis): a k0 > 0 job measures slot + k0, where a busy
      * cell has some other PDSCH -- the rank-4 bed recorded that slot's mask (0x804) with k0 = 1 and
      * pruned the true entries away (0/10k probes). A mask seen in the DCI's slot proves k0 = 0. */
+    {
+      static _Atomic uint32_t s_gate_n;
+      if ((atomic_fetch_add(&s_gate_n, 1) % 2000) == 0)
+        LOG_A(PHY, "SENSING: ORACLE_GATE settled=%d gen=%lu nrb=%u k0=%u probe=%u\n", job.sweep_ticket.settled,
+              (unsigned long)job.sweep_ticket.generation, job.freq_alloc.num_rbs, job.sweep_ticket.k0, job.layout_probe);
+    }
     if (!job.sweep_ticket.settled && job.sweep_ticket.generation && job.freq_alloc.num_rbs >= 4
         && job.sweep_ticket.k0 == 0) {
       const int n_sym = fp->symbols_per_slot;
