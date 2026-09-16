@@ -18,6 +18,7 @@
 
 #include <math.h>    // sqrt, for the Wilson interval
 #include <stddef.h>  // NULL
+#include <stdlib.h>  // getenv/atoi (ISAC_DCI11_S1_OFF)
 
 /* TS 38.212 7.3.1.2.2, fields at fixed width regardless of any RRC switch:
  *   format identifier 1 | MCS 5 | NDI 1 | RV 2 | TPC for PUCCH 2 | PUCCH resource indicator 3
@@ -487,6 +488,13 @@ int nr_dci11_resolver_observe(nr_dci11_resolver_t *r, uint64_t payload)
     }
   }
   r->n_obs++;
+  /* ISAC_DCI11_S1_OFF=1: keep every layout alive (probes rotate over the whole set). A/B knob for
+   * "did stage 1 delete the true layout" -- the one question a 0 % run cannot answer otherwise. */
+  static int s_s1_off = -1;
+  if (s_s1_off < 0)
+    s_s1_off = (getenv("ISAC_DCI11_S1_OFF") != NULL && atoi(getenv("ISAC_DCI11_S1_OFF")) != 0) ? 1 : 0;
+  if (s_s1_off)
+    return r->n_alive;
   /* Drop in a second pass, and never drop the last one. Dropping inside the loop above would make
    * the outcome depend on candidate order; and an empty set can never converge, so a run of
    * unlucky payloads must not be able to erase the answer. */
