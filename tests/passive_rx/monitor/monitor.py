@@ -216,15 +216,21 @@ class LogTail:
                     cur, self.path, pending = nxt, nxt, ""
                     f = nxt.open("r", errors="replace")
                     # The paper statistics need the WHOLE file (one-shot lines such as "Cell
-                    # Detected" and "DCI11_LAYOUT armed" sit at the top), ~1 s per 40 MB; the
-                    # health tail only needs the last few thousand lines.
+                    # Detected" and "DCI11_LAYOUT armed" sit at the top), ~1 s per 40 MB.
                     with self._lock:
                         self.paper.begin_run(nxt, live=False)   # seeded lines carry no time
                         for line in f:
                             self.paper.ingest(line)
                     f.seek(0)
                     self._paper_pause = True     # the tail below is already counted
-                    for line in f.readlines()[-self.lines.maxlen:]:
+                    # self.stats (the LIVE tab's "Acquisition & blind discovery" panel) carries the
+                    # SAME one-shot facts as paper does -- "Cell Detected"/"DCI11_LAYOUT armed" sit
+                    # at the top of the file too. Slicing to the last self.lines.maxlen lines (2026-
+                    # 09-16 bug) silently dropped them on any run past a few thousand lines, so a
+                    # freshly (re)started dashboard against an in-progress capture showed "searching"
+                    # forever even though the receiver had locked minutes ago. self.lines is itself a
+                    # bounded deque, so feeding it the whole file costs nothing extra there.
+                    for line in f:
                         self._ingest(line.rstrip())
                     self._paper_pause = False
                     f.seek(0, 2)
