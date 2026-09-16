@@ -2950,6 +2950,7 @@ constdiag_done:;
       continue;
 
     int dmrs_sym = -1;
+    uint8_t hy_k0 = 0; /* PDSCH slot offset from this DCI's slot, from the Technique D hypothesis */
     for (int m = out.start_symbol; m < out.start_symbol + out.num_symbols; m++) {
       if (out.dl_dmrs_symb_pos & (1u << m)) {
         dmrs_sym = m;
@@ -3017,6 +3018,7 @@ constdiag_done:;
                                        nr_pdcch_blind_dmrs_mask, &sweep_ticket, &hy))
         continue; /* Unsupported auto context is not a guessed manual success. */
       nr_pdsch_adaptive_apply(&hy, &dlsch_pdu, &grant_mcs_table, &grant_mcs_table_lbrm);
+      hy_k0 = hy.k0;
       sweep_ticket.layout_index = cand_task[ti].dl_auto ? cand_task[ti].dl_layout_index : 0xFFFF;
       dmrs_sym = __builtin_ctz((unsigned)hy.dmrs_mask);
     }
@@ -3083,10 +3085,11 @@ constdiag_done:;
       job.dlsch_pdu     = dlsch_pdu;
       job.freq_alloc    = freq_alloc;
       job.grant         = grant_q;
-      job.frame_rx      = proc->frame_rx;
-      job.nr_slot_rx    = proc->nr_slot_rx;
+      /* k0: the PDSCH is k0 slots after the DCI. The consumer waits for that slot's samples. */
+      job.frame_rx      = (proc->frame_rx + (proc->nr_slot_rx + hy_k0) / fp->slots_per_frame) % 1024;
+      job.nr_slot_rx    = (proc->nr_slot_rx + hy_k0) % fp->slots_per_frame;
       job.gNB_id        = proc->gNB_id;
-      job.absolute_slot = source_absolute_slot;
+      job.absolute_slot = source_absolute_slot + hy_k0;
       job.rnti          = out.rnti;
       job.harq_pid_tag  = blind_harq_tag(abs_slot, out.rnti, out.harq_pid);
       job.want_data     = want_data;

@@ -48,15 +48,23 @@ int nr_pdsch_config_sweep_init_legal(nr_pdsch_config_sweep_state_t *st, int tda_
   st->winner = -1;
   (void)tda_count; /* Contexts are isolated by the observed index; list width is not inferred here. */
 
-  /* Supported mapping-A catalog. Enumerate all entries, never a deployment-biased prefix. */
-  static const uint8_t kSL[][2] = {
-      {1, 13}, {0, 14}, {2, 12}, {1, 12}, {0, 13}, {2, 10}, {1, 7}, {0, 7},
-  };
+  /* Mapping-A catalog: EVERY legal (S, L) of TS 38.214 Table 5.1.2.1-1 (S 0..3, L 3..14, S+L <= 14),
+   * not a curated prefix (the previous 8 pairs were the two lab cells' entries -- a deployment bias
+   * the search must not carry). k0 (TDRA slot offset) is a TDRA-entry property like S/L and is
+   * enumerated 0..2; the consumer decodes slot + k0. */
+  uint8_t kSL[64][2];
+  unsigned n_sl = 0;
+  for (uint8_t S = 0; S <= 3; S++)
+    for (uint8_t L = 3; S + L <= 14; L++) {
+      kSL[n_sl][0] = S; kSL[n_sl][1] = L; n_sl++;
+    }
+  static const uint8_t kK0[]     = {0, 1}; /* k0 = 2 is not enumerated: 3024 raw entries would not fit the per-context state */
   static const uint8_t kAddPos[] = {0, 1, 2, 3};
   static const uint8_t kMaxLen[] = {1, 2};
   static const uint8_t kMcsTab[] = {0, 1, 2};
 
-  for (unsigned a = 0; a < sizeof(kSL) / sizeof(kSL[0]); a++) {
+  for (unsigned a = 0; a < n_sl; a++) {
+   for (unsigned e = 0; e < sizeof(kK0); e++) {
     for (unsigned b = 0; b < sizeof(kAddPos); b++) {
       for (unsigned c = 0; c < sizeof(kMaxLen); c++) {
         for (unsigned d = 0; d < sizeof(kMcsTab); d++) {
@@ -68,7 +76,7 @@ int nr_pdsch_config_sweep_init_legal(nr_pdsch_config_sweep_state_t *st, int tda_
             bool equivalent = false;
             for (int i = 0; i < st->n_hyp; ++i) {
               const nr_pdsch_cfg_hypothesis_t *h = &st->hyp[i];
-              if (h->tda_start == kSL[a][0] && h->tda_length == kSL[a][1]
+              if (h->tda_start == kSL[a][0] && h->tda_length == kSL[a][1] && h->k0 == kK0[e]
                   && h->dmrs_mask == mask && h->mcs_table == kMcsTab[d])
                 equivalent = true;
             }
@@ -84,6 +92,7 @@ int nr_pdsch_config_sweep_init_legal(nr_pdsch_config_sweep_state_t *st, int tda_
           h->dmrs_mask = (uint16_t)mask;
           h->tda_start    = kSL[a][0];
           h->tda_length   = kSL[a][1];
+          h->k0           = kK0[e];
           h->dmrs_add_pos = kAddPos[b];
           h->dmrs_max_len = kMaxLen[c];
           h->mcs_table    = kMcsTab[d];
@@ -92,6 +101,7 @@ int nr_pdsch_config_sweep_init_legal(nr_pdsch_config_sweep_state_t *st, int tda_
         }
       }
     }
+   }
   }
   return st->n_hyp;
 }

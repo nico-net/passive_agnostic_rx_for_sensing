@@ -309,7 +309,7 @@ TEST_F(PdschRecovery, PolicyRejectsInvalidValuesWithoutDisablingRecovery) {
 
 static bool same_hyp(const nr_pdsch_cfg_hypothesis_t &a, const nr_pdsch_cfg_hypothesis_t &b)
 {
-  return a.tda_start == b.tda_start && a.tda_length == b.tda_length
+  return a.tda_start == b.tda_start && a.tda_length == b.tda_length && a.k0 == b.k0
          && a.dmrs_add_pos == b.dmrs_add_pos && a.dmrs_max_len == b.dmrs_max_len
          && a.mcs_table == b.mcs_table;
 }
@@ -362,8 +362,8 @@ TEST(PdschConfigSweepPrior, PruneMatchingNothingLeavesTheCatalogUsable) {
 }
 
 TEST(PdschConfigSweepPrior, SiblingTdaContextConvergesFarSooner) {
-  const nr_pdsch_cfg_hypothesis_t truth0{1, 13, 1, 1, 0, 1};  // S=1 L=13, the OTA-measured winner
-  const nr_pdsch_cfg_hypothesis_t truth1{1,  7, 1, 1, 0, 1};  // same cell fields, other TDRA entry
+  const nr_pdsch_cfg_hypothesis_t truth0{1, 13, 0, 1, 1, 0, 1};  // S=1 L=13, the OTA-measured winner
+  const nr_pdsch_cfg_hypothesis_t truth1{1, 7, 0, 1, 1, 0, 1};  // same cell fields, other TDRA entry
 
   // Baseline: no prior available to the second context.
   nr_pdsch_config_sweep_reset_all();
@@ -391,7 +391,7 @@ TEST(PdschConfigSweepPrior, AWrongPriorIsAbandonedAndTheTruthIsStillFound) {
   // Publish a prior from a cell whose mcs_table is 1 ...
   nr_pdsch_config_sweep_reset_all();
   nr_pdsch_config_sweep_prior_reset();
-  const nr_pdsch_cfg_hypothesis_t truth0{1, 13, 1, 1, 0, 1};
+  const nr_pdsch_cfg_hypothesis_t truth0{1, 13, 0, 1, 1, 0, 1};
   nr_pdsch_cfg_hypothesis_t w{};
   ASSERT_GT(drive_context(9, 0x4601, 0, truth0, 0.54, 400000, &w), 0);
   uint8_t tbl = 255;
@@ -400,7 +400,7 @@ TEST(PdschConfigSweepPrior, AWrongPriorIsAbandonedAndTheTruthIsStillFound) {
 
   // ... then give a sibling context a truth the prior EXCLUDES (mcs_table 0). The pruned catalog
   // cannot contain it, so the context must detect that and restore the full search.
-  const nr_pdsch_cfg_hypothesis_t truth1{2, 12, 1, 1, 0, 0};
+  const nr_pdsch_cfg_hypothesis_t truth1{2, 12, 0, 1, 1, 0, 0};
   nr_pdsch_cfg_hypothesis_t w1{};
   const int n = drive_context(9, 0x4602, 1, truth1, 0.54, 400000, &w1);
   ASSERT_GT(n, 0) << "a wrong prior trapped the context: it never converged";
@@ -411,7 +411,7 @@ TEST(PdschConfigSweepPrior, AWrongPriorIsAbandonedAndTheTruthIsStillFound) {
  * add_pos-0 mask, because the layout rotation churned contexts faster than any walked past the
  * catalog head. An observed mask must prune every context created AFTER the observation. */
 TEST(PdschConfigSweepOracle, ObservedMaskPrunesContextsCreatedLater) {
-  const nr_pdsch_cfg_hypothesis_t truth{1, 13, 2, 1, 0, 1};  // S=1 L=13 add_pos 2
+  const nr_pdsch_cfg_hypothesis_t truth{1, 13, 0, 2, 1, 0, 1};  // S=1 L=13 add_pos 2
   const uint16_t truth_mask = (uint16_t)test_legal(0, 13, 1, 0, 2, 1);
   nr_pdsch_config_sweep_reset_all();
   nr_pdsch_config_sweep_prior_reset();

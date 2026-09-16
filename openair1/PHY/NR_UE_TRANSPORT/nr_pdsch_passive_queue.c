@@ -271,10 +271,17 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
      * fails and it is indistinguishable from a weak channel. Count it as a drop, never "decode
      * anyway and hope". With drop-oldest admission this should now be rare -- if dropped_stale stays
      * high, the consumer pool is still too small for the offered rate. ---- */
-    const long prod = atomic_load_explicit(&nr_ue_diag_producer_absolute_slot, memory_order_relaxed);
+    long prod = atomic_load_explicit(&nr_ue_diag_producer_absolute_slot, memory_order_relaxed);
     const long lag  = prod - job.absolute_slot;
     if (lag > (long)atomic_load_explicit(&g_max_lag, memory_order_relaxed)) {
       atomic_store_explicit(&g_max_lag, (uint64_t)(lag > 0 ? lag : 0), memory_order_relaxed);
+    }
+    /* A k0 > 0 hypothesis targets a slot the producer may not have read yet: wait for it (bounded
+     * by 3 slots of wall time) instead of counting it stale. */
+    for (int w = 0; w < 30 && prod < job.absolute_slot; w++) {
+      struct timespec ts = {0, 100000};
+      nanosleep(&ts, NULL);
+      prod = atomic_load_explicit(&nr_ue_diag_producer_absolute_slot, memory_order_relaxed);
     }
     if (!nr_passive_samples_valid(prod, job.absolute_slot, slots_per_frame)) {
       atomic_fetch_add_explicit(&g_dropped_stale, 1, memory_order_relaxed);

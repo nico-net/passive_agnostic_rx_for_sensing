@@ -49,6 +49,7 @@
 typedef struct {
   uint8_t tda_start;   ///< S: first PDSCH symbol
   uint8_t tda_length;  ///< L: number of PDSCH symbols
+  uint8_t k0;          ///< PDSCH slot offset from the DCI slot (TDRA entry k0), 0..2
   uint8_t dmrs_add_pos;///< dmrs-AdditionalPosition, 0..3
   uint8_t dmrs_max_len;///< maxLength, 1 or 2
   uint16_t dmrs_mask; ///< validated effective mask, zero only in legacy pure tests
@@ -73,7 +74,7 @@ typedef struct {
 typedef void (*nr_pdsch_sweep_reporter_t)(const nr_pdsch_sweep_report_t *);
 void nr_pdsch_config_sweep_set_reporter(nr_pdsch_sweep_reporter_t);
 
-#define NR_PDSCH_SWEEP_MAX_HYP 192
+#define NR_PDSCH_SWEEP_MAX_HYP 2048 /* 42 legal type-A (S,L) x k0 {0,1} x 4 add_pos x 2 max_len x 3 mcs_table = 2016 before mask merging */
 #define NR_PDSCH_SWEEP_MAX_CONTEXTS 1024 /* one per (layout x TDA index) under the wide search; 256 thrashed at 809 layouts */
 
 typedef struct {
