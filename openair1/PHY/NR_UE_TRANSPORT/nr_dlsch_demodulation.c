@@ -18,6 +18,7 @@
 #include "openair1/PHY/NR_UE_ESTIMATION/nr_estimation.h"
 #include "PHY/NR_REFSIG/nr_refsig.h"
 #include "PHY/NR_REFSIG/dmrs_nr.h"
+#include "PHY/NR_REFSIG/ptrs_nr.h" // is_ptrs_subcarrier (per-layer PT-RS RE compaction)
 #include "common/utils/nr/nr_common.h"
 #include <stdlib.h> // atoi (ISAC_RX_MRC_MODE)
 #include <math.h>   // log10 (RXBRANCH probe)
