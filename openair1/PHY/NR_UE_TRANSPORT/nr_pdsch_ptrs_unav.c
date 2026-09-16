@@ -38,15 +38,15 @@ uint32_t nr_pdsch_ptrs_unav_res(uint16_t nb_rb, uint8_t start_symbol, uint8_t nb
    * with a blind stride would mis-count exactly on the configurations with more than one DM-RS
    * symbol -- which is every additionalPosition > 0 cell. */
   uint32_t symbols = 0;
-  int since_ref = -1;   /* -1 until the first DM-RS symbol establishes the reference */
+  /* 38.214 5.1.6.3: l_ref starts at the allocation's first symbol and PT-RS sits at l_ref + i*L
+   * from i = 0 -- so the START symbol carries PT-RS unless it is a DM-RS symbol. This used to skip
+   * symbols before the first DM-RS, one symbol short of set_ptrs_symb_idx() on every mapping-A
+   * grant starting at symbol 1 (LLRFILL: G - llr_have = one PT-RS symbol, rank-4 bed 2026-09-16). */
+  int since_ref = 0;
   for (int s = start_symbol; s < start_symbol + nb_symbols; s++) {
     const bool is_dmrs = (s >= 0 && s < 16) && ((dmrs_symb_pos >> s) & 0x1u);
     if (is_dmrs) {
-      since_ref = 0;    /* cadence restarts after the DM-RS */
-      continue;
-    }
-    if (since_ref < 0) {
-      /* Data symbols before any DM-RS carry no phase reference to track. */
+      since_ref = 1;    /* cadence restarts at the DM-RS: next PT-RS is l_ref + L */
       continue;
     }
     if ((since_ref % l_density) == 0) {

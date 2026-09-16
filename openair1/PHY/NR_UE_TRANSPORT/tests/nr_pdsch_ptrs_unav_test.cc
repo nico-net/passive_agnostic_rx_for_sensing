@@ -38,11 +38,13 @@ TEST(PtrsUnav, DmrsSymbolsCarryNoPtrs) {
   EXPECT_LE(two_dmrs, one_dmrs) << "a DM-RS symbol was counted as carrying PT-RS";
 }
 
-TEST(PtrsUnav, NoPtrsBeforeTheFirstDmrs) {
-  // Data symbols preceding any DM-RS have no phase reference to track, so they carry none.
-  // Allocation starts at 0 but DM-RS is at symbol 2: symbols 0 and 1 must contribute nothing.
-  const uint32_t early = nr_pdsch_ptrs_unav_res(RB, 0, 3, 0x004, 2, 1, 1);   // symbols 0,1,2
-  EXPECT_EQ(early, 0u);
+TEST(PtrsUnav, PtrsStartsAtTheAllocationsFirstSymbol) {
+  // TS 38.214 5.1.6.3: l_ref is the allocation's first symbol and PT-RS sits at l_ref + i*L from
+  // i = 0, so symbols BEFORE the first DM-RS do carry PT-RS -- exactly what set_ptrs_symb_idx()
+  // (the extraction side) does. The old expectation of 0 here left G one PT-RS symbol short of
+  // the LLR count on every mapping-A grant (measured on the rank-4 bed, 2026-09-16).
+  const uint32_t early = nr_pdsch_ptrs_unav_res(RB, 0, 3, 0x004, 2, 1, 1);   // symbols 0,1 carry, 2 is DM-RS
+  EXPECT_EQ(early, 2u * 137u);
 }
 
 TEST(PtrsUnav, TimeDensityScalesTheCount) {
