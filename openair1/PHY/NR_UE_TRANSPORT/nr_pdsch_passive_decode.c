@@ -1340,6 +1340,38 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
     return out->status;
   }
 
+  /* ---- PROBE HORIZON. A layout probe decodes code block 0 only, and its E bits sit in the first
+   * data symbols of the allocation (rank-4 64QAM full band: E0 = 11.8 kbit against 78 kbit per
+   * symbol). Everything past the last symbol it needs -- FEP, channel estimation of later DM-RS
+   * symbols, equalisation, LLRs -- is wasted; a probe then costs the LDPC of one segment plus one
+   * or two symbols of PHY instead of a whole slot (8 ms at rank 4), which is what lets probing keep
+   * up with 1500 grants/s OTA instead of dropping 95 % of the queue. Symbols after the horizon are
+   * skipped (their LLR count stays 0, so segment 0's bits are still the first in the buffer); the
+   * allocation's last symbol is still visited because nr_rx_pdsch() emits the LLRs there. */
+  int probe_last_sym = -1;
+  if (t_probe_first_seg) {
+    const uint32_t Kcb = (cw->ldpcBaseGraph == 2) ? 3840u : 8448u;
+    const uint32_t B = cw->TBS + 24u;
+    const uint32_t C_est = (B <= Kcb) ? 1u : (B + (Kcb - 24u) - 1u) / (Kcb - 24u);
+    if (C_est > 1) {
+      const uint32_t E0 = (G + C_est - 1) / C_est;
+      const uint32_t per_sym = (uint32_t)freq_alloc->num_rbs * 12u * cw->qamModOrder * cw->Nl;
+      const uint32_t dmrs_sym_re = (dlsch_config->dmrsConfigType == NFAPI_NR_DMRS_TYPE1)
+                                       ? 12u - 6u * dlsch_config->n_dmrs_cdm_groups
+                                       : 12u - 4u * dlsch_config->n_dmrs_cdm_groups;
+      uint32_t acc = 0;
+      for (int m = dlsch_config->start_symbol; m < dlsch_config->start_symbol + dlsch_config->number_symbols; m++) {
+        const bool is_dmrs = (dlsch_config->dlDmrsSymbPos >> m) & 1;
+        acc += is_dmrs ? (uint32_t)freq_alloc->num_rbs * dmrs_sym_re * cw->qamModOrder * cw->Nl : per_sym;
+        if (acc >= E0 + per_sym) { probe_last_sym = m; break; } /* one symbol of slack */
+      }
+      /* The first DM-RS symbol is always needed: the symbols before it are equalised against it. */
+      const int first_dmrs = __builtin_ctz((unsigned)dlsch_config->dlDmrsSymbPos | (1u << 15));
+      if (probe_last_sym >= 0 && probe_last_sym < first_dmrs) probe_last_sym = first_dmrs;
+    }
+  }
+  const int probe_end = (probe_last_sym >= 0) ? probe_last_sym + 1 : dlsch_config->start_symbol + dlsch_config->number_symbols;
+
   // ---- FEP every symbol of the allocation. The caller keeps this buffer: the data-aided submit
   // needs the SAME Y samples to form Ĥ = Y/X, and re-transforming them would be both wasteful and a
   // chance for the two views to diverge. ----
@@ -1358,7 +1390,8 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
   const long share_slot = grant->source_absolute_slot;
   const int fep_hit = t_share.on && t_fep_cache.valid && t_fep_cache.slot == share_slot && t_fep_cache.fo == fep_fo;
   const int fep_s0 = t_share.on ? 0 : dlsch_config->start_symbol;
-  const int fep_n  = t_share.on ? fp->symbols_per_slot : dlsch_config->number_symbols;
+  const int fep_n  = t_share.on ? fp->symbols_per_slot
+                     : (probe_last_sym >= 0 ? probe_end - dlsch_config->start_symbol : dlsch_config->number_symbols);
   atomic_fetch_add(fep_hit ? &g_fep_hit : &g_fep_miss, 1);
   if (fep_hit) {
     /* same slot, same offset: this thread transformed it for the previous grant of the group */
@@ -1494,7 +1527,7 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
     nvar = t_chest_cache.nvar; nvar_den = t_chest_cache.nvar_den; n_dmrs_sym = t_chest_cache.n_dmrs_sym;
     dmrs_first = t_chest_cache.dmrs_first; dmrs_last = t_chest_cache.dmrs_last;
   }
-  for (int m = dlsch_config->start_symbol; !chest_hit && m < dlsch_config->start_symbol + dlsch_config->number_symbols; m++) {
+  for (int m = dlsch_config->start_symbol; !chest_hit && m < probe_end; m++) {
     if (!((dlsch_config->dlDmrsSymbPos >> m) & 1)) {
       continue;
     }
@@ -1536,7 +1569,7 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
   }
   if (s_tinterp) {
     int dsym[NR_SYMBOLS_PER_SLOT], nd = 0;
-    for (int m = 0; m < NR_SYMBOLS_PER_SLOT; m++)
+    for (int m = 0; m < NR_SYMBOLS_PER_SLOT && m < probe_end; m++) /* only estimated DM-RS symbols */
       if ((dlsch_config->dlDmrsSymbPos >> m) & 1)
         dsym[nd++] = m;
     const int s0 = dlsch_config->start_symbol, s1 = s0 + dlsch_config->number_symbols;
@@ -2128,7 +2161,7 @@ chest_done:
   }
   out->nvar = nvar;
 
-  if (ue->chest_time == 1) {
+  if (ue->chest_time == 1 && probe_last_sym < 0) { /* a probe estimated only the first DM-RS symbol(s) */
     nr_chest_time_domain_avg(fp, (int32_t **)pdsch_dl_ch_estimates, dlsch_config->number_symbols,
                              dlsch_config->start_symbol, dlsch_config->dlDmrsSymbPos, freq_alloc->num_rbs, cw->Nl,
                              fp->nb_antennas_rx);
@@ -2253,7 +2286,10 @@ chest_done:
 
   const uint64_t pdt_dem = pdtim_on ? pdtim_now() : 0;
   bool demod_ok = true;
-  for (int m = dlsch_config->start_symbol; m < dlsch_config->start_symbol + dlsch_config->number_symbols; m++) {
+  const int last_sym = dlsch_config->start_symbol + dlsch_config->number_symbols - 1;
+  for (int m = dlsch_config->start_symbol; m <= last_sym; m++) {
+    if (probe_last_sym >= 0 && m > probe_last_sym && m != last_sym)
+      continue; /* probe: past the horizon, LLR count stays 0 for this symbol */
     if (sfo_eps != 0.0) {
       /* Bring every DM-RS slot to the rotation this symbol needs. Cheap: at most 3 slots on this
        * cell, and only the ones that actually differ are touched. */
