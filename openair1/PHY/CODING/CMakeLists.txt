@@ -61,6 +61,21 @@ if(ENABLE_LDPC_CUDA)
   set_target_properties(nr_pdsch_gpu_fep_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
   add_dependencies(nr_pdsch_gpu_fep_test pdsch_gpu)
   add_dependencies(nr-uesoftmodem pdsch_gpu)
+  # GPU DM-RS chest + QPSK LLR for the blind PDCCH CORESET-extent search (libpdcch_gpu.so, same
+  # NR_GPU_FEP=1 loader knob as pdsch_gpu above -- see nr_pdcch_gpu_fep.h). No cuFFT: FFT stays on
+  # the CPU (nr_slot_fep), already shared across every extent candidate -- see that file's top
+  # comment for why.
+  add_library(pdcch_gpu MODULE ${CMAKE_CURRENT_SOURCE_DIR}/../NR_UE_TRANSPORT/nr_pdcch_gpu_fep.cu)
+  set_target_properties(pdcch_gpu PROPERTIES LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
+                        CUDA_ARCHITECTURES "${LDPC_CUDA_ARCH}" POSITION_INDEPENDENT_CODE ON)
+  target_include_directories(pdcch_gpu PRIVATE ${CUDAToolkit_INCLUDE_DIRS})
+  target_link_libraries(pdcch_gpu PRIVATE CUDA::cudart)
+  add_executable(nr_pdcch_gpu_fep_test ${CMAKE_CURRENT_SOURCE_DIR}/../NR_UE_TRANSPORT/tests/nr_pdcch_gpu_fep_test.cc)
+  target_include_directories(nr_pdcch_gpu_fep_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../NR_UE_TRANSPORT)
+  target_link_libraries(nr_pdcch_gpu_fep_test PRIVATE ${CMAKE_DL_LIBS})
+  set_target_properties(nr_pdcch_gpu_fep_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
+  add_dependencies(nr_pdcch_gpu_fep_test pdcch_gpu)
+  add_dependencies(nr-uesoftmodem pdcch_gpu)
 endif()
 
 add_dependencies(ldpctest ldpc ldpc_orig)
