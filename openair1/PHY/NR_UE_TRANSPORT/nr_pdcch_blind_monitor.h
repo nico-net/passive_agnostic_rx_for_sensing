@@ -852,6 +852,47 @@ bool nr_pdcch_blind_monitor_autodiscover_extent_verified(void);
 void nr_pdcch_blind_monitor_autodiscover_observe(uint16_t rnti, uint32_t slot, uint64_t payload);
 void nr_pdcch_blind_monitor_autodiscover_reset(void);
 
+/** Multi-candidate-per-occasion lookahead (2026-09-16, PDCCH_GPU_BATCH_HANDOVER.md): the extent/
+ * mapping search above tests ONE (extent, mapping) hypothesis at a time, each given
+ * NR_PDCCH_EXTENT_VERIFY_OCC real occasions -- measured live, decode (Polar SCL+CRC) costs 10x
+ * fep_llr and 99% of occasions already exceed the slot budget at a single hypothesis, so
+ * WALL-CLOCK time to exhaust up to 1035 extents is the bottleneck, not compute. These lanes run
+ * K-1 ADDITIONAL hypotheses per real occasion (rt.c reuses the one FFT/LLR pass already paid for
+ * that occasion), each with its OWN NR_PDCCH_EXTENT_VERIFY_OCC dwell -- no candidate's budget
+ * shrinks, K candidates just complete their full dwell in ~1/K the wall-clock time. Whichever lane
+ * (or the primary) verifies first wins and its geometry becomes g_cfg, exactly as an unbatched
+ * search would have found eventually. Off by default (ISAC_PDCCH_EXTENT_BATCH unset or 1); set it
+ * to K to run K-1 lanes. */
+#define NR_PDCCH_LOOKAHEAD_MAX 15
+typedef struct {
+  bool valid;             // this lane owns a live candidate this call
+  int  rb_offset;
+  int  freq_domain;       // span, in 6-RB windows
+  int  reg_bundle_size;
+  int  interleaver_size;
+  int  shift_index;
+} nr_pdcch_lookahead_geom_t;
+
+/** Configured lookahead lane COUNT (ISAC_PDCCH_EXTENT_BATCH - 1, clamped to
+ *  [0, NR_PDCCH_LOOKAHEAD_MAX]; 0 = feature off, the default). Read once from the environment. */
+int nr_pdcch_blind_lookahead_count(void);
+/** This lane's currently applied geometry. False if the extent/mapping search is not running
+ *  (footprint not found yet, already verified, or the lane index is unused this run). */
+bool nr_pdcch_blind_lookahead_get(int lane, nr_pdcch_lookahead_geom_t *out);
+/** Same evidence contract as nr_pdcch_blind_monitor_autodiscover_observe(), scoped to one lookahead
+ *  lane. Returns true iff THIS call just verified the lane's geometry -- the caller must then call
+ *  nr_pdcch_blind_monitor_autodiscover_set_dci_length() with the lane's own found length, since
+ *  g_cfg's dci_length_override is not touched here (rt.c owns per-lane length-sweep state). */
+bool nr_pdcch_blind_lookahead_observe(int lane, uint16_t rnti, uint32_t slot, uint64_t payload);
+/** Bump this lane's occasion counter and advance it to its next candidate if its
+ *  NR_PDCCH_EXTENT_VERIFY_OCC dwell just expired. Call once per real occasion this lane was offered
+ *  a decode attempt, whether or not it produced evidence. */
+void nr_pdcch_blind_lookahead_step(int lane);
+/** Immediately retire this lane's current candidate without waiting out its NR_PDCCH_EXTENT_VERIFY_OCC
+ *  dwell -- mirrors nr_pdcch_blind_monitor_autodiscover_retry() for the primary, for the case where a
+ *  lane's own DCI-length sweep gives up (AUTODISCOVER_LENGTH_SWEEP_MAX_OCCASIONS) well before that. */
+void nr_pdcch_blind_lookahead_retry(int lane);
+
 #ifdef __cplusplus
 }
 #endif

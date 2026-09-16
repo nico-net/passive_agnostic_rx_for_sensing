@@ -454,6 +454,176 @@ static bool extent_advance(void)
         s_ext_idx + 1, s_ext_n, g_cfg.coreset_rb_offset, g_cfg.coreset_freq_domain * 6, s_map_n);
   return true;
 }
+/* ---- Lookahead lanes: see nr_pdcch_blind_monitor.h's own comment for the design. Each lane owns
+ * an INDEPENDENT walk over the same (extent, mapping) catalog the primary (s_ext_idx/s_map_idx)
+ * walks, seeded at a spread-out starting point so lanes explore different candidates than the
+ * primary and each other. ponytail: a fixed initial spread plus a fixed +(k+1) stride can eventually
+ * collide with the primary's own +1 walk once it catches up -- harmless (re-testing an
+ * already-inconclusive candidate costs cycles, not correctness), and not worth a shared-claim
+ * allocator for a search this wide (up to 1035 extents). */
+typedef struct {
+  bool active;
+  int  ext_idx;
+  int  rb_offset;
+  int  freq_domain;
+  int  reg_bundle_size;
+  int  interleaver_size;
+  int  shift_index;
+  nr_pdcch_map_cand_t map_cand[NR_PDCCH_MAP_MAX_CAND];
+  int  map_n;
+  int  map_idx;
+  int  occ;
+  extent_evidence_t evidence[NR_PDCCH_BLIND_MAX_UE];
+} nr_pdcch_lookahead_lane_t;
+static nr_pdcch_lookahead_lane_t s_lane[NR_PDCCH_LOOKAHEAD_MAX];
+
+int nr_pdcch_blind_lookahead_count(void)
+{
+  static int s_k = -1;
+  if (s_k < 0) {
+    const char *e = getenv("ISAC_PDCCH_EXTENT_BATCH");
+    int v = e ? atoi(e) : 1;
+    if (v < 1) v = 1;
+    if (v > NR_PDCCH_LOOKAHEAD_MAX + 1) v = NR_PDCCH_LOOKAHEAD_MAX + 1;
+    s_k = v - 1;
+  }
+  return s_k;
+}
+
+static void lane_map_apply(int lane)
+{
+  nr_pdcch_lookahead_lane_t *ln = &s_lane[lane];
+  const nr_pdcch_map_cand_t *m = &ln->map_cand[ln->map_idx];
+  ln->reg_bundle_size   = m->bundle;
+  ln->interleaver_size  = m->interleaver;
+  ln->shift_index       = m->shift;
+}
+
+static void lane_assign(int lane, int ext_idx)
+{
+  nr_pdcch_lookahead_lane_t *ln = &s_lane[lane];
+  if (ext_idx < 0 || ext_idx >= s_ext_n) {
+    ln->active = false;
+    return;
+  }
+  ln->ext_idx       = ext_idx;
+  ln->rb_offset     = s_ext_cand[ext_idx].first_w * 6;
+  ln->freq_domain   = s_ext_cand[ext_idx].last_w - s_ext_cand[ext_idx].first_w + 1;
+  const int span_rb = ln->freq_domain * 6;
+  ln->map_n = nr_pdcch_map_candidates(span_rb, g_cfg.coreset_duration, g_cfg.coreset_pdcch_dmrs_scrambling_id,
+                                      ln->map_cand, NR_PDCCH_MAP_MAX_CAND);
+  ln->map_idx = 0;
+  memset(ln->evidence, 0, sizeof(ln->evidence));
+  ln->occ    = 0;
+  ln->active = (ln->map_n > 0);
+  if (ln->active)
+    lane_map_apply(lane);
+}
+
+/* Called once a fresh footprint is found (nr_pdcch_blind_monitor_autodiscover_step), same moment
+ * the primary's own s_ext_cand/s_ext_n catalog is (re)built. */
+static void lookahead_lanes_init(void)
+{
+  const int k = nr_pdcch_blind_lookahead_count();
+  for (int L = 0; L < NR_PDCCH_LOOKAHEAD_MAX; L++) {
+    if (L >= k || s_ext_n <= 1) {
+      s_lane[L].active = false;
+      continue;
+    }
+    const int start = ((L + 1) * s_ext_n) / (k + 1);
+    lane_assign(L, start % s_ext_n);
+  }
+}
+
+static void lane_advance(int lane)
+{
+  nr_pdcch_lookahead_lane_t *ln = &s_lane[lane];
+  memset(ln->evidence, 0, sizeof(ln->evidence));
+  ln->occ = 0;
+  if (++ln->map_idx < ln->map_n) {
+    lane_map_apply(lane);
+    return;
+  }
+  const int k    = nr_pdcch_blind_lookahead_count();
+  const int next = (s_ext_n > 0) ? (ln->ext_idx + k + 1) % s_ext_n : -1;
+  lane_assign(lane, next);
+}
+
+bool nr_pdcch_blind_lookahead_get(int lane, nr_pdcch_lookahead_geom_t *out)
+{
+  if (!out)
+    return false;
+  memset(out, 0, sizeof(*out));
+  if (lane < 0 || lane >= NR_PDCCH_LOOKAHEAD_MAX)
+    return false;
+  const nr_pdcch_lookahead_lane_t *ln = &s_lane[lane];
+  if (!s_dedicated_found || s_ext_verified || !ln->active)
+    return false;
+  out->valid            = true;
+  out->rb_offset         = ln->rb_offset;
+  out->freq_domain       = ln->freq_domain;
+  out->reg_bundle_size   = ln->reg_bundle_size;
+  out->interleaver_size  = ln->interleaver_size;
+  out->shift_index       = ln->shift_index;
+  return true;
+}
+
+bool nr_pdcch_blind_lookahead_observe(int lane, uint16_t rnti, uint32_t slot, uint64_t payload)
+{
+  if (lane < 0 || lane >= NR_PDCCH_LOOKAHEAD_MAX || !rnti)
+    return false;
+  nr_pdcch_lookahead_lane_t *ln = &s_lane[lane];
+  if (!s_dedicated_found || s_ext_verified || !ln->active)
+    return false;
+  int victim = 0;
+  for (int i = 0; i < NR_PDCCH_BLIND_MAX_UE; ++i) {
+    extent_evidence_t *e = &ln->evidence[i];
+    if (e->rnti == rnti) {
+      if (slot > e->slot && payload != e->payload) {
+        /* This lane's geometry just VERIFIED: commit it as THE answer and stop every lane's search,
+         * same effect as the primary's own verification (nr_pdcch_blind_monitor_autodiscover_observe).
+         * dci_length_override is deliberately left to the caller (see header comment) -- rt.c owns
+         * the per-lane length-sweep state this needs. */
+        g_cfg.coreset_rb_offset        = ln->rb_offset;
+        g_cfg.coreset_freq_domain      = ln->freq_domain;
+        g_cfg.coreset_reg_bundle_size  = ln->reg_bundle_size;
+        g_cfg.coreset_interleaver_size = ln->interleaver_size;
+        g_cfg.coreset_shift_index      = ln->shift_index;
+        s_ext_verified = true;
+        ++s_ext_generation;
+        LOG_A(PHY, "SENSING: CORESET VERIFIED by lookahead lane %d: offset=%d span=%d rnti=0x%x\n",
+              lane, ln->rb_offset, ln->freq_domain * 6, rnti);
+        return true;
+      }
+      return false;
+    }
+    if (!e->rnti || e->slot < ln->evidence[victim].slot)
+      victim = i;
+  }
+  ln->evidence[victim] = (extent_evidence_t){rnti, slot, payload};
+  return false;
+}
+
+void nr_pdcch_blind_lookahead_step(int lane)
+{
+  if (lane < 0 || lane >= NR_PDCCH_LOOKAHEAD_MAX)
+    return;
+  nr_pdcch_lookahead_lane_t *ln = &s_lane[lane];
+  if (!s_dedicated_found || s_ext_verified || !ln->active)
+    return;
+  if (++ln->occ >= NR_PDCCH_EXTENT_VERIFY_OCC)
+    lane_advance(lane);
+}
+
+void nr_pdcch_blind_lookahead_retry(int lane)
+{
+  if (lane < 0 || lane >= NR_PDCCH_LOOKAHEAD_MAX)
+    return;
+  if (!s_dedicated_found || s_ext_verified || !s_lane[lane].active)
+    return;
+  lane_advance(lane);
+}
+
 void nr_pdcch_blind_monitor_autodiscover_reset(void)
 {
   s_css0_applied = false;
@@ -465,6 +635,7 @@ void nr_pdcch_blind_monitor_autodiscover_reset(void)
   s_obs_calls = 0;
   g_cfg.dci_length_override = 0;
   extent_clear_evidence();
+  memset(s_lane, 0, sizeof(s_lane));
 }
 
 int nr_pdcch_map_candidates(int span_rb, int duration, int pci, nr_pdcch_map_cand_t *out, int max_out)
@@ -760,6 +931,7 @@ bool nr_pdcch_blind_monitor_autodiscover_step(const void* rxdataF_symbol, int of
   s_ext_n = nr_pdcch_extent_candidates(first_w, last_w, nw_total, s_ext_cand, NR_PDCCH_EXTENT_MAX_CAND);
   s_ext_idx = 0;
   extent_clear_evidence();
+  lookahead_lanes_init();
 
   first_w = s_ext_cand[0].first_w;
   last_w  = s_ext_cand[0].last_w;

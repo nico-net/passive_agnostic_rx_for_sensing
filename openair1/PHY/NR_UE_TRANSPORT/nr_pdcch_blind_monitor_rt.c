@@ -547,6 +547,18 @@ static void nr_pdcch_dci11_layout_observe(const nr_pdcch_blind_monitor_cfg_t *cf
 
 static nr_pdcch_dci_length_sweep_state_t g_dl_length_state;
 
+/* Lookahead lanes (nr_pdcch_blind_monitor.h). DCI length is a property of the payload width, not
+ * the CORESET geometry, but a WRONG geometry's "candidates" are pure noise, so each lane needs its
+ * OWN length-sweep accumulator -- sharing one across different geometries would mix real signal
+ * from a right one with noise from a wrong one in the same significance test. Reset whenever a
+ * lane's geometry changes (detected by comparing against g_lane_last_geom each occasion, since
+ * nr_pdcch_blind_monitor.c owns lane advancement and has no reason to know this file's state). */
+static nr_pdcch_dci_length_sweep_state_t g_lane_length_state[NR_PDCCH_LOOKAHEAD_MAX];
+static bool                 g_lane_length_swept[NR_PDCCH_LOOKAHEAD_MAX];
+static bool                 g_lane_length_found[NR_PDCCH_LOOKAHEAD_MAX];
+static uint16_t             g_lane_dci_length[NR_PDCCH_LOOKAHEAD_MAX];
+static nr_pdcch_lookahead_geom_t g_lane_last_geom[NR_PDCCH_LOOKAHEAD_MAX];
+
 static void dl_discovery_invalidate(void)
 {
   g_length_swept = g_length_found = false;
@@ -1017,6 +1029,8 @@ typedef struct {
   bool         ok;             // OUTPUT
   int8_t       bwp_entry;      // passive BWP entry this length belongs to (0 = the configured BWP)
   uint8_t      bwp_probe;      // 1 = raw decode only: BWP discovery / DM-RS scoring probe
+  bool         is_lookahead;   // multi-candidate-per-occasion lookahead task (see the lookahead block)
+  int8_t       lookahead_lane; // which lane; valid only when is_lookahead
   task_ans_t  *ans;
 } nr_pdcch_blind_cand_task_t;
 
@@ -2490,6 +2504,161 @@ constdiag_done:;
     }
   }
 
+  /* ---- Lookahead lanes (nr_pdcch_blind_monitor.h): K-1 ADDITIONAL (extent, mapping) hypotheses
+   * tested this same occasion, reusing the rxdataF this occasion already FEP'd above (every lane
+   * shares g_cfg's coreset_duration, so the "only re-FEP a symbol beyond what's already covered"
+   * guard below never fires -- mirrors the existing Passive-BWP second-pass block just above, which
+   * established that pattern for a different geometry source). AL2-only (this cell's own dedicated
+   * SS never schedules anything else -- see CLAUDE.md's "Multi-AL scanning" note): a lookahead
+   * lane's job is finding the right GEOMETRY, not a complete scan of an unconfirmed one. Off by
+   * default (ISAC_PDCCH_EXTENT_BATCH unset or 1). ---- */
+  const int lookahead_k = (cfg->autodiscover && nr_pdcch_blind_monitor_autodiscover_done()
+                                && !nr_pdcch_blind_monitor_autodiscover_extent_verified())
+                               ? nr_pdcch_blind_lookahead_count() : 0;
+  /* Per-lane candidate REs must survive until Phase 1's decode loop runs, much later in this same
+   * occasion -- a stack array scoped to one loop iteration would leave cand_task[].e_rx dangling by
+   * the time it's read. __thread (not a plain static) so two occasions running concurrently on
+   * different consumer threads never share one buffer -- same convention this file's own pbwp
+   * second-pass block already uses for s_pdcch_e_rx2. pdcch_llr_lane, by contrast, is fully
+   * written-then-read within one lane's own iteration, so a single reused buffer is enough. */
+  static __thread c16_t s_pdcch_e_rx_lane[NR_PDCCH_LOOKAHEAD_MAX][NR_PDCCH_BLIND_RE_PER_RB_OUT_DMRS * 2 * 45];
+  static __thread c16_t pdcch_llr_lane[1][1][NR_PDCCH_BLIND_MAX_CORESET_RB * NR_PDCCH_BLIND_MAX_CORESET_DURATION
+                                             * NR_PDCCH_BLIND_RE_PER_RB_OUT_DMRS];
+  for (int lane = 0; lane < lookahead_k; lane++) {
+    nr_pdcch_lookahead_geom_t geom;
+    if (!nr_pdcch_blind_lookahead_get(lane, &geom))
+      continue;
+    if (memcmp(&geom, &g_lane_last_geom[lane], sizeof(geom)) != 0) {
+      g_lane_last_geom[lane] = geom;
+      nr_pdcch_dci_length_sweep_reset(&g_lane_length_state[lane]);
+      g_lane_length_swept[lane] = false;
+      g_lane_length_found[lane] = false;
+    }
+
+    nr_phy_data_t phy_lane;
+    memset(&phy_lane, 0, sizeof(phy_lane));
+    phy_lane.phy_pdcch_config.nb_search_space = 1;
+    fapi_nr_dl_config_dci_dl_pdu_rel15_t *lrel = &phy_lane.phy_pdcch_config.pdcch_config[0];
+    lrel->coreset.CoreSetType   = rel15->coreset.CoreSetType;
+    lrel->coreset.rb_offset     = (uint16_t)geom.rb_offset;
+    lrel->coreset.duration      = rel15->coreset.duration; // every lane shares g_cfg's duration
+    build_coreset_bitmap(geom.freq_domain, lrel->coreset.frequency_domain_resource);
+    lrel->coreset.CceRegMappingType = (geom.reg_bundle_size != 0)
+                                          ? FAPI_NR_CCE_REG_MAPPING_TYPE_INTERLEAVED
+                                          : FAPI_NR_CCE_REG_MAPPING_TYPE_NON_INTERLEAVED;
+    lrel->coreset.RegBundleSize            = (uint8_t)geom.reg_bundle_size;
+    lrel->coreset.InterleaverSize          = (uint8_t)geom.interleaver_size;
+    lrel->coreset.ShiftIndex               = (uint8_t)geom.shift_index;
+    lrel->coreset.pdcch_dmrs_scrambling_id = cfg->coreset_pdcch_dmrs_scrambling_id;
+    lrel->coreset.scrambling_rnti          = 0;
+    lrel->coreset.StartSymbolBitmap        = rel15->coreset.StartSymbolBitmap;
+
+    int ln_rb = 0, ln_start = 0;
+    get_coreset_rballoc(lrel->coreset.frequency_domain_resource, &ln_rb, &ln_start);
+    if (ln_rb < 12) { // need >=2 AL2 candidates' worth of CCEs, same floor as the primary
+      nr_pdcch_blind_lookahead_step(lane);
+      continue;
+    }
+    const int ln_num_cces = (ln_rb * lrel->coreset.duration) / 6;
+    const int ln_L    = 2; // AL2-only, see the block comment above
+    const int ln_need = NR_PDCCH_BLIND_RE_PER_RB_OUT_DMRS * ln_L * 6;
+    const int ln_npos = (ln_num_cces >= ln_L) ? ((ln_num_cces - ln_L) / ln_L + 1) : 0;
+    int ln_nc = 0;
+    for (int p = 0; p < ln_npos && ln_nc < 45
+                    && (ln_nc + 1) * ln_need <= (int)(sizeof(s_pdcch_e_rx_lane[lane]) / sizeof(s_pdcch_e_rx_lane[0][0]));
+         p++) {
+      lrel->CCE[ln_nc] = (uint16_t)(p * ln_L);
+      lrel->L[ln_nc]   = (uint8_t)ln_L;
+      ln_nc++;
+    }
+    if (ln_nc < 1) {
+      nr_pdcch_blind_lookahead_step(lane);
+      continue;
+    }
+    lrel->number_of_candidates = (uint8_t)ln_nc;
+
+    const int ln_llr_sym = ln_rb * NR_PDCCH_BLIND_RE_PER_RB_OUT_DMRS;
+    if ((size_t)(lrel->coreset.duration * ln_llr_sym) > sizeof(pdcch_llr[0][0]) / sizeof(c16_t)) {
+      nr_pdcch_blind_lookahead_step(lane);
+      continue;
+    }
+    for (int symbol = cfg->ss_first_symbol; symbol < cfg->ss_first_symbol + lrel->coreset.duration; symbol++) {
+      if (symbol >= cfg->ss_first_symbol + rel15->coreset.duration)
+        nr_slot_fep(ue, fp, proc->nr_slot_rx, symbol, rxdataF, link_type_dl, 0, ue->common_vars.rxdata);
+      __attribute__((aligned(32))) c16_t rxdataF_symb_lane[fp->nb_antennas_rx][((fp->ofdm_symbol_size + 7) / 8) * 8];
+      for (int ant = 0; ant < fp->nb_antennas_rx; ant++)
+        memcpy(rxdataF_symb_lane[ant], &rxdataF[ant][symbol * fp->ofdm_symbol_size], sizeof(c16_t) * fp->ofdm_symbol_size);
+      nr_pdcch_generate_llr(ue, proc, symbol, &phy_lane, ln_llr_sym, num_monitoring_occ, lrel->coreset.duration,
+                            rxdataF_symb_lane, pdcch_llr_lane);
+    }
+    nr_pdcch_demapping_deinterleaving((uint32_t)ln_rb, pdcch_llr_lane[0][0], s_pdcch_e_rx_lane[lane],
+                                      lrel->coreset.duration, lrel->coreset.RegBundleSize,
+                                      lrel->coreset.InterleaverSize, lrel->coreset.ShiftIndex,
+                                      lrel->number_of_candidates, lrel->CCE, lrel->L, ln_llr_sym);
+
+    if (!g_lane_length_found[lane]) {
+      nr_pdcch_autodiscover_cand_t disc_cand[45];
+      int disc_n = 0, idx = 0;
+      for (int c = 0; c < ln_nc && disc_n < 45; c++) {
+        disc_cand[disc_n].e_rx = &s_pdcch_e_rx_lane[lane][idx];
+        disc_cand[disc_n].L    = lrel->L[c];
+        disc_n++;
+        idx += NR_PDCCH_BLIND_RE_PER_RB_OUT_DMRS * lrel->L[c] * 6;
+      }
+      if (disc_n > 0) {
+        nr_pdcch_autodiscover_sweep_ctx_t sweep_ctx = {
+            .cand                = disc_cand,
+            .n_cand              = disc_n,
+            .bwp_size            = (uint16_t)cfg->bwp_size,
+            .dmrs_typeA_position = (uint8_t)cfg->dmrs_typeA_position,
+            .rnti_min            = cfg->rnti_min,
+            .rnti_max            = cfg->rnti_max,
+            .extract_opts        = &cfg->extract,
+            .scrambling_rnti     = lrel->coreset.scrambling_rnti,
+            .dmrs_scrambling_id  = lrel->coreset.pdcch_dmrs_scrambling_id,
+        };
+        g_lane_length_state[lane].excluded_len = dci10_length;
+        const int found_len = nr_pdcch_dci_length_sweep_feed(&g_lane_length_state[lane],
+            nr_pdcch_autodiscover_length_scorer, &sweep_ctx, disc_n, 30, 63, 0);
+        if (found_len > 0) {
+          g_lane_dci_length[lane]   = (uint16_t)found_len;
+          g_lane_length_found[lane] = true;
+          g_lane_length_swept[lane] = true;
+          LOG_I(PHY, "SENSING: lookahead lane %d dci_length locked at %d (offset=%d span=%d)\n",
+                lane, found_len, geom.rb_offset, geom.freq_domain * 6);
+        } else if (g_lane_length_state[lane].occasions_fed >= AUTODISCOVER_LENGTH_SWEEP_MAX_OCCASIONS) {
+          // Give up on THIS lane's geometry well before its NR_PDCCH_EXTENT_VERIFY_OCC dwell would --
+          // mirrors the primary's own give-up branch above.
+          nr_pdcch_blind_lookahead_retry(lane);
+        }
+      }
+    } else {
+      const int cap = (int)(sizeof(cand_task) / sizeof(cand_task[0]));
+      int idx = 0;
+      for (int c = 0; c < ln_nc && nof_tasks < cap; c++) {
+        cand_task[nof_tasks] = (nr_pdcch_blind_cand_task_t){
+            .e_rx               = &s_pdcch_e_rx_lane[lane][idx],
+            .L                  = lrel->L[c],
+            .dci_length         = g_lane_dci_length[lane],
+            .rnti_min           = cfg->rnti_min,
+            .rnti_max           = cfg->rnti_max,
+            .scrambling_rnti    = lrel->coreset.scrambling_rnti,
+            .dmrs_scrambling_id = lrel->coreset.pdcch_dmrs_scrambling_id,
+            .frame              = proc->frame_rx,
+            .slot               = proc->nr_slot_rx,
+            .cce                = lrel->CCE[c],
+            .format             = NR_BLIND_DCI_FORMAT_1_1,
+            .dl_auto            = true, // raw decode (nr_pdcch_blind_decode_raw_11), same as the primary
+            .is_lookahead       = true,
+            .lookahead_lane     = (int8_t)lane,
+        };
+        nof_tasks++;
+        idx += NR_PDCCH_BLIND_RE_PER_RB_OUT_DMRS * lrel->L[c] * 6;
+      }
+    }
+    nr_pdcch_blind_lookahead_step(lane);
+  }
+
   // ---- Phase 1 (parallel): fan the independent unscramble+decode work out across the UE's thread
   // pool. pushTpool() runs the task inline if the pool has zero worker threads configured (its own
   // documented fallback), so this degrades to the original sequential behaviour rather than
@@ -2534,6 +2703,20 @@ constdiag_done:;
   // split, just walking cand_task[] instead of decoding inline. ----
   int decodes_this_occasion = 0; // capped by cfg->pdsch_max_per_slot -- see that field's comment
   for (int ti = 0; ti < nof_tasks; ti++) {
+    if (cand_task[ti].is_lookahead) {
+      /* Routed independently of the primary's dl_auto branch below on purpose: that branch updates
+       * PRIMARY-only global state (ue->dci_thres EMA, RNTI persistence, AL census, DCI11 layout
+       * stage 2) which must never see evidence from a lookahead lane's still-UNVERIFIED geometry --
+       * noise from a wrong candidate mixed into those accumulators would corrupt them for everyone. */
+      if (cand_task[ti].ok && cand_task[ti].dl_raw.rnti) {
+        const long mono = source_absolute_slot;
+        const bool just_verified = nr_pdcch_blind_lookahead_observe(cand_task[ti].lookahead_lane,
+            cand_task[ti].dl_raw.rnti, mono >= 0 ? (uint32_t)mono : abs_slot, cand_task[ti].dl_raw.payload);
+        if (just_verified)
+          nr_pdcch_blind_monitor_autodiscover_set_dci_length(g_lane_dci_length[cand_task[ti].lookahead_lane]);
+      }
+      continue;
+    }
     if (cand_task[ti].bwp_probe) {
       const nr_pdcch_blind_raw_result_t *pr = &cand_task[ti].dl_raw;
       if (cand_task[ti].ok && pr->rnti != 0) {
