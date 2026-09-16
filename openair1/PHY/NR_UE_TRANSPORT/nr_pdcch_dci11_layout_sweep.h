@@ -127,6 +127,8 @@ typedef struct {
   int      n_alive;
   int      cursor;                      ///< round-robin position for stage 2
   int      winner;                      ///< -1 until decided
+  uint32_t probe_ok[NR_DCI11_LAYOUT_MAX];  ///< code-block-0 probe passes per layout (survives sweep-context eviction)
+  uint32_t probe_tr[NR_DCI11_LAYOUT_MAX];  ///< probe trials per layout
   uint16_t riv_bits;
   uint8_t  tda_bits;
   uint16_t observed_len;

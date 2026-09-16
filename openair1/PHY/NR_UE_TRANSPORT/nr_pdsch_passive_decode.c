@@ -981,6 +981,20 @@ static bool passive_ldpc_decode_core(PHY_VARS_NR_UE *ue,
     t_seg_ok_last = seg_ok;
     if (t_probe_first_seg && C_full > 1) {
       t_probe_seg_ok = (seg_ok == 1);
+      /* The all-zero guard the full-TB path applies, on segment 0: an all-zero code block carries a
+       * zero CRC24B, so LLRs that are mostly "0" (wrong layout, wrong scrambling, empty grant) pass
+       * as a hit. On the rank-4 bed such hits landed 1/1 on a dozen different layouts and never
+       * reproduced, and exploiting them starved the search (8 hits, then none in 20000 probes). */
+      if (t_probe_seg_ok) {
+        const uint32_t seg_bytes = (TB_parameters.K >> 3) - (TB_parameters.F >> 3) - 3;
+        uint32_t i = 0;
+        while (i < seg_bytes && h->c[i] == 0)
+          i++;
+        if (i == seg_bytes) {
+          t_probe_seg_ok = false;
+          atomic_fetch_add(&g_ldpc_zero_tb, 1);
+        }
+      }
       return false; /* a probe never counts as a decoded TB */
     }
     if (seg_ok != TB_parameters.C) {

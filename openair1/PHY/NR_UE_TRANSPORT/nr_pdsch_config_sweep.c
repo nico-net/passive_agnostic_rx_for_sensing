@@ -201,6 +201,21 @@ int nr_pdsch_config_sweep_next(nr_pdsch_config_sweep_state_t *st, nr_pdsch_cfg_h
     *out = st->hyp[st->winner];
     return st->winner;
   }
+  /* EXPLOIT a hypothesis that has already passed a CRC: three trials in four go to the one with
+   * the most passes, the fourth keeps the round-robin exploring. Pure round-robin spent 5/6 of
+   * every probe on hypotheses already refuted by evidence, so a layout that hit once took ~1300
+   * grants to hit again (rank-4 bed, 809 live layouts, 2026-09-16). Ties keep the lowest index. */
+  int hot = -1;
+  for (int i = 0; i < st->n_hyp; i++)
+    if (st->ok[i] > 0 && (hot < 0 || st->ok[i] > st->ok[hot]))
+      hot = i;
+  /* Only until the hot one has the 64 trials the separation test needs; after that the fair
+   * round-robin resumes so a marginal link (5 % true rate) still reaches SWEEP_MIN_TRIALS on
+   * every hypothesis. */
+  if (hot >= 0 && st->trials[hot] < 64 && (st->exploit_tick++ & 3) != 3) {
+    *out = st->hyp[hot];
+    return hot;
+  }
   if (!st->cursor) nr_crc_shuffle(st->order, st->n_hyp, &st->random_state);
   const int idx = st->order[st->cursor];
   st->cursor = (st->cursor + 1) % st->n_hyp;

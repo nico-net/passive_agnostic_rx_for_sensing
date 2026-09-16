@@ -74,7 +74,7 @@ typedef void (*nr_pdsch_sweep_reporter_t)(const nr_pdsch_sweep_report_t *);
 void nr_pdsch_config_sweep_set_reporter(nr_pdsch_sweep_reporter_t);
 
 #define NR_PDSCH_SWEEP_MAX_HYP 192
-#define NR_PDSCH_SWEEP_MAX_CONTEXTS (16 * 16)
+#define NR_PDSCH_SWEEP_MAX_CONTEXTS 1024 /* one per (layout x TDA index) under the wide search; 256 thrashed at 809 layouts */
 
 typedef struct {
   nr_pdsch_cfg_hypothesis_t hyp[NR_PDSCH_SWEEP_MAX_HYP];
@@ -83,6 +83,7 @@ typedef struct {
   int      n_hyp;
   int      order[NR_PDSCH_SWEEP_MAX_HYP];
   uint32_t random_state;
+  uint32_t exploit_tick; ///< 3 of 4 trials go to the hypothesis with the most passes (see _next)
   int      cursor;    ///< position in the shuffled, balanced round
   int      winner;    ///< -1 until decided
 } nr_pdsch_config_sweep_state_t;
@@ -140,6 +141,7 @@ typedef struct {
   uint8_t tda_index;
   int hypothesis;
   bool settled; ///< this selection uses an already-converged context
+  uint16_t layout_index; ///< DCI 1_1 layout (resolver index) this trial was decoded under; 0xFFFF = none
 } nr_pdsch_sweep_ticket_t;
 
 /** Thread-safe per-(configuration,RNTI,TDA) controller. No allocation or decoder work under lock.

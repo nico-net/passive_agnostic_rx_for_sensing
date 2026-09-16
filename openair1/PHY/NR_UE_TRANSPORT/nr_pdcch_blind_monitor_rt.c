@@ -192,6 +192,16 @@ static uint64_t g_pdsch_configuration;
  * enumeration hard-codes antenna_ports=4 bits and can never contain the truth. OTA 2026-09-15 on the
  * rank-4 cell: 8 survivors, configured layout dead, 0/3793 TB CRC for the whole run. */
 static int g_dci11_cfg_alive = 1;
+static _Atomic int g_dl_layout_preferred; /* a DL layout family has >= 8 code-block CRC passes */
+void nr_pdcch_dci11_layout_feedback(uint16_t layout_index, bool cb0_ok)
+{
+  if (layout_index >= NR_DCI11_LAYOUT_MAX)
+    return;
+  /* consumer thread vs the receive thread's reads: plain counters, a torn read costs one tally */
+  __atomic_fetch_add(&g_dci11_resolver.probe_tr[layout_index], 1u, __ATOMIC_RELAXED);
+  if (cb0_ok)
+    __atomic_fetch_add(&g_dci11_resolver.probe_ok[layout_index], 1u, __ATOMIC_RELAXED);
+}
 static int nr_pdcch_dci11_stage2_enabled(void)
 {
   static int s_on = -1;
@@ -203,7 +213,7 @@ static int nr_pdcch_dci11_stage2_enabled(void)
 }
 static int nr_pdcch_dci11_stage2_candidates(const nr_pdcch_blind_raw_result_t *raw, uint16_t len,
                                             const nr_pdcch_blind_monitor_cfg_t *cfg,
-                                            nr_pdcch_blind_result_t *out, uint8_t *ids, int max)
+                                            nr_pdcch_blind_result_t *out, uint16_t *ids, int max)
 {
   const nr_dci11_resolver_t *r = &g_dci11_resolver;
   /* DILUTION GATE. Every candidate offered here gets its own Technique-D context, so N candidates
@@ -239,13 +249,19 @@ static int nr_pdcch_dci11_stage2_candidates(const nr_pdcch_blind_raw_result_t *r
      * for the rotation to come round again (809 live x ~6 PDSCH hypotheses: 1 hit per ~3000 probes
      * on the rank-4 bed, 2026-09-16). Everything else keeps rotating behind it. */
     int nh = 0;
-    for (int k = 0; k < no && nh < max; k++) {
+    uint32_t hot_ok[NR_DCI11_STAGE2_MAX_ALIVE + 3];
+    for (int k = 0; k < no; k++) {
       const int i = order[k];
-      uint32_t ok = 0, tr = 0;
-      const uint64_t key = (g_pdsch_configuration ^ (uint64_t)(i + 1)) * UINT64_C(1099511628211);
-      nr_pdsch_config_sweep_context_stats(key, 0, 0xFF /* any tda */, cfg->dmrs_typeA_position, &ok, &tr);
-      if (ok > 0)
-        rot[nh++] = i;
+      const uint32_t ok = r->probe_ok[i]; /* resolver-level evidence: survives sweep-context eviction */
+      if (ok == 0)
+        continue;
+      /* keep the `max` most-passed, sorted: the leader must be in every window once preferred */
+      int pos = nh < max ? nh : max - 1;
+      if (nh >= max && ok <= hot_ok[pos])
+        continue;
+      while (pos > 0 && hot_ok[pos - 1] < ok) { rot[pos] = rot[pos - 1]; hot_ok[pos] = hot_ok[pos - 1]; pos--; }
+      rot[pos] = i; hot_ok[pos] = ok;
+      if (nh < max) nh++;
     }
     for (int k = 0, w = nh; k < no && w < no; k++) {
       const int i = order[(start + k) % no];
@@ -304,7 +320,8 @@ static int nr_pdcch_dci11_stage2_candidates(const nr_pdcch_blind_raw_result_t *r
       continue;
     }
     out[count] = parsed;
-    ids[count++] = (uint8_t)i;
+    ids[count++] = (uint16_t)i; /* resolver index: up to 2048, a uint8_t wrapped it and merged
+                                 * the sweep contexts / evidence of layouts 256 apart */
   }
   return count;
 }
@@ -498,9 +515,7 @@ static void nr_pdcch_dci11_layout_observe(const nr_pdcch_blind_monitor_cfg_t *cf
       nr_dci11_field_bits_t f;
       if (!nr_dci11_layout_to_field_bits(&r->hyp[i], &f))
         continue;
-      uint32_t ok = 0, tr = 0;
-      const uint64_t key = (g_pdsch_configuration ^ (uint64_t)(i + 1)) * UINT64_C(1099511628211);
-      nr_pdsch_config_sweep_context_stats(key, 0 /* any rnti */, 0xFF /* any tda */, cfg->dmrs_typeA_position, &ok, &tr);
+      const uint32_t ok = r->probe_ok[i], tr = r->probe_tr[i];
       u += snprintf(eb + u, sizeof(eb) - u, "[%d t%ub%dm%dx%da%d%cp%d:%u/%u]", i, (unsigned)r->off[i].tda_bits,
                     f.bwp_indicator_bits, f.vrb_to_prb_bits, f.tb2_bits, f.antenna_ports_bits,
                     f.dmrs_config_type ? 'B' : 'A', f.tci_bits, ok, tr);
@@ -516,6 +531,7 @@ static nr_pdcch_dci_length_sweep_state_t g_dl_length_state;
 static void dl_discovery_invalidate(void)
 {
   g_length_swept = g_length_found = false;
+  atomic_store_explicit(&g_dl_layout_preferred, 0, memory_order_relaxed);
   nr_pdcch_dci_length_sweep_reset(&g_dl_length_state);
   nr_pdsch_config_sweep_reset_all();
   g_pdsch_sweep_on = false;
@@ -972,6 +988,7 @@ typedef struct {
      must be unable to see this task kind at all. */
   bool         dl_auto;
   uint64_t     dl_layout_configuration;
+  uint16_t     dl_layout_index; /* resolver index of the layout decoded under (0xFFFF = none) */
   nr_pdcch_blind_raw_result_t dl_raw;
   bool         ul_auto; // raw decode; sequential controller interprets the CRC-verified bits
   uint8_t      ul_scan; // 1 = interpret this candidate as DCI 0_1; `format` is then meaningless
@@ -2654,14 +2671,17 @@ constdiag_done:;
       /* Sized by the hand-over, NOT by the resolver's 512-entry capacity: this runs on a scan
        * consumer's stack, and 512 results there overflowed it on the first DL grant (OTA 2026-09-15). */
       nr_pdcch_blind_result_t layouts[NR_DCI11_STAGE2_MAX_ALIVE + 3];
-      uint8_t layout_ids[NR_DCI11_STAGE2_MAX_ALIVE + 3];
+      uint16_t layout_ids[NR_DCI11_STAGE2_MAX_ALIVE + 3];
       int n = 0;
       if ((nr_pdcch_dci11_stage2_enabled() || nr_agnostic_v2()) && g_dci11_state == 1)
         n = nr_pdcch_dci11_stage2_candidates(raw, cand_task[ti].dci_length, cfg, layouts, layout_ids, NR_DCI11_STAGE2_MAX_ALIVE);
       const bool from_stage2 = (n > 0);
-      if (!n)
+      if (!n) {
+        uint8_t ids8[3];
         n = nr_pdcch_blind_dl_layout_candidates(raw, cand_task[ti].dci_length,
-            cfg->bwp_size, cfg->dmrs_typeA_position, layouts, layout_ids);
+            cfg->bwp_size, cfg->dmrs_typeA_position, layouts, ids8);
+        for (int i = 0; i < n && i < 3; i++) layout_ids[i] = ids8[i];
+      }
       if (!n) continue;
       {
         static uint32_t s_cand_n;
@@ -2694,13 +2714,19 @@ constdiag_done:;
       uint32_t ts_ok[NR_DCI11_STAGE2_MAX_ALIVE + 3], ts_tr[NR_DCI11_STAGE2_MAX_ALIVE + 3];
       for (int i=0;i<n;++i) {
         uint32_t ok=0,tr=0;
-        nr_pdsch_config_sweep_context_stats(keys[i],raw->rnti,layouts[i].tda_index,cfg->dmrs_typeA_position,&ok,&tr);
+        if (from_stage2 && layout_ids[i] < NR_DCI11_LAYOUT_MAX) {
+          /* wide search: the resolver's own probe tallies (a sweep context can be evicted between
+           * two probes of the same layout; these cannot) */
+          ok = g_dci11_resolver.probe_ok[layout_ids[i]]; tr = g_dci11_resolver.probe_tr[layout_ids[i]];
+        } else
+          nr_pdsch_config_sweep_context_stats(keys[i],raw->rnti,layouts[i].tda_index,cfg->dmrs_typeA_position,&ok,&tr);
         ts_ok[i]=ok; ts_tr[i]=tr;
         if (ok>preferred_ok) { preferred_ok=ok; preferred=i; }
         else if (ok==preferred_ok && preferred>=0 && ok>0) preferred=-1; // tie: no preference
       }
       if (preferred>=0 && preferred_ok>=8) {
         static uint8_t s_pref_logged[65536];
+        atomic_store_explicit(&g_dl_layout_preferred, 1, memory_order_relaxed); /* probing is over: decode */
         if (!s_pref_logged[raw->rnti]) {
           s_pref_logged[raw->rnti]=1;
           LOG_A(PHY,"SENSING: DL layout family PREFERRED by TB CRC: rnti=0x%x layout_id=%u (%d candidates) passes=%u\n",
@@ -2724,6 +2750,7 @@ constdiag_done:;
       const int selected=settled>=0 ? settled : preferred>=0 ? preferred : fallback;
       cand_task[ti].out=layouts[selected];
       cand_task[ti].dl_layout_configuration=keys[selected];
+      cand_task[ti].dl_layout_index=from_stage2 ? layout_ids[selected] : 0xFFFF;
     }
     const nr_pdcch_blind_result_t out = cand_task[ti].out;
     if (!cand_task[ti].ok) {
@@ -2990,6 +3017,7 @@ constdiag_done:;
                                        nr_pdcch_blind_dmrs_mask, &sweep_ticket, &hy))
         continue; /* Unsupported auto context is not a guessed manual success. */
       nr_pdsch_adaptive_apply(&hy, &dlsch_pdu, &grant_mcs_table, &grant_mcs_table_lbrm);
+      sweep_ticket.layout_index = cand_task[ti].dl_auto ? cand_task[ti].dl_layout_index : 0xFFFF;
       dmrs_sym = __builtin_ctz((unsigned)hy.dmrs_mask);
     }
     dlsch_pdu.pduBitmap          = 0; // no PTRS: format 1_1 with no dedicated PTRS config
@@ -3068,8 +3096,12 @@ constdiag_done:;
       job.sweep_ticket  = sweep_ticket;
       job.bwp_entry     = cand_task[ti].bwp_entry;
       /* Wide layout set: this trial is a first-code-block probe, not a full decode. */
+      /* ... until a layout family is PREFERRED by its own code-block CRCs: from then on every
+       * trial is a full decode (the rank-4 bed converged at 22k grants and then sat at 0 % CRC
+       * because it kept probing -- a probe never reports a TB). */
       job.layout_probe  = (cand_task[ti].dl_auto && g_dci11_state == 1
-                           && g_dci11_resolver.n_alive > NR_DCI11_STAGE2_MAX_ALIVE) ? 1 : 0;
+                           && g_dci11_resolver.n_alive > NR_DCI11_STAGE2_MAX_ALIVE
+                           && !atomic_load_explicit(&g_dl_layout_preferred, memory_order_relaxed)) ? 1 : 0;
       nr_pdsch_passive_queue_enqueue(&job);
       continue;
     }
