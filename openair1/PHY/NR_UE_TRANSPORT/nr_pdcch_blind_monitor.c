@@ -332,6 +332,25 @@ static int s_obs_calls;
 static nr_pdcch_extent_cand_t s_ext_cand[NR_PDCCH_EXTENT_MAX_CAND];
 static int  s_ext_n        = 0;
 static int  s_ext_idx      = 0;
+/* CCE-to-REG mapping hypotheses of the extent under test (nr_pdcch_map_candidates). Each
+ * (extent, mapping) pair gets the same NR_PDCCH_EXTENT_VERIFY_OCC dwell. */
+#define NR_PDCCH_MAP_MAX_CAND 512
+static nr_pdcch_map_cand_t s_map_cand[NR_PDCCH_MAP_MAX_CAND];
+static int  s_map_n        = 0;
+static int  s_map_idx      = 0;
+static void map_apply(void)
+{
+  const nr_pdcch_map_cand_t *m = &s_map_cand[s_map_idx];
+  g_cfg.coreset_reg_bundle_size  = m->bundle;
+  g_cfg.coreset_interleaver_size = m->interleaver;
+  g_cfg.coreset_shift_index      = m->shift;
+}
+static void map_restart(int span_rb, int duration, int pci)
+{
+  s_map_n = nr_pdcch_map_candidates(span_rb, duration, pci, s_map_cand, NR_PDCCH_MAP_MAX_CAND);
+  s_map_idx = 0;
+  map_apply();
+}
 static bool s_ext_verified = false;
 static int  s_ext_occ      = 0;
 static uint64_t s_ext_generation;
@@ -386,6 +405,13 @@ static bool extent_advance(void)
     return false;
   extent_clear_evidence();
   g_cfg.dci_length_override = 0;
+  if (++s_map_idx < s_map_n) {
+    map_apply();
+    LOG_I(PHY, "SENSING: CORESET candidate %d/%d mapping %d/%d: offset=%d span=%d bundle=%u interleaver=%u shift=%u (unverified)\n",
+          s_ext_idx + 1, s_ext_n, s_map_idx + 1, s_map_n, g_cfg.coreset_rb_offset, g_cfg.coreset_freq_domain * 6,
+          g_cfg.coreset_reg_bundle_size, g_cfg.coreset_interleaver_size, g_cfg.coreset_shift_index);
+    return true;
+  }
   if (++s_ext_idx >= s_ext_n) {
     /* Inconclusive, never "verified" and never a fallback to candidate zero.
      * Re-observe the live occupancy on a new epoch; no permanent quiet-link blacklist. */
@@ -396,8 +422,9 @@ static bool extent_advance(void)
   }
   g_cfg.coreset_rb_offset = s_ext_cand[s_ext_idx].first_w * 6;
   g_cfg.coreset_freq_domain = s_ext_cand[s_ext_idx].last_w - s_ext_cand[s_ext_idx].first_w + 1;
-  LOG_I(PHY, "SENSING: CORESET candidate %d/%d: offset=%d span=%d (unverified)\n",
-        s_ext_idx + 1, s_ext_n, g_cfg.coreset_rb_offset, g_cfg.coreset_freq_domain * 6);
+  map_restart(g_cfg.coreset_freq_domain * 6, g_cfg.coreset_duration, g_cfg.coreset_pdcch_dmrs_scrambling_id);
+  LOG_I(PHY, "SENSING: CORESET candidate %d/%d: offset=%d span=%d (%d mappings, unverified)\n",
+        s_ext_idx + 1, s_ext_n, g_cfg.coreset_rb_offset, g_cfg.coreset_freq_domain * 6, s_map_n);
   return true;
 }
 void nr_pdcch_blind_monitor_autodiscover_reset(void)
@@ -405,11 +432,45 @@ void nr_pdcch_blind_monitor_autodiscover_reset(void)
   s_css0_applied = false;
   s_dedicated_found = false;
   s_ext_n = s_ext_idx = 0;
+  s_map_n = s_map_idx = 0;
   memset(s_hit_count, 0, sizeof(s_hit_count));
   memset(s_hit_count1, 0, sizeof(s_hit_count1));
   s_obs_calls = 0;
   g_cfg.dci_length_override = 0;
   extent_clear_evidence();
+}
+
+int nr_pdcch_map_candidates(int span_rb, int duration, int pci, nr_pdcch_map_cand_t *out, int max_out)
+{
+  if (out == NULL || max_out <= 0 || span_rb <= 0 || duration < 1 || duration > 3)
+    return 0;
+  int n = 0;
+  out[n++] = (nr_pdcch_map_cand_t){0, 0, 0}; /* non-interleaved: this project's every captured dedicated CORESET */
+  const int N_reg = span_rb * duration;
+  static const int Ls[2][2] = {{2, 6}, {3, 6}};
+  const int *L = Ls[duration == 3];
+  static const int Rs[3] = {2, 3, 6};
+  for (int li = 0; li < 2; li++) {
+    const int nb = N_reg / L[li];             /* REG bundles; the shift acts modulo this */
+    if (L[li] % duration != 0 || nb > 255)   /* demapper: B_rb = L/duration; FAPI ShiftIndex is 8-bit */
+      continue;
+    for (int ri = 0; ri < 3; ri++) {
+      const int R = Rs[ri];
+      if (N_reg % (L[li] * R) != 0)           /* C = N_REG/(L*R) must be an integer */
+        continue;
+      /* every distinct residue: the PCI's first, 0 second, then the rest in order */
+      for (int k = -2; k < nb && n < max_out; k++) {
+        int sh;
+        if (k == -2) sh = pci % nb;
+        else if (k == -1) sh = 0;
+        else sh = k;
+        if ((k == -1 && sh == pci % nb) || (k >= 0 && (sh == pci % nb || sh == 0)))
+          continue;
+        out[n++] = (nr_pdcch_map_cand_t){(uint8_t)L[li], (uint8_t)R, (uint8_t)sh};
+      }
+    }
+  }
+  return n;
 }
 
 
@@ -709,6 +770,7 @@ bool nr_pdcch_blind_monitor_autodiscover_step(const void* rxdataF_symbol, int of
   // and never read ShiftIndex when non-interleaved), but 0 is the value that's actually
   // correct here, not a default guess of pci.
   g_cfg.coreset_shift_index     = 0;
+  /* mapping list for candidate 0 is started below, once the duration is decided */
 
   /* CSS0 autoconf (a hard prerequisite for this feature's bootstrap RNTI -- see the autodiscover
    * conf knob's own comment) runs first and populates these SAME g_cfg fields for CORESET#0/SIB1.
@@ -793,15 +855,11 @@ bool nr_pdcch_blind_monitor_autodiscover_step(const void* rxdataF_symbol, int of
     LOG_I(PHY, "SENSING: Phase 3 autodiscover -- CORESET duration %d (symbol-0 hits %u, symbol-1 hits %u over the footprint)\n",
           g_cfg.coreset_duration, h0, h1);
   }
-  g_cfg.coreset_reg_bundle_size          = 0;
-  // interleaver_size=0 matches the manual ground-truth dedicated conf's own field 4
-  // (tests/passive_rx/ota/nrue.passive_rx.conf: "45:1:0:0:0:2"). Inert either way given
-  // reg_bundle_size=0 above -- both nr_pdcch_demapping_deinterleaving() (dci_nr.c, this module's
-  // actual RX demapper) and cce_to_reg_interleaving() (nr_common.c) take the non-interleaved
-  // identity path (f = k) whenever the bundle size is 0, never reading R -- but 0 is the value
-  // that's actually correct here, not a leftover 2 from CORESET#0's own (genuinely interleaved,
-  // R=2) reset above.
-  g_cfg.coreset_interleaver_size         = 0;
+  /* CCE-to-REG mapping: hypothesis 0 is non-interleaved (bundle 0 -- the demapper's identity
+   * path, this project's every captured dedicated CORESET); the interleaved (L, R, shift)
+   * hypotheses follow, each with the same dwell, when the non-interleaved one collects no
+   * dedicated-DCI evidence (nr_pdcch_map_candidates, extent_advance). */
+  map_restart(span_rb, g_cfg.coreset_duration, pci);
   g_cfg.ss_monitoring_slot_periodicity   = 1;
   g_cfg.ss_monitoring_slot_offset        = 0;
   g_cfg.ss_duration                      = 1;

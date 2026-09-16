@@ -130,26 +130,41 @@ TEST_F(DlGeometry, RetrySearchesOtherWidthsAtSameOffsetAndNeverInventsVerificati
   const auto *cfg=nr_pdcch_blind_monitor_get_cfg();
   EXPECT_EQ(cfg->coreset_rb_offset,18);
   EXPECT_EQ(cfg->coreset_freq_domain,1);
+  EXPECT_EQ(cfg->coreset_reg_bundle_size,0); // hypothesis 0: non-interleaved
+  // Every CCE-to-REG mapping of an extent is tried before the next extent: a retry walks the
+  // interleaved hypotheses of this 6-RB window first (each with the same dwell as an extent).
+  auto n_maps=[&](){ nr_pdcch_map_cand_t m[512]; return nr_pdcch_map_candidates(cfg->coreset_freq_domain*6,cfg->coreset_duration,cfg->coreset_pdcch_dmrs_scrambling_id,m,512); };
+  const int maps0=n_maps();
+  EXPECT_GT(maps0,1);
+  for(int i=1;i<maps0;i++){
+    nr_pdcch_blind_monitor_autodiscover_retry(18);
+    EXPECT_EQ(cfg->coreset_rb_offset,18);
+    EXPECT_EQ(cfg->coreset_freq_domain,1);
+    EXPECT_NE(cfg->coreset_reg_bundle_size,0);
+  }
   nr_pdcch_blind_monitor_autodiscover_retry(18);
-  // The second hypothesis is the full carrier (see ExtentCandidates.NearestHypothesesComeFirst);
-  // the nearest dilation of the observed window comes after it.
+  // The second extent is the full carrier (see ExtentCandidates.NearestHypothesesComeFirst),
+  // back at the non-interleaved mapping; the nearest dilation of the observed window comes after it.
   EXPECT_EQ(cfg->coreset_rb_offset,0);
   EXPECT_EQ(cfg->coreset_freq_domain,cfg->bwp_size/6);
+  EXPECT_EQ(cfg->coreset_reg_bundle_size,0);
+  for(int i=1;i<n_maps();i++) nr_pdcch_blind_monitor_autodiscover_retry(0);
   nr_pdcch_blind_monitor_autodiscover_retry(0);
   EXPECT_EQ(cfg->coreset_rb_offset,18);
   EXPECT_EQ(cfg->coreset_freq_domain,2);
   EXPECT_FALSE(nr_pdcch_blind_monitor_autodiscover_offset_rejected(18));
-  int trials=1;
-  while(nr_pdcch_blind_monitor_autodiscover_done() && trials<40) {
+  int extents=3, trials=0;
+  while(nr_pdcch_blind_monitor_autodiscover_done() && trials<20000) {
+    const int off=cfg->coreset_rb_offset, span=cfg->coreset_freq_domain;
     nr_pdcch_blind_monitor_autodiscover_retry(cfg->bwp_start+cfg->coreset_rb_offset);
     trials++;
+    if(nr_pdcch_blind_monitor_autodiscover_done() && (cfg->coreset_rb_offset!=off || cfg->coreset_freq_domain!=span)) extents++;
     EXPECT_FALSE(nr_pdcch_blind_monitor_autodiscover_extent_verified());
   }
   EXPECT_FALSE(nr_pdcch_blind_monitor_autodiscover_done());
   // Four admissible starts x five admissible ends = 20 geometries, all searched; the full carrier
   // is taken as the second hypothesis and is one of those 20, so the count is unchanged.
-  EXPECT_GE(trials,19);
-  EXPECT_LE(trials,20);
+  EXPECT_EQ(extents,20);
   ASSERT_NO_FATAL_FAILURE(discover_single_window()); // quiet intervals do not permanently blacklist
 }
 TEST(DlAdaptive, ExtentCatalogContainsEveryAdmissibleContiguousGeometry) {

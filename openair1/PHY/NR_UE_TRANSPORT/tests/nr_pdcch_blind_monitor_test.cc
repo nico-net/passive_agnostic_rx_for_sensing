@@ -3018,3 +3018,58 @@ TEST_F(BlindPdcchTest, UlFeedbackOwnershipStillSeparatesActualOptionChanges) {
   EXPECT_EQ(nr_pdcch_ul_discovery_snapshot().raw_samples,16);
   nr_pdcch_ul_discovery_reset();
 }
+
+// ---- CCE-to-REG mapping hypotheses (TS 38.211 7.3.2.2) ------------------------------------------
+TEST(MapCandidates, NonInterleavedFirstThenEveryLegalInterleavedMappingWithPciFirst) {
+  // Truth on a commercial cell: a 48-RB, 1-symbol dedicated CORESET interleaved with L=6, R=2,
+  // shift = PCI (CORESET#0-style). The hypothesis list must contain it, must not seed it as the
+  // answer (non-interleaved comes first), and must try the PCI's residue before any other shift.
+  nr_pdcch_map_cand_t c[512];
+  const int n = nr_pdcch_map_candidates(48, 1, 2, c, 512);
+  ASSERT_GT(n, 1);
+  EXPECT_EQ(c[0].bundle, 0);
+  int truth = -1, first_62 = -1;
+  for (int i = 0; i < n; i++) {
+    const int nreg = 48, L = c[i].bundle;
+    if (L == 0) { EXPECT_EQ(i, 0); continue; }
+    EXPECT_TRUE(L == 2 || L == 6);                       // duration 1: L in {2, 6}
+    EXPECT_EQ(nreg % (L * c[i].interleaver), 0);         // C integer
+    EXPECT_LT(c[i].shift, nreg / L);                     // reduced modulo N_REG/L
+    if (L == 6 && c[i].interleaver == 2) {
+      if (first_62 < 0) first_62 = i;
+      if (c[i].shift == 2 % (nreg / 6)) truth = i;
+    }
+  }
+  ASSERT_GE(truth, 0);
+  EXPECT_EQ(truth, first_62);                            // PCI residue is the first shift tried
+  EXPECT_EQ(c[first_62 + 1].shift, 0);                   // 0 second
+  // every (L, R, shift) distinct
+  for (int i = 0; i < n; i++)
+    for (int j = i + 1; j < n; j++)
+      EXPECT_FALSE(c[i].bundle == c[j].bundle && c[i].interleaver == c[j].interleaver && c[i].shift == c[j].shift);
+  // count: L=2: R in {2,3,6} legal (48 % 4, % 6, % 12 == 0) -> 3 x 24 shifts; L=6: R=2 (48%12) legal,
+  // R=3 (48%18) not, R=6 (48%36) not -> 8 shifts. 1 + 72 + 8.
+  EXPECT_EQ(n, 1 + 3 * 24 + 8);
+}
+
+TEST(MapCandidates, DurationThreeUsesBundleThreeAndSix) {
+  nr_pdcch_map_cand_t c[512];
+  const int n = nr_pdcch_map_candidates(24, 3, 100, c, 512);
+  ASSERT_GT(n, 1);
+  for (int i = 1; i < n; i++)
+    EXPECT_TRUE(c[i].bundle == 3 || c[i].bundle == 6);
+  // 72 REGs: L=3 -> 24 bundles, R in {2,3,6} all legal; L=6 -> 12 bundles, R in {2,3,6} all legal
+  EXPECT_EQ(n, 1 + 3 * 24 + 3 * 12);
+  EXPECT_EQ(c[1].shift, 100 % 24);
+}
+
+TEST(MapCandidates, ANonInterleavedCellNeedsNoDwellBeyondHypothesisZero) {
+  // The OAI rfsim / srsRAN dedicated CORESETs are non-interleaved: hypothesis 0 is exactly the
+  // config those cells decode with (bundle 0 = demapper identity path), so they lock with no
+  // added dwell whatever the interleaved tail holds.
+  nr_pdcch_map_cand_t c[8];
+  ASSERT_GE(nr_pdcch_map_candidates(240, 1, 2, c, 8), 1);
+  EXPECT_EQ(c[0].bundle, 0);
+  EXPECT_EQ(c[0].interleaver, 0);
+  EXPECT_EQ(c[0].shift, 0);
+}

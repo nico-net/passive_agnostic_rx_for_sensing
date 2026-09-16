@@ -810,6 +810,17 @@ int32_t nr_pdcch_blind_dmrs_mask(int dmrs_TypeA_Position, int NrOfSymbols, int s
 int nr_pdcch_extent_candidates(int first_w, int last_w, int nw_total,
                                nr_pdcch_extent_cand_t* out, int max_out);
 
+/** One CCE-to-REG mapping hypothesis for a dedicated CORESET (TS 38.211 7.3.2.2): bundle = 0 is
+ *  non-interleaved; otherwise (L, R, n_shift) with n_shift already reduced modulo N_REG/L. */
+typedef struct { uint8_t bundle; uint8_t interleaver; uint8_t shift; } nr_pdcch_map_cand_t;
+
+/** Enumerate the legal CCE-to-REG mappings of a CORESET of span_rb x duration, decided by DCI CRC
+ *  evidence exactly like the extent hypotheses. Order: non-interleaved first, then for each legal
+ *  (L, R) -- L in {2,6} (duration 1,2) / {3,6} (duration 3), R in {2,3,6}, N_REG divisible by L*R --
+ *  every distinct shift modulo N_REG/L, the PCI's residue first and 0 second: the PCI is one
+ *  hypothesis, never the seeded answer. Returns the number written (capped by max_out). */
+int nr_pdcch_map_candidates(int span_rb, int duration, int pci, nr_pdcch_map_cand_t *out, int max_out);
+
 /** Phase 3 Technique A, extent verification. Call once per candidate-bearing occasion after the
  * footprint is found: it scores the currently applied CORESET extent by whether Technique B
  * confirms a C-RNTI under it, and advances to the next admissible extent hypothesis if not.
