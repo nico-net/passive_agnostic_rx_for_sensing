@@ -322,6 +322,10 @@ uint32_t get_ssb_offset_to_pointA(uint32_t absoluteFrequencySSB,
 int get_ssb_subcarrier_offset(uint32_t absoluteFrequencySSB, uint32_t absoluteFrequencyPointA, int scs);
 int get_delay_idx(int delay, int max_delay_comp);
 
+/** Band-wide SSB search: RX centre frequencies (Hz) that cover the band's synchronisation raster in
+ *  sampling-bandwidth-sized windows (nbRB at mu), adjacent windows overlapping by one SSB width.
+ *  Returns the count written (at most max). */
+int nr_band_scan_windows(const int nrBand, const int mu, const int nbRB, uint64_t *centres, const int max);
 int get_scan_ssb_first_sc(const double fc,
                           const int nbRB,
                           const int nrBand,

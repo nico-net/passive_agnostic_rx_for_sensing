@@ -9,6 +9,11 @@
 #include "common/config/config_paramdesc.h"
 #include "common/config/config_userapi.h"
 #include "openair1/PHY/phy_extern_nr_ue.h"
+#include "PHY/MODULATION/nr_modulation.h" // init_symbol_rotation
+#include "common/utils/nr/nr_common.h"     // nr_band_scan_windows
+#define NRUE_BAND_SCAN_MAX 64
+static uint64_t s_band_scan_c[NRUE_BAND_SCAN_MAX];
+static int s_band_scan_n = 0, s_band_scan_i = -1;
 
 /* NR UE RU configuration section name */
 #define CONFIG_STRING_NRUE_RU_LIST "RUs"
@@ -131,9 +136,32 @@ void nrue_set_cell_params(configmodule_interface_t *cfg)
     nrue_cell_count = 1;
     nrue_cell_fp = calloc_or_fail(nrue_cell_count, sizeof(NR_DL_FRAME_PARMS));
     nrue_cells = calloc_or_fail(nrue_cell_count, sizeof(nrUE_cell_params_t));
+    uint64_t rf_frequency = downlink_frequency[0][0];
+    /* BAND-WIDE SEARCH: no -C given, only --band. The RX centre steps across the band's SSB raster
+     * in sampling-bandwidth windows (nrue_band_scan_next, one per failed acquisition); the first
+     * window is tuned here so the radio never starts at 0 Hz. Once MIB/SIB1 give point A the
+     * existing SYNC REQ retune moves the carrier to the cell's own centre. */
+    if (rf_frequency == 0 && get_nrUE_params()->UE_scan_carrier) {
+      s_band_scan_n = nr_band_scan_windows(get_softmodem_params()->band, get_softmodem_params()->numerology,
+                                           get_nrUE_params()->N_RB_DL, s_band_scan_c, NRUE_BAND_SCAN_MAX);
+      AssertFatal(s_band_scan_n > 0, "band-wide search: no synchronisation raster for band %d\n", get_softmodem_params()->band);
+      s_band_scan_i = 0;
+      /* rfsim carries the gNB's baseband whatever the UE is tuned to, so a band scan there can only
+       * be exercised mechanically; ISAC_BANDSCAN_FIRST_HZ puts the cell's centre first (test knob). */
+      const char *first = getenv("ISAC_BANDSCAN_FIRST_HZ");
+      if (first != NULL && strtoull(first, NULL, 10) > 0) {
+        for (int i = s_band_scan_n; i > 0; i--)
+          s_band_scan_c[i] = s_band_scan_c[i - 1];
+        s_band_scan_c[0] = strtoull(first, NULL, 10);
+        s_band_scan_n = s_band_scan_n < NRUE_BAND_SCAN_MAX ? s_band_scan_n + 1 : NRUE_BAND_SCAN_MAX;
+      }
+      rf_frequency = s_band_scan_c[0];
+      LOG_W(PHY, "SENSING: BANDSCAN band %d: %d windows of %d RB, first centre %lu Hz\n",
+            get_softmodem_params()->band, s_band_scan_n, get_nrUE_params()->N_RB_DL, rf_frequency);
+    }
     nrue_cells[0] = (nrUE_cell_params_t){.ru_id = 0,
                                          .band = get_softmodem_params()->band,
-                                         .rf_frequency = downlink_frequency[0][0],
+                                         .rf_frequency = rf_frequency,
                                          .rf_freq_offset = uplink_frequency_offset[0][0],
                                          .numerology = get_softmodem_params()->numerology,
                                          .N_RB_DL = get_nrUE_params()->N_RB_DL,
@@ -430,6 +458,33 @@ void nrue_ru_end(void)
     if (ru->trx_end_func)
       ru->trx_end_func(ru);
   }
+}
+
+bool nrue_band_scan_active(void)
+{
+  return s_band_scan_n > 1;
+}
+int nrue_band_scan_next(PHY_VARS_NR_UE *UE)
+{
+  if (s_band_scan_n <= 1)
+    return 0;
+  s_band_scan_i = (s_band_scan_i + 1) % s_band_scan_n;
+  NR_DL_FRAME_PARMS *fp = &UE->frame_parms;
+  const uint64_t dl = s_band_scan_c[s_band_scan_i];
+  const int64_t duplex = (int64_t)fp->ul_CarrierFreq - (int64_t)fp->dl_CarrierFreq;
+  LOG_W(PHY, "SENSING: BANDSCAN window %d/%d: retuning every channel to %lu Hz and re-initialising the device\n",
+        s_band_scan_i + 1, s_band_scan_n, dl);
+  /* All channels, via the device re-init that is proven to survive on the X410 (a bare live retune
+   * moved channel 0 only and killed 3/3 runs -- CFOTRK's own record). */
+  nrue_ru_set_freq(UE, dl + duplex, dl, UE->common_vars.freq_offset);
+  fp->dl_CarrierFreq = dl;
+  fp->ul_CarrierFreq = dl + duplex;
+  init_symbol_rotation(fp);
+  if (nrue_ru_reinit() != 0) {
+    LOG_E(PHY, "SENSING: BANDSCAN device re-init FAILED at %lu Hz\n", dl);
+    return -1;
+  }
+  return 0;
 }
 
 void nrue_ru_set_freq(PHY_VARS_NR_UE *UE, uint64_t ul_carrier, uint64_t dl_carrier, int freq_offset)

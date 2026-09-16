@@ -1144,6 +1144,38 @@ int get_scan_ssb_first_sc(const double fc, const int nbRB, const int nrBand, con
   return numGscn;
 }
 
+int nr_band_scan_windows(const int nrBand, const int mu, const int nbRB, uint64_t *centres, const int max)
+{
+  const sync_raster_t *r = sync_raster;
+  const sync_raster_t *end = sync_raster + sizeofArray(sync_raster);
+  while (r < end && (r->band != nrBand || r->scs_index != mu))
+    r++;
+  if (r >= end || centres == NULL || max <= 0 || nbRB <= 0)
+    return 0;
+  const double scs = MU_SCS(mu) * 1e3;
+  const double ssbBW = 20 * NR_NB_SC_PER_RB * scs;
+  const double bw = (double)nbRB * NR_NB_SC_PER_RB * scs;
+  const double lo = get_ssref_from_gscn(r->first_gscn) - ssbBW / 2;
+  const double hi = get_ssref_from_gscn(r->last_gscn) + ssbBW / 2;
+  /* Adjacent windows overlap by one SSB width, so a raster point straddling a boundary is still
+   * fully inside one of them; the last window is pulled back to end at the band's top. */
+  const double step = bw - ssbBW;
+  if (step <= 0 || hi <= lo)
+    return 0;
+  int n = 0;
+  for (double start = lo; start < hi && n < max; start += step) {
+    double c = start + bw / 2;
+    if (c + bw / 2 > hi)
+      c = hi - bw / 2;
+    if (c - bw / 2 < lo)
+      c = lo + bw / 2;
+    centres[n++] = (uint64_t)llround(c);
+    if (c + bw / 2 >= hi)
+      break;
+  }
+  return n;
+}
+
 // Table 38.211 6.3.3.1-1
 static uint8_t long_prach_dur[4] = {1, 3, 4, 1}; // 0.9, 2.28, 3.35, 0.9 ms
 

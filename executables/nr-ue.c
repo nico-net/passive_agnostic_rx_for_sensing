@@ -1126,6 +1126,13 @@ void *UE_thread(void *arg)
       else
         UE->max_pos_acc = 0;
       UE->max_pos_iir = 0;
+      /* Band-wide search (no -C): every failed acquisition steps the RX window before the next
+       * capture; the first attempt uses the window tuned at start-up. */
+      {
+        static int s_band_scan_attempts = 0;
+        if (nrue_band_scan_active() && s_band_scan_attempts++ > 0)
+          nrue_band_scan_next(UE);
+      }
       readFrame(UE, &sync_timestamp, duration_rx_to_tx, false);
       if (oai_exit)
         break;

@@ -593,8 +593,22 @@ nr_initial_sync_t nr_initial_sync(UE_nr_rxtx_proc_t *proc,
    * is bounded by BOTH the worker count and a fixed scratch budget, which keeps peak memory flat
    * regardless of bandwidth, antenna count, or how many GSCN the band search yields.
    */
+  /* SCAN ON ONE ANTENNA. Acquisition needs one receive branch: PSS/SSS/PBCH on antenna 0 alone
+   * is what every single-channel run ever used, and the 4-channel scan cost 4x the scratch per
+   * GSCN (the ~1.6 GB that made malloc16() fail at 273 PRB x 4 RX x ~40 GSCN) for a combining
+   * gain the acquisition never needed. The scan sees a frame-parms copy with nb_antennas_rx =
+   * scan_ant; the receive chain itself keeps every antenna -- nothing is retuned, the stream is
+   * the same 4 channels before and after lock. ISAC_SCAN_ANT=N widens it (A/B only). */
+  NR_DL_FRAME_PARMS scan_fp = ue->frame_parms;
+  {
+    const char *e = getenv("ISAC_SCAN_ANT");
+    int scan_ant = (e != NULL) ? atoi(e) : 1;
+    if (scan_ant < 1 || scan_ant > fp->nb_antennas_rx)
+      scan_ant = fp->nb_antennas_rx;
+    scan_fp.nb_antennas_rx = scan_ant;
+  }
   const size_t rxdata_len = (size_t)fp->samples_per_frame * n_frames + fp->ofdm_symbol_size;
-  const size_t bytes_per_gscn = (size_t)fp->nb_antennas_rx * rxdata_len * sizeof(c16_t);
+  const size_t bytes_per_gscn = (size_t)scan_fp.nb_antennas_rx * rxdata_len * sizeof(c16_t);
   size_t max_by_mem = NR_INITIAL_SYNC_SCAN_SCRATCH_BUDGET / (bytes_per_gscn ? bytes_per_gscn : 1);
   if (max_by_mem < 1)
     max_by_mem = 1; // one GSCN at a time is the floor; below that the scan cannot run at all
@@ -649,7 +663,7 @@ nr_initial_sync_t nr_initial_sync(UE_nr_rxtx_proc_t *proc,
     for (int k = 0; k < n; k++) {
       nr_ue_ssb_scan_t *ssbInfo = &ssb_info[base + k];
       *ssbInfo = (nr_ue_ssb_scan_t){.gscnInfo = gscnInfo[base + k],
-                                    .fp = &ue->frame_parms,
+                                    .fp = &scan_fp,
                                     .proc = proc,
                                     .syncRes.cell_detected = false,
                                     .nFrames = n_frames,
@@ -657,13 +671,13 @@ nr_initial_sync_t nr_initial_sync(UE_nr_rxtx_proc_t *proc,
                                     .freqOffset = auto_acquire ? coarse_offset : ue->initial_fo,
                                     .targetNidCell = ue->target_Nid_cell};
       ready[k] = false;
-      ssbInfo->rxdata = malloc16_clear(fp->nb_antennas_rx * sizeof(c16_t *));
+      ssbInfo->rxdata = malloc16_clear(scan_fp.nb_antennas_rx * sizeof(c16_t *));
       if (!ssbInfo->rxdata) {
         LOG_E(NR_PHY, "GSCN %d: cannot allocate scan buffer array, skipping this GSCN\n", ssbInfo->gscnInfo.gscn);
         continue;
       }
       bool ok = true;
-      for (int ant = 0; ant < fp->nb_antennas_rx; ant++) {
+      for (int ant = 0; ant < scan_fp.nb_antennas_rx; ant++) {
         ssbInfo->rxdata[ant] = malloc16(sizeof(c16_t) * rxdata_len);
         if (!ssbInfo->rxdata[ant]) {
           LOG_E(NR_PHY,
@@ -717,7 +731,7 @@ nr_initial_sync_t nr_initial_sync(UE_nr_rxtx_proc_t *proc,
           res = ssbInfo;
       }
       if (ssbInfo->rxdata) {
-        for (int ant = 0; ant < fp->nb_antennas_rx; ant++) {
+        for (int ant = 0; ant < scan_fp.nb_antennas_rx; ant++) {
           free(ssbInfo->rxdata[ant]);
         }
         free(ssbInfo->rxdata);
