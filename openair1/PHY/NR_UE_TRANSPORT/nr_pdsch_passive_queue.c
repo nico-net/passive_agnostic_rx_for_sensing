@@ -71,12 +71,117 @@
 /* ---- GPU front end (NR_GPU_FEP=1): FEP + chest + MMSE + LLR for a whole slot group in one launch
  * set, LLRs handed to the decode through nr_pdsch_passive_set_llr_override(). ---- */
 static const nr_gpu_fep_api_t *g_gpu; /* NULL = CPU path */
-static pthread_mutex_t g_gpu_lock = PTHREAD_MUTEX_INITIALIZER; /* one resident slot: consumers take turns */
 static _Atomic uint64_t g_gpu_slots, g_gpu_jobs, g_gpu_fep_ns, g_gpu_llr_ns;
 static _Atomic uint64_t g_gpu_chk_n, g_gpu_chk_crc_agree, g_gpu_chk_crc_gpu_ok, g_gpu_chk_crc_cpu_ok;
 #define GPU_LLR_CAP (16u << 20) /* int16 per consumer: ~13 full-band rank-4 256QAM TBs, or any probe batch */
 
 static uint64_t now_ns(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (uint64_t)t.tv_sec * 1000000000ull + t.tv_nsec; }
+
+/* ---- ONE dedicated GPU worker thread (2026-09-16), not "whichever consumer grabs the lock" -------
+ * ROOT CAUSE of the live OTA drop spike (r4a_104200: 92 % dropped, GPU_FEP calls measured 13-31 ms
+ * against the isolated 0.3-1.6 ms): cons6_ota.conf's `pdcch_blind_monitor_pdsch` pins the 6 passive-
+ * PDSCH consumers to cores 6..11 (LOG line "cores 6..11") -- 2 of those (6,7) ARE `--thread-pool`
+ * cores, and 4 (8-11) ARE the NIC's own dedicated MSI IRQ cores (preflight: "NIC irqs -> 8-13"), the
+ * exact contention the 2026-09-02 NIC/softmodem core separation exists to prevent, now reintroduced
+ * for this pool. Confirmed NOT a self-check or batching bug: ISAC_GPU_SELFCHECK never fired in that
+ * run (0 GPU_SELFCHECK lines) and GPU_FEP slots==jobs (batch 1 throughout, as expected -- most
+ * dequeues are single-slot, "slot_groups=37/641"). Reproduced clean (4 threads, real mutex, 3 ms of
+ * CPU work/job, no core contention): p50 251 us / p99 273 us fep, 840 jobs/s aggregate -- mutex
+ * contention ALONE does not explain it (scratchpad/gpu_contend_bench.cc).
+ * MECHANISM: with the OLD design every one of the 6 consumers directly executed the blocking GPU
+ * call (fep_slot+pdsch_llr) under one shared mutex. CPU-only decodes are fully independent, so a
+ * consumer thread stalled on a contended core only slows itself; the GPU path serialises all 6
+ * behind one lock, so ANY ONE of the 6 -- and on this conf 4/6 sit on the busiest IRQ cores in the
+ * box -- stalling while it holds the lock stalls the other five. That is the drop-rate asymmetry.
+ * FIX: one dedicated worker thread executes every GPU call; consumers hand off a request and block
+ * on their OWN completion condvar (releasing the CPU, not spinning on the lock). This does not
+ * raise the GPU's raw throughput ceiling (still one lane), but it shrinks the "who can stall
+ * everyone" surface from 6 threads on 6 (partly contended) cores to exactly 1 thread on 1 core that
+ * can be placed deliberately: core 3 by default -- `isolcpus=2,3` keeps the scheduler off it,
+ * ISAC_UE_RT_CORE only pins the receive thread to core 2, and it is neither a `--thread-pool` core
+ * nor a NIC IRQ core. ISAC_GPU_WORKER_CORE overrides; <0 = unpinned. */
+typedef struct {
+  nr_gpu_pdsch_job_t *jobs; int n_jobs;
+  const int16_t *rx[4]; uint32_t ring_len, ring_off, abs_sample; double fo_hz; const int16_t *rot;
+  int16_t *out; size_t out_cap;
+  volatile int done; int64_t rc;
+} gpu_fep_req_t;
+#define GPU_WORKER_QUEUE_MAX 32
+static gpu_fep_req_t *g_gpu_wq[GPU_WORKER_QUEUE_MAX];
+static int g_gpu_wq_n;
+static pthread_mutex_t g_gpu_wq_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t g_gpu_wq_work = PTHREAD_COND_INITIALIZER, g_gpu_wq_done = PTHREAD_COND_INITIALIZER;
+static _Atomic int g_gpu_worker_running;
+static pthread_t g_gpu_worker_thread;
+
+static void *gpu_fep_worker_thread(void *arg)
+{
+  (void)arg;
+  LOG_I(PHY, "SENSING: GPU_FEP worker thread started\n");
+  while (atomic_load_explicit(&g_gpu_worker_running, memory_order_relaxed)) {
+    gpu_fep_req_t *take[GPU_WORKER_QUEUE_MAX];
+    int nt;
+    pthread_mutex_lock(&g_gpu_wq_lock);
+    while (g_gpu_wq_n == 0 && atomic_load_explicit(&g_gpu_worker_running, memory_order_relaxed)) {
+      struct timespec ts;
+      clock_gettime(CLOCK_REALTIME, &ts);
+      ts.tv_nsec += 20 * 1000 * 1000;
+      if (ts.tv_nsec >= 1000000000L) { ts.tv_sec++; ts.tv_nsec -= 1000000000L; }
+      pthread_cond_timedwait(&g_gpu_wq_work, &g_gpu_wq_lock, &ts);
+    }
+    nt = g_gpu_wq_n;
+    memcpy(take, g_gpu_wq, (size_t)nt * sizeof(*take));
+    g_gpu_wq_n = 0;
+    pthread_mutex_unlock(&g_gpu_wq_lock);
+    for (int i = 0; i < nt; i++) {
+      gpu_fep_req_t *r = take[i];
+      const uint64_t t0 = now_ns();
+      int64_t rc = g_gpu->fep_slot(r->rx, r->ring_len, r->ring_off, r->abs_sample, r->fo_hz, r->rot);
+      const uint64_t t1 = now_ns();
+      if (rc == 0) rc = g_gpu->pdsch_llr(r->jobs, r->n_jobs, r->out, r->out_cap);
+      const uint64_t t2 = now_ns();
+      r->rc = rc;
+      if (rc >= 0) {
+        atomic_fetch_add(&g_gpu_slots, 1);
+        atomic_fetch_add(&g_gpu_jobs, (uint64_t)r->n_jobs);
+        atomic_fetch_add(&g_gpu_fep_ns, t1 - t0);
+        atomic_fetch_add(&g_gpu_llr_ns, t2 - t1);
+        const uint64_t ns = atomic_load(&g_gpu_slots);
+        if (ns == 50 || (ns % 1000) == 0)
+          LOG_A(PHY, "SENSING: GPU_FEP slots=%lu jobs=%lu fep=%.0f us/slot chest+llr=%.0f us/slot (%.1f us/job) selfcheck n=%lu crc_agree=%lu gpu_ok=%lu cpu_ok=%lu\n",
+                (unsigned long)ns, (unsigned long)atomic_load(&g_gpu_jobs), atomic_load(&g_gpu_fep_ns) / 1e3 / ns,
+                atomic_load(&g_gpu_llr_ns) / 1e3 / ns, atomic_load(&g_gpu_llr_ns) / 1e3 / (double)atomic_load(&g_gpu_jobs),
+                (unsigned long)atomic_load(&g_gpu_chk_n), (unsigned long)atomic_load(&g_gpu_chk_crc_agree),
+                (unsigned long)atomic_load(&g_gpu_chk_crc_gpu_ok), (unsigned long)atomic_load(&g_gpu_chk_crc_cpu_ok));
+      }
+    }
+    pthread_mutex_lock(&g_gpu_wq_lock);
+    for (int i = 0; i < nt; i++) take[i]->done = 1;
+    pthread_cond_broadcast(&g_gpu_wq_done);
+    pthread_mutex_unlock(&g_gpu_wq_lock);
+  }
+  LOG_I(PHY, "SENSING: GPU_FEP worker thread exiting\n");
+  return NULL;
+}
+
+/* Hand a request to the dedicated worker and block (condvar, not the queue's own mutex) until it is
+ * done. Returns the same rc fep_slot()/pdsch_llr() would have. */
+static int64_t gpu_fep_submit_and_wait(gpu_fep_req_t *req)
+{
+  req->done = 0;
+  pthread_mutex_lock(&g_gpu_wq_lock);
+  if (g_gpu_wq_n >= GPU_WORKER_QUEUE_MAX) {
+    /* worker is badly backed up -- do not grow unbounded; caller falls back to CPU for this group */
+    pthread_mutex_unlock(&g_gpu_wq_lock);
+    return -1;
+  }
+  g_gpu_wq[g_gpu_wq_n++] = req;
+  pthread_cond_signal(&g_gpu_wq_work);
+  while (!req->done)
+    pthread_cond_wait(&g_gpu_wq_done, &g_gpu_wq_lock);
+  pthread_mutex_unlock(&g_gpu_wq_lock);
+  return req->rc;
+}
 
 /* ISAC_GPU_DUMP=<file>: one record per self-checked job -- the slot's time-domain window per antenna,
  * the job, and both LLR sets -- for offline comparison. */
@@ -360,28 +465,19 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
         nr_gpu_pdsch_job_t packed[NR_PDSCH_PASSIVE_SLOT_GROUP_MAX + 1];
         int map[NR_PDSCH_PASSIVE_SLOT_GROUP_MAX + 1], np = 0;
         for (int k = 0; k <= n_more; k++) if (gj_ok[k]) { map[np] = k; packed[np++] = gj[k]; }
-        pthread_mutex_lock(&g_gpu_lock);
-        const uint64_t t0 = now_ns();
-        int64_t rc = g_gpu->fep_slot(rx, ring_len, off, off, fo, (const int16_t *)rot);
-        const uint64_t t1 = now_ns();
-        if (rc == 0) rc = g_gpu->pdsch_llr(packed, np, t_gpu_llr, GPU_LLR_CAP);
-        const uint64_t t2 = now_ns();
-        pthread_mutex_unlock(&g_gpu_lock);
+        /* Hand off to the ONE dedicated GPU worker thread (see its header comment) instead of
+         * locking and executing the GPU call inline on this consumer thread: this consumer just
+         * blocks on its own completion condvar, so a bad core assignment for THIS thread no longer
+         * stalls the other five while it happens to be holding the GPU's only lock. */
+        gpu_fep_req_t req = {.jobs = packed, .n_jobs = np, .ring_len = ring_len, .ring_off = off,
+                             .abs_sample = off, .fo_hz = fo, .rot = (const int16_t *)rot,
+                             .out = t_gpu_llr, .out_cap = GPU_LLR_CAP};
+        for (int a = 0; a < fp->nb_antennas_rx && a < 4; a++) req.rx[a] = rx[a];
+        const int64_t rc = gpu_fep_submit_and_wait(&req);
         if (rc < 0) {
           for (int k = 0; k <= n_more; k++) gj_ok[k] = 0;
         } else {
           for (int p = 0; p < np; p++) { gj[map[p]] = packed[p]; if (packed[p].n_llr == 0) gj_ok[map[p]] = 0; }
-          atomic_fetch_add(&g_gpu_slots, 1);
-          atomic_fetch_add(&g_gpu_jobs, (uint64_t)np);
-          atomic_fetch_add(&g_gpu_fep_ns, t1 - t0);
-          atomic_fetch_add(&g_gpu_llr_ns, t2 - t1);
-          const uint64_t ns = atomic_load(&g_gpu_slots);
-          if (ns == 50 || (ns % 1000) == 0)
-            LOG_A(PHY, "SENSING: GPU_FEP slots=%lu jobs=%lu fep=%.0f us/slot chest+llr=%.0f us/slot (%.1f us/job) selfcheck n=%lu crc_agree=%lu gpu_ok=%lu cpu_ok=%lu\n",
-                  (unsigned long)ns, (unsigned long)atomic_load(&g_gpu_jobs), atomic_load(&g_gpu_fep_ns) / 1e3 / ns,
-                  atomic_load(&g_gpu_llr_ns) / 1e3 / ns, atomic_load(&g_gpu_llr_ns) / 1e3 / (double)atomic_load(&g_gpu_jobs),
-                  (unsigned long)atomic_load(&g_gpu_chk_n), (unsigned long)atomic_load(&g_gpu_chk_crc_agree),
-                  (unsigned long)atomic_load(&g_gpu_chk_crc_gpu_ok), (unsigned long)atomic_load(&g_gpu_chk_crc_cpu_ok));
         }
       }
     }
@@ -763,8 +859,20 @@ bool nr_pdsch_passive_queue_start(PHY_VARS_NR_UE *ue, int depth, int n_consumers
     if (fp->nb_antennas_rx > 4 || g_gpu->init(&cfg) != 0) {
       LOG_W(PHY, "SENSING: GPU_FEP requested (NR_GPU_FEP=1) but libpdsch_gpu.so init failed -- CPU path\n");
       g_gpu = NULL;
-    } else
+    } else {
       LOG_A(PHY, "SENSING: GPU_FEP enabled: %d RX, N=%d, per-slot FEP + chest + MMSE + LLR on the GPU\n", cfg.nant, cfg.ofdm_symbol_size);
+      if (atomic_fetch_or(&g_gpu_worker_running, 1) == 0) {
+        /* Deliberately its OWN thread/core, not one of the passive-PDSCH consumers: see the worker's
+         * header comment. Default core 3 -- isolcpus=2,3 keeps the scheduler off it, ISAC_UE_RT_CORE
+         * only pins the receive thread to core 2, so 3 is otherwise unused by any pinned thread here. */
+        static int s_gpu_worker_core = -2;
+        if (s_gpu_worker_core == -2) {
+          const char *e = getenv("ISAC_GPU_WORKER_CORE");
+          s_gpu_worker_core = e ? atoi(e) : 3;
+        }
+        threadCreate(&g_gpu_worker_thread, gpu_fep_worker_thread, NULL, "gpuFepWorker", s_gpu_worker_core, 40);
+      }
+    }
   }
   if (atomic_load_explicit(&g_running, memory_order_acquire)) {
     return true;
@@ -940,6 +1048,12 @@ void nr_pdsch_passive_queue_stop(void)
     pthread_join(g_threads[i], NULL);
     free(g_rxdataF[i]);
     g_rxdataF[i] = NULL;
+  }
+  if (atomic_exchange(&g_gpu_worker_running, 0)) {
+    pthread_mutex_lock(&g_gpu_wq_lock);
+    pthread_cond_broadcast(&g_gpu_wq_work);
+    pthread_mutex_unlock(&g_gpu_wq_lock);
+    pthread_join(g_gpu_worker_thread, NULL);
   }
   atomic_store_explicit(&g_running, 0, memory_order_release);
 }
