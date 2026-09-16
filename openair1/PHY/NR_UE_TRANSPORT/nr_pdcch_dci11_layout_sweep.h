@@ -129,6 +129,14 @@ typedef struct {
   int      winner;                      ///< -1 until decided
   uint32_t probe_ok[NR_DCI11_LAYOUT_MAX];  ///< code-block-0 probe passes per layout (survives sweep-context eviction)
   uint32_t probe_tr[NR_DCI11_LAYOUT_MAX];  ///< probe trials per layout
+  /* INTERPRETATION FAMILIES. On one DCI many layouts read identical fields (start/len, TDA, MCS,
+   * RV, NDI, HARQ, ports, nscid): their probes are the same decode and their evidence adds. Per
+   * layout the family of its LAST read; per family the probe tallies. Rank-4 bed 2026-09-16:
+   * 12 % marginal CRC yet no layout alone ever reached 8 passes. */
+#define NR_DCI11_FAM_N 4096
+  uint16_t layout_fam[NR_DCI11_LAYOUT_MAX];
+  uint32_t fam_ok[NR_DCI11_FAM_N];
+  uint32_t fam_tr[NR_DCI11_FAM_N];
   uint16_t riv_bits;
   uint8_t  tda_bits;
   uint16_t observed_len;

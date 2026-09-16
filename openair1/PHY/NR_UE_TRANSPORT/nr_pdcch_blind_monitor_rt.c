@@ -201,6 +201,24 @@ void nr_pdcch_dci11_layout_feedback(uint16_t layout_index, bool cb0_ok)
   __atomic_fetch_add(&g_dci11_resolver.probe_tr[layout_index], 1u, __ATOMIC_RELAXED);
   if (cb0_ok)
     __atomic_fetch_add(&g_dci11_resolver.probe_ok[layout_index], 1u, __ATOMIC_RELAXED);
+  const uint16_t fam = g_dci11_resolver.layout_fam[layout_index] % NR_DCI11_FAM_N;
+  __atomic_fetch_add(&g_dci11_resolver.fam_tr[fam], 1u, __ATOMIC_RELAXED);
+  if (cb0_ok)
+    __atomic_fetch_add(&g_dci11_resolver.fam_ok[fam], 1u, __ATOMIC_RELAXED);
+}
+/* Evidence for a layout: its own probe passes or those of the interpretation family it last read. */
+static inline uint32_t dci11_layout_evidence(const nr_dci11_resolver_t *r, int i, uint32_t *tr)
+{
+  const uint32_t fo = r->fam_ok[r->layout_fam[i] % NR_DCI11_FAM_N];
+  if (tr) *tr = r->probe_tr[i] > r->fam_tr[r->layout_fam[i] % NR_DCI11_FAM_N] ? r->probe_tr[i] : r->fam_tr[r->layout_fam[i] % NR_DCI11_FAM_N];
+  return r->probe_ok[i] > fo ? r->probe_ok[i] : fo;
+}
+static inline uint16_t dci11_family_key(const nr_pdcch_blind_result_t *p)
+{
+  uint32_t k = 2166136261u;
+  const uint32_t v[] = {p->start_rb, p->num_rb, p->tda_index, p->mcs, p->rv, p->ndi, p->harq_pid, p->dmrs_ports, p->nscid, p->n_dmrs_cdm_groups};
+  for (unsigned i = 0; i < sizeof(v) / sizeof(v[0]); i++) k = (k ^ v[i]) * 16777619u;
+  return (uint16_t)(k % NR_DCI11_FAM_N);
 }
 static int nr_pdcch_dci11_stage2_enabled(void)
 {
@@ -252,7 +270,7 @@ static int nr_pdcch_dci11_stage2_candidates(const nr_pdcch_blind_raw_result_t *r
     uint32_t hot_ok[NR_DCI11_STAGE2_MAX_ALIVE + 3];
     for (int k = 0; k < no; k++) {
       const int i = order[k];
-      const uint32_t ok = r->probe_ok[i]; /* resolver-level evidence: survives sweep-context eviction */
+      const uint32_t ok = dci11_layout_evidence(r, i, NULL); /* own or family evidence */
       if (ok == 0)
         continue;
       /* keep the `max` most-passed, sorted: the leader must be in every window once preferred */
@@ -319,6 +337,7 @@ static int nr_pdcch_dci11_stage2_candidates(const nr_pdcch_blind_raw_result_t *r
               parsed.reject_reason ? parsed.reject_reason : "?", s_sz_mismatch, s_rejected);
       continue;
     }
+    g_dci11_resolver.layout_fam[i] = dci11_family_key(&parsed); /* what this layout reads on this DCI */
     out[count] = parsed;
     ids[count++] = (uint16_t)i; /* resolver index: up to 2048, a uint8_t wrapped it and merged
                                  * the sweep contexts / evidence of layouts 256 apart */
@@ -2729,7 +2748,7 @@ constdiag_done:;
         if (from_stage2 && layout_ids[i] < NR_DCI11_LAYOUT_MAX) {
           /* wide search: the resolver's own probe tallies (a sweep context can be evicted between
            * two probes of the same layout; these cannot) */
-          ok = g_dci11_resolver.probe_ok[layout_ids[i]]; tr = g_dci11_resolver.probe_tr[layout_ids[i]];
+          ok = dci11_layout_evidence(&g_dci11_resolver, layout_ids[i], &tr);
         } else
           nr_pdsch_config_sweep_context_stats(keys[i],raw->rnti,layouts[i].tda_index,cfg->dmrs_typeA_position,&ok,&tr);
         ts_ok[i]=ok; ts_tr[i]=tr;
