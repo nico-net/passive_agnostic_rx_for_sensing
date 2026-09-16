@@ -941,9 +941,13 @@ static bool passive_ldpc_decode_core(PHY_VARS_NR_UE *ue,
    * 59 segments and 8.6 ms CPU per TB -- a full decode per trial cannot converge). With
    * t_probe_first_seg the decoder sees C=1: segment 0 with the E/K/Z the full C gave it. The TB is
    * NOT reported decoded; the outcome feeds only the layout search. */
+  /* NOT by setting C = 1: that told the decoder the TB is one code block, so it checked segment 0
+   * against a CRC24A over the whole TBS instead of its own CRC24B -- every probe failed by
+   * construction (ISAC_PROBE_ALL on a pinned conf that decodes 97 %: 0/455, 2026-09-16), OTA
+   * 0/286000 included. nb_segments_to_decode keeps C, K', E and the offsets of the real TB. */
   const uint32_t C_full = TB_parameters.C;
-  if (t_probe_first_seg && C_full > 1)
-    TB_parameters.C = 1;
+  TB_parameters.nb_segments_to_decode = (t_probe_first_seg && C_full > 1) ? 1 : 0;
+  const uint32_t C_dec = TB_parameters.nb_segments_to_decode ? 1 : C_full;
   for (uint32_t r = 0; r < TB_parameters.C; r++) {
     TB_parameters.decodeSuccess[r] = false;
   }
@@ -960,7 +964,7 @@ static bool passive_ldpc_decode_core(PHY_VARS_NR_UE *ue,
 
   {
     uint32_t seg_ok = 0;
-    for (uint32_t r = 0; r < TB_parameters.C; r++) {
+    for (uint32_t r = 0; r < C_dec; r++) {
       if (TB_parameters.decodeSuccess[r]) {
         seg_ok++;
       }
@@ -2534,6 +2538,14 @@ chest_done:
     }
     bool ldpc_ok = passive_ldpc_decode(ue, proc, &g_harq, cw, dlsch_config, llr, freq_alloc->num_rbs, G);
     t_hq.armed = 0;
+    /* A probe's outcome is code block 0's CRC, and every hypothesis sweep below (PT-RS density,
+     * the PDSCH config feedback in the queue, the layout search) must see it: with ldpc_ok false
+     * for every probe the PT-RS sweep could never latch "absent" and only 1 arm in 7 was right --
+     * exactly the 57/400 measured with ISAC_PROBE_ALL on a pinned conf that decodes 97 %. The TB
+     * itself is still never reported decoded (the queue maps a probe onto CRC status only). */
+    const bool probe_ok = t_probe_first_seg && t_probe_seg_ok;
+    if (probe_ok)
+      ldpc_ok = true;
     /* ISAC_RV_RETRY=1 (default off): on a failed TB, re-run ONLY the LDPC stage with rv 2, 3, 1 on
      * the same (already descrambled) LLRs. Tests the hypothesis that some grants are retransmissions
      * whose RV field the current DCI-1_1 layout misreads as 0 (MCS-24 grants: 0 % of code blocks

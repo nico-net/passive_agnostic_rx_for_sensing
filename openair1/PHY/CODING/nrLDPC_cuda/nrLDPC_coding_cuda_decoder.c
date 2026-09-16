@@ -200,6 +200,13 @@ int32_t nrLDPC_coding_shutdown(void)
 }
 
 static __thread double t_prep_s, t_gpu_s; /* LDPC_BENCH phase split */
+/* Segments to decode for a TB: nb_segments_to_decode (0 = all C) -- a layout probe wants code
+ * block 0 alone, with the CRC type / K' / offsets of the full C. */
+static inline int tb_ndec(const nrLDPC_TB_decoding_parameters_t *tb)
+{
+  return (tb->nb_segments_to_decode > 0 && tb->nb_segments_to_decode < tb->C) ? (int)tb->nb_segments_to_decode : (int)tb->C;
+}
+
 int32_t nrLDPC_coding_decoder_impl(nrLDPC_slot_decoding_parameters_t *slot)
 {
   const double t_start = ldpc_bench_on() ? ldpc_bench_wall_s() : 0;
@@ -208,7 +215,7 @@ int32_t nrLDPC_coding_decoder_impl(nrLDPC_slot_decoding_parameters_t *slot)
     return nt ? -1 : 0;
   int nb = 0;
   for (int t = 0; t < nt; t++)
-    nb += slot->TBs[t].C;
+    nb += tb_ndec(&slot->TBs[t]);
   if (nb == 0)
     return 0;
   const uint32_t in_stride = ldpc_batch_llr_stride(), bits_stride = ldpc_batch_bits_stride();
@@ -219,7 +226,7 @@ int32_t nrLDPC_coding_decoder_impl(nrLDPC_slot_decoding_parameters_t *slot)
   int firsts[64];
   pthread_mutex_lock(&g_mu);
   for (int t = 0; t < nt; t++) {
-    while ((firsts[t] = slots_reserve(slot->TBs[t].C)) < 0)
+    while ((firsts[t] = slots_reserve(tb_ndec(&slot->TBs[t]))) < 0)
       pthread_cond_wait(&g_cv_done, &g_mu);
   }
   pthread_mutex_unlock(&g_mu);
@@ -232,7 +239,7 @@ int32_t nrLDPC_coding_decoder_impl(nrLDPC_slot_decoding_parameters_t *slot)
   for (int t = 0; t < nt; t++) {
     nrLDPC_TB_decoding_parameters_t *tb = &slot->TBs[t];
     *tb->processedSegments = 0;
-    for (int r = 0; r < (int)tb->C; r++, k++) {
+    for (int r = 0; r < tb_ndec(tb); r++, k++) {
       nrLDPC_cuda_seg_t *s = &seg[k];
       const bool second = r >= (int)tb->first_rE2;
       s->BG = tb->BG;
@@ -265,7 +272,7 @@ int32_t nrLDPC_coding_decoder_impl(nrLDPC_slot_decoding_parameters_t *slot)
   for (int t = 0; t < nt; t++) {
     nrLDPC_TB_decoding_parameters_t *tb = &slot->TBs[t];
     req[t] = (gpu_req_t){.BG = tb->BG, .Z = tb->Z, .iters = 2 * tb->max_ldpc_iterations, .first = firsts[t],
-                         .count = tb->C, .K = tb->K, .done = false};
+                         .count = tb_ndec(tb), .K = tb->K, .done = false};
     g_queue[g_qn++] = &req[t];
   }
   pthread_cond_signal(&g_cv_work);
@@ -283,7 +290,7 @@ int32_t nrLDPC_coding_decoder_impl(nrLDPC_slot_decoding_parameters_t *slot)
     const int C = tb->C;
     const uint32_t Kprime = lenWithCrc(C, tb->A);
     const uint8_t crc_type = crcType(C, tb->A);
-    for (int r = 0; r < C; r++, k++) {
+    for (int r = 0; r < tb_ndec(tb); r++, k++) {
       const uint8_t *b = pool_bits + (size_t)(firsts[t] + r) * bits_stride;
       uint8_t *c = tb->c + r * (tb->K >> 3);
       const bool ok = seg[k].prep_ok && check_crc((uint8_t *)b, Kprime, crc_type);
@@ -297,7 +304,7 @@ int32_t nrLDPC_coding_decoder_impl(nrLDPC_slot_decoding_parameters_t *slot)
   }
   pthread_mutex_lock(&g_mu);
   for (int t = 0; t < nt; t++)
-    memset(&g_slot_used[firsts[t]], 0, slot->TBs[t].C);
+    memset(&g_slot_used[firsts[t]], 0, tb_ndec(&slot->TBs[t]));
   pthread_cond_broadcast(&g_cv_done);
   pthread_mutex_unlock(&g_mu);
   if (ldpc_bench_on())

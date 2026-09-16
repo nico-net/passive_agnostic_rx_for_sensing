@@ -253,6 +253,12 @@ static void nr_process_decode_segment(void *arg)
   completed_task_ans(rdata->ans);
 }
 
+/* Segments to decode for a TB: nb_segments_to_decode (0 = all C). */
+static inline uint32_t tb_ndec(const nrLDPC_TB_decoding_parameters_t *tb)
+{
+  return (tb->nb_segments_to_decode > 0 && tb->nb_segments_to_decode < tb->C) ? tb->nb_segments_to_decode : tb->C;
+}
+
 int nrLDPC_prepare_TB_decoding(nrLDPC_slot_decoding_parameters_t *nrLDPC_slot_decoding_parameters,
                                int pusch_id,
                                thread_info_tm_t *t_info)
@@ -266,7 +272,8 @@ int nrLDPC_prepare_TB_decoding(nrLDPC_slot_decoding_parameters_t *nrLDPC_slot_de
   decParams.numMaxIter = nrLDPC_TB_decoding_parameters->max_ldpc_iterations;
   decParams.outMode = nrLDPC_outMode_BIT;
 
-  for (int r = 0; r < nrLDPC_TB_decoding_parameters->C; r++) {
+  const uint32_t n_dec = tb_ndec(nrLDPC_TB_decoding_parameters);
+  for (int r = 0; r < (int)n_dec; r++) {
     nrLDPC_decoding_parameters_t *rdata = &((nrLDPC_decoding_parameters_t *)t_info->buf)[t_info->len];
     DevAssert(t_info->len < t_info->cap);
     rdata->ans = t_info->ans;
@@ -319,7 +326,7 @@ int nrLDPC_prepare_TB_decoding(nrLDPC_slot_decoding_parameters_t *nrLDPC_slot_de
 
     LOG_D(PHY, "Added a block to decode, in pipe: %d, rdata->c %p\n", r, rdata->c);
   }
-  return nrLDPC_TB_decoding_parameters->C;
+  return (int)n_dec;
 }
 
 int32_t nrLDPC_coding_init(void)
@@ -337,7 +344,7 @@ int32_t nrLDPC_coding_decoder_impl(nrLDPC_slot_decoding_parameters_t *nrLDPC_slo
   int nbSegments = 0;
   for (int pusch_id = 0; pusch_id < nrLDPC_slot_decoding_parameters->nb_TBs; pusch_id++) {
     nrLDPC_TB_decoding_parameters_t *nrLDPC_TB_decoding_parameters = &nrLDPC_slot_decoding_parameters->TBs[pusch_id];
-    nbSegments += nrLDPC_TB_decoding_parameters->C;
+    nbSegments += tb_ndec(nrLDPC_TB_decoding_parameters);
   }
   nrLDPC_decoding_parameters_t arr[nbSegments];
   task_ans_t ans;
@@ -355,7 +362,7 @@ int32_t nrLDPC_coding_decoder_impl(nrLDPC_slot_decoding_parameters_t *nrLDPC_slo
   for (int pusch_id = 0; pusch_id < nrLDPC_slot_decoding_parameters->nb_TBs; pusch_id++) {
     nrLDPC_TB_decoding_parameters_t *nrLDPC_TB_decoding_parameters = &nrLDPC_slot_decoding_parameters->TBs[pusch_id];
     *nrLDPC_TB_decoding_parameters->processedSegments = 0;
-    for (int r = 0; r < nrLDPC_TB_decoding_parameters->C; r++) {
+    for (int r = 0; r < (int)tb_ndec(nrLDPC_TB_decoding_parameters); r++) {
       if (nrLDPC_TB_decoding_parameters->decodeSuccess[r])
         *nrLDPC_TB_decoding_parameters->processedSegments = *nrLDPC_TB_decoding_parameters->processedSegments + 1;
 

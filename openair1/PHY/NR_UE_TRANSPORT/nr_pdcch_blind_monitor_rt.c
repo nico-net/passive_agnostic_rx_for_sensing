@@ -234,13 +234,32 @@ static int nr_pdcch_dci11_stage2_candidates(const nr_pdcch_blind_raw_result_t *r
     const uint32_t start = atomic_fetch_add_explicit(&s_rot, (uint32_t)max, memory_order_relaxed) % (uint32_t)no;
     for (int k = 0; k < no; k++) sc[order[k]] = 0.0; /* order[] rotated below; scores unused */
     static __thread int rot[NR_DCI11_LAYOUT_MAX];
-    for (int k = 0; k < no; k++) rot[k] = order[(start + k) % no];
+    /* EXPLOIT FIRST: a layout whose probes have already passed code block 0 goes to the head of
+     * every window, so one lucky hit turns into a settled layout within seconds instead of waiting
+     * for the rotation to come round again (809 live x ~6 PDSCH hypotheses: 1 hit per ~3000 probes
+     * on the rank-4 bed, 2026-09-16). Everything else keeps rotating behind it. */
+    int nh = 0;
+    for (int k = 0; k < no && nh < max; k++) {
+      const int i = order[k];
+      uint32_t ok = 0, tr = 0;
+      const uint64_t key = (g_pdsch_configuration ^ (uint64_t)(i + 1)) * UINT64_C(1099511628211);
+      nr_pdsch_config_sweep_context_stats(key, 0, 0xFF /* any tda */, cfg->dmrs_typeA_position, &ok, &tr);
+      if (ok > 0)
+        rot[nh++] = i;
+    }
+    for (int k = 0, w = nh; k < no && w < no; k++) {
+      const int i = order[(start + k) % no];
+      bool hot = false;
+      for (int h = 0; h < nh; h++) hot |= (rot[h] == i);
+      if (!hot) rot[w++] = i;
+    }
     memcpy(order, rot, (size_t)no * sizeof(order[0]));
   }
   /* Above the hand-over limit only `max` of the live set fit one grant's trial list; rotate the
    * window over the score-sorted list so every hypothesis gets probed, best ones most often. */
   static __thread int s_rot = 0;
-  const int start = (no > max) ? (s_rot++ % (no - max + 1)) : 0;
+  /* The wide set was already rotated (hot layouts at its head): offer from 0 there. */
+  const int start = (no > max && no <= NR_DCI11_STAGE2_MAX_ALIVE) ? (s_rot++ % (no - max + 1)) : 0;
   for (int oi = start; oi < no && count < max; oi++) {
     const int i = order[oi];
     nr_dci11_field_bits_t f;
@@ -481,7 +500,7 @@ static void nr_pdcch_dci11_layout_observe(const nr_pdcch_blind_monitor_cfg_t *cf
         continue;
       uint32_t ok = 0, tr = 0;
       const uint64_t key = (g_pdsch_configuration ^ (uint64_t)(i + 1)) * UINT64_C(1099511628211);
-      nr_pdsch_config_sweep_context_stats(key, 0 /* any rnti */, 0, cfg->dmrs_typeA_position, &ok, &tr);
+      nr_pdsch_config_sweep_context_stats(key, 0 /* any rnti */, 0xFF /* any tda */, cfg->dmrs_typeA_position, &ok, &tr);
       u += snprintf(eb + u, sizeof(eb) - u, "[%d t%ub%dm%dx%da%d%cp%d:%u/%u]", i, (unsigned)r->off[i].tda_bits,
                     f.bwp_indicator_bits, f.vrb_to_prb_bits, f.tb2_bits, f.antenna_ports_bits,
                     f.dmrs_config_type ? 'B' : 'A', f.tci_bits, ok, tr);

@@ -356,6 +356,14 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
         nr_pdsch_config_sweep_observe_mask(&job.sweep_ticket, mask);
     }
     nr_pdsch_passive_decode_result_t dec;
+    { /* ISAC_PROBE_ALL=1: every job is a first-code-block probe, pinned confs included -- isolates
+       * the probe mechanics from the layout search. */
+      static int s_probe_all = -1;
+      if (s_probe_all < 0)
+        s_probe_all = (getenv("ISAC_PROBE_ALL") != NULL) ? 1 : 0;
+      if (s_probe_all)
+        job.layout_probe = 1;
+    }
     nr_pdsch_passive_probe_mode(job.layout_probe != 0);
     const nr_pdsch_passive_decode_status_t st_raw =
         nr_pdsch_passive_decode(ue, &proc, &job.dlsch_pdu, &job.freq_alloc, &job.grant, rxdataF, &dec);
@@ -370,7 +378,8 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
       static _Atomic uint64_t s_probe_n, s_probe_ok;
       atomic_fetch_add_explicit(&s_probe_n, 1, memory_order_relaxed);
       if (st == NR_PDSCH_PASSIVE_DECODE_CRC_OK) atomic_fetch_add_explicit(&s_probe_ok, 1, memory_order_relaxed);
-      if ((atomic_load_explicit(&s_probe_n, memory_order_relaxed) % 2000) == 0)
+      const uint64_t pn = atomic_load_explicit(&s_probe_n, memory_order_relaxed);
+      if (pn == 100 || pn == 400 || (pn % 2000) == 0)
         LOG_A(PHY, "SENSING: LAYOUT_PROBE n=%lu cb0_ok=%lu\n", (unsigned long)atomic_load(&s_probe_n), (unsigned long)atomic_load(&s_probe_ok));
     } else
       nr_passive_replay_dl(&job, &dec);

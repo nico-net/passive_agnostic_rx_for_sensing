@@ -571,9 +571,12 @@ void nr_pdsch_config_sweep_context_stats(uint64_t configuration, uint16_t rnti, 
   pthread_mutex_lock(&g_lock);
   for (int i=0;i<NR_PDSCH_SWEEP_MAX_CONTEXTS;++i) {
     const sweep_context_t *c=&g_contexts[i];
-    if (c->generation && c->configuration==configuration && c->tda==tda && c->typeA==typeA) {
+    /* tda 0xFF = every TDA context of this configuration: a layout hypothesis reads the TDA
+     * index at its own offset, so its evidence is spread over the contexts that index created. */
+    if (c->generation && c->configuration==configuration && (tda == 0xFF || c->tda==tda) && c->typeA==typeA) {
       for (int h=0; h<c->state.n_hyp; ++h) { *passes += c->state.ok[h]; *trials += c->state.trials[h]; }
-      break;
+      if (tda != 0xFF)
+        break;
     }
   }
   pthread_mutex_unlock(&g_lock);
