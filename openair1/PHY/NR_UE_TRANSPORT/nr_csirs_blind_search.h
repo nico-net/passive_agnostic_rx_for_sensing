@@ -147,6 +147,23 @@ int nr_csirs_blind_next(nr_csirs_blind_state_t *st);
 bool nr_csirs_blind_feed(nr_csirs_blind_state_t *st, int idx, uint32_t absolute_slot,
                          double rho, double rho_null);
 
+/* ---- ZERO-POWER CSI-RS ---------------------------------------------------------------------------
+ * A ZP CSI-RS is a rate-matching pattern only: the same RE pattern as an NZP row, carrying no
+ * energy while the PDSCH scheduled around it does. Observable without any reference sequence:
+ * the energy on the pattern's REs against the energy on the other REs of the same RBs and symbol. */
+
+/** 1 - min(1, E_on / E_off): E_on = mean |rx|^2 on the REs `ref` occupies, E_off = mean |rx|^2 on
+ * the remaining REs of the RBs the pattern touches. ~1 for a ZP resource under a scheduled PDSCH,
+ * ~0 for data or an NZP resource, ~0 on an empty symbol (no false hit from silence). -1 when the
+ * reference is empty or the off-pattern REs carry no energy at all. Pure. */
+double nr_csirs_blind_zero_score(const int16_t *rx_re_im, const int16_t *ref_re_im, int n);
+
+/** nr_csirs_blind_feed() for the ZP search, plus one guard: a periodic resource is hit in at most
+ * 1/period of its tests, so a candidate that scores a hit on more than half of them is a
+ * structural hole (a DM-RS symbol's data-free CDM group, an unscheduled band) and never confirms. */
+bool nr_csirs_blind_zp_feed(nr_csirs_blind_state_t *st, int idx, uint32_t absolute_slot,
+                            double score, double score_null);
+
 /** The confirmed resource, or NULL. Fills period/offset when non-NULL. */
 const nr_csirs_candidate_t *nr_csirs_blind_confirmed(const nr_csirs_blind_state_t *st,
                                                      uint16_t *period, uint16_t *offset);

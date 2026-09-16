@@ -26,6 +26,9 @@
 #define NR_CSIRS_BLIND_RT_MAX_PORTS 4
 
 static nr_csirs_blind_state_t g_st;
+static nr_csirs_blind_state_t g_zp;      /* zero-power search over the same candidates */
+static double   g_zp_null[64];
+static int      g_zp_null_n, g_zp_null_w;
 static int      g_on = -1;      /* -1 = not read, 0 = off, 1 = on */
 static int      g_armed;
 static uint64_t g_slots;
@@ -36,21 +39,22 @@ static uint64_t g_slots;
 static double   g_null[NULLWIN];
 static int      g_null_n, g_null_w;
 
-static double null_median(void)
+static double median_of(const double *src, int n)
 {
-  if (g_null_n < 8) {
+  if (n < 8) {
     return -1.0;   /* not enough population yet to say what "standing out" means */
   }
   double t[NULLWIN];
-  memcpy(t, g_null, sizeof(t[0]) * (size_t)g_null_n);
-  for (int i = 1; i < g_null_n; i++) {
+  memcpy(t, src, sizeof(t[0]) * (size_t)n);
+  for (int i = 1; i < n; i++) {
     const double v = t[i];
     int j = i - 1;
     while (j >= 0 && t[j] > v) { t[j + 1] = t[j]; j--; }
     t[j + 1] = v;
   }
-  return t[g_null_n / 2];
+  return t[n / 2];
 }
+static double null_median(void) { return median_of(g_null, g_null_n); }
 
 void nr_csirs_blind_rt_slot(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot,
                             c16_t rxdataF[][ue->frame_parms.samples_per_slot_wCP])
@@ -71,6 +75,7 @@ void nr_csirs_blind_rt_slot(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot
       g_on = 0;
       return;
     }
+    nr_csirs_blind_init(&g_zp, fp->N_RB_DL, fp->Nid_cell);
     g_armed = 1;
     LOG_I(PHY, "SENSING: CSIRS_BLIND armed: %d candidates, N_RB=%d scramb_id=%d (assumed = PCI)\n",
           g_st.n, fp->N_RB_DL, fp->Nid_cell);
@@ -152,6 +157,26 @@ void nr_csirs_blind_rt_slot(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot
   if (g_null_n < NULLWIN) {
     g_null_n++;
   }
+  /* ZERO-POWER hypothesis on the same candidate and symbol (no extra FEP or reference): does the
+   * pattern carry no energy while the PDSCH around it does? Confirmed the same way (periodic). */
+  if (g_zp.confirmed < 0) {
+    const double zs = nr_csirs_blind_zero_score((const int16_t *)&rxdataF_ant0[off], (const int16_t *)&ref[off],
+                                                fp->ofdm_symbol_size);
+    if (zs >= 0.0) {
+      const double znull = median_of(g_zp_null, g_zp_null_n);
+      if (nr_csirs_blind_zp_feed(&g_zp, idx, absolute_slot, zs, znull)) {
+        uint16_t period = 0, offset = 0;
+        const nr_csirs_candidate_t *w = nr_csirs_blind_confirmed(&g_zp, &period, &offset);
+        char line[128];
+        if (w != NULL && nr_csirs_blind_format(w, period, offset, line, sizeof(line)) > 0)
+          LOG_A(PHY, "SENSING: CSIRS_BLIND ZP CONFIRMED after %llu slots (rate-matching only) -- \"%s\"\n",
+                (unsigned long long)g_slots, line);
+      }
+      g_zp_null[g_zp_null_w] = zs;
+      g_zp_null_w = (g_zp_null_w + 1) % NULLWIN;
+      if (g_zp_null_n < NULLWIN) g_zp_null_n++;
+    }
+  }
   if (done) {
     uint16_t period = 0, offset = 0;
     const nr_csirs_candidate_t *w = nr_csirs_blind_confirmed(&g_st, &period, &offset);
@@ -170,19 +195,20 @@ void nr_csirs_blind_rt_slot(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot
 /* RATE MATCHING FROM THE BLIND SEARCH (2026-09-15). The passive PDSCH decoder used to refuse any
  * grant flagged with CSI-RS rate matching because nothing told it WHICH REs to skip; the blind
  * search now does, so its confirmed resource is offered as the FAPI PDU the demodulator already
- * understands. ZP CSI-RS (a pure rate-matching pattern) is still not searched; a cell using one
- * loses those REs' TBs, which TB CRC will show. */
-bool nr_csirs_blind_rt_rate_match(uint32_t absolute_slot, fapi_nr_dl_config_csirs_pdu_rel15_t *out)
+ * understands. ZP CSI-RS (a pure rate-matching pattern) is searched by energy (nr_csirs_blind_zero_score)
+ * on the same candidates and offered separately as csi_type 2. */
+static bool rate_match_from(const nr_csirs_blind_state_t *st, uint8_t csi_type, uint32_t absolute_slot,
+                            fapi_nr_dl_config_csirs_pdu_rel15_t *out)
 {
-  if (out == NULL || g_on <= 0 || g_armed == 0 || g_st.confirmed < 0 || g_st.period == 0)
+  if (out == NULL || g_on <= 0 || g_armed == 0 || st->confirmed < 0 || st->period == 0)
     return false;
-  if ((absolute_slot % g_st.period) != (g_st.offset % g_st.period))
+  if ((absolute_slot % st->period) != (st->offset % st->period))
     return false;
-  const nr_csirs_candidate_t *c = &g_st.cand[g_st.confirmed];
+  const nr_csirs_candidate_t *c = &st->cand[st->confirmed];
   memset(out, 0, sizeof(*out));
   out->start_rb = c->start_rb;
   out->nr_of_rbs = c->nr_of_rbs;
-  out->csi_type = 1; /* NZP */
+  out->csi_type = csi_type;
   out->row = c->row;
   out->freq_domain = c->freq_domain;
   out->symb_l0 = c->symb_l0;
@@ -191,4 +217,12 @@ bool nr_csirs_blind_rt_rate_match(uint32_t absolute_slot, fapi_nr_dl_config_csir
   out->freq_density = c->freq_density;
   out->scramb_id = c->scramb_id;
   return true;
+}
+bool nr_csirs_blind_rt_rate_match(uint32_t absolute_slot, fapi_nr_dl_config_csirs_pdu_rel15_t *out)
+{
+  return rate_match_from(&g_st, 1 /* NZP */, absolute_slot, out);
+}
+bool nr_csirs_blind_rt_rate_match_zp(uint32_t absolute_slot, fapi_nr_dl_config_csirs_pdu_rel15_t *out)
+{
+  return rate_match_from(&g_zp, 2 /* ZP: rate matching only, no estimation */, absolute_slot, out);
 }

@@ -230,3 +230,56 @@ int main(int argc, char **argv)
   ::testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();
 }
+
+// ---- Zero-power CSI-RS: energy hole under a scheduled PDSCH -------------------------------------
+namespace {
+// A 4-RB symbol: the "reference" occupies subcarrier 0 of every RB (a density-1 comb); rx carries
+// unit-amplitude data everywhere except where `hole` says the pattern REs are silent.
+void zp_symbol(bool hole, bool empty, std::vector<int16_t> &rx, std::vector<int16_t> &ref) {
+  const int n = 48;
+  rx.assign(2 * n, 0);
+  ref.assign(2 * n, 0);
+  for (int i = 0; i < n; i++) {
+    const bool on = (i % 12) == 0;
+    if (on) { ref[2 * i] = 100; ref[2 * i + 1] = -100; }
+    if (empty) continue;
+    const int16_t a = (on && hole) ? 2 : 700; // residual noise in the hole, data elsewhere
+    rx[2 * i] = (i & 1) ? a : -a;
+    rx[2 * i + 1] = (i & 2) ? a : -a;
+  }
+}
+}
+TEST(CsirsBlindZp, HoleUnderDataScoresOneDataScoresZeroSilenceScoresZero) {
+  std::vector<int16_t> rx, ref;
+  zp_symbol(true, false, rx, ref);
+  EXPECT_GT(nr_csirs_blind_zero_score(rx.data(), ref.data(), 48), 0.99);
+  zp_symbol(false, false, rx, ref);
+  EXPECT_NEAR(nr_csirs_blind_zero_score(rx.data(), ref.data(), 48), 0.0, 1e-9);
+  zp_symbol(false, true, rx, ref);            // nothing scheduled: unscorable, never a hit
+  EXPECT_LT(nr_csirs_blind_zero_score(rx.data(), ref.data(), 48), 0.0);
+  std::vector<int16_t> none(2 * 48, 0);       // reference maps no RE
+  EXPECT_LT(nr_csirs_blind_zero_score(rx.data(), none.data(), 48), 0.0);
+}
+TEST(CsirsBlindZp, ConfirmsAPeriodicHoleAndRejectsAStructuralOne) {
+  nr_csirs_blind_state_t st;
+  ASSERT_GT(nr_csirs_blind_init(&st, 24, 1), 0);
+  // periodic: candidate 0 tested every 4 slots, hole every 20 slots -> hit on 1 test in 5
+  for (uint32_t slot = 0; slot < 400; slot += 4) {
+    const double s = (slot % 20 == 0) ? 0.98 : 0.02;
+    const bool done = nr_csirs_blind_zp_feed(&st, 0, slot, s, 0.02);
+    if (done) {
+      uint16_t p = 0, o = 0;
+      ASSERT_NE(nr_csirs_blind_confirmed(&st, &p, &o), nullptr);
+      EXPECT_EQ(p, 20);
+      EXPECT_EQ(o, 0);
+      break;
+    }
+  }
+  EXPECT_GE(st.confirmed, 0);
+  // structural: a hole on EVERY test (a DM-RS symbol's data-free CDM group) never confirms
+  nr_csirs_blind_state_t st2;
+  ASSERT_GT(nr_csirs_blind_init(&st2, 24, 1), 0);
+  for (uint32_t slot = 0; slot < 400; slot += 4)
+    EXPECT_FALSE(nr_csirs_blind_zp_feed(&st2, 0, slot, 0.98, 0.02));
+  EXPECT_LT(st2.confirmed, 0);
+}

@@ -230,6 +230,74 @@ bool nr_csirs_blind_feed(nr_csirs_blind_state_t *st, int idx, uint32_t absolute_
   return true;
 }
 
+double nr_csirs_blind_zero_score(const int16_t *rx_re_im, const int16_t *ref_re_im, int n)
+{
+  if (rx_re_im == NULL || ref_re_im == NULL || n <= 0) {
+    return -1.0;
+  }
+  /* RBs the pattern touches: a 12-RE granularity mask on the caller's index (symbol-relative
+   * indices keep the RB grid; a whole-symbol buffer starts at RB 0 either way). */
+  double e_on = 0.0, e_off = 0.0;
+  int n_on = 0, n_off = 0;
+  for (int rb0 = 0; rb0 + 12 <= n; rb0 += 12) {
+    bool touched = false;
+    for (int i = rb0; i < rb0 + 12; i++) {
+      if (ref_re_im[2 * i] != 0 || ref_re_im[2 * i + 1] != 0) { touched = true; break; }
+    }
+    if (!touched) {
+      continue;
+    }
+    for (int i = rb0; i < rb0 + 12; i++) {
+      const double yr = (double)rx_re_im[2 * i], yi = (double)rx_re_im[2 * i + 1];
+      const double e = yr * yr + yi * yi;
+      if (ref_re_im[2 * i] != 0 || ref_re_im[2 * i + 1] != 0) { e_on += e; n_on++; }
+      else { e_off += e; n_off++; }
+    }
+  }
+  if (n_on == 0 || n_off == 0 || e_off <= 0.0) {
+    return -1.0;
+  }
+  const double ratio = (e_on / n_on) / (e_off / n_off);
+  return 1.0 - (ratio > 1.0 ? 1.0 : ratio);
+}
+
+bool nr_csirs_blind_zp_feed(nr_csirs_blind_state_t *st, int idx, uint32_t absolute_slot,
+                            double score, double score_null)
+{
+  if (st == NULL || idx < 0 || idx >= st->n) {
+    return false;
+  }
+  if (st->confirmed >= 0) {
+    return true;
+  }
+  /* Same relative bar as the NZP feed; the null population is the other candidates' zero scores,
+   * which sit near 0 on data (E_on ~ E_off). A minimum absolute margin keeps a null median of
+   * ~0 from turning every small fluctuation into a hit. */
+  const bool hit = score > 0.5 && score_null >= 0.0 && score > CSIRS_DETECT_MARGIN * score_null;
+  st->tried[idx]++;
+  if (score > st->best_rho[idx]) {
+    st->best_rho[idx] = score;
+  }
+  if (!hit) {
+    return false;
+  }
+  st->hits[idx]++;
+  if (st->n_hit_slot[idx] < 8) {
+    st->hit_slot[idx][st->n_hit_slot[idx]++] = absolute_slot;
+  }
+  if (st->n_hit_slot[idx] < CSIRS_MIN_HITS || st->hits[idx] * 2 > st->tried[idx]) {
+    return false; /* not enough evidence, or a structural hole (hit on most tests) */
+  }
+  uint16_t p = 0, o = 0;
+  if (!nr_csirs_blind_infer_period(st->hit_slot[idx], st->n_hit_slot[idx], CSIRS_MIN_HITS, &p, &o)) {
+    return false;
+  }
+  st->confirmed = idx;
+  st->period = p;
+  st->offset = o;
+  return true;
+}
+
 const nr_csirs_candidate_t *nr_csirs_blind_confirmed(const nr_csirs_blind_state_t *st,
                                                      uint16_t *period, uint16_t *offset)
 {
