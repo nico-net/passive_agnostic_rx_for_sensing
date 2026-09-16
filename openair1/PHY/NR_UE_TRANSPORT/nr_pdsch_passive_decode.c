@@ -398,6 +398,9 @@ static _Atomic uint64_t g_ldpc_ok       = 0;
 static _Atomic uint64_t g_fep_hit = 0, g_fep_miss = 0, g_chest_hit = 0, g_chest_miss = 0; // per-slot sharing
 static _Atomic int g_lbrm_nl = 4;        // TBS_LBRM layer term n_L, latched cell-wide by TB CRC (4 = spec ceiling)
 static _Atomic uint64_t g_lbrm_try[5], g_lbrm_ok[5]; // per hypothesised n_L
+/* mean |LLR| the int8 decoder gets: 127/40 ~ 3.2x headroom over the mean for the 256QAM outer bits */
+#define LLR_NORM_TARGET 40u
+static _Atomic uint64_t g_llr_norm_shift[9]; /* TBs by applied right shift */
 static _Atomic uint64_t g_rv_census[2][4]; // [mcs>=24][rv]: does this cell retransmit at rv 0? (HARQ gate)
 static _Atomic uint64_t g_ldpc_iface_err = 0;
 static _Atomic uint64_t g_seg_ok_sum    = 0; // segments that decoded, summed over failing TBs
@@ -568,7 +571,7 @@ void nr_pdsch_passive_ldpc_stats_dump(void)
       LOG_I(PHY, "SENSING: RVRETRY rescued/tried by mcs: %s\n", rb);
   }
   if (nr_agnostic_v2()) {
-    LOG_I(PHY, "SENSING: HARQC first=%lu retx_combined=%lu/%lu tbs_from_first=%lu busy_skip=%lu | rv census mcs<24 [%lu %lu %lu %lu] mcs>=24 [%lu %lu %lu %lu] | lbrm n_L=%d try/ok 4:%lu/%lu 2:%lu/%lu 1:%lu/%lu\n",
+    LOG_I(PHY, "SENSING: HARQC first=%lu retx_combined=%lu/%lu tbs_from_first=%lu busy_skip=%lu | rv census mcs<24 [%lu %lu %lu %lu] mcs>=24 [%lu %lu %lu %lu] | lbrm n_L=%d try/ok 4:%lu/%lu 2:%lu/%lu 1:%lu/%lu | llr_norm shift0..4 [%lu %lu %lu %lu %lu]\n",
           (unsigned long)atomic_load(&g_hq_first), (unsigned long)atomic_load(&g_hq_retx_ok),
           (unsigned long)atomic_load(&g_hq_retx_try), (unsigned long)atomic_load(&g_hq_tbs_override),
           (unsigned long)atomic_load(&g_hq_busy_skip),
@@ -578,7 +581,10 @@ void nr_pdsch_passive_ldpc_stats_dump(void)
           (unsigned long)atomic_load(&g_rv_census[1][2]), (unsigned long)atomic_load(&g_rv_census[1][3]),
           atomic_load(&g_lbrm_nl), (unsigned long)atomic_load(&g_lbrm_try[4]), (unsigned long)atomic_load(&g_lbrm_ok[4]),
           (unsigned long)atomic_load(&g_lbrm_try[2]), (unsigned long)atomic_load(&g_lbrm_ok[2]),
-          (unsigned long)atomic_load(&g_lbrm_try[1]), (unsigned long)atomic_load(&g_lbrm_ok[1]));
+          (unsigned long)atomic_load(&g_lbrm_try[1]), (unsigned long)atomic_load(&g_lbrm_ok[1]),
+          (unsigned long)atomic_load(&g_llr_norm_shift[0]), (unsigned long)atomic_load(&g_llr_norm_shift[1]),
+          (unsigned long)atomic_load(&g_llr_norm_shift[2]), (unsigned long)atomic_load(&g_llr_norm_shift[3]),
+          (unsigned long)atomic_load(&g_llr_norm_shift[4]));
     pthread_mutex_lock(&g_ptrs_lock);
     LOG_I(PHY, "SENSING: PTRS_SWEEP latched=%d ok/trials per arm [absent %u/%u | K2L1 %u/%u K2L2 %u/%u K2L4 %u/%u | K4L1 %u/%u K4L2 %u/%u K4L4 %u/%u]\n",
           g_ptrs.latched, g_ptrs.ok[0], g_ptrs.tr[0], g_ptrs.ok[1], g_ptrs.tr[1], g_ptrs.ok[2], g_ptrs.tr[2],
@@ -2638,6 +2644,30 @@ chest_done:
       }
     }
     atomic_fetch_add(&g_rv_census[grant->mcs >= 24][cw->rv & 3], 1);
+    /* ---- LLR SCALE NORMALISATION before the int8 decoder ----------------------------------------
+     * The decoder saturates every LLR to +-127 (simde_mm_packs_epi16). The demodulators' output
+     * scale is NOT controlled: the fixed-point 4-layer MMSE scales by det(G) and gave mean |LLR|
+     * 454 with 87 % clipped on the rank-4 bed (417 / 22 % OTA), the float path 79 / 20 %, a rank-2
+     * decode 125 / 0.015 %. Min-sum is scale-invariant except for that clipping, so a uniform
+     * right shift that brings the mean under LLR_NORM_TARGET costs nothing where the scale was
+     * already right and keeps the soft information where it was not. ISAC_LLR_NORM=0 disables. */
+    {
+      static int s_norm = -1;
+      if (s_norm < 0) { const char *e = getenv("ISAC_LLR_NORM"); s_norm = (e && atoi(e) == 0) ? 0 : 1; }
+      if (s_norm && G >= 64) {
+        uint64_t acc = 0; uint32_t cnt = 0;
+        for (uint32_t i = 0; i < G; i += 16) { acc += (uint32_t)abs(llr[i]); cnt++; }
+        const uint32_t mean = (uint32_t)(acc / cnt);
+        int k = 0;
+        while (k < 8 && (mean >> k) > LLR_NORM_TARGET) k++;
+        if (k > 0) {
+          for (uint32_t i = 0; i < G; i++) llr[i] = (int16_t)(llr[i] >> k);
+          atomic_fetch_add(&g_llr_norm_shift[k], 1);
+        } else {
+          atomic_fetch_add(&g_llr_norm_shift[0], 1);
+        }
+      }
+    }
     if (nr_agnostic_v2() && atomic_load(&g_ldpc_ok) >= 100) { /* only once the layout has bootstrapped */
       t_hq.armed = 1;
       t_hq.rnti = grant->rnti;
