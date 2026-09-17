@@ -1393,51 +1393,8 @@ int nr_process_pbch_symbol(
                                nid);
     // Get channel response to measure timing error
     if ((fp->ssb_index == ssbIndex) && (relPbchSymb == NB_SYMBOLS_PBCH - 1)) {
-      /* TIMING CIR AT A FIXED 1024 POINTS, NOT ofdm_symbol_size.
-       *
-       * The PBCH estimate occupies 240 subcarriers (20 RB) whatever the carrier is, so the delay
-       * information it carries is identical at every bandwidth -- but OAI's fixed-point
-       * idft(scale=1) right-shifts at every radix-2 stage, so transforming the same 240 populated
-       * bins at 4096 instead of 1024 spends two more stages of shifts on a mostly-zero input and
-       * throws away the peak's bit-precision. MEASURED 2026-09-17, same cell, same SSB, minutes
-       * apart: CIR peak/median 2721x at 1024 (51 PRB) against 95x at 4096 (273 PRB) -- ~15 dB --
-       * with a spurious second peak at 90% of the main, wandering per SSB and disagreeing across
-       * branches by up to 5.4 us. The +-CP search then picked a different peak each SSB
-       * (|corr_pos| ~130 against ~5) and the window walked off: EVERY 217/273 PRB run tracked
-       * pbch_ok=0 while EVERY 51 PRB run tracked 50/50.
-       *
-       * Take the SSB's own 240 bins into a 1024-point buffer (DC-centred exactly as the full-size
-       * grid presents them) and transform that. The output is in samples at the CARRIER's rate
-       * scaled by 1024/ofdm_symbol_size, so the caller's +-CP search and its sample-domain
-       * corrections need the CIR back at carrier resolution: expand by that ratio. Delay
-       * resolution is set by the 3.6 MHz the SSB occupies, not by the transform size, so nothing
-       * real is lost -- only the noise the extra shifts were amplifying. */
-      const int N = fp->ofdm_symbol_size;
-      if (N > 1024) {
-        const int ratio = N / 1024;
-        __attribute__((aligned(32))) c16_t ssb_f[1024], ssb_t[1024];
-        memset(ssb_f, 0, sizeof(ssb_f));
-        /* dl_ch_estimates[] is the full grid, DC at index 0 and negative frequencies wrapped to
-         * the top; the SSB's 240 bins sit around DC the same way, so copy both halves. */
-        for (int k = 0; k < 120; k++) {
-          ssb_f[k] = dl_ch_estimates[aarx][k];
-          ssb_f[1024 - 120 + k] = dl_ch_estimates[aarx][N - 120 + k];
-        }
-        freq2time(1024, (int16_t *)ssb_f, (int16_t *)ssb_t);
-        /* Expand 1024 -> N: sample i of the short CIR is delay i*ratio at the carrier rate. Zero
-         * the rest; the search only reads +-nb_prefix_samples and the audit sums the whole span. */
-        memset(dl_ch_estimates_time[aarx], 0, sizeof(c16_t) * N);
-        for (int i = 0; i < 1024; i++) {
-          const int src = (i > 512) ? (i - 1024) : i; // signed delay
-          int dst = src * ratio;
-          if (dst < 0)
-            dst += N;
-          dl_ch_estimates_time[aarx][dst] = ssb_t[i];
-        }
-      } else {
-        // do ifft of channel estimate
-        freq2time(N, (int16_t *)&dl_ch_estimates[aarx], (int16_t *)dl_ch_estimates_time[aarx]);
-      }
+      // do ifft of channel estimate
+      freq2time(fp->ofdm_symbol_size, (int16_t *)&dl_ch_estimates[aarx], (int16_t *)dl_ch_estimates_time[aarx]);
       UEscopeCopy(ue, pbchDlChEstimateTime, (void *)dl_ch_estimates_time, sizeof(c16_t), fp->nb_antennas_rx, fp->ofdm_symbol_size, 0);
     }
   }
