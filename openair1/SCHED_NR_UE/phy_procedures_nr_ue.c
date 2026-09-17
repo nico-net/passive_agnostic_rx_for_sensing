@@ -1467,6 +1467,35 @@ int nr_process_pbch_symbol(
     }
     // Get channel response to measure timing error
     if ((fp->ssb_index == ssbIndex) && (relPbchSymb == NB_SYMBOLS_PBCH - 1)) {
+      /* ISAC_CHEST_RAW=<path> (diagnostic, default off): dump the 240-value frequency-domain
+       * estimate AND the 240 source REs it was built from, so the 1024-vs-4096 estimates can be
+       * compared directly instead of inferred from CIR statistics. Per SSB, antenna 0 only, 24 max:
+       * header int32 {N, ssb_offset, frame, slot}, then 244 c16_t of dl_ch_estimates[0..243],
+       * then 240 c16_t of rxdataF at the SSB REs in read order (ssb_offset + 4*i wrapped). */
+      {
+        static int s_raw_left = -1;
+        static FILE *s_raw = NULL;
+        if (s_raw_left < 0) {
+          const char *pth = getenv("ISAC_CHEST_RAW");
+          s_raw = (pth && pth[0]) ? fopen(pth, "wb") : NULL;
+          s_raw_left = s_raw ? 24 : 0;
+        }
+        if (s_raw_left > 0 && s_raw && aarx == 0) {
+          s_raw_left--;
+          unsigned int so = fp->first_carrier_offset + fp->ssb_start_subcarrier;
+          if (so >= (unsigned)fp->ofdm_symbol_size)
+            so -= fp->ofdm_symbol_size;
+          int32_t hdr[4] = {fp->ofdm_symbol_size, (int32_t)so, proc->frame_rx, proc->nr_slot_rx};
+          fwrite(hdr, sizeof(hdr), 1, s_raw);
+          fwrite(&dl_ch_estimates[aarx][0], sizeof(c16_t), 244, s_raw);
+          for (int i = 0; i < 240; i++) {
+            const unsigned int idx = (so + (unsigned)i) % (unsigned)fp->ofdm_symbol_size;
+            fwrite(&rxdataF[aarx][idx], sizeof(c16_t), 1, s_raw);
+          }
+          fflush(s_raw);
+          if (s_raw_left == 0) { fclose(s_raw); s_raw = NULL; }
+        }
+      }
       /* ISAC_CHEST_COH=1 (diagnostic, default off): adjacent-subcarrier coherence and RMS of the
        * TRACKING estimate over the REs it actually populated, to compare against the same quantity
        * on the acquisition path (nr_pbch.c's CIRTEST). A real channel is smooth across 3.6 MHz, so
