@@ -64,6 +64,20 @@ canvas{display:block;width:100%;border-radius:6px;border:1px solid var(--soft);b
 .banner b{color:var(--amber)}
 .log{font-family:"IBM Plex Mono",monospace;font-size:11px;color:var(--dim);white-space:pre-wrap;word-break:break-all;max-height:420px;overflow:auto;line-height:1.7}
 .hidden{display:none!important}
+/* Raw-log panes, hidden together by the header toggle. Only the RENDERING stops: the panes stay in
+   the DOM and both poll loops keep writing to them, so unhiding shows the present, not a stale
+   snapshot from when they were last visible. */
+.tbtn{background:var(--raised);color:var(--dim);border:1px solid var(--border);border-radius:5px;padding:6px 10px;font-family:"IBM Plex Mono",monospace;font-size:11.5px;cursor:pointer}
+.tbtn:hover{color:var(--text)} .tbtn.off{color:var(--faint)}
+body.nologs .logpane{display:none!important}
+/* The DCI deep-dive tab. Same builders as the Paper-stats section, but given the whole viewport:
+   key ABOVE value (a right-aligned mono string in a flex row is what squeezed the long layout
+   verdicts into a few characters) and readable type instead of the 11.5px document density. */
+.roomy .kv{flex-direction:column;align-items:flex-start;gap:3px;padding:9px 0}
+.roomy .kv .k{font-size:11.5px}
+.roomy .kv .v{text-align:left;font-size:13.5px;white-space:normal;word-break:break-word}
+.roomy table{font-size:13px} .roomy th{font-size:10.5px;padding-bottom:10px} .roomy td{padding:8px}
+.roomy .ptitle{font-size:11.5px;margin-top:18px}
 .empty{color:var(--faint);font-size:12px;padding:18px 0;text-align:center;font-family:"IBM Plex Mono",monospace}
 </style>
 </head>
@@ -77,6 +91,7 @@ canvas{display:block;width:100%;border-radius:6px;border:1px solid var(--soft);b
     </svg>PASSIVE&middot;RX MONITOR
   </div>
   <select id="rxsel"></select>
+  <button id="logBtn" class="tbtn" title="Show or hide the raw log panes (Live key lines, Receiver log)"></button>
   <div class="status" id="status"></div>
 </header>
 <nav id="tabs"></nav>
@@ -84,7 +99,7 @@ canvas{display:block;width:100%;border-radius:6px;border:1px solid var(--soft);b
 <div id="liveWrap"></div>
 
 <script>
-const TABS = ["Live","Paper stats","Link & Sync Health","DL Detections","UL Detections","Tracking","Config / Scene"];
+const TABS = ["Live","Paper stats","PDCCH / DCI","Link & Sync Health","DL Detections","UL Detections","Tracking","Config / Scene"];
 let tab = 0, state = null, rxId = null, pollError = null, paper = null;
 
 const el = (t, cls, txt) => { const e = document.createElement(t); if (cls) e.className = cls; if (txt != null) e.textContent = txt; return e; };
@@ -379,10 +394,13 @@ function tabHealth(v) {
 
   if (log && log.lines.length) {
     const lg = panel("Receiver log");
+    lg.className += " logpane";   // hidden as a unit by the header's logs toggle
     lg.appendChild(el("div","log", log.lines.join("\n")));
     v.appendChild(lg);
   } else {
-    v.appendChild(panel("Receiver log", el("div","empty","start monitor.py with --log <receiver.log> for radio health")));
+    const lg = panel("Receiver log", el("div","empty","start monitor.py with --log <receiver.log> for radio health"));
+    lg.className += " logpane";
+    v.appendChild(lg);
   }
 }
 
@@ -584,6 +602,71 @@ function bars(rows, unit) {
   });
   return wrap;
 }
+/* PDCCH / DCI section. Built once, rendered in two places: compactly as section 2 of the Paper
+   stats document, and roomy on its own tab -- these numbers are what an operator stares at while a
+   DCI 1_1 layout converges, and at the document's 11.5px density in a sixth of a scrolling page
+   they were unreadable. Same data, same builders; only the type scale and the kv orientation
+   change, so there is one source of truth. */
+function dciPanel(r, id, G, roomy) {
+  const P = paper;
+  const L = r.layouts || {}, vd = L.verdict, pref = L.preferred;
+  const dci = panel("2 · PDCCH / DCI  (SEARCH_SPACE INFERRED / rnti_seen / DCI11_LAYOUT / STAGE2 / PREFERRED)");
+  if (roomy) dci.className += " roomy";
+  dci.appendChild(kvRows([
+    ["Distinct valid DCI observations (CRC-confirmed)", r.ss ? `${r.ss.confirmed}  per AL [${r.ss.per_al}]` : "waiting for SEARCH_SPACE INFERRED"],
+    ["DCI-length discovery", L.armed ? `length ${L.armed.dci_len} bits → ${L.armed.layouts} layouts armed` + (r.len_unresolved ? ` · ${r.len_unresolved} CORESET hypotheses exhausted 500 occasions` : "") : "not yet resolved", L.armed ? "green" : null],
+    ["CORESET hypotheses tried", r.coreset_hyp ? `${r.coreset_hyp[0]} / ${r.coreset_hyp[1]}` + (id.coreset_span ? ` → verified offset ${id.coreset_offset} span ${id.coreset_span}` : "") : "—"],
+    ["RNTI recovery / persistence", `${P.rnti.distinct} distinct · ${P.rnti.persistent} seen ≥2×  ` + (P.rnti.top||[]).slice(0,4).map(([k,n]) => `0x${k}:${n}`).join(" ")],
+    ["Hypotheses before / after filtering", vd ? `${vd.total} → ${L.now ? L.now[1] : vd.total}` + (pref ? ` → 1 (layout ${pref.layout_id}, ${pref.passes} TB-CRC passes)` : "") : "—"],
+    ["Observations to convergence (≤8 alive)", L.obs_to_converge != null ? L.obs_to_converge.toLocaleString() + " DCI observations" : (L.now ? `not yet (${L.now[1]} alive after ${L.now[0].toLocaleString()})` : "—")],
+    ["Technique D (S,L)", r.techd ? `S${r.techd.S} L${r.techd.L} tda${r.techd.tda} (rnti ${r.techd.rnti})` : `not converged · DM-RS oracle observations: ${r.oracle_obs || 0}` + (r.probe ? ` · probes ${r.probe[1]}/${r.probe[0]} cb0 ok` : "")],
+    ["PARMSET overflow (contradictory tuples)", r.parmset_overflow ? String(r.parmset_overflow) : "0", r.parmset_overflow ? "amber" : null],
+  ]));
+  dci.appendChild(el("div","ptitle","Figure 2 · DCI interpretation verdicts (layout hypotheses)"));
+  if (vd) {
+    dci.appendChild(table(["Layouts","VALIDATED (TB CRC)","AMBIGUOUS (alive, unproven)","REJECTED (stage 1/2)","UNSUPPORTED jobs","Wrong vs manual oracle"],
+      [[String(vd.total), `${vd.validated}  (${pc(vd.validated, vd.total)})`, `${vd.ambiguous}  (${pc(vd.ambiguous, vd.total)})`,
+        `${vd.rejected}  (${pc(vd.rejected, vd.total)})` + (L.stage2_rejected ? ` · stage-2 RIV rejects ${L.stage2_rejected}` : ""), String(vd.unsupported_jobs), "—"]]));
+    dci.appendChild(NA(G.oracle));
+  } else dci.appendChild(el("div","empty","no layout set armed yet"));
+  dci.appendChild(el("div","ptitle","Figure 3 · hypothesis convergence"));
+  dci.appendChild(convergencePlot(L.alive, L.armed && L.armed.layouts));
+  return dci;
+}
+
+/* The DCI deep-dive tab: the same section with the whole viewport, plus the two per-RNTI lines that
+   only ever appeared truncated (per_rnti is capped at 300 chars server-side) or not at all. */
+function tabDCI(v) {
+  const P = paper;
+  if (!P || !P.acq) { v.appendChild(el("div","empty","waiting for /paper (start monitor.py with --log)")); return; }
+  const r = P.run || {}, G = P.gaps || {}, id = r.ident || {};
+  v.appendChild(dciPanel(r, id, G, true));
+
+  const st = (state && state.log && state.log.stats) || {};
+  const detail = panel("Per-RNTI decode / search-space detail");
+  detail.className += " roomy";
+  const mono = (txt) => { const d = el("div", "mono", txt); d.style.cssText = "font-size:12.5px;color:var(--text);white-space:pre-wrap;word-break:break-word;padding:4px 0"; return d; };
+  let any = false;
+  if (st.per_rnti) { detail.appendChild(el("div","ptitle","PDSCHQ per-RNTI")); detail.appendChild(mono(st.per_rnti)); any = true; }
+  if (st.search_space && Object.keys(st.search_space).length) {
+    detail.appendChild(el("div","ptitle","SEARCH_SPACE INFERRED — monitored aggregation levels"));
+    detail.appendChild(table(["Search space","Monitored AL"], Object.entries(st.search_space)));
+    any = true;
+  }
+  if (st.scrambling && Object.keys(st.scrambling).length) {
+    detail.appendChild(el("div","ptitle","PDCCH scrambling ID confirmed"));
+    detail.appendChild(table(["Search space","n_id"], Object.entries(st.scrambling).map(([k,n]) => [k, String(n)])));
+    any = true;
+  }
+  if (st.converged) {
+    detail.appendChild(el("div","ptitle","Technique D converged"));
+    detail.appendChild(kvRows(Object.entries(st.converged).map(([k,x]) => [k, String(x)])));
+    any = true;
+  }
+  if (!any) detail.appendChild(el("div","empty","no per-RNTI or search-space lines seen yet"));
+  v.appendChild(detail);
+}
+
 function tabPaper(v) {
   const P = paper;
   if (!P || !P.acq) { v.appendChild(el("div","empty","waiting for /paper (start monitor.py with --log)")); return; }
@@ -615,30 +698,10 @@ function tabPaper(v) {
   v.appendChild(acq);
 
   // ---- 2. PDCCH / DCI ----
-  const L = r.layouts || {}, vd = L.verdict, pref = L.preferred;
-  const dci = panel("2 · PDCCH / DCI  (SEARCH_SPACE INFERRED / rnti_seen / DCI11_LAYOUT / STAGE2 / PREFERRED)");
-  dci.appendChild(kvRows([
-    ["Distinct valid DCI observations (CRC-confirmed)", r.ss ? `${r.ss.confirmed}  per AL [${r.ss.per_al}]` : "waiting for SEARCH_SPACE INFERRED"],
-    ["DCI-length discovery", L.armed ? `length ${L.armed.dci_len} bits → ${L.armed.layouts} layouts armed` + (r.len_unresolved ? ` · ${r.len_unresolved} CORESET hypotheses exhausted 500 occasions` : "") : "not yet resolved", L.armed ? "green" : null],
-    ["CORESET hypotheses tried", r.coreset_hyp ? `${r.coreset_hyp[0]} / ${r.coreset_hyp[1]}` + (id.coreset_span ? ` → verified offset ${id.coreset_offset} span ${id.coreset_span}` : "") : "—"],
-    ["RNTI recovery / persistence", `${P.rnti.distinct} distinct · ${P.rnti.persistent} seen ≥2×  ` + (P.rnti.top||[]).slice(0,4).map(([k,n]) => `0x${k}:${n}`).join(" ")],
-    ["Hypotheses before / after filtering", vd ? `${vd.total} → ${L.now ? L.now[1] : vd.total}` + (pref ? ` → 1 (layout ${pref.layout_id}, ${pref.passes} TB-CRC passes)` : "") : "—"],
-    ["Observations to convergence (≤8 alive)", L.obs_to_converge != null ? L.obs_to_converge.toLocaleString() + " DCI observations" : (L.now ? `not yet (${L.now[1]} alive after ${L.now[0].toLocaleString()})` : "—")],
-    ["Technique D (S,L)", r.techd ? `S${r.techd.S} L${r.techd.L} tda${r.techd.tda} (rnti ${r.techd.rnti})` : `not converged · DM-RS oracle observations: ${r.oracle_obs || 0}` + (r.probe ? ` · probes ${r.probe[1]}/${r.probe[0]} cb0 ok` : "")],
-    ["PARMSET overflow (contradictory tuples)", r.parmset_overflow ? String(r.parmset_overflow) : "0", r.parmset_overflow ? "amber" : null],
-  ]));
-  dci.appendChild(el("div","ptitle","Figure 2 · DCI interpretation verdicts (layout hypotheses)"));
-  if (vd) {
-    dci.appendChild(table(["Layouts","VALIDATED (TB CRC)","AMBIGUOUS (alive, unproven)","REJECTED (stage 1/2)","UNSUPPORTED jobs","Wrong vs manual oracle"],
-      [[String(vd.total), `${vd.validated}  (${pc(vd.validated, vd.total)})`, `${vd.ambiguous}  (${pc(vd.ambiguous, vd.total)})`,
-        `${vd.rejected}  (${pc(vd.rejected, vd.total)})` + (L.stage2_rejected ? ` · stage-2 RIV rejects ${L.stage2_rejected}` : ""), String(vd.unsupported_jobs), "—"]]));
-    dci.appendChild(NA(G.oracle));
-  } else dci.appendChild(el("div","empty","no layout set armed yet"));
-  dci.appendChild(el("div","ptitle","Figure 3 · hypothesis convergence"));
-  dci.appendChild(convergencePlot(L.alive, L.armed && L.armed.layouts));
-  v.appendChild(dci);
+  v.appendChild(dciPanel(r, id, G, false));
 
   // ---- 3. PDSCH ----
+  const L = r.layouts || {}, pref = L.preferred;
   const q = r.pdschq, post = r.post_conv, ld = r.ldpc, hq = r.harqc;
   const pd = panel("3 · PDSCH  (PDSCHQ = completed jobs, one per grant · LDPCDIAG · HARQC · MCSHIST / RBHIST)");
   pd.appendChild(kvRows([
@@ -817,7 +880,7 @@ function decoderPanel() {
   return row;
 }
 
-const RENDER = [null, tabPaper, tabHealth, tabDL, tabUL, tabTracking, tabConfig];  // index 0 = Live, handled before this table
+const RENDER = [null, tabPaper, tabDCI, tabHealth, tabDL, tabUL, tabTracking, tabConfig];  // index 0 = Live, handled before this table
 
 function renderChrome() {
   const nav = document.getElementById("tabs"); nav.textContent = "";
@@ -866,7 +929,9 @@ function render() {
   v.textContent = "";
   if (state && state.log) v.appendChild(discoveryPanel());
   if (state && state.log) v.appendChild(decoderPanel());
-  if (tab === 1) { RENDER[tab](v); return; }
+  // Paper stats and the DCI tab come from /paper, not from a receiver report, so they render even
+  // with no CPI closed yet -- and they own no .log panes, so they skip the scroll restore below.
+  if (RENDER[tab] === tabPaper || RENDER[tab] === tabDCI) { RENDER[tab](v); return; }
   if (!state || !Object.keys(state.receivers).length) {
     const live = state.log && state.log.last_line_at && (state.now - state.log.last_line_at) < 10;
     v.appendChild(el("div","empty", live
@@ -956,6 +1021,23 @@ function safeRender() {
     }
   }
 }
+/* Logs toggle. CSS-only hiding (body.nologs .logpane): both poll loops keep writing to the panes
+   while they are hidden, so unhiding shows the present rather than a snapshot from when they were
+   last visible, and nothing downstream has to know the panes are gone. */
+const LOGKEY = "monitor.showLogs";
+function applyLogs() {
+  const on = localStorage.getItem(LOGKEY) !== "0";
+  document.body.classList.toggle("nologs", !on);
+  const b = document.getElementById("logBtn");
+  b.textContent = on ? "logs ▾" : "logs ▸";
+  b.classList.toggle("off", !on);
+}
+document.getElementById("logBtn").onclick = () => {
+  localStorage.setItem(LOGKEY, localStorage.getItem(LOGKEY) === "0" ? "1" : "0");
+  applyLogs();
+};
+applyLogs();
+
 safeRender(); poll();
 window.addEventListener("resize", () => render());
 </script>
@@ -1001,7 +1083,7 @@ window.addEventListener("resize", () => render());
   </div>
   <div class="row" style="margin-top:12px" id="liveAgn"></div>
   <div class="map" style="margin-top:12px"><h4>gNB / cell <span id="liveIdSub"></span></h4><div class="agn" id="liveId"></div></div>
-  <div class="map" style="margin-top:12px"><h4>Receiver log — key lines <span id="liveLogSub">lock · CFO · PREFERRED · PDSCHQ · CHESTDIAG · RFSTALL · discovery · oracle · HARQC</span></h4>
+  <div class="map logpane" style="margin-top:12px"><h4>Receiver log — key lines <span id="liveLogSub">lock · CFO · PREFERRED · PDSCHQ · CHESTDIAG · RFSTALL · discovery · oracle · HARQC</span></h4>
     <div class="log" id="liveLog" style="max-height:360px"></div></div>
 </div>
 <script>
