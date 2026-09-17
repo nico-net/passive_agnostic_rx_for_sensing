@@ -35,6 +35,14 @@
 void nr_csirs_blind_rt_slot(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot,
                             c16_t rxdataF[][ue->frame_parms.samples_per_slot_wCP]);
 
+/** Hand one slot to the blind CSI-RS search's OWN consumer (bounded ring, drop-oldest, priority 40
+ *  -- see the consumer's comment in nr_csirs_blind_rt.c). Never blocks; the PDCCH scan consumer
+ *  calls this instead of nr_csirs_blind_rt_slot() so the search can never delay a PDCCH occasion.
+ *  absolute_slot_mono is the producer's monotonic slot counter for the staleness test; fo_hz the
+ *  frequency offset sampled with these samples (replayed via nr_slot_fep_fo_override_hz). */
+void nr_csirs_blind_rt_enqueue(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot, long absolute_slot_mono,
+                               double fo_hz);
+
 #include "nfapi/open-nFAPI/nfapi/public_inc/fapi_nr_ue_interface.h"
 /** The confirmed cell CSI-RS resource as a FAPI PDU for PDSCH rate matching, if the blind search has
  *  converged and the resource occurs in `absolute_slot`. Returns true and fills *out; else false. */

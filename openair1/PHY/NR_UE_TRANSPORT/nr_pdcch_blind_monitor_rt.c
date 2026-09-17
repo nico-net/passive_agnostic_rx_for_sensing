@@ -137,6 +137,23 @@ static void build_coreset_bitmap(int num_groups, uint8_t bitmap[6])
 // flood at LOG_D's own level anyway, so this is a deliberate low-rate INFO counter, not a
 // downgrade of the per-candidate line.
 #define NR_PDCCH_BLIND_SUMMARY_PERIOD_OCC 1000
+/* The periodic summary/BTIM lines used to fire every 1000 occasions, which on a 2026-09-17 capture
+ * meant nothing for the first ~170 s (the summary block is only reached once the occasion runs to
+ * completion) and then every 2 s: a 120 s validation capture printed no BTIM at all while a 600 s
+ * one printed 204 near-identical lines. Gate them on wall-clock instead: once every 20 s, from the
+ * first completed occasion. */
+#define NR_PDCCH_BLIND_SUMMARY_PERIOD_NS 20000000000ull
+static bool summary_due_now(void)
+{
+  static uint64_t s_last_ns = 0;
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  const uint64_t now = (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+  if (s_last_ns != 0 && now - s_last_ns < NR_PDCCH_BLIND_SUMMARY_PERIOD_NS)
+    return false;
+  s_last_ns = now;
+  return true;
+}
 static uint64_t    g_occasions_run  = 0;
 static uint64_t    g_candidates_run = 0;
 // Phase 3 autodiscover (2026-09-04): Technique C's dci_length sweep has succeeded, OR given up
@@ -713,7 +730,7 @@ static uint64_t g_held_mismatch = 0; // migrated from NRSniffer: rejected by the
  * pdcch_blind_monitor_scan_thread set these are CONSUMER times: the receive thread only enqueues. */
 #define BTIM_PRE     8   /* occasion entry -> first FEP (UL scan setup, hypothesis selection) */
 #define BTIM_PBWP    9   /* passive-BWP CORESET observe (every 8th occasion) */
-#define BTIM_CSIRS   10  /* nr_csirs_blind_rt_slot(): CSI-RS reference generation + FEP + correlate */
+#define BTIM_CSIRS   10  /* CSI-RS blind search hand-off (was the in-line body; now only the enqueue) */
 #define BTIM_POST    11  /* after the candidate decodes: accepts, evidence, sweeps, submissions */
 #define BTIM_RT      12  /* nr_pdcch_blind_monitor_process() on the PHY RECEIVE thread, per slot:
                           * the only blind-PDCCH work left there once scan/pdsch/ul consumers are on
@@ -1930,10 +1947,12 @@ void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_pr
    * already overwritten would feed the correlator next frame's samples and manufacture hits that
    * no periodicity test could distinguish from a real resource. It reads rxdataF and writes
    * nothing the decoder consumes, so it cannot affect decoding. */
+  /* Hand the slot to the search's OWN consumer (nr_csirs_blind_rt.c); the ~1.85 ms body no longer
+   * runs here. Still after the sample-lifetime check, and the consumer re-checks before its FEP. */
   const uint64_t btim_t_csirs = btim_on ? btim_now() : 0;
-  nr_csirs_blind_rt_slot(ue, proc->nr_slot_rx,
-                         source_absolute_slot >= 0 ? (uint32_t)source_absolute_slot : 0u,
-                         rxdataF);
+  nr_csirs_blind_rt_enqueue(ue, proc->nr_slot_rx,
+                            source_absolute_slot >= 0 ? (uint32_t)source_absolute_slot : 0u,
+                            source_absolute_slot, nr_slot_fep_fo_override_hz);
   btim_add(BTIM_CSIRS, btim_t_csirs);
 
   /* XCHECK diagnostic (2026-09-06, Task 5 follow-up): run Technique A's own correlation function
@@ -3609,7 +3628,8 @@ constdiag_done:;
     btim_occasion_total(d, slot_ns);
   }
 
-  if (g_occasions_run % NR_PDCCH_BLIND_SUMMARY_PERIOD_OCC == 0) {
+  const bool sum_due = summary_due_now();
+  if (sum_due) {
     /* scanq is all-zero when the scan runs in-line, which is what distinguishes "deferral off" from
      * "deferral on and keeping up" in a log without needing a second line. */
     nr_pdcch_passive_queue_stats_t scanq;
@@ -3662,7 +3682,7 @@ constdiag_done:;
       nr_pdsch_passive_parmset_dump();
     }
     /* Which HALF of the decode is failing -- see §29.1. Cheap (one line) and period-guarded. */
-    if (want_decode && (g_occasions_run % NR_PDCCH_BLIND_SUMMARY_PERIOD_OCC) == 0) {
+    if (want_decode && sum_due) {
       nr_pdsch_passive_ldpc_stats_dump();
     }
 
@@ -3670,10 +3690,10 @@ constdiag_done:;
      * static library contributes nothing until something needs a symbol from it, so without a
      * caller a clean build proves only that the sources COMPILE, not that the gNB PUSCH receive
      * chain resolves inside this binary. */
-    if ((g_occasions_run % NR_PDCCH_BLIND_SUMMARY_PERIOD_OCC) == 0) {
+    if (sum_due) {
       nr_pusch_grant_book_stats_dump();
     }
-    if (nr_pdsch_passive_queue_running() && (g_occasions_run % NR_PDCCH_BLIND_SUMMARY_PERIOD_OCC) == 0) {
+    if (nr_pdsch_passive_queue_running() && sum_due) {
       nr_pdsch_passive_queue_stats_t qs;
       nr_pdsch_passive_queue_get_stats(&qs);
       /* Every field here is a reason a queued job did NOT become a decode, so a shortfall in
@@ -3714,7 +3734,7 @@ constdiag_done:;
     const bool acq_bwp = ul_opts.bwp_size > 0;
     static int acq_last_sig = -1;
     const int acq_sig = (int)acq_len | ((int)acq_cs << 1) | ((int)acq_bwp << 2);
-    const bool acq_period = (g_occasions_run % NR_PDCCH_BLIND_SUMMARY_PERIOD_OCC) == 0;
+    const bool acq_period = sum_due;
     if (acq_period || acq_sig != acq_last_sig) {
       acq_last_sig = acq_sig;
       const nr_pdcch_ul_discovery_snapshot_t uls = nr_pdcch_ul_discovery_snapshot();
@@ -3752,7 +3772,7 @@ constdiag_done:;
       }
     }
 
-    if (btim_on && (g_occasions_run % NR_PDCCH_BLIND_SUMMARY_PERIOD_OCC) == 0) {
+    if (btim_on && sum_due) {
       char rep[1100];
       int u = 0;
       for (int k = 0; k < BTIM_N && u < (int)sizeof(rep) - 90; k++) {
