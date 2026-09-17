@@ -593,19 +593,43 @@ nr_initial_sync_t nr_initial_sync(UE_nr_rxtx_proc_t *proc,
    * is bounded by BOTH the worker count and a fixed scratch budget, which keeps peak memory flat
    * regardless of bandwidth, antenna count, or how many GSCN the band search yields.
    */
-  /* SCAN ON ONE ANTENNA. Acquisition needs one receive branch: PSS/SSS/PBCH on antenna 0 alone
-   * is what every single-channel run ever used, and the 4-channel scan cost 4x the scratch per
-   * GSCN (the ~1.6 GB that made malloc16() fail at 273 PRB x 4 RX x ~40 GSCN) for a combining
-   * gain the acquisition never needed. The scan sees a frame-parms copy with nb_antennas_rx =
-   * scan_ant; the receive chain itself keeps every antenna -- nothing is retuned, the stream is
-   * the same 4 channels before and after lock. ISAC_SCAN_ANT=N widens it (A/B only). */
+  /* SCAN ON EVERY BRANCH, STRONGEST FIRST. pss_search_time_nr() already sums the correlation
+   * power over the antennas it is given and the PBCH step MRCs them, so the scan gets the full
+   * combining gain simply by being handed all branches. It used to be handed ONE (antenna 0)
+   * because 273 PRB x 4 RX x ~40 GSCN of scratch once exhausted memory; the scratch is now
+   * batched under NR_INITIAL_SYNC_SCAN_SCRATCH_BUDGET (4 branches at 273 PRB = 6 GSCN per batch
+   * instead of 24), so that reason is gone. The receive chain itself is unchanged: nothing is
+   * retuned, the stream is the same channels before and after lock. ISAC_SCAN_ANT=N narrows the
+   * scan to the N strongest branches (A/B only). */
   NR_DL_FRAME_PARMS scan_fp = ue->frame_parms;
   {
     const char *e = getenv("ISAC_SCAN_ANT");
-    int scan_ant = (e != NULL) ? atoi(e) : 1;
+    int scan_ant = (e != NULL) ? atoi(e) : fp->nb_antennas_rx;
     if (scan_ant < 1 || scan_ant > fp->nb_antennas_rx)
       scan_ant = fp->nb_antennas_rx;
     scan_fp.nb_antennas_rx = scan_ant;
+  }
+  /* WHICH branch(es) feed the scan is decided by measured power, not by index. The X410's four
+   * branches differ by up to 12 dB and the ordering changes between sessions (2026-09-17: antenna 0
+   * read 12 dB below antenna 3 and the -r 51 scan could not decode PBCH on it, while the same
+   * capture locked at once with the strongest branch in its place). Rank the physical branches by
+   * energy over the captured frames and give the scan the top scan_ant of them. */
+  int scan_src[NB_ANTENNAS_RX];
+  {
+    double e_ant[NB_ANTENNAS_RX] = {0};
+    for (int aarx = 0; aarx < fp->nb_antennas_rx; aarx++) {
+      scan_src[aarx] = aarx;
+      e_ant[aarx] = signal_energy(&ue->common_vars.rxdata[aarx][0], fp->samples_per_frame);
+    }
+    for (int i = 0; i < fp->nb_antennas_rx; i++) // selection sort, descending energy
+      for (int j = i + 1; j < fp->nb_antennas_rx; j++)
+        if (e_ant[scan_src[j]] > e_ant[scan_src[i]]) {
+          const int t = scan_src[i]; scan_src[i] = scan_src[j]; scan_src[j] = t;
+        }
+    if (fp->nb_antennas_rx > 1)
+      LOG_I(NR_PHY, "Scan branch by energy: antenna %d (%.1f dB above antenna 0); order [%d %d %d %d]\n",
+            scan_src[0], 10.0 * log10((e_ant[scan_src[0]] + 1.0) / (e_ant[0] + 1.0)),
+            scan_src[0], fp->nb_antennas_rx > 1 ? scan_src[1] : 0, fp->nb_antennas_rx > 2 ? scan_src[2] : 0, fp->nb_antennas_rx > 3 ? scan_src[3] : 0);
   }
   const size_t rxdata_len = (size_t)fp->samples_per_frame * n_frames + fp->ofdm_symbol_size;
   const size_t bytes_per_gscn = (size_t)scan_fp.nb_antennas_rx * rxdata_len * sizeof(c16_t);
@@ -688,7 +712,7 @@ nr_initial_sync_t nr_initial_sync(UE_nr_rxtx_proc_t *proc,
           ok = false;
           break; // partial allocation is released by the collection loop below
         }
-        memcpy(ssbInfo->rxdata[ant], ue->common_vars.rxdata[ant], sizeof(c16_t) * fp->samples_per_frame * n_frames);
+        memcpy(ssbInfo->rxdata[ant], ue->common_vars.rxdata[scan_src[ant]], sizeof(c16_t) * fp->samples_per_frame * n_frames);
         memset(ssbInfo->rxdata[ant] + fp->samples_per_frame * n_frames, 0, fp->ofdm_symbol_size * sizeof(c16_t));
         ssbInfo->rxdata_sz = rxdata_len;
       }
