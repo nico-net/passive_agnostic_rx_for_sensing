@@ -1929,18 +1929,26 @@ void *UE_thread(void *arg)
         /* Two consecutive windows (2 s) before acting: one window is enough to be sure given how
          * far apart the two levels sit, but the stall is permanent and a spurious reacquisition
          * costs a real capture gap, so require it to persist. */
-        /* PATIENCE DEPENDS ON WHICH FAULT THIS IS.
-         *
-         * Signal present but no SSB decoding is a timing runaway: it does not heal itself and every
-         * further window walks the FFT window further off, so act after 2.
+        /* PATIENCE: 8 windows for BOTH faults.
          *
          * All four branches at the noise floor is a STREAM OUTAGE, and measured 2026-09-01 those
          * recover ON THEIR OWN after 3-4 s (17 of 122 census windows deaf across a run, always
          * followed by a full return to pbch_ok=50/50). Killing at 2 windows threw away captures
          * that were about to come back -- the receiver was ending the run over a transient it would
          * have survived. With the integrator frozen above there is nothing to gain by acting fast,
-         * so wait long enough to let the outage clear. */
-        const int bad_needed = (rf_collapsed && UE->is_synchronized) ? 8 : 2;
+         * so wait long enough to let the outage clear.
+         *
+         * Signal present but no SSB decoding used to be treated as a timing runaway and acted on
+         * after 2, on the premise that it was the ONLY way to get pbch_ok=0 with signal present.
+         * Measured 2026-09-17 it is not: with the SSB beam the scan happened to acquire sitting at
+         * the PBCH decode edge (1-3 of 50 per window, then 0), the receiver was killed while its
+         * timing integrator was stable (max_pos_acc -3..-36, PBCH-derived steps of a few samples),
+         * SIB1 had decoded twice and 17k CSI-RS confirmations were flowing -- a working receiver,
+         * ended over a marginal broadcast beam. The integrator is frozen while PBCH is dead and the
+         * per-frame loop keeps applying its held drift estimate, so nothing walks off in the extra
+         * windows; a genuine runaway still trips after 8 (16 s), one reacquisition later than
+         * before, while a beam that decodes even one SSB per window resets the count and survives. */
+        const int bad_needed = 8;
         if (s_wd_on && s_bad >= bad_needed && UE->is_synchronized) {
           s_fires++;
           LOG_E(PHY,
