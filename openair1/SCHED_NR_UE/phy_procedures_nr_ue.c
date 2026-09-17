@@ -1393,6 +1393,60 @@ int nr_process_pbch_symbol(
                                nid);
     // Get channel response to measure timing error
     if ((fp->ssb_index == ssbIndex) && (relPbchSymb == NB_SYMBOLS_PBCH - 1)) {
+      /* ISAC_CHEST_COH=1 (diagnostic, default off): adjacent-subcarrier coherence and RMS of the
+       * TRACKING estimate over the REs it actually populated, to compare against the same quantity
+       * on the acquisition path (nr_pbch.c's CIRTEST). A real channel is smooth across 3.6 MHz, so
+       * coherence ~1; noise or a wrong DM-RS/subcarrier mapping gives ~0. Cheap: one pass. */
+      static int s_coh = -1;
+      if (s_coh < 0)
+        s_coh = (getenv("ISAC_CHEST_COH") && atoi(getenv("ISAC_CHEST_COH"))) ? 1 : 0;
+      static int s_coh_left = 24;
+      if (s_coh && s_coh_left > 0 && aarx == 0) {
+        s_coh_left--;
+        const c16_t *h = dl_ch_estimates[aarx];
+        const int N = fp->ofdm_symbol_size;
+        double lr = 0.0, li = 0.0, den = 0.0, e = 0.0;
+        int nz = 0, prev = -1;
+        for (int k = 0; k < N; k++) {
+          if (h[k].r == 0 && h[k].i == 0)
+            continue;
+          nz++;
+          e += (double)h[k].r * h[k].r + (double)h[k].i * h[k].i;
+          if (prev >= 0 && k == prev + 1) { // adjacent populated pair only
+            const double ar = h[prev].r, ai = h[prev].i, br = h[k].r, bi = h[k].i;
+            lr += ar * br + ai * bi;
+            li += ar * bi - ai * br;
+            den += sqrt((ar * ar + ai * ai) * (br * br + bi * bi));
+          }
+          prev = k;
+        }
+        /* Is the SSB actually in the bins the estimator reads? Compare the mean |rxdataF| over the
+         * 240 subcarriers it walks (absolute positions, same arithmetic as the estimator) against
+         * the mean over the whole symbol. SSB present and correctly mapped -> ratio well above 1;
+         * ratio ~1 means those bins hold ordinary traffic/noise, i.e. a wrong mapping. */
+        unsigned int ssb_off = fp->first_carrier_offset + ssb_start_subcarrier;
+        if (ssb_off >= (unsigned)N)
+          ssb_off -= N;
+        double ssb_sum = 0.0, all_sum = 0.0;
+        for (int i = 0; i < N; i++)
+          all_sum += hypot((double)rxdataF[aarx][i].r, (double)rxdataF[aarx][i].i);
+        double ssb_first = 0.0, ssb_last = 0.0; // first/last 20 SSB REs: structure vs flat
+        for (int i = 0; i < 240; i++) {
+          const unsigned int sc = (ssb_off + i) % (unsigned)N;
+          const double m = hypot((double)rxdataF[aarx][sc].r, (double)rxdataF[aarx][sc].i);
+          ssb_sum += m;
+          if (i < 20)
+            ssb_first += m;
+          else if (i >= 220)
+            ssb_last += m;
+        }
+        LOG_W(PHY,
+              "SENSING: CHESTCOH path=tracking N=%d ssb=%d nz=%d rms=%.1f coh=%.4f "
+              "ssb_band_mean=%.1f sym_mean=%.1f ratio=%.2f edge_first=%.1f edge_last=%.1f\n",
+              N, ssbIndex, nz, nz ? sqrt(e / nz) : 0.0, den > 0.0 ? sqrt(lr * lr + li * li) / den : 0.0,
+              ssb_sum / 240.0, all_sum / N, (all_sum > 0.0) ? (ssb_sum / 240.0) / (all_sum / N) : 0.0,
+              ssb_first / 20.0, ssb_last / 20.0);
+      }
       // do ifft of channel estimate
       freq2time(fp->ofdm_symbol_size, (int16_t *)&dl_ch_estimates[aarx], (int16_t *)dl_ch_estimates_time[aarx]);
       UEscopeCopy(ue, pbchDlChEstimateTime, (void *)dl_ch_estimates_time, sizeof(c16_t), fp->nb_antennas_rx, fp->ofdm_symbol_size, 0);
