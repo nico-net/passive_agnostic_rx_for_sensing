@@ -706,9 +706,24 @@ static uint64_t g_held_mismatch = 0; // migrated from NRSniffer: rejected by the
 #define BTIM_PDSCH   5
 #define BTIM_SUBMIT  6
 #define BTIM_TOTAL   7
-#define BTIM_N       8
+/* The untimed remainder, bucketed 2026-09-17: the four stages above summed to ~138 us while TOTAL
+ * read 1980 us per occasion (cs1 capture), and that gap -- not the decode -- is what made one scan
+ * consumer drop 68 % of occasions (scanq drop_full=618213 of 902224). Name every segment so the
+ * next capture says where it goes instead of a reader guessing. Note that with
+ * pdcch_blind_monitor_scan_thread set these are CONSUMER times: the receive thread only enqueues. */
+#define BTIM_PRE     8   /* occasion entry -> first FEP (UL scan setup, hypothesis selection) */
+#define BTIM_PBWP    9   /* passive-BWP CORESET observe (every 8th occasion) */
+#define BTIM_CSIRS   10  /* nr_csirs_blind_rt_slot(): CSI-RS reference generation + FEP + correlate */
+#define BTIM_POST    11  /* after the candidate decodes: accepts, evidence, sweeps, submissions */
+#define BTIM_RT      12  /* nr_pdcch_blind_monitor_process() on the PHY RECEIVE thread, per slot:
+                          * the only blind-PDCCH work left there once scan/pdsch/ul consumers are on
+                          * (Phase 3's own single-antenna FEP + window scan while undiscovered, the
+                          * occasion gate, the enqueue). Written from the receive thread into its own
+                          * array slots; the consumer never touches index 12. */
+#define BTIM_N       13
 static const char *const kBtimName[BTIM_N] = {"fep_llr", "demap", "prepass", "decode",
-                                              "chest",   "pdsch", "submit",  "TOTAL"};
+                                              "chest",   "pdsch", "submit",  "TOTAL",
+                                              "pre",     "pbwp",  "csirs",   "post", "rt"};
 static uint64_t g_btim_ns[BTIM_N]  = {0};
 static uint64_t g_btim_n[BTIM_N]   = {0};
 static uint64_t g_btim_max[BTIM_N] = {0};
@@ -1126,7 +1141,14 @@ static void nr_pdcch_blind_cand_worker(void *arg)
   completed_task_ans(t->ans);
 }
 
+static void nr_pdcch_blind_monitor_process_body(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc);
 void nr_pdcch_blind_monitor_process(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc)
+{
+  const uint64_t t_rt = btim_enabled() ? btim_now() : 0;
+  nr_pdcch_blind_monitor_process_body(ue, proc);
+  btim_add(BTIM_RT, t_rt);
+}
+static void nr_pdcch_blind_monitor_process_body(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc)
 {
   /* The blind PDCCH monitor is the PASSIVE RECEIVER, not part of the sensing pipeline: it decodes
    * other UEs' DCIs and (optionally) their PDSCH. It used to be gated on nr_isac_enabled() as well,
@@ -1815,6 +1837,7 @@ void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_pr
   extern int nr_pdcch_blind_capture;
   nr_pdcch_blind_capture = (getenv("ISAC_PDCCH_CAPTURE") != NULL);
 
+  btim_add(BTIM_PRE, btim_occ0);
   const uint64_t btim_t_fep = btim_on ? btim_now() : 0;
   for (int symbol = cfg->ss_first_symbol; symbol < cfg->ss_first_symbol + rel15->coreset.duration; symbol++) {
     nr_slot_fep(ue, fp, proc->nr_slot_rx, symbol, rxdataF, link_type_dl, 0, ue->common_vars.rxdata);
@@ -1830,6 +1853,7 @@ void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_pr
    * BWP, so this CORESET never carries its DCIs. Every 8th occasion, correlate each 6-RB window of the
    * CORESET symbols against the PDCCH DM-RS under the spec reference (CRB 0) and the OAI one (the BWP
    * start, within 5 RB below the window), and let the tracker find a second CORESET. ~6k MAC/symbol. */
+  const uint64_t btim_t_pbwp = btim_on ? btim_now() : 0;
   if (pbwp_on) {
     static uint32_t s_cs_tick;
     static bool s_cs_logged;
@@ -1895,6 +1919,7 @@ void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_pr
       }
     }
   }
+  btim_add(BTIM_PBWP, btim_t_pbwp);
   if (!nr_passive_samples_valid(
           atomic_load_explicit(&nr_ue_diag_producer_absolute_slot, memory_order_relaxed),
           source_absolute_slot, fp->slots_per_frame))
@@ -1905,9 +1930,11 @@ void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_pr
    * already overwritten would feed the correlator next frame's samples and manufacture hits that
    * no periodicity test could distinguish from a real resource. It reads rxdataF and writes
    * nothing the decoder consumes, so it cannot affect decoding. */
+  const uint64_t btim_t_csirs = btim_on ? btim_now() : 0;
   nr_csirs_blind_rt_slot(ue, proc->nr_slot_rx,
                          source_absolute_slot >= 0 ? (uint32_t)source_absolute_slot : 0u,
                          rxdataF);
+  btim_add(BTIM_CSIRS, btim_t_csirs);
 
   /* XCHECK diagnostic (2026-09-06, Task 5 follow-up): run Technique A's own correlation function
    * on THIS FEP output -- the manual, live-verified ground-truth config's own receive chain, which
@@ -2696,6 +2723,7 @@ constdiag_done:;
     }
   }
   btim_add(BTIM_DECODE, btim_t_dec);
+  const uint64_t btim_t_post = btim_on ? btim_now() : 0;
 
   // ---- Phase 2 (sequential, in original candidate order): everything below has a genuine
   // sequential dependency (dci_thres EMA, RNTI persistence ring buffer) or is rare/expensive enough
@@ -3567,6 +3595,7 @@ constdiag_done:;
   }
 
   if (btim_on) {
+    btim_add(BTIM_POST, btim_t_post);
     const uint64_t d = btim_now() - btim_occ0;
     g_btim_ns[BTIM_TOTAL] += d;
     g_btim_n[BTIM_TOTAL]++;
@@ -3724,7 +3753,7 @@ constdiag_done:;
     }
 
     if (btim_on && (g_occasions_run % NR_PDCCH_BLIND_SUMMARY_PERIOD_OCC) == 0) {
-      char rep[700];
+      char rep[1100];
       int u = 0;
       for (int k = 0; k < BTIM_N && u < (int)sizeof(rep) - 90; k++) {
         u += snprintf(rep + u, sizeof(rep) - u, "%s[n=%lu mean=%.1fus max=%.1fus tot=%.2fs] ",
