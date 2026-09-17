@@ -19,16 +19,10 @@
 #include "PHY/nr_phy_common/inc/nr_phy_common.h"
 #include "common/utils/LOG/log.h"
 
-#include "common/utils/system.h"          // threadCreate
-#include "nr_passive_sample_lifetime.h"    // nr_passive_samples_valid
-#include <pthread.h>
-#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
-#include <time.h>
 
 /* Max CSI-RS ports over the rows kRows enumerates (row 4). */
-extern _Atomic long nr_ue_diag_producer_absolute_slot; // producer's monotonic slot counter (nr-ue.c)
 #define NR_CSIRS_BLIND_RT_MAX_PORTS 4
 
 static nr_csirs_blind_state_t g_st;
@@ -243,132 +237,4 @@ bool nr_csirs_blind_rt_rate_match(uint32_t absolute_slot, fapi_nr_dl_config_csir
 bool nr_csirs_blind_rt_rate_match_zp(uint32_t absolute_slot, fapi_nr_dl_config_csirs_pdu_rel15_t *out)
 {
   return rate_match_from(&g_zp, 2 /* ZP: rate matching only, no estimation */, absolute_slot, out);
-}
-
-/* ---- Own consumer for the blind CSI-RS SEARCH (2026-09-17) -------------------------------------
- *
- * The search body above used to run inside every PDCCH monitoring occasion, on the PDCCH scan
- * consumer, where it was ~1.85 ms of untimed work per occasion (reference generation + FEP +
- * correlation for one candidate) against a 500 us occasion period -- the single largest reason that
- * consumer dropped 68 % of occasions. It has no business there: it reads the raw IQ ring and the
- * slot number, writes only its own state, and nothing in the PDCCH occasion consumes its result
- * in-line (the rate-matcher reads the stored confirmed state, nr_csirs_blind_rt_rate_match()).
- *
- * Same shape as nr_pdcch_passive_queue: a job is a slot reference, the consumer re-FEPs from
- * ue->common_vars.rxdata itself and checks first that the producer has not overwritten that slot.
- * One consumer, priority BELOW the PDCCH scan consumer (40 vs 50) so it can never delay a PDCCH
- * occasion, not on the shared RT Tpool. Bounded ring, drop-OLDEST when full (a stale slot is a
- * wrong answer, a dropped one is only a slower search), every drop counted.
- *
- * DECIMATION IS THE RING, NOT A CONSTANT. The search's statistics are per-candidate hit/slot pairs
- * whose periodicity is inferred from absolute_slot deltas (nr_csirs_blind_feed), so any subset of
- * slots converges -- only more slowly, in proportion to the fraction kept. A fixed "every Nth slot"
- * would be a number guessed against a cost that is itself transient: once the resource is
- * confirmed the body returns immediately (see above) and this consumer idles. So the producer
- * offers every slot, the consumer takes what its real cost allows, and the difference is
- * dropped_full in the stats line, i.e. the effective decimation is measured, not assumed. */
-#define CSIRS_Q_DEPTH 8
-typedef struct {
-  int      slot;
-  uint32_t absolute_slot;
-  long     absolute_slot_mono; ///< producer's monotonic counter, for the staleness test
-  double   fo_hz;
-} csirs_job_t;
-static csirs_job_t     g_q[CSIRS_Q_DEPTH];
-static int             g_q_head, g_q_tail, g_q_count;
-static pthread_mutex_t g_q_lock = PTHREAD_MUTEX_INITIALIZER;
-static pthread_cond_t  g_q_cv   = PTHREAD_COND_INITIALIZER;
-static _Atomic int      g_q_running;
-static _Atomic uint64_t g_q_queued, g_q_done, g_q_drop_full, g_q_drop_stale;
-static PHY_VARS_NR_UE  *g_q_ue;
-static pthread_t        g_q_thread;
-
-static void *csirs_consumer(void *arg)
-{
-  (void)arg;
-  PHY_VARS_NR_UE *ue = g_q_ue;
-  const NR_DL_FRAME_PARMS *fp = &ue->frame_parms;
-  const long slots_per_frame = fp->slots_per_frame;
-  /* One antenna's slot of frequency-domain scratch: the body only ever FEPs and reads antenna 0. */
-  c16_t (*rxdataF)[fp->samples_per_slot_wCP] = malloc16_clear(sizeof(c16_t) * fp->samples_per_slot_wCP);
-  if (rxdataF == NULL) {
-    LOG_E(PHY, "SENSING: CSIRS_BLIND consumer: no scratch memory, search disabled\n");
-    return NULL;
-  }
-  LOG_I(PHY, "SENSING: CSIRS_BLIND consumer started (depth %d, drop-oldest, priority 40) -- the CSI-RS "
-             "search no longer runs on the PDCCH scan consumer\n", CSIRS_Q_DEPTH);
-  uint64_t last_report_ns = 0;
-  while (1) {
-    csirs_job_t job;
-    pthread_mutex_lock(&g_q_lock);
-    while (g_q_count == 0) {
-      struct timespec ts;
-      clock_gettime(CLOCK_REALTIME, &ts);
-      ts.tv_nsec += 20 * 1000 * 1000;
-      if (ts.tv_nsec >= 1000000000L) { ts.tv_sec++; ts.tv_nsec -= 1000000000L; }
-      pthread_cond_timedwait(&g_q_cv, &g_q_lock, &ts);
-    }
-    job       = g_q[g_q_tail];
-    g_q_tail  = (g_q_tail + 1) % CSIRS_Q_DEPTH;
-    g_q_count--;
-    pthread_mutex_unlock(&g_q_lock);
-    const long prod = atomic_load_explicit(&nr_ue_diag_producer_absolute_slot, memory_order_relaxed);
-    if (!nr_passive_samples_valid(prod, job.absolute_slot_mono, slots_per_frame)) {
-      atomic_fetch_add_explicit(&g_q_drop_stale, 1, memory_order_relaxed);
-      continue;
-    }
-    const double saved_fo = nr_slot_fep_fo_override_hz;
-    nr_slot_fep_fo_override_hz = job.fo_hz; // replay the offset captured with these samples
-    nr_csirs_blind_rt_slot(ue, job.slot, job.absolute_slot, rxdataF);
-    nr_slot_fep_fo_override_hz = saved_fo;
-    atomic_fetch_add_explicit(&g_q_done, 1, memory_order_relaxed);
-    struct timespec now;
-    clock_gettime(CLOCK_MONOTONIC, &now);
-    const uint64_t now_ns = (uint64_t)now.tv_sec * 1000000000ull + (uint64_t)now.tv_nsec;
-    if (now_ns - last_report_ns >= 20000000000ull) {
-      last_report_ns = now_ns;
-      LOG_I(PHY, "SENSING: CSIRS_BLIND queue queued=%llu done=%llu drop_full=%llu drop_stale=%llu confirmed=%d\n",
-            (unsigned long long)atomic_load(&g_q_queued), (unsigned long long)atomic_load(&g_q_done),
-            (unsigned long long)atomic_load(&g_q_drop_full), (unsigned long long)atomic_load(&g_q_drop_stale),
-            g_st.confirmed);
-    }
-  }
-  return NULL;
-}
-
-void nr_csirs_blind_rt_enqueue(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot, long absolute_slot_mono,
-                               double fo_hz)
-{
-  if (g_on < 0) {
-    const char *e = getenv("ISAC_CSIRS_BLIND");
-    g_on = (e != NULL && atoi(e) != 0) ? 1 : 0;
-  }
-  if (!g_on || ue == NULL) {
-    return;
-  }
-  if (!atomic_load_explicit(&g_q_running, memory_order_acquire)) {
-    /* Lazy, one-shot, from the (single) PDCCH scan consumer: needs a live ue with frame_parms sized. */
-    static int s_tried;
-    if (s_tried) {
-      return;
-    }
-    s_tried = 1;
-    g_q_ue = ue;
-    atomic_store_explicit(&g_q_running, 1, memory_order_release);
-    threadCreate(&g_q_thread, csirs_consumer, NULL, "csirsBlind", -1, 40);
-  }
-  const csirs_job_t job = {.slot = slot, .absolute_slot = absolute_slot,
-                           .absolute_slot_mono = absolute_slot_mono, .fo_hz = fo_hz};
-  pthread_mutex_lock(&g_q_lock);
-  if (g_q_count == CSIRS_Q_DEPTH) {
-    g_q_tail = (g_q_tail + 1) % CSIRS_Q_DEPTH; // drop the OLDEST: the one nearest to being overwritten
-    g_q_count--;
-    atomic_fetch_add_explicit(&g_q_drop_full, 1, memory_order_relaxed);
-  }
-  g_q[g_q_head] = job;
-  g_q_head      = (g_q_head + 1) % CSIRS_Q_DEPTH;
-  g_q_count++;
-  pthread_cond_signal(&g_q_cv);
-  pthread_mutex_unlock(&g_q_lock);
-  atomic_fetch_add_explicit(&g_q_queued, 1, memory_order_relaxed);
 }

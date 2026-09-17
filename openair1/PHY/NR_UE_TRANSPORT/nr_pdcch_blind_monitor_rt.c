@@ -730,17 +730,20 @@ static uint64_t g_held_mismatch = 0; // migrated from NRSniffer: rejected by the
  * pdcch_blind_monitor_scan_thread set these are CONSUMER times: the receive thread only enqueues. */
 #define BTIM_PRE     8   /* occasion entry -> first FEP (UL scan setup, hypothesis selection) */
 #define BTIM_PBWP    9   /* passive-BWP CORESET observe (every 8th occasion) */
-#define BTIM_CSIRS   10  /* CSI-RS blind search hand-off (was the in-line body; now only the enqueue) */
+#define BTIM_CSIRS   10  /* nr_csirs_blind_rt_slot(): CSI-RS reference generation + FEP + correlate (until confirmed) */
 #define BTIM_POST    11  /* after the candidate decodes: accepts, evidence, sweeps, submissions */
 #define BTIM_RT      12  /* nr_pdcch_blind_monitor_process() on the PHY RECEIVE thread, per slot:
                           * the only blind-PDCCH work left there once scan/pdsch/ul consumers are on
                           * (Phase 3's own single-antenna FEP + window scan while undiscovered, the
                           * occasion gate, the enqueue). Written from the receive thread into its own
                           * array slots; the consumer never touches index 12. */
-#define BTIM_N       13
+#define BTIM_DLSWEEP 13  /* DL dci_length autodiscover sweep: 34 lengths x every candidate, Polar+CRC each */
+#define BTIM_ULSWEEP 14  /* UL per-RNTI dci_length sweep, same shape, under ul_length_lock */
+#define BTIM_N       15
 static const char *const kBtimName[BTIM_N] = {"fep_llr", "demap", "prepass", "decode",
                                               "chest",   "pdsch", "submit",  "TOTAL",
-                                              "pre",     "pbwp",  "csirs",   "post", "rt"};
+                                              "pre",     "pbwp",  "csirs",   "post", "rt",
+                                              "dlsweep", "ulsweep"};
 static uint64_t g_btim_ns[BTIM_N]  = {0};
 static uint64_t g_btim_n[BTIM_N]   = {0};
 static uint64_t g_btim_max[BTIM_N] = {0};
@@ -1947,12 +1950,15 @@ void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_pr
    * already overwritten would feed the correlator next frame's samples and manufacture hits that
    * no periodicity test could distinguish from a real resource. It reads rxdataF and writes
    * nothing the decoder consumes, so it cannot affect decoding. */
-  /* Hand the slot to the search's OWN consumer (nr_csirs_blind_rt.c); the ~1.85 ms body no longer
-   * runs here. Still after the sample-lifetime check, and the consumer re-checks before its FEP. */
+  /* IN-LINE, ONCE PER OCCASION, UNTIL CONFIRMED -- then a free early return (see
+   * nr_csirs_blind_rt_slot). A separate consumer thread was tried (2026-09-17) and starved:
+   * unpinned at FIFO 40 it processed 3519 of 145k slots and never confirmed, because every slot
+   * dropped stretches the round-robin search's time-to-confirm by the same factor. Correctness over
+   * cleverness: the body costs the csirs bucket below only while unconfirmed. */
   const uint64_t btim_t_csirs = btim_on ? btim_now() : 0;
-  nr_csirs_blind_rt_enqueue(ue, proc->nr_slot_rx,
-                            source_absolute_slot >= 0 ? (uint32_t)source_absolute_slot : 0u,
-                            source_absolute_slot, nr_slot_fep_fo_override_hz);
+  nr_csirs_blind_rt_slot(ue, proc->nr_slot_rx,
+                         source_absolute_slot >= 0 ? (uint32_t)source_absolute_slot : 0u,
+                         rxdataF);
   btim_add(BTIM_CSIRS, btim_t_csirs);
 
   /* XCHECK diagnostic (2026-09-06, Task 5 follow-up): run Technique A's own correlation function
@@ -2103,6 +2109,7 @@ void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_pr
                  "sweep skipped\n", s_force_len);
     }
   }
+  const uint64_t btim_t_dlsw = btim_on ? btim_now() : 0;
   if (cfg->autodiscover && nr_pdcch_blind_monitor_autodiscover_done() && !g_length_swept) {
     nr_pdcch_autodiscover_cand_t disc_cand[64];
     int disc_n_cand = 0;
@@ -2152,6 +2159,7 @@ void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_pr
         g_length_found = true;
         LOG_A(PHY, "SENSING: Phase 3 autodiscover -- dci_length locked at %d (bootstrap_rnti=0x%x, "
                    "occasions_fed=%d)\n", found_len, bootstrap_rnti, g_dl_length_state.occasions_fed);
+        btim_add(BTIM_DLSWEEP, btim_t_dlsw);
         return; /* Rebuild the next occasion with the newly selected length. */
       } else if (g_dl_length_state.occasions_fed >= AUTODISCOVER_LENGTH_SWEEP_MAX_OCCASIONS) {
         // Bounded give-up (mirrors this file's other bounded-cost designs): a cell where the
@@ -2226,7 +2234,9 @@ void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_pr
 
   /* full_auto=0 never feeds a search or replaces a manual UL option/length.
    * Auto has no silent fallback: unresolved searches do not emit guessed grants. */
+  btim_add(BTIM_DLSWEEP, btim_t_dlsw);
   bool ul_ready=false;
+  const uint64_t btim_t_ulsw = btim_on ? btim_now() : 0;
   pthread_mutex_lock(&ul_length_lock);
   uint64_t geom=UINT64_C(1469598103934665603);
   const int geometry_fields[]={cfg->bwp_start,cfg->bwp_size,cfg->coreset_rb_offset,
@@ -2278,6 +2288,7 @@ void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_pr
     if(ul_ready) dci01_length=ulc->found;
   }
   pthread_mutex_unlock(&ul_length_lock);
+  btim_add(BTIM_ULSWEEP, btim_t_ulsw);
   const uint64_t btim_t_pre = btim_on ? btim_now() : 0;
   {
     int e_rx_cand_idx = 0;
@@ -3773,7 +3784,7 @@ constdiag_done:;
     }
 
     if (btim_on && sum_due) {
-      char rep[1100];
+      char rep[1300];
       int u = 0;
       for (int k = 0; k < BTIM_N && u < (int)sizeof(rep) - 90; k++) {
         u += snprintf(rep + u, sizeof(rep) - u, "%s[n=%lu mean=%.1fus max=%.1fus tot=%.2fs] ",
