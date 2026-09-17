@@ -406,7 +406,11 @@ TEST(PdschConfigSweepPrior, AWrongPriorIsAbandonedAndTheTruthIsStillFound) {
   const int n = drive_context(9, 0x4601, 1, truth1, 0.54, 400000, &w1);
   ASSERT_GT(n, 0) << "a wrong prior trapped the context: it never converged";
   EXPECT_TRUE(same_hyp(w1, truth1));
-  EXPECT_FALSE(nr_pdsch_config_sweep_rnti_prior_get(0x4601, nullptr, nullptr, nullptr, nullptr)); // and dropped it
+  // The wrong prior was dropped at probation, and the full-catalog convergence then re-published
+  // the UE's prior from what it actually found -- exactly as the cell-wide code did before.
+  tbl = 255;
+  ASSERT_TRUE(nr_pdsch_config_sweep_rnti_prior_get(0x4601, nullptr, &tbl, nullptr, nullptr));
+  EXPECT_EQ(tbl, 0);
 }
 
 /* ---- Per-RNTI contexts ---------------------------------------------------------------------------
