@@ -100,7 +100,20 @@ int nr_pdcch_dci_length_sweep_feed(nr_pdcch_dci_length_sweep_state_t* state,
   if (state == NULL || decode_one_candidate == NULL || n_trials_this_call <= 0) {
     return -1;
   }
-  for (int len = min_len; len <= max_len && len < NR_PDCCH_DCI_LENGTH_SWEEP_MAX_LEN; len++) {
+  /* Rotation (see the header's `stride`): test every stride'th length, phase-shifted per call, so
+   * each length is visited exactly once per stride calls -- fair by construction, no length can be
+   * starved, and the phase survives the caller restarting the sweep on a new CORESET hypothesis
+   * only in the sense that a reset returns it to 0, which is a complete round boundary anyway. */
+  int stride = (state->stride > 1) ? state->stride : 1;
+  const int n_lengths = max_len - min_len + 1;
+  if (stride > n_lengths) {
+    stride = (n_lengths > 0) ? n_lengths : 1;
+  }
+  if (state->rot_phase >= stride) {
+    state->rot_phase = 0; // stride shrank under us; restart the round rather than skip lengths
+  }
+  for (int len = min_len + state->rot_phase; len <= max_len && len < NR_PDCCH_DCI_LENGTH_SWEEP_MAX_LEN;
+       len += stride) {
     for (int t = 0; t < n_trials_this_call; t++) {
       uint16_t rnti = 0;
       uint32_t payload_hash = 0;
@@ -115,7 +128,12 @@ int nr_pdcch_dci_length_sweep_feed(nr_pdcch_dci_length_sweep_state_t* state,
       add_distinct_hash(state->hashes[len], &state->n_distinct[len], payload_hash);
     }
   }
-  state->occasions_fed++;
+  /* One ROUND -- every length visited once -- is what the caller's give-up cap counts, so the
+   * per-length trial budget is identical at any stride; rotation redistributes it in time. */
+  if (++state->rot_phase >= stride) {
+    state->rot_phase = 0;
+    state->occasions_fed++;
+  }
 
   int    best_len   = -1;
   double best_score = 0.0;

@@ -28,6 +28,7 @@
  * absolute pass floor becoming trivially clearable by chance once accumulated trials grow large.
  */
 #include <cstdint>
+#include <cstring>
 #include <gtest/gtest.h>
 
 extern "C" {
@@ -239,4 +240,70 @@ TEST(DciLengthBank, EvictionAndInvalidKeysDoNotInventEvidence) {
   EXPECT_EQ(nr_pdcch_dci_length_context(&bank,8,1)->found,0);
   EXPECT_EQ(nr_pdcch_dci_length_context(nullptr,8,1),nullptr);
   EXPECT_EQ(nr_pdcch_dci_length_context(&bank,8,0),nullptr);
+}
+
+// ---- Rotation (2026-09-17) -------------------------------------------------------------------
+// The sweep's cost was the receiver's dominant per-occasion expense (34 lengths x every candidate,
+// Polar+CRC each, ~1.75ms against a ~667us occasion interval -> 68.5% of occasions dropped). The
+// `stride` field spreads the lengths over successive calls. These two tests pin the properties that
+// make that safe: every length is still visited equally often, and a ROUND -- not a call -- is what
+// the caller's give-up budget counts, so no length loses trials.
+namespace {
+struct RotProbe {
+  static int visits[NR_PDCCH_DCI_LENGTH_SWEEP_MAX_LEN];
+  static bool decode(int dci_length, int, uint16_t *rnti_out, uint32_t *hash_out, void *)
+  {
+    visits[dci_length]++;
+    *rnti_out = 0;
+    *hash_out = 0;
+    return false; // never passes: this test is about WHICH lengths get tried, not about scoring
+  }
+};
+int RotProbe::visits[NR_PDCCH_DCI_LENGTH_SWEEP_MAX_LEN];
+} // namespace
+
+TEST(DciLengthSweepRotation, EveryLengthIsVisitedOncePerRoundAndNoneIsStarved)
+{
+  for (int stride : {1, 8, 34}) {
+    memset(RotProbe::visits, 0, sizeof(RotProbe::visits));
+    nr_pdcch_dci_length_sweep_state_t st{};
+    st.stride = stride;
+    // Three full rounds: stride calls per round.
+    for (int call = 0; call < 3 * stride; call++) {
+      nr_pdcch_dci_length_sweep_feed(&st, RotProbe::decode, nullptr, /*n_trials=*/2, 30, 63, 0);
+    }
+    for (int len = 30; len <= 63; len++) {
+      EXPECT_EQ(RotProbe::visits[len], 3 * 2) << "stride " << stride << ", length " << len;
+      EXPECT_EQ(st.trials[len], 3 * 2) << "stride " << stride << ", length " << len;
+    }
+    // A round is stride calls, and only a completed round counts against the give-up budget.
+    EXPECT_EQ(st.occasions_fed, 3) << "stride " << stride;
+    EXPECT_EQ(st.rot_phase, 0) << "stride " << stride;
+  }
+}
+
+TEST(DciLengthSweepRotation, PerLengthTrialBudgetIsIdenticalToTheUnrotatedSweep)
+{
+  // The invariant the give-up cap depends on: at the moment occasions_fed hits the caller's cap,
+  // every length has accumulated exactly as many trials as it would have without rotation.
+  constexpr int kCap = 25; // stands in for AUTODISCOVER_LENGTH_SWEEP_MAX_OCCASIONS
+  int trials_at_cap[2][NR_PDCCH_DCI_LENGTH_SWEEP_MAX_LEN] = {};
+  int calls[2] = {0, 0};
+  const int strides[2] = {1, 8};
+  for (int arm = 0; arm < 2; arm++) {
+    nr_pdcch_dci_length_sweep_state_t st{};
+    st.stride = strides[arm];
+    while (st.occasions_fed < kCap) {
+      nr_pdcch_dci_length_sweep_feed(&st, RotProbe::decode, nullptr, /*n_trials=*/3, 30, 63, 0);
+      calls[arm]++;
+    }
+    memcpy(trials_at_cap[arm], st.trials, sizeof(st.trials));
+  }
+  for (int len = 30; len <= 63; len++) {
+    EXPECT_EQ(trials_at_cap[0][len], trials_at_cap[1][len]) << "length " << len;
+    EXPECT_EQ(trials_at_cap[1][len], kCap * 3) << "length " << len;
+  }
+  // Same budget, spread over 8x the calls -- that is the whole point: 8x less work per occasion.
+  EXPECT_EQ(calls[0], kCap);
+  EXPECT_EQ(calls[1], kCap * 8);
 }

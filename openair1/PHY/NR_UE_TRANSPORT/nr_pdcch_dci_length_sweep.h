@@ -88,11 +88,25 @@ typedef struct {
   int      bootstrap_hits[NR_PDCCH_DCI_LENGTH_SWEEP_MAX_LEN]; // of which, hit the known RNTI
   uint32_t hashes[NR_PDCCH_DCI_LENGTH_SWEEP_MAX_LEN][NR_PDCCH_DCI_LENGTH_SWEEP_MAX_HASHES];
   int      n_distinct[NR_PDCCH_DCI_LENGTH_SWEEP_MAX_LEN];
+  /* ROUNDS of full exposure, NOT calls: incremented once every `stride` calls, when the rotation
+   * below has visited every length exactly once. Identical to the call count at stride<=1. The
+   * caller's give-up cap (AUTODISCOVER_LENGTH_SWEEP_MAX_OCCASIONS) counts these, so each length
+   * keeps its full trial budget however coarsely the rotation spreads it in time. */
   int      occasions_fed;
   /* A length known to belong to ANOTHER format pair on the same search space (the derived 1_0/0_0
    * size): its CRC passes are real but say nothing about the 1_1/0_1 size the sweep is after. The
    * SA rfsim cell locked 44 = its 1_0 size on 58 format-1_0 accepts (2026-09-16). 0 = none. */
   int      excluded_len;
+  /* ROTATION. <=1 (the zero-initialised default) tests every length on every call, which is what
+   * this sweep did unconditionally until 2026-09-17 -- and what made it the receiver's dominant
+   * cost: 34 lengths x ~6 candidates x ~8us of Polar+CRC is ~1.75ms on EVERY occasion, against a
+   * ~667us occasion arrival interval, so 68.5% of PDCCH occasions were dropped unprocessed
+   * (scanq drop_full=618213/902224) and the CORESET search saw a third of the air. At stride=N
+   * each call tests every Nth length, phase-shifted, so a length is visited once per N calls:
+   * the per-occasion cost falls ~N-fold while the trials each length accumulates per ROUND is
+   * unchanged. Set it at the call site before the first feed (the same place excluded_len is set). */
+  int      stride;
+  int      rot_phase; // 0..stride-1, which interleaved subset this call tests
 } nr_pdcch_dci_length_sweep_state_t;
 
 /* A caller-serialized bank. Interleaved UEs never reset one another; geometry

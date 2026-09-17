@@ -615,6 +615,38 @@ static void pdsch_sweep_maybe_enable(const nr_pdcch_blind_monitor_cfg_t *cfg)
 // length has been reached within tens of occasions in every live capture measured so far, so this
 // is generous headroom, not a tuned minimum.
 #define AUTODISCOVER_LENGTH_SWEEP_MAX_OCCASIONS 500
+/* ISAC_DCI_SWEEP_STRIDE: test every Nth dci_length per occasion instead of all 34 (the sweep's
+ * `stride`, see nr_pdcch_dci_length_sweep.h). The budget above counts ROUNDS, so each length still
+ * gets its 500 visits -- rotation only spreads them in time.
+ *
+ * DERIVATION of the value to use, from cs1_090638 (600 s, K=1, one active hypothesis): the scan
+ * consumer took TOTAL 1890 us/occasion while its timed stages summed to ~135 us (fep_llr 24,
+ * demap 4, prepass 3, decode 103), leaving ~1.75 ms in the two sweeps -- 34 lengths x ~6
+ * candidates x ~8 us, i.e. ~51 us per length per occasion. Occasions arrive at ~1500/s = one per
+ * 667 us, so the consumer was ~2.8x oversubscribed and dropped 68.5 % of them
+ * (scanq queued=902224 done=283999 drop_full=618213). Both sweeps can run in the same occasion
+ * (the DL one falls through to the UL one), so budget for two: 2 x (34/N) x 51 us + 135 us < 667 us
+ * needs N >= 6.2. N = 8 gives 2 x 217 + 135 = 569 us at the pessimistic both-sweeps bound and
+ * 135 + 217 = 352 us (53 % of the interval) when only one runs -- the headroom K>1 lookahead needs.
+ * DEFAULT 0 (= off, bit-identical to the pre-rotation sweep) until a live capture confirms the
+ * drops actually go away; 68.5 % occasion loss is the number that justifies flipping it on. */
+static int dci_sweep_stride(void)
+{
+  static int s_stride = -1;
+  if (s_stride < 0) {
+    const char *e = getenv("ISAC_DCI_SWEEP_STRIDE");
+    s_stride = (e != NULL) ? atoi(e) : 0;
+    if (s_stride < 0) {
+      s_stride = 0;
+    }
+    if (s_stride > 1) {
+      LOG_A(PHY, "SENSING: dci_length sweep rotating -- every %dth length per occasion, %d rounds "
+                 "to the give-up cap (per-length trials unchanged)\n",
+            s_stride, AUTODISCOVER_LENGTH_SWEEP_MAX_OCCASIONS);
+    }
+  }
+  return s_stride;
+}
 static int         g_constdiag_left = 20; // TEMPORARY, see CONSTDIAG below
 /* Why these three exist (2026-09-09): the gNB's own log shows 746 format-1_1 and 147 format-0_1
  * DCIs in the same CORESET, same search space, same al=2, same rnti -- and this receiver converges
@@ -2151,6 +2183,7 @@ void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_pr
       // are guaranteed-wasted trials (7 of 41 hypotheses, ~17% of the sweep's budget, for zero
       // possible acceptance).
       g_dl_length_state.excluded_len = dci10_length; /* the 1_0/0_0 size is known; the sweep wants the other one */
+      g_dl_length_state.stride       = dci_sweep_stride();
       const int found_len = nr_pdcch_dci_length_sweep_feed(&g_dl_length_state, nr_pdcch_autodiscover_length_scorer,
                                                             &sweep_ctx, disc_n_cand, 30, 63, bootstrap_rnti);
       if (found_len > 0) {
@@ -2266,6 +2299,7 @@ void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_pr
         ul_length_ctx_t ctx={.cand=candidates,.count=count,.rnti=boot_rnti,
                             .scrambling_rnti=rel15->coreset.scrambling_rnti,
                             .dmrs_id=rel15->coreset.pdcch_dmrs_scrambling_id};
+        ulc->state.stride = dci_sweep_stride();
         const int found=nr_pdcch_dci_length_sweep_feed(&ulc->state,ul_length_score,&ctx,
                                                      count,30,63,boot_rnti);
         /* A single matching decode cannot rule out a degenerate polar fixed point.
@@ -2675,6 +2709,7 @@ constdiag_done:;
             .dmrs_scrambling_id  = lrel->coreset.pdcch_dmrs_scrambling_id,
         };
         g_lane_length_state[lane].excluded_len = dci10_length;
+        g_lane_length_state[lane].stride       = dci_sweep_stride();
         const int found_len = nr_pdcch_dci_length_sweep_feed(&g_lane_length_state[lane],
             nr_pdcch_autodiscover_length_scorer, &sweep_ctx, disc_n, 30, 63, 0);
         if (found_len > 0) {
