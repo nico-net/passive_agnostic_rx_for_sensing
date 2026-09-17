@@ -486,8 +486,6 @@ int nr_pdcch_blind_lookahead_count(void)
     if (v < 1) v = 1;
     if (v > NR_PDCCH_LOOKAHEAD_MAX + 1) v = NR_PDCCH_LOOKAHEAD_MAX + 1;
     s_k = v - 1;
-    LOG_A(PHY, "SENSING: PDCCH_LOOKAHEAD configured ISAC_PDCCH_EXTENT_BATCH=%s -> K=%d (%d lookahead lane%s active)\n",
-          e ? e : "(unset)", v, s_k, s_k == 1 ? "" : "s");
   }
   return s_k;
 }
@@ -939,6 +937,10 @@ bool nr_pdcch_blind_monitor_autodiscover_step(const void* rxdataF_symbol, int of
   last_w  = s_ext_cand[0].last_w;
   const int rb_offset = first_w * 6;
   const int span_rb   = (last_w - first_w + 1) * 6;
+  /* Start a new occupancy window for any later inconclusive retry. */
+  memset(s_hit_count, 0, sizeof(s_hit_count));
+  memset(s_hit_count1, 0, sizeof(s_hit_count1));
+  s_obs_calls = 0;
 
   g_cfg.coreset_type            = 0;  // PDCCH-Config (dedicated), NOT MIB/SIB1 -- see coreset_type's
                                         // own comment in autoconf_css0() for why this field matters
@@ -1052,15 +1054,6 @@ bool nr_pdcch_blind_monitor_autodiscover_step(const void* rxdataF_symbol, int of
     LOG_I(PHY, "SENSING: Phase 3 autodiscover -- CORESET duration %d (symbol-0 hits %u, symbol-1 hits %u over the footprint)\n",
           g_cfg.coreset_duration, h0, h1);
   }
-  /* Start a new occupancy window for any later inconclusive retry. MUST run after the duration
-   * readout above, not before: this used to sit right after first_w/last_w were picked, which
-   * zeroed s_hit_count[]/s_hit_count1[] before the duration block below could read them -- every
-   * declared footprint logged "symbol-0 hits 0, symbol-1 hits 0" and coreset_duration was silently
-   * forced to 1 regardless of the real evidence, live-measured 2026-09-17 (rb_offset=0 span_rb=48
-   * bootstrap_rnti=0x0, exhausting and rediscovering every ~50s on a real commercial cell). */
-  memset(s_hit_count, 0, sizeof(s_hit_count));
-  memset(s_hit_count1, 0, sizeof(s_hit_count1));
-  s_obs_calls = 0;
   /* CCE-to-REG mapping: hypothesis 0 is non-interleaved (bundle 0 -- the demapper's identity
    * path, this project's every captured dedicated CORESET); the interleaved (L, R, shift)
    * hypotheses follow, each with the same dwell, when the non-interleaved one collects no
