@@ -619,7 +619,7 @@ nr_initial_sync_t nr_initial_sync(UE_nr_rxtx_proc_t *proc,
     double e_ant[NB_ANTENNAS_RX] = {0};
     for (int aarx = 0; aarx < fp->nb_antennas_rx; aarx++) {
       scan_src[aarx] = aarx;
-      e_ant[aarx] = signal_energy(&ue->common_vars.rxdata[aarx][0], fp->samples_per_frame);
+      e_ant[aarx] = signal_energy((int32_t *)&ue->common_vars.rxdata[aarx][0], fp->samples_per_frame);
     }
     for (int i = 0; i < fp->nb_antennas_rx; i++) // selection sort, descending energy
       for (int j = i + 1; j < fp->nb_antennas_rx; j++)
