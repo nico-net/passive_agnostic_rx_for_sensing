@@ -336,10 +336,85 @@ static _Atomic uint64_t g_mcs_segs[32], g_mcs_segs_ok[32], g_mcs_tbs[32], g_mcs_
 static _Atomic uint64_t g_rv_try[4][32], g_rv_ok[4][32]; // ISAC_RV_RETRY rescues by [rv][mcs]
 /* V2 HARQ soft-combining and PT-RS sweep state, declared here so the periodic report can read it. */
 static _Atomic uint64_t g_hq_retx_try, g_hq_retx_ok, g_hq_tbs_override, g_hq_busy_skip, g_hq_first;
-static nr_ptrs_sweep_t g_ptrs;
-static bool g_ptrs_init = false;
 static pthread_mutex_t g_ptrs_lock = PTHREAD_MUTEX_INITIALIZER;
 static _Atomic int g_ptrs_arm_last = -2; // for the report
+static _Atomic int g_lbrm_nl = 4;        // TBS_LBRM layer term n_L, CELL-WIDE seed (4 = spec ceiling), see rnti_dec()
+static int g_ptrs_cell_arm = -1;         // PT-RS arm, CELL-WIDE seed; under g_ptrs_lock
+/* PER-RNTI n_L AND PT-RS ARM. Both are dedicated-RRC properties of the UE (maxMIMO-layers
+ * capability, phaseTrackingRS) and only cell-common in practice, so each RNTI latches its own,
+ * SEEDED from the cell-wide value, and the cell-wide value is promoted only once two distinct
+ * RNTIs latched the same one. nl == 0 means "not latched, read the cell seed". With a single RNTI
+ * this is exactly the old cell-wide behaviour (its own latch is the only one, read back on the
+ * next grant); the cell seed is then never promoted and never read past the first latch. */
+#define RNTI_DEC_MAX 16
+typedef struct { uint16_t rnti; uint64_t touched; int nl; nr_ptrs_sweep_t ptrs; } rnti_dec_t;
+static rnti_dec_t g_rnti_dec[RNTI_DEC_MAX];
+static uint64_t g_rnti_dec_clock;
+/* under g_ptrs_lock. ponytail: LRU by grant order, no idle clock -- an active UE is touched every
+ * grant and is never the victim; only one-off noise-floor RNTIs churn. */
+static rnti_dec_t *rnti_dec(uint16_t rnti)
+{
+  int victim = 0;
+  for (int i = 0; i < RNTI_DEC_MAX; i++) {
+    if (g_rnti_dec[i].rnti == rnti) {
+      g_rnti_dec[i].touched = ++g_rnti_dec_clock;
+      return &g_rnti_dec[i];
+    }
+    if (g_rnti_dec[i].touched < g_rnti_dec[victim].touched)
+      victim = i;
+  }
+  rnti_dec_t *r = &g_rnti_dec[victim];
+  memset(r, 0, sizeof(*r));
+  r->rnti = rnti;
+  r->touched = ++g_rnti_dec_clock;
+  nr_ptrs_sweep_init(&r->ptrs);
+  r->ptrs.latched = g_ptrs_cell_arm; // seed: a cell-wide arm, or -1 = sweep from scratch
+  return r;
+}
+static int rnti_nl_get(uint16_t rnti)
+{
+  pthread_mutex_lock(&g_ptrs_lock);
+  const rnti_dec_t *r = rnti_dec(rnti);
+  const int v = r->nl ? r->nl : atomic_load(&g_lbrm_nl);
+  pthread_mutex_unlock(&g_ptrs_lock);
+  return v;
+}
+/* Returns the value this RNTI read before the latch (for the log). */
+static int rnti_nl_latch(uint16_t rnti, int nl)
+{
+  pthread_mutex_lock(&g_ptrs_lock);
+  rnti_dec_t *r = rnti_dec(rnti);
+  const int prev = r->nl ? r->nl : atomic_load(&g_lbrm_nl);
+  r->nl = nl;
+  if (atomic_load(&g_lbrm_nl) != nl)
+    for (int i = 0; i < RNTI_DEC_MAX; i++)
+      if (g_rnti_dec[i].rnti && g_rnti_dec[i].rnti != rnti && g_rnti_dec[i].nl == nl) {
+        atomic_store(&g_lbrm_nl, nl);
+        break;
+      }
+  pthread_mutex_unlock(&g_ptrs_lock);
+  return prev;
+}
+static int rnti_ptrs_pick(uint16_t rnti)
+{
+  pthread_mutex_lock(&g_ptrs_lock);
+  const int arm = nr_ptrs_sweep_pick(&rnti_dec(rnti)->ptrs);
+  pthread_mutex_unlock(&g_ptrs_lock);
+  return arm;
+}
+static int rnti_ptrs_feed(uint16_t rnti, int arm, bool tb_ok)
+{
+  pthread_mutex_lock(&g_ptrs_lock);
+  const int latched = nr_ptrs_sweep_feed(&rnti_dec(rnti)->ptrs, arm, tb_ok);
+  if (latched >= 0 && g_ptrs_cell_arm < 0)
+    for (int i = 0; i < RNTI_DEC_MAX; i++)
+      if (g_rnti_dec[i].rnti && g_rnti_dec[i].rnti != rnti && g_rnti_dec[i].ptrs.latched == latched) {
+        g_ptrs_cell_arm = latched;
+        break;
+      }
+  pthread_mutex_unlock(&g_ptrs_lock);
+  return latched;
+}
 /* RBMAP: which RBs the cell actually allocated, for the dashboard's spectrum strip. One counter per
  * RB, incremented per accepted grant over its allocation, printed as 273 density digits and reset --
  * so the strip shows the LAST window, not the run average. */
@@ -397,7 +472,6 @@ static _Atomic uint64_t g_ldpc_zero_tb  = 0;
 static _Atomic uint64_t g_ldpc_ok       = 0;
 static _Atomic uint64_t g_fep_hit = 0, g_fep_miss = 0, g_chest_hit = 0, g_chest_miss = 0; // per-slot sharing
 static _Atomic uint64_t g_gpu_llr_jobs = 0, g_gpu_cpu_jobs = 0; // decodes fed by the GPU front end vs the CPU chain
-static _Atomic int g_lbrm_nl = 4;        // TBS_LBRM layer term n_L, latched cell-wide by TB CRC (4 = spec ceiling)
 static _Atomic uint64_t g_lbrm_try[5], g_lbrm_ok[5]; // per hypothesised n_L
 /* mean |LLR| the int8 decoder gets: 127/40 ~ 3.2x headroom over the mean for the 256QAM outer bits */
 #define LLR_NORM_TARGET 40u
@@ -589,9 +663,18 @@ void nr_pdsch_passive_ldpc_stats_dump(void)
           (unsigned long)atomic_load(&g_llr_norm_shift[2]), (unsigned long)atomic_load(&g_llr_norm_shift[3]),
           (unsigned long)atomic_load(&g_llr_norm_shift[4]));
     pthread_mutex_lock(&g_ptrs_lock);
-    LOG_I(PHY, "SENSING: PTRS_SWEEP latched=%d ok/trials per arm [absent %u/%u | K2L1 %u/%u K2L2 %u/%u K2L4 %u/%u | K4L1 %u/%u K4L2 %u/%u K4L4 %u/%u]\n",
-          g_ptrs.latched, g_ptrs.ok[0], g_ptrs.tr[0], g_ptrs.ok[1], g_ptrs.tr[1], g_ptrs.ok[2], g_ptrs.tr[2],
-          g_ptrs.ok[3], g_ptrs.tr[3], g_ptrs.ok[4], g_ptrs.tr[4], g_ptrs.ok[5], g_ptrs.tr[5], g_ptrs.ok[6], g_ptrs.tr[6]);
+    nr_ptrs_sweep_t sum = {0};
+    int n_rnti = 0, n_latched = 0;
+    for (int i = 0; i < RNTI_DEC_MAX; i++) {
+      if (!g_rnti_dec[i].rnti)
+        continue;
+      n_rnti++;
+      n_latched += g_rnti_dec[i].ptrs.latched >= 0;
+      for (int a = 0; a < NR_PTRS_ARMS; a++) { sum.ok[a] += g_rnti_dec[i].ptrs.ok[a]; sum.tr[a] += g_rnti_dec[i].ptrs.tr[a]; }
+    }
+    LOG_I(PHY, "SENSING: PTRS_SWEEP cell_arm=%d rntis=%d latched=%d ok/trials per arm, all RNTIs [absent %u/%u | K2L1 %u/%u K2L2 %u/%u K2L4 %u/%u | K4L1 %u/%u K4L2 %u/%u K4L4 %u/%u]\n",
+          g_ptrs_cell_arm, n_rnti, n_latched, sum.ok[0], sum.tr[0], sum.ok[1], sum.tr[1], sum.ok[2], sum.tr[2],
+          sum.ok[3], sum.tr[3], sum.ok[4], sum.tr[4], sum.ok[5], sum.tr[5], sum.ok[6], sum.tr[6]);
     pthread_mutex_unlock(&g_ptrs_lock);
   }
   {
@@ -1264,10 +1347,7 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
   int ptrs_arm = -1;
   if (nr_agnostic_v2() && !(dlsch_config->pduBitmap & 0x1) && grant->mcs >= 10 && grant->mcs <= 27
       && t_ptrs_sweep_allow && !t_probe_first_seg) {
-    pthread_mutex_lock(&g_ptrs_lock);
-    if (!g_ptrs_init) { nr_ptrs_sweep_init(&g_ptrs); g_ptrs_init = true; }
-    ptrs_arm = nr_ptrs_sweep_pick(&g_ptrs);
-    pthread_mutex_unlock(&g_ptrs_lock);
+    ptrs_arm = rnti_ptrs_pick(grant->rnti);
     uint8_t K, L;
     if (nr_ptrs_sweep_arm(ptrs_arm, &K, &L)) {
       dlsch_config->pduBitmap |= 0x1;
@@ -1373,8 +1453,8 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
    * ones (C=43) and every rank-2 / 64QAM TB stay under N_ref -- the 5-9 % "MCS-25 wall" on the
    * rfsim rank-4 bed (2026-09-16). It is decided by the TB CRC like every other cell property: a
    * failed TB whose E exceeds N_ref under a smaller n_L is re-dematched under that n_L (LDPC only,
-   * the LLRs are untouched) and a pass latches it cell-wide (g_lbrm_nl). */
-  const int nl_tbslbrm = atomic_load(&g_lbrm_nl);
+   * the LLRs are untouched) and a pass latches it for this RNTI (rnti_nl_latch). */
+  const int nl_tbslbrm = rnti_nl_get(grant->rnti);
   /* TS 38.212 5.4.2.1 sizes N_ref from TBS_LBRM over the carrier's LARGEST configured DL BWP, not
    * over whatever frequency reference this particular grant uses. Measured 2026-08-21: on a
    * CORESET#0 format-1_0 grant BWPSize is 48 and this produced lbrm=229576 against the gNB's own
@@ -2795,10 +2875,10 @@ gpu_llr_ready:;
       }
     }
     /* LBRM layer-term hypotheses: only when the hypothesis would change the bit selection (E beyond
-     * the smaller N_ref), never on probes; a pass latches n_L cell-wide. Cost: one extra LDPC pass
-     * per failed long TB until latched. */
+     * the smaller N_ref), never on probes; a pass latches n_L for this RNTI. Cost: one extra LDPC
+     * pass per failed long TB until latched. */
     if (!ldpc_ok && t_seg_C > 0) { /* probes too: the phone's n_L is unknown and LBRM binds on code block 0 as well */
-      const int nl_now = atomic_load(&g_lbrm_nl);
+      const int nl_now = rnti_nl_get(grant->rnti);
       const uint32_t E_first = t_seg_E;
       const uint32_t tbs_now = dlsch_config->tbslbrm;
       const uint16_t bw_lbrm = grant->bw_tbslbrm > 0 ? grant->bw_tbslbrm : dlsch_config->BWPSize;
@@ -2821,9 +2901,9 @@ gpu_llr_ready:;
         if (full_ok || (t_probe_first_seg && t_probe_seg_ok)) {
           ldpc_ok = true;
           atomic_fetch_add(&g_lbrm_ok[nl_h], 1);
-          if (atomic_exchange(&g_lbrm_nl, nl_h) != nl_h)
-            LOG_A(PHY, "SENSING: LBRM layer term n_L=%d latched from the TB CRC (was %d): TBS_LBRM=%u C=%u E=%u N_ref=%u\n",
-                  nl_h, nl_now, lbrm_h, t_seg_C, E_first, nref_h);
+          if (rnti_nl_latch(grant->rnti, nl_h) != nl_h)
+            LOG_A(PHY, "SENSING: LBRM layer term n_L=%d latched from the TB CRC for rnti 0x%04x (was %d): TBS_LBRM=%u C=%u E=%u N_ref=%u\n",
+                  nl_h, grant->rnti, nl_now, lbrm_h, t_seg_C, E_first, nref_h);
         } else {
           dlsch_config->tbslbrm = tbs_now;
         }
@@ -2908,14 +2988,12 @@ gpu_llr_ready:;
     }
 
     if (ptrs_arm >= 0) {
-      pthread_mutex_lock(&g_ptrs_lock);
-      const int latched = nr_ptrs_sweep_feed(&g_ptrs, ptrs_arm, ldpc_ok);
-      pthread_mutex_unlock(&g_ptrs_lock);
+      const int latched = rnti_ptrs_feed(grant->rnti, ptrs_arm, ldpc_ok);
       if (latched >= 0 && atomic_exchange(&g_ptrs_arm_last, latched) != latched) {
         uint8_t K = 0, L = 0;
         const bool any = nr_ptrs_sweep_arm(latched, &K, &L);
-        LOG_A(PHY, "SENSING: PTRS_SWEEP LATCHED arm=%d (%s K=%u L=%u) from the TB CRC\n", latched,
-              any ? "PT-RS present," : "no PT-RS", K, L);
+        LOG_A(PHY, "SENSING: PTRS_SWEEP LATCHED arm=%d (%s K=%u L=%u) from the TB CRC for rnti 0x%04x\n", latched,
+              any ? "PT-RS present," : "no PT-RS", K, L, grant->rnti);
       }
     }
     /* ---- Subset scan. Runs AFTER the normal decode so it can never change this TB's own result:

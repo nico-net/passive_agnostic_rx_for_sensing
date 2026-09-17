@@ -140,36 +140,116 @@ int nr_pdsch_config_sweep_prune_mask(nr_pdsch_config_sweep_state_t *st, uint16_t
  * entries at the head of the catalog: OTA 2026-09-16, every PARMSET dmrsmask was 0x4 while the
  * oracle read 0x884 on every slot it looked at. */
 #define OBS_MASKS_MAX 8
-static uint16_t g_obs_mask[OBS_MASKS_MAX];
-static int8_t   g_obs_last[OBS_MASKS_MAX]; /* last PDSCH symbol measured with that mask, -1 = unknown */
-static int8_t   g_obs_k0[OBS_MASKS_MAX];   /* k0 of the job the mask was measured on, -1 = unknown */
-static int g_n_obs_mask;
+typedef struct {
+  uint16_t mask[OBS_MASKS_MAX];
+  int8_t   last[OBS_MASKS_MAX]; /* last PDSCH symbol measured with that mask, -1 = unknown */
+  int8_t   k0[OBS_MASKS_MAX];   /* k0 of the job the mask was measured on, -1 = unknown */
+  int n;
+} obs_set_t;
+typedef struct {
+  bool valid;
+  uint64_t configuration;
+  uint8_t mcs_table, dmrs_add_pos, dmrs_max_len;
+} prior_t;
+
+/* PER-RNTI EVIDENCE. mcs-Table, dmrs-AdditionalPosition, maxLength and the DM-RS symbol set are
+ * per-UE in the spec (dedicated RRC) and only cell-common in practice. Each RNTI therefore keeps its
+ * own prior and observations, SEEDED from the cell-wide ones (the seed is what made sibling TDA
+ * contexts converge 29x sooner -- see the CELL-WIDE PRIOR note in the header); the cell-wide ones
+ * are PROMOTED only once two distinct RNTIs agree, so one UE with a private config can neither
+ * poison the cell prior nor be forced onto it. Single-RNTI behaviour is unchanged by construction:
+ * with one RNTI its own prior/observations are exactly what the cell-wide ones used to be, and the
+ * (never-promoted) cell-wide ones are read only when the RNTI has nothing of its own. */
+#define RNTI_CTX_MAX 16
+typedef struct {
+  uint16_t rnti;
+  uint64_t touched;
+  prior_t prior;
+  obs_set_t obs;
+} rnti_ctx_t;
+static rnti_ctx_t g_rnti[RNTI_CTX_MAX];
+static obs_set_t g_obs;   /* cell-wide: observations two RNTIs agree on */
+static prior_t   g_prior; /* cell-wide: a prior two RNTIs converged on */
+static uint64_t g_generation, g_clock;
+
+/* ponytail: LRU by select order, no idle clock -- an active UE is touched every grant and so is
+ * never the victim; only one-off noise-floor RNTIs churn. Add an idle-time floor if a real UE ever
+ * gets evicted by a burst of >16 RNTIs inside one of its own grant gaps. */
+static rnti_ctx_t *rnti_ctx(uint16_t rnti, bool create)
+{
+  int victim = 0;
+  for (int i = 0; i < RNTI_CTX_MAX; i++) {
+    if (g_rnti[i].rnti == rnti) {
+      g_rnti[i].touched = ++g_clock;
+      return &g_rnti[i];
+    }
+    if (g_rnti[i].touched < g_rnti[victim].touched)
+      victim = i;
+  }
+  if (!create)
+    return NULL;
+  rnti_ctx_t *r = &g_rnti[victim];
+  memset(r, 0, sizeof(*r));
+  r->rnti = rnti;
+  r->touched = ++g_clock;
+  return r;
+}
+
+static int obs_find(const obs_set_t *o, uint16_t mask)
+{
+  for (int i = 0; i < o->n; i++)
+    if (o->mask[i] == mask)
+      return i;
+  return -1;
+}
+/* Record (mask, last symbol, k0) into a set. A later, more specific observation refines the record; a
+ * contradiction (a different last symbol under the same mask) relaxes it back to unknown: two TDRA
+ * entries can share a mask. Returns the entry index, -1 when the set is full. */
+static int obs_record(obs_set_t *o, uint16_t mask, int last_symbol, int k0)
+{
+  int k = obs_find(o, mask);
+  if (k < 0 && o->n < OBS_MASKS_MAX) {
+    k = o->n++;
+    o->mask[k] = mask;
+    o->last[k] = -1;
+    o->k0[k] = -1;
+  }
+  if (k >= 0) {
+    if (last_symbol >= 0) o->last[k] = (o->last[k] < 0 || o->last[k] == last_symbol) ? (int8_t)last_symbol : -1;
+    if (k0 >= 0) o->k0[k] = (o->k0[k] < 0 || o->k0[k] == k0) ? (int8_t)k0 : -1;
+  }
+  return k;
+}
 /* An observation is (mask, last symbol, k0); an entry is consistent with it when its mask matches,
  * its S+L-1 equals the measured last symbol (when measured) and its k0 equals the job's (when the
  * mask was seen in the DCI's own slot the PDSCH is there: k0 of that job). */
-static bool obs_admits(const nr_pdsch_cfg_hypothesis_t *h, int k)
+static bool obs_admits(const nr_pdsch_cfg_hypothesis_t *h, const obs_set_t *o, int k)
 {
-  if (h->dmrs_mask != g_obs_mask[k])
+  if (h->dmrs_mask != o->mask[k])
     return false;
-  if (g_obs_last[k] >= 0 && (int)h->tda_start + (int)h->tda_length - 1 != g_obs_last[k])
+  if (o->last[k] >= 0 && (int)h->tda_start + (int)h->tda_length - 1 != o->last[k])
     return false;
-  if (g_obs_k0[k] >= 0 && h->k0 != g_obs_k0[k])
+  if (o->k0[k] >= 0 && h->k0 != o->k0[k])
     return false;
   return true;
 }
-/* Keep the entries admitted by any observation; untouched if none matches. */
-static int prune_to_observed(nr_pdsch_config_sweep_state_t *st)
+static bool obs_any_admits(const nr_pdsch_cfg_hypothesis_t *h, const obs_set_t *o)
 {
-  if (st == NULL || st->n_hyp <= 0 || g_n_obs_mask <= 0)
+  for (int k = 0; k < o->n; k++)
+    if (obs_admits(h, o, k))
+      return true;
+  return false;
+}
+/* Keep the entries admitted by any observation of this RNTI or of the cell; untouched if none matches. */
+static int prune_to_observed(nr_pdsch_config_sweep_state_t *st, const obs_set_t *own)
+{
+  if (st == NULL || st->n_hyp <= 0 || ((own ? own->n : 0) + g_obs.n) <= 0)
     return 0;
   nr_pdsch_cfg_hypothesis_t keep[NR_PDSCH_SWEEP_MAX_HYP];
   int n = 0;
   for (int i = 0; i < st->n_hyp; i++)
-    for (int k = 0; k < g_n_obs_mask; k++)
-      if (obs_admits(&st->hyp[i], k)) {
-        keep[n++] = st->hyp[i];
-        break;
-      }
+    if ((own && obs_any_admits(&st->hyp[i], own)) || obs_any_admits(&st->hyp[i], &g_obs))
+      keep[n++] = st->hyp[i];
   if (n <= 0 || n == st->n_hyp)
     return n == st->n_hyp ? n : 0;
   memcpy(st->hyp, keep, (size_t)n * sizeof(keep[0]));
@@ -333,7 +413,7 @@ typedef struct {
   /* Kept so a context pruned by the cell-wide prior can rebuild its full catalog without the
    * caller having to hand the legality function back. */
   nr_pdsch_legality_fn_t legality;
-  bool priored;
+  enum { PRIORED_NONE = 0, PRIORED_OWN, PRIORED_CELL } priored; /* which prior pruned this catalog */
   nr_pdsch_config_sweep_state_t state;
 } sweep_context_t;
 
@@ -342,13 +422,7 @@ typedef struct {
  * the ~70,000 the full catalog costs if it is not. */
 #define PRIOR_PROBATION 2000
 
-static struct {
-  bool valid;
-  uint64_t configuration;
-  uint8_t mcs_table, dmrs_add_pos, dmrs_max_len;
-} g_prior;
 static sweep_context_t g_contexts[NR_PDSCH_SWEEP_MAX_CONTEXTS];
-static uint64_t g_generation, g_clock;
 static nr_pdsch_sweep_reporter_t g_reporter;
 static uint32_t g_recovery_minimum_failures = 32;
 static double g_recovery_probability_budget = 1e-6;
@@ -396,7 +470,7 @@ static void reopen_context(sweep_context_t *c)
    * a previously converged context starts failing. */
   if (c->priored && c->legality) {
     nr_pdsch_config_sweep_init_legal(&c->state, c->tda_count, c->typeA, c->legality);
-    c->priored = false;
+    c->priored = PRIORED_NONE;
   }
   /* Keep the already checked legal catalog, but discard stale decoding evidence. */
   memset(c->state.trials, 0, sizeof(c->state.trials));
@@ -416,22 +490,56 @@ void nr_pdsch_config_sweep_prior_reset(void)
 {
   pthread_mutex_lock(&g_lock);
   g_prior.valid = false;
+  for (int i = 0; i < RNTI_CTX_MAX; i++)
+    g_rnti[i].prior.valid = false;
   pthread_mutex_unlock(&g_lock);
 }
 
+static bool prior_get_locked(const prior_t *p, uint64_t *configuration, uint8_t *mcs_table,
+                             uint8_t *dmrs_add_pos, uint8_t *dmrs_max_len)
+{
+  if (!p || !p->valid)
+    return false;
+  if (configuration) *configuration = p->configuration;
+  if (mcs_table)     *mcs_table     = p->mcs_table;
+  if (dmrs_add_pos)  *dmrs_add_pos  = p->dmrs_add_pos;
+  if (dmrs_max_len)  *dmrs_max_len  = p->dmrs_max_len;
+  return true;
+}
 bool nr_pdsch_config_sweep_prior_get(uint64_t *configuration, uint8_t *mcs_table,
                                      uint8_t *dmrs_add_pos, uint8_t *dmrs_max_len)
 {
   pthread_mutex_lock(&g_lock);
-  const bool v = g_prior.valid;
-  if (v) {
-    if (configuration) *configuration = g_prior.configuration;
-    if (mcs_table)     *mcs_table     = g_prior.mcs_table;
-    if (dmrs_add_pos)  *dmrs_add_pos  = g_prior.dmrs_add_pos;
-    if (dmrs_max_len)  *dmrs_max_len  = g_prior.dmrs_max_len;
-  }
+  const bool v = prior_get_locked(&g_prior, configuration, mcs_table, dmrs_add_pos, dmrs_max_len);
   pthread_mutex_unlock(&g_lock);
   return v;
+}
+bool nr_pdsch_config_sweep_rnti_prior_get(uint16_t rnti, uint64_t *configuration, uint8_t *mcs_table,
+                                          uint8_t *dmrs_add_pos, uint8_t *dmrs_max_len)
+{
+  pthread_mutex_lock(&g_lock);
+  const rnti_ctx_t *r = rnti_ctx(rnti, false);
+  const bool v = r && prior_get_locked(&r->prior, configuration, mcs_table, dmrs_add_pos, dmrs_max_len);
+  pthread_mutex_unlock(&g_lock);
+  return v;
+}
+
+static bool prior_same(const prior_t *a, const prior_t *b)
+{
+  return a->valid && b->valid && a->configuration == b->configuration && a->mcs_table == b->mcs_table
+         && a->dmrs_add_pos == b->dmrs_add_pos && a->dmrs_max_len == b->dmrs_max_len;
+}
+/* Promote to the cell-wide prior once a SECOND distinct RNTI has converged on the same fields. The
+ * first alone stays private: one UE's dedicated config is not evidence about the cell. */
+static void prior_promote_locked(const rnti_ctx_t *just_set)
+{
+  if (g_prior.valid)
+    return;
+  for (int i = 0; i < RNTI_CTX_MAX; i++)
+    if (g_rnti[i].rnti && g_rnti[i].rnti != just_set->rnti && prior_same(&g_rnti[i].prior, &just_set->prior)) {
+      g_prior = just_set->prior;
+      return;
+    }
 }
 
 static sweep_context_t *ticket_context(const nr_pdsch_sweep_ticket_t *t)
@@ -439,9 +547,7 @@ static sweep_context_t *ticket_context(const nr_pdsch_sweep_ticket_t *t)
   if (!t || !t->generation || t->context_slot >= NR_PDSCH_SWEEP_MAX_CONTEXTS)
     return NULL;
   sweep_context_t *c = &g_contexts[t->context_slot];
-  /* Key is config+tda, NOT rnti: two UEs sharing a cell config + layout family carry the same
-   * configuration key and refine one shared sweep (evidence pools -> converges N x faster with N UEs).
-   * generation+slot+tda identify the context; the ticket rnti is informational only. */
+  /* generation+slot+tda identify the context (the slot's generation changes on every reuse). */
   return c->generation == t->generation && c->tda == t->tda_index
          && t->hypothesis >= 0 && t->hypothesis < c->state.n_hyp ? c : NULL;
 }
@@ -456,10 +562,11 @@ bool nr_pdsch_config_sweep_select(uint64_t configuration, uint16_t rnti, uint8_t
       || tda_count < 0 || tda_count > 16 || (tda_count && tda_index >= tda_count))
     return false;
   pthread_mutex_lock(&g_lock);
+  rnti_ctx_t *r = rnti_ctx(rnti, true);
   int found = -1, victim = 0;
   for (int i = 0; i < NR_PDSCH_SWEEP_MAX_CONTEXTS; ++i) {
     sweep_context_t *c = &g_contexts[i];
-    if (c->generation && c->configuration == configuration
+    if (c->generation && c->configuration == configuration && c->rnti == rnti
         && c->tda == tda_index && c->tda_count == tda_count && c->typeA == typeA) {
       found = i;
       break;
@@ -479,14 +586,20 @@ bool nr_pdsch_config_sweep_select(uint64_t configuration, uint16_t rnti, uint8_t
     c->typeA = typeA;
     c->legality = legality;
     nr_pdsch_config_sweep_init_legal(&c->state, tda_count, typeA, legality);
-    /* Scoped to the same configuration key: a different cell config is a different DM-RS/PDSCH
-     * setup and its prior says nothing here. */
-    if (g_prior.valid && g_prior.configuration == configuration
-        && nr_pdsch_config_sweep_prune_to(&c->state, g_prior.mcs_table, g_prior.dmrs_add_pos,
-                                          g_prior.dmrs_max_len) > 0) {
-      c->priored = true;
+    /* Seed: this RNTI's own prior first (its other TDA contexts already converged on these fields),
+     * else the cell-wide one. Scoped to the same configuration key either way: a different cell
+     * config is a different DM-RS/PDSCH setup and its prior says nothing here. */
+    const prior_t *seed = NULL;
+    int from = PRIORED_NONE;
+    if (r->prior.valid && r->prior.configuration == configuration) {
+      seed = &r->prior; from = PRIORED_OWN;
+    } else if (g_prior.valid && g_prior.configuration == configuration) {
+      seed = &g_prior; from = PRIORED_CELL;
     }
-    prune_to_observed(&c->state);
+    if (seed && nr_pdsch_config_sweep_prune_to(&c->state, seed->mcs_table, seed->dmrs_add_pos,
+                                               seed->dmrs_max_len) > 0)
+      c->priored = from;
+    prune_to_observed(&c->state, &r->obs);
   }
   sweep_context_t *c = &g_contexts[found];
   c->touched = ++g_clock;
@@ -509,25 +622,23 @@ int nr_pdsch_config_sweep_observe(const nr_pdsch_sweep_ticket_t *ticket, uint16_
   if (ticket == NULL || ticket->generation == 0 || dmrs_mask == 0)
     return 0;
   pthread_mutex_lock(&g_lock);
-  int k = -1;
-  for (int i = 0; i < g_n_obs_mask; i++)
-    if (g_obs_mask[i] == dmrs_mask) { k = i; break; }
-  if (k < 0 && g_n_obs_mask < OBS_MASKS_MAX) {
-    k = g_n_obs_mask++;
-    g_obs_mask[k] = dmrs_mask;
-    g_obs_last[k] = -1;
-    g_obs_k0[k] = -1;
+  rnti_ctx_t *r = rnti_ctx(ticket->rnti, true);
+  obs_record(&r->obs, dmrs_mask, last_symbol, k0);
+  /* Promote to the cell-wide set once a second distinct RNTI has seen the same mask. */
+  if (obs_find(&g_obs, dmrs_mask) < 0) {
+    for (int i = 0; i < RNTI_CTX_MAX; i++)
+      if (g_rnti[i].rnti && g_rnti[i].rnti != r->rnti && obs_find(&g_rnti[i].obs, dmrs_mask) >= 0) {
+        const int j = obs_find(&g_rnti[i].obs, dmrs_mask);
+        obs_record(&g_obs, dmrs_mask, g_rnti[i].obs.last[j], g_rnti[i].obs.k0[j]);
+        break;
+      }
   }
-  if (k >= 0) {
-    /* A later, more specific observation refines the record; a contradiction (a different last
-     * symbol under the same mask) relaxes it back to unknown: two TDRA entries can share a mask. */
-    if (last_symbol >= 0) g_obs_last[k] = (g_obs_last[k] < 0 || g_obs_last[k] == last_symbol) ? (int8_t)last_symbol : -1;
-    if (k0 >= 0) g_obs_k0[k] = (g_obs_k0[k] < 0 || g_obs_k0[k] == k0) ? (int8_t)k0 : -1;
-  }
+  if (obs_find(&g_obs, dmrs_mask) >= 0)
+    obs_record(&g_obs, dmrs_mask, last_symbol, k0);
   sweep_context_t *c = ticket_context(ticket);
   int n = 0;
   if (c != NULL && c->state.winner < 0)
-    n = prune_to_observed(&c->state);
+    n = prune_to_observed(&c->state, &r->obs);
   pthread_mutex_unlock(&g_lock);
   return n;
 }
@@ -553,14 +664,20 @@ bool nr_pdsch_config_sweep_feedback(const nr_pdsch_sweep_ticket_t *ticket, bool 
       }
       if (best_rate < SWEEP_MIN_RATE) {
         /* The prior does not hold for this context. Restore the full search and stop applying the
-         * prior anywhere -- publishing it was the error, and leaving it valid would make every
+         * prior that seeded it -- publishing it was the error, and leaving it valid would make every
          * later context pay the same probation. */
         if (c->legality) {
           nr_pdsch_config_sweep_init_legal(&c->state, c->tda_count, c->typeA, c->legality);
         }
-        c->priored = false;
+        if (c->priored == PRIORED_CELL) {
+          g_prior.valid = false;
+        } else {
+          rnti_ctx_t *r = rnti_ctx(c->rnti, false);
+          if (r)
+            r->prior.valid = false;
+        }
+        c->priored = PRIORED_NONE;
         c->outcomes = 0;
-        g_prior.valid = false;
         w = -1;
       }
     }
@@ -602,15 +719,17 @@ bool nr_pdsch_config_sweep_feedback(const nr_pdsch_sweep_ticket_t *ticket, bool 
                       &c->reference_crc_lower, &reference_upper);
 
       announced = true;
-      /* Publish the cell-wide fields so sibling TDA contexts do not re-derive them. Only the first
-       * converged context publishes: later ones are already cheap, and re-publishing would let a
-       * context that converged under a prior reinforce that same prior. */
-      if (!g_prior.valid) {
-        g_prior.valid = true;
-        g_prior.configuration = c->configuration;
-        g_prior.mcs_table = c->state.hyp[w].mcs_table;
-        g_prior.dmrs_add_pos = c->state.hyp[w].dmrs_add_pos;
-        g_prior.dmrs_max_len = c->state.hyp[w].dmrs_max_len;
+      /* Publish the UE-wide fields so this RNTI's sibling TDA contexts do not re-derive them. Only
+       * the first converged context of the RNTI publishes: later ones are already cheap, and
+       * re-publishing would let a context that converged under a prior reinforce that same prior.
+       * The cell-wide prior is only ever set by agreement between two RNTIs. */
+      rnti_ctx_t *r = rnti_ctx(c->rnti, true);
+      if (!r->prior.valid) {
+        r->prior = (prior_t){.valid = true, .configuration = c->configuration,
+                             .mcs_table = c->state.hyp[w].mcs_table,
+                             .dmrs_add_pos = c->state.hyp[w].dmrs_add_pos,
+                             .dmrs_max_len = c->state.hyp[w].dmrs_max_len};
+        prior_promote_locked(r);
       }
       if (winner)
         *winner = c->state.hyp[w];
@@ -629,7 +748,7 @@ void nr_pdsch_config_sweep_context_stats(uint64_t configuration, uint16_t rnti, 
     const sweep_context_t *c=&g_contexts[i];
     /* tda 0xFF = every TDA context of this configuration: a layout hypothesis reads the TDA
      * index at its own offset, so its evidence is spread over the contexts that index created. */
-    if (c->generation && c->configuration==configuration && (tda == 0xFF || c->tda==tda) && c->typeA==typeA) {
+    if (c->generation && c->configuration==configuration && c->rnti==rnti && (tda == 0xFF || c->tda==tda) && c->typeA==typeA) {
       for (int h=0; h<c->state.n_hyp; ++h) { *passes += c->state.ok[h]; *trials += c->state.trials[h]; }
       if (tda != 0xFF)
         break;
@@ -643,7 +762,7 @@ bool nr_pdsch_config_sweep_is_settled(uint64_t configuration, uint16_t rnti, uin
   bool settled=false;
   for (int i=0;i<NR_PDSCH_SWEEP_MAX_CONTEXTS;++i) {
     const sweep_context_t *c=&g_contexts[i];
-    if (c->generation && c->configuration==configuration
+    if (c->generation && c->configuration==configuration && c->rnti==rnti
         && c->tda==tda && c->tda_count==0 && c->typeA==typeA && c->state.winner>=0) {
       settled=true;
       break;
@@ -668,9 +787,10 @@ void nr_pdsch_config_sweep_reset_all(void)
 {
   pthread_mutex_lock(&g_lock);
   memset(g_contexts, 0, sizeof(g_contexts));
-  g_n_obs_mask = 0;
-  /* The prior is evidence derived from those contexts; keeping it across a reset would let a
-   * cleared run inherit conclusions it can no longer justify. */
+  /* Priors and observations are evidence derived from those contexts; keeping them across a reset
+   * would let a cleared run inherit conclusions it can no longer justify. */
+  memset(g_rnti, 0, sizeof(g_rnti));
+  memset(&g_obs, 0, sizeof(g_obs));
   g_prior.valid = false;
   /* Do not rewind generation: in-flight jobs from before reset must remain invalid. */
   pthread_mutex_unlock(&g_lock);

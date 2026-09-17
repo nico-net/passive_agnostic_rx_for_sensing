@@ -130,9 +130,13 @@ int nr_pdsch_config_sweep_prune_to(nr_pdsch_config_sweep_state_t *st, uint8_t mc
 /** Drop the published prior (tests, and any external evidence that the cell changed). */
 void nr_pdsch_config_sweep_prior_reset(void);
 
-/** True when a prior is published; fills any non-NULL outputs. */
+/** True when the CELL-WIDE prior is published (two distinct RNTIs converged on the same fields);
+ *  fills any non-NULL outputs. */
 bool nr_pdsch_config_sweep_prior_get(uint64_t *configuration, uint8_t *mcs_table,
                                      uint8_t *dmrs_add_pos, uint8_t *dmrs_max_len);
+/** Same for one RNTI's own prior (set by its first converged context; seeds its sibling TDA contexts). */
+bool nr_pdsch_config_sweep_rnti_prior_get(uint16_t rnti, uint64_t *configuration, uint8_t *mcs_table,
+                                          uint8_t *dmrs_add_pos, uint8_t *dmrs_max_len);
 
 /** Value-only feedback identity. A zero generation is never scored. */
 typedef struct {
@@ -147,7 +151,10 @@ typedef struct {
 } nr_pdsch_sweep_ticket_t;
 
 /** Thread-safe per-(configuration,RNTI,TDA) controller. No allocation or decoder work under lock.
- * Context exhaustion evicts the least recently selected context; stale queued feedback is ignored. */
+ * Contexts are PER RNTI: a new RNTI's context is seeded (pruned) from that RNTI's own prior and
+ * observations when it has any, else from the cell-wide ones, which exist only once two distinct
+ * RNTIs agree. Context exhaustion evicts the least recently selected context; stale queued
+ * feedback is ignored. */
 bool nr_pdsch_config_sweep_select(uint64_t configuration, uint16_t rnti, uint8_t tda_index,
                                  int tda_count, int typeA, nr_pdsch_legality_fn_t legality,
                                  nr_pdsch_sweep_ticket_t *ticket, nr_pdsch_cfg_hypothesis_t *out);
