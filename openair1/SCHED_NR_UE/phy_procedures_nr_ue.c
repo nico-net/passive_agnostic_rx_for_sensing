@@ -1393,8 +1393,35 @@ int nr_process_pbch_symbol(
                                nid);
     // Get channel response to measure timing error
     if ((fp->ssb_index == ssbIndex) && (relPbchSymb == NB_SYMBOLS_PBCH - 1)) {
+      /* Normalise the estimate to full scale before the IDFT. freq2time() is the fixed-point
+       * idft(scale=1), whose output shrinks with the transform size on top of the size-scaled FEP
+       * that produced the estimate, while the int16 floor of the peak search does not. Measured
+       * 2026-09-17 on the same SSB minutes apart: CIR peak max_val ~2.1M at 1024-FFT (51 PRB,
+       * |corr_pos| mean 2.7, PBCH 50/50) vs 61-111k at 4096-FFT (217 PRB, |corr_pos| mean 117
+       * hitting the +-CP window edge, PBCH 0/50) -- the tracking loop chased noise peaks and the
+       * wide-bandwidth PBCH tracking failed. The shift is derived from the estimate's own headroom
+       * (log2_approx of its max, the house pattern), so the CIR the tracker sees is independent of
+       * N and of absolute level; the estimate itself is left untouched for the PBCH decode. */
+      c16_t *cir_in = &dl_ch_estimates[aarx][0];
+      c16_t cir_scaled[fp->ofdm_symbol_size] __attribute__((aligned(32)));
+      {
+        int maxabs = 0;
+        for (int k = 0; k < fp->ofdm_symbol_size; k++) {
+          const int r = abs(dl_ch_estimates[aarx][k].r), i = abs(dl_ch_estimates[aarx][k].i);
+          if (r > maxabs) maxabs = r;
+          if (i > maxabs) maxabs = i;
+        }
+        const int shift = maxabs > 0 ? 13 - log2_approx((uint32_t)maxabs) : 0;
+        if (shift > 0) {
+          for (int k = 0; k < fp->ofdm_symbol_size; k++) {
+            cir_scaled[k].r = (int16_t)(dl_ch_estimates[aarx][k].r << shift);
+            cir_scaled[k].i = (int16_t)(dl_ch_estimates[aarx][k].i << shift);
+          }
+          cir_in = cir_scaled;
+        }
+      }
       // do ifft of channel estimate
-      freq2time(fp->ofdm_symbol_size, (int16_t *)&dl_ch_estimates[aarx], (int16_t *)dl_ch_estimates_time[aarx]);
+      freq2time(fp->ofdm_symbol_size, (int16_t *)cir_in, (int16_t *)dl_ch_estimates_time[aarx]);
       UEscopeCopy(ue, pbchDlChEstimateTime, (void *)dl_ch_estimates_time, sizeof(c16_t), fp->nb_antennas_rx, fp->ofdm_symbol_size, 0);
     }
   }
