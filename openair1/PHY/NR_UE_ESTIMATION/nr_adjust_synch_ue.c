@@ -68,6 +68,37 @@ int nr_adjust_synch_ue(const NR_DL_FRAME_PARMS *frame_parms,
     }
   }
 
+  /* ISAC_TSYNC_DUMP=<path> (diagnostic, default off): append the per-branch CIR power of the first
+   * 32 SSBs -- header {N, nb_ant, frame, slot} as int32, then nb_ant x N int32 |h|^2 -- so the
+   * peak structure the search above sees can be inspected offline instead of inferred from
+   * corr_pos statistics (2026-09-17: 4096-FFT tracking peak alternating +-100..260 samples). */
+  {
+    static int s_dump_left = -1;
+    static FILE *s_dump = NULL;
+    if (s_dump_left < 0) {
+      const char *p = getenv("ISAC_TSYNC_DUMP");
+      s_dump = (p != NULL && p[0]) ? fopen(p, "wb") : NULL;
+      s_dump_left = s_dump ? 32 : 0;
+    }
+    if (s_dump_left > 0 && s_dump) {
+      const int N = frame_parms->ofdm_symbol_size;
+      int32_t hdr[4] = {N, frame_parms->nb_antennas_rx, frame, slot};
+      fwrite(hdr, sizeof(hdr), 1, s_dump);
+      for (int aa = 0; aa < frame_parms->nb_antennas_rx; aa++) {
+        int32_t pw[N];
+        for (int k = 0; k < N; k++) {
+          const int Re = dl_ch_estimates_time[aa][k].r, Im = dl_ch_estimates_time[aa][k].i;
+          pw[k] = Re * Re + Im * Im;
+        }
+        fwrite(pw, sizeof(int32_t), N, s_dump);
+      }
+      if (--s_dump_left == 0) {
+        fclose(s_dump);
+        s_dump = NULL;
+      }
+    }
+  }
+
   // TIME-TRACKING AUDIT (2026-08-04, instrumentation only -- no behavioural change).
   // The search above is deliberately confined to +-nb_prefix_samples. If the true channel peak lies
   // OUTSIDE that window the loop cannot see it and locks onto whatever is inside, so we additionally
