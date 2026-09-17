@@ -1379,7 +1379,63 @@ int nr_process_pbch_symbol(
 
   const int nid = fp->Nid_cell;
   const int ssb_start_subcarrier = fp->ssb_start_subcarrier;
+  /* FIXED-POINT HEADROOM FOR THE SSB REs BEFORE THE ESTIMATOR.
+   *
+   * nr_pbch_channel_estimation() is fixed point end to end -- an LS product at
+   * c16mulShift(...,15) and an int16 filt16a interpolation -- so its output precision is set by how
+   * far the received SSB REs sit below int16 full scale, and nothing downstream can recover bits
+   * lost there. That level is BANDWIDTH DEPENDENT: at 122.88 MS/s the same ADC full scale covers
+   * 100 MHz instead of 20 MHz, so each RE of the SSB's fixed 3.6 MHz carries proportionally less of
+   * it, and the DFT spreads the same energy over 4x the bins.
+   *
+   * MEASURED on one cell, same SSB, minutes apart (ISAC_CHEST_COH): the estimate is real and smooth
+   * at both widths (240 populated bins, adjacent-subcarrier coherence 0.93-0.97 at 51 PRB and
+   * 0.87-0.89 at 273 -- so neither noise nor a wrong mapping), but the received SSB REs are 2.9x
+   * lower at 4096 (ssb_band_mean 82.7 against 241.8, -9.3 dB) and the estimate 2.6x lower
+   * (rms 108.4 against 280.7) while the int16 quantisation floor is unchanged. That is the CIR
+   * peak/median collapse (2721x -> 95x) that made the +-CP timing search chase noise peaks and
+   * killed PBCH tracking at every bandwidth above 20 MHz.
+   *
+   * So scale the estimator's INPUT, not its output: take the 240 SSB REs, derive a shift from their
+   * own measured magnitude, and hand the estimator a copy at a fixed working point. The timing peak
+   * search is scale invariant and the PBCH LLR path derives log2_maxh from the channel level it is
+   * given, so both absorb a power-of-two gain; the shift is reported so saturation is measurable
+   * rather than assumed. Applied only where the deficit exists (ofdm_symbol_size > 1024, the width
+   * at which this chain is measured healthy), so the 20 MHz path stays bit-identical. */
+  const int Nsym = fp->ofdm_symbol_size;
+  unsigned int ssb_off0 = fp->first_carrier_offset + ssb_start_subcarrier;
+  if (ssb_off0 >= (unsigned)Nsym)
+    ssb_off0 -= Nsym;
   for (int aarx = 0; aarx < fp->nb_antennas_rx; aarx++) {
+    const c16_t *est_in = rxdataF[aarx];
+    __attribute__((aligned(32))) c16_t rxf_scaled[Nsym];
+    int ssb_shift = 0;
+    if (Nsym > 1024) {
+      int maxabs = 0;
+      for (int i = 0; i < 240; i++) {
+        const unsigned int sc = (ssb_off0 + i) % (unsigned)Nsym;
+        const int r = abs(rxdataF[aarx][sc].r), im = abs(rxdataF[aarx][sc].i);
+        if (r > maxabs)
+          maxabs = r;
+        if (im > maxabs)
+          maxabs = im;
+      }
+      /* Target 2^13: the LS product and the 3-tap filt16a accumulation both run in int16, so leave
+       * two bits of headroom below 2^15 for them rather than filling the word. */
+      if (maxabs > 0)
+        ssb_shift = 13 - (int)log2_approx((uint32_t)maxabs);
+      if (ssb_shift < 0)
+        ssb_shift = 0;
+      if (ssb_shift > 0) {
+        memcpy(rxf_scaled, rxdataF[aarx], sizeof(c16_t) * Nsym);
+        for (int i = 0; i < 240; i++) {
+          const unsigned int sc = (ssb_off0 + i) % (unsigned)Nsym;
+          rxf_scaled[sc].r = (int16_t)(rxdataF[aarx][sc].r << ssb_shift);
+          rxf_scaled[sc].i = (int16_t)(rxdataF[aarx][sc].i << ssb_shift);
+        }
+        est_in = rxf_scaled;
+      }
+    }
     nr_pbch_channel_estimation(&ue->frame_parms,
                                NULL,
                                dl_ch_estimates[aarx],
@@ -1388,9 +1444,27 @@ int nr_process_pbch_symbol(
                                ssbIndex & 7,
                                symbIdxInFrame > (fp->slots_per_frame * NR_SYMBOLS_PER_SLOT / 2),
                                ssb_start_subcarrier,
-                               rxdataF[aarx],
+                               est_in,
                                false,
                                nid);
+    /* Saturation check on the estimator's int16 output at the new input level -- the obvious
+     * failure mode of adding gain, so measure it instead of assuming. Rate limited. */
+    if (ssb_shift > 0) {
+      static int s_sat_left = 12;
+      if (s_sat_left > 0) {
+        int hmax = 0;
+        for (int i = 0; i < 244; i++) {
+          const int r = abs(dl_ch_estimates[aarx][i].r), im = abs(dl_ch_estimates[aarx][i].i);
+          if (r > hmax)
+            hmax = r;
+          if (im > hmax)
+            hmax = im;
+        }
+        s_sat_left--;
+        LOG_W(PHY, "SENSING: CHESTGAIN N=%d ant=%d shift=%d |H|max=%d%s\n",
+              Nsym, aarx, ssb_shift, hmax, (hmax >= 32000) ? " SATURATED" : "");
+      }
+    }
     // Get channel response to measure timing error
     if ((fp->ssb_index == ssbIndex) && (relPbchSymb == NB_SYMBOLS_PBCH - 1)) {
       /* ISAC_CHEST_COH=1 (diagnostic, default off): adjacent-subcarrier coherence and RMS of the
