@@ -1706,14 +1706,23 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
       && t_chest_cache.nscid == dlsch_config->nscid && t_chest_cache.ports_lo == (uint8_t)dlsch_config->dmrs_ports
       && t_chest_cache.cdm == dlsch_config->n_dmrs_cdm_groups && t_chest_cache.nl == cw->Nl
       && t_chest_cache.scr == dlsch_config->dlDmrsScramblingId
-      && t_chest_cache.rb_lo <= (int)freq_alloc->first_rb
+      /* EQUAL, not <=. nr_pdsch_channel_estimation() writes dl_ch from INDEX 0 = the first RB of
+       * the freq_alloc IT was given, and nr_dlsch_extract_rbs() reads it back from index 0 assuming
+       * that is THIS grant's first RB. Reusing an estimate whose base RB is LOWER therefore hands
+       * the equaliser a channel shifted by (first_rb - rb_lo)*12 subcarriers -- wrong H, not merely
+       * a stale one, and silently so. Requiring equality costs a re-estimate for a grant that
+       * starts higher than the group's widest member; it does not cost correctness. */
+      && t_chest_cache.rb_lo == (int)freq_alloc->first_rb
       && (int)(freq_alloc->first_rb + freq_alloc->num_rbs) <= t_chest_cache.rb_lo + t_chest_cache.rb_n;
   atomic_fetch_add(chest_hit ? &g_chest_hit : &g_chest_miss, 1);
   /* On a miss, estimate over the group's union of RBs so the slot's next grant can reuse it. */
   fapi_nr_dl_config_dlsch_pdu_rel15_t chest_cfg = *dlsch_config;
   freq_alloc_bitmap_t chest_alloc = *freq_alloc;
   if (t_share.on && t_share.rb_n > 0 && !chest_hit) {
-    const int lo = t_share.rb_lo < (int)freq_alloc->first_rb ? t_share.rb_lo : (int)freq_alloc->first_rb;
+    /* Widen UPWARD only, for the same index-0 reason as the cache predicate above: the estimate is
+     * indexed from its own first RB, so lowering the base below this grant's first_rb would
+     * misalign the estimate this very call then uses. */
+    const int lo = (int)freq_alloc->first_rb;
     const int hi0 = t_share.rb_lo + t_share.rb_n, hi1 = (int)(freq_alloc->first_rb + freq_alloc->num_rbs);
     const int hi = hi0 > hi1 ? hi0 : hi1;
     chest_alloc = set_bitmap_from_start_size(lo, hi - lo);

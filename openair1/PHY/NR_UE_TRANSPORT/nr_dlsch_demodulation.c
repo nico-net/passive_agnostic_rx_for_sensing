@@ -1414,6 +1414,42 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
         }
       }
       *log2_maxh = (log2_approx(avgs) >> 1) + 1 + log2_approx(contributing);
+      /* ISAC_L2MAXH_HEADROOM=1 (default off): the shift above is derived from the MEAN |H|^2, which
+       * leaves 2-4 bits of the int16 equaliser output unused on a flat channel and is therefore
+       * 2-4 bits too COARSE once the channel has in-band spread -- the weak RBs then get too few
+       * LSBs per 256QAM constellation step. Measured with OAI's own nr_channel_compensation() +
+       * nr_256qam_llr(), no noise, exact H, 273 PRB, 3276 REs (see
+       * openair1/PHY/NR_UE_ISAC/tests/dlsch_fixed_point_test.cc):
+       *   |H|rms 480, flat        : 0.0000 % LLR sign errors at the mean-derived shift
+       *   |H|rms 480, 21 dB spread: 2.14 %  at the mean-derived shift, 0.0000 % 2-4 bits lower
+       *   |H|rms 2672, 21 dB      : 0.0000 % either way (that level already has the headroom)
+       * Sizing the shift from the PEAK per-RB level instead makes the choice automatic and can only
+       * LOWER it (cmin below), so a receiver already inside the exact window is unaffected.
+       * NOT the root cause of the OTA wide-grant failure -- that rig measures |H|rms ~2672, where
+       * both rules score 0.0000 % -- this is a robustness fix for lower-gain / wider-spread cases.
+       * Per-RB means (not per-RE) so one noisy RE cannot steal a bit from the whole grant, same
+       * primitive as nr_channel_level() so the two scale alike. */
+      static int s_l2_hr = -1;
+      if (s_l2_hr < 0) {
+        const char *e = getenv("ISAC_L2MAXH_HEADROOM");
+        s_l2_hr = (e != NULL && atoi(e) != 0) ? 1 : 0;
+      }
+      if (s_l2_hr) {
+        int32_t peak_rb = 0;
+        c16_t (*ext_hr)[rx_size_symbol] = (c16_t (*)[rx_size_symbol])dl_ch_estimates_ext;
+        for (int aarx = 0; aarx < nbRx; aarx++) {
+          if (nbRx == 4 && (t_mrc_mode == 3 || nr_dlsch_forced_mask >= 0) && !(t_mrc_live_mask & (1 << aarx)))
+            continue;
+          for (uint32_t re = 0; re + 12 <= nb_re_pdsch; re += 12) {
+            const int32_t rb = simde_mm_average((simde__m128i *)&ext_hr[aarx][re], 12, 2, 3);
+            if (rb > peak_rb)
+              peak_rb = rb;
+          }
+        }
+        const int hr = nr_log2_maxh_headroom((uint32_t)peak_rb, contributing);
+        if (peak_rb > 0 && hr < *log2_maxh)
+          *log2_maxh = hr;
+      }
     }
     else
       *log2_maxh = (log2_approx(avgs) >> 1) + log2_approx(nbRx >> 1);

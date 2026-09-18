@@ -983,6 +983,32 @@ int nr_process_pbch_symbol(
         LOG_W(PHY, "SENSING: PBCHBIAS applying %+d samples to tracking PBCH FFT window only\n", s_pbch_bias);
     }
     nr_slot_fep(ue, fp, proc->nr_slot_rx, symbol, tmp, link_type_dl, s_pbch_bias, ue->common_vars.rxdata);
+    /* ISAC_SSB_IQ=<path> (diagnostic, default off): the RAW TIME-DOMAIN samples this FEP call just
+     * transformed, so the SSB can be re-processed offline independently of OAI's fixed-point DFT --
+     * in float at the native size, and via a 20 MHz decimated 1024-point path. Neither is decidable
+     * from rxdataF, which is already the DFT's output. antenna 0, first 96 records (24 SSB x 4 symb):
+     * header int32 {N, nb_prefix, rx_offset, frame, slot, symbol, ssb_start_subcarrier, nb_ant},
+     * then (nb_prefix + N) c16_t from rxdata[0][rx_offset - nb_prefix]. No wrap: rxdata is
+     * 2*samples_per_frame + ofdm_symbol_size long and the FEP reads contiguously. */
+    {
+      static int s_iq_left = -1;
+      static FILE *s_iq = NULL;
+      if (s_iq_left < 0) {
+        const char *pth = getenv("ISAC_SSB_IQ");
+        s_iq = (pth && pth[0]) ? fopen(pth, "wb") : NULL;
+        s_iq_left = s_iq ? 96 : 0;
+      }
+      const unsigned int rxo = nr_slot_fep_diag_rx_offset, npfx = nr_slot_fep_diag_nb_prefix_samples;
+      if (s_iq_left > 0 && s_iq && rxo >= npfx) {
+        s_iq_left--;
+        int32_t hdr[8] = {fp->ofdm_symbol_size, (int32_t)npfx, (int32_t)rxo, proc->frame_rx,
+                          proc->nr_slot_rx, symbol, fp->ssb_start_subcarrier, fp->nb_antennas_rx};
+        fwrite(hdr, sizeof(hdr), 1, s_iq);
+        fwrite(&ue->common_vars.rxdata[0][rxo - npfx], sizeof(c16_t), npfx + fp->ofdm_symbol_size, s_iq);
+        fflush(s_iq);
+        if (s_iq_left == 0) { fclose(s_iq); s_iq = NULL; }
+      }
+    }
     // COORDINATE-SYSTEM CHECK (2026-08-06): nr_slot_fep_diag_rx_offset is the FINAL buffer index
     // the DFT reads from, after slot origin, symbol offset, sample_offset and the CP/divisor
     // backoff. Logging it with and without the bias proves whether ISAC_PBCH_OFFSET_BIAS actually
@@ -1471,7 +1497,11 @@ int nr_process_pbch_symbol(
        * estimate AND the 240 source REs it was built from, so the 1024-vs-4096 estimates can be
        * compared directly instead of inferred from CIR statistics. Per SSB, antenna 0 only, 24 max:
        * header int32 {N, ssb_offset, frame, slot}, then 244 c16_t of dl_ch_estimates[0..243],
-       * then 240 c16_t of rxdataF at the SSB REs in read order (ssb_offset + 4*i wrapped). */
+       * then the WHOLE symbol: ofdm_symbol_size c16_t of rxdataF[0..N-1]. Whole-symbol (not just
+       * the 240 SSB REs) so the SSB can be LOCATED offline rather than assumed: the PBCH DM-RS
+       * repeats every 20 ms, so a per-subcarrier consecutive-SSB coherence profile marks the DM-RS
+       * comb wherever it actually is. A 240-RE dump cannot distinguish "SSB destroyed" from
+       * "reading the wrong 240 subcarriers on a fully loaded carrier". */
       {
         static int s_raw_left = -1;
         static FILE *s_raw = NULL;
@@ -1488,10 +1518,7 @@ int nr_process_pbch_symbol(
           int32_t hdr[4] = {fp->ofdm_symbol_size, (int32_t)so, proc->frame_rx, proc->nr_slot_rx};
           fwrite(hdr, sizeof(hdr), 1, s_raw);
           fwrite(&dl_ch_estimates[aarx][0], sizeof(c16_t), 244, s_raw);
-          for (int i = 0; i < 240; i++) {
-            const unsigned int idx = (so + (unsigned)i) % (unsigned)fp->ofdm_symbol_size;
-            fwrite(&rxdataF[aarx][idx], sizeof(c16_t), 1, s_raw);
-          }
+          fwrite(&rxdataF[aarx][0], sizeof(c16_t), fp->ofdm_symbol_size, s_raw);
           fflush(s_raw);
           if (s_raw_left == 0) { fclose(s_raw); s_raw = NULL; }
         }

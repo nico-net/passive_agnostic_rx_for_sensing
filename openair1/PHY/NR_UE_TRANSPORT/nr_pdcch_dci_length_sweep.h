@@ -107,7 +107,27 @@ typedef struct {
    * unchanged. Set it at the call site before the first feed (the same place excluded_len is set). */
   int      stride;
   int      rot_phase; // 0..stride-1, which interleaved subset this call tests
+  /* CELL PRIOR (2026-09-17). When > 0, test ONLY this length for the first
+   * NR_PDCCH_LENGTH_PREFERRED_ROUNDS rounds instead of all 34. Set from the bank's cell-wide length
+   * once TWO DISTINCT RNTIs have converged on it independently -- so a third UE is not trusting a
+   * guess, it is re-testing a hypothesis that two full sweeps already agreed on, under the SAME
+   * significance test. If it does not clear inside the budget the prior is dropped and the full
+   * sweep resumes, so a wrong prior costs a handful of occasions, not a lockout. */
+  int      preferred_len;
+  int      preferred_rounds;
+  /* Total scorer invocations = total polar decodes this sweep has paid for. Paired with BTIM's
+   * dlsweep/ulsweep nanoseconds it gives microseconds PER DECODE and the batch actually available
+   * per occasion -- the two numbers that decide whether a GPU batch can win here. The failed GPU
+   * LDPC attempt lost because consumers blocked and the batcher only ever saw 1.05 TBs; this sweep
+   * offers ~34 lengths x ~6 candidates of INDEPENDENT work per occasion, from one work item, over
+   * the SAME LLR slice. Measure it rather than assume it. */
+  uint64_t decodes;
 } nr_pdcch_dci_length_sweep_state_t;
+/* Rounds a seeded length gets before the full sweep resumes. The sweep's own significance test
+ * needs accumulated trials, and one occasion carries only ~6 candidates; 8 rounds is ~50 candidates,
+ * comfortably enough for a length that is already right and nowhere near enough to make a wrong one
+ * look right. */
+#define NR_PDCCH_LENGTH_PREFERRED_ROUNDS 8
 
 /* A caller-serialized bank. Interleaved UEs never reset one another; geometry
  * epoch changes invalidate all entries. Eviction discards evidence, never reuses it. */
@@ -122,9 +142,20 @@ typedef struct {
 typedef struct {
   nr_pdcch_dci_length_context_t ue[NR_PDCCH_LENGTH_CONTEXTS];
   uint64_t epoch, clock;
+  /* Cell-wide UL dci_length, published only once two DISTINCT RNTIs converge on the same value --
+   * the same rule nr_pdsch_config_sweep uses for its prior, and for the same reason: one UE's
+   * dedicated configuration is not evidence about the cell. Before this, every new RNTI re-ran the
+   * whole 34-length sweep from scratch, so the discovery cost scaled with the number of UEs -- the
+   * dominant cost at high grant rates (the sweep is ~93 % of consumer time, 1.75 ms of 1.89 ms). */
+  int      cell_len;    // 0 = not established
+  int      first_len;   // the first RNTI to converge, awaiting a second to agree
+  uint16_t first_rnti;
 } nr_pdcch_dci_length_bank_t;
 nr_pdcch_dci_length_context_t *nr_pdcch_dci_length_context(
     nr_pdcch_dci_length_bank_t *bank, uint64_t epoch, uint16_t rnti);
+/** Record that @p rnti converged on @p found. Publishes the cell-wide length on agreement between
+ *  two distinct RNTIs, so every later context starts from it instead of sweeping. */
+void nr_pdcch_dci_length_bank_converged(nr_pdcch_dci_length_bank_t *bank, uint16_t rnti, int found);
 
 void nr_pdcch_dci_length_sweep_reset(nr_pdcch_dci_length_sweep_state_t* state);
 

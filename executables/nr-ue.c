@@ -185,6 +185,23 @@ void init_nr_ue_vars(PHY_VARS_NR_UE *ue, uint8_t UE_id)
   ue->if_inst     = nr_ue_if_module_init(UE_id);
   ue->dci_thres   = 0;
   ue->target_Nid_cell = -1;
+  /* ISAC_TARGET_PCI=<pci>: pin the initial SSB search to one N_ID_2 (PCI%3), a hard filter in
+   * pss_nr.c (pss_index_start=pss_index_end-1=GET_NID2(target)) -- correlates against exactly
+   * that one PSS sequence, never even evaluates the other two. Existing target_Nid_cell plumbing
+   * (nr_initial_sync.c/nr_ue_measurements.c) was previously only reachable via a NAS-triggered
+   * re-sync request; this is the FIRST wiring for the initial blind acquisition itself. Unset =
+   * -1 = unchanged blind-scan behaviour, bit-identical to before. Does not disambiguate two
+   * cells sharing the same N_ID_2 (SSS/N_ID_1 is still whichever correlates -- see
+   * wideband-tracking-uses-wrong-cell-dmrs memory); only rules out N_ID_2-distinct co-channel
+   * cells entirely, which is what it is being used for here. */
+  {
+    const char *e = getenv("ISAC_TARGET_PCI");
+    if (e && *e) {
+      ue->target_Nid_cell = atoi(e);
+      LOG_W(NR_PHY, "ISAC_TARGET_PCI=%d: pinning initial acquisition to N_ID_2=%d\n",
+            ue->target_Nid_cell, ue->target_Nid_cell % 3);
+    }
+  }
 
   // initialize all signal buffers
   init_nr_ue_signal(ue, nb_connected_gNB);
@@ -1417,6 +1434,37 @@ void *UE_thread(void *arg)
     if (slot_nr == nb_slot_frame - 1) {
       // we shift of half of measured drift, at each beginning of frame for both rx and tx
       iq_shift_to_apply = shiftForNextFrame;
+      /* ISAC_SHIFT_CENSUS=<frames> (default off): the CUMULATIVE window motion actually applied.
+       * The 2026-09-17 offline analysis could not obtain this. Measured from raw SSB IQ at 217 PRB,
+       * the PBCH DM-RS peak ramps away from the FFT window (R^2 = 0.983) until it leaves
+       * +-nb_prefix_samples, while at 51 PRB it settles. That ramp is not clock drift -- the LO and
+       * the ADC clock share a reference and the residual CFO puts it at ~4.1 ppm -- so the receiver
+       * is moving its own window. rx_offset cannot show it (it is a pure function of (slot,symbol)
+       * and reads nominal at BOTH widths; an applied shift moves the DATA within the ring, not the
+       * index). This census names the source: if the cumulative rate here matches the ramp seen on
+       * air, the motion comes through shiftForNextFrame and LOG_TIMEMUT says who wrote it; if it
+       * does not, the stream is being moved somewhere other than readBlockSize. */
+      {
+        static int s_census = -1;
+        static long s_cum = 0, s_frames = 0, s_nz = 0;
+        if (s_census < 0) {
+          const char *e = getenv("ISAC_SHIFT_CENSUS");
+          s_census = e ? atoi(e) : 0;
+        }
+        if (s_census > 0) {
+          s_cum += iq_shift_to_apply;
+          s_frames++;
+          if (iq_shift_to_apply)
+            s_nz++;
+          if (s_frames % s_census == 0)
+            LOG_W(PHY,
+                  "SENSING: SHIFTCENSUS frames=%ld applied_cum=%ld mean=%.3f samples/frame "
+                  "(%.2f ppm) nonzero=%ld/%ld max_pos_acc=%d shiftForNextFrame=%d\n",
+                  s_frames, s_cum, (double)s_cum / s_frames,
+                  (double)s_cum / s_frames / (double)fp->samples_per_frame * 1e6,
+                  s_nz, s_frames, UE->max_pos_acc, shiftForNextFrame);
+        }
+      }
       // autonomous timing advance calculation, which does not use SIB19 information
       if (ntn_koffset && get_nrUE_params()->autonomous_ta)
         UE->timing_advance_ntn -= 2 * shiftForNextFrame;

@@ -2191,7 +2191,9 @@ void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_pr
         g_length_swept = true;
         g_length_found = true;
         LOG_A(PHY, "SENSING: Phase 3 autodiscover -- dci_length locked at %d (bootstrap_rnti=0x%x, "
-                   "occasions_fed=%d)\n", found_len, bootstrap_rnti, g_dl_length_state.occasions_fed);
+                   "occasions_fed=%d, polar_decodes=%llu -- divide BTIM dlsweep by this for us/decode, "
+                   "the GPU batch sizing)\n", found_len, bootstrap_rnti, g_dl_length_state.occasions_fed,
+                   (unsigned long long)g_dl_length_state.decodes);
         btim_add(BTIM_DLSWEEP, btim_t_dlsw);
         return; /* Rebuild the next occasion with the newly selected length. */
       } else if (g_dl_length_state.occasions_fed >= AUTODISCOVER_LENGTH_SWEEP_MAX_OCCASIONS) {
@@ -2311,7 +2313,12 @@ void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_pr
         if(found>0 && supported_lengths==1 && ulc->state.n_distinct[found]>1 &&
            ulc->state.bootstrap_hits[found]>=3) {
           ulc->found=found;
-          LOG_A(PHY,"UL automatic DCI length locked: %d rnti=0x%x\n",found,boot_rnti);
+          LOG_A(PHY,"UL automatic DCI length locked: %d rnti=0x%x (occasions=%d polar_decodes=%llu)\n",
+                found,boot_rnti,ulc->state.occasions_fed,(unsigned long long)ulc->state.decodes);
+          /* Publish to the bank. On agreement between two distinct RNTIs this becomes the cell-wide
+           * prior and every later RNTI skips its own 34-length sweep -- the discovery cost stops
+           * scaling with the number of UEs, which is what breaks the consumer at high grant rates. */
+          nr_pdcch_dci_length_bank_converged(&ul_lengths, boot_rnti, found);
         } else if(ulc->state.occasions_fed>=AUTODISCOVER_LENGTH_SWEEP_MAX_OCCASIONS) {
           ulc->exhausted=true;
           LOG_W(PHY,"UL automatic length unresolved after %d occasions\n",ulc->state.occasions_fed);

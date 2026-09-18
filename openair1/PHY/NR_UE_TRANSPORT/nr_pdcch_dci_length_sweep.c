@@ -39,6 +39,7 @@
  * pass rate), not a constant.
  */
 #include "nr_pdcch_dci_length_sweep.h"
+#include "common/utils/LOG/log.h"
 #include <string.h>
 #include <math.h>
 #include <stdio.h>
@@ -112,12 +113,33 @@ int nr_pdcch_dci_length_sweep_feed(nr_pdcch_dci_length_sweep_state_t* state,
   if (state->rot_phase >= stride) {
     state->rot_phase = 0; // stride shrank under us; restart the round rather than skip lengths
   }
-  for (int len = min_len + state->rot_phase; len <= max_len && len < NR_PDCCH_DCI_LENGTH_SWEEP_MAX_LEN;
-       len += stride) {
+  /* CELL PRIOR: test ONLY the seeded length while its budget lasts. The significance test below is
+   * unchanged -- this restricts which lengths get new TRIALS, not what counts as evidence -- so a
+   * seeded length still has to earn its win. Two distinct RNTIs already converged on it through
+   * independent full sweeps, which is why testing it alone is not weaker evidence than one UE's
+   * 34-length statistics; it is the same test applied to a hypothesis with cross-UE support. */
+  int prefer = 0;
+  if (state->preferred_len >= min_len && state->preferred_len <= max_len
+      && state->preferred_len < NR_PDCCH_DCI_LENGTH_SWEEP_MAX_LEN
+      && state->preferred_len != state->excluded_len) {
+    if (state->preferred_rounds < NR_PDCCH_LENGTH_PREFERRED_ROUNDS) {
+      prefer = state->preferred_len;
+    } else if (state->preferred_len) {
+      LOG_W(PHY, "SENSING: UL dci_length cell prior %d did not clear in %d rounds -- resuming the "
+                 "full sweep for this RNTI\n", state->preferred_len, NR_PDCCH_LENGTH_PREFERRED_ROUNDS);
+      state->preferred_len = 0;
+    }
+  } else {
+    state->preferred_len = 0;
+  }
+  for (int len = prefer ? prefer : (min_len + state->rot_phase);
+       len <= (prefer ? prefer : max_len) && len < NR_PDCCH_DCI_LENGTH_SWEEP_MAX_LEN;
+       len += prefer ? (max_len + 1) : stride) {
     for (int t = 0; t < n_trials_this_call; t++) {
       uint16_t rnti = 0;
       uint32_t payload_hash = 0;
       state->trials[len]++;
+      state->decodes++;
       if (!decode_one_candidate(len, t, &rnti, &payload_hash, user_ctx)) {
         continue;
       }
@@ -130,7 +152,11 @@ int nr_pdcch_dci_length_sweep_feed(nr_pdcch_dci_length_sweep_state_t* state,
   }
   /* One ROUND -- every length visited once -- is what the caller's give-up cap counts, so the
    * per-length trial budget is identical at any stride; rotation redistributes it in time. */
-  if (++state->rot_phase >= stride) {
+  if (prefer) {
+    state->preferred_rounds++;
+    state->rot_phase = 0;
+    state->occasions_fed++; // one length is the whole round when a prior is seeded
+  } else if (++state->rot_phase >= stride) {
     state->rot_phase = 0;
     state->occasions_fed++;
   }
@@ -211,5 +237,35 @@ nr_pdcch_dci_length_context_t *nr_pdcch_dci_length_context(
   memset(oldest, 0, sizeof(*oldest));
   oldest->rnti=rnti;
   oldest->touched=++bank->clock;
+  if (bank->cell_len > 0) {
+    oldest->state.preferred_len = bank->cell_len;
+    LOG_I(PHY, "SENSING: UL dci_length -- rnti=0x%04x seeded from the cell prior %d (skipping the "
+               "34-length sweep unless it fails to clear)\n", rnti, bank->cell_len);
+  }
   return oldest;
+}
+
+void nr_pdcch_dci_length_bank_converged(nr_pdcch_dci_length_bank_t *bank, uint16_t rnti, int found)
+{
+  if (!bank || !rnti || found <= 0 || bank->cell_len > 0)
+    return;
+  if (bank->first_rnti == 0 || bank->first_rnti == rnti) {
+    /* First converged RNTI stays PRIVATE: one UE's dedicated config is not evidence about the cell
+     * (a UE's DCI 0_1 width depends on its own configured features, not only on the BWP). */
+    bank->first_rnti = rnti;
+    bank->first_len  = found;
+    return;
+  }
+  if (bank->first_len == found) {
+    bank->cell_len = found;
+    LOG_W(PHY, "SENSING: UL dci_length cell prior PUBLISHED = %d, by agreement rnti=0x%04x + "
+               "rnti=0x%04x -- later RNTIs skip the sweep\n", found, bank->first_rnti, rnti);
+  } else {
+    /* Two UEs genuinely differ: there is no cell-wide answer. Keep the newer as the candidate so a
+     * third UE can still agree with one of them, but never publish a value two UEs contradict. */
+    LOG_W(PHY, "SENSING: UL dci_length DISAGREEMENT rnti=0x%04x says %d, rnti=0x%04x says %d -- no "
+               "cell prior published\n", bank->first_rnti, bank->first_len, rnti, found);
+    bank->first_rnti = rnti;
+    bank->first_len  = found;
+  }
 }

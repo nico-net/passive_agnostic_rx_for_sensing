@@ -41,7 +41,11 @@ SENSECOMB=${SENSECOMB:-1}  # sensing grid: co-phased branch combining (STO/SFO/C
 CONTFO=${CONTFO:-}
 FSP=${FSP:-0.05}    # upstream default 0.01 needs ~265 PBCH (5 s) to pull in a 4 kHz mis-lock
 FSI=${FSI:-0.001}
-MGMT=${MGMT:-128.178.122.174}   # X410 mgmt (was .3 on the retired unit)
+# X410 mgmt address: READ IT FROM THE DEVICE. It has flipped on three reboots in two days; a stale
+# value makes every usrp-hwd restart in this script and armval.sh silently no-op, which then reads
+# as "the receiver stopped locking" (2026-09-17, hours lost). MGMT=<ip> still overrides.
+MGMT=${MGMT:-$(timeout 20 uhd_find_devices --args "type=x4xx,addr=${DATA:-192.168.20.2}" 2>/dev/null | grep -oE "mgmt_addr: [0-9.]+" | head -1 | awk '{print $2}')}
+MGMT=${MGMT:-192.168.20.2}      # last-known fallback if uhd_find_devices is silent
 DATA=${DATA:-192.168.20.2}      # X410 sfp1
 DPDK=${DPDK:-}                  # empty = kernel socket path (no uhd.conf here, so DPDK is unconfigured)
 BASE=/home/sens/NICOLA/captures
@@ -54,7 +58,7 @@ BASE=/home/sens/NICOLA/captures
 # regression. The IP is now persistent in the NM profile and the ring is not
 # reboot-persistent at all, so assert all of it here rather than trusting either.
 # This is the ONE place every runner (ab_*.sh, keep_live.sh) passes through.
-NIC=${NIC:-enp129s0f0np0}
+NIC=${NIC:-enp2s0f1np1}
 preflight() {
   ip -4 addr show "$NIC" | grep -q "192.168.20.1/24" \
     || { echo "  preflight: restoring 192.168.20.1/24 on $NIC"; sudo ip addr add 192.168.20.1/24 dev "$NIC"; }
@@ -209,7 +213,7 @@ for t in $(seq 1 "$TRIES"); do
     ${TSYNCAUDIT:+ISAC_TSYNC_AUDIT=$TSYNCAUDIT} ${CHESTDIAG:+ISAC_CHEST_DIAG=1} ${MMSEFLOAT:+ISAC_MMSE_FLOAT=$MMSEFLOAT} ${S1OFF:+ISAC_DCI11_S1_OFF=1} \
     ISAC_TSYNC_RESET=${TSYNCRESET:-0} ISAC_AUTO_ACQUIRE=${AUTOACQ:-0} ISAC_ACQ_CFO_MAX_HZ=${ACQCFOMAX:-60000} \
     ${CPUSET:+CPUSET=$CPUSET} BIN=$BIN ${XENV:-} \
-    setsid nohup bash -c "ulimit -c ${CORELIM:-0}; exec timeout $DUR ${CPUSET:+taskset -c $CPUSET} \
+    setsid nohup bash -c "ulimit -c ${CORELIM:-0}; exec timeout -k 20 $DUR ${CPUSET:+taskset -c $CPUSET} \
     ${GDBRUN:+gdb -q -batch -ex 'handle SIGPIPE SIGUSR1 SIGUSR2 SIG32 SIG33 SIG34 SIG35 nostop noprint pass' -ex run -ex 'bt 30' -ex 'info registers rip' -ex 'thread apply all bt 4' --args} \
     $BIN \
     --usrp-args type=x4xx,addr=$DATA,mgmt_addr=$MGMT${DPDK:+,use_dpdk=$DPDK} \
@@ -244,6 +248,12 @@ for t in $(seq 1 "$TRIES"); do
   # run on `stable=yes` discards a good capture (measured: a successful forced retune was stamped
   # VOID_CFO_MISLOCK). Skip the abort when CFOAPPLY is set.
   ( while pgrep -x nr-uesoftmodem >/dev/null; do
+      # A receiver that died at RX start (X410 out-of-sequence after a SIGKILLed predecessor) logs
+      # "UE main thread is ending" and then hangs in shutdown, ignoring SIGTERM; without this it
+      # held a try for 19 min (norm0tb, 2026-09-18). timeout -k above is the backstop at DUR.
+      if grep -aq "UE main thread is ending" "$OUT/run.log" 2>/dev/null; then
+        sudo pkill -9 -x nr-uesoftmodem; break
+      fi
       if [ -z "${CONTFO:-}" ] && [ -z "${CFOAPPLY:-}" ] && grep -aq "CFOTRK .*stable=yes" "$OUT/run.log" 2>/dev/null; then
         touch "$OUT/cfo_mislock"; sudo pkill -9 -x nr-uesoftmodem; break
       fi

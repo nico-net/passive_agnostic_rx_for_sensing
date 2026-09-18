@@ -19,6 +19,15 @@
 #include "nr_crc_evidence.h"
 #include <string.h>
 #include <pthread.h>
+#include "common/utils/LOG/log.h"
+
+/* OBSERVABILITY (2026-09-17). This module had NO logging at all, which made its central claim --
+ * "a cell-wide prior is only published once two DISTINCT RNTIs converge on the same fields" --
+ * unfalsifiable from a run log: a live no-regression test could not tell "did not promote" from
+ * "never executed". Every log below marks a state TRANSITION (a context opening, converging, being
+ * reopened, a prior published or withdrawn), so the volume is bounded by how often the receiver
+ * actually learns something, not by grant rate. The one event that can be driven by noise RNTIs --
+ * context eviction -- is rate limited. */
 
 /* Minimum trials before a hypothesis may be declared. At the measured working rate (~76 % TB CRC)
  * and a wrong-hypothesis rate of ~0, a few hundred trials is already overwhelming; this is set for
@@ -189,9 +198,25 @@ static rnti_ctx_t *rnti_ctx(uint16_t rnti, bool create)
   if (!create)
     return NULL;
   rnti_ctx_t *r = &g_rnti[victim];
+  const uint16_t evicted = r->rnti;
+  const bool had_prior = r->prior.valid;
   memset(r, 0, sizeof(*r));
   r->rnti = rnti;
   r->touched = ++g_clock;
+  /* Rate limited: a burst of one-off noise-floor RNTIs churns this slot and must not flood. Losing
+   * a context that had already CONVERGED is the case worth seeing, so it is logged separately and
+   * louder -- that is the "a real UE got evicted by noise" failure the LRU comment warns about. */
+  if (evicted && had_prior)
+    LOG_W(PHY, "SWEEP: evicted CONVERGED context rnti=0x%04x to make room for rnti=0x%04x\n",
+          evicted, rnti);
+  else {
+    static int s_left = 20;
+    if (s_left > 0) {
+      s_left--;
+      LOG_I(PHY, "SWEEP: new per-RNTI context rnti=0x%04x%s%s\n", rnti,
+            evicted ? " (evicted unconverged rnti=" : "", evicted ? "...)" : "");
+    }
+  }
   return r;
 }
 
@@ -478,6 +503,15 @@ static void reopen_context(sweep_context_t *c)
   c->state.winner = -1;
   c->state.cursor = 0;
   for (int i=0; i<c->state.n_hyp; ++i) c->state.order[i] = i;
+  /* A reopen is the signal that a CONVERGED context stopped working -- the most valuable thing in
+   * this log, because it is how a wrong prior announces itself. reacquisitions rising steadily on
+   * one RNTI means its catalog keeps being re-derived. */
+  LOG_W(PHY,
+        "SWEEP: rnti=0x%04x tda=%u REOPENED (reacquisition #%u, failure streak %u, "
+        "locked %llu/%llu, reference lower bound %.3f)\n",
+        c->rnti, (unsigned)c->tda, (unsigned)c->reacquisitions, (unsigned)report.failure_streak,
+        (unsigned long long)report.passes, (unsigned long long)report.trials,
+        report.reference_crc_lower);
   if (g_reporter) g_reporter(&report);
 }
 
@@ -538,6 +572,14 @@ static void prior_promote_locked(const rnti_ctx_t *just_set)
   for (int i = 0; i < RNTI_CTX_MAX; i++)
     if (g_rnti[i].rnti && g_rnti[i].rnti != just_set->rnti && prior_same(&g_rnti[i].prior, &just_set->prior)) {
       g_prior = just_set->prior;
+      /* The load-bearing line: it names BOTH RNTIs, so "two distinct UEs agreed" is verifiable from
+       * the log instead of asserted. A promotion that ever prints the same RNTI twice is a bug. */
+      LOG_W(PHY,
+            "SWEEP: cell prior PROMOTED by agreement rnti=0x%04x + rnti=0x%04x -- "
+            "mcs_table=%u dmrs_add_pos=%u dmrs_max_len=%u cfg=0x%llx\n",
+            just_set->rnti, g_rnti[i].rnti, (unsigned)g_prior.mcs_table,
+            (unsigned)g_prior.dmrs_add_pos, (unsigned)g_prior.dmrs_max_len,
+            (unsigned long long)g_prior.configuration);
       return;
     }
 }
@@ -671,10 +713,14 @@ bool nr_pdsch_config_sweep_feedback(const nr_pdsch_sweep_ticket_t *ticket, bool 
         }
         if (c->priored == PRIORED_CELL) {
           g_prior.valid = false;
+          LOG_W(PHY, "SWEEP: cell prior WITHDRAWN -- it did not hold for rnti=0x%04x tda=%u "
+                     "(best rate %.3f < %.3f)\n", c->rnti, (unsigned)c->tda, best_rate, SWEEP_MIN_RATE);
         } else {
           rnti_ctx_t *r = rnti_ctx(c->rnti, false);
           if (r)
             r->prior.valid = false;
+          LOG_W(PHY, "SWEEP: rnti=0x%04x prior WITHDRAWN for tda=%u (best rate %.3f < %.3f)\n",
+                c->rnti, (unsigned)c->tda, best_rate, SWEEP_MIN_RATE);
         }
         c->priored = PRIORED_NONE;
         c->outcomes = 0;
@@ -729,6 +775,12 @@ bool nr_pdsch_config_sweep_feedback(const nr_pdsch_sweep_ticket_t *ticket, bool 
                              .mcs_table = c->state.hyp[w].mcs_table,
                              .dmrs_add_pos = c->state.hyp[w].dmrs_add_pos,
                              .dmrs_max_len = c->state.hyp[w].dmrs_max_len};
+        LOG_W(PHY,
+              "SWEEP: rnti=0x%04x CONVERGED tda=%u mcs_table=%u dmrs_add_pos=%u dmrs_max_len=%u "
+              "(%u/%u trials on the winner, cfg=0x%llx) -- private to this RNTI until a second agrees\n",
+              c->rnti, (unsigned)c->tda, (unsigned)c->state.hyp[w].mcs_table,
+              (unsigned)c->state.hyp[w].dmrs_add_pos, (unsigned)c->state.hyp[w].dmrs_max_len,
+              c->state.ok[w], c->state.trials[w], (unsigned long long)c->configuration);
         prior_promote_locked(r);
       }
       if (winner)
