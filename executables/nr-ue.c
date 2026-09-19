@@ -998,6 +998,21 @@ void *UE_thread(void *arg)
   const char *auto_acquire_env = getenv("ISAC_AUTO_ACQUIRE");
   const bool auto_timing = IS_PASSIVE_RX_MODE(get_softmodem_params())
                            && auto_acquire_env && !strcmp(auto_acquire_env, "1");
+  /* BLIND-SCAN CONFIRM PASS (2026-09-19). MEASURED on the Swisscom macro (PCI 382, 3610.56 MHz SSB,
+   * 273 PRB, identical -C and RX gain): from a 64-GSCN blind scan the receiver acquires and decodes
+   * the MIB every time, then NEVER tracks PBCH (0/50 in all 45 windows, in-window CIR energy
+   * 0.42-0.77, SIB1 0). With the SSB PINNED (--ssb 204) the same cell tracks 50/50, in-window 0.991,
+   * and SIB1 decodes. Acquisition output is identical between the two (same PCI, SSB index, symbol
+   * offset, sync_pos_frame, sub-kHz CFO), so the multi-GSCN scan leaves some other state the pinned
+   * path sets correctly. Rather than model that difference: once the scan has WON a GSCN, redo the
+   * acquisition against that SSB alone -- the second pass IS the pinned path. Costs one extra
+   * acquisition (~0.7 s) on a blind-scan start only; a pinned start never triggers it.
+   * ISAC_SCAN_CONFIRM=0 disables. */
+  const char *scan_confirm_env = getenv("ISAC_SCAN_CONFIRM");
+  const bool scan_confirm_on = (scan_confirm_env == NULL) || (atoi(scan_confirm_env) != 0);
+  bool scan_confirm_pending = false;
+  int scan_confirm_left = 1; /* once per process: a second pass that also fails must not loop */
+  nr_gscn_info_t scan_confirm_ssb = {0};
   bool auto_anchor_valid = false, auto_drift_ready = false;
   openair0_timestamp_t auto_anchor_timestamp = 0;
   int auto_anchor_frame = 0, auto_anchor_pci = -1;
@@ -1109,6 +1124,24 @@ void *UE_thread(void *arg)
           // shift the frame index with all the frames we trashed meanwhile we perform the synch search
           decoded_frame_rx = (decoded_frame_rx + UE->init_sync_frame + trashed_frames) % MAX_FRAME_NUMBER;
           intialSyncOffset = syncMsg->rx_offset;
+          /* See scan_confirm_on: re-acquire against the SSB this scan just won, so tracking starts
+           * from the single-SSB path's state rather than the multi-GSCN scan's. */
+          if (scan_confirm_on && scan_confirm_left > 0 && syncMsg->numGscn > 1) {
+            scan_confirm_left--;
+            scan_confirm_ssb = (nr_gscn_info_t){.ssbFirstSC = fp->ssb_start_subcarrier};
+            for (int i = 0; i < syncMsg->numGscn; ++i)
+              if (syncMsg->gscnInfo[i].ssbFirstSC == fp->ssb_start_subcarrier)
+                scan_confirm_ssb = syncMsg->gscnInfo[i];
+            scan_confirm_pending = true;
+            UE->is_synchronized = 0;
+            LOG_W(PHY,
+                  "SENSING: SCAN_CONFIRM blind scan won PCI %d at SSB subcarrier %d; re-acquiring "
+                  "against that SSB alone before tracking\n",
+                  fp->Nid_cell, fp->ssb_start_subcarrier);
+            delNotifiedFIFO_elt(res);
+            stream_status = STREAM_STATUS_UNSYNC;
+            continue;
+          }
         }
         delNotifiedFIFO_elt(res);
         stream_status = STREAM_STATUS_UNSYNC;
@@ -1163,6 +1196,11 @@ void *UE_thread(void *arg)
       if (auto_timing && auto_anchor_valid) {
         // The second timing observation searches only the SSB just measured OTA.
         syncMsg->gscnInfo[0] = auto_anchor_ssb;
+        syncMsg->numGscn = 1;
+      } else if (scan_confirm_pending) {
+        // Confirm pass: only the SSB the blind scan just won (see scan_confirm_on).
+        scan_confirm_pending = false;
+        syncMsg->gscnInfo[0] = scan_confirm_ssb;
         syncMsg->numGscn = 1;
       } else if (UE->UE_scan_carrier) {
         // Get list of GSCN in this band for UE's bandwidth and center frequency.
