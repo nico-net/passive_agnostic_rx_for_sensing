@@ -48,7 +48,6 @@
 #include "PHY/NR_UE_TRANSPORT/nr_pdcch_dci01_layout_sweep.h" // DCI 0_1 layout, stage 1
 #include "PHY/NR_UE_TRANSPORT/nr_pdcch_ss_registry.h"        // CORESET/SS registry, observe-only
 #include "PHY/NR_UE_TRANSPORT/nr_agnostic_v2.h"
-#include "PHY/NR_UE_TRANSPORT/nr_polar_gpu.h" // NR_GPU_POLAR=1: batched GPU polar SC decode
 #include "PHY/NR_UE_TRANSPORT/nr_csirs_blind_rt.h" // blind CSI-RS search, observe-only
 #include "PHY/NR_UE_TRANSPORT/nr_pdcch_coreset_map.h"      // Phase 3 Technique A cross-check (XCHECK diag)
 
@@ -65,6 +64,7 @@
 #include "PHY/TOOLS/tools_defs.h"                        // allocCast2D/fourDimArray_t
 #include "PHY/NR_UE_ISAC/nr_isac.h"                      // nr_isac_submit_cfr/_enabled/_source_enabled
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.h"  // passive PDSCH decode (data-aided source)
+#include "PHY/NR_UE_TRANSPORT/nr_passive_mac_ta.h"        // timing advance out of an overheard MAC PDU
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.h"   // deferred decode off the RT thread
 #include "PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.h"   // deferred SCAN off the RT thread
 #include <stdatomic.h>
@@ -1052,127 +1052,6 @@ static bool nr_pdcch_autodiscover_length_scorer(int dci_length, int trial_idx, u
   return true;
 }
 
-/* PARALLEL dlsweep (2026-09-19). MEASURED (sens6 bench, one core): a trial is Polar decode ~2.8 us
- * of ~3.2 us at every AL; unscramble (0.1-0.3 us) and the unused re-encode (0.2-0.4 us) are noise,
- * and a decode cannot be shared across lengths (different frozen set). So the lever is parallelism:
- * ISAC_DLSWEEP_TASKS=K computes every (length, candidate) result in K chunks on the Tpool, then the
- * UNCHANGED serial feed consumes that table -- same trials, same results, same order. A chunk is
- * ~34/K lengths x n_cand decodes (~0.2-1 ms), large enough to amortise the queueing that made
- * per-CANDIDATE fan-out 15x slower (Phase 1 below). Default 1 = inline. Only the plain full sweep is
- * precomputed; a stride or a seeded prior falls back inline. Scan thread only (capped at 1). */
-typedef struct { bool ok; uint16_t rnti; uint32_t hash; } dlsw_res_t;
-typedef struct {
-  const nr_pdcch_autodiscover_sweep_ctx_t *ctx;
-  bool have[64];
-  dlsw_res_t res[64][64];
-} dlsw_cache_t;
-typedef struct { dlsw_cache_t *c; int len0, len1; task_ans_t *ans; } dlsw_task_t;
-
-static void dlsw_worker(void *arg)
-{
-  dlsw_task_t *t = (dlsw_task_t *)arg;
-  for (int len = t->len0; len <= t->len1; len++)
-    for (int i = 0; i < t->c->ctx->n_cand; i++) {
-      dlsw_res_t *r = &t->c->res[len][i];
-      r->ok = nr_pdcch_autodiscover_length_scorer(len, i, &r->rnti, &r->hash, (void *)t->c->ctx);
-    }
-  completed_task_ans(t->ans);
-}
-
-static bool dlsw_cached_scorer(int len, int trial, uint16_t *rnti, uint32_t *hash, void *u)
-{
-  const dlsw_cache_t *c = (const dlsw_cache_t *)u;
-  if (len < 0 || len >= 64 || !c->have[len])
-    return nr_pdcch_autodiscover_length_scorer(len, trial, rnti, hash, (void *)c->ctx);
-  const dlsw_res_t *r = &c->res[len][trial % c->ctx->n_cand];
-  if (!r->ok)
-    return false;
-  *rnti = r->rnti;
-  *hash = r->hash;
-  return true;
-}
-
-/* GPU fill of the same table (NR_GPU_POLAR=1). MEASURED on sens6's RTX 4060 Ti with the prototype's
- * own benchmark: 0.51 us/decode at batch 2048 vs 2.8 us on a CPU core, i.e. one sweep occasion
- * (~34 x 56 decodes) in ~1 ms instead of ~3.5 ms, without borrowing the Tpool the receive path uses.
- * Each candidate is unscrambled ONCE; decode_vec lets every length share that one vector on the device
- * (live: the replicating path cost 1.85 ms/occasion vs the benchmark's 1.05 ms for the same batch).
- * The accept test is decode_raw_11()'s own (24-bit CRC inside [rnti_min, rnti_max], format bit 1);
- * its mismatched-bits re-encode is skipped because the scorer never reads it. Anything the GPU
- * refuses (AL16 beyond its E cap, params table full) is decoded on the CPU, so the table is always
- * complete. Returns false only if the whole batch failed (caller falls back to the CPU fill).
- * Not reached by ISAC_PDCCH_FULLCRC's printf probe, which lives in the CPU decode. */
-#define DLSW_GPU_STRIDE (8 * 108)
-#define DLSW_GPU_MAX (64 * 34)
-static bool dlsw_gpu_fill(dlsw_cache_t *c, const nr_gpu_polar_api_t *api, int lo, int hi)
-{
-  static int16_t *s_llr;
-  static int16_t s_u[64][DLSW_GPU_STRIDE];
-  static uint16_t len[DLSW_GPU_MAX];
-  static uint8_t al[DLSW_GPU_MAX], ok[DLSW_GPU_MAX], ci[DLSW_GPU_MAX];
-  static uint32_t crc[DLSW_GPU_MAX];
-  static uint64_t pay[DLSW_GPU_MAX];
-  static bool done[64][64];
-  if (s_llr == NULL && (s_llr = malloc(sizeof(int16_t) * DLSW_GPU_STRIDE * DLSW_GPU_MAX)) == NULL)
-    return false;
-  const nr_pdcch_autodiscover_sweep_ctx_t *x = c->ctx;
-  for (int i = 0; i < x->n_cand; i++)
-    if (x->cand[i].L <= 8)
-      nr_pdcch_unscrambling((c16_t *)x->cand[i].e_rx, x->scrambling_rnti, (uint32_t)(x->cand[i].L * 108),
-                            x->dmrs_scrambling_id, s_u[i]);
-  static uint16_t vidx[DLSW_GPU_MAX];
-  int n = 0;
-  for (int l = lo; l <= hi; l++)
-    for (int i = 0; i < x->n_cand && n < DLSW_GPU_MAX; i++) {
-      if (x->cand[i].L > 8)
-        continue;
-      if (api->decode_vec == NULL) /* older module: replicate the vector per item */
-        memcpy(s_llr + (size_t)n * DLSW_GPU_STRIDE, s_u[i], sizeof(int16_t) * x->cand[i].L * 108);
-      len[n] = (uint16_t)l;
-      al[n] = x->cand[i].L;
-      ci[n] = (uint8_t)i;
-      vidx[n] = (uint16_t)i;
-      n++;
-    }
-  const int rc = (n == 0) ? 0
-                 : (api->decode_vec != NULL)
-                       ? api->decode_vec(&s_u[0][0], DLSW_GPU_STRIDE, x->n_cand, vidx, len, al, n, crc, pay, ok)
-                       : api->decode(s_llr, DLSW_GPU_STRIDE, len, al, n, crc, pay, ok);
-  if (rc < 0)
-    return false;
-  memset(done, 0, sizeof(done));
-  for (int k = 0; k < n; k++) {
-    if (!ok[k])
-      continue;
-    dlsw_res_t *r = &c->res[len[k]][ci[k]];
-    r->ok = crc[k] >= x->rnti_min && crc[k] <= x->rnti_max && ((pay[k] >> (len[k] - 1)) & 1);
-    r->rnti = (uint16_t)crc[k];
-    r->hash = (uint32_t)pay[k] ^ (uint32_t)(pay[k] >> 32);
-    done[len[k]][ci[k]] = true;
-  }
-  for (int l = lo; l <= hi; l++)
-    for (int i = 0; i < x->n_cand; i++)
-      if (!done[l][i]) {
-        dlsw_res_t *r = &c->res[l][i];
-        r->ok = nr_pdcch_autodiscover_length_scorer(l, i, &r->rnti, &r->hash, (void *)x);
-      }
-  return true;
-}
-
-static int dlsweep_tasks(void)
-{
-  static int s = -1;
-  if (s < 0) {
-    const char *e = getenv("ISAC_DLSWEEP_TASKS");
-    s = (e != NULL && atoi(e) > 1) ? atoi(e) : 1;
-    if (s > 34)
-      s = 34;
-    if (s > 1)
-      LOG_A(PHY, "SENSING: dlsweep parallel -- %d Tpool chunks per occasion\n", s);
-  }
-  return s;
-}
-
 // ---- Parallel per-candidate decode (2026-08-05) ------------------------------------------------
 // MEASURED live: unscrambling + polar decode (Step 1's SCL search) + the mismatched-bits re-encode
 // check are, per candidate, by far the most expensive work in this file, and ran strictly
@@ -1218,7 +1097,6 @@ typedef struct {
   bool         ok;             // OUTPUT
   int8_t       bwp_entry;      // passive BWP entry this length belongs to (0 = the configured BWP)
   uint8_t      bwp_probe;      // 1 = raw decode only: BWP discovery / DM-RS scoring probe
-  nr_pdcch_blind_polar_pre_t pre; // GPU batch result for this candidate (pre.llr == NULL = CPU decode)
   bool         is_lookahead;   // multi-candidate-per-occasion lookahead task (see the lookahead block)
   int8_t       lookahead_lane; // which lane; valid only when is_lookahead
   task_ans_t  *ans;
@@ -1259,82 +1137,13 @@ void nr_pdcch_bwp_probe_result(int entry, uint64_t payload, const float *prb_coh
   pthread_mutex_unlock(&g_pbwp_lock);
 }
 
-// ---- GPU polar batch (NR_GPU_POLAR=1, off by default) -----------------------------------------
-// The scan's dominant cost is one polar SC decode per candidate and the candidates of an occasion
-// are independent, so the whole occasion goes to the GPU as ONE batch here, before the existing
-// per-candidate worker runs. Nothing downstream changes: the worker still runs the same decode
-// entry point, the same mismatch/persistence/plausibility gates, in the same order -- only the
-// decode itself was already done. Every failure mode (knob off, .so missing, AL16, params table
-// full, batch error) leaves pre.llr NULL for the affected candidates, which is the CPU path.
-#define NR_BLIND_GPU_MAX_CAND 128
-#define NR_BLIND_GPU_LLR_STRIDE (16 * 108) // AL16's coded length; one fixed-stride slot per candidate
-static void nr_pdcch_blind_gpu_polar_batch(nr_pdcch_blind_cand_task_t *task, int n)
-{
-  const nr_gpu_polar_api_t *api = nr_gpu_polar_load();
-  static int s_logged = 0;
-  if (!s_logged) {
-    s_logged = 1;
-    const char *e = getenv("NR_GPU_POLAR");
-    if (api != NULL)
-      LOG_A(PHY, "SENSING: blind PDCCH polar decode on the GPU (libpolar_gpu.so loaded, NR_GPU_POLAR=1)\n");
-    else if (e != NULL && atoi(e) != 0)
-      LOG_W(PHY, "SENSING: NR_GPU_POLAR=1 but libpolar_gpu.so did not load -- blind PDCCH stays on the CPU\n");
-    else
-      LOG_I(PHY, "SENSING: blind PDCCH polar decode on the CPU (set NR_GPU_POLAR=1 for the GPU batch)\n");
-  }
-  if (api == NULL || n <= 0)
-    return;
-  if (n > NR_BLIND_GPU_MAX_CAND)
-    n = NR_BLIND_GPU_MAX_CAND;
-
-  /* Per scan-consumer thread, like this file's other per-occasion buffers: the workers read these
-     LLRs after the fan-out, so they must outlive the loop below but only until the join. */
-  static __thread int16_t *s_llr;
-  if (s_llr == NULL) {
-    s_llr = malloc((size_t)NR_BLIND_GPU_MAX_CAND * NR_BLIND_GPU_LLR_STRIDE * sizeof(int16_t));
-    if (s_llr == NULL)
-      return;
-  }
-  uint16_t len[NR_BLIND_GPU_MAX_CAND];
-  uint8_t al[NR_BLIND_GPU_MAX_CAND], ok[NR_BLIND_GPU_MAX_CAND];
-  uint32_t crc[NR_BLIND_GPU_MAX_CAND];
-  uint64_t payload[NR_BLIND_GPU_MAX_CAND];
-
-  for (int i = 0; i < n; i++) {
-    int16_t *dst = s_llr + (size_t)i * NR_BLIND_GPU_LLR_STRIDE;
-    nr_pdcch_unscrambling((c16_t *)task[i].e_rx, task[i].scrambling_rnti, (uint32_t)(task[i].L * 108),
-                          task[i].dmrs_scrambling_id, dst);
-    len[i] = task[i].dci_length;
-    al[i] = task[i].L;
-  }
-  if (api->decode(s_llr, NR_BLIND_GPU_LLR_STRIDE, len, al, n, crc, payload, ok) < 0)
-    return;
-  for (int i = 0; i < n; i++) {
-    if (!ok[i])
-      continue;
-    task[i].pre.llr = s_llr + (size_t)i * NR_BLIND_GPU_LLR_STRIDE;
-    task[i].pre.crc = crc[i];
-    task[i].pre.payload = payload[i];
-    task[i].pre.dci_length = len[i];
-    task[i].pre.aggregation_level = al[i];
-  }
-}
-
 /* The candidate body WITHOUT the task_ans handshake, for the serial path. Split rather than passing
  * a flag so the parallel worker keeps exactly its previous shape and the pool contract (every task
  * must signal completion exactly once) cannot be broken by a wrong flag. */
 static void nr_pdcch_blind_cand_worker_body(nr_pdcch_blind_cand_task_t *t)
 {
-  int16_t local_e[16 * 108];
-  int16_t *tmp_e = local_e;
-  if (t->pre.llr != NULL) {
-    /* The GPU batch already unscrambled this candidate (into a buffer owned by the scan thread,
-       alive until the join) and decoded it; hand the result to this thread's next decode. */
-    tmp_e = (int16_t *)t->pre.llr;
-    nr_pdcch_blind_polar_pre_set(&t->pre);
-  } else {
-    nr_pdcch_unscrambling((c16_t *)t->e_rx, t->scrambling_rnti, (uint32_t)(t->L * 108), t->dmrs_scrambling_id, tmp_e);
-  }
+  int16_t tmp_e[16 * 108];
+  nr_pdcch_unscrambling((c16_t *)t->e_rx, t->scrambling_rnti, (uint32_t)(t->L * 108), t->dmrs_scrambling_id, tmp_e);
   if (t->ul_scan) {
     t->ok = nr_pdcch_blind_decode_01_mode(t->ul_auto,tmp_e,t->L,t->dci_length,t->ul_opts,
                                           t->rnti_min,t->rnti_max,&t->ul_out);
@@ -1552,62 +1361,6 @@ static void nr_pdcch_blind_monitor_process_body(PHY_VARS_NR_UE *ue, const UE_nr_
     return;  // geometry not ready (or just became ready this call) -- no candidate decode this call
   }
 
-  /* ---- CSS0/SI-RNTI INTERLEAVE (ISAC_CSS0_INTERLEAVE_K; unset or 0 = OFF, nothing below runs) ----
-   *
-   * Autodiscover overwrites the live config with the DEDICATED one and never looks at CORESET#0
-   * again, so "does SIB1 still decode here?" and "is the dedicated sweep progressing?" needed two
-   * separate captures -- and the CSS0 path has only ever been proven at 51 PRB for that reason.
-   * With K > 0, one in every K CSS0-eligible slots runs the common-search-space occasion instead of
-   * the dedicated one, using the config snapshot autoconf_css0() left behind.
-   *
-   * TIME-DIVISION, never addition: the interleaved occasion RETURNS, so the dedicated sweep does not
-   * also run this slot. The single scan consumer is the bottleneck (~87 % of occasions dropped);
-   * pushing both candidate sets through it would make that worse, not better.
-   *
-   * Run INLINE here rather than through the scan queue, on purpose: the config swap is a global, and
-   * a deferred occasion would be decoded by the consumer at an unknown later time, i.e. under
-   * whichever config happened to be live then. Inline keeps swap -> occasion -> restore unbroken on
-   * one thread. It costs the PHY receive thread one occasion (BTIM: 69-102 us) on a CSS0-eligible
-   * slot -- which is rare (SIB1's SS0 periodicity), and rarer still by 1/K.
-   * ponytail: fixed cost on the RT thread. If a deployment's SS0 is dense enough for that to eat
-   * into the ~18 % duty budget that PBCH lock needs, gate it on the queue's own idle margin. */
-  {
-    static int s_css0_k = -1;
-    if (s_css0_k < 0) {
-      const char *e = getenv("ISAC_CSS0_INTERLEAVE_K");
-      s_css0_k = (e != NULL) ? atoi(e) : 0;
-      if (s_css0_k < 0)
-        s_css0_k = 0;
-      if (s_css0_k > 0)
-        LOG_A(PHY, "SENSING: CSS0/SI-RNTI interleave ON (ISAC_CSS0_INTERLEAVE_K=%d): 1 occasion in %d "
-                   "on a CORESET#0 monitoring slot runs the common search space instead of the "
-                   "dedicated sweep\n", s_css0_k, s_css0_k);
-    }
-    const nr_pdcch_blind_monitor_cfg_t *c0 =
-        (s_css0_k > 0 && cfg->coreset_type == 0) ? nr_pdcch_blind_monitor_css0_cfg() : NULL;
-    if (c0 != NULL && c0->ss_monitoring_slot_periodicity > 0) {
-      /* CORESET#0's own occasion gate, evaluated against ITS ss_* fields -- the live config's are the
-       * dedicated ones (periodicity 1, i.e. every slot), which say nothing about where SIB1 is. */
-      const uint32_t s0   = (uint32_t)proc->frame_rx * fp->slots_per_frame + (uint32_t)proc->nr_slot_rx;
-      const uint32_t rem0 = s0 % (uint32_t)c0->ss_monitoring_slot_periodicity;
-      const uint32_t dur0 = (c0->ss_duration > 0) ? (uint32_t)c0->ss_duration : 1;
-      if (rem0 >= (uint32_t)c0->ss_monitoring_slot_offset && rem0 < (uint32_t)c0->ss_monitoring_slot_offset + dur0) {
-        static uint32_t s_css0_occ; /* this function runs on the PHY receive thread only */
-        if ((s_css0_occ++ % (uint32_t)s_css0_k) == 0) {
-          const long mono0 = atomic_load_explicit(&nr_ue_diag_producer_absolute_slot, memory_order_relaxed);
-          nr_pdcch_blind_monitor_cfg_override(c0);
-          /* serial_candidates = false: we are ON the receive thread, where fanning the candidate
-           * decodes out to the pool is what protects it (the measured 15x penalty in the fan-out's
-           * own comment applies to a scan CONSUMER, not here). The pool workers read only their own
-           * task, never the config, so the override staying on this thread is enough. */
-          nr_pdcch_blind_monitor_run_occasion(ue, proc, false, mono0);
-          nr_pdcch_blind_monitor_cfg_override(NULL);
-          return; /* this occasion belonged to CSS0 */
-        }
-      }
-    }
-  }
-
   const uint32_t gate_slot = (uint32_t)proc->frame_rx * fp->slots_per_frame + (uint32_t)proc->nr_slot_rx;
   // BUG FIXED 2026-09-04 (found while investigating 0 blind SI-RNTI accepts on CORESET#0): this
   // gate checked ONLY the single slot at ss_monitoring_slot_offset, ignoring ss_duration entirely
@@ -1698,92 +1451,6 @@ void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_pr
     }
   }
   const nr_pdcch_blind_monitor_cfg_t *cfg = nr_pdcch_blind_monitor_get_cfg();
-
-  /* ---- ADAPTIVE LOAD SHED (NR_PDCCH_LOAD_SHED_US; unset or <= 0 = OFF, nothing below runs) ----
-   *
-   * BTIM on this deployment: 100 % of occasions exceed the 500 us slot reference, many by 3.2 ms.
-   * A thread that is chronically late cannot protect proc->frame_rx / nrue_ru_read(), so bound the
-   * lateness instead of processing every occasion however late it gets. Skipping is "not this one",
-   * never "not this search space": NOTHING is advanced on a skip -- the gate sits above
-   * nr_pdcch_ss_registry_occasion() (whose occasions[] feeds nr_pdcch_ss_retire_barren(), so a
-   * shed occasion counted there would retire a search space that was never actually scanned),
-   * above the agnostic-V2 retired-entry probe counter, and above g_occasions_run.
-   *
-   * The signal is measured at the GATE ONLY, from two entry-point samples, so nothing downstream of
-   * here is instrumented:
-   *
-   *   debt += (wall time since the previous occasion entry) - (slots elapsed since it) * slot_ns
-   *
-   * `source_absolute_slot` is the producer's monotonic RF slot counter, which advances only as
-   * samples are actually read, so wall > owed IS this pipeline falling behind real time, whatever
-   * the cause -- which is the quantity the frame/slot bookkeeping actually depends on. Duty cycle
-   * alone does not accumulate debt: a thread spending 20 % of every slot here still has
-   * wall == owed. Debt is clamped at 0 below, so recovery drains it, and a shed occasion costs
-   * ~nothing, so the loop self-limits to shedding just enough.
-   *
-   * CSS0/SI-RNTI interleaved occasions (ISAC_CSS0_INTERLEAVE_K) are NEVER shed: they are already
-   * rare by construction and 1/K rarer again, so shedding them preferentially would silence the one
-   * path that proves SIB1 still decodes. The THREAD-LOCAL cfg override is what identifies them.
-   *
-   * ponytail: one shared debt accumulator across the receive thread and the scan consumers (relaxed
-   * atomics, no lock). It measures "is this pipeline behind", not "is thread N behind"; make it
-   * per-thread only if a capture shows consumers and the RT thread needing different budgets. */
-  {
-    static int s_shed_us = -1;
-    if (s_shed_us < 0) {
-      const char *e = getenv("NR_PDCCH_LOAD_SHED_US");
-      s_shed_us = (e != NULL) ? atoi(e) : 0;
-      if (s_shed_us < 0)
-        s_shed_us = 0;
-      if (s_shed_us > 0)
-        LOG_A(PHY, "SENSING: PDCCH load shedding ON (NR_PDCCH_LOAD_SHED_US=%d): an occasion is "
-                   "skipped whole, before any accounting, once this pipeline's accumulated lateness "
-                   "against real RF time exceeds that budget\n", s_shed_us);
-    }
-    if (s_shed_us > 0 && ue->frame_parms.slots_per_frame > 0) {
-      static _Atomic long s_debt_ns = 0;
-      static _Atomic long s_prev_ns = 0;
-      static _Atomic long s_prev_slot = -1;
-      static _Atomic unsigned long s_shed_n = 0;
-      static _Atomic unsigned long s_seen_n = 0;
-      const long now_ns = (long)btim_now();
-      const long prev_ns = atomic_exchange_explicit(&s_prev_ns, now_ns, memory_order_relaxed);
-      const long prev_slot = atomic_exchange_explicit(&s_prev_slot, source_absolute_slot, memory_order_relaxed);
-      long debt = atomic_load_explicit(&s_debt_ns, memory_order_relaxed);
-      if (prev_ns > 0 && prev_slot >= 0 && source_absolute_slot > prev_slot) {
-        const long slot_ns = 10000000L / (long)ue->frame_parms.slots_per_frame;
-        /* LEAKY, not cumulative: >> 4 drains 1/16 of the standing debt per occasion, i.e. this is a
-         * sum over roughly the last 16 occasions rather than since boot. That is what makes the
-         * shed a control loop instead of a latch -- an absolute accumulator can only fall when the
-         * thread runs AHEAD of the RF stream, and a shed occasion costs ~nothing, so it would sit
-         * just above the threshold forever and shed 100 %. With the leak, shedding stops adding
-         * lateness, the debt decays under the threshold, the next occasion is processed, and the
-         * duty settles at whatever fraction the thread can actually afford (simulated in
-         * tests/pdcch_load_shed_sim.py: 0 % shed when keeping up, ~34 % at 3.2 ms/occasion).
-         * Consequence for the knob: NR_PDCCH_LOAD_SHED_US is a ~16-occasion budget, so a steady
-         * overrun of X us per occasion settles at a debt near 16X. */
-        debt = debt - (debt >> 4) + (now_ns - prev_ns) - (source_absolute_slot - prev_slot) * slot_ns;
-        if (debt < 0)
-          debt = 0;
-        if (debt > 1000000000L)
-          debt = 1000000000L; /* a second of lateness is a resync or a stall, not a backlog to chase */
-        atomic_store_explicit(&s_debt_ns, debt, memory_order_relaxed);
-      }
-      atomic_fetch_add_explicit(&s_seen_n, 1, memory_order_relaxed);
-      const bool css0_occ = (cfg != NULL && cfg == nr_pdcch_blind_monitor_css0_cfg());
-      if (debt > (long)s_shed_us * 1000L && !css0_occ) {
-        const unsigned long n = atomic_fetch_add_explicit(&s_shed_n, 1, memory_order_relaxed) + 1;
-        if ((n % 5000) == 1)
-          LOG_A(PHY, "SENSING: PDCCH load shed: %lu of %lu occasions skipped (lateness %ld us > %d us)\n",
-                n, atomic_load_explicit(&s_seen_n, memory_order_relaxed), debt / 1000, s_shed_us);
-        /* Grants ACCEPTED by earlier occasions must still reach the PDSCH consumers -- shedding this
-         * occasion must not also stall work that is already queued. */
-        nr_pdsch_passive_queue_flush();
-        return;
-      }
-    }
-  }
-
   nr_pdcch_ss_registry_occasion(cfg);
   nr_pdsch_passive_queue_flush(); /* previous slot's grants go to the consumers together */
   if (nr_agnostic_v2()) {
@@ -2518,32 +2185,8 @@ void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_pr
       // possible acceptance).
       g_dl_length_state.excluded_len = dci10_length; /* the 1_0/0_0 size is known; the sweep wants the other one */
       g_dl_length_state.stride       = dci_sweep_stride();
-      const int sw_lo = 30, sw_hi = 63;
-      nr_pdcch_dci_length_scorer_fn score_fn = nr_pdcch_autodiscover_length_scorer;
-      void *score_ctx = &sweep_ctx;
-      static dlsw_cache_t s_dlsw;
-      const int K = dlsweep_tasks();
-      const nr_gpu_polar_api_t *gpu = nr_gpu_polar_load();
-      if ((K > 1 || gpu != NULL) && g_dl_length_state.stride <= 1 && g_dl_length_state.preferred_len == 0) {
-        s_dlsw.ctx = &sweep_ctx;
-        if (gpu == NULL || !dlsw_gpu_fill(&s_dlsw, gpu, sw_lo, sw_hi)) {
-          const int nl = sw_hi - sw_lo + 1;
-          dlsw_task_t tk[34];
-          task_ans_t ans;
-          init_task_ans(&ans, K);
-          for (int k = 0; k < K; k++) {
-            tk[k] = (dlsw_task_t){&s_dlsw, sw_lo + k * nl / K, sw_lo + (k + 1) * nl / K - 1, &ans};
-            pushTpool(&get_nrUE_params()->Tpool, (task_t){.func = dlsw_worker, .args = &tk[k]});
-          }
-          join_task_ans(&ans);
-        }
-        for (int len = 0; len < 64; len++)
-          s_dlsw.have[len] = (len >= sw_lo && len <= sw_hi);
-        score_fn = dlsw_cached_scorer;
-        score_ctx = &s_dlsw;
-      }
-      const int found_len = nr_pdcch_dci_length_sweep_feed(&g_dl_length_state, score_fn,
-                                                            score_ctx, disc_n_cand, sw_lo, sw_hi, bootstrap_rnti);
+      const int found_len = nr_pdcch_dci_length_sweep_feed(&g_dl_length_state, nr_pdcch_autodiscover_length_scorer,
+                                                            &sweep_ctx, disc_n_cand, 30, 63, bootstrap_rnti);
       if (found_len > 0) {
         nr_pdcch_blind_monitor_autodiscover_set_dci_length(found_len);
         g_length_swept = true;
@@ -3123,7 +2766,6 @@ constdiag_done:;
   btim_add(BTIM_PREPASS, btim_t_pre);
 
   const uint64_t btim_t_dec = btim_on ? btim_now() : 0;
-  nr_pdcch_blind_gpu_polar_batch(cand_task, nof_tasks);
   if (nof_tasks > 0) {
     if (serial_candidates) {
       /* ALREADY off the PHY receive thread, so there is nothing to protect by fanning out -- and
@@ -3499,16 +3141,6 @@ constdiag_done:;
         s_no_mm = (getenv("ISAC_PDCCH_NO_MISMATCH_GATE") != NULL) ? 1 : 0;
       if (!s_no_mm && out.mismatched_bits > (ue->dci_thres + 30)) {
         g_held_mismatch++;
-        /* ISAC_PDCCH_HELD_TRACE=1: which RNTI got held and why, so a single capture can show
-         * whether "held" is one real RNTI repeatedly failing a gate or scattered noise -- no
-         * such per-candidate view existed before. Cheap: one static getenv, checked every hold,
-         * same pattern as ISAC_PDCCH_NO_MISMATCH_GATE above. */
-        static int s_held_trace = -1;
-        if (s_held_trace < 0)
-          s_held_trace = (getenv("ISAC_PDCCH_HELD_TRACE") != NULL) ? 1 : 0;
-        if (s_held_trace)
-          LOG_I(PHY, "SENSING: HELD gate=mismatch rnti=0x%04x mismatched_bits=%u thres=%d slot=%u\n",
-                out.rnti, out.mismatched_bits, ue->dci_thres, abs_slot);
         continue;
       }
     }
@@ -3517,13 +3149,6 @@ constdiag_done:;
     // (almost always) a one-off. See rnti_persistence_check()'s own comment. ----
     if (!rnti_persistence_check(out.rnti, abs_slot, persist_window_slots, cfg->rnti_persist_k)) {
       g_held_persist++;
-      {
-        static int s_held_trace2 = -1;
-        if (s_held_trace2 < 0)
-          s_held_trace2 = (getenv("ISAC_PDCCH_HELD_TRACE") != NULL) ? 1 : 0;
-        if (s_held_trace2)
-          LOG_I(PHY, "SENSING: HELD gate=persist rnti=0x%04x slot=%u\n", out.rnti, abs_slot);
-      }
       continue;
     }
 
@@ -3794,6 +3419,7 @@ constdiag_done:;
       job.gNB_id        = proc->gNB_id;
       job.absolute_slot = source_absolute_slot + hy_k0;
       job.rnti          = out.rnti;
+      job.rnti_class    = out.rnti_class;
       job.harq_pid_tag  = blind_harq_tag(abs_slot, out.rnti, out.harq_pid);
       job.want_data     = want_data;
       job.fo_hz         = isnan(nr_slot_fep_fo_override_hz)
@@ -3986,6 +3612,7 @@ constdiag_done:;
               /* Preserve the original RF slot across PDCCH -> PDSCH deferral. */
               job.absolute_slot = source_absolute_slot;
               job.rnti          = out.rnti;
+              job.rnti_class    = out.rnti_class;
               job.harq_pid_tag  = blind_harq_tag(abs_slot, out.rnti, out.harq_pid);
               job.want_data     = want_data;
               job.fo_hz         = isnan(nr_slot_fep_fo_override_hz)
@@ -4021,6 +3648,14 @@ constdiag_done:;
                 g_dec_ok++;
                 LOG_D(PHY, "SENSING: passive PDSCH decode OK (%d.%d) rnti=0x%x mcs=%u rv=%u TBS=%u\n",
                       proc->frame_rx, proc->nr_slot_rx, out.rnti, out.mcs, out.rv, dec.cw.TBS);
+                /* Same observation the deferred consumer makes: with deferral off nothing else ever
+                 * looks inside the payload, so every overheard timing advance -- a range to the
+                 * illuminator obtained without transmitting -- would be silently discarded. */
+                if (dec.tb != NULL && dec.cw.TBS > 0)
+                  nr_passive_mac_report_ta(out.rnti, out.rnti_class == NR_BLIND_RNTI_CLASS_RA,
+                                           proc->frame_rx, proc->nr_slot_rx,
+                                           (int)fp->numerology_index, dec.tb,
+                                           dec.cw.TBS / 8); /* TBS is in BITS; the parser walks octets */
                 if (want_data) {
                   // The reconstruction chain the attached UE uses, unchanged -- the ONLY difference
                   // is where the verified transport block came from.

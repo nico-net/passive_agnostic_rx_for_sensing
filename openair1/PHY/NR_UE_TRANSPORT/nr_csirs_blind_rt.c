@@ -54,6 +54,9 @@ static uint32_t g_epr_n[NR_CSIRS_BLIND_MAX_CAND];
  * not be the PCI, so sweep it: 8 ids per qualifying slot (a slot where EPR says the pilot is there),
  * which keeps the added RT cost ~0.3 ms and covers all 1024 in 128 such slots. */
 static int      g_ids = -1;
+static int      g_slotsweep = -1;   /* ISAC_CSIRS_BLIND_SLOTSWEEP: sweep the slot index in c_init */
+static double   g_slot_best_z;
+static int      g_slot_best_off = -1;
 static uint16_t g_id_next;
 static int      g_id_pin = -1;   /* candidate the sweep is locked to; -1 = not chosen yet */
 static double   g_id_best_z;
@@ -255,15 +258,15 @@ void nr_csirs_blind_rt_slot(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot
    * symbols, so transform this candidate's symbol now (antenna 0) -- without this the search
    * scored an empty buffer and never fired (OTA 2026-09-14: 15 min, zero progress lines). */
   nr_slot_fep_ant(ue, fp, (unsigned)slot, (unsigned)c->symb_l0, 0, rxdataF, link_type_dl, 0, ue->common_vars.rxdata);
-  const uint32_t off = (uint32_t)c->symb_l0 * (uint32_t)fp->ofdm_symbol_size;
+  const uint32_t off_sym = (uint32_t)c->symb_l0 * (uint32_t)fp->ofdm_symbol_size;
   /* Sub-band size for the channel-robust score, in OCCUPIED REs. 32 REs is ~11 RB for a density-3
    * row (4 MHz at 30 kHz) -- narrow enough that the channel is flat across it, wide enough that
    * noise stays well below a match: noise reads ~1.0, a perfect match sqrt(32)/0.886 = 6.4, and a
    * realistic 10 dB-SNR match with some residual drift lands around 4-5. */
 #define CSIRS_BLIND_SUBBAND_RE 32
   int n_used = 0;
-  const double rho = nr_csirs_blind_correlate_blocks((const int16_t *)&rxdataF_ant0[off],
-                                                     (const int16_t *)&ref[off],
+  const double rho = nr_csirs_blind_correlate_blocks((const int16_t *)&rxdataF_ant0[off_sym],
+                                                     (const int16_t *)&ref[off_sym],
                                                      fp->ofdm_symbol_size, CSIRS_BLIND_SUBBAND_RE,
                                                      &n_used);
   if (rho < 0.0) {
@@ -279,8 +282,8 @@ void nr_csirs_blind_rt_slot(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot
   /* Sequence-free positional evidence, logged next to z: if z stays at noise while this shows
    * periodic structure, the POSITIONS are right and the SEQUENCE (scramblingID != PCI) is wrong --
    * which the correlation alone cannot distinguish from an empty hypothesis. */
-  const double epr = nr_csirs_blind_energy_ratio((const int16_t *)&rxdataF_ant0[off],
-                                                 (const int16_t *)&ref[off], fp->ofdm_symbol_size);
+  const double epr = nr_csirs_blind_energy_ratio((const int16_t *)&rxdataF_ant0[off_sym],
+                                                 (const int16_t *)&ref[off_sym], fp->ofdm_symbol_size);
   if (epr > 0.0 && idx < NR_CSIRS_BLIND_MAX_CAND) {
     g_epr_sum[idx] += epr;
     g_epr_n[idx]++;
@@ -301,8 +304,8 @@ void nr_csirs_blind_rt_slot(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot
     char prof[256];
     int po = 0;
     for (int g = 0; g < G && po < (int)sizeof(prof) - 8; g++) {
-      const double r = nr_csirs_blind_correlate((const int16_t *)&rxdataF_ant0[off + (uint32_t)g * step],
-                                                (const int16_t *)&ref[off + (uint32_t)g * step], (int)step);
+      const double r = nr_csirs_blind_correlate((const int16_t *)&rxdataF_ant0[off_sym + (uint32_t)g * step],
+                                                (const int16_t *)&ref[off_sym + (uint32_t)g * step], (int)step);
       po += snprintf(prof + po, sizeof(prof) - po, "%s%.2f", g ? " " : "", (r < 0.0) ? 0.0 : r);
     }
     LOG_A(PHY, "SENSING: CSIRS_BLIND SPAN row%u fd%u l%u z=%.2f rho=%.3f n_re=%d epr=%.2f slices[%d]: %s\n",
@@ -322,7 +325,7 @@ void nr_csirs_blind_rt_slot(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot
   /* ZERO-POWER hypothesis on the same candidate and symbol (no extra FEP or reference): does the
    * pattern carry no energy while the PDSCH around it does? Confirmed the same way (periodic). */
   if (g_zp.confirmed < 0) {
-    const double zs = nr_csirs_blind_zero_score((const int16_t *)&rxdataF_ant0[off], (const int16_t *)&ref[off],
+    const double zs = nr_csirs_blind_zero_score((const int16_t *)&rxdataF_ant0[off_sym], (const int16_t *)&ref[off_sym],
                                                 fp->ofdm_symbol_size);
     if (zs >= 0.0) {
       const double znull = median_of(g_zp_null, g_zp_null_n);
@@ -366,6 +369,51 @@ void nr_csirs_blind_rt_slot(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot
             g_st.cand[g_id_pin].row, g_st.cand[g_id_pin].freq_domain, g_st.cand[g_id_pin].symb_l0,
             best_m, g_epr_n[g_id_pin]);
   }
+  /* SLOT-INDEX SWEEP (ISAC_CSIRS_BLIND_SLOTSWEEP=1). MEASURED 2026-09-19 on Swisscom PCI 382: a
+   * COMPLETE 1024-value scramblingID sweep, pinned to one candidate and scored with the
+   * channel-robust statistic, peaked at z=1.40 against a noise floor of 1.0 and a bar of 4 -- so the
+   * scramblingID is NOT what makes the sequence wrong, while the sequence-free energy test keeps
+   * finding the same TRS pair at ~3x its neighbours.
+   *
+   * The remaining input to the sequence is the SLOT: c_init = 2^10*(14*n_s + l + 1)*(2*N_ID+1) + N_ID
+   * (TS 38.211 7.4.1.5.2). Crucially the RE MAPPING does not depend on n_s at all -- so if our slot
+   * numbering is offset from the cell's (half-frame ambiguity, or an SFN/slot origin off by a fixed
+   * amount), every sequence we generate is wrong while the positions stay exactly right. That is
+   * precisely the pattern observed. Only ~20 offsets at mu=1, so the whole space fits in ONE visit. */
+  if (g_slotsweep < 0) {
+    const char *e = getenv("ISAC_CSIRS_BLIND_SLOTSWEEP");
+    g_slotsweep = (e != NULL && atoi(e) != 0) ? 1 : 0;
+  }
+  if (g_slotsweep && idx == g_id_pin && epr > 1.5 && g_slot_best_off < 0) {
+    const int n_slots = fp->slots_per_frame;
+    for (int off = 0; off < n_slots; off++) {
+      const int trial_slot = (slot + off) % n_slots;
+      memset(&t_refbuf[0][off_sym], 0, (size_t)fp->ofdm_symbol_size * sizeof(c16_t));
+      for (int pp = 1; pp < n_ports; pp++)
+        memset(&t_refbuf[pp][off_sym], 0, (size_t)fp->ofdm_symbol_size * sizeof(c16_t));
+      const csi_mapping_parms_t sp = get_csi_mapping_parms(c->row, c->freq_domain, c->symb_l0, c->symb_l1);
+      nr_generate_csi_rs(fp, &sp, AMP, trial_slot, c->freq_density, c->start_rb, c->nr_of_rbs,
+                         c->symb_l0, c->symb_l1, c->row, c->scramb_id, 0, c->cdm_type, refp);
+      int sn = 0;
+      const double sz = nr_csirs_blind_correlate_blocks((const int16_t *)&rxdataF_ant0[off_sym],
+                                                        (const int16_t *)&ref[off_sym],
+                                                        fp->ofdm_symbol_size, CSIRS_BLIND_SUBBAND_RE, &sn);
+      if (sz > g_slot_best_z) {
+        g_slot_best_z = sz;
+        if (sz >= 4.0) {
+          g_slot_best_off = off;
+          LOG_A(PHY,
+                "SENSING: CSIRS_BLIND SLOTSWEEP SOLVED row%u fd%u l%u slot_offset=%+d z=%.2f "
+                "(our slot %d -> cell slot %d, epr=%.2f) -- the receiver's slot numbering is the "
+                "sequence error, not the scramblingID\n",
+                c->row, c->freq_domain, c->symb_l0, off, sz, slot, trial_slot, epr);
+        }
+      }
+    }
+    if (g_slot_best_off < 0)
+      LOG_A(PHY, "SENSING: CSIRS_BLIND SLOTSWEEP all %d offsets, best z=%.2f (bar 4, noise ~1) -- the "
+                 "slot index is NOT the sequence error either\n", fp->slots_per_frame, g_slot_best_z);
+  }
   if (g_ids && !g_id_solved && idx == g_id_pin && epr > 1.5) {
     /* 32 ids per visit, not 8: the pinned candidate comes round only once per pass over the
      * candidate list (~0.3 s), so at 8 the 1024 ids did not finish inside a 300 s capture and the
@@ -375,17 +423,17 @@ void nr_csirs_blind_rt_slot(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot
     for (int k = 0; k < 32; k++) {
       trial.scramb_id = g_id_next;
       g_id_next = (uint16_t)((g_id_next + 1) & 1023);
-      memset(&t_refbuf[0][off], 0, (size_t)fp->ofdm_symbol_size * sizeof(c16_t));
+      memset(&t_refbuf[0][off_sym], 0, (size_t)fp->ofdm_symbol_size * sizeof(c16_t));
       for (int pp = 1; pp < n_ports; pp++)
-        memset(&t_refbuf[pp][off], 0, (size_t)fp->ofdm_symbol_size * sizeof(c16_t));
+        memset(&t_refbuf[pp][off_sym], 0, (size_t)fp->ofdm_symbol_size * sizeof(c16_t));
       const csi_mapping_parms_t tp = get_csi_mapping_parms(trial.row, trial.freq_domain, trial.symb_l0,
                                                            trial.symb_l1);
       nr_generate_csi_rs(fp, &tp, AMP, slot, trial.freq_density, trial.start_rb, trial.nr_of_rbs,
                          trial.symb_l0, trial.symb_l1, trial.row, trial.scramb_id, 0, trial.cdm_type,
                          refp);
       int tn = 0;
-      const double tz = nr_csirs_blind_correlate_blocks((const int16_t *)&rxdataF_ant0[off],
-                                                        (const int16_t *)&ref[off], fp->ofdm_symbol_size,
+      const double tz = nr_csirs_blind_correlate_blocks((const int16_t *)&rxdataF_ant0[off_sym],
+                                                        (const int16_t *)&ref[off_sym], fp->ofdm_symbol_size,
                                                         CSIRS_BLIND_SUBBAND_RE, &tn);
       if (tz > g_id_best_z) {
         g_id_best_z = tz;

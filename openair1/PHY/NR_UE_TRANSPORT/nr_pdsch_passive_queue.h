@@ -93,6 +93,10 @@ typedef struct {
   int      gNB_id;        ///< nr_pdsch_data_aided.c: frame_rx, nr_slot_rx, gNB_id and nothing else)
   long     absolute_slot; ///< producer clock at capture: what the staleness check compares against
   uint16_t rnti;
+  /// nr_blind_rnti_class_t of the DCI that scheduled this PDSCH. Only the consumer's MAC-TA parse
+  /// reads it: a RAR (RA-RNTI) and a dedicated DL-SCH PDU carry timing advance in different places,
+  /// and guessing from the payload alone would mis-parse noise.
+  uint8_t  rnti_class;
   /// nrLDPC_coding_interface harq_unique_pid, ALREADY namespaced by the producer (3000 + harq_pid
   /// for this path). uint32_t, not uint8_t: the base is 3000, and truncating it to 8 bits would
   /// alias the attached-UE (1000+) and CSI (2000+) namespaces that must stay disjoint so a hardware

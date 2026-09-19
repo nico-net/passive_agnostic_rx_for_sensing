@@ -47,6 +47,7 @@
  */
 
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.h"
+#include "PHY/NR_UE_TRANSPORT/nr_passive_mac_ta.h"    // MAC timing-advance parsers + this file's reporter
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_xoverhead.h"   // reject-only xOverhead elimination by TB CRC
 #include "PHY/NR_UE_TRANSPORT/nr_dmrs_id_estimate.h"  // blind DM-RS scrambling-identity estimate
 #include "PHY/NR_REFSIG/dmrs_nr.h"                     // get_num_dmrs_re_per_rb
@@ -341,6 +342,38 @@ typedef struct {
   int idx;
 } consumer_arg_t;
 static consumer_arg_t g_args[NR_PDSCH_PASSIVE_QUEUE_MAX_CONSUMERS];
+
+
+/* Timing advance out of an overheard, CRC-verified MAC PDU. The parsing itself is pure and lives in
+ * nr_passive_mac_ta.c; this is only the reporting half, kept here so that file needs no log.h and
+ * can be unit-tested standalone. A RAR gives an ABSOLUTE range to the UE it answers; a TA Command CE
+ * gives a range delta for an already-connected one. Non-static and declared in nr_passive_mac_ta.h:
+ * the in-line decode path in nr_pdcch_blind_monitor_rt.c reports through this same function, so the
+ * two paths cannot drift apart in what they log. */
+void nr_passive_mac_report_ta(uint16_t rnti, bool is_ra_rnti, int frame, int slot, int mu,
+                              const uint8_t *tb, uint32_t tb_bytes)
+{
+  if (tb == NULL || tb_bytes == 0)
+    return;
+  if (is_ra_rnti) {
+    uint8_t rapid = 0;
+    uint16_t ta = 0, tc_rnti = 0;
+    if (nr_passive_mac_rar_ta(tb, tb_bytes, &rapid, &ta, &tc_rnti))
+      LOG_A(PHY, "SENSING: MAC_TA RAR (%d.%d) ra_rnti=0x%x rapid=%u ta=%u -> %.1f m one-way, tc_rnti=0x%x\n",
+            frame, slot, rnti, rapid, ta, nr_passive_mac_ta_metres(ta, mu), tc_rnti);
+    return;
+  }
+  uint8_t tag = 0, cmd = 0;
+  if (nr_passive_mac_dlsch_ta(tb, tb_bytes, &tag, &cmd)) {
+    /* TS 38.213 4.2: a CE command is RELATIVE around 31, so 31 means hold. The ABSOLUTE range needs
+     * that UE's RAR, which this receiver has only if it also overheard its Msg2. */
+    const int step = (int)cmd - 31;
+    const double delta_m = nr_passive_mac_ta_metres((uint16_t)(step < 0 ? -step : step), mu)
+                           * (step < 0 ? -1.0 : 1.0);
+    LOG_A(PHY, "SENSING: MAC_TA CE (%d.%d) rnti=0x%x tag=%u ta_cmd=%u -> %+.1f m range delta\n",
+          frame, slot, rnti, tag, cmd, delta_m);
+  }
+}
 
 static void *nr_pdsch_passive_queue_thread(void *arg)
 {
@@ -700,6 +733,15 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
       atomic_fetch_add_explicit(&g_decoded, 1, memory_order_relaxed);
       atomic_fetch_add_explicit(&g_rnti_dec[job.rnti], 1, memory_order_relaxed);
       if (st == NR_PDSCH_PASSIVE_DECODE_CRC_OK) atomic_fetch_add_explicit(&g_rnti_ok[job.rnti], 1, memory_order_relaxed);
+      /* TIMING ADVANCE FROM AN OVERHEARD PDU (nr_passive_mac_ta.h). The payload of a CRC-verified
+       * transport block was being discarded; a RAR carries the gNB's absolute advance for the UE it
+       * answers, and a TA Command CE carries an update -- i.e. that UE's range to the illuminator,
+       * measured without transmitting. Parse-only, on the consumer thread, and silent unless the PDU
+       * actually contains one. */
+      if (st == NR_PDSCH_PASSIVE_DECODE_CRC_OK && dec.tb != NULL && dec.cw.TBS > 0)
+        nr_passive_mac_report_ta(job.rnti, job.rnti_class == NR_BLIND_RNTI_CLASS_RA, job.frame_rx,
+                                 job.nr_slot_rx, (int)ue->frame_parms.numerology_index, dec.tb,
+                                 dec.cw.TBS / 8);   /* TBS is in BITS; the parser walks octets */
       {
         /* Two dedicated-parameter checks that need only what is in hand here, on the consumer.
          * xOverhead: every CRC-OK decode refutes each alternative whose TBS differs (reject-only,

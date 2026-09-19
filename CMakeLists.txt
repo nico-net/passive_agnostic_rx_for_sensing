@@ -976,6 +976,7 @@ set(PHY_SRC_UE
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/dci_nr.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c
+  ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_passive_mac_ta.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_ptrs_unav.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_tdd_pattern.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_dci11_layout_sweep.c
@@ -2120,7 +2121,7 @@ add_executable(nr_dlsim
   ${PHY_INTERFACE_DIR}/queue_t.c
   )
 target_link_libraries(nr_dlsim PRIVATE
-  -Wl,--start-group UTIL SIMU PHY_NR_COMMON PHY_NR PHY_NR_UE SCHED_NR_LIB SCHED_NR_UE_LIB MAC_UE_NR MAC_NR_COMMON CONFIG_LIB L2_NR -Wl,--end-group
+  -Wl,--start-group UTIL SIMU PHY_NR_COMMON PHY_NR PHY_NR_UE NR_UE_ISAC nr_pdcch_blind_monitor SCHED_NR_LIB SCHED_NR_UE_LIB MAC_UE_NR MAC_NR_COMMON CONFIG_LIB L2_NR -Wl,--end-group
   m pthread ${T_LIB} ITTI dl nr_ue_phy_meas physim_common NR_L2_UE
   softmodem_common
   )
@@ -2149,7 +2150,7 @@ add_executable(nr_ulsim
   )
 
 target_link_libraries(nr_ulsim PRIVATE
-  -Wl,--start-group UTIL SIMU PHY_NR_COMMON PHY_NR PHY_NR_UE SCHED_NR_LIB SCHED_NR_UE_LIB MAC_UE_NR MAC_NR_COMMON CONFIG_LIB L2_NR -Wl,--end-group
+  -Wl,--start-group UTIL SIMU PHY_NR_COMMON PHY_NR PHY_NR_UE NR_UE_ISAC SCHED_NR_LIB SCHED_NR_UE_LIB MAC_UE_NR MAC_NR_COMMON CONFIG_LIB L2_NR -Wl,--end-group
   m pthread ${T_LIB} ITTI dl nr_ue_phy_meas physim_common softmodem_common NR_L2_UE
   )
 target_link_libraries(nr_ulsim PRIVATE asn1_nr_rrc_hdrs asn1_lte_rrc_hdrs)
@@ -2172,7 +2173,7 @@ add_executable(nr_ulsim_mu_mimo
   )
 
 target_link_libraries(nr_ulsim_mu_mimo PRIVATE
-  -Wl,--start-group UTIL SIMU PHY_NR_COMMON PHY_NR PHY_NR_UE SCHED_NR_LIB SCHED_NR_UE_LIB MAC_UE_NR MAC_NR_COMMON CONFIG_LIB L2_NR -Wl,--end-group
+  -Wl,--start-group UTIL SIMU PHY_NR_COMMON PHY_NR PHY_NR_UE NR_UE_ISAC SCHED_NR_LIB SCHED_NR_UE_LIB MAC_UE_NR MAC_NR_COMMON CONFIG_LIB L2_NR -Wl,--end-group
   m pthread ${T_LIB} ITTI dl nr_ue_phy_meas physim_common softmodem_common NR_L2_UE
   )
 target_link_libraries(nr_ulsim_mu_mimo PRIVATE asn1_nr_rrc_hdrs asn1_lte_rrc_hdrs)
@@ -2316,6 +2317,13 @@ if(ENABLE_TESTS)
   # ECA/ECA+ clutter-cancellation offline self-test (ECA_CLUTTER_HANDOVER.md rollout step 2/4):
   # validates the CFR-domain oblique projection in isolation (mean-subtraction equivalence + mirror
   # -ghost suppression) before RT/engine wiring, same pattern as test_isac_sync above.
+  # Fixed-point envelope of the PDSCH 256QAM demodulation chain (nr_channel_compensation +
+  # nr_256qam_llr driven with an exact H and no noise). Links nr_phy_common only -- no UE state.
+  add_executable(test_dlsch_fixed_point ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/tests/dlsch_fixed_point_test.cc)
+  target_link_libraries(test_dlsch_fixed_point PRIVATE nr_phy_common UTIL GTest::gtest GTest::gtest_main)
+  add_dependencies(tests test_dlsch_fixed_point)
+  add_test(NAME test_dlsch_fixed_point COMMAND ./test_dlsch_fixed_point)
+
   add_executable(test_eca_clutter ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/tests/eca_clutter_test.cc)
   target_include_directories(test_eca_clutter PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_ISAC)
   target_link_libraries(test_eca_clutter PRIVATE NR_UE_ISAC UTIL GTest::gtest)
@@ -2499,6 +2507,13 @@ if(ENABLE_TESTS)
   target_link_libraries(test_nr_csirs_blind_search PRIVATE UTIL GTest::gtest)
   add_dependencies(tests test_nr_csirs_blind_search)
   add_test(NAME test_nr_csirs_blind_search COMMAND ./test_nr_csirs_blind_search)
+
+  add_executable(test_nr_passive_mac_ta ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_passive_mac_ta_test.cc
+                                        ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_passive_mac_ta.c)
+  target_include_directories(test_nr_passive_mac_ta PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
+  target_link_libraries(test_nr_passive_mac_ta PRIVATE UTIL GTest::gtest)
+  add_dependencies(tests test_nr_passive_mac_ta)
+  add_test(NAME test_nr_passive_mac_ta COMMAND ./test_nr_passive_mac_ta)
 
   add_executable(test_nr_pdcch_dci11_layout_sweep ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_dci11_layout_sweep_test.cc
                                                   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_dci11_layout_sweep.c)
