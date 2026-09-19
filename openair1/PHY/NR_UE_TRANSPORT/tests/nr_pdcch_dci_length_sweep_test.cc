@@ -159,6 +159,39 @@ TEST(DciLengthSweep, AccumulatesAcrossManyOccasionsToFindARealButSparseLength)
   EXPECT_EQ(nr_pdcch_dci_length_sweep_feed(&one_shot, &Fixture::decode, &one_call, 20, 30, 70, 0), -1);
 }
 
+TEST(DciLengthSweep, RejectsTheMeasuredSingleOccasionFalseLock)
+{
+  // MEASURED 2026-09-19, Salt macro: length 42 locked from ONE occasion (~56 trials) with no
+  // bootstrap RNTI. A wrong length decodes a REAL DCI more often than noise does, so the assumed
+  // 1/256 chance rate under-models it; the null is now measured from the length population and a
+  // statistical lock needs MIN_TRIALS_FOR_STATISTICAL_LOCK trials. Verified against the OLD code,
+  // which locks 42 here.
+  auto structured = [](int dci_length, int trial_idx, uint16_t* rnti_out, uint32_t* payload_hash_out,
+                       void*) -> bool {
+    *rnti_out = (uint16_t)(0x1000 + trial_idx + dci_length);
+    *payload_hash_out = 7000u + (uint32_t)(trial_idx * 31 + dci_length);
+    return dci_length == 42 && (trial_idx % 11) == 0; // 6 of 56
+  };
+  nr_pdcch_dci_length_sweep_state_t state;
+  nr_pdcch_dci_length_sweep_reset(&state);
+  EXPECT_EQ(nr_pdcch_dci_length_sweep_feed(&state, structured, nullptr, 56, 30, 63, 0), -1);
+}
+
+TEST(DciLengthSweep, ASingleBootstrapHitIsNotEnough)
+{
+  // A chance match on a known 16-bit value is 2^-24 per trial, but a CORESET walk runs ~29k
+  // length-hypotheses x ~28k trials, so single hits are expected several times per walk.
+  auto one_hit = [](int dci_length, int trial_idx, uint16_t* rnti_out, uint32_t* payload_hash_out,
+                    void*) -> bool {
+    *rnti_out = (trial_idx == 0 && dci_length == 55) ? 0x4601 : (uint16_t)(0x2000 + trial_idx);
+    *payload_hash_out = 5000u + (uint32_t)(trial_idx + dci_length);
+    return (trial_idx == 0 && dci_length == 55);
+  };
+  nr_pdcch_dci_length_sweep_state_t state;
+  nr_pdcch_dci_length_sweep_reset(&state);
+  EXPECT_EQ(nr_pdcch_dci_length_sweep_feed(&state, one_hit, nullptr, 56, 30, 63, 0x4601), -1);
+}
+
 TEST(DciLengthSweep, FixedFloorWouldFalseTriggerButScaledTestDoesNot)
 {
   // The regression this rewrite specifically guards: at this project's own measured ~1/256

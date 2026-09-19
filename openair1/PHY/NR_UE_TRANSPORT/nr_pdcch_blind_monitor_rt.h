@@ -309,6 +309,17 @@ extern "C" {
 /// this pointer -- owned by nr_pdcch_blind_monitor.c.
 const nr_pdcch_blind_monitor_cfg_t* nr_pdcch_blind_monitor_get_cfg(void);
 
+/// The CSS0/CORESET#0 config last derived from MIB/SIB1, kept across autodiscover's overwrite of the
+/// live config. NULL until nr_pdcch_blind_monitor_autoconf_css0() has succeeded at least once (e.g.
+/// a hand-written dedicated config, where there is nothing to interleave with). Read-only.
+const nr_pdcch_blind_monitor_cfg_t* nr_pdcch_blind_monitor_css0_cfg(void);
+
+/// Make nr_pdcch_blind_monitor_get_cfg() return `in` ON THIS THREAD ONLY until called again with
+/// NULL. Used ONLY by the CSS0/SI-RNTI interleave, to run one occasion under the common-search-space
+/// config without disturbing a scan consumer that may be inside an occasion of its own at the same
+/// time. The caller must clear it on every path out of that occasion.
+void nr_pdcch_blind_monitor_cfg_override(const nr_pdcch_blind_monitor_cfg_t *in);
+
 /**
  * @brief Blind-PDCCH RT tap: if a monitoring occasion is due and [sensing] pdcch_blind_monitor_*
  * is configured, FEPs the CORESET's own symbol(s), generates LLR (reusing the exported

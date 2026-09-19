@@ -1747,6 +1747,44 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
                                   get_dmrs_port(nl, dlsch_config->dmrs_ports), (unsigned char)m, pdsch_est_size,
                                   pdsch_dl_ch_estimates, fp->samples_per_slot_wCP, rxdataF, &nvar_tmp);
       nvar += nvar_tmp;
+      /* ---- DC-SUBCARRIER (LO-leakage) INTERPOLATION (ISAC_DC_FIX=1, default off pending live A/B) --
+       * MEASURED 2026-09-18, office gNB PCI 2, 273 PRB, reproduced IDENTICALLY across two independent
+       * captures minutes apart, two different serving UEs/precoding vectors (pm_index 35 and others):
+       * EQDIAG evm_by_freq_bin shows a fixed spike at the diagnostic bin straddling absolute FFT index
+       * 0 (evm 282%/111% both times, hrms normal there -- "the estimate is wrong, not the signal"),
+       * while every other bin reads 12-16%. FFT index 0 is DC -- classic direct-conversion LO leakage,
+       * a RECEIVER hardware property independent of cell/UE/precoding, confirmed by reproducing
+       * identically under two different pm_index values. It was never excluded anywhere in this path.
+       * For a 273 PRB / BWPStart=0 grant this lands at allocation-relative PRB ~136 -- inside only
+       * 1-2 of ~27 code blocks at MCS 25, but a TB needs every block, so it single-handedly zeroes
+       * TB success while low-MCS (SEGIDXC: most segment indices already measured at 92-100%, only
+       * specific indices near-0%) tolerates it on redundancy/margin alone. Small linear-interpolation
+       * window (+/-4 bins around DC) from the nearest unaffected neighbours -- cheap, and every other
+       * grant/estimate is untouched (bit-identical when DC is not inside num_rbs*12 relative to this
+       * layer's own indexing). Do NOT widen this window without new evidence: the diagnostic's own
+       * bin resolution (204 REs) is far coarser than the true affected width. */
+      {
+        static int s_dc_fix = -1;
+        if (s_dc_fix < 0) {
+          const char *e = getenv("ISAC_DC_FIX");
+          s_dc_fix = (e != NULL && atoi(e) != 0) ? 1 : 0;
+        }
+        if (s_dc_fix) {
+          const int N = fp->ofdm_symbol_size;
+          const int W = 4; // +/- bins interpolated; W+1 used as the reference neighbour on each side
+          for (int aarx = 0; aarx < fp->nb_antennas_rx; aarx++) {
+            const int r = nl * fp->nb_antennas_rx + aarx;
+            c16_t *h = (c16_t *)&pdsch_dl_ch_estimates[r][N * m];
+            const c16_t lo = h[(N - (W + 1)) % N], hi = h[(W + 1) % N];
+            for (int d = -W; d <= W; d++) {
+              const double t = (double)(d + W + 1) / (double)(2 * (W + 1));
+              const int idx = ((d % N) + N) % N;
+              h[idx].r = (int16_t)lround((double)lo.r + t * ((double)hi.r - lo.r));
+              h[idx].i = (int16_t)lround((double)lo.i + t * ((double)hi.i - lo.i));
+            }
+          }
+        }
+      }
     }
     n_dmrs_sym++;
   }

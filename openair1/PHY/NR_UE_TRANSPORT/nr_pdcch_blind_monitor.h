@@ -129,6 +129,23 @@ bool nr_pdcch_blind_publish_common(const nr_pdcch_blind_common_config_t *facts);
 bool nr_pdcch_blind_get_common(uint16_t pci, nr_pdcch_blind_common_config_t *facts);
 void nr_pdcch_blind_reset_common(void);
 
+/* ---- Precomputed polar result (GPU batch path, nr_polar_gpu.h) -------------------------------
+ * The blind scan's cost is one polar SC decode per candidate, and every candidate of an occasion is
+ * independent -- so they can all be decoded as ONE GPU batch before the per-candidate decode/gate
+ * path runs. Rather than give all four decode entry points a new argument, the batch hands its
+ * result to the NEXT decode on the CALLING THREAD, which is the worker about to run that candidate.
+ * Consumed once, and only when (llr, dci_length, aggregation_level) all match, so a stale or
+ * mismatched hand-off silently falls back to the CPU decode instead of returning another
+ * candidate's payload. With nothing set (llr == NULL) this is the CPU path, byte for byte. */
+typedef struct {
+  const int16_t *llr; ///< the exact unscrambled vector the batch decoded; NULL = nothing precomputed
+  uint32_t crc;       ///< polar_decoder_int16()'s return value
+  uint64_t payload;   ///< polar_decoder_int16()'s out[0]
+  uint16_t dci_length;
+  uint8_t aggregation_level;
+} nr_pdcch_blind_polar_pre_t;
+void nr_pdcch_blind_polar_pre_set(const nr_pdcch_blind_polar_pre_t *pre);
+
 /* Raw length evidence is independent of every RRC interpretation field. */
 typedef struct {
   uint64_t payload;

@@ -85,13 +85,39 @@
 // nr_pdcch_blind_monitor_rt.c via nr_pdcch_blind_monitor_get_cfg() below.
 // ---------------------------------------------------------------------------------------------
 static nr_pdcch_blind_monitor_cfg_t g_cfg;
+/* The LAST CSS0/CORESET#0 config this cell derived, kept after autodiscover overwrites g_cfg with
+ * the dedicated one. Its only consumer is the CSS0/SI-RNTI interleave in nr_pdcch_blind_monitor_rt.c
+ * (ISAC_CSS0_INTERLEAVE_K), which time-division-swaps it back in for one occasion at a time so a
+ * single capture can answer "does SIB1 decode here?" and "is the dedicated sweep progressing?"
+ * without two separate runs. Snapshotting the WHOLE struct rather than listing the fields that
+ * differ is deliberate: the two config sets diverge in ~20 fields (coreset geometry+mapping, bwp,
+ * ss_*, ss_al_candidates[], dci10_*, rnti range, energy gate), and any field added to one block and
+ * forgotten in the other would leak silently across the swap. */
+static nr_pdcch_blind_monitor_cfg_t g_css0_cfg;
+static bool                         g_css0_cfg_valid;
 static int                          g_parsed  = 0;
 static bool s_css0_applied; /* CSS0 autoconf idempotency; an autodiscover reset re-arms it (a reset IS a state change) */
 static int                          g_enabled = 0;
 
+/* Set for the duration of ONE occasion by the CSS0/SI-RNTI interleave, and THREAD-LOCAL on purpose:
+ * the interleaved occasion runs on the PHY receive thread while a scan consumer may be inside an
+ * occasion of its own. Swapping the global g_cfg instead would hand that consumer a CORESET#0 config
+ * mid-occasion -- not a crash, just confident nonsense -- and the race would be invisible in a log. */
+static __thread const nr_pdcch_blind_monitor_cfg_t *t_cfg_override;
+
 const nr_pdcch_blind_monitor_cfg_t* nr_pdcch_blind_monitor_get_cfg(void)
 {
-  return &g_cfg;
+  return (t_cfg_override != NULL) ? t_cfg_override : &g_cfg;
+}
+
+const nr_pdcch_blind_monitor_cfg_t* nr_pdcch_blind_monitor_css0_cfg(void)
+{
+  return g_css0_cfg_valid ? &g_css0_cfg : NULL;
+}
+
+void nr_pdcch_blind_monitor_cfg_override(const nr_pdcch_blind_monitor_cfg_t *in)
+{
+  t_cfg_override = in;
 }
 
 /* ---- PHASE 1: SELF-CONFIGURE FROM MIB/SIB1 (2026-09-04) ---------------------------------------
@@ -263,6 +289,19 @@ bool nr_pdcch_blind_monitor_autoconf_css0(int num_rbs,
         ssb_offset_point_a, rb_offset,
         g_cfg.ss_monitoring_slot_periodicity, g_cfg.ss_monitoring_slot_offset, g_cfg.ss_duration,
         g_cfg.ss_first_symbol, g_cfg.dci10_mux_pattern);
+
+  /* Snapshot for the CSS0/SI-RNTI interleave (see g_css0_cfg). Taken HERE, not where autodiscover
+   * overwrites g_cfg: autodiscover_step() also re-runs on RETRY, by which time g_cfg already holds
+   * a DEDICATED config, so snapshotting there would capture the wrong one.
+   * autodiscover is forced off IN THE SNAPSHOT ONLY: every dedicated-sweep bookkeeping site in
+   * run_occasion() (extent_step, the length sweep, the lookahead lanes) is gated on cfg->autodiscover
+   * and WRITES g_cfg when it advances a hypothesis. An interleaved occasion restores the saved
+   * dedicated config when it finishes, which would silently revert such an advance while the sweep's
+   * own index had already moved on -- i.e. the sweep would go on testing the previous mapping while
+   * believing it was testing the next one. A CSS0 occasion is not part of that sweep anyway. */
+  g_css0_cfg              = g_cfg;
+  g_css0_cfg.autodiscover = 0;
+  g_css0_cfg_valid        = true;
   return true;
 }
 
@@ -334,7 +373,7 @@ static int  s_ext_n        = 0;
 static int  s_ext_idx      = 0;
 /* CCE-to-REG mapping hypotheses of the extent under test (nr_pdcch_map_candidates). Each
  * (extent, mapping) pair gets the same NR_PDCCH_EXTENT_VERIFY_OCC dwell. */
-#define NR_PDCCH_MAP_MAX_CAND 512
+#define NR_PDCCH_MAP_MAX_CAND 1024 /* 865 legal at 216 RB x 2 symbols; 512 truncated them */
 static nr_pdcch_map_cand_t s_map_cand[NR_PDCCH_MAP_MAX_CAND];
 static int  s_map_n        = 0;
 static int  s_map_idx      = 0;
@@ -650,23 +689,30 @@ int nr_pdcch_map_candidates(int span_rb, int duration, int pci, nr_pdcch_map_can
   static const int Ls[2][2] = {{2, 6}, {3, 6}};
   const int *L = Ls[duration == 3];
   static const int Rs[3] = {2, 3, 6};
-  for (int li = 0; li < 2; li++) {
-    const int nb = N_reg / L[li];             /* REG bundles; the shift acts modulo this */
-    if (L[li] % duration != 0 || nb > 255)   /* demapper: B_rb = L/duration; FAPI ShiftIndex is 8-bit */
-      continue;
-    for (int ri = 0; ri < 3; ri++) {
-      const int R = Rs[ri];
-      if (N_reg % (L[li] * R) != 0)           /* C = N_REG/(L*R) must be an integer */
+  /* Two passes (2026-09-19): pass 0 = the PCI's residue and 0 of EVERY legal (L, R); pass 1 = the
+   * remaining shifts. The single-pass order walked all shifts of one (L, R) before the next, so on
+   * the macro's 216 RB x 2-symbol CORESET (865 legal) the 512 cap cut the list before ANY L=6
+   * mapping -- CORESET#0's own bundle size -- and no run length could ever reach it. */
+  for (int pass = 0; pass < 2; pass++) {
+    for (int li = 0; li < 2; li++) {
+      const int nb = N_reg / L[li];             /* REG bundles; the shift acts modulo this */
+      if (L[li] % duration != 0 || nb > 255)   /* demapper: B_rb = L/duration; FAPI ShiftIndex is 8-bit */
         continue;
-      /* every distinct residue: the PCI's first, 0 second, then the rest in order */
-      for (int k = -2; k < nb && n < max_out; k++) {
-        int sh;
-        if (k == -2) sh = pci % nb;
-        else if (k == -1) sh = 0;
-        else sh = k;
-        if ((k == -1 && sh == pci % nb) || (k >= 0 && (sh == pci % nb || sh == 0)))
+      const int p = pci % nb;
+      for (int ri = 0; ri < 3; ri++) {
+        const int R = Rs[ri];
+        if (N_reg % (L[li] * R) != 0)           /* C = N_REG/(L*R) must be an integer */
           continue;
-        out[n++] = (nr_pdcch_map_cand_t){(uint8_t)L[li], (uint8_t)R, (uint8_t)sh};
+        if (pass == 0) {
+          if (n < max_out)
+            out[n++] = (nr_pdcch_map_cand_t){(uint8_t)L[li], (uint8_t)R, (uint8_t)p};
+          if (p != 0 && n < max_out)
+            out[n++] = (nr_pdcch_map_cand_t){(uint8_t)L[li], (uint8_t)R, 0};
+        } else {
+          for (int sh = 1; sh < nb && n < max_out; sh++)
+            if (sh != p)
+              out[n++] = (nr_pdcch_map_cand_t){(uint8_t)L[li], (uint8_t)R, (uint8_t)sh};
+        }
       }
     }
   }
@@ -2257,6 +2303,16 @@ static int32_t blind_fill_dmrs_mask(int dmrs_TypeA_Position,
 // candidate and paying it per plausible one.
 // ---------------------------------------------------------------------------------------------
 
+/* Precomputed polar result for the next decode on THIS thread -- see nr_pdcch_blind_monitor.h. */
+static __thread nr_pdcch_blind_polar_pre_t tls_polar_pre;
+void nr_pdcch_blind_polar_pre_set(const nr_pdcch_blind_polar_pre_t *pre)
+{
+  if (pre != NULL)
+    tls_polar_pre = *pre;
+  else
+    tls_polar_pre.llr = NULL;
+}
+
 /// Step 1: RNTI-independent polar decode. The CRC-recovered value IS the candidate RNTI in its low
 /// 16 bits; the full 24 bits are returned because only a genuine decode has the upper 8 zero.
 static uint32_t blind_polar_decode(const int16_t* llr,
@@ -2268,8 +2324,20 @@ static uint32_t blind_polar_decode(const int16_t* llr,
 {
   dci_estimation[0] = 0;
   dci_estimation[1] = 0;
-  const uint32_t crc = polar_decoder_int16((int16_t*)llr, dci_estimation, 1, NR_POLAR_DCI_MESSAGE_TYPE,
-                                           dci_length, aggregation_level);
+  uint32_t crc;
+  /* GPU batch hand-off (nr_polar_gpu.h): this candidate was already decoded as part of its
+     occasion's batch. One-shot and fully qualified -- anything that does not match exactly falls
+     through to the CPU decoder below, which is also what happens when a decode path runs the
+     decoder twice for one candidate. */
+  if (tls_polar_pre.llr == llr && tls_polar_pre.dci_length == dci_length
+      && tls_polar_pre.aggregation_level == aggregation_level) {
+    dci_estimation[0] = tls_polar_pre.payload;
+    crc = tls_polar_pre.crc;
+    tls_polar_pre.llr = NULL;
+  } else {
+    crc = polar_decoder_int16((int16_t*)llr, dci_estimation, 1, NR_POLAR_DCI_MESSAGE_TYPE,
+                              dci_length, aggregation_level);
+  }
 
   /* FULLCRC probe: polar_decoder_int16() returns a 24-bit CRC, and only a genuine match has its
    * upper bits zero (the live path relies on exactly that when it does `crc == n_rnti`). Logging

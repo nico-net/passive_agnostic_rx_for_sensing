@@ -82,15 +82,53 @@ static bool add_distinct_hash(uint32_t* hashes, int* n_distinct, uint32_t h)
 // Does this length's ACCUMULATED (trials, passes) clear the chance floor by Z_SIGMA standard
 // deviations? Scales with trials -- see this file's header comment on why a fixed floor cannot be
 // reused here.
-static bool clears_chance_floor(int trials, int passes)
+/* Minimum ACCUMULATED trials before the statistical path may lock (the bootstrap path is exempt --
+ * two independent hits on a known 16-bit value are ~2^-48 by chance whatever the sample size).
+ * MEASURED 2026-09-19 on the Salt macro: length 42 locked from occasions_fed=1 (~56 trials) with no
+ * bootstrap RNTI, which cannot be significant, and a false lock STICKS (g_length_found gates the
+ * sweep off), so the rest of that CORESET walk ran with a wrong length. */
+#define MIN_TRIALS_FOR_STATISTICAL_LOCK 256
+
+/* Does this length's ACCUMULATED (trials, passes) clear the noise floor by Z_SIGMA sd?
+ *
+ * `null_rate` is MEASURED from the length population rather than assumed: at most one of the ~34
+ * lengths under test can be the real one, so the median pass rate across the others IS this
+ * hypothesis's own noise rate -- and it captures what CHANCE_PASS_RATE cannot, namely STRUCTURED
+ * false accepts (a real DCI decoded at the WRONG length passes far more often than noise, which is
+ * what produced the measured false lock above; at the assumed 1/256 the same event is ~1e-6). It is
+ * floored at CHANCE_PASS_RATE so this can never be laxer than the fixed rate it replaces. */
+static bool clears_chance_floor(int trials, int passes, double null_rate)
 {
-  if (trials <= 0) {
+  if (trials < MIN_TRIALS_FOR_STATISTICAL_LOCK) {
     return false;
   }
-  const double mean = (double)trials * CHANCE_PASS_RATE;
-  const double var  = (double)trials * CHANCE_PASS_RATE * (1.0 - CHANCE_PASS_RATE);
+  const double p    = (null_rate > CHANCE_PASS_RATE) ? null_rate : CHANCE_PASS_RATE;
+  const double mean = (double)trials * p;
+  const double var  = (double)trials * p * (1.0 - p);
   const double sd   = sqrt(var);
   return (double)passes >= mean + Z_SIGMA * sd + 1.0; // +1: never accept on a razor-thin margin
+}
+
+/* Median pass RATE over every length except `skip_len` -- the measured noise null above. */
+static double measured_null_rate(const nr_pdcch_dci_length_sweep_state_t *state, int min_len, int max_len,
+                                 int skip_len)
+{
+  double r[NR_PDCCH_DCI_LENGTH_SWEEP_MAX_LEN];
+  int n = 0;
+  for (int len = min_len; len <= max_len && len < NR_PDCCH_DCI_LENGTH_SWEEP_MAX_LEN; len++) {
+    if (len == skip_len || len == state->excluded_len || state->trials[len] <= 0)
+      continue;
+    r[n++] = (double)state->passes[len] / (double)state->trials[len];
+  }
+  if (n == 0)
+    return 0.0;
+  for (int i = 1; i < n; i++) { /* insertion sort: n <= 41 */
+    const double v = r[i];
+    int j = i - 1;
+    while (j >= 0 && r[j] > v) { r[j + 1] = r[j]; j--; }
+    r[j + 1] = v;
+  }
+  return (n & 1) ? r[n / 2] : 0.5 * (r[n / 2 - 1] + r[n / 2]);
 }
 
 int nr_pdcch_dci_length_sweep_feed(nr_pdcch_dci_length_sweep_state_t* state,
@@ -176,8 +214,12 @@ int nr_pdcch_dci_length_sweep_feed(nr_pdcch_dci_length_sweep_state_t* state,
     // specific 16-bit value by chance is ~1/65536 per trial -- far below anything needed here,
     // and unaffected by accumulated sample size), or -- with no bootstrap available, or not yet on
     // this length -- its accumulated passes must clear the sample-size-scaled chance floor.
-    const bool significant = (state->bootstrap_hits[len] > 0)
-                           || clears_chance_floor(state->trials[len], state->passes[len]);
+    /* Two bootstrap hits, not one: a single chance match is 2^-24 per trial but a hypothesis runs
+     * ~28k trials per length and a full CORESET walk ~29k length-hypotheses, so single hits are
+     * expected several times per walk; two are not. */
+    const bool significant = (state->bootstrap_hits[len] > 1)
+                           || clears_chance_floor(state->trials[len], state->passes[len],
+                                                  measured_null_rate(state, min_len, max_len, len));
     if (!significant) {
       continue;
     }

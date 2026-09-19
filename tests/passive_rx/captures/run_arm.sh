@@ -221,7 +221,7 @@ for t in $(seq 1 "$TRIES"); do
     --ue-nb-ant-rx $NANT --ue-nb-ant-tx ${NTX:-$NANT} --passive-rx --ue-fo-compensation --initial-fo ${INITIALFO:--15000} \
     ${CONTFO:+--cont-fo-comp $CONTFO --freq-sync-P $FSP --freq-sync-I $FSI} \
     ${OFFDIV:+--offset-divisor $OFFDIV} \
-    --thread-pool 0,1,4,5,6,7 --time-sync-I 0.01 --ntn-initial-time-drift -4.25 -A 90 ${LDPCV:+--loader.ldpc.shlibversion $LDPCV}" \
+    --thread-pool ${THREADPOOL:-0,1,4,5,6,7} --time-sync-I 0.01 --ntn-initial-time-drift -4.25 -A 90 ${LDPCV:+--loader.ldpc.shlibversion $LDPCV}" \
     > "$OUT/run.log" 2>&1 < /dev/null &
   sleep 5
   # NIC DROP TIME SERIES. 2026-09-02: stalls and rx_out_of_buffer correlate across runs

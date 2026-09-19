@@ -281,6 +281,72 @@ TEST_F(BlindPdcchTest, RawPayloadRoundTrip) {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Group 0b: the GPU batch hand-off (nr_pdcch_blind_polar_pre_set, nr_polar_gpu.h). The batch path
+// replaces ONLY the decode, so the one thing that has to hold is that a hand-off is consumed when
+// it belongs to this candidate and IGNORED otherwise -- a wrongly consumed one would attribute
+// another candidate's payload to this one, silently, with every gate downstream still believing it.
+// ---------------------------------------------------------------------------------------------
+TEST_F(BlindPdcchTest, PolarPreHandoffIsConsumedOnlyWhenItMatches) {
+  const uint16_t bwp_size = 106;
+  const uint16_t dci_length = nr_pdcch_blind_dci_size(bwp_size);
+
+  GroundTruth gt;
+  gt.rnti = 0x4601;
+  gt.bwp_size = bwp_size;
+  gt.riv = 7;
+  gt.time_domain_assignment = 1;
+  gt.antenna_ports = 5;
+  gt.dmrs_seq_init = 1;
+  const uint64_t packed = PackPayload(gt, RivBitsFor(bwp_size));
+  auto llr = EncodeToLLR(packed, gt.rnti, dci_length, kAggregationLevel, /*snr_db=*/40.0, rng_);
+
+  // Baseline: the CPU decode this candidate would do on its own.
+  nr_pdcch_blind_raw_result_t cpu = {};
+  ASSERT_TRUE(nr_pdcch_blind_decode_raw_11(llr.data(), kAggregationLevel, dci_length, 0x0001, 0xFFEF, &cpu));
+
+  nr_pdcch_blind_polar_pre_t pre = {};
+  pre.llr = llr.data();
+  pre.crc = cpu.rnti;
+  pre.payload = cpu.payload;
+  pre.dci_length = dci_length;
+  pre.aggregation_level = kAggregationLevel;
+
+  // Matching hand-off: same answer, and consumed (the second decode must fall back to the CPU and
+  // still agree -- which is also what makes a decode path that decodes twice safe).
+  nr_pdcch_blind_polar_pre_set(&pre);
+  nr_pdcch_blind_raw_result_t gpu = {};
+  ASSERT_TRUE(nr_pdcch_blind_decode_raw_11(llr.data(), kAggregationLevel, dci_length, 0x0001, 0xFFEF, &gpu));
+  EXPECT_EQ(gpu.rnti, cpu.rnti);
+  EXPECT_EQ(gpu.payload, cpu.payload);
+  EXPECT_EQ(gpu.mismatched_bits, cpu.mismatched_bits);
+
+  nr_pdcch_blind_raw_result_t again = {};
+  ASSERT_TRUE(nr_pdcch_blind_decode_raw_11(llr.data(), kAggregationLevel, dci_length, 0x0001, 0xFFEF, &again));
+  EXPECT_EQ(again.payload, cpu.payload) << "one-shot hand-off must not survive into a second decode";
+
+  // Mismatched hand-off (another candidate's payload under a wrong length/AL/buffer): must be
+  // ignored, not returned.
+  const uint64_t poison = packed ^ 0x2AAAAAAAull;
+  for (int k = 0; k < 3; k++) {
+    nr_pdcch_blind_polar_pre_t bad = pre;
+    bad.crc = 0x1234;
+    bad.payload = poison;
+    if (k == 0)
+      bad.dci_length = (uint16_t)(dci_length - 1);
+    else if (k == 1)
+      bad.aggregation_level = (uint8_t)(kAggregationLevel * 2);
+    else
+      bad.llr = llr.data() + 1;
+    nr_pdcch_blind_polar_pre_set(&bad);
+    nr_pdcch_blind_raw_result_t r = {};
+    ASSERT_TRUE(nr_pdcch_blind_decode_raw_11(llr.data(), kAggregationLevel, dci_length, 0x0001, 0xFFEF, &r)) << k;
+    EXPECT_EQ(r.payload, cpu.payload) << "case " << k << ": a non-matching hand-off must fall back to the CPU decode";
+    EXPECT_EQ(r.rnti, cpu.rnti) << "case " << k;
+  }
+  nr_pdcch_blind_polar_pre_set(nullptr);
+}
+
+// ---------------------------------------------------------------------------------------------
 // Group 1: DCI size/layout.
 // ---------------------------------------------------------------------------------------------
 TEST(DciSize, MatchesHandDerivedValues) {
@@ -1922,6 +1988,43 @@ TEST(Css0Autoconf, BwpOriginIsTheCoresetZeroStartNotTheSsbOrigin) {
   EXPECT_EQ(c->coreset_type, 1);
 }
 
+// ISAC_CSS0_INTERLEAVE_K swaps the WHOLE config struct per occasion, so what it has to guarantee is
+// (a) the snapshot really is the common-search-space one, (b) it carries autodiscover OFF so an
+// interleaved occasion cannot advance -- and then have reverted -- a dedicated-sweep hypothesis, and
+// (c) the swap is an exact round trip. Field-by-field assertions would just re-list the ~20 fields
+// the snapshot exists to avoid listing; memcmp is the actual contract.
+TEST(Css0Interleave, SnapshotIsTheCommonConfigAndTheSwapRoundTripsExactly) {
+  auto* c = const_cast<nr_pdcch_blind_monitor_cfg_t*>(nr_pdcch_blind_monitor_get_cfg());
+  ASSERT_TRUE(nr_pdcch_blind_monitor_autoconf_css0(48, 1, 0, 12, 40, 0, 2, 0, 1, 2, 12, 2));
+
+  const nr_pdcch_blind_monitor_cfg_t* c0 = nr_pdcch_blind_monitor_css0_cfg();
+  ASSERT_NE(c0, nullptr);
+  EXPECT_EQ(c0->coreset_type, 1);       // CORESET#0, not the dedicated one
+  EXPECT_EQ(c0->rnti_min, 0xFFFF);      // SI-RNTI pin
+  EXPECT_EQ(c0->autodiscover, 0);       // must not run the dedicated sweep's bookkeeping
+
+  // Stand in for "autodiscover has since overwritten the live config with the dedicated one".
+  c->coreset_type = 0;
+  c->rnti_min     = 1;
+  c->rnti_max     = 0xFFEF;
+  c->autodiscover = 1;
+  const nr_pdcch_blind_monitor_cfg_t dedicated = *c;
+
+  // While the override is on, THIS thread reads the common config...
+  nr_pdcch_blind_monitor_cfg_override(c0);
+  const nr_pdcch_blind_monitor_cfg_t* live = nr_pdcch_blind_monitor_get_cfg();
+  EXPECT_EQ(live->coreset_type, 1);
+  EXPECT_EQ(live->rnti_min, 0xFFFF);
+  EXPECT_EQ(live->autodiscover, 0);
+  // ...and the dedicated config is UNTOUCHED, which is what keeps a scan consumer on another thread
+  // (and the dedicated sweep's own state) out of the interleave's way.
+  EXPECT_EQ(memcmp(c, &dedicated, sizeof(dedicated)), 0);
+
+  nr_pdcch_blind_monitor_cfg_override(nullptr);
+  EXPECT_EQ(nr_pdcch_blind_monitor_get_cfg(), c);
+  EXPECT_EQ(memcmp(c, &dedicated, sizeof(dedicated)), 0);
+}
+
 }  // namespace
 
 extern "C" {
@@ -3050,6 +3153,22 @@ TEST(MapCandidates, NonInterleavedFirstThenEveryLegalInterleavedMappingWithPciFi
   // count: L=2: R in {2,3,6} legal (48 % 4, % 6, % 12 == 0) -> 3 x 24 shifts; L=6: R=2 (48%12) legal,
   // R=3 (48%18) not, R=6 (48%36) not -> 8 shifts. 1 + 72 + 8.
   EXPECT_EQ(n, 1 + 3 * 24 + 8);
+}
+
+TEST(MapCandidates, MacroWideCoresetReachesBundleSixWithinFirstPass) {
+  // Macro PCI 64, 216 RB x 2 symbols: 1 + 3*216 (L=2) + 3*72 (L=6) = 865 legal. The old
+  // one-(L,R)-at-a-time order put every L=6 entry past index 648, beyond the 512 runtime cap.
+  nr_pdcch_map_cand_t c[1024];
+  const int n = nr_pdcch_map_candidates(216, 2, 64, c, 1024);
+  EXPECT_EQ(n, 1 + 3 * 216 + 3 * 72);
+  int l6r2_pci = -1;
+  for (int i = 0; i < n; i++)
+    if (c[i].bundle == 6 && c[i].interleaver == 2 && c[i].shift == 64 % 72) l6r2_pci = i;
+  ASSERT_GE(l6r2_pci, 0);
+  EXPECT_LT(l6r2_pci, 1 + 6 * 2);  // pass 0: PCI residue + 0 for each of the 6 legal (L, R)
+  for (int i = 0; i < n; i++)
+    for (int j = i + 1; j < n; j++)
+      EXPECT_FALSE(c[i].bundle == c[j].bundle && c[i].interleaver == c[j].interleaver && c[i].shift == c[j].shift);
 }
 
 TEST(MapCandidates, DurationThreeUsesBundleThreeAndSix) {
