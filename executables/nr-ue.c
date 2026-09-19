@@ -1364,8 +1364,14 @@ void *UE_thread(void *arg)
     // acquisition uses (syncInFrame), then clears every accumulated fine-timing state so the CIR
     // loop restarts from the new origin instead of integrating corrections from the old one.
     if (atomic_load_explicit(&nr_ue_pending_rebase_valid, memory_order_relaxed) && slot_nr_prev0) {
-      const long d = atomic_load_explicit(&nr_ue_pending_rebase_delta, memory_order_relaxed);
+      long d = atomic_load_explicit(&nr_ue_pending_rebase_delta, memory_order_relaxed);
       atomic_store_explicit(&nr_ue_pending_rebase_valid, 0, memory_order_relaxed);
+      // A LATE window (d < 0) cannot rewind the stream: discard one frame minus |d| instead, and
+      // count that frame so frame/slot numbering stays aligned with the air.
+      if (d < 0 && -d < (long)fp->samples_per_frame) {
+        d += fp->samples_per_frame;
+        absolute_slot += nb_slot_frame;
+      }
       if (d > 0 && d < (long)fp->samples_per_frame) {
         LOG_W(PHY, "SENSING: REBASE applying coarse timing rebase of %ld samples at frame boundary\n", d);
         syncInFrame(UE, &sync_timestamp, duration_rx_to_tx, (openair0_timestamp_t)d);

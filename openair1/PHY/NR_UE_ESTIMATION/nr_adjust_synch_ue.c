@@ -252,8 +252,17 @@ int nr_adjust_synch_ue(const NR_DL_FRAME_PARMS *frame_parms,
       const char *e = getenv("ISAC_TSYNC_GLOBAL_REBASE");
       s_gr_on = (e == NULL || atoi(e) != 0) ? 1 : 0;
     }
+    /* LATE WINDOW TOO (2026-09-19). Macro PCI 64 at 217 PRB: global_pos -341 (window LATE, the mirror
+     * of the 4-ch +342 case), global/in-window ratio only 4.8-6.5x, e_win_frac 0.14-0.17 on every
+     * observation, SIB1 0. Both `g_pos > 0` and the hard 8x blocked it. Negative deltas are now
+     * applied by the consumer as a one-frame-minus-|d| discard. ISAC_TSYNC_REBASE_RATIO overrides 8. */
+    static int s_gr_ratio = -1;
+    if (s_gr_ratio < 0) {
+      const char *e = getenv("ISAC_TSYNC_REBASE_RATIO");
+      s_gr_ratio = (e != NULL && atoi(e) > 0) ? atoi(e) : 8;
+    }
     static int s_gr_cnt = 0;
-    const bool dominant = peak_out_of_window && g_pos > 0 && g_val > 8 * (int64_t)(max_val > 0 ? max_val : 1);
+    const bool dominant = peak_out_of_window && g_pos != 0 && g_val > s_gr_ratio * (int64_t)(max_val > 0 ? max_val : 1);
     s_gr_cnt = dominant ? s_gr_cnt + 1 : 0;
     if (s_gr_on && s_gr_cnt >= 4 && !atomic_load_explicit(&nr_ue_pending_rebase_valid, memory_order_relaxed)) {
       atomic_store_explicit(&nr_ue_pending_rebase_delta, (long)g_pos, memory_order_relaxed);
