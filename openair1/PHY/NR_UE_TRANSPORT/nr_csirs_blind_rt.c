@@ -30,6 +30,8 @@ static nr_csirs_blind_state_t g_zp;      /* zero-power search over the same cand
 static double   g_zp_null[64];
 static int      g_zp_null_n, g_zp_null_w;
 static int      g_on = -1;      /* -1 = not read, 0 = off, 1 = on */
+static int      g_rank = -1;    /* ISAC_CSIRS_BLIND_RANK: keep scoring after a confirmation */
+static bool     g_confirm_logged;
 static int      g_armed;
 static uint64_t g_slots;
 /* Recent scores from OTHER candidates, for the RELATIVE detection bar. An absolute correlation
@@ -38,6 +40,25 @@ static uint64_t g_slots;
 #define NULLWIN 64
 static double   g_null[NULLWIN];
 static int      g_null_n, g_null_w;
+/* Per-candidate sequence-free evidence: mean power ON the candidate's REs vs the rest of its RBs.
+ * Accumulated for EVERY scoring, not just the ones that pass a correlation bar -- the first cut
+ * logged EPR only for z>3 candidates, which is 25 biased samples and cannot rank a 198-candidate
+ * space. If the scramblingID is not the PCI, this is the ONLY statistic that can still see the
+ * resource, because it never touches the sequence. */
+static double   g_epr_sum[NR_CSIRS_BLIND_MAX_CAND];
+static uint32_t g_epr_n[NR_CSIRS_BLIND_MAX_CAND];
+/* scramblingID sweep (ISAC_CSIRS_BLIND_IDSWEEP=1). MEASURED 2026-09-19 on Swisscom PCI 382: the
+ * sequence-free EPR finds a TRS pair (row 1, same fd, symbols 4 and 8) at 4-5x the power of its
+ * neighbouring REs, while the correlation against the PCI-derived sequence stays at the noise level
+ * -- i.e. the POSITIONS are right and the SEQUENCE is wrong. scramblingID is dedicated RRC and need
+ * not be the PCI, so sweep it: 8 ids per qualifying slot (a slot where EPR says the pilot is there),
+ * which keeps the added RT cost ~0.3 ms and covers all 1024 in 128 such slots. */
+static int      g_ids = -1;
+static uint16_t g_id_next;
+static int      g_id_pin = -1;   /* candidate the sweep is locked to; -1 = not chosen yet */
+static double   g_id_best_z;
+static uint16_t g_id_best;
+static bool     g_id_solved;
 
 static double median_of(const double *src, int n)
 {
@@ -87,18 +108,90 @@ void nr_csirs_blind_rt_slot(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot
    * 2026-09-17 on the PDCCH scan consumer: ~1.85 ms of untimed work per occasion, 68 % of PDCCH
    * occasions dropped, and 281k "CONFIRMED" lines in one 600 s run. The rate-matcher and the sensing
    * capture read the stored state (rate_match_from), which this leaves untouched. */
+  /* RANKING MODE (ISAC_CSIRS_BLIND_RANK=1, diagnostic only). MEASURED 2026-09-19 on a live
+   * commercial cell: two identical 300 s runs both CONFIRMED, but on DIFFERENT resources
+   * ("...:2:6:...:16:3" vs "...:4:5:...:16:8"; agreeing only on row 2 / density / period 16). The
+   * cell may genuinely carry several CSI-RS resources -- the search stops at the FIRST confirmation,
+   * so different runs would legitimately land on different real ones -- or some confirmations are
+   * false at a 3x-null-median, 3-hit bar over 198 candidates x thousands of slots. The stored
+   * ranking is what separates those, and stopping early throws it away.
+   *
+   * So in this mode: log EVERY confirmation, clear it, and keep scoring the whole population, then
+   * print the top candidates by best correlation. A real resource sits far above the rest and
+   * repeats across runs; a false positive shuffles. The rate-matcher gets no resource while this is
+   * on (g_st.confirmed is cleared), which is why it is diagnostic only. */
+  if (g_rank < 0) {
+    const char *e = getenv("ISAC_CSIRS_BLIND_RANK");
+    g_rank = (e != NULL && atoi(e) != 0) ? 1 : 0;
+  }
   if (g_st.confirmed >= 0) {
-    static bool s_logged;
-    if (!s_logged) {
-      s_logged = true;
-      uint16_t period = 0, offset = 0;
-      const nr_csirs_candidate_t *w = nr_csirs_blind_confirmed(&g_st, &period, &offset);
-      char line[128];
-      if (w != NULL && nr_csirs_blind_format(w, period, offset, line, sizeof(line)) > 0)
+    uint16_t period = 0, offset = 0;
+    const nr_csirs_candidate_t *w = nr_csirs_blind_confirmed(&g_st, &period, &offset);
+    char line[128];
+    if (w != NULL && nr_csirs_blind_format(w, period, offset, line, sizeof(line)) > 0) {
+      const int widx = g_st.confirmed;
+      if (g_rank)
+        LOG_A(PHY,
+              "SENSING: CSIRS_BLIND CONFIRMED[rank] after %llu slots -- \"%s\" z=%.2f hits=%u "
+              "tried=%u z_median=%.2f (search continues)\n",
+              (unsigned long long)g_slots, line, g_st.best_rho[widx], g_st.hits[widx],
+              g_st.tried[widx], null_median());
+      else if (!g_confirm_logged)
         LOG_A(PHY, "SENSING: CSIRS_BLIND CONFIRMED after %llu slots -- csirs_monitor = \"%s\" (search stopped)\n",
               (unsigned long long)g_slots, line);
     }
-    return;
+    if (!g_rank) {
+      g_confirm_logged = true;
+      return;
+    }
+    g_st.confirmed = -1; /* keep the population moving; see RANKING MODE above */
+  }
+  if (g_rank && (g_slots % 4000) == 3999) {
+    /* Top 5 by best SCALE-FREE score (best_rho now holds z = rho*sqrt(n_re); noise ~0.89). */
+    int top[5] = {-1, -1, -1, -1, -1};
+    for (int i = 0; i < g_st.n; i++)
+      for (int k = 0; k < 5; k++)
+        if (top[k] < 0 || g_st.best_rho[i] > g_st.best_rho[top[k]]) {
+          for (int m = 4; m > k; m--)
+            top[m] = top[m - 1];
+          top[k] = i;
+          break;
+        }
+    char buf[512];
+    int off2 = 0;
+    for (int k = 0; k < 5 && top[k] >= 0 && off2 < (int)sizeof(buf) - 64; k++) {
+      const nr_csirs_candidate_t *c2 = &g_st.cand[top[k]];
+      off2 += snprintf(buf + off2, sizeof(buf) - off2, "[row%u fd%u l%u rho=%.3f hits=%u/%u] ",
+                       c2->row, c2->freq_domain, c2->symb_l0, g_st.best_rho[top[k]],
+                       g_st.hits[top[k]], g_st.tried[top[k]]);
+    }
+    LOG_A(PHY, "SENSING: CSIRS_BLIND RANK slots=%llu z_median=%.2f (noise ~0.89) top: %s\n",
+          (unsigned long long)g_slots, null_median(), buf);
+    /* Same ranking by the SEQUENCE-FREE statistic. A real boosted pilot sits above 1 here even when
+     * the sequence hypothesis is wrong; if the whole space reads ~1, no enumerated position carries
+     * one and the resource is outside the search space rather than mis-sequenced. */
+    int etop[5] = {-1, -1, -1, -1, -1};
+    for (int i = 0; i < g_st.n && i < NR_CSIRS_BLIND_MAX_CAND; i++) {
+      if (g_epr_n[i] < 4)
+        continue;   /* too few samples to average */
+      const double mi = g_epr_sum[i] / g_epr_n[i];
+      for (int k = 0; k < 5; k++)
+        if (etop[k] < 0 || mi > g_epr_sum[etop[k]] / g_epr_n[etop[k]]) {
+          for (int m = 4; m > k; m--)
+            etop[m] = etop[m - 1];
+          etop[k] = i;
+          break;
+        }
+    }
+    char ebuf[512];
+    int eo = 0;
+    for (int k = 0; k < 5 && etop[k] >= 0 && eo < (int)sizeof(ebuf) - 64; k++) {
+      const nr_csirs_candidate_t *c3 = &g_st.cand[etop[k]];
+      eo += snprintf(ebuf + eo, sizeof(ebuf) - eo, "[row%u fd%u l%u epr=%.2f n=%u] ", c3->row,
+                     c3->freq_domain, c3->symb_l0, g_epr_sum[etop[k]] / g_epr_n[etop[k]], g_epr_n[etop[k]]);
+    }
+    LOG_A(PHY, "SENSING: CSIRS_BLIND EPRRANK slots=%llu (1.0 = no pilot) top: %s\n",
+          (unsigned long long)g_slots, ebuf);
   }
   const int idx = nr_csirs_blind_next(&g_st);
   if (idx < 0) {
@@ -163,16 +256,65 @@ void nr_csirs_blind_rt_slot(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot
    * scored an empty buffer and never fired (OTA 2026-09-14: 15 min, zero progress lines). */
   nr_slot_fep_ant(ue, fp, (unsigned)slot, (unsigned)c->symb_l0, 0, rxdataF, link_type_dl, 0, ue->common_vars.rxdata);
   const uint32_t off = (uint32_t)c->symb_l0 * (uint32_t)fp->ofdm_symbol_size;
-  const double rho = nr_csirs_blind_correlate((const int16_t *)&rxdataF_ant0[off],
-                                              (const int16_t *)&ref[off],
-                                              fp->ofdm_symbol_size);
+  /* Sub-band size for the channel-robust score, in OCCUPIED REs. 32 REs is ~11 RB for a density-3
+   * row (4 MHz at 30 kHz) -- narrow enough that the channel is flat across it, wide enough that
+   * noise stays well below a match: noise reads ~1.0, a perfect match sqrt(32)/0.886 = 6.4, and a
+   * realistic 10 dB-SNR match with some residual drift lands around 4-5. */
+#define CSIRS_BLIND_SUBBAND_RE 32
+  int n_used = 0;
+  const double rho = nr_csirs_blind_correlate_blocks((const int16_t *)&rxdataF_ant0[off],
+                                                     (const int16_t *)&ref[off],
+                                                     fp->ofdm_symbol_size, CSIRS_BLIND_SUBBAND_RE,
+                                                     &n_used);
   if (rho < 0.0) {
     return;   /* unscorable: this candidate maps no RE in this symbol */
   }
-  const double nullv = null_median();
-  const bool done = nr_csirs_blind_feed(&g_st, idx, absolute_slot, rho, nullv);
-  /* Feed the null AFTER scoring, so a candidate is never compared against itself. */
-  g_null[g_null_w] = rho;
+  /* SCALE-FREE SCORE. rho is not comparable across candidates -- noise gives ~0.89/sqrt(n_used), and
+   * n_used is 273 for a density-one row-2 candidate but 819 for density-three at 273 RB, so the old
+   * relative-to-the-null bar systematically picked the SMALLEST candidates. MEASURED: winners
+   * 0.19-0.22 = the expected max of ~950 noise draws at n_used=273; every confirmation this module
+   * produced OTA was that artefact. z = rho*sqrt(n_used) is ~0.89 for noise at any size and
+   * sqrt(n_used) (>16 here) for a true match, so the bar below is absolute, not relative. */
+  const double z = rho;   /* already normalised: ~1.0 noise, ~6.4 perfect, at any candidate size */
+  /* Sequence-free positional evidence, logged next to z: if z stays at noise while this shows
+   * periodic structure, the POSITIONS are right and the SEQUENCE (scramblingID != PCI) is wrong --
+   * which the correlation alone cannot distinguish from an empty hypothesis. */
+  const double epr = nr_csirs_blind_energy_ratio((const int16_t *)&rxdataF_ant0[off],
+                                                 (const int16_t *)&ref[off], fp->ofdm_symbol_size);
+  if (epr > 0.0 && idx < NR_CSIRS_BLIND_MAX_CAND) {
+    g_epr_sum[idx] += epr;
+    g_epr_n[idx]++;
+  }
+  /* SPAN PROFILE (rank mode). MEASURED 2026-09-19 on Swisscom: the best candidate scores rho 0.22
+   * against a 0.045 null -- 5x the null, but nowhere near the ~1 a correct known sequence must give,
+   * while its HIT RATE (93/1798 = 5.2 %) matches a real period-16 resource. The candidates fix
+   * start_rb=0 / nr_of_rbs=N_RB_DL, so a resource covering a NARROWER band dilutes the whole-symbol
+   * correlation by ~sqrt(real_RBs / N_RB_DL) and can never score high. Correlating G slices of the
+   * SAME buffers separates the two: a real resource is a contiguous block of high slices, a wrong
+   * SEQUENCE (e.g. scramb_id != PCI) is flat. Slices are FFT-index ranges, so a carrier-contiguous
+   * resource shows up as high slices at BOTH ends when it straddles DC. */
+  static uint64_t s_span_last;
+  if (g_rank && z > 3.0 && g_slots - s_span_last >= 200) {
+    s_span_last = g_slots;
+    enum { G = 12 };
+    const uint32_t step = (uint32_t)fp->ofdm_symbol_size / G;
+    char prof[256];
+    int po = 0;
+    for (int g = 0; g < G && po < (int)sizeof(prof) - 8; g++) {
+      const double r = nr_csirs_blind_correlate((const int16_t *)&rxdataF_ant0[off + (uint32_t)g * step],
+                                                (const int16_t *)&ref[off + (uint32_t)g * step], (int)step);
+      po += snprintf(prof + po, sizeof(prof) - po, "%s%.2f", g ? " " : "", (r < 0.0) ? 0.0 : r);
+    }
+    LOG_A(PHY, "SENSING: CSIRS_BLIND SPAN row%u fd%u l%u z=%.2f rho=%.3f n_re=%d epr=%.2f slices[%d]: %s\n",
+          c->row, c->freq_domain, c->symb_l0, z, rho, n_used, epr, G, prof);
+  }
+  /* ABSOLUTE bar: feed() tests score >= CSIRS_DETECT_MARGIN (3.0) * null, so a fixed null of 2.0
+   * demands z >= 6, i.e. ~6.7x the 0.89 noise level, at ANY candidate size. The measured null median
+   * is still tracked and logged, for visibility only. */
+  const double nullv = 4.0 / 3.0;   /* feed()'s 3x margin => confirm at z >= 4 (noise ~1) */
+  const bool done = nr_csirs_blind_feed(&g_st, idx, absolute_slot, z, nullv);
+  /* Keep the observed z population for the diagnostics. */
+  g_null[g_null_w] = z;
   g_null_w = (g_null_w + 1) % NULLWIN;
   if (g_null_n < NULLWIN) {
     g_null_n++;
@@ -197,6 +339,76 @@ void nr_csirs_blind_rt_slot(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot
       if (g_zp_null_n < NULLWIN) g_zp_null_n++;
     }
   }
+  /* ---- scramblingID sweep on a candidate whose POSITIONS already look like a pilot ---- */
+  if (g_ids < 0) {
+    const char *e = getenv("ISAC_CSIRS_BLIND_IDSWEEP");
+    g_ids = (e != NULL && atoi(e) != 0) ? 1 : 0;
+  }
+  /* PIN THE SWEEP TO ONE CANDIDATE. First cut advanced the id cursor on ANY slot whose candidate
+   * had epr > 2, but the round-robin serves a different candidate every slot, so a "full pass"
+   * spread its 1024 ids over many candidates and tested none of them -- the verdict it printed was
+   * meaningless. The sweep now locks onto the candidate with the highest MEAN epr (>= 32 samples,
+   * so the choice is not made on noise) and only advances while that same candidate is scored. */
+  if (g_ids && !g_id_solved && g_id_pin < 0) {
+    double best_m = 2.0;   /* nothing below 2x its neighbours is worth sweeping 1024 ids for */
+    for (int i = 0; i < g_st.n && i < NR_CSIRS_BLIND_MAX_CAND; i++) {
+      if (g_epr_n[i] < 32)
+        continue;
+      const double m = g_epr_sum[i] / g_epr_n[i];
+      if (m > best_m) {
+        best_m = m;
+        g_id_pin = i;
+      }
+    }
+    if (g_id_pin >= 0)
+      LOG_A(PHY, "SENSING: CSIRS_BLIND IDSWEEP pinned to row%u fd%u l%u (mean epr=%.2f over %u) -- "
+                 "sweeping 1024 scramblingIDs on THAT candidate only\n",
+            g_st.cand[g_id_pin].row, g_st.cand[g_id_pin].freq_domain, g_st.cand[g_id_pin].symb_l0,
+            best_m, g_epr_n[g_id_pin]);
+  }
+  if (g_ids && !g_id_solved && idx == g_id_pin && epr > 1.5) {
+    /* 32 ids per visit, not 8: the pinned candidate comes round only once per pass over the
+     * candidate list (~0.3 s), so at 8 the 1024 ids did not finish inside a 300 s capture and the
+     * run ended with no verdict at all. 32 ids is ~1.3 ms of extra work on a visit that already
+     * costs an FEP plus a reference generation. */
+    nr_csirs_candidate_t trial = *c;
+    for (int k = 0; k < 32; k++) {
+      trial.scramb_id = g_id_next;
+      g_id_next = (uint16_t)((g_id_next + 1) & 1023);
+      memset(&t_refbuf[0][off], 0, (size_t)fp->ofdm_symbol_size * sizeof(c16_t));
+      for (int pp = 1; pp < n_ports; pp++)
+        memset(&t_refbuf[pp][off], 0, (size_t)fp->ofdm_symbol_size * sizeof(c16_t));
+      const csi_mapping_parms_t tp = get_csi_mapping_parms(trial.row, trial.freq_domain, trial.symb_l0,
+                                                           trial.symb_l1);
+      nr_generate_csi_rs(fp, &tp, AMP, slot, trial.freq_density, trial.start_rb, trial.nr_of_rbs,
+                         trial.symb_l0, trial.symb_l1, trial.row, trial.scramb_id, 0, trial.cdm_type,
+                         refp);
+      int tn = 0;
+      const double tz = nr_csirs_blind_correlate_blocks((const int16_t *)&rxdataF_ant0[off],
+                                                        (const int16_t *)&ref[off], fp->ofdm_symbol_size,
+                                                        CSIRS_BLIND_SUBBAND_RE, &tn);
+      if (tz > g_id_best_z) {
+        g_id_best_z = tz;
+        g_id_best = trial.scramb_id;
+        if (tz >= 4.0) {   /* noise ~1.0; 1024 ids give a noise max near 2.5-3 */
+          g_id_solved = true;
+          LOG_A(PHY,
+                "SENSING: CSIRS_BLIND IDSWEEP SOLVED row%u fd%u l%u scramb_id=%u z=%.1f (PCI=%d, "
+                "epr=%.2f) -- csirs_monitor scramblingID is NOT the PCI\n",
+                trial.row, trial.freq_domain, trial.symb_l0, trial.scramb_id, tz, fp->Nid_cell, epr);
+          break;
+        }
+      }
+    }
+    if (!g_id_solved && (g_id_next % 256) == 0)
+      LOG_A(PHY, "SENSING: CSIRS_BLIND IDSWEEP progress %u/1024 ids, best so far id=%u z=%.2f (bar 4, noise ~1)\n",
+            (unsigned)g_id_next, g_id_best, g_id_best_z);
+    if (!g_id_solved && g_id_next == 0)
+      LOG_A(PHY, "SENSING: CSIRS_BLIND IDSWEEP full pass, no id reached z=4: best id=%u z=%.2f "
+                 "(row%u fd%u l%u epr=%.2f) -- sequence error is NOT the scramblingID\n",
+            g_id_best, g_id_best_z, c->row, c->freq_domain, c->symb_l0, epr);
+  }
+  /* the sweep above reused the shared reference buffer; the candidate's own reference is stale now */
   (void)done; // logged once, by the early return above on the next call
   if ((++g_slots % 20000) == 0) {
     LOG_I(PHY, "SENSING: CSIRS_BLIND slots=%llu candidates=%d null_median=%.3f confirmed=%d\n",

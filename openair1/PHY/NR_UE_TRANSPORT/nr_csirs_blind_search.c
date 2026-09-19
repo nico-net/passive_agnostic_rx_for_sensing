@@ -25,6 +25,21 @@ const uint16_t nr_csirs_blind_periods[NR_CSIRS_BLIND_N_PERIODS] = {
 
 double nr_csirs_blind_correlate(const int16_t *rx_re_im, const int16_t *ref_re_im, int n)
 {
+  return nr_csirs_blind_correlate_n(rx_re_im, ref_re_im, n, NULL);
+}
+
+/* MEASURED 2026-09-19 on a live cell, and it invalidated every confirmation this module had made:
+ * |rho| of N random complex pairs is ~0.89/sqrt(N), so the score depends on how many REs a candidate
+ * occupies (273 for row 2 density-one, 819 for density-three at 273 RB). The relative bar compared a
+ * candidate against the MEDIAN of the others, i.e. against a different N -- so the smallest
+ * candidates always won on chance alone. Observed: winners 0.19-0.22 = exactly the expected MAXIMUM
+ * of ~950 noise draws at N=273, null median 0.045 = noise at the larger N. Callers should therefore
+ * use rho * sqrt(n_used), which is ~0.89 for noise at ANY N and grows as sqrt(N) for a true match. */
+double nr_csirs_blind_correlate_n(const int16_t *rx_re_im, const int16_t *ref_re_im, int n, int *n_used)
+{
+  if (n_used != NULL) {
+    *n_used = 0;
+  }
   if (rx_re_im == NULL || ref_re_im == NULL || n <= 0) {
     return -1.0;
   }
@@ -45,6 +60,9 @@ double nr_csirs_blind_correlate(const int16_t *rx_re_im, const int16_t *ref_re_i
     e_rx += yr * yr + yi * yi;
     e_ref += xr * xr + xi * xi;
     used++;
+  }
+  if (n_used != NULL) {
+    *n_used = used;
   }
   if (used == 0 || e_rx <= 0.0 || e_ref <= 0.0) {
     /* An unoccupied reference, or a dead slot. -1 is NOT 0: a candidate that cannot be scored must
@@ -307,4 +325,108 @@ const nr_csirs_candidate_t *nr_csirs_blind_confirmed(const nr_csirs_blind_state_
   if (period) *period = st->period;
   if (offset) *offset = st->offset;
   return &st->cand[st->confirmed];
+}
+
+/* SEQUENCE-FREE positional evidence (2026-09-19). The correlation oracle needs the right sequence,
+ * which needs the right scramblingID -- assumed to be the PCI here, and dedicated RRC is free to set
+ * it otherwise, in which case a REAL resource scores like noise and is indistinguishable from an
+ * empty hypothesis. This statistic ignores the sequence entirely and asks only whether the REs the
+ * candidate's POSITIONS point at carry different power from their neighbours in the same RBs: mean
+ * |y|^2 on the pattern REs over mean |y|^2 on the other REs of the touched RBs. A boosted pilot
+ * reads > 1, an unused (zero-power) pattern < 1, and noise/PDSCH ~1. Restricted to touched RBs so an
+ * unallocated guard band cannot skew it. Pure. Returns -1.0 when either side has no REs. */
+double nr_csirs_blind_energy_ratio(const int16_t *rx_re_im, const int16_t *ref_re_im, int n)
+{
+  if (rx_re_im == NULL || ref_re_im == NULL || n <= 0) {
+    return -1.0;
+  }
+  double e_on = 0.0, e_off = 0.0;
+  int n_on = 0, n_off = 0;
+  for (int rb0 = 0; rb0 + 12 <= n; rb0 += 12) {
+    bool touched = false;
+    for (int i = rb0; i < rb0 + 12; i++) {
+      if (ref_re_im[2 * i] != 0 || ref_re_im[2 * i + 1] != 0) {
+        touched = true;
+        break;
+      }
+    }
+    if (!touched) {
+      continue;
+    }
+    for (int i = rb0; i < rb0 + 12; i++) {
+      const double yr = (double)rx_re_im[2 * i], yi = (double)rx_re_im[2 * i + 1];
+      const double e = yr * yr + yi * yi;
+      if (ref_re_im[2 * i] != 0 || ref_re_im[2 * i + 1] != 0) {
+        e_on += e;
+        n_on++;
+      } else {
+        e_off += e;
+        n_off++;
+      }
+    }
+  }
+  if (n_on == 0 || n_off == 0 || e_off <= 0.0) {
+    return -1.0;
+  }
+  return (e_on / n_on) / (e_off / n_off);
+}
+
+/* CHANNEL-ROBUST SCORE (2026-09-19). The flat correlation above is the wrong oracle on air: it sums
+ * y*conj(x) coherently across the WHOLE band, but the propagation channel rotates each subcarrier's
+ * phase, and over 273 RB at 30 kHz even 100 ns of delay spread turns the phase by tens of radians
+ * end to end. A perfectly correct sequence then averages to ~zero, which is exactly what was
+ * measured OTA: the sequence-free energy test finds a TRS pair at 4-6x its neighbours while the
+ * correlation sits at the noise floor for every scramblingID.
+ *
+ * So: correlate COHERENTLY inside sub-bands narrow enough for the channel to be flat, and combine
+ * the magnitudes NON-COHERENTLY across them. Same single pass, no FFT. The return is normalised so
+ * that noise reads ~1.0 at any candidate size and a perfect match reads ~sqrt(REs per block):
+ * mean_b(rho_b) * sqrt(n_per_block) / 0.886, with 0.886 = E|rho| for Rayleigh noise.
+ * `sub_res` is the number of consecutive REs per sub-band (of the reference's OCCUPIED REs). */
+double nr_csirs_blind_correlate_blocks(const int16_t *rx_re_im, const int16_t *ref_re_im, int n,
+                                       int sub_res, int *n_used)
+{
+  if (n_used != NULL) {
+    *n_used = 0;
+  }
+  if (rx_re_im == NULL || ref_re_im == NULL || n <= 0 || sub_res <= 0) {
+    return -1.0;
+  }
+  double acc_r = 0.0, acc_i = 0.0, e_rx = 0.0, e_ref = 0.0;
+  double rho_sum = 0.0;
+  int in_block = 0, blocks = 0, used = 0;
+  for (int i = 0; i <= n; i++) {
+    const bool flush = (i == n) || (in_block == sub_res);
+    if (flush && in_block > 0) {
+      if (e_rx > 0.0 && e_ref > 0.0) {
+        const double r = sqrt(acc_r * acc_r + acc_i * acc_i) / (sqrt(e_rx) * sqrt(e_ref));
+        rho_sum += (r > 1.0) ? 1.0 : r;
+        blocks++;
+      }
+      acc_r = acc_i = e_rx = e_ref = 0.0;
+      in_block = 0;
+    }
+    if (i == n) {
+      break;
+    }
+    const double xr = (double)ref_re_im[2 * i], xi = (double)ref_re_im[2 * i + 1];
+    if (xr == 0.0 && xi == 0.0) {
+      continue;
+    }
+    const double yr = (double)rx_re_im[2 * i], yi = (double)rx_re_im[2 * i + 1];
+    acc_r += yr * xr + yi * xi;
+    acc_i += yi * xr - yr * xi;
+    e_rx += yr * yr + yi * yi;
+    e_ref += xr * xr + xi * xi;
+    in_block++;
+    used++;
+  }
+  if (n_used != NULL) {
+    *n_used = used;
+  }
+  if (blocks == 0 || used == 0) {
+    return -1.0;
+  }
+  const double per_block = (double)used / (double)blocks;
+  return (rho_sum / blocks) * sqrt(per_block) / 0.886;
 }

@@ -2,6 +2,7 @@
 #include <cstdlib>
 #include <string>
 #include <vector>
+#include <random>
 #include <gtest/gtest.h>
 extern "C" {
 #include "nr_csirs_blind_search.h"
@@ -282,4 +283,69 @@ TEST(CsirsBlindZp, ConfirmsAPeriodicHoleAndRejectsAStructuralOne) {
   for (uint32_t slot = 0; slot < 400; slot += 4)
     EXPECT_FALSE(nr_csirs_blind_zp_feed(&st2, 0, slot, 0.98, 0.02));
   EXPECT_LT(st2.confirmed, 0);
+}
+
+/* ---- Channel robustness: the whole reason the OTA correlation read as noise ------------------
+ * MEASURED 2026-09-19 on a live 100 MHz cell: the sequence-free energy test found a TRS pair at
+ * 4-6x its neighbours while the flat correlation sat at the noise floor for EVERY scramblingID.
+ * The flat oracle sums y*conj(x) coherently across the whole band, but the channel rotates each
+ * subcarrier, so a CORRECT sequence averages to nothing. These two cases pin that down: same
+ * samples, same sequence, only a channel phase ramp added. */
+namespace {
+/* A candidate-shaped reference: every 4th RE occupied (density 3), QPSK-ish, over `n` REs. */
+void make_ref(std::vector<int16_t> &ref, int n)
+{
+  ref.assign((size_t)2 * n, 0);
+  std::mt19937 g(4242);
+  for (int i = 0; i < n; i += 4) {
+    ref[2 * i]     = (g() & 1) ? 800 : -800;
+    ref[2 * i + 1] = (g() & 1) ? 800 : -800;
+  }
+}
+/* rx = ref rotated by a linear phase ramp of `rad_total` radians end to end, plus noise. */
+void make_rx(std::vector<int16_t> &rx, const std::vector<int16_t> &ref, int n, double rad_total,
+             double noise_amp)
+{
+  rx.assign((size_t)2 * n, 0);
+  std::mt19937 g(99);
+  std::normal_distribution<double> nd(0.0, noise_amp);
+  for (int i = 0; i < n; i++) {
+    const double ph = rad_total * ((double)i / (double)n);
+    const double xr = ref[2 * i], xi = ref[2 * i + 1];
+    rx[2 * i]     = (int16_t)(xr * cos(ph) - xi * sin(ph) + nd(g));
+    rx[2 * i + 1] = (int16_t)(xr * sin(ph) + xi * cos(ph) + nd(g));
+  }
+}
+} // namespace
+
+TEST(CsirsBlindCorrelate, FlatCorrelationDiesUnderARealChannelButTheSubBandScoreSurvives)
+{
+  const int n = 3276;                 // one 273 RB symbol
+  std::vector<int16_t> ref, rx;
+  make_ref(ref, n);
+  make_rx(rx, ref, n, 40.0, 80.0);    // 40 rad end to end ~ 100 ns delay spread at 100 MHz
+
+  int used = 0;
+  const double flat = nr_csirs_blind_correlate_n(rx.data(), ref.data(), n, &used);
+  ASSERT_GT(used, 0);
+  const double z_flat = flat * sqrt((double)used);      // the old scale-free score
+  const double z_block = nr_csirs_blind_correlate_blocks(rx.data(), ref.data(), n, 32, &used);
+
+  EXPECT_LT(z_flat, 3.0);    // the CORRECT sequence looks like noise to the flat oracle
+  EXPECT_GT(z_block, 4.0);   // and is still found once the sub-bands are combined non-coherently
+}
+
+TEST(CsirsBlindCorrelate, SubBandScoreReadsAboutOneOnNoise)
+{
+  const int n = 3276;
+  std::vector<int16_t> ref, rx;
+  make_ref(ref, n);
+  make_rx(rx, ref, n, 0.0, 0.0);
+  std::mt19937 g(7);                       // replace rx with pure noise: wrong sequence entirely
+  std::normal_distribution<double> nd(0.0, 500.0);
+  for (auto &v : rx) v = (int16_t)nd(g);
+  int used = 0;
+  const double z = nr_csirs_blind_correlate_blocks(rx.data(), ref.data(), n, 32, &used);
+  EXPECT_GT(used, 0);
+  EXPECT_LT(z, 2.5);                       // noise floor ~1.0; the confirmation bar is 4
 }

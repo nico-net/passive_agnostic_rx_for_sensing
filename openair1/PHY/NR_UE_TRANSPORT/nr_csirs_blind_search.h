@@ -68,6 +68,23 @@ typedef struct {
  * Pure: no PHY state, no allocation. `n` is the number of REs in both buffers. */
 double nr_csirs_blind_correlate(const int16_t *rx_re_im, const int16_t *ref_re_im, int n);
 
+/** Same, and reports how many REs the reference occupied. USE THIS: rho alone is not comparable
+ * across candidates (|rho| ~ 0.89/sqrt(n_used) for noise), so the scale-free score is
+ * rho * sqrt(n_used) -- ~0.89 for noise at any size, sqrt(n_used) for a perfect match. */
+double nr_csirs_blind_correlate_n(const int16_t *rx_re_im, const int16_t *ref_re_im, int n, int *n_used);
+
+/** Sequence-free positional evidence: mean power ON the candidate's REs over mean power on the
+ * other REs of the RBs it touches. >1 boosted pilot, <1 zero-power, ~1 noise/PDSCH. Needs no
+ * scramblingID, so it still speaks when the sequence hypothesis is wrong. Pure. */
+double nr_csirs_blind_energy_ratio(const int16_t *rx_re_im, const int16_t *ref_re_im, int n);
+
+/** Channel-robust score: coherent inside sub-bands of `sub_res` occupied REs, magnitudes combined
+ * across sub-bands. Noise reads ~1.0 at any candidate size; a correct sequence reads
+ * ~sqrt(REs per sub-band). Use this OTA -- the flat whole-band correlation is destroyed by the
+ * channel's phase ramp over a wide carrier. Pure. */
+double nr_csirs_blind_correlate_blocks(const int16_t *rx_re_im, const int16_t *ref_re_im, int n,
+                                       int sub_res, int *n_used);
+
 /// Periodicities TS 38.331 CSI-ResourcePeriodicityAndOffset admits, in slots.
 #define NR_CSIRS_BLIND_N_PERIODS 13
 extern const uint16_t nr_csirs_blind_periods[NR_CSIRS_BLIND_N_PERIODS];
