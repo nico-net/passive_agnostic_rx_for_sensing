@@ -615,7 +615,34 @@ static void pdsch_sweep_maybe_enable(const nr_pdcch_blind_monitor_cfg_t *cfg)
 // different, faster-ticking counter than this one's real candidate-bearing occasions); a real
 // length has been reached within tens of occasions in every live capture measured so far, so this
 // is generous headroom, not a tuned minimum.
-#define AUTODISCOVER_LENGTH_SWEEP_MAX_OCCASIONS 500
+/* Occasions spent on one CORESET mapping hypothesis before moving to the next.
+ *
+ * 500 was sized for a sweep with NO GROUND TRUTH: the only way to judge a hypothesis was whether the
+ * distribution of CRC passes looked non-random, which needs a large sample. That premise changed
+ * 2026-09-20 -- the bootstrap now supplies a REAL RNTI (measured: bootstrap_rnti=0x15e1, from a
+ * TC-RNTI harvested in the proven CORESET#0), so each hypothesis is a KNOWN-ANSWER test: the correct
+ * mapping recovers that RNTI almost at once, a wrong one never does. 500 occasions to establish that
+ * is enormously conservative.
+ *
+ * It matters because the sweep is serial over the catalogue and rate-limited by AIR TIME, not by
+ * compute: MEASURED 2026-09-20, ~3 hypotheses/min, so 271 mappings take ~56 min per pass -- longer
+ * than a TC-RNTI stays addressable in the dedicated search space, which is self-defeating.
+ *
+ * ISAC_SWEEP_OCCASIONS overrides it; default unchanged at 500 so no existing run behaves differently.
+ * The structural fix is to test MANY hypotheses per occasion (same LLRs, 271 deinterleavings, batched
+ * polar decodes -- a GPU job) which collapses a pass from 135,500 occasions to ~500. This knob is the
+ * cheap approximation of that. */
+static inline int autodiscover_sweep_budget(void)
+{
+  static int s_budget = -1;
+  if (s_budget < 0) {
+    const char *e = getenv("ISAC_SWEEP_OCCASIONS");
+    const int v = (e != NULL) ? atoi(e) : 0;
+    s_budget = (v > 0) ? v : 500;
+  }
+  return s_budget;
+}
+#define AUTODISCOVER_LENGTH_SWEEP_MAX_OCCASIONS autodiscover_sweep_budget()
 /* ISAC_DCI_SWEEP_STRIDE: test every Nth dci_length per occasion instead of all 34 (the sweep's
  * `stride`, see nr_pdcch_dci_length_sweep.h). The budget above counts ROUNDS, so each length still
  * gets its 500 visits -- rotation only spreads them in time.
@@ -1451,6 +1478,51 @@ void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_pr
     }
   }
   const nr_pdcch_blind_monitor_cfg_t *cfg = nr_pdcch_blind_monitor_get_cfg();
+
+  /* ---- CSS0 INTERLEAVE -------------------------------------------------------------------------
+   * The snapshot taken in nr_pdcch_blind_monitor.c (g_css0_cfg) was built for this and NOTHING EVER
+   * CONSUMED IT: nr_pdcch_blind_monitor_css0_cfg() was declared, defined, and called from nowhere.
+   * So the two modes were mutually exclusive in practice, which is why (measured 2026-09-20,
+   * Swisscom PCI 382):
+   *   autodiscover=0 -> CSS0 gets every occasion: SI=10000, TC=16, seeds flow, no dedicated search
+   *   autodiscover=1 -> CSS0 never runs at all:   SI=0,     TC=0,  no seeds, dedicated cannot verify
+   * and the dedicated search needs BOTH at once -- CSS0 to harvest a verified RNTI, the dedicated
+   * scan to use it. The single SIB1 seen in an autodiscover=1 run came from the autoconf phase
+   * before the dedicated search took over, not from an interleave.
+   *
+   * Spending 1 occasion in ISAC_CSS0_EVERY on CSS0 is cheap: CSS0 yielded 10000 SI accepts when it
+   * had 100 % of occasions, so a fraction still harvests plentifully, and the dedicated sweep keeps
+   * the rest.
+   *
+   * SAFE AGAINST THE DOCUMENTED HAZARD: the snapshot carries autodiscover=0, and every dedicated
+   * bookkeeping site (extent_step, the length sweep, the lookahead lanes) is gated on
+   * cfg->autodiscover and only then writes g_cfg. Under the snapshot none of them run, so an
+   * interleaved occasion cannot silently revert a hypothesis advance -- which is precisely what the
+   * snapshot comment warned about. cfg is read-only for the occasion; nothing is restored because
+   * nothing is mutated. */
+  {
+    static int s_css0_every = -1;
+    if (s_css0_every < 0) {
+      const char *e = getenv("ISAC_CSS0_EVERY");
+      s_css0_every = (e != NULL && atoi(e) >= 0) ? atoi(e) : 8;
+    }
+    if (s_css0_every > 0 && cfg->autodiscover) {
+      const nr_pdcch_blind_monitor_cfg_t *css0 = nr_pdcch_blind_monitor_css0_cfg();
+      if (css0 != NULL) {
+        static _Atomic uint64_t s_occ = 0;
+        const uint64_t n = atomic_fetch_add_explicit(&s_occ, 1, memory_order_relaxed);
+        if ((n % (uint64_t)s_css0_every) == 0) {
+          cfg = css0;
+          static _Atomic uint64_t s_css0_runs = 0;
+          const uint64_t r = atomic_fetch_add_explicit(&s_css0_runs, 1, memory_order_relaxed) + 1;
+          if (r == 1 || (r % 20000) == 0)
+            LOG_A(PHY, "SENSING: CSS0 interleave: %llu occasions on CORESET#0 (1 in %d)\n",
+                  (unsigned long long)r, s_css0_every);
+        }
+      }
+    }
+  }
+
   nr_pdcch_ss_registry_occasion(cfg);
   nr_pdsch_passive_queue_flush(); /* previous slot's grants go to the consumers together */
   if (nr_agnostic_v2()) {

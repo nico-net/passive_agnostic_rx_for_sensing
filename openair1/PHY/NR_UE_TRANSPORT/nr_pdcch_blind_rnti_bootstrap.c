@@ -74,10 +74,33 @@ static int boot_slot_for_new(uint32_t now_abs_slot)
    * other 15 sat frozen until they aged out. A 16-entry table was doing the work of a 1-entry one,
    * which is exactly the wrong behaviour when the thing we are waiting for is any RNTI recurring.
    * Evicting by age keeps a rolling window of the most recent sightings instead. */
-  int worst = 0;
+  /* NEVER EVICT A TRUSTED ENTRY FOR AN UNTRUSTED ONE. MEASURED 2026-09-20 (Swisscom PCI 382, the
+   * CSS0 interleave running at 1 in 2): the table filled with 16 entries whose RNTIs were spread
+   * uniformly over the 16-bit space -- USS noise from the dedicated hypothesis search -- and EVERY
+   * entry read age=0, i.e. the whole table was being overwritten continuously. The dedicated search
+   * produced 142 accepts against 4 real TC-RNTIs from CORESET#0, so the seeds were evicted by noise
+   * before anything could use them, and live stayed 0 despite TC>0.
+   *
+   * A trusted entry came from a CORESET whose mapping is proven; an untrusted one is a random CRC
+   * pass at a guessed CCE location. Ranking them equally for a scarce slot throws away the only
+   * identities worth keeping. Untrusted entries are therefore evicted first, and a trusted entry is
+   * displaced only when every slot is trusted -- in which case the oldest goes, as before. */
+  int worst = -1;
   for (int i = 0; i < NR_PDCCH_BLIND_MAX_UE; i++) {
     if (g_boot[i].sightings == 0) {
       return i;
+    }
+    if (!g_boot[i].trusted) {
+      if (worst < 0 || g_boot[worst].trusted) {
+        worst = i;            /* first untrusted candidate outranks any trusted one */
+        continue;
+      }
+    } else if (worst >= 0 && !g_boot[worst].trusted) {
+      continue;               /* already holding an untrusted candidate: keep preferring it */
+    }
+    if (worst < 0) {
+      worst = i;
+      continue;
     }
     if (g_boot[i].sightings != g_boot[worst].sightings) {
       if (g_boot[i].sightings < g_boot[worst].sightings) {
