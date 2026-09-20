@@ -1143,7 +1143,7 @@ typedef struct {
  * which is always correct because the scorer falls back per item. */
 #define LANE_BATCH_VSTRIDE   (LANE_BATCH_AL_MAX * 108)  /* AL8: 864 REs */
 #define LANE_BATCH_MAX_VEC   2048           /* distinct candidates across all lanes */
-#define LANE_BATCH_MAX_ITEMS 49152          /* (candidate x length) pairs; must be <= NPG_MAX_ITEMS */
+#define LANE_BATCH_MAX_ITEMS 131072          /* (candidate x length) pairs; must be <= NPG_MAX_ITEMS */
 #define LANE_BATCH_MAX_LEN   64
 
 typedef struct {
@@ -1156,6 +1156,16 @@ typedef struct {
  * the documented cause of an AVX alignment fault in this project (per-antenna CFR buffer, same
  * shape of bug). Only the pointer is thread-local; allocated once per thread, 32-byte aligned. */
 static __thread int16_t *g_lb_vec = NULL;
+/* HEAP, not __thread: at 131072 items these six total ~2.4 MB, and a TLS block that size is the
+ * documented shape of the AVX alignment fault this project already hit. One allocation, sliced. */
+static __thread uint16_t *g_lb_vidx = NULL;
+static __thread uint16_t *g_lb_len  = NULL;
+static __thread uint8_t  *g_lb_al   = NULL;
+static __thread uint32_t *g_lb_crc  = NULL;
+static __thread uint64_t *g_lb_pl   = NULL;
+static __thread uint8_t  *g_lb_ok   = NULL;
+static __thread void     *g_lb_pool = NULL;
+
 static bool lane_batch_vec_ready(void)
 {
   if (g_lb_vec != NULL)
@@ -1163,15 +1173,27 @@ static bool lane_batch_vec_ready(void)
   void *m = NULL;
   if (posix_memalign(&m, 32, sizeof(int16_t) * (size_t)LANE_BATCH_MAX_VEC * LANE_BATCH_VSTRIDE) != 0)
     return false;
+  const size_t n = (size_t)LANE_BATCH_MAX_ITEMS;
+  const size_t need = n * (sizeof(uint16_t) * 2 + sizeof(uint8_t) * 2 + sizeof(uint32_t) + sizeof(uint64_t))
+                      + 6 * 32;   /* slack so each slice can start 32-byte aligned */
+  void *q = NULL;
+  if (posix_memalign(&q, 32, need) != 0) {
+    free(m);
+    return false;
+  }
+  g_lb_pool = q;
+  uintptr_t c = (uintptr_t)q;
+  #define LB_SLICE(T, cnt) ({ c = (c + 31u) & ~(uintptr_t)31u; T *r_ = (T *)c; c += sizeof(T) * (cnt); r_; })
+  g_lb_vidx = LB_SLICE(uint16_t, n);
+  g_lb_len  = LB_SLICE(uint16_t, n);
+  g_lb_al   = LB_SLICE(uint8_t,  n);
+  g_lb_crc  = LB_SLICE(uint32_t, n);
+  g_lb_pl   = LB_SLICE(uint64_t, n);
+  g_lb_ok   = LB_SLICE(uint8_t,  n);
+  #undef LB_SLICE
   g_lb_vec = (int16_t *)m;
   return true;
 }
-static __thread uint16_t g_lb_vidx[LANE_BATCH_MAX_ITEMS];
-static __thread uint16_t g_lb_len[LANE_BATCH_MAX_ITEMS];
-static __thread uint8_t  g_lb_al[LANE_BATCH_MAX_ITEMS];
-static __thread uint32_t g_lb_crc[LANE_BATCH_MAX_ITEMS];
-static __thread uint64_t g_lb_pl[LANE_BATCH_MAX_ITEMS];
-static __thread uint8_t  g_lb_ok[LANE_BATCH_MAX_ITEMS];
 static __thread lane_batch_slot_t g_lb_slot[NR_PDCCH_LOOKAHEAD_MAX];
 static __thread int g_lb_n_items, g_lb_n_vec;
 static __thread int g_lb_flushed;   /* 1 once decode_vec has run for this occasion */
@@ -1231,6 +1253,8 @@ static bool lane_batch_add(int lane, const nr_pdcch_autodiscover_sweep_ctx_t *ct
 static void lane_batch_flush(void)
 {
   g_lb_flushed = 0;
+  if (g_lb_vec == NULL || g_lb_ok == NULL)
+    return;                                  /* nothing was ever added on this thread */
   { /* WHY-NOT diagnostic: a silent early return here costs double work (batch built, CPU still
      * decodes), so report the reason once per 5000 occasions rather than guessing. */
     static _Atomic uint64_t s_why = 0;
@@ -1272,7 +1296,7 @@ static __thread nr_pdcch_lookahead_geom_t         g_lane_geom_snap[NR_PDCCH_LOOK
 /* Cached result for (lane, candidate, length); false = decode it on the CPU as before. */
 static bool lane_batch_get(const void *ctx, int cand_idx, int dci_length, uint32_t *crc, uint64_t *payload)
 {
-  if (!g_lb_flushed)
+  if (!g_lb_flushed || g_lb_ok == NULL)
     return false;
   const nr_pdcch_autodiscover_sweep_ctx_t *c = (const nr_pdcch_autodiscover_sweep_ctx_t *)ctx;
   if (c < &g_lane_sweep_ctx[0] || c >= &g_lane_sweep_ctx[NR_PDCCH_LOOKAHEAD_MAX])
@@ -1910,6 +1934,7 @@ void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_pr
    * interleaved occasion cannot silently revert a hypothesis advance -- which is precisely what the
    * snapshot comment warned about. cfg is read-only for the occasion; nothing is restored because
    * nothing is mutated. */
+  bool css0_occasion = false;   /* true when cfg below is the CORESET#0 snapshot, not the dedicated cfg */
   {
     static int s_css0_every = -1;
     if (s_css0_every < 0) {
@@ -1923,6 +1948,7 @@ void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_pr
         const uint64_t n = atomic_fetch_add_explicit(&s_occ, 1, memory_order_relaxed);
         if ((n % (uint64_t)s_css0_every) == 0) {
           cfg = css0;
+          css0_occasion = true;
           static _Atomic uint64_t s_css0_runs = 0;
           const uint64_t r = atomic_fetch_add_explicit(&s_css0_runs, 1, memory_order_relaxed) + 1;
           if (r == 1 || (r % 20000) == 0)
@@ -2302,8 +2328,14 @@ void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_pr
   {
     /* One-shot: a scan ladder that silently covers the wrong format/size finds nothing and reports
      * no error, which is the same failure mode the aggregation-level ladder already had. */
+    /* Must report the DEDICATED config. The CSS0 interleave swaps cfg to the CORESET#0 snapshot on
+     * every s_css0_every'th occasion INCLUDING occasion 0, and this log is one-shot -- so it fired
+     * on the snapshot and printed "1_1=off (len=46 bwp=48)": 1_0-exclusive at CORESET#0's 48 RB.
+     * Both fields were then read as evidence that format 1_1 was disabled and that the dedicated
+     * sweep was sized against a 48 RB BWP. Neither was true (2026-09-20). The whole point of this
+     * line is to make a wrong ladder visible at startup, so printing the wrong config defeats it. */
     static int s_fmt_logged = 0;
-    if (!s_fmt_logged) {
+    if (!s_fmt_logged && !css0_occasion) {
       s_fmt_logged = 1;
       LOG_I(PHY,
             "SENSING: blind PDCCH formats: 1_1=%s (len=%u bwp=%u) 1_0=%s (len=%u n_rb_riv=%u rb_offset=%d "

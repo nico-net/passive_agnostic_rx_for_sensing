@@ -21,7 +21,7 @@
  * unscrambled: strictly slower than not batching at all, and silent. Both lower layers
  * (npc_decode_batch_vec, npc_gpu_decode) size their host/device buffers off n, so only this
  * shim's static arrays needed raising (~590 kB BSS). */
-#define NPG_MAX_ITEMS 49152 /* dlsweep alone needs 64 cand x 34 len = 2176; the lane batch needs all K */
+#define NPG_MAX_ITEMS 131072 /* dlsweep alone needs 64 cand x 34 len = 2176; the lane batch needs all K */
 
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 
