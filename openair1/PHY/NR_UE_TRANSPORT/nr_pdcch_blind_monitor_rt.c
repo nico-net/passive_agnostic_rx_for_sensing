@@ -84,6 +84,7 @@ extern _Atomic long nr_ue_diag_producer_absolute_slot;
 #include "executables/nr-uesoftmodem.h"                   // get_nrUE_params()->Tpool
 #include "common/utils/threadPool/thread-pool.h"          // tpool_t, pushTpool, task_t
 #include "common/utils/threadPool/task_ans.h"             // task_ans_t, init/join/completed_task_ans
+#include "nr_polar_gpu.h"                                 // SWEEP GPU BATCH: nr_gpu_polar_load/decode_vec
 
 #define NR_PDCCH_BLIND_RE_PER_RB_OUT_DMRS 9 // == dci_nr.c's file-local RE_PER_RB_OUT_DMRS #define
 // Spec maxima for a CORESET: the frequency-domain bitmap addresses 6-PRB groups over the BWP, so at
@@ -1053,6 +1054,272 @@ typedef struct {
   uint16_t dmrs_scrambling_id;
 } nr_pdcch_autodiscover_sweep_ctx_t;
 
+/* ---- LANE BATCH ---------------------------------------------------------------------------------
+ * ONE GPU call per OCCASION instead of one per LANE.
+ *
+ * MEASURED 2026-09-20 (Swisscom PCI 382, K=96, GPU on, 100 % cache hit, 0 misses):
+ *     30,000,000 decodes / 2,866 occasions   = ~10,500 decodes per occasion
+ *     96 calls/occasion x ~90 us per call    = ~8,640 us
+ *     prepass measured                        =  8,756 us
+ * i.e. the per-CALL overhead accounts for essentially all of prepass, and the decodes themselves are
+ * nearly free. That is also why growing the batch 5.4x (238 -> 1292 items) changed the time by 0.6 %:
+ * items are cheap, calls are not. At 238 items a call is actually SLOWER than decoding on the CPU
+ * (~33 us), so the per-lane integration was a pessimisation; the device only pays above ~640 items.
+ *
+ * So all lanes' (candidate x length) grids are gathered into ONE batch per occasion. The lane loop is
+ * split: phase A builds each lane's candidate list, then one flush decodes everything, then phase B
+ * runs each lane's sweep against the cache.
+ *
+ * Lanes are AL2-only (ln_L = 2 in the lane loop), so one vector is 2*108 = 216 int16.
+ * Bounded by BOTH item and vector caps; anything that does not fit is simply left for the CPU path,
+ * which is always correct because the scorer falls back per item. */
+#define LANE_BATCH_VSTRIDE   216            /* AL2: 2 * 108 REs */
+#define LANE_BATCH_MAX_VEC   1024           /* distinct candidates across all lanes */
+#define LANE_BATCH_MAX_ITEMS 24576          /* (candidate x length) pairs; must be <= NPG_MAX_ITEMS */
+#define LANE_BATCH_MAX_LEN   64
+
+typedef struct {
+  int      base;        /* first item index for this lane, -1 = not in the batch */
+  int      n_cand;
+  int      min_len, max_len;
+} lane_batch_slot_t;
+
+static __thread int16_t  g_lb_vec[LANE_BATCH_MAX_VEC * LANE_BATCH_VSTRIDE];
+static __thread uint16_t g_lb_vidx[LANE_BATCH_MAX_ITEMS];
+static __thread uint16_t g_lb_len[LANE_BATCH_MAX_ITEMS];
+static __thread uint8_t  g_lb_al[LANE_BATCH_MAX_ITEMS];
+static __thread uint32_t g_lb_crc[LANE_BATCH_MAX_ITEMS];
+static __thread uint64_t g_lb_pl[LANE_BATCH_MAX_ITEMS];
+static __thread uint8_t  g_lb_ok[LANE_BATCH_MAX_ITEMS];
+static __thread lane_batch_slot_t g_lb_slot[NR_PDCCH_LOOKAHEAD_MAX];
+static __thread int g_lb_n_items, g_lb_n_vec;
+static __thread int g_lb_flushed;   /* 1 once decode_vec has run for this occasion */
+
+static void lane_batch_reset(void)
+{
+  g_lb_n_items = 0;
+  g_lb_n_vec   = 0;
+  g_lb_flushed = 0;
+  for (int i = 0; i < NR_PDCCH_LOOKAHEAD_MAX; i++)
+    g_lb_slot[i].base = -1;
+}
+
+/* Add one lane's (candidate x length) grid. Unscrambles each candidate ONCE -- the unscrambling
+ * depends on (e_rx, L, dmrs_id) and not on dci_length, so doing it inside the length loop repeated
+ * it 34x for identical output. Returns false when the lane does not fit; that lane then uses the
+ * CPU path untouched. */
+static bool lane_batch_add(int lane, const nr_pdcch_autodiscover_sweep_ctx_t *ctx, int min_len, int max_len)
+{
+  if (lane < 0 || lane >= NR_PDCCH_LOOKAHEAD_MAX || ctx == NULL || ctx->n_cand <= 0)
+    return false;
+  if (min_len < 0 || max_len >= LANE_BATCH_MAX_LEN || max_len < min_len)
+    return false;
+  const int n_len = max_len - min_len + 1;
+  if (g_lb_n_vec + ctx->n_cand > LANE_BATCH_MAX_VEC)
+    return false;
+  if (g_lb_n_items + ctx->n_cand * n_len > LANE_BATCH_MAX_ITEMS)
+    return false;
+
+  const int base = g_lb_n_items;
+  for (int c = 0; c < ctx->n_cand; c++) {
+    const nr_pdcch_autodiscover_cand_t *cd = &ctx->cand[c];
+    if ((int)cd->L * 108 > LANE_BATCH_VSTRIDE)
+      return false;                       /* not AL2: leave the whole lane on the CPU path */
+    const int v = g_lb_n_vec + c;
+    nr_pdcch_unscrambling((c16_t *)cd->e_rx, ctx->scrambling_rnti, (uint32_t)(cd->L * 108),
+                          ctx->dmrs_scrambling_id, &g_lb_vec[v * LANE_BATCH_VSTRIDE]);
+    for (int l = min_len; l <= max_len; l++) {
+      const int i = g_lb_n_items + c * n_len + (l - min_len);
+      g_lb_vidx[i] = (uint16_t)v;
+      g_lb_len[i]  = (uint16_t)l;
+      g_lb_al[i]   = cd->L;
+    }
+  }
+  g_lb_slot[lane].base    = base;
+  g_lb_slot[lane].n_cand  = ctx->n_cand;
+  g_lb_slot[lane].min_len = min_len;
+  g_lb_slot[lane].max_len = max_len;
+  g_lb_n_vec   += ctx->n_cand;
+  g_lb_n_items += ctx->n_cand * n_len;
+  return true;
+}
+
+/* One device call for every lane gathered this occasion. */
+static void lane_batch_flush(void)
+{
+  g_lb_flushed = 0;
+  { /* WHY-NOT diagnostic: a silent early return here costs double work (batch built, CPU still
+     * decodes), so report the reason once per 5000 occasions rather than guessing. */
+    static _Atomic uint64_t s_why = 0;
+    const uint64_t w = atomic_fetch_add_explicit(&s_why, 1, memory_order_relaxed) + 1;
+    if (w == 1 || (w % 5000) == 0) {
+      const nr_gpu_polar_api_t *a = nr_gpu_polar_load();
+      LOG_A(PHY, "SENSING: LANEBATCH-WHY items=%d vec=%d api=%s\n",
+            g_lb_n_items, g_lb_n_vec, (a && a->decode_vec) ? "yes" : "NO");
+    }
+  }
+  if (g_lb_n_items <= 0 || g_lb_n_vec <= 0)
+    return;
+  const nr_gpu_polar_api_t *api = nr_gpu_polar_load();
+  if (api == NULL || api->decode_vec == NULL)
+    return;                                  /* no GPU: every lane falls back to CPU, unchanged */
+  memset(g_lb_ok, 0, (size_t)g_lb_n_items);
+  const int m = api->decode_vec(g_lb_vec, LANE_BATCH_VSTRIDE, g_lb_n_vec, g_lb_vidx, g_lb_len,
+                                g_lb_al, g_lb_n_items, g_lb_crc, g_lb_pl, g_lb_ok);
+  if (m < 0)
+    return;
+  g_lb_flushed = 1;
+  static _Atomic uint64_t s_calls = 0, s_items = 0;
+  const uint64_t n = atomic_fetch_add_explicit(&s_calls, 1, memory_order_relaxed) + 1;
+  atomic_fetch_add_explicit(&s_items, (uint64_t)g_lb_n_items, memory_order_relaxed);
+  if (n == 1 || (n % 2000) == 0)
+    LOG_A(PHY, "SENSING: LANEBATCH call #%llu: %d items, %d vectors, %llu items total (1 call/occasion)\n",
+          (unsigned long long)n, g_lb_n_items, g_lb_n_vec,
+          (unsigned long long)atomic_load_explicit(&s_items, memory_order_relaxed));
+}
+
+/* Per-lane sweep contexts live in an array so the scorer can recover its lane index by pointer
+ * arithmetic -- O(1), and it keeps nr_pdcch_autodiscover_sweep_ctx_t unchanged. */
+static __thread nr_pdcch_autodiscover_sweep_ctx_t g_lane_sweep_ctx[NR_PDCCH_LOOKAHEAD_MAX];
+static __thread nr_pdcch_autodiscover_cand_t      g_lane_disc_cand[NR_PDCCH_LOOKAHEAD_MAX][45];
+static __thread int                               g_lane_disc_n[NR_PDCCH_LOOKAHEAD_MAX];
+static __thread uint8_t                           g_lane_needs_sweep[NR_PDCCH_LOOKAHEAD_MAX];
+static __thread nr_pdcch_lookahead_geom_t         g_lane_geom_snap[NR_PDCCH_LOOKAHEAD_MAX];
+
+/* Cached result for (lane, candidate, length); false = decode it on the CPU as before. */
+static bool lane_batch_get(const void *ctx, int cand_idx, int dci_length, uint32_t *crc, uint64_t *payload)
+{
+  if (!g_lb_flushed)
+    return false;
+  const nr_pdcch_autodiscover_sweep_ctx_t *c = (const nr_pdcch_autodiscover_sweep_ctx_t *)ctx;
+  if (c < &g_lane_sweep_ctx[0] || c >= &g_lane_sweep_ctx[NR_PDCCH_LOOKAHEAD_MAX])
+    return false;                            /* not a lane context (e.g. the primary DL sweep) */
+  const int lane = (int)(c - &g_lane_sweep_ctx[0]);
+  const lane_batch_slot_t *sl = &g_lb_slot[lane];
+  if (sl->base < 0 || cand_idx < 0 || cand_idx >= sl->n_cand)
+    return false;
+  if (dci_length < sl->min_len || dci_length > sl->max_len)
+    return false;
+  const int n_len = sl->max_len - sl->min_len + 1;
+  const int i = sl->base + cand_idx * n_len + (dci_length - sl->min_len);
+  if (i < 0 || i >= g_lb_n_items || !g_lb_ok[i])
+    return false;
+  *crc     = g_lb_crc[i];
+  *payload = g_lb_pl[i];
+  return true;
+}
+
+/* ---- SWEEP GPU BATCH ---------------------------------------------------------------------------
+ * The DCI length sweep is 99 % of an occasion, and it was doing two things wrong per item.
+ *
+ * MEASURED 2026-09-20 (Swisscom PCI 382, K=64): prepass 12618us mean = 76 % of a 16.6 ms occasion,
+ * with over_slot(500us) = 32393/32393 -- every occasion overran its slot ~33x, which is why K=64
+ * froze the host and the sweep never left candidate 1/133. prepass SPANS the lane loop, and each
+ * lane runs a full sweep: 34 lengths x up to 45 candidates. The `decode` bucket (81us) times only
+ * Phase 1 of the primary config, so it hid this entirely.
+ *
+ * Two fixes, both here:
+ *
+ * 1. UNSCRAMBLE ONCE PER CANDIDATE. nr_pdcch_unscrambling() depends on (e_rx, L, dmrs_id) -- NOT on
+ *    dci_length -- yet it sat inside the length loop and ran 34 times per candidate for identical
+ *    output. Same redundancy class as the per-extent LLR hoist, which took fep_llr from ~98 % to
+ *    0.2 % of the occasion.
+ *
+ * 2. ONE GPU BATCH PER SWEEP. Every (candidate, length) pair is an independent polar decode, so the
+ *    whole grid goes to npg_decode_vec() in a single call: n_vec distinct unscrambled vectors,
+ *    vidx[] selecting which one each item uses. That is exactly the shape this API was built for.
+ *    It also avoids the failure mode of the earlier GPU A/B on this rig (20x SLOWER because
+ *    consumers blocked and the batch degenerated to 1): here 1530 items are in hand at once.
+ *
+ * Falls back to the CPU path whenever the GPU is absent, NR_GPU_POLAR is unset, the grid does not
+ * fit, or any item fails -- the scorer below checks `ok` per item and decodes that one on CPU. So
+ * this can only be faster, never wrong. */
+#define SWEEP_BATCH_MAX_CAND 45
+#define SWEEP_BATCH_MAX_LEN  64
+#define SWEEP_BATCH_VSTRIDE  (16 * 108)
+
+typedef struct {
+  const void *ctx;                 /* which sweep context this cache belongs to */
+  int         n_cand, min_len, max_len;
+  uint8_t     valid;
+  uint8_t     ok[SWEEP_BATCH_MAX_CAND][SWEEP_BATCH_MAX_LEN];
+  uint32_t    crc[SWEEP_BATCH_MAX_CAND][SWEEP_BATCH_MAX_LEN];
+  uint64_t    payload[SWEEP_BATCH_MAX_CAND][SWEEP_BATCH_MAX_LEN];
+} sweep_batch_cache_t;
+
+static __thread sweep_batch_cache_t g_sweep_cache;
+
+/* Unscramble each candidate once, then decode the whole (candidate x length) grid in one GPU call.
+ * Returns true when the cache is populated; false leaves the scorer on its original CPU path. */
+static bool sweep_gpu_prefill(const nr_pdcch_autodiscover_sweep_ctx_t *ctx, int min_len, int max_len)
+{
+  g_sweep_cache.valid = 0;
+  if (ctx == NULL || ctx->n_cand <= 0 || ctx->n_cand > SWEEP_BATCH_MAX_CAND)
+    return false;
+  if (min_len < 0 || max_len >= SWEEP_BATCH_MAX_LEN || max_len < min_len)
+    return false;
+  const nr_gpu_polar_api_t *api = nr_gpu_polar_load();
+  if (api == NULL || api->decode_vec == NULL)
+    return false;
+
+  const int n_len = max_len - min_len + 1;
+  const int n_items = ctx->n_cand * n_len;
+  static __thread int16_t  vec[SWEEP_BATCH_MAX_CAND * SWEEP_BATCH_VSTRIDE];
+  static __thread uint16_t vidx[SWEEP_BATCH_MAX_CAND * SWEEP_BATCH_MAX_LEN];
+  static __thread uint16_t lens[SWEEP_BATCH_MAX_CAND * SWEEP_BATCH_MAX_LEN];
+  static __thread uint8_t  als[SWEEP_BATCH_MAX_CAND * SWEEP_BATCH_MAX_LEN];
+  static __thread uint32_t crcs[SWEEP_BATCH_MAX_CAND * SWEEP_BATCH_MAX_LEN];
+  static __thread uint64_t pls[SWEEP_BATCH_MAX_CAND * SWEEP_BATCH_MAX_LEN];
+  static __thread uint8_t  oks[SWEEP_BATCH_MAX_CAND * SWEEP_BATCH_MAX_LEN];
+  if (n_items > (int)(sizeof(vidx) / sizeof(vidx[0])))
+    return false;
+
+  /* (1) one unscramble per candidate, not per (candidate, length) */
+  for (int c = 0; c < ctx->n_cand; c++) {
+    const nr_pdcch_autodiscover_cand_t *cd = &ctx->cand[c];
+    if ((int)cd->L * 108 > SWEEP_BATCH_VSTRIDE)
+      return false;
+    nr_pdcch_unscrambling((c16_t *)cd->e_rx, ctx->scrambling_rnti, (uint32_t)(cd->L * 108),
+                          ctx->dmrs_scrambling_id, &vec[c * SWEEP_BATCH_VSTRIDE]);
+  }
+  /* (2) every (candidate, length) pair as one batch item */
+  int n = 0;
+  for (int c = 0; c < ctx->n_cand; c++)
+    for (int l = min_len; l <= max_len; l++) {
+      vidx[n] = (uint16_t)c;
+      lens[n] = (uint16_t)l;
+      als[n]  = ctx->cand[c].L;
+      n++;
+    }
+  const int m = api->decode_vec(vec, SWEEP_BATCH_VSTRIDE, ctx->n_cand, vidx, lens, als, n, crcs, pls, oks);
+  if (m < 0)
+    return false;
+
+  memset(g_sweep_cache.ok, 0, sizeof(g_sweep_cache.ok));
+  for (int i = 0; i < n; i++) {
+    const int c = vidx[i], l = lens[i];
+    if (!oks[i])
+      continue;
+    g_sweep_cache.ok[c][l]      = 1;
+    g_sweep_cache.crc[c][l]     = crcs[i];
+    g_sweep_cache.payload[c][l] = pls[i];
+  }
+  g_sweep_cache.ctx     = ctx;
+  g_sweep_cache.n_cand  = ctx->n_cand;
+  g_sweep_cache.min_len = min_len;
+  g_sweep_cache.max_len = max_len;
+  g_sweep_cache.valid   = 1;
+
+  static _Atomic uint64_t s_batches = 0, s_items = 0;
+  const uint64_t b = atomic_fetch_add_explicit(&s_batches, 1, memory_order_relaxed) + 1;
+  atomic_fetch_add_explicit(&s_items, (uint64_t)m, memory_order_relaxed);
+  if (b == 1 || (b % 5000) == 0)
+    LOG_A(PHY, "SENSING: sweep GPU batch #%llu: %d items (%d cand x %d len), %llu decoded total\n",
+          (unsigned long long)b, n, ctx->n_cand, n_len,
+          (unsigned long long)atomic_load_explicit(&s_items, memory_order_relaxed));
+  return true;
+}
+
 static bool nr_pdcch_autodiscover_length_scorer(int dci_length, int trial_idx, uint16_t *rnti_out,
                                                 uint32_t *payload_hash_out, void *user_ctx)
 {
@@ -1060,7 +1327,67 @@ static bool nr_pdcch_autodiscover_length_scorer(int dci_length, int trial_idx, u
   if (ctx == NULL || ctx->n_cand <= 0) {
     return false;
   }
-  const nr_pdcch_autodiscover_cand_t *c = &ctx->cand[trial_idx % ctx->n_cand];
+  const int cand_idx = trial_idx % ctx->n_cand;
+  /* LANE BATCH first: one device call per occasion covered this lane's whole grid. Same admission
+   * test the CPU path applies, so a cached result can never be accepted on weaker evidence. */
+  {
+    uint32_t bcrc = 0;
+    uint64_t bpl  = 0;
+    if (lane_batch_get(ctx, cand_idx, dci_length, &bcrc, &bpl)) {
+      static _Atomic uint64_t s_bh = 0;
+      const uint64_t bh = atomic_fetch_add_explicit(&s_bh, 1, memory_order_relaxed) + 1;
+      if ((bh % 20000000) == 0)
+        LOG_A(PHY, "SENSING: LANEBATCH hit=%llu\n", (unsigned long long)bh);
+      /* BOTH tests nr_pdcch_blind_decode_raw_11() applies, and it is the ground truth for what a
+       * decode means here: CRC-recovered value in the plausible RNTI range, AND payload bit
+       * (dci_length-1) set. That second one is its "format indicator=0 (UL grant, not DL)" reject.
+       * A cached result must be judged on exactly the evidence a computed one is. */
+      if ((bcrc >> 16) != 0 || bcrc < ctx->rnti_min || bcrc > ctx->rnti_max)
+        return false;
+      if (((bpl >> (dci_length - 1)) & 1) == 0)
+        return false;
+      *rnti_out         = (uint16_t)bcrc;
+      *payload_hash_out = (uint32_t)bpl ^ (uint32_t)(bpl >> 32);
+      return true;
+    }
+  }
+  /* SWEEPCACHE: is the GPU result actually being USED? A miss means we paid for the batch AND
+   * still decode on CPU -- which would explain why prepass did not move. Counted, not assumed. */
+  {
+    static _Atomic uint64_t s_hit = 0, s_miss = 0;
+    const bool usable = g_sweep_cache.valid && g_sweep_cache.ctx == ctx
+                        && cand_idx < g_sweep_cache.n_cand
+                        && dci_length >= g_sweep_cache.min_len && dci_length <= g_sweep_cache.max_len
+                        && g_sweep_cache.ok[cand_idx][dci_length];
+    const uint64_t h = usable ? atomic_fetch_add_explicit(&s_hit, 1, memory_order_relaxed) + 1
+                              : atomic_load_explicit(&s_hit, memory_order_relaxed);
+    const uint64_t m = usable ? atomic_load_explicit(&s_miss, memory_order_relaxed)
+                              : atomic_fetch_add_explicit(&s_miss, 1, memory_order_relaxed) + 1;
+    if (((h + m) % 2000000) == 0)
+      LOG_A(PHY, "SENSING: SWEEPCACHE hit=%llu miss=%llu (%.1f%% hit)\n",
+            (unsigned long long)h, (unsigned long long)m, 100.0 * (double)h / (double)(h + m));
+  }
+  /* SWEEP GPU BATCH: prefilled by sweep_gpu_prefill() for this exact ctx. A miss (GPU absent, item
+   * rejected, length outside the batched range) falls through to the CPU path below unchanged. */
+  if (g_sweep_cache.valid && g_sweep_cache.ctx == ctx && cand_idx < g_sweep_cache.n_cand
+      && dci_length >= g_sweep_cache.min_len && dci_length <= g_sweep_cache.max_len
+      && g_sweep_cache.ok[cand_idx][dci_length]) {
+    const uint32_t crc = g_sweep_cache.crc[cand_idx][dci_length];
+    const uint64_t pl  = g_sweep_cache.payload[cand_idx][dci_length];
+    if ((crc >> 16) != 0 || crc < ctx->rnti_min || crc > ctx->rnti_max)
+      return false;
+    /* BUG (found 2026-09-20): this path claimed parity with nr_pdcch_blind_decode_raw_11() but
+     * applied only the RNTI-range half of it, so it admitted format-indicator=0 candidates -- UL
+     * grants -- that the CPU path rejects. Roughly a factor 2 of extra false accepts fed straight
+     * into the sweep's bootstrap-hit statistics, which is exactly the noise the >1-hit threshold
+     * is trying to stand above. */
+    if (((pl >> (dci_length - 1)) & 1) == 0)
+      return false;
+    *rnti_out         = (uint16_t)crc;
+    *payload_hash_out = (uint32_t)pl ^ (uint32_t)(pl >> 32);
+    return true;
+  }
+  const nr_pdcch_autodiscover_cand_t *c = &ctx->cand[cand_idx];
   // Same unscramble step nr_pdcch_blind_cand_worker_body() below uses on the identical cursor
   // (t->e_rx from the same pdcch_e_rx[]/e_rx_cand_idx walk), just with `dci_length` substituted
   // for the hypothesis under test instead of the (as yet unknown) real one.
@@ -2257,6 +2584,7 @@ void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_pr
       // possible acceptance).
       g_dl_length_state.excluded_len = dci10_length; /* the 1_0/0_0 size is known; the sweep wants the other one */
       g_dl_length_state.stride       = dci_sweep_stride();
+      sweep_gpu_prefill(&sweep_ctx, 30, 63);  /* SWEEP GPU BATCH: primary DL sweep */
       const int found_len = nr_pdcch_dci_length_sweep_feed(&g_dl_length_state, nr_pdcch_autodiscover_length_scorer,
                                                             &sweep_ctx, disc_n_cand, 30, 63, bootstrap_rnti);
       if (found_len > 0) {
@@ -2710,6 +3038,7 @@ constdiag_done:;
    * Scoped to ONE occasion deliberately: these LLRs derive from this slot's samples, so the key is
    * reset on every call and never carried across occasions. */
   int llr_cache_rb = -1, llr_cache_off = -1;
+  lane_batch_reset();   /* LANE BATCH is per-occasion: these LLRs belong to this slot only */
   for (int lane = 0; lane < lookahead_k; lane++) {
     nr_pdcch_lookahead_geom_t geom;
     if (!nr_pdcch_blind_lookahead_get(lane, &geom))
@@ -2796,8 +3125,14 @@ constdiag_done:;
         idx += NR_PDCCH_BLIND_RE_PER_RB_OUT_DMRS * lrel->L[c] * 6;
       }
       if (disc_n > 0) {
-        nr_pdcch_autodiscover_sweep_ctx_t sweep_ctx = {
-            .cand                = disc_cand,
+        /* PHASE A: record this lane's grid and DEFER the sweep. One device call covers every lane
+         * (see LANE BATCH): per-lane calls cost ~90 us each and dominated the occasion at K=96.
+         * nr_pdcch_blind_lookahead_step() is deferred with it -- it advances the lane's geometry
+         * cursor, so stepping before the sweep would attribute a lock to the wrong geometry. */
+        memcpy(g_lane_disc_cand[lane], disc_cand, (size_t)disc_n * sizeof(disc_cand[0]));
+        g_lane_disc_n[lane] = disc_n;
+        g_lane_sweep_ctx[lane] = (nr_pdcch_autodiscover_sweep_ctx_t){
+            .cand                = g_lane_disc_cand[lane],
             .n_cand              = disc_n,
             .bwp_size            = (uint16_t)cfg->bwp_size,
             .dmrs_typeA_position = (uint8_t)cfg->dmrs_typeA_position,
@@ -2807,21 +3142,10 @@ constdiag_done:;
             .scrambling_rnti     = lrel->coreset.scrambling_rnti,
             .dmrs_scrambling_id  = lrel->coreset.pdcch_dmrs_scrambling_id,
         };
-        g_lane_length_state[lane].excluded_len = dci10_length;
-        g_lane_length_state[lane].stride       = dci_sweep_stride();
-        const int found_len = nr_pdcch_dci_length_sweep_feed(&g_lane_length_state[lane],
-            nr_pdcch_autodiscover_length_scorer, &sweep_ctx, disc_n, 30, 63, 0);
-        if (found_len > 0) {
-          g_lane_dci_length[lane]   = (uint16_t)found_len;
-          g_lane_length_found[lane] = true;
-          g_lane_length_swept[lane] = true;
-          LOG_I(PHY, "SENSING: lookahead lane %d dci_length locked at %d (offset=%d span=%d)\n",
-                lane, found_len, geom.rb_offset, geom.freq_domain * 6);
-        } else if (g_lane_length_state[lane].occasions_fed >= AUTODISCOVER_LENGTH_SWEEP_MAX_OCCASIONS) {
-          // Give up on THIS lane's geometry well before its NR_PDCCH_EXTENT_VERIFY_OCC dwell would --
-          // mirrors the primary's own give-up branch above.
-          nr_pdcch_blind_lookahead_retry(lane);
-        }
+        g_lane_geom_snap[lane]   = geom;
+        g_lane_needs_sweep[lane] = 1;
+        lane_batch_add(lane, &g_lane_sweep_ctx[lane], 30, 63);
+        continue;   /* phase B runs the sweep AND the step for this lane */
       }
     } else {
       const int cap = (int)(sizeof(cand_task) / sizeof(cand_task[0]));
@@ -2846,6 +3170,37 @@ constdiag_done:;
         nof_tasks++;
         idx += NR_PDCCH_BLIND_RE_PER_RB_OUT_DMRS * lrel->L[c] * 6;
       }
+    }
+    nr_pdcch_blind_lookahead_step(lane);
+  }
+
+  /* ---- PHASE B: one device call for every lane, then each lane's sweep against the cache -------
+   * Splitting the loop is what makes the single call possible: phase A needed every lane's
+   * candidate list to exist before the batch could be assembled. Lanes that did not fit the batch
+   * are not special-cased -- the scorer simply misses and decodes them on the CPU exactly as
+   * before, so correctness never depends on the batch succeeding. */
+  lane_batch_flush();
+  for (int lane = 0; lane < lookahead_k; lane++) {
+    if (!g_lane_needs_sweep[lane])
+      continue;
+    g_lane_needs_sweep[lane] = 0;
+    const int disc_n = g_lane_disc_n[lane];
+    if (disc_n <= 0) {
+      nr_pdcch_blind_lookahead_step(lane);
+      continue;
+    }
+    g_lane_length_state[lane].excluded_len = dci10_length;
+    g_lane_length_state[lane].stride       = dci_sweep_stride();
+    const int found_len = nr_pdcch_dci_length_sweep_feed(&g_lane_length_state[lane],
+        nr_pdcch_autodiscover_length_scorer, &g_lane_sweep_ctx[lane], disc_n, 30, 63, 0);
+    if (found_len > 0) {
+      g_lane_dci_length[lane]   = (uint16_t)found_len;
+      g_lane_length_found[lane] = true;
+      g_lane_length_swept[lane] = true;
+      LOG_I(PHY, "SENSING: lookahead lane %d dci_length locked at %d (offset=%d span=%d)\n",
+            lane, found_len, g_lane_geom_snap[lane].rb_offset, g_lane_geom_snap[lane].freq_domain * 6);
+    } else if (g_lane_length_state[lane].occasions_fed >= AUTODISCOVER_LENGTH_SWEEP_MAX_OCCASIONS) {
+      nr_pdcch_blind_lookahead_retry(lane);
     }
     nr_pdcch_blind_lookahead_step(lane);
   }

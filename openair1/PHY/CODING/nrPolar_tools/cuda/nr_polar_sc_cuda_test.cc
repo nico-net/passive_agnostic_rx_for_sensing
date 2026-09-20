@@ -237,10 +237,12 @@ int main(int argc, char **argv)
   const pset bp = {47, 2}; const int bpid = npc_register(bp.len, bp.al); const int E = E_of(bp);
   std::vector<std::vector<int16_t>> pool(1024);
   for (auto &x : pool) { x.resize(E); for (int i = 0; i < E; i++) x[i] = (int16_t)((rnd() % 4000) - 2000); }
+  double cpu_us_per_decode = 0.0;
   { /* CPU reference: one core, same vectors */
     const int reps = 2000; double t0 = now_us(); uint64_t o;
     for (int r = 0; r < reps; r++) cpu_decode(bp, pool[r % 1024].data(), &o);
-    printf("CPU polar_decoder_int16 len=%u AL=%u: %.1f us/decode (one core)\n", bp.len, bp.al, (now_us() - t0) / reps);
+    cpu_us_per_decode = (now_us() - t0) / reps;
+    printf("CPU polar_decoder_int16 len=%u AL=%u: %.1f us/decode (one core)\n", bp.len, bp.al, cpu_us_per_decode);
   }
   const int sizes[] = {1, 8, 32, 128, 512, 1024, 2048, 4096};
   for (int si = 0; si < (int)(sizeof(sizes) / sizeof(sizes[0])); si++) {
@@ -263,8 +265,16 @@ int main(int argc, char **argv)
     for (int i = 0; i < n; i++) items[i] = (npc_item_t){pids[i % 5], pool[i % 1024].data()};
     npc_decode_batch(items.data(), n, c.data(), pay.data());
     double t0 = now_us(); for (int r = 0; r < 20; r++) npc_decode_batch(items.data(), n, c.data(), pay.data());
-    printf("ONE OCCASION (8 lanes x 13 AL2 x 5 lengths = %d decodes): %.0f us on GPU vs %.0f us on one CPU core\n",
-           n, (now_us() - t0) / 20, n * 130.2);
+    /* Use the CPU rate THIS RUN measured, never a constant. A hardcoded 130.2 us/decode used to
+     * sit here while the CPU reference a few lines above measured 1.9 us/decode on the same box --
+     * a 68x overstatement that made the GPU look ~200x faster than one core when the real, measured
+     * ratio is ~4x. That fabricated ratio escaped this file and was quoted as a "271x speedup"
+     * justification for GPU work elsewhere. Never print a speedup against a number you did not
+     * measure in the same run. */
+    const double gpu_us = (now_us() - t0) / 20;
+    printf("ONE OCCASION (8 lanes x 13 AL2 x 5 lengths = %d decodes): %.0f us on GPU vs %.0f us on one "
+           "CPU core (measured %.1f us/decode) -> %.1fx\n",
+           n, gpu_us, n * cpu_us_per_decode, cpu_us_per_decode, (n * cpu_us_per_decode) / gpu_us);
   }
   return 0;
 }

@@ -897,7 +897,7 @@ void nr_pdcch_blind_monitor_autodiscover_reset(void);
  * the marginal lane costs only its deinterleave+decode.
  * Why it matters: the search is 133 extents x 271 mappings ~= 36k hypotheses, and convergence needs
  * (36k / K) x occasions_per_hypothesis occasions of AIR TIME. K is the only term we control. */
-#define NR_PDCCH_LOOKAHEAD_MAX 63
+#define NR_PDCCH_LOOKAHEAD_MAX 127
 typedef struct {
   bool valid;             // this lane owns a live candidate this call
   int  rb_offset;
