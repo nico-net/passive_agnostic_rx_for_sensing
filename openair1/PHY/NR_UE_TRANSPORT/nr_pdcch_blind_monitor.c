@@ -58,6 +58,7 @@
  */
 
 #include "nr_pdcch_blind_monitor.h"
+#include "nr_pdcch_sib1_prior.h"
 #include "nr_pdcch_blind_monitor_rt.h" // nr_pdcch_blind_monitor_cfg_t + get_cfg() accessor (implemented
                                        // below); the RT tap itself lives in nr_pdcch_blind_monitor_rt.c
                                        // -- see that header's file comment for why the split exists.
@@ -708,6 +709,18 @@ int nr_pdcch_map_candidates(int span_rb, int duration, int pci, nr_pdcch_map_can
   if (out == NULL || max_out <= 0 || span_rb <= 0 || duration < 1 || duration > 3)
     return 0;
   int n = 0;
+  /* SIB1 PRIOR FIRST, for the same reason as the extent: the cell's own commonControlResourceSet
+   * states its REG bundle size, interleaver size and shift index. The blind walk below tries the
+   * PCI residue of every legal (L, R) and then all ~271 shifts; if the operator reuses the common
+   * mapping for the dedicated CORESET, this single entry replaces that entire walk. */
+  {
+    const nr_pdcch_sib1_prior_t *pr = nr_pdcch_sib1_prior_get();
+    if (pr != NULL && pr->coreset_valid && pr->interleaved && n < max_out) {
+      out[n++] = (nr_pdcch_map_cand_t){(uint8_t)pr->reg_bundle_size,
+                                       (uint8_t)pr->interleaver_size,
+                                       (uint8_t)pr->shift_index};
+    }
+  }
   out[n++] = (nr_pdcch_map_cand_t){0, 0, 0}; /* non-interleaved: this project's every captured dedicated CORESET */
   const int N_reg = span_rb * duration;
   static const int Ls[2][2] = {{2, 6}, {3, 6}};
@@ -750,6 +763,19 @@ int nr_pdcch_extent_candidates(int first_w, int last_w, int nw_total,
   if (out == NULL || max_out <= 0 || nw_total <= 0 || first_w < 0 || last_w < first_w
       || last_w >= nw_total) {
     return 0;
+  }
+  /* SIB1 PRIOR FIRST. The cell broadcasts commonControlResourceSet in SIB1, and its frequency-domain
+   * bitmap is a real, DECODED CORESET footprint on THIS cell -- whereas everything below is derived
+   * from where DCIs happened to land during a dwell. It is the COMMON CORESET, so it is a
+   * hypothesis for the dedicated one rather than an answer; putting it at index 0 costs one dwell
+   * to test and nothing if wrong, and the entire blind walk still follows it. */
+  {
+    int pw_first = -1, pw_last = -1;
+    if (nr_pdcch_sib1_prior_window(&pw_first, &pw_last) && pw_last < nw_total && n < max_out) {
+      out[n].first_w = pw_first;
+      out[n].last_w  = pw_last;
+      n++;
+    }
   }
   /* Candidate 0 is the pre-2026-09-07 heuristic's OWN answer, so a cell where it was already right
    * locks with no added dwell and this can never regress. */

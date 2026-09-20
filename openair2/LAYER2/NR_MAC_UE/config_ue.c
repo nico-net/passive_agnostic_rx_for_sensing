@@ -20,6 +20,7 @@
 #include "oai_asn1.h"
 #include "PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.h"
 #include "PHY/NR_UE_TRANSPORT/nr_passive_acq_state.h"
+#include "PHY/NR_UE_TRANSPORT/nr_pdcch_sib1_prior.h"
 
 #define ASIGN_P_VAL(dst, src) \
   do {                        \
@@ -2141,6 +2142,113 @@ void nr_rrc_mac_start_ra(module_id_t module_id, nr_mac_ra_start_cause_t cause)
   AssertFatal(!ret, "mutex failed %d\n", ret);
 }
 
+/* Publish the SIB1-derived PDCCH prior (see nr_pdcch_sib1_prior.h).
+ *
+ * The blind CORESET search brute-forces ~36,000 (extent x mapping) hypotheses while SIB1 -- which
+ * decodes on every run -- carries commonControlResourceSet: the same bitmap, duration, bundle,
+ * interleaver, shift and DM-RS scrambling id, already decoded. The passive path had `scc` in hand
+ * and returned early, and the caller frees the ASN.1 struct immediately afterwards, so the answer
+ * was being read and discarded once per run.
+ *
+ * Every conversion below mirrors nr_ue_dci_configuration.c's own CORESET decoding (the canonical
+ * one) so a consumer can use these values directly as fapi_nr_coreset_t fields. This is the COMMON
+ * CORESET, so it is a prioritised HYPOTHESIS for the dedicated one, never an answer. */
+static void publish_sib1_pdcch_prior(const NR_UE_MAC_INST_t *mac, const NR_ServingCellConfigCommonSIB_t *scc)
+{
+  if (scc == NULL) {
+    return;
+  }
+  nr_pdcch_sib1_prior_t pr;
+  memset(&pr, 0, sizeof(pr));
+
+  const NR_BWP_DownlinkCommon_t *dl_common = &scc->downlinkConfigCommon.initialDownlinkBWP;
+
+  /* Initial DL BWP. The blind DCI length sweep has been sizing n_rb_riv from the SIB1 CARRIER,
+   * which only equals the BWP when the operator has not narrowed it. */
+  const long lab = dl_common->genericParameters.locationAndBandwidth;
+  pr.dl_bwp_size = (uint16_t)NRRIV2BW(lab, MAX_BWP_SIZE);
+  pr.dl_bwp_start = (uint16_t)NRRIV2PRBOFFSET(lab, MAX_BWP_SIZE);
+  pr.dl_bwp_valid = (pr.dl_bwp_size > 0);
+
+  if (dl_common->pdcch_ConfigCommon != NULL
+      && dl_common->pdcch_ConfigCommon->present == NR_SetupRelease_PDCCH_ConfigCommon_PR_setup) {
+    const NR_PDCCH_ConfigCommon_t *pcc = dl_common->pdcch_ConfigCommon->choice.setup;
+
+    if (pcc->ra_SearchSpace != NULL) {
+      pr.ra_ss_valid = true;
+      pr.ra_ss_id = (uint8_t)*pcc->ra_SearchSpace;
+    }
+    if (pcc->searchSpaceSIB1 != NULL) {
+      pr.sib1_ss_valid = true;
+      pr.sib1_ss_id = (uint8_t)*pcc->searchSpaceSIB1;
+    }
+    if (pcc->pagingSearchSpace != NULL) {
+      pr.paging_ss_valid = true;
+      pr.paging_ss_id = (uint8_t)*pcc->pagingSearchSpace;
+    }
+
+    const NR_ControlResourceSet_t *cs = pcc->commonControlResourceSet;
+    if (cs != NULL) {
+      pr.coreset_valid = true;
+      pr.coreset_id = (uint8_t)cs->controlResourceSetId;
+      pr.duration = (uint8_t)cs->duration;
+      for (int i = 0; i < 6 && i < cs->frequencyDomainResources.size; i++) {
+        pr.frequency_domain_resource[i] = cs->frequencyDomainResources.buf[i];
+      }
+      if (cs->cce_REG_MappingType.present == NR_ControlResourceSet__cce_REG_MappingType_PR_interleaved) {
+        const struct NR_ControlResourceSet__cce_REG_MappingType__interleaved *il =
+            cs->cce_REG_MappingType.choice.interleaved;
+        pr.interleaved = true;
+        pr.reg_bundle_size =
+            (uint8_t)((il->reg_BundleSize == NR_ControlResourceSet__cce_REG_MappingType__interleaved__reg_BundleSize_n6)
+                          ? 6
+                          : (2 + il->reg_BundleSize));
+        pr.interleaver_size =
+            (uint8_t)((il->interleaverSize == NR_ControlResourceSet__cce_REG_MappingType__interleaved__interleaverSize_n6)
+                          ? 6
+                          : (2 + il->interleaverSize));
+        /* Both of these DEFAULT TO physCellId when absent -- a wrong value here does not weaken the
+         * estimate, it makes Y/X use the wrong X, which reads as a dead channel. */
+        pr.shift_index = (uint16_t)(il->shiftIndex != NULL ? *il->shiftIndex : mac->physCellId);
+      } else {
+        pr.interleaved = false;
+        pr.reg_bundle_size = 0;
+        pr.interleaver_size = 0;
+        pr.shift_index = 0;
+      }
+      pr.pdcch_dmrs_scrambling_id =
+          (uint16_t)(cs->pdcch_DMRS_ScramblingID != NULL ? *cs->pdcch_DMRS_ScramblingID : mac->physCellId);
+    }
+
+    /* nrofCandidates per AL is the cell's OWN answer to what the adaptive AL ladder infers from
+     * accept counts. Take the MAX across the common search spaces: a level any common SS monitors
+     * is a level the cell uses. A zero is informative too -- it means do not scan that level. */
+    if (pcc->commonSearchSpaceList != NULL) {
+      for (int i = 0; i < pcc->commonSearchSpaceList->list.count; i++) {
+        const NR_SearchSpace_t *ss = pcc->commonSearchSpaceList->list.array[i];
+        if (ss == NULL || ss->nrofCandidates == NULL) {
+          continue;
+        }
+        const long al[NR_SIB1_PRIOR_NUM_AL] = {ss->nrofCandidates->aggregationLevel1,
+                                               ss->nrofCandidates->aggregationLevel2,
+                                               ss->nrofCandidates->aggregationLevel4,
+                                               ss->nrofCandidates->aggregationLevel8,
+                                               ss->nrofCandidates->aggregationLevel16};
+        for (int a = 0; a < NR_SIB1_PRIOR_NUM_AL; a++) {
+          /* ASN.1 enum n0,n1,n2,n3,n4,n5,n6,n8 -> 0,1,2,3,4,5,6,8 */
+          const uint8_t n = (al[a] >= 7) ? 8 : (uint8_t)al[a];
+          if (n > pr.al_candidates[a]) {
+            pr.al_candidates[a] = n;
+          }
+        }
+        pr.ss_valid = true;
+      }
+    }
+  }
+
+  nr_pdcch_sib1_prior_set(&pr);
+}
+
 /* Probe mode stops at broadcast facts: applying SIB1 to a trial RF window
  * would incorrectly promote the scan center to the actual carrier center.
  * The supervisor derives Point A and restarts with the broadcast geometry.
@@ -2217,6 +2325,11 @@ void nr_rrc_mac_config_req_sib1(module_id_t module_id, int cc_idP, NR_SIB1_t *si
             mac->physCellId, dl_bw_prb, dl_scs, (long)fdl->offsetToPointA, ul_bw_prb, ul_scs, ul_pointA);
     }
   }
+  /* Publish BEFORE the passive early-return below: that return skips the rest of this function,
+   * and the caller frees the ASN.1 struct straight after, so this is the last point at which the
+   * decoded common CORESET / search spaces still exist. */
+  publish_sib1_pdcch_prior(mac, scc);
+
   if (passive_acquisition_sib1(mac, scc)) {
     ret = pthread_mutex_unlock(&mac->if_mutex);
     AssertFatal(!ret, "mutex failed %d\n", ret);
