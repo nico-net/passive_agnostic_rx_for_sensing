@@ -65,14 +65,30 @@ static int boot_find(uint16_t rnti, uint8_t cls)
 
 /// Free slot, else the weakest-evidenced entry. Never evicts on age alone: a UE that is quiet for a
 /// moment is still a real UE, whereas a noise RNTI never accumulates sightings.
-static int boot_slot_for_new(void)
+static int boot_slot_for_new(uint32_t now_abs_slot)
 {
+  /* Among the weakest-evidenced entries, evict the OLDEST -- not simply the first one found.
+   * MEASURED 2026-09-20 (Swisscom PCI 382, BOOTTABLE): with every entry sitting at n=1, the old
+   * "first minimum" rule always returned index 0, so one slot churned on every new RNTI while the
+   * other 15 sat frozen until they aged out. A 16-entry table was doing the work of a 1-entry one,
+   * which is exactly the wrong behaviour when the thing we are waiting for is any RNTI recurring.
+   * Evicting by age keeps a rolling window of the most recent sightings instead. */
   int worst = 0;
   for (int i = 0; i < NR_PDCCH_BLIND_MAX_UE; i++) {
     if (g_boot[i].sightings == 0) {
       return i;
     }
-    if (g_boot[i].sightings < g_boot[worst].sightings) {
+    if (g_boot[i].sightings != g_boot[worst].sightings) {
+      if (g_boot[i].sightings < g_boot[worst].sightings) {
+        worst = i;
+      }
+      continue;
+    }
+    /* Equal evidence: prefer the staler entry. Unsigned ages, so compare last_slot directly
+     * against now rather than subtracting into a wrap. */
+    const uint32_t age_i = (now_abs_slot >= g_boot[i].last_slot) ? (now_abs_slot - g_boot[i].last_slot) : 0;
+    const uint32_t age_w = (now_abs_slot >= g_boot[worst].last_slot) ? (now_abs_slot - g_boot[worst].last_slot) : 0;
+    if (age_i > age_w) {
       worst = i;
     }
   }
@@ -94,7 +110,7 @@ void nr_pdcch_blind_rnti_bootstrap_record(uint16_t rnti, uint8_t rnti_class, uin
     g_boot[i].last_slot = abs_slot;
     return;
   }
-  const int n = boot_slot_for_new();
+  const int n = boot_slot_for_new(abs_slot);
   g_boot[n].rnti      = rnti;
   g_boot[n].cls       = rnti_class;
   g_boot[n].last_slot = abs_slot;

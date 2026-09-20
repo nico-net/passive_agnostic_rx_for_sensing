@@ -351,16 +351,30 @@ static consumer_arg_t g_args[NR_PDSCH_PASSIVE_QUEUE_MAX_CONSUMERS];
  * the in-line decode path in nr_pdcch_blind_monitor_rt.c reports through this same function, so the
  * two paths cannot drift apart in what they log. */
 void nr_passive_mac_report_ta(uint16_t rnti, bool is_ra_rnti, int frame, int slot, int mu,
-                              const uint8_t *tb, uint32_t tb_bytes)
+                              uint32_t abs_slot, const uint8_t *tb, uint32_t tb_bytes)
 {
   if (tb == NULL || tb_bytes == 0)
     return;
   if (is_ra_rnti) {
     uint8_t rapid = 0;
     uint16_t ta = 0, tc_rnti = 0;
-    if (nr_passive_mac_rar_ta(tb, tb_bytes, &rapid, &ta, &tc_rnti))
+    if (nr_passive_mac_rar_ta(tb, tb_bytes, &rapid, &ta, &tc_rnti)) {
       LOG_A(PHY, "SENSING: MAC_TA RAR (%d.%d) ra_rnti=0x%x rapid=%u ta=%u -> %.1f m one-way, tc_rnti=0x%x\n",
             frame, slot, rnti, rapid, ta, nr_passive_mac_ta_metres(ta, mu), tc_rnti);
+      /* THE SEED THE DEDICATED SEARCH NEEDS. Every other RNTI this receiver sees is a guess: the
+       * CORESET search tests 271 unverified mapping hypotheses, so its accepts are random CRC
+       * passes at random CCE locations (measured: ~20 RNTIs uniform over the 16-bit space, none
+       * ever recurring). This one is not a guess. The RA-RNTI that scheduled this RAR is COMPUTED
+       * from the PRACH occasion, the DCI carried 16 spec-fixed zero reserved bits, and the transport
+       * block then passed its own CRC -- three independent checks. The TC-RNTI inside becomes that
+       * UE's C-RNTI, so it will recur in the dedicated search space and can confirm.
+       *
+       * Recorded as TC: nr_pdcch_blind_rnti_bootstrap_record() admits C and TC only, and the two
+       * share one hypothesis downstream. A zero TC-RNTI is not a UE and is dropped by the parser's
+       * own field checks, but guard anyway -- this feeds a table the whole dedicated path keys on. */
+      if (tc_rnti != 0)
+        nr_pdcch_blind_rnti_bootstrap_record(tc_rnti, NR_BLIND_RNTI_CLASS_TC, abs_slot);
+    }
     return;
   }
   uint8_t tag = 0, cmd = 0;
@@ -740,7 +754,8 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
        * actually contains one. */
       if (st == NR_PDSCH_PASSIVE_DECODE_CRC_OK && dec.tb != NULL && dec.cw.TBS > 0)
         nr_passive_mac_report_ta(job.rnti, job.rnti_class == NR_BLIND_RNTI_CLASS_RA, job.frame_rx,
-                                 job.nr_slot_rx, (int)ue->frame_parms.numerology_index, dec.tb,
+                                 job.nr_slot_rx, (int)ue->frame_parms.numerology_index,
+                                 (uint32_t)job.absolute_slot, dec.tb,
                                  dec.cw.TBS / 8);   /* TBS is in BITS; the parser walks octets */
       {
         /* Two dedicated-parameter checks that need only what is in hand here, on the consumer.

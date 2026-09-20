@@ -248,8 +248,32 @@ bool nr_pdcch_blind_monitor_autoconf_css0(int num_rbs,
    * Pinning it to the single value is also a far stronger gate than the wide default: a false
    * accept must now hit one specific RNTI rather than any of 65519, which is worth ~16 bits of
    * additional rejection on a search whose only other check is a 24-bit CRC. */
-  g_cfg.rnti_min = 0xFFFF; // SI-RNTI
-  g_cfg.rnti_max = 0xFFFF;
+  /* RA-RNTI IS THE ONLY VERIFIABLE SEED THIS RECEIVER CAN GET, and the SI-only pin was silently
+   * throwing it away. MEASURED 2026-09-20 (Swisscom PCI 382): dci10[C=314 SI=0 RA=0] with
+   * BOOTTABLE used=0 -- every RA candidate was rejected as "outside plausible RNTI range" before
+   * any RA logic ran, because crc <= 17920 fails `crc >= rnti_min` when rnti_min is pinned to
+   * 0xFFFF.
+   *
+   * Why this matters beyond one counter: the dedicated CORESET search is circular. Verifying a
+   * mapping hypothesis needs a known-good RNTI, and the only RNTIs on offer come from the search
+   * over 271 UNVERIFIED hypotheses -- i.e. random CCE locations yielding random CRC passes. That
+   * was measured too: ~20 accepted RNTIs spread uniformly over the 16-bit space, not one of which
+   * ever recurred. C-RNTI cannot break the loop from inside the search, and CORESET#0 carries no
+   * C-RNTI to borrow (connected UEs are scheduled in their own USS).
+   *
+   * RA-RNTI can, because it is COMPUTED from the PRACH occasion rather than guessed: a CRC pass
+   * against it is self-validating, and dci10_parse() additionally demands its 16 spec-fixed
+   * reserved bits be zero. The RAR it schedules then carries a TC-RNTI, which is that UE's real
+   * C-RNTI -- a trustworthy bootstrap seed.
+   *
+   * COST OF WIDENING: none for SIB1. SI-RNTI (0xFFFF) and P-RNTI (0xFFFE) are admitted by
+   * dci10_extract() INDEPENDENTLY of [rnti_min, rnti_max] -- see its Step 2 comment -- so the pin
+   * was never what protected them. The false-accept budget stays small: this path sees ~3
+   * candidates/occasion at ~50 occasions/s (~800x fewer trials than the dedicated CORESET), the
+   * bound is the spec's own RA-RNTI domain rather than the wide 1..0xFFEF default, and RA then
+   * costs a further 16 bits of reserved-field rejection. */
+  g_cfg.rnti_min = 1;
+  g_cfg.rnti_max = NR_PDCCH_BLIND_RA_RNTI_MAX;
 
   /* Format 0_1 OFF. It is a UE-specific-search-space format and cannot appear in CORESET#0, but
    * leaving the configured scan on does real harm rather than nothing: MEASURED, it consumed every

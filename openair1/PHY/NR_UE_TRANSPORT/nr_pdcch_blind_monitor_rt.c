@@ -3158,7 +3158,18 @@ constdiag_done:;
      * Recording pre-gate is safe because the bootstrap does NOT trust a single sighting either --
      * boot_entry_live() still demands sightings >= 2 within RNTI_BOOTSTRAP_STALE_SLOTS, so a noise
      * RNTI that never recurs enters at n=1 and is never confirmed, exactly as before. */
-    if (!cfg->autodiscover || g_length_found || is_dci10)
+    /* CIRCULARITY, measured 2026-09-20: seeding from ANY accept feeds the bootstrap the output of
+     * a search over 271 UNVERIFIED CORESET mapping hypotheses. Testing random CCE locations yields
+     * random CRC passes, so the table filled with ~20 distinct RNTIs spread uniformly over the
+     * 16-bit space and NOT ONE ever recurred (BOOTTABLE: used=16, every entry n=1, live=0). Real
+     * UEs get many grants a second and repeat immediately. A valid RNTI needs the right CORESET and
+     * verifying a CORESET needs a valid RNTI -- so the loop can never close from inside the search.
+     *
+     * CORESET#0 breaks it: its mapping is PROVEN every run by SIB1 decoding, so a C-RNTI recovered
+     * from the common search space is a real UE, will recur, and can confirm. Once the dedicated
+     * length is found (g_length_found) the USS is trustworthy too and seeds as before. */
+    const bool seed_ss_ok = (nr_pdcch_ss_bucket(cfg) == 0) || g_length_found;
+    if (!cfg->autodiscover || g_length_found || (is_dci10 && seed_ss_ok))
       nr_pdcch_blind_rnti_bootstrap_record(out.rnti, out.rnti_class, abs_slot);
 
     // ---- Gate 2: RNTI persistence. A real UE's RNTI recurs across many grants; a noise accept is
@@ -3675,7 +3686,7 @@ constdiag_done:;
                 if (dec.tb != NULL && dec.cw.TBS > 0)
                   nr_passive_mac_report_ta(out.rnti, out.rnti_class == NR_BLIND_RNTI_CLASS_RA,
                                            proc->frame_rx, proc->nr_slot_rx,
-                                           (int)fp->numerology_index, dec.tb,
+                                           (int)fp->numerology_index, (uint32_t)abs_slot, dec.tb,
                                            dec.cw.TBS / 8); /* TBS is in BITS; the parser walks octets */
                 if (want_data) {
                   // The reconstruction chain the attached UE uses, unchanged -- the ONLY difference

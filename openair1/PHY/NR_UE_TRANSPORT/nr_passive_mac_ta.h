@@ -55,7 +55,11 @@ double nr_passive_mac_ta_metres(uint16_t ta_absolute, int mu);
  * because they run on payloads whose RNTI class is only a hypothesis. Declared here anyway because
  * BOTH passive decode paths (deferred consumer and in-line receive thread) must report identically,
  * and one implementation is the only way that stays true. */
+/* @p abs_slot is the monitor's own monotonic slot clock -- the SAME clock the RNTI
+ * bootstrap ages entries on. A RAR's TC-RNTI is seeded into that table from here, so it
+ * has to share the clock or the entry looks stale the moment it lands. */
 void nr_passive_mac_report_ta(uint16_t rnti, bool is_ra_rnti, int frame, int slot, int mu,
+                              uint32_t abs_slot,
                               const uint8_t *tb, uint32_t tb_bytes);
 
 #endif /* __NR_PASSIVE_MAC_TA_H__ */
