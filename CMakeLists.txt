@@ -2508,6 +2508,21 @@ if(ENABLE_TESTS)
   add_dependencies(tests test_nr_csirs_blind_search)
   add_test(NAME test_nr_csirs_blind_search COMMAND ./test_nr_csirs_blind_search)
 
+  # PLAIN C, not gtest: nr_phy_common.h (which declares nr_generate_csi_rs and csi_mapping_parms_t)
+  # also declares nr_mmse_2layers() with C variably-modified array parameters, which C++ rejects --
+  # so a .cc version cannot include the real header at all. assert()-based, exits non-zero on failure.
+  add_executable(test_nr_csirs_blind_synth ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_csirs_blind_synth_check.c
+                                          ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_csirs_blind_search.c
+                                          ${OPENAIR1_DIR}/PHY/nr_phy_common/src/nr_phy_common_csirs.c
+                                          ${OPENAIR1_DIR}/PHY/NR_REFSIG/refsig.c
+                                          ${OPENAIR1_DIR}/PHY/NR_REFSIG/nr_gen_mod_table.c
+                                          ${OPENAIR1_DIR}/PHY/MODULATION/nr_modulation.c
+                                          ${OPENAIR_DIR}/common/utils/ds/hashtable.c)
+  target_include_directories(test_nr_csirs_blind_synth PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
+  target_link_libraries(test_nr_csirs_blind_synth PRIVATE nr_phy_common nr_common UTIL m)
+  add_dependencies(tests test_nr_csirs_blind_synth)
+  add_test(NAME test_nr_csirs_blind_synth COMMAND ./test_nr_csirs_blind_synth)
+
   add_executable(test_nr_passive_mac_ta ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_passive_mac_ta_test.cc
                                         ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_passive_mac_ta.c)
   target_include_directories(test_nr_passive_mac_ta PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
