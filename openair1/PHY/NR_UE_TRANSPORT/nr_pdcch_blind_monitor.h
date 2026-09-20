@@ -850,6 +850,11 @@ bool nr_pdcch_blind_monitor_autodiscover_extent_step(uint32_t abs_slot);
 
 void nr_pdcch_blind_rnti_bootstrap_record(uint16_t rnti, uint8_t rnti_class, uint32_t abs_slot);
 
+/* Same, but marks the sighting TRUSTED: it came from a CORESET whose mapping is PROVEN (CORESET#0,
+ * confirmed by SIB1 decodes) rather than from an unverified hypothesis. A trusted entry is live at
+ * ONE sighting -- see boot_entry_live() for why the two-sighting rule cannot apply to TC-RNTI. */
+void nr_pdcch_blind_rnti_bootstrap_record_trusted(uint16_t rnti, uint8_t rnti_class, uint32_t abs_slot);
+
 /** All currently confirmed, non-stale C-RNTIs. Returns how many were written. */
 int nr_pdcch_blind_monitor_confirmed_rnti_set(uint32_t now_abs_slot, uint16_t *out, int max_out);
 /** Is this RNTI a confirmed, non-stale UE? */

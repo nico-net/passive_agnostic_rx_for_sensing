@@ -48,7 +48,8 @@ typedef struct {
   uint16_t rnti;
   uint8_t  cls;
   uint32_t last_slot;
-  uint32_t sightings;  ///< 0 = free slot; 1 = pending; >=2 = confirmed
+  uint32_t sightings;
+  uint8_t  trusted;   ///< sighted in a CORESET whose mapping is proven; live at n=1  ///< 0 = free slot; 1 = pending; >=2 = confirmed
 } nr_boot_entry_t;
 
 static nr_boot_entry_t g_boot[NR_PDCCH_BLIND_MAX_UE];
@@ -95,7 +96,7 @@ static int boot_slot_for_new(uint32_t now_abs_slot)
   return worst;
 }
 
-void nr_pdcch_blind_rnti_bootstrap_record(uint16_t rnti, uint8_t rnti_class, uint32_t abs_slot)
+static void boot_record(uint16_t rnti, uint8_t rnti_class, uint32_t abs_slot, uint8_t trusted)
 {
   // Only C-RNTI and TC-RNTI describe the DEDICATED search space this technique targets; SI-RNTI
   // (Phase 1's own domain) and P-RNTI carry no information about it.
@@ -108,18 +109,45 @@ void nr_pdcch_blind_rnti_bootstrap_record(uint16_t rnti, uint8_t rnti_class, uin
       g_boot[i].sightings++;
     }
     g_boot[i].last_slot = abs_slot;
+    if (trusted) {
+      g_boot[i].trusted = 1;   /* trust is sticky: one proven sighting is enough forever */
+    }
     return;
   }
   const int n = boot_slot_for_new(abs_slot);
   g_boot[n].rnti      = rnti;
   g_boot[n].cls       = rnti_class;
   g_boot[n].last_slot = abs_slot;
-  g_boot[n].sightings = 1;  // pending; a single sighting is not evidence
+  g_boot[n].sightings = 1;  // pending unless trusted (see boot_entry_live)
+  g_boot[n].trusted   = trusted;
+}
+
+void nr_pdcch_blind_rnti_bootstrap_record(uint16_t rnti, uint8_t rnti_class, uint32_t abs_slot)
+{
+  boot_record(rnti, rnti_class, abs_slot, 0);
+}
+
+void nr_pdcch_blind_rnti_bootstrap_record_trusted(uint16_t rnti, uint8_t rnti_class, uint32_t abs_slot)
+{
+  boot_record(rnti, rnti_class, abs_slot, 1);
 }
 
 static bool boot_entry_live(const nr_boot_entry_t *e, uint32_t now)
 {
-  if (e->sightings < 2) {
+  /* TC-RNTI IS SINGLE-USE, so "two sightings" can never be satisfied for it. MEASURED 2026-09-20 on
+   * Swisscom PCI 382: a CSS0-only scan recorded 12 distinct TC-RNTIs (0x07a6..0x42c4, a narrow band
+   * consistent with one gNB allocating from a pool) and NOT ONE recurred. That is the protocol, not
+   * bad luck -- a TC-RNTI is handed out per random access, used for Msg3/Msg4, and then becomes the
+   * UE C-RNTI in the dedicated search space this receiver cannot yet read.
+   *
+   * The two-sighting rule exists to reject NOISE, and its premise is that a sighting is untrusted.
+   * That premise fails here: a trusted sighting came from CORESET#0, whose mapping is proven on this
+   * cell by 1957 SIB1 decodes at one exact signature (L=8 len=39 cce=0), and it additionally passed
+   * CRC and DCI format validation. It is also self-limiting downstream -- the dedicated search USES
+   * a candidate RNTI to test mapping hypotheses, so a wrong one simply verifies nothing. The
+   * verification step is the filter; demanding a repeat first only guarantees no candidate ever
+   * arrives. Untrusted entries keep the original rule unchanged. */
+  if (e->sightings < 2 && !e->trusted) {
     return false;  // pending, not confirmed
   }
   const uint32_t age = (now >= e->last_slot) ? (now - e->last_slot) : 0;

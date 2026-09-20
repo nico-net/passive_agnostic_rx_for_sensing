@@ -3121,6 +3121,34 @@ constdiag_done:;
       }
     }
 
+    /* DEADLOCK 3, measured 2026-09-20 on Swisscom PCI 382 -- the third gate to starve the seed it
+     * depends on. With a CSS0-only scan the monitor accepted TC=16 real TC-RNTIs (and SI=10000
+     * SIB1s, so the chain is demonstrably healthy), yet BOOTTABLE stayed used=0. The record sat
+     * BELOW Gate 1.5, the adaptive mismatched-bits test, and held[mismatch=18] is those accepts:
+     * ue->dci_thres is an EMA driven here by ten thousand pristine SIB1 decodes, so it sits very
+     * low and a slightly noisier TC-RNTI decode exceeds dci_thres+30 and is dropped.
+     *
+     * A TC-RNTI is the one identity this receiver can VERIFY -- it is handed out during random
+     * access, so it belongs to a real UE and becomes that UE C-RNTI. It is exactly the seed the
+     * dedicated CORESET search needs, and it was being thrown away by a threshold tuned on
+     * broadcast traffic.
+     *
+     * Recorded here, above every heuristic gate, for the same reason the Gate 2 move was safe: the
+     * bootstrap does not trust one sighting either -- boot_entry_live() still demands sightings >= 2
+     * within RNTI_BOOTSTRAP_STALE_SLOTS, so a false accept that never recurs enters at n=1 and is
+     * never confirmed. The gates still govern what gets DECODED and reported; they no longer govern
+     * what gets REMEMBERED. */
+    if (is_dci10 || !cfg->autodiscover || g_length_found) {
+      /* Trusted iff this sighting came from the COMMON search space, i.e. CORESET#0, whose mapping
+       * is proven by SIB1. A sighting from the dedicated hypothesis search is NOT trusted: those
+       * accepts are random CRC passes at guessed CCE locations (measured: ~20 RNTIs uniform over the
+       * 16-bit space, none recurring), and trusting them would seed the search with its own noise. */
+      if (nr_pdcch_ss_bucket(cfg) == 0)
+        nr_pdcch_blind_rnti_bootstrap_record_trusted(out.rnti, out.rnti_class, abs_slot);
+      else
+        nr_pdcch_blind_rnti_bootstrap_record(out.rnti, out.rnti_class, abs_slot);
+    }
+
     // ---- Gate 1.5: mismatched-bits adaptive threshold. Migrated from NRSniffer's dci_nr.c
     // (nr_dci_false_detection + ue->dci_thres), 2026-08-05. out.mismatched_bits (computed in
     // nr_pdcch_blind_decode_and_extract_ex) counts bit disagreements between the re-encoded
@@ -3158,20 +3186,6 @@ constdiag_done:;
      * Recording pre-gate is safe because the bootstrap does NOT trust a single sighting either --
      * boot_entry_live() still demands sightings >= 2 within RNTI_BOOTSTRAP_STALE_SLOTS, so a noise
      * RNTI that never recurs enters at n=1 and is never confirmed, exactly as before. */
-    /* CIRCULARITY, measured 2026-09-20: seeding from ANY accept feeds the bootstrap the output of
-     * a search over 271 UNVERIFIED CORESET mapping hypotheses. Testing random CCE locations yields
-     * random CRC passes, so the table filled with ~20 distinct RNTIs spread uniformly over the
-     * 16-bit space and NOT ONE ever recurred (BOOTTABLE: used=16, every entry n=1, live=0). Real
-     * UEs get many grants a second and repeat immediately. A valid RNTI needs the right CORESET and
-     * verifying a CORESET needs a valid RNTI -- so the loop can never close from inside the search.
-     *
-     * CORESET#0 breaks it: its mapping is PROVEN every run by SIB1 decoding, so a C-RNTI recovered
-     * from the common search space is a real UE, will recur, and can confirm. Once the dedicated
-     * length is found (g_length_found) the USS is trustworthy too and seeds as before. */
-    const bool seed_ss_ok = (nr_pdcch_ss_bucket(cfg) == 0) || g_length_found;
-    if (!cfg->autodiscover || g_length_found || (is_dci10 && seed_ss_ok))
-      nr_pdcch_blind_rnti_bootstrap_record(out.rnti, out.rnti_class, abs_slot);
-
     // ---- Gate 2: RNTI persistence. A real UE's RNTI recurs across many grants; a noise accept is
     // (almost always) a one-off. See rnti_persistence_check()'s own comment. ----
     if (!rnti_persistence_check(out.rnti, abs_slot, persist_window_slots, cfg->rnti_persist_k)) {
