@@ -643,6 +643,74 @@ static inline int autodiscover_sweep_budget(void)
   }
   return s_budget;
 }
+/* ISAC_DCI_LEN_MIN / ISAC_DCI_LEN_MAX: narrow the blind dci_length range (default 30..63, i.e. 34
+ * lengths). Total sweep work is hypotheses x dwell x candidates x LENGTHS, so this is one of only
+ * two knobs that cut TOTAL work rather than moving it in time (the other is the dwell above) --
+ * batching and reordering cannot, because the search is throughput-bound, not launch-bound
+ * (MEASURED 2026-09-20: 96 GPU calls -> 1 moved prepass by 5%).
+ *
+ * Narrowing is a PRIOR, not a fact: a real length outside the window becomes undiscoverable. Keep
+ * the default wide and narrow only when the deployment's DCI 1_1 size is already known for the
+ * bandwidth in use (e.g. ~47-48 at 273 PRB), and widen again if nothing converges. */
+static inline int dci_len_min(void)
+{
+  static int v = -1;
+  if (v < 0) {
+    const char *e = getenv("ISAC_DCI_LEN_MIN");
+    const int x = (e != NULL) ? atoi(e) : 0;
+    v = (x >= 1 && x <= 63) ? x : 30;
+  }
+  return v;
+}
+static inline int dci_len_max(void)
+{
+  static int v = -1;
+  if (v < 0) {
+    const char *e = getenv("ISAC_DCI_LEN_MAX");
+    const int x = (e != NULL) ? atoi(e) : 0;
+    v = (x >= dci_len_min() && x <= 63) ? x : 63;
+  }
+  return v;
+}
+/* Widest aggregation level a lane may scan. Defined here because lane_als() validates against it
+ * and is declared above the LANE BATCH block that sizes its vectors from it. */
+#define LANE_BATCH_AL_MAX    8
+/* Per-lane extracted-RE budget: 16 candidates at the widest AL (9 RE/RB * 8 * 6 = 432). */
+#define LANE_RE_PER_LANE     (16 * NR_PDCCH_BLIND_RE_PER_RB_OUT_DMRS * LANE_BATCH_AL_MAX * 6)
+/* ISAC_LANE_ALS: aggregation levels the LOOKAHEAD LANES scan, comma-separated (default "2").
+ *
+ * The lanes were AL2-only, hardcoded, and they perform ~99 % of the CORESET geometry search -- the
+ * primary walks one extent while 96 lanes walk the rest. As this file already notes further down,
+ * "the gNB picks the aggregation level from the SERVED UE's link", so AL2-only hardcodes a
+ * deployment. That was right for the lab srsRAN cell (dedicated traffic measured at AL2 -- note its
+ * log prints log2(L), so its "AL1" IS AL2). For a commercial macro received at distance there is NO
+ * such measurement, and cell-edge UEs are served at AL4/8/16, where an AL2-only scan can never find
+ * a grant however long it dwells. Default stays "2" so nothing changes silently. */
+static int lane_als(const uint8_t **out)
+{
+  static uint8_t v[5];
+  static int n = -1;
+  if (n < 0) {
+    const char *e = getenv("ISAC_LANE_ALS");
+    n = 0;
+    if (e != NULL) {
+      for (const char *q = e; *q && n < 5;) {
+        const int x = atoi(q);
+        if ((x == 1 || x == 2 || x == 4 || x == 8 || x == 16) && x <= LANE_BATCH_AL_MAX) {
+          bool dup = false;
+          for (int i = 0; i < n; i++)
+            if (v[i] == (uint8_t)x) dup = true;
+          if (!dup) v[n++] = (uint8_t)x;
+        }
+        while (*q && *q != ',') q++;
+        if (*q == ',') q++;
+      }
+    }
+    if (n == 0) { v[0] = 2; n = 1; }   /* default: previous AL2-only behaviour */
+  }
+  *out = v;
+  return n;
+}
 #define AUTODISCOVER_LENGTH_SWEEP_MAX_OCCASIONS autodiscover_sweep_budget()
 /* ISAC_DCI_SWEEP_STRIDE: test every Nth dci_length per occasion instead of all 34 (the sweep's
  * `stride`, see nr_pdcch_dci_length_sweep.h). The budget above counts ROUNDS, so each length still
@@ -1073,9 +1141,9 @@ typedef struct {
  * Lanes are AL2-only (ln_L = 2 in the lane loop), so one vector is 2*108 = 216 int16.
  * Bounded by BOTH item and vector caps; anything that does not fit is simply left for the CPU path,
  * which is always correct because the scorer falls back per item. */
-#define LANE_BATCH_VSTRIDE   216            /* AL2: 2 * 108 REs */
-#define LANE_BATCH_MAX_VEC   1024           /* distinct candidates across all lanes */
-#define LANE_BATCH_MAX_ITEMS 24576          /* (candidate x length) pairs; must be <= NPG_MAX_ITEMS */
+#define LANE_BATCH_VSTRIDE   (LANE_BATCH_AL_MAX * 108)  /* AL8: 864 REs */
+#define LANE_BATCH_MAX_VEC   2048           /* distinct candidates across all lanes */
+#define LANE_BATCH_MAX_ITEMS 49152          /* (candidate x length) pairs; must be <= NPG_MAX_ITEMS */
 #define LANE_BATCH_MAX_LEN   64
 
 typedef struct {
@@ -1084,7 +1152,20 @@ typedef struct {
   int      min_len, max_len;
 } lane_batch_slot_t;
 
-static __thread int16_t  g_lb_vec[LANE_BATCH_MAX_VEC * LANE_BATCH_VSTRIDE];
+/* HEAP, not __thread: at AL8 this buffer is 2048 * 864 * 2 = 3.5 MB, and a TLS block that size is
+ * the documented cause of an AVX alignment fault in this project (per-antenna CFR buffer, same
+ * shape of bug). Only the pointer is thread-local; allocated once per thread, 32-byte aligned. */
+static __thread int16_t *g_lb_vec = NULL;
+static bool lane_batch_vec_ready(void)
+{
+  if (g_lb_vec != NULL)
+    return true;
+  void *m = NULL;
+  if (posix_memalign(&m, 32, sizeof(int16_t) * (size_t)LANE_BATCH_MAX_VEC * LANE_BATCH_VSTRIDE) != 0)
+    return false;
+  g_lb_vec = (int16_t *)m;
+  return true;
+}
 static __thread uint16_t g_lb_vidx[LANE_BATCH_MAX_ITEMS];
 static __thread uint16_t g_lb_len[LANE_BATCH_MAX_ITEMS];
 static __thread uint8_t  g_lb_al[LANE_BATCH_MAX_ITEMS];
@@ -1112,6 +1193,8 @@ static bool lane_batch_add(int lane, const nr_pdcch_autodiscover_sweep_ctx_t *ct
 {
   if (lane < 0 || lane >= NR_PDCCH_LOOKAHEAD_MAX || ctx == NULL || ctx->n_cand <= 0)
     return false;
+  if (!lane_batch_vec_ready())
+    return false;                           /* no buffer: whole lane uses the CPU path, unchanged */
   if (min_len < 0 || max_len >= LANE_BATCH_MAX_LEN || max_len < min_len)
     return false;
   const int n_len = max_len - min_len + 1;
@@ -1124,7 +1207,7 @@ static bool lane_batch_add(int lane, const nr_pdcch_autodiscover_sweep_ctx_t *ct
   for (int c = 0; c < ctx->n_cand; c++) {
     const nr_pdcch_autodiscover_cand_t *cd = &ctx->cand[c];
     if ((int)cd->L * 108 > LANE_BATCH_VSTRIDE)
-      return false;                       /* not AL2: leave the whole lane on the CPU path */
+      return false;                       /* wider than LANE_BATCH_AL_MAX: CPU path */
     const int v = g_lb_n_vec + c;
     nr_pdcch_unscrambling((c16_t *)cd->e_rx, ctx->scrambling_rnti, (uint32_t)(cd->L * 108),
                           ctx->dmrs_scrambling_id, &g_lb_vec[v * LANE_BATCH_VSTRIDE]);
@@ -2584,9 +2667,9 @@ void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_pr
       // possible acceptance).
       g_dl_length_state.excluded_len = dci10_length; /* the 1_0/0_0 size is known; the sweep wants the other one */
       g_dl_length_state.stride       = dci_sweep_stride();
-      sweep_gpu_prefill(&sweep_ctx, 30, 63);  /* SWEEP GPU BATCH: primary DL sweep */
+      sweep_gpu_prefill(&sweep_ctx, dci_len_min(), dci_len_max());  /* SWEEP GPU BATCH: primary DL sweep */
       const int found_len = nr_pdcch_dci_length_sweep_feed(&g_dl_length_state, nr_pdcch_autodiscover_length_scorer,
-                                                            &sweep_ctx, disc_n_cand, 30, 63, bootstrap_rnti);
+                                                            &sweep_ctx, disc_n_cand, dci_len_min(), dci_len_max(), bootstrap_rnti);
       if (found_len > 0) {
         nr_pdcch_blind_monitor_autodiscover_set_dci_length(found_len);
         g_length_swept = true;
@@ -2704,7 +2787,7 @@ void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_pr
                             .dmrs_id=rel15->coreset.pdcch_dmrs_scrambling_id};
         ulc->state.stride = dci_sweep_stride();
         const int found=nr_pdcch_dci_length_sweep_feed(&ulc->state,ul_length_score,&ctx,
-                                                     count,30,63,boot_rnti);
+                                                     count, dci_len_min(), dci_len_max(), boot_rnti);
         /* A single matching decode cannot rule out a degenerate polar fixed point.
          * Require distinct UL payloads before trusting the shared engine's shortcut. */
         int supported_lengths=0;
@@ -3020,7 +3103,18 @@ constdiag_done:;
    * different consumer threads never share one buffer -- same convention this file's own pbwp
    * second-pass block already uses for s_pdcch_e_rx2. pdcch_llr_lane, by contrast, is fully
    * written-then-read within one lane's own iteration, so a single reused buffer is enough. */
-  static __thread c16_t s_pdcch_e_rx_lane[NR_PDCCH_LOOKAHEAD_MAX][NR_PDCCH_BLIND_RE_PER_RB_OUT_DMRS * 2 * 45];
+  /* Was [.. * 2 * 45] = 810 REs/lane, i.e. ~7 AL2 candidates and only ONE AL8 -- sized when lanes
+   * were AL2-only. A mixed-AL scan needs room for several positions at each level, so this is now
+   * 16 AL8-equivalents and lives on the HEAP: as a __thread array it would be 127 * 6912 * 4 B =
+   * 3.5 MB of TLS, the same shape as the large-TLS AVX alignment fault this project already hit. */
+  static __thread c16_t *s_lane_re = NULL;
+  if (s_lane_re == NULL) {
+    void *m = NULL;
+    if (posix_memalign(&m, 32, sizeof(c16_t) * (size_t)NR_PDCCH_LOOKAHEAD_MAX * LANE_RE_PER_LANE) != 0)
+      return;
+    s_lane_re = (c16_t *)m;
+  }
+  c16_t (*s_pdcch_e_rx_lane)[LANE_RE_PER_LANE] = (c16_t (*)[LANE_RE_PER_LANE])s_lane_re;
   static __thread c16_t pdcch_llr_lane[1][1][NR_PDCCH_BLIND_MAX_CORESET_RB * NR_PDCCH_BLIND_MAX_CORESET_DURATION
                                              * NR_PDCCH_BLIND_RE_PER_RB_OUT_DMRS];
   /* LLR CACHE, per occasion. nr_pdcch_generate_llr() depends on the frequency EXTENT (rb_offset and
@@ -3075,16 +3169,35 @@ constdiag_done:;
       continue;
     }
     const int ln_num_cces = (ln_rb * lrel->coreset.duration) / 6;
-    const int ln_L    = 2; // AL2-only, see the block comment above
-    const int ln_need = NR_PDCCH_BLIND_RE_PER_RB_OUT_DMRS * ln_L * 6;
-    const int ln_npos = (ln_num_cces >= ln_L) ? ((ln_num_cces - ln_L) / ln_L + 1) : 0;
-    int ln_nc = 0;
-    for (int p = 0; p < ln_npos && ln_nc < 45
-                    && (ln_nc + 1) * ln_need <= (int)(sizeof(s_pdcch_e_rx_lane[lane]) / sizeof(s_pdcch_e_rx_lane[0][0]));
-         p++) {
-      lrel->CCE[ln_nc] = (uint16_t)(p * ln_L);
-      lrel->L[ln_nc]   = (uint8_t)ln_L;
-      ln_nc++;
+    /* Every configured aggregation level, non-overlapping CCE positions at each. The RE budget is
+     * tracked as a RUNNING TOTAL rather than (count * fixed_need): with mixed ALs the candidates no
+     * longer have equal width, so the old uniform-stride check would under-count an AL8 entry and
+     * overrun s_pdcch_e_rx_lane[]. This mirrors the disc_cand walk below, which already advances
+     * its cursor by each candidate's own L. */
+    const uint8_t *ln_als = NULL;
+    const int ln_nal = lane_als(&ln_als);
+    const int ln_cap_re = (int)(sizeof(s_pdcch_e_rx_lane[lane]) / sizeof(s_pdcch_e_rx_lane[0][0]));
+    int ln_nc = 0, ln_used_re = 0;
+    /* ROUND-ROBIN over the ALs (position-major), NOT AL-major. AL-major lets the first level in the
+     * list spend the whole RE budget -- with AL2 first that leaves ZERO AL4/AL8 candidates, which
+     * would silently test nothing of what the widening exists to test. Rotating by position gives
+     * every configured AL the same low CCE positions first. */
+    for (int p = 0; ln_nc < 45; p++) {
+      bool any = false;
+      for (int ai = 0; ai < ln_nal && ln_nc < 45; ai++) {
+        const int ln_L    = (int)ln_als[ai];
+        const int ln_need = NR_PDCCH_BLIND_RE_PER_RB_OUT_DMRS * ln_L * 6;
+        const int ln_npos = (ln_num_cces >= ln_L) ? ((ln_num_cces - ln_L) / ln_L + 1) : 0;
+        if (p >= ln_npos || ln_used_re + ln_need > ln_cap_re)
+          continue;
+        lrel->CCE[ln_nc] = (uint16_t)(p * ln_L);
+        lrel->L[ln_nc]   = (uint8_t)ln_L;
+        ln_nc++;
+        ln_used_re += ln_need;
+        any = true;
+      }
+      if (!any)
+        break;                                  /* no AL can place another candidate: budget spent */
     }
     if (ln_nc < 1) {
       nr_pdcch_blind_lookahead_step(lane);
@@ -3144,7 +3257,7 @@ constdiag_done:;
         };
         g_lane_geom_snap[lane]   = geom;
         g_lane_needs_sweep[lane] = 1;
-        lane_batch_add(lane, &g_lane_sweep_ctx[lane], 30, 63);
+        lane_batch_add(lane, &g_lane_sweep_ctx[lane], dci_len_min(), dci_len_max());
         continue;   /* phase B runs the sweep AND the step for this lane */
       }
     } else {
@@ -3192,7 +3305,7 @@ constdiag_done:;
     g_lane_length_state[lane].excluded_len = dci10_length;
     g_lane_length_state[lane].stride       = dci_sweep_stride();
     const int found_len = nr_pdcch_dci_length_sweep_feed(&g_lane_length_state[lane],
-        nr_pdcch_autodiscover_length_scorer, &g_lane_sweep_ctx[lane], disc_n, 30, 63, 0);
+        nr_pdcch_autodiscover_length_scorer, &g_lane_sweep_ctx[lane], disc_n, dci_len_min(), dci_len_max(), 0);
     if (found_len > 0) {
       g_lane_dci_length[lane]   = (uint16_t)found_len;
       g_lane_length_found[lane] = true;
