@@ -889,7 +889,15 @@ void nr_pdcch_blind_monitor_autodiscover_reset(void);
  * (or the primary) verifies first wins and its geometry becomes g_cfg, exactly as an unbatched
  * search would have found eventually. Off by default (ISAC_PDCCH_EXTENT_BATCH unset or 1); set it
  * to K to run K-1 lanes. */
-#define NR_PDCCH_LOOKAHEAD_MAX 15
+/* Raised 15 -> 63 (2026-09-20) together with the per-occasion LLR cache in
+ * nr_pdcch_blind_monitor_rt.c. Before that cache each lane redid the FEP, a full-symbol memcpy per
+ * antenna and the channel estimation, so K lanes cost K x ~98 % of an occasion and 16 was already
+ * near the RT budget (135+217 us of 632 us at K=1). With the cache, lanes sharing an extent -- which
+ * is the normal case, the catalogue walks 271 mappings per extent -- share one LLR computation, so
+ * the marginal lane costs only its deinterleave+decode.
+ * Why it matters: the search is 133 extents x 271 mappings ~= 36k hypotheses, and convergence needs
+ * (36k / K) x occasions_per_hypothesis occasions of AIR TIME. K is the only term we control. */
+#define NR_PDCCH_LOOKAHEAD_MAX 63
 typedef struct {
   bool valid;             // this lane owns a live candidate this call
   int  rb_offset;

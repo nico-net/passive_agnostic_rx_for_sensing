@@ -818,6 +818,55 @@ int nr_pdcch_extent_candidates(int first_w, int last_w, int nw_total,
       n++;
     }
   }
+
+  /* SATURATED OCCUPANCY: the containment premise fails, so also search INSIDE the window.
+   *
+   * Everything above rests on "the true CORESET must CONTAIN the observed occupancy", which holds
+   * only while the histogram lights up where PDCCH DM-RS actually is. On a loaded commercial cell
+   * it does not: MEASURED 2026-09-20 on Swisscom PCI 382 (273 PRB, heavy traffic), the observation
+   * saturated to the whole carrier, so first_w=0 and last_w=nw_total-1. The expansion loop then has
+   * d_max = 0 and emits exactly ONE candidate -- the log reads "CORESET candidate 1/1" -- and the
+   * sweep spent three full passes over its 271 bundle/interleaver/shift variations with 15 live
+   * bootstrap RNTIs and verified nothing, because the true mapping was never a candidate.
+   *
+   * A saturated observation carries no information about the edges, so treat it as unknown rather
+   * than as a lower bound and enumerate plausible CONTAINED footprints. Bounded deliberately: only
+   * the common CORESET widths (24/48/96/144 RB, i.e. 4/8/16/24 windows of 6 RB) at every offset,
+   * rather than all 1035 contiguous intervals -- at 271 mapping variations each, the full set would
+   * be ~280k hypotheses and unreachable in any realistic dwell, whereas this adds ~100 and is
+   * covered in minutes at K=16 lanes.
+   *
+   * Only triggered when the observation really is saturated (>= 90 % of the carrier). A tight
+   * observation keeps the original containment behaviour untouched, so no cell that already
+   * converged can regress. */
+  {
+    const int observed_w = last_w - first_w + 1;
+    if (observed_w * 10 >= nw_total * 9) {
+      static const int kCommonWidths[] = {4, 8, 16, 24}; /* 24, 48, 96, 144 RB */
+      for (unsigned wi = 0; wi < sizeof(kCommonWidths) / sizeof(kCommonWidths[0]) && n < max_out; wi++) {
+        const int w = kCommonWidths[wi];
+        if (w > nw_total) {
+          continue;
+        }
+        for (int f = 0; f + w - 1 < nw_total && n < max_out; f++) {
+          const int l = f + w - 1;
+          bool dup = false;
+          for (int i = 0; i < n; i++) {
+            if (out[i].first_w == f && out[i].last_w == l) {
+              dup = true;
+              break;
+            }
+          }
+          if (dup) {
+            continue;
+          }
+          out[n].first_w = f;
+          out[n].last_w  = l;
+          n++;
+        }
+      }
+    }
+  }
   return n;
 }
 

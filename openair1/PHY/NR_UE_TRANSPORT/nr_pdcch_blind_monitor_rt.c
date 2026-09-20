@@ -2695,6 +2695,21 @@ constdiag_done:;
   static __thread c16_t s_pdcch_e_rx_lane[NR_PDCCH_LOOKAHEAD_MAX][NR_PDCCH_BLIND_RE_PER_RB_OUT_DMRS * 2 * 45];
   static __thread c16_t pdcch_llr_lane[1][1][NR_PDCCH_BLIND_MAX_CORESET_RB * NR_PDCCH_BLIND_MAX_CORESET_DURATION
                                              * NR_PDCCH_BLIND_RE_PER_RB_OUT_DMRS];
+  /* LLR CACHE, per occasion. nr_pdcch_generate_llr() depends on the frequency EXTENT (rb_offset and
+   * the RB count implied by freq_domain) and the duration -- NOT on RegBundleSize, InterleaverSize
+   * or ShiftIndex, which only nr_pdcch_demapping_deinterleaving() consumes. The catalogue walks all
+   * 271 mapping variations WITHIN one extent, so consecutive lanes share the extent and each was
+   * redoing the FEP, a full-symbol memcpy per antenna, and the channel estimation inside
+   * generate_llr -- for bit-identical output.
+   *
+   * That repeated work IS the cost: polar decode is 4.3 us of a 208 us occasion (2 %, measured), so
+   * ~98 % of an occasion is what is being duplicated K times. Removing it is what makes K > 16
+   * lanes affordable on CPU, and it is also the precondition for a GPU version to be worth doing --
+   * only once this is gone does the decode become the dominant term.
+   *
+   * Scoped to ONE occasion deliberately: these LLRs derive from this slot's samples, so the key is
+   * reset on every call and never carried across occasions. */
+  int llr_cache_rb = -1, llr_cache_off = -1;
   for (int lane = 0; lane < lookahead_k; lane++) {
     nr_pdcch_lookahead_geom_t geom;
     if (!nr_pdcch_blind_lookahead_get(lane, &geom))
@@ -2753,6 +2768,9 @@ constdiag_done:;
       nr_pdcch_blind_lookahead_step(lane);
       continue;
     }
+    if (ln_rb != llr_cache_rb || (int)lrel->coreset.rb_offset != llr_cache_off) {
+    llr_cache_rb  = ln_rb;
+    llr_cache_off = (int)lrel->coreset.rb_offset;
     for (int symbol = cfg->ss_first_symbol; symbol < cfg->ss_first_symbol + lrel->coreset.duration; symbol++) {
       if (symbol >= cfg->ss_first_symbol + rel15->coreset.duration)
         nr_slot_fep(ue, fp, proc->nr_slot_rx, symbol, rxdataF, link_type_dl, 0, ue->common_vars.rxdata);
@@ -2762,6 +2780,7 @@ constdiag_done:;
       nr_pdcch_generate_llr(ue, proc, symbol, &phy_lane, ln_llr_sym, num_monitoring_occ, lrel->coreset.duration,
                             rxdataF_symb_lane, pdcch_llr_lane);
     }
+    }  /* end LLR CACHE guard: reuse pdcch_llr_lane when the extent is unchanged */
     nr_pdcch_demapping_deinterleaving((uint32_t)ln_rb, pdcch_llr_lane[0][0], s_pdcch_e_rx_lane[lane],
                                       lrel->coreset.duration, lrel->coreset.RegBundleSize,
                                       lrel->coreset.InterleaverSize, lrel->coreset.ShiftIndex,
