@@ -3145,6 +3145,22 @@ constdiag_done:;
       }
     }
 
+    /* DEADLOCK 2, measured 2026-09-20 on Swisscom PCI 382: this call used to sit BELOW Gate 2, so
+     * an accept held by the persistence gate never recorded a sighting. But the bootstrap's own
+     * confirmation rule is "2 sightings in the window" -- the counter that would have released the
+     * gate was itself behind the gate. Measured: occasions=5377 accepts=164, held[persist=127
+     * mismatch=37] = 164, i.e. EVERY accept held, and BOOTTABLE used=0 -- the table never received
+     * a single entry, so bootstrap_rnti stayed 0x0 and with it the dedicated CORESET verification,
+     * the DL length sweep and the UL PUSCH scan (all three gate on the confirmed-RNTI set).
+     *
+     * This is the same deadlock the 1_0-seeding fix below addressed one layer down, and the file's
+     * own comment there already states the intent: record new-UE evidence BEFORE membership gating.
+     * Recording pre-gate is safe because the bootstrap does NOT trust a single sighting either --
+     * boot_entry_live() still demands sightings >= 2 within RNTI_BOOTSTRAP_STALE_SLOTS, so a noise
+     * RNTI that never recurs enters at n=1 and is never confirmed, exactly as before. */
+    if (!cfg->autodiscover || g_length_found || is_dci10)
+      nr_pdcch_blind_rnti_bootstrap_record(out.rnti, out.rnti_class, abs_slot);
+
     // ---- Gate 2: RNTI persistence. A real UE's RNTI recurs across many grants; a noise accept is
     // (almost always) a one-off. See rnti_persistence_check()'s own comment. ----
     if (!rnti_persistence_check(out.rnti, abs_slot, persist_window_slots, cfg->rnti_persist_k)) {
@@ -3191,8 +3207,6 @@ constdiag_done:;
      * Format 1_0's length is DERIVED (CORESET/BWP), never guessed, so a 1_0 accept is exactly as
      * trustworthy a sighting as a post-lock one -- and it still has to clear the same persistence
      * gate (2 sightings in the window) before it counts as confirmed. */
-    if (!cfg->autodiscover || g_length_found || is_dci10)
-      nr_pdcch_blind_rnti_bootstrap_record(out.rnti, out.rnti_class, abs_slot);
     if (cfg->autodiscover && g_length_found && !is_dci10) {
       const uint64_t fingerprint = (uint64_t)out.start_rb | ((uint64_t)out.num_rb << 9)
           | ((uint64_t)out.mcs << 18) | ((uint64_t)out.rv << 23) | ((uint64_t)out.ndi << 25)
@@ -3706,6 +3720,17 @@ constdiag_done:;
     nr_pdcch_passive_queue_stats_t scanq;
     memset(&scanq, 0, sizeof(scanq));
     nr_pdcch_passive_queue_get_stats(&scanq);
+    /* The bootstrap table, raw. bootstrap_rnti=0x0 gates dedicated CORESET verification, the DL
+     * length sweep AND the UL PUSCH scan at once, so when it stays zero the whole pipeline is dead
+     * downstream -- and an empty table is indistinguishable from a table full of one-sighting
+     * entries without printing it. live>0 means something confirmed; used>0 with live=0 means
+     * accepts are arriving but never repeating. */
+    {
+      char boottab[512];
+      boottab[0] = '\0';
+      nr_pdcch_blind_rnti_bootstrap_dump((uint32_t)abs_slot, boottab, (int)sizeof(boottab));
+      LOG_I(PHY, "SENSING: BOOTTABLE %s\n", boottab[0] ? boottab : "(empty)");
+    }
     LOG_I(PHY,
          "SENSING: blind PDCCH monitor summary: occasions=%lu candidates=%lu accepts=%lu "
          "dci10[accepts=%lu C=%lu TC=%lu SI=%lu RA=%lu P=%lu] dci01[accepts=%lu rejects=%lu] "

@@ -29,6 +29,7 @@
 
 #include "nr_pdcch_blind_monitor.h"
 #include <string.h>
+#include <stdio.h>   // snprintf, for the BOOTTABLE diagnostic dump
 
 // ---- Phase 3 Technique B: C-RNTI bootstrap, MULTI-UE ----------------------------------------
 // A cell carries many UEs and a passive receiver hears all of them, so tracking ONE C-RNTI threw
@@ -154,6 +155,35 @@ bool nr_pdcch_blind_monitor_confirmed_rnti(uint32_t now_abs_slot, uint16_t* rnti
   *class_out = g_boot[best].cls;
   *age_slots_out = (now_abs_slot >= g_boot[best].last_slot) ? (now_abs_slot - g_boot[best].last_slot) : 0;
   return true;
+}
+
+/* DIAGNOSTIC. Everything downstream -- dedicated CORESET verification, the DL length sweep and the
+ * UL PUSCH scan -- is gated on an entry reaching sightings >= 2 (boot_entry_live). When that never
+ * happens the whole chain reads as "bootstrap_rnti=0x0" with no way to tell WHY from the outside:
+ * a table of one-sighting entries (accepts are false, RNTIs never repeat) looks identical to an
+ * empty table. Prints the raw table so the two are distinguishable. */
+int nr_pdcch_blind_rnti_bootstrap_dump(uint32_t now_abs_slot, char *buf, int buflen)
+{
+  if (buf == NULL || buflen <= 0) {
+    return 0;
+  }
+  int off = 0, live = 0, used = 0;
+  for (int i = 0; i < NR_PDCCH_BLIND_MAX_UE && off < buflen - 32; i++) {
+    if (g_boot[i].sightings == 0) {
+      continue;
+    }
+    used++;
+    const uint32_t age = (now_abs_slot >= g_boot[i].last_slot) ? (now_abs_slot - g_boot[i].last_slot) : 0;
+    if (boot_entry_live(&g_boot[i], now_abs_slot)) {
+      live++;
+    }
+    off += snprintf(buf + off, (size_t)(buflen - off), "%s0x%04x:n=%u,age=%u",
+                    (off > 0) ? " " : "", g_boot[i].rnti, g_boot[i].sightings, age);
+  }
+  if (off < buflen - 24) {
+    off += snprintf(buf + off, (size_t)(buflen - off), " | used=%d live=%d", used, live);
+  }
+  return off;
 }
 
 void nr_pdcch_blind_rnti_bootstrap_reset_for_test(void)
