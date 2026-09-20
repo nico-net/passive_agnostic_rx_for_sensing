@@ -85,6 +85,16 @@ double nr_csirs_blind_energy_ratio(const int16_t *rx_re_im, const int16_t *ref_r
 double nr_csirs_blind_correlate_blocks(const int16_t *rx_re_im, const int16_t *ref_re_im, int n,
                                        int sub_res, int *n_used);
 
+/** Same statistic, but reading rx at (i + rx_shift) % n -- the FFT-ordered position of the CRB-order
+ * reference index i. rx_shift is frame_parms->first_carrier_offset; see the definition for why the
+ * receiver grid and the generated reference do not share a convention. Pure. */
+double nr_csirs_blind_correlate_blocks_shift(const int16_t *rx_re_im, const int16_t *ref_re_im, int n,
+                                             int sub_res, int rx_shift, int *n_used);
+
+/** Sequence-free energy ratio with the same rx index mapping. Pure. */
+double nr_csirs_blind_energy_ratio_shift(const int16_t *rx_re_im, const int16_t *ref_re_im, int n,
+                                         int rx_shift);
+
 /** Same statistic, but over the best CONTIGUOUS RUN of sub-bands rather than all of them, and it
  * reports which run won. A candidate asserts the resource spans the whole carrier; a real CSI-RS
  * often covers only part of the BWP, and the whole-band mean then reads ~fraction * perfect, which
@@ -196,6 +206,10 @@ bool nr_csirs_blind_feed(nr_csirs_blind_state_t *st, int idx, uint32_t absolute_
  * ~0 for data or an NZP resource, ~0 on an empty symbol (no false hit from silence). -1 when the
  * reference is empty or the off-pattern REs carry no energy at all. Pure. */
 double nr_csirs_blind_zero_score(const int16_t *rx_re_im, const int16_t *ref_re_im, int n);
+
+/** ZP energy score with the rx index mapped to FFT order (rx_shift = first_carrier_offset). Pure. */
+double nr_csirs_blind_zero_score_shift(const int16_t *rx_re_im, const int16_t *ref_re_im, int n,
+                                       int rx_shift);
 
 /** nr_csirs_blind_feed() for the ZP search, plus one guard: a periodic resource is hit in at most
  * 1/period of its tests, so a candidate that scores a hit on more than half of them is a

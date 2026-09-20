@@ -310,7 +310,12 @@ bool nr_csirs_blind_feed(nr_csirs_blind_state_t *st, int idx, uint32_t absolute_
   return true;
 }
 
-double nr_csirs_blind_zero_score(const int16_t *rx_re_im, const int16_t *ref_re_im, int n)
+/* Same grid-alignment requirement as the other two comparators: this reads rxdataF at the
+ * reference's RE positions, so it must map CRB order to FFT order. It searches ZP CSI-RS, whose
+ * only evidence IS the energy, so a misaligned read does not merely weaken it -- it measures a
+ * different part of the spectrum entirely. */
+double nr_csirs_blind_zero_score_shift(const int16_t *rx_re_im, const int16_t *ref_re_im, int n,
+                                       int rx_shift)
 {
   if (rx_re_im == NULL || ref_re_im == NULL || n <= 0) {
     return -1.0;
@@ -328,7 +333,8 @@ double nr_csirs_blind_zero_score(const int16_t *rx_re_im, const int16_t *ref_re_
       continue;
     }
     for (int i = rb0; i < rb0 + 12; i++) {
-      const double yr = (double)rx_re_im[2 * i], yi = (double)rx_re_im[2 * i + 1];
+      const int j = (int)(((long)i + rx_shift) % n);
+      const double yr = (double)rx_re_im[2 * j], yi = (double)rx_re_im[2 * j + 1];
       const double e = yr * yr + yi * yi;
       if (ref_re_im[2 * i] != 0 || ref_re_im[2 * i + 1] != 0) { e_on += e; n_on++; }
       else { e_off += e; n_off++; }
@@ -397,7 +403,12 @@ const nr_csirs_candidate_t *nr_csirs_blind_confirmed(const nr_csirs_blind_state_
  * |y|^2 on the pattern REs over mean |y|^2 on the other REs of the touched RBs. A boosted pilot
  * reads > 1, an unused (zero-power) pattern < 1, and noise/PDSCH ~1. Restricted to touched RBs so an
  * unallocated guard band cannot skew it. Pure. Returns -1.0 when either side has no REs. */
-double nr_csirs_blind_energy_ratio(const int16_t *rx_re_im, const int16_t *ref_re_im, int n)
+/* Same grid-alignment argument as nr_csirs_blind_correlate_blocks_shift(): this compares power ON
+ * the reference REs against power off them, so it too must read rxdataF at the FFT-ordered
+ * position. Without the shift it measured power at unrelated subcarriers, which is why the OTA
+ * "energy" reading drifted (3.27 -> 3.0 -> 1.4) instead of settling on a real pilot. */
+double nr_csirs_blind_energy_ratio_shift(const int16_t *rx_re_im, const int16_t *ref_re_im, int n,
+                                         int rx_shift)
 {
   if (rx_re_im == NULL || ref_re_im == NULL || n <= 0) {
     return -1.0;
@@ -416,7 +427,8 @@ double nr_csirs_blind_energy_ratio(const int16_t *rx_re_im, const int16_t *ref_r
       continue;
     }
     for (int i = rb0; i < rb0 + 12; i++) {
-      const double yr = (double)rx_re_im[2 * i], yi = (double)rx_re_im[2 * i + 1];
+      const int j = (int)(((long)i + rx_shift) % n);
+      const double yr = (double)rx_re_im[2 * j], yi = (double)rx_re_im[2 * j + 1];
       const double e = yr * yr + yi * yi;
       if (ref_re_im[2 * i] != 0 || ref_re_im[2 * i + 1] != 0) {
         e_on += e;
@@ -433,6 +445,16 @@ double nr_csirs_blind_energy_ratio(const int16_t *rx_re_im, const int16_t *ref_r
   return (e_on / n_on) / (e_off / n_off);
 }
 
+double nr_csirs_blind_zero_score(const int16_t *rx_re_im, const int16_t *ref_re_im, int n)
+{
+  return nr_csirs_blind_zero_score_shift(rx_re_im, ref_re_im, n, 0);
+}
+
+double nr_csirs_blind_energy_ratio(const int16_t *rx_re_im, const int16_t *ref_re_im, int n)
+{
+  return nr_csirs_blind_energy_ratio_shift(rx_re_im, ref_re_im, n, 0);
+}
+
 /* CHANNEL-ROBUST SCORE (2026-09-19). The flat correlation above is the wrong oracle on air: it sums
  * y*conj(x) coherently across the WHOLE band, but the propagation channel rotates each subcarrier's
  * phase, and over 273 RB at 30 kHz even 100 ns of delay spread turns the phase by tens of radians
@@ -445,8 +467,23 @@ double nr_csirs_blind_energy_ratio(const int16_t *rx_re_im, const int16_t *ref_r
  * that noise reads ~1.0 at any candidate size and a perfect match reads ~sqrt(REs per block):
  * mean_b(rho_b) * sqrt(n_per_block) / 0.886, with 0.886 = E|rho| for Rayleigh noise.
  * `sub_res` is the number of consecutive REs per sub-band (of the reference's OCCUPIED REs). */
-double nr_csirs_blind_correlate_blocks(const int16_t *rx_re_im, const int16_t *ref_re_im, int n,
-                                       int sub_res, int *n_used)
+/* GRID ALIGNMENT, measured 2026-09-20 and the reason this search never matched on air.
+ * nr_generate_csi_rs() writes the reference at CRB-order indices (k = rb*12 + koverline + kp, bins
+ * 0..N_RB*12), which is the gNB transmit-grid convention. The UE rxdataF that nr_slot_fep_ant()
+ * produces is FFT-ordered: the carrier starts at first_carrier_offset and wraps. Correlating the
+ * two at the SAME index compares subcarriers ~2458 bins apart at 273 PRB / 4096, so the score sat
+ * at the noise floor for every scramblingID (complete 1024 sweep) and every slot (complete 20
+ * sweep) -- the sequence was never the problem, we were never looking at the resource.
+ *
+ * OAI own working receiver does exactly this mapping: csi_rx.c:185 reads
+ *   k = (first_carrier_offset + rb*12 + koverline[cdm_id] + kp) % ofdm_symbol_size
+ * so @p rx_shift is that first_carrier_offset and the modulo is the wrap.
+ *
+ * Shifting the RX read rather than rotating the reference keeps sub-bands contiguous in real
+ * frequency, which the channel-robust score depends on -- rotating the reference instead would put
+ * one sub-band astride the wrap, joining REs from opposite band edges. */
+double nr_csirs_blind_correlate_blocks_shift(const int16_t *rx_re_im, const int16_t *ref_re_im, int n,
+                                             int sub_res, int rx_shift, int *n_used)
 {
   if (n_used != NULL) {
     *n_used = 0;
@@ -475,7 +512,8 @@ double nr_csirs_blind_correlate_blocks(const int16_t *rx_re_im, const int16_t *r
     if (xr == 0.0 && xi == 0.0) {
       continue;
     }
-    const double yr = (double)rx_re_im[2 * i], yi = (double)rx_re_im[2 * i + 1];
+    const int j = (int)(((long)i + rx_shift) % n);
+    const double yr = (double)rx_re_im[2 * j], yi = (double)rx_re_im[2 * j + 1];
     acc_r += yr * xr + yi * xi;
     acc_i += yi * xr - yr * xi;
     e_rx += yr * yr + yi * yi;
@@ -491,6 +529,14 @@ double nr_csirs_blind_correlate_blocks(const int16_t *rx_re_im, const int16_t *r
   }
   const double per_block = (double)used / (double)blocks;
   return (rho_sum / blocks) * sqrt(per_block) / 0.886;
+}
+
+/* Zero-shift form: both grids already share one convention. Used by the offline tests, which build
+ * rx and ref themselves and therefore cannot disagree about the layout. */
+double nr_csirs_blind_correlate_blocks(const int16_t *rx_re_im, const int16_t *ref_re_im, int n,
+                                       int sub_res, int *n_used)
+{
+  return nr_csirs_blind_correlate_blocks_shift(rx_re_im, ref_re_im, n, sub_res, 0, n_used);
 }
 
 /* BEST CONTIGUOUS RUN (2026-09-19). The mean-over-sub-bands score assumes the resource covers the

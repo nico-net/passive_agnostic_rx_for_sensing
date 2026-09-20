@@ -282,10 +282,10 @@ void nr_csirs_blind_rt_slot(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot
    * realistic 10 dB-SNR match with some residual drift lands around 4-5. */
 #define CSIRS_BLIND_SUBBAND_RE 32
   int n_used = 0;
-  const double rho = nr_csirs_blind_correlate_blocks((const int16_t *)&rxdataF_ant0[off_sym],
+  const double rho = nr_csirs_blind_correlate_blocks_shift((const int16_t *)&rxdataF_ant0[off_sym],
                                                      (const int16_t *)&ref[off_sym],
                                                      fp->ofdm_symbol_size, CSIRS_BLIND_SUBBAND_RE,
-                                                     &n_used);
+                                                     fp->first_carrier_offset, &n_used);
   if (rho < 0.0) {
     return;   /* unscorable: this candidate maps no RE in this symbol */
   }
@@ -299,8 +299,9 @@ void nr_csirs_blind_rt_slot(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot
   /* Sequence-free positional evidence, logged next to z: if z stays at noise while this shows
    * periodic structure, the POSITIONS are right and the SEQUENCE (scramblingID != PCI) is wrong --
    * which the correlation alone cannot distinguish from an empty hypothesis. */
-  const double epr = nr_csirs_blind_energy_ratio((const int16_t *)&rxdataF_ant0[off_sym],
-                                                 (const int16_t *)&ref[off_sym], fp->ofdm_symbol_size);
+  const double epr = nr_csirs_blind_energy_ratio_shift((const int16_t *)&rxdataF_ant0[off_sym],
+                                                 (const int16_t *)&ref[off_sym], fp->ofdm_symbol_size,
+                                                 fp->first_carrier_offset);
   if (epr > 0.0 && idx < NR_CSIRS_BLIND_MAX_CAND) {
     g_epr_sum[idx] += epr;
     g_epr_n[idx]++;
@@ -348,8 +349,8 @@ void nr_csirs_blind_rt_slot(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot
   /* ZERO-POWER hypothesis on the same candidate and symbol (no extra FEP or reference): does the
    * pattern carry no energy while the PDSCH around it does? Confirmed the same way (periodic). */
   if (g_zp.confirmed < 0) {
-    const double zs = nr_csirs_blind_zero_score((const int16_t *)&rxdataF_ant0[off_sym], (const int16_t *)&ref[off_sym],
-                                                fp->ofdm_symbol_size);
+    const double zs = nr_csirs_blind_zero_score_shift((const int16_t *)&rxdataF_ant0[off_sym], (const int16_t *)&ref[off_sym],
+                                                fp->ofdm_symbol_size, fp->first_carrier_offset);
     if (zs >= 0.0) {
       const double znull = median_of(g_zp_null, g_zp_null_n);
       if (nr_csirs_blind_zp_feed(&g_zp, idx, absolute_slot, zs, znull)) {
@@ -418,9 +419,10 @@ void nr_csirs_blind_rt_slot(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot
       nr_generate_csi_rs(fp, &sp, AMP, trial_slot, c->freq_density, c->start_rb, c->nr_of_rbs,
                          c->symb_l0, c->symb_l1, c->row, c->scramb_id, 0, c->cdm_type, refp);
       int sn = 0;
-      const double sz = nr_csirs_blind_correlate_blocks((const int16_t *)&rxdataF_ant0[off_sym],
+      const double sz = nr_csirs_blind_correlate_blocks_shift((const int16_t *)&rxdataF_ant0[off_sym],
                                                         (const int16_t *)&ref[off_sym],
-                                                        fp->ofdm_symbol_size, CSIRS_BLIND_SUBBAND_RE, &sn);
+                                                        fp->ofdm_symbol_size, CSIRS_BLIND_SUBBAND_RE,
+                                                        fp->first_carrier_offset, &sn);
       if (sz > g_slot_best_z) {
         g_slot_best_z = sz;
         if (sz >= 4.0) {
@@ -455,9 +457,10 @@ void nr_csirs_blind_rt_slot(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot
                          trial.symb_l0, trial.symb_l1, trial.row, trial.scramb_id, 0, trial.cdm_type,
                          refp);
       int tn = 0;
-      const double tz = nr_csirs_blind_correlate_blocks((const int16_t *)&rxdataF_ant0[off_sym],
+      const double tz = nr_csirs_blind_correlate_blocks_shift((const int16_t *)&rxdataF_ant0[off_sym],
                                                         (const int16_t *)&ref[off_sym], fp->ofdm_symbol_size,
-                                                        CSIRS_BLIND_SUBBAND_RE, &tn);
+                                                        CSIRS_BLIND_SUBBAND_RE,
+                                                        fp->first_carrier_offset, &tn);
       if (tz > g_id_best_z) {
         g_id_best_z = tz;
         g_id_best = trial.scramb_id;
