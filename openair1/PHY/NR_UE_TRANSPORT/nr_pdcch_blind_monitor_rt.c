@@ -3184,7 +3184,14 @@ constdiag_done:;
 
     /* Record new-UE evidence before membership gating, otherwise a confirmed UE prevents
      * every later UE from ever acquiring a context. Only resolved-length accepts may seed it. */
-    if (!cfg->autodiscover || g_length_found)
+    /* DEADLOCK, measured 2026-09-19 on two commercial cells: the bootstrap only seeded AFTER the
+     * DCI 1_1 length was found, but the length sweep needs a bootstrapped RNTI to reach significance
+     * on a sparsely loaded cell -- so on a cell where we decode 1_0 grants and nothing else,
+     * bootstrap_rnti stayed 0x0 for entire 25-minute runs and no mapping could ever be verified.
+     * Format 1_0's length is DERIVED (CORESET/BWP), never guessed, so a 1_0 accept is exactly as
+     * trustworthy a sighting as a post-lock one -- and it still has to clear the same persistence
+     * gate (2 sightings in the window) before it counts as confirmed. */
+    if (!cfg->autodiscover || g_length_found || is_dci10)
       nr_pdcch_blind_rnti_bootstrap_record(out.rnti, out.rnti_class, abs_slot);
     if (cfg->autodiscover && g_length_found && !is_dci10) {
       const uint64_t fingerprint = (uint64_t)out.start_rb | ((uint64_t)out.num_rb << 9)

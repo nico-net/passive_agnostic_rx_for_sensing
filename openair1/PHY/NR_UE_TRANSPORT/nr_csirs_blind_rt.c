@@ -47,6 +47,14 @@ static int      g_null_n, g_null_w;
  * resource, because it never touches the sequence. */
 static double   g_epr_sum[NR_CSIRS_BLIND_MAX_CAND];
 static uint32_t g_epr_n[NR_CSIRS_BLIND_MAX_CAND];
+/* IS IT THE SSB? (2026-09-19) Both sequence inputs are excluded by complete sweeps, yet the energy
+ * test keeps finding the same pair. SSB blocks always start at symbol 2 or 8 WITHIN a slot, so
+ * l=4/l=8 cannot separate "SSB" from "CSI-RS" by symbol. The SLOT can: an SSB burst only occupies
+ * slots 0-3 (Case C, L=8) of the SSB-period frames, while a real CSI-RS follows its own periodicity.
+ * So bin every high-EPR sighting of the leading candidate by slot and print the histogram. */
+#define EPR_SLOT_BINS 20
+static uint32_t g_epr_slot_hi[EPR_SLOT_BINS];
+static uint32_t g_epr_slot_all[EPR_SLOT_BINS];
 /* scramblingID sweep (ISAC_CSIRS_BLIND_IDSWEEP=1). MEASURED 2026-09-19 on Swisscom PCI 382: the
  * sequence-free EPR finds a TRS pair (row 1, same fd, symbols 4 and 8) at 4-5x the power of its
  * neighbouring REs, while the correlation against the PCI-derived sequence stays at the noise level
@@ -195,6 +203,15 @@ void nr_csirs_blind_rt_slot(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot
     }
     LOG_A(PHY, "SENSING: CSIRS_BLIND EPRRANK slots=%llu (1.0 = no pilot) top: %s\n",
           (unsigned long long)g_slots, ebuf);
+    if (g_id_pin >= 0) {
+      char hb[256];
+      int ho = 0;
+      for (int b = 0; b < EPR_SLOT_BINS && ho < (int)sizeof(hb) - 12; b++)
+        ho += snprintf(hb + ho, sizeof(hb) - ho, "%u/%u ", g_epr_slot_hi[b], g_epr_slot_all[b]);
+      LOG_A(PHY, "SENSING: CSIRS_BLIND EPRSLOT pinned row%u fd%u l%u, epr>2 by slot%%20 (SSB lives in "
+                 "slots 0-3): %s\n",
+            g_st.cand[g_id_pin].row, g_st.cand[g_id_pin].freq_domain, g_st.cand[g_id_pin].symb_l0, hb);
+    }
   }
   const int idx = nr_csirs_blind_next(&g_st);
   if (idx < 0) {
@@ -287,6 +304,12 @@ void nr_csirs_blind_rt_slot(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot
   if (epr > 0.0 && idx < NR_CSIRS_BLIND_MAX_CAND) {
     g_epr_sum[idx] += epr;
     g_epr_n[idx]++;
+  }
+  if (epr > 0.0 && idx == g_id_pin && slot >= 0) {
+    const int b = slot % EPR_SLOT_BINS;
+    g_epr_slot_all[b]++;
+    if (epr > 2.0)
+      g_epr_slot_hi[b]++;
   }
   /* SPAN PROFILE (rank mode). MEASURED 2026-09-19 on Swisscom: the best candidate scores rho 0.22
    * against a 0.045 null -- 5x the null, but nowhere near the ~1 a correct known sequence must give,
