@@ -183,7 +183,17 @@ void nr_isac_pusch_data_aided_submit(PHY_VARS_NR_UE *ue,
         if (mod_idx >= expected || nof_re >= cap) {
           break;
         }
-        const int k_abs = ((g->start_rb + g->bwp_start) * 12 + rb * 12 + sc) % symsz;
+        /* TWO different indices, and collapsing them into one is silently wrong: rxdataF is the
+         * FFT-ordered grid (nr_symbol_fep_ul writes DC at bin 0, the carrier starting at
+         * first_carrier_offset and wrapping) -- which is why nr_rx_pusch, reading this same buffer,
+         * adds first_carrier_offset -- while the ISAC grid column is CRB0-absolute. The DL twin
+         * (nr_pdsch_data_aided.c) keeps them apart as start_re/base_sc; this used to use the
+         * CRB-absolute value for BOTH, so Y was read ~first_carrier_offset subcarriers away from X
+         * and H = Y/X was noise. */
+        const int k_crb = (g->start_rb + g->bwp_start) * 12 + rb * 12 + sc;
+        int       k_abs = fp->first_carrier_offset + k_crb;
+        if (k_abs >= symsz)
+          k_abs -= symsz;
 
         const c16_t  xs = mod_syms[mod_idx++];
         const double xr = (double)xs.r, xi = (double)xs.i;
@@ -200,7 +210,7 @@ void nr_isac_pusch_data_aided_submit(PHY_VARS_NR_UE *ue,
           h_buf[o]       = (float)((yr * xr + yi * xi) / p);
           h_buf[o + 1]   = (float)((yi * xr - yr * xi) / p);
         }
-        k_buf[nof_re] = (uint32_t)k_abs;
+        k_buf[nof_re] = (uint32_t)k_crb;
         l_buf[nof_re] = (uint32_t)l;
         nof_re++;
       }

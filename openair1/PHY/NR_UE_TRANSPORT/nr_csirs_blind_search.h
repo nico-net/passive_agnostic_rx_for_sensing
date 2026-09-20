@@ -85,6 +85,14 @@ double nr_csirs_blind_energy_ratio(const int16_t *rx_re_im, const int16_t *ref_r
 double nr_csirs_blind_correlate_blocks(const int16_t *rx_re_im, const int16_t *ref_re_im, int n,
                                        int sub_res, int *n_used);
 
+/** Same statistic, but over the best CONTIGUOUS RUN of sub-bands rather than all of them, and it
+ * reports which run won. A candidate asserts the resource spans the whole carrier; a real CSI-RS
+ * often covers only part of the BWP, and the whole-band mean then reads ~fraction * perfect, which
+ * is indistinguishable from a near-miss. Returns -1.0 when fewer than two sub-bands are scorable. */
+double nr_csirs_blind_correlate_bestrun(const int16_t *rx_re_im, const int16_t *ref_re_im, int n,
+                                        int sub_res, int *first_block_out, int *n_blocks_out,
+                                        int *n_used_out);
+
 /// Periodicities TS 38.331 CSI-ResourcePeriodicityAndOffset admits, in slots.
 #define NR_CSIRS_BLIND_N_PERIODS 13
 extern const uint16_t nr_csirs_blind_periods[NR_CSIRS_BLIND_N_PERIODS];
@@ -129,7 +137,12 @@ int nr_csirs_blind_format(const nr_csirs_candidate_t *c, uint16_t period, uint16
  * parameter we can simply try first and fall back on.
  */
 
-#define NR_CSIRS_BLIND_MAX_CAND 256
+/* The extended enumeration (rows 1-5, row-1's full 4-bit bitmap, row-2's dot5 densities, symbols
+ * 0-13) produces ~680 candidates; at 256 the list was silently truncated mid-row and everything
+ * after row 2 was never tried. Cost of the larger space is CONVERGENCE TIME, not CPU per slot: one
+ * candidate is still scored per slot, so a full pass is ~1 s at this slot rate and the per-candidate
+ * evidence (32 samples before the sweep pins) takes ~35 s. */
+#define NR_CSIRS_BLIND_MAX_CAND 1024
 
 typedef struct {
   nr_csirs_candidate_t cand[NR_CSIRS_BLIND_MAX_CAND];
@@ -147,6 +160,15 @@ typedef struct {
 /** Enumerate candidate resources for a cell. `scramb_id` is normally the PCI.
  * Returns the count, or -1 on bad arguments. */
 int nr_csirs_blind_enumerate(nr_csirs_candidate_t *out, int max, uint16_t n_rb, uint16_t scramb_id);
+
+/** Set bits get_csi_mapping_parms() requires for @p row, or -1 if the row is not enumerated here.
+ * Its bitmap walk is UNBOUNDED: hand it a bitmap with fewer set bits than the row needs and it
+ * spins forever on the receive thread. */
+int nr_csirs_blind_row_needs_bits(uint8_t row);
+
+/** True when @p c may safely be handed to get_csi_mapping_parms(). Call this before generating a
+ * reference from any candidate that did not come straight out of nr_csirs_blind_enumerate(). */
+bool nr_csirs_blind_candidate_safe(const nr_csirs_candidate_t *c);
 
 /** Initialise a search state from an enumeration. Returns the candidate count. */
 int nr_csirs_blind_init(nr_csirs_blind_state_t *st, uint16_t n_rb, uint16_t scramb_id);

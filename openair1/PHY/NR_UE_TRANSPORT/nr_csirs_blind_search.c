@@ -142,12 +142,34 @@ int nr_csirs_blind_format(const nr_csirs_candidate_t *c, uint16_t period, uint16
 
 /* Rows worth searching -- see the header for why the wide-port rows are excluded.
  * Row 1: 1 port, density 3, one symbol. Row 2: 1 port, density 1. Row 4: 4 ports, density 1. */
-static const uint8_t kRows[]    = {1, 2, 4};
-static const uint8_t kDensity[] = {3, 2, 2};   /* per row: 3 = three, 2 = one */
-static const uint8_t kCdm[]     = {0, 0, 1};   /* per row: noCDM, noCDM, fd-CDM2 */
-/* Frequency-domain bitmap width differs per row; a one-hot sweep over the legal positions is what
- * a real configuration always is. Row 1 has 3 positions, rows 2 and 4 have 12 and 3. */
-static const uint8_t kFdBits[]  = {3, 12, 3};
+/* Rows enumerated, TS 38.211 Table 7.4.1.5.3-1. EXTENDED 2026-09-19 from {1,2,4}.
+ *
+ * WHAT GATES THIS LIST, and it is a hazard not a preference: get_csi_mapping_parms() locates the
+ * REs by walking the bitmap until it has found the number of set bits the ROW requires --
+ * `while (found < 4)` for row 6, `< 2` for row 8, `< 6` for row 9. Its loop has no bound, so a
+ * candidate whose bitmap carries FEWER set bits than its row needs spins forever, on the PHY
+ * receive thread. Every row below therefore needs exactly ONE set bit (`found < 1`), which is what
+ * makes a one-hot enumeration safe; kNeedBits records the requirement and enumerate() asserts it.
+ *
+ * Rows 6-18 (8/12/16/24/32 ports) need 2-6 simultaneous bits, i.e. a combinatorial bitmap
+ * enumeration, and are deliberately still out: a 32-port CQI resource on a mMIMO cell is invisible
+ * to this search, which is a real coverage limit and the honest next extension. */
+static const uint8_t kRows[]     = {1, 2, 3, 4, 5};
+static const uint8_t kPorts[]    = {1, 1, 2, 4, 4};
+static const uint8_t kNeedBits[] = {1, 1, 1, 1, 1};   /* set bits get_csi_mapping_parms() demands */
+static const uint8_t kCdm[]      = {0, 0, 1, 1, 1};   /* noCDM, noCDM, fd-CDM2, fd-CDM2, fd-CDM2 */
+
+/* Bitmap width per row. Row 1 is b3..b0 -- FOUR bits: the generator places its REs at k0, k0+4,
+ * k0+8 with k0 in {0,1,2,3}. This said 3, so k0=3 was never enumerated and a quarter of the row-1
+ * (TRS) space was unreachable no matter how long a search ran. */
+static const uint8_t kFdBits[]   = {4, 12, 3, 3, 3};
+
+/* Densities to try per row. Row 2 is the only single-port row that admits dot5, and a cell using
+ * dot5 (even or odd RBs) puts its REs on half the RBs a density-one candidate tests -- which reads
+ * as a half-strength match, not as a miss, so it has to be enumerated rather than inferred.
+ * 0 = dot5 even RB, 1 = dot5 odd RB, 2 = one, 3 = three. */
+static const uint8_t kDensities[][3] = {{3, 0xFF, 0xFF}, {2, 0, 1}, {2, 0xFF, 0xFF},
+                                        {2, 0xFF, 0xFF}, {2, 0xFF, 0xFF}};
 
 #define CSIRS_DETECT_MARGIN 3.0   /* a hit must beat the null MEDIAN by this factor */
 #define CSIRS_MIN_HITS      3
@@ -159,28 +181,68 @@ int nr_csirs_blind_enumerate(nr_csirs_candidate_t *out, int max, uint16_t n_rb, 
   }
   int n = 0;
   for (unsigned r = 0; r < sizeof(kRows) / sizeof(kRows[0]); r++) {
-    for (uint8_t b = 0; b < kFdBits[r]; b++) {
-      /* symb_l0 runs over the symbols a CSI-RS may start on. Symbol 0 and 1 are excluded: a CORESET
-       * occupies the start of the slot and no cell places a measurement resource under it. */
-      for (uint8_t l0 = 2; l0 < 13; l0++) {
-        if (n >= max) {
-          return n;
+    if (kNeedBits[r] != 1) {
+      continue;   /* see kRows: a multi-bit row would spin the generator's unbounded bitmap walk */
+    }
+    for (unsigned d = 0; d < 3; d++) {
+      const uint8_t density = kDensities[r][d];
+      if (density == 0xFF) {
+        continue;
+      }
+      for (uint8_t b = 0; b < kFdBits[r]; b++) {
+        /* symb_l0 covers every symbol a CSI-RS may start on. Symbols 0-1 are included: only a
+         * 3-symbol CORESET reaches symbol 2, and a cell is free to place a resource above a
+         * 1-symbol one -- excluding them was an assumption about the scheduler, not a constraint
+         * from the spec. Rows whose pattern uses l0+1 (row 5) must leave room for it. */
+        const uint8_t l_max = (kRows[r] == 5) ? 12 : 13;
+        for (uint8_t l0 = 0; l0 <= l_max; l0++) {
+          if (n >= max) {
+            return n;
+          }
+          nr_csirs_candidate_t *c = &out[n++];
+          memset(c, 0, sizeof(*c));
+          c->row = kRows[r];
+          c->freq_domain = (uint16_t)(1u << b);   /* one-hot: exactly the one set bit these rows need */
+          c->symb_l0 = l0;
+          c->symb_l1 = 0;
+          c->cdm_type = kCdm[r];
+          c->freq_density = density;
+          c->scramb_id = scramb_id;
+          c->start_rb = 0;
+          c->nr_of_rbs = n_rb;
         }
-        nr_csirs_candidate_t *c = &out[n++];
-        memset(c, 0, sizeof(*c));
-        c->row = kRows[r];
-        c->freq_domain = (uint16_t)(1u << b);   /* one-hot: what a real configuration carries */
-        c->symb_l0 = l0;
-        c->symb_l1 = 0;
-        c->cdm_type = kCdm[r];
-        c->freq_density = kDensity[r];
-        c->scramb_id = scramb_id;
-        c->start_rb = 0;
-        c->nr_of_rbs = n_rb;
       }
     }
   }
   return n;
+}
+
+int nr_csirs_blind_row_needs_bits(uint8_t row)
+{
+  for (unsigned r = 0; r < sizeof(kRows) / sizeof(kRows[0]); r++) {
+    if (kRows[r] == row) {
+      return kNeedBits[r];
+    }
+  }
+  return -1;
+}
+
+bool nr_csirs_blind_candidate_safe(const nr_csirs_candidate_t *c)
+{
+  if (c == NULL) {
+    return false;
+  }
+  const int need = nr_csirs_blind_row_needs_bits(c->row);
+  if (need < 0) {
+    return false;   /* a row this module does not know: never hand it to the generator */
+  }
+  int set = 0;
+  for (int b = 0; b < 16; b++) {
+    if ((c->freq_domain >> b) & 1u) {
+      set++;
+    }
+  }
+  return set >= need;
 }
 
 int nr_csirs_blind_init(nr_csirs_blind_state_t *st, uint16_t n_rb, uint16_t scramb_id)
@@ -429,4 +491,73 @@ double nr_csirs_blind_correlate_blocks(const int16_t *rx_re_im, const int16_t *r
   }
   const double per_block = (double)used / (double)blocks;
   return (rho_sum / blocks) * sqrt(per_block) / 0.886;
+}
+
+/* BEST CONTIGUOUS RUN (2026-09-19). The mean-over-sub-bands score assumes the resource covers the
+ * whole carrier, because that is what the candidates assert (start_rb 0, nr_of_rbs = N_RB_DL). A real
+ * CSI-RS often does not: a TRS is commonly configured over a subset of the BWP. If it covers a
+ * fraction f of the band, the MEAN reads ~f * sqrt(per_block)/0.886 -- for 52 of 273 RB that is ~1.2,
+ * which is exactly where the OTA scores sat (1.31-1.40) after both the scramblingID and the slot
+ * index had been excluded by complete sweeps. In other words the sequence may have been right all
+ * along and simply averaged away.
+ *
+ * So score the best CONTIGUOUS RUN of sub-bands instead, and report where it is: that both detects a
+ * partial-band resource and hands back its extent, which the caller can turn into start_rb/nr_of_rbs.
+ * Runs of one block are excluded -- a single block is the easiest thing for noise to win. */
+double nr_csirs_blind_correlate_bestrun(const int16_t *rx_re_im, const int16_t *ref_re_im, int n,
+                                        int sub_res, int *first_block_out, int *n_blocks_out,
+                                        int *n_used_out)
+{
+  if (first_block_out) *first_block_out = -1;
+  if (n_blocks_out) *n_blocks_out = 0;
+  if (n_used_out) *n_used_out = 0;
+  if (rx_re_im == NULL || ref_re_im == NULL || n <= 0 || sub_res <= 0) {
+    return -1.0;
+  }
+  enum { MAXB = 256 };
+  double rho[MAXB];
+  int nb = 0, used_total = 0;
+  double acc_r = 0.0, acc_i = 0.0, e_rx = 0.0, e_ref = 0.0;
+  int in_block = 0;
+  for (int i = 0; i <= n && nb < MAXB; i++) {
+    const bool flush = (i == n) || (in_block == sub_res);
+    if (flush && in_block > 0) {
+      rho[nb++] = (e_rx > 0.0 && e_ref > 0.0)
+                      ? sqrt(acc_r * acc_r + acc_i * acc_i) / (sqrt(e_rx) * sqrt(e_ref))
+                      : 0.0;
+      acc_r = acc_i = e_rx = e_ref = 0.0;
+      in_block = 0;
+    }
+    if (i == n) break;
+    const double xr = (double)ref_re_im[2 * i], xi = (double)ref_re_im[2 * i + 1];
+    if (xr == 0.0 && xi == 0.0) continue;
+    const double yr = (double)rx_re_im[2 * i], yi = (double)rx_re_im[2 * i + 1];
+    acc_r += yr * xr + yi * xi;
+    acc_i += yi * xr - yr * xi;
+    e_rx += yr * yr + yi * yi;
+    e_ref += xr * xr + xi * xi;
+    in_block++;
+    used_total++;
+  }
+  if (n_used_out) *n_used_out = used_total;
+  if (nb < 2) return -1.0;
+  /* Best mean over any contiguous run of >= 2 blocks, normalised the same way as the whole-band
+   * score so the two are directly comparable (noise ~1.0, perfect ~sqrt(sub_res)/0.886). */
+  const double norm = sqrt((double)sub_res) / 0.886;
+  double best = 0.0;
+  for (int i = 0; i < nb; i++) {
+    double sum = 0.0;
+    for (int j = i; j < nb; j++) {
+      sum += rho[j];
+      const int len = j - i + 1;
+      if (len < 2) continue;
+      const double z = (sum / len) * norm;
+      if (z > best) {
+        best = z;
+        if (first_block_out) *first_block_out = i;
+        if (n_blocks_out) *n_blocks_out = len;
+      }
+    }
+  }
+  return best;
 }

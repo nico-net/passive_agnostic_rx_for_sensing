@@ -349,3 +349,47 @@ TEST(CsirsBlindCorrelate, SubBandScoreReadsAboutOneOnNoise)
   EXPECT_GT(used, 0);
   EXPECT_LT(z, 2.5);                       // noise floor ~1.0; the confirmation bar is 4
 }
+
+/* ---- Partial-band resource: the leading explanation of the OTA scores -------------------------
+ * A candidate asserts start_rb=0, nr_of_rbs=N_RB_DL, but a real CSI-RS (a TRS especially) is often
+ * configured over part of the BWP. The whole-band mean then reads ~fraction * perfect. MEASURED on
+ * air after BOTH the scramblingID (complete 1024 sweep) and the slot index (complete 20 sweep) had
+ * been excluded: the best score sat at 1.31-1.40, not at the 1.0 noise floor -- exactly what a
+ * correct sequence covering ~20 % of the band produces. These two cases pin that behaviour down. */
+TEST(CsirsBlindCorrelate, WholeBandMeanDilutesAPartialBandResource)
+{
+  const int n = 3276;
+  std::vector<int16_t> ref, rx;
+  make_ref(ref, n);
+  make_rx(rx, ref, n, 8.0, 60.0);     // correct sequence, mild channel
+  /* The truth only occupies the first 20 % of the band; everywhere else the reference points at REs
+   * that carry nothing related. */
+  for (int i = (int)(0.2 * n); i < n; i++) { rx[2 * i] = (int16_t)0; rx[2 * i + 1] = (int16_t)0; }
+
+  int used = 0;
+  const double z_mean = nr_csirs_blind_correlate_blocks(rx.data(), ref.data(), n, 32, &used);
+  int fb = -1, nbk = 0;
+  const double z_run = nr_csirs_blind_correlate_bestrun(rx.data(), ref.data(), n, 32, &fb, &nbk, &used);
+  printf("PARTIAL-BAND: whole-band z=%.2f, best-run z=%.2f over blocks [%d..%d]\n", z_mean, z_run, fb,
+         fb + nbk - 1);
+
+  EXPECT_LT(z_mean, 2.5);   // the mean cannot see it: this is the OTA symptom
+  EXPECT_GT(z_run, 4.0);    // the contiguous run does
+  EXPECT_GE(fb, 0);
+  EXPECT_LE(fb, 2);         // and it localises the resource to the low end of the band
+}
+
+TEST(CsirsBlindCorrelate, BestRunDoesNotManufactureASignalFromNoise)
+{
+  const int n = 3276;
+  std::vector<int16_t> ref, rx;
+  make_ref(ref, n);
+  std::mt19937 g(31337);
+  std::normal_distribution<double> nd(0.0, 500.0);
+  rx.assign((size_t)2 * n, 0);
+  for (auto &v : rx) v = (int16_t)nd(g);
+  int fb = -1, nbk = 0, used = 0;
+  const double z = nr_csirs_blind_correlate_bestrun(rx.data(), ref.data(), n, 32, &fb, &nbk, &used);
+  printf("NOISE best-run z=%.2f (blocks %d..%d)\n", z, fb, fb + nbk - 1);
+  EXPECT_LT(z, 4.0);        // picking the best of many runs must not clear the bar on pure noise
+}
