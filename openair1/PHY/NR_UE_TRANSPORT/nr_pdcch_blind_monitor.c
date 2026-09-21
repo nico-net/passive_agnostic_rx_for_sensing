@@ -238,7 +238,12 @@ bool nr_pdcch_blind_monitor_autoconf_css0(int num_rbs,
    * was invisible to a last-value diagnostic and needed tracing the class-mask logic directly. */
   g_cfg.dci10_ss_type     = NR_BLIND_SS_COMMON;
   g_cfg.dci10_n_rb_riv    = num_rbs; // RIV is over CORESET#0 for SI-RNTI, not the whole carrier
-  g_cfg.dci10_rb_offset   = 0;
+  g_cfg.dci10_rb_offset   = cset_start_rb; /* the origin this function just derived; auto
+                                      * (bwp_start + bitmap offset) measured 0 at decode
+                                      * time while cset_start_rb was 1 -- CORESET#0 at
+                                      * CRB 1, so the allocation was extracted one RB low
+                                      * and every SIB1 PDSCH CRC failed with otherwise
+                                      * perfect parameters. */
   g_cfg.dci10_mux_pattern = (mux_pattern >= 1 && mux_pattern <= 3) ? mux_pattern : 1;
   g_cfg.dci10_sib1        = 1;
 
@@ -730,7 +735,19 @@ int nr_pdcch_map_candidates(int span_rb, int duration, int pci, nr_pdcch_map_can
    * remaining shifts. The single-pass order walked all shifts of one (L, R) before the next, so on
    * the macro's 216 RB x 2-symbol CORESET (865 legal) the 512 cap cut the list before ANY L=6
    * mapping -- CORESET#0's own bundle size -- and no run length could ever reach it. */
-  for (int pass = 0; pass < 2; pass++) {
+  /* ISAC_MAP_PASS0_ONLY=1: emit ONLY pass 0 -- the PCI residue and shift 0 of every legal (L, R).
+   * Pass 1 is the blind crawl over every remaining shift, and it is ~96 % of the 271 mappings, so
+   * skipping it turns a 133 x 271 = 36,043-hypothesis catalogue into ~133 x 12 = 1,600: a full walk
+   * in seconds rather than minutes. shiftIndex is overwhelmingly either 0 or PCI-derived in real
+   * deployments, so this covers the likely answers first and simply MISSES an exotic shift -- run
+   * without the knob to get the exhaustive walk back. Default off; nothing changes silently. */
+  static int s_pass0_only = -1;
+  if (s_pass0_only < 0) {
+    const char *e = getenv("ISAC_MAP_PASS0_ONLY");
+    s_pass0_only = (e != NULL && atoi(e) == 1) ? 1 : 0;
+  }
+  const int n_pass = s_pass0_only ? 1 : 2;
+  for (int pass = 0; pass < n_pass; pass++) {
     for (int li = 0; li < 2; li++) {
       const int nb = N_reg / L[li];             /* REG bundles; the shift acts modulo this */
       if (L[li] % duration != 0 || nb > 255)   /* demapper: B_rb = L/duration; FAPI ShiftIndex is 8-bit */

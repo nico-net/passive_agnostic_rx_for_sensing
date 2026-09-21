@@ -1370,12 +1370,20 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
     int pk = s_ptrs_k, pl = s_ptrs_l;
     if (ptrs_arm > 0) { uint8_t K = 0, L = 0; nr_ptrs_sweep_arm(ptrs_arm, &K, &L); pk = K; pl = L; } /* the RE count wants literal L */
     if (pk <= 0 || pl <= 0) {
+      { static _Atomic unsigned long c_ = 0;
+        const unsigned long n_ = atomic_fetch_add_explicit(&c_, 1, memory_order_relaxed) + 1;
+        if (n_ == 1 || (n_ % 200) == 0)
+          LOG_A(PHY, "SENSING: PDSCH UNSUP@1373 n=%lu\n", n_); }
       return out->status; // PT-RS, and no density given to compute G with
     }
     ptrs_unav = nr_pdsch_ptrs_unav_res(freq_alloc->num_rbs, dlsch_config->start_symbol,
                                        dlsch_config->number_symbols, dlsch_config->dlDmrsSymbPos,
                                        (uint8_t)pk, (uint8_t)pl, 1);
     if (ptrs_unav == 0) {
+      { static _Atomic unsigned long c_ = 0;
+        const unsigned long n_ = atomic_fetch_add_explicit(&c_, 1, memory_order_relaxed) + 1;
+        if (n_ == 1 || (n_ % 200) == 0)
+          LOG_A(PHY, "SENSING: PDSCH UNSUP@1379 n=%lu\n", n_); }
       return out->status; // the density did not describe any PT-RS -- do not guess G
     }
   }
@@ -1402,6 +1410,10 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
    * nof_antennas_dl < 4 ("RU number of downlink ports=4 must match the number of transmission
    * antennas"). */
   if (n_ports < 1 || n_ports > fp->nb_antennas_rx) {
+    { static _Atomic unsigned long c_ = 0;
+      const unsigned long n_ = atomic_fetch_add_explicit(&c_, 1, memory_order_relaxed) + 1;
+      if (n_ == 1 || (n_ % 200) == 0)
+        LOG_A(PHY, "SENSING: PDSCH UNSUP@1405 n=%lu\n", n_); }
     return out->status; // cannot separate more layers than we have receive antennas
   }
 
@@ -1420,6 +1432,10 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
     // a real UE takes them from the initial transmission. A passive receiver has no such history,
     // so such a grant is simply not decodable here. nr_pdcch_blind_decode_and_extract() already
     // rejects those, so reaching this means the MCS table assumption is wrong.
+    { static _Atomic unsigned long c_ = 0;
+      const unsigned long n_ = atomic_fetch_add_explicit(&c_, 1, memory_order_relaxed) + 1;
+      if (n_ == 1 || (n_ % 200) == 0)
+        LOG_A(PHY, "SENSING: PDSCH UNSUP@1423 n=%lu\n", n_); }
     return out->status;
   }
   const uint8_t nb_re_dmrs = get_num_dmrs_re_per_rb(dlsch_config->dmrsConfigType, dlsch_config->n_dmrs_cdm_groups);
@@ -1428,6 +1444,10 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
   cw->TBS = nr_compute_tbs(cw->qamModOrder, (uint16_t)R, freq_alloc->num_rbs, dlsch_config->number_symbols,
                            nb_re_dmrs * dmrs_len, grant->nb_rb_oh, grant->tb_scaling, cw->Nl);
   if (cw->TBS == 0) {
+    { static _Atomic unsigned long c_ = 0;
+      const unsigned long n_ = atomic_fetch_add_explicit(&c_, 1, memory_order_relaxed) + 1;
+      if (n_ == 1 || (n_ % 200) == 0)
+        LOG_A(PHY, "SENSING: PDSCH UNSUP@1431 n=%lu\n", n_); }
     return out->status;
   }
   cw->ldpcBaseGraph = get_BG(cw->TBS, cw->targetCodeRate);
@@ -1472,6 +1492,10 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
                               ptrs_unav + csi_unav /* PT-RS from the density sweep; CSI-RS from the blind search */,
                               cw->qamModOrder, cw->Nl);
   if (G == 0) {
+    { static _Atomic unsigned long c_ = 0;
+      const unsigned long n_ = atomic_fetch_add_explicit(&c_, 1, memory_order_relaxed) + 1;
+      if (n_ == 1 || (n_ % 200) == 0)
+        LOG_A(PHY, "SENSING: PDSCH UNSUP@1475 n=%lu\n", n_); }
     return out->status;
   }
 /* TBPARM probe (ISAC_PDSCH_TBPARM=1): every transport-block parameter the gNB also prints on its
@@ -1520,6 +1544,10 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
 
   if (!passive_harq_prepare(&g_harq, fp->N_RB_DL)) {
     out->status = NR_PDSCH_PASSIVE_DECODE_ERROR;
+    { static _Atomic unsigned long c_ = 0;
+      const unsigned long n_ = atomic_fetch_add_explicit(&c_, 1, memory_order_relaxed) + 1;
+      if (n_ == 1 || (n_ % 200) == 0)
+        LOG_A(PHY, "SENSING: PDSCH UNSUP@1523 n=%lu\n", n_); }
     return out->status;
   }
 
@@ -1622,6 +1650,10 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
           atomic_load_explicit(&nr_ue_diag_producer_absolute_slot, memory_order_relaxed),
           grant->source_absolute_slot, fp->slots_per_frame)) {
     out->status = NR_PDSCH_PASSIVE_DECODE_UNSUPPORTED;
+    { static _Atomic unsigned long c_ = 0;
+      const unsigned long n_ = atomic_fetch_add_explicit(&c_, 1, memory_order_relaxed) + 1;
+      if (n_ == 1 || (n_ % 200) == 0)
+        LOG_A(PHY, "SENSING: PDSCH UNSUP@1625 n=%lu\n", n_); }
     return out->status; /* overwritten IQ is not CRC evidence */
   }
 
@@ -1789,6 +1821,10 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
     n_dmrs_sym++;
   }
   if (n_dmrs_sym == 0) {
+    { static _Atomic unsigned long c_ = 0;
+      const unsigned long n_ = atomic_fetch_add_explicit(&c_, 1, memory_order_relaxed) + 1;
+      if (n_ == 1 || (n_ % 200) == 0)
+        LOG_A(PHY, "SENSING: PDSCH UNSUP@1792 n=%lu\n", n_); }
     return out->status; // no DM-RS in the allocation: nothing to equalise against
   }
   if (chest_hit) {
@@ -2450,6 +2486,10 @@ gpu_llr_ready:;
   }
   if (llr == NULL) {
     out->status = NR_PDSCH_PASSIVE_DECODE_ERROR;
+    { static _Atomic unsigned long c_ = 0;
+      const unsigned long n_ = atomic_fetch_add_explicit(&c_, 1, memory_order_relaxed) + 1;
+      if (n_ == 1 || (n_ % 200) == 0)
+        LOG_A(PHY, "SENSING: PDSCH UNSUP@2453 n=%lu\n", n_); }
     return out->status;
   }
 
@@ -3219,10 +3259,20 @@ gpu_llr_ready:;
        * adjacency-based pairing silently mis-attributes (it produced two mutually contradictory
        * breakdowns before this was fixed). Same class of error as the retracted "20 % dt bias". */
       LOG_I(PHY,
-            "SENSING: TBRESULT rnti=0x%x nl=%u mcs=%u Qm=%u R=%u tbs=%u bg=%u prb=%u+%u status=%s\n",
+            "SENSING: TBRESULT rnti=0x%x nl=%u mcs=%u Qm=%u R=%u tbs=%u bg=%u prb=%u+%u "
+            "cdm=%u dmrsmask=0x%x nscid=%u scramb=%u refpt=%u sym=%u+%u G=%u bwpstart=%u status=%s\n",
             grant->rnti, (unsigned)cw->Nl, (unsigned)grant->mcs, (unsigned)cw->qamModOrder,
             (unsigned)cw->targetCodeRate, (unsigned)cw->TBS, (unsigned)cw->ldpcBaseGraph,
             (unsigned)freq_alloc->first_rb, (unsigned)freq_alloc->num_rbs,
+            (unsigned)dlsch_config->n_dmrs_cdm_groups,
+            (unsigned)dlsch_config->dlDmrsSymbPos,
+            (unsigned)dlsch_config->nscid,
+            (unsigned)dlsch_config->dlDataScramblingId,
+            (unsigned)dlsch_config->refPoint,
+            (unsigned)dlsch_config->start_symbol,
+            (unsigned)dlsch_config->number_symbols,
+            (unsigned)out->G,
+            (unsigned)dlsch_config->BWPStart,
             out->status == NR_PDSCH_PASSIVE_DECODE_CRC_OK ? "CRC_OK"
               : (out->status == NR_PDSCH_PASSIVE_DECODE_CRC_FAIL ? "CRC_FAIL" : "ERROR"));
   }
@@ -3231,5 +3281,9 @@ gpu_llr_ready:;
 
   /* Nothing is freed here any more: every buffer above persists for the life of this thread and is
    * reused by the next grant. See the note at the chest allocation for the measurement. */
+  { static _Atomic unsigned long c_ = 0;
+    const unsigned long n_ = atomic_fetch_add_explicit(&c_, 1, memory_order_relaxed) + 1;
+    if (n_ == 1 || (n_ % 200) == 0)
+      LOG_A(PHY, "SENSING: PDSCH UNSUP@3234 n=%lu\n", n_); }
   return out->status;
 }
