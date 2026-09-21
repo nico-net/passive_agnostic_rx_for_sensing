@@ -74,6 +74,18 @@ typedef struct {
   uint8_t  sib1_ss_id;
   bool     paging_ss_valid;
   uint8_t  paging_ss_id;
+
+  /* ---- uplinkConfigCommon.initialUplinkBWP.rach-ConfigCommon --------------------------------
+   * Kept for ONE purpose: making an RA-RNTI accept self-verifying. RA-RNTI is
+   *     1 + s_id + 14*t_id + 1120*f_id + 8960*ul_carrier_id      (nr_mac_common.c:5118)
+   * so a candidate value DECOMPOSES, and the cell's own PRACH config says which decompositions
+   * are legal. The blind monitor currently accepts any crc <= NR_PDCCH_BLIND_RA_RNTI_MAX (17920),
+   * which passes 17920/65536 = 27 % of random CRCs -- that is why RA accepts have been noise. */
+  bool     rach_valid;
+  uint8_t  prach_config_index;
+  uint8_t  msg1_fdm;            /**< DECODED occasion count 1/2/4/8, not the ASN.1 enum 0..3. */
+  uint16_t msg1_frequency_start;
+  bool     sul_present;         /**< false => ul_carrier_id must be 0. */
 } nr_pdcch_sib1_prior_t;
 
 /** Publish the prior. Called once per SIB1 from the MAC config path; last write wins.
@@ -88,5 +100,17 @@ const nr_pdcch_sib1_prior_t *nr_pdcch_sib1_prior_get(void);
  *  Returns false when the prior is absent or its bitmap is empty. The blind extent search speaks
  *  in these window indices, so this is what lets the prior be injected as an extent candidate. */
 bool nr_pdcch_sib1_prior_window(int *first_w, int *last_w);
+
+/** True when `rnti` is a legal RA-RNTI for THIS cell's PRACH configuration.
+ *
+ *  This is the only RNTI class a passive receiver can verify WITHOUT already knowing the answer:
+ *  SI-RNTI is the fixed constant 0xFFFF, and RA-RNTI is a structured value whose fields are bounded
+ *  by broadcast config. A C-RNTI, by contrast, is an arbitrary 16-bit number assigned in dedicated
+ *  signalling, so a C-RNTI accept can only be believed after it REPEATS -- which is the circularity
+ *  that has kept the bootstrap table full of n=1 chance hits.
+ *
+ *  Returns false when no SIB1 prior has been published yet, so callers must keep their existing
+ *  range check as the fallback rather than treating false as "reject". */
+bool nr_pdcch_sib1_prior_ra_rnti_valid(uint16_t rnti);
 
 #endif /* NR_PDCCH_SIB1_PRIOR_H */

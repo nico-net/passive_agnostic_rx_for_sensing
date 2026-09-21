@@ -764,19 +764,6 @@ int nr_pdcch_extent_candidates(int first_w, int last_w, int nw_total,
       || last_w >= nw_total) {
     return 0;
   }
-  /* SIB1 PRIOR FIRST. The cell broadcasts commonControlResourceSet in SIB1, and its frequency-domain
-   * bitmap is a real, DECODED CORESET footprint on THIS cell -- whereas everything below is derived
-   * from where DCIs happened to land during a dwell. It is the COMMON CORESET, so it is a
-   * hypothesis for the dedicated one rather than an answer; putting it at index 0 costs one dwell
-   * to test and nothing if wrong, and the entire blind walk still follows it. */
-  {
-    int pw_first = -1, pw_last = -1;
-    if (nr_pdcch_sib1_prior_window(&pw_first, &pw_last) && pw_last < nw_total && n < max_out) {
-      out[n].first_w = pw_first;
-      out[n].last_w  = pw_last;
-      n++;
-    }
-  }
   /* Candidate 0 is the pre-2026-09-07 heuristic's OWN answer, so a cell where it was already right
    * locks with no added dwell and this can never regress. */
   /* SNAP ON SPAN, NOT ON first_w == 0.
@@ -797,6 +784,19 @@ int nr_pdcch_extent_candidates(int first_w, int last_w, int nw_total,
    * The observed footprint is hypothesis 1 as observed; the full carrier is hypothesis 2. */
   const int snap = 0;
   int n = 0;
+  /* SIB1 PRIOR FIRST. The cell broadcasts commonControlResourceSet in SIB1, and its frequency-domain
+   * bitmap is a real, DECODED CORESET footprint on THIS cell -- whereas everything below is derived
+   * from where DCIs happened to land during a dwell. It is the COMMON CORESET, so it is a
+   * hypothesis for the dedicated one rather than an answer; putting it at index 0 costs one dwell
+   * to test and nothing if wrong, and the entire blind walk still follows it. */
+  {
+    int pw_first = -1, pw_last = -1;
+    if (nr_pdcch_sib1_prior_window(&pw_first, &pw_last) && pw_last < nw_total && n < max_out) {
+      out[n].first_w = pw_first;
+      out[n].last_w  = pw_last;
+      n++;
+    }
+  }
   out[n].first_w = first_w;
   out[n].last_w  = last_w;
   n++;
@@ -2894,8 +2894,34 @@ static bool blind_decode_and_interpret_10(const int16_t*                       l
     // field (16 bits) AND a bounded value range, so when it passes it passes for a reason. A
     // C-/TC-RNTI payload can also present 16 zero tail bits (rv=0, harq=0, dai=0, tpc=0, PUCCH-RI=0,
     // k1=0 is an entirely ordinary grant), which is why the RNTI bound is applied as well.
-    if ((mask & (1u << NR_BLIND_RNTI_CLASS_RA)) && crc <= NR_PDCCH_BLIND_RA_RNTI_MAX) {
-      attempts[n_attempts++] = NR_BLIND_RNTI_CLASS_RA;
+    /* EXACT test when SIB1 has told us the PRACH config, range test otherwise.
+     * `crc <= NR_PDCCH_BLIND_RA_RNTI_MAX` admits 17920 of 65536 values -- 27 % of random CRCs --
+     * which is why the RA accept counter has been indistinguishable from noise (RA=13 in a 900 s
+     * capture, never repeating). RA-RNTI is a STRUCTURED value: decomposing it and checking the
+     * fields against the cell's own msg1-FDM and SUL presence typically cuts the admissible set
+     * by 8-16x. That matters because RA-RNTI and SI-RNTI are the only two classes a passive
+     * receiver can verify without already knowing the answer. */
+    if (mask & (1u << NR_BLIND_RNTI_CLASS_RA)) {
+      /* Tighten ONLY when the PRACH config is actually in hand. The first cut gated the fallback
+       * on `prior == NULL`, but a prior exists as soon as SIB1 is decoded -- and this cell's SIB1
+       * turns out to carry no rach-ConfigCommon reachable here (measured: "rach(none)"), which
+       * would have made ra_rnti_valid() always false and silently DISABLED RA decoding altogether,
+       * killing the RAR -> TC-RNTI harvest this path exists to feed. Gate on the RACH fields
+       * themselves, so the exact test is used when it can be, and the old range test otherwise. */
+      const nr_pdcch_sib1_prior_t *ra_prior = nr_pdcch_sib1_prior_get();
+      const bool ra_exact = (ra_prior != NULL) && ra_prior->rach_valid;
+      const bool ra_ok = ra_exact ? nr_pdcch_sib1_prior_ra_rnti_valid((uint16_t)crc)
+                                  : (crc <= NR_PDCCH_BLIND_RA_RNTI_MAX);
+      if (ra_ok && ra_exact) {
+        static _Atomic uint64_t s_rav = 0;
+        const uint64_t v = atomic_fetch_add_explicit(&s_rav, 1, memory_order_relaxed) + 1;
+        if (v == 1 || (v % 100) == 0)
+          LOG_A(PHY, "SENSING: RA-RNTI VERIFIED 0x%x -- %llu passed the exact PRACH decomposition\n",
+                (unsigned)crc, (unsigned long long)v);
+      }
+      if (ra_ok) {
+        attempts[n_attempts++] = NR_BLIND_RNTI_CLASS_RA;
+      }
     }
     // C and TC share one hypothesis: the field lists are bit-identical and the label is chosen by
     // search space (see nr_blind_rnti_class_t). EITHER bit therefore enables it -- gating on the

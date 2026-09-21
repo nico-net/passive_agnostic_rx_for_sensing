@@ -2246,6 +2246,23 @@ static void publish_sib1_pdcch_prior(const NR_UE_MAC_INST_t *mac, const NR_Servi
     }
   }
 
+  /* RACH, for the ONE purpose of making an RA-RNTI accept self-verifying (see the validator in
+   * nr_pdcch_sib1_prior.c). Path mirrors this file's own PRACH configuration block above. */
+  if (scc->uplinkConfigCommon != NULL && scc->uplinkConfigCommon->initialUplinkBWP.rach_ConfigCommon != NULL
+      && scc->uplinkConfigCommon->initialUplinkBWP.rach_ConfigCommon->present
+             == NR_SetupRelease_RACH_ConfigCommon_PR_setup) {
+    const NR_RACH_ConfigCommon_t *rc = scc->uplinkConfigCommon->initialUplinkBWP.rach_ConfigCommon->choice.setup;
+    const NR_RACH_ConfigGeneric_t *rg = &rc->rach_ConfigGeneric;
+    pr.prach_config_index = (uint8_t)rg->prach_ConfigurationIndex;
+    pr.msg1_frequency_start = (uint16_t)rg->msg1_FrequencyStart;
+    /* ASN.1 enum 0..3 -> 1/2/4/8 occasions, same mapping as NR_MAC_gNB/config.c's switch. Stored
+     * DECODED so the validator never has to know about the enum. */
+    pr.msg1_fdm = (uint8_t)(1u << (unsigned)(rg->msg1_FDM & 3));
+    pr.rach_valid = true;
+  }
+  /* Supplementary uplink is what would allow ul_carrier_id = 1 in an RA-RNTI. */
+  pr.sul_present = (scc->supplementaryUplink != NULL);
+
   nr_pdcch_sib1_prior_set(&pr);
 }
 
