@@ -144,6 +144,34 @@ bool nr_pdcch_blind_monitor_autoconf_wanted(void)
   return g_cfg.autoconf != 0;
 }
 
+void nr_pdcch_blind_monitor_set_tda_common(const uint8_t *start, const uint8_t *len,
+                                           const uint8_t *map, int n)
+{
+  if (start == NULL || len == NULL || map == NULL || n <= 0) {
+    return;
+  }
+  if (n > 16) {
+    n = 16;
+  }
+  for (int i = 0; i < n; i++) {
+    g_cfg.extract.tda_common_start[i]   = start[i];
+    g_cfg.extract.tda_common_length[i]  = len[i];
+    g_cfg.extract.tda_common_mapping[i] = map[i];
+  }
+  g_cfg.extract.tda_common_count = n;
+  static bool tda_logged = false;
+  if (!tda_logged) {
+    tda_logged = true;
+    char b[256];
+    int u = 0;
+    for (int k = 0; k < n && u < (int)sizeof(b) - 24; k++) {
+      u += snprintf(b + u, sizeof(b) - u, " [%d]S=%u,L=%u,m=%u", k, start[k], len[k], map[k]);
+    }
+    LOG_A(PHY, "SENSING: TDA-COMMON from SIB1: %d entries:%s -- RA/TC/C-in-CSS now use the CELL's "
+               "own list instead of the spec default table\n", n, b);
+  }
+}
+
 bool nr_pdcch_blind_monitor_autoconf_css0(int num_rbs,
                                           int num_symbols,
                                           int cset_start_rb,

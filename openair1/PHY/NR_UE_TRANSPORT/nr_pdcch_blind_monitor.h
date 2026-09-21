@@ -848,6 +848,13 @@ bool nr_pdcch_blind_monitor_autodiscover_extent_step(uint32_t abs_slot);
  * the ceiling on how many it can follow at once, not a property of the deployment. */
 #define NR_PDCCH_BLIND_MAX_UE 16
 
+/* Publish pdsch-ConfigCommon's PDSCH TDRA list, decoded to (S, L, mappingType) triples.
+ * SI-RNTI's own SIB1 grants deliberately ignore it (the list travels inside SIB1), but RA-RNTI,
+ * TC-RNTI and C-RNTI-in-CSS are all sized from it -- and with count 0 they silently fall back to
+ * the spec default table, which is a different allocation on any cell that configures its own. */
+void nr_pdcch_blind_monitor_set_tda_common(const uint8_t *start, const uint8_t *len,
+                                           const uint8_t *map, int n);
+
 void nr_pdcch_blind_rnti_bootstrap_record(uint16_t rnti, uint8_t rnti_class, uint32_t abs_slot);
 
 /* Same, but marks the sighting TRUSTED: it came from a CORESET whose mapping is PROVEN (CORESET#0,

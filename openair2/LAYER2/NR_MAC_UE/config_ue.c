@@ -1763,6 +1763,34 @@ static void configure_common_BWP_dl(NR_UE_MAC_INST_t *mac, int bwp_id, NR_BWP_Do
         asn1cFreeStruc(asn_DEF_NR_PDSCH_TimeDomainResourceAllocationList, bwp->tdaList_Common);
     }
 
+    /* Publish the cell's own PDSCH TDRA list to the blind monitor. The probe below decodes the
+     * same SLIV values but is gated on ISAC_OTA_CFG and only LOGS them, so tda_common_count stayed
+     * 0 and every RA-RNTI / TC-RNTI grant silently fell back to the spec DEFAULT table.
+     * MEASURED 2026-09-21: SIB1 decodes at S=1,L=13 (it must use the default table -- the list
+     * travels inside SIB1) while RARs resolved to the default S=2,L=12 and failed CRC 19/19 with
+     * every other field correct. Wrong symbols means the wrong DM-RS row AND the wrong data REs. */
+    if (bwp_id == 0 && bwp->tdaList_Common != NULL && bwp->tdaList_Common->list.count > 0) {
+      uint8_t ts[16], tl[16], tm[16];
+      int nt = bwp->tdaList_Common->list.count;
+      if (nt > 16) {
+        nt = 16;
+      }
+      for (int t = 0; t < nt; t++) {
+        const NR_PDSCH_TimeDomainResourceAllocation_t *e = bwp->tdaList_Common->list.array[t];
+        const int sliv = (int)e->startSymbolAndLength;
+        /* Same disambiguation as the probe: SLIV alone is ambiguous, S + L <= 14 selects the pair. */
+        int S = sliv % 14, L = (sliv / 14) + 1;
+        if (S + L > 14) {
+          L = 14 - (sliv / 14) + 1;
+          S = 14 - 1 - (sliv % 14);
+        }
+        ts[t] = (uint8_t)S;
+        tl[t] = (uint8_t)L;
+        tm[t] = (uint8_t)e->mappingType;
+      }
+      nr_pdcch_blind_monitor_set_tda_common(ts, tl, tm, nt);
+    }
+
     /* ---- OTA CONFIG DERIVATION PROBE (ISAC_OTA_CFG=1) -------------------------------------
      * Everything the blind PDCCH monitor is currently TOLD via pdcch_blind_monitor_* is, for the
      * COMMON configuration, already available here -- decoded from SIB1 over the air, with no
