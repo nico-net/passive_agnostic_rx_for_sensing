@@ -70,6 +70,13 @@ typedef struct {
    * bootstrap circularity, where the anchor is currently always a chance CRC hit. */
   bool     ra_ss_valid;
   uint8_t  ra_ss_id;
+  /* The RA search space's OWN monitoring occasions. SIB1 and RA are different search spaces (here
+   * sib1_ss=0, ra_ss=1) with independent monitoringSlotPeriodicityAndOffset, and the monitor was
+   * configured from SS#0 alone -- gate `slot % 40 in [11,13)`. If SS#1's occasions fall outside
+   * those 2 slots in 40, RAR and Msg4 are never even looked at, which reads as an idle cell. */
+  uint16_t ra_ss_period;
+  uint16_t ra_ss_offset;
+  uint8_t  ra_ss_duration;
   bool     sib1_ss_valid;
   uint8_t  sib1_ss_id;
   bool     paging_ss_valid;

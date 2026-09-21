@@ -58,7 +58,10 @@ void nr_pdcch_sib1_prior_set(const nr_pdcch_sib1_prior_t *p)
           g_prior.prach_config_index,
           g_prior.msg1_fdm,
           g_prior.msg1_frequency_start,
-          g_prior.sul_present ? 1 : 0);
+          g_prior.sul_present ? 1 : 0,
+          g_prior.ra_ss_period,
+          g_prior.ra_ss_offset,
+          g_prior.ra_ss_duration);
   }
 }
 

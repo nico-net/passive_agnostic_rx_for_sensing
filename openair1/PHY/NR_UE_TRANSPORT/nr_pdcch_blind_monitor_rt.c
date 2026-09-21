@@ -38,6 +38,7 @@
  */
 
 #include "PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.h"
+#include "PHY/NR_UE_TRANSPORT/nr_pdcch_sib1_prior.h"
 #include "PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.h"
 #include "PHY/NR_UE_TRANSPORT/nr_pdcch_dci_length_sweep.h" // Phase 3 Technique C
 #include "PHY/NR_UE_TRANSPORT/nr_passive_bwp.h"
@@ -1838,7 +1839,33 @@ static void nr_pdcch_blind_monitor_process_body(PHY_VARS_NR_UE *ue, const UE_nr_
     return;
   }
   const uint32_t rem = gate_slot % (uint32_t)cfg->ss_monitoring_slot_periodicity;
-  if (rem < (uint32_t)cfg->ss_monitoring_slot_offset || rem >= (uint32_t)cfg->ss_monitoring_slot_offset + ss_dur) {
+  bool on_occasion = !(rem < (uint32_t)cfg->ss_monitoring_slot_offset
+                       || rem >= (uint32_t)cfg->ss_monitoring_slot_offset + ss_dur);
+  /* ---- RA SEARCH SPACE: its own occasions, in addition to the configured one ------------------
+   * SIB1 and RA are DIFFERENT common search spaces with independent
+   * monitoringSlotPeriodicityAndOffset -- on this cell sib1_ss=0 and ra_ss=1. CSS0 autoconf
+   * configures this gate from SS#0 only (measured: period=40 offset=11 dur=2), so unless SS#1
+   * happens to fall inside those 2 slots in 40 we never look at a single RAR or Msg4 occasion.
+   * MEASURED 2026-09-21: RA=0 and TC=1 over 58,001 occasions on a cell the operator confirms is
+   * busy -- which is what being blind to the RA window looks like, not an idle cell. Both windows
+   * scan DCI 1_0 in a common search space, so widening the gate is sufficient; nothing downstream
+   * needs to change. Inert until SIB1 supplies a period. */
+  if (!on_occasion) {
+    const nr_pdcch_sib1_prior_t *rp = nr_pdcch_sib1_prior_get();
+    if (rp != NULL && rp->ra_ss_valid && rp->ra_ss_period > 0) {
+      const uint32_t rdur = (rp->ra_ss_duration > 0) ? rp->ra_ss_duration : 1u;
+      const uint32_t rrem = gate_slot % (uint32_t)rp->ra_ss_period;
+      if (rrem >= (uint32_t)rp->ra_ss_offset && rrem < (uint32_t)rp->ra_ss_offset + rdur) {
+        on_occasion = true;
+        static _Atomic uint64_t s_ra_occ = 0;
+        const uint64_t n = atomic_fetch_add_explicit(&s_ra_occ, 1, memory_order_relaxed) + 1;
+        if (n == 1 || (n % 20000) == 0)
+          LOG_A(PHY, "SENSING: RA-SS occasion %llu (period=%u offset=%u dur=%u) -- slots SS#0 never covered\n",
+                (unsigned long long)n, rp->ra_ss_period, rp->ra_ss_offset, (unsigned)rdur);
+      }
+    }
+  }
+  if (!on_occasion) {
     return; // not a monitoring occasion this slot
   }
 
@@ -3836,9 +3863,25 @@ constdiag_done:;
      * is not one of them is a false accept: real grants are addressed to UEs that recur, noise is
      * not. Inert until the first confirmation, so discovery is never blocked by its own output. */
     {
+      /* The self-verifying classes are EXEMPT. This gate's premise -- "real grants are addressed to
+       * UEs that recur" -- holds only for C-RNTI. It is wrong, and in two cases circular, for:
+       *   SI-RNTI  the fixed constant 0xFFFF. Unfakeable, and never a member of the confirmed set,
+       *            so once ANY UE was confirmed EVERY SI accept was held. MEASURED 2026-09-21:
+       *            SIB1 PDSCH decoding stopped dead at 188 of 14450 accepts for exactly this
+       *            reason (held[rnti_set]=11228, and persist+mismatch+rnti_set = accepts - 188
+       *            to the unit).
+       *   TC-RNTI  single-use by construction (one random-access contention resolution). Demanding
+       *            that it recur before it may be decoded is circular: Msg4 is what would confirm
+       *            it, and Msg4 is what this gate was blocking. 41 accepts, 0 decoded.
+       *   RA-RNTI  a structured value now checked against the cell's own PRACH configuration
+       *            (nr_pdcch_sib1_prior_ra_rnti_valid), which is stronger evidence than recurrence.
+       * C-RNTI keeps the gate, which is where it actually discriminates. */
+      const bool self_verifying = (out.rnti_class == NR_BLIND_RNTI_CLASS_SI)
+                                  || (out.rnti_class == NR_BLIND_RNTI_CLASS_TC)
+                                  || (out.rnti_class == NR_BLIND_RNTI_CLASS_RA);
       uint16_t known[NR_PDCCH_BLIND_MAX_UE];
       const int n_known = nr_pdcch_blind_monitor_confirmed_rnti_set(abs_slot, known, NR_PDCCH_BLIND_MAX_UE);
-      if (n_known > 0 && !nr_pdcch_blind_monitor_rnti_confirmed(abs_slot, out.rnti)) {
+      if (!self_verifying && n_known > 0 && !nr_pdcch_blind_monitor_rnti_confirmed(abs_slot, out.rnti)) {
         g_held_rnti_set++;
         continue;
       }

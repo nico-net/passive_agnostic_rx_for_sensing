@@ -2177,6 +2177,22 @@ static void publish_sib1_pdcch_prior(const NR_UE_MAC_INST_t *mac, const NR_Servi
     if (pcc->ra_SearchSpace != NULL) {
       pr.ra_ss_valid = true;
       pr.ra_ss_id = (uint8_t)*pcc->ra_SearchSpace;
+      /* Its OWN occasions, not SIB1's. Looked up by searchSpaceId in the common list. */
+      if (pcc->commonSearchSpaceList != NULL) {
+        for (int i = 0; i < pcc->commonSearchSpaceList->list.count; i++) {
+          const NR_SearchSpace_t *ss = pcc->commonSearchSpaceList->list.array[i];
+          if (ss == NULL || ss->searchSpaceId != *pcc->ra_SearchSpace
+              || ss->monitoringSlotPeriodicityAndOffset == NULL) {
+            continue;
+          }
+          int per = 0, off = 0;
+          get_monitoring_period_offset(ss, &per, &off);
+          pr.ra_ss_period   = (uint16_t)per;
+          pr.ra_ss_offset   = (uint16_t)off;
+          pr.ra_ss_duration = (uint8_t)(ss->duration != NULL ? *ss->duration : 1);
+          break;
+        }
+      }
     }
     if (pcc->searchSpaceSIB1 != NULL) {
       pr.sib1_ss_valid = true;
