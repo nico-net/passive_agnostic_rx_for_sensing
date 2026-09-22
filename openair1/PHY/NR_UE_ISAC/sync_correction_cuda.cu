@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: OAI-Public-License-1.1 */
 #include "sync_correction_cuda.h"
+#include "sync_correction.h"
 
 #include <cuda_runtime_api.h>
 #include <cufft.h>
@@ -13,7 +14,6 @@
 #include <cfloat>
 #include <cstring>
 #include <limits>
-#include <mutex>
 #include <string>
 #include <vector>
 
@@ -396,6 +396,12 @@ public:
         return false;
       }
     }
+    cufft_status = cufftSetStream(plan_, cudaStreamPerThread);
+    if (cufft_status != CUFFT_SUCCESS) {
+      set_error(error, std::string("cufftSetStream: ") + cufft_error_name(cufft_status));
+      reset();
+      return false;
+    }
 
     std::vector<int> offsets(rows + 1);
     for (uint32_t row = 0; row <= rows; ++row)
@@ -437,7 +443,7 @@ public:
   }
 
   bool run(const CfrWindow& window, uint32_t oversample, CudaSyncFrontEnd& output,
-           std::string* error)
+           std::string* error, bool earliest_persistent, uint32_t max_lead_bins)
   {
     const uint32_t fft_n = window.subcarriers * oversample;
     if (!configure(fft_n, window.subcarriers, window.rows, error)) return false;
@@ -484,6 +490,11 @@ public:
     }
     output.anchor_unsigned = static_cast<uint32_t>(
         std::max_element(coarse_host_.begin(), coarse_host_.end()) - coarse_host_.begin());
+    if (earliest_persistent) {
+      std::vector<double> coarse(coarse_host_.begin(), coarse_host_.end());
+      output.anchor_unsigned = select_earliest_persistent(
+          coarse, output.anchor_unsigned, mask_leakage_profile(window), max_lead_bins);
+    }
     output.anchor = output.anchor_unsigned <= window.subcarriers / 2
                         ? static_cast<int>(output.anchor_unsigned)
                         : static_cast<int>(output.anchor_unsigned) - static_cast<int>(window.subcarriers);
@@ -838,27 +849,15 @@ private:
   std::vector<uint32_t> complex_count_host_;
 };
 
-CufftBatch& shared_batch()
+CufftBatch& thread_batch()
 {
-  static CufftBatch value;
+  thread_local CufftBatch value;
   return value;
 }
 
-std::mutex& shared_batch_mutex()
+CorrectionWorkspace& thread_correction_workspace()
 {
-  static std::mutex value;
-  return value;
-}
-
-CorrectionWorkspace& shared_correction_workspace()
-{
-  static CorrectionWorkspace value;
-  return value;
-}
-
-std::mutex& shared_correction_mutex()
-{
-  static std::mutex value;
+  thread_local CorrectionWorkspace value;
   return value;
 }
 
@@ -867,15 +866,15 @@ std::mutex& shared_correction_mutex()
 bool compute_sync_frontend_cuda(const CfrWindow& window,
                                 uint32_t oversample,
                                 CudaSyncFrontEnd& output,
-                                std::string* error)
+                                std::string* error,
+                                bool earliest_persistent, uint32_t max_lead_bins)
 {
   if (!window.valid() || !oversample
       || window.subcarriers > std::numeric_limits<uint32_t>::max() / oversample) {
     set_error(error, "invalid CFR window or CUDA IFFT length");
     return false;
   }
-  std::lock_guard<std::mutex> lock(shared_batch_mutex());
-  return shared_batch().run(window, oversample, output, error);
+  return thread_batch().run(window, oversample, output, error, earliest_persistent, max_lead_bins);
 }
 
 bool warmup_sync_cuda(uint32_t maximum_rows, uint32_t subcarriers, std::string* error)
@@ -891,8 +890,7 @@ bool warmup_sync_cuda(uint32_t maximum_rows, uint32_t subcarriers, std::string* 
     set_error(error, "CUDA sync warmup IFFT length overflow");
     return false;
   }
-  std::lock_guard<std::mutex> lock(shared_batch_mutex());
-  return shared_batch().configure(subcarriers * oversample, subcarriers, maximum_rows, error);
+  return thread_batch().configure(subcarriers * oversample, subcarriers, maximum_rows, error);
 }
 
 bool apply_sync_correction_cuda(
@@ -907,8 +905,7 @@ bool apply_sync_correction_cuda(
     set_error(error, "invalid CUDA sync-correction input");
     return false;
   }
-  std::lock_guard<std::mutex> lock(shared_correction_mutex());
-  return shared_correction_workspace().run(window, estimate, delay_reference_bin,
+  return thread_correction_workspace().run(window, estimate, delay_reference_bin,
                                            los_spatial, error);
 }
 
@@ -917,8 +914,7 @@ bool warmup_sync_correction_cuda(uint32_t maximum_rows,
                                  uint32_t antennas,
                                  std::string* error)
 {
-  std::lock_guard<std::mutex> lock(shared_correction_mutex());
-  return shared_correction_workspace().configure(maximum_rows, subcarriers, antennas, error);
+  return thread_correction_workspace().configure(maximum_rows, subcarriers, antennas, error);
 }
 
 } // namespace nr_isac

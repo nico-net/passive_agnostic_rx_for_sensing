@@ -30,9 +30,11 @@ struct CudaSyncFrontEnd {
 bool compute_sync_frontend_cuda(const CfrWindow& window,
                                 uint32_t oversample,
                                 CudaSyncFrontEnd& output,
-                                std::string* error);
+                                std::string* error,
+                                bool earliest_persistent = false,
+                                uint32_t max_lead_bins = 0);
 
-/** Allocate the process-wide CUDA context, buffers, and cuFFT plan before CFR admission. */
+/** Allocate this calling thread's CUDA buffers and cuFFT plan before CFR admission. */
 bool warmup_sync_cuda(uint32_t maximum_rows, uint32_t subcarriers, std::string* error);
 
 /** Apply Python's BIC-selected common-mode STO/CPE/SFO correction on CUDA. */
@@ -43,7 +45,7 @@ bool apply_sync_correction_cuda(
     const std::optional<std::array<std::complex<double>, 4>>& los_spatial_steering,
     std::string* error);
 
-/** Preallocate the dense correction workspace before CFR admission. */
+/** Preallocate this calling thread's dense correction workspace before CFR admission. */
 bool warmup_sync_correction_cuda(uint32_t maximum_rows,
                                  uint32_t subcarriers,
                                  uint32_t antennas,

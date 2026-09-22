@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: OAI-Public-License-1.1 */
 #pragma once
 
-#include "detector.h"
+#include "clean_detector.h"
 
 #include <optional>
 #include <string>

@@ -3,7 +3,6 @@
 #define NR_ISAC_H
 
 #include <stdint.h>
-#include "PHY/NR_UE_TRANSPORT/nr_rx_branch.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -39,11 +38,9 @@ typedef struct nr_isac_carrier_s {
   uint16_t slots_per_frame;
 } nr_isac_carrier_t;
 
-/* P14 Stage A (removal table 2.4, row 2): the AOA_ENABLE/AOA_UL_ENABLE environment override and
- * the process-wide globals it drove are gone. AoA is requested only by the `[sensing] aoa_enable`
- * / `aoa_ul_enable` configuration keys, whose parsed values live in PipelineConfig. The obsolete
- * environment keys are rejected loudly instead of silently ignored; returns how many were set. */
-int nr_isac_obsolete_env_keys(void);
+/* Process-wide policy values requested by the deployment. The UL flag is always subordinate. */
+extern int AOA_ENABLE;
+extern int AOA_UL_ENABLE;
 
 void nr_isac_init(void);
 void nr_isac_start(void);
@@ -82,108 +79,27 @@ void nr_isac_submit_cfr_multi(uint32_t slot_idx,
                               const uint32_t *l_sym,
                               uint32_t nof_re,
                               float noise_var);
+
+/** Submit one protocol-identified PUSCH channel. session_id is normally the C-RNTI scoped by the
+ * current carrier/cell lifetime. It is mandatory for UL and is not a geometry or truth input. */
+void nr_isac_submit_cfr_multi_session(uint32_t slot_idx,
+                                      float slot_frac,
+                                      int source,
+                                      const nr_isac_carrier_t *carrier,
+                                      const float *h,
+                                      uint32_t nof_ant,
+                                      uint32_t ant_stride_re,
+                                      const uint32_t *k_abs,
+                                      const uint32_t *l_sym,
+                                      uint32_t nof_re,
+                                      float noise_var,
+                                      uint64_t session_id);
 /* k_abs is always the logical CRB/Point-A carrier-grid coordinate in
  * [0, carrier->nof_prb*12). It is never an FFT-buffer index and excludes first_carrier_offset. */
 
-/* adaptive_RX_pipeline.md P10a: "no branch identity". NOT branch 0 -- branch 0 is a real physical
- * receive branch under P03's rx_branches/rx_branch_phys_map, so using 0 as the unset value would
- * make every legacy producer claim to be branch 0. The report omits the branch field for this
- * value, following the same omit-rather-than-fabricate convention as azimuth_std_deg. */
-#define NR_ISAC_BRANCH_NONE 0xFFu
-
-/* adaptive_RX_pipeline.md P10a: nr_isac_submit_cfr_multi() with an identity slot for the receive
- * branch the CFR was measured on. nr_isac_submit_cfr_multi() above is a one-line wrapper for this
- * function with NR_ISAC_BRANCH_NONE -- that wrapper, not an argument, is what makes every producer
- * that has not migrated structurally unchanged rather than assumed unchanged.
- *
- * P13 (adaptive_RX_pipeline.md Stage 4) made the identity LOAD-BEARING: this value now selects
- * which of the per-branch SensingEngine instances consumes the row. A branch_id naming a branch
- * that is not in `rx_branches` is DROPPED and counted, never folded into another branch's coherent
- * window; NR_ISAC_BRANCH_NONE goes to the lowest active branch, which with a single active branch
- * (the legacy and default configuration) is the only engine there is. */
-void nr_isac_submit_cfr_multi_branch(uint32_t slot_idx,
-                                     float slot_frac,
-                                     int source,
-                                     const nr_isac_carrier_t *carrier,
-                                     const float *h,
-                                     uint32_t nof_ant,
-                                     uint32_t ant_stride_re,
-                                     const uint32_t *k_abs,
-                                     const uint32_t *l_sym,
-                                     uint32_t nof_re,
-                                     float noise_var,
-                                     uint8_t branch_id);
-
-uint32_t nr_isac_aoa_antennas(void);
-
-/* adaptive_RX_pipeline.md P10b (AoA-removal audit Stage B item 2): ONE CFR submission's antenna
- * slice and branch identity. A producer packs its per-antenna channel estimates ONCE, antenna-major
- * with a fixed stride, and then submits one slice per plan entry -- `first_ant` is a pointer offset
- * into that buffer, never a second pack. */
-typedef struct nr_isac_submit_plan_s {
-  uint32_t first_ant;  /* index of the first antenna plane this submission reads */
-  uint32_t nof_ant;    /* how many consecutive planes from first_ant */
-  uint8_t branch_id;   /* NR_ISAC_BRANCH_NONE on the legacy single-engine submission */
-} nr_isac_submit_plan_t;
-
-/* Fills out[] with the submissions a CFR producer must make this slot, and *pack_antennas (may be
- * NULL) with how many antenna planes it must pack to serve all of them.
- *
- * With ONE active receive branch -- today's default, and the co-located-array AoA deployment -- this
- * returns exactly ONE entry {first_ant = 0, nof_ant = legacy_nof_ant, branch_id = BRANCH_NONE}, i.e.
- * the call the producer makes today, with the identity explicitly absent. That is the whole reason
- * the legacy path is unchanged rather than merely tested unchanged.
- *
- * With SEVERAL active branches (physically separated single-antenna receivers) it returns one
- * SINGLE-ANTENNA entry per active branch, reading that branch's own `physical_channel` and tagged
- * with its branch_id, so each branch's rows reach its own SensingEngine. The multi-antenna AoA
- * submission is NOT also made: mixing 1-antenna and 4-antenna rows in one engine collapses that
- * engine's coherent window to one antenna (sensing_engine.cc's build_window() takes the MINIMUM
- * available antenna count across rows) and silently disables AoA rather than fusing anything. AoA
- * and multi-branch are mutually exclusive deployment modes; nr_isac_init() now says so loudly when
- * both are configured.
- *
- * `available_antennas` is the producer's own bound -- min(frame_parms->nb_antennas_rx, the
- * producer's packing-buffer capacity), and 1 when the producer holds a single-plane buffer. A
- * branch whose physical_channel is at or beyond it is SKIPPED (counted, logged once): reading a
- * plane the producer does not have would be an out-of-bounds read, and folding that branch into
- * another one is the misrouting P13a exists to prevent.
- *
- * Returns the number of entries written, 0 when sensing is off or no branch is serviceable, or -1
- * when `max` is smaller than the active branch count -- following nr_rx_branch_set_dispatch()'s
- * rule that a caller must never fan out to a silent subset. A producer treats <= 0 as "submit
- * nothing this slot". */
-int nr_isac_submit_plan(nr_isac_submit_plan_t *out,
-                        int max,
-                        uint32_t legacy_nof_ant,
-                        uint32_t available_antennas,
-                        uint32_t *pack_antennas);
+/** Number of independent RF channels requested by sensing (one or four). */
+uint32_t nr_isac_rx_channels(void);
 uint32_t nr_isac_subslot_config(uint32_t *min_re, float *min_snr_db);
-
-/* adaptive_RX_pipeline.md P03: [sensing] rx_branches / rx_branch_phys_map, parsed by
- * nr_isac_init() into a process-wide nr_rx_branch_set_t. Foundation only -- nothing in the RT
- * read loop consults this yet (P04/P05). Returns NULL if sensing is disabled or the branch
- * config failed to parse (nr_isac_init() logs LOG_E and disables sensing in that case, same as
- * every other fatal [sensing] parse failure in this file). */
-const nr_rx_branch_set_t *nr_isac_rx_branches(void);
-
-/* adaptive_RX_pipeline.md P06a: the same set, writable, for the ONE owner of branch lifecycle --
- * the nr-ue.c read loop (AcquisitionOwner). Every other reader uses the const accessor above.
- * The epochs it mutates are plain aligned uint32 counters read without a lock by the DL decode
- * consumers: they only ever increase, a torn read is not possible on an aligned 32-bit load, and
- * a consumer that reads one epoch late merely discards one more job than strictly necessary --
- * which is the safe direction. Returns NULL under exactly the same conditions as the const
- * accessor. */
-nr_rx_branch_set_t *nr_isac_rx_branches_mutable(void);
-
-/* Sets the live UE receive-antenna count nr_isac_init() checks rx_branches against (P03's "more
- * branches than antennas" reject). Must be called BEFORE nr_isac_init() to take effect; default
- * is 0 ("unknown"), under which the antenna-count check is skipped rather than fatally rejecting
- * a config it cannot evaluate. Not called from anywhere in this task (nr-uesoftmodem.c is out of
- * this task's file scope) -- see nr_isac.cc's nr_isac_init() comment and
- * docs/passive_branch_globals_audit.md for where get_nrUE_params()->nb_antennas_rx would supply
- * a live value once wired. */
-void nr_isac_set_nb_antennas_rx(int nb_antennas_rx);
 
 #ifdef __cplusplus
 }

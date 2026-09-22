@@ -18,7 +18,9 @@ LocalStatistic cut_excluded_local_statistic(const std::vector<double>& surface,
                                              uint32_t train_r,
                                              uint32_t train_d,
                                              uint32_t guard_r,
-                                             uint32_t guard_d)
+                                             uint32_t guard_d,
+                                             uint32_t excluded_doppler_bin,
+                                             bool exclude_cut_range_bin)
 {
   if (!nr || !nd || surface.size() != static_cast<size_t>(nr) * nd || cut_r >= nr || cut_d >= nd)
     throw std::invalid_argument("local CUT map/index mismatch");
@@ -29,6 +31,7 @@ LocalStatistic cut_excluded_local_statistic(const std::vector<double>& surface,
   const uint32_t hi_r = std::min(nr - 1, cut_r + train_r);
   values.reserve(static_cast<size_t>(hi_r - lo_r + 1) * (2 * train_d + 1));
   for (uint32_t r = lo_r; r <= hi_r; ++r) {
+    if (exclude_cut_range_bin && r == cut_r) continue;
     for (int64_t offset = -static_cast<int64_t>(train_d); offset <= static_cast<int64_t>(train_d); ++offset) {
       int64_t wrapped = (static_cast<int64_t>(cut_d) + offset) % static_cast<int64_t>(nd);
       if (wrapped < 0)
@@ -38,6 +41,7 @@ LocalStatistic cut_excluded_local_statistic(const std::vector<double>& surface,
                                          nd - (d > cut_d ? d - cut_d : cut_d - d));
       if ((r > cut_r ? r - cut_r : cut_r - r) <= guard_r && circular <= guard_d)
         continue;
+      if (d == excluded_doppler_bin) continue;
       const double value = surface[(size_t)r * nd + d];
       if (std::isfinite(value) && value > 0.0)
         values.push_back(value);
@@ -65,8 +69,20 @@ LocalStatistic cut_excluded_local_statistic(const std::vector<double>& surface,
   result.log_background_sigma = std::max(result.log_background_sigma, 1e-12);
   result.cut_score = surface[(size_t)cut_r * nd + cut_d];
   result.valid = std::isfinite(result.cut_score) && result.cut_score > 0.0;
-  if (result.valid)
-    result.z = (std::log(result.cut_score) - result.log_background_median) / result.log_background_sigma;
+  if (result.valid) {
+    // OUR ADAPTATION: nothing previously floors log_background_median. On a sparse/weak CPI the
+    // training-cell median can itself be measured near the underflow floor, which then makes z
+    // arbitrarily large for any nonzero cut_score regardless of the sigma floor two lines above.
+    // Bound the dynamic range this statistic is allowed to claim relative to the cell actually
+    // being tested, using float epsilon (not double): the underlying CFR is stored as
+    // complex<float>, so float precision -- not double -- is the representable-precision limit
+    // of the actual measured data, matching the same reasoning clean_detector.cc's storage_floor
+    // already uses for an analogous purpose. Not a value chosen to fit any capture's outcome.
+    const double log_cut_score = std::log(result.cut_score);
+    const double floor_nats = 2.0 * std::log(static_cast<double>(std::numeric_limits<float>::epsilon()));
+    result.log_background_median = std::max(result.log_background_median, log_cut_score + floor_nats);
+    result.z = (log_cut_score - result.log_background_median) / result.log_background_sigma;
+  }
   result.training_cells = static_cast<uint32_t>(values.size());
   return result;
 }

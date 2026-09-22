@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: OAI-Public-License-1.1 */
 #include "variable_cpi.h"
 
-#include "detector.h"
+#include "clean_detector.h"
 
 #include <algorithm>
 #include <cmath>

@@ -86,6 +86,14 @@ public:
 private:
   MotionTrackerConfig config_;
   std::vector<Track> tracks_;
+  // OUR ADAPTATION: tracks dropped after exceeding the ordinary coast budget are not discarded outright.
+  // They are kept here, still Kalman-predicted forward each update() using the same physically-derived
+  // process-noise model, and get one further maximum_coasts-sized grace window (the same budget/formula
+  // an ordinary coasting track already uses, not a new tunable) during which a birth candidate that is
+  // chi2-consistent with the predicted state (the same gate_chi2 test used for live association) revives
+  // the original track ID instead of spawning a new one. This targets genuine coverage-gap ID switches,
+  // as distinct from the micro-Doppler sibling-birth mechanism handled directly in update()'s birth loop.
+  std::vector<Track> graveyard_;
   uint64_t next_id_ = 1;
   std::optional<double> time_s_;
   bool last_lost_ = false;

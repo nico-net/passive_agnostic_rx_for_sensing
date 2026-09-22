@@ -1080,7 +1080,14 @@ set(NR_UE_ISAC_SRC
   ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/adaptive_threshold.cc
   ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/adaptive_clutter_map.cc
   ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/sync_correction.cc
-  ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/detector.cc
+  # detector.cc (single-RX lineage) is superseded by clean_detector.cc and no longer compiles
+  # against the multi-RX PipelineConfig (it references maximum_path_doppler_hz, removed there).
+  ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/clean_detector.cc
+  ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/causal_clutter_filter.cc
+  ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/multistatic_imm_tracker.cc
+  ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/multipath_fusion.cc
+  ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/origin_hypothesis.cc
+  ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/ul_dtd_dfs_validator.cc
   ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/motion_tracker.cc
   ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/variable_cpi.cc
   ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/enu_tracker.cc

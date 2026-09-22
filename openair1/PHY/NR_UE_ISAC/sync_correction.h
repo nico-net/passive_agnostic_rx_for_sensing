@@ -8,7 +8,30 @@
 
 namespace nr_isac {
 
-SyncEstimate estimate_sync(const CfrWindow& window);
+enum class SyncPathPolicy {
+  dominant,
+  earliest_persistent,
+};
+
+/** max_lead_bins (earliest_persistent only): the earliest-path search is confined to
+ *  [dominant - max_lead_bins, dominant]. 0 = whole circular delay axis (legacy). The caller derives
+ *  it from the physical range horizon: a direct path cannot lead the dominant path by more than
+ *  the transport support, so circular aliases (e.g. the DMRS comb-interpolation image at N/2) are
+ *  excluded by physics, not by tuning. */
+SyncEstimate estimate_sync(
+    const CfrWindow& window,
+    SyncPathPolicy path_policy = SyncPathPolicy::dominant,
+    uint32_t max_lead_bins = 0);
+
+/** Delay-domain leakage of the window's own subcarrier masks: mean over rows of |IFFT(mask_r)|^2 at
+ *  the coarse (1 bin = 1/subcarriers) resolution, normalised to 1 at zero lag. A full-band mask gives
+ *  a delta (no leakage). Used by the earliest-path search so a partial-band rectangular window's own
+ *  sidelobes are never mistaken for an earlier persistent path. */
+std::vector<double> mask_leakage_profile(const CfrWindow& window);
+
+/** Earliest-persistent candidate test shared by the CPU and CUDA front ends. Returns the anchor. */
+uint32_t select_earliest_persistent(const std::vector<double>& coarse, uint32_t dominant,
+                                    const std::vector<double>& leakage, uint32_t max_lead_bins);
 
 /** Apply selected STO/SFO and per-row measured LOS phase identically to every antenna. */
 void apply_sync_correction(CfrWindow& window,

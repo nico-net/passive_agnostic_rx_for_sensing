@@ -29,6 +29,20 @@
 namespace nr_isac {
 namespace {
 
+// (2026-09-21, NR_ISAC_ROW_LOS_GAIN=1) Per-row direct-path amplitude normalisation. Measured on the
+// OAI-estimated CFR: row power jitters by +-6 dB (std 0.61 decades) between rows of one CPI while the
+// same rows synthesised from the Sionna bank jitter by 0.16 -- the passive estimator's per-slot
+// autoscale/normalisation. A static return with row-varying gain is not static in slow time, so the
+// DC clutter canceller leaves a Doppler-spread residual (measured floor tail 14 dB vs 8.4 dB for an
+// exponential floor). Referencing every row to its own measured direct path (amplitude AND phase,
+// applied identically to all antennas) removes the jitter at its source -- the direct path is the
+// passive receiver's local oscillator. The CPI's overall scale is preserved (median row gain).
+bool row_los_gain_enabled()
+{
+  static const bool value = [] { const char* v = std::getenv("NR_ISAC_ROW_LOS_GAIN"); return v && *v == '1'; }();
+  return value;
+}
+
 std::vector<double> row_times(const CfrWindow& window)
 {
   std::vector<double> result(window.rows);
@@ -183,7 +197,7 @@ bool force_cpu_sync()
 
 } // namespace
 
-SyncEstimate estimate_sync(const CfrWindow& window)
+SyncEstimate estimate_sync(const CfrWindow& window, SyncPathPolicy path_policy, uint32_t max_lead_bins)
 {
   if (!window.valid() || window.rows < 3 || window.subcarriers < 3)
     throw std::invalid_argument("sync estimation needs a valid >=3x3 CFR window");
@@ -202,7 +216,9 @@ SyncEstimate estimate_sync(const CfrWindow& window)
   if (!force_cpu_sync() && !cuda_failed.load(std::memory_order_relaxed)) {
     std::string error;
     CudaSyncFrontEnd front_end;
-    used_cuda = compute_sync_frontend_cuda(window, oversample, front_end, &error);
+    used_cuda = compute_sync_frontend_cuda(
+        window, oversample, front_end, &error,
+        path_policy == SyncPathPolicy::earliest_persistent, max_lead_bins);
     if (!used_cuda) {
       cuda_failed.store(true, std::memory_order_relaxed);
       if (cuda_required())
@@ -235,7 +251,11 @@ SyncEstimate estimate_sync(const CfrWindow& window)
     for (uint32_t k = 0; k < subcarriers; ++k)
       for (uint32_t j = 0; j < oversample; ++j)
         coarse[k] += mean_profile[(size_t)k * oversample + j];
-    anchor_unsigned = static_cast<uint32_t>(std::max_element(coarse.begin(), coarse.end()) - coarse.begin());
+    anchor_unsigned = static_cast<uint32_t>(
+        std::max_element(coarse.begin(), coarse.end()) - coarse.begin());
+    if (path_policy == SyncPathPolicy::earliest_persistent)
+      anchor_unsigned = select_earliest_persistent(coarse, anchor_unsigned,
+                                                   mask_leakage_profile(window), max_lead_bins);
     anchor = anchor_unsigned <= subcarriers / 2 ? static_cast<int>(anchor_unsigned)
                                                 : static_cast<int>(anchor_unsigned) - static_cast<int>(subcarriers);
     halfwidth = profile_halfwidth(coarse, anchor_unsigned);
@@ -385,7 +405,7 @@ static void apply_sync_correction_cpu(
 
   // Python requests CPE, not a direct CFO rotation. Each usable row is phase-referenced to its
   // measured LOS; missing rows use nearest admitted phase plus the BIC-selected CFO prediction.
-  std::vector<double> measured_phase(window.rows, 0.0), applied_phase(window.rows, 0.0);
+  std::vector<double> measured_phase(window.rows, 0.0), applied_phase(window.rows, 0.0), measured_gain(window.rows, 0.0);
   std::vector<uint8_t> admitted(window.rows, 0);
   const uint32_t selected_antennas = los_spatial ? window.antennas : 1;
   for (uint32_t r = 0; r < window.rows; ++r) {
@@ -413,6 +433,23 @@ static void apply_sync_correction_cpu(
     const uint32_t real_samples = 2 * complex_count;
     if (bic(residual, real_samples, 2) < bic(energy, real_samples, 0)) {
       admitted[r] = 1; measured_phase[r] = std::arg(coherent); applied_phase[r] = measured_phase[r];
+      measured_gain[r] = std::abs(coherent) / complex_count;
+    }
+  }
+  std::vector<double> applied_gain(window.rows, 1.0);
+  if (row_los_gain_enabled()) {
+    std::vector<double> gains;
+    for (uint32_t r = 0; r < window.rows; ++r) if (admitted[r] && measured_gain[r] > 0.0) gains.push_back(measured_gain[r]);
+    if (!gains.empty()) {
+      const double reference = median(gains);
+      for (uint32_t r = 0; r < window.rows; ++r) {
+        if (admitted[r] && measured_gain[r] > 0.0) { applied_gain[r] = reference / measured_gain[r]; continue; }
+        // rows without an admitted direct path take the nearest admitted row's gain (as for the phase)
+        double best = std::numeric_limits<double>::infinity(); uint32_t nearest = r;
+        for (uint32_t q = 0; q < window.rows; ++q)
+          if (admitted[q] && measured_gain[q] > 0.0 && std::abs(times[q] - times[r]) < best) { best = std::abs(times[q] - times[r]); nearest = q; }
+        if (nearest != r) applied_gain[r] = reference / measured_gain[nearest];
+      }
     }
   }
   std::vector<uint32_t> usable;
@@ -440,6 +477,7 @@ static void apply_sync_correction_cpu(
         const double angle = 2.0 * PI * delay[r] * centered / window.subcarriers
                              - (usable.empty() ? 0.0 : applied_phase[r]);
         window.values[index] *= std::complex<float>(std::cos(angle), std::sin(angle));
+        if (applied_gain[r] != 1.0) window.values[index] *= static_cast<float>(applied_gain[r]);
       }
 }
 
@@ -452,7 +490,7 @@ void apply_sync_correction(CfrWindow& window,
   if (cuda_required() && force_cpu_sync())
     throw std::runtime_error("NR_ISAC_REQUIRE_CUDA=1 conflicts with NR_ISAC_DISABLE_CUDA_SYNC=1");
   static std::atomic<bool> cuda_failed{false};
-  if (!force_cpu_sync() && !cuda_failed.load(std::memory_order_relaxed)) {
+  if (!force_cpu_sync() && !row_los_gain_enabled() && !cuda_failed.load(std::memory_order_relaxed)) {
     std::string error;
     if (apply_sync_correction_cuda(window, estimate, delay_reference_bin, los_spatial, &error)) {
       static std::atomic<bool> cuda_logged{false};
@@ -695,6 +733,7 @@ double estimate_current_cpi_variance(const CfrWindow& window, uint32_t* family_c
 #endif
   uint64_t count = 0;
   std::vector<double> powers;
+  double max_raw_power = 0.0;
   for (const auto& item : grouped) {
     if (item.second.size() < 2) continue;
     for (size_t i = 1; i < item.second.size(); ++i) {
@@ -702,15 +741,34 @@ double estimate_current_cpi_variance(const CfrWindow& window, uint32_t* family_c
       for (uint32_t a = 0; a < window.antennas; ++a)
         for (uint32_t k = 0; k < window.subcarriers; ++k) {
           if (!window.observed[window.cell(left, k)] || !window.observed[window.cell(right, k)]) continue;
-          const double power = std::norm(static_cast<std::complex<double>>(window.values[window.sample(a, right, k)])
-                                         - static_cast<std::complex<double>>(window.values[window.sample(a, left, k)]));
+          const auto left_value = static_cast<std::complex<double>>(window.values[window.sample(a, left, k)]);
+          const auto right_value = static_cast<std::complex<double>>(window.values[window.sample(a, right, k)]);
+          const double power = std::norm(right_value - left_value);
           ++count;
-          if (std::isfinite(power) && power > 0.0) powers.push_back(power);
+          // OUR ADAPTATION: an exact-zero differenced power between two observed, causally
+          // legitimate same-family rows is the correct low-noise measurement, not an invalid
+          // sample. Excluding it as previously written (power > 0.0) discards precisely the
+          // quietest, most informative CPIs (e.g. once a target has come to a stop and the scene
+          // is genuinely static), forcing a fallback to the undifferenced raw-power estimator --
+          // which includes static/clutter content the differencing exists to remove -- and
+          // produces a variance many orders of magnitude too large for that CPI.
+          if (std::isfinite(power) && power >= 0.0) powers.push_back(power);
+          max_raw_power = std::max({max_raw_power, std::norm(left_value), std::norm(right_value)});
         }
     }
   }
   if (differenced_samples) *differenced_samples = count;
-  if (!powers.empty()) return median(std::move(powers)) / (2.0 * std::log(2.0));
+  if (!powers.empty()) {
+    // OUR ADAPTATION: guard the same way clean_detector.cc's storage_floor already does for an
+    // analogous squared-magnitude quantity -- a relative floor of the signal's own observed power
+    // scale times float epsilon squared, since complex<float> is the actual storage precision.
+    // Without this, a genuinely all-zero differenced-power CPI (a fully static scene, now
+    // representable thanks to the fix above) could return exactly 0.0, which
+    // causal_clutter_filter's strict variance>0.0 precondition would reject outright.
+    const double storage_floor = max_raw_power
+        * std::numeric_limits<float>::epsilon() * std::numeric_limits<float>::epsilon();
+    return std::max(median(std::move(powers)), storage_floor) / (2.0 * std::log(2.0));
+  }
   for (uint32_t a = 0; a < window.antennas; ++a)
     for (uint32_t r = 0; r < window.rows; ++r)
       for (uint32_t k = 0; k < window.subcarriers; ++k)
@@ -734,6 +792,82 @@ std::vector<uint8_t> aoa_observed_mask(const CfrWindow& window, bool enable, boo
       std::fill(result.begin() + (size_t)r * window.subcarriers,
                 result.begin() + (size_t)(r + 1) * window.subcarriers, 0);
   return result;
+}
+
+
+std::vector<double> mask_leakage_profile(const CfrWindow& window)
+{
+  const uint32_t n = window.subcarriers;
+  std::vector<double> profile(n, 0.0);
+  std::map<std::vector<uint8_t>, std::vector<double>> cache;
+  for (uint32_t r = 0; r < window.rows; ++r) {
+    std::vector<uint8_t> mask(window.observed.begin() + window.cell(r, 0),
+                              window.observed.begin() + window.cell(r, 0) + n);
+    auto it = cache.find(mask);
+    if (it == cache.end()) {
+      std::vector<std::complex<double>> w(n);
+      for (uint32_t k = 0; k < n; ++k) w[k] = mask[k] ? 1.0 : 0.0;
+      fft_inplace(w, true);
+      std::vector<double> power(n);
+      const double zero = std::max(std::norm(w[0]), std::numeric_limits<double>::min());
+      for (uint32_t i = 0; i < n; ++i) power[i] = std::norm(w[i]) / zero;
+      it = cache.emplace(std::move(mask), std::move(power)).first;
+    }
+    for (uint32_t i = 0; i < n; ++i) profile[i] += it->second[i] / window.rows;
+  }
+  return profile;
+}
+
+uint32_t select_earliest_persistent(const std::vector<double>& coarse, uint32_t dominant,
+                                    const std::vector<double>& leakage, uint32_t max_lead_bins)
+{
+  const uint32_t n = static_cast<uint32_t>(coarse.size());
+  const double background = median(coarse);
+  const double background_mad = median_absolute_deviation(coarse, background);
+  const double robust_sigma = 1.4826 * background_mad;
+  const double familywise_tail = std::sqrt(2.0 * std::log(std::max(2u, n)));
+  const double excess = familywise_tail * std::max(
+      robust_sigma, std::numeric_limits<double>::epsilon() * std::max(1.0, coarse[dominant]));
+  const double threshold = background + excess;
+  // Leakage-dominated lags: the profile there is the dominant path seen through the mask window's
+  // sidelobes (plus multipath). Its log-ratio to the predicted leakage self-calibrates the family-
+  // wise excess an earlier candidate must show above that envelope. Full-band masks have no
+  // leakage, so this branch is inert and the legacy background test applies unchanged.
+  std::vector<double> log_ratio;
+  log_ratio.reserve(n);
+  for (uint32_t c = 0; c < n; ++c) {
+    const double predicted = coarse[dominant] * leakage[(c + n - dominant) % n];
+    if (c != dominant && predicted > background && coarse[c] > 0.0)
+      log_ratio.push_back(std::log(coarse[c]) - std::log(predicted));
+  }
+  double ratio_median = 0.0, ratio_excess = 0.0;
+  if (log_ratio.size() >= 8) {
+    ratio_median = median(log_ratio);
+    ratio_excess = familywise_tail * std::max(1.4826 * median_absolute_deviation(log_ratio, ratio_median),
+                                              std::numeric_limits<double>::epsilon());
+  }
+  uint32_t anchor = dominant;
+  int earliest_delta = 0;
+  for (uint32_t candidate = 0; candidate < n; ++candidate) {
+    const uint32_t left = (candidate + n - 1) % n;
+    const uint32_t right = (candidate + 1) % n;
+    if (coarse[candidate] < threshold || coarse[candidate] < coarse[left]
+        || coarse[candidate] < coarse[right])
+      continue;
+    int delta = static_cast<int>(candidate) - static_cast<int>(dominant);
+    if (delta > static_cast<int>(n / 2)) delta -= static_cast<int>(n);
+    else if (delta < -static_cast<int>(n / 2)) delta += static_cast<int>(n);
+    if (max_lead_bins && delta < -static_cast<int>(max_lead_bins)) continue;
+    // Predicted leakage of the dominant path through the mask window at this lag: a candidate must
+    // exceed it by the same family-wise excess it must exceed the background by.
+    const double predicted = coarse[dominant] * leakage[(candidate + n - dominant) % n];
+    if (predicted > background) {
+      if (log_ratio.size() < 8) continue;
+      if (std::log(coarse[candidate]) - std::log(predicted) - ratio_median < ratio_excess) continue;
+    }
+    if (delta < earliest_delta) { earliest_delta = delta; anchor = candidate; }
+  }
+  return anchor;
 }
 
 } // namespace nr_isac

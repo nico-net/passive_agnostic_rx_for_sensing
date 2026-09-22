@@ -6,11 +6,9 @@
 
 #include <array>
 #include <complex>
-#include <cmath>
 #include <cstdint>
-#include <cstdio>
-#include <cstdlib>
 #include <limits>
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
@@ -19,6 +17,7 @@ namespace nr_isac {
 
 constexpr double C_MPS = 299792458.0;
 constexpr double PI = 3.141592653589793238462643383279502884;
+constexpr double SPATIAL_CPI_DURATION_S = 0.075;
 // Keep this definition identical to gpu_pipeline.py.  The diagnostic DL view is not inferred
 // from an already-fused row mask because a mixed row cannot be separated after averaging.
 constexpr uint32_t DL_SOURCE_BITS = (1u << NR_ISAC_SRC_CSI_RS)
@@ -28,6 +27,9 @@ constexpr uint32_t DL_SOURCE_BITS = (1u << NR_ISAC_SRC_CSI_RS)
 constexpr uint32_t UL_SOURCE_BITS = (1u << NR_ISAC_SRC_PUSCH_DMRS) | (1u << NR_ISAC_SRC_PUSCH_DATA);
 
 struct CfrWindow {
+  // Zero for non-session-specific sources. UL windows carry the PUSCH protocol session and must
+  // never contain rows from more than one transmitter.
+  uint64_t session_id = 0;
   uint32_t antennas = 0;
   uint32_t rows = 0;
   uint32_t subcarriers = 0;
@@ -41,10 +43,6 @@ struct CfrWindow {
   std::vector<uint32_t> row_slot_idx;
   std::vector<double> row_slot_frac;
   std::vector<uint32_t> row_source_mask;
-  // P10a: bit b set when a row of this window carried branch identity b; 0 = no row was tagged.
-  // Window-level, not per-row: this slice only makes the identity visible in the report, and a
-  // per-row axis would be the first half of the branch-routed windowing that belongs to P13.
-  uint32_t branch_mask = 0;
   std::array<uint64_t, NR_ISAC_SRC_COUNT> source_occurrences{};
 
   size_t cell(uint32_t row, uint32_t subcarrier) const
@@ -92,6 +90,7 @@ struct LocalStatistic {
   double log_background_mad = 0.0;
   double log_background_sigma = 0.0;
   uint32_t training_cells = 0;
+  double column_peak = 0.0;   // (2026-09-22) strongest cell in the CUT's range column (skirt rule)
 };
 
 struct Axes {
@@ -120,15 +119,40 @@ struct CleanComponent {
   double score = 0.0;
   double raw_score = 0.0;
   uint32_t iteration = 0;
+  // OUR ADAPTATION: -1 means this component is independent (a bulk/rigid-body component, or a
+  // component with no other component sharing its range neighborhood). A non-negative value is
+  // the `iteration` of the bulk component this one shares range support with but not Doppler
+  // support with -- i.e. a candidate micro-Doppler sideband of that bulk component, not merged
+  // into it (unlike collapse_unresolved's existing range+Doppler blend) so its own range/Doppler/
+  // amplitude stay exactly as CLEAN found them. Set by tag_micro_doppler_families(), after
+  // collapse_unresolved. Never used to change the underlying CLEAN detection/subtraction.
+  int32_t bulk_component_iteration = -1;
+  // (2026-09-20) true when the proposal failed the range-column (greatest-of) CFAR test: a Doppler
+  // skirt of a stronger component.  Subtracted by CLEAN like any component, but excluded from
+  // the objects/detections the report emits.
+  bool skirt = false;
   double amplitude_abs = 0.0;
   double amplitude_phase_rad = 0.0;
+  // Explicit fitted coefficient.  amplitude_abs/phase are retained for report compatibility;
+  // this value avoids a lossy reconstruction in downstream path-origin processing.
+  std::complex<double> complex_coefficient;
   double weighted_energy_removed = 0.0;
   double fitted_weighted_energy = 0.0;
   LocalStatistic local;
   double local_threshold = std::numeric_limits<double>::infinity();
+  // (2026-09-22) range-column (greatest-of) test that decides `skirt`, exported for diagnosis
+  double column_z = 0.0;
+  double column_threshold = std::numeric_limits<double>::infinity();
+  uint32_t column_training_cells = 0;
   Localization localization;
   std::vector<std::complex<double>> array_response;
   uint32_t object_component_count = 1;
+  // One-based serial CLEAN iterations contributing to this component/object.  This is provenance
+  // only: it is populated after the unchanged CLEAN decisions have been made.
+  std::vector<uint32_t> component_lineage;
+  bool split_validated = false;
+  double split_minimum_z = -std::numeric_limits<double>::infinity();
+  double split_threshold = std::numeric_limits<double>::infinity();
 };
 
 struct AoaEstimate {
@@ -158,10 +182,16 @@ struct Detection {
   double decision_statistic = -std::numeric_limits<double>::infinity();
   double decision_threshold = std::numeric_limits<double>::infinity();
   double effective_decision_threshold = std::numeric_limits<double>::infinity();
+  bool split_validated = false;
+  double split_minimum_z = -std::numeric_limits<double>::infinity();
+  double split_threshold = std::numeric_limits<double>::infinity();
   bool covariance_valid = false;
   Matrix range_rate_covariance{2, 2};
   uint32_t source_component_iteration = 0;
+  int32_t bulk_component_iteration = -1;
   uint32_t object_component_count = 1;
+  std::complex<double> complex_coefficient;
+  std::vector<uint32_t> component_lineage;
   AoaEstimate aoa;
   double dwell_s = 0.0;
   bool ul_confirmation_supported = false;
@@ -169,11 +199,37 @@ struct Detection {
   std::string ul_confirmation_status;
 };
 
+/** Immutable, receiver-local first-pass likelihood surface supplied to fusion.
+ *
+ * Values are the detector's unthresholded current-CPI GLRT map.  They are never modified by the
+ * tracker and are explicitly distinguished from CLEAN residual iterations.  A missing or
+ * incomplete surface is unavailable evidence, not a negative detection.
+ */
+struct SoftRangeRateEvidence {
+  Axes axes;
+  std::vector<double> values; // range-major [range][Doppler], raw detector score
+  double null_scale = 0.0; // exponential mean power, NOT its median
+  uint32_t psf_range_halfwidth_bins = 0;
+  uint32_t psf_doppler_halfwidth_bins = 0;
+  uint64_t effective_hypotheses = 0;
+  bool search_complete = false;
+
+  bool valid() const
+  {
+    return axes.range_bins > 0 && axes.rate_bins > 0
+           && values.size() == static_cast<size_t>(axes.range_bins) * axes.rate_bins
+           && axes.range_res_m > 0.0 && axes.rate_res_mps > 0.0
+           && std::isfinite(null_scale) && null_scale > 0.0
+           && effective_hypotheses > 0;
+  }
+};
+
 struct DetectorResult {
   Axes axes;
   std::vector<CleanComponent> components;
   std::vector<CleanComponent> objects;
   std::vector<double> initial_likelihood; // range-major [range][Doppler], raw score
+  std::vector<double> final_likelihood;   // same layout: residual map after the last CLEAN subtraction (export only)
   // Exact DL-only diagnostic view, accumulated before DL/UL PendingRow fusion.
   std::vector<double> initial_dl_likelihood;
   uint64_t dl_observed_re_count = 0;
@@ -181,9 +237,23 @@ struct DetectorResult {
   double final_weighted_energy = 0.0;
   double initial_residual_scale = 0.0;
   double adaptive_threshold = std::numeric_limits<double>::infinity();
+  uint32_t psf_range_halfwidth_bins = 0;
+  uint32_t psf_doppler_halfwidth_bins = 0;
+  uint64_t searched_cells = 0;
+  uint64_t resolution_cells = 0;
+  uint64_t effective_hypotheses = 0;
+  uint64_t split_validation_rejections = 0;
+  uint64_t identifiability_guard = 0;
+  uint32_t skirt_components = 0;   // (2026-09-20) proposals rejected by the range-column CFAR test
+  double null_scale = 0.0; // exponential mean power; shared contract with soft-map consumers
+  std::string null_scale_source;
+  std::string stop_reason;
 };
 
 struct TrackSnapshot {
+  double existence_score = 0.0;
+  double existence_threshold = 0.0;
+  uint32_t existence_receiver_mask = 0;
   uint64_t track_id = 0;
   std::string status = "uninitialized";
   double air_time_s = 0.0;
@@ -216,11 +286,47 @@ struct TrackSnapshot {
   Matrix velocity_covariance{3, 3};
   double azimuth_deg = 0.0;
   double elevation_deg = 0.0;
+  bool imm_valid = false;
+  std::array<double, 3> imm_model_probabilities{}; // CV, CA, coordinated turn
+  uint32_t receiver_update_count = 0;
+  bool has_geometry_condition = false;
+  double geometry_condition = 0.0;
+  std::string ul_validation_status = "unavailable";
+  double ul_validation_log_bayes_factor = 0.0;
+  double direct_predictive_bic = std::numeric_limits<double>::infinity();
+  double reflected_predictive_bic = std::numeric_limits<double>::infinity();
+  // A reportable target must win a causal direct-vs-clutter predictive comparison in more than
+  // one CPI.  These counters expose that decision rather than hiding it in track confirmation.
+  uint64_t direct_validation_epochs = 0;
+  uint64_t direct_support_epochs = 0;
+  uint32_t direct_supported_receivers = 0;
+  double direct_validation_mean_log_bayes_factor = 0.0;
+  bool direct_emission_validated = false;
+  uint64_t shared_reflector_id = 0;
+  uint64_t physical_parent_track_id = 0;
+  // Diagnostic first stage of measurement-origin management. It is intentionally separate from
+  // track status until independent simulation/OTA validation demonstrates safe suppression.
+  std::string origin_hypothesis = "clutter_or_new";
+  bool origin_evidence_ready = false;
+  std::array<double, 3> origin_log_evidence{}; // target, static/slow multipath, clutter/new
+  double origin_temporal_structure_log_bayes_factor = 0.0;
+  double origin_cross_rx_structure_log_bayes_factor = 0.0;
+  double origin_stationary_log_bayes_factor = 0.0;
+  double origin_ul_direct_log_bayes_factor = 0.0;
+  double origin_exclusivity_log_bayes_factor = 0.0;
+  uint64_t origin_exclusivity_competitor_track_id = 0;
+  uint64_t origin_observed_epochs = 0;
+  uint64_t origin_cross_rx_epochs = 0;
 };
 
 struct ArrayGeometry {
   std::array<Vec3, 4> positions{};
   Vec3 broadside{0.0, 0.0, 1.0};
+  bool configured = false;
+};
+
+struct SpatialReceiverGeometry {
+  std::array<Vec3, 4> positions{};
   bool configured = false;
 };
 
@@ -241,148 +347,6 @@ struct ArrayCalibration {
   std::array<double, 4> delay_s{};
 };
 
-/** Fixed receive-CHAIN correction for ONE independent receive branch (adaptive_RX_pipeline.md
- * P14calib, AoA-removal audit Stage B item 4).  Indexed by BRANCH ID, not by array element.
- *
- * This is the AoA-free half of the ArrayCalibration split above.  ArrayCalibration stays exactly
- * what it always was -- the co-located four-element array's steering/manifold correction, carrying
- * phase_rad, gated behind aoa_enable, applied only by aoa.cc.  ChannelCalibration carries what a
- * receive CHAIN has regardless of whether anything estimates a bearing: its gain imbalance and its
- * fixed (cable/filter/front-end) group delay.  It is parsed unconditionally and applies in BOTH
- * deployment modes.
- *
- * WHY NO PHASE FIELD (the operator's own reasoning, recorded so it is not re-litigated):
- * four physically separated branches are never coherently combined and no bearing is estimated from
- * them, so an inter-channel phase offset has nothing to corrupt -- it is a constant multiplier on
- * one branch's CFR, and every quantity that branch measures (delay profile, Doppler, magnitude) is
- * invariant to it.  A fixed DELAY is not: it moves that branch's whole range axis.
- *
- * WHY DELAY STILL MATTERS EVEN THOUGH IT PARTLY CANCELS: for UL DTD/DFS the measurement is
- * differential WITHIN one receiver, DTD = tau_target - tau_direct, and a per-RX constant tau_cal
- * appears identically in both terms and cancels exactly.  So this calibration buys a single
- * receiver's own differential measurements NOTHING.  Its value is ABSOLUTE range consistency ACROSS
- * receivers: multi-static fusion (P17+) intersects one receiver's ellipse with another's, and an
- * uncalibrated per-chain delay offset biases that receiver's ellipse by c*tau_cal with no
- * within-receiver observable that can reveal it.  Calibrate it, or the fusion geometry is wrong by
- * a constant nobody can see.
- *
- * WHAT IS DELIBERATELY NOT HERE.  Two things the operator's "keep" list names already have owners,
- * and duplicating them would create a second source of truth:
- *   - CHANNEL MAPPING is P03's rx_branch_phys_map (nr_rx_branch_t::physical_channel), parsed and
- *     validated by nr_rx_branch_set_parse().  ArrayCalibration's physical_to_observed exists only
- *     because a co-located array has no branch set to carry it.
- *   - PHYSICAL RX POSITION is surveyed receiver geometry (rx_pos_*, P01's geometry_four_rx.json),
- *     a different concept entirely from receive-chain calibration.
- *
- * The complex correction applied to branch b at baseband offset f is
- *
- *   gain[b] * exp(+j * 2*pi*f * fixed_delay_s[b])
- *
- * -- the SAME form and the SAME sign as ArrayCalibration's, with phase_rad dropped, so a range
- * measured in AoA mode and one measured in independent-branch mode use one convention.  Both stored
- * values are what you MULTIPLY BY, not what you measured: a chain that runs 2x hot takes gain=0.5,
- * and a chain whose cable DELAYS by tau takes fixed_delay_s=+tau (a physical delay is
- * exp(-j*2*pi*f*tau), so multiplying by exp(+j*2*pi*f*tau) removes it).
- */
-struct ChannelCalibration {
-  bool configured = false;
-  std::array<double, NR_RX_BRANCH_MAX> gain{1.0, 1.0, 1.0, 1.0};
-  std::array<double, NR_RX_BRANCH_MAX> fixed_delay_s{};
-};
-
-/* Parses the [sensing] rx_channel_calibration value: one to NR_RX_BRANCH_MAX semicolon-separated
- * branch,gain,delay_ns tuples, e.g. "0,1.0,0;1,0.92,3.4".  Three fields, deliberately NOT four --
- * it cannot be confused with rx_array_calibration's observed,gain,phase_rad,delay_ns, and a value
- * pasted from the wrong key is rejected rather than silently reinterpreted.
- *
- * An empty/absent value yields the default (configured == false), which is the no-correction path.
- * A branch absent from a non-empty list keeps gain 1.0 / delay 0 -- naming only the branches you
- * actually measured is the normal case, not an error.  Returns false (nothing written) on a
- * malformed tuple, a duplicate or out-of-range branch id, a non-finite value, or gain <= 0. */
-inline bool parse_channel_calibration(const char* spec, ChannelCalibration* out)
-{
-  if (!out) return false;
-  if (!spec || !*spec) { *out = ChannelCalibration{}; return true; }
-  ChannelCalibration parsed;
-  std::array<uint8_t, NR_RX_BRANCH_MAX> seen{};
-  size_t tuples = 0;
-  const std::string text(spec);
-  size_t begin = 0;
-  while (begin <= text.size()) {
-    const size_t end = std::min(text.find(';', begin), text.size());
-    const std::string token = text.substr(begin, end - begin);
-    begin = end + 1;
-    if (tuples >= NR_RX_BRANCH_MAX) return false;
-    unsigned branch = 0; double gain = 0.0, delay_ns = 0.0; int consumed = 0;
-    if (std::sscanf(token.c_str(), " %u , %lf , %lf %n", &branch, &gain, &delay_ns, &consumed) != 3
-        || token.find_first_not_of(" \t", static_cast<size_t>(consumed)) != std::string::npos
-        || branch >= NR_RX_BRANCH_MAX || seen[branch]++
-        || !(std::isfinite(gain) && gain > 0.0) || !std::isfinite(delay_ns))
-      return false;
-    parsed.gain[branch] = gain;
-    parsed.fixed_delay_s[branch] = delay_ns * 1e-9;
-    ++tuples;
-  }
-  if (!tuples) return false;
-  parsed.configured = true;
-  *out = parsed;
-  return true;
-}
-
-/* True when branch `branch` has a correction that is not the identity, i.e. when applying it can
- * change a single sample.  Everything that would make the correction meaningless or unsafe -- not
- * configured, a branch id outside the array, a non-finite or non-positive coefficient -- answers
- * false here, at the ONE point of use, rather than throwing from somewhere far away.  A default
- * (unset) calibration is therefore bit-identical to no calibration by construction, not by test. */
-inline bool channel_calibration_active(const ChannelCalibration& calibration, int branch)
-{
-  if (!calibration.configured || branch < 0 || branch >= NR_RX_BRANCH_MAX) return false;
-  const double gain = calibration.gain[branch], delay = calibration.fixed_delay_s[branch];
-  if (!(std::isfinite(gain) && gain > 0.0) || !std::isfinite(delay)) return false;
-  return gain != 1.0 || delay != 0.0;
-}
-
-/* The correction factor itself, kept as one expression so aoa.cc's convention and this one cannot
- * drift apart silently -- tests/python_parity_test.cc pins them equal on a shared vector. */
-inline std::complex<double> channel_calibration_factor(const ChannelCalibration& calibration,
-                                                       int branch, double offset_hz)
-{
-  return std::polar(calibration.gain[branch],
-                    2.0 * PI * offset_hz * calibration.fixed_delay_s[branch]);
-}
-
-/* In-place correction of ONE packed CFR submission (antenna-major, nof_re resource elements per
- * antenna plane, k_abs[i] the CRB/Point-A carrier-grid subcarrier of element i).
- *
- * The frequency reference is the CARRIER centre, (k - (nof_subcarriers-1)/2) * scs, where aoa.cc
- * uses its WINDOW centre.  The two agree whenever the window spans the carrier, and where they do
- * not the difference is a delay-dependent CONSTANT phase common to every element of the plane --
- * which is precisely the quantity an independent branch cannot and need not observe (see the
- * struct comment).  The carrier centre is used here because a submission is a sparse RE list with
- * no window of its own, and it is stable across submissions where a per-submission centre is not.
- *
- * In AoA mode (four antenna planes on ONE branch) the branch-level factor is common-mode across the
- * array and therefore immaterial to any bearing; per-ELEMENT correction there is
- * rx_array_calibration's job, and stays so. */
-inline void apply_channel_calibration(std::complex<float>* values, uint32_t antennas,
-                                      uint32_t nof_re, const uint32_t* k_abs,
-                                      uint32_t nof_subcarriers, double scs_hz,
-                                      const ChannelCalibration& calibration, int branch)
-{
-  if (!values || !k_abs || !nof_re || !antennas || !channel_calibration_active(calibration, branch))
-    return;
-  const double centre = 0.5 * (static_cast<double>(nof_subcarriers) - 1.0);
-  for (uint32_t i = 0; i < nof_re; ++i) {
-    const std::complex<double> factor =
-        channel_calibration_factor(calibration, branch, (k_abs[i] - centre) * scs_hz);
-    for (uint32_t a = 0; a < antennas; ++a) {
-      const size_t at = static_cast<size_t>(a) * nof_re + i;
-      values[at] = static_cast<std::complex<float>>(
-          static_cast<std::complex<double>>(values[at]) * factor);
-    }
-  }
-}
-
 /** Admission limits for using an otherwise finite AoA measurement in tracking. */
 struct AoaQualityPolicy {
   double maximum_relative_manifold_residual_energy = 0.25;
@@ -392,6 +356,10 @@ struct AoaQualityPolicy {
 };
 
 struct PipelineConfig {
+  uint32_t evidence_mode = 0;
+  uint32_t lifecycle_features = 0;
+  double evidence_window_s = 0.150;
+  double existence_threshold_scale = 1.0;
   uint32_t num_ues = 1; // supported runtime range: 1..4; decoding stays UE-agnostic here
   uint32_t sources_mask = 1u << NR_ISAC_SRC_CSI_RS;
   std::vector<double> duration_bank_s{0.008, 0.016, 0.024, 0.032};
@@ -409,19 +377,34 @@ struct PipelineConfig {
   uint32_t lengthen_agreement = 2;
   double plan_max_age_s = 0.5;
   double search_minimum_bins = 4.0;
-  double maximum_target_speed_mps = 50.0;
-  double maximum_range_m = 312.283810417;
-  uint32_t maximum_components = 8;
-  uint32_t maximum_objects = 8;
-  double maximum_path_delay_m = 312.283810417;
-  double maximum_path_doppler_hz = 0.0; // 0 derives 2*vmax*fc/c
-  double leading_significance_db = -10.0;
-  uint32_t adaptive_training_range_bins = 12;
-  uint32_t adaptive_training_doppler_bins = 12;
-  uint32_t adaptive_guard_range_bins = 2;
-  uint32_t adaptive_guard_doppler_bins = 2;
-  double false_object_intensity_per_s = 0.01 / 0.0305;
+  // Operational requirements have no library defaults.  The OAI configuration parser and every
+  // caller must declare them; zero deliberately fails closed before sensing starts.
+  double maximum_target_speed_mps = 0.0;
+  double maximum_range_m = 0.0;
+  double false_object_intensity_per_s = 0.0;
+  // EXPERIMENTAL, REVERTIBLE: see MultistaticImmTrackerConfig::ue_position_known's declaration in
+  // multistatic_imm_tracker.h. Default false leaves every existing path unchanged.
+  bool ue_position_known = false;
+  Vec3 ue_position;
+  // Wall-clock budget handed to the CLEAN detector. In a live system this MUST remain the CPI
+  // cadence: work that cannot finish before the next causal CPI has to be shed, and the detector's
+  // own comment is explicit that shedding is never a live-throughput claim. In OFFLINE REPLAY the
+  // constraint is an artefact -- there is no next real CPI to race, but the 8 concurrent detector
+  // invocations (4 receivers x DL+UL) still contend for the same hardware, so each is truncated by
+  // machine load rather than by evidence. Measured cost on these captures: the deadline fires on
+  // 45-75% of receiver-CPIs, halves emitted components (2.3-2.8 -> 1.2 per receiver) and costs
+  // 15-17 points of target detection probability; because the cut-off point depends on wall-clock
+  // timing it is also the reason two identical replay runs differ in 158/160 CPIs. Raising it for
+  // offline scoring lets CLEAN stop on its own statistical criterion instead. Zero or negative
+  // means unlimited. Default preserves the existing live-cadence behavior exactly.
+  double spatial_detector_deadline_s = SPATIAL_CPI_DURATION_S;
   bool sync_enable = true;
+  // DL excess-range origin.  true: the measured direct-path delay of the current CPI is placed at
+  // zero (the only reference an OTA receiver without absolute timing has; a sub-cell LOS-peak bias
+  // from close environment paths enters the range axis).  false: the surveyed gNB->RX baseline is
+  // placed at zero, which is exact only when the CFR delay origin is absolute (ideal file replay)
+  // and demonstrably fails under any STO/SFO (impairment A/B, 2026-09-19).
+  bool dl_reference_measured_los = true;
   bool family_static = true;
   bool tracker_enable = true;
   bool hierarchical_tracker_enable = true;
@@ -430,10 +413,10 @@ struct PipelineConfig {
   bool aoa_ul_enable = false;
   ArrayGeometry array;
   ArrayCalibration array_calibration;
-  ChannelCalibration channel_calibration;
   AoaQualityPolicy aoa_quality;
   Vec3 tx_position;
   Vec3 rx_position;
+  SpatialReceiverGeometry spatial_receivers;
   std::string rx_id = "rx1";
   std::string illuminator_id = "gnb1";
   std::string out_path = "/tmp/oaiue_sensing";
@@ -449,174 +432,6 @@ struct PipelineConfig {
   uint32_t subslot_min_re = 600;
   float subslot_min_snr_db = 0.0f;
 };
-
-/* adaptive_RX_pipeline.md P13: one independent SensingEngine per ACTIVE receive branch.
- * nr_rx_branch_set_t::b[] is itself branch_id-indexed, so the engine array is indexed by
- * branch_id too and there is no second mapping table that can fall out of step with it.
- *
- * These four helpers are the ONLY place the per-branch output identity and the routing decision
- * are derived. They are free functions rather than private detail of nr_isac.cc so the parity test
- * can pin them directly: the legacy-identity regression and the "never misroute" rule are the two
- * safety-critical properties of the array, and neither is reachable through nr_isac_init() from a
- * test (that path needs the live configuration subsystem). */
-
-/* The ONE "is this branch active" predicate this layer uses. Both halves are tested deliberately:
- * nr_rx_branch_set_parse() now guarantees they are equivalent (it rejects a phys_map entry for a
- * branch that rx_branches does not name, and `state` is only ever moved between ACQUIRING/LOCKED/
- * LOST at runtime, never back to DISABLED), but P13a must not SILENTLY depend on that invariant --
- * if it is ever weakened again, the failure here has to be a refused row, not two engines sharing
- * one report file. */
-inline bool branch_is_active(const nr_rx_branch_set_t& set, int branch)
-{
-  return branch >= 0 && branch < NR_RX_BRANCH_MAX && set.b[branch].physical_channel >= 0
-         && set.b[branch].state != NR_RXB_DISABLED;
-}
-
-/* How many engines this set will build. Counted from branch_is_active(), NOT read from
- * set.n_active: the suffixing decision and the construction loop must agree by CONSTRUCTION, and
- * they used to be two independent predicates that a malformed phys_map could split. */
-inline int branch_active_count(const nr_rx_branch_set_t& set)
-{
-  int n = 0;
-  for (int b = 0; b < NR_RX_BRANCH_MAX; ++b) n += branch_is_active(set, b) ? 1 : 0;
-  return n;
-}
-
-/* P13b: aoa_enable and rx_branches describe mutually exclusive receivers -- AoA needs ONE
- * co-located four-element array on one branch, while a multi-branch set is one antenna per
- * PHYSICALLY SEPARATED branch (P03's branch:physical map is 1:1). SensingEngine's constructor
- * already refuses the combination, but only after the configuration has been half-applied and an
- * engine construction attempted. This is that same decision expressed at the first point it is
- * knowable, and it is a free function for exactly the reason build_submit_plan() is one: the
- * LEGACY pin -- aoa_enable with a single active branch stays accepted, byte for byte -- is the
- * safety-critical half, and it has to be assertable from the parity test, which cannot reach
- * nr_isac_init(). */
-inline bool aoa_conflicts_with_branches(bool aoa_enable, const nr_rx_branch_set_t& set)
-{
-  return aoa_enable && branch_active_count(set) > 1;
-}
-
-/* "/x/reports.jsonl" -> "/x/reports_b2.jsonl"; "/x/prefix" -> "/x/prefix_b2". The suffix goes
- * BEFORE the extension so a consumer globbing "*.jsonl" still finds every branch's stream. */
-inline std::string branch_suffix_path(const std::string& base, uint8_t branch_id)
-{
-  if (base.empty()) return base;
-  const std::string tag = "_b" + std::to_string(static_cast<unsigned>(branch_id));
-  const size_t slash = base.find_last_of('/');
-  const size_t dot = base.find_last_of('.');
-  const bool extension = dot != std::string::npos && dot + 1 < base.size()
-                         && (slash == std::string::npos ? dot > 0 : dot > slash + 1);
-  return extension ? base.substr(0, dot) + tag + base.substr(dot) : base + tag;
-}
-
-/* A TCP bind endpoint ending in a numeric port gets that port plus branch_id (port 5555 becomes
- * 5557 for branch 2); anything without a trailing numeric port takes the same "_b<id>" suffix as
- * a path. Offsetting BY branch_id, not by an ordinal,
- * keeps the ports distinct for any rx_branches list and leaves branch 0 on the configured port. */
-inline std::string branch_suffix_endpoint(const std::string& base, uint8_t branch_id)
-{
-  if (base.empty()) return base;
-  size_t at = base.size();
-  while (at > 0 && base[at - 1] >= '0' && base[at - 1] <= '9') --at;
-  if (at < base.size() && at > 0 && base[at - 1] == ':') {
-    const unsigned long port = std::strtoul(base.c_str() + at, nullptr, 10);
-    return base.substr(0, at) + std::to_string(port + branch_id);
-  }
-  return base + "_b" + std::to_string(static_cast<unsigned>(branch_id));
-}
-
-/* The configuration one branch's engine is constructed with. With ONE active branch this returns
- * the base configuration UNCHANGED -- that is the legacy bit-identity requirement, and it is
- * deliberately keyed on set.n_active rather than on "branch_id == 0", because a single-branch
- * deployment may name any branch id and must still write exactly the configured
- * rx_id/out_path/report_path. With several, every field a ReportWriter can collide on (its JSONL
- * path, the out_path that path falls back to, the ZeroMQ bind endpoint, and the rx_id stamped into
- * every line) is made distinct. */
-inline PipelineConfig branch_pipeline_config(const PipelineConfig& base,
-                                             const nr_rx_branch_set_t& set, uint8_t branch_id)
-{
-  PipelineConfig out = base;
-  if (branch_active_count(set) <= 1) return out;
-  out.rx_id = base.rx_id + "_b" + std::to_string(static_cast<unsigned>(branch_id));
-  out.out_path = branch_suffix_path(base.out_path, branch_id);
-  out.report_path = branch_suffix_path(base.report_path, branch_id);
-  out.report_endpoint = branch_suffix_endpoint(base.report_endpoint, branch_id);
-  return out;
-}
-
-/* The routing decision, and the single most safety-critical rule in P13: a CFR row tagged with a
- * branch that has no engine must be DROPPED, never folded into another branch's CPI -- that would
- * corrupt the other branch's coherent window with samples it never measured, which is exactly the
- * hazard the whole per-branch plan exists to prevent. Returns the engine index (== branch_id), or
- * -1 meaning "drop".
- *
- * NR_ISAC_BRANCH_NONE resolves to the LOWEST active branch. That is the legacy path: it is where
- * the five still-unmigrated CFR producers land, and with one active branch it is the only engine
- * there is, so behaviour is exactly today's. With several active branches it is an ATTRIBUTION and
- * not a measurement -- nr_isac.cc says so loudly, once -- and it disappears as P10's continuation
- * tags the remaining producers. */
-inline int branch_engine_index(const nr_rx_branch_set_t& set, uint8_t branch_id)
-{
-  if (branch_id == NR_ISAC_BRANCH_NONE) {
-    for (int b = 0; b < NR_RX_BRANCH_MAX; ++b)
-      if (branch_is_active(set, b)) return b;
-    return -1;
-  }
-  if (branch_id >= NR_RX_BRANCH_MAX) return -1;
-  return branch_is_active(set, branch_id) ? static_cast<int>(branch_id) : -1;
-}
-
-/* P10b: the submission-plan derivation, as a free function for exactly the reason the four helpers
- * above are free functions -- the legacy-identity regression is the safety-critical property and it
- * has to be pinnable from the parity test, which cannot reach nr_isac_init(). nr_isac.cc's
- * nr_isac_submit_plan() is a thin C wrapper over this that supplies the process-wide branch set and
- * counts the skips. See nr_isac.h for the contract. */
-inline int build_submit_plan(const nr_rx_branch_set_t* set, nr_isac_submit_plan_t* out, int max,
-                             uint32_t legacy_nof_ant, uint32_t available_antennas,
-                             uint32_t* pack_antennas)
-{
-  if (pack_antennas) *pack_antennas = 0;
-  if (!out || max < 1) return 0;
-  const int active = set ? branch_active_count(*set) : 0;
-  if (active <= 1) {
-    // THE REGRESSION PIN. Legacy nof_ant verbatim -- the producer has already clamped it against
-    // its own buffer and nb_antennas_rx, and re-clamping here would silently change the AoA path.
-    out[0].first_ant = 0;
-    out[0].nof_ant = legacy_nof_ant;
-    out[0].branch_id = NR_ISAC_BRANCH_NONE;
-    if (pack_antennas) *pack_antennas = legacy_nof_ant;
-    return 1;
-  }
-  if (active > max) return -1;  // never fan out to a silent subset
-  int n = 0;
-  uint32_t pack = 0;
-  for (int b = 0; b < NR_RX_BRANCH_MAX; ++b) {
-    if (!branch_is_active(*set, b)) continue;
-    const uint32_t physical = static_cast<uint32_t>(set->b[b].physical_channel);  // >= 0 by the predicate
-    if (physical >= available_antennas) continue;  // the wrapper counts and logs this
-    out[n].first_ant = physical;
-    out[n].nof_ant = 1;
-    out[n].branch_id = static_cast<uint8_t>(b);
-    if (physical + 1u > pack) pack = physical + 1u;
-    ++n;
-  }
-  if (pack_antennas) *pack_antennas = pack;
-  return n;
-}
-
-/* P13b: how many ACTIVE branches build_submit_plan() could not place, i.e. how many named a
- * physical channel this CFR producer cannot reach. Split out of nr_isac_submit_plan() because the
- * condition there was `written > 0 && ...`, which skipped the counter AND the log in precisely the
- * worst case -- written == 0, every active branch unreachable, total data loss for this producer
- * with a clean-looking census. Zero for the legacy plan (<= 1 active branch: one untagged
- * submission is the correct answer, nothing is skipped) and zero for a FAILED plan (written < 0,
- * "does not fit the caller's array", where active - written would be arithmetic nonsense). */
-inline int submit_plan_skipped(const nr_rx_branch_set_t* set, int written)
-{
-  if (set == nullptr || written < 0) return 0;
-  const int active = branch_active_count(*set);
-  return (active > 1 && written < active) ? active - written : 0;
-}
 
 inline double slot_duration_s(double scs_hz)
 { return 1e-3 / std::max(1.0, scs_hz / 15000.0); }

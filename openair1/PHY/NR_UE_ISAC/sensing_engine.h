@@ -2,7 +2,9 @@
 #pragma once
 
 #include "hierarchical_tracker.h"
+#include "multistatic_imm_tracker.h"
 #include "report_writer.h"
+#include "causal_clutter_filter.h"
 
 #include <atomic>
 #include <complex>
@@ -18,6 +20,8 @@
 
 namespace nr_isac {
 
+class SpatialDetectorExecutor;
+
 class SensingEngine {
 public:
   SensingEngine(PipelineConfig config, uint32_t maximum_prb, uint32_t requested_antennas);
@@ -28,20 +32,24 @@ public:
               const nr_isac_carrier_t& carrier, const std::complex<float>* cfr,
               uint32_t antennas, const uint32_t* absolute_subcarrier,
               const uint32_t* ofdm_symbol, uint32_t resource_elements,
-              float noise_variance,
-              // P10a: identity of the receive branch this row was measured on, carried to the
-              // report. NR_ISAC_BRANCH_NONE (the default, and what every unmigrated producer
-              // sends) leaves the row untagged. Routing by branch happens ONE LAYER UP, in
-              // nr_isac.cc, which owns one engine instance per active branch (P13) -- an engine
-              // never sees a row belonging to another branch, so nothing here needs to filter.
-              uint8_t branch_id = NR_ISAC_BRANCH_NONE);
+              float noise_variance, uint64_t session_id = 0);
+  // Offline-harness accounting (2026-09-20): CPIs are anchored at the first pending row, not at
+  // 150-slot multiples, and non-viable windows emit nothing, so a replay must wait on what the
+  // engine actually enqueued rather than on a slot-count prediction.
+  uint64_t enqueued_cpis() const { return enqueued_cpis_.load(std::memory_order_relaxed); }
+  uint64_t dropped_cpis() const { return dropped_cpis_.load(std::memory_order_relaxed); }
+  // True once every accepted submit() has been consumed by the accumulation thread, so any window
+  // closable from the submitted rows has already been enqueued (or rejected as non-viable).
+  bool submissions_drained() const {
+    return consumed_submissions_.load(std::memory_order_acquire) == accepted_submissions_.load(std::memory_order_acquire);
+  }
 
 private:
   struct Snapshot;
   struct PendingRow;
   struct WindowTask {
     CfrWindow dl_window;
-    std::optional<CfrWindow> ul_window;
+    std::vector<CfrWindow> ul_windows;
     CpiPlan plan;
     double air_origin_slots = 0.0;
     uint64_t sequence = 0;
@@ -76,7 +84,8 @@ private:
   bool processing_in_flight() const;
   void wait_for_processing();
   void finish_pending_windows();
-  void enqueue_window(CfrWindow dl_window, std::optional<CfrWindow> ul_window, const CpiPlan& plan);
+  void enqueue_window(CfrWindow dl_window, std::vector<CfrWindow> ul_windows,
+                      const CpiPlan& plan);
   size_t pending_row_storage_bytes(const PendingRow& row) const;
   void make_pending_row_room(size_t incoming_bytes);
   void erase_rows(const std::vector<int64_t>& keys);
@@ -86,13 +95,12 @@ private:
   void ensure_plan();
   void close_ready_windows(bool flush);
   CfrWindow build_window(const std::vector<int64_t>& keys, bool uplink,
-                         uint32_t forced_antennas = 0) const;
-  void process_window(CfrWindow dl_window, std::optional<CfrWindow> ul_window,
+                         uint32_t forced_antennas = 0,
+                         uint64_t selected_session = 0) const;
+  void process_window(CfrWindow dl_window, std::vector<CfrWindow> ul_windows,
                       const CpiPlan& plan, double air_origin_slots,
                       uint64_t sequence);
   TrackSnapshot planning_snapshot(double time_s) const;
-  std::vector<ConfirmedTrackView> confirmed_tracks() const;
-  AdaptiveClutterMap* clutter_map();
 
   PipelineConfig config_;
   uint32_t maximum_prb_ = 0;
@@ -107,6 +115,9 @@ private:
   std::mutex submission_mutex_;
   std::atomic<uint64_t> dropped_{0};
   std::atomic<uint64_t> dropped_cpis_{0};
+  std::atomic<uint64_t> enqueued_cpis_{0};
+  std::atomic<uint64_t> accepted_submissions_{0};
+  std::atomic<uint64_t> consumed_submissions_{0};
   std::atomic<uint64_t> discarded_pending_rows_{0};
   std::atomic<uint64_t> discarded_pending_intervals_{0};
   std::atomic<uint64_t> stale_{0};
@@ -130,10 +141,25 @@ private:
   uint64_t cpi_sequence_ = 0;
   IndependentClockTracker dl_clock_tracker_;
   IndependentClockTracker ul_clock_tracker_;
+  std::array<CausalClutterFilter, 4> spatial_clutter_filters_;
+  // (2026-09-22) per-receiver ring of the last corrected (post-clutter) DL windows for nested dwells
+  std::array<std::deque<CfrWindow>, 4> dwell_ring_;
+  // (2026-09-22) UL accumulation gate: per (PUSCH session, receiver) ring of corrected UL windows.
+  // The UL leg gets 14-31 PUSCH DMRS rows per 75 ms CPI against 84-96 on DL, so the direct path's
+  // slow-time sidelobes sit only ~28 dB down and cover range bins 0-3 -- exactly where a target
+  // passing near the UE lands. The gate accumulates consecutive UL CPIs until a declared row count
+  // or a declared maximum dwell is reached, whichever comes first.
+  std::map<std::pair<uint64_t, uint32_t>, std::deque<CfrWindow>> ul_dwell_ring_;
+  // PUSCH clutter state is transmitter-specific. Sharing it across RNTIs would subtract one UE's
+  // channel from another and manufacture DTD/DFS residuals.
+  std::map<uint64_t, std::array<CausalClutterFilter, 4>> spatial_ul_clutter_filters_;
+  std::map<uint64_t, uint64_t> spatial_ul_filter_last_used_;
   CpiPlanner planner_;
   std::unique_ptr<MotionTracker> motion_tracker_;
   std::unique_ptr<MotionTracker> ul_motion_tracker_;
   std::unique_ptr<HierarchicalEnuTracker> hierarchical_tracker_;
+  std::unique_ptr<MultistaticImmTracker> multistatic_tracker_;
+  std::unique_ptr<SpatialDetectorExecutor> spatial_detector_executor_;
   mutable std::mutex tracker_mutex_;
   std::unique_ptr<ReportWriter> writer_;
 };

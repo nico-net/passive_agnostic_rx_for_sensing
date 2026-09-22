@@ -4,13 +4,13 @@
 #include "sync_correction.h"
 
 #include <cuda_runtime.h>
-#include <thrust/device_ptr.h>
-#include <thrust/sort.h>
+#include <cub/device/device_radix_sort.cuh>
 
 #include <algorithm>
 #include <cfloat>
 #include <cmath>
 #include <complex>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -226,11 +226,22 @@ __global__ void family_static_kernel(float2* primary_values,
   }
 }
 
+// OUR ADAPTATION: non-negative IEEE-754 doubles preserve ordering under unsigned bit-pattern
+// comparison, so an unsigned long long atomicMax on the reinterpreted bits gives a correct
+// device-side running maximum without a CAS loop.
+__device__ void atomic_max_double_nonneg(double* address_as_double, double value)
+{
+  unsigned long long* address = reinterpret_cast<unsigned long long*>(address_as_double);
+  unsigned long long value_bits = __double_as_longlong(value);
+  atomicMax(address, value_bits);
+}
+
 __global__ void difference_power_kernel(const float2* values,
                                         const DifferenceJob* jobs,
                                         const uint32_t* columns,
                                         double* powers,
                                         unsigned long long* valid_count,
+                                        double* max_raw_power,
                                         uint32_t job_count,
                                         uint32_t antennas,
                                         uint32_t rows,
@@ -252,10 +263,19 @@ __global__ void difference_power_kernel(const float2* values,
     const double real = static_cast<double>(right.x) - left.x;
     const double imag = static_cast<double>(right.y) - left.y;
     const double power = real * real + imag * imag;
-    if (isfinite(power) && power > 0.0) {
+    // OUR ADAPTATION: an exact-zero differenced power between two observed, causally legitimate
+    // same-family rows is the correct low-noise measurement, not an invalid sample -- see the CPU
+    // path (sync_correction.cc, estimate_current_cpi_variance) for the full rationale. Excluding it
+    // (previously power > 0.0) forced a fallback to the undifferenced raw-power estimator on the
+    // quietest, most static CPIs, producing a variance many orders of magnitude too large.
+    if (isfinite(power) && power >= 0.0) {
       const unsigned long long output = atomicAdd(valid_count, 1ULL);
       powers[output] = power;
     }
+    const double left_power = static_cast<double>(left.x) * left.x + static_cast<double>(left.y) * left.y;
+    const double right_power = static_cast<double>(right.x) * right.x + static_cast<double>(right.y) * right.y;
+    if (isfinite(left_power)) atomic_max_double_nonneg(max_raw_power, left_power);
+    if (isfinite(right_power)) atomic_max_double_nonneg(max_raw_power, right_power);
   }
 }
 
@@ -296,7 +316,11 @@ struct Workspace {
   double* weights = nullptr;
   uint8_t* valid_jobs = nullptr;
   double* powers = nullptr;
+  double* sorted_powers = nullptr;
+  void* sort_scratch = nullptr;
+  size_t sorted_capacity = 0, sort_scratch_bytes = 0;
   unsigned long long* valid_count = nullptr;
+  double* max_raw_power = nullptr;
   std::vector<std::complex<float>> host_values;
   std::vector<std::complex<float>> host_secondary_values;
   size_t sample_capacity = 0, secondary_sample_capacity = 0, cell_capacity = 0;
@@ -304,7 +328,8 @@ struct Workspace {
 
   ~Workspace()
   {
-    cudaFree(valid_count); cudaFree(powers); cudaFree(valid_jobs); cudaFree(weights);
+    cudaFree(sort_scratch); cudaFree(sorted_powers);
+    cudaFree(max_raw_power); cudaFree(valid_count); cudaFree(powers); cudaFree(valid_jobs); cudaFree(weights);
     cudaFree(phases); cudaFree(columns); cudaFree(rows); cudaFree(difference_jobs);
     cudaFree(family_jobs); cudaFree(align_jobs); cudaFree(observed); cudaFree(secondary_values);
     cudaFree(values);
@@ -344,6 +369,8 @@ struct Workspace {
     }
     if (!valid_count)
       check(cudaMalloc(&valid_count, sizeof(*valid_count)), "allocate family valid count");
+    if (!max_raw_power)
+      check(cudaMalloc(&max_raw_power, sizeof(*max_raw_power)), "allocate family max raw power");
   }
 
   void ensure_secondary(size_t samples)
@@ -471,15 +498,38 @@ FamilyAlignmentStats alignment_stats_device(const std::vector<std::vector<uint32
 double sorted_median(uint64_t count)
 {
   if (!count) throw std::invalid_argument("CPI has no positive covariance samples");
-  thrust::device_ptr<double> begin(workspace.powers);
-  thrust::sort(begin, begin + count);
+  if (count > static_cast<uint64_t>(std::numeric_limits<int>::max()))
+    throw std::overflow_error("covariance sample count exceeds CUDA sort capacity");
+  // Keep exact finite-positive order statistics, but reuse per-lane device storage instead
+  // of allocating/freeing Thrust's temporary storage for every receiver/CPI median.
+  if (count > workspace.sorted_capacity) {
+    double* next = nullptr;
+    check(cudaMalloc(&next, count * sizeof(double)), "allocate sorted covariance powers");
+    cudaFree(workspace.sorted_powers);
+    workspace.sorted_powers = next;
+    workspace.sorted_capacity = count;
+  }
+  size_t required = 0;
+  check(cub::DeviceRadixSort::SortKeys(nullptr, required, workspace.powers,
+                                     workspace.sorted_powers, static_cast<int>(count)),
+        "query covariance sort workspace");
+  if (required > workspace.sort_scratch_bytes) {
+    void* next = nullptr;
+    check(cudaMalloc(&next, required), "allocate covariance sort workspace");
+    cudaFree(workspace.sort_scratch);
+    workspace.sort_scratch = next;
+    workspace.sort_scratch_bytes = required;
+  }
+  check(cub::DeviceRadixSort::SortKeys(workspace.sort_scratch, workspace.sort_scratch_bytes,
+                                     workspace.powers, workspace.sorted_powers,
+                                     static_cast<int>(count)), "sort covariance powers");
   double middle[2]{};
   if (count & 1) {
-    check(cudaMemcpy(middle, workspace.powers + count / 2, sizeof(double),
+    check(cudaMemcpy(middle, workspace.sorted_powers + count / 2, sizeof(double),
                      cudaMemcpyDeviceToHost), "download covariance median");
     return middle[0];
   }
-  check(cudaMemcpy(middle, workspace.powers + count / 2 - 1, 2 * sizeof(double),
+  check(cudaMemcpy(middle, workspace.sorted_powers + count / 2 - 1, 2 * sizeof(double),
                    cudaMemcpyDeviceToHost), "download covariance median pair");
   return 0.5 * (middle[0] + middle[1]);
 }
@@ -616,8 +666,11 @@ double estimate_current_cpi_variance_cuda(
   const PackedFamilies packed = pack(window, family_rows);
   upload_common(window, packed);
   unsigned long long zero = 0;
+  double zero_d = 0.0;
   check(cudaMemcpy(workspace.valid_count, &zero, sizeof(zero), cudaMemcpyHostToDevice),
         "clear covariance count");
+  check(cudaMemcpy(workspace.max_raw_power, &zero_d, sizeof(zero_d), cudaMemcpyHostToDevice),
+        "clear max raw power");
   if (!packed.differences.empty()) {
     check(cudaMemcpy(workspace.difference_jobs, packed.differences.data(),
                      packed.differences.size() * sizeof(DifferenceJob), cudaMemcpyHostToDevice),
@@ -625,16 +678,25 @@ double estimate_current_cpi_variance_cuda(
     const uint32_t blocks_y = (window.antennas * window.subcarriers + 255) / 256;
     difference_power_kernel<<<dim3(packed.differences.size(), blocks_y), 256>>>(
         workspace.values, workspace.difference_jobs, workspace.columns, workspace.powers,
-        workspace.valid_count, packed.differences.size(), window.antennas, window.rows,
-        window.subcarriers);
+        workspace.valid_count, workspace.max_raw_power, packed.differences.size(),
+        window.antennas, window.rows, window.subcarriers);
     check(cudaGetLastError(), "launch within-family covariance");
   }
   unsigned long long valid = 0;
   check(cudaMemcpy(&valid, workspace.valid_count, sizeof(valid), cudaMemcpyDeviceToHost),
         "download covariance count");
   if (differenced_samples) *differenced_samples = packed.difference_samples;
-  if (valid)
-    return sorted_median(valid) / (2.0 * std::log(2.0));
+  if (valid) {
+    double max_raw_power = 0.0;
+    check(cudaMemcpy(&max_raw_power, workspace.max_raw_power, sizeof(max_raw_power),
+                     cudaMemcpyDeviceToHost),
+          "download max raw power");
+    // OUR ADAPTATION: same relative storage-precision floor as the CPU path
+    // (sync_correction.cc, estimate_current_cpi_variance) -- see that function for the rationale.
+    const double storage_floor = max_raw_power
+        * std::numeric_limits<float>::epsilon() * std::numeric_limits<float>::epsilon();
+    return std::max(sorted_median(valid), storage_floor) / (2.0 * std::log(2.0));
+  }
 
   check(cudaMemcpy(workspace.valid_count, &zero, sizeof(zero), cudaMemcpyHostToDevice),
         "clear raw covariance count");

@@ -17,11 +17,13 @@ struct DiagnosticLikelihoodMap {
   std::vector<double> likelihood; // range-major [range][Doppler], raw score
 };
 
-/** Native equivalent of clean_components_gpu + collapse_clean_multipath. */
+/** Current-CPI measured-lattice GLRT+CLEAN for one independently processed receiver. */
 DetectorResult detect_clean(const CfrWindow& window,
                             const PipelineConfig& config,
                             const RateGate& rate_gate = {},
-                            uint32_t minimum_range_bin = 0);
+                            uint32_t minimum_range_bin = 0,
+                            std::optional<double> current_cpi_noise_variance = std::nullopt,
+                            std::optional<double> processing_deadline_s = std::nullopt);
 
 /** Detect on the fused CFR view while computing the provenance-preserving DL-only first-pass map
  * concurrently when CUDA is available. The DL view never enters CLEAN, detections, or tracking.

@@ -194,7 +194,7 @@ MotionTracker::MotionTracker(MotionTrackerConfig config)
 
 MotionTracker::~MotionTracker() = default;
 
-void MotionTracker::reset(){tracks_.clear();time_s_.reset();last_lost_=false;clutter_map_.reset();}
+void MotionTracker::reset(){tracks_.clear();graveyard_.clear();time_s_.reset();last_lost_=false;clutter_map_.reset();}
 
 TrackSnapshot MotionTracker::snapshot() const
 {
@@ -253,7 +253,7 @@ void MotionTracker::update(double air_time_s,const std::vector<Detection>& detec
   }
   double dt=0.0; if(time_s_){dt=air_time_s-*time_s_;if(dt<0.0)throw std::invalid_argument("tracker time moved backwards");
     if(dt>config_.maximum_propagation_s){reset();dt=0.0;}}
-  time_s_=air_time_s;if(dt>0.0)for(auto&t:tracks_)t.predict(dt);
+  time_s_=air_time_s;if(dt>0.0){for(auto&t:tracks_)t.predict(dt);for(auto&t:graveyard_)t.predict(dt);}
   std::vector<size_t> order(candidates.size());std::iota(order.begin(),order.end(),0);
   std::stable_sort(order.begin(),order.end(),[&](size_t a,size_t b){return candidates[a].score>candidates[b].score;});
   std::vector<uint8_t> multipath(candidates.size()),sidelobe(candidates.size()),static_leak(candidates.size());
@@ -279,13 +279,47 @@ void MotionTracker::update(double air_time_s,const std::vector<Detection>& detec
   std::set<size_t> assigned_t,assigned_d;
   for(auto [t,d]:hungarian(costs))if(costs(t,d)<=config_.gate_chi2){tracks_[t].update_measurement(candidates[d],noises[d],innovations.at({t,d}),sequence,original[d]);assigned_t.insert(t);assigned_d.insert(d);}
   std::vector<Track> survivors;bool lost=false;
-  for(size_t t=0;t<tracks_.size();++t){if(!assigned_t.count(t)&&!tracks_[t].coast(rate_res,ul_motion_active)){lost=true;continue;}survivors.push_back(std::move(tracks_[t]));}
+  for(size_t t=0;t<tracks_.size();++t){if(!assigned_t.count(t)&&!tracks_[t].coast(rate_res,ul_motion_active)){
+      lost=true;tracks_[t].coasts=0;tracks_[t].status="coasting";graveyard_.push_back(std::move(tracks_[t]));continue;}
+    survivors.push_back(std::move(tracks_[t]));}
   last_lost_=lost&&survivors.empty();
+  // OUR ADAPTATION: a candidate tagged as a probable micro-Doppler sideband (bulk_component_iteration>=0)
+  // must not spawn a competing track when its own bulk component was just claimed, this same CPI, by a
+  // track that already existed before this CPI (assigned_d). This suppresses exactly the fragmentation
+  // mechanism confirmed empirically: sideband detections spawning tracks alongside the already-tracked
+  // bulk target, not a coverage gap. Candidates with no tag (-1) or whose bulk iteration was not claimed
+  // by any pre-existing track this CPI are unaffected and still eligible for birth as before.
+  // The set is also grown live as each birth happens below (not just seeded from assigned_d): when a
+  // target is seen for the first time (or reacquired) in a CPI with no pre-existing track yet, its bulk
+  // component is itself born earlier in this same loop (order is score-descending, and the tagger always
+  // anchors on the higher-score component), so registering it immediately lets a same-CPI sideband
+  // sibling processed later in this loop still be recognized and suppressed instead of spawning its own
+  // competing track.
+  std::set<int32_t> claimed_bulk_iterations;
+  for(size_t d:assigned_d)claimed_bulk_iterations.insert(static_cast<int32_t>(candidates[d].source_component_iteration));
+  // OUR ADAPTATION: before minting a brand-new ID, check whether this birth candidate is chi2-consistent
+  // (same gate_chi2 Kalman innovation test used for ordinary live-track association) with a recently
+  // dropped track's own state, still propagated forward every cycle by the same constant-velocity/
+  // process-noise model as a live coasting track. If so this is a genuine coverage-gap reacquisition of
+  // the same physical target, not a new object, so the original ID is revived instead of fragmenting into
+  // a new one. This is orthogonal to the sibling-birth suppression above, which targets the micro-Doppler
+  // mechanism specifically; this targets tracks lost for exceeding the ordinary coast budget.
   if(!lost)for(size_t d:order){if(assigned_d.count(d)||multipath[d]||sidelobe[d]||static_leak[d]||candidates[d].score<config_.birth_score_threshold)continue;
+    if(candidates[d].bulk_component_iteration>=0&&claimed_bulk_iterations.count(candidates[d].bulk_component_iteration))continue;
     if(survivors.size()>=config_.maximum_tracks)break;
+    size_t best_g=graveyard_.size();double best_chi2=config_.gate_chi2;Innovation best_in;
+    for(size_t g=0;g<graveyard_.size();++g){auto in=graveyard_[g].innovation(candidates[d],noises[d]);
+      if(std::get<0>(in)<=best_chi2){best_chi2=std::get<0>(in);best_g=g;best_in=in;}}
+    if(best_g<graveyard_.size()){
+      Track t=std::move(graveyard_[best_g]);graveyard_.erase(graveyard_.begin()+static_cast<long>(best_g));
+      t.update_measurement(candidates[d],noises[d],best_in,sequence,original[d]);
+      survivors.push_back(std::move(t));assigned_d.insert(d);
+      claimed_bulk_iterations.insert(static_cast<int32_t>(candidates[d].source_component_iteration));continue;}
     Track t;t.id=next_id_++;t.config=config_;t.x={candidates[d].range_m,candidates[d].range_rate_mps,0};
     t.p(0,0)=noises[d](0,0);t.p(1,1)=noises[d](1,1);t.p(2,2)=config_.initial_accel_sigma_mps2*config_.initial_accel_sigma_mps2;
-    t.time_s=air_time_s;t.source_sequence=sequence;t.source_midpoint=air_time_s;t.last_score=candidates[d].score;t.associated_index=original[d];survivors.push_back(std::move(t));assigned_d.insert(d);}
+    t.time_s=air_time_s;t.source_sequence=sequence;t.source_midpoint=air_time_s;t.last_score=candidates[d].score;t.associated_index=original[d];survivors.push_back(std::move(t));assigned_d.insert(d);
+    claimed_bulk_iterations.insert(static_cast<int32_t>(candidates[d].source_component_iteration));}
+  for(size_t g=0;g<graveyard_.size();)if(!graveyard_[g].coast(rate_res,ul_motion_active)){graveyard_.erase(graveyard_.begin()+static_cast<long>(g));}else ++g;
   if(survivors.empty()&&!candidates.empty()&&!lost)for(size_t d:order){if(static_leak[d]||multipath[d]||sidelobe[d])continue;
     Track t;t.id=next_id_++;t.config=config_;t.x={candidates[d].range_m,candidates[d].range_rate_mps,0};t.p(0,0)=noises[d](0,0);t.p(1,1)=noises[d](1,1);t.p(2,2)=config_.initial_accel_sigma_mps2*config_.initial_accel_sigma_mps2;
     t.time_s=air_time_s;t.source_sequence=sequence;t.source_midpoint=air_time_s;t.last_score=candidates[d].score;t.associated_index=original[d];survivors.push_back(std::move(t));break;}

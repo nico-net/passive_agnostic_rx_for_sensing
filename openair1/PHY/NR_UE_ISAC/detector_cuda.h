@@ -50,6 +50,18 @@ public:
   CudaDetectorBackend(const CudaDetectorBackend&) = delete;
   CudaDetectorBackend& operator=(const CudaDetectorBackend&) = delete;
 
+  /** (2026-09-22) Enable range-walk steering for this window and supply the lattice constants it
+   * needs (declared physics, no fitted parameter): the range cell in metres and the slow-time
+   * midpoint the map's range coordinate refers to. Disabled by default; the map is then bit-identical.
+   */
+  void set_range_walk(bool enabled, double range_res_m, double time_midpoint_s);
+
+  /** Freeze the per-row range migration (in range bins) of the CLEAN proposal being refined and
+   * subtracted, so refinement/subtraction use the same non-separable model the steered map found.
+   * An empty vector restores the separable model.
+   */
+  void set_component_walk(const std::vector<double>& walk_bins);
+
   /** Rebind invariant CPI coordinates and clear the device residual while retaining allocations
    * and the cuFFT plan for another window with identical tensor dimensions.
    */
@@ -75,6 +87,22 @@ public:
   /** Upload the current CLEAN residual and return range-major [range][Doppler] likelihood. */
   std::vector<double> likelihood_map(const std::vector<std::complex<double>>& residual,
                                      uint32_t minimum_range_bin);
+
+  /** (2026-09-20) Same computation as likelihood_map, but only the strongest finite positive
+   * cell is located on the device and the three Doppler columns d-1, d, d+1 (each range_bins
+   * long, Doppler index wrapped) are downloaded: CLEAN's proposal, its 3x3 interpolation and
+   * the OS-CFAR column statistic need nothing else.  Replaces a 2 MB map transfer + host scan per
+   * iteration by ~40 KB. */
+  struct LikelihoodPeak {
+    bool valid = false;
+    uint32_t r = 0, d = 0;
+    double score = 0.0;
+    uint32_t range_bins = 0, rows = 0;
+    std::vector<float> columns;   // 3 * range_bins: [d-1 | d | d+1]
+    std::vector<float> range_slice;   // rows: all Doppler cells at range r (greatest-of CFAR column)
+  };
+  LikelihoodPeak likelihood_peak(const std::vector<std::complex<double>>& residual,
+                                 uint32_t minimum_range_bin);
 
   /** Map-only complex64 input path. Observation weights isolate excluded rows on the device;
    * the CLEAN residual and its energy state are neither uploaded nor modified.
