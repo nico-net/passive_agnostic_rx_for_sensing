@@ -64,6 +64,12 @@ struct PipelineReport {
   uint64_t discarded_pending_rows = 0;
   uint64_t discarded_pending_intervals = 0;
   uint64_t stale_submissions = 0;
+  uint64_t abi_rejections = 0;
+  uint64_t sessionless_ul_rejections = 0;
+  uint64_t rejected_submissions = 0;
+  uint64_t nonviable_rows = 0;
+  uint64_t consume_failures = 0;
+  uint64_t ul_sessions_capped = 0;
   uint32_t spatial_frontend_jobs = 0;
   uint32_t spatial_frontend_worker_count = 0;
   uint32_t spatial_frontend_peak_concurrency = 0;

@@ -66,6 +66,11 @@ public:
     discard_requested_.store(true, std::memory_order_release);
   }
   uint64_t gate_discarded_rows() const { return gate_discarded_rows_.load(std::memory_order_relaxed); }
+  /** CFRs refused at the nr_isac ABI boundary before submit(): bad geometry, or UL without a session. */
+  void note_abi_rejection(bool sessionless)
+  {
+    (sessionless ? sessionless_ul_rejections_ : abi_rejections_).fetch_add(1, std::memory_order_relaxed);
+  }
 
 private:
   struct Snapshot;
@@ -151,6 +156,12 @@ private:
   std::atomic<uint64_t> discard_after_{0};
   std::atomic<uint64_t> gate_discarded_rows_{0};
   std::atomic<uint64_t> stale_{0};
+  std::atomic<uint64_t> abi_rejections_{0};
+  std::atomic<uint64_t> sessionless_ul_rejections_{0};
+  std::atomic<uint64_t> rejected_submissions_{0};
+  std::atomic<uint64_t> nonviable_rows_{0};
+  std::atomic<uint64_t> consume_failures_{0};
+  std::atomic<uint64_t> ul_sessions_capped_{0};
   mutable std::mutex processing_mutex_;
   std::condition_variable processing_condition_;
   bool processing_in_flight_ = false;

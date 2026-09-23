@@ -726,7 +726,13 @@ std::string build_report_json(const PipelineReport& r, const PipelineConfig& c, 
       +",\"dropped_cpis\":"+std::to_string(r.dropped_cpis)
       +",\"discarded_pending_rows\":"+std::to_string(r.discarded_pending_rows)
       +",\"discarded_pending_intervals\":"+std::to_string(r.discarded_pending_intervals)
-      +",\"stale_submissions\":"+std::to_string(r.stale_submissions);
+      +",\"stale_submissions\":"+std::to_string(r.stale_submissions)
+      +",\"abi_rejections\":"+std::to_string(r.abi_rejections)
+      +",\"sessionless_ul_rejections\":"+std::to_string(r.sessionless_ul_rejections)
+      +",\"rejected_submissions\":"+std::to_string(r.rejected_submissions)
+      +",\"nonviable_rows\":"+std::to_string(r.nonviable_rows)
+      +",\"consume_failures\":"+std::to_string(r.consume_failures)
+      +",\"ul_sessions_capped\":"+std::to_string(r.ul_sessions_capped);
   if(emit_maps){
     const auto& axes=r.detector.axes;
     const uint32_t nb=(c.rvm_max_range_m>0.0 && axes.range_res_m>0.0)

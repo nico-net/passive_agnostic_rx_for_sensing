@@ -619,13 +619,21 @@ void SensingEngine::stop()
   std::fprintf(stderr,
                "SENSING: engine backlog peak_pending_rows=%zu peak_pending_mib=%.1f "
                "peak_ready_queue=%zu/%zu snapshot_pool_drops=%llu stale=%llu "
-               "discarded_pending_rows=%llu dropped_cpis=%llu gate_discarded_rows=%llu cpis=%llu\n",
+               "discarded_pending_rows=%llu dropped_cpis=%llu gate_discarded_rows=%llu cpis=%llu "
+               "abi_rejections=%llu sessionless_ul_rejections=%llu rejected_submissions=%llu "
+               "nonviable_rows=%llu consume_failures=%llu ul_sessions_capped=%llu\n",
                peak_pending_rows_, peak_pending_row_bytes_ / 1048576.0, ready_.peak_depth(),
                pool_.size(), (unsigned long long)dropped_.load(), (unsigned long long)stale_.load(),
                (unsigned long long)discarded_pending_rows_.load(),
                (unsigned long long)dropped_cpis_.load(),
                (unsigned long long)gate_discarded_rows_.load(),
-               (unsigned long long)enqueued_cpis_.load());
+               (unsigned long long)enqueued_cpis_.load(),
+               (unsigned long long)abi_rejections_.load(),
+               (unsigned long long)sessionless_ul_rejections_.load(),
+               (unsigned long long)rejected_submissions_.load(),
+               (unsigned long long)nonviable_rows_.load(),
+               (unsigned long long)consume_failures_.load(),
+               (unsigned long long)ul_sessions_capped_.load());
 }
 
 void SensingEngine::submit(uint32_t slot, float fraction, nr_isac_source_t source,
@@ -635,10 +643,14 @@ void SensingEngine::submit(uint32_t slot, float fraction, nr_isac_source_t sourc
                            uint32_t re, float noise, uint64_t session_id)
 {
   std::lock_guard<std::mutex> admission(submission_mutex_);
-  if (!running_.load(std::memory_order_relaxed) || !cfr || !subcarrier || !symbol
+  if (!running_.load(std::memory_order_relaxed)) return;
+  if (!cfr || !subcarrier || !symbol
       || !re || re > maximum_re_ || antennas != requested_antennas_
       || !std::isfinite(fraction) || fraction < 0.0f || fraction >= 1.0f
-      || !std::isfinite(noise) || noise < 0.0f) return;
+      || !std::isfinite(noise) || noise < 0.0f) {
+    rejected_submissions_.fetch_add(1, std::memory_order_relaxed);
+    return;
+  }
   // Do this while holding submission_mutex_: the callbacks originate from several PHY workers,
   // whereas the old accumulator-only unwrap happens too late to prevent warm-up rows entering
   // the bounded snapshot FIFO.  The stamped value also preserves the absolute clock when the
@@ -646,8 +658,10 @@ void SensingEngine::submit(uint32_t slot, float fraction, nr_isac_source_t sourc
   const int64_t absolute_slot = unwrap_submission_slot(slot, carrier);
   if (config_.admission_window_enabled
       && (absolute_slot < static_cast<int64_t>(config_.admission_start_slot)
-          || absolute_slot >= static_cast<int64_t>(config_.admission_end_slot)))
+          || absolute_slot >= static_cast<int64_t>(config_.admission_end_slot))) {
+    rejected_submissions_.fetch_add(1, std::memory_order_relaxed);
     return;
+  }
   Snapshot* value = nullptr;
 #ifdef NR_ISAC_FIXED_WORK_REPLAY
   // Offline saved-input qualification must preserve every observation under host contention.
@@ -702,7 +716,10 @@ void SensingEngine::accumulation_run()
     // or consume() would window them into a stale partial CPI and the discard would hit this row.
     maybe_discard_pending();
     try { consume(*value); }
-    catch (const std::exception& e) { std::fprintf(stderr, "SENSING: dropped CFR occurrence: %s\n", e.what()); }
+    catch (const std::exception& e) {
+      consume_failures_.fetch_add(1, std::memory_order_relaxed);
+      std::fprintf(stderr, "SENSING: dropped CFR occurrence: %s\n", e.what());
+    }
     value->cfr.clear(); value->subcarrier.clear(); value->symbol.clear(); free_.push(value);
     consumed_submissions_.fetch_add(1, std::memory_order_release);
     maybe_discard_pending();
@@ -1074,10 +1091,20 @@ void SensingEngine::close_ready_windows(bool flush)
     }
     if (viable()) {
       CfrWindow dl_window = build_window(keys, false);
-      std::vector<CfrWindow> ul_windows;
+      std::vector<std::pair<uint64_t, size_t>> sessions;
       for (const auto& [session, span] : session_spans)
         if (span.count >= active_plan_->minimum_rows && span.last > span.first)
-          ul_windows.push_back(build_window(keys, true, dl_window.antennas, session));
+          sessions.emplace_back(session, span.count);
+      // One UL lane set per configured UE: keep the num_ues sessions with the most rows, count the rest.
+      std::stable_sort(sessions.begin(), sessions.end(),
+                       [](const auto& a, const auto& b) { return a.second > b.second; });
+      if (sessions.size() > config_.num_ues) {
+        ul_sessions_capped_.fetch_add(sessions.size() - config_.num_ues, std::memory_order_relaxed);
+        sessions.resize(config_.num_ues);
+      }
+      std::vector<CfrWindow> ul_windows;
+      for (const auto& session : sessions)
+        ul_windows.push_back(build_window(keys, true, dl_window.antennas, session.first));
       const CpiPlan plan = *active_plan_;
       const double last_time_slots = rows_.at(keys.back()).time_slots;
       erase_rows(keys);
@@ -1086,6 +1113,7 @@ void SensingEngine::close_ready_windows(bool flush)
       return; // Python parity: plan the next CPI only after this tracker update finishes.
     } else {
       const double last_time_slots = rows_.at(keys.back()).time_slots;
+      nonviable_rows_.fetch_add(keys.size(), std::memory_order_relaxed);
       erase_rows(keys);
       last_closed_slots_ = last_time_slots;
       active_plan_.reset();
@@ -1197,6 +1225,12 @@ void SensingEngine::process_window(CfrWindow dl_window, std::vector<CfrWindow> u
   report.discarded_pending_rows = discarded_pending_rows_.load(std::memory_order_relaxed);
   report.discarded_pending_intervals = discarded_pending_intervals_.load(std::memory_order_relaxed);
   report.stale_submissions = stale_.load(std::memory_order_relaxed);
+  report.abi_rejections = abi_rejections_.load(std::memory_order_relaxed);
+  report.sessionless_ul_rejections = sessionless_ul_rejections_.load(std::memory_order_relaxed);
+  report.rejected_submissions = rejected_submissions_.load(std::memory_order_relaxed);
+  report.nonviable_rows = nonviable_rows_.load(std::memory_order_relaxed);
+  report.consume_failures = consume_failures_.load(std::memory_order_relaxed);
+  report.ul_sessions_capped = ul_sessions_capped_.load(std::memory_order_relaxed);
   auto record_sources = [&](const CfrWindow& view) {
     for (uint32_t mask : view.row_source_mask) report.sources_mask |= mask;
     for (uint32_t i = 0; i < NR_ISAC_SRC_COUNT; ++i)
@@ -1729,19 +1763,31 @@ void SensingEngine::process_window(CfrWindow dl_window, std::vector<CfrWindow> u
     const auto detector_frontends_started = std::chrono::steady_clock::now();
     if (getenv("ISAC_DEBUG_HANG"))
       std::fprintf(stderr, "HANG seq=%llu submitting DL lanes\n", (unsigned long long)sequence);
+    if (ul_windows.size() > config_.num_ues)
+      throw std::logic_error("more UL sessions than configured num_ues lanes");
     std::array<std::future<SpatialReceiverProduct>, 4> dl_futures;
-    for (uint32_t receiver = 0; receiver < dl_futures.size(); ++receiver)
-      dl_futures[receiver] = spatial_detector_executor_->submit(
-          receiver, [&, receiver] { return process_receiver(receiver, nullptr); });
     std::vector<std::array<std::future<SpatialReceiverProduct>, 4>> ul_futures(
         ul_windows.size());
-    for (size_t session = 0; session < ul_windows.size(); ++session) {
-      const CfrWindow* const source = &ul_windows[session];
-      for (uint32_t receiver = 0; receiver < ul_futures[session].size(); ++receiver) {
-        const size_t lane = 4 * (session + 1) + receiver;
-        ul_futures[session][receiver] = spatial_detector_executor_->submit(
-            lane, [&, receiver, source] { return process_receiver(receiver, source); });
+    // Lanes capture this frame by reference: never unwind while one is still running.
+    try {
+      for (uint32_t receiver = 0; receiver < dl_futures.size(); ++receiver)
+        dl_futures[receiver] = spatial_detector_executor_->submit(
+            receiver, [&, receiver] { return process_receiver(receiver, nullptr); });
+      for (size_t session = 0; session < ul_windows.size(); ++session) {
+        const CfrWindow* const source = &ul_windows[session];
+        for (uint32_t receiver = 0; receiver < ul_futures[session].size(); ++receiver) {
+          const size_t lane = 4 * (session + 1) + receiver;
+          ul_futures[session][receiver] = spatial_detector_executor_->submit(
+              lane, [&, receiver, source] { return process_receiver(receiver, source); });
+        }
       }
+    } catch (...) {
+      for (auto& future : dl_futures)
+        if (future.valid()) future.wait();
+      for (auto& session : ul_futures)
+        for (auto& future : session)
+          if (future.valid()) future.wait();
+      throw;
     }
     if (getenv("ISAC_DEBUG_HANG"))
       std::fprintf(stderr, "HANG seq=%llu all lanes submitted, awaiting DL futures\n",

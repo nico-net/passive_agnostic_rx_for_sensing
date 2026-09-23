@@ -485,7 +485,8 @@ extern "C" void nr_isac_submit_cfr_multi_session(uint32_t slot,float fraction,in
       && session_id==0){
     static std::atomic<bool> warned{false};
     if(!warned.exchange(true))
-      LOG_E(PHY,"SENSING: UL CFR without session_id rejected at the ABI (source=%d); further rejections are silent\n",source);
+      LOG_E(PHY,"SENSING: UL CFR without session_id rejected at the ABI (source=%d); further rejections are counted (sessionless_ul_rejections)\n",source);
+    engine->note_abi_rejection(true);
     return;
   }
   const uint32_t expected_channels=nr_isac_rx_channels();
@@ -498,8 +499,9 @@ extern "C" void nr_isac_submit_cfr_multi_session(uint32_t slot,float fraction,in
     static std::atomic<bool> warned{false};
     if(!warned.exchange(true))
       LOG_E(PHY,"SENSING: CFR rejected at the ABI: antennas=%u expected=%u stride=%u n=%u nof_prb=%u "
-            "(spatial mode needs --ue-nb-ant-rx 4); further rejections are silent\n",
+            "(spatial mode needs --ue-nb-ant-rx 4); further rejections are counted (abi_rejections)\n",
             antennas,expected_channels,stride,n,carrier->nof_prb);
+    engine->note_abi_rejection(false);
     return;
   }
   static thread_local std::vector<std::complex<float>> packed;
