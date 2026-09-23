@@ -29,6 +29,8 @@
 
 #include "nr_pdcch_blind_monitor.h"
 #include <string.h>
+#include <stdio.h>   // snprintf, for the BOOTTABLE diagnostic dump
+#include <stdlib.h>
 
 // ---- Phase 3 Technique B: C-RNTI bootstrap, MULTI-UE ----------------------------------------
 // A cell carries many UEs and a passive receiver hears all of them, so tracking ONE C-RNTI threw
@@ -47,7 +49,9 @@ typedef struct {
   uint16_t rnti;
   uint8_t  cls;
   uint32_t last_slot;
-  uint32_t sightings;  ///< 0 = free slot; 1 = pending; >=2 = confirmed
+  uint32_t sightings;
+  uint8_t  trusted;   ///< sighted in a CORESET whose mapping is proven (geometry, NOT the RNTI)
+  uint8_t  verified;  ///< the RAR chain proved the RNTI itself; live at n=1  ///< 0 = free slot; 1 = pending; >=2 = confirmed
 } nr_boot_entry_t;
 
 static nr_boot_entry_t g_boot[NR_PDCCH_BLIND_MAX_UE];
@@ -64,21 +68,60 @@ static int boot_find(uint16_t rnti, uint8_t cls)
 
 /// Free slot, else the weakest-evidenced entry. Never evicts on age alone: a UE that is quiet for a
 /// moment is still a real UE, whereas a noise RNTI never accumulates sightings.
-static int boot_slot_for_new(void)
+static int boot_slot_for_new(uint32_t now_abs_slot)
 {
-  int worst = 0;
+  /* Among the weakest-evidenced entries, evict the OLDEST -- not simply the first one found.
+   * MEASURED 2026-09-20 (Swisscom PCI 382, BOOTTABLE): with every entry sitting at n=1, the old
+   * "first minimum" rule always returned index 0, so one slot churned on every new RNTI while the
+   * other 15 sat frozen until they aged out. A 16-entry table was doing the work of a 1-entry one,
+   * which is exactly the wrong behaviour when the thing we are waiting for is any RNTI recurring.
+   * Evicting by age keeps a rolling window of the most recent sightings instead. */
+  /* NEVER EVICT A TRUSTED ENTRY FOR AN UNTRUSTED ONE. MEASURED 2026-09-20 (Swisscom PCI 382, the
+   * CSS0 interleave running at 1 in 2): the table filled with 16 entries whose RNTIs were spread
+   * uniformly over the 16-bit space -- USS noise from the dedicated hypothesis search -- and EVERY
+   * entry read age=0, i.e. the whole table was being overwritten continuously. The dedicated search
+   * produced 142 accepts against 4 real TC-RNTIs from CORESET#0, so the seeds were evicted by noise
+   * before anything could use them, and live stayed 0 despite TC>0.
+   *
+   * A trusted entry came from a CORESET whose mapping is proven; an untrusted one is a random CRC
+   * pass at a guessed CCE location. Ranking them equally for a scarce slot throws away the only
+   * identities worth keeping. Untrusted entries are therefore evicted first, and a trusted entry is
+   * displaced only when every slot is trusted -- in which case the oldest goes, as before. */
+  int worst = -1;
   for (int i = 0; i < NR_PDCCH_BLIND_MAX_UE; i++) {
     if (g_boot[i].sightings == 0) {
       return i;
     }
-    if (g_boot[i].sightings < g_boot[worst].sightings) {
+    if (!g_boot[i].trusted) {
+      if (worst < 0 || g_boot[worst].trusted) {
+        worst = i;            /* first untrusted candidate outranks any trusted one */
+        continue;
+      }
+    } else if (worst >= 0 && !g_boot[worst].trusted) {
+      continue;               /* already holding an untrusted candidate: keep preferring it */
+    }
+    if (worst < 0) {
+      worst = i;
+      continue;
+    }
+    if (g_boot[i].sightings != g_boot[worst].sightings) {
+      if (g_boot[i].sightings < g_boot[worst].sightings) {
+        worst = i;
+      }
+      continue;
+    }
+    /* Equal evidence: prefer the staler entry. Unsigned ages, so compare last_slot directly
+     * against now rather than subtracting into a wrap. */
+    const uint32_t age_i = (now_abs_slot >= g_boot[i].last_slot) ? (now_abs_slot - g_boot[i].last_slot) : 0;
+    const uint32_t age_w = (now_abs_slot >= g_boot[worst].last_slot) ? (now_abs_slot - g_boot[worst].last_slot) : 0;
+    if (age_i > age_w) {
       worst = i;
     }
   }
   return worst;
 }
 
-void nr_pdcch_blind_rnti_bootstrap_record(uint16_t rnti, uint8_t rnti_class, uint32_t abs_slot)
+static void boot_record(uint16_t rnti, uint8_t rnti_class, uint32_t abs_slot, uint8_t trusted, uint8_t verified)
 {
   // Only C-RNTI and TC-RNTI describe the DEDICATED search space this technique targets; SI-RNTI
   // (Phase 1's own domain) and P-RNTI carry no information about it.
@@ -91,22 +134,110 @@ void nr_pdcch_blind_rnti_bootstrap_record(uint16_t rnti, uint8_t rnti_class, uin
       g_boot[i].sightings++;
     }
     g_boot[i].last_slot = abs_slot;
+    if (trusted) {
+      g_boot[i].trusted = 1;   /* trust is sticky: one proven sighting is enough forever */
+    }
+    if (verified) {
+      g_boot[i].verified = 1;  /* likewise: the RAR chain cannot be un-proved by a later sighting */
+    }
     return;
   }
-  const int n = boot_slot_for_new();
+  const int n = boot_slot_for_new(abs_slot);
   g_boot[n].rnti      = rnti;
   g_boot[n].cls       = rnti_class;
   g_boot[n].last_slot = abs_slot;
-  g_boot[n].sightings = 1;  // pending; a single sighting is not evidence
+  g_boot[n].sightings = 1;  // pending unless VERIFIED (see boot_entry_live)
+  g_boot[n].trusted   = trusted;
+  g_boot[n].verified  = verified;
+}
+
+void nr_pdcch_blind_rnti_bootstrap_record(uint16_t rnti, uint8_t rnti_class, uint32_t abs_slot)
+{
+  boot_record(rnti, rnti_class, abs_slot, 0, 0);
+}
+
+/* The RAR chain: the only RNTI this receiver can verify without already knowing the answer. */
+void nr_pdcch_blind_rnti_bootstrap_record_verified(uint16_t rnti, uint8_t rnti_class, uint32_t abs_slot)
+{
+  boot_record(rnti, rnti_class, abs_slot, 1, 1);
+}
+
+void nr_pdcch_blind_rnti_bootstrap_record_trusted(uint16_t rnti, uint8_t rnti_class, uint32_t abs_slot)
+{
+  boot_record(rnti, rnti_class, abs_slot, 1, 0);
+}
+
+void nr_pdcch_blind_rnti_bootstrap_record_corroborated(uint16_t rnti, uint8_t rnti_class,
+                                                       uint32_t abs_slot)
+{
+  boot_record(rnti, rnti_class, abs_slot, 1, 1);
 }
 
 static bool boot_entry_live(const nr_boot_entry_t *e, uint32_t now)
 {
-  if (e->sightings < 2) {
+  /* TC-RNTI IS SINGLE-USE, so "two sightings" can never be satisfied for it. MEASURED 2026-09-20 on
+   * Swisscom PCI 382: a CSS0-only scan recorded 12 distinct TC-RNTIs (0x07a6..0x42c4, a narrow band
+   * consistent with one gNB allocating from a pool) and NOT ONE recurred. That is the protocol, not
+   * bad luck -- a TC-RNTI is handed out per random access, used for Msg3/Msg4, and then becomes the
+   * UE C-RNTI in the dedicated search space this receiver cannot yet read.
+   *
+   * The two-sighting rule exists to reject NOISE, and its premise is that a sighting is untrusted.
+   * That premise fails here: a trusted sighting came from CORESET#0, whose mapping is proven on this
+   * cell by 1957 SIB1 decodes at one exact signature (L=8 len=39 cce=0), and it additionally passed
+   * CRC and DCI format validation. It is also self-limiting downstream -- the dedicated search USES
+   * a candidate RNTI to test mapping hypotheses, so a wrong one simply verifies nothing. The
+   * verification step is the filter; demanding a repeat first only guarantees no candidate ever
+   * arrives. Untrusted entries keep the original rule unchanged. */
+  /* CORRECTED 2026-09-21: this used to accept `trusted`, which is set for every CORESET#0 accept.
+   * But a CRC false accept at a REAL CCE location is still a random 16-bit value -- measured, two
+   * anchors at n=1 drove a whole run. `trusted` is evidence about the GEOMETRY; only `verified`
+   * (the RAR chain) is evidence about the RNTI. */
+  if (e->sightings < 2 && !e->verified) {
     return false;  // pending, not confirmed
   }
   const uint32_t age = (now >= e->last_slot) ? (now - e->last_slot) : 0;
   return age <= RNTI_BOOTSTRAP_STALE_SLOTS;
+}
+
+/* Offline hidden-waveform validation may supply candidate identities before dedicated decoding.
+ * It is never enabled implicitly and has no OTA source. CRC/payload recurrence must still prove
+ * the DCI length and every grant. */
+static int simulation_candidate_rntis(uint16_t *out, int max_out)
+{
+  static int initialized;
+  static uint16_t values[NR_PDCCH_BLIND_MAX_UE];
+  static int count;
+  if (!initialized) {
+    initialized = 1;
+    const char *e = getenv("ISAC_SIM_CANDIDATE_RNTIS");
+    if (e == NULL)
+      e = getenv("ISAC_SIM_CANDIDATE_RNTI"); /* backward-compatible single value */
+    while (e != NULL && *e != '\0' && count < NR_PDCCH_BLIND_MAX_UE) {
+      char *end = NULL;
+      const unsigned long x = strtoul(e, &end, 0);
+      if (end == e)
+        break;
+      if (x > 0 && x < 65535)
+        values[count++] = (uint16_t)x;
+      e = end;
+      while (*e == ',' || *e == ':' || *e == ';' || *e == ' ' || *e == '\t')
+        ++e;
+    }
+  }
+  const int n = count < max_out ? count : max_out;
+  if (out != NULL && n > 0)
+    memcpy(out, values, (size_t)n * sizeof(*out));
+  return n;
+}
+
+static bool simulation_candidate_contains(uint16_t rnti)
+{
+  uint16_t candidates[NR_PDCCH_BLIND_MAX_UE];
+  const int n = simulation_candidate_rntis(candidates, NR_PDCCH_BLIND_MAX_UE);
+  for (int i = 0; i < n; ++i)
+    if (candidates[i] == rnti)
+      return true;
+  return false;
 }
 
 int nr_pdcch_blind_monitor_confirmed_rnti_set(uint32_t now_abs_slot, uint16_t *out, int max_out)
@@ -120,11 +251,60 @@ int nr_pdcch_blind_monitor_confirmed_rnti_set(uint32_t now_abs_slot, uint16_t *o
       out[n++] = g_boot[i].rnti;
     }
   }
+  uint16_t sim[NR_PDCCH_BLIND_MAX_UE];
+  const int nsim = simulation_candidate_rntis(sim, NR_PDCCH_BLIND_MAX_UE);
+  for (int si = 0; si < nsim && n < max_out; ++si) {
+    bool present = false;
+    for (int i = 0; i < n; ++i)
+      present |= out[i] == sim[si];
+    if (!present)
+      out[n++] = sim[si];
+  }
+  return n;
+}
+
+int nr_pdcch_blind_monitor_verified_rnti_set(uint32_t now_abs_slot, uint16_t *out, int max_out)
+{
+  if (out == NULL || max_out <= 0)
+    return 0;
+  int n = 0;
+  for (int i = 0; i < NR_PDCCH_BLIND_MAX_UE && n < max_out; ++i)
+    if (g_boot[i].verified && boot_entry_live(&g_boot[i], now_abs_slot))
+      out[n++] = g_boot[i].rnti;
+  uint16_t sim[NR_PDCCH_BLIND_MAX_UE];
+  const int nsim = simulation_candidate_rntis(sim, NR_PDCCH_BLIND_MAX_UE);
+  for (int si = 0; si < nsim && n < max_out; ++si) {
+    bool present = false;
+    for (int i = 0; i < n; ++i)
+      present |= out[i] == sim[si];
+    if (!present)
+      out[n++] = sim[si];
+  }
+  return n;
+}
+
+int nr_pdcch_blind_monitor_dedicated_rnti_set(uint32_t now_abs_slot, uint16_t *out, int max_out)
+{
+  if (out == NULL || max_out <= 0)
+    return 0;
+  int n = 0;
+  for (int i = 0; i < NR_PDCCH_BLIND_MAX_UE && n < max_out; ++i)
+    if (g_boot[i].cls == NR_BLIND_RNTI_CLASS_C && boot_entry_live(&g_boot[i], now_abs_slot))
+      out[n++] = g_boot[i].rnti;
+  uint16_t sim[NR_PDCCH_BLIND_MAX_UE];
+  const int nsim = simulation_candidate_rntis(sim, NR_PDCCH_BLIND_MAX_UE);
+  for (int si = 0; si < nsim && n < max_out; ++si) {
+    bool present = false;
+    for (int i = 0; i < n; ++i) present |= out[i] == sim[si];
+    if (!present) out[n++] = sim[si];
+  }
   return n;
 }
 
 bool nr_pdcch_blind_monitor_rnti_confirmed(uint32_t now_abs_slot, uint16_t rnti)
 {
+  if (simulation_candidate_contains(rnti))
+    return true;
   for (int i = 0; i < NR_PDCCH_BLIND_MAX_UE; i++) {
     if (g_boot[i].rnti == rnti && boot_entry_live(&g_boot[i], now_abs_slot)) {
       return true;
@@ -138,22 +318,69 @@ bool nr_pdcch_blind_monitor_rnti_confirmed(uint32_t now_abs_slot, uint16_t rnti)
 bool nr_pdcch_blind_monitor_confirmed_rnti(uint32_t now_abs_slot, uint16_t* rnti_out, uint8_t* class_out,
                                            uint32_t* age_slots_out)
 {
+  /* TRUSTED FIRST. Two passes, not one comparison: an untrusted entry with more sightings must not
+   * outrank a trusted one, because sightings are exactly what a noise RNTI accumulates when the
+   * search is decoding unverified CCE locations. Pass 1 considers only trusted entries; pass 0 is
+   * the original rule and runs only if pass 1 found nothing, so a deployment that never produces a
+   * trusted entry behaves exactly as before. */
   int best = -1;
-  for (int i = 0; i < NR_PDCCH_BLIND_MAX_UE; i++) {
-    if (!boot_entry_live(&g_boot[i], now_abs_slot)) {
-      continue;
-    }
-    if (best < 0 || g_boot[i].sightings > g_boot[best].sightings) {
-      best = i;
+  for (int pass = 2; pass >= 0 && best < 0; pass--) {
+    for (int i = 0; i < NR_PDCCH_BLIND_MAX_UE; i++) {
+      if (!boot_entry_live(&g_boot[i], now_abs_slot)) {
+        continue;
+      }
+      if (pass == 2 && !g_boot[i].verified) {
+        continue;   /* pass 2: the RAR chain only */
+      }
+      if (pass == 1 && !g_boot[i].trusted) {
+        continue;   /* pass 1: CORESET#0 geometry, but the RNTI itself recurred (sightings >= 2) */
+      }
+      if (best < 0 || g_boot[i].sightings > g_boot[best].sightings) {
+        best = i;
+      }
     }
   }
   if (best < 0) {
     return false;
   }
   *rnti_out = g_boot[best].rnti;
-  *class_out = g_boot[best].cls;
+  /* Class 7 is not a real RNTI class: it is the marker for "this anchor is TRUSTED", carried on the
+   * existing out-param so no call site has to change. Only the sweep's log reads it (every other
+   * consumer ignores class_out), and a trusted entry's real class is always TC or C anyway. */
+  /* 7 = VERIFIED (RAR chain), 6 = trusted geometry + recurrence, else the real class. Only the
+   * sweep's give-up log reads this; every other consumer ignores class_out. */
+  *class_out = g_boot[best].verified ? 7 : (g_boot[best].trusted ? 6 : g_boot[best].cls);
   *age_slots_out = (now_abs_slot >= g_boot[best].last_slot) ? (now_abs_slot - g_boot[best].last_slot) : 0;
   return true;
+}
+
+/* DIAGNOSTIC. Everything downstream -- dedicated CORESET verification, the DL length sweep and the
+ * UL PUSCH scan -- is gated on an entry reaching sightings >= 2 (boot_entry_live). When that never
+ * happens the whole chain reads as "bootstrap_rnti=0x0" with no way to tell WHY from the outside:
+ * a table of one-sighting entries (accepts are false, RNTIs never repeat) looks identical to an
+ * empty table. Prints the raw table so the two are distinguishable. */
+int nr_pdcch_blind_rnti_bootstrap_dump(uint32_t now_abs_slot, char *buf, int buflen)
+{
+  if (buf == NULL || buflen <= 0) {
+    return 0;
+  }
+  int off = 0, live = 0, used = 0;
+  for (int i = 0; i < NR_PDCCH_BLIND_MAX_UE && off < buflen - 32; i++) {
+    if (g_boot[i].sightings == 0) {
+      continue;
+    }
+    used++;
+    const uint32_t age = (now_abs_slot >= g_boot[i].last_slot) ? (now_abs_slot - g_boot[i].last_slot) : 0;
+    if (boot_entry_live(&g_boot[i], now_abs_slot)) {
+      live++;
+    }
+    off += snprintf(buf + off, (size_t)(buflen - off), "%s0x%04x:n=%u,age=%u",
+                    (off > 0) ? " " : "", g_boot[i].rnti, g_boot[i].sightings, age);
+  }
+  if (off < buflen - 24) {
+    off += snprintf(buf + off, (size_t)(buflen - off), " | used=%d live=%d", used, live);
+  }
+  return off;
 }
 
 void nr_pdcch_blind_rnti_bootstrap_reset_for_test(void)

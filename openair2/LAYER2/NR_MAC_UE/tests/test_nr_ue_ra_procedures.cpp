@@ -9,8 +9,38 @@ extern "C" {
 #include "executables/softmodem-common.h"
 #include "openair2/LAYER2/nr_rlc/nr_rlc_oai_api.h"
 #include "common/utils/ocp_itti/intertask_interface.h"
+#include "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.h"
+#include "openair1/PHY/NR_UE_TRANSPORT/nr_passive_acq_state.h"
 
 static softmodem_params_t softmodem_params;
+
+/* Link-only stubs. MAC_UE_NR gained calls into the passive blind-PDCCH monitor with the CSS0
+ * autoconf work (21603544bf), and this test's link line never followed, so it stopped LINKING.
+ * Linking the real nr_pdcch_blind_monitor instead drags polar/CRC and PDCCH gold-sequence PHY into
+ * an RA unit test. Every call site is gated off here, so these are never reached:
+ *   nr_pdcch_blind_publish_common  -- config_ue.c, only under IS_PASSIVE_RX_MODE (not set here)
+ *   ..._autoconf_css0              -- nr_ue_dci_configuration.c, only if autoconf_wanted() is true
+ *   nr_pdcch_blind_dci10_size      -- nr_ue_dci_configuration.c, only under getenv("ISAC_OTA_CFG")
+ * autoconf_wanted() returning false is the module's own default (pdcch_blind_monitor_autoconf=0). */
+bool nr_pdcch_blind_publish_common(const nr_pdcch_blind_common_config_t *facts)
+{
+  (void)facts;
+  return false;
+}
+bool nr_pdcch_blind_monitor_autoconf_wanted(void)
+{
+  return false;
+}
+bool nr_pdcch_blind_monitor_autoconf_css0(int, int, int, int, int, int, int, int, int, int, int, int)
+{
+  return false;
+}
+uint16_t nr_pdcch_blind_dci10_size(uint16_t)
+{
+  return 0; // the real function's own "invalid" sentinel; unreachable without ISAC_OTA_CFG
+}
+void nr_passive_acq_note_sib1(void) {} // same passive-mode-only site as publish_common
+void nr_passive_acq_note_sib1_carrier(int, int, int, int, int) {} // same gate (ISAC_AUTO_ACQUIRE + passive)
 softmodem_params_t *get_softmodem_params(void)
 {
   return &softmodem_params;

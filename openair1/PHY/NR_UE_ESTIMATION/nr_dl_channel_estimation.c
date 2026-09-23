@@ -2,6 +2,7 @@
  * SPDX-License-Identifier: LicenseRef-CSSL-1.0
  */
 
+#include <math.h>
 #include <stdlib.h> // getenv (NVAR probe)
 #include "nr_common.h"
 #include <string.h>
@@ -29,6 +30,15 @@
  * estimator concurrently on different transport blocks. 0 = that antenna produced no estimate. */
 #define NR_DL_CHEST_MAX_ANT 8
 __thread uint32_t nr_dl_chest_nvar_ant[NR_DL_CHEST_MAX_ANT];
+/* Consumer-only diagnostics (BRDELAY/PDP). The passive decode consumer sets the request flag on its
+ * thread; the per-antenna pool task inherits it through the task struct. Never set on the RT thread. */
+static __thread c16_t t_dft_est[4096];
+static __thread int nr_dl_chest_cur_ant = 0; // set by the per-antenna task before the interp call
+static __thread int t_dft_valid = 0;
+__thread int nr_dl_chest_diag_request = 0;
+__thread int nr_dl_chest_pdp_compact_pct = -1;
+__thread int nr_dl_chest_pdp_sec_pos = 0;
+__thread int nr_dl_chest_pdp_sec_db = 0;
 // #define DEBUG_PDSCH
 // #define DEBUG_PDCCH
 // #define DEBUG_PBCH(a...) printf(a)
@@ -935,6 +945,94 @@ static void NFAPI_NR_DMRS_TYPE1_linear_interp(NR_DL_FRAME_PARMS *frame_parms,
     nr_passive_est_delay(frame_parms->ofdm_symbol_size, dl_ls_est, ch_estimates_time, delay);
   else
     nr_est_delay(frame_parms->ofdm_symbol_size, dl_ls_est, ch_estimates_time, delay);
+  if (nr_dl_chest_diag_request) {
+    /* PDP shape: % of IDFT energy within +/-8 samples of the peak, and the strongest secondary peak
+     * outside that window (signed position, dB below the main peak). Shape is scale-free. */
+    const int N = frame_parms->ofdm_symbol_size;
+    const int pk = ((delay->delay_max_pos % N) + N) % N;
+    double tot = 0.0, win = 0.0, sec = 0.0;
+    int secpos = 0;
+    for (int i = 0; i < N; i++) {
+      const double e = (double)ch_estimates_time[i].r * ch_estimates_time[i].r + (double)ch_estimates_time[i].i * ch_estimates_time[i].i;
+      tot += e;
+      int dd = i - pk;
+      if (dd > N / 2) dd -= N;
+      if (dd < -N / 2) dd += N;
+      if (dd >= -8 && dd <= 8) win += e;
+      else if (e > sec) { sec = e; secpos = dd; }
+    }
+    const double mainpk = (double)ch_estimates_time[pk].r * ch_estimates_time[pk].r + (double)ch_estimates_time[pk].i * ch_estimates_time[pk].i;
+    nr_dl_chest_pdp_compact_pct = tot > 0.0 ? (int)(100.0 * win / tot) : -1;
+    nr_dl_chest_pdp_sec_pos = secpos;
+    nr_dl_chest_pdp_sec_db = (sec > 0.0 && mainpk > 0.0) ? (int)(10.0 * log10(mainpk / sec)) : 99;
+  }
+  /* ISAC_CHEST_DFT_WIN=<W samples> (default 0 = off): DFT-domain channel estimate. The FIR smoother
+   * below averages ~8 pilots (~480 kHz) and flattens any path beyond ~1 us, so a dispersive branch
+   * (OTA 2026-09-14: branches 1-3 keep only 40-48 % of their delay-profile energy within +/-8 samples,
+   * branch 0 98 %) comes out as "noise" (nvar x4000) and never decodes. Here the LS estimate is
+   * transformed to delay, everything outside +/-W samples of the peak is zeroed, and the result is
+   * transformed back: paths up to W samples survive, the pilot comb is interpolated exactly, and the
+   * noise outside the window is rejected. Same overflow guard as nr_passive_est_delay(). */
+  static int s_dftw = -1;
+  if (s_dftw < 0) {
+    const char *e = getenv("ISAC_CHEST_DFT_WIN");
+    s_dftw = (e != NULL) ? atoi(e) : 0;
+  }
+  static int s_dft_apply = -1;
+  if (s_dft_apply < 0)
+    s_dft_apply = (getenv("ISAC_CHEST_DFT_APPLY") != NULL) ? 1 : 0;
+  /* Branch 0 is compact on this rig and the DFT estimate equals the FIR one there (corr 0.999):
+   * when APPLYING, spend the transforms only on the branches that need them. */
+  if (s_dftw > 0 && !(s_dft_apply && nr_dl_chest_cur_ant == 0)) {
+    const int N = frame_parms->ofdm_symbol_size;
+    int root = 1;
+    while (root * root < N) ++root;
+    int peak_l1 = 0;
+    for (int k = 0; k < N; ++k) {
+      const int pw = abs((int)dl_ls_est[k].r) + abs((int)dl_ls_est[k].i);
+      if (pw > peak_l1) peak_l1 = pw;
+    }
+    int shift = 0;
+    const int limit = 16383 / root;
+    while ((peak_l1 >> shift) > limit) ++shift;
+    c16_t scaled[N] __attribute__((aligned(32)));
+    c16_t tbuf[N] __attribute__((aligned(32)));
+    c16_t fbuf[N] __attribute__((aligned(32)));
+    const int div = 1 << shift;
+    for (int k = 0; k < N; ++k) {
+      scaled[k].r = (int16_t)(dl_ls_est[k].r / div);
+      scaled[k].i = (int16_t)(dl_ls_est[k].i / div);
+    }
+    idft(get_idft(N), (int16_t *)scaled, (int16_t *)tbuf, 1);
+    const int pk = ((delay->delay_max_pos % N) + N) % N;
+    for (int i = 0; i < N; ++i) {
+      int dd = i - pk;
+      if (dd > N / 2) dd -= N;
+      if (dd < -N / 2) dd += N;
+      if (dd < -s_dftw || dd > s_dftw) {
+        tbuf[i].r = 0;
+        tbuf[i].i = 0;
+      }
+    }
+    /* Return with the SAME transform: DFT(y) = conj(IDFT(conj(y))). OAI's dft()/idft() are not
+     * guaranteed to be exact inverses of each other (first OTA try: magnitude preserved, 0 % CRC);
+     * this makes the pair an identity by construction, whatever idft()'s internal convention. */
+    for (int i = 0; i < N; ++i)
+      tbuf[i].i = (int16_t)-tbuf[i].i;
+    idft(get_idft(N), (int16_t *)tbuf, (int16_t *)fbuf, 1);
+    for (int i = 0; i < N; ++i)
+      fbuf[i].i = (int16_t)-fbuf[i].i;
+    for (int k = 0; k < idx; ++k) {
+      int r = (int)fbuf[k].r * div, im = (int)fbuf[k].i * div;
+      if (r > 32767) r = 32767; if (r < -32768) r = -32768;
+      if (im > 32767) im = 32767; if (im < -32768) im = -32768;
+      t_dft_est[k].r = (int16_t)r;
+      t_dft_est[k].i = (int16_t)im;
+    }
+    t_dft_valid = idx;
+  } else {
+    t_dft_valid = 0;
+  }
   int delay_idx = get_delay_idx(delay->est_delay, MAX_DELAY_COMP);
   c16_t *dl_delay_table = frame_parms->delay_table[delay_idx];
 
@@ -967,6 +1065,28 @@ static void NFAPI_NR_DMRS_TYPE1_linear_interp(NR_DL_FRAME_PARMS *frame_parms,
     nest_count++;
   }
 
+  if (t_dft_valid == idx && idx > 0 && s_dft_apply) {
+    noise_amp2 = 0;
+    for (int k = 0; k < idx; k++) {
+      dl_ch[k] = t_dft_est[k];
+      noise_amp2 += c16amp2(c16sub(dl_ls_est[k], dl_ch[k]));
+    }
+  } else if (t_dft_valid == idx && idx > 0) {
+    /* DFT-vs-FIR comparison on the SAME LS input. corr ~1 / phase ~0 / scale ~1 means the two agree;
+     * a shift or scale here is what a decode failure with a clean LS check would be hiding. */
+    double xr = 0.0, xi = 0.0, e_f = 0.0, e_d = 0.0;
+    for (int k = 0; k < idx; k++) {
+      xr += (double)dl_ch[k].r * t_dft_est[k].r + (double)dl_ch[k].i * t_dft_est[k].i;
+      xi += (double)dl_ch[k].i * t_dft_est[k].r - (double)dl_ch[k].r * t_dft_est[k].i;
+      e_f += (double)dl_ch[k].r * dl_ch[k].r + (double)dl_ch[k].i * dl_ch[k].i;
+      e_d += (double)t_dft_est[k].r * t_dft_est[k].r + (double)t_dft_est[k].i * t_dft_est[k].i;
+    }
+    static __thread unsigned long s_cmp_n = 0;
+    if ((s_cmp_n++ % 5000) == 0)
+      LOG_A(PHY, "SENSING: CHEST_DFTCMP corr=%.3f phase=%.1fdeg scale(dft/fir)=%.3f nvar_fir=%llu idx=%d\n",
+            (e_f > 0.0 && e_d > 0.0) ? hypot(xr, xi) / sqrt(e_f * e_d) : 0.0, atan2(xi, xr) * 180.0 / M_PI,
+            e_f > 0.0 ? sqrt(e_d / e_f) : 0.0, (unsigned long long)(nest_count ? noise_amp2 / nest_count : 0), idx);
+  }
   if (nvar && nest_count > 0) {
     /* Per-ANTENNA mean noise. The `/ nb_antennas_rx` that used to be here was wrong twice over:
      * this helper is called once per receive antenna and never sums across them, so dividing by the
@@ -1270,6 +1390,8 @@ typedef struct {
   int bwp_start_subcarrier;
   bool want_nvar;
   uint32_t nvar_out;
+  int diag_request;
+  int delay_pos_out, delay_val_out, pdp_compact_out, pdp_sec_pos_out, pdp_sec_db_out;
   task_ans_t *ans;
 } nr_pdsch_chest_ant_task_t;
 
@@ -1291,6 +1413,8 @@ static void nr_pdsch_chest_ant_task(void *arg)
   memset(dl_ch, 0, sizeof(*dl_ch) * fp->ofdm_symbol_size);
 
   delay_t delay = {0};
+  nr_dl_chest_diag_request = a->diag_request;
+  nr_dl_chest_cur_ant = a->aarx;
   if (a->config_type == NFAPI_NR_DMRS_TYPE1 && a->ue->chest_freq == 0) {
     NFAPI_NR_DMRS_TYPE1_linear_interp(fp, rxF, &a->pilot[6 * a->rb_offset], dl_ch, a->bwp_start_subcarrier,
                                       a->freq_alloc, a->dlsch->BWPSize, &delay, nvar_p);
@@ -1306,6 +1430,11 @@ static void nr_pdsch_chest_ant_task(void *arg)
   }
 
   a->nvar_out = nvar_ant;
+  a->delay_pos_out = delay.delay_max_pos;
+  a->delay_val_out = delay.delay_max_val;
+  a->pdp_compact_out = nr_dl_chest_pdp_compact_pct;
+  a->pdp_sec_pos_out = nr_dl_chest_pdp_sec_pos;
+  a->pdp_sec_db_out = nr_dl_chest_pdp_sec_db;
   if (aarx < NR_DL_CHEST_MAX_ANT) {
     nr_dl_chest_nvar_ant[aarx] = nvar_ant; // 0 here matches the pre-loop zeroing this replaces for a no-estimate antenna
   }
@@ -1402,11 +1531,33 @@ void nr_pdsch_channel_estimation(PHY_VARS_NR_UE *ue,
                                                       .delta = delta,
                                                       .bwp_start_subcarrier = bwp_start_subcarrier,
                                                       .want_nvar = (nvar != NULL),
+                                                      .diag_request = nr_dl_chest_diag_request,
                                                       .ans = &chest_ans};
       task_t t = {.func = nr_pdsch_chest_ant_task, .args = &chest_tasks[aarx]};
       pushTpool(&get_nrUE_params()->Tpool, t);
     }
     join_task_ans(&chest_ans);
+    /* nr_dl_chest_nvar_ant[] is __thread. The task wrote it into the POOL thread's copy; the reader
+     * (nr_pdsch_passive_decode's per-branch nvar substitution) runs on THIS thread and was seeing the
+     * zero from the pre-loop clear on every multi-antenna decode. Publish the per-antenna values here. */
+    for (int aarx = 0; aarx < fp->nb_antennas_rx && aarx < NR_DL_CHEST_MAX_ANT; aarx++)
+      nr_dl_chest_nvar_ant[aarx] = chest_tasks[aarx].nvar_out;
+    {
+      static __thread unsigned long s_brd_n = 0;
+      if (nr_dl_chest_diag_request && (s_brd_n++ % 2000) == 0 && fp->nb_antennas_rx >= 2) {
+        char pb[120], vb[160], nb[160], cb[240];
+        int up = 0, uv = 0, un = 0, uc = 0;
+        for (int aarx = 0; aarx < fp->nb_antennas_rx && aarx < 4; aarx++) {
+          up += snprintf(pb + up, sizeof(pb) - up, "%s%d", aarx ? " " : "", chest_tasks[aarx].delay_pos_out);
+          uv += snprintf(vb + uv, sizeof(vb) - uv, "%s%d", aarx ? " " : "", chest_tasks[aarx].delay_val_out);
+          un += snprintf(nb + un, sizeof(nb) - un, "%s%u", aarx ? " " : "", chest_tasks[aarx].nvar_out);
+          uc += snprintf(cb + uc, sizeof(cb) - uc, "%s%d%%/%+d@%ddB", aarx ? " " : "", chest_tasks[aarx].pdp_compact_out,
+                         chest_tasks[aarx].pdp_sec_pos_out, chest_tasks[aarx].pdp_sec_db_out);
+        }
+        LOG_A(PHY, "SENSING: BRDELAY sym=%d nb_rb=%d peak_pos=[%s] peak_val=[%s] nvar=[%s] pdp[compact%%/2nd-peak@dB-below]=[%s]\n",
+              symbol, nb_rb_pdsch, pb, vb, nb, cb);
+      }
+    }
     if (nvar) {
       for (int aarx = 0; aarx < fp->nb_antennas_rx; aarx++) {
         if (chest_tasks[aarx].nvar_out > 0) {

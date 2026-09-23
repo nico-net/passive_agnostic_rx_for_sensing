@@ -11,7 +11,48 @@
 
 /// Anti-windup bound on the timing PI loop's integral term -- see where it is applied. A healthy
 /// receiver holds max_pos_acc ~450 flat; a runaway reached -2141 and cost the capture.
+///
+/// Anti-windup bound on the timing PI loop's integral term -- see where it is applied. A healthy
+/// receiver holds max_pos_acc ~450 flat; a runaway reached -2141 and cost the capture.
 #define NR_MAX_POS_ACC_LIMIT 1024
+
+/// SAMPLE-RATE SCALING: AVAILABLE BUT DEFAULT OFF -- the hypothesis behind it FAILED its own audit.
+///
+/// The mechanism is real algebra. max_pos_acc IS the loop's rate estimate (I*acc is a per-frame
+/// shift) and it integrates position error, so the loop is second order and should track a clock
+/// drift -- a RAMP -- with zero steady-state error. Clamping acc breaks that: any drift beyond
+/// limit*time_sync_I must be carried by the P term instead, which can only do so by holding a
+/// STANDING POSITION ERROR of 2*(drift_samples_per_frame - limit*time_sync_I)/time_sync_P, and that
+/// error has to fit inside the +-nb_prefix_samples peak search. The drift in samples/frame scales
+/// with fs; a clamp of 1024 SAMPLES does not, so the budget is 33.3 ppm at 30.72 MS/s but only
+/// 8.3 ppm at 122.88 MS/s.
+///
+/// WHY IT IS NOT ENABLED. It only bites above 8.3 ppm, and the true clock drift on this rig is
+/// BELOW that: the LO and the ADC clock share one reference, so their fractional error is the same,
+/// and `--initial-fo -15000` with a 593 Hz residual at 3.54 GHz puts it at -4.07..-4.40 ppm. At
+/// 4.07 ppm the modelled standing error at 217 PRB is 1.8 samples with the old clamp and 1.8 with
+/// the new one -- the change does nothing in the regime that physically exists.
+///
+/// The 19 ppm (51 PRB) / 25 ppm / -63 ppm (217 PRB) drifts measured from the SSB IQ captures are
+/// therefore NOT clock drift. The 51 PRB figure is a line fitted to a settling transient; the 217
+/// figures are the collapsed loop's own output. All three are symptoms, and the initiating cause of
+/// the 217 PRB collapse is STILL UNKNOWN -- do not treat this knob as its fix.
+///
+/// ISAC_MAX_POS_ACC=<samples> forces a value (use ofdm_symbol_size to test the scaling hypothesis
+/// on air). Model and its checks: tests/timing_loop/acc_limit_model.py -- note its thresholds are
+/// REGRESSION GUARDS written around observed output, not independent validation.
+static int nr_max_pos_acc_limit(const NR_DL_FRAME_PARMS *fp)
+{
+  (void)fp; // used only when ISAC_MAX_POS_ACC asks for the rate-scaled variant
+  static int override = -2;
+  if (override == -2) {
+    const char *e = getenv("ISAC_MAX_POS_ACC");
+    override = e ? atoi(e) : -1;
+  }
+  if (override > 0)
+    return override;
+  return NR_MAX_POS_ACC_LIMIT; // unchanged default; see the note above
+}
 
 /* Set by the RF census in nr-ue.c while the receive stream is delivering noise floor on every
  * branch. Read here to FREEZE the integral term: see where it is used. */
@@ -46,7 +87,17 @@ int nr_adjust_synch_ue(const NR_DL_FRAME_PARMS *frame_parms,
     int temp = 0;
 
     int j = (i < 0) ? (i + frame_parms->ofdm_symbol_size) : i;
+    /* ISAC_SYNC_ANT_MASK (bitmask, default all): which branches feed the timing peak search. OTA
+     * 2026-09-14: branch 2 carries a strong long-delay path (chest nvar 5000x branch 0, SSB peak
+     * alternating +/-200 samples), and summing it in made 4-antenna starts lock only ~1 in 4. */
+    static int s_mask = -1;
+    if (s_mask < 0) {
+      const char *e = getenv("ISAC_SYNC_ANT_MASK");
+      s_mask = (e != NULL) ? (int)strtol(e, NULL, 0) : 0xFFFF;
+    }
     for (int aa = 0; aa < frame_parms->nb_antennas_rx; aa++) {
+      if (!((s_mask >> aa) & 1))
+        continue;
       int Re = dl_ch_estimates_time[aa][j].r;
       int Im = dl_ch_estimates_time[aa][j].i;
       temp += (Re*Re/2) + (Im*Im/2);
@@ -55,6 +106,37 @@ int nr_adjust_synch_ue(const NR_DL_FRAME_PARMS *frame_parms,
     if (temp > max_val) {
       max_pos = i;
       max_val = temp;
+    }
+  }
+
+  /* ISAC_TSYNC_DUMP=<path> (diagnostic, default off): append the per-branch CIR power of the first
+   * 32 SSBs -- header {N, nb_ant, frame, slot} as int32, then nb_ant x N int32 |h|^2 -- so the
+   * peak structure the search above sees can be inspected offline instead of inferred from
+   * corr_pos statistics (2026-09-17: 4096-FFT tracking peak alternating +-100..260 samples). */
+  {
+    static int s_dump_left = -1;
+    static FILE *s_dump = NULL;
+    if (s_dump_left < 0) {
+      const char *p = getenv("ISAC_TSYNC_DUMP");
+      s_dump = (p != NULL && p[0]) ? fopen(p, "wb") : NULL;
+      s_dump_left = s_dump ? 32 : 0;
+    }
+    if (s_dump_left > 0 && s_dump) {
+      const int N = frame_parms->ofdm_symbol_size;
+      int32_t hdr[4] = {N, frame_parms->nb_antennas_rx, frame, slot};
+      fwrite(hdr, sizeof(hdr), 1, s_dump);
+      for (int aa = 0; aa < frame_parms->nb_antennas_rx; aa++) {
+        int32_t pw[N];
+        for (int k = 0; k < N; k++) {
+          const int Re = dl_ch_estimates_time[aa][k].r, Im = dl_ch_estimates_time[aa][k].i;
+          pw[k] = Re * Re + Im * Im;
+        }
+        fwrite(pw, sizeof(int32_t), N, s_dump);
+      }
+      if (--s_dump_left == 0) {
+        fclose(s_dump);
+        s_dump = NULL;
+      }
     }
   }
 
@@ -152,6 +234,44 @@ int nr_adjust_synch_ue(const NR_DL_FRAME_PARMS *frame_parms,
   // INPUT changes, not the control law, so this isolates "was the search window too narrow" from
   // "is the filter/PI loop itself wrong".
   const int corr_pos = force_global ? g_pos : max_pos;
+
+  /* GATED GLOBAL REBASE (2026-09-16). Measured on the X410 at 4 RX: the acquisition placed the FFT
+   * window 342 samples EARLY on every miss (TSYNC global_pos=342, global_val 25x the in-window peak,
+   * e_win_frac 0.06 on all 60 observations; the 4-ch SIB1 hits had e_win_frac 0.99). The +-CP search
+   * above is structurally blind to it, and ISAC_FORCE_GLOBAL_SYNC (always chase the global peak) was
+   * measured to kill healthy locks. So: only when the global peak is out of window AND dominant, for
+   * NR_TSYNC_GLOBAL_N consecutive observations, request ONE deferred rebase by that offset through
+   * the same frame-boundary path the ANCHOR uses (positive = channel later than the window, discard
+   * that many samples). Never fires on a healthy lock (peak in window). ISAC_TSYNC_GLOBAL_REBASE=0
+   * disables. */
+  {
+    extern _Atomic long nr_ue_pending_rebase_delta;
+    extern _Atomic int nr_ue_pending_rebase_valid;
+    static int s_gr_on = -1;
+    if (s_gr_on < 0) {
+      const char *e = getenv("ISAC_TSYNC_GLOBAL_REBASE");
+      s_gr_on = (e == NULL || atoi(e) != 0) ? 1 : 0;
+    }
+    /* LATE WINDOW TOO (2026-09-19). Macro PCI 64 at 217 PRB: global_pos -341 (window LATE, the mirror
+     * of the 4-ch +342 case), global/in-window ratio only 4.8-6.5x, e_win_frac 0.14-0.17 on every
+     * observation, SIB1 0. Both `g_pos > 0` and the hard 8x blocked it. Negative deltas are now
+     * applied by the consumer as a one-frame-minus-|d| discard. ISAC_TSYNC_REBASE_RATIO overrides 8. */
+    static int s_gr_ratio = -1;
+    if (s_gr_ratio < 0) {
+      const char *e = getenv("ISAC_TSYNC_REBASE_RATIO");
+      s_gr_ratio = (e != NULL && atoi(e) > 0) ? atoi(e) : 8;
+    }
+    static int s_gr_cnt = 0;
+    const bool dominant = peak_out_of_window && g_pos != 0 && g_val > s_gr_ratio * (int64_t)(max_val > 0 ? max_val : 1);
+    s_gr_cnt = dominant ? s_gr_cnt + 1 : 0;
+    if (s_gr_on && s_gr_cnt >= 4 && !atomic_load_explicit(&nr_ue_pending_rebase_valid, memory_order_relaxed)) {
+      atomic_store_explicit(&nr_ue_pending_rebase_delta, (long)g_pos, memory_order_relaxed);
+      atomic_store_explicit(&nr_ue_pending_rebase_valid, 1, memory_order_relaxed);
+      LOG_W(PHY, "SENSING: TSYNC_GLOBAL_REBASE requesting deferred rebase of %+d samples (global %d vs in-window %d, e_win_frac %.3f)\n",
+            g_pos, g_val, max_val, e_win_frac);
+      s_gr_cnt = 0;
+    }
+  }
 
   // ---- RELIABILITY GATE + MEASURE-ONLY MODE (2026-08-06) -----------------------------------
   // Two independent controls, both defaulting to the previous behaviour:
@@ -302,10 +422,11 @@ int nr_adjust_synch_ue(const NR_DL_FRAME_PARMS *frame_parms,
    * >2x headroom for a genuine standing offset while capping the correction this term can ever
    * demand at 1024*time_sync_I ~ 10 samples/frame. Real clock drift needs a tiny fraction of that:
    * the measured SFO on this pair is 0.11 ppm, i.e. ~0.14 samples/frame. */
-  if (ue->max_pos_acc > NR_MAX_POS_ACC_LIMIT) {
-    ue->max_pos_acc = NR_MAX_POS_ACC_LIMIT;
-  } else if (ue->max_pos_acc < -NR_MAX_POS_ACC_LIMIT) {
-    ue->max_pos_acc = -NR_MAX_POS_ACC_LIMIT;
+  const int acc_limit = nr_max_pos_acc_limit(frame_parms);
+  if (ue->max_pos_acc > acc_limit) {
+    ue->max_pos_acc = acc_limit;
+  } else if (ue->max_pos_acc < -acc_limit) {
+    ue->max_pos_acc = -acc_limit;
   }
 
   return sample_shift;

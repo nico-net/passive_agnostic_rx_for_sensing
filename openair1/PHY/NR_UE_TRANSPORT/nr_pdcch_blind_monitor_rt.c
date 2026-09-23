@@ -38,14 +38,24 @@
  */
 
 #include "PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.h"
+#include "PHY/NR_UE_TRANSPORT/nr_pdcch_sib1_prior.h"
 #include "PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.h"
 #include "PHY/NR_UE_TRANSPORT/nr_pdcch_dci_length_sweep.h" // Phase 3 Technique C
+#include "PHY/NR_UE_TRANSPORT/nr_passive_bwp.h"
+#include "PHY/NR_UE_TRANSPORT/nr_pdcch_coreset_map.h"
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_adaptive_config.h"
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_config_sweep.h" // Phase 3 Technique D
+#include "PHY/NR_UE_TRANSPORT/nr_pdcch_dci11_layout_sweep.h" // DCI 1_1 layout, stage 1
+#include "PHY/NR_UE_TRANSPORT/nr_pdcch_dci01_layout_sweep.h" // DCI 0_1 layout, stage 1
+#include "PHY/NR_UE_TRANSPORT/nr_pdcch_ss_registry.h"        // CORESET/SS registry, observe-only
+#include "PHY/NR_UE_TRANSPORT/nr_agnostic_v2.h"
+#include "PHY/NR_UE_TRANSPORT/nr_csirs_blind_rt.h" // blind CSI-RS search, observe-only
 #include "PHY/NR_UE_TRANSPORT/nr_pdcch_coreset_map.h"      // Phase 3 Technique A cross-check (XCHECK diag)
 
 #include <string.h>
-#include <stdlib.h> // getenv/atoi for the env-gated diagnostics in this file
+#include <stdlib.h>
+#include <limits.h>
+bool nr_passive_rar_tc_seen(uint16_t rnti, uint32_t now_abs_slot, uint32_t window_slots, uint32_t *age_out); // nr_pdsch_passive_queue.c // getenv/atoi for the env-gated diagnostics in this file
 #include <time.h> // clock_gettime for the rnti_seen correlation line below
 
 #include "common/utils/LOG/log.h"
@@ -57,6 +67,7 @@
 #include "PHY/TOOLS/tools_defs.h"                        // allocCast2D/fourDimArray_t
 #include "PHY/NR_UE_ISAC/nr_isac.h"                      // nr_isac_submit_cfr/_enabled/_source_enabled
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.h"  // passive PDSCH decode (data-aided source)
+#include "PHY/NR_UE_TRANSPORT/nr_passive_mac_ta.h"        // timing advance out of an overheard MAC PDU
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.h"   // deferred decode off the RT thread
 #include "PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.h"   // deferred SCAN off the RT thread
 #include <stdatomic.h>
@@ -67,6 +78,8 @@
 extern _Atomic long nr_ue_diag_producer_absolute_slot;
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_data_aided.h"      // shared re-encode + Ĥ=Y/X submit
 #include "nr_pdcch_ul_discovery.h"
+#include "nr_passive_acq_state.h" // explicit acquisition-state tracker (period-guarded)
+#include "nr_pdsch_xoverhead.h"
 #include <pthread.h>
 #include "PHY/NR_UE_TRANSPORT/nr_pusch_passive_decode.h" // passive UPLINK PUSCH receive census
 #include "PHY/NR_UE_TRANSPORT/nr_pusch_passive_monitor_rt.h" // UL grant book
@@ -74,6 +87,10 @@ extern _Atomic long nr_ue_diag_producer_absolute_slot;
 #include "executables/nr-uesoftmodem.h"                   // get_nrUE_params()->Tpool
 #include "common/utils/threadPool/thread-pool.h"          // tpool_t, pushTpool, task_t
 #include "common/utils/threadPool/task_ans.h"             // task_ans_t, init/join/completed_task_ans
+#include "nr_pdcch_discovery_replay.h"
+#include "nr_pdcch_uss_tracker.h"
+#include <stdio.h>
+#include "nr_polar_gpu.h"                                 // SWEEP GPU BATCH: nr_gpu_polar_load/decode_vec
 
 #define NR_PDCCH_BLIND_RE_PER_RB_OUT_DMRS 9 // == dci_nr.c's file-local RE_PER_RB_OUT_DMRS #define
 // Spec maxima for a CORESET: the frequency-domain bitmap addresses 6-PRB groups over the BWP, so at
@@ -128,6 +145,23 @@ static void build_coreset_bitmap(int num_groups, uint8_t bitmap[6])
 // flood at LOG_D's own level anyway, so this is a deliberate low-rate INFO counter, not a
 // downgrade of the per-candidate line.
 #define NR_PDCCH_BLIND_SUMMARY_PERIOD_OCC 1000
+/* The periodic summary/BTIM lines used to fire every 1000 occasions, which on a 2026-09-17 capture
+ * meant nothing for the first ~170 s (the summary block is only reached once the occasion runs to
+ * completion) and then every 2 s: a 120 s validation capture printed no BTIM at all while a 600 s
+ * one printed 204 near-identical lines. Gate them on wall-clock instead: once every 20 s, from the
+ * first completed occasion. */
+#define NR_PDCCH_BLIND_SUMMARY_PERIOD_NS 20000000000ull
+static bool summary_due_now(void)
+{
+  static uint64_t s_last_ns = 0;
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  const uint64_t now = (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+  if (s_last_ns != 0 && now - s_last_ns < NR_PDCCH_BLIND_SUMMARY_PERIOD_NS)
+    return false;
+  s_last_ns = now;
+  return true;
+}
 static uint64_t    g_occasions_run  = 0;
 static uint64_t    g_candidates_run = 0;
 // Phase 3 autodiscover (2026-09-04): Technique C's dci_length sweep has succeeded, OR given up
@@ -147,14 +181,758 @@ static bool         g_length_swept  = false;
  * pinned to in turn. A deaf run must degrade to "no conclusion", never to a confident wrong one. */
 static bool         g_length_found  = false;
 
+
+/* Verified dedicated geometries remain operational while discovery continues for another UE's
+ * CORESET. Entries are immutable after the release-store publishes them, so the receive producer
+ * may test the count while the single scan consumer appends without a lock. */
+#define NR_PDCCH_DISCOVERED_CORESETS 8
+typedef struct {
+  nr_pdcch_blind_monitor_cfg_t cfg;
+  uint16_t owners[NR_PDCCH_BLIND_MAX_UE];
+  uint8_t nowners;
+} nr_pdcch_discovered_coreset_t;
+static nr_pdcch_discovered_coreset_t g_coreset_bank[NR_PDCCH_DISCOVERED_CORESETS];
+static _Atomic int g_coreset_bank_n;
+/* Is this geometry already a verified bank entry? (stage 1-2 hand-off: a discovered CORESET the walk found
+ * first must not be re-dwelled -- run s3live5 re-tested it, the alias rule retired it as "not verified",
+ * and the walk resumed instead of pausing.) */
+bool nr_pdcch_blind_monitor_bank_has_geometry(int rb_offset, int groups, int duration, int bundle, int interleaver,
+                                               int shift, int nid)
+{
+  const int n = atomic_load_explicit(&g_coreset_bank_n, memory_order_acquire);
+  for (int i = 0; i < n; ++i) {
+    const nr_pdcch_blind_monitor_cfg_t *b = &g_coreset_bank[i].cfg;
+    if ((int)(b->bwp_start + b->coreset_rb_offset) == rb_offset && (int)b->coreset_freq_domain == groups
+        && (int)b->coreset_duration == duration && (int)b->coreset_reg_bundle_size == bundle
+        && (bundle == 0 || ((int)b->coreset_interleaver_size == interleaver && (int)b->coreset_shift_index == shift))
+        && (int)b->coreset_pdcch_dmrs_scrambling_id == nid)
+      return true;
+  }
+  return false;
+}
+
+static bool coreset_same_geometry(const nr_pdcch_blind_monitor_cfg_t *a,
+                                  const nr_pdcch_blind_monitor_cfg_t *b)
+{
+  return a->bwp_start == b->bwp_start && a->bwp_size == b->bwp_size
+      && a->coreset_rb_offset == b->coreset_rb_offset
+      && a->coreset_freq_domain == b->coreset_freq_domain
+      && a->coreset_duration == b->coreset_duration
+      && a->coreset_reg_bundle_size == b->coreset_reg_bundle_size
+      && a->coreset_interleaver_size == b->coreset_interleaver_size
+      && a->coreset_shift_index == b->coreset_shift_index
+      && a->coreset_pdcch_dmrs_scrambling_id == b->coreset_pdcch_dmrs_scrambling_id
+      && a->ss_first_symbol == b->ss_first_symbol
+      && a->dci_length_override == b->dci_length_override;
+}
+
+/* A banked operational scan may deliberately cover a wider RB interval than the observed
+ * footprint. It covers any later hypothesis inside that interval when symbol, duration, DM-RS ID
+ * and CCE-to-REG mapping agree. Skipping such hypotheses prevents discovery from repeatedly
+ * rediscovering its first archived CORESET while still allowing a different mapping in the same
+ * RBs to become a separate bank entry. */
+static bool coreset_bank_covers(int rb_offset, int span_rb, int duration, int symbol,
+                                int bundle, int interleaver, int shift, int dmrs_id)
+{
+  const int n = atomic_load_explicit(&g_coreset_bank_n, memory_order_acquire);
+  for (int i = 0; i < n; ++i) {
+    const nr_pdcch_blind_monitor_cfg_t *b = &g_coreset_bank[i].cfg;
+    const int bank_span = b->coreset_freq_domain * 6;
+    if (b->coreset_rb_offset <= rb_offset
+        && b->coreset_rb_offset + bank_span >= rb_offset + span_rb
+        && b->coreset_duration == duration && b->ss_first_symbol == symbol
+        && b->coreset_reg_bundle_size == bundle
+        && b->coreset_interleaver_size == interleaver
+        && b->coreset_shift_index == shift
+        && b->coreset_pdcch_dmrs_scrambling_id == dmrs_id)
+      return true;
+  }
+  return false;
+}
+
+static bool coreset_bank_has_owner(uint16_t rnti)
+{
+  if (!rnti)
+    return false;
+  const int n = atomic_load_explicit(&g_coreset_bank_n, memory_order_acquire);
+  for (int i = 0; i < n; ++i)
+    for (int j = 0; j < g_coreset_bank[i].nowners; ++j)
+      if (g_coreset_bank[i].owners[j] == rnti)
+        return true;
+  return false;
+}
+
+/* A verified dedicated DCI length is a high-value cell prior for another CORESET, but not ground
+ * truth: different UEs may have different BWPs/configurations. The fast catalog tests the modal
+ * bank length for a bounded eight rounds; the exhaustive lap still tries every legal length. */
+static int coreset_bank_length_hint(void)
+{
+  const int n = atomic_load_explicit(&g_coreset_bank_n, memory_order_acquire);
+  int best = 0, best_count = 0;
+  for (int i = 0; i < n; ++i) {
+    const int len = g_coreset_bank[i].cfg.dci_length_override;
+    if (len <= 0)
+      continue;
+    int count = 0;
+    for (int j = 0; j < n; ++j)
+      if (g_coreset_bank[j].cfg.dci_length_override == len)
+        ++count;
+    if (count > best_count) {
+      best = len;
+      best_count = count;
+    }
+  }
+  return best;
+}
+
+static void coreset_bank_add(const nr_pdcch_blind_monitor_cfg_t *cfg, uint16_t owner)
+{
+  if (cfg == NULL || cfg->dci_length_override <= 0)
+    return;
+  int n = atomic_load_explicit(&g_coreset_bank_n, memory_order_acquire);
+  int at = -1;
+  for (int i = 0; i < n; ++i)
+    if (coreset_same_geometry(&g_coreset_bank[i].cfg, cfg)) { at = i; break; }
+  if (at < 0) {
+    /* A narrow CCE-compatible subset can decode the same UE as its already banked CORESET. It is
+     * useful evidence but not a second independent configuration; retaining every such alias can
+     * fill the bounded bank before another UE is reached. */
+    if (coreset_bank_has_owner(owner))
+      return;
+    if (n >= NR_PDCCH_DISCOVERED_CORESETS) {
+      LOG_W(PHY, "SENSING: multi-CORESET bank full (%d); verified geometry left unarchived\n", n);
+      return;
+    }
+    at = n;
+    memset(&g_coreset_bank[at], 0, sizeof(g_coreset_bank[at]));
+    g_coreset_bank[at].cfg = *cfg;
+    g_coreset_bank[at].cfg.autodiscover = 0;
+    g_coreset_bank[at].cfg.ss_monitoring_slot_periodicity = 1;
+    g_coreset_bank[at].cfg.ss_monitoring_slot_offset = 0;
+    g_coreset_bank[at].cfg.ss_duration = 1;
+    atomic_store_explicit(&g_coreset_bank_n, n + 1, memory_order_release);
+    LOG_A(PHY, "SENSING: multi-CORESET bank add index=%d offset=%d span=%d symbol=%d mapping=%d/%d/%d len=%d\n",
+          at, cfg->coreset_rb_offset, cfg->coreset_freq_domain * 6, cfg->ss_first_symbol,
+          cfg->coreset_reg_bundle_size, cfg->coreset_interleaver_size, cfg->coreset_shift_index,
+          cfg->dci_length_override);
+  }
+  nr_pdcch_discovered_coreset_t *e = &g_coreset_bank[at];
+  for (int i = 0; i < e->nowners; ++i)
+    if (e->owners[i] == owner) return;
+  if (owner && e->nowners < NR_PDCCH_BLIND_MAX_UE)
+    e->owners[e->nowners++] = owner;
+}
+
 /* Manual/auto is authoritative: disabled means no hypothesis application or scoring. */
 static bool g_pdsch_sweep_on;
+
+/* ---- DCI 1_1 LAYOUT CONSISTENCY (stage 1 of nr_pdcch_dci11_layout_sweep) ---------------------
+ * The configured field layout is a set of ASSUMPTIONS. A wrong one still yields CRC-valid DCIs
+ * with plausible-looking allocations -- the RNTI comes from the CRC and not the payload, and the
+ * RIV precedes most of the fields that can be misplaced -- so nothing looks wrong except that no
+ * transport block decodes. That is precisely how a whole campaign was lost to bwp_indicator 1->0
+ * and time_domain_assignment 4->2 while the TOTAL length was right.
+ *
+ * Stage 1 costs NO decode: it reads the payload only. It enumerates every layout consistent with
+ * the observed DCI length, drops the ones the payloads contradict, and reports whether the
+ * CONFIGURED layout is still among the survivors. It cannot repair the layout on its own --
+ * rotating the extractor across candidates is stage 2 and needs air to validate -- but it converts
+ * a silent wrong assumption into a loud one, which is the expensive half of that failure.
+ *
+ * Lazily armed: bwp_size and the DCI length are not known until the monitor is configured. */
+static nr_dci11_resolver_t g_dci11_resolver;
+static int      g_dci11_state;   /* 0 = not tried, 1 = armed, -1 = unavailable */
+static uint64_t g_dci11_seen;
+
+static inline int nr_pdcch_ss_bucket(const nr_pdcch_blind_monitor_cfg_t *cfg);
+
+/* STAGE 0: PDCCH data-scrambling n_RNTI as a HYPOTHESIS (TS 38.211 7.3.2.3, c_init = (n_RNTI << 16)
+ * + n_ID). n_RNTI is the C-RNTI in a UE-specific search space whose CORESET carries
+ * pdcch-DMRS-ScramblingID, else 0 -- and that RRC field is ciphered, so a passive receiver cannot
+ * know which. Both are therefore tested, on USS/PDCCH-Config occasions only (callers gate that):
+ *   H = {0} U {every RNTI the receiver itself has confirmed}; one hypothesis per occasion, chosen by a
+ *   hash of the slot (a plain modulo aliases against TDD/monitoring periodicity and could starve a
+ *   hypothesis forever).
+ * Evidence, recorded per hypothesis and needing no ground truth:
+ *   n_RNTI = R != 0 : accepts whose CRC-recovered RNTI == R. Under the right hypothesis the UE's own
+ *                     DCIs decode with their own RNTI; under a wrong one nothing decodes consistently.
+ *   n_RNTI = 0      : accepts whose RNTI is receiver-confirmed (recurrent).
+ * ISAC_PDCCH_NRNTI=0 forces 0 (regression control only). There is deliberately no way to inject a
+ * known C-RNTI: that was a test fixture and it is gone.
+ * ponytail: uniform rotation, i.e. pure exploration; weight toward the winning hypothesis once the
+ * evidence has been validated on a cell where n_RNTI != 0. */
+#define STAGE0_MAXH 17
+static struct {
+  uint32_t slot;
+  uint16_t nrnti;
+} s_stage0_ring[1024];
+static struct {
+  uint16_t nrnti;
+  uint64_t occ, acc, match;
+} s_stage0_h[STAGE0_MAXH];
+static pthread_mutex_t s_stage0_mu = PTHREAD_MUTEX_INITIALIZER;
+
+static int stage0_slot_of(uint16_t nrnti) /* caller holds s_stage0_mu */
+{
+  for (int i = 0; i < STAGE0_MAXH; i++)
+    if (s_stage0_h[i].occ && s_stage0_h[i].nrnti == nrnti)
+      return i;
+  for (int i = 0; i < STAGE0_MAXH; i++)
+    if (!s_stage0_h[i].occ) {
+      s_stage0_h[i].nrnti = nrnti;
+      return i;
+    }
+  return -1;
+}
+
+static uint16_t nr_pdcch_nrnti_override(uint32_t abs_slot)
+{
+  static int s_force0 = -1;
+  if (s_force0 < 0) {
+    const char *e = getenv("ISAC_PDCCH_NRNTI");
+    s_force0 = (e != NULL && strcmp(e, "0") == 0) ? 1 : 0;
+    LOG_A(PHY, "SENSING: STAGE0 n_RNTI %s\n", s_force0 ? "forced to 0 (regression control)"
+                                                       : "hypothesis test: {0} U confirmed RNTIs per USS occasion");
+  }
+  if (s_force0)
+    return 0;
+  /* Decided: once n_RNTI=0 has >= 200 confirmed accepts and every other hypothesis with >= 1000 occasions
+   * self-matches at < 1/50 of that rate, n_RNTI=0 is the answer for this cell (a per-CORESET property, so
+   * later UEs inherit it). Rotating on would descramble 1/(1+k) of all USS occasions with a wrong n_RNTI and
+   * lose every grant in them (2 UEs: 2/3 of the occasions). */
+  static int s_decided = -1;
+  if (s_decided == 0)
+    return 0;
+  uint16_t h[STAGE0_MAXH];
+  h[0] = 0;
+  const int n = 1 + nr_pdcch_blind_monitor_confirmed_rnti_set(abs_slot, h + 1, STAGE0_MAXH - 1);
+  const uint16_t pick = h[(uint32_t)(((uint64_t)abs_slot * 2654435761u) >> 16) % (uint32_t)n];
+  pthread_mutex_lock(&s_stage0_mu);
+  const int r = abs_slot & 1023;
+  if (s_stage0_ring[r].slot != abs_slot + 1) { /* first call this slot (+1 so slot 0 != empty) */
+    s_stage0_ring[r].slot = abs_slot + 1;
+    s_stage0_ring[r].nrnti = pick;
+    const int i = stage0_slot_of(pick);
+    if (i >= 0)
+      s_stage0_h[i].occ++;
+    static uint64_t s_n;
+    if ((s_n % 1000) == 999 && s_decided < 0) {
+      int z = -1;
+      for (int k = 0; k < STAGE0_MAXH; k++)
+        if (s_stage0_h[k].occ && s_stage0_h[k].nrnti == 0) z = k;
+      if (z >= 0 && s_stage0_h[z].match >= 200) {
+        const double r0 = (double)s_stage0_h[z].match / (double)s_stage0_h[z].occ;
+        bool decisive = true;
+        for (int k = 0; k < STAGE0_MAXH; k++)
+          if (k != z && s_stage0_h[k].occ >= 1000
+              && 50.0 * (double)s_stage0_h[k].match / (double)s_stage0_h[k].occ >= r0)
+            decisive = false;
+        if (decisive) {
+          s_decided = 0;
+          LOG_A(PHY, "SENSING: STAGE0 DECIDED n_RNTI=0 for this cell (confirmed %lu / %lu occasions; every other "
+                     "hypothesis self-matches at < 1/50 of that rate) -- rotation stopped\n",
+                (unsigned long)s_stage0_h[z].match, (unsigned long)s_stage0_h[z].occ);
+        }
+      }
+    }
+    if ((++s_n % 4000) == 0) {
+      char b[600];
+      int u = 0;
+      for (int k = 0; k < STAGE0_MAXH && u < (int)sizeof(b) - 60; k++)
+        if (s_stage0_h[k].occ)
+          u += snprintf(b + u, sizeof(b) - u, "n_RNTI=0x%04x:occ=%lu,acc=%lu,%s=%lu  ", s_stage0_h[k].nrnti,
+                        (unsigned long)s_stage0_h[k].occ, (unsigned long)s_stage0_h[k].acc,
+                        s_stage0_h[k].nrnti ? "self" : "confirmed", (unsigned long)s_stage0_h[k].match);
+      LOG_A(PHY, "SENSING: STAGE0 %s\n", b);
+    }
+  }
+  const uint16_t used = s_stage0_ring[r].nrnti; /* all three call sites of one slot agree */
+  pthread_mutex_unlock(&s_stage0_mu);
+  return used;
+}
+
+/* Credit an accept to the n_RNTI hypothesis its slot was descrambled with. */
+static void stage0_note_accept(uint32_t abs_slot, uint16_t rnti, bool confirmed)
+{
+  pthread_mutex_lock(&s_stage0_mu);
+  const int r = abs_slot & 1023;
+  if (s_stage0_ring[r].slot == abs_slot + 1) {
+    const int i = stage0_slot_of(s_stage0_ring[r].nrnti);
+    if (i >= 0) {
+      s_stage0_h[i].acc++;
+      if (s_stage0_h[i].nrnti ? (rnti == s_stage0_h[i].nrnti) : confirmed)
+        s_stage0_h[i].match++;
+    }
+  }
+  pthread_mutex_unlock(&s_stage0_mu);
+}
+
+
+/* Every PDSCH field an RA-class grant is decoded with. Printed for the first 8 RA grants of a run so
+ * that a working configuration and a broken one can be diffed field by field instead of guessed at
+ * -- the failure mode here is a CRC that fails for ALL of them, which says nothing about WHICH
+ * field is wrong. RA class only, 8 lines, so it costs nothing during a capture. */
+static void ragrant_dump(const fapi_nr_dl_config_dlsch_pdu_rel15_t *pdu,
+                         const nr_pdcch_blind_result_t *out, int mcs_table, bool css0, const char *path)
+{
+  if (out->rnti_class != NR_BLIND_RNTI_CLASS_RA) {
+    return;
+  }
+  static _Atomic unsigned long s_n = 0;
+  if (atomic_fetch_add_explicit(&s_n, 1, memory_order_relaxed) >= 8) {
+    return;
+  }
+  LOG_A(PHY,
+        "SENSING: RAGRANT %s css0=%d rnti=0x%x bwp=%u+%u rb=%u+%u sym=%u+%u dmrsmask=0x%x refpt=%u "
+        "cdm=%u type=%d nscid=%u dmrs_scr=%u data_scr=%u ports=0x%x mcs=%u tbl=%d rv=%u tbscale=%u\n",
+        path, (int)css0, (unsigned)out->rnti, (unsigned)pdu->BWPStart, (unsigned)pdu->BWPSize,
+        (unsigned)pdu->start_rb, (unsigned)pdu->number_rbs, (unsigned)pdu->start_symbol,
+        (unsigned)pdu->number_symbols, (unsigned)pdu->dlDmrsSymbPos, (unsigned)pdu->refPoint,
+        (unsigned)pdu->n_dmrs_cdm_groups, (int)pdu->dmrsConfigType, (unsigned)pdu->nscid,
+        (unsigned)pdu->dlDmrsScramblingId, (unsigned)pdu->dlDataScramblingId,
+        (unsigned)pdu->dmrs_ports, (unsigned)out->mcs, mcs_table, (unsigned)out->rv,
+        (unsigned)out->tb_scaling);
+}
+
+
+/* See the header note on GRANTDROP. Rate-limited per reason so a persistent gate logs once and then
+ * every 500th time, which is enough to see it without flooding a capture. */
+static void grantdrop(const nr_pdcch_blind_result_t *out, int frame, int slot, const char *why)
+{
+  if (out->rnti_class != NR_BLIND_RNTI_CLASS_SI && out->rnti_class != NR_BLIND_RNTI_CLASS_RA
+      && out->rnti_class != NR_BLIND_RNTI_CLASS_TC) {
+    return;
+  }
+  static _Atomic unsigned long s_n = 0;
+  const unsigned long n = atomic_fetch_add_explicit(&s_n, 1, memory_order_relaxed) + 1;
+  if (n <= 20 || (n % 500) == 0) {
+    LOG_A(PHY, "SENSING: GRANTDROP (%d.%d) rnti=0x%x class=%d why=%s (n=%lu)\n",
+          frame, slot, (unsigned)out->rnti, (int)out->rnti_class, why, n);
+  }
+}
+
 static uint64_t g_pdsch_configuration;
+/* ---- DCI 1_1 layout, STAGE 2 (ISAC_DCI11_STAGE2=1, default off). Every layout the stage-1
+ * resolver still holds alive is turned into extract widths (nr_dci11_layout_to_field_bits, which is
+ * offset-identical to the layout by construction -- nr_dci11_layout_apply_roundtrip) and parsed. Each
+ * parse is a candidate allocation; the existing Technique-D machinery below gives every candidate its
+ * own TB-CRC-scored context (key = configuration ^ layout id) and the settled/preferred/round-robin
+ * selection promotes the one that decodes. TB CRC remains the only authority. The hand-picked
+ * 3-family enumeration is the fallback while stage 1 is not armed. */
+#define NR_DCI11_STAGE2_MAX_ALIVE 8   /* hand over once stage 1 is down to this many */
+/* While the configured layout is still among stage 1's survivors, hand over only at 4 (the measured
+ * dilution limit); once stage 1 has REFUTED it, waiting is pointless -- the hand-picked fallback
+ * enumeration hard-codes antenna_ports=4 bits and can never contain the truth. OTA 2026-09-15 on the
+ * rank-4 cell: 8 survivors, configured layout dead, 0/3793 TB CRC for the whole run. */
+static int g_dci11_cfg_alive = 1;
+static _Atomic int g_dl_layout_preferred; /* a DL layout family has >= 8 code-block CRC passes */
+void nr_pdcch_dci11_layout_feedback(uint16_t layout_index, bool cb0_ok)
+{
+  if (layout_index >= NR_DCI11_LAYOUT_MAX)
+    return;
+  /* consumer thread vs the receive thread's reads: plain counters, a torn read costs one tally */
+  __atomic_fetch_add(&g_dci11_resolver.probe_tr[layout_index], 1u, __ATOMIC_RELAXED);
+  if (cb0_ok)
+    __atomic_fetch_add(&g_dci11_resolver.probe_ok[layout_index], 1u, __ATOMIC_RELAXED);
+  const uint16_t fam = g_dci11_resolver.layout_fam[layout_index] % NR_DCI11_FAM_N;
+  __atomic_fetch_add(&g_dci11_resolver.fam_tr[fam], 1u, __ATOMIC_RELAXED);
+  if (cb0_ok)
+    __atomic_fetch_add(&g_dci11_resolver.fam_ok[fam], 1u, __ATOMIC_RELAXED);
+}
+/* Evidence for a layout: its own probe passes or those of the interpretation family it last read. */
+static inline uint32_t dci11_layout_evidence(const nr_dci11_resolver_t *r, int i, uint32_t *tr)
+{
+  const uint32_t fo = r->fam_ok[r->layout_fam[i] % NR_DCI11_FAM_N];
+  if (tr) *tr = r->probe_tr[i] > r->fam_tr[r->layout_fam[i] % NR_DCI11_FAM_N] ? r->probe_tr[i] : r->fam_tr[r->layout_fam[i] % NR_DCI11_FAM_N];
+  return r->probe_ok[i] > fo ? r->probe_ok[i] : fo;
+}
+static inline uint16_t dci11_family_key(const nr_pdcch_blind_result_t *p)
+{
+  uint32_t k = 2166136261u;
+  const uint32_t v[] = {p->start_rb, p->num_rb, p->tda_index, p->mcs, p->rv, p->ndi, p->harq_pid, p->dmrs_ports, p->nscid, p->n_dmrs_cdm_groups};
+  for (unsigned i = 0; i < sizeof(v) / sizeof(v[0]); i++) k = (k ^ v[i]) * 16777619u;
+  return (uint16_t)(k % NR_DCI11_FAM_N);
+}
+static int nr_pdcch_dci11_stage2_enabled(void)
+{
+  static int s_on = -1;
+  if (s_on < 0) {
+    const char *e = getenv("ISAC_DCI11_STAGE2");
+    s_on = (e != NULL && atoi(e) != 0) ? 1 : 0;
+  }
+  return s_on;
+}
+static int nr_pdcch_dci11_stage2_candidates(const nr_pdcch_blind_raw_result_t *raw, uint16_t len,
+                                            const nr_pdcch_blind_monitor_cfg_t *cfg,
+                                            nr_pdcch_blind_result_t *out, uint16_t *ids, int max)
+{
+  const nr_dci11_resolver_t *r = &g_dci11_resolver;
+  /* DILUTION GATE. Every candidate offered here gets its own Technique-D context, so N candidates
+   * means each sees 1/N of the grants and none reaches min_trials -- the same failure the
+   * layout-family preference below was built for, measured at N=14 (OTA 2026-09-12: DL CRC 0.3 %).
+   * Stage 1 prunes on plausibility at no decode cost, so wait until it has: hand over only when the
+   * live set is small enough to converge, and run the hand-picked enumeration until then. */
+  /* Stage 2 drives at ANY live count now: above the hand-over limit the trials are first-code-block
+   * PROBES (job.layout_probe, ~1/C of a full decode), so a wide set converges instead of waiting. */
+  (void)g_dci11_cfg_alive;
+  int count = 0;
+  static __thread int order[NR_DCI11_LAYOUT_MAX];
+  static __thread double sc[NR_DCI11_LAYOUT_MAX];
+  int no = 0;
+  for (int i = 0; i < r->n_hyp; i++)
+    if (r->alive[i]) { sc[i] = nr_dci11_resolver_score(r, i); order[no++] = i; }
+  if (no <= NR_DCI11_STAGE2_MAX_ALIVE) {
+    for (int a = 1; a < no; a++)          /* insertion sort: a small set is offered best-scored first */
+      for (int b = a; b > 0 && sc[order[b]] > sc[order[b - 1]]; b--) {
+        const int t = order[b]; order[b] = order[b - 1]; order[b - 1] = t;
+      }
+  } else {
+    /* WIDE SET: ROTATE, do not rank. Measured on the rank-4 bed (883 live, constant phy-test DCI):
+     * every offset reads a constant field, so the distributional score ranks nothing, and offering
+     * the same top-8 by that score on every grant meant the true layout was never tried (12k probes,
+     * 0 hits). A rotating window gives every live layout its probe within n_alive/max grants. */
+    static _Atomic uint32_t s_rot;
+    const uint32_t start = atomic_fetch_add_explicit(&s_rot, (uint32_t)max, memory_order_relaxed) % (uint32_t)no;
+    for (int k = 0; k < no; k++) sc[order[k]] = 0.0; /* order[] rotated below; scores unused */
+    static __thread int rot[NR_DCI11_LAYOUT_MAX];
+    /* EXPLOIT FIRST: a layout whose probes have already passed code block 0 goes to the head of
+     * every window, so one lucky hit turns into a settled layout within seconds instead of waiting
+     * for the rotation to come round again (809 live x ~6 PDSCH hypotheses: 1 hit per ~3000 probes
+     * on the rank-4 bed, 2026-09-16). Everything else keeps rotating behind it. */
+    int nh = 0;
+    uint32_t hot_ok[NR_DCI11_STAGE2_MAX_ALIVE + 3];
+    for (int k = 0; k < no; k++) {
+      const int i = order[k];
+      const uint32_t ok = dci11_layout_evidence(r, i, NULL); /* own or family evidence */
+      if (ok == 0)
+        continue;
+      /* keep the `max` most-passed, sorted: the leader must be in every window once preferred */
+      int pos = nh < max ? nh : max - 1;
+      if (nh >= max && ok <= hot_ok[pos])
+        continue;
+      while (pos > 0 && hot_ok[pos - 1] < ok) { rot[pos] = rot[pos - 1]; hot_ok[pos] = hot_ok[pos - 1]; pos--; }
+      rot[pos] = i; hot_ok[pos] = ok;
+      if (nh < max) nh++;
+    }
+    for (int k = 0, w = nh; k < no && w < no; k++) {
+      const int i = order[(start + k) % no];
+      bool hot = false;
+      for (int h = 0; h < nh; h++) hot |= (rot[h] == i);
+      if (!hot) rot[w++] = i;
+    }
+    memcpy(order, rot, (size_t)no * sizeof(order[0]));
+  }
+  /* Above the hand-over limit only `max` of the live set fit one grant's trial list; rotate the
+   * window over the score-sorted list so every hypothesis gets probed, best ones most often. */
+  static __thread int s_rot = 0;
+  /* The wide set was already rotated (hot layouts at its head): offer from 0 there. */
+  const int start = (no > max && no <= NR_DCI11_STAGE2_MAX_ALIVE) ? (s_rot++ % (no - max + 1)) : 0;
+  for (int oi = start; oi < no && count < max; oi++) {
+    const int i = order[oi];
+    nr_dci11_field_bits_t f;
+    if (!nr_dci11_layout_to_field_bits(&r->hyp[i], &f))
+      continue;
+    nr_pdcch_blind_extract_opts_t o = {0};
+    o.bwp_indicator_bits = f.bwp_indicator_bits;
+    o.vrb_to_prb_bits    = f.vrb_to_prb_bits;
+    o.prb_bundling_bits  = f.prb_bundling_bits;
+    o.rate_matching_bits = f.rate_matching_bits;
+    o.zp_csirs_bits      = f.zp_csirs_bits;
+    o.tb2_bits           = f.tb2_bits;
+    o.harq_pid_bits      = f.harq_pid_bits;
+    o.dai_bits           = f.dai_bits;
+    o.pdsch_to_harq_bits = f.pdsch_to_harq_bits;
+    o.antenna_ports_bits = f.antenna_ports_bits;
+    o.dmrs_config_type   = f.dmrs_config_type;
+    o.tci_bits           = f.tci_bits;
+    o.srs_request_bits   = f.srs_request_bits;
+    o.cbg_bits           = f.cbg_bits;
+    /* The TDA width is THIS hypothesis' (searched); a configured list still pins it. tda_count is
+     * the largest count that width can express; S/L are the scaffold Technique D replaces. */
+    const uint8_t htb = r->off[i].tda_bits;
+    o.tda_count          = (cfg->extract.tda_count > 0) ? cfg->extract.tda_count : (htb == 0 ? 1 : (1 << htb));
+    o.dmrs_add_pos       = 0;
+    o.dmrs_max_length    = 1;
+    for (int k = 0; k < o.tda_count && k < 16; ++k) {
+      o.tda_start[k] = 1; o.tda_length[k] = 13; o.tda_mapping[k] = 0; // scaffold: Technique D replaces S/L
+    }
+    static __thread uint32_t s_sz_mismatch, s_rejected, s_diag_n;
+    if (nr_pdcch_blind_dci_size_ex(cfg->bwp_size, &o) != len) {
+      s_sz_mismatch++;
+      continue; // the resolver and the extractor disagree on this layout's length: not a candidate
+    }
+    nr_pdcch_blind_result_t parsed;
+    if (!nr_pdcch_blind_extract_11(raw, len, cfg->bwp_size, cfg->dmrs_typeA_position, &o, &parsed)) {
+      s_rejected++;
+      if ((++s_diag_n % 5000) == 1)
+        LOG_A(PHY, "SENSING: STAGE2 reject: layout %d (tda_bits %u ap %u bwp %u) len_ex=%u: %s [size_mismatch=%u rejected=%u]\n", i,
+              r->off[i].tda_bits, f.antenna_ports_bits, f.bwp_indicator_bits, nr_pdcch_blind_dci_size_ex(cfg->bwp_size, &o),
+              parsed.reject_reason ? parsed.reject_reason : "?", s_sz_mismatch, s_rejected);
+      continue;
+    }
+    g_dci11_resolver.layout_fam[i] = dci11_family_key(&parsed); /* what this layout reads on this DCI */
+    out[count] = parsed;
+    ids[count++] = (uint16_t)i; /* resolver index: up to 2048, a uint8_t wrapped it and merged
+                                 * the sweep contexts / evidence of layouts 256 apart */
+  }
+  return count;
+}
+
+/* ---- DCI 0_1 layout, stage 1 (observe-only, mirrors the 1_1 observer below). The uplink grant's
+ * field widths are set by RRC switches this receiver cannot read; every layout whose total equals
+ * the observed 0_1 length is a hypothesis and each accepted payload prunes by plausibility. */
+static nr_dci11_resolver_t g_dci01_resolver;
+static int g_dci01_state = 0;   /* 0 = not armed, 1 = armed, -1 = no legal layout at this length */
+static uint64_t g_dci01_seen = 0;
+static void nr_pdcch_dci01_layout_observe(uint16_t ul_bwp_size, int ul_tda_count,
+                                          uint16_t dci_length, uint64_t payload)
+{
+  if (g_dci01_state < 0 || dci_length == 0 || ul_bwp_size == 0) {
+    return;
+  }
+  if (g_dci01_state == 0) {
+    const double span = ((double)ul_bwp_size * (double)(ul_bwp_size + 1)) / 2.0;
+    const uint16_t riv_bits = (uint16_t)ceil(log2(span));
+    uint8_t tda_bits = 4;
+    if (ul_tda_count > 0) {
+      tda_bits = 0;
+      while ((1 << tda_bits) < ul_tda_count) {
+        tda_bits++;
+      }
+    }
+    static nr_dci01_layout_t hyp[NR_DCI11_LAYOUT_MAX];
+    static nr_dci11_offsets_t off[NR_DCI11_LAYOUT_MAX];
+    const int n = nr_dci01_layout_enumerate(riv_bits, tda_bits, dci_length, hyp, off, NR_DCI11_LAYOUT_MAX);
+    if (n <= 0 || nr_dci_resolver_init_from_offsets(&g_dci01_resolver, ul_bwp_size, off, n) <= 0) {
+      LOG_W(PHY, "SENSING: DCI01_LAYOUT no legal layout sums to dci_length=%u at ul_bwp_size=%u "
+                 "tda_bits=%u -- one of those three is wrong for this cell\n",
+            dci_length, (unsigned)ul_bwp_size, tda_bits);
+      g_dci01_state = -1;
+      return;
+    }
+    if (ul_tda_count > 0 && ul_tda_count < 16)
+      nr_dci11_resolver_set_tda_count(&g_dci01_resolver, (uint8_t)ul_tda_count);
+    LOG_I(PHY, "SENSING: DCI01_LAYOUT armed: %d layouts consistent with dci_length=%u (riv=%u bits, tda=%u bits)\n",
+          n, dci_length, riv_bits, tda_bits);
+    g_dci01_state = 1;
+  }
+  nr_dci11_resolver_observe(&g_dci01_resolver, payload);
+  if ((++g_dci01_seen % 4000) == 0) {
+    LOG_A(PHY, "SENSING: DCI01_LAYOUT n=%llu observed | %d of %d layouts still plausible\n",
+          (unsigned long long)g_dci01_seen, g_dci01_resolver.n_alive, g_dci01_resolver.n_hyp);
+  }
+}
+
+/* ---- CORESET / search-space registry, observe-only. Each configuration the monitor scans is
+ * registered on first sight; every occasion and accept is attributed to it; a CONFIRMED accept is
+ * one whose RNTI repeated (noise does not repeat). The retire verdict is LOGGED, not acted on. */
+static nr_pdcch_ss_registry_t g_ss_reg;
+static int g_ss_reg_idx[2] = {-1, -1};
+static uint16_t g_ss_recent_rnti[64];
+static unsigned g_ss_recent_w = 0;
+static int nr_pdcch_ss_registry_index(const nr_pdcch_blind_monitor_cfg_t *cfg)
+{
+  if (cfg == NULL || cfg->bwp_size == 0)
+    return -1; // not configured yet (autoconf before MIB/SIB1)
+  const int b = nr_pdcch_ss_bucket(cfg);
+  if (g_ss_reg_idx[b] < 0) {
+    const int nrb = cfg->coreset_freq_domain; // num_groups of 6 contiguous PRBs
+    nr_pdcch_ss_entry_t e = {.coreset_id = (uint8_t)(b == 0 ? 0 : 1),
+                             .coreset_duration = (uint8_t)cfg->coreset_duration,
+                             .coreset_n_rbs = (uint16_t)(nrb * 6),
+                             .ss_type = (uint8_t)(b == 0 ? 0 : 1),
+                             .ss_first_symbol = (uint8_t)cfg->ss_first_symbol,
+                             .ss_period_slots = 1,
+                             .ss_offset_slots = 0,
+                             .bwp_start = (uint16_t)cfg->bwp_start,
+                             .bwp_size = (uint16_t)cfg->bwp_size,
+                             .al_candidates = {0, 1, 1, 1, 0}}; // AL2/4/8 scanned; the census refines per SS
+    g_ss_reg_idx[b] = nr_pdcch_ss_register(&g_ss_reg, &e);
+  }
+  return g_ss_reg_idx[b];
+}
+static void nr_pdcch_ss_registry_accept(const nr_pdcch_blind_monitor_cfg_t *cfg, uint16_t rnti)
+{
+  const int idx = nr_pdcch_ss_registry_index(cfg);
+  if (idx < 0)
+    return;
+  bool repeated = false;
+  for (int i = 0; i < 64; i++)
+    if (g_ss_recent_rnti[i] == rnti) { repeated = true; break; }
+  g_ss_recent_rnti[g_ss_recent_w++ % 64] = rnti;
+  nr_pdcch_ss_observe(&g_ss_reg, idx, true, repeated);
+}
+static void nr_pdcch_ss_registry_occasion(const nr_pdcch_blind_monitor_cfg_t *cfg)
+{
+  const int idx = nr_pdcch_ss_registry_index(cfg);
+  if (idx < 0)
+    return;
+  g_ss_reg.occasions[idx]++;
+  static uint64_t n;
+  if ((++n % 200000) == 0) {
+    char b[400];
+    int u = 0;
+    for (int i = 0; i < g_ss_reg.n && u < (int)sizeof(b) - 60; i++)
+      u += snprintf(b + u, sizeof(b) - u, "[%s cs%u dur%u %uRB sym%u: occ=%llu acc=%llu conf=%llu%s] ",
+                    g_ss_reg.entry[i].ss_type ? "USS" : "CSS0", g_ss_reg.entry[i].coreset_id,
+                    g_ss_reg.entry[i].coreset_duration, g_ss_reg.entry[i].coreset_n_rbs,
+                    g_ss_reg.entry[i].ss_first_symbol, (unsigned long long)g_ss_reg.occasions[i],
+                    (unsigned long long)g_ss_reg.accepts[i], (unsigned long long)g_ss_reg.confirmed[i],
+                    g_ss_reg.retired[i] ? " RETIRED" : "");
+    /* Observe-only by default: a copy is asked what it WOULD retire. Under V2 the live registry is
+     * pruned (it never retires its last live entry), and the occasion loop above then probes a
+     * retired entry 1 time in 64 instead of paying full scan cost on it. */
+    int would;
+    if (nr_agnostic_v2()) {
+      would = nr_pdcch_ss_retire_barren(&g_ss_reg, 100000);
+    } else {
+      nr_pdcch_ss_registry_t probe = g_ss_reg;
+      would = nr_pdcch_ss_retire_barren(&probe, 100000);
+    }
+    LOG_A(PHY, "SENSING: SS_REGISTRY live=%d/%d would_retire=%d %s\n", nr_pdcch_ss_live(&g_ss_reg), g_ss_reg.n, would, b);
+  }
+}
+
+static void nr_pdcch_dci11_layout_observe(const nr_pdcch_blind_monitor_cfg_t *cfg,
+                                          uint16_t dci_length, uint64_t payload)
+{
+  if (g_dci11_state < 0 || cfg == NULL || dci_length == 0 || cfg->bwp_size == 0) {
+    return;
+  }
+  if (g_dci11_state == 0) {
+    const double span = ((double)cfg->bwp_size * (double)(cfg->bwp_size + 1)) / 2.0;
+    const uint16_t riv_bits = (uint16_t)ceil(log2(span));
+    /* No configured TDRA list -> the field width is UNKNOWN and is searched (0..4 bits), not
+     * assumed to be the 16-entry default. A configured list pins it, as before. */
+    uint8_t tda_bits = NR_DCI11_TDA_UNKNOWN;
+    if (cfg->extract.tda_count > 0) {
+      tda_bits = 0;
+      while ((1 << tda_bits) < cfg->extract.tda_count) {
+        tda_bits++;
+      }
+    }
+    const int n = nr_dci11_resolver_init(&g_dci11_resolver, cfg->bwp_size, riv_bits, tda_bits,
+                                         dci_length);
+    if (n <= 0) {
+      /* NOT a resolver failure. It means no legal switch combination sums to the observed length,
+       * so one of bwp_size / tda_count / dci_length disagrees with this cell -- which is itself
+       * worth saying out loud, once. */
+      LOG_W(PHY, "SENSING: DCI11_LAYOUT no legal layout sums to dci_length=%u at bwp_size=%u "
+                 "tda_bits=%u -- one of those three is wrong for this cell\n",
+            dci_length, (unsigned)cfg->bwp_size, tda_bits);
+      g_dci11_state = -1;
+      return;
+    }
+    if (cfg->extract.tda_count > 0 && cfg->extract.tda_count < 16)
+      nr_dci11_resolver_set_tda_count(&g_dci11_resolver, (uint8_t)cfg->extract.tda_count);
+    LOG_I(PHY, "SENSING: DCI11_LAYOUT armed: %d layouts consistent with dci_length=%u "
+               "(riv=%u bits, tda=%s)\n", n, dci_length, riv_bits,
+          tda_bits == NR_DCI11_TDA_UNKNOWN ? "0..4 bits (searched)" : "configured");
+    g_dci11_state = 1;
+  }
+  nr_dci11_resolver_observe(&g_dci11_resolver, payload);
+  if ((++g_dci11_seen % 4000) != 0) {
+    return;
+  }
+  const nr_dci11_resolver_t *r = &g_dci11_resolver;
+  const int cfg_bwp = (cfg->extract.bwp_indicator_bits >= 0) ? cfg->extract.bwp_indicator_bits : 1;
+  const int cfg_ap  = (cfg->extract.antenna_ports_bits >= 0) ? cfg->extract.antenna_ports_bits : 4;
+  int cfg_alive = 0;
+  for (int i = 0; i < r->n_hyp; i++) {
+    if (!r->alive[i]) {
+      continue;
+    }
+    nr_dci11_field_bits_t f;
+    if (nr_dci11_layout_to_field_bits(&r->hyp[i], &f)
+        && f.bwp_indicator_bits == cfg_bwp && f.antenna_ports_bits == cfg_ap) {
+      cfg_alive = 1;
+      break;
+    }
+  }
+  g_dci11_cfg_alive = cfg_alive;
+  LOG_A(PHY, "SENSING: DCI11_LAYOUT n=%llu observed | %d of %d layouts still plausible | "
+             "configured (bwp_ind=%d ant_ports=%d) %s\n",
+        (unsigned long long)g_dci11_seen, r->n_alive, r->n_hyp, cfg_bwp, cfg_ap,
+        cfg_alive ? "IS among the survivors"
+                  : "IS NOT among the survivors -- the assumed widths contradict the air");
+  if (nr_pdcch_dci11_stage2_enabled() || nr_agnostic_v2()) {
+    /* Every live layout, compactly: i t<tda>b<bwp>m<pre_mcs>x<tb2+dai+p2h>a<ant><type>p<post_ant>:ok/trials.
+     * The whole set, not a 400-byte prefix: whether the TRUE layout is still alive is the first
+     * question when nothing decodes, and it cannot be answered from a truncated list. */
+    static char eb[8192];
+    int u = 0;
+    for (int i = 0; i < r->n_hyp && u < (int)sizeof(eb) - 48; i++) {
+      if (!r->alive[i])
+        continue;
+      nr_dci11_field_bits_t f;
+      if (!nr_dci11_layout_to_field_bits(&r->hyp[i], &f))
+        continue;
+      const uint32_t ok = r->probe_ok[i], tr = r->probe_tr[i];
+      u += snprintf(eb + u, sizeof(eb) - u, "[%d t%ub%dm%dx%da%d%cp%d:%u/%u]", i, (unsigned)r->off[i].tda_bits,
+                    f.bwp_indicator_bits, f.vrb_to_prb_bits, f.tb2_bits, f.antenna_ports_bits,
+                    f.dmrs_config_type ? 'B' : 'A', f.tci_bits, ok, tr);
+    }
+    LOG_A(PHY, "SENSING: DCI11_STAGE2 %s (alive=%d, hands over at <=%d) tb_crc ok/trials per live layout: %s\n",
+          r->n_alive <= (g_dci11_cfg_alive ? 4 : NR_DCI11_STAGE2_MAX_ALIVE) ? "DRIVING the extractor" : "waiting for stage 1 to prune",
+          r->n_alive, NR_DCI11_STAGE2_MAX_ALIVE, eb);
+  }
+}
+
+/* Length evidence has two identities: physical CORESET geometry and addressed RNTI. The inner
+ * bank owns per-RNTI state; the outer LRU keeps interleaved CORESET#0, discovered and archived
+ * CORESETs independent. */
+static nr_pdcch_dci_length_store_t g_dl_length_store;
+static nr_pdcch_dci_length_store_t g_ul_length_store;
+static pthread_mutex_t g_dl_length_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static uint64_t length_coreset_key(const nr_pdcch_blind_monitor_cfg_t *cfg)
+{
+  uint64_t h = UINT64_C(1469598103934665603);
+  const int fields[] = {
+      cfg->bwp_start, cfg->bwp_size, cfg->coreset_rb_offset, cfg->coreset_freq_domain,
+      cfg->coreset_duration, cfg->ss_first_symbol, cfg->coreset_type,
+      cfg->coreset_reg_bundle_size, cfg->coreset_interleaver_size, cfg->coreset_shift_index,
+      cfg->coreset_pdcch_dmrs_scrambling_id};
+  for (unsigned i = 0; i < sizeof(fields) / sizeof(fields[0]); ++i)
+    h = (h ^ (uint32_t)fields[i]) * UINT64_C(1099511628211);
+  return h ? h : 1;
+}
+
+static uint64_t length_lookahead_key(const nr_pdcch_blind_monitor_cfg_t *cfg,
+                                     const nr_pdcch_lookahead_geom_t *g)
+{
+  uint64_t h = UINT64_C(1469598103934665603);
+  const int fields[] = {
+      cfg->bwp_start, cfg->bwp_size, g->rb_offset, g->freq_domain,
+      cfg->coreset_duration, cfg->ss_first_symbol, cfg->coreset_type,
+      g->reg_bundle_size, g->interleaver_size, g->shift_index,
+      cfg->coreset_pdcch_dmrs_scrambling_id};
+  for (unsigned i = 0; i < sizeof(fields) / sizeof(fields[0]); ++i)
+    h = (h ^ (uint32_t)fields[i]) * UINT64_C(1099511628211);
+  return h ? h : 1;
+}
+
+/* Unanchored discovery cannot own a per-RNTI context yet. It remains isolated from the persistent
+ * banks and is discarded when the geometry advances. */
 static nr_pdcch_dci_length_sweep_state_t g_dl_length_state;
+
+/* Lookahead lanes (nr_pdcch_blind_monitor.h). DCI length is a property of the payload width, not
+ * the CORESET geometry, but a WRONG geometry's "candidates" are pure noise, so each lane needs its
+ * OWN length-sweep accumulator -- sharing one across different geometries would mix real signal
+ * from a right one with noise from a wrong one in the same significance test. Reset whenever a
+ * lane's geometry changes (detected by comparing against g_lane_last_geom each occasion, since
+ * nr_pdcch_blind_monitor.c owns lane advancement and has no reason to know this file's state). */
+static nr_pdcch_dci_length_sweep_state_t g_lane_length_state[NR_PDCCH_LOOKAHEAD_MAX];
+static bool                 g_lane_length_swept[NR_PDCCH_LOOKAHEAD_MAX];
+static bool                 g_lane_length_found[NR_PDCCH_LOOKAHEAD_MAX];
+static uint16_t             g_lane_dci_length[NR_PDCCH_LOOKAHEAD_MAX];
+static uint16_t             g_lane_length_rnti[NR_PDCCH_LOOKAHEAD_MAX];
+static nr_pdcch_lookahead_geom_t g_lane_last_geom[NR_PDCCH_LOOKAHEAD_MAX];
 
 static void dl_discovery_invalidate(void)
 {
   g_length_swept = g_length_found = false;
+  atomic_store_explicit(&g_dl_layout_preferred, 0, memory_order_relaxed);
   nr_pdcch_dci_length_sweep_reset(&g_dl_length_state);
   nr_pdsch_config_sweep_reset_all();
   g_pdsch_sweep_on = false;
@@ -189,7 +967,164 @@ static void pdsch_sweep_maybe_enable(const nr_pdcch_blind_monitor_cfg_t *cfg)
 // different, faster-ticking counter than this one's real candidate-bearing occasions); a real
 // length has been reached within tens of occasions in every live capture measured so far, so this
 // is generous headroom, not a tuned minimum.
-#define AUTODISCOVER_LENGTH_SWEEP_MAX_OCCASIONS 500
+/* Occasions spent on one CORESET mapping hypothesis before moving to the next.
+ *
+ * 500 was sized for a sweep with NO GROUND TRUTH: the only way to judge a hypothesis was whether the
+ * distribution of CRC passes looked non-random, which needs a large sample. That premise changed
+ * 2026-09-20 -- the bootstrap now supplies a REAL RNTI (measured: bootstrap_rnti=0x15e1, from a
+ * TC-RNTI harvested in the proven CORESET#0), so each hypothesis is a KNOWN-ANSWER test: the correct
+ * mapping recovers that RNTI almost at once, a wrong one never does. 500 occasions to establish that
+ * is enormously conservative.
+ *
+ * It matters because the sweep is serial over the catalogue and rate-limited by AIR TIME, not by
+ * compute: MEASURED 2026-09-20, ~3 hypotheses/min, so 271 mappings take ~56 min per pass -- longer
+ * than a TC-RNTI stays addressable in the dedicated search space, which is self-defeating.
+ *
+ * ISAC_SWEEP_OCCASIONS overrides it; default unchanged at 500 so no existing run behaves differently.
+ * The structural fix is to test MANY hypotheses per occasion (same LLRs, 271 deinterleavings, batched
+ * polar decodes -- a GPU job) which collapses a pass from 135,500 occasions to ~500. This knob is the
+ * cheap approximation of that. */
+static inline int autodiscover_sweep_budget(void)
+{
+  static int s_budget = -1;
+  if (s_budget < 0) {
+    const char *e = getenv("ISAC_SWEEP_OCCASIONS");
+    const int v = (e != NULL) ? atoi(e) : 0;
+    s_budget = (v > 0) ? v : 500;
+  }
+  return s_budget;
+}
+/* ISAC_DCI_LEN_MIN / ISAC_DCI_LEN_MAX: narrow the blind dci_length range (default 30..63, i.e. 34
+ * lengths). Total sweep work is hypotheses x dwell x candidates x LENGTHS, so this is one of only
+ * two knobs that cut TOTAL work rather than moving it in time (the other is the dwell above) --
+ * batching and reordering cannot, because the search is throughput-bound, not launch-bound
+ * (MEASURED 2026-09-20: 96 GPU calls -> 1 moved prepass by 5%).
+ *
+ * Narrowing is a PRIOR, not a fact: a real length outside the window becomes undiscoverable. Keep
+ * the default wide and narrow only when the deployment's DCI 1_1 size is already known for the
+ * bandwidth in use (e.g. ~47-48 at 273 PRB), and widen again if nothing converges. */
+static inline int dci_len_min(void)
+{
+  static int v = -1;
+  if (v < 0) {
+    const char *e = getenv("ISAC_DCI_LEN_MIN");
+    const int x = (e != NULL) ? atoi(e) : 0;
+    v = (x >= 1 && x <= 63) ? x : 30;
+  }
+  return v;
+}
+static inline int dci_len_max(void)
+{
+  static int v = -1;
+  if (v < 0) {
+    const char *e = getenv("ISAC_DCI_LEN_MAX");
+    const int x = (e != NULL) ? atoi(e) : 0;
+    v = (x >= dci_len_min() && x <= 63) ? x : 63;
+  }
+  return v;
+}
+/* Widest aggregation level a lane may scan. Defined here because lane_als() validates against it
+ * and is declared above the LANE BATCH block that sizes its vectors from it. */
+#define LANE_BATCH_AL_MAX    8
+/* Per-lane extracted-RE budget: 16 candidates at the widest AL (9 RE/RB * 8 * 6 = 432). */
+#define LANE_RE_PER_LANE     (16 * NR_PDCCH_BLIND_RE_PER_RB_OUT_DMRS * LANE_BATCH_AL_MAX * 6)
+/* ISAC_LANE_ALS: aggregation levels the LOOKAHEAD LANES scan, comma-separated (default "2").
+ *
+ * The lanes were AL2-only, hardcoded, and they perform ~99 % of the CORESET geometry search -- the
+ * primary walks one extent while 96 lanes walk the rest. As this file already notes further down,
+ * "the gNB picks the aggregation level from the SERVED UE's link", so AL2-only hardcodes a
+ * deployment. That was right for the lab srsRAN cell (dedicated traffic measured at AL2 -- note its
+ * log prints log2(L), so its "AL1" IS AL2). For a commercial macro received at distance there is NO
+ * such measurement, and cell-edge UEs are served at AL4/8/16, where an AL2-only scan can never find
+ * a grant however long it dwells. Default stays "2" so nothing changes silently. */
+static int lane_als(const uint8_t **out)
+{
+  static uint8_t v[5];
+  static int n = -1;
+  if (n < 0) {
+    const char *e = getenv("ISAC_LANE_ALS");
+    n = 0;
+    if (e != NULL) {
+      for (const char *q = e; *q && n < 5;) {
+        const int x = atoi(q);
+        if ((x == 1 || x == 2 || x == 4 || x == 8 || x == 16) && x <= LANE_BATCH_AL_MAX) {
+          bool dup = false;
+          for (int i = 0; i < n; i++)
+            if (v[i] == (uint8_t)x) dup = true;
+          if (!dup) v[n++] = (uint8_t)x;
+        }
+        while (*q && *q != ',') q++;
+        if (*q == ',') q++;
+      }
+    }
+    if (n == 0) {
+      const nr_pdcch_sib1_prior_t *pr = nr_pdcch_sib1_prior_get();
+      if (pr != NULL && pr->ss_valid) {
+        for (int i = 0; i < NR_SIB1_PRIOR_NUM_AL && n < 5; i++)
+          if (pr->al_candidates[i] > 0) v[n++] = (uint8_t)(1 << i);
+        if (n > 0)
+          LOG_A(PHY, "SENSING: lane ALs from SIB1 CSS: %d,%d,%d,%d,%d (n=%d)\n", v[0], n > 1 ? v[1] : 0,
+                n > 2 ? v[2] : 0, n > 3 ? v[3] : 0, n > 4 ? v[4] : 0, n);
+      }
+      if (n == 0) {
+        v[0] = 2; n = 1;   /* previous AL2-only default, until a SIB1 prior arrives */
+        *out = v;
+        const int r = n; n = -1;   /* do not cache: re-evaluate once SIB1 has been decoded */
+        return r;
+      }
+    }
+  }
+  *out = v;
+  return n;
+}
+
+static int lane_al_count(void)
+{
+  const uint8_t *unused = NULL;
+  return lane_als(&unused);
+}
+
+static bool lane_has_bootstrap_hit(const nr_pdcch_dci_length_sweep_state_t *state)
+{
+  for (int len = 0; len < NR_PDCCH_DCI_LENGTH_SWEEP_MAX_LEN; ++len)
+    if (state->bootstrap_hits[len] > 0)
+      return true;
+  return false;
+}
+
+#define AUTODISCOVER_LENGTH_SWEEP_MAX_OCCASIONS autodiscover_sweep_budget()
+/* ISAC_DCI_SWEEP_STRIDE: test every Nth dci_length per occasion instead of all 34 (the sweep's
+ * `stride`, see nr_pdcch_dci_length_sweep.h). The budget above counts ROUNDS, so each length still
+ * gets its 500 visits -- rotation only spreads them in time.
+ *
+ * DERIVATION of the value to use, from cs1_090638 (600 s, K=1, one active hypothesis): the scan
+ * consumer took TOTAL 1890 us/occasion while its timed stages summed to ~135 us (fep_llr 24,
+ * demap 4, prepass 3, decode 103), leaving ~1.75 ms in the two sweeps -- 34 lengths x ~6
+ * candidates x ~8 us, i.e. ~51 us per length per occasion. Occasions arrive at ~1500/s = one per
+ * 667 us, so the consumer was ~2.8x oversubscribed and dropped 68.5 % of them
+ * (scanq queued=902224 done=283999 drop_full=618213). Both sweeps can run in the same occasion
+ * (the DL one falls through to the UL one), so budget for two: 2 x (34/N) x 51 us + 135 us < 667 us
+ * needs N >= 6.2. N = 8 gives 2 x 217 + 135 = 569 us at the pessimistic both-sweeps bound and
+ * 135 + 217 = 352 us (53 % of the interval) when only one runs -- the headroom K>1 lookahead needs.
+ * DEFAULT 0 (= off, bit-identical to the pre-rotation sweep) until a live capture confirms the
+ * drops actually go away; 68.5 % occasion loss is the number that justifies flipping it on. */
+static int dci_sweep_stride(void)
+{
+  static int s_stride = -1;
+  if (s_stride < 0) {
+    const char *e = getenv("ISAC_DCI_SWEEP_STRIDE");
+    s_stride = (e != NULL) ? atoi(e) : 0;
+    if (s_stride < 0) {
+      s_stride = 0;
+    }
+    if (s_stride > 1) {
+      LOG_A(PHY, "SENSING: dci_length sweep rotating -- every %dth length per occasion, %d rounds "
+                 "to the give-up cap (per-length trials unchanged)\n",
+            s_stride, AUTODISCOVER_LENGTH_SWEEP_MAX_OCCASIONS);
+    }
+  }
+  return s_stride;
+}
 static int         g_constdiag_left = 20; // TEMPORARY, see CONSTDIAG below
 /* Why these three exist (2026-09-09): the gNB's own log shows 746 format-1_1 and 147 format-0_1
  * DCIs in the same CORESET, same search space, same al=2, same rnti -- and this receiver converges
@@ -224,6 +1159,7 @@ static uint64_t g_cfr_submits    = 0; // final count that actually reached the I
 // ---- Noise-floor gate counters (2026-07-28) -- how many raw accepts each gate held back, so the
 // periodic summary shows where candidates are actually being lost, not just the final count. ----
 static uint64_t g_held_energy   = 0; // skipped decode entirely, raw LLR energy below energy_min
+static uint64_t g_held_dmrs     = 0; // skipped decode entirely, DM-RS coherence below this occasion's own per-AL median+MAD floor (5GSniffer-style gate, 2026-09-23)
 
 // ---- Adaptive energy floor (cfg->energy_adapt_factor) ------------------------------------------
 // Tracks the NOISE-FLOOR candidate energy so the gate threshold can be expressed as a dimensionless
@@ -268,7 +1204,10 @@ static void energy_floor_update(float x)
 static uint64_t g_held_persist  = 0;
 static uint64_t    g_held_rnti_set = 0;  // rejected: RNTI not among the confirmed UEs // decoded+accepted but RNTI not yet seen rnti_persist_k times
 static uint64_t g_held_snr      = 0; // decoded+accepted+persisted but post-estimation SNR too low
-static uint64_t g_held_mismatch = 0; // migrated from NRSniffer: rejected by the adaptive mismatched-bits gate
+static uint64_t g_held_mismatch = 0;
+static unsigned long g_acc_slot[2][20], g_occ_slot[20]; // ACCSLOT census, see the accept path
+/* [0]=deferred enqueue, [1]=normal enqueue, indexed by nr_blind_rnti_class_t. */
+static _Atomic unsigned long g_enq_class[2][NR_BLIND_RNTI_CLASS_COUNT]; // migrated from NRSniffer: rejected by the adaptive mismatched-bits gate
 
 // ---- Passive PDSCH decode counters (2026-07-30). g_dec_ok/g_dec_try IS the go/no-go measurement
 // PASSIVE_PDSCH_DATA_AIDED_HANDOVER.md §B.5 asks for: a passive receiver sits somewhere the grant
@@ -298,9 +1237,27 @@ static uint64_t g_held_mismatch = 0; // migrated from NRSniffer: rejected by the
 #define BTIM_PDSCH   5
 #define BTIM_SUBMIT  6
 #define BTIM_TOTAL   7
-#define BTIM_N       8
+/* The untimed remainder, bucketed 2026-09-17: the four stages above summed to ~138 us while TOTAL
+ * read 1980 us per occasion (cs1 capture), and that gap -- not the decode -- is what made one scan
+ * consumer drop 68 % of occasions (scanq drop_full=618213 of 902224). Name every segment so the
+ * next capture says where it goes instead of a reader guessing. Note that with
+ * pdcch_blind_monitor_scan_thread set these are CONSUMER times: the receive thread only enqueues. */
+#define BTIM_PRE     8   /* occasion entry -> first FEP (UL scan setup, hypothesis selection) */
+#define BTIM_PBWP    9   /* passive-BWP CORESET observe (every 8th occasion) */
+#define BTIM_CSIRS   10  /* nr_csirs_blind_rt_slot(): CSI-RS reference generation + FEP + correlate (until confirmed) */
+#define BTIM_POST    11  /* after the candidate decodes: accepts, evidence, sweeps, submissions */
+#define BTIM_RT      12  /* nr_pdcch_blind_monitor_process() on the PHY RECEIVE thread, per slot:
+                          * the only blind-PDCCH work left there once scan/pdsch/ul consumers are on
+                          * (Phase 3's own single-antenna FEP + window scan while undiscovered, the
+                          * occasion gate, the enqueue). Written from the receive thread into its own
+                          * array slots; the consumer never touches index 12. */
+#define BTIM_DLSWEEP 13  /* DL dci_length autodiscover sweep: 34 lengths x every candidate, Polar+CRC each */
+#define BTIM_ULSWEEP 14  /* UL per-RNTI dci_length sweep, same shape, under ul_length_lock */
+#define BTIM_N       15
 static const char *const kBtimName[BTIM_N] = {"fep_llr", "demap", "prepass", "decode",
-                                              "chest",   "pdsch", "submit",  "TOTAL"};
+                                              "chest",   "pdsch", "submit",  "TOTAL",
+                                              "pre",     "pbwp",  "csirs",   "post", "rt",
+                                              "dlsweep", "ulsweep"};
 static uint64_t g_btim_ns[BTIM_N]  = {0};
 static uint64_t g_btim_n[BTIM_N]   = {0};
 static uint64_t g_btim_max[BTIM_N] = {0};
@@ -324,6 +1281,73 @@ static inline uint64_t btim_now(void)
   struct timespec t;
   clock_gettime(CLOCK_MONOTONIC, &t);
   return (uint64_t)t.tv_sec * 1000000000ull + (uint64_t)t.tv_nsec;
+}
+
+/* Opt-in work deadline; 350 us reserves 150 us of the 500-us mean target for
+ * the ordinary decode/dispatch tail. Measured whole-occasion quantiles decide
+ * whether the target is actually met; this is not a hard real-time guarantee. */
+static unsigned discovery_budget_us(void)
+{
+  static int value=-1;
+  if (value<0) {
+    const char *e=getenv("ISAC_PDCCH_DISCOVERY_BUDGET_US");
+    value=e?atoi(e):0;
+    if(value<0 || value>1000000) value=0;
+  }
+  return (unsigned)value;
+}
+static uint64_t discovery_cpu_now(void)
+{
+  struct timespec t;
+  clock_gettime(CLOCK_THREAD_CPUTIME_ID, &t);
+  return (uint64_t)t.tv_sec * 1000000000ull + (uint64_t)t.tv_nsec;
+}
+static bool discovery_trace_enabled(void)
+{
+  static int enabled=-1;
+  if(enabled<0) enabled=getenv("ISAC_PDCCH_DISCOVERY_TRACE")!=NULL;
+  return enabled;
+}
+typedef struct {
+  uint64_t start, cpu_start, before_feed, after_feed, after_extent, after_ul, after_pre, after_decode;
+  uint64_t trials;
+  int width, budget, phase;
+} discovery_latency_scope_t;
+static struct { uint64_t n, ns, over_ms, hist[1002]; } discovery_latency[46];
+static void discovery_latency_done(discovery_latency_scope_t *s)
+{
+  if(!s->start || s->width<6 || s->width>270 || s->width%6) return;
+  const uint64_t end=btim_now(), ns=end-s->start;
+  if(s->cpu_start) {
+    const uint64_t cpu=discovery_cpu_now()-s->cpu_start;
+    static unsigned slow, fast;
+    if((ns>=1000000 && slow++<32) || (ns<1000000 && fast++<2)) {
+      LOG_A(PHY,"DISCOVERYTRACE span=%d budget=%d phase=%d wall_us=%.2f cpu_us=%.2f "
+            "before_feed_us=%.2f feed_us=%.2f extent_us=%.2f ul_us=%.2f pre_us=%.2f decode_us=%.2f tail_us=%.2f trials=%lu\n",
+            s->width,s->budget,s->phase,ns/1000.0,cpu/1000.0,
+            s->before_feed?(s->before_feed-s->start)/1000.0:0.0,
+            s->after_feed?(s->after_feed-s->before_feed)/1000.0:0.0,
+            s->after_extent&&s->after_feed?(s->after_extent-s->after_feed)/1000.0:0.0,
+            s->after_ul&&s->after_extent?(s->after_ul-s->after_extent)/1000.0:0.0,
+            s->after_pre&&s->after_ul?(s->after_pre-s->after_ul)/1000.0:0.0,
+            s->after_decode&&s->after_pre?(s->after_decode-s->after_pre)/1000.0:0.0,
+            s->after_decode?(end-s->after_decode)/1000.0:0.0,(unsigned long)s->trials);
+    }
+  }
+  const int i=s->width/6;
+  ++discovery_latency[i].n; discovery_latency[i].ns+=ns;
+  discovery_latency[i].over_ms+=ns>=1000000;
+  uint64_t bin=(ns+999)/1000; if(bin>1001) bin=1001;
+  ++discovery_latency[i].hist[bin];
+  if(discovery_latency[i].n%4096==0) {
+    const uint64_t target=(99*discovery_latency[i].n+99)/100;
+    uint64_t count=0; int p99=0;
+    for(;p99<=1001;++p99) { count+=discovery_latency[i].hist[p99]; if(count>=target) break; }
+    LOG_A(PHY,"DISCOVERYLAT span=%d n=%lu mean_us=%.2f p99_upper_us=%d over_1ms=%lu budget_us=%u\n",
+          s->width,(unsigned long)discovery_latency[i].n,
+          discovery_latency[i].ns/(1000.0*discovery_latency[i].n),p99,
+          (unsigned long)discovery_latency[i].over_ms,discovery_budget_us());
+  }
 }
 
 static inline void btim_add(int k, uint64_t t0)
@@ -387,7 +1411,79 @@ static uint64_t g_dec_over_cap = 0;
 #define AL_MIN_PROBE 2
 #define AL_PRIOR     1.0
 static _Atomic uint64_t g_al_accepts[4]; // indexed as ss_al_candidates[]: AL 1, 2, 4, 8
-static uint32_t         g_al_rotate[4];  // per-level rotating CCE start, advanced each occasion // skipped: rv != 0 and rv0_only set (not self-decodable, see cfg)
+static _Atomic uint64_t g_al_cand[2][4];    // [0]=CSS0 [1]=dedicated USS; candidates EXAMINED per AL
+static _Atomic uint64_t g_al_confirmed[2][4]; // same split; accepts that PASSED the RNTI-persistence gate
+static uint32_t         g_al_rotate[4];
+/* ---- SEARCH-SPACE (aggregation-level) INFERENCE  (agnosticity gap #1) ---------------------------
+ * The set of monitored CCE aggregation levels is a dedicated-search-space property that the air
+ * does not carry, but it IS inferable: every accept counted in g_al_accepts[] above already passed
+ * the DCI CRC (a recovered, real RNTI) AND the cross-occasion persistence gate, so those grants
+ * land only on the levels the gNB actually schedules. Report the inferred set ONCE, when enough
+ * confirmed grants have accumulated to name it. Honestly bounded and reject-only: a level with no
+ * confirmed grants is reported absent, never assumed; and this is the OBSERVED monitored set with
+ * its per-level share, NOT nrofCandidates or exact CCE positions (which need the SS config itself).*/
+static _Atomic int g_ss_inferred_logged_ss[2]; // one verdict per search space (CSS0, USS)
+#define SS_INFER_MIN_GRANTS 32   /* enough CRC-recovered grants before naming the set */
+#define SS_INFER_SHARE_NUM  1    /* a level carrying >= 20% (1/5) of confirmed grants is "monitored" */
+#define SS_INFER_SHARE_DEN  5
+#define SS_INFER_MIN_CAND   200  /* candidates examined before a level's rate means anything */
+/* CORESET#0 (common) and the dedicated UE-specific search space are DIFFERENT search spaces with
+ * DIFFERENT aggregation levels -- measured on this cell: broadcast SIB1 at AL4 (gNB's own
+ * dci_aggregation_level=2, i.e. log2), dedicated traffic overwhelmingly AL2. Pooling them into one
+ * histogram produces a confidently wrong "monitored AL set", so every count is bucketed by which
+ * search space produced it. cfg->coreset_type: 1 = MIB/SIB1 CORESET#0, 0 = dedicated. */
+static inline int nr_pdcch_ss_bucket(const nr_pdcch_blind_monitor_cfg_t *cfg)
+{
+  return (cfg && cfg->dci10_ss_type == NR_BLIND_SS_COMMON) ? 0 : 1;
+}
+static void nr_pdcch_blind_infer_search_space(void)
+{
+  /* Reported PER SEARCH SPACE. CORESET#0 and the dedicated USS are different search spaces with
+   * different aggregation levels (measured here: broadcast AL4, dedicated AL2), so a single pooled
+   * "monitored AL set" is not a well-defined quantity -- it would be confidently wrong. Each bucket
+   * is declared once, independently, as soon as IT has enough evidence. */
+  static const char *kSsName[2] = {"CSS0(common)", "USS(dedicated)"};
+  for (int ss = 0; ss < 2; ++ss) {
+    if (atomic_load_explicit(&g_ss_inferred_logged_ss[ss], memory_order_relaxed))
+      continue;
+    uint64_t a[4], c[4], tot = 0;
+    for (int i = 0; i < 4; ++i) {
+      a[i] = atomic_load_explicit(&g_al_confirmed[ss][i], memory_order_relaxed);
+      c[i] = atomic_load_explicit(&g_al_cand[ss][i], memory_order_relaxed);
+      tot += a[i];
+    }
+    if (tot < SS_INFER_MIN_GRANTS)
+      continue;
+    /* RATE, not raw count: the adaptive allocator feeds budget to whichever level already produced
+     * accepts, so raw counts are self-confirming. A level whose denominator is too small to support
+     * a conclusion is reported UNDERSAMPLED, never silently declared absent. */
+    double rate[4]; double rmax = 0.0;
+    for (int i = 0; i < 4; ++i) {
+      rate[i] = (c[i] > 0) ? ((double)a[i] / (double)c[i]) : 0.0;
+      if (rate[i] > rmax) rmax = rate[i];
+    }
+    const int lvl[4] = {1, 2, 4, 8};
+    char al_set[64]; int u = 0;
+    char weak[64];   int w = 0;
+    for (int i = 0; i < 4; ++i) {
+      if (c[i] < SS_INFER_MIN_CAND)
+        w += snprintf(weak + w, sizeof(weak) - w, "%s%d", w ? "," : "", lvl[i]);
+      else if (rmax > 0.0 && rate[i] * SS_INFER_SHARE_DEN >= rmax * SS_INFER_SHARE_NUM)
+        u += snprintf(al_set + u, sizeof(al_set) - u, "%s%d", u ? "," : "", lvl[i]);
+    }
+    if (!u) continue; /* nothing adequately sampled in this bucket yet */
+    atomic_store_explicit(&g_ss_inferred_logged_ss[ss], 1, memory_order_relaxed);
+    LOG_A(PHY, "SENSING: SEARCH_SPACE INFERRED [%s] by CRC-recovered grants: monitored AL={%s}%s%s "
+               "confirmed/examined[AL1=%llu/%llu AL2=%llu/%llu AL4=%llu/%llu AL8=%llu/%llu] "
+               "total_confirmed=%llu (accepts per candidate EXAMINED; levels below %d candidates are "
+               "undersampled, not shown absent; nrofCandidates/CCE positions bounded, not exact)\n",
+          kSsName[ss], al_set, w ? " undersampled=" : "", w ? weak : "",
+          (unsigned long long)a[0], (unsigned long long)c[0], (unsigned long long)a[1], (unsigned long long)c[1],
+          (unsigned long long)a[2], (unsigned long long)c[2], (unsigned long long)a[3], (unsigned long long)c[3],
+          (unsigned long long)tot, SS_INFER_MIN_CAND);
+  }
+}
+  // per-level rotating CCE start, advanced each occasion // skipped: rv != 0 and rv0_only set (not self-decodable, see cfg)
 static uint64_t g_dec_unsup = 0; // skipped: grant outside the decode/reconstruction scope
 static uint64_t g_data_submits = 0; // reconstructed CFRs submitted as NR_ISAC_SRC_PDSCH_DATA
 
@@ -438,31 +1534,30 @@ static bool rnti_persistence_check(uint16_t rnti, uint32_t abs_slot, uint32_t wi
 // offers -- a real occasion rarely has 64 distinct ones, so most lengths get each real candidate
 // tried several times, which is fine: a genuinely wrong length still degenerates to "few/no passes"
 // or "one fixed-point payload", exactly the two traps nr_pdcch_dci_length_sweep.h documents.
+
+/* Opt-in observation only. No hypothesis, RNTI or acceptance decision comes from
+ * this stream. The offline scorer runs after the receiver has exited. */
+static __thread int discovery_evidence_frame = -1, discovery_evidence_slot = -1;
+static void discovery_evidence(const char *stage, const char *direction, int frame, int slot,
+                               int bits, uint16_t rnti, uint64_t payload, int al, int cce)
+{
+  static __thread int enabled = -1;
+  if (enabled < 0) {
+    const char *e = getenv("ISAC_DISCOVERY_EVIDENCE");
+    enabled = e && !strcmp(e, "1");
+  }
+  if (!enabled) return;
+  LOG_A(PHY, "DISCOVERY_EVIDENCE {\"stage\":\"%s\",\"direction\":\"%s\","
+        "\"frame\":%d,\"slot\":%d,\"bits\":%d,\"rnti\":%u,"
+        "\"payload\":\"%016llx\",\"al\":%d,\"cce\":%d}\n",
+        stage, direction, frame, slot, bits, rnti, (unsigned long long)payload, al, cce);
+}
+
 typedef struct {
   const c16_t *e_rx;
   uint8_t      L;
+  uint16_t     cce;
 } nr_pdcch_autodiscover_cand_t;
-/* UL length evidence is independent of both the DL sweep and field interpretation. */
-typedef struct {
-  const nr_pdcch_autodiscover_cand_t *cand;
-  int count;
-  uint16_t rnti, scrambling_rnti, dmrs_id;
-} ul_length_ctx_t;
-static bool ul_length_score(int len, int trial, uint16_t *rnti, uint32_t *hash, void *opaque)
-{
-  const ul_length_ctx_t *ctx=opaque;
-  const nr_pdcch_autodiscover_cand_t *c=&ctx->cand[trial%ctx->count];
-  int16_t llr[16*108];
-  nr_pdcch_unscrambling((c16_t *)c->e_rx,ctx->scrambling_rnti,c->L*108,ctx->dmrs_id,llr);
-  nr_pdcch_blind_ul_result_t out;
-  /* Use a confirmed RNTI, not a DL-calibrated plausibility false-alarm floor. */
-  if(!nr_pdcch_blind_decode_raw_01(llr,c->L,len,ctx->rnti,ctx->rnti,&out)) return false;
-  *rnti=out.rnti;
-  *hash=(uint32_t)out.raw_payload ^ (uint32_t)(out.raw_payload>>32);
-  return true;
-}
-static nr_pdcch_dci_length_bank_t ul_lengths;
-static uint64_t ul_geometry;
 static pthread_mutex_t ul_length_lock=PTHREAD_MUTEX_INITIALIZER;
 
 
@@ -476,7 +1571,542 @@ typedef struct {
   const nr_pdcch_blind_extract_opts_t *extract_opts;
   uint16_t scrambling_rnti;
   uint16_t dmrs_scrambling_id;
+  uint16_t known_rnti[NR_PDCCH_BLIND_MAX_UE];
+  uint8_t  n_known;
+  uint16_t bootstrap_alias;
+  int lane, rb_offset, span_rb, bundle, interleaver, shift;
 } nr_pdcch_autodiscover_sweep_ctx_t;
+
+static uint16_t sweep_evidence_rnti(const nr_pdcch_autodiscover_sweep_ctx_t *ctx, uint16_t rnti,
+                                    int dci_length, const nr_pdcch_autodiscover_cand_t *cand)
+{
+  for (int i = 0; i < ctx->n_known; ++i)
+    if (ctx->known_rnti[i] == rnti) {
+      static _Atomic uint64_t hits = 0;
+      const uint64_t h = atomic_fetch_add_explicit(&hits, 1, memory_order_relaxed) + 1;
+      if (h == 1 || h % 16 == 0)
+        LOG_A(PHY, "SENSING: USS_BOOT_HIT count=%lu frame=%d slot=%d rnti=0x%04x len=%d "
+                   "AL=%u CCE=%u lane=%d offset=%d span=%d bundle=%d interleaver=%d shift=%d "
+                   "verified_set=%u\n",
+              (unsigned long)h, discovery_evidence_frame, discovery_evidence_slot, rnti, dci_length,
+              cand ? cand->L : 0, cand ? cand->cce : 0, ctx->lane, ctx->rb_offset, ctx->span_rb,
+              ctx->bundle, ctx->interleaver, ctx->shift, ctx->n_known);
+      return ctx->bootstrap_alias;
+    }
+  return rnti;
+}
+
+/* DMRS scheduling: 0 = old exhaustive order, 1 = bounded ranking + exploration (default),
+ * 2 = ranked exhaustive control. A sub-1% cadence remains exhaustive in mode 1. No absolute
+ * correlation cutoff and no changes to CRC validation, lengths or verified/CSS0 decoding. */
+static int blind_dmrs_rank_mode(void)
+{
+  static int mode = -1;
+  if (mode < 0) {
+    const char *e = getenv("ISAC_PDCCH_DMRS_RANK");
+    mode = e ? atoi(e) : 1;
+    if (mode < 0 || mode > 2) mode = 1;
+  }
+  return mode;
+}
+
+static void blind_dmrs_rank_candidates(const nr_pdcch_dmrs_rank_grid_t *grid,
+                                       fapi_nr_dl_config_dci_dl_pdu_rel15_t *pdu,
+                                       int span, int offset, int slot, int first_symbol,
+                                       uint32_t abs_slot, uint64_t visit)
+{
+  const int n = pdu->number_of_candidates;
+  if (n < 1 || n > NR_PDCCH_RANK_MAX_CAND || !grid->n_rb) return;
+  double score[NR_PDCCH_RANK_MAX_CAND], dmrs[NR_PDCCH_RANK_MAX_CAND];
+  uint8_t order[NR_PDCCH_RANK_MAX_CAND], al[NR_PDCCH_RANK_MAX_CAND];
+  uint16_t cce[NR_PDCCH_RANK_MAX_CAND], support[NR_PDCCH_RANK_MAX_CAND] = {0};
+  const nr_pdcch_uss_geometry_t tracker_geometry = {
+      .rb_offset = (uint16_t)offset, .span_rb = (uint16_t)span,
+      .shift = pdu->coreset.ShiftIndex, .dmrs_id = pdu->coreset.pdcch_dmrs_scrambling_id,
+      .duration = pdu->coreset.duration, .bundle = pdu->coreset.RegBundleSize,
+      .interleaver = pdu->coreset.InterleaverSize, .first_symbol = (uint8_t)first_symbol};
+  uint16_t known[NR_PDCCH_BLIND_MAX_UE];
+  int n_known = nr_pdcch_blind_monitor_dedicated_rnti_set(abs_slot, known, NR_PDCCH_BLIND_MAX_UE);
+  uint16_t tracked[NR_PDCCH_USS_TRACKER_TOP];
+  const int n_tracked = nr_pdcch_uss_tracker_peek(&tracker_geometry, tracked, NR_PDCCH_USS_TRACKER_TOP);
+  for (int t = 0; t < n_tracked && n_known < NR_PDCCH_BLIND_MAX_UE; ++t) {
+    bool duplicate = false;
+    for (int k = 0; k < n_known; ++k) duplicate |= known[k] == tracked[t];
+    if (!duplicate) known[n_known++] = tracked[t];
+  }
+  if (n_known > 0)
+    nr_pdcch_uss_candidate_supports((span * pdu->coreset.duration) / 6, slot, known, n_known,
+                                    pdu->CCE, pdu->L, n, support);
+  const double prior_den = n_known > 0 ? 21.0 * n_known : 1.0; /* 3 hash classes x 7 M values */
+  for (int i = 0; i < n; ++i) {
+    dmrs[i] = nr_pdcch_dmrs_candidate_score(grid, offset, span, pdu->coreset.RegBundleSize,
+        pdu->coreset.InterleaverSize, pdu->coreset.ShiftIndex, pdu->CCE[i], pdu->L[i]);
+    if (!isfinite(dmrs[i])) return; /* unsupported mapping: preserve exhaustive decode */
+    /* DMRS measures occupancy; the normalized USS term is the prior probability under every
+     * still-possible standard SearchSpace configuration. Neither term is an acceptance gate. */
+    score[i] = dmrs[i] + 2.0 * (double)support[i] / prior_den;
+  }
+  /* Persist one strongest observation per AL. p_real and sigma remain separate; the
+   * noise-debiased DMRS occupancy alone weights the independent USS identity scorer. */
+  nr_pdcch_uss_observation_t observation[NR_PDCCH_USS_TRACKER_AL];
+  int n_observation = 0;
+  for (int level = 1; level <= 16; level *= 2) {
+    int count = 0, strongest = -1;
+    double sum = 0.0, sum2 = 0.0;
+    for (int i = 0; i < n; ++i) if (pdu->L[i] == level) {
+      ++count; sum += dmrs[i]; sum2 += dmrs[i] * dmrs[i];
+      if (strongest < 0 || dmrs[i] > dmrs[strongest]) strongest = i;
+    }
+    if (count < 2 || strongest < 0) continue;
+    const double mean = sum / count;
+    const double variance = fmax(0.0, sum2 / count - mean * mean);
+    const double sigma = sqrt(variance);
+    observation[n_observation++] = (nr_pdcch_uss_observation_t){
+        .cce = pdu->CCE[strongest], .al = (uint8_t)level, .p_real = (float)dmrs[strongest],
+        .sigma = (float)sigma, .score = (float)fmax(dmrs[strongest], 0.0)};
+  }
+  if (n_observation > 0)
+    nr_pdcch_uss_tracker_observe(&tracker_geometry, abs_slot, (uint16_t)slot,
+                                 (uint16_t)((span * pdu->coreset.duration) / 6),
+                                 observation, n_observation);
+
+  /* Exploration already rotates every visit. Keep a sub-1% full audit so the p99 metric is
+   * representative of normal bounded work while still measuring the complete list. */
+  const bool full = blind_dmrs_rank_mode() == 2 || (visit % 128) == 0;
+  const int used = nr_pdcch_dmrs_candidate_order(score, pdu->L, n, visit, full, order);
+  if (used < 1) return;
+  const int best = order[0];
+  for (int i = 0; i < used; ++i) { cce[i] = pdu->CCE[order[i]]; al[i] = pdu->L[order[i]]; }
+  memcpy(pdu->CCE, cce, used * sizeof(cce[0]));
+  memcpy(pdu->L, al, used * sizeof(al[0]));
+  pdu->number_of_candidates = used;
+  static _Atomic uint64_t calls = 0, offered = 0, selected = 0, audits = 0, known_calls = 0;
+  const uint64_t t = atomic_fetch_add(&calls, 1) + 1;
+  atomic_fetch_add(&offered, n);
+  atomic_fetch_add(&selected, used);
+  if (full) atomic_fetch_add(&audits, 1);
+  if (n_known > 0) atomic_fetch_add(&known_calls, 1);
+  if (t == 1 || t % 4096 == 0)
+    LOG_A(PHY, "SENSING: DMRSRANK mode=%d geometries=%lu offered=%lu selected=%lu full=%lu "
+               "uss=%lu known=%d offset=%d span=%d best=%.4f dmrs=%.4f support=%u kept=%d/%d\n",
+          blind_dmrs_rank_mode(), (unsigned long)t, (unsigned long)atomic_load(&offered),
+          (unsigned long)atomic_load(&selected), (unsigned long)atomic_load(&audits),
+          (unsigned long)atomic_load(&known_calls), n_known, offset, span, score[best], dmrs[best],
+          support[best], used, n);
+}
+
+/* Bounded diagnostic recording. This run is NOT a latency benchmark: file I/O is
+ * explicitly enabled only by ISAC_PDCCH_DISCOVERY_REPLAY. Accepted CSS0 controls
+ * and unverified primary hypotheses have distinct record kinds. */
+static void blind_discovery_replay(const NR_DL_FRAME_PARMS *fp, const UE_nr_rxtx_proc_t *proc,
+    const fapi_nr_dl_config_dci_dl_pdu_rel15_t *pdu, int span, int offset, int first_symbol,
+    const c16_t *grid, const c16_t *fft, long source_absolute_slot, int expected_index, uint16_t expected_rnti,
+    uint16_t expected_length, uint64_t expected_payload, const c16_t *expected)
+{
+  static int initialized;
+  static FILE *file;
+  static unsigned controls, hypotheses;
+  static uint64_t last_geometry = UINT64_MAX, last_control = UINT64_MAX;
+  if (!initialized) {
+    initialized = 1;
+    const char *path = getenv("ISAC_PDCCH_DISCOVERY_REPLAY");
+    if (!path || !*path) return;
+    file = fopen(path, "wbx");
+    LOG_A(PHY, "PDCCHREPLAY %s path=%s; capture timing VOID for performance comparison\n",
+          file ? "ARMED" : "VOID(open)", path);
+  }
+  if (!file) return;
+  const bool control = expected_index >= 0;
+  const uint64_t geometry = (uint64_t)offset | ((uint64_t)span << 9)
+      | ((uint64_t)pdu->coreset.duration << 18) | ((uint64_t)pdu->coreset.RegBundleSize << 20)
+      | ((uint64_t)pdu->coreset.InterleaverSize << 24) | ((uint64_t)pdu->coreset.ShiftIndex << 28);
+  const uint64_t slot_key = (uint64_t)source_absolute_slot;
+  if (control ? (controls >= 16 || slot_key == last_control) : (hypotheses >= 64 || geometry == last_geometry)) return;
+  if (span < 6 || span > 270 || pdu->coreset.duration < 1 || pdu->coreset.duration > 3
+      || pdu->number_of_candidates > 64 || (control && expected_index >= pdu->number_of_candidates)) return;
+  nr_pdcch_discovery_replay_t h = {
+    .magic=NR_PDCCH_REPLAY_MAGIC, .version=2, .header_bytes=sizeof(h), .kind=control?1:2,
+    .source_slot=slot_key, .expected_payload=expected_payload,
+    .frame=proc->frame_rx, .slot=proc->nr_slot_rx, .pci=fp->Nid_cell,
+    .span=span, .offset=offset, .duration=pdu->coreset.duration, .first_symbol=first_symbol,
+    .bundle=pdu->coreset.RegBundleSize, .interleaver=pdu->coreset.InterleaverSize,
+    .shift=pdu->coreset.ShiftIndex, .dmrs_id=pdu->coreset.pdcch_dmrs_scrambling_id,
+    .scrambling_rnti=pdu->coreset.scrambling_rnti, .n_candidates=pdu->number_of_candidates,
+    .grid_count=span*9*pdu->coreset.duration, .fft_size=fp->ofdm_symbol_size,
+    .carrier_rb=fp->N_RB_DL, .first_carrier_offset=fp->first_carrier_offset,
+    .expected_index=control?expected_index:UINT32_MAX, .expected_rnti=expected_rnti,
+    .expected_length=expected_length, .expected_re=control?54*pdu->L[expected_index]:0,
+  };
+  memcpy(h.cce,pdu->CCE,h.n_candidates*sizeof(h.cce[0]));
+  memcpy(h.al,pdu->L,h.n_candidates*sizeof(h.al[0]));
+  bool ok=fwrite(&h,sizeof(h),1,file)==1
+      && fwrite(grid,sizeof(c16_t),h.grid_count,file)==h.grid_count
+      && fwrite(fft,sizeof(c16_t),h.fft_size*h.duration,file)==h.fft_size*h.duration
+      && (!h.expected_re || fwrite(expected,sizeof(c16_t),h.expected_re,file)==h.expected_re)
+      && fflush(file)==0;
+  if (!ok) { LOG_E(PHY,"PDCCHREPLAY VOID(write)\n"); fclose(file); file=NULL; return; }
+  if (control) { ++controls; last_control=slot_key; } else { ++hypotheses; last_geometry=geometry; }
+  LOG_A(PHY,"PDCCHREPLAY record kind=%s source=%lu span=%u controls=%u hypotheses=%u\n",
+        control?"CSS0_SI":"UNVERIFIED",(unsigned long)slot_key,h.span,controls,hypotheses);
+}
+
+/* ---- LANE BATCH ---------------------------------------------------------------------------------
+ * ONE GPU call per OCCASION instead of one per LANE.
+ *
+ * MEASURED 2026-09-20 (Swisscom PCI 382, K=96, GPU on, 100 % cache hit, 0 misses):
+ *     30,000,000 decodes / 2,866 occasions   = ~10,500 decodes per occasion
+ *     96 calls/occasion x ~90 us per call    = ~8,640 us
+ *     prepass measured                        =  8,756 us
+ * i.e. the per-CALL overhead accounts for essentially all of prepass, and the decodes themselves are
+ * nearly free. That is also why growing the batch 5.4x (238 -> 1292 items) changed the time by 0.6 %:
+ * items are cheap, calls are not. At 238 items a call is actually SLOWER than decoding on the CPU
+ * (~33 us), so the per-lane integration was a pessimisation; the device only pays above ~640 items.
+ *
+ * So all lanes' (candidate x length) grids are gathered into ONE batch per occasion. The lane loop is
+ * split: phase A builds each lane's candidate list, then one flush decodes everything, then phase B
+ * runs each lane's sweep against the cache.
+ *
+ * Lanes are AL2-only (ln_L = 2 in the lane loop), so one vector is 2*108 = 216 int16.
+ * Bounded by BOTH item and vector caps; anything that does not fit is simply left for the CPU path,
+ * which is always correct because the scorer falls back per item. */
+#define LANE_BATCH_VSTRIDE   (LANE_BATCH_AL_MAX * 108)  /* AL8: 864 REs */
+#define LANE_BATCH_MAX_VEC   2048           /* distinct candidates across all lanes */
+#define LANE_BATCH_MAX_ITEMS 131072          /* (candidate x length) pairs; must be <= NPG_MAX_ITEMS */
+#define LANE_BATCH_MAX_LEN   64
+
+typedef struct {
+  int      base;        /* first item index for this lane, -1 = not in the batch */
+  int      n_cand;
+  int      min_len, max_len;
+} lane_batch_slot_t;
+
+/* HEAP, not __thread: at AL8 this buffer is 2048 * 864 * 2 = 3.5 MB, and a TLS block that size is
+ * the documented cause of an AVX alignment fault in this project (per-antenna CFR buffer, same
+ * shape of bug). Only the pointer is thread-local; allocated once per thread, 32-byte aligned. */
+static __thread int16_t *g_lb_vec = NULL;
+/* HEAP, not __thread: at 131072 items these six total ~2.4 MB, and a TLS block that size is the
+ * documented shape of the AVX alignment fault this project already hit. One allocation, sliced. */
+static __thread uint16_t *g_lb_vidx = NULL;
+static __thread uint16_t *g_lb_len  = NULL;
+static __thread uint8_t  *g_lb_al   = NULL;
+static __thread uint32_t *g_lb_crc  = NULL;
+static __thread uint64_t *g_lb_pl   = NULL;
+static __thread uint8_t  *g_lb_ok   = NULL;
+static __thread void     *g_lb_pool = NULL;
+
+static bool lane_batch_vec_ready(void)
+{
+  if (g_lb_vec != NULL)
+    return true;
+  void *m = NULL;
+  if (posix_memalign(&m, 32, sizeof(int16_t) * (size_t)LANE_BATCH_MAX_VEC * LANE_BATCH_VSTRIDE) != 0)
+    return false;
+  const size_t n = (size_t)LANE_BATCH_MAX_ITEMS;
+  const size_t need = n * (sizeof(uint16_t) * 2 + sizeof(uint8_t) * 2 + sizeof(uint32_t) + sizeof(uint64_t))
+                      + 6 * 32;   /* slack so each slice can start 32-byte aligned */
+  void *q = NULL;
+  if (posix_memalign(&q, 32, need) != 0) {
+    free(m);
+    return false;
+  }
+  g_lb_pool = q;
+  uintptr_t c = (uintptr_t)q;
+  #define LB_SLICE(T, cnt) ({ c = (c + 31u) & ~(uintptr_t)31u; T *r_ = (T *)c; c += sizeof(T) * (cnt); r_; })
+  g_lb_vidx = LB_SLICE(uint16_t, n);
+  g_lb_len  = LB_SLICE(uint16_t, n);
+  g_lb_al   = LB_SLICE(uint8_t,  n);
+  g_lb_crc  = LB_SLICE(uint32_t, n);
+  g_lb_pl   = LB_SLICE(uint64_t, n);
+  g_lb_ok   = LB_SLICE(uint8_t,  n);
+  #undef LB_SLICE
+  g_lb_vec = (int16_t *)m;
+  return true;
+}
+static __thread lane_batch_slot_t g_lb_slot[NR_PDCCH_LOOKAHEAD_MAX];
+static __thread int g_lb_n_items, g_lb_n_vec;
+static __thread int g_lb_flushed;   /* 1 once decode_vec has run for this occasion */
+
+static void lane_batch_reset(void)
+{
+  g_lb_n_items = 0;
+  g_lb_n_vec   = 0;
+  g_lb_flushed = 0;
+  for (int i = 0; i < NR_PDCCH_LOOKAHEAD_MAX; i++)
+    g_lb_slot[i].base = -1;
+}
+
+/* Add one lane's (candidate x length) grid. Unscrambles each candidate ONCE -- the unscrambling
+ * depends on (e_rx, L, dmrs_id) and not on dci_length, so doing it inside the length loop repeated
+ * it 34x for identical output. Returns false when the lane does not fit; that lane then uses the
+ * CPU path untouched. */
+static bool lane_batch_add(int lane, const nr_pdcch_autodiscover_sweep_ctx_t *ctx, int min_len, int max_len)
+{
+  if (lane < 0 || lane >= NR_PDCCH_LOOKAHEAD_MAX || ctx == NULL || ctx->n_cand <= 0)
+    return false;
+  if (!lane_batch_vec_ready())
+    return false;                           /* no buffer: whole lane uses the CPU path, unchanged */
+  if (min_len < 0 || max_len >= LANE_BATCH_MAX_LEN || max_len < min_len)
+    return false;
+  const int n_len = max_len - min_len + 1;
+  if (g_lb_n_vec + ctx->n_cand > LANE_BATCH_MAX_VEC)
+    return false;
+  if (g_lb_n_items + ctx->n_cand * n_len > LANE_BATCH_MAX_ITEMS)
+    return false;
+
+  const int base = g_lb_n_items;
+  for (int c = 0; c < ctx->n_cand; c++) {
+    const nr_pdcch_autodiscover_cand_t *cd = &ctx->cand[c];
+    if ((int)cd->L * 108 > LANE_BATCH_VSTRIDE)
+      return false;                       /* wider than LANE_BATCH_AL_MAX: CPU path */
+    const int v = g_lb_n_vec + c;
+    nr_pdcch_unscrambling((c16_t *)cd->e_rx, ctx->scrambling_rnti, (uint32_t)(cd->L * 108),
+                          ctx->dmrs_scrambling_id, &g_lb_vec[v * LANE_BATCH_VSTRIDE]);
+    for (int l = min_len; l <= max_len; l++) {
+      const int i = g_lb_n_items + c * n_len + (l - min_len);
+      g_lb_vidx[i] = (uint16_t)v;
+      g_lb_len[i]  = (uint16_t)l;
+      g_lb_al[i]   = cd->L;
+    }
+  }
+  g_lb_slot[lane].base    = base;
+  g_lb_slot[lane].n_cand  = ctx->n_cand;
+  g_lb_slot[lane].min_len = min_len;
+  g_lb_slot[lane].max_len = max_len;
+  g_lb_n_vec   += ctx->n_cand;
+  g_lb_n_items += ctx->n_cand * n_len;
+  return true;
+}
+
+/* One device call for every lane gathered this occasion. */
+static void lane_batch_flush(void)
+{
+  g_lb_flushed = 0;
+  if (g_lb_vec == NULL || g_lb_ok == NULL)
+    return;                                  /* nothing was ever added on this thread */
+  { /* WHY-NOT diagnostic: a silent early return here costs double work (batch built, CPU still
+     * decodes), so report the reason once per 5000 occasions rather than guessing. */
+    static _Atomic uint64_t s_why = 0;
+    const uint64_t w = atomic_fetch_add_explicit(&s_why, 1, memory_order_relaxed) + 1;
+    if (w == 1 || (w % 5000) == 0) {
+      const nr_gpu_polar_api_t *a = nr_gpu_polar_load();
+      LOG_A(PHY, "SENSING: LANEBATCH-WHY items=%d vec=%d api=%s\n",
+            g_lb_n_items, g_lb_n_vec, (a && a->decode_vec) ? "yes" : "NO");
+    }
+  }
+  if (g_lb_n_items <= 0 || g_lb_n_vec <= 0)
+    return;
+  const nr_gpu_polar_api_t *api = nr_gpu_polar_load();
+  if (api == NULL || api->decode_vec == NULL)
+    return;                                  /* no GPU: every lane falls back to CPU, unchanged */
+  memset(g_lb_ok, 0, (size_t)g_lb_n_items);
+  const int m = api->decode_vec(g_lb_vec, LANE_BATCH_VSTRIDE, g_lb_n_vec, g_lb_vidx, g_lb_len,
+                                g_lb_al, g_lb_n_items, g_lb_crc, g_lb_pl, g_lb_ok);
+  if (m < 0)
+    return;
+  g_lb_flushed = 1;
+  static _Atomic uint64_t s_calls = 0, s_items = 0;
+  const uint64_t n = atomic_fetch_add_explicit(&s_calls, 1, memory_order_relaxed) + 1;
+  atomic_fetch_add_explicit(&s_items, (uint64_t)g_lb_n_items, memory_order_relaxed);
+  if (n == 1 || (n % 2000) == 0)
+    LOG_A(PHY, "SENSING: LANEBATCH call #%llu: %d items, %d vectors, %llu items total (1 call/occasion)\n",
+          (unsigned long long)n, g_lb_n_items, g_lb_n_vec,
+          (unsigned long long)atomic_load_explicit(&s_items, memory_order_relaxed));
+}
+
+/* Per-lane sweep contexts live in an array so the scorer can recover its lane index by pointer
+ * arithmetic -- O(1), and it keeps nr_pdcch_autodiscover_sweep_ctx_t unchanged. */
+static __thread nr_pdcch_autodiscover_sweep_ctx_t g_lane_sweep_ctx[NR_PDCCH_LOOKAHEAD_MAX];
+static __thread nr_pdcch_autodiscover_cand_t      g_lane_disc_cand[NR_PDCCH_LOOKAHEAD_MAX][45];
+static __thread int                               g_lane_disc_n[NR_PDCCH_LOOKAHEAD_MAX];
+static __thread uint8_t                           g_lane_needs_sweep[NR_PDCCH_LOOKAHEAD_MAX];
+static __thread nr_pdcch_lookahead_geom_t         g_lane_geom_snap[NR_PDCCH_LOOKAHEAD_MAX];
+
+/* Cached result for (lane, candidate, length); false = decode it on the CPU as before. */
+static bool lane_batch_get(const void *ctx, int cand_idx, int dci_length, uint32_t *crc, uint64_t *payload)
+{
+  if (!g_lb_flushed || g_lb_ok == NULL)
+    return false;
+  const nr_pdcch_autodiscover_sweep_ctx_t *c = (const nr_pdcch_autodiscover_sweep_ctx_t *)ctx;
+  if (c < &g_lane_sweep_ctx[0] || c >= &g_lane_sweep_ctx[NR_PDCCH_LOOKAHEAD_MAX])
+    return false;                            /* not a lane context (e.g. the primary DL sweep) */
+  const int lane = (int)(c - &g_lane_sweep_ctx[0]);
+  const lane_batch_slot_t *sl = &g_lb_slot[lane];
+  if (sl->base < 0 || cand_idx < 0 || cand_idx >= sl->n_cand)
+    return false;
+  if (dci_length < sl->min_len || dci_length > sl->max_len)
+    return false;
+  const int n_len = sl->max_len - sl->min_len + 1;
+  const int i = sl->base + cand_idx * n_len + (dci_length - sl->min_len);
+  if (i < 0 || i >= g_lb_n_items || !g_lb_ok[i])
+    return false;
+  *crc     = g_lb_crc[i];
+  *payload = g_lb_pl[i];
+  return true;
+}
+
+/* ---- SWEEP GPU BATCH ---------------------------------------------------------------------------
+ * The DCI length sweep is 99 % of an occasion, and it was doing two things wrong per item.
+ *
+ * MEASURED 2026-09-20 (Swisscom PCI 382, K=64): prepass 12618us mean = 76 % of a 16.6 ms occasion,
+ * with over_slot(500us) = 32393/32393 -- every occasion overran its slot ~33x, which is why K=64
+ * froze the host and the sweep never left candidate 1/133. prepass SPANS the lane loop, and each
+ * lane runs a full sweep: 34 lengths x up to 45 candidates. The `decode` bucket (81us) times only
+ * Phase 1 of the primary config, so it hid this entirely.
+ *
+ * Two fixes, both here:
+ *
+ * 1. UNSCRAMBLE ONCE PER CANDIDATE. nr_pdcch_unscrambling() depends on (e_rx, L, dmrs_id) -- NOT on
+ *    dci_length -- yet it sat inside the length loop and ran 34 times per candidate for identical
+ *    output. Same redundancy class as the per-extent LLR hoist, which took fep_llr from ~98 % to
+ *    0.2 % of the occasion.
+ *
+ * 2. ONE GPU BATCH PER SWEEP. Every (candidate, length) pair is an independent polar decode, so the
+ *    whole grid goes to npg_decode_vec() in a single call: n_vec distinct unscrambled vectors,
+ *    vidx[] selecting which one each item uses. That is exactly the shape this API was built for.
+ *    It also avoids the failure mode of the earlier GPU A/B on this rig (20x SLOWER because
+ *    consumers blocked and the batch degenerated to 1): here 1530 items are in hand at once.
+ *
+ * Falls back to the CPU path whenever the GPU is absent, NR_GPU_POLAR is unset, the grid does not
+ * fit, or any item fails -- the scorer below checks `ok` per item and decodes that one on CPU. So
+ * this can only be faster, never wrong. */
+#define SWEEP_BATCH_MAX_CAND 45
+#define SWEEP_BATCH_MAX_LEN  64
+#define SWEEP_BATCH_VSTRIDE  (16 * 108)
+
+typedef struct {
+  const void *ctx;                 /* which sweep context this cache belongs to */
+  int         n_cand, min_len, max_len;
+  uint8_t     valid;
+  uint8_t     ok[SWEEP_BATCH_MAX_CAND][SWEEP_BATCH_MAX_LEN];
+  uint32_t    crc[SWEEP_BATCH_MAX_CAND][SWEEP_BATCH_MAX_LEN];
+  uint64_t    payload[SWEEP_BATCH_MAX_CAND][SWEEP_BATCH_MAX_LEN];
+} sweep_batch_cache_t;
+
+static __thread sweep_batch_cache_t g_sweep_cache;
+
+/* Unscramble each candidate once, then decode the whole (candidate x length) grid in one GPU call.
+ * Returns true when the cache is populated; false leaves the scorer on its original CPU path. */
+static bool sweep_gpu_prefill(const nr_pdcch_autodiscover_sweep_ctx_t *ctx, int min_len, int max_len)
+{
+  g_sweep_cache.valid = 0;
+  if (ctx == NULL || ctx->n_cand <= 0 || ctx->n_cand > SWEEP_BATCH_MAX_CAND)
+    return false;
+  if (min_len < 0 || max_len >= SWEEP_BATCH_MAX_LEN || max_len < min_len)
+    return false;
+  const nr_gpu_polar_api_t *api = nr_gpu_polar_load();
+  if (api == NULL || api->decode_vec == NULL)
+    return false;
+
+  const int n_len = max_len - min_len + 1;
+  const int n_items = ctx->n_cand * n_len;
+  static __thread int16_t  vec[SWEEP_BATCH_MAX_CAND * SWEEP_BATCH_VSTRIDE];
+  static __thread uint16_t vidx[SWEEP_BATCH_MAX_CAND * SWEEP_BATCH_MAX_LEN];
+  static __thread uint16_t lens[SWEEP_BATCH_MAX_CAND * SWEEP_BATCH_MAX_LEN];
+  static __thread uint8_t  als[SWEEP_BATCH_MAX_CAND * SWEEP_BATCH_MAX_LEN];
+  static __thread uint32_t crcs[SWEEP_BATCH_MAX_CAND * SWEEP_BATCH_MAX_LEN];
+  static __thread uint64_t pls[SWEEP_BATCH_MAX_CAND * SWEEP_BATCH_MAX_LEN];
+  static __thread uint8_t  oks[SWEEP_BATCH_MAX_CAND * SWEEP_BATCH_MAX_LEN];
+  if (n_items > (int)(sizeof(vidx) / sizeof(vidx[0])))
+    return false;
+
+  /* (1) one unscramble per candidate, not per (candidate, length) */
+  for (int c = 0; c < ctx->n_cand; c++) {
+    const nr_pdcch_autodiscover_cand_t *cd = &ctx->cand[c];
+    if ((int)cd->L * 108 > SWEEP_BATCH_VSTRIDE)
+      return false;
+    nr_pdcch_unscrambling((c16_t *)cd->e_rx, ctx->scrambling_rnti, (uint32_t)(cd->L * 108),
+                          ctx->dmrs_scrambling_id, &vec[c * SWEEP_BATCH_VSTRIDE]);
+  }
+  /* (2) every (candidate, length) pair as one batch item */
+  int n = 0;
+  for (int c = 0; c < ctx->n_cand; c++)
+    for (int l = min_len; l <= max_len; l++) {
+      vidx[n] = (uint16_t)c;
+      lens[n] = (uint16_t)l;
+      als[n]  = ctx->cand[c].L;
+      n++;
+    }
+  const int m = api->decode_vec(vec, SWEEP_BATCH_VSTRIDE, ctx->n_cand, vidx, lens, als, n, crcs, pls, oks);
+  if (m < 0)
+    return false;
+
+  memset(g_sweep_cache.ok, 0, sizeof(g_sweep_cache.ok));
+  for (int i = 0; i < n; i++) {
+    const int c = vidx[i], l = lens[i];
+    if (!oks[i])
+      continue;
+    g_sweep_cache.ok[c][l]      = 1;
+    g_sweep_cache.crc[c][l]     = crcs[i];
+    g_sweep_cache.payload[c][l] = pls[i];
+  }
+  g_sweep_cache.ctx     = ctx;
+  g_sweep_cache.n_cand  = ctx->n_cand;
+  g_sweep_cache.min_len = min_len;
+  g_sweep_cache.max_len = max_len;
+  g_sweep_cache.valid   = 1;
+
+  static _Atomic uint64_t s_batches = 0, s_items = 0;
+  const uint64_t b = atomic_fetch_add_explicit(&s_batches, 1, memory_order_relaxed) + 1;
+  atomic_fetch_add_explicit(&s_items, (uint64_t)m, memory_order_relaxed);
+  if (b == 1 || (b % 5000) == 0)
+    LOG_A(PHY, "SENSING: sweep GPU batch #%llu: %d items (%d cand x %d len), %llu decoded total\n",
+          (unsigned long long)b, n, ctx->n_cand, n_len,
+          (unsigned long long)atomic_load_explicit(&s_items, memory_order_relaxed));
+  return true;
+}
+
+/* UL length evidence is independent of both the DL sweep and field interpretation. */
+typedef struct {
+  const nr_pdcch_autodiscover_cand_t *cand;
+  int count;
+  uint16_t rnti, scrambling_rnti, dmrs_id;
+  const nr_pdcch_autodiscover_sweep_ctx_t *gpu_ctx;  /* sweep_gpu_prefill()'d for these cands, or NULL */
+} ul_length_ctx_t;
+static bool ul_length_score(int len, int trial, uint16_t *rnti, uint32_t *hash, void *opaque)
+{
+  const ul_length_ctx_t *ctx=opaque;
+  const int ci=trial%ctx->count;
+  /* GPU SWEEP CACHE, same batch the DL sweep uses: the polar decode is format-agnostic, only the
+   * admission differs -- mirror nr_pdcch_blind_decode_raw_01(): exact bootstrap RNTI (rnti_min ==
+   * rnti_max == ctx->rnti) and format indicator 0. A miss falls through to the CPU path unchanged. */
+  if (ctx->gpu_ctx && g_sweep_cache.valid && g_sweep_cache.ctx == ctx->gpu_ctx
+      && ci < g_sweep_cache.n_cand && len >= g_sweep_cache.min_len && len <= g_sweep_cache.max_len
+      && g_sweep_cache.ok[ci][len]) {
+    const uint32_t crc=g_sweep_cache.crc[ci][len];
+    const uint64_t pl=g_sweep_cache.payload[ci][len];
+    if ((crc>>16)==0 && (uint16_t)crc==ctx->rnti && ((pl>>(len-1))&1)==0) {
+      *rnti=(uint16_t)crc;
+      *hash=(uint32_t)pl ^ (uint32_t)(pl>>32);
+      discovery_evidence("sweep_crc", "UL", discovery_evidence_frame, discovery_evidence_slot,
+                          len, (uint16_t)crc, pl, ctx->cand[ci].L, ctx->cand[ci].cce);
+      return true;
+    }
+  }
+  const nr_pdcch_autodiscover_cand_t *c=&ctx->cand[ci];
+  int16_t llr[16*108];
+  nr_pdcch_blind_ul_result_t out;
+  /* TS 38.211 7.3.2.3: a USS under a CORESET with pdcch-DMRS-ScramblingID uses the
+   * C-RNTI in the data scrambling initialization. The encrypted dedicated RRC leaves a passive
+   * receiver unable to know whether that optional field is present, so try both legal modes once
+   * an exact OTA-verified RNTI is available. An unanchored sweep still tries only zero. */
+  nr_pdcch_unscrambling((c16_t *)c->e_rx,ctx->scrambling_rnti,c->L*108,ctx->dmrs_id,llr);
+  bool ok=nr_pdcch_blind_decode_raw_01(llr,c->L,len,ctx->rnti,ctx->rnti,&out);
+  bool used_alt = false;
+  if(!ok && ci == 0 && ctx->rnti != 0 && ctx->rnti != ctx->scrambling_rnti) {
+    nr_pdcch_unscrambling((c16_t *)c->e_rx,ctx->rnti,c->L*108,ctx->dmrs_id,llr);
+    ok=nr_pdcch_blind_decode_raw_01(llr,c->L,len,ctx->rnti,ctx->rnti,&out);
+    used_alt = ok;
+  }
+  if(!ok) return false;
+  if (used_alt)
+    LOG_A(PHY, "SENSING: RNTI_SCRAMBLE_HIT direction=UL rnti=0x%04x len=%d AL=%u CCE=%u\n",
+          ctx->rnti, len, c->L, c->cce);
+  *rnti=out.rnti;
+  *hash=(uint32_t)out.raw_payload ^ (uint32_t)(out.raw_payload>>32);
+  discovery_evidence("sweep_crc", "UL", discovery_evidence_frame, discovery_evidence_slot,
+                      len, out.rnti, out.raw_payload, c->L, c->cce);
+  return true;
+}
 
 static bool nr_pdcch_autodiscover_length_scorer(int dci_length, int trial_idx, uint16_t *rnti_out,
                                                 uint32_t *payload_hash_out, void *user_ctx)
@@ -485,21 +2115,96 @@ static bool nr_pdcch_autodiscover_length_scorer(int dci_length, int trial_idx, u
   if (ctx == NULL || ctx->n_cand <= 0) {
     return false;
   }
-  const nr_pdcch_autodiscover_cand_t *c = &ctx->cand[trial_idx % ctx->n_cand];
+  const int cand_idx = trial_idx % ctx->n_cand;
+  const nr_pdcch_autodiscover_cand_t *evidence_cand = &ctx->cand[cand_idx];
+  /* LANE BATCH first: one device call per occasion covered this lane's whole grid. Same admission
+   * test the CPU path applies, so a cached result can never be accepted on weaker evidence. */
+  {
+    uint32_t bcrc = 0;
+    uint64_t bpl  = 0;
+    if (lane_batch_get(ctx, cand_idx, dci_length, &bcrc, &bpl)) {
+      static _Atomic uint64_t s_bh = 0;
+      const uint64_t bh = atomic_fetch_add_explicit(&s_bh, 1, memory_order_relaxed) + 1;
+      if ((bh % 20000000) == 0)
+        LOG_A(PHY, "SENSING: LANEBATCH hit=%llu\n", (unsigned long long)bh);
+      /* BOTH tests nr_pdcch_blind_decode_raw_11() applies, and it is the ground truth for what a
+       * decode means here: CRC-recovered value in the plausible RNTI range, AND payload bit
+       * (dci_length-1) set. That second one is its "format indicator=0 (UL grant, not DL)" reject.
+       * A cached result must be judged on exactly the evidence a computed one is. */
+      if ((bcrc >> 16) == 0 && bcrc >= ctx->rnti_min && bcrc <= ctx->rnti_max
+          && ((bpl >> (dci_length - 1)) & 1) != 0) {
+        *rnti_out         = sweep_evidence_rnti(ctx, (uint16_t)bcrc, dci_length, evidence_cand);
+        *payload_hash_out = (uint32_t)bpl ^ (uint32_t)(bpl >> 32);
+        discovery_evidence("sweep_crc", "DL", discovery_evidence_frame, discovery_evidence_slot,
+                            dci_length, (uint16_t)bcrc, bpl, evidence_cand->L, evidence_cand->cce);
+        return true;
+      }
+    }
+  }
+  /* SWEEPCACHE: is the GPU result actually being USED? A miss means we paid for the batch AND
+   * still decode on CPU -- which would explain why prepass did not move. Counted, not assumed. */
+  {
+    static _Atomic uint64_t s_hit = 0, s_miss = 0;
+    const bool usable = g_sweep_cache.valid && g_sweep_cache.ctx == ctx
+                        && cand_idx < g_sweep_cache.n_cand
+                        && dci_length >= g_sweep_cache.min_len && dci_length <= g_sweep_cache.max_len
+                        && g_sweep_cache.ok[cand_idx][dci_length];
+    const uint64_t h = usable ? atomic_fetch_add_explicit(&s_hit, 1, memory_order_relaxed) + 1
+                              : atomic_load_explicit(&s_hit, memory_order_relaxed);
+    const uint64_t m = usable ? atomic_load_explicit(&s_miss, memory_order_relaxed)
+                              : atomic_fetch_add_explicit(&s_miss, 1, memory_order_relaxed) + 1;
+    if (((h + m) % 2000000) == 0)
+      LOG_A(PHY, "SENSING: SWEEPCACHE hit=%llu miss=%llu (%.1f%% hit)\n",
+            (unsigned long long)h, (unsigned long long)m, 100.0 * (double)h / (double)(h + m));
+  }
+  /* SWEEP GPU BATCH: prefilled by sweep_gpu_prefill() for this exact ctx. A miss (GPU absent, item
+   * rejected, length outside the batched range) falls through to the CPU path below unchanged. */
+  if (g_sweep_cache.valid && g_sweep_cache.ctx == ctx && cand_idx < g_sweep_cache.n_cand
+      && dci_length >= g_sweep_cache.min_len && dci_length <= g_sweep_cache.max_len
+      && g_sweep_cache.ok[cand_idx][dci_length]) {
+    const uint32_t crc = g_sweep_cache.crc[cand_idx][dci_length];
+    const uint64_t pl  = g_sweep_cache.payload[cand_idx][dci_length];
+    const bool crc_ok = (crc >> 16) == 0 && crc >= ctx->rnti_min && crc <= ctx->rnti_max;
+    /* BUG (found 2026-09-20): this path claimed parity with nr_pdcch_blind_decode_raw_11() but
+     * applied only the RNTI-range half of it, so it admitted format-indicator=0 candidates -- UL
+     * grants -- that the CPU path rejects. Roughly a factor 2 of extra false accepts fed straight
+     * into the sweep's bootstrap-hit statistics, which is exactly the noise the >1-hit threshold
+     * is trying to stand above. */
+    if (crc_ok && ((pl >> (dci_length - 1)) & 1) != 0) {
+      *rnti_out         = sweep_evidence_rnti(ctx, (uint16_t)crc, dci_length, evidence_cand);
+      *payload_hash_out = (uint32_t)pl ^ (uint32_t)(pl >> 32);
+      discovery_evidence("sweep_crc", "DL", discovery_evidence_frame, discovery_evidence_slot,
+                          dci_length, (uint16_t)crc, pl, evidence_cand->L, evidence_cand->cce);
+      return true;
+    }
+  }
+  const nr_pdcch_autodiscover_cand_t *c = &ctx->cand[cand_idx];
   // Same unscramble step nr_pdcch_blind_cand_worker_body() below uses on the identical cursor
   // (t->e_rx from the same pdcch_e_rx[]/e_rx_cand_idx walk), just with `dci_length` substituted
   // for the hypothesis under test instead of the (as yet unknown) real one.
   int16_t tmp_e[16 * 108];
+  nr_pdcch_blind_raw_result_t out;
   nr_pdcch_unscrambling((c16_t *)c->e_rx, ctx->scrambling_rnti, (uint32_t)(c->L * 108), ctx->dmrs_scrambling_id,
                         tmp_e);
-  nr_pdcch_blind_raw_result_t out;
-  if(!nr_pdcch_blind_decode_raw_11(tmp_e,c->L,(uint16_t)dci_length,ctx->rnti_min,ctx->rnti_max,&out))
-    return false;
+  bool ok=nr_pdcch_blind_decode_raw_11(tmp_e,c->L,(uint16_t)dci_length,ctx->rnti_min,ctx->rnti_max,&out);
+  bool used_alt = false;
+  if(!ok && cand_idx == 0 && ctx->bootstrap_alias != 0 && ctx->bootstrap_alias != ctx->scrambling_rnti) {
+    nr_pdcch_unscrambling((c16_t *)c->e_rx, ctx->bootstrap_alias, (uint32_t)(c->L * 108),
+                          ctx->dmrs_scrambling_id, tmp_e);
+    ok=nr_pdcch_blind_decode_raw_11(tmp_e,c->L,(uint16_t)dci_length,ctx->rnti_min,ctx->rnti_max,&out);
+    used_alt = ok;
+  }
+  if(!ok) return false;
+  if (used_alt)
+    LOG_A(PHY, "SENSING: RNTI_SCRAMBLE_HIT direction=DL rnti=0x%04x len=%d AL=%u CCE=%u\n",
+          ctx->bootstrap_alias, dci_length, c->L, c->cce);
   /* Never ask a layout-dependent extractor to judge a length. An unknown TDA
    * width previously rejected genuine CRC-recovered 47-bit grants against a
    * presumed 51-bit field list, so discovery could never reach interpretation. */
-  *rnti_out=out.rnti;
+  *rnti_out=sweep_evidence_rnti(ctx, out.rnti, dci_length, evidence_cand);
   *payload_hash_out=(uint32_t)out.payload ^ (uint32_t)(out.payload>>32);
+  discovery_evidence("sweep_crc", "DL", discovery_evidence_frame, discovery_evidence_slot,
+                      dci_length, out.rnti, out.payload, evidence_cand->L, evidence_cand->cce);
 
   return true;
 }
@@ -525,6 +2230,7 @@ typedef struct {
   uint16_t     rnti_max;
   const nr_pdcch_blind_extract_opts_t *extract_opts;
   uint16_t     scrambling_rnti;
+  uint16_t     alternate_scrambling_rnti; /* exact verified C-RNTI, 0 when unavailable */
   uint16_t     dmrs_scrambling_id;
   int          frame;   /* LLRPROBE correlation only */
   int          slot;    /* LLRPROBE correlation only */
@@ -539,6 +2245,7 @@ typedef struct {
      must be unable to see this task kind at all. */
   bool         dl_auto;
   uint64_t     dl_layout_configuration;
+  uint16_t     dl_layout_index; /* resolver index of the layout decoded under (0xFFFF = none) */
   nr_pdcch_blind_raw_result_t dl_raw;
   bool         ul_auto; // raw decode; sequential controller interprets the CRC-verified bits
   uint8_t      ul_scan; // 1 = interpret this candidate as DCI 0_1; `format` is then meaningless
@@ -546,8 +2253,48 @@ typedef struct {
   nr_pdcch_blind_ul_result_t ul_out; // OUTPUT when ul_scan
   nr_pdcch_blind_result_t out; // OUTPUT
   bool         ok;             // OUTPUT
+  int8_t       bwp_entry;      // passive BWP entry this length belongs to (0 = the configured BWP)
+  uint8_t      bwp_probe;      // 1 = raw decode only: BWP discovery / DM-RS scoring probe
+  uint8_t      open_rnti;      // 1 = open RNTI range at a known length: finds UEs not yet resolved
+  bool         is_lookahead;   // multi-candidate-per-occasion lookahead task (see the lookahead block)
+  int8_t       lookahead_lane; // which lane; valid only when is_lookahead
   task_ans_t  *ans;
 } nr_pdcch_blind_cand_task_t;
+
+/* ---- Passive DL BWP tracking (nr_passive_bwp.h). ISAC_BWP_TRACK=1, or on under V2. The RT thread
+ * registers entries and tracks RNTIs; decode consumers resolve (size, start) from the DM-RS, so every
+ * access is under g_pbwp_lock and the scan works from a per-occasion snapshot. ---- */
+static nr_pbwp_t g_pbwp;
+static pthread_mutex_t g_pbwp_lock = PTHREAD_MUTEX_INITIALIZER;
+static nr_pdcch_blind_extract_opts_t g_pbwp_opts[NR_PBWP_MAX];
+static int nr_pbwp_enabled(void)
+{
+  static int s_on = -1;
+  if (s_on < 0) {
+    const char *e = getenv("ISAC_BWP_TRACK");
+    s_on = (e != NULL) ? (atoi(e) != 0) : nr_agnostic_v2();
+  }
+  return s_on;
+}
+/* TB-CRC outcome of a grant decoded against a DISCOVERED BWP: 32 failures with no pass un-resolve it. */
+void nr_pdcch_bwp_crc_result(int entry, bool crc_ok)
+{
+  pthread_mutex_lock(&g_pbwp_lock);
+  const bool was = nr_pbwp_resolved(&g_pbwp, entry);
+  nr_pbwp_feed_crc(&g_pbwp, entry, crc_ok);
+  if (was && !nr_pbwp_resolved(&g_pbwp, entry))
+    LOG_A(PHY, "SENSING: BWP UNRESOLVED entry=%d: 32 TB-CRC failures, no pass -- rescoring from the DM-RS\n", entry);
+  pthread_mutex_unlock(&g_pbwp_lock);
+}
+void nr_pdcch_bwp_probe_result(int entry, uint64_t payload, const float *prb_coh)
+{
+  pthread_mutex_lock(&g_pbwp_lock);
+  if (entry > 0 && entry < g_pbwp.n && nr_pbwp_score_grant(&g_pbwp, entry, payload, prb_coh))
+    LOG_A(PHY, "SENSING: BWP RESOLVED entry=%d len=%u size=%u start=%d ind_bits=%u after %u grants\n", entry,
+          g_pbwp.e[entry].dci_len, g_pbwp.e[entry].size, g_pbwp.e[entry].start, g_pbwp.e[entry].ind_bits,
+          g_pbwp.e[entry].grants_scored);
+  pthread_mutex_unlock(&g_pbwp_lock);
+}
 
 /* The candidate body WITHOUT the task_ans handshake, for the serial path. Split rather than passing
  * a flag so the parallel worker keeps exactly its previous shape and the pool contract (every task
@@ -555,20 +2302,52 @@ typedef struct {
 static void nr_pdcch_blind_cand_worker_body(nr_pdcch_blind_cand_task_t *t)
 {
   int16_t tmp_e[16 * 108];
-  nr_pdcch_unscrambling((c16_t *)t->e_rx, t->scrambling_rnti, (uint32_t)(t->L * 108), t->dmrs_scrambling_id, tmp_e);
+  uint16_t data_scrambling_rnti = t->scrambling_rnti;
+  bool used_alternate_scrambling = false;
+retry_scrambling:
+  nr_pdcch_unscrambling((c16_t *)t->e_rx, data_scrambling_rnti, (uint32_t)(t->L * 108), t->dmrs_scrambling_id, tmp_e);
   if (t->ul_scan) {
     t->ok = nr_pdcch_blind_decode_01_mode(t->ul_auto,tmp_e,t->L,t->dci_length,t->ul_opts,
                                           t->rnti_min,t->rnti_max,&t->ul_out);
   } else if (t->format == NR_BLIND_DCI_FORMAT_1_0) {
-    t->ok = nr_pdcch_blind_decode_and_extract_10(tmp_e, t->L, t->dci_length, t->dci10_ctx, t->rnti_min, t->rnti_max,
-                                                 t->extract_opts, &t->out);
-  } else if (t->dl_auto) {
+    nr_dci10_interpretation_report_t report;
+    t->ok = nr_pdcch_blind_decode_10_mode(t->dl_auto, tmp_e, t->L, t->dci_length,
+                                          t->dci10_ctx, t->rnti_min, t->rnti_max,
+                                          t->extract_opts, &t->out, &report);
+    if (t->dl_auto && report.attempted) {
+      LOG_D(PHY, "DCI_INTERPRET format=1_0 frame=%d slot=%d cce=%d rnti=0x%04x "
+                 "payload=0x%016lx bits=%u candidates=%u surviving=%u state=%s "
+                 "unique=%d evidence=protocol_only scope=supplied_context\n",
+            t->frame, t->slot, t->cce, t->out.rnti, (unsigned long)t->out.payload,
+            t->dci_length, report.attempted, report.surviving,
+            nr_dci_interpretation_state_name(report.state), report.unique_candidate);
+      for (unsigned i = 0; i < report.attempted; ++i) {
+        const nr_pdcch_blind_result_t *h = &report.candidates[i];
+        LOG_D(PHY, "DCI_HYPOTHESIS rnti=0x%04x candidate=%u class=%u protocol=%s "
+                   "reason=%s PRB=%u+%u symbols=%u+%u mcs=%u rv=%u harq=%u dmrs=0x%x\n",
+              t->out.rnti, i, h->rnti_class, h->plausible ? "PASS" : "REJECT",
+              h->reject_reason ? h->reject_reason : "independent_validation_pending",
+              h->start_rb, h->num_rb, h->start_symbol, h->num_symbols,
+              h->mcs, h->rv, h->harq_pid, h->dl_dmrs_symb_pos);
+      }
+    }
+  } else if (t->dl_auto || t->bwp_probe) {
     t->ok = nr_pdcch_blind_decode_raw_11(tmp_e, t->L, t->dci_length,
                                         t->rnti_min, t->rnti_max, &t->dl_raw);
   } else {
     t->ok = nr_pdcch_blind_decode_and_extract_ex(tmp_e, t->L, t->dci_length, t->bwp_size, t->dmrs_typeA_position,
                                                  t->rnti_min, t->rnti_max, t->extract_opts, &t->out);
   }
+  if (!t->ok && t->alternate_scrambling_rnti != 0
+      && t->alternate_scrambling_rnti != data_scrambling_rnti) {
+    data_scrambling_rnti = t->alternate_scrambling_rnti;
+    used_alternate_scrambling = true;
+    goto retry_scrambling;
+  }
+  if (t->ok && used_alternate_scrambling)
+    LOG_A(PHY, "SENSING: RNTI_SCRAMBLE_HIT direction=%s rnti=0x%04x len=%u AL=%u CCE=%d\n",
+          t->ul_scan ? "UL" : "DL", t->alternate_scrambling_rnti,
+          t->dci_length, t->L, t->cce);
   {
     extern void nr_pdcch_llr_probe(const char *, int, int, int, int, uint32_t, const int16_t *, int);
     nr_pdcch_llr_probe("blind", t->frame, t->slot, t->cce, t->L, t->out.rnti, tmp_e, t->L * 108);
@@ -587,7 +2366,14 @@ static void nr_pdcch_blind_cand_worker(void *arg)
   completed_task_ans(t->ans);
 }
 
+static void nr_pdcch_blind_monitor_process_body(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc);
 void nr_pdcch_blind_monitor_process(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc)
+{
+  const uint64_t t_rt = btim_enabled() ? btim_now() : 0;
+  nr_pdcch_blind_monitor_process_body(ue, proc);
+  btim_add(BTIM_RT, t_rt);
+}
+static void nr_pdcch_blind_monitor_process_body(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc)
 {
   /* The blind PDCCH monitor is the PASSIVE RECEIVER, not part of the sensing pipeline: it decodes
    * other UEs' DCIs and (optionally) their PDSCH. It used to be gated on nr_isac_enabled() as well,
@@ -634,8 +2420,6 @@ void nr_pdcch_blind_monitor_process(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t 
   // data-aided path (pdsch_decode) is a second, independent reason to scan the same candidates, and
   // `pdsch_decode == 1` (measure the CRC pass rate, submit nothing) must work with NO sensing source
   // enabled at all -- that is the whole point of having a measure-only level.
-  const bool isac_on   = nr_isac_enabled() != 0;
-  const bool want_dmrs = isac_on && nr_isac_source_enabled(NR_ISAC_SRC_PDSCH_DMRS_BLIND);
   const bool want_decode = cfg->pdsch_decode >= 1; // >=1 always decodes; only >=2 submits
 
   /* ---- Deferred decode (PASSIVE_RX_ONLY_HANDOVER.md §15). Started lazily here rather than from
@@ -658,17 +2442,24 @@ void nr_pdcch_blind_monitor_process(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t 
               "SENSING: passive PDSCH decode DEFERRED to %d consumer thread(s) (depth=%d core=%d) -- "
               "775us mean decode no longer runs on the PHY receive thread\n",
               n_cons, depth, cfg->pdsch_thread_core);
-        if (cfg->pdsch_combine)
-          LOG_I(PHY, "SENSING: passive PDSCH decode COMBINED across every real receive antenna -- "
-                     "one LDPC decode per grant, tagged per antenna downstream, not one per branch\n");
       }
     }
   }
-  if (!want_dmrs && !want_decode) {
-    return;
-  }
+  /* DCI discovery is itself a monitor consumer. PDSCH decode and ISAC DM-RS extraction are
+   * optional work after an accepted grant, so disabling both must not disable PDCCH discovery. */
 
   NR_DL_FRAME_PARMS *fp = &ue->frame_parms;
+  /* Consult the SIB1 cache as soon as the cell is known: with OAI's own SIB1 failing at 4 RX, this
+   * is what seeds the DL TDRA list (and the UL seed below) on a cell decoded before. One call per
+   * PCI; the loader itself is idempotent. */
+  {
+    static uint16_t s_cache_pci = 0xFFFF;
+    if (s_cache_pci != fp->Nid_cell) {
+      s_cache_pci = (uint16_t)fp->Nid_cell;
+      nr_pdcch_blind_common_config_t c;
+      (void)nr_pdcch_blind_get_common((uint16_t)fp->Nid_cell, &c);
+    }
+  }
 
   /* ---- PHASE 3 (2026-09-04): recover the DEDICATED CORESET by search, Technique A -------------
    * Runs BEFORE the dedicated-SS occasion gate below, which is keyed on ss_monitoring_slot_* --
@@ -683,7 +2474,24 @@ void nr_pdcch_blind_monitor_process(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t 
    * Does its OWN minimal single-symbol, whole-carrier FEP -- NOT run_occasion()'s CORESET-scoped
    * one further down, which needs coreset geometry (duration, frequency_domain_resource) this
    * function does not have until Technique A succeeds. */
-  if (cfg->autodiscover && !nr_pdcch_blind_monitor_autodiscover_done()) {
+  /* STAGE 1 blind nID sweep: one FEP symbol per DL slot (rotating), handed to an idle-priority
+   * worker. Diagnostic; off unless ISAC_COREMAP_IDSWEEP=1. */
+  {
+    const int idsw_sym = nr_pdcch_coreset_map_idsweep_want(
+        (uint32_t)proc->frame_rx * fp->slots_per_frame + (uint32_t)proc->nr_slot_rx, fp->symbols_per_slot);
+    static c16_t *s_idsw_buf;
+    if (idsw_sym >= 0 && s_idsw_buf == NULL)
+      s_idsw_buf = malloc16(sizeof(c16_t) * fp->samples_per_slot_wCP);
+    if (idsw_sym >= 0 && s_idsw_buf != NULL) {
+      c16_t(*rxF_id)[fp->samples_per_slot_wCP] = (c16_t(*)[fp->samples_per_slot_wCP])s_idsw_buf;
+      nr_slot_fep_ant(ue, fp, proc->nr_slot_rx, idsw_sym, 0 /* ant */, rxF_id, link_type_dl, 0, ue->common_vars.rxdata);
+      nr_pdcch_coreset_map_idsweep_push(s_idsw_buf + idsw_sym * fp->ofdm_symbol_size, fp->ofdm_symbol_size,
+                                        fp->first_carrier_offset, fp->N_RB_DL, proc->nr_slot_rx, idsw_sym,
+                                        (uint16_t)fp->Nid_cell, fp->symbols_per_slot);
+    }
+  }
+  if (cfg->autodiscover && !nr_pdcch_blind_monitor_autodiscover_done()
+      && !nr_pdcch_blind_monitor_discovery_paused()) { /* paused: every discovered CORESET is banked */
     const uint32_t abs_slot_now = (uint32_t)proc->frame_rx * fp->slots_per_frame + (uint32_t)proc->nr_slot_rx;
     // ponytail: fixed at symbol 0 rather than rotating through the slot. This deployment's
     // dedicated CORESETs are always 1 symbol starting at 0 (see nr_pdcch_blind_monitor.c's
@@ -716,10 +2524,30 @@ void nr_pdcch_blind_monitor_process(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t 
         fflush(stdout);
       }
     }
-    nr_pdcch_blind_monitor_autodiscover_step(rxdataF_disc[0], fp->ofdm_symbol_size, fp->N_RB_DL,
+    if (getenv("ISAC_DISCOVER_DIAG") != NULL) {
+      static uint32_t s_en_n;
+      if ((s_en_n++ % 2000) == 0) {
+        double e = 0; int nz = 0;
+        for (int k = 0; k < fp->ofdm_symbol_size; k++) {
+          const c16_t v = rxdataF_disc[0][disc_symbol * fp->ofdm_symbol_size + k];
+          e += (double)v.r * v.r + (double)v.i * v.i; nz += (v.r | v.i) != 0;
+        }
+        printf("DISCOVERDIAG fep slot=%d sym=%d energy=%.3g nonzero_sc=%d\n", proc->nr_slot_rx, disc_symbol, e, nz);
+        fflush(stdout);
+      }
+    }
+    /* Symbol 1 as well, for the duration decision (one more symbol FEP per DL slot, pre-discovery only). */
+    nr_slot_fep_ant(ue, fp, proc->nr_slot_rx, 1, 0 /* ant */, rxdataF_disc, link_type_dl, 0, ue->common_vars.rxdata);
+    nr_pdcch_blind_monitor_autodiscover_observe_symbol1(rxdataF_disc[0] + 1 * fp->ofdm_symbol_size, fp->ofdm_symbol_size,
+                                                        fp->N_RB_DL, fp->first_carrier_offset, (uint16_t)fp->Nid_cell,
+                                                        proc->nr_slot_rx);
+    nr_pdcch_blind_monitor_autodiscover_step(rxdataF_disc[0] + disc_symbol * fp->ofdm_symbol_size, fp->ofdm_symbol_size, fp->N_RB_DL,
                                              fp->first_carrier_offset, (uint16_t)fp->Nid_cell,
                                              proc->nr_slot_rx, disc_symbol, abs_slot_now);
-    return;  // geometry not ready (or just became ready this call) -- no candidate decode this call
+    /* Previously a second discovery epoch made the receiver deaf: the unconditional return also
+     * stopped every already-verified CORESET. Keep those immutable bank entries running. */
+    if (atomic_load_explicit(&g_coreset_bank_n, memory_order_acquire) == 0)
+      return;
   }
 
   const uint32_t gate_slot = (uint32_t)proc->frame_rx * fp->slots_per_frame + (uint32_t)proc->nr_slot_rx;
@@ -738,7 +2566,33 @@ void nr_pdcch_blind_monitor_process(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t 
     return;
   }
   const uint32_t rem = gate_slot % (uint32_t)cfg->ss_monitoring_slot_periodicity;
-  if (rem < (uint32_t)cfg->ss_monitoring_slot_offset || rem >= (uint32_t)cfg->ss_monitoring_slot_offset + ss_dur) {
+  bool on_occasion = !(rem < (uint32_t)cfg->ss_monitoring_slot_offset
+                       || rem >= (uint32_t)cfg->ss_monitoring_slot_offset + ss_dur);
+  /* ---- RA SEARCH SPACE: its own occasions, in addition to the configured one ------------------
+   * SIB1 and RA are DIFFERENT common search spaces with independent
+   * monitoringSlotPeriodicityAndOffset -- on this cell sib1_ss=0 and ra_ss=1. CSS0 autoconf
+   * configures this gate from SS#0 only (measured: period=40 offset=11 dur=2), so unless SS#1
+   * happens to fall inside those 2 slots in 40 we never look at a single RAR or Msg4 occasion.
+   * MEASURED 2026-09-21: RA=0 and TC=1 over 58,001 occasions on a cell the operator confirms is
+   * busy -- which is what being blind to the RA window looks like, not an idle cell. Both windows
+   * scan DCI 1_0 in a common search space, so widening the gate is sufficient; nothing downstream
+   * needs to change. Inert until SIB1 supplies a period. */
+  if (!on_occasion) {
+    const nr_pdcch_sib1_prior_t *rp = nr_pdcch_sib1_prior_get();
+    if (rp != NULL && rp->ra_ss_valid && rp->ra_ss_period > 0) {
+      const uint32_t rdur = (rp->ra_ss_duration > 0) ? rp->ra_ss_duration : 1u;
+      const uint32_t rrem = gate_slot % (uint32_t)rp->ra_ss_period;
+      if (rrem >= (uint32_t)rp->ra_ss_offset && rrem < (uint32_t)rp->ra_ss_offset + rdur) {
+        on_occasion = true;
+        static _Atomic uint64_t s_ra_occ = 0;
+        const uint64_t n = atomic_fetch_add_explicit(&s_ra_occ, 1, memory_order_relaxed) + 1;
+        if (n == 1 || (n % 20000) == 0)
+          LOG_A(PHY, "SENSING: RA-SS occasion %llu (period=%u offset=%u dur=%u) -- slots SS#0 never covered\n",
+                (unsigned long long)n, rp->ra_ss_period, rp->ra_ss_offset, (unsigned)rdur);
+      }
+    }
+  }
+  if (!on_occasion) {
     return; // not a monitoring occasion this slot
   }
 
@@ -790,10 +2644,217 @@ void nr_pdcch_blind_monitor_process(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t 
 /* The occasion body. Runs on a scan consumer when the pool is up, and on the PHY receive thread
  * otherwise -- identical code either way, which is what makes the deferral A/B-able with one config
  * field. `abs_slot_monotonic` is the producer's un-wrapped slot counter for this occasion. */
+static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc,
+                                                     bool serial_candidates, long source_absolute_slot);
+
+/* CROSS-PASS DEDUPE (2026-09-23). One slot is decoded by several passes (verified banks, CORESET#0-USS,
+ * discovery). A DCI whose REs lie in CORESET#0's RBs decodes in BOTH the bank pass and the CORESET#0-USS
+ * pass under different CCE numbering -- run s3live4: 1962 DL DCIs accepted twice (CCE 4 and CCE 6), i.e.
+ * duplicate grants and duplicate PDSCH decodes. One accept per (slot, RNTI, direction). */
+enum { PASS_OTHER = 0, PASS_C0USS = 1, PASS_BANK = 2 };
+static __thread int t_pass_kind;
+static pthread_mutex_t s_dedupe_mu = PTHREAD_MUTEX_INITIALIZER;
+static struct { uint32_t slot; uint16_t rnti; uint8_t dir; } s_dedupe[256];
+static unsigned s_dedupe_w;
+static _Atomic uint64_t g_c0uss_unique, g_bank_accepts, g_dup_dropped;
+static bool accept_dup(uint32_t abs_slot, uint16_t rnti, int dir)
+{
+  bool dup = false;
+  pthread_mutex_lock(&s_dedupe_mu);
+  for (int i = 0; i < 256 && !dup; i++)
+    dup = s_dedupe[i].slot == abs_slot + 1 && s_dedupe[i].rnti == rnti && s_dedupe[i].dir == dir;
+  if (!dup) {
+    s_dedupe[s_dedupe_w & 255].slot = abs_slot + 1; /* +1: slot 0 never looks like an empty entry */
+    s_dedupe[s_dedupe_w & 255].rnti = rnti;
+    s_dedupe[s_dedupe_w & 255].dir = (uint8_t)dir;
+    s_dedupe_w++;
+  }
+  pthread_mutex_unlock(&s_dedupe_mu);
+  if (dup)
+    atomic_fetch_add_explicit(&g_dup_dropped, 1, memory_order_relaxed);
+  else if (t_pass_kind == PASS_C0USS)
+    atomic_fetch_add_explicit(&g_c0uss_unique, 1, memory_order_relaxed);
+  else if (t_pass_kind == PASS_BANK)
+    atomic_fetch_add_explicit(&g_bank_accepts, 1, memory_order_relaxed);
+  return dup;
+}
+
 void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc,
                                          bool serial_candidates, long source_absolute_slot)
 {
+  const nr_pdcch_blind_monitor_cfg_t *root = nr_pdcch_blind_monitor_get_cfg();
+  const int n = atomic_load_explicit(&g_coreset_bank_n, memory_order_acquire);
+  if (!root->autodiscover) {
+    nr_pdcch_blind_monitor_run_occasion_one(ue, proc, serial_candidates, source_absolute_slot);
+    return;
+  }
+
+  /* A USS may legally reference CORESET#0. It is the cheapest exact geometry available OTA, so
+   * search it before spending the occasion on unknown footprints. */
+  nr_pdcch_blind_monitor_cfg_t c0_uss;
+  uint16_t verified[NR_PDCCH_BLIND_MAX_UE];
+  const uint32_t frame_slot = proc != NULL
+      ? (uint32_t)proc->frame_rx * (uint32_t)ue->frame_parms.slots_per_frame + (uint32_t)proc->nr_slot_rx
+      : 0;
+  const int n_verified = nr_pdcch_blind_monitor_verified_rnti_set(
+      frame_slot, verified, NR_PDCCH_BLIND_MAX_UE);
+  /* ORDER + GATE (2026-09-23). Verified banks run FIRST, so the cross-pass dedupe keeps their copy and a
+   * CORESET#0-USS accept only counts when it is UNIQUE. A USS may legally live on CORESET#0, so the pass is
+   * never removed: it is skipped once a full window of occasions gives it no unique accept while the banks
+   * are decoding, re-probed on 1 occasion in 64, and re-opened by its first unique accept. */
+  if (n == 0) {
+    t_pass_kind = PASS_C0USS;
+    if (nr_pdcch_blind_monitor_coreset0_uss_cfg(&c0_uss)) {
+      nr_pdcch_blind_monitor_cfg_override(&c0_uss);
+      nr_pdcch_blind_monitor_run_occasion_one(ue, proc, serial_candidates, source_absolute_slot);
+      nr_pdcch_blind_monitor_cfg_override(NULL);
+    }
+    t_pass_kind = PASS_OTHER;
+    nr_pdcch_blind_monitor_run_occasion_one(ue, proc, serial_candidates, source_absolute_slot);
+    return;
+  }
+  t_pass_kind = PASS_BANK;
+  for (int i = 0; i < n; ++i) {
+    nr_pdcch_blind_monitor_cfg_override(&g_coreset_bank[i].cfg);
+    nr_pdcch_blind_monitor_run_occasion_one(ue, proc, serial_candidates, source_absolute_slot);
+  }
+  nr_pdcch_blind_monitor_cfg_override(NULL);
+  {
+    static uint64_t s_occ, s_u0, s_b0;
+    static bool s_closed;
+    const uint64_t u = atomic_load_explicit(&g_c0uss_unique, memory_order_relaxed);
+    const uint64_t b = atomic_load_explicit(&g_bank_accepts, memory_order_relaxed);
+    if (s_closed && u > s_u0) {
+      s_closed = false;
+      LOG_A(PHY, "SENSING: CORESET0_USS pass RE-OPENED: a probe found a DCI no other pass had\n");
+    }
+    if (++s_occ >= 20000) { /* ponytail: window/probe rates are compute budgets, not cell parameters */
+      if (!s_closed && u == s_u0 && b > s_b0) {
+        s_closed = true;
+        LOG_A(PHY, "SENSING: CORESET0_USS pass GATED: 0 unique accepts in %lu occasions while the banks accepted %lu "
+                   "-- probing 1 occasion in 64\n", (unsigned long)s_occ, (unsigned long)(b - s_b0));
+      }
+      s_occ = 0;
+      s_u0 = u;
+      s_b0 = b;
+    }
+    t_pass_kind = PASS_C0USS;
+    if ((!s_closed || (s_occ & 63) == 0) && nr_pdcch_blind_monitor_coreset0_uss_cfg(&c0_uss)) {
+      nr_pdcch_blind_monitor_cfg_override(&c0_uss);
+      nr_pdcch_blind_monitor_run_occasion_one(ue, proc, serial_candidates, source_absolute_slot);
+    }
+    t_pass_kind = PASS_OTHER;
+  }
+  nr_pdcch_blind_monitor_cfg_override(NULL);
+
+  if (nr_pdcch_blind_monitor_autodiscover_done()) {
+    nr_pdcch_blind_monitor_run_occasion_one(ue, proc, serial_candidates, source_absolute_slot);
+  } else {
+    /* CSS0 remains alive while the discovery-only path has no candidate geometry to scan. */
+    static uint64_t css_tick;
+    const nr_pdcch_blind_monitor_cfg_t *css0 = nr_pdcch_blind_monitor_css0_cfg();
+    if (css0 != NULL && ((css_tick++ & 7u) == 0)) {
+      nr_pdcch_blind_monitor_cfg_override(css0);
+      nr_pdcch_blind_monitor_run_occasion_one(ue, proc, serial_candidates, source_absolute_slot);
+      nr_pdcch_blind_monitor_cfg_override(NULL);
+    }
+  }
+}
+
+static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc,
+                                                     bool serial_candidates, long source_absolute_slot)
+{
+  discovery_evidence_frame = proc ? proc->frame_rx : -1;
+  discovery_evidence_slot = proc ? proc->nr_slot_rx : -1;
+  /* ISAC_TDD_SKIP=1: do not scan slots SIB1 says carry no downlink. Unknown pattern -> scan. */
+  {
+    static int s_tdd_skip = -1;
+    if (s_tdd_skip < 0)
+      s_tdd_skip = (getenv("ISAC_TDD_SKIP") != NULL) ? 1 : 0;
+    static unsigned long s_skipped = 0, s_seen = 0;
+    if (s_tdd_skip && proc != NULL) {
+      s_seen++;
+      /* Frame-aligned slot: the TDD pattern's phase is relative to the frame, and the producer's
+       * ring counter is not (and can be -1 on this path). */
+      const uint32_t frame_slot = (uint32_t)proc->frame_rx * (uint32_t)ue->frame_parms.slots_per_frame + (uint32_t)proc->nr_slot_rx;
+      if (!nr_passive_acq_tdd_slot_has_downlink(frame_slot)) {
+        if ((++s_skipped % 20000) == 1)
+          LOG_A(PHY, "SENSING: TDD skip: %lu of %lu slots skipped as uplink-only (from SIB1)\n", s_skipped, s_seen);
+        return;
+      }
+    }
+  }
   const nr_pdcch_blind_monitor_cfg_t *cfg = nr_pdcch_blind_monitor_get_cfg();
+  if (cfg->autodiscover && nr_pdcch_blind_monitor_autodiscover_done()
+      && !nr_pdcch_blind_monitor_autodiscover_extent_verified()
+      && coreset_bank_covers(cfg->coreset_rb_offset, cfg->coreset_freq_domain * 6,
+                            cfg->coreset_duration, cfg->ss_first_symbol,
+                            cfg->coreset_reg_bundle_size, cfg->coreset_interleaver_size,
+                            cfg->coreset_shift_index, cfg->coreset_pdcch_dmrs_scrambling_id)) {
+    nr_pdcch_blind_monitor_autodiscover_retry(cfg->bwp_start + cfg->coreset_rb_offset);
+    dl_discovery_invalidate();
+    return;
+  }
+  if (proc != NULL && proc->nr_slot_rx >= 0 && proc->nr_slot_rx < 20)
+    g_occ_slot[proc->nr_slot_rx]++; // ACCSLOT census: occasions actually run per slot
+
+  /* ---- CSS0 INTERLEAVE -------------------------------------------------------------------------
+   * The snapshot taken in nr_pdcch_blind_monitor.c (g_css0_cfg) was built for this and NOTHING EVER
+   * CONSUMED IT: nr_pdcch_blind_monitor_css0_cfg() was declared, defined, and called from nowhere.
+   * So the two modes were mutually exclusive in practice, which is why (measured 2026-09-20,
+   * Swisscom PCI 382):
+   *   autodiscover=0 -> CSS0 gets every occasion: SI=10000, TC=16, seeds flow, no dedicated search
+   *   autodiscover=1 -> CSS0 never runs at all:   SI=0,     TC=0,  no seeds, dedicated cannot verify
+   * and the dedicated search needs BOTH at once -- CSS0 to harvest a verified RNTI, the dedicated
+   * scan to use it. The single SIB1 seen in an autodiscover=1 run came from the autoconf phase
+   * before the dedicated search took over, not from an interleave.
+   *
+   * Spending 1 occasion in ISAC_CSS0_EVERY on CSS0 is cheap: CSS0 yielded 10000 SI accepts when it
+   * had 100 % of occasions, so a fraction still harvests plentifully, and the dedicated sweep keeps
+   * the rest.
+   *
+   * SAFE AGAINST THE DOCUMENTED HAZARD: the snapshot carries autodiscover=0, and every dedicated
+   * bookkeeping site (extent_step, the length sweep, the lookahead lanes) is gated on
+   * cfg->autodiscover and only then writes g_cfg. Under the snapshot none of them run, so an
+   * interleaved occasion cannot silently revert a hypothesis advance -- which is precisely what the
+   * snapshot comment warned about. cfg is read-only for the occasion; nothing is restored because
+   * nothing is mutated. */
+  /* CORESET#0 can carry either a common or a UE-specific SearchSpace. Downstream behavior follows
+   * the SearchSpace, while CoreSetType continues to control the physical DM-RS reference. */
+  bool css0_occasion = (cfg->dci10_ss_type == NR_BLIND_SS_COMMON);
+  {
+    static int s_css0_every = -1;
+    if (s_css0_every < 0) {
+      const char *e = getenv("ISAC_CSS0_EVERY");
+      s_css0_every = (e != NULL && atoi(e) >= 0) ? atoi(e) : 8;
+    }
+    if (s_css0_every > 0 && cfg->autodiscover) {
+      const nr_pdcch_blind_monitor_cfg_t *css0 = nr_pdcch_blind_monitor_css0_cfg();
+      if (css0 != NULL) {
+        static _Atomic uint64_t s_occ = 0;
+        const uint64_t n = atomic_fetch_add_explicit(&s_occ, 1, memory_order_relaxed);
+        if ((n % (uint64_t)s_css0_every) == 0) {
+          cfg = css0;
+          css0_occasion = true;
+          static _Atomic uint64_t s_css0_runs = 0;
+          const uint64_t r = atomic_fetch_add_explicit(&s_css0_runs, 1, memory_order_relaxed) + 1;
+          if (r == 1 || (r % 20000) == 0)
+            LOG_A(PHY, "SENSING: CSS0 interleave: %llu occasions on CORESET#0 (1 in %d)\n",
+                  (unsigned long long)r, s_css0_every);
+        }
+      }
+    }
+  }
+
+  nr_pdcch_ss_registry_occasion(cfg);
+  nr_pdsch_passive_queue_flush(); /* previous slot's grants go to the consumers together */
+  if (nr_agnostic_v2()) {
+    const int ssi = nr_pdcch_ss_registry_index(cfg);
+    static _Atomic uint64_t s_probe = 0;
+    if (ssi >= 0 && g_ss_reg.retired[ssi]
+        && (atomic_fetch_add_explicit(&s_probe, 1, memory_order_relaxed) & 63) != 0)
+      return; /* barren configuration: spend 1 occasion in 64 re-checking it, not every one */
+  }
   NR_DL_FRAME_PARMS *fp = &ue->frame_parms;
   nr_pdcch_blind_ul_opts_t ul_opts = cfg->ul;
   ul_opts.phy_cell_id = fp->Nid_cell;
@@ -851,10 +2912,16 @@ void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_pr
       }
     }
   }
+  if (cfg->autodiscover)
+    nr_pdcch_blind_monitor_discovered_poll(); /* stage 1-2 hand-off; bumps the generation when applied */
   static uint64_t previous_geometry;
   const uint64_t geometry = nr_pdcch_blind_monitor_autodiscover_generation();
   if (cfg->autodiscover && geometry != previous_geometry) {
     dl_discovery_invalidate();
+    /* A lookahead lane commits its already-scored length together with the verified geometry.
+     * Preserve that result across the generation handoff instead of immediately sweeping it again. */
+    if (nr_pdcch_blind_monitor_autodiscover_extent_verified() && cfg->dci_length_override > 0)
+      g_length_swept = g_length_found = true;
     previous_geometry = geometry;
   }
   /* Frame-derived, exactly as before the split -- NOT the producer's monotonic counter, even though
@@ -877,6 +2944,20 @@ void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_pr
   g_occasions_run++;
   const int      btim_on   = btim_enabled();
   const uint64_t btim_occ0 = btim_on ? btim_now() : 0;
+  const bool budget_active=cfg->autodiscover && cfg->coreset_type!=1
+      && !nr_pdcch_blind_monitor_autodiscover_extent_verified() && discovery_budget_us()>0;
+  discovery_latency_scope_t discovery_scope __attribute__((cleanup(discovery_latency_done))) = {
+      .start=(btim_on && cfg->autodiscover && cfg->coreset_type!=1
+          && !nr_pdcch_blind_monitor_autodiscover_extent_verified()) ? btim_occ0 : 0,
+      .cpu_start=discovery_trace_enabled()?discovery_cpu_now():0,
+      .width=0, .budget=budget_active, .phase=0};
+  const uint64_t sweep_deadline=budget_active ? (btim_on?btim_occ0:btim_now())+1000ull*discovery_budget_us() : 0;
+  /* Occasions are consumed by several scan workers. A TLS counter made every worker restart the
+   * rotation at lane zero, starving the high-numbered lanes indefinitely. */
+  static uint64_t budget_visit;
+  const uint64_t visit = __atomic_fetch_add(&budget_visit, 1, __ATOMIC_RELAXED);
+  const int budget_owner = budget_active ? (int)(visit % (1 + nr_pdcch_blind_lookahead_count())) : 0;
+
 
   // ---- Build the local, single-search-space PDCCH config. ----
   nr_phy_data_t local_phy_data;
@@ -906,7 +2987,7 @@ void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_pr
                                          : FAPI_NR_CCE_REG_MAPPING_TYPE_NON_INTERLEAVED;
   rel15->coreset.RegBundleSize     = (uint8_t)cfg->coreset_reg_bundle_size;
   rel15->coreset.InterleaverSize   = (uint8_t)cfg->coreset_interleaver_size;
-  rel15->coreset.ShiftIndex        = (uint8_t)cfg->coreset_shift_index;
+  rel15->coreset.ShiftIndex        = (uint16_t)cfg->coreset_shift_index;
   rel15->coreset.pdcch_dmrs_scrambling_id = cfg->coreset_pdcch_dmrs_scrambling_id;
   /* PDCCH data scrambling is c_init = (n_RNTI*2^16 + n_ID), where n_RNTI is the C-RNTI only when
    * the search space is UE-specific AND the CORESET carries pdcch-DMRS-ScramblingID; otherwise 0.
@@ -915,7 +2996,8 @@ void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_pr
    * which is what this module already assumed. (Had it been non-zero, blind decoding of the USS
    * would need the C-RNTI *before* it can descramble -- the very thing the scan is recovering --
    * i.e. a structural blocker rather than a tuning error. It is not the case here.) */
-  rel15->coreset.scrambling_rnti   = 0;
+  rel15->coreset.scrambling_rnti   = (cfg->dci10_ss_type == NR_BLIND_SS_UE_SPECIFIC && cfg->coreset_type != 1
+                                              ? nr_pdcch_nrnti_override(abs_slot) : 0); /* USS on a PDCCH-Config CORESET only */
   if (cfg->ss_first_symbol < 0 || cfg->ss_first_symbol >= fp->symbols_per_slot) {
     return;
   }
@@ -923,9 +3005,17 @@ void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_pr
 
   int n_rb = 0, cset_start = 0;
   get_coreset_rballoc(rel15->coreset.frequency_domain_resource, &n_rb, &cset_start);
-  if (n_rb < 12 || rel15->coreset.duration < 1) { // need >=2 AL2 candidates' worth of CCEs to bother
+  /* Six RBs contain a legal AL1 candidate (and AL2/AL3 worth of CCEs at durations 2/3).
+   * The old 12-RB floor returned before the retry/extent clock, freezing a 6-RB observation. */
+  if (n_rb < 6 || n_rb % 6 || rel15->coreset.duration < 1 || rel15->coreset.duration > 3
+      || cfg->ss_first_symbol + rel15->coreset.duration > fp->symbols_per_slot) {
+    if (cfg->autodiscover) {
+      nr_pdcch_blind_monitor_autodiscover_retry(cfg->bwp_start + cfg->coreset_rb_offset);
+      dl_discovery_invalidate();
+    }
     return;
   }
+  discovery_scope.width=n_rb;
   const int num_cces = (n_rb * rel15->coreset.duration) / 6;
 
   /* Build the blind candidate set across AGGREGATION LEVELS.
@@ -1023,6 +3113,7 @@ void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_pr
       used_re += need;
     }
     g_al_rotate[idx] = start + (uint32_t)added;
+    atomic_fetch_add_explicit(&g_al_cand[nr_pdcch_ss_bucket(cfg)][idx], (uint64_t)added, memory_order_relaxed);
   }
 
   /* One-shot visibility. A ladder that silently fails to cover the level the deployment actually
@@ -1051,6 +3142,11 @@ void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_pr
   }
 
   if (nc < 1) {
+    /* A geometry with no supported AL must advance even though no polar decode can run. */
+    if (cfg->autodiscover) {
+      nr_pdcch_blind_monitor_autodiscover_retry(cfg->bwp_start + cfg->coreset_rb_offset);
+      dl_discovery_invalidate();
+    }
     return;
   }
   rel15->number_of_candidates = (uint8_t)nc;
@@ -1061,6 +3157,42 @@ void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_pr
   }
   rel15->num_dci_options       = 1;
   rel15->dci_length_options[0] = dci_length;
+  /* Passive BWP tracking: snapshot the resolved entries for this occasion and pick the probe. */
+  const bool pbwp_on = nr_pbwp_enabled() != 0;
+  struct { uint16_t len, size; int16_t start; } pbwp_snap[NR_PBWP_MAX];
+  memset(pbwp_snap, 0, sizeof(pbwp_snap));
+  int pbwp_n = 0, pbwp_probe_entry = 0;
+  uint16_t pbwp_probe_len = 0;
+  bool cs_have = false;
+  int cs_start = 0, cs_n = 0, cs_dur = 1, cs_ref = 0;
+  if (pbwp_on) {
+    pthread_mutex_lock(&g_pbwp_lock);
+    const uint8_t base_ind = cfg->extract.bwp_indicator_bits >= 0 ? (uint8_t)cfg->extract.bwp_indicator_bits : 1;
+    if (g_pbwp.base_len != dci_length || g_pbwp.base_size != (uint16_t)cfg->bwp_size) {
+      nr_pbwp_init(&g_pbwp, (uint16_t)ue->frame_parms.N_RB_DL, (uint16_t)cfg->bwp_start, (uint16_t)cfg->bwp_size,
+                   dci_length, base_ind);
+      LOG_A(PHY, "SENSING: BWP tracking armed: base len=%u size=%d start=%d ind_bits=%u, %d candidate lengths\n",
+            dci_length, cfg->bwp_size, cfg->bwp_start, base_ind, g_pbwp.n_cand);
+    }
+    pbwp_n = g_pbwp.n;
+    for (int bi = 0; bi < g_pbwp.n; bi++) {
+      pbwp_snap[bi].len = g_pbwp.e[bi].dci_len;
+      pbwp_snap[bi].size = g_pbwp.e[bi].size;
+      pbwp_snap[bi].start = g_pbwp.e[bi].start;
+      if (bi > 0 && g_pbwp.e[bi].start >= 0) {
+        g_pbwp_opts[bi] = cfg->extract;
+        g_pbwp_opts[bi].bwp_indicator_bits = g_pbwp.e[bi].ind_bits;
+      } else if (bi > 0 && !pbwp_probe_len) {
+        pbwp_probe_len = g_pbwp.e[bi].dci_len; /* unresolved: collect DM-RS-scored grants */
+        pbwp_probe_entry = bi;
+      }
+    }
+    cs_have = nr_pbwp_coreset_hypothesis(&g_pbwp, &cs_start, &cs_n, &cs_dur, &cs_ref);
+    static uint32_t s_probe_tick;
+    if (!pbwp_probe_len && (++s_probe_tick & 3) == 0) /* discovery: 1 occasion in 4 */
+      pbwp_probe_len = nr_pbwp_next_probe_len(&g_pbwp);
+    pthread_mutex_unlock(&g_pbwp_lock);
+  }
 
   /* ---- DCI format 1_0 context (TS 38.212 7.3.1.0 / TS 38.214 5.1.2.2.2). Three things change with
    * the search-space kind and NONE of them is cosmetic: the frequency-domain field is sized from
@@ -1069,7 +3201,16 @@ void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_pr
    * is pdsch-ConfigCommon's rather than the dedicated one. Resolved once per occasion, then shared
    * (read-only) by every candidate task. ---- */
   const bool scan_11 = (cfg->dci10_scan != 2);
-  const bool scan_10 = (cfg->dci10_scan >= 1);
+  bool scan_10 = (cfg->dci10_scan >= 1);
+  /* DISCOVERY vs DECODE VOLUME (V2). Scanning format 1_0 next to 1_1 doubles the polar decodes per
+   * candidate, and the scan queue was dropping 34 % of occasions. Once the cell has shown what it
+   * sends -- >= 10000 accepts with 1_0 under 0.5 % of them -- keep 1_0 on 1 occasion in 8: enough
+   * to notice a change (fallback grants, a new UE in its common search space), not enough to cost
+   * the 1_1 decode budget. Evidence-led and self-reversing: the share is re-evaluated every call. */
+  if (scan_10 && scan_11 && nr_agnostic_v2() && g_accepts > 10000 && g_accepts_10 * 200 < g_accepts) {
+    static _Atomic uint64_t s_occ10 = 0;
+    scan_10 = (atomic_fetch_add_explicit(&s_occ10, 1, memory_order_relaxed) & 7) == 0;
+  }
   const bool scan_01 = nr_pdcch_blind_monitor_ul_scan_enabled(cfg);
   uint16_t   dci01_length = 0;
   if (scan_01) {
@@ -1108,8 +3249,14 @@ void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_pr
   {
     /* One-shot: a scan ladder that silently covers the wrong format/size finds nothing and reports
      * no error, which is the same failure mode the aggregation-level ladder already had. */
+    /* Must report the DEDICATED config. The CSS0 interleave swaps cfg to the CORESET#0 snapshot on
+     * every s_css0_every'th occasion INCLUDING occasion 0, and this log is one-shot -- so it fired
+     * on the snapshot and printed "1_1=off (len=46 bwp=48)": 1_0-exclusive at CORESET#0's 48 RB.
+     * Both fields were then read as evidence that format 1_1 was disabled and that the dedicated
+     * sweep was sized against a 48 RB BWP. Neither was true (2026-09-20). The whole point of this
+     * line is to make a wrong ladder visible at startup, so printing the wrong config defeats it. */
     static int s_fmt_logged = 0;
-    if (!s_fmt_logged) {
+    if (!s_fmt_logged && !css0_occasion) {
       s_fmt_logged = 1;
       LOG_I(PHY,
             "SENSING: blind PDCCH formats: 1_1=%s (len=%u bwp=%u) 1_0=%s (len=%u n_rb_riv=%u rb_offset=%d "
@@ -1178,6 +3325,7 @@ void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_pr
   extern int nr_pdcch_blind_capture;
   nr_pdcch_blind_capture = (getenv("ISAC_PDCCH_CAPTURE") != NULL);
 
+  btim_add(BTIM_PRE, btim_occ0);
   const uint64_t btim_t_fep = btim_on ? btim_now() : 0;
   for (int symbol = cfg->ss_first_symbol; symbol < cfg->ss_first_symbol + rel15->coreset.duration; symbol++) {
     nr_slot_fep(ue, fp, proc->nr_slot_rx, symbol, rxdataF, link_type_dl, 0, ue->common_vars.rxdata);
@@ -1189,10 +3337,97 @@ void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_pr
                          rel15->coreset.duration, rxdataF_symb, pdcch_llr);
   }
   btim_add(BTIM_FEP_LLR, btim_t_fep);
+  /* ---- Passive BWP: CORESET discovery (nr_passive_bwp.h). A dedicated BWP's CORESET lives inside that
+   * BWP, so this CORESET never carries its DCIs. Every 8th occasion, correlate each 6-RB window of the
+   * CORESET symbols against the PDCCH DM-RS under the spec reference (CRB 0) and the OAI one (the BWP
+   * start, within 5 RB below the window), and let the tracker find a second CORESET. ~6k MAC/symbol. */
+  const uint64_t btim_t_pbwp = btim_on ? btim_now() : 0;
+  if (pbwp_on) {
+    static uint32_t s_cs_tick;
+    static bool s_cs_logged;
+    if ((++s_cs_tick & 7) == 0) {
+      const int n_win = fp->N_RB_DL / 6 < NR_PBWP_CS_MAXWIN ? fp->N_RB_DL / 6 : NR_PBWP_CS_MAXWIN;
+      const int base_lo = (cfg->bwp_start + cfg->coreset_rb_offset) / 6;
+      const int base_hi = base_lo + cfg->coreset_freq_domain - 1;
+      c16_t pilot[fp->N_RB_DL * 3];
+      float corr[NR_PBWP_CS_MAXWIN];
+      int16_t ref[NR_PBWP_CS_MAXWIN];
+      for (int sym = 0; sym < 2; sym++) {
+        const int symbol = cfg->ss_first_symbol + sym;
+        if (sym >= rel15->coreset.duration)
+          nr_slot_fep(ue, fp, proc->nr_slot_rx, symbol, rxdataF, link_type_dl, 0, ue->common_vars.rxdata);
+        nr_pdcch_coreset_pilot(cfg->coreset_pdcch_dmrs_scrambling_id, proc->nr_slot_rx, symbol, fp->N_RB_DL, pilot);
+        const c16_t *y = &rxdataF[0][symbol * fp->ofdm_symbol_size];
+        for (int w = 0; w < n_win; w++) {
+          corr[w] = (float)nr_pdcch_coreset_window_corr(y, fp->ofdm_symbol_size, fp->first_carrier_offset, pilot,
+                                                        fp->N_RB_DL, w * 6, 0);
+          ref[w] = 0;
+          for (int d = 0; d <= 5 && w * 6 - d > 0; d++) {
+            const float c = (float)nr_pdcch_coreset_window_corr(y, fp->ofdm_symbol_size, fp->first_carrier_offset,
+                                                                pilot, fp->N_RB_DL, w * 6, w * 6 - d);
+            if (c > corr[w]) { corr[w] = c; ref[w] = (int16_t)(w * 6 - d); }
+          }
+        }
+        pthread_mutex_lock(&g_pbwp_lock);
+        nr_pbwp_coreset_observe(&g_pbwp, n_win, base_lo, base_hi, cfg->bwp_start, corr, ref, sym, 0.8f);
+        pthread_mutex_unlock(&g_pbwp_lock);
+        /* ISAC_BWP_DIAG=1: every 256 observations, the 4 strongest windows of symbol 0 with their winning
+         * reference -- what the tracker is actually seeing, when no CORESET gets declared. */
+        static int s_bwp_diag = -1;
+        if (s_bwp_diag < 0)
+          s_bwp_diag = getenv("ISAC_BWP_DIAG") ? 1 : 0;
+        static uint32_t s_diag_n;
+        if (s_bwp_diag && sym == 0 && (++s_diag_n % 256) == 0) {
+          char line[256];
+          int u = 0;
+          bool used[NR_PBWP_CS_MAXWIN] = {false};
+          for (int k = 0; k < 4; k++) {
+            int bw = -1;
+            for (int w = 0; w < n_win; w++)
+              if (!used[w] && (bw < 0 || corr[w] > corr[bw]))
+                bw = w;
+            if (bw < 0)
+              break;
+            used[bw] = true;
+            u += snprintf(line + u, sizeof(line) - u, " RB%d:%.2f(ref %d, hits %u)", bw * 6, corr[bw], ref[bw],
+                          g_pbwp.cs.hits[bw][0]);
+          }
+          LOG_A(PHY, "SENSING: BWP_DIAG coreset obs=%u base=[w%d..w%d ref %d]%s\n", g_pbwp.cs.occ, base_lo, base_hi,
+                cfg->bwp_start, line);
+        }
+      }
+      int cs_start, cs_n, cs_dur, cs_ref;
+      pthread_mutex_lock(&g_pbwp_lock);
+      const bool have = nr_pbwp_coreset_hypothesis(&g_pbwp, &cs_start, &cs_n, &cs_dur, &cs_ref);
+      pthread_mutex_unlock(&g_pbwp_lock);
+      if (have && !s_cs_logged) {
+        s_cs_logged = true;
+        LOG_A(PHY, "SENSING: BWP CORESET found: RB %d..%d (%d RB), %d symbol(s), DM-RS reference RB %d (%s)\n",
+              cs_start, cs_start + cs_n - 1, cs_n, cs_dur, cs_ref, cs_ref ? "BWP start, OAI-style" : "CRB 0, 38.211");
+      }
+    }
+  }
+  btim_add(BTIM_PBWP, btim_t_pbwp);
   if (!nr_passive_samples_valid(
           atomic_load_explicit(&nr_ue_diag_producer_absolute_slot, memory_order_relaxed),
           source_absolute_slot, fp->slots_per_frame))
     return; /* No discovery/CRC evidence from an overwritten CORESET window. */
+
+  /* Blind CSI-RS search, observe-only (ISAC_CSIRS_BLIND=1, default off). Placed HERE, after the
+   * sample-lifetime check, deliberately: scoring a candidate against a window the producer has
+   * already overwritten would feed the correlator next frame's samples and manufacture hits that
+   * no periodicity test could distinguish from a real resource. It reads rxdataF and writes
+   * nothing the decoder consumes, so it cannot affect decoding. */
+  /* IN-LINE, ONCE PER OCCASION, UNTIL CONFIRMED -- then a free early return (see
+   * nr_csirs_blind_rt_slot). A separate consumer thread was tried (2026-09-17) and starved:
+   * unpinned at FIFO 40 it processed 3519 of 145k slots and never confirmed, because every slot
+   * dropped stretches the round-robin search's time-to-confirm by the same factor. Correctness over
+   * cleverness: the body costs the csirs bucket below only while unconfirmed. */
+  const uint64_t btim_t_csirs = btim_on ? btim_now() : 0;
+  nr_csirs_blind_rt_slot(ue, proc->nr_slot_rx,
+                         source_absolute_slot >= 0 ? (uint32_t)source_absolute_slot : 0u,
+                         rxdataF);
+  btim_add(BTIM_CSIRS, btim_t_csirs);
 
   /* XCHECK diagnostic (2026-09-06, Task 5 follow-up): run Technique A's own correlation function
    * on THIS FEP output -- the manual, live-verified ground-truth config's own receive chain, which
@@ -1229,7 +3464,34 @@ void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_pr
   // check instead). ----
   const int llr_stride = llr_size_symbol; // duration==1 here -> llr_size == llr_size_symbol
   c16_t pdcch_e_rx[NR_MAX_PDCCH_SIZE];
+  if (cfg->autodiscover && cfg->coreset_type != 1)
+    blind_discovery_replay(fp,proc,rel15,n_rb,rel15->BWPStart+cset_start+rel15->coreset.rb_offset,cfg->ss_first_symbol,
+        pdcch_llr[0][0],&rxdataF[0][cfg->ss_first_symbol*fp->ofdm_symbol_size],source_absolute_slot,-1,0,0,0,NULL);
   const uint64_t btim_t_dmp = btim_on ? btim_now() : 0;
+  /* Grid is built once from this occasion's FFT and reused by all geometry lanes. It has no
+   * mutable cross-occasion evidence and cannot associate a stale histogram with a current RNTI. */
+  nr_pdcch_dmrs_rank_grid_t rank_grid;
+  rank_grid.n_rb = 0;
+  const bool rank_known_uss = cfg->coreset_type == 1
+                                && cfg->dci10_ss_type == NR_BLIND_SS_UE_SPECIFIC;
+  const bool rank_discovery = blind_dmrs_rank_mode() != 0
+                                && ((cfg->autodiscover
+                                     && !nr_pdcch_blind_monitor_autodiscover_extent_verified())
+                                    || rank_known_uss);
+  /* Keep the measurement grid available after extent verification while UL length is unresolved.
+   * The regular candidate list remains exhaustive; only the UL length sweep uses its top candidate. */
+  const bool build_rank_grid = blind_dmrs_rank_mode() != 0
+                                 && (rank_discovery || scan_01);
+  static __thread uint64_t rank_visit;
+  static __thread uint64_t rank_lane_visit[NR_PDCCH_LOOKAHEAD_MAX];
+  if (build_rank_grid && nr_pdcch_dmrs_rank_grid(&rank_grid, rxdataF[0], fp->ofdm_symbol_size,
+      fp->first_carrier_offset, fp->N_RB_DL, rel15->coreset.pdcch_dmrs_scrambling_id,
+      proc->nr_slot_rx, cfg->ss_first_symbol, rel15->coreset.duration, 0)
+      && rank_discovery) {
+    blind_dmrs_rank_candidates(&rank_grid, rel15, n_rb,
+                               rel15->BWPStart + cset_start + rel15->coreset.rb_offset,
+                               proc->nr_slot_rx, cfg->ss_first_symbol, abs_slot, rank_visit++);
+  }
   nr_pdcch_demapping_deinterleaving((uint32_t)n_rb, pdcch_llr[0][0], pdcch_e_rx, rel15->coreset.duration,
                                     rel15->coreset.RegBundleSize, rel15->coreset.InterleaverSize,
                                     rel15->coreset.ShiftIndex, rel15->number_of_candidates, rel15->CCE, rel15->L,
@@ -1322,13 +3584,27 @@ void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_pr
    * occasion's own real candidate count, typically ~20-40) is actually LOWER than the original
    * one-shot design's fixed 34*64 budget, so calling this every candidate-bearing occasion until
    * it converges is not a new order of magnitude of RT cost, just spread over more occasions. */
-  /* DIAGNOSTIC (2026-09-06, env-gated ISAC_FORCE_DCI_LEN=<n>): pin dci_length instead of sweeping
-   * for it. Separates two hypotheses that the "0 accepts under autodiscover" symptom cannot
-   * distinguish on its own: (a) the rest of the autodiscover-derived config is sound and only the
-   * SWEEP fails to find the right length, vs (b) something ELSE in that config breaks decode, in
-   * which case even the known-correct length recovers nothing. The manual conf decodes this cell at
-   * 48.6-82.8% PDSCH CRC with dci_length=47, so forcing 47 here is a like-for-like test. */
-  if (cfg->autodiscover && nr_pdcch_blind_monitor_autodiscover_done() && !g_length_swept) {
+  /* DCI 1_1 length evidence is owned by (exact CORESET geometry, RNTI). This is also used for
+   * CORESET#0 USS: a known physical CORESET does not make its dedicated payload width known. */
+  uint16_t dl_ready_rnti[NR_PDCCH_BLIND_MAX_UE] = {0};
+  uint16_t dl_ready_len[NR_PDCCH_BLIND_MAX_UE] = {0};
+  int n_dl_ready = 0;
+  uint16_t dl_known[NR_PDCCH_BLIND_MAX_UE] = {0};
+  /* Expensive dedicated sweeps admit only recurring C-RNTIs or stable USS-hash tracks. A
+   * RAR-proved TC-RNTI may be unrelated to the operational SCG C-RNTI under NSA CFRA. */
+  int n_known_dl = nr_pdcch_blind_monitor_dedicated_rnti_set(
+      abs_slot, dl_known, NR_PDCCH_BLIND_MAX_UE);
+  /* USS CCE hashing narrows positions but cannot identify an exact 16-bit RNTI when
+   * monitoring occasions repeat the same slot phase. Exact identities enter only through
+   * multi-occasion CRC/payload recurrence below. */
+  const uint64_t dl_geom = length_coreset_key(cfg);
+  const bool dl_uss_auto = scan_11 && cfg->dl_full_auto
+                           && cfg->dci10_ss_type != NR_BLIND_SS_COMMON;
+  const bool dl_geometry_ready = !cfg->autodiscover
+                                 || nr_pdcch_blind_monitor_autodiscover_done();
+
+  /* Operator-forced length remains an explicit diagnostic for the active autodiscovery geometry. */
+  if (cfg->autodiscover && dl_geometry_ready && !g_length_swept) {
     static int s_force_len = -1;
     if (s_force_len < 0) {
       const char *e = getenv("ISAC_FORCE_DCI_LEN");
@@ -1337,73 +3613,160 @@ void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_pr
     if (s_force_len > 0) {
       nr_pdcch_blind_monitor_autodiscover_set_dci_length(s_force_len);
       g_length_swept = true;
-      g_length_found = true;  // an operator-supplied length is as trustworthy as a swept one
-      LOG_A(PHY, "SENSING: Phase 3 autodiscover -- dci_length FORCED to %d (ISAC_FORCE_DCI_LEN), "
-                 "sweep skipped\n", s_force_len);
+      g_length_found = true;
+      LOG_A(PHY, "SENSING: Phase 3 autodiscover -- dci_length FORCED to %d (ISAC_FORCE_DCI_LEN)\n",
+            s_force_len);
     }
   }
-  if (cfg->autodiscover && nr_pdcch_blind_monitor_autodiscover_done() && !g_length_swept) {
-    nr_pdcch_autodiscover_cand_t disc_cand[64];
-    int disc_n_cand = 0;
-    {
-      int idx = 0;
-      for (int c = 0; c < rel15->number_of_candidates && disc_n_cand < 64; c++) {
-        const int L         = rel15->L[c];
-        const int n_re_cand = NR_PDCCH_BLIND_RE_PER_RB_OUT_DMRS * L * 6;
-        disc_cand[disc_n_cand].e_rx = &pdcch_e_rx[idx];
-        disc_cand[disc_n_cand].L    = (uint8_t)L;
-        disc_n_cand++;
-        idx += n_re_cand;
-      }
-    }
-    if (disc_n_cand > 0) {
-      uint16_t bootstrap_rnti = 0;
-      uint8_t  bootstrap_class = 0xFF;
-      uint32_t age = 0;
-      nr_pdcch_blind_monitor_confirmed_rnti(abs_slot, &bootstrap_rnti, &bootstrap_class, &age);
-      // Only bootstrap_rnti feeds the sweep below; the function unconditionally writes through
-      // all three out-params (see nr_pdcch_blind_rnti_bootstrap.c), so these two can't be NULL.
-      (void)bootstrap_class;
-      (void)age;
 
-      nr_pdcch_autodiscover_sweep_ctx_t sweep_ctx = {
-          .cand                = disc_cand,
-          .n_cand              = disc_n_cand,
-          .bwp_size            = (uint16_t)cfg->bwp_size,
-          .dmrs_typeA_position = (uint8_t)cfg->dmrs_typeA_position,
-          .rnti_min            = cfg->rnti_min,
-          .rnti_max            = cfg->rnti_max,
-          .extract_opts        = &cfg->extract,
-          .scrambling_rnti     = rel15->coreset.scrambling_rnti,
-          .dmrs_scrambling_id  = rel15->coreset.pdcch_dmrs_scrambling_id,
-      };
-      // DCI 1_1 lengths land in roughly 30-70 bits on any deployment this project has seen
-      // (nr_pdcch_dci_length_sweep.h's own file comment), but this codebase itself rejects any
-      // dci_length > 63 before ever decoding -- so the upper bound is 63, not 70: lengths 64-70
-      // are guaranteed-wasted trials (7 of 41 hypotheses, ~17% of the sweep's budget, for zero
-      // possible acceptance).
-      const int found_len = nr_pdcch_dci_length_sweep_feed(&g_dl_length_state, nr_pdcch_autodiscover_length_scorer,
-                                                            &sweep_ctx, disc_n_cand, 30, 63, bootstrap_rnti);
-      if (found_len > 0) {
-        nr_pdcch_blind_monitor_autodiscover_set_dci_length(found_len);
-        g_length_swept = true;
-        g_length_found = true;
-        LOG_A(PHY, "SENSING: Phase 3 autodiscover -- dci_length locked at %d (bootstrap_rnti=0x%x, "
-                   "occasions_fed=%d)\n", found_len, bootstrap_rnti, g_dl_length_state.occasions_fed);
-        return; /* Rebuild the next occasion with the newly selected length. */
-      } else if (g_dl_length_state.occasions_fed >= AUTODISCOVER_LENGTH_SWEEP_MAX_OCCASIONS) {
-        // Bounded give-up (mirrors this file's other bounded-cost designs): a cell where the
-        // sweep genuinely never reaches significance (e.g. real accept rate far below what even
-        // this many occasions can establish) must not run this indefinitely.
-        const int occasions = g_dl_length_state.occasions_fed;
-        nr_pdcch_blind_monitor_autodiscover_retry(cfg->bwp_start + cfg->coreset_rb_offset);
-        dl_discovery_invalidate();
-        LOG_W(PHY, "SENSING: DCI length unresolved after %d occasions; next CORESET hypothesis, "
-                   "no offset blacklist (bootstrap_rnti=0x%x)\n", occasions, bootstrap_rnti);
-        return; /* Old LLRs must never be decoded against the new geometry. */
+  const uint64_t btim_t_dlsw = btim_on ? btim_now() : 0;
+  if (dl_uss_auto && dl_geometry_ready) {
+    pthread_mutex_lock(&g_dl_length_lock);
+    uint64_t evicted_geom = 0;
+    nr_pdcch_dci_length_bank_t *dl_bank =
+        nr_pdcch_dci_length_store_get(&g_dl_length_store, dl_geom, &evicted_geom);
+    if (evicted_geom && getenv("ISAC_DISCOVER_DIAG") != NULL)
+      LOG_A(PHY, "SENSING: DL length store evicted coreset_key=%llu for key=%llu\n",
+            (unsigned long long)evicted_geom, (unsigned long long)dl_geom);
+
+    uint16_t bootstrap_rnti = 0;
+    nr_pdcch_dci_length_context_t *dlc = NULL;
+    if (n_known_dl > 0) {
+      uint64_t pick = (uint64_t)abs_slot + dl_geom + UINT64_C(0x9e3779b97f4a7c15);
+      pick = (pick ^ (pick >> 30)) * UINT64_C(0xbf58476d1ce4e5b9);
+      pick = (pick ^ (pick >> 27)) * UINT64_C(0x94d049bb133111eb);
+      pick ^= pick >> 31;
+      /* Prefer an unresolved UE, but rotate the starting point so periodic traffic cannot starve
+       * one context. */
+      for (int k = 0; k < n_known_dl; ++k) {
+        const uint16_t r = dl_known[(pick + (uint64_t)k) % (uint64_t)n_known_dl];
+        nr_pdcch_dci_length_context_t *c = nr_pdcch_dci_length_context(dl_bank, dl_geom, r);
+        if (!c->found && !c->exhausted) {
+          bootstrap_rnti = r;
+          dlc = c;
+          break;
+        }
       }
     }
+
+    /* Before an identity exists, a deadline-bounded anonymous state remains owned by this exact
+     * CORESET bank. It jointly discovers (RNTI,length); it never promotes a hash alias. */
+    const bool dl_anonymous = dlc == NULL && n_known_dl == 0 && dl_bank && !dl_bank->anonymous_exhausted;
+    nr_pdcch_dci_length_sweep_state_t *dl_state =
+        dlc ? &dlc->state : (dl_anonymous ? &dl_bank->anonymous : NULL);
+    if (dl_state && (dlc || !dl_bank->anonymous_found)) {
+      nr_pdcch_autodiscover_cand_t disc_cand[64];
+      int disc_n_cand = 0, idx = 0;
+      for (int c = 0; c < rel15->number_of_candidates && disc_n_cand < 64; ++c) {
+        const int L = rel15->L[c];
+        disc_cand[disc_n_cand++] = (nr_pdcch_autodiscover_cand_t){
+            .e_rx = &pdcch_e_rx[idx], .L = (uint8_t)L, .cce = rel15->CCE[c]};
+        idx += NR_PDCCH_BLIND_RE_PER_RB_OUT_DMRS * L * 6;
+      }
+      if (disc_n_cand > 0) {
+        nr_pdcch_autodiscover_sweep_ctx_t sweep_ctx = {
+            .cand = disc_cand,
+            .n_cand = disc_n_cand,
+            .bwp_size = (uint16_t)cfg->bwp_size,
+            .dmrs_typeA_position = (uint8_t)cfg->dmrs_typeA_position,
+            .rnti_min = bootstrap_rnti ? bootstrap_rnti : cfg->rnti_min,
+            .rnti_max = bootstrap_rnti ? bootstrap_rnti : cfg->rnti_max,
+            .extract_opts = &cfg->extract,
+            .scrambling_rnti = rel15->coreset.scrambling_rnti,
+            .dmrs_scrambling_id = rel15->coreset.pdcch_dmrs_scrambling_id,
+            .bootstrap_alias = bootstrap_rnti,
+            .lane = -1,
+            .rb_offset = rel15->BWPStart + cset_start + rel15->coreset.rb_offset,
+            .span_rb = n_rb,
+            .bundle = rel15->coreset.RegBundleSize,
+            .interleaver = rel15->coreset.InterleaverSize,
+            .shift = rel15->coreset.ShiftIndex,
+        };
+        sweep_ctx.n_known = (uint8_t)n_known_dl;
+        memcpy(sweep_ctx.known_rnti, dl_known, (size_t)n_known_dl * sizeof(dl_known[0]));
+        dl_state->excluded_len = dci10_length;
+        dl_state->stride = dci_sweep_stride();
+        if (dlc && dl_state->preferred_len == 0 && cfg->dci_length_override >= dci_len_min()
+            && cfg->dci_length_override <= dci_len_max())
+          dl_state->preferred_len = cfg->dci_length_override;
+
+        if (budget_active)
+          g_sweep_cache.valid = 0;
+        else
+          sweep_gpu_prefill(&sweep_ctx, dci_len_min(), dci_len_max());
+        discovery_scope.before_feed = btim_on ? btim_now() : 0;
+        discovery_scope.phase = 1;
+        const uint64_t trace_decodes = dl_state->decodes;
+        int found_len = (budget_active && budget_owner != 0) ? -1 :
+            nr_pdcch_dci_length_sweep_feed_budget(
+                dl_state, nr_pdcch_autodiscover_length_scorer, &sweep_ctx, disc_n_cand,
+                dci_len_min(), dci_len_max(), bootstrap_rnti, sweep_deadline, 0);
+        uint16_t locked_rnti = bootstrap_rnti;
+        if (found_len > 0 && dl_anonymous) {
+          locked_rnti = nr_pdcch_dci_length_sweep_winner_rnti(dl_state, found_len);
+          if (!locked_rnti)
+            found_len = -1;
+        }
+        discovery_scope.after_feed = btim_on ? btim_now() : 0;
+        discovery_scope.trials = dl_state->decodes - trace_decodes;
+        discovery_scope.phase = 2;
+        if (found_len > 0) {
+          if (dlc) {
+            dlc->found = found_len;
+            nr_pdcch_dci_length_bank_converged(dl_bank, locked_rnti, found_len);
+          } else {
+            dl_bank->anonymous_found = found_len;
+            dl_bank->anonymous_rnti = locked_rnti;
+            nr_pdcch_blind_rnti_bootstrap_record_corroborated(
+                locked_rnti, NR_BLIND_RNTI_CLASS_C, abs_slot);
+            nr_pdcch_dci_length_context_t *promoted =
+                nr_pdcch_dci_length_context(dl_bank, dl_geom, locked_rnti);
+            if (promoted)
+              promoted->found = found_len;
+          }
+          LOG_A(PHY, "SENSING: DCI 1_1 length locked coreset=%llu rnti=0x%x len=%d "
+                     "occasions=%d decodes=%llu evidence=distinct_ota\n",
+                (unsigned long long)dl_geom, locked_rnti, found_len,
+                dl_state->occasions_fed, (unsigned long long)dl_state->decodes);
+          if (cfg->autodiscover) {
+            nr_pdcch_blind_monitor_autodiscover_set_dci_length(found_len);
+            g_length_swept = true;
+            g_length_found = true;
+          }
+        } else if (dl_state->occasions_fed >= AUTODISCOVER_LENGTH_SWEEP_MAX_OCCASIONS) {
+          if (dlc)
+            dlc->exhausted = true;
+          else if (dl_bank)
+            dl_bank->anonymous_exhausted = true;
+          if (cfg->autodiscover) {
+            const int occasions = dl_state->occasions_fed;
+            nr_pdcch_blind_monitor_autodiscover_retry(cfg->bwp_start + cfg->coreset_rb_offset);
+            dl_discovery_invalidate();
+            pthread_mutex_unlock(&g_dl_length_lock);
+            LOG_W(PHY, "SENSING: DCI length unresolved after %d occasions for coreset=%llu rnti=0x%x; "
+                       "next geometry\n", occasions, (unsigned long long)dl_geom, bootstrap_rnti);
+            return;
+          }
+        }
+      }
+    }
+
+    /* Snapshot every resolved RNTI for this CORESET. Candidate tasks below use exact RNTI bounds
+     * and each UE's own length; no formula-default 1_1 decode is admitted in full-auto mode. */
+    for (int i = 0; i < n_known_dl && n_dl_ready < NR_PDCCH_BLIND_MAX_UE; ++i) {
+      nr_pdcch_dci_length_context_t *c =
+          nr_pdcch_dci_length_context(dl_bank, dl_geom, dl_known[i]);
+      if (c && c->found > 0) {
+        dl_ready_rnti[n_dl_ready] = dl_known[i];
+        dl_ready_len[n_dl_ready] = (uint16_t)c->found;
+        ++n_dl_ready;
+      }
+    }
+    if (cfg->autodiscover && n_dl_ready > 0)
+      g_length_found = g_length_swept = true;
+    pthread_mutex_unlock(&g_dl_length_lock);
   }
+  btim_add(BTIM_DLSWEEP, btim_t_dlsw);
 
   // Persistence window in slots -- computed once per occasion (cheap, only used when the gate is
   // enabled). Standard NR: 10ms/frame regardless of numerology, so slots_per_frame slots = 10ms.
@@ -1438,11 +3801,18 @@ void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_pr
    * re-bootstraps. Never pinned. */
   /* Both geometry and length are hypotheses. Advance even while length is unresolved,
    * and never combine current LLRs with a newly applied geometry. */
-  if (cfg->autodiscover && nr_pdcch_blind_monitor_autodiscover_extent_step(abs_slot)) {
+  /* Before a length lock, only the budget owner actually feeds this geometry's sweep. Counting
+   * the other lanes' visits retired the primary after 125 of the intended 500 rounds at K=4 and
+   * stride=8. After lock, every visit carries verification evidence and counts normally. */
+  if (cfg->autodiscover && (g_length_found || !budget_active || budget_owner == 0)
+      && nr_pdcch_blind_monitor_autodiscover_extent_step(abs_slot)) {
     dl_discovery_invalidate();
     return;
   }
-  pdsch_sweep_maybe_enable(cfg);
+  /* The temporary CSS0 snapshot must not arm or replace the dedicated PDSCH
+   * configuration. Its DCI 1_0 grants bypass this bank. */
+  if (!css0_occasion)
+    pdsch_sweep_maybe_enable(cfg);
 
   /* MULTI-UE: the confirmed SET, not one RNTI. Narrowing acceptance to a single C-RNTI discarded
    * every grant addressed to any other UE on the cell -- which for a passive receiver is most of
@@ -1454,48 +3824,138 @@ void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_pr
    * discovery and filtering coexist. */
   uint16_t boot_rnti = 0;
   uint16_t known_ul[NR_PDCCH_BLIND_MAX_UE];
-  const int n_known_ul = nr_pdcch_blind_monitor_confirmed_rnti_set(abs_slot,
+  const int n_known_ul = nr_pdcch_blind_monitor_dedicated_rnti_set(abs_slot,
       known_ul, NR_PDCCH_BLIND_MAX_UE);
-  static uint32_t ul_ue_cursor;
-  /* Bounded round-robin: one UL candidate set per occasion, fair across confirmed UEs.
-   * Each UE owns its length and interpretation state; newest sighting cannot erase it. */
-  if (n_known_ul > 0)
-    boot_rnti = known_ul[(ul_ue_cursor++) % n_known_ul];
+  /* Selection happens only on an eligible sweep below. It is keyed by a mixed absolute slot:
+   * a plain round-robin counter aliases with periodic schedulers whenever the grant period is a
+   * multiple of the confirmed-UE count, selecting the same UE on every occupied occasion. */
 
   /* full_auto=0 never feeds a search or replaces a manual UL option/length.
    * Auto has no silent fallback: unresolved searches do not emit guessed grants. */
+  discovery_scope.after_extent=btim_on?btim_now():0;
+  discovery_scope.phase=3;
   bool ul_ready=false;
+#define dl_resolved(r_) ({ bool f_ = false; for (int q_ = 0; q_ < n_dl_ready; ++q_) f_ |= dl_ready_rnti[q_] == (r_); f_; })
+  uint16_t ul_ready_rnti[NR_PDCCH_BLIND_MAX_UE], ul_ready_len[NR_PDCCH_BLIND_MAX_UE];
+  int n_ul_ready = 0;
+  const uint64_t btim_t_ulsw = btim_on ? btim_now() : 0;
   pthread_mutex_lock(&ul_length_lock);
-  uint64_t geom=UINT64_C(1469598103934665603);
-  const int geometry_fields[]={cfg->bwp_start,cfg->bwp_size,cfg->coreset_rb_offset,
-      cfg->coreset_freq_domain,cfg->coreset_duration,cfg->coreset_reg_bundle_size,
-      cfg->coreset_interleaver_size,cfg->coreset_shift_index,cfg->ul.phy_cell_id,
-      rel15->coreset.scrambling_rnti,rel15->coreset.pdcch_dmrs_scrambling_id};
-  for(unsigned i=0;i<sizeof(geometry_fields)/sizeof(geometry_fields[0]);++i)
-    geom=(geom^(uint32_t)geometry_fields[i])*UINT64_C(1099511628211);
-  geom ^= nr_pdcch_blind_monitor_autodiscover_generation();
-  if (!cfg->dl_full_auto || !scan_01 || geom != ul_geometry) {
-    memset(&ul_lengths, 0, sizeof(ul_lengths));
-    nr_pdcch_ul_discovery_reset();
-    ul_geometry=geom;
-  }
-  nr_pdcch_dci_length_context_t *ulc = boot_rnti
-      ? nr_pdcch_dci_length_context(&ul_lengths, geom, boot_rnti) : NULL;
-  if(cfg->dl_full_auto && scan_01 && boot_rnti && (!cfg->autodiscover || nr_pdcch_blind_monitor_autodiscover_extent_verified())) {
-    if(!ulc->found && !ulc->exhausted) {
+  const uint64_t geom = length_coreset_key(cfg);
+  uint64_t evicted_geom = 0;
+  nr_pdcch_dci_length_bank_t *ul_bank =
+      nr_pdcch_dci_length_store_get(&g_ul_length_store, geom, &evicted_geom);
+  if (evicted_geom && getenv("ISAC_DISCOVER_DIAG") != NULL)
+    LOG_A(PHY, "SENSING: UL length store evicted coreset_key=%llu for key=%llu\n",
+          (unsigned long long)evicted_geom, (unsigned long long)geom);
+  /* Interleaved CORESETs retain independent evidence. Disabling a scan pauses its bank; it must
+   * not erase it, and the downstream field-layout discovery is already keyed by RNTI/length/options. */
+  const bool ul_sweep_enabled = !css0_occasion && cfg->dl_full_auto && scan_01;
+  /* DCI format 0_1 is monitored in a UE-specific search space only (TS 38.213 10.1); on a common
+   * search space occasion (CORESET#0 interleave, or a cfg whose SS is common) there is nothing to
+   * sweep for, so the whole block is skipped. dci01_length stays unset for this occasion. */
+  const bool ul_ss_possible = !css0_occasion && cfg->dci10_ss_type != NR_BLIND_SS_COMMON;
+  nr_pdcch_dci_length_context_t *ulc = NULL;
+  if(ul_sweep_enabled && ul_ss_possible && n_known_ul > 0
+      && (!cfg->autodiscover || nr_pdcch_blind_monitor_autodiscover_extent_verified())) {
+    /* Stateless avalanche mixing breaks grant-period/UE-count phase locking while remaining
+     * deterministic and independent of any deployment timing. */
+    uint64_t pick = (uint64_t)abs_slot + UINT64_C(0x9e3779b97f4a7c15);
+    pick = (pick ^ (pick >> 30)) * UINT64_C(0xbf58476d1ce4e5b9);
+    pick = (pick ^ (pick >> 27)) * UINT64_C(0x94d049bb133111eb);
+    pick ^= pick >> 31;
+    boot_rnti = known_ul[pick % (uint64_t)n_known_ul];
+    /* Sweep target: a UE PROVEN by its own DL decodes (DL length resolved) whose UL length is unresolved.
+     * Falsely confirmed noise RNTIs never resolve a DL length; letting them start 34-length UL sweeps cost
+     * ~160 us per occasion at ~1400 DCIs/s (s3live7). No such UE -> no UL sweep this occasion. */
+    bool sweep_target = false;
+    for (int k = 0; k < n_known_ul; ++k) {
+      const uint16_t r = known_ul[(pick + (uint64_t)k) % (uint64_t)n_known_ul];
+      if (!dl_resolved(r))
+        continue;
+      const nr_pdcch_dci_length_context_t *cx = nr_pdcch_dci_length_context(ul_bank, geom, r);
+      if (!cx->found && !cx->exhausted) {
+        boot_rnti = r;
+        sweep_target = true;
+        break;
+      }
+    }
+    ulc = nr_pdcch_dci_length_context(ul_bank, geom, boot_rnti);
+    if(sweep_target && !ulc->found && !ulc->exhausted) {
       nr_pdcch_autodiscover_cand_t candidates[64];
       int count=0, offset=0;
       for(int c=0;c<rel15->number_of_candidates && count<64;++c) {
         const int L=rel15->L[c];
-        candidates[count++]=(nr_pdcch_autodiscover_cand_t){.e_rx=&pdcch_e_rx[offset],.L=L};
+        candidates[count++]=(nr_pdcch_autodiscover_cand_t){.e_rx=&pdcch_e_rx[offset],.L=L,.cce=rel15->CCE[c]};
         offset+=NR_PDCCH_BLIND_RE_PER_RB_OUT_DMRS*L*6;
       }
       if(count) {
-        ul_length_ctx_t ctx={.cand=candidates,.count=count,.rnti=boot_rnti,
+        /* Put this occasion's strongest measured DM-RS candidate first. The ordinary decoder below
+         * still receives every candidate; this ordering only lets the bounded length sweep cover all
+         * lengths for the likeliest live CCE. */
+        if (rank_grid.n_rb && blind_dmrs_rank_mode() != 0) {
+          double score[64];
+          for (int i = 0; i < count; ++i)
+            score[i] = nr_pdcch_dmrs_candidate_score(
+                &rank_grid, rel15->BWPStart + cset_start + rel15->coreset.rb_offset, n_rb,
+                rel15->coreset.RegBundleSize, rel15->coreset.InterleaverSize,
+                rel15->coreset.ShiftIndex, candidates[i].cce, candidates[i].L);
+          /* Keep several hot CCEs, in score order. One strongest CCE is enough for one UE but
+           * permanently starves every other RNTI when several UE-specific CORESETs are active in
+           * the same slot. Four remains a bounded GPU batch and needs no signal threshold. */
+          for (int i = 1; i < count; ++i) {
+            const nr_pdcch_autodiscover_cand_t c = candidates[i];
+            const double sc = score[i];
+            int j = i - 1;
+            while (j >= 0 && (!isfinite(score[j]) || (isfinite(sc) && score[j] < sc))) {
+              candidates[j + 1] = candidates[j];
+              score[j + 1] = score[j];
+              --j;
+            }
+            candidates[j + 1] = c;
+            score[j + 1] = sc;
+          }
+          /* Scores from different ALs are not directly interchangeable: a real AL4 grant also
+           * makes its two AL2 halves look hot. Keep the four strongest candidates PER AL, enough
+           * for four simultaneous UEs without returning to a whole-CORESET sweep. */
+          nr_pdcch_autodiscover_cand_t selected[16];
+          int per_al[4] = {0}, nsel = 0;
+          for (int i = 0; i < count && nsel < 16; ++i) {
+            const int ai = candidates[i].L == 1 ? 0 : candidates[i].L == 2 ? 1
+                         : candidates[i].L == 4 ? 2 : 3;
+            if (per_al[ai] < 4) {
+              selected[nsel++] = candidates[i];
+              ++per_al[ai];
+            }
+          }
+          memcpy(candidates, selected, (size_t)nsel * sizeof(candidates[0]));
+          count = nsel;
+        }
+        /* The main candidate list was already ranked from this occasion's measured DM-RS. During
+         * length discovery, one top-ranked candidate tests every length in about one candidate's
+         * budget; testing every mostly-empty CCE multiplied the sweep by the CORESET width. Mode 0
+         * retains the exhaustive control. The batch itself must use the same bound: pre-decoding all
+         * offered CCEs before a one-candidate feed merely moved the old cost outside the timer. */
+        const int sweep_trials = count; /* ranked mode already compacted to <=4 candidates per AL */
+        const nr_pdcch_autodiscover_sweep_ctx_t gctx={.cand=candidates,.n_cand=sweep_trials,
                             .scrambling_rnti=rel15->coreset.scrambling_rnti,
-                            .dmrs_id=rel15->coreset.pdcch_dmrs_scrambling_id};
-        const int found=nr_pdcch_dci_length_sweep_feed(&ulc->state,ul_length_score,&ctx,
-                                                     count,30,63,boot_rnti);
+                            .dmrs_scrambling_id=rel15->coreset.pdcch_dmrs_scrambling_id};
+        const bool gpu=sweep_gpu_prefill(&gctx, dci_len_min(), dci_len_max());
+        ul_length_ctx_t ctx={.cand=candidates,.count=sweep_trials,.rnti=boot_rnti,
+                            .scrambling_rnti=rel15->coreset.scrambling_rnti,
+                            .dmrs_id=rel15->coreset.pdcch_dmrs_scrambling_id,
+                            .gpu_ctx=gpu?&gctx:NULL};
+        ulc->state.stride = dci_sweep_stride();
+        const uint64_t ul_feed_start = btim_now();
+        const uint64_t ul_deadline = discovery_budget_us() > 0
+                                         ? ul_feed_start + 1000ull * discovery_budget_us()
+                                         : 0;
+        const int found=nr_pdcch_dci_length_sweep_feed_budget(&ulc->state,ul_length_score,&ctx,
+                                                     sweep_trials, dci_len_min(), dci_len_max(),
+                                                     boot_rnti, ul_deadline, 0);
+        if (getenv("ISAC_DISCOVER_DIAG") != NULL)
+          LOG_A(PHY, "SENSING: ULSWEEPTIM us=%.2f rnti=0x%x ranked_trials=%d offered=%d decodes=%llu\n",
+                (double)(btim_now() - ul_feed_start) / 1000.0, boot_rnti, sweep_trials, count,
+                (unsigned long long)ulc->state.decodes);
         /* A single matching decode cannot rule out a degenerate polar fixed point.
          * Require distinct UL payloads before trusting the shared engine's shortcut. */
         int supported_lengths=0;
@@ -1505,7 +3965,17 @@ void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_pr
         if(found>0 && supported_lengths==1 && ulc->state.n_distinct[found]>1 &&
            ulc->state.bootstrap_hits[found]>=3) {
           ulc->found=found;
-          LOG_A(PHY,"UL automatic DCI length locked: %d rnti=0x%x\n",found,boot_rnti);
+          LOG_A(PHY,"UL automatic DCI length locked: %d rnti=0x%x (occasions=%d polar_decodes=%llu)\n",
+                found,boot_rnti,ulc->state.occasions_fed,(unsigned long long)ulc->state.decodes);
+          /* Publish to the bank. On agreement between two distinct RNTIs this becomes the cell-wide
+           * prior and every later RNTI skips its own 34-length sweep -- the discovery cost stops
+           * scaling with the number of UEs, which is what breaks the consumer at high grant rates. */
+          nr_pdcch_dci_length_bank_converged(ul_bank, boot_rnti, found);
+        } else if(ulc->state.occasions_fed>=AUTODISCOVER_LENGTH_SWEEP_MAX_OCCASIONS && dl_resolved(boot_rnti)) {
+          /* A PROVEN UE (its own DL length resolved) keeps trying: s3live4's 0x4643 (~2 UL grants/s, and a UL
+           * size of 43 where the peer had 45) was exhausted forever inside the occasion budget. Unproven RNTIs --
+           * falsely confirmed noise -- still exhaust: letting them sweep forever cost ~180 us/occasion (s3live6). */
+          ulc->state.occasions_fed=0;
         } else if(ulc->state.occasions_fed>=AUTODISCOVER_LENGTH_SWEEP_MAX_OCCASIONS) {
           ulc->exhausted=true;
           LOG_W(PHY,"UL automatic length unresolved after %d occasions\n",ulc->state.occasions_fed);
@@ -1514,10 +3984,82 @@ void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_pr
     }
     ul_ready=ulc->found>0;
     if(ul_ready) dci01_length=ulc->found;
+    /* MULTI-RNTI UL (2026-09-23): every UE whose UL length is resolved gets its own task below. The old
+     * path decoded 0_1 for ONE picked UE per occasion, so with 2 UEs at most ~half the UL grants could be
+     * recovered (live s3live3: ~30 %). */
+    for (int k = 0; k < n_known_ul && n_ul_ready < NR_PDCCH_BLIND_MAX_UE; ++k) {
+      const nr_pdcch_dci_length_context_t *cx = nr_pdcch_dci_length_context(ul_bank, geom, known_ul[k]);
+      if (cx->found > 0) {
+        ul_ready_rnti[n_ul_ready] = known_ul[k];
+        ul_ready_len[n_ul_ready++] = (uint16_t)cx->found;
+      }
+    }
+    ul_ready = n_ul_ready > 0;
   }
   pthread_mutex_unlock(&ul_length_lock);
+  (void)ulc;
+  btim_add(BTIM_ULSWEEP, btim_t_ulsw);
+  discovery_scope.after_ul=btim_on?btim_now():0;
+  discovery_scope.phase=4;
   const uint64_t btim_t_pre = btim_on ? btim_now() : 0;
   {
+    /* DM-RS COHERENCE GATE (2026-09-23, 5GSniffer-style: correlate_DMRS() + AL_corr_thresholds, but
+     * the threshold is DERIVED per occasion from THIS occasion's own candidates (median + MAD per AL)
+     * instead of copied fixed constants -- 5GSniffer's {0.9,0.8,0.7,0.15,0.15} were tuned on their own
+     * rig and would silently misfire on a different SNR/CORESET config (the macro). Independent of the
+     * existing raw-energy Gate 1 below: that gate reads post-equalisation candidate energy and cannot
+     * tell strong noise/interference from a real PDCCH; this one requires coherent match to the
+     * ACTUAL DM-RS Gold sequence for this CORESET's nID, which noise energy cannot fake. Fail-open
+     * (gates nothing) whenever the DM-RS reference grid isn't available -- unverified/unknown geometry
+     * during discovery, or the mode disabled -- so it can never block finding a CORESET in the first
+     * place, only reduce cost/false-accepts once one is known. */
+    static int s_dmrs_gate_env = -1;
+    if (s_dmrs_gate_env < 0) {
+      /* DEFAULT OFF (2026-09-23, measured, not guessed): live A/B on this cell (run s3live9 vs s3live8,
+       * everything else identical) -- decoded grants 94.0%->86.8%, false accepts ~33->4, over_slot(500us)
+       * 9.9%->3.0%, drop_full way down. The gate DOES what it is supposed to (cuts noise, cuts cost) but
+       * ALSO rejects real weaker-SNR candidates at the current z=3.09 (~1e-3) threshold -- a net LOSS
+       * against this project's explicit priority (minimize lost grants), not a bug to hunt. Needs a
+       * threshold sweep (looser z, or only gate candidates far below the energy-gate floor rather than a
+       * tight statistical bound) before defaulting on. ISAC_PDCCH_DMRS_GATE=1 to re-enable for that A/B. */
+      s_dmrs_gate_env = (getenv("ISAC_PDCCH_DMRS_GATE") != NULL && atoi(getenv("ISAC_PDCCH_DMRS_GATE")) != 0) ? 1 : 0;
+    }
+    double cand_dmrs_score[256];
+    float  cand_al_thresh[5] = {-INFINITY, -INFINITY, -INFINITY, -INFINITY, -INFINITY}; /* AL 1,2,4,8,16 */
+    const bool dmrs_gate_active = s_dmrs_gate_env && rank_grid.n_rb > 0
+                                   && rel15->number_of_candidates <= 256;
+    if (dmrs_gate_active) {
+      int bucket_idx[5][256], bucket_n[5] = {0};
+      for (int c = 0; c < rel15->number_of_candidates; c++) {
+        cand_dmrs_score[c] = nr_pdcch_dmrs_candidate_score(
+            &rank_grid, rel15->BWPStart + cset_start + rel15->coreset.rb_offset, n_rb,
+            rel15->coreset.RegBundleSize, rel15->coreset.InterleaverSize, rel15->coreset.ShiftIndex,
+            rel15->CCE[c], rel15->L[c]);
+        const int ai = (rel15->L[c] == 1) ? 0 : (rel15->L[c] == 2) ? 1 : (rel15->L[c] == 4) ? 2
+                     : (rel15->L[c] == 8) ? 3 : 4;
+        if (bucket_n[ai] < 256)
+          bucket_idx[ai][bucket_n[ai]++] = c;
+      }
+      /* Need enough candidates per AL for a stable median/MAD; too few -> that AL is not gated this
+       * occasion (fail-open per-AL, not a global disable). Small-n insertion sort, counts are <= a few
+       * dozen per AL in every deployment seen so far. */
+      for (int ai = 0; ai < 5; ai++) {
+        const int m = bucket_n[ai];
+        if (m < 8)
+          continue;
+        double v[256];
+        for (int i = 0; i < m; i++)
+          v[i] = cand_dmrs_score[bucket_idx[ai][i]];
+        for (int i = 1; i < m; i++) { double x = v[i]; int j = i - 1; while (j >= 0 && v[j] > x) { v[j + 1] = v[j]; j--; } v[j + 1] = x; }
+        const double med = v[m / 2];
+        double d[256];
+        for (int i = 0; i < m; i++)
+          d[i] = fabs(v[i] - med);
+        for (int i = 1; i < m; i++) { double x = d[i]; int j = i - 1; while (j >= 0 && d[j] > x) { d[j + 1] = d[j]; j--; } d[j + 1] = x; }
+        const double mad = 1.4826 * d[m / 2] > 1e-6 ? 1.4826 * d[m / 2] : 1e-6;
+        cand_al_thresh[ai] = (float)(med + 3.09 * mad); /* ~1e-3 one-sided, same z as the rest of this project */
+      }
+    }
     int e_rx_cand_idx = 0;
     for (int c = 0; c < rel15->number_of_candidates; c++) {
       const int L         = rel15->L[c];
@@ -1587,6 +4129,18 @@ void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_pr
         if (mean_abs < thresh) {
           e_rx_cand_idx += n_re_cand;
           g_held_energy++;
+          continue;
+        }
+      }
+
+      // ---- Gate 0 (DM-RS coherence, see the setup block above this loop): survivors of the raw
+      // energy gate still get checked against the ACTUAL PDCCH DM-RS sequence before a polar decode
+      // is attempted for ANY UE or length at this candidate. ----
+      if (dmrs_gate_active) {
+        const int ai = (L == 1) ? 0 : (L == 2) ? 1 : (L == 4) ? 2 : (L == 8) ? 3 : 4;
+        if (isfinite(cand_al_thresh[ai]) && cand_dmrs_score[c] < cand_al_thresh[ai]) {
+          e_rx_cand_idx += n_re_cand;
+          g_held_dmrs++;
           continue;
         }
       }
@@ -1661,8 +4215,57 @@ constdiag_done:;
           .dci10_ctx           = NULL,
           .dl_auto             = cfg->dl_full_auto != 0,
       };
-      if (scan_11 && nof_tasks < (int)(sizeof(cand_task) / sizeof(cand_task[0]))) {
+      if (scan_11 && !cfg->dl_full_auto
+          && nof_tasks < (int)(sizeof(cand_task) / sizeof(cand_task[0]))) {
+        cand_task[nof_tasks++] = base_task;
+      } else if (scan_11 && cfg->dl_full_auto && n_dl_ready > 0) {
+        /* One polar task per resolved UE, all through this single candidate pipeline. Exact CRC
+         * bounds make the pair (CORESET,RNTI,length) operationally inseparable. Rotate UE order so
+         * the fixed task cap cannot starve a later UE during a full-audit occasion. */
+        const int first = (int)((abs_slot + (uint32_t)c) % (uint32_t)n_dl_ready);
+        for (int k = 0; k < n_dl_ready
+             && nof_tasks < (int)(sizeof(cand_task) / sizeof(cand_task[0])); ++k) {
+          const int ri = (first + k) % n_dl_ready;
+          cand_task[nof_tasks] = base_task;
+          cand_task[nof_tasks].dci_length = dl_ready_len[ri];
+          cand_task[nof_tasks].rnti_min = dl_ready_rnti[ri];
+          cand_task[nof_tasks].rnti_max = dl_ready_rnti[ri];
+          cand_task[nof_tasks].alternate_scrambling_rnti = c == 0 ? dl_ready_rnti[ri] : 0;
+          nof_tasks++;
+        }
+        /* MULTI-RNTI (2026-09-23): the exact-bound tasks above can only ever decode UEs already resolved,
+         * so a second UE on the same CORESET was invisible forever (live s3live: gNB scheduled 0x4626
+         * 2033 times, receiver saw it 0 times). One OPEN-range task per distinct resolved length lets a new
+         * RNTI be recovered from the CRC; it then goes through the same persistence + bootstrap
+         * confirmation as any other before a grant is emitted. Known RNTIs are skipped in its results. */
+        for (int ri = 0; ri < n_dl_ready && nof_tasks < (int)(sizeof(cand_task) / sizeof(cand_task[0])); ++ri) {
+          bool dup = false;
+          for (int rj = 0; rj < ri; ++rj) dup |= dl_ready_len[rj] == dl_ready_len[ri];
+          if (dup) continue;
+          cand_task[nof_tasks] = base_task;
+          cand_task[nof_tasks].dci_length = dl_ready_len[ri];
+          cand_task[nof_tasks].open_rnti = 1;
+          nof_tasks++;
+        }
+      }
+      /* Other resolved BWPs: their own length, RIV width and indicator width. ponytail: extracted with
+       * the manual layout (cfg->extract); the V2 layout sweep is not run per BWP. */
+      for (int bi = 1; scan_11 && pbwp_on && bi < pbwp_n; bi++) {
+        if (pbwp_snap[bi].start < 0 || nof_tasks >= (int)(sizeof(cand_task) / sizeof(cand_task[0])))
+          continue;
         cand_task[nof_tasks] = base_task;
+        cand_task[nof_tasks].dci_length   = pbwp_snap[bi].len;
+        cand_task[nof_tasks].bwp_size     = pbwp_snap[bi].size;
+        cand_task[nof_tasks].extract_opts = &g_pbwp_opts[bi];
+        cand_task[nof_tasks].dl_auto      = false;
+        cand_task[nof_tasks].bwp_entry    = (int8_t)bi;
+        nof_tasks++;
+      }
+      if (scan_11 && pbwp_on && pbwp_probe_len && nof_tasks < (int)(sizeof(cand_task) / sizeof(cand_task[0]))) {
+        cand_task[nof_tasks] = base_task;
+        cand_task[nof_tasks].dci_length = pbwp_probe_len;
+        cand_task[nof_tasks].bwp_probe  = 1;
+        cand_task[nof_tasks].bwp_entry  = (int8_t)pbwp_probe_entry;
         nof_tasks++;
       }
       if (scan_10 && nof_tasks < (int)(sizeof(cand_task) / sizeof(cand_task[0]))) {
@@ -1670,18 +4273,27 @@ constdiag_done:;
         cand_task[nof_tasks].dci_length = dci10_length;
         cand_task[nof_tasks].format     = NR_BLIND_DCI_FORMAT_1_0;
         cand_task[nof_tasks].dci10_ctx  = &dci10_ctx;
+        /* C-RNTI-dependent scrambling is attempted after CRC recurrence identifies the RNTI. */
         nof_tasks++;
       }
-      if (scan_01 && (!cfg->dl_full_auto || ul_ready) && nof_tasks < (int)(sizeof(cand_task) / sizeof(cand_task[0]))) {
+      if (scan_01 && !cfg->dl_full_auto && nof_tasks < (int)(sizeof(cand_task) / sizeof(cand_task[0]))) {
         cand_task[nof_tasks]            = base_task;
         cand_task[nof_tasks].dci_length = dci01_length;
         cand_task[nof_tasks].ul_scan    = 1;
         cand_task[nof_tasks].ul_opts    = &ul_opts;
-        cand_task[nof_tasks].ul_auto    = cfg->dl_full_auto != 0;
-        if(cfg->dl_full_auto) {
-          cand_task[nof_tasks].rnti_min=boot_rnti;
-          cand_task[nof_tasks].rnti_max=boot_rnti;
-        }
+        cand_task[nof_tasks].ul_auto    = 0;
+        nof_tasks++;
+      }
+      for (int ri = 0; scan_01 && cfg->dl_full_auto && ri < n_ul_ready
+           && nof_tasks < (int)(sizeof(cand_task) / sizeof(cand_task[0])); ++ri) {
+        cand_task[nof_tasks]            = base_task;
+        cand_task[nof_tasks].dci_length = ul_ready_len[ri];
+        cand_task[nof_tasks].ul_scan    = 1;
+        cand_task[nof_tasks].ul_opts    = &ul_opts;
+        cand_task[nof_tasks].ul_auto    = 1;
+        cand_task[nof_tasks].rnti_min   = ul_ready_rnti[ri];
+        cand_task[nof_tasks].rnti_max   = ul_ready_rnti[ri];
+        cand_task[nof_tasks].alternate_scrambling_rnti = c == 0 ? ul_ready_rnti[ri] : 0;
         nof_tasks++;
       }
       e_rx_cand_idx += n_re_cand;
@@ -1689,11 +4301,598 @@ constdiag_done:;
     }
   }
 
+  /* ---- Passive BWP: second monitoring pass over the CORESET discovered for a dedicated BWP. Same
+   * PDCCH pipeline (LLRs, demapping, the same scan tasks and result loop); only the CORESET geometry
+   * differs, and only the lengths of discovered BWPs are tried there (the resolved ones + the probe).
+   * DM-RS reference = the voted reference RB: the BWP start on OAI, 0 (CRB 0) per 38.211. ---- */
+  static __thread c16_t s_pdcch_e_rx2[NR_MAX_PDCCH_SIZE];
+  if (pbwp_on && cs_have && scan_11 && (pbwp_n > 1 || pbwp_probe_len) && cs_n >= 6
+      && cs_n <= NR_PDCCH_BLIND_MAX_CORESET_RB && cs_dur <= NR_PDCCH_BLIND_MAX_CORESET_DURATION) {
+    nr_phy_data_t phy_b = local_phy_data;
+    fapi_nr_dl_config_dci_dl_pdu_rel15_t *rb = &phy_b.phy_pdcch_config.pdcch_config[0];
+    rb->BWPStart = (uint16_t)cs_ref;
+    rb->coreset.rb_offset = (uint16_t)(cs_start - cs_ref);
+    rb->coreset.duration = (uint8_t)cs_dur;
+    build_coreset_bitmap(cs_n / 6, rb->coreset.frequency_domain_resource);
+    const int ncce_b = cs_n * cs_dur / 6;
+    static const int al_b[4] = {2, 4, 1, 8};
+    int nc_b = 0, re_b = 0;
+    for (int oi = 0; oi < 4; oi++) {
+      const int L = al_b[oi], need = NR_PDCCH_BLIND_RE_PER_RB_OUT_DMRS * L * 6;
+      for (int cce = 0; cce + L <= ncce_b && nc_b < 48 && re_b + need <= NR_MAX_PDCCH_SIZE; cce += L) {
+        rb->CCE[nc_b] = (uint16_t)cce;
+        rb->L[nc_b] = (uint8_t)L;
+        nc_b++;
+        re_b += need;
+      }
+    }
+    rb->number_of_candidates = (uint8_t)nc_b;
+    const int llr_sym_b = cs_n * NR_PDCCH_BLIND_RE_PER_RB_OUT_DMRS;
+    c16_t pdcch_llr_b[1][1][NR_PDCCH_BLIND_MAX_CORESET_RB * NR_PDCCH_BLIND_MAX_CORESET_DURATION
+                           * NR_PDCCH_BLIND_RE_PER_RB_OUT_DMRS];
+    for (int symbol = cfg->ss_first_symbol; symbol < cfg->ss_first_symbol + cs_dur; symbol++) {
+      if (symbol >= cfg->ss_first_symbol + rel15->coreset.duration)
+        nr_slot_fep(ue, fp, proc->nr_slot_rx, symbol, rxdataF, link_type_dl, 0, ue->common_vars.rxdata);
+      __attribute__((aligned(32))) c16_t rxdataF_symb[fp->nb_antennas_rx][((fp->ofdm_symbol_size + 7) / 8) * 8];
+      for (int ant = 0; ant < fp->nb_antennas_rx; ant++)
+        memcpy(rxdataF_symb[ant], &rxdataF[ant][symbol * fp->ofdm_symbol_size], sizeof(c16_t) * fp->ofdm_symbol_size);
+      nr_pdcch_generate_llr(ue, proc, symbol, &phy_b, llr_sym_b, num_monitoring_occ, rb->coreset.duration,
+                            rxdataF_symb, pdcch_llr_b);
+    }
+    nr_pdcch_demapping_deinterleaving((uint32_t)cs_n, pdcch_llr_b[0][0], s_pdcch_e_rx2, rb->coreset.duration,
+                                      rb->coreset.RegBundleSize, rb->coreset.InterleaverSize, rb->coreset.ShiftIndex,
+                                      rb->number_of_candidates, rb->CCE, rb->L, llr_sym_b);
+    const int cap = (int)(sizeof(cand_task) / sizeof(cand_task[0]));
+    int idx2 = 0;
+    for (int c = 0; c < nc_b; c++) {
+      const nr_pdcch_blind_cand_task_t t2 = {
+          .e_rx = &s_pdcch_e_rx2[idx2],
+          .L = rb->L[c],
+          .dmrs_typeA_position = (uint8_t)cfg->dmrs_typeA_position,
+          .rnti_min = cfg->rnti_min,
+          .rnti_max = cfg->rnti_max,
+          .scrambling_rnti = rb->coreset.scrambling_rnti,
+          .dmrs_scrambling_id = rb->coreset.pdcch_dmrs_scrambling_id,
+          .frame = proc->frame_rx,
+          .slot = proc->nr_slot_rx,
+          .cce = rb->CCE[c],
+          .format = NR_BLIND_DCI_FORMAT_1_1,
+          .dl_auto = false,
+      };
+      for (int bi = 1; bi < pbwp_n && nof_tasks < cap; bi++) {
+        if (pbwp_snap[bi].start < 0)
+          continue;
+        cand_task[nof_tasks] = t2;
+        cand_task[nof_tasks].dci_length = pbwp_snap[bi].len;
+        cand_task[nof_tasks].bwp_size = pbwp_snap[bi].size;
+        cand_task[nof_tasks].extract_opts = &g_pbwp_opts[bi];
+        cand_task[nof_tasks].bwp_entry = (int8_t)bi;
+        nof_tasks++;
+      }
+      if (pbwp_probe_len && nof_tasks < cap) {
+        cand_task[nof_tasks] = t2;
+        cand_task[nof_tasks].dci_length = pbwp_probe_len;
+        cand_task[nof_tasks].bwp_probe = 1;
+        cand_task[nof_tasks].bwp_entry = (int8_t)pbwp_probe_entry;
+        nof_tasks++;
+      }
+      idx2 += NR_PDCCH_BLIND_RE_PER_RB_OUT_DMRS * rb->L[c] * 6;
+    }
+  }
+
+  /* ---- Lookahead lanes (nr_pdcch_blind_monitor.h): K-1 ADDITIONAL (extent, mapping) hypotheses
+   * tested this same occasion, reusing the rxdataF this occasion already FEP'd above (every lane
+   * shares g_cfg's coreset_duration, so the "only re-FEP a symbol beyond what's already covered"
+   * guard below never fires -- mirrors the existing Passive-BWP second-pass block just above, which
+   * established that pattern for a different geometry source). AL2-only (this cell's own dedicated
+   * SS never schedules anything else -- see CLAUDE.md's "Multi-AL scanning" note): a lookahead
+   * lane's job is finding the right GEOMETRY, not a complete scan of an unconfirmed one. Off by
+   * default (ISAC_PDCCH_EXTENT_BATCH unset or 1). ---- */
+  const int lookahead_k = (cfg->autodiscover && nr_pdcch_blind_monitor_autodiscover_done()
+                                && !nr_pdcch_blind_monitor_autodiscover_extent_verified())
+                               ? nr_pdcch_blind_lookahead_count() : 0;
+  /* Per-lane candidate REs must survive until Phase 1's decode loop runs, much later in this same
+   * occasion -- a stack array scoped to one loop iteration would leave cand_task[].e_rx dangling by
+   * the time it's read. __thread (not a plain static) so two occasions running concurrently on
+   * different consumer threads never share one buffer -- same convention this file's own pbwp
+   * second-pass block already uses for s_pdcch_e_rx2. pdcch_llr_lane, by contrast, is fully
+   * written-then-read within one lane's own iteration, so a single reused buffer is enough. */
+  /* Was [.. * 2 * 45] = 810 REs/lane, i.e. ~7 AL2 candidates and only ONE AL8 -- sized when lanes
+   * were AL2-only. A mixed-AL scan needs room for several positions at each level, so this is now
+   * 16 AL8-equivalents and lives on the HEAP: as a __thread array it would be 127 * 6912 * 4 B =
+   * 3.5 MB of TLS, the same shape as the large-TLS AVX alignment fault this project already hit. */
+  static __thread c16_t *s_lane_re = NULL;
+  if (s_lane_re == NULL) {
+    void *m = NULL;
+    if (posix_memalign(&m, 32, sizeof(c16_t) * (size_t)NR_PDCCH_LOOKAHEAD_MAX * LANE_RE_PER_LANE) != 0)
+      return;
+    s_lane_re = (c16_t *)m;
+  }
+  c16_t (*s_pdcch_e_rx_lane)[LANE_RE_PER_LANE] = (c16_t (*)[LANE_RE_PER_LANE])s_lane_re;
+  static __thread c16_t pdcch_llr_lane[1][1][NR_PDCCH_BLIND_MAX_CORESET_RB * NR_PDCCH_BLIND_MAX_CORESET_DURATION
+                                             * NR_PDCCH_BLIND_RE_PER_RB_OUT_DMRS];
+  /* LLR CACHE, per occasion. nr_pdcch_generate_llr() depends on the frequency EXTENT (rb_offset and
+   * the RB count implied by freq_domain) and the duration -- NOT on RegBundleSize, InterleaverSize
+   * or ShiftIndex, which only nr_pdcch_demapping_deinterleaving() consumes. The catalogue walks all
+   * 271 mapping variations WITHIN one extent, so consecutive lanes share the extent and each was
+   * redoing the FEP, a full-symbol memcpy per antenna, and the channel estimation inside
+   * generate_llr -- for bit-identical output.
+   *
+   * That repeated work IS the cost: polar decode is 4.3 us of a 208 us occasion (2 %, measured), so
+   * ~98 % of an occasion is what is being duplicated K times. Removing it is what makes K > 16
+   * lanes affordable on CPU, and it is also the precondition for a GPU version to be worth doing --
+   * only once this is gone does the decode become the dominant term.
+   *
+   * Scoped to ONE occasion deliberately: these LLRs derive from this slot's samples, so the key is
+   * reset on every call and never carried across occasions. */
+  int llr_cache_rb = -1, llr_cache_off = -1;
+  lane_batch_reset();   /* LANE BATCH is per-occasion: these LLRs belong to this slot only */
+
+  /* UNION LLR: one FEP + channel estimate + LLR per occasion instead of one per lane.
+   * lane_advance() puts every lane on its OWN extent (ext_idx + k + 1), so the per-lane LLR cache
+   * below missed on every lane and nr_pdcch_generate_llr() ran K times per slot. For a dedicated
+   * CORESET the DM-RS is absolute-indexed (dci_nr.c: pilots generated from BWPStart, RB n's pilot
+   * does not depend on which extent contains it), so an LLR over the union of all lanes' extents
+   * is the same per-RB quantity and each lane takes its slice. The one thing that is NOT identical:
+   * the channel-estimation filter at an extent's first/last RB sees neighbours in the union that it
+   * would not see in the sub-extent. ISAC_LANE_UNION_LLR=0 restores the per-lane path for an A/B. */
+  static int s_union_llr = -1;
+  if (s_union_llr < 0) { const char *e = getenv("ISAC_LANE_UNION_LLR"); s_union_llr = (e == NULL || atoi(e) != 0) ? 1 : 0; }
+  static __thread c16_t pdcch_llr_union[1][1][NR_PDCCH_BLIND_MAX_CORESET_RB * NR_PDCCH_BLIND_MAX_CORESET_DURATION
+                                              * NR_PDCCH_BLIND_RE_PER_RB_OUT_DMRS];
+  int u_lo = 0, u_rb = 0;         /* union window: first RB and RB count; u_rb == 0 -> not built */
+  if (s_union_llr) {
+    int lo = INT_MAX, hi = -1;
+    for (int lane = 0; lane < lookahead_k; lane++) {
+      nr_pdcch_lookahead_geom_t g;
+      if (!nr_pdcch_blind_lookahead_get(lane, &g))
+        continue;
+      if (g.rb_offset < lo) lo = g.rb_offset;
+      if (g.rb_offset + g.freq_domain * 6 > hi) hi = g.rb_offset + g.freq_domain * 6;
+    }
+    if (hi > lo && (hi - lo) <= NR_PDCCH_BLIND_MAX_CORESET_RB && ((hi - lo) % 6) == 0) {
+      nr_phy_data_t phy_u;
+      memset(&phy_u, 0, sizeof(phy_u));
+      phy_u.phy_pdcch_config.nb_search_space = 1;
+      fapi_nr_dl_config_dci_dl_pdu_rel15_t *urel = &phy_u.phy_pdcch_config.pdcch_config[0];
+      urel->coreset.CoreSetType   = rel15->coreset.CoreSetType;
+      urel->coreset.rb_offset     = (uint16_t)lo;
+      urel->coreset.duration      = rel15->coreset.duration;
+      build_coreset_bitmap((hi - lo) / 6, urel->coreset.frequency_domain_resource);
+      urel->coreset.CceRegMappingType        = FAPI_NR_CCE_REG_MAPPING_TYPE_NON_INTERLEAVED; /* LLR is mapping-independent */
+      urel->coreset.pdcch_dmrs_scrambling_id = cfg->coreset_pdcch_dmrs_scrambling_id;
+      urel->coreset.scrambling_rnti          = (cfg->dci10_ss_type == NR_BLIND_SS_UE_SPECIFIC && cfg->coreset_type != 1
+                                              ? nr_pdcch_nrnti_override(abs_slot) : 0); /* USS on a PDCCH-Config CORESET only */
+      urel->coreset.StartSymbolBitmap        = rel15->coreset.StartSymbolBitmap;
+      const int u_sym = (hi - lo) * NR_PDCCH_BLIND_RE_PER_RB_OUT_DMRS;
+      if ((size_t)(urel->coreset.duration * u_sym) <= sizeof(pdcch_llr_union[0][0]) / sizeof(c16_t)) {
+        for (int symbol = cfg->ss_first_symbol; symbol < cfg->ss_first_symbol + urel->coreset.duration; symbol++) {
+          if (symbol >= cfg->ss_first_symbol + rel15->coreset.duration)
+            nr_slot_fep(ue, fp, proc->nr_slot_rx, symbol, rxdataF, link_type_dl, 0, ue->common_vars.rxdata);
+          __attribute__((aligned(32))) c16_t rxdataF_symb_u[fp->nb_antennas_rx][((fp->ofdm_symbol_size + 7) / 8) * 8];
+          for (int ant = 0; ant < fp->nb_antennas_rx; ant++)
+            memcpy(rxdataF_symb_u[ant], &rxdataF[ant][symbol * fp->ofdm_symbol_size], sizeof(c16_t) * fp->ofdm_symbol_size);
+          nr_pdcch_generate_llr(ue, proc, symbol, &phy_u, u_sym, num_monitoring_occ, urel->coreset.duration,
+                                rxdataF_symb_u, pdcch_llr_union);
+        }
+        u_lo = lo;
+        u_rb = hi - lo;
+      }
+    }
+  }
+
+  for (int lane = 0; lane < lookahead_k; lane++) {
+    nr_pdcch_lookahead_geom_t geom;
+    if (!nr_pdcch_blind_lookahead_get(lane, &geom))
+      continue;
+    if (coreset_bank_covers(geom.rb_offset, geom.freq_domain * 6, cfg->coreset_duration,
+                            cfg->ss_first_symbol, geom.reg_bundle_size, geom.interleaver_size,
+                            geom.shift_index, cfg->coreset_pdcch_dmrs_scrambling_id)) {
+      nr_pdcch_blind_lookahead_retry(lane);
+      continue;
+    }
+    if (memcmp(&geom, &g_lane_last_geom[lane], sizeof(geom)) != 0) {
+      g_lane_last_geom[lane] = geom;
+      nr_pdcch_dci_length_sweep_reset(&g_lane_length_state[lane]);
+      /* SIB1 length seed: DCI 1_0 in a UE-specific search space is sized on the ACTIVE DL BWP, and
+       * SIB1's initialDownlinkBWP is that BWP until RRC says otherwise -- so its 1_0 length is
+       * KNOWN, not swept. Tried first for NR_PDCCH_LENGTH_PREFERRED_ROUNDS rounds, then the full
+       * 30..63 sweep as before (the 1_1 length still depends on the dedicated config). */
+      {
+        const int bank_len = geom.fast_length_only ? coreset_bank_length_hint() : 0;
+        if (bank_len >= dci_len_min() && bank_len <= dci_len_max())
+          g_lane_length_state[lane].preferred_len = bank_len;
+        const nr_pdcch_sib1_prior_t *pr = nr_pdcch_sib1_prior_get();
+        if (g_lane_length_state[lane].preferred_len == 0
+            && pr != NULL && pr->dl_bwp_valid && pr->dl_bwp_size > 0) {
+          const int seed = (int)nr_pdcch_blind_dci10_size(pr->dl_bwp_size);
+          if (seed >= dci_len_min() && seed <= dci_len_max())
+            g_lane_length_state[lane].preferred_len = seed;
+        }
+      }
+      g_lane_length_swept[lane] = false;
+      g_lane_length_found[lane] = false;
+      g_lane_length_rnti[lane] = 0;
+    }
+
+    nr_phy_data_t phy_lane;
+    memset(&phy_lane, 0, sizeof(phy_lane));
+    phy_lane.phy_pdcch_config.nb_search_space = 1;
+    fapi_nr_dl_config_dci_dl_pdu_rel15_t *lrel = &phy_lane.phy_pdcch_config.pdcch_config[0];
+    lrel->coreset.CoreSetType   = rel15->coreset.CoreSetType;
+    lrel->coreset.rb_offset     = (uint16_t)geom.rb_offset;
+    lrel->coreset.duration      = rel15->coreset.duration; // every lane shares g_cfg's duration
+    build_coreset_bitmap(geom.freq_domain, lrel->coreset.frequency_domain_resource);
+    lrel->coreset.CceRegMappingType = (geom.reg_bundle_size != 0)
+                                          ? FAPI_NR_CCE_REG_MAPPING_TYPE_INTERLEAVED
+                                          : FAPI_NR_CCE_REG_MAPPING_TYPE_NON_INTERLEAVED;
+    lrel->coreset.RegBundleSize            = (uint8_t)geom.reg_bundle_size;
+    lrel->coreset.InterleaverSize          = (uint8_t)geom.interleaver_size;
+    lrel->coreset.ShiftIndex               = (uint16_t)geom.shift_index;
+    lrel->coreset.pdcch_dmrs_scrambling_id = cfg->coreset_pdcch_dmrs_scrambling_id;
+    lrel->coreset.scrambling_rnti          = (cfg->dci10_ss_type == NR_BLIND_SS_UE_SPECIFIC && cfg->coreset_type != 1
+                                              ? nr_pdcch_nrnti_override(abs_slot) : 0); /* USS on a PDCCH-Config CORESET only */
+    lrel->coreset.StartSymbolBitmap        = rel15->coreset.StartSymbolBitmap;
+
+    int ln_rb = 0, ln_start = 0;
+    get_coreset_rballoc(lrel->coreset.frequency_domain_resource, &ln_rb, &ln_start);
+    if (ln_rb < 6) { // a 6-RB CORESET can carry AL1
+      nr_pdcch_blind_lookahead_retry(lane);
+      continue;
+    }
+    const int ln_num_cces = (ln_rb * lrel->coreset.duration) / 6;
+    /* Every configured aggregation level, non-overlapping CCE positions at each. The RE budget is
+     * tracked as a RUNNING TOTAL rather than (count * fixed_need): with mixed ALs the candidates no
+     * longer have equal width, so the old uniform-stride check would under-count an AL8 entry and
+     * overrun s_pdcch_e_rx_lane[]. This mirrors the disc_cand walk below, which already advances
+     * its cursor by each candidate's own L. */
+    const uint8_t *ln_als_cfg = NULL;
+    const int ln_nal_all = lane_als(&ln_als_cfg);
+    uint8_t ln_als_ord[5];
+    const uint8_t *ln_als = ln_als_cfg;
+    {
+      const nr_pdcch_sib1_prior_t *pr = nr_pdcch_sib1_prior_get();
+      if (pr != NULL && pr->ss_valid && ln_nal_all > 1) {
+        int n = 0;
+        for (int pass = 0; pass < 2; pass++)           /* pass 0: ALs the SIB1 CSS monitors; pass 1: the rest */
+          for (int ai = 0; ai < ln_nal_all; ai++) {
+            int idx = 0;
+            while ((1 << idx) < ln_als_cfg[ai]) idx++;   /* AL -> al_candidates index (1,2,4,8,16 -> 0..4) */
+            const bool known = (idx < NR_SIB1_PRIOR_NUM_AL) && pr->al_candidates[idx] > 0;
+            if ((pass == 0) == known) ln_als_ord[n++] = ln_als_cfg[ai];
+          }
+        ln_als = ln_als_ord;
+      }
+    }
+    /* One AL per visit. Decoding every AL at every geometry multiplied the lane-batch prepass by
+     * four and measured >1 ms. The geometry dwell below is extended to two complete rotations, so
+     * this changes scheduling latency only; every configured AL remains covered. Lane staggering
+     * prevents all lanes from testing the same AL in an occasion. */
+    const uint64_t lane_visit = rank_lane_visit[lane]++;
+    uint8_t ln_al_active = ln_als[(lane_visit + (uint64_t)lane) % (uint64_t)ln_nal_all];
+    ln_als = &ln_al_active;
+    const int ln_nal = 1;
+    const int ln_cap_re = (int)(sizeof(s_pdcch_e_rx_lane[lane]) / sizeof(s_pdcch_e_rx_lane[0][0]));
+    int ln_nc = 0, ln_used_re = 0;
+    /* Form every legal non-overlapping position before applying the extraction-buffer budget.
+     * The previous position-major truncation silently removed high CCEs on wide mixed-AL
+     * geometries before DMRS could score them. A verified RAR identity now contributes the exact
+     * 38.213 USS hash prior; DMRS contributes current-slot occupancy. One rotating candidate per AL
+     * gets the largest priority, so a bad prior or a quiet grant can delay but never permanently
+     * exclude any CCE. */
+    uint16_t all_cce[256], all_support[256] = {0};
+    uint8_t all_al[256], all_order[256];
+    double all_score[256] = {0};
+    int all_n = 0;
+    for (int pos = 0; all_n < 256; ++pos) {
+      bool any = false;
+      for (int ai = 0; ai < ln_nal && all_n < 256; ++ai) {
+        const int L = (int)ln_als[ai];
+        const int npos = ln_num_cces / L;
+        if (pos >= npos)
+          continue;
+        all_cce[all_n] = (uint16_t)(pos * L);
+        all_al[all_n] = (uint8_t)L;
+        all_order[all_n] = (uint8_t)all_n;
+        ++all_n;
+        any = true;
+      }
+      if (!any)
+        break;
+    }
+    uint16_t verified[NR_PDCCH_BLIND_MAX_UE];
+    const int n_verified =
+        nr_pdcch_blind_monitor_verified_rnti_set(abs_slot, verified, NR_PDCCH_BLIND_MAX_UE);
+    if (n_verified > 0)
+      nr_pdcch_uss_candidate_supports(ln_num_cces, proc->nr_slot_rx, verified, n_verified,
+                                      all_cce, all_al, all_n, all_support);
+    const bool prioritize = rank_grid.n_rb || n_verified > 0;
+    if (prioritize) {
+      const double prior_den = n_verified > 0 ? 21.0 * n_verified : 1.0;
+      for (int i = 0; i < all_n; ++i) {
+        const double d = rank_grid.n_rb
+            ? nr_pdcch_dmrs_candidate_score(&rank_grid, geom.rb_offset, ln_rb,
+                                            lrel->coreset.RegBundleSize,
+                                            lrel->coreset.InterleaverSize,
+                                            lrel->coreset.ShiftIndex, all_cce[i], all_al[i])
+            : 0.0;
+        all_score[i] = (isfinite(d) ? d : 0.0) + 2.0 * (double)all_support[i] / prior_den;
+      }
+      /* Reserve one cyclic exploration point per AL. Its bonus only changes scheduling order. */
+      for (int ai = 0; ai < ln_nal; ++ai) {
+        int count = 0;
+        for (int i = 0; i < all_n; ++i)
+          if (all_al[i] == ln_als[ai])
+            ++count;
+        if (count == 0)
+          continue;
+        int target = (int)(rank_lane_visit[lane] % (uint64_t)count);
+        for (int i = 0; i < all_n; ++i)
+          if (all_al[i] == ln_als[ai] && target-- == 0) {
+            all_score[i] += 4.0;
+            break;
+          }
+      }
+      for (int i = 1; i < all_n; ++i) {
+        const uint8_t v = all_order[i];
+        int j = i;
+        while (j > 0 && all_score[v] > all_score[all_order[j - 1]]) {
+          all_order[j] = all_order[j - 1];
+          --j;
+        }
+        all_order[j] = v;
+      }
+    }
+    for (int oi = 0; oi < all_n && ln_nc < 45; ++oi) {
+      const int i = all_order[oi];
+      const int need = NR_PDCCH_BLIND_RE_PER_RB_OUT_DMRS * all_al[i] * 6;
+      if (ln_used_re + need > ln_cap_re)
+        continue;
+      lrel->CCE[ln_nc] = all_cce[i];
+      lrel->L[ln_nc] = all_al[i];
+      ++ln_nc;
+      ln_used_re += need;
+    }
+    if (ln_nc < 1) {
+      nr_pdcch_blind_lookahead_retry(lane);
+      continue;
+    }
+    lrel->number_of_candidates = (uint8_t)ln_nc;
+    if (rank_grid.n_rb) {
+      blind_dmrs_rank_candidates(&rank_grid, lrel, ln_rb, geom.rb_offset,
+                                  proc->nr_slot_rx, cfg->ss_first_symbol, abs_slot, lane_visit);
+      ln_nc = lrel->number_of_candidates;
+    }
+
+    const int ln_llr_sym = ln_rb * NR_PDCCH_BLIND_RE_PER_RB_OUT_DMRS;
+    if ((size_t)(lrel->coreset.duration * ln_llr_sym) > sizeof(pdcch_llr[0][0]) / sizeof(c16_t)) {
+      nr_pdcch_blind_lookahead_step(lane);
+      continue;
+    }
+    const bool in_union = (u_rb > 0) && ((int)lrel->coreset.rb_offset >= u_lo)
+                          && ((int)lrel->coreset.rb_offset + ln_rb <= u_lo + u_rb);
+    if (in_union) {
+      /* UNION LLR slice: row r of the lane buffer = row r of the union buffer, offset by the lane's
+       * RB distance from the union start. Same [symbol][RB*9] layout on both sides. */
+      const int u_sym = u_rb * NR_PDCCH_BLIND_RE_PER_RB_OUT_DMRS;
+      const int u_off = ((int)lrel->coreset.rb_offset - u_lo) * NR_PDCCH_BLIND_RE_PER_RB_OUT_DMRS;
+      for (int r = 0; r < lrel->coreset.duration; r++)
+        memcpy(&pdcch_llr_lane[0][0][r * ln_llr_sym], &pdcch_llr_union[0][0][r * u_sym + u_off],
+               (size_t)ln_llr_sym * sizeof(c16_t));
+      llr_cache_rb = -1;  /* the per-lane cache no longer describes pdcch_llr_lane */
+    } else
+    if (ln_rb != llr_cache_rb || (int)lrel->coreset.rb_offset != llr_cache_off) {
+    llr_cache_rb  = ln_rb;
+    llr_cache_off = (int)lrel->coreset.rb_offset;
+    for (int symbol = cfg->ss_first_symbol; symbol < cfg->ss_first_symbol + lrel->coreset.duration; symbol++) {
+      if (symbol >= cfg->ss_first_symbol + rel15->coreset.duration)
+        nr_slot_fep(ue, fp, proc->nr_slot_rx, symbol, rxdataF, link_type_dl, 0, ue->common_vars.rxdata);
+      __attribute__((aligned(32))) c16_t rxdataF_symb_lane[fp->nb_antennas_rx][((fp->ofdm_symbol_size + 7) / 8) * 8];
+      for (int ant = 0; ant < fp->nb_antennas_rx; ant++)
+        memcpy(rxdataF_symb_lane[ant], &rxdataF[ant][symbol * fp->ofdm_symbol_size], sizeof(c16_t) * fp->ofdm_symbol_size);
+      nr_pdcch_generate_llr(ue, proc, symbol, &phy_lane, ln_llr_sym, num_monitoring_occ, lrel->coreset.duration,
+                            rxdataF_symb_lane, pdcch_llr_lane);
+    }
+    }  /* end LLR CACHE guard: reuse pdcch_llr_lane when the extent is unchanged */
+    nr_pdcch_demapping_deinterleaving((uint32_t)ln_rb, pdcch_llr_lane[0][0], s_pdcch_e_rx_lane[lane],
+                                      lrel->coreset.duration, lrel->coreset.RegBundleSize,
+                                      lrel->coreset.InterleaverSize, lrel->coreset.ShiftIndex,
+                                      lrel->number_of_candidates, lrel->CCE, lrel->L, ln_llr_sym);
+
+    if (!g_lane_length_found[lane]) {
+      nr_pdcch_autodiscover_cand_t disc_cand[45];
+      int disc_n = 0, idx = 0;
+      for (int c = 0; c < ln_nc && disc_n < 45; c++) {
+        disc_cand[disc_n].e_rx = &s_pdcch_e_rx_lane[lane][idx];
+        disc_cand[disc_n].L    = lrel->L[c];
+        disc_cand[disc_n].cce = lrel->CCE[c];
+        disc_n++;
+        idx += NR_PDCCH_BLIND_RE_PER_RB_OUT_DMRS * lrel->L[c] * 6;
+      }
+      if (disc_n > 0) {
+        /* PHASE A: record this lane's grid and DEFER the sweep. One device call covers every lane
+         * (see LANE BATCH): per-lane calls cost ~90 us each and dominated the occasion at K=96.
+         * nr_pdcch_blind_lookahead_step() is deferred with it -- it advances the lane's geometry
+         * cursor, so stepping before the sweep would attribute a lock to the wrong geometry. */
+        memcpy(g_lane_disc_cand[lane], disc_cand, (size_t)disc_n * sizeof(disc_cand[0]));
+        g_lane_disc_n[lane] = disc_n;
+        g_lane_sweep_ctx[lane] = (nr_pdcch_autodiscover_sweep_ctx_t){
+            .cand                = g_lane_disc_cand[lane],
+            .n_cand              = disc_n,
+            .bwp_size            = (uint16_t)cfg->bwp_size,
+            .dmrs_typeA_position = (uint8_t)cfg->dmrs_typeA_position,
+            .rnti_min            = cfg->rnti_min,
+            .rnti_max            = cfg->rnti_max,
+            .extract_opts        = &cfg->extract,
+            .scrambling_rnti     = lrel->coreset.scrambling_rnti,
+            .dmrs_scrambling_id  = lrel->coreset.pdcch_dmrs_scrambling_id,
+            .lane                = lane,
+            .rb_offset           = geom.rb_offset,
+            .span_rb             = geom.freq_domain * 6,
+            .bundle              = geom.reg_bundle_size,
+            .interleaver         = geom.interleaver_size,
+            .shift               = geom.shift_index,
+        };
+        g_lane_geom_snap[lane]   = geom;
+        g_lane_needs_sweep[lane] = 1;
+        if (!budget_active)
+          lane_batch_add(lane, &g_lane_sweep_ctx[lane], dci_len_min(), dci_len_max());
+        continue;   /* phase B runs the anchored sweep AND the step for this lane */
+      }
+    } else {
+      const int cap = (int)(sizeof(cand_task) / sizeof(cand_task[0]));
+      int idx = 0;
+      for (int c = 0; c < ln_nc && nof_tasks < cap; c++) {
+        cand_task[nof_tasks] = (nr_pdcch_blind_cand_task_t){
+            .e_rx               = &s_pdcch_e_rx_lane[lane][idx],
+            .L                  = lrel->L[c],
+            .dci_length         = g_lane_dci_length[lane],
+            .rnti_min           = g_lane_length_rnti[lane] ? g_lane_length_rnti[lane] : cfg->rnti_min,
+            .rnti_max           = g_lane_length_rnti[lane] ? g_lane_length_rnti[lane] : cfg->rnti_max,
+            .scrambling_rnti    = lrel->coreset.scrambling_rnti,
+            .alternate_scrambling_rnti = c == 0 ? g_lane_length_rnti[lane] : 0,
+            .dmrs_scrambling_id = lrel->coreset.pdcch_dmrs_scrambling_id,
+            .frame              = proc->frame_rx,
+            .slot               = proc->nr_slot_rx,
+            .cce                = lrel->CCE[c],
+            .format             = NR_BLIND_DCI_FORMAT_1_1,
+            .dl_auto            = true, // raw decode (nr_pdcch_blind_decode_raw_11), same as the primary
+            .is_lookahead       = true,
+            .lookahead_lane     = (int8_t)lane,
+        };
+        nof_tasks++;
+        idx += NR_PDCCH_BLIND_RE_PER_RB_OUT_DMRS * lrel->L[c] * 6;
+      }
+    }
+    nr_pdcch_blind_lookahead_step(lane);
+  }
+
+  /* ---- PHASE B: one device call for every lane, then each lane's sweep against the cache -------
+   * Splitting the loop is what makes the single call possible: phase A needed every lane's
+   * candidate list to exist before the batch could be assembled. Lanes that did not fit the batch
+   * are not special-cased -- the scorer simply misses and decodes them on the CPU exactly as
+   * before, so correctness never depends on the batch succeeding. */
+  if (!budget_active) lane_batch_flush();
+  for (int lane = 0; lane < lookahead_k; lane++) {
+    if (!g_lane_needs_sweep[lane])
+      continue;
+    g_lane_needs_sweep[lane] = 0;
+    const int disc_n = g_lane_disc_n[lane];
+    if (disc_n <= 0) {
+      nr_pdcch_blind_lookahead_step(lane);
+      continue;
+    }
+    uint16_t lane_boot = 0;
+    nr_pdcch_autodiscover_sweep_ctx_t *lane_ctx = &g_lane_sweep_ctx[lane];
+    uint16_t lane_known[NR_PDCCH_BLIND_MAX_UE];
+    int lane_n_known = nr_pdcch_blind_monitor_dedicated_rnti_set(
+        abs_slot, lane_known, NR_PDCCH_BLIND_MAX_UE);
+    if (lane_n_known > 0) {
+      uint64_t pick = length_lookahead_key(cfg, &g_lane_geom_snap[lane])
+                      + (uint64_t)abs_slot + (uint64_t)lane;
+      pick = (pick ^ (pick >> 30)) * UINT64_C(0xbf58476d1ce4e5b9);
+      pick = (pick ^ (pick >> 27)) * UINT64_C(0x94d049bb133111eb);
+      pick ^= pick >> 31;
+      lane_boot = lane_known[pick % (uint64_t)lane_n_known];
+      lane_ctx->n_known = 1;
+      lane_ctx->known_rnti[0] = lane_boot;
+      lane_ctx->bootstrap_alias = lane_boot;
+      lane_ctx->rnti_min = lane_boot;
+      lane_ctx->rnti_max = lane_boot;
+    } else {
+      lane_ctx->n_known = 0;
+      lane_ctx->bootstrap_alias = 0;
+    }
+
+    pthread_mutex_lock(&g_dl_length_lock);
+    const uint64_t lane_geom_key = length_lookahead_key(cfg, &g_lane_geom_snap[lane]);
+    nr_pdcch_dci_length_bank_t *lane_bank =
+        nr_pdcch_dci_length_store_get(&g_dl_length_store, lane_geom_key, NULL);
+    nr_pdcch_dci_length_context_t *lane_len_ctx =
+        lane_boot ? nr_pdcch_dci_length_context(lane_bank, lane_geom_key, lane_boot) : NULL;
+    const bool lane_anonymous = !lane_boot && lane_bank && !lane_bank->anonymous_exhausted;
+    nr_pdcch_dci_length_sweep_state_t *lane_state =
+        lane_len_ctx ? &lane_len_ctx->state
+                     : (lane_anonymous ? &lane_bank->anonymous : &g_lane_length_state[lane]);
+    if (!lane_boot && !lane_anonymous) {
+      pthread_mutex_unlock(&g_dl_length_lock);
+      nr_pdcch_blind_lookahead_retry(lane);
+      nr_pdcch_blind_lookahead_step(lane);
+      continue;
+    }
+    if (lane_state->preferred_len == 0
+        && g_lane_length_state[lane].preferred_len >= dci_len_min()
+        && g_lane_length_state[lane].preferred_len <= dci_len_max())
+      lane_state->preferred_len = g_lane_length_state[lane].preferred_len;
+    lane_state->excluded_len = dci10_length;
+    lane_state->stride = dci_sweep_stride();
+
+    /* Only one owner spends discovery budget per occasion. Anonymous and anchored evidence use
+     * the same bounded scorer; a fast one-length prior may finish without suspension. */
+    const bool lane_needs_deadline = budget_active
+        && (!g_lane_geom_snap[lane].fast_length_only || lane_state->preferred_len == 0);
+    const uint64_t lane_deadline = lane_needs_deadline ? btim_now() + 150000ull : 0;
+    int found_len = lane_len_ctx ? lane_len_ctx->found
+                                 : (lane_anonymous ? lane_bank->anonymous_found : 0);
+    if (found_len <= 0)
+      found_len = (budget_active && budget_owner != lane + 1) ? -1 :
+          nr_pdcch_dci_length_sweep_feed_budget(lane_state,
+              nr_pdcch_autodiscover_length_scorer, lane_ctx, disc_n,
+              dci_len_min(), dci_len_max(), lane_boot, lane_deadline, 0);
+    uint16_t lane_locked_rnti = lane_boot;
+    if (found_len > 0 && lane_anonymous) {
+      lane_locked_rnti = nr_pdcch_dci_length_sweep_winner_rnti(lane_state, found_len);
+      if (!lane_locked_rnti)
+        found_len = -1;
+    }
+    if (found_len > 0) {
+      if (lane_len_ctx && lane_len_ctx->found <= 0) {
+        lane_len_ctx->found = found_len;
+        nr_pdcch_dci_length_bank_converged(lane_bank, lane_locked_rnti, found_len);
+      } else if (lane_anonymous) {
+        lane_bank->anonymous_found = found_len;
+        lane_bank->anonymous_rnti = lane_locked_rnti;
+        nr_pdcch_blind_rnti_bootstrap_record_corroborated(
+            lane_locked_rnti, NR_BLIND_RNTI_CLASS_C, abs_slot);
+        nr_pdcch_dci_length_context_t *promoted =
+            nr_pdcch_dci_length_context(lane_bank, lane_geom_key, lane_locked_rnti);
+        if (promoted)
+          promoted->found = found_len;
+      }
+      g_lane_dci_length[lane] = (uint16_t)found_len;
+      g_lane_length_rnti[lane] = lane_locked_rnti;
+      g_lane_length_found[lane] = true;
+      g_lane_length_swept[lane] = true;
+      LOG_I(PHY, "SENSING: lookahead lane %d dci_length locked at %d rnti=0x%x "
+                 "(offset=%d span=%d) evidence=distinct_ota\n",
+            lane, found_len, lane_locked_rnti, g_lane_geom_snap[lane].rb_offset,
+            g_lane_geom_snap[lane].freq_domain * 6);
+    } else if (g_lane_geom_snap[lane].fast_length_only
+               && lane_state->preferred_rounds >= 2 * lane_al_count()
+               && !lane_has_bootstrap_hit(lane_state)) {
+      nr_pdcch_blind_lookahead_retry(lane);
+    } else if (lane_state->occasions_fed >= AUTODISCOVER_LENGTH_SWEEP_MAX_OCCASIONS) {
+      if (lane_len_ctx)
+        lane_len_ctx->exhausted = true;
+      else if (lane_bank)
+        lane_bank->anonymous_exhausted = true;
+      nr_pdcch_blind_lookahead_retry(lane);
+    }
+    pthread_mutex_unlock(&g_dl_length_lock);
+    /* Until a length locks, only this lane's budget-owned visits add sweep evidence. Advancing on
+     * every visit underexposed each geometry by (1 + K): 125 rounds instead of 500 at K=3. Once
+     * locked, phase A owns the verification dwell and advances on every OTA visit. */
+    if (!budget_active || budget_owner == lane + 1)
+      nr_pdcch_blind_lookahead_step(lane);
+  }
+
   // ---- Phase 1 (parallel): fan the independent unscramble+decode work out across the UE's thread
   // pool. pushTpool() runs the task inline if the pool has zero worker threads configured (its own
   // documented fallback), so this degrades to the original sequential behaviour rather than
   // breaking on a single-core/no-pool build. ----
   btim_add(BTIM_PREPASS, btim_t_pre);
+  discovery_scope.after_pre=btim_on?btim_now():0;
+  discovery_scope.phase=5;
 
   const uint64_t btim_t_dec = btim_on ? btim_now() : 0;
   if (nof_tasks > 0) {
@@ -1726,51 +4925,112 @@ constdiag_done:;
     }
   }
   btim_add(BTIM_DECODE, btim_t_dec);
+  discovery_scope.after_decode=btim_on?btim_now():0;
+  discovery_scope.phase=6;
+  const uint64_t btim_t_post = btim_on ? btim_now() : 0;
 
   // ---- Phase 2 (sequential, in original candidate order): everything below has a genuine
   // sequential dependency (dci_thres EMA, RNTI persistence ring buffer) or is rare/expensive enough
   // (CFR submission, PDSCH decode) that parallelising it buys nothing. Unchanged from before the
   // split, just walking cand_task[] instead of decoding inline. ----
   int decodes_this_occasion = 0; // capped by cfg->pdsch_max_per_slot -- see that field's comment
+  bool retired_lookahead[NR_PDCCH_LOOKAHEAD_MAX] = {false};
   for (int ti = 0; ti < nof_tasks; ti++) {
+    if (cand_task[ti].is_lookahead) {
+      /* Routed independently of the primary's dl_auto branch below on purpose: that branch updates
+       * PRIMARY-only global state (ue->dci_thres EMA, RNTI persistence, AL census, DCI11 layout
+       * stage 2) which must never see evidence from a lookahead lane's still-UNVERIFIED geometry --
+       * noise from a wrong candidate mixed into those accumulators would corrupt them for everyone. */
+      const int lane = cand_task[ti].lookahead_lane;
+      if (lane < 0 || lane >= NR_PDCCH_LOOKAHEAD_MAX || retired_lookahead[lane])
+        continue;
+      if (cand_task[ti].ok && cand_task[ti].dl_raw.rnti) {
+        if (coreset_bank_has_owner(cand_task[ti].dl_raw.rnti)) {
+          /* This hypothesis is another decode-compatible view of an already operational UE.
+           * Retire it once, immediately, so aliases cannot consume the search or the bank. */
+          nr_pdcch_blind_lookahead_retry(lane);
+          retired_lookahead[lane] = true;
+          continue;
+        }
+        const long mono = source_absolute_slot;
+        const bool just_verified = nr_pdcch_blind_lookahead_observe(lane,
+            cand_task[ti].dl_raw.rnti, mono >= 0 ? (uint32_t)mono : abs_slot, cand_task[ti].dl_raw.payload);
+        if (just_verified) {
+          retired_lookahead[lane] = true;
+          nr_pdcch_blind_monitor_autodiscover_set_dci_length(g_lane_dci_length[lane]);
+          /* The lane already ran the same length scorer and fresh-payload verification as the
+           * primary. Mark that result consumed so the newly committed geometry is not swept again. */
+          g_length_swept = true;
+          g_length_found = true;
+          coreset_bank_add(nr_pdcch_blind_monitor_get_cfg(), cand_task[ti].dl_raw.rnti);
+          nr_pdcch_blind_monitor_autodiscover_next();
+        }
+      }
+      continue;
+    }
+    if (cand_task[ti].bwp_probe) {
+      const nr_pdcch_blind_raw_result_t *pr = &cand_task[ti].dl_raw;
+      if (cand_task[ti].ok && pr->rnti != 0) {
+        const int be = cand_task[ti].bwp_entry;
+        pthread_mutex_lock(&g_pbwp_lock);
+        const bool proven = nr_pbwp_rnti_seen(&g_pbwp, pr->rnti);
+        const int ne = (be == 0) ? nr_pbwp_probe_accept(&g_pbwp, pr->rnti, cand_task[ti].dci_length) : -1;
+        const int ng = (ne > 0) ? g_pbwp.e[ne].ng : 0;
+        pthread_mutex_unlock(&g_pbwp_lock);
+        if (ne > 0)
+          LOG_A(PHY, "SENSING: BWP NEW entry=%d len=%u from rnti 0x%x (%d indicator-width hypotheses) -- "
+                     "resolving size/start from the DM-RS\n", ne, cand_task[ti].dci_length, pr->rnti, ng);
+        if (be > 0 && proven && nr_pdsch_passive_queue_running()) {
+          nr_pdsch_passive_job_t job;
+          memset(&job, 0, sizeof(job));
+          job.frame_rx = proc->frame_rx;
+          job.nr_slot_rx = proc->nr_slot_rx;
+          job.gNB_id = proc->gNB_id;
+          job.absolute_slot = source_absolute_slot;
+          job.rnti = pr->rnti;
+          job.fo_hz = isnan(nr_slot_fep_fo_override_hz)
+              ? (ue->cont_fo_comp ? ue->dl_Doppler_shift + ue->freq_offset : 0.0)
+              : nr_slot_fep_fo_override_hz;
+          job.bwp_probe_entry = (int8_t)be;
+          job.bwp_probe_payload = pr->payload;
+          nr_pdsch_passive_queue_enqueue(&job);
+        }
+      }
+      continue;
+    }
     /* ---- UPLINK candidates are handled here and nothing below runs for them: every line after
      * this point reads a DL result and would misinterpret a UL one. ---- */
     if (cand_task[ti].ul_scan) {
       g_ul_sched++;
       /* rnti is written only after the in-range CRC check, so non-zero IS that check. */
       if (cand_task[ti].ul_out.rnti != 0) g_ul_crc_hit++;
-      /* Manual mode (TESTING MODE RULE): record replay evidence for every ACCEPTED UL
-       * candidate, not only full-auto ones. ul_auto below gates DISCOVERY (re-interpreting the
-       * payload via a blind length/field search), not whether an accepted candidate is real --
-       * boot_rnti/dci01_length/ul_out.raw_payload are all populated identically in the manual
-       * (pinned) path (nr_pdcch_blind_monitor_rt.c:1071-1074, :1452-1460, :555-556). Coupling the
-       * recording call to ul_auto left the passive-replay recorder permanently UL-blind in manual
-       * mode (ul_seen never becomes true), independently of the DL sweep_ticket fix above. */
-      if (cand_task[ti].ok) {
-        nr_passive_replay_ul(source_absolute_slot, boot_rnti, dci01_length,
-                             cand_task[ti].ul_out.raw_payload);
-      }
       if(cand_task[ti].ok && cand_task[ti].ul_auto) {
         g_ul_disc_call++;
+        nr_passive_replay_ul(source_absolute_slot, cand_task[ti].rnti_min, cand_task[ti].dci_length,
+                             cand_task[ti].ul_out.raw_payload);
         nr_pdcch_blind_ul_result_t discovered;
-        cand_task[ti].ok=nr_pdcch_ul_discovery_grant(&ul_opts,dci01_length,boot_rnti,
+        cand_task[ti].ok=nr_pdcch_ul_discovery_grant(&ul_opts,cand_task[ti].dci_length,cand_task[ti].rnti_min,
                                                     cand_task[ti].ul_out.raw_payload,&discovered);
         if(cand_task[ti].ok) cand_task[ti].ul_out=discovered;
       }
       const nr_pdcch_blind_ul_result_t *u = &cand_task[ti].ul_out;
+      if (cand_task[ti].ok && accept_dup(abs_slot, u->rnti, 1))
+        cand_task[ti].ok = false; /* same UL DCI already accepted by another pass this slot */
       if (cand_task[ti].ok) {
         g_ul_accepts++;
-        /* A CRC-plausible blind decode is not yet a trustworthy UE identity. Random candidates
-         * occasionally recover an in-range 16-bit RNTI and previously reached the grant book on
-         * their first sighting, creating bogus PUSCH CFR rows. Apply the same recurrence test as
-         * the DL path before routing a grant; genuine UE RNTIs recur within a few slots. */
-        if (!rnti_persistence_check(u->rnti, abs_slot, persist_window_slots, cfg->rnti_persist_k)) {
-          g_held_persist++;
-        } else {
-          /* Park it for the slot its PUSCH occupies. The DCI is in a DOWNLINK slot; the PUSCH is k2
-           * slots later in an UPLINK one, where nothing runs today. */
-          nr_pusch_grant_book_add(u, cand_task[ti].frame, cand_task[ti].slot, fp->slots_per_frame);
+        discovery_evidence("ul_admitted", "UL", cand_task[ti].frame, cand_task[ti].slot,
+                            u->dci_length, u->rnti, u->raw_payload, cand_task[ti].L, cand_task[ti].cce);
+        nr_pdcch_dci01_layout_observe(ul_opts.bwp_size, ul_opts.tda_count, cand_task[ti].dci_length, u->raw_payload);
+        { /* grant-loss SCORING only: matchable to the gNB scheduler log */
+          struct timespec uts;
+          clock_gettime(CLOCK_REALTIME, &uts);
+          LOG_I(PHY, "SENSING: blind PDCCH ul_seen utc_ns=%lld rnti=0x%x sfn=%d slot=%d fmt=0_1 cce=%d al=%d\n",
+                (long long)uts.tv_sec * 1000000000LL + uts.tv_nsec, u->rnti, cand_task[ti].frame, cand_task[ti].slot,
+                cand_task[ti].cce, (int)cand_task[ti].L);
         }
+        /* Park it for the slot its PUSCH occupies. The DCI is in a DOWNLINK slot; the PUSCH is k2
+         * slots later in an UPLINK one, where nothing runs today. */
+        nr_pusch_grant_book_add(u, source_absolute_slot);
       } else {
         g_ul_rejects++;
       }
@@ -1852,7 +5112,7 @@ constdiag_done:;
                   ul00.rnti, (unsigned)ul00.start_rb, (unsigned)ul00.num_rb,
                   (unsigned)ul00.start_symbol, (unsigned)ul00.num_symbols,
                   (unsigned)ul00.k2, (unsigned)ul00.mcs);
-          nr_pusch_grant_book_add(&ul00, cand_task[ti].frame, cand_task[ti].slot, fp->slots_per_frame);
+          nr_pusch_grant_book_add(&ul00, source_absolute_slot);
         } else {
           g_ul00_rejects++;
         }
@@ -1862,15 +5122,55 @@ constdiag_done:;
       if (!cand_task[ti].ok || (cfg->autodiscover && !g_length_found))
         continue;
       const nr_pdcch_blind_raw_result_t *raw = &cand_task[ti].dl_raw;
+      if (cand_task[ti].open_rnti) { /* resolved UEs are decoded by their own exact task */
+        bool known = false;
+        for (int ri = 0; ri < n_dl_ready && !known; ++ri) known = dl_ready_rnti[ri] == raw->rnti;
+        if (known) continue;
+      }
       ue->dci_thres = (ue->dci_thres + raw->mismatched_bits) / 2;
       if (raw->mismatched_bits > ue->dci_thres + 30
           || !rnti_persistence_check(raw->rnti, abs_slot, persist_window_slots, cfg->rnti_persist_k))
         continue;
       nr_pdcch_blind_rnti_bootstrap_record(raw->rnti, NR_BLIND_RNTI_CLASS_C, abs_slot);
+      /* rnti_persistence_check() establishes a repeated raw candidate; the bootstrap table then
+       * requires its own second admitted sighting. Until that happens this is discovery evidence,
+       * not an operational dedicated grant. Emitting/decoding it here admitted a one-off 0x2a8a
+       * noise candidate in the hidden-truth replay. */
+      if (!nr_pdcch_blind_monitor_rnti_confirmed(abs_slot, raw->rnti))
+        continue;
+      if (accept_dup(abs_slot, raw->rnti, 0)) /* same DCI already accepted by another pass this slot */
+        continue;
+      if (cfg->autodiscover && !nr_pdcch_blind_monitor_autodiscover_extent_verified()
+          && coreset_bank_has_owner(raw->rnti)) {
+        /* Same alias rule as the lookahead path. The already banked geometry continues decoding
+         * this UE through the dispatcher; the discovery cursor must keep looking for a new owner. */
+        nr_pdcch_blind_monitor_autodiscover_retry(cfg->bwp_start + cfg->coreset_rb_offset);
+        dl_discovery_invalidate();
+        continue;
+      }
+      { /* Corroborated AL census for DCI 1_1 -- the dominant traffic. This branch does its OWN
+         * persistence check above and then continues on its own path, so accepts here never reach
+         * the generic Gate 2 where the census was originally placed. MEASURED 2026-09-13: 51,498
+         * 1_1 grants produced ZERO confirmed counts while only stray non-1_1 accepts were tallied,
+         * so the search-space inference never reached its 32-grant threshold and never fired. */
+        const int Lc3 = cand_task[ti].L;
+        const int li3 = (Lc3 == 1) ? 0 : (Lc3 == 2) ? 1 : (Lc3 == 4) ? 2 : 3;
+        atomic_fetch_add_explicit(&g_al_confirmed[nr_pdcch_ss_bucket(cfg)][li3], 1, memory_order_relaxed);
+      }
+      discovery_evidence("dl_raw_admitted", "DL", cand_task[ti].frame, cand_task[ti].slot,
+                          cand_task[ti].dci_length, raw->rnti, raw->payload, cand_task[ti].L, cand_task[ti].cce);
+      stage0_note_accept((uint32_t)cand_task[ti].frame * fp->slots_per_frame + (uint32_t)cand_task[ti].slot,
+                         raw->rnti, true);
+      nr_pdcch_ss_registry_accept(cfg, raw->rnti);
       if (cfg->autodiscover) {
+        const bool was_verified = nr_pdcch_blind_monitor_autodiscover_extent_verified();
         const long mono = source_absolute_slot;
         nr_pdcch_blind_monitor_autodiscover_observe(raw->rnti,
             mono >= 0 ? (uint32_t)mono : abs_slot, raw->payload);
+        if (!was_verified && nr_pdcch_blind_monitor_autodiscover_extent_verified()) {
+          coreset_bank_add(nr_pdcch_blind_monitor_get_cfg(), raw->rnti);
+          nr_pdcch_blind_monitor_autodiscover_next();
+        }
       }
       static uint64_t raw_dl_count;
       if (++raw_dl_count <= 12 || raw_dl_count % 2000 == 0)
@@ -1878,13 +5178,34 @@ constdiag_done:;
                    "layout requires TB-CRC evidence\n",
               (unsigned long)raw_dl_count, cand_task[ti].dci_length, raw->rnti,
               (unsigned long)raw->payload, raw->mismatched_bits);
+      nr_pdcch_dci11_layout_observe(cfg, cand_task[ti].dci_length, raw->payload);
       if (!g_pdsch_sweep_on) continue;
-      nr_pdcch_blind_result_t layouts[3];
-      uint8_t layout_ids[3];
-      const int n=nr_pdcch_blind_dl_layout_candidates(raw, cand_task[ti].dci_length,
-          cfg->bwp_size, cfg->dmrs_typeA_position, layouts, layout_ids);
+      /* Sized by the hand-over, NOT by the resolver's 512-entry capacity: this runs on a scan
+       * consumer's stack, and 512 results there overflowed it on the first DL grant (OTA 2026-09-15). */
+      nr_pdcch_blind_result_t layouts[NR_DCI11_STAGE2_MAX_ALIVE + 3];
+      uint16_t layout_ids[NR_DCI11_STAGE2_MAX_ALIVE + 3];
+      int n = 0;
+      if ((nr_pdcch_dci11_stage2_enabled() || nr_agnostic_v2()) && g_dci11_state == 1)
+        n = nr_pdcch_dci11_stage2_candidates(raw, cand_task[ti].dci_length, cfg, layouts, layout_ids, NR_DCI11_STAGE2_MAX_ALIVE);
+      const bool from_stage2 = (n > 0);
+      if (!n) {
+        uint8_t ids8[3];
+        n = nr_pdcch_blind_dl_layout_candidates(raw, cand_task[ti].dci_length,
+            cfg->bwp_size, cfg->dmrs_typeA_position, layouts, ids8);
+        for (int i = 0; i < n && i < 3; i++) layout_ids[i] = ids8[i];
+      }
       if (!n) continue;
-      uint64_t keys[3];
+      {
+        static uint32_t s_cand_n;
+        if ((s_cand_n++ % 2000) == 0) {
+          char cb[160];
+          int u = 0;
+          for (int i = 0; i < n && u < (int)sizeof(cb) - 12; i++)
+            u += snprintf(cb + u, sizeof(cb) - u, "%u:%u/%u/%u ", layout_ids[i], __builtin_popcount(layouts[i].dmrs_ports), layouts[i].mcs, layouts[i].rv);
+          LOG_A(PHY, "SENSING: DL layout candidates n=%d %s ids(ports/mcs/rv)= %s\n", n, from_stage2 ? "stage2" : "fallback", cb);
+        }
+      }
+      uint64_t keys[NR_DCI11_STAGE2_MAX_ALIVE + 3];
       int settled=-1, n_settled=0;
       for (int i=0;i<n;++i) {
         keys[i]=(g_pdsch_configuration ^ (uint64_t)(layout_ids[i]+1)) * UINT64_C(1099511628211);
@@ -1894,17 +5215,103 @@ constdiag_done:;
       }
       if (n_settled>1) continue; // ambiguous layouts are not a unique operational solution
       static uint32_t layout_cursor[65536]; // independent RR cursors, indexed by recovered RNTI
-      const int selected=settled>=0 ? settled : layout_cursor[raw->rnti]++ % n;
+      /* LAYOUT-FAMILY ELIMINATION (OTA 2026-09-12). With several candidate 1_1 field layouts at one
+       * DCI length, pure round-robin gave the family that actually decodes (8/9 CRC in its own
+       * context) a small, payload-dependent share of the grants -- ~1/14 measured -- so its
+       * Technique-D context never reached min_trials and nothing ever settled; overall DL CRC read
+       * 0.3 %, 15 % or 26 % depending only on that share. A family that has passed CRC is preferred
+       * over one that never has: reject-only, evidence-led, and it collapses to the old behaviour
+       * while no family has evidence. Ties (both decoding) still rotate. */
+      int preferred=-1; uint32_t preferred_ok=0;
+      uint32_t ts_ok[NR_DCI11_STAGE2_MAX_ALIVE + 3], ts_tr[NR_DCI11_STAGE2_MAX_ALIVE + 3];
+      for (int i=0;i<n;++i) {
+        uint32_t ok=0,tr=0;
+        if (from_stage2 && layout_ids[i] < NR_DCI11_LAYOUT_MAX) {
+          /* wide search: the resolver's own probe tallies (a sweep context can be evicted between
+           * two probes of the same layout; these cannot) */
+          ok = dci11_layout_evidence(&g_dci11_resolver, layout_ids[i], &tr);
+        } else
+          nr_pdsch_config_sweep_context_stats(keys[i],raw->rnti,layouts[i].tda_index,cfg->dmrs_typeA_position,&ok,&tr);
+        ts_ok[i]=ok; ts_tr[i]=tr;
+        if (ok>preferred_ok) { preferred_ok=ok; preferred=i; }
+        else if (ok==preferred_ok && preferred>=0 && ok>0) preferred=-1; // tie: no preference
+      }
+      if (preferred>=0 && preferred_ok>=8) {
+        static uint8_t s_pref_logged[65536];
+        atomic_store_explicit(&g_dl_layout_preferred, 1, memory_order_relaxed); /* probing is over: decode */
+        if (!s_pref_logged[raw->rnti]) {
+          s_pref_logged[raw->rnti]=1;
+          LOG_A(PHY,"SENSING: DL layout family PREFERRED by TB CRC: rnti=0x%x layout_id=%u (%d candidates) passes=%u\n",
+                raw->rnti,(unsigned)layout_ids[preferred],n,preferred_ok);
+        }
+      } else preferred=-1;
+      int fallback;
+      if (nr_agnostic_v2() && n > 1) {
+        /* Thompson over the candidates' cell-wide TB-CRC evidence (contexts are keyed without the
+         * RNTI, so every UE's grants inform every other's). Stage-2 candidates arrive best-scored
+         * first; that order becomes a small prior so the first grants go to the stage-1 favourite. */
+        static __thread uint64_t s_rng = 0;
+        if (s_rng == 0) s_rng = 0x9E3779B97F4A7C15ULL ^ (uint64_t)(uintptr_t)&s_rng;
+        double prior[NR_DCI11_STAGE2_MAX_ALIVE + 3];
+        for (int i=0;i<n;++i) prior[i] = from_stage2 ? 2.0 * (double)(n - i) / (double)n : 0.0;
+        fallback = nr_dci11_thompson_pick(ts_ok, ts_tr, prior, n, &s_rng);
+        if (fallback < 0) fallback = 0;
+      } else {
+        fallback = layout_cursor[raw->rnti]++ % n;
+      }
+      const int selected=settled>=0 ? settled : preferred>=0 ? preferred : fallback;
       cand_task[ti].out=layouts[selected];
       cand_task[ti].dl_layout_configuration=keys[selected];
+      cand_task[ti].dl_layout_index=from_stage2 ? layout_ids[selected] : 0xFFFF;
     }
     const nr_pdcch_blind_result_t out = cand_task[ti].out;
     if (!cand_task[ti].ok) {
       g_last_reject_reason = out.reject_reason; // TEMPORARY diagnostic, see periodic summary below
       g_last_reject_rnti   = out.rnti;
+      /* A SELF-VERIFYING class (SI/RA/TC) that decodes and is then rejected downstream is the one
+       * case worth a line each: those RNTIs cannot be chance hits, so the reject reason IS the
+       * defect. Chatty C-RNTI rejects stay in the periodic summary. */
+      if (out.rnti_class == NR_BLIND_RNTI_CLASS_RA || out.rnti_class == NR_BLIND_RNTI_CLASS_TC || out.rnti_class == NR_BLIND_RNTI_CLASS_P) {
+        LOG_A(PHY, "SENSING: DCIREJECT (%d.%d) rnti=0x%x class=%d L=%d reason=%s\n",
+              proc->frame_rx, proc->nr_slot_rx, (unsigned)out.rnti, (int)out.rnti_class, cand_task[ti].L,
+              out.reject_reason ? out.reject_reason : "(none)");
+      }
       continue;
     }
+    if (cfg->coreset_type == 1 && out.rnti == 0xffff
+        && cand_task[ti].format == NR_BLIND_DCI_FORMAT_1_0) {
+      int cursor=0;
+      for (int ci=0;ci<rel15->number_of_candidates;++ci) {
+        if (cand_task[ti].e_rx == &pdcch_e_rx[cursor]) {
+          blind_discovery_replay(fp,proc,rel15,n_rb,rel15->BWPStart+cset_start+rel15->coreset.rb_offset,cfg->ss_first_symbol,
+              pdcch_llr[0][0],&rxdataF[0][cfg->ss_first_symbol*fp->ofdm_symbol_size],source_absolute_slot,ci,out.rnti,
+              cand_task[ti].dci_length,out.payload,cand_task[ti].e_rx);
+          break;
+        }
+        cursor += 54*rel15->L[ci];
+      }
+    }
+    stage0_note_accept((uint32_t)cand_task[ti].frame * fp->slots_per_frame + (uint32_t)cand_task[ti].slot,
+                       out.rnti, nr_pdcch_blind_monitor_rnti_confirmed(abs_slot, out.rnti));
     g_accepts++;
+    /* ACCSLOT: per-slot census of CRC passes, SI vs everything else. Noise passes are uniform over
+     * slots if every slot is processed identically; a slot with zero passes of EITHER kind is a slot
+     * the scan never really looks at (2026-09-21: SIB1 decodes at slots 11/12 and RAR at slot 5 and
+     * nothing else does, on a cell that must be paging and sending Msg4 in the other DL slots). */
+    if (proc->nr_slot_rx >= 0 && proc->nr_slot_rx < 20)
+      g_acc_slot[out.rnti_class == NR_BLIND_RNTI_CLASS_SI ? 0 : 1][proc->nr_slot_rx]++;
+    if (pbwp_on && out.rnti != 0) {
+      pthread_mutex_lock(&g_pbwp_lock);
+      nr_pbwp_mark_seen(&g_pbwp, out.rnti);
+      const bool sw = out.dci_format == NR_BLIND_DCI_FORMAT_1_1
+                      && nr_pbwp_on_accept(&g_pbwp, out.rnti, cand_task[ti].bwp_entry);
+      const uint32_t nsw = g_pbwp.switches;
+      pthread_mutex_unlock(&g_pbwp_lock);
+      if (sw)
+        LOG_A(PHY, "SENSING: BWP SWITCH rnti=0x%x -> entry %d (len %u, start %d, size %u), switches=%u\n",
+              out.rnti, cand_task[ti].bwp_entry, cand_task[ti].dci_length,
+              pbwp_snap[cand_task[ti].bwp_entry].start, cand_task[ti].bwp_size, nsw);
+    }
     {
       /* Feeds the adaptive ladder above. Counted per AGGREGATION LEVEL of the candidate that
        * produced the accept, which is the quantity the allocation needs -- not per candidate index,
@@ -1924,12 +5331,44 @@ constdiag_done:;
      * For format 1_1, and for 1_0 in a UE-specific search space, all three resolve to what this
      * function used before. ---- */
     const bool    is_dci10        = (out.dci_format == NR_BLIND_DCI_FORMAT_1_0);
-    const int     rb_origin       = is_dci10 ? dci10_rb_base : cfg->bwp_start;
+    const int     rb_origin       = is_dci10 ? dci10_rb_base
+                                  : (cand_task[ti].bwp_entry > 0 ? pbwp_snap[cand_task[ti].bwp_entry].start : cfg->bwp_start);
     uint8_t grant_mcs_table = is_dci10 ? out.mcs_table : (uint8_t)cfg->pdsch_mcs_table;
     if (is_dci10) {
       g_accepts_10++;
       if (out.rnti_class < NR_BLIND_RNTI_CLASS_COUNT) {
         g_accepts_class[out.rnti_class]++;
+      }
+    }
+
+    /* DEADLOCK 3, measured 2026-09-20 on Swisscom PCI 382 -- the third gate to starve the seed it
+     * depends on. With a CSS0-only scan the monitor accepted TC=16 real TC-RNTIs (and SI=10000
+     * SIB1s, so the chain is demonstrably healthy), yet BOOTTABLE stayed used=0. The record sat
+     * BELOW Gate 1.5, the adaptive mismatched-bits test, and held[mismatch=18] is those accepts:
+     * ue->dci_thres is an EMA driven here by ten thousand pristine SIB1 decodes, so it sits very
+     * low and a slightly noisier TC-RNTI decode exceeds dci_thres+30 and is dropped.
+     *
+     * A TC-RNTI is the one identity this receiver can VERIFY -- it is handed out during random
+     * access, so it belongs to a real UE and becomes that UE C-RNTI. It is exactly the seed the
+     * dedicated CORESET search needs, and it was being thrown away by a threshold tuned on
+     * broadcast traffic.
+     *
+     * Recorded here, above every heuristic gate, for the same reason the Gate 2 move was safe: the
+     * bootstrap does not trust one sighting either -- boot_entry_live() still demands sightings >= 2
+     * within RNTI_BOOTSTRAP_STALE_SLOTS, so a false accept that never recurs enters at n=1 and is
+     * never confirmed. The gates still govern what gets DECODED and reported; they no longer govern
+     * what gets REMEMBERED. */
+    {
+      const int ss_bucket = nr_pdcch_ss_bucket(cfg);
+      /* Never let an unverified geometry bootstrap itself. Salt produced thousands of raw 1_0
+       * chance accepts; over millions of trials several 16-bit values repeated and filled the
+       * dedicated set with false RNTIs. CORESET#0 USS is also only a search hypothesis despite its
+       * known physical geometry. Exact identities enter from a common SS, an already verified
+       * dedicated CORESET, or record_corroborated() after the joint five-payload lock. */
+      if (ss_bucket == 0) {
+        nr_pdcch_blind_rnti_bootstrap_record_trusted(out.rnti, out.rnti_class, abs_slot);
+      } else if (cfg->coreset_type == 0 && (!cfg->autodiscover || g_length_found)) {
+        nr_pdcch_blind_rnti_bootstrap_record(out.rnti, out.rnti_class, abs_slot);
       }
     }
 
@@ -1951,23 +5390,106 @@ constdiag_done:;
       static int s_no_mm = -1;
       if (s_no_mm < 0)
         s_no_mm = (getenv("ISAC_PDCCH_NO_MISMATCH_GATE") != NULL) ? 1 : 0;
-      if (!s_no_mm && out.mismatched_bits > (ue->dci_thres + 30)) {
+      /* DCIQUAL: report decode QUALITY for the non-SI classes. The DCI CRC passing only means a
+       * 16-bit RNTI was recovered; the PAYLOAD can still carry bit errors, which would give a
+       * subtly wrong allocation and a PDSCH that can never decode. mismatched_bits counts
+       * re-encode disagreements against the LLR polarity, so a genuine decode sits near the EMA
+       * and a marginal one well above it. Printed against dci_thres because the gate is adaptive:
+       * the absolute number means nothing without the running mean it is judged against. */
+      if (out.rnti_class != NR_BLIND_RNTI_CLASS_SI) {
+        static _Atomic uint64_t s_dq = 0;
+        const uint64_t dq = atomic_fetch_add_explicit(&s_dq, 1, memory_order_relaxed) + 1;
+        if (dq <= 40 || (dq % 50) == 0)
+          LOG_A(PHY, "SENSING: DCIQUAL rnti=0x%x class=%u mismatched_bits=%u dci_thres=%u %s\n",
+                out.rnti, (unsigned)out.rnti_class, (unsigned)out.mismatched_bits,
+                (unsigned)ue->dci_thres,
+                (out.mismatched_bits > (ue->dci_thres + 30)) ? "HELD" : "pass");
+      }
+      /* MSG4 BY EXACT RNTI (2026-09-21). A TC-class accept whose RNTI was issued by a RAR we decoded
+       * in the last ~2 s is Msg4 (or its retransmission) -- an exact 16-bit match against a known
+       * value, stronger than any heuristic gate. Logged unconditionally so the RAR -> Msg4 link is
+       * MEASURED (harv3: 46 RARs, 0 matching accepts -- this line settles whether Msg4 ever reaches
+       * the CRC stage), and exempt from the mismatch hold below. */
+      uint32_t msg4_age = 0;
+      const bool msg4_exact = (out.rnti_class == NR_BLIND_RNTI_CLASS_TC)
+                              && nr_passive_rar_tc_seen(out.rnti, abs_slot, 4 * fp->slots_per_frame * 10, &msg4_age);
+      if (msg4_exact)
+        LOG_A(PHY, "SENSING: MSG4 CANDIDATE (%d.%d) tc_rnti=0x%x %u slots after its RAR, mismatched_bits=%u thres=%u L=%d\n",
+              proc->frame_rx, proc->nr_slot_rx, out.rnti, msg4_age, (unsigned)out.mismatched_bits,
+              (unsigned)ue->dci_thres, cand_task[ti].L);
+      if (!msg4_exact && !s_no_mm && out.mismatched_bits > (ue->dci_thres + 30)) {
         g_held_mismatch++;
         continue;
       }
     }
 
+    /* DEADLOCK 2, measured 2026-09-20 on Swisscom PCI 382: this call used to sit BELOW Gate 2, so
+     * an accept held by the persistence gate never recorded a sighting. But the bootstrap's own
+     * confirmation rule is "2 sightings in the window" -- the counter that would have released the
+     * gate was itself behind the gate. Measured: occasions=5377 accepts=164, held[persist=127
+     * mismatch=37] = 164, i.e. EVERY accept held, and BOOTTABLE used=0 -- the table never received
+     * a single entry, so bootstrap_rnti stayed 0x0 and with it the dedicated CORESET verification,
+     * the DL length sweep and the UL PUSCH scan (all three gate on the confirmed-RNTI set).
+     *
+     * This is the same deadlock the 1_0-seeding fix below addressed one layer down, and the file's
+     * own comment there already states the intent: record new-UE evidence BEFORE membership gating.
+     * Recording pre-gate is safe because the bootstrap does NOT trust a single sighting either --
+     * boot_entry_live() still demands sightings >= 2 within RNTI_BOOTSTRAP_STALE_SLOTS, so a noise
+     * RNTI that never recurs enters at n=1 and is never confirmed, exactly as before. */
     // ---- Gate 2: RNTI persistence. A real UE's RNTI recurs across many grants; a noise accept is
     // (almost always) a one-off. See rnti_persistence_check()'s own comment. ----
-    if (!rnti_persistence_check(out.rnti, abs_slot, persist_window_slots, cfg->rnti_persist_k)) {
+    /* SAME EXEMPTION AS GATE 3 (2026-09-21, Swisscom PCI 382): a TC-RNTI addresses exactly ONE
+     * Msg4, so "recur within 500 ms or be held" holds every Msg4 by construction -- MEASURED
+     * TC accepts 17..322 per run, TC PDSCH decodes 0, held[persist] the only non-zero hold. RA-RNTI
+     * is verified by PRACH decomposition, SI is a constant; recurrence adds nothing for any of the
+     * three, and Msg4 is the ONLY carrier of the dedicated config (nr_passive_rrc_harvest.c). */
+    const bool gate2_exempt = (out.rnti_class == NR_BLIND_RNTI_CLASS_SI)
+                              || (out.rnti_class == NR_BLIND_RNTI_CLASS_TC)
+                              || (out.rnti_class == NR_BLIND_RNTI_CLASS_RA);
+    if (!gate2_exempt && !rnti_persistence_check(out.rnti, abs_slot, persist_window_slots, cfg->rnti_persist_k)) {
       g_held_persist++;
       continue;
     }
 
+    { /* Corroborated AL census: this accept's RNTI recurred, so it is not a one-off false accept.
+       * The RAW census above is fed by every accept and is therefore dominated by the blind
+       * false-accept floor, which scales with how many candidates a level is given -- useless for
+       * inferring what the CELL does. This one only counts accepts that survived the gate. */
+      const int Lc2 = cand_task[ti].L;
+      const int li2 = (Lc2 == 1) ? 0 : (Lc2 == 2) ? 1 : (Lc2 == 4) ? 2 : 3;
+      atomic_fetch_add_explicit(&g_al_confirmed[nr_pdcch_ss_bucket(cfg)][li2], 1, memory_order_relaxed);
+    }
+
+    { /* ---- PDCCH SCRAMBLING IDENTITY VERDICT  (agnosticity #5) ----------------------------
+       * pdcch-DMRS-ScramblingID is assumed = PCI (mandated for CORESET#0, but DEDICATED CORESETs
+       * may carry a configured value, and nothing verified ours). A CRC-recovered RNTI IS the
+       * proof: the DM-RS sequence generated from this identity is what de-scrambles the candidate,
+       * so a WRONG identity yields no accepts at all rather than degraded ones. State it once per
+       * search space instead of leaving it an unexamined assumption -- and say plainly that this
+       * confirms the value IN USE, it does not search the 1024-value domain for an override. */
+      const int ssb_ = nr_pdcch_ss_bucket(cfg);
+      static _Atomic int s_scr_logged[2];
+      int expect_ = 0;
+      if (atomic_compare_exchange_strong_explicit(&s_scr_logged[ssb_], &expect_, 1,
+                                                  memory_order_relaxed, memory_order_relaxed)) {
+        LOG_A(PHY, "SENSING: PDCCH_SCRAMBLING_ID CONFIRMED [%s] n_id=%u (assumed = PCI %u) by "
+                   "CRC-recovered RNTI 0x%x -- a wrong identity yields zero accepts, so this is "
+                   "proof of the value in use, not a search of the identity domain\n",
+              ssb_ ? "USS(dedicated)" : "CSS0(common)",
+              (unsigned)cfg->coreset_pdcch_dmrs_scrambling_id,
+              (unsigned)ue->frame_parms.Nid_cell, out.rnti);
+      }
+    }
+
     /* Record new-UE evidence before membership gating, otherwise a confirmed UE prevents
      * every later UE from ever acquiring a context. Only resolved-length accepts may seed it. */
-    if (!cfg->autodiscover || g_length_found)
-      nr_pdcch_blind_rnti_bootstrap_record(out.rnti, out.rnti_class, abs_slot);
+    /* DEADLOCK, measured 2026-09-19 on two commercial cells: the bootstrap only seeded AFTER the
+     * DCI 1_1 length was found, but the length sweep needs a bootstrapped RNTI to reach significance
+     * on a sparsely loaded cell -- so on a cell where we decode 1_0 grants and nothing else,
+     * bootstrap_rnti stayed 0x0 for entire 25-minute runs and no mapping could ever be verified.
+     * Format 1_0's length is DERIVED (CORESET/BWP), never guessed, so a 1_0 accept is exactly as
+     * trustworthy a sighting as a post-lock one -- and it still has to clear the same persistence
+     * gate (2 sightings in the window) before it counts as confirmed. */
     if (cfg->autodiscover && g_length_found && !is_dci10) {
       const uint64_t fingerprint = (uint64_t)out.start_rb | ((uint64_t)out.num_rb << 9)
           | ((uint64_t)out.mcs << 18) | ((uint64_t)out.rv << 23) | ((uint64_t)out.ndi << 25)
@@ -1981,9 +5503,25 @@ constdiag_done:;
      * is not one of them is a false accept: real grants are addressed to UEs that recur, noise is
      * not. Inert until the first confirmation, so discovery is never blocked by its own output. */
     {
+      /* The self-verifying classes are EXEMPT. This gate's premise -- "real grants are addressed to
+       * UEs that recur" -- holds only for C-RNTI. It is wrong, and in two cases circular, for:
+       *   SI-RNTI  the fixed constant 0xFFFF. Unfakeable, and never a member of the confirmed set,
+       *            so once ANY UE was confirmed EVERY SI accept was held. MEASURED 2026-09-21:
+       *            SIB1 PDSCH decoding stopped dead at 188 of 14450 accepts for exactly this
+       *            reason (held[rnti_set]=11228, and persist+mismatch+rnti_set = accepts - 188
+       *            to the unit).
+       *   TC-RNTI  single-use by construction (one random-access contention resolution). Demanding
+       *            that it recur before it may be decoded is circular: Msg4 is what would confirm
+       *            it, and Msg4 is what this gate was blocking. 41 accepts, 0 decoded.
+       *   RA-RNTI  a structured value now checked against the cell's own PRACH configuration
+       *            (nr_pdcch_sib1_prior_ra_rnti_valid), which is stronger evidence than recurrence.
+       * C-RNTI keeps the gate, which is where it actually discriminates. */
+      const bool self_verifying = (out.rnti_class == NR_BLIND_RNTI_CLASS_SI)
+                                  || (out.rnti_class == NR_BLIND_RNTI_CLASS_TC)
+                                  || (out.rnti_class == NR_BLIND_RNTI_CLASS_RA);
       uint16_t known[NR_PDCCH_BLIND_MAX_UE];
       const int n_known = nr_pdcch_blind_monitor_confirmed_rnti_set(abs_slot, known, NR_PDCCH_BLIND_MAX_UE);
-      if (n_known > 0 && !nr_pdcch_blind_monitor_rnti_confirmed(abs_slot, out.rnti)) {
+      if (!self_verifying && n_known > 0 && !nr_pdcch_blind_monitor_rnti_confirmed(abs_slot, out.rnti)) {
         g_held_rnti_set++;
         continue;
       }
@@ -2039,7 +5577,29 @@ constdiag_done:;
     struct timespec rnti_ts;
     clock_gettime(CLOCK_REALTIME, &rnti_ts);
     const long long rnti_utc_ns = (long long)rnti_ts.tv_sec * 1000000000LL + (long long)rnti_ts.tv_nsec;
-    LOG_I(PHY, "SENSING: blind PDCCH rnti_seen utc_ns=%lld rnti=0x%x\n", rnti_utc_ns, out.rnti);
+    /* sfn/slot/cce make each accept matchable to the gNB scheduler log -- for grant-loss SCORING only */
+    LOG_I(PHY, "SENSING: blind PDCCH rnti_seen utc_ns=%lld rnti=0x%x sfn=%d slot=%d fmt=%s cce=%d al=%d\n", rnti_utc_ns,
+          out.rnti, cand_task[ti].frame, cand_task[ti].slot,
+          cand_task[ti].ul_scan ? "0_x" : (out.dci_format == NR_BLIND_DCI_FORMAT_1_0 ? "1_0" : "1_1"), cand_task[ti].cce,
+          (int)cand_task[ti].L);
+    /* Tie this accept to whichever CORESET windows are currently lit -- see COREMAPLT. */
+    if (out.rnti_class == NR_BLIND_RNTI_CLASS_C || out.rnti_class == NR_BLIND_RNTI_CLASS_TC)
+      nr_pdcch_blind_monitor_note_rnti_for_windows(out.rnti);
+
+    /* ON-ACCEPT DM-RS PROBE (ISAC_COREMAP_ONACCEPT=1, default off). This DCI passed CRC from THIS
+     * buffer, at THIS symbol -- so the CORESET provably carried a PDCCH here. Correlating now
+     * removes the duty-cycle dilution that every all-calls average suffers, and is the paired
+     * control for COREMAPCTL. Uses the cfg's own CORESET geometry, so it asks about the CORESET
+     * the accept actually came from rather than an assumed one. */
+    {
+      int probe_n_rb = 0, probe_start = 0;
+      get_coreset_rballoc(rel15->coreset.frequency_domain_resource, &probe_n_rb, &probe_start);
+      nr_pdcch_coreset_map_accept_probe(&rxdataF[0][cfg->ss_first_symbol * fp->ofdm_symbol_size],
+                                        fp->ofdm_symbol_size, fp->N_RB_DL, fp->first_carrier_offset,
+                                        rel15->coreset.pdcch_dmrs_scrambling_id, proc->nr_slot_rx,
+                                        cfg->ss_first_symbol,
+                                        probe_start + rel15->coreset.rb_offset, probe_n_rb);
+    }
 
     // ---- CFR extraction: nr_pdsch_channel_estimation() on the blind-decoded allocation/DMRS config
     // -- mirrors phy_procedures_nr_ue.c's existing pdsch_dmrs ISAC tap exactly (same function, same
@@ -2047,12 +5607,17 @@ constdiag_done:;
     // own real DLSCH config. ----
     /* Accepted DCI may still be discovery evidence. Do not emit PDSCH/CFR from
      * unverified geometry or silently use manual interpretation while full-auto is waiting. */
-    if (cfg->autodiscover && (!g_length_found || !nr_pdcch_blind_monitor_autodiscover_extent_verified()))
+    if (cfg->autodiscover && (!g_length_found || !nr_pdcch_blind_monitor_autodiscover_extent_verified())) {
+      grantdrop(&out, proc->frame_rx, proc->nr_slot_rx, "autodiscover-unverified");
       continue;
-    if (cfg->dl_full_auto && !is_dci10 && !g_pdsch_sweep_on)
+    }
+    if (cfg->dl_full_auto && !is_dci10 && !g_pdsch_sweep_on) {
+      grantdrop(&out, proc->frame_rx, proc->nr_slot_rx, "full_auto-no-sweep");
       continue;
+    }
 
     int dmrs_sym = -1;
+    uint8_t hy_k0 = 0; /* PDSCH slot offset from this DCI's slot, from the Technique D hypothesis */
     for (int m = out.start_symbol; m < out.start_symbol + out.num_symbols; m++) {
       if (out.dl_dmrs_symb_pos & (1u << m)) {
         dmrs_sym = m;
@@ -2060,13 +5625,14 @@ constdiag_done:;
       }
     }
     if (dmrs_sym < 0) {
+      grantdrop(&out, proc->frame_rx, proc->nr_slot_rx, "no-dmrs-symbol-in-tda");
       continue;
     }
 
     fapi_nr_dl_config_dlsch_pdu_rel15_t dlsch_pdu;
     memset(&dlsch_pdu, 0, sizeof(dlsch_pdu));
     dlsch_pdu.BWPStart           = (uint16_t)rb_origin;
-    dlsch_pdu.BWPSize            = is_dci10 ? dci10_ctx.n_rb_riv : (uint16_t)cfg->bwp_size;
+    dlsch_pdu.BWPSize            = is_dci10 ? dci10_ctx.n_rb_riv : cand_task[ti].bwp_size;
     dlsch_pdu.resource_alloc     = 1; // Type-1/RIV -- the only branch this module ever produces
     /* DM-RS SEQUENCE reference point, TS 38.211 7.4.1.1.2. NOT cosmetic and NOT unread:
      * nr_dl_channel_estimation.c:1249 computes the gold-sequence offset as
@@ -2086,8 +5652,12 @@ constdiag_done:;
      * KNOWN GAP: the spec scopes the exception to Type0-PDCCH CSS specifically, and this monitor
      * cannot tell Type0 from Type0A (other SI messages, si_indicator = 1) -- if Type0A SI ever needs
      * decoding here, gate this on out.si_indicator == 0 as well. */
+    /* RETRACTED 2026-09-21: the RA/TC extension above was wrong on BOTH counts. TS 38.211 7.4.1.1.2
+     * scopes the CORESET reference point to SI-RNTI in Type0-PDCCH CSS only (which is exactly OAI's
+     * own `mac->get_sib1 ? 1 : 0`), and it did not fix anything -- genuine RARs fail CRC identically
+     * at refPoint 0 and 1, so refpt was never the differing field the comment above claimed. */
     dlsch_pdu.refPoint           = (is_dci10 && out.rnti_class == NR_BLIND_RNTI_CLASS_SI) ? 1 : 0;
-    dlsch_pdu.dmrsConfigType     = NFAPI_NR_DMRS_TYPE1;
+    dlsch_pdu.dmrsConfigType     = out.dmrs_config_type ? NFAPI_NR_DMRS_TYPE2 : NFAPI_NR_DMRS_TYPE1; // the table the ports were read under
     dlsch_pdu.n_dmrs_cdm_groups  = out.n_dmrs_cdm_groups;
     dlsch_pdu.dlDmrsScramblingId = fp->Nid_cell;
     dlsch_pdu.nscid              = out.nscid;
@@ -2120,10 +5690,38 @@ constdiag_done:;
                                        nr_pdcch_blind_dmrs_mask, &sweep_ticket, &hy))
         continue; /* Unsupported auto context is not a guessed manual success. */
       nr_pdsch_adaptive_apply(&hy, &dlsch_pdu, &grant_mcs_table, &grant_mcs_table_lbrm);
+      hy_k0 = hy.k0;
+      sweep_ticket.layout_index = cand_task[ti].dl_auto ? cand_task[ti].dl_layout_index : 0xFFFF;
       dmrs_sym = __builtin_ctz((unsigned)hy.dmrs_mask);
     }
     dlsch_pdu.pduBitmap          = 0; // no PTRS: format 1_1 with no dedicated PTRS config
     dlsch_pdu.numCsiRsForRateMatching = 0;
+    /* CSI-RS rate matching from the blind CSI-RS search's confirmed resources (NZP and ZP), on the
+     * slots they occur. A hypothesis that lands on one of this grant's DM-RS symbols is wrong for
+     * this grant (the standard forbids the overlap and nr_dlsch_extract_rbs() ASSERTS on it -- which
+     * killed the 4-RX OTA run r4a_223725): applied only when it touches no DM-RS symbol. */
+    for (int zp = 0; zp < 2; zp++) {
+      fapi_nr_dl_config_csirs_pdu_rel15_t *c = &dlsch_pdu.csiRsForRateMatching[dlsch_pdu.numCsiRsForRateMatching];
+      const bool have = zp ? nr_csirs_blind_rt_rate_match_zp(abs_slot, c) : nr_csirs_blind_rt_rate_match(abs_slot, c);
+      if (!have)
+        continue;
+      static const uint8_t num_l0[18] = {1, 1, 1, 1, 2, 1, 2, 2, 1, 2, 2, 2, 2, 2, 4, 2, 2, 4};
+      bool clash = (c->row < 1 || c->row > 18);
+      for (int k = 0; !clash && k < num_l0[c->row - 1]; k++)
+        if ((dlsch_pdu.dlDmrsSymbPos >> (c->symb_l0 + k)) & 1) clash = true;
+      if (!clash && (c->row == 13 || c->row == 14 || c->row == 16 || c->row == 17))
+        for (int k = 0; !clash && k < 2; k++)
+          if ((dlsch_pdu.dlDmrsSymbPos >> (c->symb_l1 + k)) & 1) clash = true;
+      static _Atomic uint32_t s_clash_n;
+      if (clash) {
+        if ((atomic_fetch_add(&s_clash_n, 1) % 500) == 0)
+          LOG_W(PHY, "SENSING: %s CSI-RS hypothesis (row %u l0=%u) overlaps this grant's DM-RS symbols (mask 0x%x): not applied\n",
+                zp ? "ZP" : "NZP", c->row, c->symb_l0, dlsch_pdu.dlDmrsSymbPos);
+        memset(c, 0, sizeof(*c));
+      } else {
+        dlsch_pdu.numCsiRsForRateMatching++;
+      }
+    }
 
     const freq_alloc_bitmap_t freq_alloc = set_bitmap_from_start_size(out.start_rb, out.num_rb);
 
@@ -2144,6 +5742,12 @@ constdiag_done:;
      * costs it nothing. `sources = "pdsch_data"` makes want_dmrs false, and this deployment runs the
      * SNR gate off, so on the sensing config this skips the whole block. */
     const bool need_chest = want_dmrs || (cfg->min_snr_lin > 0.0f);
+    if (want_decode && (cfg->pdsch_rv0_only && out.rv != 0))
+      grantdrop(&out, proc->frame_rx, proc->nr_slot_rx, "rv!=0");
+    if (want_decode && decodes_this_occasion >= cfg->pdsch_max_per_slot)
+      grantdrop(&out, proc->frame_rx, proc->nr_slot_rx, "max-per-slot");
+    if (!want_decode)
+      grantdrop(&out, proc->frame_rx, proc->nr_slot_rx, "pdsch_decode=0");
     if (!need_chest && defer && want_decode && !(cfg->pdsch_rv0_only && out.rv != 0)
         && decodes_this_occasion < cfg->pdsch_max_per_slot) {
       /* Nothing on this thread needs the estimate, and the consumer makes its own -- so enqueue
@@ -2154,6 +5758,8 @@ constdiag_done:;
       const nr_pdsch_passive_grant_t grant_q = {.rnti           = out.rnti,
                                                 .mcs            = out.mcs,
                                                 .rv             = out.rv,
+                                                .ndi            = out.ndi,
+                                                .harq_pid       = out.harq_pid,
                                                 .mcs_table      = grant_mcs_table,
                                                 .nb_rb_oh       = (uint16_t)cfg->pdsch_xoverhead,
                                                 .tb_scaling     = out.tb_scaling,
@@ -2164,25 +5770,30 @@ constdiag_done:;
       job.dlsch_pdu     = dlsch_pdu;
       job.freq_alloc    = freq_alloc;
       job.grant         = grant_q;
-      job.frame_rx      = proc->frame_rx;
-      job.nr_slot_rx    = proc->nr_slot_rx;
+      /* k0: the PDSCH is k0 slots after the DCI. The consumer waits for that slot's samples. */
+      job.frame_rx      = (proc->frame_rx + (proc->nr_slot_rx + hy_k0) / fp->slots_per_frame) % 1024;
+      job.nr_slot_rx    = (proc->nr_slot_rx + hy_k0) % fp->slots_per_frame;
       job.gNB_id        = proc->gNB_id;
-      job.absolute_slot = source_absolute_slot;
+      job.absolute_slot = source_absolute_slot + hy_k0;
       job.rnti          = out.rnti;
-      /* P06a: identity is stamped per branch by the fan-out enqueue below; these are the
-       * legacy defaults it overwrites (and keeps, with one active branch). */
-      job.branch_id     = 0;
-      job.physical_channel = 0;
+      job.rnti_class    = out.rnti_class;
       job.harq_pid_tag  = blind_harq_tag(abs_slot, out.rnti, out.harq_pid);
       job.want_data     = want_data;
       job.fo_hz         = isnan(nr_slot_fep_fo_override_hz)
                   ? (ue->cont_fo_comp ? ue->dl_Doppler_shift + ue->freq_offset : 0.0)
                   : nr_slot_fep_fo_override_hz;  /* receive-thread sample; see nr_slot_fep_fo_override_hz */
       job.sweep_ticket  = sweep_ticket;
-      if (cfg->pdsch_combine)
-        nr_pdsch_passive_queue_enqueue_combined(&job);
-      else
-        nr_pdsch_passive_queue_enqueue_fanout(&job);
+      job.bwp_entry     = cand_task[ti].bwp_entry;
+      /* Wide layout set: this trial is a first-code-block probe, not a full decode. */
+      /* ... until a layout family is PREFERRED by its own code-block CRCs: from then on every
+       * trial is a full decode (the rank-4 bed converged at 22k grants and then sat at 0 % CRC
+       * because it kept probing -- a probe never reports a TB). */
+      job.layout_probe  = (cand_task[ti].dl_auto && g_dci11_state == 1
+                           && g_dci11_resolver.n_alive > NR_DCI11_STAGE2_MAX_ALIVE
+                           && !atomic_load_explicit(&g_dl_layout_preferred, memory_order_relaxed)) ? 1 : 0;
+      atomic_fetch_add_explicit(&g_enq_class[0][out.rnti_class], 1, memory_order_relaxed);
+      ragrant_dump(&dlsch_pdu, &out, grant_mcs_table, css0_occasion, "deferred");
+      nr_pdsch_passive_queue_enqueue(&job);
       continue;
     }
 
@@ -2242,21 +5853,6 @@ constdiag_done:;
       if (nof_ant > NR_PDCCH_BLIND_MAX_ANT) {
         nof_ant = NR_PDCCH_BLIND_MAX_ANT;
       }
-      // adaptive_RX_pipeline.md P10b: same submission plan as csi_rx.c's CSI-RS tap -- one untagged
-      // multi-antenna submission at one active branch (unchanged), one single-antenna submission per
-      // branch otherwise. The SNR gate below stays on packed plane 0: it decides whether this blind
-      // PDCCH candidate is credible at all, which is a receiver-wide decision about the grant, not a
-      // per-branch measurement, and gating each branch separately would make one branch's fade
-      // silently change another branch's row count.
-      nr_isac_submit_plan_t plan[NR_RX_BRANCH_MAX];
-      uint32_t pack_ant = 0;
-      const uint32_t avail_ant = (uint32_t)fp->nb_antennas_rx < NR_PDCCH_BLIND_MAX_ANT
-                                     ? (uint32_t)fp->nb_antennas_rx
-                                     : (uint32_t)NR_PDCCH_BLIND_MAX_ANT;
-      const int nof_plan = nr_isac_submit_plan(plan, NR_RX_BRANCH_MAX, nof_ant, avail_ant, &pack_ant);
-      if (nof_plan > 0 && pack_ant > 0) {
-        nof_ant = pack_ant;
-      }
       static __thread float    isac_h[NR_PDCCH_BLIND_MAX_ANT * 2 * 273 * NR_NB_SC_PER_RB];
       static __thread uint32_t isac_k[273 * NR_NB_SC_PER_RB];
       static __thread uint32_t isac_l[273 * NR_NB_SC_PER_RB];
@@ -2293,18 +5889,9 @@ constdiag_done:;
                                        .dl_center_hz    = fp->dl_CarrierFreq,
                                        .pci             = fp->Nid_cell,
                                        .slots_per_frame = fp->slots_per_frame};
-          for (int p = 0; p < nof_plan; p++) {
-            nr_isac_submit_cfr_multi_branch(abs_slot, 0.0f, NR_ISAC_SRC_PDSCH_DMRS_BLIND, &carrier,
-                                            &isac_h[2 * (size_t)plan[p].first_ant * (273 * NR_NB_SC_PER_RB)],
-                                            plan[p].nof_ant, 273 * NR_NB_SC_PER_RB, isac_k, isac_l,
-                                            nof_re, (float)nvar, plan[p].branch_id);
-          }
-          // One CANDIDATE produced CFR, however many branches measured it -- this counter is the
-          // blind monitor's accept-to-submit ratio (see the 1:1 accepts/cfr_submits check in
-          // PHASE3_BLIND_PDCCH_LIVE_WIRING_HANDOVER.md) and must not start counting branches.
-          if (nof_plan > 0) {
-            g_cfr_submits++;
-          }
+          nr_isac_submit_cfr_multi(abs_slot, 0.0f, NR_ISAC_SRC_PDSCH_DMRS_BLIND, &carrier, isac_h, nof_ant,
+                                   273 * NR_NB_SC_PER_RB, isac_k, isac_l, nof_re, (float)nvar);
+          g_cfr_submits++;
         }
 
         // ---- Passive data-aided PDSCH (PASSIVE_PDSCH_DATA_AIDED_HANDOVER.md Part B). Deliberately
@@ -2352,6 +5939,8 @@ constdiag_done:;
             const nr_pdsch_passive_grant_t grant = {.rnti       = out.rnti,
                                                     .mcs        = out.mcs,
                                                     .rv         = out.rv,
+                                                    .ndi        = out.ndi,
+                                                    .harq_pid   = out.harq_pid,
                                                     .mcs_table  = grant_mcs_table,
                                                     .nb_rb_oh   = (uint16_t)cfg->pdsch_xoverhead,
                                                     .tb_scaling = out.tb_scaling,
@@ -2382,20 +5971,17 @@ constdiag_done:;
               /* Preserve the original RF slot across PDCCH -> PDSCH deferral. */
               job.absolute_slot = source_absolute_slot;
               job.rnti          = out.rnti;
-              /* P06a: identity is stamped per branch by the fan-out enqueue below; these are the
-               * legacy defaults it overwrites (and keeps, with one active branch). */
-              job.branch_id     = 0;
-              job.physical_channel = 0;
+              job.rnti_class    = out.rnti_class;
               job.harq_pid_tag  = blind_harq_tag(abs_slot, out.rnti, out.harq_pid);
               job.want_data     = want_data;
               job.fo_hz         = isnan(nr_slot_fep_fo_override_hz)
                   ? (ue->cont_fo_comp ? ue->dl_Doppler_shift + ue->freq_offset : 0.0)
                   : nr_slot_fep_fo_override_hz;  /* receive-thread sample */
               job.sweep_ticket  = sweep_ticket;
-              if (cfg->pdsch_combine)
-                nr_pdsch_passive_queue_enqueue_combined(&job);
-              else
-                nr_pdsch_passive_queue_enqueue_fanout(&job);
+              job.bwp_entry     = cand_task[ti].bwp_entry;
+              atomic_fetch_add_explicit(&g_enq_class[1][out.rnti_class], 1, memory_order_relaxed);
+              ragrant_dump(&dlsch_pdu, &out, grant_mcs_table, css0_occasion, "normal");
+              nr_pdsch_passive_queue_enqueue(&job);
               /* The per-candidate channel-estimate allocation is freed at the BOTTOM of this loop,
                * which `continue` skips -- ~917 kB per job at 273 PRB x 4 antennas, and mlockall()
                * makes every byte of it count against RLIMIT_MEMLOCK. Free it here. */
@@ -2423,6 +6009,14 @@ constdiag_done:;
                 g_dec_ok++;
                 LOG_D(PHY, "SENSING: passive PDSCH decode OK (%d.%d) rnti=0x%x mcs=%u rv=%u TBS=%u\n",
                       proc->frame_rx, proc->nr_slot_rx, out.rnti, out.mcs, out.rv, dec.cw.TBS);
+                /* Same observation the deferred consumer makes: with deferral off nothing else ever
+                 * looks inside the payload, so every overheard timing advance -- a range to the
+                 * illuminator obtained without transmitting -- would be silently discarded. */
+                if (dec.tb != NULL && dec.cw.TBS > 0)
+                  nr_passive_mac_report_ta(out.rnti, out.rnti_class == NR_BLIND_RNTI_CLASS_RA,
+                                           proc->frame_rx, proc->nr_slot_rx,
+                                           (int)fp->numerology_index, (uint32_t)abs_slot, dec.tb,
+                                           dec.cw.TBS / 8); /* TBS is in BITS; the parser walks octets */
                 if (want_data) {
                   // The reconstruction chain the attached UE uses, unchanged -- the ONLY difference
                   // is where the verified transport block came from.
@@ -2445,6 +6039,7 @@ constdiag_done:;
   }
 
   if (btim_on) {
+    btim_add(BTIM_POST, btim_t_post);
     const uint64_t d = btim_now() - btim_occ0;
     g_btim_ns[BTIM_TOTAL] += d;
     g_btim_n[BTIM_TOTAL]++;
@@ -2458,17 +6053,50 @@ constdiag_done:;
     btim_occasion_total(d, slot_ns);
   }
 
-  if (g_occasions_run % NR_PDCCH_BLIND_SUMMARY_PERIOD_OCC == 0) {
+  const bool sum_due = summary_due_now();
+  if (sum_due) {
     /* scanq is all-zero when the scan runs in-line, which is what distinguishes "deferral off" from
      * "deferral on and keeping up" in a log without needing a second line. */
     nr_pdcch_passive_queue_stats_t scanq;
     memset(&scanq, 0, sizeof(scanq));
     nr_pdcch_passive_queue_get_stats(&scanq);
+    /* The bootstrap table, raw. bootstrap_rnti=0x0 gates dedicated CORESET verification, the DL
+     * length sweep AND the UL PUSCH scan at once, so when it stays zero the whole pipeline is dead
+     * downstream -- and an empty table is indistinguishable from a table full of one-sighting
+     * entries without printing it. live>0 means something confirmed; used>0 with live=0 means
+     * accepts are arriving but never repeating. */
+    {
+      char boottab[512];
+      boottab[0] = '\0';
+      nr_pdcch_blind_rnti_bootstrap_dump((uint32_t)abs_slot, boottab, (int)sizeof(boottab));
+      LOG_I(PHY, "SENSING: BOOTTABLE %s\n", boottab[0] ? boottab : "(empty)");
+    }
+    {
+      char a0[256], a1[256], a2[256]; int u0 = 0, u1 = 0, u2 = 0;
+      for (int k = 0; k < 20; k++) {
+        u0 += snprintf(a0 + u0, sizeof(a0) - u0, "%lu%s", g_acc_slot[0][k], k < 19 ? "," : "");
+        u1 += snprintf(a1 + u1, sizeof(a1) - u1, "%lu%s", g_acc_slot[1][k], k < 19 ? "," : "");
+        u2 += snprintf(a2 + u2, sizeof(a2) - u2, "%lu%s", g_occ_slot[k], k < 19 ? "," : "");
+      }
+      LOG_I(PHY, "SENSING: ACCSLOT occasions=[%s] si=[%s] other=[%s]\n", a2, a0, a1);
+      LOG_I(PHY,
+            "SENSING: ENQCLASS deferred[C=%lu TC=%lu SI=%lu RA=%lu P=%lu] normal[C=%lu TC=%lu SI=%lu RA=%lu P=%lu]\n",
+            atomic_load_explicit(&g_enq_class[0][0], memory_order_relaxed),
+            atomic_load_explicit(&g_enq_class[0][1], memory_order_relaxed),
+            atomic_load_explicit(&g_enq_class[0][2], memory_order_relaxed),
+            atomic_load_explicit(&g_enq_class[0][3], memory_order_relaxed),
+            atomic_load_explicit(&g_enq_class[0][4], memory_order_relaxed),
+            atomic_load_explicit(&g_enq_class[1][0], memory_order_relaxed),
+            atomic_load_explicit(&g_enq_class[1][1], memory_order_relaxed),
+            atomic_load_explicit(&g_enq_class[1][2], memory_order_relaxed),
+            atomic_load_explicit(&g_enq_class[1][3], memory_order_relaxed),
+            atomic_load_explicit(&g_enq_class[1][4], memory_order_relaxed));
+    }
     LOG_I(PHY,
          "SENSING: blind PDCCH monitor summary: occasions=%lu candidates=%lu accepts=%lu "
          "dci10[accepts=%lu C=%lu TC=%lu SI=%lu RA=%lu P=%lu] dci01[accepts=%lu rejects=%lu] "
          "dci00[accepts=%lu rejects=%lu] ulscan[sched=%lu crc_hit=%lu disc=%lu] "
-         "held[energy=%lu persist=%lu snr=%lu mismatch=%lu rnti_set=%lu] efloor=%.2f cfr_submits=%lu "
+         "held[energy=%lu dmrs=%lu persist=%lu snr=%lu mismatch=%lu rnti_set=%lu] efloor=%.2f cfr_submits=%lu "
          "pdsch_decode[try=%lu crc_ok=%lu (%.1f%%) skip_rv=%lu unsup=%lu over_cap=%lu data_submits=%lu] "
          "scanq[queued=%lu done=%lu drop_full=%lu drop_stale=%lu maxlag=%lu] "
          "last_reject=\"%s\" last_reject_rnti=0x%x\n",
@@ -2482,7 +6110,7 @@ constdiag_done:;
          (unsigned long)g_ul_accepts, (unsigned long)g_ul_rejects,
          (unsigned long)g_ul00_accepts, (unsigned long)g_ul00_rejects,
          (unsigned long)g_ul_sched, (unsigned long)g_ul_crc_hit, (unsigned long)g_ul_disc_call,
-         (unsigned long)g_held_energy, (unsigned long)g_held_persist, (unsigned long)g_held_snr,
+         (unsigned long)g_held_energy, (unsigned long)g_held_dmrs, (unsigned long)g_held_persist, (unsigned long)g_held_snr,
          (unsigned long)g_held_mismatch, (unsigned long)g_held_rnti_set,
          g_energy_floor,
          (unsigned long)g_cfr_submits,
@@ -2511,7 +6139,7 @@ constdiag_done:;
       nr_pdsch_passive_parmset_dump();
     }
     /* Which HALF of the decode is failing -- see §29.1. Cheap (one line) and period-guarded. */
-    if (want_decode && (g_occasions_run % NR_PDCCH_BLIND_SUMMARY_PERIOD_OCC) == 0) {
+    if (want_decode && sum_due) {
       nr_pdsch_passive_ldpc_stats_dump();
     }
 
@@ -2519,58 +6147,90 @@ constdiag_done:;
      * static library contributes nothing until something needs a symbol from it, so without a
      * caller a clean build proves only that the sources COMPILE, not that the gNB PUSCH receive
      * chain resolves inside this binary. */
-    if ((g_occasions_run % NR_PDCCH_BLIND_SUMMARY_PERIOD_OCC) == 0) {
+    if (sum_due) {
       nr_pusch_grant_book_stats_dump();
     }
-    if (nr_pdsch_passive_queue_running() && (g_occasions_run % NR_PDCCH_BLIND_SUMMARY_PERIOD_OCC) == 0) {
+    if (nr_pdsch_passive_queue_running() && sum_due) {
       nr_pdsch_passive_queue_stats_t qs;
       nr_pdsch_passive_queue_get_stats(&qs);
       /* Every field here is a reason a queued job did NOT become a decode, so a shortfall in
        * `decoded` is attributable rather than merely visible. max_lag is the number that says
-       * whether the configured depth was right: it must stay well under slots_per_frame.
-       * P06a exactness caveat at n_active > 1: that accounting is exact only in AGGREGATE.
-       * `dropped_full` and `dropped_stale` are not split per branch (the ring evicts a job before
-       * anything looks at whose branch it was), and a job dropped on a stale epoch DOES count in
-       * its branch's `q` column with no matching per-branch drop column of its own except
-       * `stale` -- so per branch, q - dec - stale is the share of the aggregate dropped_full. */
+       * whether the configured depth was right: it must stay well under slots_per_frame. */
       LOG_I(PHY,
             "SENSING: PDSCHQ queued=%lu decoded=%lu crc_ok=%lu (%.1f%%) dropped[full=%lu stale=%lu] "
-            "max_lag_slots=%lu/%d\n",
+            "max_lag_slots=%lu/%d slot_groups=%lu/%lu multi-grant slots dropped_narrow=%lu\n",
             (unsigned long)qs.queued, (unsigned long)qs.decoded, (unsigned long)qs.crc_ok,
             qs.decoded ? (100.0 * (double)qs.crc_ok / (double)qs.decoded) : 0.0,
             (unsigned long)qs.dropped_full, (unsigned long)qs.dropped_stale,
-            (unsigned long)qs.max_lag_slots, fp->slots_per_frame);
-      /* P06a per-branch columns. GRANTS ARE SHARED: the blind monitor discovers each grant ONCE
-       * and fans it out, so br<n>.q is the same grant counted once per branch and the four q
-       * columns are expected to be equal. PAYLOADS AND CRC ARE PER BRANCH -- each is decoded from
-       * that branch's own antenna alone, so dec/ok are what actually differ between branches, and
-       * stale is the count discarded because the branch changed epoch after fan-out. Printed only
-       * in independent mode (n_active > 1); in legacy mode the aggregate line above already says
-       * everything. */
+            (unsigned long)qs.max_lag_slots, fp->slots_per_frame, (unsigned long)qs.slot_groups,
+            (unsigned long)qs.batches_multi, (unsigned long)qs.dropped_narrow);
+      char rc[256]; nr_pdsch_passive_queue_rnti_census(rc, sizeof(rc));
+      LOG_I(PHY, "SENSING: PDSCHQ per-rnti%s\n", rc);
+    }
+    /* Explicit acquisition/discovery state (Gate 4/5 groundwork). Every input is a read of a
+     * counter/boolean that ALREADY exists at this point -- no new measurement, no control-flow
+     * change. Transitions log themselves at LOG_A inside nr_passive_acq_update(); the heartbeat
+     * below is period-guarded like the census lines above (see the PARMSET note on why
+     * per-occasion logging here is not merely untidy).
+     *
+     * The UPDATE is not tied to that log period any more. It used to be, and on a 4 s raw capture
+     * that meant zero updates: the whole 1000-occasion summary never fired, the state never left
+     * SEARCHING_PDCCH, and nothing was logged. Now three cheap milestone booleans are compared
+     * EVERY occasion (3 compares), and a flip forces a full update -- costlier sweep snapshots
+     * included -- immediately. Flips happen a handful of times per run, so RT cost stays
+     * negligible. Convergence winners are still sampled at the period: they take tens of seconds
+     * to form, so ~0.6 s resolution loses nothing. Unsynchronised statics follow this function's
+     * existing single-caller assumption (g_occasions_run, raw_dl_count). */
+    static bool acq_first_logged = false;
+    if (!acq_first_logged) {
+      acq_first_logged = true;
+      LOG_I(PHY, "SENSING: ACQ first monitored occasion (occasions_run=%lu)\n", (unsigned long)g_occasions_run);
+    }
+    const bool acq_len = g_length_found;
+    const bool acq_cs  = !cfg->autodiscover || nr_pdcch_blind_monitor_autodiscover_extent_verified();
+    const bool acq_bwp = ul_opts.bwp_size > 0;
+    static int acq_last_sig = -1;
+    const int acq_sig = (int)acq_len | ((int)acq_cs << 1) | ((int)acq_bwp << 2);
+    const bool acq_period = sum_due;
+    if (acq_period || acq_sig != acq_last_sig) {
+      acq_last_sig = acq_sig;
+      const nr_pdcch_ul_discovery_snapshot_t uls = nr_pdcch_ul_discovery_snapshot();
+      const nr_passive_acq_inputs_t acq_in = {
+        .pdcch_length_found      = acq_len,
+        .coreset_extent_verified = acq_cs,
+        .ul_bwp_known            = acq_bwp,
+        .dl_search_winners       = (uint64_t)nr_pdsch_config_sweep_settled_count(),
+        .ul_width_winners        = (uint64_t)uls.width_winners,
+        .ul_interp_winners       = (uint64_t)uls.interp_winners,
+      };
+      nr_passive_acq_update(&acq_in);
+      nr_pdcch_blind_infer_search_space();
+      const nr_passive_acq_snapshot_t acq = nr_passive_acq_snapshot();
+      if (acq_period)
       {
-        const nr_rx_branch_set_t *bset = nr_isac_rx_branches();
-        if (bset != NULL && bset->n_active > 1) {
-          char bl[256];
-          size_t u = 0;
-          for (int b = 0; b < NR_RX_BRANCH_MAX && u < sizeof(bl) - 64; b++) {
-            if (bset->b[b].physical_channel < 0)
-              continue;
-            u += snprintf(bl + u, sizeof(bl) - u, "br%d[phys=%d q=%lu dec=%lu ok=%lu stale=%lu] ",
-                          (int)bset->b[b].branch_id, (int)bset->b[b].physical_channel,
-                          (unsigned long)qs.per_branch[b].queued,
-                          (unsigned long)qs.per_branch[b].decoded,
-                          (unsigned long)qs.per_branch[b].crc_ok,
-                          (unsigned long)qs.per_branch[b].dropped_stale_epoch);
-          }
-          LOG_I(PHY, "SENSING: PDSCHQ-BRANCH (grants shared, payloads/CRC per branch) %s\n", bl);
-          LOG_I(PHY, "SENSING: PDSCHQ-BRANCH multilayer_rejected=%s\n",
-                nr_pdsch_passive_view_unsupported_multilayer_str());
-        }
+      const nr_pdsch_xoverhead_state_t xo = nr_pdsch_xoverhead_snapshot();
+      const nr_dmrs_id_state_t *dd = nr_pdsch_passive_dl_dmrs_id(), *du = nr_pusch_passive_ul_dmrs_id();
+      LOG_I(PHY, "SENSING: ACQ state=%s time_in_state=%lu transitions=%lu regressions=%lu "
+                 "in[len=%d coreset=%d ul_bwp=%d dl_win=%lu ul_win[w=%lu i=%lu]] "
+                 "uldisc[gen=%lu raw=%d wcls=%d icls=%d wtrials=%lu itrials=%lu rejected_fb=%lu] "
+                 "carrier=%s xoh[assumed=%u %s crc_ok=%u] dmrs_id[dl=%s%d/%u ul=%s%d/%u]\n",
+            nr_passive_acq_state_name(acq.state), (unsigned long)acq.time_in_state,
+            (unsigned long)acq.transitions, (unsigned long)acq.consecutive_regressions,
+            acq_in.pdcch_length_found, acq_in.coreset_extent_verified, acq_in.ul_bwp_known,
+            (unsigned long)acq_in.dl_search_winners, (unsigned long)acq_in.ul_width_winners,
+            (unsigned long)acq_in.ul_interp_winners,
+            (unsigned long)uls.generation, uls.raw_samples, uls.width_classes, uls.interp_classes,
+            (unsigned long)uls.width_trials, (unsigned long)uls.interp_trials,
+            (unsigned long)uls.rejected_feedback,
+            acq.carrier_verified > 0 ? "CONFIRMED" : acq.carrier_verified < 0 ? "MISMATCH" : "unchecked",
+            xo.assumed, xo.confirmed ? "CONFIRMED" : "unresolved", xo.crc_ok_seen,
+            dd->decided ? (dd->best_id == dd->assumed_id ? "CONFIRMED:" : "MISMATCH:") : "pending:", dd->best_id, dd->grants,
+            du->decided ? (du->best_id == du->assumed_id ? "CONFIRMED:" : "MISMATCH:") : "pending:", du->best_id, du->grants);
       }
     }
 
-    if (btim_on && (g_occasions_run % NR_PDCCH_BLIND_SUMMARY_PERIOD_OCC) == 0) {
-      char rep[700];
+    if (btim_on && sum_due) {
+      char rep[1300];
       int u = 0;
       for (int k = 0; k < BTIM_N && u < (int)sizeof(rep) - 90; k++) {
         u += snprintf(rep + u, sizeof(rep) - u, "%s[n=%lu mean=%.1fus max=%.1fus tot=%.2fs] ",

@@ -507,6 +507,25 @@ static void nr_rrc_process_sib1(NR_UE_RRC_INST_t *rrc, NR_UE_RRC_SI_INFO *SI_inf
   const NR_CellIdentity_t *ci = &sib1->cellAccessRelatedInfo.plmn_IdentityInfoList.list.array[0]->cellIdentity;
   rrc->cell_identity = BIT_STRING_to_uint64(ci);
 
+  /* WHO ARE WE LISTENING TO (2026-09-19). SIB1 carries the PLMN and cell identity and this function
+   * already decodes both, but nothing logged them -- so on a commercial cell the operator was being
+   * inferred from a published band plan instead of read off the air, which is a guess presented as a
+   * fact. One line, on the passive path too (it runs before the IDLE/RA branch below). */
+  {
+    const NR_PLMN_IdentityInfo_t *info = sib1->cellAccessRelatedInfo.plmn_IdentityInfoList.list.array[0];
+    long tac = -1;
+    if (info->trackingAreaCode != NULL)
+      tac = (long)BIT_STRING_to_uint32(info->trackingAreaCode);
+    LOG_A(NR_RRC,
+          "SENSING: SIB1 CELL mcc=%03d mnc=%0*d cell_identity=0x%09llx tac=%ld n_plmn=%d\n",
+          plmn_id->mcc,
+          plmn_id->mnc_digit_length,
+          plmn_id->mnc,
+          (unsigned long long)rrc->cell_identity,
+          tac,
+          sib1->cellAccessRelatedInfo.plmn_IdentityInfoList.list.count);
+  }
+
   nr_timer_start(&SI_info->sib1_timer);
   SI_info->sib1_validity = true;
   // In passive receive-only mode we never establish a connection, so no RA is ever triggered.

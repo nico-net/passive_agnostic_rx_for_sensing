@@ -71,6 +71,8 @@ typedef struct {
   uint16_t rnti;      ///< CRC-recovered RNTI: the PDSCH scrambling sequence depends on it
   uint8_t  mcs;       ///< MCS index from the DCI
   uint8_t  rv;        ///< redundancy version from the DCI
+  uint8_t  ndi;       ///< new-data indicator: unchanged for a HARQ process = retransmission
+  uint8_t  harq_pid;  ///< HARQ process number: keys the soft-combining buffer
   uint8_t  mcs_table; ///< 0 = qam64, 1 = qam256, 2 = qam64LowSE (the gNB's PDSCH-Config mcs-Table)
   uint16_t nb_rb_oh;  ///< xOverhead_PDSCH in REs per PRB (0/6/12/18); 0 when not configured
   int8_t   mcs_table_lbrm; ///< MCS table whose MAXIMUM modulation order sizes TBS_LBRM. TS 38.214
@@ -107,58 +109,7 @@ typedef struct {
   fapi_nr_dl_cw_info_t cw;    ///< codeword parameters this decode derived from the grant
   uint32_t             G;     ///< coded bits available on the allocation
   uint32_t             nvar;  ///< noise variance from channel estimation (fusion weight downstream)
-  /// Static string naming WHY the status is what it is (an UNSUPPORTED sub-reason, or "crc_ok"/
-  /// "crc_fail"/"error"); never NULL after the call. For the ISAC_PDSCH_VERDICT_TRACE line.
-  const char          *reason;
 } nr_pdsch_passive_decode_result_t;
-
-/* ---- Independent (single-branch) DL view -- adaptive_RX_pipeline.md P07 --------------------------
- * The decode chain reads its antenna count from ue->frame_parms.nb_antennas_rx in every callee
- * (docs/passive_dl_branch_view_audit.md sec 1), so a branch view is delivered as a thread-local
- * SHALLOW COPY of *ue with nb_antennas_rx = 1 and common_vars.rxdata = {rxdata[phys]}: every
- * cross-branch mechanism (MRC, selection-diversity retry, subset scan, BRANCHFO, planned-branch
- * nvar) then switches itself off through its own existing nb_antennas_rx / nbRx == 4 gate, and the
- * noise estimate is that channel's alone. Default (no view) returns ue itself: bit-identical. */
-
-/// Resolves the view for one job. ISAC_DL_BRANCH_VIEW=<phys> (replay tests) wins; else, when P03's
-/// branch set has n_active > 1, the job's physical_channel if it names an active branch and
-/// otherwise the lowest-id active branch (pre-P06 producers tag every job 0/0); else -1 = legacy.
-/// *branch_id receives the branch identity (0 in legacy mode). An env value outside
-/// [0, nb_antennas_rx) is rejected with LOG_E and resolves to legacy -- visible in the trace.
-int nr_pdsch_passive_branch_view_resolve(const PHY_VARS_NR_UE *ue, int8_t job_physical_channel,
-                                          uint8_t *branch_id);
-
-/// Returns ue for phys < 0; otherwise the calling thread's shadow UE for that physical channel
-/// (first call on a thread copies *ue once; later calls refresh only the mutable scalars the chain
-/// reads). Pass the SAME pointer to nr_pdsch_passive_decode() AND nr_isac_pdsch_data_aided_submit()
-/// so both see the same single antenna. Also arms the view for the counters/gates in the decoder.
-PHY_VARS_NR_UE *nr_pdsch_passive_branch_view(PHY_VARS_NR_UE *ue, int phys, uint8_t branch_id);
-
-/// Process-wide count of Nl > 1 grants REJECTED because a one-antenna branch view cannot separate
-/// layers (plan sec 2.3 retraction). Reported separately from CRC failure.
-uint64_t nr_pdsch_passive_view_unsupported_multilayer(void);
-
-/// P10a: the branch identity armed on THIS thread by nr_pdsch_passive_branch_view(), or
-/// NR_ISAC_BRANCH_NONE when no view is armed (the attached-UE and legacy 4-antenna paths). Lets the
-/// data-aided CFR tap name its branch without a second thread-local to keep in step with this one.
-uint8_t nr_pdsch_passive_view_branch(void);
-
-/// True while a single-branch view is armed on THIS thread (nr_pdsch_passive_view_branch() would
-/// return a real branch or NR_ISAC_BRANCH_NONE-for-unmapped, as opposed to NR_ISAC_BRANCH_NONE
-/// because no view is active at all -- the attached-UE/legacy path and the antenna-combining
-/// producer both look like "no view" here, which is exactly the distinction
-/// nr_pdsch_data_aided.c's per-antenna branch tagging needs: tag every real antenna itself only
-/// when NO view restricted this decode to one.
-bool nr_pdsch_passive_view_active(void);
-
-/// P06a: the same counter split per branch, formatted as "br0=<n> br1=<n> ..." for the periodic
-/// PDSCHQ-BRANCH log line. Returns a pointer to a static buffer (one periodic caller).
-const char *nr_pdsch_passive_view_unsupported_multilayer_str(void);
-
-/// ISAC_PDSCH_VERDICT_TRACE=1: one stdout line per DL job, "PDSCH-VERDICT job=.. rnti=.. crc=..
-/// reason=.. Nl=.. branch=.. phys=..". Off by default (no output, no cost beyond one getenv).
-void nr_pdsch_passive_verdict_trace(uint64_t job_idx, uint16_t rnti, uint8_t branch_id, int phys,
-                                     const nr_pdsch_passive_decode_result_t *out);
 
 /**
  * @brief Decode an overheard PDSCH.
@@ -206,5 +157,29 @@ void nr_pdsch_passive_ldpc_stats_dump(void);
 #ifdef __cplusplus
 }
 #endif
+
+/** Layout-probe mode for the calling thread: decode only code block 0; its CRC comes back through
+ *  nr_pdsch_passive_probe_outcome() and the TB is never reported decoded. */
+void nr_pdsch_passive_probe_mode(bool on);
+bool nr_pdsch_passive_probe_outcome(void);
+/** PT-RS density sweep gate for the next decode on this thread: off while the grant's layout /
+ *  Technique-D context is still being searched (a wrong PT-RS arm rotates layer 0 by its bogus CPE,
+ *  7-13 % EVM, and would feed that failure into the searches). Default on. */
+void nr_pdsch_passive_ptrs_sweep_allow(bool on);
+
+/* ---- GPU front end (NR_GPU_FEP=1, libpdsch_gpu.so): the queue does FEP + chest + MMSE + LLR for a
+ * whole slot on the GPU and hands each job its LLRs; nr_pdsch_passive_decode() then skips its own
+ * FEP/chest/demod and runs descramble + LDPC on them. ---- */
+#include "nr_pdsch_gpu_fep.h"
+/** Fill the GPU job for this grant with the same arithmetic the decode uses (ports -> Nl, Qm, TBS ->
+ *  probe horizon). false = the decode would not attempt it either (or the GPU cannot: PT-RS, CSI-RS
+ *  rate matching, Nl > antennas), so the caller leaves it on the CPU. */
+bool nr_pdsch_passive_gpu_job(const PHY_VARS_NR_UE *ue, const fapi_nr_dl_config_dlsch_pdu_rel15_t *dlsch_config,
+                              const freq_alloc_bitmap_t *freq_alloc, const nr_pdsch_passive_grant_t *grant, int slot_rx,
+                              bool probe, nr_gpu_pdsch_job_t *job);
+/** LLRs for the NEXT nr_pdsch_passive_decode() call on this thread (n = 0 clears). */
+void nr_pdsch_passive_set_llr_override(const int16_t *llr, uint32_t n);
+/** The (descrambled) LLR buffer and G of this thread's last decode -- the GPU self-check compares against it. */
+uint32_t nr_pdsch_passive_last_llr(const int16_t **p);
 
 #endif // NR_PDSCH_PASSIVE_DECODE_H

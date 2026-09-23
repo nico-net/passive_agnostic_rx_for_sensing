@@ -98,7 +98,7 @@ void generate_pss_nr_time(int ofdm_symbol_size,
   for (int i=0; i < LENGTH_PSS_NR; i++) {
     if (k >= ofdm_symbol_size)
       k -= ofdm_symbol_size;
-    synchroF_tmp[k] = (c16_t){.r = pss[i] * ((1U << SCALING_PSS_NR) - 1)};
+    synchroF_tmp[k] = (c16_t){.r = (pss[i] * SHRT_MAX) >> SCALING_PSS_NR}; /* Maximum value for type short int ie int16_t */
     k++;
   }
 
@@ -180,6 +180,23 @@ nr_pss_info_t pss_search_time_nr(const pss_search_t *p)
   c16_t(*pssTime)[p->ofdm_symbol_size] = (c16_t(*)[p->ofdm_symbol_size])p->pssTime;
   int max_size = get_softmodem_params()->sl_mode == 0 ? NUMBER_PSS_SEQUENCE : NUMBER_PSS_SEQUENCE_SL;
 
+  /* Adaptive correlation shift (2026-09-16 fix): SCALING_PSS_NR alone is the FREQUENCY-domain
+   * reference's fixed-point shift, not what dot_product() should use -- vanilla derives the
+   * correlation shift from the ACTUAL time-domain reference's peak magnitude, so it tracks
+   * whatever the IFFT/generate_pss_nr_time() chain really produces instead of assuming a constant
+   * that only happened to be close by coincidence. Using a hardcoded SCALING_PSS_NR here (as this
+   * file did before) is what let the frequency-domain scaling bug (see generate_pss_nr_time())
+   * hide for as long as it did, and reintroducing just that one fix without this one left the
+   * correlation shift stale relative to the corrected reference -- measured live as intermittent
+   * PSS/PBCH lock failures at a cell vanilla OAI decodes reliably. */
+  int maxval = 0;
+  for (int j = 0; j < max_size; j++)
+    for (int i = 0; i < p->ofdm_symbol_size; i++) {
+      maxval = max(maxval, abs(pssTime[j][i].r));
+      maxval = max(maxval, abs(pssTime[j][i].i));
+    }
+  const int shift = log2_approx(maxval);
+
   /* Search pss in the received buffer each 4 samples which ensures a memory alignment on 128 bits (32 bits x 4 ) */
   /* This is required by SIMD (single instruction Multiple Data) Extensions of Intel processors. */
   /* Correlation computation is based on a dot product which is realized thank to SIMS extensions */
@@ -205,7 +222,7 @@ nr_pss_info_t pss_search_time_nr(const pss_search_t *p)
        * (ar=0..nb_ant_rx) and store the sum in temp[n]; */
       for (int ar = 0; ar < p->nb_antennas_rx; ar++) {
         /* perform correlation of rx data and pss sequence ie it is a dot product */
-        const c32_t result = dot_product(pssTime[pss_index], &p->rxdata[ar][n], p->ofdm_symbol_size, SCALING_PSS_NR);
+        const c32_t result = dot_product(pssTime[pss_index], &p->rxdata[ar][n], p->ofdm_symbol_size, shift);
         const c64_t r64 = {.r = result.r, .i = result.i};
         pss_corr_ue += squaredMod(r64);
       }
@@ -244,14 +261,14 @@ nr_pss_info_t pss_search_time_nr(const pss_search_t *p)
       c32_t r1 = dot_product(pssTime[pss_index],
                              rx_peak,
                              p->ofdm_symbol_size >> 1,
-                             SCALING_PSS_NR);
+                             shift);
       // Computing cross-correlation at peak on half the symbol size for data shifted by half symbol size
       // as it is real and complex it is necessary to shift by a value equal to symbol size to obtain such shift
       c32_t r2 =
           dot_product(pssTime[pss_index] + (p->ofdm_symbol_size >> 1),
                       rx_peak + (p->ofdm_symbol_size >> 1),
                       p->ofdm_symbol_size >> 1,
-                      SCALING_PSS_NR);
+                      shift);
       cd_t r1d = {r1.r, r1.i}, r2d = {r2.r, r2.i};
       // estimation of fractional frequency offset: angle[(result1)'*(result2)]/pi
       ffo_est = atan2(r1d.r * r2d.i - r2d.r * r1d.i, r1d.r * r2d.r + r1d.i * r2d.i) / M_PI;

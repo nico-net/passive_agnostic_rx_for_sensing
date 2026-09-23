@@ -17,6 +17,43 @@
 
 #include <stdalign.h>
 #include <stdint.h>
+#include <stdlib.h>
+#include <stdio.h>
+/* LDPC_BENCH=1: per-TB decode wall time and whole-process CPU time (getrusage, so the thread pool's
+ * segment tasks are included), averaged and printed every 200 calls. For comparing libldpc (CPU) and
+ * libldpc_cuda (GPU) on the same workload; off by default. */
+#include <sys/resource.h>
+static int ldpc_bench_on(void)
+{
+  static int on = -1;
+  if (on < 0) {
+    const char *e = getenv("LDPC_BENCH");
+    on = e && atoi(e);
+  }
+  return on;
+}
+static double ldpc_bench_cpu_s(void)
+{
+  struct rusage u;
+  getrusage(RUSAGE_SELF, &u);
+  return u.ru_utime.tv_sec + u.ru_stime.tv_sec + 1e-6 * (u.ru_utime.tv_usec + u.ru_stime.tv_usec);
+}
+static double ldpc_bench_wall_s(void)
+{
+  struct timespec t;
+  clock_gettime(CLOCK_MONOTONIC, &t);
+  return t.tv_sec + 1e-9 * t.tv_nsec;
+}
+static void ldpc_bench_add(const char *who, double wall, double cpu, int segs)
+{
+  static __thread double sw, sc;
+  static __thread long n, ns;
+  sw += wall; sc += cpu; ns += segs;
+  if (++n % 200 == 0)
+    printf("LDPC_BENCH %s: %ld TBs, %.1f segs/TB, wall %.1f us/TB, cpu %.1f us/TB\n", who, n, (double)ns / n,
+           1e6 * sw / n, 1e6 * sc / n);
+}
+
 #include <syscall.h>
 #include <time.h>
 // #define gNB_DEBUG_TRACE
@@ -216,6 +253,12 @@ static void nr_process_decode_segment(void *arg)
   completed_task_ans(rdata->ans);
 }
 
+/* Segments to decode for a TB: nb_segments_to_decode (0 = all C). */
+static inline uint32_t tb_ndec(const nrLDPC_TB_decoding_parameters_t *tb)
+{
+  return (tb->nb_segments_to_decode > 0 && tb->nb_segments_to_decode < tb->C) ? tb->nb_segments_to_decode : tb->C;
+}
+
 int nrLDPC_prepare_TB_decoding(nrLDPC_slot_decoding_parameters_t *nrLDPC_slot_decoding_parameters,
                                int pusch_id,
                                thread_info_tm_t *t_info)
@@ -229,7 +272,8 @@ int nrLDPC_prepare_TB_decoding(nrLDPC_slot_decoding_parameters_t *nrLDPC_slot_de
   decParams.numMaxIter = nrLDPC_TB_decoding_parameters->max_ldpc_iterations;
   decParams.outMode = nrLDPC_outMode_BIT;
 
-  for (int r = 0; r < nrLDPC_TB_decoding_parameters->C; r++) {
+  const uint32_t n_dec = tb_ndec(nrLDPC_TB_decoding_parameters);
+  for (int r = 0; r < (int)n_dec; r++) {
     nrLDPC_decoding_parameters_t *rdata = &((nrLDPC_decoding_parameters_t *)t_info->buf)[t_info->len];
     DevAssert(t_info->len < t_info->cap);
     rdata->ans = t_info->ans;
@@ -282,7 +326,7 @@ int nrLDPC_prepare_TB_decoding(nrLDPC_slot_decoding_parameters_t *nrLDPC_slot_de
 
     LOG_D(PHY, "Added a block to decode, in pipe: %d, rdata->c %p\n", r, rdata->c);
   }
-  return nrLDPC_TB_decoding_parameters->C;
+  return (int)n_dec;
 }
 
 int32_t nrLDPC_coding_init(void)
@@ -295,12 +339,12 @@ int32_t nrLDPC_coding_shutdown(void)
   return 0;
 }
 
-int32_t nrLDPC_coding_decoder(nrLDPC_slot_decoding_parameters_t *nrLDPC_slot_decoding_parameters)
+int32_t nrLDPC_coding_decoder_impl(nrLDPC_slot_decoding_parameters_t *nrLDPC_slot_decoding_parameters)
 {
   int nbSegments = 0;
   for (int pusch_id = 0; pusch_id < nrLDPC_slot_decoding_parameters->nb_TBs; pusch_id++) {
     nrLDPC_TB_decoding_parameters_t *nrLDPC_TB_decoding_parameters = &nrLDPC_slot_decoding_parameters->TBs[pusch_id];
-    nbSegments += nrLDPC_TB_decoding_parameters->C;
+    nbSegments += tb_ndec(nrLDPC_TB_decoding_parameters);
   }
   nrLDPC_decoding_parameters_t arr[nbSegments];
   task_ans_t ans;
@@ -318,7 +362,7 @@ int32_t nrLDPC_coding_decoder(nrLDPC_slot_decoding_parameters_t *nrLDPC_slot_dec
   for (int pusch_id = 0; pusch_id < nrLDPC_slot_decoding_parameters->nb_TBs; pusch_id++) {
     nrLDPC_TB_decoding_parameters_t *nrLDPC_TB_decoding_parameters = &nrLDPC_slot_decoding_parameters->TBs[pusch_id];
     *nrLDPC_TB_decoding_parameters->processedSegments = 0;
-    for (int r = 0; r < nrLDPC_TB_decoding_parameters->C; r++) {
+    for (int r = 0; r < (int)tb_ndec(nrLDPC_TB_decoding_parameters); r++) {
       if (nrLDPC_TB_decoding_parameters->decodeSuccess[r])
         *nrLDPC_TB_decoding_parameters->processedSegments = *nrLDPC_TB_decoding_parameters->processedSegments + 1;
 
@@ -331,4 +375,17 @@ int32_t nrLDPC_coding_decoder(nrLDPC_slot_decoding_parameters_t *nrLDPC_slot_dec
     }
   }
   return 0;
+}
+
+int32_t nrLDPC_coding_decoder(nrLDPC_slot_decoding_parameters_t *p)
+{
+  if (!ldpc_bench_on())
+    return nrLDPC_coding_decoder_impl(p);
+  int segs = 0;
+  for (int t = 0; t < p->nb_TBs; t++)
+    segs += p->TBs[t].C;
+  const double w0 = ldpc_bench_wall_s(), c0 = ldpc_bench_cpu_s();
+  const int32_t rc = nrLDPC_coding_decoder_impl(p);
+  ldpc_bench_add("cpu", ldpc_bench_wall_s() - w0, ldpc_bench_cpu_s() - c0, segs);
+  return rc;
 }

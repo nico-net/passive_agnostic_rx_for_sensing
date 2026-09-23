@@ -390,6 +390,22 @@ unsigned int nr_get_tx_amp(int power_dBm, int power_max_dBm, int total_nb_rb, in
   return (0);
 }
 
+/* See nr_phy_common.h. The equaliser writes  rxComp = (Y.H*) >> shift  and
+ * ch_maga = (|H|^2 >> shift) * 8/sqrt(170); the largest value either can take over the allocation is
+ * peak|H|^2 * 15/sqrt(170) = 1.15 * peak|H|^2. Keeping that under the int16 rail needs
+ *     shift >= log2(1.15 * peak|H|^2) - 15 ~= log2_approx(peak_rb_h2) - 14.75,
+ * so -14 is the smallest integer shift that is always safe (it leaves ~0.75 bit of margin for the
+ * per-RB mean under-reporting a single strong RE). log2_approx() ROUNDS, which supplies the rest.
+ * The MRC sum of `contributing` coherent branches grows by up to that factor, hence the extra term
+ * -- the same one nr_rx_pdsch() adds to its mean-derived shift. */
+int nr_log2_maxh_headroom(uint32_t peak_rb_h2, int contributing)
+{
+  if (peak_rb_h2 == 0)
+    return 0;
+  int s = (int)log2_approx(peak_rb_h2) - 14 + (int)log2_approx((uint32_t)(contributing > 0 ? contributing : 1));
+  return s > 0 ? s : 0;
+}
+
 // compute average channel_level on each antenna
 void nr_channel_level(const int symbol,
                       const int size_est,

@@ -166,16 +166,6 @@ typedef struct {
                             // of --thread-pool's cores -- the point is to stop competing with the
                             // receive path, and sharing a core with the candidate-decode pool would
                             // partly undo that.
-  // Antenna-combining producer (adaptive_RX_pipeline.md, 2026-09-14): with multiple branches
-  // active, the fanout producer (pdsch_thread's own consumer pool, above) enqueues ONE decode job
-  // PER BRANCH -- N independent single-antenna LDPC decodes of the SAME transport block. Measured
-  // live: with N=4 branches this oversubscribes the (unchanged) 2-consumer pool 4x, and the ring's
-  // deterministic branch-ascending enqueue order (nr_rx_branch_set_dispatch()) systematically
-  // starves the last-enqueued branch (65% vs 9% decode completion on the same load). DEFAULT 0 =
-  // the previous fanout behaviour, byte-identical. 1 = decode ONCE against every real antenna
-  // (nr_pdsch_passive_queue_enqueue_combined()), then tag each real antenna's own Ĥ = Y/X with its
-  // own branch id in nr_pdsch_data_aided.c -- one LDPC decode per grant instead of N.
-  int   pdsch_combine;
 
   /* ---- Deferred blind-PDCCH SCAN. Distinct from pdsch_thread above: that defers the PDSCH DECODE
    * of an already-accepted grant; this defers the SCAN that finds the grant at all -- the full-slot
@@ -306,7 +296,9 @@ typedef struct {
  * and automatic 0_1 paths must use this gate: 0_1 is a dedicated-USS format. */
 static inline bool nr_pdcch_blind_monitor_ul_scan_enabled(const nr_pdcch_blind_monitor_cfg_t *cfg)
 {
-  return cfg && cfg->dci01_scan == 1 && cfg->coreset_type == 0
+  /* DCI 0_1 belongs to a UE-specific SearchSpace. That SearchSpace may legally reference
+   * CORESET#0, so CORESET type is not an exclusion criterion. */
+  return cfg && cfg->dci01_scan == 1
       && cfg->dci10_ss_type == NR_BLIND_SS_UE_SPECIFIC && (cfg->dl_full_auto || cfg->ul.bwp_size > 0);
 }
 
@@ -318,6 +310,22 @@ extern "C" {
 /// (i.e. after nr_pdcch_blind_monitor_init() has parsed a complete config). Do not modify through
 /// this pointer -- owned by nr_pdcch_blind_monitor.c.
 const nr_pdcch_blind_monitor_cfg_t* nr_pdcch_blind_monitor_get_cfg(void);
+
+/// The CSS0/CORESET#0 config last derived from MIB/SIB1, kept across autodiscover's overwrite of the
+/// live config. NULL until nr_pdcch_blind_monitor_autoconf_css0() has succeeded at least once (e.g.
+/// a hand-written dedicated config, where there is nothing to interleave with). Read-only.
+const nr_pdcch_blind_monitor_cfg_t* nr_pdcch_blind_monitor_css0_cfg(void);
+
+/// Build a UE-specific SearchSpace view over the broadcast CORESET#0 geometry. The physical
+/// CORESET mapping remains type-0 CSS/CORESET#0; only monitoring, DCI sizing and RNTI classes
+/// change to USS semantics. Returns false until CORESET#0 and the initial DL BWP are known.
+bool nr_pdcch_blind_monitor_coreset0_uss_cfg(nr_pdcch_blind_monitor_cfg_t *out);
+
+/// Make nr_pdcch_blind_monitor_get_cfg() return `in` ON THIS THREAD ONLY until called again with
+/// NULL. Used ONLY by the CSS0/SI-RNTI interleave, to run one occasion under the common-search-space
+/// config without disturbing a scan consumer that may be inside an occasion of its own at the same
+/// time. The caller must clear it on every path out of that occasion.
+void nr_pdcch_blind_monitor_cfg_override(const nr_pdcch_blind_monitor_cfg_t *in);
 
 /**
  * @brief Blind-PDCCH RT tap: if a monitoring occasion is due and [sensing] pdcch_blind_monitor_*
@@ -333,6 +341,8 @@ const nr_pdcch_blind_monitor_cfg_t* nr_pdcch_blind_monitor_get_cfg(void);
  * @param proc  Current slot's RX/TX processing context
  */
 void nr_pdcch_blind_monitor_process(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc);
+/// Consumer-side outcome of a decode/probe made under DCI 1_1 layout `layout_index` (0xFFFF = none).
+void nr_pdcch_dci11_layout_feedback(uint16_t layout_index, bool cb0_ok);
 
 /**
  * @brief Run ONE monitoring occasion: FEP -> PDCCH LLR -> demap -> per-candidate decode -> accepts.

@@ -26,6 +26,8 @@
  * so: it proves the correlation MATH is self-consistent before any live capture is spent on it,
  * the same discipline nr_pdcch_blind_monitor_test.cc's own RawPayloadRoundTrip group uses).
  */
+#include <algorithm>
+#include <limits>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -117,9 +119,141 @@ TEST(CoresetMap, ReportsNothingOnPureNoise) {
   EXPECT_EQ(n, 0);
 }
 
+TEST(UssPrior, ContainsEveryStandardHashHypothesisAndRejectsNoCandidate)
+{
+  static const uint32_t A[3] = {39827, 39829, 39839};
+  static const int Mset[7] = {1, 2, 3, 4, 5, 6, 8};
+  std::mt19937 rng(0x3813);
+  for (int trial = 0; trial < 200; ++trial) {
+    const int n_cces = 6 + (rng() % 40);
+    const int ai = rng() % 4;
+    const int L = 1 << ai;
+    if (n_cces / L < 1)
+      continue;
+    const int N = n_cces / L;
+    const uint16_t rnti = (uint16_t)(1 + rng() % 0xfff0);
+    const int slot = rng() % 20;
+    const int cid = rng() % 3;
+    const int M = Mset[rng() % 7];
+    const int m = rng() % M;
+    uint32_t Y = rnti;
+    for (int s = 0; s <= slot; ++s)
+      Y = (A[cid] * Y) % 65537u;
+    const uint16_t expected =
+        (uint16_t)(L * ((Y + (uint32_t)((m * n_cces) / (L * M))) % (uint32_t)N));
+
+    std::vector<uint16_t> cce(N), support(N);
+    std::vector<uint8_t> al(N, (uint8_t)L);
+    for (int i = 0; i < N; ++i)
+      cce[i] = (uint16_t)(i * L);
+    nr_pdcch_uss_candidate_supports(n_cces, slot, &rnti, 1, cce.data(), al.data(), N,
+                                    support.data());
+    ASSERT_GT(support[expected / L], 0)
+        << "trial=" << trial << " L=" << L << " M=" << M << " cid=" << cid;
+  }
+}
+
+TEST(UssPrior, CoversDurationThreeCcePositionsAboveFortyFive)
+{
+  constexpr int n_cces=135, L=1, slot=17;
+  const uint16_t rnti=0x5a3c;
+  std::vector<uint16_t> cce(n_cces), support(n_cces);
+  std::vector<uint8_t> al(n_cces, L);
+  for (int i=0;i<n_cces;i++) cce[i]=(uint16_t)i;
+  nr_pdcch_uss_candidate_supports(n_cces,slot,&rnti,1,cce.data(),al.data(),n_cces,
+                                  support.data());
+  bool above=false;
+  for (int i=46;i<n_cces;i++) above |= support[i] > 0;
+  EXPECT_TRUE(above);
+}
+
+TEST(UssPrior, EmptyIdentitySetProducesNoPreference)
+{
+  const uint16_t cce[] = {0, 2, 4, 6};
+  const uint8_t al[] = {2, 2, 2, 2};
+  uint16_t support[4] = {9, 9, 9, 9};
+  nr_pdcch_uss_candidate_supports(12, 7, nullptr, 0, cce, al, 4, support);
+  for (const uint16_t v : support)
+    EXPECT_EQ(v, 0);
+}
+
 int main(int argc, char** argv)
 {
   logInit();
   testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();
+}
+
+
+TEST(DmrsRank, InterleavedPilotsBeatStrongerNoiseAndWrongSlot) {
+  constexpr int fft=1024, nrb=60, carrier=800, slot=7, id=382;
+  std::vector<c16_t> rx(fft*14);
+  std::mt19937 rng(184);
+  std::normal_distribution<double> noise(0,3000);
+  for (auto &v:rx) v={(int16_t)noise(rng),(int16_t)noise(rng)};
+  std::vector<c16_t> pilot(nrb*3);
+  nr_pdcch_coreset_pilot(id,slot,0,nrb,pilot.data());
+  // Independently worked example: 48 RB, D=1, Lreg=6, R=2, shift=3, CCE0 AL2.
+  // Bundles 0,1 map to bundles 3,7 -> RB18..23,42..47, plus a 1-RB CORESET offset.
+  for (int rb=0;rb<nrb;rb++) if ((rb>=19&&rb<25)||(rb>=43&&rb<49)) {
+    const int phase=rb<25 ? 1 : -1; // independent bundle precoders must not cancel
+    for(int q=0;q<3;q++) {
+      const auto x=pilot[rb*3+q];
+      rx[(carrier+rb*12+1+4*q)%fft]={(int16_t)(phase*x.r/16),(int16_t)(-phase*x.i/16)};
+    }
+  }
+  nr_pdcch_dmrs_rank_grid_t g;
+  ASSERT_TRUE(nr_pdcch_dmrs_rank_grid(&g,rx.data(),fft,carrier,nrb,id,slot,0,1,0));
+  const double correct=nr_pdcch_dmrs_candidate_score(&g,1,48,6,2,3,0,2);
+  EXPECT_NEAR(correct,1.0,1e-9);
+  EXPECT_GT(correct,nr_pdcch_dmrs_candidate_score(&g,1,48,6,2,0,0,2)+0.5);
+  ASSERT_TRUE(nr_pdcch_dmrs_rank_grid(&g,rx.data(),fft,carrier,nrb,id,slot+1,0,1,0));
+  EXPECT_LT(nr_pdcch_dmrs_candidate_score(&g,1,48,6,2,3,0,2),0.5);
+}
+
+TEST(DmrsRank, ExplicitReferenceAndSixRbAlOne) {
+  constexpr int fft=1024,nrb=60,offset=7;
+  std::vector<c16_t> rx(fft*14),pilot(nrb*3);
+  nr_pdcch_coreset_pilot(382,2,1,nrb,pilot.data());
+  for(int rb=offset;rb<offset+6;rb++) for(int q=0;q<3;q++) {
+    const auto x=pilot[(rb-offset)*3+q];
+    rx[fft+(rb*12+1+4*q)]={x.r,(int16_t)-x.i};
+  }
+  nr_pdcch_dmrs_rank_grid_t g;
+  ASSERT_TRUE(nr_pdcch_dmrs_rank_grid(&g,rx.data(),fft,0,nrb,382,2,1,1,offset));
+  EXPECT_NEAR(nr_pdcch_dmrs_candidate_score(&g,offset,6,0,0,0,0,1),1.0,1e-9);
+  EXPECT_FALSE(std::isfinite(nr_pdcch_dmrs_candidate_score(&g,offset,6,0,0,0,0,2)));
+  EXPECT_FALSE(nr_pdcch_dmrs_rank_grid(&g,rx.data(),fft,0,nrb,382,2,13,2,offset));
+  EXPECT_EQ(g.n_rb,0);
+}
+
+TEST(DmrsRank, WeakCandidatesRemainExplorableAtEveryAggregationLevel) {
+  double score[20]; uint8_t al[20]; bool seen[20]={};
+  for(int i=0;i<20;i++) { score[i]=20-i; al[i]=1<<(i/4); }
+  for(uint64_t visit=0;visit<4;visit++) {
+    uint8_t order[20];
+    ASSERT_EQ(nr_pdcch_dmrs_candidate_order(score,al,20,visit,false,order),10);
+    bool once[20]={};
+    double prev[5] = {INFINITY, INFINITY, INFINITY, INFINITY, INFINITY};
+    for(int j=0;j<10;j++) {
+      EXPECT_FALSE(once[order[j]]); once[order[j]]=true; seen[order[j]]=true;
+      int ai=0; while ((1<<ai) < al[order[j]]) ++ai;
+      EXPECT_GE(prev[ai], score[order[j]]);
+      prev[ai]=score[order[j]];
+    }
+    for(int i=0;i<20;i+=4) EXPECT_TRUE(once[i]); // highest-scoring candidate of each AL
+  }
+  for(bool v:seen) EXPECT_TRUE(v);
+  uint8_t order[20];
+  EXPECT_EQ(nr_pdcch_dmrs_candidate_order(score,al,20,4,true,order),20);
+  score[0]=std::numeric_limits<double>::quiet_NaN();
+  EXPECT_EQ(nr_pdcch_dmrs_candidate_order(score,al,20,4,true,order),20);
+  int pos0=-1;
+  for (int j=0;j<20;j++) if (order[j]==0) pos0=j;
+  ASSERT_GE(pos0,0);
+  for (int i=1;i<4;i++) {
+    int pos=-1;
+    for (int j=0;j<20;j++) if (order[j]==i) pos=j;
+    EXPECT_LT(pos,pos0); // NaN is last within AL1; other ALs are intentionally interleaved.
+  }
 }

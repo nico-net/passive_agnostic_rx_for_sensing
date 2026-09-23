@@ -41,7 +41,11 @@ SENSECOMB=${SENSECOMB:-1}  # sensing grid: co-phased branch combining (STO/SFO/C
 CONTFO=${CONTFO:-}
 FSP=${FSP:-0.05}    # upstream default 0.01 needs ~265 PBCH (5 s) to pull in a 4 kHz mis-lock
 FSI=${FSI:-0.001}
-MGMT=${MGMT:-128.178.122.174}   # X410 mgmt (was .3 on the retired unit)
+# X410 mgmt address: READ IT FROM THE DEVICE. It has flipped on three reboots in two days; a stale
+# value makes every usrp-hwd restart in this script and armval.sh silently no-op, which then reads
+# as "the receiver stopped locking" (2026-09-17, hours lost). MGMT=<ip> still overrides.
+MGMT=${MGMT:-$(timeout 20 uhd_find_devices --args "type=x4xx,addr=${DATA:-192.168.20.2}" 2>/dev/null | grep -oE "mgmt_addr: [0-9.]+" | head -1 | awk '{print $2}')}
+MGMT=${MGMT:-192.168.20.2}      # last-known fallback if uhd_find_devices is silent
 DATA=${DATA:-192.168.20.2}      # X410 sfp1
 DPDK=${DPDK:-}                  # empty = kernel socket path (no uhd.conf here, so DPDK is unconfigured)
 BASE=/home/sens/NICOLA/captures
@@ -54,7 +58,7 @@ BASE=/home/sens/NICOLA/captures
 # regression. The IP is now persistent in the NM profile and the ring is not
 # reboot-persistent at all, so assert all of it here rather than trusting either.
 # This is the ONE place every runner (ab_*.sh, keep_live.sh) passes through.
-NIC=${NIC:-enp129s0f0np0}
+NIC=${NIC:-enp2s0f1np1}
 preflight() {
   ip -4 addr show "$NIC" | grep -q "192.168.20.1/24" \
     || { echo "  preflight: restoring 192.168.20.1/24 on $NIC"; sudo ip addr add 192.168.20.1/24 dev "$NIC"; }
@@ -62,6 +66,8 @@ preflight() {
     || { echo "  preflight: restoring MTU 9000"; sudo ip link set "$NIC" mtu 9000; }
   ethtool -g "$NIC" | awk '/Current hardware/,0' | grep -qE '^RX:[[:space:]]+8192' \
     || { echo "  preflight: restoring rx/tx ring 8192"; sudo ethtool -G "$NIC" rx 8192 tx 8192; }
+  [ "$(sysctl -n net.core.netdev_max_backlog)" = 250000 ] && [ "$(sysctl -n net.core.rmem_default)" = 62500000 ] \
+    || { echo "  preflight: restoring netdev_max_backlog/rmem_default"; sudo sysctl -q -w net.core.netdev_max_backlog=250000 net.core.rmem_default=62500000; }
   # BUILD FRESHNESS. 2026-09-02: a 40-minute baseline was captured against a binary
   # that predated the per-illuminator LOS work and the max_pos_acc anti-windup clamp --
   # the tree had both, ran_build/build did not. Same class as the dlopen'd-plugin trap,
@@ -93,7 +99,9 @@ preflight() {
   # NOSEP=1 disables both halves (for an A/B that needs the stock arm).
   if [ -z "${NOSEP:-}" ]; then
     n=0
-    for i in 152 155 156 157 158 159 160 161 162 163 164 165 166 167; do
+    # The IRQ numbers come from the port itself: the hard-coded list went stale when the NIC changed
+    # slot (2026-09-15) and pinned the idle second port while the live one kept comp0..7 on cpus 0-7.
+    for i in $(ls /sys/class/net/$NIC/device/msi_irqs); do
       [ -e /proc/irq/$i/smp_affinity_list ] || continue
       echo "$(( 8 + n % 6 ))" | sudo tee /proc/irq/$i/smp_affinity_list >/dev/null
       n=$((n+1))
@@ -119,9 +127,11 @@ CARRIER=${CARRIER:-3450000000}
 SCAN=${SCAN:-0}
 SSB=${SSB:-150}
 if [ "$SCAN" = 1 ]; then FREQARGS="--ue-scan-carrier"; else FREQARGS="--ssb $SSB"; fi
+# NOCARRIER=1: band-wide SSB search -- only --band, no -C (the RX window steps across the raster).
+if [ "${NOCARRIER:-0}" = 1 ]; then FREQARGS="--ue-scan-carrier"; CARRIERARG=""; else CARRIERARG="-C $CARRIER"; fi
 
 for t in $(seq 1 "$TRIES"); do
-  OUT=$BASE/${ARM}_$(date +%H%M%S); mkdir -p "$OUT"
+  CORELIM=${CORE:+unlimited}; OUT=$BASE/${ARM}_$(date +%H%M%S); mkdir -p "$OUT"
   # RELEASE THE X410 CLAIM GRACEFULLY BEFORE PROBING. Root-caused 2026-09-02 from the X410's own
   # MPM journal, which is the only place it is visible:
   #   11:44:02 [MPM.RPCServer] [WARNING] Someone tried to claim this device again (From: <this host>)
@@ -154,7 +164,12 @@ for t in $(seq 1 "$TRIES"); do
     echo "  (X410 unreachable or FORCE_HWD set -- restarting usrp-hwd)"
     ssh -o BatchMode=yes -o StrictHostKeyChecking=no root@$MGMT "systemctl restart usrp-hwd" >/dev/null 2>&1
     sudo rm -rf /var/run/dpdk/* /dev/hugepages/* 2>/dev/null
-    sleep 40
+    # SETTLE, do not just wait for MPM to answer. MEASURED 2026-09-13: with the old 40 s the receiver
+    # failed to acquire 0-for-5+ in a row -- PSS/SSS found the SSB every time but PBCH never decoded
+    # (`pbch not decoded on any branch` -> `synch Failed` -> rescan), which mimics a CFO/code fault and
+    # cost a day of misdirected debugging. The front end sits near the noise floor for a while after
+    # an MPM restart; giving it ~3 min produced a first-try lock repeatedly. Override with SETTLE_S.
+    sleep ${SETTLE_S:-180}
   fi
   for a in 1 2 3 4; do
     timeout 45 uhd_usrp_probe --args "type=x4xx,addr=$DATA,mgmt_addr=$MGMT" 2>&1 \
@@ -175,27 +190,38 @@ for t in $(seq 1 "$TRIES"); do
   # measured and small -- the 683 lines/s figure was dominated by the TSYNC_PDCCH flood, which is
   # gated separately on ISAC_TSYNC_AUDIT -- and log rate turns out to track receiver HEALTH rather
   # than harm it (the 2195 lines/s run had zero NIC drops; the 41 lines/s run had 45k).
-  sudo env ISAC_DISC_NO_RESYNC=1  \
+  # The launch below is ONE `sudo env ... \`-continued command ending in `setsid nohup bash -c "..."`.
+  # A `#` comment (or an un-backslashed newline) placed ANYWHERE inside it breaks the continuation:
+  # in the outer shell a trailing `\` folds the next line into a comment and detaches the rest (once
+  # made the softmodem run WITHOUT sudo -> couldn't overwrite the root-owned stats log -> assert); and
+  # inside the bash -c string a `#` truncates argv (once dropped --thread-pool -> UHD overflows). So
+  # all rationale stays HERE, outside the command. Thread pool = 0,1,4,5,6,7 (6 RT cores) leaves
+  # cpu2,3 free. isolcpus=domain keeps the balancer from ever moving a thread onto 2,3, so the RF reader
+  # (UEthread) is pinned there explicitly: unpinned, the 6 GSCN-scan workers (RR 97, same prio) took all
+  # six pool cores, the reader never ran, the NIC dropped 88k packets and the X410 stream halted on
+  # 5/5 attempts (2026-09-15). RTCORE=-1 restores unpinned. Do not put comments inside the command.
+  sudo env ISAC_DISC_NO_RESYNC=1 ISAC_UE_RT_CORE=${RTCORE:-2} \
     ISAC_PDCCH_TIMING=1 ISAC_PUSCH_TIMING=1 ISAC_PUSCH_DIAG=1 \
    ${PDCCHTIMING:+ISAC_PDCCH_TIMING=1} ${PUSCHTIMING:+ISAC_PUSCH_TIMING=1} ${PUSCHDIAG:+ISAC_PUSCH_DIAG=1} \
-    ISAC_CFO_TRACK_HZ=800 ISAC_CFO_TRACK_PERIOD=20 ${CFOAPPLY:+ISAC_CFO_TRACK_APPLY=1} \
+    ISAC_CFO_TRACK_HZ=${CFOTRKHZ:-800} ISAC_CFO_TRACK_PERIOD=20 ${CFOAPPLY:+ISAC_CFO_TRACK_APPLY=1} \
     ISAC_UL_TA_SWEEP=${TASWEEP:-0:0:0} ${ULPROBE:+ISAC_UL_PROBE=1} \
     ${GAINTRIM:+ISAC_RX_GAIN_TRIM=$GAINTRIM} \
-    ${MRC:+ISAC_RX_MRC_MODE=$MRC} ${BRMIN:+ISAC_RX_BRANCH_MIN_DB=$BRMIN} ${RXBRANCH:+ISAC_RX_BRANCH=$RXBRANCH} ${NVARFIX:+ISAC_RX_NVAR_FIX=$NVARFIX} ${BRFO:+ISAC_RX_BRANCH_FO=$BRFO} ${FULLCRC:+ISAC_PDCCH_FULLCRC=1} ${CFGTRACE:+ISAC_PDCCH_CFGTRACE=1 ISAC_PDCCH_CFGTRACE_SLOT=$CFGTRACE} ${LLRPROBE:+ISAC_PDCCH_LLRPROBE=1 ISAC_PDCCH_LLRPROBE_SLOT=$LLRPROBE} ${DCIGT:+ISAC_PDCCH_DCIGT=1} ${OTACFG:+ISAC_OTA_CFG=1} ${SIB1DIAG:+ISAC_SIB1_DIAG=1} ${DISCOVERDIAG:+ISAC_DISCOVER_DIAG=1} ${EVMPROBE:+ISAC_PDSCH_EVM=1} ${LLRSCALE:+ISAC_LLR_SCALE=$LLRSCALE} ${SFOCORR:+ISAC_SFO_CORRECT=1} ${CFGSWEEP:+ISAC_PDSCH_CFG_SWEEP=1} ${SUBSETSCAN:+ISAC_SUBSET_SCAN=$SUBSETSCAN} ${DCIWATCH:+ISAC_DCI_WATCH_RNTI=$DCIWATCH} ${FORCEDCILEN:+ISAC_FORCE_DCI_LEN=$FORCEDCILEN} \
+    ${MRC:+ISAC_RX_MRC_MODE=$MRC} ${BRMIN:+ISAC_RX_BRANCH_MIN_DB=$BRMIN} ${RXBRANCH:+ISAC_RX_BRANCH=$RXBRANCH} ${NVARFIX:+ISAC_RX_NVAR_FIX=$NVARFIX} ${BRFO:+ISAC_RX_BRANCH_FO=$BRFO} ${FULLCRC:+ISAC_PDCCH_FULLCRC=1} ${CFGTRACE:+ISAC_PDCCH_CFGTRACE=1 ISAC_PDCCH_CFGTRACE_SLOT=$CFGTRACE} ${LLRPROBE:+ISAC_PDCCH_LLRPROBE=1 ISAC_PDCCH_LLRPROBE_SLOT=$LLRPROBE} ${DCIGT:+ISAC_PDCCH_DCIGT=1} ${OTACFG:+ISAC_OTA_CFG=1} ${SIB1DIAG:+ISAC_SIB1_DIAG=1} ${DISCOVERDIAG:+ISAC_DISCOVER_DIAG=1} ${EVMPROBE:+ISAC_PDSCH_EVM=1} ${CSIRSBLIND:+ISAC_CSIRS_BLIND=1} ${LLRSCALE:+ISAC_LLR_SCALE=$LLRSCALE} ${SFOCORR:+ISAC_SFO_CORRECT=1} ${L2PEAK:+ISAC_L2MAXH_PEAK=1} ${GUARDSPEC:+ISAC_GUARDSPEC=1} ${TINTERP:+ISAC_CHEST_TINTERP=1} ${L2DELTA:+ISAC_L2MAXH_DELTA=$L2DELTA} ${PBCHL2:+ISAC_PBCH_L2_DELTA=$PBCHL2} ${SHIFTCLAMP:+ISAC_PBCH_SHIFT_CLAMP=$SHIFTCLAMP} ${SYNCMASK:+ISAC_SYNC_ANT_MASK=$SYNCMASK} ${RVRETRY:+ISAC_RV_RETRY=1} ${TDDSKIP:+ISAC_TDD_SKIP=1} ${DFTWIN:+ISAC_CHEST_DFT_WIN=$DFTWIN} ${DFTAPPLY:+ISAC_CHEST_DFT_APPLY=1} ${XANT:+ISAC_XANT=1} ${STAGE2:+ISAC_DCI11_STAGE2=1} ${AGNV2:+ISAC_AGNOSTIC_V2=1} ${PDCCHMASK:+ISAC_PDCCH_ANT_MASK=$PDCCHMASK} ${CHANMAP:+ISAC_RX_CHAN_MAP=$CHANMAP} ${CFGSWEEP:+ISAC_PDSCH_CFG_SWEEP=1} ${SUBSETSCAN:+ISAC_SUBSET_SCAN=$SUBSETSCAN} ${DCIWATCH:+ISAC_DCI_WATCH_RNTI=$DCIWATCH} ${FORCEDCILEN:+ISAC_FORCE_DCI_LEN=$FORCEDCILEN} \
     ${ENERGY:+ISAC_PDCCH_ENERGY=1} ${CAPTURE:+ISAC_PDCCH_CAPTURE=1} \
     ${SENSECOMB:+ISAC_SENSE_COMB=$SENSECOMB} ${SLOTPOOL:+ISAC_SLOT_POOL=$SLOTPOOL} \
     ${SYNCONLY:+ISAC_SYNC_ONLY=$SYNCONLY} \
-    ${TSYNCAUDIT:+ISAC_TSYNC_AUDIT=$TSYNCAUDIT} \
-    ISAC_TSYNC_RESET=${TSYNCRESET:-0} \
-    ${CPUSET:+CPUSET=$CPUSET} BIN=$BIN \
-    setsid nohup bash -c "ulimit -c 0; exec timeout $DUR ${CPUSET:+taskset -c $CPUSET} \
+    ${TSYNCAUDIT:+ISAC_TSYNC_AUDIT=$TSYNCAUDIT} ${CHESTDIAG:+ISAC_CHEST_DIAG=1} ${MMSEFLOAT:+ISAC_MMSE_FLOAT=$MMSEFLOAT} ${S1OFF:+ISAC_DCI11_S1_OFF=1} \
+    ISAC_TSYNC_RESET=${TSYNCRESET:-0} ISAC_AUTO_ACQUIRE=${AUTOACQ:-0} ISAC_ACQ_CFO_MAX_HZ=${ACQCFOMAX:-60000} \
+    ${CPUSET:+CPUSET=$CPUSET} BIN=$BIN ${XENV:-} \
+    setsid nohup bash -c "ulimit -c ${CORELIM:-0}; exec timeout -k 20 $DUR ${CPUSET:+taskset -c $CPUSET} \
+    ${GDBRUN:+gdb -q -batch -ex 'handle SIGPIPE SIGUSR1 SIGUSR2 SIG32 SIG33 SIG34 SIG35 nostop noprint pass' -ex run -ex 'bt 30' -ex 'info registers rip' -ex 'thread apply all bt 4' --args} \
     $BIN \
     --usrp-args type=x4xx,addr=$DATA,mgmt_addr=$MGMT${DPDK:+,use_dpdk=$DPDK} \
-    -O $CONF -r 273 --numerology 1 --band 78 -C $CARRIER $FREQARGS --ue-rxgain $RXG \
-    --ue-nb-ant-rx $NANT --ue-nb-ant-tx $NANT --passive-rx --ue-fo-compensation \
+    -O $CONF -r ${PRB:-273} --numerology 1 --band 78 $CARRIERARG $FREQARGS --ue-rxgain $RXG \
+    --ue-nb-ant-rx $NANT --ue-nb-ant-tx ${NTX:-$NANT} --passive-rx --ue-fo-compensation --initial-fo ${INITIALFO:--15000} \
     ${CONTFO:+--cont-fo-comp $CONTFO --freq-sync-P $FSP --freq-sync-I $FSI} \
     ${OFFDIV:+--offset-divisor $OFFDIV} \
-    --thread-pool 0,1,4,5,6,7 --time-sync-I 0.01 --ntn-initial-time-drift -4.25 -A 90" \
+    --thread-pool ${THREADPOOL:-0,1,4,5,6,7} --time-sync-I 0.01 --ntn-initial-time-drift -4.25 -A 90 ${LDPCV:+--loader.ldpc.shlibversion $LDPCV}" \
     > "$OUT/run.log" 2>&1 < /dev/null &
   sleep 5
   # NIC DROP TIME SERIES. 2026-09-02: stalls and rx_out_of_buffer correlate across runs
@@ -212,11 +238,23 @@ for t in $(seq 1 "$TRIES"); do
     done > "$OUT/nic.csv" ) &
   # CFO MIS-LOCK WATCHDOG. The trim loop's own gate (streak >= 5 agreeing windows, spread < 500 Hz,
   # |ema| > thr) is what CFOAPPLY used to fire on. It discriminates correctly: it said stable=yes on
-  # both measured mis-locks and withheld on a noisy-but-recoverable lock. But ACTING on it means
-  # nrue_ru_reinit(), which killed the radio in 2 of 2 runs (once rpc::timeout on rfdc_set_nco_freq,
-  # once left deaf at the noise floor). Retrying costs 4 minutes, so abort instead of retuning.
+  # both measured mis-locks and withheld on a noisy-but-recoverable lock. Acting on it USED TO kill
+  # the radio in 2 of 2 runs, which is why this aborts instead of retuning -- but that was caused by
+  # the apply path failing to seed the re-acquisition with the correction it had just made, so the
+  # re-acquisition measured the RESIDUAL and applied it as the TOTAL, undoing the fix. With that seed
+  # restored (nr-ue.c), a forced retune completed -16325 -> -16209 Hz and the receiver recovered all
+  # the way to TRACKING with six UEs decoding at 32-44 %. So this abort is ONLY correct when the
+  # operator has NOT armed the retune: with CFOAPPLY set the retune is intentional and killing the
+  # run on `stable=yes` discards a good capture (measured: a successful forced retune was stamped
+  # VOID_CFO_MISLOCK). Skip the abort when CFOAPPLY is set.
   ( while pgrep -x nr-uesoftmodem >/dev/null; do
-      if [ -z "$CONTFO" ] && grep -aq "CFOTRK .*stable=yes" "$OUT/run.log" 2>/dev/null; then
+      # A receiver that died at RX start (X410 out-of-sequence after a SIGKILLed predecessor) logs
+      # "UE main thread is ending" and then hangs in shutdown, ignoring SIGTERM; without this it
+      # held a try for 19 min (norm0tb, 2026-09-18). timeout -k above is the backstop at DUR.
+      if grep -aq "UE main thread is ending" "$OUT/run.log" 2>/dev/null; then
+        sudo pkill -9 -x nr-uesoftmodem; break
+      fi
+      if [ -z "${CONTFO:-}" ] && [ -z "${CFOAPPLY:-}" ] && grep -aq "CFOTRK .*stable=yes" "$OUT/run.log" 2>/dev/null; then
         touch "$OUT/cfo_mislock"; sudo pkill -9 -x nr-uesoftmodem; break
       fi
       sleep 5
@@ -241,6 +279,25 @@ for t in $(seq 1 "$TRIES"); do
          | awk -F'[= ]' '{ t=$3+$5; if (t>0) printf "%d", 100*$3/t; else print 0 }')
   CLAIM=$(grep -aoE 'claimed=[0-9]+' "$L" | tail -1)
   CFOT=$(grep -ac CFOTRK "$L")
+  # BANDWIDTH / CENTRE ADAPTATION FROM SIB1. The receiver is started with a GUESSED geometry
+  # (-r/-C); SIB1 carries the cell's real carrier bandwidth and Point A. When they disagree the
+  # started sample grid is not this cell's carrier: the SSB is narrow enough to acquire anyway, but
+  # every PDSCH RB index is then computed against the wrong grid, so downlink decode cannot work.
+  # The receiver emits the measured geometry as ISAC_ACQ_RETUNE; re-launch once with it instead of
+  # reporting a failure the operator has to diagnose by hand. ADAPT=0 disables. One retry only --
+  # if the corrected geometry still mismatches, that is a real finding, not something to loop on.
+  if [ "${ADAPT:-1}" = "1" ] && [ -z "${ADAPTED:-}" ] \
+     && grep -aq "ISAC_ACQ_RETUNE" "$OUT/run.log" 2>/dev/null; then
+    RT=$(grep -a -m1 -o 'ISAC_ACQ_RETUNE {[^}]*}' "$OUT/run.log")
+    NRB=$(echo "$RT" | grep -o '"n_rb":[0-9]*' | cut -d: -f2)
+    CTR=$(echo "$RT" | grep -o '"centre_hz":[0-9]*' | cut -d: -f2)
+    if [ -n "$NRB" ] && [ -n "$CTR" ] && [ "$NRB" -gt 0 ] 2>/dev/null; then
+      echo "  ADAPT: SIB1 says ${NRB} PRB @ ${CTR} Hz; started ${PRB:-273} PRB @ ${CARRIER} Hz -- relaunching once with the measured geometry"
+      ADAPTED=1 NOCARRIER=0 PRB=$NRB CARRIER=$CTR "$0" "$@"
+      exit $?
+    fi
+    echo "  ADAPT: ISAC_ACQ_RETUNE present but unparseable ($RT) -- not relaunching"
+  fi
   if   [ -f "$OUT/cfo_mislock" ];   then V=VOID_CFO_MISLOCK
   elif [ "$SIB" -eq 0 ];            then V=VOID_NO_SIB1
   elif [ "${DLOK:-0}" -eq 0 ];      then V=VOID_DL_ZERO

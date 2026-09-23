@@ -630,7 +630,7 @@ static int nr_ue_pdsch_procedures(PHY_VARS_NR_UE *ue,
   return 0;
 }
 
-static uint32_t compute_csi_rm_unav_res(fapi_nr_dl_config_dlsch_pdu_rel15_t *dlsch_config, freq_alloc_bitmap_t *freq_alloc)
+uint32_t nr_ue_csi_rm_unav_res(fapi_nr_dl_config_dlsch_pdu_rel15_t *dlsch_config, freq_alloc_bitmap_t *freq_alloc)
 {
   uint32_t unav_res = 0;
   for (int i = 0; i < dlsch_config->numCsiRsForRateMatching; i++) {
@@ -983,6 +983,32 @@ int nr_process_pbch_symbol(
         LOG_W(PHY, "SENSING: PBCHBIAS applying %+d samples to tracking PBCH FFT window only\n", s_pbch_bias);
     }
     nr_slot_fep(ue, fp, proc->nr_slot_rx, symbol, tmp, link_type_dl, s_pbch_bias, ue->common_vars.rxdata);
+    /* ISAC_SSB_IQ=<path> (diagnostic, default off): the RAW TIME-DOMAIN samples this FEP call just
+     * transformed, so the SSB can be re-processed offline independently of OAI's fixed-point DFT --
+     * in float at the native size, and via a 20 MHz decimated 1024-point path. Neither is decidable
+     * from rxdataF, which is already the DFT's output. antenna 0, first 96 records (24 SSB x 4 symb):
+     * header int32 {N, nb_prefix, rx_offset, frame, slot, symbol, ssb_start_subcarrier, nb_ant},
+     * then (nb_prefix + N) c16_t from rxdata[0][rx_offset - nb_prefix]. No wrap: rxdata is
+     * 2*samples_per_frame + ofdm_symbol_size long and the FEP reads contiguously. */
+    {
+      static int s_iq_left = -1;
+      static FILE *s_iq = NULL;
+      if (s_iq_left < 0) {
+        const char *pth = getenv("ISAC_SSB_IQ");
+        s_iq = (pth && pth[0]) ? fopen(pth, "wb") : NULL;
+        s_iq_left = s_iq ? 96 : 0;
+      }
+      const unsigned int rxo = nr_slot_fep_diag_rx_offset, npfx = nr_slot_fep_diag_nb_prefix_samples;
+      if (s_iq_left > 0 && s_iq && rxo >= npfx) {
+        s_iq_left--;
+        int32_t hdr[8] = {fp->ofdm_symbol_size, (int32_t)npfx, (int32_t)rxo, proc->frame_rx,
+                          proc->nr_slot_rx, symbol, fp->ssb_start_subcarrier, fp->nb_antennas_rx};
+        fwrite(hdr, sizeof(hdr), 1, s_iq);
+        fwrite(&ue->common_vars.rxdata[0][rxo - npfx], sizeof(c16_t), npfx + fp->ofdm_symbol_size, s_iq);
+        fflush(s_iq);
+        if (s_iq_left == 0) { fclose(s_iq); s_iq = NULL; }
+      }
+    }
     // COORDINATE-SYSTEM CHECK (2026-08-06): nr_slot_fep_diag_rx_offset is the FINAL buffer index
     // the DFT reads from, after slot origin, symbol offset, sample_offset and the CP/divisor
     // backoff. Logging it with and without the bias proves whether ISAC_PBCH_OFFSET_BIAS actually
@@ -1379,7 +1405,63 @@ int nr_process_pbch_symbol(
 
   const int nid = fp->Nid_cell;
   const int ssb_start_subcarrier = fp->ssb_start_subcarrier;
+  /* FIXED-POINT HEADROOM FOR THE SSB REs BEFORE THE ESTIMATOR.
+   *
+   * nr_pbch_channel_estimation() is fixed point end to end -- an LS product at
+   * c16mulShift(...,15) and an int16 filt16a interpolation -- so its output precision is set by how
+   * far the received SSB REs sit below int16 full scale, and nothing downstream can recover bits
+   * lost there. That level is BANDWIDTH DEPENDENT: at 122.88 MS/s the same ADC full scale covers
+   * 100 MHz instead of 20 MHz, so each RE of the SSB's fixed 3.6 MHz carries proportionally less of
+   * it, and the DFT spreads the same energy over 4x the bins.
+   *
+   * MEASURED on one cell, same SSB, minutes apart (ISAC_CHEST_COH): the estimate is real and smooth
+   * at both widths (240 populated bins, adjacent-subcarrier coherence 0.93-0.97 at 51 PRB and
+   * 0.87-0.89 at 273 -- so neither noise nor a wrong mapping), but the received SSB REs are 2.9x
+   * lower at 4096 (ssb_band_mean 82.7 against 241.8, -9.3 dB) and the estimate 2.6x lower
+   * (rms 108.4 against 280.7) while the int16 quantisation floor is unchanged. That is the CIR
+   * peak/median collapse (2721x -> 95x) that made the +-CP timing search chase noise peaks and
+   * killed PBCH tracking at every bandwidth above 20 MHz.
+   *
+   * So scale the estimator's INPUT, not its output: take the 240 SSB REs, derive a shift from their
+   * own measured magnitude, and hand the estimator a copy at a fixed working point. The timing peak
+   * search is scale invariant and the PBCH LLR path derives log2_maxh from the channel level it is
+   * given, so both absorb a power-of-two gain; the shift is reported so saturation is measurable
+   * rather than assumed. Applied only where the deficit exists (ofdm_symbol_size > 1024, the width
+   * at which this chain is measured healthy), so the 20 MHz path stays bit-identical. */
+  const int Nsym = fp->ofdm_symbol_size;
+  unsigned int ssb_off0 = fp->first_carrier_offset + ssb_start_subcarrier;
+  if (ssb_off0 >= (unsigned)Nsym)
+    ssb_off0 -= Nsym;
   for (int aarx = 0; aarx < fp->nb_antennas_rx; aarx++) {
+    const c16_t *est_in = rxdataF[aarx];
+    __attribute__((aligned(32))) c16_t rxf_scaled[Nsym];
+    int ssb_shift = 0;
+    if (Nsym > 1024) {
+      int maxabs = 0;
+      for (int i = 0; i < 240; i++) {
+        const unsigned int sc = (ssb_off0 + i) % (unsigned)Nsym;
+        const int r = abs(rxdataF[aarx][sc].r), im = abs(rxdataF[aarx][sc].i);
+        if (r > maxabs)
+          maxabs = r;
+        if (im > maxabs)
+          maxabs = im;
+      }
+      /* Target 2^13: the LS product and the 3-tap filt16a accumulation both run in int16, so leave
+       * two bits of headroom below 2^15 for them rather than filling the word. */
+      if (maxabs > 0)
+        ssb_shift = 13 - (int)log2_approx((uint32_t)maxabs);
+      if (ssb_shift < 0)
+        ssb_shift = 0;
+      if (ssb_shift > 0) {
+        memcpy(rxf_scaled, rxdataF[aarx], sizeof(c16_t) * Nsym);
+        for (int i = 0; i < 240; i++) {
+          const unsigned int sc = (ssb_off0 + i) % (unsigned)Nsym;
+          rxf_scaled[sc].r = (int16_t)(rxdataF[aarx][sc].r << ssb_shift);
+          rxf_scaled[sc].i = (int16_t)(rxdataF[aarx][sc].i << ssb_shift);
+        }
+        est_in = rxf_scaled;
+      }
+    }
     nr_pbch_channel_estimation(&ue->frame_parms,
                                NULL,
                                dl_ch_estimates[aarx],
@@ -1388,11 +1470,113 @@ int nr_process_pbch_symbol(
                                ssbIndex & 7,
                                symbIdxInFrame > (fp->slots_per_frame * NR_SYMBOLS_PER_SLOT / 2),
                                ssb_start_subcarrier,
-                               rxdataF[aarx],
+                               est_in,
                                false,
                                nid);
+    /* Saturation check on the estimator's int16 output at the new input level -- the obvious
+     * failure mode of adding gain, so measure it instead of assuming. Rate limited. */
+    if (ssb_shift > 0) {
+      static int s_sat_left = 12;
+      if (s_sat_left > 0) {
+        int hmax = 0;
+        for (int i = 0; i < 244; i++) {
+          const int r = abs(dl_ch_estimates[aarx][i].r), im = abs(dl_ch_estimates[aarx][i].i);
+          if (r > hmax)
+            hmax = r;
+          if (im > hmax)
+            hmax = im;
+        }
+        s_sat_left--;
+        LOG_W(PHY, "SENSING: CHESTGAIN N=%d ant=%d shift=%d |H|max=%d%s\n",
+              Nsym, aarx, ssb_shift, hmax, (hmax >= 32000) ? " SATURATED" : "");
+      }
+    }
     // Get channel response to measure timing error
     if ((fp->ssb_index == ssbIndex) && (relPbchSymb == NB_SYMBOLS_PBCH - 1)) {
+      /* ISAC_CHEST_RAW=<path> (diagnostic, default off): dump the 240-value frequency-domain
+       * estimate AND the 240 source REs it was built from, so the 1024-vs-4096 estimates can be
+       * compared directly instead of inferred from CIR statistics. Per SSB, antenna 0 only, 24 max:
+       * header int32 {N, ssb_offset, frame, slot}, then 244 c16_t of dl_ch_estimates[0..243],
+       * then the WHOLE symbol: ofdm_symbol_size c16_t of rxdataF[0..N-1]. Whole-symbol (not just
+       * the 240 SSB REs) so the SSB can be LOCATED offline rather than assumed: the PBCH DM-RS
+       * repeats every 20 ms, so a per-subcarrier consecutive-SSB coherence profile marks the DM-RS
+       * comb wherever it actually is. A 240-RE dump cannot distinguish "SSB destroyed" from
+       * "reading the wrong 240 subcarriers on a fully loaded carrier". */
+      {
+        static int s_raw_left = -1;
+        static FILE *s_raw = NULL;
+        if (s_raw_left < 0) {
+          const char *pth = getenv("ISAC_CHEST_RAW");
+          s_raw = (pth && pth[0]) ? fopen(pth, "wb") : NULL;
+          s_raw_left = s_raw ? 24 : 0;
+        }
+        if (s_raw_left > 0 && s_raw && aarx == 0) {
+          s_raw_left--;
+          unsigned int so = fp->first_carrier_offset + fp->ssb_start_subcarrier;
+          if (so >= (unsigned)fp->ofdm_symbol_size)
+            so -= fp->ofdm_symbol_size;
+          int32_t hdr[4] = {fp->ofdm_symbol_size, (int32_t)so, proc->frame_rx, proc->nr_slot_rx};
+          fwrite(hdr, sizeof(hdr), 1, s_raw);
+          fwrite(&dl_ch_estimates[aarx][0], sizeof(c16_t), 244, s_raw);
+          fwrite(&rxdataF[aarx][0], sizeof(c16_t), fp->ofdm_symbol_size, s_raw);
+          fflush(s_raw);
+          if (s_raw_left == 0) { fclose(s_raw); s_raw = NULL; }
+        }
+      }
+      /* ISAC_CHEST_COH=1 (diagnostic, default off): adjacent-subcarrier coherence and RMS of the
+       * TRACKING estimate over the REs it actually populated, to compare against the same quantity
+       * on the acquisition path (nr_pbch.c's CIRTEST). A real channel is smooth across 3.6 MHz, so
+       * coherence ~1; noise or a wrong DM-RS/subcarrier mapping gives ~0. Cheap: one pass. */
+      static int s_coh = -1;
+      if (s_coh < 0)
+        s_coh = (getenv("ISAC_CHEST_COH") && atoi(getenv("ISAC_CHEST_COH"))) ? 1 : 0;
+      static int s_coh_left = 24;
+      if (s_coh && s_coh_left > 0 && aarx == 0) {
+        s_coh_left--;
+        const c16_t *h = dl_ch_estimates[aarx];
+        const int N = fp->ofdm_symbol_size;
+        double lr = 0.0, li = 0.0, den = 0.0, e = 0.0;
+        int nz = 0, prev = -1;
+        for (int k = 0; k < N; k++) {
+          if (h[k].r == 0 && h[k].i == 0)
+            continue;
+          nz++;
+          e += (double)h[k].r * h[k].r + (double)h[k].i * h[k].i;
+          if (prev >= 0 && k == prev + 1) { // adjacent populated pair only
+            const double ar = h[prev].r, ai = h[prev].i, br = h[k].r, bi = h[k].i;
+            lr += ar * br + ai * bi;
+            li += ar * bi - ai * br;
+            den += sqrt((ar * ar + ai * ai) * (br * br + bi * bi));
+          }
+          prev = k;
+        }
+        /* Is the SSB actually in the bins the estimator reads? Compare the mean |rxdataF| over the
+         * 240 subcarriers it walks (absolute positions, same arithmetic as the estimator) against
+         * the mean over the whole symbol. SSB present and correctly mapped -> ratio well above 1;
+         * ratio ~1 means those bins hold ordinary traffic/noise, i.e. a wrong mapping. */
+        unsigned int ssb_off = fp->first_carrier_offset + ssb_start_subcarrier;
+        if (ssb_off >= (unsigned)N)
+          ssb_off -= N;
+        double ssb_sum = 0.0, all_sum = 0.0;
+        for (int i = 0; i < N; i++)
+          all_sum += hypot((double)rxdataF[aarx][i].r, (double)rxdataF[aarx][i].i);
+        double ssb_first = 0.0, ssb_last = 0.0; // first/last 20 SSB REs: structure vs flat
+        for (int i = 0; i < 240; i++) {
+          const unsigned int sc = (ssb_off + i) % (unsigned)N;
+          const double m = hypot((double)rxdataF[aarx][sc].r, (double)rxdataF[aarx][sc].i);
+          ssb_sum += m;
+          if (i < 20)
+            ssb_first += m;
+          else if (i >= 220)
+            ssb_last += m;
+        }
+        LOG_W(PHY,
+              "SENSING: CHESTCOH path=tracking N=%d ssb=%d nz=%d rms=%.1f coh=%.4f "
+              "ssb_band_mean=%.1f sym_mean=%.1f ratio=%.2f edge_first=%.1f edge_last=%.1f\n",
+              N, ssbIndex, nz, nz ? sqrt(e / nz) : 0.0, den > 0.0 ? sqrt(lr * lr + li * li) / den : 0.0,
+              ssb_sum / 240.0, all_sum / N, (all_sum > 0.0) ? (ssb_sum / 240.0) / (all_sum / N) : 0.0,
+              ssb_first / 20.0, ssb_last / 20.0);
+      }
       // do ifft of channel estimate
       freq2time(fp->ofdm_symbol_size, (int16_t *)&dl_ch_estimates[aarx], (int16_t *)dl_ch_estimates_time[aarx]);
       UEscopeCopy(ue, pbchDlChEstimateTime, (void *)dl_ch_estimates_time, sizeof(c16_t), fp->nb_antennas_rx, fp->ofdm_symbol_size, 0);
@@ -1407,22 +1591,14 @@ int nr_process_pbch_symbol(
   if (nr_isac_enabled() && nr_isac_source_enabled(NR_ISAC_SRC_SSB)) {
     uint32_t k_abs[NR_PBCH_NUM_RB * NR_NB_SC_PER_RB];
     uint32_t l_sym[NR_PBCH_NUM_RB * NR_NB_SC_PER_RB];
-    // P11fix item 2: the former /*k_ssb=*/0 argument is GONE, not plumbed. Investigated and
-    // recorded in docs/cfr_support_and_reference_contract.md (finding P11-A4): k_ssb existed only
-    // to floor the axis to the CRB containing the SSB, and that is the wrong target -- element i
-    // of dl_ch_estimates is the estimate AT subcarrier ssb_start_subcarrier + i (traced in
-    // nr_isac_ssb_axis.c's header comment). Two corrections to the comment this replaces, both
-    // re-verified here rather than inherited: (a) a PHY-side path to the MAC value DOES exist,
-    // ue->nrUE_config.ssb_table.ssb_subcarrier_offset (fapi_nr_ue_interface.h:666, written by
-    // config_ue.c:210), so "zero hits" was stale -- it is simply not wanted; (b) the old
-    // comment's "correct for this deployment" is false: ssb_start_subcarrier % 12 == 6 on the
-    // registered fixture, so the old CRB-flooring formula shifted the axis DOWN by 6 subcarriers
-    // on this deployment's own captures -- independent of how that remainder would be interpreted
-    // as kSSB. NOTE for the next reader: --ssb sets ssb_start_subcarrier DIRECTLY
-    // (nr-uesoftmodem.h:66 -> nr-ue-ru.c:141 -> nr_parms.c:470); it is NOT a kSSB value, so
-    // 150 % 12 is a property of the AXIS, not a recovered kSSB. P11-A1: wrap modulo the carrier
-    // grid (N_RB_DL*12), never modulo the FFT size.
-    nr_isac_ssb_k_abs(ssb_start_subcarrier, fp->N_RB_DL * 12, k_abs);
+    // k_ssb hardcoded to 0: there is no PHY-side plumbing path to the MAC's real
+    // ssb_subcarrier_offset at this call site (nr_process_pbch_symbol only receives
+    // PHY_VARS_NR_UE*, never the MAC instance) -- and no field on NR_DL_FRAME_PARMS carries it
+    // either (verified: grepped the whole PHY tree, zero hits). CORRECT for this deployment
+    // (Phase 1 already confirmed this cell's actual kSSB is 0) but WRONG for any future cell
+    // with a nonzero kSSB -- flagged, not fixed; adding real MAC->PHY plumbing for this one
+    // value is out of scope for this task.
+    nr_isac_ssb_k_abs(ssb_start_subcarrier, /*k_ssb=*/0, fp->ofdm_symbol_size, k_abs);
     for (uint32_t i = 0; i < NR_PBCH_NUM_RB * NR_NB_SC_PER_RB; i++) {
       l_sym[i] = (uint32_t)relPbchSymb;
     }
@@ -1439,20 +1615,7 @@ int nr_process_pbch_symbol(
     // stride -- dl_ch_estimates[aarx] are separate allocations, not one contiguous block, so pack
     // them into a stack buffer rather than assuming a stride across dl_ch_estimates itself.
     float h_packed[2 * (NR_PBCH_NUM_RB * NR_NB_SC_PER_RB) * NR_ISAC_SSB_MAX_ANT];
-    uint32_t nof_ant_clamped = nof_ant > NR_ISAC_SSB_MAX_ANT ? NR_ISAC_SSB_MAX_ANT : nof_ant;
-    // adaptive_RX_pipeline.md P10b: the same submission plan the CSI-RS and blind DM-RS taps use.
-    // One active branch -> one untagged submission of nof_ant_clamped planes, exactly as before;
-    // several -> one single-antenna submission per branch, sliced out of this same packed buffer.
-    nr_isac_submit_plan_t plan[NR_RX_BRANCH_MAX];
-    uint32_t pack_ant = 0;
-    const uint32_t avail_ant = (uint32_t)fp->nb_antennas_rx < NR_ISAC_SSB_MAX_ANT
-                                   ? (uint32_t)fp->nb_antennas_rx
-                                   : (uint32_t)NR_ISAC_SSB_MAX_ANT;
-    const int nof_plan =
-        nr_isac_submit_plan(plan, NR_RX_BRANCH_MAX, nof_ant_clamped, avail_ant, &pack_ant);
-    if (nof_plan > 0 && pack_ant > 0) {
-      nof_ant_clamped = pack_ant;
-    }
+    const uint32_t nof_ant_clamped = nof_ant > NR_ISAC_SSB_MAX_ANT ? NR_ISAC_SSB_MAX_ANT : nof_ant;
     for (uint32_t a = 0; a < nof_ant_clamped; a++) {
       const c16_t* est = (const c16_t*)dl_ch_estimates[a];
       for (uint32_t i = 0; i < NR_PBCH_NUM_RB * NR_NB_SC_PER_RB; i++) {
@@ -1477,21 +1640,17 @@ int nr_process_pbch_symbol(
     // lines over a 150 s ssb-only capture, root-caused by inspecting sensing_engine.cc + the
     // csi_rs tap's slot_idx computation for comparison).
     const uint32_t ssb_abs_slot = (uint32_t)(proc->frame_rx * fp->slots_per_frame + proc->nr_slot_rx);
-    for (int p = 0; p < nof_plan; p++) {
-      nr_isac_submit_cfr_multi_branch(ssb_abs_slot,
-                                      0.0f,
-                                      NR_ISAC_SRC_SSB,
-                                      &carrier,
-                                      &h_packed[2 * (size_t)plan[p].first_ant
-                                                * (NR_PBCH_NUM_RB * NR_NB_SC_PER_RB)],
-                                      plan[p].nof_ant,
-                                      NR_PBCH_NUM_RB * NR_NB_SC_PER_RB,
-                                      k_abs,
-                                      l_sym,
-                                      NR_PBCH_NUM_RB * NR_NB_SC_PER_RB,
-                                      0.0f,
-                                      plan[p].branch_id);
-    }
+    nr_isac_submit_cfr_multi(ssb_abs_slot,
+                             0.0f,
+                             NR_ISAC_SRC_SSB,
+                             &carrier,
+                             h_packed,
+                             nof_ant_clamped,
+                             NR_PBCH_NUM_RB * NR_NB_SC_PER_RB,
+                             k_abs,
+                             l_sym,
+                             NR_PBCH_NUM_RB * NR_NB_SC_PER_RB,
+                             0.0f);
   }
 
   // Copy current symbol estimate for FO estimation
@@ -2283,7 +2442,7 @@ void pdsch_processing(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc, nr_phy_
       int ptrsSymbPerSlot = get_ptrs_symbols_in_slot(ptrsSymbPos, dlsch_config->start_symbol, dlsch_config->number_symbols);
       unav_res = n_ptrs * ptrsSymbPerSlot;
     }
-    unav_res += compute_csi_rm_unav_res(dlsch_config, &freq_alloc);
+    unav_res += nr_ue_csi_rm_unav_res(dlsch_config, &freq_alloc);
     int G = nr_get_G(freq_alloc.num_rbs,
                      dlsch_config->number_symbols,
                      nb_re_dmrs,

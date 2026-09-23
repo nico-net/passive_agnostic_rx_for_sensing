@@ -5,7 +5,6 @@
  */
 #include "nr_passive_replay_capture.h"
 #include "PHY/MODULATION/modulation_UE.h"
-#include "PHY/NR_UE_TRANSPORT/nr_pdsch_data_aided.h" /* P07: replay exercises the data-aided path too */
 #include "common/utils/LOG/log.h"
 #include <stdatomic.h>
 #include <pthread.h>
@@ -106,8 +105,6 @@ void nr_passive_replay_init(PHY_VARS_NR_UE *ue)
   if (!path || !*path) return;
   const NR_DL_FRAME_PARMS *fp=&ue->frame_parms;
   size_t bytes=(size_t)REPLAY_FRAMES*fp->samples_per_frame*fp->nb_antennas_rx*sizeof(c16_t);
-  LOG_I(PHY,"REPLAY geometry nb_ant=%u samples_per_frame=%u slots_per_frame=%u bytes=%zu\n",
-        fp->nb_antennas_rx, fp->samples_per_frame, fp->slots_per_frame, bytes);
   if (!fp->nb_antennas_rx || fp->nb_antennas_rx>4 || !bytes || bytes>REPLAY_MAX_BYTES
       || !fp->slots_per_frame || fp->slots_per_frame>160) {
     LOG_E(PHY,"REPLAY VOID: geometry exceeds bounded recorder\n"); return;
@@ -203,16 +200,13 @@ void nr_passive_replay_dl(const nr_pdsch_passive_job_t *job,
   if (atomic_load(&state)==RP_DISABLED) return;
   const bool success=result->status==NR_PDSCH_PASSIVE_DECODE_CRC_OK && result->tb;
   const bool failures=header->version>=2;
-  /* Manual mode (TESTING MODE RULE): the layout is fixed, not swept, so generation==0 means
-   * "no sweep in progress, already settled" -- treat it exactly like a settled ticket. */
-  if(!success && !(failures && (job->sweep_ticket.generation==0 || job->sweep_ticket.settled) &&
+  if(!success && !(failures && job->sweep_ticket.settled &&
                   result->status==NR_PDSCH_PASSIVE_DECODE_CRC_FAIL))
     return;
-  if (success && (job->sweep_ticket.generation==0 || !failures || job->sweep_ticket.settled)
+  if (success && job->sweep_ticket.generation && (!failures || job->sweep_ticket.settled)
       && atomic_load(&ul_seen)) {
     int expected=RP_ARMED;
-    if (atomic_compare_exchange_strong(&state,&expected,RP_REQUESTED))
-      LOG_I(PHY,"REPLAY ARMED at absolute_slot=%ld\n",job->absolute_slot);
+    atomic_compare_exchange_strong(&state,&expected,RP_REQUESTED);
   }
   pthread_mutex_lock(&record_lock);
   if (recordable(job->absolute_slot) && header->n_dl<REPLAY_DL) {
@@ -264,14 +258,6 @@ int nr_passive_replay_read(PHY_VARS_NR_UE *ue, const char *path)
   c16_t (*rxF)[fp->samples_per_slot_wCP]=aligned_alloc(32,(freq_bytes+31)&~(size_t)31);
   if (!rxF) { free(samples); free(h); return 2; }
   unsigned matches=0,failed=0;
-  /* P07 single-branch view (ISAC_DL_BRANCH_VIEW=<phys>): resolved ONCE for the whole replay. The
-   * recorded jobs' branch_id/physical_channel bytes predate those fields (uninitialised padding in
-   * the producer of this fixture), so they are overwritten below and never read. */
-  uint8_t view_branch=0; const int view_phys=nr_pdsch_passive_branch_view_resolve(ue,0,&view_branch);
-  PHY_VARS_NR_UE *vue=nr_pdsch_passive_branch_view(ue,view_phys,view_branch);
-  unsigned st_count[4]={0,0,0,0}; /* CRC_OK, CRC_FAIL, UNSUPPORTED, ERROR over every DL record decoded */
-  const uint64_t submits_before=nr_isac_pdsch_data_aided_submits();
-  nr_isac_data_aided_force=true; /* run the reconstruction path on every CRC-OK TB (engine is not started) */
   for (unsigned i=0;i<h->n_dl;++i) {
     replay_dl_t *r=&h->dl[i]; long index=r->job.absolute_slot-h->start;
     if (index<fp->slots_per_frame || index>=h->slots ||
@@ -289,21 +275,10 @@ int nr_passive_replay_read(PHY_VARS_NR_UE *ue, const char *path)
     UE_nr_rxtx_proc_t proc={0};
     proc.frame_rx=r->job.frame_rx; proc.nr_slot_rx=r->job.nr_slot_rx; proc.gNB_id=r->job.gNB_id;
     r->job.grant.check_sample_lifetime=false;
-    r->job.branch_id=view_branch; r->job.physical_channel=(int8_t)view_phys;
     nr_slot_fep_fo_override_hz=r->job.fo_hz;
     nr_pdsch_passive_decode_result_t result;
-    nr_pdsch_passive_decode_status_t status=nr_pdsch_passive_decode(vue,&proc,&r->job.dlsch_pdu,
+    nr_pdsch_passive_decode_status_t status=nr_pdsch_passive_decode(ue,&proc,&r->job.dlsch_pdu,
         &r->job.freq_alloc,&r->job.grant,rxF,&result);
-    if((unsigned)status<4) st_count[status]++;
-    nr_pdsch_passive_verdict_trace(i,r->job.rnti,view_branch,view_phys,&result);
-    if(status==NR_PDSCH_PASSIVE_DECODE_CRC_OK&&result.tb) {
-      /* Same view as the decode, same accepted TB: the branch's own Y against its own X. The engine
-       * is not started during replay, so the row is produced and counted but not admitted. */
-      nr_isac_abs_slot_override=(uint64_t)r->job.absolute_slot;
-      nr_isac_pdsch_data_aided_submit(vue,&proc,&result.cw,&r->job.dlsch_pdu,&r->job.freq_alloc,
-          r->job.rnti,result.tb,r->job.harq_pid_tag,rxF,(double)result.nvar);
-      nr_isac_abs_slot_override=0;
-    }
     if(!r->tb_bytes) {
       printf("DL-REPLAY-FAILURE rnti=%04x source=%ld mcs=%u rb=%u sym=%u+%u dmrs=%x "
              "status=%d tbs=%u\n",r->job.rnti,r->job.absolute_slot,r->job.grant.mcs,
@@ -318,17 +293,11 @@ int nr_passive_replay_read(PHY_VARS_NR_UE *ue, const char *path)
     printf("REPLAY-CONTROL rnti=%04x source=%ld status=%d identical=%d\n",r->job.rnti,r->job.absolute_slot,status,match);
   }
   nr_slot_fep_fo_override_hz=NAN;
-  nr_isac_data_aided_force=false;
   if(!matches) ++failed; /* A failure-only recording is not a replay control. */
   for (unsigned i=0;i<h->n_ul;++i)
     printf("REPLAY-RAW-UL source=%ld rnti=%04x bits=%u payload=%016lx\n",
            h->ul[i].source,h->ul[i].rnti,h->ul[i].length,(unsigned long)h->ul[i].payload);
   if (h->n_ul<8) printf("UL-SEARCH UNRESOLVED: fewer than eight raw observations; no UL convergence claim\n");
-  printf("REPLAY-VIEW phys=%d branch=%u records=%u crc_ok=%u crc_fail=%u unsupported=%u error=%u "
-         "unsupported_multilayer=%lu data_submits=%lu\n",view_phys,(unsigned)view_branch,h->n_dl,
-         st_count[0],st_count[1],st_count[2],st_count[3],
-         (unsigned long)nr_pdsch_passive_view_unsupported_multilayer(),
-         (unsigned long)(nr_isac_pdsch_data_aided_submits()-submits_before));
   printf("REPLAY %s: identical DL controls=%u failed=%u raw UL=%u; no radio opened\n",
          failed?"VOID":"PASS",matches,failed,h->n_ul);
   if (!failed && getenv("ISAC_PASSIVE_REPLAY_UL_PROBE")) replay_probe_ul(ue,h,samples);

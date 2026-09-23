@@ -115,7 +115,7 @@ for i in "${!RX_CONFS[@]}"; do
   fi
 done
 
-ALL_UE_CONFS=("ue.active.conf" "ue.active2.conf" "ue.active3.conf")
+ALL_UE_CONFS=("${ACTIVE_CONF_OVERRIDE:-ue.active.conf}" "ue.active2.conf" "ue.active3.conf")
 ALL_UE_LABELS=("ue1" "ue2" "ue3")
 UE_CONFS=("${ALL_UE_CONFS[@]:0:$NUM_UE}")
 UE_LABELS=("${ALL_UE_LABELS[@]:0:$NUM_UE}")
@@ -270,7 +270,9 @@ wait_for() { # wait_for <file> <pattern> <timeout_s> <label>
 
 # --- 1. gNB ------------------------------------------------------------------------------------
 echo "--- starting gNB (SA, rfsim server, open5gs) ---"
-$(pin_for gnb) "$BUILD_DIR/nr-softmodem" -O "$SCRIPT_DIR/$GNB_CONF" --rfsim >"$GNB_LOG" 2>&1 &
+GNB_CONF="${GNB_CONF_OVERRIDE:-$GNB_CONF}"   # e.g. gnb.sa.rfsim.bwp.conf (dedicated-BWP test)
+# GNB_EXTRA: extra gNB flags, e.g. "--telnetsrv --telnetsrv.shrmod ci" for trigger_bwp_switch.
+$(pin_for gnb) "$BUILD_DIR/nr-softmodem" -O "$SCRIPT_DIR/$GNB_CONF" --rfsim ${GNB_EXTRA:-} >"$GNB_LOG" 2>&1 &
 wait_for "$GNB_LOG" "Received NGSetupResponse" 30 "gNB associated with AMF" || exit 1
 # NGAP comes up BEFORE the RU/L1, so the rfsim server socket is not necessarily listening yet.
 # Starting a UE before it is bound leaves that UE stuck in its connect-retry loop.
@@ -281,7 +283,7 @@ until ss -lnt 2>/dev/null | grep -q ':4043 '; do
 done
 echo "  [ok] rfsim server listening on :4043"
 
-# --- 2. active UE(s) ---------------------------------------------------------------------------
+# --- 2. active UE(s) --- ACTIVE_UE_EXTRA: extra active-UE flags (rank 4: "--ue-nb-ant-rx 4 --uecap_file <uecap_ports4.xml>")------------------------------------------------------------------------
 echo "--- starting $NUM_UE ACTIVE UE(s) (attach, carry traffic) ---"
 UE_IPS=()
 for i in "${!UE_CONFS[@]}"; do
@@ -289,12 +291,12 @@ for i in "${!UE_CONFS[@]}"; do
   if [ "$i" -eq 0 ]; then
     echo "  $label: default netns"
     sudo -n $(pin_for ue "$i") "$BUILD_DIR/nr-uesoftmodem" -O "$SCRIPT_DIR/$conf" --rfsim \
-      "${CELL_ARGS[@]}" >"$log" 2>&1 &
+      "${CELL_ARGS[@]}" ${ACTIVE_UE_EXTRA:-} >"$log" 2>&1 &
   else
     echo "  $label: own netns (${UE_NETNS_BY_IDX[$i]}, veth to gNB at ${UE_HOST_IP_BY_IDX[$i]})"
     setup_ue_netns "$i"
     sudo -n ip netns exec "${UE_NETNS_BY_IDX[$i]}" $(pin_for ue "$i") "$BUILD_DIR/nr-uesoftmodem" -O "$SCRIPT_DIR/$conf" --rfsim \
-      "${CELL_ARGS[@]}" >"$log" 2>&1 &
+      "${CELL_ARGS[@]}" ${ACTIVE_UE_EXTRA:-} >"$log" 2>&1 &
   fi
   # 150s for the same reason as the passive receivers below: at 273 PRB with several softmodems
   # already running, initial sync + RA legitimately takes longer than the original 60s. Measured

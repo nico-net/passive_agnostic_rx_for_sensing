@@ -1621,16 +1621,31 @@ static int trx_usrp_read(openair0_device_t *device, openair0_timestamp_t *ptimes
   }
 
   // bring RX data into 12 LSBs for softmodem RX
+  /* ISAC_RX_CHAN_MAP="2,3,0,1": OAI antenna i takes UHD channel map[i]. A/B tool (2026-09-16): on the
+   * X410 the weak daughterboard-A antennas are UHD ch0/ch1 and the strong B ones ch2/ch3; making a
+   * strong channel OAI antenna 0 tells whether the 4-RX CORESET#0 failure follows antenna 0's role. */
+  static int s_map[8] = {0, 1, 2, 3, 4, 5, 6, 7};
+  static int s_map_init = 0;
+  if (!s_map_init) {
+    s_map_init = 1;
+    const char *e = getenv("ISAC_RX_CHAN_MAP");
+    if (e && *e) {
+      int n = 0; const char *q = e;
+      while (*q && n < 8) { s_map[n++] = atoi(q); while (*q && *q != ',') q++; if (*q) q++; }
+      LOG_W(HW, "ISAC_RX_CHAN_MAP: OAI antennas take UHD channels [%d %d %d %d]\n", s_map[0], s_map[1], s_map[2], s_map[3]);
+    }
+  }
   for (int i=0; i<cc; i++) {
+    const int src = (s_map[i] >= 0 && s_map[i] < cc) ? s_map[i] : i;
     for (int j = 0; j < nsamps2; j++) {
       // bring RX data into 12 LSBs for softmodem RX,
       // this keeps the significant bits of B210 and may loose better ADC results,
       // but it makes free bits in MSB for signal processing on int16
       if ((((uintptr_t) buff[i])&0x1F)==0) {
-        ((simde__m256i *)buff[i])[j] = simde_mm256_srai_epi16(buff_tmp[i][j], rxshift);
+        ((simde__m256i *)buff[i])[j] = simde_mm256_srai_epi16(buff_tmp[src][j], rxshift);
       } else {
         // FK: in some cases the buffer might not be 32 byte aligned, so we cannot use avx2
-        simde__m256i tmp = simde_mm256_srai_epi16(buff_tmp[i][j], rxshift);
+        simde__m256i tmp = simde_mm256_srai_epi16(buff_tmp[src][j], rxshift);
         simde_mm256_storeu_si256(((simde__m256i *)buff[i]) + j, tmp);
       }
     }
@@ -1721,15 +1736,36 @@ static bool is_equal(double a, double b) {
   return std::fabs(a-b) < std::numeric_limits<double>::epsilon();
 }
 
+/* Retune EVERY RX channel. set_rx_freq(req) without a channel tunes UHD channel 0 only, so after
+ * the first CFO retune antennas 1..N-1 stayed at the old frequency: measured OTA 2026-09-15 as
+ * BRANCHFO d_vs_br0 = [0 588 653 652] Hz on the X410, which is why 4-RX MRC never combined. */
+static void usrp_set_rx_freq_all(usrp_state_t *s, const openair0_config_t *cfg)
+{
+  const int n = cfg->rx_num_channels > 0 ? cfg->rx_num_channels : 1;
+  for (int i = 0; i < n; i++) {
+    const double f = cfg->rx_freq[i] > 0.0 ? cfg->rx_freq[i] : cfg->rx_freq[0];
+    uhd::tune_request_t req(f, cfg->tune_offset);
+    /* A CFO correction (tens of kHz) moves only the DDC NCO: relocking four LOs while streaming
+     * stalled the X410 stream right after "Got synch" on 3/3 runs (2026-09-15). A real frequency
+     * move, or an NCO that cannot land the request (no DDC in the chain), gets the full tune. */
+    const bool nco = std::fabs(f - s->usrp->get_rx_freq(i)) < 0.25 * cfg->sample_rate;
+    if (nco)
+      req.rf_freq_policy = uhd::tune_request_t::POLICY_NONE;
+    s->usrp->set_rx_freq(req, i);
+    if (nco && std::fabs(s->usrp->get_rx_freq(i) - f) > 1.0) {
+      LOG_W(HW, "rx ch%d NCO-only retune landed at %.1f Hz for %.1f Hz, full tune\n", i, s->usrp->get_rx_freq(i), f);
+      s->usrp->set_rx_freq(uhd::tune_request_t(f, cfg->tune_offset), i);
+    }
+  }
+}
+
 void *freq_thread(void *arg) {
   openair0_device_t *device=(openair0_device_t *)arg;
   usrp_state_t *s = (usrp_state_t *)device->priv;
   uhd::tune_request_t tx_tune_req(device->openair0_cfg[0].tx_freq[0],
                                   device->openair0_cfg[0].tune_offset);
-  uhd::tune_request_t rx_tune_req(device->openair0_cfg[0].rx_freq[0],
-                                  device->openair0_cfg[0].tune_offset);
   s->usrp->set_tx_freq(tx_tune_req);
-  s->usrp->set_rx_freq(rx_tune_req);
+  usrp_set_rx_freq_all(s, &device->openair0_cfg[0]);
   return NULL;
 }
 /*! \brief Set frequencies (TX/RX). Spawns a thread to handle the frequency change to not block the calling thread
@@ -1744,9 +1780,8 @@ int trx_usrp_set_freq(openair0_device_t *device, openair0_config_t *openair0_cfg
   printf("Setting USRP TX Freq %f, RX Freq %f, tune_offset: %f\n", openair0_cfg[0].tx_freq[0], openair0_cfg[0].rx_freq[0], openair0_cfg[0].tune_offset);
 
   uhd::tune_request_t tx_tune_req(openair0_cfg[0].tx_freq[0], openair0_cfg[0].tune_offset);
-  uhd::tune_request_t rx_tune_req(openair0_cfg[0].rx_freq[0], openair0_cfg[0].tune_offset);
   s->usrp->set_tx_freq(tx_tune_req);
-  s->usrp->set_rx_freq(rx_tune_req);
+  usrp_set_rx_freq_all(s, &openair0_cfg[0]);
 
   return(0);
 }
@@ -1762,9 +1797,8 @@ int openair0_set_rx_frequencies(openair0_device_t *device, openair0_config_t *op
   uhd::tune_request_t rx_tune_req(openair0_cfg[0].rx_freq[0], openair0_cfg[0].tune_offset);
   printf("In openair0_set_rx_frequencies, freq: %f, tune offset: %f\n",
          openair0_cfg[0].rx_freq[0],  openair0_cfg[0].tune_offset);
-  //rx_tune_req.rf_freq_policy = uhd::tune_request_t::POLICY_MANUAL;
-  //rx_tune_req.rf_freq = openair0_cfg[0].rx_freq[0];
-  s->usrp->set_rx_freq(rx_tune_req);
+  (void)rx_tune_req;
+  usrp_set_rx_freq_all(s, &openair0_cfg[0]);
   return(0);
 }
 

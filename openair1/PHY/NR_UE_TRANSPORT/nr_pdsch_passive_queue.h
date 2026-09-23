@@ -65,7 +65,6 @@
 #include "PHY/defs_nr_UE.h"
 #include "nfapi/open-nFAPI/nfapi/public_inc/fapi_nr_ue_interface.h"
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.h" // nr_pdsch_passive_grant_t
-#include "PHY/NR_UE_TRANSPORT/nr_rx_branch.h" // NR_RX_BRANCH_MAX, per-branch census
 
 #ifdef __cplusplus
 extern "C" {
@@ -92,35 +91,31 @@ typedef struct {
   int      frame_rx;      ///< the only three UE_nr_rxtx_proc_t fields the chain reads (verified by
   int      nr_slot_rx;    ///< inspection of nr_dl_channel_estimation.c / nr_dlsch_demodulation.c /
   int      gNB_id;        ///< nr_pdsch_data_aided.c: frame_rx, nr_slot_rx, gNB_id and nothing else)
-  /// P06a epoch snapshot of the branch this job was fanned out to, taken at enqueue. The consumer
-  /// discards the job if the branch has since moved past it (nr_rx_branch_dispatch_is_stale
-  /// semantics) -- P05'"'"'s "no old/new mixing". Placed in the 4-byte hole that followed gNB_id and
-  /// the 7-byte hole that followed want_data, so sizeof(nr_pdsch_passive_job_t) is UNCHANGED at
-  /// 384 and the P02 replay fixture'"'"'s job_bytes header check still passes (verified with
-  /// `gdb -ex "ptype /o nr_pdsch_passive_job_t"` before and after).
-  uint32_t acq_epoch;
   long     absolute_slot; ///< producer clock at capture: what the staleness check compares against
   uint16_t rnti;
-  /// P07 branch identity (adaptive_RX_pipeline.md): which P03 branch this job belongs to and the
-  /// physical channel its samples come from. 0/0 in legacy mode. Deliberately placed in the two
-  /// padding bytes between rnti and harq_pid_tag so sizeof() is unchanged (the P02 replay fixture
-  /// checks job_bytes == sizeof). Recorded fixtures predate these fields: the replay overwrites
-  /// them from its own view resolution and never trusts the recorded bytes.
-  uint8_t  branch_id;
-  int8_t   physical_channel;
+  /// nr_blind_rnti_class_t of the DCI that scheduled this PDSCH. Only the consumer's MAC-TA parse
+  /// reads it: a RAR (RA-RNTI) and a dedicated DL-SCH PDU carry timing advance in different places,
+  /// and guessing from the payload alone would mis-parse noise.
+  uint8_t  rnti_class;
   /// nrLDPC_coding_interface harq_unique_pid, ALREADY namespaced by the producer (3000 + harq_pid
   /// for this path). uint32_t, not uint8_t: the base is 3000, and truncating it to 8 bits would
   /// alias the attached-UE (1000+) and CSI (2000+) namespaces that must stay disjoint so a hardware
   /// LDPC accelerator cannot mix two receivers' contexts.
   uint32_t harq_pid_tag;
   bool     want_data;     ///< submit the reconstructed CFR (pdsch_decode >= 2 and the source enabled)
-  uint32_t lock_epoch;    ///< see acq_epoch above (second half of the P06a epoch snapshot)
   /// FO (Hz) sampled on the RECEIVE thread with these samples; replayed by the consumer
   /// via nr_slot_fep_fo_override_hz. NAN would mean "read live", which is the bug.
   double fo_hz;
   /// Value-only RNTI/TDA/context-generation ticket; zero generation means manual/unscored.
   /// Resets/evictions cannot redirect an old queued outcome into a new hypothesis context.
   nr_pdsch_sweep_ticket_t sweep_ticket;
+  /// >0: DM-RS coherence probe for an UNRESOLVED passive BWP entry (nr_passive_bwp.h) -- no decode;
+  /// the consumer transforms the DM-RS symbol, scores the carrier and hands back bwp_probe_payload.
+  int8_t   bwp_probe_entry;
+  uint8_t  layout_probe;   ///< 1 = DCI-layout trial: decode code block 0 only, its CRC is the arm outcome
+  /// Passive BWP entry the grant was decoded against (>0): its TB CRC is fed back to the tracker.
+  int8_t   bwp_entry;
+  uint64_t bwp_probe_payload;
 } nr_pdsch_passive_job_t;
 
 /// Per-run census. Every field is a reason a job did NOT become a decode, so a shortfall in
@@ -130,18 +125,12 @@ typedef struct {
   uint64_t decoded;
   uint64_t crc_ok;
   uint64_t dropped_full;   ///< producer found the ring full: the consumers are not keeping up
+  uint64_t dropped_narrow; ///< budget: narrow grant refused while the ring was >= 90 % full
   uint64_t dropped_stale;  ///< dequeued too late; rxdata for that slot was already overwritten
   uint64_t max_lag_slots;  ///< worst observed producer-minus-job lag, in slots
-  /// P06a per-branch census. GRANTS ARE SHARED -- one blind-PDCCH discovery per occasion, fanned
-  /// out to every active branch -- so `queued` here is the same grant counted once per branch;
-  /// PAYLOADS AND CRC ARE PER BRANCH, each decoded from that branch'"'"'s own antenna only. Index is
-  /// the P03 branch_id. Only meaningful (and only printed) when the branch set has n_active > 1.
-  struct {
-    uint64_t queued;
-    uint64_t decoded;
-    uint64_t crc_ok;
-    uint64_t dropped_stale_epoch; ///< branch moved past the job'"'"'s epoch snapshot before it ran
-  } per_branch[NR_RX_BRANCH_MAX];
+  uint64_t slot_groups;    ///< dequeues that took >1 grant of one slot (FEP/chest shared)
+  uint64_t batches;        ///< producer slot batches pushed
+  uint64_t batches_multi;  ///< of which carried >1 grant (slots the cell shares between UEs)
 } nr_pdsch_passive_queue_stats_t;
 
 /**
@@ -168,35 +157,8 @@ bool nr_pdsch_passive_queue_running(void);
  *         in-line -- doing so would reintroduce exactly the deadline overrun this exists to remove.
  */
 bool nr_pdsch_passive_queue_enqueue(const nr_pdsch_passive_job_t *job);
-
-/**
- * @brief P06a fan-out producer. Enqueues ONE copy of *job per ACTIVE branch (nr_isac_rx_branches()),
- *        each stamped with that branch'"'"'s branch_id/physical_channel and its current
- *        lock_epoch/acq_epoch. With no branch set, or a single active branch, this enqueues exactly
- *        one job with the caller'"'"'s own branch_id/physical_channel -- byte-for-byte the legacy path.
- *        Grants are discovered ONCE and shared; only the decode is per branch.
- * @return the number of jobs accepted by the ring (0 if none were).
- */
-int nr_pdsch_passive_queue_enqueue_fanout(const nr_pdsch_passive_job_t *job);
-
-/// Sentinel for nr_pdsch_passive_job_t.physical_channel meaning "combined-antenna decode": the
-/// consumer must NOT apply a single-branch view (nr_pdsch_passive_branch_view_resolve() never sees
-/// this value; the consumer checks for it first). Distinct from every real physical channel (>= 0)
-/// and from the legacy "unset" convention (also >= 0, resolved against the branch map) -- negative
-/// and reserved so it can never collide with either.
-#define NR_PDSCH_PASSIVE_COMBINED (-2)
-
-/**
- * @brief Antenna-combining producer (adaptive_RX_pipeline.md: decode once, tag per antenna).
- *        Enqueues exactly ONE job carrying NR_PDSCH_PASSIVE_COMBINED, so the consumer decodes
- *        against the REAL, unrestricted ue (every active receive antenna via nr_rx_pdsch's own
- *        equaliser) instead of a single-antenna branch view. One LDPC decode per grant instead of
- *        one per branch -- the fix for the branch-fanout queue oversubscription measured live
- *        2026-09-14 (br0 65% vs br3 9% decode completion under identical load). Per-antenna CFR
- *        branch tagging happens downstream in nr_pdsch_data_aided.c, not here.
- * @return true if the ring accepted the job.
- */
-bool nr_pdsch_passive_queue_enqueue_combined(const nr_pdsch_passive_job_t *job);
+/// Push the producer's held-back slot batch (call at each occasion start / before stop).
+void nr_pdsch_passive_queue_flush(void);
 
 void nr_pdsch_passive_queue_get_stats(nr_pdsch_passive_queue_stats_t *out);
 
@@ -207,4 +169,15 @@ void nr_pdsch_passive_queue_stop(void);
 }
 #endif
 
+#include "PHY/NR_UE_TRANSPORT/nr_dmrs_id_estimate.h"
+#ifdef __cplusplus
+extern "C" {
+#endif
+/* Read-only view of the DL DM-RS identity estimate (diagnostic; plain ints, racy by design). */
+const nr_dmrs_id_state_t *nr_pdsch_passive_dl_dmrs_id(void);
+/* Up to 6 RNTIs with >= 50 decodes, as " 0xRNTI:ok/decoded(pct)" items. */
+void nr_pdsch_passive_queue_rnti_census(char *buf, size_t n);
+#ifdef __cplusplus
+}
+#endif
 #endif // NR_PDSCH_PASSIVE_QUEUE_H

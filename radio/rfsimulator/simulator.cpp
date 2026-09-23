@@ -23,7 +23,6 @@
 #include <stdbool.h>
 #include <errno.h>
 #include <sys/epoll.h>
-#include <sys/stat.h>
 #include <netdb.h>
 
 #include <common/utils/assertions.h>
@@ -79,24 +78,11 @@ typedef enum { SIMU_ROLE_SERVER = 1, SIMU_ROLE_CLIENT } simuRole;
 #define RFSIMU_BEAM_MAP "beam_map"
 #define RFSIMU_BEAM_GAINS "beam_gains"
 #define RFSIMU_BEAM_IDS "beam_ids"
-#define RFSIMU_PASSIVE_UL_CAPTURE_DIR "passive_ul_capture_dir"
-#define RFSIMU_PASSIVE_UL_CAPTURE_MAX_BYTES "passive_ul_capture_max_bytes"
-#define RFSIMU_PASSIVE_UL_SOURCE_ID "passive_ul_source_id"
-#define RFSIMU_PASSIVE_UL_NUM_SOURCES "passive_ul_num_sources"
-
-#define RFSIM_OPTION_FLAG_PASSIVE_UL_SOURCE (1u << 27)
-#define RFSIM_OPTION_FLAG_PASSIVE_UL_SINK (1u << 28)
-#define RFSIM_OPTION_FLAG_RELAYED_UL (1u << 29)
-#define RFSIM_OPTION_FLAG_PASSIVE_UL_OBSERVED (1u << 30)
-#define RFSIM_OPTION_FLAG_PASSIVE_UL_EMPTY (1u << 31)
-#define RFSIM_PASSIVE_UL_MAX_SOURCES 4
 
 #define RFSIM_CONFIG_HELP_OPTIONS                                                                  \
   " list of comma separated options to enable rf simulator functionalities. Available options: \n" \
   "        chanmod:   enable channel modelisation\n"                                               \
-  "        saviq:     enable saving written iqs to a file\n"                                      \
-  "        passive-ul-relay:    relay active UE uplink blocks to passive-ul-observer clients\n"    \
-  "        passive-ul-observer: mark a normal --passive-rx client as an uplink IQ observer\n"
+  "        saviq:     enable saving written iqs to a file\n"
 
 #define simOpt PARAMFLAG_NOFREE | PARAMFLAG_CMDLINE_NOPREFIXENABLED
 #define simBool PARAMFLAG_BOOL | PARAMFLAG_NOFREE | PARAMFLAG_CMDLINE_NOPREFIXENABLED
@@ -121,10 +107,6 @@ typedef enum { SIMU_ROLE_SERVER = 1, SIMU_ROLE_CLIENT } simuRole;
   UINT64PARAM(RFSIMU_BEAM_MAP,          "<initial beam map>\n",                     simOpt, NULL,                             1),                     \
   STRINGPARAM(RFSIMU_BEAM_IDS,          "<initial beam ids>\n",                     simOpt, NULL,                             NULL),                  \
   STRINGPARAM(RFSIMU_BEAM_GAINS,        "<beam gain matrix in toeplitz form>\n",    simOpt, NULL,                             NULL),                  \
-  STRINGPARAM(RFSIMU_PASSIVE_UL_CAPTURE_DIR, "<optional directory for relayed passive UL waveform capture>\n", simOpt, NULL,                    NULL),                  \
-  UINT64PARAM(RFSIMU_PASSIVE_UL_CAPTURE_MAX_BYTES, "<maximum passive UL IQ bytes; 0 means unlimited>\n", simOpt, NULL,                    0),                     \
-  INTPARAM(RFSIMU_PASSIVE_UL_SOURCE_ID, "<stable active UE source id, 1..4; 0 disables observed-UL output>\n", simOpt, NULL,                    0),                     \
-  INTPARAM(RFSIMU_PASSIVE_UL_NUM_SOURCES, "<number of source-tagged UEs required by a passive observer, 1..4>\n", simOpt, NULL,                    0),                     \
 };
 // clang-format on
 static void getset_currentchannels_type(char *buf, int debug, webdatadef_t *tdata, telnet_printfunc_t prnt);
@@ -181,8 +163,6 @@ typedef struct buffer_s {
   size_t payload_sz;
   size_t remainToTransferBeam;
   std::queue<rfsim_packet_t *> received_packets;
-  bool passive_ul_sink;
-  int passive_ul_source_id;
 } buffer_t;
 
 typedef struct {
@@ -220,23 +200,6 @@ typedef struct {
   int wait_timeout;
   double prop_delay_ms;
   rfsim_beam_ctrl_t *beam_ctrl;
-  bool passive_ul_relay;
-  bool passive_ul_sink;
-  char *passive_ul_capture_dir;
-  FILE *passive_ul_capture_waveform;
-  FILE *passive_ul_capture_index;
-  uint64_t passive_ul_capture_next_block_id;
-  uint64_t passive_ul_capture_max_bytes;
-  uint64_t passive_ul_relayed_bytes;
-  bool passive_ul_capture_open_failed;
-  int passive_ul_source_id;
-  int passive_ul_num_sources;
-  std::queue<rfsim_packet_t *> passive_ul_packets[RFSIM_PASSIVE_UL_MAX_SOURCES];
-  uint64_t passive_ul_last_ts[RFSIM_PASSIVE_UL_MAX_SOURCES];
-  uint64_t passive_ul_blocks[RFSIM_PASSIVE_UL_MAX_SOURCES];
-  uint64_t passive_ul_nonzero_blocks[RFSIM_PASSIVE_UL_MAX_SOURCES];
-  FILE *passive_ul_route_trace;
-  bool passive_ul_route_trace_open_failed;
 } rfsimulator_state_t;
 
 /**
@@ -349,202 +312,6 @@ static void clear_old_packets(std::queue<rfsim_packet_t *> &received_packets, ui
     } else {
       break;
     }
-  }
-}
-
-static void fullwrite(int fd, const void *_buf, ssize_t count, rfsimulator_state_t *t);
-
-static bool passive_ul_is_sink_registration(const rfsim_packet_t *pkt)
-{
-  return (pkt->header.option_flag & RFSIM_OPTION_FLAG_PASSIVE_UL_SINK) != 0;
-}
-
-static bool passive_ul_is_relayed(const rfsim_packet_t *pkt)
-{
-  return (pkt->header.option_flag & RFSIM_OPTION_FLAG_RELAYED_UL) != 0;
-}
-
-static bool passive_ul_is_observed(const rfsim_packet_t *pkt)
-{
-  return (pkt->header.option_flag & RFSIM_OPTION_FLAG_PASSIVE_UL_OBSERVED) != 0;
-}
-
-static bool passive_ul_is_empty(const rfsim_packet_t *pkt)
-{
-  return (pkt->header.option_flag & RFSIM_OPTION_FLAG_PASSIVE_UL_EMPTY) != 0;
-}
-
-static int passive_ul_packet_source_id(const rfsim_packet_t *pkt)
-{
-  if ((pkt->header.option_flag & RFSIM_OPTION_FLAG_PASSIVE_UL_SOURCE) == 0)
-    return 0;
-  return (int)pkt->header.option_value;
-}
-
-static size_t rfsim_packet_payload_bytes(const samplesBlockHeader_t *h)
-{
-  if ((h->option_flag & RFSIM_OPTION_FLAG_PASSIVE_UL_EMPTY) != 0)
-    return 0;
-  const int num_beams = __builtin_popcountll(h->beam_map);
-  return sampleToByte(h->size, h->nbAnt) * num_beams;
-}
-
-static bool passive_ul_payload_has_signal(const rfsim_packet_t *pkt)
-{
-  const size_t payload_bytes = rfsim_packet_payload_bytes(&pkt->header);
-  const uint32_t *iq = (const uint32_t *)pkt->payload;
-  for (size_t i = 0; i < payload_bytes / sizeof(*iq); ++i)
-    if (iq[i] != 0)
-      return true;
-  return false;
-}
-
-static void passive_ul_capture_packet(rfsimulator_state_t *t, const char *source, const buffer_t *b, const rfsim_packet_t *pkt)
-{
-  if (t->passive_ul_capture_dir == nullptr || t->passive_ul_capture_dir[0] == '\0' || t->passive_ul_capture_open_failed)
-    return;
-
-  const size_t payload_bytes = rfsim_packet_payload_bytes(&pkt->header);
-  if (!passive_ul_payload_has_signal(pkt))
-    return;
-
-  if (t->passive_ul_capture_waveform == nullptr || t->passive_ul_capture_index == nullptr) {
-    mkdir(t->passive_ul_capture_dir, 0777);
-
-    char path[768];
-    snprintf(path, sizeof(path), "%s/passive_ul_waveform.c16", t->passive_ul_capture_dir);
-    t->passive_ul_capture_waveform = fopen(path, "ab");
-
-    snprintf(path, sizeof(path), "%s/passive_ul_waveform_index.csv", t->passive_ul_capture_dir);
-    t->passive_ul_capture_index = fopen(path, "a+");
-
-    if (t->passive_ul_capture_waveform == nullptr || t->passive_ul_capture_index == nullptr) {
-      LOG_E(HW, "RFsim passive UL capture: failed to open capture files under %s\n", t->passive_ul_capture_dir);
-      if (t->passive_ul_capture_waveform != nullptr) {
-        fclose(t->passive_ul_capture_waveform);
-        t->passive_ul_capture_waveform = nullptr;
-      }
-      if (t->passive_ul_capture_index != nullptr) {
-        fclose(t->passive_ul_capture_index);
-        t->passive_ul_capture_index = nullptr;
-      }
-      t->passive_ul_capture_open_failed = true;
-      return;
-    }
-
-    fseek(t->passive_ul_capture_index, 0, SEEK_END);
-    if (ftell(t->passive_ul_capture_index) == 0)
-      fprintf(t->passive_ul_capture_index,
-              "capture_block_id,source,role,conn_sock,timestamp,nsamps,nb_ant,beam_map,option_flag,"
-              "payload_byte_offset,payload_bytes\n");
-  }
-
-  fseek(t->passive_ul_capture_waveform, 0, SEEK_END);
-  const long payload_byte_offset = ftell(t->passive_ul_capture_waveform);
-  if (payload_byte_offset < 0)
-    return;
-  if (t->passive_ul_capture_max_bytes > 0
-      && (uint64_t)payload_byte_offset + payload_bytes > t->passive_ul_capture_max_bytes)
-    return;
-
-  fwrite(pkt->payload, 1, payload_bytes, t->passive_ul_capture_waveform);
-  const uint64_t block_id = ++t->passive_ul_capture_next_block_id;
-  fprintf(t->passive_ul_capture_index,
-          "%" PRIu64 ",%s,%s,%d,%" PRIu64 ",%u,%u,%" PRIu64 ",%u,%ld,%zu\n",
-          block_id,
-          source,
-          t->role == SIMU_ROLE_SERVER ? "server" : "client",
-          b->conn_sock,
-          pkt->header.timestamp,
-          pkt->header.size,
-          pkt->header.nbAnt,
-          pkt->header.beam_map,
-          pkt->header.option_flag,
-          payload_byte_offset,
-          payload_bytes);
-  fflush(t->passive_ul_capture_index);
-}
-
-static void passive_ul_relay_packet(rfsimulator_state_t *t, const buffer_t *src, const rfsim_packet_t *pkt)
-{
-  const int source_id = passive_ul_packet_source_id(pkt);
-  if (!t->passive_ul_relay || t->role != SIMU_ROLE_SERVER || !passive_ul_is_observed(pkt)
-      || passive_ul_is_sink_registration(pkt) || passive_ul_is_relayed(pkt))
-    return;
-  AssertFatal(source_id >= 1 && source_id <= RFSIM_PASSIVE_UL_MAX_SOURCES,
-              "RFsim observed UL packet has invalid source id %d\n", source_id);
-
-  samplesBlockHeader_t header = pkt->header;
-  header.option_flag &= ~RFSIM_OPTION_FLAG_PASSIVE_UL_SINK;
-  header.option_flag |= RFSIM_OPTION_FLAG_RELAYED_UL;
-  const size_t payload_bytes = rfsim_packet_payload_bytes(&header);
-  // The gNB transmit thread uses the same socket for normal DL blocks. Keep each relayed header and
-  // payload contiguous on the wire; otherwise the two writers can interleave and corrupt framing.
-  mutexlock(t->Sockmutex);
-  bool relayed = false;
-  for (int i = 0; i < MAX_FD_RFSIMU; i++) {
-    buffer_t *dst = &t->buf[i];
-    if (dst->conn_sock < 0 || dst == src || !dst->passive_ul_sink)
-      continue;
-    fullwrite(dst->conn_sock, &header, sizeof(header), t);
-    fullwrite(dst->conn_sock, pkt->payload, payload_bytes, t);
-    relayed = true;
-  }
-  if (relayed)
-    t->passive_ul_relayed_bytes += payload_bytes;
-  mutexunlock(t->Sockmutex);
-}
-
-static void passive_ul_accept_relay(rfsimulator_state_t *t, rfsim_packet_t *pkt)
-{
-  const int source_id = passive_ul_packet_source_id(pkt);
-  AssertFatal(t->role == SIMU_ROLE_CLIENT && t->passive_ul_sink,
-              "relayed passive UL arrived outside a passive observer\n");
-  AssertFatal(source_id >= 1 && source_id <= t->passive_ul_num_sources,
-              "relayed passive UL source id %d is outside configured 1..%d\n",
-              source_id,
-              t->passive_ul_num_sources);
-
-  const int index = source_id - 1;
-  const uint64_t end_timestamp = pkt->header.timestamp + pkt->header.size;
-  AssertFatal(end_timestamp >= t->passive_ul_last_ts[index],
-              "relayed passive UL source %d moved backwards: end=%" PRIu64 " previous=%" PRIu64 "\n",
-              source_id,
-              end_timestamp,
-              t->passive_ul_last_ts[index]);
-  t->passive_ul_last_ts[index] = end_timestamp;
-  t->passive_ul_blocks[index]++;
-  if (!passive_ul_is_empty(pkt) && passive_ul_payload_has_signal(pkt))
-    t->passive_ul_nonzero_blocks[index]++;
-  t->passive_ul_packets[index].emplace(pkt);
-
-  if (t->passive_ul_route_trace == nullptr && !t->passive_ul_route_trace_open_failed) {
-    const char *path = getenv("OAI_PASSIVE_UL_ROUTE_TRACE_PATH");
-    if (path != nullptr && path[0] != '\0') {
-      t->passive_ul_route_trace = fopen(path, "w");
-      if (t->passive_ul_route_trace != nullptr) {
-        fprintf(t->passive_ul_route_trace,
-                "source_id,timestamp,nsamps,num_antennas,empty,payload_bytes\n");
-        fflush(t->passive_ul_route_trace);
-      } else {
-        LOG_E(HW, "RFsim passive UL route trace: failed to open %s: %s\n", path, strerror(errno));
-        t->passive_ul_route_trace_open_failed = true;
-      }
-    } else {
-      t->passive_ul_route_trace_open_failed = true;
-    }
-  }
-  if (t->passive_ul_route_trace != nullptr) {
-    fprintf(t->passive_ul_route_trace,
-            "%d,%" PRIu64 ",%u,%u,%d,%zu\n",
-            source_id,
-            pkt->header.timestamp,
-            pkt->header.size,
-            pkt->header.nbAnt,
-            passive_ul_is_empty(pkt) ? 1 : 0,
-            rfsim_packet_payload_bytes(&pkt->header));
-    if ((t->passive_ul_blocks[index] & UINT64_C(255)) == 0)
-      fflush(t->passive_ul_route_trace);
   }
 }
 
@@ -662,14 +429,14 @@ static int setblocking(int sock, enum blocking_t active)
   return 0;
 }
 
-static void fullwrite(int fd, const void *_buf, ssize_t count, rfsimulator_state_t *t)
+static void fullwrite(int fd, void *_buf, ssize_t count, rfsimulator_state_t *t)
 {
   if (t->saveIQfile != -1) {
     if (write(t->saveIQfile, _buf, count) != count)
       LOG_E(HW, "write() in save iq file failed (%d)\n", errno);
   }
 
-  const char *buf = static_cast<const char *>(_buf);
+  char *buf = static_cast<char *>(_buf);
   ssize_t l;
 
   while (count) {
@@ -787,16 +554,6 @@ static void rfsimulator_readconfig(rfsimulator_state_t *rfsimulator)
   rfsimulator->chan_offset = *(gpd(rfsimuParam, sizeofArray(rfsimuParams), RFSIMU_OFFSET)->u64ptr);
   rfsimulator->prop_delay_ms = *(gpd(rfsimuParam, sizeofArray(rfsimuParams), RFSIMU_PROP_DELAY)->dblptr);
   rfsimulator->wait_timeout = *(gpd(rfsimuParam, sizeofArray(rfsimuParams), RFSIMU_WAIT_TIMEOUT)->iptr);
-  char **passive_ul_capture_dir =
-      gpd(rfsimuParam, sizeofArray(rfsimuParams), RFSIMU_PASSIVE_UL_CAPTURE_DIR)->strptr;
-  if (passive_ul_capture_dir != nullptr && *passive_ul_capture_dir != nullptr && (*passive_ul_capture_dir)[0] != '\0')
-    rfsimulator->passive_ul_capture_dir = strdup(*passive_ul_capture_dir);
-  rfsimulator->passive_ul_capture_max_bytes =
-      *(gpd(rfsimuParam, sizeofArray(rfsimuParams), RFSIMU_PASSIVE_UL_CAPTURE_MAX_BYTES)->u64ptr);
-  rfsimulator->passive_ul_source_id =
-      *(gpd(rfsimuParam, sizeofArray(rfsimuParams), RFSIMU_PASSIVE_UL_SOURCE_ID)->iptr);
-  rfsimulator->passive_ul_num_sources =
-      *(gpd(rfsimuParam, sizeofArray(rfsimuParams), RFSIMU_PASSIVE_UL_NUM_SOURCES)->iptr);
 
   rfsim_beam_ctrl_t *beam_ctrl = rfsimulator->beam_ctrl;
   beam_ctrl->enable_beams = *(gpd(rfsimuParam, sizeofArray(rfsimuParams), RFSIMU_ENABLE_BEAMS)->iptr);
@@ -816,6 +573,8 @@ static void rfsimulator_readconfig(rfsimulator_state_t *rfsimulator)
         LOG_E(HW, "open(%s) failed for IQ saving, errno(%d)\n", saveF, errno);
         exit(-1);
       }
+
+      break;
     } else if (strcmp(rfsimuParam[p].strlistptr[i], "chanmod") == 0) {
       init_channelmod();
       load_channellist(rfsimulator->tx_num_channels,
@@ -824,10 +583,6 @@ static void rfsimulator_readconfig(rfsimulator_state_t *rfsimulator)
                        rfsimulator->rx_freq,
                        rfsimulator->tx_bw);
       rfsimulator->channelmod = true;
-    } else if (strcmp(rfsimuParam[p].strlistptr[i], "passive-ul-relay") == 0) {
-      rfsimulator->passive_ul_relay = true;
-    } else if (strcmp(rfsimuParam[p].strlistptr[i], "passive-ul-observer") == 0) {
-      rfsimulator->passive_ul_sink = true;
     } else {
       fprintf(stderr, "unknown rfsimulator option: %s\n", rfsimuParam[p].strlistptr[i]);
       exit(-1);
@@ -859,47 +614,6 @@ static void rfsimulator_readconfig(rfsimulator_state_t *rfsimulator)
     rfsimulator->role = SIMU_ROLE_SERVER;
   else
     rfsimulator->role = SIMU_ROLE_CLIENT;
-
-  AssertFatal(rfsimulator->passive_ul_source_id >= 0
-                  && rfsimulator->passive_ul_source_id <= RFSIM_PASSIVE_UL_MAX_SOURCES,
-              "rfsimulator.passive_ul_source_id must be in 0..%d (got %d)\n",
-              RFSIM_PASSIVE_UL_MAX_SOURCES,
-              rfsimulator->passive_ul_source_id);
-  AssertFatal(rfsimulator->passive_ul_num_sources >= 0
-                  && rfsimulator->passive_ul_num_sources <= RFSIM_PASSIVE_UL_MAX_SOURCES,
-              "rfsimulator.passive_ul_num_sources must be in 0..%d (got %d)\n",
-              RFSIM_PASSIVE_UL_MAX_SOURCES,
-              rfsimulator->passive_ul_num_sources);
-  AssertFatal(!(rfsimulator->passive_ul_sink && rfsimulator->passive_ul_source_id != 0),
-              "a passive-ul-observer cannot also be an active UL source\n");
-  AssertFatal(!rfsimulator->passive_ul_sink || rfsimulator->passive_ul_num_sources > 0,
-              "passive-ul-observer requires passive_ul_num_sources in 1..%d\n",
-              RFSIM_PASSIVE_UL_MAX_SOURCES);
-  AssertFatal(rfsimulator->role != SIMU_ROLE_SERVER || rfsimulator->passive_ul_source_id == 0,
-              "the RFsim server cannot be a passive UL source\n");
-  if (rfsimulator->passive_ul_source_id > 0) {
-    const char *source_env = getenv("OAI_PASSIVE_UL_SOURCE_ID");
-    char *end = nullptr;
-    errno = 0;
-    const long source_from_env = source_env != nullptr ? strtol(source_env, &end, 10) : 0;
-    AssertFatal(source_env != nullptr && errno == 0 && end != source_env && *end == '\0'
-                    && source_from_env == rfsimulator->passive_ul_source_id,
-                "OAI_PASSIVE_UL_SOURCE_ID ('%s') must exactly match rfsimulator.passive_ul_source_id (%d)\n",
-                source_env != nullptr ? source_env : "unset",
-                rfsimulator->passive_ul_source_id);
-  }
-
-  if (rfsimulator->passive_ul_relay)
-    LOG_I(HW, "RFsim passive UL relay enabled: source-tagged observed UE blocks will be mirrored to passive observers\n");
-  if (rfsimulator->passive_ul_sink)
-    LOG_I(HW, "RFsim passive UL observer enabled: requiring source ids 1..%d\n",
-          rfsimulator->passive_ul_num_sources);
-  if (rfsimulator->passive_ul_source_id > 0)
-    LOG_I(HW, "RFsim active UE will publish independently channelized passive UL source id %d\n",
-          rfsimulator->passive_ul_source_id);
-  if (rfsimulator->passive_ul_capture_dir != nullptr)
-    LOG_I(HW, "RFsim passive UL waveform capture directory: %s (max=%" PRIu64 " bytes)\n",
-          rfsimulator->passive_ul_capture_dir, rfsimulator->passive_ul_capture_max_bytes);
 }
 
 static int rfsimu_set_beam(char *buff, int debug, telnet_printfunc_t prnt, void *arg)
@@ -1264,15 +978,7 @@ static int rfsimulator_write_internal(rfsimulator_state_t *t,
     buffer_t *b = &t->buf[i];
 
     if (b->conn_sock >= 0) {
-      uint32_t option_flag = t->passive_ul_sink ? RFSIM_OPTION_FLAG_PASSIVE_UL_SINK : 0;
-      if (t->passive_ul_source_id > 0)
-        option_flag |= RFSIM_OPTION_FLAG_PASSIVE_UL_SOURCE;
-      samplesBlockHeader_t header = {(uint32_t)nsamps,
-                                     (uint32_t)nbAnt,
-                                     (uint64_t)timestamp,
-                                     (uint32_t)t->passive_ul_source_id,
-                                     option_flag,
-                                     beams_to_beam_map(tx_beams)};
+      samplesBlockHeader_t header = {(uint32_t)nsamps, (uint32_t)nbAnt, (uint64_t)timestamp, 0, 0, beams_to_beam_map(tx_beams)};
       fullwrite(b->conn_sock, &header, sizeof(header), t);
       int num_beams = tx_beams.size();
       // Send beams in order of beam index. This is required for beam_map to work correctly on the receiver side.
@@ -1358,44 +1064,6 @@ static int rfsimulator_write(openair0_device_t *device, openair0_timestamp_t tim
   return rfsimulator_write_beams(device, timestamp, &tmp, nsamps, cc, 1, flags);
 }
 
-static int rfsimulator_write_passive_ul(openair0_device_t *device,
-                                        openair0_timestamp_t timestamp,
-                                        void **buff,
-                                        int nsamps,
-                                        int num_antennas,
-                                        bool empty)
-{
-  rfsimulator_state_t *t = static_cast<rfsimulator_state_t *>(device->priv);
-  AssertFatal(t->role == SIMU_ROLE_CLIENT && t->passive_ul_source_id > 0,
-              "observed passive UL writes require an active source id\n");
-  AssertFatal(num_antennas > 0, "observed passive UL requires at least one antenna\n");
-  AssertFatal(empty || buff != nullptr, "non-empty observed passive UL requires sample buffers\n");
-
-  timestamp -= device->openair0_cfg->command_line_sample_advance;
-  uint32_t option_flag = RFSIM_OPTION_FLAG_PASSIVE_UL_SOURCE | RFSIM_OPTION_FLAG_PASSIVE_UL_OBSERVED;
-  if (empty)
-    option_flag |= RFSIM_OPTION_FLAG_PASSIVE_UL_EMPTY;
-  const samplesBlockHeader_t header = {(uint32_t)nsamps,
-                                       (uint32_t)num_antennas,
-                                       (uint64_t)timestamp,
-                                       (uint32_t)t->passive_ul_source_id,
-                                       option_flag,
-                                       1};
-
-  mutexlock(t->Sockmutex);
-  for (int i = 0; i < MAX_FD_RFSIMU; ++i) {
-    buffer_t *b = &t->buf[i];
-    if (b->conn_sock < 0)
-      continue;
-    fullwrite(b->conn_sock, &header, sizeof(header), t);
-    if (!empty)
-      for (int ant = 0; ant < num_antennas; ++ant)
-        fullwrite(b->conn_sock, buff[ant], sampleToByte(nsamps, 1), t);
-  }
-  mutexunlock(t->Sockmutex);
-  return nsamps;
-}
-
 static bool add_client(rfsimulator_state_t *t)
 {
   struct sockaddr_storage sa = {0};
@@ -1437,44 +1105,36 @@ static void process_recv_header(rfsimulator_state_t *t, buffer_t *b, bool first_
 {
   b->headerMode = false; // We got the header
   AssertFatal(b->th.nbAnt != 0, "Number of antennas not set\n");
-  const bool source_tagged = (b->th.option_flag & RFSIM_OPTION_FLAG_PASSIVE_UL_SOURCE) != 0;
-  const int source_id = source_tagged ? (int)b->th.option_value : 0;
-  if (t->role == SIMU_ROLE_SERVER && source_tagged) {
-    AssertFatal(source_id >= 1 && source_id <= RFSIM_PASSIVE_UL_MAX_SOURCES,
-                "RFsim active UL source id must be in 1..%d (got %d)\n",
-                RFSIM_PASSIVE_UL_MAX_SOURCES,
-                source_id);
-    if (b->passive_ul_source_id == 0) {
-      for (int i = 0; i < MAX_FD_RFSIMU; ++i)
-        AssertFatal(&t->buf[i] == b || t->buf[i].conn_sock < 0 || t->buf[i].passive_ul_source_id != source_id,
-                    "duplicate RFsim active UL source id %d\n",
-                    source_id);
-      b->passive_ul_source_id = source_id;
-      LOG_I(HW, "RFsim registered active UL source id %d on socket %d\n", source_id, b->conn_sock);
-    } else {
-      AssertFatal(b->passive_ul_source_id == source_id,
-                  "RFsim socket %d changed active UL source id from %d to %d\n",
-                  b->conn_sock,
-                  b->passive_ul_source_id,
-                  source_id);
-    }
-  }
-  if (t->role == SIMU_ROLE_SERVER && (b->th.option_flag & RFSIM_OPTION_FLAG_PASSIVE_UL_SINK) != 0 && !b->passive_ul_sink) {
-    b->passive_ul_sink = true;
-    LOG_I(HW, "RFsim passive UL observer registered on socket %d\n", b->conn_sock);
-  }
-  const bool out_of_band_ul_header = (b->th.option_flag
-                                      & (RFSIM_OPTION_FLAG_RELAYED_UL | RFSIM_OPTION_FLAG_PASSIVE_UL_OBSERVED)) != 0;
-  if (!out_of_band_ul_header && b->nbAnt != b->th.nbAnt) {
+  if (b->nbAnt != b->th.nbAnt) {
     LOG_A(HW, "RFsim: Number of antennas changed from %d to %d\n", b->nbAnt, b->th.nbAnt);
     b->nbAnt = b->th.nbAnt;
+    /* The channel model was sized at load_channellist() from OUR tx count, but its tx dimension is
+     * the PEER's antenna count: rxAddInput() loops over channel_model->nb_tx, so a 1-TX UE facing a
+     * 4-TX gNB convolved only the gNB's antenna 0 and every layer beyond the first was silently
+     * dropped -- rank >1 PDSCH could never decode on rfsim (2026-09-16, nl=1 100 % / nl=2,4 0 %).
+     * Rebuild the descriptor at the peer's width; the sensing scene is re-parsed onto it. */
+    channel_desc_t *cm = b->channel_model;
+    if (cm != NULL && cm->nb_tx != b->nbAnt) {
+      channel_desc_t *nm = new_channel_desc_scm(b->nbAnt, cm->nb_rx, static_cast<SCM_t>(cm->modelid), cm->sampling_rate,
+                                                cm->center_freq, cm->channel_bandwidth, 30e-9, cm->max_Doppler,
+                                                cm->corr_level, cm->forgetting_factor, cm->channel_offset,
+                                                cm->path_loss_dB, cm->noise_power_dB);
+      set_channeldesc_owner(nm, RFSIMU_MODULEID);
+      set_channeldesc_direction(nm, cm->is_uplink);
+      set_channeldesc_name(nm, cm->model_name);
+      random_channel(nm, false);
+      if (cm->sensing_traj != NULL) {
+        sensing_channel_free(cm->sensing_traj);
+        cm->sensing_traj = NULL;
+        nm->sensing_traj = sensing_channel_parse(nm);
+      }
+      LOG_A(HW, "RFsim: channel model %s rebuilt with nb_tx %d (peer antennas) x nb_rx %d\n", nm->model_name, nm->nb_tx,
+            nm->nb_rx);
+      b->channel_model = nm;
+      free_channel_desc_scm(cm);
+    }
   }
-  if (out_of_band_ul_header) {
-    // Source-channelized and relayed UL records share sockets with the normal RF timeline. They
-    // must never advance or invalidate that timeline; their own per-source watermarks are tracked
-    // separately by the passive observer.
-    b->trashingPacket = false;
-  } else if (first_time) {
+  if (first_time) {
     b->lastReceivedTS = b->th.timestamp;
     b->trashingPacket = true;
   } else {
@@ -1489,52 +1149,15 @@ static void process_recv_header(rfsimulator_state_t *t, buffer_t *b, bool first_
     }
   }
 
+  int num_beams = __builtin_popcountll(b->th.beam_map);
   AssertFatal(b->th.beam_map == 1ULL || t->beam_ctrl->enable_beams == 1,
               "The transmitter has enabled beam simulation while this receiver has not\n");
-  size_t payload_sz = rfsim_packet_payload_bytes(&b->th);
+  size_t payload_sz = sampleToByte(b->th.size, b->th.nbAnt) * num_beams;
   b->packet_ptr = static_cast<rfsim_packet_t *>(malloc_or_fail(payload_sz + sizeof(samplesBlockHeader_t)));
   b->packet_ptr->header = b->th;
   b->transferPtr = b->packet_ptr->payload;
   b->remainToTransfer = payload_sz;
   return;
-}
-
-static void complete_recv_packet(rfsimulator_state_t *t, buffer_t *b)
-{
-  rfsim_packet_t *pkt = b->packet_ptr;
-  AssertFatal(pkt != nullptr, "RFsim completed a null packet\n");
-  const bool passive_sink_packet = passive_ul_is_sink_registration(pkt);
-  const bool relayed_ul_packet = passive_ul_is_relayed(pkt);
-  const bool observed_ul_packet = passive_ul_is_observed(pkt);
-
-  b->headerMode = true;
-  b->transferPtr = (char *)&b->th;
-  b->remainToTransfer = sizeof(samplesBlockHeader_t);
-
-  if (relayed_ul_packet) {
-    passive_ul_capture_packet(t, "ue_observed_relay", b, pkt);
-    passive_ul_accept_relay(t, pkt); // queue takes ownership
-  } else if (observed_ul_packet) {
-    AssertFatal(t->role == SIMU_ROLE_SERVER,
-                "unrelayed observed UL packet arrived at an RFsim client\n");
-    passive_ul_capture_packet(t, "ue_observed_source", b, pkt);
-    passive_ul_relay_packet(t, b, pkt);
-    free(pkt);
-  } else if (!b->trashingPacket) {
-    b->lastReceivedTS = b->th.timestamp + b->th.size;
-    LOG_D(HW, "UEsock: %d Set b->lastReceivedTS %ld\n", b->conn_sock, b->lastReceivedTS);
-    if (passive_sink_packet) {
-      free(pkt);
-    } else {
-      if (t->role == SIMU_ROLE_SERVER)
-        passive_ul_capture_packet(t, "server_ul_rx", b, pkt);
-      b->received_packets.emplace(pkt);
-    }
-  } else {
-    free(pkt);
-  }
-  b->packet_ptr = nullptr;
-  b->trashingPacket = false;
 }
 
 /**
@@ -1666,13 +1289,23 @@ static bool flushInput(rfsimulator_state_t *t, int timeout, bool first_time)
     b->remainToTransfer -= sz;
     b->transferPtr += sz;
     if (b->remainToTransfer == 0) {
-      if (b->headerMode) {
+      if (b->headerMode)
         process_recv_header(t, b, first_time);
-        if (b->remainToTransfer == 0)
-          complete_recv_packet(t, b);
-      } else {
+      else {
         LOG_D(HW, "UEsock: %d Completed block reception: %ld\n", b->conn_sock, b->lastReceivedTS);
-        complete_recv_packet(t, b);
+        b->headerMode = true;
+        b->transferPtr = (char *)&b->th;
+        b->remainToTransfer = sizeof(samplesBlockHeader_t);
+
+        if (!b->trashingPacket) {
+          b->lastReceivedTS = b->th.timestamp + b->th.size;
+          LOG_D(HW, "UEsock: %d Set b->lastReceivedTS %ld\n", b->conn_sock, b->lastReceivedTS);
+          b->received_packets.emplace(b->packet_ptr);
+        } else {
+          free(b->packet_ptr);
+        }
+        b->packet_ptr = NULL;
+        b->trashingPacket = false;
       }
     }
   }
@@ -1694,7 +1327,7 @@ static void rfsimulator_read_internal(rfsimulator_state_t *t,
   for (int sock = 0; sock < MAX_FD_RFSIMU; sock++) {
     buffer_t *ptr = &t->buf[sock];
 
-    if (ptr->conn_sock != -1 && !ptr->passive_ul_sink && !ptr->received_packets.empty()) {
+    if (ptr->conn_sock != -1 && !ptr->received_packets.empty()) {
       AssertFatal(ptr->nbAnt != 0, "Number of antennas not set\n");
       bool reGenerateChannel = false;
 
@@ -1801,11 +1434,6 @@ static int rfsimulator_read_beams(openair0_device_t *device,
   // check if a UE is connected
   int first_sock;
 
-  /* A passive observer still sends the normal all-zero RFsim pacing blocks. They carry no RF
-   * signal and remain excluded from rfsimulator_read_internal()'s sample summation, but they must
-   * participate in the server receive-clock wait set. Excluding the only passive client here
-   * deadlocked simulated time when the recorder was armed before the active UE: the gNB never
-   * advanced, so the passive receiver could not acquire PBCH. */
   for (first_sock = 0; first_sock < MAX_FD_RFSIMU; first_sock++)
     if (t->buf[first_sock].conn_sock != -1)
       break;
@@ -1858,7 +1486,7 @@ static int rfsimulator_read_beams(openair0_device_t *device,
   for (int sock = 0; sock < MAX_FD_RFSIMU; sock++) {
     buffer_t *ptr = &t->buf[sock];
 
-    if (ptr->conn_sock != -1 && !ptr->passive_ul_sink && ptr->channel_model != NULL) {
+    if (ptr->conn_sock != -1 && ptr->channel_model != NULL) {
       update_channel_model(ptr->channel_model, nsamps, t->nextRxTstamp);
     }
   }
@@ -1920,7 +1548,7 @@ static int rfsimulator_read_beams(openair0_device_t *device,
   for (int sock = 0; sock < MAX_FD_RFSIMU; sock++) {
     buffer_t *ptr = &t->buf[sock];
 
-    if (ptr->conn_sock != -1 && !ptr->passive_ul_sink && !ptr->received_packets.empty()) {
+    if (ptr->conn_sock != -1 && !ptr->received_packets.empty()) {
       openair0_timestamp_t timestamp_to_free = t->nextRxTstamp - 1;
       if (ptr->channel_model) {
         timestamp_to_free -=
@@ -1938,96 +1566,6 @@ static int rfsimulator_read_beams(openair0_device_t *device,
 static int rfsimulator_read(openair0_device_t *device, openair0_timestamp_t *ptimestamp, void **samplesVoid, int nsamps, int nbAnt)
 {
   return rfsimulator_read_beams(device, ptimestamp, &samplesVoid, nsamps, nbAnt, 1);
-}
-
-static inline int16_t passive_ul_saturating_add(int16_t left, int16_t right)
-{
-  const int32_t sum = (int32_t)left + (int32_t)right;
-  if (sum > INT16_MAX)
-    return INT16_MAX;
-  if (sum < INT16_MIN)
-    return INT16_MIN;
-  return (int16_t)sum;
-}
-
-static int rfsimulator_add_passive_ul(openair0_device_t *device,
-                                      openair0_timestamp_t timestamp,
-                                      void **samples_void,
-                                      int nsamps,
-                                      int num_antennas)
-{
-  rfsimulator_state_t *t = static_cast<rfsimulator_state_t *>(device->priv);
-  if (!t->passive_ul_sink)
-    return 0;
-  AssertFatal(t->role == SIMU_ROLE_CLIENT, "passive UL observations can only be mixed at a client\n");
-  AssertFatal(samples_void != nullptr && nsamps > 0 && num_antennas > 0,
-              "invalid passive UL mix request\n");
-  const uint64_t start = (uint64_t)timestamp;
-  const uint64_t end = start + (uint64_t)nsamps;
-
-  // Source UEs publish one observed-data block or one empty watermark for every RFsim write. Wait
-  // until all configured sources prove that this interval is complete; mixing a partial set would
-  // silently turn a multi-UE scenario into a different experiment.
-  for (int attempt = 0;; ++attempt) {
-    bool complete = true;
-    for (int source = 0; source < t->passive_ul_num_sources; ++source)
-      complete = complete && t->passive_ul_last_ts[source] >= end;
-    if (complete)
-      break;
-    if (attempt >= 500) {
-      LOG_E(HW,
-            "RFsim passive UL timeout for interval [%" PRIu64 ",%" PRIu64 "): watermarks=%" PRIu64
-            ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 " expected_sources=%d\n",
-            start,
-            end,
-            t->passive_ul_last_ts[0],
-            t->passive_ul_last_ts[1],
-            t->passive_ul_last_ts[2],
-            t->passive_ul_last_ts[3],
-            t->passive_ul_num_sources);
-      return -1;
-    }
-    flushInput(t, 3, false);
-  }
-
-  c16_t **samples = reinterpret_cast<c16_t **>(samples_void);
-  for (int source = 0; source < t->passive_ul_num_sources; ++source) {
-    std::queue<rfsim_packet_t *> packets = t->passive_ul_packets[source];
-    while (!packets.empty()) {
-      const rfsim_packet_t *pkt = packets.front();
-      packets.pop();
-      const uint64_t pkt_start = pkt->header.timestamp;
-      const uint64_t pkt_end = pkt_start + pkt->header.size;
-      if (pkt_end <= start)
-        continue;
-      if (pkt_start >= end)
-        break;
-      if (passive_ul_is_empty(pkt))
-        continue;
-      AssertFatal((int)pkt->header.nbAnt == num_antennas,
-                  "passive UL source %d has %u antennas, receiver requested %d\n",
-                  source + 1,
-                  pkt->header.nbAnt,
-                  num_antennas);
-      AssertFatal(pkt->header.beam_map == 1, "passive UL observed streams do not support RFsim beams\n");
-      const uint64_t overlap_start = std::max(start, pkt_start);
-      const uint64_t overlap_end = std::min(end, pkt_end);
-      const size_t dst_offset = (size_t)(overlap_start - start);
-      const size_t src_offset = (size_t)(overlap_start - pkt_start);
-      const size_t count = (size_t)(overlap_end - overlap_start);
-      const c16_t *payload = reinterpret_cast<const c16_t *>(pkt->payload);
-      for (int ant = 0; ant < num_antennas; ++ant) {
-        const c16_t *input = payload + (size_t)ant * pkt->header.size + src_offset;
-        c16_t *output = samples[ant] + dst_offset;
-        for (size_t i = 0; i < count; ++i) {
-          output[i].r = passive_ul_saturating_add(output[i].r, input[i].r);
-          output[i].i = passive_ul_saturating_add(output[i].i, input[i].i);
-        }
-      }
-    }
-    clear_old_packets(t->passive_ul_packets[source], end);
-  }
-  return nsamps;
 }
 
 static int rfsimulator_get_stats(openair0_device_t *device)
@@ -2048,28 +1586,11 @@ static void rfsimulator_end(openair0_device_t *device)
     if (b->conn_sock >= 0)
       removeCirBuf(s, b);
   }
-  if (s->passive_ul_capture_waveform != nullptr)
-    fclose(s->passive_ul_capture_waveform);
-  if (s->passive_ul_capture_index != nullptr)
-    fclose(s->passive_ul_capture_index);
-  if (s->passive_ul_route_trace != nullptr)
-    fclose(s->passive_ul_route_trace);
-  for (int source = 0; source < RFSIM_PASSIVE_UL_MAX_SOURCES; ++source) {
-    if (s->passive_ul_blocks[source] > 0)
-      LOG_I(HW,
-            "RFsim passive UL source %d: blocks=%" PRIu64 " nonzero=%" PRIu64 " last_ts=%" PRIu64 "\n",
-            source + 1,
-            s->passive_ul_blocks[source],
-            s->passive_ul_nonzero_blocks[source],
-            s->passive_ul_last_ts[source]);
-    clear_old_packets(s->passive_ul_packets[source], UINT64_MAX);
-  }
-  free(s->passive_ul_capture_dir);
   clear_beam_queue(&s->beam_ctrl->tx, INT64_MAX);
   clear_beam_queue(&s->beam_ctrl->rx, INT64_MAX);
   delete s->beam_ctrl;
   close(s->epollfd);
-  delete s;
+  free(s);
 }
 
 static void stopServer(openair0_device_t *device)
@@ -2107,11 +1628,7 @@ extern "C" __attribute__((__visibility__("default"))) int device_init(openair0_d
 {
   // to change the log level, use this on command line
   // --log_config.hw_log_level debug
-  // This state owns std::queue members (both the normal socket queues and the per-source
-  // passive-UL queues).  calloc leaves those C++ objects unconstructed, so the first relayed UL
-  // emplace dereferences a null deque map.  Value-initializing with new preserves zero defaults for
-  // scalar fields while running every queue constructor.
-  rfsimulator_state_t *rfsimulator = new rfsimulator_state_t{};
+  rfsimulator_state_t *rfsimulator = static_cast<rfsimulator_state_t *>(calloc(sizeof(rfsimulator_state_t), 1));
   // initialize channel simulation
   rfsimulator->ru_id = openair0_cfg->ru_id;
   rfsimulator->tx_num_channels = openair0_cfg->tx_num_channels;
@@ -2141,8 +1658,6 @@ extern "C" __attribute__((__visibility__("default"))) int device_init(openair0_d
   device->trx_set_gains_func = rfsimulator_set_gains;
   device->trx_write_func = rfsimulator_write;
   device->trx_read_func = rfsimulator_read;
-  device->trx_write_passive_ul_func = rfsimulator_write_passive_ul;
-  device->trx_add_passive_ul_func = rfsimulator_add_passive_ul;
   if (rfsimulator->beam_ctrl->enable_beams) {
     device->trx_write_beams_func = rfsimulator_write_beams;
     device->trx_read_beams_func = rfsimulator_read_beams;

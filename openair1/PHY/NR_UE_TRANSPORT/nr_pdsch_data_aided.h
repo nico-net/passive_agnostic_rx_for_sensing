@@ -49,14 +49,6 @@ extern "C" {
 /// which is what the in-order attached-UE path wants.
 extern __thread uint64_t nr_isac_abs_slot_override;
 
-/// P07 replay-only: when true, nr_isac_pdsch_data_aided_submit() skips its "ISAC/source enabled"
-/// early return and runs the whole reconstruction (re-encode, Ĥ = Y/X, counter) even though the
-/// sensing engine is not started -- nr_isac_submit_cfr_multi() still drops the row when the
-/// engine is absent, so nothing reaches a detector. Exists so the replay can MEASURE that a branch
-/// view's reconstruction consumes exactly its own CRC-OK TBs (G2 test 3) on a fixture whose
-/// receiver.conf never enabled the engine. Default false = previous behaviour everywhere.
-extern __thread bool nr_isac_data_aided_force;
-
 /**
  * @brief Re-encode a CRC-verified transport block through the real TX chain (LDPC encode + rate
  * match + scramble + modulate), then submit Ĥ = Y/X at every DATA RE of the allocation to the
@@ -84,10 +76,6 @@ extern __thread bool nr_isac_data_aided_force;
  * @param rxdataF       Frequency-domain received samples for this slot, per rx antenna
  * @param nvar          Noise variance estimate from the demodulator, for the engine's fusion weight
  */
-/// Process-wide count of transport blocks whose reconstruction reached the CFR submission stage
-/// (P07 G2 test 3: a branch's submissions == its own CRC-OK count). See the .c for what it counts.
-uint64_t nr_isac_pdsch_data_aided_submits(void);
-
 void nr_isac_pdsch_data_aided_submit(PHY_VARS_NR_UE *ue,
                                      const UE_nr_rxtx_proc_t *proc,
                                      const fapi_nr_dl_cw_info_t *cw,

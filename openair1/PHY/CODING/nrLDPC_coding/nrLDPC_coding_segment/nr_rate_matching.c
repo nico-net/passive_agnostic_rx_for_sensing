@@ -625,10 +625,15 @@ int nr_rate_matching_ldpc_rx(uint32_t Tbslbrm,
   }
 
   uint32_t ind = (index_k0[BG - 1][rvidx] * Ncb / N) * Z;
-  if (Foffset > E) {
-    LOG_E(PHY, "nr_rate_matching: invalid parameters (Foffset %d > E %d)\n", Foffset, E);
-    return -1;
-  }
+  /* Foffset > E is NOT an error on the RX side (2026-09-16, OTA rank-1/wide-TB bed): every loop
+   * below is independently bounded by (k < E), so it simply stops before ever reaching the filler
+   * region -- exactly the correct behaviour for a small E (many code blocks / low per-CB rate,
+   * common on a wide-bandwidth grant with plenty of code blocks). The equivalent guard on the TX
+   * side (nr_rate_matching_ldpc, above) is NOT redundant there -- its first memcpy copies
+   * (Foffset - ind) bytes unconditionally, which DOES overrun a short E buffer, so leave that one
+   * alone. This guard was a copy-paste from there that cost every such grant its whole codeword:
+   * measured 1.7M rejected code blocks in one 10-minute capture, the majority of the real UE's
+   * own large TBs (K=8448, C=63, E as low as ~4750 against Foffset=7584). */
   if (Foffset > Ncb) {
     LOG_E(PHY, "nr_rate_matching: invalid parameters (Foffset %d > Ncb %d)\n", Foffset, Ncb);
     return -1;
@@ -645,8 +650,12 @@ int nr_rate_matching_ldpc_rx(uint32_t Tbslbrm,
          Tbslbrm);
 #endif
 
+  /* Clear the WHOLE circular buffer, not just the N_cb the bit selection can reach: the decoder
+   * reads d up to N (+2Z) whatever N_cb is, so when LBRM binds (N_cb < N) the entries beyond N_cb
+   * kept the previous transport block's soft bits and fed them to the decoder as parity evidence.
+   * Bits beyond N_cb are never transmitted; their LLR is 0. (rank-4 256QAM bed, 2026-09-16) */
   if (clear == 1)
-    memset(d, 0, Ncb * sizeof(int16_t));
+    memset(d, 0, N * sizeof(int16_t));
 
   uint32_t k = 0;
   if (ind < Foffset)

@@ -103,6 +103,8 @@ typedef struct sensing_traj_s {
 
   sens_elem_t elem[SENS_MAX_RX_ELEM]; ///< RX element offsets, ENU-aligned; see sensing_channel_set_rx_array()
   int         nelem;                  ///< 0 => no array configured, every rx antenna is co-located
+  sens_elem_t tx_elem[SENS_MAX_RX_ELEM]; ///< TX element offsets, ENU-aligned; see sensing_channel_set_tx_array()
+  int         ntx_elem;               ///< 0 => every tx port radiates the same wavefront (rank-1 channel)
 
   // --- Receiver clock impairments (see sensing_channel_set_rx_clock) ----------------------------
   // These model the RECEIVER's own oscillator/sampling error, which is why they are applied
@@ -201,6 +203,13 @@ static void arrival_dir(const sensing_traj_t *s, double px, double py, double *u
   *uy = dy / n;
 }
 
+// Unit vector pointing FROM the illuminator TOWARDS (px,py): the departure direction of that path.
+static void departure_dir(const sensing_traj_t *s, double px, double py, double *ux, double *uy)
+{
+  const double dx = px - s->tx_x, dy = py - s->tx_y, n = hypot(dx, dy);
+  if (n < 1e-9) { *ux = 1.0; *uy = 0.0; return; }
+  *ux = dx / n; *uy = dy / n;
+}
 // R(t) for one object, for the ground-truth finite-difference range-rate.
 static double object_bistatic_range(const sensing_traj_t *s, const sens_object_t *o, double t)
 {
@@ -216,17 +225,34 @@ static double object_bistatic_range(const sensing_traj_t *s, const sens_object_t
 // Accumulate a PER-RX-ANTENNA gain into tap k. gr/gi are indexed by rx antenna; cd->ch is laid out
 // [aarx + aatx*nb_rx] (OAI convention, see multipath_channel.c), and every tx antenna sees the same
 // per-rx steering because the array being modelled is the RECEIVE array.
-static inline void accum_tap(channel_desc_t *cd, int k, int nb_rx, const double *gr, const double *gi)
+static inline void accum_tap(channel_desc_t *cd, int k, int nb_rx, const double *gr, const double *gi,
+                             const double *txr, const double *txi)
 {
   if (k < 0 || k >= (int)cd->channel_length) {
     return;
   }
   for (int aatx = 0; aatx < cd->nb_tx; aatx++) {
+    /* TX-side steering (unit phasor per port, or 1 when no tx array): each path is the rank-1 outer
+     * product s_tx * s_rx^T, so a scene with LOS + K scatterers at distinct angles gives a channel of
+     * rank min(nb_tx, nb_rx, 1+K). Without a tx array every port radiates the same wavefront and the
+     * matrix is rank 1 -- which is why a 4-TX gNB on rfsim could never carry rank 4 (2026-09-16). */
+    const double sr = txr ? txr[aatx] : 1.0, si = txi ? txi[aatx] : 0.0;
     for (int aarx = 0; aarx < nb_rx; aarx++) {
       struct complexd *t = &cd->ch[aarx + aatx * cd->nb_rx][k];
-      t->r += gr[aarx];
-      t->i += gi[aarx];
+      t->r += gr[aarx] * sr - gi[aarx] * si;
+      t->i += gi[aarx] * sr + gr[aarx] * si;
     }
+  }
+}
+// Departure steering of the tx ports for a wavefront leaving TOWARDS unit direction (ux,uy) (pointing
+// from the illuminator towards the scatterer / receiver). Same convention as steer_gain().
+static void tx_steer(const sensing_traj_t *s, int nb_tx, double ux, double uy, double *txr, double *txi)
+{
+  for (int a = 0; a < nb_tx; a++) {
+    if (a >= s->ntx_elem) { txr[a] = 1.0; txi[a] = 0.0; continue; }
+    const double proj = s->tx_elem[a].x * ux + s->tx_elem[a].y * uy;
+    const double ph = 2.0 * M_PI * proj / s->lambda;
+    txr[a] = cos(ph); txi[a] = sin(ph);
   }
 }
 
@@ -254,14 +280,16 @@ static void steer_gain(const sensing_traj_t *s, int nb_rx, double gr0, double gi
 // Add complex gain (gr0,gi0) at continuous fractional delay tau, spread with a Hann-windowed sinc,
 // steered across the rx array for an arrival direction (ux,uy).
 static void add_tap_frac(channel_desc_t *cd, const sensing_traj_t *s, double tau, double gr0, double gi0,
-                         double ux, double uy)
+                         double ux, double uy, double dx, double dy)
 {
-  double gr[SENS_MAX_RX_ANT], gi[SENS_MAX_RX_ANT];
+  double gr[SENS_MAX_RX_ANT], gi[SENS_MAX_RX_ANT], txr[SENS_MAX_RX_ANT], txi[SENS_MAX_RX_ANT];
   const int nb_rx = (cd->nb_rx < SENS_MAX_RX_ANT) ? cd->nb_rx : SENS_MAX_RX_ANT;
+  const int nb_tx = (cd->nb_tx < SENS_MAX_RX_ANT) ? cd->nb_tx : SENS_MAX_RX_ANT;
   steer_gain(s, nb_rx, gr0, gi0, ux, uy, gr, gi);
+  tx_steer(s, nb_tx, dx, dy, txr, txi);
 
   if (s->frac_taps <= 0) {
-    accum_tap(cd, (int)lround(tau), nb_rx, gr, gi);
+    accum_tap(cd, (int)lround(tau), nb_rx, gr, gi, txr, txi);
     return;
   }
   const int k0 = (int)floor(tau);
@@ -275,7 +303,7 @@ static void add_tap_frac(channel_desc_t *cd, const sensing_traj_t *s, double tau
         wr[a] = gr[a] * w;
         wi[a] = gi[a] * w;
       }
-      accum_tap(cd, k, nb_rx, wr, wi);
+      accum_tap(cd, k, nb_rx, wr, wi, txr, txi);
     }
   }
 }
@@ -340,7 +368,9 @@ void sensing_channel_update(channel_desc_t *cd, int nbSamples, uint64_t TS)
   // what the UE-side direct-path array self-calibration exploits.
   double ulx, uly;
   arrival_dir(s, s->tx_x, s->tx_y, &ulx, &uly);
-  add_tap_frac(cd, s, s->los_delay + clk_delay, s->los_gain * clk_cos, s->los_gain * clk_sin, ulx, uly);
+  double dlx, dly;
+  departure_dir(s, s->rx_x, s->rx_y, &dlx, &dly);
+  add_tap_frac(cd, s, s->los_delay + clk_delay, s->los_gain * clk_cos, s->los_gain * clk_sin, ulx, uly, dlx, dly);
 
   // Moving reflectors.
   for (int k = 0; k < s->nobj; k++) {
@@ -356,7 +386,9 @@ void sensing_channel_update(channel_desc_t *cd, int nbSamples, uint64_t TS)
     const double gi    = gi0 * clk_cos + gr0 * clk_sin;
     double ux, uy;
     arrival_dir(s, ox, oy, &ux, &uy);
-    add_tap_frac(cd, s, tau, gr, gi, ux, uy);
+    double dx, dy;
+    departure_dir(s, ox, oy, &dx, &dy);
+    add_tap_frac(cd, s, tau, gr, gi, ux, uy, dx, dy);
   }
 
   // Doppler is carried by the tap phases (block-to-block); leave the scalar rotation off.
@@ -576,6 +608,30 @@ void *sensing_channel_make(channel_desc_t *cd,
   return s;
 }
 
+int sensing_channel_set_tx_array(void *traj, const char *spec, double boresight_deg)
+{
+  sensing_traj_t *s = (sensing_traj_t *)traj;
+  if (s == NULL) return 0;
+  s->ntx_elem = 0;
+  if (spec == NULL || spec[0] == '\0') return 0;
+  const double rot = boresight_deg * M_PI / 180.0, cs = cos(rot), sn = sin(rot);
+  char *dup = strdup(spec), *saveptr = NULL;
+  for (char *tok = strtok_r(dup, ";", &saveptr); tok != NULL; tok = strtok_r(NULL, ";", &saveptr)) {
+    double ex, ey;
+    while (*tok == ' ') tok++;
+    if (*tok == '\0') continue;
+    if (sscanf(tok, "%lf,%lf", &ex, &ey) != 2 || s->ntx_elem >= SENS_MAX_RX_ELEM) continue;
+    s->tx_elem[s->ntx_elem].x = ex * cs - ey * sn;
+    s->tx_elem[s->ntx_elem].y = ex * sn + ey * cs;
+    s->ntx_elem++;
+  }
+  free(dup);
+  if (s->ntx_elem <= 1) { s->ntx_elem = 0; return 0; }
+  LOG_A(HW, "SENSING_CHANNEL: tx_array %d elements, boresight=%.1fdeg -- per-port departure steering on, "
+            "channel rank = min(nb_tx, nb_rx, 1 + objects)\n", s->ntx_elem, boresight_deg);
+  return s->ntx_elem;
+}
+
 int sensing_channel_set_rx_array(void *traj, const char *spec, double boresight_deg)
 {
   sensing_traj_t *s = (sensing_traj_t *)traj;
@@ -705,7 +761,8 @@ void *sensing_channel_parse(channel_desc_t *cd)
   double p_boresight = 0.0;
   double p_sto_us = 0.0, p_cfo_hz = 0.0, p_sfo_ppm = 0.0, p_sfo_wrap = 64.0;
   char  *p_objects = NULL;
-  char  *p_rx_array = NULL;
+  char  *p_rx_array = NULL, *p_tx_array = NULL;
+  double p_tx_boresight = 0.0;
 
   paramdef_t params[] = {
       {"enable", "enable synthetic moving-target sensing channel", PARAMFLAG_BOOL, .iptr = &p_enable, .defintval = 0,
@@ -727,6 +784,10 @@ void *sensing_channel_parse(channel_desc_t *cd)
        .strptr = &p_rx_array, .defstrval = "", TYPE_STRING, 0},
       {"rx_array_boresight_deg", "rotation of the rx array frame into ENU (deg CCW from east)", 0,
        .dblptr = &p_boresight, .defdblval = 0.0, TYPE_DOUBLE, 0},
+      {"tx_array", "TX element offsets \"x,y;x,y;...\" (m, array frame); empty = every port radiates the same wavefront", 0,
+       .strptr = &p_tx_array, .defstrval = "", TYPE_STRING, 0},
+      {"tx_array_boresight_deg", "rotation of the tx array frame into ENU (deg CCW from east)", 0,
+       .dblptr = &p_tx_boresight, .defdblval = 0.0, TYPE_DOUBLE, 0},
       {"rx_sto_us", "receiver constant timing offset (us, 0 = none)", 0, .dblptr = &p_sto_us,
        .defdblval = 0.0, TYPE_DOUBLE, 0},
       {"rx_cfo_hz", "receiver carrier frequency offset (Hz, 0 = none)", 0, .dblptr = &p_cfo_hz,
@@ -746,6 +807,7 @@ void *sensing_channel_parse(channel_desc_t *cd)
       sensing_channel_make(cd, p_tx_x, p_tx_y, p_rx_x, p_rx_y, p_los_db, p_los_delay, p_frac, p_chanlen, p_objects);
   if (traj != NULL) {
     sensing_channel_set_rx_array(traj, p_rx_array, p_boresight);
+    sensing_channel_set_tx_array(traj, p_tx_array, p_tx_boresight);
     sensing_channel_set_rx_clock(cd, traj, p_sto_us, p_cfo_hz, p_sfo_ppm, p_sfo_wrap);
   }
   return traj;

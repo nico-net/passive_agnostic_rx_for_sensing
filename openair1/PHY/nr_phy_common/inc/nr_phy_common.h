@@ -340,6 +340,14 @@ void freq2time(uint16_t ofdm_symbol_size, int16_t *freq_signal, int16_t *time_si
 void nr_est_delay(int ofdm_symbol_size, const c16_t *ls_est, c16_t *ch_estimates_time, delay_t *delay);
 unsigned int nr_get_tx_amp(int power_dBm, int power_max_dBm, int total_nb_rb, int nb_rb);
 void nr_fo_compensation(double fo_Hz, int samples_per_ms, int sample_offset, const c16_t *rxdata_in, c16_t *rxdata_out, int size);
+/* Fixed-point output shift for the PDSCH equaliser, sized from the PEAK per-RB channel level so
+ * that the strongest RE's Y.H* just fits int16, instead of from the MEAN.
+ *   peak_rb_h2   max over the allocation's RBs of the per-RB mean |H|^2 (nr_channel_level's units)
+ *   contributing number of receive branches coherently summed (1 for a single-branch decode)
+ * Returns the shift; the caller takes the MINIMUM of this and its own mean-derived shift, so the
+ * result can only ever KEEP MORE bits, never fewer. See nr_dlsch_demodulation.c's call site and
+ * openair1/PHY/NR_UE_ISAC/tests/dlsch_fixed_point_test.cc for the measurement behind the -14. */
+int nr_log2_maxh_headroom(uint32_t peak_rb_h2, int contributing);
 void nr_channel_level(const int symbol,
                       const int size_est,
                       const c16_t ch_estimates_ext[][size_est],

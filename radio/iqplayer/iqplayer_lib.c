@@ -232,72 +232,90 @@ static int trx_iqplayer_read(openair0_device_t *device, openair0_timestamp_t *pt
   recplay_state_t *s = device->recplay_state;
   static struct timeval tprev;
   static int read_count = 0;
-  
-  if (s->curSamplesBlock==0 && s->wrap_count==0) { 
-    s->currentTs=s->ms_sample->ts;
-    tprev.tv_sec = s->ms_sample->tv_sec;
-    tprev.tv_usec = s->ms_sample->tv_usec;
+
+  if (!device->openair0_cfg->recplay_conf->use_mmap) {
+    /* The legacy read(2) path still requires one request per record. */
+    if (s->curSamplesBlock == s->nbSamplesBlocks) {
+      if (s->wrap_count == device->openair0_cfg->recplay_conf->u_sf_loops)
+        exit_function(__FILE__, __FUNCTION__, __LINE__, "replay ended, triggering process termination\n", OAI_EXIT_NORMAL);
+      s->curSamplesBlock = 0;
+      s->wrap_count++;
+      close(s->fd);
+      iqplayer_loadfile(device, device->openair0_cfg);
+    }
+    if (read(s->fd, s->ms_sample, sizeof(iqrec_t)) != sizeof(iqrec_t))
+      AssertFatal(false, "Cannot read IQ record header: %s\n", strerror(errno));
+    iqrec_t *h = s->ms_sample;
+    AssertFatal(h->header == BELL_LABS_IQ_HEADER && h->nbBytes == (int64_t)nsamps * 4,
+                "non-mmap replay requires one full record per read: nsamps=%d bytes=%ld\n",
+                nsamps, h->nbBytes);
+    AssertFatal(read(s->fd, h + 1, h->nbBytes) == h->nbBytes, "Cannot read IQ record data\n");
+    if (s->curSamplesBlock == 0 && s->wrap_count == 0)
+      s->currentTs = h->ts;
+    *ptimestamp = s->currentTs;
+    memcpy(buff[0], h + 1, (size_t)h->nbBytes);
+    s->currentTs += nsamps;
+    s->curSamplesBlock++;
+    return nsamps;
+  }
+
+  if (s->curSamplesBlock == 0 && s->wrap_count == 0 && s->currentSampleOffset == 0) {
+    iqrec_t *first = (iqrec_t *)s->currentPtr;
+    s->currentTs = first->ts;
+    tprev.tv_sec = first->tv_sec;
+    tprev.tv_usec = first->tv_usec;
     LOG_I(HW, "First timestamp=%lu s->nbSamplesBlocks=%u\n", s->currentTs, s->nbSamplesBlocks);
   }
 
-  if (s->curSamplesBlock == s->nbSamplesBlocks) {
-    if (s->wrap_count == device->openair0_cfg->recplay_conf->u_sf_loops) {
-      LOG_W(HW, "iqplayer device terminating subframes replay  after %u iteration\n",
-            device->openair0_cfg->recplay_conf->u_sf_loops);
-      exit_function(__FILE__, __FUNCTION__, __LINE__,"replay ended, triggering process termination\n", OAI_EXIT_NORMAL);
-    }
-
-    if (s->wrap_count > 0) {
-        LOG_I(HW, "wrapping on iq file (%ld)\n", s->wrap_count);
-    }
-    s->curSamplesBlock = 0;
-    s->wrap_count++;
-    device->recplay_state->currentPtr=(uint8_t *)device->recplay_state->ms_sample;
-
-    if (!(device->openair0_cfg->recplay_conf->use_mmap) ) {
-      close(device->recplay_state->fd);
-      iqplayer_loadfile(device, device->openair0_cfg);
-    }
-  }
-
-  if (!(device->openair0_cfg->recplay_conf->use_mmap)) {
-    // read sample from file
-    if (read(s->fd, s->ms_sample, sizeof(iqrec_t)) != sizeof(iqrec_t)) {
-      LOG_E(HW,"pb reading iq record header at index %lu %s\n",sizeof(iqrec_t)*s->curSamplesBlock, strerror(errno) );
-      exit(-1);
-    } else {
-      if (read(s->fd, s->ms_sample+1, BELL_LABS_IQ_BYTES_PER_SF) !=  BELL_LABS_IQ_BYTES_PER_SF) {
-        LOG_E(HW,"pb reading iq record data at index %lu %s\n",sizeof(iqrec_t)*s->curSamplesBlock, strerror(errno) );
-        exit(-1);
-      }
-    }
-  }
-
-  iqrec_t *curHeader=(iqrec_t *)s->currentPtr;
-  if (curHeader->header != BELL_LABS_IQ_HEADER) {
-    AssertFatal(curHeader->header == BELL_LABS_IQ_HEADER, "Problem iq header nsamps %d\n", nsamps);
-  }
-  // the current timestamp is the stored timestamp until we wrap on input
-  AssertFatal(nsamps*4==curHeader->nbBytes,"nsamps=%d curHeader->nbBytes=%d", (int)nsamps, (int)curHeader->nbBytes);
   *ptimestamp = s->currentTs;
-  memcpy(buff[0], curHeader+1, nsamps*4);
-  s->curSamplesBlock++;
-  // Prepare for next read
-  s->currentTs+=nsamps;
+  uint8_t *dst = buff[0];
+  size_t remaining = (size_t)nsamps;
 
-  if (device->openair0_cfg->recplay_conf->use_mmap)
-    s->currentPtr+=sizeof(iqrec_t)+BELL_LABS_IQ_BYTES_PER_SF;
+  while (remaining > 0) {
+    if (s->curSamplesBlock == s->nbSamplesBlocks) {
+      if (s->wrap_count == device->openair0_cfg->recplay_conf->u_sf_loops) {
+        LOG_W(HW, "iqplayer device terminating replay after %u iteration(s)\n",
+              device->openair0_cfg->recplay_conf->u_sf_loops);
+        exit_function(__FILE__, __FUNCTION__, __LINE__, "replay ended, triggering process termination\n", OAI_EXIT_NORMAL);
+      }
+      if (s->wrap_count > 0)
+        LOG_I(HW, "wrapping on iq file (%ld)\n", s->wrap_count);
+      s->curSamplesBlock = 0;
+      s->currentSampleOffset = 0;
+      s->wrap_count++;
+      s->currentPtr = (uint8_t *)s->ms_sample;
+    }
 
-  // subframe read delay is not taken into account
-  // Real time interval is handle to mimic RF board latcency
-  struct timeval tcur, tdiff;
-  tcur.tv_sec = curHeader->tv_sec;
-  tcur.tv_usec = curHeader->tv_usec;
-  timersub(&tcur, &tprev, &tdiff);
-  if (tdiff.tv_usec > 0) {
-    busy_wait(tdiff.tv_usec);
+    iqrec_t *h = (iqrec_t *)s->currentPtr;
+    AssertFatal(h->header == BELL_LABS_IQ_HEADER, "Problem IQ record header at block %u\n", s->curSamplesBlock);
+    AssertFatal(h->nbBytes > 0 && (h->nbBytes & 3) == 0, "Invalid IQ record size %ld\n", h->nbBytes);
+    const size_t record_samples = (size_t)h->nbBytes / 4;
+    AssertFatal(s->currentSampleOffset < record_samples, "Invalid IQ record offset\n");
+
+    if (s->currentSampleOffset == 0) {
+      struct timeval tcur = {.tv_sec = h->tv_sec, .tv_usec = h->tv_usec};
+      struct timeval tdiff;
+      timersub(&tcur, &tprev, &tdiff);
+      if (tdiff.tv_sec == 0 && tdiff.tv_usec > 0)
+        busy_wait((uint32_t)tdiff.tv_usec);
+      tprev = tcur;
+    }
+
+    const size_t available = record_samples - s->currentSampleOffset;
+    const size_t take = remaining < available ? remaining : available;
+    const uint8_t *record_data = (const uint8_t *)(h + 1);
+    memcpy(dst, record_data + s->currentSampleOffset * 4, take * 4);
+    dst += take * 4;
+    remaining -= take;
+    s->currentSampleOffset += take;
+    s->currentTs += take;
+
+    if (s->currentSampleOffset == record_samples) {
+      s->currentSampleOffset = 0;
+      s->curSamplesBlock++;
+      s->currentPtr += sizeof(*h) + (size_t)h->nbBytes;
+    }
   }
-  tprev = tcur;
 
   read_count++;
   LOG_D(HW, "returning %d samples at ts %lu read_count %d\n", nsamps, *ptimestamp, read_count);

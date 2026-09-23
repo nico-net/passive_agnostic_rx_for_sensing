@@ -975,9 +975,18 @@ set(PHY_SRC_UE
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_prach.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/dci_nr.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c
-  ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_rx_branch.c
-  ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_rx_span_pool.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c
+  ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_passive_mac_ta.c
+  ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_ptrs_unav.c
+  ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_tdd_pattern.c
+  ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_dci11_layout_sweep.c
+  ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_dci01_layout_sweep.c
+  ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_ss_registry.c
+  ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_passive_bwp.c
+  ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_csirs_blind_search.c
+  ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_csirs_blind_rt.c
+  ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_dmrs_id_estimate.c
+  ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_xoverhead.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_passive_replay_capture.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c
@@ -1073,8 +1082,9 @@ target_compile_definitions(PHY_NR_NO_AVX_256 PUBLIC USE_128BIT)
 add_library(PHY_NR_UE ${PHY_NR_UE_SRC})
 target_link_libraries(PHY_NR_UE PRIVATE asn1_nr_rrc_hdrs nr_phy_common nr_common UTIL polar smallblock)
 
-# Native C++ transcription of the validated Python passive-sensing pipeline. The RT PHY only
-# submits CFR rows through the C ABI; all DSP, detection, tracking and AoA work runs off-thread.
+# ISAC / passive-radar sensing pipeline (OAI-UE). Faithful port of the srsUE sensing engine
+# (repos/srs-ue-isac-dmd). Off-RT DSP + DetectionReport emission compliant with the central node
+# (repos/isac). Compiled as C++; exposes a C API to the RT PHY procedures.
 set(NR_UE_ISAC_SRC
   ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/fft.cc
   ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/adaptive_threshold.cc
@@ -1349,6 +1359,7 @@ set (MAC_NR_SRC_UE
   ${NR_UE_PHY_INTERFACE_DIR}/NR_IF_Module.c
   ${NR_UE_PHY_INTERFACE_DIR}/NR_Packet_Drop.c
   ${NR_UE_MAC_DIR}/config_ue.c
+  ${NR_UE_MAC_DIR}/nr_passive_rrc_harvest.c
   ${NR_UE_MAC_DIR}/config_ue_sl.c
   ${NR_UE_MAC_DIR}/mac_tables.c
   ${NR_UE_MAC_DIR}/main_ue_nr.c
@@ -1473,7 +1484,7 @@ target_link_libraries(NR_L2_UE PRIVATE nr_nas)
 # executables (see the test_nr_pdcch_coreset_map/test_nr_pdcch_dci_length_sweep targets below) --
 # nothing wired them into any library nr-uesoftmodem links, so the first real (non-test) caller
 # failed at link time with "undefined reference" until they were added here.
-add_library(nr_pdcch_blind_monitor ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_rnti_bootstrap.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_coreset_map.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_dci_length_sweep.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_config_sweep.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_hyp_sweep.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_field_sweep.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_interp_sweep.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_discovery.c)
+add_library(nr_pdcch_blind_monitor ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_rnti_bootstrap.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_coreset_map.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_uss_tracker.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_dci_length_sweep.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_config_sweep.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_hyp_sweep.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_field_sweep.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_interp_sweep.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_discovery.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_passive_acq_state.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_sib1_prior.c)
 target_include_directories(nr_pdcch_blind_monitor PRIVATE
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT
   ${NFAPI_DIR}/nfapi/public_inc
@@ -2013,7 +2024,6 @@ add_executable(nr-uesoftmodem
   ${OPENAIR_DIR}/executables/position_interface.c
   ${OPENAIR_DIR}/executables/nr-ue.c
   ${OPENAIR_DIR}/executables/nr-ue-ru.c
-  ${OPENAIR_DIR}/executables/passive-ul-channel.c
   ${OPENAIR1_DIR}/PHY/TOOLS/phy_scope_interface.c
   ${NFAPI_USER_DIR}/nfapi.c
   ${PHY_INTERFACE_DIR}/queue_t.c
@@ -2135,7 +2145,7 @@ add_executable(nr_dlsim
   ${PHY_INTERFACE_DIR}/queue_t.c
   )
 target_link_libraries(nr_dlsim PRIVATE
-  -Wl,--start-group UTIL SIMU PHY_NR_COMMON PHY_NR PHY_NR_UE SCHED_NR_LIB SCHED_NR_UE_LIB MAC_UE_NR MAC_NR_COMMON CONFIG_LIB L2_NR -Wl,--end-group
+  -Wl,--start-group UTIL SIMU PHY_NR_COMMON PHY_NR PHY_NR_UE NR_UE_ISAC nr_pdcch_blind_monitor SCHED_NR_LIB SCHED_NR_UE_LIB MAC_UE_NR MAC_NR_COMMON CONFIG_LIB L2_NR -Wl,--end-group
   m pthread ${T_LIB} ITTI dl nr_ue_phy_meas physim_common NR_L2_UE
   softmodem_common
   )
@@ -2164,7 +2174,7 @@ add_executable(nr_ulsim
   )
 
 target_link_libraries(nr_ulsim PRIVATE
-  -Wl,--start-group UTIL SIMU PHY_NR_COMMON PHY_NR PHY_NR_UE SCHED_NR_LIB SCHED_NR_UE_LIB MAC_UE_NR MAC_NR_COMMON CONFIG_LIB L2_NR -Wl,--end-group
+  -Wl,--start-group UTIL SIMU PHY_NR_COMMON PHY_NR PHY_NR_UE NR_UE_ISAC SCHED_NR_LIB SCHED_NR_UE_LIB MAC_UE_NR MAC_NR_COMMON CONFIG_LIB L2_NR -Wl,--end-group
   m pthread ${T_LIB} ITTI dl nr_ue_phy_meas physim_common softmodem_common NR_L2_UE
   )
 target_link_libraries(nr_ulsim PRIVATE asn1_nr_rrc_hdrs asn1_lte_rrc_hdrs)
@@ -2187,7 +2197,7 @@ add_executable(nr_ulsim_mu_mimo
   )
 
 target_link_libraries(nr_ulsim_mu_mimo PRIVATE
-  -Wl,--start-group UTIL SIMU PHY_NR_COMMON PHY_NR PHY_NR_UE SCHED_NR_LIB SCHED_NR_UE_LIB MAC_UE_NR MAC_NR_COMMON CONFIG_LIB L2_NR -Wl,--end-group
+  -Wl,--start-group UTIL SIMU PHY_NR_COMMON PHY_NR PHY_NR_UE NR_UE_ISAC SCHED_NR_LIB SCHED_NR_UE_LIB MAC_UE_NR MAC_NR_COMMON CONFIG_LIB L2_NR -Wl,--end-group
   m pthread ${T_LIB} ITTI dl nr_ue_phy_meas physim_common softmodem_common NR_L2_UE
   )
 target_link_libraries(nr_ulsim_mu_mimo PRIVATE asn1_nr_rrc_hdrs asn1_lte_rrc_hdrs)
@@ -2268,9 +2278,6 @@ if (${T_TRACER})
 endif (${T_TRACER})
 
 set(ENABLE_TESTS OFF CACHE STRING "Activate build of tests")
-set(ENABLE_PLUGINS ON CACHE BOOL "Activate Sionna-RK plugins when a plugin tree is provided")
-set(SIONNA_RK_PLUGINS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/plugins" CACHE PATH
-    "Path to the Sionna-RK plugins directory")
 set_property(CACHE ENABLE_TESTS PROPERTY TYPE BOOL)
 set(ENABLE_PHYSIM_TESTS OFF CACHE STRING "Activate build of physim tests")
 set_property(CACHE ENABLE_PHYSIM_TESTS PROPERTY TYPE BOOL)
@@ -2308,6 +2315,11 @@ if(ENABLE_TESTS)
   endif()
 endif()
 
+# ota_sync_passive_ue.md Phase 6a: offline STO/CFO/SFO/closed-loop self-test. No scratchpad/*_test.cc
+# existed to extend (Phase 0 confirmed), so this is a new, gtest-based target matching the existing
+# common/utils/nr/tests convention (add_executable + GTest::gtest + add_dependencies(tests ...) +
+# add_test(...)). Must come after the `tests` custom target + GTest::gtest are defined above. See
+# openair1/PHY/NR_UE_ISAC/tests/isac_sync_test.cc's file header for design notes.
 if(ENABLE_TESTS)
   if(ENABLE_ISAC_SENSING)
     add_executable(test_nr_isac_python_parity
@@ -2356,6 +2368,45 @@ if(ENABLE_TESTS)
       target_link_libraries(benchmark_nr_isac_cuda_family_processing PRIVATE NR_UE_ISAC UTIL)
     endif()
   endif()
+  # uniqCfg/exit_function (needed by LOG/CONFIG_LIB) are defined directly in isac_sync_test.cc,
+  # not via minimal_lib -- static-archive link order made minimal_lib's stubs unreliable here.
+
+  # tests/ota_sync_bench/ (cheap-office OTA sync validation, no gNB/RU needed): replays a CFR
+  # grid built from a real two-SDR RF capture (tests/ota_sync_bench/process_capture.py) through
+  # the same production tracker classes as test_isac_sync above, instead of a synthetic grid.
+  # Not a gtest (takes a required --grid file argument), so no add_test() registration.
+
+  # ECA/ECA+ clutter-cancellation offline self-test (ECA_CLUTTER_HANDOVER.md rollout step 2/4):
+  # validates the CFR-domain oblique projection in isolation (mean-subtraction equivalence + mirror
+  # -ghost suppression) before RT/engine wiring, same pattern as test_isac_sync above.
+  # Fixed-point envelope of the PDSCH 256QAM demodulation chain (nr_channel_compensation +
+  # nr_256qam_llr driven with an exact H and no noise). Links nr_phy_common only -- no UE state.
+  add_executable(test_dlsch_fixed_point ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/tests/dlsch_fixed_point_test.cc)
+  target_link_libraries(test_dlsch_fixed_point PRIVATE nr_phy_common UTIL GTest::gtest GTest::gtest_main)
+  add_dependencies(tests test_dlsch_fixed_point)
+  add_test(NAME test_dlsch_fixed_point COMMAND ./test_dlsch_fixed_point)
+
+
+  # Per-CPI Kalman target track (target_tracker.{h,cc}): validates sub-bin accuracy vs the quantized
+  # detections it is fed, gating/association against false alarms, coast-and-reacquire, and filter
+  # consistency (mean NIS). Same standalone pattern as the two above.
+
+  # Multi-object tracking (multi_target_tracker.{h,cc}): a bank of per-track filters + global greedy
+  # association + M-of-N initiation. Validates two-target association, track-ID stability across a
+  # range crossing, and spurious-track rejection. Same standalone pattern as the tests above.
+
+  # Low-rank CFR matrix completion (matrix_complete.{h,cc}): recovery accuracy, data consistency, and
+  # amplitude-gating Doppler-harmonic removal. Only needs isac_fft's icf_t; link the whole lib anyway
+  # for consistency with the other ISAC tests.
+
+  # Receive-array AoA (isac_aoa.{h,cc}, PHASE3_AOA_MULTISTATIC_HANDOVER 5.4): array parsing +
+  # ambiguity flags, bearing recovery across the field of view for beamscan/interferometry/MUSIC, the
+  # SNR gate, CRB behaviour, and direct-path self-calibration. Same standalone pattern as the tests
+  # above.
+
+
+  # Phase 2 (roadmap artifact "Cell-Agnostic Passive Receiver"): type-system plumbing for the SSB
+  # CFR source (NR_ISAC_SRC_SSB), tested in isolation from the RT tap.
 
   # Phase 3 (TOTAL_PASSIVE_UE_HANDOVER.md): offline blind PDCCH/DCI-1_1 decode + extract, synthetic
   # DCI injection against known ground truth -- required by this project's own testing plan before
@@ -2377,6 +2428,14 @@ if(ENABLE_TESTS)
   add_dependencies(tests test_nr_pdcch_blind_monitor)
   add_test(NAME test_nr_pdcch_blind_monitor COMMAND ./test_nr_pdcch_blind_monitor)
 
+  # L1/FISTA sparse Doppler recovery (sparse_doppler.{h,cc}): peak-to-harmonic ratio vs. dense NUDFT
+  # on a gappy tone, and preservation of a genuine second weaker target.
+
+  # CLEAN deconvolution (clean_deconv.{h,cc}): a strong scatterer's window-PSF skirt is removed while
+  # a nearby weaker target buried in that skirt is recovered as a clean peak.
+
+  # Occupancy-aware forward-model CLEAN (range_doppler clean_occ_aware): end-to-end suppression of a
+  # gated Doppler harmonic through the real occupancy operator.
   # Phase 3 Technique B (roadmap artifact "Cell-Agnostic Passive Receiver"): C-RNTI bootstrap
   # state machine, tested independently of any live RT capture.
   add_executable(test_nr_pdcch_blind_rnti_bootstrap ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_blind_rnti_bootstrap_test.cc)
@@ -2384,6 +2443,7 @@ if(ENABLE_TESTS)
   target_link_libraries(test_nr_pdcch_blind_rnti_bootstrap PRIVATE nr_pdcch_blind_monitor nr_common MAC_NR_COMMON polar crc_byte UTIL asn1_nr_rrc_hdrs asn1_lte_rrc_hdrs GTest::gtest)
   add_dependencies(tests test_nr_pdcch_blind_rnti_bootstrap)
   add_test(NAME test_nr_pdcch_blind_rnti_bootstrap COMMAND ./test_nr_pdcch_blind_rnti_bootstrap)
+
   # Phase 3 Technique A (roadmap artifact "Cell-Agnostic Passive Receiver"): full-carrier PDCCH
   # DM-RS correlation mapping. Closed-loop synthetic test (regenerates its own known-good DM-RS to
   # verify against) plus a pure-noise negative control. Needs the REAL nr_gold_pdcch (refsig.c) and
@@ -2418,6 +2478,31 @@ if(ENABLE_TESTS)
   add_dependencies(tests test_nr_hyp_sweep)
   add_test(NAME test_nr_hyp_sweep COMMAND ./test_nr_hyp_sweep)
 
+  add_executable(test_nr_passive_acq_state ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_passive_acq_state_test.cc
+                                           ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_passive_acq_state.c)
+  target_include_directories(test_nr_passive_acq_state PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
+  target_link_libraries(test_nr_passive_acq_state PRIVATE UTIL GTest::gtest)
+  add_dependencies(tests test_nr_passive_acq_state)
+  add_test(NAME test_nr_passive_acq_state COMMAND ./test_nr_passive_acq_state)
+
+  add_executable(test_nr_dmrs_id_estimate ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_dmrs_id_estimate_test.cc
+                                          ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_dmrs_id_estimate.c
+                                          ${OPENAIR1_DIR}/PHY/NR_REFSIG/refsig.c
+                                          ${OPENAIR1_DIR}/PHY/NR_REFSIG/nr_dmrs_rx.c
+                                          ${OPENAIR_DIR}/common/utils/ds/hashtable.c)
+  target_include_directories(test_nr_dmrs_id_estimate PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
+  target_link_libraries(test_nr_dmrs_id_estimate PRIVATE UTIL GTest::gtest m)
+  add_dependencies(tests test_nr_dmrs_id_estimate)
+  add_test(NAME test_nr_dmrs_id_estimate COMMAND ./test_nr_dmrs_id_estimate)
+
+  add_executable(test_nr_pdsch_xoverhead ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_pdsch_xoverhead_test.cc
+                                         ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_xoverhead.c)
+  target_include_directories(test_nr_pdsch_xoverhead PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
+  # MAC_NR_COMMON carries nr_compute_tbs; the same trio the blind-monitor test links for it.
+  target_link_libraries(test_nr_pdsch_xoverhead PRIVATE MAC_NR_COMMON UTIL asn1_nr_rrc_hdrs asn1_lte_rrc_hdrs GTest::gtest m)
+  add_dependencies(tests test_nr_pdsch_xoverhead)
+  add_test(NAME test_nr_pdsch_xoverhead COMMAND ./test_nr_pdsch_xoverhead)
+
   add_executable(test_nr_pdsch_config_sweep ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_pdsch_config_sweep_test.cc
                                             ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_config_sweep.c)
   target_include_directories(test_nr_pdsch_config_sweep PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
@@ -2425,79 +2510,83 @@ if(ENABLE_TESTS)
   add_dependencies(tests test_nr_pdsch_config_sweep)
   add_test(NAME test_nr_pdsch_config_sweep COMMAND ./test_nr_pdsch_config_sweep)
 
-  # adaptive_RX_pipeline.md P03: receiver-branch identity/epoch/lifecycle abstraction, pure and
-  # standalone (no OAI PHY dependencies beyond LOG_E), so it is built directly from its own .c
-  # rather than pulling in the PHY_NR_UE library it will later be linked into.
-  # P08a fix round 1: nr_passive_harq_tag_gnb_pin.c is a C shim that lets the gtest assert the
-  # zero-default of PHY_VARS_gNB::harq_unique_pid_base on the REAL struct. It cannot be done from
-  # the .cc: defs_gNB.h pulls thread-pool.h, whose `_Atomic(uint64_t)` is C11 syntax that is not
-  # valid C++. The shim uses only the type definition + calloc, so it adds no link dependency.
-  add_executable(nr_rx_branch_test ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_rx_branch_test.cc
-                                    ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_passive_harq_tag_gnb_pin.c
-                                    ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_rx_branch.c)
-  target_include_directories(nr_rx_branch_test PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT
-                                                       ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests)
-  target_link_libraries(nr_rx_branch_test PRIVATE UTIL GTest::gtest)
-  add_dependencies(tests nr_rx_branch_test)
-  add_test(NAME nr_rx_branch_test COMMAND ./nr_rx_branch_test)
+  add_executable(test_nr_csirs_blind_search ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_csirs_blind_search_test.cc
+                                            ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_csirs_blind_search.c)
+  target_include_directories(test_nr_csirs_blind_search PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
+  target_link_libraries(test_nr_csirs_blind_search PRIVATE UTIL GTest::gtest)
+  add_dependencies(tests test_nr_csirs_blind_search)
+  add_test(NAME test_nr_csirs_blind_search COMMAND ./test_nr_csirs_blind_search)
 
-  # adaptive_RX_pipeline.md P04: refcounted per-branch span pool (immutable IQ delivery), pure and
-  # standalone like P03 -- built directly from its own .c + nr_rx_branch.c rather than pulling in
-  # the PHY_NR_UE library it will later be linked into (see the P04 brief: nr-ue.c read-loop wiring
-  # is a separate step, P05+).
-  add_executable(nr_rx_span_pool_test ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_rx_span_pool_test.cc
-                                       ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_rx_span_pool.c
-                                       ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_rx_branch.c)
-  target_include_directories(nr_rx_span_pool_test PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
-  target_link_libraries(nr_rx_span_pool_test PRIVATE UTIL GTest::gtest)
-  add_dependencies(tests nr_rx_span_pool_test)
-  add_test(NAME nr_rx_span_pool_test COMMAND ./nr_rx_span_pool_test)
+  # PLAIN C, not gtest: nr_phy_common.h (which declares nr_generate_csi_rs and csi_mapping_parms_t)
+  # also declares nr_mmse_2layers() with C variably-modified array parameters, which C++ rejects --
+  # so a .cc version cannot include the real header at all. assert()-based, exits non-zero on failure.
+  add_executable(test_nr_csirs_blind_synth ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_csirs_blind_synth_check.c
+                                          ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_csirs_blind_search.c
+                                          ${OPENAIR1_DIR}/PHY/nr_phy_common/src/nr_phy_common_csirs.c
+                                          ${OPENAIR1_DIR}/PHY/NR_REFSIG/refsig.c
+                                          ${OPENAIR1_DIR}/PHY/NR_REFSIG/nr_gen_mod_table.c
+                                          ${OPENAIR1_DIR}/PHY/MODULATION/nr_modulation.c
+                                          ${OPENAIR_DIR}/common/utils/ds/hashtable.c)
+  target_include_directories(test_nr_csirs_blind_synth PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
+  target_link_libraries(test_nr_csirs_blind_synth PRIVATE nr_phy_common nr_common UTIL m)
+  add_dependencies(tests test_nr_csirs_blind_synth)
+  add_test(NAME test_nr_csirs_blind_synth COMMAND ./test_nr_csirs_blind_synth)
 
-  # adaptive_RX_pipeline.md P05: per-branch digital correction/recovery state (CFO accumulator,
-  # timing offset, frame-wrap/slot-continuity bookkeeping, lock/acq epoch staleness snapshot) --
-  # pure and standalone like P03/P04, built directly from its own .c + nr_rx_branch.c (needed for
-  # the nr_rx_branch_t* argument to nr_rx_branch_sync_is_stale()) rather than pulling in the
-  # PHY_NR_UE library it will later be linked into. See docs/passive_branch_wiring_plan.md for the
-  # (not-yet-done) nr-ue.c read-loop wiring this state is meant to replace.
-  add_executable(nr_rx_branch_sync_test ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_rx_branch_sync_test.cc
-                                         ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_rx_branch_sync.c
-                                         ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_rx_branch.c)
-  target_include_directories(nr_rx_branch_sync_test PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
-  target_link_libraries(nr_rx_branch_sync_test PRIVATE UTIL GTest::gtest)
-  add_dependencies(tests nr_rx_branch_sync_test)
-  add_test(NAME nr_rx_branch_sync_test COMMAND ./nr_rx_branch_sync_test)
+  add_executable(test_nr_passive_mac_ta ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_passive_mac_ta_test.cc
+                                        ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_passive_mac_ta.c)
+  target_include_directories(test_nr_passive_mac_ta PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
+  target_link_libraries(test_nr_passive_mac_ta PRIVATE UTIL GTest::gtest)
+  add_dependencies(tests test_nr_passive_mac_ta)
+  add_test(NAME test_nr_passive_mac_ta COMMAND ./test_nr_passive_mac_ta)
 
-  # P05 hardware-isolation guard: greps the branch modules for forbidden radio-access symbols and
-  # fails if any are found (see tests/passive_rx/check_branch_hw_isolation.sh). Registered as a
-  # plain shell-script test, same ctest surface as the two gtest binaries above --
-  # `ctest -R branch_hw_isolation` runs both this and its own self-test (below).
-  add_test(NAME branch_hw_isolation
-           COMMAND bash ${CMAKE_SOURCE_DIR}/tests/passive_rx/check_branch_hw_isolation.sh
-           WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
-  add_test(NAME branch_hw_isolation_selftest
-           COMMAND bash ${CMAKE_SOURCE_DIR}/tests/passive_rx/check_branch_hw_isolation.sh --selftest
-           WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+  add_executable(test_nr_pdcch_dci11_layout_sweep ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_dci11_layout_sweep_test.cc
+                                                  ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_dci11_layout_sweep.c)
+  target_include_directories(test_nr_pdcch_dci11_layout_sweep PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
+  target_link_libraries(test_nr_pdcch_dci11_layout_sweep PRIVATE UTIL GTest::gtest)
+  add_dependencies(tests test_nr_pdcch_dci11_layout_sweep)
+  add_test(NAME test_nr_pdcch_dci11_layout_sweep COMMAND ./test_nr_pdcch_dci11_layout_sweep)
 
-  # P13b branch-id masking guard: P13a fixed FOUR separate instances of a raw
-  # `branch_id & (NR_RX_BRANCH_MAX-1)` mask aliasing the NR_ISAC_BRANCH_NONE sentinel onto real
-  # branch 3, each found only by manual review. This greps for the idiom so the fifth one fails the
-  # build instead (see tests/passive_rx/check_branch_id_masking.sh). Same shell-script ctest
-  # surface as the P05 hardware-isolation guard above.
-  add_test(NAME branch_id_masking
-           COMMAND bash ${CMAKE_SOURCE_DIR}/tests/passive_rx/check_branch_id_masking.sh
-           WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
-  add_test(NAME branch_id_masking_selftest
-           COMMAND bash ${CMAKE_SOURCE_DIR}/tests/passive_rx/check_branch_id_masking.sh --selftest
-           WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+  add_executable(test_nr_passive_bwp ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_passive_bwp_test.cc
+                                     ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_passive_bwp.c)
+  target_include_directories(test_nr_passive_bwp PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
+  target_link_libraries(test_nr_passive_bwp PRIVATE GTest::gtest GTest::gtest_main)
+  add_dependencies(tests test_nr_passive_bwp)
+  add_test(NAME test_nr_passive_bwp COMMAND ./test_nr_passive_bwp)
 
-  # P07 G2 tests 1/3 in replay form: replays the registered P02 fixture through the REAL
-  # nr-uesoftmodem (no radio) once per single-branch view and once legacy; see
-  # tests/passive_rx/replay_branch_view.sh. Skips (exit 77, reported as a ctest SKIP, never a false
-  # PASS) when the fixture or the binary is missing.
-  add_test(NAME dl_branch_view_replay
-           COMMAND bash ${CMAKE_SOURCE_DIR}/tests/passive_rx/replay_branch_view.sh
-           WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
-  set_tests_properties(dl_branch_view_replay PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 600)
+  add_executable(test_nr_mrc_weights ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_mrc_weights_test.cc)
+  target_include_directories(test_nr_mrc_weights PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
+  target_link_libraries(test_nr_mrc_weights PRIVATE GTest::gtest GTest::gtest_main m)
+  add_dependencies(tests test_nr_mrc_weights)
+  add_test(NAME test_nr_mrc_weights COMMAND ./test_nr_mrc_weights)
+
+  add_executable(test_nr_pdsch_ptrs_unav ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_pdsch_ptrs_unav_test.cc
+                                         ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_ptrs_unav.c)
+  target_include_directories(test_nr_pdsch_ptrs_unav PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
+  target_link_libraries(test_nr_pdsch_ptrs_unav PRIVATE UTIL GTest::gtest)
+  add_dependencies(tests test_nr_pdsch_ptrs_unav)
+  add_test(NAME test_nr_pdsch_ptrs_unav COMMAND ./test_nr_pdsch_ptrs_unav)
+
+  add_executable(test_nr_tdd_pattern ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_tdd_pattern_test.cc
+                                     ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_tdd_pattern.c)
+  target_include_directories(test_nr_tdd_pattern PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
+  target_link_libraries(test_nr_tdd_pattern PRIVATE UTIL GTest::gtest)
+  add_dependencies(tests test_nr_tdd_pattern)
+  add_test(NAME test_nr_tdd_pattern COMMAND ./test_nr_tdd_pattern)
+
+  add_executable(test_nr_pdcch_dci01_layout_sweep ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_dci01_layout_sweep_test.cc
+                                                  ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_dci01_layout_sweep.c
+                                                  ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_dci11_layout_sweep.c)
+  target_include_directories(test_nr_pdcch_dci01_layout_sweep PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
+  target_link_libraries(test_nr_pdcch_dci01_layout_sweep PRIVATE UTIL GTest::gtest)
+  add_dependencies(tests test_nr_pdcch_dci01_layout_sweep)
+  add_test(NAME test_nr_pdcch_dci01_layout_sweep COMMAND ./test_nr_pdcch_dci01_layout_sweep)
+
+  add_executable(test_nr_pdcch_ss_registry ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_ss_registry_test.cc
+                                           ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_ss_registry.c)
+  target_include_directories(test_nr_pdcch_ss_registry PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
+  target_link_libraries(test_nr_pdcch_ss_registry PRIVATE UTIL GTest::gtest)
+  add_dependencies(tests test_nr_pdcch_ss_registry)
+  add_test(NAME test_nr_pdcch_ss_registry COMMAND ./test_nr_pdcch_ss_registry)
 endif()
 
 add_subdirectory(common)
@@ -2509,26 +2598,6 @@ add_subdirectory(openair2)
 add_subdirectory(openair3)
 add_subdirectory(radio)
 add_subdirectory(tests)
-if(ENABLE_PLUGINS AND EXISTS "${SIONNA_RK_PLUGINS_DIR}/CMakeLists.txt")
-  if(SIONNA_CHANNEL_EMULATION_LOADER_ONLY)
-    set(SIONNA_CHANNEL_EMULATION_ONLY OFF CACHE BOOL
-        "Build only Sionna-RK channel emulation for the sensing integration" FORCE)
-  else()
-    set(SIONNA_CHANNEL_EMULATION_ONLY ON CACHE BOOL
-        "Build only Sionna-RK channel emulation for the sensing integration" FORCE)
-  endif()
-  get_filename_component(SIONNA_RK_ROOT_DIR "${SIONNA_RK_PLUGINS_DIR}" DIRECTORY)
-  foreach(sionna_oai_target nr-softmodem nr-uesoftmodem)
-    if(TARGET ${sionna_oai_target})
-      target_compile_definitions(${sionna_oai_target} PRIVATE ENABLE_SIONNA_RK_PLUGINS)
-      target_include_directories(${sionna_oai_target} PRIVATE "${SIONNA_RK_ROOT_DIR}")
-    endif()
-  endforeach()
-  add_subdirectory("${SIONNA_RK_PLUGINS_DIR}" "${CMAKE_BINARY_DIR}/sionna_plugins")
-  target_include_directories(plugins_plugins PUBLIC "${SIONNA_RK_ROOT_DIR}")
-elseif(ENABLE_PLUGINS)
-  message(STATUS "Sionna-RK plugins not found at ${SIONNA_RK_PLUGINS_DIR}; channel-emulation hook disabled")
-endif()
 
 add_boolean_option(OAI_RU_FRONTHAUL OFF "Whether to configure OAI fronthaul library" OFF)
 if(OAI_RU_FRONTHAUL)

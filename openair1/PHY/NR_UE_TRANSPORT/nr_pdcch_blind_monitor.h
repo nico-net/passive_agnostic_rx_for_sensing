@@ -129,6 +129,23 @@ bool nr_pdcch_blind_publish_common(const nr_pdcch_blind_common_config_t *facts);
 bool nr_pdcch_blind_get_common(uint16_t pci, nr_pdcch_blind_common_config_t *facts);
 void nr_pdcch_blind_reset_common(void);
 
+/* ---- Precomputed polar result (GPU batch path, nr_polar_gpu.h) -------------------------------
+ * The blind scan's cost is one polar SC decode per candidate, and every candidate of an occasion is
+ * independent -- so they can all be decoded as ONE GPU batch before the per-candidate decode/gate
+ * path runs. Rather than give all four decode entry points a new argument, the batch hands its
+ * result to the NEXT decode on the CALLING THREAD, which is the worker about to run that candidate.
+ * Consumed once, and only when (llr, dci_length, aggregation_level) all match, so a stale or
+ * mismatched hand-off silently falls back to the CPU decode instead of returning another
+ * candidate's payload. With nothing set (llr == NULL) this is the CPU path, byte for byte. */
+typedef struct {
+  const int16_t *llr; ///< the exact unscrambled vector the batch decoded; NULL = nothing precomputed
+  uint32_t crc;       ///< polar_decoder_int16()'s return value
+  uint64_t payload;   ///< polar_decoder_int16()'s out[0]
+  uint16_t dci_length;
+  uint8_t aggregation_level;
+} nr_pdcch_blind_polar_pre_t;
+void nr_pdcch_blind_polar_pre_set(const nr_pdcch_blind_polar_pre_t *pre);
+
 /* Raw length evidence is independent of every RRC interpretation field. */
 typedef struct {
   uint64_t payload;
@@ -136,6 +153,10 @@ typedef struct {
   uint16_t mismatched_bits;
   const char *reject_reason;
 } nr_pdcch_blind_raw_result_t;
+/* Format-neutral polar/CRC core. SI/RA/P DCI 1_0 have no DL/UL indicator. */
+bool nr_pdcch_blind_decode_raw(const int16_t *llr, uint8_t aggregation_level,
+                               uint16_t dci_length, uint16_t rnti_min, uint16_t rnti_max,
+                               bool require_dl_indicator, nr_pdcch_blind_raw_result_t *out);
 bool nr_pdcch_blind_decode_raw_11(const int16_t *llr, uint8_t aggregation_level,
                                  uint16_t dci_length, uint16_t rnti_min, uint16_t rnti_max,
                                  nr_pdcch_blind_raw_result_t *out);
@@ -150,7 +171,8 @@ typedef struct {
   uint8_t     num_symbols;        ///< PDSCH symbol count
   uint16_t    dl_dmrs_symb_pos;   ///< DMRS symbol bitmap (same encoding as fapi_nr_dl_config_dlsch_pdu_rel15_t)
   uint8_t     n_dmrs_cdm_groups;  ///< DMRS CDM groups without data (Table 7.3.1.2.2-1)
-  uint16_t    dmrs_ports;         ///< DMRS port bitmask (Table 7.3.1.2.2-1)
+  uint16_t    dmrs_ports;         ///< DMRS port bitmask (Tables 7.3.1.2.2-1..4)
+  uint8_t     dmrs_config_type;   ///< 0 = type 1, 1 = type 2 (the hypothesis the ports were read under)
   uint8_t     nscid;              ///< DMRS scrambling sequence initialization (fixed 0 for format 1_1 blind MVP)
   // ---- Transport-block parameters. Decoded since 2026-07-30 (previously read and discarded):
   // needed ONLY by the passive data-aided path (nr_pdsch_passive_decode.{h,c}), which must
@@ -229,7 +251,6 @@ typedef struct {
 /// misaligned ones) -- were still correct. It surfaced the moment the MCS/RV fields were needed:
 /// 74 % of accepted grants decoded as rv != 0 on a link that has essentially no retransmissions.
 typedef struct {
-  int     mcs_table;        ///< DCI 1_1 PDSCH MCS table: 0 = qam64, 1 = qam256, 2 = qam64LowSE
   int     tda_count;        ///< 0 = use the spec default TDRA table (old behaviour)
   uint8_t tda_start[16];    ///< per-index PDSCH start symbol S
   uint8_t tda_length[16];   ///< per-index PDSCH symbol count L
@@ -248,6 +269,7 @@ typedef struct {
   uint8_t tda_common_mapping[16];
   int     dmrs_add_pos;     ///< dmrs-AdditionalPosition as fill_dmrs_mask()'s column index (0..3); <0 = default (2 = pos2)
   int     dmrs_max_length;  ///< DM-RS maxLength (1 or 2); <=0 = default (1)
+  int     dmrs_config_type; ///< DM-RS type: 0 = type 1 (default), 1 = type 2 -- selects the antenna-ports table
 
   // Per-field bit widths; -1 = this module's built-in assumption. Listed in TS 38.212 payload
   // order, matching nr_dci_size()'s own accumulation order one-for-one.
@@ -346,6 +368,47 @@ bool nr_pdcch_blind_decode_and_extract_10(const int16_t* llr,
                                           const nr_pdcch_blind_extract_opts_t* opts,
                                           nr_pdcch_blind_result_t* out);
 
+/* Protocol plausibility is not physical validation. A unique candidate remains
+ * UNRESOLVED until independent PDSCH/configuration evidence validates it. */
+typedef enum {
+  NR_DCI_UNRESOLVED, NR_DCI_AMBIGUOUS, NR_DCI_VALIDATED, NR_DCI_REJECTED,
+} nr_dci_interpretation_state_t;
+
+static inline const char *nr_dci_interpretation_state_name(nr_dci_interpretation_state_t state)
+{
+  switch (state) {
+    case NR_DCI_UNRESOLVED: return "UNRESOLVED";
+    case NR_DCI_AMBIGUOUS: return "AMBIGUOUS";
+    case NR_DCI_VALIDATED: return "VALIDATED";
+    case NR_DCI_REJECTED: return "REJECTED";
+    default: return "INVALID_STATE";
+  }
+}
+
+/* Exhaustive only over this parser's enabled RNTI classes for ONE supplied
+ * frequency/TDRA context. Not proof of cell configuration or C-vs-TC identity.
+ * Every attempted candidate retains its allocation or static rejection reason. */
+#define NR_DCI10_MAX_CLASS_CANDIDATES 3
+typedef struct {
+  nr_dci_interpretation_state_t state;
+  unsigned attempted, surviving;
+  int unique_candidate; /* -1 unless exactly one candidate survives */
+  nr_pdcch_blind_result_t candidates[NR_DCI10_MAX_CLASS_CANDIDATES];
+} nr_dci10_interpretation_report_t;
+
+/* Manual: legacy first-match behavior; report is empty and UNRESOLVED.
+ * Auto: ONE polar decode, every enabled class, true only for a unique protocol-
+ * plausible decoding ATTEMPT, never VALIDATED. Ambiguity clears allocation and
+ * plausible but preserves payload/RNTI/mismatches, including format-0_0 input.
+ * report may be NULL without disabling automatic ambiguity protection. */
+bool nr_pdcch_blind_decode_10_mode(bool automatic,
+                                  const int16_t *llr, uint8_t aggregation_level,
+                                  uint16_t dci_length, const nr_pdcch_blind_dci10_ctx_t *ctx,
+                                  uint16_t rnti_min, uint16_t rnti_max,
+                                  const nr_pdcch_blind_extract_opts_t *opts,
+                                  nr_pdcch_blind_result_t *out,
+                                  nr_dci10_interpretation_report_t *report);
+
 /* Bounded initial layout family. Returned grants contain a legal S/L scaffold;
  * never decode them without a Technique D selection. No layout is declared correct here. */
 int nr_pdcch_blind_dl_layout_candidates(const nr_pdcch_blind_raw_result_t *raw,
@@ -407,6 +470,12 @@ bool nr_pdcch_blind_monitor_autoconf_css0(int num_rbs,
  * and populated g_cfg for it. This is NOT a verification verdict. Distinct from g_cfg.bwp_size, which CSS0 autoconf above
  * may already have set for the COMMON search space by the time this is first checked. */
 bool nr_pdcch_blind_monitor_autodiscover_done(void);
+/* Apply /tmp/coresets_discovered.txt (stage 1-2 hand-off) when it changes; true if applied. */
+bool nr_pdcch_blind_monitor_discovered_poll(void);
+bool nr_pdcch_blind_monitor_bank_has_geometry(int rb_offset, int groups, int duration, int bundle, int interleaver,
+                                               int shift, int nid);
+/* True while every discovered CORESET is verified: the catalog walk (and its decode pass) is paused. */
+bool nr_pdcch_blind_monitor_discovery_paused(void);
 
 /** Advance the current geometry after an inconclusive length budget. The offset is not
  * blacklisted: other widths and future observations remain eligible. */
@@ -421,6 +490,9 @@ bool nr_pdcch_blind_monitor_autodiscover_offset_rejected(int rb_offset);
  * PHY-heavy c16_t definition (nr_pdcch_coreset_map.h pulls in PHY/impl_defs_top.h; the .c file casts
  * internally). Returns true once a candidate footprint is selected and g_cfg is populated.
  * `abs_slot` feeds nr_pdcch_blind_monitor_confirmed_rnti() for the bootstrap-RNTI log line. */
+void nr_pdcch_blind_monitor_autodiscover_observe_symbol1(const void* rxdataF_symbol, int ofdm_symbol_size,
+                                                          int n_rb_carrier, int first_carrier_offset, uint16_t pci,
+                                                          int slot);
 bool nr_pdcch_blind_monitor_autodiscover_step(const void* rxdataF_symbol, int ofdm_symbol_size, int n_rb_carrier,
                                               int first_carrier_offset, uint16_t pci, int slot, int symbol,
                                               uint32_t abs_slot);
@@ -431,6 +503,8 @@ bool nr_pdcch_blind_monitor_autodiscover_step(const void* rxdataF_symbol, int of
  * tap -- which only ever sees the const nr_pdcch_blind_monitor_get_cfg() accessor -- needs this
  * setter rather than writing g_cfg.dci_length_override directly. */
 void nr_pdcch_blind_monitor_autodiscover_set_dci_length(int dci_length);
+/** Archive/activate the verified geometry externally, then resume occupancy discovery for another CORESET. */
+void nr_pdcch_blind_monitor_autodiscover_next(void);
 
 /**
  * @brief DCI format 1_1 payload bit-width under this module's fixed MVP assumption set (see the
@@ -765,6 +839,24 @@ int32_t nr_pdcch_blind_dmrs_mask(int dmrs_TypeA_Position, int NrOfSymbols, int s
 int nr_pdcch_extent_candidates(int first_w, int last_w, int nw_total,
                                nr_pdcch_extent_cand_t* out, int max_out);
 
+/** Build a complete extent catalogue from independent recurrent occupancy peaks. Peaks are
+ * hypotheses for separate CORESETs, so no candidate is forced to span all of them. The recurrent
+ * single-window and common-width hypotheses are ordered first; every contiguous interval remains
+ * in the fallback, making an imperfect oracle unable to exclude the true geometry. */
+int nr_pdcch_extent_candidates_multi(const int *seed_w, int nseed, int nw_total,
+                                     nr_pdcch_extent_cand_t *out, int max_out);
+
+/** One CCE-to-REG mapping hypothesis for a dedicated CORESET (TS 38.211 7.3.2.2): bundle = 0 is
+ *  non-interleaved; otherwise (L, R, n_shift) with n_shift already reduced modulo N_REG/L. */
+typedef struct { uint8_t bundle; uint8_t interleaver; uint16_t shift; } nr_pdcch_map_cand_t;
+
+/** Enumerate the legal CCE-to-REG mappings of a CORESET of span_rb x duration, decided by DCI CRC
+ *  evidence exactly like the extent hypotheses. Order: non-interleaved first, then for each legal
+ *  (L, R) -- L in {2,6} (duration 1,2) / {3,6} (duration 3), R in {2,3,6}, N_REG divisible by L*R --
+ *  every distinct shift modulo N_REG/L, the PCI's residue first and 0 second: the PCI is one
+ *  hypothesis, never the seeded answer. Returns the number written (capped by max_out). */
+int nr_pdcch_map_candidates(int span_rb, int duration, int pci, nr_pdcch_map_cand_t *out, int max_out);
+
 /** Phase 3 Technique A, extent verification. Call once per candidate-bearing occasion after the
  * footprint is found: it scores the currently applied CORESET extent by whether Technique B
  * confirms a C-RNTI under it, and advances to the next admissible extent hypothesis if not.
@@ -775,10 +867,36 @@ bool nr_pdcch_blind_monitor_autodiscover_extent_step(uint32_t abs_slot);
  * the ceiling on how many it can follow at once, not a property of the deployment. */
 #define NR_PDCCH_BLIND_MAX_UE 16
 
+/* Publish pdsch-ConfigCommon's PDSCH TDRA list, decoded to (S, L, mappingType) triples.
+ * SI-RNTI's own SIB1 grants deliberately ignore it (the list travels inside SIB1), but RA-RNTI,
+ * TC-RNTI and C-RNTI-in-CSS are all sized from it -- and with count 0 they silently fall back to
+ * the spec default table, which is a different allocation on any cell that configures its own. */
+void nr_pdcch_blind_monitor_set_tda_common(const uint8_t *start, const uint8_t *len,
+                                           const uint8_t *map, int n);
+
 void nr_pdcch_blind_rnti_bootstrap_record(uint16_t rnti, uint8_t rnti_class, uint32_t abs_slot);
+
+/* Same, but marks the sighting TRUSTED: it came from a CORESET whose mapping is PROVEN (CORESET#0,
+ * confirmed by SIB1 decodes) rather than from an unverified hypothesis. A trusted entry is live at
+ * ONE sighting -- see boot_entry_live() for why the two-sighting rule cannot apply to TC-RNTI. */
+/** Tag currently-lit CORESET windows with an accepted C-RNTI, so a window can be tied to a UE --
+ *  the test for whether each UE has its own dedicated CORESET. Diagnostic; consumes no decision. */
+void nr_pdcch_blind_monitor_note_rnti_for_windows(uint16_t rnti);
+
+void nr_pdcch_blind_rnti_bootstrap_record_trusted(uint16_t rnti, uint8_t rnti_class, uint32_t abs_slot);
+/* The RAR chain (RA-RNTI decomposition -> TB CRC -> TC-RNTI): live at ONE sighting. */
+void nr_pdcch_blind_rnti_bootstrap_record_verified(uint16_t rnti, uint8_t rnti_class, uint32_t abs_slot);
+/* Five changing payloads for the same (CORESET,RNTI,length), each from a distinct OTA occasion. */
+void nr_pdcch_blind_rnti_bootstrap_record_corroborated(uint16_t rnti, uint8_t rnti_class,
+                                                       uint32_t abs_slot);
 
 /** All currently confirmed, non-stale C-RNTIs. Returns how many were written. */
 int nr_pdcch_blind_monitor_confirmed_rnti_set(uint32_t now_abs_slot, uint16_t *out, int max_out);
+/* Subset whose identity came from a CRC-valid RAR chain. Unlike recurrence-only entries, these are
+ * safe inputs to the UE-specific CCE hash before a dedicated CORESET has been discovered. */
+int nr_pdcch_blind_monitor_verified_rnti_set(uint32_t now_abs_slot, uint16_t *out, int max_out);
+/* Confirmed C-RNTIs only. TC-RNTIs from CFRA are not operational USS identities. */
+int nr_pdcch_blind_monitor_dedicated_rnti_set(uint32_t now_abs_slot, uint16_t *out, int max_out);
 /** Is this RNTI a confirmed, non-stale UE? */
 bool nr_pdcch_blind_monitor_rnti_confirmed(uint32_t now_abs_slot, uint16_t rnti);
 
@@ -788,6 +906,10 @@ bool nr_pdcch_blind_monitor_rnti_confirmed(uint32_t now_abs_slot, uint16_t rnti)
 bool nr_pdcch_blind_monitor_confirmed_rnti(uint32_t now_abs_slot, uint16_t* rnti_out, uint8_t* class_out,
                                            uint32_t* age_slots_out);
 
+/* Formats the raw bootstrap table (rnti:sightings,age plus used/live counts) into @p buf.
+ * Diagnostic only: distinguishes "no accepts" from "accepts that never repeat". */
+int nr_pdcch_blind_rnti_bootstrap_dump(uint32_t now_abs_slot, char *buf, int buflen);
+
 /* Test-only: clears bootstrap state between gtest cases. Not for RT use. */
 void nr_pdcch_blind_rnti_bootstrap_reset_for_test(void);
 /** Producer-thread-only geometry epoch and fresh-evidence interface. */
@@ -795,6 +917,56 @@ uint64_t nr_pdcch_blind_monitor_autodiscover_generation(void);
 bool nr_pdcch_blind_monitor_autodiscover_extent_verified(void);
 void nr_pdcch_blind_monitor_autodiscover_observe(uint16_t rnti, uint32_t slot, uint64_t payload);
 void nr_pdcch_blind_monitor_autodiscover_reset(void);
+
+/** Multi-candidate-per-occasion lookahead (2026-09-16, PDCCH_GPU_BATCH_HANDOVER.md): the extent/
+ * mapping search above tests ONE (extent, mapping) hypothesis at a time, each given
+ * NR_PDCCH_EXTENT_VERIFY_OCC real occasions -- measured live, decode (Polar SCL+CRC) costs 10x
+ * fep_llr and 99% of occasions already exceed the slot budget at a single hypothesis, so
+ * WALL-CLOCK time to exhaust up to 1035 extents is the bottleneck, not compute. These lanes run
+ * K-1 ADDITIONAL hypotheses per real occasion (rt.c reuses the one FFT/LLR pass already paid for
+ * that occasion), each with its OWN NR_PDCCH_EXTENT_VERIFY_OCC dwell -- no candidate's budget
+ * shrinks, K candidates just complete their full dwell in ~1/K the wall-clock time. Whichever lane
+ * (or the primary) verifies first wins and its geometry becomes g_cfg, exactly as an unbatched
+ * search would have found eventually. Off by default (ISAC_PDCCH_EXTENT_BATCH unset or 1); set it
+ * to K to run K-1 lanes. */
+/* Raised 15 -> 63 (2026-09-20) together with the per-occasion LLR cache in
+ * nr_pdcch_blind_monitor_rt.c. Before that cache each lane redid the FEP, a full-symbol memcpy per
+ * antenna and the channel estimation, so K lanes cost K x ~98 % of an occasion and 16 was already
+ * near the RT budget (135+217 us of 632 us at K=1). With the cache, lanes sharing an extent -- which
+ * is the normal case, the catalogue walks 271 mappings per extent -- share one LLR computation, so
+ * the marginal lane costs only its deinterleave+decode.
+ * Why it matters: the search is 133 extents x 271 mappings ~= 36k hypotheses, and convergence needs
+ * (36k / K) x occasions_per_hypothesis occasions of AIR TIME. K is the only term we control. */
+#define NR_PDCCH_LOOKAHEAD_MAX 127
+typedef struct {
+  bool valid;             // this lane owns a live candidate this call
+  bool fast_length_only;  // bounded bank-length pass; exhaustive lengths follow in the next lap
+  int  rb_offset;
+  int  freq_domain;       // span, in 6-RB windows
+  int  reg_bundle_size;
+  int  interleaver_size;
+  int  shift_index;
+} nr_pdcch_lookahead_geom_t;
+
+/** Configured lookahead lane COUNT (ISAC_PDCCH_EXTENT_BATCH - 1, clamped to
+ *  [0, NR_PDCCH_LOOKAHEAD_MAX]; 0 = feature off, the default). Read once from the environment. */
+int nr_pdcch_blind_lookahead_count(void);
+/** This lane's currently applied geometry. False if the extent/mapping search is not running
+ *  (footprint not found yet, already verified, or the lane index is unused this run). */
+bool nr_pdcch_blind_lookahead_get(int lane, nr_pdcch_lookahead_geom_t *out);
+/** Same evidence contract as nr_pdcch_blind_monitor_autodiscover_observe(), scoped to one lookahead
+ *  lane. Returns true iff THIS call just verified the lane's geometry -- the caller must then call
+ *  nr_pdcch_blind_monitor_autodiscover_set_dci_length() with the lane's own found length, since
+ *  g_cfg's dci_length_override is not touched here (rt.c owns per-lane length-sweep state). */
+bool nr_pdcch_blind_lookahead_observe(int lane, uint16_t rnti, uint32_t slot, uint64_t payload);
+/** Bump this lane's occasion counter and advance it to its next candidate if its
+ *  NR_PDCCH_EXTENT_VERIFY_OCC dwell just expired. Call once per real occasion this lane was offered
+ *  a decode attempt, whether or not it produced evidence. */
+void nr_pdcch_blind_lookahead_step(int lane);
+/** Immediately retire this lane's current candidate without waiting out its NR_PDCCH_EXTENT_VERIFY_OCC
+ *  dwell -- mirrors nr_pdcch_blind_monitor_autodiscover_retry() for the primary, for the case where a
+ *  lane's own DCI-length sweep gives up (AUTODISCOVER_LENGTH_SWEEP_MAX_OCCASIONS) well before that. */
+void nr_pdcch_blind_lookahead_retry(int lane);
 
 #ifdef __cplusplus
 }

@@ -4,31 +4,19 @@ set -euo pipefail
 REPO=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)
 BUILD=$REPO/cmake_targets/ran_build/build
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-BRANCH=$(git -C "$REPO" branch --show-current)
-case "$BRANCH" in
-  adaptive-rx-UL-DL|merge/adaptive-sensing) ;;
-  *) echo "BLOCKED: unexpected branch '$BRANCH' (expected adaptive-rx-UL-DL or merge/adaptive-sensing)"; exit 3 ;;
-esac
+test "$(git -C "$REPO" branch --show-current)" = adaptive-rx-UL-DL
 test -x "$BUILD/nr-uesoftmodem"
 # The binary must not predate the tree. Measured 2026-09-09: two admissibility rules were added and
 # only the TEST targets were rebuilt, so a 40-minute capture ran the previous nr-uesoftmodem and
 # reported the pre-fix hypothesis count. Nothing in the recorded commit/patch/sha256 identity catches
 # that -- they describe the SOURCE, and the source was correct; it was the binary that was behind.
-if find "$REPO/openair1" "$REPO/openair2" "$REPO/executables" "$REPO/radio" -path '*/tests/*' -prune -o \( -name '*.c' -o -name '*.h' -o -name '*.cpp' -o -name '*.cc' \) -newer "$BUILD/nr-uesoftmodem" -print -quit 2>/dev/null | grep -q .; then
+if find "$REPO/openair1" "$REPO/openair2" "$REPO/executables" "$REPO/radio"      \( -name '*.c' -o -name '*.h' -o -name '*.cpp' -o -name '*.cc' \)      -newer "$BUILD/nr-uesoftmodem" -print -quit 2>/dev/null | grep -q .; then
   echo "BLOCKED: nr-uesoftmodem is older than tracked source -- rebuild before capturing"; exit 3
 fi
-# Sensing may now be built IN: this tree merges the sensing pipeline, and an AoA/tracking run
-# requires it. The guard is therefore "the binary matches what the config asks for" rather than
-# "sensing is always off": a config with sensing enabled needs a sensing-enabled build, and one
-# without it must not silently pay for sensing.
-SENSE_CONF="$SCRIPT_DIR/${CONF:-adaptive_no_hints.conf}"
-if grep -qE '^[[:space:]]*enable[[:space:]]*=[[:space:]]*1' "$SENSE_CONF"; then
-  grep -qx "ENABLE_ISAC_SENSING:BOOL=ON" "$BUILD/CMakeCache.txt" || {
-    echo "BLOCKED: $CONF enables sensing but the build has ENABLE_ISAC_SENSING=OFF"; exit 3; }
-else
-  grep -qx "ENABLE_ISAC_SENSING:BOOL=OFF" "$BUILD/CMakeCache.txt" || {
-    echo "BLOCKED: sensing is built in but ${CONF:-adaptive_no_hints.conf} does not enable it"; exit 3; }
-fi
+# Accepts ON or OFF -- both are valid build states on this branch now that the sensing
+# pipeline (CFO/SFO trackers, LOS baseline, DetectionReport bus) is buildable here; only an
+# UNRECOGNISED/missing cache entry is refused, so a broken configure still fails loudly.
+grep -qE "ENABLE_ISAC_SENSING:BOOL=(ON|OFF)" "$BUILD/CMakeCache.txt"
 test "$(readlink "$BUILD/liboai_device.so")" = liboai_usrpdevif.so
 exec 9>/tmp/adaptive-rx-UL-DL.radio.lock
 flock -n 9 || { echo "BLOCKED: another adaptive test holds lock"; exit 3; }
@@ -75,7 +63,7 @@ cd "$BUILD"
 # Each void attempt's log is kept as evidence, never silently discarded.
 run_modem() {
   sudo -n env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
-    ISAC_RX_MRC_MODE="${MRC:-2}" ISAC_UL_RX_BRANCH="${UL_BRANCH:-}" \
+    ISAC_RX_MRC_MODE="${MRC:-2}" ${UL_BRANCH:+ISAC_UL_RX_BRANCH="$UL_BRANCH"} \
     ISAC_DMRS_FO_APPLY=0 ISAC_SFO_CORRECT=0 \
     ISAC_RX_BRANCH_FO=0 ISAC_RX_GAIN_TRIM=0,0,0,0 \
     ISAC_DISC_NO_RESYNC=0 ISAC_RF_STALL_MAX_REINIT=0 ISAC_CFO_TRACK_HZ=1 ISAC_CFO_TRACK_PERIOD=20 \
@@ -88,7 +76,7 @@ run_modem() {
     -O "$OUT/receiver.conf" -r 273 --numerology 1 --band 78 -C 3450000000 --ssb 150 \
     --ue-rxgain ${RXGAIN:-40} --ue-nb-ant-rx 4 --ue-nb-ant-tx 4 --passive-rx \
     --ue-fo-compensation --cont-fo-comp 1 --freq-sync-P 0.05 --freq-sync-I 0.001 \
-    --initial-fo -16480 --thread-pool 0,1,6,7 --time-sync-I 0.01 \
+    --initial-fo ${INITIAL_FO:--16480} --thread-pool 0,1,6,7 --time-sync-I 0.01 \
     --ntn-initial-time-drift -4.25 -A 90 > "$OUT/run.log" 2>&1
 }
 

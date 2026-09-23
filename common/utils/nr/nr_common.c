@@ -1091,25 +1091,17 @@ static void find_gscn_to_scan(const double startFreq,
   const double scs = MU_SCS(gscn.scs_index) * 1e3;
   const double ssbBW = 20 * NR_NB_SC_PER_RB * scs;
 
-  for (int g = gscn.first_gscn; g < gscn.last_gscn; g += gscn.step_gscn) {
+  /* Include both raster endpoints and represent an empty window explicitly.
+   * Never manufacture GSCN 0 or an SSB outside the sampled bandwidth. */
+  *scanGscnStart = 0;
+  *scanGscnStop = -1;
+  for (int g = gscn.first_gscn; g <= gscn.last_gscn; g += gscn.step_gscn) {
     const double centerSSBFreq = get_ssref_from_gscn(g);
-    const double startSSBFreq = centerSSBFreq - ssbBW / 2;
-    if (startSSBFreq < startFreq)
+    if (centerSSBFreq - ssbBW / 2 < startFreq || centerSSBFreq + ssbBW / 2 - 1 > stopFreq)
       continue;
-
-    *scanGscnStart = g;
-    break;
-  }
-  *scanGscnStop = *scanGscnStart;
-
-  for (int g = gscn.last_gscn; g > gscn.first_gscn; g -= gscn.step_gscn) {
-    const double centerSSBFreq = get_ssref_from_gscn(g);
-    const double stopSSBFreq = centerSSBFreq + ssbBW / 2 - 1;
-    if (stopSSBFreq > stopFreq)
-      continue;
-
+    if (*scanGscnStart == 0)
+      *scanGscnStart = g;
     *scanGscnStop = g;
-    break;
   }
 }
 
@@ -1150,6 +1142,38 @@ int get_scan_ssb_first_sc(const double fc, const int nbRB, const int nrBand, con
   }
 
   return numGscn;
+}
+
+int nr_band_scan_windows(const int nrBand, const int mu, const int nbRB, uint64_t *centres, const int max)
+{
+  const sync_raster_t *r = sync_raster;
+  const sync_raster_t *end = sync_raster + sizeofArray(sync_raster);
+  while (r < end && (r->band != nrBand || r->scs_index != mu))
+    r++;
+  if (r >= end || centres == NULL || max <= 0 || nbRB <= 0)
+    return 0;
+  const double scs = MU_SCS(mu) * 1e3;
+  const double ssbBW = 20 * NR_NB_SC_PER_RB * scs;
+  const double bw = (double)nbRB * NR_NB_SC_PER_RB * scs;
+  const double lo = get_ssref_from_gscn(r->first_gscn) - ssbBW / 2;
+  const double hi = get_ssref_from_gscn(r->last_gscn) + ssbBW / 2;
+  /* Adjacent windows overlap by one SSB width, so a raster point straddling a boundary is still
+   * fully inside one of them; the last window is pulled back to end at the band's top. */
+  const double step = bw - ssbBW;
+  if (step <= 0 || hi <= lo)
+    return 0;
+  int n = 0;
+  for (double start = lo; start < hi && n < max; start += step) {
+    double c = start + bw / 2;
+    if (c + bw / 2 > hi)
+      c = hi - bw / 2;
+    if (c - bw / 2 < lo)
+      c = lo + bw / 2;
+    centres[n++] = (uint64_t)llround(c);
+    if (c + bw / 2 >= hi)
+      break;
+  }
+  return n;
 }
 
 // Table 38.211 6.3.3.1-1

@@ -31,10 +31,8 @@
 
 /* Set by a DEFERRED caller to this job's monotonic absolute slot; 0 = derive from proc. */
 __thread uint64_t nr_isac_abs_slot_override = 0;
-__thread bool nr_isac_data_aided_force = false;
 
 #include <math.h>
-#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -47,57 +45,8 @@ __thread bool nr_isac_data_aided_force = false;
 #include "PHY/MODULATION/nr_modulation.h"
 #include "PHY/NR_TRANSPORT/nr_transport_common_proto.h"
 #include "PHY/NR_UE_ISAC/nr_isac.h"
-#include "nr_pdsch_passive_decode.h" // P10a: nr_pdsch_passive_view_branch()
 #include "executables/nr-uesoftmodem.h"
 #include "openair2/LAYER2/NR_MAC_COMMON/nr_mac_common.h"
-
-/* Transport blocks whose reconstruction reached the CFR submission stage (all guards passed and
- * the RE enumeration matched the rate matcher). Counted once per TB regardless of how many
- * sub-slot rows it was split into. The engine may still discard the row (not running, admission
- * gate), so this counts what the DATA-AIDED PATH produced, which is the P07 G2 test-3 quantity:
- * a branch's submissions must equal that branch's own CRC-OK count and nothing else's. */
-static _Atomic uint64_t g_data_submits = 0;
-
-uint64_t nr_isac_pdsch_data_aided_submits(void)
-{
-  return atomic_load_explicit(&g_data_submits, memory_order_relaxed);
-}
-
-/* Antenna-combining producer support: which branch (if any) owns real receive antenna `ant`. NONE
- * when no branch set is active (attached-UE/legacy path -- callers only take this path when a
- * branch set with n_active > 1 exists, but keep the guard so it is safe standalone) or when no
- * active branch's physical_channel matches (a real antenna the branch map does not name). */
-static uint8_t branch_for_antenna(const nr_rx_branch_set_t *bset, uint32_t ant)
-{
-  if (bset == NULL)
-    return (uint8_t)NR_ISAC_BRANCH_NONE;
-  for (int b = 0; b < NR_RX_BRANCH_MAX; b++)
-    if (bset->b[b].physical_channel == (int)ant)
-      return bset->b[b].branch_id;
-  return (uint8_t)NR_ISAC_BRANCH_NONE;
-}
-
-/* Wraps nr_isac_submit_cfr_multi_branch(): in combined mode, one call per real antenna, each
- * carrying ONLY that antenna's plane and ITS OWN branch id (the whole point -- each branch's
- * SensingEngine gets its own CFR row from a decode that ran once, not four times). Otherwise
- * (per-branch view, attached-UE, legacy 4-antenna) byte-identical to the single call this replaces:
- * same arguments, same one invocation, same isac_branch. h_base is already offset to the row's
- * symbol-group start (matching the call sites below); the per-antenna plane offset a*max_re is
- * added here, matching how isac_h was packed (see the fill loop's `o` computation above). */
-static void isac_submit_rows(uint32_t slot_idx, float frac, const nr_isac_carrier_t *carrier, const float *h_base,
-                             uint32_t nof_ant, uint32_t max_re, const uint32_t *k, const uint32_t *l, uint32_t n,
-                             float noise, bool combined_multibranch, const nr_rx_branch_set_t *bset, uint8_t isac_branch)
-{
-  if (!combined_multibranch) {
-    nr_isac_submit_cfr_multi_branch(slot_idx, frac, NR_ISAC_SRC_PDSCH_DATA, carrier, h_base, nof_ant, max_re, k, l, n,
-                                    noise, isac_branch);
-    return;
-  }
-  for (uint32_t a = 0; a < nof_ant; a++) {
-    nr_isac_submit_cfr_multi_branch(slot_idx, frac, NR_ISAC_SRC_PDSCH_DATA, carrier, h_base + (size_t)2 * a * max_re,
-                                    1, max_re, k, l, n, noise, branch_for_antenna(bset, a));
-  }
-}
 
 void nr_isac_pdsch_data_aided_submit(PHY_VARS_NR_UE *ue,
                                      const UE_nr_rxtx_proc_t *proc,
@@ -110,9 +59,7 @@ void nr_isac_pdsch_data_aided_submit(PHY_VARS_NR_UE *ue,
                                      const c16_t rxdataF[][ue->frame_parms.samples_per_slot_wCP],
                                      double nvar)
 {
-  /* P07 replay: nr_isac_data_aided_force runs the reconstruction even when the engine is not up
-   * (the row then dies inside nr_isac_submit_cfr_multi(), which is the intent -- see the .h). */
-  if (!nr_isac_data_aided_force && (!nr_isac_enabled() || !nr_isac_source_enabled(NR_ISAC_SRC_PDSCH_DATA)))
+  if (!nr_isac_enabled() || !nr_isac_source_enabled(NR_ISAC_SRC_PDSCH_DATA))
     return;
 
   /* SINGLE LAYER ONLY -- and this is a correctness guard, not a scope preference.
@@ -243,18 +190,7 @@ void nr_isac_pdsch_data_aided_submit(PHY_VARS_NR_UE *ue,
   // not just antenna 0. X is the SAME reconstructed transport block for all of them, so this is a
   // pure inner loop over rxdataF[a] -- the per-element phase difference it captures IS the bearing.
   const uint32_t isac_max_re = 273 * 12 * 14;
-  // Antenna-combining producer (nr_pdsch_passive_queue_enqueue_combined()): multiple branches are
-  // configured AND this decode did NOT go through a single-branch view, which only happens when
-  // `ue` here is the REAL, unrestricted PHY_VARS_NR_UE (every active receive antenna). In that case
-  // want every real antenna's Ĥ, not nr_isac_aoa_antennas()'s AoA-array count (0/1 by default when
-  // no rx_array is configured for this deployment, which would silently drop back to one plane and
-  // defeat the whole point). The per-branch-view and attached-UE/legacy-4-antenna paths are
-  // untouched: nr_isac_aoa_antennas() as before.
-  const nr_rx_branch_set_t *isac_bset = nr_isac_rx_branches();
-  const bool isac_combined_multibranch =
-      isac_bset != NULL && isac_bset->n_active > 1 && !nr_pdsch_passive_view_active();
-  uint32_t isac_nof_ant =
-      isac_combined_multibranch ? (uint32_t)fp->nb_antennas_rx : nr_isac_aoa_antennas();
+  uint32_t       isac_nof_ant = nr_isac_aoa_antennas();
   if (isac_nof_ant > (uint32_t)fp->nb_antennas_rx)
     isac_nof_ant = (uint32_t)fp->nb_antennas_rx;
   if (isac_nof_ant == 0)
@@ -391,16 +327,6 @@ void nr_isac_pdsch_data_aided_submit(PHY_VARS_NR_UE *ue,
     return; // contribute nothing rather than corrupt the range profile
   }
 
-  atomic_fetch_add_explicit(&g_data_submits, 1, memory_order_relaxed);
-  // P10a (closes the former TODO(P10) here): the CFR ABI now carries a branch identity slot, and
-  // every submission below names the branch whose single-antenna view produced this transport block
-  // -- nr_pdsch_passive_view_branch() reads the view P06a/P07 armed on THIS thread, and returns
-  // NR_ISAC_BRANCH_NONE on the attached-UE and legacy 4-antenna paths, which leaves those rows
-  // untagged exactly as before. STILL OPEN, deliberately: the identity is only carried to the
-  // report. One engine still consumes every branch; per-branch engines/detectors and the remaining
-  // 8 producers are P13 / the rest of Stage 3, as is branch-striding the re-encode's own
-  // harq_unique_pid namespace (docs/passive_branch_namespace_audit.md sec 4.2).
-  const uint8_t isac_branch = nr_pdsch_passive_view_branch();
   nr_isac_carrier_t carrier = {.nof_prb         = (uint32_t)fp->N_RB_DL,
                                .scs_hz          = fp->subcarrier_spacing,
                                .dl_center_hz    = fp->dl_CarrierFreq,
@@ -435,8 +361,8 @@ void nr_isac_pdsch_data_aided_submit(PHY_VARS_NR_UE *ue,
   const uint32_t sub_target = nr_isac_subslot_config(&sub_min_re, &sub_min_snr_db);
 
   if (sub_target == 0 || nof_sym <= 1) {
-    isac_submit_rows(slot_idx, 0.0f, &carrier, isac_h, isac_nof_ant, isac_max_re, isac_k, isac_l, nof_re,
-                     (float)nvar, isac_combined_multibranch, isac_bset, isac_branch);
+    nr_isac_submit_cfr_multi(slot_idx, 0.0f, NR_ISAC_SRC_PDSCH_DATA, &carrier, isac_h, isac_nof_ant, isac_max_re,
+                             isac_k, isac_l, nof_re, (float)nvar);
     return;
   }
 
@@ -463,24 +389,24 @@ void nr_isac_pdsch_data_aided_submit(PHY_VARS_NR_UE *ue,
       const float  frac   = (float)(centre / (double)NR_SYMBOLS_PER_SLOT);
       // Slice, not copy: ant_stride_re stays the FULL buffer stride so antenna a's slice starts at
       // the same symbol offset within its own plane.
-      isac_submit_rows(slot_idx, frac, &carrier, &isac_h[2 * sym_start[g_first]], isac_nof_ant, isac_max_re,
-                       &isac_k[sym_start[g_first]], &isac_l[sym_start[g_first]], g_re, (float)nvar,
-                       isac_combined_multibranch, isac_bset, isac_branch);
+      nr_isac_submit_cfr_multi(slot_idx, frac, NR_ISAC_SRC_PDSCH_DATA, &carrier, &isac_h[2 * sym_start[g_first]],
+                               isac_nof_ant, isac_max_re, &isac_k[sym_start[g_first]], &isac_l[sym_start[g_first]],
+                               g_re, (float)nvar);
       emitted++;
       g_first = i + 1;
     } else if (is_last) {
       // Tail that never passed the gates: merge it BACKWARDS by re-emitting from g_first to the end
       // as one row if nothing has been emitted yet, otherwise fold it into the whole-slot fallback.
       if (emitted == 0) {
-        isac_submit_rows(slot_idx, 0.0f, &carrier, isac_h, isac_nof_ant, isac_max_re, isac_k, isac_l, nof_re,
-                         (float)nvar, isac_combined_multibranch, isac_bset, isac_branch);
+        nr_isac_submit_cfr_multi(slot_idx, 0.0f, NR_ISAC_SRC_PDSCH_DATA, &carrier, isac_h, isac_nof_ant, isac_max_re,
+                                 isac_k, isac_l, nof_re, (float)nvar);
         emitted++;
       } else {
         const double centre = 0.5 * ((double)sym_id[g_first] + (double)sym_id[i]) + 0.5;
         const float  frac   = (float)(centre / (double)NR_SYMBOLS_PER_SLOT);
-        isac_submit_rows(slot_idx, frac, &carrier, &isac_h[2 * sym_start[g_first]], isac_nof_ant, isac_max_re,
-                         &isac_k[sym_start[g_first]], &isac_l[sym_start[g_first]], g_re, (float)nvar,
-                         isac_combined_multibranch, isac_bset, isac_branch);
+        nr_isac_submit_cfr_multi(slot_idx, frac, NR_ISAC_SRC_PDSCH_DATA, &carrier, &isac_h[2 * sym_start[g_first]],
+                                 isac_nof_ant, isac_max_re, &isac_k[sym_start[g_first]], &isac_l[sym_start[g_first]],
+                                 g_re, (float)nvar);
       }
     }
   }

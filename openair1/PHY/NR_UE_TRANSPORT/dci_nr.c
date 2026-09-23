@@ -321,35 +321,29 @@ static void nr_pdcch_channel_compensation(int arraySz,
   }
 }
 
-static void nr_pdcch_detection_mrc(int nb_ant, int sz, c16_t rxdataF_comp[][sz])
+static void nr_pdcch_detection_mrc(int nb_ant, int sz, unsigned kept_mask,
+                                     c16_t rxdataF_comp[][sz])
 {
-  /* Four-RX rank-one compatibility mode uses branch 0 to avoid overflow in
-   * the fixed-point MRC accumulator. */
-  if (nb_ant == 4)
+  /* Equal-noise MRC after conjugate channel compensation. Sum in 32 bits so branch order cannot
+   * change the answer, then retain the one-branch soft scale expected by nr_pdcch_llr(). Rejected
+   * branches are absent from both the numerator and divisor. */
+  int nkept = 0;
+  for (int a = 0; a < nb_ant; ++a)
+    nkept += (kept_mask >> a) & 1u;
+  if (nkept < 1)
     return;
-
-  /* NOTE -- an "equal-gain, 32-bit accumulator, divide by nb_ant" rewrite of the loop below is a
-   * REGRESSION: the output feeds nr_pdcch_llr(), which CLIPS at +/-31, so absolute amplitude --
-   * not just relative branch weighting -- sets the soft-bit resolution. Dividing by nb_ant drops
-   * the signal ~4x below the rail and the LLRs collapse to 0/+-1. The cascade below is lopsided
-   * (a0/8 + a1/8 + a2/4 + a3/2 at four branches) but keeps the sum near the rail, which matters
-   * more here. Do not "fix" the weighting without renormalising to the clip rail and re-measuring.
-   *
-   * The passive-mode carve-out that used to sit here (combine instead of skip when
-   * IS_PASSIVE_RX_MODE) has been REVERTED to the baseline: its justification was the 817-vs-8 /
-   * 3202-vs-11 recovered-RNTI counts, which X410_BLIND_PDCCH_HANDOVER.md section 5 retracted as
-   * 0x5199, a degenerate polar-decoder fixed point on empty CCEs. Re-measure before reinstating. */
-
-  c16_t *rx0 = rxdataF_comp[0];
-  // MRC on each re of rb
-  // input always aligned and accepting tail padding to process all actual samples
-  for (int a = 1; a < nb_ant; a++) {
-    c16_t *rx = rxdataF_comp[a];
-    for (int i = 0; i < sz; i += 4) {
-      *(simde__m128i *)(rx0 + i) = simde_mm_adds_epi16(simde_mm_srai_epi16(*(simde__m128i *)(rx0 + i), 1),
-                                                       simde_mm_srai_epi16(*(simde__m128i *)(rx + i), 1));
+  for (int i = 0; i < sz; ++i) {
+    int32_t re = 0, im = 0;
+    for (int a = 0; a < nb_ant; ++a) {
+      if (!(kept_mask & (1u << a)))
+        continue;
+      re += rxdataF_comp[a][i].r;
+      im += rxdataF_comp[a][i].i;
     }
+    rxdataF_comp[0][i].r = (int16_t)(re / nkept);
+    rxdataF_comp[0][i].i = (int16_t)(im / nkept);
   }
+
 }
 
 /* Produce LLRs from received PDCCH signal */
@@ -668,18 +662,58 @@ static void nr_rx_pdcch_symbol(PHY_VARS_NR_UE *ue,
   LOG_D(NR_PHY_DCI, "in channel level function (dl_ch_estimates_ext -> dl_ch_estimates_ext)\n");
   int avg[fp->nb_antennas_rx];
   nr_channel_level(0, rx_size, pdcch_dl_ch_estimates_ext, fp->nb_antennas_rx, 1, avg, n_rb * RE_PER_RB_OUT_DMRS);
+  /* BRANCH QUALITY GATE (2026-09-15). PRECLIP_ANT on the X410's CORESET#0: channel levels
+   * a0=1285 a1=7504 a2=611403 a3=198612 while raw power spreads only 15 dB -- the two strong
+   * branches' estimates are not a channel (cv 1.8-1.9 after compensation, noise-like) and they set
+   * the output shift, crushing a0/a1 to mean 1-3. 1 RX (a0) and 2 RX (a0+a1) decode SIB1; 4 RX never
+   * did. Same physics the PDSCH side handles with noise weighting (nr_mrc_noise_weights): a branch is
+   * scored by the roughness of its estimate -- adjacent-subcarrier difference power over mean power,
+   * ~0 for a smooth channel, ~2 for noise -- and branches rougher than 4x the smoothest are ZEROED
+   * (h = 0 adds no signal and no noise to the combine). The shift is the max over the kept ones. */
+  unsigned kept_mask = 0;
+  {
+    double rough[fp->nb_antennas_rx];
+    double best_r = 1e30;
+    const int n_re = n_rb * RE_PER_RB_OUT_DMRS;
+    for (int a = 0; a < fp->nb_antennas_rx; a++) {
+      double dp = 0.0, pw = 0.0;
+      const c16_t *h = pdcch_dl_ch_estimates_ext[a];
+      for (int i = 1; i < n_re; i++) {
+        const double dr = (double)h[i].r - h[i - 1].r, di = (double)h[i].i - h[i - 1].i;
+        dp += dr * dr + di * di;
+        pw += (double)h[i].r * h[i].r + (double)h[i].i * h[i].i;
+      }
+      rough[a] = pw > 0.0 ? dp / pw : 1e30;
+      if (rough[a] < best_r) best_r = rough[a];
+    }
+    /* ISAC_PDCCH_ANT_MASK=<hex>: force the kept set (A/B tool: 0x3 = branches 0+1, what 2 RX uses). */
+    static int s_force_mask = -1;
+    if (s_force_mask < 0) {
+      const char *e = getenv("ISAC_PDCCH_ANT_MASK");
+      s_force_mask = e ? (int)strtol(e, NULL, 0) : 0;
+    }
+    int kept = 0;
+    for (int a = 0; a < fp->nb_antennas_rx; a++) {
+      if ((s_force_mask && !(s_force_mask & (1 << a))) || (!s_force_mask && rough[a] > 4.0 * best_r)) {
+        memset(pdcch_dl_ch_estimates_ext[a], 0, sizeof(c16_t) * rx_size);
+        avg[a] = 0;
+      } else {
+        kept |= 1 << a;
+      }
+    }
+    kept_mask = (unsigned)kept;
+    static int s_gate_log = 12;
+    if (s_gate_log > 0 && fp->nb_antennas_rx > 1 && proc->nr_slot_rx == 1) {
+      s_gate_log--;
+      LOG_W(PHY, "SENSING: PDCCH branch gate slot=%d symb=%d kept=0x%x rough=[%.2f %.2f %.2f %.2f]\n",
+            proc->nr_slot_rx, symbol, kept, rough[0], fp->nb_antennas_rx > 1 ? rough[1] : -1.0,
+            fp->nb_antennas_rx > 2 ? rough[2] : -1.0, fp->nb_antennas_rx > 3 ? rough[3] : -1.0);
+    }
+  }
   int avgs = avg[0];
-  // The four-RX rank-one mode below skips MRC, so ONLY branch 0 reaches nr_pdcch_llr(). The output
-  // shift must then be derived from branch 0 as well: taking the max over all four branches scales
-  // the compensation for a stronger antenna that is not part of the decoder input, right-shifting
-  // branch 0's REs too far and shrinking every LLR. This mirrors the identical correction the
-  // four-RX commit makes in nr_rx_pdsch() (`if (nl == 1 && nbRx == 4) avgs = avg[0];`), which it
-  // did not carry over to PDCCH. Kept in lockstep with nr_pdcch_detection_mrc()'s own nb_ant == 4
-  // early return -- if that condition is ever changed, change it here too or the shift and the
-  // decoder input silently disagree again.
-  if (fp->nb_antennas_rx != 4)
-    for (int i = 1; i < fp->nb_antennas_rx; i++)
-      avgs = cmax(avgs, avg[i]);
+  // All KEPT branches are MRC-combined (see nr_pdcch_detection_mrc()), so the shift is the max over them.
+  for (int i = 1; i < fp->nb_antennas_rx; i++)
+    avgs = cmax(avgs, avg[i]);
   const int log2_maxh = (log2_approx(avgs) / 2) + 5; //+frame_parms->nb_antennas_rx;
   int rx_comp_sz = ceil_mod(llr_size_symbol, 4);
   __attribute__((aligned(32))) c16_t rxdataF_comp[fp->nb_antennas_rx][rx_comp_sz];
@@ -692,8 +726,32 @@ static void nr_rx_pdcch_symbol(PHY_VARS_NR_UE *ue,
                                 fp->nb_antennas_rx,
                                 log2_maxh); // log2_maxh+I0_shift
 
+  /* Per-ANTENNA constellation before combining (2026-09-15): at 4 RX the combined CORESET#0 symbols
+   * read cv 1.2-2.2 (noise-like) on every acquisition that never decoded SIB1, and 1/2 RX decode it.
+   * Which branches are QPSK-like, and which are not, is the discriminating fact. 12 shots, slot 1. */
+  {
+    static int s_ant_left = 12;
+    if (s_ant_left > 0 && fp->nb_antennas_rx > 1 && proc->nr_slot_rx == 1) {
+      char b[300];
+      int u = 0;
+      for (int a = 0; a < fp->nb_antennas_rx && u < (int)sizeof(b) - 60; a++) {
+        double sm = 0, sm2 = 0, si = 0, sq = 0;
+        for (int i = 0; i < llr_size_symbol; i++) {
+          const double vi = rxdataF_comp[a][i].r, vq = rxdataF_comp[a][i].i, m = sqrt(vi * vi + vq * vq);
+          sm += m; sm2 += m * m; si += fabs(vi); sq += fabs(vq);
+        }
+        const double n = llr_size_symbol, mean = sm / n, var = sm2 / n - mean * mean;
+        u += snprintf(b + u, sizeof(b) - u, "a%d[lvl=%d mean=%.1f cv=%.2f iq=%.2f] ", a, avg[a], mean,
+                      mean > 0 ? sqrt(var > 0 ? var : 0) / mean : -1, sq > 0 ? si / sq : -1);
+      }
+      if (u > 0) {
+        s_ant_left--;
+        LOG_W(PHY, "SENSING: PRECLIP_ANT slot=%d symb=%d shift=%d %s\n", proc->nr_slot_rx, symbol, log2_maxh, b);
+      }
+    }
+  }
   if (fp->nb_antennas_rx > 1) {
-    nr_pdcch_detection_mrc(fp->nb_antennas_rx, rx_comp_sz, rxdataF_comp);
+    nr_pdcch_detection_mrc(fp->nb_antennas_rx, rx_comp_sz, kept_mask, rxdataF_comp);
   }
   /* TEMPORARY DIAGNOSTIC (2026-08-04, blind-PDCCH bring-up): the PRE-CLIP equalised constellation.
    * nr_pdcch_llr() below deliberately clips to [-32,31] (6-bit soft values for the polar decoder),
@@ -867,27 +925,51 @@ static void nr_rx_pdcch_symbol(PHY_VARS_NR_UE *ue,
      * because the mean here is the empty-CORESET noise floor -- the very thing that mis-scales the
      * stock path. A pure right shift keeps I and Q in the same ratio, so the constellation is
      * scaled rather than rotated. Peaks below the rail are left completely alone. */
-    int peak = 0;
+    /* PERCENTILE, BOTH DIRECTIONS (2026-09-15). Measured on the X410 at 4 RX (PRECLIP): the run that
+     * decoded SIB1 had mean_mag 14-22 with a peak of 66-101; the runs that never did had mean_mag
+     * 4.6-5.6 (LLRs of 0/+-1) or mean 116 / peak 402 (half the REs clipped). One outlier RE set the
+     * old peak-only right shift, and it never scaled UP. The 90th-percentile magnitude is put at
+     * half the +/-31 rail: a shift either way, the top decile clips (nr_pdcch_llr() clips anyway). */
+    uint16_t hist[256] = {0};
+    int n = 0;
     for (int i = 0; i < llr_size_symbol; i++) {
       const int ar = rxdataF_comp[0][i].r < 0 ? -rxdataF_comp[0][i].r : rxdataF_comp[0][i].r;
       const int ai = rxdataF_comp[0][i].i < 0 ? -rxdataF_comp[0][i].i : rxdataF_comp[0][i].i;
-      if (ar > peak) peak = ar;
-      if (ai > peak) peak = ai;
+      const int m = ar > ai ? ar : ai;
+      hist[m > 255 ? 255 : m]++; /* magnitudes >= 255 share the top bin: they need a right shift anyway */
+      n++;
     }
-    int sh = 0;
-    while (peak > 31 && sh < 15) {
-      peak >>= 1;
-      sh++;
+    int p90 = 0, acc = 0;
+    for (int b = 0; b < 256; b++) {
+      acc += hist[b];
+      if (acc * 10 >= n * 9) { p90 = b; break; }
     }
-    if (sh > 0) {
+    int sh = 0; /* >0 right shift, <0 left shift */
+    if (p90 >= 255) {
+      int peak = 0;
       for (int i = 0; i < llr_size_symbol; i++) {
-        rxdataF_comp[0][i].r = (int16_t)(rxdataF_comp[0][i].r >> sh);
-        rxdataF_comp[0][i].i = (int16_t)(rxdataF_comp[0][i].i >> sh);
+        const int ar = rxdataF_comp[0][i].r < 0 ? -rxdataF_comp[0][i].r : rxdataF_comp[0][i].r;
+        const int ai = rxdataF_comp[0][i].i < 0 ? -rxdataF_comp[0][i].i : rxdataF_comp[0][i].i;
+        if (ar > peak) peak = ar;
+        if (ai > peak) peak = ai;
+      }
+      while (peak > 31 && sh < 15) { peak >>= 1; sh++; }
+    } else if (p90 > 24) {
+      while ((p90 >> sh) > 24 && sh < 8) sh++;
+    } else if (p90 > 0) {
+      while ((p90 << (-sh + 1)) <= 24 && sh > -6) sh--;
+    }
+    if (sh != 0) {
+      for (int i = 0; i < llr_size_symbol; i++) {
+        int r = rxdataF_comp[0][i].r, q = rxdataF_comp[0][i].i;
+        if (sh > 0) { r >>= sh; q >>= sh; } else { r <<= -sh; q <<= -sh; }
+        rxdataF_comp[0][i].r = (int16_t)(r > 32767 ? 32767 : r < -32768 ? -32768 : r);
+        rxdataF_comp[0][i].i = (int16_t)(q > 32767 ? 32767 : q < -32768 ? -32768 : q);
       }
       static int s_shift_log_left = 8;
       if (s_shift_log_left > 0) {
-        LOG_W(PHY, "SENSING: PDCCH autoscale slot=%d symb=%d extra_shift=%d (peak now %d)\n",
-              proc->nr_slot_rx, symbol, sh, peak);
+        LOG_W(PHY, "SENSING: PDCCH autoscale slot=%d symb=%d extra_shift=%d (p90 %d -> %d)\n",
+              proc->nr_slot_rx, symbol, sh, p90, sh > 0 ? p90 >> sh : p90 << -sh);
         s_shift_log_left--;
       }
     }
@@ -1089,6 +1171,18 @@ static void nr_dci_decoding_procedure(const UE_nr_rxtx_proc_t *proc,
       nr_pdcch_llr_probe("normal", proc->frame_rx, proc->nr_slot_rx, CCEind, L, crc, tmp_e, L * 108);
 
       rnti_t n_rnti = rel15->rnti;
+      /* SI-RNTI census: whether CORESET#0 candidates are being evaluated at all, and how often
+       * they hit. Half of the 2026-09-15 X410 acquisitions never decoded SIB1 with PBCH at 50/50
+       * and nothing said why. Every 500 SI candidates, plus the first hit. */
+      if (is_SI) {
+        static uint32_t s_si_try, s_si_hit;
+        s_si_try++;
+        if (crc == n_rnti)
+          s_si_hit++;
+        if ((s_si_try % 500) == 0 || (crc == n_rnti && s_si_hit == 1))
+          LOG_W(NR_PHY_DCI, "SENSING: SICENSUS si_rnti candidates=%u hits=%u (last: %d.%d L=%d cce=%d len=%d crc=0x%x)\n",
+                s_si_try, s_si_hit, proc->frame_rx, proc->nr_slot_rx, L, CCEind, dci_length, crc);
+      }
       if (crc == n_rnti) {
         LOG_D(NR_PHY_DCI,
               "(%i.%i) Received dci indication (rnti %x,dci format %d,n_CCE %d,payloadSize %d,payload %llx)\n",

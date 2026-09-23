@@ -20,6 +20,8 @@
 #include "common/utils/nr/nr_common.h"
 #include "PHY/defs_gNB.h"
 #include "PHY/defs_RU.h"          // RU_RX_SLOT_DEPTH -- the gNB rxdataF ring depth
+#include "PHY/NR_UE_TRANSPORT/nr_dmrs_id_estimate.h" // blind UL DM-RS identity estimate
+#include "PHY/NR_UE_TRANSPORT/nr_pusch_passive_queue.h" // nr_pusch_passive_queue_running()
 #include "PHY/MODULATION/modulation_UE.h"
 #include "PHY/NR_TRANSPORT/nr_transport_proto.h"
 #include "PHY/NR_TRANSPORT/nr_ulsch.h"
@@ -28,7 +30,6 @@
 #include "openair2/LAYER2/NR_MAC_COMMON/nr_mac_common.h"
 #include "PHY/NR_UE_ISAC/nr_isac.h" // UL CFR submission
 #include "nr_pdcch_blind_monitor_rt.h" // nr_pdcch_blind_monitor_get_cfg: the UCI search parameters
-#include "nr_passive_harq_tag.h" // the LDPC harq_unique_pid namespace map
 
 /* nr_ulsch_decoding() has no declaration in any header this library exposes -- nr_transport_proto.h
  * declares nr_rx_pusch_group_tp() but not its decoder. Declared here against the definition read
@@ -77,12 +78,10 @@ NR_gNB_PHY_STATS_t *get_phy_stats(PHY_VARS_gNB *gNB, uint16_t rnti)
 }
 
 #define PASSIVE_UL_MAX_ANT 4
-/* HARQ namespace: nr_passive_harq_tag.h, which owns the whole map. What used to sit here was a
- * PASSIVE_UL_HARQ_TAG_BASE 4000 that was never referenced by anything (so every UL decode really
- * went out as harq_unique_pid = ULSCH_id = 0) and that had also drifted onto the same 4000 the UL
- * RE-ENCODE uses. P08a: the decode gets its own 5000 range, strided by decode context. */
-static_assert(NR_PUSCH_PASSIVE_HARQ_MAX_CTX == NR_PUSCH_PASSIVE_MAX_CTX,
-              "nr_passive_harq_tag.h context count drifted from nr_pusch_passive_decode.h");
+/* HARQ namespace. The DL path already uses 1000+ (attached UE), 2000+ (passive PDSCH decode) and
+ * 3000+ (data-aided re-encode) on the SAME dlopen'd LDPC interface. A hardware accelerator keys its
+ * internal state on this id, so an overlap would alias two unrelated transport blocks. */
+#define PASSIVE_UL_HARQ_TAG_BASE 4000
 
 /* One context per potential concurrent decoder. Every buffer the receive chain writes -- the
  * rxdataF ring, pusch_vars, the ULSCH HARQ, the tpool -- hangs off PHY_VARS_gNB, so sharing one
@@ -92,6 +91,13 @@ static_assert(NR_PUSCH_PASSIVE_HARQ_MAX_CTX == NR_PUSCH_PASSIVE_MAX_CTX,
 static PHY_VARS_gNB *g_gnb[NR_PUSCH_PASSIVE_MAX_CTX];
 static int           g_gnb_nant;
 static _Atomic uint64_t g_try, g_crc_ok, g_rej_unsup, g_rej_setup;
+/* UL DM-RS identity estimate (CP-OFDM PUSCH, type 1, port 0): same sequence family as PDSCH
+ * (TS 38.211 6.4.1.1.1.1 vs 7.4.1.1.1), reference point CRB 0, so the PDSCH estimator applies
+ * unchanged. Shared across decode contexts under one lock; CRC-OK grants only. */
+static nr_dmrs_id_state_t g_ul_dmrs_id;
+static bool g_ul_dmrs_id_init;
+static pthread_mutex_t g_ul_dmrs_id_lock = PTHREAD_MUTEX_INITIALIZER;
+const nr_dmrs_id_state_t *nr_pusch_passive_ul_dmrs_id(void) { return &g_ul_dmrs_id; }
 static _Atomic uint64_t g_seg_fail, g_zero_tb;
 /* Residual the channel estimator can absorb on its own: MAX_DELAY_COMP is 20 samples, so anything
  * beyond a comfortable fraction of that is worth re-placing the window for rather than hoping. */
@@ -373,10 +379,7 @@ static bool passive_gnb_prepare(PHY_VARS_NR_UE *ue, int ctx)
 
   gnb->gNB_config.carrier_config.num_rx_ant.value = nant;
   gnb->gNB_config.cell_config.phy_cell_id.value   = ufp->Nid_cell;
-  gnb->max_nb_pusch                = NR_PUSCH_PASSIVE_ULSCH_PER_CTX;
-  /* Every transport block this context decodes is tagged from here (nr_ulsch_decoding.c adds the
-   * ULSCH_id). Without it all NR_PUSCH_PASSIVE_MAX_CTX contexts emit id 0 concurrently. */
-  gnb->harq_unique_pid_base        = nr_pusch_passive_harq_tag_base(ctx);
+  gnb->max_nb_pusch                = 1;
   gnb->max_ldpc_iterations         = 8;
   gnb->num_pusch_symbols_per_thread = 1;
   gnb->dmrs_num_antennas_per_thread = 1;
@@ -447,13 +450,7 @@ static bool passive_gnb_prepare(PHY_VARS_NR_UE *ue, int ctx)
   pv->llr = (int16_t *)malloc16_clear(8 * ((3 * 8 * 6144) + 12) * sizeof(int16_t));
   pv->ul_valid_re_per_slot = (int16_t *)malloc16_clear(sps * sizeof(int16_t));
 
-  /* pusch_vars above and ulsch here are both indexed by ULSCH_id (nr_ulsch_decoding.c:101-102) and
-   * only element 0 is built, which is what makes the harq-tag stride of one id per context correct.
-   * Assert it rather than comment it: growing either array without growing the stride would put two
-   * contexts' transport blocks back on one accelerator id. */
-  static_assert(NR_PUSCH_PASSIVE_ULSCH_PER_CTX == 1,
-                "only ULSCH/pusch_vars element 0 is allocated per context");
-  gnb->ulsch = (NR_gNB_ULSCH_t *)malloc16_clear(NR_PUSCH_PASSIVE_ULSCH_PER_CTX * sizeof(NR_gNB_ULSCH_t));
+  gnb->ulsch = (NR_gNB_ULSCH_t *)malloc16_clear(sizeof(NR_gNB_ULSCH_t));
   gnb->ulsch[0] = new_gNB_ulsch(gnb->max_ldpc_iterations, gnb->frame_parms.N_RB_UL);
 
   g_gnb[ctx]  = gnb;
@@ -578,20 +575,6 @@ static unsigned int passive_ul_fep_offset(const NR_DL_FRAME_PARMS *fp, unsigned 
   return (unsigned int)off;
 }
 
-/* nr_symbol_fep_ul() performs its ring subtraction through an unsigned accumulator and therefore
- * requires a canonical non-negative offset.  Delay refinement can legitimately move the window
- * through zero (for example TA 1600 - delay 2042 = -442); passing that value directly underflows
- * the wrap branch and turns its split-window memcpy length into several gigabytes. */
-static int passive_ul_normalize_fep_offset(const NR_DL_FRAME_PARMS *fp, int64_t sample_offset)
-{
-  const int64_t ring = fp->samples_per_frame;
-  AssertFatal(ring > 0, "passive UL FEP requires a positive RX ring length\n");
-  int64_t normalized = sample_offset % ring;
-  if (normalized < 0)
-    normalized += ring;
-  return (int)normalized;
-}
-
 /* De-rotate one symbol's worth of samples into scratch, then DFT it. Mirrors nr_symbol_fep_ul()'s
  * wrap handling against samples_per_frame. */
 void nr_pusch_passive_fep_symbol(const NR_DL_FRAME_PARMS *fp, const c16_t *rxdata, c16_t *rxdataF,
@@ -687,9 +670,8 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
   /* One-shot STAGE markers. The first live run entered the decode and never returned, and with no
    * gdb on this host and every thread sleeping rather than spinning, the log is the only instrument
    * that can say WHERE. Each prints once; the last one printed is the stage that blocked. */
-  static _Atomic int s_stage_once = 1;
-  const int stage_diag = atomic_exchange_explicit(&s_stage_once, 0, memory_order_relaxed);
-#define PUSCH_STAGE(n, what) do { if (stage_diag) { LOG_I(PHY, "SENSING: PUSCHSTAGE %d %s\n", (n), (what)); } } while (0)
+  static int s_stage = 1;
+#define PUSCH_STAGE(n, what) do { if (s_stage) { LOG_I(PHY, "SENSING: PUSCHSTAGE %d %s\n", (n), (what)); } } while (0)
   PUSCH_STAGE(1, "guards passed");
   const int      utim = utim_enabled();
   const uint64_t t_all = utim ? utim_now() : 0;
@@ -739,7 +721,6 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
 #define PASSIVE_UL_FEP(off_)                                                                       \
   do {                                                                                             \
     const double fo_hz_ = fo_hz;                                                                   \
-    const int sample_offset_ = passive_ul_normalize_fep_offset(fp, (int64_t)(off_));                \
     const int s0_ = g->start_symbol;                                                               \
     const int s1_ = g->start_symbol + g->num_symbols;                                              \
     for (int a_ = 0; a_ < nant; a_++) {                                                            \
@@ -747,10 +728,9 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
       for (int sym_ = s0_; sym_ < s1_ && sym_ < sps; sym_++) {                                     \
         c16_t *dst_ = &gnb->common_vars.rxdataF[a_][slot_off + sym_ * symsz];                      \
         if (fo_hz_ != 0.0) {                                                                       \
-          nr_pusch_passive_fep_symbol(fp, rx_, dst_, (unsigned char)sym_, (unsigned char)slot,          \
-                                      sample_offset_, fo_hz_);                                          \
+          nr_pusch_passive_fep_symbol(fp, rx_, dst_, (unsigned char)sym_, (unsigned char)slot, (off_), fo_hz_);\
         } else {                                                                                   \
-          nr_symbol_fep_ul(fp, rx_, dst_, (unsigned char)sym_, (unsigned char)slot, sample_offset_);    \
+          nr_symbol_fep_ul(fp, rx_, dst_, (unsigned char)sym_, (unsigned char)slot, (off_));       \
         }                                                                                          \
         apply_nr_rotation_symbol_RX(fp->symbols_per_slot, fp->slots_per_subframe,                  \
                                     fp->timeshift_symbol_rotation, fp->first_carrier_offset,       \
@@ -866,7 +846,7 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
    * data-aided UL CFR is the one that needs a CRC-verified TB; this one does not.
    *
    * Layout: ul_ch_estimates[nl * num_sp_streams + antenna] is a per-symbol buffer indexed
-   * [ofdm_symbol_size * symbol + k], with k relative to the PUSCH allocation. num_sp_streams is
+   * [ofdm_symbol_size * symbol + k], with k an ABSOLUTE subcarrier. num_sp_streams is
    * param_v4.numSpatialStreamIndices -- the same field whose being zero deadlocked this function,
    * so it is read back from the PDU rather than assumed equal to nant.
    *
@@ -874,23 +854,7 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
    * point of a 4-element array is that the inter-element phase carries the bearing, and combining
    * before submission would destroy exactly that. */
   if (nr_isac_enabled() && nr_isac_source_enabled(NR_ISAC_SRC_PUSCH_DMRS)) {
-    /* adaptive_RX_pipeline.md P10c: who consumes these rows. The per-antenna DM-RS channel
-     * estimates are NOT combined here (see the paragraph above -- combining would destroy the
-     * inter-element phase), so plane `a` is an honest measurement at physical receive channel `a`
-     * and carries a real per-branch identity, exactly like every DL producer P10a/P10b migrated.
-     * One untagged submission of nant planes at a single active branch (the default, and the
-     * co-located-array AoA deployment); one single-antenna submission per branch -- a pointer
-     * offset into the same packed buffer -- otherwise. A branch naming a physical channel this
-     * context did not allocate (nant < 4) is skipped and counted inside nr_isac_submit_plan().
-     *
-     * The coherent multi-antenna combining that DOES happen on this path is in the decode
-     * (nr_rx_pusch_group_tp() -> LLRs -> LDPC), which produces the shared reference, not these
-     * rows. Splitting the decode itself per branch is P08s separate, still-open work. */
-    nr_isac_submit_plan_t plan[NR_RX_BRANCH_MAX];
-    uint32_t pack_ant = 0;
-    const int nof_plan =
-        nr_isac_submit_plan(plan, NR_RX_BRANCH_MAX, (uint32_t)nant, (uint32_t)nant, &pack_ant);
-    const uint32_t nof_ant_cfr = pack_ant;  /* == nant with one active branch */
+    const uint32_t nof_ant_cfr = (uint32_t)nant;
     const int      num_sp      = pdu.param_v4.numSpatialStreamIndices;
     /* First DM-RS symbol inside the allocation. TS 38.211 puts the front-loaded one at l0, and it
      * is the strongest; the additional positions are used by the estimator but one symbol is what
@@ -902,10 +866,10 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
         break;
       }
     }
-    const int logical_start_sc = (g->bwp_start + g->start_rb) * NR_NB_SC_PER_RB;
-    const int fft_start_sc = (logical_start_sc + fp->first_carrier_offset) % fp->ofdm_symbol_size;
+    const int start_sc = ((g->bwp_start + g->start_rb) * NR_NB_SC_PER_RB + fp->first_carrier_offset)
+                         % fp->ofdm_symbol_size;
     const int num_sc = g->num_rb * NR_NB_SC_PER_RB;
-    if (dmrs_sym >= 0 && num_sp > 0 && num_sc > 0 && nof_plan > 0 && nof_ant_cfr > 0) {
+    if (dmrs_sym >= 0 && num_sp > 0 && num_sc > 0) {
       static __thread float    *ul_h = NULL;
       static __thread uint32_t *ul_k = NULL, *ul_l = NULL;
       static __thread uint32_t  ul_cap = 0;
@@ -929,14 +893,13 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
           const c16_t *h0 = (const c16_t *)&pvp->ul_ch_estimates[0][fp->ofdm_symbol_size * dmrs_sym];
           double e_rel = 0.0, e_abs = 0.0;
           for (int j = 0; j < num_sc; j++) {
-            const int ka = (fft_start_sc + j) % fp->ofdm_symbol_size;
+            const int ka = (start_sc + j) % fp->ofdm_symbol_size;
             e_rel += (double)h0[j].r * h0[j].r + (double)h0[j].i * h0[j].i;
             e_abs += (double)h0[ka].r * h0[ka].r + (double)h0[ka].i * h0[ka].i;
           }
           LOG_I(PHY,
-                "SENSING: ULCFRIDX dmrs_sym=%d fft_start_sc=%d grid_start_sc=%d num_sc=%d "
-                "num_sp=%d E_rel=%.3e E_abs=%.3e\n",
-                dmrs_sym, fft_start_sc, logical_start_sc, num_sc, num_sp, e_rel, e_abs);
+                "SENSING: ULCFRIDX dmrs_sym=%d start_sc=%d num_sc=%d num_sp=%d E_rel=%.3e E_abs=%.3e\n",
+                dmrs_sym, start_sc, num_sc, num_sp, e_rel, e_abs);
         }
       }
       uint32_t nof_re = 0;
@@ -956,11 +919,10 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
        * 256-PRB grants gave pw=[13333 579 58538 53579] (wrong, but believable) and 7-PRB grants
        * gave pw=[0 0 0 0] over 308628 REs, which is what made it visible at all.
        *
-       * The REPORTED subcarrier (ul_k below) is the logical CRB/Point-A carrier-grid coordinate,
-       * 0..N_RB_UL*12-1. first_carrier_offset belongs only to the FFT-buffer address and must never
-       * enter the sensing-grid coordinate. */
+       * The REPORTED subcarrier (ul_k below) stays ABSOLUTE and CRB-referenced -- that is what the
+       * CPI grid indexes on, and it was always correct. Only the read index was wrong. */
       for (int j = 0; j < num_sc && nof_re < ul_cap; j++) {
-        const int k_grid = logical_start_sc + j;
+        const int k_abs = (start_sc + j) % fp->ofdm_symbol_size;
         for (uint32_t a = 0; a < nof_ant_cfr; a++) {
           /* layer 0 only: this receiver rejects multi-layer PUSCH upstream, and a second layer
            * would need its own submission rather than being folded into this one. */
@@ -976,7 +938,7 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
             ant_pw[a] += p2;
           }
         }
-        ul_k[nof_re] = (uint32_t)k_grid;
+        ul_k[nof_re] = (uint32_t)k_abs;
         ul_l[nof_re] = (uint32_t)dmrs_sym;
         nof_re++;
       }
@@ -1005,13 +967,9 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
          * the producer-timeline value FOR THIS SLOT. Exact while the lag stays under one wrap
          * (~10 slots in practice against a 20480-slot wrap). */
         const uint32_t ul_slot_idx = passive_ul_slow_time_idx(fp, frame, slot, abs_slot);
-        for (int pi = 0; pi < nof_plan; pi++) {
-          /* Slice, not copy: ul_h is antenna-major with stride `cap`. */
-          nr_isac_submit_cfr_multi_branch(ul_slot_idx, 0.0f, NR_ISAC_SRC_PUSCH_DMRS, &carrier,
-                                          &ul_h[2 * (size_t)plan[pi].first_ant * cap],
-                                          plan[pi].nof_ant, cap, ul_k, ul_l, nof_re, 1.0f,
-                                          plan[pi].branch_id);
-        }
+        nr_isac_submit_cfr_multi(ul_slot_idx, 0.0f,
+                                 NR_ISAC_SRC_PUSCH_DMRS, &carrier, ul_h, nof_ant_cfr, cap,
+                                 ul_k, ul_l, nof_re, 1.0f);
         atomic_fetch_add_explicit(&g_cfr_re, nof_re, memory_order_relaxed);
         for (uint32_t a = 0; a < nof_ant_cfr && a < PASSIVE_UL_MAX_ANT; a++) {
           /* Accumulate the SUM and divide once at report time. Dividing per grant and casting to
@@ -1159,14 +1117,12 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
    * offset, and it is never written into configuration. Single-layer, no-PTRS scope, matching the
    * inverse it uses; combined ACK+CSI layouts and small-ACK puncturing are not covered. */
   const nr_pdcch_blind_monitor_cfg_t *ucfg = nr_pdcch_blind_monitor_get_cfg();
-  /* Only once the field layout is SETTLED. While the width search is still exploring, most grants
-   * carry a deliberately wrong layout, so their failures have nothing to do with UCI and no
-   * footprint can rescue them -- the search would just burn LDPC attempts on noise and learn
-   * nothing. Measured live during exploration: 104,235 UCI attempts, ~16 per grant, ZERO rescues.
-   * A grant whose width hypothesis is still under test carries width_hyp_class >= 0; a settled one
-   * carries -1, which is the condition used here. */
+  /* Width hypotheses must be scored by the same decoder as settled grants.
+   * Waiting for a width winner before recovering UCI is circular when UCI
+   * prevents the correct width from passing. The existing per-identity rate
+   * limiter bounds exploration; cache entries still require a verified TB CRC. */
   if (rc == 0 && hp_crc_failed(ulsch) && ucfg != NULL && ucfg->ul_uci_search > 0
-      && g->nrOfLayers == 1 && out->G > 0 && g->width_hyp_class < 0) {
+      && g->nrOfLayers == 1 && out->G > 0) {
     const uint32_t full_bits = out->G;
     int16_t *original = malloc((size_t)full_bits * sizeof(*original));
     if (original == NULL) {
@@ -1235,6 +1191,7 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
                (fp->slots_per_frame > 0) ? (10000000ull / (uint64_t)fp->slots_per_frame) : 0);
   }
   PUSCH_STAGE(6, "ulsch_decoding returned");
+  s_stage = 0;
 #undef PUSCH_STAGE
 
   out->qam_mod_order = pdu.qam_mod_order;
@@ -1298,6 +1255,38 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
   out->status = NR_PUSCH_PASSIVE_OK;
   out->tb     = hp->b;
   atomic_fetch_add_explicit(&g_crc_ok, 1, memory_order_relaxed);
+  {
+    /* dataScramblingIdentityPUSCH, same argument as the DL: a CRC-OK TB under this n_ID is proof. */
+    static _Atomic int s_ul_scr_confirmed;
+    int expected = 0;
+    if (atomic_compare_exchange_strong(&s_ul_scr_confirmed, &expected, 1))
+      LOG_A(PHY, "SENSING: DATA_SCRAMBLING_ID PUSCH CONFIRMED n_id=%d (assumed PCI %u) by TB CRC, rnti=0x%x\n",
+            g->data_scrambling_id, (unsigned)fp->Nid_cell, g->rnti);
+  }
+
+  /* 1024-candidate sweep, milliseconds: only when this decode runs on a queue consumer. When the
+   * queue is not running this function IS the RT thread's in-line decode (monitor_rt.c), where a
+   * millisecond burst is a guaranteed timing-loop hit -- the identity then simply stays unmeasured. */
+  if (nr_pusch_passive_queue_running() && g->dmrs_config_type == 0 && !g->transform_precoding
+      && pthread_mutex_trylock(&g_ul_dmrs_id_lock) == 0) {
+    if (!g_ul_dmrs_id_init) { nr_dmrs_id_init(&g_ul_dmrs_id, "PUSCH", g->ul_dmrs_scrambling_id); g_ul_dmrs_id_init = true; }
+    if (!g_ul_dmrs_id.decided) {
+      int dsym = -1;
+      for (int m_ = g->start_symbol; m_ < g->start_symbol + g->num_symbols; m_++)
+        if (g->ul_dmrs_symb_pos & (1u << m_)) { dsym = m_; break; }
+      if (dsym >= 0) {
+        /* rxdataF is a ring of RU_RX_SLOT_DEPTH slots (see the FEP above); absolute subcarriers. */
+        const int slot_off_ = (slot % RU_RX_SLOT_DEPTH) * fp->symbols_per_slot * fp->ofdm_symbol_size;
+        const c16_t *row = &gnb->common_vars.rxdataF[0][slot_off_ + dsym * fp->ofdm_symbol_size];
+        const int start_sc = fp->first_carrier_offset + (g->bwp_start + g->start_rb) * NR_NB_SC_PER_RB;
+        if (nr_dmrs_id_accumulate(&g_ul_dmrs_id, row, fp->ofdm_symbol_size, start_sc,
+                                  g->bwp_start + g->start_rb, g->num_rb, fp->N_RB_UL, fp->symbols_per_slot,
+                                  slot, dsym, g->nscid, fp->Ncp == NR_NORMAL))
+          nr_dmrs_id_decide(&g_ul_dmrs_id, 16, 10.0);
+      }
+    }
+    pthread_mutex_unlock(&g_ul_dmrs_id_lock);
+  }
 
   /* UPLINK DATA-AIDED CFR. Gated on o_ack == 0, which means this TB decoded on the FIRST attempt --
    * the no-UCI hypothesis -- so the codeword occupies every data RE and X is fully reconstructible.

@@ -424,17 +424,6 @@ struct openair0_device {
                         int nb_antennas_tx,
                         int flags);
 
-  /*! \brief Send a source-tagged, already channelized UE waveform to passive RFsim observers.
-   * This optional simulation-only side channel never replaces or modifies the normal UL write.
-   * When empty is true, only a timestamp watermark is transported.
-   */
-  int (*trx_write_passive_ul_func)(openair0_device_t *device,
-                                   openair0_timestamp_t timestamp,
-                                   void **buff,
-                                   int nsamps,
-                                   int num_antennas,
-                                   bool empty);
-
   /*! \brief Called to send samples to the RF target
       @param device pointer to the device structure specific to the RF hardware target
       @param timestamp The timestamp at whicch the first sample MUST be sent
@@ -462,16 +451,6 @@ struct openair0_device {
    */
 
   int (*trx_read_func)(openair0_device_t *device, openair0_timestamp_t *ptimestamp, void **buff, int nsamps, int num_antennas);
-
-  /*! \brief Add independently channelized, source-tagged UE observations to a passive RFsim read.
-   * The driver waits for every configured source watermark and saturating-adds only samples whose
-   * timestamps overlap this read. Returns nsamps on success, zero when disabled, and <0 on error.
-   */
-  int (*trx_add_passive_ul_func)(openair0_device_t *device,
-                                 openair0_timestamp_t timestamp,
-                                 void **buff,
-                                 int nsamps,
-                                 int num_antennas);
 
   /*! \brief Receive samples from hardware.
    * Read nsamps samples from each channel to buffers. buff[0] is the array for
@@ -677,3 +656,4 @@ void openair0_write_reorder_clear_context(openair0_device_t *device);
 #endif
 
 #endif // COMMON_LIB_H
+

@@ -65,6 +65,9 @@ typedef struct nrLDPC_TB_decoding_parameters_s{
   uint32_t F;
 
   uint32_t C;
+  /// Decode only the first this-many segments (0 = all C). The segment CRC type, K', E and the
+  /// LLR offsets are still those of the full C: a layout probe reads code block 0's own CRC.
+  uint32_t nb_segments_to_decode;
   int E;
   uint8_t R;
   int E2;

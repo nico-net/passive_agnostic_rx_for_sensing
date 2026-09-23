@@ -327,7 +327,7 @@ int main(int argc, char **argv)
 
     case 'z':
       n_rx=atoi(optarg);
-      if ((n_rx==0) || (n_rx>2)) {
+      if ((n_rx==0) || (n_rx>4)) {
         printf("Unsupported number of RX antennas %d. Exiting.\n", n_rx);
         exit(-1);
       }
@@ -436,13 +436,14 @@ int main(int argc, char **argv)
   frame_length_complex_samples = frame_parms->samples_per_subframe*NR_NUMBER_OF_SUBFRAMES_PER_FRAME;
   frame_length_complex_samples_no_prefix = frame_parms->samples_per_subframe_wCP;
 
-  s_re = malloc(2*sizeof(double*));
-  s_im = malloc(2*sizeof(double*));
-  r_re = malloc(2*sizeof(double*));
-  r_im = malloc(2*sizeof(double*));
-  txdata = calloc(2, sizeof(c16_t*));
+  const int n_buffers=n_rx>2?n_rx:2;
+  s_re = malloc(n_buffers*sizeof(double*));
+  s_im = malloc(n_buffers*sizeof(double*));
+  r_re = malloc(n_buffers*sizeof(double*));
+  r_im = malloc(n_buffers*sizeof(double*));
+  txdata = calloc(n_buffers, sizeof(c16_t*));
 
-  for (i=0; i<2; i++) {
+  for (i=0; i<n_buffers; i++) {
 
 
     s_re[i] = malloc16_clear(frame_length_complex_samples*sizeof(double));
@@ -597,9 +598,15 @@ int main(int argc, char **argv)
     for (trial = 0; trial < n_trials && !stop; trial++) {
 
       for (i=0; i<frame_length_complex_samples; i++) {
-        for (aa=0; aa<frame_parms->nb_antennas_tx; aa++) {
-          r_re[aa][i] = (double)txdata[aa][i].r;
-          r_im[aa][i] = (double)txdata[aa][i].i;
+        /* This harness currently implements AWGN only (multipath call below is
+         * disabled). Every RX sees the same transmitted waveform, with independently
+         * generated noise below. Previously RX>TX branches contained only noise. */
+        for (aa=0; aa<frame_parms->nb_antennas_rx; aa++) {
+          double re=0,im=0;
+          for(int tx=0;tx<frame_parms->nb_antennas_tx;++tx) {
+            re+=txdata[tx][i].r; im+=txdata[tx][i].i;
+          }
+          r_re[aa][i]=re; r_im[aa][i]=im;
         }
       }
 
@@ -681,7 +688,7 @@ int main(int argc, char **argv)
 
           for (int aarx = 0; aarx < frame_parms->nb_antennas_rx; aarx++) {
             memcpy(rxdataF_symb[aarx],
-                   &rxdataF[0][i * frame_parms->ofdm_symbol_size],
+                   &rxdataF[aarx][(i % frame_parms->symbols_per_slot) * frame_parms->ofdm_symbol_size],
                    sizeof(c16_t) * frame_parms->ofdm_symbol_size);
             nr_pbch_channel_estimation(frame_parms,
                                        &UE->SL_UE_PHY_PARAMS,
@@ -767,7 +774,7 @@ int main(int argc, char **argv)
   term_nr_ue_signal(UE);
   free(UE);
 
-  for (i=0; i<2; i++) {
+  for (i=0; i<n_buffers; i++) {
     free(s_re[i]);
     free(s_im[i]);
     free(r_re[i]);

@@ -234,6 +234,45 @@ static void do_time_to_freq(nr_ssb_search_params_t *params, uint32_t sample_offs
     for (unsigned char aa = 0; aa < params->nb_antennas_rx; aa++) {
       c16_t *rxF = rxdataF[symb][aa];
       dft(dftsize, (int16_t *)&params->rxdata[aa][rx_offset], (int16_t *)rxF, 1);
+
+      // TEMPORARY DIAGNOSTIC (2026-08-05): matches phy_procedures_nr_ue.c's tracking-path FEPDIAG --
+      // same 3 stages, so the two paths' amplitude at each stage can be compared directly for the
+      // same nominal SSB position. do_time_to_freq() has no equivalent nb_prefix_samples0 (this
+      // path never uses the long/first-symbol CP length at all -- see this function's rx_offset
+      // formula above), logged as 0 to make that asymmetry explicit rather than omitting the field.
+      if (aa == 0) {
+        static int s_fepdiag_acq_left = 40;
+        if (s_fepdiag_acq_left > 0) {
+          const c16_t *rxd = params->rxdata[0];
+          double s1_sum = 0.0, s1_sumsq = 0.0;
+          const int s1_n = (int)(params->nb_prefix_samples + params->ofdm_symbol_size);
+          for (int i = 0; i < s1_n; i++) {
+            const double m = hypot((double)rxd[rx_offset - params->nb_prefix_samples + i].r,
+                                   (double)rxd[rx_offset - params->nb_prefix_samples + i].i);
+            s1_sum += m;
+            s1_sumsq += m * m;
+          }
+          double s2_sum = 0.0, s2_sumsq = 0.0;
+          for (int i = 0; i < params->ofdm_symbol_size; i++) {
+            const double m = hypot((double)rxd[rx_offset + i].r, (double)rxd[rx_offset + i].i);
+            s2_sum += m;
+            s2_sumsq += m * m;
+          }
+          double s3_sum = 0.0, s3_sumsq = 0.0;
+          for (int i = 0; i < params->ofdm_symbol_size; i++) {
+            const double m = hypot((double)rxF[i].r, (double)rxF[i].i);
+            s3_sum += m;
+            s3_sumsq += m * m;
+          }
+          LOG_W(PHY,
+                "SENSING: FEPDIAG path=acquisition slot=- symbol=%d rx_offset=%u nb_prefix=%u nb_prefix0=0 "
+                "is_sync=0 s1_mean=%.2f s1_rms=%.2f s2_mean=%.2f s2_rms=%.2f s3_mean=%.2f s3_rms=%.2f\n",
+                symb, rx_offset, params->nb_prefix_samples, s1_sum / s1_n, sqrt(s1_sumsq / s1_n),
+                s2_sum / params->ofdm_symbol_size, sqrt(s2_sumsq / params->ofdm_symbol_size),
+                s3_sum / params->ofdm_symbol_size, sqrt(s3_sumsq / params->ofdm_symbol_size));
+          s_fepdiag_acq_left--;
+        }
+      }
       apply_nr_rotation_symbol_RX(params->symbols_per_slot,
                                   params->slots_per_subframe,
                                   timeshift_symbol_rotation,
@@ -286,9 +325,7 @@ bool nr_search_ssb_common(nr_ssb_search_params_t *params)
 #endif
 
     // Check that SSB fits within buffer
-    if (ssb_time_offset < 0
-        || ssb_time_offset + NR_N_SYMBOLS_SSB * (params->ofdm_symbol_size + params->nb_prefix_samples)
-               >= params->rxdata_size) {
+    if (ssb_time_offset + NR_N_SYMBOLS_SSB * (params->ofdm_symbol_size + params->nb_prefix_samples) >= params->rxdata_size) {
       LOG_D(PHY,
             "SSB extends beyond buffer boundary (sync_pos %d, ssb_time_offset %d, buffer_size %d)\n",
             sync_pos,
@@ -514,7 +551,28 @@ nr_initial_sync_t nr_initial_sync(UE_nr_rxtx_proc_t *proc,
         fp->dl_CarrierFreq,
         fp->N_RB_DL,
         numGscn);
-  DevAssert(numGscn);
+  if (numGscn <= 0) {
+    LOG_W(NR_PHY, "ISAC_ACQ_EMPTY_WINDOW: no synchronization raster points\n");
+    return (nr_initial_sync_t){.cell_detected = false};
+  }
+  const char *auto_env = getenv("ISAC_AUTO_ACQUIRE");
+  const bool auto_acquire = auto_env && !strcmp(auto_env, "1");
+  int cfo_bins = 0;
+  int cfo_limit_hz = 0;
+  if (auto_acquire) {
+    AssertFatal(IS_PASSIVE_RX_MODE(get_softmodem_params()), "Automatic acquisition is passive-only\n");
+    AssertFatal(ue->UE_fo_compensation, "Automatic acquisition requires --ue-fo-compensation\n");
+    const char *bound = getenv("ISAC_ACQ_CFO_MAX_HZ");
+    char *end = NULL;
+    const double max_hz = bound ? strtod(bound, &end) : 0;
+    AssertFatal(bound && end != bound && !*end && isfinite(max_hz) && max_hz > 0
+                    && max_hz <= 32.0 * fp->subcarrier_spacing,
+                "ISAC_ACQ_CFO_MAX_HZ must be a positive search bound <= 32 SCS\n");
+    AssertFatal(fabs((double)ue->initial_fo) <= max_hz, "Initial CFO measurement exceeds search bound\n");
+    cfo_limit_hz = (int)floor(max_hz);
+    cfo_bins = (int)ceil((max_hz + fabs((double)ue->initial_fo)) / fp->subcarrier_spacing);
+  }
+
 
   /* Peak scratch memory, not parallelism, is the binding constraint on this scan.
    *
@@ -535,8 +593,46 @@ nr_initial_sync_t nr_initial_sync(UE_nr_rxtx_proc_t *proc,
    * is bounded by BOTH the worker count and a fixed scratch budget, which keeps peak memory flat
    * regardless of bandwidth, antenna count, or how many GSCN the band search yields.
    */
+  /* SCAN ON EVERY BRANCH, STRONGEST FIRST. pss_search_time_nr() already sums the correlation
+   * power over the antennas it is given and the PBCH step MRCs them, so the scan gets the full
+   * combining gain simply by being handed all branches. It used to be handed ONE (antenna 0)
+   * because 273 PRB x 4 RX x ~40 GSCN of scratch once exhausted memory; the scratch is now
+   * batched under NR_INITIAL_SYNC_SCAN_SCRATCH_BUDGET (4 branches at 273 PRB = 6 GSCN per batch
+   * instead of 24), so that reason is gone. The receive chain itself is unchanged: nothing is
+   * retuned, the stream is the same channels before and after lock. ISAC_SCAN_ANT=N narrows the
+   * scan to the N strongest branches (A/B only). */
+  NR_DL_FRAME_PARMS scan_fp = ue->frame_parms;
+  {
+    const char *e = getenv("ISAC_SCAN_ANT");
+    int scan_ant = (e != NULL) ? atoi(e) : fp->nb_antennas_rx;
+    if (scan_ant < 1 || scan_ant > fp->nb_antennas_rx)
+      scan_ant = fp->nb_antennas_rx;
+    scan_fp.nb_antennas_rx = scan_ant;
+  }
+  /* WHICH branch(es) feed the scan is decided by measured power, not by index. The X410's four
+   * branches differ by up to 12 dB and the ordering changes between sessions (2026-09-17: antenna 0
+   * read 12 dB below antenna 3 and the -r 51 scan could not decode PBCH on it, while the same
+   * capture locked at once with the strongest branch in its place). Rank the physical branches by
+   * energy over the captured frames and give the scan the top scan_ant of them. */
+  int scan_src[NB_ANTENNAS_RX];
+  {
+    double e_ant[NB_ANTENNAS_RX] = {0};
+    for (int aarx = 0; aarx < fp->nb_antennas_rx; aarx++) {
+      scan_src[aarx] = aarx;
+      e_ant[aarx] = signal_energy((int32_t *)&ue->common_vars.rxdata[aarx][0], fp->samples_per_frame);
+    }
+    for (int i = 0; i < fp->nb_antennas_rx; i++) // selection sort, descending energy
+      for (int j = i + 1; j < fp->nb_antennas_rx; j++)
+        if (e_ant[scan_src[j]] > e_ant[scan_src[i]]) {
+          const int t = scan_src[i]; scan_src[i] = scan_src[j]; scan_src[j] = t;
+        }
+    if (fp->nb_antennas_rx > 1)
+      LOG_I(NR_PHY, "Scan branch by energy: antenna %d (%.1f dB above antenna 0); order [%d %d %d %d]\n",
+            scan_src[0], 10.0 * log10((e_ant[scan_src[0]] + 1.0) / (e_ant[0] + 1.0)),
+            scan_src[0], fp->nb_antennas_rx > 1 ? scan_src[1] : 0, fp->nb_antennas_rx > 2 ? scan_src[2] : 0, fp->nb_antennas_rx > 3 ? scan_src[3] : 0);
+  }
   const size_t rxdata_len = (size_t)fp->samples_per_frame * n_frames + fp->ofdm_symbol_size;
-  const size_t bytes_per_gscn = (size_t)fp->nb_antennas_rx * rxdata_len * sizeof(c16_t);
+  const size_t bytes_per_gscn = (size_t)scan_fp.nb_antennas_rx * rxdata_len * sizeof(c16_t);
   size_t max_by_mem = NR_INITIAL_SYNC_SCAN_SCRATCH_BUDGET / (bytes_per_gscn ? bytes_per_gscn : 1);
   if (max_by_mem < 1)
     max_by_mem = 1; // one GSCN at a time is the floor; below that the scan cannot run at all
@@ -562,7 +658,25 @@ nr_initial_sync_t nr_initial_sync(UE_nr_rxtx_proc_t *proc,
   // returns exactly the cell the single-shot version did.
   nr_ue_ssb_scan_t *res = NULL;
 
-  for (int base = 0; base < numGscn; base += batch) {
+  /* Search integer-SCS ambiguities on fresh private copies, then let the
+   * existing PSS/SSS estimators refine CFO. Only PBCH CRC accepts a hypothesis.
+   * This increases work, not scratch memory, and never retunes the radio. */
+  for (int trial = 0; trial <= 2 * cfo_bins && !res; ++trial) {
+    /* Probe starts at zero; handoff starts at this run's PBCH-derived CFO.
+     * Fresh PBCH CRC still accepts every trial, including the initial seed. */
+    /* SIGNED arithmetic: fp->subcarrier_spacing is uint32_t, so the -1 direction was promoted to
+     * unsigned and wrapped -- every negative trial evaluated to INT_MIN and was then skipped by the
+     * abs() guard (whose INT_MIN case is itself UB). The search therefore only ever probed the
+     * POSITIVE hypotheses, which is why a rig sitting below -SCS/2 could never acquire. */
+    const int scs_hz = (int)fp->subcarrier_spacing;
+    const int step = ((trial + 1) / 2) * scs_hz;
+    const int coarse_offset = ue->initial_fo + ((trial & 1) ? step : -step);
+    if (auto_acquire && abs(coarse_offset) > cfo_limit_hz)
+      continue;
+    if (auto_acquire)
+      LOG_I(NR_PHY, "ISAC_ACQ_CFO_TRIAL coarse_hz=%d\n", coarse_offset);
+  for (int base = 0; base < numGscn && !res; base += batch) {
+
     const int n = (numGscn - base < batch) ? (numGscn - base) : batch;
     bool ready[n];
     int pushed = 0;
@@ -573,21 +687,21 @@ nr_initial_sync_t nr_initial_sync(UE_nr_rxtx_proc_t *proc,
     for (int k = 0; k < n; k++) {
       nr_ue_ssb_scan_t *ssbInfo = &ssb_info[base + k];
       *ssbInfo = (nr_ue_ssb_scan_t){.gscnInfo = gscnInfo[base + k],
-                                    .fp = &ue->frame_parms,
+                                    .fp = &scan_fp,
                                     .proc = proc,
                                     .syncRes.cell_detected = false,
                                     .nFrames = n_frames,
                                     .foFlag = ue->UE_fo_compensation,
-                                    .freqOffset = ue->initial_fo,
+                                    .freqOffset = auto_acquire ? coarse_offset : ue->initial_fo,
                                     .targetNidCell = ue->target_Nid_cell};
       ready[k] = false;
-      ssbInfo->rxdata = malloc16_clear(fp->nb_antennas_rx * sizeof(c16_t *));
+      ssbInfo->rxdata = malloc16_clear(scan_fp.nb_antennas_rx * sizeof(c16_t *));
       if (!ssbInfo->rxdata) {
         LOG_E(NR_PHY, "GSCN %d: cannot allocate scan buffer array, skipping this GSCN\n", ssbInfo->gscnInfo.gscn);
         continue;
       }
       bool ok = true;
-      for (int ant = 0; ant < fp->nb_antennas_rx; ant++) {
+      for (int ant = 0; ant < scan_fp.nb_antennas_rx; ant++) {
         ssbInfo->rxdata[ant] = malloc16(sizeof(c16_t) * rxdata_len);
         if (!ssbInfo->rxdata[ant]) {
           LOG_E(NR_PHY,
@@ -598,7 +712,7 @@ nr_initial_sync_t nr_initial_sync(UE_nr_rxtx_proc_t *proc,
           ok = false;
           break; // partial allocation is released by the collection loop below
         }
-        memcpy(ssbInfo->rxdata[ant], ue->common_vars.rxdata[ant], sizeof(c16_t) * fp->samples_per_frame * n_frames);
+        memcpy(ssbInfo->rxdata[ant], ue->common_vars.rxdata[scan_src[ant]], sizeof(c16_t) * fp->samples_per_frame * n_frames);
         memset(ssbInfo->rxdata[ant] + fp->samples_per_frame * n_frames, 0, fp->ofdm_symbol_size * sizeof(c16_t));
         ssbInfo->rxdata_sz = rxdata_len;
       }
@@ -641,7 +755,7 @@ nr_initial_sync_t nr_initial_sync(UE_nr_rxtx_proc_t *proc,
           res = ssbInfo;
       }
       if (ssbInfo->rxdata) {
-        for (int ant = 0; ant < fp->nb_antennas_rx; ant++) {
+        for (int ant = 0; ant < scan_fp.nb_antennas_rx; ant++) {
           free(ssbInfo->rxdata[ant]);
         }
         free(ssbInfo->rxdata);
@@ -654,6 +768,8 @@ nr_initial_sync_t nr_initial_sync(UE_nr_rxtx_proc_t *proc,
       break;
     }
   }
+
+  } // coarse CFO hypotheses
 
   // Set globals based on detected cell
   if (res) {
@@ -733,6 +849,17 @@ nr_initial_sync_t nr_initial_sync(UE_nr_rxtx_proc_t *proc,
     LOG_I(PHY, "[UE%d] In synch, rx_offset %d samples\n", ue->Mod_id, res->syncRes.rx_offset);
     LOG_I(PHY, "[UE %d] Measured Carrier Frequency offset %d Hz\n", ue->Mod_id, res->freqOffset);
     LOG_A(PHY, "Initial sync successful, PCI: %d\n", fp->Nid_cell);
+    if (auto_acquire) {
+      const double ss_ref = res->gscnInfo.ssRef > 0 ? res->gscnInfo.ssRef
+          : (double)fp->dl_CarrierFreq
+              + (res->gscnInfo.ssbFirstSC + 120 - 6 * fp->N_RB_DL) * (double)fp->subcarrier_spacing;
+      LOG_I(NR_PHY,
+            "ISAC_ACQ_SSB {\"pci\":%d,\"gscn\":%d,\"ss_ref_hz\":%.0f,"
+            "\"ssb_mu\":%d,\"cfo_hz\":%d,\"sto_samples\":%d,\"sample_rate_hz\":%d}\n",
+            fp->Nid_cell, res->gscnInfo.gscn, ss_ref, fp->numerology_index,
+            res->freqOffset, res->syncRes.rx_offset, fp->samples_per_subframe * 1000);
+    }
+
     return res->syncRes;
   } else {
 #ifdef DEBUG_INITIAL_SYNC

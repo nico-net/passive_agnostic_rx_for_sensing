@@ -110,6 +110,9 @@ void *sensing_channel_make(channel_desc_t *cd,
  * @return number of elements accepted (0 on a NULL/empty/malformed spec).
  */
 int sensing_channel_set_rx_array(void *traj, const char *spec, double boresight_deg);
+/** TX element offsets: per-port departure steering, so a multi-port gNB produces a full-rank channel
+ *  with enough scatterers. Empty = rank-1 (every port radiates the same wavefront). */
+int sensing_channel_set_tx_array(void *traj, const char *spec, double boresight_deg);
 
 /**
  * @brief Inject a RECEIVER CLOCK error (STO / CFO / SFO) into the sensing channel.

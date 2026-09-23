@@ -19,6 +19,8 @@
 #include "RRC/NR_UE/L2_interface_ue.h"
 #include "oai_asn1.h"
 #include "PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.h"
+#include "PHY/NR_UE_TRANSPORT/nr_passive_acq_state.h"
+#include "PHY/NR_UE_TRANSPORT/nr_pdcch_sib1_prior.h"
 
 #define ASIGN_P_VAL(dst, src) \
   do {                        \
@@ -1095,6 +1097,15 @@ void nr_rrc_mac_sched_sib(module_id_t module_id, int sched_sib)
   if (sched_sib == 1) {
     bool const is_c0 = is_cset0_present(mac->frequency_range, mac->ssb_subcarrier_offset);
     mac->get_sib1 = is_c0;
+    /* A passive receiver must survive a cell without SIB1 (e.g. a --phy-test gNB, whose MIB carries no
+     * CORESET 0): it runs from its manual pdcch_blind_monitor_* configuration instead. */
+    if (!is_c0 && IS_PASSIVE_RX_MODE(get_softmodem_params())) {
+      static bool warned;
+      if (!warned)
+        LOG_W(NR_MAC, "Passive RX: MIB indicates no CORESET 0 / SIB1 in this cell -- not scheduling SIB1\n");
+      warned = true;
+      return;
+    }
     AssertFatal(is_c0, "RRC scheduling SIB1 reception but MIB indicates no SIB1 present in current cell\n");
   } else if (sched_sib > 1)
     mac->get_otherSI[sched_sib - 2] = true;
@@ -1752,6 +1763,34 @@ static void configure_common_BWP_dl(NR_UE_MAC_INST_t *mac, int bwp_id, NR_BWP_Do
         asn1cFreeStruc(asn_DEF_NR_PDSCH_TimeDomainResourceAllocationList, bwp->tdaList_Common);
     }
 
+    /* Publish the cell's own PDSCH TDRA list to the blind monitor. The probe below decodes the
+     * same SLIV values but is gated on ISAC_OTA_CFG and only LOGS them, so tda_common_count stayed
+     * 0 and every RA-RNTI / TC-RNTI grant silently fell back to the spec DEFAULT table.
+     * MEASURED 2026-09-21: SIB1 decodes at S=1,L=13 (it must use the default table -- the list
+     * travels inside SIB1) while RARs resolved to the default S=2,L=12 and failed CRC 19/19 with
+     * every other field correct. Wrong symbols means the wrong DM-RS row AND the wrong data REs. */
+    if (bwp_id == 0 && bwp->tdaList_Common != NULL && bwp->tdaList_Common->list.count > 0) {
+      uint8_t ts[16], tl[16], tm[16];
+      int nt = bwp->tdaList_Common->list.count;
+      if (nt > 16) {
+        nt = 16;
+      }
+      for (int t = 0; t < nt; t++) {
+        const NR_PDSCH_TimeDomainResourceAllocation_t *e = bwp->tdaList_Common->list.array[t];
+        const int sliv = (int)e->startSymbolAndLength;
+        /* Same disambiguation as the probe: SLIV alone is ambiguous, S + L <= 14 selects the pair. */
+        int S = sliv % 14, L = (sliv / 14) + 1;
+        if (S + L > 14) {
+          L = 14 - (sliv / 14) + 1;
+          S = 14 - 1 - (sliv % 14);
+        }
+        ts[t] = (uint8_t)S;
+        tl[t] = (uint8_t)L;
+        tm[t] = (uint8_t)e->mappingType;
+      }
+      nr_pdcch_blind_monitor_set_tda_common(ts, tl, tm, nt);
+    }
+
     /* ---- OTA CONFIG DERIVATION PROBE (ISAC_OTA_CFG=1) -------------------------------------
      * Everything the blind PDCCH monitor is currently TOLD via pdcch_blind_monitor_* is, for the
      * COMMON configuration, already available here -- decoded from SIB1 over the air, with no
@@ -2131,6 +2170,243 @@ void nr_rrc_mac_start_ra(module_id_t module_id, nr_mac_ra_start_cause_t cause)
   AssertFatal(!ret, "mutex failed %d\n", ret);
 }
 
+/* Log every broadcast SearchSpace separately: timing and type remain attached to its candidates. */
+static void log_sib1_pdcch_search_spaces(const NR_PDCCH_ConfigCommon_t *pcc)
+{
+  static unsigned seq;
+  const unsigned n = ++seq;
+  if (!pcc) { LOG_A(NR_MAC, "SENSING: SIB1_PDCCH seq=%u absent\n", n); return; }
+  LOG_A(NR_MAC, "SENSING: SIB1_PDCCH seq=%u crs0=%ld ss0=%ld common_crs=%s count=%d refs[sib1=%ld otherSI=%ld paging=%ld ra=%ld]\n",
+        n, pcc->controlResourceSetZero ? *pcc->controlResourceSetZero : -1L,
+        pcc->searchSpaceZero ? *pcc->searchSpaceZero : -1L,
+        pcc->commonControlResourceSet ? "present" : "absent",
+        pcc->commonSearchSpaceList ? pcc->commonSearchSpaceList->list.count : 0,
+        pcc->searchSpaceSIB1 ? *pcc->searchSpaceSIB1 : -1L,
+        pcc->searchSpaceOtherSystemInformation ? *pcc->searchSpaceOtherSystemInformation : -1L,
+        pcc->pagingSearchSpace ? *pcc->pagingSearchSpace : -1L,
+        pcc->ra_SearchSpace ? *pcc->ra_SearchSpace : -1L);
+  if (!pcc->commonSearchSpaceList) return;
+  for (int i = 0; i < pcc->commonSearchSpaceList->list.count; ++i) {
+    const NR_SearchSpace_t *ss = pcc->commonSearchSpaceList->list.array[i];
+    if (!ss) { LOG_A(NR_MAC, "SENSING: SIB1_SS seq=%u index=%d null\n", n, i); continue; }
+    int period = 0, offset = 0;
+    if (ss->monitoringSlotPeriodicityAndOffset) get_monitoring_period_offset(ss, &period, &offset);
+    uint16_t symbols = 0;
+    if (ss->monitoringSymbolsWithinSlot && ss->monitoringSymbolsWithinSlot->size >= 2)
+      symbols = (uint16_t)(((uint16_t)ss->monitoringSymbolsWithinSlot->buf[0] << 6)
+                           | (ss->monitoringSymbolsWithinSlot->buf[1] >> 2));
+    uint8_t cand[5] = {0};
+    if (ss->nrofCandidates) {
+      const long raw[5] = {ss->nrofCandidates->aggregationLevel1, ss->nrofCandidates->aggregationLevel2,
+                           ss->nrofCandidates->aggregationLevel4, ss->nrofCandidates->aggregationLevel8,
+                           ss->nrofCandidates->aggregationLevel16};
+      for (int a = 0; a < 5; ++a) cand[a] = raw[a] >= 7 ? 8 : (uint8_t)raw[a];
+    }
+    const char *type = "unset";
+    int f00_10 = 0, f20 = 0, f21 = 0, f22 = 0, f23 = 0, ue_formats = -1;
+    if (ss->searchSpaceType && ss->searchSpaceType->present == NR_SearchSpace__searchSpaceType_PR_common) {
+      type = "common";
+      if (ss->searchSpaceType->choice.common) {
+        const struct NR_SearchSpace__searchSpaceType__common *c = ss->searchSpaceType->choice.common;
+        f00_10 = c->dci_Format0_0_AndFormat1_0 != NULL; f20 = c->dci_Format2_0 != NULL;
+        f21 = c->dci_Format2_1 != NULL; f22 = c->dci_Format2_2 != NULL; f23 = c->dci_Format2_3 != NULL;
+      }
+    } else if (ss->searchSpaceType && ss->searchSpaceType->present == NR_SearchSpace__searchSpaceType_PR_ue_Specific) {
+      type = "ue-specific";
+      if (ss->searchSpaceType->choice.ue_Specific) ue_formats = ss->searchSpaceType->choice.ue_Specific->dci_Formats;
+    }
+    LOG_A(NR_MAC, "SENSING: SIB1_SS seq=%u index=%d id=%ld coreset=%ld type=%s period=%d offset=%d duration=%ld symbols=0x%04x cand[1,2,4,8,16]=%u,%u,%u,%u,%u formats[00_10=%d 20=%d 21=%d 22=%d 23=%d ue=%d] roles[sib1=%d otherSI=%d paging=%d ra=%d]\n",
+          n, i, ss->searchSpaceId, ss->controlResourceSetId ? *ss->controlResourceSetId : -1L,
+          type, period, offset, ss->duration ? *ss->duration : 1L, symbols,
+          cand[0], cand[1], cand[2], cand[3], cand[4], f00_10, f20, f21, f22, f23, ue_formats,
+          pcc->searchSpaceSIB1 && ss->searchSpaceId == *pcc->searchSpaceSIB1,
+          pcc->searchSpaceOtherSystemInformation && ss->searchSpaceId == *pcc->searchSpaceOtherSystemInformation,
+          pcc->pagingSearchSpace && ss->searchSpaceId == *pcc->pagingSearchSpace,
+          pcc->ra_SearchSpace && ss->searchSpaceId == *pcc->ra_SearchSpace);
+  }
+}
+
+/* Publish the SIB1-derived PDCCH prior (see nr_pdcch_sib1_prior.h).
+ *
+ * The blind CORESET search brute-forces ~36,000 (extent x mapping) hypotheses while SIB1 -- which
+ * decodes on every run -- carries commonControlResourceSet: the same bitmap, duration, bundle,
+ * interleaver, shift and DM-RS scrambling id, already decoded. The passive path had `scc` in hand
+ * and returned early, and the caller frees the ASN.1 struct immediately afterwards, so the answer
+ * was being read and discarded once per run.
+ *
+ * Every conversion below mirrors nr_ue_dci_configuration.c's own CORESET decoding (the canonical
+ * one) so a consumer can use these values directly as fapi_nr_coreset_t fields. This is the COMMON
+ * CORESET, so it is a prioritised HYPOTHESIS for the dedicated one, never an answer. */
+static void publish_sib1_pdcch_prior(const NR_UE_MAC_INST_t *mac, const NR_ServingCellConfigCommonSIB_t *scc)
+{
+  if (scc == NULL) {
+    return;
+  }
+  nr_pdcch_sib1_prior_t pr;
+  memset(&pr, 0, sizeof(pr));
+
+  const NR_BWP_DownlinkCommon_t *dl_common = &scc->downlinkConfigCommon.initialDownlinkBWP;
+
+  /* Initial DL BWP. The blind DCI length sweep has been sizing n_rb_riv from the SIB1 CARRIER,
+   * which only equals the BWP when the operator has not narrowed it. */
+  const long lab = dl_common->genericParameters.locationAndBandwidth;
+  pr.dl_bwp_size = (uint16_t)NRRIV2BW(lab, MAX_BWP_SIZE);
+  pr.dl_bwp_start = (uint16_t)NRRIV2PRBOFFSET(lab, MAX_BWP_SIZE);
+  pr.dl_bwp_valid = (pr.dl_bwp_size > 0);
+
+  if (dl_common->pdcch_ConfigCommon != NULL
+      && dl_common->pdcch_ConfigCommon->present == NR_SetupRelease_PDCCH_ConfigCommon_PR_setup) {
+    const NR_PDCCH_ConfigCommon_t *pcc = dl_common->pdcch_ConfigCommon->choice.setup;
+    log_sib1_pdcch_search_spaces(pcc);
+
+    if (pcc->ra_SearchSpace != NULL) {
+      pr.ra_ss_valid = true;
+      pr.ra_ss_id = (uint8_t)*pcc->ra_SearchSpace;
+      /* Its OWN occasions, not SIB1's. Looked up by searchSpaceId in the common list. */
+      if (pcc->commonSearchSpaceList != NULL) {
+        for (int i = 0; i < pcc->commonSearchSpaceList->list.count; i++) {
+          const NR_SearchSpace_t *ss = pcc->commonSearchSpaceList->list.array[i];
+          if (ss == NULL || ss->searchSpaceId != *pcc->ra_SearchSpace
+              || ss->monitoringSlotPeriodicityAndOffset == NULL) {
+            continue;
+          }
+          int per = 0, off = 0;
+          get_monitoring_period_offset(ss, &per, &off);
+          pr.ra_ss_period   = (uint16_t)per;
+          pr.ra_ss_offset   = (uint16_t)off;
+          pr.ra_ss_duration = (uint8_t)(ss->duration != NULL ? *ss->duration : 1);
+          if (ss->monitoringSymbolsWithinSlot != NULL && ss->monitoringSymbolsWithinSlot->size >= 2)
+            pr.ra_ss_symbol_mask = (uint16_t)(((uint16_t)ss->monitoringSymbolsWithinSlot->buf[0] << 6)
+                                              | (ss->monitoringSymbolsWithinSlot->buf[1] >> 2));
+          break;
+        }
+      }
+    }
+    if (pcc->searchSpaceSIB1 != NULL) {
+      pr.sib1_ss_valid = true;
+      pr.sib1_ss_id = (uint8_t)*pcc->searchSpaceSIB1;
+    }
+    if (pcc->pagingSearchSpace != NULL) {
+      pr.paging_ss_valid = true;
+      pr.paging_ss_id = (uint8_t)*pcc->pagingSearchSpace;
+    }
+
+    const NR_ControlResourceSet_t *cs = pcc->commonControlResourceSet;
+    if (cs != NULL) {
+      pr.coreset_valid = true;
+      pr.coreset_id = (uint8_t)cs->controlResourceSetId;
+      pr.duration = (uint8_t)cs->duration;
+      for (int i = 0; i < 6 && i < cs->frequencyDomainResources.size; i++) {
+        pr.frequency_domain_resource[i] = cs->frequencyDomainResources.buf[i];
+      }
+      if (cs->cce_REG_MappingType.present == NR_ControlResourceSet__cce_REG_MappingType_PR_interleaved) {
+        const struct NR_ControlResourceSet__cce_REG_MappingType__interleaved *il =
+            cs->cce_REG_MappingType.choice.interleaved;
+        pr.interleaved = true;
+        pr.reg_bundle_size =
+            (uint8_t)((il->reg_BundleSize == NR_ControlResourceSet__cce_REG_MappingType__interleaved__reg_BundleSize_n6)
+                          ? 6
+                          : (2 + il->reg_BundleSize));
+        pr.interleaver_size =
+            (uint8_t)((il->interleaverSize == NR_ControlResourceSet__cce_REG_MappingType__interleaved__interleaverSize_n6)
+                          ? 6
+                          : (2 + il->interleaverSize));
+        /* Both of these DEFAULT TO physCellId when absent -- a wrong value here does not weaken the
+         * estimate, it makes Y/X use the wrong X, which reads as a dead channel. */
+        pr.shift_index = (uint16_t)(il->shiftIndex != NULL ? *il->shiftIndex : mac->physCellId);
+      } else {
+        pr.interleaved = false;
+        pr.reg_bundle_size = 0;
+        pr.interleaver_size = 0;
+        pr.shift_index = 0;
+      }
+      pr.pdcch_dmrs_scrambling_id =
+          (uint16_t)(cs->pdcch_DMRS_ScramblingID != NULL ? *cs->pdcch_DMRS_ScramblingID : mac->physCellId);
+    }
+
+    /* nrofCandidates per AL is the cell's OWN answer to what the adaptive AL ladder infers from
+     * accept counts. Take the MAX across the common search spaces: a level any common SS monitors
+     * is a level the cell uses. A zero is informative too -- it means do not scan that level. */
+    if (pcc->commonSearchSpaceList != NULL) {
+      for (int i = 0; i < pcc->commonSearchSpaceList->list.count; i++) {
+        const NR_SearchSpace_t *ss = pcc->commonSearchSpaceList->list.array[i];
+        if (ss == NULL || ss->nrofCandidates == NULL) {
+          continue;
+        }
+        const long al[NR_SIB1_PRIOR_NUM_AL] = {ss->nrofCandidates->aggregationLevel1,
+                                               ss->nrofCandidates->aggregationLevel2,
+                                               ss->nrofCandidates->aggregationLevel4,
+                                               ss->nrofCandidates->aggregationLevel8,
+                                               ss->nrofCandidates->aggregationLevel16};
+        for (int a = 0; a < NR_SIB1_PRIOR_NUM_AL; a++) {
+          /* ASN.1 enum n0,n1,n2,n3,n4,n5,n6,n8 -> 0,1,2,3,4,5,6,8 */
+          const uint8_t n = (al[a] >= 7) ? 8 : (uint8_t)al[a];
+          if (n > pr.al_candidates[a]) {
+            pr.al_candidates[a] = n;
+          }
+        }
+        pr.ss_valid = true;
+      }
+    }
+  }
+
+  /* RACH, for the ONE purpose of making an RA-RNTI accept self-verifying (see the validator in
+   * nr_pdcch_sib1_prior.c). Path mirrors this file's own PRACH configuration block above. */
+  if (scc->uplinkConfigCommon != NULL && scc->uplinkConfigCommon->initialUplinkBWP.rach_ConfigCommon != NULL
+      && scc->uplinkConfigCommon->initialUplinkBWP.rach_ConfigCommon->present
+             == NR_SetupRelease_RACH_ConfigCommon_PR_setup) {
+    const NR_RACH_ConfigCommon_t *rc = scc->uplinkConfigCommon->initialUplinkBWP.rach_ConfigCommon->choice.setup;
+    const NR_RACH_ConfigGeneric_t *rg = &rc->rach_ConfigGeneric;
+    pr.prach_config_index = (uint8_t)rg->prach_ConfigurationIndex;
+    pr.msg1_frequency_start = (uint16_t)rg->msg1_FrequencyStart;
+    /* ASN.1 enum 0..3 -> 1/2/4/8 occasions, same mapping as NR_MAC_gNB/config.c's switch. Stored
+     * DECODED so the validator never has to know about the enum. */
+    pr.msg1_fdm = (uint8_t)(1u << (unsigned)(rg->msg1_FDM & 3));
+    pr.rach_valid = true;
+  }
+  /* Supplementary uplink is what would allow ul_carrier_id = 1 in an RA-RNTI. */
+  pr.sul_present = (scc->supplementaryUplink != NULL);
+
+  nr_pdcch_sib1_prior_set(&pr);
+}
+
+/* Probe mode stops at broadcast facts: applying SIB1 to a trial RF window
+ * would incorrectly promote the scan center to the actual carrier center.
+ * The supervisor derives Point A and restarts with the broadcast geometry.
+ * In capture mode the same event revalidates the handoff before declaring LIVE. */
+static bool passive_acquisition_sib1(NR_UE_MAC_INST_t *mac, NR_ServingCellConfigCommonSIB_t *scc)
+{
+  const char *automatic = getenv("ISAC_AUTO_ACQUIRE");
+  if (!IS_PASSIVE_RX_MODE(get_softmodem_params()) || !automatic || strcmp(automatic, "1"))
+    return false;
+  const char *probe_env = getenv("ISAC_ACQ_PROBE");
+  const bool probe = probe_env && !strcmp(probe_env, "1");
+  const NR_FrequencyInfoDL_SIB_t *dl = &scc->downlinkConfigCommon.frequencyInfoDL;
+  const NR_FrequencyInfoUL_SIB_t *ul = scc->uplinkConfigCommon ? &scc->uplinkConfigCommon->frequencyInfoUL : NULL;
+  if (!mac->mib || mac->frequency_range != FR1 || dl->frequencyBandList.list.count < 1
+      || !dl->frequencyBandList.list.array[0]->freqBandIndicatorNR
+      || dl->scs_SpecificCarrierList.list.count != 1 || !ul || ul->scs_SpecificCarrierList.list.count != 1) {
+    LOG_W(NR_MAC, "ISAC_ACQ_UNSUPPORTED: need FR1 with one DL and one UL SCS carrier\n");
+    return probe;
+  }
+  LOG_I(NR_MAC,
+        "ISAC_ACQ_SIB1 {\"pci\":%d,\"band\":%ld,\"mib_mu\":%ld,"
+        "\"dl_mu\":%ld,\"dl_prb\":%ld,\"dl_offset_rb\":%ld,"
+        "\"offset_to_point_a_rb\":%ld,\"k_ssb\":%d,\"tdd\":%d,"
+        "\"ul_mu\":%ld,\"ul_prb\":%ld,\"ul_offset_rb\":%ld,\"ul_point_a_arfcn\":%ld}\n",
+        (int)mac->physCellId, *dl->frequencyBandList.list.array[0]->freqBandIndicatorNR,
+        mac->mib->subCarrierSpacingCommon,
+        dl->scs_SpecificCarrierList.list.array[0]->subcarrierSpacing,
+        dl->scs_SpecificCarrierList.list.array[0]->carrierBandwidth,
+        dl->scs_SpecificCarrierList.list.array[0]->offsetToCarrier,
+        dl->offsetToPointA, mac->ssb_subcarrier_offset, scc->tdd_UL_DL_ConfigurationCommon != NULL,
+        ul->scs_SpecificCarrierList.list.array[0]->subcarrierSpacing,
+        ul->scs_SpecificCarrierList.list.array[0]->carrierBandwidth,
+        ul->scs_SpecificCarrierList.list.array[0]->offsetToCarrier,
+        ul->absoluteFrequencyPointA ? *ul->absoluteFrequencyPointA : -1L);
+  return probe;
+}
+
 void nr_rrc_mac_config_req_sib1(module_id_t module_id, int cc_idP, NR_SIB1_t *sib1, bool can_start_ra)
 {
   NR_UE_MAC_INST_t *mac = get_mac_inst(module_id);
@@ -2144,6 +2420,43 @@ void nr_rrc_mac_config_req_sib1(module_id_t module_id, int cc_idP, NR_SIB1_t *si
   }
   NR_ServingCellConfigCommonSIB_t *scc = sib1->servingCellConfigCommon;
   AssertFatal(scc, "SIB1 SCC should not be NULL\n");
+  {
+    static bool logged_once = false;
+    if (!logged_once) {
+      logged_once = true;
+      const NR_FrequencyInfoDL_SIB_t *fdl = &scc->downlinkConfigCommon.frequencyInfoDL;
+      long dl_bw_prb = 0, dl_scs = -1;
+      if (fdl->scs_SpecificCarrierList.list.count > 0) {
+        dl_bw_prb = fdl->scs_SpecificCarrierList.list.array[0]->carrierBandwidth;
+        dl_scs = fdl->scs_SpecificCarrierList.list.array[0]->subcarrierSpacing;
+      }
+      long ul_bw_prb = 0, ul_scs = -1, ul_pointA = -1;
+      if (scc->uplinkConfigCommon) {
+        const NR_FrequencyInfoUL_SIB_t *ful = &scc->uplinkConfigCommon->frequencyInfoUL;
+        if (ful->scs_SpecificCarrierList.list.count > 0) {
+          ul_bw_prb = ful->scs_SpecificCarrierList.list.array[0]->carrierBandwidth;
+          ul_scs = ful->scs_SpecificCarrierList.list.array[0]->subcarrierSpacing;
+        }
+        if (ful->absoluteFrequencyPointA)
+          ul_pointA = *ful->absoluteFrequencyPointA;
+      }
+      LOG_I(NR_MAC,
+            "PASSIVE: cell config extracted from SIB1 -- PCI=%ld DL: %ld PRB @ SCS=%ld offsetToPointA=%ld "
+            "UL: %ld PRB @ SCS=%ld absoluteFrequencyPointA=%ld\n",
+            mac->physCellId, dl_bw_prb, dl_scs, (long)fdl->offsetToPointA, ul_bw_prb, ul_scs, ul_pointA);
+    }
+  }
+  /* Publish BEFORE the passive early-return below: that return skips the rest of this function,
+   * and the caller frees the ASN.1 struct straight after, so this is the last point at which the
+   * decoded common CORESET / search spaces still exist. */
+  publish_sib1_pdcch_prior(mac, scc);
+
+  if (passive_acquisition_sib1(mac, scc)) {
+    ret = pthread_mutex_unlock(&mac->if_mutex);
+    AssertFatal(!ret, "mutex failed %d\n", ret);
+    return;
+  }
+
   UPDATE_IE(mac->tdd_UL_DL_ConfigurationCommon, scc->tdd_UL_DL_ConfigurationCommon, NR_TDD_UL_DL_ConfigCommon_t);
   configure_si_schedulingInfo(mac, si_SchedulingInfo, si_SchedulingInfo_v1700);
   configure_pcch_config(mac, scc);
@@ -2193,6 +2506,39 @@ void nr_rrc_mac_config_req_sib1(module_id_t module_id, int cc_idP, NR_SIB1_t *si
       }
     }
     nr_pdcch_blind_publish_common(&facts);
+    nr_passive_acq_note_sib1(); // acquisition-state tracker: SIB1 common config published
+    if (scc->tdd_UL_DL_ConfigurationCommon || mac->tdd_UL_DL_ConfigurationCommon) {
+      /* Periodicity in 1/8 ms so 0.625 ms stays integer; slots = (x8 << mu) / 8 when it divides. */
+      const NR_TDD_UL_DL_ConfigCommon_t *tc = scc->tdd_UL_DL_ConfigurationCommon ? scc->tdd_UL_DL_ConfigurationCommon : mac->tdd_UL_DL_ConfigurationCommon;
+      const int mu = (int)tc->referenceSubcarrierSpacing;
+      nr_tdd_pattern_t tp[2] = {{0}, {0}};
+      const NR_TDD_UL_DL_Pattern_t *pp[2] = {&tc->pattern1, tc->pattern2};
+      for (int i = 0; i < 2; i++) {
+        if (!pp[i]) continue;
+        static const int x8[8] = {4, 5, 8, 10, 16, 20, 40, 80};
+        int per8 = x8[pp[i]->dl_UL_TransmissionPeriodicity & 7];
+        if (pp[i]->ext1 && pp[i]->ext1->dl_UL_TransmissionPeriodicity_v1530)
+          per8 = (*pp[i]->ext1->dl_UL_TransmissionPeriodicity_v1530 == 0) ? 24 : 32; // ms3 / ms4
+        const int num = per8 << mu;
+        tp[i].period_slots = (num % 8) ? 0 : (uint16_t)(num / 8);
+        tp[i].dl_slots = (uint8_t)pp[i]->nrofDownlinkSlots;
+        tp[i].dl_symbols = (uint8_t)pp[i]->nrofDownlinkSymbols;
+        tp[i].ul_slots = (uint8_t)pp[i]->nrofUplinkSlots;
+        tp[i].ul_symbols = (uint8_t)pp[i]->nrofUplinkSymbols;
+      }
+      nr_passive_acq_note_sib1_tdd(&tp[0], tc->pattern2 ? &tp[1] : NULL);
+    } else {
+      LOG_A(PHY, "SENSING: TDD from SIB1 ABSENT (tdd-UL-DL-ConfigurationCommon not in SIB1 -> FDD or pattern unknown)\n");
+    }
+    /* Verify the started PHY geometry against what the cell says about itself; the tracker logs
+     * CONFIRMED or MISMATCH once. FrequencyInfoDL-SIB has one scs-SpecificCarrier on every cell this
+     * receiver supports (checked by the acquisition path); index 0 is that carrier. */
+    if (scc->downlinkConfigCommon.frequencyInfoDL.scs_SpecificCarrierList.list.count >= 1) {
+      const NR_SCS_SpecificCarrier_t *car = scc->downlinkConfigCommon.frequencyInfoDL.scs_SpecificCarrierList.list.array[0];
+      nr_passive_acq_note_sib1_carrier((int)car->carrierBandwidth, (int)car->subcarrierSpacing,
+                                       (int)scc->downlinkConfigCommon.frequencyInfoDL.offsetToPointA,
+                                       (int)car->offsetToCarrier, (int)mac->ssb_subcarrier_offset);
+    }
   }
   // set current BWP only if coming from non-connected state
   // otherwise it is just a periodically update of the SIB1 content

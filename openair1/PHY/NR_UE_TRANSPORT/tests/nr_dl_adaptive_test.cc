@@ -26,20 +26,22 @@ void nr_pdcch_dmrs_ref(const uint32_t *, c16_t *, unsigned short);
 }
 
 TEST(DlAdaptive, CompleteLegalCatalogAndNoPermanentlyUnfeedableHypotheses) {
-  const int sl[][2]={{1,13},{0,14},{2,12},{1,12},{0,13},{2,10},{1,7},{0,7}};
-  using Key=std::tuple<int,int,int,int>;
+  /* Every legal mapping-A (S,L) of TS 38.214 Table 5.1.2.1-1 (S 0..3, L 3..14, S+L <= 14) x k0 {0,1}:
+   * no curated prefix. */
+  using Key=std::tuple<int,int,int,int,int>;
   for(int typeA : {0,1}) {
     std::set<Key> expected, actual;
-    for(auto &p:sl) for(int add=0;add<4;add++) for(int len=1;len<=2;len++) for(int mcs=0;mcs<3;mcs++) {
-      int mask=nr_pdcch_blind_dmrs_mask(typeA,p[1],p[0],0,add,len);
-      if(mask>0) expected.emplace(p[0],p[1],mask,mcs);
+    for(int S=0;S<=3;S++) for(int L=3;S+L<=14;L++) for(int k0=0;k0<2;k0++)
+      for(int add=0;add<4;add++) for(int len=1;len<=2;len++) for(int mcs=0;mcs<3;mcs++) {
+      int mask=nr_pdcch_blind_dmrs_mask(typeA,L,S,0,add,len);
+      if(mask>0) expected.emplace(S,L,k0,mask,mcs);
     }
     nr_pdsch_config_sweep_state_t state{};
     nr_pdsch_config_sweep_init_legal(&state,2,typeA,nr_pdcch_blind_dmrs_mask);
     for(int i=0;i<state.n_hyp;i++) {
       auto h=state.hyp[i];
       EXPECT_GT(h.dmrs_mask,0);
-      actual.emplace(h.tda_start,h.tda_length,h.dmrs_mask,h.mcs_table);
+      actual.emplace(h.tda_start,h.tda_length,h.k0,h.dmrs_mask,h.mcs_table);
     }
     EXPECT_EQ(actual,expected);
     EXPECT_EQ(actual.size(),static_cast<size_t>(state.n_hyp));
@@ -124,22 +126,48 @@ TEST_F(DlGeometry, FreshDistinctDedicatedGrantsVerifyOnlyTheirOwnEpoch) {
   for(int i=0;i<5000;i++) EXPECT_FALSE(nr_pdcch_blind_monitor_autodiscover_extent_step(1200+i));
 }
 TEST_F(DlGeometry, RetrySearchesOtherWidthsAtSameOffsetAndNeverInventsVerification) {
+  // Exhaustive walk (every mapping of an extent before the next extent) is now opt-in: the
+  // default is a pass-0 lap first (see StagedDefaultWalksPassZeroPrefixThenMovesOn).
+  setenv("ISAC_MAP_PASS0_ONLY","0",1);
   ASSERT_NO_FATAL_FAILURE(discover_single_window());
   const auto *cfg=nr_pdcch_blind_monitor_get_cfg();
   EXPECT_EQ(cfg->coreset_rb_offset,18);
   EXPECT_EQ(cfg->coreset_freq_domain,1);
+  EXPECT_EQ(cfg->coreset_reg_bundle_size,0); // hypothesis 0: non-interleaved
+  // Every CCE-to-REG mapping of an extent is tried before the next extent: a retry walks the
+  // interleaved hypotheses of this 6-RB window first (each with the same dwell as an extent).
+  auto n_maps=[&](){ nr_pdcch_map_cand_t m[512]; return nr_pdcch_map_candidates(cfg->coreset_freq_domain*6,cfg->coreset_duration,cfg->coreset_pdcch_dmrs_scrambling_id,m,512); };
+  const int maps0=n_maps();
+  EXPECT_GT(maps0,1);
+  for(int i=1;i<maps0;i++){
+    nr_pdcch_blind_monitor_autodiscover_retry(18);
+    EXPECT_EQ(cfg->coreset_rb_offset,18);
+    EXPECT_EQ(cfg->coreset_freq_domain,1);
+    EXPECT_NE(cfg->coreset_reg_bundle_size,0);
+  }
   nr_pdcch_blind_monitor_autodiscover_retry(18);
+  // The second extent is the full carrier (see ExtentCandidates.NearestHypothesesComeFirst),
+  // back at the non-interleaved mapping; the nearest dilation of the observed window comes after it.
+  EXPECT_EQ(cfg->coreset_rb_offset,0);
+  EXPECT_EQ(cfg->coreset_freq_domain,cfg->bwp_size/6);
+  EXPECT_EQ(cfg->coreset_reg_bundle_size,0);
+  for(int i=1;i<n_maps();i++) nr_pdcch_blind_monitor_autodiscover_retry(0);
+  nr_pdcch_blind_monitor_autodiscover_retry(0);
   EXPECT_EQ(cfg->coreset_rb_offset,18);
   EXPECT_EQ(cfg->coreset_freq_domain,2);
   EXPECT_FALSE(nr_pdcch_blind_monitor_autodiscover_offset_rejected(18));
-  int trials=1;
-  while(nr_pdcch_blind_monitor_autodiscover_done() && trials<40) {
+  int extents=3, trials=0;
+  while(nr_pdcch_blind_monitor_autodiscover_done() && trials<20000) {
+    const int off=cfg->coreset_rb_offset, span=cfg->coreset_freq_domain;
     nr_pdcch_blind_monitor_autodiscover_retry(cfg->bwp_start+cfg->coreset_rb_offset);
     trials++;
+    if(nr_pdcch_blind_monitor_autodiscover_done() && (cfg->coreset_rb_offset!=off || cfg->coreset_freq_domain!=span)) extents++;
     EXPECT_FALSE(nr_pdcch_blind_monitor_autodiscover_extent_verified());
   }
   EXPECT_FALSE(nr_pdcch_blind_monitor_autodiscover_done());
-  EXPECT_EQ(trials,20); // four admissible starts times five admissible ends, all searched
+  // Four admissible starts x five admissible ends = 20 geometries, all searched; the full carrier
+  // is taken as the second hypothesis and is one of those 20, so the count is unchanged.
+  EXPECT_EQ(extents,20);
   ASSERT_NO_FATAL_FAILURE(discover_single_window()); // quiet intervals do not permanently blacklist
 }
 TEST(DlAdaptive, ExtentCatalogContainsEveryAdmissibleContiguousGeometry) {
@@ -150,6 +178,29 @@ TEST(DlAdaptive, ExtentCatalogContainsEveryAdmissibleContiguousGeometry) {
   for(int i=0;i<n;i++) got.emplace(c[i].first_w,c[i].last_w);
   EXPECT_EQ(got.size(),static_cast<size_t>(n));
   for(int f=0;f<=20;f++) for(int l=20;l<45;l++) EXPECT_EQ(got.count({f,l}),1u);
+}
+
+TEST_F(DlGeometry, StagedDefaultWalksPassZeroPrefixThenMovesOn) {
+  // Default (env unset): the primary walks only the pass-0 mappings (PCI residue / shift 0 of every
+  // legal (L, R)) of an extent, then advances to the next extent; the remaining shifts come in a
+  // second lap. The pass-0 count is what the enumerator emits under ISAC_MAP_PASS0_ONLY=1.
+  unsetenv("ISAC_MAP_PASS0_ONLY");
+  ASSERT_NO_FATAL_FAILURE(discover_single_window());
+  const auto *cfg=nr_pdcch_blind_monitor_get_cfg();
+  ASSERT_EQ(cfg->coreset_rb_offset,18);
+  nr_pdcch_map_cand_t m[512];
+  const int full=nr_pdcch_map_candidates(6,cfg->coreset_duration,cfg->coreset_pdcch_dmrs_scrambling_id,m,512);
+  int pass0=0;
+  for(int i=0;i<full;i++){ // pass-0 prefix: shift is 0 or the PCI residue, and the prefix is contiguous
+    const int nb=(6*cfg->coreset_duration)/m[i].bundle;
+    const bool p0=(m[i].bundle==0)||(m[i].shift==0)||(m[i].shift==cfg->coreset_pdcch_dmrs_scrambling_id%nb);
+    if(!p0) break;
+    pass0=i+1;
+  }
+  ASSERT_GT(pass0,0); ASSERT_LT(pass0,full);
+  for(int i=1;i<pass0;i++){ nr_pdcch_blind_monitor_autodiscover_retry(18); EXPECT_EQ(cfg->coreset_rb_offset,18); }
+  nr_pdcch_blind_monitor_autodiscover_retry(18);
+  EXPECT_NE(cfg->coreset_rb_offset,18); // pass-0 prefix exhausted: next extent, not the remaining shifts
 }
 
 TEST_F(DlGeometry, UlScanIntentSurvivesCss0AndRealDedicatedDiscovery) {
@@ -243,4 +294,22 @@ TEST(UlGrantBook, ExpiredAndCapacityDropsNeverOverwriteAnotherUe) {
   EXPECT_FALSE(nr_passive_ul_book_take(&book,1018,20,&e,&expired));
   EXPECT_EQ(expired,NR_PASSIVE_UL_BOOK_CAPACITY);
   EXPECT_EQ(nr_passive_ul_book_put(&book,&g,1020),1);
+}
+
+TEST(DlAdaptive, MaskOracleCollapsesTheFullCatalogToAFewEntries) {
+  // Measured OTA 2026-09-16 (DMRS_ORACLE mask=0x884, symbols 2/7/11). The full (S,L) x k0 catalog is
+  // ~1000 entries; joint with ~200 live DCI layouts the OTA search spread 98k probes so thin that no
+  // (layout, entry) pair was tried twice. The oracle must bring a context down to the entries that
+  // actually carry DM-RS on those symbols, so the joint search is layouts x O(10), not x O(1000).
+  nr_pdsch_config_sweep_state_t st{};
+  const int full = nr_pdsch_config_sweep_init_legal(&st, 2, 0, nr_pdcch_blind_dmrs_mask);
+  const int n = nr_pdsch_config_sweep_prune_mask(&st, 0x884);
+  std::cerr << "[ MEASURED ] catalog " << full << " -> " << n << " after mask 0x884:";
+  for (int i = 0; i < n; i++)
+    std::cerr << " (S" << +st.hyp[i].tda_start << ",L" << +st.hyp[i].tda_length << ",k0=" << +st.hyp[i].k0
+              << ",m" << +st.hyp[i].mcs_table << ")";
+  std::cerr << "\n";
+  EXPECT_GT(n, 0);
+  EXPECT_LE(n, 40);
+  for (int i = 0; i < n; i++) EXPECT_EQ(st.hyp[i].dmrs_mask, 0x884);
 }
