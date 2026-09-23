@@ -22,7 +22,8 @@ void nr_llrconf_unpack(const uint8_t *packed, uint32_t G, uint8_t *bits);
 /* P34 grant-level gate: a CRC-failed grant may go masked only if its DM-RS SNR >= the learned p05
  * of CRC-OK grants' SNR at the same Qm (any consistent per-path scale). Off until the Qm has
  * NR_LLRCONF_MIN_SNR_GRANTS CRC-OK samples. */
-#define NR_LLRCONF_MIN_SNR_GRANTS NR_LLRCONF_MIN_SYMBOLS
+/* 200 grants put ~10 samples below p05: a stable quantile in ~1 s of traffic, not ~10 min. */
+#define NR_LLRCONF_MIN_SNR_GRANTS 200
 #define NR_LLRCONF_SNR_QUANTILE 0.05
 void nr_llrconf_snr_observe(uint8_t qm, float snr_db);
 int nr_llrconf_snr_eligible(uint8_t qm, float snr_db);
