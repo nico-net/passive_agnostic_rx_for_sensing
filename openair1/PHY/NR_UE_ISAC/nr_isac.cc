@@ -14,6 +14,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <memory>
+#include <mutex>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -214,7 +215,7 @@ extern "C" int nr_isac_flow_admit(uint16_t rnti)
   return ok?1:0;
 }
 extern "C" void nr_isac_request_discard(void){if(engine)engine->request_discard_pending();}
-extern "C" int nr_isac_drained(void){return engine&&engine->submissions_drained()?1:0;}
+extern "C" int nr_isac_drained(void){return engine&&engine->idle()?1:0;}
 
 extern "C" void nr_isac_init(void)
 {
@@ -372,8 +373,42 @@ extern "C" void nr_isac_init(void)
         AOA_ENABLE,AOA_UL_ENABLE,pipeline.array_calibration.configured);
 }
 
-// Task 10 will replace this in place with the real recorded-close writer.
-static void nr_isac_record_gate_close(void) {}
+// CFR recorder at the ABI (NR_ISAC_DEBUG_DIR/cfr_rows.bin), replayed offline by tools/isac_replay.
+// Record layout: "CFR1", kind (0 row, 1 gate close), slot, frac, source, nof_prb, scs_hz,
+// dl_center_hz, pci, slots_per_frame, antennas, re, noise, session, mono_ns; a row is followed by
+// float h[2*antennas*re] (antenna-major), uint32 k[re], uint32 l[re].
+namespace {
+std::mutex rec_mutex;
+FILE* rec_file = nullptr;
+bool rec_checked = false;
+FILE* recorder() // caller holds rec_mutex
+{
+  if (!rec_checked) {
+    rec_checked = true;
+    const char* d = std::getenv("NR_ISAC_DEBUG_DIR");
+    if (d && *d) {
+      const std::string p = std::string(d) + "/cfr_rows.bin";
+      rec_file = std::fopen(p.c_str(), "wb");
+      if (!rec_file) LOG_E(PHY, "SENSING: cannot open %s for recording\n", p.c_str());
+    }
+  }
+  return rec_file;
+}
+uint64_t mono_ns(){timespec ts;clock_gettime(CLOCK_MONOTONIC,&ts);return (uint64_t)ts.tv_sec*1000000000ull+ts.tv_nsec;}
+void rec_header(FILE* f,uint32_t kind,uint32_t slot,float frac,int32_t source,const nr_isac_carrier_t* c,
+                uint32_t ant,uint32_t re,float noise,uint64_t session)
+{
+  const uint32_t prb=c?c->nof_prb:0,scs=c?c->scs_hz:0;const uint64_t fc=c?c->dl_center_hz:0;
+  const uint16_t pci=c?c->pci:0,spf=c?c->slots_per_frame:0;const uint64_t t=mono_ns();
+  std::fwrite("CFR1",1,4,f);std::fwrite(&kind,4,1,f);std::fwrite(&slot,4,1,f);std::fwrite(&frac,4,1,f);
+  std::fwrite(&source,4,1,f);std::fwrite(&prb,4,1,f);std::fwrite(&scs,4,1,f);std::fwrite(&fc,8,1,f);
+  std::fwrite(&pci,2,1,f);std::fwrite(&spf,2,1,f);std::fwrite(&ant,4,1,f);std::fwrite(&re,4,1,f);
+  std::fwrite(&noise,4,1,f);std::fwrite(&session,8,1,f);std::fwrite(&t,8,1,f);
+}
+}
+static void nr_isac_record_gate_close(void)
+{std::lock_guard<std::mutex> rec_lock(rec_mutex);if(FILE* f=recorder()){rec_header(f,1,0,0.f,-1,nullptr,0,0,0.f,0);std::fflush(f);}}
+extern "C" uint64_t nr_isac_gate_discarded_rows(void){return engine?engine->gate_discarded_rows():0;}
 
 extern "C" void nr_isac_start(void)
 {
@@ -417,6 +452,7 @@ extern "C" void nr_isac_stop(void)
     gate_watchdog = nullptr;
   }
   if (engine && started.exchange(false)) engine->stop();
+  {std::lock_guard<std::mutex> rec_lock(rec_mutex);if(rec_file){std::fclose(rec_file);rec_file=nullptr;}}
 }
 extern "C" int nr_isac_enabled(void){return enabled.load(std::memory_order_relaxed);}
 extern "C" int nr_isac_source(void){for(int i=0;i<NR_ISAC_SRC_COUNT;++i)if(pipeline.sources_mask&(1u<<i))return i;return NR_ISAC_SRC_CSI_RS;}
@@ -465,5 +501,9 @@ extern "C" void nr_isac_submit_cfr_multi_session(uint32_t slot,float fraction,in
   static thread_local std::vector<std::complex<float>> packed;
   const size_t total=(size_t)antennas*n;if(packed.size()<total)packed.resize(total);
   for(uint32_t a=0;a<antennas;++a){const float* input=h+(size_t)2*a*stride;for(uint32_t i=0;i<n;++i)packed[(size_t)a*n+i]={input[2*i],input[2*i+1]};}
+  {std::lock_guard<std::mutex> rec_lock(rec_mutex);if(FILE* f=recorder()){
+    rec_header(f,0,slot,fraction,source,carrier,antennas,n,noise,session_id);
+    for(uint32_t a=0;a<antennas;++a)std::fwrite(h+(size_t)2*a*stride,sizeof(float),(size_t)2*n,f);
+    std::fwrite(k,4,n,f);std::fwrite(l,4,n,f);}}
   engine->submit(slot,fraction,static_cast<nr_isac_source_t>(source),*carrier,packed.data(),antennas,k,l,n,noise,session_id);
 }

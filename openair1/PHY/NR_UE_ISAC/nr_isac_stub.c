@@ -35,6 +35,7 @@ void nr_isac_flow_note(uint16_t rnti, int uplink) { (void)rnti; (void)uplink; }
 int nr_isac_flow_admit(uint16_t rnti) { (void)rnti; return 0; }
 void nr_isac_request_discard(void) {}
 int nr_isac_drained(void) { return 1; }
+uint64_t nr_isac_gate_discarded_rows(void) { return 0; }
 /* Removed (Task 2, P7 follow-up): nr_isac_submit_cfr_multi_branch, nr_isac_submit_plan,
  * nr_isac_rx_branches[_mutable], nr_isac_set_nb_antennas_rx. Their types (nr_isac_submit_plan_t,
  * nr_rx_branch_set_t, NR_ISAC_BRANCH_NONE) are not declared anywhere in the multi-RX nr_isac.h and

@@ -48,6 +48,9 @@ public:
   bool submissions_drained() const {
     return consumed_submissions_.load(std::memory_order_acquire) == accepted_submissions_.load(std::memory_order_acquire);
   }
+  // Drained and no CPI in flight. A window closed by a consumed row marks itself in flight before
+  // that row counts as consumed, so this never reports idle between the two.
+  bool idle() const { return submissions_drained() && !processing_in_flight(); }
 
   /** Gate closed: drop every pending (not yet windowed) row once the accumulation thread has
    *  consumed everything that was already queued at request time -- a snapshot already sitting in

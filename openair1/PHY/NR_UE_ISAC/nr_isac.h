@@ -107,8 +107,10 @@ void nr_isac_flow_note(uint16_t rnti, int uplink);
 int nr_isac_flow_admit(uint16_t rnti);
 /** Drop the engine's partial CPI (gate close, or a recorded close replayed offline). */
 void nr_isac_request_discard(void);
-/** 1 when every accepted submission has been consumed (offline replay). */
+/** 1 when every accepted submission has been consumed and no CPI is being processed (offline replay). */
 int nr_isac_drained(void);
+/** Pending rows dropped by gate closes (not loss: counted apart from discarded_pending_rows). */
+uint64_t nr_isac_gate_discarded_rows(void);
 
 #ifdef __cplusplus
 }
