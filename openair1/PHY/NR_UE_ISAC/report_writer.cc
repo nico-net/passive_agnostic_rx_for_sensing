@@ -439,7 +439,11 @@ std::string build_report_json(const PipelineReport& r, const PipelineConfig& c, 
         out += ",\"range_rate_variance_mps2\":";
         number(out,spatial.uplink_direct_path_rate_variance_mps2);
         out += '}';
-        // OFFLINE DIAGNOSTIC: per-session UL map (pre-CLEAN), same layout as the DL rvm_blob
+        // OFFLINE DIAGNOSTIC: per-session UL map (pre-CLEAN), same layout as the DL rvm_blob.
+        // Map and clean_diag are gated independently: the map is a raster (emit_maps-decimated,
+        // like every other rvm_blob site), clean_diag is O(components) and stays on the DL
+        // clean_components analog's (:280) undecimated c.capture_rvm gate -- decimating it buys
+        // nothing and would contradict "component lists keep their current capture_rvm gating".
         if (emit_maps && !spatial.uplink_detector.initial_likelihood.empty()) {
           const auto& ax = spatial.uplink_detector.axes;
           const uint32_t nb=(c.rvm_max_range_m>0.0 && ax.range_res_m>0.0)
@@ -455,6 +459,8 @@ std::string build_report_json(const PipelineReport& r, const PipelineConfig& c, 
             const double v=spatial.uplink_detector.initial_likelihood[(size_t)q*ax.rate_bins+d];
             number(out,std::isfinite(v)&&v>0.0?v:0.0);}
           out+=']';
+        }
+        if (c.capture_rvm && !spatial.uplink_detector.initial_likelihood.empty()) {
           const auto& ud = spatial.uplink_detector;
           out += ",\"clean_diag\":{\"components\":"+std::to_string(ud.components.size())
               +",\"skirt_components\":"+std::to_string(ud.skirt_components)
