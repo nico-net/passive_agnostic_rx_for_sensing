@@ -16,10 +16,10 @@ command. Build it and validate it over the air.
 
 1. **Fully passive.** The receiver never transmits. Nothing in this work adds a TX path.
 2. **Fully agnostic.** No value that describes the gNB or the cell is hardcoded, pinned in a conf,
-   or passed by the launcher: no carrier, SSB position, PRB count, PCI, CORESET, DCI length or
+   or passed by the launcher, except the three front-end start values below: no SSB position, PCI, CORESET, DCI length or
    layout, TDA, DM-RS configuration, RNTI, or CFO seed. Every such value is discovered on air.
    Operator inputs are limited to:
-   - band to scan,
+   - the RF front-end start values `-r 273 --numerology 1 -C 3450000000` (decided, §9),
    - RX gain,
    - number of RX channels,
    - the **site survey** file (§7), i.e. where the antennas and the gNB physically are. This is
@@ -126,6 +126,8 @@ how the decoder combined branches. So Ĥ_i[k] = Y_i[k] / X̂[k] for i = 0..3.
   transmitted constellation point whatever it encodes. That lifts today's `uci_ack_re == 0`
   restriction for the masked path, while the re-encode path keeps it.
 - **Grants with more than 1 layer** contribute DM-RS only.
+- **Empty grants** (gNB PDSCH with no MAC PDU, ~30 % of grants) get no special case: they carry a real
+  codeword, so a CRC-passing one yields an exact re-encoded X̂ like any other.
 - **Where the gates change:**
   - DL: `nr_pdsch_passive_queue.c:~916` and `nr_pdcch_blind_monitor_rt.c:~6008` currently submit
     only on `CRC_OK`. The masked path is added beside them.
@@ -138,8 +140,9 @@ how the decoder combined branches. So Ĥ_i[k] = Y_i[k] / X̂[k] for i = 0..3.
 ## 7. Site survey file (single source of geometry)
 
 `survey.json` contains:
-- gNB ENU position,
-- the ENU position of each of the four antennas,
+- frame: ENU metres, **origin at the X410** (east, north, up); every position below is relative to it,
+- gNB ENU position (its antenna, relative to the X410),
+- the ENU position of each of the four RX antennas (the far ends of the cables, not the X410),
 - the channel → antenna mapping,
 - optional per-channel `rx_array_calibration` (gain / phase / delay).
 
@@ -185,12 +188,11 @@ must be verified in the merged engine (§13 step 3), not assumed.
 | `captures/run_arm.sh` | `REPO` defaults to another tree | the launcher always uses this worktree's binary and checks it |
 | `captures/agnostic_ota.conf` | `pdcch_blind_monitor_pdsch = "2:1:0:1:16:2:64:6"` and other positional strings | each field audited; any cell-describing value removed or derived |
 
-**Open item — needs your decision before implementation:** OAI's UE takes `-r <PRB>`,
-`--numerology` and `-C <carrier>` at startup to configure the RF front end. A truly agnostic start
-needs the receiver to learn bandwidth and carrier from MIB/SIB1 after a band scan, then re-init the
-front end. Step 1 of implementation measures whether the adaptive tree already does this. If it
-does not, building it is its own work package, and I will report that rather than hide a `-r` pin
-in the launcher.
+**Decided 2026-09-23 (user):** the RF front-end start values are fixed operator inputs:
+`-r 273 --numerology 1 -C 3450000000`. They configure the SDR front end and are the ONLY
+cell-related values the launcher passes. The SSB position is NOT pinned: it is found by
+`--ue-scan-carrier`. Everything above the front end (PCI, CORESETs, DCI layouts, TDA, DM-RS,
+RNTIs, CFO) stays discovered on air.
 
 ## 10. Per-channel CFO / SFO / STO
 
@@ -295,7 +297,6 @@ One command on sens6, e.g. `run_sensing.sh --band 78 --rxg 43 --survey survey.js
 - **CPU budget.** At 4 RX the passive decode was CPU-bound (68 % of grants dropped, 2026-09-15).
   Adding decision-directed CFR and the engine costs more CPU. Core split and the §13.5 A/B measure
   it.
-- **Agnostic front-end start** (§9 open item) may be a separate work package.
 - **Frozen chain on real data.** It was validated on Sionna only. Its per-class numbers
   (e.g. person 80.6 % / 100 %) do not transfer to OTA and are not quoted as OTA results.
 
