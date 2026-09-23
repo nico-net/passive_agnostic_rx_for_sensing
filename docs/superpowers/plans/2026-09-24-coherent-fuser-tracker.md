@@ -2257,3 +2257,27 @@ git commit -m "passive rx: coherent monitor page, coherent launcher mode (chain 
 3. `test_coherent_chain.sh` — offline + real-time PASS on the GPU.
 4. `test_make_coherent_scene.py`, `test_coherent_view.py`, `test_monitor.py` PASS.
 5. `git status` clean; no file deleted (`git diff --diff-filter=D --name-only <base>..HEAD` is empty).
+
+---
+
+### Task 12: Final presentation report, run commands, survey procedure
+
+Runs LAST, after the final whole-branch review, so every number in it is measured on the finished code.
+
+**Files:**
+- Create: `docs/COHERENT_FUSER_REPORT.md` (the presentation source; the controller also publishes it as an HTML page)
+
+**Interfaces:**
+- Consumes: the spec, this plan, the ledger `Ruling:` lines, the outputs of `test_coherent_chain.sh` (offline + real-time), every `test_nr_isac_coherent_*` output, `git log` of the branch.
+
+- [ ] **Step 1: Write the report.** Required sections, in this order, each detailed enough to present from:
+  1. **Executive summary** — what the system does, what is measured vs designed-but-unmeasured (be explicit: OTA coherence, tape-survey sufficiency and autofocus convergence on real targets are NOT yet measured).
+  2. **End-to-end pipeline** — block diagram (receiver: blind PDCCH → DCI → PDSCH decode → X̂ → per-antenna Ĥ; engine: flow gate (DL-only mode), CPI formation; coherent pipeline C1–C6; tracker; outputs; monitor), with data sizes per CPI and which blocks run on GPU vs CPU.
+  3. **Every block, with its mathematics** — for each: purpose, inputs/outputs, equations, derived (not tuned) quantities and why they are derived that way, complexity, failure behaviour. Must include at least: channel estimate Ĥ_i = Y_i / X̂ (DM-RS and re-encoded data); flow gate; derive_axes (B_eff, delay step 1/(N_fft·Δf), range crop from the volume, Doppler step 1/T_cpi, span 1/(2·median Δt), tested bins from 2·v_max/λ, notch = Hann mainlobe); LOS detection (median/MAD noise, Γ(1) quantile, earliest-not-strongest, parabolic sub-bin); common row sync (φ_r and δ_r estimators); range profile (centred IFFT, Hann over the observed band, per-row normalisation) and the NUDFT; static clutter removal; the calibrator (unit-phasor Kalman, R = 1/(2·SNR_i) + 1/(2·SNR_0), covariance matching for Q, coherence factor c_i = e^{−σ²/2}, predicted-phase coherent gain G and ρ); excess delay Δτ_i(x) and why LOS referencing cancels STO and cable delay; envelope statistic and its Γ(4,1) null; CFAR P_fa = intensity·T_cpi/(voxels·Doppler bins); NMS radius, harmonic merge rule, z<0 rejection; coherent refinement (fringe width λR/(2D), ρ-blend); position/rate σ; tracker (CV model, process noise, Joseph form, Hungarian GNN, χ² gate, SPRT thresholds ln((1−β)/α) and ln(β/(1−α)), online P_D, clutter density); autofocus (phase-sensitivity model a = −k(u_tx − u_x), RLS with the survey prior); UL path (TDOA grid search, UE geometry) and why it is off.
+  4. **Strengths** and **weaknesses / risks** — honest, with the physics behind each (tape survey vs λ = 8.7 cm, sparse-array fringe ambiguity, per-retune channel phase on the X410, Doppler resolution vs pedestrians, rotor micro-Doppler aliasing, multipath exceptions, grant-driven slow-time sampling, TX-side unknowns for UL, compute margins).
+  5. **Measured results** — tables from the offline and real-time tests (per-stage timing p50/p95, CPI counts, coherence G/ρ, detection/track errors vs truth, parity numbers), with the exact commands that produced them.
+  6. **Hardware and measurement needs** — X410 + 4 antennas + identical cables, host (CPU cores, GPU), the lab gNB config it assumes (manual template values), the survey requirements and what accuracy buys what.
+  7. **Tomorrow's procedure** — (a) measuring-tape survey step by step (origin at the X410, axes, what to measure: each antenna phase centre at 0.5/3.5 m, the gNB antenna, diagonals as a consistency check, how to write `ota/survey.json`), (b) the capture commands, (c) the UI commands (SSH tunnel + URL), (d) the analysis commands, (e) the OTA test order: static coherence → walking person → car → drone, with what "good" looks like on the coherence panel (G → 4, ρ → 1, phase traces flat) and what to do if it is not.
+  8. **Rulings** — every ledger `Ruling:` line with its cost-if-wrong.
+- [ ] **Step 2:** Verify every command in the report by running it (offline ones) or `bash -n`/`--help` (capture ones — never touch the radio).
+- [ ] **Step 3: Commit** — `git add docs/COHERENT_FUSER_REPORT.md && git commit -m "docs: coherent fuser presentation report, run commands and survey procedure"`.
