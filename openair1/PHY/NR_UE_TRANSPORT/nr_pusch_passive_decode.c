@@ -967,8 +967,12 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
          * the producer-timeline value FOR THIS SLOT. Exact while the lag stays under one wrap
          * (~10 slots in practice against a 20480-slot wrap). */
         const uint32_t ul_slot_idx = passive_ul_slow_time_idx(fp, frame, slot, abs_slot);
-        nr_isac_flow_note(g->rnti, 1);
-        if (nr_isac_flow_admit(g->rnti)) {
+        /* As DL (nr_pdcch_blind_monitor_rt.c, want_dmrs): C-RNTI grants only -- format 0_1 lives in the
+         * USS and is never TC-RNTI scrambled -- and never rows from an unsettled layout hypothesis. */
+        const bool c_rnti = g->ul_dci_format == NR_BLIND_UL_DCI_FORMAT_0_1;
+        if (c_rnti)
+          nr_isac_flow_note(g->rnti, 1);
+        if (c_rnti && (!g->hyp_generation || g->hyp_settled) && nr_isac_flow_admit(g->rnti)) {
           nr_isac_submit_cfr_multi_session(ul_slot_idx, 0.0f,
                                            NR_ISAC_SRC_PUSCH_DMRS, &carrier, ul_h, nof_ant_cfr, cap,
                                            ul_k, ul_l, nof_re, 1.0f, (uint64_t)g->rnti);
