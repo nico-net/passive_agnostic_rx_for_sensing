@@ -19,6 +19,8 @@ ping -c1 -W2 192.168.20.2 >/dev/null || { log "ABORT: X410 data plane 192.168.20
 # uhd_find_devices reports the data port as mgmt_addr, so run_arm's auto-derived MGMT is wrong: pass it.
 ping -c1 -W2 "$MGMT" >/dev/null || { log "ABORT: X410 management address $MGMT unreachable (--mgmt ADDR)"; exit 3; }
 timeout 20 uhd_find_devices --args "type=x4xx,addr=192.168.20.2" 2>/dev/null | grep -q x4xx || { log "ABORT: uhd_find_devices does not see the X410"; exit 3; }
+grep -qv performance /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor 2>/dev/null && \
+  { log "ABORT: CPU governor not 'performance' (RT budget assumes it): sudo cpupower frequency-set -g performance"; exit 3; }
 [ -x "$BUILD/nr-uesoftmodem" ] || { log "ABORT: no sensing build at $BUILD"; exit 3; }
 strings "$BUILD/nr-uesoftmodem" | grep -q 'SENSING_GATE open' || { log "ABORT: binary lacks the sensing gate (stale build?)"; exit 3; }
 python3 "$W/tests/passive_rx/survey.py" "$SURVEY" --geometry "$RUN/geometry.json" \
