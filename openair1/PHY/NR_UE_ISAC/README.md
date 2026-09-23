@@ -138,6 +138,29 @@ CUDA is the validated campaign backend. A later CPU-only optimization should add
 projection workspaces, cache steering matrices by CPI geometry, vectorize map accumulation, and
 parallelize independent range bins while preserving decision order and CPU/CUDA golden parity.
 
+## Debugging the chain block by block
+
+Set `NR_ISAC_DEBUG_DIR=<dir>` (the launcher does this with `--debug`). Every artifact maps to one block:
+
+| block | artifact | view with |
+|---|---|---|
+| input (ABI) | `cfr_rows.bin` — every admitted row, per antenna, plus gate closes | `isac_replay -O <conf> --rows cfr_rows.bin` |
+| gate | `SENSING_GATE open/close/stats` receiver log lines | monitor Pipeline tab |
+| per-channel CFO | `BRANCHFO d_vs_br0=[...]` log line | monitor Pipeline tab |
+| [1] sync | `seqN_rxI_raw.bin` → `seqN_rxI_sync.bin`[^sync-dump]; report `spatial_receivers[i].sync` | `show_block.py` |
+| [2] families + clutter | `seqN_rxI_pre.bin` → `seqN_rxI_post.bin`; report `causal_clutter` | `show_block.py` |
+| [3] CPI formation | report `cpi_plan`, `dropped_cpis`, `discarded_pending_*` | monitor Pipeline tab |
+| [4]/[5] RD map, CLEAN, CFAR | report `rvm_blob` (pre-CLEAN), `rvm_final_blob`, components, `detections` (capture = 1) | monitor DL/UL tabs |
+| [6] long dwells | report `long_dwells` | report JSON |
+| UL per UE | `seqN_rxI_ul<rnti>_raw/post.bin`; report `uplink_sessions[]` | `show_block.py`, monitor UL tab |
+| [7]–[10] | `realtime_chain.py --debug-dir`: `stage8.jsonl`, `localiser.jsonl`, `stage9.jsonl`, `tracks.jsonl` | monitor 3D tab |
+
+[^sync-dump]: the `sync` dump is only emitted when `sync_enable` is on and the window has >= 3
+  rows -- a `raw` file with no matching `sync` sibling means that CPI skipped sync correction, not
+  a bug.
+
+Offline: record once over the air, then replay deterministically as often as needed.
+
 ## Reference identity
 
 The source snapshot used for the transcription is branch `feature/multi-object-relax`, commit

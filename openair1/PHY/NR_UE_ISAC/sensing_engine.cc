@@ -1196,9 +1196,15 @@ void SensingEngine::process_window(CfrWindow dl_window, std::vector<CfrWindow> u
       auto& spatial = product.report;
       spatial.receiver_id = "rx" + std::to_string(receiver);
       spatial.receiver_position = config_.spatial_receivers.positions[receiver];
-      // OFFLINE DIAGNOSTIC: dump the detector input before/after the causal clutter filter.
+      // OFFLINE DIAGNOSTIC: dump every stage of the per-receiver CFR chain (raw -> sync -> pre ->
+      // post, plus UL). getenv is cached in a function-local static (magic-static init is
+      // thread-safe) so an unset NR_ISAC_DEBUG_DIR costs one pointer check per call, not a
+      // getenv() per window per stage.
       auto dump_window = [&](const CfrWindow& w, const char* stage) {
-        const char* dir = std::getenv("NR_ISAC_CLUTTER_DUMP_DIR");
+        static const char* const dir = [] {
+          const char* d = std::getenv("NR_ISAC_DEBUG_DIR");
+          return d ? d : std::getenv("NR_ISAC_CLUTTER_DUMP_DIR");
+        }();
         if (!dir) return;
         char path[512];
         std::snprintf(path, sizeof(path), "%s/seq%06llu_rx%u_%s.bin", dir,
@@ -1214,6 +1220,7 @@ void SensingEngine::process_window(CfrWindow dl_window, std::vector<CfrWindow> u
       };
       if (!uplink_only) {
       CfrWindow corrected = independent_receiver_view(dl_window, receiver);
+      dump_window(corrected, "raw");
       spatial.sync.rows = corrected.rows;
       if (config_.sync_enable && corrected.rows >= 3) {
         // Current-CPI direct-path nuisance estimation is independent for each RF chain.  No
@@ -1238,6 +1245,10 @@ void SensingEngine::process_window(CfrWindow dl_window, std::vector<CfrWindow> u
           delay_reference_bin = spatial.sync.los_bins - baseline_m / range_res_m;
         }
         apply_sync_correction(corrected, spatial.sync, delay_reference_bin, std::nullopt);
+        // Only reachable inside this `sync_enable && rows >= 3` block, so a "sync" dump exists
+        // only for CPIs where sync correction actually ran -- a "raw" file with no matching
+        // "sync" sibling is expected, not a bug, on a short/disabled-sync CPI.
+        dump_window(corrected, "sync");
       }
       spatial.current_cpi_variance = estimate_current_cpi_variance(
           corrected, &spatial.covariance_family_count,
@@ -1373,6 +1384,8 @@ void SensingEngine::process_window(CfrWindow dl_window, std::vector<CfrWindow> u
         spatial.uplink_session_id = uplink_source->session_id;
         try {
           CfrWindow ul_corrected = independent_receiver_view(*uplink_source, receiver);
+          dump_window(ul_corrected,
+              (std::string("ul") + std::to_string(ul_corrected.session_id) + "_raw").c_str());
           spatial.uplink_sync.rows = ul_corrected.rows;
           if (!config_.sync_enable || ul_corrected.rows < 3)
             throw std::runtime_error(
@@ -1407,7 +1420,8 @@ void SensingEngine::process_window(CfrWindow dl_window, std::vector<CfrWindow> u
             spatial.uplink_causal_clutter =
                 spatial_ul_clutter_filters_.at(ul_corrected.session_id)[receiver].filter(
                 ul_corrected, spatial.uplink_current_cpi_variance);
-          dump_window(ul_corrected, "ulpost");   // OFFLINE DIAGNOSTIC (same env gate as DL)
+          dump_window(ul_corrected,   // OFFLINE DIAGNOSTIC (same env gate as DL)
+              (std::string("ul") + std::to_string(ul_corrected.session_id) + "_post").c_str());
           PipelineConfig uplink_detector_config = config_;
           const double uplink_dwell_s = (ul_corrected.row_time_slots.back()
                                           - ul_corrected.row_time_slots.front())
