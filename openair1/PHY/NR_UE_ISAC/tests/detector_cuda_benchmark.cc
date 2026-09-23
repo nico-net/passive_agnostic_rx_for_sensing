@@ -214,7 +214,7 @@ int main()
       if (receiver == 0) report.detector = std::move(rx_result);
     }
     const auto detected = std::chrono::steady_clock::now();
-    const std::string json = build_report_json(report, config);
+    const std::string json = build_report_json(report, config, config.capture_rvm);
     const auto stopped = std::chrono::steady_clock::now();
     if (json.find("\"dl_rvm_blob\":[") == std::string::npos)
       std::exit(EXIT_FAILURE);

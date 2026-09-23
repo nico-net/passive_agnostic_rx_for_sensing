@@ -423,6 +423,11 @@ struct PipelineConfig {
   std::string report_path;
   std::string report_endpoint;
   bool capture_rvm = false;
+  // Report-side map cost controls (Task 12): capture_rvm alone made every CPI's report carry a
+  // full range-Doppler blob per receiver, which is unaffordable for a live capture. These bound
+  // that cost without touching what the detector itself computes.
+  double rvm_period_s = 0.5;   // emit a map at most this often (steady clock); default 0.5 s
+  double rvm_max_range_m = 0.0; // crop each map's range axis to this many metres; 0 = full axis
   // The RF/CIR clock is allowed to warm up before sensing starts.  When enabled, snapshots outside
   // [admission_start_slot, admission_end_slot) are rejected before they enter the sensing FIFO.
   bool admission_window_enabled = false;

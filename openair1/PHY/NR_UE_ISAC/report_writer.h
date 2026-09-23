@@ -100,7 +100,7 @@ struct PipelineReport {
 
 std::string source_name(nr_isac_source_t source);
 std::string sources_name(uint32_t source_mask);
-std::string build_report_json(const PipelineReport& report, const PipelineConfig& config);
+std::string build_report_json(const PipelineReport& report, const PipelineConfig& config, bool emit_maps);
 
 class ReportWriter {
 public:
@@ -111,6 +111,7 @@ public:
 private:
   PipelineConfig config_;
   std::ofstream file_;
+  double last_rvm_emit_ns_ = -1e18;
 #ifdef ENABLE_ZEROMQ
   void* zmq_context_ = nullptr;
   void* zmq_socket_ = nullptr;

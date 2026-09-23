@@ -2,6 +2,7 @@
 #include "report_writer.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <filesystem>
@@ -82,7 +83,7 @@ std::string sources_name(uint32_t mask)
   return count == 1 ? joined : "fused(" + joined + ')';
 }
 
-std::string build_report_json(const PipelineReport& r, const PipelineConfig& c)
+std::string build_report_json(const PipelineReport& r, const PipelineConfig& c, bool emit_maps)
 {
   const size_t expected_map_cells = static_cast<size_t>(r.detector.axes.range_bins)
                                     * r.detector.axes.rate_bins;
@@ -97,7 +98,7 @@ std::string build_report_json(const PipelineReport& r, const PipelineConfig& c)
       && r.uplink_detector.initial_likelihood.size() != expected_ul_map_cells)
     throw std::invalid_argument("captured UL range-Doppler map is absent or malformed");
   std::string out;
-  out.reserve(c.capture_rvm
+  out.reserve(emit_maps
                   ? (r.detector.initial_likelihood.size()
                      + r.detector.initial_dl_likelihood.size()) * 12
                   : 8192);
@@ -379,15 +380,23 @@ std::string build_report_json(const PipelineReport& r, const PipelineConfig& c)
       out += ']';
     }
     out += '}';
-    if(c.capture_rvm){out += ",\"rvm_layout\":\"doppler_major_range_minor\",\"rvm_blob\":[";
-      bool first_spatial=true;for(uint32_t d=0;d<spatial.detector.axes.rate_bins;++d)
-        for(uint32_t q=0;q<spatial.detector.axes.range_bins;++q){if(!first_spatial)out.push_back(',');first_spatial=false;
-          const double value=spatial.detector.initial_likelihood[(size_t)q*spatial.detector.axes.rate_bins+d];
+    if(emit_maps){
+      const auto& axes=spatial.detector.axes;
+      const uint32_t nb=(c.rvm_max_range_m>0.0 && axes.range_res_m>0.0)
+          ? std::min<uint32_t>(axes.range_bins,(uint32_t)std::ceil(c.rvm_max_range_m/axes.range_res_m))
+          : axes.range_bins;
+      out += ",\"rvm_layout\":\"doppler_major_range_minor\",\"rvm_range_bins\":"+std::to_string(nb)
+          +",\"rvm_rate_bins\":"+std::to_string(axes.rate_bins)+",\"rvm_range_res_m\":";
+      number(out,axes.range_res_m);out += ",\"rvm_rate_res_mps\":";number(out,axes.rate_res_mps);
+      out += ",\"rvm_blob\":[";
+      bool first_spatial=true;for(uint32_t d=0;d<axes.rate_bins;++d)
+        for(uint32_t q=0;q<nb;++q){if(!first_spatial)out.push_back(',');first_spatial=false;
+          const double value=spatial.detector.initial_likelihood[(size_t)q*axes.rate_bins+d];
           number(out,std::isfinite(value)&&value>0.0?value:0.0);}out+=']';
       if(spatial.detector.final_likelihood.size()==spatial.detector.initial_likelihood.size()){out += ",\"rvm_final_blob\":[";
-        bool first_f=true;for(uint32_t d=0;d<spatial.detector.axes.rate_bins;++d)
-          for(uint32_t q=0;q<spatial.detector.axes.range_bins;++q){if(!first_f)out.push_back(',');first_f=false;
-            const double value=spatial.detector.final_likelihood[(size_t)q*spatial.detector.axes.rate_bins+d];
+        bool first_f=true;for(uint32_t d=0;d<axes.rate_bins;++d)
+          for(uint32_t q=0;q<nb;++q){if(!first_f)out.push_back(',');first_f=false;
+            const double value=spatial.detector.final_likelihood[(size_t)q*axes.rate_bins+d];
             number(out,std::isfinite(value)&&value>0.0?value:0.0);}out+=']';}}
     out+='}';
   }
@@ -431,12 +440,17 @@ std::string build_report_json(const PipelineReport& r, const PipelineConfig& c)
         number(out,spatial.uplink_direct_path_rate_variance_mps2);
         out += '}';
         // OFFLINE DIAGNOSTIC: per-session UL map (pre-CLEAN), same layout as the DL rvm_blob
-        if (c.capture_rvm && !spatial.uplink_detector.initial_likelihood.empty()) {
+        if (emit_maps && !spatial.uplink_detector.initial_likelihood.empty()) {
           const auto& ax = spatial.uplink_detector.axes;
-          out += ",\"rvm_layout\":\"doppler_major_range_minor\",\"rvm_range_bins\":"+std::to_string(ax.range_bins)
-              +",\"rvm_rate_bins\":"+std::to_string(ax.rate_bins)+",\"rvm_blob\":[";
+          const uint32_t nb=(c.rvm_max_range_m>0.0 && ax.range_res_m>0.0)
+              ? std::min<uint32_t>(ax.range_bins,(uint32_t)std::ceil(c.rvm_max_range_m/ax.range_res_m))
+              : ax.range_bins;
+          out += ",\"rvm_layout\":\"doppler_major_range_minor\",\"rvm_range_bins\":"+std::to_string(nb)
+              +",\"rvm_rate_bins\":"+std::to_string(ax.rate_bins)+",\"rvm_range_res_m\":";
+          number(out,ax.range_res_m);out += ",\"rvm_rate_res_mps\":";number(out,ax.rate_res_mps);
+          out += ",\"rvm_blob\":[";
           bool first=true;
-          for(uint32_t d=0;d<ax.rate_bins;++d) for(uint32_t q=0;q<ax.range_bins;++q){
+          for(uint32_t d=0;d<ax.rate_bins;++d) for(uint32_t q=0;q<nb;++q){
             if(!first)out.push_back(',');first=false;
             const double v=spatial.uplink_detector.initial_likelihood[(size_t)q*ax.rate_bins+d];
             number(out,std::isfinite(v)&&v>0.0?v:0.0);}
@@ -699,18 +713,26 @@ std::string build_report_json(const PipelineReport& r, const PipelineConfig& c)
       +",\"discarded_pending_rows\":"+std::to_string(r.discarded_pending_rows)
       +",\"discarded_pending_intervals\":"+std::to_string(r.discarded_pending_intervals)
       +",\"stale_submissions\":"+std::to_string(r.stale_submissions);
-  if(c.capture_rvm){out += ",\"rvm_layout\":\"doppler_major_range_minor\",\"rvm_blob\":[";
-    bool first_value=true;for(uint32_t d=0;d<r.detector.axes.rate_bins;++d)for(uint32_t q=0;q<r.detector.axes.range_bins;++q){
+  if(emit_maps){
+    const auto& axes=r.detector.axes;
+    const uint32_t nb=(c.rvm_max_range_m>0.0 && axes.range_res_m>0.0)
+        ? std::min<uint32_t>(axes.range_bins,(uint32_t)std::ceil(c.rvm_max_range_m/axes.range_res_m))
+        : axes.range_bins;
+    out += ",\"rvm_layout\":\"doppler_major_range_minor\",\"rvm_range_bins\":"+std::to_string(nb)
+        +",\"rvm_rate_bins\":"+std::to_string(axes.rate_bins)+",\"rvm_range_res_m\":";
+    number(out,axes.range_res_m);out += ",\"rvm_rate_res_mps\":";number(out,axes.rate_res_mps);
+    out += ",\"rvm_blob\":[";
+    bool first_value=true;for(uint32_t d=0;d<axes.rate_bins;++d)for(uint32_t q=0;q<nb;++q){
       if(!first_value)out.push_back(',');
-      first_value=false;const double value=r.detector.initial_likelihood[(size_t)q*r.detector.axes.rate_bins+d];
+      first_value=false;const double value=r.detector.initial_likelihood[(size_t)q*axes.rate_bins+d];
       number(out,std::isfinite(value)&&value>0.0?value:0.0);}out+=']';
     out += ",\"dl_rvm_layout\":\"doppler_major_range_minor\""
         ",\"dl_rvm_source_mask\":" + std::to_string(DL_SOURCE_BITS)
         + ",\"dl_rvm_observed_re_count\":" + std::to_string(r.detector.dl_observed_re_count)
         + ",\"dl_rvm_blob\":[";
-    first_value=true;for(uint32_t d=0;d<r.detector.axes.rate_bins;++d)for(uint32_t q=0;q<r.detector.axes.range_bins;++q){
+    first_value=true;for(uint32_t d=0;d<axes.rate_bins;++d)for(uint32_t q=0;q<nb;++q){
       if(!first_value)out.push_back(',');
-      first_value=false;const double value=r.detector.initial_dl_likelihood[(size_t)q*r.detector.axes.rate_bins+d];
+      first_value=false;const double value=r.detector.initial_dl_likelihood[(size_t)q*axes.rate_bins+d];
       number(out,std::isfinite(value)&&value>0.0?value:0.0);}out+=']';}
   out += "}\n";return out;
 }
@@ -746,7 +768,12 @@ ReportWriter::~ReportWriter()
 
 void ReportWriter::emit(const PipelineReport& report)
 {
-  const std::string line = build_report_json(report, config_);
+  const double now_ns = std::chrono::duration<double, std::nano>(
+      std::chrono::steady_clock::now().time_since_epoch()).count();
+  const bool emit_maps = config_.capture_rvm
+      && (now_ns - last_rvm_emit_ns_) >= config_.rvm_period_s * 1e9;
+  const std::string line = build_report_json(report, config_, emit_maps);
+  if (emit_maps) last_rvm_emit_ns_ = now_ns;
   if (file_) { file_ << line; file_.flush(); }
 #ifdef ENABLE_ZEROMQ
   if (zmq_socket_) zmq_send(zmq_socket_, line.data(), line.size() - 1, ZMQ_DONTWAIT);

@@ -407,7 +407,7 @@ void test_validation_report_compatibility()
   r.source_occurrences={1,2,3,4,5,6,7};
   Detection d;d.aoa.valid=true;d.aoa.azimuth_deg=12.5;d.aoa.elevation_deg=-3.0;
   r.detections.push_back(d);
-  const std::string json=build_report_json(r,c);
+  const std::string json=build_report_json(r,c,c.capture_rvm);
   require(json.find("\"cpi_duration_ns\":7500000")!=std::string::npos,
           "validation report lost CPI duration");
   require(json.find("\"first_row_time_ns\":50000000")!=std::string::npos,
@@ -436,7 +436,7 @@ void test_validation_report_compatibility()
   r.detector.initial_likelihood={1,2,3,4,5,6};
   r.detector.initial_dl_likelihood={6,5,4,3,2,1};
   r.detector.dl_observed_re_count=42;
-  const std::string capture_json=build_report_json(r,captured);
+  const std::string capture_json=build_report_json(r,captured,captured.capture_rvm);
   require(capture_json.find("\"dl_rvm_layout\":\"doppler_major_range_minor\"")!=std::string::npos,
           "captured report lost DL-only RDM layout");
   require(capture_json.find("\"dl_rvm_source_mask\":15")!=std::string::npos,

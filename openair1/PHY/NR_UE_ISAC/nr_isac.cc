@@ -197,6 +197,7 @@ extern "C" void nr_isac_init(void)
   // explicitly; silently inheriting the historical campaign envelope is hidden hard-tuning.
   double p_max_speed=0.0,p_max_range=0.0,p_false_intensity=0.0;
   double p_rx_x=0,p_rx_y=0,p_rx_z=0,p_tx_x=0,p_tx_y=0,p_tx_z=0,p_rotation=0,p_subslot_snr=0;
+  double p_rvm_period=0.5,p_rvm_max_range=0.0;
   double p_aoa_max_manifold=.25,p_aoa_max_phase=PI/4.0,p_aoa_max_az_sigma=45.0;
   double p_aoa_max_el_sigma=45.0;
   char *p_source=nullptr,*p_sources=nullptr,*p_durations=nullptr,*p_array=nullptr,*p_broadside=nullptr;
@@ -250,6 +251,8 @@ extern "C" void nr_isac_init(void)
     real("rx_pos_x","receiver ENU east",&p_rx_x,0),real("rx_pos_y","receiver ENU north",&p_rx_y,0),real("rx_pos_z","receiver ENU up",&p_rx_z,0),
     real("tx_pos_x","transmitter ENU east",&p_tx_x,0),real("tx_pos_y","transmitter ENU north",&p_tx_y,0),real("tx_pos_z","transmitter ENU up",&p_tx_z,0),
     integer("capture","include native range-Doppler raster in reports",PARAMFLAG_BOOL,&p_capture,0),
+    real("rvm_period_s","minimum seconds between emitted range-Doppler maps",&p_rvm_period,0.5),
+    real("rvm_max_range_m","crop each emitted map's range axis to this many metres; 0=full",&p_rvm_max_range,0.0),
     text("out_path","output prefix",&p_out,"/tmp/oaiue_sensing"),text("rx_id","receiver id",&p_rx_id,"rx1"),
     text("illuminator_id","illuminator id",&p_illum,"gnb1"),text("report_path","JSONL report path",&p_report,""),
     text("report_endpoint","ZeroMQ PUB bind endpoint",&p_endpoint,""),
@@ -282,6 +285,7 @@ extern "C" void nr_isac_init(void)
   pipeline.false_object_intensity_per_s=p_false_intensity;
   pipeline.sync_enable=p_sync!=0;pipeline.family_static=p_family_static!=0;pipeline.tracker_enable=p_track!=0;
   pipeline.hierarchical_tracker_enable=p_hierarchical!=0;pipeline.capture_rvm=p_capture!=0;
+  pipeline.rvm_period_s=p_rvm_period;pipeline.rvm_max_range_m=p_rvm_max_range;
   pipeline.rx_position={p_rx_x,p_rx_y,p_rx_z};pipeline.tx_position={p_tx_x,p_tx_y,p_tx_z};
   AOA_ENABLE=environment_bool("AOA_ENABLE",p_aoa);const int requested=environment_bool("AOA_UL_ENABLE",p_aoa_ul);
   AOA_UL_ENABLE=AOA_ENABLE&&requested;pipeline.aoa_enable=AOA_ENABLE;pipeline.aoa_ul_enable_requested=requested;
