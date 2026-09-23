@@ -964,7 +964,7 @@ static void nr_isac_submit_csirs_ls(const NR_DL_FRAME_PARMS *frame_parms,
     return;
   }
   const uint16_t stop_rb = csirs_config_pdu->start_rb + csirs_config_pdu->nr_of_rbs;
-  uint32_t nof_ant = nr_isac_aoa_antennas();
+  uint32_t nof_ant = nr_isac_rx_channels();
   if (nof_ant > (uint32_t)frame_parms->nb_antennas_rx)
     nof_ant = (uint32_t)frame_parms->nb_antennas_rx;
   if (nof_ant == 0 || ant_stride == 0)

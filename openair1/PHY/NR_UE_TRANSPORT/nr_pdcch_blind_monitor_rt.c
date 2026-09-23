@@ -5839,11 +5839,11 @@ constdiag_done:;
       // pdsch_dl_ch_estimates[a][...] for each) -- this was already true before today, nothing new
       // needed there. The only gap was HERE: extraction/submission only ever read antenna 0 and
       // called the single-antenna nr_isac_submit_cfr(). Mirrors csi_rx.c's nr_isac_submit_csirs_ls()
-      // exactly (same nr_isac_aoa_antennas()/clamp/pack-then-submit-multi pattern, already
+      // exactly (same nr_isac_rx_channels()/clamp/pack-then-submit-multi pattern, already
       // live-validated there for the attached-UE AoA path). Antenna 0 stays primary (feeds
       // range-Doppler + the SNR gate below); antennas 1..N-1 exist solely for isac_aoa.cc's bearing
       // estimate.
-      uint32_t nof_ant = nr_isac_aoa_antennas();
+      uint32_t nof_ant = nr_isac_rx_channels();
       if (nof_ant > (uint32_t)fp->nb_antennas_rx) {
         nof_ant = (uint32_t)fp->nb_antennas_rx;
       }

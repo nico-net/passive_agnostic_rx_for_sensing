@@ -1606,8 +1606,8 @@ int nr_process_pbch_symbol(
     // shared NR_MAX_RX_ANTENNAS constant anywhere in the PHY tree (verified by grep), so this
     // follows the existing per-ISAC-tap local-bound pattern rather than inventing a new one.
     enum { NR_ISAC_SSB_MAX_ANT = 8 };
-    const uint32_t nof_ant = nr_isac_aoa_antennas() > 0
-                                  ? (nr_isac_aoa_antennas() < (uint32_t)fp->nb_antennas_rx ? nr_isac_aoa_antennas()
+    const uint32_t nof_ant = nr_isac_rx_channels() > 0
+                                  ? (nr_isac_rx_channels() < (uint32_t)fp->nb_antennas_rx ? nr_isac_rx_channels()
                                                                                             : (uint32_t)fp->nb_antennas_rx)
                                   : 1;
     // dl_ch_estimates is ANTENNA-MAJOR ALREADY at this call site (dl_ch_estimates[aarx]), and
