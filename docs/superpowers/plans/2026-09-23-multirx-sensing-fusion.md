@@ -2468,7 +2468,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
      C-RNTIs there (they change on every re-attach).
   4. **Survey:** `tests/passive_rx/ota/survey.json` filled by the user; `survey.py` accepts it.
 
-- [ ] **Step 1: 4-channel CORESET finding, with the CURRENT adaptive receiver** (the user's
+- [ ] **Step 1 (DEFERRED by the user 2026-09-23: lab gNB unavailable; do not run until asked): 4-channel CORESET finding, with the CURRENT adaptive receiver** (the user's
   item 3; before anything about sensing). Same rig, same config, alternating arms, `DUR=180`, 2
   runs per arm:
 

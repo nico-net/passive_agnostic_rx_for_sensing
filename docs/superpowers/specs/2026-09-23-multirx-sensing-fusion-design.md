@@ -325,3 +325,17 @@ One command on sens6, e.g. `run_sensing.sh --band 78 --rxg 43 --survey survey.js
 
 A C++ port of stages [7]–[10] (conditional on §13.4), the micro-Doppler classifier, a co-located
 array / AoA chain, and any TX path.
+
+## 16. Decisions after review (2026-09-23)
+
+- **No absolute UE position work.**
+  - The 3D tracks come from the DL leg: surveyed gNB plus 4 separated receivers.
+  - UL is shown as per-UE range-Doppler maps and detections, relative to each UE's own direct
+    path.
+  - UE localisation uses the TDOA across the 4 channels (shared FFT window and clock).
+  - TA decoding (RAR / TA MAC CE -> localiser offset prior) and the UL window-advance sidecar are
+    NOT built.
+  - Watch in OTA validation: if UE positions are 24-40 m off and the stage-9 UL attachment
+    degrades tracks, disable that attachment by flag rather than building TA support.
+- **The 4-channel CORESET re-validation (plan Task 17 Step 1) is deferred** until the lab gNB is
+  available again.
