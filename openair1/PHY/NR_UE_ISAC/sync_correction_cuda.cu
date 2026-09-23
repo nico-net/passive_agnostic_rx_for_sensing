@@ -11,6 +11,7 @@
 #include <complex>
 #include <cstddef>
 #include <cstdint>
+#include <new>
 #include <cfloat>
 #include <cstring>
 #include <limits>
@@ -19,6 +20,35 @@
 
 namespace nr_isac {
 namespace {
+
+/** Page-locked host staging: a pageable cudaMemcpy runs at ~5 GB/s through the driver's own bounce
+ * buffers and holds the copy engine the other lanes are queued on; pinned memory DMAs directly. */
+template <typename T>
+class PinnedBuffer {
+public:
+  ~PinnedBuffer() { clear(); }
+  void resize(size_t count)
+  {
+    if (count == size_) return;
+    clear();
+    if (count && cudaMallocHost(reinterpret_cast<void**>(&data_), count * sizeof(T)) != cudaSuccess) {
+      data_ = nullptr;
+      throw std::bad_alloc();
+    }
+    size_ = count;
+  }
+  void clear()
+  {
+    if (data_) cudaFreeHost(data_);
+    data_ = nullptr;
+    size_ = 0;
+  }
+  T* data() { return data_; }
+  T& operator[](size_t i) { return data_[i]; }
+private:
+  T* data_ = nullptr;
+  size_t size_ = 0;
+};
 
 const char* cufft_error_name(cufftResult status)
 {
@@ -639,7 +669,7 @@ private:
   uint32_t fft_n_ = 0;
   uint32_t subcarriers_ = 0;
   uint32_t rows_ = 0;
-  std::vector<cufftComplex> compact_host_;
+  PinnedBuffer<cufftComplex> compact_host_;
   std::vector<float> coarse_host_;
   std::vector<double> delay_host_;
   std::vector<float> contrast_host_;
@@ -744,7 +774,8 @@ public:
     const size_t cells = static_cast<size_t>(window.rows) * window.subcarriers;
     const size_t samples = cells * window.antennas;
     static_assert(sizeof(std::complex<float>) == sizeof(cufftComplex));
-    cudaError_t status = cudaMemcpy(values_, window.values.data(), samples * sizeof(*values_),
+    std::memcpy(corrected_host_.data(), window.values.data(), samples * sizeof(*values_));
+    cudaError_t status = cudaMemcpy(values_, corrected_host_.data(), samples * sizeof(*values_),
                                     cudaMemcpyHostToDevice);
     if (status == cudaSuccess)
       status = cudaMemcpy(observed_, window.observed.data(), cells * sizeof(*observed_),
@@ -892,7 +923,7 @@ private:
   uint32_t rows_ = 0;
   uint32_t subcarriers_ = 0;
   uint32_t antennas_ = 0;
-  std::vector<cufftComplex> corrected_host_;
+  PinnedBuffer<cufftComplex> corrected_host_;
   std::vector<double> row_delay_host_;
   std::vector<double> delay_host_;
   std::vector<double> applied_phase_host_;
