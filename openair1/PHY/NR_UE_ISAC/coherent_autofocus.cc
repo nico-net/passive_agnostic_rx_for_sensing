@@ -1,97 +1,213 @@
 /* SPDX-License-Identifier: OAI-Public-License-1.1 */
 //
-// Known limit: the linear model below holds while the per-channel residual is within +/-pi;
-// residuals from a wrong fringe are down-weighted only through SNR. The pipeline feeds only
-// detections associated with confirmed tracks.
+// Honest limit: this is a LINEAR phase model (Ĥ measured mod 2*pi), so it only converges inside
+// its capture range -- the antenna error delta_i for which |z * a_i . delta_i| stays under pi,
+// i.e. |delta_i| < pi / (z * |a_i|). At 3.45 GHz, |a_i| = k*|u_t-u_x| ranges up to ~2k (k =
+// 2*pi*fc/c ~= 72.3 rad/m here), so the capture range is roughly pi/(3*144) ~= 7 mm in the worst
+// direction and a few cm in a typical one. A tape-grade survey (sigma = 0.1 m) routinely seeds
+// errors outside that range: the admission gate (step 3 below) and the per-channel accept test in
+// geometry() (step 4) are what make the estimator DECLINE to act there instead of diverging --
+// that is the correct, safe behaviour, not a missing feature. Pulling in a genuinely out-of-range
+// error needs a coarse stage first (delay/envelope-domain refinement, unambiguous over many
+// wavelengths) to shrink the error below this capture range before this linear stage can help;
+// that coarse stage is future work, not attempted here.
 //
-// --- Sign derivation (do not guess this back if the test starts failing with a growing error) ---
-// Per-channel coherent term, as produced upstream: t_i = exp(j*(-ph_true_i + ph_comp_i)),
-// i.e. its phase is the survey's compensation phase minus the (unknown) true bistatic phase.
+// --- Sign derivation (re-check by deriving, do not guess it back) ---
+// Per-channel coherent term, as produced upstream: t_i = exp(j*(-ph_true_i + ph_comp_i)), i.e.
+// its phase is the survey's compensation phase minus the (unknown) true bistatic phase.
 // ph(r) = k*(dist(pos,tx) + dist(pos,r) - dist(tx,r)), k = 2*pi*fc/c, evaluated at rx position r.
-// Let r0 = current antenna estimate (geometry() before this add()) and let the true antenna
-// position be r0 + delta_i (delta_i is what we want to recover; the corrected estimate is then
-// r0 + x_i with x_i -> delta_i). ph_comp uses r0 (or the surveyed r, same to first order once
-// re-linearised each add()), ph_true uses r0 + delta_i, so to first order in delta_i:
+// Let r0 be an antenna position estimate and let the true antenna position be r0 + delta_i. Then
+// to first order in delta_i:
 //   ph_true_i - ph_comp_i ~= grad_r ph(r)|_{r0} . delta_i
 //   grad_r dist(pos,r) = (r - pos)/|r - pos| = -u_x,  u_x = normalized(pos - r)   (rx -> target)
 //   grad_r dist(tx,r)  = (r - tx)/|r - tx|   = -u_t,  u_t = normalized(tx  - r)   (rx -> tx)
 //   => grad_r ph(r) = k*(-u_x - (-u_t)) = k*(u_t - u_x)
-// So the per-channel residual (before common-mode removal) is
-//   e_i = -ph_true_i + ph_comp_i ~= -k*(u_t - u_x).delta_i = k*(u_x - u_t).delta_i
-// The code below sets a_i = -k*(u_t - u_x) = k*(u_x - u_t) and fits e_i ~= a_i . x_i by weighted
-// least squares, so the fitted x_i converges to delta_i directly -- geometry() then reports
-// surveyed + x_i, which is exactly r0 + delta_i, i.e. the true antenna position. (Verified
-// numerically by the unit test: correction_norm_m() shrinks the seeded per-antenna errors.)
-//
-// Common-mode note: e_i above is taken relative to the coherent sum of all channels (arg(t_i *
-// conj(sum t)) below when the array is coherent enough, see the gate note further down), which
-// removes whatever phase is common to every channel. A translation delta applied identically to
-// all kCh antennas is therefore only weakly observable through the differences in (u_t - u_x)
-// across antennas (which are non-zero for a real array, since each antenna looks at the
-// target/tx along a slightly different bearing) -- it is not fully unobservable, just poorly
-// conditioned when the array aperture is small relative to target range. The w = 1/sigma^2
-// survey prior seeded into J_/b_ regularises that direction so the solve stays well-posed even
-// when a particular translation is nearly in the null space.
-//
-// Coherence gate (found empirically, not in the original per-channel-only sketch): a SINGLE
-// channel whose own delta already pushes some detections' raw (ph_true-ph_comp) past +/-pi (a
-// real, measured case for the unit test's seeded errors at this array's geometry/frequency -- see
-// the "Known limit" note above) drags arg(sum) away from every OTHER channel's true reference
-// too, since sum includes that channel's corrupted term. That doesn't just hurt the bad channel's
-// own fit, it POISONS every channel's residual, because they all share the same sum. Guard: only
-// trust the shared reference when the array is coherent enough (|sum| close to kCh); otherwise
-// reference channel i against its own phase directly. This is not an ad hoc fallback: for a
-// coherent array sum is real and positive, so arg(t_i * conj(sum)) and arg(t_i) are the SAME
-// value there -- the gate only changes behaviour in the regime the shared reference is already
-// unreliable in.
+// So the raw per-channel phase, relative to r0, is
+//   -ph_true_i + ph_comp_i ~= -k*(u_t - u_x).delta_i = k*(u_x - u_t).delta_i
+// a_i below is set to -k*(u_t-u_x) = k*(u_x-u_t), so that fitting the observed phase against
+// a_i . x makes the fitted x converge to delta_i directly (verified by the unit tests, and by the
+// fact that flipping this sign makes every test regress instead of improve).
 #include "coherent_autofocus.h"
 #include <cmath>
 namespace nr_isac::coherent {
 namespace {
-bool solve3(const std::array<double, 9>& A, const std::array<double, 3>& b, double x[3])
+constexpr uint32_t kDim = 3 * kCh;
+
+// Cholesky decomposition of a symmetric positive-definite matrix: A = L * L^T, L lower
+// triangular. J_ is SPD by construction (a positive prior plus a sum of rank-1 y*y^T/var
+// updates, all PSD), so this should never fail; return false defensively rather than throw.
+bool cholesky(const Matrix& a, Matrix& l)
 {
-  const double d = A[0] * (A[4] * A[8] - A[5] * A[7]) - A[1] * (A[3] * A[8] - A[5] * A[6]) + A[2] * (A[3] * A[7] - A[4] * A[6]);
-  if (!(std::abs(d) > 0)) return false;
-  auto det3 = [](double a, double b_, double c, double d_, double e, double f, double g, double h, double i) { return a * (e * i - f * h) - b_ * (d_ * i - f * g) + c * (d_ * h - e * g); };
-  x[0] = det3(b[0], A[1], A[2], b[1], A[4], A[5], b[2], A[7], A[8]) / d;
-  x[1] = det3(A[0], b[0], A[2], A[3], b[1], A[5], A[6], b[2], A[8]) / d;
-  x[2] = det3(A[0], A[1], b[0], A[3], A[4], b[1], A[6], A[7], b[2]) / d;
+  const size_t n = a.rows();
+  l = Matrix(n, n);
+  for (size_t i = 0; i < n; ++i) {
+    for (size_t j = 0; j <= i; ++j) {
+      double sum = a(i, j);
+      for (size_t k = 0; k < j; ++k) sum -= l(i, k) * l(j, k);
+      if (i == j) {
+        if (!(sum > 0)) return false;
+        l(i, j) = std::sqrt(sum);
+      } else {
+        l(i, j) = sum / l(j, j);
+      }
+    }
+  }
   return true;
 }
-} // namespace
-Autofocus::Autofocus(const Geometry& s, double sigma, double fc) : surveyed_(s), k_(2 * M_PI * fc / kC)
+
+std::vector<double> cholesky_solve(const Matrix& l, const std::vector<double>& rhs)
 {
-  const double w = 1.0 / (sigma * sigma);                          // prior: surveyed position, declared sigma
-  for (uint32_t i = 0; i < kCh; ++i) { J_[i] = {w, 0, 0, 0, w, 0, 0, 0, w}; b_[i] = {0, 0, 0}; }
+  const size_t n = l.rows();
+  std::vector<double> y(n, 0.0), x(n, 0.0);
+  for (size_t i = 0; i < n; ++i) {
+    double s = rhs[i];
+    for (size_t k = 0; k < i; ++k) s -= l(i, k) * y[k];
+    y[i] = s / l(i, i);
+  }
+  for (size_t ii = 0; ii < n; ++ii) {
+    const size_t i = n - 1 - ii;
+    double s = y[i];
+    for (size_t k = i + 1; k < n; ++k) s -= l(k, i) * x[k];
+    x[i] = s / l(i, i);
+  }
+  return x;
 }
+
+// Full inverse via repeated Cholesky solves against the identity columns -- used to get the
+// posterior covariance blocks for the admission gate. kDim=12, so this is cheap.
+Matrix cholesky_inverse(const Matrix& l)
+{
+  const size_t n = l.rows();
+  Matrix inv(n, n);
+  std::vector<double> e(n, 0.0);
+  for (size_t col = 0; col < n; ++col) {
+    if (col > 0) e[col - 1] = 0.0;
+    e[col] = 1.0;
+    const std::vector<double> x = cholesky_solve(l, e);
+    for (size_t r = 0; r < n; ++r) inv(r, col) = x[r];
+  }
+  return inv;
+}
+} // namespace
+
+Autofocus::Autofocus(const Geometry& s, double sigma, double fc)
+    : surveyed_(s), k_(2 * M_PI * fc / kC), J_(kDim, kDim), b_(kDim, 0.0)
+{
+  const double w = 1.0 / (sigma * sigma);
+  for (uint32_t i = 0; i < kDim; ++i) J_(i, i) = w;
+}
+
+std::vector<double> Autofocus::solve() const
+{
+  Matrix l;
+  if (!cholesky(J_, l)) return std::vector<double>(kDim, 0.0);
+  return cholesky_solve(l, b_);
+}
+
+Geometry Autofocus::raw_geometry(const std::vector<double>& xhat) const
+{
+  Geometry g = surveyed_;
+  for (uint32_t i = 0; i < kCh; ++i) g.rx[i] = surveyed_.rx[i] + Vec3{xhat[3 * i], xhat[3 * i + 1], xhat[3 * i + 2]};
+  return g;
+}
+
 void Autofocus::add(const Detection& d)
 {
-  std::complex<double> sum = 0; for (const auto& t : d.terms) sum += t;
-  // Coherence gate: see the "Coherence gate" comment at the top of this file. 0.75*kCh requires
-  // the array to be combining reasonably constructively before its sum is trusted as a reference.
-  const bool coherent = std::abs(sum) >= 0.75 * kCh;
-  const double var = 1.0 / (2 * std::max(d.snr, 1e-6));          // phase variance from SNR
-  const Geometry g = geometry();
+  Matrix l;
+  if (!cholesky(J_, l)) return;
+  const std::vector<double> xhat = cholesky_solve(l, b_);
+  const Matrix jinv = cholesky_inverse(l); // posterior covariance, for the admission gate
+
+  const double var = 1.0 / (2.0 * std::max(d.snr, 1e-6));
+  constexpr double kZ = 3.0; // conventional quantile for the admission gate
+
+  const Geometry g = raw_geometry(xhat); // relinearise at the CURRENT joint estimate, ungated
+  std::array<Vec3, kCh> a{};
+  std::array<bool, kCh> admit{};
+  uint32_t n_admit = 0;
   for (uint32_t i = 0; i < kCh; ++i) {
-    if (std::abs(d.terms[i]) == 0) continue;
-    // residual vs the coherent sum (or vs the channel's own phase below the coherence gate)
-    const double e = coherent ? std::arg(d.terms[i] * std::conj(sum)) : std::arg(d.terms[i]);
-    // residual phase = -k * (u_tx,i - u_x,i) . delta_i   (u = unit vectors from rx_i)
+    if (std::abs(d.terms[i]) == 0) { admit[i] = false; continue; }
     const Vec3 ux = normalized(d.pos - g.rx[i]), ut = normalized(d.tx - g.rx[i]);
-    const Vec3 a = (ut - ux) * (-k_);
-    const double av[3] = {a.x, a.y, a.z};
-    for (int r = 0; r < 3; ++r) { for (int c = 0; c < 3; ++c) J_[i][r * 3 + c] += av[r] * av[c] / var; b_[i][r] += av[r] * e / var; }
+    a[i] = (ut - ux) * (-k_);
+    // a_i^T P_i a_i, P_i = the 3x3 block of J^-1 for channel i (the joint posterior covariance,
+    // not a per-channel-only inverse -- correlations across channels matter here).
+    double a_p_a = 0.0;
+    const double av[3] = {a[i].x, a[i].y, a[i].z};
+    for (int r = 0; r < 3; ++r)
+      for (int c = 0; c < 3; ++c)
+        a_p_a += av[r] * jinv(3 * i + r, 3 * i + c) * av[c];
+    const double capture = kZ * std::sqrt(std::max(a_p_a, 0.0) + var);
+    admit[i] = capture < M_PI;
+    if (admit[i]) ++n_admit;
+  }
+  if (n_admit < 2) return; // need at least 2 admitted channels to be worth fitting
+
+  // ref = sum over admitted j of t_j * exp(-j*a_j.xhat_j) / |t_j|: a robust, amplitude-free
+  // estimate of whatever phase all admitted channels currently agree on once each channel's own
+  // best-known prediction is backed out.
+  std::complex<double> ref = 0;
+  for (uint32_t j = 0; j < kCh; ++j) {
+    if (!admit[j]) continue;
+    const double aj_xj = a[j].x * xhat[3 * j] + a[j].y * xhat[3 * j + 1] + a[j].z * xhat[3 * j + 2];
+    ref += d.terms[j] * std::polar(1.0, -aj_xj) / std::abs(d.terms[j]);
+  }
+  if (std::abs(ref) == 0) return;
+
+  // mean_row = (1/n_admit) * sum over admitted j of row_j, row_j = a_j placed in channel j's 3
+  // columns of the kDim-wide row, 0 elsewhere.
+  std::vector<double> mean_row(kDim, 0.0);
+  for (uint32_t j = 0; j < kCh; ++j) {
+    if (!admit[j]) continue;
+    mean_row[3 * j] += a[j].x; mean_row[3 * j + 1] += a[j].y; mean_row[3 * j + 2] += a[j].z;
+  }
+  for (auto& v : mean_row) v /= static_cast<double>(n_admit);
+
+  for (uint32_t i = 0; i < kCh; ++i) {
+    if (!admit[i]) continue;
+    const double ai_xi = a[i].x * xhat[3 * i] + a[i].y * xhat[3 * i + 1] + a[i].z * xhat[3 * i + 2];
+    const double nu = std::arg(d.terms[i] * std::polar(1.0, -ai_xi) * std::conj(ref));
+
+    std::vector<double> y(kDim, 0.0);
+    for (uint32_t c = 0; c < kDim; ++c) y[c] = -mean_row[c];
+    y[3 * i] += a[i].x; y[3 * i + 1] += a[i].y; y[3 * i + 2] += a[i].z;
+
+    const double rhs = (nu + ai_xi) / var;
+    for (uint32_t r = 0; r < kDim; ++r) {
+      b_[r] += y[r] * rhs;
+      for (uint32_t c = 0; c < kDim; ++c) J_(r, c) += y[r] * y[c] / var;
+    }
   }
 }
+
+std::array<bool, kCh> Autofocus::applied() const
+{
+  std::array<bool, kCh> out{};
+  const std::vector<double> xhat = solve();
+  constexpr double kChiSq3_99 = 11.345; // chi-square, 3 dof, 1% false-alarm quantile
+  for (uint32_t i = 0; i < kCh; ++i) {
+    double stat = 0.0;
+    for (int r = 0; r < 3; ++r)
+      for (int c = 0; c < 3; ++c)
+        stat += xhat[3 * i + r] * J_(3 * i + r, 3 * i + c) * xhat[3 * i + c];
+    out[i] = stat > kChiSq3_99;
+  }
+  return out;
+}
+
 Geometry Autofocus::geometry() const
 {
   Geometry g = surveyed_;
-  for (uint32_t i = 0; i < kCh; ++i) { double x[3]; if (solve3(J_[i], b_[i], x)) g.rx[i] = surveyed_.rx[i] + Vec3{x[0], x[1], x[2]}; }
+  const std::vector<double> xhat = solve();
+  const std::array<bool, kCh> app = applied();
+  for (uint32_t i = 0; i < kCh; ++i)
+    if (app[i]) g.rx[i] = surveyed_.rx[i] + Vec3{xhat[3 * i], xhat[3 * i + 1], xhat[3 * i + 2]};
   return g;
 }
+
 std::array<double, kCh> Autofocus::correction_norm_m() const
 {
-  std::array<double, kCh> n{}; const Geometry g = geometry();
+  std::array<double, kCh> n{};
+  const Geometry g = geometry();
   for (uint32_t i = 0; i < kCh; ++i) n[i] = dist(g.rx[i], surveyed_.rx[i]);
   return n;
 }
