@@ -47,7 +47,7 @@ trap 'stop_all; [ -n "$RL" ] && type verdict >/dev/null 2>&1 && verdict; exit 13
 export NR_ISAC_CPUS=$SENSE_CPUS NR_ISAC_REQUIRE_CUDA=1
 [ -n "$DEBUG" ] && { mkdir -p "$RUN/debug"; export NR_ISAC_DEBUG_DIR=$RUN/debug; }
 ( REPO=$W BIN=$BUILD/nr-uesoftmodem ARM=sense CONF=$RUN/ue.conf DUR=$DUR TRIES=$TRIES RXG=$RXG NANT=${NANT:-4} MGMT=$MGMT \
-  SCAN=${SCAN:-1} ${SSB:+SSB=$SSB} PRB=273 CARRIER=3450000000 INITIALFO=${INITIALFO:-0} \
+  SCAN=${SCAN:-1} SSB=${SSB:-150} PRB=273 CARRIER=3450000000 INITIALFO=${INITIALFO:-0} \
   XENV="NR_ISAC_CPUS=$SENSE_CPUS NR_ISAC_REQUIRE_CUDA=1 ISAC_COREMAP_IDSWEEP=12 ${NR_ISAC_DEBUG_DIR:+NR_ISAC_DEBUG_DIR=$NR_ISAC_DEBUG_DIR}" \
   bash "$W/tests/passive_rx/captures/run_arm.sh" ) > "$RUN/run_arm.out" 2>&1 &
 ARM_PID=$!
