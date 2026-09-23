@@ -5889,9 +5889,14 @@ constdiag_done:;
                                        .dl_center_hz    = fp->dl_CarrierFreq,
                                        .pci             = fp->Nid_cell,
                                        .slots_per_frame = fp->slots_per_frame};
-          nr_isac_submit_cfr_multi(abs_slot, 0.0f, NR_ISAC_SRC_PDSCH_DMRS_BLIND, &carrier, isac_h, nof_ant,
-                                   273 * NR_NB_SC_PER_RB, isac_k, isac_l, nof_re, (float)nvar);
-          g_cfr_submits++;
+          if (out.rnti_class == NR_BLIND_RNTI_CLASS_C) {
+            nr_isac_flow_note(out.rnti, 0);
+            if (nr_isac_flow_admit(out.rnti)) {
+              nr_isac_submit_cfr_multi(abs_slot, 0.0f, NR_ISAC_SRC_PDSCH_DMRS_BLIND, &carrier, isac_h, nof_ant,
+                                       273 * NR_NB_SC_PER_RB, isac_k, isac_l, nof_re, (float)nvar);
+              g_cfr_submits++;
+            }
+          }
         }
 
         // ---- Passive data-aided PDSCH (PASSIVE_PDSCH_DATA_AIDED_HANDOVER.md Part B). Deliberately

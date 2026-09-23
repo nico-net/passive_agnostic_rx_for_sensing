@@ -61,6 +61,8 @@ void nr_isac_pdsch_data_aided_submit(PHY_VARS_NR_UE *ue,
 {
   if (!nr_isac_enabled() || !nr_isac_source_enabled(NR_ISAC_SRC_PDSCH_DATA))
     return;
+  if (!nr_isac_flow_admit(rnti))
+    return;
 
   /* SINGLE LAYER ONLY -- and this is a correctness guard, not a scope preference.
    *

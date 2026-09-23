@@ -67,6 +67,9 @@ void nr_isac_pusch_data_aided_submit(PHY_VARS_NR_UE *ue,
   if (ue == NULL || gnb == NULL || pdu == NULL || g == NULL || tb_bytes == NULL) {
     return;
   }
+  if (!nr_isac_flow_admit(g->rnti)) {
+    return;
+  }
   if (g->nrOfLayers != 1) {
     return; // single layer only, same scope guard the decode itself applies
   }
