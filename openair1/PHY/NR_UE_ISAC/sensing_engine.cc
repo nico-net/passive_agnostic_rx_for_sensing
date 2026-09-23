@@ -644,6 +644,9 @@ void SensingEngine::accumulation_run()
   for (;;) {
     Snapshot* value = ready_.wait_pop();
     if (!value) break;
+    // Gate closed while we were blocked: drop the pre-close rows BEFORE this post-gap row is consumed,
+    // or consume() would window them into a stale partial CPI and the discard would hit this row.
+    maybe_discard_pending();
     try { consume(*value); }
     catch (const std::exception& e) { std::fprintf(stderr, "SENSING: dropped CFR occurrence: %s\n", e.what()); }
     value->cfr.clear(); value->subcarrier.clear(); value->symbol.clear(); free_.push(value);

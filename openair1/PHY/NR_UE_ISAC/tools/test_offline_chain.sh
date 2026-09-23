@@ -73,12 +73,17 @@ def check(tag):
     print(f"replay wall {wall:.2f} s for {span:.2f} s of recorded air time")
     loss = {k: max(r[k] for r in reps) for k in ("dropped_submissions", "dropped_cpis", "discarded_pending_rows", "stale_submissions")}
     print(f"loss counters {loss}; deadline-shed stages {shed}; gate_discarded_rows {gate_discarded}")
-    assert gate_discarded > 0, f"{tag}: the recorded gate close discarded no pending rows"
+    assert gate_discarded > (1 if tag == "fixed" else 0), f"{tag}: the gate close discarded {gate_discarded} pending rows"
+    # The close must drop the pre-gap partial CPI, not emit it (and not the first post-gap row).
+    short = [r["midpoint_air_time_s"] for r in reps
+             if r["midpoint_air_time_s"] < 5.0 and r["dwell_s"] < r["cpi_plan"]["target_dwell_s"] - 0.001]
+    assert not short, f"{tag}: pre-gap CPIs shorter than their target dwell at t={short}"
     assert not any(loss.values()), f"{tag}: rows or CPIs lost outside the gate-close discard: {loss}"
     assert ok >= 0.8 * n, f"{tag}: engine misses the synthetic target (or cable delay did not cancel)"
     return reps, total, shed
 
 fixed, _, _ = check("fixed")
+assert len(fixed) == 119, f"lockstep: {len(fixed)} CPIs, expected 119 (66 pre-gap + 53 post-gap)"
 rt, total, shed = check("rt")
 assert len(rt) == len(fixed), f"real time: {len(rt)} CPIs vs {len(fixed)} in lockstep (engine fell behind)"
 assert shed == 0, f"real time: {shed} detector/tracker stages shed work at the CPI deadline"
