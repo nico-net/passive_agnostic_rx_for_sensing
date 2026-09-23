@@ -13,6 +13,9 @@ if(ENABLE_CHANNEL_SIM_CUDA)
     message(STATUS "CUDA explicitly enabled, building with GPU acceleration support.")
 
     enable_language(CUDA)
+    # The CXX compiler links CUDA objects; the host compiler's own (older) libstdc++ directory
+    # would shadow the CXX one and break libs built against it (libzmq -> libnorm, CXXABI_1.3.15).
+    list(FILTER CMAKE_CUDA_IMPLICIT_LINK_DIRECTORIES EXCLUDE REGEX "/lib/gcc/")
 
     if(CMAKE_SYSTEM_PROCESSOR STREQUAL "aarch64")
         set(CMAKE_CUDA_ARCHITECTURES 90)
