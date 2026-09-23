@@ -16,8 +16,17 @@
 #include <chrono>
 #include <cmath>
 #include <complex>
+#include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
+#include <deque>
+#include <functional>
+#include <future>
+#include <memory>
+#include <mutex>
+#include <optional>
+#include <stdexcept>
+#include <thread>
 #include <vector>
 
 using namespace nr_isac;
@@ -108,6 +117,86 @@ CfrWindow dl_only_view(const CfrWindow& fused)
   }
   return dl;
 }
+
+// P17(c): one persistent OS thread per receiver lane, reused for every repetition -- a minimal
+// port of sensing_engine.cc's SpatialDetectorExecutor (same shape: one dedicated worker thread
+// per lane, a mutex/condvar-guarded task queue, std::packaged_task -> std::future). A thread
+// spawned fresh per repetition would not do: clean_detector.cc caches its CUDA
+// backend/stream in `thread_local` storage (detect_clean(), ~line 1414), so only a genuinely
+// persistent per-lane thread keeps that cache warm across repetitions the way the real spatial
+// engine's long-lived workers do; a fresh std::thread per call would rebuild the CUDA context
+// every time and measure cold-start cost, not steady-state throughput.
+class FixedLaneExecutor {
+public:
+  explicit FixedLaneExecutor(size_t lanes)
+  {
+    workers_.reserve(lanes);
+    while (workers_.size() < lanes) workers_.push_back(std::make_unique<Worker>());
+  }
+
+  template <typename F>
+  auto submit(size_t lane, F function) -> std::future<decltype(function())>
+  {
+    return workers_.at(lane)->submit(std::move(function));
+  }
+
+private:
+  struct Worker {
+    Worker() : thread([this] { run(); }) {}
+    ~Worker()
+    {
+      { std::lock_guard<std::mutex> lock(mutex); stopping = true; }
+      condition.notify_one();
+      if (thread.joinable()) thread.join();
+    }
+
+    template <typename F>
+    auto submit(F function) -> std::future<decltype(function())>
+    {
+      using R = decltype(function());
+      auto task = std::make_shared<std::packaged_task<R()>>(std::move(function));
+      auto future = task->get_future();
+      {
+        std::lock_guard<std::mutex> lock(mutex);
+        if (stopping) throw std::runtime_error("benchmark lane worker is stopping");
+        tasks.push_back([task] { (*task)(); });
+      }
+      condition.notify_one();
+      return future;
+    }
+
+    void run()
+    {
+      for (;;) {
+        std::function<void()> task;
+        {
+          std::unique_lock<std::mutex> lock(mutex);
+          condition.wait(lock, [&] { return stopping || !tasks.empty(); });
+          if (stopping && tasks.empty()) return;
+          task = std::move(tasks.front());
+          tasks.pop_front();
+        }
+        task();
+      }
+    }
+
+    std::mutex mutex;
+    std::condition_variable condition;
+    std::deque<std::function<void()>> tasks;
+    bool stopping = false;
+    std::thread thread;
+  };
+
+  std::vector<std::unique_ptr<Worker>> workers_;
+};
+
+double percentile(std::vector<double> values, double fraction)
+{
+  std::sort(values.begin(), values.end());
+  const size_t index = std::min(values.size() - 1,
+      static_cast<size_t>(std::ceil(fraction * values.size())) - 1);
+  return values[index];
+}
 } // namespace
 
 int main()
@@ -133,15 +222,34 @@ int main()
   // ~0.0317 s, so 1.0/s keeps the budget comfortably inside range.
   config.false_object_intensity_per_s = 1.0;
   config.capture_rvm = true;
+  // P17(c): "everything real time" -- the per-CPI deadline the real spatial engine passes to
+  // every per-receiver detect_clean() call (sensing_engine.cc process_receiver(), ~line 1187),
+  // and the wall-clock budget one CPI has before the next one arrives.
+  config.spatial_detector_deadline_s = SPATIAL_CPI_DURATION_S;
   const CfrWindow window = dense_window();
   const CfrWindow dl_window = dl_only_view(window);
+  const std::optional<double> deadline = config.spatial_detector_deadline_s > 0.0
+      ? std::optional<double>(config.spatial_detector_deadline_s) : std::nullopt;
+  // P17(c): one worker thread per receiver, shared by every run()/run_full_cpi() call below
+  // (warmup and timed repetitions alike) so each lane's CUDA backend/stream stays warm exactly
+  // as it would in the real long-lived engine.
+  FixedLaneExecutor lanes(window.antennas);
   // Canonical CLEAN accepts one independent receiver: keep the workload by running the four
-  // per-receiver detections of this 4x192x3276 CPI and timing the total (P11), rather than one
-  // 4-antenna call the engine never makes in spatial mode.
+  // per-receiver detections of this 4x192x3276 CPI CONCURRENTLY (P17(c) -- mirrors
+  // SpatialDetectorExecutor: one lane's detection is gated by nothing but its own latency, not
+  // by the other three finishing first) and timing the whole concurrent batch (P11's original
+  // sequential timing is superseded here).
   auto run = [&]() {
     const auto started = std::chrono::steady_clock::now();
-    for (uint32_t receiver = 0; receiver < window.antennas; ++receiver) {
-      const auto result = detect_clean(receiver_view(window, receiver), config);
+    std::vector<std::future<DetectorResult>> futures;
+    futures.reserve(window.antennas);
+    for (uint32_t receiver = 0; receiver < window.antennas; ++receiver)
+      futures.push_back(lanes.submit(receiver, [&, receiver] {
+        return detect_clean(receiver_view(window, receiver), config, RateGate{}, 0,
+                            std::nullopt, deadline);
+      }));
+    for (uint32_t receiver = 0; receiver < futures.size(); ++receiver) {
+      const auto result = futures[receiver].get();
       if (result.components.empty() || result.initial_likelihood.empty()) {
         std::fprintf(stderr,
                      "dense CUDA detector returned %zu components and %zu map cells (rx%u)\n",
@@ -163,13 +271,17 @@ int main()
     std::vector<double> samples;
     for (uint32_t repetition = 0; repetition < 5; ++repetition)
       samples.push_back(run());
-    std::sort(samples.begin(), samples.end());
-    const double median_ms = samples[samples.size() / 2];
+    std::vector<double> sorted_samples = samples;
+    std::sort(sorted_samples.begin(), sorted_samples.end());
+    const double median_ms = sorted_samples[sorted_samples.size() / 2];
+    const double p95_ms = percentile(samples, 0.95);
     const char* configured_limit = std::getenv("NR_ISAC_CUDA_BENCHMARK_MAX_MS");
-    const double limit_ms = configured_limit ? std::strtod(configured_limit, nullptr) : 200.0;
-    std::printf("CUDA detector dense CPI: warmup=%.3f ms min=%.3f ms median=%.3f ms "
-                "max=%.3f ms limit=%.3f ms\n",
-                warmup_ms, samples.front(), median_ms, samples.back(), limit_ms);
+    const double limit_ms = configured_limit ? std::strtod(configured_limit, nullptr)
+                                             : SPATIAL_CPI_DURATION_S * 1000.0;
+    std::printf("CUDA detector dense CPI (4 receivers concurrent): warmup=%.3f ms min=%.3f ms "
+                "median=%.3f ms p95=%.3f ms max=%.3f ms limit=%.3f ms\n",
+                warmup_ms, sorted_samples.front(), median_ms, p95_ms, sorted_samples.back(),
+                limit_ms);
     if (!(median_ms < limit_ms)) {
       std::fprintf(stderr, "CUDA detector misses required steady-state CPI throughput\n");
       return EXIT_FAILURE;
@@ -206,12 +318,28 @@ int main()
     const auto allocation_aligned = std::chrono::steady_clock::now();
     PipelineReport report;
     report.sync = sync;
-    // Same per-receiver split as `run()` above: the timed span below covers all four receivers'
-    // detections, keeping the full-path benchmark's workload consistent with the detector-only one.
-    for (uint32_t receiver = 0; receiver < detector_input.antennas; ++receiver) {
-      auto rx_result = detect_clean_with_diagnostic(
-          receiver_view(detector_input, receiver), receiver_view(dl_corrected, receiver), config);
-      if (receiver == 0) report.detector = std::move(rx_result);
+    // Same concurrent per-receiver split as `run()` above (P17(c)), on the SAME persistent lanes
+    // -- the timed span below covers all four receivers' detections running at once, gated by
+    // the same spatial_detector_deadline_s. Uses plain detect_clean(), not
+    // detect_clean_with_diagnostic(): that is what the real spatial per-receiver call
+    // (sensing_engine.cc process_receiver(), ~line 1187) actually calls, and it is the only one
+    // of the two that accepts a deadline at all. Mirrors that call site's own DL-only map
+    // shortcut too (~line 1192): the fused map IS the DL-only map there, aliased rather than
+    // computed by a second pass.
+    std::vector<std::future<DetectorResult>> detector_futures;
+    detector_futures.reserve(detector_input.antennas);
+    for (uint32_t receiver = 0; receiver < detector_input.antennas; ++receiver)
+      detector_futures.push_back(lanes.submit(receiver, [&, receiver] {
+        return detect_clean(receiver_view(detector_input, receiver), config, RateGate{}, 0,
+                            std::nullopt, deadline);
+      }));
+    for (uint32_t receiver = 0; receiver < detector_futures.size(); ++receiver) {
+      auto rx_result = detector_futures[receiver].get();
+      if (receiver == 0) {
+        report.detector = std::move(rx_result);
+        report.detector.initial_dl_likelihood = report.detector.initial_likelihood;
+        report.detector.dl_observed_re_count = report.detector.axes.observed_re_count;
+      }
     }
     const auto detected = std::chrono::steady_clock::now();
     const std::string json = build_report_json(report, config, config.capture_rvm);
@@ -233,23 +361,30 @@ int main()
   const uint32_t repetitions = cpu_baseline ? 1 : 5;
   for (uint32_t repetition = 0; repetition < repetitions; ++repetition)
     full_samples.push_back(run_full_cpi());
-  const auto median_field = [&](double FullSample::*field) {
+  const auto field_values = [&](double FullSample::*field) {
     std::vector<double> values;
     for (const auto& sample : full_samples) values.push_back(sample.*field);
+    return values;
+  };
+  const auto median_field = [&](double FullSample::*field) {
+    auto values = field_values(field);
     std::sort(values.begin(), values.end());
     return values[values.size() / 2];
   };
   const double full_median_ms = median_field(&FullSample::total);
+  const double full_p95_ms = percentile(field_values(&FullSample::total), 0.95);
   const auto [minimum_full, maximum_full] = std::minmax_element(
       full_samples.begin(), full_samples.end(),
       [](const FullSample& left, const FullSample& right) { return left.total < right.total; });
   const char* configured_full_limit = std::getenv("NR_ISAC_CUDA_FULL_CPI_MAX_MS");
   const double full_limit_ms = configured_full_limit
-                                   ? std::strtod(configured_full_limit, nullptr) : 200.0;
-  std::printf("%s full CPI (copy+sync+correction+variance+alignment+detector+dual-map JSON): "
-              "warmup=%.3f ms min=%.3f ms median=%.3f ms max=%.3f ms limit=%.3f ms\n",
+                                   ? std::strtod(configured_full_limit, nullptr)
+                                   : SPATIAL_CPI_DURATION_S * 1000.0;
+  std::printf("%s full CPI (copy+sync+correction+variance+alignment+4-receiver-concurrent-"
+              "detector+report): warmup=%.3f ms min=%.3f ms median=%.3f ms p95=%.3f ms "
+              "max=%.3f ms limit=%.3f ms\n",
               cpu_baseline ? "CPU" : "CUDA", full_warmup.total,
-              minimum_full->total, full_median_ms,
+              minimum_full->total, full_median_ms, full_p95_ms,
               maximum_full->total, full_limit_ms);
   std::printf("%s full CPI median stages: copy=%.3f sync=%.3f correction=%.3f "
               "variance=%.3f alignment=%.3f fused_plus_dl_detector=%.3f report=%.3f ms\n",
