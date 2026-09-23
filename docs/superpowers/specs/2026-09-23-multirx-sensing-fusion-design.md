@@ -117,10 +117,21 @@ how the decoder combined branches. So Ĥ_i[k] = Y_i[k] / X̂[k] for i = 0..3.
 |---|---|---|
 | PDSCH / PUSCH DM-RS | generated DM-RS sequence | always, CRC-independent |
 | data, TB CRC OK | re-encoded TB (existing `nr_isac_p[du]sch_data_aided_submit` chain) | CRC OK |
-| data, TB CRC failed (or UL UCI-hypothesis grant) | hard decision of the equalised symbol | RE kept only if min over its bits of \|LLR\| ≥ τ |
+| data, TB CRC failed (or UL UCI-hypothesis grant) | hard decision from the decoder's own LLRs (sign → bit → the same scramble + modulate step the re-encode path uses) | RE kept only if min over its Qm bits of \|LLR\| ≥ τ_Qm |
 
-- **τ is derived per grant** from that grant's own LLR magnitude population
-  (median + 3.09·MAD), consistent with the project's other derived gates. It is never a constant.
+- **τ_Qm is learned, not chosen** (corrected 2026-09-23; the earlier "median + 3.09·MAD" rule was
+  wrong, because it kept only the most confident tail). On every CRC-OK grant both X̂s exist: the
+  re-encoded truth and the LLR hard decision. From that grant's REs the receiver accumulates, per
+  modulation order Qm, a histogram of min|LLR| split into "hard decision right" and "wrong". τ_Qm
+  is the smallest bin edge at which the kept REs' error fraction is < 1 %, over the last N ≥ 1e5
+  calibration REs. The 1 % is a quality target, not a cell parameter.
+- **Until a Qm has calibration data**, CRC-fail grants of that Qm contribute DM-RS only.
+- **A live counter** reports the measured agreement between the masked X̂ and the truth on CRC-OK
+  grants, so the rule's actual error rate is always visible.
+- **LLR sources:**
+  - DL: `nr_pdsch_passive_last_llr()`, which is after descrambling. The hard bits are
+    re-scrambled before modulation.
+  - UL: `pusch_vars.llr` of the grant's context.
 - **Dropped REs** are removed from the occupancy mask. They are never zero-filled or interpolated.
 - **Decision-directed X̂ also covers UCI-punctured PUSCH REs.** A hard decision recovers the
   transmitted constellation point whatever it encodes. That lifts today's `uci_ack_re == 0`
@@ -144,7 +155,11 @@ how the decoder combined branches. So Ĥ_i[k] = Y_i[k] / X̂[k] for i = 0..3.
 - gNB ENU position (its antenna, relative to the X410),
 - the ENU position of each of the four RX antennas (the far ends of the cables, not the X410),
 - the channel → antenna mapping,
-- optional per-channel `rx_array_calibration` (gain / phase / delay).
+- optional `max_range_m` (scene's physical maximum bistatic range for the localiser; default = the
+  report's own `range_max_m`).
+
+`rx_array_calibration` is NOT used: the engine refuses it in spatial-receiver mode (`nr_isac.cc`
+disables sensing if both are set).
 
 The launcher generates the engine's `spatial_rx_positions` / `tx_pos_*` conf lines **and**
 `realtime_chain`'s `--geometry` from this one file. Two hand-kept copies disagreeing would be a
@@ -161,14 +176,20 @@ must be verified in the merged engine (§13 step 3), not assumed.
 
 ## 8. Start/stop gate
 
-- **Flow.** A C-RNTI confirmed by the bootstrap whose dedicated **DCI 1_1 and DCI 0_1** layouts
-  are both resolved and producing decoded grants.
-- **Open** when at least one flow exists. Before that, every CFR submission is dropped at the
-  submit boundary (counted as `gate_closed`).
-- **Close** when no dedicated grant of any flow has produced a CFR for **2 s**.
-  - The engine discards the partial CPI; it is not flushed into a report.
+- **Flow.** A C-RNTI (`rnti_class == NR_BLIND_RNTI_CLASS_C`) that has produced at least one CFR
+  from a decoded DL grant **and** at least one from a decoded UL grant within the last 2 s. DM-RS
+  counts, so this is CRC-independent: "usable dedicated parts" means a grant we actually extracted
+  a channel from.
+- **Open** while at least one flow exists. Before that, and while closed, every CFR submission is
+  dropped at the submit boundary (counted as `gate_closed`).
+- **Admission.** Only grants of RNTIs that are currently flows are submitted.
+- **Close** when no flow remains (the 2 s window empties).
+  - A watchdog thread in `nr_isac.cc` detects the close, logs it, and asks the engine to discard
+    its partial CPI through the same path spatial mode already uses for incomplete windows.
+  - The discard is counted separately (`gate_discarded_rows`), so `discarded_pending_rows` keeps
+    meaning "loss".
   - Tracker state is left to the chain's own retirement logic.
-  - The gate re-opens on the next dedicated grant.
+- **Re-opens** automatically when a flow reappears.
 - **Scope.** Only dedicated grants of confirmed flows are ever submitted; CORESET#0/SIB1/RA
   traffic never is.
 - **Implementation.** One small state object in the receiver, read by the producers. It is fed
