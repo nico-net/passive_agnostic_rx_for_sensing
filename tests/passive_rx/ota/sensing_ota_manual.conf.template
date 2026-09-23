@@ -110,7 +110,13 @@ sensing = {
   // declared false-object intensity; engine requires value*0.075 s < 1; value used by the
   // engine's own tests -- no validated field value yet
   false_object_intensity_per_s = 1.0;
-  sources = "pdsch_dmrs_blind,pdsch_data,pusch_dmrs,pusch_data";
+  // ===== COHERENT FUSER (DL only) =====
+  gate_require_ul = 0;
+  sources = "pdsch_dmrs_blind,pdsch_data";
+  coherent_enable = 1;
+  coherent_ul_enable = 0;
+  coherent_volume_m = "-15:15:-15:15:0:30";
+  coherent_survey_sigma_m = 0.1;
   // UE CAPACITY, not a cell value: 4 lanes per UE (4*(1+num_ues) detector lanes), engine maximum 4.
   // UL sessions beyond it in one CPI are dropped and counted (ul_sessions_capped).
   num_ues = 4;
