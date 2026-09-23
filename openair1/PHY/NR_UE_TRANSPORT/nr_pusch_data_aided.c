@@ -80,7 +80,8 @@ void nr_isac_pusch_data_aided_submit(PHY_VARS_NR_UE *ue,
                                      uint32_t harq_pid_tag,
                                      uint32_t ul_slot_idx,
                                      uint32_t nof_ant,
-                                     int slot)
+                                     int slot,
+                                     float snr_db)
 {
   if (!nr_isac_enabled() || !nr_isac_source_enabled(NR_ISAC_SRC_PUSCH_DATA)) {
     return;
@@ -129,14 +130,13 @@ void nr_isac_pusch_data_aided_submit(PHY_VARS_NR_UE *ue,
       atomic_fetch_add_explicit(&g_da_nocal, 1, memory_order_relaxed);
       return; /* no calibration for this Qm yet: DM-RS only (spec §6) */
     }
+    if (!nr_llrconf_snr_eligible((uint8_t)Qm, snr_db)) { /* P34: garbage grants keep a fixed fraction */
+      nr_llrconf_count(NR_LLRCONF_SRC_UL, NR_LLRCONF_CNT_SNR_REJECT, 1);
+      return;
+    }
     nr_llrconf_hard((uint8_t)Qm, llr, TB.G, tau, hard, keep);
     /* Hard decisions of DESCRAMBLED LLRs; the scramble below restores the transmitted bits. */
-    for (uint32_t j = 0; j < TB.G / 8; j++) {
-      const uint8_t *h = &hard[8 * j];
-      coded_bits[j] = (uint8_t)(h[0] | h[1] << 1 | h[2] << 2 | h[3] << 3 | h[4] << 4 | h[5] << 5 | h[6] << 6 | h[7] << 7);
-    }
-    for (uint32_t i = TB.G & ~7u; i < TB.G; i++)
-      coded_bits[i >> 3] |= (uint8_t)(hard[i] << (i & 7));
+    nr_llrconf_pack(hard, TB.G, coded_bits);
   } else {
     /* ---- Segment + LDPC encode. Re-segmented here because the decode path only sized C/K/Z/F. ---- */
     static __thread uint8_t  seg_storage[MAX_NUM_NR_DLSCH_SEGMENTS_PER_LAYER][8448];
@@ -189,13 +189,8 @@ void nr_isac_pusch_data_aided_submit(PHY_VARS_NR_UE *ue,
 
     uint8_t *truth = have_llr ? bit_buf(TB.G) : NULL;
     if (truth != NULL) { /* CRC-OK grant: this IS the calibration ground truth */
-      for (uint32_t j = 0; j < TB.G / 8; j++) {
-        const uint8_t c = coded_bits[j];
-        for (int b = 0; b < 8; b++)
-          truth[8 * j + b] = (c >> b) & 1;
-      }
-      for (uint32_t i = TB.G & ~7u; i < TB.G; i++)
-        truth[i] = (coded_bits[i >> 3] >> (i & 7)) & 1;
+      nr_llrconf_unpack(coded_bits, TB.G, truth);
+      nr_llrconf_snr_observe((uint8_t)Qm, snr_db);
       nr_llrconf_observe((uint8_t)Qm, llr, truth, TB.G);
       nr_llrconf_agreement((uint8_t)Qm, llr, truth, TB.G);
     }
@@ -314,5 +309,10 @@ void nr_isac_pusch_data_aided_submit(PHY_VARS_NR_UE *ue,
   atomic_fetch_add_explicit(&g_da_re, nof_re, memory_order_relaxed);
   if (masked) {
     atomic_fetch_add_explicit(&g_da_masked, 1, memory_order_relaxed);
+  }
+  nr_llrconf_count(NR_LLRCONF_SRC_UL, masked ? NR_LLRCONF_CNT_MASKED : NR_LLRCONF_CNT_CRC_OK, 1);
+  if (masked) {
+    nr_llrconf_count(NR_LLRCONF_SRC_UL, NR_LLRCONF_CNT_RE_KEPT, nof_re);
+    nr_llrconf_count(NR_LLRCONF_SRC_UL, NR_LLRCONF_CNT_RE_OFFERED, expected);
   }
 }

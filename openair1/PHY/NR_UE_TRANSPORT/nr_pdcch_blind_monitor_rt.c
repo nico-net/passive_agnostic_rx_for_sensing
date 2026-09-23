@@ -6031,17 +6031,19 @@ constdiag_done:;
                   const uint32_t da_G = nr_pdsch_passive_last_llr(&da_llr);
                   nr_isac_pdsch_data_aided_submit(ue, proc, &dec.cw, &dlsch_pdu, &freq_alloc, out.rnti, dec.tb,
                                                   da_llr, da_G, blind_harq_tag(abs_slot, out.rnti, out.harq_pid),
-                                                  rxdataF_pdsch, (double)dec.nvar);
+                                                  rxdataF_pdsch, (double)dec.nvar, dec.snr_db);
                   btim_add(BTIM_SUBMIT, btim_t_sub);
                   g_data_submits++;
                 }
-              } else if (st == NR_PDSCH_PASSIVE_DECODE_CRC_FAIL && want_data && out.rnti_class == NR_BLIND_RNTI_CLASS_C) {
+              } else if (st == NR_PDSCH_PASSIVE_DECODE_CRC_FAIL && want_data && out.rnti_class == NR_BLIND_RNTI_CLASS_C
+                         && (!sweep_ticket.generation || sweep_ticket.settled)) {
+                /* Unsettled-hypothesis CRC failures are wrong mappings, not noise: never mask (cf. DMRS rows). */
                 const uint64_t btim_t_sub = btim_on ? btim_now() : 0;
                 const int16_t *da_llr = NULL;
                 const uint32_t da_G = nr_pdsch_passive_last_llr(&da_llr);
                 nr_isac_pdsch_data_aided_submit(ue, proc, &dec.cw, &dlsch_pdu, &freq_alloc, out.rnti, NULL, da_llr,
                                                 da_G, blind_harq_tag(abs_slot, out.rnti, out.harq_pid), rxdataF_pdsch,
-                                                (double)dec.nvar);
+                                                (double)dec.nvar, dec.snr_db);
                 btim_add(BTIM_SUBMIT, btim_t_sub);
               }
             }

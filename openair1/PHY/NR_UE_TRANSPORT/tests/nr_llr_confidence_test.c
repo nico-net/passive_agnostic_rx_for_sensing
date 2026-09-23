@@ -50,6 +50,28 @@ int main(void) {
   for (uint32_t i = 0; i < G; i++) llr[i] = (int16_t)-llr[i];
   for (int k = 0; k < 2; k++) nr_llrconf_agreement(2, llr, truth, G);
   assert(nr_llrconf_disabled() == 1);
+  { /* byte-wise pack/unpack round trip, incl. a G that is not a multiple of 8 */
+    static uint8_t packed[G / 8 + 1], back[G];
+    for (uint32_t n = G - 3; n <= G; n += 3) {
+      nr_llrconf_pack(truth, n, packed); nr_llrconf_unpack(packed, n, back);
+      for (uint32_t i = 0; i < n; i++) assert(back[i] == (truth[i] & 1) && ((packed[i >> 3] >> (i & 7)) & 1) == back[i]);
+    }
+  }
+  { /* P34 grant-level SNR gate: learned p05 of CRC-OK grants per Qm, off before calibration */
+    nr_llrconf_reset();
+    for (uint64_t n = 0; n + 1 < NR_LLRCONF_MIN_SNR_GRANTS; n++) nr_llrconf_snr_observe(2, (float)(20.0 + 2.0 * gauss()));
+    assert(!nr_llrconf_snr_eligible(2, 40.0f));                 /* nothing passes before calibration */
+    nr_llrconf_snr_observe(2, 20.0f);
+    int good = 0, garbage = 0;
+    for (int k = 0; k < 1000; k++) {
+      good += nr_llrconf_snr_eligible(2, (float)(20.0 + 2.0 * gauss()));
+      garbage += nr_llrconf_snr_eligible(2, (float)(5.0 + 2.0 * gauss()));
+    }
+    assert(good > 900 && good < 990);                           /* ~95 % of the CRC-OK population passes */
+    assert(garbage == 0);                                       /* low-SNR grants are rejected */
+    assert(!nr_llrconf_snr_eligible(4, 40.0f));                 /* another Qm stays uncalibrated */
+    assert(!nr_llrconf_snr_eligible(2, NAN));                   /* unknown SNR never passes */
+  }
   puts("nr_llr_confidence_test: PASS");
   return 0;
 }

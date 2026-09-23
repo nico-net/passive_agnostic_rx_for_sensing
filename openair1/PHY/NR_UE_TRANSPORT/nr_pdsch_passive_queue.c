@@ -923,16 +923,18 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
           const uint32_t da_G = nr_pdsch_passive_last_llr(&da_llr);
           nr_isac_abs_slot_override = (uint64_t)job.absolute_slot;
           nr_isac_pdsch_data_aided_submit(ue, &proc, &dec.cw, &job.dlsch_pdu, &job.freq_alloc, job.rnti,
-                                          dec.tb, da_llr, da_G, job.harq_pid_tag, rxdataF, (double)dec.nvar);
+                                          dec.tb, da_llr, da_G, job.harq_pid_tag, rxdataF, (double)dec.nvar, dec.snr_db);
           nr_isac_abs_slot_override = 0;
         }
       } else if (st == NR_PDSCH_PASSIVE_DECODE_CRC_FAIL && job.want_data && !job.layout_probe
-                 && job.rnti_class == NR_BLIND_RNTI_CLASS_C) {
+                 && job.rnti_class == NR_BLIND_RNTI_CLASS_C
+                 && (!job.sweep_ticket.generation || job.sweep_ticket.settled)) {
+        /* An unsettled hypothesis's CRC failure is mostly a wrong mapping, not noise: never mask it. */
         const int16_t *da_llr = NULL;
         const uint32_t da_G = nr_pdsch_passive_last_llr(&da_llr);
         nr_isac_abs_slot_override = (uint64_t)job.absolute_slot;
         nr_isac_pdsch_data_aided_submit(ue, &proc, &dec.cw, &job.dlsch_pdu, &job.freq_alloc, job.rnti,
-                                        NULL, da_llr, da_G, job.harq_pid_tag, rxdataF, (double)dec.nvar);
+                                        NULL, da_llr, da_G, job.harq_pid_tag, rxdataF, (double)dec.nvar, dec.snr_db);
         nr_isac_abs_slot_override = 0;
       }
     }

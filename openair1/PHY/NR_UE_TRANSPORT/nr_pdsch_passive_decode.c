@@ -1600,6 +1600,7 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
    * the shape vary per grant and force a reallocation (and a "resizing" log line) on every change.
    * dim2 is the stride and is already constant. */
   allocCast2D(pdsch_dl_ch_estimates, int32_t, toFree, fp->nb_antennas_rx * NR_MAX_NB_LAYERS, pdsch_est_size, true);
+  out->snr_db = NAN;
   if (gpu_llr)
     goto gpu_llr_ready; /* after the variably-modified declaration above, which a jump may not cross */
 
@@ -2362,6 +2363,18 @@ chest_done:
     }
   }
   out->nvar = nvar;
+  if (nvar > 0 && dlsch_config->dlDmrsSymbPos) { /* grant DM-RS SNR for the P34 masked-submission gate */
+    const int sym = __builtin_ctz(dlsch_config->dlDmrsSymbPos), nsc = freq_alloc->num_rbs * NR_NB_SC_PER_RB;
+    double acc = 0;
+    for (int a = 0; a < fp->nb_antennas_rx; a++) {
+      const c16_t *h = (const c16_t *)&pdsch_dl_ch_estimates[a][fp->ofdm_symbol_size * sym];
+      for (int k = 0; k < nsc; k++)
+        acc += (double)h[k].r * h[k].r + (double)h[k].i * h[k].i;
+    }
+    const double pw = acc / ((double)nsc * fp->nb_antennas_rx);
+    if (pw > 0)
+      out->snr_db = (float)(10.0 * log10(pw / (double)nvar));
+  }
 
   if (ue->chest_time == 1 && probe_last_sym < 0) { /* a probe estimated only the first DM-RS symbol(s) */
     nr_chest_time_domain_avg(fp, (int32_t **)pdsch_dl_ch_estimates, dlsch_config->number_symbols,

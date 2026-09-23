@@ -16,4 +16,20 @@ int nr_llrconf_disabled(void);
 void nr_llrconf_stats_dump(void);
 void nr_llrconf_reset(void);
 float nr_llrconf_median_abs(const int16_t *llr, uint32_t G);
+/* Byte-per-bit <-> packed LSB-first (the encoder's / nr_codeword_scrambling()'s format). */
+void nr_llrconf_pack(const uint8_t *bits, uint32_t G, uint8_t *packed);
+void nr_llrconf_unpack(const uint8_t *packed, uint32_t G, uint8_t *bits);
+/* P34 grant-level gate: a CRC-failed grant may go masked only if its DM-RS SNR >= the learned p05
+ * of CRC-OK grants' SNR at the same Qm (any consistent per-path scale). Off until the Qm has
+ * NR_LLRCONF_MIN_SNR_GRANTS CRC-OK samples. */
+#define NR_LLRCONF_MIN_SNR_GRANTS NR_LLRCONF_MIN_SYMBOLS
+#define NR_LLRCONF_SNR_QUANTILE 0.05
+void nr_llrconf_snr_observe(uint8_t qm, float snr_db);
+int nr_llrconf_snr_eligible(uint8_t qm, float snr_db);
+/* Spec §6 per-source counters, bumped by the submitters only on an actual submission. */
+enum { NR_LLRCONF_SRC_DL, NR_LLRCONF_SRC_UL, NR_LLRCONF_NSRC };
+enum { NR_LLRCONF_CNT_CRC_OK, NR_LLRCONF_CNT_MASKED, NR_LLRCONF_CNT_SNR_REJECT, NR_LLRCONF_CNT_RE_KEPT,
+       NR_LLRCONF_CNT_RE_OFFERED, NR_LLRCONF_NCNT };
+void nr_llrconf_count(int src, int what, uint64_t n);
+uint64_t nr_llrconf_counter(int src, int what);
 #endif

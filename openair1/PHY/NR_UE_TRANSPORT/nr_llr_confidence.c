@@ -3,11 +3,17 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 
 static _Atomic uint64_t g_right[4][NR_LLRCONF_BINS], g_wrong[4][NR_LLRCONF_BINS];
 static _Atomic uint64_t g_agree[4], g_disagree[4];
 static _Atomic int g_disabled;
-static _Atomic uint64_t g_kept_sym, g_total_sym; /* masked-path REs kept vs offered (spec §6 counters) */
+static _Atomic uint64_t g_src[NR_LLRCONF_NSRC][NR_LLRCONF_NCNT]; /* spec §6, per source */
+/* CRC-OK DM-RS SNR histogram per Qm: 0.1 dB bins over a range wide enough for any path's scale. */
+#define SNR_LO_DB (-100.0f)
+#define SNR_BIN_DB 0.1f
+#define SNR_BINS 2500
+static _Atomic uint64_t g_snr_hist[4][SNR_BINS], g_snr_n[4];
 
 static int qidx(uint8_t qm) { return (qm == 2 || qm == 4 || qm == 6 || qm == 8) ? qm / 2 - 1 : -1; }
 
@@ -81,8 +87,6 @@ uint32_t nr_llrconf_hard(uint8_t qm, const int16_t *llr, uint32_t G, float tau, 
     keep[m] = (uint8_t)(mn >= t);
     kept += keep[m];
   }
-  atomic_fetch_add_explicit(&g_kept_sym, kept, memory_order_relaxed);
-  atomic_fetch_add_explicit(&g_total_sym, G / qm, memory_order_relaxed);
   return kept;
 }
 
@@ -106,12 +110,67 @@ void nr_llrconf_stats_dump(void) {
     const uint64_t A = g_agree[q], D = g_disagree[q];
     fprintf(stderr, "SENSING: LLRCONF qm=%d calibrated=%d tau_rel=%.2f crc_ok_bit_agreement=%.4f disabled=%d\n",
             2 * q + 2, cal, tau, (A + D) ? (double)A / (double)(A + D) : 0.0, (int)g_disabled); }
-  fprintf(stderr, "SENSING: LLRCONF masked_re kept=%llu offered=%llu\n",
-          (unsigned long long)g_kept_sym, (unsigned long long)g_total_sym);
+  static const char *src_name[NR_LLRCONF_NSRC] = {"dl", "ul"};
+  for (int s = 0; s < NR_LLRCONF_NSRC; s++)
+    fprintf(stderr, "SENSING: LLRCONF src=%s submitted_crc_ok=%llu submitted_masked=%llu snr_gate_rejected=%llu "
+            "masked_re kept=%llu offered=%llu\n", src_name[s],
+            (unsigned long long)g_src[s][NR_LLRCONF_CNT_CRC_OK], (unsigned long long)g_src[s][NR_LLRCONF_CNT_MASKED],
+            (unsigned long long)g_src[s][NR_LLRCONF_CNT_SNR_REJECT], (unsigned long long)g_src[s][NR_LLRCONF_CNT_RE_KEPT],
+            (unsigned long long)g_src[s][NR_LLRCONF_CNT_RE_OFFERED]);
 }
 
 void nr_llrconf_reset(void) {
   memset((void *)g_right, 0, sizeof g_right); memset((void *)g_wrong, 0, sizeof g_wrong);
   memset((void *)g_agree, 0, sizeof g_agree); memset((void *)g_disagree, 0, sizeof g_disagree); g_disabled = 0;
-  g_kept_sym = 0; g_total_sym = 0;
+  memset((void *)g_src, 0, sizeof g_src); memset((void *)g_snr_hist, 0, sizeof g_snr_hist);
+  memset((void *)g_snr_n, 0, sizeof g_snr_n);
+}
+
+void nr_llrconf_pack(const uint8_t *bits, uint32_t G, uint8_t *packed) {
+  for (uint32_t j = 0; j < G / 8; j++) {
+    const uint8_t *h = &bits[8 * j];
+    packed[j] = (uint8_t)(h[0] | h[1] << 1 | h[2] << 2 | h[3] << 3 | h[4] << 4 | h[5] << 5 | h[6] << 6 | h[7] << 7);
+  }
+  if (G & 7) {
+    uint8_t t = 0;
+    for (uint32_t i = G & ~7u; i < G; i++) t |= (uint8_t)(bits[i] << (i & 7));
+    packed[G >> 3] = t;
+  }
+}
+
+void nr_llrconf_unpack(const uint8_t *packed, uint32_t G, uint8_t *bits) {
+  for (uint32_t j = 0; j < G / 8; j++) {
+    const uint8_t c = packed[j];
+    for (int b = 0; b < 8; b++) bits[8 * j + b] = (c >> b) & 1;
+  }
+  for (uint32_t i = G & ~7u; i < G; i++) bits[i] = (packed[i >> 3] >> (i & 7)) & 1;
+}
+
+static int snr_bin(float snr_db) { const int b = (int)floorf((snr_db - SNR_LO_DB) / SNR_BIN_DB);
+  return b < 0 ? 0 : (b >= SNR_BINS ? SNR_BINS - 1 : b); }
+
+void nr_llrconf_snr_observe(uint8_t qm, float snr_db) {
+  const int q = qidx(qm); if (q < 0 || !isfinite(snr_db)) return;
+  atomic_fetch_add_explicit(&g_snr_hist[q][snr_bin(snr_db)], 1, memory_order_relaxed);
+  atomic_fetch_add_explicit(&g_snr_n[q], 1, memory_order_relaxed);
+}
+
+/* O(SNR_BINS) worst case, typically a short scan: the p05 sits in the low tail. */
+int nr_llrconf_snr_eligible(uint8_t qm, float snr_db) {
+  const int q = qidx(qm); if (q < 0 || !isfinite(snr_db)) return 0;
+  const uint64_t n = atomic_load_explicit(&g_snr_n[q], memory_order_relaxed);
+  if (n < NR_LLRCONF_MIN_SNR_GRANTS) return 0;
+  const uint64_t target = (uint64_t)ceil(NR_LLRCONF_SNR_QUANTILE * (double)n);
+  uint64_t c = 0; int b = 0;
+  for (; b < SNR_BINS; b++) { c += atomic_load_explicit(&g_snr_hist[q][b], memory_order_relaxed); if (c >= target) break; }
+  return snr_bin(snr_db) >= b;
+}
+
+void nr_llrconf_count(int src, int what, uint64_t n) {
+  if (src >= 0 && src < NR_LLRCONF_NSRC && what >= 0 && what < NR_LLRCONF_NCNT && n)
+    atomic_fetch_add_explicit(&g_src[src][what], n, memory_order_relaxed);
+}
+
+uint64_t nr_llrconf_counter(int src, int what) {
+  return (src >= 0 && src < NR_LLRCONF_NSRC && what >= 0 && what < NR_LLRCONF_NCNT) ? atomic_load(&g_src[src][what]) : 0;
 }

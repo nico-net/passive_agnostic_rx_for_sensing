@@ -81,6 +81,8 @@ extern __thread uint64_t nr_isac_abs_slot_override;
  * @param harq_pid_tag  Disambiguates this TB on the shared nrLDPC coding interface; see the .c file
  * @param rxdataF       Frequency-domain received samples for this slot, per rx antenna
  * @param nvar          Noise variance estimate from the demodulator, for the engine's fusion weight
+ * @param snr_db        grant DM-RS SNR (any consistent per-path scale), NAN if unknown: learned on CRC-OK
+ *                      grants, and a CRC-failed grant below that Qm's learned p05 is not masked (P34)
  */
 void nr_isac_pdsch_data_aided_submit(PHY_VARS_NR_UE *ue,
                                      const UE_nr_rxtx_proc_t *proc,
@@ -93,7 +95,8 @@ void nr_isac_pdsch_data_aided_submit(PHY_VARS_NR_UE *ue,
                                      uint32_t llr_G,
                                      uint32_t harq_pid_tag,
                                      const c16_t rxdataF[][ue->frame_parms.samples_per_slot_wCP],
-                                     double nvar);
+                                     double nvar,
+                                     float snr_db);
 
 #ifdef __cplusplus
 }

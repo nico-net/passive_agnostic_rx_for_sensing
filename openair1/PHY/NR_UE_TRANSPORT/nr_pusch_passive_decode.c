@@ -1083,11 +1083,12 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
   }
 #define UL_MASKED_SUBMIT()                                                                          \
   do {                                                                                              \
-    if (ul_llr_full)                                                                                \
+    /* never mask an unsettled layout hypothesis: its CRC failure is a wrong mapping, not noise */ \
+    if (ul_llr_full && (!g->hyp_generation || g->hyp_settled))                                      \
       nr_isac_pusch_data_aided_submit(ue, gnb, &pdu, g, NULL, ul_llr_full, ul_G_full,               \
                                       NR_PUSCH_PASSIVE_DA_TAG_BASE + (uint32_t)ctx,                 \
                                       passive_ul_slow_time_idx(fp, frame, slot, abs_slot),          \
-                                      (uint32_t)nant, slot);                                        \
+                                      (uint32_t)nant, slot, ul_snr_db);                             \
   } while (0)
 
   int ulsch_id = 0;
@@ -1233,6 +1234,7 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
   if (pvp->ulsch_noise_power_tot > 0) {
     out->snr_db = 10.0f * log10f((float)pvp->ulsch_power_tot / (float)pvp->ulsch_noise_power_tot);
   }
+  const float ul_snr_db = (pvp->ulsch_noise_power_tot > 0) ? out->snr_db : NAN;
 
   /* `rc` is the LDPC coding INTERFACE return, not the CRC verdict -- nr_ulsch_decoding() returns
    * whatever nrLDPC_coding_decoder() gave it and reports the actual per-segment CRC only through
@@ -1331,7 +1333,7 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
     nr_isac_pusch_data_aided_submit(ue, gnb, &pdu, g, hp->b, ul_llr_full, ul_G_full,
                                     NR_PUSCH_PASSIVE_DA_TAG_BASE + (uint32_t)ctx,
                                     passive_ul_slow_time_idx(fp, frame, slot, abs_slot),
-                                    (uint32_t)nant, slot);
+                                    (uint32_t)nant, slot, ul_snr_db);
   } else {
     UL_MASKED_SUBMIT();
   }

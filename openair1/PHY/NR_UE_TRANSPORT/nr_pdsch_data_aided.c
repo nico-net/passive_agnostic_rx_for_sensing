@@ -60,7 +60,8 @@ void nr_isac_pdsch_data_aided_submit(PHY_VARS_NR_UE *ue,
                                      uint32_t llr_G,
                                      uint32_t harq_pid_tag,
                                      const c16_t rxdataF[][ue->frame_parms.samples_per_slot_wCP],
-                                     double nvar)
+                                     double nvar,
+                                     float snr_db)
 {
   if (!nr_isac_enabled() || !nr_isac_source_enabled(NR_ISAC_SRC_PDSCH_DATA))
     return;
@@ -135,9 +136,12 @@ void nr_isac_pdsch_data_aided_submit(PHY_VARS_NR_UE *ue,
     float tau = 0.0f;
     if (!have_llr || !nr_llrconf_threshold(cw->qamModOrder, &tau))
       return; /* no calibration for this Qm yet: DM-RS only (spec §6) */
+    if (!nr_llrconf_snr_eligible(cw->qamModOrder, snr_db)) { /* P34: garbage grants keep a fixed fraction */
+      nr_llrconf_count(NR_LLRCONF_SRC_DL, NR_LLRCONF_CNT_SNR_REJECT, 1);
+      return;
+    }
     nr_llrconf_hard(cw->qamModOrder, llr, TB_parameters.G, tau, bit_bytes, keep);
-    for (uint32_t i = 0; i < TB_parameters.G; i++)
-      coded_bits[i >> 3] |= (uint8_t)(bit_bytes[i] << (i & 7));
+    nr_llrconf_pack(bit_bytes, TB_parameters.G, coded_bits);
   } else {
     // --- TB CRC-included payload: tb_bytes is ALREADY B = A + TB-CRC bits (16 or 24-bit, matching
     // NR_MAX_PDSCH_TBS threshold) -- the exact same buffer format the TX-side encoder segments, so no
@@ -187,8 +191,8 @@ void nr_isac_pdsch_data_aided_submit(PHY_VARS_NR_UE *ue,
       return;
     }
     if (have_llr) { /* CRC-OK grant: this IS the calibration ground truth */
-      for (uint32_t i = 0; i < TB_parameters.G; i++)
-        bit_bytes[i] = (coded_bits[i >> 3] >> (i & 7)) & 1;
+      nr_llrconf_unpack(coded_bits, TB_parameters.G, bit_bytes);
+      nr_llrconf_snr_observe(cw->qamModOrder, snr_db);
       nr_llrconf_observe(cw->qamModOrder, llr, bit_bytes, TB_parameters.G);
       nr_llrconf_agreement(cw->qamModOrder, llr, bit_bytes, TB_parameters.G);
     }
@@ -353,6 +357,11 @@ void nr_isac_pdsch_data_aided_submit(PHY_VARS_NR_UE *ue,
             dlsch_config->n_dmrs_cdm_groups, dlsch_config->dmrsConfigType);
     }
     return; // contribute nothing rather than corrupt the range profile
+  }
+  nr_llrconf_count(NR_LLRCONF_SRC_DL, masked ? NR_LLRCONF_CNT_MASKED : NR_LLRCONF_CNT_CRC_OK, 1);
+  if (masked) {
+    nr_llrconf_count(NR_LLRCONF_SRC_DL, NR_LLRCONF_CNT_RE_KEPT, nof_re);
+    nr_llrconf_count(NR_LLRCONF_SRC_DL, NR_LLRCONF_CNT_RE_OFFERED, expected_syms);
   }
 
   nr_isac_carrier_t carrier = {.nof_prb         = (uint32_t)fp->N_RB_DL,
