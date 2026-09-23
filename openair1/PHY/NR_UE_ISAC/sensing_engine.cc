@@ -1245,6 +1245,9 @@ void SensingEngine::process_window(CfrWindow dl_window, std::vector<CfrWindow> u
           delay_reference_bin = spatial.sync.los_bins - baseline_m / range_res_m;
         }
         apply_sync_correction(corrected, spatial.sync, delay_reference_bin, std::nullopt);
+        // Only reachable inside this `sync_enable && rows >= 3` block, so a "sync" dump exists
+        // only for CPIs where sync correction actually ran -- a "raw" file with no matching
+        // "sync" sibling is expected, not a bug, on a short/disabled-sync CPI.
         dump_window(corrected, "sync");
       }
       spatial.current_cpi_variance = estimate_current_cpi_variance(
