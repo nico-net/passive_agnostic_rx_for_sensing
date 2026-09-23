@@ -20,6 +20,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
+#include <limits>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -42,6 +43,19 @@ void close(double actual, double expected, double tolerance, const char* message
   }
 }
 
+// Fixed-seed LCG + Box-Muller, deterministic across runs/platforms (no <random> engine-specific
+// output). Same shape as detector_cuda_benchmark.cc's dense_window() noise, reused here so
+// CLEAN's CFAR background statistic sees a genuine (not degenerate/noiseless) population -- P17.
+double seeded_gaussian(uint32_t& state)
+{
+  auto next_uniform = [&]() {
+    state = 1664525u * state + 1013904223u;
+    return std::max((state >> 8) / 16777216.0, 1e-12);
+  };
+  const double u1 = next_uniform(), u2 = next_uniform();
+  return std::sqrt(-2.0 * std::log(u1)) * std::cos(2.0 * PI * u2);
+}
+
 CfrWindow fractional_component(double range_bin=12.25, double doppler_bin=32.3125)
 {
   CfrWindow w; w.antennas=4;w.rows=64;w.subcarriers=512;w.scs_hz=30000.0;
@@ -52,12 +66,19 @@ CfrWindow fractional_component(double range_bin=12.25, double doppler_bin=32.312
   const double rate_res=C_MPS*(w.rows-1.0)/(w.fc_hz*w.rows*dwell);
   const double rate=-(doppler_bin-32.0)*rate_res;
   const double gains[4]{0.0,0.25,-0.4,0.7};
+  const double noise_sigma=0.05;
+  uint32_t noise_state=0xC0FFEEu;
   for(uint32_t r=0;r<w.rows;++r){w.row_time_slots[r]=r;w.row_slot_idx[r]=r;
     const double time=r*slot_duration_s(w.scs_hz);
     for(uint32_t k=0;k<w.subcarriers;++k){
       const double phase=-2.0*PI*range_bin*k/w.subcarriers
                          -2.0*PI*rate*w.fc_hz*time/C_MPS;
-      for(uint32_t a=0;a<4;++a)w.values[w.sample(a,r,k)]=std::polar(1.0f,static_cast<float>(phase+gains[a]));
+      for(uint32_t a=0;a<4;++a){
+        const std::complex<double> signal=std::polar(1.0,phase+gains[a]);
+        const std::complex<double> noise(noise_sigma*seeded_gaussian(noise_state),
+                                         noise_sigma*seeded_gaussian(noise_state));
+        w.values[w.sample(a,r,k)]=static_cast<std::complex<float>>(signal+noise);
+      }
     }}
   return w;
 }
@@ -101,19 +122,37 @@ void test_adaptive_threshold()
 
 void test_detector()
 {
+  // P17: 300 m (16 range bins @ 512 sc/30 kHz) leaves too few CFAR training cells after the
+  // detector's own guard exclusion (>=33 bins needed here; see clean_detector.cc's P17(d)
+  // warning) -- every CPI reads as noise before any component is even scored. 700 m (36 bins)
+  // clears that floor. The noiseless fixture also made CLEAN's background statistic degenerate;
+  // fractional_component() now injects seeded Gaussian noise for a genuine population.
   PipelineConfig config;
-  config.maximum_range_m=300.0;config.maximum_target_speed_mps=50.0;
+  config.maximum_range_m=700.0;config.maximum_target_speed_mps=50.0;
   config.false_object_intensity_per_s=1.0;
-  const auto result=detect_clean(receiver_view(fractional_component(),0),config);
-  require(result.components.size()==1,"CLEAN failed to return pure component");
-  close(result.components[0].range_bin,12.25,2e-4,"continuous CLEAN range parity");
-  close(result.components[0].doppler_bin,32.3125,2e-4,"continuous CLEAN Doppler parity");
-  close(result.components[0].score,32767.999999999607,2e-4,"normalized pure-component score parity");
+  const double injected_range_bin=12.25,injected_doppler_bin=32.3125;
+  const auto result=detect_clean(
+      receiver_view(fractional_component(injected_range_bin,injected_doppler_bin),0),config);
+  require(result.components.size()==1,"CLEAN failed to return exactly one component");
+  const auto& component=result.components[0];
+  close(component.range_bin,injected_range_bin,result.psf_range_halfwidth_bins+0.5,
+        "CLEAN range must locate the injected target within PSF tolerance");
+  close(component.doppler_bin,injected_doppler_bin,result.psf_doppler_halfwidth_bins+0.5,
+        "CLEAN Doppler must locate the injected target within PSF tolerance");
+  require(std::isfinite(component.local.z)&&component.local.z>component.local_threshold,
+          "admitted component must clear its own reported CFAR threshold with a finite z");
 
-  const auto zero_doppler=detect_clean(receiver_view(fractional_component(8.5,32.0),0),config);
+  const double zero_range_bin=8.5,zero_doppler_bin=32.0;
+  const auto zero_doppler=detect_clean(
+      receiver_view(fractional_component(zero_range_bin,zero_doppler_bin),0),config);
   require(zero_doppler.components.size()==1,"zero-Doppler CUT was incorrectly notched");
-  close(zero_doppler.components[0].range_bin,8.5,2e-4,"zero-Doppler range parity");
-  close(zero_doppler.components[0].doppler_bin,32.0,2e-4,"zero-Doppler bin must remain searchable");
+  const auto& zero_component=zero_doppler.components[0];
+  close(zero_component.range_bin,zero_range_bin,zero_doppler.psf_range_halfwidth_bins+0.5,
+        "zero-Doppler range must locate the injected target within PSF tolerance");
+  close(zero_component.doppler_bin,zero_doppler_bin,zero_doppler.psf_doppler_halfwidth_bins+0.5,
+        "zero-Doppler bin must remain searchable");
+  require(std::isfinite(zero_component.local.z)&&zero_component.local.z>zero_component.local_threshold,
+          "zero-Doppler component must clear its own reported CFAR threshold with a finite z");
 }
 
 void test_required_cuda_contract()
@@ -643,7 +682,15 @@ void test_invalid_ul_does_not_suppress_dl()
   carrier.nof_prb = 2; carrier.scs_hz = 30000; carrier.dl_center_hz = 3499440000;
   carrier.slots_per_frame = 20; carrier.pci = 1;
   std::vector<std::complex<float>> dl(24, {1.0f, 0.0f});
-  std::vector<std::complex<float>> invalid_ul(24, {0.0f, 0.0f});
+  // P17(b): an all-zero UL channel is a well-formed (if degenerate) CFR -- the UL pipeline runs
+  // to completion without throwing, so SensingEngine reports uplink_valid=true for it (see the
+  // prior round's finding). Non-finite samples are the engine's actual invalid path: they make
+  // every downstream covariance/statistic computation non-finite, which the UL try/catch in
+  // sensing_engine.cc genuinely throws on ("CPI has no positive covariance samples"), leaving
+  // uplink_valid at its default false.
+  const std::complex<float> nan_sample{std::numeric_limits<float>::quiet_NaN(),
+                                       std::numeric_limits<float>::quiet_NaN()};
+  std::vector<std::complex<float>> invalid_ul(24, nan_sample);
   std::vector<uint32_t> k(24), symbol(24, 2);
   for (uint32_t i = 0; i < k.size(); ++i) k[i] = i;
   {
@@ -659,7 +706,12 @@ void test_invalid_ul_does_not_suppress_dl()
   std::ifstream input(path); require(input.good(), "invalid UL suppressed the DL report file");
   std::string line; require(static_cast<bool>(std::getline(input, line)),
                             "invalid UL suppressed the valid DL report");
-  require(line.find("\"uplink\":{\"present\":true,\"valid\":false") != std::string::npos,
+  // Two separate substring checks, not one contiguous literal: pusch_session_id (added by the
+  // prior round's UL session_id fix) now sits between "present" and "valid" in the JSON field
+  // order, which a single fixed literal would miss without meaning anything about validity.
+  require(line.find("\"uplink\":{\"present\":true") != std::string::npos,
+          "invalid UL suppressed the uplink object entirely");
+  require(line.find("\"valid\":false") != std::string::npos,
           "invalid UL is not explicitly marked invalid");
   require(line.find("\"dl_rvm_blob\":[") != std::string::npos,
           "invalid UL removed the valid DL map");

@@ -29,6 +29,20 @@ void close(double actual, double expected, double absolute, double relative, con
   }
 }
 
+// Fixed-seed LCG + Box-Muller, deterministic across runs/platforms. Same shape as
+// python_parity_test.cc's seeded_gaussian() and detector_cuda_benchmark.cc's dense_window()
+// noise, reused here so CLEAN's CFAR background statistic sees a genuine (not degenerate/
+// noiseless) population -- P17.
+double seeded_gaussian(uint32_t& state)
+{
+  auto next_uniform = [&]() {
+    state = 1664525u * state + 1013904223u;
+    return std::max((state >> 8) / 16777216.0, 1e-12);
+  };
+  const double u1 = next_uniform(), u2 = next_uniform();
+  return std::sqrt(-2.0 * std::log(u1)) * std::cos(2.0 * PI * u2);
+}
+
 CfrWindow fixture()
 {
   CfrWindow window;
@@ -50,6 +64,8 @@ CfrWindow fixture()
                                  / (window.fc_hz * window.rows * dwell);
   const double rate = -(doppler_bin - window.rows / 2.0) * rate_resolution;
   const double antenna_phase[4]{0.0, .25, -.4, .7};
+  const double noise_sigma = 0.05;
+  uint32_t noise_state = 0xC0FFEEu;
   for (uint32_t row = 0; row < window.rows; ++row) {
     window.row_time_slots[row] = row;
     window.row_slot_idx[row] = row;
@@ -57,9 +73,13 @@ CfrWindow fixture()
     for (uint32_t subcarrier = 0; subcarrier < window.subcarriers; ++subcarrier) {
       const double phase = -2.0 * PI * range_bin * subcarrier / window.subcarriers
                            - 2.0 * PI * rate * window.fc_hz * time / C_MPS;
-      for (uint32_t antenna = 0; antenna < window.antennas; ++antenna)
+      for (uint32_t antenna = 0; antenna < window.antennas; ++antenna) {
+        const std::complex<double> signal = std::polar(1.0, phase + antenna_phase[antenna]);
+        const std::complex<double> noise(noise_sigma * seeded_gaussian(noise_state),
+                                         noise_sigma * seeded_gaussian(noise_state));
         window.values[window.sample(antenna, row, subcarrier)] =
-            std::polar(1.0f, static_cast<float>(phase + antenna_phase[antenna]));
+            static_cast<std::complex<float>>(signal + noise);
+      }
     }
   }
   return window;
@@ -86,7 +106,10 @@ int main()
   }
   try {
     PipelineConfig config;
-    config.maximum_range_m = 300.0;
+    // P17: 300 m (16 range bins @ 512 sc/30 kHz) leaves too few CFAR training cells after the
+    // detector's own guard exclusion -- every CPI reads as noise before any component is
+    // scored (see clean_detector.cc's P17(d) warning). 700 m (36 bins) clears that floor.
+    config.maximum_range_m = 700.0;
     config.maximum_target_speed_mps = 50.0;
     // Declared false-alarm budget required by clean_detector.cc's admission gate
     // (config.false_object_intensity_per_s * dwell_s must lie in (0,1)); this fixture's dwell is
