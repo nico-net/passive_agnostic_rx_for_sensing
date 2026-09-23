@@ -1,0 +1,4 @@
+{"frame": "ENU metres, origin at the X410 (synthetic 10 m checkerboard square)",
+ "gnb_m": [35.0, 20.0, 6.0],
+ "rx_antennas_m": {"ch0": [0.0, 0.0, 0.5], "ch1": [10.0, 0.0, 3.5], "ch2": [0.0, 10.0, 3.5], "ch3": [10.0, 10.0, 0.5]},
+ "max_range_m": 120}
