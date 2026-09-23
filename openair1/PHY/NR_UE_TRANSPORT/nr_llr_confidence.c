@@ -26,14 +26,33 @@ float nr_llrconf_median_abs(const int16_t *llr, uint32_t G) {
 
 static int bin_of(float r) { int b = (int)(r / NR_LLRCONF_BIN_W); return b < 0 ? 0 : (b >= NR_LLRCONF_BINS ? NR_LLRCONF_BINS - 1 : b); }
 
+/* Per-symbol float divisions dominated the RT cost. Both tests below are monotone in the integer
+ * min|LLR| (0..32767), so each is replaced by integer edges found with the SAME float expression:
+ * bit-identical results, O(log) divisions per grant instead of one per symbol. */
+static int first_mn_bin(float med, int b) { int lo = 0, hi = 32768;
+  while (lo < hi) { const int mid = (lo + hi) / 2; if (bin_of(mid / med) >= b) hi = mid; else lo = mid + 1; } return lo; }
+static int first_mn_tau(float med, float tau) { int lo = 0, hi = 32768;
+  while (lo < hi) { const int mid = (lo + hi) / 2; if ((float)mid / med >= tau) hi = mid; else lo = mid + 1; } return lo; }
+
 void nr_llrconf_observe(uint8_t qm, const int16_t *llr, const uint8_t *truth, uint32_t G) {
   const int q = qidx(qm); if (q < 0 || !llr || !truth || G < qm) return;
   const float med = nr_llrconf_median_abs(llr, G); if (med <= 0.0f) return;
+  static __thread uint8_t *lut = NULL; /* min|LLR| -> bin, exactly bin_of(mn / med) */
+  if (!lut && !(lut = malloc(32768))) return;
+  for (int b = 0, e0 = 0; b < NR_LLRCONF_BINS; b++) {
+    const int e1 = (b + 1 < NR_LLRCONF_BINS) ? first_mn_bin(med, b + 1) : 32768;
+    memset(lut + e0, b, (size_t)(e1 - e0)); e0 = e1;
+  }
+  uint32_t right[NR_LLRCONF_BINS] = {0}, wrong[NR_LLRCONF_BINS] = {0}; /* one atomic per bin, not per symbol */
   for (uint32_t m = 0; m < G / qm; m++) {
-    int ok = 1; int mn = 32767;
+    int bad = 0; int mn = 32767;
     for (int b = 0; b < qm; b++) { const int16_t v = llr[m * qm + b]; const int a = v < 0 ? -v : v;
-      if (a < mn) { mn = a; } if ((uint8_t)(v < 0) != (truth[m * qm + b] & 1)) ok = 0; }
-    atomic_fetch_add_explicit(ok ? &g_right[q][bin_of(mn / med)] : &g_wrong[q][bin_of(mn / med)], 1, memory_order_relaxed);
+      mn = a < mn ? a : mn; bad |= (v < 0) ^ (truth[m * qm + b] & 1); }
+    (bad ? wrong : right)[lut[mn]]++;
+  }
+  for (int b = 0; b < NR_LLRCONF_BINS; b++) {
+    if (right[b]) atomic_fetch_add_explicit(&g_right[q][b], right[b], memory_order_relaxed);
+    if (wrong[b]) atomic_fetch_add_explicit(&g_wrong[q][b], wrong[b], memory_order_relaxed);
   }
 }
 
@@ -54,11 +73,12 @@ int nr_llrconf_threshold(uint8_t qm, float *tau) {
 uint32_t nr_llrconf_hard(uint8_t qm, const int16_t *llr, uint32_t G, float tau, uint8_t *bits, uint8_t *keep) {
   if (qidx(qm) < 0 || !llr || G < qm) return 0;
   const float med = nr_llrconf_median_abs(llr, G); uint32_t kept = 0;
+  const int t = med > 0.0f ? first_mn_tau(med, tau) : 32768; /* keep <=> (float)mn / med >= tau */
   for (uint32_t m = 0; m < G / qm; m++) {
     int mn = 32767;
     for (int b = 0; b < qm; b++) { const int16_t v = llr[m * qm + b]; const int a = v < 0 ? -v : v;
       if (a < mn) { mn = a; } bits[m * qm + b] = (uint8_t)(v < 0); }
-    keep[m] = (uint8_t)(med > 0.0f && (float)mn / med >= tau);
+    keep[m] = (uint8_t)(mn >= t);
     kept += keep[m];
   }
   atomic_fetch_add_explicit(&g_kept_sym, kept, memory_order_relaxed);
@@ -68,8 +88,9 @@ uint32_t nr_llrconf_hard(uint8_t qm, const int16_t *llr, uint32_t G, float tau, 
 
 void nr_llrconf_agreement(uint8_t qm, const int16_t *llr, const uint8_t *truth, uint32_t G) {
   const int q = qidx(qm); if (q < 0 || !llr || !truth) return;
-  uint64_t a = 0, d = 0;
-  for (uint32_t i = 0; i < G; i++) ((uint8_t)(llr[i] < 0) == (truth[i] & 1)) ? a++ : d++;
+  uint32_t dd = 0;
+  for (uint32_t i = 0; i < G; i++) dd += (uint32_t)((llr[i] < 0) ^ (truth[i] & 1)); /* branchless: vectorises */
+  const uint64_t d = dd, a = (uint64_t)G - dd;
   const uint64_t A = atomic_fetch_add(&g_agree[q], a) + a, D = atomic_fetch_add(&g_disagree[q], d) + d;
   /* Raw bit agreement must be far above 50 % on CRC-OK grants; below it, sign or packing is wrong. */
   if (A + D >= 10000 && A < D && !atomic_exchange(&g_disabled, 1))

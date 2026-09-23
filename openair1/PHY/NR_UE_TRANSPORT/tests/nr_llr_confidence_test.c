@@ -38,6 +38,13 @@ int main(void) {
     if (keep[m] && (bits[2 * m] != truth[2 * m] || bits[2 * m + 1] != truth[2 * m + 1])) wrong++;
   assert(kept > G / 8);                                       /* the gate keeps a real fraction */
   assert((double)wrong / kept < 0.015);                       /* and meets the 1 % target (+slack) */
+  { /* integer-edge keep test must equal the original float test, symbol by symbol */
+    const float med = nr_llrconf_median_abs(llr, G);
+    for (uint32_t m = 0; m < G / 2; m++) {
+      const int a0 = llr[2 * m] < 0 ? -llr[2 * m] : llr[2 * m], a1 = llr[2 * m + 1] < 0 ? -llr[2 * m + 1] : llr[2 * m + 1];
+      assert(keep[m] == (uint8_t)((float)(a0 < a1 ? a0 : a1) / med >= tau));
+    }
+  }
   assert(nr_llrconf_hard(2, llr, G, 0.0f, bits, keep) == G / 2); /* tau 0 keeps everything */
   /* sign-convention guard: inverted LLRs must disable the masked path */
   for (uint32_t i = 0; i < G; i++) llr[i] = (int16_t)-llr[i];

@@ -131,7 +131,11 @@ void nr_isac_pusch_data_aided_submit(PHY_VARS_NR_UE *ue,
     }
     nr_llrconf_hard((uint8_t)Qm, llr, TB.G, tau, hard, keep);
     /* Hard decisions of DESCRAMBLED LLRs; the scramble below restores the transmitted bits. */
-    for (uint32_t i = 0; i < TB.G; i++)
+    for (uint32_t j = 0; j < TB.G / 8; j++) {
+      const uint8_t *h = &hard[8 * j];
+      coded_bits[j] = (uint8_t)(h[0] | h[1] << 1 | h[2] << 2 | h[3] << 3 | h[4] << 4 | h[5] << 5 | h[6] << 6 | h[7] << 7);
+    }
+    for (uint32_t i = TB.G & ~7u; i < TB.G; i++)
       coded_bits[i >> 3] |= (uint8_t)(hard[i] << (i & 7));
   } else {
     /* ---- Segment + LDPC encode. Re-segmented here because the decode path only sized C/K/Z/F. ---- */
@@ -185,7 +189,12 @@ void nr_isac_pusch_data_aided_submit(PHY_VARS_NR_UE *ue,
 
     uint8_t *truth = have_llr ? bit_buf(TB.G) : NULL;
     if (truth != NULL) { /* CRC-OK grant: this IS the calibration ground truth */
-      for (uint32_t i = 0; i < TB.G; i++)
+      for (uint32_t j = 0; j < TB.G / 8; j++) {
+        const uint8_t c = coded_bits[j];
+        for (int b = 0; b < 8; b++)
+          truth[8 * j + b] = (c >> b) & 1;
+      }
+      for (uint32_t i = TB.G & ~7u; i < TB.G; i++)
         truth[i] = (coded_bits[i >> 3] >> (i & 7)) & 1;
       nr_llrconf_observe((uint8_t)Qm, llr, truth, TB.G);
       nr_llrconf_agreement((uint8_t)Qm, llr, truth, TB.G);
