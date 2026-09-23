@@ -82,6 +82,18 @@ CfrWindow dense_window()
   return window;
 }
 
+// canonical CLEAN (clean_detector.h) accepts one independent receiver; split spatial RF channels
+// first, mirroring sensing_engine.cc's independent_receiver_view().
+CfrWindow receiver_view(const CfrWindow& input, uint32_t receiver)
+{
+  CfrWindow output = input;
+  output.antennas = 1;
+  const size_t cells = static_cast<size_t>(input.rows) * input.subcarriers;
+  output.values.assign(input.values.begin() + receiver * cells,
+                       input.values.begin() + (receiver + 1) * cells);
+  return output;
+}
+
 CfrWindow dl_only_view(const CfrWindow& fused)
 {
   CfrWindow dl = fused;
@@ -116,23 +128,34 @@ int main()
   PipelineConfig config;
   config.maximum_range_m = 312.283810417;
   config.maximum_target_speed_mps = 50.0;
+  // Declared false-alarm budget required by clean_detector.cc's admission gate
+  // (config.false_object_intensity_per_s * dwell_s must lie in (0,1)); this fixture's dwell is
+  // ~0.0317 s, so 1.0/s keeps the budget comfortably inside range.
+  config.false_object_intensity_per_s = 1.0;
   config.capture_rvm = true;
   const CfrWindow window = dense_window();
   const CfrWindow dl_window = dl_only_view(window);
+  // Canonical CLEAN accepts one independent receiver: keep the workload by running the four
+  // per-receiver detections of this 4x192x3276 CPI and timing the total (P11), rather than one
+  // 4-antenna call the engine never makes in spatial mode.
   auto run = [&]() {
     const auto started = std::chrono::steady_clock::now();
-    const auto result = detect_clean(window, config);
-    const auto stopped = std::chrono::steady_clock::now();
-    if (result.components.empty() || result.initial_likelihood.empty()) {
-      std::fprintf(stderr, "dense CUDA detector returned %zu components and %zu map cells\n",
-                   result.components.size(), result.initial_likelihood.size());
-      std::exit(EXIT_FAILURE);
-    }
-    for (const auto& component : result.components)
-      if (!component.local.valid || !std::isfinite(component.local.z)) {
-        std::fputs("dense CUDA detector lost a component local statistic\n", stderr);
+    for (uint32_t receiver = 0; receiver < window.antennas; ++receiver) {
+      const auto result = detect_clean(receiver_view(window, receiver), config);
+      if (result.components.empty() || result.initial_likelihood.empty()) {
+        std::fprintf(stderr,
+                     "dense CUDA detector returned %zu components and %zu map cells (rx%u)\n",
+                     result.components.size(), result.initial_likelihood.size(), receiver);
         std::exit(EXIT_FAILURE);
       }
+      for (const auto& component : result.components)
+        if (!component.local.valid || !std::isfinite(component.local.z)) {
+          std::fprintf(stderr, "dense CUDA detector lost a component local statistic (rx%u)\n",
+                       receiver);
+          std::exit(EXIT_FAILURE);
+        }
+    }
+    const auto stopped = std::chrono::steady_clock::now();
     return std::chrono::duration<double, std::milli>(stopped - started).count();
   };
   if (!cpu_baseline) {
@@ -183,7 +206,13 @@ int main()
     const auto allocation_aligned = std::chrono::steady_clock::now();
     PipelineReport report;
     report.sync = sync;
-    report.detector = detect_clean_with_diagnostic(detector_input, dl_corrected, config);
+    // Same per-receiver split as `run()` above: the timed span below covers all four receivers'
+    // detections, keeping the full-path benchmark's workload consistent with the detector-only one.
+    for (uint32_t receiver = 0; receiver < detector_input.antennas; ++receiver) {
+      auto rx_result = detect_clean_with_diagnostic(
+          receiver_view(detector_input, receiver), receiver_view(dl_corrected, receiver), config);
+      if (receiver == 0) report.detector = std::move(rx_result);
+    }
     const auto detected = std::chrono::steady_clock::now();
     const std::string json = build_report_json(report, config);
     const auto stopped = std::chrono::steady_clock::now();

@@ -9,6 +9,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <stdexcept>
+#include <vector>
 
 using namespace nr_isac;
 
@@ -63,6 +64,18 @@ CfrWindow fixture()
   }
   return window;
 }
+
+// canonical CLEAN (clean_detector.h) accepts one independent receiver; split spatial RF channels
+// first, mirroring sensing_engine.cc's independent_receiver_view().
+CfrWindow receiver_view(const CfrWindow& input, uint32_t receiver)
+{
+  CfrWindow output = input;
+  output.antennas = 1;
+  const size_t cells = static_cast<size_t>(input.rows) * input.subcarriers;
+  output.values.assign(input.values.begin() + receiver * cells,
+                       input.values.begin() + (receiver + 1) * cells);
+  return output;
+}
 } // namespace
 
 int main()
@@ -75,6 +88,10 @@ int main()
     PipelineConfig config;
     config.maximum_range_m = 300.0;
     config.maximum_target_speed_mps = 50.0;
+    // Declared false-alarm budget required by clean_detector.cc's admission gate
+    // (config.false_object_intensity_per_s * dwell_s must lie in (0,1)); this fixture's dwell is
+    // ~0.0315 s, so 1.0/s keeps the budget comfortably inside range.
+    config.false_object_intensity_per_s = 1.0;
     config.capture_rvm = true;
     auto window = fixture();
     for (uint32_t row = 0; row < window.rows; ++row)
@@ -86,85 +103,110 @@ int main()
       if ((dl_window.row_source_mask[row] & DL_SOURCE_BITS) == 0)
         for (uint32_t subcarrier = 0; subcarrier < dl_window.subcarriers; ++subcarrier)
           dl_window.observed[dl_window.cell(row, subcarrier)] = 0;
+    // Canonical CLEAN accepts one independent receiver: split the 4-antenna window into per-
+    // receiver 1-antenna views (P11), mirroring sensing_engine.cc's independent_receiver_view()
+    // and process_receiver() -- one CLEAN run per receiver, not one 4-antenna run.
+    std::vector<DetectorResult> cpu(window.antennas), cuda(window.antennas),
+        cuda_fused_only(window.antennas);
+    std::vector<DiagnosticLikelihoodMap> cuda_dl_only(window.antennas);
     setenv("NR_ISAC_REQUIRE_CUDA", "0", 1);
     setenv("NR_ISAC_CUDA_DETECTOR", "0", 1);
-    const auto cpu = detect_clean_with_diagnostic(window, dl_window, config);
+    for (uint32_t receiver = 0; receiver < window.antennas; ++receiver)
+      cpu[receiver] = detect_clean_with_diagnostic(
+          receiver_view(window, receiver), receiver_view(dl_window, receiver), config);
     setenv("NR_ISAC_REQUIRE_CUDA", "1", 1);
     setenv("NR_ISAC_CUDA_DETECTOR", "1", 1);
     detector_cuda_warmup();
-    const auto cuda = detect_clean_with_diagnostic(window, dl_window, config);
-    const auto cuda_fused_only = detect_clean(window, config);
-    const auto cuda_dl_only = diagnostic_likelihood_map(dl_window, config);
-    require(cuda.initial_likelihood == cuda_fused_only.initial_likelihood
-                && cuda.initial_weighted_energy == cuda_fused_only.initial_weighted_energy
-                && cuda.final_weighted_energy == cuda_fused_only.final_weighted_energy,
-            "concurrent diagnostic changed fused CUDA detector results");
-    require(cuda.components.size() == cuda_fused_only.components.size(),
-            "concurrent diagnostic changed fused component count");
-    for (size_t index = 0; index < cuda.components.size(); ++index) {
-      const auto& concurrent = cuda.components[index];
-      const auto& isolated = cuda_fused_only.components[index];
-      require(concurrent.range_bin == isolated.range_bin
-                  && concurrent.doppler_bin == isolated.doppler_bin
-                  && concurrent.score == isolated.score
-                  && concurrent.raw_score == isolated.raw_score
-                  && concurrent.local.z == isolated.local.z,
-              "concurrent diagnostic changed a fused component");
+    for (uint32_t receiver = 0; receiver < window.antennas; ++receiver) {
+      const CfrWindow rx_window = receiver_view(window, receiver);
+      const CfrWindow rx_dl_window = receiver_view(dl_window, receiver);
+      cuda[receiver] = detect_clean_with_diagnostic(rx_window, rx_dl_window, config);
+      cuda_fused_only[receiver] = detect_clean(rx_window, config);
+      cuda_dl_only[receiver] = diagnostic_likelihood_map(rx_dl_window, config);
     }
-    require(cuda.initial_dl_likelihood == cuda_dl_only.likelihood,
-            "concurrent and standalone CUDA diagnostic maps differ");
-    require(cpu.components.size() == 1 && cuda.components.size() == 1,
-            "CPU/CUDA component count differs");
-    require(cpu.objects.size() == cuda.objects.size(), "CPU/CUDA object count differs");
-    require(cpu.initial_likelihood.size() == cuda.initial_likelihood.size(),
-            "CPU/CUDA initial map shape differs");
-    require(cpu.initial_dl_likelihood.size() == cuda.initial_dl_likelihood.size()
-                && cpu.initial_dl_likelihood.size() == cpu.initial_likelihood.size(),
-            "CPU/CUDA DL-only map shape differs");
-    require(cpu.dl_observed_re_count == cuda.dl_observed_re_count
-                && cpu.dl_observed_re_count > 0,
-            "CPU/CUDA DL-only observed-RE count differs");
-    double map_scale = 0.0, map_error = 0.0;
-    for (size_t index = 0; index < cpu.initial_likelihood.size(); ++index) {
-      const double expected = cpu.initial_likelihood[index];
-      const double actual = cuda.initial_likelihood[index];
-      if (!std::isfinite(expected) || !std::isfinite(actual)) {
-        require(std::isfinite(expected) == std::isfinite(actual),
-                "CPU/CUDA initial map support differs");
-        continue;
+    for (uint32_t receiver = 0; receiver < window.antennas; ++receiver) {
+      require(cuda[receiver].initial_likelihood == cuda_fused_only[receiver].initial_likelihood
+                  && cuda[receiver].initial_weighted_energy
+                         == cuda_fused_only[receiver].initial_weighted_energy
+                  && cuda[receiver].final_weighted_energy
+                         == cuda_fused_only[receiver].final_weighted_energy,
+              "concurrent diagnostic changed fused CUDA detector results");
+      require(cuda[receiver].components.size() == cuda_fused_only[receiver].components.size(),
+              "concurrent diagnostic changed fused component count");
+      for (size_t index = 0; index < cuda[receiver].components.size(); ++index) {
+        const auto& concurrent = cuda[receiver].components[index];
+        const auto& isolated = cuda_fused_only[receiver].components[index];
+        require(concurrent.range_bin == isolated.range_bin
+                    && concurrent.doppler_bin == isolated.doppler_bin
+                    && concurrent.score == isolated.score
+                    && concurrent.raw_score == isolated.raw_score
+                    && concurrent.local.z == isolated.local.z,
+                "concurrent diagnostic changed a fused component");
       }
-      map_scale = std::max(map_scale, std::abs(expected));
-      map_error = std::max(map_error, std::abs(actual - expected));
-    }
-    require(map_error <= 5e-5 * std::max(map_scale, 1.0),
-            "CPU/CUDA initial likelihood exceeds complex64 tolerance");
-    double dl_map_scale = 0.0, dl_map_error = 0.0;
-    for (size_t index = 0; index < cpu.initial_dl_likelihood.size(); ++index) {
-      const double expected_dl = cpu.initial_dl_likelihood[index];
-      const double actual_dl = cuda.initial_dl_likelihood[index];
-      if (!std::isfinite(expected_dl) || !std::isfinite(actual_dl)) {
-        require(std::isfinite(expected_dl) == std::isfinite(actual_dl),
-                "CPU/CUDA DL-only map support differs");
-        continue;
+      require(cuda[receiver].initial_dl_likelihood == cuda_dl_only[receiver].likelihood,
+              "concurrent and standalone CUDA diagnostic maps differ");
+      // Non-vacuous per P11: every receiver must actually yield a component, with finite energy.
+      require(!cpu[receiver].components.empty() && !cuda[receiver].components.empty(),
+              "a receiver yielded no CLEAN component");
+      require(std::isfinite(cpu[receiver].components.front().weighted_energy_removed)
+                  && std::isfinite(cuda[receiver].components.front().weighted_energy_removed),
+              "a receiver's component energy is not finite");
+      require(cpu[receiver].components.size() == cuda[receiver].components.size(),
+              "CPU/CUDA component count differs");
+      require(cpu[receiver].objects.size() == cuda[receiver].objects.size(),
+              "CPU/CUDA object count differs");
+      require(cpu[receiver].initial_likelihood.size() == cuda[receiver].initial_likelihood.size(),
+              "CPU/CUDA initial map shape differs");
+      require(cpu[receiver].initial_dl_likelihood.size()
+                      == cuda[receiver].initial_dl_likelihood.size()
+                  && cpu[receiver].initial_dl_likelihood.size()
+                         == cpu[receiver].initial_likelihood.size(),
+              "CPU/CUDA DL-only map shape differs");
+      require(cpu[receiver].dl_observed_re_count == cuda[receiver].dl_observed_re_count
+                  && cpu[receiver].dl_observed_re_count > 0,
+              "CPU/CUDA DL-only observed-RE count differs");
+      double map_scale = 0.0, map_error = 0.0;
+      for (size_t index = 0; index < cpu[receiver].initial_likelihood.size(); ++index) {
+        const double expected = cpu[receiver].initial_likelihood[index];
+        const double actual = cuda[receiver].initial_likelihood[index];
+        if (!std::isfinite(expected) || !std::isfinite(actual)) {
+          require(std::isfinite(expected) == std::isfinite(actual),
+                  "CPU/CUDA initial map support differs");
+          continue;
+        }
+        map_scale = std::max(map_scale, std::abs(expected));
+        map_error = std::max(map_error, std::abs(actual - expected));
       }
-      dl_map_scale = std::max(dl_map_scale, std::abs(expected_dl));
-      dl_map_error = std::max(dl_map_error, std::abs(actual_dl - expected_dl));
+      require(map_error <= 5e-5 * std::max(map_scale, 1.0),
+              "CPU/CUDA initial likelihood exceeds complex64 tolerance");
+      double dl_map_scale = 0.0, dl_map_error = 0.0;
+      for (size_t index = 0; index < cpu[receiver].initial_dl_likelihood.size(); ++index) {
+        const double expected_dl = cpu[receiver].initial_dl_likelihood[index];
+        const double actual_dl = cuda[receiver].initial_dl_likelihood[index];
+        if (!std::isfinite(expected_dl) || !std::isfinite(actual_dl)) {
+          require(std::isfinite(expected_dl) == std::isfinite(actual_dl),
+                  "CPU/CUDA DL-only map support differs");
+          continue;
+        }
+        dl_map_scale = std::max(dl_map_scale, std::abs(expected_dl));
+        dl_map_error = std::max(dl_map_error, std::abs(actual_dl - expected_dl));
+      }
+      require(dl_map_error <= 5e-5 * std::max(dl_map_scale, 1.0),
+              "CPU/CUDA DL-only likelihood exceeds complex64 tolerance");
+      const auto& expected = cpu[receiver].components.front();
+      const auto& actual = cuda[receiver].components.front();
+      close(actual.range_bin, expected.range_bin, 3e-4, 0.0, "continuous range parity");
+      close(actual.doppler_bin, expected.doppler_bin, 3e-4, 0.0, "continuous Doppler parity");
+      close(actual.score, expected.score, 1e-3, 5e-5, "component score parity");
+      close(actual.raw_score, expected.raw_score, 1e-3, 5e-5, "raw score parity");
+      close(actual.local.z, expected.local.z, 2e-3, 2e-4, "local statistic parity");
+      require(actual.local.training_cells == expected.local.training_cells,
+              "local training-cell count differs");
+      close(cuda[receiver].initial_weighted_energy, cpu[receiver].initial_weighted_energy,
+            1e-6, 1e-10, "initial residual energy parity");
+      close(cuda[receiver].final_weighted_energy, cpu[receiver].final_weighted_energy,
+            1e-5, 2e-5, "final residual energy parity");
     }
-    require(dl_map_error <= 5e-5 * std::max(dl_map_scale, 1.0),
-            "CPU/CUDA DL-only likelihood exceeds complex64 tolerance");
-    const auto& expected = cpu.components.front();
-    const auto& actual = cuda.components.front();
-    close(actual.range_bin, expected.range_bin, 3e-4, 0.0, "continuous range parity");
-    close(actual.doppler_bin, expected.doppler_bin, 3e-4, 0.0, "continuous Doppler parity");
-    close(actual.score, expected.score, 1e-3, 5e-5, "component score parity");
-    close(actual.raw_score, expected.raw_score, 1e-3, 5e-5, "raw score parity");
-    close(actual.local.z, expected.local.z, 2e-3, 2e-4, "local statistic parity");
-    require(actual.local.training_cells == expected.local.training_cells,
-            "local training-cell count differs");
-    close(cuda.initial_weighted_energy, cpu.initial_weighted_energy, 1e-6, 1e-10,
-          "initial residual energy parity");
-    close(cuda.final_weighted_energy, cpu.final_weighted_energy, 1e-5, 2e-5,
-          "final residual energy parity");
   } catch (const std::exception& error) {
     std::fprintf(stderr, "CUDA detector parity failed: %s\n", error.what());
     return EXIT_FAILURE;
