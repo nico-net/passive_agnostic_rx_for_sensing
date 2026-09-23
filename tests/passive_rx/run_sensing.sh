@@ -28,6 +28,8 @@ grep -qa 'SENSING_GATE open' "$BUILD/nr-uesoftmodem" || { log "ABORT: binary lac
 python3 "$W/tests/passive_rx/survey.py" "$SURVEY" --geometry "$RUN/geometry.json" \
   --apply "${TEMPLATE:-$W/tests/passive_rx/ota/sensing_ota.conf.template}" "$RUN/ue.conf" --report-path "$RUN/reports.jsonl" \
   || { log "ABORT: survey rejected (see above)"; exit 3; }
+COH=$(grep -Eq '^\s*coherent_enable\s*=\s*1' "$RUN/ue.conf" && echo 1 || echo 0)
+log "coherent mode: $COH"
 # Dedicated-CORESET discovery hand-off: a previous run's result must never be applied (agnostic rule).
 sudo rm -f /tmp/coresets_discovered.txt /tmp/passive_rx/idsweep_*.bin
 if [ ! -x "$DISC/idsweep_offline_gpu" ] || [ -n "$(find "$DISC" -maxdepth 1 \( -name '*.c' -o -name '*.cu' \) -newer "$DISC/idsweep_offline_gpu")" ]; then
@@ -63,39 +65,61 @@ start_discovery(){ kill $DISC_PID 2>/dev/null; sudo rm -f /tmp/coresets_discover
   N=10 DISC_CPUS=$DISC_CPUS OUT=$RUN bash "$DISC/discover_live.sh" >> "$RUN/discovery.log" 2>&1 &
   DISC_PID=$!; DISC_T0=$(date +%s); DISC_WARNED=; }
 start_tail(){
+CHAIN_PID=
+if [ "$COH" = 0 ]; then
 taskset -c $CHAIN_CPU python3 "$W/openair1/PHY/NR_UE_ISAC/tools/realtime_chain.py" --follow "$RUN/reports.jsonl" \
   --geometry "$RUN/geometry.json" --out "$RUN/tracks.jsonl" --status "$RUN/status.jsonl" \
   ${DEBUG:+--debug-dir "$RUN/debug/chain"} > "$RUN/chain.out" 2>&1 &
 CHAIN_PID=$!
+fi
+if [ "$COH" = 1 ]; then
+taskset -c $MON_CPU python3 "$W/tests/passive_rx/monitor/monitor.py" --port "$PORT" --coherent-dir "$RUN" \
+  --geometry "$RUN/geometry.json" --log "$RL" > "$RUN/monitor.out" 2>&1 &
+else
 taskset -c $MON_CPU python3 "$W/tests/passive_rx/monitor/monitor.py" --port "$PORT" --reports "$RUN/reports.jsonl" \
   --tracks "$RUN/tracks.jsonl" --status "$RUN/status.jsonl" --geometry "$RUN/geometry.json" --log "$RL" > "$RUN/monitor.out" 2>&1 &
+fi
 MON_PID=$!
 }
 ln -sfn "$(dirname "$RL")" "$RUN/capture"; log "receiver log $RL"
 start_discovery; start_tail
 log "monitor: ssh -L $PORT:localhost:$PORT sens6  then  http://localhost:$PORT/"
 
-verdict(){ python3 - "$RUN" "$RL" <<'EOF'
-import json, os, re, sys
-run, rl = sys.argv[1], sys.argv[2]
+verdict(){ python3 - "$RUN" "$RL" "$COH" <<'EOF'
+import glob, json, os, re, sys
+run, rl, coh = sys.argv[1], sys.argv[2], sys.argv[3] == "1"
 log = open(rl, errors="replace").read() if os.path.exists(rl) else ""
-reps = [json.loads(l) for l in open(f"{run}/reports.jsonl")] if os.path.exists(f"{run}/reports.jsonl") else []
-last = reps[-1] if reps else {}
-v = {"cpis": len(reps), "gate_opened": "SENSING_GATE open" in log,
+v = {"gate_opened": "SENSING_GATE open" in log,
      "cuda": bool(re.search(r"CUDA.*(enabled|warm)", log)), "cfo_mislock": os.path.exists(os.path.join(os.path.dirname(rl), "cfo_mislock")),
-     "dropped_cpis": last.get("dropped_cpis"), "discarded_pending_rows": last.get("discarded_pending_rows"),
-     "dropped_submissions": last.get("dropped_submissions"),
      "arm_verdict": open(os.path.join(os.path.dirname(rl), "verdict.txt")).read().strip() if os.path.exists(os.path.join(os.path.dirname(rl), "verdict.txt")) else None}
-new_drops = ("abi_rejections", "sessionless_ul_rejections", "rejected_submissions", "nonviable_rows",
-             "consume_failures", "ul_sessions_capped")
-for k in new_drops: v[k] = last.get(k)
+arm_ok = bool(v["arm_verdict"]) and "verdict=VALID" in v["arm_verdict"]
+if coh:
+    reps = []
+    for fp in sorted(glob.glob(f"{run}/coherent_reports.*.jsonl")):
+        for line in open(fp, errors="replace"):
+            line = line.strip()
+            if not line: continue
+            try: reps.append(json.loads(line))
+            except json.JSONDecodeError: pass
+    last = reps[-1] if reps else {}
+    v["cpis"] = sum(1 for r in reps if r.get("skipped_reason") is None)
+    v["valid"] = bool(v["gate_opened"] and v["cpis"] > 0 and not v["cfo_mislock"] and arm_ok
+                      and (last.get("stats") or {}).get("overruns") == 0)
+else:
+    reps = [json.loads(l) for l in open(f"{run}/reports.jsonl")] if os.path.exists(f"{run}/reports.jsonl") else []
+    last = reps[-1] if reps else {}
+    v["cpis"] = len(reps)
+    v.update({"dropped_cpis": last.get("dropped_cpis"), "discarded_pending_rows": last.get("discarded_pending_rows"),
+              "dropped_submissions": last.get("dropped_submissions")})
+    new_drops = ("abi_rejections", "sessionless_ul_rejections", "rejected_submissions", "nonviable_rows",
+                 "consume_failures", "ul_sessions_capped")
+    for k in new_drops: v[k] = last.get(k)
+    v["valid"] = bool(v["gate_opened"] and v["cpis"] > 0 and not v["cfo_mislock"] and arm_ok
+                      and not (v["dropped_cpis"] or v["discarded_pending_rows"] or v["dropped_submissions"])
+                      and not any(v[k] for k in new_drops))
 dl = open(f"{run}/discovery.log", errors="replace").read() if os.path.exists(f"{run}/discovery.log") else ""
 v["discovery"] = [l for l in dl.splitlines() if "HANDOFF" in l or "SUMMARY" in l or l.startswith("DISCOVERY")]
 v["discovered_coreset_applied"] = log.count("from decode-free discovery") + log.count("is already a verified bank entry")
-arm_ok = bool(v["arm_verdict"]) and "verdict=VALID" in v["arm_verdict"]
-v["valid"] = bool(v["gate_opened"] and v["cpis"] > 0 and not v["cfo_mislock"] and arm_ok
-                  and not (v["dropped_cpis"] or v["discarded_pending_rows"] or v["dropped_submissions"])
-                  and not any(v[k] for k in new_drops))
 json.dump(v, open(f"{run}/run_verdict.json", "w"), indent=1); print(json.dumps(v))
 EOF
 }
@@ -105,8 +129,15 @@ T0=$(date +%s); LAST_SIZE=0; LAST_GROWTH=$T0
 while kill -0 $ARM_PID 2>/dev/null; do
   sleep 10; now=$(date +%s)
   r=$(newest_rl); if [ -n "$r" ] && [ "$r" != "$RL" ]; then
-    # run_arm retried: the previous try's reports must not be scored with this one's.
+    # run_arm retried: the previous try's outputs must not be scored with this one's, and both
+    # realtime_chain.py (tracks.jsonl/status.jsonl) and start_tail()'s own `>` redirects
+    # (chain.out/monitor.out) truncate on every fresh launch -- rename them all out of the way
+    # first so the run keeps an append-only history instead of losing the try.
     [ -f "$RUN/reports.jsonl" ] && mv "$RUN/reports.jsonl" "$RUN/reports.try$TRY.jsonl"
+    [ -f "$RUN/tracks.jsonl" ] && mv "$RUN/tracks.jsonl" "$RUN/tracks.try$TRY.jsonl"
+    [ -f "$RUN/status.jsonl" ] && mv "$RUN/status.jsonl" "$RUN/status.try$TRY.jsonl"
+    [ -f "$RUN/chain.out" ] && mv "$RUN/chain.out" "$RUN/chain.try$TRY.out"
+    [ -f "$RUN/monitor.out" ] && mv "$RUN/monitor.out" "$RUN/monitor.try$TRY.out"
     TRY=$((TRY+1)); RL=$r; LAST_SIZE=0; LAST_GROWTH=$now
     ln -sfn "$(dirname "$RL")" "$RUN/capture"; log "run_arm try $TRY: receiver log $RL"
     kill $CHAIN_PID $MON_PID 2>/dev/null; start_discovery; start_tail
@@ -116,7 +147,7 @@ while kill -0 $ARM_PID 2>/dev/null; do
   size=$(stat -c%s "$RL" 2>/dev/null || echo 0)
   [ "$size" -gt "$LAST_SIZE" ] && { LAST_SIZE=$size; LAST_GROWTH=$now; }
   [ $((now - LAST_GROWTH)) -gt 60 ] && log "WARN: receiver log silent for $((now - LAST_GROWTH)) s"
-  kill -0 $CHAIN_PID 2>/dev/null || log "WARN: realtime_chain died (see chain.out)"
+  [ "$COH" = 0 ] && { kill -0 $CHAIN_PID 2>/dev/null || log "WARN: realtime_chain died (see chain.out)"; }
   kill -0 $MON_PID 2>/dev/null || log "WARN: monitor died (see monitor.out)"
 done
 sleep 3; kill $CHAIN_PID $MON_PID $DISC_PID 2>/dev/null

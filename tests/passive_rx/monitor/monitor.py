@@ -313,7 +313,7 @@ def sub_thread(endpoint, store):
                 print(f"[monitor] bad JSON from {endpoint}: {e}")
 
 
-def make_handler(store, logtail, html_path, sens, sensing_html_path, vendor_dir):
+def make_handler(store, logtail, html_path, sens, sensing_html_path, vendor_dir, coh_view=None, coherent_html_path=None):
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *a):
             pass
@@ -342,6 +342,10 @@ def make_handler(store, logtail, html_path, sens, sensing_html_path, vendor_dir)
                 self._send(200, json.dumps(payload).encode(), "application/json")
             elif self.path.startswith("/sensing"):
                 self._send(200, json.dumps(sens.snapshot()).encode(), "application/json")
+            elif self.path.startswith("/api/coherent") and coh_view is not None:
+                self._send(200, json.dumps(coh_view.snapshot()).encode(), "application/json")
+            elif self.path.startswith("/coherent") and coh_view is not None:
+                self._send(200, coherent_html_path.read_bytes(), "text/html; charset=utf-8")
             elif self.path.startswith("/vendor/"):
                 name = self.path[len("/vendor/"):]
                 if "/" in name or ".." in name:
@@ -380,6 +384,7 @@ def main():
     ap.add_argument("--tracks", help="tail a tracks JSONL for the 3D track view")
     ap.add_argument("--status", help="tail the realtime_chain status-sidecar JSONL")
     ap.add_argument("--geometry", help="geometry.json (gNB + receiver positions) for the 3D view")
+    ap.add_argument("--coherent-dir", help="run dir with coherent_{reports,tracks}.*/coherence.*.jsonl (coherent fuser mode)")
     args = ap.parse_args()
 
     store = ReportStore()
@@ -441,8 +446,19 @@ def main():
     if not sensing_html_path.exists():
         raise SystemExit(f"missing {sensing_html_path}")
 
+    coh_view = None
+    coherent_html_path = None
+    if args.coherent_dir:
+        from coherent_view import CoherentView
+        coherent_html_path = Path(__file__).with_name("coherent.html")
+        if not coherent_html_path.exists():
+            raise SystemExit(f"missing {coherent_html_path}")
+        geom = json.load(open(args.geometry)) if args.geometry else None
+        coh_view = CoherentView(args.coherent_dir, geometry=geom)
+
     srv = ThreadingHTTPServer((args.bind, args.port),
-                              make_handler(store, logtail, html_path, sens, sensing_html_path, vendor_dir))
+                              make_handler(store, logtail, html_path, sens, sensing_html_path, vendor_dir,
+                                          coh_view, coherent_html_path))
     print(f"[monitor] http://{args.bind}:{args.port}/  (ssh -L {args.port}:localhost:{args.port} sens6)")
     srv.serve_forever()
 

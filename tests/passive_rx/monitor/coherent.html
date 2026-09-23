@@ -1,0 +1,169 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Passive ISAC — coherent fuser</title>
+<script src="/vendor/plotly-2.35.2.min.js"></script>
+<style>
+:root{--bg:#0f1115;--fg:#e6e6e6;--mut:#8a8f98;--card:#171a21;--ok:#3fb950;--bad:#f85149}
+body{margin:0;background:var(--bg);color:var(--fg);font:13px system-ui,sans-serif}
+nav{display:flex;gap:4px;padding:8px;border-bottom:1px solid #222;align-items:center}
+nav button{background:var(--card);color:var(--fg);border:1px solid #2a2f3a;padding:6px 12px;cursor:pointer}
+nav button.on{border-color:#58a6ff}
+section{display:none;padding:10px}section.on{display:block}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(420px,1fr));gap:10px}
+.card{background:var(--card);border:1px solid #2a2f3a;padding:8px}
+#scene3d{height:78vh}
+#health{padding:6px 10px;font-size:12px;color:var(--mut);border-bottom:1px solid #222;white-space:pre-wrap}
+#health b{color:var(--fg)}
+</style></head><body>
+<div id="health">waiting for first report…</div>
+<nav><button data-t="scene" class="on">3D scene</button><button data-t="top">Top view</button>
+<button data-t="rd">RD maps</button><button data-t="coh">Coherence</button>
+<a href="/" style="margin-left:auto;color:#58a6ff;padding:6px">sensing view →</a></nav>
+<section id="scene" class="on"><div id="scene3d" class="card"></div></section>
+<section id="top"><div id="topbox" class="card"></div></section>
+<section id="rd"><div class="grid" id="rdgrid"></div></section>
+<section id="coh"><div class="grid" id="cohgrid"></div></section>
+<script>
+const $=q=>document.querySelector(q);
+document.querySelectorAll("nav button").forEach(b=>b.onclick=()=>{
+  document.querySelectorAll("nav button,section").forEach(e=>e.classList.remove("on"));
+  b.classList.add("on");$("#"+b.dataset.t).classList.add("on");
+  if(b.dataset.t==="scene")Plotly.Plots.resize("scene3d");});
+
+const DARK={paper_bgcolor:"#171a21",plot_bgcolor:"#171a21",font:{color:"#e6e6e6"}};
+
+function lastFull(s){ // the report carrying topview/rd (coherent_view.py always attaches it to the last entry)
+  const r=s.reports||[]; return r.length?r[r.length-1]:null;
+}
+
+function scene3d(s){
+  const g=s.geometry||{}, tr=[];
+  if(g.gnb) tr.push({type:"scatter3d",mode:"markers+text",x:[g.gnb[0]],y:[g.gnb[1]],z:[g.gnb[2]],
+    text:["gNB"],textposition:"top center",marker:{size:7,color:"#f0883e",symbol:"diamond"},name:"gNB"});
+  if(g.rx&&g.rx.length) tr.push({type:"scatter3d",mode:"markers+text",x:g.rx.map(p=>p[0]),y:g.rx.map(p=>p[1]),z:g.rx.map(p=>p[2]),
+    text:g.rx.map((_,i)=>"ch"+i),textposition:"top center",marker:{size:6,color:"#58a6ff",symbol:"square"},name:"RX antennas"});
+  if(g.volume&&g.volume.length===6){
+    const [x0,x1,y0,y1,z0,z1]=g.volume;
+    const corners=[[x0,y0,z0],[x1,y0,z0],[x1,y1,z0],[x0,y1,z0],[x0,y0,z0],
+                   [x0,y0,z1],[x1,y0,z1],[x1,y1,z1],[x0,y1,z1],[x0,y0,z1]];
+    const edges=[[0,1],[1,2],[2,3],[3,0],[5,6],[6,7],[7,8],[8,5],[0,5],[1,6],[2,7],[3,8]];
+    for(const [a,b] of edges) tr.push({type:"scatter3d",mode:"lines",
+      x:[corners[a][0],corners[b][0]],y:[corners[a][1],corners[b][1]],z:[corners[a][2],corners[b][2]],
+      line:{width:1,color:"#3a3f4a"},showlegend:false,hoverinfo:"skip"});
+  }
+  const rep=lastFull(s), dets=(rep&&rep.detections)||[];
+  if(dets.length) tr.push({type:"scatter3d",mode:"markers",x:dets.map(d=>d.p[0]),y:dets.map(d=>d.p[1]),z:dets.map(d=>d.p[2]),
+    marker:{size:dets.map(d=>4+3*Math.log10(Math.max(1,d.snr||1))),color:"#ff4d4d"},
+    text:dets.map(d=>`p=[${d.p.map(v=>v.toFixed(1))}]<br>rr=${(d.rr??0).toFixed(2)} m/s<br>snr=${(d.snr??0).toFixed(1)} dB<br>s=[${(d.s||[]).map(v=>v.toFixed(2))}]`),
+    hoverinfo:"text",name:"detections"});
+  const trails=s.track_trails||{}, trkById={};
+  for(const t of (s.tracks&&s.tracks.tracks)||[]) trkById[t.id]=t;
+  for(const [id,pts] of Object.entries(trails)){
+    if(!pts.length) continue;
+    const t=trkById[id], confirmed=t?!!t.confirmed:true, pe=t?t.pe:1;
+    tr.push({type:"scatter3d",mode:"lines+markers",
+      x:pts.map(p=>p[1]),y:pts.map(p=>p[2]),z:pts.map(p=>p[3]),
+      line:{width:4,color:confirmed?"#3fb950":"#8a8f98"},
+      marker:{size:pts.map((_,i)=>i===pts.length-1?7:1.5),color:confirmed?"#3fb950":"#8a8f98",
+              opacity:confirmed?1.0:0.3},
+      opacity:confirmed?1.0:0.3,
+      name:`track ${id} (pe=${(pe??0).toFixed(2)})`});
+    if(t&&t.v){
+      const p=t.p;
+      tr.push({type:"cone",x:[p[0]],y:[p[1]],z:[p[2]],u:[t.v[0]],v:[t.v[1]],w:[t.v[2]],
+        sizemode:"absolute",sizeref:2,anchor:"tail",showscale:false,colorscale:[[0,"#d2a8ff"],[1,"#d2a8ff"]],
+        showlegend:false,hoverinfo:"skip"});
+    }
+  }
+  Plotly.react("scene3d",tr,{...DARK,margin:{l:0,r:0,t:10,b:0},uirevision:"keep-camera",
+    scene:{aspectmode:"data",xaxis:{title:"x (m)"},yaxis:{title:"y (m)"},zaxis:{title:"z (m)"},dragmode:"orbit"}},
+    {responsive:true});
+}
+
+function topview(s){
+  const rep=lastFull(s), tv=rep&&rep.topview;
+  const box=$("#topbox");
+  if(!tv){box.innerHTML='<div class="mut">no top view yet</div>';return;}
+  const x=[...Array(tv.nx).keys()].map(i=>tv.x0+i*tv.step);
+  const y=[...Array(tv.ny).keys()].map(j=>tv.y0+j*tv.step);
+  const z=[]; for(let j=0;j<tv.ny;j++) z.push(tv.db.slice(j*tv.nx,(j+1)*tv.nx));
+  const dets=(rep.detections||[]);
+  const traces=[{type:"heatmap",x,y,z,colorscale:"Viridis",colorbar:{title:"dB"}},
+    {type:"scatter",mode:"markers",x:dets.map(d=>d.p[0]),y:dets.map(d=>d.p[1]),
+     marker:{color:"#ff4d4d",size:9,symbol:"x"},name:"det"}];
+  Plotly.react(box,traces,{...DARK,title:{text:"top view",font:{size:13}},
+    xaxis:{title:"x (m)"},yaxis:{title:"y (m)"},margin:{l:55,r:10,t:30,b:40},
+    height:520,showlegend:false,uirevision:"keep"},{displayModeBar:false});
+}
+
+function ensure(parent,id){let e=document.getElementById(id);if(!e){e=document.createElement("div");e.id=id;e.className="card";parent.appendChild(e);}return e;}
+
+function rdMaps(s){
+  const rep=lastFull(s), rds=(rep&&rep.rd)||[];
+  const grid=$("#rdgrid");
+  if(!rds.length){grid.innerHTML='<div class="mut">no RD maps yet</div>';return;}
+  rds.forEach(v=>{
+    const div=ensure(grid,"rd"+v.ch);
+    const x=[...Array(v.nr).keys()].map(m=>m*v.range_m_per_bin);
+    const y=[...Array(v.nd).keys()].map(d=>v.dopp0_hz+d*v.dopp_step_hz);
+    // db is range-major: p[m*nd+d], m in [0,nr) outer, doppler d in [0,nd) inner/fastest
+    // (Task 9 producer layout). z rows follow y (doppler), columns follow x (range), so
+    // transpose: z[d][m] = db[m*nd+d].
+    const z=[]; for(let d=0;d<v.nd;d++){const row=new Array(v.nr); for(let m=0;m<v.nr;m++) row[m]=v.db[m*v.nd+d]; z.push(row);}
+    Plotly.react(div,[{type:"heatmap",x,y,z,colorscale:"Viridis",colorbar:{title:"dB"}}],
+      {...DARK,title:{text:`RD ch${v.ch}`,font:{size:13}},xaxis:{title:"range (m)"},yaxis:{title:"Doppler (Hz)"},
+       margin:{l:55,r:10,t:30,b:40},height:330,uirevision:"rd"+v.ch},{displayModeBar:false});
+  });
+}
+
+function coherence(s){
+  const rows=s.coherence||[];
+  const grid=$("#cohgrid");
+  const t=rows.map(r=>r.t);
+  const nch=rows.length?(rows[rows.length-1].phase||[]).length:4;
+  const colors=["#58a6ff","#3fb950","#f0883e","#d2a8ff"];
+
+  const phaseTraces=[...Array(nch).keys()].map(ch=>({type:"scatter",mode:"lines",x:t,
+    y:rows.map(r=>(r.phase||[])[ch]),name:"ch"+ch,line:{color:colors[ch%4]}}));
+  Plotly.react(ensure(grid,"cohphase"),phaseTraces,{...DARK,title:{text:"per-channel phase (rad)",font:{size:13}},
+    xaxis:{title:"t (s)"},yaxis:{title:"rad"},margin:{l:50,r:10,t:30,b:35},height:280,uirevision:"keep"},{displayModeBar:false});
+
+  const jbTraces=[];
+  for(let ch=0;ch<nch;ch++){
+    jbTraces.push({type:"scatter",mode:"lines",x:t,y:rows.map(r=>(r.jitter||[])[ch]),name:"jitter ch"+ch,line:{color:colors[ch%4]}});
+    jbTraces.push({type:"scatter",mode:"lines",x:t,y:rows.map(r=>(r.bound||[])[ch]),name:"bound ch"+ch,line:{color:colors[ch%4],dash:"dot"}});
+  }
+  Plotly.react(ensure(grid,"cohjb"),jbTraces,{...DARK,title:{text:"phase jitter vs bound",font:{size:13}},
+    xaxis:{title:"t (s)"},yaxis:{title:"rad"},margin:{l:50,r:10,t:30,b:35},height:280,uirevision:"keep"},{displayModeBar:false});
+
+  Plotly.react(ensure(grid,"cohgr"),[
+      {type:"scatter",mode:"lines",x:t,y:rows.map(r=>r.G),name:"G (dB)",line:{color:"#3fb950"}},
+      {type:"scatter",mode:"lines",x:t,y:rows.map(r=>r.rho),name:"rho",yaxis:"y2",line:{color:"#f0883e"}}],
+    {...DARK,title:{text:"coherent gain G / rho",font:{size:13}},xaxis:{title:"t (s)"},
+     yaxis:{title:"G (dB)"},yaxis2:{title:"rho",overlaying:"y",side:"right",range:[0,1]},
+     margin:{l:50,r:50,t:30,b:35},height:280,uirevision:"keep"},{displayModeBar:false});
+
+  const afTraces=[...Array(nch).keys()].map(ch=>({type:"scatter",mode:"lines",x:t,
+    y:rows.map(r=>(r.af_corr_m||[])[ch]),name:"ch"+ch,line:{color:colors[ch%4]}}));
+  Plotly.react(ensure(grid,"cohaf"),afTraces,{...DARK,title:{text:"autofocus correction (m)",font:{size:13}},
+    xaxis:{title:"t (s)"},yaxis:{title:"m"},margin:{l:50,r:10,t:30,b:35},height:280,uirevision:"keep"},{displayModeBar:false});
+}
+
+function health(s){
+  const h=s.health||{}, st=h.stats||{};
+  const last=(s.reports||[]).length?s.reports[s.reports.length-1]:{};
+  $("#health").innerHTML=
+    `<b>${h.gpu?"GPU":"CPU"}</b> backend &nbsp;`+
+    `total <b>${(h.total_ms??0).toFixed?.(1)??h.total_ms} ms</b> vs CPI <b>${(h.cpi_ms??0).toFixed?.(1)??h.cpi_ms} ms</b> &nbsp;`+
+    `processed=${st.processed??"—"} skipped=${st.skipped??"—"} overruns=${st.overruns??"—"} queue_waits=${st.queue_waits??"—"} &nbsp;`+
+    `last skipped_reason: ${last.skipped_reason??"—"}`;
+}
+
+async function poll(){
+  try{
+    const s=await (await fetch("/api/coherent",{cache:"no-store"})).json();
+    scene3d(s); topview(s); rdMaps(s); coherence(s); health(s);
+  }catch(e){console.log(e);}
+  setTimeout(poll,500);
+}
+poll();
+</script></body></html>
