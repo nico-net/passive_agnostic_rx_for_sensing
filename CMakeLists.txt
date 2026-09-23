@@ -2371,6 +2371,10 @@ if(ENABLE_TESTS)
                                  ${OPENAIR1_DIR}/PHY/NR_UE_ISAC)
       target_link_libraries(benchmark_nr_isac_cuda_family_processing PRIVATE NR_UE_ISAC UTIL)
     endif()
+    add_executable(test_nr_isac_flow_gate ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/tests/flow_gate_test.cc)
+    target_include_directories(test_nr_isac_flow_gate PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_ISAC)
+    add_dependencies(tests test_nr_isac_flow_gate)
+    add_test(NAME test_nr_isac_flow_gate COMMAND ./test_nr_isac_flow_gate)
   endif()
   # uniqCfg/exit_function (needed by LOG/CONFIG_LIB) are defined directly in isac_sync_test.cc,
   # not via minimal_lib -- static-archive link order made minimal_lib's stubs unreliable here.

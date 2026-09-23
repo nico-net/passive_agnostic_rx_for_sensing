@@ -2,10 +2,12 @@
 /** Public OAI glue for the native transcription of the validated Python sensing pipeline. */
 #include "nr_isac.h"
 
+#include "flow_gate.h"
 #include "sensing_engine.h"
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <complex>
 #include <cstdio>
@@ -14,6 +16,8 @@
 #include <memory>
 #include <sstream>
 #include <string>
+#include <thread>
+#include <time.h>
 #include <vector>
 
 extern "C" {
@@ -184,6 +188,29 @@ int environment_bool(const char* name, int fallback)
 
 } // namespace
 
+namespace {
+double monotonic_s(){timespec ts;clock_gettime(CLOCK_MONOTONIC,&ts);return ts.tv_sec+1e-9*ts.tv_nsec;}
+nr_isac::FlowGate flow_gate(2.0);
+std::atomic<uint64_t> gate_admitted{0},gate_rejected{0};
+std::atomic<bool> gate_watchdog_run{false};
+std::thread gate_watchdog;
+}
+
+extern "C" void nr_isac_flow_note(uint16_t rnti,int uplink)
+{
+  if(!enabled.load(std::memory_order_relaxed))return;
+  if(flow_gate.note(rnti,uplink!=0,monotonic_s())>0)LOG_I(PHY,"SENSING_GATE open rnti=0x%04x\n",rnti);
+}
+extern "C" int nr_isac_flow_admit(uint16_t rnti)
+{
+  if(!enabled.load(std::memory_order_relaxed))return 0;
+  const bool ok=flow_gate.admit(rnti,monotonic_s());
+  (ok?gate_admitted:gate_rejected).fetch_add(1,std::memory_order_relaxed);
+  return ok?1:0;
+}
+extern "C" void nr_isac_request_discard(void){if(engine)engine->request_discard_pending();}
+extern "C" int nr_isac_drained(void){return engine&&engine->submissions_drained()?1:0;}
+
 extern "C" void nr_isac_init(void)
 {
   if (enabled.load(std::memory_order_relaxed)) return;
@@ -340,6 +367,9 @@ extern "C" void nr_isac_init(void)
         AOA_ENABLE,AOA_UL_ENABLE,pipeline.array_calibration.configured);
 }
 
+// Task 10 will replace this in place with the real recorded-close writer.
+static void nr_isac_record_gate_close(void) {}
+
 extern "C" void nr_isac_start(void)
 {
   bool expected = false;
@@ -350,9 +380,34 @@ extern "C" void nr_isac_start(void)
     started.store(false);
     enabled.store(false);
     LOG_E(PHY, "SENSING: startup failed before CFR admission: %s\n", error.what());
+    return;
   }
+  gate_watchdog_run.store(true);
+  gate_watchdog = std::thread([] {
+    double last_stats = monotonic_s();
+    while (gate_watchdog_run.load()) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(100));
+      const double now = monotonic_s();
+      if (flow_gate.poll(now) < 0) {
+        LOG_I(PHY, "SENSING_GATE close reason=no_dl_ul_flow_for_2s\n");
+        nr_isac_request_discard();
+        nr_isac_record_gate_close(); // Task 10; until then define it as an empty static function
+      }
+      if (now - last_stats >= 10.0) {
+        last_stats = now;
+        LOG_I(PHY, "SENSING_GATE stats open=%d admitted=%lu rejected=%lu gate_discarded_rows=%lu\n",
+              flow_gate.open() ? 1 : 0, (unsigned long)gate_admitted.load(), (unsigned long)gate_rejected.load(),
+              (unsigned long)(engine ? engine->gate_discarded_rows() : 0));
+      }
+    }
+  });
 }
-extern "C" void nr_isac_stop(void){if(engine&&started.exchange(false))engine->stop();}
+extern "C" void nr_isac_stop(void)
+{
+  gate_watchdog_run.store(false);
+  if (gate_watchdog.joinable()) gate_watchdog.join();
+  if (engine && started.exchange(false)) engine->stop();
+}
 extern "C" int nr_isac_enabled(void){return enabled.load(std::memory_order_relaxed);}
 extern "C" int nr_isac_source(void){for(int i=0;i<NR_ISAC_SRC_COUNT;++i)if(pipeline.sources_mask&(1u<<i))return i;return NR_ISAC_SRC_CSI_RS;}
 extern "C" int nr_isac_source_enabled(int source){return enabled.load()&&source>=0&&source<NR_ISAC_SRC_COUNT&&(pipeline.sources_mask&(1u<<source));}

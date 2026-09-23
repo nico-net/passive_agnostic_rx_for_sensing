@@ -26,7 +26,10 @@
 #include <cstdlib>
 #include <cstring>
 #include <limits>
+#include <pthread.h>
+#include <sched.h>
 #include <set>
+#include <sstream>
 #include <stdexcept>
 #include <thread>
 
@@ -175,6 +178,20 @@ void cap_reported_covariance(Matrix& covariance, const Axes& axes)
 }
 } // namespace
 
+/** Engine threads leave the PHY's SCHED_FIFO class and, when NR_ISAC_CPUS="3,12,13" is set, run
+ *  only on those cores -- a std::thread created from a FIFO PHY thread inherits FIFO otherwise. */
+void pin_current_thread_from_env()
+{
+  sched_param sp{}; sp.sched_priority = 0;
+  pthread_setschedparam(pthread_self(), SCHED_OTHER, &sp);
+  const char* cpus = std::getenv("NR_ISAC_CPUS");
+  if (!cpus || !*cpus) return;
+  cpu_set_t set; CPU_ZERO(&set);
+  std::stringstream s(cpus); std::string tok;
+  while (std::getline(s, tok, ',')) if (!tok.empty()) CPU_SET(std::stoi(tok), &set);
+  pthread_setaffinity_np(pthread_self(), sizeof(set), &set);
+}
+
 struct SpatialReceiverProduct {
   SpatialReceiverReport report;
   ReceiverDetectionBatch batch;
@@ -239,6 +256,7 @@ private:
 
     void run()
     {
+      pin_current_thread_from_env();
       for (;;) {
         Task task;
         {
@@ -585,9 +603,11 @@ void SensingEngine::submit(uint32_t slot, float fraction, nr_isac_source_t sourc
 
 void SensingEngine::accumulation_run()
 {
+  pin_current_thread_from_env();
   for (;;) {
     Snapshot* value = ready_.wait_pop();
     if (!value) break;
+    if (discard_requested_.exchange(false, std::memory_order_acq_rel)) discard_pending_rows();
     try { consume(*value); }
     catch (const std::exception& e) { std::fprintf(stderr, "SENSING: dropped CFR occurrence: %s\n", e.what()); }
     value->cfr.clear(); value->subcarrier.clear(); value->symbol.clear(); free_.push(value);
@@ -600,6 +620,7 @@ void SensingEngine::accumulation_run()
 
 void SensingEngine::processing_run()
 {
+  pin_current_thread_from_env();
   while (auto task = windows_.wait_pop()) {
     try {
       process_window(std::move(task->dl_window), std::move(task->ul_windows), task->plan,
@@ -970,6 +991,16 @@ void SensingEngine::close_ready_windows(bool flush)
       active_plan_.reset();
     }
   }
+}
+
+void SensingEngine::discard_pending_rows()
+{
+  std::vector<int64_t> keys;
+  keys.reserve(rows_.size());
+  for (const auto& item : rows_) keys.push_back(item.first);
+  gate_discarded_rows_.fetch_add(keys.size(), std::memory_order_relaxed);
+  erase_rows(keys);
+  active_plan_.reset();
 }
 
 CfrWindow SensingEngine::build_window(const std::vector<int64_t>& keys, bool uplink,

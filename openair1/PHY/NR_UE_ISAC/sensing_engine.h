@@ -44,6 +44,11 @@ public:
     return consumed_submissions_.load(std::memory_order_acquire) == accepted_submissions_.load(std::memory_order_acquire);
   }
 
+  /** Gate closed: drop every pending (not yet windowed) row before the next submission is consumed.
+   *  Counted apart from discarded_pending_rows, which keeps meaning "loss". */
+  void request_discard_pending() { discard_requested_.store(true, std::memory_order_release); }
+  uint64_t gate_discarded_rows() const { return gate_discarded_rows_.load(std::memory_order_relaxed); }
+
 private:
   struct Snapshot;
   struct PendingRow;
@@ -89,6 +94,7 @@ private:
   size_t pending_row_storage_bytes(const PendingRow& row) const;
   void make_pending_row_room(size_t incoming_bytes);
   void erase_rows(const std::vector<int64_t>& keys);
+  void discard_pending_rows();
   void consume(const Snapshot& snapshot);
   int64_t unwrap_submission_slot(uint32_t slot, const nr_isac_carrier_t& carrier);
   void begin_geometry(const nr_isac_carrier_t& carrier);
@@ -120,6 +126,8 @@ private:
   std::atomic<uint64_t> consumed_submissions_{0};
   std::atomic<uint64_t> discarded_pending_rows_{0};
   std::atomic<uint64_t> discarded_pending_intervals_{0};
+  std::atomic<bool> discard_requested_{false};
+  std::atomic<uint64_t> gate_discarded_rows_{0};
   std::atomic<uint64_t> stale_{0};
   mutable std::mutex processing_mutex_;
   std::condition_variable processing_condition_;
