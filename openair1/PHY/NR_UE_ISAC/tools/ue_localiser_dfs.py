@@ -200,7 +200,7 @@ class LocaliserStream:
     """Streaming UE localiser (2026-09-21): feed(report) -> window estimate or None. The body is the
     offline per-report loop verbatim; the window buffers and the previous solution are the state."""
     def __init__(self, rx_positions, range_res_m, rate_res_mps, window_cpis, ul_session=None, tx_position=None,
-                 max_range_m=312.2838104166667, ul_advance=None, samples_per_bin=4096.0 / 3276.0):
+                 max_range_m=312.2838104166667, ul_advance=None, samples_per_bin=None):
         self.rx = np.asarray(rx_positions, float); self.n = len(self.rx)
         self.args = (range_res_m, rate_res_mps, window_cpis, ul_session, tx_position, max_range_m, ul_advance, samples_per_bin)
         self.T, self.D, self.F, self.SD, self.SF = [], [], [], [], []; self.x_prev = None
@@ -226,6 +226,8 @@ class LocaliserStream:
         # absorbed by the model's common offset. Median over the CPI's slots; skipped if none.
         advance_bins = 0.0
         if ul_advance is not None:
+            if samples_per_bin is None:
+                raise ValueError("samples_per_bin is required with ul_advance")
             s0 = int(round(r["midpoint_air_time_s"] / 0.0005 - 75)); s1 = s0 + 150
             seg = ul_advance[max(s0, 0):max(s1, 0)]
             ok = np.isfinite(seg[:, 1])
