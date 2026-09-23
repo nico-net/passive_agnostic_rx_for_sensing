@@ -75,6 +75,8 @@ preflight() {
   # A stale-source false alarm (a git checkout bumps mtimes) costs one rebuild;
   # a stale binary costs the whole capture and is invisible in the logs.
   REPO=${REPO:-/home/sens/NICOLA/openairinterface5g-total-passive-ue}
+  export REPO  # the ADAPT retry below re-execs "$0" as a fresh bash process (line ~296) and needs
+               # REPO in its environment, not just this shell's -- cd at line 118 doesn't
   # BIN lets an A/B run a DELIBERATELY older binary as its control arm. Setting it explicitly
   # also waives the freshness check below -- the whole point of that arm is a stale binary --
   # so it is announced loudly rather than passing silently.
@@ -115,7 +117,7 @@ preflight() {
 }
 nic_miss() { awk '{print $1}' /sys/class/net/$NIC/statistics/rx_missed_errors 2>/dev/null || echo 0; }
 preflight
-cd /home/sens/NICOLA/openairinterface5g-total-passive-ue/cmake_targets || exit 1
+cd "$REPO/cmake_targets" || exit 1
 
 # CARRIER/SSB: cell moved to dl_arfcn=630000 (3450 MHz) / dl_ssb_arfcn=627264 on 2026-09-03.
 # ssb_start_subcarrier = (F_ssb - pointA)/scs - 120, F_ssb=3408.96 MHz, pointA=3400.86 MHz -> 150.
