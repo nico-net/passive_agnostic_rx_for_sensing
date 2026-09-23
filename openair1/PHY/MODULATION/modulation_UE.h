@@ -31,6 +31,7 @@ int slot_fep(PHY_VARS_UE *phy_vars_ue,
              int no_prefix,
 	     int reset_freq_est);
 
+extern __thread int nr_slot_fep_only_ant;
 int nr_slot_fep(PHY_VARS_NR_UE *ue,
                 const NR_DL_FRAME_PARMS *frame_parms,
                 unsigned int slot,

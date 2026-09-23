@@ -343,6 +343,8 @@ void nr_pdcch_blind_monitor_cfg_override(const nr_pdcch_blind_monitor_cfg_t *in)
 void nr_pdcch_blind_monitor_process(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc);
 /// Consumer-side outcome of a decode/probe made under DCI 1_1 layout `layout_index` (0xFFFF = none).
 void nr_pdcch_dci11_layout_feedback(uint16_t layout_index, bool cb0_ok);
+/** Count one blind DM-RS CFR submission made by the PDSCH consumer (the scan summary's cfr_submits). */
+void nr_pdcch_blind_note_cfr_submit(void);
 
 /**
  * @brief Run ONE monitoring occasion: FEP -> PDCCH LLR -> demap -> per-candidate decode -> accepts.

@@ -116,6 +116,9 @@ typedef struct {
   /// Passive BWP entry the grant was decoded against (>0): its TB CRC is fed back to the tracker.
   int8_t   bwp_entry;
   uint64_t bwp_probe_payload;
+  /// 1 = also submit the blind DM-RS CFR (raw LS Y_i/X at the DM-RS REs, every rx antenna) from the
+  /// consumer's FEP; 2 = that CFR only, no decode. Keeps the per-antenna work off the scan thread.
+  uint8_t  dmrs_cfr;
 } nr_pdsch_passive_job_t;
 
 /// Per-run census. Every field is a reason a job did NOT become a decode, so a shortfall in

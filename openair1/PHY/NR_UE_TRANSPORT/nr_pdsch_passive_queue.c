@@ -69,6 +69,62 @@ void nr_passive_rrc_harvest(const uint8_t *tb, uint32_t tb_bytes); // openair2/L
 #include "PHY/NR_UE_ISAC/nr_isac.h"
 #include "PHY/MODULATION/modulation_UE.h"
 #include "PHY/NR_UE_TRANSPORT/nr_transport_proto_ue.h" // nr_dlsch_unscrambling (GPU self-check)
+#include "PHY/NR_REFSIG/nr_refsig.h"                   // nr_gold_pdsch, nr_pdsch_dmrs_rx
+#include "PHY/NR_TRANSPORT/nr_sch_dmrs.h"              // get_delta
+
+/* P39 blind DM-RS CFR: raw LS H_i[k] = Y_i[k] / X[k] at the grant's DM-RS REs (first DM-RS symbol,
+ * layer-0 port, type 1), every rx antenna, from this consumer's own FEP -- the scan thread only
+ * forwards the grant. X = conj(pilot): nr_pdsch_dmrs_rx() returns the conjugated sequence. */
+static void dmrs_ls_cfr_submit(PHY_VARS_NR_UE *ue, const nr_pdsch_passive_job_t *job, const c16_t *rxF, uint32_t rxF_sz)
+{
+  const NR_DL_FRAME_PARMS *fp = &ue->frame_parms;
+  const fapi_nr_dl_config_dlsch_pdu_rel15_t *d = &job->dlsch_pdu;
+  if (d->dmrsConfigType != NFAPI_NR_DMRS_TYPE1 || !(d->dlDmrsSymbPos & 0x3fff))
+    return;
+  const int sym = __builtin_ctz(d->dlDmrsSymbPos);
+  const int first_rb = job->freq_alloc.first_rb;
+  const int nb_rb = job->freq_alloc.last_rb - first_rb + 1;
+  const int rb_offset = first_rb + (d->refPoint ? 0 : d->BWPStart);
+  if (nb_rb < 1 || (nb_rb + rb_offset) * 6 > 3280)
+    return;
+  const int p = get_dmrs_port(0, d->dmrs_ports);
+  const int delta = get_delta(p, d->dmrsConfigType);
+  const float beta = get_beta_dmrs(d->n_dmrs_cdm_groups, false);
+  __attribute__((aligned(16))) c16_t pilot[3280];
+  nr_pdsch_dmrs_rx(fp->Ncp, nr_gold_pdsch(fp->N_RB_DL, fp->symbols_per_slot, d->dlDmrsScramblingId, d->nscid, job->nr_slot_rx, sym),
+                   pilot, 1000 + p, 0, nb_rb + rb_offset, d->dmrsConfigType, (int16_t)((1 / beta) * (1 << 14)));
+  uint32_t nof_ant = nr_isac_rx_channels();
+  if (nof_ant > (uint32_t)fp->nb_antennas_rx) nof_ant = fp->nb_antennas_rx;
+  if (nof_ant == 0) nof_ant = 1;
+  if (nof_ant > 8) nof_ant = 8;
+  enum { MAX_RE = 273 * NR_NB_SC_PER_RB / 2 };
+  static __thread float h[8 * 2 * MAX_RE];
+  static __thread uint32_t kk[MAX_RE], ll[MAX_RE];
+  const int sc0 = fp->first_carrier_offset + (d->BWPStart + first_rb) * NR_NB_SC_PER_RB;
+  const c16_t *pil = &pilot[6 * rb_offset];
+  uint32_t n = 0;
+  for (int j = delta; j < nb_rb * NR_NB_SC_PER_RB && n < MAX_RE; j += 2, n++) {
+    const float xr = pil[n].r, xi = pil[n].i, den = xr * xr + xi * xi;
+    const int k = (sc0 + j) % fp->ofdm_symbol_size;
+    for (uint32_t a = 0; a < nof_ant; a++) {
+      const c16_t y = rxF[(size_t)a * rxF_sz + (size_t)sym * fp->ofdm_symbol_size + k];
+      float *o = &h[2 * ((size_t)a * MAX_RE + n)];
+      /* Y / conj(pil) = Y * pil / |pil|^2 */
+      o[0] = den > 0 ? (y.r * xr - y.i * xi) / den : 0;
+      o[1] = den > 0 ? (y.r * xi + y.i * xr) / den : 0;
+    }
+    kk[n] = (uint32_t)((d->BWPStart + first_rb) * NR_NB_SC_PER_RB + j);
+    ll[n] = (uint32_t)sym;
+  }
+  if (n == 0)
+    return;
+  const nr_isac_carrier_t carrier = {.nof_prb = (uint32_t)fp->N_RB_DL, .scs_hz = fp->subcarrier_spacing,
+                                     .dl_center_hz = fp->dl_CarrierFreq, .pci = fp->Nid_cell,
+                                     .slots_per_frame = fp->slots_per_frame};
+  nr_isac_submit_cfr_multi((uint32_t)job->absolute_slot, 0.0f, NR_ISAC_SRC_PDSCH_DMRS_BLIND, &carrier, h, nof_ant, MAX_RE, kk,
+                           ll, n, 0.0f);
+  nr_pdcch_blind_note_cfr_submit();
+}
 
 /* ---- GPU front end (NR_GPU_FEP=1): FEP + chest + MMSE + LLR for a whole slot group in one launch
  * set, LLRs handed to the decode through nr_pdsch_passive_set_llr_override(). ---- */
@@ -597,6 +653,22 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
     job.grant.check_sample_lifetime = true;
     job.grant.source_absolute_slot = job.absolute_slot;
 
+    if (job.dmrs_cfr == 2) {
+      /* CFR only: transform the DM-RS symbol into a scratch grid (rxdataF may hold the slot-share
+       * FEP cache of another slot) and form the LS CFR. */
+      static __thread c16_t *s_dm = NULL;
+      if (!s_dm)
+        s_dm = malloc16_clear((size_t)fp->nb_antennas_rx * rxdataF_sz * sizeof(c16_t));
+      if (s_dm && job.dlsch_pdu.dlDmrsSymbPos
+          && nr_passive_samples_valid(atomic_load_explicit(&nr_ue_diag_producer_absolute_slot, memory_order_relaxed),
+                                      job.absolute_slot, fp->slots_per_frame)) {
+        nr_slot_fep(ue, fp, job.nr_slot_rx, __builtin_ctz(job.dlsch_pdu.dlDmrsSymbPos), (c16_t (*)[rxdataF_sz])s_dm,
+                    link_type_dl, 0, ue->common_vars.rxdata);
+        dmrs_ls_cfr_submit(ue, &job, s_dm, rxdataF_sz);
+      }
+      nr_slot_fep_fo_override_hz = saved_fo;
+      continue;
+    }
     if (job.bwp_probe_entry > 0) {
       /* Passive BWP discovery: per-PRB DM-RS coherence on the DM-RS symbol. dmrs-TypeA-Position is
        * pos2 or pos3 -- score both and keep the one carrying DM-RS (the larger total coherence).
@@ -698,6 +770,9 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
     const nr_pdsch_passive_decode_status_t st_raw =
         nr_pdsch_passive_decode(ue, &proc, &job.dlsch_pdu, &job.freq_alloc, &job.grant, rxdataF, &dec);
     nr_pdsch_passive_set_llr_override(NULL, 0);
+    /* The decode's FEP holds the DM-RS symbol for every antenna (not on the GPU path). */
+    if (job.dmrs_cfr && !gpu_job && (st_raw == NR_PDSCH_PASSIVE_DECODE_CRC_OK || st_raw == NR_PDSCH_PASSIVE_DECODE_CRC_FAIL))
+      dmrs_ls_cfr_submit(ue, &job, &rxdataF[0][0], rxdataF_sz);
     const bool probe_outcome = nr_pdsch_passive_probe_outcome(); /* before the self-check re-runs the decode */
     /* ISAC_GPU_SELFCHECK=N: the first N GPU-fed decodes are re-run on the CPU chain and compared --
      * TB/CB0 CRC agreement, LLR sign agreement and max |dLLR| after matching the two scales. */

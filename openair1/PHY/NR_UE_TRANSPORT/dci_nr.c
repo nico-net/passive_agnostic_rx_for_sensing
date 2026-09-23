@@ -346,6 +346,19 @@ static void nr_pdcch_detection_mrc(int nb_ant, int sz, unsigned kept_mask,
 
 }
 
+int nr_pdcch_single_branch(int nb_antennas_rx)
+{
+  static int s_mask = -1;
+  if (s_mask < 0) {
+    const char *e = getenv("ISAC_PDCCH_ANT_MASK");
+    s_mask = e ? (int)strtol(e, NULL, 0) : 0;
+  }
+  if (nb_antennas_rx < 2 || s_mask <= 0 || (s_mask & (s_mask - 1)) != 0)
+    return -1;
+  const int b = __builtin_ctz((unsigned)s_mask);
+  return b < nb_antennas_rx ? b : -1;
+}
+
 /* Produce LLRs from received PDCCH signal */
 static void nr_rx_pdcch_symbol(PHY_VARS_NR_UE *ue,
                                const UE_nr_rxtx_proc_t *proc,
@@ -718,13 +731,18 @@ static void nr_rx_pdcch_symbol(PHY_VARS_NR_UE *ue,
   int rx_comp_sz = ceil_mod(llr_size_symbol, 4);
   __attribute__((aligned(32))) c16_t rxdataF_comp[fp->nb_antennas_rx][rx_comp_sz];
   memset(rxdataF_comp, 0, sizeof(rxdataF_comp));
-  nr_pdcch_channel_compensation(rx_comp_sz,
-                                rx_size,
-                                rxdataF_ext,
-                                pdcch_dl_ch_estimates_ext,
-                                rxdataF_comp,
-                                fp->nb_antennas_rx,
-                                log2_maxh); // log2_maxh+I0_shift
+  const int only_ant = nr_pdcch_single_branch(fp->nb_antennas_rx);
+  if (only_ant >= 0) /* the other branches are masked: their comp stays zero, as before */
+    mult_cpx_conj_vector(pdcch_dl_ch_estimates_ext[only_ant], rxdataF_ext[only_ant], rxdataF_comp[only_ant], rx_comp_sz,
+                         log2_maxh);
+  else
+    nr_pdcch_channel_compensation(rx_comp_sz,
+                                  rx_size,
+                                  rxdataF_ext,
+                                  pdcch_dl_ch_estimates_ext,
+                                  rxdataF_comp,
+                                  fp->nb_antennas_rx,
+                                  log2_maxh); // log2_maxh+I0_shift
 
   /* Per-ANTENNA constellation before combining (2026-09-15): at 4 RX the combined CORESET#0 symbols
    * read cv 1.2-2.2 (noise-like) on every acquisition that never decoded SIB1, and 1/2 RX decode it.

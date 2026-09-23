@@ -12,6 +12,9 @@
 #include <common/utils/LOG/log.h>
 
 /* rxdataF should be 16 bytes aligned */
+/* >= 0: nr_slot_fep() transforms that rx branch only (the PDCCH single-branch mode). -1 = all. */
+__thread int nr_slot_fep_only_ant = -1;
+
 void nr_symbol_fep(const NR_DL_FRAME_PARMS *frame_parms,
                    const int slot,
                    const unsigned char symbol,
@@ -27,6 +30,8 @@ void nr_symbol_fep(const NR_DL_FRAME_PARMS *frame_parms,
 
   dft_size_idx_t dftsize = get_dft(frame_parms->ofdm_symbol_size);
   for (unsigned char aa = 0; aa < frame_parms->nb_antennas_rx; aa++) {
+    if (nr_slot_fep_only_ant >= 0 && aa != nr_slot_fep_only_ant)
+      continue;
     if (dft_stats) start_meas(dft_stats);
     dft(dftsize, (int16_t *)rxdata[aa], (int16_t *)rxdataF[aa], 1);
     if (dft_stats) stop_meas(dft_stats);
@@ -151,6 +156,9 @@ int nr_slot_fep(PHY_VARS_NR_UE *ue,
   c16_t *rxdataF_symb_ptr[frame_parms->nb_antennas_rx];
   for (unsigned char aa = 0; aa < frame_parms->nb_antennas_rx; aa++) {
     rxdataF_symb_ptr[aa] = &rxdataF[aa][frame_parms->ofdm_symbol_size * symbol];
+    rxdata_symb_ptr[aa] = NULL;
+    if (nr_slot_fep_only_ant >= 0 && aa != nr_slot_fep_only_ant)
+      continue;
     // This happens only during initial sync
     if (rx_offset + frame_parms->ofdm_symbol_size > total_samples) {
       // we have to wrap on the end

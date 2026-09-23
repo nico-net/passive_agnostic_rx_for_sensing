@@ -142,4 +142,8 @@ int nr_sl_psbch_rsrp_measurements(PHY_VARS_NR_UE *ue,
                                   const c16_t rxdataF[][fp->ofdm_symbol_size],
                                   bool use_SSS);
 /** @}*/
+/* ISAC_PDCCH_ANT_MASK selecting exactly ONE branch (and nb_antennas_rx > 1): that branch, else -1.
+ * The PDCCH FEP, channel estimate and compensation then run on that branch only. */
+int nr_pdcch_single_branch(int nb_antennas_rx);
+
 #endif

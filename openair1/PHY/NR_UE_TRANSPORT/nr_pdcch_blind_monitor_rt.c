@@ -473,6 +473,37 @@ static void stage0_note_accept(uint32_t abs_slot, uint16_t rnti, bool confirmed)
  * that a working configuration and a broken one can be diffed field by field instead of guessed at
  * -- the failure mode here is a CRC that fails for ALL of them, which says nothing about WHICH
  * field is wrong. RA class only, 8 lines, so it costs nothing during a capture. */
+/* P39: a grant whose only remaining use is the blind DM-RS CFR. The PDSCH consumer transforms the
+ * DM-RS symbol and forms the raw-LS Y_i/X for every rx antenna; this thread only forwards the grant. */
+static void blind_enqueue_dmrs_cfr_only(const PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc, int slots_per_frame,
+                                        const fapi_nr_dl_config_dlsch_pdu_rel15_t *pdu, const freq_alloc_bitmap_t *fa,
+                                        int k0, long source_absolute_slot, uint16_t rnti, uint8_t rnti_class)
+{
+  nr_pdsch_passive_job_t job;
+  memset(&job, 0, sizeof(job));
+  job.dlsch_pdu     = *pdu;
+  job.freq_alloc    = *fa;
+  job.frame_rx      = (proc->frame_rx + (proc->nr_slot_rx + k0) / slots_per_frame) % 1024;
+  job.nr_slot_rx    = (proc->nr_slot_rx + k0) % slots_per_frame;
+  job.gNB_id        = proc->gNB_id;
+  job.absolute_slot = source_absolute_slot + k0;
+  job.rnti          = rnti;
+  job.rnti_class    = rnti_class;
+  job.fo_hz         = isnan(nr_slot_fep_fo_override_hz) ? (ue->cont_fo_comp ? ue->dl_Doppler_shift + ue->freq_offset : 0.0)
+                                                        : nr_slot_fep_fo_override_hz;
+  job.dmrs_cfr      = 2;
+  nr_pdsch_passive_queue_enqueue(&job);
+}
+
+/* CORESET-symbol FEP: the single masked branch only when ISAC_PDCCH_ANT_MASK selects one. */
+static void pdcch_slot_fep(PHY_VARS_NR_UE *ue, const NR_DL_FRAME_PARMS *fp, int slot, int symbol,
+                           c16_t rxdataF[][fp->samples_per_slot_wCP])
+{
+  nr_slot_fep_only_ant = nr_pdcch_single_branch(fp->nb_antennas_rx);
+  nr_slot_fep(ue, fp, slot, symbol, rxdataF, link_type_dl, 0, ue->common_vars.rxdata);
+  nr_slot_fep_only_ant = -1;
+}
+
 static void ragrant_dump(const fapi_nr_dl_config_dlsch_pdu_rel15_t *pdu,
                          const nr_pdcch_blind_result_t *out, int mcs_table, bool css0, const char *path)
 {
@@ -1156,6 +1187,11 @@ static uint64_t g_accepts_10     = 0;
 static uint64_t g_accepts_class[NR_BLIND_RNTI_CLASS_COUNT] = {0};
 static uint64_t g_cfr_submits    = 0; // final count that actually reached the ISAC engine, i.e. after
                                       // ALL gates (raw accept + energy + persistence + SNR)
+
+void nr_pdcch_blind_note_cfr_submit(void)
+{
+  __atomic_fetch_add(&g_cfr_submits, 1, __ATOMIC_RELAXED);
+}
 
 // ---- Noise-floor gate counters (2026-07-28) -- how many raw accepts each gate held back, so the
 // periodic summary shows where candidates are actually being lost, not just the final count. ----
@@ -3329,7 +3365,7 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
   btim_add(BTIM_PRE, btim_occ0);
   const uint64_t btim_t_fep = btim_on ? btim_now() : 0;
   for (int symbol = cfg->ss_first_symbol; symbol < cfg->ss_first_symbol + rel15->coreset.duration; symbol++) {
-    nr_slot_fep(ue, fp, proc->nr_slot_rx, symbol, rxdataF, link_type_dl, 0, ue->common_vars.rxdata);
+    pdcch_slot_fep(ue, fp, proc->nr_slot_rx, symbol, rxdataF);
     __attribute__((aligned(32))) c16_t rxdataF_symb[fp->nb_antennas_rx][((fp->ofdm_symbol_size + 7) / 8) * 8];
     for (int ant = 0; ant < fp->nb_antennas_rx; ant++) {
       memcpy(rxdataF_symb[ant], &rxdataF[ant][symbol * fp->ofdm_symbol_size], sizeof(c16_t) * fp->ofdm_symbol_size);
@@ -3356,7 +3392,7 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
       for (int sym = 0; sym < 2; sym++) {
         const int symbol = cfg->ss_first_symbol + sym;
         if (sym >= rel15->coreset.duration)
-          nr_slot_fep(ue, fp, proc->nr_slot_rx, symbol, rxdataF, link_type_dl, 0, ue->common_vars.rxdata);
+          pdcch_slot_fep(ue, fp, proc->nr_slot_rx, symbol, rxdataF);
         nr_pdcch_coreset_pilot(cfg->coreset_pdcch_dmrs_scrambling_id, proc->nr_slot_rx, symbol, fp->N_RB_DL, pilot);
         const c16_t *y = &rxdataF[0][symbol * fp->ofdm_symbol_size];
         for (int w = 0; w < n_win; w++) {
@@ -4333,7 +4369,7 @@ constdiag_done:;
                            * NR_PDCCH_BLIND_RE_PER_RB_OUT_DMRS];
     for (int symbol = cfg->ss_first_symbol; symbol < cfg->ss_first_symbol + cs_dur; symbol++) {
       if (symbol >= cfg->ss_first_symbol + rel15->coreset.duration)
-        nr_slot_fep(ue, fp, proc->nr_slot_rx, symbol, rxdataF, link_type_dl, 0, ue->common_vars.rxdata);
+        pdcch_slot_fep(ue, fp, proc->nr_slot_rx, symbol, rxdataF);
       __attribute__((aligned(32))) c16_t rxdataF_symb[fp->nb_antennas_rx][((fp->ofdm_symbol_size + 7) / 8) * 8];
       for (int ant = 0; ant < fp->nb_antennas_rx; ant++)
         memcpy(rxdataF_symb[ant], &rxdataF[ant][symbol * fp->ofdm_symbol_size], sizeof(c16_t) * fp->ofdm_symbol_size);
@@ -4469,7 +4505,7 @@ constdiag_done:;
       if ((size_t)(urel->coreset.duration * u_sym) <= sizeof(pdcch_llr_union[0][0]) / sizeof(c16_t)) {
         for (int symbol = cfg->ss_first_symbol; symbol < cfg->ss_first_symbol + urel->coreset.duration; symbol++) {
           if (symbol >= cfg->ss_first_symbol + rel15->coreset.duration)
-            nr_slot_fep(ue, fp, proc->nr_slot_rx, symbol, rxdataF, link_type_dl, 0, ue->common_vars.rxdata);
+            pdcch_slot_fep(ue, fp, proc->nr_slot_rx, symbol, rxdataF);
           __attribute__((aligned(32))) c16_t rxdataF_symb_u[fp->nb_antennas_rx][((fp->ofdm_symbol_size + 7) / 8) * 8];
           for (int ant = 0; ant < fp->nb_antennas_rx; ant++)
             memcpy(rxdataF_symb_u[ant], &rxdataF[ant][symbol * fp->ofdm_symbol_size], sizeof(c16_t) * fp->ofdm_symbol_size);
@@ -4687,7 +4723,7 @@ constdiag_done:;
     llr_cache_off = (int)lrel->coreset.rb_offset;
     for (int symbol = cfg->ss_first_symbol; symbol < cfg->ss_first_symbol + lrel->coreset.duration; symbol++) {
       if (symbol >= cfg->ss_first_symbol + rel15->coreset.duration)
-        nr_slot_fep(ue, fp, proc->nr_slot_rx, symbol, rxdataF, link_type_dl, 0, ue->common_vars.rxdata);
+        pdcch_slot_fep(ue, fp, proc->nr_slot_rx, symbol, rxdataF);
       __attribute__((aligned(32))) c16_t rxdataF_symb_lane[fp->nb_antennas_rx][((fp->ofdm_symbol_size + 7) / 8) * 8];
       for (int ant = 0; ant < fp->nb_antennas_rx; ant++)
         memcpy(rxdataF_symb_lane[ant], &rxdataF[ant][symbol * fp->ofdm_symbol_size], sizeof(c16_t) * fp->ofdm_symbol_size);
@@ -5742,7 +5778,12 @@ constdiag_done:;
      * The DEFERRED decode does its own FEP and channel estimation in the consumer, so skipping here
      * costs it nothing. `sources = "pdsch_data"` makes want_dmrs false, and this deployment runs the
      * SNR gate off, so on the sensing config this skips the whole block. */
-    const bool need_chest = want_dmrs || (cfg->min_snr_lin > 0.0f);
+    /* P39: in deferred mode the DM-RS CFR is formed by the PDSCH consumer (raw LS Y_i/X at the DM-RS
+     * REs, every antenna); this thread no longer FEPs or estimates for it. Same guards as in-line. */
+    const bool need_chest = (want_dmrs && !defer) || (cfg->min_snr_lin > 0.0f);
+    const bool dmrs_elig = defer && want_dmrs && out.rnti_class == NR_BLIND_RNTI_CLASS_C
+                           && (!sweep_ticket.generation || sweep_ticket.settled);
+#define DMRS_CFR_ADMIT() (dmrs_elig && (nr_isac_flow_note(out.rnti, 0), nr_isac_flow_admit(out.rnti)))
     if (want_decode && (cfg->pdsch_rv0_only && out.rv != 0))
       grantdrop(&out, proc->frame_rx, proc->nr_slot_rx, "rv!=0");
     if (want_decode && decodes_this_occasion >= cfg->pdsch_max_per_slot)
@@ -5792,9 +5833,21 @@ constdiag_done:;
       job.layout_probe  = (cand_task[ti].dl_auto && g_dci11_state == 1
                            && g_dci11_resolver.n_alive > NR_DCI11_STAGE2_MAX_ALIVE
                            && !atomic_load_explicit(&g_dl_layout_preferred, memory_order_relaxed)) ? 1 : 0;
+      job.dmrs_cfr      = DMRS_CFR_ADMIT() ? 1 : 0;
       atomic_fetch_add_explicit(&g_enq_class[0][out.rnti_class], 1, memory_order_relaxed);
       ragrant_dump(&dlsch_pdu, &out, grant_mcs_table, css0_occasion, "deferred");
       nr_pdsch_passive_queue_enqueue(&job);
+      continue;
+    }
+
+    if (defer && !need_chest) {
+      if (want_decode && decodes_this_occasion >= cfg->pdsch_max_per_slot)
+        g_dec_over_cap++;
+      else if (want_decode && cfg->pdsch_rv0_only && out.rv != 0)
+        g_dec_skip_rv++;
+      if (DMRS_CFR_ADMIT())
+        blind_enqueue_dmrs_cfr_only(ue, proc, fp->slots_per_frame, &dlsch_pdu, &freq_alloc, hy_k0, source_absolute_slot,
+                                    out.rnti, out.rnti_class);
       continue;
     }
 
@@ -5883,7 +5936,8 @@ constdiag_done:;
           !(cfg->min_snr_lin > 0.0f && nof_re > 0 && nvar > 0
             && (float)(h_pow_sum / nof_re) < cfg->min_snr_lin * (float)nvar);
       if (nof_re > 0 && snr_ok) {
-        if (want_dmrs && (!sweep_ticket.generation || sweep_ticket.settled)) {
+        bool cfr_forwarded = false;
+        if (!defer && want_dmrs && (!sweep_ticket.generation || sweep_ticket.settled)) {
           /* Do not publish unverified hypothesis-derived DMRS rows into sensing. */
           nr_isac_carrier_t carrier = {.nof_prb         = (uint32_t)fp->N_RB_DL,
                                        .scs_hz          = fp->subcarrier_spacing,
@@ -5985,6 +6039,8 @@ constdiag_done:;
                   : nr_slot_fep_fo_override_hz;  /* receive-thread sample */
               job.sweep_ticket  = sweep_ticket;
               job.bwp_entry     = cand_task[ti].bwp_entry;
+              job.dmrs_cfr      = DMRS_CFR_ADMIT() ? 1 : 0;
+              cfr_forwarded     = true;
               atomic_fetch_add_explicit(&g_enq_class[1][out.rnti_class], 1, memory_order_relaxed);
               ragrant_dump(&dlsch_pdu, &out, grant_mcs_table, css0_occasion, "normal");
               nr_pdsch_passive_queue_enqueue(&job);
@@ -6049,12 +6105,16 @@ constdiag_done:;
             }
           }
         }
+        if (!cfr_forwarded && DMRS_CFR_ADMIT())
+          blind_enqueue_dmrs_cfr_only(ue, proc, fp->slots_per_frame, &dlsch_pdu, &freq_alloc, hy_k0, source_absolute_slot,
+                                      out.rnti, out.rnti_class);
       } else if (nof_re > 0) {
         g_held_snr++;
       }
     }
     free(toFree);
   }
+#undef DMRS_CFR_ADMIT
 
   if (btim_on) {
     btim_add(BTIM_POST, btim_t_post);
