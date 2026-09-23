@@ -220,7 +220,7 @@ extern "C" int nr_isac_drained(void){return engine&&engine->idle()?1:0;}
 extern "C" void nr_isac_init(void)
 {
   if (enabled.load(std::memory_order_relaxed)) return;
-  int p_enable=0,p_num_ues=1,p_sync=1,p_family_static=1,p_track=1,p_hierarchical=1;
+  int p_enable=0,p_gate_ul=1,p_num_ues=1,p_sync=1,p_family_static=1,p_track=1,p_hierarchical=1;
   int p_evidence_mode=0,p_lifecycle_features=0;
   double p_evidence_window=.150,p_existence_scale=1.0;
   int p_aoa=0,p_aoa_ul=0,p_capture=0,p_min_rows=16,p_max_rows=512,p_bootstrap=3,p_pending_mib=2048;
@@ -239,6 +239,7 @@ extern "C" void nr_isac_init(void)
   paramdef_t params[] = {
     integer("enable","enable native passive sensing",PARAMFLAG_BOOL,&p_enable,0),
     integer("num_ues","decoded UE count (supported 1..4)",0,&p_num_ues,1),
+    integer("gate_require_ul","1 = gate opens on a C-RNTI with DL AND UL CFR; 0 = DL CFR alone (DL-only)",PARAMFLAG_BOOL,&p_gate_ul,1),
     integer("evidence_mode","experimental ablation: 0 baseline, 1..6 B..G",0,&p_evidence_mode,0),
     integer("lifecycle_features","experimental bitmask: grouped birth=1, object/path=2, retirement=4",0,&p_lifecycle_features,0),
     real("evidence_window_s","causal evidence window, global 0.1..0.2 seconds",&p_evidence_window,.150),
@@ -297,6 +298,8 @@ extern "C" void nr_isac_init(void)
   };
   config_get(config_get_if(),params,sizeof(params)/sizeof(params[0]),"sensing");
   if (!p_enable) return;
+  flow_gate.set_require_ul(p_gate_ul!=0);
+  LOG_I(PHY,"SENSING_GATE mode=%s\n",p_gate_ul?"dl+ul":"dl_only");
   if (!(std::isfinite(p_max_speed) && p_max_speed > 0.0
         && std::isfinite(p_max_range) && p_max_range > 0.0
         && std::isfinite(p_false_intensity) && p_false_intensity > 0.0)) {

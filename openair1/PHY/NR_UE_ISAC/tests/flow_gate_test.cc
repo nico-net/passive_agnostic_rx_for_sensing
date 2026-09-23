@@ -35,6 +35,16 @@ int main() {
   require(closes == 1, "exactly one poll() closed the gate");
   require(!g2.admit(0x9001, 4.0), "admit false after close, UL never returned");
 
+  // DL-only mode: a DL CFR alone opens, admits and keeps the gate; it closes 2 s after the last DL.
+  nr_isac::FlowGate g3(2.0, false);
+  require(g3.note(0x4611, false, 1.0) == 1, "dl_only: DL alone opens");
+  require(g3.admit(0x4611, 1.5), "dl_only: DL-only RNTI admitted");
+  require(!g3.admit(0x4612, 1.5), "dl_only: unknown RNTI not admitted");
+  require(g3.poll(2.9) == 0, "dl_only: DL 1.9 s old: still open");
+  require(g3.poll(3.1) == -1, "dl_only: DL 2.1 s old: closes");
+  g3.set_require_ul(true);
+  require(g3.note(0x4611, false, 5.0) == 0, "switched back: DL alone no longer opens");
+
   std::puts("flow_gate_test: PASS");
   return 0;
 }

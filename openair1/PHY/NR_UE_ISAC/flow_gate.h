@@ -7,11 +7,18 @@
 
 namespace nr_isac {
 
-/** A C-RNTI is a flow while it produced a DL CFR AND a UL CFR within the last window_s.
+/** A C-RNTI is a flow while it produced a DL CFR AND a UL CFR within the last window_s
+ *  (require_ul=false: a DL CFR alone suffices -- DL-only sensing, no UE-transmitted signal used).
  *  The sensing gate is open while at least one flow exists (spec §8). */
 class FlowGate {
 public:
-  explicit FlowGate(double window_s) : window_s_(window_s) {}
+  explicit FlowGate(double window_s, bool require_ul = true) : window_s_(window_s), require_ul_(require_ul) {}
+
+  void set_require_ul(bool require_ul)
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    require_ul_ = require_ul;
+  }
 
   /** Returns 1 when this event opened the gate, else 0. Never closes the gate -- only poll() may
    *  do that, so a fast DL-only stream landing between polls can't silently flip open_ false with
@@ -59,7 +66,7 @@ private:
   };
   bool is_flow(const Flow& f, double now_s) const
   {
-    return now_s - f.last_dl_s <= window_s_ && now_s - f.last_ul_s <= window_s_;
+    return now_s - f.last_dl_s <= window_s_ && (!require_ul_ || now_s - f.last_ul_s <= window_s_);
   }
   bool any_flow(double now_s) const
   {
@@ -68,6 +75,7 @@ private:
     return false;
   }
   double window_s_;
+  bool require_ul_;
   mutable std::mutex mutex_;
   std::unordered_map<uint16_t, Flow> flows_;
   bool open_ = false;
