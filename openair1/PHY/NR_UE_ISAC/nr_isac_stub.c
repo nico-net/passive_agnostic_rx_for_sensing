@@ -20,6 +20,11 @@ void nr_isac_submit_cfr_multi(uint32_t s, float f, int t, const nr_isac_carrier_
                               const float *h, uint32_t a, uint32_t z,
                               const uint32_t *k, const uint32_t *l, uint32_t n, float v)
 { (void)s; (void)f; (void)t; (void)c; (void)h; (void)a; (void)z; (void)k; (void)l; (void)n; (void)v; }
+void nr_isac_submit_cfr_multi_session(uint32_t s, float f, int t, const nr_isac_carrier_t *c,
+                                      const float *h, uint32_t a, uint32_t z,
+                                      const uint32_t *k, const uint32_t *l, uint32_t n, float v,
+                                      uint64_t id)
+{ (void)s; (void)f; (void)t; (void)c; (void)h; (void)a; (void)z; (void)k; (void)l; (void)n; (void)v; (void)id; }
 uint32_t nr_isac_aoa_antennas(void) { return 0; }
 /* P7: the multi-RX nr_isac.h no longer declares nr_isac_aoa_antennas() -- the engine owns the
  * channel count via nr_isac_rx_channels() instead. Receiver call sites were repointed there. */

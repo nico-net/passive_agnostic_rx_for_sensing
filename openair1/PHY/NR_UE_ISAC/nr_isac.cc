@@ -377,14 +377,26 @@ extern "C" void nr_isac_submit_cfr_multi_session(uint32_t slot,float fraction,in
   if(source<0||source>=NR_ISAC_SRC_COUNT)source=nr_isac_source();
   if(!nr_isac_source_enabled(source))return;
   if(nr_isac_source_illum(static_cast<nr_isac_source_t>(source))==NR_ISAC_ILLUM_UL
-      && session_id==0)return;
+      && session_id==0){
+    static std::atomic<bool> warned{false};
+    if(!warned.exchange(true))
+      LOG_E(PHY,"SENSING: UL CFR without session_id rejected at the ABI (source=%d); further rejections are silent\n",source);
+    return;
+  }
   const uint32_t expected_channels=nr_isac_rx_channels();
   const uint64_t maximum_re=(uint64_t)carrier->nof_prb*12u*14u;
   // Fail closed before allocation or pointer arithmetic.  The caller is inside the PHY, but this
   // ABI boundary must not turn a corrupt antenna/stride/RE count into an unbounded allocation or
   // an out-of-bounds read on the real-time thread.
   if(!expected_channels||antennas!=expected_channels||antennas>4||stride<n
-      ||carrier->nof_prb<1||carrier->nof_prb>275||n>maximum_re)return;
+      ||carrier->nof_prb<1||carrier->nof_prb>275||n>maximum_re){
+    static std::atomic<bool> warned{false};
+    if(!warned.exchange(true))
+      LOG_E(PHY,"SENSING: CFR rejected at the ABI: antennas=%u expected=%u stride=%u n=%u nof_prb=%u "
+            "(spatial mode needs --ue-nb-ant-rx 4); further rejections are silent\n",
+            antennas,expected_channels,stride,n,carrier->nof_prb);
+    return;
+  }
   static thread_local std::vector<std::complex<float>> packed;
   const size_t total=(size_t)antennas*n;if(packed.size()<total)packed.resize(total);
   for(uint32_t a=0;a<antennas;++a){const float* input=h+(size_t)2*a*stride;for(uint32_t i=0;i<n;++i)packed[(size_t)a*n+i]={input[2*i],input[2*i+1]};}

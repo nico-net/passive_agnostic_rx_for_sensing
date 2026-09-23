@@ -245,8 +245,8 @@ void nr_isac_pusch_data_aided_submit(PHY_VARS_NR_UE *ue,
                                .dl_center_hz    = fp->ul_CarrierFreq,
                                .pci             = fp->Nid_cell,
                                .slots_per_frame = fp->slots_per_frame};
-  nr_isac_submit_cfr_multi(ul_slot_idx, 0.0f, NR_ISAC_SRC_PUSCH_DATA, &carrier, h_buf, nant, cap,
-                           k_buf, l_buf, nof_re, 1.0f);
+  nr_isac_submit_cfr_multi_session(ul_slot_idx, 0.0f, NR_ISAC_SRC_PUSCH_DATA, &carrier, h_buf, nant, cap,
+                                   k_buf, l_buf, nof_re, 1.0f, (uint64_t)g->rnti);
   atomic_fetch_add_explicit(&g_da_ok, 1, memory_order_relaxed);
   atomic_fetch_add_explicit(&g_da_re, nof_re, memory_order_relaxed);
 }
