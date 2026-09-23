@@ -1,0 +1,4 @@
+{"frame": "ENU metres (east, north, up), origin at the X410. Measure each position on site.",
+ "gnb_m": [0.0, 0.0, 0.0],
+ "rx_antennas_m": {"ch0": [0.0, 0.0, 0.0], "ch1": [0.0, 0.0, 0.0], "ch2": [0.0, 0.0, 0.0], "ch3": [0.0, 0.0, 0.0]},
+ "max_range_m": 600}
