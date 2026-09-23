@@ -11,6 +11,7 @@
 #endif
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <chrono>
 #include <complex>
@@ -1499,8 +1500,30 @@ DetectorResult detect_clean(const CfrWindow& window,
   // independent NOISE cells searched (every DFT lattice point), not the PSF-resolution count:
   // a taper widens signal resolution but does not reduce the number of noise trials (measured:
   // 191-cell count let pure noise pass 55%; 15450-cell count gives the declared rate).
+  const int64_t range_training_cells_available =
+      (int64_t)plan.axes.range_bins - 4 * (int64_t)psf.range_halfwidth - 1;
+  // DIAGNOSTIC ONLY, no algorithm/threshold change: doppler_row_ca_statistic_impl() (this file,
+  // above) discards its own decision (valid=false, effectively "residual_compatible_with_
+  // current_cpi_noise") whenever fewer than 16 range-axis cells survive its own
+  // guard = 2*psf.range_halfwidth exclusion around the CUT -- the same
+  // "range_bins - 4*range_halfwidth - 1" quantity the adaptive-threshold's reported nominal N
+  // below already clamps to that same 16. A short range axis is silently undetectable; say so
+  // once instead of leaving every CPI stopping at "noise" with no explanation.
+  if (range_training_cells_available < 16) {
+    static std::atomic<bool> warned_short_range_axis{false};
+    if (!warned_short_range_axis.exchange(true))
+      std::fprintf(stderr,
+          "SENSING: range axis has only %u bins; after the CFAR training guard "
+          "(4*psf_range_halfwidth_bins+1 = %lld) at most %lld cells remain, short of the "
+          "16-cell minimum the detector needs to form a background estimate -- every CPI on "
+          "this axis will read as noise before any component can be scored. Raise "
+          "[sensing] maximum_range_m (range_bins = min(subcarriers, "
+          "floor(maximum_range_m/range_res_m)+1)); further such warnings are suppressed.\n",
+          plan.axes.range_bins, (long long)(4 * (int64_t)psf.range_halfwidth + 1),
+          (long long)std::max<int64_t>(0, range_training_cells_available));
+  }
   result.adaptive_threshold = os_cfar_multiplier(
-      static_cast<uint32_t>(std::max<int64_t>(16, (int64_t)plan.axes.range_bins - 4 * psf.range_halfwidth - 1)),
+      static_cast<uint32_t>(std::max<int64_t>(16, range_training_cells_available)),
       (budget / 2.0) / static_cast<double>(psf.searched_cells));   // reported: nominal N
 
   CpuMapWorkspace cpu_map_workspace;

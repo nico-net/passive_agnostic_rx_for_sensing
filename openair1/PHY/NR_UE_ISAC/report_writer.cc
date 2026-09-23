@@ -644,10 +644,18 @@ std::string build_report_json(const PipelineReport& r, const PipelineConfig& c, 
       out += ",\"updated_this_cpi\":";out += t.updated?"true":"false";
       out += ",\"bistatic_range_m\":";number(out,t.range_m);out += ",\"bistatic_velocity_mps\":";
       number(out,t.range_rate_mps);out += ",\"coast_count\":"+std::to_string(t.coast_count)+'}';}out+=']';
-    if(c.capture_rvm){out += ",\"ul_rvm_layout\":\"doppler_major_range_minor\",\"ul_rvm_blob\":[";
-      bool first_ul=true;for(uint32_t d=0;d<r.uplink_detector.axes.rate_bins;++d)
-        for(uint32_t q=0;q<r.uplink_detector.axes.range_bins;++q){if(!first_ul)out.push_back(',');first_ul=false;
-          const double value=r.uplink_detector.initial_likelihood[(size_t)q*r.uplink_detector.axes.rate_bins+d];
+    if(emit_maps){
+      const auto& ax=r.uplink_detector.axes;
+      const uint32_t nb=(c.rvm_max_range_m>0.0 && ax.range_res_m>0.0)
+          ? std::min<uint32_t>(ax.range_bins,(uint32_t)std::ceil(c.rvm_max_range_m/ax.range_res_m))
+          : ax.range_bins;
+      out += ",\"ul_rvm_layout\":\"doppler_major_range_minor\",\"ul_rvm_range_bins\":"+std::to_string(nb)
+          +",\"ul_rvm_rate_bins\":"+std::to_string(ax.rate_bins)+",\"ul_rvm_range_res_m\":";
+      number(out,ax.range_res_m);out += ",\"ul_rvm_rate_res_mps\":";number(out,ax.rate_res_mps);
+      out += ",\"ul_rvm_blob\":[";
+      bool first_ul=true;for(uint32_t d=0;d<ax.rate_bins;++d)
+        for(uint32_t q=0;q<nb;++q){if(!first_ul)out.push_back(',');first_ul=false;
+          const double value=r.uplink_detector.initial_likelihood[(size_t)q*ax.rate_bins+d];
           number(out,std::isfinite(value)&&value>0.0?value:0.0);}out+=']';}
   }
   out += '}';
