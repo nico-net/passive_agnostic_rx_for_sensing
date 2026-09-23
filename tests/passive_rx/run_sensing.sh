@@ -26,7 +26,7 @@ grep -qv performance /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor 2>/de
 [ -x "$BUILD/nr-uesoftmodem" ] || { log "ABORT: no sensing build at $BUILD"; exit 3; }
 grep -qa 'SENSING_GATE open' "$BUILD/nr-uesoftmodem" || { log "ABORT: binary lacks the sensing gate (stale build?)"; exit 3; }
 python3 "$W/tests/passive_rx/survey.py" "$SURVEY" --geometry "$RUN/geometry.json" \
-  --apply "$W/tests/passive_rx/ota/sensing_ota.conf.template" "$RUN/ue.conf" --report-path "$RUN/reports.jsonl" \
+  --apply "${TEMPLATE:-$W/tests/passive_rx/ota/sensing_ota.conf.template}" "$RUN/ue.conf" --report-path "$RUN/reports.jsonl" \
   || { log "ABORT: survey rejected (see above)"; exit 3; }
 # Dedicated-CORESET discovery hand-off: a previous run's result must never be applied (agnostic rule).
 sudo rm -f /tmp/coresets_discovered.txt /tmp/passive_rx/idsweep_*.bin
@@ -46,8 +46,8 @@ trap 'stop_all; [ -n "$RL" ] && type verdict >/dev/null 2>&1 && verdict; exit 13
 # ---- receiver (+ in-process engine) through the qualified run_arm harness ----
 export NR_ISAC_CPUS=$SENSE_CPUS NR_ISAC_REQUIRE_CUDA=1
 [ -n "$DEBUG" ] && { mkdir -p "$RUN/debug"; export NR_ISAC_DEBUG_DIR=$RUN/debug; }
-( REPO=$W BIN=$BUILD/nr-uesoftmodem ARM=sense CONF=$RUN/ue.conf DUR=$DUR TRIES=$TRIES RXG=$RXG NANT=4 MGMT=$MGMT \
-  SCAN=1 PRB=273 CARRIER=3450000000 INITIALFO=0 \
+( REPO=$W BIN=$BUILD/nr-uesoftmodem ARM=sense CONF=$RUN/ue.conf DUR=$DUR TRIES=$TRIES RXG=$RXG NANT=${NANT:-4} MGMT=$MGMT \
+  SCAN=${SCAN:-1} ${SSB:+SSB=$SSB} PRB=273 CARRIER=3450000000 INITIALFO=${INITIALFO:-0} \
   XENV="NR_ISAC_CPUS=$SENSE_CPUS NR_ISAC_REQUIRE_CUDA=1 ISAC_COREMAP_IDSWEEP=12 ${NR_ISAC_DEBUG_DIR:+NR_ISAC_DEBUG_DIR=$NR_ISAC_DEBUG_DIR}" \
   bash "$W/tests/passive_rx/captures/run_arm.sh" ) > "$RUN/run_arm.out" 2>&1 &
 ARM_PID=$!

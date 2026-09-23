@@ -1,0 +1,4 @@
+{"frame": "PLACEHOLDER positions (user-approved 2026-09-23 for a first OTA run) -- per-receiver RD maps valid, tracker world positions are NOT. Replace with the measured survey.",
+ "gnb_m": [20.0, 10.0, 3.0],
+ "rx_antennas_m": {"ch0": [0.0, 0.0, 1.5], "ch1": [5.0, 0.0, 1.5], "ch2": [0.0, 5.0, 1.5], "ch3": [5.0, 5.0, 1.5]},
+ "max_range_m": 600}

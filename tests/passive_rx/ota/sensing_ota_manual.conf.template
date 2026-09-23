@@ -1,0 +1,124 @@
+// AGNOSTIC OTA conf: the raw-replay harness receiver.conf with the raw_iq device removed and the
+// OTA-safe sensing sources. No manual UL/DL layout: dci01 "1:0" (length by search), no ul_dci_bits,
+// no ul_bwp/ul_tda (from SIB1 + Components 1-3), full_auto DL. Consumer cores as the OTA manual
+// conf (isolcpus 2-3 for UL, DL consumers on 6).
+//
+// CORE MAP (sens6, 14 cores: 0-5 P, 6-13 E; isolcpus=2-3). Owner of each core; FIFO threads never
+// share a core with the SCHED_OTHER sensing lanes or the Python tail (spec §12):
+//   0,1,4,5,6,7  RT PHY thread pool (run_arm --thread-pool); PDCCH scan consumer on 5 (scan_thread)
+//   2            RF receive thread (run_arm ISAC_UE_RT_CORE=2), alone on an isolated core
+//   3            UL PUSCH decode consumer x1, FIFO 50 (ul_thread), alone on an isolated core
+//   6-10         DL PDSCH decode consumers x5, FIFO 40 (pdsch); 6,7 shared with the pool as before
+//   8-13         NIC completion IRQ threads, FIFO 50 (run_arm, from sysfs) -- above the consumers
+//   11,12,13     sensing engine lanes + accumulation/processing threads (run_sensing NR_ISAC_CPUS)
+//   4            realtime_chain + monitor (Python, SCHED_OTHER): a pool core, so any RT work
+//                preempts them; never a decode consumer's or a sensing core
+//   11,12,13     discovery tool (discover_live.sh, ~4 s, before the gate can open) -- lanes idle then
+// Not enough cores for everything alone: UL 2->1 consumer (UL decode <=1 grant/slot, ~0.4 core) and
+// DL 6->5 consumers were the price of moving sensing off core 3 and the Python tail off 10-11.
+//
+// TEMPLATE for run_sensing.sh (Task 16). tests/passive_rx/survey.py --apply fills in
+// spatial_rx_positions / tx_pos_x / tx_pos_y / tx_pos_z / rvm_max_range_m / report_path from the
+// site survey before every run; report_path/out_path/report_endpoint are deleted below on purpose
+// (JSONL via survey.py's --report-path is the only transport, spec Sec 5 -- no ZeroMQ, no capture
+// dump path baked into a shared template).
+//
+// FIELD AUDIT (2026-09-23, Task 16 Step 1): every pdcch_blind_monitor_* key below is documented
+// with its parser (openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c's parse_*() functions,
+// field order = sscanf() order) so a reader doesn't have to re-derive it. Any field that encodes a
+// CELL value (DCI length, TDA, CORESET, RNTI, bandwidth, MCS table) is set to the parser's own
+// documented auto/derive sentinel; thread/queue/core counts and search-budget/noise-gate constants
+// are not cell values and are left as this deployment's tuned defaults.
+sensing = {
+  // ===== MANUAL MODE (lab cell PCI 2, 2026-09-23 15:40 gNB restart) =====
+  // Every value below read from the gNB's own debug log (RRC CellGroupConfig JSON + FAPI PDUs),
+  // NOT agnostic. DCI 1_1 = 47 bits, DCI 0_1 = 43 bits (gNB FAPI payload_size).
+  pdcch_blind_monitor_autoconf = 0;
+  pdcch_blind_monitor_autodiscover = 0;
+  pdcch_blind_monitor_full_auto = 0;
+  pdcch_blind_monitor_coreset = "45:1:0:0:0:2";        // CORESET1: 45 groups, dur 1, non-interleaved, nid 2
+  pdcch_blind_monitor_ss = "1:0:1:0:-1:0:0:0";         // SS2: symbol 0, every slot
+  pdcch_blind_monitor_bwp = "0:273:0:47";              // BWP 0+273, DCI 1_1 length 47
+  pdcch_blind_monitor_tda = "1:13,1:7";                // no dedicated list -> SIB1 common (2 entries, 1 bit)
+  pdcch_blind_monitor_dmrs = "2:1";                    // DL DM-RS pos2 (symbols 2,7,11), maxLength 1
+  // bwp_ind:vrb:bundling:ratematch:zp:tb2:harq:dai:k1:antports:tci:srs:cbg
+  pdcch_blind_monitor_dci_bits = "0:0:0:0:0:0:4:2:3:4:0:2:0";
+  pdcch_blind_monitor_pdsch = "2:1:0:1:16:5:64:6";     // decode+submit, mcs-Table qam256
+  pdcch_blind_monitor_dci01 = "1:43";
+  pdcch_blind_monitor_ul_bwp = "0:273";
+  pdcch_blind_monitor_ul_tda = "0:14:4:0,0:14:5:0,0:14:6:0,0:14:7:0,0:14:8:0,0:14:11:0";  // SIB1 common, 3 bits
+  pdcch_blind_monitor_ul_dmrs = "1:2:1";               // type1, pos2 (2,7,11), len1
+  pdcch_blind_monitor_ul_misc = "0:0:2:2:2";           // TP off, qam64, scrambling ids 2, PCI 2
+  // carrier:ulsul:bwp:hopping:harq:dai1:dai2:sri:precoding:antports:srsreq:csireq:cbg:ptrs:beta:dmrsseq
+  pdcch_blind_monitor_ul_dci_bits = "0:0:0:0:4:2:0:0:0:3:2:0:0:0:0:1";
+  enable = 1;
+  // 1 = derive the COMMON search space (CORESET#0/SS#0, initial BWP, DCI 1_0 size) from MIB/SIB1 at
+  // runtime rather than reading a hand-written pdcch_blind_monitor_coreset/_ss/_bwp. Behaviour flag,
+  // not a cell value -- this IS the agnostic path.
+  // Phase 3: recover the DEDICATED CORESET/search space by DM-RS correlation + dci_length sweep
+  // instead of a hand-written config. Requires autoconf=1 above (bootstrap RNTI comes from its CSS0
+  // grants). Behaviour flag.
+  // Master switch for payload-INTERPRETATION auto mode (Technique D): also self-discovers the TDA
+  // list, DM-RS additionalPosition and MCS table (TB-CRC-scored sweep) instead of trusting the
+  // hand-set starting points below (pdcch_blind_monitor_pdsch's mcs_table field). Behaviour flag.
+  // "scan[:ss_type[:n_rb_riv[:rb_offset[:length_override[:class_mask[:mux_pattern[:sib1]]]]]]]"
+  // scan=1 (both 1_0 and 1_1), everything else omitted -> ss_type=0 (UE-specific), n_rb_riv=0 (auto:
+  // bwp_size), rb_offset=-1 (auto: bwp_start), length_override=0 (auto: nr_pdcch_blind_dci10_size()),
+  // class_mask=0 (auto from ss_type), mux_pattern=0->1 (default), sib1=0. Already all auto/default --
+  // no field here encodes a cell value.
+  pdcch_blind_monitor_dci10 = "1";
+  // "decode:mcs_table:xoverhead:rv0_only:max_per_slot[:thread[:queue_depth[:thread_core]]]"
+  // decode=2 (decode + re-encode + submit CFR as NR_ISAC_SRC_PDSCH_DATA; needs pdsch_data in
+  // [sensing] sources, set below). mcs_table WAS 1 (qam256, a hardcoded assumption about this cell's
+  // PDSCH-Config) -> changed to 0, the parser's documented "not configured" default, since
+  // pdcch_blind_monitor_full_auto=1 above makes Technique D discover the real table anyway and 0 is
+  // its neutral starting point. xoverhead=0 (not configured, the default -- already auto).
+  // rv0_only=1 (only attempt rv==0 grants; a decode-attempt policy, not a cell value). max_per_slot,
+  // queue_depth, thread_core are decode-attempt-budget/queue/core counts, not cell values -- left at
+  // this deployment's tuned defaults. thread=6 decode consumers (was 2): at 2 the decode queue was
+  // dropping 93% full OTA, matching the known-good captures/cons6_ota.conf.
+  // "rnti_min:rnti_max" -- already NR_PDCCH_BLIND_RNTI_MIN_DEFAULT:NR_PDCCH_BLIND_RNTI_MAX_DEFAULT
+  // (nr_pdcch_blind_monitor.h: 0x0001:0xFFEF = 1:65519), i.e. the full legal C-RNTI range, not a
+  // specific cell's RNTI. Already the documented default.
+  pdcch_blind_monitor_rnti_range = "1:65519";
+  // "energy_min:rnti_persist_k:rnti_persist_window_ms:min_snr_lin[:energy_adapt_factor]" -- false-
+  // accept reduction. energy_min=0 is inert because energy_adapt_factor=3.0 (>0) selects the
+  // adaptive energy gate instead; rnti_persist_k/window_ms and min_snr_lin=0 (disabled) are noise-
+  // floor/persistence tuning constants, not cell values. Left unchanged.
+  pdcch_blind_monitor_noise_gates = "0:2:500:0:3.0";
+  // "n_consumers[:queue_depth[:core]]" -- defers the blind-PDCCH scan off the PHY RX thread. Thread/
+  // queue/core counts, not a cell value. Left unchanged.
+  pdcch_blind_monitor_scan_thread = "1:8:5";
+  // "scan[:length_override]" -- UL DCI format 0_1. scan=1 (on), length_override=0 = "derive from the
+  // field widths" (nr_pdcch_blind_dci01_size()), already the parser's documented auto value (NOT a
+  // pinned per-deployment width).
+  // "decode[:max_per_slot[:ta_offset_samples]]" -- decode=1 (channel-estimate + CFR + LDPC decode),
+  // max_per_slot=1 (decode-attempt budget), ta_offset_samples=0 = "derive N_TA_offset from the
+  // sample rate", already auto. No cell value pinned.
+  pdcch_blind_monitor_ul_pusch = "1:1:0";
+  // "max_trials[:beta_idx[:alpha_idx[:explore_every]]]" -- UCI-on-PUSCH reservation search.
+  // max_trials=256 is a search-budget constant, not a cell value. beta_idx=11 and alpha_idx=0 already
+  // equal the parser's own compiled-in defaults (11, 0) before this line even applies -- not pinned
+  // to a discovered betaOffsets/alpha-scaling value. explore_every=32 is an amortisation constant.
+  // None of these are cell values.
+  pdcch_blind_monitor_ul_uci = "256:11:0:32";
+  // "n_consumers[:queue_depth[:core]]" -- defers the passive PUSCH decode off the PHY RX thread.
+  // Thread/queue/core counts, not a cell value. Left unchanged.
+  pdcch_blind_monitor_ul_thread = "1:64:3";
+  // frozen multi-RX detector contract: sionna scenarios.json detector.maximum_target_speed_mps
+  maximum_target_speed_mps = 50.0;
+  // declared false-object intensity; engine requires value*0.075 s < 1; value used by the
+  // engine's own tests -- no validated field value yet
+  false_object_intensity_per_s = 1.0;
+  sources = "pdsch_dmrs_blind,pdsch_data,pusch_dmrs,pusch_data";
+  // UE CAPACITY, not a cell value: 4 lanes per UE (4*(1+num_ues) detector lanes), engine maximum 4.
+  // UL sessions beyond it in one CPI are dropped and counted (ul_sessions_capped).
+  num_ues = 4;
+  cpi_slots = 32;
+  interpolate = 1;
+  capture = 1;
+  rvm_period_s = 0.5;
+  sync_correction = 1;
+  nominal_los_range_m = 0.0;
+  rx_id = "rx_x410";
+};
