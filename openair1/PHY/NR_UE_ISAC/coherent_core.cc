@@ -10,8 +10,6 @@ namespace nr_isac::coherent {
 namespace {
 uint32_t next_pow2(uint32_t n) { uint32_t p = 1; while (p < n) p <<= 1; return p; }
 double hann(double u) { return 0.5 - 0.5 * std::cos(2 * M_PI * u); }  // u in [0,1]
-// Hann peak sidelobe power relative to its mainlobe (-31.47 dB): a window property, not a tuning.
-constexpr double kHannPslPow = 7.1326e-4;
 double baseband_hz(const CfrWindow& w, uint32_t k) { return ((double)k - w.subcarriers / 2.0) * w.scs_hz; }
 // Observed [lo,hi] subcarrier span of a row; returns false when the row is empty.
 bool row_span(const CfrWindow& w, uint32_t r, uint32_t* lo, uint32_t* hi)
@@ -21,11 +19,24 @@ bool row_span(const CfrWindow& w, uint32_t r, uint32_t* lo, uint32_t* hi)
   if (l < 0) return false;
   *lo = (uint32_t)l; *hi = (uint32_t)h; return true;
 }
+// Smallest spacing between consecutive observed subcarriers of a row: 1 = contiguous, 2 = comb-2
+// (e.g. DM-RS-only rows). 0 when the row has fewer than two observed subcarriers.
+uint32_t row_comb(const CfrWindow& w, uint32_t r)
+{
+  uint32_t c = 0, prev = UINT32_MAX;
+  for (uint32_t k = 0; k < w.subcarriers; ++k) if (w.observed[w.cell(r, k)]) {
+    if (prev != UINT32_MAX && (c == 0 || k - prev < c)) c = k - prev;
+    prev = k;
+  }
+  return c;
+}
 // Centred-index inverse FFT of one row after a delay ramp and a Hann window over
 // the row's observed band; amplitude normalised by the window sum so every allocation gives the
 // path amplitude at its peak. `sub` (optional, per subcarrier) is subtracted after the ramp.
+// `unit` replaces the data by 1: the row's own point-spread (kernel) from its observed mask.
 std::vector<cd> row_profile(const CfrWindow& w, const Axes& a, uint32_t ant, uint32_t row,
-                            double ramp_delay_s, double phase_rad, const std::vector<cd>* sub = nullptr)
+                            double ramp_delay_s, double phase_rad, const std::vector<cd>* sub = nullptr,
+                            bool unit = false)
 {
   std::vector<cd> buf(a.n_fft, cd(0, 0));
   double wsum = 0;
@@ -38,7 +49,7 @@ std::vector<cd> row_profile(const CfrWindow& w, const Axes& a, uint32_t ant, uin
       const double f = baseband_hz(w, k);
       const cd ramp = std::polar(1.0, 2 * M_PI * f * ramp_delay_s - phase_rad);
       const int q = (int)k - (int)(w.subcarriers / 2);
-      const cd z = cd(w.values[w.sample(ant, row, k)]) * ramp - (sub ? (*sub)[k] : cd(0));
+      const cd z = unit ? cd(1) : cd(w.values[w.sample(ant, row, k)]) * ramp - (sub ? (*sub)[k] : cd(0));
       buf[(size_t)((q % (int)a.n_fft + (int)a.n_fft) % (int)a.n_fft)] += z * win;
     }
   fft_inplace(buf, true);                         // inverse: sum * e^{+j...} / N
@@ -49,9 +60,22 @@ std::vector<cd> row_profile(const CfrWindow& w, const Axes& a, uint32_t ant, uin
 
 double gamma_upper_quantile(uint32_t shape, double p)
 {
-  auto Q = [shape](double x) { double term = 1, s = 1; for (uint32_t k = 1; k < shape; ++k) { term *= x / k; s += term; } return std::exp(-x) * s; };
-  double lo = 0, hi = 1; while (Q(hi) > p) hi *= 2;
-  for (int i = 0; i < 200; ++i) { const double m = 0.5 * (lo + hi); (Q(m) > p ? lo : hi) = m; }
+  if (shape == 0 || p >= 1) return 0.0;
+  // log Q(shape,x) = -x + log sum_{k<shape} x^k/k!, summed in the log domain (online log-sum-exp):
+  // the linear form underflows exp(-x) at x ~ 745, i.e. for R >~ 650 rows.
+  auto logQ = [shape](double x) {
+    if (x <= 0) return 0.0;
+    const double lx = std::log(x);
+    double t = 0, m = 0, acc = 1;                  // term k=0: log 1 = 0
+    for (uint32_t k = 1; k < shape; ++k) {
+      t += lx - std::log((double)k);
+      if (t > m) { acc = acc * std::exp(m - t) + 1; m = t; } else acc += std::exp(t - m);
+    }
+    return -x + m + std::log(acc);
+  };
+  const double lp = std::log(p);
+  double lo = 0, hi = 1; while (logQ(hi) > lp) hi *= 2;
+  for (int i = 0; i < 200 && hi - lo > 1e-13 * hi; ++i) { const double mid = 0.5 * (lo + hi); (logQ(mid) > lp ? lo : hi) = mid; }
   return 0.5 * (lo + hi);
 }
 
@@ -61,6 +85,7 @@ Axes derive_axes(const CfrWindow& w, const Volume& vol, const Geometry& g, doubl
   auto fail = [&](const char* why) { a.valid = false; a.invalid_reason = why; return a; };
   if (!w.valid() || w.antennas != kCh) return fail("window invalid or not 4 antennas");
   if (w.rows < 3) return fail("fewer than 3 rows");
+  for (uint32_t r = 1; r < w.rows; ++r) if (w.row_time_slots[r] < w.row_time_slots[r - 1]) return fail("non-monotonic row times");
   a.fc_hz = w.fc_hz; a.lambda_m = kC / w.fc_hz; a.scs_hz = w.scs_hz; a.subcarriers = w.subcarriers;
   std::vector<double> bw;
   for (uint32_t r = 0; r < w.rows; ++r) { uint32_t lo, hi; if (row_span(w, r, &lo, &hi)) bw.push_back((hi - lo + 1) * w.scs_hz); }
@@ -99,76 +124,113 @@ Axes derive_axes(const CfrWindow& w, const Volume& vol, const Geometry& g, doubl
 LosEstimate find_los(const CfrWindow& w, const Axes& a, double pfa)
 {
   LosEstimate L;
+  if (!a.valid) return L;
+  const long N = (long)a.n_fft;
+  auto wrap = [N](long n) { return (size_t)(((n % N) + N) % N); };
+  // Rows' mean point-spread (power) from the observed masks alone, and their finest comb. Taking
+  // the kernel from the masks keeps the sidelobe guard valid for comb/split rows, where the Hann
+  // PSL bounds nothing (a comb-2 row has a full-power replica at n_fft/2; a gapped row has raised
+  // sidelobes).
+  std::vector<double> kern(a.n_fft, 0.0);
+  uint32_t R = 0, dk_min = 0;
+  for (uint32_t r = 0; r < w.rows; ++r) {
+    uint32_t lo, hi; if (!row_span(w, r, &lo, &hi)) continue;
+    const std::vector<cd> k = row_profile(w, a, 0, r, 0.0, 0.0, nullptr, true);
+    for (size_t n = 0; n < kern.size(); ++n) kern[n] += std::norm(k[n]);
+    const uint32_t c = row_comb(w, r); if (c && (!dk_min || c < dk_min)) dk_min = c;
+    ++R;
+  }
+  if (R == 0) return L;
+  for (double& v : kern) v /= R;
+  // Delay is unambiguous only modulo n_fft/dk_min bins: fold into [-span/2, span/2), i.e. take the
+  // (bit-identical, for comb-2) replica nearest 0 delay.
+  const double span = (double)N / std::max(1u, dk_min);
+  auto fold = [span](double bin) { return bin - span * std::round(bin / span); };
+  long hm = 1;                                     // mainlobe half-width: first null of the kernel
+  while (hm < N / 2 && kern[wrap(hm + 1)] < kern[wrap(hm)]) ++hm;
+  double e_main = 0; for (long d = -hm; d <= hm; ++d) e_main += kern[wrap(d)];
+  // Leakage relative to a path's own peak at offset d (+-1 bin: sub-bin position); zero inside the
+  // mainlobe. leak_any: the same for a path ANYWHERE in a peak's mainlobe (merged, unresolved).
+  auto leak = [&](long d) {
+    const long f = std::lround(fold((double)d));
+    if (std::labs(f) <= hm) return 0.0;
+    return std::max({kern[wrap(f - 1)], kern[wrap(f)], kern[wrap(f + 1)]});
+  };
+  auto leak_any = [&](long d) { double m = 0; for (long x = -hm; x <= hm; ++x) m = std::max(m, leak(d - x)); return m; };
+
   for (uint32_t i = 0; i < kCh; ++i) {
     // Rows are combined NON-coherently: a common CFO / per-row phase rotates each row's profile, so
     // a coherent row mean cancels the LOS it is looking for (measured: 60 rows at 23 Hz CFO put the
-    // estimate 20-28 bins off). The power mean is phase-blind; phase and sub-bin come from the
-    // coherent refinement below.
+    // estimate 20-28 bins off). Phase and the final sub-bin come from the coherent refinement below.
     std::vector<double> pw(a.n_fft, 0.0);
-    uint32_t R = 0;
     for (uint32_t r = 0; r < w.rows; ++r) {
       uint32_t lo, hi; if (!row_span(w, r, &lo, &hi)) continue;
       const std::vector<cd> p = row_profile(w, a, i, r, 0.0, 0.0);
-      for (size_t n = 0; n < pw.size(); ++n) pw[n] += std::norm(p[n]);
-      ++R;
+      for (size_t n = 0; n < pw.size(); ++n) pw[n] += std::norm(p[n]) / R;
     }
-    if (R == 0) { L.found[i] = false; continue; }
-    for (double& v : pw) v /= R;
     // Noise-only mean of R exponential powers is Gamma(R, mu/R): its median is mu*Q^-1(R,1/2)/R.
     const double noise = median(pw) * R / gamma_upper_quantile(R, 0.5);
     const double thr = noise * gamma_upper_quantile(R, pfa) / R;
-    const size_t strongest = (size_t)(std::max_element(pw.begin(), pw.end()) - pw.begin());
-    // earliest significant local maximum within n_range bins before the strongest (circular).
-    // "Significant" = above the strongest path's own Hann sidelobe, with noise at its threshold
-    // added IN PHASE (amplitudes add): at high SNR every leading sidelobe (-31/-41/-48 dB here)
-    // clears the noise threshold alone and was picked instead of the LOS (measured 34 bins early).
-    // The sidelobe is budgeted at 2x PSL power (-28.5 dB): other paths' sidelobes add to the
-    // strongest's (measured: a -14 dB target 4 bins behind the LOS lifted its first sidelobe past
-    // the bare PSL, 1 CPI in 40). ponytail: fixed 3 dB budget; an earlier true path more than
-    // 28.5 dB below the strongest is taken for a sidelobe.
-    const double lead_amp = std::sqrt(2 * kHannPslPow * pw[strongest]) + std::sqrt(thr);
-    const double lead_thr = lead_amp * lead_amp;
-    size_t best = strongest;
-    for (uint32_t back = a.n_range; back > 0; --back) {
-      const size_t n = (strongest + pw.size() - back) % pw.size();
-      const size_t nm = (n + pw.size() - 1) % pw.size(), np = (n + 1) % pw.size();
-      if (pw[n] > lead_thr && pw[n] >= pw[nm] && pw[n] >= pw[np]) { best = n; break; }
+    const long strongest = (long)(std::max_element(pw.begin(), pw.end()) - pw.begin());
+    auto P = [&](long n) { return pw[wrap(n)]; };
+    // Peaks within one unambiguous span around the strongest (a comb replica is the same path).
+    std::vector<long> peaks;
+    for (long d = -(long)(span / 2); d < (long)(span / 2); ++d) {
+      const long n = strongest + d;
+      if (P(n) > thr && P(n) >= P(n - 1) && P(n) >= P(n + 1)) peaks.push_back(n);
     }
-    if (pw[best] <= thr) { L.found[i] = false; continue; }
-    const size_t bm = (best + pw.size() - 1) % pw.size(), bp = (best + 1) % pw.size();
-    const double y0 = std::sqrt(pw[bm]), y1 = std::sqrt(pw[best]), y2 = std::sqrt(pw[bp]);
+    std::sort(peaks.begin(), peaks.end(), [&](long x, long y) { return P(x) > P(y); });
+    // A peak is a PATH only if it exceeds the leakage of the stronger paths plus noise at its
+    // threshold, added as AMPLITUDES (static paths and the noise sample add coherently; a power sum
+    // is not a bound). Each path leaks from its peak power AND from the excess energy of its
+    // mainlobe over the kernel's -- paths merged into it (measured: a -14 dB target 4-6 bins
+    // behind the LOS widened the mainlobe and lifted its first sidelobe past the single-path
+    // level). Without this every leading sidelobe (-31/-41/-48 dB here) clears the noise threshold
+    // and was taken for the LOS (measured 12-35 bins early).
+    struct Path { long n; double p, excess; };
+    std::vector<Path> paths;
+    for (long q : peaks) {
+      double amp = std::sqrt(thr);
+      for (const Path& p : paths) amp += std::sqrt(p.p * leak(q - p.n)) + std::sqrt(p.excess * leak_any(q - p.n));
+      if (P(q) <= amp * amp) continue;
+      double e = 0; for (long d = -hm; d <= hm; ++d) e += P(q + d);
+      paths.push_back({q, P(q), std::max(0.0, e - P(q) * e_main) / e_main});
+    }
+    // LOS = the earliest path within n_range bins before the strongest (the spec: not the strongest,
+    // a wall reflection of the gNB must not bias calibration).
+    long best = strongest;
+    for (const Path& p : paths) {
+      const long d = std::lround(fold((double)(p.n - strongest)));
+      if (d < 0 && -d <= (long)a.n_range && d < best - strongest) best = strongest + d;
+    }
+    if (P(best) <= thr) continue;
+    const double y0 = std::sqrt(P(best - 1)), y1 = std::sqrt(P(best)), y2 = std::sqrt(P(best + 1));
     const double den = y0 - 2 * y1 + y2;
     const double frac = (std::abs(den) > 0) ? 0.5 * (y0 - y2) / den : 0.0;
-    double bin = (double)best + std::clamp(frac, -0.5, 0.5);
-    if (bin > a.n_fft / 2.0) bin -= a.n_fft;                        // negative delays wrap
-    L.delay_s[i] = bin * a.delay_step_s;
-    L.snr[i] = pw[best] / noise; L.found[i] = true;
+    L.delay_s[i] = fold((double)wrap(best) + std::clamp(frac, -0.5, 0.5)) * a.delay_step_s;
+    L.snr[i] = P(best) / noise; L.found[i] = true;
   }
   // Coherent sub-bin refinement. The power mean above is phase-blind, so a moving path near the
   // LOS biases its peak (measured up to 0.27 bin from a -14 dB target 6 bins behind). With the
-  // common CFO/SFO of the coarse LOS removed, the row mean is coherent: a moving path averages
-  // out over its Doppler, and the hopping rows combine to the full union-band resolution.
+  // common CFO/SFO drift removed, the row mean is coherent: a moving path averages out over its
+  // Doppler, and the hopping rows combine to the full union-band resolution.
   const RowSync s = estimate_row_sync(w, a, L);
-  double d_mean = 0; for (double d : s.delay_s) d_mean += d / w.rows;
   for (uint32_t i = 0; i < kCh; ++i) {
     if (!L.found[i]) continue;
     std::vector<cd> coh(a.n_fft, cd(0));
-    uint32_t R = 0;
     for (uint32_t r = 0; r < w.rows; ++r) {
       uint32_t lo, hi; if (!row_span(w, r, &lo, &hi)) continue;
-      const std::vector<cd> p = row_profile(w, a, i, r, s.delay_s[r] - d_mean, s.phase_rad[r]);
-      for (size_t n = 0; n < coh.size(); ++n) coh[n] += p[n];
-      ++R;
+      const std::vector<cd> p = row_profile(w, a, i, r, s.delay_s[r], s.phase_rad[r]);
+      for (size_t n = 0; n < coh.size(); ++n) coh[n] += p[n] / (double)R;
     }
     const long n0 = std::lround(L.delay_s[i] / a.delay_step_s);
-    const long N = (long)a.n_fft;
-    auto at = [&](long n) { return std::abs(coh[(size_t)(((n % N) + N) % N)]); };
+    auto at = [&](long n) { return std::abs(coh[wrap(n)]); };
     long best = n0;
     for (long n = n0 - 2; n <= n0 + 2; ++n) if (at(n) > at(best)) best = n;
     const double y0 = at(best - 1), y1 = at(best), y2 = at(best + 1), den = y0 - 2 * y1 + y2;
     const double frac = (std::abs(den) > 0) ? 0.5 * (y0 - y2) / den : 0.0;
-    L.delay_s[i] = ((double)best + std::clamp(frac, -0.5, 0.5)) * a.delay_step_s;
-    L.tap[i] = coh[(size_t)(((best % N) + N) % N)] / (double)R;
+    L.delay_s[i] = fold((double)best + std::clamp(frac, -0.5, 0.5)) * a.delay_step_s;
+    L.tap[i] = coh[wrap(best)];
   }
   return L;
 }
@@ -176,20 +238,54 @@ LosEstimate find_los(const CfrWindow& w, const Axes& a, double pfa)
 RowSync estimate_row_sync(const CfrWindow& w, const Axes& a, const LosEstimate& L)
 {
   RowSync s; s.phase_rad.assign(w.rows, 0.0); s.delay_s.assign(w.rows, 0.0);
+  if (!a.valid) return s;
   std::vector<std::array<cd, kCh>> tap(w.rows);
   std::vector<cd> slope(w.rows, cd(0));
-  for (uint32_t r = 0; r < w.rows; ++r)
+  std::vector<uint32_t> comb(w.rows, 0);
+  std::vector<double> fc(w.rows, 0.0);           // row's mean observed baseband frequency
+  double fc_max = 0;
+  for (uint32_t r = 0; r < w.rows; ++r) {
+    comb[r] = row_comb(w, r);                      // phase step over the row's own finest spacing
+    double nk = 0;
+    for (uint32_t k = 0; k < w.subcarriers; ++k) if (w.observed[w.cell(r, k)]) { fc[r] += baseband_hz(w, k); nk += 1; }
+    if (nk > 0) fc[r] /= nk;
+    fc_max = std::max(fc_max, std::abs(fc[r]));
     for (uint32_t i = 0; i < kCh; ++i) {
       if (!L.found[i]) continue;
       cd acc = 0; double n = 0; uint32_t prev = UINT32_MAX; cd zp = 0;
       for (uint32_t k = 0; k < w.subcarriers; ++k) if (w.observed[w.cell(r, k)]) {
         const cd z = cd(w.values[w.sample(i, r, k)]) * std::polar(1.0, 2 * M_PI * baseband_hz(w, k) * L.delay_s[i]);
         acc += z; n += 1;
-        if (prev != UINT32_MAX && k - prev == 1) slope[r] += z * std::conj(zp);  // adjacent-subcarrier phase step
+        if (prev != UINT32_MAX && k - prev == comb[r]) slope[r] += z * std::conj(zp);
         prev = k; zp = z;
       }
       tap[r][i] = n > 0 ? acc / n : cd(0);
     }
+  }
+  // A row's tap carries a hop-dependent phase 2*pi*fc(r)*err from any error `err` in the reference
+  // delay; with the allocation hopping across the band, 1 bin of error is +-2 rad row to row and
+  // the CFO fit collapses (measured: a static wall pulled the power-mean LOS 1 bin late; the fit
+  // returned 3.9 Hz for a 23 Hz CFO and the coherent LOS dropped to 0.17). So per channel, the
+  // residual delay is taken where the rows combine best: max over (err, f) of
+  // |sum_r tap_r e^{+j2pi fc(r) err} e^{-j2pi f t_r}|, err over one row resolution cell either way,
+  // stepped so the hop phase error stays <= pi/4, f over the row-rate span at half a Doppler bin.
+  if (fc_max > 0) {
+    const double cell = 1.0 / a.b_eff_hz, step = 1.0 / (8 * fc_max);
+    const double f_half = 1.0 / (2 * a.median_dt_s), f_step = 0.5 / a.t_cpi_s;
+    for (uint32_t i = 0; i < kCh; ++i) {
+      if (!L.found[i]) continue;
+      double best_err = 0, best_score = -1;
+      for (double err = -cell; err <= cell; err += step) {
+        std::vector<cd> y(w.rows);
+        for (uint32_t r = 0; r < w.rows; ++r) y[r] = tap[r][i] * std::polar(1.0, 2 * M_PI * fc[r] * err);
+        for (double f = -f_half; f <= f_half; f += f_step) {
+          cd acc = 0; for (uint32_t r = 0; r < w.rows; ++r) acc += y[r] * std::polar(1.0, -2 * M_PI * f * a.row_t_s[r]);
+          if (std::abs(acc) > best_score) { best_score = std::abs(acc); best_err = err; }
+        }
+      }
+      for (uint32_t r = 0; r < w.rows; ++r) tap[r][i] *= std::polar(1.0, 2 * M_PI * fc[r] * best_err);
+    }
+  }
   // Channel phase alignment against the strongest channel: the common row rotation cancels in
   // tap_i * conj(tap_ref), so this stays defined even when a CFO spins the plain row mean to ~0.
   uint32_t ref = 0;
@@ -206,32 +302,44 @@ RowSync estimate_row_sync(const CfrWindow& w, const Axes& a, const LosEstimate& 
   // and -1.2 dB target peak on the two channels whose target sits 0.7 / 4.3 bins from the LOS).
   // ponytail: a line cannot follow oscillator phase noise inside a CPI; per-row residual tracking
   // with the target Doppler protected would be the upgrade if OTA CPIs show it.
-  std::vector<double> t, ph, dl; double prev_ph = 0;
+  std::vector<double> tp, ph, td, dl; double prev_ph = 0;
   for (uint32_t r = 0; r < w.rows; ++r) {
     cd c = 0; for (uint32_t i = 0; i < kCh; ++i) if (L.found[i]) c += tap[r][i] * align[i];  // weight = LOS amplitude
-    if (std::abs(c) == 0 || std::abs(slope[r]) == 0) continue;
-    double p = std::arg(c);
-    if (!ph.empty()) p = prev_ph + std::remainder(p - prev_ph, 2 * M_PI);                  // unwrap in row order
-    prev_ph = p;
-    t.push_back(a.row_t_s[r]); ph.push_back(p); dl.push_back(-std::arg(slope[r]) / (2 * M_PI * w.scs_hz));
+    if (std::abs(c) > 0) {                                                                  // phase never needs a slope
+      double p = std::arg(c);
+      if (!ph.empty()) p = prev_ph + std::remainder(p - prev_ph, 2 * M_PI);                  // unwrap in row order
+      prev_ph = p; tp.push_back(a.row_t_s[r]); ph.push_back(p);
+    }
+    if (std::abs(slope[r]) > 0) { td.push_back(a.row_t_s[r]); dl.push_back(-std::arg(slope[r]) / (2 * M_PI * comb[r] * w.scs_hz)); }
   }
-  if (t.empty()) return s;
-  auto fit = [&](const std::vector<double>& y, std::vector<double>& out) {
+  if (tp.empty()) return s;
+  auto fit = [&](const std::vector<double>& t, const std::vector<double>& y, std::vector<double>& out) {
     double mt = 0, my = 0; for (size_t n = 0; n < t.size(); ++n) { mt += t[n]; my += y[n]; }
     mt /= t.size(); my /= t.size();
     double stt = 0, sty = 0; for (size_t n = 0; n < t.size(); ++n) { stt += (t[n] - mt) * (t[n] - mt); sty += (t[n] - mt) * (y[n] - my); }
     const double b = stt > 0 ? sty / stt : 0.0;
     for (uint32_t r = 0; r < w.rows; ++r) out[r] = my + b * (a.row_t_s[r] - mt);
   };
-  fit(ph, s.phase_rad); fit(dl, s.delay_s);
+  fit(tp, ph, s.phase_rad);
+  // Delay: DRIFT ONLY. The fit's intercept is the power-weighted centroid of all paths, not the
+  // LOS (measured: a static 0.5-amplitude wall 15 m behind moved every channel's range axis by 1.2
+  // bins and dropped |los_tap| to ~0.3). Absolute delay stays referenced to find_los's LOS.
+  if (td.size() >= 2) {
+    fit(td, dl, s.delay_s);
+    double mean = 0; for (double d : s.delay_s) mean += d / w.rows;
+    for (double& d : s.delay_s) d -= mean;
+  }
+  s.valid = true;
   return s;
 }
 
 RdResult range_doppler(const CfrWindow& w, const Axes& a, const LosEstimate& L, const RowSync& s)
 {
-  RdResult out; out.rd.axes = a; out.rd.v.assign((size_t)kCh * a.n_range * a.n_dopp, cf(0, 0));
+  RdResult out; out.rd.axes = a;
+  if (!a.valid) return out;
+  out.rd.v.assign((size_t)kCh * a.n_range * a.n_dopp, cf(0, 0));
   std::vector<double> win(w.rows); double wsum = 0;
-  for (uint32_t r = 0; r < w.rows; ++r) { win[r] = hann(a.t_cpi_s > 0 ? a.row_t_s[r] / a.row_t_s.back() : 0.5); wsum += win[r]; }
+  for (uint32_t r = 0; r < w.rows; ++r) { win[r] = hann(a.row_t_s.back() > 0 ? a.row_t_s[r] / a.row_t_s.back() : 0.5); wsum += win[r]; }
   for (uint32_t i = 0; i < kCh; ++i) {
     // Static removal PER SUBCARRIER, before the range IFFT. A range-bin mean cannot do it: when the
     // allocation hops between rows, the LOS leakage into bin m != 0 carries a row-dependent phase

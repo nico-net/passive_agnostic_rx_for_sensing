@@ -21,9 +21,12 @@ struct LosEstimate {
   std::array<bool, kCh> found{};
 };
 
+/** Common per-row CFO phase and SFO delay DRIFT (zero-mean over rows; absolute delay stays
+ * referenced to the LOS). valid = false when no row carried a usable LOS tap. */
 struct RowSync {
   std::vector<double> phase_rad;
   std::vector<double> delay_s;
+  bool valid = false;
 };
 
 struct RdResult {
