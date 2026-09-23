@@ -48,6 +48,7 @@
 
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.h"
 #include "PHY/NR_UE_TRANSPORT/nr_passive_mac_ta.h"    // MAC timing-advance parsers + this file's reporter
+void nr_passive_rrc_harvest(const uint8_t *tb, uint32_t tb_bytes); // openair2/LAYER2/NR_MAC_UE
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_xoverhead.h"   // reject-only xOverhead elimination by TB CRC
 #include "PHY/NR_UE_TRANSPORT/nr_dmrs_id_estimate.h"  // blind DM-RS scrambling-identity estimate
 #include "PHY/NR_REFSIG/dmrs_nr.h"                     // get_num_dmrs_re_per_rb
@@ -350,6 +351,42 @@ static consumer_arg_t g_args[NR_PDSCH_PASSIVE_QUEUE_MAX_CONSUMERS];
  * gives a range delta for an already-connected one. Non-static and declared in nr_passive_mac_ta.h:
  * the in-line decode path in nr_pdcch_blind_monitor_rt.c reports through this same function, so the
  * two paths cannot drift apart in what they log. */
+/* TC-RNTIs harvested from CRC-verified RARs, with the slot they were issued. A Msg4 addressed to one
+ * of these is the ONLY DCI in CORESET#0 whose RNTI we know in advance, so its CRC match is exact
+ * evidence and needs none of the noise gates (mismatch/persistence) that exist for guessed RNTIs.
+ * Small ring, no eviction policy: a TC-RNTI is live for one RA procedure (~tens of ms), 32 entries
+ * cover minutes at this cell's RAR rate. */
+#define RAR_TC_RING 32
+static struct { uint16_t rnti; uint32_t abs_slot; } g_rar_tc[RAR_TC_RING];
+static unsigned g_rar_tc_head;
+static uint32_t g_rar_tc_wrap;   /* slots per SFN cycle = 1024 * slots_per_frame, set on first RAR */
+static pthread_mutex_t g_rar_tc_lock = PTHREAD_MUTEX_INITIALIZER;
+/* CLOCK BUG, found before it produced a conclusion (2026-09-21): the ring used to be stamped with
+ * job.absolute_slot -- the PRODUCER'S MONOTONIC counter -- while the PDCCH accept path asks with
+ * frame_rx * slots_per_frame + nr_slot_rx. Two clocks with different origins, so the window test
+ * was never true and a real Msg4 could not have been flagged however many arrived. Both sides now
+ * use the FRAME-DERIVED slot, which wraps at SFN 1024, hence the modular age below. */
+bool nr_passive_rar_tc_seen(uint16_t rnti, uint32_t now_abs_slot, uint32_t window_slots, uint32_t *age_out)
+{
+  bool hit = false;
+  pthread_mutex_lock(&g_rar_tc_lock);
+  for (int i = 0; i < RAR_TC_RING; i++) {
+    if (g_rar_tc[i].rnti != rnti || rnti == 0 || g_rar_tc_wrap == 0) {
+      continue;
+    }
+    const uint32_t age = (now_abs_slot >= g_rar_tc[i].abs_slot)
+                             ? (now_abs_slot - g_rar_tc[i].abs_slot)
+                             : (now_abs_slot + g_rar_tc_wrap - g_rar_tc[i].abs_slot);
+    if (age <= window_slots) {
+      if (age_out) *age_out = age;
+      hit = true;
+      break;
+    }
+  }
+  pthread_mutex_unlock(&g_rar_tc_lock);
+  return hit;
+}
+
 void nr_passive_mac_report_ta(uint16_t rnti, bool is_ra_rnti, int frame, int slot, int mu,
                               uint32_t abs_slot, const uint8_t *tb, uint32_t tb_bytes)
 {
@@ -372,8 +409,21 @@ void nr_passive_mac_report_ta(uint16_t rnti, bool is_ra_rnti, int frame, int slo
        * Recorded as TC: nr_pdcch_blind_rnti_bootstrap_record() admits C and TC only, and the two
        * share one hypothesis downstream. A zero TC-RNTI is not a UE and is dropped by the parser's
        * own field checks, but guard anyway -- this feeds a table the whole dedicated path keys on. */
-      if (tc_rnti != 0)
-        nr_pdcch_blind_rnti_bootstrap_record(tc_rnti, NR_BLIND_RNTI_CLASS_TC, abs_slot);
+      if (tc_rnti != 0) {
+        /* TRUSTED: live at one sighting. See this file's header note and the RAR chain above --
+         * three independent checks passed before this line, and a TC-RNTI cannot repeat. */
+        nr_pdcch_blind_rnti_bootstrap_record_verified(tc_rnti, NR_BLIND_RNTI_CLASS_TC, abs_slot);
+        /* FRAME-DERIVED, to match what the accept path asks with. slots_per_frame = 10 << mu,
+         * never a hardcoded 10 (valid only at 15 kHz, and it has broken a slow-time axis here
+         * before). */
+        const uint32_t spf = 10u << (unsigned)mu;
+        pthread_mutex_lock(&g_rar_tc_lock);
+        g_rar_tc_wrap = 1024u * spf;
+        g_rar_tc[g_rar_tc_head % RAR_TC_RING] =
+            (typeof(g_rar_tc[0])){tc_rnti, (uint32_t)frame * spf + (uint32_t)slot};
+        g_rar_tc_head++;
+        pthread_mutex_unlock(&g_rar_tc_lock);
+      }
     }
     return;
   }
@@ -752,6 +802,13 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
        * answers, and a TA Command CE carries an update -- i.e. that UE's range to the illuminator,
        * measured without transmitting. Parse-only, on the consumer thread, and silent unless the PDU
        * actually contains one. */
+      /* RRCSetup harvest: the ONLY unciphered appearance of the dedicated config, which is the
+       * only thing that can retire the DCI 0_1/1_1 sweeps (their field widths are never broadcast).
+       * Run on EVERY CRC-OK block rather than gating on a verified TC-RNTI: a successful uper_decode
+       * of a full RRCSetup is self-validating, so the decoder is stronger evidence than an RNTI we
+       * might never catch. Silent on the ~100 % of blocks that are not CCCH. */
+      if (st == NR_PDSCH_PASSIVE_DECODE_CRC_OK && dec.tb != NULL && dec.cw.TBS > 0)
+        nr_passive_rrc_harvest(dec.tb, dec.cw.TBS / 8);
       if (st == NR_PDSCH_PASSIVE_DECODE_CRC_OK && dec.tb != NULL && dec.cw.TBS > 0)
         nr_passive_mac_report_ta(job.rnti, job.rnti_class == NR_BLIND_RNTI_CLASS_RA, job.frame_rx,
                                  job.nr_slot_rx, (int)ue->frame_parms.numerology_index,

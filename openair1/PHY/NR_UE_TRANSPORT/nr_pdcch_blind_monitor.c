@@ -64,6 +64,7 @@
                                        // -- see that header's file comment for why the split exists.
 
 #include <math.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "common/config/config_userapi.h"
@@ -96,6 +97,11 @@ static nr_pdcch_blind_monitor_cfg_t g_cfg;
  * forgotten in the other would leak silently across the swap. */
 static nr_pdcch_blind_monitor_cfg_t g_css0_cfg;
 static bool                         g_css0_cfg_valid;
+/* CORESET#0's window range, excluded from the DEDICATED footprint decision so the search stops
+ * rediscovering a CORESET whose geometry MIB/SIB1 already gave us -- measured, it dominates at
+ * ~22 sigma because SIB1/RAR are transmitted there constantly. -1 = not known. Declared here
+ * because autoconf_css0() sets it long before the observation code reads it. */
+static int s_css0_excl_first_w = -1, s_css0_excl_last_w = -1;
 static int                          g_parsed  = 0;
 static bool s_css0_applied; /* CSS0 autoconf idempotency; an autodiscover reset re-arms it (a reset IS a state change) */
 static int                          g_enabled = 0;
@@ -111,9 +117,51 @@ const nr_pdcch_blind_monitor_cfg_t* nr_pdcch_blind_monitor_get_cfg(void)
   return (t_cfg_override != NULL) ? t_cfg_override : &g_cfg;
 }
 
+static bool map_staging_enabled(void)
+{
+  /* Explicit 0 means exhaustive immediately; explicit 1 deliberately limits the search to the
+   * pass-0 prior. Only the default staged mode promises a later exhaustive lap. */
+  return getenv("ISAC_MAP_PASS0_ONLY") == NULL;
+}
+
 const nr_pdcch_blind_monitor_cfg_t* nr_pdcch_blind_monitor_css0_cfg(void)
 {
   return g_css0_cfg_valid ? &g_css0_cfg : NULL;
+}
+
+bool nr_pdcch_blind_monitor_coreset0_uss_cfg(nr_pdcch_blind_monitor_cfg_t *out)
+{
+  const nr_pdcch_sib1_prior_t *pr = nr_pdcch_sib1_prior_get();
+  if (out == NULL || !g_css0_cfg_valid || pr == NULL || !pr->dl_bwp_valid
+      || pr->dl_bwp_size == 0)
+    return false;
+
+  const int physical_start = g_css0_cfg.bwp_start + g_css0_cfg.coreset_rb_offset;
+  if (physical_start < (int)pr->dl_bwp_start)
+    return false;
+
+  *out = g_css0_cfg;
+  out->bwp_start = pr->dl_bwp_start;
+  out->bwp_size = pr->dl_bwp_size;
+  out->coreset_rb_offset = physical_start - out->bwp_start;
+  /* CORESET#0 keeps CoreSetType=MIB/SIB1 so its DM-RS reference remains CRB0. The SearchSpace
+   * referencing it is UE-specific: monitor every DL slot/all ALs and size 1_0 from the active BWP. */
+  out->ss_monitoring_slot_periodicity = 1;
+  out->ss_monitoring_slot_offset = 0;
+  out->ss_duration = 1;
+  for (int i = 0; i < 4; ++i)
+    out->ss_al_candidates[i] = 0;
+  out->dci10_scan = 1;
+  out->dci10_ss_type = NR_BLIND_SS_UE_SPECIFIC;
+  out->dci10_n_rb_riv = out->bwp_size;
+  out->dci10_rb_offset = out->bwp_start;
+  out->dci10_class_mask = 1u << NR_BLIND_RNTI_CLASS_C;
+  out->dci10_mux_pattern = 0;
+  out->dci10_sib1 = 0;
+  out->rnti_min = NR_PDCCH_BLIND_RNTI_MIN_DEFAULT;
+  out->rnti_max = NR_PDCCH_BLIND_RNTI_MAX_DEFAULT;
+  out->autodiscover = 0;
+  return true;
 }
 
 void nr_pdcch_blind_monitor_cfg_override(const nr_pdcch_blind_monitor_cfg_t *in)
@@ -157,8 +205,16 @@ void nr_pdcch_blind_monitor_set_tda_common(const uint8_t *start, const uint8_t *
     g_cfg.extract.tda_common_start[i]   = start[i];
     g_cfg.extract.tda_common_length[i]  = len[i];
     g_cfg.extract.tda_common_mapping[i] = map[i];
+    /* AND THE CORESET#0 SNAPSHOT. See this function's header note: the snapshot is taken at MIB
+     * time, before SIB1 exists, so without this it keeps tda_common_count = 0 and every RA/TC/C
+     * grant on a CSS0 interleave occasion is decoded from the 3GPP default table instead of the
+     * cell's own list. MEASURED: that is the whole difference between 68/68 RARs and 0. */
+    g_css0_cfg.extract.tda_common_start[i]   = start[i];
+    g_css0_cfg.extract.tda_common_length[i]  = len[i];
+    g_css0_cfg.extract.tda_common_mapping[i] = map[i];
   }
-  g_cfg.extract.tda_common_count = n;
+  g_cfg.extract.tda_common_count      = n;
+  g_css0_cfg.extract.tda_common_count = n;
   static bool tda_logged = false;
   if (!tda_logged) {
     tda_logged = true;
@@ -238,6 +294,20 @@ bool nr_pdcch_blind_monitor_autoconf_css0(int num_rbs,
   g_cfg.ss_duration                    = (ss_duration > 0) ? ss_duration : 1;
   g_cfg.ss_first_symbol                = ss_first_symbol;
 
+  /* Align Technique A s 6-RB window grid to THIS cell s CORESET#0 start, derived just above from
+   * the SSB offset. MEASURED: the grid was CRB-0 aligned while the CORESET starts at RB 1, so
+   * every window straddled two REG bundles (independent precoders under sameAsREG-bundle) --
+   * correcting it took the on-accept correlation 0.510 to 0.607, and evened out per-RB values
+   * that had ranged 0.360 to 0.949 within one CCE. Derived, never hardcoded. */
+  nr_pdcch_coreset_map_set_phase_hint(cset_start_rb);
+  nr_pdcch_coreset_map_set_css0(cset_start_rb, num_rbs);
+  /* And tell the DEDICATED search where CORESET#0 is, so it stops rediscovering it: measured, it
+   * dominates the histogram at ~22 sigma (window 7, 41 hits vs background 3) because SIB1/RAR are
+   * transmitted constantly there. Its geometry is already known from MIB/SIB1, so masking it is
+   * removing a known quantity, not hiding evidence. */
+  s_css0_excl_first_w = cset_start_rb / 6;
+  s_css0_excl_last_w  = (cset_start_rb + num_rbs - 1) / 6;
+
   /* SearchSpace#0's candidate counts are FIXED by TS 38.213 Table 10.1-1, and fill_searchSpaceZero()
    * sets exactly these: AL1 = 0, AL2 = 0, AL4 = 4, AL8 = 2. Pin them rather than leaving the
    * adaptive split to discover them -- the split spends candidates on AL1/AL2, where SIB1 is never
@@ -247,6 +317,22 @@ bool nr_pdcch_blind_monitor_autoconf_css0(int num_rbs,
   g_cfg.ss_al_candidates[1] = -1; // AL2 -- not used by SS0
   g_cfg.ss_al_candidates[2] = 4;  // AL4
   g_cfg.ss_al_candidates[3] = 2;  // AL8
+  /* ISAC_CSS0_ALS="a1:a2:a4:a8" overrides the four above. The Table 10.1-1 pin is correct for
+   * SEARCH SPACE #0, but RAR and Msg4 live in the ra-SearchSpace -- a different common search
+   * space, with its own nrofCandidates, that happens to share CORESET#0 on this cell. Disabling
+   * AL1/AL2 is therefore an SS#0 fact applied to SS#1, which is exactly the kind of assumption
+   * that makes a scan cover the wrong geometry and report no error. Measured on Swisscom PCI 382:
+   * 450+ RARs decoded at 100 % CRC, TC-RNTIs harvested, and ZERO Msg4 DCIs ever accepted. */
+  {
+    const char *e = getenv("ISAC_CSS0_ALS");
+    int a[4];
+    if (e != NULL && sscanf(e, "%d:%d:%d:%d", &a[0], &a[1], &a[2], &a[3]) == 4) {
+      for (int i = 0; i < 4; i++)
+        g_cfg.ss_al_candidates[i] = a[i];
+      LOG_A(PHY, "SENSING: CSS0 AL ladder OVERRIDDEN by ISAC_CSS0_ALS: AL1=%d AL2=%d AL4=%d AL8=%d\n",
+            a[0], a[1], a[2], a[3]);
+    }
+  }
 
   /* Format 1_0 ONLY. 1_1 lives in the DEDICATED search space, whose description is ciphered and
    * therefore not available to us -- scanning for it here would only manufacture false accepts. */
@@ -306,8 +392,17 @@ bool nr_pdcch_blind_monitor_autoconf_css0(int num_rbs,
    * candidates/occasion at ~50 occasions/s (~800x fewer trials than the dedicated CORESET), the
    * bound is the spec's own RA-RNTI domain rather than the wide 1..0xFFEF default, and RA then
    * costs a further 16 bits of reserved-field rejection. */
-  g_cfg.rnti_min = 1;
-  g_cfg.rnti_max = NR_PDCCH_BLIND_RA_RNTI_MAX;
+  /* MEASURED 2026-09-21 (Swisscom PCI 382, harv2_115328): 77 RARs decoded at 100 % CRC handed out
+   * TC-RNTIs 0x5962..0x732a -- ALL above NR_PDCCH_BLIND_RA_RNTI_MAX (0x4600), so every Msg4 DCI
+   * (CRC scrambled by that TC-RNTI, sent in THIS common search space) was rejected as "outside
+   * plausible RNTI range" before dci10_parse() ran, and the RRCSetup harvest saw only SIB1 TBs
+   * (ccch_sdus=0 over 6200 TBs). The 89 "TC accepts" that run did see were all <= 0x45A8: noise
+   * inside the RA range that failed RA decomposition. The comment above ("CORESET#0 carries no
+   * C-RNTI") predates Msg4 harvesting. TC-RNTI is a C-RNTI-range value; admit the whole range and
+   * let the mismatch gate + PDSCH TB CRC + ASN.1 decode be the verifier, as nr_passive_rrc_harvest.c
+   * already argues. RA keeps its own <= RA_RNTI_MAX / decomposition test inside dci10_extract(). */
+  g_cfg.rnti_min = NR_PDCCH_BLIND_RNTI_MIN_DEFAULT;
+  g_cfg.rnti_max = NR_PDCCH_BLIND_RNTI_MAX_DEFAULT;
 
   /* Format 0_1 OFF. It is a UE-specific-search-space format and cannot appear in CORESET#0, but
    * leaving the configured scan on does real harm rather than nothing: MEASURED, it consumed every
@@ -400,6 +495,21 @@ bool nr_pdcch_blind_monitor_autodiscover_done(void)
 #define NR_PDCCH_MAX_CANDIDATE_WINDOWS (273 / 6)
 static uint16_t s_hit_count[NR_PDCCH_MAX_CANDIDATE_WINDOWS];
 static uint16_t s_hit_count1[NR_PDCCH_MAX_CANDIDATE_WINDOWS]; /* same, CORESET symbol 1: decides the duration */
+
+/* LONG-TERM evidence, never reset by a dwell -- see the note on the per-UE CORESET hypothesis.
+ * Diagnostic only: nothing below consumes these, so no decision changes. */
+static unsigned long s_lt_hits[NR_PDCCH_MAX_CANDIDATE_WINDOWS];
+static unsigned      s_lt_dwells[NR_PDCCH_MAX_CANDIDATE_WINDOWS];
+static uint16_t      s_lt_rnti[NR_PDCCH_MAX_CANDIDATE_WINDOWS];
+static unsigned      s_lt_ndwell;
+void nr_pdcch_blind_monitor_note_rnti_for_windows(uint16_t rnti)
+{
+  /* Tag every currently-hot window with the RNTI just accepted. Cheap and approximate on purpose:
+   * it answers "which UE was on air while this window was lit", not "which UE owns this CORESET". */
+  for (int w = 0; w < NR_PDCCH_MAX_CANDIDATE_WINDOWS; w++)
+    if (s_hit_count[w] > 0)
+      s_lt_rnti[w] = rnti;
+}
 static int s_obs_calls;
 
 /* CONVERGENCE CRITERION (rewritten 2026-09-06 -- see the handover doc's reversal section for the
@@ -429,10 +539,31 @@ static int s_obs_calls;
 static nr_pdcch_extent_cand_t s_ext_cand[NR_PDCCH_EXTENT_MAX_CAND];
 static int  s_ext_n        = 0;
 static int  s_ext_idx      = 0;
+static int  s_ext_phase_idx = 0;
+
+/* The occupancy oracle samples one 6-RB grid phase, chosen from CORESET#0. A dedicated BWP may
+ * start at any CRB, so that phase is only a search-order prior, never the physical phase of a
+ * dedicated CORESET. Try it first, then the other five residues. */
+static int extent_phase(int idx)
+{
+  const int hint = nr_pdcch_coreset_map_get_phase() % 6;
+  if (idx <= 0)
+    return hint;
+  int n = 1;
+  for (int phase = 0; phase < 6; ++phase) {
+    if (phase != hint && n++ == idx)
+      return phase;
+  }
+  return hint;
+}
 /* CCE-to-REG mapping hypotheses of the extent under test (nr_pdcch_map_candidates). Each
  * (extent, mapping) pair gets the same NR_PDCCH_EXTENT_VERIFY_OCC dwell. */
 #define NR_PDCCH_MAP_MAX_CAND 1024 /* 865 legal at 216 RB x 2 symbols; 512 truncated them */
 static nr_pdcch_map_cand_t s_map_cand[NR_PDCCH_MAP_MAX_CAND];
+static int s_map_stage = 0;          /* 0 = pass-0 mappings only; 1 = full list (see nr_pdcch_map_candidates) */
+static int s_map_pass0_n = 0;        /* pass-0 prefix length of the last nr_pdcch_map_candidates() call */
+static int map_stage_truncate(int n);
+static bool map_staging_enabled(void);
 static int  s_map_n        = 0;
 static int  s_map_idx      = 0;
 static void map_apply(void)
@@ -445,6 +576,7 @@ static void map_apply(void)
 static void map_restart(int span_rb, int duration, int pci)
 {
   s_map_n = nr_pdcch_map_candidates(span_rb, duration, pci, s_map_cand, NR_PDCCH_MAP_MAX_CAND);
+  s_map_n = map_stage_truncate(s_map_n);
   s_map_idx = 0;
   map_apply();
 }
@@ -464,6 +596,19 @@ static void extent_clear_evidence(void)
   s_ext_verified = false;
   s_ext_occ = 0;
   ++s_ext_generation;
+}
+
+/* A decoded CCE proves that its RBs belong to this CORESET, but cannot prove either edge: an unused
+ * CCE emits no DM-RS. For non-interleaved mapping, extending the bitmap to the right preserves every
+ * proven CCE-to-RB mapping exactly. Use that standards-valid superset as the operational scan
+ * envelope, so grants scheduled at higher CCEs remain visible while the measured span stays only a
+ * lower bound. Interleaved mappings cannot be extended this way because N_REG changes the mapping. */
+static int extent_operational_groups(int rb_offset, int observed_groups, int reg_bundle_size)
+{
+  if (reg_bundle_size != 0)
+    return observed_groups;
+  const int available = (g_cfg.bwp_size - rb_offset) / 6;
+  return available > observed_groups ? available : observed_groups;
 }
 uint64_t nr_pdcch_blind_monitor_autodiscover_generation(void)
 {
@@ -485,9 +630,13 @@ void nr_pdcch_blind_monitor_autodiscover_observe(uint16_t rnti, uint32_t slot, u
     extent_evidence_t *e = &s_ext_evidence[i];
     if (e->rnti == rnti) {
       if (slot > e->slot && payload != e->payload) {
+        const int observed_span = g_cfg.coreset_freq_domain * 6;
+        g_cfg.coreset_freq_domain = extent_operational_groups(
+            g_cfg.coreset_rb_offset, g_cfg.coreset_freq_domain, g_cfg.coreset_reg_bundle_size);
         s_ext_verified = true;
-        LOG_A(PHY, "SENSING: CORESET VERIFIED by fresh dedicated DCI: offset=%d span=%d rnti=0x%x\n",
-              g_cfg.coreset_rb_offset, g_cfg.coreset_freq_domain * 6, rnti);
+        LOG_A(PHY, "SENSING: CORESET VERIFIED by fresh dedicated DCI: offset=%d observed_span=%d "
+                   "scan_span=%d rnti=0x%x\n",
+              g_cfg.coreset_rb_offset, observed_span, g_cfg.coreset_freq_domain * 6, rnti);
       }
       return;
     }
@@ -522,44 +671,205 @@ static void extent_log_evidence_before_clear(void)
   LOG_I(PHY, "SENSING: CORESET candidate %d/%d mapping %d/%d abandoned: offset=%d span=%d rnti_votes=%d [%s]\n",
         s_ext_idx + 1, s_ext_n, s_map_idx + 1, s_map_n, g_cfg.coreset_rb_offset, g_cfg.coreset_freq_domain * 6, n, buf);
 }
+static void discovered_restore(void);
+static void discovered_verified(void);
 static bool extent_advance(void)
 {
   if (!s_dedicated_found || s_ext_verified || s_ext_n <= 0)
     return false;
+  discovered_restore(); /* a discovered geometry that failed hands back to the walk unchanged */
   extent_log_evidence_before_clear();
   extent_clear_evidence();
   g_cfg.dci_length_override = 0;
+
+  while (++s_ext_phase_idx < 6) {
+    const int off = s_ext_cand[s_ext_idx].first_w * 6 + extent_phase(s_ext_phase_idx);
+    const int span = g_cfg.coreset_freq_domain * 6;
+    if (off + span > g_cfg.bwp_size)
+      continue;
+    g_cfg.coreset_rb_offset = off;
+    LOG_I(PHY, "SENSING: CORESET candidate %d/%d phase %d/6 mapping %d/%d: offset=%d span=%d "
+               "bundle=%u interleaver=%u shift=%u (unverified)\n",
+          s_ext_idx + 1, s_ext_n, s_ext_phase_idx + 1, s_map_idx + 1, s_map_n,
+          g_cfg.coreset_rb_offset, span, g_cfg.coreset_reg_bundle_size,
+          g_cfg.coreset_interleaver_size, g_cfg.coreset_shift_index);
+    return true;
+  }
+  s_ext_phase_idx = 0;
+
   if (++s_map_idx < s_map_n) {
+    g_cfg.coreset_rb_offset = s_ext_cand[s_ext_idx].first_w * 6 + extent_phase(0);
     map_apply();
-    LOG_I(PHY, "SENSING: CORESET candidate %d/%d mapping %d/%d: offset=%d span=%d bundle=%u interleaver=%u shift=%u (unverified)\n",
-          s_ext_idx + 1, s_ext_n, s_map_idx + 1, s_map_n, g_cfg.coreset_rb_offset, g_cfg.coreset_freq_domain * 6,
-          g_cfg.coreset_reg_bundle_size, g_cfg.coreset_interleaver_size, g_cfg.coreset_shift_index);
+    LOG_I(PHY, "SENSING: CORESET candidate %d/%d phase 1/6 mapping %d/%d: offset=%d span=%d "
+               "bundle=%u interleaver=%u shift=%u (unverified)\n",
+          s_ext_idx + 1, s_ext_n, s_map_idx + 1, s_map_n, g_cfg.coreset_rb_offset,
+          g_cfg.coreset_freq_domain * 6, g_cfg.coreset_reg_bundle_size,
+          g_cfg.coreset_interleaver_size, g_cfg.coreset_shift_index);
     return true;
   }
   if (++s_ext_idx >= s_ext_n) {
-    /* Inconclusive, never "verified" and never a fallback to candidate zero.
-     * Re-observe the live occupancy on a new epoch; no permanent quiet-link blacklist. */
-    s_dedicated_found = false;
-    s_ext_n = 0;
-    LOG_W(PHY, "SENSING: CORESET candidates exhausted without evidence; restarting occupancy discovery\n");
-    return true;
+    if (s_map_stage == 0 && map_staging_enabled()) {
+      s_map_stage = 1;
+      s_ext_idx = 0;
+      LOG_A(PHY, "SENSING: autodiscover mapping stage 1: primary fast lap exhausted, widening to all shifts\n");
+    } else {
+      s_dedicated_found = false;
+      s_ext_n = 0;
+      LOG_W(PHY, "SENSING: CORESET candidates exhausted without evidence; restarting occupancy discovery\n");
+      return true;
+    }
   }
-  g_cfg.coreset_rb_offset = s_ext_cand[s_ext_idx].first_w * 6;
+  g_cfg.coreset_rb_offset = s_ext_cand[s_ext_idx].first_w * 6 + extent_phase(0);
   g_cfg.coreset_freq_domain = s_ext_cand[s_ext_idx].last_w - s_ext_cand[s_ext_idx].first_w + 1;
-  map_restart(g_cfg.coreset_freq_domain * 6, g_cfg.coreset_duration, g_cfg.coreset_pdcch_dmrs_scrambling_id);
-  LOG_I(PHY, "SENSING: CORESET candidate %d/%d: offset=%d span=%d (%d mappings, unverified)\n",
+  map_restart(g_cfg.coreset_freq_domain * 6, g_cfg.coreset_duration,
+              g_cfg.coreset_pdcch_dmrs_scrambling_id);
+  LOG_I(PHY, "SENSING: CORESET candidate %d/%d: offset=%d span=%d (%d mappings x 6 phases, unverified)\n",
         s_ext_idx + 1, s_ext_n, g_cfg.coreset_rb_offset, g_cfg.coreset_freq_domain * 6, s_map_n);
   return true;
 }
-/* ---- Lookahead lanes: see nr_pdcch_blind_monitor.h's own comment for the design. Each lane owns
- * an INDEPENDENT walk over the same (extent, mapping) catalog the primary (s_ext_idx/s_map_idx)
- * walks, seeded at a spread-out starting point so lanes explore different candidates than the
- * primary and each other. ponytail: a fixed initial spread plus a fixed +(k+1) stride can eventually
- * collide with the primary's own +1 walk once it catches up -- harmless (re-testing an
- * already-inconclusive candidate costs cycles, not correctness), and not worth a shared-claim
- * allocator for a search this wide (up to 1035 extents). */
+
+
+/* STAGE 1-2 HAND-OFF (2026-09-23). The decode-free discovery process (captures/idsweep_offline --stage2,
+ * GPU stage 1) writes /tmp/coresets_discovered.txt from THIS cell's own snapshots, one line per CORESET.
+ * They are applied in order as the CURRENT candidate. A verified one is banked by the caller (and
+ * autodiscover_next() moves on to the next line); one that fails its dwell hands back to the walk's saved
+ * position and geometry and the next line is tried. When every line is verified, decode-free evidence
+ * says nothing else is significant, so the catalog walk PAUSES -- one whole decode pass per occasion
+ * saved -- until the file changes. If any line failed, the walk resumes as the fallback. */
+#define DISC_MAX 8
+typedef struct { int nid, sym, dur, rb, ng, L, R, sh; } disc_coreset_t;
+static disc_coreset_t s_disc[DISC_MAX];
+static int s_disc_n, s_disc_next, s_disc_failed;
+static bool s_disc_active, s_disc_pending, s_disc_paused;
+static int s_disc_saved[8];
+
+bool nr_pdcch_blind_monitor_discovery_paused(void)
+{
+  return s_disc_paused;
+}
+
+static void discovered_restore(void) /* called from extent_advance(): the applied line failed its dwell */
+{
+  if (!s_disc_active)
+    return;
+  g_cfg.coreset_rb_offset = s_disc_saved[0];
+  g_cfg.coreset_freq_domain = s_disc_saved[1];
+  g_cfg.coreset_duration = s_disc_saved[2];
+  g_cfg.coreset_reg_bundle_size = s_disc_saved[3];
+  g_cfg.coreset_interleaver_size = s_disc_saved[4];
+  g_cfg.coreset_shift_index = s_disc_saved[5];
+  g_cfg.coreset_pdcch_dmrs_scrambling_id = s_disc_saved[6];
+  g_cfg.ss_first_symbol = s_disc_saved[7];
+  s_disc_active = false;
+  s_disc_failed++;
+  s_disc_next++;
+  s_disc_pending = s_disc_next < s_disc_n;
+  LOG_A(PHY, "SENSING: discovered CORESET %d/%d did not verify in its dwell; %s\n", s_disc_next, s_disc_n,
+        s_disc_pending ? "trying the next discovered one" : "resuming the catalog walk");
+}
+
+/* called from autodiscover_next(): the applied line was verified and banked */
+static void discovered_verified(void)
+{
+  if (!s_disc_active)
+    return;
+  s_disc_active = false;
+  s_disc_next++;
+  s_disc_pending = s_disc_next < s_disc_n;
+  if (!s_disc_pending && s_disc_failed == 0) {
+    s_disc_paused = true;
+    LOG_A(PHY, "SENSING: all %d discovered CORESET(s) verified and banked; decode-free discovery reports nothing "
+               "else significant -> catalog walk PAUSED until the discovery file changes\n", s_disc_n);
+  }
+}
+
+static bool discovered_load(const char *path)
+{
+  FILE *f = fopen(path, "r");
+  if (f == NULL)
+    return false;
+  char line[256];
+  s_disc_n = 0;
+  while (s_disc_n < DISC_MAX && fgets(line, sizeof(line), f)) {
+    disc_coreset_t d;
+    if (sscanf(line, "CORESET nid=%d sym=%d dur=%d grid_rb=%d groups=%d L=%d R=%d shift=%d", &d.nid, &d.sym, &d.dur,
+               &d.rb, &d.ng, &d.L, &d.R, &d.sh) != 8)
+      continue;
+    if (d.nid < 0 || d.nid > 65535 || d.sym < 0 || d.sym > 13 || d.dur < 1 || d.dur > 3 || d.rb < 0 || d.ng < 1
+        || d.rb + 6 * d.ng > (int)g_cfg.bwp_size || (d.L != 0 && d.L != 2 && d.L != 3 && d.L != 6))
+      continue;
+    s_disc[s_disc_n++] = d;
+  }
+  fclose(f);
+  s_disc_next = s_disc_failed = 0;
+  return s_disc_n > 0;
+}
+
+bool nr_pdcch_blind_monitor_discovered_poll(void)
+{
+  static uint64_t s_calls;
+  static time_t s_mtime;
+  if ((++s_calls & 1023) != 1)
+    return false;
+  const char *path = "/tmp/coresets_discovered.txt";
+  struct stat st;
+  if (stat(path, &st) == 0 && st.st_mtime != s_mtime) { /* new or changed discovery result */
+    s_mtime = st.st_mtime;
+    if (discovered_load(path)) {
+      s_disc_pending = true;
+      if (s_disc_paused) {
+        s_disc_paused = false;
+        LOG_A(PHY, "SENSING: discovery file changed; catalog walk un-paused\n");
+      }
+    } else {
+      LOG_W(PHY, "SENSING: %s present but no usable CORESET line; ignored\n", path);
+    }
+  }
+  /* discovered CORESETs the bank already holds are verified: skip them without a dwell */
+  while (s_disc_pending && !s_disc_active) {
+    const disc_coreset_t *b = &s_disc[s_disc_next];
+    if (!nr_pdcch_blind_monitor_bank_has_geometry(b->rb, b->ng, b->dur, b->L, b->R, b->sh, b->nid))
+      break;
+    LOG_A(PHY, "SENSING: discovered CORESET %d/%d is already a verified bank entry -- no dwell needed\n",
+          s_disc_next + 1, s_disc_n);
+    s_disc_active = true; /* discovered_verified() consumes an active entry */
+    discovered_verified();
+  }
+  if (!s_disc_pending || s_disc_active || !s_dedicated_found || s_ext_verified || s_ext_n <= 0)
+    return false;
+  const disc_coreset_t *d = &s_disc[s_disc_next];
+  s_disc_saved[0] = g_cfg.coreset_rb_offset;
+  s_disc_saved[1] = g_cfg.coreset_freq_domain;
+  s_disc_saved[2] = g_cfg.coreset_duration;
+  s_disc_saved[3] = g_cfg.coreset_reg_bundle_size;
+  s_disc_saved[4] = g_cfg.coreset_interleaver_size;
+  s_disc_saved[5] = g_cfg.coreset_shift_index;
+  s_disc_saved[6] = g_cfg.coreset_pdcch_dmrs_scrambling_id;
+  s_disc_saved[7] = g_cfg.ss_first_symbol;
+  extent_log_evidence_before_clear();
+  extent_clear_evidence(); /* bumps the generation: the RT path invalidates its length sweep */
+  g_cfg.dci_length_override = 0;
+  g_cfg.coreset_rb_offset = d->rb;
+  g_cfg.coreset_freq_domain = d->ng;
+  g_cfg.coreset_duration = d->dur;
+  g_cfg.coreset_reg_bundle_size = d->L;
+  g_cfg.coreset_interleaver_size = d->R;
+  g_cfg.coreset_shift_index = d->sh;
+  g_cfg.coreset_pdcch_dmrs_scrambling_id = d->nid;
+  g_cfg.ss_first_symbol = d->sym;
+  s_disc_active = true;
+  s_disc_pending = false;
+  LOG_A(PHY, "SENSING: CORESET %d/%d from decode-free discovery: nID=%d sym=%d dur=%d grid_rb=%d groups=%d "
+             "bundle=%d interleaver=%d shift=%d (unverified)\n",
+        s_disc_next + 1, s_disc_n, d->nid, d->sym, d->dur, d->rb, d->ng, d->L, d->R, d->sh);
+  return true;
+}
+
+/* ---- Lookahead lanes: see nr_pdcch_blind_monitor.h's own comment for the design. Lanes draw
+ * unique (extent,mapping) tasks from a shared producer-thread catalogue. */
 typedef struct {
   bool active;
+  bool fast_length_only;
   int  ext_idx;
   int  rb_offset;
   int  freq_domain;
@@ -573,6 +883,11 @@ typedef struct {
   extent_evidence_t evidence[NR_PDCCH_BLIND_MAX_UE];
 } nr_pdcch_lookahead_lane_t;
 static nr_pdcch_lookahead_lane_t s_lane[NR_PDCCH_LOOKAHEAD_MAX];
+static int s_lane_dispatch_ext;
+static int s_lane_dispatch_map;
+static int s_lane_dispatch_phase;
+static int s_lane_dispatch_stage;
+static int s_lane_dispatch_map_max;
 
 int nr_pdcch_blind_lookahead_count(void)
 {
@@ -598,25 +913,92 @@ static void lane_map_apply(int lane)
   ln->shift_index       = m->shift;
 }
 
-static void lane_assign(int lane, int ext_idx)
+static int lane_map_count(int ext, nr_pdcch_map_cand_t *out)
+{
+  const int span_rb = (s_ext_cand[ext].last_w - s_ext_cand[ext].first_w + 1) * 6;
+  const int full_n = nr_pdcch_map_candidates(span_rb, g_cfg.coreset_duration,
+                                             g_cfg.coreset_pdcch_dmrs_scrambling_id,
+                                             out, NR_PDCCH_MAP_MAX_CAND);
+  const char *e = getenv("ISAC_MAP_PASS0_ONLY");
+  if (e != NULL && atoi(e) == 0)
+    return full_n; /* explicitly exhaustive from the first lap */
+  if (s_lane_dispatch_stage == 0 && s_map_pass0_n > 0 && s_map_pass0_n < full_n)
+    return s_map_pass0_n;
+  return full_n;
+}
+
+static int lane_catalog_map_max(void)
+{
+  nr_pdcch_map_cand_t tmp[NR_PDCCH_MAP_MAX_CAND];
+  int max_n = 0;
+  for (int ext = 0; ext < s_ext_n; ++ext) {
+    const int n = lane_map_count(ext, tmp);
+    if (n > max_n)
+      max_n = n;
+  }
+  return max_n;
+}
+
+static bool lane_assign_next(int lane)
 {
   nr_pdcch_lookahead_lane_t *ln = &s_lane[lane];
-  if (ext_idx < 0 || ext_idx >= s_ext_n) {
-    ln->active = false;
-    return;
-  }
-  ln->ext_idx       = ext_idx;
-  ln->rb_offset     = s_ext_cand[ext_idx].first_w * 6;
-  ln->freq_domain   = s_ext_cand[ext_idx].last_w - s_ext_cand[ext_idx].first_w + 1;
-  const int span_rb = ln->freq_domain * 6;
-  ln->map_n = nr_pdcch_map_candidates(span_rb, g_cfg.coreset_duration, g_cfg.coreset_pdcch_dmrs_scrambling_id,
-                                      ln->map_cand, NR_PDCCH_MAP_MAX_CAND);
-  ln->map_idx = 0;
-  memset(ln->evidence, 0, sizeof(ln->evidence));
-  ln->occ    = 0;
-  ln->active = (ln->map_n > 0);
-  if (ln->active)
+  while (s_ext_n > 0) {
+    if (s_lane_dispatch_map >= s_lane_dispatch_map_max) {
+      if (s_lane_dispatch_stage == 0 && map_staging_enabled()) {
+        s_lane_dispatch_stage = 1;
+        s_lane_dispatch_ext = 0;
+        s_lane_dispatch_map = 0;
+        s_lane_dispatch_phase = 0;
+        s_lane_dispatch_map_max = lane_catalog_map_max();
+        LOG_A(PHY, "SENSING: autodiscover mapping stage 1: fast catalog assigned, widening to "
+                   "all lengths, shifts and RB phases\n");
+      } else {
+        ln->active = false;
+        return false;
+      }
+    }
+
+    /* Extent is the innermost cursor. Saturated occupancy means the edge is unknown, so spending
+     * every mapping/phase on one width before touching the next one starves later physical
+     * CORESETs. Visit every extent at the same mapping/phase first; mapping and phase remain fully
+     * exhaustive, only their order changes. */
+    if (s_lane_dispatch_ext >= s_ext_n) {
+      s_lane_dispatch_ext = 0;
+      if (++s_lane_dispatch_phase >= 6) {
+        s_lane_dispatch_phase = 0;
+        ++s_lane_dispatch_map;
+      }
+      continue;
+    }
+
+    const int ext = s_lane_dispatch_ext++;
+    ln->ext_idx       = ext;
+    ln->freq_domain   = s_ext_cand[ext].last_w - s_ext_cand[ext].first_w + 1;
+    const int span_rb = ln->freq_domain * 6;
+    ln->map_n = lane_map_count(ext, ln->map_cand);
+    if (s_lane_dispatch_map >= ln->map_n)
+      continue;
+
+    const int map_idx = s_lane_dispatch_map;
+    const int phase_idx = s_lane_dispatch_phase;
+    ln->rb_offset = s_ext_cand[ext].first_w * 6 + extent_phase(phase_idx);
+    if (ln->rb_offset + span_rb > g_cfg.bwp_size)
+      continue;
+
+    ln->map_idx = map_idx;
+    ln->fast_length_only = (s_lane_dispatch_stage == 0 && map_staging_enabled());
+    memset(ln->evidence, 0, sizeof(ln->evidence));
+    ln->occ = 0;
+    ln->active = true;
     lane_map_apply(lane);
+    if (getenv("ISAC_DISCOVER_DIAG") != NULL)
+      LOG_I(PHY, "SENSING: LOOKAHEAD_ASSIGN lane=%d extent=%d offset=%d span=%d bundle=%d interleaver=%d shift=%d fast=%d\n",
+            lane, ext, ln->rb_offset, span_rb, ln->reg_bundle_size, ln->interleaver_size,
+            ln->shift_index, ln->fast_length_only);
+    return true;
+  }
+  ln->active = false;
+  return false;
 }
 
 /* Called once a fresh footprint is found (nr_pdcch_blind_monitor_autodiscover_step), same moment
@@ -624,13 +1006,22 @@ static void lane_assign(int lane, int ext_idx)
 static void lookahead_lanes_init(void)
 {
   const int k = nr_pdcch_blind_lookahead_count();
+  /* The primary owns task (extent 0, mapping 0). Every lane draws a different subsequent task
+   * from one shared two-dimensional catalogue. The old design spread lanes over extents but put
+   * every one at mapping 0, making an L=6 interleaved CORESET wait behind thousands of occasions
+   * of unrelated mappings. */
+  const char *map_env = getenv("ISAC_MAP_PASS0_ONLY");
+  s_lane_dispatch_stage = (map_env != NULL && atoi(map_env) == 0) ? 1 : 0;
+  s_lane_dispatch_ext = 1; /* primary owns extent 0 / mapping 0 / preferred phase */
+  s_lane_dispatch_map = 0;
+  s_lane_dispatch_phase = 0;
+  s_lane_dispatch_map_max = lane_catalog_map_max();
   for (int L = 0; L < NR_PDCCH_LOOKAHEAD_MAX; L++) {
-    if (L >= k || s_ext_n <= 1) {
+    if (L >= k || s_ext_n <= 0) {
       s_lane[L].active = false;
       continue;
     }
-    const int start = ((L + 1) * s_ext_n) / (k + 1);
-    lane_assign(L, start % s_ext_n);
+    lane_assign_next(L);
   }
 }
 
@@ -639,13 +1030,7 @@ static void lane_advance(int lane)
   nr_pdcch_lookahead_lane_t *ln = &s_lane[lane];
   memset(ln->evidence, 0, sizeof(ln->evidence));
   ln->occ = 0;
-  if (++ln->map_idx < ln->map_n) {
-    lane_map_apply(lane);
-    return;
-  }
-  const int k    = nr_pdcch_blind_lookahead_count();
-  const int next = (s_ext_n > 0) ? (ln->ext_idx + k + 1) % s_ext_n : -1;
-  lane_assign(lane, next);
+  lane_assign_next(lane);
 }
 
 bool nr_pdcch_blind_lookahead_get(int lane, nr_pdcch_lookahead_geom_t *out)
@@ -659,6 +1044,7 @@ bool nr_pdcch_blind_lookahead_get(int lane, nr_pdcch_lookahead_geom_t *out)
   if (!s_dedicated_found || s_ext_verified || !ln->active)
     return false;
   out->valid            = true;
+  out->fast_length_only = ln->fast_length_only;
   out->rb_offset         = ln->rb_offset;
   out->freq_domain       = ln->freq_domain;
   out->reg_bundle_size   = ln->reg_bundle_size;
@@ -684,14 +1070,16 @@ bool nr_pdcch_blind_lookahead_observe(int lane, uint16_t rnti, uint32_t slot, ui
          * dci_length_override is deliberately left to the caller (see header comment) -- rt.c owns
          * the per-lane length-sweep state this needs. */
         g_cfg.coreset_rb_offset        = ln->rb_offset;
-        g_cfg.coreset_freq_domain      = ln->freq_domain;
+        g_cfg.coreset_freq_domain      = extent_operational_groups(
+            ln->rb_offset, ln->freq_domain, ln->reg_bundle_size);
         g_cfg.coreset_reg_bundle_size  = ln->reg_bundle_size;
         g_cfg.coreset_interleaver_size = ln->interleaver_size;
         g_cfg.coreset_shift_index      = ln->shift_index;
         s_ext_verified = true;
         ++s_ext_generation;
-        LOG_A(PHY, "SENSING: CORESET VERIFIED by lookahead lane %d: offset=%d span=%d rnti=0x%x\n",
-              lane, ln->rb_offset, ln->freq_domain * 6, rnti);
+        LOG_A(PHY, "SENSING: CORESET VERIFIED by lookahead lane %d: offset=%d observed_span=%d "
+                   "scan_span=%d rnti=0x%x\n",
+              lane, ln->rb_offset, ln->freq_domain * 6, g_cfg.coreset_freq_domain * 6, rnti);
         return true;
       }
       return false;
@@ -727,8 +1115,11 @@ void nr_pdcch_blind_monitor_autodiscover_reset(void)
 {
   s_css0_applied = false;
   s_dedicated_found = false;
-  s_ext_n = s_ext_idx = 0;
+  s_ext_n = s_ext_idx = s_ext_phase_idx = 0;
+  s_map_stage = 0;
   s_map_n = s_map_idx = 0;
+  s_lane_dispatch_ext = s_lane_dispatch_map = s_lane_dispatch_phase = 0;
+  s_lane_dispatch_stage = s_lane_dispatch_map_max = 0;
   memset(s_hit_count, 0, sizeof(s_hit_count));
   memset(s_hit_count1, 0, sizeof(s_hit_count1));
   s_obs_calls = 0;
@@ -751,7 +1142,7 @@ int nr_pdcch_map_candidates(int span_rb, int duration, int pci, nr_pdcch_map_can
     if (pr != NULL && pr->coreset_valid && pr->interleaved && n < max_out) {
       out[n++] = (nr_pdcch_map_cand_t){(uint8_t)pr->reg_bundle_size,
                                        (uint8_t)pr->interleaver_size,
-                                       (uint8_t)pr->shift_index};
+                                       (uint16_t)pr->shift_index};
     }
   }
   out[n++] = (nr_pdcch_map_cand_t){0, 0, 0}; /* non-interleaved: this project's every captured dedicated CORESET */
@@ -769,16 +1160,23 @@ int nr_pdcch_map_candidates(int span_rb, int duration, int pci, nr_pdcch_map_can
    * in seconds rather than minutes. shiftIndex is overwhelmingly either 0 or PCI-derived in real
    * deployments, so this covers the likely answers first and simply MISSES an exotic shift -- run
    * without the knob to get the exhaustive walk back. Default off; nothing changes silently. */
-  static int s_pass0_only = -1;
-  if (s_pass0_only < 0) {
+  /* 2026-09-21 (user: shrink the search from what SIB1/PCI give): pass 0 is now the DEFAULT first
+   * lap -- every extent is walked with only the PCI residue / shift 0 mappings, and pass 1 (every
+   * other shift) is added only after the whole extent catalogue has been assigned once at pass 0
+   * (s_map_stage, advanced by lane_assign). ISAC_MAP_PASS0_ONLY=1 never widens; =0 is the old
+   * exhaustive walk from the start. */
+  static int s_pass0_env = -1;
+  if (s_pass0_env < 0) {
     const char *e = getenv("ISAC_MAP_PASS0_ONLY");
-    s_pass0_only = (e != NULL && atoi(e) == 1) ? 1 : 0;
+    s_pass0_env = (e == NULL) ? -2 : ((atoi(e) == 1) ? 1 : 0);   /* -2 = staged (default) */
   }
-  const int n_pass = s_pass0_only ? 1 : 2;
+  const int n_pass = (s_pass0_env == 1) ? 1 : 2;   /* staging is applied by the callers, see map_stage_truncate() */
+  int n_pass0 = 0;
   for (int pass = 0; pass < n_pass; pass++) {
+    if (pass == 1) n_pass0 = n;
     for (int li = 0; li < 2; li++) {
       const int nb = N_reg / L[li];             /* REG bundles; the shift acts modulo this */
-      if (L[li] % duration != 0 || nb > 255)   /* demapper: B_rb = L/duration; FAPI ShiftIndex is 8-bit */
+      if (L[li] % duration != 0)
         continue;
       const int p = pci % nb;
       for (int ri = 0; ri < 3; ri++) {
@@ -787,20 +1185,29 @@ int nr_pdcch_map_candidates(int span_rb, int duration, int pci, nr_pdcch_map_can
           continue;
         if (pass == 0) {
           if (n < max_out)
-            out[n++] = (nr_pdcch_map_cand_t){(uint8_t)L[li], (uint8_t)R, (uint8_t)p};
+            out[n++] = (nr_pdcch_map_cand_t){(uint8_t)L[li], (uint8_t)R, (uint16_t)p};
           if (p != 0 && n < max_out)
             out[n++] = (nr_pdcch_map_cand_t){(uint8_t)L[li], (uint8_t)R, 0};
         } else {
           for (int sh = 1; sh < nb && n < max_out; sh++)
             if (sh != p)
-              out[n++] = (nr_pdcch_map_cand_t){(uint8_t)L[li], (uint8_t)R, (uint8_t)sh};
+              out[n++] = (nr_pdcch_map_cand_t){(uint8_t)L[li], (uint8_t)R, (uint16_t)sh};
         }
       }
     }
   }
+  s_map_pass0_n = (n_pass == 1) ? n : n_pass0;
   return n;
 }
 
+/* Stage 0 keeps only the pass-0 prefix (PCI residue / shift 0 of every legal (L, R)); stage 1 is
+ * the full list. ISAC_MAP_PASS0_ONLY=0 disables staging (exhaustive from the start). */
+static int map_stage_truncate(int n)
+{
+  const char *e = getenv("ISAC_MAP_PASS0_ONLY");
+  if (e != NULL && atoi(e) == 0) return n;
+  return (s_map_stage == 0 && s_map_pass0_n > 0 && s_map_pass0_n < n) ? s_map_pass0_n : n;
+}
 
 int nr_pdcch_extent_candidates(int first_w, int last_w, int nw_total,
                                nr_pdcch_extent_cand_t* out, int max_out)
@@ -941,6 +1348,76 @@ int nr_pdcch_extent_candidates(int first_w, int last_w, int nw_total,
   return n;
 }
 
+
+static bool extent_catalog_add(nr_pdcch_extent_cand_t *out, int *n, int max_out,
+                               int first_w, int last_w, int nw_total)
+{
+  if (first_w < 0 || last_w < first_w || last_w >= nw_total)
+    return false;
+  for (int i = 0; i < *n; ++i)
+    if (out[i].first_w == first_w && out[i].last_w == last_w)
+      return true;
+  if (*n >= max_out)
+    return false;
+  out[*n] = (nr_pdcch_extent_cand_t){.first_w = first_w, .last_w = last_w};
+  ++*n;
+  return true;
+}
+
+int nr_pdcch_extent_candidates_multi(const int *seed_w, int nseed, int nw_total,
+                                     nr_pdcch_extent_cand_t *out, int max_out)
+{
+  if (out == NULL || max_out <= 0 || nw_total <= 0 || nseed < 0
+      || (nseed > 0 && seed_w == NULL))
+    return 0;
+  for (int i = 0; i < nseed; ++i)
+    if (seed_w[i] < 0 || seed_w[i] >= nw_total)
+      return 0;
+
+  int n = 0;
+  int prior_first = -1, prior_last = -1;
+  if (nr_pdcch_sib1_prior_window(&prior_first, &prior_last) && prior_last < nw_total)
+    extent_catalog_add(out, &n, max_out, prior_first, prior_last, nw_total);
+
+  /* Treat recurrent peaks independently. Joining two peaks into one observed span made every
+   * candidate contain both, which made two per-UE CORESETs undiscoverable by construction. */
+  for (int i = 0; i < nseed; ++i)
+    extent_catalog_add(out, &n, max_out, seed_w[i], seed_w[i], nw_total);
+
+  /* BWP-wide CORESETs are common and occupancy only shows active CCEs, not the edges. */
+  extent_catalog_add(out, &n, max_out, 0, nw_total - 1, nw_total);
+
+  /* Put common widths near every recurrent peak ahead of the exhaustive fallback. Every legal
+   * start containing the peak is retained; no centre/edge guess can exclude the answer. */
+  static const int common_widths[] = {4, 8, 16, 24};
+  for (unsigned wi = 0; wi < sizeof(common_widths) / sizeof(common_widths[0]); ++wi) {
+    const int width = common_widths[wi];
+    if (width > nw_total)
+      continue;
+    for (int i = 0; i < nseed; ++i) {
+      const int lo = seed_w[i] - width + 1 > 0 ? seed_w[i] - width + 1 : 0;
+      const int hi = seed_w[i] < nw_total - width ? seed_w[i] : nw_total - width;
+      const int centre = seed_w[i] - (width - 1) / 2;
+      for (int d = 0; d < nw_total; ++d) {
+        const int f0 = centre - d;
+        const int f1 = centre + d;
+        if (f0 >= lo && f0 <= hi)
+          extent_catalog_add(out, &n, max_out, f0, f0 + width - 1, nw_total);
+        if (d && f1 >= lo && f1 <= hi)
+          extent_catalog_add(out, &n, max_out, f1, f1 + width - 1, nw_total);
+      }
+    }
+  }
+
+  /* Completeness is the safety property: occupancy ranks the search but cannot veto geometry.
+   * Shorter extents come first because they are cheaper to demap and distinguish separate
+   * per-UE CORESETs; the full-carrier fast path above preserves the wide-CORESET case. */
+  for (int width = 1; width <= nw_total && n < max_out; ++width)
+    for (int first = 0; first + width <= nw_total && n < max_out; ++first)
+      extent_catalog_add(out, &n, max_out, first, first + width - 1, nw_total);
+  return n;
+}
+
 #define AUTODISCOVER_MIN_HITS  3
 #define AUTODISCOVER_HITS_PER_WINDOW 30   // mean hits/window required before deciding --
                                           // makes MIN_HITS a real floor rather than noise
@@ -1040,7 +1517,33 @@ bool nr_pdcch_blind_monitor_autodiscover_step(const void* rxdataF_symbol, int of
   int obs_top = 0;
   for (int w = 0; w < NR_PDCCH_MAX_CANDIDATE_WINDOWS; w++)
     if (s_hit_count[w] > obs_top) obs_top = s_hit_count[w];
-  const int lit_floor = (obs_top / 8 > AUTODISCOVER_MIN_HITS) ? obs_top / 8 : AUTODISCOVER_MIN_HITS;
+  /* LIT = SIGNIFICANT AGAINST THE BACKGROUND, not a fraction of the peak (2026-09-21).
+   * top/8 is a RELATIVE rule: it cannot distinguish "everything lit" from "nothing lit", which is
+   * exactly how an ungated, duty-cycle-diluted histogram saturated to 0..44 and triggered the
+   * ~133-footprint fallback. With the occupancy gate in place the histogram is now Poisson counts
+   * over a low background, so the right test is against that background: a window is lit iff it
+   * exceeds mean + k*sqrt(mean) of the OTHER windows. MEASURED on the first gated capture --
+   * background mean 4.75, peak window 39 at 64 hits = 27 sigma -- where top/8 = 8 admitted nine
+   * windows (span 1..40) and this admits one (span 39..39).
+   * The background is the MEDIAN-based mean rather than the plain mean so the peak cannot inflate
+   * the very threshold meant to exclude it. AUTODISCOVER_MIN_HITS remains the absolute floor. */
+  int lit_floor;
+  {
+    int v[NR_PDCCH_MAX_CANDIDATE_WINDOWS], m = 0;
+    for (int w = 0; w < n_rb_carrier / 6 && w < NR_PDCCH_MAX_CANDIDATE_WINDOWS; w++)
+      v[m++] = s_hit_count[w];
+    for (int i = 1; i < m; i++) { int x = v[i]; int j = i - 1; while (j >= 0 && v[j] > x) { v[j+1] = v[j]; j--; } v[j+1] = x; }
+    const double bg = (m > 0) ? (double)v[m / 2] : 0.0;   /* median = background, peak-immune */
+    const double k = 5.0;
+    const int stat_floor = (int)(bg + k * sqrt(bg > 1.0 ? bg : 1.0) + 0.5);
+    lit_floor = stat_floor > AUTODISCOVER_MIN_HITS ? stat_floor : AUTODISCOVER_MIN_HITS;
+    /* NO CLAMP TO THE PEAK. It was here so a uniform CORESET could not go unlit, but it also
+     * guarantees the strongest window is ALWAYS lit, which defeats the significance test entirely:
+     * MEASURED 2026-09-21, a window at 11 hits against a background of 6 (~2 sigma, i.e. noise)
+     * was declared a footprint (rb_offset=12 span_rb=6) purely because it was the maximum. When
+     * nothing is significant the right answer is to keep observing -- which the caller already
+     * does when first_w < 0. */
+  }
   int obs_lit = 0;
   for (int w = 0; w < NR_PDCCH_MAX_CANDIDATE_WINDOWS; w++)
     obs_lit += (s_hit_count[w] >= lit_floor);
@@ -1060,6 +1563,30 @@ bool nr_pdcch_blind_monitor_autodiscover_step(const void* rxdataF_symbol, int of
   memset(s_hit_count1, 0, sizeof(s_hit_count1));
     s_obs_calls = 0;
     return false;
+  }
+  /* BACKGROUND MUST BE ESTIMABLE BEFORE THE SIGNIFICANCE TEST CAN RUN -- see the note on
+   * lit_floor. With the occupancy gate the histogram fills ~20x more slowly than the 1000-call
+   * dwell assumes, and a median of 0 turns `median + 5*sqrt(median)` into a flat floor of 5, which
+   * declared a different footprint every dwell (rb_offset 12 / 36 / 42; peaks at windows 39/17/6).
+   * Hold the decision until the median window count is meaningful. Still bounded by
+   * AUTODISCOVER_MAX_OBS_CALLS, so a genuinely empty cell gives up exactly as before. */
+  {
+    static int s_min_bg = -1;
+    if (s_min_bg < 0) {
+      const char *e = getenv("ISAC_DISCOVER_MIN_BG");
+      s_min_bg = (e != NULL) ? atoi(e) : 3;
+      if (s_min_bg < 0) s_min_bg = 0;
+    }
+    if (s_min_bg > 0) {
+      int v[NR_PDCCH_MAX_CANDIDATE_WINDOWS], m = 0;
+      for (int w = 0; w < n_rb_carrier / 6 && w < NR_PDCCH_MAX_CANDIDATE_WINDOWS; w++)
+        v[m++] = s_hit_count[w];
+      for (int i = 1; i < m; i++) { int x = v[i]; int j = i - 1; while (j >= 0 && v[j] > x) { v[j+1] = v[j]; j--; } v[j+1] = x; }
+      const int bg = (m > 0) ? v[m / 2] : 0;
+      if (bg < s_min_bg && s_obs_calls < AUTODISCOVER_MAX_OBS_CALLS) {
+        return false;  /* keep observing: the background is not yet estimable */
+      }
+    }
   }
   if (s_obs_calls < AUTODISCOVER_OBS_CALLS || obs_total_hits < obs_hits_needed) {
     return false;
@@ -1097,37 +1624,117 @@ bool nr_pdcch_blind_monitor_autodiscover_step(const void* rxdataF_symbol, int of
   // confirmed -- the same "generous, scan-everything" philosophy this function already applies
   // below to fields it cannot determine precisely. A short internal gap of unconfirmed windows
   // (a CCE range this dwell just didn't happen to use) is still safely inside a real CORESET's span.
-  int first_w = -1, last_w = -1;
-  for (int w = 0; w < n_rb_carrier / 6 && w < NR_PDCCH_MAX_CANDIDATE_WINDOWS; w++) {
-    if (s_hit_count[w] >= lit_floor) {
-      if (first_w < 0) {
-        first_w = w;
-      }
-      last_w = w;
-    }
+  /* TOP-3 peaks with their significance -- the lit SPAN hides whether a second CORESET exists. */
+  {
+    int t[3] = {-1, -1, -1};
+    for (int w = 0; w < n_rb_carrier / 6 && w < NR_PDCCH_MAX_CANDIDATE_WINDOWS; w++)
+      for (int i = 0; i < 3; i++)
+        if (t[i] < 0 || s_hit_count[w] > s_hit_count[t[i]]) {
+          for (int j = 2; j > i; j--) t[j] = t[j - 1];
+          t[i] = w;
+          break;
+        }
+    int v[NR_PDCCH_MAX_CANDIDATE_WINDOWS], m = 0;
+    for (int w = 0; w < n_rb_carrier / 6 && w < NR_PDCCH_MAX_CANDIDATE_WINDOWS; w++) v[m++] = s_hit_count[w];
+    for (int i = 1; i < m; i++) { int x = v[i]; int j = i - 1; while (j >= 0 && v[j] > x) { v[j+1] = v[j]; j--; } v[j+1] = x; }
+    const double bg = (m > 0) ? (double)v[m / 2] : 0.0;
+    const double sd = sqrt(bg > 1.0 ? bg : 1.0);
+    LOG_A(PHY,
+          "SENSING: COREMAPTOP bg=%.1f excl_w=%d..%d top: w%d=%d(%.1fsig) w%d=%d(%.1fsig) w%d=%d(%.1fsig)\n",
+          bg, s_css0_excl_first_w, s_css0_excl_last_w,
+          t[0], t[0] >= 0 ? s_hit_count[t[0]] : 0, t[0] >= 0 ? (s_hit_count[t[0]] - bg) / sd : 0.0,
+          t[1], t[1] >= 0 ? s_hit_count[t[1]] : 0, t[1] >= 0 ? (s_hit_count[t[1]] - bg) / sd : 0.0,
+          t[2], t[2] >= 0 ? s_hit_count[t[2]] : 0, t[2] >= 0 ? (s_hit_count[t[2]] - bg) / sd : 0.0);
   }
-  if (first_w < 0) {
-    // Nothing confirmed this observation window -- reset and keep trying rather than declaring
-    // failure permanently (the caller re-invokes this every DL slot for as long as autodiscover
-    // stays unconverged; see the handover doc's note on this cost being unbounded).
+  /* LONG-TERM ACCUMULATION + RECURRENCE REPORT. The per-dwell histogram is about to be consumed
+   * and reset; fold it into evidence that survives, because recurrence across dwells -- not peak
+   * height within one -- is what distinguishes a UE's CORESET from a burst. */
+  {
+    const int nw = n_rb_carrier / 6;
+    int t3[3] = {-1, -1, -1};
+    for (int w = 0; w < nw && w < NR_PDCCH_MAX_CANDIDATE_WINDOWS; w++) {
+      s_lt_hits[w] += (unsigned long)s_hit_count[w];
+      if (s_css0_excl_first_w >= 0 && w >= s_css0_excl_first_w && w <= s_css0_excl_last_w) continue;
+      for (int i = 0; i < 3; i++)
+        if (t3[i] < 0 || s_hit_count[w] > s_hit_count[t3[i]]) {
+          for (int j = 2; j > i; j--) t3[j] = t3[j - 1];
+          t3[i] = w;
+          break;
+        }
+    }
+    for (int i = 0; i < 3; i++)
+      if (t3[i] >= 0 && s_hit_count[t3[i]] > 0) s_lt_dwells[t3[i]]++;
+    s_lt_ndwell++;
+    int ord[NR_PDCCH_MAX_CANDIDATE_WINDOWS], n_ord = 0;
+    for (int w = 0; w < nw && w < NR_PDCCH_MAX_CANDIDATE_WINDOWS; w++)
+      if (s_lt_dwells[w] > 0) ord[n_ord++] = w;
+    for (int i = 1; i < n_ord; i++) {
+      const int x = ord[i];
+      int j = i - 1;
+      while (j >= 0 && s_lt_dwells[ord[j]] < s_lt_dwells[x]) { ord[j + 1] = ord[j]; j--; }
+      ord[j + 1] = x;
+    }
+    char b[700];
+    int u = 0;
+    for (int i = 0; i < n_ord && i < 8 && u < (int)sizeof(b) - 40; i++) {
+      const int w = ord[i];
+      u += snprintf(b + u, sizeof(b) - u, "w%d:%u/%u dwells,%lu hits,rnti=0x%04x  ",
+                    w, s_lt_dwells[w], s_lt_ndwell, s_lt_hits[w], s_lt_rnti[w]);
+    }
+    LOG_A(PHY, "SENSING: COREMAPLT dwell=%u (recurrence across dwells; excl w%d..%d) %s\n",
+          s_lt_ndwell, s_css0_excl_first_w, s_css0_excl_last_w, b);
+  }
+  const int nw_total = n_rb_carrier / 6;
+
+  /* Do not commit a permanent catalogue from one transient dwell. Measured on Salt, the old path
+   * committed after dwell 3 to w13 although the persistent table had w0 and w13 tied at 2/3. It
+   * then generated only the 322 intervals containing w13, making every CORESET elsewhere
+   * impossible to discover. Eight independent dwells are cheap compared with the catalogue walk. */
+  enum { MIN_ORACLE_DWELLS = 8, MAX_ORACLE_SEEDS = 8 };
+  if (s_lt_ndwell < MIN_ORACLE_DWELLS) {
     memset(s_hit_count, 0, sizeof(s_hit_count));
-  memset(s_hit_count1, 0, sizeof(s_hit_count1));
+    memset(s_hit_count1, 0, sizeof(s_hit_count1));
     s_obs_calls = 0;
     return false;
   }
-  /* Occupancy is a lower bound, not the CORESET boundary. Search all containing
-   * contiguous intervals; the legacy full-carrier snap affects trial order only. */
-  const int nw_total = n_rb_carrier / 6;
 
-  /* Geometry verification uses only fresh dedicated DCI evidence collected in this epoch. */
-  s_ext_n = nr_pdcch_extent_candidates(first_w, last_w, nw_total, s_ext_cand, NR_PDCCH_EXTENT_MAX_CAND);
+  int seeds[MAX_ORACLE_SEEDS];
+  int nseed = 0;
+  const unsigned recurrence_floor = (s_lt_ndwell + 4) / 5; /* >=20% of independent dwells */
+  for (int rank = 0; rank < MAX_ORACLE_SEEDS; ++rank) {
+    int best = -1;
+    for (int w = 0; w < nw_total && w < NR_PDCCH_MAX_CANDIDATE_WINDOWS; ++w) {
+      if (s_css0_excl_first_w >= 0 && w >= s_css0_excl_first_w && w <= s_css0_excl_last_w)
+        continue;
+      bool used = false;
+      for (int i = 0; i < nseed; ++i)
+        used |= seeds[i] == w;
+      if (!used && s_lt_dwells[w] >= recurrence_floor
+          && (best < 0 || s_lt_dwells[w] > s_lt_dwells[best]
+              || (s_lt_dwells[w] == s_lt_dwells[best] && s_lt_hits[w] > s_lt_hits[best])))
+        best = w;
+    }
+    if (best < 0)
+      break;
+    seeds[nseed++] = best;
+  }
+
+  /* Geometry verification uses only fresh dedicated DCI evidence collected in this epoch. The
+   * catalogue is complete even when nseed==0: oracle evidence changes order, never eligibility. */
+  s_ext_n = nr_pdcch_extent_candidates_multi(seeds, nseed, nw_total,
+                                             s_ext_cand, NR_PDCCH_EXTENT_MAX_CAND);
+  if (s_ext_n <= 0)
+    return false;
   s_ext_idx = 0;
+  s_ext_phase_idx = 0;
   extent_clear_evidence();
-  lookahead_lanes_init();
 
-  first_w = s_ext_cand[0].first_w;
-  last_w  = s_ext_cand[0].last_w;
-  const int rb_offset = first_w * 6;
+  int first_w = s_ext_cand[0].first_w;
+  int last_w  = s_ext_cand[0].last_w;
+  LOG_A(PHY, "SENSING: recurrent oracle committed after %u dwells: seeds=%d floor=%u catalog=%d\n",
+        s_lt_ndwell, nseed, recurrence_floor, s_ext_n);
+  /* The oracle phase orders six physical RB-phase hypotheses; it is not dedicated-BWP truth. */
+  const int rb_offset = first_w * 6 + extent_phase(0);
   const int span_rb   = (last_w - first_w + 1) * 6;
 
   g_cfg.coreset_type            = 0;  // PDCCH-Config (dedicated), NOT MIB/SIB1 -- see coreset_type's
@@ -1278,6 +1885,8 @@ bool nr_pdcch_blind_monitor_autodiscover_step(const void* rxdataF_symbol, int of
   (void)age;
 
   s_dedicated_found = true;
+  /* Initialize only after the discovered duration, BWP and PCI are final. */
+  lookahead_lanes_init();
 
   LOG_A(PHY, "SENSING: Phase 3 autodiscover -- CORESET footprint rb_offset=%d span_rb=%d "
             "bootstrap_rnti=0x%x\n", rb_offset, span_rb, bootstrap_rnti);
@@ -1289,6 +1898,28 @@ bool nr_pdcch_blind_monitor_autodiscover_step(const void* rxdataF_symbol, int of
 void nr_pdcch_blind_monitor_autodiscover_set_dci_length(int dci_length)
 {
   g_cfg.dci_length_override = dci_length;
+}
+
+void nr_pdcch_blind_monitor_autodiscover_next(void)
+{
+  if (!s_ext_verified)
+    return;
+  /* The caller has copied the verified config into its operational bank. Re-arm only discovery;
+   * CSS0 and the long-term occupancy evidence remain valid. */
+  s_dedicated_found = false;
+  s_ext_n = s_ext_idx = s_ext_phase_idx = 0;
+  s_map_stage = 0;
+  s_map_n = s_map_idx = 0;
+  s_lane_dispatch_ext = s_lane_dispatch_map = s_lane_dispatch_phase = 0;
+  s_lane_dispatch_stage = s_lane_dispatch_map_max = 0;
+  memset(s_hit_count, 0, sizeof(s_hit_count));
+  memset(s_hit_count1, 0, sizeof(s_hit_count1));
+  s_obs_calls = 0;
+  g_cfg.dci_length_override = 0;
+  memset(s_lane, 0, sizeof(s_lane));
+  extent_clear_evidence();
+  discovered_verified(); /* a banked discovered CORESET moves the hand-off on (and may pause the walk) */
+  LOG_A(PHY, "SENSING: multi-CORESET discovery resumed (verified bank retained by RT monitor)\n");
 }
 
 /* Called once per candidate-bearing occasion once the footprint is found. Returns true when it
@@ -3078,9 +3709,9 @@ bool nr_pdcch_blind_decode_and_extract(const int16_t* llr,
                                               rnti_min, rnti_max, NULL /* spec defaults */, out);
 }
 
-bool nr_pdcch_blind_decode_raw_11(const int16_t *llr, uint8_t aggregation_level,
+bool nr_pdcch_blind_decode_raw(const int16_t *llr, uint8_t aggregation_level,
                                  uint16_t dci_length, uint16_t rnti_min, uint16_t rnti_max,
-                                 nr_pdcch_blind_raw_result_t *out)
+                                 bool require_dl_indicator, nr_pdcch_blind_raw_result_t *out)
 {
   if (!out) return false;
   memset(out,0,sizeof(*out));
@@ -3097,12 +3728,19 @@ bool nr_pdcch_blind_decode_raw_11(const int16_t *llr, uint8_t aggregation_level,
     out->reject_reason="CRC-recovered value outside plausible RNTI range";
     return false;
   }
-  if(((bits[0]>>(dci_length-1))&1)==0) {
+  if(require_dl_indicator && ((bits[0]>>(dci_length-1))&1)==0) {
     out->reject_reason="format indicator=0 (UL grant, not DL)";
     return false;
   }
   out->mismatched_bits=blind_mismatched_bits(llr,bits,crc,aggregation_level,dci_length);
   return true;
+}
+
+bool nr_pdcch_blind_decode_raw_11(const int16_t *llr, uint8_t aggregation_level,
+                                 uint16_t dci_length, uint16_t rnti_min, uint16_t rnti_max,
+                                 nr_pdcch_blind_raw_result_t *out)
+{
+  return nr_pdcch_blind_decode_raw(llr, aggregation_level, dci_length, rnti_min, rnti_max, true, out);
 }
 
 bool nr_pdcch_blind_extract_11(const nr_pdcch_blind_raw_result_t *raw,

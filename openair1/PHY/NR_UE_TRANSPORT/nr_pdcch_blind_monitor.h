@@ -153,6 +153,10 @@ typedef struct {
   uint16_t mismatched_bits;
   const char *reject_reason;
 } nr_pdcch_blind_raw_result_t;
+/* Format-neutral polar/CRC core. SI/RA/P DCI 1_0 have no DL/UL indicator. */
+bool nr_pdcch_blind_decode_raw(const int16_t *llr, uint8_t aggregation_level,
+                               uint16_t dci_length, uint16_t rnti_min, uint16_t rnti_max,
+                               bool require_dl_indicator, nr_pdcch_blind_raw_result_t *out);
 bool nr_pdcch_blind_decode_raw_11(const int16_t *llr, uint8_t aggregation_level,
                                  uint16_t dci_length, uint16_t rnti_min, uint16_t rnti_max,
                                  nr_pdcch_blind_raw_result_t *out);
@@ -466,6 +470,12 @@ bool nr_pdcch_blind_monitor_autoconf_css0(int num_rbs,
  * and populated g_cfg for it. This is NOT a verification verdict. Distinct from g_cfg.bwp_size, which CSS0 autoconf above
  * may already have set for the COMMON search space by the time this is first checked. */
 bool nr_pdcch_blind_monitor_autodiscover_done(void);
+/* Apply /tmp/coresets_discovered.txt (stage 1-2 hand-off) when it changes; true if applied. */
+bool nr_pdcch_blind_monitor_discovered_poll(void);
+bool nr_pdcch_blind_monitor_bank_has_geometry(int rb_offset, int groups, int duration, int bundle, int interleaver,
+                                               int shift, int nid);
+/* True while every discovered CORESET is verified: the catalog walk (and its decode pass) is paused. */
+bool nr_pdcch_blind_monitor_discovery_paused(void);
 
 /** Advance the current geometry after an inconclusive length budget. The offset is not
  * blacklisted: other widths and future observations remain eligible. */
@@ -493,6 +503,8 @@ bool nr_pdcch_blind_monitor_autodiscover_step(const void* rxdataF_symbol, int of
  * tap -- which only ever sees the const nr_pdcch_blind_monitor_get_cfg() accessor -- needs this
  * setter rather than writing g_cfg.dci_length_override directly. */
 void nr_pdcch_blind_monitor_autodiscover_set_dci_length(int dci_length);
+/** Archive/activate the verified geometry externally, then resume occupancy discovery for another CORESET. */
+void nr_pdcch_blind_monitor_autodiscover_next(void);
 
 /**
  * @brief DCI format 1_1 payload bit-width under this module's fixed MVP assumption set (see the
@@ -827,9 +839,16 @@ int32_t nr_pdcch_blind_dmrs_mask(int dmrs_TypeA_Position, int NrOfSymbols, int s
 int nr_pdcch_extent_candidates(int first_w, int last_w, int nw_total,
                                nr_pdcch_extent_cand_t* out, int max_out);
 
+/** Build a complete extent catalogue from independent recurrent occupancy peaks. Peaks are
+ * hypotheses for separate CORESETs, so no candidate is forced to span all of them. The recurrent
+ * single-window and common-width hypotheses are ordered first; every contiguous interval remains
+ * in the fallback, making an imperfect oracle unable to exclude the true geometry. */
+int nr_pdcch_extent_candidates_multi(const int *seed_w, int nseed, int nw_total,
+                                     nr_pdcch_extent_cand_t *out, int max_out);
+
 /** One CCE-to-REG mapping hypothesis for a dedicated CORESET (TS 38.211 7.3.2.2): bundle = 0 is
  *  non-interleaved; otherwise (L, R, n_shift) with n_shift already reduced modulo N_REG/L. */
-typedef struct { uint8_t bundle; uint8_t interleaver; uint8_t shift; } nr_pdcch_map_cand_t;
+typedef struct { uint8_t bundle; uint8_t interleaver; uint16_t shift; } nr_pdcch_map_cand_t;
 
 /** Enumerate the legal CCE-to-REG mappings of a CORESET of span_rb x duration, decided by DCI CRC
  *  evidence exactly like the extent hypotheses. Order: non-interleaved first, then for each legal
@@ -860,10 +879,24 @@ void nr_pdcch_blind_rnti_bootstrap_record(uint16_t rnti, uint8_t rnti_class, uin
 /* Same, but marks the sighting TRUSTED: it came from a CORESET whose mapping is PROVEN (CORESET#0,
  * confirmed by SIB1 decodes) rather than from an unverified hypothesis. A trusted entry is live at
  * ONE sighting -- see boot_entry_live() for why the two-sighting rule cannot apply to TC-RNTI. */
+/** Tag currently-lit CORESET windows with an accepted C-RNTI, so a window can be tied to a UE --
+ *  the test for whether each UE has its own dedicated CORESET. Diagnostic; consumes no decision. */
+void nr_pdcch_blind_monitor_note_rnti_for_windows(uint16_t rnti);
+
 void nr_pdcch_blind_rnti_bootstrap_record_trusted(uint16_t rnti, uint8_t rnti_class, uint32_t abs_slot);
+/* The RAR chain (RA-RNTI decomposition -> TB CRC -> TC-RNTI): live at ONE sighting. */
+void nr_pdcch_blind_rnti_bootstrap_record_verified(uint16_t rnti, uint8_t rnti_class, uint32_t abs_slot);
+/* Five changing payloads for the same (CORESET,RNTI,length), each from a distinct OTA occasion. */
+void nr_pdcch_blind_rnti_bootstrap_record_corroborated(uint16_t rnti, uint8_t rnti_class,
+                                                       uint32_t abs_slot);
 
 /** All currently confirmed, non-stale C-RNTIs. Returns how many were written. */
 int nr_pdcch_blind_monitor_confirmed_rnti_set(uint32_t now_abs_slot, uint16_t *out, int max_out);
+/* Subset whose identity came from a CRC-valid RAR chain. Unlike recurrence-only entries, these are
+ * safe inputs to the UE-specific CCE hash before a dedicated CORESET has been discovered. */
+int nr_pdcch_blind_monitor_verified_rnti_set(uint32_t now_abs_slot, uint16_t *out, int max_out);
+/* Confirmed C-RNTIs only. TC-RNTIs from CFRA are not operational USS identities. */
+int nr_pdcch_blind_monitor_dedicated_rnti_set(uint32_t now_abs_slot, uint16_t *out, int max_out);
 /** Is this RNTI a confirmed, non-stale UE? */
 bool nr_pdcch_blind_monitor_rnti_confirmed(uint32_t now_abs_slot, uint16_t rnti);
 
@@ -907,6 +940,7 @@ void nr_pdcch_blind_monitor_autodiscover_reset(void);
 #define NR_PDCCH_LOOKAHEAD_MAX 127
 typedef struct {
   bool valid;             // this lane owns a live candidate this call
+  bool fast_length_only;  // bounded bank-length pass; exhaustive lengths follow in the next lap
   int  rb_offset;
   int  freq_domain;       // span, in 6-RB windows
   int  reg_bundle_size;

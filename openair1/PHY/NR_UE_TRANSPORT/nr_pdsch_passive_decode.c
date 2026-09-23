@@ -243,26 +243,9 @@ typedef struct {
  * successes against its OWN failures -- far stronger than comparing across runs, which is what
  * every cross-run comparison in §§17-29 was reduced to.
  * Sampled every 32nd LLR: G reaches ~150k and this runs per decode. */
-/* Selection diversity: per-branch retry attempts and successes, indexed by receive branch.
- * `try` counts only RETRIES (the default path's own branch is not counted here), so
- * ok[b]/try[b] reads directly as "how often branch b rescued a TB the default branch lost".
- * This is the measurement that decides whether the other branches are usable at all -- the
- * standing hypothesis, never directly tested, is that only branch 0 is. */
-static _Atomic uint64_t g_branch_try[NR_DL_CHEST_MAX_ANT] = {0};
-static _Atomic uint64_t g_branch_ok[NR_DL_CHEST_MAX_ANT]  = {0};
-
-/* Default ON: the retry runs only after the normal path has already failed, so it can add
- * successes but cannot remove any. ISAC_RX_BRANCH_RETRY=0 disables it for a clean A/B. */
-static bool g_branch_retry_enabled(void)
-{
-  static int s_en = -1;
-  if (s_en < 0) {
-    const char *e = getenv("ISAC_RX_BRANCH_RETRY");
-    s_en = (e != NULL) ? atoi(e) : 1;
-  }
-  return s_en != 0;
-}
-
+/* Four receive streams are estimated independently, then exactly one demodulation/LDPC
+ * pipeline runs. Per-antenna CFR extraction remains downstream of the decoded X and uses every
+ * raw Y branch; CRC failure never triggers another antenna decode. */
 static _Atomic uint64_t g_llr_n[2]    = {0, 0}; // [0] = TB failed, [1] = TB decoded
 static _Atomic uint64_t g_llr_absum[2] = {0, 0};
 static _Atomic uint64_t g_llr_zero[2]  = {0, 0};
@@ -274,29 +257,6 @@ static _Atomic uint64_t g_llr_sat[2]   = {0, 0};
  * clipped LLR is a hard decision, and belief propagation on hard decisions cannot correct
  * anything. Measured mean |llr| on this receiver is 232-498, i.e. 2-4x that rail. */
 static _Atomic uint64_t g_llr_clip8[2] = {0, 0};
-/* ---- SAME-CAPTURE ANTENNA SUBSET SCAN (ISAC_SUBSET_SCAN=<every Nth TB>, 0/unset = off) --------
- * Replays ONE captured transport block through all 15 non-empty subsets of the four receive
- * branches, reusing the identical samples, channel estimates, noise estimate, grant and decoder
- * settings -- only the set of branches entering the combiner differs. Comparing separate live runs
- * cannot answer whether four branches hurt: propagation, gain state and this rig's own 5-88 % CRC
- * swing all move between runs, and that confound has already produced several wrong conclusions.
- * Subsets are indexed by BIT POSITION = PHYSICAL branch, so {3} is physical channel 3's samples and
- * estimates, never a silent remap onto channel 0. */
-#define NR_PDSCH_SUBSET_N 16
-static const uint8_t kSubsetMask[NR_PDSCH_SUBSET_N] = {
-    0x1, 0x2, 0x4, 0x8,                     /* {0} {1} {2} {3} */
-    0x3, 0x5, 0x9, 0x6, 0xA, 0xC,           /* {0,1} {0,2} {0,3} {1,2} {1,3} {2,3} */
-    0x7, 0xB, 0xD, 0xE,                     /* {0,1,2} {0,1,3} {0,2,3} {1,2,3} */
-    0xF,                                    /* {0,1,2,3} */
-    0x0};  /* CONTROL: no forcing at all -- byte-for-byte the primary path. If this reads 0 % while
-            * the primary decode of the SAME TB read 77-87 %, then re-running the demod+decode chain
-            * a second time is itself what fails, and every subset number is meaningless. */
-static const char *const kSubsetName[NR_PDSCH_SUBSET_N] = {
-    "{0}", "{1}", "{2}", "{3}", "{0,1}", "{0,2}", "{0,3}", "{1,2}", "{1,3}", "{2,3}",
-    "{0,1,2}", "{0,1,3}", "{0,2,3}", "{1,2,3}", "{0,1,2,3}", "REPLAY-CTL"};
-static _Atomic uint64_t g_subset_try[NR_PDSCH_SUBSET_N];
-static _Atomic uint64_t g_subset_ok[NR_PDSCH_SUBSET_N];
-
 /* The DMRSFO tracker's current SFO estimate, in ppm, for the correction stage below. Read-mostly
  * across consumer threads; a torn double would only mean one grant corrected with a slightly stale
  * value, which is why this is a plain double and not a lock. */
@@ -700,25 +660,6 @@ void nr_pdsch_passive_ldpc_stats_dump(void)
     }
   }
   {
-    /* SUBSET: every subset scored on the SAME transport blocks, so the comparison isolates the
-     * combiner. Read {0} as the single-branch reference: any subset BELOW it is a case of adding a
-     * branch making decoding worse. Same-board pairs vs cross-board pairs is the discriminator for
-     * the per-daughterboard frequency-offset hypothesis (X410: ch0/1 on board A, ch2/3 on board B).*/
-    char sb[520];
-    size_t u = 0;
-    for (int k = 0; k < NR_PDSCH_SUBSET_N && u < sizeof(sb) - 34; k++) {
-      const uint64_t t = atomic_load(&g_subset_try[k]);
-      if (t == 0) {
-        continue;
-      }
-      u += snprintf(sb + u, sizeof(sb) - u, "%s=%.0f%%(%lu) ", kSubsetName[k],
-                    100.0 * (double)atomic_load(&g_subset_ok[k]) / (double)t, (unsigned long)t);
-    }
-    if (u > 0) {
-      LOG_I(PHY, "SENSING: SUBSET crc_ok%% on identical TBs: %s\n", sb);
-    }
-  }
-  {
     /* PIPEDIAG: one line per outcome, every downstream quantity as a mean. Read it by DIFFING the
      * two rows: any field that differs between DECODED and FAILED is the stage that matters, and
      * every field that matches is eliminated. */
@@ -780,33 +721,7 @@ void nr_pdsch_passive_ldpc_stats_dump(void)
         (unsigned long)ok, (unsigned long)sf, (unsigned long)tf, (unsigned long)zt,
         (unsigned long)ie, (unsigned long)so, (unsigned long)st,
         st ? (100.0 * (double)so / (double)st) : 0.0);
-  /* BRANCHSEL: what selection diversity actually bought, per branch. `rescued` is the number of
-   * transport blocks that FAILED on the default branch and then decoded on this one -- so a column
-   * that stays at 0/N says that branch is unusable however strong it looks, which is exactly the
-   * per-daughterboard-offset question. Printed unconditionally alongside LDPCDIAG (one line per
-   * census) rather than behind a probe env var, because it is the headline result of the feature. */
-  {
-    char bs[160];
-    size_t u = 0;
-    uint64_t tot_try = 0, tot_ok = 0;
-    bs[0] = '\0';
-    for (int b = 0; b < NR_DL_CHEST_MAX_ANT; b++) {
-      const uint64_t bt = atomic_load(&g_branch_try[b]);
-      const uint64_t bo = atomic_load(&g_branch_ok[b]);
-      tot_try += bt;
-      tot_ok += bo;
-      if (u < sizeof(bs) - 1) {
-        const int n = snprintf(bs + u, sizeof(bs) - u, "%s%d:%lu/%lu",
-                               b ? " " : "", b, (unsigned long)bo, (unsigned long)bt);
-        // snprintf returns what it WOULD have written; clamp so a truncation cannot walk past the end
-        u = (n > 0 && (size_t)n < sizeof(bs) - u) ? u + (size_t)n : sizeof(bs) - 1;
-      }
-    }
-    if (tot_try > 0) {
-      LOG_I(PHY, "SENSING: BRANCHSEL rescued=%lu/%lu retries [%s] (branch:rescued/tried)\n",
-            (unsigned long)tot_ok, (unsigned long)tot_try, bs);
-    }
-  }
+
 }
 
 /// Bounded append for CHESTDIAG's report string. snprintf() returns the length it WOULD have
@@ -2538,6 +2453,63 @@ gpu_llr_ready:;
     first_symbol_with_data++;
   }
 
+  /* ---- PDSCH BRANCH-QUALITY GATE (ISAC_PDSCH_ANT_GATE=1, default OFF) --------------------------
+   * 2026-09-23, ADDED BUT NOT LIVE-VALIDATED (no hardware available overnight to A/B it). Mirrors
+   * dci_nr.c's `rough[a]` PDCCH gate exactly: nr_rx_pdsch() below MMSE/MRC-combines every rx antenna
+   * UNCONDITIONALLY (no such gate exists on this path today), which is exactly the configuration
+   * [[four-antenna-fep-chest-blows-rt-budget]] measured failing on THIS receiver's own X410 -- two
+   * branches physically 8-15 dB down (bad RX1 cabling on channels 1/3, confirmed with rx_gain/config
+   * identical across channels) took 4-antenna PDSCH from 76-93% (1 ant) to ~0%, because MRC weights a
+   * noise-dominated branch's channel estimate as signal and ADDS noise rather than combining gain.
+   * Same metric as PDCCH: roughness = sum of |consecutive-RE channel estimate difference|^2 over
+   * total power, on the FIRST DM-RS symbol (dmrs_first) since that is what every later data symbol's
+   * equaliser reference is drawn from (get_valid_dmrs_idx_for_channel_est()); a branch whose roughness
+   * exceeds 4x the best branch is memset to zero for ALL its symbols before nr_rx_pdsch() ever reads
+   * it, exactly like the PDCCH gate zeroes pdcch_dl_ch_estimates_ext[a]. A zeroed channel estimate
+   * contributes zero MRC weight, so the bad branch is excluded rather than merely down-weighted.
+   * Default OFF: the PDCCH gate above is the validated pattern this ports, but ported code is not
+   * measured code -- turn this on and re-run the branch-imbalance A/B ([[antpow-branch-shape-is-not-stable]]
+   * warns the imbalance SHAPE itself is not stable run to run) before trusting a live PDSCH number
+   * at NANT>1. */
+  if (fp->nb_antennas_rx > 1 && dmrs_first >= 0) {
+    static int s_pdsch_ant_gate = -1;
+    if (s_pdsch_ant_gate < 0)
+      s_pdsch_ant_gate = (getenv("ISAC_PDSCH_ANT_GATE") != NULL && atoi(getenv("ISAC_PDSCH_ANT_GATE")) != 0) ? 1 : 0;
+    if (s_pdsch_ant_gate) {
+      double rough[8];
+      double best_r = 1e30;
+      const int nrx = fp->nb_antennas_rx > 8 ? 8 : fp->nb_antennas_rx; /* rough[] bound, matches dci_nr.c's <=8 */
+      for (int a = 0; a < nrx; a++) {
+        const c16_t *h = (const c16_t *)&pdsch_dl_ch_estimates[a][fp->ofdm_symbol_size * dmrs_first];
+        double dp = 0.0, pw = 0.0;
+        for (uint32_t i = 1; i < fp->ofdm_symbol_size; i++) {
+          const double dr = (double)h[i].r - h[i - 1].r, di = (double)h[i].i - h[i - 1].i;
+          dp += dr * dr + di * di;
+          pw += (double)h[i].r * h[i].r + (double)h[i].i * h[i].i;
+        }
+        rough[a] = pw > 0.0 ? dp / pw : 1e30;
+        if (rough[a] < best_r)
+          best_r = rough[a];
+      }
+      int kept = 0;
+      for (int a = 0; a < nrx; a++) {
+        if (rough[a] > 4.0 * best_r) {
+          for (uint32_t d = 0; d < (uint32_t)fp->symbols_per_slot; d++)
+            memset((c16_t *)&pdsch_dl_ch_estimates[a][fp->ofdm_symbol_size * d], 0, sizeof(c16_t) * fp->ofdm_symbol_size);
+        } else {
+          kept |= 1 << a;
+        }
+      }
+      static int s_gate_log = 8;
+      if (s_gate_log > 0 && kept != (1 << nrx) - 1) {
+        s_gate_log--;
+        LOG_W(PHY, "SENSING: PDSCH branch gate kept=0x%x rough=[%.2f %.2f %.2f %.2f]\n", kept, rough[0],
+              nrx > 1 ? rough[1] : -1.0, nrx > 2 ? rough[2] : -1.0, nrx > 3 ? rough[3] : -1.0);
+      }
+    }
+  }
+
+
   /* ---- RESIDUAL SFO CORRECTION (ISAC_SFO_CORRECT=1, default off) ------------------------------
    * WHAT IS UNCORRECTED. nr_rx_pdsch() equalises EVERY data symbol against ONE DM-RS symbol's
    * estimate -- dl_ch_estimates[..][validDmrsEst * ofdm_symbol_size], chosen by
@@ -2998,82 +2970,6 @@ gpu_llr_ready:;
     }
     pdtim_add(PDTIM_LDPC, pdt_ldp);
 
-    /* ---- SELECTION DIVERSITY across receive branches (2026-09-03) -------------------------------
-     * If the default branch selection failed CRC, re-demodulate and re-decode the SAME transport
-     * block from each OTHER receive branch in turn, and keep the first one that passes.
-     *
-     * WHY THIS SHAPE, and why it is safe: the default path runs FIRST and unchanged, so this can
-     * only convert a failure into a success -- never the reverse. `nb_antennas_rx == 1` and a
-     * successful first attempt both skip the whole block, leaving those cases bit-identical.
-     *
-     * WHY SELECTION AND NOT COMBINING: OAI's fixed-point MRC accumulator overflows at four RX
-     * (the reason ISAC_RX_MRC_MODE defaults to 0, branch 0 only), and on this rig an alternated
-     * 2x4 sweep measured every combining mode at 0.0 % CRC against 48.9-82.6 % for branch 0 alone.
-     * Decoding one branch at a time keeps each attempt in exactly the configuration that works.
-     *
-     * WHY IT COSTS NOTHING FOR SENSING: the decode exists only to recover X. X is a single physical
-     * truth -- whichever branch recovers it, the data-aided tap then forms H = Y_a/X against the RAW
-     * per-antenna Y of EVERY antenna (nr_pdsch_data_aided.c loops rxdataF[a]), so AoA and per-antenna
-     * CFR are unaffected by which branch happened to decode.
-     *
-     * WHY BY INDEX AND NOT BY POWER: mode 1 already picks the strongest branch, and it measured
-     * 0.0 % while branch 3 held the highest |h| -- power does not predict decodability on this rig
-     * (the standing hypothesis is a per-daughterboard frequency offset: X410 puts ch0/1 on board A
-     * and ch2/3 on board B). So walk by index and let the CRC be the judge. The per-branch counters
-     * below are the measurement that turns that hypothesis into data. */
-    if (!ldpc_ok && !gpu_llr && fp->nb_antennas_rx > 1 && cw->Nl == 1 && g_branch_retry_enabled()) {
-      const int first_branch = nr_dlsch_last_branch(); // -1 if the first attempt combined
-      for (int b = 0; b < fp->nb_antennas_rx && !ldpc_ok; b++) {
-        if (b == first_branch) {
-          continue; // already tried, and it failed
-        }
-        atomic_fetch_add(&g_branch_try[b], 1);
-        nr_dlsch_force_branch(b);
-        /* Per-branch nvar: the equaliser is about to work on branch b ALONE, so hand it branch b's
-         * own noise rather than the mean across all four. The mean is dominated by the weak
-         * branches here (8-15 dB down), which mis-states the confidence for whichever single branch
-         * is actually being decoded. Falls back to the mean if this branch produced no estimate. */
-        const uint32_t nvar_saved = nvar;
-        if (b < NR_DL_CHEST_MAX_ANT && nr_dl_chest_nvar_ant[b] > 0) {
-          const uint64_t scaled = (uint64_t)nr_dl_chest_nvar_ant[b] * (uint64_t)(n_dmrs_sym * cw->Nl);
-          const uint32_t nvar_branch = (uint32_t)(scaled / nvar_den);
-          if (nvar_branch > 0) {
-            nvar = nvar_branch;
-          }
-        }
-        memset(llr, 0, rx_llr_buf_sz * sizeof(*llr));
-        bool redemod_ok = true;
-        for (int m = dlsch_config->start_symbol; m < dlsch_config->start_symbol + dlsch_config->number_symbols; m++) {
-          if (nr_rx_pdsch(ue, proc, &dlsch, freq_alloc, dlsch_config, &harq, (unsigned char)m,
-                          m == first_symbol_with_data, (unsigned char)dlsch_config->harq_process_nbr, pdsch_est_size,
-                          pdsch_dl_ch_estimates, llr, dl_valid_re, rxdataF, &log2_maxh, rx_size_symbol,
-                          fp->nb_antennas_rx, rxdataF_comp, dl_ch_mag, dl_ch_magb, dl_ch_magr, ptrs_phase_per_slot,
-                          ptrs_re_per_slot, nvar, &scope_req, NULL /* rho_dl: single layer */)
-              < 0) {
-            redemod_ok = false;
-            break;
-          }
-        }
-        /* DESCRAMBLE. nr_dlsch_unscrambling() mutates llr IN PLACE and is applied exactly once on
-         * the primary path, BEFORE the first decode -- so any path that regenerates llr by
-         * re-running nr_rx_pdsch() must descramble it again or it hands the LDPC decoder scrambled
-         * soft bits and fails 100 %% of the time, whatever the antennas are doing.
-         * Found 2026-09-08 by a no-mask REPLAY CONTROL in the subset scan: forcing nothing at all,
-         * i.e. reproducing the primary path exactly, still read 0 %% on TBs the primary decoded at
-         * 49.7 %%. That isolated the fault to the REPLAY rather than to branch selection, after two
-         * earlier fixes (per-subset nvar, the mask-aware shift) had been aimed at the wrong thing. */
-        if (redemod_ok) {
-          nr_dlsch_unscrambling(llr, G, 0 /* codeword */, dlsch_config->dlDataScramblingId, grant->rnti);
-        }
-        if (redemod_ok && passive_ldpc_decode(ue, proc, &g_harq, cw, dlsch_config, llr, freq_alloc->num_rbs, G)) {
-          ldpc_ok = true;
-          atomic_fetch_add(&g_branch_ok[b], 1);
-        }
-        nvar = nvar_saved; // restore: the next retry (and anything downstream) expects the mean
-      }
-      nr_dlsch_force_branch(-1); // never leave a pin set: the next TB must re-decide normally
-    }
-
     if (ptrs_arm >= 0) {
       const int latched = rnti_ptrs_feed(grant->rnti, ptrs_arm, ldpc_ok);
       if (latched >= 0 && atomic_exchange(&g_ptrs_arm_last, latched) != latched) {
@@ -3083,66 +2979,6 @@ gpu_llr_ready:;
               any ? "PT-RS present," : "no PT-RS", K, L, grant->rnti);
       }
     }
-    /* ---- Subset scan. Runs AFTER the normal decode so it can never change this TB's own result:
-     * ldpc_ok is saved and restored, and the pin is always cleared. Sampled (1 in N) because it
-     * costs 15 extra demod+decode passes per scanned TB, which is far beyond the RT budget if run
-     * on every grant. Deliberately NOT restricted to TBs that some subset decoded -- selecting on
-     * success would bias every rate it reports. */
-    {
-      static int s_subset_n = -1;
-      if (s_subset_n < 0) {
-        const char *e = getenv("ISAC_SUBSET_SCAN");
-        s_subset_n = (e != NULL) ? atoi(e) : 0;
-      }
-      static __thread unsigned long s_subset_seen = 0;
-      if (s_subset_n > 0 && !gpu_llr && fp->nb_antennas_rx == 4 && cw->Nl == 1
-          && (s_subset_seen++ % (unsigned long)s_subset_n) == 0) {
-        const bool ldpc_ok_saved = ldpc_ok;
-        /* The diagnostic decoder reuses g_harq.b. Preserving only ldpc_ok would publish
-         * the final subset's bytes as if they were the primary CRC-verified TB. */
-        const size_t saved_tb_size = (lenWithCrc(1, cw->TBS) + 7u) / 8u;
-        uint8_t *saved_tb = ldpc_ok_saved ? malloc(saved_tb_size) : NULL;
-        if (saved_tb)
-          memcpy(saved_tb, g_harq.b, saved_tb_size);
-        /* On allocation failure skip the diagnostic, never risk the production payload. */
-        for (int k = 0; (!ldpc_ok_saved || saved_tb) && k < NR_PDSCH_SUBSET_N; k++) {
-          /* mask 0 is the control: force nothing, so selection follows the normal mode-0 path. */
-          nr_dlsch_force_mask(kSubsetMask[k] ? kSubsetMask[k] : -1);
-          memset(llr, 0, rx_llr_buf_sz * sizeof(*llr));
-          bool ok = true;
-          for (int m = dlsch_config->start_symbol;
-               m < dlsch_config->start_symbol + dlsch_config->number_symbols; m++) {
-            if (nr_rx_pdsch(ue, proc, &dlsch, freq_alloc, dlsch_config, &harq, (unsigned char)m,
-                            m == first_symbol_with_data, (unsigned char)dlsch_config->harq_process_nbr,
-                            pdsch_est_size, pdsch_dl_ch_estimates, llr, dl_valid_re, rxdataF,
-                            &log2_maxh, rx_size_symbol, fp->nb_antennas_rx, rxdataF_comp, dl_ch_mag,
-                            dl_ch_magb, dl_ch_magr, ptrs_phase_per_slot, ptrs_re_per_slot, nvar,
-                            &scope_req, NULL) < 0) {
-              ok = false;
-              break;
-            }
-          }
-          if (ok) {
-            // Same reason as the retry loop above: llr has just been regenerated, so it is
-            // scrambled again and must be descrambled before the decoder sees it.
-            nr_dlsch_unscrambling(llr, G, 0 /* codeword */, dlsch_config->dlDataScramblingId,
-                                  grant->rnti);
-          }
-          atomic_fetch_add(&g_subset_try[k], 1);
-          if (ok && passive_ldpc_decode(ue, proc, &g_harq, cw, dlsch_config, llr,
-                                        freq_alloc->num_rbs, G)) {
-            atomic_fetch_add(&g_subset_ok[k], 1);
-          }
-        }
-        nr_dlsch_force_mask(-1);  // never leave a mask pinned
-        if (saved_tb) {
-          memcpy(g_harq.b, saved_tb, saved_tb_size);
-          free(saved_tb);
-        }
-        ldpc_ok = ldpc_ok_saved;  // both outcome and payload now match the primary/retry result
-      }
-    }
-
     {
       /* 1 = decoded with data, 0 = zero_tb, 2 = seg_fail. `out->status` is not set yet here, so the
        * zero/seg distinction comes from the counters passive_ldpc_decode just bumped. */

@@ -126,6 +126,9 @@ TEST_F(DlGeometry, FreshDistinctDedicatedGrantsVerifyOnlyTheirOwnEpoch) {
   for(int i=0;i<5000;i++) EXPECT_FALSE(nr_pdcch_blind_monitor_autodiscover_extent_step(1200+i));
 }
 TEST_F(DlGeometry, RetrySearchesOtherWidthsAtSameOffsetAndNeverInventsVerification) {
+  // Exhaustive walk (every mapping of an extent before the next extent) is now opt-in: the
+  // default is a pass-0 lap first (see StagedDefaultWalksPassZeroPrefixThenMovesOn).
+  setenv("ISAC_MAP_PASS0_ONLY","0",1);
   ASSERT_NO_FATAL_FAILURE(discover_single_window());
   const auto *cfg=nr_pdcch_blind_monitor_get_cfg();
   EXPECT_EQ(cfg->coreset_rb_offset,18);
@@ -175,6 +178,29 @@ TEST(DlAdaptive, ExtentCatalogContainsEveryAdmissibleContiguousGeometry) {
   for(int i=0;i<n;i++) got.emplace(c[i].first_w,c[i].last_w);
   EXPECT_EQ(got.size(),static_cast<size_t>(n));
   for(int f=0;f<=20;f++) for(int l=20;l<45;l++) EXPECT_EQ(got.count({f,l}),1u);
+}
+
+TEST_F(DlGeometry, StagedDefaultWalksPassZeroPrefixThenMovesOn) {
+  // Default (env unset): the primary walks only the pass-0 mappings (PCI residue / shift 0 of every
+  // legal (L, R)) of an extent, then advances to the next extent; the remaining shifts come in a
+  // second lap. The pass-0 count is what the enumerator emits under ISAC_MAP_PASS0_ONLY=1.
+  unsetenv("ISAC_MAP_PASS0_ONLY");
+  ASSERT_NO_FATAL_FAILURE(discover_single_window());
+  const auto *cfg=nr_pdcch_blind_monitor_get_cfg();
+  ASSERT_EQ(cfg->coreset_rb_offset,18);
+  nr_pdcch_map_cand_t m[512];
+  const int full=nr_pdcch_map_candidates(6,cfg->coreset_duration,cfg->coreset_pdcch_dmrs_scrambling_id,m,512);
+  int pass0=0;
+  for(int i=0;i<full;i++){ // pass-0 prefix: shift is 0 or the PCI residue, and the prefix is contiguous
+    const int nb=(6*cfg->coreset_duration)/m[i].bundle;
+    const bool p0=(m[i].bundle==0)||(m[i].shift==0)||(m[i].shift==cfg->coreset_pdcch_dmrs_scrambling_id%nb);
+    if(!p0) break;
+    pass0=i+1;
+  }
+  ASSERT_GT(pass0,0); ASSERT_LT(pass0,full);
+  for(int i=1;i<pass0;i++){ nr_pdcch_blind_monitor_autodiscover_retry(18); EXPECT_EQ(cfg->coreset_rb_offset,18); }
+  nr_pdcch_blind_monitor_autodiscover_retry(18);
+  EXPECT_NE(cfg->coreset_rb_offset,18); // pass-0 prefix exhausted: next extent, not the remaining shifts
 }
 
 TEST_F(DlGeometry, UlScanIntentSurvivesCss0AndRealDedicatedDiscovery) {

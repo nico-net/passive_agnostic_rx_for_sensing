@@ -296,7 +296,9 @@ typedef struct {
  * and automatic 0_1 paths must use this gate: 0_1 is a dedicated-USS format. */
 static inline bool nr_pdcch_blind_monitor_ul_scan_enabled(const nr_pdcch_blind_monitor_cfg_t *cfg)
 {
-  return cfg && cfg->dci01_scan == 1 && cfg->coreset_type == 0
+  /* DCI 0_1 belongs to a UE-specific SearchSpace. That SearchSpace may legally reference
+   * CORESET#0, so CORESET type is not an exclusion criterion. */
+  return cfg && cfg->dci01_scan == 1
       && cfg->dci10_ss_type == NR_BLIND_SS_UE_SPECIFIC && (cfg->dl_full_auto || cfg->ul.bwp_size > 0);
 }
 
@@ -313,6 +315,11 @@ const nr_pdcch_blind_monitor_cfg_t* nr_pdcch_blind_monitor_get_cfg(void);
 /// live config. NULL until nr_pdcch_blind_monitor_autoconf_css0() has succeeded at least once (e.g.
 /// a hand-written dedicated config, where there is nothing to interleave with). Read-only.
 const nr_pdcch_blind_monitor_cfg_t* nr_pdcch_blind_monitor_css0_cfg(void);
+
+/// Build a UE-specific SearchSpace view over the broadcast CORESET#0 geometry. The physical
+/// CORESET mapping remains type-0 CSS/CORESET#0; only monitoring, DCI sizing and RNTI classes
+/// change to USS semantics. Returns false until CORESET#0 and the initial DL BWP are known.
+bool nr_pdcch_blind_monitor_coreset0_uss_cfg(nr_pdcch_blind_monitor_cfg_t *out);
 
 /// Make nr_pdcch_blind_monitor_get_cfg() return `in` ON THIS THREAD ONLY until called again with
 /// NULL. Used ONLY by the CSS0/SI-RNTI interleave, to run one occasion under the common-search-space

@@ -44,6 +44,7 @@
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <time.h>
 
 // Empirically measured false-accept rate of nr_pdcch_blind_decode_and_extract_ex()'s "plausible"
 // gate on this project's own prior data (42k/10.9M candidates -- see this file's header and
@@ -77,6 +78,58 @@ static bool add_distinct_hash(uint32_t* hashes, int* n_distinct, uint32_t h)
     hashes[(*n_distinct)++] = h;
   }
   return true;
+}
+
+/* Record evidence for the (length,RNTI) pair. The bounded Misra-Gries table retains recurrent
+ * identities under a stream of one-off false accepts without allocating per-RNTI state. */
+static void add_rnti_evidence(nr_pdcch_dci_length_sweep_state_t *state, int len, uint16_t rnti,
+                              uint32_t payload_hash, uint32_t feed_serial)
+{
+  if (rnti == 0 || len <= 0 || len >= NR_PDCCH_DCI_LENGTH_SWEEP_MAX_LEN)
+    return;
+
+  nr_pdcch_dci_length_rnti_evidence_t *empty = NULL;
+  for (int i = 0; i < NR_PDCCH_DCI_LENGTH_SWEEP_RNTI_TRACKERS; ++i) {
+    nr_pdcch_dci_length_rnti_evidence_t *e = &state->rnti_evidence[i];
+    if (e->rnti == rnti && e->len == len) {
+      /* Several CCEs from one occasion are correlated trials, not recurrence. */
+      if (e->last_feed == feed_serial)
+        return;
+      e->last_feed = feed_serial;
+      if (e->support < UINT16_MAX)
+        ++e->support;
+      for (int j = 0; j < e->n_distinct; ++j)
+        if (e->hashes[j] == payload_hash)
+          return;
+      if (e->n_distinct < NR_PDCCH_DCI_LENGTH_SWEEP_RNTI_HASHES)
+        e->hashes[e->n_distinct++] = payload_hash;
+      if (e->n_distinct > state->max_rnti_distinct[len])
+        state->max_rnti_distinct[len] = e->n_distinct;
+      return;
+    }
+    if (e->rnti == 0 && empty == NULL)
+      empty = e;
+  }
+
+  if (empty == NULL) {
+    /* Standard heavy-hitter cancellation: one-off identities disappear, while a recurrent RNTI's
+     * accumulated support protects its distinct-payload history. The new one-off is discarded. */
+    for (int i = 0; i < NR_PDCCH_DCI_LENGTH_SWEEP_RNTI_TRACKERS; ++i) {
+      nr_pdcch_dci_length_rnti_evidence_t *e = &state->rnti_evidence[i];
+      if (e->support > 0 && --e->support == 0)
+        memset(e, 0, sizeof(*e));
+    }
+    return;
+  }
+
+  empty->rnti = rnti;
+  empty->len = (uint8_t)len;
+  empty->n_distinct = 1;
+  empty->support = 1;
+  empty->last_feed = feed_serial;
+  empty->hashes[0] = payload_hash;
+  if (state->max_rnti_distinct[len] < 1)
+    state->max_rnti_distinct[len] = 1;
 }
 
 // Does this length's ACCUMULATED (trials, passes) clear the chance floor by Z_SIGMA standard
@@ -131,10 +184,10 @@ static double measured_null_rate(const nr_pdcch_dci_length_sweep_state_t *state,
   return (n & 1) ? r[n / 2] : 0.5 * (r[n / 2 - 1] + r[n / 2]);
 }
 
-int nr_pdcch_dci_length_sweep_feed(nr_pdcch_dci_length_sweep_state_t* state,
+int nr_pdcch_dci_length_sweep_feed_budget(nr_pdcch_dci_length_sweep_state_t* state,
                                    nr_pdcch_dci_length_scorer_fn decode_one_candidate, void* user_ctx,
                                    int n_trials_this_call, int min_len, int max_len,
-                                   uint16_t bootstrap_rnti)
+                                   uint16_t bootstrap_rnti, uint64_t deadline_ns, int max_trials)
 {
   if (state == NULL || decode_one_candidate == NULL || n_trials_this_call <= 0) {
     return -1;
@@ -162,18 +215,32 @@ int nr_pdcch_dci_length_sweep_feed(nr_pdcch_dci_length_sweep_state_t* state,
       && state->preferred_len != state->excluded_len) {
     if (state->preferred_rounds < NR_PDCCH_LENGTH_PREFERRED_ROUNDS) {
       prefer = state->preferred_len;
-    } else if (state->preferred_len) {
-      LOG_W(PHY, "SENSING: UL dci_length cell prior %d did not clear in %d rounds -- resuming the "
-                 "full sweep for this RNTI\n", state->preferred_len, NR_PDCCH_LENGTH_PREFERRED_ROUNDS);
-      state->preferred_len = 0;
+    } else if (state->preferred_len && !state->alt_full) {
+      /* Alternate instead of dropping: one full lap, then the hypothesis again. Dropping it for good made a
+       * low-rate UE fall into the full sweep and exhaust before its first two hits arrived. */
+      state->alt_full = 1;
     }
   } else {
     state->preferred_len = 0;
   }
-  for (int len = prefer ? prefer : (min_len + state->rot_phase);
+  int completed=0;
+  uint32_t feed_serial = ++state->feed_serial;
+  if (feed_serial == 0)
+    feed_serial = ++state->feed_serial;
+  const int initial_len=state->resume_len ? state->resume_len : (prefer ? prefer : min_len+state->rot_phase);
+  for (int len = initial_len;
        len <= (prefer ? prefer : max_len) && len < NR_PDCCH_DCI_LENGTH_SWEEP_MAX_LEN;
        len += prefer ? (max_len + 1) : stride) {
-    for (int t = 0; t < n_trials_this_call; t++) {
+    const int initial_trial=(state->resume_len==len) ? state->resume_trial : 0;
+    for (int t = initial_trial; t < n_trials_this_call; t++) {
+      bool stop=max_trials>0 && completed>=max_trials;
+      if (deadline_ns) {
+        struct timespec now;
+        clock_gettime(CLOCK_MONOTONIC,&now);
+        stop |= (uint64_t)now.tv_sec*1000000000ull+(uint64_t)now.tv_nsec >= deadline_ns;
+      }
+      if (stop) { state->resume_len=len; state->resume_trial=t; goto score_evidence; }
+      ++completed;
       uint16_t rnti = 0;
       uint32_t payload_hash = 0;
       state->trials[len]++;
@@ -186,8 +253,10 @@ int nr_pdcch_dci_length_sweep_feed(nr_pdcch_dci_length_sweep_state_t* state,
         state->bootstrap_hits[len]++;
       }
       add_distinct_hash(state->hashes[len], &state->n_distinct[len], payload_hash);
+      add_rnti_evidence(state, len, rnti, payload_hash, feed_serial);
     }
   }
+  state->resume_len=state->resume_trial=0;
   /* One ROUND -- every length visited once -- is what the caller's give-up cap counts, so the
    * per-length trial budget is identical at any stride; rotation redistributes it in time. */
   if (prefer) {
@@ -197,8 +266,13 @@ int nr_pdcch_dci_length_sweep_feed(nr_pdcch_dci_length_sweep_state_t* state,
   } else if (++state->rot_phase >= stride) {
     state->rot_phase = 0;
     state->occasions_fed++;
+    if (state->alt_full) { /* full lap done: back to the hypothesis */
+      state->alt_full = 0;
+      state->preferred_rounds = 0;
+    }
   }
 
+score_evidence:;
   int    best_len   = -1;
   double best_score = 0.0;
   for (int len = min_len; len <= max_len && len < NR_PDCCH_DCI_LENGTH_SWEEP_MAX_LEN; len++) {
@@ -217,13 +291,17 @@ int nr_pdcch_dci_length_sweep_feed(nr_pdcch_dci_length_sweep_state_t* state,
     /* Two bootstrap hits, not one: a single chance match is 2^-24 per trial but a hypothesis runs
      * ~28k trials per length and a full CORESET walk ~29k length-hypotheses, so single hits are
      * expected several times per walk; two are not. */
-    const bool significant = (state->bootstrap_hits[len] > 1)
+    const bool recurrent_rnti =
+        state->max_rnti_distinct[len] >= NR_PDCCH_DCI_LENGTH_SWEEP_RNTI_LOCK;
+    const bool significant = recurrent_rnti || (state->bootstrap_hits[len] > 1)
                            || clears_chance_floor(state->trials[len], state->passes[len],
                                                   measured_null_rate(state, min_len, max_len, len));
     if (!significant) {
       continue;
     }
-    const double score = (double)state->bootstrap_hits[len] * 100.0 + (double)state->n_distinct[len];
+    const double score = (double)state->max_rnti_distinct[len] * 10000.0
+                       + (double)state->bootstrap_hits[len] * 100.0
+                       + (double)state->n_distinct[len];
     if (score > best_score) {
       best_score = score;
       best_len   = len;
@@ -259,6 +337,67 @@ int nr_pdcch_dci_length_sweep_feed(nr_pdcch_dci_length_sweep_state_t* state,
   return best_len;
 }
 
+int nr_pdcch_dci_length_sweep_feed(nr_pdcch_dci_length_sweep_state_t *state,
+    nr_pdcch_dci_length_scorer_fn scorer, void *ctx, int n_trials, int min_len, int max_len,
+    uint16_t bootstrap_rnti)
+{
+  return nr_pdcch_dci_length_sweep_feed_budget(state,scorer,ctx,n_trials,min_len,max_len,bootstrap_rnti,0,0);
+}
+
+uint16_t nr_pdcch_dci_length_sweep_winner_rnti(
+    const nr_pdcch_dci_length_sweep_state_t *state, int len)
+{
+  if (!state || len <= 0 || len >= NR_PDCCH_DCI_LENGTH_SWEEP_MAX_LEN)
+    return 0;
+  const nr_pdcch_dci_length_rnti_evidence_t *best = NULL;
+  for (int i = 0; i < NR_PDCCH_DCI_LENGTH_SWEEP_RNTI_TRACKERS; ++i) {
+    const nr_pdcch_dci_length_rnti_evidence_t *e = &state->rnti_evidence[i];
+    if (e->rnti == 0 || e->len != len
+        || e->n_distinct < NR_PDCCH_DCI_LENGTH_SWEEP_RNTI_LOCK)
+      continue;
+    if (!best || e->n_distinct > best->n_distinct
+        || (e->n_distinct == best->n_distinct && e->support > best->support))
+      best = e;
+  }
+  return best ? best->rnti : 0;
+}
+
+nr_pdcch_dci_length_bank_t *nr_pdcch_dci_length_store_get(
+    nr_pdcch_dci_length_store_t *store, uint64_t key, uint64_t *evicted_key)
+{
+  if (!store || !key)
+    return NULL;
+  nr_pdcch_dci_length_coreset_t *victim = &store->coreset[0];
+  for (int i = 0; i < NR_PDCCH_LENGTH_CORESETS; ++i) {
+    nr_pdcch_dci_length_coreset_t *e = &store->coreset[i];
+    if (e->used && e->key == key) {
+      e->touched = ++store->clock;
+      if (evicted_key)
+        *evicted_key = 0;
+      return e->bank;
+    }
+    if (!e->used || (victim->used && e->touched < victim->touched))
+      victim = e;
+  }
+  if (evicted_key)
+    *evicted_key = victim->used ? victim->key : 0;
+  nr_pdcch_dci_length_bank_t *bank = victim->bank;
+  if (bank == NULL) {
+    bank = calloc(1, sizeof(*bank));
+    if (bank == NULL)
+      return NULL;
+  } else {
+    memset(bank, 0, sizeof(*bank));
+  }
+  memset(victim, 0, sizeof(*victim));
+  victim->bank = bank;
+  victim->used = true;
+  victim->key = key;
+  victim->touched = ++store->clock;
+  bank->epoch = key;
+  return bank;
+}
+
 nr_pdcch_dci_length_context_t *nr_pdcch_dci_length_context(
     nr_pdcch_dci_length_bank_t *bank, uint64_t epoch, uint16_t rnti)
 {
@@ -283,6 +422,11 @@ nr_pdcch_dci_length_context_t *nr_pdcch_dci_length_context(
     oldest->state.preferred_len = bank->cell_len;
     LOG_I(PHY, "SENSING: UL dci_length -- rnti=0x%04x seeded from the cell prior %d (skipping the "
                "34-length sweep unless it fails to clear)\n", rnti, bank->cell_len);
+  } else if (bank->first_len > 0 && bank->first_rnti != rnti) {
+    /* One UE's width is only a hypothesis for another UE. preferred_len preserves that distinction:
+     * this RNTI must still produce its own recurrent CRC/payload evidence, and automatically falls
+     * back to the full sweep if the hypothesis is wrong. */
+    oldest->state.preferred_len = bank->first_len;
   }
   return oldest;
 }
@@ -296,6 +440,17 @@ void nr_pdcch_dci_length_bank_converged(nr_pdcch_dci_length_bank_t *bank, uint16
      * (a UE's DCI 0_1 width depends on its own configured features, not only on the BWP). */
     bank->first_rnti = rnti;
     bank->first_len  = found;
+    /* Existing contexts may predate the first convergence. Give each unresolved peer the same
+     * bounded hypothesis fast path that a newly-created context receives. Completed evidence is
+     * retained; only an unfinished budget cursor is restarted. */
+    for (int i = 0; i < NR_PDCCH_LENGTH_CONTEXTS; ++i) {
+      nr_pdcch_dci_length_context_t *c = &bank->ue[i];
+      if (c->rnti && c->rnti != rnti && !c->found && !c->exhausted && !c->state.preferred_len) {
+        c->state.preferred_len = found;
+        c->state.preferred_rounds = 0;
+        c->state.resume_len = c->state.resume_trial = 0;
+      }
+    }
     return;
   }
   if (bank->first_len == found) {

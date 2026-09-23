@@ -51,6 +51,12 @@ typedef struct {
 static ul_context_t contexts[UL_DISCOVERY_CONTEXTS];
 static uint64_t generation_counter = 1, context_clock;
 static uint64_t rejected_feedback;
+/* MEASURED 2026-09-21 (Swisscom macro, cons6_css0_auto): nr_pdcch_ul_discovery_reset() was 1370 us
+ * of a 1399 us occasion, on EVERY occasion, in a conf whose UL sweep never ran. The RT caller
+ * resets whenever full_auto or scan_01 is off, and each ul_context_t holds two
+ * nr_hyp_sweep_state_t of 1,163,280 bytes -- 16 contexts is a ~37 MB memset per slot. State that
+ * nobody has written does not need clearing: reset() is a no-op until a mutator has run. */
+static bool s_discovery_dirty = true;   /* true at start so the FIRST reset initialises winners */
 /* Struct padding is not a network configuration value. Compare only declared
  * members, retaining the existing conservative identity of every option. */
 static bool same_options(const nr_pdcch_blind_ul_opts_t *a, const nr_pdcch_blind_ul_opts_t *b)
@@ -91,8 +97,11 @@ static void reset_locked(ul_context_t *c)
 void nr_pdcch_ul_discovery_reset(void)
 {
   pthread_mutex_lock(&lock);
-  for (int i=0; i<UL_DISCOVERY_CONTEXTS; ++i) reset_locked(&contexts[i]);
-  rejected_feedback=0;
+  if (s_discovery_dirty) {
+    for (int i=0; i<UL_DISCOVERY_CONTEXTS; ++i) reset_locked(&contexts[i]);
+    rejected_feedback=0;
+    s_discovery_dirty=false;
+  }
   pthread_mutex_unlock(&lock);
 }
 typedef struct { nr_pdcch_blind_ul_opts_t opts; bool interpretation; ul_context_t *owner; } apply_ctx_t;
@@ -215,6 +224,7 @@ bool nr_pdcch_ul_discovery_grant(const nr_pdcch_blind_ul_opts_t *fixed, uint16_t
 {
   if (!fixed || !out || !rnti || !len || len>63) return false;
   pthread_mutex_lock(&lock);
+  s_discovery_dirty=true;
   /* Equal DCI lengths do not prove equal dedicated configurations. Keep
    * each identity's CRC evidence independent; no pooled-probe winner veto. */
   ul_context_t *c = NULL, *oldest = &contexts[0];
@@ -403,6 +413,7 @@ void nr_pdcch_ul_discovery_feedback(const nr_pdcch_blind_ul_result_t *g, bool ok
 {
   if (!g || !g->hyp_generation) return;
   pthread_mutex_lock(&lock);
+  s_discovery_dirty=true;
   const bool width_owner=g->width_hyp_class>=0, interp_owner=g->interp_hyp_class>=0;
   if (width_owner==interp_owner || g->width_hyp_class < -1 || g->interp_hyp_class < -1) {
     ++rejected_feedback;

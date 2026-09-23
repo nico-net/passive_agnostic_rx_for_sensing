@@ -309,6 +309,14 @@ void nr_dlsim_preprocessor(gNB_MAC_INST *nr_mac, post_process_pdsch_t *pp_pdsch)
   post_process_dlsch(nr_mac, pp_pdsch, UE_info, &sched_pdsch, &candidate);
 }
 
+#include "hidden_waveform.h"
+
+/* Standalone simulator has no device timing producer. */
+_Atomic int nr_ue_pending_rebase_valid = 0;
+_Atomic long nr_ue_pending_rebase_delta = 0;
+_Atomic long nr_ue_diag_producer_absolute_slot = -1;
+_Atomic long nr_ue_diag_producer_wall_ns = 0;
+
 nrUE_params_t nrUE_params;
 
 nrUE_params_t *get_nrUE_params(void) {
@@ -772,6 +780,23 @@ int main(int argc, char **argv)
   prepare_scc(scc);
   uint64_t ssb_bitmap = 1; // Enable only first SSB with index ssb_indx=0
   fill_scc_sim(scc, &ssb_bitmap, N_RB_DL, N_RB_DL, mu, mu);
+  const char *hidden_dir = getenv("ISAC_HIDDEN_WAVEFORM_DIR");
+  unsigned hidden_seed = getenv("ISAC_HIDDEN_SEED") ? strtoul(getenv("ISAC_HIDDEN_SEED"), NULL, 0) : 71231;
+  if (hidden_dir) {
+    *scc->physCellId = hidden_seed % 1008;
+    AssertFatal(mu == 1, "Hidden waveform fixture currently requires mu=1\n");
+    *scc->downlinkConfigCommon->frequencyInfoDL->absoluteFrequencySSB = 641088;
+    NR_PDCCH_ConfigCommon_t *pcc = scc->downlinkConfigCommon->initialDownlinkBWP->pdcch_ConfigCommon->choice.setup;
+    pcc->commonSearchSpaceList = calloc_or_fail(1, sizeof(*pcc->commonSearchSpaceList));
+    const int css_candidates[5] = {0, 0, 2, 0, 0};
+    for (int i = 1; i <= 3; ++i)
+      asn1cSeqAdd(&pcc->commonSearchSpaceList->list, rrc_searchspace_config(true, i, 0, css_candidates));
+    asn1cCallocOne(pcc->searchSpaceSIB1, 0);
+    asn1cCallocOne(pcc->ra_SearchSpace, 1);
+    asn1cCallocOne(pcc->pagingSearchSpace, 2);
+    asn1cCallocOne(pcc->searchSpaceOtherSystemInformation, 3);
+    *scc->uplinkConfigCommon->frequencyInfoUL->absoluteFrequencyPointA = scc->downlinkConfigCommon->frequencyInfoDL->absoluteFrequencyPointA;
+  }
   fix_scc(scc, ssb_bitmap);
 
   frame_structure_t frame_structure = {0};
@@ -835,10 +860,14 @@ int main(int argc, char **argv)
   };
 
   RC.nb_nr_macrlc_inst = 1;
+  if (hidden_dir) get_softmodem_params()->phy_test = 0;
   mac_top_init_gNB(ngran_gNB, scc, &conf, &rlc_config);
+  if (hidden_dir) get_softmodem_params()->phy_test = 1;
   gNB_mac = RC.nrmac[0];
   gNB_mac->beam_info = (NR_beam_info_t){.beams_per_period = 1};
+  if (hidden_dir) get_softmodem_params()->phy_test = 0;
   nr_mac_config_scc(RC.nrmac[0], scc, &conf);
+  if (hidden_dir) get_softmodem_params()->phy_test = 1;
 
   gNB_mac->dl_bler.harq_round_max = num_rounds;
 
@@ -846,7 +875,7 @@ int main(int argc, char **argv)
 
   NR_UE_NR_Capability_t *UE_Capability_nr = CALLOC(1,sizeof(NR_UE_NR_Capability_t));
   prepare_sim_uecap(UE_Capability_nr, scc, mu, N_RB_DL, g_mcsTableIdx, 0);
-  rnti_t rnti = 0x1234;
+  rnti_t rnti = hidden_dir ? 17921 + hidden_seed % 45000 : 0x1234;
   int uid = 0;
   int ssb_index = 0;
   NR_CellGroupConfig_t *secondaryCellGroup = get_default_secondaryCellGroup(scc, UE_Capability_nr, 0, 1, &conf, uid, ssb_index);
@@ -898,6 +927,9 @@ int main(int argc, char **argv)
                         &fs,
                         &txbw,
                         &rxbw);
+
+  if (hidden_dir)
+    return hidden_waveform(gNB, gNB_mac, UE_info, fs, n_trials, hidden_dir);
 
   gNB2UE = new_channel_desc_scm(n_tx,
                                 n_rx,

@@ -30,6 +30,8 @@
 #include "isac_aoa.h"
 #include "sensing_engine.h"
 
+#include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <string>
@@ -704,6 +706,36 @@ extern "C" void nr_isac_submit_cfr_multi(uint32_t                 slot_idx,
     for (uint32_t i = 0; i < nof_re; i++) {
       dst[i] = icf_t(src[2 * i], src[2 * i + 1]);
     }
+  }
+
+  /* Offline/OTA audit: prove that the source handed the engine distinct per-antenna channel
+   * estimates rather than four copies of a fused branch. Relative phase uses antenna 0 as the
+   * reference and is invariant to each branch's gain. Bounded to avoid changing steady-state load. */
+  static const bool multi_diag = std::getenv("ISAC_MULTI_CFR_DIAG") != nullptr;
+  static std::atomic<unsigned> multi_diag_n{0};
+  const unsigned dn = multi_diag ? multi_diag_n.fetch_add(1, std::memory_order_relaxed) : 99;
+  if (multi_diag && dn < 16 && nof_ant > 1) {
+    double p[4] = {}, ph[4] = {}, coh[4] = {};
+    const uint32_t show = std::min(nof_ant, 4u);
+    for (uint32_t a = 0; a < show; ++a) {
+      double cr = 0.0, ci = 0.0, pa = 0.0, p0 = 0.0;
+      for (uint32_t i = 0; i < nof_re; ++i) {
+        const icf_t za = cfr[(size_t)a * nof_re + i];
+        const icf_t z0 = cfr[i];
+        const double ar = za.real(), ai = za.imag(), br = z0.real(), bi = z0.imag();
+        cr += ar * br + ai * bi;
+        ci += ai * br - ar * bi;
+        pa += ar * ar + ai * ai;
+        p0 += br * br + bi * bi;
+      }
+      p[a] = nof_re ? pa / nof_re : 0.0;
+      ph[a] = std::atan2(ci, cr);
+      coh[a] = pa > 0.0 && p0 > 0.0 ? std::hypot(cr, ci) / std::sqrt(pa * p0) : 0.0;
+    }
+    LOG_A(PHY, "SENSING: MULTICFR source=%d ant=%u re=%u power=[%.1f %.1f %.1f %.1f] "
+               "rel_phase=[%.3f %.3f %.3f %.3f] coherence=[%.3f %.3f %.3f %.3f]\n",
+          source, nof_ant, nof_re, p[0], p[1], p[2], p[3],
+          ph[0], ph[1], ph[2], ph[3], coh[0], coh[1], coh[2], coh[3]);
   }
 
   g_engine->submit(slot_idx, slot_frac, (nr_isac_source_t)source, *carrier, cfr.data(), nof_ant, k_abs, l_sym, nof_re,

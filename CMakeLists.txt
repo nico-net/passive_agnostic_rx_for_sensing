@@ -1336,6 +1336,7 @@ set (MAC_NR_SRC_UE
   ${NR_UE_PHY_INTERFACE_DIR}/NR_IF_Module.c
   ${NR_UE_PHY_INTERFACE_DIR}/NR_Packet_Drop.c
   ${NR_UE_MAC_DIR}/config_ue.c
+  ${NR_UE_MAC_DIR}/nr_passive_rrc_harvest.c
   ${NR_UE_MAC_DIR}/config_ue_sl.c
   ${NR_UE_MAC_DIR}/mac_tables.c
   ${NR_UE_MAC_DIR}/main_ue_nr.c
@@ -1460,7 +1461,7 @@ target_link_libraries(NR_L2_UE PRIVATE nr_nas)
 # executables (see the test_nr_pdcch_coreset_map/test_nr_pdcch_dci_length_sweep targets below) --
 # nothing wired them into any library nr-uesoftmodem links, so the first real (non-test) caller
 # failed at link time with "undefined reference" until they were added here.
-add_library(nr_pdcch_blind_monitor ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_rnti_bootstrap.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_coreset_map.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_dci_length_sweep.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_config_sweep.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_hyp_sweep.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_field_sweep.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_interp_sweep.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_discovery.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_passive_acq_state.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_sib1_prior.c)
+add_library(nr_pdcch_blind_monitor ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_rnti_bootstrap.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_coreset_map.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_uss_tracker.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_dci_length_sweep.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_config_sweep.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_hyp_sweep.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_field_sweep.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_interp_sweep.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_discovery.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_passive_acq_state.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_sib1_prior.c)
 target_include_directories(nr_pdcch_blind_monitor PRIVATE
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT
   ${NFAPI_DIR}/nfapi/public_inc

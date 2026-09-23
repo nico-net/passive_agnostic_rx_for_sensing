@@ -29,7 +29,7 @@ void nr_pdcch_sib1_prior_set(const nr_pdcch_sib1_prior_t *p)
     LOG_A(PHY,
           "SENSING: SIB1 PRIOR: bwp=%u+%u coreset%s[id=%u dur=%u %s bundle=%u interleaver=%u "
           "shift=%u dmrs_id=%u win=%d..%d] ss%s[AL1=%u AL2=%u AL4=%u AL8=%u AL16=%u period=%u "
-          "offset=%u dur=%u] ra_ss=%d sib1_ss=%d paging_ss=%d rach%s[prach_idx=%u msg1_fdm=%u msg1_fstart=%u sul=%d]\n",
+          "offset=%u dur=%u] ra_ss=%d[period=%u offset=%u dur=%u symbols=0x%04x] sib1_ss=%d paging_ss=%d rach%s[prach_idx=%u msg1_fdm=%u msg1_fstart=%u sul=%d]\n",
           g_prior.dl_bwp_valid ? g_prior.dl_bwp_start : 0,
           g_prior.dl_bwp_valid ? g_prior.dl_bwp_size : 0,
           g_prior.coreset_valid ? "" : "(none)",
@@ -52,16 +52,14 @@ void nr_pdcch_sib1_prior_set(const nr_pdcch_sib1_prior_t *p)
           g_prior.ss_offset_slots,
           g_prior.ss_duration,
           g_prior.ra_ss_valid ? (int)g_prior.ra_ss_id : -1,
+          g_prior.ra_ss_period, g_prior.ra_ss_offset, (unsigned)g_prior.ra_ss_duration, (unsigned)g_prior.ra_ss_symbol_mask,
           g_prior.sib1_ss_valid ? (int)g_prior.sib1_ss_id : -1,
           g_prior.paging_ss_valid ? (int)g_prior.paging_ss_id : -1,
           g_prior.rach_valid ? "" : "(none)",
           g_prior.prach_config_index,
           g_prior.msg1_fdm,
           g_prior.msg1_frequency_start,
-          g_prior.sul_present ? 1 : 0,
-          g_prior.ra_ss_period,
-          g_prior.ra_ss_offset,
-          g_prior.ra_ss_duration);
+          g_prior.sul_present ? 1 : 0);
   }
 }
 

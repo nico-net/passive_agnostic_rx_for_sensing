@@ -32,4 +32,11 @@ static inline int nr_mrc_effective_branches(const double *w, int n)
   const int e = (int)ceil(s - 1e-9);
   return e < 1 ? 1 : e;
 }
+/* Common-scale average AFTER channel conjugate multiplication. Widen before
+ * summing so opposite phases can cancel before any saturation. Equal receiver
+ * noise is assumed; this does not claim optimal weighting for unequal noise. */
+static inline int16_t nr_mrc_average4(int16_t a, int16_t b, int16_t c, int16_t d)
+{
+  return ((int32_t)a + b + c + d) / 4;
+}
 #endif

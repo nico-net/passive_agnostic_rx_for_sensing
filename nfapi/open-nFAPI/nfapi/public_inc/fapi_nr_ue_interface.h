@@ -70,7 +70,7 @@ typedef struct {
   uint8_t CceRegMappingType; //  interleaved or noninterleaved
   uint8_t RegBundleSize;     //  valid if CCE to REG mapping type is interleaved type
   uint8_t InterleaverSize;   //  valid if CCE to REG mapping type is interleaved type
-  uint8_t ShiftIndex;        //  valid if CCE to REG mapping type is interleaved type
+  uint16_t ShiftIndex;       //  valid if CCE to REG mapping type is interleaved type (0..274 per 38.331)
   uint8_t CoreSetType;
   uint8_t precoder_granularity;
   uint16_t pdcch_dmrs_scrambling_id;

@@ -112,6 +112,7 @@ typedef struct {
   uint8_t        *currentPtr;
   uint64_t        currentTs;
   unsigned int    curSamplesBlock;
+  size_t          currentSampleOffset; /* samples consumed inside current IQ record */
   int64_t         wrap_count;
   size_t          maxSizeBytes;
 } recplay_state_t;

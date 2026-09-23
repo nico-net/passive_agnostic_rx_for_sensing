@@ -838,7 +838,14 @@ int nr_pdsch_config_sweep_settled_count(void)
 void nr_pdsch_config_sweep_reset_all(void)
 {
   pthread_mutex_lock(&g_lock);
-  memset(g_contexts, 0, sizeof(g_contexts));
+  /* Every lookup/feedback path requires a live generation. Invalidate the small
+   * identity fields now; select() clears the full state before reusing a slot.
+   * Clearing all 1024 hypothesis arrays here used ~1.2 ms even for an empty bank.
+   * touched=0 makes invalid slots eligible for reuse ahead of live contexts. */
+  for (int i=0; i<NR_PDSCH_SWEEP_MAX_CONTEXTS; ++i) {
+    g_contexts[i].generation=0;
+    g_contexts[i].touched=0;
+  }
   /* Priors and observations are evidence derived from those contexts; keeping them across a reset
    * would let a cleared run inherit conclusions it can no longer justify. */
   memset(g_rnti, 0, sizeof(g_rnti));

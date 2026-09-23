@@ -321,36 +321,29 @@ static void nr_pdcch_channel_compensation(int arraySz,
   }
 }
 
-static void nr_pdcch_detection_mrc(int nb_ant, int sz, c16_t rxdataF_comp[][sz])
+static void nr_pdcch_detection_mrc(int nb_ant, int sz, unsigned kept_mask,
+                                     c16_t rxdataF_comp[][sz])
 {
-  /* The four-RX "branch 0 only" skip that used to sit here is GONE (2026-09-15). Measured on the
-   * X410: 1 RX decodes SIB1 on the 5th SI-RNTI candidate, 2 RX (MRC of the two WEAK antennas) on
-   * the 47th, 4 RX single-branch -- branch 0 or the strongest -- 0 in 36k candidates. The loop
-   * below halves both operands before every add, so it cannot overflow at any branch count; the
-   * overflow argument belonged to nr_pbch's plain-adds loop, not to this one. */
-
-  /* NOTE -- an "equal-gain, 32-bit accumulator, divide by nb_ant" rewrite of the loop below is a
-   * REGRESSION: the output feeds nr_pdcch_llr(), which CLIPS at +/-31, so absolute amplitude --
-   * not just relative branch weighting -- sets the soft-bit resolution. Dividing by nb_ant drops
-   * the signal ~4x below the rail and the LLRs collapse to 0/+-1. The cascade below is lopsided
-   * (a0/8 + a1/8 + a2/4 + a3/2 at four branches) but keeps the sum near the rail, which matters
-   * more here. Do not "fix" the weighting without renormalising to the clip rail and re-measuring.
-   *
-   * The passive-mode carve-out that used to sit here (combine instead of skip when
-   * IS_PASSIVE_RX_MODE) has been REVERTED to the baseline: its justification was the 817-vs-8 /
-   * 3202-vs-11 recovered-RNTI counts, which X410_BLIND_PDCCH_HANDOVER.md section 5 retracted as
-   * 0x5199, a degenerate polar-decoder fixed point on empty CCEs. Re-measure before reinstating. */
-
-  c16_t *rx0 = rxdataF_comp[0];
-  // MRC on each re of rb
-  // input always aligned and accepting tail padding to process all actual samples
-  for (int a = 1; a < nb_ant; a++) {
-    c16_t *rx = rxdataF_comp[a];
-    for (int i = 0; i < sz; i += 4) {
-      *(simde__m128i *)(rx0 + i) = simde_mm_adds_epi16(simde_mm_srai_epi16(*(simde__m128i *)(rx0 + i), 1),
-                                                       simde_mm_srai_epi16(*(simde__m128i *)(rx + i), 1));
+  /* Equal-noise MRC after conjugate channel compensation. Sum in 32 bits so branch order cannot
+   * change the answer, then retain the one-branch soft scale expected by nr_pdcch_llr(). Rejected
+   * branches are absent from both the numerator and divisor. */
+  int nkept = 0;
+  for (int a = 0; a < nb_ant; ++a)
+    nkept += (kept_mask >> a) & 1u;
+  if (nkept < 1)
+    return;
+  for (int i = 0; i < sz; ++i) {
+    int32_t re = 0, im = 0;
+    for (int a = 0; a < nb_ant; ++a) {
+      if (!(kept_mask & (1u << a)))
+        continue;
+      re += rxdataF_comp[a][i].r;
+      im += rxdataF_comp[a][i].i;
     }
+    rxdataF_comp[0][i].r = (int16_t)(re / nkept);
+    rxdataF_comp[0][i].i = (int16_t)(im / nkept);
   }
+
 }
 
 /* Produce LLRs from received PDCCH signal */
@@ -677,6 +670,7 @@ static void nr_rx_pdcch_symbol(PHY_VARS_NR_UE *ue,
    * scored by the roughness of its estimate -- adjacent-subcarrier difference power over mean power,
    * ~0 for a smooth channel, ~2 for noise -- and branches rougher than 4x the smoothest are ZEROED
    * (h = 0 adds no signal and no noise to the combine). The shift is the max over the kept ones. */
+  unsigned kept_mask = 0;
   {
     double rough[fp->nb_antennas_rx];
     double best_r = 1e30;
@@ -707,6 +701,7 @@ static void nr_rx_pdcch_symbol(PHY_VARS_NR_UE *ue,
         kept |= 1 << a;
       }
     }
+    kept_mask = (unsigned)kept;
     static int s_gate_log = 12;
     if (s_gate_log > 0 && fp->nb_antennas_rx > 1 && proc->nr_slot_rx == 1) {
       s_gate_log--;
@@ -756,7 +751,7 @@ static void nr_rx_pdcch_symbol(PHY_VARS_NR_UE *ue,
     }
   }
   if (fp->nb_antennas_rx > 1) {
-    nr_pdcch_detection_mrc(fp->nb_antennas_rx, rx_comp_sz, rxdataF_comp);
+    nr_pdcch_detection_mrc(fp->nb_antennas_rx, rx_comp_sz, kept_mask, rxdataF_comp);
   }
   /* TEMPORARY DIAGNOSTIC (2026-08-04, blind-PDCCH bring-up): the PRE-CLIP equalised constellation.
    * nr_pdcch_llr() below deliberately clips to [-32,31] (6-bit soft values for the polar decoder),

@@ -79,6 +79,21 @@ typedef bool (*nr_pdcch_dci_length_scorer_fn)(int dci_length, int trial_idx, uin
                                                  // degenerate detection only needs to distinguish
                                                  // "1 distinct value" from "more than 1".
 
+/* Blind evidence table shared by all lengths in one geometry. A real dedicated DCI repeatedly
+ * recovers the same CRC-scrambled RNTI while its payload changes with scheduling. Random/structured
+ * false accepts do not get to borrow evidence from other RNTIs. */
+#define NR_PDCCH_DCI_LENGTH_SWEEP_RNTI_TRACKERS 128
+#define NR_PDCCH_DCI_LENGTH_SWEEP_RNTI_HASHES   5
+#define NR_PDCCH_DCI_LENGTH_SWEEP_RNTI_LOCK     5
+typedef struct {
+  uint16_t rnti;
+  uint8_t  len;
+  uint8_t  n_distinct;
+  uint16_t support;
+  uint32_t last_feed; /* one identity vote at most per OTA occasion */
+  uint32_t hashes[NR_PDCCH_DCI_LENGTH_SWEEP_RNTI_HASHES];
+} nr_pdcch_dci_length_rnti_evidence_t;
+
 /** Persistent state, accumulated across many nr_pdcch_dci_length_sweep_feed() calls (one call per
  *  candidate-bearing occasion). Plain struct, no hidden allocation -- zero-initialize (static
  *  storage, or nr_pdcch_dci_length_sweep_reset()) before the first feed. */
@@ -88,6 +103,9 @@ typedef struct {
   int      bootstrap_hits[NR_PDCCH_DCI_LENGTH_SWEEP_MAX_LEN]; // of which, hit the known RNTI
   uint32_t hashes[NR_PDCCH_DCI_LENGTH_SWEEP_MAX_LEN][NR_PDCCH_DCI_LENGTH_SWEEP_MAX_HASHES];
   int      n_distinct[NR_PDCCH_DCI_LENGTH_SWEEP_MAX_LEN];
+  nr_pdcch_dci_length_rnti_evidence_t
+      rnti_evidence[NR_PDCCH_DCI_LENGTH_SWEEP_RNTI_TRACKERS];
+  uint8_t  max_rnti_distinct[NR_PDCCH_DCI_LENGTH_SWEEP_MAX_LEN];
   /* ROUNDS of full exposure, NOT calls: incremented once every `stride` calls, when the rotation
    * below has visited every length exactly once. Identical to the call count at stride<=1. The
    * caller's give-up cap (AUTODISCOVER_LENGTH_SWEEP_MAX_OCCASIONS) counts these, so each length
@@ -106,6 +124,7 @@ typedef struct {
    * the per-occasion cost falls ~N-fold while the trials each length accumulates per ROUND is
    * unchanged. Set it at the call site before the first feed (the same place excluded_len is set). */
   int      stride;
+  int      resume_len, resume_trial; // budget suspension; reset with the geometry epoch
   int      rot_phase; // 0..stride-1, which interleaved subset this call tests
   /* CELL PRIOR (2026-09-17). When > 0, test ONLY this length for the first
    * NR_PDCCH_LENGTH_PREFERRED_ROUNDS rounds instead of all 34. Set from the bank's cell-wide length
@@ -115,6 +134,7 @@ typedef struct {
    * sweep resumes, so a wrong prior costs a handful of occasions, not a lockout. */
   int      preferred_len;
   int      preferred_rounds;
+  int      alt_full;  /* 1 = running one full-sweep lap between hypothesis rounds */
   /* Total scorer invocations = total polar decodes this sweep has paid for. Paired with BTIM's
    * dlsweep/ulsweep nanoseconds it gives microseconds PER DECODE and the batch actually available
    * per occasion -- the two numbers that decide whether a GPU batch can win here. The failed GPU
@@ -122,6 +142,7 @@ typedef struct {
    * offers ~34 lengths x ~6 candidates of INDEPENDENT work per occasion, from one work item, over
    * the SAME LLR slice. Measure it rather than assume it. */
   uint64_t decodes;
+  uint32_t feed_serial; /* distinct OTA occasions; resumed work never manufactures recurrence */
 } nr_pdcch_dci_length_sweep_state_t;
 /* Rounds a seeded length gets before the full sweep resumes. The sweep's own significance test
  * needs accumulated trials, and one occasion carries only ~6 candidates; 8 rounds is ~50 candidates,
@@ -142,20 +163,48 @@ typedef struct {
 typedef struct {
   nr_pdcch_dci_length_context_t ue[NR_PDCCH_LENGTH_CONTEXTS];
   uint64_t epoch, clock;
-  /* Cell-wide UL dci_length, published only once two DISTINCT RNTIs converge on the same value --
-   * the same rule nr_pdsch_config_sweep uses for its prior, and for the same reason: one UE's
-   * dedicated configuration is not evidence about the cell. Before this, every new RNTI re-ran the
-   * whole 34-length sweep from scratch, so the discovery cost scaled with the number of UEs -- the
-   * dominant cost at high grant rates (the sweep is ~93 % of consumer time, 1.75 ms of 1.89 ms). */
+  /* Cell-wide UL dci_length is published only once two DISTINCT RNTIs converge. The first
+   * result may seed another UE's bounded preferred-length trial, but that UE still has to confirm
+   * it with its own CRC/payload evidence and falls back to the full sweep on failure. */
   int      cell_len;    // 0 = not established
   int      first_len;   // the first RNTI to converge, awaiting a second to agree
   uint16_t first_rnti;
+  /* Before an RNTI is known, retain joint (length,RNTI) evidence for this exact CORESET.
+   * A lock is promoted to a normal per-RNTI context only after distinct-occasion recurrence. */
+  nr_pdcch_dci_length_sweep_state_t anonymous;
+  int anonymous_found;
+  uint16_t anonymous_rnti;
+  bool anonymous_exhausted;
 } nr_pdcch_dci_length_bank_t;
 nr_pdcch_dci_length_context_t *nr_pdcch_dci_length_context(
     nr_pdcch_dci_length_bank_t *bank, uint64_t epoch, uint16_t rnti);
 /** Record that @p rnti converged on @p found. Publishes the cell-wide length on agreement between
  *  two distinct RNTIs, so every later context starts from it instead of sweeping. */
 void nr_pdcch_dci_length_bank_converged(nr_pdcch_dci_length_bank_t *bank, uint16_t rnti, int found);
+
+/* Persistent LRU of independent CORESET banks. A bank already separates RNTIs; the outer store
+ * prevents interleaved physical CORESETs from resetting one another. The exact, caller-computed
+ * geometry key is also used as the bank epoch. Eviction loses evidence but can never mix it. */
+/* The discovery worker can touch the primary hypothesis plus 127 lookahead
+ * geometries in one pass, followed by up to eight already verified CORESETs.
+ * The old capacity of 16 was smaller than the normal K=17 working set: every
+ * pass evicted the state that the next pass needed, so even repeated valid CRC
+ * hits could never reach the two-hit bootstrap lock. */
+#define NR_PDCCH_LENGTH_CORESETS 136
+typedef struct {
+  /* Allocated on first use. Keeping 136 full banks inline would reserve tens of
+   * MiB even when discovery only observes one or two physical CORESETs. */
+  nr_pdcch_dci_length_bank_t *bank;
+  uint64_t key;
+  uint64_t touched;
+  bool used;
+} nr_pdcch_dci_length_coreset_t;
+typedef struct {
+  nr_pdcch_dci_length_coreset_t coreset[NR_PDCCH_LENGTH_CORESETS];
+  uint64_t clock;
+} nr_pdcch_dci_length_store_t;
+nr_pdcch_dci_length_bank_t *nr_pdcch_dci_length_store_get(
+    nr_pdcch_dci_length_store_t *store, uint64_t key, uint64_t *evicted_key);
 
 void nr_pdcch_dci_length_sweep_reset(nr_pdcch_dci_length_sweep_state_t* state);
 
@@ -179,6 +228,17 @@ int nr_pdcch_dci_length_sweep_feed(nr_pdcch_dci_length_sweep_state_t* state,
                                    nr_pdcch_dci_length_scorer_fn decode_one_candidate, void* user_ctx,
                                    int n_trials_this_call, int min_len, int max_len,
                                    uint16_t bootstrap_rnti);
+
+/* Absolute CLOCK_MONOTONIC deadline; zero disables it. max_trials <= 0 is unlimited.
+ * Suspended work resumes on fresh candidates on the next occasion. Only completed
+ * trials enter evidence, and only completed rounds advance occasions_fed. */
+int nr_pdcch_dci_length_sweep_feed_budget(nr_pdcch_dci_length_sweep_state_t *state,
+    nr_pdcch_dci_length_scorer_fn scorer, void *ctx, int n_trials, int min_len, int max_len,
+    uint16_t bootstrap_rnti, uint64_t deadline_ns, int max_trials);
+
+/* RNTI whose distinct-payload, distinct-occasion evidence caused a blind length lock; zero if none. */
+uint16_t nr_pdcch_dci_length_sweep_winner_rnti(
+    const nr_pdcch_dci_length_sweep_state_t *state, int len);
 
 #ifdef __cplusplus
 }

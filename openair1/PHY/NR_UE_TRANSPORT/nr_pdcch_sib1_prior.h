@@ -77,6 +77,10 @@ typedef struct {
   uint16_t ra_ss_period;
   uint16_t ra_ss_offset;
   uint8_t  ra_ss_duration;
+  /* monitoringSymbolsWithinSlot of the RA search space, bit 13 = symbol 0 (ASN.1 order). The scan
+   * runs ONE symbol per slot (SS#0's); a Msg4 at any other monitored symbol is invisible to it, so
+   * this is logged to settle "no Msg4 on the air" vs "Msg4 at a symbol we never look at". */
+  uint16_t ra_ss_symbol_mask;
   bool     sib1_ss_valid;
   uint8_t  sib1_ss_id;
   bool     paging_ss_valid;

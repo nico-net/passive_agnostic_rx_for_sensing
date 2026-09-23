@@ -187,6 +187,18 @@ TEST(RntiBootstrap, StaleEntriesLeaveTheSet) {
   EXPECT_FALSE(nr_pdcch_blind_monitor_rnti_confirmed(11 + 20001, 0x3333));
 }
 
+TEST_F(RntiBootstrapTest, UssPriorUsesOnlyRarVerifiedIdentities)
+{
+  nr_pdcch_blind_rnti_bootstrap_record(0x1111, NR_BLIND_RNTI_CLASS_C, 100);
+  nr_pdcch_blind_rnti_bootstrap_record(0x1111, NR_BLIND_RNTI_CLASS_C, 101);
+  nr_pdcch_blind_rnti_bootstrap_record_verified(0x2222, NR_BLIND_RNTI_CLASS_TC, 102);
+  uint16_t set[NR_PDCCH_BLIND_MAX_UE] = {};
+  ASSERT_EQ(nr_pdcch_blind_monitor_verified_rnti_set(103, set, NR_PDCCH_BLIND_MAX_UE), 1);
+  EXPECT_EQ(set[0], 0x2222);
+  EXPECT_EQ(nr_pdcch_blind_monitor_verified_rnti_set(102 + 20001, set,
+                                                      NR_PDCCH_BLIND_MAX_UE), 0);
+}
+
 int main(int argc, char** argv)
 {
   testing::InitGoogleTest(&argc, argv);

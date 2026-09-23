@@ -883,22 +883,24 @@ static void nr_ue_trs_processing(PHY_VARS_NR_UE *ue,
 {
   AssertFatal((sym0 > -1) && (sym1 > -1) && (sym1 > sym0), "Invalid symbol index for TRS estimation\n");
   const NR_DL_FRAME_PARMS *fp = &ue->frame_parms;
-  // CFO estimation
-  const int ant_rx = 0; // Estimate only on first antenna port
+  // CFO estimation. The temporal channel product cancels each branch's static phase, so all
+  // receive branches can be power-combined without calibrating their RF-chain phases.
   cd_t phase_diff = {0.0};
   AssertFatal(csirs_config_pdu->freq_density == 3,
               "CSI-RS for tracking must have freq density of 3 but has %d\n",
               csirs_config_pdu->freq_density);
   AssertFatal(csi_mapping->kprime == 0 && csi_mapping->lprime == 0, "Invalid kprime, lprime for CSI-RS for tracking (row 1)\n");
-  for (int rb = csirs_config_pdu->start_rb; rb < (csirs_config_pdu->start_rb + csirs_config_pdu->nr_of_rbs); rb++) {
-    for (int cdm_id = 0; cdm_id < csi_mapping->size; cdm_id++) {
-      uint16_t kinit = rb * NR_NB_SC_PER_RB;
-      uint16_t k = kinit + csi_mapping->koverline[cdm_id];
+  for (int ant_rx = 0; ant_rx < fp->nb_antennas_rx; ++ant_rx) {
+    for (int rb = csirs_config_pdu->start_rb; rb < (csirs_config_pdu->start_rb + csirs_config_pdu->nr_of_rbs); rb++) {
+      for (int cdm_id = 0; cdm_id < csi_mapping->size; cdm_id++) {
+        uint16_t kinit = rb * NR_NB_SC_PER_RB;
+        uint16_t k = kinit + csi_mapping->koverline[cdm_id];
 
-      const c16_t *res0 = res0_est[ant_rx][0];
-      const c16_t *res1 = res1_est[ant_rx][0];
-      phase_diff.r += res1[k].r * res0[k].r + res1[k].i * res0[k].i;
-      phase_diff.i += res1[k].i * res0[k].r - res1[k].r * res0[k].i;
+        const c16_t *res0 = res0_est[ant_rx][0];
+        const c16_t *res1 = res1_est[ant_rx][0];
+        phase_diff.r += res1[k].r * res0[k].r + res1[k].i * res0[k].i;
+        phase_diff.i += res1[k].i * res0[k].r - res1[k].r * res0[k].i;
+      }
     }
   }
   *cfo = (int)get_cfo(atan2(phase_diff.i, phase_diff.r), sym0, sym1, fp);
@@ -907,7 +909,7 @@ static void nr_ue_trs_processing(PHY_VARS_NR_UE *ue,
     // Time offset estimation
     __attribute__((aligned(32))) c16_t time_est[fp->ofdm_symbol_size];
     delay_t delay = {0};
-    nr_est_delay(fp->ofdm_symbol_size, freq_interp_est[ant_rx][0], time_est, &delay);
+    nr_est_delay(fp->ofdm_symbol_size, freq_interp_est[0][0], time_est, &delay);
     *time_offset = delay.delay_max_pos;
   }
 }

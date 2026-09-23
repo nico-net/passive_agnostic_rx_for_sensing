@@ -1,10 +1,23 @@
 #include <cstdlib>
+#include <chrono>
+#include <algorithm>
 #include <iostream>
 #include <thread>
 #include <vector>
 #include <gtest/gtest.h>
 extern "C" {
 #include "nr_pdsch_config_sweep.h"
+#include "common/config/config_userapi.h"
+#include "common/utils/LOG/log.h"
+}
+
+extern "C" {
+configmodule_interface_t *uniqCfg=nullptr;
+void exit_function(const char *file,const char *fn,int line,const char *message,int fatal) {
+  if(message) fprintf(stderr,"%s:%d %s: %s\n",file,line,fn,message);
+  if(fatal) abort();
+  exit(EXIT_SUCCESS);
+}
 }
 
 // Feed `n` grants round-robin, letting hypothesis `truth` decode at `p_true` and every other
@@ -182,7 +195,10 @@ TEST(PdschConfigSweep, InvalidTicketAndUnavailableContextCannotScore) {
 int main(int argc, char **argv)
 {
   testing::InitGoogleTest(&argc, argv);
-  return RUN_ALL_TESTS();
+  logInit();
+  int rc=RUN_ALL_TESTS();
+  logClean();
+  return rc;
 }
 
 /* Recovery fixtures use three independently identifiable MCS-table hypotheses.
@@ -565,4 +581,48 @@ TEST(PdschConfigSweepOracle, MaskLastSymbolAndK0CollapseAContextToTheEndAmbiguit
     EXPECT_EQ(h.tda_start + h.tda_length - 1, 13);
     EXPECT_EQ(h.k0, 0);
   }
+}
+
+// Opt-in benchmark of the real shared-bank reset, outside an OTA run.
+TEST(PdschReset, Timing) {
+  if (!getenv("ISAC_PDSCH_RESET_BENCH")) GTEST_SKIP();
+  std::vector<double> us;
+  for(int i=0;i<528;++i) {
+    auto start=std::chrono::steady_clock::now();
+    nr_pdsch_config_sweep_reset_all();
+    double t=std::chrono::duration<double,std::micro>(std::chrono::steady_clock::now()-start).count();
+    if(i>=16) us.push_back(t);
+  }
+  double sum=0; for(double v:us) sum+=v;
+  std::sort(us.begin(),us.end());
+  printf("PDSCHRESET n=%zu mean_us=%.2f p99_us=%.2f max_us=%.2f\n",us.size(),sum/us.size(),us[(99*us.size()+99)/100-1],us.back());
+}
+
+TEST(PdschReset, ClearsEvidenceAndRejectsTicketsAcrossReuse) {
+  nr_pdsch_config_sweep_reset_all();
+  const auto old0=select_context(777,0x4601,0);
+  const auto old1=select_context(778,0x4602,1);
+  nr_pdsch_config_sweep_feedback(&old0,true,nullptr);
+  nr_pdsch_config_sweep_feedback(&old1,false,nullptr);
+  nr_pdsch_config_sweep_state_t state{};
+  ASSERT_TRUE(nr_pdsch_config_sweep_snapshot(&old0,&state));
+  EXPECT_EQ(state.trials[old0.hypothesis],1u);
+  nr_pdsch_config_sweep_reset_all();
+  EXPECT_FALSE(nr_pdsch_config_sweep_snapshot(&old0,&state));
+  EXPECT_FALSE(nr_pdsch_config_sweep_snapshot(&old1,&state));
+  EXPECT_FALSE(nr_pdsch_config_sweep_feedback(&old0,true,nullptr));
+  EXPECT_FALSE(nr_pdsch_config_sweep_feedback(&old1,true,nullptr));
+  EXPECT_EQ(nr_pdsch_config_sweep_observe_mask(&old0,4),0);
+  uint32_t passes=99,trials=99;
+  nr_pdsch_config_sweep_context_stats(777,0x4601,0,0,&passes,&trials);
+  EXPECT_EQ(passes,0u); EXPECT_EQ(trials,0u);
+  EXPECT_EQ(nr_pdsch_config_sweep_settled_count(),0);
+  EXPECT_FALSE(nr_pdsch_config_sweep_prior_get(nullptr,nullptr,nullptr,nullptr));
+  EXPECT_FALSE(nr_pdsch_config_sweep_rnti_prior_get(0x4601,nullptr,nullptr,nullptr,nullptr));
+  const auto fresh=select_context(777,0x4601,0);
+  EXPECT_NE(fresh.generation,old0.generation);
+  EXPECT_FALSE(nr_pdsch_config_sweep_feedback(&old0,true,nullptr));
+  ASSERT_TRUE(nr_pdsch_config_sweep_snapshot(&fresh,&state));
+  EXPECT_EQ(state.winner,-1);
+  for(int i=0;i<state.n_hyp;++i) { EXPECT_EQ(state.trials[i],0u); EXPECT_EQ(state.ok[i],0u); }
 }

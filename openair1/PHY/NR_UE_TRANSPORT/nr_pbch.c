@@ -16,6 +16,7 @@
 #include "openair1/PHY/NR_REFSIG/nr_refsig.h"
 #include "openair1/PHY/NR_UE_ESTIMATION/nr_estimation.h"
 #include "bits.h"
+#include "nr_mrc_weights.h"
 #include "instrumentation.h"
 //#define DEBUG_PBCH
 //#define DEBUG_PBCH_ENCODING
@@ -195,9 +196,18 @@ void nr_pbch_channel_compensation(const struct complex16 rxdataF_ext[][PBCH_MAX_
 
 static void nr_pbch_detection_mrc(struct complex16 rxdataF_comp[][PBCH_MAX_RE_PER_SYMBOL], uint8_t nb_antennas_rx, int nb_re)
 {
-  /* Four-RX rank-one compatibility mode uses branch 0 to avoid overflow in
-   * the fixed-point MRC accumulator. */
-  if (nb_antennas_rx == 1 || nb_antennas_rx == 4)
+  /* Four channel-compensated branches are combined in a wide accumulator before scaling.
+   * This preserves every branch and is order-independent; the old default silently used branch 0. */
+  if (nb_antennas_rx == 4) {
+    for (int i=0; i<nb_re; ++i) {
+      rxdataF_comp[0][i].r=nr_mrc_average4(rxdataF_comp[0][i].r,rxdataF_comp[1][i].r,
+                                         rxdataF_comp[2][i].r,rxdataF_comp[3][i].r);
+      rxdataF_comp[0][i].i=nr_mrc_average4(rxdataF_comp[0][i].i,rxdataF_comp[1][i].i,
+                                         rxdataF_comp[2][i].i,rxdataF_comp[3][i].i);
+    }
+    return;
+  }
+  if (nb_antennas_rx == 1)
     return;
 
   simde__m128i *rxdataF_comp128_0 = (simde__m128i *)rxdataF_comp[0];

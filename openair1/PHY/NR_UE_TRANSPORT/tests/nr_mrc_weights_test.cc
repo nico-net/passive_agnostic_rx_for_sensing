@@ -43,3 +43,11 @@ TEST(MrcWeights, ABranchWithoutAnEstimateGetsZero) {
   EXPECT_EQ(nr_mrc_noise_weights(nv, 4, w), 1);
   EXPECT_EQ(w[0], 0.0); EXPECT_EQ(w[1], 1.0);
 }
+
+TEST(MrcWeights, FourBranchSumDoesNotSaturateBeforeCancellation) {
+  EXPECT_EQ(nr_mrc_average4(30000,30000,-30000,-30000),0);
+  EXPECT_EQ(nr_mrc_average4(30000,-30000,30000,-30000),0);
+  EXPECT_EQ(nr_mrc_average4(32767,32767,32767,32767),32767);
+  EXPECT_EQ(nr_mrc_average4(-32768,-32768,-32768,-32768),-32768);
+  EXPECT_EQ(nr_mrc_average4(0,0,0,12000),3000);
+}

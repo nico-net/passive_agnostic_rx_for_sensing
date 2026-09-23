@@ -2170,6 +2170,62 @@ void nr_rrc_mac_start_ra(module_id_t module_id, nr_mac_ra_start_cause_t cause)
   AssertFatal(!ret, "mutex failed %d\n", ret);
 }
 
+/* Log every broadcast SearchSpace separately: timing and type remain attached to its candidates. */
+static void log_sib1_pdcch_search_spaces(const NR_PDCCH_ConfigCommon_t *pcc)
+{
+  static unsigned seq;
+  const unsigned n = ++seq;
+  if (!pcc) { LOG_A(NR_MAC, "SENSING: SIB1_PDCCH seq=%u absent\n", n); return; }
+  LOG_A(NR_MAC, "SENSING: SIB1_PDCCH seq=%u crs0=%ld ss0=%ld common_crs=%s count=%d refs[sib1=%ld otherSI=%ld paging=%ld ra=%ld]\n",
+        n, pcc->controlResourceSetZero ? *pcc->controlResourceSetZero : -1L,
+        pcc->searchSpaceZero ? *pcc->searchSpaceZero : -1L,
+        pcc->commonControlResourceSet ? "present" : "absent",
+        pcc->commonSearchSpaceList ? pcc->commonSearchSpaceList->list.count : 0,
+        pcc->searchSpaceSIB1 ? *pcc->searchSpaceSIB1 : -1L,
+        pcc->searchSpaceOtherSystemInformation ? *pcc->searchSpaceOtherSystemInformation : -1L,
+        pcc->pagingSearchSpace ? *pcc->pagingSearchSpace : -1L,
+        pcc->ra_SearchSpace ? *pcc->ra_SearchSpace : -1L);
+  if (!pcc->commonSearchSpaceList) return;
+  for (int i = 0; i < pcc->commonSearchSpaceList->list.count; ++i) {
+    const NR_SearchSpace_t *ss = pcc->commonSearchSpaceList->list.array[i];
+    if (!ss) { LOG_A(NR_MAC, "SENSING: SIB1_SS seq=%u index=%d null\n", n, i); continue; }
+    int period = 0, offset = 0;
+    if (ss->monitoringSlotPeriodicityAndOffset) get_monitoring_period_offset(ss, &period, &offset);
+    uint16_t symbols = 0;
+    if (ss->monitoringSymbolsWithinSlot && ss->monitoringSymbolsWithinSlot->size >= 2)
+      symbols = (uint16_t)(((uint16_t)ss->monitoringSymbolsWithinSlot->buf[0] << 6)
+                           | (ss->monitoringSymbolsWithinSlot->buf[1] >> 2));
+    uint8_t cand[5] = {0};
+    if (ss->nrofCandidates) {
+      const long raw[5] = {ss->nrofCandidates->aggregationLevel1, ss->nrofCandidates->aggregationLevel2,
+                           ss->nrofCandidates->aggregationLevel4, ss->nrofCandidates->aggregationLevel8,
+                           ss->nrofCandidates->aggregationLevel16};
+      for (int a = 0; a < 5; ++a) cand[a] = raw[a] >= 7 ? 8 : (uint8_t)raw[a];
+    }
+    const char *type = "unset";
+    int f00_10 = 0, f20 = 0, f21 = 0, f22 = 0, f23 = 0, ue_formats = -1;
+    if (ss->searchSpaceType && ss->searchSpaceType->present == NR_SearchSpace__searchSpaceType_PR_common) {
+      type = "common";
+      if (ss->searchSpaceType->choice.common) {
+        const struct NR_SearchSpace__searchSpaceType__common *c = ss->searchSpaceType->choice.common;
+        f00_10 = c->dci_Format0_0_AndFormat1_0 != NULL; f20 = c->dci_Format2_0 != NULL;
+        f21 = c->dci_Format2_1 != NULL; f22 = c->dci_Format2_2 != NULL; f23 = c->dci_Format2_3 != NULL;
+      }
+    } else if (ss->searchSpaceType && ss->searchSpaceType->present == NR_SearchSpace__searchSpaceType_PR_ue_Specific) {
+      type = "ue-specific";
+      if (ss->searchSpaceType->choice.ue_Specific) ue_formats = ss->searchSpaceType->choice.ue_Specific->dci_Formats;
+    }
+    LOG_A(NR_MAC, "SENSING: SIB1_SS seq=%u index=%d id=%ld coreset=%ld type=%s period=%d offset=%d duration=%ld symbols=0x%04x cand[1,2,4,8,16]=%u,%u,%u,%u,%u formats[00_10=%d 20=%d 21=%d 22=%d 23=%d ue=%d] roles[sib1=%d otherSI=%d paging=%d ra=%d]\n",
+          n, i, ss->searchSpaceId, ss->controlResourceSetId ? *ss->controlResourceSetId : -1L,
+          type, period, offset, ss->duration ? *ss->duration : 1L, symbols,
+          cand[0], cand[1], cand[2], cand[3], cand[4], f00_10, f20, f21, f22, f23, ue_formats,
+          pcc->searchSpaceSIB1 && ss->searchSpaceId == *pcc->searchSpaceSIB1,
+          pcc->searchSpaceOtherSystemInformation && ss->searchSpaceId == *pcc->searchSpaceOtherSystemInformation,
+          pcc->pagingSearchSpace && ss->searchSpaceId == *pcc->pagingSearchSpace,
+          pcc->ra_SearchSpace && ss->searchSpaceId == *pcc->ra_SearchSpace);
+  }
+}
+
 /* Publish the SIB1-derived PDCCH prior (see nr_pdcch_sib1_prior.h).
  *
  * The blind CORESET search brute-forces ~36,000 (extent x mapping) hypotheses while SIB1 -- which
@@ -2201,6 +2257,7 @@ static void publish_sib1_pdcch_prior(const NR_UE_MAC_INST_t *mac, const NR_Servi
   if (dl_common->pdcch_ConfigCommon != NULL
       && dl_common->pdcch_ConfigCommon->present == NR_SetupRelease_PDCCH_ConfigCommon_PR_setup) {
     const NR_PDCCH_ConfigCommon_t *pcc = dl_common->pdcch_ConfigCommon->choice.setup;
+    log_sib1_pdcch_search_spaces(pcc);
 
     if (pcc->ra_SearchSpace != NULL) {
       pr.ra_ss_valid = true;
@@ -2218,6 +2275,9 @@ static void publish_sib1_pdcch_prior(const NR_UE_MAC_INST_t *mac, const NR_Servi
           pr.ra_ss_period   = (uint16_t)per;
           pr.ra_ss_offset   = (uint16_t)off;
           pr.ra_ss_duration = (uint8_t)(ss->duration != NULL ? *ss->duration : 1);
+          if (ss->monitoringSymbolsWithinSlot != NULL && ss->monitoringSymbolsWithinSlot->size >= 2)
+            pr.ra_ss_symbol_mask = (uint16_t)(((uint16_t)ss->monitoringSymbolsWithinSlot->buf[0] << 6)
+                                              | (ss->monitoringSymbolsWithinSlot->buf[1] >> 2));
           break;
         }
       }
