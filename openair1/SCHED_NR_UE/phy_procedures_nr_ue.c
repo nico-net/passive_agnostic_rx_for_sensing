@@ -1591,14 +1591,11 @@ int nr_process_pbch_symbol(
   if (nr_isac_enabled() && nr_isac_source_enabled(NR_ISAC_SRC_SSB)) {
     uint32_t k_abs[NR_PBCH_NUM_RB * NR_NB_SC_PER_RB];
     uint32_t l_sym[NR_PBCH_NUM_RB * NR_NB_SC_PER_RB];
-    // k_ssb hardcoded to 0: there is no PHY-side plumbing path to the MAC's real
-    // ssb_subcarrier_offset at this call site (nr_process_pbch_symbol only receives
-    // PHY_VARS_NR_UE*, never the MAC instance) -- and no field on NR_DL_FRAME_PARMS carries it
-    // either (verified: grepped the whole PHY tree, zero hits). CORRECT for this deployment
-    // (Phase 1 already confirmed this cell's actual kSSB is 0) but WRONG for any future cell
-    // with a nonzero kSSB -- flagged, not fixed; adding real MAC->PHY plumbing for this one
-    // value is out of scope for this task.
-    nr_isac_ssb_k_abs(ssb_start_subcarrier, /*k_ssb=*/0, fp->ofdm_symbol_size, k_abs);
+    // P11fix (nr_isac_ssb_axis.h): ssb_start_subcarrier is already Point-A-referenced and needs
+    // no k_ssb term here; the axis wraps modulo the carrier's own bandwidth in subcarriers
+    // (fp->N_RB_DL * 12), NOT fp->ofdm_symbol_size (the FFT size), which differ (e.g. 3276 vs
+    // 4096 at 273 PRB) and can wrap a value outside the declared [0, nof_prb*12) range.
+    nr_isac_ssb_k_abs(ssb_start_subcarrier, fp->N_RB_DL * 12, k_abs);
     for (uint32_t i = 0; i < NR_PBCH_NUM_RB * NR_NB_SC_PER_RB; i++) {
       l_sym[i] = (uint32_t)relPbchSymb;
     }
