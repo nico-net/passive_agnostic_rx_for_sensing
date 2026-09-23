@@ -44,6 +44,7 @@ extern _Atomic long nr_ue_diag_producer_absolute_slot;
  * inside an #ifdef __cplusplus block, and a declaration placed there is silently invisible to C. */
 #define NR_DL_CHEST_MAX_ANT 8
 extern __thread uint32_t nr_dl_chest_nvar_ant[];
+extern __thread int nr_dl_chest_only_ant;
 extern __thread int nr_dl_chest_diag_request;
 extern __thread int nr_dlsch_chest_per_symbol; // nr_dlsch_demodulation.c: read the estimate at the data symbol itself
 
@@ -1256,7 +1257,7 @@ static __thread nr_pdsch_slot_share_t t_share = {0, 0, 0};
 static __thread struct { long slot; double fo; int valid; } t_fep_cache = {0, 0.0, 0};
 static __thread struct {
   long slot; uint16_t dmrs_pos; uint8_t cfg_type, nscid, ports_lo, cdm, nl; uint16_t scr;
-  int rb_lo, rb_n; uint32_t nvar, nvar_den; int n_dmrs_sym, dmrs_first, dmrs_last; int valid;
+  int rb_lo, rb_n; uint32_t nvar, nvar_den; int n_dmrs_sym, dmrs_first, dmrs_last; int only; int valid;
 } t_chest_cache = {0};
 
 void nr_pdsch_passive_set_slot_share(int on, int rb_lo, int rb_n)
@@ -1680,7 +1681,13 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
     }
   }
   int dmrs_first = -1, dmrs_last = -1; // for the per-branch phase-slope estimator below
+  /* SINGLE-BRANCH DECODE (P39): when the demodulator reads one branch (ISAC_RX_MRC_MODE=0 -> branch 0,
+   * or a pinned branch), estimate only that branch. The other three were estimated and then never read:
+   * 4x the chest cost (~1.2 ms/grant OTA) for nothing. Sensing does not use this estimate -- it forms
+   * H_i = Y_i / X from the raw per-antenna FEP output, which is still produced for every antenna. */
+  const int chest_only = nr_dlsch_planned_branch(fp->nb_antennas_rx, cw->Nl);
   const int chest_hit = t_share.on && t_chest_cache.valid && t_chest_cache.slot == share_slot
+      && t_chest_cache.only == chest_only
       && t_chest_cache.dmrs_pos == dlsch_config->dlDmrsSymbPos && t_chest_cache.cfg_type == dlsch_config->dmrsConfigType
       && t_chest_cache.nscid == dlsch_config->nscid && t_chest_cache.ports_lo == (uint8_t)dlsch_config->dmrs_ports
       && t_chest_cache.cdm == dlsch_config->n_dmrs_cdm_groups && t_chest_cache.nl == cw->Nl
@@ -1711,6 +1718,7 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
     nvar = t_chest_cache.nvar; nvar_den = t_chest_cache.nvar_den; n_dmrs_sym = t_chest_cache.n_dmrs_sym;
     dmrs_first = t_chest_cache.dmrs_first; dmrs_last = t_chest_cache.dmrs_last;
   }
+  nr_dl_chest_only_ant = chest_only;
   for (int m = dlsch_config->start_symbol; !chest_hit && m < probe_end; m++) {
     if (!((dlsch_config->dlDmrsSymbPos >> m) & 1)) {
       continue;
@@ -1767,6 +1775,7 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
     }
     n_dmrs_sym++;
   }
+  nr_dl_chest_only_ant = -1;
   if (n_dmrs_sym == 0) {
     { static _Atomic unsigned long c_ = 0;
       const unsigned long n_ = atomic_fetch_add_explicit(&c_, 1, memory_order_relaxed) + 1;
@@ -1906,7 +1915,7 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
   t_chest_cache.nl = cw->Nl; t_chest_cache.scr = dlsch_config->dlDmrsScramblingId;
   t_chest_cache.rb_lo = chest_alloc.first_rb; t_chest_cache.rb_n = chest_alloc.num_rbs;
   t_chest_cache.nvar = nvar; t_chest_cache.nvar_den = nvar_den; t_chest_cache.n_dmrs_sym = n_dmrs_sym;
-  t_chest_cache.dmrs_first = dmrs_first; t_chest_cache.dmrs_last = dmrs_last;
+  t_chest_cache.dmrs_first = dmrs_first; t_chest_cache.dmrs_last = dmrs_last; t_chest_cache.only = chest_only;
   t_chest_cache.valid = t_share.on;
 chest_done:
 
@@ -2193,7 +2202,7 @@ chest_done:
     if (!atomic_exchange(&s_inert_logged, 1))
       LOG_W(PHY, "SENSING: BRANCHFO inert: grant has one DM-RS symbol, no per-branch slope to measure\n");
   }
-  if (fp->nb_antennas_rx > 1 && dmrs_first >= 0 && dmrs_last > dmrs_first) {
+  if (fp->nb_antennas_rx > 1 && chest_only < 0 && dmrs_first >= 0 && dmrs_last > dmrs_first) {
     static _Atomic uint64_t s_fo_n = 0;
     static double s_fo_ema[NR_DL_CHEST_MAX_ANT];
     // symbol duration incl. CP: one slot is 1ms/slots_per_subframe, split into symbols_per_slot
