@@ -6,18 +6,20 @@
  *
  *  1. UCI. A downlink TB owns every data RE in its allocation. An uplink one does not: HARQ-ACK
  *     with O_ACK <= 2 PUNCTURES the ULSCH, overwriting REs whose positions depend on bits this
- *     receiver never decodes. Rather than reconstruct what we cannot know, this path runs ONLY on
- *     grants that decoded with no UCI hypothesis at all (out->o_ack == 0 at the call site). Grants
- *     rescued by a UCI hypothesis keep contributing through the DM-RS source, which does not care.
- *     Measure where X is known; skip where it is not.
+ *     receiver never decodes. Rather than reconstruct what we cannot know, the RE-ENCODE path runs
+ *     ONLY on grants that decoded with no UCI hypothesis at all (uci_ack_re == 0 at the call site).
+ *     Grants rescued by a UCI hypothesis, and CRC-failed grants, use the MASKED path instead: hard
+ *     decisions of the grant's own LLRs, kept only where the learned confidence says they are right.
  *  2. Scrambling. TS 38.211 gives PUSCH the same Gold sequence as PDSCH when no UCI is present --
  *     nr_pusch_codeword_scrambling() itself delegates to nr_codeword_scrambling() for template ==
  *     NULL -- so the no-UCI case needs the public downlink function, not a UL-specific export.
  *  3. rxdataF is a RING of RU_RX_SLOT_DEPTH slots here, not a plain per-slot buffer.
  */
 #include "nr_pusch_data_aided.h"
+#include "nr_llr_confidence.h"
 
 #include <stdatomic.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "PHY/CODING/nrLDPC_extern.h"
@@ -32,6 +34,7 @@
 #define UL_DA_MAX_RE (273 * 12 * 14)
 
 static _Atomic uint64_t g_da_try, g_da_ok, g_da_rej_seg, g_da_rej_enc, g_da_rej_modidx, g_da_re;
+static _Atomic uint64_t g_da_masked, g_da_nocal;
 
 void nr_isac_pusch_data_aided_stats_dump(void)
 {
@@ -41,14 +44,30 @@ void nr_isac_pusch_data_aided_stats_dump(void)
   }
   LOG_I(PHY,
         "SENSING: pusch_data_aided[try=%lu submitted=%lu (%.1f%%) re=%lu rej_seg=%lu rej_enc=%lu "
-        "rej_modidx=%lu]\n",
+        "rej_modidx=%lu masked=%lu no_cal=%lu]\n",
         (unsigned long)t,
         (unsigned long)atomic_load_explicit(&g_da_ok, memory_order_relaxed),
         100.0 * (double)atomic_load_explicit(&g_da_ok, memory_order_relaxed) / (double)t,
         (unsigned long)atomic_load_explicit(&g_da_re, memory_order_relaxed),
         (unsigned long)atomic_load_explicit(&g_da_rej_seg, memory_order_relaxed),
         (unsigned long)atomic_load_explicit(&g_da_rej_enc, memory_order_relaxed),
-        (unsigned long)atomic_load_explicit(&g_da_rej_modidx, memory_order_relaxed));
+        (unsigned long)atomic_load_explicit(&g_da_rej_modidx, memory_order_relaxed),
+        (unsigned long)atomic_load_explicit(&g_da_masked, memory_order_relaxed),
+        (unsigned long)atomic_load_explicit(&g_da_nocal, memory_order_relaxed));
+}
+
+/* nr_llr_confidence works on one byte per bit; the LDPC output, the scrambler and the modulator on
+ * packed bits, bit i at byte i/8, bit i%8. */
+static uint8_t *bit_buf(uint32_t G)
+{
+  static __thread uint8_t *buf = NULL;
+  static __thread uint32_t cap = 0;
+  if (cap < G) {
+    free(buf);
+    buf = malloc(G);
+    cap = buf ? G : 0;
+  }
+  return buf;
 }
 
 void nr_isac_pusch_data_aided_submit(PHY_VARS_NR_UE *ue,
@@ -56,6 +75,8 @@ void nr_isac_pusch_data_aided_submit(PHY_VARS_NR_UE *ue,
                                      const nfapi_nr_pusch_pdu_t *pdu,
                                      const nr_pdcch_blind_ul_result_t *g,
                                      const uint8_t *tb_bytes,
+                                     const int16_t *llr,
+                                     uint32_t llr_G,
                                      uint32_t harq_pid_tag,
                                      uint32_t ul_slot_idx,
                                      uint32_t nof_ant,
@@ -64,7 +85,7 @@ void nr_isac_pusch_data_aided_submit(PHY_VARS_NR_UE *ue,
   if (!nr_isac_enabled() || !nr_isac_source_enabled(NR_ISAC_SRC_PUSCH_DATA)) {
     return;
   }
-  if (ue == NULL || gnb == NULL || pdu == NULL || g == NULL || tb_bytes == NULL) {
+  if (ue == NULL || gnb == NULL || pdu == NULL || g == NULL) {
     return;
   }
   if (!nr_isac_flow_admit(g->rnti)) {
@@ -80,37 +101,14 @@ void nr_isac_pusch_data_aided_submit(PHY_VARS_NR_UE *ue,
   const int                sps   = fp->symbols_per_slot;
   const uint32_t           Qm    = pdu->qam_mod_order;
 
-  /* ---- Segment + LDPC encode. Re-segmented here because the decode path only sized C/K/Z/F. ---- */
-  static __thread uint8_t  seg_storage[MAX_NUM_NR_DLSCH_SEGMENTS_PER_LAYER][8448];
-  static __thread uint8_t *c_segs[MAX_NUM_NR_DLSCH_SEGMENTS_PER_LAYER];
-  for (int r = 0; r < MAX_NUM_NR_DLSCH_SEGMENTS_PER_LAYER; r++) {
-    c_segs[r] = seg_storage[r];
-  }
-
-  const uint32_t A = pdu->pusch_data.tb_size * 8;
-  nrLDPC_TB_encoding_parameters_t TB = {0};
-  TB.harq_unique_pid = harq_pid_tag;
-  TB.BG              = pdu->maintenance_parms_v3.ldpcBaseGraph;
-  TB.A               = A;
-  const uint32_t B   = A + 24; // TB CRC, as nr_segmentation expects
-  TB.Kb = nr_segmentation((unsigned char *)tb_bytes, c_segs, B, &TB.C, &TB.K, &TB.Z, &TB.F, TB.BG);
-  if (TB.C > MAX_NUM_NR_DLSCH_SEGMENTS_PER_LAYER) {
-    atomic_fetch_add_explicit(&g_da_rej_seg, 1, memory_order_relaxed);
-    return;
-  }
-
-  TB.nb_rb      = g->num_rb;
-  TB.Qm         = Qm;
-  TB.mcs        = g->mcs;
-  TB.nb_layers  = 1;
-  TB.rv_index   = g->rv;
-  TB.tbslbrm    = pdu->maintenance_parms_v3.tbSizeLbrmBytes;
-
   const int n_dmrs_sym = __builtin_popcount((unsigned)g->ul_dmrs_symb_pos
                                             & (((1u << g->num_symbols) - 1u) << g->start_symbol));
   const int nb_dmrs_re_per_rb = ((g->dmrs_config_type == 0) ? 6 : 4) * g->n_dmrs_cdm_groups;
+  nrLDPC_TB_encoding_parameters_t TB = {0};
+  TB.Qm        = Qm;
+  TB.nb_layers = 1;
   TB.G = nr_get_G(g->num_rb, g->num_symbols, nb_dmrs_re_per_rb, n_dmrs_sym, 0, Qm, 1);
-  if (TB.G == 0) {
+  if (TB.G == 0 || TB.G > UL_DA_MAX_RE * 8) {
     atomic_fetch_add_explicit(&g_da_rej_seg, 1, memory_order_relaxed);
     return;
   }
@@ -119,36 +117,94 @@ void nr_isac_pusch_data_aided_submit(PHY_VARS_NR_UE *ue,
    * encoder store through AVX2 intrinsics that fault on a misaligned buffer, and a __thread buffer's
    * address depends on the whole TLS layout, which makes natural alignment accidental. */
   static __thread uint8_t coded_bits[(UL_DA_MAX_RE * 8 + 63) / 64 * 64 + 64] __attribute__((aligned(32)));
+  static __thread uint8_t keep[UL_DA_MAX_RE];
   memset(coded_bits, 0, sizeof(coded_bits));
-  TB.output = coded_bits;
+  const bool masked = (tb_bytes == NULL);
+  const bool have_llr = (llr != NULL && llr_G == TB.G);
 
-  static __thread nrLDPC_segment_encoding_parameters_t segs[MAX_NUM_NR_DLSCH_SEGMENTS_PER_LAYER];
-  memset(segs, 0, sizeof(segs));
-  TB.segments = segs;
-  for (uint32_t r = 0; r < TB.C; r++) {
-    segs[r].c = c_segs[r];
-    segs[r].E = nr_get_E(TB.G, TB.C, TB.Qm, TB.nb_layers, r);
-    reset_meas(&segs[r].ts_interleave);
-    reset_meas(&segs[r].ts_rate_match);
-    reset_meas(&segs[r].ts_ldpc_encode);
+  if (masked) {
+    float tau = 0.0f;
+    uint8_t *hard = bit_buf(TB.G);
+    if (!have_llr || hard == NULL || !nr_llrconf_threshold((uint8_t)Qm, &tau)) {
+      atomic_fetch_add_explicit(&g_da_nocal, 1, memory_order_relaxed);
+      return; /* no calibration for this Qm yet: DM-RS only (spec §6) */
+    }
+    nr_llrconf_hard((uint8_t)Qm, llr, TB.G, tau, hard, keep);
+    /* Hard decisions of DESCRAMBLED LLRs; the scramble below restores the transmitted bits. */
+    for (uint32_t j = 0; j < TB.G / 8; j++) {
+      const uint8_t *h = &hard[8 * j];
+      coded_bits[j] = (uint8_t)(h[0] | h[1] << 1 | h[2] << 2 | h[3] << 3 | h[4] << 4 | h[5] << 5 | h[6] << 6 | h[7] << 7);
+    }
+    for (uint32_t i = TB.G & ~7u; i < TB.G; i++)
+      coded_bits[i >> 3] |= (uint8_t)(hard[i] << (i & 7));
+  } else {
+    /* ---- Segment + LDPC encode. Re-segmented here because the decode path only sized C/K/Z/F. ---- */
+    static __thread uint8_t  seg_storage[MAX_NUM_NR_DLSCH_SEGMENTS_PER_LAYER][8448];
+    static __thread uint8_t *c_segs[MAX_NUM_NR_DLSCH_SEGMENTS_PER_LAYER];
+    for (int r = 0; r < MAX_NUM_NR_DLSCH_SEGMENTS_PER_LAYER; r++) {
+      c_segs[r] = seg_storage[r];
+    }
+
+    const uint32_t A = pdu->pusch_data.tb_size * 8;
+    TB.harq_unique_pid = harq_pid_tag;
+    TB.BG              = pdu->maintenance_parms_v3.ldpcBaseGraph;
+    TB.A               = A;
+    const uint32_t B   = A + 24; // TB CRC, as nr_segmentation expects
+    TB.Kb = nr_segmentation((unsigned char *)tb_bytes, c_segs, B, &TB.C, &TB.K, &TB.Z, &TB.F, TB.BG);
+    if (TB.C > MAX_NUM_NR_DLSCH_SEGMENTS_PER_LAYER) {
+      atomic_fetch_add_explicit(&g_da_rej_seg, 1, memory_order_relaxed);
+      return;
+    }
+
+    TB.nb_rb      = g->num_rb;
+    TB.mcs        = g->mcs;
+    TB.rv_index   = g->rv;
+    TB.tbslbrm    = pdu->maintenance_parms_v3.tbSizeLbrmBytes;
+    TB.output     = coded_bits;
+
+    static __thread nrLDPC_segment_encoding_parameters_t segs[MAX_NUM_NR_DLSCH_SEGMENTS_PER_LAYER];
+    memset(segs, 0, sizeof(segs));
+    TB.segments = segs;
+    for (uint32_t r = 0; r < TB.C; r++) {
+      segs[r].c = c_segs[r];
+      segs[r].E = nr_get_E(TB.G, TB.C, TB.Qm, TB.nb_layers, r);
+      reset_meas(&segs[r].ts_interleave);
+      reset_meas(&segs[r].ts_rate_match);
+      reset_meas(&segs[r].ts_ldpc_encode);
+    }
+
+    nrLDPC_slot_encoding_parameters_t sp = {.frame      = 0,
+                                            .slot       = slot,
+                                            .nb_TBs     = 1,
+                                            .threadPool = &get_nrUE_params()->Tpool,
+                                            .tinput     = NULL,
+                                            .tprep      = NULL,
+                                            .tparity    = NULL,
+                                            .toutput    = NULL,
+                                            .TBs        = &TB};
+    if (ue->nrLDPC_coding_interface.nrLDPC_coding_encoder(&sp) != 0) {
+      atomic_fetch_add_explicit(&g_da_rej_enc, 1, memory_order_relaxed);
+      return;
+    }
+
+    uint8_t *truth = have_llr ? bit_buf(TB.G) : NULL;
+    if (truth != NULL) { /* CRC-OK grant: this IS the calibration ground truth */
+      for (uint32_t j = 0; j < TB.G / 8; j++) {
+        const uint8_t c = coded_bits[j];
+        for (int b = 0; b < 8; b++)
+          truth[8 * j + b] = (c >> b) & 1;
+      }
+      for (uint32_t i = TB.G & ~7u; i < TB.G; i++)
+        truth[i] = (coded_bits[i >> 3] >> (i & 7)) & 1;
+      nr_llrconf_observe((uint8_t)Qm, llr, truth, TB.G);
+      nr_llrconf_agreement((uint8_t)Qm, llr, truth, TB.G);
+    }
   }
 
-  nrLDPC_slot_encoding_parameters_t sp = {.frame      = 0,
-                                          .slot       = slot,
-                                          .nb_TBs     = 1,
-                                          .threadPool = &get_nrUE_params()->Tpool,
-                                          .tinput     = NULL,
-                                          .tprep      = NULL,
-                                          .tparity    = NULL,
-                                          .toutput    = NULL,
-                                          .TBs        = &TB};
-  if (ue->nrLDPC_coding_interface.nrLDPC_coding_encoder(&sp) != 0) {
-    atomic_fetch_add_explicit(&g_da_rej_enc, 1, memory_order_relaxed);
-    return;
-  }
-
-  /* ---- Scramble + modulate. No UCI here by construction (see the file header), which is exactly
-   * the case where PUSCH scrambling reduces to the plain codeword scrambling. ---- */
+  /* ---- Scramble + modulate. The re-encode path has no UCI by construction (see the file header),
+   * exactly the case where PUSCH scrambling reduces to the plain codeword scrambling. The masked path
+   * scrambles bits that the receiver DESCRAMBLED with this same c(i), so it also reproduces UCI and
+   * placeholder bits. ---- */
   static __thread uint32_t scrambled[(UL_DA_MAX_RE * 8 + 31) / 32 + 1] __attribute__((aligned(32)));
   nr_codeword_scrambling(coded_bits, TB.G, 0, pdu->data_scrambling_id, g->rnti, scrambled);
 
@@ -198,7 +254,11 @@ void nr_isac_pusch_data_aided_submit(PHY_VARS_NR_UE *ue,
         if (k_abs >= symsz)
           k_abs -= symsz;
 
-        const c16_t  xs = mod_syms[mod_idx++];
+        const uint32_t m  = mod_idx;
+        const c16_t    xs = mod_syms[mod_idx++];
+        if (masked && !keep[m]) {
+          continue; // consumed (keeps the mapping aligned), not measured: low-confidence decision
+        }
         const double xr = (double)xs.r, xi = (double)xs.i;
         const double p  = xr * xr + xi * xi;
         if (p <= 0.0) {
@@ -252,4 +312,7 @@ void nr_isac_pusch_data_aided_submit(PHY_VARS_NR_UE *ue,
                                    k_buf, l_buf, nof_re, 1.0f, (uint64_t)g->rnti);
   atomic_fetch_add_explicit(&g_da_ok, 1, memory_order_relaxed);
   atomic_fetch_add_explicit(&g_da_re, nof_re, memory_order_relaxed);
+  if (masked) {
+    atomic_fetch_add_explicit(&g_da_masked, 1, memory_order_relaxed);
+  }
 }
