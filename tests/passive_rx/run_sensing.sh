@@ -22,7 +22,7 @@ timeout 20 uhd_find_devices --args "type=x4xx,addr=192.168.20.2" 2>/dev/null | g
 grep -qv performance /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor 2>/dev/null && \
   { log "ABORT: CPU governor not 'performance' (RT budget assumes it): sudo cpupower frequency-set -g performance"; exit 3; }
 [ -x "$BUILD/nr-uesoftmodem" ] || { log "ABORT: no sensing build at $BUILD"; exit 3; }
-strings "$BUILD/nr-uesoftmodem" | grep -q 'SENSING_GATE open' || { log "ABORT: binary lacks the sensing gate (stale build?)"; exit 3; }
+grep -qa 'SENSING_GATE open' "$BUILD/nr-uesoftmodem" || { log "ABORT: binary lacks the sensing gate (stale build?)"; exit 3; }
 python3 "$W/tests/passive_rx/survey.py" "$SURVEY" --geometry "$RUN/geometry.json" \
   --apply "$W/tests/passive_rx/ota/sensing_ota.conf.template" "$RUN/ue.conf" --report-path "$RUN/reports.jsonl" \
   || { log "ABORT: survey rejected (see above)"; exit 3; }
