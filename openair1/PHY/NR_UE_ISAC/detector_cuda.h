@@ -25,6 +25,11 @@ bool detector_cuda_available();
 /** Pay one-time CUDA context/cuFFT code-loading cost before CFR admission starts. */
 void detector_cuda_warmup();
 
+/** Make host threads that wait on the GPU sleep instead of spin (cudaDeviceScheduleBlockingSync),
+ * as ldpc_decoder_init() does. The engine's lanes share a few pinned cores; a spinning waiter burns
+ * the core another lane needs. Call before the first CUDA call of the process when possible. */
+void detector_cuda_prefer_blocking_sync();
+
 /** Per-CPI CUDA workspace for the expensive detector primitives.
  *
  * The owning detector keeps CLEAN control flow, thresholding, localization covariance, and

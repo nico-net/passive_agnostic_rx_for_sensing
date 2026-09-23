@@ -11,6 +11,7 @@
 #include <complex>
 #include <cstddef>
 #include <cstdint>
+#include <new>
 #include <cfloat>
 #include <cstring>
 #include <limits>
@@ -19,6 +20,35 @@
 
 namespace nr_isac {
 namespace {
+
+/** Page-locked host staging: a pageable cudaMemcpy runs at ~5 GB/s through the driver's own bounce
+ * buffers and holds the copy engine the other lanes are queued on; pinned memory DMAs directly. */
+template <typename T>
+class PinnedBuffer {
+public:
+  ~PinnedBuffer() { clear(); }
+  void resize(size_t count)
+  {
+    if (count == size_) return;
+    clear();
+    if (count && cudaMallocHost(reinterpret_cast<void**>(&data_), count * sizeof(T)) != cudaSuccess) {
+      data_ = nullptr;
+      throw std::bad_alloc();
+    }
+    size_ = count;
+  }
+  void clear()
+  {
+    if (data_) cudaFreeHost(data_);
+    data_ = nullptr;
+    size_ = 0;
+  }
+  T* data() { return data_; }
+  T& operator[](size_t i) { return data_[i]; }
+private:
+  T* data_ = nullptr;
+  size_t size_ = 0;
+};
 
 const char* cufft_error_name(cufftResult status)
 {
@@ -178,6 +208,60 @@ __global__ void local_peak_kernel(const float* power, uint32_t rows, uint32_t ff
     peak_indices[row] = static_cast<int>(peak);
     peak_power[row] = centre;
     peak_delta[row] = delta;
+  }
+}
+
+// Exact per-row order statistics by 8-bit radix select, written where the segmented sort would
+// have put them (compact_statistics_kernel reads only the middle of each sorted row). The key is
+// CUB's float twiddle, so the order -- and the selected float bits -- are exactly the sort's.
+__device__ __forceinline__ uint32_t sortable_float_key(float value)
+{
+  const uint32_t bits = __float_as_uint(value);
+  return (bits & 0x80000000u) ? ~bits : (bits | 0x80000000u);
+}
+
+__device__ float select_row_rank(const float* row_power, uint32_t fft_n, uint32_t rank,
+                                 uint32_t* histogram, uint32_t* shared_state)
+{
+  uint32_t prefix = 0, mask = 0;
+  for (int shift = 24; shift >= 0; shift -= 8) {
+    for (uint32_t bucket = threadIdx.x; bucket < 256; bucket += blockDim.x) histogram[bucket] = 0;
+    __syncthreads();
+    for (uint32_t i = threadIdx.x; i < fft_n; i += blockDim.x) {
+      const uint32_t key = sortable_float_key(row_power[i]);
+      if ((key & mask) == prefix) atomicAdd(&histogram[(key >> shift) & 255u], 1u);
+    }
+    __syncthreads();
+    if (threadIdx.x == 0) {
+      uint32_t bucket = 0;
+      while (rank >= histogram[bucket]) rank -= histogram[bucket++];
+      shared_state[0] = bucket;
+      shared_state[1] = rank;
+    }
+    __syncthreads();
+    prefix |= shared_state[0] << shift;
+    mask |= 255u << shift;
+    rank = shared_state[1];
+    __syncthreads();
+  }
+  const uint32_t bits = (prefix & 0x80000000u) ? (prefix & 0x7fffffffu) : ~prefix;
+  return __uint_as_float(bits);
+}
+
+__global__ void row_median_select_kernel(const float* power, float* sorted_power, uint32_t rows,
+                                         uint32_t fft_n)
+{
+  const uint32_t row = blockIdx.x;
+  if (row >= rows) return;
+  __shared__ uint32_t histogram[256];
+  __shared__ uint32_t shared_state[2];
+  const size_t base = static_cast<size_t>(row) * fft_n;
+  const uint32_t upper = fft_n / 2;
+  const float high = select_row_rank(power + base, fft_n, upper, histogram, shared_state);
+  if (threadIdx.x == 0) sorted_power[base + upper] = high;
+  if (!(fft_n & 1)) {
+    const float low = select_row_rank(power + base, fft_n, upper - 1, histogram, shared_state);
+    if (threadIdx.x == 0) sorted_power[base + upper - 1] = low;
   }
 }
 
@@ -504,12 +588,10 @@ public:
     local_peak_kernel<<<window.rows, threads>>>(device_power_, window.rows, fft_n,
                                                 fine_center, radius, peak_indices_,
                                                 peak_power_, peak_delta_);
-    cuda_status = cub::DeviceSegmentedRadixSort::SortKeys(
-        sort_workspace_, sort_workspace_bytes_, device_power_, device_sorted_,
-        static_cast<int>(elements), static_cast<int>(window.rows),
-        segment_offsets_, segment_offsets_ + 1);
+    row_median_select_kernel<<<window.rows, threads>>>(device_power_, device_sorted_, window.rows, fft_n);
+    cuda_status = cudaGetLastError();
     if (cuda_status != cudaSuccess) {
-      set_error(error, std::string("CUB segmented row median: ") + cudaGetErrorString(cuda_status));
+      set_error(error, std::string("CUDA row median select: ") + cudaGetErrorString(cuda_status));
       return false;
     }
     compact_statistics_kernel<<<(window.rows + threads - 1) / threads, threads>>>(
@@ -587,7 +669,7 @@ private:
   uint32_t fft_n_ = 0;
   uint32_t subcarriers_ = 0;
   uint32_t rows_ = 0;
-  std::vector<cufftComplex> compact_host_;
+  PinnedBuffer<cufftComplex> compact_host_;
   std::vector<float> coarse_host_;
   std::vector<double> delay_host_;
   std::vector<float> contrast_host_;
@@ -692,7 +774,8 @@ public:
     const size_t cells = static_cast<size_t>(window.rows) * window.subcarriers;
     const size_t samples = cells * window.antennas;
     static_assert(sizeof(std::complex<float>) == sizeof(cufftComplex));
-    cudaError_t status = cudaMemcpy(values_, window.values.data(), samples * sizeof(*values_),
+    std::memcpy(corrected_host_.data(), window.values.data(), samples * sizeof(*values_));
+    cudaError_t status = cudaMemcpy(values_, corrected_host_.data(), samples * sizeof(*values_),
                                     cudaMemcpyHostToDevice);
     if (status == cudaSuccess)
       status = cudaMemcpy(observed_, window.observed.data(), cells * sizeof(*observed_),
@@ -840,7 +923,7 @@ private:
   uint32_t rows_ = 0;
   uint32_t subcarriers_ = 0;
   uint32_t antennas_ = 0;
-  std::vector<cufftComplex> corrected_host_;
+  PinnedBuffer<cufftComplex> corrected_host_;
   std::vector<double> row_delay_host_;
   std::vector<double> delay_host_;
   std::vector<double> applied_phase_host_;

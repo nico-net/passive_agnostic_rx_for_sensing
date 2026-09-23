@@ -24,8 +24,11 @@ class SpatialDetectorExecutor;
 
 /** Engine threads leave the PHY's SCHED_FIFO class and, when NR_ISAC_CPUS="3,12,13" is set, run
  *  only on those cores -- a std::thread created from a FIFO PHY thread inherits FIFO otherwise.
- *  Declared here so non-engine threads (the gate watchdog in nr_isac.cc) can share it too. */
-void pin_current_thread_from_env();
+ *  Declared here so non-engine threads (the gate watchdog in nr_isac.cc) can share it too.
+ *  lane >= 0 pins a detector lane to ONE listed core (lane modulo the list): the production list
+ *  includes an isolcpus core, where the scheduler never load-balances, so threads given the whole
+ *  set piled onto that one core and left the others idle. */
+void pin_current_thread_from_env(int lane = -1);
 
 class SensingEngine {
 public:
@@ -80,7 +83,9 @@ private:
     void push(Snapshot* value);
     bool try_pop(Snapshot*& value);
     Snapshot* wait_pop();
+    size_t peak_depth() const { return peak_depth_.load(std::memory_order_relaxed); }
   private:
+    std::atomic<size_t> peak_depth_{0};
     std::mutex mutex_;
     std::condition_variable condition_;
     std::deque<Snapshot*> queue_;
@@ -157,6 +162,10 @@ private:
   // only in the family key, exactly as in the Python pipeline.
   std::map<int64_t, PendingRow> rows_;
   size_t pending_row_bytes_ = 0;
+  // Backlog high-water marks (accumulation thread only), printed at stop(): zero loss counters do not
+  // prove real time -- a slow engine hides its backlog in rows_ until a gate close discards it.
+  size_t peak_pending_rows_ = 0;
+  size_t peak_pending_row_bytes_ = 0;
   bool have_slot_clock_ = false;
   int64_t latest_absolute_slot_ = 0;
   uint32_t latest_raw_slot_ = 0;

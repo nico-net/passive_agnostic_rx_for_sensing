@@ -1119,6 +1119,15 @@ if(ENABLE_CHANNEL_SIM_CUDA)
        ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/sync_correction_cuda.cu
        ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/detector_cuda.cu
        ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/family_processing_cuda.cu)
+  # Each detector lane is its own host thread. With the legacy default stream every lane's sync and
+  # family kernels, and every synchronous cudaMemcpy, serialised behind all the other lanes' work
+  # (measured: 8 lanes, sync estimate p50 3 ms alone -> 34 ms concurrent). Per-thread default streams
+  # keep each lane on its own stream; sync_correction_cuda's cuFFT already binds cudaStreamPerThread.
+  set_source_files_properties(
+       ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/sync_correction_cuda.cu
+       ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/detector_cuda.cu
+       ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/family_processing_cuda.cu
+       PROPERTIES COMPILE_OPTIONS "--default-stream=per-thread")
 else()
   list(APPEND NR_UE_ISAC_SRC ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/detector_cuda_stub.cc)
 endif()
