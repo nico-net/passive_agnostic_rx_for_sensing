@@ -1149,6 +1149,25 @@ void *UE_thread(void *arg)
             nr_get_carrier_frequencies(UE, &dl_carrier, &ul_carrier);
             nrue_ru_set_freq(UE, ul_carrier, dl_carrier, UE->initial_fo);
             UE->common_vars.freq_offset = UE->initial_fo;
+            /* The retune only reaches samples produced from now on. Frames already queued host-side
+             * were taken on the corrected LO, and the confirm capture would read them and measure the
+             * residual again (measured: -12 Hz after the retune, 2026-09-23). Drain until a 2-frame
+             * read has to wait for live samples (>= 15 ms of its 20 ms air time). */
+            {
+              int flushed = 0;
+              double dt = 0.0;
+              struct timespec t0, t1;
+              while (dt < 15e-3 && flushed < 400 && !oai_exit) {
+                clock_gettime(CLOCK_MONOTONIC, &t0);
+                readFrame(UE, &sync_timestamp, duration_rx_to_tx, true);
+                clock_gettime(CLOCK_MONOTONIC, &t1);
+                dt = (t1.tv_sec - t0.tv_sec) + 1e-9 * (t1.tv_nsec - t0.tv_nsec);
+                flushed += 2;
+              }
+              readFrame(UE, &sync_timestamp, duration_rx_to_tx, true);
+              LOG_W(PHY, "SENSING: SCAN_CONFIRM drained %d queued frames after the retune (last read %.1f ms)\n",
+                    flushed, dt * 1e3);
+            }
             delNotifiedFIFO_elt(res);
             stream_status = STREAM_STATUS_UNSYNC;
             continue;
