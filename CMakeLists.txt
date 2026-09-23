@@ -994,6 +994,7 @@ set(PHY_SRC_UE
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_data_aided.c
+  ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_llr_confidence.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/pucch_nr.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/csi_rx.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_csirs_monitor.c
@@ -2446,6 +2447,12 @@ if(ENABLE_TESTS)
   target_link_libraries(test_nr_pdcch_blind_rnti_bootstrap PRIVATE nr_pdcch_blind_monitor nr_common MAC_NR_COMMON polar crc_byte UTIL asn1_nr_rrc_hdrs asn1_lte_rrc_hdrs GTest::gtest)
   add_dependencies(tests test_nr_pdcch_blind_rnti_bootstrap)
   add_test(NAME test_nr_pdcch_blind_rnti_bootstrap COMMAND ./test_nr_pdcch_blind_rnti_bootstrap)
+
+  add_executable(test_nr_llr_confidence ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_llr_confidence_test.c
+                                        ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_llr_confidence.c)
+  target_link_libraries(test_nr_llr_confidence PRIVATE m)
+  add_dependencies(tests test_nr_llr_confidence)
+  add_test(NAME test_nr_llr_confidence COMMAND ./test_nr_llr_confidence)
 
   # Phase 3 Technique A (roadmap artifact "Cell-Agnostic Passive Receiver"): full-carrier PDCCH
   # DM-RS correlation mapping. Closed-loop synthetic test (regenerates its own known-good DM-RS to
