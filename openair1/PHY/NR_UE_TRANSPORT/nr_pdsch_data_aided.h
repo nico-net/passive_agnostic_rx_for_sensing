@@ -57,9 +57,12 @@ extern __thread uint64_t nr_isac_abs_slot_override;
  * reconstruction rather than merely losing a few REs.
  *
  * The caller owns the scope decision. This function assumes, and does NOT re-check:
- *   - `tb_bytes` is a CRC-VERIFIED payload in the TX encoder's own B = A + TB-CRC format (i.e. a
- *     decoder's `harq->b`). Feeding it a failed decode reconstructs the WRONG X and injects
- *     high-power garbage across every range bin -- the single worst failure mode this source has.
+ *   - `tb_bytes`, when non-NULL, is a CRC-VERIFIED payload in the TX encoder's own B = A + TB-CRC
+ *     format (i.e. a decoder's `harq->b`). Feeding it a failed decode reconstructs the WRONG X and
+ *     injects high-power garbage across every range bin -- the single worst failure mode this source
+ *     has. A CRC-failed grant instead passes `tb_bytes == NULL` with its `llr`: X is then the hard
+ *     decision, and only REs whose confidence clears the threshold LEARNED from CRC-OK grants
+ *     (nr_llr_confidence.h, spec §6) are measured; until that Qm is calibrated nothing is submitted.
  *   - single layer (`cw->Nl == 1`), no PTRS, no CSI-RS rate-matching overlap: the RE enumeration
  *     treats every RE of a non-DM-RS symbol inside the allocation as plain data.
  *
@@ -71,7 +74,10 @@ extern __thread uint64_t nr_isac_abs_slot_override;
  * @param dlsch_config  Allocation/DM-RS/scrambling parameters of the grant
  * @param freq_alloc    Resolved PRB allocation
  * @param rnti          RNTI the PDSCH was scrambled with
- * @param tb_bytes      CRC-verified transport block, A + CRC bits
+ * @param tb_bytes      CRC-verified transport block, A + CRC bits; NULL = masked decision-directed path
+ * @param llr           descrambled LLRs of this grant (nr_pdsch_passive_last_llr), or NULL. With
+ *                      `tb_bytes` they calibrate the confidence threshold; without, they are X-hat
+ * @param llr_G         number of LLRs at `llr`; must equal this grant's G or they are ignored
  * @param harq_pid_tag  Disambiguates this TB on the shared nrLDPC coding interface; see the .c file
  * @param rxdataF       Frequency-domain received samples for this slot, per rx antenna
  * @param nvar          Noise variance estimate from the demodulator, for the engine's fusion weight
@@ -83,6 +89,8 @@ void nr_isac_pdsch_data_aided_submit(PHY_VARS_NR_UE *ue,
                                      const freq_alloc_bitmap_t *freq_alloc,
                                      uint16_t rnti,
                                      const uint8_t *tb_bytes,
+                                     const int16_t *llr,
+                                     uint32_t llr_G,
                                      uint32_t harq_pid_tag,
                                      const c16_t rxdataF[][ue->frame_parms.samples_per_slot_wCP],
                                      double nvar);
