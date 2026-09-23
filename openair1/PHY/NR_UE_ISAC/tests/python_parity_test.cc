@@ -3,7 +3,7 @@
 #include "adaptive_threshold.h"
 #include "aoa.h"
 #include "cross_leg_fusion.h"
-#include "detector.h"
+#include "clean_detector.h"
 #include "detector_cuda.h"
 #include "enu_tracker.h"
 #include "hierarchical_tracker.h"
@@ -62,6 +62,18 @@ CfrWindow fractional_component(double range_bin=12.25, double doppler_bin=32.312
   return w;
 }
 
+// canonical CLEAN (clean_detector.h) accepts one independent receiver; split spatial RF channels
+// first, mirroring sensing_engine.cc's independent_receiver_view().
+CfrWindow receiver_view(const CfrWindow& input, uint32_t receiver)
+{
+  CfrWindow output = input;
+  output.antennas = 1;
+  const size_t cells = static_cast<size_t>(input.rows) * input.subcarriers;
+  output.values.assign(input.values.begin() + receiver * cells,
+                       input.values.begin() + (receiver + 1) * cells);
+  return output;
+}
+
 void test_fft()
 {
   std::vector<std::complex<double>> values{{1.0,2.0},{-0.5,0.25},{3.0,-1.0},{0.0,0.5},{2.0,0.0}};
@@ -89,15 +101,16 @@ void test_adaptive_threshold()
 
 void test_detector()
 {
-  PipelineConfig config;config.maximum_components=1;config.maximum_objects=1;
+  PipelineConfig config;
   config.maximum_range_m=300.0;config.maximum_target_speed_mps=50.0;
-  const auto result=detect_clean(fractional_component(),config);
+  config.false_object_intensity_per_s=1.0;
+  const auto result=detect_clean(receiver_view(fractional_component(),0),config);
   require(result.components.size()==1,"CLEAN failed to return pure component");
   close(result.components[0].range_bin,12.25,2e-4,"continuous CLEAN range parity");
   close(result.components[0].doppler_bin,32.3125,2e-4,"continuous CLEAN Doppler parity");
   close(result.components[0].score,32767.999999999607,2e-4,"normalized pure-component score parity");
 
-  const auto zero_doppler=detect_clean(fractional_component(8.5,32.0),config);
+  const auto zero_doppler=detect_clean(receiver_view(fractional_component(8.5,32.0),0),config);
   require(zero_doppler.components.size()==1,"zero-Doppler CUT was incorrectly notched");
   close(zero_doppler.components[0].range_bin,8.5,2e-4,"zero-Doppler range parity");
   close(zero_doppler.components[0].doppler_bin,32.0,2e-4,"zero-Doppler bin must remain searchable");
@@ -107,12 +120,11 @@ void test_required_cuda_contract()
 {
   if (detector_cuda_available()) return;
   PipelineConfig config;
-  config.maximum_components = 1;
-  config.maximum_objects = 1;
+  config.false_object_intensity_per_s=1.0;
   setenv("NR_ISAC_REQUIRE_CUDA", "1", 1);
   bool rejected = false;
   try {
-    (void)detect_clean(fractional_component(), config);
+    (void)detect_clean(receiver_view(fractional_component(), 0), config);
   } catch (const std::runtime_error&) {
     rejected = true;
   }
@@ -445,7 +457,7 @@ void test_causal_cpi_pipeline()
   c.minimum_dwell_s=0.001;c.maximum_dwell_s=0.001;
   c.minimum_rows=2;c.maximum_rows=4;
   c.sync_enable=false;c.family_static=false;c.tracker_enable=false;
-  c.maximum_components=1;c.maximum_objects=1;
+  c.maximum_range_m=200.0;c.maximum_target_speed_mps=50.0;c.false_object_intensity_per_s=50.0;
   c.report_path=path;c.out_path.clear();
   nr_isac_carrier_t carrier{};
   carrier.nof_prb=2;carrier.scs_hz=30000;carrier.dl_center_hz=3499440000;
@@ -498,7 +510,7 @@ void test_finite_admission_window()
   c.minimum_dwell_s=0.001;c.maximum_dwell_s=0.001;
   c.minimum_rows=2;c.maximum_rows=4;
   c.sync_enable=false;c.family_static=false;c.tracker_enable=false;
-  c.maximum_components=1;c.maximum_objects=1;
+  c.maximum_range_m=200.0;c.maximum_target_speed_mps=50.0;c.false_object_intensity_per_s=50.0;
   c.report_path=path;c.out_path.clear();
   c.admission_window_enabled=true;c.admission_start_slot=20;c.admission_end_slot=24;
   nr_isac_carrier_t carrier{};
@@ -564,8 +576,9 @@ std::array<std::vector<double>, 3> mixed_row_capture(float ul_amplitude,
   c.minimum_dwell_s = 0.001; c.maximum_dwell_s = 0.001;
   c.minimum_rows = 2; c.maximum_rows = 4;
   c.sync_enable = false; c.family_static = false; c.tracker_enable = false;
-  c.maximum_components = 1; c.maximum_objects = 1; c.capture_rvm = true;
-  c.maximum_range_m = 200.0; c.report_path = path; c.out_path.clear();
+  c.capture_rvm = true; c.false_object_intensity_per_s = 50.0;
+  c.maximum_range_m = 200.0; c.maximum_target_speed_mps = 50.0;
+  c.report_path = path; c.out_path.clear();
   nr_isac_carrier_t carrier{};
   carrier.nof_prb = 2; carrier.scs_hz = 30000; carrier.dl_center_hz = 3499440000;
   carrier.slots_per_frame = 20; carrier.pci = 1;
@@ -581,7 +594,7 @@ std::array<std::vector<double>, 3> mixed_row_capture(float ul_amplitude,
       engine.submit(slot, 0.0f, NR_ISAC_SRC_CSI_RS, carrier, dl.data(), 1,
                     k.data(), symbol.data(), dl.size(), 1.0f);
       engine.submit(slot, 0.0f, NR_ISAC_SRC_PUSCH_DMRS, carrier, ul.data(), 1,
-                    k.data(), symbol.data(), ul.size(), 1.0f);
+                    k.data(), symbol.data(), ul.size(), 1.0f, 42);
     }
     engine.stop();
   }
@@ -596,491 +609,6 @@ std::array<std::vector<double>, 3> mixed_row_capture(float ul_amplitude,
   require(primary.size() == ul_only.size(), "mixed-row DL/UL RDM shapes differ");
   std::remove(path.c_str());
   return {std::move(primary), std::move(dl_only), std::move(ul_only)};
-}
-
-// --- P10a: branch identity on the CFR ABI ---------------------------------------------------
-// Pins the three things this slice claims: an untagged CPI's report is unchanged (no branch field
-// at all), a single-branch CPI names its branch, and a CPI fused from several carries the mask
-// without naming one of them. The strongest of the three is the FIRST: the tagged line, with only
-// the two branch fields removed, must be character-for-character the untagged line -- i.e. carrying
-// the identity changes no numeric result anywhere in the pipeline.
-std::string drop_json_field(std::string line, const std::string& key)
-{
-  const std::string needle = ",\"" + key + "\":";
-  const size_t at = line.find(needle);
-  if (at == std::string::npos) return line;
-  size_t end = at + needle.size();
-  while (end < line.size() && line[end] != ',' && line[end] != '}') ++end;
-  return line.erase(at, end - at);
-}
-
-// branch_b < 0 submits one branch only.
-std::string branch_capture(int branch_a, int branch_b, const std::string& path)
-{
-  std::remove(path.c_str());
-  PipelineConfig c;
-  c.sources_mask = (1u << NR_ISAC_SRC_CSI_RS);
-  c.duration_bank_s = {0.001}; c.bootstrap_duration_index = 0;
-  c.minimum_dwell_s = 0.001; c.maximum_dwell_s = 0.001;
-  c.minimum_rows = 2; c.maximum_rows = 4;
-  c.sync_enable = false; c.family_static = false; c.tracker_enable = false;
-  c.maximum_components = 1; c.maximum_objects = 1;
-  c.maximum_range_m = 200.0; c.report_path = path; c.out_path.clear();
-  nr_isac_carrier_t carrier{};
-  carrier.nof_prb = 2; carrier.scs_hz = 30000; carrier.dl_center_hz = 3499440000;
-  carrier.slots_per_frame = 20; carrier.pci = 1;
-  std::vector<std::complex<float>> h(24, {1.0f, 0.0f});
-  std::vector<uint32_t> k(24), symbol(24, 2);
-  for (uint32_t i = 0; i < k.size(); ++i) k[i] = i;
-  {
-    SensingEngine engine(c, 2, 1); engine.start();
-    for (uint32_t slot = 0; slot < 10; ++slot) {
-      engine.submit(slot, 0.0f, NR_ISAC_SRC_CSI_RS, carrier, h.data(), 1,
-                    k.data(), symbol.data(), h.size(), 1.0f,
-                    branch_a < 0 ? NR_ISAC_BRANCH_NONE : static_cast<uint8_t>(branch_a));
-      if (branch_b >= 0)
-        engine.submit(slot, 0.5f, NR_ISAC_SRC_CSI_RS, carrier, h.data(), 1,
-                      k.data(), symbol.data(), h.size(), 1.0f, static_cast<uint8_t>(branch_b));
-    }
-    engine.stop();
-  }
-  std::ifstream input(path); require(input.good(), "branch capture emitted no report");
-  std::string line;
-  require(static_cast<bool>(std::getline(input, line)), "branch capture report is empty");
-  std::remove(path.c_str());
-  return line;
-}
-
-void test_branch_identity_report()
-{
-  const std::string legacy = branch_capture(-1, -1, "/tmp/nr_isac_branch_legacy.jsonl");
-  require(legacy.find("\"branch_mask\"") == std::string::npos
-              && legacy.find("\"branch_id\"") == std::string::npos,
-          "an untagged CPI must carry no branch field at all, not branch 0");
-
-  const std::string tagged = branch_capture(3, -1, "/tmp/nr_isac_branch_single.jsonl");
-  require(tagged.find("\"branch_mask\":8") != std::string::npos,
-          "a single-branch CPI must report its own branch bit");
-  require(tagged.find("\"branch_id\":3") != std::string::npos,
-          "a single-branch CPI must name its branch");
-  // The whole point of the slice: identity is additive. Only the wall clock may differ.
-  const std::string key = "cpi_start_time_utc_ns";
-  require(drop_json_field(drop_json_field(drop_json_field(tagged, "branch_mask"), "branch_id"), key)
-              == drop_json_field(legacy, key),
-          "carrying a branch identity changed something other than the branch fields");
-
-  const std::string fused = branch_capture(1, 2, "/tmp/nr_isac_branch_fused.jsonl");
-  require(fused.find("\"branch_mask\":6") != std::string::npos,
-          "a CPI fused from two branches must report both bits");
-  require(fused.find("\"branch_id\"") == std::string::npos,
-          "a CPI fused from two branches must not name one of them");
-}
-
-// ---------------------------------------------------------------------------------------------
-// adaptive_RX_pipeline.md P13: the per-branch SensingEngine array. Three properties are pinned
-// here, in the order of how much damage getting them wrong would do:
-//   (c) a CFR row tagged with an inactive branch is DROPPED, never routed to another branch;
-//   (a) a single-branch (legacy) receiver's output identity is EXACTLY what it is today;
-//   (b) two engines fed different data produce independent reports -- one's CPI is bit-identical
-//       to what it would have been had the other never existed.
-nr_rx_branch_set_t branch_set(std::initializer_list<int> active)
-{
-  nr_rx_branch_set_t set{};
-  for (int i = 0; i < NR_RX_BRANCH_MAX; ++i) {
-    set.b[i].branch_id = static_cast<uint8_t>(i);
-    set.b[i].physical_channel = -1;
-    set.b[i].state = NR_RXB_DISABLED;
-  }
-  int physical = 0;
-  for (int id : active) {
-    set.b[id].physical_channel = static_cast<int8_t>(physical++);
-    set.b[id].state = NR_RXB_ACQUIRING;
-    ++set.n_active;
-  }
-  return set;
-}
-
-void test_branch_engine_routing()
-{
-  // (c) An inactive, out-of-range or unmapped branch must resolve to "drop" (-1), never to 0.
-  const nr_rx_branch_set_t two = branch_set({0, 2});
-  require(branch_engine_index(two, 0) == 0, "an active branch must route to its own engine");
-  require(branch_engine_index(two, 2) == 2, "the engine array is indexed by branch id, not ordinal");
-  require(branch_engine_index(two, 1) == -1,
-          "a CFR tagged with an INACTIVE branch must be dropped, never misrouted to another engine");
-  require(branch_engine_index(two, 3) == -1, "an unmapped branch must be dropped");
-  require(branch_engine_index(two, NR_RX_BRANCH_MAX) == -1, "an out-of-range branch must be dropped");
-  require(branch_engine_index(two, 200) == -1, "a garbage branch id must be dropped, not wrapped");
-  require(branch_engine_index(two, NR_ISAC_BRANCH_NONE) == 0,
-          "an untagged row belongs to the lowest active branch (the legacy engine)");
-
-  // A single-branch deployment may name any branch id; the sentinel must follow it, not assume 0.
-  const nr_rx_branch_set_t only_two = branch_set({2});
-  require(branch_engine_index(only_two, NR_ISAC_BRANCH_NONE) == 2,
-          "with one active branch the legacy engine is that branch, whatever its id");
-  require(branch_engine_index(only_two, 0) == -1,
-          "branch 0 is not special: unnamed means dropped");
-
-  // With no active branch at all there is nothing to route to; nr_isac_init() refuses this case,
-  // and the router must not invent an engine for it either.
-  const nr_rx_branch_set_t none = branch_set({});
-  require(branch_engine_index(none, NR_ISAC_BRANCH_NONE) == -1 && branch_engine_index(none, 0) == -1,
-          "an empty branch set must route nothing");
-}
-
-// ---------------------------------------------------------------------------------------------
-// adaptive_RX_pipeline.md P10b (AoA-removal audit Stage B item 2): the CFR producers' submission
-// plan. Two properties, in order of how much damage getting them wrong would do:
-//   (a) THE REGRESSION PIN -- with <= 1 active branch the plan is EXACTLY the call the producer
-//       made before P10b: one submission, antenna plane 0, the producer's own antenna count
-//       verbatim, branch identity explicitly ABSENT. Every producer routes through this one
-//       function, so this single assertion is the structural proof for all of them.
-//   (b) with several branches, one SINGLE-ANTENNA submission per branch reading THAT branch's own
-//       physical channel and tagged with its branch id -- never another branch's plane, never a
-//       fabricated branch 0.
-// The drop-not-misroute guarantee itself is NOT re-tested here: every entry this plan produces is
-// submitted through nr_isac_submit_cfr_multi_branch(), which test_branch_engine_routing() above
-// already pins.
-void test_branch_submit_plan()
-{
-  nr_isac_submit_plan_t plan[NR_RX_BRANCH_MAX];
-  uint32_t pack = 0;
-
-  // (a) No branch set at all (sensing's stub/legacy shape) and a single branch, AoA's four antennas.
-  require(build_submit_plan(nullptr, plan, NR_RX_BRANCH_MAX, 4, 4, &pack) == 1
-              && plan[0].first_ant == 0 && plan[0].nof_ant == 4
-              && plan[0].branch_id == NR_ISAC_BRANCH_NONE && pack == 4,
-          "with no branch set the plan must be the legacy untagged submission, antennas unchanged");
-  for (int id : {0, 3}) {
-    const nr_rx_branch_set_t one = branch_set({id});
-    require(build_submit_plan(&one, plan, NR_RX_BRANCH_MAX, 4, 4, &pack) == 1
-                && plan[0].first_ant == 0 && plan[0].nof_ant == 4
-                && plan[0].branch_id == NR_ISAC_BRANCH_NONE && pack == 4,
-            "one active branch must keep the legacy multi-antenna AoA submission, untagged");
-    // The producer's own clamp is authoritative and must pass through untouched, even when it
-    // exceeds what this layer would consider available -- re-clamping here would silently change
-    // the live AoA path.
-    require(build_submit_plan(&one, plan, NR_RX_BRANCH_MAX, 1, 4, &pack) == 1
-                && plan[0].nof_ant == 1 && pack == 1,
-            "the single-branch plan must carry the producer's antenna count verbatim");
-  }
-
-  // (b) Two branches on physical channels 0 and 1: one single-antenna submission each, tagged.
-  const nr_rx_branch_set_t two = branch_set({0, 2});  // branch 0 -> phys 0, branch 2 -> phys 1
-  require(build_submit_plan(&two, plan, NR_RX_BRANCH_MAX, 4, 4, &pack) == 2,
-          "two active branches must produce one submission each");
-  require(plan[0].branch_id == 0 && plan[0].first_ant == 0 && plan[0].nof_ant == 1,
-          "a branch submission must be single-antenna and read its own physical channel");
-  require(plan[1].branch_id == 2 && plan[1].first_ant == 1 && plan[1].nof_ant == 1,
-          "the second branch must read ITS physical channel, and be tagged by branch id not ordinal");
-  require(pack == 2, "the producer must pack exactly the planes the plan reads");
-  require(plan[0].branch_id != NR_ISAC_BRANCH_NONE && plan[1].branch_id != NR_ISAC_BRANCH_NONE,
-          "a multi-branch submission must never be untagged: untagged rows all land on one engine");
-
-  // A branch mapped to a physical channel the producer cannot reach is SKIPPED, not folded into
-  // another branch's plane and not silently read out of bounds.
-  require(build_submit_plan(&two, plan, NR_RX_BRANCH_MAX, 4, 1, &pack) == 1
-              && plan[0].branch_id == 0 && plan[0].first_ant == 0 && pack == 1,
-          "a branch whose physical channel exceeds the producer's buffer must be dropped");
-  require(build_submit_plan(&two, plan, NR_RX_BRANCH_MAX, 4, 0, &pack) == 0 && pack == 0,
-          "with no reachable antenna the producer must submit nothing at all");
-
-  // Never fan out to a silent subset -- the same rule nr_rx_branch_set_dispatch() states.
-  require(build_submit_plan(&two, plan, 1, 4, 4, &pack) == -1,
-          "a plan that does not fit the caller's array must fail, not drop a branch quietly");
-
-  // A mapped-but-DISABLED slot is not a branch, and must not acquire a submission.
-  nr_rx_branch_set_t half = branch_set({0, 1});
-  half.b[1].state = NR_RXB_DISABLED;
-  require(build_submit_plan(&half, plan, NR_RX_BRANCH_MAX, 4, 4, &pack) == 1
-              && plan[0].branch_id == NR_ISAC_BRANCH_NONE,
-          "with the second branch disabled the set is single-branch again: back to the legacy plan");
-
-  // Four branches, identity map: the plan must be exhaustive and collision-free.
-  const nr_rx_branch_set_t all = branch_set({0, 1, 2, 3});
-  require(build_submit_plan(&all, plan, NR_RX_BRANCH_MAX, 4, 4, &pack) == 4 && pack == 4,
-          "every active branch must get its own submission");
-  uint32_t seen = 0;
-  for (int i = 0; i < 4; ++i) {
-    require(plan[i].branch_id == (uint8_t)i && plan[i].nof_ant == 1, "branch order must be by id");
-    require(!(seen & (1u << plan[i].first_ant)), "no two branches may read the same antenna plane");
-    seen |= 1u << plan[i].first_ant;
-  }
-}
-
-// P10c: the two UL producers (nr_pusch_data_aided.c, nr_pusch_passive_decode.c) pass the passive
-// gNB context's OWN allocated plane count as BOTH legacy_nof_ant and available_antennas -- that
-// count is min(nb_antennas_rx, PASSIVE_UL_MAX_ANT), fixed at passive_gnb_prepare() time, not
-// nb_antennas_rx itself. The hazard this pins is UL-specific: a branch mapped past it would slice
-// rxdataF / ul_ch_estimates planes the context never allocated.
-void test_ul_submit_plan()
-{
-  nr_isac_submit_plan_t plan[NR_RX_BRANCH_MAX];
-  uint32_t pack = 0;
-
-  // Legacy identity: whatever the context allocated, one untagged submission of exactly that.
-  for (uint32_t nant = 1; nant <= 4; ++nant) {
-    require(build_submit_plan(nullptr, plan, NR_RX_BRANCH_MAX, nant, nant, &pack) == 1
-                && plan[0].first_ant == 0 && plan[0].nof_ant == nant
-                && plan[0].branch_id == NR_ISAC_BRANCH_NONE && pack == nant,
-            "a UL CFR submission must be untagged and keep the context antenna count at 1 branch");
-  }
-
-  // Multi-branch: per-antenna H = Y_a/X is a real per-branch measurement, so each branch reads its
-  // own plane -- it is NOT attributed to the lowest branch, and NOT dropped.
-  const nr_rx_branch_set_t two = branch_set({0, 2});  // branch 0 -> phys 0, branch 2 -> phys 1
-  require(build_submit_plan(&two, plan, NR_RX_BRANCH_MAX, 4, 4, &pack) == 2
-              && plan[0].branch_id == 0 && plan[0].first_ant == 0
-              && plan[1].branch_id == 2 && plan[1].first_ant == 1,
-          "each UL branch must carry its own identity and read its own antenna plane");
-
-  // A context that allocated only 2 planes must not serve branches mapped to planes 2 and 3.
-  const nr_rx_branch_set_t high = branch_set({0, 1, 2, 3});
-  require(build_submit_plan(&high, plan, NR_RX_BRANCH_MAX, 2, 2, &pack) == 2 && pack == 2,
-          "branches beyond the passive UL context allocated planes must be skipped, not sliced");
-}
-
-// P13b item 2: aoa_enable + several active branches is refused at CONFIG PARSE time (nr_isac.cc's
-// aoa_enable block), not only by SensingEngine's constructor deep in engine construction. The
-// predicate is the testable half; the LOG_E and the "return without applying anything" around it
-// are the same shape as the two rx_array parse failures next to it. The single-branch pin is the
-// important assertion here: the co-located-array AoA deployment must be completely unaffected.
-void test_aoa_branch_conflict()
-{
-  const nr_rx_branch_set_t none = branch_set({});
-  const nr_rx_branch_set_t one = branch_set({0});
-  const nr_rx_branch_set_t one_high = branch_set({3});
-  const nr_rx_branch_set_t two = branch_set({0, 2});
-  const nr_rx_branch_set_t all = branch_set({0, 1, 2, 3});
-
-  // THE REGRESSION PIN: the legacy AoA receiver (aoa_enable, one or no branch) is still accepted.
-  require(!aoa_conflicts_with_branches(true, none) && !aoa_conflicts_with_branches(true, one)
-              && !aoa_conflicts_with_branches(true, one_high),
-          "aoa_enable at a single active branch is the co-located-array deployment: stays accepted");
-
-  // The refused combination, at two and at four branches.
-  require(aoa_conflicts_with_branches(true, two) && aoa_conflicts_with_branches(true, all),
-          "aoa_enable together with several active branches must be refused at parse time");
-
-  // Without aoa_enable a multi-branch set is the normal deployment and must never be touched.
-  require(!aoa_conflicts_with_branches(false, two) && !aoa_conflicts_with_branches(false, all),
-          "a multi-branch receiver without aoa_enable must not be refused");
-
-  // A mapped-but-DISABLED slot is not a branch: the same predicate build_submit_plan() uses, so a
-  // set that reads as single-branch there must read as single-branch here too.
-  nr_rx_branch_set_t half = branch_set({0, 1});
-  half.b[1].state = NR_RXB_DISABLED;
-  require(!aoa_conflicts_with_branches(true, half),
-          "with the second branch disabled the set is single-branch again: AoA stays accepted");
-}
-
-// P13b item 3: the submission-plan skip census must fire when the plan places NOTHING. The old
-// condition was "written > 0 && set", so written == 0 -- every active branch naming a physical
-// channel this producer cannot reach, i.e. TOTAL loss for this producer -- incremented no counter
-// and logged nothing. FALSIFICATION: the first two require()s below assert 2 and 4 where the
-// pre-fix expression (written > 0 ? active - written : 0) yields 0, so they fail against the old
-// code; the remaining ones pin the shapes that must keep answering zero.
-void test_submit_plan_skip_census()
-{
-  const nr_rx_branch_set_t two = branch_set({0, 2});
-  const nr_rx_branch_set_t all = branch_set({0, 1, 2, 3});
-  const nr_rx_branch_set_t one = branch_set({0});
-
-  require(submit_plan_skipped(&two, 0) == 2,
-          "with no reachable antenna at all BOTH active branches must be counted as skipped");
-  require(submit_plan_skipped(&all, 0) == 4, "the same at four branches");
-
-  // Partial reachability: the pre-existing behaviour, unchanged.
-  require(submit_plan_skipped(&two, 1) == 1, "one placed of two active branches is one skipped");
-  require(submit_plan_skipped(&two, 2) == 0, "a fully placed plan skips nothing");
-
-  // The legacy shapes answer zero: one untagged submission IS the whole plan there.
-  require(submit_plan_skipped(nullptr, 0) == 0 && submit_plan_skipped(&one, 1) == 0
-              && submit_plan_skipped(&one, 0) == 0,
-          "the legacy single-branch / no-set plan must never report a skipped branch");
-
-  // A FAILED plan (does not fit the caller's array) is not a skip count: active - (-1) would be
-  // arithmetic nonsense and would inflate the census by one on every such call.
-  require(submit_plan_skipped(&two, -1) == 0 && submit_plan_skipped(&all, -1) == 0,
-          "a plan that failed outright must not be counted as skipped branches");
-
-  // End to end against the real plan builder: two branches, zero reachable antennas.
-  nr_isac_submit_plan_t plan[NR_RX_BRANCH_MAX];
-  uint32_t pack = 0;
-  const int written = build_submit_plan(&two, plan, NR_RX_BRANCH_MAX, 4, 0, &pack);
-  require(written == 0 && pack == 0 && submit_plan_skipped(&two, written) == 2,
-          "the plan builder's own total-loss case must be censused as two skipped branches");
-}
-
-void test_branch_output_identity()
-{
-  PipelineConfig base;
-  base.rx_id = "rx1";
-  base.out_path = "/tmp/oaiue_sensing";
-  base.report_path = "/tmp/sensing/reports.jsonl";
-  base.report_endpoint = "tcp://*:5555";
-
-  // (a) THE REGRESSION PIN. One active branch -> every output-identity field byte-identical.
-  for (int id : {0, 3}) {
-    const PipelineConfig single = branch_pipeline_config(base, branch_set({id}), (uint8_t)id);
-    require(single.rx_id == base.rx_id && single.out_path == base.out_path
-                && single.report_path == base.report_path
-                && single.report_endpoint == base.report_endpoint,
-            "a single-branch receiver must keep exactly the configured output identity, unsuffixed");
-  }
-
-  const nr_rx_branch_set_t two = branch_set({0, 1});
-  const PipelineConfig a = branch_pipeline_config(base, two, 0);
-  const PipelineConfig b = branch_pipeline_config(base, two, 1);
-  require(a.rx_id == "rx1_b0" && b.rx_id == "rx1_b1", "each branch must report its own rx_id");
-  require(a.report_path == "/tmp/sensing/reports_b0.jsonl"
-              && b.report_path == "/tmp/sensing/reports_b1.jsonl",
-          "branch report paths must differ, with the suffix before the extension");
-  require(a.out_path == "/tmp/oaiue_sensing_b0" && b.out_path == "/tmp/oaiue_sensing_b1",
-          "an extensionless prefix takes the suffix at the end");
-  require(a.report_endpoint == "tcp://*:5555" && b.report_endpoint == "tcp://*:5556",
-          "ZeroMQ endpoints must be offset by branch id so two engines cannot fight over one port");
-  require(a.report_path != b.report_path && a.out_path != b.out_path
-              && a.report_endpoint != b.report_endpoint && a.rx_id != b.rx_id,
-          "no two branches may share any output identity");
-
-  // Fix round 1 / defence in depth: a set whose n_active DISAGREES with what is actually mapped
-  // must still suffix. nr_rx_branch_set_parse() now rejects this at parse (nr_rx_branch_test.cc's
-  // RejectsAPhysicalMappingForAnUnnamedBranch), so it is unreachable through the config surface --
-  // it is asserted here so that if that parser invariant is ever weakened again, the failure is a
-  // suffixed-but-surprising path rather than two engines silently sharing one report file.
-  nr_rx_branch_set_t lying = branch_set({0, 1});
-  lying.n_active = 1;  // what a stale/looser parser could have produced
-  require(branch_active_count(lying) == 2, "the active count must be measured, not trusted");
-  require(branch_pipeline_config(base, lying, 1).report_path == "/tmp/sensing/reports_b1.jsonl"
-              && branch_pipeline_config(base, lying, 0).report_path
-                     != branch_pipeline_config(base, lying, 1).report_path,
-          "two mapped branches must get distinct paths even when n_active claims otherwise");
-  // And the routing predicate must agree with it: a mapped-but-DISABLED slot is not an engine.
-  nr_rx_branch_set_t half = branch_set({0});
-  half.b[1].physical_channel = 1;  // mapped, still NR_RXB_DISABLED
-  require(branch_active_count(half) == 1 && branch_engine_index(half, 1) == -1,
-          "a mapped but disabled branch has no engine and must not be routed to");
-
-  // A directory containing a dot must not be mistaken for a file extension.
-  PipelineConfig dotted = base;
-  dotted.report_path = "/tmp/run.1/reports";
-  require(branch_pipeline_config(dotted, two, 1).report_path == "/tmp/run.1/reports_b1",
-          "a dot in a directory name is not an extension");
-  PipelineConfig ipc = base;
-  ipc.report_endpoint = "ipc:///tmp/sensing.sock";
-  require(branch_pipeline_config(ipc, two, 1).report_endpoint == "ipc:///tmp/sensing.sock_b1",
-          "an endpoint with no numeric port still has to become distinct");
-}
-
-// (b) Two live engines, started together, fed DIFFERENT CFR. `solo` runs the first engine alone;
-// `paired` runs both. The first engine's report must be identical either way -- i.e. nothing about
-// another engine's existence, submissions or CPI closure reaches it.
-std::string two_engine_capture(bool with_second, const std::string& suffix)
-{
-  const std::string path_a = "/tmp/nr_isac_p13_a_" + suffix + ".jsonl";
-  const std::string path_b = "/tmp/nr_isac_p13_b_" + suffix + ".jsonl";
-  std::remove(path_a.c_str()); std::remove(path_b.c_str());
-  PipelineConfig base;
-  base.sources_mask = (1u << NR_ISAC_SRC_CSI_RS);
-  base.duration_bank_s = {0.001}; base.bootstrap_duration_index = 0;
-  base.minimum_dwell_s = 0.001; base.maximum_dwell_s = 0.001;
-  base.minimum_rows = 2; base.maximum_rows = 4;
-  base.sync_enable = false; base.family_static = false; base.tracker_enable = false;
-  base.maximum_components = 1; base.maximum_objects = 1;
-  base.maximum_range_m = 200.0; base.out_path.clear();
-  PipelineConfig ca = base; ca.report_path = path_a; ca.rx_id = "rxA";
-  PipelineConfig cb = base; cb.report_path = path_b; cb.rx_id = "rxB";
-  nr_isac_carrier_t carrier{};
-  carrier.nof_prb = 2; carrier.scs_hz = 30000; carrier.dl_center_hz = 3499440000;
-  carrier.slots_per_frame = 20; carrier.pci = 1;
-  std::vector<std::complex<float>> ha(24, {1.0f, 0.0f});
-  std::vector<std::complex<float>> hb(24, {0.0f, 9.0f});
-  std::vector<uint32_t> k(24), symbol(24, 2);
-  for (uint32_t i = 0; i < k.size(); ++i) k[i] = i;
-  {
-    SensingEngine engine_a(ca, 2, 1);
-    std::unique_ptr<SensingEngine> engine_b;
-    if (with_second) engine_b = std::make_unique<SensingEngine>(cb, 2, 1);
-    engine_a.start();
-    if (engine_b) engine_b->start();
-    for (uint32_t slot = 0; slot < 10; ++slot) {
-      engine_a.submit(slot, 0.0f, NR_ISAC_SRC_CSI_RS, carrier, ha.data(), 1,
-                      k.data(), symbol.data(), ha.size(), 1.0f, 0);
-      // Deliberately a different slot cadence, different amplitude and a different branch tag:
-      // if any of the accumulator, planner, clutter map, clock tracker or sequence counter were
-      // shared, engine A's single closed CPI could not survive this unchanged.
-      if (engine_b)
-        for (int repeat = 0; repeat < 3; ++repeat)
-          engine_b->submit(slot, 0.25f * repeat, NR_ISAC_SRC_CSI_RS, carrier, hb.data(), 1,
-                           k.data(), symbol.data(), hb.size(), 4.0f, 1);
-    }
-    if (engine_b) engine_b->stop();
-    engine_a.stop();
-  }
-  // NOTE: compares the FIRST report line only. These fixtures close exactly one CPI (10 slots at
-  // a 1 ms bank, minimum_rows 2), so the first line IS the whole output; if a future fixture closes
-  // two, this must compare the whole file or it will silently stop covering the later CPIs.
-  std::ifstream input(path_a); require(input.good(), "engine A emitted no report");
-  std::string line;
-  require(static_cast<bool>(std::getline(input, line)), "engine A's report is empty");
-  if (with_second) {
-    std::ifstream other(path_b);
-    std::string other_line;
-    require(other.good() && std::getline(other, other_line),
-            "engine B emitted nothing, so the isolation comparison would be vacuous");
-    require(other_line.find("\"rx_id\":\"rxB\"") != std::string::npos
-                && line.find("\"rx_id\":\"rxA\"") != std::string::npos,
-            "each engine must write its own receiver identity to its own file");
-    require(other_line != line, "two engines fed different CFR produced the same report");
-  }
-  std::remove(path_a.c_str()); std::remove(path_b.c_str());
-  return line;
-}
-
-void test_branch_engines_are_independent()
-{
-  const std::string key = "cpi_start_time_utc_ns";
-  const std::string solo = drop_json_field(two_engine_capture(false, "solo"), key);
-  const std::string paired = drop_json_field(two_engine_capture(true, "paired"), key);
-  require(solo == paired,
-          "a second engine's submissions changed the first engine's CPI: the instances share state");
-
-  // And the derived per-branch configuration really is what a live engine writes: the file lands at
-  // the suffixed path and the line carries the suffixed rx_id. This is what ties the pure helper
-  // above to nr_isac.cc's construction loop.
-  PipelineConfig base;
-  base.sources_mask = (1u << NR_ISAC_SRC_CSI_RS);
-  base.duration_bank_s = {0.001}; base.bootstrap_duration_index = 0;
-  base.minimum_dwell_s = 0.001; base.maximum_dwell_s = 0.001;
-  base.minimum_rows = 2; base.maximum_rows = 4;
-  base.sync_enable = false; base.family_static = false; base.tracker_enable = false;
-  base.maximum_components = 1; base.maximum_objects = 1;
-  base.maximum_range_m = 200.0; base.out_path.clear();
-  base.rx_id = "rx1"; base.report_path = "/tmp/nr_isac_p13_derived.jsonl";
-  const PipelineConfig derived = branch_pipeline_config(base, branch_set({0, 1}), 1);
-  require(derived.report_path == "/tmp/nr_isac_p13_derived_b1.jsonl", "derived path");
-  std::remove(derived.report_path.c_str());
-  nr_isac_carrier_t carrier{};
-  carrier.nof_prb = 2; carrier.scs_hz = 30000; carrier.dl_center_hz = 3499440000;
-  carrier.slots_per_frame = 20; carrier.pci = 1;
-  std::vector<std::complex<float>> h(24, {1.0f, 0.0f});
-  std::vector<uint32_t> k(24), symbol(24, 2);
-  for (uint32_t i = 0; i < k.size(); ++i) k[i] = i;
-  {
-    SensingEngine engine(derived, 2, 1); engine.start();
-    for (uint32_t slot = 0; slot < 10; ++slot)
-      engine.submit(slot, 0.0f, NR_ISAC_SRC_CSI_RS, carrier, h.data(), 1,
-                    k.data(), symbol.data(), h.size(), 1.0f, 1);
-    engine.stop();
-  }
-  std::ifstream input(derived.report_path);
-  std::string line;
-  require(input.good() && std::getline(input, line),
-          "a branch engine wrote nothing at its derived report path");
-  require(line.find("\"rx_id\":\"rx1_b1\"") != std::string::npos,
-          "a branch engine must stamp its own branch-qualified receiver id");
-  std::remove(derived.report_path.c_str());
 }
 
 void test_mixed_row_dl_rdm_isolation()
@@ -1108,8 +636,9 @@ void test_invalid_ul_does_not_suppress_dl()
   c.minimum_dwell_s = 0.001; c.maximum_dwell_s = 0.001;
   c.minimum_rows = 2; c.maximum_rows = 4;
   c.sync_enable = false; c.family_static = false; c.tracker_enable = false;
-  c.maximum_components = 1; c.maximum_objects = 1; c.capture_rvm = true;
-  c.maximum_range_m = 200.0; c.report_path = path; c.out_path.clear();
+  c.capture_rvm = true; c.false_object_intensity_per_s = 50.0;
+  c.maximum_range_m = 200.0; c.maximum_target_speed_mps = 50.0;
+  c.report_path = path; c.out_path.clear();
   nr_isac_carrier_t carrier{};
   carrier.nof_prb = 2; carrier.scs_hz = 30000; carrier.dl_center_hz = 3499440000;
   carrier.slots_per_frame = 20; carrier.pci = 1;
@@ -1123,7 +652,7 @@ void test_invalid_ul_does_not_suppress_dl()
       engine.submit(slot, 0.0f, NR_ISAC_SRC_CSI_RS, carrier, dl.data(), 1,
                     k.data(), symbol.data(), dl.size(), 1.0f);
       engine.submit(slot, 0.0f, NR_ISAC_SRC_PUSCH_DMRS, carrier, invalid_ul.data(), 1,
-                    k.data(), symbol.data(), invalid_ul.size(), 1.0f);
+                    k.data(), symbol.data(), invalid_ul.size(), 1.0f, 42);
     }
     engine.stop();
   }
@@ -1147,7 +676,8 @@ void test_dl_capture_fails_closed_without_dl()
   c.minimum_dwell_s = 0.001; c.maximum_dwell_s = 0.001;
   c.minimum_rows = 2; c.maximum_rows = 4;
   c.sync_enable = false; c.family_static = false; c.tracker_enable = false;
-  c.maximum_components = 1; c.maximum_objects = 1; c.capture_rvm = true;
+  c.capture_rvm = true; c.false_object_intensity_per_s = 50.0;
+  c.maximum_range_m = 200.0; c.maximum_target_speed_mps = 50.0;
   c.report_path = path; c.out_path.clear();
   nr_isac_carrier_t carrier{};
   carrier.nof_prb = 2; carrier.scs_hz = 30000; carrier.dl_center_hz = 3499440000;
@@ -1209,210 +739,11 @@ void test_ssb_k_abs()
   require(k[0] == 0xDEADBEEFu, "a non-positive carrier bandwidth must write nothing");
 }
 
-/** P14calib: the per-branch receive-chain calibration parser (rx_channel_calibration). */
-void test_channel_calibration_parse()
-{
-  ChannelCalibration parsed;
-  require(parse_channel_calibration(nullptr,&parsed) && !parsed.configured,
-          "an absent rx_channel_calibration must yield the unconfigured no-correction default");
-  require(parse_channel_calibration("",&parsed) && !parsed.configured,
-          "an empty rx_channel_calibration must yield the unconfigured no-correction default");
-
-  require(parse_channel_calibration(" 0 , 1.0 , 0 ; 2 , 0.5 , -3.25 ",&parsed),
-          "a well-formed two-branch calibration must parse");
-  require(parsed.configured,"a parsed calibration must be marked configured");
-  require(parsed.gain[0]==1.0 && parsed.fixed_delay_s[0]==0.0,
-          "branch 0 must round-trip its own gain/delay");
-  require(std::abs(parsed.gain[2]-0.5)<1e-12 && std::abs(parsed.fixed_delay_s[2]+3.25e-9)<1e-21,
-          "delay_ns must round-trip as seconds on the branch it names, sign preserved");
-  require(parsed.gain[1]==1.0 && parsed.fixed_delay_s[1]==0.0 && parsed.gain[3]==1.0
-              && parsed.fixed_delay_s[3]==0.0,
-          "a branch absent from the list must keep the identity correction, not zero gain");
-  /* The whole point of the split: a branch left at the identity is inert even though the struct
-     as a whole is configured. Without this the "default is bit-identical" claim would only hold
-     for an absent key, not for a partially-specified one. */
-  require(!channel_calibration_active(parsed,1) && channel_calibration_active(parsed,2),
-          "only a branch with a non-identity coefficient may be active");
-  require(!channel_calibration_active(parsed,-1) && !channel_calibration_active(parsed,4)
-              && !channel_calibration_active(ChannelCalibration{},0),
-          "an out-of-range branch or an unconfigured calibration must never be active");
-
-  ChannelCalibration guard;
-  const char* rejected[] = {
-    "0,1.0,0;0,0.9,1",        /* duplicate branch id */
-    "4,1.0,0",                /* branch id out of range */
-    "0,1.0,0,0",              /* rx_array_calibration's FOUR-field form pasted into this key */
-    "0,0,0",                  /* non-positive gain */
-    "0,-1.0,0",               /* negative gain */
-    "0,1.0",                  /* short tuple */
-    "0,1.0,0;",               /* trailing separator, i.e. an empty tuple */
-    "x,1.0,0",                /* malformed branch id */
-    "0,nan,0",                /* non-finite gain */
-    "0,1.0,inf",              /* non-finite delay */
-    "0,1.0,0 junk",           /* trailing garbage */
-    "0,1,0;1,1,0;2,1,0;3,1,0;0,1,0", /* more tuples than branches */
-  };
-  for (const char* spec : rejected) {
-    ChannelCalibration out = guard;
-    require(!parse_channel_calibration(spec,&out),
-            "a malformed rx_channel_calibration tuple must be rejected");
-    require(!out.configured,"a rejected calibration must leave the destination untouched");
-  }
-}
-
-/** P14calib: the kept (gain + fixed-delay) correction must agree NUMERICALLY with the AoA
- *  steering correction it was split out of. Both paths can measure range from the same hardware;
- *  if their sign or frequency-reference conventions disagreed, the two modes would report ranges
- *  offset from each other by 2*c*tau and nothing in either path would reveal it. Pinned on a
- *  shared vector rather than argued in a comment. */
-void test_channel_calibration_matches_aoa_convention()
-{
-  constexpr uint32_t subcarriers = 9;
-  const std::array<double,4> gain{1.0,1.3,0.7,0.95};
-  const std::array<double,4> delay_s{0.0,4.5e-9,-2.75e-9,1.25e-9};
-
-  CfrWindow window; window.antennas=4; window.rows=1; window.subcarriers=subcarriers;
-  window.scs_hz=30000; window.fc_hz=3.6e9;
-  window.values.resize((size_t)4*subcarriers);
-  window.observed.assign(subcarriers,1);
-  window.row_time_slots={0}; window.row_slot_idx={0}; window.row_slot_frac={0};
-  window.row_source_mask={1u<<NR_ISAC_SRC_CSI_RS};
-  std::vector<std::complex<float>> packed((size_t)4*subcarriers);
-  std::vector<uint32_t> k_abs(subcarriers);
-  for (uint32_t a=0;a<4;++a)
-    for (uint32_t sc=0;sc<subcarriers;++sc) {
-      const auto value = std::polar(0.6f+0.2f*a, static_cast<float>(0.37*sc-0.11*a));
-      window.values[window.sample(a,0,sc)] = value;
-      packed[(size_t)a*subcarriers+sc] = value;
-    }
-  for (uint32_t sc=0;sc<subcarriers;++sc) k_abs[sc]=sc;
-
-  /* The AoA path, with phase_rad zeroed -- the field this split REMOVES -- and the identity
-     channel permutation, so gain and delay are the only things either side applies. */
-  ArrayCalibration array; array.configured=true; array.physical_to_observed={0,1,2,3};
-  array.gain=gain; array.phase_rad={}; array.delay_s=delay_s;
-  apply_array_calibration(window,array);
-
-  /* The independent-branch path: each element is its own single-antenna branch submission, with
-     the carrier chosen to span exactly the window so the two frequency references coincide. */
-  for (uint32_t branch=0;branch<4;++branch) {
-    ChannelCalibration chain; chain.configured=true;
-    chain.gain[branch]=gain[branch]; chain.fixed_delay_s[branch]=delay_s[branch];
-    apply_channel_calibration(packed.data()+(size_t)branch*subcarriers,1,subcarriers,k_abs.data(),
-                              subcarriers,window.scs_hz,chain,(int)branch);
-  }
-  for (uint32_t a=0;a<4;++a)
-    for (uint32_t sc=0;sc<subcarriers;++sc)
-      require(std::abs(packed[(size_t)a*subcarriers+sc]-window.values[window.sample(a,0,sc)])<1e-6,
-              "per-branch gain/delay calibration disagrees with the AoA steering convention");
-
-  /* Sign check that does not depend on aoa.cc at all: the stored delay is what you MULTIPLY BY,
-     so applying +tau then -tau is the identity, and applying +tau to a flat channel produces a
-     phase that ADVANCES with subcarrier index for a positive tau. Getting this backwards would
-     double a cable delay instead of removing it, and would still look like "a correction". */
-  std::vector<std::complex<float>> round_trip{{1.f,0.f},{1.f,0.f},{1.f,0.f}};
-  const std::vector<uint32_t> k3{0,1,2};
-  ChannelCalibration forward; forward.configured=true; forward.fixed_delay_s[0]=5e-9;
-  apply_channel_calibration(round_trip.data(),1,3,k3.data(),3,30000.0,forward,0);
-  require(std::arg(round_trip[2])>std::arg(round_trip[1])
-              && std::arg(round_trip[1])>std::arg(round_trip[0]),
-          "a positive fixed_delay_s must ADVANCE phase with frequency (it removes a delay)");
-  ChannelCalibration inverse; inverse.configured=true; inverse.fixed_delay_s[0]=-5e-9;
-  apply_channel_calibration(round_trip.data(),1,3,k3.data(),3,30000.0,inverse,0);
-  for (size_t i=0;i<round_trip.size();++i)
-    require(std::abs(round_trip[i]-std::complex<float>(1.f,0.f))<1e-6,
-            "equal and opposite fixed delays must compose to the identity");
-
-  /* The bit-identity property itself, asserted rather than assumed: an unset calibration writes
-     nothing at all. This is what makes the default independent-branch path unchanged. */
-  std::vector<std::complex<float>> untouched{{0.25f,-0.5f},{-1.f,2.f},{3.f,0.125f}};
-  const std::vector<std::complex<float>> before = untouched;
-  apply_channel_calibration(untouched.data(),1,3,k3.data(),3,30000.0,ChannelCalibration{},0);
-  ChannelCalibration identity; identity.configured=true;
-  apply_channel_calibration(untouched.data(),1,3,k3.data(),3,30000.0,identity,0);
-  require(untouched==before,
-          "an unset or identity rx_channel_calibration must leave every sample bit-identical");
-}
-
-/** P14calib, fix round 1: the sign pinned against PHYSICS, not against its own convention.
- *
- *  test_channel_calibration_matches_aoa_convention() above is self-referential by construction --
- *  agreement with aoa.cc, a +tau/-tau round trip and "positive delay advances phase" would all
- *  stay green if the new code AND aoa.cc were coordinated-wrong (say a refactor redefined the
- *  stored field as "the correction to apply" and updated both consistently). This one cannot: it
- *  builds a channel with a KNOWN physical propagation delay and asserts the correction moves that
- *  delay to zero through the repo's OWN range projection -- the inverse FFT over subcarriers that
- *  detector.cc:106 performs.
- *
- *  A physical delay tau has response H[k] = exp(-j*2*pi*f_k*tau). Choosing tau = m/(N*scs) makes
- *  the inverse DFT a clean impulse at range bin m. The UNCORRECTED peak is asserted FIRST, because
- *  a synthetic setup that does not put its target where the physics says it should be cannot be
- *  trusted to say anything about the corrected case. */
-void test_channel_calibration_removes_a_known_physical_delay()
-{
-  constexpr uint32_t subcarriers = 64;
-  constexpr uint32_t delay_bins = 3;
-  const double scs_hz = 30000.0;
-  const double tau_s = static_cast<double>(delay_bins) / (subcarriers * scs_hz);
-
-  std::vector<uint32_t> k_abs(subcarriers);
-  std::vector<std::complex<float>> channel(subcarriers);
-  for (uint32_t k = 0; k < subcarriers; ++k) {
-    k_abs[k] = k;
-    /* The channel a cable of group delay tau_s imposes: exp(-j*2*pi*f*tau). */
-    channel[k] = static_cast<std::complex<float>>(
-        std::polar(1.0, -2.0 * PI * (k * scs_hz) * tau_s));
-  }
-  /* detector.cc:106's range projection, verbatim in form: inverse FFT over the subcarrier axis. */
-  auto peak_bin = [&](const std::vector<std::complex<float>>& cfr) {
-    std::vector<std::complex<double>> buffer(cfr.begin(), cfr.end());
-    fft_inplace(buffer, true);
-    uint32_t best = 0;
-    for (uint32_t q = 1; q < subcarriers; ++q)
-      if (std::abs(buffer[q]) > std::abs(buffer[best])) best = q;
-    return best;
-  };
-
-  require(peak_bin(channel)==delay_bins,
-          "the synthetic known-delay channel must peak at its own delay bin before anything is "
-          "corrected -- if it does not, nothing below this line means anything");
-
-  ChannelCalibration correct; correct.configured=true; correct.fixed_delay_s[0]=tau_s;
-  std::vector<std::complex<float>> corrected = channel;
-  apply_channel_calibration(corrected.data(),1,subcarriers,k_abs.data(),subcarriers,scs_hz,
-                            correct,0);
-  require(peak_bin(corrected)==0,
-          "a fixed_delay_s equal to the channel's own physical delay must move the peak to bin 0");
-
-  /* The inverted convention does not merely fail to help -- it DOUBLES the delay, which is the
-     failure mode that would otherwise look like a working correction. Asserting the exact wrong
-     answer, not just "not zero", is what makes this diagnostic. */
-  ChannelCalibration inverted; inverted.configured=true; inverted.fixed_delay_s[0]=-tau_s;
-  std::vector<std::complex<float>> doubled = channel;
-  apply_channel_calibration(doubled.data(),1,subcarriers,k_abs.data(),subcarriers,scs_hz,
-                            inverted,0);
-  require(peak_bin(doubled)==2*delay_bins,
-          "an inverted fixed_delay_s must DOUBLE the delay -- the convention is the wrong way round");
-}
-
-/** P14 Stage A: the AoA environment override is removed, so the keys must be REPORTED, never
- *  honoured. Counting them (rather than only logging) is what makes the removal testable. */
-void test_obsolete_aoa_env_rejected()
-{
-  ::unsetenv("AOA_ENABLE"); ::unsetenv("AOA_UL_ENABLE");
-  require(nr_isac_obsolete_env_keys()==0,"a clean environment must report no obsolete AoA keys");
-  ::setenv("AOA_ENABLE","1",1);
-  require(nr_isac_obsolete_env_keys()==1,"AOA_ENABLE must be reported obsolete, not honoured");
-  ::setenv("AOA_UL_ENABLE","0",1);
-  require(nr_isac_obsolete_env_keys()==2,"AOA_UL_ENABLE must be reported obsolete even when zero");
-  ::unsetenv("AOA_ENABLE"); ::unsetenv("AOA_UL_ENABLE");
-  require(nr_isac_obsolete_env_keys()==0,"obsolete AoA key reporting must not be sticky");
-}
 }
 
 int main()
 {
-  try {test_fft();test_adaptive_threshold();test_detector();test_required_cuda_contract();test_aoa();test_aoa_component_mixture_and_cross_leg_fusion();test_enu_geometry();test_repeated_ul_confirmation_gates_global_birth();test_variable_cpi();test_causal_cpi_pipeline();test_finite_admission_window();test_mixed_row_dl_rdm_isolation();test_invalid_ul_does_not_suppress_dl();test_dl_capture_fails_closed_without_dl();test_validation_report_compatibility();test_branch_identity_report();test_branch_engine_routing();test_branch_submit_plan();test_ul_submit_plan();test_aoa_branch_conflict();test_submit_plan_skip_census();test_branch_output_identity();test_branch_engines_are_independent();test_obsolete_aoa_env_rejected();test_ssb_k_abs();test_channel_calibration_parse();test_channel_calibration_matches_aoa_convention();test_channel_calibration_removes_a_known_physical_delay();}
+  try {test_fft();test_adaptive_threshold();test_detector();test_required_cuda_contract();test_aoa();test_aoa_component_mixture_and_cross_leg_fusion();test_enu_geometry();test_repeated_ul_confirmation_gates_global_birth();test_variable_cpi();test_causal_cpi_pipeline();test_finite_admission_window();test_mixed_row_dl_rdm_isolation();test_invalid_ul_does_not_suppress_dl();test_dl_capture_fails_closed_without_dl();test_validation_report_compatibility();test_ssb_k_abs();}
   catch(const std::exception& e){std::fprintf(stderr,"python parity test failed: %s\n",e.what());return EXIT_FAILURE;}
   std::puts("native sensing golden parity checks passed");return EXIT_SUCCESS;
 }
