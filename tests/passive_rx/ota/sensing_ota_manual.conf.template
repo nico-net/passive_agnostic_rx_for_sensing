@@ -47,7 +47,7 @@ sensing = {
   pdcch_blind_monitor_dci01 = "1:43";
   pdcch_blind_monitor_ul_bwp = "0:273";
   pdcch_blind_monitor_ul_tda = "0:14:4:0,0:14:5:0,0:14:6:0,0:14:7:0,0:14:8:0,0:14:11:0";  // SIB1 common, 3 bits
-  pdcch_blind_monitor_ul_dmrs = "1:2:1";               // type1, pos2 (2,7,11), len1
+  pdcch_blind_monitor_ul_dmrs = "0:2:1";               // type1 (0=type1), pos2 (2,7,11), len1
   pdcch_blind_monitor_ul_misc = "0:0:2:2:2";           // TP off, qam64, scrambling ids 2, PCI 2
   // carrier:ulsul:bwp:hopping:harq:dai1:dai2:sri:precoding:antports:srsreq:csireq:cbg:ptrs:beta:dmrsseq
   pdcch_blind_monitor_ul_dci_bits = "0:0:0:0:4:2:0:0:0:3:2:0:0:0:0:1";
