@@ -27,11 +27,17 @@ extern "C" {
 #endif
 
 /**
- * @brief Re-encode a CRC-verified uplink TB and submit H = Y/X over its data REs.
+ * @brief Submit H = Y/X over a PUSCH grant's data REs, in one of two modes.
  *
- * MUST only be called for a grant carrying NO UCI (see the o_ack gate at the call site): with
- * HARQ-ACK present the ACK OVERWRITES ULSCH resource elements, so X at those REs is not the ULSCH
- * symbol this function reconstructs and H there would be noise dressed up as a measurement.
+ * Re-encode (tb_bytes != NULL): X is the CRC-verified TB re-encoded. MUST only be used for a grant
+ * carrying NO UCI (see the uci_ack_re gate at the call site): UCI OVERWRITES ULSCH resource
+ * elements, so X there is not the ULSCH symbol this reconstructs. With llr given, the grant also
+ * feeds the LLR-confidence calibration (nr_llr_confidence.h).
+ *
+ * Masked (tb_bytes == NULL): X is the hard decision of llr, re-scrambled and re-modulated, kept only
+ * on REs whose min |LLR| clears the learned threshold. Valid with or without UCI, because a
+ * descrambled hard decision re-scrambled with the same c(i) is the transmitted bit whatever it
+ * encodes. Submits nothing until that modulation order has calibration.
  *
  * Silently no-ops unless NR_ISAC_SRC_PUSCH_DATA is an enabled source.
  *
@@ -39,7 +45,9 @@ extern "C" {
  * @param gnb           the passive gNB context holding rxdataF for this slot
  * @param pdu           the PUSCH PDU the decode ran against
  * @param g             the blind UL grant (allocation, DM-RS layout, RNTI)
- * @param tb_bytes      the CRC-verified transport block
+ * @param tb_bytes      the CRC-verified transport block, or NULL for the masked mode
+ * @param llr           descrambled LLRs over ALL of the grant's REs (data + UCI), or NULL
+ * @param llr_G         length of llr; must equal the grant's full G or llr is ignored
  * @param harq_pid_tag  namespaced LDPC id, disjoint from every other user of this interface
  * @param ul_slot_idx   producer-timeline slow-time index, identical to the DM-RS path's
  * @param nof_ant       receive antennas to extract (per-antenna phases are preserved for AoA)
@@ -50,6 +58,8 @@ void nr_isac_pusch_data_aided_submit(PHY_VARS_NR_UE *ue,
                                      const nfapi_nr_pusch_pdu_t *pdu,
                                      const nr_pdcch_blind_ul_result_t *g,
                                      const uint8_t *tb_bytes,
+                                     const int16_t *llr,
+                                     uint32_t llr_G,
                                      uint32_t harq_pid_tag,
                                      uint32_t ul_slot_idx,
                                      uint32_t nof_ant,

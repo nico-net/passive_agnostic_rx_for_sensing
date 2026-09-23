@@ -1062,6 +1062,34 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
     return false;
   }
 
+  /* Snapshot of the DESCRAMBLED LLRs over the grant's full G (data + UCI), for the masked
+   * data-aided CFR. Taken HERE: pvp->llr is complete once nr_rx_pusch_group_tp() has run (with
+   * unav_res = 0) and out->G is known, and the UCI recovery below rewrites it in place. A local
+   * pointer, not the static buffer, gates use: the buffer keeps the previous grant's content. */
+  static __thread int16_t *ul_llr_buf = NULL;
+  static __thread uint32_t ul_llr_cap = 0;
+  const int16_t *ul_llr_full = NULL;
+  const uint32_t ul_G_full = out->G;
+  if (nr_isac_enabled() && nr_isac_source_enabled(NR_ISAC_SRC_PUSCH_DATA) && ul_G_full > 0) {
+    if (ul_llr_cap < ul_G_full) {
+      free(ul_llr_buf);
+      ul_llr_buf = malloc16((size_t)ul_G_full * sizeof(int16_t));
+      ul_llr_cap = ul_llr_buf ? ul_G_full : 0;
+    }
+    if (ul_llr_buf) {
+      memcpy(ul_llr_buf, pvp->llr, (size_t)ul_G_full * sizeof(int16_t));
+      ul_llr_full = ul_llr_buf;
+    }
+  }
+#define UL_MASKED_SUBMIT()                                                                          \
+  do {                                                                                              \
+    if (ul_llr_full)                                                                                \
+      nr_isac_pusch_data_aided_submit(ue, gnb, &pdu, g, NULL, ul_llr_full, ul_G_full,               \
+                                      NR_PUSCH_PASSIVE_DA_TAG_BASE + (uint32_t)ctx,                 \
+                                      passive_ul_slow_time_idx(fp, frame, slot, abs_slot),          \
+                                      (uint32_t)nant, slot);                                        \
+  } while (0)
+
   int ulsch_id = 0;
   int rc = nr_ulsch_decoding(gnb, fp, frame, slot, &ulsch_id, 1);
 
@@ -1218,6 +1246,7 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
   if (rc != 0 || hp->b == NULL) {
     out->status = NR_PUSCH_PASSIVE_CRC_FAIL;
     out->reject_reason = "LDPC decoder interface error";
+    UL_MASKED_SUBMIT();
     return false;
   }
   if (ta_idx >= 0) {
@@ -1230,6 +1259,7 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
     atomic_fetch_add_explicit(&g_seg_fail, 1, memory_order_relaxed);
     out->status = NR_PUSCH_PASSIVE_CRC_FAIL;
     out->reject_reason = "segment or final transport-block CRC failed";
+    UL_MASKED_SUBMIT();
     return false;
   }
 
@@ -1291,19 +1321,22 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
     pthread_mutex_unlock(&g_ul_dmrs_id_lock);
   }
 
-  /* UPLINK DATA-AIDED CFR. Gated on o_ack == 0, which means this TB decoded on the FIRST attempt --
-   * the no-UCI hypothesis -- so the codeword occupies every data RE and X is fully reconstructible.
-   * A grant rescued by a UCI hypothesis has HARQ-ACK PUNCTURING the ULSCH at positions derived from
-   * bits this receiver never decodes; reconstructing X there would be a guess, and a guess in the
-   * numerator of Y/X is indistinguishable from a measurement downstream. Those grants keep
-   * contributing through the DM-RS source, which does not depend on the payload at all. */
+  /* UPLINK DATA-AIDED CFR. uci_ack_re == 0 means this TB decoded under the no-UCI hypothesis, so
+   * the codeword occupies every data RE and X is the re-encoded TB -- which also calibrates the LLR
+   * confidence. A grant rescued by a UCI hypothesis has UCI at positions this receiver never decodes,
+   * so re-encoding the UL-SCH alone cannot place those REs; the decision-directed path covers every
+   * RE instead, because descramble-then-rescramble with the same c(i) returns each transmitted bit's
+   * decision. */
   if (out->uci_ack_re == 0) {
-    nr_isac_pusch_data_aided_submit(ue, gnb, &pdu, g, hp->b,
+    nr_isac_pusch_data_aided_submit(ue, gnb, &pdu, g, hp->b, ul_llr_full, ul_G_full,
                                     NR_PUSCH_PASSIVE_DA_TAG_BASE + (uint32_t)ctx,
                                     passive_ul_slow_time_idx(fp, frame, slot, abs_slot),
                                     (uint32_t)nant, slot);
+  } else {
+    UL_MASKED_SUBMIT();
   }
   return true;
+#undef UL_MASKED_SUBMIT
 }
 
 /* The per-grant probe lives HERE, wrapping the decode, rather than in a caller: there are two
