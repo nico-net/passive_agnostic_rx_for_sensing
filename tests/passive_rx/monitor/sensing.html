@@ -1,0 +1,78 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Passive ISAC — sensing</title>
+<script src="/vendor/plotly-2.35.2.min.js"></script>
+<style>
+:root{--bg:#0f1115;--fg:#e6e6e6;--mut:#8a8f98;--card:#171a21;--ok:#3fb950;--bad:#f85149}
+body{margin:0;background:var(--bg);color:var(--fg);font:13px system-ui,sans-serif}
+nav{display:flex;gap:4px;padding:8px;border-bottom:1px solid #222}
+nav button{background:var(--card);color:var(--fg);border:1px solid #2a2f3a;padding:6px 12px;cursor:pointer}
+nav button.on{border-color:#58a6ff}
+section{display:none;padding:10px}section.on{display:block}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(420px,1fr));gap:10px}
+.card{background:var(--card);border:1px solid #2a2f3a;padding:8px}
+.kv td{padding:2px 10px 2px 0}.mut{color:var(--mut)}
+#tracks3d{height:78vh}
+</style></head><body>
+<nav><button data-t="dl" class="on">DL detections</button><button data-t="ul">UL detections</button>
+<button data-t="trk">3D tracks</button><button data-t="pipe">Pipeline</button>
+<a href="/receiver" style="margin-left:auto;color:#58a6ff;padding:6px">receiver health →</a></nav>
+<section id="dl" class="on"><div class="grid" id="dlgrid"></div></section>
+<section id="ul"><div id="ulbox"></div></section>
+<section id="trk"><div id="tracks3d" class="card"></div></section>
+<section id="pipe"><div class="card"><table class="kv" id="pipetab"></table></div></section>
+<script>
+const $=q=>document.querySelector(q);
+document.querySelectorAll("nav button").forEach(b=>b.onclick=()=>{
+  document.querySelectorAll("nav button,section").forEach(e=>e.classList.remove("on"));
+  b.classList.add("on");$("#"+b.dataset.t).classList.add("on");if(b.dataset.t==="trk")Plotly.Plots.resize("tracks3d");});
+
+function rdMap(div, v, title){
+  if(!v.map_db){div.innerHTML=`<div class="mut">${title}: no map yet</div>`;return;}
+  const z=[]; for(let d=0;d<v.nr;d++) z.push(v.map_db.slice(d*v.nb,(d+1)*v.nb));
+  const x=[...Array(v.nb).keys()].map(q=>q*v.range_res_m), y=[...Array(v.nr).keys()].map(d=>(d-Math.floor(v.nr/2))*v.rate_res_mps);
+  const traces=[{type:"heatmap",x,y,z,colorscale:"Viridis",colorbar:{title:"dB"}},
+    {type:"scatter",mode:"markers",x:v.dets.map(d=>d[0]),y:v.dets.map(d=>d[1]),marker:{color:"#ff4d4d",size:9,symbol:"x"},name:"det"}];
+  Plotly.react(div,traces,{title:{text:title,font:{size:13}},paper_bgcolor:"#171a21",plot_bgcolor:"#171a21",
+    font:{color:"#e6e6e6"},xaxis:{title:"bistatic range (m)"},yaxis:{title:"range rate (m/s)"},margin:{l:55,r:10,t:30,b:40},
+    height:330,showlegend:false,uirevision:title},{displayModeBar:false});
+}
+function ensure(parent,id){let e=document.getElementById(id);if(!e){e=document.createElement("div");e.id=id;e.className="card";parent.appendChild(e);}return e;}
+
+let trkInit=false;
+function tracks3d(s){
+  const g=s.geometry||{}, tr=[];
+  if(g.gnb) tr.push({type:"scatter3d",mode:"markers+text",x:[g.gnb[0]],y:[g.gnb[1]],z:[g.gnb[2]],text:["gNB"],marker:{size:6,color:"#f0883e",symbol:"diamond"},name:"gNB"});
+  if(g.rx&&g.rx.length) tr.push({type:"scatter3d",mode:"markers+text",x:g.rx.map(p=>p[0]),y:g.rx.map(p=>p[1]),z:g.rx.map(p=>p[2]),
+    text:g.rx.map((_,i)=>"ch"+i),marker:{size:5,color:"#58a6ff",symbol:"square"},name:"RX antennas"});
+  for(const [k,u] of Object.entries(s.ue||{})) if(u.position_m) tr.push({type:"scatter3d",mode:"markers+text",
+    x:[u.position_m[0]],y:[u.position_m[1]],z:[u.position_m[2]],text:["UE "+(+k).toString(16)],marker:{size:5,color:"#d2a8ff"},name:"UE "+k});
+  for(const [id,t] of Object.entries(s.tracks||{})){const p=t.trail;tr.push({type:"scatter3d",mode:"lines+markers",
+    x:p.map(q=>q[0]),y:p.map(q=>q[1]),z:p.map(q=>q[2]),line:{width:4,color:t.confirmed?"#3fb950":"#8a8f98"},
+    marker:{size:p.map((_,i)=>i===p.length-1?6:1.5)},name:"track "+id});}
+  Plotly.react("tracks3d",tr,{paper_bgcolor:"#171a21",font:{color:"#e6e6e6"},margin:{l:0,r:0,t:10,b:0},
+    uirevision:"keep-camera",   // rotation/zoom survive every live update
+    scene:{aspectmode:"data",xaxis:{title:"east (m)"},yaxis:{title:"north (m)"},zaxis:{title:"up (m)"},dragmode:"orbit"}},
+    {responsive:true});
+}
+function pipeline(p){
+  const rows=[["gate",p.gate_open===true?'<b style="color:var(--ok)">OPEN</b> '+(p.gate_rnti||""):p.gate_open===false?'<b style="color:var(--bad)">CLOSED</b>':"—"],
+    ["admitted / rejected",`${p.admitted??"—"} / ${p.rejected??"—"}`],["gate-discarded rows",p.gate_discarded_rows??"—"],
+    ["CPIs",p.cpis],["dropped CPIs",p.dropped_cpis??"—"],["dropped submissions",p.dropped_submissions??"—"],
+    ["discarded pending rows",p.discarded_pending_rows??"—"],["BRANCHFO (Hz, vs ch0)",p.branchfo_hz?p.branchfo_hz.join("  "):"—"],
+    ["LLR confidence",p.llrconf?JSON.stringify(p.llrconf):"—"],["UL sessions",(p.ul_sessions||[]).map(x=>"0x"+x.toString(16)).join(" ")||"—"],
+    ["chain ms / lag s",`${p.chain_ms?.toFixed?.(1)??"—"} / ${p.chain_lag_s?.toFixed?.(1)??"—"}`],
+    ["last report",p.last_report_wall?((Date.now()/1000-p.last_report_wall).toFixed(1)+" s ago"):"never"],["backend",p.backend_line||"—"]];
+  $("#pipetab").innerHTML=rows.map(r=>`<tr><td class="mut">${r[0]}</td><td>${r[1]}</td></tr>`).join("");
+}
+async function poll(){
+  try{const s=await (await fetch("/sensing",{cache:"no-store"})).json();
+    s.dl.forEach((v,i)=>rdMap(ensure($("#dlgrid"),"dl"+i),v,`DL ${v.rx||("rx"+i)} (combined over its CFR, this receiver)`));
+    for(const [k,rxs] of Object.entries(s.ul)){const box=ensure($("#ulbox"),"ulbox"+k);box.className="";
+      if(!box.dataset.h){box.innerHTML=`<h3>UE C-RNTI 0x${(+k).toString(16)}</h3><div class="grid" id="ulg${k}"></div>`;box.dataset.h=1;}
+      rxs.forEach((v,i)=>rdMap(ensure($("#ulg"+k),`ul${k}_${i}`),v,`UL 0x${(+k).toString(16)} ${v.rx||("rx"+i)}`));}
+    tracks3d(s); pipeline(s.pipeline);
+  }catch(e){console.log(e);}
+  setTimeout(poll,1000);
+}
+poll();
+</script></body></html>

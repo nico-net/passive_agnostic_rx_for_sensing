@@ -21,7 +21,7 @@ from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-import zmq
+from sensing_view import SensingState
 
 # nr_isac_source_t order (nr_isac.h). PUSCH_DMRS is the only uplink source, and its geometry is
 # UE->target->rx, not gNB->target->rx -- which is why the UI reports it separately and never maps it.
@@ -268,7 +268,29 @@ def replay_thread(path, store, rate_hz):
         print(f"[monitor] replay {path}: {n} reports, looping")
 
 
+def tail_file(path, on_line, poll_s=0.2):
+    """Follow a file from its start (fresh per run), surviving its late creation."""
+    import os
+    while not os.path.exists(path): time.sleep(poll_s)
+    with open(path, "r", errors="replace") as f:
+        buf = ""
+        while True:
+            chunk = f.read()
+            if not chunk: time.sleep(poll_s); continue
+            buf += chunk
+            while "\n" in buf:
+                line, buf = buf.split("\n", 1)
+                if line.strip(): on_line(line)
+
+def json_lines(cb):
+    def on(line):
+        try: cb(json.loads(line))
+        except ValueError: pass   # torn line while the writer is mid-flush
+    return on
+
+
 def sub_thread(endpoint, store):
+    import zmq
     ctx = zmq.Context.instance()
     sock = ctx.socket(zmq.SUB)
     sock.setsockopt_string(zmq.SUBSCRIBE, "")
@@ -291,7 +313,7 @@ def sub_thread(endpoint, store):
                 print(f"[monitor] bad JSON from {endpoint}: {e}")
 
 
-def make_handler(store, logtail, html_path):
+def make_handler(store, logtail, html_path, sens, sensing_html_path, vendor_dir):
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *a):
             pass
@@ -318,8 +340,20 @@ def make_handler(store, logtail, html_path):
                     "now": time.time(),
                 }
                 self._send(200, json.dumps(payload).encode(), "application/json")
-            elif self.path in ("/", "/index.html"):
+            elif self.path.startswith("/sensing"):
+                self._send(200, json.dumps(sens.snapshot()).encode(), "application/json")
+            elif self.path.startswith("/vendor/"):
+                name = self.path[len("/vendor/"):]
+                if "/" in name or ".." in name:
+                    self._send(404, b"not found", "text/plain"); return
+                f = vendor_dir / name
+                if not f.exists():
+                    self._send(404, b"not found", "text/plain"); return
+                self._send(200, f.read_bytes(), "application/javascript")
+            elif self.path == "/receiver":
                 self._send(200, html_path.read_bytes(), "text/html; charset=utf-8")
+            elif self.path in ("/", "/index.html"):
+                self._send(200, sensing_html_path.read_bytes(), "text/html; charset=utf-8")
             else:
                 self._send(404, b"not found", "text/plain")
 
@@ -342,9 +376,23 @@ def main():
                     help="replay a recorded report JSONL instead of subscribing (testing, no receiver needed)")
     ap.add_argument("--replay-rate", type=float, default=2.0,
                     help="reports per second when replaying (default 2)")
+    ap.add_argument("--reports", help="tail a report JSONL for the sensing view (DL/UL RD maps, pipeline)")
+    ap.add_argument("--tracks", help="tail a tracks JSONL for the 3D track view")
+    ap.add_argument("--status", help="tail the realtime_chain status-sidecar JSONL")
+    ap.add_argument("--geometry", help="geometry.json (gNB + receiver positions) for the 3D view")
     args = ap.parse_args()
 
     store = ReportStore()
+    sens = SensingState()
+    if args.geometry:
+        sens.set_geometry(json.load(open(args.geometry)))
+    if args.reports:
+        threading.Thread(target=tail_file, args=(args.reports, json_lines(
+            lambda r: (sens.add_report(r), store.add("file", r)))), daemon=True).start()
+    if args.tracks:
+        threading.Thread(target=tail_file, args=(args.tracks, json_lines(sens.add_tracks)), daemon=True).start()
+    if args.status:
+        threading.Thread(target=tail_file, args=(args.status, json_lines(sens.add_status)), daemon=True).start()
     if args.seed:
         n = 0
         try:
@@ -375,20 +423,26 @@ def main():
     if args.replay:
         threading.Thread(target=replay_thread, args=(args.replay, store, args.replay_rate),
                          daemon=True).start()
-    else:
-        for ep in (args.connect or ["tcp://127.0.0.1:5556"]):
+    elif args.connect:
+        for ep in args.connect:
             threading.Thread(target=sub_thread, args=(ep, store), daemon=True).start()
 
     logtail = None
     if args.log:
         logtail = DecoderLogTail(args.log)
         threading.Thread(target=logtail.run, daemon=True).start()
+        threading.Thread(target=tail_file, args=(args.log, sens.add_log_line), daemon=True).start()
 
     html_path = Path(__file__).with_name("monitor.html")
+    sensing_html_path = Path(__file__).with_name("sensing.html")
+    vendor_dir = Path(__file__).with_name("vendor")
     if not html_path.exists():
         raise SystemExit(f"missing {html_path}")
+    if not sensing_html_path.exists():
+        raise SystemExit(f"missing {sensing_html_path}")
 
-    srv = ThreadingHTTPServer((args.bind, args.port), make_handler(store, logtail, html_path))
+    srv = ThreadingHTTPServer((args.bind, args.port),
+                              make_handler(store, logtail, html_path, sens, sensing_html_path, vendor_dir))
     print(f"[monitor] http://{args.bind}:{args.port}/  (ssh -L {args.port}:localhost:{args.port} sens6)")
     srv.serve_forever()
 

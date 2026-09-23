@@ -1,0 +1,2 @@
+{"t": 0.0, "wall": 1790000000.0, "ms": 12.3, "sessions": [17921], "ue": {"17921": {"position_m": [30.0, 25.0, 1.5], "position_sigma_m": [1.0, 1.0, 1.0]}}, "range_res_m": 3.05, "rate_res_mps": 1.1}
+{"t": 1.0, "wall": 1790000001.0, "ms": 11.8, "sessions": [17921], "ue": {"17921": {"position_m": [30.2, 25.1, 1.5], "position_sigma_m": [1.0, 1.0, 1.0]}}, "range_res_m": 3.05, "rate_res_mps": 1.1}
