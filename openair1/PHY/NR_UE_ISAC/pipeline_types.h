@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: OAI-Public-License-1.1 */
 #pragma once
 
+#include "coherent_types.h"
 #include "nr_isac.h"
 #include "small_matrix.h"
 
@@ -428,6 +429,7 @@ struct PipelineConfig {
   // that cost without touching what the detector itself computes.
   double rvm_period_s = 0.5;   // emit a map at most this often (steady clock); default 0.5 s
   double rvm_max_range_m = 0.0; // crop each map's range axis to this many metres; 0 = full axis
+  coherent::CoherentConfig coherent;   // coherent fuser (coherent_enable); default off
   // The RF/CIR clock is allowed to warm up before sensing starts.  When enabled, snapshots outside
   // [admission_start_slot, admission_end_slot) are rejected before they enter the sensing FIFO.
   bool admission_window_enabled = false;

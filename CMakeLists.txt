@@ -1113,6 +1113,7 @@ set(NR_UE_ISAC_SRC
   ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/nr_isac.cc
   ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/nr_isac_ssb_axis.c
   ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/nr_isac_env.c
+  ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/coherent_report.cc
   )
 if(ENABLE_CHANNEL_SIM_CUDA)
   list(APPEND NR_UE_ISAC_SRC
@@ -2406,6 +2407,11 @@ if(ENABLE_TESTS)
     target_include_directories(test_nr_isac_flow_gate PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_ISAC)
     add_dependencies(tests test_nr_isac_flow_gate)
     add_test(NAME test_nr_isac_flow_gate COMMAND ./test_nr_isac_flow_gate)
+    add_executable(test_nr_isac_coherent_report ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/tests/coherent_report_test.cc)
+    target_include_directories(test_nr_isac_coherent_report PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_ISAC)
+    target_link_libraries(test_nr_isac_coherent_report PRIVATE NR_UE_ISAC)
+    add_dependencies(tests test_nr_isac_coherent_report)
+    add_test(NAME test_nr_isac_coherent_report COMMAND ./test_nr_isac_coherent_report)
   endif()
   # uniqCfg/exit_function (needed by LOG/CONFIG_LIB) are defined directly in isac_sync_test.cc,
   # not via minimal_lib -- static-archive link order made minimal_lib's stubs unreliable here.
