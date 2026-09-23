@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <stdexcept>
 namespace nr_isac::coherent {
 namespace {
 constexpr double kInf = 1e18;
@@ -28,16 +29,25 @@ std::vector<int> hungarian(const std::vector<std::vector<double>>& cost)
   const int n = (int)cost.size(); if (!n) return {};
   const int m = (int)cost[0].size();
   // Rectangular Kuhn-Munkres (e-maxx form): outer loop runs once per WORKER, the SMALLER side of
-  // the matrix, not once per max(rows,cols) padded up to a square. A CPI can carry 3 tracks against
-  // a burst of 400 detections; padding to a 401x401 square (an earlier version of this function did
-  // that) measured ~29 ms, over step()'s 20 ms budget -- from genuine O(N^3) work over N=401, not
-  // from cache effects. This form does O(tracks^2 * detections) work instead and measures <1 ms on
-  // the same input. transpose=true swaps which side is "workers" when there are more tracks than
-  // detections (rows>cols), so the outer loop always runs over the smaller dimension.
+  // the matrix, not once per max(rows,cols) padded up to a square -- O(tracks^2 * detections)
+  // instead of O(detections^3) for a typical few-tracks/many-detections CPI.
+  //
+  // Forbidden entries (>= kInf/2, the convention callers use) are NOT fed to the algorithm as the
+  // raw 1e18 sentinel: ulp(1e18) is ~128, so once the u/v potentials accumulate sums of that
+  // magnitude every real (small) cost difference underneath gets rounded away -- corrupting the
+  // assignment whenever any row or column is entirely forbidden, which for a tracker is every CPI
+  // (any track with no detection inside its gate). Measured in review: 4131/200000 random trials
+  // suboptimal with the raw sentinel. Fixed with a data-derived big-M: large enough that trading a
+  // real edge for a forbidden one can never pay off (bounded by the sum of all finite costs), but
+  // small enough to stay well inside double precision.
+  double finite_sum = 0.0;
+  for (const auto& row : cost) for (double c : row) if (c < kInf / 2) finite_sum += std::abs(c);
+  const double M = 2.0 * (1.0 + finite_sum);
   const bool transpose = n > m;
   const int W = transpose ? m : n;   // workers = outer-loop count = min(n, m)
   const int J = transpose ? n : m;   // jobs = the other side
-  auto C = [&](int w, int j) { return transpose ? cost[j][w] : cost[w][j]; };  // 0-indexed (worker, job) -> cost
+  auto Craw = [&](int w, int j) { return transpose ? cost[j][w] : cost[w][j]; };            // 0-indexed (worker, job) -> ORIGINAL cost
+  auto C = [&](int w, int j) { const double c = Craw(w, j); return c >= kInf / 2 ? M : c; }; // big-M substituted, algorithm-internal only
   std::vector<double> u(W + 1, 0.0), v(J + 1, 0.0);
   std::vector<int> p(J + 1, 0), way(J + 1, 0);
   std::vector<double> minv(J + 1); std::vector<char> used(J + 1);
@@ -60,13 +70,17 @@ std::vector<int> hungarian(const std::vector<std::vector<double>>& cost)
   std::vector<int> row(n, -1);
   for (int j = 1; j <= J; ++j) if (p[j] >= 1) {
     const int w = p[j] - 1, jb = j - 1;             // 0-indexed worker, job
-    if (C(w, jb) >= kInf / 2) continue;             // forbidden edge, forced by shape -> unmatched
+    if (Craw(w, jb) >= kInf / 2) continue;          // forbidden edge, tested against the ORIGINAL cost -> unmatched
     if (!transpose) row[w] = jb; else row[jb] = w;
   }
   return row;
 }
 
-CoherentTracker::CoherentTracker(const TrackerParams& p) : p_(p) {}
+CoherentTracker::CoherentTracker(const TrackerParams& p) : p_(p)
+{
+  if (!(p_.max_speed_mps > 0)) throw std::invalid_argument("TrackerParams.max_speed_mps must be > 0");
+  if (!(p_.false_object_intensity_per_s > 0)) throw std::invalid_argument("TrackerParams.false_object_intensity_per_s must be > 0");
+}
 
 void CoherentTracker::predict(Track& t, double dt) const
 {
@@ -110,21 +124,29 @@ void CoherentTracker::update_position(Track& t, const Detection& d, double* nis)
 }
 void CoherentTracker::update_rate(Track& t, const Detection& d) const
 {
-  if (!(d.range_rate_sigma > 0 && d.range_rate_sigma < 1e8)) return;
+  if (!std::isfinite(d.range_rate_sigma) || d.range_rate_sigma <= 0) return;   // no rate measurement
   const Vec3 x{t.x[0], t.x[1], t.x[2]};
-  const Vec3 h = normalized(x - d.tx) + normalized(x - p_.array_centroid);    // gradient w.r.t. velocity
+  // Unit vectors from each end (tx, rx) toward the target: h is d/dx of the bistatic path length
+  // |x-tx| + |x-rx|, i.e. the gradient of predicted range-rate w.r.t. target velocity.
+  const Vec3 h = normalized(x - d.tx) + normalized(x - p_.array_centroid);
   const double hv[6] = {0, 0, 0, h.x, h.y, h.z};
   const double pred = h.x * t.x[3] + h.y * t.x[4] + h.z * t.x[5];
-  double PH[6], S = d.range_rate_sigma * d.range_rate_sigma;
+  const double r_var = d.range_rate_sigma * d.range_rate_sigma;
+  double PH[6], S = r_var;
   for (int a = 0; a < 6; ++a) { double s = 0; for (int b = 0; b < 6; ++b) s += t.P[a * 6 + b] * hv[b]; PH[a] = s; }
   for (int a = 0; a < 6; ++a) S += hv[a] * PH[a];
   const double nu = d.range_rate_mps - pred;
   if (nu * nu / S > 6.634896601021214) return;                               // chi2_1 99 %: outlier rate ignored
   double K[6]; for (int a = 0; a < 6; ++a) K[a] = PH[a] / S;
   for (int a = 0; a < 6; ++a) t.x[a] += K[a] * nu;
-  for (int a = 0; a < 6; ++a) for (int b = 0; b < 6; ++b) t.P[a * 6 + b] -= K[a] * S * K[b];
-  symmetrize(t);
-  for (int a = 0; a < 6; ++a) if (!(t.P[a * 6 + a] > 0)) t.P[a * 6 + a] = std::abs(t.P[a * 6 + a]) + 1e-12;
+  // Joseph form (scalar measurement): P = (I-K h^T) P (I-K h^T)^T + K sigma^2 K^T. Same reasoning
+  // as update_position's Joseph form: guarantees PSD under roundoff, so no post-hoc diagonal
+  // repair is needed (or correct) the way the plain P -= K S K^T form required.
+  std::array<double, 36> IKH{}; for (int a = 0; a < 6; ++a) for (int b = 0; b < 6; ++b) IKH[a * 6 + b] = (a == b) - K[a] * hv[b];
+  std::array<double, 36> T1{}, Pn{};
+  for (int a = 0; a < 6; ++a) for (int b = 0; b < 6; ++b) { double s = 0; for (int c = 0; c < 6; ++c) s += IKH[a * 6 + c] * t.P[c * 6 + b]; T1[a * 6 + b] = s; }
+  for (int a = 0; a < 6; ++a) for (int b = 0; b < 6; ++b) { double s = 0; for (int c = 0; c < 6; ++c) s += T1[a * 6 + c] * IKH[b * 6 + c]; s += K[a] * r_var * K[b]; Pn[a * 6 + b] = s; }
+  t.P = Pn; symmetrize(t);
 }
 
 const std::vector<Track>& CoherentTracker::step(double t_s, double t_cpi_s, const std::vector<Detection>& dets, std::vector<int>* assoc)
@@ -134,6 +156,7 @@ const std::vector<Track>& CoherentTracker::step(double t_s, double t_cpi_s, cons
   const Volume& V = p_.volume;
   const double vol = std::max(1e-9, (V.x1 - V.x0) * (V.y1 - V.y0) * (V.z1 - V.z0));
   const double clutter_density = std::max(1e-12, p_.false_object_intensity_per_s * t_cpi_s / vol);
+  const double q0 = p_.max_speed_mps * p_.max_speed_mps;          // declared bound, stage-10 convention
   std::vector<std::vector<double>> cost(tracks_.size(), std::vector<double>(dets.size(), kInf));
   for (size_t i = 0; i < tracks_.size(); ++i) for (size_t j = 0; j < dets.size(); ++j) {
     double ld; const double q = position_nis(tracks_[i], dets[j], &ld); if (q <= kGate3) cost[i][j] = q + ld; }
@@ -149,23 +172,11 @@ const std::vector<Track>& CoherentTracker::step(double t_s, double t_cpi_s, cons
       t.llr += std::log(std::max(1e-300, pd * like / clutter_density));
       double nis = 0; update_position(t, d, &nis); update_rate(t, d);
       t.nis_sum += nis; ++t.nis_n; ++t.hits;
-      // Adaptive Q: track q toward mean(NIS)/3 (chi2_3 mean = 3 at correct sizing), multiplicatively
-      // from q0. The brief's original one-liner divides by the *pre-this-update* mean, which on a
-      // track's first association has zero samples behind it (nis_n==1 -> "before" mean is 0/0) and
-      // only survives via a 1e-3 floor -- that floor then acts as the denominator outright, so the
-      // very first hit multiplies q by ~(mean_nis/3)/1e-3, a three-orders-of-magnitude one-off jump
-      // unrelated to the actual NIS. Fixed: skip the rescale on the first hit (q keeps its q0 seed,
-      // which is exactly what a brand-new track should use), and for later hits divide by the
-      // *previous* running mean (well-defined once nis_n>=2, no floor needed there) with a small
-      // clamp on the per-step multiplicative move so one noisy NIS sample can't blow q up or collapse
-      // it in a single update.
-      if (t.nis_n > 1) {
-        const double mean_after = t.nis_sum / t.nis_n;
-        const double mean_before = (t.nis_sum - nis) / (t.nis_n - 1);
-        double ratio = (mean_after / 3.0) / std::max(1e-9, mean_before / 3.0);
-        ratio = std::clamp(ratio, 0.2, 5.0);
-        t.q *= ratio;
-      }
+      // Covariance matching (Mehra): q tracks the running mean NIS toward its theoretical value of
+      // 3 (chi2_3 mean at correct sizing), scaled from the declared q0 seed. Absolute, not
+      // incremental -- no clamp, no first-hit special case needed, since nis_n>=1 is guaranteed
+      // right after a hit (++t.nis_n above).
+      t.q = q0 * (t.nis_sum / t.nis_n) / 3.0;
       if (t.confirmed) pd_hits_ += 1;
     } else {
       t.llr += std::log(std::max(1e-300, 1 - pd)); ++t.misses;
@@ -173,17 +184,24 @@ const std::vector<Track>& CoherentTracker::step(double t_s, double t_cpi_s, cons
     }
     if (!t.confirmed && t.llr >= kConfirm) t.confirmed = true;
   }
+  // Snapshot assoc against PRE-erase indices (matches hungarian's `a`, whose domain is exactly
+  // tracks_'s index space here, since erase()/new-track push haven't run yet), then remap those
+  // indices to post-erase positions once tracks_ is compacted below. Building assoc only AFTER
+  // erase() (against post-erase tracks_.size() but pre-erase indices in `a`) is wrong whenever any
+  // track -- in particular one BEFORE the associated one -- gets deleted in the same step.
+  std::vector<int> pre_erase_assoc;
+  if (assoc) { pre_erase_assoc.assign(dets.size(), -1); for (size_t i = 0; i < a.size(); ++i) if (a[i] >= 0) pre_erase_assoc[(size_t)a[i]] = (int)i; }
+  std::vector<int> old_to_new(tracks_.size(), -1);
+  { int nxt = 0; for (size_t i = 0; i < tracks_.size(); ++i) if (tracks_[i].llr > kDelete) old_to_new[i] = nxt++; }
   tracks_.erase(std::remove_if(tracks_.begin(), tracks_.end(), [](const Track& t) { return t.llr <= kDelete; }), tracks_.end());
-  const double q0 = std::pow(p_.max_speed_mps / 1.0, 2);          // declared bound, stage-10 convention
+  if (assoc) { assoc->assign(dets.size(), -1); for (size_t j = 0; j < pre_erase_assoc.size(); ++j) if (pre_erase_assoc[j] >= 0) (*assoc)[j] = old_to_new[(size_t)pre_erase_assoc[j]]; }
   for (size_t j = 0; j < dets.size(); ++j) if (!used[j]) {
     Track t; t.id = next_id_++; t.q = q0;
     t.x = {dets[j].pos.x, dets[j].pos.y, dets[j].pos.z, 0, 0, 0};
-    const double vs = p_.max_speed_mps * p_.max_speed_mps;
     t.P.fill(0); P(t, 0, 0) = dets[j].pos_sigma.x * dets[j].pos_sigma.x; P(t, 1, 1) = dets[j].pos_sigma.y * dets[j].pos_sigma.y;
-    P(t, 2, 2) = dets[j].pos_sigma.z * dets[j].pos_sigma.z; P(t, 3, 3) = P(t, 4, 4) = P(t, 5, 5) = vs;
+    P(t, 2, 2) = dets[j].pos_sigma.z * dets[j].pos_sigma.z; P(t, 3, 3) = P(t, 4, 4) = P(t, 5, 5) = q0;
     t.hits = 1; tracks_.push_back(t);
   }
-  if (assoc) { assoc->assign(dets.size(), -1); for (size_t i = 0; i < a.size(); ++i) if (a[i] >= 0) (*assoc)[(size_t)a[i]] = (int)i; }
   return tracks_;
 }
 } // namespace nr_isac::coherent
