@@ -42,9 +42,10 @@ sensing = {
   // pdcch_blind_monitor_full_auto=1 above makes Technique D discover the real table anyway and 0 is
   // its neutral starting point. xoverhead=0 (not configured, the default -- already auto).
   // rv0_only=1 (only attempt rv==0 grants; a decode-attempt policy, not a cell value). max_per_slot,
-  // thread, queue_depth, thread_core are decode-attempt-budget/thread/queue/core counts, not cell
-  // values -- left at this deployment's tuned defaults.
-  pdcch_blind_monitor_pdsch = "2:0:0:1:16:2:64:6";
+  // queue_depth, thread_core are decode-attempt-budget/queue/core counts, not cell values -- left at
+  // this deployment's tuned defaults. thread=6 decode consumers (was 2): at 2 the decode queue was
+  // dropping 93% full OTA, matching the known-good captures/cons6_ota.conf.
+  pdcch_blind_monitor_pdsch = "2:0:0:1:16:6:64:6";
   // "rnti_min:rnti_max" -- already NR_PDCCH_BLIND_RNTI_MIN_DEFAULT:NR_PDCCH_BLIND_RNTI_MAX_DEFAULT
   // (nr_pdcch_blind_monitor.h: 0x0001:0xFFEF = 1:65519), i.e. the full legal C-RNTI range, not a
   // specific cell's RNTI. Already the documented default.

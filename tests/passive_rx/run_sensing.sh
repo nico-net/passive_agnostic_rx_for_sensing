@@ -3,10 +3,10 @@
 # engine (in-process), realtime chain, monitor; supervised; verdict at the end. Spec §12.
 set -uo pipefail
 W=$(cd "$(dirname "$0")/../.." && pwd)
-DUR=600 RXG=43 SURVEY=$W/tests/passive_rx/ota/survey.json DEBUG= PORT=8080 RUN=/home/sens/NICOLA/sensing_runs/$(date +%Y%m%d_%H%M%S)
+DUR=600 RXG=43 MGMT=192.168.1.140 SURVEY=$W/tests/passive_rx/ota/survey.json DEBUG= PORT=8080 RUN=/home/sens/NICOLA/sensing_runs/$(date +%Y%m%d_%H%M%S)
 while [ $# -gt 0 ]; do case $1 in
   --dur) DUR=$2; shift;; --rxg) RXG=$2; shift;; --survey) SURVEY=$2; shift;; --debug) DEBUG=1;;
-  --port) PORT=$2; shift;; --run-dir) RUN=$2; shift;; *) echo "unknown arg $1"; exit 2;; esac; shift; done
+  --port) PORT=$2; shift;; --mgmt) MGMT=$2; shift;; --run-dir) RUN=$2; shift;; *) echo "unknown arg $1"; exit 2;; esac; shift; done
 BUILD=${BUILD:-$W/cmake_targets/ran_build/build_sense}
 SENSE_CPUS=${SENSE_CPUS:-3,12,13} CHAIN_CPU=${CHAIN_CPU:-11} MON_CPU=${MON_CPU:-10}
 mkdir -p "$RUN" && cd "$RUN" || exit 2
@@ -16,6 +16,8 @@ log(){ echo "[run_sensing $(date +%T)] $*" | tee -a "$RUN/launcher.log"; }
 pgrep -x nr-uesoftmodem >/dev/null && { log "ABORT: a receiver is already running"; exit 3; }
 pgrep -f 'ninja|cmake --build|make -j' >/dev/null && { log "ABORT: a build is running (never build during a capture)"; exit 3; }
 ping -c1 -W2 192.168.20.2 >/dev/null || { log "ABORT: X410 data plane 192.168.20.2 unreachable"; exit 3; }
+# uhd_find_devices reports the data port as mgmt_addr, so run_arm's auto-derived MGMT is wrong: pass it.
+ping -c1 -W2 "$MGMT" >/dev/null || { log "ABORT: X410 management address $MGMT unreachable (--mgmt ADDR)"; exit 3; }
 timeout 20 uhd_find_devices --args "type=x4xx,addr=192.168.20.2" 2>/dev/null | grep -q x4xx || { log "ABORT: uhd_find_devices does not see the X410"; exit 3; }
 [ -x "$BUILD/nr-uesoftmodem" ] || { log "ABORT: no sensing build at $BUILD"; exit 3; }
 strings "$BUILD/nr-uesoftmodem" | grep -q 'SENSING_GATE open' || { log "ABORT: binary lacks the sensing gate (stale build?)"; exit 3; }
@@ -30,7 +32,7 @@ log "waiting 30 s for the radio"; sleep 30
 # ---- receiver (+ in-process engine) through the qualified run_arm harness ----
 export NR_ISAC_CPUS=$SENSE_CPUS NR_ISAC_REQUIRE_CUDA=1
 [ -n "$DEBUG" ] && { mkdir -p "$RUN/debug"; export NR_ISAC_DEBUG_DIR=$RUN/debug; }
-( REPO=$W BIN=$BUILD/nr-uesoftmodem ARM=sense CONF=$RUN/ue.conf DUR=$DUR TRIES=${TRIES:-3} RXG=$RXG NANT=4 \
+( REPO=$W BIN=$BUILD/nr-uesoftmodem ARM=sense CONF=$RUN/ue.conf DUR=$DUR TRIES=${TRIES:-3} RXG=$RXG NANT=4 MGMT=$MGMT \
   SCAN=1 PRB=273 CARRIER=3450000000 INITIALFO=0 \
   XENV="NR_ISAC_CPUS=$SENSE_CPUS NR_ISAC_REQUIRE_CUDA=1 ${NR_ISAC_DEBUG_DIR:+NR_ISAC_DEBUG_DIR=$NR_ISAC_DEBUG_DIR}" \
   bash "$W/tests/passive_rx/captures/run_arm.sh" ) > "$RUN/run_arm.out" 2>&1 &
