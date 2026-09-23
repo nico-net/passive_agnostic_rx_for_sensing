@@ -8,11 +8,14 @@
 #define NR_LLRCONF_BIN_W 0.05f
 #define NR_LLRCONF_TARGET_ERR 0.01
 #define NR_LLRCONF_MIN_SYMBOLS 100000ULL
-void nr_llrconf_observe(uint8_t qm, const int16_t *llr, const uint8_t *truth_bits, uint32_t G);
-int nr_llrconf_threshold(uint8_t qm, float *tau_rel);
+/* Calibration (tau), the SNR gate and the disable latch are kept PER SOURCE: DL and UL SNR come from
+ * different estimators, and a UL sign/packing fault must not disable DL. */
+enum { NR_LLRCONF_SRC_DL, NR_LLRCONF_SRC_UL, NR_LLRCONF_NSRC };
+void nr_llrconf_observe(int src, uint8_t qm, const int16_t *llr, const uint8_t *truth_bits, uint32_t G);
+int nr_llrconf_threshold(int src, uint8_t qm, float *tau_rel);
 uint32_t nr_llrconf_hard(uint8_t qm, const int16_t *llr, uint32_t G, float tau_rel, uint8_t *bits, uint8_t *keep);
-void nr_llrconf_agreement(uint8_t qm, const int16_t *llr, const uint8_t *truth_bits, uint32_t G);
-int nr_llrconf_disabled(void);
+void nr_llrconf_agreement(int src, uint8_t qm, const int16_t *llr, const uint8_t *truth_bits, uint32_t G);
+int nr_llrconf_disabled(int src);
 void nr_llrconf_stats_dump(void);
 void nr_llrconf_reset(void);
 float nr_llrconf_median_abs(const int16_t *llr, uint32_t G);
@@ -25,10 +28,9 @@ void nr_llrconf_unpack(const uint8_t *packed, uint32_t G, uint8_t *bits);
 /* 200 grants put ~10 samples below p05: a stable quantile in ~1 s of traffic, not ~10 min. */
 #define NR_LLRCONF_MIN_SNR_GRANTS 200
 #define NR_LLRCONF_SNR_QUANTILE 0.05
-void nr_llrconf_snr_observe(uint8_t qm, float snr_db);
-int nr_llrconf_snr_eligible(uint8_t qm, float snr_db);
+void nr_llrconf_snr_observe(int src, uint8_t qm, float snr_db);
+int nr_llrconf_snr_eligible(int src, uint8_t qm, float snr_db);
 /* Spec §6 per-source counters, bumped by the submitters only on an actual submission. */
-enum { NR_LLRCONF_SRC_DL, NR_LLRCONF_SRC_UL, NR_LLRCONF_NSRC };
 enum { NR_LLRCONF_CNT_CRC_OK, NR_LLRCONF_CNT_MASKED, NR_LLRCONF_CNT_SNR_REJECT, NR_LLRCONF_CNT_RE_KEPT,
        NR_LLRCONF_CNT_RE_OFFERED, NR_LLRCONF_NCNT };
 void nr_llrconf_count(int src, int what, uint64_t n);

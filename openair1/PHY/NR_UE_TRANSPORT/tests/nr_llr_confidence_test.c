@@ -27,11 +27,13 @@ int main(void) {
     assert(nr_llrconf_median_abs(llr, n) == qsort_median(llr, n));
   }
   float tau;
-  assert(nr_llrconf_threshold(2, &tau) == 0);                 /* uncalibrated */
-  for (int k = 0; k < 6; k++) { make(G, 100.0, 60.0, truth, llr); nr_llrconf_observe(2, llr, truth, G); }
-  assert(nr_llrconf_threshold(2, &tau) == 1 && tau > 0.0f);   /* 120000 symbols observed */
-  assert(nr_llrconf_threshold(4, &tau) == 0);                 /* other Qm stays uncalibrated */
-  nr_llrconf_threshold(2, &tau);
+  enum { D = NR_LLRCONF_SRC_DL, U = NR_LLRCONF_SRC_UL };
+  assert(nr_llrconf_threshold(D, 2, &tau) == 0);                 /* uncalibrated */
+  for (int k = 0; k < 6; k++) { make(G, 100.0, 60.0, truth, llr); nr_llrconf_observe(D, 2, llr, truth, G); }
+  assert(nr_llrconf_threshold(D, 2, &tau) == 1 && tau > 0.0f);   /* 120000 symbols observed */
+  assert(nr_llrconf_threshold(D, 4, &tau) == 0);                 /* other Qm stays uncalibrated */
+  assert(nr_llrconf_threshold(U, 2, &tau) == 0);                 /* other source stays uncalibrated */
+  nr_llrconf_threshold(D, 2, &tau);
   make(G, 100.0, 60.0, truth, llr);
   uint32_t kept = nr_llrconf_hard(2, llr, G, tau, bits, keep), wrong = 0;
   for (uint32_t m = 0; m < G / 2; m++)
@@ -48,8 +50,9 @@ int main(void) {
   assert(nr_llrconf_hard(2, llr, G, 0.0f, bits, keep) == G / 2); /* tau 0 keeps everything */
   /* sign-convention guard: inverted LLRs must disable the masked path */
   for (uint32_t i = 0; i < G; i++) llr[i] = (int16_t)-llr[i];
-  for (int k = 0; k < 2; k++) nr_llrconf_agreement(2, llr, truth, G);
-  assert(nr_llrconf_disabled() == 1);
+  for (int k = 0; k < 2; k++) nr_llrconf_agreement(D, 2, llr, truth, G);
+  assert(nr_llrconf_disabled(D) == 1);
+  assert(nr_llrconf_disabled(U) == 0);                        /* a DL fault leaves UL enabled */
   { /* byte-wise pack/unpack round trip, incl. a G that is not a multiple of 8 */
     static uint8_t packed[G / 8 + 1], back[G];
     for (uint32_t n = G - 3; n <= G; n += 3) {
@@ -59,18 +62,19 @@ int main(void) {
   }
   { /* P34 grant-level SNR gate: learned p05 of CRC-OK grants per Qm, off before calibration */
     nr_llrconf_reset();
-    for (uint64_t n = 0; n + 1 < NR_LLRCONF_MIN_SNR_GRANTS; n++) nr_llrconf_snr_observe(2, (float)(20.0 + 2.0 * gauss()));
-    assert(!nr_llrconf_snr_eligible(2, 40.0f));                 /* nothing passes before calibration */
-    nr_llrconf_snr_observe(2, 20.0f);
+    for (uint64_t n = 0; n + 1 < NR_LLRCONF_MIN_SNR_GRANTS; n++) nr_llrconf_snr_observe(D, 2, (float)(20.0 + 2.0 * gauss()));
+    assert(!nr_llrconf_snr_eligible(D, 2, 40.0f));                 /* nothing passes before calibration */
+    nr_llrconf_snr_observe(D, 2, 20.0f);
     int good = 0, garbage = 0;
     for (int k = 0; k < 1000; k++) {
-      good += nr_llrconf_snr_eligible(2, (float)(20.0 + 2.0 * gauss()));
-      garbage += nr_llrconf_snr_eligible(2, (float)(5.0 + 2.0 * gauss()));
+      good += nr_llrconf_snr_eligible(D, 2, (float)(20.0 + 2.0 * gauss()));
+      garbage += nr_llrconf_snr_eligible(D, 2, (float)(5.0 + 2.0 * gauss()));
     }
     assert(good > 900 && good < 990);                           /* ~95 % of the CRC-OK population passes */
     assert(garbage == 0);                                       /* low-SNR grants are rejected */
-    assert(!nr_llrconf_snr_eligible(4, 40.0f));                 /* another Qm stays uncalibrated */
-    assert(!nr_llrconf_snr_eligible(2, NAN));                   /* unknown SNR never passes */
+    assert(!nr_llrconf_snr_eligible(D, 4, 40.0f));                 /* another Qm stays uncalibrated */
+    assert(!nr_llrconf_snr_eligible(D, 2, NAN));                   /* unknown SNR never passes */
+    assert(!nr_llrconf_snr_eligible(U, 2, 40.0f));                 /* DL calibration does not reach UL */
   }
   puts("nr_llr_confidence_test: PASS");
   return 0;

@@ -134,9 +134,9 @@ void nr_isac_pdsch_data_aided_submit(PHY_VARS_NR_UE *ue,
                         && (bit_bytes != NULL || (bit_bytes = malloc(273 * 12 * 14 * 8)) != NULL);
   if (masked) {
     float tau = 0.0f;
-    if (!have_llr || !nr_llrconf_threshold(cw->qamModOrder, &tau))
+    if (!have_llr || !nr_llrconf_threshold(NR_LLRCONF_SRC_DL, cw->qamModOrder, &tau))
       return; /* no calibration for this Qm yet: DM-RS only (spec §6) */
-    if (!nr_llrconf_snr_eligible(cw->qamModOrder, snr_db)) { /* P34: garbage grants keep a fixed fraction */
+    if (!nr_llrconf_snr_eligible(NR_LLRCONF_SRC_DL, cw->qamModOrder, snr_db)) { /* P34: garbage grants keep a fixed fraction */
       nr_llrconf_count(NR_LLRCONF_SRC_DL, NR_LLRCONF_CNT_SNR_REJECT, 1);
       return;
     }
@@ -192,9 +192,9 @@ void nr_isac_pdsch_data_aided_submit(PHY_VARS_NR_UE *ue,
     }
     if (have_llr) { /* CRC-OK grant: this IS the calibration ground truth */
       nr_llrconf_unpack(coded_bits, TB_parameters.G, bit_bytes);
-      nr_llrconf_snr_observe(cw->qamModOrder, snr_db);
-      nr_llrconf_observe(cw->qamModOrder, llr, bit_bytes, TB_parameters.G);
-      nr_llrconf_agreement(cw->qamModOrder, llr, bit_bytes, TB_parameters.G);
+      nr_llrconf_snr_observe(NR_LLRCONF_SRC_DL, cw->qamModOrder, snr_db);
+      nr_llrconf_observe(NR_LLRCONF_SRC_DL, cw->qamModOrder, llr, bit_bytes, TB_parameters.G);
+      nr_llrconf_agreement(NR_LLRCONF_SRC_DL, cw->qamModOrder, llr, bit_bytes, TB_parameters.G);
     }
   }
 
