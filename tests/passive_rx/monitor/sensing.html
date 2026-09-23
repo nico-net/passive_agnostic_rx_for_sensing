@@ -54,14 +54,17 @@ function tracks3d(s){
     scene:{aspectmode:"data",xaxis:{title:"east (m)"},yaxis:{title:"north (m)"},zaxis:{title:"up (m)"},dragmode:"orbit"}},
     {responsive:true});
 }
+function esc(s){return String(s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));}
 function pipeline(p){
-  const rows=[["gate",p.gate_open===true?'<b style="color:var(--ok)">OPEN</b> '+(p.gate_rnti||""):p.gate_open===false?'<b style="color:var(--bad)">CLOSED</b>':"—"],
+  // gate_rnti and backend_line are receiver-log-derived text; escape before innerHTML insertion.
+  const rows=[["gate",p.gate_open===true?'<b style="color:var(--ok)">OPEN</b> '+esc(p.gate_rnti||""):p.gate_open===false?'<b style="color:var(--bad)">CLOSED</b>':"—"],
     ["admitted / rejected",`${p.admitted??"—"} / ${p.rejected??"—"}`],["gate-discarded rows",p.gate_discarded_rows??"—"],
     ["CPIs",p.cpis],["dropped CPIs",p.dropped_cpis??"—"],["dropped submissions",p.dropped_submissions??"—"],
     ["discarded pending rows",p.discarded_pending_rows??"—"],["BRANCHFO (Hz, vs ch0)",p.branchfo_hz?p.branchfo_hz.join("  "):"—"],
     ["LLR confidence",p.llrconf?JSON.stringify(p.llrconf):"—"],["UL sessions",(p.ul_sessions||[]).map(x=>"0x"+x.toString(16)).join(" ")||"—"],
     ["chain ms / lag s",`${p.chain_ms?.toFixed?.(1)??"—"} / ${p.chain_lag_s?.toFixed?.(1)??"—"}`],
-    ["last report",p.last_report_wall?((Date.now()/1000-p.last_report_wall).toFixed(1)+" s ago"):"never"],["backend",p.backend_line||"—"]];
+    ["last report",p.last_report_wall?((Date.now()/1000-p.last_report_wall).toFixed(1)+" s ago"):"never"],
+    ["backend",p.backend_line?esc(p.backend_line):"—"]];
   $("#pipetab").innerHTML=rows.map(r=>`<tr><td class="mut">${r[0]}</td><td>${r[1]}</td></tr>`).join("");
 }
 async function poll(){

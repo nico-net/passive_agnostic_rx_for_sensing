@@ -347,7 +347,7 @@ def make_handler(store, logtail, html_path, sens, sensing_html_path, vendor_dir)
                 if "/" in name or ".." in name:
                     self._send(404, b"not found", "text/plain"); return
                 f = vendor_dir / name
-                if not f.exists():
+                if not f.is_file():
                     self._send(404, b"not found", "text/plain"); return
                 self._send(200, f.read_bytes(), "application/javascript")
             elif self.path == "/receiver":

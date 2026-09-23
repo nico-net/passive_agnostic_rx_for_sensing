@@ -37,6 +37,18 @@ def test_ul_detection_key_names():
     s.add_report({"uplink_sessions": [{"pusch_session_id": 1, "receivers": [rx]}]})
     assert s.snapshot()["ul"]["1"][0]["dets"] == [[12.5, -2.0]]
 
+def test_ul_session_evicted_after_60s_absence():
+    """RNTI churn (UE detach/re-attach) must not leak UL session entries forever, but a session
+    also must not disappear just because one report happened to carry no grant for it."""
+    s = SensingState()
+    rx = {"receiver_id": "rx0", "detections": [{"delta_path_range_m": 1.0, "delta_path_range_rate_mps": 0.0}]}
+    s.add_report({"uplink_sessions": [{"pusch_session_id": 5, "receivers": [rx]}]}, now=0.0)
+    assert "5" in s.snapshot()["ul"]
+    s.add_report({}, now=30.0)                      # one report without it, well inside the TTL
+    assert "5" in s.snapshot()["ul"]
+    s.add_report({}, now=61.0)                       # 61 s since last seen -> aged out
+    assert "5" not in s.snapshot()["ul"]
+
 def test_map_persists_when_report_has_none():
     s = SensingState(); s.add_report({"spatial_receivers": [spatial(0)]})
     s.add_report({"spatial_receivers": [{"receiver_id": "rx0", "detections": []}]})
@@ -59,6 +71,7 @@ def test_pipeline_from_log():
     assert p["gate_open"] is True and p["admitted"] == 10 and p["branchfo_hz"] == [0.0, 3.2, -1.1, 4.0]
 
 if __name__ == "__main__":
-    test_maps_and_ul(); test_ul_detection_key_names(); test_map_persists_when_report_has_none()
+    test_maps_and_ul(); test_ul_detection_key_names(); test_ul_session_evicted_after_60s_absence()
+    test_map_persists_when_report_has_none()
     test_tracks_trail_and_expiry(); test_pipeline_from_log()
     print("test_sensing_view: PASS")

@@ -2,6 +2,7 @@
 import math, re, threading, time
 
 TRAIL = 120
+UL_SESSION_TTL_S = 60.0   # evict a UL session only after this long unseen, not on one absent report
 RE_GATE_OPEN = re.compile(r"SENSING_GATE open rnti=(0x[0-9a-fA-F]+)")
 RE_GATE_CLOSE = re.compile(r"SENSING_GATE close")
 RE_GATE_STATS = re.compile(r"SENSING_GATE stats open=(\d) admitted=(\d+) rejected=(\d+) gate_discarded_rows=(\d+)")
@@ -33,6 +34,7 @@ class SensingState:
     def __init__(self):
         self._lock = threading.Lock()
         self.dl, self.ul, self.tracks, self.ue, self.geometry = [], {}, {}, {}, {}
+        self.ul_seen = {}   # session key -> wall time last present in a report
         self.pipeline = {"gate_open": None, "last_report_wall": None, "cpis": 0}
 
     def set_geometry(self, g):
@@ -40,15 +42,22 @@ class SensingState:
             self.geometry = {"gnb": g.get("transmitter_position_m"),
                              "rx": [g["receiver_positions_m"][f"rx{i}"] for i in range(4)] if g.get("receiver_positions_m") else []}
 
-    def add_report(self, rep):
+    def add_report(self, rep, now=None):
+        now = time.time() if now is None else now
         with self._lock:
             srs = rep.get("spatial_receivers") or []
             self.dl = [_receiver_view(s, self.dl[i] if i < len(self.dl) else None) for i, s in enumerate(srs)]
             for sess in rep.get("uplink_sessions") or []:
                 k = str(sess.get("pusch_session_id")); old = self.ul.get(k, [])
                 self.ul[k] = [_receiver_view(s, old[i] if i < len(old) else None) for i, s in enumerate(sess.get("receivers") or [])]
+                self.ul_seen[k] = now
+            # Age-based eviction: a UL session vanishes only after UL_SESSION_TTL_S with no grant
+            # seen at all, never on one report that simply didn't carry it -- grants are
+            # intermittent by nature and pruning on mere absence would flicker the UL tiles.
+            for k in [k for k, seen in self.ul_seen.items() if now - seen > UL_SESSION_TTL_S]:
+                del self.ul[k]; del self.ul_seen[k]
             p = self.pipeline
-            p.update({"cpis": p["cpis"] + 1, "last_report_wall": time.time(),
+            p.update({"cpis": p["cpis"] + 1, "last_report_wall": now,
                       "dropped_cpis": rep.get("dropped_cpis"), "discarded_pending_rows": rep.get("discarded_pending_rows"),
                       "dropped_submissions": rep.get("dropped_submissions"), "cpi_plan": rep.get("cpi_plan")})
 
