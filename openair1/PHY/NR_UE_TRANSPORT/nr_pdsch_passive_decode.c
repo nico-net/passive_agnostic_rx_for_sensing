@@ -1043,6 +1043,36 @@ static harqc_entry_t g_harqc[NR_HARQC_N];
 static uint64_t g_harqc_clock;
 static __thread struct { int armed; uint16_t rnti; uint8_t pid, ndi; } t_hq;
 static __thread int16_t *t_hq_d = NULL;
+/* BRANCHFO residuals measured on this thread's current grant, committed only on a TB CRC pass. */
+static __thread bool t_brfo_pending = false;
+static __thread int t_brfo_nant = 0;
+static __thread double t_brfo_d[NR_DL_CHEST_MAX_ANT];
+static pthread_mutex_t s_brfo_lock = PTHREAD_MUTEX_INITIALIZER;
+static void brfo_commit(void)
+{
+  static double s_fo_corr[NR_DL_CHEST_MAX_ANT];
+  static int s_brfo = -1;
+  if (!t_brfo_pending)
+    return;
+  t_brfo_pending = false;
+  if (s_brfo < 0) {
+    const char *e = getenv("ISAC_RX_BRANCH_FO");
+    s_brfo = (e != NULL) && (atoi(e) != 0); // default OFF (as before the port): on-air validation pending
+  }
+  if (!s_brfo)
+    return;
+  pthread_mutex_lock(&s_brfo_lock);
+  for (int a = 0; a < t_brfo_nant && a < NR_DL_CHEST_MAX_ANT; a++) {
+    /* INTEGRATE. `d` is the residual AFTER the correction already in the FEP, so the correction
+     * must accumulate it, not be replaced by it -- replacing settled at half the offset (measured
+     * -350..-700 Hz residual with the loop "on"). Gain 0.05/grant, clamp to the aliasing limit. */
+    s_fo_corr[a] -= 0.05 * t_brfo_d[a];
+    if (s_fo_corr[a] > 1500.0) s_fo_corr[a] = 1500.0;
+    if (s_fo_corr[a] < -1500.0) s_fo_corr[a] = -1500.0;
+    nr_ue_set_branch_fo_hz(a, s_fo_corr[a]);
+  }
+  pthread_mutex_unlock(&s_brfo_lock);
+}
 static __thread bool t_probe_first_seg = false; /* decode segment 0 only; outcome in t_probe_seg_ok */
 static __thread bool t_probe_seg_ok = false;
 void nr_pdsch_passive_probe_mode(bool on) { t_probe_first_seg = on; t_probe_seg_ok = false; }
@@ -2770,16 +2800,18 @@ chest_done:
     }
   }
 
+  /* BRANCHFO: measured here, integrated only once this grant's TB CRC passes (see brfo_commit):
+   * probes, unsettled layout hypotheses and false-accept DCIs give random slopes that would
+   * random-walk the correction to its clamp. */
+  t_brfo_pending = false;
+  if (fp->nb_antennas_rx > 1 && dmrs_first >= 0 && dmrs_last <= dmrs_first) {
+    static _Atomic int s_inert_logged = 0;
+    if (!atomic_exchange(&s_inert_logged, 1))
+      LOG_W(PHY, "SENSING: BRANCHFO inert: grant has one DM-RS symbol, no per-branch slope to measure\n");
+  }
   if (fp->nb_antennas_rx > 1 && dmrs_first >= 0 && dmrs_last > dmrs_first) {
     static _Atomic uint64_t s_fo_n = 0;
     static double s_fo_ema[NR_DL_CHEST_MAX_ANT];
-    static double s_fo_corr[NR_DL_CHEST_MAX_ANT];
-    static pthread_mutex_t s_fo_lock = PTHREAD_MUTEX_INITIALIZER;
-    static int s_brfo = -1;
-    if (s_brfo < 0) {
-      const char *e = getenv("ISAC_RX_BRANCH_FO");
-      s_brfo = (e != NULL) && (atoi(e) != 0); // default OFF (as before the port): on-air validation pending
-    }
     // symbol duration incl. CP: one slot is 1ms/slots_per_subframe, split into symbols_per_slot
     const double dt = (1.0e-3 / (double)fp->slots_per_subframe) / (double)fp->symbols_per_slot
                       * (double)(dmrs_last - dmrs_first);
@@ -2796,22 +2828,16 @@ chest_done:
       fo[a] = (re != 0.0 || im != 0.0) ? atan2(im, re) / (2.0 * M_PI * dt) : 0.0;
     }
     const uint64_t n = atomic_fetch_add(&s_fo_n, 1);
-    pthread_mutex_lock(&s_fo_lock);
+    pthread_mutex_lock(&s_brfo_lock);
     for (int a = 0; a < fp->nb_antennas_rx && a < NR_DL_CHEST_MAX_ANT; a++) {
       // Differential against branch 0: the common part is the shared sync loop's job, not ours.
       const double d = fo[a] - fo[0];
       s_fo_ema[a] = (n == 0) ? d : (0.99 * s_fo_ema[a] + 0.01 * d);
-      if (s_brfo) {
-        /* INTEGRATE. `d` is the residual AFTER the correction already in the FEP, so the correction
-         * must accumulate it, not be replaced by it -- replacing settled at half the offset (measured
-         * -350..-700 Hz residual with the loop "on"). Gain 0.05/grant, clamp to the aliasing limit. */
-        s_fo_corr[a] -= 0.05 * d;
-        if (s_fo_corr[a] > 1500.0) s_fo_corr[a] = 1500.0;
-        if (s_fo_corr[a] < -1500.0) s_fo_corr[a] = -1500.0;
-        nr_ue_set_branch_fo_hz(a, s_fo_corr[a]);
-      }
+      t_brfo_d[a] = d;
     }
-    pthread_mutex_unlock(&s_fo_lock);
+    pthread_mutex_unlock(&s_brfo_lock);
+    t_brfo_nant = fp->nb_antennas_rx;
+    t_brfo_pending = true;
     if ((n % 500) == 0) {
       LOG_I(PHY,
             "SENSING: BRANCHFO d_vs_br0=[%.1f %.1f %.1f %.1f] Hz (EMA, DM-RS sym %d->%d, "
@@ -3791,6 +3817,8 @@ gpu_llr_ready:;
       atomic_fetch_add(&g_llr_tb[k], 1);
     }
     if (ldpc_ok) {
+      if (!t_probe_first_seg)
+        brfo_commit();
       out->status = NR_PDSCH_PASSIVE_DECODE_CRC_OK;
       out->tb     = g_harq.b;
       // Reserved-MCS retransmission record (G5 review, gap-harq): only a CRC-VERIFIED TB is strong
