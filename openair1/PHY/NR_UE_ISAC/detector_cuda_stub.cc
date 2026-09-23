@@ -9,6 +9,7 @@ struct CudaDetectorBackend::Impl {};
 
 bool detector_cuda_available() { return false; }
 void detector_cuda_warmup() {}
+void detector_cuda_prefer_blocking_sync() {}
 
 CudaDetectorBackend::CudaDetectorBackend(uint32_t,
                                          uint32_t,

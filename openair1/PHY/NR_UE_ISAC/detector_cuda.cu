@@ -423,6 +423,12 @@ bool detector_cuda_available()
   return devices > 0;
 }
 
+void detector_cuda_prefer_blocking_sync()
+{
+  if (detector_cuda_available())
+    cudaSetDeviceFlags(cudaDeviceScheduleBlockingSync);
+}
+
 void detector_cuda_warmup()
 {
   static std::once_flag warmed;

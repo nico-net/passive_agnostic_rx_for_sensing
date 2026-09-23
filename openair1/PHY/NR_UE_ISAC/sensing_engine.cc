@@ -181,7 +181,7 @@ void cap_reported_covariance(Matrix& covariance, const Axes& axes)
 
 /** Engine threads leave the PHY's SCHED_FIFO class and, when NR_ISAC_CPUS="3,12,13" is set, run
  *  only on those cores -- a std::thread created from a FIFO PHY thread inherits FIFO otherwise. */
-void pin_current_thread_from_env()
+void pin_current_thread_from_env(int lane)
 {
   // Fix round 1 (P20): std::stoi throws std::invalid_argument/out_of_range on a garbage or
   // out-of-range NR_ISAC_CPUS token, and an uncaught exception at the top of an engine thread is
@@ -210,9 +210,46 @@ void pin_current_thread_from_env()
     CPU_SET(static_cast<int>(cpu), &set);
     any = true;
   }
+  if (any && lane >= 0) {
+    int pick = lane % CPU_COUNT(&set);
+    for (int cpu = 0; cpu < CPU_SETSIZE; ++cpu)
+      if (CPU_ISSET(cpu, &set) && pick-- == 0) {
+        CPU_ZERO(&set);
+        CPU_SET(cpu, &set);
+        break;
+      }
+  }
   if (any && pthread_setaffinity_np(pthread_self(), sizeof(set), &set) != 0 && !warned.exchange(true))
     std::fprintf(stderr, "SENSING: pthread_setaffinity_np failed for an engine thread\n");
 }
+
+/** NR_ISAC_STAGE_TIMING=1: one stderr line per lane and CPI with the wall time of each front-end
+ *  stage (profiling aid for the real-time budget; off by default). */
+struct StageTimer {
+  static bool enabled()
+  {
+    static const bool value = std::getenv("NR_ISAC_STAGE_TIMING") != nullptr;
+    return value;
+  }
+  using Clock = std::chrono::steady_clock;
+  Clock::time_point last = Clock::now();
+  char text[512];
+  int used = 0;
+  void mark(const char* stage)
+  {
+    if (!enabled()) return;
+    const auto now = Clock::now();
+    used += std::snprintf(text + used, sizeof(text) - used, " %s=%.2f", stage,
+                          std::chrono::duration<double, std::milli>(now - last).count());
+    last = now;
+  }
+  void flush(uint64_t sequence, uint32_t receiver, bool uplink)
+  {
+    if (enabled())
+      std::fprintf(stderr, "NR_ISAC stage seq=%llu rx=%u %s%s\n", (unsigned long long)sequence,
+                   receiver, uplink ? "UL" : "DL", text);
+  }
+};
 
 struct SpatialReceiverProduct {
   SpatialReceiverReport report;
@@ -234,7 +271,7 @@ public:
     if (!worker_count) throw std::invalid_argument("spatial detector executor needs workers");
     workers_.reserve(worker_count);
     while (workers_.size() < worker_count)
-      workers_.push_back(std::make_unique<Worker>());
+      workers_.push_back(std::make_unique<Worker>(static_cast<int>(workers_.size())));
   }
 
   std::future<SpatialReceiverProduct> submit(
@@ -251,7 +288,7 @@ private:
   using Task = std::packaged_task<SpatialReceiverProduct()>;
 
   struct Worker {
-    Worker() : thread([this] { run(); }) {}
+    explicit Worker(int lane) : lane(lane), thread([this] { run(); }) {}
     ~Worker()
     {
       {
@@ -278,7 +315,7 @@ private:
 
     void run()
     {
-      pin_current_thread_from_env();
+      pin_current_thread_from_env(lane);
       for (;;) {
         Task task;
         {
@@ -296,6 +333,7 @@ private:
     std::condition_variable condition;
     std::deque<Task> tasks;
     bool stopping = false;
+    int lane;
     std::thread thread;
   };
 
@@ -344,7 +382,12 @@ struct SensingEngine::PendingRow {
 
 void SensingEngine::PointerQueue::push(Snapshot* value)
 {
-  { std::lock_guard<std::mutex> lock(mutex_); queue_.push_back(value); }
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    queue_.push_back(value);
+    if (queue_.size() > peak_depth_.load(std::memory_order_relaxed))
+      peak_depth_.store(queue_.size(), std::memory_order_relaxed);
+  }
   condition_.notify_one();
 }
 
@@ -512,6 +555,7 @@ void SensingEngine::start()
   if (running_.load(std::memory_order_relaxed)) return;
   const bool require_cuda = cuda_required();
   const bool have_detector_cuda = detector_cuda_available();
+  detector_cuda_prefer_blocking_sync();
   if (require_cuda && !have_detector_cuda)
     throw std::runtime_error("NR_ISAC_REQUIRE_CUDA=1 but no usable CUDA detector is available");
   if (config_.sync_enable) {
@@ -572,6 +616,16 @@ void SensingEngine::stop()
   }
   if (accumulation_worker_.joinable()) accumulation_worker_.join();
   if (processing_worker_.joinable()) processing_worker_.join();
+  std::fprintf(stderr,
+               "SENSING: engine backlog peak_pending_rows=%zu peak_pending_mib=%.1f "
+               "peak_ready_queue=%zu/%zu snapshot_pool_drops=%llu stale=%llu "
+               "discarded_pending_rows=%llu dropped_cpis=%llu gate_discarded_rows=%llu cpis=%llu\n",
+               peak_pending_rows_, peak_pending_row_bytes_ / 1048576.0, ready_.peak_depth(),
+               pool_.size(), (unsigned long long)dropped_.load(), (unsigned long long)stale_.load(),
+               (unsigned long long)discarded_pending_rows_.load(),
+               (unsigned long long)dropped_cpis_.load(),
+               (unsigned long long)gate_discarded_rows_.load(),
+               (unsigned long long)enqueued_cpis_.load());
 }
 
 void SensingEngine::submit(uint32_t slot, float fraction, nr_isac_source_t source,
@@ -831,6 +885,8 @@ void SensingEngine::consume(const Snapshot& s)
     row.weights.assign((size_t)requested_antennas_ * subcarriers, 0.0f);
     found = rows_.emplace(key, std::move(row)).first;
     pending_row_bytes_ += pending_row_storage_bytes(found->second);
+    peak_pending_rows_ = std::max(peak_pending_rows_, rows_.size());
+    peak_pending_row_bytes_ = std::max(peak_pending_row_bytes_, pending_row_bytes_);
   }
   PendingRow& row = found->second;
   row.source_mask |= 1u << static_cast<uint32_t>(s.source);
@@ -861,6 +917,7 @@ void SensingEngine::consume(const Snapshot& s)
       view.weights.assign((size_t)requested_antennas_ * subcarriers, 0.0f);
       found_view = row.uplink.emplace(s.session_id, std::move(view)).first;
       pending_row_bytes_ += view_bytes;
+      peak_pending_row_bytes_ = std::max(peak_pending_row_bytes_, pending_row_bytes_);
     }
     found_view->second.source_mask |= 1u << static_cast<uint32_t>(s.source);
     ++found_view->second.source_occurrences[static_cast<uint32_t>(s.source)];
@@ -1212,13 +1269,17 @@ void SensingEngine::process_window(CfrWindow dl_window, std::vector<CfrWindow> u
         std::fwrite(w.values.data(), sizeof(std::complex<float>), w.values.size(), f);
         std::fclose(f);
       };
+      StageTimer timer;
+      timer.mark("queue");
       if (!uplink_only) {
       CfrWindow corrected = independent_receiver_view(dl_window, receiver);
+      timer.mark("view");
       spatial.sync.rows = corrected.rows;
       if (config_.sync_enable && corrected.rows >= 3) {
         // Current-CPI direct-path nuisance estimation is independent for each RF chain.  No
         // stored cable/phase correction and no target state enters this operation.
         spatial.sync = estimate_sync(corrected);
+        timer.mark("sync_est");
         // Excess bistatic range requires the measured direct path at zero even if its
         // fractional clock offset/drift is insignificant. Match the existing UL DTD policy;
         // this is a current-CPI reference, not a stored cable calibration.
@@ -1238,19 +1299,23 @@ void SensingEngine::process_window(CfrWindow dl_window, std::vector<CfrWindow> u
           delay_reference_bin = spatial.sync.los_bins - baseline_m / range_res_m;
         }
         apply_sync_correction(corrected, spatial.sync, delay_reference_bin, std::nullopt);
+        timer.mark("sync_apply");
       }
       spatial.current_cpi_variance = estimate_current_cpi_variance(
           corrected, &spatial.covariance_family_count,
           &spatial.covariance_difference_count);
+      timer.mark("variance");
       // Align repeated scheduler allocations first, but do not self-subtract their current-CPI
       // mean.  The receiver-local filter subtracts only the preceding causal state and updates it
       // after producing this detector input.
       spatial.detector_alignment = align_allocation_families(corrected, false);
+      timer.mark("align");
       dump_window(corrected, "pre");
       if (config_.family_static)
         spatial.causal_clutter = spatial_clutter_filters_[receiver].filter(
             corrected, spatial.current_cpi_variance);
       dump_window(corrected, "post");
+      timer.mark("clutter");
       // Detector measurements are frozen before any cross-receiver or tracker consumer exists.
 #ifdef NR_ISAC_FIXED_WORK_REPLAY
       diagnostic_clean::select(sequence, receiver, false);
@@ -1260,6 +1325,7 @@ void SensingEngine::process_window(CfrWindow dl_window, std::vector<CfrWindow> u
           config_.spatial_detector_deadline_s > 0.0
               ? std::optional<double>(config_.spatial_detector_deadline_s)
               : std::nullopt);
+      timer.mark("clean");
       spatial.detector.initial_dl_likelihood = spatial.detector.initial_likelihood;
       spatial.detector.dl_observed_re_count = spatial.detector.axes.observed_re_count;
       for (const CleanComponent& object : spatial.detector.objects) {
@@ -1366,6 +1432,7 @@ void SensingEngine::process_window(CfrWindow dl_window, std::vector<CfrWindow> u
       soft->effective_hypotheses = spatial.detector.effective_hypotheses;
       soft->search_complete = spatial.detector.stop_reason != "next_cpi_processing_deadline";
       batch.soft_evidence = std::move(soft);
+      timer.mark("report");
       }
 
       if (uplink_only) {
@@ -1373,6 +1440,7 @@ void SensingEngine::process_window(CfrWindow dl_window, std::vector<CfrWindow> u
         spatial.uplink_session_id = uplink_source->session_id;
         try {
           CfrWindow ul_corrected = independent_receiver_view(*uplink_source, receiver);
+          timer.mark("view");
           spatial.uplink_sync.rows = ul_corrected.rows;
           if (!config_.sync_enable || ul_corrected.rows < 3)
             throw std::runtime_error(
@@ -1385,6 +1453,7 @@ void SensingEngine::process_window(CfrWindow dl_window, std::vector<CfrWindow> u
               std::ceil(config_.maximum_range_m / ul_range_res_m));
           spatial.uplink_sync = estimate_sync(
               ul_corrected, SyncPathPolicy::earliest_persistent, ul_max_lead_bins);
+          timer.mark("sync_est");
           const uint32_t minimum_reference_rows = std::max(
               3, static_cast<int>(std::ceil(std::log2(
                      std::max(2u, spatial.uplink_sync.rows)))));
@@ -1398,15 +1467,19 @@ void SensingEngine::process_window(CfrWindow dl_window, std::vector<CfrWindow> u
           // referencing, not a stored cable-delay calibration.
           spatial.uplink_sync.sto_applied = true;
           apply_sync_correction(ul_corrected, spatial.uplink_sync, 0.0, std::nullopt);
+          timer.mark("sync_apply");
           spatial.uplink_current_cpi_variance = estimate_current_cpi_variance(
               ul_corrected, &spatial.uplink_covariance_family_count,
               &spatial.uplink_covariance_difference_count);
+          timer.mark("variance");
           spatial.uplink_detector_alignment = align_allocation_families(
               ul_corrected, false);
+          timer.mark("align");
           if (config_.family_static)
             spatial.uplink_causal_clutter =
                 spatial_ul_clutter_filters_.at(ul_corrected.session_id)[receiver].filter(
                 ul_corrected, spatial.uplink_current_cpi_variance);
+          timer.mark("clutter");
           dump_window(ul_corrected, "ulpost");   // OFFLINE DIAGNOSTIC (same env gate as DL)
           PipelineConfig uplink_detector_config = config_;
           const double uplink_dwell_s = (ul_corrected.row_time_slots.back()
@@ -1432,6 +1505,7 @@ void SensingEngine::process_window(CfrWindow dl_window, std::vector<CfrWindow> u
               config_.spatial_detector_deadline_s > 0.0
                   ? std::optional<double>(config_.spatial_detector_deadline_s)
                   : std::nullopt);
+          timer.mark("clean");
           spatial.uplink_search_complete =
               spatial.uplink_detector.stop_reason != "next_cpi_processing_deadline";
           for (const CleanComponent& object : spatial.uplink_detector.objects) {
@@ -1617,10 +1691,12 @@ void SensingEngine::process_window(CfrWindow dl_window, std::vector<CfrWindow> u
           ul_batch.observable = true;
           ul_batch.search_complete = spatial.uplink_search_complete;
           product.ul_batch = std::move(ul_batch);
+          timer.mark("report");
         } catch (const std::exception& error) {
           spatial.uplink_error = error.what();
         }
       }
+      timer.flush(sequence, receiver, uplink_only);
       return product;
     };
 
