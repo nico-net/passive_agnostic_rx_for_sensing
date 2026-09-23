@@ -103,9 +103,12 @@ function rdMaps(s){
   if(!rds.length){grid.innerHTML='<div class="mut">no RD maps yet</div>';return;}
   rds.forEach(v=>{
     const div=ensure(grid,"rd"+v.ch);
-    const x=[...Array(v.nr).keys()].map(i=>i*v.range_m_per_bin);
-    const y=[...Array(v.nd).keys()].map(k=>v.dopp0_hz+k*v.dopp_step_hz);
-    const z=[]; for(let k=0;k<v.nd;k++) z.push(v.db.slice(k*v.nr,(k+1)*v.nr));
+    const x=[...Array(v.nr).keys()].map(m=>m*v.range_m_per_bin);
+    const y=[...Array(v.nd).keys()].map(d=>v.dopp0_hz+d*v.dopp_step_hz);
+    // db is range-major: p[m*nd+d], m in [0,nr) outer, doppler d in [0,nd) inner/fastest
+    // (Task 9 producer layout). z rows follow y (doppler), columns follow x (range), so
+    // transpose: z[d][m] = db[m*nd+d].
+    const z=[]; for(let d=0;d<v.nd;d++){const row=new Array(v.nr); for(let m=0;m<v.nr;m++) row[m]=v.db[m*v.nd+d]; z.push(row);}
     Plotly.react(div,[{type:"heatmap",x,y,z,colorscale:"Viridis",colorbar:{title:"dB"}}],
       {...DARK,title:{text:`RD ch${v.ch}`,font:{size:13}},xaxis:{title:"range (m)"},yaxis:{title:"Doppler (Hz)"},
        margin:{l:55,r:10,t:30,b:40},height:330,uirevision:"rd"+v.ch},{displayModeBar:false});

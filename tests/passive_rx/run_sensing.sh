@@ -129,12 +129,15 @@ T0=$(date +%s); LAST_SIZE=0; LAST_GROWTH=$T0
 while kill -0 $ARM_PID 2>/dev/null; do
   sleep 10; now=$(date +%s)
   r=$(newest_rl); if [ -n "$r" ] && [ "$r" != "$RL" ]; then
-    # run_arm retried: the previous try's outputs must not be scored with this one's, and
-    # realtime_chain.py truncates tracks.jsonl/status.jsonl on every fresh launch -- rename them
-    # out of the way first so the run keeps an append-only history instead of losing the try.
+    # run_arm retried: the previous try's outputs must not be scored with this one's, and both
+    # realtime_chain.py (tracks.jsonl/status.jsonl) and start_tail()'s own `>` redirects
+    # (chain.out/monitor.out) truncate on every fresh launch -- rename them all out of the way
+    # first so the run keeps an append-only history instead of losing the try.
     [ -f "$RUN/reports.jsonl" ] && mv "$RUN/reports.jsonl" "$RUN/reports.try$TRY.jsonl"
     [ -f "$RUN/tracks.jsonl" ] && mv "$RUN/tracks.jsonl" "$RUN/tracks.try$TRY.jsonl"
     [ -f "$RUN/status.jsonl" ] && mv "$RUN/status.jsonl" "$RUN/status.try$TRY.jsonl"
+    [ -f "$RUN/chain.out" ] && mv "$RUN/chain.out" "$RUN/chain.try$TRY.out"
+    [ -f "$RUN/monitor.out" ] && mv "$RUN/monitor.out" "$RUN/monitor.try$TRY.out"
     TRY=$((TRY+1)); RL=$r; LAST_SIZE=0; LAST_GROWTH=$now
     ln -sfn "$(dirname "$RL")" "$RUN/capture"; log "run_arm try $TRY: receiver log $RL"
     kill $CHAIN_PID $MON_PID 2>/dev/null; start_discovery; start_tail
