@@ -272,14 +272,23 @@ RowSync estimate_row_sync(const CfrWindow& w, const Axes& a, const LosEstimate& 
   if (fc_max > 0) {
     const double cell = 1.0 / a.b_eff_hz, step = 1.0 / (8 * fc_max);
     const double f_half = 1.0 / (2 * a.median_dt_s), f_step = 0.5 / a.t_cpi_s;
+    // e^{-j2*pi*f*t_r} depends only on (f, r), never on err or channel -- hoisted out of the err loop
+    // (and the channel loop, since it doesn't depend on i either) so the joint (err,f) search stops
+    // multiplying polar() evaluations by n_err (and by kCh): was O(n_err*n_f*n_rows*kCh) polar() calls,
+    // now O(n_f*n_rows) once, reused by every err step and every channel. Same f sequence (same start,
+    // same step, computed once instead of identically re-derived per err) -> bit-identical results.
+    std::vector<double> fs; for (double f = -f_half; f <= f_half; f += f_step) fs.push_back(f);
+    std::vector<std::vector<cd>> ephase(fs.size(), std::vector<cd>(w.rows));
+    for (size_t fi = 0; fi < fs.size(); ++fi)
+      for (uint32_t r = 0; r < w.rows; ++r) ephase[fi][r] = std::polar(1.0, -2 * M_PI * fs[fi] * a.row_t_s[r]);
     for (uint32_t i = 0; i < kCh; ++i) {
       if (!L.found[i]) continue;
       double best_err = 0, best_score = -1;
       for (double err = -cell; err <= cell; err += step) {
         std::vector<cd> y(w.rows);
         for (uint32_t r = 0; r < w.rows; ++r) y[r] = tap[r][i] * std::polar(1.0, 2 * M_PI * fc[r] * err);
-        for (double f = -f_half; f <= f_half; f += f_step) {
-          cd acc = 0; for (uint32_t r = 0; r < w.rows; ++r) acc += y[r] * std::polar(1.0, -2 * M_PI * f * a.row_t_s[r]);
+        for (size_t fi = 0; fi < fs.size(); ++fi) {
+          cd acc = 0; for (uint32_t r = 0; r < w.rows; ++r) acc += y[r] * ephase[fi][r];
           if (std::abs(acc) > best_score) { best_score = std::abs(acc); best_err = err; }
         }
       }
@@ -377,6 +386,49 @@ RdResult range_doppler(const CfrWindow& w, const Axes& a, const LosEstimate& L, 
     out.noise[i] = pw.empty() ? 1.0 : std::max(median(pw) / std::log(2.0), std::numeric_limits<double>::min());
   }
   return out;
+}
+
+Calibration Calibrator::update(const std::array<cd, kCh>& tap, const std::array<bool, kCh>& found,
+                               const std::array<double, kCh>& snr)
+{
+  Calibration c;
+  const bool ref_ok = found[0] && std::abs(tap[0]) > 0;
+  const cd ref = ref_ok ? std::conj(tap[0]) / std::abs(tap[0]) : cd(1);
+  // Coherence of THIS CPI's LOS taps under the PREVIOUS calibration (predicted -> not tautological).
+  if (init_ && ref_ok) {
+    cd sum = 0; double pow_sum = 0;
+    for (uint32_t i = 0; i < kCh; ++i) if (found[i] && std::abs(tap[i]) > 0) {
+      const cd unit = tap[i] * ref / std::abs(tap[i]);
+      sum += unit * std::conj(s_[i]); pow_sum += 1.0;
+    }
+    if (pow_sum > 1) { c.coherent_gain = std::norm(sum) / pow_sum; c.rho = std::clamp((c.coherent_gain - 1) / (pow_sum - 1), 0.0, 1.0); }
+  }
+  for (uint32_t i = 0; i < kCh; ++i) {
+    c.los_found[i] = found[i]; c.los_snr[i] = snr[i];
+    if (i == 0) { s_[0] = cd(1); p_[0] = 0; continue; }
+    const double r = (found[i] && ref_ok && snr[i] > 0 && snr[0] > 0) ? 1 / (2 * snr[i]) + 1 / (2 * snr[0]) : 0;
+    c.jitter_bound_rad[i] = r > 0 ? std::sqrt(r) : 0;
+    if (!init_) { s_[i] = cd(1); p_[i] = M_PI * M_PI / 3; q_[i] = 0; nq_[i] = 0; }   // uniform-phase prior variance
+    const double p_pred = p_[i] + q_[i];
+    if (!(found[i] && ref_ok && r > 0)) { p_[i] = p_pred; continue; }            // predict only (no LOS)
+    const cd z = tap[i] * ref / std::abs(tap[i]);
+    const double nu = std::arg(z * std::conj(s_[i]));                           // wrapped innovation
+    const double k = p_pred / (p_pred + r);
+    s_[i] *= std::polar(1.0, k * nu);
+    p_[i] = (1 - k) * p_pred;
+    // covariance matching: innovation power beyond what the model predicts -> process noise
+    const double q_obs = std::max(0.0, nu * nu - (p_pred + r));
+    q_[i] = (q_[i] * nq_[i] + q_obs) / (nq_[i] + 1); ++nq_[i];
+    c.jitter_rad[i] = std::sqrt(nu * nu);
+  }
+  init_ = true;
+  for (uint32_t i = 0; i < kCh; ++i) {
+    c.phase_rad[i] = std::arg(s_[i]); c.phase_var[i] = p_[i];
+    c.coh_factor[i] = std::exp(-0.5 * std::min(p_[i], 50.0));
+  }
+  if (!init_ || c.coherent_gain <= 1.0) c.rho = std::max(0.0, c.rho);
+  last_ = c;
+  return c;
 }
 
 } // namespace nr_isac::coherent

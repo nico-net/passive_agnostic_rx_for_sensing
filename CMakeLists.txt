@@ -2424,6 +2424,11 @@ if(ENABLE_TESTS)
     target_link_libraries(test_nr_isac_coherent_tracker PRIVATE NR_UE_ISAC)
     add_dependencies(tests test_nr_isac_coherent_tracker)
     add_test(NAME test_nr_isac_coherent_tracker COMMAND ./test_nr_isac_coherent_tracker)
+    add_executable(test_nr_isac_coherent_calibration ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/tests/coherent_calibration_test.cc)
+    target_include_directories(test_nr_isac_coherent_calibration PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_ISAC)
+    target_link_libraries(test_nr_isac_coherent_calibration PRIVATE NR_UE_ISAC)
+    add_dependencies(tests test_nr_isac_coherent_calibration)
+    add_test(NAME test_nr_isac_coherent_calibration COMMAND ./test_nr_isac_coherent_calibration)
   endif()
   # uniqCfg/exit_function (needed by LOG/CONFIG_LIB) are defined directly in isac_sync_test.cc,
   # not via minimal_lib -- static-archive link order made minimal_lib's stubs unreliable here.

@@ -42,4 +42,22 @@ RdResult range_doppler(const CfrWindow& w, const Axes& a, const LosEstimate& los
 /** x with Q(shape, x) = p (regularised upper incomplete gamma), integer shape. */
 double gamma_upper_quantile(uint32_t shape, double p);
 
+/** Tracks each channel's phase offset vs channel 0 across CPIs (Kalman phase filter, covariance
+ * matching for process noise) and, before updating, scores this CPI's LOS taps against the
+ * PREVIOUS posterior for a non-tautological coherent-gain / rho diagnostic. */
+class Calibrator {
+public:
+  /** One CPI: los taps (LOS-referenced), found flags and LOS SNR -> posterior calibration. */
+  Calibration update(const std::array<cd,kCh>& los_tap, const std::array<bool,kCh>& found,
+                     const std::array<double,kCh>& los_snr);
+  const Calibration& last() const { return last_; }
+private:
+  std::array<cd,kCh> s_{};          // unit phasor state per channel (ch0 fixed at 1)
+  std::array<double,kCh> p_{};      // phase variance
+  std::array<double,kCh> q_{};      // process noise (covariance matching, cumulative mean)
+  std::array<uint32_t,kCh> nq_{};
+  bool init_ = false;
+  Calibration last_;
+};
+
 } // namespace nr_isac::coherent
