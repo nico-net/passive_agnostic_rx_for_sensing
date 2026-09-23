@@ -11,22 +11,24 @@ static _Atomic uint64_t g_kept_sym, g_total_sym; /* masked-path REs kept vs offe
 
 static int qidx(uint8_t qm) { return (qm == 2 || qm == 4 || qm == 6 || qm == 8) ? qm / 2 - 1 : -1; }
 
-static int cmp_u16(const void *a, const void *b) { return (int)*(const uint16_t *)a - (int)*(const uint16_t *)b; }
-
-/* Median |LLR| of the grant: the per-TB scale every ratio below is expressed in. */
-static float median_abs(const int16_t *llr, uint32_t G) {
-  static __thread uint16_t *buf = NULL; static __thread uint32_t cap = 0;
-  if (cap < G) { free(buf); buf = malloc(sizeof(*buf) * G); cap = buf ? G : 0; if (!buf) return 0.0f; }
-  for (uint32_t i = 0; i < G; i++) buf[i] = (uint16_t)(llr[i] < 0 ? -(int)llr[i] : llr[i]);
-  qsort(buf, G, sizeof(*buf), cmp_u16);  /* ponytail: O(G log G); quickselect if it shows in profiles */
-  return (float)buf[G / 2];
+/* Median |LLR| of the grant: the per-TB scale every ratio below is expressed in. Exact (the
+ * (G/2)-th smallest |LLR|, as a sort would give) from a counting histogram, O(G + 32769): this runs
+ * per grant on the RT thread. 32769 bins so |INT16_MIN| = 32768 keeps its own bin. */
+float nr_llrconf_median_abs(const int16_t *llr, uint32_t G) {
+  static __thread uint32_t *hist = NULL;
+  if (G == 0 || (!hist && !(hist = malloc(sizeof(*hist) * 32769)))) return 0.0f;
+  memset(hist, 0, sizeof(*hist) * 32769);
+  for (uint32_t i = 0; i < G; i++) hist[llr[i] < 0 ? -(int)llr[i] : llr[i]]++;
+  uint32_t c = 0;
+  for (int v = 0; v < 32769; v++) { c += hist[v]; if (c > G / 2) return (float)v; }
+  return 0.0f;
 }
 
 static int bin_of(float r) { int b = (int)(r / NR_LLRCONF_BIN_W); return b < 0 ? 0 : (b >= NR_LLRCONF_BINS ? NR_LLRCONF_BINS - 1 : b); }
 
 void nr_llrconf_observe(uint8_t qm, const int16_t *llr, const uint8_t *truth, uint32_t G) {
   const int q = qidx(qm); if (q < 0 || !llr || !truth || G < qm) return;
-  const float med = median_abs(llr, G); if (med <= 0.0f) return;
+  const float med = nr_llrconf_median_abs(llr, G); if (med <= 0.0f) return;
   for (uint32_t m = 0; m < G / qm; m++) {
     int ok = 1; int mn = 32767;
     for (int b = 0; b < qm; b++) { const int16_t v = llr[m * qm + b]; const int a = v < 0 ? -v : v;
@@ -51,7 +53,7 @@ int nr_llrconf_threshold(uint8_t qm, float *tau) {
 
 uint32_t nr_llrconf_hard(uint8_t qm, const int16_t *llr, uint32_t G, float tau, uint8_t *bits, uint8_t *keep) {
   if (qidx(qm) < 0 || !llr || G < qm) return 0;
-  const float med = median_abs(llr, G); uint32_t kept = 0;
+  const float med = nr_llrconf_median_abs(llr, G); uint32_t kept = 0;
   for (uint32_t m = 0; m < G / qm; m++) {
     int mn = 32767;
     for (int b = 0; b < qm; b++) { const int16_t v = llr[m * qm + b]; const int a = v < 0 ? -v : v;

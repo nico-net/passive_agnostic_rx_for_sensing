@@ -15,4 +15,5 @@ void nr_llrconf_agreement(uint8_t qm, const int16_t *llr, const uint8_t *truth_b
 int nr_llrconf_disabled(void);
 void nr_llrconf_stats_dump(void);
 void nr_llrconf_reset(void);
+float nr_llrconf_median_abs(const int16_t *llr, uint32_t G);
 #endif
