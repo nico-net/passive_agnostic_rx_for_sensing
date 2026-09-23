@@ -2545,6 +2545,13 @@ if(ENABLE_TESTS)
   add_dependencies(tests test_nr_passive_bwp)
   add_test(NAME test_nr_passive_bwp COMMAND ./test_nr_passive_bwp)
 
+  add_executable(test_nr_pdcch_gf2_rnti ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_gf2_rnti_test.cc
+                                        ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_gf2_rnti.c)
+  target_include_directories(test_nr_pdcch_gf2_rnti PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
+  target_link_libraries(test_nr_pdcch_gf2_rnti PRIVATE GTest::gtest GTest::gtest_main)
+  add_dependencies(tests test_nr_pdcch_gf2_rnti)
+  add_test(NAME test_nr_pdcch_gf2_rnti COMMAND ./test_nr_pdcch_gf2_rnti)
+
   add_executable(test_nr_mrc_weights ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_mrc_weights_test.cc)
   target_include_directories(test_nr_mrc_weights PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
   target_link_libraries(test_nr_mrc_weights PRIVATE GTest::gtest GTest::gtest_main m)
