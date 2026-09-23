@@ -1149,10 +1149,11 @@ void *UE_thread(void *arg)
             nr_get_carrier_frequencies(UE, &dl_carrier, &ul_carrier);
             nrue_ru_set_freq(UE, ul_carrier, dl_carrier, UE->initial_fo);
             UE->common_vars.freq_offset = UE->initial_fo;
-            /* The retune only reaches samples produced from now on. Frames already queued host-side
-             * were taken on the corrected LO, and the confirm capture would read them and measure the
-             * residual again (measured: -12 Hz after the retune, 2026-09-23). Drain until a 2-frame
-             * read has to wait for live samples (>= 15 ms of its 20 ms air time). */
+            /* The retune does not reach the very next samples: capturing straight after it measured
+             * the residual again (-12 Hz vs -14657, 2026-09-23). OTA, the drain below found no
+             * host backlog (first read waited 19.7 ms), yet discarding those >= 2 reads (40 ms) was
+             * enough (-14607 vs -14596), so the lag is in-flight/retune latency, not a queue. Drain
+             * any queue anyway (until a 2-frame read waits >= 15 ms of its 20 ms), then read once more. */
             {
               int flushed = 0;
               double dt = 0.0;
