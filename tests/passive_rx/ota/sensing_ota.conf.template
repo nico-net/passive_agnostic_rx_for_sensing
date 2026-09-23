@@ -3,6 +3,20 @@
 // no ul_bwp/ul_tda (from SIB1 + Components 1-3), full_auto DL. Consumer cores as the OTA manual
 // conf (isolcpus 2-3 for UL, DL consumers on 6).
 //
+// CORE MAP (sens6, 14 cores: 0-5 P, 6-13 E; isolcpus=2-3). Owner of each core; FIFO threads never
+// share a core with the SCHED_OTHER sensing lanes or the Python tail (spec §12):
+//   0,1,4,5,6,7  RT PHY thread pool (run_arm --thread-pool); PDCCH scan consumer on 5 (scan_thread)
+//   2            RF receive thread (run_arm ISAC_UE_RT_CORE=2), alone on an isolated core
+//   3            UL PUSCH decode consumer x1, FIFO 50 (ul_thread), alone on an isolated core
+//   6-10         DL PDSCH decode consumers x5, FIFO 40 (pdsch); 6,7 shared with the pool as before
+//   8-13         NIC completion IRQ threads, FIFO 50 (run_arm, from sysfs) -- above the consumers
+//   11,12,13     sensing engine lanes + accumulation/processing threads (run_sensing NR_ISAC_CPUS)
+//   4            realtime_chain + monitor (Python, SCHED_OTHER): a pool core, so any RT work
+//                preempts them; never a decode consumer's or a sensing core
+//   11,12,13     discovery tool (discover_live.sh, ~4 s, before the gate can open) -- lanes idle then
+// Not enough cores for everything alone: UL 2->1 consumer (UL decode <=1 grant/slot, ~0.4 core) and
+// DL 6->5 consumers were the price of moving sensing off core 3 and the Python tail off 10-11.
+//
 // TEMPLATE for run_sensing.sh (Task 16). tests/passive_rx/survey.py --apply fills in
 // spatial_rx_positions / tx_pos_x / tx_pos_y / tx_pos_z / rvm_max_range_m / report_path from the
 // site survey before every run; report_path/out_path/report_endpoint are deleted below on purpose
@@ -45,7 +59,7 @@ sensing = {
   // queue_depth, thread_core are decode-attempt-budget/queue/core counts, not cell values -- left at
   // this deployment's tuned defaults. thread=6 decode consumers (was 2): at 2 the decode queue was
   // dropping 93% full OTA, matching the known-good captures/cons6_ota.conf.
-  pdcch_blind_monitor_pdsch = "2:0:0:1:16:6:64:6";
+  pdcch_blind_monitor_pdsch = "2:0:0:1:16:5:64:6";
   // "rnti_min:rnti_max" -- already NR_PDCCH_BLIND_RNTI_MIN_DEFAULT:NR_PDCCH_BLIND_RNTI_MAX_DEFAULT
   // (nr_pdcch_blind_monitor.h: 0x0001:0xFFEF = 1:65519), i.e. the full legal C-RNTI range, not a
   // specific cell's RNTI. Already the documented default.
@@ -74,13 +88,16 @@ sensing = {
   pdcch_blind_monitor_ul_uci = "256:11:0:32";
   // "n_consumers[:queue_depth[:core]]" -- defers the passive PUSCH decode off the PHY RX thread.
   // Thread/queue/core counts, not a cell value. Left unchanged.
-  pdcch_blind_monitor_ul_thread = "2:64:2";
+  pdcch_blind_monitor_ul_thread = "1:64:3";
   // frozen multi-RX detector contract: sionna scenarios.json detector.maximum_target_speed_mps
   maximum_target_speed_mps = 50.0;
   // declared false-object intensity; engine requires value*0.075 s < 1; value used by the
   // engine's own tests -- no validated field value yet
   false_object_intensity_per_s = 1.0;
   sources = "pdsch_dmrs_blind,pdsch_data,pusch_dmrs,pusch_data";
+  // UE CAPACITY, not a cell value: 4 lanes per UE (4*(1+num_ues) detector lanes), engine maximum 4.
+  // UL sessions beyond it in one CPI are dropped and counted (ul_sessions_capped).
+  num_ues = 4;
   cpi_slots = 32;
   interpolate = 1;
   capture = 1;

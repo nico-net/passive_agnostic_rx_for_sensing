@@ -1,0 +1,3 @@
+idsweep_offline_gpu
+*.o
+live_stage*.txt
