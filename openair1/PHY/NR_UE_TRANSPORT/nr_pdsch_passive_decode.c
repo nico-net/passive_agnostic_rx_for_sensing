@@ -2155,6 +2155,13 @@ chest_done:
   if (fp->nb_antennas_rx > 1 && dmrs_first >= 0 && dmrs_last > dmrs_first) {
     static _Atomic uint64_t s_fo_n = 0;
     static double s_fo_ema[NR_DL_CHEST_MAX_ANT];
+    static double s_fo_corr[NR_DL_CHEST_MAX_ANT];
+    static pthread_mutex_t s_fo_lock = PTHREAD_MUTEX_INITIALIZER;
+    static int s_brfo = -1;
+    if (s_brfo < 0) {
+      const char *e = getenv("ISAC_RX_BRANCH_FO");
+      s_brfo = (e == NULL) ? 1 : (atoi(e) != 0);
+    }
     // symbol duration incl. CP: one slot is 1ms/slots_per_subframe, split into symbols_per_slot
     const double dt = (1.0e-3 / (double)fp->slots_per_subframe) / (double)fp->symbols_per_slot
                       * (double)(dmrs_last - dmrs_first);
@@ -2171,21 +2178,22 @@ chest_done:
       fo[a] = (re != 0.0 || im != 0.0) ? atan2(im, re) / (2.0 * M_PI * dt) : 0.0;
     }
     const uint64_t n = atomic_fetch_add(&s_fo_n, 1);
+    pthread_mutex_lock(&s_fo_lock);
     for (int a = 0; a < fp->nb_antennas_rx && a < NR_DL_CHEST_MAX_ANT; a++) {
       // Differential against branch 0: the common part is the shared sync loop's job, not ours.
       const double d = fo[a] - fo[0];
       s_fo_ema[a] = (n == 0) ? d : (0.99 * s_fo_ema[a] + 0.01 * d);
-      if (getenv("ISAC_RX_BRANCH_FO") != NULL && atoi(getenv("ISAC_RX_BRANCH_FO")) != 0) {
+      if (s_brfo) {
         /* INTEGRATE. `d` is the residual AFTER the correction already in the FEP, so the correction
          * must accumulate it, not be replaced by it -- replacing settled at half the offset (measured
          * -350..-700 Hz residual with the loop "on"). Gain 0.05/grant, clamp to the aliasing limit. */
-        static double s_fo_corr[NR_DL_CHEST_MAX_ANT];
         s_fo_corr[a] -= 0.05 * d;
         if (s_fo_corr[a] > 1500.0) s_fo_corr[a] = 1500.0;
         if (s_fo_corr[a] < -1500.0) s_fo_corr[a] = -1500.0;
         nr_ue_set_branch_fo_hz(a, s_fo_corr[a]);
       }
     }
+    pthread_mutex_unlock(&s_fo_lock);
     if ((n % 500) == 0) {
       LOG_I(PHY,
             "SENSING: BRANCHFO d_vs_br0=[%.1f %.1f %.1f %.1f] Hz (EMA, DM-RS sym %d->%d, "
