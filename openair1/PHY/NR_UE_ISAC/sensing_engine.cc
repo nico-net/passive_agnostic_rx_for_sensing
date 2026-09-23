@@ -17,6 +17,7 @@
 #endif
 
 #include <algorithm>
+#include <cerrno>
 #include <chrono>
 #include <cmath>
 #include <exception>
@@ -26,7 +27,10 @@
 #include <cstdlib>
 #include <cstring>
 #include <limits>
+#include <pthread.h>
+#include <sched.h>
 #include <set>
+#include <sstream>
 #include <stdexcept>
 #include <thread>
 
@@ -175,6 +179,41 @@ void cap_reported_covariance(Matrix& covariance, const Axes& axes)
 }
 } // namespace
 
+/** Engine threads leave the PHY's SCHED_FIFO class and, when NR_ISAC_CPUS="3,12,13" is set, run
+ *  only on those cores -- a std::thread created from a FIFO PHY thread inherits FIFO otherwise. */
+void pin_current_thread_from_env()
+{
+  // Fix round 1 (P20): std::stoi throws std::invalid_argument/out_of_range on a garbage or
+  // out-of-range NR_ISAC_CPUS token, and an uncaught exception at the top of an engine thread is
+  // std::terminate -- the whole UE process aborts. Parse by hand instead; never throw.
+  static std::atomic<bool> warned{false};
+  sched_param sp{}; sp.sched_priority = 0;
+  if (pthread_setschedparam(pthread_self(), SCHED_OTHER, &sp) != 0 && !warned.exchange(true))
+    std::fprintf(stderr, "SENSING: pthread_setschedparam(SCHED_OTHER) failed for an engine thread\n");
+  const char* cpus = std::getenv("NR_ISAC_CPUS");
+  if (!cpus || !*cpus) return;
+  cpu_set_t set; CPU_ZERO(&set);
+  bool any = false;
+  std::stringstream s(cpus); std::string tok;
+  while (std::getline(s, tok, ',')) {
+    if (tok.empty()) continue;
+    errno = 0;
+    char* end = nullptr;
+    const long cpu = std::strtol(tok.c_str(), &end, 10);
+    if (end == tok.c_str() || *end != '\0' || errno == ERANGE || cpu < 0 || cpu >= CPU_SETSIZE) {
+      if (!warned.exchange(true))
+        std::fprintf(stderr,
+                     "SENSING: NR_ISAC_CPUS token '%s' is not a valid core id (0..%d); ignored\n",
+                     tok.c_str(), CPU_SETSIZE - 1);
+      continue;
+    }
+    CPU_SET(static_cast<int>(cpu), &set);
+    any = true;
+  }
+  if (any && pthread_setaffinity_np(pthread_self(), sizeof(set), &set) != 0 && !warned.exchange(true))
+    std::fprintf(stderr, "SENSING: pthread_setaffinity_np failed for an engine thread\n");
+}
+
 struct SpatialReceiverProduct {
   SpatialReceiverReport report;
   ReceiverDetectionBatch batch;
@@ -239,6 +278,7 @@ private:
 
     void run()
     {
+      pin_current_thread_from_env();
       for (;;) {
         Task task;
         {
@@ -583,16 +623,39 @@ void SensingEngine::submit(uint32_t slot, float fraction, nr_isac_source_t sourc
   ready_.push(value);
 }
 
+// Single-threaded on the accumulation thread only (the watchdog thread that calls
+// request_discard_pending() never touches rows_/active_plan_ directly). A snapshot already sitting
+// in ready_ at request time was accepted while the gate was still open, so the discard must wait
+// until the accumulation thread has actually consumed it -- discarding immediately would erase rows
+// belonging to that still-open interval, not just the stale ones the close is meant to drop.
+void SensingEngine::maybe_discard_pending()
+{
+  if (!discard_requested_.load(std::memory_order_acquire)) return;
+  if (consumed_submissions_.load(std::memory_order_relaxed) < discard_after_.load(std::memory_order_relaxed))
+    return;
+  discard_requested_.store(false, std::memory_order_relaxed);
+  discard_pending_rows();
+}
+
 void SensingEngine::accumulation_run()
 {
+  pin_current_thread_from_env();
+  maybe_discard_pending();
   for (;;) {
     Snapshot* value = ready_.wait_pop();
     if (!value) break;
+    // Gate closed while we were blocked: drop the pre-close rows BEFORE this post-gap row is consumed,
+    // or consume() would window them into a stale partial CPI and the discard would hit this row.
+    maybe_discard_pending();
     try { consume(*value); }
     catch (const std::exception& e) { std::fprintf(stderr, "SENSING: dropped CFR occurrence: %s\n", e.what()); }
     value->cfr.clear(); value->subcarrier.clear(); value->symbol.clear(); free_.push(value);
     consumed_submissions_.fetch_add(1, std::memory_order_release);
+    maybe_discard_pending();
   }
+  // Fix round 1 (P20): honour a discard requested right at shutdown before the final flush, or
+  // finish_pending_windows() would emit the partial CPI the close was meant to drop.
+  maybe_discard_pending();
   try { finish_pending_windows(); }
   catch (const std::exception& e) { std::fprintf(stderr, "SENSING: final window failed: %s\n", e.what()); }
   windows_.close();
@@ -600,6 +663,7 @@ void SensingEngine::accumulation_run()
 
 void SensingEngine::processing_run()
 {
+  pin_current_thread_from_env();
   while (auto task = windows_.wait_pop()) {
     try {
       process_window(std::move(task->dl_window), std::move(task->ul_windows), task->plan,
@@ -972,6 +1036,16 @@ void SensingEngine::close_ready_windows(bool flush)
   }
 }
 
+void SensingEngine::discard_pending_rows()
+{
+  std::vector<int64_t> keys;
+  keys.reserve(rows_.size());
+  for (const auto& item : rows_) keys.push_back(item.first);
+  gate_discarded_rows_.fetch_add(keys.size(), std::memory_order_relaxed);
+  erase_rows(keys);
+  active_plan_.reset();
+}
+
 CfrWindow SensingEngine::build_window(const std::vector<int64_t>& keys, bool uplink,
                                       uint32_t forced_antennas,
                                       uint64_t selected_session) const
@@ -1125,9 +1199,15 @@ void SensingEngine::process_window(CfrWindow dl_window, std::vector<CfrWindow> u
       auto& spatial = product.report;
       spatial.receiver_id = "rx" + std::to_string(receiver);
       spatial.receiver_position = config_.spatial_receivers.positions[receiver];
-      // OFFLINE DIAGNOSTIC: dump the detector input before/after the causal clutter filter.
+      // OFFLINE DIAGNOSTIC: dump every stage of the per-receiver CFR chain (raw -> sync -> pre ->
+      // post, plus UL). getenv is cached in a function-local static (magic-static init is
+      // thread-safe) so an unset NR_ISAC_DEBUG_DIR costs one pointer check per call, not a
+      // getenv() per window per stage.
       auto dump_window = [&](const CfrWindow& w, const char* stage) {
-        const char* dir = std::getenv("NR_ISAC_CLUTTER_DUMP_DIR");
+        static const char* const dir = [] {
+          const char* d = std::getenv("NR_ISAC_DEBUG_DIR");
+          return d ? d : std::getenv("NR_ISAC_CLUTTER_DUMP_DIR");
+        }();
         if (!dir) return;
         char path[512];
         std::snprintf(path, sizeof(path), "%s/seq%06llu_rx%u_%s.bin", dir,
@@ -1143,6 +1223,7 @@ void SensingEngine::process_window(CfrWindow dl_window, std::vector<CfrWindow> u
       };
       if (!uplink_only) {
       CfrWindow corrected = independent_receiver_view(dl_window, receiver);
+      dump_window(corrected, "raw");
       spatial.sync.rows = corrected.rows;
       if (config_.sync_enable && corrected.rows >= 3) {
         // Current-CPI direct-path nuisance estimation is independent for each RF chain.  No
@@ -1167,6 +1248,10 @@ void SensingEngine::process_window(CfrWindow dl_window, std::vector<CfrWindow> u
           delay_reference_bin = spatial.sync.los_bins - baseline_m / range_res_m;
         }
         apply_sync_correction(corrected, spatial.sync, delay_reference_bin, std::nullopt);
+        // Only reachable inside this `sync_enable && rows >= 3` block, so a "sync" dump exists
+        // only for CPIs where sync correction actually ran -- a "raw" file with no matching
+        // "sync" sibling is expected, not a bug, on a short/disabled-sync CPI.
+        dump_window(corrected, "sync");
       }
       spatial.current_cpi_variance = estimate_current_cpi_variance(
           corrected, &spatial.covariance_family_count,
@@ -1302,6 +1387,8 @@ void SensingEngine::process_window(CfrWindow dl_window, std::vector<CfrWindow> u
         spatial.uplink_session_id = uplink_source->session_id;
         try {
           CfrWindow ul_corrected = independent_receiver_view(*uplink_source, receiver);
+          dump_window(ul_corrected,
+              (std::string("ul") + std::to_string(ul_corrected.session_id) + "_raw").c_str());
           spatial.uplink_sync.rows = ul_corrected.rows;
           if (!config_.sync_enable || ul_corrected.rows < 3)
             throw std::runtime_error(
@@ -1336,7 +1423,8 @@ void SensingEngine::process_window(CfrWindow dl_window, std::vector<CfrWindow> u
             spatial.uplink_causal_clutter =
                 spatial_ul_clutter_filters_.at(ul_corrected.session_id)[receiver].filter(
                 ul_corrected, spatial.uplink_current_cpi_variance);
-          dump_window(ul_corrected, "ulpost");   // OFFLINE DIAGNOSTIC (same env gate as DL)
+          dump_window(ul_corrected,   // OFFLINE DIAGNOSTIC (same env gate as DL)
+              (std::string("ul") + std::to_string(ul_corrected.session_id) + "_post").c_str());
           PipelineConfig uplink_detector_config = config_;
           const double uplink_dwell_s = (ul_corrected.row_time_slots.back()
                                           - ul_corrected.row_time_slots.front())

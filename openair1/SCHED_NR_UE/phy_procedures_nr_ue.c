@@ -2315,7 +2315,7 @@ static void nr_isac_pdsch_data_aided_tap(PHY_VARS_NR_UE *ue,
   // Offset well clear of real harq_pid / 2*harq_pid+cw_idx ranges used by concurrent PDSCH decode
   // and PUSCH encode on this same nrLDPC_coding_interface, to avoid any id collision.
   nr_isac_pdsch_data_aided_submit(ue, proc, &dlsch->cw_info, dlsch_config, freq_alloc, dlsch->rnti, (uint8_t *)decoded_tb,
-                                  1000 + dlsch_config->harq_process_nbr, rxdataF, nvar);
+                                  NULL, 0, 1000 + dlsch_config->harq_process_nbr, rxdataF, nvar, NAN);
 }
 
 void pdsch_processing(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc, nr_phy_data_t *phy_data)

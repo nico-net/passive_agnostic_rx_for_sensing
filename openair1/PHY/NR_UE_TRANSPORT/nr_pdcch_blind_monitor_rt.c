@@ -67,6 +67,7 @@ bool nr_passive_rar_tc_seen(uint16_t rnti, uint32_t now_abs_slot, uint32_t windo
 #include "PHY/TOOLS/tools_defs.h"                        // allocCast2D/fourDimArray_t
 #include "PHY/NR_UE_ISAC/nr_isac.h"                      // nr_isac_submit_cfr/_enabled/_source_enabled
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.h"  // passive PDSCH decode (data-aided source)
+#include "PHY/NR_UE_TRANSPORT/nr_llr_confidence.h"        // masked DL data path: calibration stats
 #include "PHY/NR_UE_TRANSPORT/nr_passive_mac_ta.h"        // timing advance out of an overheard MAC PDU
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.h"   // deferred decode off the RT thread
 #include "PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.h"   // deferred SCAN off the RT thread
@@ -5889,9 +5890,14 @@ constdiag_done:;
                                        .dl_center_hz    = fp->dl_CarrierFreq,
                                        .pci             = fp->Nid_cell,
                                        .slots_per_frame = fp->slots_per_frame};
-          nr_isac_submit_cfr_multi(abs_slot, 0.0f, NR_ISAC_SRC_PDSCH_DMRS_BLIND, &carrier, isac_h, nof_ant,
-                                   273 * NR_NB_SC_PER_RB, isac_k, isac_l, nof_re, (float)nvar);
-          g_cfr_submits++;
+          if (out.rnti_class == NR_BLIND_RNTI_CLASS_C) {
+            nr_isac_flow_note(out.rnti, 0);
+            if (nr_isac_flow_admit(out.rnti)) {
+              nr_isac_submit_cfr_multi(abs_slot, 0.0f, NR_ISAC_SRC_PDSCH_DMRS_BLIND, &carrier, isac_h, nof_ant,
+                                       273 * NR_NB_SC_PER_RB, isac_k, isac_l, nof_re, (float)nvar);
+              g_cfr_submits++;
+            }
+          }
         }
 
         // ---- Passive data-aided PDSCH (PASSIVE_PDSCH_DATA_AIDED_HANDOVER.md Part B). Deliberately
@@ -6021,12 +6027,24 @@ constdiag_done:;
                   // The reconstruction chain the attached UE uses, unchanged -- the ONLY difference
                   // is where the verified transport block came from.
                   const uint64_t btim_t_sub = btim_on ? btim_now() : 0;
+                  const int16_t *da_llr = NULL;
+                  const uint32_t da_G = nr_pdsch_passive_last_llr(&da_llr);
                   nr_isac_pdsch_data_aided_submit(ue, proc, &dec.cw, &dlsch_pdu, &freq_alloc, out.rnti, dec.tb,
-                                                  blind_harq_tag(abs_slot, out.rnti, out.harq_pid), rxdataF_pdsch,
-                                                  (double)dec.nvar);
+                                                  da_llr, da_G, blind_harq_tag(abs_slot, out.rnti, out.harq_pid),
+                                                  rxdataF_pdsch, (double)dec.nvar, dec.snr_db);
                   btim_add(BTIM_SUBMIT, btim_t_sub);
                   g_data_submits++;
                 }
+              } else if (st == NR_PDSCH_PASSIVE_DECODE_CRC_FAIL && want_data && out.rnti_class == NR_BLIND_RNTI_CLASS_C
+                         && (!sweep_ticket.generation || sweep_ticket.settled)) {
+                /* Unsettled-hypothesis CRC failures are wrong mappings, not noise: never mask (cf. DMRS rows). */
+                const uint64_t btim_t_sub = btim_on ? btim_now() : 0;
+                const int16_t *da_llr = NULL;
+                const uint32_t da_G = nr_pdsch_passive_last_llr(&da_llr);
+                nr_isac_pdsch_data_aided_submit(ue, proc, &dec.cw, &dlsch_pdu, &freq_alloc, out.rnti, NULL, da_llr,
+                                                da_G, blind_harq_tag(abs_slot, out.rnti, out.harq_pid), rxdataF_pdsch,
+                                                (double)dec.nvar, dec.snr_db);
+                btim_add(BTIM_SUBMIT, btim_t_sub);
               }
             }
           }
@@ -6122,6 +6140,7 @@ constdiag_done:;
          (unsigned long)scanq.dropped_stale, (unsigned long)scanq.max_lag_slots,
          g_last_reject_reason ? g_last_reject_reason : "(none yet)",
          g_last_reject_rnti);
+    nr_llrconf_stats_dump();
   }
 
     /* Distinct decode-parameter census. Printed with the periodic summary rather than only at

@@ -101,6 +101,17 @@ void nr_isac_submit_cfr_multi_session(uint32_t slot_idx,
 uint32_t nr_isac_rx_channels(void);
 uint32_t nr_isac_subslot_config(uint32_t *min_re, float *min_snr_db);
 
+/** Receiver: a CFR was extracted from a decoded grant of C-RNTI `rnti` (uplink != 0 for PUSCH). */
+void nr_isac_flow_note(uint16_t rnti, int uplink);
+/** 1 when `rnti` is currently a DL+UL flow and the sensing gate is open (spec §8). */
+int nr_isac_flow_admit(uint16_t rnti);
+/** Drop the engine's partial CPI (gate close, or a recorded close replayed offline). */
+void nr_isac_request_discard(void);
+/** 1 when every accepted submission has been consumed and no CPI is being processed (offline replay). */
+int nr_isac_drained(void);
+/** Pending rows dropped by gate closes (not loss: counted apart from discarded_pending_rows). */
+uint64_t nr_isac_gate_discarded_rows(void);
+
 #ifdef __cplusplus
 }
 #endif

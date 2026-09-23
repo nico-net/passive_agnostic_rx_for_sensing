@@ -28,6 +28,7 @@
  */
 
 #include "nr_pdsch_data_aided.h"
+#include "nr_llr_confidence.h"
 
 /* Set by a DEFERRED caller to this job's monotonic absolute slot; 0 = derive from proc. */
 __thread uint64_t nr_isac_abs_slot_override = 0;
@@ -55,11 +56,16 @@ void nr_isac_pdsch_data_aided_submit(PHY_VARS_NR_UE *ue,
                                      const freq_alloc_bitmap_t *freq_alloc,
                                      uint16_t rnti,
                                      const uint8_t *tb_bytes,
+                                     const int16_t *llr,
+                                     uint32_t llr_G,
                                      uint32_t harq_pid_tag,
                                      const c16_t rxdataF[][ue->frame_parms.samples_per_slot_wCP],
-                                     double nvar)
+                                     double nvar,
+                                     float snr_db)
 {
   if (!nr_isac_enabled() || !nr_isac_source_enabled(NR_ISAC_SRC_PDSCH_DATA))
+    return;
+  if (!nr_isac_flow_admit(rnti))
     return;
 
   /* SINGLE LAYER ONLY -- and this is a correctness guard, not a scope preference.
@@ -92,44 +98,22 @@ void nr_isac_pdsch_data_aided_submit(PHY_VARS_NR_UE *ue,
 
   const NR_DL_FRAME_PARMS *fp = &ue->frame_parms;
 
-  // --- TB CRC-included payload: tb_bytes is ALREADY B = A + TB-CRC bits (16 or 24-bit, matching
-  // NR_MAX_PDSCH_TBS threshold) -- the exact same buffer format the TX-side encoder segments, so no
-  // CRC attach is needed here; the decoder already reconstructed it. ---
-  const uint32_t A = cw->TBS;
-  const unsigned int B = A + (A > NR_MAX_PDSCH_TBS ? 24 : 16);
-
-  // --- Segment into code blocks (must run again here to fill actual per-segment bytes: the decode
-  // path only sized C/K/Z/F, passing NULL/NULL for input/output). ---
-  static __thread uint8_t seg_storage[MAX_NUM_NR_DLSCH_SEGMENTS_PER_LAYER][8448];
-  static __thread uint8_t *c_segs[MAX_NUM_NR_DLSCH_SEGMENTS_PER_LAYER];
-  for (int r = 0; r < MAX_NUM_NR_DLSCH_SEGMENTS_PER_LAYER; r++)
-    c_segs[r] = seg_storage[r];
-
   nrLDPC_TB_encoding_parameters_t TB_parameters = {0};
   // Offset well clear of real harq_pid / 2*harq_pid+cw_idx ranges used by concurrent PDSCH decode
   // and PUSCH encode on this same nrLDPC_coding_interface, to avoid any id collision. The caller
   // supplies the tag so the attached and passive paths cannot collide with each other either.
   TB_parameters.harq_unique_pid = harq_pid_tag;
   TB_parameters.BG = cw->ldpcBaseGraph;
-  TB_parameters.A = A;
-  TB_parameters.Kb = nr_segmentation((unsigned char *)tb_bytes, c_segs, B, &TB_parameters.C, &TB_parameters.K,
-                                     &TB_parameters.Z, &TB_parameters.F, TB_parameters.BG);
-  if (TB_parameters.C > MAX_NUM_NR_DLSCH_SEGMENTS_PER_LAYER) {
-    LOG_W(NR_PHY, "SENSING: data-aided tap skipped -- too many segments C=%u\n", TB_parameters.C);
-    return;
-  }
-
   TB_parameters.nb_rb = freq_alloc->num_rbs;
   TB_parameters.Qm = cw->qamModOrder;
   TB_parameters.mcs = cw->mcs;
   TB_parameters.nb_layers = cw->Nl;
   TB_parameters.rv_index = cw->rv;
   TB_parameters.tbslbrm = dlsch_config->tbslbrm;
-
   const uint8_t  nb_re_dmrs = get_num_dmrs_re_per_rb(dlsch_config->dmrsConfigType, dlsch_config->n_dmrs_cdm_groups);
   const uint16_t dmrs_len   = get_num_dmrs(dlsch_config->dlDmrsSymbPos);
   TB_parameters.G = nr_get_G(freq_alloc->num_rbs, dlsch_config->number_symbols, nb_re_dmrs, dmrs_len,
-                            0 /* unav_res: PTRS/CSI-RM already excluded by the caller */, cw->qamModOrder, cw->Nl);
+                             0 /* unav_res: PTRS/CSI-RM already excluded by the caller */, cw->qamModOrder, cw->Nl);
   if (TB_parameters.G == 0)
     return;
 
@@ -138,35 +122,80 @@ void nr_isac_pdsch_data_aided_submit(PHY_VARS_NR_UE *ue,
   // i.e. on every other __thread object in this file. That made the alignment ACCIDENTAL: adding the
   // sub-slot bookkeeping arrays below shifted the layout and produced an immediate GP fault inside
   // nr_modulation's `out128[i] = ...` store. Pin it explicitly so the layout can never break it again.
+  // PACKED bits, LSB first (the encoder's output and nr_codeword_scrambling()'s input format).
   static __thread uint8_t coded_bits[(273 * 12 * 14 * 8 + 63) / 64 * 64 + 64] __attribute__((aligned(32)));
+  static __thread uint8_t keep[273 * 12 * 14];
   memset(coded_bits, 0, sizeof(coded_bits));
-  TB_parameters.output = coded_bits;
+  // nr_llr_confidence works on ONE BYTE PER BIT, the encoder on packed bits: convert through this.
+  // Heap, not __thread, for the same TLS-bloat reason as isac_h below.
+  static __thread uint8_t *bit_bytes = NULL;
+  const bool masked = (tb_bytes == NULL);
+  const bool have_llr = llr != NULL && llr_G == TB_parameters.G
+                        && (bit_bytes != NULL || (bit_bytes = malloc(273 * 12 * 14 * 8)) != NULL);
+  if (masked) {
+    float tau = 0.0f;
+    if (!have_llr || !nr_llrconf_threshold(cw->qamModOrder, &tau))
+      return; /* no calibration for this Qm yet: DM-RS only (spec §6) */
+    if (!nr_llrconf_snr_eligible(cw->qamModOrder, snr_db)) { /* P34: garbage grants keep a fixed fraction */
+      nr_llrconf_count(NR_LLRCONF_SRC_DL, NR_LLRCONF_CNT_SNR_REJECT, 1);
+      return;
+    }
+    nr_llrconf_hard(cw->qamModOrder, llr, TB_parameters.G, tau, bit_bytes, keep);
+    nr_llrconf_pack(bit_bytes, TB_parameters.G, coded_bits);
+  } else {
+    // --- TB CRC-included payload: tb_bytes is ALREADY B = A + TB-CRC bits (16 or 24-bit, matching
+    // NR_MAX_PDSCH_TBS threshold) -- the exact same buffer format the TX-side encoder segments, so no
+    // CRC attach is needed here; the decoder already reconstructed it. ---
+    const uint32_t A = cw->TBS;
+    const unsigned int B = A + (A > NR_MAX_PDSCH_TBS ? 24 : 16);
 
-  static __thread nrLDPC_segment_encoding_parameters_t segments[MAX_NUM_NR_DLSCH_SEGMENTS_PER_LAYER];
-  memset(segments, 0, sizeof(segments));
-  TB_parameters.segments = segments;
-  for (uint32_t r = 0; r < TB_parameters.C; r++) {
-    segments[r].c = c_segs[r];
-    segments[r].E = nr_get_E(TB_parameters.G, TB_parameters.C, TB_parameters.Qm, TB_parameters.nb_layers, r);
-    reset_meas(&segments[r].ts_interleave);
-    reset_meas(&segments[r].ts_rate_match);
-    reset_meas(&segments[r].ts_ldpc_encode);
-  }
+    // --- Segment into code blocks (must run again here to fill actual per-segment bytes: the decode
+    // path only sized C/K/Z/F, passing NULL/NULL for input/output). ---
+    static __thread uint8_t seg_storage[MAX_NUM_NR_DLSCH_SEGMENTS_PER_LAYER][8448];
+    static __thread uint8_t *c_segs[MAX_NUM_NR_DLSCH_SEGMENTS_PER_LAYER];
+    for (int r = 0; r < MAX_NUM_NR_DLSCH_SEGMENTS_PER_LAYER; r++)
+      c_segs[r] = seg_storage[r];
+    TB_parameters.A = A;
+    TB_parameters.Kb = nr_segmentation((unsigned char *)tb_bytes, c_segs, B, &TB_parameters.C, &TB_parameters.K,
+                                       &TB_parameters.Z, &TB_parameters.F, TB_parameters.BG);
+    if (TB_parameters.C > MAX_NUM_NR_DLSCH_SEGMENTS_PER_LAYER) {
+      LOG_W(NR_PHY, "SENSING: data-aided tap skipped -- too many segments C=%u\n", TB_parameters.C);
+      return;
+    }
+    TB_parameters.output = coded_bits;
 
-  nrLDPC_slot_encoding_parameters_t slot_parameters = {.frame = proc->frame_rx,
-                                                       .slot = proc->nr_slot_rx,
-                                                       .nb_TBs = 1,
-                                                       .threadPool = &get_nrUE_params()->Tpool,
-                                                       .tinput = NULL,
-                                                       .tinput_memcpy = NULL,
-                                                       .tprep = NULL,
-                                                       .tparity = NULL,
-                                                       .toutput = NULL,
-                                                       .tconcat = NULL,
-                                                       .TBs = &TB_parameters};
-  if (ue->nrLDPC_coding_interface.nrLDPC_coding_encoder(&slot_parameters) != 0) {
-    LOG_W(NR_PHY, "SENSING: data-aided LDPC re-encode failed\n");
-    return;
+    static __thread nrLDPC_segment_encoding_parameters_t segments[MAX_NUM_NR_DLSCH_SEGMENTS_PER_LAYER];
+    memset(segments, 0, sizeof(segments));
+    TB_parameters.segments = segments;
+    for (uint32_t r = 0; r < TB_parameters.C; r++) {
+      segments[r].c = c_segs[r];
+      segments[r].E = nr_get_E(TB_parameters.G, TB_parameters.C, TB_parameters.Qm, TB_parameters.nb_layers, r);
+      reset_meas(&segments[r].ts_interleave);
+      reset_meas(&segments[r].ts_rate_match);
+      reset_meas(&segments[r].ts_ldpc_encode);
+    }
+
+    nrLDPC_slot_encoding_parameters_t slot_parameters = {.frame = proc->frame_rx,
+                                                         .slot = proc->nr_slot_rx,
+                                                         .nb_TBs = 1,
+                                                         .threadPool = &get_nrUE_params()->Tpool,
+                                                         .tinput = NULL,
+                                                         .tinput_memcpy = NULL,
+                                                         .tprep = NULL,
+                                                         .tparity = NULL,
+                                                         .toutput = NULL,
+                                                         .tconcat = NULL,
+                                                         .TBs = &TB_parameters};
+    if (ue->nrLDPC_coding_interface.nrLDPC_coding_encoder(&slot_parameters) != 0) {
+      LOG_W(NR_PHY, "SENSING: data-aided LDPC re-encode failed\n");
+      return;
+    }
+    if (have_llr) { /* CRC-OK grant: this IS the calibration ground truth */
+      nr_llrconf_unpack(coded_bits, TB_parameters.G, bit_bytes);
+      nr_llrconf_snr_observe(cw->qamModOrder, snr_db);
+      nr_llrconf_observe(cw->qamModOrder, llr, bit_bytes, TB_parameters.G);
+      nr_llrconf_agreement(cw->qamModOrder, llr, bit_bytes, TB_parameters.G);
+    }
   }
 
   // --- Scramble (same Gold-sequence XOR the gNB TX side uses) + modulate. ---
@@ -273,7 +302,10 @@ void nr_isac_pdsch_data_aided_submit(PHY_VARS_NR_UE *ue,
       int re = start_re + j;
       if (re >= fp->ofdm_symbol_size)
         re -= fp->ofdm_symbol_size;
+      const uint32_t m = mod_idx;
       const c16_t x = mod_syms[mod_idx++];
+      if (masked && !keep[m])
+        continue; /* consumed (keeps the mapping aligned), not measured: low-confidence decision */
       const float xr = (float)x.r, xi = (float)x.i;
       const float xmag2 = xr * xr + xi * xi;
       if (xmag2 < 1e-6f)
@@ -325,6 +357,11 @@ void nr_isac_pdsch_data_aided_submit(PHY_VARS_NR_UE *ue,
             dlsch_config->n_dmrs_cdm_groups, dlsch_config->dmrsConfigType);
     }
     return; // contribute nothing rather than corrupt the range profile
+  }
+  nr_llrconf_count(NR_LLRCONF_SRC_DL, masked ? NR_LLRCONF_CNT_MASKED : NR_LLRCONF_CNT_CRC_OK, 1);
+  if (masked) {
+    nr_llrconf_count(NR_LLRCONF_SRC_DL, NR_LLRCONF_CNT_RE_KEPT, nof_re);
+    nr_llrconf_count(NR_LLRCONF_SRC_DL, NR_LLRCONF_CNT_RE_OFFERED, expected_syms);
   }
 
   nr_isac_carrier_t carrier = {.nof_prb         = (uint32_t)fp->N_RB_DL,

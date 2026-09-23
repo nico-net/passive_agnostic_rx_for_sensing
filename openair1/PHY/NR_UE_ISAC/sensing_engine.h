@@ -22,6 +22,11 @@ namespace nr_isac {
 
 class SpatialDetectorExecutor;
 
+/** Engine threads leave the PHY's SCHED_FIFO class and, when NR_ISAC_CPUS="3,12,13" is set, run
+ *  only on those cores -- a std::thread created from a FIFO PHY thread inherits FIFO otherwise.
+ *  Declared here so non-engine threads (the gate watchdog in nr_isac.cc) can share it too. */
+void pin_current_thread_from_env();
+
 class SensingEngine {
 public:
   SensingEngine(PipelineConfig config, uint32_t maximum_prb, uint32_t requested_antennas);
@@ -43,6 +48,21 @@ public:
   bool submissions_drained() const {
     return consumed_submissions_.load(std::memory_order_acquire) == accepted_submissions_.load(std::memory_order_acquire);
   }
+  // Drained and no CPI in flight. A window closed by a consumed row marks itself in flight before
+  // that row counts as consumed, so this never reports idle between the two.
+  bool idle() const { return submissions_drained() && !processing_in_flight(); }
+
+  /** Gate closed: drop every pending (not yet windowed) row once the accumulation thread has
+   *  consumed everything that was already queued at request time -- a snapshot already sitting in
+   *  ready_ belongs to the still-open interval and must survive the discard, not just the ones
+   *  submitted after the request. Counted apart from discarded_pending_rows, which keeps meaning
+   *  "loss". */
+  void request_discard_pending()
+  {
+    discard_after_.store(accepted_submissions_.load(std::memory_order_acquire), std::memory_order_relaxed);
+    discard_requested_.store(true, std::memory_order_release);
+  }
+  uint64_t gate_discarded_rows() const { return gate_discarded_rows_.load(std::memory_order_relaxed); }
 
 private:
   struct Snapshot;
@@ -89,6 +109,8 @@ private:
   size_t pending_row_storage_bytes(const PendingRow& row) const;
   void make_pending_row_room(size_t incoming_bytes);
   void erase_rows(const std::vector<int64_t>& keys);
+  void discard_pending_rows();
+  void maybe_discard_pending();
   void consume(const Snapshot& snapshot);
   int64_t unwrap_submission_slot(uint32_t slot, const nr_isac_carrier_t& carrier);
   void begin_geometry(const nr_isac_carrier_t& carrier);
@@ -120,6 +142,9 @@ private:
   std::atomic<uint64_t> consumed_submissions_{0};
   std::atomic<uint64_t> discarded_pending_rows_{0};
   std::atomic<uint64_t> discarded_pending_intervals_{0};
+  std::atomic<bool> discard_requested_{false};
+  std::atomic<uint64_t> discard_after_{0};
+  std::atomic<uint64_t> gate_discarded_rows_{0};
   std::atomic<uint64_t> stale_{0};
   mutable std::mutex processing_mutex_;
   std::condition_variable processing_condition_;

@@ -365,6 +365,7 @@ bool nr_pdcch_ul_discovery_grant(const nr_pdcch_blind_ul_opts_t *fixed, uint16_t
     out->interp_hyp_class=ii;
 
     out->hyp_generation=c->generation;
+    out->hyp_settled=ii<0 ? nr_hyp_sweep_winner(&c->widths.engine)==wi : nr_hyp_sweep_winner(&c->interp.engine)==ii;
   }
 done:
   pthread_mutex_unlock(&lock);

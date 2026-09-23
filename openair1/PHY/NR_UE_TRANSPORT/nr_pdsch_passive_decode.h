@@ -109,6 +109,7 @@ typedef struct {
   fapi_nr_dl_cw_info_t cw;    ///< codeword parameters this decode derived from the grant
   uint32_t             G;     ///< coded bits available on the allocation
   uint32_t             nvar;  ///< noise variance from channel estimation (fusion weight downstream)
+  float                snr_db; ///< layer-0 DM-RS |H|^2/nvar on this path's scale; NAN if not estimated (P34 gate)
 } nr_pdsch_passive_decode_result_t;
 
 /**
