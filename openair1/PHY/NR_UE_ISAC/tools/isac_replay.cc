@@ -29,17 +29,23 @@ int main(int argc, char **argv)
 {
   std::string rows;
   bool realtime = false;
+  double rate = 1.0; // --rate X: pace at X times the recorded row rate (stress)
+  int loops = 1; // --loops N: replay the file N times back to back, slot/time shifted (sustained run)
   std::vector<char *> args{argv[0]};
   for (int i = 1; i < argc; ++i) {
     if (!std::strcmp(argv[i], "--rows") && i + 1 < argc)
       rows = argv[++i];
     else if (!std::strcmp(argv[i], "--realtime"))
       realtime = true;
+    else if (!std::strcmp(argv[i], "--rate") && i + 1 < argc)
+      rate = std::atof(argv[++i]);
+    else if (!std::strcmp(argv[i], "--loops") && i + 1 < argc)
+      loops = std::atoi(argv[++i]);
     else
       args.push_back(argv[i]);
   }
-  if (rows.empty()) {
-    std::fprintf(stderr, "usage: isac_replay -O <ue.conf> --rows <cfr_rows.bin> [--realtime]\n");
+  if (rows.empty() || !(rate > 0.0) || loops < 1) {
+    std::fprintf(stderr, "usage: isac_replay -O <ue.conf> --rows <cfr_rows.bin> [--realtime [--rate X]] [--loops N]\n");
     return 2;
   }
   if (!(uniqCfg = load_configmodule((int)args.size(), args.data(), 0))) {
@@ -63,6 +69,11 @@ int main(int argc, char **argv)
   std::vector<uint32_t> k, l;
   uint64_t n_rows = 0, n_close = 0, first_t = 0, last_t = 0;
   int rc = 0;
+  // Loop i shifts every record by i*(span + 100 slots) in both the slot clock and mono time, so the
+  // engine sees one continuous stream (the SFN wraps as it would live).
+  int loop = 0;
+  uint64_t span_ns = 0, slot_ns = 0;
+  int64_t span_slots = 0, prev_slot = -1;
   for (;;) {
     char magic[4];
     uint32_t kind, slot, prb, scs, ant, re;
@@ -70,7 +81,12 @@ int main(int argc, char **argv)
     int32_t source;
     uint64_t fc, session, t;
     uint16_t pci, spf;
-    if (std::fread(magic, 1, 4, f) != 4) break;
+    if (std::fread(magic, 1, 4, f) != 4) {
+      if (++loop >= loops || !slot_ns) break;
+      if (loop == 1) span_ns = last_t - first_t;
+      std::rewind(f);
+      continue;
+    }
     if (std::memcmp(magic, "CFR1", 4)) {
       std::fprintf(stderr, "bad record magic after %llu rows\n", (unsigned long long)n_rows);
       rc = 4;
@@ -93,10 +109,20 @@ int main(int argc, char **argv)
       rc = 4;
       break;
     }
+    if (kind == 0 && spf) {
+      const int64_t cycle = (int64_t)spf * 1024;
+      if (!slot_ns) slot_ns = 10000000ULL / spf;
+      if (loop == 0) {
+        if (prev_slot >= 0) span_slots += (((int64_t)slot - prev_slot) % cycle + cycle) % cycle;
+        prev_slot = slot;
+      }
+      slot = (uint32_t)(((int64_t)slot + loop * (span_slots + 100)) % cycle);
+    }
+    t += loop * (span_ns + 100 * slot_ns);
     if (!n_rows && !n_close) first_t = t;
     last_t = t;
     if (realtime)
-      std::this_thread::sleep_until(started + std::chrono::nanoseconds(t - first_t));
+      std::this_thread::sleep_until(started + std::chrono::nanoseconds((uint64_t)((t - first_t) / rate)));
     if (kind == 1) {
       nr_isac_request_discard();
       ++n_close;

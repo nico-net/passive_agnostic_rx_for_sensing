@@ -5,8 +5,8 @@
 #  2. isac_replay_rt --realtime (production engine, paced at the recorded timestamps): real time --
 #     per-CPI processing p95 < the 75 ms CPI period, no shed work, zero loss, and the same CPIs as 1.
 set -euo pipefail
-BUILD=${BUILD:?set BUILD to the sensing build dir}; T=$(cd "$(dirname "$0")" && pwd); O=/tmp/isac_synth
-CONF=$T/../../../../tests/passive_rx/ota/sensing_synth.conf   # report_path = $O/reports.jsonl
+BUILD=${BUILD:?set BUILD to the sensing build dir}; T=$(cd "$(dirname "$0")" && pwd); O=${O:-/tmp/isac_synth}
+CONF=${CONF:-$T/../../../../tests/passive_rx/ota/sensing_synth.conf}   # its report_path must be $O/reports.jsonl
 rm -rf $O/reports*.jsonl $O/rec; mkdir -p $O/rec
 # A target < 1 range bin from the direct path (the generator default on this survey) is untestable.
 python3 $T/make_synthetic_rows.py --survey $T/survey_synth.json --out $O/rows.bin --seconds 12 --gap 5 8 \
