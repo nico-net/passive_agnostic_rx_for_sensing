@@ -1,4 +1,4 @@
-import json, subprocess, sys, tempfile, pathlib
+import json, re, subprocess, sys, tempfile, pathlib
 HERE = pathlib.Path(__file__).parent
 CONF = 'uicc0 = { imsi = "0"; };\nsensing = {\n  enable = 1;\n  tx_pos_x = 0.0;\n};\n'
 
@@ -18,9 +18,14 @@ def test_good():
         assert g["transmitter_position_m"] == [120, 80, 25] and g["receiver_positions_m"]["rx3"] == [40, 40, 6]
         conf = (d / "o.conf").read_text()
         assert 'spatial_rx_positions = "0,0,2;40,0,2;0,40,2;40,40,6";' in conf
-        assert "tx_pos_x = 120;" in conf and conf.count("tx_pos_x") == 1
-        assert 'report_path = "/x/r.jsonl";' in conf and "rvm_max_range_m = 600;" in conf
+        assert "tx_pos_x = 120.0;" in conf and conf.count("tx_pos_x") == 1
+        assert 'report_path = "/x/r.jsonl";' in conf and "rvm_max_range_m = 600.0;" in conf
         assert conf.index("spatial_rx_positions") < conf.index("};", conf.index("sensing"))
+        # regression: every real-typed key's literal must contain '.' or 'e' (libconfig
+        # types a bare integer as INT, and config_lookup_float() silently falls back to 0.0)
+        for k in ("tx_pos_x", "tx_pos_y", "tx_pos_z", "rvm_max_range_m"):
+            v = re.search(rf"{k} = (\S+);", conf).group(1)
+            assert "." in v or "e" in v.lower(), f"{k} = {v} has no decimal point"
 
 def test_colocated_rejected():
     bad = json.loads(json.dumps(GOOD)); bad["rx_antennas_m"]["ch1"] = [0.3, 0, 2]
