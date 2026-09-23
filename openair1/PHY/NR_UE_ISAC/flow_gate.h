@@ -13,15 +13,19 @@ class FlowGate {
 public:
   explicit FlowGate(double window_s) : window_s_(window_s) {}
 
-  /** Returns 1 when this event opened the gate, else 0. */
+  /** Returns 1 when this event opened the gate, else 0. Never closes the gate -- only poll() may
+   *  do that, so a fast DL-only stream landing between polls can't silently flip open_ false with
+   *  no close reported (the close would never be logged, discarded, or recorded). */
   int note(uint16_t rnti, bool uplink, double now_s)
   {
     std::lock_guard<std::mutex> lock(mutex_);
     Flow& f = flows_[rnti];
     (uplink ? f.last_ul_s : f.last_dl_s) = now_s;
-    const bool was_open = open_;
-    open_ = any_flow(now_s);
-    return (!was_open && open_) ? 1 : 0;
+    if (!open_ && is_flow(f, now_s)) {
+      open_ = true;
+      return 1;
+    }
+    return 0;
   }
 
   bool admit(uint16_t rnti, double now_s) const

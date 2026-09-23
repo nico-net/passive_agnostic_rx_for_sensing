@@ -190,10 +190,15 @@ int environment_bool(const char* name, int fallback)
 
 namespace {
 double monotonic_s(){timespec ts;clock_gettime(CLOCK_MONOTONIC,&ts);return ts.tv_sec+1e-9*ts.tv_nsec;}
-nr_isac::FlowGate flow_gate(2.0);
+// Fix round 1 (P20): a normal static object is destroyed during static destruction, which runs
+// even on an exit() path that skips nr_isac_stop() (see exit_function's non-assert path). A
+// joinable std::thread's destructor calls std::terminate, and the FlowGate could be freed while
+// the (still-running) watchdog thread is using it. Heap-allocate both so neither is ever
+// destroyed by the runtime; nr_isac_stop() is the only place that joins/deletes the thread.
+nr_isac::FlowGate& flow_gate = *new nr_isac::FlowGate(2.0);
 std::atomic<uint64_t> gate_admitted{0},gate_rejected{0};
 std::atomic<bool> gate_watchdog_run{false};
-std::thread gate_watchdog;
+std::thread* gate_watchdog = nullptr;
 }
 
 extern "C" void nr_isac_flow_note(uint16_t rnti,int uplink)
@@ -383,7 +388,8 @@ extern "C" void nr_isac_start(void)
     return;
   }
   gate_watchdog_run.store(true);
-  gate_watchdog = std::thread([] {
+  gate_watchdog = new std::thread([] {
+    nr_isac::pin_current_thread_from_env();
     double last_stats = monotonic_s();
     while (gate_watchdog_run.load()) {
       std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -391,7 +397,7 @@ extern "C" void nr_isac_start(void)
       if (flow_gate.poll(now) < 0) {
         LOG_I(PHY, "SENSING_GATE close reason=no_dl_ul_flow_for_2s\n");
         nr_isac_request_discard();
-        nr_isac_record_gate_close(); // Task 10; until then define it as an empty static function
+        nr_isac_record_gate_close();
       }
       if (now - last_stats >= 10.0) {
         last_stats = now;
@@ -405,7 +411,11 @@ extern "C" void nr_isac_start(void)
 extern "C" void nr_isac_stop(void)
 {
   gate_watchdog_run.store(false);
-  if (gate_watchdog.joinable()) gate_watchdog.join();
+  if (gate_watchdog) {
+    gate_watchdog->join();
+    delete gate_watchdog;
+    gate_watchdog = nullptr;
+  }
   if (engine && started.exchange(false)) engine->stop();
 }
 extern "C" int nr_isac_enabled(void){return enabled.load(std::memory_order_relaxed);}

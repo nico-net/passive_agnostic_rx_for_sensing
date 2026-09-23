@@ -22,6 +22,11 @@ namespace nr_isac {
 
 class SpatialDetectorExecutor;
 
+/** Engine threads leave the PHY's SCHED_FIFO class and, when NR_ISAC_CPUS="3,12,13" is set, run
+ *  only on those cores -- a std::thread created from a FIFO PHY thread inherits FIFO otherwise.
+ *  Declared here so non-engine threads (the gate watchdog in nr_isac.cc) can share it too. */
+void pin_current_thread_from_env();
+
 class SensingEngine {
 public:
   SensingEngine(PipelineConfig config, uint32_t maximum_prb, uint32_t requested_antennas);
@@ -44,9 +49,16 @@ public:
     return consumed_submissions_.load(std::memory_order_acquire) == accepted_submissions_.load(std::memory_order_acquire);
   }
 
-  /** Gate closed: drop every pending (not yet windowed) row before the next submission is consumed.
-   *  Counted apart from discarded_pending_rows, which keeps meaning "loss". */
-  void request_discard_pending() { discard_requested_.store(true, std::memory_order_release); }
+  /** Gate closed: drop every pending (not yet windowed) row once the accumulation thread has
+   *  consumed everything that was already queued at request time -- a snapshot already sitting in
+   *  ready_ belongs to the still-open interval and must survive the discard, not just the ones
+   *  submitted after the request. Counted apart from discarded_pending_rows, which keeps meaning
+   *  "loss". */
+  void request_discard_pending()
+  {
+    discard_after_.store(accepted_submissions_.load(std::memory_order_acquire), std::memory_order_relaxed);
+    discard_requested_.store(true, std::memory_order_release);
+  }
   uint64_t gate_discarded_rows() const { return gate_discarded_rows_.load(std::memory_order_relaxed); }
 
 private:
@@ -95,6 +107,7 @@ private:
   void make_pending_row_room(size_t incoming_bytes);
   void erase_rows(const std::vector<int64_t>& keys);
   void discard_pending_rows();
+  void maybe_discard_pending();
   void consume(const Snapshot& snapshot);
   int64_t unwrap_submission_slot(uint32_t slot, const nr_isac_carrier_t& carrier);
   void begin_geometry(const nr_isac_carrier_t& carrier);
@@ -127,6 +140,7 @@ private:
   std::atomic<uint64_t> discarded_pending_rows_{0};
   std::atomic<uint64_t> discarded_pending_intervals_{0};
   std::atomic<bool> discard_requested_{false};
+  std::atomic<uint64_t> discard_after_{0};
   std::atomic<uint64_t> gate_discarded_rows_{0};
   std::atomic<uint64_t> stale_{0};
   mutable std::mutex processing_mutex_;

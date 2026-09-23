@@ -17,6 +17,7 @@
 #endif
 
 #include <algorithm>
+#include <cerrno>
 #include <chrono>
 #include <cmath>
 #include <exception>
@@ -182,14 +183,35 @@ void cap_reported_covariance(Matrix& covariance, const Axes& axes)
  *  only on those cores -- a std::thread created from a FIFO PHY thread inherits FIFO otherwise. */
 void pin_current_thread_from_env()
 {
+  // Fix round 1 (P20): std::stoi throws std::invalid_argument/out_of_range on a garbage or
+  // out-of-range NR_ISAC_CPUS token, and an uncaught exception at the top of an engine thread is
+  // std::terminate -- the whole UE process aborts. Parse by hand instead; never throw.
+  static std::atomic<bool> warned{false};
   sched_param sp{}; sp.sched_priority = 0;
-  pthread_setschedparam(pthread_self(), SCHED_OTHER, &sp);
+  if (pthread_setschedparam(pthread_self(), SCHED_OTHER, &sp) != 0 && !warned.exchange(true))
+    std::fprintf(stderr, "SENSING: pthread_setschedparam(SCHED_OTHER) failed for an engine thread\n");
   const char* cpus = std::getenv("NR_ISAC_CPUS");
   if (!cpus || !*cpus) return;
   cpu_set_t set; CPU_ZERO(&set);
+  bool any = false;
   std::stringstream s(cpus); std::string tok;
-  while (std::getline(s, tok, ',')) if (!tok.empty()) CPU_SET(std::stoi(tok), &set);
-  pthread_setaffinity_np(pthread_self(), sizeof(set), &set);
+  while (std::getline(s, tok, ',')) {
+    if (tok.empty()) continue;
+    errno = 0;
+    char* end = nullptr;
+    const long cpu = std::strtol(tok.c_str(), &end, 10);
+    if (end == tok.c_str() || *end != '\0' || errno == ERANGE || cpu < 0 || cpu >= CPU_SETSIZE) {
+      if (!warned.exchange(true))
+        std::fprintf(stderr,
+                     "SENSING: NR_ISAC_CPUS token '%s' is not a valid core id (0..%d); ignored\n",
+                     tok.c_str(), CPU_SETSIZE - 1);
+      continue;
+    }
+    CPU_SET(static_cast<int>(cpu), &set);
+    any = true;
+  }
+  if (any && pthread_setaffinity_np(pthread_self(), sizeof(set), &set) != 0 && !warned.exchange(true))
+    std::fprintf(stderr, "SENSING: pthread_setaffinity_np failed for an engine thread\n");
 }
 
 struct SpatialReceiverProduct {
@@ -601,18 +623,36 @@ void SensingEngine::submit(uint32_t slot, float fraction, nr_isac_source_t sourc
   ready_.push(value);
 }
 
+// Single-threaded on the accumulation thread only (the watchdog thread that calls
+// request_discard_pending() never touches rows_/active_plan_ directly). A snapshot already sitting
+// in ready_ at request time was accepted while the gate was still open, so the discard must wait
+// until the accumulation thread has actually consumed it -- discarding immediately would erase rows
+// belonging to that still-open interval, not just the stale ones the close is meant to drop.
+void SensingEngine::maybe_discard_pending()
+{
+  if (!discard_requested_.load(std::memory_order_acquire)) return;
+  if (consumed_submissions_.load(std::memory_order_relaxed) < discard_after_.load(std::memory_order_relaxed))
+    return;
+  discard_requested_.store(false, std::memory_order_relaxed);
+  discard_pending_rows();
+}
+
 void SensingEngine::accumulation_run()
 {
   pin_current_thread_from_env();
+  maybe_discard_pending();
   for (;;) {
     Snapshot* value = ready_.wait_pop();
     if (!value) break;
-    if (discard_requested_.exchange(false, std::memory_order_acq_rel)) discard_pending_rows();
     try { consume(*value); }
     catch (const std::exception& e) { std::fprintf(stderr, "SENSING: dropped CFR occurrence: %s\n", e.what()); }
     value->cfr.clear(); value->subcarrier.clear(); value->symbol.clear(); free_.push(value);
     consumed_submissions_.fetch_add(1, std::memory_order_release);
+    maybe_discard_pending();
   }
+  // Fix round 1 (P20): honour a discard requested right at shutdown before the final flush, or
+  // finish_pending_windows() would emit the partial CPI the close was meant to drop.
+  maybe_discard_pending();
   try { finish_pending_windows(); }
   catch (const std::exception& e) { std::fprintf(stderr, "SENSING: final window failed: %s\n", e.what()); }
   windows_.close();

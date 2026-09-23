@@ -18,6 +18,23 @@ int main() {
   require(!g.open() && !g.admit(0x4601, 12.1), "closed admits nothing");
   require(g.poll(13.0) == 0, "close reported once");
   require(g.note(0x4601, false, 20.0) == 0 && g.note(0x4601, true, 20.1) == 1, "re-opens");
+
+  // Fix round 1 (P20, Critical): a fast DL-only stream must never let note() itself close the
+  // gate. Seed a flow, then note() DL only every 1 ms for 4 s (UL never returns) while polling
+  // every 100 ms: exactly one poll() must report the close, no note() may ever report non-zero
+  // again, and admit() must read false afterward.
+  nr_isac::FlowGate g2(2.0);
+  require(g2.note(0x9001, false, 0.0) == 0, "seed DL");
+  require(g2.note(0x9001, true, 0.0) == 1, "seed UL: opens");
+  int closes = 0;
+  for (int ms = 1; ms <= 4000; ++ms) {
+    const double t = ms * 0.001;
+    require(g2.note(0x9001, false, t) == 0, "note() never itself reports a close");
+    if (ms % 100 == 0 && g2.poll(t) == -1) ++closes;
+  }
+  require(closes == 1, "exactly one poll() closed the gate");
+  require(!g2.admit(0x9001, 4.0), "admit false after close, UL never returned");
+
   std::puts("flow_gate_test: PASS");
   return 0;
 }
