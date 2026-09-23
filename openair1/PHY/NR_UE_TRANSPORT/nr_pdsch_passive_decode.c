@@ -1274,6 +1274,7 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
 {
   memset(out, 0, sizeof(*out));
   out->status = NR_PDSCH_PASSIVE_DECODE_UNSUPPORTED;
+  t_brfo_pending = false; /* the GPU path jumps past the BRANCHFO measurement */
 
   NR_DL_FRAME_PARMS *fp = &ue->frame_parms;
 
