@@ -36,11 +36,13 @@ def main():
             if math.dist(rx[i], rx[j]) < 1.0: die(f"ch{i} and ch{j} are co-located (<1 m): stage 9 needs separated receivers")
         if math.dist(rx[i], gnb) < 1.0: die(f"ch{i} co-located with the gNB")
     max_range = float(s.get("max_range_m", 0.0))
+    if max_range <= 0: die("max_range_m missing or <= 0 in survey (required by the sensing engine)")
     json.dump({"transmitter_position_m": gnb, "receiver_positions_m": {f"rx{i}": rx[i] for i in range(4)},
                "max_range_m": max_range or None}, open(a.geometry, "w"), indent=1)
     keys = {"spatial_rx_positions": '"' + ";".join(",".join(fmt(v) for v in p) for p in rx) + '"',
             "tx_pos_x": fmt_real(gnb[0]), "tx_pos_y": fmt_real(gnb[1]), "tx_pos_z": fmt_real(gnb[2])}
-    if max_range: keys["rvm_max_range_m"] = fmt_real(max_range)
+    keys["max_range_m"] = fmt_real(max_range)
+    keys["rvm_max_range_m"] = fmt_real(max_range)
     if a.report_path: keys["report_path"] = f'"{a.report_path}"'
     text = open(a.apply[0]).read()
     m = re.search(r"^\s*sensing\s*=\s*\{", text, re.M)

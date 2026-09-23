@@ -74,6 +74,11 @@ sensing = {
   // "n_consumers[:queue_depth[:core]]" -- defers the passive PUSCH decode off the PHY RX thread.
   // Thread/queue/core counts, not a cell value. Left unchanged.
   pdcch_blind_monitor_ul_thread = "2:64:2";
+  // frozen multi-RX detector contract: sionna scenarios.json detector.maximum_target_speed_mps
+  maximum_target_speed_mps = 50.0;
+  // declared false-object intensity; engine requires value*0.075 s < 1; value used by the
+  // engine's own tests -- no validated field value yet
+  false_object_intensity_per_s = 1.0;
   sources = "pdsch_dmrs_blind,pdsch_data,pusch_dmrs,pusch_data";
   cpi_slots = 32;
   interpolate = 1;

@@ -20,12 +20,18 @@ def test_good():
         assert 'spatial_rx_positions = "0,0,2;40,0,2;0,40,2;40,40,6";' in conf
         assert "tx_pos_x = 120.0;" in conf and conf.count("tx_pos_x") == 1
         assert 'report_path = "/x/r.jsonl";' in conf and "rvm_max_range_m = 600.0;" in conf
+        assert "max_range_m = 600.0;" in conf
         assert conf.index("spatial_rx_positions") < conf.index("};", conf.index("sensing"))
         # regression: every real-typed key's literal must contain '.' or 'e' (libconfig
         # types a bare integer as INT, and config_lookup_float() silently falls back to 0.0)
-        for k in ("tx_pos_x", "tx_pos_y", "tx_pos_z", "rvm_max_range_m"):
+        for k in ("tx_pos_x", "tx_pos_y", "tx_pos_z", "rvm_max_range_m", "max_range_m"):
             v = re.search(rf"{k} = (\S+);", conf).group(1)
             assert "." in v or "e" in v.lower(), f"{k} = {v} has no decimal point"
+
+def test_missing_max_range_rejected():
+    bad = json.loads(json.dumps(GOOD)); del bad["max_range_m"]
+    with tempfile.TemporaryDirectory() as d:
+        r = run(bad, pathlib.Path(d)); assert r.returncode == 2 and "max_range_m" in r.stderr
 
 def test_colocated_rejected():
     bad = json.loads(json.dumps(GOOD)); bad["rx_antennas_m"]["ch1"] = [0.3, 0, 2]
@@ -38,4 +44,5 @@ def test_missing_channel_rejected():
         r = run(bad, pathlib.Path(d)); assert r.returncode == 2 and "ch3" in r.stderr
 
 if __name__ == "__main__":
-    test_good(); test_colocated_rejected(); test_missing_channel_rejected(); print("test_survey: PASS")
+    test_good(); test_colocated_rejected(); test_missing_channel_rejected(); test_missing_max_range_rejected()
+    print("test_survey: PASS")
