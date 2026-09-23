@@ -915,7 +915,7 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
               winner.dmrs_mask, winner.mcs_table);
       if (st == NR_PDSCH_PASSIVE_DECODE_CRC_OK && !job.layout_probe) {
         atomic_fetch_add_explicit(&g_crc_ok, 1, memory_order_relaxed);
-        if (job.want_data) {
+        if (job.want_data && job.rnti_class == NR_BLIND_RNTI_CLASS_C) {
           /* Publish THIS job's monotonic slot so the CPI grid indexes it correctly. Without this the
            * submit derives the index from proc->frame_rx, which wraps at 1024 -- harmless in order,
            * fatal once several consumers submit concurrently across a wrap. */
