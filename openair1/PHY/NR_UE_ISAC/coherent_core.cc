@@ -395,9 +395,11 @@ Calibration Calibrator::update(const std::array<cd, kCh>& tap, const std::array<
   const bool ref_ok = found[0] && std::abs(tap[0]) > 0;
   const cd ref = ref_ok ? std::conj(tap[0]) / std::abs(tap[0]) : cd(1);
   // Coherence of THIS CPI's LOS taps under the PREVIOUS calibration (predicted -> not tautological).
+  // Only channels ALREADY seeded (calibrated before this CPI) count: an unseeded channel's s_ is a
+  // placeholder, not a real reference, so it cannot evidence coherence either way.
   if (init_ && ref_ok) {
     cd sum = 0; double pow_sum = 0;
-    for (uint32_t i = 0; i < kCh; ++i) if (found[i] && std::abs(tap[i]) > 0) {
+    for (uint32_t i = 0; i < kCh; ++i) if (found[i] && std::abs(tap[i]) > 0 && (i == 0 || seeded_[i])) {
       const cd unit = tap[i] * ref / std::abs(tap[i]);
       sum += unit * std::conj(s_[i]); pow_sum += 1.0;
     }
@@ -408,25 +410,46 @@ Calibration Calibrator::update(const std::array<cd, kCh>& tap, const std::array<
     if (i == 0) { s_[0] = cd(1); p_[0] = 0; continue; }
     const double r = (found[i] && ref_ok && snr[i] > 0 && snr[0] > 0) ? 1 / (2 * snr[i]) + 1 / (2 * snr[0]) : 0;
     c.jitter_bound_rad[i] = r > 0 ? std::sqrt(r) : 0;
-    if (!init_) { s_[i] = cd(1); p_[i] = M_PI * M_PI / 3; q_[i] = 0; nq_[i] = 0; }   // uniform-phase prior variance
-    const double p_pred = p_[i] + q_[i];
-    if (!(found[i] && ref_ok && r > 0)) { p_[i] = p_pred; continue; }            // predict only (no LOS)
+    const bool valid_meas = found[i] && ref_ok && r > 0;
+    if (!seeded_[i]) {
+      p_[i] = M_PI * M_PI / 3;                            // uninformative until this channel's own first measurement
+      if (!valid_meas) continue;
+      // First valid measurement for this channel: the prior is not a model prediction, so its
+      // "innovation" is not evidence about q -- seed s_/p_ directly from the measurement and skip
+      // the innovation/q update entirely (do not count it in nq_).
+      const cd z = tap[i] * ref / std::abs(tap[i]);
+      s_[i] = z; p_[i] = r; q_[i] = 0; nu2_[i] = 0; nq_[i] = 0; seeded_[i] = true;
+      continue;
+    }
+    const double p_prev = p_[i];                          // posterior BEFORE this CPI's process noise
+    const double q_use = std::max(0.0, q_[i]);             // clip only at the point of use
+    const double p_pred = p_prev + q_use;
+    if (!valid_meas) { p_[i] = p_pred; continue; }         // predict only (no LOS)
     const cd z = tap[i] * ref / std::abs(tap[i]);
-    const double nu = std::arg(z * std::conj(s_[i]));                           // wrapped innovation
+    const double nu = std::arg(z * std::conj(s_[i]));      // wrapped innovation
     const double k = p_pred / (p_pred + r);
     s_[i] *= std::polar(1.0, k * nu);
     p_[i] = (1 - k) * p_pred;
-    // covariance matching: innovation power beyond what the model predicts -> process noise
-    const double q_obs = std::max(0.0, nu * nu - (p_pred + r));
-    q_[i] = (q_[i] * nq_[i] + q_obs) / (nq_[i] + 1); ++nq_[i];
-    c.jitter_rad[i] = std::sqrt(nu * nu);
+    // Mehra-style covariance matching: the unbiased per-step estimator of the TRUE q is
+    // nu^2-(p_prev+r), against p_prev (the posterior BEFORE this CPI's q), not p_pred (which already
+    // contains the current q estimate -- subtracting p_pred feeds q's own estimate back into itself
+    // and biases it low). Accumulated WITHOUT per-sample clipping (E[max(0,X)] != max(0,E[X]); a
+    // max(0,.) on each sample biases the mean up by E[(chi^2_1-1)^+] ~ 0.48); q is clamped to >=0
+    // only where it is applied, in p_pred above.
+    const double q_obs = nu * nu - (p_prev + r);
+    q_[i] = (q_[i] * nq_[i] + q_obs) / (nq_[i] + 1);
+    nu2_[i] = (nu2_[i] * nq_[i] + nu * nu) / (nq_[i] + 1);
+    ++nq_[i];
+    c.jitter_rad[i] = std::sqrt(nu2_[i]);                  // running innovation RMS
   }
   init_ = true;
   for (uint32_t i = 0; i < kCh; ++i) {
     c.phase_rad[i] = std::arg(s_[i]); c.phase_var[i] = p_[i];
-    c.coh_factor[i] = std::exp(-0.5 * std::min(p_[i], 50.0));
+    // One-step PREDICTIVE variance (spec Sec.2): a channel whose phase is unpredictable between CPIs
+    // fades out automatically, same as a channel whose LOS tap is corrupted this CPI.
+    const double q_use_i = std::max(0.0, q_[i]);
+    c.coh_factor[i] = std::exp(-0.5 * std::min(p_[i] + q_use_i, 50.0));
   }
-  if (!init_ || c.coherent_gain <= 1.0) c.rho = std::max(0.0, c.rho);
   last_ = c;
   return c;
 }

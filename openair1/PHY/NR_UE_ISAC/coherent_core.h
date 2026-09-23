@@ -53,9 +53,13 @@ public:
   const Calibration& last() const { return last_; }
 private:
   std::array<cd,kCh> s_{};          // unit phasor state per channel (ch0 fixed at 1)
-  std::array<double,kCh> p_{};      // phase variance
-  std::array<double,kCh> q_{};      // process noise (covariance matching, cumulative mean)
-  std::array<uint32_t,kCh> nq_{};
+  std::array<double,kCh> p_{};      // posterior phase variance
+  std::array<double,kCh> q_{};      // process noise: RAW (unclipped, can go negative) cumulative mean
+                                     // of the unbiased Mehra-style estimator nu^2-(p_prev+r); clamped
+                                     // to >=0 only at the point of use, never in the accumulator.
+  std::array<double,kCh> nu2_{};    // cumulative mean of nu^2 (jitter_rad = sqrt of this)
+  std::array<uint32_t,kCh> nq_{};   // shared sample count for q_ and nu2_ (post-seeding innovations only)
+  std::array<bool,kCh> seeded_{};   // per-channel: has this channel had its own first valid measurement
   bool init_ = false;
   Calibration last_;
 };

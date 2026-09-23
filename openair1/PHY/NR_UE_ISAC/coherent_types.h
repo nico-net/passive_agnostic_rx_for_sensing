@@ -52,13 +52,17 @@ struct Axes {
 struct Calibration {
   std::array<double, kCh> phase_rad{};      // posterior per-channel phase (ch0 = 0)
   std::array<double, kCh> phase_var{};      // posterior phase variance (rad^2)
-  std::array<double, kCh> coh_factor{};     // exp(-phase_var/2)
+  std::array<double, kCh> coh_factor{};     // exp(-(phase_var + process_noise)/2): the one-step
+                                             // PREDICTIVE phase variance, so an unpredictable
+                                             // (decohering) channel fades even when its own posterior
+                                             // looks confident.
   std::array<double, kCh> los_snr{};        // linear
-  std::array<double, kCh> jitter_rad{};     // sqrt(innovation variance)
+  std::array<double, kCh> jitter_rad{};     // running innovation RMS: sqrt(cumulative mean of nu^2)
   std::array<double, kCh> jitter_bound_rad{}; // 1/sqrt(2*SNR)
   std::array<bool, kCh> los_found{};
-  double coherent_gain = 1.0;               // predicted-phase LOS coherent gain in [1,kCh]
-  double rho = 0.0;                         // (G-1)/(kCh-1) clipped to [0,1]
+  double coherent_gain = 1.0;               // predicted-phase LOS coherent gain in [0,n_used], n_used =
+                                             // channels found+updated this CPI AND already seeded
+  double rho = 0.0;                         // (G-1)/(n_used-1) clipped to [0,1]
 };
 
 struct Detection {
