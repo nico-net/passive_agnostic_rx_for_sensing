@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: OAI-Public-License-1.1 */
 /** CPU/CUDA decision-equivalence check for the native continuous-CLEAN detector. */
-#include "detector.h"
+#include "clean_detector.h"
 #include "detector_cuda.h"
 
 #include <algorithm>
@@ -73,8 +73,6 @@ int main()
   }
   try {
     PipelineConfig config;
-    config.maximum_components = 1;
-    config.maximum_objects = 1;
     config.maximum_range_m = 300.0;
     config.maximum_target_speed_mps = 50.0;
     config.capture_rvm = true;

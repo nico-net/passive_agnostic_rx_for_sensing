@@ -6,7 +6,7 @@
  * call is deliberately excluded so CUDA context, cuFFT-plan, and code-loading startup do not count
  * against steady-state stream throughput.
  */
-#include "detector.h"
+#include "clean_detector.h"
 #include "detector_cuda.h"
 #include "report_writer.h"
 #include "sync_correction.h"
@@ -114,11 +114,6 @@ int main()
     detector_cuda_warmup();
   }
   PipelineConfig config;
-  const char* configured_components = std::getenv("NR_ISAC_CUDA_BENCHMARK_COMPONENTS");
-  config.maximum_components = configured_components
-                                  ? static_cast<uint32_t>(std::strtoul(configured_components, nullptr, 10))
-                                  : 8;
-  config.maximum_objects = 8;
   config.maximum_range_m = 312.283810417;
   config.maximum_target_speed_mps = 50.0;
   config.capture_rvm = true;
@@ -128,7 +123,7 @@ int main()
     const auto started = std::chrono::steady_clock::now();
     const auto result = detect_clean(window, config);
     const auto stopped = std::chrono::steady_clock::now();
-    if (result.components.size() != config.maximum_components || result.initial_likelihood.empty()) {
+    if (result.components.empty() || result.initial_likelihood.empty()) {
       std::fprintf(stderr, "dense CUDA detector returned %zu components and %zu map cells\n",
                    result.components.size(), result.initial_likelihood.size());
       std::exit(EXIT_FAILURE);
