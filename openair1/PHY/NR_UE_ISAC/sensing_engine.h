@@ -5,6 +5,7 @@
 #include "multistatic_imm_tracker.h"
 #include "report_writer.h"
 #include "causal_clutter_filter.h"
+#include "coherent_pipeline.h"
 
 #include <atomic>
 #include <complex>
@@ -207,6 +208,8 @@ private:
   std::unique_ptr<SpatialDetectorExecutor> spatial_detector_executor_;
   mutable std::mutex tracker_mutex_;
   std::unique_ptr<ReportWriter> writer_;
+  // Coherent array fuser (coherent_enable): replaces the per-receiver stages at runtime when set.
+  std::unique_ptr<coherent::CoherentPipeline> coherent_;
 };
 
 } // namespace nr_isac

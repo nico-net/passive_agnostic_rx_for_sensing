@@ -1118,6 +1118,7 @@ set(NR_UE_ISAC_SRC
   ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/coherent_tracker.cc
   ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/coherent_autofocus.cc
   ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/coherent_ul.cc
+  ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/coherent_pipeline.cc
   )
 if(ENABLE_CHANNEL_SIM_CUDA)
   list(APPEND NR_UE_ISAC_SRC

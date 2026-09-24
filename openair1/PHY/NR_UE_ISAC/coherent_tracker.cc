@@ -183,6 +183,10 @@ const std::vector<Track>& CoherentTracker::step(double t_s, double t_cpi_s, cons
       if (t.confirmed) pd_misses_ += 1;
     }
     if (!t.confirmed && t.llr >= kConfirm) t.confirmed = true;
+    // SPRT restart convention: a confirmed track's evidence is capped at the confirm threshold, so a
+    // departed target is deleted after exactly kConfirm - kDelete of miss evidence, not after all the
+    // hits it banked (100 hits at ~+5 each would coast ~40 s).
+    if (t.confirmed) t.llr = std::min(t.llr, kConfirm);
   }
   // Snapshot assoc against PRE-erase indices (matches hungarian's `a`, whose domain is exactly
   // tracks_'s index space here, since erase()/new-track push haven't run yet), then remap those

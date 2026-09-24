@@ -153,6 +153,25 @@ int main() {
     }
   }
 
+  // Confirmed-track LLR clamp (SPRT restart convention): a target seen for 100 CPIs then gone is
+  // deleted once its miss evidence sum(-ln(1-P_D)) reaches ln((1-b)/a) - ln(b/(1-a)), not after the
+  // ~+17 per hit it banked (which would coast it for tens of seconds).
+  {
+    CoherentTracker k2(tp);
+    std::mt19937 r2(3); std::normal_distribution<double> nn(0, 0.05);
+    int k = 0;
+    for (; k < 100; ++k) k2.step(k * T, T, {det(Vec3{1 + nn(r2), 2 + nn(r2), 3 + nn(r2)}, 0.1)});
+    const double gap = std::log(0.9 / 0.01) - std::log(0.1 / 0.99);
+    double ev = 0; int misses = 0;
+    for (;; ++k) {
+      ev += -std::log(1 - k2.pd());                 // step() uses the P_D estimate from before its update
+      const auto& tr2 = k2.step(k * T, T, {}); ++misses;
+      if (ev < gap) require(tr2.size() == 1 && tr2[0].confirmed, "confirmed track kept until the derived miss evidence");
+      else { require(tr2.empty(), "departed track deleted exactly at the derived miss evidence"); break; }
+    }
+    std::printf("llr clamp: deleted after %d missed CPIs (gap %.3f, evidence %.3f)\n", misses, gap, ev);
+    require(misses <= 5, "departed target deleted within a few CPIs");
+  }
   std::puts("coherent_tracker_test: PASS");
   return 0;
 }

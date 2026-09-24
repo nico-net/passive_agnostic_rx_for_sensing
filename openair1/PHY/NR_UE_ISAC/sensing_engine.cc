@@ -545,6 +545,7 @@ SensingEngine::SensingEngine(PipelineConfig config, uint32_t maximum_prb,
     }
   }
   writer_ = std::make_unique<ReportWriter>(config_);
+  if (config_.coherent.enable) coherent_ = std::make_unique<coherent::CoherentPipeline>(config_.coherent);
 }
 
 SensingEngine::~SensingEngine() { stop(); }
@@ -616,6 +617,8 @@ void SensingEngine::stop()
   }
   if (accumulation_worker_.joinable()) accumulation_worker_.join();
   if (processing_worker_.joinable()) processing_worker_.join();
+  // After the processing worker (the only submitter) has joined: drains the coherent queue, joins its worker.
+  coherent_.reset();
   std::fprintf(stderr,
                "SENSING: engine backlog peak_pending_rows=%zu peak_pending_mib=%.1f "
                "peak_ready_queue=%zu/%zu snapshot_pool_drops=%llu stale=%llu "
@@ -1245,6 +1248,10 @@ void SensingEngine::process_window(CfrWindow dl_window, std::vector<CfrWindow> u
                                        + dl_window.row_time_slots.back());
   report.midpoint_air_time_s = (midpoint_slots - air_origin_slots)
                                * slot_duration_s(dl_window.scs_hz);
+  if (coherent_) {   // coherent fuser replaces the per-receiver stages 1-6 at runtime (nothing removed)
+    coherent_->submit(std::move(dl_window), std::move(ul_windows), sequence, report.midpoint_air_time_s);
+    return;
+  }
   if (config_.spatial_receivers.configured) {
     const auto spatial_processing_started = std::chrono::steady_clock::now();
     if (dl_window.antennas != 4
