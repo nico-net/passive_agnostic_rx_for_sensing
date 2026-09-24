@@ -227,7 +227,7 @@ void CoherentPipeline::process(Job& j)
       std::fill(dl_masked.observed.begin() + dl_masked.cell(r, 0), dl_masked.observed.begin() + dl_masked.cell(r, 0) + dl_masked.subcarriers, 0);
     dlp = &dl_masked;
   }
-  const RdResult R = cuda_ ? cuda_->range_doppler(*dlp, a, L, rs, true) : range_doppler(*dlp, a, L, rs);
+  RdResult R = cuda_ ? cuda_->range_doppler(*dlp, a, L, rs, true) : range_doppler(*dlp, a, L, rs);
   // Static-removal diagnostic, per channel, in dB over the channel's thermal noise: the direct path
   // before removal (LOS tap) and the strongest residue left at the direct path's range (bins 0-3),
   // just outside the zero-Doppler notch (up to 3 bins beyond it) and anywhere else tested.
@@ -292,6 +292,9 @@ void CoherentPipeline::process(Job& j)
   for (uint32_t i = 0; i < kCh; ++i) los_snr[i] = L.found[i] ? std::max(L.snr[i] - 1.0, 0.0) * n_rows : 0.0;
   const Calibration cal = cal_.update(R.los_tap, L.found, los_snr);
   const Grid G = envelope_grid(cfg_.volume, a);
+  // Clutter-limited CFAR in range (whiten_range_clutter), at the detector's own per-cell false-alarm budget.
+  { const std::vector<float> wg = whiten_range_clutter(R, detect_params(a, G, cfg_.false_object_intensity_per_s).pfa);
+    if (cuda_) cuda_->scale_rd(wg); }
   std::vector<Detection> D;
   std::vector<float> E;   // CPU path only; GPU path's equivalent is cuda_->last_envelope() (see below)
   // Task 10: on GPU, cuda_->detect() runs the envelope kernel on the device and then calls the SAME

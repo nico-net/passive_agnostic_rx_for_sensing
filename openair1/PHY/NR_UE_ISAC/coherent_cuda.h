@@ -58,6 +58,8 @@ public:
    * last detect() call -- so a caller building a periodic topview (coherent_pipeline.cc's own
    * monitor_period_s diagnostic) does not need a second GPU round trip. Empty before the first
    * detect() call. */
+  /** Scale the device (and cached host) RD cube by per-[ch][range] amplitude factors (whiten_range_clutter). */
+  void scale_rd(const std::vector<float>& g);
   const std::vector<float>& last_envelope() const;
 
   /** The CPU refine() (see file header) -- kept as a method so one CudaCoherent object drives the

@@ -239,6 +239,17 @@ __global__ void k_envelope(const float* mag, const float* inv_noise, const float
 
 } // namespace
 
+namespace {
+__global__ void k_scale_rd(zC* rd, const float* g, uint32_t nrange, uint32_t ndopp, size_t n)
+{
+  for (size_t j = (size_t)blockIdx.x * blockDim.x + threadIdx.x; j < n; j += (size_t)blockDim.x * gridDim.x) {
+    const float f = g[j / ndopp];            // [ch][range] factor; rd is [ch][range][dopp]
+    rd[j].x *= f; rd[j].y *= f;
+  }
+}
+
+} // namespace
+
 struct CudaCoherent::Impl {
   cudaStream_t stream = nullptr;
   cufftHandle plan = 0; long plan_nfft = -1; long plan_batch = -1;
@@ -256,7 +267,7 @@ struct CudaCoherent::Impl {
       cap = bytes;
     }
   };
-  Buf ramp, wf_off, wf_hw, wf_st, wf_B, wf_B2, mag, vbin, values, values_f, observed, span, tau, phase, stat, wsum_row, row_los, spectrum, prof_near, prof_far, ed, rd, far_rd, E;
+  Buf whiten, ramp, wf_off, wf_hw, wf_st, wf_B, wf_B2, mag, vbin, values, values_f, observed, span, tau, phase, stat, wsum_row, row_los, spectrum, prof_near, prof_far, ed, rd, far_rd, E;
   Buf ev_tested_dopp, ev_dh, ev_dopp_ok, ev_inv_noise, ev_los_found;  // detect()'s own small persistent uploads
 
   // host-side state kept across range_doppler() -> detect() within one CPI
@@ -516,6 +527,18 @@ std::vector<Detection> CudaCoherent::detect(const Grid& g, const Geometry& geo, 
   // pursuit choices; the clean parity scene has no ties). The user's rule is no accuracy loss.
   if (!std::getenv("NR_ISAC_CUDA_DETECT_GPU")) return coherent::detect(h_E, R, g, geo, p);   // CPU oracle
   return I.det.run(h_E, R, g, geo, p, I.rd.p, (const float*)I.E.p, I.stream);
+}
+
+void CudaCoherent::scale_rd(const std::vector<float>& g)
+{
+  Impl& I = *impl_;
+  if (g.size() != (size_t)I.cur_nch * I.cur_nrange || I.cur_ndopp == 0) return;
+  I.whiten.ensure(g.size() * sizeof(float));
+  cuda_check(cudaMemcpyAsync(I.whiten.p, g.data(), g.size() * sizeof(float), cudaMemcpyHostToDevice, I.stream), "H2D whiten");
+  const size_t n = (size_t)I.cur_nch * I.cur_nrange * I.cur_ndopp;
+  k_scale_rd<<<(unsigned)std::min<size_t>(65535, (n + 255) / 256), 256, 0, I.stream>>>((zC*)I.rd.p, (const float*)I.whiten.p, I.cur_nrange, I.cur_ndopp, n);
+  cuda_check(cudaStreamSynchronize(I.stream), "sync whiten");
+  for (size_t j = 0; j < I.cached.rd.v.size(); ++j) I.cached.rd.v[j] *= g[j / I.cur_ndopp];   // keep detect()'s host copy in step
 }
 
 const std::vector<float>& CudaCoherent::last_envelope() const { return impl_->last_E; }

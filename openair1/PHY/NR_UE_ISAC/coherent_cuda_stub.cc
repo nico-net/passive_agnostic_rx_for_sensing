@@ -24,6 +24,7 @@ RdResult CudaCoherent::range_doppler(const CfrWindow&, const Axes&, const LosEst
 std::vector<Detection> CudaCoherent::detect(const Grid&, const Geometry&, const DetectParams&, std::vector<float>*)
 { throw std::runtime_error("coherent CUDA path was not compiled"); }
 
+void CudaCoherent::scale_rd(const std::vector<float>&) {}
 const std::vector<float>& CudaCoherent::last_envelope() const
 { static const std::vector<float> empty; return empty; }
 
