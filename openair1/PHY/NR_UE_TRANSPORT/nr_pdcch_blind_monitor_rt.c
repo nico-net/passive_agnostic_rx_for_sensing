@@ -89,6 +89,7 @@ extern _Atomic long nr_ue_diag_producer_absolute_slot;
 #include "common/utils/threadPool/task_ans.h"             // task_ans_t, init/join/completed_task_ans
 #include "nr_pdcch_discovery_replay.h"
 #include "nr_pdcch_uss_tracker.h"
+#include "nr_pdcch_joint_live.h"
 #include <stdio.h>
 #include "nr_polar_gpu.h"                                 // SWEEP GPU BATCH: nr_gpu_polar_load/decode_vec
 
@@ -2343,6 +2344,26 @@ retry_scrambling:
     data_scrambling_rnti = t->alternate_scrambling_rnti;
     used_alternate_scrambling = true;
     goto retry_scrambling;
+  }
+  /* UNKNOWN-RNTI FALLBACK (opt-in, ISAC_PDCCH_JOINT=1; NOT validated on air). Only the raw DL path: the format
+   * 1_0 / UL / extract-and-interpret branches are left exactly as they were. tmp_e is what the LAST iteration
+   * above descrambled with data_scrambling_rnti, which is what the solver's model must be told. */
+  if (!t->ok && !t->ul_scan && t->format != NR_BLIND_DCI_FORMAT_1_0 && (t->dl_auto || t->bwp_probe)
+      && nr_pdcch_joint_live_enabled()) {
+    nr_pdcch_joint_live_result_t jr;
+    if (nr_pdcch_joint_live_decode_11(tmp_e, t->L, t->dci_length, t->dmrs_scrambling_id, (int)data_scrambling_rnti,
+                                      t->rnti_min, t->rnti_max, &jr)) {
+      t->dl_raw.payload = jr.payload;
+      t->dl_raw.rnti = jr.rnti;
+      t->dl_raw.mismatched_bits = jr.mismatched_bits;
+      t->dl_raw.reject_reason = NULL;
+      t->ok = true;
+      static _Atomic unsigned s_jhit;
+      const unsigned h = atomic_fetch_add_explicit(&s_jhit, 1, memory_order_relaxed) + 1;
+      if (h <= 20 || (h % 1000) == 0)
+        LOG_A(PHY, "SENSING: JOINT_RNTI_HIT #%u rnti=0x%04x len=%u AL=%u CCE=%d mismatched_bits=%u (unknown-RNTI solve)\n",
+              h, jr.rnti, t->dci_length, t->L, t->cce, jr.mismatched_bits);
+    }
   }
   if (t->ok && used_alternate_scrambling)
     LOG_A(PHY, "SENSING: RNTI_SCRAMBLE_HIT direction=%s rnti=0x%04x len=%u AL=%u CCE=%d\n",

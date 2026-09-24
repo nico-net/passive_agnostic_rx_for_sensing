@@ -61,6 +61,18 @@ typedef struct nr_pdcch_joint_model nr_pdcch_joint_model_t;
  * not affine, or if the unknowns are not all observable (rank < A+16). */
 nr_pdcch_joint_model_t *nr_pdcch_joint_model_new(nr_pdcch_joint_encode_fn enc, void *ctx, int A, int E,
                                                  uint16_t n_id, int scramble_with_rnti);
+/* Same, for LLRs that a receiver ALREADY descrambled with n_RNTI = pre_descrambled_rnti (the live worker
+ * always descrambles once with its configured scrambling RNTI, usually 0, before decoding): the model then
+ * predicts that partially-descrambled observation. -1 = the LLRs are raw (no descrambling applied). */
+nr_pdcch_joint_model_t *nr_pdcch_joint_model_new_ex(nr_pdcch_joint_encode_fn enc, void *ctx, int A, int E,
+                                                    uint16_t n_id, int scramble_with_rnti, int pre_descrambled_rnti);
+
+/* Cheap O(E) SCALE-FREE screen run before the solver, because almost every PDCCH candidate is empty and a
+ * solve costs 20-160 us. r = (mean|l|)^2 / mean(l^2) is 2/pi for zero-mean Gaussian noise and tends to 1 for a
+ * decodable signal; under noise sd(r) = 0.339/sqrt(E) (delta method, checked by Monte Carlo in the tests), so the
+ * bar is 2/pi + 3.09*0.339/sqrt(E) (one-sided 1e-3). Costs sensitivity: a candidate below roughly 3-4 dB Es/N0 is
+ * screened out even though the solver could have decoded it. Returns 1 to pass. */
+int nr_pdcch_joint_prescreen(const int16_t *llr, int E);
 void nr_pdcch_joint_model_free(nr_pdcch_joint_model_t *m);
 int nr_pdcch_joint_model_unknowns(const nr_pdcch_joint_model_t *m); /* A + 16 */
 
@@ -70,6 +82,7 @@ typedef struct {
   double corr;        /* agreement of the winner with the observation on the redundancy positions, [-1,1] */
   double threshold;   /* acceptance bar for corr derived from the observation and the candidate count */
   int n_candidates;   /* candidates examined */
+  int mismatched_bits; /* observations whose sign disagrees with the winner (0 = a clean codeword) */
   int accepted;       /* corr >= threshold */
 } nr_pdcch_joint_result_t;
 

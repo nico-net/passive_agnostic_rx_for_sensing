@@ -21,7 +21,7 @@ static inline int v_zero(v128 a) { return (a.w[0] | a.w[1]) == 0; }
 static inline int v_lowbit(v128 a) { return a.w[0] ? __builtin_ctzll(a.w[0]) : 64 + __builtin_ctzll(a.w[1]); }
 
 struct nr_pdcch_joint_model {
-  int A, E, K, swr;
+  int A, E, K, swr, pre; /* pre: n_RNTI the input LLRs were already descrambled with, -1 = none */
   uint16_t nid;
   v128 *rows;    /* rows[i] = which unknowns coded bit i depends on */
   uint8_t *base; /* scrambled coded bits for the all-zero unknowns */
@@ -57,6 +57,11 @@ static int joint_eval(const nr_pdcch_joint_model_t *m, uint64_t payload, uint16_
   gold_seq((uint32_t)((((uint64_t)nrnti << 16) + m->nid) % (1ULL << 31)), m->E, seq);
   for (int i = 0; i < m->E; i++)
     out[i] ^= seq[i];
+  if (m->pre >= 0) { /* the receiver already removed the sequence for n_RNTI = pre; the residue is g(rnti) ^ g(pre) */
+    gold_seq((uint32_t)((((uint64_t)m->pre << 16) + m->nid) % (1ULL << 31)), m->E, seq);
+    for (int i = 0; i < m->E; i++)
+      out[i] ^= seq[i];
+  }
   return 0;
 }
 
@@ -81,12 +86,18 @@ void nr_pdcch_joint_model_free(nr_pdcch_joint_model_t *m)
 nr_pdcch_joint_model_t *nr_pdcch_joint_model_new(nr_pdcch_joint_encode_fn enc, void *ctx, int A, int E,
                                                  uint16_t n_id, int scramble_with_rnti)
 {
+  return nr_pdcch_joint_model_new_ex(enc, ctx, A, E, n_id, scramble_with_rnti, -1);
+}
+
+nr_pdcch_joint_model_t *nr_pdcch_joint_model_new_ex(nr_pdcch_joint_encode_fn enc, void *ctx, int A, int E,
+                                                    uint16_t n_id, int scramble_with_rnti, int pre_descrambled_rnti)
+{
   if (!enc || A < 1 || A > NR_PDCCH_JOINT_MAX_A || E < A + 16 || E > NR_PDCCH_JOINT_MAX_E)
     return NULL;
   nr_pdcch_joint_model_t *m = calloc(1, sizeof(*m));
   if (!m)
     return NULL;
-  m->A = A; m->E = E; m->K = A + 16; m->nid = n_id; m->swr = scramble_with_rnti; m->enc = enc; m->ctx = ctx;
+  m->A = A; m->E = E; m->K = A + 16; m->nid = n_id; m->swr = scramble_with_rnti; m->pre = pre_descrambled_rnti; m->enc = enc; m->ctx = ctx;
   m->rows = calloc((size_t)E, sizeof(v128));
   m->base = calloc((size_t)E, 1);
   if (!m->rows || !m->base) {
@@ -242,9 +253,10 @@ int nr_pdcch_joint_solve(const nr_pdcch_joint_model_t *m, const int16_t *llr, in
   for (int i = 0; i < E; i++) {
     if (v_par(m->rows[i], x0) ^ e_get(&yb, i))
       e_flip(&d0, i);
-    for (int t = 0; t < K; t++)
-      if (v_par(m->rows[i], colInv[t]))
-        e_flip(&T[t], i);
+    if (order >= 1) /* the flip tables are the dominant cost and only orders 1/2 use them */
+      for (int t = 0; t < K; t++)
+        if (v_par(m->rows[i], colInv[t]))
+          e_flip(&T[t], i);
   }
   uint8_t inI[NR_PDCCH_JOINT_MAX_E] = {0};
   for (int t = 0; t < K; t++)
@@ -305,6 +317,14 @@ int nr_pdcch_joint_solve(const nr_pdcch_joint_model_t *m, const int16_t *llr, in
       rn |= (uint16_t)(1u << b);
   out->rnti = rn;
 
+  {
+    ebits d = d0;
+    if (bt >= 0) for (int q = 0; q < EW; q++) d.w[q] ^= T[bt].w[q];
+    if (bu >= 0) for (int q = 0; q < EW; q++) d.w[q] ^= T[bu].w[q];
+    int mm = 0;
+    for (int q = 0; q < EW; q++) mm += __builtin_popcountll(d.w[q]);
+    out->mismatched_bits = mm;
+  }
   out->n_candidates = ncand;
   if (WO > 0.0) {
     out->corr = 1.0 - 2.0 * bestDO / WO;
@@ -313,4 +333,18 @@ int nr_pdcch_joint_solve(const nr_pdcch_joint_model_t *m, const int16_t *llr, in
     out->accepted = out->corr >= out->threshold;
   }
   return out->accepted;
+}
+
+int nr_pdcch_joint_prescreen(const int16_t *llr, int E)
+{
+  double a = 0.0, b = 0.0;
+  for (int i = 0; i < E; i++) {
+    const double v = fabs((double)llr[i]);
+    a += v;
+    b += v * v;
+  }
+  if (b <= 0.0)
+    return 0;
+  const double r = (a * a) / ((double)E * b);
+  return r >= 2.0 / M_PI + 3.09 * 0.339 / sqrt((double)E);
 }

@@ -286,6 +286,69 @@ TEST(JointSolve, AllZeroLlrsAreNeverAccepted)
   nr_pdcch_joint_model_free(m);
 }
 
+// The live worker always removes the n_RNTI = (its configured scrambling RNTI, usually 0) sequence before
+// decoding, so the solver must handle input that is ALREADY partially descrambled.
+TEST(JointSolve, HandlesLlrsAlreadyDescrambledWithAnotherRnti)
+{
+  std::mt19937 rng(29);
+  const int A = 47, L = 2;
+  EncCtx c{A, L};
+  const int E = EncLen(A, L);
+  for (int pre : {0, 0x4601}) {
+    auto* m = nr_pdcch_joint_model_new_ex(RealEncode, &c, A, E, 578, 1, pre);
+    ASSERT_NE(m, nullptr);
+    for (int t = 0; t < 60; t++) {
+      const uint64_t pl = ((uint64_t)rng() << 32 | rng()) & Mask(A);
+      const uint16_t rn = (uint16_t)rng();
+      auto llr = Channel(TxBits(pl, rn, 578, A, L, true), 40.0, rng);
+      auto g = RefScramble((uint32_t)pre, 578, E);
+      for (int i = 0; i < E; i++) if (g[i]) llr[i] = (int16_t)-llr[i];
+      nr_pdcch_joint_result_t r;
+      ASSERT_EQ(nr_pdcch_joint_solve(m, llr.data(), 0, &r), 1) << "pre=" << pre;
+      EXPECT_EQ(r.rnti, rn);
+      EXPECT_EQ(r.payload, pl);
+      EXPECT_EQ(r.mismatched_bits, 0);
+    }
+    nr_pdcch_joint_model_free(m);
+  }
+}
+
+TEST(JointSolve, PrescreenMatchesItsDerivationAndKeepsSolvableCandidates)
+{
+  std::mt19937 rng(31);
+  std::normal_distribution<double> nz(0.0, 500.0); // large scale + rounding: int16 truncation at a small sigma biases |l|
+  for (int L : {1, 2, 4}) {
+    const int A = 47, E = EncLen(A, L);
+    const int N = 100000;
+    int pass = 0;
+    double sum = 0, sum2 = 0;
+    for (int t = 0; t < N; t++) {
+      std::vector<int16_t> l(E);
+      double a = 0, b = 0;
+      for (auto& v : l) { v = (int16_t)std::lround(nz(rng)); a += std::fabs((double)v); b += (double)v * v; }
+      const double r = a * a / ((double)E * b);
+      sum += r; sum2 += r * r;
+      pass += nr_pdcch_joint_prescreen(l.data(), E);
+    }
+    const double mean = sum / N, sd = std::sqrt(sum2 / N - mean * mean);
+    printf("[prescreen] AL%d noise: mean r=%.4f (2/pi=%.4f) sd=%.4f (derived %.4f) pass rate %.2e (design 1e-3)\n", L,
+           mean, 2.0 / M_PI, sd, 0.339 / std::sqrt((double)E), (double)pass / N);
+    EXPECT_NEAR(mean, 2.0 / M_PI, 0.5 / E); // a ratio of sample means has an O(1/E) bias (measured ~0.36/E), not a formula error
+    EXPECT_NEAR(sd, 0.339 / std::sqrt((double)E), 0.08 * 0.339 / std::sqrt((double)E));
+    EXPECT_LE((double)pass / N, 3e-3);
+    for (double snr : {2.0, 4.0, 6.0, 8.0}) {
+      int kept = 0;
+      const int M = 2000;
+      for (int t = 0; t < M; t++) {
+        auto llr = Channel(TxBits((uint64_t)rng() & Mask(A), (uint16_t)rng(), 2, A, L, true), snr, rng);
+        kept += nr_pdcch_joint_prescreen(llr.data(), E);
+      }
+      printf("[prescreen] AL%d Es/N0=%.0f dB: %.1f%% of true PDCCHs pass\n", L, snr, 100.0 * kept / M);
+      if (snr >= 8.0) EXPECT_GE(kept, (int)(0.97 * M));
+    }
+  }
+}
+
 int main(int argc, char** argv)
 {
   crcTableInit();
