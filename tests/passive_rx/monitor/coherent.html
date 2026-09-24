@@ -13,7 +13,11 @@ section{display:none;padding:10px}section.on{display:block}
 #scene3d{height:78vh}
 #health{padding:6px 10px;font-size:12px;color:var(--mut);border-bottom:1px solid #222;white-space:pre-wrap}
 #health b{color:var(--fg)}
+#banner{display:none;padding:14px 16px;font-size:22px;font-weight:700;text-align:center;letter-spacing:.5px}
+#banner.off{display:block;background:#8b1d1d;color:#fff}
+#banner.stale{display:block;background:#7a5a00;color:#fff}
 </style></head><body>
+<div id="banner"></div>
 <div id="health">waiting for first report…</div>
 <nav><button data-t="scene" class="on">3D scene</button><button data-t="top">Top view</button>
 <button data-t="rd">RD maps</button><button data-t="coh">Coherence</button>
@@ -158,9 +162,17 @@ function health(s){
     `last skipped_reason: ${last.skipped_reason??"—"}`;
 }
 
+function banner(s){   // traffic off / no data must be impossible to miss
+  const t=s.traffic||{}, b=$("#banner");
+  if(t.open===false){b.className="off";b.textContent="NO DL TRAFFIC — sensing paused: no detections, tracks cleared";return;}
+  if(t.age_s!=null&&t.age_s>5){b.className="stale";b.textContent=`NO DATA from the receiver for ${t.age_s.toFixed(0)} s — map is NOT live`;return;}
+  b.className="";b.textContent="";
+}
+
 async function poll(){
   try{
     const s=await (await fetch("/api/coherent",{cache:"no-store"})).json();
+    banner(s);
     scene3d(s); topview(s); rdMaps(s); coherence(s); health(s);
   }catch(e){console.log(e);}
   setTimeout(poll,500);

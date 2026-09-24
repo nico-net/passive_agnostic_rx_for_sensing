@@ -24,17 +24,24 @@ public:
   explicit CoherentPipeline(const CoherentConfig& cfg);
   ~CoherentPipeline();                      // drains the queue, joins the worker
   void submit(CfrWindow dl, std::vector<CfrWindow> ul, uint64_t sequence, double air_time_s);
+  /** DL traffic state from the flow gate (called ~1/s). On close: tracks are dropped, no detections are
+   * emitted, and a "traffic":false line is written to reports and tracks (repeated while closed, so
+   * the UI can tell "no traffic" from "no data"). Never blocks. */
+  void traffic(bool open);
   CoherentStats stats() const;
 
 private:
-  struct Job { CfrWindow dl; std::vector<CfrWindow> ul; uint64_t seq; double t; };
+  struct Job { CfrWindow dl; std::vector<CfrWindow> ul; uint64_t seq = 0; double t = 0; int kind = 0; bool traffic = true; };   // kind 1: traffic event
   void run();
   void process(Job& job);
   void write_coherence(uint64_t seq, double t, const Calibration& cal, const std::array<double, kCh>& los_delay_s, bool skipped);
   CoherentConfig cfg_;
   Calibrator cal_;
   std::array<std::vector<double>, kCh> los_resid_;   // per-channel LOS delay residual history (s)
+  TrackerParams tp_;
   std::unique_ptr<CoherentTracker> tracker_;
+  bool traffic_open_ = true;   // guarded by mu_
+  double last_t_ = 0;          // last CPI air time, for traffic events (guarded by mu_)
   std::unique_ptr<Autofocus> af_;
   std::unique_ptr<CudaCoherent> cuda_;   // Task 10: GPU range_doppler()/envelope() when available
   bool cuda_fail_closed_ = false;        // NR_ISAC_REQUIRE_CUDA=1 and no device: skip every CPI

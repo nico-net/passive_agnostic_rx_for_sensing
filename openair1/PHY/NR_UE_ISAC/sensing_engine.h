@@ -61,6 +61,8 @@ public:
    *  ready_ belongs to the still-open interval and must survive the discard, not just the ones
    *  submitted after the request. Counted apart from discarded_pending_rows, which keeps meaning
    *  "loss". */
+  /** DL traffic state from the flow gate (coherent pipeline: stop detections/tracks while off). */
+  void set_traffic(bool open);
   void request_discard_pending()
   {
     discard_after_.store(accepted_submissions_.load(std::memory_order_acquire), std::memory_order_relaxed);

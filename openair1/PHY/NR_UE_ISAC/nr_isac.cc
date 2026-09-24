@@ -456,7 +456,7 @@ extern "C" void nr_isac_start(void)
   gate_watchdog_run.store(true);
   gate_watchdog = new std::thread([] {
     nr_isac::pin_current_thread_from_env();
-    double last_stats = monotonic_s();
+    double last_stats = monotonic_s(), last_traffic = 0;
     while (gate_watchdog_run.load()) {
       std::this_thread::sleep_for(std::chrono::milliseconds(100));
       const double now = monotonic_s();
@@ -465,6 +465,7 @@ extern "C" void nr_isac_start(void)
         nr_isac_request_discard();
         nr_isac_record_gate_close();
       }
+      if (engine && now - last_traffic >= 1.0) { last_traffic = now; engine->set_traffic(flow_gate.open()); }
       if (now - last_stats >= 10.0) {
         last_stats = now;
         LOG_I(PHY, "SENSING_GATE stats open=%d admitted=%lu rejected=%lu gate_discarded_rows=%lu\n",

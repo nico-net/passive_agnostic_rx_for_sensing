@@ -60,6 +60,7 @@ CoherentPipeline::CoherentPipeline(const CoherentConfig& cfg)
   tp.false_object_intensity_per_s = cfg.false_object_intensity_per_s;
   tp.volume = cfg.volume;
   for (const Vec3& r : cfg.geometry.rx) tp.array_centroid = tp.array_centroid + r * (1.0 / kCh);
+  tp_ = tp;
   tracker_ = std::make_unique<CoherentTracker>(tp);
   // Task 10: GPU range_doppler()/envelope(); CPU find_los/row-sync/detect()'s own branch-and-bound
   // fits/refine()/tracker stay on the host either way (see coherent_cuda.h's file header).
@@ -89,6 +90,17 @@ void CoherentPipeline::submit(CfrWindow dl, std::vector<CfrWindow> ul, uint64_t 
   std::unique_lock<std::mutex> l(mu_);
   if (q_.size() >= 2) { ++st_.queue_waits; cv_.wait(l, [this] { return q_.size() < 2 || stop_; }); }   // never drop
   q_.push_back(Job{std::move(dl), std::move(ul), seq, t});
+  cv_.notify_all();
+}
+
+void CoherentPipeline::traffic(bool open)
+{
+  std::lock_guard<std::mutex> l(mu_);
+  if (open && traffic_open_) return;           // steady "on": nothing to report
+  traffic_open_ = open;
+  if (q_.size() >= 8) return;                   // never block the gate watchdog
+  Job j; j.kind = 1; j.traffic = open; j.t = last_t_;
+  q_.push_back(std::move(j));
   cv_.notify_all();
 }
 
@@ -133,6 +145,15 @@ void CoherentPipeline::write_coherence(uint64_t seq, double t, const Calibration
 
 void CoherentPipeline::process(Job& j)
 {
+  if (j.kind == 1) {                            // traffic event: no CPI
+    if (!j.traffic) tracker_ = std::make_unique<CoherentTracker>(tp_);   // stop tracks: nothing is illuminated
+    const std::string tf = j.traffic ? "true" : "false";
+    const auto wall = std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count();
+    reports_.write_line("{\"event\":\"traffic\",\"traffic\":" + tf + ",\"t\":" + jnum(j.t) + ",\"wall\":" + jnum(wall) + ",\"detections\":[]}");
+    tracks_.write_line("{\"event\":\"traffic\",\"traffic\":" + tf + ",\"t\":" + jnum(j.t) + ",\"tracks\":[]}");
+    return;
+  }
+  { std::lock_guard<std::mutex> l(mu_); last_t_ = j.t; }
   const auto t0 = clk::now();
   double tm[7] = {0};   // sync, rd, env, detect, refine, track, ul
   double tm_los = 0;    // find_los share of tm[0]
@@ -324,7 +345,7 @@ void CoherentPipeline::process(Job& j)
   const CoherentStats st = stats();
 
   std::ostringstream rep;
-  rep << "{\"cpi\":" << j.seq << ",\"t\":" << jnum(j.t) << ",\"t_cpi_s\":" << jnum(a.t_cpi_s) << ",\"b_eff_hz\":" << jnum(a.b_eff_hz)
+  rep << "{\"cpi\":" << j.seq << ",\"traffic\":true,\"wall\":" << jnum(std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count()) << ",\"t\":" << jnum(j.t) << ",\"t_cpi_s\":" << jnum(a.t_cpi_s) << ",\"b_eff_hz\":" << jnum(a.b_eff_hz)
       << ",\"range_res_m\":" << jnum(kC / a.b_eff_hz) << ",\"grid_step_m\":" << jnum(G.step) << ",\"n_voxels\":" << G.size()
       << ",\"n_dopp_tested\":" << a.tested_dopp.size() << ",\"rows\":" << j.dl.rows << ",\"gpu\":" << (cuda_ ? "true" : "false")
       << ",\"lambda_m\":" << jnum(a.lambda_m) << ",\"dopp_step_hz\":" << jnum(a.dopp_step_hz) << ",\"notch_half_bins\":" << a.notch_half_bins << ",\"rows_bad\":" << n_bad

@@ -2076,3 +2076,7 @@ void SensingEngine::process_window(CfrWindow dl_window, std::vector<CfrWindow> u
 }
 
 } // namespace nr_isac
+
+namespace nr_isac {
+void SensingEngine::set_traffic(bool open) { if (coherent_) coherent_->traffic(open); }
+}
