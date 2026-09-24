@@ -48,18 +48,20 @@ public:
   RdResult range_doppler(const CfrWindow& w, const Axes& a, const LosEstimate& L, const RowSync& s, bool download_rd);
 
   /** Envelope (incl. per-channel Doppler sliding-window max) on the device, over the RD cube from the
-   * last range_doppler() call; downloads E and calls the CPU detect() on it unchanged (see file
-   * header). `topview_max`, if non-null, is left untouched -- coherent_pipeline.cc's periodic topview
-   * is already built directly from E on the host and this GPU path does not duplicate that. */
+   * last range_doppler() call; calls GpuDetect on the device-resident E directly (see file header) --
+   * the envelope is downloaded host-side (last_envelope()) ONLY when `topview_max` is non-null, since
+   * that is the one caller (coherent_pipeline.cc's periodic topview image) that needs a host copy;
+   * `topview_max` itself is left untouched, it is purely a per-call "download this CPI too" signal. */
   std::vector<Detection> detect(const Grid& g, const Geometry& geo, const DetectParams& p,
                                 std::vector<float>* topview_max);
 
-  /** The envelope E (layout [t][voxel], same as coherent_core.cc's envelope()) downloaded during the
-   * last detect() call -- so a caller building a periodic topview (coherent_pipeline.cc's own
-   * monitor_period_s diagnostic) does not need a second GPU round trip. Empty before the first
-   * detect() call. */
   /** Scale the device (and cached host) RD cube by per-[ch][range] amplitude factors (whiten_range_clutter). */
   void scale_rd(const std::vector<float>& g);
+  /** The envelope E (layout [t][voxel], same as coherent_core.cc's envelope()), from the last detect()
+   * call that was itself given a non-null `topview_max` -- so a caller building a periodic topview
+   * (coherent_pipeline.cc's own monitor_period_s diagnostic) does not need a second GPU round trip.
+   * Empty before the first such call; stale (last topview-due CPI's E, not this CPI's) between them --
+   * fine, since the only caller re-reads it exactly on the CPIs it asked for a download. */
   const std::vector<float>& last_envelope() const;
 
   /** The CPU refine() (see file header) -- kept as a method so one CudaCoherent object drives the
