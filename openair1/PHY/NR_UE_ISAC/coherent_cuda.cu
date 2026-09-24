@@ -55,7 +55,7 @@ __device__ inline double bb_hz(uint32_t k, uint32_t sc, double scs) { return ((d
 // Per (channel i, subcarrier k): mean over rows observing k of the derotated value (LOS+row-sync
 // delay/phase already applied, no static subtraction yet) -- coherent_core.cc range_doppler()'s
 // `stat[k]`/`cnt[k]`.
-__global__ void k_stat(const zC* values, const uint8_t* observed, const double* tau, const double* phase,
+__global__ void k_stat(const zC* values, const uint8_t* observed, const double* tau, const double* phase, const double* amp,
                        uint32_t rows, uint32_t sc, double scs, uint32_t nch, zC* stat)
 {
   for (size_t idx = (size_t)blockIdx.x * blockDim.x + threadIdx.x; idx < (size_t)nch * sc; idx += (size_t)blockDim.x * gridDim.x) {
@@ -66,7 +66,7 @@ __global__ void k_stat(const zC* values, const uint8_t* observed, const double* 
       if (!observed[(size_t)r * sc + k]) continue;
       const double ang = 2 * kPi * f * tau[(size_t)i * rows + r] - phase[r];
       double si, co; sincos(ang, &si, &co);
-      const zC v = values[((size_t)i * rows + r) * sc + k];
+      const zC v0 = values[((size_t)i * rows + r) * sc + k]; const zC v{v0.x * amp[r], v0.y * amp[r]};
       re += v.x * co - v.y * si; im += v.x * si + v.y * co;
       ++c;
     }
@@ -79,7 +79,7 @@ __global__ void k_stat(const zC* values, const uint8_t* observed, const double* 
 // contribution. Host divides by wsum_row[r] (channel-independent, computed on the host) and averages
 // over valid-span rows.
 __global__ void k_los_row(const zC* values, const uint8_t* observed, const int2* span, const double* tau,
-                          const double* phase, uint32_t rows, uint32_t sc, double scs, uint32_t nch, zC* row_los)
+                          const double* phase, const double* amp, uint32_t rows, uint32_t sc, double scs, uint32_t nch, zC* row_los)
 {
   // One block per (channel, row), threads stride the row's subcarriers, shared-memory tree reduce
   // (one thread per (i,r) was 256 threads serially looping ~3k FP64 sincos: ~11 ms).
@@ -97,7 +97,7 @@ __global__ void k_los_row(const zC* values, const uint8_t* observed, const int2*
       const double win = 0.5 - 0.5 * cospi(2 * u);
       const double ang = 2 * kPi * bb_hz((uint32_t)k, sc, scs) * ta - ph;
       double si, co; sincos(ang, &si, &co);
-      const zC v = values[((size_t)i * rows + r) * sc + (uint32_t)k];
+      const zC v0 = values[((size_t)i * rows + r) * sc + (uint32_t)k]; const zC v{v0.x * amp[r], v0.y * amp[r]};
       re += (v.x * co - v.y * si) * win; im += (v.x * si + v.y * co) * win;
     }
   }
@@ -114,7 +114,7 @@ __global__ void k_los_row(const zC* values, const uint8_t* observed, const int2*
 // (r,k) maps to a distinct wrapped index (n_fft = next_pow2(subcarriers) >= subcarriers, and a row's
 // k range spans < subcarriers consecutive centred indices), so this is a plain write, not atomicAdd.
 __global__ void k_build_spectrum(const zC* values, const uint8_t* observed, const int2* span, const double* tau,
-                                 const double* phase, const zC* stat, uint32_t rows, uint32_t sc, uint32_t nfft,
+                                 const double* phase, const double* amp, const zC* stat, uint32_t rows, uint32_t sc, uint32_t nfft,
                                  double scs, uint32_t nch, zC* spectrum)
 {
   for (size_t idx = (size_t)blockIdx.x * blockDim.x + threadIdx.x; idx < (size_t)nch * rows * sc; idx += (size_t)blockDim.x * gridDim.x) {
@@ -127,7 +127,7 @@ __global__ void k_build_spectrum(const zC* values, const uint8_t* observed, cons
     const double f = bb_hz(k, sc, scs);
     const double ang = 2 * kPi * f * tau[(size_t)i * rows + r] - phase[r];
     double si, co; sincos(ang, &si, &co);
-    const zC v = values[((size_t)i * rows + r) * sc + k];
+    const zC v0 = values[((size_t)i * rows + r) * sc + k]; const zC v{v0.x * amp[r], v0.y * amp[r]};
     const zC st = stat[(size_t)i * sc + k];
     double dre = (v.x * co - v.y * si) - st.x, dim = (v.x * si + v.y * co) - st.y;
     dre *= win; dim *= win;
@@ -256,7 +256,7 @@ struct CudaCoherent::Impl {
       cap = bytes;
     }
   };
-  Buf wf_off, wf_hw, wf_st, wf_B, wf_B2, mag, vbin, values, values_f, observed, span, tau, phase, stat, wsum_row, row_los, spectrum, prof_near, prof_far, ed, rd, far_rd, E;
+  Buf ramp, wf_off, wf_hw, wf_st, wf_B, wf_B2, mag, vbin, values, values_f, observed, span, tau, phase, stat, wsum_row, row_los, spectrum, prof_near, prof_far, ed, rd, far_rd, E;
   Buf ev_tested_dopp, ev_dh, ev_dopp_ok, ev_inv_noise, ev_los_found;  // detect()'s own small persistent uploads
 
   // host-side state kept across range_doppler() -> detect() within one CPI
@@ -344,11 +344,12 @@ RdResult CudaCoherent::range_doppler(const CfrWindow& w, const Axes& a, const Lo
   const auto t_up0 = std::chrono::steady_clock::now();
   if (!F.bound(w)) F.upload(w);
   const CudaFront::Meta& M = F.meta();
-  std::vector<double> h_tau((size_t)nch * rows), h_phase(rows);
+  std::vector<double> h_tau((size_t)nch * rows), h_phase(rows), h_amp(rows, 1.0);
   uint32_t cmax = 1;
   for (uint32_t r = 0; r < rows; ++r) {
     cmax = std::max(cmax, M.comb[r]);
     h_phase[r] = s.phase_rad.empty() ? 0.0 : s.phase_rad[r];
+    if (!s.amp.empty()) h_amp[r] = s.amp[r];
     for (uint32_t i = 0; i < nch; ++i) h_tau[(size_t)i * rows + r] = L.delay_s[i] + (s.delay_s.empty() ? 0.0 : s.delay_s[r]);
   }
   const long rep = (long)nfft / cmax, far0 = rep / 2 - (long)nrange / 2;
@@ -363,6 +364,7 @@ RdResult CudaCoherent::range_doppler(const CfrWindow& w, const Axes& a, const Lo
   // upload (per-row delay/phase only)
   I.tau.ensure((size_t)nch * rows * sizeof(double)); cuda_check(cudaMemcpyAsync(I.tau.p, h_tau.data(), h_tau.size() * sizeof(double), cudaMemcpyHostToDevice, I.stream), "H2D tau");
   I.phase.ensure(rows * sizeof(double)); cuda_check(cudaMemcpyAsync(I.phase.p, h_phase.data(), rows * sizeof(double), cudaMemcpyHostToDevice, I.stream), "H2D phase");
+  I.ramp.ensure(rows * sizeof(double)); cuda_check(cudaMemcpyAsync(I.ramp.p, h_amp.data(), rows * sizeof(double), cudaMemcpyHostToDevice, I.stream), "H2D amp");
   I.lap();
   I.timing.upload_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t_up0).count();
 
@@ -371,10 +373,10 @@ RdResult CudaCoherent::range_doppler(const CfrWindow& w, const Axes& a, const Lo
   auto launch = [](size_t n) { dim3 t(256), b((unsigned)std::min<size_t>(65535, (n + 255) / 256)); return std::make_pair(b, t); };
   {
     auto [b, t] = launch((size_t)nch * sc);
-    k_stat<<<b, t, 0, I.stream>>>(d_values, d_obs, (double*)I.tau.p, (double*)I.phase.p, rows, sc, w.scs_hz, nch, (zC*)I.stat.p);
+    k_stat<<<b, t, 0, I.stream>>>(d_values, d_obs, (double*)I.tau.p, (double*)I.phase.p, (double*)I.ramp.p, rows, sc, w.scs_hz, nch, (zC*)I.stat.p);
   }
   {
-    k_los_row<<<(unsigned)(nch * rows), 256, 0, I.stream>>>(d_values, d_obs, d_span, (double*)I.tau.p, (double*)I.phase.p, rows, sc, w.scs_hz, nch, (zC*)I.row_los.p);
+    k_los_row<<<(unsigned)(nch * rows), 256, 0, I.stream>>>(d_values, d_obs, d_span, (double*)I.tau.p, (double*)I.phase.p, (double*)I.ramp.p, rows, sc, w.scs_hz, nch, (zC*)I.row_los.p);
   }
   I.timing.build_ms = I.lap();
 
@@ -388,7 +390,7 @@ RdResult CudaCoherent::range_doppler(const CfrWindow& w, const Axes& a, const Lo
   cuda_check(cudaMemsetAsync(I.spectrum.p, 0, (size_t)nch * rows * nfft * sizeof(zC), I.stream), "memset spectrum");
   {
     auto [b, t] = launch((size_t)nch * rows * sc);
-    k_build_spectrum<<<b, t, 0, I.stream>>>(d_values, d_obs, d_span, (double*)I.tau.p, (double*)I.phase.p,
+    k_build_spectrum<<<b, t, 0, I.stream>>>(d_values, d_obs, d_span, (double*)I.tau.p, (double*)I.phase.p, (double*)I.ramp.p,
                                             (zC*)I.stat.p, rows, sc, nfft, w.scs_hz, nch, (zC*)I.spectrum.p);
   }
   cufft_check(cufftExecZ2Z(I.plan, (zC*)I.spectrum.p, (zC*)I.spectrum.p, CUFFT_INVERSE), "cufftExecZ2Z");

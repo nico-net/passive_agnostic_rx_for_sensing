@@ -27,6 +27,8 @@ struct LosEstimate {
 struct RowSync {
   std::vector<double> phase_rad;
   std::vector<double> delay_s;
+  std::vector<double> amp;        // per-row amplitude correction (1/|common gain|); empty = 1
+  std::vector<uint8_t> bad;       // per-row outlier flag (static residual inconsistent with the other rows); empty = none
   bool valid = false;
 };
 

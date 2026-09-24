@@ -707,6 +707,132 @@ RowSync estimate_row_sync(const CfrWindow& w, const Axes& a, const LosEstimate& 
   if (tp.empty()) return s;
   fit(tp, ph, pf, s.phase_rad);
   for (uint32_t r = 0; r < w.rows; ++r) s.phase_rad[r] += 2 * M_PI * f0 * a.row_t_s[r];
+  // Per-row common complex gain. One transmitter and one LO: after the line fits, row r's static
+  // channel is g_r * m_ik on EVERY channel i. OTA (empty room, 2026-09-24) the rows still carried
+  // 0.62 rad rms of phase and 3.5 dB rms of gain, 0.72-0.95 correlated across the 4 channels, which
+  // capped static suppression at ~15 dB; one common g_r per row took it to 0.20 rad / 1.0 dB. Fitted
+  // jointly over all channels and subcarriers (alternating LS: m from rows/g, g from m), one complex
+  // parameter per row, so a target (weak, different on each channel) barely enters it.
+  {
+    const std::vector<double> ph_line = s.phase_rad, dl_line = s.delay_s;   // restored if the per-row model is not significant
+    const uint32_t S = w.subcarriers, NR = w.rows;
+    std::vector<cd> g(NR, cd(1)), m((size_t)kCh * S);
+    auto zrow = [&](uint32_t i, uint32_t r, auto&& fn) {         // derotated row values with the line fits
+      uint32_t lo, hi; if (!row_span(w, r, &lo, &hi)) return;
+      const double tau = L.delay_s[i] + s.delay_s[r];
+      cd ph = std::polar(1.0, 2 * M_PI * baseband_hz(w, lo) * tau - s.phase_rad[r]); const cd rot = std::polar(1.0, 2 * M_PI * w.scs_hz * tau);
+      for (uint32_t k = lo; k <= hi; ++k, ph *= rot) if (w.observed[w.cell(r, k)]) fn(k, cd(w.values[w.sample(i, r, k)]) * ph);
+    };
+    for (int it = 0; it < 2; ++it) {
+      std::fill(m.begin(), m.end(), cd(0)); std::vector<double> den((size_t)kCh * S, 0.0);
+      for (uint32_t i = 0; i < kCh; ++i) if (L.found[i])
+        for (uint32_t r = 0; r < NR; ++r) zrow(i, r, [&](uint32_t k, cd z) { m[(size_t)i * S + k] += std::conj(g[r]) * z; den[(size_t)i * S + k] += std::norm(g[r]); });
+      for (size_t q = 0; q < m.size(); ++q) if (den[q] > 0) m[q] /= den[q];
+      for (uint32_t r = 0; r < NR; ++r) {
+        // Per-row common sub-sample delay first: the subcarrier-to-subcarrier phase step of
+        // conj(m) * z (the static channel's own frequency selectivity cancels in the product).
+        cd q = 0;
+        for (uint32_t i = 0; i < kCh; ++i) if (L.found[i]) {
+          uint32_t kp = UINT32_MAX; cd pp = 0;
+          zrow(i, r, [&](uint32_t k, cd z) { const cd pk = std::conj(m[(size_t)i * S + k]) * z;
+            if (kp != UINT32_MAX && k - kp == comb[r]) q += pk * std::conj(pp); kp = k; pp = pk; });
+        }
+        const double dr = (std::abs(q) > 0 && comb[r]) ? -std::arg(q) / (2 * M_PI * comb[r] * w.scs_hz) : 0.0;
+        s.delay_s[r] += dr;                                        // zrow now reads the row at its own delay
+        cd num = 0; double dd = 0;
+        for (uint32_t i = 0; i < kCh; ++i) if (L.found[i]) zrow(i, r, [&](uint32_t k, cd z) { const cd mk = m[(size_t)i * S + k]; num += std::conj(mk) * z; dd += std::norm(mk); });
+        g[r] = dd > 0 ? num / dd : cd(1);
+      }
+      cd gm = 0; double am = 0; uint32_t ng = 0;                  // keep the mean gain at 1 (the constant belongs to m)
+      for (uint32_t r = 0; r < NR; ++r) if (std::abs(g[r]) > 0) { gm += g[r] / std::abs(g[r]); am += std::abs(g[r]); ++ng; }
+      if (ng) { const cd u = std::polar(am / ng, std::arg(gm)); for (cd& v : g) if (std::abs(v) > 0) v /= u; else v = cd(1); }
+    }
+    // Significance of the per-row model (nested test): residual energy of the line fits alone (g=1, no
+    // per-row delay, static mean m0) vs with the per-row gains/delays; (RSS0 - RSS1)/sigma^2 ~ chi2 with
+    // 3 real dof per row under "no per-row effect", sigma^2 from RSS1. Kept only above the 1 % quantile
+    // (conventional): OTA it is overwhelming, on the synthetic scenes (no per-row gain) it is noise.
+    auto rss = [&](const std::vector<double>& dls, const std::vector<double>& phs, const std::vector<cd>& gg, size_t* nobs) {
+      std::vector<cd> mm((size_t)kCh * S, cd(0)); std::vector<double> dn((size_t)kCh * S, 0.0);
+      auto zr = [&](uint32_t i, uint32_t r, auto&& fn) {
+        uint32_t lo, hi; if (!row_span(w, r, &lo, &hi)) return;
+        const double tau = L.delay_s[i] + dls[r];
+        cd ph = std::polar(1.0, 2 * M_PI * baseband_hz(w, lo) * tau - phs[r]); const cd rot = std::polar(1.0, 2 * M_PI * w.scs_hz * tau);
+        for (uint32_t k = lo; k <= hi; ++k, ph *= rot) if (w.observed[w.cell(r, k)]) fn(k, cd(w.values[w.sample(i, r, k)]) * ph);
+      };
+      for (uint32_t i = 0; i < kCh; ++i) if (L.found[i]) for (uint32_t r = 0; r < NR; ++r)
+        zr(i, r, [&](uint32_t k, cd z) { mm[(size_t)i * S + k] += std::conj(gg[r]) * z; dn[(size_t)i * S + k] += std::norm(gg[r]); });
+      for (size_t q = 0; q < mm.size(); ++q) if (dn[q] > 0) mm[q] /= dn[q];
+      double e = 0; *nobs = 0;
+      for (uint32_t i = 0; i < kCh; ++i) if (L.found[i]) for (uint32_t r = 0; r < NR; ++r)
+        zr(i, r, [&](uint32_t k, cd z) { e += std::norm(z - gg[r] * mm[(size_t)i * S + k]); ++*nobs; });
+      return e;
+    };
+    size_t n0 = 0, n1 = 0;
+    const double rss0 = rss(dl_line, ph_line, std::vector<cd>(NR, cd(1)), &n0), rss1 = rss(s.delay_s, s.phase_rad, g, &n1);
+    const double dof = 3.0 * NR, resid_dof = std::max(1.0, 2.0 * n1 - 3.0 * NR - 2.0 * (double)kCh * S);
+    const bool keep = rss1 > 0 && 0.5 * (rss0 - rss1) / (rss1 / resid_dof) > gamma_upper_quantile((uint32_t)std::ceil(0.5 * dof), 0.01);
+    // Common-mode test: a transmitter/LO gain is the SAME on all channels; a strong target leaking into
+    // the static projection is not (its phase differs per antenna). Per-channel row gains g_ir from the
+    // line model; under H0 (independent per channel) T = sum_r |sum_i d_ir|^2 / mean_r sum_i |d_ir|^2,
+    // d_ir = g_ir - mean_r g_ir, is ~Gamma(NR); the per-row model needs T above its 1 % quantile too.
+    bool common = false;
+    if (keep) {
+      std::vector<cd> mm((size_t)kCh * S, cd(0)); std::vector<double> dn((size_t)kCh * S, 0.0);
+      auto zr = [&](uint32_t i, uint32_t r, auto&& fn) {
+        uint32_t lo, hi; if (!row_span(w, r, &lo, &hi)) return;
+        const double tau = L.delay_s[i] + dl_line[r];
+        cd ph = std::polar(1.0, 2 * M_PI * baseband_hz(w, lo) * tau - ph_line[r]); const cd rot = std::polar(1.0, 2 * M_PI * w.scs_hz * tau);
+        for (uint32_t k = lo; k <= hi; ++k, ph *= rot) if (w.observed[w.cell(r, k)]) fn(k, cd(w.values[w.sample(i, r, k)]) * ph);
+      };
+      for (uint32_t i = 0; i < kCh; ++i) if (L.found[i]) for (uint32_t r = 0; r < NR; ++r)
+        zr(i, r, [&](uint32_t k, cd z) { mm[(size_t)i * S + k] += z; dn[(size_t)i * S + k] += 1; });
+      for (size_t q = 0; q < mm.size(); ++q) if (dn[q] > 0) mm[q] /= dn[q];
+      std::vector<std::array<cd, kCh>> gi(NR);
+      for (uint32_t i = 0; i < kCh; ++i) if (L.found[i]) {
+        cd mean = 0; uint32_t nr = 0;
+        for (uint32_t r = 0; r < NR; ++r) {
+          cd num = 0; double den = 0;
+          zr(i, r, [&](uint32_t k, cd z) { const cd mk = mm[(size_t)i * S + k]; num += std::conj(mk) * z; den += std::norm(mk); });
+          gi[r][i] = den > 0 ? num / den : cd(0); if (den > 0) { mean += gi[r][i]; ++nr; }
+        }
+        if (nr) for (uint32_t r = 0; r < NR; ++r) gi[r][i] -= mean / (double)nr;
+      }
+      double num = 0, den = 0;
+      for (uint32_t r = 0; r < NR; ++r) {
+        cd sum = 0; double e = 0;
+        for (uint32_t i = 0; i < kCh; ++i) if (L.found[i]) { sum += gi[r][i]; e += std::norm(gi[r][i]); }
+        num += std::norm(sum); den += e;
+      }
+      common = den > 0 && num / (den / NR) > gamma_upper_quantile(NR, 0.01);
+    }
+    // Dominance: a transmitter/LO gain that matters explains the MAJORITY of what the line fits leave
+    // (OTA: 70-92 %, residual down 3-13x). A strong target leaking into the static projection can be
+    // significant and near-common-mode at extreme SNR (synthetic regular hop, 69 dB: 5 %) but never the
+    // majority -- without this the per-row gain absorbed part of that target and made a ghost.
+    const bool dominant = rss1 < 0.5 * rss0;
+    if (!keep || !common || !dominant) { s.phase_rad = ph_line; s.delay_s = dl_line; std::fill(g.begin(), g.end(), cd(1)); }
+    s.amp.assign(NR, 1.0);
+    for (uint32_t r = 0; r < NR; ++r) { s.phase_rad[r] += std::arg(g[r]); s.amp[r] = 1.0 / std::max(std::abs(g[r]), 1e-12); }
+    // Outlier rows. OTA (empty room) 10 % of rows carried 82 % of the static residual, each corrupt on 1-2
+    // channels and stronger than the static channel itself. Per channel, e_ir = |amp*z - m|^2 / |m|^2 over
+    // the row; a row whose log e is beyond the robust spread (median, MAD) at a Bonferroni 1 % normal
+    // quantile on ANY channel is dropped on all channels (keeps one row set for the waveform model).
+    s.bad.assign(NR, 0);
+    for (uint32_t i = 0; i < kCh; ++i) {
+      if (!L.found[i]) continue;
+      std::vector<double> le(NR, std::numeric_limits<double>::quiet_NaN());
+      for (uint32_t r = 0; r < NR; ++r) {
+        double num = 0, den = 0;
+        zrow(i, r, [&](uint32_t k, cd z) { const cd mk = m[(size_t)i * S + k]; num += std::norm(z / g[r] - mk); den += std::norm(mk); });
+        if (den > 0 && num > 0) le[r] = std::log(num / den);
+      }
+      std::vector<double> v; for (double x : le) if (std::isfinite(x)) v.push_back(x);
+      if (v.size() < 3) continue;
+      const double med = median(v); std::vector<double> ad; for (double x : v) ad.push_back(std::abs(x - med));
+      const double sig = 1.4826 * median(ad), zq = -normal_inverse_cdf(0.01 / v.size());
+      for (uint32_t r = 0; r < NR; ++r) if (std::isfinite(le[r]) && sig > 0 && le[r] > med + zq * sig) s.bad[r] = 1;
+    }
+  }
   s.valid = true;
   return s;
 }
@@ -732,8 +858,9 @@ RdResult range_doppler(const CfrWindow& w, const Axes& a, const LosEstimate& L, 
     // allocation hops between rows, the LOS leakage into bin m != 0 carries a row-dependent phase
     // 2*pi*q_centre(r)*m/n_fft, so it is not static in the profile domain (measured: a +350 Hz
     // LOS artifact at bin 3 beat the target on every channel). On a fixed subcarrier it IS static.
+    auto amp = [&](uint32_t r) { return s.amp.empty() ? 1.0 : s.amp[r]; };
     auto derot = [&](uint32_t r, uint32_t k) {
-      return cd(w.values[w.sample(i, r, k)]) * std::polar(1.0, 2 * M_PI * baseband_hz(w, k) * (L.delay_s[i] + s.delay_s[r]) - s.phase_rad[r]);
+      return cd(w.values[w.sample(i, r, k)]) * std::polar(amp(r), 2 * M_PI * baseband_hz(w, k) * (L.delay_s[i] + s.delay_s[r]) - s.phase_rad[r]);
     };
     std::vector<cd> stat(w.subcarriers, cd(0)); std::vector<uint32_t> cnt(w.subcarriers, 0);
     cd los = 0; uint32_t los_rows = 0;
@@ -749,8 +876,14 @@ RdResult range_doppler(const CfrWindow& w, const Axes& a, const LosEstimate& L, 
     for (uint32_t k = 0; k < w.subcarriers; ++k) if (cnt[k]) stat[k] /= (double)cnt[k];
     out.los_tap[i] = los_rows ? los / (double)los_rows : cd(0);    // bin-0 row mean, before static removal
     std::vector<std::vector<cd>> prof(w.rows), far(w.rows);
+    std::vector<cd> sr(w.subcarriers);
     for (uint32_t r = 0; r < w.rows; ++r) {
-      std::vector<cd> p = row_profile(w, a, i, r, L.delay_s[i] + s.delay_s[r], s.phase_rad[r], &stat);
+      // row_profile subtracts `sub` after its ramp on the UNSCALED values: scale the static term by
+      // 1/amp and the result by amp, so the profile is (amp * z - stat).
+      const double ar = amp(r);
+      for (uint32_t k = 0; k < w.subcarriers; ++k) sr[k] = stat[k] / ar;
+      std::vector<cd> p = row_profile(w, a, i, r, L.delay_s[i] + s.delay_s[r], s.phase_rad[r], &sr);
+      for (cd& v : p) v *= ar;
       prof[r].assign(p.begin(), p.begin() + a.n_range);
       if (far_ok) far[r].assign(p.begin() + far0, p.begin() + far0 + a.n_range);
     }
