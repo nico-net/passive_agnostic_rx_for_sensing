@@ -2348,21 +2348,22 @@ retry_scrambling:
   /* UNKNOWN-RNTI FALLBACK (opt-in, ISAC_PDCCH_JOINT=1; NOT validated on air). Only the raw DL path: the format
    * 1_0 / UL / extract-and-interpret branches are left exactly as they were. tmp_e is what the LAST iteration
    * above descrambled with data_scrambling_rnti, which is what the solver's model must be told. */
-  if (!t->ok && !t->ul_scan && t->format != NR_BLIND_DCI_FORMAT_1_0 && (t->dl_auto || t->bwp_probe)
-      && nr_pdcch_joint_live_enabled()) {
+  if (!t->ok && !t->ul_scan && t->format != NR_BLIND_DCI_FORMAT_1_0 && nr_pdcch_joint_live_enabled()) {
     nr_pdcch_joint_live_result_t jr;
     if (nr_pdcch_joint_live_decode_11(tmp_e, t->L, t->dci_length, t->dmrs_scrambling_id, (int)data_scrambling_rnti,
                                       t->rnti_min, t->rnti_max, &jr)) {
-      t->dl_raw.payload = jr.payload;
-      t->dl_raw.rnti = jr.rnti;
-      t->dl_raw.mismatched_bits = jr.mismatched_bits;
-      t->dl_raw.reject_reason = NULL;
-      t->ok = true;
+      nr_pdcch_blind_raw_result_t raw = {jr.payload, jr.rnti, jr.mismatched_bits, NULL};
+      if (t->dl_auto || t->bwp_probe) {
+        t->dl_raw = raw;
+        t->ok = true;
+      } else { /* the extract-and-interpret path: raw decode + nr_pdcch_blind_extract_11(), as blind_decode_and_extract does */
+        t->ok = nr_pdcch_blind_extract_11(&raw, t->dci_length, t->bwp_size, t->dmrs_typeA_position, t->extract_opts, &t->out);
+      }
       static _Atomic unsigned s_jhit;
       const unsigned h = atomic_fetch_add_explicit(&s_jhit, 1, memory_order_relaxed) + 1;
       if (h <= 20 || (h % 1000) == 0)
-        LOG_A(PHY, "SENSING: JOINT_RNTI_HIT #%u rnti=0x%04x len=%u AL=%u CCE=%d mismatched_bits=%u (unknown-RNTI solve)\n",
-              h, jr.rnti, t->dci_length, t->L, t->cce, jr.mismatched_bits);
+        LOG_A(PHY, "SENSING: JOINT_RNTI_HIT #%u rnti=0x%04x len=%u AL=%u CCE=%d mismatched_bits=%u path=%s ok=%d (unknown-RNTI solve)\n",
+              h, jr.rnti, t->dci_length, t->L, t->cce, jr.mismatched_bits, (t->dl_auto || t->bwp_probe) ? "raw" : "extract", (int)t->ok);
     }
   }
   /* Same fallback for the UL grant (DCI 0_1) raw path: the same solve with the opposite format-indicator admission,
