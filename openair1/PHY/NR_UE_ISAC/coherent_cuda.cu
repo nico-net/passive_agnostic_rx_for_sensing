@@ -356,7 +356,7 @@ RdResult CudaCoherent::range_doppler(const CfrWindow& w, const Axes& a, const Lo
   const bool far_ok = far0 >= 2 * (long)nrange && far0 + 2 * (long)nrange <= rep;
 
   // Doppler phasor table ed[d][r] = win_r/wsum_total * e^{-j2pi f_d t_r}, built on the device.
-  const zC* d_ed = F.ed(a);
+  const zC* d_ed = F.ed(w, a);
   const zC* d_values = F.d_values(); const uint8_t* d_obs = F.d_observed(); const int2* d_span = F.d_span(); const float* d_wsum = F.d_wsum_f();
 
   cuda_check(cudaEventRecord(I.ev0, I.stream), "cudaEventRecord");

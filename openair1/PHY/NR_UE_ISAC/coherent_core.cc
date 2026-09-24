@@ -843,7 +843,7 @@ RdResult range_doppler(const CfrWindow& w, const Axes& a, const LosEstimate& L, 
   if (!a.valid) return out;
   out.rd.v.assign((size_t)kCh * a.n_range * a.n_dopp, cf(0, 0));
   std::vector<double> win(w.rows); double wsum = 0;
-  for (uint32_t r = 0; r < w.rows; ++r) { win[r] = hann(a.row_t_s.back() > 0 ? a.row_t_s[r] / a.row_t_s.back() : 0.5); wsum += win[r]; }
+  win = slow_time_weights(w, a); for (double v : win) wsum += v;
   // Noise window: n_range bins centred half-way between the paths [0, n_range) and their first comb
   // replica at n_fft/comb, kept n_range bins clear of both; else the in-crop median (fallback).
   uint32_t cmax = 1; for (uint32_t r = 0; r < w.rows; ++r) cmax = std::max(cmax, row_comb(w, r));
@@ -863,17 +863,23 @@ RdResult range_doppler(const CfrWindow& w, const Axes& a, const LosEstimate& L, 
       return cd(w.values[w.sample(i, r, k)]) * std::polar(amp(r), 2 * M_PI * baseband_hz(w, k) * (L.delay_s[i] + s.delay_s[r]) - s.phase_rad[r]);
     };
     std::vector<cd> stat(w.subcarriers, cd(0)); std::vector<uint32_t> cnt(w.subcarriers, 0);
+    // EXPERIMENT (COH_SLOTCLASS=P): static profile per slot class (row slot index mod P).
+    static const long kP = std::getenv("COH_SLOTCLASS") ? std::atol(std::getenv("COH_SLOTCLASS")) : 0;
+    std::vector<std::vector<cd>> cst; std::vector<std::vector<uint32_t>> ccn;
+    if (kP > 1 && w.row_slot_idx.size() == w.rows) { cst.assign(kP, std::vector<cd>(w.subcarriers, cd(0))); ccn.assign(kP, std::vector<uint32_t>(w.subcarriers, 0)); }
     cd los = 0; uint32_t los_rows = 0;
     for (uint32_t r = 0; r < w.rows; ++r) {
       uint32_t lo, hi; if (!row_span(w, r, &lo, &hi)) continue;
       cd acc = 0; double ws = 0;
       for (uint32_t k = lo; k <= hi; ++k) if (w.observed[w.cell(r, k)]) {
         const cd z = derot(r, k); stat[k] += z; ++cnt[k];
+        if (!cst.empty()) { cst[w.row_slot_idx[r] % kP][k] += z; ++ccn[w.row_slot_idx[r] % kP][k]; }
         const double h = hann(hi > lo ? (double)(k - lo) / (hi - lo) : 0.5); acc += z * h; ws += h;
       }
       if (ws > 0) { los += acc / ws; ++los_rows; }
     }
     for (uint32_t k = 0; k < w.subcarriers; ++k) if (cnt[k]) stat[k] /= (double)cnt[k];
+    for (size_t c = 0; c < cst.size(); ++c) for (uint32_t k = 0; k < w.subcarriers; ++k) cst[c][k] = ccn[c][k] ? cst[c][k] / (double)ccn[c][k] : stat[k];
     out.los_tap[i] = los_rows ? los / (double)los_rows : cd(0);    // bin-0 row mean, before static removal
     std::vector<std::vector<cd>> prof(w.rows), far(w.rows);
     std::vector<cd> sr(w.subcarriers);
@@ -881,7 +887,7 @@ RdResult range_doppler(const CfrWindow& w, const Axes& a, const LosEstimate& L, 
       // row_profile subtracts `sub` after its ramp on the UNSCALED values: scale the static term by
       // 1/amp and the result by amp, so the profile is (amp * z - stat).
       const double ar = amp(r);
-      for (uint32_t k = 0; k < w.subcarriers; ++k) sr[k] = stat[k] / ar;
+      { const std::vector<cd>& st = cst.empty() ? stat : cst[w.row_slot_idx[r] % kP]; for (uint32_t k = 0; k < w.subcarriers; ++k) sr[k] = st[k] / ar; }
       std::vector<cd> p = row_profile(w, a, i, r, L.delay_s[i] + s.delay_s[r], s.phase_rad[r], &sr);
       for (cd& v : p) v *= ar;
       prof[r].assign(p.begin(), p.begin() + a.n_range);
@@ -1987,12 +1993,23 @@ Calibration Calibrator::update(const std::array<cd, kCh>& tap, const std::array<
 // `los`/`sync`, only row masks/times), factored out so the GPU range_doppler can build `wf` on the
 // host without paying for the CPU RD.v computation. Kept a byte-for-byte copy of that block on
 // purpose -- range_doppler() itself is left untouched (append-only file per the Task 10 dispatch).
+std::vector<double> slow_time_weights(const CfrWindow& w, const Axes& a)
+{
+  std::vector<double> sw(w.rows, 0.0);
+  for (uint32_t r = 0; r < w.rows; ++r) {
+    uint32_t lo, hi; if (!row_span(w, r, &lo, &hi)) continue;
+    double hs = 0; for (uint32_t k = lo; k <= hi; ++k) if (w.observed[w.cell(r, k)]) hs += hann(hi > lo ? (double)(k - lo) / (hi - lo) : 0.5);
+    sw[r] = hann(a.row_t_s.back() > 0 ? a.row_t_s[r] / a.row_t_s.back() : 0.5) * hs;
+  }
+  return sw;
+}
+
 RdResult::Waveform build_waveform(const CfrWindow& w, const Axes& a, bool kernels)
 {
   RdResult::Waveform m;
   if (!a.valid) return m;
   std::vector<double> win(w.rows); double wsum = 0;
-  for (uint32_t r = 0; r < w.rows; ++r) { win[r] = hann(a.row_t_s.back() > 0 ? a.row_t_s[r] / a.row_t_s.back() : 0.5); wsum += win[r]; }
+  win = slow_time_weights(w, a); for (double v : win) wsum += v;
   std::vector<cd> ed((size_t)a.n_dopp * w.rows);     // win_r e^{-j2pi f_d t_r} / wsum, [d][r]
   for (uint32_t d = 0; d < a.n_dopp; ++d)
     for (uint32_t r = 0; r < w.rows; ++r)
