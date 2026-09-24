@@ -3,6 +3,7 @@
 #include "fft.h"
 #include "robust_stats.h"
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -1732,7 +1733,7 @@ Calibration Calibrator::update(const std::array<cd, kCh>& tap, const std::array<
 // `los`/`sync`, only row masks/times), factored out so the GPU range_doppler can build `wf` on the
 // host without paying for the CPU RD.v computation. Kept a byte-for-byte copy of that block on
 // purpose -- range_doppler() itself is left untouched (append-only file per the Task 10 dispatch).
-RdResult::Waveform build_waveform(const CfrWindow& w, const Axes& a)
+RdResult::Waveform build_waveform(const CfrWindow& w, const Axes& a, bool kernels)
 {
   RdResult::Waveform m;
   if (!a.valid) return m;
@@ -1764,26 +1765,52 @@ RdResult::Waveform build_waveform(const CfrWindow& w, const Axes& a)
     if (g < 0) {
       g = (int32_t)shapes.size(); shapes.push_back(sh);
       std::vector<cd> B(nx), B2(nx);
-      // Evenly spaced observed subcarriers (contiguous or comb): the Hann-weighted sum is a sum of
-      // shifted Dirichlet kernels, exact in O(1) per sample (the direct sum below cost ~160 ms/CPI).
-      uint32_t M = 0, c = 0; bool ap = true;
-      for (uint32_t k = lo, prev = UINT32_MAX; k <= hi; ++k) if (w.observed[w.cell(r, k)]) {
-        if (prev != UINT32_MAX) { if (!c) c = k - prev; else if (k - prev != c) ap = false; }
-        prev = k; ++M;
-      }
-      if (ap && M >= 3) {
-        const double al = 2 * M_PI / (M - 1);
-        auto D = [M](double psi) {                       // sum_{m<M} e^{j psi m}
+      if (kernels) {                                  // false: the GPU fills B/B2 (coherent_cuda.cu)
+      // The observed mask decomposed into evenly spaced segments (s, step c, M points): a contiguous
+      // or comb row is ONE segment; data rows with DM-RS/CSI-RS holes are a few. The Hann taper is
+      // 0.5 - 0.25 e^{+ja(k-lo)} - 0.25 e^{-ja(k-lo)}, a = 2pi/(hi-lo), so each segment's weighted sum
+      // is a sum of shifted Dirichlet kernels: exact, O(segments) per sample instead of O(width)
+      // (the direct sum cost 0.2-2.5 s/CPI on live gapped masks).
+      // Two decompositions, the one with fewer segments wins: runs in subcarrier order (contiguous /
+      // comb rows: 1 segment), and runs within each residue class mod 12 (PRB-periodic DM-RS-symbol data
+      // masks such as 0x0c3/0x3cf per PRB: <= 12 segments instead of 2 per PRB).
+      struct Seg { uint32_t s, c, M; };
+      auto decompose = [&](uint32_t period) {
+        std::vector<Seg> out;
+        for (uint32_t res = 0; res < period; ++res) {
+          const size_t first = out.size();
+          for (uint32_t k = lo + res; k <= hi; k += period) if (w.observed[w.cell(r, k)]) {
+            if (out.size() > first) {
+              Seg& q = out.back(); const uint32_t last = q.s + q.c * (q.M - 1);
+              if (q.M == 1) { q.c = k - last; q.M = 2; continue; }
+              if (k - last == q.c) { ++q.M; continue; }
+            }
+            out.push_back({k, 0, 1});
+          }
+        }
+        return out;
+      };
+      std::vector<Seg> segs = decompose(1);
+      if (segs.size() > 1) { std::vector<Seg> s12 = decompose(12); if (s12.size() < segs.size()) segs.swap(s12); }
+      if (hi > lo && segs.size() <= 64) {
+        const double al = 2 * M_PI / (hi - lo);
+        auto D = [](double psi, uint32_t M) {            // sum_{m<M} e^{j psi m}
           const double s2 = std::sin(0.5 * psi);
           if (std::abs(s2) < 1e-9) return std::polar((double)M, 0.5 * (M - 1) * (psi - 2 * M_PI * std::round(psi / (2 * M_PI))));
           return std::polar(std::sin(0.5 * M * psi) / s2, 0.5 * psi * (M - 1));
         };
         for (long u = 0; u < nx; ++u) {
-          const double th = 2 * M_PI * (-m.X + (double)u / O) / a.n_fft, phi = th * c;
-          const cd e0 = std::polar(1.0, th * ((double)lo - kc));
-          const cd d0 = D(phi), dp = D(phi + al), dm = D(phi - al), dp2 = D(phi + 2 * al), dm2 = D(phi - 2 * al);
-          B[u] = e0 * (0.5 * d0 - 0.25 * (dp + dm)) / h1;
-          B2[u] = e0 * (0.375 * d0 - 0.25 * (dp + dm) + 0.0625 * (dp2 + dm2)) / h2;
+          const double th = 2 * M_PI * (-m.X + (double)u / O) / a.n_fft;
+          cd b1 = 0, b2 = 0;
+          for (const Seg& q : segs) {
+            const double c = q.c ? q.c : 1;
+            cd t[5];                                     // sigma = -2..2: e^{j th (s-kc)} e^{j sigma al (s-lo)} D(c (th + sigma al), M)
+            for (int sg = -2; sg <= 2; ++sg)
+              t[sg + 2] = std::polar(1.0, th * ((double)q.s - kc) + sg * al * ((double)q.s - lo)) * D(c * (th + sg * al), q.M);
+            b1 += 0.5 * t[2] - 0.25 * (t[1] + t[3]);
+            b2 += 0.375 * t[2] - 0.25 * (t[1] + t[3]) + 0.0625 * (t[0] + t[4]);
+          }
+          B[u] = b1 / h1; B2[u] = b2 / h2;
         }
       } else
       for (long u = 0; u < nx; ++u) {
@@ -1794,6 +1821,7 @@ RdResult::Waveform build_waveform(const CfrWindow& w, const Axes& a)
           const double h = hann(hi > lo ? (double)(k - lo) / (hi - lo) : 0.5); b1 += h * ph; b2 += h * h * ph;
         }
         B[u] = b1 / h1; B2[u] = b2 / h2;
+      }
       }
       m.B.push_back(std::move(B)); m.B2.push_back(std::move(B2));
     }

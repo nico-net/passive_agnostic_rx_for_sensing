@@ -161,7 +161,28 @@ void CoherentPipeline::process(Job& j)
   // here; see coherent_cuda.h's file header).
   std::array<double, kCh> geo_los{};             // survey LOS delays: picks the LOS over a stronger wall
   for (uint32_t i = 0; i < kCh; ++i) geo_los[i] = dist(geo.tx, geo.rx[i]) / kC;
-  const LosEstimate L = find_los(j.dl, a, pfa_los, &geo_los);
+  LosEstimate L = find_los(j.dl, a, pfa_los, &geo_los);
+  // Common-offset LOS referencing. Each channel's own per-CPI LOS delay jitters by 27-50 ns OTA
+  // (narrow hopping allocations), and the LOS tap phase moves by 2*pi*f_alloc*delay_err with the
+  // allocation centre hopping +-50 MHz: that alone made the calibration phases uniform (measured
+  // 2026-09-24, jitter ~1.7 rad, G ~ 0.9). The inter-channel delays are FIXED (one X410, identical
+  // cables, static geometry), so per CPI only ONE common offset (STO) is estimated, as the median over
+  // channels, and each channel sits at survey + offset + its own residual (cable/survey error),
+  // the cumulative median of its past residuals (static hardware: no forgetting constant).
+  {
+    auto med = [](std::vector<double> v) { std::nth_element(v.begin(), v.begin() + v.size() / 2, v.end()); return v[v.size() / 2]; };
+    std::array<double, kCh> res{};
+    for (uint32_t i = 0; i < kCh; ++i) res[i] = los_resid_[i].empty() ? 0.0 : med(los_resid_[i]);
+    std::vector<double> off;
+    for (uint32_t i = 0; i < kCh; ++i) if (L.found[i]) off.push_back(L.delay_s[i] - geo_los[i] - res[i]);
+    if (off.size() >= 2) {
+      const double o = med(off);
+      for (uint32_t i = 0; i < kCh; ++i) if (L.found[i]) {
+        los_resid_[i].push_back(L.delay_s[i] - geo_los[i] - o);
+        L.delay_s[i] = geo_los[i] + o + res[i];
+      }
+    }
+  }
   tm_los = ms_since(s0);
   const RowSync rs = estimate_row_sync(j.dl, a, L);
   tm[0] = ms_since(s0); s0 = clk::now();

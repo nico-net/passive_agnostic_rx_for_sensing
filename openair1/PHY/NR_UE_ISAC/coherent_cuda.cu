@@ -195,21 +195,6 @@ __global__ void k_nudft(const zC* prof, const zC* ed, uint32_t rows, uint32_t nr
 }
 
 // 4-point Lagrange cubic in |RD|, same as coherent_core.cc's MagInterp/sample_rd magnitude part.
-__device__ inline double mag_interp(const zC* rd, uint32_t ch, uint32_t nrange, uint32_t ndopp, double bin, uint32_t d)
-{
-  if (nrange == 0 || !(bin >= 0) || bin > (double)(nrange - 1)) return -1.0;
-  const long b0 = (long)bin; const double t = bin - b0;
-  auto magat = [&](long b) {
-    b = b < 0 ? 0 : (b > (long)nrange - 1 ? (long)nrange - 1 : b);
-    const zC v = rd[((size_t)ch * nrange + (uint32_t)b) * ndopp + d];
-    return sqrt(v.x * v.x + v.y * v.y);
-  };
-  const double pm = magat(b0 - 1), p0 = magat(b0), p1 = magat(b0 + 1), p2 = magat(b0 + 2);
-  const double m = -pm * t * (t - 1) * (t - 2) / 6 + p0 * (t + 1) * (t - 1) * (t - 2) / 2
-                   - p1 * (t + 1) * t * (t - 2) / 2 + p2 * (t + 1) * t * (t - 1) / 6;
-  return m > 0 ? m : 0.0;
-}
-
 struct GeoParams { double tx[3]; double rx[4][3]; };
 
 // One thread per (tested Doppler index t, voxel v): per-channel sliding max of |RD|^2/noise over the
@@ -217,34 +202,76 @@ struct GeoParams { double tx[3]; double rx[4][3]; };
 // envelope(). A channel with an out-of-range bin (MagInterp::ok == false) contributes 0, same as the
 // CPU `if (!mi.ok) continue;`; a non-ok Doppler bin contributes 0 to the max, same as CPU's
 // `ok[d] ? mi.at(...) : 0.0` fed into sliding_max (0 can never win a max over non-negative power).
-__global__ void k_envelope(const zC* rd, const float* inv_noise, const uint8_t* los_found, const uint32_t* tested_dopp,
-                           uint32_t nt, const uint8_t* dopp_ok_mask, const uint32_t* dh, GeoParams geo, double origin_x,
-                           double origin_y, double origin_z, double step, uint32_t nx, uint32_t ny, uint32_t nz,
-                           uint32_t nrange, uint32_t ndopp, double delay_step_s, double c_mps, float* E)
+// Waveform kernel tables B/B2 (RdResult::Waveform) for every distinct row mask: one thread per (group,
+// sample u), B[u] = sum_k h_k e^{j th_u (k - kc)}, th_u = 2pi(-X + u/O)/n_fft (B2: h_k^2). FP32 terms;
+// the CPU closed form falls back to an O(width) direct sum on gapped live masks, 0.6-1.6 s per CPI.
+__global__ void k_wf(const float* off, const float* hw, const uint32_t* st, uint32_t ng, uint32_t nx, float X, float O, float nfft,
+                     float2* B, float2* B2)
+{
+  for (size_t j = (size_t)blockIdx.x * blockDim.x + threadIdx.x; j < (size_t)ng * nx; j += (size_t)blockDim.x * gridDim.x) {
+    const uint32_t g = (uint32_t)(j / nx), u = (uint32_t)(j % nx);
+    const float th = 2.f * (float)kPi * (-X + (float)u / O) / nfft;
+    float br = 0, bi = 0, cr = 0, ci = 0;
+    for (uint32_t q = st[g]; q < st[g + 1]; ++q) {
+      float sn, cs; sincosf(th * off[q], &sn, &cs);
+      const float h = hw[q];
+      br += h * cs; bi += h * sn; cr += h * h * cs; ci += h * h * sn;
+    }
+    B[j] = make_float2(br, bi); B2[j] = make_float2(cr, ci);
+  }
+}
+
+// Per CPI, once: |RD| as FP32 (the envelope loop below then never touches FP64 -- consumer GPUs run
+// FP64 at 1/64 rate, and the FP64 envelope cost 83 ms p50 / 1.15 s p95 per CPI OTA at 64k voxels).
+__global__ void k_mag(const zC* rd, size_t n, float* mag)
+{
+  for (size_t j = (size_t)blockIdx.x * blockDim.x + threadIdx.x; j < n; j += (size_t)blockDim.x * gridDim.x)
+    mag[j] = (float)sqrt(rd[j].x * rd[j].x + rd[j].y * rd[j].y);
+}
+// Per (voxel, channel), once: the voxel's excess-delay range bin (FP64 geometry, stored FP32); -1 when
+// the channel has no LOS or the bin is off the range axis (contributes 0, as the CPU envelope()).
+__global__ void k_vbin(const uint8_t* los_found, GeoParams geo, double origin_x, double origin_y, double origin_z, double step,
+                       uint32_t nx, uint32_t ny, uint32_t nz, uint32_t nrange, double delay_step_s, double c_mps, float* vbin)
 {
   const size_t nv = (size_t)nx * ny * nz;
-  for (size_t idx = (size_t)blockIdx.x * blockDim.x + threadIdx.x; idx < (size_t)nt * nv; idx += (size_t)blockDim.x * gridDim.x) {
-    const size_t v = idx % nv; const uint32_t t = (uint32_t)(idx / nv);
-    const long d0 = (long)tested_dopp[t]; const uint32_t h = dh[v];
+  for (size_t j = (size_t)blockIdx.x * blockDim.x + threadIdx.x; j < nv * 4; j += (size_t)blockDim.x * gridDim.x) {
+    const size_t v = j / 4; const uint32_t ch = (uint32_t)(j % 4);
     const size_t ix = v % nx, iy = (v / nx) % ny, iz = v / ((size_t)nx * ny);
     const double xx = origin_x + ix * step, xy = origin_y + iy * step, xz = origin_z + iz * step;
+    const double dtx = sqrt((xx - geo.tx[0]) * (xx - geo.tx[0]) + (xy - geo.tx[1]) * (xy - geo.tx[1]) + (xz - geo.tx[2]) * (xz - geo.tx[2]));
+    const double drx = sqrt((xx - geo.rx[ch][0]) * (xx - geo.rx[ch][0]) + (xy - geo.rx[ch][1]) * (xy - geo.rx[ch][1]) + (xz - geo.rx[ch][2]) * (xz - geo.rx[ch][2]));
+    const double dbase = sqrt((geo.tx[0] - geo.rx[ch][0]) * (geo.tx[0] - geo.rx[ch][0]) + (geo.tx[1] - geo.rx[ch][1]) * (geo.tx[1] - geo.rx[ch][1]) + (geo.tx[2] - geo.rx[ch][2]) * (geo.tx[2] - geo.rx[ch][2]));
+    const double bin = (dtx + drx - dbase) / c_mps / delay_step_s;
+    vbin[j] = (los_found[ch] && bin >= 0 && bin <= (double)(nrange - 1)) ? (float)bin : -1.f;
+  }
+}
+
+// One thread per (tested Doppler index t, voxel v): per-channel sliding max of |RD|^2/noise over the
+// voxel's own Doppler half-width, at the channel's own excess-delay bin (cubic magnitude interpolation)
+// -- coherent_core.cc's envelope(). A non-ok Doppler bin contributes 0 to the max, as on the CPU.
+__global__ void k_envelope(const float* mag, const float* inv_noise, const float* vbin, const uint32_t* tested_dopp,
+                           uint32_t nt, const uint8_t* dopp_ok_mask, const uint32_t* dh, size_t nv,
+                           uint32_t nrange, uint32_t ndopp, float* E)
+{
+  for (size_t idx = (size_t)blockIdx.x * blockDim.x + threadIdx.x; idx < (size_t)nt * nv; idx += (size_t)blockDim.x * gridDim.x) {
+    const size_t v = idx % nv; const uint32_t t = (uint32_t)(idx / nv);
+    const long d0 = (long)tested_dopp[t]; const long h = (long)dh[v];
     float e = 0.f;
     for (uint32_t ch = 0; ch < 4; ++ch) {
-      if (!los_found[ch]) continue;
-      const double dtx = sqrt((xx - geo.tx[0]) * (xx - geo.tx[0]) + (xy - geo.tx[1]) * (xy - geo.tx[1]) + (xz - geo.tx[2]) * (xz - geo.tx[2]));
-      const double drx = sqrt((xx - geo.rx[ch][0]) * (xx - geo.rx[ch][0]) + (xy - geo.rx[ch][1]) * (xy - geo.rx[ch][1]) + (xz - geo.rx[ch][2]) * (xz - geo.rx[ch][2]));
-      const double dbase = sqrt((geo.tx[0] - geo.rx[ch][0]) * (geo.tx[0] - geo.rx[ch][0]) + (geo.tx[1] - geo.rx[ch][1]) * (geo.tx[1] - geo.rx[ch][1]) + (geo.tx[2] - geo.rx[ch][2]) * (geo.tx[2] - geo.rx[ch][2]));
-      const double bin = (dtx + drx - dbase) / c_mps / delay_step_s;
-      if (!(bin >= 0) || bin > (double)(nrange - 1)) continue;
-      double best = 0.0;
-      const long lo = d0 - (long)h, hi = d0 + (long)h;
+      const float bin = vbin[v * 4 + ch];
+      if (bin < 0.f) continue;
+      const long b0 = (long)bin; const float u = bin - (float)b0;
+      const float cm = -u * (u - 1) * (u - 2) / 6, c0 = (u + 1) * (u - 1) * (u - 2) / 2, c1 = -(u + 1) * u * (u - 2) / 2, c2 = (u + 1) * u * (u - 1) / 6;
+      auto row = [&](long b) { b = b < 0 ? 0 : (b > (long)nrange - 1 ? (long)nrange - 1 : b); return mag + ((size_t)ch * nrange + (size_t)b) * ndopp; };
+      const float *rm = row(b0 - 1), *r0 = row(b0), *r1 = row(b0 + 1), *r2 = row(b0 + 2);
+      float best = 0.f;
+      const long lo = d0 - h < 0 ? 0 : d0 - h, hi = d0 + h > (long)ndopp - 1 ? (long)ndopp - 1 : d0 + h;
       for (long dd = lo; dd <= hi; ++dd) {
-        if (dd < 0 || dd >= (long)ndopp || !dopp_ok_mask[dd]) continue;
-        const double m = mag_interp(rd, ch, nrange, ndopp, bin, (uint32_t)dd);
-        const double val = m * m * (double)inv_noise[ch];
-        if (val > best) best = val;
+        if (!dopp_ok_mask[dd]) continue;
+        const float m = fmaxf(cm * rm[dd] + c0 * r0[dd] + c1 * r1[dd] + c2 * r2[dd], 0.f);
+        best = fmaxf(best, m * m);
       }
-      e += (float)best;
+      e += best * inv_noise[ch];
     }
     E[idx] = e;
   }
@@ -269,7 +296,7 @@ struct CudaCoherent::Impl {
       cap = bytes;
     }
   };
-  Buf values, values_f, observed, span, tau, phase, stat, wsum_row, row_los, spectrum, prof_near, prof_far, ed, rd, far_rd, E;
+  Buf wf_off, wf_hw, wf_st, wf_B, wf_B2, mag, vbin, values, values_f, observed, span, tau, phase, stat, wsum_row, row_los, spectrum, prof_near, prof_far, ed, rd, far_rd, E;
   Buf ev_tested_dopp, ev_dh, ev_dopp_ok, ev_inv_noise, ev_los_found;  // detect()'s own small persistent uploads
 
   // host-side state kept across range_doppler() -> detect() within one CPI
@@ -470,7 +497,42 @@ RdResult CudaCoherent::range_doppler(const CfrWindow& w, const Axes& a, const Lo
   }
 
   const auto t_wf0 = std::chrono::steady_clock::now();
-  out.wf = build_waveform(w, a);
+  out.wf = build_waveform(w, a, false);             // everything but the B/B2 tables, which the GPU fills
+  {
+    RdResult::Waveform& m = out.wf;
+    const size_t ng = m.B.size();
+    if (ng) {
+      const uint32_t nxw = (uint32_t)m.B[0].size();
+      std::vector<int> rep(ng, -1);
+      for (uint32_t r = 0; r < rows; ++r) if (m.grp[r] >= 0 && rep[m.grp[r]] < 0) rep[m.grp[r]] = (int)r;
+      std::vector<float> off, hw; std::vector<uint32_t> st(ng + 1, 0); std::vector<double> h1(ng, 0), h2(ng, 0);
+      for (size_t g = 0; g < ng; ++g) {
+        const uint32_t r = (uint32_t)rep[g], lo = m.lo[r], hi = m.hi[r]; const double kc = 0.5 * (lo + hi);
+        for (uint32_t k = lo; k <= hi; ++k) if (w.observed[w.cell(r, k)]) {
+          const double h = host_hann(hi > lo ? (double)(k - lo) / (hi - lo) : 0.5);
+          off.push_back((float)(k - kc)); hw.push_back((float)h); h1[g] += h; h2[g] += h * h;
+        }
+        st[g + 1] = (uint32_t)off.size();
+      }
+      I.wf_off.ensure(off.size() * sizeof(float)); I.wf_hw.ensure(hw.size() * sizeof(float)); I.wf_st.ensure(st.size() * sizeof(uint32_t));
+      I.wf_B.ensure((size_t)ng * nxw * sizeof(float2)); I.wf_B2.ensure((size_t)ng * nxw * sizeof(float2));
+      cuda_check(cudaMemcpyAsync(I.wf_off.p, off.data(), off.size() * sizeof(float), cudaMemcpyHostToDevice, I.stream), "H2D wf off");
+      cuda_check(cudaMemcpyAsync(I.wf_hw.p, hw.data(), hw.size() * sizeof(float), cudaMemcpyHostToDevice, I.stream), "H2D wf hw");
+      cuda_check(cudaMemcpyAsync(I.wf_st.p, st.data(), st.size() * sizeof(uint32_t), cudaMemcpyHostToDevice, I.stream), "H2D wf st");
+      k_wf<<<(unsigned)std::min<size_t>(65535, ((size_t)ng * nxw + 255) / 256), 256, 0, I.stream>>>(
+          (float*)I.wf_off.p, (float*)I.wf_hw.p, (uint32_t*)I.wf_st.p, (uint32_t)ng, nxw, (float)m.X, (float)RdResult::Waveform::kOvs,
+          (float)a.n_fft, (float2*)I.wf_B.p, (float2*)I.wf_B2.p);
+      std::vector<float2> hB((size_t)ng * nxw), hB2((size_t)ng * nxw);
+      cuda_check(cudaMemcpyAsync(hB.data(), I.wf_B.p, hB.size() * sizeof(float2), cudaMemcpyDeviceToHost, I.stream), "D2H wf B");
+      cuda_check(cudaMemcpyAsync(hB2.data(), I.wf_B2.p, hB2.size() * sizeof(float2), cudaMemcpyDeviceToHost, I.stream), "D2H wf B2");
+      cuda_check(cudaStreamSynchronize(I.stream), "sync wf");
+      for (size_t g = 0; g < ng; ++g)
+        for (uint32_t u = 0; u < nxw; ++u) {
+          const float2 b = hB[g * nxw + u], b2 = hB2[g * nxw + u];
+          m.B[g][u] = cd(b.x, b.y) / h1[g]; m.B2[g][u] = cd(b2.x, b2.y) / h2[g];
+        }
+    }
+  }
   I.timing.wf_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t_wf0).count();
   I.timing.rd_total_ms = I.timing.upload_ms + I.timing.build_ms + I.timing.fft_ms + I.timing.crop_norm_ms
                          + I.timing.nudft_ms + I.timing.download_ms + I.timing.wf_ms;
@@ -508,10 +570,14 @@ std::vector<Detection> CudaCoherent::detect(const Grid& g, const Geometry& geo, 
   I.E.ensure(nt * nv * sizeof(float));
   GeoParams gp{}; for (int k = 0; k < 3; ++k) gp.tx[k] = geo.tx[k]; for (uint32_t i = 0; i < kCh && i < 4; ++i) for (int k = 0; k < 3; ++k) gp.rx[i][k] = geo.rx[i][k];
   {
+    const size_t nm = (size_t)I.cur_nch * I.cur_nrange * I.cur_ndopp;
+    I.mag.ensure(nm * sizeof(float)); I.vbin.ensure(nv * 4 * sizeof(float));
+    k_mag<<<(unsigned)std::min<size_t>(65535, (nm + 255) / 256), 256, 0, I.stream>>>((zC*)I.rd.p, nm, (float*)I.mag.p);
+    k_vbin<<<(unsigned)std::min<size_t>(65535, (nv * 4 + 255) / 256), 256, 0, I.stream>>>((uint8_t*)I.ev_los_found.p, gp, g.origin.x, g.origin.y, g.origin.z, g.step,
+                                                                                     g.nx, g.ny, g.nz, I.cur_nrange, a.delay_step_s, kC, (float*)I.vbin.p);
     dim3 t(256), b((unsigned)std::min<size_t>(65535, (nt * nv + 255) / 256));
-    k_envelope<<<b, t, 0, I.stream>>>((zC*)I.rd.p, (float*)I.ev_inv_noise.p, (uint8_t*)I.ev_los_found.p, (uint32_t*)I.ev_tested_dopp.p, (uint32_t)nt,
-                                      (uint8_t*)I.ev_dopp_ok.p, (uint32_t*)I.ev_dh.p, gp, g.origin.x, g.origin.y, g.origin.z, g.step,
-                                      g.nx, g.ny, g.nz, I.cur_nrange, I.cur_ndopp, a.delay_step_s, kC, (float*)I.E.p);
+    k_envelope<<<b, t, 0, I.stream>>>((float*)I.mag.p, (float*)I.ev_inv_noise.p, (float*)I.vbin.p, (uint32_t*)I.ev_tested_dopp.p, (uint32_t)nt,
+                                      (uint8_t*)I.ev_dopp_ok.p, (uint32_t*)I.ev_dh.p, nv, I.cur_nrange, I.cur_ndopp, (float*)I.E.p);
   }
   std::vector<float> h_E(nt * nv);
   cuda_check(cudaMemcpyAsync(h_E.data(), I.E.p, h_E.size() * sizeof(float), cudaMemcpyDeviceToHost, I.stream), "D2H E");

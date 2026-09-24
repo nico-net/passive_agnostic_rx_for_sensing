@@ -105,7 +105,7 @@ double gamma_upper_quantile(uint32_t shape, double p);
  * cube can get a CPU-built `wf` without paying for range_doppler()'s own (CPU) RD.v computation.
  * Bit-identical to the wf that range_doppler(w, a, los, sync) would have produced for the same
  * (w, a) -- range_doppler()'s wf-building code never reads `los`/`sync`, only row masks/times. */
-RdResult::Waveform build_waveform(const CfrWindow& w, const Axes& a);
+RdResult::Waveform build_waveform(const CfrWindow& w, const Axes& a, bool kernels = true);
 
 /** Tracks each channel's phase offset vs channel 0 across CPIs (Kalman phase filter, covariance
  * matching for process noise) and, before updating, scores this CPI's LOS taps against the

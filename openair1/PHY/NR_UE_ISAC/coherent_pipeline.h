@@ -33,6 +33,7 @@ private:
   void write_coherence(uint64_t seq, double t, const Calibration& cal, const std::array<double, kCh>& los_delay_s, bool skipped);
   CoherentConfig cfg_;
   Calibrator cal_;
+  std::array<std::vector<double>, kCh> los_resid_;   // per-channel LOS delay residual history (s)
   std::unique_ptr<CoherentTracker> tracker_;
   std::unique_ptr<Autofocus> af_;
   std::unique_ptr<CudaCoherent> cuda_;   // Task 10: GPU range_doppler()/envelope() when available

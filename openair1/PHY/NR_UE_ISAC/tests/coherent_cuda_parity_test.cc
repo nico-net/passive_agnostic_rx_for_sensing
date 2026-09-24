@@ -73,6 +73,12 @@ int main()
   for (size_t k = 0; k < R.rd.v.size(); ++k) { m = std::max(m, (double)std::abs(R.rd.v[k])); dm = std::max(dm, (double)std::abs(R.rd.v[k] - Rg.rd.v[k])); }
   std::printf("RD parity: max|cpu|=%.6g max|diff|=%.6g rel=%.3g\n", m, dm, m > 0 ? dm / m : 0.0);
   require(m > 0 && dm / m < 1e-3, "RD parity");
+  { double wm = 0, wd = 0;                         // GPU FP32 waveform kernel tables vs the CPU closed form
+    require(R.wf.B.size() == Rg.wf.B.size(), "wf group count");
+    for (size_t q = 0; q < R.wf.B.size(); ++q) for (size_t u = 0; u < R.wf.B[q].size(); ++u) {
+      wm = std::max(wm, std::abs(R.wf.B[q][u])); wd = std::max({wd, std::abs(R.wf.B[q][u] - Rg.wf.B[q][u]), std::abs(R.wf.B2[q][u] - Rg.wf.B2[q][u])}); }
+    std::printf("wf parity: groups=%zu max|B|=%.3g max|diff|=%.3g\n", R.wf.B.size(), wm, wd);
+    require(wm > 0 && wd / wm < 1e-4, "waveform kernel parity"); }
 
   const std::vector<coherent::Detection> Dc = detect(envelope(R, G, g), R, G, g, detect_params(a, G, 1.0));
   const std::vector<coherent::Detection> Dg = gpu.detect(G, g, detect_params(a, G, 1.0), nullptr);
