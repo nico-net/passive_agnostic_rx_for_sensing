@@ -108,7 +108,12 @@ int create_tasks_nrue(uint32_t ue_nb) {
 
 void exit_function(const char *file, const char *function, const int line, const char *s, const int assert)
 {
-  LOG_W(NR_PHY, "called by: %s:%d %s() Exiting OAI softmodem: %s\n", file, line, function, s ? s : "no msg");
+  /* main() can reach exit_fun() (e.g. load_configmodule() failing on a missing -O file) BEFORE logInit() has
+   * run; LOG_W dereferences g_log, so that error path used to segfault instead of printing the error. */
+  if (g_log != NULL)
+    LOG_W(NR_PHY, "called by: %s:%d %s() Exiting OAI softmodem: %s\n", file, line, function, s ? s : "no msg");
+  else
+    fprintf(stderr, "called by: %s:%d %s() Exiting OAI softmodem: %s\n", file, line, function, s ? s : "no msg");
 
   oai_exit = 1;
 
