@@ -265,7 +265,7 @@ struct CudaCoherent::Impl {
   uint32_t cur_nch = kCh, cur_rows = 0, cur_nrange = 0, cur_ndopp = 0;
   Timing timing;
   std::vector<float> last_E;
-  GpuDetect det;   // GPU-resident detect() (coherent_cuda_detect.cu); NR_ISAC_CUDA_DETECT_CPU=1 selects the CPU oracle
+  GpuDetect det;   // GPU-resident detect() (coherent_cuda_detect.cu); opt-in via NR_ISAC_CUDA_DETECT_GPU=1 (CPU oracle default)
 
   Impl()
   {
@@ -509,7 +509,10 @@ std::vector<Detection> CudaCoherent::detect(const Grid& g, const Geometry& geo, 
 
   (void)topview_max;  // caller reads last_envelope() instead (see coherent_cuda.h header)
   I.last_E = h_E;
-  if (std::getenv("NR_ISAC_CUDA_DETECT_CPU")) return coherent::detect(h_E, R, g, geo, p);   // CPU oracle
+  // GpuDetect is opt-in until it matches the CPU oracle on real data: on 40 detect() inputs dumped from
+  // the full-band OTA recording it made different decisions on 12 (FP32 magnitudes flip near-tied
+  // pursuit choices; the clean parity scene has no ties). The user's rule is no accuracy loss.
+  if (!std::getenv("NR_ISAC_CUDA_DETECT_GPU")) return coherent::detect(h_E, R, g, geo, p);   // CPU oracle
   return I.det.run(h_E, R, g, geo, p, I.rd.p, (const float*)I.E.p, I.stream);
 }
 
