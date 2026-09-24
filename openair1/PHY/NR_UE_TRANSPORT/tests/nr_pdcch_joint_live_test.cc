@@ -142,12 +142,31 @@ TEST(JointLive, NoiseUlIndicatorAndRangeAreNotAdmitted)
   EXPECT_GT(pass, 0ull);
 }
 
+TEST(JointLive, AdmitsAnUlGrantOnlyWhenAskedForOne)
+{
+  std::mt19937 rng(59);
+  const int A = 45, L = 2;
+  int ul_ok = 0, dl_admits_ul = 0;
+  for (int t = 0; t < 40; t++) {
+    const uint16_t rnti = (uint16_t)(0x3000 + rng() % 0xC000);
+    const uint64_t pl = ((((uint64_t)rng() << 32) | rng()) & ((1ULL << (A - 1)) - 1));  // indicator bit CLEAR = UL
+    auto l = Rx(pl, rnti, 2, A, L, 8.0, rng);
+    Descramble(l, 0, 2);
+    nr_pdcch_joint_live_result_t r;
+    ul_ok += (nr_pdcch_joint_live_decode(l.data(), L, A, 2, 0, 1, 0xFFEF, /*indicator=*/0, &r) && r.rnti == rnti && r.payload == pl);
+    dl_admits_ul += nr_pdcch_joint_live_decode_11(l.data(), L, A, 2, 0, 1, 0xFFEF, &r);
+  }
+  EXPECT_GE(ul_ok, 38);
+  EXPECT_EQ(dl_admits_ul, 0);
+}
+
 TEST(JointLive, RefusesShapesOutsideTheSolverLimits)
 {
   std::vector<int16_t> l(108 * 2, 100);
   nr_pdcch_joint_live_result_t r;
   EXPECT_FALSE(nr_pdcch_joint_live_decode_11(l.data(), 0, 47, 2, 0, 1, 0xFFEF, &r));
   EXPECT_FALSE(nr_pdcch_joint_live_decode_11(l.data(), 9, 47, 2, 0, 1, 0xFFEF, &r));
+  EXPECT_FALSE(nr_pdcch_joint_live_decode_11(l.data(), 3, 47, 2, 0, 1, 0xFFEF, &r)); // not a legal AL
   EXPECT_FALSE(nr_pdcch_joint_live_decode_11(l.data(), 2, 0, 2, 0, 1, 0xFFEF, &r));
   EXPECT_FALSE(nr_pdcch_joint_live_decode_11(l.data(), 2, 65, 2, 0, 1, 0xFFEF, &r));
 }

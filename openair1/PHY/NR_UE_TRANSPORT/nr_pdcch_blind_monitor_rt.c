@@ -2365,6 +2365,29 @@ retry_scrambling:
               h, jr.rnti, t->dci_length, t->L, t->cce, jr.mismatched_bits);
     }
   }
+  /* Same fallback for the UL grant (DCI 0_1) raw path: the same solve with the opposite format-indicator admission,
+   * filled exactly as nr_pdcch_blind_decode_raw_01() fills its result. */
+  if (!t->ok && t->ul_scan && t->ul_auto && nr_pdcch_joint_live_enabled()) {
+    nr_pdcch_joint_live_result_t jr;
+    if (nr_pdcch_joint_live_decode(tmp_e, t->L, t->dci_length, t->dmrs_scrambling_id, (int)data_scrambling_rnti,
+                                   t->rnti_min, t->rnti_max, /*indicator=*/0, &jr)) {
+      memset(&t->ul_out, 0, sizeof(t->ul_out));
+      t->ul_out.width_hyp_class = t->ul_out.interp_hyp_class = -1;
+      t->ul_out.plausible = false;
+      t->ul_out.ul_dci_format = NR_BLIND_UL_DCI_FORMAT_0_1;
+      t->ul_out.dci_length = t->dci_length;
+      t->ul_out.raw_payload = jr.payload;
+      t->ul_out.crc_rnti = jr.rnti;
+      t->ul_out.rnti = jr.rnti;
+      t->ul_out.mismatched_bits = jr.mismatched_bits;
+      t->ok = true;
+      static _Atomic unsigned s_jul;
+      const unsigned h = atomic_fetch_add_explicit(&s_jul, 1, memory_order_relaxed) + 1;
+      if (h <= 20 || (h % 1000) == 0)
+        LOG_A(PHY, "SENSING: JOINT_RNTI_HIT_UL #%u rnti=0x%04x len=%u AL=%u CCE=%d mismatched_bits=%u (unknown-RNTI solve)\n",
+              h, jr.rnti, t->dci_length, t->L, t->cce, jr.mismatched_bits);
+    }
+  }
   if (t->ok && used_alternate_scrambling)
     LOG_A(PHY, "SENSING: RNTI_SCRAMBLE_HIT direction=%s rnti=0x%04x len=%u AL=%u CCE=%d\n",
           t->ul_scan ? "UL" : "DL", t->alternate_scrambling_rnti,

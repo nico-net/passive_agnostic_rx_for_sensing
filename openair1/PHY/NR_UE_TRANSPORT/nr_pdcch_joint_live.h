@@ -23,9 +23,14 @@ typedef struct {
 } nr_pdcch_joint_live_result_t;
 
 bool nr_pdcch_joint_live_enabled(void);
+/* indicator: the format-indicator bit (payload bit dci_length-1) the admitted DCI must have: 1 = DL assignment
+ * (DCI 1_1), 0 = UL grant (DCI 0_1) -- the same admission nr_pdcch_blind_decode_raw_11() / _raw_01() apply. */
+bool nr_pdcch_joint_live_decode(const int16_t *llr, uint8_t aggregation_level, uint16_t dci_length, uint16_t nid,
+                                int pre_descrambled_rnti, uint16_t rnti_min, uint16_t rnti_max, int indicator,
+                                nr_pdcch_joint_live_result_t *out);
 bool nr_pdcch_joint_live_decode_11(const int16_t *llr, uint8_t aggregation_level, uint16_t dci_length, uint16_t nid,
                                    int pre_descrambled_rnti, uint16_t rnti_min, uint16_t rnti_max,
-                                   nr_pdcch_joint_live_result_t *out);
+                                   nr_pdcch_joint_live_result_t *out); /* indicator = 1 */
 void nr_pdcch_joint_live_counts(unsigned long long *attempts, unsigned long long *prescreen_pass,
                                 unsigned long long *accepted);
 

@@ -6,6 +6,7 @@
 
 #define JOINT_PFA 1e-4 /* design false-alarm probability per solve; the acceptance bar is derived from it */
 #define EW ((NR_PDCCH_JOINT_MAX_E + 63) / 64)
+#define JMAX_K 96 /* A <= 64 payload + 16 RNTI + 16 n_ID */
 
 typedef struct { uint64_t w[2]; } v128;              /* a vector over the K <= 80 unknowns */
 typedef struct { uint64_t w[EW]; } ebits;            /* a vector over the E coded bits */
@@ -21,7 +22,7 @@ static inline int v_zero(v128 a) { return (a.w[0] | a.w[1]) == 0; }
 static inline int v_lowbit(v128 a) { return a.w[0] ? __builtin_ctzll(a.w[0]) : 64 + __builtin_ctzll(a.w[1]); }
 
 struct nr_pdcch_joint_model {
-  int A, E, K, swr, pre; /* pre: n_RNTI the input LLRs were already descrambled with, -1 = none */
+  int A, E, K, swr, pre, unk; /* pre: n_RNTI the input LLRs were already descrambled with, -1 = none */
   uint16_t nid;
   v128 *rows;    /* rows[i] = which unknowns coded bit i depends on */
   uint8_t *base; /* scrambled coded bits for the all-zero unknowns */
@@ -48,17 +49,17 @@ static void gold_seq(uint32_t c_init, int n_bits, uint8_t *out)
 
 /* The joint forward map for ONE (payload, rnti): real encoder, then the spec scrambling
  * (TS 38.211 7.3.2.3: c_init = (n_RNTI << 16 + n_ID) mod 2^31, as dci_nr.c:1073 does on the UE side). */
-static int joint_eval(const nr_pdcch_joint_model_t *m, uint64_t payload, uint16_t rnti, uint8_t *out)
+static int joint_eval(const nr_pdcch_joint_model_t *m, uint64_t payload, uint16_t rnti, uint16_t nid, uint8_t *out)
 {
   uint8_t seq[NR_PDCCH_JOINT_MAX_E];
   if (m->enc(m->ctx, payload, rnti, out, m->E) != 0)
     return -1;
   const uint32_t nrnti = m->swr ? rnti : 0;
-  gold_seq((uint32_t)((((uint64_t)nrnti << 16) + m->nid) % (1ULL << 31)), m->E, seq);
+  gold_seq((uint32_t)((((uint64_t)nrnti << 16) + nid) % (1ULL << 31)), m->E, seq);
   for (int i = 0; i < m->E; i++)
     out[i] ^= seq[i];
   if (m->pre >= 0) { /* the receiver already removed the sequence for n_RNTI = pre; the residue is g(rnti) ^ g(pre) */
-    gold_seq((uint32_t)((((uint64_t)m->pre << 16) + m->nid) % (1ULL << 31)), m->E, seq);
+    gold_seq((uint32_t)((((uint64_t)m->pre << 16) + nid) % (1ULL << 31)), m->E, seq);
     for (int i = 0; i < m->E; i++)
       out[i] ^= seq[i];
   }
@@ -92,12 +93,19 @@ nr_pdcch_joint_model_t *nr_pdcch_joint_model_new(nr_pdcch_joint_encode_fn enc, v
 nr_pdcch_joint_model_t *nr_pdcch_joint_model_new_ex(nr_pdcch_joint_encode_fn enc, void *ctx, int A, int E,
                                                     uint16_t n_id, int scramble_with_rnti, int pre_descrambled_rnti)
 {
-  if (!enc || A < 1 || A > NR_PDCCH_JOINT_MAX_A || E < A + 16 || E > NR_PDCCH_JOINT_MAX_E)
+  return nr_pdcch_joint_model_new_full(enc, ctx, A, E, n_id, scramble_with_rnti, pre_descrambled_rnti, 0);
+}
+
+nr_pdcch_joint_model_t *nr_pdcch_joint_model_new_full(nr_pdcch_joint_encode_fn enc, void *ctx, int A, int E,
+                                                      uint16_t n_id, int scramble_with_rnti, int pre_descrambled_rnti,
+                                                      int unknown_nid)
+{
+  if (!enc || A < 1 || A > NR_PDCCH_JOINT_MAX_A || E < A + 16 + (unknown_nid ? 16 : 0) || E > NR_PDCCH_JOINT_MAX_E)
     return NULL;
   nr_pdcch_joint_model_t *m = calloc(1, sizeof(*m));
   if (!m)
     return NULL;
-  m->A = A; m->E = E; m->K = A + 16; m->nid = n_id; m->swr = scramble_with_rnti; m->pre = pre_descrambled_rnti; m->enc = enc; m->ctx = ctx;
+  m->A = A; m->E = E; m->K = A + 16 + (unknown_nid ? 16 : 0); m->unk = unknown_nid ? 1 : 0; m->nid = unknown_nid ? 0 : n_id; m->swr = scramble_with_rnti; m->pre = pre_descrambled_rnti; m->enc = enc; m->ctx = ctx;
   m->rows = calloc((size_t)E, sizeof(v128));
   m->base = calloc((size_t)E, 1);
   if (!m->rows || !m->base) {
@@ -105,15 +113,16 @@ nr_pdcch_joint_model_t *nr_pdcch_joint_model_new_ex(nr_pdcch_joint_encode_fn enc
     return NULL;
   }
   uint8_t t[NR_PDCCH_JOINT_MAX_E];
-  if (joint_eval(m, 0, 0, m->base) != 0) {
+  if (joint_eval(m, 0, 0, m->nid, m->base) != 0) {
     nr_pdcch_joint_model_free(m);
     return NULL;
   }
   /* PROBE the columns: never assume the structure of the real encoder. */
   for (int j = 0; j < m->K; j++) {
     const uint64_t pl = j < A ? (1ULL << j) : 0;
-    const uint16_t rn = j < A ? 0 : (uint16_t)(1u << (j - A));
-    if (joint_eval(m, pl, rn, t) != 0) {
+    const uint16_t rn = (j >= A && j < A + 16) ? (uint16_t)(1u << (j - A)) : 0;
+    const uint16_t nd = (uint16_t)(m->nid ^ (j >= A + 16 ? (1u << (j - A - 16)) : 0)); /* n_ID columns (unknown mode) */
+    if (joint_eval(m, pl, rn, nd, t) != 0) {
       nr_pdcch_joint_model_free(m);
       return NULL;
     }
@@ -127,11 +136,16 @@ nr_pdcch_joint_model_t *nr_pdcch_joint_model_new_ex(nr_pdcch_joint_encode_fn enc
   for (int trial = 0; trial < 16; trial++) {
     const uint64_t pl = xs64(&seed) & (A == 64 ? ~0ULL : ((1ULL << A) - 1));
     const uint16_t rn = (uint16_t)xs64(&seed);
+    const uint16_t nd = m->unk ? (uint16_t)xs64(&seed) : m->nid;
     v128 x = {{pl, 0}};
     for (int r = 0; r < 16; r++)
       if ((rn >> r) & 1)
         v_set(&x, A + r);
-    if (joint_eval(m, pl, rn, t) != 0) {
+    if (m->unk)
+      for (int r = 0; r < 16; r++)
+        if ((nd >> r) & 1)
+          v_set(&x, A + 16 + r);
+    if (joint_eval(m, pl, rn, nd, t) != 0) {
       nr_pdcch_joint_model_free(m);
       return NULL;
     }
@@ -142,8 +156,8 @@ nr_pdcch_joint_model_t *nr_pdcch_joint_model_new_ex(nr_pdcch_joint_encode_fn enc
       }
   }
   /* RANK: every unknown must be observable, otherwise the answer is not unique. */
-  v128 basis[80];
-  int piv[80], r = 0;
+  v128 basis[JMAX_K];
+  int piv[JMAX_K], r = 0;
   for (int i = 0; i < E && r < m->K; i++) {
     v128 v = m->rows[i];
     for (int p = 0; p < r; p++)
@@ -191,8 +205,8 @@ int nr_pdcch_joint_solve(const nr_pdcch_joint_model_t *m, const int16_t *llr, in
   qsort(ord, (size_t)E, sizeof(wi_t), cmp_wi);
 
   /* the K most reliable LINEARLY INDEPENDENT observations (the most reliable basis, MRIP) */
-  v128 basis[80];
-  int piv[80], I[80], r = 0;
+  v128 basis[JMAX_K];
+  int piv[JMAX_K], I[JMAX_K], r = 0;
   for (int o = 0; o < E && r < K; o++) {
     v128 v = m->rows[ord[o].idx];
     for (int p = 0; p < r; p++)
@@ -208,7 +222,7 @@ int nr_pdcch_joint_solve(const nr_pdcch_joint_model_t *m, const int16_t *llr, in
     return 0;
 
   /* invert B = rows at I (Gauss-Jordan on [B | Id]) */
-  v128 Bm[80], Iv[80];
+  v128 Bm[JMAX_K], Iv[JMAX_K];
   for (int t = 0; t < K; t++) {
     Bm[t] = m->rows[I[t]];
     memset(&Iv[t], 0, sizeof(Iv[t]));
@@ -231,7 +245,7 @@ int nr_pdcch_joint_solve(const nr_pdcch_joint_model_t *m, const int16_t *llr, in
       }
   }
   /* Iv[j] (a vector over t) is row j of B^-1. Columns: colInv[t] is a vector over j. */
-  v128 colInv[80];
+  v128 colInv[JMAX_K];
   memset(colInv, 0, sizeof(colInv));
   for (int j = 0; j < K; j++)
     for (int t = 0; t < K; t++)
@@ -248,7 +262,7 @@ int nr_pdcch_joint_solve(const nr_pdcch_joint_model_t *m, const int16_t *llr, in
       v_set(&x0, j);
 
   /* d0 = M x0 XOR y' (where the exact solution disagrees with the observation), and T_t = M colInv[t] */
-  ebits d0 = {{0}}, T[80];
+  ebits d0 = {{0}}, T[JMAX_K];
   memset(T, 0, sizeof(T));
   for (int i = 0; i < E; i++) {
     if (v_par(m->rows[i], x0) ^ e_get(&yb, i))
@@ -316,6 +330,14 @@ int nr_pdcch_joint_solve(const nr_pdcch_joint_model_t *m, const int16_t *llr, in
     if (v_get(x, m->A + b))
       rn |= (uint16_t)(1u << b);
   out->rnti = rn;
+  out->nid = m->nid;
+  if (m->unk) {
+    uint16_t nd = 0;
+    for (int b = 0; b < 16; b++)
+      if (v_get(x, m->A + 16 + b))
+        nd |= (uint16_t)(1u << b);
+    out->nid = nd;
+  }
 
   {
     ebits d = d0;

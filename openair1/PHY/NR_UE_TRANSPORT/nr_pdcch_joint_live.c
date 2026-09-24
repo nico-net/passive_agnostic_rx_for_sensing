@@ -72,8 +72,17 @@ bool nr_pdcch_joint_live_decode_11(const int16_t *llr, uint8_t aggregation_level
                                    int pre_descrambled_rnti, uint16_t rnti_min, uint16_t rnti_max,
                                    nr_pdcch_joint_live_result_t *out)
 {
+  return nr_pdcch_joint_live_decode(llr, aggregation_level, dci_length, nid, pre_descrambled_rnti, rnti_min, rnti_max,
+                                    1, out);
+}
+
+bool nr_pdcch_joint_live_decode(const int16_t *llr, uint8_t aggregation_level, uint16_t dci_length, uint16_t nid,
+                                int pre_descrambled_rnti, uint16_t rnti_min, uint16_t rnti_max, int indicator,
+                                nr_pdcch_joint_live_result_t *out)
+{
   if (!nr_pdcch_joint_live_enabled() || out == NULL || dci_length == 0 || dci_length > NR_PDCCH_JOINT_MAX_A
-      || aggregation_level == 0 || aggregation_level > 8)
+      || (aggregation_level != 1 && aggregation_level != 2 && aggregation_level != 4 && aggregation_level != 8
+          && aggregation_level != 16))
     return false;
   const int E = aggregation_level * 108;
   out->reject_reason = NULL;
@@ -94,8 +103,9 @@ bool nr_pdcch_joint_live_decode_11(const int16_t *llr, uint8_t aggregation_level
     out->reject_reason = "joint solve: RNTI outside plausible range";
     return false;
   }
-  if (((r.payload >> (dci_length - 1)) & 1) == 0) { /* the DL-indicator admission raw_11 applies */
-    out->reject_reason = "joint solve: format indicator=0 (UL grant, not DL)";
+  if ((int)((r.payload >> (dci_length - 1)) & 1) != (indicator ? 1 : 0)) { /* the admission raw_11 / raw_01 apply */
+    out->reject_reason = indicator ? "joint solve: format indicator=0 (UL grant, not DL)"
+                                   : "joint solve: format indicator=1 (DL assignment, not an UL grant)";
     return false;
   }
   atomic_fetch_add(&s_accepted, 1);

@@ -46,7 +46,7 @@ extern "C" {
  * validated on air; the LLRs it wants are the PRE-descrambling QPSK demodulator outputs of a candidate.
  */
 
-#define NR_PDCCH_JOINT_MAX_E 864 /* AL8: 8 CCE * 108 bits */
+#define NR_PDCCH_JOINT_MAX_E 1728 /* AL16: 16 CCE * 108 bits */
 #define NR_PDCCH_JOINT_MAX_A 64  /* polar_encoder_fast's own payload limit */
 
 /* Encode callback: write the E coded bits (0/1 per byte, index = coded-bit order) that the REAL encoder
@@ -67,6 +67,15 @@ nr_pdcch_joint_model_t *nr_pdcch_joint_model_new(nr_pdcch_joint_encode_fn enc, v
 nr_pdcch_joint_model_t *nr_pdcch_joint_model_new_ex(nr_pdcch_joint_encode_fn enc, void *ctx, int A, int E,
                                                     uint16_t n_id, int scramble_with_rnti, int pre_descrambled_rnti);
 
+/* Same again, optionally with n_ID UNKNOWN too (unknown_nid = 1; n_id is then ignored). The scrambling c_init =
+ * (n_RNTI << 16) + n_ID is linear in n_ID's 16 bits as well, so the pdcch-DMRS-ScramblingID can be recovered from
+ * the data jointly with the RNTI and payload -- for a cell where that ID was not found by the DM-RS sweep. It costs
+ * 16 more unknowns, so it needs real parity: AL >= 2 (AL1 leaves only ~29 redundancy bits and will rarely be
+ * accepted). */
+nr_pdcch_joint_model_t *nr_pdcch_joint_model_new_full(nr_pdcch_joint_encode_fn enc, void *ctx, int A, int E,
+                                                      uint16_t n_id, int scramble_with_rnti, int pre_descrambled_rnti,
+                                                      int unknown_nid);
+
 /* Cheap O(E) SCALE-FREE screen run before the solver, because almost every PDCCH candidate is empty and a
  * solve costs 20-160 us. r = (mean|l|)^2 / mean(l^2) is 2/pi for zero-mean Gaussian noise and tends to 1 for a
  * decodable signal; under noise sd(r) = 0.339/sqrt(E) (delta method, checked by Monte Carlo in the tests), so the
@@ -74,11 +83,12 @@ nr_pdcch_joint_model_t *nr_pdcch_joint_model_new_ex(nr_pdcch_joint_encode_fn enc
  * screened out even though the solver could have decoded it. Returns 1 to pass. */
 int nr_pdcch_joint_prescreen(const int16_t *llr, int E);
 void nr_pdcch_joint_model_free(nr_pdcch_joint_model_t *m);
-int nr_pdcch_joint_model_unknowns(const nr_pdcch_joint_model_t *m); /* A + 16 */
+int nr_pdcch_joint_model_unknowns(const nr_pdcch_joint_model_t *m); /* A + 16 (+16 with unknown n_ID) */
 
 typedef struct {
   uint64_t payload;   /* recovered DCI payload, low A bits (polar_encoder_fast's packing) */
   uint16_t rnti;      /* recovered C-RNTI, all 16 bits (bit 15 comes from the CRC mask) */
+  uint16_t nid;       /* recovered n_ID when the model was built with unknown_nid, else the model's n_ID */
   double corr;        /* agreement of the winner with the observation on the redundancy positions, [-1,1] */
   double threshold;   /* acceptance bar for corr derived from the observation and the candidate count */
   int n_candidates;   /* candidates examined */

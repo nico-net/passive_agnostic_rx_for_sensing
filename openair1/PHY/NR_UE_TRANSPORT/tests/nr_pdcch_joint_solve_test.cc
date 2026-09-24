@@ -349,6 +349,65 @@ TEST(JointSolve, PrescreenMatchesItsDerivationAndKeepsSolvableCandidates)
   }
 }
 
+// Other kinds of cell: n_ID unknown too (a configured pdcch-DMRS-ScramblingID the DM-RS sweep did not find), and
+// the widest aggregation level.
+TEST(JointSolve, RecoversAnUnknownNidTogetherWithTheRnti)
+{
+  std::mt19937 rng(37);
+  for (int L : {2, 4}) {
+    const int A = 47, E = EncLen(A, L);
+    EncCtx c{A, L};
+    auto* m = nr_pdcch_joint_model_new_full(RealEncode, &c, A, E, 0, 1, -1, /*unknown_nid=*/1);
+    ASSERT_NE(m, nullptr) << "AL" << L;
+    EXPECT_EQ(nr_pdcch_joint_model_unknowns(m), A + 32);
+    int exact = 0;
+    for (int t = 0; t < 60; t++) {
+      const uint64_t pl = ((uint64_t)rng() << 32 | rng()) & Mask(A);
+      const uint16_t rn = (uint16_t)rng(), nd = (uint16_t)rng();
+      auto llr = Channel(TxBits(pl, rn, nd, A, L, true), 40.0, rng);
+      nr_pdcch_joint_result_t r;
+      nr_pdcch_joint_solve(m, llr.data(), 1, &r);
+      if (r.accepted && r.payload == pl && r.rnti == rn && r.nid == nd) exact++;
+    }
+    EXPECT_EQ(exact, 60) << "AL" << L;
+    int ok8 = 0;
+    for (int t = 0; t < 100; t++) {
+      const uint64_t pl = ((uint64_t)rng() << 32 | rng()) & Mask(A);
+      const uint16_t rn = (uint16_t)rng(), nd = (uint16_t)rng();
+      auto llr = Channel(TxBits(pl, rn, nd, A, L, true), 8.0, rng);
+      nr_pdcch_joint_result_t r;
+      nr_pdcch_joint_solve(m, llr.data(), 0, &r);
+      ok8 += (r.accepted && r.payload == pl && r.rnti == rn && r.nid == nd);
+    }
+    printf("[unknown-nid] AL%d K=%d: noiseless 60/60, Es/N0 8 dB order0: %d/100\n", L, A + 32, ok8);
+    nr_pdcch_joint_model_free(m);
+  }
+}
+
+TEST(JointSolve, HandlesAggregationLevel16)
+{
+  std::mt19937 rng(53);
+  const int A = 47, L = 16, E = EncLen(A, L);
+  ASSERT_EQ(E, 1728);
+  EncCtx c{A, L};
+  auto* m = nr_pdcch_joint_model_new(RealEncode, &c, A, E, 2, 1);
+  ASSERT_NE(m, nullptr);
+  for (double snr : {0.0, 6.0})
+    for (int order : {0, 2}) {
+      int ok = 0;
+      for (int t = 0; t < 30; t++) {
+        const uint64_t pl = ((uint64_t)rng() << 32 | rng()) & Mask(A);
+        const uint16_t rn = (uint16_t)rng();
+        auto llr = Channel(TxBits(pl, rn, 2, A, L, true), snr, rng);
+        nr_pdcch_joint_result_t r;
+        ok += (nr_pdcch_joint_solve(m, llr.data(), order, &r) && r.payload == pl && r.rnti == rn);
+      }
+      printf("[AL16] Es/N0 %.0f dB order%d: %d/30\n", snr, order, ok);
+      if (snr >= 6.0) EXPECT_GE(ok, 29);
+    }
+  nr_pdcch_joint_model_free(m);
+}
+
 int main(int argc, char** argv)
 {
   crcTableInit();
