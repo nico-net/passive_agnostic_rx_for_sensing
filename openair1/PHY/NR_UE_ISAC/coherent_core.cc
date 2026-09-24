@@ -13,6 +13,38 @@
 namespace nr_isac::coherent {
 namespace {
 uint32_t next_pow2(uint32_t n) { uint32_t p = 1; while (p < n) p <<= 1; return p; }
+// Inverse power-of-two FFT with nr_isac::fft_inplace's convention (sum * e^{+j..} / N), for the
+// coherent path only: cached twiddles + bit reversal and explicit real arithmetic. fft.cc's radix-2
+// multiplies std::complex through __muldc3 (no -fcx-limited-range here) and was ~0.4 ms per 4096
+// points -- most of find_los's ~100 ms/CPI. fft.cc itself is untouched (legacy stages keep bit parity).
+void ifft_pow2(std::vector<cd>& a)
+{
+  const size_t n = a.size();
+  if (n < 2 || (n & (n - 1))) { fft_inplace(a, true); return; }
+  struct Plan { std::vector<uint32_t> rev; std::vector<double> c, s; };
+  thread_local std::map<size_t, Plan> plans;
+  Plan& P = plans[n];
+  if (P.rev.empty()) {
+    P.rev.resize(n); P.c.resize(n / 2); P.s.resize(n / 2);
+    uint32_t lg = 0; while (((size_t)1 << lg) < n) ++lg;
+    for (size_t i = 0; i < n; ++i) { uint32_t r = 0; for (uint32_t b = 0; b < lg; ++b) r |= ((i >> b) & 1u) << (lg - 1 - b); P.rev[i] = r; }
+    for (size_t j = 0; j < n / 2; ++j) { P.c[j] = std::cos(2 * M_PI * j / n); P.s[j] = std::sin(2 * M_PI * j / n); }
+  }
+  for (size_t i = 0; i < n; ++i) if (i < P.rev[i]) std::swap(a[i], a[P.rev[i]]);
+  double* x = reinterpret_cast<double*>(a.data());
+  for (size_t len = 2; len <= n; len <<= 1) {
+    const size_t h = len / 2, st = n / len;
+    for (size_t b = 0; b < n; b += len)
+      for (size_t j = 0; j < h; ++j) {
+        const double wr = P.c[j * st], wi = P.s[j * st];
+        double* u = x + 2 * (b + j); double* v = x + 2 * (b + j + h);
+        const double tr = v[0] * wr - v[1] * wi, ti = v[0] * wi + v[1] * wr;
+        v[0] = u[0] - tr; v[1] = u[1] - ti; u[0] += tr; u[1] += ti;
+      }
+  }
+  const double inv = 1.0 / n;
+  for (size_t i = 0; i < 2 * n; ++i) x[i] *= inv;
+}
 double hann(double u) { return 0.5 - 0.5 * std::cos(2 * M_PI * u); }  // u in [0,1]
 double baseband_hz(const CfrWindow& w, uint32_t k) { return ((double)k - w.subcarriers / 2.0) * w.scs_hz; }
 // Observed [lo,hi] subcarrier span of a row; returns false when the row is empty.
@@ -56,7 +88,7 @@ std::vector<cd> row_profile(const CfrWindow& w, const Axes& a, uint32_t ant, uin
       const cd z = unit ? cd(1) : cd(w.values[w.sample(ant, row, k)]) * ramp - (sub ? (*sub)[k] : cd(0));
       buf[(size_t)((q % (int)a.n_fft + (int)a.n_fft) % (int)a.n_fft)] += z * win;
     }
-  fft_inplace(buf, true);                         // inverse: sum * e^{+j...} / N
+  ifft_pow2(buf);                                 // inverse: sum * e^{+j...} / N
   if (wsum > 0) for (cd& v : buf) v *= (double)a.n_fft / wsum;
   return buf;
 }
@@ -514,57 +546,10 @@ RdResult range_doppler(const CfrWindow& w, const Axes& a, const LosEstimate& L, 
   // shape, and the static-removal operator. A hopping allocation spreads a path over its row
   // mainlobe at every Doppler bin (per-row phase 2*pi*fc_r*x); a regular hop stride puts a coherent
   // serrodyne ghost there; TDD gaps put Doppler replicas. The exact response of a path is all of it.
-  RdResult::Waveform& m = out.wf;
-  const long O = RdResult::Waveform::kOvs;
-  m.w = win; m.wsum = wsum; m.sc = w.subcarriers; m.X = (long)a.n_range + 4;
-  m.fc.assign(w.rows, 0.0); m.hh.assign(w.rows, 0.0); m.grp.assign(w.rows, -1);
-  m.mask.assign(w.observed.begin(), w.observed.end());
-  std::vector<std::vector<uint8_t>> shapes;
-  std::vector<double> H(w.rows, 0.0);
-  const long nx = 2 * m.X * O + 1;
-  for (uint32_t r = 0; r < w.rows; ++r) {
-    uint32_t lo, hi; if (!row_span(w, r, &lo, &hi)) continue;
-    std::vector<uint8_t> sh(w.observed.begin() + w.cell(r, lo), w.observed.begin() + w.cell(r, hi) + 1);
-    const double kc = 0.5 * (lo + hi);
-    m.fc[r] = ((kc - w.subcarriers / 2.0)) * w.scs_hz;
-    double h1 = 0, h2 = 0;
-    for (uint32_t k = lo; k <= hi; ++k) if (w.observed[w.cell(r, k)]) {
-      const double h = hann(hi > lo ? (double)(k - lo) / (hi - lo) : 0.5); h1 += h; h2 += h * h;
-    }
-    H[r] = h1; m.hh[r] = h1 > 0 ? h2 / (h1 * h1) : 0.0;
-    int32_t g = -1;
-    for (size_t q = 0; q < shapes.size(); ++q) if (shapes[q] == sh) { g = (int32_t)q; break; }
-    if (g < 0) {
-      g = (int32_t)shapes.size(); shapes.push_back(sh);
-      std::vector<cd> B(nx), B2(nx);
-      for (long u = 0; u < nx; ++u) {
-        const double x = -m.X + (double)u / O;
-        const cd rot = std::polar(1.0, 2 * M_PI * x / a.n_fft);
-        cd ph = std::polar(1.0, -2 * M_PI * x * (kc - lo) / a.n_fft), b1 = 0, b2 = 0;   // phasor recurrence over k
-        for (uint32_t k = lo; k <= hi; ++k, ph *= rot) if (w.observed[w.cell(r, k)]) {
-          const double h = hann(hi > lo ? (double)(k - lo) / (hi - lo) : 0.5); b1 += h * ph; b2 += h * h * ph;
-        }
-        B[u] = b1 / h1; B2[u] = b2 / h2;
-      }
-      m.B.push_back(std::move(B)); m.B2.push_back(std::move(B2));
-    }
-    m.grp[r] = g;
-  }
-  m.w2sum = 0; for (uint32_t r = 0; r < w.rows; ++r) if (m.grp[r] >= 0) m.w2sum += win[r] * win[r] * m.hh[r];
-  // Static-removal operator: Q_k(d) = sum_{r observing k} w_r e^{-j2pi f_d t_r} h_rk / (H_r wsum).
-  // Removing the per-subcarrier slow-time mean subtracts, from a path (A, x0, f), the RD term
+  // Static-removal operator Q_k(d) = sum_{r observing k} w_r e^{-j2pi f_d t_r} h_rk / (H_r wsum):
+  // removing the per-subcarrier slow-time mean subtracts, from a path (A, x0, f), the RD term
   // -A sum_k e^{j2pi f_k (x - x0) delay_step} M_k(f) Q_k(d), M_k(f) = mean_{r observing k} e^{j2pi f t_r}.
-  m.Q.assign((size_t)w.subcarriers * a.n_dopp, cf(0));
-  m.lo.assign(w.rows, 1); m.hi.assign(w.rows, 0);
-  for (uint32_t r = 0; r < w.rows; ++r) {
-    uint32_t lo, hi; if (!row_span(w, r, &lo, &hi)) continue;
-    m.lo[r] = lo; m.hi[r] = hi;
-    for (uint32_t d = 0; d < a.n_dopp; ++d) {
-      const cd e = ed[(size_t)d * w.rows + r] / H[r];
-      cf* q = &m.Q[(size_t)d * w.subcarriers];
-      for (uint32_t k = lo; k <= hi; ++k) if (w.observed[w.cell(r, k)]) q[k] += cf(e * hann(hi > lo ? (double)(k - lo) / (hi - lo) : 0.5));
-    }
-  }
+  out.wf = build_waveform(w, a);
   return out;
 }
 
@@ -986,7 +971,7 @@ const std::vector<cd>& static_term(const RdResult& R, ChanFit& f, uint32_t d)
     const long qi = (long)k - (long)(wf.sc / 2);
     buf[(size_t)(((qi % N) + N) % N)] += f.M[k] * cd(q) * std::polar(1.0, -2 * M_PI * fk * f.p * a.delay_step_s);
   }
-  fft_inplace(buf, true);
+  ifft_pow2(buf);
   out.resize(a.n_range);
   for (uint32_t m = 0; m < a.n_range; ++m) out[m] = -buf[m] * (double)N;
   return out;
@@ -1618,6 +1603,95 @@ Calibration Calibrator::update(const std::array<cd, kCh>& tap, const std::array<
   }
   last_ = c;
   return c;
+}
+
+// Task 10 (GPU path): identical to range_doppler()'s own wf-building block (it does not read
+// `los`/`sync`, only row masks/times), factored out so the GPU range_doppler can build `wf` on the
+// host without paying for the CPU RD.v computation. Kept a byte-for-byte copy of that block on
+// purpose -- range_doppler() itself is left untouched (append-only file per the Task 10 dispatch).
+RdResult::Waveform build_waveform(const CfrWindow& w, const Axes& a)
+{
+  RdResult::Waveform m;
+  if (!a.valid) return m;
+  std::vector<double> win(w.rows); double wsum = 0;
+  for (uint32_t r = 0; r < w.rows; ++r) { win[r] = hann(a.row_t_s.back() > 0 ? a.row_t_s[r] / a.row_t_s.back() : 0.5); wsum += win[r]; }
+  std::vector<cd> ed((size_t)a.n_dopp * w.rows);     // win_r e^{-j2pi f_d t_r} / wsum, [d][r]
+  for (uint32_t d = 0; d < a.n_dopp; ++d)
+    for (uint32_t r = 0; r < w.rows; ++r)
+      ed[(size_t)d * w.rows + r] = win[r] / wsum * std::polar(1.0, -2 * M_PI * (a.dopp0_hz + d * a.dopp_step_hz) * a.row_t_s[r]);
+  const long O = RdResult::Waveform::kOvs;
+  m.w = win; m.wsum = wsum; m.sc = w.subcarriers; m.X = (long)a.n_range + 4;
+  m.fc.assign(w.rows, 0.0); m.hh.assign(w.rows, 0.0); m.grp.assign(w.rows, -1);
+  m.mask.assign(w.observed.begin(), w.observed.end());
+  std::vector<std::vector<uint8_t>> shapes;
+  std::vector<double> H(w.rows, 0.0);
+  const long nx = 2 * m.X * O + 1;
+  for (uint32_t r = 0; r < w.rows; ++r) {
+    uint32_t lo, hi; if (!row_span(w, r, &lo, &hi)) continue;
+    std::vector<uint8_t> sh(w.observed.begin() + w.cell(r, lo), w.observed.begin() + w.cell(r, hi) + 1);
+    const double kc = 0.5 * (lo + hi);
+    m.fc[r] = ((kc - w.subcarriers / 2.0)) * w.scs_hz;
+    double h1 = 0, h2 = 0;
+    for (uint32_t k = lo; k <= hi; ++k) if (w.observed[w.cell(r, k)]) {
+      const double h = hann(hi > lo ? (double)(k - lo) / (hi - lo) : 0.5); h1 += h; h2 += h * h;
+    }
+    H[r] = h1; m.hh[r] = h1 > 0 ? h2 / (h1 * h1) : 0.0;
+    int32_t g = -1;
+    for (size_t q = 0; q < shapes.size(); ++q) if (shapes[q] == sh) { g = (int32_t)q; break; }
+    if (g < 0) {
+      g = (int32_t)shapes.size(); shapes.push_back(sh);
+      std::vector<cd> B(nx), B2(nx);
+      // Evenly spaced observed subcarriers (contiguous or comb): the Hann-weighted sum is a sum of
+      // shifted Dirichlet kernels, exact in O(1) per sample (the direct sum below cost ~160 ms/CPI).
+      uint32_t M = 0, c = 0; bool ap = true;
+      for (uint32_t k = lo, prev = UINT32_MAX; k <= hi; ++k) if (w.observed[w.cell(r, k)]) {
+        if (prev != UINT32_MAX) { if (!c) c = k - prev; else if (k - prev != c) ap = false; }
+        prev = k; ++M;
+      }
+      if (ap && M >= 3) {
+        const double al = 2 * M_PI / (M - 1);
+        auto D = [M](double psi) {                       // sum_{m<M} e^{j psi m}
+          const double s2 = std::sin(0.5 * psi);
+          if (std::abs(s2) < 1e-9) return std::polar((double)M, 0.5 * (M - 1) * (psi - 2 * M_PI * std::round(psi / (2 * M_PI))));
+          return std::polar(std::sin(0.5 * M * psi) / s2, 0.5 * psi * (M - 1));
+        };
+        for (long u = 0; u < nx; ++u) {
+          const double th = 2 * M_PI * (-m.X + (double)u / O) / a.n_fft, phi = th * c;
+          const cd e0 = std::polar(1.0, th * ((double)lo - kc));
+          const cd d0 = D(phi), dp = D(phi + al), dm = D(phi - al), dp2 = D(phi + 2 * al), dm2 = D(phi - 2 * al);
+          B[u] = e0 * (0.5 * d0 - 0.25 * (dp + dm)) / h1;
+          B2[u] = e0 * (0.375 * d0 - 0.25 * (dp + dm) + 0.0625 * (dp2 + dm2)) / h2;
+        }
+      } else
+      for (long u = 0; u < nx; ++u) {
+        const double x = -m.X + (double)u / O;
+        const cd rot = std::polar(1.0, 2 * M_PI * x / a.n_fft);
+        cd ph = std::polar(1.0, -2 * M_PI * x * (kc - lo) / a.n_fft), b1 = 0, b2 = 0;   // phasor recurrence over k
+        for (uint32_t k = lo; k <= hi; ++k, ph *= rot) if (w.observed[w.cell(r, k)]) {
+          const double h = hann(hi > lo ? (double)(k - lo) / (hi - lo) : 0.5); b1 += h * ph; b2 += h * h * ph;
+        }
+        B[u] = b1 / h1; B2[u] = b2 / h2;
+      }
+      m.B.push_back(std::move(B)); m.B2.push_back(std::move(B2));
+    }
+    m.grp[r] = g;
+  }
+  m.w2sum = 0; for (uint32_t r = 0; r < w.rows; ++r) if (m.grp[r] >= 0) m.w2sum += win[r] * win[r] * m.hh[r];
+  m.Q.assign((size_t)w.subcarriers * a.n_dopp, cf(0));
+  m.lo.assign(w.rows, 1); m.hi.assign(w.rows, 0);
+  std::vector<double> hk;
+  for (uint32_t r = 0; r < w.rows; ++r) {
+    uint32_t lo, hi; if (!row_span(w, r, &lo, &hi)) continue;
+    m.lo[r] = lo; m.hi[r] = hi;
+    hk.assign(hi - lo + 1, 0.0);                      // the row's Hann taper, once (not per Doppler bin)
+    for (uint32_t k = lo; k <= hi; ++k) if (w.observed[w.cell(r, k)]) hk[k - lo] = hann(hi > lo ? (double)(k - lo) / (hi - lo) : 0.5);
+    for (uint32_t d = 0; d < a.n_dopp; ++d) {
+      const cd e = ed[(size_t)d * w.rows + r] / H[r];
+      cf* q = &m.Q[(size_t)d * w.subcarriers];
+      for (uint32_t k = lo; k <= hi; ++k) if (hk[k - lo] != 0.0) q[k] += cf(e * hk[k - lo]);
+    }
+  }
+  return m;
 }
 
 } // namespace nr_isac::coherent

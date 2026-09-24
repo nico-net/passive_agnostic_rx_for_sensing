@@ -1124,7 +1124,8 @@ if(ENABLE_CHANNEL_SIM_CUDA)
   list(APPEND NR_UE_ISAC_SRC
        ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/sync_correction_cuda.cu
        ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/detector_cuda.cu
-       ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/family_processing_cuda.cu)
+       ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/family_processing_cuda.cu
+       ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/coherent_cuda.cu)
   # Each detector lane is its own host thread. With the legacy default stream every lane's sync and
   # family kernels, and every synchronous cudaMemcpy, serialised behind all the other lanes' work
   # (measured: 8 lanes, sync estimate p50 3 ms alone -> 34 ms concurrent). Per-thread default streams
@@ -1133,9 +1134,11 @@ if(ENABLE_CHANNEL_SIM_CUDA)
        ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/sync_correction_cuda.cu
        ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/detector_cuda.cu
        ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/family_processing_cuda.cu
+       ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/coherent_cuda.cu
        PROPERTIES COMPILE_OPTIONS "--default-stream=per-thread")
 else()
-  list(APPEND NR_UE_ISAC_SRC ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/detector_cuda_stub.cc)
+  list(APPEND NR_UE_ISAC_SRC ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/detector_cuda_stub.cc
+                            ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/coherent_cuda_stub.cc)
 endif()
 # Passive receiver vs sensing pipeline. The blind PDCCH -> DCI -> PDSCH receiver only ever hands
 # channel estimates TO the sensing engine and never reads anything back, so on a receiver-only build
@@ -2447,6 +2450,14 @@ if(ENABLE_TESTS)
     target_link_libraries(test_nr_isac_coherent_focus PRIVATE NR_UE_ISAC)
     add_dependencies(tests test_nr_isac_coherent_focus)
     add_test(NAME test_nr_isac_coherent_focus COMMAND ./test_nr_isac_coherent_focus)
+    # Task 10: GPU/CPU parity for coherent range_doppler()/detect()/refine(). Always built (not
+    # gated on ENABLE_CHANNEL_SIM_CUDA): coherent_cuda.h's CudaCoherent is backed by the real CUDA
+    # path or by coherent_cuda_stub.cc, and the test itself SKIPs at runtime via available().
+    add_executable(test_nr_isac_coherent_cuda_parity ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/tests/coherent_cuda_parity_test.cc)
+    target_include_directories(test_nr_isac_coherent_cuda_parity PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_ISAC)
+    target_link_libraries(test_nr_isac_coherent_cuda_parity PRIVATE NR_UE_ISAC)
+    add_dependencies(tests test_nr_isac_coherent_cuda_parity)
+    add_test(NAME test_nr_isac_coherent_cuda_parity COMMAND ./test_nr_isac_coherent_cuda_parity)
   endif()
   # uniqCfg/exit_function (needed by LOG/CONFIG_LIB) are defined directly in isac_sync_test.cc,
   # not via minimal_lib -- static-archive link order made minimal_lib's stubs unreliable here.

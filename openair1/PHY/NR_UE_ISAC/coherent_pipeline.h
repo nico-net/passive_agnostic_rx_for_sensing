@@ -2,6 +2,7 @@
 #pragma once
 #include "coherent_autofocus.h"
 #include "coherent_core.h"
+#include "coherent_cuda.h"
 #include "coherent_report.h"
 #include "coherent_tracker.h"
 #include <chrono>
@@ -34,6 +35,8 @@ private:
   Calibrator cal_;
   std::unique_ptr<CoherentTracker> tracker_;
   std::unique_ptr<Autofocus> af_;
+  std::unique_ptr<CudaCoherent> cuda_;   // Task 10: GPU range_doppler()/envelope() when available
+  bool cuda_fail_closed_ = false;        // NR_ISAC_REQUIRE_CUDA=1 and no device: skip every CPI
   JsonlSink reports_, tracks_, coherence_;
   mutable std::mutex mu_;
   std::condition_variable cv_;

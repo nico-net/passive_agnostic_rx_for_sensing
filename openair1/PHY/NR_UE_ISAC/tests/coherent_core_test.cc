@@ -134,6 +134,26 @@ int main() {
     require(!L4.found[0] && !L4.found[1] && !L4.found[2] && !L4.found[3], "no LOS on invalid axes");
     require(!estimate_row_sync(w4, a4, L4).valid, "row sync invalid on invalid axes");
     require(range_doppler(w4, a4, L4, estimate_row_sync(w4, a4, L4)).rd.v.empty(), "no RD on invalid axes"); }
+  // --- build_waveform's closed-form (Dirichlet) kernel == the direct Hann-weighted sum, contiguous and comb-2
+  for (uint32_t comb : {1u, 2u}) {
+    CfrWindow wk = make_window(8, {{los, 1.0, 0.0}}, {0, 0, 0, 0}, 0, 16, 7, comb);
+    coherent::Axes ak = derive_axes(wk, vol, g, 10.0); require(ak.valid, "axes valid (kernel)");
+    const RdResult::Waveform m = build_waveform(wk, ak);
+    uint32_t lo = 0, hi = 0; while (!wk.observed[wk.cell(0, lo)]) ++lo;
+    for (hi = wk.subcarriers - 1; !wk.observed[wk.cell(0, hi)]; --hi) {}
+    const double kc = 0.5 * (lo + hi); double h1 = 0, h2 = 0, err = 0;
+    auto hn = [&](uint32_t k) { return 0.5 - 0.5 * std::cos(2 * M_PI * (double)(k - lo) / (hi - lo)); };
+    for (uint32_t k = lo; k <= hi; ++k) if (wk.observed[wk.cell(0, k)]) { h1 += hn(k); h2 += hn(k) * hn(k); }
+    const std::vector<cd>& B = m.B[m.grp[0]]; const std::vector<cd>& B2 = m.B2[m.grp[0]];
+    for (size_t u = 0; u < B.size(); u += 7) {
+      const double x = -m.X + (double)u / RdResult::Waveform::kOvs; cd b1 = 0, b2 = 0;
+      for (uint32_t k = lo; k <= hi; ++k) if (wk.observed[wk.cell(0, k)])
+        { const cd e = std::polar(1.0, 2 * M_PI * x * (k - kc) / ak.n_fft); b1 += hn(k) * e; b2 += hn(k) * hn(k) * e; }
+      err = std::max({err, std::abs(B[u] - b1 / h1), std::abs(B2[u] - b2 / h2)});
+    }
+    std::printf("  waveform kernel comb-%u: closed form vs direct max err %.2e\n", comb, err);
+    require(err < 1e-9, "closed-form waveform kernel matches the direct sum");
+  }
   // quantile helper
   const double x = gamma_upper_quantile(4, 1e-3);
   require(std::abs(std::exp(-x) * (1 + x + x * x / 2 + x * x * x / 6) - 1e-3) < 1e-9, "Q(4,x)=p");

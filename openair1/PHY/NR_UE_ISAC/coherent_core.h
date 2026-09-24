@@ -98,6 +98,13 @@ double max_exp_sum_quantile(uint32_t m, uint32_t n, double p);
 /** x with Q(shape, x) = p (regularised upper incomplete gamma), integer shape. */
 double gamma_upper_quantile(uint32_t shape, double p);
 
+/** Task 10 (GPU path): the RdResult::Waveform half of range_doppler() (ambiguity/leakage model,
+ * independent of the RD cube itself), factored out as a standalone function so a GPU-computed RD
+ * cube can get a CPU-built `wf` without paying for range_doppler()'s own (CPU) RD.v computation.
+ * Bit-identical to the wf that range_doppler(w, a, los, sync) would have produced for the same
+ * (w, a) -- range_doppler()'s wf-building code never reads `los`/`sync`, only row masks/times. */
+RdResult::Waveform build_waveform(const CfrWindow& w, const Axes& a);
+
 /** Tracks each channel's phase offset vs channel 0 across CPIs (Kalman phase filter, covariance
  * matching for process noise) and, before updating, scores this CPI's LOS taps against the
  * PREVIOUS posterior for a non-tautological coherent-gain / rho diagnostic. */

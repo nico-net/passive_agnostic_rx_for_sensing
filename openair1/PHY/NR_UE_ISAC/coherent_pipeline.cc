@@ -2,9 +2,11 @@
 /* coherent_pipeline.cc -- CPU path; Task 10 adds the CUDA branch. */
 #include "coherent_pipeline.h"
 #include "coherent_ul.h"
+#include "cuda_support.h"
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <sstream>
 
 namespace nr_isac::coherent {
@@ -58,6 +60,18 @@ CoherentPipeline::CoherentPipeline(const CoherentConfig& cfg)
   tp.volume = cfg.volume;
   for (const Vec3& r : cfg.geometry.rx) tp.array_centroid = tp.array_centroid + r * (1.0 / kCh);
   tracker_ = std::make_unique<CoherentTracker>(tp);
+  // Task 10: GPU range_doppler()/envelope(); CPU find_los/row-sync/detect()'s own branch-and-bound
+  // fits/refine()/tracker stay on the host either way (see coherent_cuda.h's file header).
+  // NR_ISAC_CUDA_DISABLE=1: force the CPU path even when a device is present, for a true same-host
+  // same-run A/B (Task 10 benchmarking only; not part of any production config surface).
+  if (CudaCoherent::available() && !environment_flag_enabled("NR_ISAC_CUDA_DISABLE")) {
+    try { cuda_ = std::make_unique<CudaCoherent>(); std::fprintf(stderr, "SENSING: coherent pipeline: CUDA range_doppler/envelope enabled\n"); }
+    catch (const std::exception& e) { std::fprintf(stderr, "SENSING: coherent pipeline: CUDA init failed (%s); falling back to CPU\n", e.what()); }
+  }
+  if (!cuda_ && cuda_required()) {
+    cuda_fail_closed_ = true;
+    std::fprintf(stderr, "SENSING: coherent pipeline: NR_ISAC_REQUIRE_CUDA=1 but no usable CUDA device; every CPI will be skipped\n");
+  }
   worker_ = std::thread([this] { run(); });
   std::fprintf(stderr, "SENSING: coherent pipeline writing %s\n", reports_.path().c_str());
 }
@@ -120,9 +134,11 @@ void CoherentPipeline::process(Job& j)
 {
   const auto t0 = clk::now();
   double tm[7] = {0};   // sync, rd, env, detect, refine, track, ul
+  double tm_los = 0;    // find_los share of tm[0]
   if (!af_) af_ = std::make_unique<Autofocus>(cfg_.geometry, cfg_.survey_sigma_m, j.dl.fc_hz);
   const Geometry geo = af_->geometry();      // this CPI's focus geometry (autofocus contract)
-  const Axes a = j.dl.valid() ? derive_axes(j.dl, cfg_.volume, geo, cfg_.max_speed_mps) : Axes{false, "invalid CFR window"};
+  const Axes a = cuda_fail_closed_ ? Axes{false, "cuda required but unavailable"}
+               : j.dl.valid() ? derive_axes(j.dl, cfg_.volume, geo, cfg_.max_speed_mps) : Axes{false, "invalid CFR window"};
   if (!a.valid) {
     { std::lock_guard<std::mutex> l(mu_); ++st_.skipped; }
     const CoherentStats st = stats();
@@ -140,12 +156,19 @@ void CoherentPipeline::process(Job& j)
   const SurveySigma survey{{cfg_.survey_sigma_m, cfg_.survey_sigma_m, cfg_.survey_sigma_m, cfg_.survey_sigma_m}, cfg_.survey_sigma_m};
 
   auto s0 = clk::now();
+  // find_los / row-sync stay CPU-only either way (Task 10: cheap relative to range_doppler/detect
+  // on this scene, and find_los is being fixed on a parallel branch -- its body is never touched
+  // here; see coherent_cuda.h's file header).
   const LosEstimate L = find_los(j.dl, a, pfa_los);
+  tm_los = ms_since(s0);
   const RowSync rs = estimate_row_sync(j.dl, a, L);
   tm[0] = ms_since(s0); s0 = clk::now();
   // L.found flows into R.los_found: envelope / detect / refine skip channels without a LOS reference.
-  const RdResult R = range_doppler(j.dl, a, L, rs);
+  const RdResult R = cuda_ ? cuda_->range_doppler(j.dl, a, L, rs, true) : range_doppler(j.dl, a, L, rs);
   tm[1] = ms_since(s0); s0 = clk::now();
+  if (cuda_ && std::getenv("NR_ISAC_CUDA_DEBUG_TIMING")) { const auto gt = cuda_->last_timing();
+    std::fprintf(stderr, "CUDA_TIMING rows=%u upload=%.2f build=%.2f fft=%.2f crop_norm=%.2f nudft=%.2f download=%.2f wf=%.2f\n",
+                 j.dl.rows, gt.upload_ms, gt.build_ms, gt.fft_ms, gt.crop_norm_ms, gt.nudft_ms, gt.download_ms, gt.wf_ms); }
   // Calibrator SNR = SNR of R.los_tap, the mean of the n_rows rows' LOS taps: find_los's L.snr is the
   // per-row (signal+noise)/noise power ratio at the LOS bin, so the coherent R-row mean carries
   // (L.snr - 1) * n_rows.
@@ -154,11 +177,26 @@ void CoherentPipeline::process(Job& j)
   for (uint32_t i = 0; i < kCh; ++i) los_snr[i] = L.found[i] ? std::max(L.snr[i] - 1.0, 0.0) * n_rows : 0.0;
   const Calibration cal = cal_.update(R.los_tap, L.found, los_snr);
   const Grid G = envelope_grid(cfg_.volume, a);
-  const std::vector<float> E = envelope(R, G, geo);
-  tm[2] = ms_since(s0); s0 = clk::now();
-  std::vector<Detection> D = detect(E, R, G, geo, detect_params(a, G, cfg_.false_object_intensity_per_s));
-  tm[3] = ms_since(s0); s0 = clk::now();
-  for (Detection& d : D) refine(d, R, G, geo, cal, survey);
+  std::vector<Detection> D;
+  std::vector<float> E;   // CPU path only; GPU path's equivalent is cuda_->last_envelope() (see below)
+  // Task 10: on GPU, cuda_->detect() runs the envelope kernel on the device and then calls the SAME
+  // unmodified CPU detect() (branch-and-bound channel choice, per-candidate waveform fit, greedy
+  // residual pursuit, NMS/harmonic merge) on the result -- that stage is small-N and sequential, not
+  // embarrassingly parallel, and the amended brief's own method list keeps it on the host. tm[2]/tm[3]
+  // split the combined call back into its GPU-envelope and CPU-detect() shares for the report.
+  if (cuda_) {
+    D = cuda_->detect(G, geo, detect_params(a, G, cfg_.false_object_intensity_per_s), nullptr);
+    const double total = ms_since(s0); s0 = clk::now();
+    tm[2] = cuda_->last_timing().envelope_ms;
+    tm[3] = std::max(0.0, total - tm[2]);
+  } else {
+    E = envelope(R, G, geo);
+    tm[2] = ms_since(s0); s0 = clk::now();
+    D = detect(E, R, G, geo, detect_params(a, G, cfg_.false_object_intensity_per_s));
+    tm[3] = ms_since(s0); s0 = clk::now();
+  }
+  if (cuda_) cuda_->refine(D, G, geo, cal, survey);
+  else for (Detection& d : D) refine(d, R, G, geo, cal, survey);
   tm[4] = ms_since(s0); s0 = clk::now();
   if (cfg_.ul_enable)                          // UL illuminators (built, off by default)
     for (const CfrWindow& u : j.ul) {
@@ -194,9 +232,9 @@ void CoherentPipeline::process(Job& j)
   std::ostringstream rep;
   rep << "{\"cpi\":" << j.seq << ",\"t\":" << jnum(j.t) << ",\"t_cpi_s\":" << jnum(a.t_cpi_s) << ",\"b_eff_hz\":" << jnum(a.b_eff_hz)
       << ",\"range_res_m\":" << jnum(kC / a.b_eff_hz) << ",\"grid_step_m\":" << jnum(G.step) << ",\"n_voxels\":" << G.size()
-      << ",\"n_dopp_tested\":" << a.tested_dopp.size() << ",\"rows\":" << j.dl.rows << ",\"gpu\":false"
+      << ",\"n_dopp_tested\":" << a.tested_dopp.size() << ",\"rows\":" << j.dl.rows << ",\"gpu\":" << (cuda_ ? "true" : "false")
       << ",\"lambda_m\":" << jnum(a.lambda_m) << ",\"dopp_step_hz\":" << jnum(a.dopp_step_hz) << ",\"notch_half_bins\":" << a.notch_half_bins
-      << ",\"timing_ms\":{\"sync\":" << jnum(tm[0]) << ",\"rd\":" << jnum(tm[1]) << ",\"env\":" << jnum(tm[2]) << ",\"detect\":" << jnum(tm[3])
+      << ",\"timing_ms\":{\"sync\":" << jnum(tm[0]) << ",\"los\":" << jnum(tm_los) << ",\"rd\":" << jnum(tm[1]) << ",\"env\":" << jnum(tm[2]) << ",\"detect\":" << jnum(tm[3])
       << ",\"refine\":" << jnum(tm[4]) << ",\"ul\":" << jnum(tm[6]) << ",\"track\":" << jnum(tm[5]) << ",\"total\":" << jnum(total) << "}"
       << ",\"overrun\":" << (overrun ? "true" : "false")
       << ",\"stats\":{\"processed\":" << st.processed << ",\"skipped\":" << st.skipped << ",\"overruns\":" << st.overruns
@@ -211,8 +249,13 @@ void CoherentPipeline::process(Job& j)
     last_image_ = clk::now();
     const size_t nxy = (size_t)G.nx * G.ny;
     std::vector<double> top(nxy, 0.0);   // max over z and tested Doppler, y-major [iy][ix]
-    for (size_t t = 0; t < a.tested_dopp.size(); ++t)
-      for (size_t v = 0; v < G.size(); ++v) top[v % nxy] = std::max(top[v % nxy], (double)E[t * G.size() + v]);
+    // GPU path: envelope() never ran on the host, but CudaCoherent::detect() cached the same E it
+    // downloaded for the CPU detect() call (same [t][voxel] layout) -- read that instead of
+    // recomputing on the device.
+    const std::vector<float>& Eref = cuda_ ? cuda_->last_envelope() : E;
+    if (Eref.size() == a.tested_dopp.size() * G.size())
+      for (size_t t = 0; t < a.tested_dopp.size(); ++t)
+        for (size_t v = 0; v < G.size(); ++v) top[v % nxy] = std::max(top[v % nxy], (double)Eref[t * G.size() + v]);
     rep << ",\"topview\":{\"nx\":" << G.nx << ",\"ny\":" << G.ny << ",\"x0\":" << jnum(G.origin.x) << ",\"y0\":" << jnum(G.origin.y)
         << ",\"step\":" << jnum(G.step) << ",\"db\":" << jarr(to_db(top)) << "},\"rd\":[";
     for (uint32_t i = 0; i < kCh; ++i) {
