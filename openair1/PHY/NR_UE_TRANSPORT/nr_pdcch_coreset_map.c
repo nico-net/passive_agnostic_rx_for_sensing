@@ -314,9 +314,19 @@ void nr_pdcch_coreset_map_set_css0(int first_rb, int n_rb)
 #define IDSW_NID 65536
 #define IDSW_NSYM 14
 #define IDSW_PER_SYM 24
-#define IDSW_NSNAP (IDSW_NSYM * IDSW_PER_SYM) /* single-symbol snapshots per batch */
+#define IDSW_NSNAP (IDSW_NSYM * IDSW_PER_SYM) /* snapshots per batch (one per symbol occasion) */
 #define IDSW_BINS 4096
+#define IDSW_DUR_MAX 3 /* a CORESET spans at most 3 OFDM symbols (TS 38.211 7.3.2.2) */
 
+/* MULTI-SYMBOL CAPTURE (2026-09-24, "second capture pass" for 2-3 symbol CORESETs -- see the
+ * 2026-09-23 macro-readiness notes: stage 2 already detects duration>1 from the single-symbol
+ * phase's per-symbol lit rate, but cannot rank geometry coherently across symbols without a
+ * multi-symbol snapshot). Opt-in via ISAC_COREMAP_IDSWEEP_DUR=<1..3>, default 1 -- BIT-IDENTICAL to
+ * the original single-symbol format at dur=1 (same per-entry size, same file layout, only the header
+ * gains one field). An operator runs a normal dur=1 capture first, reads its own per-symbol lit-rate
+ * output, and if it shows duration>1, RE-RUNS the receiver with DUR=<the winning duration> pointed at
+ * the winning start symbol via the EXISTING round-robin selection in want() -- no live feedback loop
+ * between the offline tool and the receiver is built or needed for this. */
 static struct {
   pthread_mutex_t mu;
   pthread_cond_t cv;
@@ -325,7 +335,7 @@ static struct {
   int n;                /* snapshots captured */
   int nsc, point_a_sc, css0_crb, css0_nrb;
   int slot[IDSW_NSNAP], sym[IDSW_NSNAP];
-  c16_t *re;            /* [IDSW_NSNAP][nsc] */
+  c16_t *re;            /* [IDSW_NSNAP][dur][nsc] -- dur consecutive symbols per snapshot entry */
   int max_batches;
   unsigned nsnap;       /* snapshots per symbol so far (round-robin keeps them equal) */
   uint32_t cap;         /* capture counter: selects the symbol */
@@ -333,7 +343,23 @@ static struct {
   uint16_t pci;
   uint32_t dl_calls;
   int sps;              /* symbols per slot (CP-dependent), from the PHY */
+  int dur;              /* -1 unread; else 1..IDSW_DUR_MAX consecutive symbols captured per entry */
 } g_idsw = {PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER, -1};
+
+/** How many consecutive symbols this run captures per snapshot (ISAC_COREMAP_IDSWEEP_DUR, default 1,
+ *  clamped to [1, IDSW_DUR_MAX]). Read once; callers query it to know how many FEP calls to make
+ *  before nr_pdcch_coreset_map_idsweep_push(). */
+int nr_pdcch_coreset_map_idsweep_dur(void)
+{
+  if (g_idsw.dur < 0) {
+    const char *e = getenv("ISAC_COREMAP_IDSWEEP_DUR");
+    int d = (e != NULL) ? atoi(e) : 1;
+    if (d < 1) d = 1;
+    if (d > IDSW_DUR_MAX) d = IDSW_DUR_MAX;
+    g_idsw.dur = d;
+  }
+  return g_idsw.dur;
+}
 
 /* Dump one batch for the offline sweep (idsweep_offline). The sweep itself must NOT run in the
  * receiver: in-process, even at SCHED_IDLE, it starved the receive path and the X410 stream died on an
@@ -351,12 +377,15 @@ static void *idsw_worker(void *arg)
     snprintf(path, sizeof(path), "/tmp/passive_rx/idsweep_%03u.bin", g_idsw.batches);
     FILE *f = fopen(path, "wb");
     if (f != NULL) {
-      const int32_t hdr[8] = {0x31575349 /* "ISW1" */, g_idsw.nsc, g_idsw.point_a_sc, g_idsw.css0_crb,
-                              g_idsw.css0_nrb, g_idsw.pci, g_idsw.sps, g_idsw.n};
+      /* "ISW2": adds a `dur` field after `n` (dur=1 is the ordinary single-symbol case in the new
+       * format, not a separate legacy path -- idsweep_offline.c is always rebuilt alongside this
+       * receiver, so there is no old-format file to stay compatible with). */
+      const int32_t hdr[9] = {0x32575349 /* "ISW2" */, g_idsw.nsc, g_idsw.point_a_sc, g_idsw.css0_crb,
+                              g_idsw.css0_nrb, g_idsw.pci, g_idsw.sps, g_idsw.n, g_idsw.dur};
       fwrite(hdr, sizeof(hdr), 1, f);
       fwrite(g_idsw.slot, sizeof(int), g_idsw.n, f);
       fwrite(g_idsw.sym, sizeof(int), g_idsw.n, f);
-      fwrite(g_idsw.re, sizeof(c16_t), (size_t)g_idsw.n * g_idsw.nsc, f);
+      fwrite(g_idsw.re, sizeof(c16_t), (size_t)g_idsw.n * g_idsw.dur * g_idsw.nsc, f);
       fclose(f);
     }
     printf("IDSWEEP dumped batch %u (%d snapshots) -> %s%s\n", g_idsw.batches, g_idsw.n, path, f ? "" : " FAILED");
@@ -388,23 +417,30 @@ int nr_pdcch_coreset_map_idsweep_want(uint32_t abs_slot, int sps)
     return -1;
   if (!nr_passive_acq_tdd_slot_has_downlink(abs_slot))
     return -1;
-  /* ONE symbol, rotating through the slot, on every 10th DL slot: a single-symbol FEP of RT cost, and
-   * a batch spread over ~20 s rather than packed into the ~0.3 s right after SIB1, when the timing and
-   * CFO loops are still settling (run s01e: every early symbol-0 snapshot read as noise).
+  /* ONE window, rotating through the slot, on every 10th DL slot: RT cost stays a small, fixed number
+   * of FEP calls per occasion (dur of them, dur=1 by default), and a batch spread over ~20 s rather
+   * than packed into the ~0.3 s right after SIB1, when the timing and CFO loops are still settling
+   * (run s01e: every early symbol-0 snapshot read as noise).
    * ponytail: 10 is a sampling stride, not a cell parameter. */
   if ((g_idsw.dl_calls++ % 10) != 0)
     return -1;
-  return (int)(g_idsw.cap++ % (uint32_t)sps);
+  const int dur = nr_pdcch_coreset_map_idsweep_dur();
+  const int start = (int)(g_idsw.cap++ % (uint32_t)sps);
+  if (start + dur > sps) /* the window would run past the end of the slot: skip this occasion, still
+                          * advancing cap so the rotation does not get stuck retrying the same start */
+    return -1;
+  return start;
 }
 
 void nr_pdcch_coreset_map_idsweep_push(const c16_t *rxF_sym, int fft, int fco, int n_rb, int slot, int sym, uint16_t pci, int sps)
 {
   const nr_passive_acq_snapshot_t snap = nr_passive_acq_snapshot();
   const int nsc = 12 * n_rb;
+  const int dur = nr_pdcch_coreset_map_idsweep_dur();
   pthread_mutex_lock(&g_idsw.mu);
   if (g_idsw.re == NULL) {
     g_idsw.nsc = nsc;
-    g_idsw.re = malloc(sizeof(c16_t) * (size_t)IDSW_NSNAP * nsc);
+    g_idsw.re = malloc(sizeof(c16_t) * (size_t)IDSW_NSNAP * dur * nsc);
     if (!g_idsw.re) {
       g_idsw.enabled = 0;
       pthread_mutex_unlock(&g_idsw.mu);
@@ -413,8 +449,8 @@ void nr_pdcch_coreset_map_idsweep_push(const c16_t *rxF_sym, int fft, int fco, i
     pthread_t th;
     pthread_create(&th, NULL, idsw_worker, NULL);
     pthread_detach(th);
-    printf("IDSWEEP capture started: Point A at grid subcarrier %d (SIB1), CORESET#0 grid RB %d +%d (MIB), %d batches of %d snapshots\n",
-           snap.carrier.point_a_subcarrier, g_css0_first_rb, g_css0_nrb, g_idsw.max_batches, IDSW_NSNAP);
+    printf("IDSWEEP capture started: Point A at grid subcarrier %d (SIB1), CORESET#0 grid RB %d +%d (MIB), %d batches of %d snapshots x %d symbol(s)\n",
+           snap.carrier.point_a_subcarrier, g_css0_first_rb, g_css0_nrb, g_idsw.max_batches, IDSW_NSNAP, dur);
     fflush(stdout);
   }
   if (g_idsw.full || nsc != g_idsw.nsc) {
@@ -430,12 +466,18 @@ void nr_pdcch_coreset_map_idsweep_push(const c16_t *rxF_sym, int fft, int fco, i
   g_idsw.css0_nrb = g_css0_nrb;
   g_idsw.pci = pci;
   g_idsw.sps = sps;
+  g_idsw.dur = dur;
   const int k = g_idsw.n;
-  c16_t *dst = g_idsw.re + (size_t)k * nsc;
-  for (int i = 0; i < nsc; i++)
-    dst[i] = rxF_sym[(fco + i) % fft];
+  c16_t *dst = g_idsw.re + (size_t)k * dur * nsc;
+  /* rxF_sym points at the FIRST of `dur` consecutive whole symbols, laid out `fft` samples apart in
+   * the caller's slot buffer (dur=1 reduces to exactly the original single-symbol copy). */
+  for (int d = 0; d < dur; d++) {
+    const c16_t *sym_d = rxF_sym + (size_t)d * fft;
+    for (int i = 0; i < nsc; i++)
+      dst[d * nsc + i] = sym_d[(fco + i) % fft];
+  }
   g_idsw.slot[k] = slot;
-  g_idsw.sym[k] = sym;
+  g_idsw.sym[k] = sym; /* the WINDOW's first symbol; symbols sym..sym+dur-1 are all in this entry */
   if (++g_idsw.n == IDSW_NSNAP) {
     g_idsw.full = 1;
     pthread_cond_signal(&g_idsw.cv);

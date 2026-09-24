@@ -2474,8 +2474,10 @@ static void nr_pdcch_blind_monitor_process_body(PHY_VARS_NR_UE *ue, const UE_nr_
    * Does its OWN minimal single-symbol, whole-carrier FEP -- NOT run_occasion()'s CORESET-scoped
    * one further down, which needs coreset geometry (duration, frequency_domain_resource) this
    * function does not have until Technique A succeeds. */
-  /* STAGE 1 blind nID sweep: one FEP symbol per DL slot (rotating), handed to an idle-priority
-   * worker. Diagnostic; off unless ISAC_COREMAP_IDSWEEP=1. */
+  /* STAGE 1 blind nID sweep: one FEP'd WINDOW of nr_pdcch_coreset_map_idsweep_dur() consecutive
+   * symbols per DL slot (rotating), handed to an idle-priority worker. Diagnostic; off unless
+   * ISAC_COREMAP_IDSWEEP=1. dur=1 (default) is exactly the original single-symbol capture; dur>1 is
+   * the "second capture pass" for a 2-3 symbol CORESET (ISAC_COREMAP_IDSWEEP_DUR). */
   {
     const int idsw_sym = nr_pdcch_coreset_map_idsweep_want(
         (uint32_t)proc->frame_rx * fp->slots_per_frame + (uint32_t)proc->nr_slot_rx, fp->symbols_per_slot);
@@ -2484,7 +2486,10 @@ static void nr_pdcch_blind_monitor_process_body(PHY_VARS_NR_UE *ue, const UE_nr_
       s_idsw_buf = malloc16(sizeof(c16_t) * fp->samples_per_slot_wCP);
     if (idsw_sym >= 0 && s_idsw_buf != NULL) {
       c16_t(*rxF_id)[fp->samples_per_slot_wCP] = (c16_t(*)[fp->samples_per_slot_wCP])s_idsw_buf;
-      nr_slot_fep_ant(ue, fp, proc->nr_slot_rx, idsw_sym, 0 /* ant */, rxF_id, link_type_dl, 0, ue->common_vars.rxdata);
+      const int idsw_dur = nr_pdcch_coreset_map_idsweep_dur();
+      for (int d = 0; d < idsw_dur; d++)
+        nr_slot_fep_ant(ue, fp, proc->nr_slot_rx, idsw_sym + d, 0 /* ant */, rxF_id, link_type_dl, 0,
+                        ue->common_vars.rxdata);
       nr_pdcch_coreset_map_idsweep_push(s_idsw_buf + idsw_sym * fp->ofdm_symbol_size, fp->ofdm_symbol_size,
                                         fp->first_carrier_offset, fp->N_RB_DL, proc->nr_slot_rx, idsw_sym,
                                         (uint16_t)fp->Nid_cell, fp->symbols_per_slot);

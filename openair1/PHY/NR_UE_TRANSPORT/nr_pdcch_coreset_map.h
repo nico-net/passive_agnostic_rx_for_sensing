@@ -69,9 +69,14 @@ void nr_pdcch_coreset_map_accept_probe(const c16_t *rxdataF, int ofdm_symbol_siz
 void nr_pdcch_coreset_map_set_phase_hint(int start_rb);
 /** CORESET#0 extent from the MIB, so stage 1 scores it against its own DM-RS reference. */
 void nr_pdcch_coreset_map_set_css0(int first_rb, int n_rb);
-/** Stage-1 blind nID sweep (ISAC_COREMAP_IDSWEEP=1): want() says whether to snapshot this slot;
- * push() hands over all 14 FEP'd symbols ([14][fft], antenna 0). Heavy work is on a worker thread. */
-int nr_pdcch_coreset_map_idsweep_want(uint32_t abs_slot, int sps); /* symbol to capture, or -1 */
+/** Stage-1 blind nID sweep (ISAC_COREMAP_IDSWEEP=1): want() says whether/where to snapshot this
+ * slot (the FIRST of nr_pdcch_coreset_map_idsweep_dur() consecutive symbols to FEP and hand to
+ * push(), antenna 0). Heavy work is on a worker thread. */
+int nr_pdcch_coreset_map_idsweep_want(uint32_t abs_slot, int sps); /* start symbol to capture, or -1 */
+/** Consecutive symbols captured per snapshot (ISAC_COREMAP_IDSWEEP_DUR, default 1, max 3) -- the
+ * "second capture pass" for a CORESET whose duration a dur=1 run's per-symbol lit rate already
+ * showed to be >1. Call before FEP'ing so the caller knows how many symbols to compute. */
+int nr_pdcch_coreset_map_idsweep_dur(void);
 void nr_pdcch_coreset_map_idsweep_push(const c16_t *rxF_sym, int fft, int fco, int n_rb, int slot, int sym, uint16_t pci,
                                        int sps);
 /** The phase in force, so callers mapping a window index back to an RB add it too. */
