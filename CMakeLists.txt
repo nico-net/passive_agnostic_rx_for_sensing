@@ -1126,7 +1126,8 @@ if(ENABLE_CHANNEL_SIM_CUDA)
        ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/detector_cuda.cu
        ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/family_processing_cuda.cu
        ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/coherent_cuda.cu
-       ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/coherent_cuda_front.cu)
+       ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/coherent_cuda_front.cu
+       ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/coherent_cuda_detect.cu)
   # Each detector lane is its own host thread. With the legacy default stream every lane's sync and
   # family kernels, and every synchronous cudaMemcpy, serialised behind all the other lanes' work
   # (measured: 8 lanes, sync estimate p50 3 ms alone -> 34 ms concurrent). Per-thread default streams
@@ -1138,9 +1139,15 @@ if(ENABLE_CHANNEL_SIM_CUDA)
        ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/coherent_cuda.cu
        ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/coherent_cuda_front.cu
        PROPERTIES COMPILE_OPTIONS "--default-stream=per-thread")
+  # The GPU detect()'s host half (pursuit order, walk, final fit) must round like the CPU oracle
+  # coherent_core.cc, which is built with -march=native (FMA contraction): a notch-edge Doppler bin
+  # flips valid/invalid on one ulp (measured on the full-band recording).
+  set_source_files_properties(${OPENAIR1_DIR}/PHY/NR_UE_ISAC/coherent_cuda_detect.cu
+       PROPERTIES COMPILE_OPTIONS "--default-stream=per-thread;-Xcompiler=-march=native;-Xcompiler=-mno-avx512f")
 else()
   list(APPEND NR_UE_ISAC_SRC ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/detector_cuda_stub.cc
-                            ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/coherent_cuda_stub.cc)
+                            ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/coherent_cuda_stub.cc
+                            ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/coherent_cuda_detect_stub.cc)
 endif()
 # Passive receiver vs sensing pipeline. The blind PDCCH -> DCI -> PDSCH receiver only ever hands
 # channel estimates TO the sensing engine and never reads anything back, so on a receiver-only build

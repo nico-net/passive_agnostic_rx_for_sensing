@@ -12,6 +12,7 @@
  */
 #include "coherent_cuda.h"
 #include "coherent_cuda_front.h"
+#include "coherent_cuda_detect.h"
 
 #include <cuda_runtime.h>
 #include <cufft.h>
@@ -264,6 +265,7 @@ struct CudaCoherent::Impl {
   uint32_t cur_nch = kCh, cur_rows = 0, cur_nrange = 0, cur_ndopp = 0;
   Timing timing;
   std::vector<float> last_E;
+  GpuDetect det;   // GPU-resident detect() (coherent_cuda_detect.cu); NR_ISAC_CUDA_DETECT_CPU=1 selects the CPU oracle
 
   Impl()
   {
@@ -507,7 +509,8 @@ std::vector<Detection> CudaCoherent::detect(const Grid& g, const Geometry& geo, 
 
   (void)topview_max;  // caller reads last_envelope() instead (see coherent_cuda.h header)
   I.last_E = h_E;
-  return coherent::detect(h_E, R, g, geo, p);   // unmodified CPU detect() -- see coherent_cuda.h header
+  if (std::getenv("NR_ISAC_CUDA_DETECT_CPU")) return coherent::detect(h_E, R, g, geo, p);   // CPU oracle
+  return I.det.run(h_E, R, g, geo, p, I.rd.p, (const float*)I.E.p, I.stream);
 }
 
 const std::vector<float>& CudaCoherent::last_envelope() const { return impl_->last_E; }
