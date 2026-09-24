@@ -1171,6 +1171,11 @@ struct GpuDetect::Impl {
       r_w, r_t, r_fc, r_g, r_B, r_ed, r_em, Q, items, one, slots, F, Mf, gpp, gpr, dir, stat, st_ph, st_buf, alive,
       w_mask, w_lo, w_hi, w_trow, gam, jobs, f_cells, f_y0, f_y, f_resA, f_resa, f_resJ, f_Mmid, done_iter, moved, m_erow;
   int n_sm = 0; size_t fit_smem_set = 0;
+  // cudaOccupancyMaxActiveBlocksPerMultiprocessor(k_fit, 256, smem) is a pure function of smem (fixed
+  // kernel, fixed blockDim) but is a real driver round trip -- cache it keyed on smem instead of
+  // re-querying on every launch_fits() call (per detection x per sweep in refit_all: tens of calls/CPI
+  // with an unchanging smem size).
+  int per_sm_cached = 0; size_t per_sm_smem = (size_t)-1;
   // Cooperative fit launch: jobs (one per channel), then each new fit's grid phasors and final M.
   void launch_fits(FitArgs fa, const std::vector<FitJob>& jb, uint32_t nrow_all, const DAxes& da, const DResp& dr, size_t per)
   {
@@ -1183,8 +1188,11 @@ struct GpuDetect::Impl {
       cuda_check(cudaFuncSetAttribute(k_fit, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem), "fit smem attr");
       fit_smem_set = smem;
     }
-    int per_sm = 0; cuda_check(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&per_sm, k_fit, 256, smem), "fit occupancy");
-    const uint32_t total = (uint32_t)std::max(1, per_sm * n_sm);
+    if (smem != per_sm_smem) {
+      cuda_check(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&per_sm_cached, k_fit, 256, smem), "fit occupancy");
+      per_sm_smem = smem;
+    }
+    const uint32_t total = (uint32_t)std::max(1, per_sm_cached * n_sm);
     if (total < nj) throw std::runtime_error("detect fit: device cannot co-schedule one block per job");
     fa.B = std::max<uint32_t>(1, std::min<uint32_t>(8, total / nj));
     fa.jobs = jobs.as<FitJob>(); fa.njobs = nj;
