@@ -27,6 +27,8 @@ struct LosEstimate {
 struct RowSync {
   std::vector<double> phase_rad;
   std::vector<double> delay_s;
+  std::vector<double> amp;        // per-row amplitude correction (1/|common gain|); empty = 1
+  std::vector<uint8_t> bad;       // per-row outlier flag (static residual inconsistent with the other rows); empty = none
   bool valid = false;
 };
 
@@ -131,6 +133,13 @@ void refine(Detection& det, const RdResult& R, const Grid& g, const Geometry& ge
 double max_exp_sum_quantile(uint32_t m, uint32_t n, double p);
 /** x with Q(shape, x) = p (regularised upper incomplete gamma), integer shape. */
 double gamma_upper_quantile(uint32_t shape, double p);
+
+/** Slow-time weight of each row: the CPI's Hann taper at the row time times the row's own subcarrier
+ * weight sum (its Hann taper over the observed subcarriers). Coherent (matched-filter) integration weights
+ * every subcarrier sample equally, so a row counts in proportion to what it observed: a 2-PRB row weighed as
+ * much as a 273-PRB row made the narrow grants' noise and offsets dominate the static residue (OTA, a 5 ms
+ * TDD-periodic comb at +-200 Hz). 0 for an empty row. */
+std::vector<double> slow_time_weights(const CfrWindow& w, const Axes& a);
 
 /** Task 10 (GPU path): the RdResult::Waveform half of range_doppler() (ambiguity/leakage model,
  * independent of the RD cube itself), factored out as a standalone function so a GPU-computed RD

@@ -46,7 +46,7 @@ public:
   const int2* d_span() const;
   const float* d_wsum_f() const;
   /** ed[d][r] = win_r / wsum e^{-j2pi f_d t_r} on the device (range_doppler's NUDFT and the waveform's Q). */
-  const cufftDoubleComplex* ed(const Axes& a);
+  const cufftDoubleComplex* ed(const CfrWindow& w, const Axes& a);
   /** The complete RdResult::Waveform (= build_waveform(w, a)), kernels and Q computed on the device. */
   RdResult::Waveform waveform(const CfrWindow& w, const Axes& a);
 

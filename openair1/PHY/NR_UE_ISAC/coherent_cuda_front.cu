@@ -521,12 +521,12 @@ void CudaFront::los_refine(const Axes& a, const std::array<long, kCh>& best, con
   for (uint32_t i = 0; i < kCh; ++i) if (found[i]) { x[i] = out[3 * i]; tap[i] = cd(out[3 * i + 1], out[3 * i + 2]); }
 }
 
-const cufftDoubleComplex* CudaFront::ed(const Axes& a)
+const cufftDoubleComplex* CudaFront::ed(const CfrWindow& w, const Axes& a)
 {
   Lap lap_{tm_.ed};
   const uint32_t rows = m_.rows;
   std::vector<double> wr(rows); double wsum = 0;
-  for (uint32_t r = 0; r < rows; ++r) { wr[r] = host_hann(a.row_t_s.back() > 0 ? a.row_t_s[r] / a.row_t_s.back() : 0.5); wsum += wr[r]; }
+  { const std::vector<double> sw = slow_time_weights(w, a); for (uint32_t r = 0; r < rows; ++r) { wr[r] = sw[r]; wsum += wr[r]; } }
   for (double& v : wr) v /= wsum;
   wrow_.ensure(rows * sizeof(double)); rowt_.ensure(rows * sizeof(double)); ed_.ensure((size_t)a.n_dopp * rows * sizeof(zC));
   ck(cudaMemcpyAsync(wrow_.p, wr.data(), rows * sizeof(double), cudaMemcpyHostToDevice, st_), "H2D win");
@@ -542,9 +542,9 @@ RdResult::Waveform CudaFront::waveform(const CfrWindow& w, const Axes& a)
   RdResult::Waveform m;
   if (!a.valid) return m;
   const uint32_t rows = m_.rows, sc = m_.sc;
-  const zC* d_ed = ed(a);
+  const zC* d_ed = ed(w, a);
   m.w.resize(rows); m.wsum = 0;
-  for (uint32_t r = 0; r < rows; ++r) { m.w[r] = host_hann(a.row_t_s.back() > 0 ? a.row_t_s[r] / a.row_t_s.back() : 0.5); m.wsum += m.w[r]; }
+  { const std::vector<double> sw = slow_time_weights(w, a); for (uint32_t r = 0; r < rows; ++r) { m.w[r] = sw[r]; m.wsum += m.w[r]; } }
   const long O = RdResult::Waveform::kOvs;
   m.sc = sc; m.X = (long)a.n_range + 4;
   m.fc.assign(rows, 0.0); m.hh.assign(rows, 0.0); m.grp.assign(rows, -1);

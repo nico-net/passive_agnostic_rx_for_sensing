@@ -197,7 +197,68 @@ void CoherentPipeline::process(Job& j)
   const RowSync rs = cuda_ ? cuda_->estimate_row_sync(j.dl, a, L) : estimate_row_sync(j.dl, a, L);
   tm[0] = ms_since(s0); s0 = clk::now();
   // L.found flows into R.los_found: envelope / detect / refine skip channels without a LOS reference.
-  const RdResult R = cuda_ ? cuda_->range_doppler(j.dl, a, L, rs, true) : range_doppler(j.dl, a, L, rs);
+  // Rows the row sync flagged as outliers (RowSync::bad) are masked out for every later stage.
+  const CfrWindow* dlp = &j.dl; CfrWindow dl_masked; uint32_t n_bad = 0;
+  for (uint8_t b : rs.bad) n_bad += b;
+  if (n_bad) {
+    dl_masked = j.dl;
+    for (uint32_t r = 0; r < j.dl.rows; ++r) if (rs.bad[r])
+      std::fill(dl_masked.observed.begin() + dl_masked.cell(r, 0), dl_masked.observed.begin() + dl_masked.cell(r, 0) + dl_masked.subcarriers, 0);
+    dlp = &dl_masked;
+  }
+  const RdResult R = cuda_ ? cuda_->range_doppler(*dlp, a, L, rs, true) : range_doppler(*dlp, a, L, rs);
+  // Static-removal diagnostic, per channel, in dB over the channel's thermal noise: the direct path
+  // before removal (LOS tap) and the strongest residue left at the direct path's range (bins 0-3),
+  // just outside the zero-Doppler notch (up to 3 bins beyond it) and anywhere else tested.
+  std::array<double, kCh> st_los{}, st_edge{}, st_far{};
+  // Per-row static residual (what static removal leaves): z_rk derotated as in range_doppler, m_k its
+  // per-subcarrier mean over rows; e_r = sum_k |z_rk - m_k|^2 / sum_k |m_k|^2 over the row's own k.
+  // tapdev = median over rows of e_r (dB); tapph/tapamp: phase (rad) / amplitude (dB) rms of z/m.
+  std::array<double, kCh> tp_dev{}, tp_ph{}, tp_amp{};
+  if (rs.phase_rad.size() == j.dl.rows) for (uint32_t i = 0; i < kCh; ++i) {
+    if (!L.found[i]) continue;
+    const uint32_t S = j.dl.subcarriers, NR = j.dl.rows;
+    auto z = [&](uint32_t r, uint32_t k) {
+      const double f = ((double)k - S / 2.0) * j.dl.scs_hz;
+      return cd(j.dl.values[j.dl.sample(i, r, k)]) * std::polar(rs.amp.empty() ? 1.0 : rs.amp[r], 2 * M_PI * f * (L.delay_s[i] + rs.delay_s[r]) - rs.phase_rad[r]);
+    };
+    std::vector<cd> m(S, cd(0)); std::vector<uint32_t> n(S, 0);
+    for (uint32_t r = 0; r < NR; ++r) for (uint32_t k = 0; k < S; ++k) if (j.dl.observed[j.dl.cell(r, k)]) { m[k] += z(r, k); ++n[k]; }
+    for (uint32_t k = 0; k < S; ++k) if (n[k]) m[k] /= (double)n[k];
+    std::vector<double> er; double ph = 0, am = 0; size_t cnt = 0;
+    for (uint32_t r = 0; r < NR; ++r) {
+      double num = 0, den = 0; uint32_t lo = UINT32_MAX, hi = 0, nk = 0; cd acc = 0;
+      for (uint32_t k = 0; k < S; ++k) if (j.dl.observed[j.dl.cell(r, k)] && n[k] > 1) {
+        const cd v = z(r, k); num += std::norm(v - m[k]); den += std::norm(m[k]); acc += v * std::conj(m[k]); lo = std::min(lo, k); hi = k; ++nk;
+      }
+      if (!(den > 0)) continue;
+      const double e = num / den; er.push_back(e);
+      const double g = std::abs(acc) / den, pe = std::arg(acc);          // row's complex gain vs the static mean
+      ph += pe * pe; am += std::pow(20 * std::log10(std::max(g, 1e-12)), 2); ++cnt;
+      if (const char* fn = std::getenv("COHDBG_TAPS")) if (j.seq < 400) if (FILE* fp = std::fopen(fn, "a")) {
+        std::fprintf(fp, "%lu %u %u %.6f %u %u %u %u %u %.6e %.6e %.6e\n", (unsigned long)j.seq, i, r, a.row_t_s[r], j.dl.row_slot_idx[r],
+                     j.dl.row_source_mask[r], lo, hi, nk, e, pe, g);
+        std::fclose(fp);
+      }
+    }
+    if (er.empty()) continue;
+    std::nth_element(er.begin(), er.begin() + er.size() / 2, er.end());
+    tp_dev[i] = 10 * std::log10(er[er.size() / 2]); tp_ph[i] = std::sqrt(ph / cnt); tp_amp[i] = std::sqrt(am / cnt);
+  }
+  {
+    const long dz = std::lround(-a.dopp0_hz / a.dopp_step_hz);
+    for (uint32_t i = 0; i < kCh; ++i) {
+      if (!L.found[i] || !(R.noise[i] > 0) || R.rd.v.empty()) continue;
+      st_los[i] = 10 * std::log10(std::max(std::norm(R.los_tap[i]) / R.noise[i], 1e-30));
+      double e = 1e-30, f = 1e-30;
+      for (uint32_t m = 0; m < std::min<uint32_t>(4, a.n_range); ++m)
+        for (uint32_t d : a.tested_dopp) {
+          const double pw = std::norm(R.rd.v[R.rd.idx(i, m, d)]) / R.noise[i];
+          if (std::labs((long)d - dz) <= (long)a.notch_half_bins + 3) e = std::max(e, pw); else f = std::max(f, pw);
+        }
+      st_edge[i] = 10 * std::log10(e); st_far[i] = 10 * std::log10(f);
+    }
+  }
   tm[1] = ms_since(s0); s0 = clk::now();
   if (cuda_ && std::getenv("NR_ISAC_CUDA_DEBUG_TIMING")) { const auto gt = cuda_->last_timing();
     std::fprintf(stderr, "CUDA_TIMING rows=%u upload=%.2f build=%.2f fft=%.2f crop_norm=%.2f nudft=%.2f download=%.2f wf=%.2f\n",
@@ -274,7 +335,13 @@ void CoherentPipeline::process(Job& j)
   rep << "{\"cpi\":" << j.seq << ",\"t\":" << jnum(j.t) << ",\"t_cpi_s\":" << jnum(a.t_cpi_s) << ",\"b_eff_hz\":" << jnum(a.b_eff_hz)
       << ",\"range_res_m\":" << jnum(kC / a.b_eff_hz) << ",\"grid_step_m\":" << jnum(G.step) << ",\"n_voxels\":" << G.size()
       << ",\"n_dopp_tested\":" << a.tested_dopp.size() << ",\"rows\":" << j.dl.rows << ",\"gpu\":" << (cuda_ ? "true" : "false")
-      << ",\"lambda_m\":" << jnum(a.lambda_m) << ",\"dopp_step_hz\":" << jnum(a.dopp_step_hz) << ",\"notch_half_bins\":" << a.notch_half_bins
+      << ",\"lambda_m\":" << jnum(a.lambda_m) << ",\"dopp_step_hz\":" << jnum(a.dopp_step_hz) << ",\"notch_half_bins\":" << a.notch_half_bins << ",\"rows_bad\":" << n_bad
+      << ",\"static_db\":{\"los\":[" << jnum(st_los[0]) << "," << jnum(st_los[1]) << "," << jnum(st_los[2]) << "," << jnum(st_los[3])
+      << "],\"edge\":[" << jnum(st_edge[0]) << "," << jnum(st_edge[1]) << "," << jnum(st_edge[2]) << "," << jnum(st_edge[3])
+      << "],\"far\":[" << jnum(st_far[0]) << "," << jnum(st_far[1]) << "," << jnum(st_far[2]) << "," << jnum(st_far[3])
+      << "],\"tapdev\":[" << jnum(tp_dev[0]) << "," << jnum(tp_dev[1]) << "," << jnum(tp_dev[2]) << "," << jnum(tp_dev[3])
+      << "],\"tapph\":[" << jnum(tp_ph[0]) << "," << jnum(tp_ph[1]) << "," << jnum(tp_ph[2]) << "," << jnum(tp_ph[3])
+      << "],\"tapamp\":[" << jnum(tp_amp[0]) << "," << jnum(tp_amp[1]) << "," << jnum(tp_amp[2]) << "," << jnum(tp_amp[3]) << "]}"
       << ",\"timing_ms\":{\"sync\":" << jnum(tm[0]) << ",\"los\":" << jnum(tm_los) << ",\"rd\":" << jnum(tm[1]) << ",\"env\":" << jnum(tm[2]) << ",\"detect\":" << jnum(tm[3])
       << ",\"refine\":" << jnum(tm[4]) << ",\"ul\":" << jnum(tm[6]) << ",\"track\":" << jnum(tm[5]) << ",\"total\":" << jnum(total) << "}"
       << ",\"overrun\":" << (overrun ? "true" : "false")
