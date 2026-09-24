@@ -36,19 +36,28 @@ struct RdResult {
   std::array<double, kCh> noise{};    // thermal: from range bins far from every path
   std::array<bool, kCh> los_found{};  // = LosEstimate::found; channels without a LOS reference are
                                       // skipped by the envelope, detection and refinement
-  /** Waveform ambiguity |sum_r w_r K_r(dr) e^{-j2pi dd t_r}|^2 / |sum_r w_r|^2 (K_r = row r's
-   * unit-peak range kernel from its mask) for dr in [-n_range, n_range], dd in [-n_dopp, n_dopp] bins,
-   * tabulated at 1/kAmbOvs bin; the same for every channel (shared masks and row times). A path's
-   * leakage into the RD cell (dr, dd) away is its peak power times this. 0 outside the table. */
-  static constexpr long kAmbOvs = 4;
-  std::vector<float> amb;
-  float ambiguity(double dr, double dd) const
-  {
-    const long nr = rd.axes.n_range * kAmbOvs, nd = rd.axes.n_dopp * kAmbOvs;
-    const long r = std::lround(dr * kAmbOvs), d = std::lround(dd * kAmbOvs);
-    if (amb.empty() || r < -nr || r > nr || d < -nd || d > nd) return 0.f;
-    return amb[(size_t)((r + nr) * (2 * nd + 1) + d + nd)];
-  }
+  /** Waveform model shared by every channel (same masks and row times), for exact leakage
+   * prediction. A row's range kernel is K_r(x) = e^{j2pi fc_r x delay_step} B_g(x): B_g depends only
+   * on the row's mask shape relative to its span centre (group g), tabulated at 1/kOvs bin. */
+  struct Waveform {
+    static constexpr long kOvs = 32;
+    std::vector<double> w;                   // slow-time Hann weight per row
+    double wsum = 0, w2sum = 0;              // sum w, sum w^2 * hh
+    std::vector<double> fc, hh;              // row centre baseband Hz; sum(h^2)/(sum h)^2
+    std::vector<int32_t> grp;                // row -> group, -1 = empty row
+    std::vector<std::vector<cd>> B, B2;      // per group, x in [-X, X] bins: kernel (h) and noise kernel (h^2)
+    long X = 0;
+    uint32_t sc = 0;                         // window subcarriers
+    std::vector<uint8_t> mask;               // [row][subcarrier]
+    std::vector<uint32_t> lo, hi;            // row span (observed subcarriers), empty rows: lo > hi
+    std::vector<cf> Q;                       // [dopp][subcarrier]: static-removal operator, see .cc
+  } wf;
+  /** Complex ambiguity of a unit path: RD response x range bins and dd Doppler bins away from it
+   * (dd = (f_cell - f_path)/dopp_step). 1 at (0,0). */
+  cd ambiguity_c(double x, double dd) const;
+  /** Noise correlation between RD cells (x, dd) apart; 1 at (0,0). */
+  cd noise_corr(double x, double dd) const;
+  float ambiguity(double x, double dd) const { return (float)std::norm(ambiguity_c(x, dd)); }
 };
 
 /** Envelope voxel grid over the volume. Voxel v = (iz*ny + iy)*nx + ix. */
@@ -76,11 +85,13 @@ DetectParams detect_params(const Axes& a, const Grid& g, double false_object_int
  * detections' ambiguity leakage, NMS / harmonic merge, z < 0 rejected. */
 std::vector<Detection> detect(const std::vector<float>& E, const RdResult& R, const Grid& g,
                               const Geometry& geo, const DetectParams& p);
-/** Coherent refinement (hierarchical, down to half a fringe) within +-one envelope step. pos = rho_eff
- * blend, rho_eff = cal.rho * mean_i exp(-sigma_phi_i^2/2), sigma_phi_i = (2pi/lambda)|u_tx,i - u_x,i| *
- * survey_sigma_m[i]: the LOS calibration cannot see survey error, the target phase can. */
+/** Declared survey accuracy (1-sigma, m) of each antenna and of the illuminator. */
+struct SurveySigma { std::array<double, kCh> rx_m{}; double tx_m = 0; };
+/** Coherent refinement, hierarchical down to half a fringe within +-one envelope step, phases referred
+ * to the CPI's weighted mid-time. pos = rho_eff blend with rho_eff = cal.rho * survey coherence *
+ * P_lobe; pos_cov = rho_eff Cov_coh + (1-rho_eff) Cov_env + rho_eff(1-rho_eff) dd^T (mixture). */
 void refine(Detection& det, const RdResult& R, const Grid& g, const Geometry& geo, const Calibration& cal,
-            const std::array<double, kCh>& survey_sigma_m);
+            const SurveySigma& survey);
 /** x with P(S > x) = p, S = sum of n iid Y, Y = max of m iid Exp(1) (CDF (1-e^-y)^m): the envelope's
  * per-voxel null when each channel takes its max over m Doppler bins. m = 1 gives Gamma(n,1). */
 double max_exp_sum_quantile(uint32_t m, uint32_t n, double p);

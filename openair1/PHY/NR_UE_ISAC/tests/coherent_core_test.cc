@@ -10,7 +10,7 @@ using namespace nr_isac; using namespace nr_isac::coherent;
 // rows x 3276 grid, antennas 4; paths: (per-channel absolute delay, amplitude, doppler); channel phase offsets
 struct Path { std::array<double, kCh> tau; double amp; double doppler_hz; };
 static CfrWindow make_window(uint32_t rows, const std::vector<Path>& paths, std::array<double, kCh> ph,
-                             double cfo_hz, uint32_t nprb_row, uint32_t seed, uint32_t comb = 1)
+                             double cfo_hz, uint32_t nprb_row, uint32_t seed, uint32_t comb = 1, double sfo_ppm = 0)
 {
   CfrWindow w; w.antennas = 4; w.rows = rows; w.subcarriers = 273 * 12; w.scs_hz = 30000; w.fc_hz = 3.45e9; w.pci = 2;
   w.values.assign((size_t)4 * rows * w.subcarriers, {0, 0}); w.observed.assign((size_t)rows * w.subcarriers, 0);
@@ -31,7 +31,7 @@ static CfrWindow make_window(uint32_t rows, const std::vector<Path>& paths, std:
       for (uint32_t a = 0; a < 4; ++a) {
         std::complex<double> acc = 0;
         for (const Path& p : paths)
-          acc += p.amp * std::exp(std::complex<double>(0, -2 * M_PI * ((w.fc_hz + f) * p.tau[a] - p.doppler_hz * t)));
+          acc += p.amp * std::exp(std::complex<double>(0, -2 * M_PI * ((w.fc_hz + f) * p.tau[a] - p.doppler_hz * t + f * sfo_ppm * 1e-6 * t)));
         acc *= std::exp(std::complex<double>(0, ph[a] + 2 * M_PI * cfo_hz * t));
         acc += 0.01 * std::complex<double>(n01(rng), n01(rng));
         w.values[w.sample(a, r, k)] = std::complex<float>(acc);
@@ -42,6 +42,7 @@ static CfrWindow make_window(uint32_t rows, const std::vector<Path>& paths, std:
 }
 
 int main() {
+  std::setvbuf(stdout, nullptr, _IONBF, 0);
   Geometry g; g.tx = {35, 20, 6};
   g.rx = {Vec3{0, 0, .5}, Vec3{10, 0, 3.5}, Vec3{0, 10, 3.5}, Vec3{10, 10, .5}};
   Volume vol;
@@ -111,6 +112,19 @@ int main() {
     LosEstimate L5 = find_los(w5, a5, 1e-4);
     for (uint32_t i = 0; i < 4; ++i)
       require(L5.found[i] && std::abs(L5.delay_s[i] - los[i]) < 0.25 * a5.delay_step_s, "128-PRB rows: LOS, not its first sidelobe"); }
+  // --- SFO: a sample-clock offset ramps every path's delay (baseband phase only) by sfo*t. The row
+  // sync's drift must be KEPT (the model selection that rejects spurious drifts must not reject a real
+  // one) and the target must stay at its excess-delay bin and Doppler. 1 ppm = 59 ns (7 bins) here.
+  { const double sfo = 1.0;
+    CfrWindow w6 = make_window(60, {{los, 1.0, 0.0}, {tt, 0.2, fd}}, {0, 1.1, -2.0, 0.4}, 23.0, 64, 6, 1, sfo);
+    coherent::Axes a6 = derive_axes(w6, vol, g, 10.0); require(a6.valid, "axes valid (SFO)");
+    double tm = 0; for (double t : a6.row_t_s) tm += t / a6.row_t_s.size();
+    std::array<double, kCh> los6{}; for (uint32_t i = 0; i < 4; ++i) los6[i] = los[i] + sfo * 1e-6 * tm;   // LOS at the mean row time
+    LosEstimate L6 = find_los(w6, a6, 1e-4); RowSync s6 = estimate_row_sync(w6, a6, L6);
+    const double drift = s6.delay_s.back() - s6.delay_s.front(), want = sfo * 1e-6 * a6.row_t_s.back();
+    std::printf("  cpi: SFO %.1f ppm: drift %.2f ns (true %.2f ns)\n", sfo, drift * 1e9, want * 1e9);
+    require(s6.valid && std::abs(drift / want - 1) < 0.1, "SFO: row-sync drift kept, within 10 %");
+    check_cpi(w6, a6, los6, "SFO 1 ppm"); }
   // --- row times must be non-decreasing; invalid axes give empty results, never a division
   { CfrWindow w4 = make_window(10, {{los, 1.0, 0.0}}, {0, 0, 0, 0}, 0, 4, 5);
     std::swap(w4.row_time_slots[3], w4.row_time_slots[4]);

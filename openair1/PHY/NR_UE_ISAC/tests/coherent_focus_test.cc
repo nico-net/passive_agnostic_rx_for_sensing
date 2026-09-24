@@ -13,7 +13,10 @@ using namespace nr_isac::coherent;
 using nr_isac::CfrWindow; using nr_isac::slot_duration_s;
 
 // rows x 3276 grid, antennas 4; paths: (per-channel absolute delay, amplitude, doppler); channel phase offsets
-struct Path { std::array<double, kCh> tau; double amp; double doppler_hz; std::array<double, kCh> dopp_ch{}; };  // + per-channel Doppler
+// + per-channel Doppler; migrate: the delay follows the Doppler (tau(t) = tau - f_D t / fc), as a truly
+// moving path does. Off by default: the scene targets carry ONE Doppler on all four channels, which
+// no velocity produces, and migrating them would make their delays geometrically inconsistent.
+struct Path { std::array<double, kCh> tau; double amp; double doppler_hz; std::array<double, kCh> dopp_ch{}; bool migrate = false; };
 static CfrWindow make_window(uint32_t rows, const std::vector<Path>& paths, std::array<double, kCh> ph,
                              double cfo_hz, uint32_t nprb_row, uint32_t seed, uint32_t comb = 1,
                              bool regular_hop = false, const std::vector<double>* slots = nullptr, double noise = 0.01)
@@ -37,8 +40,11 @@ static CfrWindow make_window(uint32_t rows, const std::vector<Path>& paths, std:
       const double f = ((double)k - 273 * 6) * w.scs_hz;
       for (uint32_t a = 0; a < 4; ++a) {
         std::complex<double> acc = 0;
-        for (const Path& p : paths)
-          acc += p.amp * std::exp(std::complex<double>(0, -2 * M_PI * ((w.fc_hz + f) * p.tau[a] - (p.doppler_hz + p.dopp_ch[a]) * t)));
+        for (const Path& p : paths) {
+          const double fd = p.doppler_hz + p.dopp_ch[a];
+          acc += p.migrate ? p.amp * std::exp(std::complex<double>(0, -2 * M_PI * (w.fc_hz + f) * (p.tau[a] - fd * t / w.fc_hz)))
+                           : p.amp * std::exp(std::complex<double>(0, -2 * M_PI * ((w.fc_hz + f) * p.tau[a] - fd * t)));
+        }
         acc *= std::exp(std::complex<double>(0, ph[a] + 2 * M_PI * cfo_hz * t));
         acc += noise * std::complex<double>(n01(rng), n01(rng));
         w.values[w.sample(a, r, k)] = std::complex<float>(acc);
@@ -52,8 +58,9 @@ static void dump(const char* what, const std::vector<Detection>& D)
 {
   std::printf("  %s: %zu detections\n", what, D.size());
   for (const Detection& d : D)
-    std::printf("    env(%6.2f %6.2f %6.2f) pos(%6.2f %6.2f %6.2f) fd %7.1f snr %.3g sd %.3g\n", d.pos_env.x, d.pos_env.y,
-                d.pos_env.z, d.pos.x, d.pos.y, d.pos.z, d.doppler_hz, d.snr, d.pos_sigma.x);
+    std::printf("    env(%6.2f %6.2f %6.2f) pos(%6.2f %6.2f %6.2f) fd %7.1f snr %.3g sd (%.3g %.3g %.3g) bins %d %d %d %d\n", d.pos_env.x, d.pos_env.y,
+                d.pos_env.z, d.pos.x, d.pos.y, d.pos.z, d.doppler_hz, d.snr, d.pos_sigma.x, d.pos_sigma.y, d.pos_sigma.z,
+                d.chan_dopp_bin[0], d.chan_dopp_bin[1], d.chan_dopp_bin[2], d.chan_dopp_bin[3]);
 }
 
 namespace {
@@ -70,7 +77,7 @@ std::array<double, kCh> los_taus(const Geometry& g)
 { std::array<double, kCh> t{}; for (uint32_t i = 0; i < 4; ++i) t[i] = (dist(g.tx, g.rx[i]) + 30) / kC; return t; }
 // Whole chain on one window -> (R, calibration, grid, detections). survey: refine()'s survey sigma.
 struct Chain { Axes a; LosEstimate L; RdResult R; Calibration c; Grid G; std::vector<float> E; std::vector<Detection> D; };
-Chain run(const CfrWindow& w, const Geometry& g, const Volume& vol, double vmax, std::array<double, kCh> survey = {0, 0, 0, 0})
+Chain run(const CfrWindow& w, const Geometry& g, const Volume& vol, double vmax, SurveySigma survey = {})
 {
   Chain k; k.a = derive_axes(w, vol, g, vmax); require(k.a.valid, "axes");
   k.L = find_los(w, k.a, 1e-4); RowSync s = estimate_row_sync(w, k.a, k.L); k.R = range_doppler(w, k.a, k.L, s);
@@ -102,11 +109,12 @@ static void test_scene()
   require(E.size() == a.tested_dopp.size() * G.size(), "envelope sized");
   DetectParams p = detect_params(a, G, 1.0); require(p.pfa > 0 && p.pfa < 1e-3, "pfa derived from intensity");
   std::vector<Detection> D = detect(E, R, G, g, p);
-  // The survey sigma the pipeline passes by default (CoherentConfig::survey_sigma_m = 0.1 m): at
-  // tape grade the coherent term is not trusted (rho_eff ~ 0, see test_survey_sigma). With a perfect
-  // survey (0) the hierarchical search lands on SOME fringe lobe within +-one envelope step: 13/20
-  // seeds keep all three within a cell, and which lobe wins changed with the compiler flags.
-  for (Detection& d : D) refine(d, R, G, g, c, {0.1, 0.1, 0.1, 0.1});
+  // Refined at the survey sigma the pipeline passes by default (CoherentConfig::survey_sigma_m =
+  // 0.1 m): at tape grade the coherent term is not trusted (rho_eff ~ 0, see test_survey_sigma).
+  // Measured over seeds 1-20 of this scene: at 0.1 m all three targets lie within 3 sigma (per axis,
+  // pos_cov) in 18/20 seeds; with a perfect survey (0) only in 6/20 -- the coherent lobe choice among
+  // unresolved neighbours is not covered by the reported covariance (see the Task 5 report).
+  for (Detection& d : D) refine(d, R, G, g, c, SurveySigma{{0.1, 0.1, 0.1, 0.1}, 0.1});
   dump("scene", D);
   auto near = [&](const Vec3& q, double tol) { for (const Detection& d : D) if (dist(d.pos, q) < tol) return true; return false; };
   const double tol = kC / (2 * a.b_eff_hz);                        // one range resolution cell
@@ -124,8 +132,8 @@ static void test_scene()
 // Item 1: a regular 37-PRB hop stride is a waveform range-Doppler ambiguity in EACH channel (a
 // serrodyne ghost ~1.5-1.9 bins off at ~+250 Hz, ~0.5 of the target). It lands at a different excess
 // delay on each channel, so the multi-channel envelope must detect the target and nothing else.
-// noise = per-RE noise sigma: 1.0 puts the target ~33 dB above noise in the RD map; the helper's
-// default 0.01 puts it ~69 dB above, where the leakage model's own error exceeds the noise threshold.
+// noise = per-RE noise sigma: 0.01 / 0.3 / 1.0 put the target ~69 / ~40 / ~33 dB above the noise in
+// the RD map (the leakage must then be predicted to ~1e-3.5 of the target's power, see detect()).
 static void test_regular_hop_ghost(double noise)
 {
   const Geometry g = geo(); Volume vol; const Vec3 t1{5, 12, 1.2};
@@ -154,7 +162,7 @@ static void test_los_missing_channel()
   const std::vector<float> Eg = envelope(Rg, k.G, g);
   require(Eg == k.E, "LOS-less channel does not enter the envelope");
   std::vector<Detection> Dg = detect(Eg, Rg, k.G, g, detect_params(k.a, k.G, 1.0));
-  for (Detection& d : Dg) refine(d, Rg, k.G, g, k.c, {0, 0, 0, 0});
+  for (Detection& d : Dg) refine(d, Rg, k.G, g, k.c, SurveySigma{});
   require(Dg.size() == k.D.size(), "LOS-less channel: same detections");
   for (size_t n = 0; n < Dg.size(); ++n)
     require(dist(Dg[n].pos, k.D[n].pos) == 0 && Dg[n].snr == k.D[n].snr, "LOS-less channel: same positions and SNR");
@@ -208,20 +216,54 @@ static void test_tdd_replicas()
 // Amendment (c): rho comes from the (survey-independent) LOS calibration; the target phase is not.
 // A 0.1 m survey gives rho_eff ~ 0: the position is the envelope position and sigma envelope-scale.
 // 2 mm keeps the coherent refinement.
+// |error| <= 3 sigma per axis against truth (sigma = sqrt(diag(pos_cov))).
+static void require_within_3sigma(const Detection& d, const Vec3& truth, const char* what)
+{
+  const Vec3 e = d.pos - truth;
+  std::printf("  %s: error (%.4f %.4f %.4f) m, 3 sigma (%.4f %.4f %.4f) m\n", what, e.x, e.y, e.z,
+              3 * d.pos_sigma.x, 3 * d.pos_sigma.y, 3 * d.pos_sigma.z);
+  require(std::abs(e.x) <= 3 * d.pos_sigma.x && std::abs(e.y) <= 3 * d.pos_sigma.y && std::abs(e.z) <= 3 * d.pos_sigma.z, what);
+}
+
 static void test_survey_sigma()
 {
   const Geometry g = geo(); Volume vol; const Vec3 t2{-6, -4, 1.0};
   Chain k = run(make_window(64, {{los_taus(g), 1.0, 0}, {taus(g, t2), 0.25, -110}}, kPh, 0, 128, 3), g, vol, 20.0);
   require(k.D.size() == 1 && k.c.rho > 0.9, "survey test: one detection, calibrated (rho ~ 1)");
   Detection coarse = k.D[0], fine = k.D[0];
-  refine(coarse, k.R, k.G, g, k.c, {0.1, 0.1, 0.1, 0.1});
-  refine(fine, k.R, k.G, g, k.c, {0.002, 0.002, 0.002, 0.002});
-  const double res = kC / (2 * k.a.b_eff_hz);
-  const double sd_env = std::max(res / std::sqrt(2 * coarse.snr), k.G.step / std::sqrt(12.0));
-  std::printf("  survey 0.1 m: moved %.3g m sd %.4g (envelope %.4g) | 2 mm: moved %.3g m sd %.4g\n",
-              dist(coarse.pos, coarse.pos_env), coarse.pos_sigma.x, sd_env, dist(fine.pos, fine.pos_env), fine.pos_sigma.x);
-  require(dist(coarse.pos, coarse.pos_env) < 1e-6 && std::abs(coarse.pos_sigma.x / sd_env - 1) < 1e-6, "0.1 m survey: envelope position and sigma");
-  require(dist(fine.pos, fine.pos_env) > 0 && fine.pos_sigma.x < 0.1 * sd_env, "2 mm survey: coherent refinement kept");
+  refine(coarse, k.R, k.G, g, k.c, SurveySigma{{0.1, 0.1, 0.1, 0.1}, 0.1});
+  refine(fine, k.R, k.G, g, k.c, SurveySigma{{0.002, 0.002, 0.002, 0.002}, 0.002});
+  std::printf("  survey 0.1 m: moved %.3g m | 2 mm: moved %.3g m\n", dist(coarse.pos, coarse.pos_env), dist(fine.pos, fine.pos_env));
+  require(dist(coarse.pos, coarse.pos_env) < 1e-6, "0.1 m survey: envelope position");
+  require_within_3sigma(coarse, t2, "0.1 m survey: |error| <= 3 sigma");
+  require(dist(fine.pos, fine.pos_env) > 0, "2 mm survey: coherent refinement kept");
+  require_within_3sigma(fine, t2, "2 mm survey: |error| <= 3 sigma");
+  // The illuminator's survey error decoheres the channel pairs too (ruling: pairwise, with the tx term).
+  // Here a pair's tx sensitivity is k|u(rx_i->tx) - u(rx_j->tx)| ~ 72 * 0.25 /m: 0.1 m leaves ~0.2.
+  Detection txo = k.D[0], perfect = k.D[0];
+  refine(txo, k.R, k.G, g, k.c, SurveySigma{{0, 0, 0, 0}, 0.1});
+  refine(perfect, k.R, k.G, g, k.c, SurveySigma{});
+  std::printf("  tx survey 0.1 m alone: moved %.4g m (perfect survey: %.4g m)\n", dist(txo.pos, txo.pos_env), dist(perfect.pos, perfect.pos_env));
+  require(dist(txo.pos, txo.pos_env) < 0.5 * dist(perfect.pos, perfect.pos_env), "0.1 m tx survey alone: coherent weight reduced");
+}
+
+// Item 3: the coherent phases refer to the CPI's weighted mid-time, so a moving target refines to its
+// mid-CPI position (perfect survey). v = 8 m/s over a ~63 ms CPI: x(0) and x(tbar) are 0.25 m apart.
+static void test_mid_cpi()
+{
+  const Geometry g = geo(); Volume vol; const Vec3 x0{-6, -4, 1.0}, v{getenv("VX") ? atof(getenv("VX")) : 8.0, 0, 0};
+  const double lam = kC / 3.45e9;
+  Path p{taus(g, x0), 0.25, 0}; p.migrate = true;
+  for (uint32_t i = 0; i < kCh; ++i) p.dopp_ch[i] = -dot(normalized(x0 - g.tx) + normalized(x0 - g.rx[i]), v) / lam;
+  CfrWindow w = make_window(64, {{los_taus(g), 1.0, 0}, p}, kPh, 0, 128, 3);
+  Chain k = run(w, g, vol, 20.0);
+  require(k.D.size() == 1, "mid-CPI: one detection");
+  double tw = 0, ws = 0;
+  for (uint32_t r = 0; r < w.rows; ++r) { const double t = k.a.row_t_s[r], h = 0.5 - 0.5 * std::cos(2 * M_PI * t / k.a.row_t_s.back()); tw += h * t; ws += h; }
+  const Vec3 xm = x0 + v * (tw / ws);
+  std::printf("  mid-CPI: tbar %.4f s, |pos - x(tbar)| %.4f m, |pos - x(0)| %.4f m; envelope: |env - x(tbar)| %.4f m\n", tw / ws,
+              dist(k.D[0].pos, xm), dist(k.D[0].pos, x0), dist(k.D[0].pos_env, xm));
+  require(dist(k.D[0].pos, xm) < dist(k.D[0].pos, x0) / 5, "mid-CPI: at x(tbar), not x(0)");
 }
 
 // Amendment (d): hierarchical refinement cost at R = 2 m from the array centroid (a dense half-fringe
@@ -234,7 +276,7 @@ static void test_refine_cost()
   Detection d = k.D.at(0); d.pos = d.pos_env = cen + Vec3{2, 0, 0};
   const int N = 20;
   const auto t0 = std::chrono::steady_clock::now();
-  for (int n = 0; n < N; ++n) { Detection x = d; refine(x, k.R, k.G, g, k.c, {0, 0, 0, 0}); require(x.refined, "refined at 2 m"); }
+  for (int n = 0; n < N; ++n) { Detection x = d; refine(x, k.R, k.G, g, k.c, SurveySigma{}); require(x.refined, "refined at 2 m"); }
   const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count() / N;
   std::printf("  refine at R = 2 m: %.3f ms\n", ms);
   require(ms < 5.0, "refinement at 2 m under 5 ms");
@@ -270,19 +312,20 @@ static void test_null_quantile()
   }
 }
 
-int main(int argc, char** argv)
+int main()
 {
   std::setvbuf(stdout, nullptr, _IONBF, 0);
-  const std::string only = argc > 1 ? argv[1] : "";
-  if (only == "ghost") { test_regular_hop_ghost(0.01); std::puts("coherent_focus_test ghost (69 dB): PASS"); return 0; }
   test_null_quantile();
   test_empty_scene();
   test_scene();
   test_los_missing_channel();
+  test_regular_hop_ghost(0.01);
+  test_regular_hop_ghost(0.3);
   test_regular_hop_ghost(1.0);
   test_per_channel_doppler();
   test_tdd_replicas();
   test_survey_sigma();
+  test_mid_cpi();
   test_refine_cost();
   std::puts("coherent_focus_test: PASS");
   return 0;

@@ -70,7 +70,8 @@ struct Calibration {
 struct Detection {
   Vec3 pos;                 // final position (rho-blended)
   Vec3 pos_env;             // envelope-pass position
-  Vec3 pos_sigma;           // 1-sigma per axis
+  Vec3 pos_sigma;           // 1-sigma per axis = sqrt(diag(pos_cov))
+  std::array<double, 9> pos_cov{};  // position covariance, row-major, m^2
   double doppler_hz = 0;
   double range_rate_mps = 0;        // bistatic path-length rate = -lambda*doppler
   double range_rate_sigma = 0;
@@ -78,6 +79,11 @@ struct Detection {
   uint32_t dopp_bin = 0;
   std::array<int32_t, kCh> chan_dopp_bin{-1, -1, -1, -1};  // each channel's own (velocity-consistent)
                                                             // Doppler bin; -1 = not set
+  std::array<cd, kCh> chan_amp{};   // each channel's fitted complex path amplitude (RD units, phase at
+                                    // the CPI's first row); 0 = no fit
+  std::array<double, kCh> chan_fd_hz{};  // each channel's fitted Doppler (Hz)
+  std::array<double, kCh> chan_snr{};    // each channel's effective SNR |A|^2 / sigma^2, sigma^2 the larger of
+                                         // the noise floor and the fit's own residual (model error)
   bool refined = false;
   std::array<cd, kCh> terms{};      // per-channel coherent terms at pos (autofocus input)
   uint64_t illuminator = 0;         // 0 = gNB, else UL session id

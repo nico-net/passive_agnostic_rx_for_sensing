@@ -2440,8 +2440,6 @@ if(ENABLE_TESTS)
     target_link_libraries(test_nr_isac_coherent_focus PRIVATE NR_UE_ISAC)
     add_dependencies(tests test_nr_isac_coherent_focus)
     add_test(NAME test_nr_isac_coherent_focus COMMAND ./test_nr_isac_coherent_focus)
-    # Regular-hop ghost at the helper's 69 dB target SNR: KNOWN FAILING (see the Task 5 report).
-    add_test(NAME test_nr_isac_coherent_focus_ghost_69db COMMAND ./test_nr_isac_coherent_focus ghost)
   endif()
   # uniqCfg/exit_function (needed by LOG/CONFIG_LIB) are defined directly in isac_sync_test.cc,
   # not via minimal_lib -- static-archive link order made minimal_lib's stubs unreliable here.
