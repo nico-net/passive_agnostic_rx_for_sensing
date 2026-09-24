@@ -323,6 +323,17 @@ static NR_ControlResourceSet_t *get_coreset_config(int bwp_id,
   coreset->tci_StatesPDCCH_ToReleaseList = NULL;
   coreset->tci_PresentInDCI = NULL;
   coreset->pdcch_DMRS_ScramblingID = NULL;
+  /* TEST HOOK (simulation only, default off): ISAC_GNB_PDCCH_DMRS_ID=<0..65535> configures the dedicated CORESET's
+   * pdcch-DMRS-ScramblingID, which makes the gNB scramble UE-specific DCIs with c_init = (C-RNTI << 16) + n_ID
+   * (gNB_scheduler_primitives.c: ScramblingRNTI = rnti) -- the case a passive receiver cannot descramble without the
+   * RNTI, used to exercise the joint RNTI solver end to end on rfsim. */
+  {
+    const char *e = getenv("ISAC_GNB_PDCCH_DMRS_ID");
+    if (e != NULL) {
+      coreset->pdcch_DMRS_ScramblingID = calloc(1, sizeof(*coreset->pdcch_DMRS_ScramblingID));
+      *coreset->pdcch_DMRS_ScramblingID = (long)(atoi(e) & 0xFFFF);
+    }
+  }
   return coreset;
 }
 
