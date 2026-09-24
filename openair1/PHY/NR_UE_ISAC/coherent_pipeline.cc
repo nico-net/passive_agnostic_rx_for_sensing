@@ -159,7 +159,9 @@ void CoherentPipeline::process(Job& j)
   // find_los / row-sync stay CPU-only either way (Task 10: cheap relative to range_doppler/detect
   // on this scene, and find_los is being fixed on a parallel branch -- its body is never touched
   // here; see coherent_cuda.h's file header).
-  const LosEstimate L = find_los(j.dl, a, pfa_los);
+  std::array<double, kCh> geo_los{};             // survey LOS delays: picks the LOS over a stronger wall
+  for (uint32_t i = 0; i < kCh; ++i) geo_los[i] = dist(geo.tx, geo.rx[i]) / kC;
+  const LosEstimate L = find_los(j.dl, a, pfa_los, &geo_los);
   tm_los = ms_since(s0);
   const RowSync rs = estimate_row_sync(j.dl, a, L);
   tm[0] = ms_since(s0); s0 = clk::now();

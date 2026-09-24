@@ -47,6 +47,7 @@ int main() {
   Geometry g; g.tx = {35, 20, 6};
   g.rx = {Vec3{0, 0, .5}, Vec3{10, 0, 3.5}, Vec3{0, 10, 3.5}, Vec3{10, 10, .5}};
   Volume vol;
+  std::array<double, kCh> geo{}; for (uint32_t i = 0; i < 4; ++i) geo[i] = dist(g.tx, g.rx[i]) / kC;   // survey LOS delays
   // --- degenerate CPI (Review Focus 1)
   { CfrWindow w = make_window(1, {}, {0, 0, 0, 0}, 0, 4, 1);
     coherent::Axes a = derive_axes(w, vol, g, 10.0); require(!a.valid && !a.invalid_reason.empty(), "1-row CPI rejected with reason"); }
@@ -65,7 +66,7 @@ int main() {
   // excess-delay bin and its Doppler (so the common CFO was removed) on every channel.
   auto check_cpi = [&](const CfrWindow& win, const coherent::Axes& ax, const std::array<double, kCh>& los_exp, const char* what) {
     std::printf("  cpi: %s\n", what);
-    LosEstimate L = find_los(win, ax, 1e-4);
+    LosEstimate L = find_los(win, ax, 1e-4, &geo);
     for (uint32_t i = 0; i < 4; ++i) {
       require(L.found[i], "LOS found");
       require(std::abs(L.delay_s[i] - los_exp[i]) < 0.25 * ax.delay_step_s + 1e-12, "LOS delay sub-bin accurate");
@@ -111,7 +112,7 @@ int main() {
     for (uint32_t i = 0; i < 4; ++i) wall7[i] = los[i] + 40e-9;
     CfrWindow w8 = make_window(60, {{los, 1.0, 0.0}, {wall7, 0.5, 0.0}}, {0, 1.1, -2.0, 0.4}, 23.0, 64, 9);
     coherent::Axes a8 = derive_axes(w8, vol, g, 10.0); require(a8.valid, "axes valid (weak late wall)");
-    LosEstimate L8 = find_los(w8, a8, 1e-4);
+    LosEstimate L8 = find_los(w8, a8, 1e-4, &geo);
     for (uint32_t i = 0; i < 4; ++i)
       require(L8.found[i] && std::abs(L8.delay_s[i] - los[i]) < 0.25 * a8.delay_step_s, "no earlier path: LOS not falsely moved"); }
   // --- find_los timing on a 64-row CPI (75 ms real-time budget)

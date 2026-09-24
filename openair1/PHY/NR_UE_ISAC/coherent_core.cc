@@ -4,6 +4,8 @@
 #include "robust_stats.h"
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <limits>
 #include <deque>
 #include <map>
@@ -158,7 +160,7 @@ Axes derive_axes(const CfrWindow& w, const Volume& vol, const Geometry& g, doubl
   return a;
 }
 
-LosEstimate find_los(const CfrWindow& w, const Axes& a, double pfa)
+LosEstimate find_los(const CfrWindow& w, const Axes& a, double pfa, const std::array<double, kCh>* geo_los_s)
 {
   LosEstimate L;
   if (!a.valid) return L;
@@ -304,8 +306,9 @@ LosEstimate find_los(const CfrWindow& w, const Axes& a, double pfa)
     uint32_t lo, hi; if (!row_span(w, r, &lo, &hi)) continue;
     double ws = 0; for (uint32_t k = lo; k <= hi; ++k) if (w.observed[w.cell(r, k)]) ws += hann(hi > lo ? (double)(k - lo) / (hi - lo) : 0.5);
     for (uint32_t k = lo; k <= hi; ++k) if (w.observed[w.cell(r, k)])
-      Uk[k] += std::polar(hann(hi > lo ? (double)(k - lo) / (hi - lo) : 0.5) / (ws * R),
-                          2 * M_PI * baseband_hz(w, k) * s.delay_s[r] - s.phase_rad[r]);
+      // A static path AFTER the row sync has zero residual phase: the sync corrections apply to the
+      // data, not to the model (applying them to unit data decohered this kernel: sidelobes 0.5-1.0).
+      Uk[k] += hann(hi > lo ? (double)(k - lo) / (hi - lo) : 0.5) / (ws * R);
   }
   auto kernel_at = [&](double x) {
     const cd rot = std::polar(1.0, 2 * M_PI * w.scs_hz * x * a.delay_step_s);
@@ -332,6 +335,11 @@ LosEstimate find_los(const CfrWindow& w, const Axes& a, double pfa)
   // earlier path's sub-bin position is unknown ahead of time; same convention as `leak` above),
   // normalised to the kernel's OWN measured peak.
   auto leak_c = [&](long d) { double m = 0; for (long j = -kOvs; j <= kOvs; ++j) m = std::max(m, kernel_at(k0 + d + (double)j / kOvs)); return (kpeak > 0) ? m / kpeak : 1.0; };
+  // Pass 1, per channel: the coherent peak near the non-coherent estimate, plus every earlier local
+  // maximum in the unresolved region [peak-hm, peak-1] that clears the profile's own noise and the
+  // peak's leakage through the union kernel (both in amplitude). Candidates only -- see pass 2.
+  std::array<long, kCh> peak_n{}, best_n{};
+  std::array<std::vector<long>, kCh> cands;
   for (uint32_t i = 0; i < kCh; ++i) {
     if (!L.found[i]) continue;
     std::vector<cd> coh(a.n_fft, cd(0));
@@ -342,35 +350,40 @@ LosEstimate find_los(const CfrWindow& w, const Axes& a, double pfa)
     }
     const long n0 = std::lround(L.delay_s[i] / a.delay_step_s);
     auto at = [&](long n) { return std::abs(coh[wrap(n)]); };
-    // Locate the coherent domain's own peak near n0 first (as before this fix): the non-coherent
-    // estimate can be up to ~2 bins off the coherent peak (measured, see the original comment
-    // below), and the earlier-path scan needs the TRUE peak position/amplitude as its "strong path"
-    // reference, not the possibly-off n0 -- using n0 directly let the strong peak's own mainlobe
-    // skirt at n0's neighbour read as if it exceeded its own leakage bound and falsely fired the
-    // scan below on every ordinary (no-earlier-path) CPI.
-    long peak = n0;
+    long peak = n0;                                  // the non-coherent estimate can be ~2 bins off
     for (long n = n0 - 2; n <= n0 + 2; ++n) if (at(n) > at(peak)) peak = n;
-    long best = peak;
-    if (scan_early[i]) {
-      // The non-coherent stage could not separate an earlier path merged into this channel's strong
-      // peak's own mainlobe (scan_early above). At full-union-band resolution the coherent profile
-      // CAN: scan [peak-hm, peak-1] -- the region the non-coherent pass never resolved -- for the
-      // EARLIEST local maximum that clears both this profile's own noise floor and the strong
-      // peak's own leakage into it. Noise: under noise alone coh[n] is ONE complex Gaussian (R
-      // independent per-row draws averaged, not R power draws summed like pw), so |coh[n]|^2 is
-      // Exponential (Gamma shape 1) -- unlike the non-coherent stage's Gamma(R,.). Bonferroni over
-      // the hm bins this scan actually tries -- no new constant.
-      std::vector<double> cp(a.n_fft); for (size_t n = 0; n < cp.size(); ++n) cp[n] = std::norm(coh[n]);
-      const double noise_c = median(cp) / gamma_upper_quantile(1, 0.5);
-      const double thr_c = noise_c * gamma_upper_quantile(1, pfa / std::max<long>(1, hm));
-      for (long d = -hm; d < 0; ++d) {
-        const long n = peak + d;
-        if (at(n) <= thr_c) continue;
-        if (!(at(n) >= at(n - 1) && at(n) >= at(n + 1))) continue;
-        if (at(n) <= leak_c(d) * at(peak)) continue;  // must clear the strong peak's own leakage
-        best = n; break;                               // earliest first: d runs -hm -> -1
+    peak_n[i] = best_n[i] = peak; cands[i] = {peak};
+    if (!scan_early[i]) continue;
+    // Noise-only |coh[n]|^2 is Exponential (one complex Gaussian: R rows averaged); Bonferroni over hm.
+    std::vector<double> cp(a.n_fft); for (size_t n = 0; n < cp.size(); ++n) cp[n] = std::norm(coh[n]);
+    const double noise_c = median(cp) / gamma_upper_quantile(1, 0.5);
+    const double thr_amp = std::sqrt(noise_c * gamma_upper_quantile(1, pfa / std::max<long>(1, hm)));
+    for (long d = -hm; d < 0; ++d) {
+      const long n = peak + d;
+      if (!(at(n) >= at(n - 1) && at(n) >= at(n + 1))) continue;
+      if (at(n) > leak_c(d) * at(peak) + thr_amp) cands[i].push_back(n);
+    }
+  }
+  // Pass 2: which candidate is the LOS. With narrow rows (hm ~ 170 bins) the earliest-candidate rule
+  // locks sidelobe/target residue 60-100 bins early (measured). The survey decides instead: after LOS
+  // referencing every channel's LOS delay minus its geometric |tx-rx_i|/c is ONE common offset (STO +
+  // cable), so each channel takes the candidate closest to the median offset of the channels' peaks.
+  // A wall stronger than the LOS on a minority of channels moves only that channel's peak. Without a
+  // survey (UL: the UE position is what is being estimated) the strong peak is kept.
+  if (geo_los_s) {
+    std::vector<double> off;
+    for (uint32_t i = 0; i < kCh; ++i) if (L.found[i]) off.push_back(fold(peak_n[i] - (*geo_los_s)[i] / a.delay_step_s));
+    if (off.size() >= 3) {
+      const double o = median(off);
+      for (uint32_t i = 0; i < kCh; ++i) if (L.found[i]) {
+        auto err = [&](long c) { return std::abs(fold(c - (*geo_los_s)[i] / a.delay_step_s - o)); };
+        for (long c : cands[i]) if (err(c) < err(best_n[i])) best_n[i] = c;
       }
     }
+  }
+  for (uint32_t i = 0; i < kCh; ++i) {
+    if (!L.found[i]) continue;
+    const long best = best_n[i];
     // Sub-bin: maximise |coh(x)| over x continuous (golden section on [best-1, best+1]), coh(x) the
     // same coherent row mean evaluated off the FFT grid. A parabola through three magnitude samples
     // of a Hann mainlobe is biased by up to ~0.03 bin (measured), and a LOS reference off by that
@@ -389,16 +402,42 @@ LosEstimate find_los(const CfrWindow& w, const Axes& a, double pfa)
       for (uint32_t k = 0; k < w.subcarriers; ++k, ph *= rot) if (U[k] != cd(0)) acc += U[k] * ph;
       return acc;
     };
-    const double gr = 0.5 * (std::sqrt(5.0) - 1);
-    double xa = best - 1.0, xb = best + 1.0, xc = xb - gr * (xb - xa), xd = xa + gr * (xb - xa);
-    double fc_ = std::abs(coh_at(xc)), fd_ = std::abs(coh_at(xd));
-    while (xb - xa > 1e-6) {                               // numerical resolution, far below any CRB here
-      if (fc_ > fd_) { xb = xd; xd = xc; fd_ = fc_; xc = xb - gr * (xb - xa); fc_ = std::abs(coh_at(xc)); }
-      else { xa = xc; xc = xd; fc_ = fd_; xd = xa + gr * (xb - xa); fd_ = std::abs(coh_at(xd)); }
+    auto argmax = [](auto f, double x0) {                  // golden section on [x0-1, x0+1]
+      const double gr = 0.5 * (std::sqrt(5.0) - 1);
+      double xa = x0 - 1.0, xb = x0 + 1.0, xc = xb - gr * (xb - xa), xd = xa + gr * (xb - xa);
+      double fc_ = f(xc), fd_ = f(xd);
+      while (xb - xa > 1e-6) {                             // numerical resolution, far below any CRB here
+        if (fc_ > fd_) { xb = xd; xd = xc; fd_ = fc_; xc = xb - gr * (xb - xa); fc_ = f(xc); }
+        else { xa = xc; xc = xd; fc_ = fd_; xd = xa + gr * (xb - xa); fd_ = f(xd); }
+      }
+      return 0.5 * (xa + xb);
+    };
+    double xm = argmax([&](double x) { return std::abs(coh_at(x)); }, (double)best);
+    cd tap = coh_at(xm);
+    if (best != peak_n[i]) {
+      // The LOS was taken EARLIER than a stronger path within one row mainlobe: that path's union-kernel
+      // skirt biases the LOS peak (measured 0.33 bin, 0.36 rad on the chain scene). Alternating two-path
+      // fit: refine each path on the profile with the other's kernel response removed (kernel sum = 1
+      // at x = 0, so a path's amplitude is the residual at its own delay).
+      auto kc = [&](double x) {
+        const cd rot = std::polar(1.0, 2 * M_PI * w.scs_hz * x * a.delay_step_s);
+        cd ph = std::polar(1.0, 2 * M_PI * baseband_hz(w, 0) * x * a.delay_step_s), acc = 0;
+        for (uint32_t k = 0; k < w.subcarriers; ++k, ph *= rot) if (Uk[k] != cd(0)) acc += Uk[k] * ph;
+        return acc;
+      };
+      double xs = argmax([&](double x) { return std::abs(coh_at(x)); }, (double)peak_n[i]);
+      cd as = coh_at(xs);
+      for (int it = 0; it < 8; ++it) {                     // fixed point; converges in a few iterations
+        const double xm0 = xm, xs0 = xs;
+        xm = argmax([&](double x) { return std::abs(coh_at(x) - as * kc(x - xs)); }, xm);
+        tap = coh_at(xm) - as * kc(xm - xs);
+        xs = argmax([&](double x) { return std::abs(coh_at(x) - tap * kc(x - xm)); }, xs);
+        as = coh_at(xs) - tap * kc(xs - xm);
+        if (std::abs(xm - xm0) < 1e-4 && std::abs(xs - xs0) < 1e-4) break;
+      }
     }
-    const double xm = 0.5 * (xa + xb);
     L.delay_s[i] = fold(xm) * a.delay_step_s;
-    L.tap[i] = coh_at(xm);
+    L.tap[i] = tap;
   }
   return L;
 }

@@ -1,4 +1,4 @@
-{"frame": "ENU metres (east, north, up), origin at the X410. Measure each position on site.",
- "gnb_m": [0.0, 0.0, 0.0],
- "rx_antennas_m": {"ch0": [0.0, 0.0, 0.0], "ch1": [0.0, 0.0, 0.0], "ch2": [0.0, 0.0, 0.0], "ch3": [0.0, 0.0, 0.0]},
+{"frame": "ENU metres (east, north, up), origin at the X410. Tape survey 2026-09-24.",
+ "gnb_m": [-9.1, 16.5, 1.2],
+ "rx_antennas_m": {"ch0": [-1.9, -0.65, 0.0], "ch1": [5.7, -0.65, 2.0], "ch2": [5.7, 7.55, 0.0], "ch3": [-1.9, 7.55, 2.0]},
  "max_range_m": 600}

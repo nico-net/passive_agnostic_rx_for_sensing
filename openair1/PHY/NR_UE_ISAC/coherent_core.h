@@ -69,7 +69,9 @@ struct Grid {
 struct DetectParams { double pfa = 0; };  // per-voxel-per-Doppler false-alarm probability (derived)
 
 Axes derive_axes(const CfrWindow& w, const Volume& vol, const Geometry& g, double max_speed_mps);
-LosEstimate find_los(const CfrWindow& w, const Axes& a, double pfa);
+/** geo_los_s (optional): each channel's geometric LOS delay |tx-rx_i|/c from the survey; when given, the
+ * LOS candidate consistent with one common offset across channels wins over a stronger wall. */
+LosEstimate find_los(const CfrWindow& w, const Axes& a, double pfa, const std::array<double, kCh>* geo_los_s = nullptr);
 RowSync estimate_row_sync(const CfrWindow& w, const Axes& a, const LosEstimate& los);
 RdResult range_doppler(const CfrWindow& w, const Axes& a, const LosEstimate& los, const RowSync& sync);
 /** step = c/(4*b_eff) over the volume. */
