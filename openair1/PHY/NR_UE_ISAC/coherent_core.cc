@@ -482,37 +482,75 @@ RowSync estimate_row_sync(const CfrWindow& w, const Axes& a, const LosEstimate& 
       tap[r][i] = n > 0 ? acc / n : cd(0);
     }
   }
-  auto fit = [&](const std::vector<double>& t, const std::vector<double>& y, std::vector<double>& out) {
-    double mt = 0, my = 0; for (size_t n = 0; n < t.size(); ++n) { mt += t[n]; my += y[n]; }
+  // Radio frame of each row. The receiver re-times its FFT window once per frame (shiftForNextFrame,
+  // OTA -4 samples every 10 ms following ~3 ppm of sample-clock drift), so delay and LOS phase are a
+  // common drift PLUS a step at every frame boundary: a 10 ms sawtooth. A single line over the CPI left
+  // it in the data, and static removal passed the direct path as a one-sided comb at -100/-200/-300 Hz,
+  // 45 dB above the floor on every channel (measured 2026-09-24). Fit: one slope, one intercept per frame.
+  const uint32_t spf = std::max<uint32_t>(1, (uint32_t)std::lround(10.0 * w.scs_hz / 15000.0));
+  std::vector<uint32_t> frame(w.rows, 0);
+  if (w.row_slot_idx.size() == w.rows) for (uint32_t r = 0; r < w.rows; ++r) frame[r] = w.row_slot_idx[r] / spf;
+  auto fit = [&](const std::vector<double>& t, const std::vector<double>& y, const std::vector<uint32_t>& f, std::vector<double>& out) {
+    std::map<uint32_t, std::array<double, 3>> g;          // frame -> (n, sum t, sum y)
+    double mt = 0, my = 0;
+    for (size_t n = 0; n < t.size(); ++n) { auto& q = g[f[n]]; q[0] += 1; q[1] += t[n]; q[2] += y[n]; mt += t[n]; my += y[n]; }
     mt /= t.size(); my /= t.size();
-    double stt = 0, sty = 0; for (size_t n = 0; n < t.size(); ++n) { stt += (t[n] - mt) * (t[n] - mt); sty += (t[n] - mt) * (y[n] - my); }
+    double stt = 0, sty = 0;                                // pooled within-frame slope
+    for (size_t n = 0; n < t.size(); ++n) { const auto& q = g[f[n]]; const double dt = t[n] - q[1] / q[0], dy = y[n] - q[2] / q[0]; stt += dt * dt; sty += dt * dy; }
+    if (!(stt > 0)) { stt = sty = 0; for (size_t n = 0; n < t.size(); ++n) { stt += (t[n] - mt) * (t[n] - mt); sty += (t[n] - mt) * (y[n] - my); } }
     const double b = stt > 0 ? sty / stt : 0.0;
-    for (uint32_t r = 0; r < w.rows; ++r) out[r] = my + b * (a.row_t_s[r] - mt);
+    for (uint32_t r = 0; r < w.rows; ++r) {
+      const auto it = g.find(frame[r]);
+      out[r] = (it != g.end()) ? it->second[2] / it->second[0] + b * (a.row_t_s[r] - it->second[1] / it->second[0]) : my + b * (a.row_t_s[r] - mt);
+    }
   };
-  std::vector<double> td, dl;
+  std::vector<double> td, dl; std::vector<uint32_t> tf;
   for (uint32_t r = 0; r < w.rows; ++r)
-    if (std::abs(slope[r]) > 0) { td.push_back(a.row_t_s[r]); dl.push_back(-std::arg(slope[r]) / (2 * M_PI * comb[r] * w.scs_hz)); }
+    if (std::abs(slope[r]) > 0) { td.push_back(a.row_t_s[r]); tf.push_back(frame[r]); dl.push_back(-std::arg(slope[r]) / (2 * M_PI * comb[r] * w.scs_hz)); }
   // Delay drift FIRST: the per-row LOS taps below are read at the drift-corrected delay (at 1 ppm SFO
   // a 60-row CPI drifts 7 bins, and taps read at one fixed delay decohere: coherent LOS 0.2 of its
   // amplitude and the LOS reference 0.7 bin off -- measured). Delay: DRIFT ONLY. The fit's intercept is the power-weighted centroid of all paths, not the
   // LOS (measured: a static 0.5-amplitude wall 15 m behind moved every channel's range axis by 1.2
   // bins and dropped |los_tap| to ~0.3). Absolute delay stays referenced to find_los's LOS.
   if (td.size() >= 2) {
-    fit(td, dl, s.delay_s);
-    double mean = 0; for (double d : s.delay_s) mean += d / w.rows;
-    for (double& d : s.delay_s) d -= mean;
+    // Two drift models: one line, and one slope with a step per frame (see `frame`). Both are candidates
+    // for the model selection below, with "no drift"; the per-frame one only wins where real steps exist.
+    auto centred = [&](const std::vector<uint32_t>& f) {
+      std::vector<double> d(w.rows); fit(td, dl, f, d);
+      double mean = 0; for (double v : d) mean += v / w.rows;
+      for (double& v : d) v -= mean;
+      return d;
+    };
+    const std::vector<double> d_line = centred(std::vector<uint32_t>(tf.size(), 0)), d_frame = centred(tf);
+    // Per-frame steps only when the data need them: nested-model test on the per-row delay residuals,
+    // (RSS_line - RSS_frame) / sigma^2 ~ chi2 with (frames - 1) dof under "no steps", sigma^2 from the
+    // richer model; 1 % false-acceptance (conventional quantile). A LOS-power comparison let the extra
+    // intercepts win on noise alone and broke a no-step synthetic scene.
+    std::vector<double> dline_s(td.size()), dframe_s(td.size());
+    { std::vector<double> a1(w.rows), a2(w.rows); fit(td, dl, std::vector<uint32_t>(tf.size(), 0), a1); fit(td, dl, tf, a2);
+      std::map<double, size_t> idx; for (uint32_t r = 0; r < w.rows; ++r) idx.emplace(a.row_t_s[r], r);
+      for (size_t n = 0; n < td.size(); ++n) { const size_t r = idx[td[n]]; dline_s[n] = a1[r]; dframe_s[n] = a2[r]; } }
+    double rss1 = 0, rss2 = 0; std::map<uint32_t, int> nfr;
+    for (size_t n = 0; n < td.size(); ++n) { rss1 += (dl[n] - dline_s[n]) * (dl[n] - dline_s[n]); rss2 += (dl[n] - dframe_s[n]) * (dl[n] - dframe_s[n]); nfr[tf[n]]++; }
+    const long nfrm = (long)nfr.size(), dof2 = (long)td.size() - nfrm - 1;
+    bool steps = false;
+    if (nfrm >= 2 && dof2 > 0 && rss2 > 0) {
+      const double sig2 = rss2 / dof2, stat = (rss1 - rss2) / sig2;
+      steps = 0.5 * stat > gamma_upper_quantile((uint32_t)((nfrm - 1 + 1) / 2), 0.01);
+    }
+    s.delay_s = d_line;
     // Keep the drift only if it makes the LOS flatter across each row's band (more row-coherent LOS
     // power) than no drift. The slope estimate (adjacent-subcarrier phase, sensitivity 2*pi*scs) is
     // weak: at 0 dB per RE it read 10-35 ns of drift over drift-free CPIs, leaving the LOS 4-90x above
     // noise at range bins 0-3 across every Doppler bin after static removal (1-6 false detections per
     // CPI, measured). The LOS tap's sensitivity is 2*pi*B, so a spurious drift shows here as lost LOS
     // power. Model selection on the objective the sync serves; no constant.
-    auto los_pow = [&](bool drift) {
+    auto los_pow = [&](const std::vector<double>* drift) {
       double e = 0;
       for (uint32_t i = 0; i < kCh; ++i) if (L.found[i])
         for (uint32_t r = 0; r < w.rows; ++r) {
           uint32_t lo, hi; if (!row_span(w, r, &lo, &hi)) continue;
-          const double tau = L.delay_s[i] + (drift ? s.delay_s[r] : 0.0);
+          const double tau = L.delay_s[i] + (drift ? (*drift)[r] : 0.0);
           const cd rot = std::polar(1.0, 2 * M_PI * w.scs_hz * tau);      // phasor recurrence over k
           cd ph = std::polar(1.0, 2 * M_PI * baseband_hz(w, lo) * tau), acc = 0;
           for (uint32_t k = lo; k <= hi; ++k, ph *= rot) if (w.observed[w.cell(r, k)]) acc += cd(w.values[w.sample(i, r, k)]) * ph;
@@ -520,7 +558,9 @@ RowSync estimate_row_sync(const CfrWindow& w, const Axes& a, const LosEstimate& 
         }
       return e;
     };
-    if (los_pow(false) >= los_pow(true)) std::fill(s.delay_s.begin(), s.delay_s.end(), 0.0);
+    if (steps) s.delay_s = d_frame;
+    const double lp0 = los_pow(nullptr), lp1 = los_pow(&s.delay_s);
+    if (!steps && lp0 >= lp1) std::fill(s.delay_s.begin(), s.delay_s.end(), 0.0);   // a significant step model is kept
   }
   if (std::any_of(s.delay_s.begin(), s.delay_s.end(), [](double v) { return v != 0; }))
     for (uint32_t r = 0; r < w.rows; ++r)
@@ -596,17 +636,41 @@ RowSync estimate_row_sync(const CfrWindow& w, const Axes& a, const LosEstimate& 
   // and -1.2 dB target peak on the two channels whose target sits 0.7 / 4.3 bins from the LOS).
   // ponytail: a line cannot follow oscillator phase noise inside a CPI; per-row residual tracking
   // with the target Doppler protected would be the upgrade if OTA CPIs show it.
-  std::vector<double> tp, ph; double prev_ph = 0;
+  // Coarse CFO first: the periodogram peak of the combined LOS phasor over +-1/(2 dt_min), dt_min the
+  // finest row spacing. Unwrapping in row order alone aliases whenever consecutive rows are more than
+  // half a cycle apart: OTA, ~890 Hz of residual CFO over ~1 ms row gaps unwrapped to -107 Hz, and the
+  // direct path then survived static removal as a 45 dB "target" on every channel (measured
+  // 2026-09-24). Irregular row times make the peak unique; exact aliases derotate the rows identically.
+  std::vector<cd> cr(w.rows, cd(0));
+  for (uint32_t r = 0; r < w.rows; ++r) for (uint32_t i = 0; i < kCh; ++i) if (L.found[i]) cr[r] += tap[r][i] * align[i];
+  double f0 = 0;
+  {
+    double dt_min = 0;
+    for (uint32_t r = 1; r < w.rows; ++r) { const double d = a.row_t_s[r] - a.row_t_s[r - 1]; if (d > 0 && (dt_min == 0 || d < dt_min)) dt_min = d; }
+    if (dt_min > 0 && a.t_cpi_s > 0) {
+      const double fh = 0.5 / dt_min, df = 0.25 / a.t_cpi_s;
+      const long nf = (long)std::ceil(2 * fh / df) + 1;
+      std::vector<cd> ph0(w.rows), rot(w.rows);
+      for (uint32_t r = 0; r < w.rows; ++r) { ph0[r] = cr[r] * std::polar(1.0, 2 * M_PI * fh * a.row_t_s[r]); rot[r] = std::polar(1.0, -2 * M_PI * df * a.row_t_s[r]); }
+      double best = -1;
+      for (long n = 0; n < nf; ++n) {
+        cd acc = 0; for (uint32_t r = 0; r < w.rows; ++r) { acc += ph0[r]; ph0[r] *= rot[r]; }
+        if (std::norm(acc) > best) { best = std::norm(acc); f0 = -fh + n * df; }
+      }
+    }
+  }
+  std::vector<double> tp, ph; std::vector<uint32_t> pf; double prev_ph = 0;
   for (uint32_t r = 0; r < w.rows; ++r) {
-    cd c = 0; for (uint32_t i = 0; i < kCh; ++i) if (L.found[i]) c += tap[r][i] * align[i];  // weight = LOS amplitude
+    const cd c = cr[r] * std::polar(1.0, -2 * M_PI * f0 * a.row_t_s[r]);                // weight = LOS amplitude
     if (std::abs(c) > 0) {                                                                  // phase never needs a slope
       double p = std::arg(c);
       if (!ph.empty()) p = prev_ph + std::remainder(p - prev_ph, 2 * M_PI);                  // unwrap in row order
-      prev_ph = p; tp.push_back(a.row_t_s[r]); ph.push_back(p);
+      prev_ph = p; tp.push_back(a.row_t_s[r]); ph.push_back(p); pf.push_back(0);   // phase: one line (the step is a delay step)
     }
   }
   if (tp.empty()) return s;
-  fit(tp, ph, s.phase_rad);
+  fit(tp, ph, pf, s.phase_rad);
+  for (uint32_t r = 0; r < w.rows; ++r) s.phase_rad[r] += 2 * M_PI * f0 * a.row_t_s[r];
   s.valid = true;
   return s;
 }
@@ -1205,10 +1269,19 @@ std::vector<Detection> detect(const std::vector<float>& E, const RdResult& R, co
       const double thr = scale[t] * null_of(m_of(t, v)).second;
       if (!(Et[v] > thr)) continue;
       const long ix = v % NX, iy = (v / NX) % NY, iz = v / (NX * NY);
-      bool peak = true;                                   // spatial local maximum (spec C6)
-      for (long dz = -1; dz <= 1 && peak; ++dz) for (long dy = -1; dy <= 1 && peak; ++dy) for (long dx = -1; dx <= 1; ++dx) {
-        const long x = ix + dx, y = iy + dy, z = iz + dz;
-        if ((dx || dy || dz) && x >= 0 && x < NX && y >= 0 && y < NY && z >= 0 && z < NZ && Et[(z * NY + y) * NX + x] > Et[v]) { peak = false; break; }
+      // Local maximum of E over the joint (x, y, z, Doppler) neighbourhood (spec C6 NMS). A per-Doppler
+      // spatial maximum made one target smeared over neighbouring Doppler bins a candidate in every
+      // bin, each paying the per-channel choice: 13-31 s/CPI on full-band OTA CPIs (64k voxels).
+      // Doppler neighbours are the adjacent TESTED bins that are also adjacent on the axis.
+      bool peak = true;
+      for (long dt = -1; dt <= 1 && peak; ++dt) {
+        const long tt = (long)t + dt;
+        if (dt && (tt < 0 || tt >= (long)nt || std::labs((long)a.tested_dopp[tt] - (long)a.tested_dopp[t]) != 1)) continue;
+        const float* En = &E[(size_t)tt * nv];
+        for (long dz = -1; dz <= 1 && peak; ++dz) for (long dy = -1; dy <= 1 && peak; ++dy) for (long dx = -1; dx <= 1; ++dx) {
+          const long x = ix + dx, y = iy + dy, z = iz + dz;
+          if ((dt || dx || dy || dz) && x >= 0 && x < NX && y >= 0 && y < NY && z >= 0 && z < NZ && En[(z * NY + y) * NX + x] > Et[v]) { peak = false; break; }
+        }
       }
       if (peak) c.push_back({t, v, Et[v], thr});
     }
@@ -1451,7 +1524,6 @@ std::vector<Detection> detect(const std::vector<float>& E, const RdResult& R, co
       na.fit[i] = fit_channel(rs, i, pb, k.me.d[i], hm_r, hm_d, z, oth);
     }
     acc.push_back(std::move(na));
-    refit_all();
     rebuild_residual();
     const Acc& s = acc.back().s;
     for (Item& it : items) {
@@ -1471,6 +1543,7 @@ std::vector<Detection> detect(const std::vector<float>& E, const RdResult& R, co
       for (uint32_t i = 0; i < kCh; ++i) if (R.los_found[i]) it.leak[i] = leak_of(it.me, i);   // refits moved every parent
     }
   }
+  refit_all();   // joint refit once, after the pursuit (per accept it was O(accepted^2 x sweeps): seconds per full-band CPI)
   for (Accepted& k : acc) {
     const Acc& s = k.s; std::array<ChanFit, kCh>& fit = k.fit;
     // Envelope position: weighted least squares of the channels' FITTED delays (Gauss-Newton from the
