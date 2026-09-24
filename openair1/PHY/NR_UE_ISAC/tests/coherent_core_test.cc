@@ -1,5 +1,6 @@
 // openair1/PHY/NR_UE_ISAC/tests/coherent_core_test.cc
 #include "coherent_core.h"
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <random>
@@ -93,6 +94,35 @@ int main() {
     coherent::Axes a2 = derive_axes(w2, vol, g, 10.0); require(a2.valid, "axes valid (wall)");
     RdResult R2 = check_cpi(w2, a2, los, "LOS + static wall + target");
     for (uint32_t i = 0; i < 4; ++i) require(std::abs(std::abs(R2.los_tap[i]) - 1.0) < 0.1, "|los_tap| ~ 1 with a static wall"); }
+  // --- REGRESSION (coherent-domain early-path resolution): a wall +6 dB stronger than the LOS and
+  // ~32 ns (~4 bins) later, merged into the LOS's own mainlobe by a 64-PRB row's kernel (half-width
+  // ~10 bins here) -- the non-coherent power-sum stage cannot resolve them as separate peaks and
+  // locks onto the wall (measured pre-fix: calibration phase off by ~2.4 rad, targets 20-30 m off).
+  // find_los must resolve the true, earlier, weaker LOS in the coherent (full-union-band) domain.
+  { std::array<double, kCh> wall6{};
+    for (uint32_t i = 0; i < 4; ++i) wall6[i] = los[i] + 32e-9;
+    CfrWindow w7 = make_window(60, {{los, 1.0, 0.0}, {wall6, 2.0, 0.0}, {tt, 0.2, fd}}, {0, 1.1, -2.0, 0.4}, 23.0, 64, 7);
+    coherent::Axes a7 = derive_axes(w7, vol, g, 10.0); require(a7.valid, "axes valid (strong late wall)");
+    check_cpi(w7, a7, los, "LOS earlier + wall +6 dB/~4 bins later + target"); }
+  // --- no earlier path: LOS alone (strongest AND earliest) + a WEAKER later wall must not perturb
+  // the LOS lock -- the coherent scan's noise/leakage thresholds must reject everything in
+  // [n0-hm, n0-1] here and fall back to the ordinary (unperturbed) LOS bin.
+  { std::array<double, kCh> wall7{};
+    for (uint32_t i = 0; i < 4; ++i) wall7[i] = los[i] + 40e-9;
+    CfrWindow w8 = make_window(60, {{los, 1.0, 0.0}, {wall7, 0.5, 0.0}}, {0, 1.1, -2.0, 0.4}, 23.0, 64, 9);
+    coherent::Axes a8 = derive_axes(w8, vol, g, 10.0); require(a8.valid, "axes valid (weak late wall)");
+    LosEstimate L8 = find_los(w8, a8, 1e-4);
+    for (uint32_t i = 0; i < 4; ++i)
+      require(L8.found[i] && std::abs(L8.delay_s[i] - los[i]) < 0.25 * a8.delay_step_s, "no earlier path: LOS not falsely moved"); }
+  // --- find_los timing on a 64-row CPI (75 ms real-time budget)
+  { CfrWindow wt = make_window(64, {{los, 1.0, 0.0}, {tt, 0.2, fd}}, {0, 1.1, -2.0, 0.4}, 23.0, 64, 10);
+    coherent::Axes at = derive_axes(wt, vol, g, 10.0); require(at.valid, "axes valid (timing)");
+    const auto t0 = std::chrono::steady_clock::now();
+    constexpr int kReps = 5;
+    for (int i = 0; i < kReps; ++i) { LosEstimate Lt = find_los(wt, at, 1e-4); require(Lt.found[0], "timing run found LOS"); }
+    const auto t1 = std::chrono::steady_clock::now();
+    const double ms = std::chrono::duration<double, std::milli>(t1 - t0).count() / kReps;
+    std::printf("  find_los timing: %.2f ms/call (64-row CPI, 4 channels)\n", ms); }
   // --- comb-2 (DM-RS-only) CPI: replica at n_fft/2 must fold, CFO must still be removed
   // A -360 m STO (late FFT window) puts every LOS at a NEGATIVE delay: its bit-identical replica
   // then sits at a positive index below n_fft/2 and wins the index-order tie, so only the fold
