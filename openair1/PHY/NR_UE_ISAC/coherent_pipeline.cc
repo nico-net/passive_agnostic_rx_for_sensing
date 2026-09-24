@@ -212,13 +212,21 @@ void CoherentPipeline::process(Job& j)
   const Grid G = envelope_grid(cfg_.volume, a);
   std::vector<Detection> D;
   std::vector<float> E;   // CPU path only; GPU path's equivalent is cuda_->last_envelope() (see below)
+  // Whether THIS CPI's periodic topview image is due, decided once and reused below (both to gate the
+  // GPU path's extra envelope download and, later, to build the image) instead of re-checking the
+  // clock a second time after the (variable-latency) detect()/refine()/track stages have run.
+  const bool topview_due = std::chrono::duration<double>(clk::now() - last_image_).count() >= cfg_.monitor_period_s;
   // Task 10: on GPU, cuda_->detect() runs the envelope kernel on the device and then calls the SAME
   // unmodified CPU detect() (branch-and-bound channel choice, per-candidate waveform fit, greedy
   // residual pursuit, NMS/harmonic merge) on the result -- that stage is small-N and sequential, not
   // embarrassingly parallel, and the amended brief's own method list keeps it on the host. tm[2]/tm[3]
   // split the combined call back into its GPU-envelope and CPU-detect() shares for the report.
   if (cuda_) {
-    D = cuda_->detect(G, geo, detect_params(a, G, cfg_.false_object_intensity_per_s), nullptr);
+    // Non-null only when the topview image is due this CPI: that is the only reader of
+    // cuda_->last_envelope(), and a non-null pointer there is what makes detect() pay for the (small
+    // but non-zero) device->host copy of E -- see coherent_cuda.h/.cu.
+    std::vector<float> topview_signal;
+    D = cuda_->detect(G, geo, detect_params(a, G, cfg_.false_object_intensity_per_s), topview_due ? &topview_signal : nullptr);
     const double total = ms_since(s0); s0 = clk::now();
     tm[2] = cuda_->last_timing().envelope_ms;
     tm[3] = std::max(0.0, total - tm[2]);
@@ -278,7 +286,7 @@ void CoherentPipeline::process(Job& j)
         << ",\"rr\":" << jnum(D[k].range_rate_mps) << ",\"rr_s\":" << jnum(D[k].range_rate_sigma) << ",\"snr\":" << jnum(D[k].snr)
         << ",\"fd\":" << jnum(D[k].doppler_hz) << ",\"ill\":" << D[k].illuminator << "}";
   rep << "]";
-  if (std::chrono::duration<double>(clk::now() - last_image_).count() >= cfg_.monitor_period_s) {
+  if (topview_due) {
     last_image_ = clk::now();
     const size_t nxy = (size_t)G.nx * G.ny;
     std::vector<double> top(nxy, 0.0);   // max over z and tested Doppler, y-major [iy][ix]
