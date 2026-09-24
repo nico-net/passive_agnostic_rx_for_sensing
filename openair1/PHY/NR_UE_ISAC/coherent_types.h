@@ -45,6 +45,8 @@ struct Axes {
   double dopp_step_hz = 0, dopp0_hz = 0;  // bin d frequency = dopp0_hz + d*dopp_step_hz
   double t_cpi_s = 0, median_dt_s = 0;
   uint32_t notch_half_bins = 2;           // Hann mainlobe half-width (window property)
+  double v_max_mps = 0;                   // declared max speed (else the Doppler span's): sets the
+                                          // per-channel Doppler search width of the envelope
   std::vector<uint32_t> tested_dopp;      // bins outside the notch and within 2*v_max/lambda
   std::vector<double> row_t_s;            // row times relative to the first row
 };
@@ -74,6 +76,8 @@ struct Detection {
   double range_rate_sigma = 0;
   double snr = 0;                   // linear, per channel equivalent
   uint32_t dopp_bin = 0;
+  std::array<int32_t, kCh> chan_dopp_bin{-1, -1, -1, -1};  // each channel's own (velocity-consistent)
+                                                            // Doppler bin; -1 = not set
   bool refined = false;
   std::array<cd, kCh> terms{};      // per-channel coherent terms at pos (autofocus input)
   uint64_t illuminator = 0;         // 0 = gNB, else UL session id

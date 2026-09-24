@@ -101,6 +101,16 @@ int main() {
     CfrWindow w3 = make_window(60, {{los3, 1.0, 0.0}, {tt3, 0.2, fd}}, {0, 1.1, -2.0, 0.4}, 23.0, 64, 4, 2);
     coherent::Axes a3 = derive_axes(w3, vol, g, 10.0); require(a3.valid, "axes valid (comb-2)");
     check_cpi(w3, a3, los3, "comb-2 rows, negative LOS delay"); }
+  // --- 128-PRB rows: at integer bins the kernel straddles its first null (5.33 bins, samples at 5
+  // and 6 both near the -31.5 dB sidelobe), which once declared the mainlobe +-8 bins wide and took
+  // the first sidelobe (-6.4 bins) for the LOS on 3 of 4 channels.
+  { const Vec3 t1{5, 12, 1.2}, t2{-6, -4, 1.0}, dr{8, 8, 15};
+    auto tp = [&](const Vec3& q) { std::array<double, kCh> t{}; for (uint32_t i = 0; i < 4; ++i) t[i] = (dist(q, g.tx) + dist(q, g.rx[i]) + 30.0) / kC; return t; };
+    CfrWindow w5 = make_window(64, {{los, 1.0, 0.0}, {tp(t1), 0.2, 45}, {tp(t2), 0.25, -110}, {tp(dr), 0.15, 70}}, {0, 1.1, -2.0, 0.4}, 0, 128, 3);
+    coherent::Axes a5 = derive_axes(w5, vol, g, 20.0); require(a5.valid, "axes valid (128 PRB)");
+    LosEstimate L5 = find_los(w5, a5, 1e-4);
+    for (uint32_t i = 0; i < 4; ++i)
+      require(L5.found[i] && std::abs(L5.delay_s[i] - los[i]) < 0.25 * a5.delay_step_s, "128-PRB rows: LOS, not its first sidelobe"); }
   // --- row times must be non-decreasing; invalid axes give empty results, never a division
   { CfrWindow w4 = make_window(10, {{los, 1.0, 0.0}}, {0, 0, 0, 0}, 0, 4, 5);
     std::swap(w4.row_time_slots[3], w4.row_time_slots[4]);
