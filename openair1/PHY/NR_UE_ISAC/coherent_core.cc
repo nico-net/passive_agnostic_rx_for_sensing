@@ -163,7 +163,7 @@ Axes derive_axes(const CfrWindow& w, const Volume& vol, const Geometry& g, doubl
   return a;
 }
 
-LosEstimate find_los(const CfrWindow& w, const Axes& a, double pfa, const std::array<double, kCh>* geo_los_s)
+LosEstimate find_los(const CfrWindow& w, const Axes& a, double pfa, const std::array<double, kCh>* geo_los_s, FrontOps* ops)
 {
   LosEstimate L;
   if (!a.valid) return L;
@@ -196,6 +196,8 @@ LosEstimate find_los(const CfrWindow& w, const Axes& a, double pfa, const std::a
     const uint32_t c = row_comb(w, r); if (c && (!dk_min || c < dk_min)) dk_min = c;
     ++R;
   }
+  if (ops && R) ops->los_kernel(a, (uint32_t)kOvs, first, count, kf);
+  else
   for (size_t q = 0; q < shapes.size(); ++q) {
     const std::vector<cd> k = row_profile(w, af, 0, first[q], 0.0, 0.0, nullptr, true);
     for (size_t n = 0; n < kf.size(); ++n) kf[n] += count[q] * std::norm(k[n]);
@@ -226,12 +228,16 @@ LosEstimate find_los(const CfrWindow& w, const Axes& a, double pfa, const std::a
   // (best == strongest below): the coherent-domain scan after `estimate_row_sync` below is the only
   // place that region gets a second look, at full-union-band resolution.
   std::array<bool, kCh> scan_early{};
+  std::array<std::vector<double>, kCh> pw_ops;
+  if (ops) ops->los_noncoherent(a, R, pw_ops);
 
   for (uint32_t i = 0; i < kCh; ++i) {
     // Rows are combined NON-coherently: a common CFO / per-row phase rotates each row's profile, so
     // a coherent row mean cancels the LOS it is looking for (measured: 60 rows at 23 Hz CFO put the
     // estimate 20-28 bins off). Phase and the final sub-bin come from the coherent refinement below.
     std::vector<double> pw(a.n_fft, 0.0);
+    if (ops) pw.swap(pw_ops[i]);
+    else
     for (uint32_t r = 0; r < w.rows; ++r) {
       uint32_t lo, hi; if (!row_span(w, r, &lo, &hi)) continue;
       const std::vector<cd> p = row_profile(w, a, i, r, 0.0, 0.0);
@@ -294,7 +300,7 @@ LosEstimate find_los(const CfrWindow& w, const Axes& a, double pfa, const std::a
   // LOS biases its peak (measured up to 0.27 bin from a -14 dB target 6 bins behind). With the
   // common CFO/SFO drift removed, the row mean is coherent: a moving path averages out over its
   // Doppler, and the hopping rows combine to the full union-band resolution.
-  const RowSync s = estimate_row_sync(w, a, L);
+  const RowSync s = estimate_row_sync(w, a, L, ops);
   // Union-band kernel: the coherent estimator's own response to a unit-amplitude, zero-delay-error
   // static path -- built exactly like a channel's `U` below but with the data replaced by 1. Row
   // masks/weights and `s` are shared by every antenna, so this is channel-independent and built
@@ -305,6 +311,10 @@ LosEstimate find_los(const CfrWindow& w, const Axes& a, double pfa, const std::a
   // residual leaves behind (real, wanted here: the leakage bound below must not assume better
   // alignment than the estimator actually achieves).
   std::vector<cd> Uk(w.subcarriers, cd(0));
+  const long NKF = (long)a.n_fft * kOvs;
+  std::vector<double> kmag(NKF);
+  if (ops) ops->los_union_kernel(a, R, (uint32_t)kOvs, Uk, kmag);
+  else
   for (uint32_t r = 0; r < w.rows; ++r) {
     uint32_t lo, hi; if (!row_span(w, r, &lo, &hi)) continue;
     double ws = 0; for (uint32_t k = lo; k <= hi; ++k) if (w.observed[w.cell(r, k)]) ws += hann(hi > lo ? (double)(k - lo) / (hi - lo) : 0.5);
@@ -339,9 +349,7 @@ LosEstimate find_los(const CfrWindow& w, const Axes& a, double pfa, const std::a
   // normalised to the kernel's OWN measured peak.
   // |kernel| on the whole kOvs-fine grid in one zero-padded FFT (direct evaluation per leak_c call was
   // O(subcarriers) x 65 sub-bin offsets x every local maximum in +-hm: ~24 ms of find_los, measured OTA).
-  const long NKF = (long)a.n_fft * kOvs;
-  std::vector<double> kmag(NKF);
-  { std::vector<cd> kb(NKF, cd(0));
+  if (!ops) { std::vector<cd> kb(NKF, cd(0));
     for (uint32_t k = 0; k < w.subcarriers; ++k) if (Uk[k] != cd(0)) { const long q = (long)k - (long)(w.subcarriers / 2); kb[(size_t)(((q % NKF) + NKF) % NKF)] = Uk[k]; }
     ifft_pow2(kb); for (long n = 0; n < NKF; ++n) kmag[n] = std::abs(kb[n]) * NKF; }
   auto leak_c = [&](long d) {
@@ -353,9 +361,13 @@ LosEstimate find_los(const CfrWindow& w, const Axes& a, double pfa, const std::a
   // peak's leakage through the union kernel (both in amplitude). Candidates only -- see pass 2.
   std::array<long, kCh> peak_n{}, best_n{};
   std::array<std::vector<long>, kCh> cands;
+  std::array<std::vector<cd>, kCh> coh_ops;
+  if (ops && std::any_of(L.found.begin(), L.found.end(), [](bool f) { return f; })) ops->los_coherent(a, R, s, coh_ops);
   for (uint32_t i = 0; i < kCh; ++i) {
     if (!L.found[i]) continue;
     std::vector<cd> coh(a.n_fft, cd(0));
+    if (ops) coh.swap(coh_ops[i]);
+    else
     for (uint32_t r = 0; r < w.rows; ++r) {
       uint32_t lo, hi; if (!row_span(w, r, &lo, &hi)) continue;
       const std::vector<cd> p = row_profile(w, a, i, r, s.delay_s[r], s.phase_rad[r]);
@@ -394,8 +406,11 @@ LosEstimate find_los(const CfrWindow& w, const Axes& a, double pfa, const std::a
       }
     }
   }
+  std::array<double, kCh> x_ops{}; std::array<cd, kCh> tap_ops{};
+  if (ops) ops->los_refine(a, best_n, peak_n, L.found, x_ops, tap_ops);
   for (uint32_t i = 0; i < kCh; ++i) {
     if (!L.found[i]) continue;
+    if (ops) { L.delay_s[i] = fold(x_ops[i]) * a.delay_step_s; L.tap[i] = tap_ops[i]; continue; }
     const long best = best_n[i];
     // Sub-bin: maximise |coh(x)| over x continuous (golden section on [best-1, best+1]), coh(x) the
     // same coherent row mean evaluated off the FFT grid. A parabola through three magnitude samples
@@ -455,7 +470,7 @@ LosEstimate find_los(const CfrWindow& w, const Axes& a, double pfa, const std::a
   return L;
 }
 
-RowSync estimate_row_sync(const CfrWindow& w, const Axes& a, const LosEstimate& L)
+RowSync estimate_row_sync(const CfrWindow& w, const Axes& a, const LosEstimate& L, FrontOps* ops)
 {
   RowSync s; s.phase_rad.assign(w.rows, 0.0); s.delay_s.assign(w.rows, 0.0);
   if (!a.valid) return s;
@@ -464,12 +479,18 @@ RowSync estimate_row_sync(const CfrWindow& w, const Axes& a, const LosEstimate& 
   std::vector<uint32_t> comb(w.rows, 0);
   std::vector<double> fc(w.rows, 0.0);           // row's mean observed baseband frequency
   double fc_max = 0;
+  std::vector<double> nks(w.rows, 0.0);
+  if (ops) ops->row_info(comb, fc, nks);
   for (uint32_t r = 0; r < w.rows; ++r) {
-    comb[r] = row_comb(w, r);                      // phase step over the row's own finest spacing
-    double nk = 0;
-    for (uint32_t k = 0; k < w.subcarriers; ++k) if (w.observed[w.cell(r, k)]) { fc[r] += baseband_hz(w, k); nk += 1; }
-    if (nk > 0) fc[r] /= nk;
+    if (!ops) {
+      comb[r] = row_comb(w, r);                    // phase step over the row's own finest spacing
+      double nk = 0;
+      for (uint32_t k = 0; k < w.subcarriers; ++k) if (w.observed[w.cell(r, k)]) { fc[r] += baseband_hz(w, k); nk += 1; }
+      if (nk > 0) fc[r] /= nk;
+      nks[r] = nk;
+    }
     fc_max = std::max(fc_max, std::abs(fc[r]));
+    if (!ops)
     for (uint32_t i = 0; i < kCh; ++i) {
       if (!L.found[i]) continue;
       cd acc = 0; double n = 0; uint32_t prev = UINT32_MAX; cd zp = 0;
@@ -482,6 +503,14 @@ RowSync estimate_row_sync(const CfrWindow& w, const Axes& a, const LosEstimate& 
       tap[r][i] = n > 0 ? acc / n : cd(0);
     }
   }
+  // Accelerated: the same row sums; tap = mean, slope over found channels.
+  auto ops_taps = [&](const std::vector<double>* drift, std::vector<cd>* sl) {
+    std::vector<std::array<cd, kCh>> acc;
+    ops->row_sums(L.delay_s, drift, L.found, acc, sl);
+    for (uint32_t r = 0; r < w.rows; ++r)
+      for (uint32_t i = 0; i < kCh; ++i) if (L.found[i]) tap[r][i] = nks[r] > 0 ? acc[r][i] / nks[r] : cd(0);
+  };
+  if (ops) ops_taps(nullptr, &slope);
   // Radio frame of each row. The receiver re-times its FFT window once per frame (shiftForNextFrame,
   // OTA -4 samples every 10 ms following ~3 ppm of sample-clock drift), so delay and LOS phase are a
   // common drift PLUS a step at every frame boundary: a 10 ms sawtooth. A single line over the CPI left
@@ -547,6 +576,12 @@ RowSync estimate_row_sync(const CfrWindow& w, const Axes& a, const LosEstimate& 
     // power. Model selection on the objective the sync serves; no constant.
     auto los_pow = [&](const std::vector<double>* drift) {
       double e = 0;
+      if (ops) {
+        std::vector<std::array<cd, kCh>> acc;
+        ops->row_sums(L.delay_s, drift, L.found, acc, nullptr);
+        for (uint32_t i = 0; i < kCh; ++i) if (L.found[i]) for (uint32_t r = 0; r < w.rows; ++r) e += std::norm(acc[r][i]);
+        return e;
+      }
       for (uint32_t i = 0; i < kCh; ++i) if (L.found[i])
         for (uint32_t r = 0; r < w.rows; ++r) {
           uint32_t lo, hi; if (!row_span(w, r, &lo, &hi)) continue;
@@ -562,7 +597,8 @@ RowSync estimate_row_sync(const CfrWindow& w, const Axes& a, const LosEstimate& 
     const double lp0 = los_pow(nullptr), lp1 = los_pow(&s.delay_s);
     if (!steps && lp0 >= lp1) std::fill(s.delay_s.begin(), s.delay_s.end(), 0.0);   // a significant step model is kept
   }
-  if (std::any_of(s.delay_s.begin(), s.delay_s.end(), [](double v) { return v != 0; }))
+  if (ops && std::any_of(s.delay_s.begin(), s.delay_s.end(), [](double v) { return v != 0; })) ops_taps(&s.delay_s, nullptr);
+  else if (std::any_of(s.delay_s.begin(), s.delay_s.end(), [](double v) { return v != 0; }))
     for (uint32_t r = 0; r < w.rows; ++r)
       for (uint32_t i = 0; i < kCh; ++i) {
         if (!L.found[i]) continue;

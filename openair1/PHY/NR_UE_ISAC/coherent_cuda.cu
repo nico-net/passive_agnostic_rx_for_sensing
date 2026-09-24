@@ -11,6 +11,7 @@
  * parity target a near-certainty rather than something to chase with mixed precision.
  */
 #include "coherent_cuda.h"
+#include "coherent_cuda_front.h"
 
 #include <cuda_runtime.h>
 #include <cufft.h>
@@ -35,25 +36,7 @@ void cuda_check(cudaError_t s, const char* op) { if (s != cudaSuccess) throw std
 void cufft_check(cufftResult s, const char* op) { if (s != CUFFT_SUCCESS) throw std::runtime_error(std::string(op) + " failed (cufft " + std::to_string((int)s) + ")"); }
 
 // ---- host-side duplicates of small pure functions from coherent_core.cc's anonymous namespace
-// (not exported there; see file header). Kept byte-identical to their CPU originals.
-double host_hann(double u) { return 0.5 - 0.5 * std::cos(2 * kPi * u); }
-bool host_row_span(const CfrWindow& w, uint32_t r, uint32_t* lo, uint32_t* hi)
-{
-  int l = -1, h = -1;
-  for (uint32_t k = 0; k < w.subcarriers; ++k) if (w.observed[w.cell(r, k)]) { if (l < 0) l = (int)k; h = (int)k; }
-  if (l < 0) return false;
-  *lo = (uint32_t)l; *hi = (uint32_t)h; return true;
-}
-uint32_t host_row_comb(const CfrWindow& w, uint32_t r)
-{
-  uint32_t c = 0, prev = UINT32_MAX;
-  for (uint32_t k = 0; k < w.subcarriers; ++k) if (w.observed[w.cell(r, k)]) {
-    if (prev != UINT32_MAX && (c == 0 || k - prev < c)) c = k - prev;
-    prev = k;
-  }
-  return c;
-}
-// coherent_core.cc's dopp_half()/dopp_ok(), duplicated (same reason as above).
+// (not exported there; see file header): coherent_core.cc's dopp_half()/dopp_ok().
 bool host_dopp_ok(const Axes& a, long d) { return d >= 0 && d < (long)a.n_dopp && std::abs(a.dopp0_hz + d * a.dopp_step_hz) > a.notch_half_bins * a.dopp_step_hz; }
 Vec3 host_unit(const Vec3& v) { const double n = norm(v); return n > 0 ? v / n : Vec3{}; }
 uint32_t host_dopp_half(const Axes& a, const Geometry& geo, const std::array<bool, kCh>& used, const Vec3& x)
@@ -67,11 +50,6 @@ uint32_t host_dopp_half(const Axes& a, const Geometry& geo, const std::array<boo
 
 // ---- device kernels -------------------------------------------------------------------------
 __device__ inline double bb_hz(uint32_t k, uint32_t sc, double scs) { return ((double)k - sc * 0.5) * scs; }
-
-__global__ void k_widen(const float2* in, size_t n, zC* out)
-{
-  for (size_t j = (size_t)blockIdx.x * blockDim.x + threadIdx.x; j < n; j += (size_t)blockDim.x * gridDim.x) { out[j].x = in[j].x; out[j].y = in[j].y; }
-}
 
 // Per (channel i, subcarrier k): mean over rows observing k of the derotated value (LOS+row-sync
 // delay/phase already applied, no static subtraction yet) -- coherent_core.cc range_doppler()'s
@@ -202,25 +180,6 @@ struct GeoParams { double tx[3]; double rx[4][3]; };
 // envelope(). A channel with an out-of-range bin (MagInterp::ok == false) contributes 0, same as the
 // CPU `if (!mi.ok) continue;`; a non-ok Doppler bin contributes 0 to the max, same as CPU's
 // `ok[d] ? mi.at(...) : 0.0` fed into sliding_max (0 can never win a max over non-negative power).
-// Waveform kernel tables B/B2 (RdResult::Waveform) for every distinct row mask: one thread per (group,
-// sample u), B[u] = sum_k h_k e^{j th_u (k - kc)}, th_u = 2pi(-X + u/O)/n_fft (B2: h_k^2). FP32 terms;
-// the CPU closed form falls back to an O(width) direct sum on gapped live masks, 0.6-1.6 s per CPI.
-__global__ void k_wf(const float* off, const float* hw, const uint32_t* st, uint32_t ng, uint32_t nx, float X, float O, float nfft,
-                     float2* B, float2* B2)
-{
-  for (size_t j = (size_t)blockIdx.x * blockDim.x + threadIdx.x; j < (size_t)ng * nx; j += (size_t)blockDim.x * gridDim.x) {
-    const uint32_t g = (uint32_t)(j / nx), u = (uint32_t)(j % nx);
-    const float th = 2.f * (float)kPi * (-X + (float)u / O) / nfft;
-    float br = 0, bi = 0, cr = 0, ci = 0;
-    for (uint32_t q = st[g]; q < st[g + 1]; ++q) {
-      float sn, cs; sincosf(th * off[q], &sn, &cs);
-      const float h = hw[q];
-      br += h * cs; bi += h * sn; cr += h * h * cs; ci += h * h * sn;
-    }
-    B[j] = make_float2(br, bi); B2[j] = make_float2(cr, ci);
-  }
-}
-
 // Per CPI, once: |RD| as FP32 (the envelope loop below then never touches FP64 -- consumer GPUs run
 // FP64 at 1/64 rate, and the FP64 envelope cost 83 ms p50 / 1.15 s p95 per CPI OTA at 64k voxels).
 __global__ void k_mag(const zC* rd, size_t n, float* mag)
@@ -301,6 +260,7 @@ struct CudaCoherent::Impl {
 
   // host-side state kept across range_doppler() -> detect() within one CPI
   RdResult cached;
+  std::unique_ptr<CudaFront> front;   // device-resident CPI shared by find_los / row sync / range_doppler
   uint32_t cur_nch = kCh, cur_rows = 0, cur_nrange = 0, cur_ndopp = 0;
   Timing timing;
   std::vector<float> last_E;
@@ -310,9 +270,11 @@ struct CudaCoherent::Impl {
     cuda_check(cudaStreamCreate(&stream), "cudaStreamCreate");
     cuda_check(cudaEventCreate(&ev0), "cudaEventCreate");
     cuda_check(cudaEventCreate(&ev1), "cudaEventCreate");
+    front = std::make_unique<CudaFront>(stream);
   }
   ~Impl()
   {
+    front.reset();
     if (plan) cufftDestroy(plan);
     cudaEventDestroy(ev0); cudaEventDestroy(ev1);
     cudaStreamDestroy(stream);
@@ -352,6 +314,20 @@ bool CudaCoherent::available()
 CudaCoherent::CudaCoherent() : impl_(std::make_unique<Impl>()) {}
 CudaCoherent::~CudaCoherent() = default;
 
+void CudaCoherent::upload(const CfrWindow& w) { impl_->front->upload(w); }
+LosEstimate CudaCoherent::find_los(const CfrWindow& w, const Axes& a, double pfa, const std::array<double, kCh>* geo_los_s)
+{
+  CudaFront& F = *impl_->front;
+  if (!F.bound(w)) F.upload(w);
+  return coherent::find_los(w, a, pfa, geo_los_s, &F);
+}
+RowSync CudaCoherent::estimate_row_sync(const CfrWindow& w, const Axes& a, const LosEstimate& L)
+{
+  CudaFront& F = *impl_->front;
+  if (!F.bound(w)) F.upload(w);
+  return coherent::estimate_row_sync(w, a, L, &F);
+}
+
 RdResult CudaCoherent::range_doppler(const CfrWindow& w, const Axes& a, const LosEstimate& L, const RowSync& s, bool download_rd)
 {
   Impl& I = *impl_;
@@ -360,64 +336,43 @@ RdResult CudaCoherent::range_doppler(const CfrWindow& w, const Axes& a, const Lo
   const uint32_t rows = w.rows, sc = w.subcarriers, nfft = a.n_fft, nrange = a.n_range, ndopp = a.n_dopp;
   const uint32_t nch = kCh;
 
-  // host-side row spans, comb, and the slow-time Hann window (identical formulas to
-  // coherent_core.cc's range_doppler(); see file header for why they are duplicated here).
-  std::vector<int2> h_span(rows); std::vector<float> h_wsum(rows, 0.f);
+  // The CPI and its row metadata (spans, combs, Hann sums) are device-resident in the front
+  // (coherent_cuda_front.cu), uploaded once per CPI; only the per-row delay/phase goes up here.
+  CudaFront& F = *I.front;
+  const auto t_up0 = std::chrono::steady_clock::now();
+  if (!F.bound(w)) F.upload(w);
+  const CudaFront::Meta& M = F.meta();
   std::vector<double> h_tau((size_t)nch * rows), h_phase(rows);
   uint32_t cmax = 1;
   for (uint32_t r = 0; r < rows; ++r) {
-    uint32_t lo, hi;
-    const bool ok = host_row_span(w, r, &lo, &hi);
-    h_span[r] = ok ? int2{(int)lo, (int)hi} : int2{1, 0};
-    if (ok) { double ws = 0; for (uint32_t k = lo; k <= hi; ++k) if (w.observed[w.cell(r, k)]) ws += host_hann(hi > lo ? (double)(k - lo) / (hi - lo) : 0.5); h_wsum[r] = (float)ws; }
-    cmax = std::max(cmax, host_row_comb(w, r));
+    cmax = std::max(cmax, M.comb[r]);
     h_phase[r] = s.phase_rad.empty() ? 0.0 : s.phase_rad[r];
     for (uint32_t i = 0; i < nch; ++i) h_tau[(size_t)i * rows + r] = L.delay_s[i] + (s.delay_s.empty() ? 0.0 : s.delay_s[r]);
   }
   const long rep = (long)nfft / cmax, far0 = rep / 2 - (long)nrange / 2;
   const bool far_ok = far0 >= 2 * (long)nrange && far0 + 2 * (long)nrange <= rep;
 
-  // Doppler phasor table ed[d][r] = win_r/wsum_total * e^{-j2pi f_d t_r} -- channel-independent, same
-  // formula range_doppler() and build_waveform() both use.
-  std::vector<double> win(rows); double wsum_t = 0;
-  for (uint32_t r = 0; r < rows; ++r) { win[r] = host_hann(a.row_t_s.back() > 0 ? a.row_t_s[r] / a.row_t_s.back() : 0.5); wsum_t += win[r]; }
-  std::vector<zC> h_ed((size_t)ndopp * rows);
-  for (uint32_t d = 0; d < ndopp; ++d) for (uint32_t r = 0; r < rows; ++r) {
-    const double ang = -2 * kPi * (a.dopp0_hz + d * a.dopp_step_hz) * a.row_t_s[r];
-    const double sc_ = win[r] / wsum_t;
-    h_ed[(size_t)d * rows + r] = zC{sc_ * std::cos(ang), sc_ * std::sin(ang)};
-  }
+  // Doppler phasor table ed[d][r] = win_r/wsum_total * e^{-j2pi f_d t_r}, built on the device.
+  const zC* d_ed = F.ed(a);
+  const zC* d_values = F.d_values(); const uint8_t* d_obs = F.d_observed(); const int2* d_span = F.d_span(); const float* d_wsum = F.d_wsum_f();
 
   cuda_check(cudaEventRecord(I.ev0, I.stream), "cudaEventRecord");
 
-  // upload
-  I.values.ensure((size_t)nch * rows * sc * sizeof(zC));
-  {
-    // Same [antenna][row][subcarrier] layout as CfrWindow::sample(): upload the floats as-is and widen
-    // on the device (a host-side widening loop cost ~9 ms/CPI).
-    const size_t n = (size_t)nch * rows * sc;
-    I.values_f.ensure(n * sizeof(float2));
-    cuda_check(cudaMemcpyAsync(I.values_f.p, w.values.data(), n * sizeof(float2), cudaMemcpyHostToDevice, I.stream), "H2D values");
-    k_widen<<<(unsigned)std::min<size_t>(65535, (n + 255) / 256), 256, 0, I.stream>>>((const float2*)I.values_f.p, n, (zC*)I.values.p);
-  }
-  I.observed.ensure((size_t)rows * sc * sizeof(uint8_t));
-  cuda_check(cudaMemcpyAsync(I.observed.p, w.observed.data(), (size_t)rows * sc, cudaMemcpyHostToDevice, I.stream), "H2D observed");
-  I.span.ensure(rows * sizeof(int2)); cuda_check(cudaMemcpyAsync(I.span.p, h_span.data(), rows * sizeof(int2), cudaMemcpyHostToDevice, I.stream), "H2D span");
+  // upload (per-row delay/phase only)
   I.tau.ensure((size_t)nch * rows * sizeof(double)); cuda_check(cudaMemcpyAsync(I.tau.p, h_tau.data(), h_tau.size() * sizeof(double), cudaMemcpyHostToDevice, I.stream), "H2D tau");
   I.phase.ensure(rows * sizeof(double)); cuda_check(cudaMemcpyAsync(I.phase.p, h_phase.data(), rows * sizeof(double), cudaMemcpyHostToDevice, I.stream), "H2D phase");
-  I.wsum_row.ensure(rows * sizeof(float)); cuda_check(cudaMemcpyAsync(I.wsum_row.p, h_wsum.data(), rows * sizeof(float), cudaMemcpyHostToDevice, I.stream), "H2D wsum");
-  I.ed.ensure(h_ed.size() * sizeof(zC)); cuda_check(cudaMemcpyAsync(I.ed.p, h_ed.data(), h_ed.size() * sizeof(zC), cudaMemcpyHostToDevice, I.stream), "H2D ed");
-  I.timing.upload_ms = I.lap();
+  I.lap();
+  I.timing.upload_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t_up0).count();
 
   // stat[i][k], row_los[i][r]
   I.stat.ensure((size_t)nch * sc * sizeof(zC)); I.row_los.ensure((size_t)nch * rows * sizeof(zC));
   auto launch = [](size_t n) { dim3 t(256), b((unsigned)std::min<size_t>(65535, (n + 255) / 256)); return std::make_pair(b, t); };
   {
     auto [b, t] = launch((size_t)nch * sc);
-    k_stat<<<b, t, 0, I.stream>>>((zC*)I.values.p, (uint8_t*)I.observed.p, (double*)I.tau.p, (double*)I.phase.p, rows, sc, w.scs_hz, nch, (zC*)I.stat.p);
+    k_stat<<<b, t, 0, I.stream>>>(d_values, d_obs, (double*)I.tau.p, (double*)I.phase.p, rows, sc, w.scs_hz, nch, (zC*)I.stat.p);
   }
   {
-    k_los_row<<<(unsigned)(nch * rows), 256, 0, I.stream>>>((zC*)I.values.p, (uint8_t*)I.observed.p, (int2*)I.span.p, (double*)I.tau.p, (double*)I.phase.p, rows, sc, w.scs_hz, nch, (zC*)I.row_los.p);
+    k_los_row<<<(unsigned)(nch * rows), 256, 0, I.stream>>>(d_values, d_obs, d_span, (double*)I.tau.p, (double*)I.phase.p, rows, sc, w.scs_hz, nch, (zC*)I.row_los.p);
   }
   I.timing.build_ms = I.lap();
 
@@ -431,7 +386,7 @@ RdResult CudaCoherent::range_doppler(const CfrWindow& w, const Axes& a, const Lo
   cuda_check(cudaMemsetAsync(I.spectrum.p, 0, (size_t)nch * rows * nfft * sizeof(zC), I.stream), "memset spectrum");
   {
     auto [b, t] = launch((size_t)nch * rows * sc);
-    k_build_spectrum<<<b, t, 0, I.stream>>>((zC*)I.values.p, (uint8_t*)I.observed.p, (int2*)I.span.p, (double*)I.tau.p, (double*)I.phase.p,
+    k_build_spectrum<<<b, t, 0, I.stream>>>(d_values, d_obs, d_span, (double*)I.tau.p, (double*)I.phase.p,
                                             (zC*)I.stat.p, rows, sc, nfft, w.scs_hz, nch, (zC*)I.spectrum.p);
   }
   cufft_check(cufftExecZ2Z(I.plan, (zC*)I.spectrum.p, (zC*)I.spectrum.p, CUFFT_INVERSE), "cufftExecZ2Z");
@@ -442,7 +397,7 @@ RdResult CudaCoherent::range_doppler(const CfrWindow& w, const Axes& a, const Lo
   if (far_ok) I.prof_far.ensure((size_t)nch * rows * nrange * sizeof(zC));
   {
     auto [b, t] = launch((size_t)nch * rows * nrange);
-    k_crop_norm<<<b, t, 0, I.stream>>>((zC*)I.spectrum.p, (float*)I.wsum_row.p, rows, nfft, nrange, far0, far_ok ? 1 : 0, nch,
+    k_crop_norm<<<b, t, 0, I.stream>>>((zC*)I.spectrum.p, d_wsum, rows, nfft, nrange, far0, far_ok ? 1 : 0, nch,
                                        (zC*)I.prof_near.p, far_ok ? (zC*)I.prof_far.p : nullptr);
   }
   I.timing.crop_norm_ms = I.lap();
@@ -451,12 +406,12 @@ RdResult CudaCoherent::range_doppler(const CfrWindow& w, const Axes& a, const Lo
   I.rd.ensure((size_t)nch * nrange * ndopp * sizeof(zC));
   {
     auto [b, t] = launch((size_t)nch * nrange * ndopp);
-    k_nudft<<<b, t, 0, I.stream>>>((zC*)I.prof_near.p, (zC*)I.ed.p, rows, nrange, ndopp, nch, (zC*)I.rd.p);
+    k_nudft<<<b, t, 0, I.stream>>>((zC*)I.prof_near.p, d_ed, rows, nrange, ndopp, nch, (zC*)I.rd.p);
   }
   if (far_ok) {
     I.far_rd.ensure((size_t)nch * nrange * ndopp * sizeof(zC));
     auto [b, t] = launch((size_t)nch * nrange * ndopp);
-    k_nudft<<<b, t, 0, I.stream>>>((zC*)I.prof_far.p, (zC*)I.ed.p, rows, nrange, ndopp, nch, (zC*)I.far_rd.p);
+    k_nudft<<<b, t, 0, I.stream>>>((zC*)I.prof_far.p, d_ed, rows, nrange, ndopp, nch, (zC*)I.far_rd.p);
   }
   I.timing.nudft_ms = I.lap();
 
@@ -477,9 +432,9 @@ RdResult CudaCoherent::range_doppler(const CfrWindow& w, const Axes& a, const Lo
   for (uint32_t i = 0; i < nch; ++i) {
     cd los = 0; uint32_t los_rows = 0;
     for (uint32_t r = 0; r < rows; ++r) {
-      if (h_span[r].y < h_span[r].x || !(h_wsum[r] > 0)) continue;
+      if (M.grp[r] < 0 || !(M.h1[r] > 0)) continue;
       const zC v = h_row_los[(size_t)i * rows + r];
-      los += cd(v.x, v.y) / (double)h_wsum[r]; ++los_rows;
+      los += cd(v.x, v.y) / M.h1[r]; ++los_rows;
     }
     out.los_tap[i] = los_rows ? los / (double)los_rows : cd(0);
 
@@ -497,42 +452,7 @@ RdResult CudaCoherent::range_doppler(const CfrWindow& w, const Axes& a, const Lo
   }
 
   const auto t_wf0 = std::chrono::steady_clock::now();
-  out.wf = build_waveform(w, a, false);             // everything but the B/B2 tables, which the GPU fills
-  {
-    RdResult::Waveform& m = out.wf;
-    const size_t ng = m.B.size();
-    if (ng) {
-      const uint32_t nxw = (uint32_t)m.B[0].size();
-      std::vector<int> rep(ng, -1);
-      for (uint32_t r = 0; r < rows; ++r) if (m.grp[r] >= 0 && rep[m.grp[r]] < 0) rep[m.grp[r]] = (int)r;
-      std::vector<float> off, hw; std::vector<uint32_t> st(ng + 1, 0); std::vector<double> h1(ng, 0), h2(ng, 0);
-      for (size_t g = 0; g < ng; ++g) {
-        const uint32_t r = (uint32_t)rep[g], lo = m.lo[r], hi = m.hi[r]; const double kc = 0.5 * (lo + hi);
-        for (uint32_t k = lo; k <= hi; ++k) if (w.observed[w.cell(r, k)]) {
-          const double h = host_hann(hi > lo ? (double)(k - lo) / (hi - lo) : 0.5);
-          off.push_back((float)(k - kc)); hw.push_back((float)h); h1[g] += h; h2[g] += h * h;
-        }
-        st[g + 1] = (uint32_t)off.size();
-      }
-      I.wf_off.ensure(off.size() * sizeof(float)); I.wf_hw.ensure(hw.size() * sizeof(float)); I.wf_st.ensure(st.size() * sizeof(uint32_t));
-      I.wf_B.ensure((size_t)ng * nxw * sizeof(float2)); I.wf_B2.ensure((size_t)ng * nxw * sizeof(float2));
-      cuda_check(cudaMemcpyAsync(I.wf_off.p, off.data(), off.size() * sizeof(float), cudaMemcpyHostToDevice, I.stream), "H2D wf off");
-      cuda_check(cudaMemcpyAsync(I.wf_hw.p, hw.data(), hw.size() * sizeof(float), cudaMemcpyHostToDevice, I.stream), "H2D wf hw");
-      cuda_check(cudaMemcpyAsync(I.wf_st.p, st.data(), st.size() * sizeof(uint32_t), cudaMemcpyHostToDevice, I.stream), "H2D wf st");
-      k_wf<<<(unsigned)std::min<size_t>(65535, ((size_t)ng * nxw + 255) / 256), 256, 0, I.stream>>>(
-          (float*)I.wf_off.p, (float*)I.wf_hw.p, (uint32_t*)I.wf_st.p, (uint32_t)ng, nxw, (float)m.X, (float)RdResult::Waveform::kOvs,
-          (float)a.n_fft, (float2*)I.wf_B.p, (float2*)I.wf_B2.p);
-      std::vector<float2> hB((size_t)ng * nxw), hB2((size_t)ng * nxw);
-      cuda_check(cudaMemcpyAsync(hB.data(), I.wf_B.p, hB.size() * sizeof(float2), cudaMemcpyDeviceToHost, I.stream), "D2H wf B");
-      cuda_check(cudaMemcpyAsync(hB2.data(), I.wf_B2.p, hB2.size() * sizeof(float2), cudaMemcpyDeviceToHost, I.stream), "D2H wf B2");
-      cuda_check(cudaStreamSynchronize(I.stream), "sync wf");
-      for (size_t g = 0; g < ng; ++g)
-        for (uint32_t u = 0; u < nxw; ++u) {
-          const float2 b = hB[g * nxw + u], b2 = hB2[g * nxw + u];
-          m.B[g][u] = cd(b.x, b.y) / h1[g]; m.B2[g][u] = cd(b2.x, b2.y) / h2[g];
-        }
-    }
-  }
+  out.wf = F.waveform(w, a);                        // B/B2 and the static-removal operator Q on the device
   I.timing.wf_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t_wf0).count();
   I.timing.rd_total_ms = I.timing.upload_ms + I.timing.build_ms + I.timing.fft_ms + I.timing.crop_norm_ms
                          + I.timing.nudft_ms + I.timing.download_ms + I.timing.wf_ms;
@@ -598,6 +518,13 @@ void CudaCoherent::refine(std::vector<Detection>& dets, const Grid& g, const Geo
   for (Detection& d : dets) coherent::refine(d, R, g, geo, cal, survey);   // unmodified CPU refine()
 }
 
-CudaCoherent::Timing CudaCoherent::last_timing() const { return impl_->timing; }
+CudaCoherent::Timing CudaCoherent::last_timing() const
+{
+  Timing t = impl_->timing;
+  const CudaFront::Timing& f = impl_->front->timing();
+  t.f_upload_ms = f.upload; t.f_kernel_ms = f.kernel; t.f_noncoh_ms = f.noncoh; t.f_union_ms = f.union_k; t.f_coh_ms = f.coh; t.f_refine_ms = f.refine;
+  t.f_rowsums_ms = f.row_sums; t.f_ed_ms = f.ed; t.f_wf_ms = f.waveform; t.f_rowsums_calls = f.row_sums_calls;
+  return t;
+}
 
 } // namespace nr_isac::coherent

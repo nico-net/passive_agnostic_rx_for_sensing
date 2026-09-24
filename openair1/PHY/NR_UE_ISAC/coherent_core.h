@@ -68,11 +68,43 @@ struct Grid {
 };
 struct DetectParams { double pfa = 0; };  // per-voxel-per-Doppler false-alarm probability (derived)
 
+/** Accelerator for the O(rows x subcarriers) array stages of find_los()/estimate_row_sync(), bound to
+ * ONE CfrWindow (the GPU path, coherent_cuda_front.cu). It only produces the arrays the CPU loops do;
+ * every decision stays in the shared code. nullptr = the CPU loops (the oracle). */
+struct FrontOps {
+  virtual ~FrontOps() = default;
+  /** kf[n] = sum_g count[g] |unit row profile of row first[g] on an ovs*n_fft grid|^2 (before /R). */
+  virtual void los_kernel(const Axes& a, uint32_t ovs, const std::vector<uint32_t>& first, const std::vector<uint32_t>& count,
+                          std::vector<double>& kf) = 0;
+  /** pw[i][n] = mean over the R non-empty rows of |row_profile(i, r, 0, 0)[n]|^2. */
+  virtual void los_noncoherent(const Axes& a, uint32_t R, std::array<std::vector<double>, kCh>& pw) = 0;
+  /** Union-band unit kernel Uk[k] = sum_r obs h_r(k)/(ws_r R), and kmag[n] = |its unnormalised inverse
+   * FFT on an ovs*n_fft grid|. */
+  virtual void los_union_kernel(const Axes& a, uint32_t R, uint32_t ovs, std::vector<cd>& Uk, std::vector<double>& kmag) = 0;
+  /** Per channel: coh[i] = the unnormalised inverse FFT (n_fft, centred index) of find_los's coherent
+   * row-mean spectrum U[i][k] = sum_r obs H h_r(k)/(ws_r R) e^{j(2pi f_k s.delay[r] - s.phase[r])} (U is
+   * kept for los_refine()). */
+  virtual void los_coherent(const Axes& a, uint32_t R, const RowSync& s, std::array<std::vector<cd>, kCh>& coh) = 0;
+  /** acc[r][i] = sum over row r's observed k of H_i(r,k) e^{j2pi f_k (delay[i] + drift[r])} for found
+   * channels (others 0). slope (optional): [r] = sum over found i and observed k with k - comb_r observed
+   * of z(k) conj(z(k - comb_r)), z the same derotated value. */
+  virtual void row_sums(const std::array<double, kCh>& delay, const std::vector<double>* drift, const std::array<bool, kCh>& found,
+                        std::vector<std::array<cd, kCh>>& acc, std::vector<cd>* slope) = 0;
+  /** Per row: finest subcarrier spacing (row_comb), mean observed baseband frequency and observed count. */
+  virtual void row_info(std::vector<uint32_t>& comb, std::vector<double>& fc_mean, std::vector<double>& n_obs) = 0;
+  /** find_los's final sub-bin stage for every found channel, on the U / Uk of the last los_coherent() /
+   * los_union_kernel(): golden-section argmax of |coh(x)| on [best-1, best+1] and, when best != peak, the
+   * alternating two-path fit against the path at peak. x in bins (unfolded), tap = coh at x. */
+  virtual void los_refine(const Axes& a, const std::array<long, kCh>& best, const std::array<long, kCh>& peak,
+                          const std::array<bool, kCh>& found, std::array<double, kCh>& x, std::array<cd, kCh>& tap) = 0;
+};
+
 Axes derive_axes(const CfrWindow& w, const Volume& vol, const Geometry& g, double max_speed_mps);
 /** geo_los_s (optional): each channel's geometric LOS delay |tx-rx_i|/c from the survey; when given, the
  * LOS candidate consistent with one common offset across channels wins over a stronger wall. */
-LosEstimate find_los(const CfrWindow& w, const Axes& a, double pfa, const std::array<double, kCh>* geo_los_s = nullptr);
-RowSync estimate_row_sync(const CfrWindow& w, const Axes& a, const LosEstimate& los);
+LosEstimate find_los(const CfrWindow& w, const Axes& a, double pfa, const std::array<double, kCh>* geo_los_s = nullptr,
+                     FrontOps* ops = nullptr);
+RowSync estimate_row_sync(const CfrWindow& w, const Axes& a, const LosEstimate& los, FrontOps* ops = nullptr);
 RdResult range_doppler(const CfrWindow& w, const Axes& a, const LosEstimate& los, const RowSync& sync);
 /** step = c/(4*b_eff) over the volume. */
 Grid envelope_grid(const Volume& vol, const Axes& a);

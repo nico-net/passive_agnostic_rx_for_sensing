@@ -3,7 +3,9 @@
 // SKIPs (exit 0) when this binary was not built with ENABLE_CHANNEL_SIM_CUDA or no device is present.
 #include "coherent_core.h"
 #include "coherent_cuda.h"
+#include "coherent_cpi_dump.h"
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <complex>
 #include <cstdio>
@@ -44,7 +46,77 @@ static CfrWindow make_window(uint32_t rows, const std::vector<Path>& paths, std:
   return w;
 }
 
-int main()
+// GPU front (find_los / estimate_row_sync / waveform) vs the CPU oracle on one window. Row sync and
+// range_doppler get the CPU LosEstimate as input on both sides, so each stage is compared on its own.
+static void check_front(CudaCoherent& gpu, const CfrWindow& w, const coherent::Axes& a, double pfa,
+                        const std::array<double, kCh>* geo_los, const char* label)
+{
+  using clk = std::chrono::steady_clock;
+  auto ms = [](clk::time_point t) { return std::chrono::duration<double, std::milli>(clk::now() - t).count(); };
+  auto t0 = clk::now(); const LosEstimate Lc = find_los(w, a, pfa, geo_los); const double tc_los = ms(t0);
+  t0 = clk::now(); const RowSync Sc = estimate_row_sync(w, a, Lc); const double tc_sync = ms(t0);
+  t0 = clk::now(); const RdResult Rc = range_doppler(w, a, Lc, Sc); const double tc_rd = ms(t0);
+  double tg_up = 0, tg_los = 0, tg_sync = 0, tg_rd = 0;
+  LosEstimate Lg; RowSync Sg; RdResult Rg;
+  for (int rep = 0; rep < 2; ++rep) {                 // second pass: warm plans and buffers
+    t0 = clk::now(); gpu.upload(w); tg_up = ms(t0);
+    t0 = clk::now(); Lg = gpu.find_los(w, a, pfa, geo_los); tg_los = ms(t0);
+    t0 = clk::now(); Sg = gpu.estimate_row_sync(w, a, Lc); tg_sync = ms(t0);
+    t0 = clk::now(); Rg = gpu.range_doppler(w, a, Lc, Sc, true); tg_rd = ms(t0);
+  }
+  double dmax = 0, tmax = 0;
+  for (uint32_t i = 0; i < kCh; ++i) {
+    require(Lc.found[i] == Lg.found[i], "find_los found parity");
+    if (!Lc.found[i]) continue;
+    dmax = std::max(dmax, std::abs(Lc.delay_s[i] - Lg.delay_s[i]) / a.delay_step_s);
+    tmax = std::max(tmax, std::abs(Lc.tap[i] - Lg.tap[i]) / std::max(std::abs(Lc.tap[i]), 1e-300));
+  }
+  std::printf("[%s] find_los: found=%d%d%d%d max|ddelay|=%.3g bin max|dtap|/|tap|=%.3g\n", label, Lc.found[0], Lc.found[1], Lc.found[2], Lc.found[3], dmax, tmax);
+  require(dmax < 0.01, "find_los delay parity (0.01 bin)");
+  require(tmax < 1e-3, "find_los tap parity (1e-3 relative)");
+  require(Sc.valid == Sg.valid && Sc.phase_rad.size() == Sg.phase_rad.size(), "row sync validity");
+  double pmax = 0, sdmax = 0;
+  for (size_t r = 0; r < Sc.phase_rad.size(); ++r) {
+    pmax = std::max(pmax, std::abs(std::remainder(Sc.phase_rad[r] - Sg.phase_rad[r], 2 * M_PI)));
+    sdmax = std::max(sdmax, std::abs(Sc.delay_s[r] - Sg.delay_s[r]) / a.delay_step_s);
+  }
+  std::printf("[%s] row sync: valid=%d max|dphase|=%.3g rad max|ddelay|=%.3g bin\n", label, (int)Sc.valid, pmax, sdmax);
+  require(pmax < 1e-3, "row sync phase parity (1e-3 rad)");
+  require(sdmax < 1e-3, "row sync delay parity (1e-3 bin)");
+  double m = 0, dm = 0;
+  require(Rc.rd.v.size() == Rg.rd.v.size(), "RD size");
+  for (size_t k = 0; k < Rc.rd.v.size(); ++k) { m = std::max(m, (double)std::abs(Rc.rd.v[k])); dm = std::max(dm, (double)std::abs(Rc.rd.v[k] - Rg.rd.v[k])); }
+  double nmax = 0, lmax = 0;
+  for (uint32_t i = 0; i < kCh; ++i) if (Lc.found[i]) {
+    nmax = std::max(nmax, std::abs(Rc.noise[i] - Rg.noise[i]) / Rc.noise[i]);
+    lmax = std::max(lmax, std::abs(Rc.los_tap[i] - Rg.los_tap[i]) / std::max(std::abs(Rc.los_tap[i]), 1e-300));
+  }
+  std::printf("[%s] RD: rel=%.3g noise rel=%.3g los_tap rel=%.3g\n", label, m > 0 ? dm / m : 0.0, nmax, lmax);
+  require(m > 0 && dm / m < 1e-3, "RD parity");
+  require(nmax < 1e-3 && lmax < 1e-3, "RD noise / los_tap parity");
+  // Waveform: every field; kernels (FP32 on the device) and Q relative to their own maxima.
+  const RdResult::Waveform &A = Rc.wf, &B = Rg.wf;
+  require(A.grp == B.grp && A.lo == B.lo && A.hi == B.hi && A.mask == B.mask && A.X == B.X && A.sc == B.sc, "wf structure");
+  require(A.B.size() == B.B.size() && A.Q.size() == B.Q.size() && A.w.size() == B.w.size(), "wf sizes");
+  double fmax = 0; for (size_t r = 0; r < A.w.size(); ++r)
+    fmax = std::max({fmax, std::abs(A.w[r] - B.w[r]), std::abs(A.fc[r] - B.fc[r]) / w.scs_hz, std::abs(A.hh[r] - B.hh[r]) / std::max(A.hh[r], 1e-300)});
+  fmax = std::max({fmax, std::abs(A.wsum - B.wsum) / A.wsum, std::abs(A.w2sum - B.w2sum) / A.w2sum});
+  double bm = 0, bd = 0; for (size_t q = 0; q < A.B.size(); ++q) for (size_t u = 0; u < A.B[q].size(); ++u) {
+    bm = std::max(bm, std::abs(A.B[q][u])); bd = std::max({bd, std::abs(A.B[q][u] - B.B[q][u]), std::abs(A.B2[q][u] - B.B2[q][u])}); }
+  double qm = 0, qd = 0; for (size_t k = 0; k < A.Q.size(); ++k) { qm = std::max(qm, (double)std::abs(A.Q[k])); qd = std::max(qd, (double)std::abs(A.Q[k] - B.Q[k])); }
+  std::printf("[%s] wf: groups=%zu scalars rel=%.3g B rel=%.3g Q rel=%.3g\n", label, A.B.size(), fmax, bm > 0 ? bd / bm : 0.0, qm > 0 ? qd / qm : 0.0);
+  require(fmax < 1e-9, "wf scalar parity");
+  require(bm > 0 && bd / bm < 1e-4, "waveform kernel parity");
+  require(qm > 0 && qd / qm < 1e-4, "waveform Q parity");
+  { const CudaCoherent::Timing t = gpu.last_timing();
+    std::printf("[%s] gpu front ms: upload=%.2f kernel=%.2f noncoh=%.2f union=%.2f coh=%.2f refine=%.2f row_sums=%.2f(%d) ed=%.2f wf=%.2f | rd: build=%.2f fft=%.2f nudft=%.2f download=%.2f wf=%.2f\n",
+                label, t.f_upload_ms, t.f_kernel_ms, t.f_noncoh_ms, t.f_union_ms, t.f_coh_ms, t.f_refine_ms, t.f_rowsums_ms, t.f_rowsums_calls, t.f_ed_ms, t.f_wf_ms,
+                t.build_ms, t.fft_ms, t.nudft_ms, t.download_ms, t.wf_ms); }
+  std::printf("[%s] ms: cpu los=%.1f sync=%.1f rd=%.1f | gpu upload=%.1f los=%.1f sync=%.1f rd=%.1f\n", label, tc_los, tc_sync, tc_rd,
+              tg_up, tg_los, tg_sync, tg_rd);
+}
+
+int main(int argc, char** argv)
 {
   std::setvbuf(stdout, nullptr, _IONBF, 0);
   if (!CudaCoherent::available()) { std::puts("coherent_cuda_parity_test: SKIP (no CUDA)"); return 0; }
@@ -67,6 +139,17 @@ int main()
   const SurveySigma survey{{0.1, 0.1, 0.1, 0.1}, 0.1};
 
   CudaCoherent gpu;
+  check_front(gpu, w, a, 1e-4, nullptr, "scene");
+  { std::array<double, kCh> geo_los{}; for (uint32_t i = 0; i < kCh; ++i) geo_los[i] = (dist(g.tx, g.rx[i]) + 30) / kC;
+    check_front(gpu, w, a, 1e-4, &geo_los, "scene+survey"); }
+  // Real OTA CPIs dumped by the pipeline (NR_ISAC_COH_DUMP, coherent_cpi_dump.h), as given on the
+  // command line -- the pipeline's own axes, LOS pfa and survey LOS delays.
+  for (int f = 1; f < argc; ++f) {
+    CpiDump d; require(read_cpi_dump(argv[f], d), "read CPI dump");
+    const coherent::Axes ad = derive_axes(d.w, d.vol, d.geo, d.max_speed_mps); require(ad.valid, "dump axes");
+    std::array<double, kCh> geo_los{}; for (uint32_t i = 0; i < kCh; ++i) geo_los[i] = dist(d.geo.tx, d.geo.rx[i]) / kC;
+    check_front(gpu, d.w, ad, std::min(0.5, 1.0 / ((double)ad.n_fft * kCh)), &geo_los, argv[f]);
+  }
   const RdResult Rg = gpu.range_doppler(w, a, L, s, true);
   double m = 0, dm = 0;
   require(R.rd.v.size() == Rg.rd.v.size(), "RD size match");

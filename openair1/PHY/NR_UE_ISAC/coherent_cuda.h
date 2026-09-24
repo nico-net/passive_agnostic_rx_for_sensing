@@ -31,6 +31,14 @@ public:
   CudaCoherent(const CudaCoherent&) = delete;
   CudaCoherent& operator=(const CudaCoherent&) = delete;
 
+  /** Upload the CPI once (coherent_cuda_front.cu). find_los/estimate_row_sync/range_doppler then work on
+   * the device-resident copy; each of them uploads by itself only when `w` is not the uploaded window. */
+  void upload(const CfrWindow& w);
+  /** coherent_core.cc's find_los()/estimate_row_sync() with their array stages on the device (same
+   * decisions: the core functions run with this object's FrontOps). */
+  LosEstimate find_los(const CfrWindow& w, const Axes& a, double pfa, const std::array<double, kCh>* geo_los_s = nullptr);
+  RowSync estimate_row_sync(const CfrWindow& w, const Axes& a, const LosEstimate& L);
+
   /** Upload the CPI once; build each row's centred range profile (Hann + per-subcarrier static
    * removal + zero-padded batched cuFFT), crop near/far windows, and NUDFT into a device-resident RD
    * cube. Always downloads the (small) RD cube plus a CPU-built `wf` into the returned RdResult (see
@@ -62,6 +70,9 @@ public:
     double upload_ms = 0, build_ms = 0, fft_ms = 0, crop_norm_ms = 0, nudft_ms = 0, noise_ms = 0,
            download_ms = 0, wf_ms = 0, rd_total_ms = 0;
     double envelope_ms = 0, envelope_download_ms = 0;
+    // GPU front since the last upload (coherent_cuda_front.cu): wall ms per stage; row_sums summed over calls
+    double f_upload_ms = 0, f_kernel_ms = 0, f_noncoh_ms = 0, f_union_ms = 0, f_coh_ms = 0, f_refine_ms = 0, f_rowsums_ms = 0, f_ed_ms = 0, f_wf_ms = 0;
+    int f_rowsums_calls = 0;
   };
   Timing last_timing() const;
 

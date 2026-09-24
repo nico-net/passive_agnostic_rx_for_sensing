@@ -2,6 +2,7 @@
 /* coherent_pipeline.cc -- CPU path; Task 10 adds the CUDA branch. */
 #include "coherent_pipeline.h"
 #include "coherent_ul.h"
+#include "coherent_cpi_dump.h"
 #include "cuda_support.h"
 #include <algorithm>
 #include <cmath>
@@ -151,17 +152,26 @@ void CoherentPipeline::process(Job& j)
     write_coherence(j.seq, j.t, cal_.last(), {}, true);
     return;
   }
+  if (const char* dd = std::getenv("NR_ISAC_COH_DUMP")) {   // offline parity data (coherent_cpi_dump.h)
+    static int dumped = 0;
+    const char* nn = std::getenv("NR_ISAC_COH_DUMP_N"); const char* ev = std::getenv("NR_ISAC_COH_DUMP_EVERY");
+    if (dumped < (nn ? std::atoi(nn) : 4) && j.seq % (uint64_t)std::max(1, ev ? std::atoi(ev) : 1) == 0) {
+      ++dumped;
+      if (!write_cpi_dump(std::string(dd) + "/cpi_" + std::to_string(j.seq) + ".bin", CpiDump{j.dl, cfg_.volume, geo, cfg_.max_speed_mps}))
+        std::fprintf(stderr, "SENSING: coherent CPI dump to %s failed\n", dd);
+    }
+  }
   // LOS search tests n_fft bins per channel: at most one expected false LOS pick per CPI over all channels.
   const double pfa_los = std::min(0.5, 1.0 / ((double)a.n_fft * kCh));
   const SurveySigma survey{{cfg_.survey_sigma_m, cfg_.survey_sigma_m, cfg_.survey_sigma_m, cfg_.survey_sigma_m}, cfg_.survey_sigma_m};
 
   auto s0 = clk::now();
-  // find_los / row-sync stay CPU-only either way (Task 10: cheap relative to range_doppler/detect
-  // on this scene, and find_los is being fixed on a parallel branch -- its body is never touched
-  // here; see coherent_cuda.h's file header).
+  // GPU path: find_los / row sync run coherent_core.cc's decisions on device-computed arrays
+  // (CudaCoherent::find_los / estimate_row_sync, coherent_cuda_front.cu).
   std::array<double, kCh> geo_los{};             // survey LOS delays: picks the LOS over a stronger wall
   for (uint32_t i = 0; i < kCh; ++i) geo_los[i] = dist(geo.tx, geo.rx[i]) / kC;
-  LosEstimate L = find_los(j.dl, a, pfa_los, &geo_los);
+  if (cuda_) cuda_->upload(j.dl);                // once per CPI: find_los, row sync and range_doppler share it
+  LosEstimate L = cuda_ ? cuda_->find_los(j.dl, a, pfa_los, &geo_los) : find_los(j.dl, a, pfa_los, &geo_los);
   // Common-offset LOS referencing. Each channel's own per-CPI LOS delay jitters by 27-50 ns OTA
   // (narrow hopping allocations), and the LOS tap phase moves by 2*pi*f_alloc*delay_err with the
   // allocation centre hopping +-50 MHz: that alone made the calibration phases uniform (measured
@@ -184,7 +194,7 @@ void CoherentPipeline::process(Job& j)
     }
   }
   tm_los = ms_since(s0);
-  const RowSync rs = estimate_row_sync(j.dl, a, L);
+  const RowSync rs = cuda_ ? cuda_->estimate_row_sync(j.dl, a, L) : estimate_row_sync(j.dl, a, L);
   tm[0] = ms_since(s0); s0 = clk::now();
   // L.found flows into R.los_found: envelope / detect / refine skip channels without a LOS reference.
   const RdResult R = cuda_ ? cuda_->range_doppler(j.dl, a, L, rs, true) : range_doppler(j.dl, a, L, rs);

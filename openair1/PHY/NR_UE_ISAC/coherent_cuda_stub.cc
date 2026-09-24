@@ -12,6 +12,12 @@ bool CudaCoherent::available() { return false; }
 CudaCoherent::CudaCoherent() { throw std::runtime_error("coherent CUDA path was not compiled (ENABLE_CHANNEL_SIM_CUDA=OFF)"); }
 CudaCoherent::~CudaCoherent() = default;
 
+void CudaCoherent::upload(const CfrWindow&) { throw std::runtime_error("coherent CUDA path was not compiled"); }
+LosEstimate CudaCoherent::find_los(const CfrWindow&, const Axes&, double, const std::array<double, kCh>*)
+{ throw std::runtime_error("coherent CUDA path was not compiled"); }
+RowSync CudaCoherent::estimate_row_sync(const CfrWindow&, const Axes&, const LosEstimate&)
+{ throw std::runtime_error("coherent CUDA path was not compiled"); }
+
 RdResult CudaCoherent::range_doppler(const CfrWindow&, const Axes&, const LosEstimate&, const RowSync&, bool)
 { throw std::runtime_error("coherent CUDA path was not compiled"); }
 
