@@ -80,17 +80,19 @@ std::vector<cd> row_profile(const CfrWindow& w, const Axes& a, uint32_t ant, uin
   std::vector<cd> buf(a.n_fft, cd(0, 0));
   double wsum = 0;
   uint32_t lo, hi;
-  if (row_span(w, row, &lo, &hi))
-    for (uint32_t k = lo; k <= hi; ++k) {
+  if (row_span(w, row, &lo, &hi)) {
+    // Phasor recurrences over k for the ramp and the Hann cosine (one sincos per row, not per subcarrier).
+    cd ramp = std::polar(1.0, 2 * M_PI * baseband_hz(w, lo) * ramp_delay_s - phase_rad);
+    const cd rstep = std::polar(1.0, 2 * M_PI * w.scs_hz * ramp_delay_s);
+    cd hc(1.0, 0.0); const cd hstep = std::polar(1.0, hi > lo ? 2 * M_PI / (hi - lo) : 0.0);
+    for (uint32_t k = lo; k <= hi; ++k, ramp *= rstep, hc *= hstep) {
       if (!w.observed[w.cell(row, k)]) continue;
-      const double u = (hi > lo) ? (double)(k - lo) / (hi - lo) : 0.5;
-      const double win = hann(u); wsum += win;
-      const double f = baseband_hz(w, k);
-      const cd ramp = std::polar(1.0, 2 * M_PI * f * ramp_delay_s - phase_rad);
+      const double win = (hi > lo) ? 0.5 - 0.5 * hc.real() : 1.0; wsum += win;
       const int q = (int)k - (int)(w.subcarriers / 2);
       const cd z = unit ? cd(1) : cd(w.values[w.sample(ant, row, k)]) * ramp - (sub ? (*sub)[k] : cd(0));
       buf[(size_t)((q % (int)a.n_fft + (int)a.n_fft) % (int)a.n_fft)] += z * win;
     }
+  }
   ifft_pow2(buf);                                 // inverse: sum * e^{+j...} / N
   if (wsum > 0) for (cd& v : buf) v *= (double)a.n_fft / wsum;
   return buf;
@@ -335,7 +337,17 @@ LosEstimate find_los(const CfrWindow& w, const Axes& a, double pfa, const std::a
   // Leakage of a unit peak at integer offset d, oversampled +-1 bin at the kernel's own kOvs (a real
   // earlier path's sub-bin position is unknown ahead of time; same convention as `leak` above),
   // normalised to the kernel's OWN measured peak.
-  auto leak_c = [&](long d) { double m = 0; for (long j = -kOvs; j <= kOvs; ++j) m = std::max(m, kernel_at(k0 + d + (double)j / kOvs)); return (kpeak > 0) ? m / kpeak : 1.0; };
+  // |kernel| on the whole kOvs-fine grid in one zero-padded FFT (direct evaluation per leak_c call was
+  // O(subcarriers) x 65 sub-bin offsets x every local maximum in +-hm: ~24 ms of find_los, measured OTA).
+  const long NKF = (long)a.n_fft * kOvs;
+  std::vector<double> kmag(NKF);
+  { std::vector<cd> kb(NKF, cd(0));
+    for (uint32_t k = 0; k < w.subcarriers; ++k) if (Uk[k] != cd(0)) { const long q = (long)k - (long)(w.subcarriers / 2); kb[(size_t)(((q % NKF) + NKF) % NKF)] = Uk[k]; }
+    ifft_pow2(kb); for (long n = 0; n < NKF; ++n) kmag[n] = std::abs(kb[n]) * NKF; }
+  auto leak_c = [&](long d) {
+    const long c = std::lround((k0 + d) * kOvs); double m = 0;
+    for (long j = -kOvs; j <= kOvs; ++j) m = std::max(m, kmag[(size_t)((((c + j) % NKF) + NKF) % NKF)]);
+    return (kpeak > 0) ? m / kpeak : 1.0; };
   // Pass 1, per channel: the coherent peak near the non-coherent estimate, plus every earlier local
   // maximum in the unresolved region [peak-hm, peak-1] that clears the profile's own noise and the
   // peak's leakage through the union kernel (both in amplitude). Candidates only -- see pass 2.
