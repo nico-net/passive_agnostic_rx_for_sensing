@@ -3,6 +3,12 @@
 // SKIPs (exit 0) when this binary was not built with ENABLE_CHANNEL_SIM_CUDA or no device is present.
 #include "coherent_core.h"
 #include "coherent_cuda.h"
+#include "coherent_cuda_detect.h"
+#include <algorithm>
+#include <chrono>
+#include <cstdlib>
+#include <dirent.h>
+#include <string>
 #include <array>
 #include <cmath>
 #include <complex>
@@ -44,10 +50,63 @@ static CfrWindow make_window(uint32_t rows, const std::vector<Path>& paths, std:
   return w;
 }
 
+// Detection-set parity (gpu-common.md): same count; every GPU detection has a CPU one within one
+// envelope step with SNR within 1 %. Returns the max position / relative-SNR mismatch for the log.
+static bool same_detections(const std::vector<coherent::Detection>& Dc, const std::vector<coherent::Detection>& Dg, double step,
+                            double* max_dpos, double* max_dsnr)
+{
+  *max_dpos = 0; *max_dsnr = 0;
+  if (Dc.size() != Dg.size()) return false;
+  for (const coherent::Detection& x : Dg) {
+    const coherent::Detection* best = nullptr;
+    for (const coherent::Detection& y : Dc) if (!best || dist(x.pos_env, y.pos_env) < dist(x.pos_env, best->pos_env)) best = &y;
+    if (!best) return false;
+    const double dp = dist(x.pos_env, best->pos_env), ds = std::abs(x.snr - best->snr) / std::max(best->snr, 1e-12);
+    *max_dpos = std::max(*max_dpos, dp); *max_dsnr = std::max(*max_dsnr, ds);
+    if (!(dp <= step && ds < 0.01)) return false;
+  }
+  return true;
+}
+
+// Recorded full-band OTA detect() inputs (NR_ISAC_DETECT_DUMP from a replay): CPU oracle vs GpuDetect,
+// parity per case and timing percentiles. Run when NR_ISAC_DETECT_CASES=<dir> is set.
+static void replay_cases(const char* dir)
+{
+  std::vector<std::string> files;
+  if (DIR* d = opendir(dir)) { while (dirent* e = readdir(d)) { std::string n = e->d_name; if (n.rfind("case_", 0) == 0) files.push_back(std::string(dir) + "/" + n); } closedir(d); }
+  std::sort(files.begin(), files.end(), [](const std::string& a, const std::string& b) { return a.size() != b.size() ? a.size() < b.size() : a < b; });
+  const char* lim = std::getenv("NR_ISAC_DETECT_CASES_MAX");
+  if (lim && files.size() > std::strtoul(lim, nullptr, 10)) files.resize(std::strtoul(lim, nullptr, 10));
+  GpuDetect gd; std::vector<double> tc, tg; size_t bad = 0, ndet = 0;
+  const bool skip_cpu = std::getenv("NR_ISAC_DETECT_CASES_NOCPU") != nullptr;
+  for (const std::string& f : files) {
+    DetectCase k; require(load_detect_case(f, &k), "load case");
+    using C = std::chrono::steady_clock;
+    auto t0 = C::now();
+    const std::vector<coherent::Detection> Dg = gd.run(k.E, k.R, k.g, k.geo, k.p);
+    tg.push_back(std::chrono::duration<double, std::milli>(C::now() - t0).count());
+    std::vector<coherent::Detection> Dc;
+    if (!skip_cpu) { t0 = C::now(); Dc = detect(k.E, k.R, k.g, k.geo, k.p); tc.push_back(std::chrono::duration<double, std::milli>(C::now() - t0).count()); }
+    double dp = 0, ds = 0; const bool ok = skip_cpu || same_detections(Dc, Dg, k.g.step, &dp, &ds);
+    bad += !ok; ndet += Dg.size();
+    if (!ok && std::getenv("NR_ISAC_DETECT_CASES_VERBOSE")) {
+      for (const coherent::Detection& x : Dc) std::printf("  cpu pos_env=(%.3f %.3f %.3f) snr=%.4g dopp=%u\n", x.pos_env.x, x.pos_env.y, x.pos_env.z, x.snr, x.dopp_bin);
+      for (const coherent::Detection& x : Dg) std::printf("  gpu pos_env=(%.3f %.3f %.3f) snr=%.4g dopp=%u\n", x.pos_env.x, x.pos_env.y, x.pos_env.z, x.snr, x.dopp_bin);
+    }
+    std::printf("%s: cpu=%zu gpu=%zu %s dpos=%.3g dsnr=%.3g cpu_ms=%.1f gpu_ms=%.1f\n", f.c_str(), Dc.size(), Dg.size(), ok ? "OK" : "MISMATCH",
+                dp, ds, tc.empty() ? 0.0 : tc.back(), tg.back());
+  }
+  auto pct = [](std::vector<double> v, double q) { if (v.empty()) return 0.0; std::sort(v.begin(), v.end()); return v[std::min(v.size() - 1, (size_t)(q * (v.size() - 1) + 0.5))]; };
+  std::printf("cases=%zu detections=%zu mismatches=%zu  cpu p50=%.1f p95=%.1f max=%.1f ms  gpu p50=%.1f p95=%.1f max=%.1f ms\n", files.size(), ndet, bad,
+              pct(tc, .5), pct(tc, .95), pct(tc, 1), pct(tg, .5), pct(tg, .95), pct(tg, 1));
+  require(bad == 0, "recorded-case detect parity");
+}
+
 int main()
 {
   std::setvbuf(stdout, nullptr, _IONBF, 0);
   if (!CudaCoherent::available()) { std::puts("coherent_cuda_parity_test: SKIP (no CUDA)"); return 0; }
+  if (const char* dir = std::getenv("NR_ISAC_DETECT_CASES")) { replay_cases(dir); std::puts("coherent_cuda_parity_test: PASS"); return 0; }
 
   Geometry g; g.tx = {35, 20, 6};
   g.rx = {Vec3{0, 0, .5}, Vec3{10, 0, 3.5}, Vec3{0, 10, 3.5}, Vec3{10, 10, .5}};
@@ -83,6 +142,13 @@ int main()
   const std::vector<coherent::Detection> Dc = detect(envelope(R, G, g), R, G, g, detect_params(a, G, 1.0));
   const std::vector<coherent::Detection> Dg = gpu.detect(G, g, detect_params(a, G, 1.0), nullptr);
   std::printf("detections: cpu=%zu gpu=%zu\n", Dc.size(), Dg.size());
+  {   // GpuDetect alone on the CPU chain's own inputs (isolates detect() from range_doppler/envelope)
+    GpuDetect gd; const std::vector<float> E = envelope(R, G, g);
+    const std::vector<coherent::Detection> D2 = gd.run(E, R, G, g, detect_params(a, G, 1.0));
+    double dp = 0, ds = 0; const bool ok = same_detections(Dc, D2, G.step, &dp, &ds);
+    std::printf("GpuDetect on CPU inputs: %zu detections, max dpos=%.3g dsnr=%.3g\n", D2.size(), dp, ds);
+    require(ok, "GpuDetect parity on CPU inputs");
+  }
   require(Dc.size() == Dg.size(), "same detection count");
   for (const coherent::Detection& x : Dg) {
     bool ok = false;
