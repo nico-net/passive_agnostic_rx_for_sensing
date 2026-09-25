@@ -20,5 +20,8 @@ private:
   uint64_t next_id_ = 1;
   double last_t_ = -1;
   double pd_hits_ = 0, pd_misses_ = 0;
+  struct ClutterPoint { Vec3 pos; std::array<double, 9> cov; uint64_t owner; };   // owner = track it fed
+  std::vector<ClutterPoint> clutter_hist_;   // unclaimed in-volume detections this epoch
+  double clutter_t_ = 0;                      // dwell seconds this epoch
 };
 } // namespace nr_isac::coherent

@@ -172,6 +172,52 @@ int main() {
     std::printf("llr clamp: deleted after %d missed CPIs (gap %.3f, evidence %.3f)\n", misses, gap, ev);
     require(misses <= 5, "departed target deleted within a few CPIs");
   }
+  // Measured spatial clutter, on REAL data: 1750 CPIs of the OTA empty room (X410, lab cell, DL
+  // traffic, 2026-09-25; ~0.28 detections/CPI, all in the direct-path cell, ~4/s against a declared
+  // 1/s). The uniform declared-intensity tracker confirmed 2 ghosts over 25 CPIs here; at most the
+  // start-up transient (before any clutter has been measured) may survive.
+  {
+    FILE* f = std::fopen(ISAC_TEST_DATA "/ota_empty_room_detections.txt", "r");
+    require(f != nullptr, "fixture ota_empty_room_detections.txt");
+    TrackerParams to; to.max_speed_mps = 50; to.false_object_intensity_per_s = 1.0;
+    const Vec3 rx[4] = {{-1.9, -0.65, 0}, {5.7, -0.65, 2}, {5.7, 7.55, 0}, {-1.9, 7.55, 2}};
+    for (const Vec3& r : rx) to.array_centroid = to.array_centroid + r * 0.25;
+    CoherentTracker ko(to); char tag[4]; int cpis = 0, ghost_cpis = 0;
+    while (std::fscanf(f, "%3s", tag) == 1) {
+      if (tag[0] == 'R') { ko = CoherentTracker(to); continue; }   // traffic event: the pipeline resets the tracker
+      double t, tc; int n;
+      require(std::fscanf(f, "%lf %lf %d", &t, &tc, &n) == 3, "fixture CPI line");
+      std::vector<Detection> D(n);
+      for (Detection& d : D) {
+        require(std::fscanf(f, "%lf %lf %lf %lf %lf %lf", &d.pos.x, &d.pos.y, &d.pos.z, &d.pos_sigma.x, &d.pos_sigma.y, &d.pos_sigma.z) == 6, "fixture det");
+        for (double& c : d.pos_cov) require(std::fscanf(f, "%lf", &c) == 1, "fixture cov");
+        require(std::fscanf(f, "%lf %lf", &d.range_rate_mps, &d.range_rate_sigma) == 2, "fixture rate");
+        d.tx = {-9.1, 16.5, 1.2};
+      }
+      bool any = false; for (const Track& tr : ko.step(t, tc, D)) any |= tr.confirmed;
+      ghost_cpis += any; ++cpis;
+    }
+    std::fclose(f);
+    std::printf("OTA empty room: %d CPIs, %d with a confirmed track\n", cpis, ghost_cpis);
+    require(cpis == 1750 && ghost_cpis <= 4, "empty room stays (nearly) blank");
+  }
+  // A real mover crossing that kind of dense clutter still confirms: its own tentative trail is not
+  // clutter against itself (without that exclusion the synthetic chain's car/drone confirmed 2-3x later).
+  {
+    std::mt19937 r3(11); std::uniform_real_distribution<double> u(-5, 5), rr(3, 6); std::bernoulli_distribution b(0.3), sg(0.5);
+    CoherentTracker kc(tp); int hits = 0;
+    for (int k = 0; k < 600; ++k) {
+      std::vector<Detection> v;
+      if (b(r3)) { Detection d = det(Vec3{u(r3), 4 + u(r3), 2.5 + u(r3) / 2}, 3.0); d.range_rate_mps = (sg(r3) ? 1 : -1) * rr(r3); d.range_rate_sigma = 0.3; d.tx = {-9, 16, 1}; v.push_back(d); }
+      if (k >= 540) {                                // 2 m/s straight through the region
+        const Vec3 p{-6 + 2.0 * (k - 540) * T, 4, 2};
+        v.push_back(det(p, 0.3));
+        for (const Track& t : kc.step(k * T, T, v)) hits += t.confirmed && dist(Vec3{t.x[0], t.x[1], t.x[2]}, p) < 1;
+      } else kc.step(k * T, T, v);
+    }
+    std::printf("mover through dense clutter: confirmed on %d / 60 CPIs\n", hits);
+    require(hits > 50, "a real mover through the dense region is still confirmed");
+  }
   std::puts("coherent_tracker_test: PASS");
   return 0;
 }
