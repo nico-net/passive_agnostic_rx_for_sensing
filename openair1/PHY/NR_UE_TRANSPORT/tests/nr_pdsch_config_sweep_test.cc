@@ -553,6 +553,40 @@ TEST(PdschConfigSweepPerRnti, ObservedMaskIsPrivateUntilASecondRntiSeesIt) {
   EXPECT_LT(st.n_hyp, full);
 }
 
+TEST(PdschConfigSweepQm, PruneQmKeepsOnlyTablesPredictingTheMeasuredOrder) {
+  nr_pdsch_config_sweep_state_t st;
+  ASSERT_GT(nr_pdsch_config_sweep_init(&st, 2), 0);
+  // MCS 20: table 0 -> 64QAM, table 1 -> 256QAM, table 2 -> 16QAM. Measured 256QAM => table 1 only.
+  const int n = nr_pdsch_config_sweep_prune_qm(&st, 20, 8);
+  ASSERT_GT(n, 0);
+  for (int i = 0; i < st.n_hyp; i++) EXPECT_EQ(st.hyp[i].mcs_table, 1);
+}
+
+TEST(PdschConfigSweepQm, UninformativeMcsLeavesTheCatalogAlone) {
+  nr_pdsch_config_sweep_state_t st;
+  const int full = nr_pdsch_config_sweep_init(&st, 2);
+  EXPECT_EQ(nr_pdsch_config_sweep_prune_qm(&st, 2, 2), full);  // MCS 2 is QPSK in every table
+  EXPECT_EQ(st.n_hyp, full);
+}
+
+TEST(PdschConfigSweepQm, LiveObservationPrunesOnlyAfterTwoAgreeingSightings) {
+  nr_pdsch_config_sweep_reset_all();
+  nr_pdsch_config_sweep_prior_reset();
+  auto t = select_context(31, 0x4601, 0);
+  EXPECT_EQ(nr_pdsch_config_sweep_observe_qm(&t, 20, 8), 0);   // first sighting: evidence only
+  EXPECT_GT(nr_pdsch_config_sweep_observe_qm(&t, 20, 8), 0);   // second agreeing: pruned
+  EXPECT_EQ(nr_pdsch_config_sweep_observe_qm(&t, 20, 8), 0);   // nothing left to remove: no reset
+}
+
+TEST(PdschConfigSweepQm, ConflictingObservationsResetInsteadOfPruning) {
+  nr_pdsch_config_sweep_reset_all();
+  nr_pdsch_config_sweep_prior_reset();
+  auto t = select_context(32, 0x4602, 0);
+  EXPECT_EQ(nr_pdsch_config_sweep_observe_qm(&t, 20, 8), 0);   // implies table 1
+  EXPECT_EQ(nr_pdsch_config_sweep_observe_qm(&t, 20, 6), 0);   // implies table 0: conflict -> reset
+  EXPECT_EQ(nr_pdsch_config_sweep_observe_qm(&t, 20, 6), 0);   // first sighting after reset
+}
+
 /* OTA 2026-09-16: the oracle measured DM-RS at {2,7,11} on every slot, yet every decode used the
  * add_pos-0 mask, because the layout rotation churned contexts faster than any walked past the
  * catalog head. An observed mask must prune every context created AFTER the observation. */

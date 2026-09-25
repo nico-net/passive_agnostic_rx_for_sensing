@@ -109,6 +109,7 @@ typedef struct {
   fapi_nr_dl_cw_info_t cw;    ///< codeword parameters this decode derived from the grant
   uint32_t             G;     ///< coded bits available on the allocation
   uint32_t             nvar;  ///< noise variance from channel estimation (fusion weight downstream)
+  uint8_t              qm_measured; ///< modulation order from the equalised symbols (nr_pdsch_qm_oracle.h), 0 = abstained
 } nr_pdsch_passive_decode_result_t;
 
 /**

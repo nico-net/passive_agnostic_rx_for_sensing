@@ -27,6 +27,7 @@ extern _Atomic long nr_ue_diag_producer_absolute_slot;
  */
 
 #include "nr_pdsch_passive_decode.h"
+#include "nr_pdsch_qm_oracle.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -2354,6 +2355,7 @@ chest_done:
     }
   }
   out->nvar = nvar;
+  out->qm_measured = 0;
 
   if (ue->chest_time == 1 && probe_last_sym < 0) { /* a probe estimated only the first DM-RS symbol(s) */
     nr_chest_time_domain_avg(fp, (int32_t **)pdsch_dl_ch_estimates, dlsch_config->number_symbols,
@@ -2598,6 +2600,17 @@ gpu_llr_ready:;
   }
 
   pdtim_add(PDTIM_DEMOD, pdt_dem);
+
+  /* Qm oracle: same symbol choice as EQDIAG -- the one with the most valid data REs. */
+  if (demod_ok) {
+    int qm_m = -1;
+    uint32_t qm_n = 0;
+    for (int m = dlsch_config->start_symbol; m < dlsch_config->start_symbol + dlsch_config->number_symbols; m++)
+      if (dl_valid_re[m] > qm_n) { qm_n = dl_valid_re[m]; qm_m = m; }
+    if (qm_m >= 0)
+      out->qm_measured = (uint8_t)nr_pdsch_qm_classify((const int16_t *)rxdataF_comp[qm_m][0],
+                                                       qm_n > 4096 ? 4096 : qm_n, NULL);
+  }
 
   /* ---- EQDIAG: post-equalisation EVM (ISAC_PDSCH_EVM=1, default off) --------------------------
    * PASSIVE_RX_ONLY_HANDOVER.md §13 names this as "the measurement to take next, and why it was not

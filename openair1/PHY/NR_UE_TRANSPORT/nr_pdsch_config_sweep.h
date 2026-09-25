@@ -163,6 +163,13 @@ bool nr_pdsch_config_sweep_select(uint64_t configuration, uint16_t rnti, uint8_t
 int nr_pdsch_config_sweep_prune_mask(nr_pdsch_config_sweep_state_t *st, uint16_t dmrs_mask);
 /** Same, on the ticket's live context (no-op once it has a winner). Returns the surviving count. */
 int nr_pdsch_config_sweep_observe_mask(const nr_pdsch_sweep_ticket_t *ticket, uint16_t dmrs_mask);
+/** Qm oracle (nr_pdsch_qm_oracle.h): keep only hypotheses whose MCS table maps `mcs` to the measured
+ *  order `qm`. Same contract as prune_mask: 0 = nothing matched (state untouched); unchanged = count. */
+int nr_pdsch_config_sweep_prune_qm(nr_pdsch_config_sweep_state_t *st, uint8_t mcs, int qm);
+/** Live context, two-observation rule: the tables consistent with each observation are intersected per
+ *  context and applied once two agree; a conflict (empty intersection) resets the evidence. Returns the
+ *  surviving count only when this call removed hypotheses, else 0. ISAC_QM_ORACLE=0 disables. */
+int nr_pdsch_config_sweep_observe_qm(const nr_pdsch_sweep_ticket_t *ticket, uint8_t mcs, int qm);
 /** Full oracle observation: the DM-RS mask, the last PDSCH symbol carrying energy on the grant's
  *  PRBs (-1 = unmeasured) and the k0 of the job it was measured on (-1 = unknown). Records it
  *  cell-wide and prunes the ticket's context to the admitted entries. */
