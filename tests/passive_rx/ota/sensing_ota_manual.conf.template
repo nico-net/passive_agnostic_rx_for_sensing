@@ -115,7 +115,7 @@ sensing = {
   sources = "pdsch_dmrs_blind,pdsch_data";
   coherent_enable = 1;
   coherent_ul_enable = 0;
-  coherent_volume_m = "-15:15:-15:15:0:30";
+  coherent_volume_m = "-30:30:-30:30:0:30";
   coherent_survey_sigma_m = 0.1;
   // UE CAPACITY, not a cell value: 4 lanes per UE (4*(1+num_ues) detector lanes), engine maximum 4.
   // UL sessions beyond it in one CPI are dropped and counted (ul_sessions_capped).
