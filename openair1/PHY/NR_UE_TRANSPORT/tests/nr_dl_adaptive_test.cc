@@ -82,15 +82,61 @@ TEST(DlAdaptive, SweptMcsReachesPduDecoderAndRateMatching) {
 
 static void discover_single_window() {
   constexpr int nrb=48, fft=1024, offset=10, occupied=18, pci=2, slot=3;
+
+  // CSS0 autoconf is a hard prerequisite of real autodiscover deployments (see this feature's own
+  // "bootstrap RNTI" comment in nr_pdcch_blind_monitor.c) and gives us the SAME exclusion mechanism
+  // production uses to keep CORESET#0's own known-legitimate footprint out of the dedicated-CORESET
+  // recurrence oracle (s_css0_excl_first_w/last_w). Reused here (windows 0..2, i.e. RB 0..17) so the
+  // background injected below -- needed to clear ISAC_DISCOVER_MIN_BG, see that comment -- cannot
+  // itself accumulate recurrence and get mistaken for a second dedicated CORESET; it is excluded on
+  // exactly the same footing CORESET#0 is in production. g_cfg's CSS0 fields are fully overwritten
+  // once real dedicated discovery below completes (nr_pdcch_blind_monitor.c's own comment on that
+  // overwrite block), so this has no effect on the discovered geometry itself.
+  ASSERT_TRUE(nr_pdcch_blind_monitor_autoconf_css0(18,1,0,12,40,0,2,0,1,2,12,2));
+
   std::vector<c16_t> rx(fft),pilot((occupied+6)*3);
   nr_pdcch_dmrs_ref(nr_gold_pdcch(nrb,14,pci,slot,0),pilot.data(),occupied+6);
-  for(int rb=occupied;rb<occupied+6;rb++) for(int p=0;p<3;p++) {
-    int k=(offset+rb*12+1+4*p)%fft;
-    rx[k]={pilot[rb*3+p].r,static_cast<int16_t>(-pilot[rb*3+p].i)};
-  }
+  auto write_window=[&](int rb0){
+    for(int rb=rb0;rb<rb0+6;rb++) for(int p=0;p<3;p++) {
+      int k=(offset+rb*12+1+4*p)%fft;
+      rx[k]={pilot[rb*3+p].r,static_cast<int16_t>(-pilot[rb*3+p].i)};
+    }
+  };
+  auto clear_window=[&](int rb0){
+    for(int rb=rb0;rb<rb0+6;rb++) for(int p=0;p<3;p++) {
+      int k=(offset+rb*12+1+4*p)%fft;
+      rx[k]={0,0};
+    }
+  };
+  write_window(occupied); // the real, always-present CORESET signal (window occupied/6 == 3)
+
+  // Realistic non-zero background (2026-09-25, R15/fix-link-report.md "Fix round 1"): before this,
+  // every OTHER candidate window read a literal, permanent zero, so nr_pdcch_blind_monitor.c's
+  // ISAC_DISCOVER_MIN_BG median-hit background gate (default 3, ~line 1576) could never clear and
+  // the oracle spun forever without ever completing a dwell. Periodically -- and much more weakly
+  // than the real window's every-call presence -- light up three OTHER windows in rotation so their
+  // hit counts land a few counts above zero: enough to satisfy the background gate, nowhere near
+  // the real window's rate, so it stays the unique "lit" window and the discovered geometry
+  // (rb_offset 18 / window 3, which every DlGeometry test below asserts) is unaffected.
+  constexpr int kBgWindows[] = {0, 1, 2};
+  constexpr int kBgPeriod = 50; // ~20 injections/window per 1000-call dwell; the gate only needs 3
+
+  // Call budget: nr_pdcch_blind_monitor.c's MIN_ORACLE_DWELLS (8) x AUTODISCOVER_OBS_CALLS (1000)
+  // -- the oracle commits only after that many independent, well-populated dwells (each dwell
+  // resets its own histogram, so this is the real minimum, not a one-off warm-up). A little slack
+  // over the exact product avoids off-by-one flakiness against the background gate above.
+  constexpr int kMinOracleDwells = 8;
+  constexpr int kAutodiscoverObsCalls = 1000;
+  constexpr int kDiscoveryCallBudget = kMinOracleDwells * kAutodiscoverObsCalls + 500;
+
   bool found=false;
-  for(int i=0;i<1000 && !found;i++)
+  for(int i=0;i<kDiscoveryCallBudget && !found;i++) {
+    const int bg_w = kBgWindows[(i / kBgPeriod) % 3];
+    const bool inject_bg = (i % kBgPeriod) == 0;
+    if (inject_bg) write_window(bg_w * 6);
     found=nr_pdcch_blind_monitor_autodiscover_step(rx.data(),fft,nrb,offset,pci,slot,0,100+i);
+    if (inject_bg) clear_window(bg_w * 6);
+  }
   ASSERT_TRUE(found); // failed fixture is not evidence about verification
 }
 class DlGeometry : public testing::Test {

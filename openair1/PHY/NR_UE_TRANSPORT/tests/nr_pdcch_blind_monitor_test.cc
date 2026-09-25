@@ -1968,10 +1968,13 @@ TEST(Css0Autoconf, TurnsOffEverySettingThatDescribesTheDedicatedSearchSpace) {
   // Already-established behaviour, asserted here so a future edit cannot silently drop it.
   EXPECT_EQ(c->dci01_scan, 1); // preserve intent, suppress effective scanning in CSS0
   EXPECT_FALSE(nr_pdcch_blind_monitor_ul_scan_enabled(c));
-  // CSS0 admits the RA-RNTI range as well as SI-RNTI (1517e3f07c: RA search space monitored,
-  // SI-RNTI is admitted by class, not by this range). Was an SI-only pin (0xFFFF..0xFFFF).
+  // CSS0 admits the whole plausible RNTI range, not just RA-RNTI: MEASURED 2026-09-21 (Swisscom
+  // PCI 382) that Msg4 DCIs are scrambled by TC-RNTIs above NR_PDCCH_BLIND_RA_RNTI_MAX (0x4600),
+  // so pinning to the RA-RNTI range silently dropped every RRCSetup harvest. See
+  // nr_pdcch_blind_monitor.c's autoconf comment (~line 395) for the full "COST OF WIDENING"
+  // argument -- SI-RNTI/P-RNTI are admitted by class independently of this range regardless.
   EXPECT_EQ(c->rnti_min, 1);
-  EXPECT_EQ(c->rnti_max, NR_PDCCH_BLIND_RA_RNTI_MAX);
+  EXPECT_EQ(c->rnti_max, NR_PDCCH_BLIND_RNTI_MAX_DEFAULT);
 
   // The autoconf zero-config path must set the one MIB-derivable field it previously left at its
   // illegal zero default (spec values are 2 or 3) -- feeds the passive PDSCH-extraction l0/DM-RS
@@ -2007,7 +2010,10 @@ TEST(Css0Interleave, SnapshotIsTheCommonConfigAndTheSwapRoundTripsExactly) {
   const nr_pdcch_blind_monitor_cfg_t* c0 = nr_pdcch_blind_monitor_css0_cfg();
   ASSERT_NE(c0, nullptr);
   EXPECT_EQ(c0->coreset_type, 1);       // CORESET#0, not the dedicated one
-  EXPECT_EQ(c0->rnti_max, NR_PDCCH_BLIND_RA_RNTI_MAX); // CSS0 range: RA-RNTI (SI admitted by class)
+  // Deliberately widened 2026-09-21 (Swisscom PCI 382 Msg4-TC-RNTI measurement, see the
+  // TurnsOffEverySettingThatDescribesTheDedicatedSearchSpace comment above) to the full plausible
+  // RNTI range, not just RA-RNTI.
+  EXPECT_EQ(c0->rnti_max, NR_PDCCH_BLIND_RNTI_MAX_DEFAULT);
   EXPECT_EQ(c0->autodiscover, 0);       // must not run the dedicated sweep's bookkeeping
 
   // Stand in for "autodiscover has since overwritten the live config with the dedicated one".
@@ -2021,7 +2027,7 @@ TEST(Css0Interleave, SnapshotIsTheCommonConfigAndTheSwapRoundTripsExactly) {
   nr_pdcch_blind_monitor_cfg_override(c0);
   const nr_pdcch_blind_monitor_cfg_t* live = nr_pdcch_blind_monitor_get_cfg();
   EXPECT_EQ(live->coreset_type, 1);
-  EXPECT_EQ(live->rnti_max, NR_PDCCH_BLIND_RA_RNTI_MAX);
+  EXPECT_EQ(live->rnti_max, NR_PDCCH_BLIND_RNTI_MAX_DEFAULT); // see the widening note above
   EXPECT_EQ(live->autodiscover, 0);
   // ...and the dedicated config is UNTOUCHED, which is what keeps a scan consumer on another thread
   // (and the dedicated sweep's own state) out of the interleave's way.
