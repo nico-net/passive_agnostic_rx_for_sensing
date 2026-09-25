@@ -209,9 +209,11 @@ int nr_pdcch_joint_solve(const nr_pdcch_joint_model_t *m, const int16_t *llr, in
   int piv[JMAX_K], I[JMAX_K], r = 0;
   for (int o = 0; o < E && r < K; o++) {
     v128 v = m->rows[ord[o].idx];
-    for (int p = 0; p < r; p++)
-      if (v_get(v, piv[p]))
-        v = v_xor(v, basis[p]);
+    for (int p = 0; p < r; p++) {
+      const uint64_t msk = 0 - (uint64_t)v_get(v, piv[p]);
+      v.w[0] ^= basis[p].w[0] & msk;
+      v.w[1] ^= basis[p].w[1] & msk;
+    }
     if (!v_zero(v)) {
       basis[r] = v;
       piv[r] = v_lowbit(v);
@@ -238,11 +240,12 @@ int nr_pdcch_joint_solve(const nr_pdcch_joint_model_t *m, const int16_t *llr, in
       v128 tmp = Bm[p]; Bm[p] = Bm[c]; Bm[c] = tmp;
       tmp = Iv[p]; Iv[p] = Iv[c]; Iv[c] = tmp;
     }
-    for (int q = 0; q < K; q++)
-      if (q != c && v_get(Bm[q], c)) {
-        Bm[q] = v_xor(Bm[q], Bm[c]);
-        Iv[q] = v_xor(Iv[q], Iv[c]);
-      }
+    const v128 bc = Bm[c], ic = Iv[c];
+    for (int q = 0; q < K; q++) {
+      const uint64_t msk = (0 - (uint64_t)v_get(Bm[q], c)) & (0 - (uint64_t)(q != c));
+      Bm[q].w[0] ^= bc.w[0] & msk; Bm[q].w[1] ^= bc.w[1] & msk;
+      Iv[q].w[0] ^= ic.w[0] & msk; Iv[q].w[1] ^= ic.w[1] & msk;
+    }
   }
   /* Iv[j] (a vector over t) is row j of B^-1. Columns: colInv[t] is a vector over j. */
   v128 colInv[JMAX_K];
@@ -263,7 +266,8 @@ int nr_pdcch_joint_solve(const nr_pdcch_joint_model_t *m, const int16_t *llr, in
 
   /* d0 = M x0 XOR y' (where the exact solution disagrees with the observation), and T_t = M colInv[t] */
   ebits d0 = {{0}}, T[JMAX_K];
-  memset(T, 0, sizeof(T));
+  if (order >= 1)
+    memset(T, 0, sizeof(T)); /* only orders 1/2 read T */
   for (int i = 0; i < E; i++) {
     if (v_par(m->rows[i], x0) ^ e_get(&yb, i))
       e_flip(&d0, i);
@@ -272,13 +276,13 @@ int nr_pdcch_joint_solve(const nr_pdcch_joint_model_t *m, const int16_t *llr, in
         if (v_par(m->rows[i], colInv[t]))
           e_flip(&T[t], i);
   }
-  uint8_t inI[NR_PDCCH_JOINT_MAX_E] = {0};
+  ebits inIb = {{0}};
   for (int t = 0; t < K; t++)
-    inI[I[t]] = 1;
+    e_flip(&inIb, I[t]); /* I[] holds distinct positions */
 
   double WO = 0.0, W2O = 0.0;
   for (int i = 0; i < E; i++)
-    if (!inI[i]) {
+    if (!e_get(&inIb, i)) {
       WO += w[i];
       W2O += w[i] * w[i];
     }
@@ -296,7 +300,7 @@ int nr_pdcch_joint_solve(const nr_pdcch_joint_model_t *m, const int16_t *llr, in
         const int i = q * 64 + __builtin_ctzll(v);                              \
         v &= v - 1;                                                             \
         D += w[i];                                                              \
-        if (!inI[i]) DO += w[i];                                                \
+        if (!e_get(&inIb, i)) DO += w[i];                                       \
       }                                                                         \
     }                                                                           \
     ncand++;                                                                    \

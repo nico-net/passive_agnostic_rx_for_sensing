@@ -408,6 +408,44 @@ TEST(JointSolve, HandlesAggregationLevel16)
   nr_pdcch_joint_model_free(m);
 }
 
+TEST(JointSolve, OptimisationKeepsResultsBitIdentical)
+{
+  // Golden hash of every output field over a fixed corpus (AL1+AL2, signal and noise, orders 0-2),
+  // recorded from the solver BEFORE any optimisation. A change to results, not just speed, fails it.
+  std::mt19937 rng(20260925);
+  uint64_t h = 1469598103934665603ULL;
+  auto mix = [&](uint64_t v) { h = (h ^ v) * 1099511628211ULL; };
+  for (int L : {1, 2}) {
+    const int A = 51;
+    EncCtx c{A, L};
+    const int E = EncLen(A, L);
+    auto *m = nr_pdcch_joint_model_new(RealEncode, &c, A, E, 64, 1);
+    ASSERT_NE(m, nullptr);
+    std::normal_distribution<double> nz(0.0, 0.354);
+    for (int k = 0; k < 400; k++) {
+      std::vector<int16_t> llr;
+      if (k % 4 == 0) {
+        const uint64_t pl = (((uint64_t)rng() << 32) | rng()) & Mask(A);
+        const uint16_t rn = (uint16_t)(1 + rng() % 65519);
+        llr = Channel(TxBits(pl, rn, 64, A, L, true), 6.0, rng);
+      } else {
+        llr.resize(E);
+        for (auto &v : llr) v = (int16_t)std::max(-30000.0, std::min(30000.0, nz(rng) * 64.0));
+      }
+      for (int order = 0; order <= 2; order++) {
+        nr_pdcch_joint_result_t r;
+        nr_pdcch_joint_solve(m, llr.data(), order, &r);
+        mix(r.payload); mix(r.rnti); mix(r.nid); mix((uint64_t)r.accepted); mix((uint64_t)r.mismatched_bits);
+        mix((uint64_t)r.n_candidates); mix((uint64_t)std::llround(r.corr * 1e9));
+        mix((uint64_t)std::llround(r.threshold * 1e9));
+      }
+    }
+    nr_pdcch_joint_model_free(m);
+  }
+  printf("JOINT GOLDEN HASH = 0x%016llx\n", (unsigned long long)h);
+  EXPECT_EQ(h, UINT64_C(0x745164fa85b81a5b));  // Step 2 replaces 0x0 with the value printed by the UNMODIFIED solver
+}
+
 int main(int argc, char** argv)
 {
   crcTableInit();
