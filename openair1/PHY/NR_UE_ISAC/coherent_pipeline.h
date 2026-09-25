@@ -42,6 +42,9 @@ private:
   std::unique_ptr<CoherentTracker> tracker_;
   bool traffic_open_ = true;   // guarded by mu_
   double last_t_ = 0;          // last CPI air time, for traffic events (guarded by mu_)
+  struct MdHist { double t, R, rr; };
+  std::deque<MdHist> md_hist_;  // recent detections (worker thread only): non-translating micro-Doppler test
+  uint64_t md_suppressed_ = 0;
   std::unique_ptr<Autofocus> af_;
   std::unique_ptr<CudaCoherent> cuda_;   // Task 10: GPU range_doppler()/envelope() when available
   bool cuda_fail_closed_ = false;        // NR_ISAC_REQUIRE_CUDA=1 and no device: skip every CPI

@@ -324,6 +324,40 @@ void CoherentPipeline::process(Job& j)
   if (cuda_) cuda_->refine(D, G, geo, cal, survey);
   else for (Detection& d : D) refine(d, R, G, geo, cal, survey);
   tm[4] = ms_since(s0); s0 = clk::now();
+  // Non-translating micro-Doppler rejection (kinematic consistency). A translating object with bistatic
+  // range rate rr changes its range by rr*dt; a rotating fan (OTA: +-140..200 Hz band, symmetric, next to
+  // the antennas) shows large rr of BOTH signs but stays in one range cell. See the rule below. Memory =
+  // 2 cells / the notch-edge rate: the slowest testable mover's two-cell crossing time. A loitering slow
+  // walker keeps its detections (its own rr is consistent with staying). All derived; count reported.
+  uint32_t md_now = 0;
+  {
+    const double rres = kC / a.b_eff_hz, rho_n = a.lambda_m * a.notch_half_bins * a.dopp_step_hz;
+    const double mem = 2 * rres / std::max(rho_n, 1e-9);
+    while (!md_hist_.empty() && j.t - md_hist_.front().t > mem) md_hist_.pop_front();
+    std::vector<Detection> keep; keep.reserve(D.size());
+    for (Detection& d : D) {
+      double Rb = 0; for (uint32_t i = 0; i < kCh; ++i) Rb += excess_delay_s(d.pos, geo.tx, geo.rx[i]) * kC / kCh;
+      bool still = false;
+      static const bool md_off = std::getenv("COH_MD_OFF") != nullptr;   // A/B diagnostic only
+      // Rotation, not translation: the cell has held non-notch detections of BOTH signs of rr (a blade
+      // approaches and recedes; a translating body has one sign), spanning a time in which a translating
+      // object at this rate would have left the cell by >= 2 cells.
+      // Only in the direct-path range cell (excess bistatic range < c/B): where a fixed rotating scatterer at
+      // the receiver or transmitter site (equipment fans) sits. Elsewhere different objects crossing one
+      // coarse cell with both signs made it drop real targets (synthetic, 13 m cells: drone 39 -> 31 hits).
+      if (!md_off && Rb < rres && std::abs(d.range_rate_mps) > rho_n) {
+        double t_same = 1e300, t_opp = 1e300;
+        for (const MdHist& h : md_hist_)
+          if (std::abs(h.R - Rb) <= rres && std::abs(h.rr) > rho_n) {
+            if ((h.rr > 0) == (d.range_rate_mps > 0)) t_same = std::min(t_same, h.t); else t_opp = std::min(t_opp, h.t);
+          }
+        if (t_same < 1e299 && t_opp < 1e299 && std::abs(d.range_rate_mps) * (j.t - std::min(t_same, t_opp)) >= 2 * rres) still = true;
+      }
+      md_hist_.push_back({j.t, Rb, d.range_rate_mps});
+      if (still) ++md_now; else keep.push_back(d);
+    }
+    D.swap(keep); md_suppressed_ += md_now;
+  }
   if (cfg_.ul_enable)                          // UL illuminators (built, off by default)
     for (const CfrWindow& u : j.ul) {
       if (!u.valid()) continue;
@@ -359,7 +393,7 @@ void CoherentPipeline::process(Job& j)
   rep << "{\"cpi\":" << j.seq << ",\"traffic\":true,\"wall\":" << jnum(std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count()) << ",\"t\":" << jnum(j.t) << ",\"t_cpi_s\":" << jnum(a.t_cpi_s) << ",\"b_eff_hz\":" << jnum(a.b_eff_hz)
       << ",\"range_res_m\":" << jnum(kC / a.b_eff_hz) << ",\"grid_step_m\":" << jnum(G.step) << ",\"n_voxels\":" << G.size()
       << ",\"n_dopp_tested\":" << a.tested_dopp.size() << ",\"rows\":" << j.dl.rows << ",\"gpu\":" << (cuda_ ? "true" : "false")
-      << ",\"lambda_m\":" << jnum(a.lambda_m) << ",\"dopp_step_hz\":" << jnum(a.dopp_step_hz) << ",\"notch_half_bins\":" << a.notch_half_bins << ",\"rows_bad\":" << n_bad
+      << ",\"lambda_m\":" << jnum(a.lambda_m) << ",\"dopp_step_hz\":" << jnum(a.dopp_step_hz) << ",\"notch_half_bins\":" << a.notch_half_bins << ",\"rows_bad\":" << n_bad << ",\"md_suppressed\":" << md_now << ",\"md_suppressed_total\":" << md_suppressed_
       << ",\"static_db\":{\"los\":[" << jnum(st_los[0]) << "," << jnum(st_los[1]) << "," << jnum(st_los[2]) << "," << jnum(st_los[3])
       << "],\"edge\":[" << jnum(st_edge[0]) << "," << jnum(st_edge[1]) << "," << jnum(st_edge[2]) << "," << jnum(st_edge[3])
       << "],\"far\":[" << jnum(st_far[0]) << "," << jnum(st_far[1]) << "," << jnum(st_far[2]) << "," << jnum(st_far[3])

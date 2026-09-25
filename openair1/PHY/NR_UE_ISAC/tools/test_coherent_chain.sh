@@ -13,6 +13,8 @@ C = 299792458.0
 O = sys.argv[1]; tr = json.load(open(f"{O}/truth.json"))
 reps = [json.loads(l) for f in sorted(glob.glob(f"{O}/coherent_reports.*.jsonl")) for l in open(f)]
 trk = [json.loads(l) for f in sorted(glob.glob(f"{O}/coherent_tracks.*.jsonl")) for l in open(f)]
+reps = [r for r in reps if r.get("event") is None]   # traffic events (flow-gate state) carry no CPI
+trk = [r for r in trk if r.get("event") is None]
 coh = [json.loads(l) for f in sorted(glob.glob(f"{O}/coherence.*.jsonl")) for l in open(f)]
 assert len(reps) > 20 and len(trk) == len(reps) and len(coh) == len(reps), (len(reps), len(trk), len(coh))
 done = [r for r in reps if r["skipped_reason"] is None]
