@@ -90,6 +90,7 @@ extern _Atomic long nr_ue_diag_producer_absolute_slot;
 #include "nr_pdcch_discovery_replay.h"
 #include "nr_pdcch_uss_tracker.h"
 #include "nr_pdcch_joint_live.h"
+#include "nr_pdcch_al1_map.h"
 #include <stdio.h>
 #include "nr_polar_gpu.h"                                 // SWEEP GPU BATCH: nr_gpu_polar_load/decode_vec
 
@@ -2411,6 +2412,24 @@ static void nr_pdcch_blind_cand_worker(void *arg)
   completed_task_ans(t->ans);
 }
 
+/* One verified AL1 decode fixes the true mapping only up to the mappings whose AL1 family holds its
+ * REG set. Report how many distinct families remain: 1 means the banked mapping decodes every AL1
+ * candidate; >1 means AL1 coverage is partial until more evidence arrives (resolved by Task 15). */
+static void al1_verify_report(const nr_pdcch_lookahead_geom_t *g, int duration, int cce, uint16_t rnti)
+{
+  const int span = g->freq_domain * 6;
+  const nr_pdcch_al1_map_t m = {(uint8_t)g->reg_bundle_size, (uint8_t)g->interleaver_size, (uint16_t)g->shift_index};
+  uint16_t rs[1][6];
+  if (nr_pdcch_al1_regset(span, duration, m, cce, rs[0]) != 6)
+    return;
+  nr_pdcch_al1_map_t cand[NR_PDCCH_AL1_MAX_MAPS];
+  int n = nr_pdcch_al1_enumerate(span, duration, cand, NR_PDCCH_AL1_MAX_MAPS);
+  n = nr_pdcch_al1_narrow(span, duration, (const uint16_t (*)[6])rs, 1, cand, n);
+  const int fam = nr_pdcch_al1_family_count(span, duration, cand, n);
+  LOG_A(PHY, "SENSING: AL1_VERIFY rnti=0x%04x cce=%d mapping=%d/%d/%d consistent_mappings=%d distinct_al1_families=%d%s\n",
+        rnti, cce, m.bundle, m.interleaver, m.shift, n, fam, fam > 1 ? " (AL1 coverage partial)" : "");
+}
+
 static void nr_pdcch_blind_monitor_process_body(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc);
 void nr_pdcch_blind_monitor_process(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc)
 {
@@ -4620,6 +4639,8 @@ constdiag_done:;
      * prevents all lanes from testing the same AL in an occasion. */
     const uint64_t lane_visit = rank_lane_visit[lane]++;
     uint8_t ln_al_active = ln_als[(lane_visit + (uint64_t)lane) % (uint64_t)ln_nal_all];
+    if (geom.al1_only)
+      ln_al_active = 1; /* AL1 cover lap: the cover is only complete for aggregation level 1 */
     ln_als = &ln_al_active;
     const int ln_nal = 1;
     const int ln_cap_re = (int)(sizeof(s_pdcch_e_rx_lane[lane]) / sizeof(s_pdcch_e_rx_lane[0][0]));
@@ -5003,9 +5024,14 @@ constdiag_done:;
           continue;
         }
         const long mono = source_absolute_slot;
+        nr_pdcch_lookahead_geom_t vg;
+        const bool have_vg = nr_pdcch_blind_lookahead_get(lane, &vg);
         const bool just_verified = nr_pdcch_blind_lookahead_observe(lane,
             cand_task[ti].dl_raw.rnti, mono >= 0 ? (uint32_t)mono : abs_slot, cand_task[ti].dl_raw.payload);
         if (just_verified) {
+          if (have_vg && vg.al1_only && cand_task[ti].L == 1)
+            al1_verify_report(&vg, nr_pdcch_blind_monitor_get_cfg()->coreset_duration, cand_task[ti].cce,
+                              cand_task[ti].dl_raw.rnti);
           retired_lookahead[lane] = true;
           nr_pdcch_blind_monitor_autodiscover_set_dci_length(g_lane_dci_length[lane]);
           /* The lane already ran the same length scorer and fresh-payload verification as the
