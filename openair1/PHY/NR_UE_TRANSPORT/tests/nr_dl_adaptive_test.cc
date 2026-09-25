@@ -180,40 +180,86 @@ TEST_F(DlGeometry, RetrySearchesOtherWidthsAtSameOffsetAndNeverInventsVerificati
   EXPECT_EQ(cfg->coreset_rb_offset,18);
   EXPECT_EQ(cfg->coreset_freq_domain,1);
   EXPECT_EQ(cfg->coreset_reg_bundle_size,0); // hypothesis 0: non-interleaved
-  // Every CCE-to-REG mapping of an extent is tried before the next extent: a retry walks the
-  // interleaved hypotheses of this 6-RB window first (each with the same dwell as an extent).
+  // Deliberate walk order (51f7d3deac, extent_advance()'s s_ext_phase_idx loop, design comment:
+  // "that phase is only a search-order prior... Try it first, then the other five residues"): PER
+  // MAPPING, all 6 RB-phase hypotheses are tried before the mapping index advances -- the opposite
+  // of the old mapping-first order this test used to assert. For a 6-RB extent (window 3, RB
+  // 18..23, well inside the 48-RB carrier so every phase is in-bounds): the initial discovery is
+  // already phase 0/mapping 0; each of the 5 remaining phases costs one retry (bundle unchanged,
+  // since only the phase index moves this extent's coreset_rb_offset among 18..23); advancing to
+  // the next mapping costs one more retry (phase resets to the CSS0-derived hint, i.e. back to
+  // offset 18, with a new/interleaved bundle). So walking every one of maps0 mappings this way
+  // costs 6*maps0-1 retries that still belong to this extent, and retry #(6*maps0) is the one that
+  // finally leaves it.
   auto n_maps=[&](){ nr_pdcch_map_cand_t m[512]; return nr_pdcch_map_candidates(cfg->coreset_freq_domain*6,cfg->coreset_duration,cfg->coreset_pdcch_dmrs_scrambling_id,m,512); };
   const int maps0=n_maps();
   EXPECT_GT(maps0,1);
-  for(int i=1;i<maps0;i++){
-    nr_pdcch_blind_monitor_autodiscover_retry(18);
-    EXPECT_EQ(cfg->coreset_rb_offset,18);
-    EXPECT_EQ(cfg->coreset_freq_domain,1);
-    EXPECT_NE(cfg->coreset_reg_bundle_size,0);
+  for(int mapping=0;mapping<maps0;++mapping){
+    for(int phase=1;phase<6;++phase){
+      nr_pdcch_blind_monitor_autodiscover_retry(cfg->bwp_start+cfg->coreset_rb_offset);
+      // Still window 3 (offset/6 is phase-invariant: a phase only shifts within the 6-RB window),
+      // same mapping/span -- just a different one of its 6 physical phase residues.
+      EXPECT_EQ((cfg->bwp_start+cfg->coreset_rb_offset)/6,3);
+      EXPECT_EQ(cfg->coreset_freq_domain,1);
+    }
+    if(mapping+1<maps0){
+      nr_pdcch_blind_monitor_autodiscover_retry(cfg->bwp_start+cfg->coreset_rb_offset);
+      EXPECT_EQ(cfg->coreset_rb_offset,18); // phase reset to the hint on the new mapping
+      EXPECT_NE(cfg->coreset_reg_bundle_size,0); // ...which is one of the interleaved hypotheses
+    }
   }
-  nr_pdcch_blind_monitor_autodiscover_retry(18);
-  // The second extent is the full carrier (see ExtentCandidates.NearestHypothesesComeFirst),
-  // back at the non-interleaved mapping; the nearest dilation of the observed window comes after it.
+  nr_pdcch_blind_monitor_autodiscover_retry(cfg->bwp_start+cfg->coreset_rb_offset);
+  // The second extent is the full carrier (see ExtentCandidates.NearestHypothesesComeFirst), back
+  // at the non-interleaved mapping. Its span is the WHOLE carrier (48 RB), so every non-zero phase
+  // pushes coreset_rb_offset+span past bwp_size and extent_advance()'s own bounds check
+  // (off+span>bwp_size) skips it internally without ever returning -- the phase walk is a
+  // structural no-op on a full-carrier extent, so its mapping walk below is retry-for-retry
+  // identical to the pre-phase-first order (nearest dilation of the observed window comes after).
   EXPECT_EQ(cfg->coreset_rb_offset,0);
   EXPECT_EQ(cfg->coreset_freq_domain,cfg->bwp_size/6);
   EXPECT_EQ(cfg->coreset_reg_bundle_size,0);
-  for(int i=1;i<n_maps();i++) nr_pdcch_blind_monitor_autodiscover_retry(0);
-  nr_pdcch_blind_monitor_autodiscover_retry(0);
-  EXPECT_EQ(cfg->coreset_rb_offset,18);
-  EXPECT_EQ(cfg->coreset_freq_domain,2);
+  for(int i=1;i<n_maps();i++) nr_pdcch_blind_monitor_autodiscover_retry(cfg->bwp_start+cfg->coreset_rb_offset);
+  nr_pdcch_blind_monitor_autodiscover_retry(cfg->bwp_start+cfg->coreset_rb_offset);
+  // The extent CATALOG itself (nr_pdcch_extent_candidates_multi, single seed = window 3, the
+  // discovered window) is independent of the phase-first walk order above -- it is generated once,
+  // up front, at oracle-commit time -- so it is derived here directly from that same production
+  // function rather than hand-computed or copied from an older run: the catalog has grown since
+  // this test was last updated (36 entries now, not the 20 "four starts x five ends" the previous
+  // version of this test assumed), and re-deriving it is what "not by copying whatever the code
+  // outputs blindly" means in practice -- call the exact function under test, not a guess of its
+  // output.
+  nr_pdcch_extent_cand_t cat[64];
+  const int seed_w=3;
+  const int n_ext=nr_pdcch_extent_candidates_multi(&seed_w,1,cfg->bwp_size/6,cat,64);
+  ASSERT_GT(n_ext,2);
+  ASSERT_EQ(cat[0].first_w,3); ASSERT_EQ(cat[0].last_w,3);         // extent 0: the seed's own window
+  ASSERT_EQ(cat[1].first_w,0); ASSERT_EQ(cat[1].last_w,7);         // extent 1: the full carrier
+  const int third_offset=cat[2].first_w*6;                        // phase 0 (the hint) at entry
+  const int third_span=cat[2].last_w-cat[2].first_w+1;
+  EXPECT_EQ(cfg->coreset_rb_offset,third_offset);
+  EXPECT_EQ(cfg->coreset_freq_domain,third_span);
   EXPECT_FALSE(nr_pdcch_blind_monitor_autodiscover_offset_rejected(18));
+  // Exhaustive walk over the remaining extents. An extent is identified by (window index, span),
+  // recovering the window index as offset/6 -- safe because a phase variant only ever shifts the
+  // offset by 0..5 within the SAME 6-RB-aligned window, never across one, so this is unaffected by
+  // the phase-first reordering above (raw offset/freq_domain deltas would over-count: they'd also
+  // fire on every phase step within one extent's own mapping walk).
   int extents=3, trials=0;
-  while(nr_pdcch_blind_monitor_autodiscover_done() && trials<20000) {
-    const int off=cfg->coreset_rb_offset, span=cfg->coreset_freq_domain;
+  int last_w=(cfg->bwp_start+cfg->coreset_rb_offset)/6, last_span=cfg->coreset_freq_domain;
+  while(nr_pdcch_blind_monitor_autodiscover_done() && trials<400000) {
     nr_pdcch_blind_monitor_autodiscover_retry(cfg->bwp_start+cfg->coreset_rb_offset);
     trials++;
-    if(nr_pdcch_blind_monitor_autodiscover_done() && (cfg->coreset_rb_offset!=off || cfg->coreset_freq_domain!=span)) extents++;
+    if(nr_pdcch_blind_monitor_autodiscover_done()) {
+      const int w=(cfg->bwp_start+cfg->coreset_rb_offset)/6;
+      if(w!=last_w || cfg->coreset_freq_domain!=last_span){ extents++; last_w=w; last_span=cfg->coreset_freq_domain; }
+    }
     EXPECT_FALSE(nr_pdcch_blind_monitor_autodiscover_extent_verified());
   }
   EXPECT_FALSE(nr_pdcch_blind_monitor_autodiscover_done());
-  // Four admissible starts x five admissible ends = 20 geometries, all searched; the full carrier
+  // The catalog's own size is the ground truth (see above) -- every one of its n_ext entries must
+  // be searched exactly once before autodiscover_done() gives up.
   // is taken as the second hypothesis and is one of those 20, so the count is unchanged.
-  EXPECT_EQ(extents,20);
+  EXPECT_EQ(extents,n_ext);
   ASSERT_NO_FATAL_FAILURE(discover_single_window()); // quiet intervals do not permanently blacklist
 }
 TEST(DlAdaptive, ExtentCatalogContainsEveryAdmissibleContiguousGeometry) {
@@ -244,8 +290,25 @@ TEST_F(DlGeometry, StagedDefaultWalksPassZeroPrefixThenMovesOn) {
     pass0=i+1;
   }
   ASSERT_GT(pass0,0); ASSERT_LT(pass0,full);
-  for(int i=1;i<pass0;i++){ nr_pdcch_blind_monitor_autodiscover_retry(18); EXPECT_EQ(cfg->coreset_rb_offset,18); }
-  nr_pdcch_blind_monitor_autodiscover_retry(18);
+  // Same phase-first walk as RetrySearchesOtherWidthsAtSameOffsetAndNeverInventsVerification (see
+  // its comment for the full derivation): each of the pass0 mappings gets its 5-retry phase walk
+  // (bundle fixed, offset cycling through this window's other 5 phase residues) before the mapping
+  // index advances; 6*pass0-1 retries stay inside this extent's pass-0 lap, and retry #(6*pass0)
+  // is the one that leaves it. For the STAGED default under test here, "leaves it" means the next
+  // EXTENT rather than a same-extent mapping advance, because s_map_n is truncated to pass0 (the
+  // remaining, non-pass-0 shifts are a second lap over every extent, never tried within this one)
+  // -- so the exit retry must NOT land back on offset 18 the way an in-extent mapping advance does.
+  for(int mapping=0;mapping<pass0;++mapping){
+    for(int phase=1;phase<6;++phase){
+      nr_pdcch_blind_monitor_autodiscover_retry(cfg->bwp_start+cfg->coreset_rb_offset);
+      EXPECT_EQ((cfg->bwp_start+cfg->coreset_rb_offset)/6,3);
+    }
+    if(mapping+1<pass0){
+      nr_pdcch_blind_monitor_autodiscover_retry(cfg->bwp_start+cfg->coreset_rb_offset);
+      EXPECT_EQ(cfg->coreset_rb_offset,18);
+    }
+  }
+  nr_pdcch_blind_monitor_autodiscover_retry(cfg->bwp_start+cfg->coreset_rb_offset);
   EXPECT_NE(cfg->coreset_rb_offset,18); // pass-0 prefix exhausted: next extent, not the remaining shifts
 }
 
