@@ -91,13 +91,6 @@ static int family_keys(int span_rb, int d, nr_pdcch_al1_map_t m, uint64_t *keys)
 /* Open-addressing set of keys -> dense index. Size is a power of two >= 4x the largest union (1080). */
 #define HSZ 8192
 typedef struct { uint64_t key[HSZ]; int idx[HSZ]; int n; } kset_t;
-static int kset_find(const kset_t *s, uint64_t k)
-{
-  for (uint32_t h = (uint32_t)((k * 0x9E3779B97F4A7C15ULL) >> 51) & (HSZ - 1);; h = (h + 1) & (HSZ - 1)) {
-    if (s->idx[h] < 0) return -1;
-    if (s->key[h] == k) return s->idx[h];
-  }
-}
 static int kset_add(kset_t *s, uint64_t k)
 {
   for (uint32_t h = (uint32_t)((k * 0x9E3779B97F4A7C15ULL) >> 51) & (HSZ - 1);; h = (h + 1) & (HSZ - 1)) {
