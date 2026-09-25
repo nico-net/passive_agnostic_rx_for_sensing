@@ -440,6 +440,60 @@ void nr_passive_mac_report_ta(uint16_t rnti, bool is_ra_rnti, int frame, int slo
   }
 }
 
+/* DM-RS SYMBOL ORACLE measurement of ONE slot on the PRBs [rb0, rb0+nrb): per-symbol coherence with
+ * that symbol's own DM-RS sequence (antenna 0, ~14 symbol FFTs into row 0 of rxdataF). Returns the
+ * DM-RS symbol mask (0 = none seen) and, in *last_sym, the last symbol carrying energy on those PRBs
+ * (-1 = none). Mapping-type agnostic: a type-B grant's first DM-RS on its first symbol is measured
+ * like any other. */
+static uint16_t dmrs_oracle_measure(PHY_VARS_NR_UE *ue, NR_DL_FRAME_PARMS *fp, uint32_t rxdataF_sz,
+                                    c16_t rxdataF[][rxdataF_sz], int nr_slot, int rb0, int nrb, int nscid,
+                                    int *last_sym, double prof[14], double *med_out)
+{
+  const int n_sym = fp->symbols_per_slot;
+  float coh[275];
+  double energy[14] = {0}; /* per symbol, over the grant's PRBs: the allocation END is where it stops */
+  for (int sym = 0; sym < n_sym && sym < 14; sym++) {
+    nr_slot_fep_ant(ue, fp, nr_slot, sym, 0, rxdataF, link_type_dl, 0, ue->common_vars.rxdata);
+    nr_dmrs_prb_coherence(&rxdataF[0][sym * fp->ofdm_symbol_size], fp->ofdm_symbol_size, fp->first_carrier_offset,
+                          fp->N_RB_DL < 275 ? fp->N_RB_DL : 275, n_sym, nr_slot, sym,
+                          nscid, fp->Nid_cell, fp->Ncp == NR_NORMAL, coh);
+    double m = 0;
+    for (int p = rb0; p < rb0 + nrb && p < fp->N_RB_DL; p++) m += coh[p];
+    prof[sym] = m / nrb;
+    const c16_t *sy = &rxdataF[0][sym * fp->ofdm_symbol_size];
+    double e = 0;
+    for (int p = rb0; p < rb0 + nrb && p < fp->N_RB_DL; p++)
+      for (int r = 0; r < 12; r++) {
+        const int k = (fp->first_carrier_offset + p * 12 + r) % fp->ofdm_symbol_size;
+        e += (double)sy[k].r * sy[k].r + (double)sy[k].i * sy[k].i;
+      }
+    energy[sym] = e;
+  }
+  /* Last symbol of the allocation: the last one whose energy on these PRBs is above a quarter of
+   * the strongest (data symbols are within a few dB of each other; an empty symbol is noise). */
+  int last = -1;
+  double emax = 0;
+  for (int sym = 0; sym < n_sym && sym < 14; sym++) if (energy[sym] > emax) emax = energy[sym];
+  for (int sym = 0; sym < n_sym && sym < 14; sym++) if (energy[sym] > 0.25 * emax) last = sym;
+  /* The metric's floor on data symbols is ~0.5 (three random pair-products per PRB), a DM-RS
+   * symbol reads ~0.9 (measured on the rank-4 bed: 0.92 vs 0.47-0.53). Symbols without energy
+   * (the special slot's UL part) read 0 and are left out of the median. */
+  double srt[14]; int ns = 0;
+  for (int sym = 0; sym < n_sym; sym++) if (prof[sym] > 0.05) srt[ns++] = prof[sym];
+  for (int a = 1; a < ns; a++) for (int b = a; b > 0 && srt[b] < srt[b - 1]; b--) { double t = srt[b]; srt[b] = srt[b - 1]; srt[b - 1] = t; }
+  /* LOWER median: a short type-B allocation (L = 2) has two energetic symbols, and the upper median
+   * of two IS the DM-RS symbol, which then can never clear med + 0.18. Unchanged for >= 3 symbols. */
+  const double med = ns ? srt[(ns - 1) / 2] : 1.0;
+  uint16_t mask = 0;
+  for (int sym = 0; sym < n_sym; sym++)
+    if (prof[sym] > 0.68 && prof[sym] > med + 0.18) mask |= (uint16_t)(1u << sym); /* OTA reads 0.75-0.82, floor 0.50 */
+  *last_sym = last;
+  *med_out = med;
+  return mask;
+}
+
+static _Atomic uint64_t g_k0_probes, g_k0_probe_retained, g_k0_probe_retained_max, g_k0_probe_hits;
+
 static void *nr_pdsch_passive_queue_thread(void *arg)
 {
   const int idx = ((consumer_arg_t *)arg)->idx;
@@ -521,8 +575,11 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
       atomic_store_explicit(&g_max_lag, (uint64_t)(lag > 0 ? lag : 0), memory_order_relaxed);
     }
     /* A k0 > 0 hypothesis targets a slot the producer may not have read yet: wait for it (bounded
-     * by 3 slots of wall time) instead of counting it stale. */
-    for (int w = 0; w < 30 && prod < job.absolute_slot; w++) {
+     * by 3 ms of wall time) instead of counting it stale. An observed k0 >= 2 (k0 oracle) targets a
+     * slot further out, so its bound grows by one slot duration per slot beyond k0 = 1; k0 <= 1 is
+     * unchanged. */
+    const int wait_max = 30 + (job.sweep_ticket.k0 > 1 ? (int)(job.sweep_ticket.k0 - 1) * (int)(100 / slots_per_frame) : 0);
+    for (int w = 0; w < wait_max && prod < job.absolute_slot; w++) {
       struct timespec ts = {0, 100000};
       nanosleep(&ts, NULL);
       prod = atomic_load_explicit(&nr_ue_diag_producer_absolute_slot, memory_order_relaxed);
@@ -633,44 +690,11 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
     }
     if (!job.sweep_ticket.settled && job.sweep_ticket.generation && job.freq_alloc.num_rbs >= 4
         && job.sweep_ticket.k0 == 0) {
-      const int n_sym = fp->symbols_per_slot;
-      float coh[275];
-      double prof[14] = {0};
       const int rb0 = job.freq_alloc.first_rb, nrb = job.freq_alloc.num_rbs;
-      double energy[14] = {0}; /* per symbol, over the grant's PRBs: the allocation END is where it stops */
-      for (int sym = 0; sym < n_sym && sym < 14; sym++) {
-        nr_slot_fep_ant(ue, fp, job.nr_slot_rx, sym, 0, rxdataF, link_type_dl, 0, ue->common_vars.rxdata);
-        nr_dmrs_prb_coherence(&rxdataF[0][sym * fp->ofdm_symbol_size], fp->ofdm_symbol_size, fp->first_carrier_offset,
-                              fp->N_RB_DL < 275 ? fp->N_RB_DL : 275, n_sym, job.nr_slot_rx, sym,
-                              job.dlsch_pdu.nscid, fp->Nid_cell, fp->Ncp == NR_NORMAL, coh);
-        double m = 0;
-        for (int p = rb0; p < rb0 + nrb && p < fp->N_RB_DL; p++) m += coh[p];
-        prof[sym] = m / nrb;
-        const c16_t *sy = &rxdataF[0][sym * fp->ofdm_symbol_size];
-        double e = 0;
-        for (int p = rb0; p < rb0 + nrb && p < fp->N_RB_DL; p++)
-          for (int r = 0; r < 12; r++) {
-            const int k = (fp->first_carrier_offset + p * 12 + r) % fp->ofdm_symbol_size;
-            e += (double)sy[k].r * sy[k].r + (double)sy[k].i * sy[k].i;
-          }
-        energy[sym] = e;
-      }
-      /* Last symbol of the allocation: the last one whose energy on these PRBs is above a quarter of
-       * the strongest (data symbols are within a few dB of each other; an empty symbol is noise). */
+      double prof[14] = {0}, med = 1.0;
       int last_sym = -1;
-      double emax = 0;
-      for (int sym = 0; sym < n_sym && sym < 14; sym++) if (energy[sym] > emax) emax = energy[sym];
-      for (int sym = 0; sym < n_sym && sym < 14; sym++) if (energy[sym] > 0.25 * emax) last_sym = sym;
-      /* The metric's floor on data symbols is ~0.5 (three random pair-products per PRB), a DM-RS
-       * symbol reads ~0.9 (measured on the rank-4 bed: 0.92 vs 0.47-0.53). Symbols without energy
-       * (the special slot's UL part) read 0 and are left out of the median. */
-      double srt[14]; int ns = 0;
-      for (int sym = 0; sym < n_sym; sym++) if (prof[sym] > 0.05) srt[ns++] = prof[sym];
-      for (int a = 1; a < ns; a++) for (int b = a; b > 0 && srt[b] < srt[b - 1]; b--) { double t = srt[b]; srt[b] = srt[b - 1]; srt[b - 1] = t; }
-      const double med = ns ? srt[ns / 2] : 1.0;
-      uint16_t mask = 0;
-      for (int sym = 0; sym < n_sym; sym++)
-        if (prof[sym] > 0.68 && prof[sym] > med + 0.18) mask |= (uint16_t)(1u << sym); /* OTA reads 0.75-0.82, floor 0.50 */
+      const uint16_t mask = dmrs_oracle_measure(ue, fp, rxdataF_sz, rxdataF, job.nr_slot_rx, rb0, nrb,
+                                                job.dlsch_pdu.nscid, &last_sym, prof, &med);
       static _Atomic int s_oracle_log = 12;
       if (mask && atomic_load(&s_oracle_log) > 0) {
         atomic_fetch_sub(&s_oracle_log, 1);
@@ -678,8 +702,64 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
               job.nr_slot_rx, rb0, nrb, mask, last_sym, job.sweep_ticket.k0, med, prof[0], prof[1], prof[2], prof[3], prof[4], prof[5], prof[6], prof[7],
               prof[8], prof[9], prof[10], prof[11], prof[12], prof[13]);
       }
-      if (mask)
+      if (mask) {
         nr_pdsch_config_sweep_observe(&job.sweep_ticket, mask, last_sym, job.sweep_ticket.k0);
+      } else {
+        /* k0 ORACLE (Task 14). No DM-RS on this grant's PRBs in the DCI's own slot, so its PDSCH is k0 >= 1
+         * slots later. The catalog only enumerates k0 {0,1} (TS 38.214 allows 0..32); rather than all 33,
+         * probe the following slots and append ONLY the k0 the air shows. Depth K is MEASURED, never
+         * assumed: it is how far the producer has already written past the DCI slot at this instant
+         * (prod - DCI slot), each slot re-checked against the ring's retention (nr_passive_samples_valid)
+         * before and after its FEP. The probe never waits for the producer. slot+1 is probed first: k0 = 1
+         * is already in the catalog, so a hit there costs nothing further. A hit is not proof (another
+         * UE's PDSCH may sit on these PRBs at slot+k), which is why it only ADDS hypotheses -- the TB CRC
+         * still decides -- and never prunes. FEP goes to a scratch buffer: rxdataF carries this job's own
+         * slot, which the decode's per-thread FEP cache may reuse for the rest of the slot group.
+         * ponytail: 1 in 8 eligible jobs probes (up to K x 14 FFTs each); per-context gating if it shows. */
+        static _Atomic uint32_t s_probe_tick;
+        static __thread c16_t *t_probe;
+        if (!t_probe)
+          t_probe = (c16_t *)malloc16_clear((size_t)rxdataF_sz * sizeof(c16_t));
+        const long prod_now = atomic_load_explicit(&nr_ue_diag_producer_absolute_slot, memory_order_relaxed);
+        const long retained = prod_now - (long)job.absolute_slot;
+        if (t_probe && retained >= 1 && (atomic_fetch_add(&s_probe_tick, 1) % 8) == 0) {
+          const long K = retained < 32 ? retained : 32;
+          int hit_k = 0, hit_last = -1;
+          uint16_t hit_mask = 0;
+          for (long k = 1; k <= K && !hit_k; k++) {
+            const long target = (long)job.absolute_slot + k;
+            if (!nr_passive_samples_valid(atomic_load(&nr_ue_diag_producer_absolute_slot), target, slots_per_frame))
+              break;
+            double pf[14] = {0}, md = 1.0;
+            int ls = -1;
+            const uint16_t m = dmrs_oracle_measure(ue, fp, rxdataF_sz, (c16_t(*)[rxdataF_sz])t_probe,
+                                                   (int)((job.nr_slot_rx + k) % slots_per_frame), rb0, nrb,
+                                                   job.dlsch_pdu.nscid, &ls, pf, &md);
+            if (!nr_passive_samples_valid(atomic_load(&nr_ue_diag_producer_absolute_slot), target, slots_per_frame))
+              break; /* overwritten during the FEP: this measurement is not of slot+k */
+            if (m) {
+              hit_k = (int)k;
+              hit_mask = m;
+              hit_last = ls;
+            }
+          }
+          const int added = hit_k >= 2 ? nr_pdsch_config_sweep_add_k0(&job.sweep_ticket, (uint8_t)hit_k) : 0;
+          const uint64_t probes = atomic_fetch_add(&g_k0_probes, 1) + 1;
+          atomic_fetch_add(&g_k0_probe_retained, (uint64_t)retained);
+          uint64_t mx = atomic_load(&g_k0_probe_retained_max);
+          while ((uint64_t)retained > mx && !atomic_compare_exchange_weak(&g_k0_probe_retained_max, &mx, (uint64_t)retained)) {}
+          if (hit_k >= 2)
+            atomic_fetch_add(&g_k0_probe_hits, 1);
+          static _Atomic int s_k0_log = 20;
+          if ((hit_k >= 2 || (probes % 1000) == 1) && atomic_fetch_sub(&s_k0_log, 1) > 0)
+            LOG_A(PHY, "SENSING: K0_PROBE slot=%d rb=%d+%d retained=%ld K=%ld hit_k0=%d mask=0x%x last_sym=%d added=%d "
+                  "(probes=%lu k0>=2 hits=%lu retained mean=%.1f max=%lu)\n",
+                  job.nr_slot_rx, rb0, nrb, retained, K, hit_k, hit_mask, hit_last, added, (unsigned long)probes,
+                  (unsigned long)atomic_load(&g_k0_probe_hits),
+                  (double)atomic_load(&g_k0_probe_retained) / (double)probes,
+                  (unsigned long)atomic_load(&g_k0_probe_retained_max));
+        }
+      }
     }
     nr_pdsch_passive_decode_result_t dec = {0};
     { /* ISAC_PROBE_ALL=1: every job is a first-code-block probe, pinned confs included -- isolates

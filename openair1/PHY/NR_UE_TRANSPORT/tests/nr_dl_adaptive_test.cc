@@ -26,14 +26,16 @@ void nr_pdcch_dmrs_ref(const uint32_t *, c16_t *, unsigned short);
 }
 
 TEST(DlAdaptive, CompleteLegalCatalogAndNoPermanentlyUnfeedableHypotheses) {
-  /* Every legal mapping-A (S,L) of TS 38.214 Table 5.1.2.1-1 (S 0..3, L 3..14, S+L <= 14) x k0 {0,1}:
-   * no curated prefix. */
+  /* Every legal (S,L) of TS 38.214 Table 5.1.2.1-1 for BOTH mapping types (type A S 0..3, L 3..14;
+   * type B S 0..12, L 2..13; S+L <= 14) x k0 {0,1}: no curated prefix. The key is the effective PDU, so
+   * a type-B entry identical to a type-A one is one hypothesis. */
   using Key=std::tuple<int,int,int,int,int>;
   for(int typeA : {0,1}) {
     std::set<Key> expected, actual;
-    for(int S=0;S<=3;S++) for(int L=3;S+L<=14;L++) for(int k0=0;k0<2;k0++)
+    for(int mt=0;mt<2;mt++) for(int S=0;S<=12;S++) for(int L=2;S+L<=14;L++) for(int k0=0;k0<2;k0++)
       for(int add=0;add<4;add++) for(int len=1;len<=2;len++) for(int mcs=0;mcs<3;mcs++) {
-      int mask=nr_pdcch_blind_dmrs_mask(typeA,L,S,0,add,len);
+      if(!nr_pdsch_tda_legal(mt,S,L)) continue;
+      int mask=nr_pdcch_blind_dmrs_mask(typeA,L,S,mt,add,len);
       if(mask>0) expected.emplace(S,L,k0,mask,mcs);
     }
     nr_pdsch_config_sweep_state_t state{};
