@@ -105,6 +105,21 @@ TEST(Al1Map, EveryBundle6MappingSharesTheNonInterleavedFamily) {
   EXPECT_EQ(nr_pdcch_al1_family_count(270, 1, l6.data(), (int)l6.size()), 1);
 }
 
+TEST(Al1Map, CoverSurvivesTheLaneTypeRoundTrip) {
+  // Mirrors al1_cover_for_span() in nr_pdcch_blind_monitor.c: same field order, same widths.
+  struct lane_map { uint8_t bundle; uint8_t interleaver; uint16_t shift; };
+  static_assert(sizeof(lane_map) == sizeof(nr_pdcch_al1_map_t), "layout drift");
+  std::vector<nr_pdcch_al1_map_t> cov(NR_PDCCH_AL1_MAX_COVER);
+  const int nc = nr_pdcch_al1_cover(216, 2, cov.data(), (int)cov.size());
+  ASSERT_EQ(nc, 11);
+  for (int i = 0; i < nc; i++) {
+    const lane_map l = {cov[i].bundle, cov[i].interleaver, cov[i].shift};
+    EXPECT_EQ(l.bundle, cov[i].bundle);
+    EXPECT_EQ(l.interleaver, cov[i].interleaver);
+    EXPECT_EQ(l.shift, cov[i].shift);
+  }
+}
+
 int main(int argc, char **argv)
 {
   testing::InitGoogleTest(&argc, argv);

@@ -941,6 +941,7 @@ void nr_pdcch_blind_monitor_autodiscover_reset(void);
 typedef struct {
   bool valid;             // this lane owns a live candidate this call
   bool fast_length_only;  // bounded bank-length pass; exhaustive lengths follow in the next lap
+  bool al1_only;          // AL1 cover lap: scan aggregation level 1 only (ISAC_AL1_COVER=1)
   int  rb_offset;
   int  freq_domain;       // span, in 6-RB windows
   int  reg_bundle_size;
