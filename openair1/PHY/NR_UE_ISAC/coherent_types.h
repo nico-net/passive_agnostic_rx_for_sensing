@@ -25,6 +25,7 @@ struct CoherentConfig {
   bool long_dwell = false;                   // coherent_long_dwell: slow-target long CPI (coherent_longdwell.h)
   Volume volume;
   double survey_sigma_m = 0.1;               // declared tape accuracy (input, not tuned)
+  double min_track_age_s = 3.0;              // coherent_min_track_age_s: operator rule, a track is shown only once it has lived this long
   double max_speed_mps = 0.0;                // = PipelineConfig::maximum_target_speed_mps
   double false_object_intensity_per_s = 0.0; // = PipelineConfig::false_object_intensity_per_s
   Geometry geometry;                         // surveyed: spatial_rx_positions + tx_pos_*

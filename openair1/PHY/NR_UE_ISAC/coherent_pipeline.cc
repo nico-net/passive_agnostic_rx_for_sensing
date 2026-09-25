@@ -74,6 +74,7 @@ CoherentPipeline::CoherentPipeline(const CoherentConfig& cfg)
   tp.max_speed_mps = cfg.max_speed_mps;
   tp.false_object_intensity_per_s = cfg.false_object_intensity_per_s;
   tp.volume = cfg.volume;
+  tp.min_confirm_age_s = cfg.min_track_age_s;
   for (const Vec3& r : cfg.geometry.rx) tp.array_centroid = tp.array_centroid + r * (1.0 / kCh);
   tp_ = tp;
   tracker_ = std::make_unique<CoherentTracker>(tp);

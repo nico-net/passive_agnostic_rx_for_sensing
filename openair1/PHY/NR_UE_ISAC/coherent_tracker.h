@@ -3,7 +3,10 @@
 #include "coherent_types.h"
 #include <vector>
 namespace nr_isac::coherent {
-struct TrackerParams { double max_speed_mps = 0; double false_object_intensity_per_s = 0; Volume volume; Vec3 array_centroid; };
+struct TrackerParams {
+  double max_speed_mps = 0; double false_object_intensity_per_s = 0; Volume volume; Vec3 array_centroid;
+  double min_confirm_age_s = 0;   // a track is confirmed only once it has lived this long (operator rule; 0 = off)
+};
 std::vector<int> hungarian(const std::vector<std::vector<double>>& cost);
 /** The bistatic range-rate band a scan tests (|rate| in [lo, hi], m/s, illuminator tx): a track whose
  * predicted rate lies outside it could not have been detected, so its miss is weighted by the probability

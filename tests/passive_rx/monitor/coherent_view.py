@@ -43,7 +43,8 @@ class CoherentView:
         with self.lock:
             if r.get("event") == "traffic": return
             self.tracks = r; t = r.get("t", 0)
-            for x in r.get("tracks", []): self.trails[x["id"]].append([t] + x["p"])
+            for x in r.get("tracks", []):   # only confirmed tracks are shown (tentative ones may be ghosts)
+                if x.get("confirmed"): self.trails[x["id"]].append([t] + x["p"])
             for k in list(self.trails):
                 while self.trails[k] and t - self.trails[k][0][0] > 20.0: self.trails[k].popleft()
                 if not self.trails[k]: del self.trails[k]
