@@ -203,13 +203,13 @@ void CoherentPipeline::process(Job& j)
   {
     auto med = [](std::vector<double> v) { std::nth_element(v.begin(), v.begin() + v.size() / 2, v.end()); return v[v.size() / 2]; };
     std::array<double, kCh> res{};
-    for (uint32_t i = 0; i < kCh; ++i) res[i] = los_resid_[i].empty() ? 0.0 : med(los_resid_[i]);
+    for (uint32_t i = 0; i < kCh; ++i) res[i] = los_resid_[i].empty() ? 0.0 : los_resid_[i].median();
     std::vector<double> off;
     for (uint32_t i = 0; i < kCh; ++i) if (L.found[i]) off.push_back(L.delay_s[i] - geo_los[i] - res[i]);
     if (off.size() >= 2) {
       const double o = med(off);
       for (uint32_t i = 0; i < kCh; ++i) if (L.found[i]) {
-        los_resid_[i].push_back(L.delay_s[i] - geo_los[i] - o);
+        los_resid_[i].push(L.delay_s[i] - geo_los[i] - o);
         L.delay_s[i] = geo_los[i] + o + res[i];
       }
     }

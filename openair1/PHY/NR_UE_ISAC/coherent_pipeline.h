@@ -9,7 +9,9 @@
 #include <condition_variable>
 #include <deque>
 #include <memory>
+#include <functional>
 #include <mutex>
+#include <queue>
 #include <thread>
 
 namespace nr_isac::coherent {
@@ -37,7 +39,21 @@ private:
   void write_coherence(uint64_t seq, double t, const Calibration& cal, const std::array<double, kCh>& los_delay_s, bool skipped);
   CoherentConfig cfg_;
   Calibrator cal_;
-  std::array<std::vector<double>, kCh> los_resid_;   // per-channel LOS delay residual history (s)
+  /** Cumulative median in O(log n) per push, O(1) per read: value = sorted[n/2] of everything pushed
+   *  (the same element std::nth_element at n/2 picks). The LOS residual history grows for the whole
+   *  run; copying + nth_element over it every CPI cost O(n) and broke the CPI budget on long runs. */
+  struct RunningMedian {
+    std::priority_queue<double> lo;                                              // smallest floor(n/2)
+    std::priority_queue<double, std::vector<double>, std::greater<double>> hi;   // the rest; top = median
+    void push(double x) {
+      if (!hi.empty() && x < hi.top()) lo.push(x); else hi.push(x);
+      if (lo.size() > hi.size()) { hi.push(lo.top()); lo.pop(); }
+      else if (hi.size() > lo.size() + 1) { lo.push(hi.top()); hi.pop(); }
+    }
+    bool empty() const { return hi.empty(); }
+    double median() const { return hi.top(); }
+  };
+  std::array<RunningMedian, kCh> los_resid_;   // per-channel LOS delay residual history (s)
   TrackerParams tp_;
   std::unique_ptr<CoherentTracker> tracker_;
   bool traffic_open_ = true;   // guarded by mu_
