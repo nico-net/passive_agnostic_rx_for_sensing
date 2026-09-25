@@ -101,6 +101,14 @@ struct Track {
   uint32_t hits = 0, misses = 0;
   double age_s = 0;
   bool confirmed = false;
+  // Kinematic consistency (coherent_tracker.cc): Doppler-implied bistatic path length since the
+  // reference detection vs the bistatic range actually travelled, plus what a suppression cell needs.
+  struct Kin {
+    bool ref = false; Vec3 p0; std::array<double, 9> c0{};   // reference detection (position, cov)
+    double t_prev = 0, t0 = 0;                               // last rate-bearing hit, first hit
+    double path = 0, path_var = 0;                           // sum |rr| dt and its variance
+    uint32_t n = 0; Vec3 sum; std::array<double, 9> sum_xx{};  // hit positions since the reference
+  } kin;
 };
 
 inline double dist(const Vec3& a, const Vec3& b) { return norm(a - b); }

@@ -402,12 +402,14 @@ void CoherentPipeline::process(Job& j)
   tm[6] = ms_since(s0); s0 = clk::now();
   std::vector<int> assoc;
   std::vector<Track> T;
+  std::vector<CoherentTracker::SuppressionCell> kin_cells; uint64_t kin_deleted = 0, births_blocked = 0;
   {
     // With the long dwell on, a short scan tests |rate| > the notch edge only: a slow track's miss here
     // is not evidence (RateBand). Off: the whole axis, as before.
     const RateBand band{a.lambda_m * a.notch_half_bins * a.dopp_step_hz, 2 * a.v_max_mps, geo.tx};
     std::lock_guard<std::mutex> l(trk_mu_);
     T = tracker_->step(j.t, a.t_cpi_s, D, &assoc, long_ ? &band : nullptr);
+    kin_cells = tracker_->suppression_cells(); kin_deleted = tracker_->kin_deleted(); births_blocked = tracker_->births_blocked();
   }
   for (size_t k = 0; k < D.size(); ++k)
     if (assoc[k] >= 0 && T[(size_t)assoc[k]].confirmed && D[k].illuminator == 0) af_->add(D[k], geo);
@@ -469,6 +471,9 @@ void CoherentPipeline::process(Job& j)
        << "," << jnum(std::sqrt(x.P[7])) << "," << jnum(std::sqrt(x.P[14])) << "],\"pe\":" << jnum(1 / (1 + std::exp(-x.llr)))
        << ",\"hits\":" << x.hits << ",\"age\":" << jnum(x.age_s) << ",\"confirmed\":" << (x.confirmed ? "true" : "false") << "}";
   }
+  // Kinematic consistency (coherent_tracker.cc): places of non-translating scatterers that block births.
+  tr << "],\"kin_deleted_total\":" << kin_deleted << ",\"births_blocked_total\":" << births_blocked << ",\"suppression_cells\":[";
+  for (size_t k = 0; k < kin_cells.size(); ++k) tr << (k ? "," : "") << jvec(kin_cells[k].pos);
   tr << "]}";
   tracks_.write_line(tr.str());
   write_coherence(j.seq, j.t, cal, L.delay_s, false);

@@ -252,6 +252,30 @@ int main() {
     require(tc2.size() == 1 && assoc[0] == 0 && std::abs(tc2[0].x[0] - 3.075) < 0.15, "in-sequence scans continue after it");
     std::printf("long dwell tracker: band keeps static track (%zu, %u hits), retrodicted x %.3f\n", ta->size(), (*ta)[0].hits, tc[0].x[0]);
   }
+  // Kinematic consistency: a scatterer whose Doppler says |rr| = 5 m/s (alternating sign, like a fan
+  // blade or direct-path residue) but whose position never moves is deleted, blocks births at its place,
+  // and its cell expires after a silence its own hit rate makes a 1 % event; a translating target with
+  // the same |rr| is untouched.
+  {
+    TrackerParams tk; tk.max_speed_mps = 50; tk.false_object_intensity_per_s = 1; tk.array_centroid = {0, 0, 1};
+    const Vec3 tx{30, 0, 5}; const double T = 0.075;
+    std::mt19937 rk(7); std::normal_distribution<double> nk(0, 0.5);
+    auto mk = [&](Vec3 p, double rr) { Detection d = det(Vec3{p.x + nk(rk), p.y + nk(rk), p.z + nk(rk)}, 0.5); d.tx = tx; d.range_rate_mps = rr; d.range_rate_sigma = 0.3; return d; };
+    CoherentTracker kf(tk); int k = 0; size_t max_cells = 0;
+    for (; k < 200; ++k) { kf.step(k * T, T, {mk(Vec3{5, 5, 1}, (k % 2 ? 5.0 : -5.0))}); max_cells = std::max(max_cells, kf.suppression_cells().size()); }
+    require(kf.kin_deleted() >= 1 && max_cells >= 1 && kf.births_blocked() > 0, "non-translating scatterer deleted and its place blocks births");
+    int live = 0; for (; k < 260; ++k) live = (int)kf.step(k * T, T, {}).size();
+    require(kf.suppression_cells().empty() && live == 0, "cell expires after a 1 % silence");
+    std::printf("kinematic: deleted %llu, births blocked %llu, cell expired\n", (unsigned long long)kf.kin_deleted(), (unsigned long long)kf.births_blocked());
+    CoherentTracker kg(tk); const Vec3 v{-2.0, 3.0, 0}; int conf = 0;
+    auto R = [&](const Vec3& x) { return dist(x, tx) + dist(x, tk.array_centroid); };
+    for (int i = 0; i < 200; ++i) {
+      const Vec3 p{5 + v.x * i * T, 5 + v.y * i * T, 1};
+      const Vec3 p2{p.x + v.x * 1e-3, p.y + v.y * 1e-3, 1};
+      for (const Track& t : kg.step(i * T, T, {mk(p, (R(p2) - R(p)) / 1e-3)})) conf += t.confirmed;
+    }
+    require(kg.kin_deleted() == 0 && conf > 150, "a translating target is never kinematically deleted");
+  }
   std::puts("coherent_tracker_test: PASS");
   return 0;
 }

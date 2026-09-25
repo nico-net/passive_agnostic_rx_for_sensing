@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: OAI-Public-License-1.1 */
 #include "coherent_tracker.h"
+#include "robust_stats.h"
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -167,6 +168,53 @@ void CoherentTracker::update_rate(Track& t, const Detection& d) const
   t.P = Pn; symmetrize(t);
 }
 
+// Kinematic consistency. A track's Doppler says how far it travelled in bistatic range: the path length
+// L = sum |rr| dt since its reference detection. A translating scatterer's measured bistatic range
+// changes by about that much; a non-translating one (a fan blade, a vibrating object, direct-path
+// residue whose Doppler alternates in sign) accumulates L while its range stays put. When L exceeds the
+// travelled |dR| by the one-sided, family-wise 1 % bound of their combined uncertainty (both positions' covariances
+// projected on the bistatic gradient, and every |rr| dt's own variance) the track is deleted and the
+// place becomes a suppression cell that blocks births. A track that has shown a significant real
+// translation restarts its reference, so a long real track is never judged against its birthplace.
+void CoherentTracker::kin_hit(Track& t, const Detection& d, double t_s)
+{
+  Track::Kin& k = t.kin;
+  const std::array<double, 9> C = cov_of(d);
+  auto R = [&](const Vec3& x) { return norm(x - d.tx) + norm(x - p_.array_centroid); };
+  auto unit = [](const Vec3& v) { const double n = norm(v); return n > 0 ? v * (1.0 / n) : Vec3{}; };   // at a node: no direction
+  auto grad = [&](const Vec3& x) { return unit(x - d.tx) + unit(x - p_.array_centroid); };
+  auto quad = [](const Vec3& h, const std::array<double, 9>& c) {
+    double s = 0; for (int i = 0; i < 3; ++i) for (int j = 0; j < 3; ++j) s += h[i] * c[i * 3 + j] * h[j]; return s; };
+  auto add = [&](const Vec3& x) { ++k.n; k.sum = k.sum + x; for (int i = 0; i < 3; ++i) for (int j = 0; j < 3; ++j) k.sum_xx[i * 3 + j] += x[i] * x[j]; };
+  auto reset = [&] {
+    k = Track::Kin{}; k.ref = true; k.p0 = d.pos; k.c0 = C; k.t_prev = k.t0 = t_s; add(d.pos);
+  };
+  if (!k.ref) { reset(); return; }
+  const double dt = t_s - k.t_prev;
+  if (std::isfinite(d.range_rate_sigma) && d.range_rate_sigma > 0 && dt > 0) {   // out-of-sequence scans add no path
+    k.path += std::abs(d.range_rate_mps) * dt; k.path_var += d.range_rate_sigma * d.range_rate_sigma * dt * dt; k.t_prev = t_s;
+  }
+  add(d.pos);
+  const double dR = R(d.pos) - R(k.p0);
+  const double var = quad(grad(k.p0), k.c0) + quad(grad(d.pos), C) + k.path_var;
+  if (!(var > 0)) return;
+  // One-sided, family-wise 1 % over every test this segment has made (Bonferroni over its k.n - 1
+  // tests): testing at 1 % per hit would falsely delete about one long real track in every hundred hits.
+  const double kZ1 = normal_inverse_cdf(1.0 - 0.01 / std::max(1u, k.n - 1));
+  const double s = std::sqrt(var);
+  if (k.path - std::abs(dR) > kZ1 * s) {
+    SuppressionCell c; c.n = k.n; c.t_first = k.t0; c.t_last = t_s;
+    const double n = k.n;
+    c.pos = k.sum * (1.0 / n);
+    for (int i = 0; i < 3; ++i) for (int j = 0; j < 3; ++j)   // sample scatter of the scatterer's detections
+      c.cov[i * 3 + j] = (k.sum_xx[i * 3 + j] - n * c.pos[i] * c.pos[j]) / std::max(1.0, n - 1);
+    cells_.push_back(c); ++kin_deleted_;
+    t.llr = -std::numeric_limits<double>::infinity();
+    return;
+  }
+  if (std::abs(dR) > kZ1 * s) reset();   // significant real translation: start a new test segment
+}
+
 const std::vector<Track>& CoherentTracker::step(double t_s, double t_cpi_s, const std::vector<Detection>& dets, std::vector<int>* assoc,
                                                 const RateBand* band)
 {
@@ -174,6 +222,12 @@ const std::vector<Track>& CoherentTracker::step(double t_s, double t_cpi_s, cons
   const double dt = (last_t_ < 0) ? t_cpi_s : (lag > 0 ? -lag : t_s - last_t_);
   if (!(lag > 0)) last_t_ = t_s;
   for (Track& t : tracks_) predict(t, dt);
+  // Suppression cells expire when the silence since their last hit is a 1 % event under their own
+  // Poisson hit rate (a fan switched off, furniture moved): no tuned lifetime.
+  cells_.erase(std::remove_if(cells_.begin(), cells_.end(), [&](const SuppressionCell& c) {
+    const double lam = (c.n > 1 ? c.n - 1.0 : 1.0) / std::max(c.t_last - c.t_first, t_cpi_s);
+    return (last_t_ - c.t_last) * lam > std::log(100.0);
+  }), cells_.end());
   // P(track's predicted bistatic rate inside the scan's tested band), Gaussian predictive rate.
   auto p_vis = [&](const Track& t) {
     if (!band) return 1.0;
@@ -225,6 +279,7 @@ const std::vector<Track>& CoherentTracker::step(double t_s, double t_cpi_s, cons
       t.llr += std::log(std::max(1e-300, pd * like / clutter_density(d, t.id)));
       double nis = 0; update_position(t, d, &nis); update_rate(t, d);
       t.nis_sum += nis; ++t.nis_n; ++t.hits;
+      kin_hit(t, d, t_s);
       // Covariance matching (Mehra): q tracks the running mean NIS toward its theoretical value of
       // 3 (chi2_3 mean at correct sizing), scaled from the declared q0 seed. Absolute, not
       // incremental -- no clamp, no first-hit special case needed, since nis_n>=1 is guaranteed
@@ -239,7 +294,7 @@ const std::vector<Track>& CoherentTracker::step(double t_s, double t_cpi_s, cons
     // The volume floor is the ground: a hard physical constraint (estimate projection onto z >= z0,
     // no velocity into it). The other faces only bound surveillance, so they are not projected.
     if (t.x[2] < V.z0) { t.x[2] = V.z0; t.x[5] = std::max(0.0, t.x[5]); }
-    if (!t.confirmed && t.llr >= kConfirm) t.confirmed = true;
+    if (!t.confirmed && t.llr >= kConfirm) t.confirmed = true;   // (a kinematic deletion set llr = -inf)
     // SPRT restart convention: a confirmed track's evidence is capped at the confirm threshold, so a
     // departed target is deleted after exactly kConfirm - kDelete of miss evidence, not after all the
     // hits it banked (100 hits at ~+5 each would coast ~40 s).
@@ -257,11 +312,22 @@ const std::vector<Track>& CoherentTracker::step(double t_s, double t_cpi_s, cons
   tracks_.erase(std::remove_if(tracks_.begin(), tracks_.end(), [](const Track& t) { return t.llr <= kDelete; }), tracks_.end());
   if (assoc) { assoc->assign(dets.size(), -1); for (size_t j = 0; j < pre_erase_assoc.size(); ++j) if (pre_erase_assoc[j] >= 0) (*assoc)[j] = old_to_new[(size_t)pre_erase_assoc[j]]; }
   for (size_t j = 0; j < dets.size(); ++j) if (!used[j]) {
+    // No birth inside a suppression cell (99 % gate of cell scatter + this detection's covariance).
+    bool blocked = false;
+    for (SuppressionCell& c : cells_) {
+      std::array<double, 9> S = cov_of(dets[j]); for (int k = 0; k < 9; ++k) S[k] += c.cov[k];
+      double Si[9], det;
+      if (!inv3(S.data(), Si, &det)) continue;
+      const double nu[3] = {dets[j].pos.x - c.pos.x, dets[j].pos.y - c.pos.y, dets[j].pos.z - c.pos.z};
+      double q = 0; for (int r = 0; r < 3; ++r) for (int k = 0; k < 3; ++k) q += nu[r] * Si[r * 3 + k] * nu[k];
+      if (q <= kGate3) { blocked = true; ++c.n; c.t_last = std::max(c.t_last, t_s); break; }
+    }
+    if (blocked) { ++births_blocked_; continue; }
     Track t; t.id = next_id_++; t.q = q0;
     t.x = {dets[j].pos.x, dets[j].pos.y, dets[j].pos.z, 0, 0, 0};
     t.P.fill(0); P(t, 0, 0) = dets[j].pos_sigma.x * dets[j].pos_sigma.x; P(t, 1, 1) = dets[j].pos_sigma.y * dets[j].pos_sigma.y;
     P(t, 2, 2) = dets[j].pos_sigma.z * dets[j].pos_sigma.z; P(t, 3, 3) = P(t, 4, 4) = P(t, 5, 5) = q0;
-    t.hits = 1; owner[j] = t.id; tracks_.push_back(t);
+    t.hits = 1; owner[j] = t.id; kin_hit(t, dets[j], t_s); tracks_.push_back(t);
   }
   // ponytail: one pooled clutter estimate over short and long-dwell scans (each passes the time it
   // partitions, t_cpi or cadence, so time is counted twice and the rate is their average); keep
