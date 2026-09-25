@@ -260,12 +260,22 @@ int nr_csirs_blind_init(nr_csirs_blind_state_t *st, uint16_t n_rb, uint16_t scra
   }
   memset(st, 0, sizeof(*st));
   st->confirmed = -1;
+  st->pinned = -1;
+  st->pin_left = 0;
   const int n = nr_csirs_blind_enumerate(st->cand, NR_CSIRS_BLIND_MAX_CAND, n_rb, scramb_id);
   if (n <= 0) {
     return 0;
   }
   st->n = n;
   return n;
+}
+
+void nr_csirs_blind_pin(nr_csirs_blind_state_t *st, int idx, uint32_t budget)
+{
+  if (st == NULL || idx < 0 || idx >= st->n)
+    return;
+  st->pinned = idx;
+  st->pin_left = budget;
 }
 
 int nr_csirs_blind_next(nr_csirs_blind_state_t *st)
@@ -275,6 +285,10 @@ int nr_csirs_blind_next(nr_csirs_blind_state_t *st)
   }
   if (st->confirmed >= 0) {
     return st->confirmed;
+  }
+  if (st->pin_left > 0 && st->pinned >= 0 && st->pinned < st->n) {
+    st->pin_left--;
+    return st->pinned;
   }
   const int idx = st->cursor;
   st->cursor = (st->cursor + 1) % st->n;

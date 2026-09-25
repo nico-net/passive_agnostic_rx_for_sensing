@@ -164,6 +164,8 @@ typedef struct {
   int                  n;
   int                  cursor;
   int                  confirmed;   ///< index of a resolved resource, or -1
+  int                  pinned;      ///< candidate served on every next() while pin_left > 0, or -1
+  uint32_t             pin_left;    ///< remaining pinned next() calls
   uint16_t             period, offset;
 } nr_csirs_blind_state_t;
 
@@ -190,6 +192,14 @@ int nr_csirs_blind_init(nr_csirs_blind_state_t *st, uint16_t n_rb, uint16_t scra
 /** Which candidate to test in this slot. Round-robin, so every candidate sees statistically the
  * same channel -- the same reason Technique D interleaves per grant. Returns -1 when empty. */
 int nr_csirs_blind_next(nr_csirs_blind_state_t *st);
+
+/** Serve candidate idx on EVERY next() call for up to `budget` calls (or until confirmed), then resume
+ *  round-robin. Round-robin scores a candidate only when its turn lands on a CSI-RS slot -- about once
+ *  per n*period calls -- so a candidate the scramblingID sweep is working on, or has just solved,
+ *  would otherwise wait minutes for the hits it needs. */
+void nr_csirs_blind_pin(nr_csirs_blind_state_t *st, int idx, uint32_t budget);
+#define NR_CSIRS_BLIND_PIN_SWEEP_CALLS   (32 * 640)  /* 1024 ids / 32 per aligned visit x longest period */
+#define NR_CSIRS_BLIND_PIN_CONFIRM_CALLS (4 * 640)   /* > CSIRS_MIN_HITS periods at the longest period */
 
 /** Record the correlation a candidate scored in `absolute_slot`.
  * `rho_null` is the median score of the OTHER candidates tested recently: the detection bar is

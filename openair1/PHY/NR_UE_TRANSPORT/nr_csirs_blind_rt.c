@@ -383,11 +383,14 @@ void nr_csirs_blind_rt_slot(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot
         g_id_pin = i;
       }
     }
-    if (g_id_pin >= 0)
+    if (g_id_pin >= 0) {
       LOG_A(PHY, "SENSING: CSIRS_BLIND IDSWEEP pinned to row%u fd%u l%u (mean epr=%.2f over %u) -- "
                  "sweeping 1024 scramblingIDs on THAT candidate only\n",
             g_st.cand[g_id_pin].row, g_st.cand[g_id_pin].freq_domain, g_st.cand[g_id_pin].symb_l0,
             best_m, g_epr_n[g_id_pin]);
+      /* The sweep advances only on visits that land on a CSI-RS slot; visit it every call. */
+      nr_csirs_blind_pin(&g_st, g_id_pin, NR_CSIRS_BLIND_PIN_SWEEP_CALLS);
+    }
   }
   /* SLOT-INDEX SWEEP (ISAC_CSIRS_BLIND_SLOTSWEEP=1). MEASURED 2026-09-19 on Swisscom PCI 382: a
    * COMPLETE 1024-value scramblingID sweep, pinned to one candidate and scored with the
@@ -472,6 +475,7 @@ void nr_csirs_blind_rt_slot(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot
            * (feed() + nr_csirs_blind_infer_period()) take over on the next visit rather than
            * duplicating that logic here. */
           g_st.cand[g_id_pin].scramb_id = trial.scramb_id;
+          nr_csirs_blind_pin(&g_st, g_id_pin, NR_CSIRS_BLIND_PIN_CONFIRM_CALLS);
           LOG_A(PHY,
                 "SENSING: CSIRS_BLIND IDSWEEP SOLVED row%u fd%u l%u scramb_id=%u z=%.1f (PCI=%d, "
                 "epr=%.2f) -- csirs_monitor scramblingID is NOT the PCI; candidate corrected, "
