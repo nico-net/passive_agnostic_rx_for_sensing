@@ -38,7 +38,7 @@ class CoherentView:
                 if not r["traffic"]: self.trails.clear(); self.tracks = {"t": r.get("t"), "tracks": []}
                 return
             if r.get("topview") is not None or self.full is None: self.full = r
-            self.compact.append({k: r.get(k) for k in ("cpi", "t", "detections", "timing_ms", "t_cpi_s", "stats", "gpu", "range_res_m", "skipped_reason")})
+            self.compact.append({k: r.get(k) for k in ("cpi", "t", "detections", "timing_ms", "t_cpi_s", "stats", "gpu", "range_res_m", "skipped_reason", "dwell")})
     def _trk(self, r):
         with self.lock:
             if r.get("event") == "traffic": return
@@ -51,7 +51,7 @@ class CoherentView:
         with self.lock: self.coh.append(r)
     def snapshot(self):
         with self.lock:
-            last = self.compact[-1] if self.compact else {}
+            last = next((r for r in reversed(self.compact) if r.get("dwell") != "long"), {})   # health = the short CPI
             health = {"gpu": last.get("gpu"), "total_ms": (last.get("timing_ms") or {}).get("total"),
                       "cpi_ms": (last.get("t_cpi_s") or 0) * 1e3, "stats": last.get("stats")}
             reps = list(self.compact)

@@ -172,6 +172,38 @@ int main() {
     std::printf("llr clamp: deleted after %d missed CPIs (gap %.3f, evidence %.3f)\n", misses, gap, ev);
     require(misses <= 5, "departed target deleted within a few CPIs");
   }
+  // Long dwell (coherent_longdwell.h): (1) RateBand -- misses of a scan that does not test a track's
+  // rate are not evidence: a confirmed static track survives 20 such misses, the same misses with no band
+  // delete it. (2) Out-of-sequence scan: a detection time-stamped at an earlier time associates with a
+  // moving track (retrodiction) and the track is returned at the latest scan's time.
+  {
+    TrackerParams tp; tp.max_speed_mps = 5; tp.false_object_intensity_per_s = 1;
+    const double T = 0.075; std::mt19937 r3(5); std::normal_distribution<double> nn(0, 0.05);
+    CoherentTracker a(tp), b(tp);
+    int k = 0;
+    for (; k < 40; ++k) { const Detection d = det(Vec3{3 + nn(r3), 4 + nn(r3), 1 + nn(r3)}, 0.1); a.step(k * T, T, {d}); b.step(k * T, T, {d}); }
+    // Long-dwell cadence: 6 short scans (band |rate| in [1, 10] m/s, target absent: it is static) then one
+    // long scan (band |rate| <= 1 m/s) that sees it. With the bands the track lives; without, the short
+    // misses kill it between long hits.
+    const RateBand sb{1.0, 10.0, Vec3{30, 0, 5}}, lb{0.0, 1.0, Vec3{30, 0, 5}};
+    const std::vector<Track>* ta = nullptr; const std::vector<Track>* tb = nullptr;
+    for (int cyc = 0; cyc < 30; ++cyc) {
+      for (int m = 0; m < 6; ++m, ++k) { ta = &a.step(k * T, T, {}, nullptr, &sb); tb = &b.step(k * T, T, {}); }
+      const Detection d = det(Vec3{3 + nn(r3), 4 + nn(r3), 1 + nn(r3)}, 0.1);
+      ta = &a.step(k * T, T, {d}, nullptr, &lb); tb = &b.step(k * T, T, {d}); ++k;
+    }
+    require(ta->size() == 1 && (*ta)[0].confirmed, "rate band: a static track survives the short scans' misses between long hits");
+    require(std::none_of(tb->begin(), tb->end(), [](const Track& t) { return t.hits > 40; }), "no band: the same misses delete it");
+    CoherentTracker c(tp);
+    for (k = 0; k <= 40; ++k) c.step(k * T, T, {det(Vec3{1.0 * k * T + nn(r3), 0, 1}, 0.1)});   // 1 m/s along x, last scan t=3.0
+    std::vector<int> assoc;
+    const std::vector<Track>& tc = c.step(2.6, 0.4, {det(Vec3{2.6, 0, 1}, 0.1)}, &assoc);          // out of sequence
+    require(assoc.size() == 1 && assoc[0] >= 0, "out-of-sequence detection associates (retrodiction)");
+    require(tc.size() == 1 && std::abs(tc[0].x[0] - 3.0) < 0.15, "track returned at the latest scan time");
+    const std::vector<Track>& tc2 = c.step(3.075, T, {det(Vec3{3.075, 0, 1}, 0.1)}, &assoc);
+    require(tc2.size() == 1 && assoc[0] == 0 && std::abs(tc2[0].x[0] - 3.075) < 0.15, "in-sequence scans continue after it");
+    std::printf("long dwell tracker: band keeps static track (%zu, %u hits), retrodicted x %.3f\n", ta->size(), (*ta)[0].hits, tc[0].x[0]);
+  }
   std::puts("coherent_tracker_test: PASS");
   return 0;
 }

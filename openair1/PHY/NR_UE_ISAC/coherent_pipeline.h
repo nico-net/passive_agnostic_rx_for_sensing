@@ -3,6 +3,7 @@
 #include "coherent_autofocus.h"
 #include "coherent_core.h"
 #include "coherent_cuda.h"
+#include "coherent_longdwell.h"
 #include "coherent_report.h"
 #include "coherent_tracker.h"
 #include <chrono>
@@ -39,7 +40,8 @@ private:
   Calibrator cal_;
   std::array<std::vector<double>, kCh> los_resid_;   // per-channel LOS delay residual history (s)
   TrackerParams tp_;
-  std::unique_ptr<CoherentTracker> tracker_;
+  std::unique_ptr<CoherentTracker> tracker_;   // guarded by trk_mu_ (the long dwell steps it from its own thread)
+  std::mutex trk_mu_;
   bool traffic_open_ = true;   // guarded by mu_
   double last_t_ = 0;          // last CPI air time, for traffic events (guarded by mu_)
   std::unique_ptr<Autofocus> af_;
@@ -52,6 +54,8 @@ private:
   bool stop_ = false;
   CoherentStats st_;
   std::chrono::steady_clock::time_point last_image_{};
+  void long_result(LongResult& r);          // long-dwell sink (runs on the long-dwell thread)
+  std::unique_ptr<LongDwellRunner> long_;   // coherent_long_dwell; destroyed before the sinks/tracker it uses
   std::thread worker_;                      // last: started after every member above exists
 };
 

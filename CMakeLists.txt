@@ -1119,6 +1119,7 @@ set(NR_UE_ISAC_SRC
   ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/coherent_autofocus.cc
   ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/coherent_ul.cc
   ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/coherent_pipeline.cc
+  ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/coherent_longdwell.cc
   )
 if(ENABLE_CHANNEL_SIM_CUDA)
   list(APPEND NR_UE_ISAC_SRC
@@ -2454,6 +2455,11 @@ if(ENABLE_TESTS)
     target_link_libraries(test_nr_isac_coherent_ul PRIVATE NR_UE_ISAC)
     add_dependencies(tests test_nr_isac_coherent_ul)
     add_test(NAME test_nr_isac_coherent_ul COMMAND ./test_nr_isac_coherent_ul)
+    add_executable(test_nr_isac_coherent_longdwell ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/tests/coherent_longdwell_test.cc)
+    target_include_directories(test_nr_isac_coherent_longdwell PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_ISAC)
+    target_link_libraries(test_nr_isac_coherent_longdwell PRIVATE NR_UE_ISAC)
+    add_dependencies(tests test_nr_isac_coherent_longdwell)
+    add_test(NAME test_nr_isac_coherent_longdwell COMMAND ./test_nr_isac_coherent_longdwell)
     add_executable(test_nr_isac_coherent_focus ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/tests/coherent_focus_test.cc)
     target_include_directories(test_nr_isac_coherent_focus PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_ISAC)
     target_link_libraries(test_nr_isac_coherent_focus PRIVATE NR_UE_ISAC)

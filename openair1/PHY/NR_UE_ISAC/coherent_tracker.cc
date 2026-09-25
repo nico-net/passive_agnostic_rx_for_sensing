@@ -93,7 +93,9 @@ void CoherentTracker::predict(Track& t, double dt) const
     Pn[r * 6 + c] = s;
   }
   t.P = Pn;
-  for (int i = 0; i < 3; ++i) { P(t, i, i) += t.q * dt * dt * dt / 3; P(t, i, i + 3) += t.q * dt * dt / 2; P(t, i + 3, i) += t.q * dt * dt / 2; P(t, i + 3, i + 3) += t.q * dt; }
+  // Process noise for |dt|; a backward (retrodiction) step flips the position-velocity cross term.
+  const double ad = std::abs(dt);
+  for (int i = 0; i < 3; ++i) { P(t, i, i) += t.q * ad * ad * ad / 3; P(t, i, i + 3) += t.q * dt * ad / 2; P(t, i + 3, i) += t.q * dt * ad / 2; P(t, i + 3, i + 3) += t.q * ad; }
   symmetrize(t); t.age_s += dt;
 }
 double CoherentTracker::position_nis(const Track& t, const Detection& d, double* logdet) const
@@ -149,10 +151,26 @@ void CoherentTracker::update_rate(Track& t, const Detection& d) const
   t.P = Pn; symmetrize(t);
 }
 
-const std::vector<Track>& CoherentTracker::step(double t_s, double t_cpi_s, const std::vector<Detection>& dets, std::vector<int>* assoc)
+const std::vector<Track>& CoherentTracker::step(double t_s, double t_cpi_s, const std::vector<Detection>& dets, std::vector<int>* assoc,
+                                                const RateBand* band)
 {
-  const double dt = (last_t_ < 0) ? t_cpi_s : std::max(0.0, t_s - last_t_); last_t_ = t_s;
+  const double lag = (last_t_ >= 0 && t_s < last_t_) ? last_t_ - t_s : 0.0;   // out-of-sequence scan
+  const double dt = (last_t_ < 0) ? t_cpi_s : (lag > 0 ? -lag : t_s - last_t_);
+  if (!(lag > 0)) last_t_ = t_s;
   for (Track& t : tracks_) predict(t, dt);
+  // P(track's predicted bistatic rate inside the scan's tested band), Gaussian predictive rate.
+  auto p_vis = [&](const Track& t) {
+    if (!band) return 1.0;
+    const Vec3 x{t.x[0], t.x[1], t.x[2]};
+    const Vec3 h = normalized(x - band->tx) + normalized(x - p_.array_centroid);
+    const double hv[3] = {h.x, h.y, h.z};
+    double mu = 0, var = 0;
+    for (int a = 0; a < 3; ++a) { mu += hv[a] * t.x[3 + a]; for (int b = 0; b < 3; ++b) var += hv[a] * Pc(t, 3 + a, 3 + b) * hv[b]; }
+    if (!(var > 0)) return (std::abs(mu) >= band->lo && std::abs(mu) <= band->hi) ? 1.0 : 0.0;
+    const double s = std::sqrt(2 * var);
+    auto Phi = [&](double x) { return 0.5 * std::erfc(-(x - mu) / s); };
+    return std::clamp(Phi(band->hi) - Phi(band->lo) + Phi(-band->lo) - Phi(-band->hi), 0.0, 1.0);
+  };
   const Volume& V = p_.volume;
   const double vol = std::max(1e-9, (V.x1 - V.x0) * (V.y1 - V.y0) * (V.z1 - V.z0));
   const double clutter_density = std::max(1e-12, p_.false_object_intensity_per_s * t_cpi_s / vol);
@@ -179,8 +197,9 @@ const std::vector<Track>& CoherentTracker::step(double t_s, double t_cpi_s, cons
       t.q = q0 * (t.nis_sum / t.nis_n) / 3.0;
       if (t.confirmed) pd_hits_ += 1;
     } else {
-      t.llr += std::log(std::max(1e-300, 1 - pd)); ++t.misses;
-      if (t.confirmed) pd_misses_ += 1;
+      const double pv = p_vis(t);
+      t.llr += std::log(std::max(1e-300, 1 - pd * pv)); ++t.misses;
+      if (t.confirmed) pd_misses_ += pv;
     }
     if (!t.confirmed && t.llr >= kConfirm) t.confirmed = true;
     // SPRT restart convention: a confirmed track's evidence is capped at the confirm threshold, so a
@@ -206,6 +225,7 @@ const std::vector<Track>& CoherentTracker::step(double t_s, double t_cpi_s, cons
     P(t, 2, 2) = dets[j].pos_sigma.z * dets[j].pos_sigma.z; P(t, 3, 3) = P(t, 4, 4) = P(t, 5, 5) = q0;
     t.hits = 1; tracks_.push_back(t);
   }
+  if (lag > 0) for (Track& t : tracks_) predict(t, lag);   // back to the latest scan's time
   return tracks_;
 }
 } // namespace nr_isac::coherent
