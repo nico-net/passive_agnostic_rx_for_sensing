@@ -22,6 +22,7 @@ struct Geometry { std::array<Vec3, kCh> rx{}; Vec3 tx{}; };
 struct CoherentConfig {
   bool enable = false;
   bool ul_enable = false;
+  bool long_dwell = false;                   // coherent_long_dwell: slow-target long CPI (coherent_longdwell.h)
   Volume volume;
   double survey_sigma_m = 0.1;               // declared tape accuracy (input, not tuned)
   double max_speed_mps = 0.0;                // = PipelineConfig::maximum_target_speed_mps

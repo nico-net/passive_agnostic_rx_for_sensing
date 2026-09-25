@@ -42,6 +42,15 @@ std::vector<double> to_db(const std::vector<double>& p)
   for (size_t i = 0; i < p.size(); ++i) o[i] = std::round(100 * std::log10(std::max(p[i], 1e-30) / ref)) / 10;
   return o;
 }
+std::string jdets(const std::vector<Detection>& D)
+{
+  std::ostringstream rep; rep << "[";
+  for (size_t k = 0; k < D.size(); ++k)
+    rep << (k ? "," : "") << "{\"p\":" << jvec(D[k].pos) << ",\"s\":" << jvec(D[k].pos_sigma) << ",\"cov\":" << jarr(D[k].pos_cov)
+        << ",\"rr\":" << jnum(D[k].range_rate_mps) << ",\"rr_s\":" << jnum(D[k].range_rate_sigma) << ",\"snr\":" << jnum(D[k].snr)
+        << ",\"fd\":" << jnum(D[k].doppler_hz) << ",\"ill\":" << D[k].illuminator << "}";
+  return rep.str() + "]";
+}
 uint32_t rows_with_data(const CfrWindow& w)
 {
   uint32_t n = 0;
@@ -73,6 +82,10 @@ CoherentPipeline::CoherentPipeline(const CoherentConfig& cfg)
   if (!cuda_ && cuda_required()) {
     cuda_fail_closed_ = true;
     std::fprintf(stderr, "SENSING: coherent pipeline: NR_ISAC_REQUIRE_CUDA=1 but no usable CUDA device; every CPI will be skipped\n");
+  }
+  if (cfg.long_dwell) {
+    long_ = std::make_unique<LongDwellRunner>(cfg, cuda_ != nullptr, [this](LongResult& r) { long_result(r); });
+    std::fprintf(stderr, "SENSING: coherent pipeline: long-dwell slow-target CPI enabled\n");
   }
   worker_ = std::thread([this] { run(); });
   std::fprintf(stderr, "SENSING: coherent pipeline writing %s\n", reports_.path().c_str());
@@ -148,7 +161,8 @@ void CoherentPipeline::write_coherence(uint64_t seq, double t, const Calibration
 void CoherentPipeline::process(Job& j)
 {
   if (j.kind == 1) {                            // traffic event: no CPI
-    if (!j.traffic) tracker_ = std::make_unique<CoherentTracker>(tp_);   // stop tracks: nothing is illuminated
+    if (!j.traffic) { std::lock_guard<std::mutex> l(trk_mu_); tracker_ = std::make_unique<CoherentTracker>(tp_); }   // stop tracks: nothing is illuminated
+    // (the long dwell needs no reset: a data gap longer than its dwell restarts it, LongDwell::add)
     const std::string tf = j.traffic ? "true" : "false";
     const auto wall = std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count();
     reports_.write_line("{\"event\":\"traffic\",\"traffic\":" + tf + ",\"t\":" + jnum(j.t) + ",\"wall\":" + jnum(wall) + ",\"detections\":[]}");
@@ -167,7 +181,7 @@ void CoherentPipeline::process(Job& j)
     { std::lock_guard<std::mutex> l(mu_); ++st_.skipped; }
     const CoherentStats st = stats();
     std::ostringstream rep;
-    rep << "{\"cpi\":" << j.seq << ",\"t\":" << jnum(j.t) << ",\"rows\":" << j.dl.rows << ",\"stats\":{\"processed\":" << st.processed
+    rep << "{\"cpi\":" << j.seq << ",\"dwell\":\"short\",\"t\":" << jnum(j.t) << ",\"rows\":" << j.dl.rows << ",\"stats\":{\"processed\":" << st.processed
         << ",\"skipped\":" << st.skipped << ",\"overruns\":" << st.overruns << ",\"queue_waits\":" << st.queue_waits
         << "},\"skipped_reason\":\"" << a.invalid_reason << "\",\"detections\":[],\"topview\":null,\"rd\":null}";
     reports_.write_line(rep.str());
@@ -382,7 +396,14 @@ void CoherentPipeline::process(Job& j)
     }
   tm[6] = ms_since(s0); s0 = clk::now();
   std::vector<int> assoc;
-  const std::vector<Track>& T = tracker_->step(j.t, a.t_cpi_s, D, &assoc);
+  std::vector<Track> T;
+  {
+    // With the long dwell on, a short scan tests |rate| > the notch edge only: a slow track's miss here
+    // is not evidence (RateBand). Off: the whole axis, as before.
+    const RateBand band{a.lambda_m * a.notch_half_bins * a.dopp_step_hz, 2 * a.v_max_mps, geo.tx};
+    std::lock_guard<std::mutex> l(trk_mu_);
+    T = tracker_->step(j.t, a.t_cpi_s, D, &assoc, long_ ? &band : nullptr);
+  }
   for (size_t k = 0; k < D.size(); ++k)
     if (assoc[k] >= 0 && T[(size_t)assoc[k]].confirmed && D[k].illuminator == 0) af_->add(D[k], geo);
   tm[5] = ms_since(s0);
@@ -392,7 +413,7 @@ void CoherentPipeline::process(Job& j)
   const CoherentStats st = stats();
 
   std::ostringstream rep;
-  rep << "{\"cpi\":" << j.seq << ",\"traffic\":true,\"wall\":" << jnum(std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count()) << ",\"t\":" << jnum(j.t) << ",\"t_cpi_s\":" << jnum(a.t_cpi_s) << ",\"b_eff_hz\":" << jnum(a.b_eff_hz)
+  rep << "{\"cpi\":" << j.seq << ",\"dwell\":\"short\",\"traffic\":true,\"wall\":" << jnum(std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count()) << ",\"t\":" << jnum(j.t) << ",\"t_cpi_s\":" << jnum(a.t_cpi_s) << ",\"b_eff_hz\":" << jnum(a.b_eff_hz)
       << ",\"range_res_m\":" << jnum(kC / a.b_eff_hz) << ",\"grid_step_m\":" << jnum(G.step) << ",\"n_voxels\":" << G.size()
       << ",\"n_dopp_tested\":" << a.tested_dopp.size() << ",\"rows\":" << j.dl.rows << ",\"gpu\":" << (cuda_ ? "true" : "false")
       << ",\"lambda_m\":" << jnum(a.lambda_m) << ",\"dopp_step_hz\":" << jnum(a.dopp_step_hz) << ",\"notch_half_bins\":" << a.notch_half_bins << ",\"rows_bad\":" << n_bad << ",\"md_suppressed\":" << md_now << ",\"md_suppressed_total\":" << md_suppressed_
@@ -407,12 +428,7 @@ void CoherentPipeline::process(Job& j)
       << ",\"overrun\":" << (overrun ? "true" : "false")
       << ",\"stats\":{\"processed\":" << st.processed << ",\"skipped\":" << st.skipped << ",\"overruns\":" << st.overruns
       << ",\"queue_waits\":" << st.queue_waits << "}"
-      << ",\"skipped_reason\":null,\"detections\":[";
-  for (size_t k = 0; k < D.size(); ++k)
-    rep << (k ? "," : "") << "{\"p\":" << jvec(D[k].pos) << ",\"s\":" << jvec(D[k].pos_sigma) << ",\"cov\":" << jarr(D[k].pos_cov)
-        << ",\"rr\":" << jnum(D[k].range_rate_mps) << ",\"rr_s\":" << jnum(D[k].range_rate_sigma) << ",\"snr\":" << jnum(D[k].snr)
-        << ",\"fd\":" << jnum(D[k].doppler_hz) << ",\"ill\":" << D[k].illuminator << "}";
-  rep << "]";
+      << ",\"skipped_reason\":null,\"detections\":" << jdets(D);
   if (topview_due) {
     last_image_ = clk::now();
     const size_t nxy = (size_t)G.nx * G.ny;
@@ -451,6 +467,34 @@ void CoherentPipeline::process(Job& j)
   tr << "]}";
   tracks_.write_line(tr.str());
   write_coherence(j.seq, j.t, cal, L.delay_s, false);
+  if (long_) long_->push(std::move(j.dl), a, L, rs, j.t, geo, cal);   // last use of j.dl: moved, not copied
+}
+
+void CoherentPipeline::long_result(LongResult& r)
+{
+  const LongCpi& c = r.cpi; const Axes& a = r.a;
+  if (a.valid) {
+    // The long scan tests |rate| <= lambda f_slow, outside its own +-notch_half_bins at 1/T_L.
+    const RateBand band{a.lambda_m * a.notch_half_bins * a.dopp_step_hz, a.lambda_m * c.f_slow_hz, cfg_.geometry.tx};
+    std::lock_guard<std::mutex> l(trk_mu_);
+    tracker_->step(c.t_air_s, c.cadence_s, r.D, nullptr, &band);
+  }
+  std::ostringstream rep;
+  rep << "{\"dwell\":\"long\",\"traffic\":true,\"wall\":" << jnum(std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count())
+      << ",\"t\":" << jnum(c.t_air_s) << ",\"t_cpi_s\":" << jnum(a.valid ? a.t_cpi_s : c.t_l_s) << ",\"t_l_s\":" << jnum(c.t_l_s)
+      << ",\"cadence_s\":" << jnum(c.cadence_s) << ",\"f_slow_hz\":" << jnum(c.f_slow_hz) << ",\"rate_slow_mps\":" << jnum(c.f_slow_hz * kC / c.w.fc_hz)
+      << ",\"b_eff_superrow_hz\":" << jnum(c.b_eff_hz) << ",\"n_short\":" << c.n_short << ",\"rows\":" << c.w.rows
+      << ",\"los_found\":" << jbools(c.found) << ",\"gpu\":" << (cuda_ ? "true" : "false");
+  if (a.valid)
+    rep << ",\"b_eff_hz\":" << jnum(a.b_eff_hz) << ",\"range_res_m\":" << jnum(kC / a.b_eff_hz) << ",\"grid_step_m\":" << jnum(r.G.step)
+        << ",\"n_voxels\":" << r.G.size() << ",\"n_dopp_tested\":" << a.tested_dopp.size() << ",\"lambda_m\":" << jnum(a.lambda_m)
+        << ",\"dopp_step_hz\":" << jnum(a.dopp_step_hz) << ",\"notch_half_bins\":" << a.notch_half_bins;
+  rep << ",\"timing_ms\":{\"build\":" << jnum(r.tm_build) << ",\"rd\":" << jnum(r.tm_rd) << ",\"env\":" << jnum(r.tm_env)
+      << ",\"detect\":" << jnum(r.tm_detect) << ",\"refine\":" << jnum(r.tm_refine) << ",\"total\":" << jnum(r.tm_total) << "}"
+      << ",\"overrun\":" << (r.tm_total > c.cadence_s * 1e3 ? "true" : "false") << ",\"queue_max\":" << r.queue_max
+      << ",\"skipped_reason\":" << (a.valid ? "null" : "\"" + a.invalid_reason + "\"") << ",\"detections\":" << jdets(r.D)
+      << ",\"topview\":null,\"rd\":null}";
+  reports_.write_line(rep.str());
 }
 
 } // namespace nr_isac::coherent

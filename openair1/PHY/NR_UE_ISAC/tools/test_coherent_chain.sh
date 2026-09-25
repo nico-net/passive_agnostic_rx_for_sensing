@@ -6,12 +6,16 @@ REPO=$(cd "$T/../../../.." && pwd); CONF_T=$REPO/tests/passive_rx/ota/sensing_co
 rm -rf "$O"; mkdir -p "$O"
 python3 "$T/make_coherent_scene.py" --out "$O/rows.bin" --truth "$O/truth.json" --survey-out "$O/survey.json" --seconds ${SECONDS_RUN:-6}
 python3 "$REPO/tests/passive_rx/survey.py" "$O/survey.json" --geometry "$O/g.json" --apply "$CONF_T" "$O/coherent.conf" --report-path "$O/reports.jsonl"
+# LONG_DWELL=1: also run the long-dwell slow-target CPI (coherent_long_dwell) and score it.
+if [ "${LONG_DWELL:-0}" = 1 ]; then sed -i 's/^\(\s*\)coherent_enable = 1;/\1coherent_enable = 1;\n\1coherent_long_dwell = 1;/' "$O/coherent.conf"; grep -q "coherent_long_dwell = 1" "$O/coherent.conf"; fi
 (cd "$BUILD" && ./isac_replay -O "$O/coherent.conf" --rows "$O/rows.bin") > "$O/replay.txt" 2>&1
 python3 - "$O" <<'EOF'
 import glob, json, sys, numpy as np
 C = 299792458.0
 O = sys.argv[1]; tr = json.load(open(f"{O}/truth.json"))
-reps = [json.loads(l) for f in sorted(glob.glob(f"{O}/coherent_reports.*.jsonl")) for l in open(f)]
+allrep = [json.loads(l) for f in sorted(glob.glob(f"{O}/coherent_reports.*.jsonl")) for l in open(f)]
+# Traffic event lines (flow gate, one per ~1 s while closed; isac_replay never opens the gate) are not CPIs.
+reps = [r for r in allrep if r.get("dwell") != "long" and r.get("event") is None]; longs = [r for r in allrep if r.get("dwell") == "long"]
 trk = [json.loads(l) for f in sorted(glob.glob(f"{O}/coherent_tracks.*.jsonl")) for l in open(f)]
 reps = [r for r in reps if r.get("event") is None]   # traffic events (flow-gate state) carry no CPI
 trk = [r for r in trk if r.get("event") is None]
@@ -38,6 +42,27 @@ unit = lambda v: v / np.linalg.norm(v)
 conf = [x for x in last["tracks"] if x["confirmed"]]
 import re
 vol = [float(x) for x in re.search(r'coherent_volume_m\s*=\s*"([^"]+)"', open(f"{O}/coherent.conf").read()).group(1).split(":")]
+if longs:   # long-dwell CPIs: hit rate per target within one range cell of truth at the CPI midpoint; false = near no target
+    ok = [r for r in longs if r["skipped_reason"] is None]; nfalse = 0; hits = {tg["name"]: 0 for tg in tr["targets"]}; vis = dict(hits)
+    for r in ok:
+        tt = r["t"]; lres = r["range_res_m"]; pos = {tg["name"]: np.array(tg["p0"]) + np.array(tg["v"]) * tt for tg in tr["targets"]}
+        for tg in tr["targets"]:
+            p = pos[tg["name"]]; v = np.array(tg["v"]); rate = v @ (unit(p - gnb) + unit(p - cen))
+            if abs(rate) <= r["rate_slow_mps"] and abs(rate) > r["lambda_m"] * r["notch_half_bins"] * r["dopp_step_hz"]:
+                vis[tg["name"]] += 1; hits[tg["name"]] += any(np.linalg.norm(np.array(d["p"]) - p) < lres for d in r["detections"])
+        for d in r["detections"]:
+            if min(np.linalg.norm(np.array(d["p"]) - q) for q in pos.values()) >= lres: nfalse += 1
+        print(f"  long t={tt:.2f} T_L={r['t_l_s']:.2f}s rows={r['rows']} res={lres:.2f}m dets={len(r['detections'])} " +
+              " ".join(f"{d['p']} rr={d['rr']:+.2f}" for d in r["detections"]) + "  timing " + str({k: round(x) for k, x in r['timing_ms'].items()}))
+    lt = np.array([r["timing_ms"]["total"] for r in ok]); cad = np.median([r["cadence_s"] for r in ok])
+    print(f"long dwell: {len(ok)}/{len(longs)} CPIs, T_L p50 {np.median([r['t_l_s'] for r in ok]):.2f} s, cadence {cad:.2f} s, "
+          f"total ms p50/p95/max {np.percentile(lt, 50):.0f}/{np.percentile(lt, 95):.0f}/{lt.max():.0f}")
+    print("long dwell hit rate (CPIs with the target in the slow band):", {k: f"{hits[k]}/{vis[k]}" for k in hits}, " false detections:", nfalse)
+    # The person sits inside the short CPI's notch for the whole run (the short CPI cannot see it at all):
+    # the long dwell must place it within one range cell in most of its slow-band CPIs. False detections
+    # are reported, not asserted: a strong target's split / partial-channel ghosts are a property of the
+    # shared detect/refine chain (the short CPI shows the same class for the car), see longdwell-report.md.
+    assert vis["person"] > 0 and hits["person"] > vis["person"] / 2, ("long dwell misses the person", hits, vis)
 print(f"t={t:.3f} s  range_res={res:.2f} m  notch |dL/dt| < {notch:.3f} m/s")
 for tg in tr["targets"]:
     p = np.array(tg["p0"]) + np.array(tg["v"]) * t; v = np.array(tg["v"])
