@@ -3452,3 +3452,16 @@ TEST(PdcchReplay, BudgetTimingEveryWidth) {
     EXPECT_GT(state.occasions_fed,0)<<"budget starved complete rounds at span="<<span;
   }
 }
+
+// Task 15: lanes may scan AL16. ISAC_LANE_ALS=16 must parse (it used to be dropped by the AL8 lane
+// cap), and one lane's extracted-RE budget must hold an AL16 candidate: 16 CCE x 6 REG x 9 RE = 864.
+TEST(LookaheadLanes, Al16IsAcceptedAndFitsTheLaneBudget) {
+  uint8_t v[5] = {0};
+  ASSERT_EQ(nr_pdcch_blind_parse_lane_als("16", v), 1);
+  EXPECT_EQ(v[0], 16);
+  EXPECT_EQ(nr_pdcch_blind_parse_lane_als("1,2,4,8,16", v), 5);
+  EXPECT_EQ(v[4], 16);
+  EXPECT_EQ(nr_pdcch_blind_parse_lane_als("32,3,0", v), 0);
+  EXPECT_EQ(nr_pdcch_blind_parse_lane_als(nullptr, v), 0);
+  EXPECT_GE(nr_pdcch_blind_lane_re_budget(), 16 * 6 * 9);
+}

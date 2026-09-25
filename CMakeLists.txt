@@ -1461,7 +1461,7 @@ target_link_libraries(NR_L2_UE PRIVATE nr_nas)
 # executables (see the test_nr_pdcch_coreset_map/test_nr_pdcch_dci_length_sweep targets below) --
 # nothing wired them into any library nr-uesoftmodem links, so the first real (non-test) caller
 # failed at link time with "undefined reference" until they were added here.
-add_library(nr_pdcch_blind_monitor ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_rnti_bootstrap.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_coreset_map.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_uss_tracker.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_dci_length_sweep.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_config_sweep.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_hyp_sweep.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_field_sweep.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_interp_sweep.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_discovery.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_passive_acq_state.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_sib1_prior.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_joint_solve.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_joint_live.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_qm_oracle.c)
+add_library(nr_pdcch_blind_monitor ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_rnti_bootstrap.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_coreset_map.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_uss_tracker.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_dci_length_sweep.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_config_sweep.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_hyp_sweep.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_field_sweep.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_interp_sweep.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_discovery.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_passive_acq_state.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_sib1_prior.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_joint_solve.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_joint_live.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_prb_set.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_al1_map.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_qm_oracle.c)
 target_include_directories(nr_pdcch_blind_monitor PRIVATE
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT
   ${NFAPI_DIR}/nfapi/public_inc
@@ -2510,10 +2510,17 @@ if(ENABLE_TESTS)
   add_dependencies(tests test_nr_pdsch_qm_oracle)
   add_test(NAME test_nr_pdsch_qm_oracle COMMAND ./test_nr_pdsch_qm_oracle)
 
+  # The footprint tests call OAI's own mapping table (get_csi_mapping_parms), hence the same PHY
+  # sources and libraries as test_nr_csirs_blind_synth below.
   add_executable(test_nr_csirs_blind_search ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_csirs_blind_search_test.cc
-                                            ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_csirs_blind_search.c)
+                                            ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_csirs_blind_search.c
+                                            ${OPENAIR1_DIR}/PHY/nr_phy_common/src/nr_phy_common_csirs.c
+                                            ${OPENAIR1_DIR}/PHY/NR_REFSIG/refsig.c
+                                            ${OPENAIR1_DIR}/PHY/NR_REFSIG/nr_gen_mod_table.c
+                                            ${OPENAIR1_DIR}/PHY/MODULATION/nr_modulation.c
+                                            ${OPENAIR_DIR}/common/utils/ds/hashtable.c)
   target_include_directories(test_nr_csirs_blind_search PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
-  target_link_libraries(test_nr_csirs_blind_search PRIVATE UTIL GTest::gtest)
+  target_link_libraries(test_nr_csirs_blind_search PRIVATE nr_phy_common nr_common UTIL m GTest::gtest)
   add_dependencies(tests test_nr_csirs_blind_search)
   add_test(NAME test_nr_csirs_blind_search COMMAND ./test_nr_csirs_blind_search)
 
@@ -2567,6 +2574,19 @@ if(ENABLE_TESTS)
   target_link_libraries(test_nr_pdcch_joint_live PRIVATE nr_common polar crc_byte UTIL GTest::gtest)
   add_dependencies(tests test_nr_pdcch_joint_live)
   add_test(NAME test_nr_pdcch_joint_live COMMAND ./test_nr_pdcch_joint_live)
+
+  add_executable(test_nr_pdsch_prb_set ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_pdsch_prb_set_test.cc
+                                       ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_prb_set.c)
+  target_include_directories(test_nr_pdsch_prb_set PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
+  target_link_libraries(test_nr_pdsch_prb_set PRIVATE GTest::gtest)
+  add_dependencies(tests test_nr_pdsch_prb_set)
+  add_test(NAME test_nr_pdsch_prb_set COMMAND ./test_nr_pdsch_prb_set)
+  add_executable(test_nr_pdcch_al1_map ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_al1_map_test.cc
+                                       ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_al1_map.c)
+  target_include_directories(test_nr_pdcch_al1_map PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
+  target_link_libraries(test_nr_pdcch_al1_map PRIVATE GTest::gtest)
+  add_dependencies(tests test_nr_pdcch_al1_map)
+  add_test(NAME test_nr_pdcch_al1_map COMMAND ./test_nr_pdcch_al1_map)
 
   add_executable(test_nr_pdcch_gf2_rnti ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_gf2_rnti_test.cc
                                         ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_gf2_rnti.c)

@@ -44,7 +44,7 @@ static uint32_t rnd(void) { rng ^= rng << 13; rng ^= rng >> 7; rng ^= rng << 17;
 static double gauss(void) { double u = (rnd() + 1.0) / 4294967297.0, v = (rnd() + 1.0) / 4294967297.0; return sqrt(-2 * log(u)) * cos(6.283185307 * v); }
 
 struct pset { uint16_t len; uint8_t al; };
-static const pset P[] = {{39, 1}, {44, 2}, {47, 2}, {49, 2}, {58, 2}, {47, 4}, {58, 4}, {47, 8}, {58, 8}, {39, 8}};
+static const pset P[] = {{39, 1}, {44, 2}, {47, 2}, {49, 2}, {58, 2}, {47, 4}, {58, 4}, {47, 8}, {58, 8}, {39, 8}, {47, 16}, {58, 16}};
 #define NP ((int)(sizeof(P) / sizeof(P[0])))
 
 static int E_of(const pset &p) { return p.al * 108; }
