@@ -1,5 +1,6 @@
 #include <cmath>
 #include <cstdlib>
+#include <cstring>
 #include <iostream>
 #include <vector>
 #include <gtest/gtest.h>
@@ -160,4 +161,112 @@ int main(int argc, char **argv)
 {
   ::testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();
+}
+
+// ---- FDRA modes: PUSCH RA type 0 and dynamicSwitch (full-running-agnosticity Task 10) -----------
+// 106 PRB at CRB 0: RIV 13, config1 N_RBG 14, config2 N_RBG 7 -- five distinct FDRA widths.
+static void put_bits(uint64_t &p, uint16_t total, uint16_t off, uint8_t nb, uint64_t v)
+{
+  const int sh = total - off - nb;
+  p &= ~(((1ULL << nb) - 1ULL) << sh);
+  p |= (v & ((1ULL << nb) - 1ULL)) << sh;
+}
+
+static uint32_t ul_fdra_field(const nr_dci11_offsets_t &t, unsigned &seed, bool want_type0)
+{
+  const uint32_t riv = rand_r(&seed) % (106 * 107 / 2);
+  const uint32_t bitmap = t.n_rbg ? 1 + rand_r(&seed) % ((1u << t.n_rbg) - 1) : 0;
+  if (t.fdra_mode == NR_FDRA_TYPE1) return riv;
+  if (t.fdra_mode <= NR_FDRA_TYPE0_CFG2) return bitmap;
+  const int w = t.n_rbg > t.riv_bits ? t.n_rbg : t.riv_bits;
+  return want_type0 ? bitmap : ((1u << w) | riv);
+}
+
+static uint64_t ul_payload(const nr_dci11_offsets_t &t, unsigned &seed, uint32_t field)
+{
+  uint64_t p = 0;
+  for (int b = 0; b < t.total; b++) p |= (uint64_t)(rand_r(&seed) & 1) << b;
+  put_bits(p, t.total, t.riv, (uint8_t)(t.tda - t.riv), field);
+  put_bits(p, t.total, t.mcs, 5, rand_r(&seed) % 28);
+  put_bits(p, t.total, t.rv, 2, 0);
+  return p;
+}
+
+static void resolve_ul_fdra_mode(uint8_t mode)
+{
+  const uint16_t rb = riv_bits_for(106);
+  nr_dci01_layout_t l{};
+  l.pre_riv = 0; l.pre_mcs = 0; l.pre_ant = 7; l.ant_ports = 2; l.post_ant = 3;
+  l.fdra_mode = mode;
+  l.n_rbg = mode == NR_FDRA_TYPE1 ? 0 : (uint8_t)nr_rbg_count(0, 106, nr_fdra_rbg_size(mode, 106));
+  nr_dci11_offsets_t t{};
+  ASSERT_TRUE(nr_dci01_layout_offsets(&l, rb, 2, &t));
+  EXPECT_EQ(t.tda - t.riv, nr_fdra_bits(mode, l.n_rbg, rb));
+  std::vector<nr_dci01_layout_t> c(NR_DCI11_LAYOUT_MAX);
+  std::vector<nr_dci11_offsets_t> o(NR_DCI11_LAYOUT_MAX);
+  const int n = nr_dci01_layout_enumerate_fdra(rb, 2, t.total, 0, 106, c.data(), o.data(), NR_DCI11_LAYOUT_MAX);
+  ASSERT_GT(n, 1);
+  ASSERT_LT(n, NR_DCI11_LAYOUT_MAX);
+  int truth = -1;
+  for (int i = 0; i < n; i++)
+    if (!memcmp(&c[i], &l, sizeof(l))) truth = i;
+  ASSERT_GE(truth, 0) << "the constructed layout was not enumerated";
+  nr_dci11_resolver_t r{};
+  ASSERT_EQ(nr_dci_resolver_init_from_offsets(&r, 106, o.data(), n), n);
+  unsigned seed = 57u + mode;
+  for (int i = 0; i < 800; i++) nr_dci11_resolver_observe(&r, ul_payload(t, seed, ul_fdra_field(t, seed, i & 1)));
+  ASSERT_TRUE(r.alive[truth]) << "stage 1 deleted the true layout";
+  int w = -1;
+  for (int i = 0; i < 400000 && w < 0; i++) {
+    nr_dci11_offsets_t pick{};
+    const int idx = nr_dci11_resolver_next(&r, &pick);
+    ASSERT_GE(idx, 0);
+    w = nr_dci11_resolver_feed(&r, idx, idx == truth && (double)rand_r(&seed) / RAND_MAX < 0.40);
+  }
+  ASSERT_EQ(w, truth);
+  EXPECT_EQ(c[w].fdra_mode, mode);                 // (a)
+  EXPECT_EQ(r.off[w].fdra_mode, mode);
+  EXPECT_EQ(r.off[w].mcs, t.mcs);                  // (b)
+  EXPECT_EQ(r.off[w].rv, t.rv);
+  EXPECT_EQ(r.off[w].ant_ports, t.ant_ports);
+  // (c): PRB list of the resolved read vs the constructed allocation
+  std::vector<uint16_t> want(NR_PRB_SET_MAX), got(NR_PRB_SET_MAX);
+  const bool type0 = mode != NR_FDRA_TYPE1;
+  uint32_t field;
+  int nw;
+  if (type0) {
+    field = (1u << (l.n_rbg - 1)) | 0x3u;
+    nw = nr_ra_type0_prbs(field, 0, 106, nr_fdra_rbg_size(mode, 106), want.data(), NR_PRB_SET_MAX);
+  } else {
+    field = 106 * (10 - 1) + 30;  // RIV of start 30, length 10
+    for (nw = 0; nw < 10; nw++) want[nw] = (uint16_t)(30 + nw);
+  }
+  const uint64_t p = ul_payload(t, seed, field);
+  const nr_dci11_offsets_t &ro = r.off[w];
+  const uint8_t nb = (uint8_t)(ro.tda - ro.riv);
+  const uint32_t read = (uint32_t)((p >> (ro.total - ro.riv - nb)) & ((1ULL << nb) - 1ULL));
+  const int ng = nr_fdra_prbs(read, ro.fdra_mode, ro.n_rbg, ro.riv_bits, 0, 106, got.data(), NR_PRB_SET_MAX, nullptr);
+  ASSERT_EQ(ng, nw);
+  for (int i = 0; i < nw; i++) EXPECT_EQ(got[i], want[i]) << "PRB " << i;
+  std::cerr << "[ MEASURED ] DCI 0_1 fdra_mode " << (int)mode << ": " << n << " layouts at len " << t.total << "\n";
+}
+
+TEST(Dci01Fdra, ResolvesType1) { resolve_ul_fdra_mode(NR_FDRA_TYPE1); }
+TEST(Dci01Fdra, ResolvesType0Config1) { resolve_ul_fdra_mode(NR_FDRA_TYPE0_CFG1); }
+TEST(Dci01Fdra, ResolvesType0Config2) { resolve_ul_fdra_mode(NR_FDRA_TYPE0_CFG2); }
+TEST(Dci01Fdra, ResolvesDynamicSwitchConfig1) { resolve_ul_fdra_mode(NR_FDRA_DYN_CFG1); }
+TEST(Dci01Fdra, ResolvesDynamicSwitchConfig2) { resolve_ul_fdra_mode(NR_FDRA_DYN_CFG2); }
+
+TEST(Dci01Fdra, LayoutCountFitsTheCap) {
+  // 49 bits on 273 PRB, every FDRA mode, the widest UL TDA width (4 = the default table).
+  const uint16_t rb = riv_bits_for(273);
+  std::vector<nr_dci01_layout_t> c(1 << 16);
+  int worst = 0;
+  for (uint8_t tb = 0; tb <= 4; tb++) {
+    const int n = nr_dci01_layout_enumerate_fdra(rb, tb, 49, 0, 273, c.data(), nullptr, (int)c.size());
+    if (n > worst) worst = n;
+  }
+  std::cerr << "[ MEASURED ] DCI 0_1 every FDRA mode, len 49 / 273 PRB: " << worst << " layouts at the worst TDA width (cap "
+            << NR_DCI11_LAYOUT_MAX << ")\n";
+  EXPECT_LT(worst, NR_DCI11_LAYOUT_MAX);
 }

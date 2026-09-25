@@ -1,5 +1,6 @@
 #include <cmath>
 #include <cstdlib>
+#include <cstring>
 #include <iostream>
 #include <vector>
 #include <gtest/gtest.h>
@@ -578,4 +579,182 @@ TEST(Dci11Layout, AFiveBitAntennaPortsFieldIsTwoLayouts) {
   EXPECT_GT(five_t1, 0);
   EXPECT_EQ(four_t2, 0);
   EXPECT_EQ(six_t1, 0);
+}
+
+// ---- FDRA modes: RA type 0 and dynamicSwitch (full-running-agnosticity Task 10) ----------------
+// 106 PRB at CRB 0: RIV 13 bits, rbg-Size config1 P=8 -> N_RBG 14, config2 P=16 -> N_RBG 7, so all
+// five modes have distinct widths (13 / 14 / 7 / 15 / 14).
+static const uint16_t kFdraBwpStart = 0, kFdraBwp = 106;
+
+static void put_bits(uint64_t &p, uint16_t total, uint16_t off, uint8_t nb, uint64_t v)
+{
+  const int sh = total - off - nb;
+  p &= ~(((1ULL << nb) - 1ULL) << sh);
+  p |= (v & ((1ULL << nb) - 1ULL)) << sh;
+}
+
+static uint32_t riv_of(int start, int len, int N)
+{
+  return (len - 1 <= N / 2) ? (uint32_t)(N * (len - 1) + start) : (uint32_t)(N * (N - len + 1) + (N - 1 - start));
+}
+
+// A valid FDRA field for this layout's mode; dynamicSwitch alternates the two branches via want_type0.
+static uint32_t fdra_field(const nr_dci11_offsets_t &t, unsigned &seed, bool want_type0)
+{
+  const int N = kFdraBwp;
+  const uint32_t riv = rand_r(&seed) % (N * (N + 1) / 2);
+  const uint32_t bitmap = t.n_rbg ? 1 + rand_r(&seed) % ((1u << t.n_rbg) - 1) : 0;
+  switch (t.fdra_mode) {
+    case NR_FDRA_TYPE1: return riv;
+    case NR_FDRA_TYPE0_CFG1: case NR_FDRA_TYPE0_CFG2: return bitmap;
+    default: {
+      const int w = t.n_rbg > t.riv_bits ? t.n_rbg : t.riv_bits;
+      return want_type0 ? bitmap : ((1u << w) | riv);
+    }
+  }
+}
+
+static uint64_t fdra_payload(const nr_dci11_offsets_t &t, unsigned &seed, uint32_t field)
+{
+  uint64_t p = 0;
+  for (int b = 0; b < t.total; b++) p |= (uint64_t)(rand_r(&seed) & 1) << b;
+  put_bits(p, t.total, t.riv, (uint8_t)(t.tda - t.riv), field);
+  put_bits(p, t.total, t.mcs, 5, rand_r(&seed) % 28);
+  put_bits(p, t.total, t.rv, 2, 0);
+  if (t.ap_valid_rows) put_bits(p, t.total, t.ant_ports, t.ant_ports_bits, rand_r(&seed) % t.ap_valid_rows);
+  return p;
+}
+
+static uint32_t read_fdra(const nr_dci11_offsets_t &t, uint64_t p)
+{
+  const uint8_t nb = (uint8_t)(t.tda - t.riv);
+  return (uint32_t)((p >> (t.total - t.riv - nb)) & ((1ULL << nb) - 1ULL));
+}
+
+// (c): the decoded PRB list of the resolved layout equals nr_ra_type0_prbs() of the constructed bitmap
+// (type 0, and dynamicSwitch's type-0 branch) or the constructed RIV's contiguous range (type 1).
+static void expect_prbs(const nr_dci11_offsets_t &resolved, const nr_dci11_offsets_t &truth, bool type0,
+                        unsigned &seed)
+{
+  const int N = kFdraBwp;
+  const int P = nr_fdra_rbg_size(truth.fdra_mode, N);
+  std::vector<uint16_t> want(NR_PRB_SET_MAX), got(NR_PRB_SET_MAX);
+  int nw;
+  uint32_t field;
+  if (type0) {
+    const uint32_t bitmap = (1u << (truth.n_rbg - 1)) | 0x5u;  // RBG 0 (MSB) plus two late RBGs
+    nw = nr_ra_type0_prbs(bitmap, kFdraBwpStart, N, P, want.data(), NR_PRB_SET_MAX);
+    field = bitmap;
+  } else {
+    const int S = 17, L = 40;
+    for (nw = 0; nw < L; nw++) want[nw] = (uint16_t)(S + nw);
+    field = riv_of(S, L, N);
+    if (truth.fdra_mode >= NR_FDRA_DYN_CFG1) field |= 1u << (truth.n_rbg > truth.riv_bits ? truth.n_rbg : truth.riv_bits);
+  }
+  const uint64_t p = fdra_payload(truth, seed, field);
+  int t0 = -1;
+  const int ng = nr_fdra_prbs(read_fdra(resolved, p), resolved.fdra_mode, resolved.n_rbg, resolved.riv_bits, kFdraBwpStart,
+                              N, got.data(), NR_PRB_SET_MAX, &t0);
+  EXPECT_EQ(t0, type0 ? 1 : 0);
+  ASSERT_EQ(ng, nw);
+  for (int i = 0; i < nw; i++) EXPECT_EQ(got[i], want[i]) << "PRB " << i;
+}
+
+static void resolve_fdra_mode(uint8_t mode)
+{
+  const uint16_t rb = riv_bits_for(kFdraBwp);
+  nr_dci11_layout_t l{};
+  l.bwp_ind = 0; l.pre_mcs = 0; l.pre_ant = 14; l.ant_ports = 4; l.post_ant = 2; l.dmrs_type = 0;
+  l.fdra_mode = mode;
+  l.n_rbg = mode == NR_FDRA_TYPE1 ? 0
+                                  : (uint8_t)nr_rbg_count(kFdraBwpStart, kFdraBwp, nr_fdra_rbg_size(mode, kFdraBwp));
+  nr_dci11_offsets_t o{};
+  ASSERT_TRUE(nr_dci11_layout_offsets(&l, rb, 2, &o));
+  EXPECT_EQ(o.tda - o.riv, nr_fdra_bits(mode, l.n_rbg, rb));
+  nr_dci11_resolver_t r;
+  const int n = nr_dci11_resolver_init_fdra(&r, kFdraBwpStart, kFdraBwp, rb, 2, o.total);
+  ASSERT_GT(n, 1);
+  ASSERT_LT(n, NR_DCI11_LAYOUT_MAX) << "the set was truncated -- the truth may be missing";
+  int truth = -1;
+  for (int i = 0; i < n; i++)
+    if (!memcmp(&r.hyp[i], &l, sizeof(l))) truth = i;
+  ASSERT_GE(truth, 0) << "the constructed layout was not enumerated";
+  unsigned seed = 31u + mode;
+  for (int i = 0; i < 800; i++) nr_dci11_resolver_observe(&r, fdra_payload(o, seed, fdra_field(o, seed, i & 1)));
+  ASSERT_TRUE(r.alive[truth]) << "stage 1 deleted the true layout";
+  int w = -1;
+  for (int i = 0; i < 400000 && w < 0; i++) {
+    nr_dci11_offsets_t pick{};
+    const int idx = nr_dci11_resolver_next(&r, &pick);
+    ASSERT_GE(idx, 0);
+    w = nr_dci11_resolver_feed(&r, idx, idx == truth && (double)rand_r(&seed) / RAND_MAX < 0.40);
+  }
+  ASSERT_EQ(w, truth);
+  EXPECT_EQ(r.hyp[w].fdra_mode, mode);                                     // (a)
+  EXPECT_EQ(r.off[w].mcs, o.mcs);                                          // (b)
+  EXPECT_EQ(r.off[w].rv, o.rv);
+  EXPECT_EQ(r.off[w].ant_ports, o.ant_ports);
+  EXPECT_TRUE(nr_dci11_layout_apply_roundtrip(&r.hyp[w], rb, 2)) << "field-bits handover shifts a type-0 layout";
+  const bool t0 = mode != NR_FDRA_TYPE1;
+  expect_prbs(r.off[w], o, t0, seed);                                      // (c)
+  if (mode >= NR_FDRA_DYN_CFG1) expect_prbs(r.off[w], o, false, seed);     // dynamicSwitch, RIV branch
+  std::cerr << "[ MEASURED ] fdra_mode " << (int)mode << ": " << n << " layouts at len " << o.total
+            << ", converged on " << w << "\n";
+}
+
+TEST(Dci11Fdra, ResolvesType1) { resolve_fdra_mode(NR_FDRA_TYPE1); }
+TEST(Dci11Fdra, ResolvesType0Config1) { resolve_fdra_mode(NR_FDRA_TYPE0_CFG1); }
+TEST(Dci11Fdra, ResolvesType0Config2) { resolve_fdra_mode(NR_FDRA_TYPE0_CFG2); }
+TEST(Dci11Fdra, ResolvesDynamicSwitchConfig1) { resolve_fdra_mode(NR_FDRA_DYN_CFG1); }
+TEST(Dci11Fdra, ResolvesDynamicSwitchConfig2) { resolve_fdra_mode(NR_FDRA_DYN_CFG2); }
+
+TEST(Dci11Fdra, PlausibilityFollowsTheMode) {
+  const uint16_t rb = riv_bits_for(kFdraBwp);
+  nr_dci11_layout_t l{};
+  l.pre_ant = 14; l.ant_ports = 4; l.post_ant = 2;
+  l.fdra_mode = NR_FDRA_TYPE0_CFG1; l.n_rbg = 14;
+  nr_dci11_offsets_t o{};
+  ASSERT_TRUE(nr_dci11_layout_offsets(&l, rb, 2, &o));
+  uint64_t p = 0;
+  put_bits(p, o.total, o.mcs, 5, 10);
+  EXPECT_FALSE(nr_dci11_layout_plausible(&o, p, kFdraBwp)) << "an empty RBG bitmap allocates nothing";
+  put_bits(p, o.total, o.riv, 14, 0x3FFF);  // all 14 RBGs: fine for a bitmap, an out-of-BWP RIV value
+  EXPECT_TRUE(nr_dci11_layout_plausible(&o, p, kFdraBwp));
+  l.fdra_mode = NR_FDRA_DYN_CFG1;           // width 15, MSB 0 -> type 0
+  ASSERT_TRUE(nr_dci11_layout_offsets(&l, rb, 2, &o));
+  p = 0;
+  put_bits(p, o.total, o.mcs, 5, 10);
+  EXPECT_FALSE(nr_dci11_layout_plausible(&o, p, kFdraBwp));
+  put_bits(p, o.total, o.riv, 15, (1u << 14) | 8000u);  // MSB 1 -> RIV 8000 >= 106*107/2
+  EXPECT_FALSE(nr_dci11_layout_plausible(&o, p, kFdraBwp));
+  put_bits(p, o.total, o.riv, 15, (1u << 14) | 500u);
+  EXPECT_TRUE(nr_dci11_layout_plausible(&o, p, kFdraBwp));
+}
+
+TEST(Dci11Fdra, LayoutCountFitsTheCap) {
+  // The worst case NR_DCI11_LAYOUT_MAX's comment names: 49 bits on 273 PRB, TDA width searched 0..4.
+  const uint16_t rb = riv_bits_for(273);
+  std::vector<nr_dci11_layout_t> c(1 << 16);
+  int total = 0;
+  for (uint8_t tb = 0; tb <= 4; tb++) total += nr_dci11_layout_enumerate_fdra(rb, tb, 49, 0, 273, c.data(), (int)c.size());
+  std::cerr << "[ MEASURED ] every FDRA mode, len 49 / 273 PRB / TDA 0..4: " << total << " layouts (cap "
+            << NR_DCI11_LAYOUT_MAX << ")\n";
+  EXPECT_LT(total, NR_DCI11_LAYOUT_MAX);
+}
+
+TEST(Dci11Fdra, TruncationNeverCostsAType1Layout) {
+  // A narrow BWP overflows the cap once type 0 is searched (N_RBG << RIV width frees bits for the rest
+  // of the switch space). Every layout the type-1-only resolver held must still be there, first.
+  const uint16_t rb = riv_bits_for(106);
+  static nr_dci11_resolver_t a, b;
+  const int na = nr_dci11_resolver_init(&a, 106, rb, NR_DCI11_TDA_UNKNOWN, 45);
+  const int nb = nr_dci11_resolver_init_fdra(&b, 0, 106, rb, NR_DCI11_TDA_UNKNOWN, 45);
+  ASSERT_GT(na, 0);
+  ASSERT_GE(nb, na);
+  for (int i = 0; i < na; i++) {
+    EXPECT_EQ(memcmp(&a.hyp[i], &b.hyp[i], sizeof(a.hyp[i])), 0) << i;
+    EXPECT_EQ(a.off[i].tda_bits, b.off[i].tda_bits) << i;
+  }
+  std::cerr << "[ MEASURED ] 106 PRB len 45 TDA 0..4: type-1 " << na << ", all modes " << nb << " (cap "
+            << NR_DCI11_LAYOUT_MAX << ")\n";
 }

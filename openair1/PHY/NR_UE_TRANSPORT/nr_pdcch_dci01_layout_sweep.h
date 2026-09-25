@@ -45,6 +45,8 @@ typedef struct {
   uint8_t pre_ant;    ///< harq pid + dai1 + dai2 + tpc + sri + precoding + csi request
   uint8_t ant_ports;  ///< 2..5 (DM-RS type x maxLength, transform precoding)
   uint8_t post_ant;   ///< srs request + cbg + ptrs-dmrs + beta offset + dmrs seq init
+  uint8_t fdra_mode;  ///< NR_FDRA_* (PUSCH resourceAllocation x rbg-Size); 0 = type 1
+  uint8_t n_rbg;      ///< N_RBG of that RBG configuration (TS 38.214 Table 6.1.2.2.1-1); 0 for type 1
 } nr_dci01_layout_t;
 
 /** Offsets implied by a layout, in the SHARED struct so the DCI 1_1 resolver can score it.
@@ -57,5 +59,10 @@ bool nr_dci01_layout_offsets(const nr_dci01_layout_t *l, uint16_t riv_bits, uint
  * nr_dci_resolver_init_from_offsets(). */
 int nr_dci01_layout_enumerate(uint16_t riv_bits, uint8_t tda_bits, uint16_t observed_len,
                               nr_dci01_layout_t *out, nr_dci11_offsets_t *offsets, int max);
+
+/** As above for every FDRA mode (type 1, type 0, dynamicSwitch x rbg-Size), same rules as
+ * nr_dci11_layout_enumerate_fdra(). */
+int nr_dci01_layout_enumerate_fdra(uint16_t riv_bits, uint8_t tda_bits, uint16_t observed_len, uint16_t bwp_start,
+                                   uint16_t bwp_size, nr_dci01_layout_t *out, nr_dci11_offsets_t *offsets, int max);
 
 #endif /* __NR_PDCCH_DCI01_LAYOUT_SWEEP_H__ */

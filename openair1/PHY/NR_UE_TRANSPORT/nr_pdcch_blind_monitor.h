@@ -165,8 +165,15 @@ bool nr_pdcch_blind_decode_raw_11(const int16_t *llr, uint8_t aggregation_level,
 /// only meaningful when `plausible == true`.
 typedef struct {
   uint16_t    rnti;               ///< CRC-recovered RNTI (plausibility range-checked)
-  uint16_t    start_rb;           ///< PRB allocation start (resource-allocation-type-1/RIV)
-  uint16_t    num_rb;              ///< PRB allocation size
+  uint16_t    start_rb;           ///< PRB allocation start (RIV); RA type 0: the lowest PRB
+  uint16_t    num_rb;              ///< PRB allocation size; RA type 0: the PRB COUNT (not a span)
+  /// RA type 0 (resourceAllocationType0, or dynamicSwitch with MSB 0): the allocation is the RBG bitmap
+  /// below, NOT start_rb..start_rb+num_rb. Expand with nr_ra_type0_prbs(rbg_bitmap, rbg_bwp_start,
+  /// bwp_size, rbg_size, ...). 0 on every type-1 grant.
+  uint8_t     ra_type0;
+  uint8_t     rbg_size;           ///< RBG size P the bitmap indexes
+  uint16_t    rbg_bwp_start;      ///< BWP CRB start the RBG grid was aligned to
+  uint32_t    rbg_bitmap;         ///< N_RBG bits, MSB = RBG 0
   uint8_t     start_symbol;       ///< PDSCH start symbol (from the default TDRA table)
   uint8_t     num_symbols;        ///< PDSCH symbol count
   uint16_t    dl_dmrs_symb_pos;   ///< DMRS symbol bitmap (same encoding as fapi_nr_dl_config_dlsch_pdu_rel15_t)
@@ -289,6 +296,11 @@ typedef struct {
   int tci_bits;              ///< default 0; 3 when tci-PresentInDCI is configured
   int srs_request_bits;      ///< default 2; 3 with a supplementary uplink
   int cbg_bits;              ///< default 0 (CBGTI + CBGFI combined)
+  // Frequency-domain assignment mode, NR_FDRA_* (nr_pdsch_prb_set.h): 0 = type 1/RIV (default, the old
+  // behaviour). Type 0 / dynamicSwitch change the FDRA WIDTH, so this also moves every later field.
+  // N_RBG aligns to the common RB grid, hence the BWP's CRB start.
+  int fdra_mode;
+  int fdra_bwp_start;
 } nr_pdcch_blind_extract_opts_t;
 
 /// Everything a format-1_0 decode needs beyond the payload itself. Unlike format 1_1 -- whose field

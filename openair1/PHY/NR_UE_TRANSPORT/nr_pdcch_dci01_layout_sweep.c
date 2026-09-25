@@ -28,12 +28,13 @@ bool nr_dci01_layout_offsets(const nr_dci01_layout_t *l, uint16_t riv_bits, uint
                              nr_dci11_offsets_t *out)
 {
   if (l == NULL || out == NULL || riv_bits == 0 || l->pre_riv > 3 || l->pre_mcs > 1
-      || l->ant_ports < 2 || l->ant_ports > 5) {
+      || l->ant_ports < 2 || l->ant_ports > 5 || l->fdra_mode > NR_FDRA_DYN_CFG2
+      || (l->fdra_mode != NR_FDRA_TYPE1 && (l->n_rbg == 0 || l->n_rbg > 31))) {
     return false;
   }
   uint16_t p = DCI01_ID;
   p += l->pre_riv;                 /* UL/SUL indicator + BWP indicator */
-  out->riv = p;            p += riv_bits;
+  out->riv = p;            p += (uint16_t)nr_fdra_bits(l->fdra_mode, l->n_rbg, riv_bits);
   out->tda = p;            p += tda_bits;
   p += l->pre_mcs;                 /* frequency hopping flag */
   out->mcs = p;            p += DCI01_MCS + DCI01_NDI;
@@ -53,6 +54,9 @@ bool nr_dci01_layout_offsets(const nr_dci01_layout_t *l, uint16_t riv_bits, uint
   out->total = p;
   out->tda_bits = tda_bits;
   out->tda_valid = 0;
+  out->fdra_mode = l->fdra_mode;
+  out->n_rbg = l->n_rbg;
+  out->riv_bits = (uint8_t)riv_bits;
   return true;
 }
 
@@ -78,20 +82,18 @@ static bool have(const nr_dci01_layout_t *o, int n, const nr_dci01_layout_t *c)
 {
   for (int i = 0; i < n; i++) {
     if (o[i].pre_riv == c->pre_riv && o[i].pre_mcs == c->pre_mcs && o[i].pre_ant == c->pre_ant
-        && o[i].ant_ports == c->ant_ports && o[i].post_ant == c->post_ant) {
+        && o[i].ant_ports == c->ant_ports && o[i].post_ant == c->post_ant && o[i].fdra_mode == c->fdra_mode
+        && o[i].n_rbg == c->n_rbg) {
       return true;
     }
   }
   return false;
 }
 
-int nr_dci01_layout_enumerate(uint16_t riv_bits, uint8_t tda_bits, uint16_t observed_len,
-                              nr_dci01_layout_t *out, nr_dci11_offsets_t *offsets, int max)
+/* Appends one FDRA mode's layouts to out[n..max). */
+static int enumerate_mode(uint16_t riv_bits, uint8_t tda_bits, uint16_t observed_len, uint8_t fdra_mode,
+                          uint8_t n_rbg, nr_dci01_layout_t *out, nr_dci11_offsets_t *offsets, int n, int max)
 {
-  if (out == NULL || max <= 0 || riv_bits == 0 || observed_len == 0) {
-    return -1;
-  }
-  int n = 0;
   /* The switch space is larger than DCI 1_1's (SRI, precoding and CSI request are each up to 7
    * values), but it collapses the same way: only the SUMS between read fields are distinguishable,
    * and the derived length then pins the rest. */
@@ -121,6 +123,8 @@ int nr_dci01_layout_enumerate(uint16_t riv_bits, uint8_t tda_bits, uint16_t obse
                           + kCsiReq[cs]);
     c.ant_ports = kAnt[an];
     c.post_ant = (uint8_t)(kSrsReq[sq] + kCbg[cb] + kPtrsDmrs[pd] + kBeta[be] + kDmrsInit[di]);
+    c.fdra_mode = fdra_mode;
+    c.n_rbg = n_rbg;
     nr_dci11_offsets_t off;
     if (!nr_dci01_layout_offsets(&c, riv_bits, tda_bits, &off)) {
       continue;
@@ -135,6 +139,35 @@ int nr_dci01_layout_enumerate(uint16_t riv_bits, uint8_t tda_bits, uint16_t obse
       offsets[n] = off;
     }
     out[n++] = c;
+  }
+  return n;
+}
+
+int nr_dci01_layout_enumerate(uint16_t riv_bits, uint8_t tda_bits, uint16_t observed_len,
+                              nr_dci01_layout_t *out, nr_dci11_offsets_t *offsets, int max)
+{
+  if (out == NULL || max <= 0 || riv_bits == 0 || observed_len == 0) {
+    return -1;
+  }
+  return enumerate_mode(riv_bits, tda_bits, observed_len, NR_FDRA_TYPE1, 0, out, offsets, 0, max);
+}
+
+int nr_dci01_layout_enumerate_fdra(uint16_t riv_bits, uint8_t tda_bits, uint16_t observed_len, uint16_t bwp_start,
+                                   uint16_t bwp_size, nr_dci01_layout_t *out, nr_dci11_offsets_t *offsets, int max)
+{
+  if (out == NULL || max <= 0 || riv_bits == 0 || observed_len == 0 || bwp_size == 0) {
+    return -1;
+  }
+  int n = 0;
+  for (int m = NR_FDRA_TYPE1; m <= NR_FDRA_DYN_CFG2 && n < max; m++) {
+    int n_rbg = 0;
+    if (m != NR_FDRA_TYPE1) {
+      const int P = nr_fdra_rbg_size(m, bwp_size);
+      if (P == 0 || ((m == NR_FDRA_TYPE0_CFG2 || m == NR_FDRA_DYN_CFG2) && P == nr_fdra_rbg_size(m - 1, bwp_size)))
+        continue;
+      n_rbg = nr_rbg_count(bwp_start, bwp_size, P);
+    }
+    n = enumerate_mode(riv_bits, tda_bits, observed_len, (uint8_t)m, (uint8_t)n_rbg, out, offsets, n, max);
   }
   return n;
 }

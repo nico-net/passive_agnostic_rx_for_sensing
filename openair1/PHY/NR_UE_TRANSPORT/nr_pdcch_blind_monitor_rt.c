@@ -550,7 +550,8 @@ static inline uint32_t dci11_layout_evidence(const nr_dci11_resolver_t *r, int i
 static inline uint16_t dci11_family_key(const nr_pdcch_blind_result_t *p)
 {
   uint32_t k = 2166136261u;
-  const uint32_t v[] = {p->start_rb, p->num_rb, p->tda_index, p->mcs, p->rv, p->ndi, p->harq_pid, p->dmrs_ports, p->nscid, p->n_dmrs_cdm_groups};
+  const uint32_t v[] = {p->start_rb, p->num_rb, p->tda_index, p->mcs, p->rv, p->ndi, p->harq_pid, p->dmrs_ports, p->nscid, p->n_dmrs_cdm_groups,
+                        p->ra_type0, p->rbg_bitmap};
   for (unsigned i = 0; i < sizeof(v) / sizeof(v[0]); i++) k = (k ^ v[i]) * 16777619u;
   return (uint16_t)(k % NR_DCI11_FAM_N);
 }
@@ -648,6 +649,8 @@ static int nr_pdcch_dci11_stage2_candidates(const nr_pdcch_blind_raw_result_t *r
     o.tci_bits           = f.tci_bits;
     o.srs_request_bits   = f.srs_request_bits;
     o.cbg_bits           = f.cbg_bits;
+    o.fdra_mode          = f.fdra_mode;       /* RA type 0 / dynamicSwitch move every later field */
+    o.fdra_bwp_start     = cfg->bwp_start;    /* the grid the resolver's N_RBG was computed on */
     /* The TDA width is THIS hypothesis' (searched); a configured list still pins it. tda_count is
      * the largest count that width can express; S/L are the scaffold Technique D replaces. */
     const uint8_t htb = r->off[i].tda_bits;
@@ -685,7 +688,14 @@ static int nr_pdcch_dci11_stage2_candidates(const nr_pdcch_blind_raw_result_t *r
 static nr_dci11_resolver_t g_dci01_resolver;
 static int g_dci01_state = 0;   /* 0 = not armed, 1 = armed, -1 = no legal layout at this length */
 static uint64_t g_dci01_seen = 0;
-static void nr_pdcch_dci01_layout_observe(uint16_t ul_bwp_size, int ul_tda_count,
+/* PUSCH FDRA mode LEARNED by stage 1: NR_FDRA_TYPE1 until every live 0_1 layout agrees on another one.
+ * Stage 1 never drops the true layout, so on a type-1 cell a type-1 layout always survives (its type-0
+ * aliases survive too -- a RIV read as a bitmap is almost never empty) and unanimity on another mode is
+ * only reachable when no type-1 layout fits the air. While it is set, UL grants are REFUSED: the UL
+ * extractor reads the FDRA as a RIV of the configured width, so every such grant would be decoded wrong,
+ * and RA type 0 PUSCH itself is not decodable here (nr_rx_pusch_group_tp takes rb_start/rb_size only). */
+static int g_dci01_fdra_mode = NR_FDRA_TYPE1;
+static void nr_pdcch_dci01_layout_observe(uint16_t ul_bwp_start, uint16_t ul_bwp_size, int ul_tda_count,
                                           uint16_t dci_length, uint64_t payload)
 {
   if (g_dci01_state < 0 || dci_length == 0 || ul_bwp_size == 0) {
@@ -703,7 +713,8 @@ static void nr_pdcch_dci01_layout_observe(uint16_t ul_bwp_size, int ul_tda_count
     }
     static nr_dci01_layout_t hyp[NR_DCI11_LAYOUT_MAX];
     static nr_dci11_offsets_t off[NR_DCI11_LAYOUT_MAX];
-    const int n = nr_dci01_layout_enumerate(riv_bits, tda_bits, dci_length, hyp, off, NR_DCI11_LAYOUT_MAX);
+    const int n = nr_dci01_layout_enumerate_fdra(riv_bits, tda_bits, dci_length, ul_bwp_start, ul_bwp_size, hyp, off,
+                                                 NR_DCI11_LAYOUT_MAX);
     if (n <= 0 || nr_dci_resolver_init_from_offsets(&g_dci01_resolver, ul_bwp_size, off, n) <= 0) {
       LOG_W(PHY, "SENSING: DCI01_LAYOUT no legal layout sums to dci_length=%u at ul_bwp_size=%u "
                  "tda_bits=%u -- one of those three is wrong for this cell\n",
@@ -719,8 +730,17 @@ static void nr_pdcch_dci01_layout_observe(uint16_t ul_bwp_size, int ul_tda_count
   }
   nr_dci11_resolver_observe(&g_dci01_resolver, payload);
   if ((++g_dci01_seen % 4000) == 0) {
-    LOG_A(PHY, "SENSING: DCI01_LAYOUT n=%llu observed | %d of %d layouts still plausible\n",
-          (unsigned long long)g_dci01_seen, g_dci01_resolver.n_alive, g_dci01_resolver.n_hyp);
+    int mode = -1;
+    for (int i = 0; i < g_dci01_resolver.n_hyp && mode != -2; i++)
+      if (g_dci01_resolver.alive[i])
+        mode = (mode == -1 || mode == g_dci01_resolver.off[i].fdra_mode) ? g_dci01_resolver.off[i].fdra_mode : -2;
+    if (mode > NR_FDRA_TYPE1 && mode != g_dci01_fdra_mode) {
+      LOG_A(PHY, "SENSING: DCI01_LAYOUT every live layout reads the FDRA as mode %d (1/2 = RA type 0, 3/4 = dynamicSwitch), "
+                 "not a RIV: UL grants are refused from now on (counted in UL_FDRA_REFUSED)\n", mode);
+      g_dci01_fdra_mode = mode;
+    }
+    LOG_A(PHY, "SENSING: DCI01_LAYOUT n=%llu observed | %d of %d layouts still plausible | fdra_mode %d\n",
+          (unsigned long long)g_dci01_seen, g_dci01_resolver.n_alive, g_dci01_resolver.n_hyp, g_dci01_fdra_mode);
   }
 }
 
@@ -812,8 +832,8 @@ static void nr_pdcch_dci11_layout_observe(const nr_pdcch_blind_monitor_cfg_t *cf
         tda_bits++;
       }
     }
-    const int n = nr_dci11_resolver_init(&g_dci11_resolver, cfg->bwp_size, riv_bits, tda_bits,
-                                         dci_length);
+    const int n = nr_dci11_resolver_init_fdra(&g_dci11_resolver, cfg->bwp_start, cfg->bwp_size, riv_bits, tda_bits,
+                                              dci_length);
     if (n <= 0) {
       /* NOT a resolver failure. It means no legal switch combination sums to the observed length,
        * so one of bwp_size / tda_count / dci_length disagrees with this cell -- which is itself
@@ -827,8 +847,11 @@ static void nr_pdcch_dci11_layout_observe(const nr_pdcch_blind_monitor_cfg_t *cf
     if (cfg->extract.tda_count > 0 && cfg->extract.tda_count < 16)
       nr_dci11_resolver_set_tda_count(&g_dci11_resolver, (uint8_t)cfg->extract.tda_count);
     LOG_I(PHY, "SENSING: DCI11_LAYOUT armed: %d layouts consistent with dci_length=%u "
-               "(riv=%u bits, tda=%s)\n", n, dci_length, riv_bits,
+               "(riv=%u bits, tda=%s, FDRA type 1 / type 0 / dynamicSwitch)\n", n, dci_length, riv_bits,
           tda_bits == NR_DCI11_TDA_UNKNOWN ? "0..4 bits (searched)" : "configured");
+    if (n >= NR_DCI11_LAYOUT_MAX)
+      LOG_W(PHY, "SENSING: DCI11_LAYOUT set truncated at NR_DCI11_LAYOUT_MAX=%d: every type-1 layout is kept, the "
+                 "RA type 0 / dynamicSwitch tail is cut\n", NR_DCI11_LAYOUT_MAX);
     g_dci11_state = 1;
   }
   nr_dci11_resolver_observe(&g_dci11_resolver, payload);
@@ -869,8 +892,8 @@ static void nr_pdcch_dci11_layout_observe(const nr_pdcch_blind_monitor_cfg_t *cf
       if (!nr_dci11_layout_to_field_bits(&r->hyp[i], &f))
         continue;
       const uint32_t ok = r->probe_ok[i], tr = r->probe_tr[i];
-      u += snprintf(eb + u, sizeof(eb) - u, "[%d t%ub%dm%dx%da%d%cp%d:%u/%u]", i, (unsigned)r->off[i].tda_bits,
-                    f.bwp_indicator_bits, f.vrb_to_prb_bits, f.tb2_bits, f.antenna_ports_bits,
+      u += snprintf(eb + u, sizeof(eb) - u, "[%d t%uf%ub%dm%dx%da%d%cp%d:%u/%u]", i, (unsigned)r->off[i].tda_bits,
+                    (unsigned)r->off[i].fdra_mode, f.bwp_indicator_bits, f.vrb_to_prb_bits, f.tb2_bits, f.antenna_ports_bits,
                     f.dmrs_config_type ? 'B' : 'A', f.tci_bits, ok, tr);
     }
     LOG_A(PHY, "SENSING: DCI11_STAGE2 %s (alive=%d, hands over at <=%d) tb_crc ok/trials per live layout: %s\n",
@@ -5070,7 +5093,8 @@ constdiag_done:;
         g_ul_accepts++;
         discovery_evidence("ul_admitted", "UL", cand_task[ti].frame, cand_task[ti].slot,
                             u->dci_length, u->rnti, u->raw_payload, cand_task[ti].L, cand_task[ti].cce);
-        nr_pdcch_dci01_layout_observe(ul_opts.bwp_size, ul_opts.tda_count, cand_task[ti].dci_length, u->raw_payload);
+        nr_pdcch_dci01_layout_observe(ul_opts.bwp_start, ul_opts.bwp_size, ul_opts.tda_count, cand_task[ti].dci_length,
+                                      u->raw_payload);
         { /* grant-loss SCORING only: matchable to the gNB scheduler log */
           struct timespec uts;
           clock_gettime(CLOCK_REALTIME, &uts);
@@ -5080,7 +5104,14 @@ constdiag_done:;
         }
         /* Park it for the slot its PUSCH occupies. The DCI is in a DOWNLINK slot; the PUSCH is k2
          * slots later in an UPLINK one, where nothing runs today. */
-        nr_pusch_grant_book_add(u, source_absolute_slot);
+        if (g_dci01_fdra_mode == NR_FDRA_TYPE1) {
+          nr_pusch_grant_book_add(u, source_absolute_slot);
+        } else {
+          static unsigned long s_refused = 0;
+          if ((++s_refused % 10000) == 1)
+            LOG_W(PHY, "SENSING: UL_FDRA_REFUSED n=%lu: 0_1 FDRA is mode %d, not a RIV -- grant not booked (would be "
+                       "decoded at the wrong PRBs/offsets)\n", s_refused, g_dci01_fdra_mode);
+        }
       } else {
         g_ul_rejects++;
       }
@@ -5683,7 +5714,10 @@ constdiag_done:;
     memset(&dlsch_pdu, 0, sizeof(dlsch_pdu));
     dlsch_pdu.BWPStart           = (uint16_t)rb_origin;
     dlsch_pdu.BWPSize            = is_dci10 ? dci10_ctx.n_rb_riv : cand_task[ti].bwp_size;
-    dlsch_pdu.resource_alloc     = 1; // Type-1/RIV -- the only branch this module ever produces
+    /* resource_alloc stays 1 for RA type 0 too: nr_dl_channel_estimation.c AssertFatal()s on 0 when it
+     * PRB-averages, and rb_bitmap is never filled. A type-0 grant travels as a Task 9 PRB list in
+     * freq_alloc (below), which is what the passive decode and every chest here actually consume. */
+    dlsch_pdu.resource_alloc     = 1;
     /* DM-RS SEQUENCE reference point, TS 38.211 7.4.1.1.2. NOT cosmetic and NOT unread:
      * nr_dl_channel_estimation.c:1249 computes the gold-sequence offset as
      *     first_rb + (refPoint ? 0 : BWPStart)
@@ -5773,7 +5807,30 @@ constdiag_done:;
       }
     }
 
-    const freq_alloc_bitmap_t freq_alloc = set_bitmap_from_start_size(out.start_rb, out.num_rb);
+    freq_alloc_bitmap_t freq_alloc = set_bitmap_from_start_size(out.start_rb, out.num_rb);
+    /* RA type 0 (resolved by the DCI 1_1 layout search): the allocation is an RBG bitmap. Hand it on as a
+     * DATA-ORDERED PRB list, normalised here -- the one place every path below (fast enqueue, deferred,
+     * in-line decode, data-aided tap) takes it from -- so first_rb/num_rbs/bitmap agree with the list. */
+    if (out.ra_type0) {
+      freq_alloc.n_prb_list = (uint16_t)nr_ra_type0_prbs(out.rbg_bitmap, out.rbg_bwp_start, dlsch_pdu.BWPSize,
+                                                         out.rbg_size, freq_alloc.prb_list, NR_PRB_SET_MAX);
+      if (freq_alloc.n_prb_list == 0 || !nr_pdsch_passive_alloc_normalise(&freq_alloc, dlsch_pdu.BWPSize)) {
+        grantdrop(&out, proc->frame_rx, proc->nr_slot_rx, "ra-type0-prb-list-invalid");
+        continue;
+      }
+      dlsch_pdu.start_rb   = (uint16_t)freq_alloc.first_rb;
+      dlsch_pdu.number_rbs = (uint16_t)freq_alloc.num_rbs; /* the PRB COUNT: TBS/G read it */
+    }
+    /* The per-accept channel estimate below (DM-RS CFR tap, SNR gate) is contiguous: for a PRB-list
+     * grant it covers the list's FIRST contiguous run only (nr_pdsch_channel_estimation walks bitmap
+     * blocks but restarts its output at index 0 per block). */
+    freq_alloc_bitmap_t chest_alloc = freq_alloc;
+    if (freq_alloc.n_prb_list > 0) {
+      int run = 1;
+      while (run < freq_alloc.n_prb_list && freq_alloc.prb_list[run] == freq_alloc.prb_list[run - 1] + 1)
+        run++;
+      chest_alloc = set_bitmap_from_start_size(freq_alloc.prb_list[0], run);
+    }
 
     /* ---- Is the per-accept channel estimate needed AT ALL on this thread? -----------------------
      * It exists for exactly two consumers: the DM-RS CFR tap (`want_dmrs`) and the post-estimation
@@ -5876,14 +5933,14 @@ constdiag_done:;
     nr_slot_fep(ue, fp, proc->nr_slot_rx, dmrs_sym, rxdataF_pdsch, link_type_dl, 0, ue->common_vars.rxdata);
 
     uint32_t nvar = 0;
-    nr_pdsch_channel_estimation(ue, proc, &dlsch_pdu, &freq_alloc, 0, get_dmrs_port(0, out.dmrs_ports),
+    nr_pdsch_channel_estimation(ue, proc, &dlsch_pdu, &chest_alloc, 0, get_dmrs_port(0, out.dmrs_ports),
                                (unsigned char)dmrs_sym, pdsch_est_size, pdsch_dl_ch_estimates,
                                fp->samples_per_slot_wCP, rxdataF_pdsch, &nvar);
     btim_add(BTIM_CHEST, btim_t_che);
 
-    const int num_sc = out.num_rb * NR_NB_SC_PER_RB;
+    const int num_sc = chest_alloc.num_rbs * NR_NB_SC_PER_RB;
     if (num_sc >= 2) {
-      const uint32_t base_sc = (uint32_t)(rb_origin + out.start_rb) * NR_NB_SC_PER_RB;
+      const uint32_t base_sc = (uint32_t)(rb_origin + chest_alloc.first_rb) * NR_NB_SC_PER_RB;
       // ---- AoA (2026-07-28): nr_pdsch_channel_estimation() above already computed the estimate for
       // EVERY rx antenna (it loops aarx in [0,nb_antennas_rx) internally and writes
       // pdsch_dl_ch_estimates[a][...] for each) -- this was already true before today, nothing new

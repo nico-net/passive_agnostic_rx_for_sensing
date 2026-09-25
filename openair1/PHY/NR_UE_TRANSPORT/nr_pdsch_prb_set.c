@@ -1,6 +1,28 @@
 #include "nr_pdsch_prb_set.h"
 #include <stdbool.h>
 #include <stddef.h>
+#include <string.h>
+
+bool nr_prb_list_normalise(const uint16_t *prb, int n, int bwp_size, uint32_t *bitmap, int bitmap_words, int *first,
+                           int *last)
+{
+  if (prb == NULL || n <= 0 || n > NR_PRB_SET_MAX || bitmap_words <= 0 || bitmap_words > 16)
+    return false;
+  uint32_t bm[16] = {0};
+  int lo = NR_PRB_SET_MAX, hi = -1;
+  for (int i = 0; i < n; i++) {
+    const int r = prb[i];
+    if (r >= bwp_size || r >= 32 * bitmap_words || ((bm[r / 32] >> (r % 32)) & 1u))
+      return false; /* outside the BWP, or listed twice */
+    bm[r / 32] |= 1u << (r % 32);
+    if (r < lo) lo = r;
+    if (r > hi) hi = r;
+  }
+  memcpy(bitmap, bm, (size_t)bitmap_words * sizeof(*bitmap));
+  *first = lo;
+  *last = hi;
+  return true;
+}
 
 int nr_rbg_size(int bwp_size, int rbg_config2)
 {
@@ -47,6 +69,48 @@ int nr_fdra_dynamic_split(uint32_t field, int n_rbg, int riv_bits, uint32_t *typ
   if (type0_bitmap)
     *type0_bitmap = field & ((1u << n_rbg) - 1u);
   return 0;
+}
+
+int nr_fdra_rbg_size(int mode, int bwp_size)
+{
+  return mode == NR_FDRA_TYPE1 ? 0 : nr_rbg_size(bwp_size, mode == NR_FDRA_TYPE0_CFG2 || mode == NR_FDRA_DYN_CFG2);
+}
+
+int nr_fdra_bits(int mode, int n_rbg, int riv_bits)
+{
+  if (mode == NR_FDRA_TYPE1)
+    return riv_bits;
+  if (mode == NR_FDRA_TYPE0_CFG1 || mode == NR_FDRA_TYPE0_CFG2)
+    return n_rbg;
+  return 1 + (n_rbg > riv_bits ? n_rbg : riv_bits);
+}
+
+int nr_fdra_prbs(uint32_t field, int mode, int n_rbg, int riv_bits, int bwp_start, int bwp_size, uint16_t *prb,
+                 int max, int *type0)
+{
+  uint32_t v = field;
+  int t0 = mode == NR_FDRA_TYPE0_CFG1 || mode == NR_FDRA_TYPE0_CFG2;
+  if (mode == NR_FDRA_DYN_CFG1 || mode == NR_FDRA_DYN_CFG2)
+    t0 = !nr_fdra_dynamic_split(field, n_rbg, riv_bits, &v, &v);
+  if (type0)
+    *type0 = t0;
+  if (t0)
+    return v ? nr_ra_type0_prbs(v, bwp_start, bwp_size, nr_fdra_rbg_size(mode, bwp_size), prb, max) : 0;
+  /* RIV, TS 38.214 5.1.2.2.2 (same decode as NRRIV2BW / NRRIV2PRBOFFSET) */
+  const int N = bwp_size;
+  if (N <= 0 || v >= (uint32_t)N * (uint32_t)(N + 1) / 2u)
+    return 0;
+  int L = (int)v / N + 1, S = (int)v % N;
+  if (S + L > N) {
+    L = N + 1 - (int)v / N;
+    S = N - 1 - (int)v % N;
+  }
+  if (L < 1 || S < 0 || S + L > N)
+    return 0;
+  int n = 0;
+  for (int i = 0; i < L && n < max; i++)
+    prb[n++] = (uint16_t)(S + i);
+  return n;
 }
 
 int nr_vrb_to_prb_interleaved(int bwp_start, int bwp_size, int L, int vrb_start, int n_vrb, uint16_t *prb)

@@ -1,5 +1,6 @@
 #ifndef NR_PDSCH_PRB_SET_H
 #define NR_PDSCH_PRB_SET_H
+#include <stdbool.h>
 #include <stdint.h>
 #ifdef __cplusplus
 extern "C" {
@@ -11,6 +12,11 @@ extern "C" {
 
 #define NR_PRB_SET_MAX 275
 
+/** Validate a data-ordered PRB list and derive its bitmap (bitmap_words 32-bit words, written only on
+ *  success) and lowest/highest PRB: the pure core of nr_pdsch_passive_alloc_normalise(). false if the
+ *  list is empty or longer than NR_PRB_SET_MAX, or a PRB is outside the BWP / the bitmap, or listed twice. */
+bool nr_prb_list_normalise(const uint16_t *prb, int n, int bwp_size, uint32_t *bitmap, int bitmap_words, int *first,
+                           int *last);
 /** RBG size P (TS 38.214 Table 5.1.2.2.1-1; UL Table 6.1.2.2.1-1 is identical). 0 if out of range. */
 int nr_rbg_size(int bwp_size, int rbg_config2);
 /** N_RBG = ceil((N_size + (N_start mod P)) / P). */
@@ -20,6 +26,17 @@ int nr_ra_type0_prbs(uint32_t bitmap, int bwp_start, int bwp_size, int P, uint16
 /** dynamicSwitch FDRA field (1 + max(N_RBG, riv_bits) bits): MSB 0 -> type 0, bitmap = N_RBG LSBs,
  *  returns 0; MSB 1 -> type 1, RIV = riv_bits LSBs, returns 1 (TS 38.212 7.3.1.2.2). */
 int nr_fdra_dynamic_split(uint32_t field, int n_rbg, int riv_bits, uint32_t *type0_bitmap, uint32_t *riv);
+/** Frequency-domain resource assignment mode of a DCI 1_1 / 0_1 (resourceAllocation x rbg-Size). */
+enum { NR_FDRA_TYPE1 = 0, NR_FDRA_TYPE0_CFG1 = 1, NR_FDRA_TYPE0_CFG2 = 2, NR_FDRA_DYN_CFG1 = 3, NR_FDRA_DYN_CFG2 = 4 };
+/** RBG size P a mode uses (0 for type 1). */
+int nr_fdra_rbg_size(int mode, int bwp_size);
+/** FDRA field width: type 1 = riv_bits, type 0 = N_RBG, dynamicSwitch = 1 + max(N_RBG, riv_bits). */
+int nr_fdra_bits(int mode, int n_rbg, int riv_bits);
+/** Decode an FDRA field into a data-ordered PRB list (type 1 = the RIV's contiguous range). Returns the
+ *  count; 0 = impossible for the true layout (empty bitmap, RIV outside the BWP). *type0 (may be NULL) is
+ *  set to 1 when the field resolved to a type-0 bitmap. */
+int nr_fdra_prbs(uint32_t field, int mode, int n_rbg, int riv_bits, int bwp_start, int bwp_size, uint16_t *prb,
+                 int max, int *type0);
 /** Interleaved VRB-to-PRB mapping (TS 38.211 7.3.1.6), bundle size L in {2,4}. prb[i] is the PRB of
  *  VRB vrb_start+i, i.e. the output is in DATA order (PDSCH maps to VRBs in increasing order).
  *  For DCI 1_0 in a common search space pass bwp_start = 0, the initial-BWP size, L = 2. */

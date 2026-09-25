@@ -57,6 +57,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "nr_pdsch_prb_set.h"   /* NR_FDRA_* modes, N_RBG, FDRA width */
+
 /// One layout hypothesis, in the only terms extraction can distinguish.
 typedef struct {
   uint8_t bwp_ind;      ///< BWP indicator width: 0, 1 or 2 (n_dl_bwp)
@@ -65,6 +67,11 @@ typedef struct {
   uint8_t ant_ports;    ///< 4, 5 or 6 (DM-RS type x maxLength)
   uint8_t post_ant;     ///< tci + srs + cbg + cbg_flush (0..14)
   uint8_t dmrs_type;    ///< 0 = type 1, 1 = type 2: at 5 bits both are layouts (Tables -2 vs -3)
+  /* Frequency-domain assignment. resourceAllocation (type 0 / type 1 / dynamicSwitch) and rbg-Size are
+   * RRC switches too, and they set the FDRA WIDTH -- get it wrong and every later field shifts, the
+   * same failure as the old bwp_indicator/TDA gap. NR_FDRA_* (0 = type 1/RIV, all-zero = old layout). */
+  uint8_t fdra_mode;
+  uint8_t n_rbg;        ///< N_RBG of this mode's RBG configuration; 0 for type 1
 } nr_dci11_layout_t;
 
 #define NR_DCI11_LAYOUT_MAX 2048 /* searched TDA width x DM-RS type x HARQ width: ~2x988 at len 49 on 273 PRB */
@@ -89,6 +96,12 @@ typedef struct {
    * at or beyond the list length is impossible for the true layout and common for a shifted one. */
   uint8_t tda_bits;
   uint8_t tda_valid;
+  /* How the field at `riv` (width tda - riv) is read: NR_FDRA_* mode, N_RBG and the RIV width
+   * (the dynamicSwitch split needs both). The plausibility test follows the mode: RIV inside the BWP,
+   * or a non-empty RBG bitmap. */
+  uint8_t fdra_mode;
+  uint8_t n_rbg;
+  uint8_t riv_bits;
 } nr_dci11_offsets_t;
 
 /** Offsets implied by a layout. `tda_bits` comes from the TDRA list Technique D already recovers,
@@ -96,11 +109,19 @@ typedef struct {
 bool nr_dci11_layout_offsets(const nr_dci11_layout_t *l, uint16_t riv_bits, uint8_t tda_bits,
                              nr_dci11_offsets_t *out);
 
-/** Every layout whose total width equals `observed_len`, written to `out` (up to `max`).
+/** Every layout whose total width equals `observed_len`, written to `out` (up to `max`). Type-1 (RIV)
+ * frequency-domain assignment only -- nr_dci11_layout_enumerate_fdra() searches every mode.
  * Returns the count, or -1 on bad arguments. This is the whole point: the derived DCI length is a
  * hard constraint that most of the switch space fails. Pure. */
 int nr_dci11_layout_enumerate(uint16_t riv_bits, uint8_t tda_bits, uint16_t observed_len,
                               nr_dci11_layout_t *out, int max);
+
+/** Every layout of every FDRA mode (type 1, type 0 and dynamicSwitch, each rbg-Size config): the same
+ * switch space enumerated once per mode with that mode's FDRA width, the length constraint pruning the
+ * impossible ones. N_RBG needs the BWP's CRB start (RBGs align to the common grid). rbg-Size config 2
+ * is skipped where it gives the same RBG size as config 1 (> 144 PRB): identical reads, a duplicate. */
+int nr_dci11_layout_enumerate_fdra(uint16_t riv_bits, uint8_t tda_bits, uint16_t observed_len,
+                                   uint16_t bwp_start, uint16_t bwp_size, nr_dci11_layout_t *out, int max);
 
 /** Stage-1 oracle: is this payload PLAUSIBLE under this layout? Checks the fields a wrong offset
  * corrupts first -- MCS not in the reserved rows, RV in range, and a RIV inside the BWP. Costs no
@@ -141,6 +162,7 @@ typedef struct {
   uint8_t  tda_bits;
   uint16_t observed_len;
   uint16_t bwp_size;
+  uint16_t bwp_start;
   /* DISTRIBUTIONAL EVIDENCE (stage 1). A correctly aligned field has structure on a live cell --
    * MCS sits on one or two values under load, RV is overwhelmingly 0, the TDA index uses one to three
    * entries, the antenna-ports codepoint is constant for a single-layer UE -- while a misaligned read
@@ -157,6 +179,10 @@ typedef struct {
 #define NR_DCI11_TDA_UNKNOWN 0xFF /* tda_bits: enumerate every width 0..4 (the list size is an RRC switch) */
 int nr_dci11_resolver_init(nr_dci11_resolver_t *r, uint16_t bwp_size, uint16_t riv_bits,
                            uint8_t tda_bits, uint16_t observed_len);
+/** As nr_dci11_resolver_init(), searching every FDRA mode (nr_dci11_layout_enumerate_fdra); the one the
+ * receive path uses. nr_dci11_resolver_init() stays type-1-only. */
+int nr_dci11_resolver_init_fdra(nr_dci11_resolver_t *r, uint16_t bwp_start, uint16_t bwp_size, uint16_t riv_bits,
+                                uint8_t tda_bits, uint16_t observed_len);
 
 /** Build a resolver directly from a caller-supplied offsets list, for a DCI format other than 1_1.
  * The resolver only ever reads offsets, so it is format-agnostic: DCI 0_1 exposes the same fields
@@ -217,6 +243,7 @@ typedef struct {
   int dmrs_config_type;     ///< 0 = type 1, 1 = type 2 (which antenna-ports table the width means)
   int tci_bits;             ///< carries post_ant (tci + srs + cbg + flush)
   int srs_request_bits, cbg_bits;                             ///< always 0, see above
+  int fdra_mode;            ///< NR_FDRA_*: the extractor derives the FDRA width (and N_RBG) from it
 } nr_dci11_field_bits_t;
 
 /** Translate a layout into those widths. Returns false if the layout cannot be represented
