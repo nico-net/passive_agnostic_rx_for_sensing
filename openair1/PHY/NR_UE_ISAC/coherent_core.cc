@@ -2015,9 +2015,27 @@ static std::vector<float> whiten_notch_leakage(RdResult& R, double pfa_cell, Whi
   std::vector<float> f((size_t)kCh * nr * nd, 1.f);
   std::vector<uint32_t> notch; for (uint32_t d = 0; d < nd; ++d) if (!dopp_ok(a, d)) notch.push_back(d);
   if (notch.empty()) return f;
-  const long dx = (long)nr - 1, dy = (long)nd - 1;
-  std::vector<double> A2((size_t)(2 * dx + 1) * (2 * dy + 1));
-  for (long x = -dx; x <= dx; ++x) for (long y = -dy; y <= dy; ++y) A2[(size_t)(x + dx) * (2 * dy + 1) + (y + dy)] = R.ambiguity((double)x, (double)y);
+  // The range kernel is zero beyond +-wf.X bins, so only range offsets within that support are tabulated
+  // (and summed); Doppler offsets are tabulated in full (they are all reachable from the notch).
+  const long dx = std::min((long)nr - 1, R.wf.X), dy = (long)nd - 1, W = 2 * dy + 1;
+  // |A(x, y)|^2 = |sum_r u_r(x) e^{-j2pi y df t_r}|^2 / wsum^2 with u_r(x) = w_r e^{j2pi fc_r x dt} B_g(r)(x):
+  // the same sum as RdResult::ambiguity_c, with the Doppler phases tabulated once instead of per (x, y, r).
+  std::vector<double> A2((size_t)(2 * dx + 1) * W, 0.0);
+  if (R.wf.wsum > 0) {
+    const size_t nrow = R.wf.grp.size();
+    std::vector<cd> E((size_t)W * nrow, cd(0, 0)), u(nrow);
+    for (long y = -dy; y <= dy; ++y) for (size_t r = 0; r < nrow; ++r)
+      if (R.wf.grp[r] >= 0) E[(size_t)(y + dy) * nrow + r] = std::polar(1.0, -2 * M_PI * y * a.dopp_step_hz * a.row_t_s[r]);
+    for (long x = -dx; x <= dx; ++x) {
+      for (size_t r = 0; r < nrow; ++r)
+        u[r] = R.wf.grp[r] >= 0 ? R.wf.w[r] * std::polar(1.0, 2 * M_PI * R.wf.fc[r] * x * a.delay_step_s) * kernel_at(R.wf.B[R.wf.grp[r]], R.wf.X, (double)x) / R.wf.wsum : cd(0, 0);
+      for (long y = -dy; y <= dy; ++y) {
+        cd acc = 0; const cd* e = &E[(size_t)(y + dy) * nrow];
+        for (size_t r = 0; r < nrow; ++r) acc += e[r] * u[r];
+        A2[(size_t)(x + dx) * W + (y + dy)] = std::norm(acc);
+      }
+    }
+  }
   bool any = false;
   std::vector<double> src(nr * notch.size());
   for (uint32_t i = 0; i < kCh; ++i) {
@@ -2026,9 +2044,10 @@ static std::vector<float> whiten_notch_leakage(RdResult& R, double pfa_cell, Whi
     for (size_t m = 0; m < nr; ++m) for (size_t q = 0; q < notch.size(); ++q) src[m * notch.size() + q] = std::max(0.0, (double)std::norm(R.rd.v[R.rd.idx(i, (uint32_t)m, notch[q])]) - N0);
     for (uint32_t d : a.tested_dopp) for (size_t m = 0; m < nr; ++m) {
       double leak = 0;
-      for (size_t m2 = 0; m2 < nr; ++m2) {
-        const double* row = &A2[(size_t)((long)m - (long)m2 + dx) * (2 * dy + 1)];
-        for (size_t q = 0; q < notch.size(); ++q) leak += src[m2 * notch.size() + q] * row[(long)d - (long)notch[q] + dy];
+      const long m2lo = std::max(0L, (long)m - dx), m2hi = std::min((long)nr - 1, (long)m + dx);
+      for (long m2 = m2lo; m2 <= m2hi; ++m2) {
+        const double* row = &A2[(size_t)((long)m - m2 + dx) * W];
+        for (size_t q = 0; q < notch.size(); ++q) leak += src[(size_t)m2 * notch.size() + q] * row[(long)d - (long)notch[q] + dy];
       }
       if (!(leak > 0)) continue;
       const float g = (float)std::sqrt(N0 / (N0 + leak));
@@ -2065,7 +2084,12 @@ std::vector<float> whiten_range_clutter(RdResult& R, double pfa_cell, WhitenInfo
       for (uint32_t d = 0; d < a.n_dopp; ++d) R.rd.v[R.rd.idx(i, m, d)] *= g;
     }
   }
-  return f;
+  // The range-bin median cannot see STRUCTURED leakage of the notch energy -- the grating lobes the TDD
+  // gaps put at k x 200 Hz. Adding the predicted notch-leakage floor on top removed most of what remained
+  // (48 GB empty-room replay: 0.67 -> 0.15 detections/CPI in these CPIs, all CPIs 0.67 -> 0.21).
+  std::vector<float> c = whiten_notch_leakage(R, pfa_cell, nullptr);
+  for (size_t j = 0; j < c.size(); ++j) c[j] *= f[j / a.n_dopp];
+  return c;
 }
 
 std::vector<double> slow_time_weights(const CfrWindow& w, const Axes& a)
