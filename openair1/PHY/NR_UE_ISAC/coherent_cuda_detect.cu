@@ -528,6 +528,35 @@ __global__ void k_fit_dir(DAxes a, DResp rs, const uint32_t* slots, uint32_t ns,
     dir[(size_t)s * nc + (size_t)m * a.n_dopp + d] = acc;
   }
 }
+// The other tolerance-grid points' responses over the whole RD grid (the leakage bound reads them at
+// every item's cells): G = (em pp) K per (slot, grid point, m, row), then sum_j ed(d)_j G_j per cell in
+// row order. Associates differently from the oracle's ((ed em) pp) K by a few ulps per term.
+__global__ void k_fit_G(DAxes a, DResp rs, const DFit* F, const uint32_t* slots, uint32_t ns, const double2* gpp, const double* gpr, double2* G)
+{
+  const size_t per = (size_t)kMaxGrid * rs.nrow, pq = (size_t)a.n_range * rs.nrow, tot = (size_t)ns * (kMaxGrid - 1) * pq;
+  for (size_t q = (size_t)blockIdx.x * blockDim.x + threadIdx.x; q < tot; q += (size_t)blockDim.x * gridDim.x) {
+    const uint32_t i = (uint32_t)(q / ((kMaxGrid - 1) * pq)), gq = 1 + (uint32_t)((q / pq) % (kMaxGrid - 1));
+    const uint32_t m = (uint32_t)((q % pq) / rs.nrow), j = (uint32_t)(q % rs.nrow);
+    const uint32_t s = slots[i];
+    if ((int)gq >= F[s].ngrid) continue;
+    const size_t o = (size_t)s * per + (size_t)gq * rs.nrow + j;
+    G[q] = cmul(cmul(rs.em[(size_t)m * rs.nrow + j], gpp[o]), d_kernel_at(rs, rs.g[j], (double)m - gpr[o]));
+  }
+}
+__global__ void k_fit_dirg(DAxes a, DResp rs, const DFit* F, const uint32_t* slots, uint32_t ns, const double2* G, double2* dirg)
+{
+  const size_t nc = (size_t)a.n_range * a.n_dopp, pq = (size_t)a.n_range * rs.nrow, tot = (size_t)ns * (kMaxGrid - 1) * nc;
+  for (size_t q = (size_t)blockIdx.x * blockDim.x + threadIdx.x; q < tot; q += (size_t)blockDim.x * gridDim.x) {
+    const uint32_t i = (uint32_t)(q / ((kMaxGrid - 1) * nc)), gq1 = (uint32_t)((q / nc) % (kMaxGrid - 1));
+    const uint32_t m = (uint32_t)((q % nc) / a.n_dopp), d = (uint32_t)(q % a.n_dopp);
+    const uint32_t s = slots[i];
+    if ((int)gq1 + 1 >= F[s].ngrid) continue;
+    const double2* Gm = G + ((size_t)i * (kMaxGrid - 1) + gq1) * pq + (size_t)m * rs.nrow; const double2* ed = rs.ed + (size_t)d * rs.nrow;
+    double2 acc = make_double2(0, 0);
+    for (uint32_t j = 0; j < rs.nrow; ++j) acc = cadd(acc, cmul(ed[j], Gm[j]));
+    dirg[((size_t)s * (kMaxGrid - 1) + gq1) * nc + (size_t)m * a.n_dopp + d] = acc;
+  }
+}
 // Static-removal term of each new fit (coherent_core.cc's static_term), all Doppler bins: buffer fill for
 // one inverse FFT per (slot, d) over the subcarriers, then the crop to the range axis.
 __global__ void k_stat_phase(DAxes a, uint32_t sc, const DFit* F, const uint32_t* slots, uint32_t ns, double2* ph)
@@ -576,9 +605,9 @@ __global__ void k_rebuild(DAxes a, const DFit* F, const uint32_t* slots, uint32_
 // 0..leak_n[i]-1 at the Doppler bin leak_d[i] (the fits do not change during the pursuit, so a new
 // accepted fit only appends a term, in the same order as the oracle's sum).
 struct DItem { DAcc me; double thr; int32_t d; uint32_t dh, alive, pad; double leak[kCh]; uint32_t leak_d[kCh], leak_n[kCh]; };
-struct DFitTabs { const DFit* F; const double2 *gpp, *dir, *stat; const double* gpr; uint32_t per, nc, sper; };
-// leak_amp() of one fit at (bin, d), by one warp: the (grid point, range bin) responses are spread over
-// the lanes, each a sequential row sum in the oracle's order (Response::at); shv: 4 * kMaxGrid doubles.
+struct DFitTabs { const DFit* F; const double2 *gpp, *dir, *stat; const double* gpr; uint32_t per, nc, sper; const double2* dirg; };
+// leak_amp() of one fit at (bin, d), by one warp: the (grid point, range bin) responses come from the
+// slot's response tables (dir, dirg); shv: 4 * kMaxGrid doubles.
 __device__ double d_leak_amp(const DAxes& a, const DResp& rs, const DFitTabs& T, uint32_t s, double bin, uint32_t d, double z, double* shv)
 {
   const DFit& f = T.F[s];
@@ -589,13 +618,9 @@ __device__ double d_leak_amp(const DAxes& a, const DResp& rs, const DFitTabs& T,
   uint32_t b[4]; for (int j = 0; j < 4; ++j) { const long q = b0 - 1 + j; b[j] = (uint32_t)(q < 0 ? 0 : (q > (long)n - 1 ? (long)n - 1 : q)); }
   const double2* st = T.stat + (size_t)s * T.sper + (size_t)d * n;
   for (uint32_t c = lane; c < (uint32_t)f.ngrid * 4; c += 32) {
-    const uint32_t q = c / 4, jb = c % 4; double2 at;
-    if (q == 0) at = T.dir[(size_t)s * T.nc + (size_t)b[jb] * a.n_dopp + d];
-    else {
-      const double2* pp = T.gpp + (size_t)s * T.per + (size_t)q * rs.nrow; const double* pr = T.gpr + (size_t)s * T.per + (size_t)q * rs.nrow;
-      at = make_double2(0, 0);
-      for (uint32_t j = 0; j < rs.nrow; ++j) at = cadd(at, d_term(rs, b[jb], d, j, pp[j], pr[j]));
-    }
+    const uint32_t q = c / 4, jb = c % 4;
+    const double2 at = q == 0 ? T.dir[(size_t)s * T.nc + (size_t)b[jb] * a.n_dopp + d]
+                              : T.dirg[((size_t)s * (kMaxGrid - 1) + (q - 1)) * T.nc + (size_t)b[jb] * a.n_dopp + d];
     shv[c] = cabs2(cadd(at, st[b[jb]]));
   }
   __syncwarp();
@@ -674,7 +699,7 @@ struct FitArgs {
 size_t fit_smem_bytes(uint32_t nrow, uint32_t nm, uint32_t Nmax, uint32_t nrow_all, uint32_t ndw)
 {
   return (size_t)(nrow + (nrow + 1) / 2 + (size_t)nm * nrow + Nmax + 4 * (size_t)Nmax + 32 * (size_t)Nmax / 2 + 2) * sizeof(double2)
-         + (size_t)nrow_all * sizeof(double2) + (size_t)(ndw + nm) * nrow * sizeof(double2);
+         + (size_t)nrow_all * sizeof(double2) + (size_t)(ndw + nm) * nrow * sizeof(double2) + (size_t)Nmax * sizeof(double2);
 }
 __device__ inline double2 block_sum2(double2 v, double2* sh)   // blockDim.x multiple of 32, <= 1024
 {
@@ -694,7 +719,7 @@ struct FitCtx {
   const FitArgs* A; uint32_t job, b; int N, m0; uint32_t nm;
   const int2* cells; double2 *y0, *y, *resA, *resa; double* resJ;
   double2* shp; double* shr; double2* shG; double2* sha; double2* shD; double* shP; double2* erow; double2* shred;
-  double2 *shED, *shEM; int d0;   // the window's Doppler (from d0) and range (from m0) row phasors ed / em
+  double2 *shED, *shEM, *shY; int d0;   // the window's Doppler (from d0) and range (from m0) row phasors ed / em
   int nsync, rd;   // rd: result buffer of the last completed batch
 };
 // J(p, fb) for point slot k: model a_c = sum_j ed[d_c][j] (em[m_c][j] pp_j K(m_c - pr_j)),
@@ -707,6 +732,7 @@ __device__ void fit_eval_point(FitCtx& C, double p, double fb, int k, int wb, bo
     const double pr = p - (f / a.fc_hz) * (rs.t[j] - rs.tbar) / a.delay_step_s;
     C.shr[j] = pr; C.shp[j] = dpolar(2 * M_PI * (f * rs.t[j] - rs.fc[j] * pr * a.delay_step_s));
   }
+  for (int c = threadIdx.x; c < C.N; c += blockDim.x) C.shY[c] = __ldcg(C.y + c);   // the cells' data, for the J sum below
   __syncthreads();
   // G_j(m) = em_j(m) pp_j K_j(m - pr_j), per (m, row); then per cell ONE thread sums ed_j(d) G_j(m) over the
   // rows in the oracle's order (Response::at), and one thread sums the cells (fit_channel's J). The
@@ -718,22 +744,38 @@ __device__ void fit_eval_point(FitCtx& C, double p, double fb, int k, int wb, bo
     C.shG[q] = cmul(cmul(C.shEM[q], C.shp[j]), d_kernel_at(rs, rs.g[j], (double)m - C.shr[j]));
   }
   __syncthreads();
-  for (int c = threadIdx.x; c < C.N; c += blockDim.x) {
+  // cells: each cell's row sum in kSeg consecutive row segments (one thread each), combined in segment
+  // order; FP64 runs at 1/64 rate here and a warp instruction costs the same with 1 or 32 lanes active,
+  // so the sums are spread over the block instead of one thread per cell.
+  constexpr uint32_t kSeg = 4;
+  const uint32_t seg = (rs.nrow + kSeg - 1) / kSeg;
+  for (uint32_t q = threadIdx.x; q < (uint32_t)C.N * kSeg; q += blockDim.x) {
+    const uint32_t c = q / kSeg, sgi = q % kSeg;
     const int2 cm = __ldcg(C.cells + c);
     const double2* ed = C.shED + (size_t)(cm.y - C.d0) * rs.nrow; const double2* G = C.shG + (size_t)(cm.x - C.m0) * rs.nrow;
     double2 acc = make_double2(0, 0);
-    for (uint32_t j = 0; j < rs.nrow; ++j) acc = cadd(acc, cmul(ed[j], G[j]));
+    const uint32_t j1 = (sgi + 1) * seg < rs.nrow ? (sgi + 1) * seg : rs.nrow;
+    for (uint32_t j = sgi * seg; j < j1; ++j) acc = cadd(acc, cmul(ed[j], G[j]));
+    C.shD[q] = acc;   // (shD is free during the searches; N * kSeg <= 4 * Nmax)
+  }
+  __syncthreads();
+  for (int c = threadIdx.x; c < C.N; c += blockDim.x) {
+    double2 acc = C.shD[c * kSeg]; for (uint32_t k2 = 1; k2 < kSeg; ++k2) acc = cadd(acc, C.shD[c * kSeg + k2]);
     C.sha[c] = acc;
   }
   __syncthreads();
-  if (threadIdx.x == 0) {
+  if (threadIdx.x < 32) {   // J: warp 0, lane-strided partial sums then a shuffle tree
     double2 num = make_double2(0, 0); double den = 0;
-    for (int c = 0; c < C.N; ++c) {
-      const double2 yc = __ldcg(C.y + c), ac = C.sha[c];
+    for (int c = threadIdx.x; c < C.N; c += 32) {
+      const double2 yc = C.shY[c], ac = C.sha[c];
       num.x += yc.x * ac.x + yc.y * ac.y; num.y += yc.y * ac.x - yc.x * ac.y; den += ac.x * ac.x + ac.y * ac.y;
     }
-    C.resJ[wb * kMaxPts + k] = den > 0 ? (num.x * num.x + num.y * num.y) / den : 0.0;
-    C.resA[wb * kMaxPts + k] = den > 0 ? make_double2(num.x / den, num.y / den) : make_double2(0, 0);
+    num = warp_sum(num);
+    for (int o = 16; o > 0; o >>= 1) den += __shfl_xor_sync(0xffffffffu, den, o);
+    if (threadIdx.x == 0) {
+      C.resJ[wb * kMaxPts + k] = den > 0 ? (num.x * num.x + num.y * num.y) / den : 0.0;
+      C.resA[wb * kMaxPts + k] = den > 0 ? make_double2(num.x / den, num.y / den) : make_double2(0, 0);
+    }
   }
   if (want_a) for (int c = threadIdx.x; c < C.N; c += blockDim.x) C.resa[((size_t)wb * kMaxPts + k) * A.Nmax + c] = C.sha[c];
   __syncthreads();
@@ -865,7 +907,7 @@ __device__ void fit_ctx_init(const FitArgs& A, FitCtx& C, uint32_t job, uint32_t
   C.shp = smem; C.shr = (double*)(smem + rs.nrow); C.shG = smem + rs.nrow + (rs.nrow + 1) / 2;
   C.sha = C.shG + (size_t)nm * rs.nrow; C.shD = C.sha + A.Nmax; C.shP = (double*)(C.shD + 4 * (size_t)A.Nmax);
   C.erow = (double2*)(C.shP + 32 * (size_t)A.Nmax) + 2;
-  C.shED = C.erow + A.nrow_all; C.shEM = C.shED + (size_t)(2 * A.hm_d + 1) * rs.nrow;
+  C.shED = C.erow + A.nrow_all; C.shEM = C.shED + (size_t)(2 * A.hm_d + 1) * rs.nrow; C.shY = C.shEM + (size_t)nm * rs.nrow;
   C.shred = shred;
 }
 // One channel fit (coherent_core.cc's fit_channel) by the B blocks of job C.job, ending with every block
@@ -1206,7 +1248,7 @@ struct GpuDetect::Impl {
   };
   Buf okt, rd_up, E_up, rdf, mag, rcf, magc, dh, tested, okc, nmed, nthr, zz, zz_sorted, seg_off, scale, flag, cand, ncand, cub_tmp,
       c_me, c_ec, c_thr, pk_scratch,
-      r_w, r_t, r_fc, r_g, r_B, r_ed, r_em, Q, items, one, slots, F, Mf, gpp, gpr, dir, stat, st_ph, st_buf, alive,
+      r_w, r_t, r_fc, r_g, r_B, r_ed, r_em, Q, items, one, slots, F, Mf, gpp, gpr, dir, dirg, fitG, stat, st_ph, st_buf, alive,
       w_mask, w_lo, w_hi, w_trow, gam, jobs, f_cells, f_y0, f_y, f_resA, f_resa, f_resJ, f_Mmid, f_Z, bar, moved, fstats, m_erow, refit_flags;
   int n_sm = 0; size_t fit_smem_set = 0, choose_smem_set = 0;
   // Warps per block for the warp-per-candidate choose kernels: as many as fit a block's shared memory (<= 4).
@@ -1238,7 +1280,9 @@ struct GpuDetect::Impl {
     int per_sm = 0; cuda_check(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&per_sm, kern, 256, smem), "fit occupancy");
     const uint32_t total = (uint32_t)std::max(1, per_sm * n_sm);
     if (total < nj) throw std::runtime_error("detect fit: device cannot co-schedule one block per job");
-    fa.B = std::max<uint32_t>(1, std::min<uint32_t>(kMaxPts, total / nj));   // a full 9-point batch in one wave
+    // Blocks per job: a full 9-point batch in one wave, but no more blocks than SMs in total -- two blocks
+    // sharing an SM share its FP64 units, and every batch waits for the slowest block of the job.
+    fa.B = std::max<uint32_t>(1, std::min<uint32_t>({(uint32_t)kMaxPts, total / nj, (uint32_t)n_sm / nj}));
     fa.jobs = jobs.as<FitJob>(); fa.njobs = nj;
     const size_t nb = (size_t)nj * fa.B;
     f_cells.ensure((size_t)nj * fa.Nmax * sizeof(int2)); f_y0.ensure((size_t)nj * fa.Nmax * sizeof(double2)); f_y.ensure((size_t)nj * fa.Nmax * sizeof(double2));
@@ -1303,11 +1347,12 @@ struct GpuDetect::Impl {
   {
     if (n <= slot_cap && F.cap >= n * sizeof(DFit)) {
       // the per-slot sizes can change CPI to CPI (rows, Doppler bins): re-check the byte sizes too
-      if (gpp.cap >= n * per * sizeof(double2) && dir.cap >= n * ncc * sizeof(double2) && stat.cap >= n * sper * sizeof(double2) && Mf.cap >= (size_t)n * sc * sizeof(double2)) return;
+      if (gpp.cap >= n * per * sizeof(double2) && dir.cap >= n * ncc * sizeof(double2) && dirg.cap >= n * (kMaxGrid - 1) * ncc * sizeof(double2) &&
+          stat.cap >= n * sper * sizeof(double2) && Mf.cap >= (size_t)n * sc * sizeof(double2)) return;
     }
     const uint32_t cap = std::max<uint32_t>(n, 2 * slot_cap);
     grow_keep(F, cap * sizeof(DFit)); grow_keep(gpp, cap * per * sizeof(double2)); grow_keep(gpr, cap * per * sizeof(double));
-    grow_keep(dir, cap * ncc * sizeof(double2)); grow_keep(stat, cap * sper * sizeof(double2)); grow_keep(Mf, (size_t)cap * sc * sizeof(double2));
+    grow_keep(dir, cap * ncc * sizeof(double2)); grow_keep(dirg, cap * (kMaxGrid - 1) * ncc * sizeof(double2)); grow_keep(stat, cap * sper * sizeof(double2)); grow_keep(Mf, (size_t)cap * sc * sizeof(double2));
     slot_cap = cap;
   }
   void set_alive(const std::vector<DItem>& it)
@@ -1321,6 +1366,10 @@ struct GpuDetect::Impl {
   void build_fit_tables(const DAxes& da, const DResp& dr, uint32_t ns, uint32_t sc, size_t per, size_t ncc, size_t sper)
   {
     k_fit_dir<<<blocks(ns * ncc, 128), 128, 0, stream>>>(da, dr, slots.as<uint32_t>(), ns, gpp.as<double2>(), gpr.as<double>(), dir.as<double2>());
+    const size_t ng = (size_t)ns * (kMaxGrid - 1) * da.n_range * dr.nrow;
+    fitG.ensure(ng * sizeof(double2));
+    k_fit_G<<<blocks(ng), 256, 0, stream>>>(da, dr, F.as<DFit>(), slots.as<uint32_t>(), ns, gpp.as<double2>(), gpr.as<double>(), fitG.as<double2>());
+    k_fit_dirg<<<blocks((size_t)ns * (kMaxGrid - 1) * ncc, 128), 128, 0, stream>>>(da, dr, F.as<DFit>(), slots.as<uint32_t>(), ns, fitG.as<double2>(), dirg.as<double2>());
     const long N = da.n_fft, batch = (long)ns * da.n_dopp;
     if (!plan || plan_n != N || plan_batch < batch) {
       if (plan) cufftDestroy(plan);
@@ -1363,8 +1412,14 @@ std::vector<Detection> GpuDetect::run(const std::vector<float>& E, const RdResul
   const auto t_all = Clock::now();
   if (const char* dir = std::getenv("NR_ISAC_DETECT_DUMP")) {
     const char* mx = std::getenv("NR_ISAC_DETECT_DUMP_MAX");
-    if (I.n_calls < (mx ? std::strtoull(mx, nullptr, 10) : 1000ull))
-      save_detect_case(std::string(dir) + "/case_" + std::to_string(I.n_calls) + ".bin", E, R, g, geo, p);
+    if (I.n_calls < (mx ? std::strtoull(mx, nullptr, 10) : 1000ull)) {
+      std::vector<float> Ed;   // the caller may pass the device envelope only (host E then a placeholder)
+      if (d_E && !E.empty()) {
+        Ed.resize(E.size());
+        cuda_check(cudaMemcpyAsync(Ed.data(), d_E, Ed.size() * sizeof(float), cudaMemcpyDeviceToHost, I.stream), "D2H E (dump)"); I.sync();
+      }
+      save_detect_case(std::string(dir) + "/case_" + std::to_string(I.n_calls) + ".bin", Ed.empty() ? E : Ed, R, g, geo, p);
+    }
   }
   ++I.n_calls;
 
@@ -1574,7 +1629,7 @@ std::vector<Detection> GpuDetect::run(const std::vector<float>& E, const RdResul
   }
   I.up(I.items, ditems.data(), ditems.size());
   I.fit_slots_reserve(4, per, ncc, sper, sc);
-  auto tabs = [&]() { return DFitTabs{I.F.as<DFit>(), I.gpp.as<double2>(), I.dir.as<double2>(), I.stat.as<double2>(), I.gpr.as<double>(), (uint32_t)per, (uint32_t)ncc, (uint32_t)sper}; };
+  auto tabs = [&]() { return DFitTabs{I.F.as<DFit>(), I.gpp.as<double2>(), I.dir.as<double2>(), I.stat.as<double2>(), I.gpr.as<double>(), (uint32_t)per, (uint32_t)ncc, (uint32_t)sper, I.dirg.as<double2>()}; };
   DItem* d_items = nullptr;
   for (;;) {
     auto tq = Clock::now();
