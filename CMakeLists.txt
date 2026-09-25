@@ -2391,6 +2391,9 @@ if(ENABLE_TESTS)
   # duplication decisions and /home/sens/.claude/plans/zesty-baking-thompson.md for the design record.
   add_executable(test_nr_pdcch_blind_monitor ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_blind_monitor_test.cc ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/dci_nr.c ${OPENAIR1_DIR}/PHY/NR_REFSIG/refsig.c ${OPENAIR_DIR}/common/utils/ds/hashtable.c)
   target_sources(test_nr_pdcch_blind_monitor PRIVATE
+    ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_tdd_pattern.c
+    ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_blind_monitor_test_stubs.c)
+  target_sources(test_nr_pdcch_blind_monitor PRIVATE
     ${OPENAIR1_DIR}/PHY/NR_REFSIG/nr_dmrs_rx.c
     ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_dl_adaptive_test.cc
     ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_ul_field_sweep_test.cc
@@ -2472,6 +2475,9 @@ if(ENABLE_TESTS)
 
   add_executable(test_nr_passive_acq_state ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_passive_acq_state_test.cc
                                            ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_passive_acq_state.c)
+  target_sources(test_nr_passive_acq_state PRIVATE
+    ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_tdd_pattern.c
+    ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_blind_monitor_test_stubs.c)
   target_include_directories(test_nr_passive_acq_state PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
   target_link_libraries(test_nr_passive_acq_state PRIVATE UTIL GTest::gtest)
   add_dependencies(tests test_nr_passive_acq_state)
