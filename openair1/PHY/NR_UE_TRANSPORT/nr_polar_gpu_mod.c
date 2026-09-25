@@ -43,8 +43,8 @@ static int npg_decode(const int16_t *llr, int stride, const uint16_t *len, const
   pthread_mutex_lock(&g_lock);
   for (int i = 0; i < n; i++) {
     ok[i] = 0;
-    /* AL16 is 1728 coded bits, past the kernel's NPC_MAX_E; and the params table is finite, so a
-     * long length sweep can legitimately run out. Both cases fall back, they are not failures. */
+    /* E beyond the kernel's NPC_MAX_E (AL16 = 1728 fits since NPC_MAX_E = 2048); and the params table
+     * is finite, so a long length sweep can legitimately run out. Both cases fall back, not failures. */
     if ((int)al[i] * 108 > NPC_MAX_E)
       continue;
     const int pid = npc_register(len[i], al[i]);

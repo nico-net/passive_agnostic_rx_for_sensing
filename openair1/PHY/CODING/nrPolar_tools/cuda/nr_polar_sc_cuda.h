@@ -27,9 +27,9 @@ extern "C" {
 #endif
 
 #define NPC_MAX_N 512     /* NR_POLAR_DCI_N_MAX = 9 */
-#define NPC_MAX_E 1024    /* AL8 = 864 */
+#define NPC_MAX_E 2048    /* AL16 = 1728 (repetition rate matching: E > N) */
 #define NPC_MAX_OPS 2048  /* <= 3 * (2N - 1) */
-#define NPC_MAX_PARAMS 256 /* dlsweep: 34 lengths x AL{1,2,4,8} = 136, plus the scan's own */
+#define NPC_MAX_PARAMS 256 /* dlsweep: 34 lengths x AL{1,2,4,8,16} = 170, plus the scan's own */
 
 /* Register one (DCI length, aggregation level) so its patterns and op list live on the device.
  * Idempotent; returns a params id >= 0, or -1. Uses nr_polar_params() for the patterns. */
