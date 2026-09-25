@@ -32,6 +32,10 @@ typedef struct { uint16_t prb_start; uint16_t n_prb; uint16_t data_index; } nr_p
  *  (PRB bundling: precoding may change there, so a channel estimate must not interpolate across it).
  *  prg = 0 = wideband. Returns the segment count, -1 if more than max. */
 int nr_prb_segments(const uint16_t *prb, int n, int bwp_start, int prg, nr_prb_seg_t *seg, int max);
+/** RE gather order: for each segment in array order, the BWP-relative RE indices
+ *  prb_start*re_per_prb .. (prb_start+n_prb)*re_per_prb - 1. out[i] is the source RE of data RE i.
+ *  Returns the count, -1 if more than max. */
+int nr_prb_gather_index(const nr_prb_seg_t *seg, int nseg, int re_per_prb, int *out, int max);
 
 #ifdef __cplusplus
 }

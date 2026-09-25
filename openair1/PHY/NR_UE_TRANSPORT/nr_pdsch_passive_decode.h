@@ -132,7 +132,12 @@ typedef struct {
  * @param ue           UE PHY instance
  * @param proc         Current slot's RX processing context
  * @param dlsch_config Allocation description; cw_info/tbslbrm/n_codewords are written by this call
- * @param freq_alloc   Resolved PRB allocation
+ * @param freq_alloc   Resolved PRB allocation. n_prb_list > 0 = a DATA-ORDERED, possibly non-contiguous
+ *                     BWP-relative PRB list (first_rb/last_rb/num_rbs/bitmap are re-derived from it);
+ *                     prg > 0 = PRB bundling size. Either may split the grant into several channel-
+ *                     estimation segments; one segment with prg == 0 is the unchanged contiguous path.
+ *                     A segmented grant with PT-RS, or with CSI-RS rate matching on a segment whose
+ *                     data position and PRB differ in parity, returns UNSUPPORTED.
  * @param grant        Transport-block parameters from the DCI + deployment constants
  * @param rxdataF      Caller-owned per-antenna frequency-domain slot buffer, filled by this call
  * @param[out] out     Decode outcome; always written
