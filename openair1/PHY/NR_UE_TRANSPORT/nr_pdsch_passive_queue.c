@@ -909,17 +909,23 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
       /* Technique D scoring: the TB CRC is the only oracle that can tell a right payload
        * interpretation from a wrong one, and this is the one place it is known. */
       nr_pdsch_cfg_hypothesis_t winner;
+      nr_pdcch_dci11_layout_feedback(job.sweep_ticket.layout_index, st == NR_PDSCH_PASSIVE_DECODE_CRC_OK);
+      if (nr_pdsch_config_sweep_feedback(&job.sweep_ticket, st == NR_PDSCH_PASSIVE_DECODE_CRC_OK, &winner))
+        LOG_A(PHY, "SENSING: Technique D CONVERGED rnti=0x%x tda=%u S=%u L=%u mask=0x%x table=%u\n",
+              job.sweep_ticket.rnti, job.sweep_ticket.tda_index, winner.tda_start, winner.tda_length,
+              winner.dmrs_mask, winner.mcs_table);
+      /* Qm-oracle prune runs AFTER this job's CRC feedback above: prune_tables() compacts and
+       * re-indexes st->hyp[] without bumping the context generation, so pruning before the CRC
+       * feedback for the SAME job would credit that outcome to a hypothesis index that has already
+       * moved (nr_pdsch_config_sweep_feedback resolves job.sweep_ticket.hypothesis against the
+       * pre-prune array). Ordering this after leaves the DM-RS observe at ~682 untouched -- that one
+       * runs on a separate, earlier tap and is out of scope here. */
       if (!job.sweep_ticket.settled && job.sweep_ticket.generation && dec.qm_measured) {
         const int kept = nr_pdsch_config_sweep_observe_qm(&job.sweep_ticket, job.grant.mcs, dec.qm_measured);
         if (kept > 0)
           LOG_A(PHY, "SENSING: Technique D Qm oracle rnti=0x%x mcs=%u qm=%u -> %d hypotheses\n",
                 job.sweep_ticket.rnti, job.grant.mcs, dec.qm_measured, kept);
       }
-      nr_pdcch_dci11_layout_feedback(job.sweep_ticket.layout_index, st == NR_PDSCH_PASSIVE_DECODE_CRC_OK);
-      if (nr_pdsch_config_sweep_feedback(&job.sweep_ticket, st == NR_PDSCH_PASSIVE_DECODE_CRC_OK, &winner))
-        LOG_A(PHY, "SENSING: Technique D CONVERGED rnti=0x%x tda=%u S=%u L=%u mask=0x%x table=%u\n",
-              job.sweep_ticket.rnti, job.sweep_ticket.tda_index, winner.tda_start, winner.tda_length,
-              winner.dmrs_mask, winner.mcs_table);
       if (st == NR_PDSCH_PASSIVE_DECODE_CRC_OK && !job.layout_probe) {
         atomic_fetch_add_explicit(&g_crc_ok, 1, memory_order_relaxed);
         if (job.want_data) {
