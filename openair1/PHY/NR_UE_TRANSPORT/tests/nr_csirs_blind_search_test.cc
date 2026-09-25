@@ -3,6 +3,7 @@
 #include <string>
 #include <vector>
 #include <random>
+#include <memory>
 #include <gtest/gtest.h>
 extern "C" {
 #include "nr_csirs_blind_search.h"
@@ -234,6 +235,39 @@ TEST(CsirsBlindFeed, ConfirmsAPeriodicResourceAndReportsIt) {
   char buf[128];
   ASSERT_GT(nr_csirs_blind_format(c, p, o, buf, sizeof(buf)), 0);
   EXPECT_NE(std::string(buf).find(":20:13"), std::string::npos);
+}
+
+// ---- pinning ------------------------------------------------------------------------------------
+
+TEST(CsirsBlindPin, PinnedCandidateIsServedUntilBudgetThenRoundRobinResumes) {
+  auto st = std::make_unique<nr_csirs_blind_state_t>();
+  ASSERT_GT(nr_csirs_blind_init(st.get(), 273, 2), 10);
+  nr_csirs_blind_pin(st.get(), 7, 3);
+  EXPECT_EQ(nr_csirs_blind_next(st.get()), 7);
+  EXPECT_EQ(nr_csirs_blind_next(st.get()), 7);
+  EXPECT_EQ(nr_csirs_blind_next(st.get()), 7);
+  EXPECT_EQ(nr_csirs_blind_next(st.get()), 0);  // budget spent: round-robin resumes from its cursor
+  EXPECT_EQ(nr_csirs_blind_next(st.get()), 1);
+}
+
+TEST(CsirsBlindPin, PinnedPeriodicResourceConfirmsWithinThreePeriods) {
+  auto st = std::make_unique<nr_csirs_blind_state_t>();
+  ASSERT_GT(nr_csirs_blind_init(st.get(), 273, 2), 10);
+  const int truth = 7, period = 40, offset = 2;
+  nr_csirs_blind_pin(st.get(), truth, NR_CSIRS_BLIND_PIN_CONFIRM_CALLS);
+  uint32_t s = 0;
+  for (; s < 4 * 640; s++) {
+    const int idx = nr_csirs_blind_next(st.get());
+    const double z = (idx == truth && s % period == offset) ? 6.0 : 1.0;  // bar is 3 x 4/3 = 4
+    if (nr_csirs_blind_feed(st.get(), idx, s, z, 4.0 / 3.0))
+      break;
+  }
+  uint16_t p = 0, o = 0;
+  ASSERT_NE(nr_csirs_blind_confirmed(st.get(), &p, &o), nullptr);
+  EXPECT_EQ(st->confirmed, truth);
+  EXPECT_EQ(p, period);
+  EXPECT_EQ(o, offset);
+  EXPECT_LE(s, (uint32_t)(2 * period + offset));  // hits at 2, 42, 82
 }
 
 int main(int argc, char **argv)
