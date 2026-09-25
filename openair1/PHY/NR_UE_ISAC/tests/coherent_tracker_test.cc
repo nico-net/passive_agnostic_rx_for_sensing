@@ -172,6 +172,86 @@ int main() {
     std::printf("llr clamp: deleted after %d missed CPIs (gap %.3f, evidence %.3f)\n", misses, gap, ev);
     require(misses <= 5, "departed target deleted within a few CPIs");
   }
+  // Measured spatial clutter, on REAL data: 1750 CPIs of the OTA empty room (X410, lab cell, DL
+  // traffic, 2026-09-25; ~0.28 detections/CPI, all in the direct-path cell, ~4/s against a declared
+  // 1/s). Regression guard at the measured value: the uniform declared-intensity tracker confirmed
+  // 25 CPIs here, this one 20 (2 ids). The gain is modest on this file (across all three empty-room
+  // recordings: 223 -> 197 CPIs, 32 -> 19 ids); position sigmas of 3-9 m in a 10 m room let a
+  // tentative track associate almost any detection, which the clutter density alone cannot fix.
+  {
+    FILE* f = std::fopen(ISAC_TEST_DATA "/ota_empty_room_detections.txt", "r");
+    require(f != nullptr, "fixture ota_empty_room_detections.txt");
+    TrackerParams to; to.max_speed_mps = 50; to.false_object_intensity_per_s = 1.0;
+    const Vec3 rx[4] = {{-1.9, -0.65, 0}, {5.7, -0.65, 2}, {5.7, 7.55, 0}, {-1.9, 7.55, 2}};
+    for (const Vec3& r : rx) to.array_centroid = to.array_centroid + r * 0.25;
+    CoherentTracker ko(to); char tag[4]; int cpis = 0, ghost_cpis = 0;
+    while (std::fscanf(f, "%3s", tag) == 1) {
+      if (tag[0] == 'R') { ko = CoherentTracker(to); continue; }   // traffic event: the pipeline resets the tracker
+      double t, tc; int n;
+      require(std::fscanf(f, "%lf %lf %d", &t, &tc, &n) == 3, "fixture CPI line");
+      std::vector<Detection> D(n);
+      for (Detection& d : D) {
+        require(std::fscanf(f, "%lf %lf %lf %lf %lf %lf", &d.pos.x, &d.pos.y, &d.pos.z, &d.pos_sigma.x, &d.pos_sigma.y, &d.pos_sigma.z) == 6, "fixture det");
+        for (double& c : d.pos_cov) require(std::fscanf(f, "%lf", &c) == 1, "fixture cov");
+        require(std::fscanf(f, "%lf %lf", &d.range_rate_mps, &d.range_rate_sigma) == 2, "fixture rate");
+        d.tx = {-9.1, 16.5, 1.2};
+      }
+      bool any = false; for (const Track& tr : ko.step(t, tc, D)) any |= tr.confirmed;
+      ghost_cpis += any; ++cpis;
+    }
+    std::fclose(f);
+    std::printf("OTA empty room: %d CPIs, %d with a confirmed track\n", cpis, ghost_cpis);
+    require(cpis == 1750 && ghost_cpis <= 20, "empty-room ghost CPIs do not regress");
+  }
+  // A real mover crossing that kind of dense clutter still confirms: its own tentative trail is not
+  // clutter against itself (without that exclusion the synthetic chain's car/drone confirmed 2-3x later).
+  {
+    std::mt19937 r3(11); std::uniform_real_distribution<double> u(-5, 5), rr(3, 6); std::bernoulli_distribution b(0.3), sg(0.5);
+    CoherentTracker kc(tp); int hits = 0;
+    for (int k = 0; k < 600; ++k) {
+      std::vector<Detection> v;
+      if (b(r3)) { Detection d = det(Vec3{u(r3), 4 + u(r3), 2.5 + u(r3) / 2}, 3.0); d.range_rate_mps = (sg(r3) ? 1 : -1) * rr(r3); d.range_rate_sigma = 0.3; d.tx = {-9, 16, 1}; v.push_back(d); }
+      if (k >= 540) {                                // 2 m/s straight through the region
+        const Vec3 p{-6 + 2.0 * (k - 540) * T, 4, 2};
+        v.push_back(det(p, 0.3));
+        for (const Track& t : kc.step(k * T, T, v)) hits += t.confirmed && dist(Vec3{t.x[0], t.x[1], t.x[2]}, p) < 1;
+      } else kc.step(k * T, T, v);
+    }
+    std::printf("mover through dense clutter: confirmed on %d / 60 CPIs\n", hits);
+    require(hits > 50, "a real mover through the dense region is still confirmed");
+  }
+  // Long dwell (coherent_longdwell.h): (1) RateBand -- misses of a scan that does not test a track's
+  // rate are not evidence: a confirmed static track survives 20 such misses, the same misses with no band
+  // delete it. (2) Out-of-sequence scan: a detection time-stamped at an earlier time associates with a
+  // moving track (retrodiction) and the track is returned at the latest scan's time.
+  {
+    TrackerParams tp; tp.max_speed_mps = 5; tp.false_object_intensity_per_s = 1;
+    const double T = 0.075; std::mt19937 r3(5); std::normal_distribution<double> nn(0, 0.05);
+    CoherentTracker a(tp), b(tp);
+    int k = 0;
+    for (; k < 40; ++k) { const Detection d = det(Vec3{3 + nn(r3), 4 + nn(r3), 1 + nn(r3)}, 0.1); a.step(k * T, T, {d}); b.step(k * T, T, {d}); }
+    // Long-dwell cadence: 6 short scans (band |rate| in [1, 10] m/s, target absent: it is static) then one
+    // long scan (band |rate| <= 1 m/s) that sees it. With the bands the track lives; without, the short
+    // misses kill it between long hits.
+    const RateBand sb{1.0, 10.0, Vec3{30, 0, 5}}, lb{0.0, 1.0, Vec3{30, 0, 5}};
+    const std::vector<Track>* ta = nullptr; const std::vector<Track>* tb = nullptr;
+    for (int cyc = 0; cyc < 30; ++cyc) {
+      for (int m = 0; m < 6; ++m, ++k) { ta = &a.step(k * T, T, {}, nullptr, &sb); tb = &b.step(k * T, T, {}); }
+      const Detection d = det(Vec3{3 + nn(r3), 4 + nn(r3), 1 + nn(r3)}, 0.1);
+      ta = &a.step(k * T, T, {d}, nullptr, &lb); tb = &b.step(k * T, T, {d}); ++k;
+    }
+    require(ta->size() == 1 && (*ta)[0].confirmed, "rate band: a static track survives the short scans' misses between long hits");
+    require(std::none_of(tb->begin(), tb->end(), [](const Track& t) { return t.hits > 40; }), "no band: the same misses delete it");
+    CoherentTracker c(tp);
+    for (k = 0; k <= 40; ++k) c.step(k * T, T, {det(Vec3{1.0 * k * T + nn(r3), 0, 1}, 0.1)});   // 1 m/s along x, last scan t=3.0
+    std::vector<int> assoc;
+    const std::vector<Track>& tc = c.step(2.6, 0.4, {det(Vec3{2.6, 0, 1}, 0.1)}, &assoc);          // out of sequence
+    require(assoc.size() == 1 && assoc[0] >= 0, "out-of-sequence detection associates (retrodiction)");
+    require(tc.size() == 1 && std::abs(tc[0].x[0] - 3.0) < 0.15, "track returned at the latest scan time");
+    const std::vector<Track>& tc2 = c.step(3.075, T, {det(Vec3{3.075, 0, 1}, 0.1)}, &assoc);
+    require(tc2.size() == 1 && assoc[0] == 0 && std::abs(tc2[0].x[0] - 3.075) < 0.15, "in-sequence scans continue after it");
+    std::printf("long dwell tracker: band keeps static track (%zu, %u hits), retrodicted x %.3f\n", ta->size(), (*ta)[0].hits, tc[0].x[0]);
+  }
   std::puts("coherent_tracker_test: PASS");
   return 0;
 }

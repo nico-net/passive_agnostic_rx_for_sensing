@@ -236,13 +236,14 @@ extern "C" void nr_isac_init(void)
   char *p_source=nullptr,*p_sources=nullptr,*p_durations=nullptr,*p_array=nullptr,*p_broadside=nullptr;
   char *p_array_calibration=nullptr,*p_spatial_receivers=nullptr;
   char *p_out=nullptr,*p_rx_id=nullptr,*p_illum=nullptr,*p_report=nullptr,*p_endpoint=nullptr;
-  int p_coh=0,p_coh_ul=0; double p_coh_sigma=0.1; char* p_coh_vol=nullptr;
+  int p_coh=0,p_coh_ul=0,p_coh_long=0; double p_coh_sigma=0.1; char* p_coh_vol=nullptr;
   paramdef_t params[] = {
     integer("enable","enable native passive sensing",PARAMFLAG_BOOL,&p_enable,0),
     integer("num_ues","decoded UE count (supported 1..4)",0,&p_num_ues,1),
     integer("gate_require_ul","1 = gate opens on a C-RNTI with DL AND UL CFR; 0 = DL CFR alone (DL-only)",PARAMFLAG_BOOL,&p_gate_ul,1),
     integer("coherent_enable","1 = coherent array fuser/tracker replaces per-receiver stages 1-6",PARAMFLAG_BOOL,&p_coh,0),
     integer("coherent_ul_enable","1 = also UL-illuminated focusing (built, default off)",PARAMFLAG_BOOL,&p_coh_ul,0),
+    integer("coherent_long_dwell","1 = long-dwell slow-target CPI (tests the short CPI's zero-Doppler notch)",PARAMFLAG_BOOL,&p_coh_long,0),
     real("coherent_survey_sigma_m","declared antenna/gNB survey accuracy (m)",&p_coh_sigma,0.1),
     text("coherent_volume_m","surveillance volume xmin:xmax:ymin:ymax:zmin:zmax (m, ENU)",&p_coh_vol,"-15:15:-15:15:0:30"),
     integer("evidence_mode","experimental ablation: 0 baseline, 1..6 B..G",0,&p_evidence_mode,0),
@@ -366,6 +367,7 @@ extern "C" void nr_isac_init(void)
   pipeline.subslot_min_re=std::max(0,p_subslot_min_re);pipeline.subslot_min_snr_db=p_subslot_snr;
   pipeline.coherent.enable=p_coh!=0;
   pipeline.coherent.ul_enable=p_coh_ul!=0;
+  pipeline.coherent.long_dwell=p_coh_long!=0;
   pipeline.coherent.survey_sigma_m=p_coh_sigma;
   if (!nr_isac::coherent::parse_volume(p_coh_vol?p_coh_vol:"",&pipeline.coherent.volume)) {
     LOG_E(PHY,"SENSING: malformed coherent_volume_m '%s'; coherent path disabled\n",p_coh_vol?p_coh_vol:"");
@@ -382,7 +384,7 @@ extern "C" void nr_isac_init(void)
     LOG_E(PHY,"SENSING: coherent_enable needs spatial_rx_positions (4 antennas); coherent path disabled\n");
     pipeline.coherent.enable=false;
   }
-  if (pipeline.coherent.enable) LOG_I(PHY,"SENSING: coherent fuser enabled (ul=%d)\n",(int)pipeline.coherent.ul_enable);
+  if (pipeline.coherent.enable) LOG_I(PHY,"SENSING: coherent fuser enabled (ul=%d long_dwell=%d)\n",(int)pipeline.coherent.ul_enable,(int)pipeline.coherent.long_dwell);
   if (p_admission_start < 0 || p_admission_slots < 0) {
     LOG_E(PHY,"SENSING: admission_start_slot and admission_num_slots must be non-negative\\n"); return;
   }
@@ -456,7 +458,7 @@ extern "C" void nr_isac_start(void)
   gate_watchdog_run.store(true);
   gate_watchdog = new std::thread([] {
     nr_isac::pin_current_thread_from_env();
-    double last_stats = monotonic_s();
+    double last_stats = monotonic_s(), last_traffic = 0;
     while (gate_watchdog_run.load()) {
       std::this_thread::sleep_for(std::chrono::milliseconds(100));
       const double now = monotonic_s();
@@ -465,6 +467,7 @@ extern "C" void nr_isac_start(void)
         nr_isac_request_discard();
         nr_isac_record_gate_close();
       }
+      if (engine && now - last_traffic >= 1.0) { last_traffic = now; engine->set_traffic(flow_gate.open()); }
       if (now - last_stats >= 10.0) {
         last_stats = now;
         LOG_I(PHY, "SENSING_GATE stats open=%d admitted=%lu rejected=%lu gate_discarded_rows=%lu\n",

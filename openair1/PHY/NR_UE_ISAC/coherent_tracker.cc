@@ -22,6 +22,22 @@ bool inv3(const double a[9], double o[9], double* det)
   return true;
 }
 void symmetrize(Track& t) { for (int r = 0; r < 6; ++r) for (int c = r + 1; c < 6; ++c) { const double m = 0.5 * (P(t, r, c) + P(t, c, r)); P(t, r, c) = P(t, c, r) = m; } }
+std::array<double, 9> cov_of(const Detection& d)
+{
+  std::array<double, 9> c = d.pos_cov;
+  if (!(c[0] > 0 && c[4] > 0 && c[8] > 0)) c = {d.pos_sigma.x * d.pos_sigma.x, 0, 0, 0, d.pos_sigma.y * d.pos_sigma.y, 0, 0, 0, d.pos_sigma.z * d.pos_sigma.z};
+  return c;
+}
+/** N(x; mu, A + B), the 3-D Gaussian with the two covariances summed. 0 if singular. */
+double gauss3(const Vec3& x, const Vec3& mu, const std::array<double, 9>& A, const std::array<double, 9>& B)
+{
+  double S[9], Si[9], det;
+  for (int i = 0; i < 9; ++i) S[i] = A[i] + B[i];
+  if (!inv3(S, Si, &det) || !(det > 0)) return 0;
+  const double nu[3] = {x.x - mu.x, x.y - mu.y, x.z - mu.z};
+  double q = 0; for (int i = 0; i < 3; ++i) for (int j = 0; j < 3; ++j) q += nu[i] * Si[i * 3 + j] * nu[j];
+  return std::exp(-0.5 * q) / std::sqrt(std::pow(2 * M_PI, 3) * det);
+}
 } // namespace
 
 std::vector<int> hungarian(const std::vector<std::vector<double>>& cost)
@@ -93,7 +109,9 @@ void CoherentTracker::predict(Track& t, double dt) const
     Pn[r * 6 + c] = s;
   }
   t.P = Pn;
-  for (int i = 0; i < 3; ++i) { P(t, i, i) += t.q * dt * dt * dt / 3; P(t, i, i + 3) += t.q * dt * dt / 2; P(t, i + 3, i) += t.q * dt * dt / 2; P(t, i + 3, i + 3) += t.q * dt; }
+  // Process noise for |dt|; a backward (retrodiction) step flips the position-velocity cross term.
+  const double ad = std::abs(dt);
+  for (int i = 0; i < 3; ++i) { P(t, i, i) += t.q * ad * ad * ad / 3; P(t, i, i + 3) += t.q * dt * ad / 2; P(t, i + 3, i) += t.q * dt * ad / 2; P(t, i + 3, i + 3) += t.q * ad; }
   symmetrize(t); t.age_s += dt;
 }
 double CoherentTracker::position_nis(const Track& t, const Detection& d, double* logdet) const
@@ -149,19 +167,54 @@ void CoherentTracker::update_rate(Track& t, const Detection& d) const
   t.P = Pn; symmetrize(t);
 }
 
-const std::vector<Track>& CoherentTracker::step(double t_s, double t_cpi_s, const std::vector<Detection>& dets, std::vector<int>* assoc)
+const std::vector<Track>& CoherentTracker::step(double t_s, double t_cpi_s, const std::vector<Detection>& dets, std::vector<int>* assoc,
+                                                const RateBand* band)
 {
-  const double dt = (last_t_ < 0) ? t_cpi_s : std::max(0.0, t_s - last_t_); last_t_ = t_s;
+  const double lag = (last_t_ >= 0 && t_s < last_t_) ? last_t_ - t_s : 0.0;   // out-of-sequence scan
+  const double dt = (last_t_ < 0) ? t_cpi_s : (lag > 0 ? -lag : t_s - last_t_);
+  if (!(lag > 0)) last_t_ = t_s;
   for (Track& t : tracks_) predict(t, dt);
+  // P(track's predicted bistatic rate inside the scan's tested band), Gaussian predictive rate.
+  auto p_vis = [&](const Track& t) {
+    if (!band) return 1.0;
+    const Vec3 x{t.x[0], t.x[1], t.x[2]};
+    const Vec3 h = normalized(x - band->tx) + normalized(x - p_.array_centroid);
+    const double hv[3] = {h.x, h.y, h.z};
+    double mu = 0, var = 0;
+    for (int a = 0; a < 3; ++a) { mu += hv[a] * t.x[3 + a]; for (int b = 0; b < 3; ++b) var += hv[a] * Pc(t, 3 + a, 3 + b) * hv[b]; }
+    if (!(var > 0)) return (std::abs(mu) >= band->lo && std::abs(mu) <= band->hi) ? 1.0 : 0.0;
+    const double s = std::sqrt(2 * var);
+    auto Phi = [&](double x) { return 0.5 * std::erfc(-(x - mu) / s); };
+    return std::clamp(Phi(band->hi) - Phi(band->lo) + Phi(-band->lo) - Phi(-band->hi), 0.0, 1.0);
+  };
   const Volume& V = p_.volume;
   const double vol = std::max(1e-9, (V.x1 - V.x0) * (V.y1 - V.y0) * (V.z1 - V.z0));
-  const double clutter_density = std::max(1e-12, p_.false_object_intensity_per_s * t_cpi_s / vol);
+  // Clutter intensity is MEASURED, not assumed, and it is SPATIAL: a kernel density of the past
+  // in-volume detections no confirmed track claimed, each kernel being that detection's own
+  // position covariance (plus the evaluated detection's), so the bandwidth is the measurement
+  // uncertainty and nothing is tuned. The declared intensity enters as one pseudo-event spread
+  // uniformly over the volume (same Laplace convention as pd()). A receiver whose false detections
+  // pile up in one region (the direct-path cell) would otherwise over-credit every chance
+  // association there and confirm ghosts.
+  // ponytail: whole-epoch history, O(history) per association; window/grid it if epochs run for hours.
+  const size_t h0 = clutter_hist_.size();
+  auto clutter_density = [&](const Detection& d, uint64_t self) {
+    const std::array<double, 9> Cd = cov_of(d);
+    double k = 0;
+    // A track's own tentative trail is not clutter against itself (else a real target suppresses
+    // its own confirmation); every other unclaimed detection is.
+    for (size_t i = 0; i < h0; ++i) if (clutter_hist_[i].owner != self) k += gauss3(d.pos, clutter_hist_[i].pos, clutter_hist_[i].cov, Cd);
+    return std::max(1e-300, (k + 1.0 / vol) / (clutter_t_ + 1.0 / p_.false_object_intensity_per_s) * t_cpi_s);
+  };
   const double q0 = p_.max_speed_mps * p_.max_speed_mps;          // declared bound, stage-10 convention
   std::vector<std::vector<double>> cost(tracks_.size(), std::vector<double>(dets.size(), kInf));
   for (size_t i = 0; i < tracks_.size(); ++i) for (size_t j = 0; j < dets.size(); ++j) {
     double ld; const double q = position_nis(tracks_[i], dets[j], &ld); if (q <= kGate3) cost[i][j] = q + ld; }
   std::vector<int> a = hungarian(cost);
   std::vector<char> used(dets.size(), 0);
+  // owner[j]: id of the track detection j feeds (0 none); claimed = fed a CONFIRMED track.
+  std::vector<uint64_t> owner(dets.size(), 0); std::vector<char> claimed(dets.size(), 0);
+  for (size_t i = 0; i < a.size() && i < tracks_.size(); ++i) if (a[i] >= 0) { owner[(size_t)a[i]] = tracks_[i].id; claimed[(size_t)a[i]] = tracks_[i].confirmed; }
   const double pd = this->pd();
   for (size_t i = 0; i < tracks_.size(); ++i) {
     Track& t = tracks_[i];
@@ -169,7 +222,7 @@ const std::vector<Track>& CoherentTracker::step(double t_s, double t_cpi_s, cons
       const Detection& d = dets[(size_t)a[i]]; used[(size_t)a[i]] = 1;
       double ld; const double q = position_nis(t, d, &ld);
       const double like = std::exp(-0.5 * q) / std::sqrt(std::pow(2 * M_PI, 3) * std::exp(ld));
-      t.llr += std::log(std::max(1e-300, pd * like / clutter_density));
+      t.llr += std::log(std::max(1e-300, pd * like / clutter_density(d, t.id)));
       double nis = 0; update_position(t, d, &nis); update_rate(t, d);
       t.nis_sum += nis; ++t.nis_n; ++t.hits;
       // Covariance matching (Mehra): q tracks the running mean NIS toward its theoretical value of
@@ -179,9 +232,13 @@ const std::vector<Track>& CoherentTracker::step(double t_s, double t_cpi_s, cons
       t.q = q0 * (t.nis_sum / t.nis_n) / 3.0;
       if (t.confirmed) pd_hits_ += 1;
     } else {
-      t.llr += std::log(std::max(1e-300, 1 - pd)); ++t.misses;
-      if (t.confirmed) pd_misses_ += 1;
+      const double pv = p_vis(t);
+      t.llr += std::log(std::max(1e-300, 1 - pd * pv)); ++t.misses;
+      if (t.confirmed) pd_misses_ += pv;
     }
+    // The volume floor is the ground: a hard physical constraint (estimate projection onto z >= z0,
+    // no velocity into it). The other faces only bound surveillance, so they are not projected.
+    if (t.x[2] < V.z0) { t.x[2] = V.z0; t.x[5] = std::max(0.0, t.x[5]); }
     if (!t.confirmed && t.llr >= kConfirm) t.confirmed = true;
     // SPRT restart convention: a confirmed track's evidence is capped at the confirm threshold, so a
     // departed target is deleted after exactly kConfirm - kDelete of miss evidence, not after all the
@@ -204,8 +261,18 @@ const std::vector<Track>& CoherentTracker::step(double t_s, double t_cpi_s, cons
     t.x = {dets[j].pos.x, dets[j].pos.y, dets[j].pos.z, 0, 0, 0};
     t.P.fill(0); P(t, 0, 0) = dets[j].pos_sigma.x * dets[j].pos_sigma.x; P(t, 1, 1) = dets[j].pos_sigma.y * dets[j].pos_sigma.y;
     P(t, 2, 2) = dets[j].pos_sigma.z * dets[j].pos_sigma.z; P(t, 3, 3) = P(t, 4, 4) = P(t, 5, 5) = q0;
-    t.hits = 1; tracks_.push_back(t);
+    t.hits = 1; owner[j] = t.id; tracks_.push_back(t);
   }
+  // ponytail: one pooled clutter estimate over short and long-dwell scans (each passes the time it
+  // partitions, t_cpi or cadence, so time is counted twice and the rate is their average); keep
+  // per-scan-class statistics if the long dwell is enabled and its false rate differs.
+  for (size_t j = 0; j < dets.size(); ++j) {
+    const Vec3& x = dets[j].pos;
+    if (!claimed[j] && x.x >= V.x0 && x.x <= V.x1 && x.y >= V.y0 && x.y <= V.y1 && x.z >= V.z0 && x.z <= V.z1)
+      clutter_hist_.push_back({x, cov_of(dets[j]), owner[j]});
+  }
+  clutter_t_ += t_cpi_s;
+  if (lag > 0) for (Track& t : tracks_) predict(t, lag);   // back to the latest scan's time
   return tracks_;
 }
 } // namespace nr_isac::coherent

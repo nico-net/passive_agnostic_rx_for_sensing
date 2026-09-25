@@ -206,34 +206,63 @@ __global__ void k_vbin(const uint8_t* los_found, GeoParams geo, double origin_x,
   }
 }
 
-// One thread per (tested Doppler index t, voxel v): per-channel sliding max of |RD|^2/noise over the
-// voxel's own Doppler half-width, at the channel's own excess-delay bin (cubic magnitude interpolation)
-// -- coherent_core.cc's envelope(). A non-ok Doppler bin contributes 0 to the max, as on the CPU.
+// One BLOCK per voxel: build each channel's fractional-bin-interpolated, notch-masked magnitude
+// column ONCE over the full Doppler axis (staged in shared memory), then every one of the ~nt tested
+// Doppler indices scans its own +-dh(v) window out of that shared column -- coherent_core.cc's
+// envelope() already amortises exactly this way (its sliding_max() builds `col[d]` once per channel
+// before sliding a window over it). The prior kernel (one thread per (t,voxel)) redid the full 4-tap
+// interpolation plus 4 global-memory loads for every tested Doppler index, up to 2*dh+1 times each --
+// on the full-band OTA CPI (nt~146, dh up to ~60) that is >100x redundant global traffic and FLOPs
+// per voxel per channel. `mag`'s layout is Doppler-contiguous per (channel, range bin), so the
+// strided build loop below is coalesced. `dopp_ok_mask[dd] ? m : 0` is folded into `vals[]` at build
+// time instead of re-tested per query. Squaring only the final window max (not every element) is the
+// same simplification the CPU makes implicitly (max of squares of a non-negative sequence == square
+// of its max).
 __global__ void k_envelope(const float* mag, const float* inv_noise, const float* vbin, const uint32_t* tested_dopp,
                            uint32_t nt, const uint8_t* dopp_ok_mask, const uint32_t* dh, size_t nv,
                            uint32_t nrange, uint32_t ndopp, float* E)
 {
-  for (size_t idx = (size_t)blockIdx.x * blockDim.x + threadIdx.x; idx < (size_t)nt * nv; idx += (size_t)blockDim.x * gridDim.x) {
-    const size_t v = idx % nv; const uint32_t t = (uint32_t)(idx / nv);
-    const long d0 = (long)tested_dopp[t]; const long h = (long)dh[v];
-    float e = 0.f;
+  extern __shared__ float smem[];
+  float* const vals = smem;          // [ndopp]: current channel's interpolated/masked Doppler column
+  float* const eacc = smem + ndopp;  // [nt]: running cross-channel sum for this voxel
+
+  for (size_t v = blockIdx.x; v < nv; v += gridDim.x) {
+    for (uint32_t t = threadIdx.x; t < nt; t += blockDim.x) eacc[t] = 0.f;
+    __syncthreads();
+    const long h = (long)dh[v];
     for (uint32_t ch = 0; ch < 4; ++ch) {
-      const float bin = vbin[v * 4 + ch];
+      const float bin = vbin[v * 4 + ch];   // same value for every thread in the block: uniform branch
       if (bin < 0.f) continue;
       const long b0 = (long)bin; const float u = bin - (float)b0;
       const float cm = -u * (u - 1) * (u - 2) / 6, c0 = (u + 1) * (u - 1) * (u - 2) / 2, c1 = -(u + 1) * u * (u - 2) / 2, c2 = (u + 1) * u * (u - 1) / 6;
       auto row = [&](long b) { b = b < 0 ? 0 : (b > (long)nrange - 1 ? (long)nrange - 1 : b); return mag + ((size_t)ch * nrange + (size_t)b) * ndopp; };
       const float *rm = row(b0 - 1), *r0 = row(b0), *r1 = row(b0 + 1), *r2 = row(b0 + 2);
-      float best = 0.f;
-      const long lo = d0 - h < 0 ? 0 : d0 - h, hi = d0 + h > (long)ndopp - 1 ? (long)ndopp - 1 : d0 + h;
-      for (long dd = lo; dd <= hi; ++dd) {
-        if (!dopp_ok_mask[dd]) continue;
-        const float m = fmaxf(cm * rm[dd] + c0 * r0[dd] + c1 * r1[dd] + c2 * r2[dd], 0.f);
-        best = fmaxf(best, m * m);
+      for (uint32_t d = threadIdx.x; d < ndopp; d += blockDim.x)
+        vals[d] = dopp_ok_mask[d] ? fmaxf(cm * rm[d] + c0 * r0[d] + c1 * r1[d] + c2 * r2[d], 0.f) : 0.f;
+      __syncthreads();
+      const float invn = inv_noise[ch];
+      for (uint32_t t = threadIdx.x; t < nt; t += blockDim.x) {
+        const long d0 = (long)tested_dopp[t];
+        const long lo = d0 - h < 0 ? 0 : d0 - h, hi = d0 + h > (long)ndopp - 1 ? (long)ndopp - 1 : d0 + h;
+        float best = 0.f;
+        for (long dd = lo; dd <= hi; ++dd) best = fmaxf(best, vals[dd] * vals[dd]);
+        eacc[t] += best * invn;
       }
-      e += best * inv_noise[ch];
+      __syncthreads();   // every read of vals[] for this channel must finish before the next one overwrites it
     }
-    E[idx] = e;
+    for (uint32_t t = threadIdx.x; t < nt; t += blockDim.x) E[(size_t)t * nv + v] = eacc[t];
+    __syncthreads();     // all E writes done before the grid-stride loop reuses eacc[]/vals[] for the next voxel
+  }
+}
+
+} // namespace
+
+namespace {
+__global__ void k_scale_rd(zC* rd, const float* g, uint32_t nrange, uint32_t ndopp, size_t n)
+{
+  for (size_t j = (size_t)blockIdx.x * blockDim.x + threadIdx.x; j < n; j += (size_t)blockDim.x * gridDim.x) {
+    const float f = g[j / ndopp];            // [ch][range] factor; rd is [ch][range][dopp]
+    rd[j].x *= f; rd[j].y *= f;
   }
 }
 
@@ -256,15 +285,21 @@ struct CudaCoherent::Impl {
       cap = bytes;
     }
   };
-  Buf ramp, wf_off, wf_hw, wf_st, wf_B, wf_B2, mag, vbin, values, values_f, observed, span, tau, phase, stat, wsum_row, row_los, spectrum, prof_near, prof_far, ed, rd, far_rd, E;
+  Buf whiten, ramp, wf_off, wf_hw, wf_st, wf_B, wf_B2, mag, vbin, values, values_f, observed, span, tau, phase, stat, wsum_row, row_los, spectrum, prof_near, prof_far, ed, rd, far_rd, E;
   Buf ev_tested_dopp, ev_dh, ev_dopp_ok, ev_inv_noise, ev_los_found;  // detect()'s own small persistent uploads
 
   // host-side state kept across range_doppler() -> detect() within one CPI
   RdResult cached;
   std::unique_ptr<CudaFront> front;   // device-resident CPI shared by find_los / row sync / range_doppler
   uint32_t cur_nch = kCh, cur_rows = 0, cur_nrange = 0, cur_ndopp = 0;
+  size_t ev_smem_raised = 0;   // largest k_envelope dynamic-shared-mem opt-in granted so far (see detect())
   Timing timing;
   std::vector<float> last_E;
+  // Grow-only, contents never read: GpuDetect::run() size-checks its `E` argument even when it takes
+  // the device envelope directly (d_E != null) and never touches `E`'s contents in that case -- see
+  // detect() below. Passing this instead of downloading avoids the D2H on every CPI that doesn't need
+  // a host copy, without editing coherent_cuda_detect.cu (owned by another agent).
+  std::vector<float> ev_dummy_E;
   GpuDetect det;   // GPU-resident detect() (coherent_cuda_detect.cu); opt-in via NR_ISAC_CUDA_DETECT_GPU=1 (CPU oracle default)
 
   Impl()
@@ -499,23 +534,60 @@ std::vector<Detection> CudaCoherent::detect(const Grid& g, const Geometry& geo, 
     k_mag<<<(unsigned)std::min<size_t>(65535, (nm + 255) / 256), 256, 0, I.stream>>>((zC*)I.rd.p, nm, (float*)I.mag.p);
     k_vbin<<<(unsigned)std::min<size_t>(65535, (nv * 4 + 255) / 256), 256, 0, I.stream>>>((uint8_t*)I.ev_los_found.p, gp, g.origin.x, g.origin.y, g.origin.z, g.step,
                                                                                      g.nx, g.ny, g.nz, I.cur_nrange, a.delay_step_s, kC, (float*)I.vbin.p);
-    dim3 t(256), b((unsigned)std::min<size_t>(65535, (nt * nv + 255) / 256));
-    k_envelope<<<b, t, 0, I.stream>>>((float*)I.mag.p, (float*)I.ev_inv_noise.p, (float*)I.vbin.p, (uint32_t*)I.ev_tested_dopp.p, (uint32_t)nt,
+    // One block per voxel (see k_envelope); shared mem = this CPI's own Doppler-axis size + tested-bin
+    // count (derived, not tuned). Opt in to a bigger-than-default dynamic shared mem block ONLY if this
+    // CPI's own axes need it (RTX 4060 Ti / Ada supports up to 100 KB opt-in vs the 48 KB static default).
+    const int ev_threads = 128;
+    const unsigned ev_blocks = (unsigned)std::min<size_t>(65535, std::max<size_t>(1, nv));
+    const size_t ev_smem = ((size_t)I.cur_ndopp + nt) * sizeof(float);
+    if (ev_smem > 48 * 1024 && ev_smem > I.ev_smem_raised) {
+      int dev = 0, max_optin = 0;
+      cuda_check(cudaGetDevice(&dev), "cudaGetDevice");
+      cuda_check(cudaDeviceGetAttribute(&max_optin, cudaDevAttrMaxSharedMemoryPerBlockOptin, dev), "cudaDeviceGetAttribute");
+      if ((size_t)max_optin < ev_smem) throw std::runtime_error("k_envelope: CPI Doppler axis exceeds device shared-mem opt-in limit");
+      cuda_check(cudaFuncSetAttribute(k_envelope, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)ev_smem), "cudaFuncSetAttribute smem");
+      I.ev_smem_raised = ev_smem;
+    }
+    k_envelope<<<ev_blocks, ev_threads, ev_smem, I.stream>>>((float*)I.mag.p, (float*)I.ev_inv_noise.p, (float*)I.vbin.p, (uint32_t*)I.ev_tested_dopp.p, (uint32_t)nt,
                                       (uint8_t*)I.ev_dopp_ok.p, (uint32_t*)I.ev_dh.p, nv, I.cur_nrange, I.cur_ndopp, (float*)I.E.p);
   }
-  std::vector<float> h_E(nt * nv);
-  cuda_check(cudaMemcpyAsync(h_E.data(), I.E.p, h_E.size() * sizeof(float), cudaMemcpyDeviceToHost, I.stream), "D2H E");
+  // Host-side E is needed for the CPU-oracle path (currently the default -- see below) and for the
+  // caller's periodic topview image (coherent_pipeline.cc passes a non-null `topview_max` exactly on
+  // the CPI that image is due); GpuDetect::run() below takes the DEVICE envelope pointer directly and
+  // never reads its `E` argument when one is supplied, so skipping this D2H when neither applies
+  // changes nothing it consumes.
+  const bool use_gpu_detect = std::getenv("NR_ISAC_CUDA_DETECT_GPU") != nullptr;
+  const bool need_host_E = !use_gpu_detect || topview_max != nullptr;
+  std::vector<float> h_E;
+  if (need_host_E) {
+    h_E.resize(nt * nv);
+    cuda_check(cudaMemcpyAsync(h_E.data(), I.E.p, h_E.size() * sizeof(float), cudaMemcpyDeviceToHost, I.stream), "D2H E");
+  } else if (I.ev_dummy_E.size() != nt * nv) {
+    I.ev_dummy_E.resize(nt * nv);   // grow-only in steady state (see Impl::ev_dummy_E); contents unused
+  }
   cuda_check(cudaStreamSynchronize(I.stream), "sync detect");
   I.timing.envelope_ms = I.lap();
   I.timing.envelope_download_ms = 0;  // included above; kept separate field for report symmetry only
 
-  (void)topview_max;  // caller reads last_envelope() instead (see coherent_cuda.h header)
-  I.last_E = h_E;
+  if (need_host_E) I.last_E = h_E;    // last_envelope(): topview builder (or the CPU-oracle path)
   // GpuDetect is opt-in until it matches the CPU oracle on real data: on 40 detect() inputs dumped from
   // the full-band OTA recording it made different decisions on 12 (FP32 magnitudes flip near-tied
   // pursuit choices; the clean parity scene has no ties). The user's rule is no accuracy loss.
-  if (!std::getenv("NR_ISAC_CUDA_DETECT_GPU")) return coherent::detect(h_E, R, g, geo, p);   // CPU oracle
-  return I.det.run(h_E, R, g, geo, p, I.rd.p, (const float*)I.E.p, I.stream);
+  // (Inherited from c32469c8b5, unrelated to this file's envelope-kernel speed-up -- kept verbatim.)
+  if (!use_gpu_detect) return coherent::detect(h_E, R, g, geo, p);   // CPU oracle (default)
+  return I.det.run(need_host_E ? h_E : I.ev_dummy_E, R, g, geo, p, I.rd.p, (const float*)I.E.p, I.stream);
+}
+
+void CudaCoherent::scale_rd(const std::vector<float>& g)
+{
+  Impl& I = *impl_;
+  if (g.size() != (size_t)I.cur_nch * I.cur_nrange || I.cur_ndopp == 0) return;
+  I.whiten.ensure(g.size() * sizeof(float));
+  cuda_check(cudaMemcpyAsync(I.whiten.p, g.data(), g.size() * sizeof(float), cudaMemcpyHostToDevice, I.stream), "H2D whiten");
+  const size_t n = (size_t)I.cur_nch * I.cur_nrange * I.cur_ndopp;
+  k_scale_rd<<<(unsigned)std::min<size_t>(65535, (n + 255) / 256), 256, 0, I.stream>>>((zC*)I.rd.p, (const float*)I.whiten.p, I.cur_nrange, I.cur_ndopp, n);
+  cuda_check(cudaStreamSynchronize(I.stream), "sync whiten");
+  for (size_t j = 0; j < I.cached.rd.v.size(); ++j) I.cached.rd.v[j] *= g[j / I.cur_ndopp];   // keep detect()'s host copy in step
 }
 
 const std::vector<float>& CudaCoherent::last_envelope() const { return impl_->last_E; }

@@ -42,6 +42,15 @@ std::vector<double> to_db(const std::vector<double>& p)
   for (size_t i = 0; i < p.size(); ++i) o[i] = std::round(100 * std::log10(std::max(p[i], 1e-30) / ref)) / 10;
   return o;
 }
+std::string jdets(const std::vector<Detection>& D)
+{
+  std::ostringstream rep; rep << "[";
+  for (size_t k = 0; k < D.size(); ++k)
+    rep << (k ? "," : "") << "{\"p\":" << jvec(D[k].pos) << ",\"s\":" << jvec(D[k].pos_sigma) << ",\"cov\":" << jarr(D[k].pos_cov)
+        << ",\"rr\":" << jnum(D[k].range_rate_mps) << ",\"rr_s\":" << jnum(D[k].range_rate_sigma) << ",\"snr\":" << jnum(D[k].snr)
+        << ",\"fd\":" << jnum(D[k].doppler_hz) << ",\"ill\":" << D[k].illuminator << "}";
+  return rep.str() + "]";
+}
 uint32_t rows_with_data(const CfrWindow& w)
 {
   uint32_t n = 0;
@@ -60,6 +69,7 @@ CoherentPipeline::CoherentPipeline(const CoherentConfig& cfg)
   tp.false_object_intensity_per_s = cfg.false_object_intensity_per_s;
   tp.volume = cfg.volume;
   for (const Vec3& r : cfg.geometry.rx) tp.array_centroid = tp.array_centroid + r * (1.0 / kCh);
+  tp_ = tp;
   tracker_ = std::make_unique<CoherentTracker>(tp);
   // Task 10: GPU range_doppler()/envelope(); CPU find_los/row-sync/detect()'s own branch-and-bound
   // fits/refine()/tracker stay on the host either way (see coherent_cuda.h's file header).
@@ -72,6 +82,10 @@ CoherentPipeline::CoherentPipeline(const CoherentConfig& cfg)
   if (!cuda_ && cuda_required()) {
     cuda_fail_closed_ = true;
     std::fprintf(stderr, "SENSING: coherent pipeline: NR_ISAC_REQUIRE_CUDA=1 but no usable CUDA device; every CPI will be skipped\n");
+  }
+  if (cfg.long_dwell) {
+    long_ = std::make_unique<LongDwellRunner>(cfg, cuda_ != nullptr, [this](LongResult& r) { long_result(r); });
+    std::fprintf(stderr, "SENSING: coherent pipeline: long-dwell slow-target CPI enabled\n");
   }
   worker_ = std::thread([this] { run(); });
   std::fprintf(stderr, "SENSING: coherent pipeline writing %s\n", reports_.path().c_str());
@@ -89,6 +103,19 @@ void CoherentPipeline::submit(CfrWindow dl, std::vector<CfrWindow> ul, uint64_t 
   std::unique_lock<std::mutex> l(mu_);
   if (q_.size() >= 2) { ++st_.queue_waits; cv_.wait(l, [this] { return q_.size() < 2 || stop_; }); }   // never drop
   q_.push_back(Job{std::move(dl), std::move(ul), seq, t});
+  cv_.notify_all();
+}
+
+void CoherentPipeline::traffic(bool open)
+{
+  std::lock_guard<std::mutex> l(mu_);
+  // Transitions only. Re-announcing a steady "off" every second reset the tracker every second
+  // (harmless live, where a closed gate admits no rows, but it broke every replay).
+  if (open == traffic_open_) return;
+  if (q_.size() >= 8) return;                   // never block the gate watchdog; retried next second
+  traffic_open_ = open;
+  Job j; j.kind = 1; j.traffic = open; j.t = last_t_;
+  q_.push_back(std::move(j));
   cv_.notify_all();
 }
 
@@ -133,6 +160,16 @@ void CoherentPipeline::write_coherence(uint64_t seq, double t, const Calibration
 
 void CoherentPipeline::process(Job& j)
 {
+  if (j.kind == 1) {                            // traffic event: no CPI
+    if (!j.traffic) { std::lock_guard<std::mutex> l(trk_mu_); tracker_ = std::make_unique<CoherentTracker>(tp_); }   // stop tracks: nothing is illuminated
+    // (the long dwell needs no reset: a data gap longer than its dwell restarts it, LongDwell::add)
+    const std::string tf = j.traffic ? "true" : "false";
+    const auto wall = std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count();
+    reports_.write_line("{\"event\":\"traffic\",\"traffic\":" + tf + ",\"t\":" + jnum(j.t) + ",\"wall\":" + jnum(wall) + ",\"detections\":[]}");
+    tracks_.write_line("{\"event\":\"traffic\",\"traffic\":" + tf + ",\"t\":" + jnum(j.t) + ",\"tracks\":[]}");
+    return;
+  }
+  { std::lock_guard<std::mutex> l(mu_); last_t_ = j.t; }
   const auto t0 = clk::now();
   double tm[7] = {0};   // sync, rd, env, detect, refine, track, ul
   double tm_los = 0;    // find_los share of tm[0]
@@ -144,7 +181,7 @@ void CoherentPipeline::process(Job& j)
     { std::lock_guard<std::mutex> l(mu_); ++st_.skipped; }
     const CoherentStats st = stats();
     std::ostringstream rep;
-    rep << "{\"cpi\":" << j.seq << ",\"t\":" << jnum(j.t) << ",\"rows\":" << j.dl.rows << ",\"stats\":{\"processed\":" << st.processed
+    rep << "{\"cpi\":" << j.seq << ",\"dwell\":\"short\",\"t\":" << jnum(j.t) << ",\"rows\":" << j.dl.rows << ",\"stats\":{\"processed\":" << st.processed
         << ",\"skipped\":" << st.skipped << ",\"overruns\":" << st.overruns << ",\"queue_waits\":" << st.queue_waits
         << "},\"skipped_reason\":\"" << a.invalid_reason << "\",\"detections\":[],\"topview\":null,\"rd\":null}";
     reports_.write_line(rep.str());
@@ -182,13 +219,13 @@ void CoherentPipeline::process(Job& j)
   {
     auto med = [](std::vector<double> v) { std::nth_element(v.begin(), v.begin() + v.size() / 2, v.end()); return v[v.size() / 2]; };
     std::array<double, kCh> res{};
-    for (uint32_t i = 0; i < kCh; ++i) res[i] = los_resid_[i].empty() ? 0.0 : med(los_resid_[i]);
+    for (uint32_t i = 0; i < kCh; ++i) res[i] = los_resid_[i].empty() ? 0.0 : los_resid_[i].median();
     std::vector<double> off;
     for (uint32_t i = 0; i < kCh; ++i) if (L.found[i]) off.push_back(L.delay_s[i] - geo_los[i] - res[i]);
     if (off.size() >= 2) {
       const double o = med(off);
       for (uint32_t i = 0; i < kCh; ++i) if (L.found[i]) {
-        los_resid_[i].push_back(L.delay_s[i] - geo_los[i] - o);
+        los_resid_[i].push(L.delay_s[i] - geo_los[i] - o);
         L.delay_s[i] = geo_los[i] + o + res[i];
       }
     }
@@ -206,7 +243,7 @@ void CoherentPipeline::process(Job& j)
       std::fill(dl_masked.observed.begin() + dl_masked.cell(r, 0), dl_masked.observed.begin() + dl_masked.cell(r, 0) + dl_masked.subcarriers, 0);
     dlp = &dl_masked;
   }
-  const RdResult R = cuda_ ? cuda_->range_doppler(*dlp, a, L, rs, true) : range_doppler(*dlp, a, L, rs);
+  RdResult R = cuda_ ? cuda_->range_doppler(*dlp, a, L, rs, true) : range_doppler(*dlp, a, L, rs);
   // Static-removal diagnostic, per channel, in dB over the channel's thermal noise: the direct path
   // before removal (LOS tap) and the strongest residue left at the direct path's range (bins 0-3),
   // just outside the zero-Doppler notch (up to 3 bins beyond it) and anywhere else tested.
@@ -271,15 +308,26 @@ void CoherentPipeline::process(Job& j)
   for (uint32_t i = 0; i < kCh; ++i) los_snr[i] = L.found[i] ? std::max(L.snr[i] - 1.0, 0.0) * n_rows : 0.0;
   const Calibration cal = cal_.update(R.los_tap, L.found, los_snr);
   const Grid G = envelope_grid(cfg_.volume, a);
+  // Clutter-limited CFAR in range (whiten_range_clutter), at the detector's own per-cell false-alarm budget.
+  { const std::vector<float> wg = whiten_range_clutter(R, detect_params(a, G, cfg_.false_object_intensity_per_s).pfa);
+    if (cuda_) cuda_->scale_rd(wg); }
   std::vector<Detection> D;
   std::vector<float> E;   // CPU path only; GPU path's equivalent is cuda_->last_envelope() (see below)
+  // Whether THIS CPI's periodic topview image is due, decided once and reused below (both to gate the
+  // GPU path's extra envelope download and, later, to build the image) instead of re-checking the
+  // clock a second time after the (variable-latency) detect()/refine()/track stages have run.
+  const bool topview_due = std::chrono::duration<double>(clk::now() - last_image_).count() >= cfg_.monitor_period_s;
   // Task 10: on GPU, cuda_->detect() runs the envelope kernel on the device and then calls the SAME
   // unmodified CPU detect() (branch-and-bound channel choice, per-candidate waveform fit, greedy
   // residual pursuit, NMS/harmonic merge) on the result -- that stage is small-N and sequential, not
   // embarrassingly parallel, and the amended brief's own method list keeps it on the host. tm[2]/tm[3]
   // split the combined call back into its GPU-envelope and CPU-detect() shares for the report.
   if (cuda_) {
-    D = cuda_->detect(G, geo, detect_params(a, G, cfg_.false_object_intensity_per_s), nullptr);
+    // Non-null only when the topview image is due this CPI: that is the only reader of
+    // cuda_->last_envelope(), and a non-null pointer there is what makes detect() pay for the (small
+    // but non-zero) device->host copy of E -- see coherent_cuda.h/.cu.
+    std::vector<float> topview_signal;
+    D = cuda_->detect(G, geo, detect_params(a, G, cfg_.false_object_intensity_per_s), topview_due ? &topview_signal : nullptr);
     const double total = ms_since(s0); s0 = clk::now();
     tm[2] = cuda_->last_timing().envelope_ms;
     tm[3] = std::max(0.0, total - tm[2]);
@@ -292,6 +340,40 @@ void CoherentPipeline::process(Job& j)
   if (cuda_) cuda_->refine(D, G, geo, cal, survey);
   else for (Detection& d : D) refine(d, R, G, geo, cal, survey);
   tm[4] = ms_since(s0); s0 = clk::now();
+  // Non-translating micro-Doppler rejection (kinematic consistency). A translating object with bistatic
+  // range rate rr changes its range by rr*dt; a rotating fan (OTA: +-140..200 Hz band, symmetric, next to
+  // the antennas) shows large rr of BOTH signs but stays in one range cell. See the rule below. Memory =
+  // 2 cells / the notch-edge rate: the slowest testable mover's two-cell crossing time. A loitering slow
+  // walker keeps its detections (its own rr is consistent with staying). All derived; count reported.
+  uint32_t md_now = 0;
+  {
+    const double rres = kC / a.b_eff_hz, rho_n = a.lambda_m * a.notch_half_bins * a.dopp_step_hz;
+    const double mem = 2 * rres / std::max(rho_n, 1e-9);
+    while (!md_hist_.empty() && j.t - md_hist_.front().t > mem) md_hist_.pop_front();
+    std::vector<Detection> keep; keep.reserve(D.size());
+    for (Detection& d : D) {
+      double Rb = 0; for (uint32_t i = 0; i < kCh; ++i) Rb += excess_delay_s(d.pos, geo.tx, geo.rx[i]) * kC / kCh;
+      bool still = false;
+      static const bool md_off = std::getenv("COH_MD_OFF") != nullptr;   // A/B diagnostic only
+      // Rotation, not translation: the cell has held non-notch detections of BOTH signs of rr (a blade
+      // approaches and recedes; a translating body has one sign), spanning a time in which a translating
+      // object at this rate would have left the cell by >= 2 cells.
+      // Only in the direct-path range cell (excess bistatic range < c/B): where a fixed rotating scatterer at
+      // the receiver or transmitter site (equipment fans) sits. Elsewhere different objects crossing one
+      // coarse cell with both signs made it drop real targets (synthetic, 13 m cells: drone 39 -> 31 hits).
+      if (!md_off && Rb < rres && std::abs(d.range_rate_mps) > rho_n) {
+        double t_same = 1e300, t_opp = 1e300;
+        for (const MdHist& h : md_hist_)
+          if (std::abs(h.R - Rb) <= rres && std::abs(h.rr) > rho_n) {
+            if ((h.rr > 0) == (d.range_rate_mps > 0)) t_same = std::min(t_same, h.t); else t_opp = std::min(t_opp, h.t);
+          }
+        if (t_same < 1e299 && t_opp < 1e299 && std::abs(d.range_rate_mps) * (j.t - std::min(t_same, t_opp)) >= 2 * rres) still = true;
+      }
+      md_hist_.push_back({j.t, Rb, d.range_rate_mps});
+      if (still) ++md_now; else keep.push_back(d);
+    }
+    D.swap(keep); md_suppressed_ += md_now;
+  }
   if (cfg_.ul_enable)                          // UL illuminators (built, off by default)
     for (const CfrWindow& u : j.ul) {
       if (!u.valid()) continue;
@@ -314,7 +396,14 @@ void CoherentPipeline::process(Job& j)
     }
   tm[6] = ms_since(s0); s0 = clk::now();
   std::vector<int> assoc;
-  const std::vector<Track>& T = tracker_->step(j.t, a.t_cpi_s, D, &assoc);
+  std::vector<Track> T;
+  {
+    // With the long dwell on, a short scan tests |rate| > the notch edge only: a slow track's miss here
+    // is not evidence (RateBand). Off: the whole axis, as before.
+    const RateBand band{a.lambda_m * a.notch_half_bins * a.dopp_step_hz, 2 * a.v_max_mps, geo.tx};
+    std::lock_guard<std::mutex> l(trk_mu_);
+    T = tracker_->step(j.t, a.t_cpi_s, D, &assoc, long_ ? &band : nullptr);
+  }
   for (size_t k = 0; k < D.size(); ++k)
     if (assoc[k] >= 0 && T[(size_t)assoc[k]].confirmed && D[k].illuminator == 0) af_->add(D[k], geo);
   tm[5] = ms_since(s0);
@@ -324,10 +413,10 @@ void CoherentPipeline::process(Job& j)
   const CoherentStats st = stats();
 
   std::ostringstream rep;
-  rep << "{\"cpi\":" << j.seq << ",\"t\":" << jnum(j.t) << ",\"t_cpi_s\":" << jnum(a.t_cpi_s) << ",\"b_eff_hz\":" << jnum(a.b_eff_hz)
+  rep << "{\"cpi\":" << j.seq << ",\"dwell\":\"short\",\"traffic\":true,\"wall\":" << jnum(std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count()) << ",\"t\":" << jnum(j.t) << ",\"t_cpi_s\":" << jnum(a.t_cpi_s) << ",\"b_eff_hz\":" << jnum(a.b_eff_hz)
       << ",\"range_res_m\":" << jnum(kC / a.b_eff_hz) << ",\"grid_step_m\":" << jnum(G.step) << ",\"n_voxels\":" << G.size()
       << ",\"n_dopp_tested\":" << a.tested_dopp.size() << ",\"rows\":" << j.dl.rows << ",\"gpu\":" << (cuda_ ? "true" : "false")
-      << ",\"lambda_m\":" << jnum(a.lambda_m) << ",\"dopp_step_hz\":" << jnum(a.dopp_step_hz) << ",\"notch_half_bins\":" << a.notch_half_bins << ",\"rows_bad\":" << n_bad
+      << ",\"lambda_m\":" << jnum(a.lambda_m) << ",\"dopp_step_hz\":" << jnum(a.dopp_step_hz) << ",\"notch_half_bins\":" << a.notch_half_bins << ",\"rows_bad\":" << n_bad << ",\"md_suppressed\":" << md_now << ",\"md_suppressed_total\":" << md_suppressed_
       << ",\"static_db\":{\"los\":[" << jnum(st_los[0]) << "," << jnum(st_los[1]) << "," << jnum(st_los[2]) << "," << jnum(st_los[3])
       << "],\"edge\":[" << jnum(st_edge[0]) << "," << jnum(st_edge[1]) << "," << jnum(st_edge[2]) << "," << jnum(st_edge[3])
       << "],\"far\":[" << jnum(st_far[0]) << "," << jnum(st_far[1]) << "," << jnum(st_far[2]) << "," << jnum(st_far[3])
@@ -339,13 +428,8 @@ void CoherentPipeline::process(Job& j)
       << ",\"overrun\":" << (overrun ? "true" : "false")
       << ",\"stats\":{\"processed\":" << st.processed << ",\"skipped\":" << st.skipped << ",\"overruns\":" << st.overruns
       << ",\"queue_waits\":" << st.queue_waits << "}"
-      << ",\"skipped_reason\":null,\"detections\":[";
-  for (size_t k = 0; k < D.size(); ++k)
-    rep << (k ? "," : "") << "{\"p\":" << jvec(D[k].pos) << ",\"s\":" << jvec(D[k].pos_sigma) << ",\"cov\":" << jarr(D[k].pos_cov)
-        << ",\"rr\":" << jnum(D[k].range_rate_mps) << ",\"rr_s\":" << jnum(D[k].range_rate_sigma) << ",\"snr\":" << jnum(D[k].snr)
-        << ",\"fd\":" << jnum(D[k].doppler_hz) << ",\"ill\":" << D[k].illuminator << "}";
-  rep << "]";
-  if (std::chrono::duration<double>(clk::now() - last_image_).count() >= cfg_.monitor_period_s) {
+      << ",\"skipped_reason\":null,\"detections\":" << jdets(D);
+  if (topview_due) {
     last_image_ = clk::now();
     const size_t nxy = (size_t)G.nx * G.ny;
     std::vector<double> top(nxy, 0.0);   // max over z and tested Doppler, y-major [iy][ix]
@@ -383,6 +467,34 @@ void CoherentPipeline::process(Job& j)
   tr << "]}";
   tracks_.write_line(tr.str());
   write_coherence(j.seq, j.t, cal, L.delay_s, false);
+  if (long_) long_->push(std::move(j.dl), a, L, rs, j.t, geo, cal);   // last use of j.dl: moved, not copied
+}
+
+void CoherentPipeline::long_result(LongResult& r)
+{
+  const LongCpi& c = r.cpi; const Axes& a = r.a;
+  if (a.valid) {
+    // The long scan tests |rate| <= lambda f_slow, outside its own +-notch_half_bins at 1/T_L.
+    const RateBand band{a.lambda_m * a.notch_half_bins * a.dopp_step_hz, a.lambda_m * c.f_slow_hz, cfg_.geometry.tx};
+    std::lock_guard<std::mutex> l(trk_mu_);
+    tracker_->step(c.t_air_s, c.cadence_s, r.D, nullptr, &band);
+  }
+  std::ostringstream rep;
+  rep << "{\"dwell\":\"long\",\"traffic\":true,\"wall\":" << jnum(std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count())
+      << ",\"t\":" << jnum(c.t_air_s) << ",\"t_cpi_s\":" << jnum(a.valid ? a.t_cpi_s : c.t_l_s) << ",\"t_l_s\":" << jnum(c.t_l_s)
+      << ",\"cadence_s\":" << jnum(c.cadence_s) << ",\"f_slow_hz\":" << jnum(c.f_slow_hz) << ",\"rate_slow_mps\":" << jnum(c.f_slow_hz * kC / c.w.fc_hz)
+      << ",\"b_eff_superrow_hz\":" << jnum(c.b_eff_hz) << ",\"n_short\":" << c.n_short << ",\"rows\":" << c.w.rows
+      << ",\"los_found\":" << jbools(c.found) << ",\"gpu\":" << (cuda_ ? "true" : "false");
+  if (a.valid)
+    rep << ",\"b_eff_hz\":" << jnum(a.b_eff_hz) << ",\"range_res_m\":" << jnum(kC / a.b_eff_hz) << ",\"grid_step_m\":" << jnum(r.G.step)
+        << ",\"n_voxels\":" << r.G.size() << ",\"n_dopp_tested\":" << a.tested_dopp.size() << ",\"lambda_m\":" << jnum(a.lambda_m)
+        << ",\"dopp_step_hz\":" << jnum(a.dopp_step_hz) << ",\"notch_half_bins\":" << a.notch_half_bins;
+  rep << ",\"timing_ms\":{\"build\":" << jnum(r.tm_build) << ",\"rd\":" << jnum(r.tm_rd) << ",\"env\":" << jnum(r.tm_env)
+      << ",\"detect\":" << jnum(r.tm_detect) << ",\"refine\":" << jnum(r.tm_refine) << ",\"total\":" << jnum(r.tm_total) << "}"
+      << ",\"overrun\":" << (r.tm_total > c.cadence_s * 1e3 ? "true" : "false") << ",\"queue_max\":" << r.queue_max
+      << ",\"skipped_reason\":" << (a.valid ? "null" : "\"" + a.invalid_reason + "\"") << ",\"detections\":" << jdets(r.D)
+      << ",\"topview\":null,\"rd\":null}";
+  reports_.write_line(rep.str());
 }
 
 } // namespace nr_isac::coherent

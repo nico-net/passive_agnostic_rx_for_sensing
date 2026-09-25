@@ -1993,6 +1993,33 @@ Calibration Calibrator::update(const std::array<cd, kCh>& tap, const std::array<
 // `los`/`sync`, only row masks/times), factored out so the GPU range_doppler can build `wf` on the
 // host without paying for the CPU RD.v computation. Kept a byte-for-byte copy of that block on
 // purpose -- range_doppler() itself is left untouched (append-only file per the Task 10 dispatch).
+std::vector<float> whiten_range_clutter(RdResult& R, double pfa_cell)
+{
+  const Axes& a = R.rd.axes;
+  std::vector<float> f((size_t)kCh * a.n_range, 1.f);
+  if (!a.valid || R.rd.v.empty() || a.tested_dopp.size() < 3 || !(pfa_cell > 0 && pfa_cell < 1)) return f;
+  // Self-masking guard: a mover spreads a fraction pi_ped of its power over every Doppler bin (the
+  // waveform's own pedestal: hopping allocations, TDD gaps). Whitening keeps it detectable only while
+  // its peak-to-pedestal ratio 1/pi_ped exceeds the per-cell exponential threshold -ln(pfa).
+  double ped = 0; uint32_t np = 0;
+  for (uint32_t d : a.tested_dopp) { ped += R.ambiguity(0.0, (double)d - (a.n_dopp / 2)); ++np; }
+  if (np) ped /= np;
+  if (!(ped * -std::log(pfa_cell) < 1.0)) return f;
+  std::vector<double> p; p.reserve(a.tested_dopp.size());
+  for (uint32_t i = 0; i < kCh; ++i) {
+    if (!R.los_found[i] || !(R.noise[i] > 0)) continue;
+    for (uint32_t m = 0; m < a.n_range; ++m) {
+      p.clear(); for (uint32_t d : a.tested_dopp) p.push_back(std::norm(R.rd.v[R.rd.idx(i, m, d)]));
+      const double floor = median(p) / std::log(2.0);
+      if (!(floor > R.noise[i])) continue;
+      const float g = (float)std::sqrt(R.noise[i] / floor);
+      f[(size_t)i * a.n_range + m] = g;
+      for (uint32_t d = 0; d < a.n_dopp; ++d) R.rd.v[R.rd.idx(i, m, d)] *= g;
+    }
+  }
+  return f;
+}
+
 std::vector<double> slow_time_weights(const CfrWindow& w, const Axes& a)
 {
   std::vector<double> sw(w.rows, 0.0);

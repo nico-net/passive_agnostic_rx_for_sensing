@@ -134,6 +134,16 @@ double max_exp_sum_quantile(uint32_t m, uint32_t n, double p);
 /** x with Q(shape, x) = p (regularised upper incomplete gamma), integer shape. */
 double gamma_upper_quantile(uint32_t shape, double p);
 
+/** Clutter-limited CFAR in range. Per (channel, range bin) the floor is the median over the tested Doppler
+ * bins (robust: a mover occupies a few) converted to an exponential mean; where it exceeds the channel's
+ * thermal noise the whole range bin is scaled to thermal (amplitude sqrt(noise/floor)), so every cell is
+ * unit-mean under "nothing moving" and the designed false-alarm rate holds at clutter-limited ranges too
+ * (OTA empty room: broadband static residue 30-46 dB above thermal at the direct path's ranges made
+ * ~10 detections per CPI). A target at the same range as that residue is judged against it -- physics.
+ * Skipped (all factors 1) when the waveform's own Doppler pedestal could hide a mover under the floor
+ * (pi_ped * -ln(pfa_cell) >= 1, e.g. narrow hopping rows). Returns the factors [ch][range] (1 = none). */
+std::vector<float> whiten_range_clutter(RdResult& R, double pfa_cell);
+
 /** Slow-time weight of each row: the CPI's Hann taper at the row time times the row's own subcarrier
  * weight sum (its Hann taper over the observed subcarriers). Coherent (matched-filter) integration weights
  * every subcarrier sample equally, so a row counts in proportion to what it observed: a 2-PRB row weighed as

@@ -3,13 +3,16 @@
 #include "coherent_autofocus.h"
 #include "coherent_core.h"
 #include "coherent_cuda.h"
+#include "coherent_longdwell.h"
 #include "coherent_report.h"
 #include "coherent_tracker.h"
 #include <chrono>
 #include <condition_variable>
 #include <deque>
 #include <memory>
+#include <functional>
 #include <mutex>
+#include <queue>
 #include <thread>
 
 namespace nr_isac::coherent {
@@ -24,17 +27,42 @@ public:
   explicit CoherentPipeline(const CoherentConfig& cfg);
   ~CoherentPipeline();                      // drains the queue, joins the worker
   void submit(CfrWindow dl, std::vector<CfrWindow> ul, uint64_t sequence, double air_time_s);
+  /** DL traffic state from the flow gate (called ~1/s). On close: tracks are dropped, no detections are
+   * emitted, and a "traffic":false line is written to reports and tracks (repeated while closed, so
+   * the UI can tell "no traffic" from "no data"). Never blocks. */
+  void traffic(bool open);
   CoherentStats stats() const;
 
 private:
-  struct Job { CfrWindow dl; std::vector<CfrWindow> ul; uint64_t seq; double t; };
+  struct Job { CfrWindow dl; std::vector<CfrWindow> ul; uint64_t seq = 0; double t = 0; int kind = 0; bool traffic = true; };   // kind 1: traffic event
   void run();
   void process(Job& job);
   void write_coherence(uint64_t seq, double t, const Calibration& cal, const std::array<double, kCh>& los_delay_s, bool skipped);
   CoherentConfig cfg_;
   Calibrator cal_;
-  std::array<std::vector<double>, kCh> los_resid_;   // per-channel LOS delay residual history (s)
-  std::unique_ptr<CoherentTracker> tracker_;
+  /** Cumulative median in O(log n) per push, O(1) per read: value = sorted[n/2] of everything pushed
+   *  (the same element std::nth_element at n/2 picks). The LOS residual history grows for the whole
+   *  run; copying + nth_element over it every CPI cost O(n) and broke the CPI budget on long runs. */
+  struct RunningMedian {
+    std::priority_queue<double> lo;                                              // smallest floor(n/2)
+    std::priority_queue<double, std::vector<double>, std::greater<double>> hi;   // the rest; top = median
+    void push(double x) {
+      if (!hi.empty() && x < hi.top()) lo.push(x); else hi.push(x);
+      if (lo.size() > hi.size()) { hi.push(lo.top()); lo.pop(); }
+      else if (hi.size() > lo.size() + 1) { lo.push(hi.top()); hi.pop(); }
+    }
+    bool empty() const { return hi.empty(); }
+    double median() const { return hi.top(); }
+  };
+  std::array<RunningMedian, kCh> los_resid_;   // per-channel LOS delay residual history (s)
+  TrackerParams tp_;
+  std::unique_ptr<CoherentTracker> tracker_;   // guarded by trk_mu_ (the long dwell steps it from its own thread)
+  std::mutex trk_mu_;
+  bool traffic_open_ = true;   // guarded by mu_
+  double last_t_ = 0;          // last CPI air time, for traffic events (guarded by mu_)
+  struct MdHist { double t, R, rr; };
+  std::deque<MdHist> md_hist_;  // recent detections (worker thread only): non-translating micro-Doppler test
+  uint64_t md_suppressed_ = 0;
   std::unique_ptr<Autofocus> af_;
   std::unique_ptr<CudaCoherent> cuda_;   // Task 10: GPU range_doppler()/envelope() when available
   bool cuda_fail_closed_ = false;        // NR_ISAC_REQUIRE_CUDA=1 and no device: skip every CPI
@@ -45,6 +73,8 @@ private:
   bool stop_ = false;
   CoherentStats st_;
   std::chrono::steady_clock::time_point last_image_{};
+  void long_result(LongResult& r);          // long-dwell sink (runs on the long-dwell thread)
+  std::unique_ptr<LongDwellRunner> long_;   // coherent_long_dwell; destroyed before the sinks/tracker it uses
   std::thread worker_;                      // last: started after every member above exists
 };
 

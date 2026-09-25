@@ -16,4 +16,16 @@ with tempfile.TemporaryDirectory() as d:
     assert s["reports"][-1]["cpi"] == 7, "follows the newest file"
     assert s["tracks"]["tracks"][0]["id"] == 3 and "3" in {str(k) for k in s["track_trails"]}
     assert s["coherence"][-1]["G"] == 3.9 and s["health"]["gpu"] is True
+    assert s["traffic"]["open"] is None or s["traffic"]["open"] is True
+    # traffic off: the pipeline's event clears detections and tracks, and the state is exposed for the banner
+    w("coherent_reports", "B", [{"event": "traffic", "traffic": False, "t": 0.6, "wall": time.time(), "detections": []}])
+    w("coherent_tracks", "B", [{"event": "traffic", "traffic": False, "t": 0.6, "tracks": []}])
+    time.sleep(0.5); s = v.snapshot()
+    assert s["traffic"]["open"] is False and s["traffic"]["age_s"] < 5, s["traffic"]
+    assert all(not r["detections"] for r in s["reports"]), "no detections while traffic is off"
+    assert s["tracks"]["tracks"] == [] and not s["track_trails"], "tracks cleared"
+    # traffic back: normal reports resume
+    w("coherent_reports", "B", [{"cpi": 8, "traffic": True, "t": 0.7, "detections": [{"p": [1, 2, 3]}], "timing_ms": {"total": 6}, "t_cpi_s": 0.075, "stats": {}, "gpu": True, "topview": None, "rd": None}])
+    time.sleep(0.5); s = v.snapshot()
+    assert s["traffic"]["open"] is True and s["reports"][-1]["detections"], "resumes"
 print("test_coherent_view: PASS")
