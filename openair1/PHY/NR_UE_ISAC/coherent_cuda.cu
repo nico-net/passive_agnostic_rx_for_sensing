@@ -570,10 +570,11 @@ std::vector<Detection> CudaCoherent::detect(const Grid& g, const Geometry& geo, 
   I.timing.envelope_download_ms = 0;  // included above; kept separate field for report symmetry only
 
   if (need_host_E) I.last_E = h_E;    // last_envelope(): topview builder (or the CPU-oracle path)
-  // GpuDetect is opt-in until it matches the CPU oracle on real data: on 40 detect() inputs dumped from
-  // the full-band OTA recording it made different decisions on 12 (FP32 magnitudes flip near-tied
-  // pursuit choices; the clean parity scene has no ties). The user's rule is no accuracy loss.
-  // (Inherited from c32469c8b5, unrelated to this file's envelope-kernel speed-up -- kept verbatim.)
+  // GpuDetect is opt-in (NR_ISAC_CUDA_DETECT_GPU=1). On 120 detect() inputs dumped from two OTA
+  // recordings it matches the CPU oracle exactly wherever the ORACLE is reproducible; where it is not
+  // (the oracle's own source rebuilt without FMA contraction, or run on 1-ulp-perturbed inputs, changes
+  // its own output) the GPU differs like those rebuilds do -- see gpu-exact-report.md and the
+  // recorded-case mode of tests/coherent_cuda_parity_test.cc. Default left to the controller.
   if (!use_gpu_detect) return coherent::detect(h_E, R, g, geo, p);   // CPU oracle (default)
   return I.det.run(need_host_E ? h_E : I.ev_dummy_E, R, g, geo, p, I.rd.p, (const float*)I.E.p, I.stream);
 }

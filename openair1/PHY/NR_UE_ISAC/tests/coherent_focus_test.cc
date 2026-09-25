@@ -1,5 +1,7 @@
 // openair1/PHY/NR_UE_ISAC/tests/coherent_focus_test.cc  (make_window copied from coherent_core_test.cc)
 #include "coherent_core.h"
+#include "coherent_cuda_detect.h"   // save_detect_case (header-only): NR_ISAC_FOCUS_DUMP=<dir> records every
+                                    // detect() input of these scenes for the GPU parity replay
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -10,6 +12,12 @@
 #include <stdexcept>
 static void require(bool c, const char* m) { if (!c) throw std::runtime_error(m); }
 using namespace nr_isac::coherent;
+static std::vector<Detection> detect_rec(const std::vector<float>& E, const RdResult& R, const Grid& G, const Geometry& g, const DetectParams& p)
+{
+  static int n = 0;
+  if (const char* dir = std::getenv("NR_ISAC_FOCUS_DUMP")) save_detect_case(std::string(dir) + "/case_" + std::to_string(n++) + ".bin", E, R, G, g, p);
+  return detect(E, R, G, g, p);
+}
 using nr_isac::CfrWindow; using nr_isac::slot_duration_s;
 
 // rows x 3276 grid, antennas 4; paths: (per-channel absolute delay, amplitude, doppler); channel phase offsets
@@ -83,7 +91,7 @@ Chain run(const CfrWindow& w, const Geometry& g, const Volume& vol, double vmax,
   k.L = find_los(w, k.a, 1e-4); RowSync s = estimate_row_sync(w, k.a, k.L); k.R = range_doppler(w, k.a, k.L, s);
   Calibrator cal; for (int n = 0; n < 5; ++n) k.c = cal.update(k.R.los_tap, k.L.found, k.L.snr);
   k.G = envelope_grid(vol, k.a); k.E = envelope(k.R, k.G, g);
-  k.D = detect(k.E, k.R, k.G, g, detect_params(k.a, k.G, 1.0));
+  k.D = detect_rec(k.E, k.R, k.G, g, detect_params(k.a, k.G, 1.0));
   for (Detection& d : k.D) refine(d, k.R, k.G, g, k.c, survey);
   return k;
 }
@@ -108,7 +116,7 @@ static void test_scene()
   std::vector<float> E = envelope(R, G, g);
   require(E.size() == a.tested_dopp.size() * G.size(), "envelope sized");
   DetectParams p = detect_params(a, G, 1.0); require(p.pfa > 0 && p.pfa < 1e-3, "pfa derived from intensity");
-  std::vector<Detection> D = detect(E, R, G, g, p);
+  std::vector<Detection> D = detect_rec(E, R, G, g, p);
   // Refined at the survey sigma the pipeline passes by default (CoherentConfig::survey_sigma_m =
   // 0.1 m): at tape grade the coherent term is not trusted (rho_eff ~ 0, see test_survey_sigma).
   // Measured over seeds 1-20 of this scene: at 0.1 m all three targets lie within 3 sigma (per axis,
@@ -161,7 +169,7 @@ static void test_los_missing_channel()
   Rg.noise[2] = 1e-12;
   const std::vector<float> Eg = envelope(Rg, k.G, g);
   require(Eg == k.E, "LOS-less channel does not enter the envelope");
-  std::vector<Detection> Dg = detect(Eg, Rg, k.G, g, detect_params(k.a, k.G, 1.0));
+  std::vector<Detection> Dg = detect_rec(Eg, Rg, k.G, g, detect_params(k.a, k.G, 1.0));
   for (Detection& d : Dg) refine(d, Rg, k.G, g, k.c, SurveySigma{});
   require(Dg.size() == k.D.size(), "LOS-less channel: same detections");
   for (size_t n = 0; n < Dg.size(); ++n)
