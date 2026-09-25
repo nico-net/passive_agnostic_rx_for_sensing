@@ -292,7 +292,6 @@ struct CudaCoherent::Impl {
   RdResult cached;
   std::unique_ptr<CudaFront> front;   // device-resident CPI shared by find_los / row sync / range_doppler
   uint32_t cur_nch = kCh, cur_rows = 0, cur_nrange = 0, cur_ndopp = 0;
-  size_t ev_smem_raised = 0;   // largest k_envelope dynamic-shared-mem opt-in granted so far (see detect())
   Timing timing;
   std::vector<float> last_E;
   // Grow-only, contents never read: GpuDetect::run() size-checks its `E` argument even when it takes
@@ -540,13 +539,12 @@ std::vector<Detection> CudaCoherent::detect(const Grid& g, const Geometry& geo, 
     const int ev_threads = 128;
     const unsigned ev_blocks = (unsigned)std::min<size_t>(65535, std::max<size_t>(1, nv));
     const size_t ev_smem = ((size_t)I.cur_ndopp + nt) * sizeof(float);
-    if (ev_smem > 48 * 1024 && ev_smem > I.ev_smem_raised) {
+    if (ev_smem > 48 * 1024) {
       int dev = 0, max_optin = 0;
       cuda_check(cudaGetDevice(&dev), "cudaGetDevice");
       cuda_check(cudaDeviceGetAttribute(&max_optin, cudaDevAttrMaxSharedMemoryPerBlockOptin, dev), "cudaDeviceGetAttribute");
       if ((size_t)max_optin < ev_smem) throw std::runtime_error("k_envelope: CPI Doppler axis exceeds device shared-mem opt-in limit");
-      cuda_check(cudaFuncSetAttribute(k_envelope, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)ev_smem), "cudaFuncSetAttribute smem");
-      I.ev_smem_raised = ev_smem;
+      raise_dyn_smem((const void*)k_envelope, ev_smem, "k_envelope smem");   // process-wide, never lowered
     }
     k_envelope<<<ev_blocks, ev_threads, ev_smem, I.stream>>>((float*)I.mag.p, (float*)I.ev_inv_noise.p, (float*)I.vbin.p, (uint32_t*)I.ev_tested_dopp.p, (uint32_t)nt,
                                       (uint8_t*)I.ev_dopp_ok.p, (uint32_t*)I.ev_dh.p, nv, I.cur_nrange, I.cur_ndopp, (float*)I.E.p);

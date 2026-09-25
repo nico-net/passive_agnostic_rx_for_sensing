@@ -5,6 +5,7 @@
  * the waveform tables (as the Task 10 k_wf) and the static-removal operator Q (the CPU accumulates Q in
  * FP32 too). Parity: tests/coherent_cuda_parity_test.cc. */
 #include "coherent_cuda_front.h"
+#include "coherent_cuda_detect.h"
 
 #include <algorithm>
 #include <chrono>
@@ -514,7 +515,7 @@ void CudaFront::los_refine(const Axes& a, const std::array<long, kCh>& best, con
   ref_in_.ensure(sizeof(in)); ref_out_.ensure(sizeof(out));
   ck(cudaMemcpyAsync(ref_in_.p, in, sizeof(in), cudaMemcpyHostToDevice, st_), "H2D refine");
   const size_t shm = 2 * (size_t)m_.sc * sizeof(float2);
-  ck(cudaFuncSetAttribute(k_los_refine, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)shm), "refine smem");
+  raise_dyn_smem((const void*)k_los_refine, shm, "refine smem");   // process-wide, never lowered (other threads' instances)
   k_los_refine<<<kCh, 32, shm, st_>>>(ucf_.as<float2>(), ukf_.as<float2>(), m_.sc, 2LL * a.n_fft, ref_in_.as<long2>(), fm, ref_out_.as<double>());
   ck(cudaMemcpyAsync(out, ref_out_.p, sizeof(out), cudaMemcpyDeviceToHost, st_), "D2H refine");
   sync();

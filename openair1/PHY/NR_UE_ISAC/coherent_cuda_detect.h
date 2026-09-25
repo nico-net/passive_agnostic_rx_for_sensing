@@ -13,6 +13,10 @@
 #include <vector>
 
 namespace nr_isac::coherent {
+/** Raise kernel `kern`'s dynamic shared-memory limit to >= `bytes`, process-wide, never lowering it
+ *  (the attribute is per kernel for the whole process, shared by every GpuDetect/CudaCoherent/
+ *  CudaFront instance on every thread). Throws on failure. */
+void raise_dyn_smem(const void* kern, size_t bytes, const char* what);
 
 struct GpuDetectTiming {
   double total_ms = 0, prep_ms = 0, scale_ms = 0, cand_ms = 0, choose_ms = 0, items_ms = 0, pursuit_ms = 0,

@@ -28,6 +28,7 @@
 #include <cstdlib>
 #include <deque>
 #include <map>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 #include <tuple>
@@ -275,6 +276,23 @@ struct DPk { double v, raw; uint32_t d; };
 // over velocity-consistent combinations, run by lane 0 on the lists in shared memory. Scratch per warp:
 // choose_smem(W) bytes. Returns ec (every lane) or -1 (me.d/me.pw untouched then; me.bin always set).
 __host__ __device__ inline size_t choose_smem(uint32_t W) { return (size_t)W * (2 * sizeof(double) + (kCh + 1) * sizeof(DPk)) + 2 * kCh * sizeof(uint32_t); }
+// cudaFuncAttributeMaxDynamicSharedMemorySize is PROCESS-wide per kernel, but several GpuDetect
+// instances live on different threads (short CPI, long dwell). A per-instance "already set" cache let
+// one instance leave the limit below what the other launches with: the launch failed, nothing checked
+// it, and the host read the previous CPI's device buffers (OTA segfault 2026-09-25). So the limit is
+// raised process-wide under a lock and never lowered: any launch within it stays valid concurrently.
+} // namespace
+void raise_dyn_smem(const void* kern, size_t bytes, const char* what)
+{
+  static std::mutex m; static std::map<const void*, size_t> cur;
+  std::lock_guard<std::mutex> l(m);
+  size_t& c = cur[kern];
+  if (bytes <= c) return;
+  const cudaError_t e = cudaFuncSetAttribute(kern, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)bytes);
+  if (e != cudaSuccess) throw std::runtime_error(std::string(what) + ": " + cudaGetErrorString(e));
+  c = bytes;
+}
+namespace {
 __device__ double w_choose(const DAxes& a, const DGeo& g, DAcc& me, long d, uint32_t dhv, double thr, const float* mag, const float* magc,
                            char* scr, uint32_t W)
 {
@@ -1242,7 +1260,7 @@ struct GpuDetect::Impl {
       c_me, c_ec, c_thr, pk_scratch,
       r_w, r_t, r_fc, r_g, r_B, r_ed, r_em, Q, items, one, slots, F, Mf, gpp, gpr, dir, dirg, fitG, stat, st_ph, st_buf, alive,
       w_mask, w_lo, w_hi, w_trow, gam, jobs, f_cells, f_y0, f_y, f_resA, f_resa, f_resJ, f_Mmid, f_Z, bar, moved, fstats, m_erow, refit_flags;
-  int n_sm = 0; size_t fit_smem_set = 0, choose_smem_set = 0;
+  int n_sm = 0;
   // Warps per block for the warp-per-candidate choose kernels: as many as fit a block's shared memory (<= 4).
   uint32_t choose_warps(uint32_t W)
   {
@@ -1250,11 +1268,8 @@ struct GpuDetect::Impl {
     int dev = 0, maxsm = 0; cudaGetDevice(&dev); cudaDeviceGetAttribute(&maxsm, cudaDevAttrMaxSharedMemoryPerBlockOptin, dev);
     if (per > (size_t)maxsm) throw std::runtime_error("detect choose: Doppler search window too wide for shared memory");
     const uint32_t w = (uint32_t)std::max<size_t>(1, std::min<size_t>(4, (size_t)maxsm / per));
-    if (w * per > choose_smem_set) {
-      cuda_check(cudaFuncSetAttribute((const void*)k_choose_cand, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)(w * per)), "choose smem");
-      cuda_check(cudaFuncSetAttribute((const void*)k_rescore, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)(w * per)), "rescore smem");
-      choose_smem_set = w * per;
-    }
+    raise_dyn_smem((const void*)k_choose_cand, w * per, "choose smem");
+    raise_dyn_smem((const void*)k_rescore, w * per, "rescore smem");
     return w;
   }
   // Cooperative fit launch setup: jobs (one per channel), blocks per job, scratch. Returns the block count.
@@ -1264,11 +1279,8 @@ struct GpuDetect::Impl {
     up(jobs, jb.data(), nj);
     const size_t smem = fit_smem_bytes(fa.rs.nrow, (uint32_t)(2 * fa.hm_r + 1), fa.Nmax, nrow_all, (uint32_t)(2 * fa.hm_d + 1));
     if (!n_sm) { int dev = 0; cudaGetDevice(&dev); cudaDeviceGetAttribute(&n_sm, cudaDevAttrMultiProcessorCount, dev); }
-    if (smem > fit_smem_set) {
-      cuda_check(cudaFuncSetAttribute((const void*)k_fit, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem), "fit smem attr");
-      cuda_check(cudaFuncSetAttribute((const void*)k_refit, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem), "refit smem attr");
-      fit_smem_set = smem;
-    }
+    raise_dyn_smem((const void*)k_fit, smem, "fit smem attr");
+    raise_dyn_smem((const void*)k_refit, smem, "refit smem attr");
     int per_sm = 0; cuda_check(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&per_sm, kern, 256, smem), "fit occupancy");
     const uint32_t total = (uint32_t)std::max(1, per_sm * n_sm);
     if (total < nj) throw std::runtime_error("detect fit: device cannot co-schedule one block per job");
@@ -1385,7 +1397,9 @@ struct GpuDetect::Impl {
   {
     if (n) cuda_check(cudaMemcpyAsync(h, b.p, n * sizeof(T), cudaMemcpyDeviceToHost, stream), "D2H");
   }
-  void sync() { cuda_check(cudaStreamSynchronize(stream), "sync"); }
+  // A launch-configuration failure is reported only by cudaGetLastError (not by the stream sync):
+  // check it here, before any host code reads what the launches were supposed to write.
+  void sync() { cuda_check(cudaGetLastError(), "kernel launch"); cuda_check(cudaStreamSynchronize(stream), "sync"); }
   static unsigned blocks(size_t n, unsigned t = 256) { return (unsigned)std::max<size_t>(1, std::min<size_t>(65535 * 4, (n + t - 1) / t)); }
 };
 
