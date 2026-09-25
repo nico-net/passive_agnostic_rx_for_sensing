@@ -17,7 +17,9 @@
 
 #include "nr_pdsch_config_sweep.h"
 #include "nr_crc_evidence.h"
+#include "nr_pdsch_qm_oracle.h"
 #include <string.h>
+#include <stdlib.h>
 #include <pthread.h>
 #include "common/utils/LOG/log.h"
 
@@ -140,6 +142,42 @@ int nr_pdsch_config_sweep_prune_mask(nr_pdsch_config_sweep_state_t *st, uint16_t
   st->cursor = 0;
   st->winner = -1;
   return n;
+}
+
+static uint8_t qm_table_mask(uint8_t mcs, int qm)
+{
+  uint8_t mask = 0;
+  for (uint8_t t = 0; t < 3; t++)
+    if (nr_pdsch_qm_of_mcs(mcs, t) == qm)
+      mask |= (uint8_t)(1u << t);
+  return mask;
+}
+
+static int prune_tables(nr_pdsch_config_sweep_state_t *st, uint8_t mask)
+{
+  if (st == NULL || st->n_hyp <= 0 || mask == 0)
+    return 0;
+  nr_pdsch_cfg_hypothesis_t keep[NR_PDSCH_SWEEP_MAX_HYP];
+  int n = 0;
+  for (int i = 0; i < st->n_hyp; i++)
+    if (mask & (1u << st->hyp[i].mcs_table))
+      keep[n++] = st->hyp[i];
+  if (n <= 0 || n == st->n_hyp)
+    return n == st->n_hyp ? n : 0;
+  memcpy(st->hyp, keep, (size_t)n * sizeof(keep[0]));
+  st->n_hyp = n;
+  memset(st->trials, 0, sizeof(st->trials));
+  memset(st->ok, 0, sizeof(st->ok));
+  for (int i = 0; i < n; i++)
+    st->order[i] = i;
+  st->cursor = 0;
+  st->winner = -1;
+  return n;
+}
+
+int nr_pdsch_config_sweep_prune_qm(nr_pdsch_config_sweep_state_t *st, uint8_t mcs, int qm)
+{
+  return prune_tables(st, qm_table_mask(mcs, qm));
 }
 
 /* DM-RS symbol masks the oracle has MEASURED on this cell (per-symbol coherence, independent of
@@ -448,6 +486,7 @@ typedef struct {
   uint8_t tda;
   int tda_count, typeA;
   bool reported;
+  uint8_t qm_tables, qm_obs; /* Qm-oracle evidence: consistent-table bitmask, sightings */
   uint64_t outcomes, locked_trials, locked_passes;
   uint64_t failure_streak, reacquisitions;
   double reference_crc_lower;
@@ -697,6 +736,40 @@ int nr_pdsch_config_sweep_observe(const nr_pdsch_sweep_ticket_t *ticket, uint16_
   int n = 0;
   if (c != NULL && c->state.winner < 0)
     n = prune_to_observed(&c->state, &r->obs);
+  pthread_mutex_unlock(&g_lock);
+  return n;
+}
+
+int nr_pdsch_config_sweep_observe_qm(const nr_pdsch_sweep_ticket_t *ticket, uint8_t mcs, int qm)
+{
+  static int enabled = -1;
+  if (enabled < 0) {
+    const char *e = getenv("ISAC_QM_ORACLE");
+    enabled = (e != NULL && atoi(e) == 0) ? 0 : 1;
+  }
+  if (!enabled || ticket == NULL || ticket->generation == 0 || qm <= 0)
+    return 0;
+  const uint8_t mask = qm_table_mask(mcs, qm);
+  if (mask == 0 || mask == 0x7)
+    return 0; /* impossible for this MCS, or every table agrees: no information */
+  pthread_mutex_lock(&g_lock);
+  sweep_context_t *c = ticket_context(ticket);
+  int n = 0;
+  if (c != NULL && c->state.winner < 0) {
+    const uint8_t inter = c->qm_obs ? (uint8_t)(c->qm_tables & mask) : mask;
+    if (inter == 0) {
+      c->qm_obs = 0;
+      c->qm_tables = 0;
+    } else {
+      c->qm_tables = inter;
+      if (c->qm_obs < 255) c->qm_obs++;
+      if (c->qm_obs >= 2) {
+        const int before = c->state.n_hyp;
+        n = prune_tables(&c->state, inter);
+        if (n == before) n = 0;
+      }
+    }
+  }
   pthread_mutex_unlock(&g_lock);
   return n;
 }

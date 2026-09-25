@@ -54,6 +54,7 @@ void nr_passive_rrc_harvest(const uint8_t *tb, uint32_t tb_bytes); // openair2/L
 #include "PHY/NR_REFSIG/dmrs_nr.h"                     // get_num_dmrs_re_per_rb
 #include "common/utils/nr/nr_common.h"                // get_num_dmrs
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_config_sweep.h" // Technique D scoring
+#include "PHY/NR_UE_TRANSPORT/nr_pdsch_qm_oracle.h" // Technique D Qm oracle
 #include "PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.h" // nr_pdcch_dci11_layout_feedback
 
 #include <math.h>
@@ -680,7 +681,7 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
       if (mask)
         nr_pdsch_config_sweep_observe(&job.sweep_ticket, mask, last_sym, job.sweep_ticket.k0);
     }
-    nr_pdsch_passive_decode_result_t dec;
+    nr_pdsch_passive_decode_result_t dec = {0};
     { /* ISAC_PROBE_ALL=1: every job is a first-code-block probe, pinned confs included -- isolates
        * the probe mechanics from the layout search. */
       static int s_probe_all = -1;
@@ -707,7 +708,7 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
       if (gpu_job && s_chk > 0 && atomic_load(&g_gpu_chk_n) < (uint64_t)s_chk
           && st_raw != NR_PDSCH_PASSIVE_DECODE_ERROR && st_raw != NR_PDSCH_PASSIVE_DECODE_UNSUPPORTED) {
         const bool gpu_ok = job.layout_probe ? probe_outcome : st_raw == NR_PDSCH_PASSIVE_DECODE_CRC_OK;
-        nr_pdsch_passive_decode_result_t dec2;
+        nr_pdsch_passive_decode_result_t dec2 = {0};
         fapi_nr_dl_config_dlsch_pdu_rel15_t pdu2 = job.dlsch_pdu;
         nr_pdsch_passive_probe_mode(job.layout_probe != 0);
         const nr_pdsch_passive_decode_status_t st2 =
@@ -908,6 +909,12 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
       /* Technique D scoring: the TB CRC is the only oracle that can tell a right payload
        * interpretation from a wrong one, and this is the one place it is known. */
       nr_pdsch_cfg_hypothesis_t winner;
+      if (!job.sweep_ticket.settled && job.sweep_ticket.generation && dec.qm_measured) {
+        const int kept = nr_pdsch_config_sweep_observe_qm(&job.sweep_ticket, job.grant.mcs, dec.qm_measured);
+        if (kept > 0)
+          LOG_A(PHY, "SENSING: Technique D Qm oracle rnti=0x%x mcs=%u qm=%u -> %d hypotheses\n",
+                job.sweep_ticket.rnti, job.grant.mcs, dec.qm_measured, kept);
+      }
       nr_pdcch_dci11_layout_feedback(job.sweep_ticket.layout_index, st == NR_PDSCH_PASSIVE_DECODE_CRC_OK);
       if (nr_pdsch_config_sweep_feedback(&job.sweep_ticket, st == NR_PDSCH_PASSIVE_DECODE_CRC_OK, &winner))
         LOG_A(PHY, "SENSING: Technique D CONVERGED rnti=0x%x tda=%u S=%u L=%u mask=0x%x table=%u\n",
