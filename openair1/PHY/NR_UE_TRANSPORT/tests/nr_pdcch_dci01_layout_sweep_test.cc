@@ -319,10 +319,18 @@ TEST(Dci01Fdra, TypeZeroTruthWithConstantLeadingBitsKeepsType1AliveUntilTbCrcRef
     for (int k = 0; k < 20000; k++) nr_dci11_resolver_observe(&r, payload());
     const int type1_alive = r.n_alive;
     EXPECT_GT(type1_alive, 0) << "stage 1 refuted every type-1 layout -- then stage 1 COULD drive the refusal";
-    // The booked type-1 PUSCH decodes nothing on this cell: the verdict walks BOOK -> ARM -> REFUSE.
-    EXPECT_EQ(nr_dci01_fdra_verdict(NR_DCI11_FDRA_ARM_MIN_TRIALS - 1, 0, false, &r), NR_DCI01_FDRA_BOOK);
-    EXPECT_EQ(nr_dci01_fdra_verdict(NR_DCI11_FDRA_ARM_MIN_TRIALS, 0, false, &r), NR_DCI01_FDRA_ARM);
-    EXPECT_EQ(nr_dci01_fdra_verdict(NR_DCI11_FDRA_ARM_MIN_TRIALS, 0, true, &r), NR_DCI01_FDRA_BOOK)
+    // The oracle-class 0_1 PUSCH decodes nothing on this cell while DCI 0_0 PUSCH does (link healthy):
+    // the verdict walks BOOK -> ARM -> REFUSE.
+    nr_dci01_fdra_evidence_t ev{};
+    for (int k = 0; k < NR_DCI11_FDRA_ARM_MIN_TRIALS - 1; k++) {
+      nr_dci01_fdra_note(&ev, true, false);
+      if ((k % 8) == 0) nr_dci01_fdra_note(&ev, false, true);  // a 0_0 pass: link health, NOT a type-1 pass
+    }
+    EXPECT_EQ(ev.t1_ok, 0u) << "a DCI 0_0 pass was counted as a 0_1 type-1 pass";
+    EXPECT_EQ(nr_dci01_fdra_verdict(&ev, false, &r), NR_DCI01_FDRA_BOOK);
+    nr_dci01_fdra_note(&ev, true, false);
+    EXPECT_EQ(nr_dci01_fdra_verdict(&ev, false, &r), NR_DCI01_FDRA_ARM);
+    EXPECT_EQ(nr_dci01_fdra_verdict(&ev, true, &r), NR_DCI01_FDRA_BOOK)
         << "armed but nothing non-type-1 alive: no reason to refuse";
     const int added = ul_arm(r, false, rb, 2, t.total, 0, 106);
     ASSERT_GT(added, 0);
@@ -334,10 +342,27 @@ TEST(Dci01Fdra, TypeZeroTruthWithConstantLeadingBitsKeepsType1AliveUntilTbCrcRef
     ASSERT_GE(truth, 0) << "arming did not add the true layout";
     for (int k = 0; k < 20000; k++) nr_dci11_resolver_observe(&r, payload());
     EXPECT_TRUE(r.alive[truth]) << "stage 1 deleted the armed truth";
-    EXPECT_EQ(nr_dci01_fdra_verdict(NR_DCI11_FDRA_ARM_MIN_TRIALS, 0, true, &r), NR_DCI01_FDRA_REFUSE)
-        << "the refusal did not fire on a type-0 cell";
-    EXPECT_EQ(nr_dci01_fdra_verdict(NR_DCI11_FDRA_ARM_MIN_TRIALS + 5, 1, true, &r), NR_DCI01_FDRA_BOOK)
-        << "one type-1 TB CRC pass must end the refusal";
+    EXPECT_EQ(nr_dci01_fdra_verdict(&ev, true, &r), NR_DCI01_FDRA_REFUSE) << "the refusal did not fire on a type-0 cell";
+    // Refusal applies to oracle-class 0_1 only: 0_0 and discovery grants stay booked; 1 in 64 is a probe.
+    EXPECT_TRUE(nr_dci01_fdra_book(NR_DCI01_FDRA_REFUSE, false, 0)) << "a DCI 0_0 grant was refused";
+    EXPECT_FALSE(nr_dci01_fdra_book(NR_DCI01_FDRA_REFUSE, true, 1));
+    EXPECT_TRUE(nr_dci01_fdra_book(NR_DCI01_FDRA_REFUSE, true, NR_DCI01_FDRA_PROBE_EVERY)) << "no probe";
+    EXPECT_TRUE(nr_dci01_fdra_book(NR_DCI01_FDRA_BOOK, true, 0));
+    // More 0_0 passes never flip it; one oracle pass ends it for good.
+    for (int k = 0; k < 100; k++) nr_dci01_fdra_note(&ev, false, true);
+    EXPECT_EQ(nr_dci01_fdra_verdict(&ev, true, &r), NR_DCI01_FDRA_REFUSE) << "0_0 passes disabled the refusal";
+    nr_dci01_fdra_evidence_t proven = ev;
+    nr_dci01_fdra_note(&proven, true, true);
+    EXPECT_EQ(nr_dci01_fdra_verdict(&proven, true, &r), NR_DCI01_FDRA_BOOK) << "one 0_1 type-1 pass must end the refusal";
+    // Link health is required: the same failing 0_1 reads with no recent 0_0 pass never refuse (dead link).
+    nr_dci01_fdra_evidence_t dead{};
+    for (int k = 0; k < 4 * NR_DCI11_FDRA_ARM_MIN_TRIALS; k++) nr_dci01_fdra_note(&dead, true, false);
+    EXPECT_EQ(nr_dci01_fdra_verdict(&dead, false, &r), NR_DCI01_FDRA_BOOK) << "armed on a dead link";
+    EXPECT_EQ(nr_dci01_fdra_verdict(&dead, true, &r), NR_DCI01_FDRA_BOOK) << "refused on a dead link";
+    nr_dci01_fdra_evidence_t stale = dead;
+    stale.link_ok = 1;
+    stale.t1_try_at_link = 0;  // the link worked once, long before the 0_1 reads started failing
+    EXPECT_EQ(nr_dci01_fdra_verdict(&stale, true, &r), NR_DCI01_FDRA_BOOK) << "stale link health accepted";
     int other = 0;
     for (int i = 0; i < r.n_hyp; i++) other += r.alive[i] && r.off[i].fdra_mode != NR_FDRA_TYPE1;
     std::cerr << "[ MEASURED ] UL type-0 truth mode " << (int)mode << " pre_riv 3: " << type1_alive << "/" << n1
@@ -375,10 +400,10 @@ TEST(Dci01Fdra, EveryStageFitsTheCap) {
           const int t1 = count(rb, L, tb);
           if (t1 > worst1) worst1 = t1;
           if (armed > worstA) { worstA = armed; aN = N; aL = L; }
-          EXPECT_LT(t1, NR_DCI11_LAYOUT_MAX);
-          EXPECT_LT(t1 + armed, NR_DCI11_LAYOUT_MAX) << "N=" << N << " L=" << L << " tb=" << tb;
+          EXPECT_LT(t1, NR_DCI01_LAYOUT_MAX);
+          EXPECT_LT(t1 + armed, NR_DCI01_LAYOUT_MAX) << "N=" << N << " L=" << L << " tb=" << tb;
         }
   }
   std::cerr << "[ MEASURED ] DCI 0_1 stages: type-1 max " << worst1 << ", armed set (modes 1..4) max " << worstA << " at "
-            << aN << " PRB / " << aL << " bits (cap " << NR_DCI11_LAYOUT_MAX << ")\n";
+            << aN << " PRB / " << aL << " bits (cap " << NR_DCI01_LAYOUT_MAX << ")\n";
 }

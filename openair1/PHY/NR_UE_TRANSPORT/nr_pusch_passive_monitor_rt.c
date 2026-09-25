@@ -93,7 +93,7 @@ static void passive_ul_deliver(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc
     if(!(cfg->ul_pusch_decode == 2) && (out.status==NR_PUSCH_PASSIVE_OK ||
         out.status==NR_PUSCH_PASSIVE_CRC_FAIL || out.status==NR_PUSCH_PASSIVE_ZERO_TB)) {
       nr_pdcch_ul_discovery_feedback(&g,out.status==NR_PUSCH_PASSIVE_OK);
-      nr_pdcch_dci01_fdra_feedback(out.status==NR_PUSCH_PASSIVE_OK);
+      nr_pdcch_dci01_fdra_feedback(&g, out.status==NR_PUSCH_PASSIVE_OK);
     }
 
 

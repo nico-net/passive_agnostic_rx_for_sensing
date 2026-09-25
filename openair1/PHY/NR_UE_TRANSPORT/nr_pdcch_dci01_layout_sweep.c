@@ -183,15 +183,36 @@ int nr_dci01_layout_enumerate_fdra(uint16_t riv_bits, uint8_t tda_bits, uint16_t
   return n;
 }
 
-int nr_dci01_fdra_verdict(uint32_t tb_try, uint32_t tb_ok, bool armed, const nr_dci11_resolver_t *r)
+void nr_dci01_fdra_note(nr_dci01_fdra_evidence_t *e, bool oracle_grant, bool tb_crc_ok)
 {
-  if (tb_ok > 0)
+  if (e == NULL)
+    return;
+  if (oracle_grant) {
+    e->t1_try++;
+    e->t1_ok += tb_crc_ok;
+  } else if (tb_crc_ok) {
+    e->link_ok++;
+    e->t1_try_at_link = e->t1_try;
+  }
+}
+
+int nr_dci01_fdra_verdict(const nr_dci01_fdra_evidence_t *e, bool armed, const nr_dci11_resolver_t *r)
+{
+  if (e == NULL || e->t1_ok > 0 || e->t1_try < NR_DCI11_FDRA_ARM_MIN_TRIALS)
+    return NR_DCI01_FDRA_BOOK;
+  const bool link_healthy = e->link_ok > 0 && e->t1_try - e->t1_try_at_link <= NR_DCI11_FDRA_ARM_MIN_TRIALS;
+  if (!link_healthy)
     return NR_DCI01_FDRA_BOOK;
   if (!armed)
-    return tb_try >= NR_DCI11_FDRA_ARM_MIN_TRIALS ? NR_DCI01_FDRA_ARM : NR_DCI01_FDRA_BOOK;
+    return NR_DCI01_FDRA_ARM;
   if (r != NULL)
     for (int i = 0; i < r->n_hyp; i++)
       if (r->alive[i] && r->off[i].fdra_mode != NR_FDRA_TYPE1)
         return NR_DCI01_FDRA_REFUSE;
   return NR_DCI01_FDRA_BOOK;
+}
+
+bool nr_dci01_fdra_book(int verdict, bool oracle_grant, unsigned long refused_so_far)
+{
+  return verdict != NR_DCI01_FDRA_REFUSE || !oracle_grant || (refused_so_far % NR_DCI01_FDRA_PROBE_EVERY) == 0;
 }

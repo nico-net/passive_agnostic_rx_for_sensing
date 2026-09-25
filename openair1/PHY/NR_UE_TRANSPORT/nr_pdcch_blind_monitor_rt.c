@@ -527,10 +527,26 @@ static uint64_t g_pdsch_configuration;
  * rank-4 cell: 8 survivors, configured layout dead, 0/3793 TB CRC for the whole run. */
 static int g_dci11_cfg_alive = 1;
 static _Atomic int g_dl_layout_preferred; /* a DL layout family has >= 8 code-block CRC passes */
+/* DL LINK HEALTH for FDRA staging: a CRC pass on a PDSCH decoded OUTSIDE the stage-2 layout search
+ * (format 1_0 -- SIB1/RA/paging/C-RNTI fallback -- or the manual/fallback layouts), stamped with the
+ * stage-2 trial count at which it arrived. Staging arms only while such a pass is recent, so a dead link
+ * (CFO mis-lock, Technique D still searching) cannot cascade-arm every mode on its 0-pass reads. */
+static _Atomic uint64_t g_dl_layout_trials;          /* stage-2 trials fed back so far */
+static _Atomic uint64_t g_dl_link_pass_at = UINT64_MAX; /* g_dl_layout_trials at the last link pass */
+static _Atomic int g_dl_type1_pass = -1;              /* a type-1 layout that passed: disarm (observer applies it) */
 void nr_pdcch_dci11_layout_feedback(uint16_t layout_index, bool cb0_ok)
 {
-  if (layout_index >= NR_DCI11_LAYOUT_MAX)
+  if (layout_index >= NR_DCI11_LAYOUT_MAX) {
+    if (cb0_ok) /* 0xFFFF: not a stage-2 trial -- a link-health pass */
+      atomic_store_explicit(&g_dl_link_pass_at, atomic_load_explicit(&g_dl_layout_trials, memory_order_relaxed),
+                            memory_order_relaxed);
     return;
+  }
+  atomic_fetch_add_explicit(&g_dl_layout_trials, 1, memory_order_relaxed);
+  if (cb0_ok && layout_index < __atomic_load_n(&g_dci11_resolver.n_hyp, __ATOMIC_ACQUIRE)
+      && g_dci11_resolver.off[layout_index].fdra_mode == NR_FDRA_TYPE1 && g_dci11_resolver.fdra_next > 1
+      && g_dci11_resolver.fdra_next < NR_DCI11_FDRA_STAGES)
+    atomic_store_explicit(&g_dl_type1_pass, (int)layout_index, memory_order_relaxed);
   /* consumer thread vs the receive thread's reads: plain counters, a torn read costs one tally */
   __atomic_fetch_add(&g_dci11_resolver.probe_tr[layout_index], 1u, __ATOMIC_RELAXED);
   if (cb0_ok)
@@ -590,7 +606,8 @@ static int nr_pdcch_dci11_stage2_candidates(const nr_pdcch_blind_raw_result_t *r
     AssertFatal(order != NULL && rot != NULL && sc != NULL, "DCI 1_1 stage-2 scratch allocation failed\n");
   }
   int no = 0;
-  for (int i = 0; i < r->n_hyp; i++)
+  const int nh = __atomic_load_n(&r->n_hyp, __ATOMIC_ACQUIRE); /* the observer appends and publishes with release */
+  for (int i = 0; i < nh; i++)
     if (r->alive[i]) { sc[i] = nr_dci11_resolver_score(r, i); order[no++] = i; }
   if (no <= NR_DCI11_STAGE2_MAX_ALIVE) {
     for (int a = 1; a < no; a++)          /* insertion sort: a small set is offered best-scored first */
@@ -698,58 +715,67 @@ static int g_dci01_state = 0;   /* 0 = not armed, 1 = armed, -1 = no legal layou
 static uint64_t g_dci01_seen = 0;
 /* ---- DCI 0_1 FDRA MODE STAGING. Only type 1 is searched at first. Stage 1 cannot tell a type-0 cell
  * from a type-1 one on the uplink: a type-1 window that starts on the constant-zero identifier / UL-SUL /
- * BWP bits always reads a RIV inside the BWP, so type-1 layouts SURVIVE on a type-0 truth (measured at
- * 106 PRB: 72 of 144 alive). The only oracle is the TB CRC of the PUSCH booked under the type-1 read:
- * 0 passes over NR_DCI11_FDRA_ARM_MIN_TRIALS booked TBs arms the RA type 0 / dynamicSwitch 0_1 layouts,
- * and from then on -- while no type-1 TB has ever passed and a non-type-1 layout is alive, i.e. while a
- * non-type-1 FDRA is the leading explanation -- UL booking is REFUSED (UL_FDRA_REFUSED): the UL
- * extractor reads a RIV of the configured width, so those grants would be decoded at the wrong PRBs and
- * offsets, and RA type 0 PUSCH itself is not decodable here (nr_rx_pusch_group_tp takes
- * rb_start/rb_size only). One grant in UL_FDRA_PROBE_EVERY is still booked so a type-1 pass can clear it:
- * UL CRC also reads 0 for reasons unrelated to the layout (MCS, CFO, timing). ---- */
-#define UL_FDRA_PROBE_EVERY 64
-static _Atomic uint32_t g_ul_tb_try, g_ul_tb_ok; /* booked PUSCH TB CRC outcomes (decode consumer threads) */
-static _Atomic int g_dci01_fdra_refuse;          /* 1 = refuse UL booking */
+ * BWP bits always reads a RIV inside the BWP, so type-1 layouts SURVIVE on a type-0 truth (measured by
+ * Dci01Fdra.TypeZeroTruthWithConstantLeadingBits...: 144 of 208 alive at 106 PRB). The oracle is the TB
+ * CRC of PUSCH decoded from DCI 0_1 grants read under converged, non-discovery widths only; DCI 0_0 and
+ * discovery-hypothesis passes are LINK HEALTH (nr_dci01_fdra_evidence_t). With the link healthy and that
+ * oracle 0/NR_DCI11_FDRA_ARM_MIN_TRIALS, the RA type 0 / dynamicSwitch 0_1 layouts are armed and oracle-class
+ * 0_1 grants REFUSED (UL_FDRA_REFUSED): the UL extractor reads a RIV of the configured width, so they would
+ * be decoded at the wrong PRBs and offsets, and RA type 0 PUSCH is not decodable here (nr_rx_pusch_group_tp
+ * takes rb_start/rb_size only). 0_0 and discovery grants stay booked (UL DM-RS CFR continues); one refused
+ * grant in NR_DCI01_FDRA_PROBE_EVERY is still booked, and one oracle pass ends the refusal for good.
+ * KNOWN LIMIT: a type-1 cell whose 0_1 PUSCH fails for another reason (e.g. MCS-limited decode) while 0_0
+ * decodes satisfies the same evidence and is refused too -- the probe keeps checking. ---- */
+static pthread_mutex_t g_dci01_fdra_lock = PTHREAD_MUTEX_INITIALIZER;
+static nr_dci01_fdra_evidence_t g_dci01_fdra_ev;  /* under g_dci01_fdra_lock */
+static _Atomic int g_dci01_fdra_refuse;          /* 1 = refuse oracle-class 0_1 booking */
 static _Atomic unsigned long g_ul_fdra_refused;
 static int g_dci01_fdra_armed;
 static uint16_t g_dci01_riv_bits, g_dci01_bwp_start, g_dci01_bwp_size;
 static uint8_t g_dci01_tda_bits;
-static nr_dci01_layout_t g_dci01_hyp[NR_DCI11_LAYOUT_MAX];
-static nr_dci11_offsets_t g_dci01_off[NR_DCI11_LAYOUT_MAX];
-void nr_pdcch_dci01_fdra_feedback(bool tb_crc_ok)
+static nr_dci01_layout_t g_dci01_hyp[NR_DCI01_LAYOUT_MAX];
+static nr_dci11_offsets_t g_dci01_off[NR_DCI01_LAYOUT_MAX];
+static inline bool dci01_oracle_grant(const nr_pdcch_blind_ul_result_t *g)
 {
-  atomic_fetch_add_explicit(&g_ul_tb_try, 1, memory_order_relaxed);
-  if (tb_crc_ok) {
-    atomic_fetch_add_explicit(&g_ul_tb_ok, 1, memory_order_relaxed);
-    atomic_store_explicit(&g_dci01_fdra_refuse, 0, memory_order_relaxed);
-  }
+  return nr_dci01_fdra_oracle_grant(g->ul_dci_format, g->width_hyp_class, g->interp_hyp_class);
+}
+void nr_pdcch_dci01_fdra_feedback(const nr_pdcch_blind_ul_result_t *g, bool tb_crc_ok)
+{
+  const bool oracle = dci01_oracle_grant(g);
+  pthread_mutex_lock(&g_dci01_fdra_lock);
+  nr_dci01_fdra_note(&g_dci01_fdra_ev, oracle, tb_crc_ok);
+  pthread_mutex_unlock(&g_dci01_fdra_lock);
+  if (oracle && tb_crc_ok)
+    atomic_store_explicit(&g_dci01_fdra_refuse, 0, memory_order_relaxed); /* type 1 proven */
 }
 static void nr_pdcch_dci01_fdra_stage(bool periodic)
 {
-  const uint32_t tr = atomic_load_explicit(&g_ul_tb_try, memory_order_relaxed);
-  const uint32_t ok = atomic_load_explicit(&g_ul_tb_ok, memory_order_relaxed);
-  int v = nr_dci01_fdra_verdict(tr, ok, g_dci01_fdra_armed, NULL);
+  pthread_mutex_lock(&g_dci01_fdra_lock);
+  const nr_dci01_fdra_evidence_t ev = g_dci01_fdra_ev;
+  pthread_mutex_unlock(&g_dci01_fdra_lock);
+  int v = nr_dci01_fdra_verdict(&ev, g_dci01_fdra_armed, NULL);
   if (v == NR_DCI01_FDRA_ARM) {
     g_dci01_fdra_armed = 1;
     int n = 0;
-    for (uint8_t m = NR_FDRA_TYPE0_CFG1; m <= NR_FDRA_DYN_CFG2 && n < NR_DCI11_LAYOUT_MAX; m++) {
+    for (uint8_t m = NR_FDRA_TYPE0_CFG1; m <= NR_FDRA_DYN_CFG2 && n < NR_DCI01_LAYOUT_MAX; m++) {
       const int k = nr_dci01_layout_enumerate_mode(g_dci01_riv_bits, g_dci01_tda_bits, g_dci01_resolver.observed_len,
                                                    g_dci01_bwp_start, g_dci01_bwp_size, m, g_dci01_hyp + n,
-                                                   g_dci01_off + n, NR_DCI11_LAYOUT_MAX - n);
+                                                   g_dci01_off + n, NR_DCI01_LAYOUT_MAX - n);
       n += (k > 0) ? k : 0;
     }
     const int added = nr_dci_resolver_append_offsets(&g_dci01_resolver, g_dci01_off, n);
-    LOG_A(PHY, "SENSING: DCI01_LAYOUT type-1 PUSCH TB CRC 0/%u: armed RA type 0 / dynamicSwitch 0_1 layouts (%d added%s)\n",
-          tr, added, added < n ? ", TRUNCATED at NR_DCI11_LAYOUT_MAX" : "");
+    LOG_A(PHY, "SENSING: DCI01_LAYOUT 0_1 type-1 PUSCH TB CRC 0/%u with the link healthy (%u other UL passes): armed "
+               "RA type 0 / dynamicSwitch 0_1 layouts (%d added%s)\n",
+          ev.t1_try, ev.link_ok, added, (added < n || n >= NR_DCI01_LAYOUT_MAX) ? ", TRUNCATED" : "");
     periodic = true;
   }
   if (!periodic)
     return; /* the alive scan below is O(n_hyp): run it every 256 observations, not per grant */
-  v = nr_dci01_fdra_verdict(tr, ok, g_dci01_fdra_armed, &g_dci01_resolver);
+  v = nr_dci01_fdra_verdict(&ev, g_dci01_fdra_armed, &g_dci01_resolver);
   const int refuse = (v == NR_DCI01_FDRA_REFUSE);
   if (refuse != atomic_exchange_explicit(&g_dci01_fdra_refuse, refuse, memory_order_relaxed))
-    LOG_A(PHY, "SENSING: DCI01_LAYOUT UL booking %s (type-1 PUSCH TB CRC %u/%u)\n",
-          refuse ? "REFUSED -- a non-type-1 FDRA is the leading explanation" : "resumed", ok, tr);
+    LOG_A(PHY, "SENSING: DCI01_LAYOUT oracle-class 0_1 booking %s (0_1 type-1 PUSCH TB CRC %u/%u, other UL passes %u)\n",
+          refuse ? "REFUSED -- a non-type-1 FDRA is the leading explanation" : "resumed", ev.t1_ok, ev.t1_try, ev.link_ok);
 }
 static void nr_pdcch_dci01_layout_observe(uint16_t ul_bwp_start, uint16_t ul_bwp_size, int ul_tda_count,
                                           uint16_t dci_length, uint64_t payload)
@@ -770,11 +796,11 @@ static void nr_pdcch_dci01_layout_observe(uint16_t ul_bwp_start, uint16_t ul_bwp
     /* Type 1 only: the other FDRA modes are armed by nr_pdcch_dci01_fdra_stage() on TB-CRC evidence --
      * unless no type-1 layout fits this length at all, when the type-1 read is certainly wrong and they
      * are armed at once (and UL booking refused by the next verdict). */
-    int n = nr_dci01_layout_enumerate(riv_bits, tda_bits, dci_length, g_dci01_hyp, g_dci01_off, NR_DCI11_LAYOUT_MAX);
+    int n = nr_dci01_layout_enumerate(riv_bits, tda_bits, dci_length, g_dci01_hyp, g_dci01_off, NR_DCI01_LAYOUT_MAX);
     if (n == 0) {
-      for (uint8_t m = NR_FDRA_TYPE0_CFG1; m <= NR_FDRA_DYN_CFG2 && n < NR_DCI11_LAYOUT_MAX; m++) {
+      for (uint8_t m = NR_FDRA_TYPE0_CFG1; m <= NR_FDRA_DYN_CFG2 && n < NR_DCI01_LAYOUT_MAX; m++) {
         const int k = nr_dci01_layout_enumerate_mode(riv_bits, tda_bits, dci_length, ul_bwp_start, ul_bwp_size, m,
-                                                     g_dci01_hyp + n, g_dci01_off + n, NR_DCI11_LAYOUT_MAX - n);
+                                                     g_dci01_hyp + n, g_dci01_off + n, NR_DCI01_LAYOUT_MAX - n);
         n += (k > 0) ? k : 0;
       }
       g_dci01_fdra_armed = (n > 0);
@@ -786,8 +812,8 @@ static void nr_pdcch_dci01_layout_observe(uint16_t ul_bwp_start, uint16_t ul_bwp
       g_dci01_state = -1;
       return;
     }
-    if (n >= NR_DCI11_LAYOUT_MAX)
-      LOG_W(PHY, "SENSING: DCI01_LAYOUT initial set truncated at NR_DCI11_LAYOUT_MAX=%d\n", NR_DCI11_LAYOUT_MAX);
+    if (n >= NR_DCI01_LAYOUT_MAX)
+      LOG_W(PHY, "SENSING: DCI01_LAYOUT initial set truncated at NR_DCI01_LAYOUT_MAX=%d\n", NR_DCI01_LAYOUT_MAX);
     g_dci01_riv_bits = riv_bits;
     g_dci01_tda_bits = tda_bits;
     g_dci01_bwp_start = ul_bwp_start;
@@ -803,10 +829,12 @@ static void nr_pdcch_dci01_layout_observe(uint16_t ul_bwp_start, uint16_t ul_bwp
   const bool periodic = (++g_dci01_seen % 256) == 0 || g_dci01_seen == 1;
   nr_pdcch_dci01_fdra_stage(periodic);
   if ((g_dci01_seen % 4000) == 0) {
-    LOG_A(PHY, "SENSING: DCI01_LAYOUT n=%llu observed | %d of %d layouts still plausible | type-1 PUSCH TB CRC %u/%u | "
-               "fdra %s | UL_FDRA_REFUSED=%lu\n",
-          (unsigned long long)g_dci01_seen, g_dci01_resolver.n_alive, g_dci01_resolver.n_hyp,
-          atomic_load_explicit(&g_ul_tb_ok, memory_order_relaxed), atomic_load_explicit(&g_ul_tb_try, memory_order_relaxed),
+    pthread_mutex_lock(&g_dci01_fdra_lock);
+    const nr_dci01_fdra_evidence_t ev = g_dci01_fdra_ev;
+    pthread_mutex_unlock(&g_dci01_fdra_lock);
+    LOG_A(PHY, "SENSING: DCI01_LAYOUT n=%llu observed | %d of %d layouts still plausible | 0_1 type-1 PUSCH TB CRC %u/%u, "
+               "other UL passes %u | fdra %s | UL_FDRA_REFUSED=%lu\n",
+          (unsigned long long)g_dci01_seen, g_dci01_resolver.n_alive, g_dci01_resolver.n_hyp, ev.t1_ok, ev.t1_try, ev.link_ok,
           atomic_load_explicit(&g_dci01_fdra_refuse, memory_order_relaxed) ? "refusing" : (g_dci01_fdra_armed ? "armed" : "type-1"),
           atomic_load_explicit(&g_ul_fdra_refused, memory_order_relaxed));
   }
@@ -914,9 +942,9 @@ static void nr_pdcch_dci11_layout_observe(const nr_pdcch_blind_monitor_cfg_t *cf
     }
     if (cfg->extract.tda_count > 0 && cfg->extract.tda_count < 16)
       nr_dci11_resolver_set_tda_count(&g_dci11_resolver, (uint8_t)cfg->extract.tda_count);
-    LOG_I(PHY, "SENSING: DCI11_LAYOUT armed: %d layouts (FDRA mode <= %d) consistent with dci_length=%u "
+    LOG_I(PHY, "SENSING: DCI11_LAYOUT armed: %d layouts (FDRA stages < %d) consistent with dci_length=%u "
                "(riv=%u bits, tda=%s; later RA type 0 / dynamicSwitch modes armed only on TB-CRC refutation)\n", n,
-          g_dci11_resolver.fdra_next - 1, dci_length,
+          g_dci11_resolver.fdra_next, dci_length,
           riv_bits, tda_bits == NR_DCI11_TDA_UNKNOWN ? "0..4 bits (searched)" : "configured");
     if (n >= NR_DCI11_LAYOUT_MAX)
       LOG_W(PHY, "SENSING: DCI11_LAYOUT initial set truncated at NR_DCI11_LAYOUT_MAX=%d\n", NR_DCI11_LAYOUT_MAX);
@@ -928,13 +956,25 @@ static void nr_pdcch_dci11_layout_observe(const nr_pdcch_blind_monitor_cfg_t *cf
   }
   /* FDRA MODE STAGING (nr_dci11_resolver_init_fdra): stage 2 has refuted every live layout by TB CRC ->
    * arm the next RA type 0 / dynamicSwitch mode. Never on stage-1 evidence, which cannot refute them. */
-  if (nr_dci11_resolver_all_refuted(&g_dci11_resolver, NR_DCI11_FDRA_ARM_MIN_TRIALS)) {
+  const int t1_pass = atomic_exchange_explicit(&g_dl_type1_pass, -1, memory_order_relaxed);
+  if (t1_pass >= 0) {
+    const int killed = nr_dci11_resolver_disarm(&g_dci11_resolver, t1_pass);
+    LOG_A(PHY, "SENSING: DCI11_LAYOUT type-1 layout %d passed its CRC: FDRA staging DISARMED, %d RA type 0 / "
+               "dynamicSwitch layouts killed\n", t1_pass, killed);
+  }
+  const uint64_t dl_tr = atomic_load_explicit(&g_dl_layout_trials, memory_order_relaxed);
+  const uint64_t dl_link = atomic_load_explicit(&g_dl_link_pass_at, memory_order_relaxed);
+  /* Link healthy = a non-stage-2 PDSCH passed within the span a refutation needs (64 trials per live layout). */
+  const bool dl_link_ok = dl_link != UINT64_MAX
+                          && dl_tr - dl_link <= (uint64_t)NR_DCI11_FDRA_ARM_MIN_TRIALS * (uint64_t)(g_dci11_resolver.n_alive + 1);
+  if (dl_link_ok && nr_dci11_resolver_all_refuted(&g_dci11_resolver, NR_DCI11_FDRA_ARM_MIN_TRIALS)) {
     int added = 0;
     const int m = nr_dci11_resolver_arm_next_mode(&g_dci11_resolver, &added);
     if (m >= 0)
-      LOG_A(PHY, "SENSING: DCI11_LAYOUT every live layout refuted by TB CRC (0 passes over >= %d trials): armed FDRA "
-                 "mode %d (1/2 = RA type 0, 3/4 = dynamicSwitch), %d layouts, %d total%s\n",
-            NR_DCI11_FDRA_ARM_MIN_TRIALS, m, added, g_dci11_resolver.n_hyp,
+      LOG_A(PHY, "SENSING: DCI11_LAYOUT live set refuted by TB CRC (0 passes, >= %d trials per live layout in total, "
+                 "link healthy): retired it, armed FDRA mode %d (1/2 = RA type 0, 3/4 = dynamicSwitch): %d layouts, "
+                 "%d live of %d%s\n",
+            NR_DCI11_FDRA_ARM_MIN_TRIALS, m, added, g_dci11_resolver.n_alive, g_dci11_resolver.n_hyp,
             g_dci11_resolver.n_hyp >= NR_DCI11_LAYOUT_MAX ? " -- TRUNCATED at NR_DCI11_LAYOUT_MAX" : "");
   }
   const nr_dci11_resolver_t *r = &g_dci11_resolver;
@@ -5183,17 +5223,19 @@ constdiag_done:;
         }
         /* Park it for the slot its PUSCH occupies. The DCI is in a DOWNLINK slot; the PUSCH is k2
          * slots later in an UPLINK one, where nothing runs today. */
-        if (!atomic_load_explicit(&g_dci01_fdra_refuse, memory_order_relaxed)) {
-          nr_pusch_grant_book_add(u, source_absolute_slot);
-        } else {
-          const unsigned long nref = atomic_fetch_add_explicit(&g_ul_fdra_refused, 1, memory_order_relaxed) + 1;
+        const int ul_verdict = atomic_load_explicit(&g_dci01_fdra_refuse, memory_order_relaxed) ? NR_DCI01_FDRA_REFUSE
+                                                                                              : NR_DCI01_FDRA_BOOK;
+        const bool ul_oracle = dci01_oracle_grant(u);
+        unsigned long nref = 0;
+        if (ul_verdict == NR_DCI01_FDRA_REFUSE && ul_oracle) {
+          nref = atomic_fetch_add_explicit(&g_ul_fdra_refused, 1, memory_order_relaxed) + 1;
           if (nref == 1 || (nref % 10000) == 0)
-            LOG_W(PHY, "SENSING: UL_FDRA_REFUSED n=%lu: the 0_1 FDRA is not a RIV (type-1 PUSCH TB CRC 0/%u) -- grant not "
-                       "booked (it would be decoded at the wrong PRBs/offsets); 1 in %d still booked as a probe\n",
-                  nref, atomic_load_explicit(&g_ul_tb_try, memory_order_relaxed), UL_FDRA_PROBE_EVERY);
-          if ((nref % UL_FDRA_PROBE_EVERY) == 0)
-            nr_pusch_grant_book_add(u, source_absolute_slot);
+            LOG_W(PHY, "SENSING: UL_FDRA_REFUSED n=%lu: the 0_1 FDRA is not a RIV -- 0_1 grant not booked (it would be "
+                       "decoded at the wrong PRBs/offsets); 1 in %d still booked as a probe, 0_0 always booked\n",
+                  nref, NR_DCI01_FDRA_PROBE_EVERY);
         }
+        if (nr_dci01_fdra_book(ul_verdict, ul_oracle, nref))
+          nr_pusch_grant_book_add(u, source_absolute_slot);
       } else {
         g_ul_rejects++;
       }
@@ -5844,6 +5886,9 @@ constdiag_done:;
     /* Apply only to dedicated format 1_1. Common/SI/RA/Paging semantics stay manual/spec-derived.
      * The key includes RNTI and the observed TDA index; tickets carry a generation across threads. */
     nr_pdsch_sweep_ticket_t sweep_ticket = {0};
+    /* 0 is layout 0, not "none": a format 1_0 / manual-layout decode used to credit its CRC (SIB1 passes
+     * included) to stage-2 layout 0. 0xFFFF = none, which the feedback counts as DL link health. */
+    sweep_ticket.layout_index = 0xFFFF;
     int8_t grant_mcs_table_lbrm = (int8_t)cfg->pdsch_mcs_table;
     if (g_pdsch_sweep_on && !is_dci10) {
       /* Rotate only grants eligible for a CRC attempt, not deterministic RV/cap drops. */
@@ -6191,6 +6236,8 @@ constdiag_done:;
             btim_add(BTIM_PDSCH, btim_t_pds);
             /* Same feedback contract as deferred decoding: unsupported/internal errors are not CRC trials. */
             if (st == NR_PDSCH_PASSIVE_DECODE_CRC_OK || st == NR_PDSCH_PASSIVE_DECODE_CRC_FAIL) {
+              /* same evidence as the deferred consumer: layout tallies, or DL link health for 0xFFFF */
+              nr_pdcch_dci11_layout_feedback(sweep_ticket.layout_index, st == NR_PDSCH_PASSIVE_DECODE_CRC_OK);
               nr_pdsch_cfg_hypothesis_t winner;
               if (nr_pdsch_config_sweep_feedback(&sweep_ticket, st == NR_PDSCH_PASSIVE_DECODE_CRC_OK, &winner))
                 LOG_A(PHY, "SENSING: Technique D CONVERGED rnti=0x%x tda=%u S=%u L=%u mask=0x%x table=%u\n",

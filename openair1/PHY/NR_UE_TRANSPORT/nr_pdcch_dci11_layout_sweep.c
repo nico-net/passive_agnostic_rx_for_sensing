@@ -316,7 +316,7 @@ int nr_dci11_resolver_init_fdra(nr_dci11_resolver_t *r, uint16_t bwp_start, uint
   r->riv_bits = riv_bits;
   r->tda_bits = tda_bits;
   r->observed_len = observed_len;
-  r->fdra_next = NR_FDRA_TYPE0_CFG1;   /* type 1 now; the other modes only via nr_dci11_resolver_arm_next_mode() */
+  r->fdra_next = 1;   /* stage index: type 1 now, the others only via nr_dci11_resolver_arm_next_mode() */
   /* NR_DCI11_TDA_UNKNOWN: the TDRA list size is itself an RRC switch the receiver cannot read (the
    * dedicated pdsch-TimeDomainAllocationList travels ciphered, and SIB1's common list is only a
    * hypothesis about it). Enumerate every width 0..4 bits; each hypothesis carries its own
@@ -350,21 +350,58 @@ int nr_dci11_resolver_init(nr_dci11_resolver_t *r, uint16_t bwp_size, uint16_t r
   return nr_dci11_resolver_init_fdra(r, 0, bwp_size, riv_bits, tda_bits, observed_len);
 }
 
+/* ANY pass -- its own feed(), a code-block probe, or its interpretation family's (a layout reading
+ * identical fields decodes identically) -- means a layout is not refuted. */
+static bool layout_has_pass(const nr_dci11_resolver_t *r, int i)
+{
+  return r->ok[i] || r->probe_ok[i] || r->fam_ok[r->layout_fam[i] % NR_DCI11_FAM_N];
+}
+
 bool nr_dci11_resolver_all_refuted(const nr_dci11_resolver_t *r, uint32_t min_trials)
 {
   if (r == NULL || r->n_alive <= 0 || r->winner >= 0)
     return false;
-  for (int i = 0; i < r->n_hyp; i++) {
+  /* AGGREGATE rule: no live layout has a pass, and the live set has absorbed min_trials trials per live
+   * layout IN TOTAL. A per-layout floor never fires when some layout cannot receive trials at all -- its
+   * reads are lost before enqueue (the stage-2 size check / extractor rejects them, which the true layout
+   * does not suffer) or it is never selected -- and one such layout used to freeze staging forever.
+   * The total keeps the same evidence budget; zero passes anywhere over it is the refutation. */
+  uint64_t tr = 0;
+  const int nh = __atomic_load_n(&r->n_hyp, __ATOMIC_ACQUIRE);
+  for (int i = 0; i < nh; i++) {
     if (!r->alive[i])
       continue;
-    /* Own feed() trials or first-code-block probes, whichever saw more; ANY pass -- its own, a probe,
-     * or its interpretation family's (a layout reading identical fields decodes identically) --
-     * means it is not refuted. */
-    const uint32_t tr = r->trials[i] > r->probe_tr[i] ? r->trials[i] : r->probe_tr[i];
-    if (tr < min_trials || r->ok[i] || r->probe_ok[i] || r->fam_ok[r->layout_fam[i] % NR_DCI11_FAM_N])
+    if (layout_has_pass(r, i))
       return false;
+    tr += r->trials[i] > r->probe_tr[i] ? r->trials[i] : r->probe_tr[i];
   }
-  return true;
+  return tr >= (uint64_t)min_trials * (uint64_t)r->n_alive;
+}
+
+int nr_dci11_fdra_stage(uint8_t fdra_mode)
+{
+  static const int8_t stage[5] = {0, 1, 4, 2, 3}; /* see kArmOrder */
+  return fdra_mode <= NR_FDRA_DYN_CFG2 ? stage[fdra_mode] : -1;
+}
+
+int nr_dci11_resolver_disarm(nr_dci11_resolver_t *r, int type1_idx)
+{
+  if (r == NULL)
+    return 0;
+  const int nh = __atomic_load_n(&r->n_hyp, __ATOMIC_ACQUIRE);
+  int killed = 0;
+  for (int i = 0; i < nh; i++)
+    if (r->alive[i] && r->off[i].fdra_mode != NR_FDRA_TYPE1) {
+      r->alive[i] = false;
+      r->n_alive--;
+      killed++;
+    }
+  if (type1_idx >= 0 && type1_idx < nh && r->off[type1_idx].fdra_mode == NR_FDRA_TYPE1 && !r->alive[type1_idx]) {
+    r->alive[type1_idx] = true; /* killed when its stage was refuted; its own pass proves it */
+    r->n_alive++;
+  }
+  r->fdra_next = NR_DCI11_FDRA_STAGES; /* type 1 is proven: never arm again */
+  return killed;
 }
 
 /* Append entries at n_hyp and publish them with one release store: readers on other threads walk
@@ -395,18 +432,33 @@ int nr_dci_resolver_append_offsets(nr_dci11_resolver_t *r, const nr_dci11_offset
   return append_offsets(r, NULL, offsets, n);
 }
 
+/* Arming order after type 1. dynamicSwitch goes BEFORE type 0 config 2: config 2's narrow FDRA admits
+ * the bulk of the switch space (up to 5458 layouts at one length), and armed first it used to fill the
+ * cap before dynamicSwitch got a slot (106 PRB at 48-49 bits: dynamicSwitch 0 of 1329). */
+static const uint8_t kArmOrder[NR_DCI11_FDRA_STAGES] = {NR_FDRA_TYPE1, NR_FDRA_TYPE0_CFG1, NR_FDRA_DYN_CFG1,
+                                                        NR_FDRA_DYN_CFG2, NR_FDRA_TYPE0_CFG2};
+
 int nr_dci11_resolver_arm_next_mode(nr_dci11_resolver_t *r, int *added)
 {
   if (added)
     *added = 0;
   if (r == NULL || r->observed_len == 0 || r->riv_bits == 0)
     return -1;
+  /* The live set was refuted by TB CRC (the caller checked nr_dci11_resolver_all_refuted): retire it, so
+   * n_alive -- and stage 1's per-payload and pruning cost -- stays one stage's size. A layout with any
+   * pass is kept. nr_dci11_resolver_disarm() revives a type-1 layout whose late pass proves it. */
+  const int nh = __atomic_load_n(&r->n_hyp, __ATOMIC_ACQUIRE);
+  for (int i = 0; i < nh && r->fdra_next < NR_DCI11_FDRA_STAGES; i++)
+    if (r->alive[i] && !layout_has_pass(r, i)) {
+      r->alive[i] = false;
+      r->n_alive--;
+    }
   static nr_dci11_layout_t hyp[NR_DCI11_LAYOUT_MAX];   /* arming is rare and single-threaded (the observer) */
   static nr_dci11_offsets_t off[NR_DCI11_LAYOUT_MAX];
   const uint8_t tb_lo = (r->tda_bits == NR_DCI11_TDA_UNKNOWN) ? 0 : r->tda_bits;
   const uint8_t tb_hi = (r->tda_bits == NR_DCI11_TDA_UNKNOWN) ? 4 : r->tda_bits;
-  while (r->fdra_next <= NR_FDRA_DYN_CFG2) {
-    const uint8_t m = r->fdra_next++;
+  while (r->fdra_next < NR_DCI11_FDRA_STAGES) {
+    const uint8_t m = kArmOrder[r->fdra_next++];
     int n = 0;
     for (uint8_t tb = tb_lo; tb <= tb_hi && n < NR_DCI11_LAYOUT_MAX; tb++) {
       const int k = nr_dci11_layout_enumerate_mode(r->riv_bits, tb, r->observed_len, r->bwp_start, r->bwp_size, m,
@@ -516,6 +568,12 @@ static void hist_observe(nr_dci11_resolver_t *r, int i, uint64_t payload)
     r->hist[i][52 + (peek(payload, o->total, o->ant_ports, (uint8_t)apb) & 63)]++;
 }
 
+static int cmp_desc(const void *a, const void *b)
+{
+  const double x = *(const double *)a, y = *(const double *)b;
+  return (x < y) - (x > y);
+}
+
 static void prune_by_distribution(nr_dci11_resolver_t *r)
 {
   static double score[NR_DCI11_LAYOUT_MAX];
@@ -527,13 +585,22 @@ static void prune_by_distribution(nr_dci11_resolver_t *r)
     if (score[i] > best)
       best = score[i];
   }
+  /* Ranks by sort + binary search, not the O(n_alive^2) double loop (20 ms at 4.3k live). */
+  static double sorted[NR_DCI11_LAYOUT_MAX];
+  int ns = 0;
+  for (int i = 0; i < r->n_hyp; i++)
+    if (r->alive[i])
+      sorted[ns++] = score[i];
+  qsort(sorted, (size_t)ns, sizeof(sorted[0]), cmp_desc);
   for (int i = 0; i < r->n_hyp && r->n_alive > DCI11_S1_KEEP_MIN; i++) {
     if (!r->alive[i] || r->seen[i] < DCI11_S1_DIST_MIN)
       continue;
-    int better = 0;
-    for (int j = 0; j < r->n_hyp; j++)
-      if (r->alive[j] && score[j] > score[i])
-        better++;
+    int lo = 0, hi = ns; /* first index whose score is <= score[i]: that many are strictly better */
+    while (lo < hi) {
+      const int mid = (lo + hi) / 2;
+      if (sorted[mid] > score[i]) lo = mid + 1; else hi = mid;
+    }
+    const int better = lo;
     /* OTA 2026-09-15 (v2l): the configured layout, which decodes at 72 % by TB CRC, was NOT in the
      * top 4 by this score -- a misaligned layout that reads constant RIV bits as MCS/RV/AP is MORE
      * compressible than the truth. So the score only RANKS (Thompson prior in the RT monitor);

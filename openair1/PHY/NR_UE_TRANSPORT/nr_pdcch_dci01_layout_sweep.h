@@ -69,16 +69,46 @@ int nr_dci01_layout_enumerate_mode(uint16_t riv_bits, uint8_t tda_bits, uint16_t
 int nr_dci01_layout_enumerate_fdra(uint16_t riv_bits, uint8_t tda_bits, uint16_t observed_len, uint16_t bwp_start,
                                    uint16_t bwp_size, nr_dci01_layout_t *out, nr_dci11_offsets_t *offsets, int max);
 
-/** DCI 0_1 FDRA MODE STAGING verdict. Stage 1 cannot refute type 1 on a type-0 cell (a type-1 window that
- * starts on constant-zero leading bits always reads an in-range RIV), so the oracle is the TB CRC of the
- * PUSCH booked under the type-1 read: tb_try booked TBs, tb_ok passes.
- *   NR_DCI01_FDRA_BOOK   -- book UL grants (type 1 not refuted, or a type-1 TB has passed: type 1 is right)
- *   NR_DCI01_FDRA_ARM    -- not armed yet and 0 passes over >= NR_DCI11_FDRA_ARM_MIN_TRIALS: append the
- *                           type 0 / dynamicSwitch layouts (nr_dci01_layout_enumerate_mode +
- *                           nr_dci_resolver_append_offsets), then ask again
- *   NR_DCI01_FDRA_REFUSE -- armed, still 0 passes, and a non-type-1 layout alive: a non-type-1 FDRA is the
- *                           leading explanation, so the type-1 read would decode the grant wrong. Pure. */
+/* The 0_1 set is far smaller than 1_1's (type-1 stage <= 462, armed set <= 1830 over BWP 6..273 and
+ * 28..62 bits), so its enumeration keeps the old cap even though the shared resolver type is larger. */
+#define NR_DCI01_LAYOUT_MAX 8192
+
+/* ---- DCI 0_1 FDRA MODE STAGING -----------------------------------------------------------------
+ * Stage 1 cannot refute type 1 on a type-0 cell (a type-1 window that starts on constant-zero leading
+ * bits always reads an in-range RIV: 144/208 type-1 layouts survive in the test), so the oracle is the TB
+ * CRC of PUSCH decoded under the type-1 read -- but ONLY of DCI 0_1 grants read under converged,
+ * non-discovery widths (the "oracle" class). A DCI 0_0 grant is always type 1, and a UL-discovery grant
+ * is read under a width HYPOTHESIS: their CRC passes say the link works (LINK HEALTH), never that the
+ * 0_1 FDRA is a RIV. Refusal requires link health, because on a dead link every read fails. */
+typedef struct {
+  uint32_t t1_try, t1_ok;      ///< oracle-class 0_1 TBs decoded / passed
+  uint32_t link_ok;            ///< CRC passes on every other UL grant (0_0, discovery hypotheses)
+  uint32_t t1_try_at_link;     ///< t1_try when the last link pass arrived
+} nr_dci01_fdra_evidence_t;
+
+/** True for a grant in the oracle class: format 0_1, no width or interpretation hypothesis owns it. */
+static inline bool nr_dci01_fdra_oracle_grant(int ul_dci_format, int width_hyp_class, int interp_hyp_class)
+{
+  return ul_dci_format == 0 /* NR_BLIND_UL_DCI_FORMAT_0_1 */ && width_hyp_class < 0 && interp_hyp_class < 0;
+}
+/** Record one decoded UL TB. Not thread-safe: the caller serialises. */
+void nr_dci01_fdra_note(nr_dci01_fdra_evidence_t *e, bool oracle_grant, bool tb_crc_ok);
+
+/**   NR_DCI01_FDRA_BOOK   -- book everything: an oracle 0_1 TB has passed (type 1 is proven, permanently),
+ *                           or type 1 is not refuted yet, or the link is not known to be healthy
+ *   NR_DCI01_FDRA_ARM    -- not armed, link healthy and oracle 0/NR_DCI11_FDRA_ARM_MIN_TRIALS: append the
+ *                           type 0 / dynamicSwitch layouts, then ask again
+ *   NR_DCI01_FDRA_REFUSE -- armed, link healthy, oracle still 0 passes and a non-type-1 layout alive
+ * LINK HEALTHY = a link pass arrived during the last NR_DCI11_FDRA_ARM_MIN_TRIALS oracle trials, i.e. the
+ * link demonstrably worked while the type-1 reads were failing. Pure. */
 enum { NR_DCI01_FDRA_BOOK = 0, NR_DCI01_FDRA_ARM = 1, NR_DCI01_FDRA_REFUSE = 2 };
-int nr_dci01_fdra_verdict(uint32_t tb_try, uint32_t tb_ok, bool armed, const nr_dci11_resolver_t *r);
+int nr_dci01_fdra_verdict(const nr_dci01_fdra_evidence_t *e, bool armed, const nr_dci11_resolver_t *r);
+
+/** Whether to book one UL grant under a verdict. REFUSE applies to oracle-class 0_1 grants only (0_0 and
+ * discovery grants are always booked, so their UL DM-RS CFR and the discovery search continue), and one
+ * refused grant in NR_DCI01_FDRA_PROBE_EVERY is still booked so a type-1 pass can end the refusal.
+ * `refused_so_far` counts refused oracle grants including this one. Pure. */
+#define NR_DCI01_FDRA_PROBE_EVERY 64
+bool nr_dci01_fdra_book(int verdict, bool oracle_grant, unsigned long refused_so_far);
 
 #endif /* __NR_PDCCH_DCI01_LAYOUT_SWEEP_H__ */

@@ -126,7 +126,7 @@ static void *nr_pusch_passive_queue_thread(void *arg)
     if(!job.cfr_only && (out.status==NR_PUSCH_PASSIVE_OK ||
         out.status==NR_PUSCH_PASSIVE_CRC_FAIL || out.status==NR_PUSCH_PASSIVE_ZERO_TB)) {
       nr_pdcch_ul_discovery_feedback(&job.grant,out.status==NR_PUSCH_PASSIVE_OK);
-      nr_pdcch_dci01_fdra_feedback(out.status==NR_PUSCH_PASSIVE_OK);
+      nr_pdcch_dci01_fdra_feedback(&job.grant, out.status==NR_PUSCH_PASSIVE_OK);
     }
 
 

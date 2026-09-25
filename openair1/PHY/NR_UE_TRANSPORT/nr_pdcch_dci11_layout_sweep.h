@@ -74,10 +74,10 @@ typedef struct {
   uint8_t n_rbg;        ///< N_RBG of this mode's RBG configuration; 0 for type 1
 } nr_dci11_layout_t;
 
-/* Searched TDA width x DM-RS type x HARQ width, per FDRA stage. Measured over BWP 6..273 and a 28..62-bit
- * DCI: one stage (one FDRA mode, TDA 0..4) peaks at 5458; type 1 alone reaches 2521 (273 PRB, 53 bits),
- * which already overflowed the old 2048. Resolver memory ~0.52 kB/entry (hist dominates): ~4.3 MB each. */
-#define NR_DCI11_LAYOUT_MAX 8192
+/* Searched TDA width x DM-RS type x HARQ width. Measured over BWP 6..273 and a 28..62-bit DCI: one FDRA
+ * stage (one mode, TDA 0..4) peaks at 5458 and every mode together at 26,992, so 32768 holds the whole
+ * staged set without a cut. Resolver memory ~0.52 kB/entry (hist dominates): ~17.2 MB each. */
+#define NR_DCI11_LAYOUT_MAX 32768
 #define NR_DCI11_HIST_BINS 116   /* mcs 32 | rv 4 | tda 16 | ant ports 64 */
 
 /// Bit offsets (MSB-first, as read_field() counts) of every field the extraction consumes.
@@ -170,7 +170,7 @@ typedef struct {
   uint16_t bwp_size;
   uint16_t bwp_start;
   uint8_t  tda_count;      ///< last nr_dci11_resolver_set_tda_count(), applied to modes armed later
-  uint8_t  fdra_next;      ///< next NR_FDRA_* mode nr_dci11_resolver_arm_next_mode() arms (> 4 = all armed)
+  uint8_t  fdra_next;      ///< next FDRA STAGE index to arm (1..4; NR_DCI11_FDRA_STAGES = all armed / disarmed)
   /* DISTRIBUTIONAL EVIDENCE (stage 1). A correctly aligned field has structure on a live cell --
    * MCS sits on one or two values under load, RV is overwhelmingly 0, the TDA index uses one to three
    * entries, the antenna-ports codepoint is constant for a single-layer UE -- while a misaligned read
@@ -197,6 +197,15 @@ int nr_dci11_resolver_init(nr_dci11_resolver_t *r, uint16_t bwp_size, uint16_t r
 int nr_dci11_resolver_init_fdra(nr_dci11_resolver_t *r, uint16_t bwp_start, uint16_t bwp_size, uint16_t riv_bits,
                                 uint8_t tda_bits, uint16_t observed_len);
 
+#define NR_DCI11_FDRA_STAGES 5
+/** Stage index of an FDRA mode in the arming order: type 1 = 0, type 0 cfg1 = 1, dynamicSwitch cfg1 = 2,
+ * dynamicSwitch cfg2 = 3, type 0 cfg2 = 4 (the bulk, last). -1 for a bad mode. */
+int nr_dci11_fdra_stage(uint8_t fdra_mode);
+
+/** A type-1 layout passed a TB / code-block CRC: type 1 is proven. Kill every non-type-1 layout, revive
+ * `type1_idx` if its stage was retired, and never arm again. Returns the number killed. */
+int nr_dci11_resolver_disarm(nr_dci11_resolver_t *r, int type1_idx);
+
 /* Trials with zero TB-CRC / code-block passes before a layout counts as refuted by stage 2. 64 = the
  * stage-2 decision floor (DCI11_S2_MIN_TRIALS). Against the lowest true-layout rate measured on these
  * rigs (12 % marginal CRC, rank-4 bed 2026-09-16) the truth reads 0/64 with probability 0.88^64 =
@@ -204,15 +213,17 @@ int nr_dci11_resolver_init_fdra(nr_dci11_resolver_t *r, uint16_t bwp_start, uint
  * (nothing already live is dropped), i.e. it costs the pre-staging dilution, not the answer. */
 #define NR_DCI11_FDRA_ARM_MIN_TRIALS 64
 
-/** True when every live layout has >= min_trials stage-2 trials (feed() or code-block probes) and no pass
- * of its own, as a probe, or through its interpretation family. False with a winner or an empty set. */
+/** True when no live layout has a pass (own feed(), code-block probe, or interpretation family) and the live
+ * set has taken >= min_trials x n_alive stage-2 trials IN TOTAL (aggregate, so a layout that can never be
+ * trialled cannot freeze staging). False with a winner or an empty set. The caller must also gate on link
+ * health: on a dead link every layout reads 0 passes. */
 bool nr_dci11_resolver_all_refuted(const nr_dci11_resolver_t *r, uint32_t min_trials);
 
-/** Arm the next FDRA mode (type 0 cfg1, type 0 cfg2, dynamicSwitch cfg1, cfg2 -- skipping any with no
- * layout at this length): its layouts are APPENDED alive with fresh counters, nothing live is removed.
- * Returns the mode armed and *added (may be NULL) its count, or -1 once every mode is armed. One stage is
- * <= 5458 layouts over the measured window; the cumulative set is truncated at NR_DCI11_LAYOUT_MAX
- * (*added then short of the mode's count). Caller-serialised (the stage-1 observer). */
+/** Arm the next FDRA stage (type 0 cfg1, dynamicSwitch cfg1, dynamicSwitch cfg2, type 0 cfg2 -- skipping any
+ * with no layout at this length). The refuted live set (every live layout WITHOUT a pass) is retired first,
+ * so n_alive stays one stage; the new layouts are APPENDED alive with fresh counters. Call only after
+ * nr_dci11_resolver_all_refuted(). Returns the mode armed and *added (may be NULL) its count, or -1 once
+ * every stage is armed. Caller-serialised (the stage-1 observer). */
 int nr_dci11_resolver_arm_next_mode(nr_dci11_resolver_t *r, int *added);
 
 /** Append offsets to a resolver built by nr_dci_resolver_init_from_offsets() (DCI 0_1 FDRA staging), alive,
