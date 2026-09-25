@@ -227,6 +227,14 @@ int nr_csirs_blind_row_needs_bits(uint8_t row)
   return -1;
 }
 
+int nr_csirs_blind_row_ports(uint8_t row)
+{
+  for (unsigned i = 0; i < sizeof(kRows) / sizeof(kRows[0]); i++)
+    if (kRows[i] == row)
+      return kPorts[i];
+  return 0;
+}
+
 bool nr_csirs_blind_candidate_safe(const nr_csirs_candidate_t *c)
 {
   if (c == NULL) {

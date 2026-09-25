@@ -227,15 +227,11 @@ void nr_csirs_blind_rt_slot(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot
   /* ONE BUFFER PER PORT, not one buffer. nr_generate_csi_rs() writes dataF[p] for every port the
    * ROW defines, so handing it a single-element array made row 4 (4 ports) write through
    * dataF[1..3] and segfault the receiver -- caught on air, first run after wiring.
-   * The count is taken from the row rather than assumed: rows 1 and 2 are single-port, row 4 is
-   * four-port, and a future row added to kRows must extend this table with it. */
-  int n_ports = 1;
-  switch (c->row) {
-    case 4: n_ports = 4; break;
-    case 1:
-    case 2:
-    default: n_ports = 1; break;
-  }
+   * From the enumerator's own table, so a row added there cannot get the wrong port count here: rows
+   * 3 and 5 (2 and 4 ports) were generated with only port 0 cleared. */
+  const int n_ports = nr_csirs_blind_row_ports(c->row);
+  if (n_ports <= 0 || n_ports > NR_CSIRS_BLIND_RT_MAX_PORTS)
+    return;
 
   /* ---- ALLOCATED ONCE, NOT PER SLOT -----------------------------------------------------------
    * This runs on the PHY receive thread. The first version called calloc()/free() every slot for
