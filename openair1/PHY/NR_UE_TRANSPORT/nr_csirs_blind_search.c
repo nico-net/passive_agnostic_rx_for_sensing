@@ -767,10 +767,15 @@ static uint8_t row_cdm_type(int row)
 static int match_group(const uint16_t mask[NR_CSIRS_BLIND_NSYM], uint8_t density, uint16_t n_rb,
                        uint16_t scramb_id, nr_csirs_candidate_t *out, int max)
 {
-  nr_csirs_candidate_t m[FP_MATCH_TMP];
+  /* WIDEST ROWS FIRST, sub-footprints rejected on insertion. A row-18 pattern admits 66+ narrower
+   * fits (rows 6-15 inside it); enumerating narrow rows first filled the scratch before rows 15-18 were
+   * reached, and the truth never made it into the result. Ports only fall as the row index falls, so a
+   * later fit can never strictly contain an earlier one: every kept fit is maximal, and hitting the cap
+   * drops only further maximal fits -- truncation is harmless by construction. */
   uint16_t mfp[FP_MATCH_TMP][NR_CSIRS_BLIND_NSYM];
+  const int cap = (max < FP_MATCH_TMP) ? max : FP_MATCH_TMP;
   int nm = 0;
-  for (int row = 6; row <= 18; row++) {
+  for (int row = 18; row >= 6 && nm < cap; row--) {
     const int need = nr_csirs_blind_row_needs_bits((uint8_t)row), ports = nr_csirs_blind_row_ports((uint8_t)row);
     /* Density 0.5 exists only for the 16-32-port rows (11-18); rows 6-10 are density one. */
     if (density != 2 && ports < 16) {
@@ -819,28 +824,23 @@ static int match_group(const uint16_t mask[NR_CSIRS_BLIND_NSYM], uint8_t density
           if (nr_csirs_blind_footprint(&c, sym) != ports || !fp_inside(sym, mask)) {
             continue;
           }
-          if (nm == FP_MATCH_TMP) {
-            break; /* ponytail: a group admitting > 64 fits is a union of many resources; the first 64 are tried */
+          /* A strict sub-footprint (row 11 inside row 16, ...) is the same energy explained by fewer
+           * ports, and the sequence stage could confirm it on its port-0 REs alone. Equal footprints
+           * (rows 16/17, ...) are kept: only the sequence stage can separate those. */
+          bool dominated = false;
+          for (int j = 0; j < nm && !dominated; j++) {
+            dominated = fp_inside(sym, mfp[j]) && !fp_inside(mfp[j], sym);
           }
-          m[nm] = c;
+          if (dominated || nm == cap) {
+            continue;
+          }
+          out[nm] = c;
           memcpy(mfp[nm++], sym, sizeof(sym));
         }
       }
     }
   }
-  /* Keep only maximal fits: a strict sub-footprint (row 11 inside row 16, ...) is the same energy
-   * explained by fewer ports, and the sequence stage could confirm it on its port-0 REs alone. */
-  int n = 0;
-  for (int i = 0; i < nm && n < max; i++) {
-    bool dominated = false;
-    for (int j = 0; j < nm && !dominated; j++) {
-      dominated = j != i && fp_inside(mfp[i], mfp[j]) && !fp_inside(mfp[j], mfp[i]);
-    }
-    if (!dominated) {
-      out[n++] = m[i];
-    }
-  }
-  return n;
+  return nm;
 }
 
 int nr_csirs_blind_fp_match(const nr_csirs_blind_fp_t *fp, uint16_t n_rb, uint16_t scramb_id,

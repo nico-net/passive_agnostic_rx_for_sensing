@@ -4,7 +4,6 @@
 #include <vector>
 #include <random>
 #include <memory>
-#include <chrono>
 #include <cstdio>
 #include <gtest/gtest.h>
 extern "C" {
@@ -320,10 +319,7 @@ TEST(CsirsBlindFootprint, MatchesA32PortResourceAndOnlyItsFootprintTwins) {
   auto acc = std::make_unique<nr_csirs_blind_fp_t>();
   run_visits(acc.get(), {r, trs}, 40 * 14 * 12);
   std::vector<nr_csirs_candidate_t> out(64);
-  const auto t0 = std::chrono::steady_clock::now();
   const int n = nr_csirs_blind_fp_match(acc.get(), 273, 382, out.data(), (int)out.size());
-  const auto us = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - t0).count();
-  printf("FOOTPRINT MATCH: %d candidates in %lld us\n", n, (long long)us);
   out.resize(n > 0 ? n : 0);
   // Exactly the two rows with this RE set: row 18 needs 4 consecutive symbols, and every narrower
   // row (13, 11, 6, ...) fits inside it and must be dropped as a strict sub-footprint.
@@ -359,6 +355,31 @@ TEST(CsirsBlindFootprint, DensityHalfIsMatchedOnItsOwnParity) {
   EXPECT_TRUE(has(out, 16, 0x0F, 6, 8, 0));
   EXPECT_TRUE(has(out, 17, 0x0F, 6, 8, 0));
   for (const auto &c : out) EXPECT_EQ(c.freq_density, 0) << "row " << (int)c.row;
+}
+
+TEST(CsirsBlindFootprint, RowEighteenDensityOneIsNotCrowdedOutByItsSubFootprints) {
+  // REGRESSION (review of the first cut): a row-18 density-1 pattern admits 66+ narrower fits
+  // (rows 6-15 inside it). Enumerating narrow rows first filled the 64-entry scratch before rows
+  // 15-18 were reached, so the maximality filter never saw the truth and returned rows 11-14 --
+  // which the confirm path could then confirm with symbols 8-9 missing from rate matching.
+  const nr_csirs_candidate_t truth = cand_of(18, 0x0F, 6, 0, 2);   // cdm8, symbols 6-9, all RBs
+  Res r{};
+  ASSERT_EQ(nr_csirs_blind_footprint(&truth, r.fp), 32);
+  r.density = 2; r.period = 40; r.offset = 3;
+  auto acc = std::make_unique<nr_csirs_blind_fp_t>();
+  run_visits(acc.get(), {r}, 40 * 14 * 12);
+  std::vector<nr_csirs_candidate_t> out(64);
+  const int n = nr_csirs_blind_fp_match(acc.get(), 273, 382, out.data(), (int)out.size());
+  out.resize(n > 0 ? n : 0);
+  // Row 18 plus its same-footprint twins (rows 16/17 with l1 = l0 + 2), nothing narrower.
+  EXPECT_EQ(n, 3);
+  EXPECT_TRUE(has(out, 18, 0x0F, 6, 0, 2));
+  EXPECT_TRUE(has(out, 17, 0x0F, 6, 8, 2));
+  EXPECT_TRUE(has(out, 16, 0x0F, 6, 8, 2));
+  for (const auto &c : out) {
+    uint16_t m[NR_CSIRS_BLIND_NSYM];
+    ASSERT_EQ(nr_csirs_blind_footprint(&c, m), 32) << "row " << (int)c.row << " is a sub-footprint";
+  }
 }
 
 TEST(CsirsBlindFootprint, RowsOneToFiveAndAperiodicEnergyProduceNoWideCandidate) {

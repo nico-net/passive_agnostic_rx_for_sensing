@@ -44,8 +44,13 @@ static uint64_t g_slots;
 static double   g_null[NULLWIN];
 static int      g_null_n, g_null_w;
 /* Rows 6-18, footprint-first (nr_csirs_blind_search.h): per-slot on/off evidence from the symbol
- * this tap FFTs anyway, matched against OAI's mapping table at most once per FP_MATCH_EVERY calls. */
+ * this tap FFTs anyway, matched against OAI's mapping table at most once per FP_MATCH_EVERY calls.
+ * OPT-IN (ISAC_CSIRS_BLIND_WIDE=1, default off): appending and pinning fits changes the order in which
+ * the population is searched, and a union of two narrow resources sharing a period/offset (e.g. two
+ * row-4 resources at k0=0 and k0=4) fits a row-6 footprint. Off, none of this code runs and the rows
+ * 1-5 search is exactly what it was. */
 #define FP_MATCH_EVERY 1000
+static int      g_wide = -1;   /* -1 = not read, 0 = off, 1 = on */
 static nr_csirs_blind_fp_t g_fp;
 static bool     g_fp_dirty;
 static uint64_t g_fp_last;
@@ -285,11 +290,17 @@ void nr_csirs_blind_rt_slot(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot
   nr_slot_fep_ant(ue, fp, (unsigned)slot, (unsigned)c->symb_l0, 0, rxdataF, link_type_dl, 0, ue->common_vars.rxdata);
   const uint32_t off_sym = (uint32_t)c->symb_l0 * (uint32_t)fp->ofdm_symbol_size;
   /* Footprint evidence for rows 6-18 from the symbol just transformed: one pass over the carrier. */
-  uint16_t on_even = 0, on_odd = 0;
-  nr_csirs_blind_symbol_on((const int16_t *)&rxdataF_ant0[off_sym], fp->ofdm_symbol_size,
-                           fp->first_carrier_offset, fp->N_RB_DL, &on_even, &on_odd);
-  if (nr_csirs_blind_fp_record(&g_fp, c->symb_l0, on_even, on_odd, absolute_slot))
-    g_fp_dirty = true;
+  if (g_wide < 0) {
+    const char *e = getenv("ISAC_CSIRS_BLIND_WIDE");
+    g_wide = (e != NULL && atoi(e) != 0) ? 1 : 0;
+  }
+  if (g_wide) {
+    uint16_t on_even = 0, on_odd = 0;
+    nr_csirs_blind_symbol_on((const int16_t *)&rxdataF_ant0[off_sym], fp->ofdm_symbol_size,
+                             fp->first_carrier_offset, fp->N_RB_DL, &on_even, &on_odd);
+    if (nr_csirs_blind_fp_record(&g_fp, c->symb_l0, on_even, on_odd, absolute_slot))
+      g_fp_dirty = true;
+  }
   /* Sub-band size for the channel-robust score, in OCCUPIED REs. 32 REs is ~11 RB for a density-3
    * row (4 MHz at 30 kHz) -- narrow enough that the channel is flat across it, wide enough that
    * noise stays well below a match: noise reads ~1.0, a perfect match sqrt(32)/0.886 = 6.4, and a
@@ -516,7 +527,7 @@ void nr_csirs_blind_rt_slot(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot
    * to the population. Pinned for a confirm budget when nothing else holds the pin, since round-robin
    * alone would reach it only once per ~700 calls. Nothing is appended on a cell without periodic
    * pair-structured energy, which leaves the rows 1-5 search exactly as it was. */
-  if (g_fp_dirty && g_slots - g_fp_last >= FP_MATCH_EVERY) {
+  if (g_wide && g_fp_dirty && g_slots - g_fp_last >= FP_MATCH_EVERY) {
     g_fp_dirty = false;
     g_fp_last = g_slots;
     nr_csirs_candidate_t fit[16];
@@ -525,7 +536,14 @@ void nr_csirs_blind_rt_slot(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot
       const int at = nr_csirs_blind_append(&g_st, &fit[i]);
       if (at < 0)
         continue;
-      nr_csirs_blind_append(&g_zp, &fit[i]); /* g_zp mirrors g_st index for index */
+      /* g_zp mirrors g_st index for index: the ZP feed below scores g_zp at g_st's idx. */
+      const int zat = nr_csirs_blind_append(&g_zp, &fit[i]);
+      static bool s_zp_diverged;
+      if (zat != at && !s_zp_diverged) {
+        s_zp_diverged = true;
+        LOG_E(PHY, "SENSING: CSIRS_BLIND FOOTPRINT g_zp append index %d != g_st index %d -- ZP search no longer "
+                   "mirrors the NZP population\n", zat, at);
+      }
       if (g_st.pin_left == 0)
         nr_csirs_blind_pin(&g_st, at, NR_CSIRS_BLIND_PIN_CONFIRM_CALLS);
       LOG_A(PHY, "SENSING: CSIRS_BLIND FOOTPRINT row%u fd0x%x l0=%u l1=%u density=%u cdm=%u (%d ports) "
