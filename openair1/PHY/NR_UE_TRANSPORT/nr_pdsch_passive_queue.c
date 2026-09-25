@@ -56,7 +56,10 @@ void nr_passive_rrc_harvest(const uint8_t *tb, uint32_t tb_bytes); // openair2/L
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_config_sweep.h" // Technique D scoring
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_qm_oracle.h" // Technique D Qm oracle
 #include "PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.h" // nr_pdcch_dci11_layout_feedback
+#include "PHY/NR_UE_TRANSPORT/nr_pdsch_prb_set.h" // nr_prb_segments (probe span of a PRB-list grant)
+#include "PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.h" // nr_pdsch_passive_alloc_normalise
 
+#include <limits.h>
 #include <math.h>
 #include <pthread.h>
 #include <stdatomic.h>
@@ -440,6 +443,40 @@ void nr_passive_mac_report_ta(uint16_t rnti, bool is_ra_rnti, int frame, int slo
   }
 }
 
+/* The DM-RS probes below (oracle gate, rank, CDM, DM-RS identity) read one CONTIGUOUS stretch of
+ * subcarriers from first_rb. A PRB-list or PRG grant is not contiguous (and may change precoder at a
+ * PRG edge), so they measure its LARGEST segment instead -- still real PRBs of this grant, which is
+ * all they need; covering every segment would only add PRBs to a statistic, not correctness. A
+ * contiguous grant keeps first_rb/num_rbs exactly. *nrb = 0 = nothing measurable. */
+static int probe_span(const nr_pdsch_passive_job_t *j, int *nrb)
+{
+  const freq_alloc_bitmap_t *fa = &j->freq_alloc;
+  *nrb = fa->num_rbs;
+  if (fa->n_prb_list == 0 && fa->prg == 0)
+    return fa->first_rb;
+  uint16_t contig[NR_PRB_SET_MAX];
+  const uint16_t *prb = fa->prb_list;
+  int n = fa->n_prb_list;
+  if (n == 0) {
+    n = fa->num_rbs < NR_PRB_SET_MAX ? fa->num_rbs : NR_PRB_SET_MAX;
+    for (int i = 0; i < n; i++)
+      contig[i] = (uint16_t)(fa->first_rb + i);
+    prb = contig;
+  }
+  nr_prb_seg_t seg[NR_PRB_SET_MAX];
+  const int ns = nr_prb_segments(prb, n, j->dlsch_pdu.BWPStart, fa->prg, seg, NR_PRB_SET_MAX);
+  if (ns <= 0) {
+    *nrb = 0;
+    return fa->first_rb;
+  }
+  int best = 0;
+  for (int s = 1; s < ns; s++)
+    if (seg[s].n_prb > seg[best].n_prb)
+      best = s;
+  *nrb = seg[best].n_prb;
+  return seg[best].prb_start;
+}
+
 static void *nr_pdsch_passive_queue_thread(void *arg)
 {
   const int idx = ((consumer_arg_t *)arg)->idx;
@@ -481,8 +518,15 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
     }
     pthread_mutex_unlock(&g_lock);
     /* Union of RBs over the group members whose DM-RS configuration matches the head job's. */
-    int rb_lo = job.freq_alloc.first_rb, rb_hi = job.freq_alloc.first_rb + job.freq_alloc.num_rbs;
+    /* PRB-list / PRG grants never read the shared estimate (the decoder bypasses the cache for them),
+     * and their first_rb + num_rbs is not their span, so they must not widen the union the OTHER grants
+     * of the slot are estimated over. */
+#define CONTIG_JOB(j) ((j).freq_alloc.n_prb_list == 0 && (j).freq_alloc.prg == 0)
+    int rb_lo = CONTIG_JOB(job) ? job.freq_alloc.first_rb : INT_MAX;
+    int rb_hi = CONTIG_JOB(job) ? job.freq_alloc.first_rb + job.freq_alloc.num_rbs : INT_MIN;
     for (int k = 0; k < n_more; k++) {
+      if (!CONTIG_JOB(more[k]))
+        continue;
       const fapi_nr_dl_config_dlsch_pdu_rel15_t *a = &job.dlsch_pdu, *b = &more[k].dlsch_pdu;
       if (a->dlDmrsSymbPos != b->dlDmrsSymbPos || a->dmrsConfigType != b->dmrsConfigType
           || a->nscid != b->nscid || a->dmrs_ports != b->dmrs_ports || a->n_dmrs_cdm_groups != b->n_dmrs_cdm_groups
@@ -492,6 +536,9 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
       if (lo < rb_lo) rb_lo = lo;
       if (hi > rb_hi) rb_hi = hi;
     }
+    if (rb_hi < rb_lo) /* no contiguous member: rb_n = 0 disables the widening */
+      rb_lo = rb_hi = 0;
+#undef CONTIG_JOB
     /* Wide first: the data-aided CFR rows come from what decodes, and a wide grant's row is
      * worth more to the sensing grid than a narrow one's if the samples go stale mid-group. */
     if (n_more > 0) {
@@ -631,12 +678,14 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
         LOG_A(PHY, "SENSING: ORACLE_GATE settled=%d gen=%lu nrb=%u k0=%u probe=%u\n", job.sweep_ticket.settled,
               (unsigned long)job.sweep_ticket.generation, job.freq_alloc.num_rbs, job.sweep_ticket.k0, job.layout_probe);
     }
-    if (!job.sweep_ticket.settled && job.sweep_ticket.generation && job.freq_alloc.num_rbs >= 4
+    int oracle_nrb;
+    const int oracle_rb0 = probe_span(&job, &oracle_nrb);
+    if (!job.sweep_ticket.settled && job.sweep_ticket.generation && oracle_nrb >= 4
         && job.sweep_ticket.k0 == 0) {
       const int n_sym = fp->symbols_per_slot;
       float coh[275];
       double prof[14] = {0};
-      const int rb0 = job.freq_alloc.first_rb, nrb = job.freq_alloc.num_rbs;
+      const int rb0 = oracle_rb0, nrb = oracle_nrb;
       double energy[14] = {0}; /* per symbol, over the grant's PRBs: the allocation END is where it stops */
       for (int sym = 0; sym < n_sym && sym < 14; sym++) {
         nr_slot_fep_ant(ue, fp, job.nr_slot_rx, sym, 0, rxdataF, link_type_dl, 0, ue->common_vars.rxdata);
@@ -842,13 +891,15 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
         /* RANK PROBE (OTA 2026-09-12: full-band grants 0/10000 CRC, short grants 8/9, gNB has 4 DL
          * antennas and the decoder assumes one layer). Per-grant even/odd DM-RS pair coherence under
          * the assumed identity: ~1 single-layer, collapsed two-layer. Censused by size and CRC. */
-        if (pdu->dmrsConfigType == 0 && pdu->dlDmrsSymbPos && pthread_mutex_trylock(&g_dl_rank_lock) == 0) {
+        int pr_nrb;
+        const int pr_rb0 = probe_span(&job, &pr_nrb);
+        if (pr_nrb > 0 && pdu->dmrsConfigType == 0 && pdu->dlDmrsSymbPos && pthread_mutex_trylock(&g_dl_rank_lock) == 0) {
           const NR_DL_FRAME_PARMS *fp = &ue->frame_parms;
           const int sym = __builtin_ctz((unsigned)pdu->dlDmrsSymbPos);
-          const int rb_offset = job.freq_alloc.first_rb + (pdu->refPoint ? 0 : pdu->BWPStart);
-          const int start_sc  = fp->first_carrier_offset + (pdu->BWPStart + job.freq_alloc.first_rb) * 12;
+          const int rb_offset = pr_rb0 + (pdu->refPoint ? 0 : pdu->BWPStart);
+          const int start_sc  = fp->first_carrier_offset + (pdu->BWPStart + pr_rb0) * 12;
           const double coh = nr_dmrs_port_pair_coherence(&rxdataF[0][sym * fp->ofdm_symbol_size], fp->ofdm_symbol_size,
-                                                         start_sc, rb_offset, job.freq_alloc.num_rbs, fp->N_RB_DL,
+                                                         start_sc, rb_offset, pr_nrb, fp->N_RB_DL,
                                                          fp->symbols_per_slot, job.nr_slot_rx, sym, pdu->nscid,
                                                          pdu->dlDmrsScramblingId, fp->Ncp == NR_NORMAL);
           /* CDM-GROUP PROBE. In the DM-RS symbol the other comb (delta = 1: subcarriers 4n+1, 4n+3)
@@ -859,7 +910,7 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
           {
             const c16_t *row = &rxdataF[0][sym * fp->ofdm_symbol_size];
             int re = ((start_sc % fp->ofdm_symbol_size) + fp->ofdm_symbol_size) % fp->ofdm_symbol_size;
-            for (int m = 0; m < 12 * job.freq_alloc.num_rbs; ++m) {
+            for (int m = 0; m < 12 * pr_nrb; ++m) {
               const double e = (double)row[re].r * row[re].r + (double)row[re].i * row[re].i;
               if (m & 1) e_other += e; else e_dmrs += e;
               re = (re + 1) % fp->ofdm_symbol_size;
@@ -890,16 +941,16 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
           }
           pthread_mutex_unlock(&g_dl_rank_lock);
         }
-        if (crc && pdu->dmrsConfigType == 0 && pdu->dlDmrsSymbPos && pthread_mutex_trylock(&g_dl_dmrs_id_lock) == 0) {
+        if (pr_nrb > 0 && crc && pdu->dmrsConfigType == 0 && pdu->dlDmrsSymbPos && pthread_mutex_trylock(&g_dl_dmrs_id_lock) == 0) {
           if (!g_dl_dmrs_id_init) { nr_dmrs_id_init(&g_dl_dmrs_id, "PDSCH", pdu->dlDmrsScramblingId); g_dl_dmrs_id_init = true; }
           if (!g_dl_dmrs_id.decided) {
             const NR_DL_FRAME_PARMS *fp = &ue->frame_parms;
             const int sym = __builtin_ctz((unsigned)pdu->dlDmrsSymbPos);
             /* Same two quantities the estimator itself derives (nr_dl_channel_estimation.c). */
-            const int rb_offset = job.freq_alloc.first_rb + (pdu->refPoint ? 0 : pdu->BWPStart);
-            const int start_sc  = fp->first_carrier_offset + (pdu->BWPStart + job.freq_alloc.first_rb) * 12;
+            const int rb_offset = pr_rb0 + (pdu->refPoint ? 0 : pdu->BWPStart);
+            const int start_sc  = fp->first_carrier_offset + (pdu->BWPStart + pr_rb0) * 12;
             if (nr_dmrs_id_accumulate(&g_dl_dmrs_id, &rxdataF[0][sym * fp->ofdm_symbol_size], fp->ofdm_symbol_size,
-                                      start_sc, rb_offset, job.freq_alloc.num_rbs, fp->N_RB_DL, fp->symbols_per_slot,
+                                      start_sc, rb_offset, pr_nrb, fp->N_RB_DL, fp->symbols_per_slot,
                                       job.nr_slot_rx, sym, pdu->nscid, fp->Ncp == NR_NORMAL))
               nr_dmrs_id_decide(&g_dl_dmrs_id, 16, 10.0);
           }
@@ -1101,7 +1152,18 @@ bool nr_pdsch_passive_queue_enqueue(const nr_pdsch_passive_job_t *job)
   if (g_n_pending > 0 && (g_pending[0].absolute_slot != job->absolute_slot
                           || g_n_pending == NR_PDSCH_PASSIVE_SLOT_GROUP_MAX))
     nr_pdsch_passive_queue_flush();
-  g_pending[g_n_pending++] = *job;
+  g_pending[g_n_pending] = *job;
+  /* ONE normalisation for everyone downstream: decoder, data-aided tap (recomputes nb_rb/G from
+   * num_rbs), queue probes, narrow-grant budget. A no-op for a contiguous grant. */
+  if (!nr_pdsch_passive_alloc_normalise(&g_pending[g_n_pending].freq_alloc, job->dlsch_pdu.BWPSize)) {
+    static _Atomic unsigned long c_ = 0;
+    const unsigned long n_ = atomic_fetch_add_explicit(&c_, 1, memory_order_relaxed) + 1;
+    if (n_ == 1 || (n_ % 200) == 0)
+      LOG_W(PHY, "SENSING: PDSCHQ refused an invalid PRB-list grant n=%lu (n_prb_list=%u bwp_size=%u)\n", n_,
+            (unsigned)job->freq_alloc.n_prb_list, (unsigned)job->dlsch_pdu.BWPSize);
+    return false;
+  }
+  g_n_pending++;
   return true;
 }
 

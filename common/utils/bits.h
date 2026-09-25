@@ -81,6 +81,13 @@ typedef struct {
   int last_rb;
   int num_rbs;
   uint32_t bitmap[9];
+  /* Non-contiguous DATA-ORDERED allocation (passive PDSCH decode only; everything else leaves these
+   * zero). n_prb_list == 0: the legacy first_rb..last_rb/bitmap allocation. Otherwise prb_list[i] is
+   * the BWP-relative PRB carrying data PRB i (RA type 0, interleaved VRB); 275 = NR_PRB_SET_MAX.
+   * prg: PRB bundling size in RBs (0 = wideband), channel estimates never interpolate across it. */
+  uint16_t n_prb_list;
+  uint16_t prb_list[275];
+  uint8_t prg;
 } freq_alloc_bitmap_t;
 bool check_rb_in_bitmap(const freq_alloc_bitmap_t *alloc, int rb);
 freq_alloc_bitmap_t set_start_end_from_bitmap(int size, int alloc_size, const uint8_t *bitmap);

@@ -3,6 +3,7 @@
 extern "C" {
 #include "nr_pdsch_prb_set.h"
 }
+extern "C" int nr_prb_gather_index(const nr_prb_seg_t *seg, int nseg, int re_per_prb, int *out, int max);
 
 TEST(PrbSet, RbgSizeTable) {  // 38.214 Table 5.1.2.2.1-1
   EXPECT_EQ(nr_rbg_size(36, 0), 2);  EXPECT_EQ(nr_rbg_size(36, 1), 4);
@@ -92,6 +93,15 @@ TEST(PrbSet, SegmentsFollowDataOrderAndPrgBoundaries) {
   EXPECT_EQ(s[0].n_prb, 3); EXPECT_EQ(s[1].n_prb, 4); EXPECT_EQ(s[2].n_prb, 3);
   ASSERT_EQ(nr_prb_segments(c, 10, 0, 0, s, 16), 1);  // wideband contiguous = today's single segment
   EXPECT_EQ(nr_prb_segments(c, 10, 0, 2, s, 4), -1);  // does not fit
+}
+
+TEST(PrbSet, GatherConcatenatesSegmentsInDataOrder) {
+  // Two segments: PRBs 4-5 (data 0-1) then PRBs 0-1 (data 2-3); 2 REs per PRB for the test.
+  const nr_prb_seg_t s[2] = {{4, 2, 0}, {0, 2, 2}};
+  int idx[8];
+  ASSERT_EQ(nr_prb_gather_index(s, 2, 2, idx, 8), 8);
+  const int want[8] = {8, 9, 10, 11, 0, 1, 2, 3};  // RE index within the symbol, BWP-relative
+  for (int i = 0; i < 8; i++) EXPECT_EQ(idx[i], want[i]);
 }
 
 int main(int argc, char **argv)
