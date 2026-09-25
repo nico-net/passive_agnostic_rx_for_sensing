@@ -22,11 +22,25 @@
 #include "nr_pdcch_ul_interp_sweep.h"
 #include "common/utils/LOG/log.h"
 #include <string.h>
+bool nr_pusch_tda_legal(int mapping_type, int S, int L)
+{
+  if (S < 0 || L < 1 || S + L > 14)
+    return false;
+  if (mapping_type == 0)
+    return S == 0 && L >= 4;
+  return mapping_type == 1;
+}
 int nr_pdcch_ul_interp_sweep_generate(nr_hyp_t *out, int cap)
 {
+  /* {S, L, mapping (0 = A, 1 = B), k2}. Mapping type B rows are enumerated like type A: the extraction
+   * derives the type-B DM-RS mask (first DM-RS on the first PUSCH symbol) from the row's own mapping.
+   * S=2 L=12 used to be listed as type A, which TS 38.214 Table 6.1.2.1-1 forbids (type A has S = 0):
+   * it is legal only as type B, so it is listed as type B. The rows stay a curated list: the full legal
+   * set (11 type A + 105 type B) x k2 {1..4} x the 96 field combinations below is 44,544 raw hypotheses
+   * against NR_HYP_SWEEP_MAX_RAW = 8192, and without a UL DM-RS oracle nothing prunes it. */
   static const uint8_t tda[][4] = {
     {0,14,0,1},{0,14,0,2},{0,14,0,3},{0,14,0,4},
-    {0,7,0,1},{0,7,0,2},{2,12,0,1},{2,12,0,2},{0,4,1,1},{0,4,1,2}
+    {0,7,0,1},{0,7,0,2},{2,12,1,1},{2,12,1,2},{0,4,1,1},{0,4,1,2}
   };
   if (!out || cap<=0) return NR_HYP_SWEEP_INVALID;
   int n=0;

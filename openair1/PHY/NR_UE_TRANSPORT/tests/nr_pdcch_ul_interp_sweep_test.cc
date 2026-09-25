@@ -76,3 +76,24 @@ TEST(UlInterpSweep, DifferentK2IsNotAnEquivalentGrant) {
   EXPECT_NE(a.tda_k2[0],b.tda_k2[0]);
   /* Matching only S/L, as the plan's tie-check did, is not grant equivalence. */
 }
+/* TS 38.214 Table 6.1.2.1-1 (normal CP): type A S = 0, L 4..14; type B S 0..13, L 1..14, S+L <= 14. */
+TEST(UlInterpSweep, PuschLegalTdaCounts) {
+  int a=0,b=0;
+  for(int S=0;S<14;++S)
+    for(int L=1;L<=14;++L) { a+=nr_pusch_tda_legal(0,S,L); b+=nr_pusch_tda_legal(1,S,L); }
+  EXPECT_EQ(a,11);
+  EXPECT_EQ(b,105);
+  EXPECT_FALSE(nr_pusch_tda_legal(2,0,4));
+}
+TEST(UlInterpSweep, EveryCatalogueTdaIsLegalAndTypeBIsPresent) {
+  std::vector<nr_hyp_t> raw(NR_HYP_SWEEP_MAX_RAW);
+  const int n=nr_pdcch_ul_interp_sweep_generate(raw.data(),raw.size());
+  ASSERT_GT(n,0);
+  int type_b=0;
+  for(int i=0;i<n;++i) {
+    nr_pdcch_ul_interp_hyp_t h; memcpy(&h,raw[i].bytes,sizeof(h));
+    EXPECT_TRUE(nr_pusch_tda_legal(h.tda_mapping,h.tda_start,h.tda_length));
+    type_b+=h.tda_mapping==1;
+  }
+  EXPECT_GT(type_b,0);
+}

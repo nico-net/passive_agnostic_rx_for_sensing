@@ -49,12 +49,17 @@
 typedef struct {
   uint8_t tda_start;   ///< S: first PDSCH symbol
   uint8_t tda_length;  ///< L: number of PDSCH symbols
-  uint8_t k0;          ///< PDSCH slot offset from the DCI slot (TDRA entry k0), 0..2
+  uint8_t k0;          ///< PDSCH slot offset from the DCI slot (TDRA entry k0), 0..32 (>= 2 only once observed)
   uint8_t dmrs_add_pos;///< dmrs-AdditionalPosition, 0..3
   uint8_t dmrs_max_len;///< maxLength, 1 or 2
   uint16_t dmrs_mask; ///< validated effective mask, zero only in legacy pure tests
   uint8_t mcs_table;   ///< 0 = 64QAM, 1 = 256QAM, 2 = 64QAM-LowSE
+  uint8_t mapping_type;///< PDSCH mapping type: 0 = A, 1 = B (dmrs_add_pos/max_len are that type's IE)
 } nr_pdsch_cfg_hypothesis_t;
+
+/** TS 38.214 Table 5.1.2.1-1, normal CP: type A S 0..3, L 3..14; type B (Rel-16) S 0..12, L 2..13;
+ *  both S+L <= 14. mapping_type 0 = A, 1 = B, anything else is not legal. */
+bool nr_pdsch_tda_legal(int mapping_type, int S, int L);
 
 /* Optional non-reentrant diagnostics: callback must not call the sweep API.
  * Pure/offline users have no logger dependency. */
@@ -74,7 +79,13 @@ typedef struct {
 typedef void (*nr_pdsch_sweep_reporter_t)(const nr_pdsch_sweep_report_t *);
 void nr_pdsch_config_sweep_set_reporter(nr_pdsch_sweep_reporter_t);
 
-#define NR_PDSCH_SWEEP_MAX_HYP 2048 /* 42 legal type-A (S,L) x k0 {0,1} x 4 add_pos x 2 max_len x 3 mcs_table = 2016 before mask merging */
+/* ISAC_PDSCH_TYPEB=0 (read once) drops mapping type B from the catalog; default on.
+ * Pure catalog (no mask merging): (42 type-A + 90 type-B legal (S,L)) x k0 {0,1} x 4 add_pos x 2 max_len
+ * x 3 mcs_table = 6336. Runtime (merged by effective mask, pos2) = 2154, i.e. ~1077 per k0 layer, so
+ * 8192 leaves room for five observed k0 >= 2 layers. Per context: 8192 x 22 B = 180 KB, heap-allocated
+ * when a context slot is first used (nr-uesoftmodem mlockall()s, so 1024 inline states would pin
+ * 185 MB at startup). */
+#define NR_PDSCH_SWEEP_MAX_HYP 8192
 #define NR_PDSCH_SWEEP_MAX_CONTEXTS 1024 /* one per (layout x TDA index) under the wide search; 256 thrashed at 809 layouts */
 
 typedef struct {
@@ -89,7 +100,7 @@ typedef struct {
   int      winner;    ///< -1 until decided
 } nr_pdsch_config_sweep_state_t;
 
-/** Build the complete supported mapping-A catalog for pure algorithm tests.
+/** Build the complete supported mapping-A + mapping-B catalog for pure algorithm tests.
  * Runtime uses init_legal() with the real cell DMRS table. TDA field width remains an
  * extraction input: total DCI length alone does not determine it. */
 int nr_pdsch_config_sweep_init(nr_pdsch_config_sweep_state_t *st, int tda_count);
@@ -122,8 +133,10 @@ int nr_pdsch_config_sweep_init_legal(nr_pdsch_config_sweep_state_t *st, int tda_
  * SWEEP_MIN_RATE within its probation window restores the full catalog AND invalidates the prior,
  * so one bad publication cannot poison the rest of the run. */
 
-/** Restrict a catalog to one set of cell-wide fields, discarding evidence.
- *  Returns the new hypothesis count, or 0 leaving the state untouched when nothing matches. */
+/** Restrict a catalog to one set of cell-wide fields (every mapping type), discarding evidence.
+ *  Returns the new hypothesis count, or 0 leaving the state untouched when nothing matches. When EVERY
+ *  entry matches nothing moves, so the count is returned unchanged and the evidence is KEPT (before
+ *  Task 14 it was cleared in that case too). */
 int nr_pdsch_config_sweep_prune_to(nr_pdsch_config_sweep_state_t *st, uint8_t mcs_table,
                                    uint8_t dmrs_add_pos, uint8_t dmrs_max_len);
 
@@ -174,6 +187,11 @@ int nr_pdsch_config_sweep_observe_qm(const nr_pdsch_sweep_ticket_t *ticket, uint
  *  PRBs (-1 = unmeasured) and the k0 of the job it was measured on (-1 = unknown). Records it
  *  cell-wide and prunes the ticket's context to the admitted entries. */
 int nr_pdsch_config_sweep_observe(const nr_pdsch_sweep_ticket_t *ticket, uint16_t dmrs_mask, int last_symbol, int k0);
+/** k0 oracle: the air showed DM-RS on this grant's PRBs `k0` slots after the DCI (and not in the
+ *  catalog's k0 {0,1} slots). Appends the k0 layer to the ticket's live context (unsettled only) and
+ *  remembers it for this RNTI's later contexts. Returns the number of hypotheses added: 0 when the
+ *  layer is already there, k0 > 32, the context is settled/stale, or the layer would not fit. */
+int nr_pdsch_config_sweep_add_k0(const nr_pdsch_sweep_ticket_t *t, uint8_t k0);
 /** Returns true exactly once on convergence; fills winner when supplied. */
 bool nr_pdsch_config_sweep_feedback(const nr_pdsch_sweep_ticket_t *ticket, bool crc_ok,
                                    nr_pdsch_cfg_hypothesis_t *winner);

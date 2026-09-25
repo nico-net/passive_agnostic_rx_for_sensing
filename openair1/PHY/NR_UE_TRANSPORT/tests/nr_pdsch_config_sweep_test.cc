@@ -61,11 +61,16 @@ TEST(PdschConfigSweep, FindsTheTruthOnAMarginalLink) {
   EXPECT_EQ(nr_pdsch_config_sweep_winner(&st), truth);
 }
 
+/* The two StaysUndecided tests are O(n^2) in the catalog (the post-MIN_TRIALS fallback scans every
+ * hypothesis per feed): they run on the type-A-only legal catalog (2016), which is what they were sized
+ * for; the 6336-entry pure A+B catalog made each take ~117 s. */
+static int32_t test_legal(int, int length, int start, int mapping_b, int add, int maxlen);
+
 TEST(PdschConfigSweep, StaysUndecidedWhenNothingDecodes) {
   // Geometry wrong upstream (bad dci_length/CORESET) -> every hypothesis scores zero. Reporting a
   // winner here would hand the receiver a confident wrong config, which is worse than no answer.
   nr_pdsch_config_sweep_state_t st;
-  const int n = nr_pdsch_config_sweep_init(&st, 2);
+  const int n = nr_pdsch_config_sweep_init_legal(&st, 2, 0, test_legal);
   drive(st, -1, 0.0, 0.0, 600 * n);
   EXPECT_EQ(nr_pdsch_config_sweep_winner(&st), -1);
 }
@@ -73,7 +78,7 @@ TEST(PdschConfigSweep, StaysUndecidedWhenNothingDecodes) {
 TEST(PdschConfigSweep, StaysUndecidedWhenTwoHypothesesAreIndistinguishable) {
   // Two hypotheses that the traffic cannot separate must NOT be resolved by a coin flip.
   nr_pdsch_config_sweep_state_t st;
-  const int n = nr_pdsch_config_sweep_init(&st, 2);
+  const int n = nr_pdsch_config_sweep_init_legal(&st, 2, 0, test_legal);
   unsigned seed = 999;
   for (int i = 0; i < 600 * n; i++) {
     nr_pdsch_cfg_hypothesis_t h;
@@ -119,9 +124,13 @@ TEST(PdschConfigSweep, RejectsBadArguments) {
 }
 
 
-static int32_t test_legal(int, int length, int start, int, int add, int maxlen)
+/* Models a cell whose legality admits mapping type A only -- the catalog every test below was sized
+ * against (mapping type was not an input before Task 14). Admitting type B here as well grows these
+ * catalogs 2016 -> 4368 and unaided convergence 223,838 -> 484,911 outcomes (measured), past their
+ * 400,000 budgets; type B is exercised by the PdschConfigSweepTypeB tests with their own fixture. */
+static int32_t test_legal(int, int length, int start, int mapping_b, int add, int maxlen)
 {
-  return 1 + start * 1000 + length * 40 + add * 3 + maxlen;
+  return mapping_b ? 0 : 1 + start * 1000 + length * 40 + add * 3 + maxlen;
 }
 static nr_pdsch_sweep_ticket_t select_context(uint64_t config, uint16_t rnti, uint8_t tda)
 {
@@ -681,4 +690,142 @@ TEST(PdschReset, ClearsEvidenceAndRejectsTicketsAcrossReuse) {
   ASSERT_TRUE(nr_pdsch_config_sweep_snapshot(&fresh,&state));
   EXPECT_EQ(state.winner,-1);
   for(int i=0;i<state.n_hyp;++i) { EXPECT_EQ(state.trials[i],0u); EXPECT_EQ(state.ok[i],0u); }
+}
+
+/* ---- Task 14: mapping type B and k0 >= 2 ---------------------------------------------------------
+ * TS 38.214 Table 5.1.2.1-1 (normal CP): type A S 0..3, L 3..14, S+L <= 14; type B (Rel-16)
+ * S 0..12, L 2..13, S+L <= 14. k0 may be 0..32; only values the air shows are enumerated. */
+TEST(PdschConfigSweepTypeB, LegalTdaTablesMatchTs38214) {
+  int a = 0, b = 0;
+  for (int S = 0; S < 14; S++)
+    for (int L = 1; L <= 14; L++) {
+      a += nr_pdsch_tda_legal(0, S, L) ? 1 : 0;
+      b += nr_pdsch_tda_legal(1, S, L) ? 1 : 0;
+    }
+  EXPECT_EQ(a, 42);
+  EXPECT_EQ(b, 90);
+  EXPECT_FALSE(nr_pdsch_tda_legal(2, 0, 7));
+}
+
+TEST(PdschConfigSweepTypeB, CatalogIncludesTypeBAndFits) {
+  nr_pdsch_config_sweep_state_t st;
+  const int n = nr_pdsch_config_sweep_init(&st, 2);
+  int nb = 0;
+  for (int i = 0; i < n; i++)
+    nb += st.hyp[i].mapping_type == 1;
+  std::cerr << "[ MEASURED ] pure catalog n_hyp=" << n << " (type B " << nb << ") max=" << NR_PDSCH_SWEEP_MAX_HYP
+            << " bytes/context=" << sizeof(nr_pdsch_config_sweep_state_t) << std::endl;
+  EXPECT_GT(nb, 0);
+  EXPECT_LT(n, NR_PDSCH_SWEEP_MAX_HYP);
+}
+
+/* The mapping type reaches the legality function (OAI's mask generator takes it), and a type-B entry
+ * whose effective PDU equals a type-A one (same S, L, k0, mask, table) is ONE hypothesis: the TB CRC
+ * cannot tell them apart, and two indistinguishable hypotheses could never be separated. */
+static int32_t ab_legal(int, int length, int start, int mapping_b, int add, int maxlen)
+{
+  if (maxlen != 1)
+    return 0;
+  if (!mapping_b)
+    return start == 1 && length == 13 && add == 0 ? 0x4 : 0;
+  if (start == 1 && length == 13 && add == 0)
+    return 0x4; /* identical PDU to the type-A entry: must merge */
+  return start == 5 && length == 4 && add == 1 ? 0x20 : 0;
+}
+TEST(PdschConfigSweepTypeB, TypeBReachesTheMaskGeneratorAndMergesIdenticalPdus) {
+  nr_pdsch_config_sweep_state_t st;
+  ASSERT_EQ(nr_pdsch_config_sweep_init_legal(&st, 2, 0, ab_legal), 12); /* 2 (S,L) x k0{0,1} x 3 tables */
+  int b = 0;
+  for (int i = 0; i < st.n_hyp; i++)
+    if (st.hyp[i].mapping_type == 1) {
+      b++;
+      EXPECT_EQ(st.hyp[i].tda_start, 5);
+      EXPECT_EQ(st.hyp[i].dmrs_mask, 0x20);
+    }
+  EXPECT_EQ(b, 6);
+}
+
+/* dmrs-DownlinkForPDSCH-MappingTypeA and -MappingTypeB are separate RRC IEs: a prior learned on a
+ * type-A entry says nothing about type-B add_pos/max_len (mcs-Table is shared). */
+TEST(PdschConfigSweepTypeB, PriorFromTypeAKeepsTypeBEntriesOfTheSameTable) {
+  nr_pdsch_config_sweep_reset_all();
+  nr_pdsch_config_sweep_prior_reset();
+  unsigned seed = 77;
+  bool converged = false;
+  for (int i = 0; i < 200000 && !converged; i++) {
+    nr_pdsch_sweep_ticket_t t{};
+    nr_pdsch_cfg_hypothesis_t h{};
+    ASSERT_TRUE(nr_pdsch_config_sweep_select(0xAB, 0x4601, 0, 2, 0, ab_legal, &t, &h));
+    const bool truth = h.mapping_type == 0 && h.k0 == 0 && h.mcs_table == 1;
+    const double u = (double)rand_r(&seed) / (double)RAND_MAX;
+    converged = nr_pdsch_config_sweep_feedback(&t, truth && u < 0.54, nullptr);
+  }
+  ASSERT_TRUE(converged);
+  nr_pdsch_sweep_ticket_t t1{};
+  nr_pdsch_cfg_hypothesis_t h1{};
+  ASSERT_TRUE(nr_pdsch_config_sweep_select(0xAB, 0x4601, 1, 2, 0, ab_legal, &t1, &h1));
+  nr_pdsch_config_sweep_state_t st{};
+  ASSERT_TRUE(nr_pdsch_config_sweep_snapshot(&t1, &st));
+  int b = 0;
+  for (int i = 0; i < st.n_hyp; i++) {
+    EXPECT_EQ(st.hyp[i].mcs_table, 1);
+    b += st.hyp[i].mapping_type == 1;
+  }
+  EXPECT_EQ(b, 2);         /* type B, table 1, k0 {0,1} -- its add_pos 1 is not the type-A prior's 0 */
+  EXPECT_EQ(st.n_hyp, 4);
+}
+
+static int count_k0(const nr_pdsch_config_sweep_state_t &st, int k0)
+{
+  int n = 0;
+  for (int i = 0; i < st.n_hyp; i++)
+    n += st.hyp[i].k0 == k0;
+  return n;
+}
+TEST(PdschConfigSweepK0, ObservedK0IsAddedToTheContext) {
+  nr_pdsch_config_sweep_reset_all();
+  nr_pdsch_config_sweep_prior_reset();
+  const auto t = select_context(0x5150, 0x4601, 0);
+  nr_pdsch_config_sweep_state_t st{};
+  ASSERT_TRUE(nr_pdsch_config_sweep_snapshot(&t, &st));
+  const int before = st.n_hyp;
+  EXPECT_EQ(count_k0(st, 3), 0);
+  const int added = nr_pdsch_config_sweep_add_k0(&t, 3);
+  EXPECT_GT(added, 0);
+  ASSERT_TRUE(nr_pdsch_config_sweep_snapshot(&t, &st)); /* the ticket stays valid: entries are appended */
+  EXPECT_EQ(st.n_hyp, before + added);
+  EXPECT_EQ(count_k0(st, 3), added);
+  EXPECT_EQ(count_k0(st, 3), count_k0(st, 0)); /* one complete layer */
+  EXPECT_EQ(nr_pdsch_config_sweep_add_k0(&t, 3), 0);
+  EXPECT_EQ(nr_pdsch_config_sweep_add_k0(&t, 33), 0); /* TS 38.214: k0 <= 32 */
+  /* A context of the same RNTI created later carries the observed k0 as well. */
+  const auto t1 = select_context(0x5150, 0x4601, 1);
+  ASSERT_TRUE(nr_pdsch_config_sweep_snapshot(&t1, &st));
+  EXPECT_EQ(count_k0(st, 3), added);
+}
+
+/* A k0 layer the context tried and did not win on was a false k0-oracle hit: once the context converges
+ * on another k0, later contexts of the RNTI are no longer seeded with it. */
+TEST(PdschConfigSweepK0, ConvergenceOnAnotherK0DropsTheFalseLayer) {
+  nr_pdsch_config_sweep_reset_all();
+  nr_pdsch_config_sweep_prior_reset();
+  nr_pdsch_sweep_ticket_t t{};
+  nr_pdsch_cfg_hypothesis_t h{};
+  ASSERT_TRUE(nr_pdsch_config_sweep_select(0xAC, 0x4601, 0, 2, 0, ab_legal, &t, &h));
+  ASSERT_EQ(nr_pdsch_config_sweep_add_k0(&t, 3), 6);
+  unsigned seed = 5;
+  bool converged = false;
+  nr_pdsch_cfg_hypothesis_t w{};
+  for (int i = 0; i < 200000 && !converged; i++) {
+    ASSERT_TRUE(nr_pdsch_config_sweep_select(0xAC, 0x4601, 0, 2, 0, ab_legal, &t, &h));
+    const bool truth = h.mapping_type == 0 && h.k0 == 0 && h.mcs_table == 1;
+    const double u = (double)rand_r(&seed) / (double)RAND_MAX;
+    converged = nr_pdsch_config_sweep_feedback(&t, truth && u < 0.54, &w);
+  }
+  ASSERT_TRUE(converged);
+  EXPECT_EQ(w.k0, 0);
+  ASSERT_TRUE(nr_pdsch_config_sweep_select(0xAC, 0x4601, 1, 2, 0, ab_legal, &t, &h));
+  nr_pdsch_config_sweep_state_t st{};
+  ASSERT_TRUE(nr_pdsch_config_sweep_snapshot(&t, &st));
+  EXPECT_EQ(count_k0(st, 3), 0);
 }
