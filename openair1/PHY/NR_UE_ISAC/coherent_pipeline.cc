@@ -19,6 +19,12 @@ std::string jnum(double v)
   if (!std::isfinite(v)) return "null";
   std::ostringstream o; o.precision(7); o << v; return o.str();
 }
+/** Wall clock (s since epoch) to the millisecond: jnum's 7 significant digits round it to ~1000 s. */
+std::string jwall()
+{
+  char b[32]; std::snprintf(b, sizeof b, "%.3f", std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count());
+  return b;
+}
 std::string jvec(const Vec3& v) { return "[" + jnum(v.x) + "," + jnum(v.y) + "," + jnum(v.z) + "]"; }
 template <class A> std::string jarr(const A& a)
 {
@@ -164,8 +170,7 @@ void CoherentPipeline::process(Job& j)
     if (!j.traffic) { std::lock_guard<std::mutex> l(trk_mu_); tracker_ = std::make_unique<CoherentTracker>(tp_); }   // stop tracks: nothing is illuminated
     // (the long dwell needs no reset: a data gap longer than its dwell restarts it, LongDwell::add)
     const std::string tf = j.traffic ? "true" : "false";
-    const auto wall = std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count();
-    reports_.write_line("{\"event\":\"traffic\",\"traffic\":" + tf + ",\"t\":" + jnum(j.t) + ",\"wall\":" + jnum(wall) + ",\"detections\":[]}");
+    reports_.write_line("{\"event\":\"traffic\",\"traffic\":" + tf + ",\"t\":" + jnum(j.t) + ",\"wall\":" + jwall() + ",\"detections\":[]}");
     tracks_.write_line("{\"event\":\"traffic\",\"traffic\":" + tf + ",\"t\":" + jnum(j.t) + ",\"tracks\":[]}");
     return;
   }
@@ -413,7 +418,7 @@ void CoherentPipeline::process(Job& j)
   const CoherentStats st = stats();
 
   std::ostringstream rep;
-  rep << "{\"cpi\":" << j.seq << ",\"dwell\":\"short\",\"traffic\":true,\"wall\":" << jnum(std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count()) << ",\"t\":" << jnum(j.t) << ",\"t_cpi_s\":" << jnum(a.t_cpi_s) << ",\"b_eff_hz\":" << jnum(a.b_eff_hz)
+  rep << "{\"cpi\":" << j.seq << ",\"dwell\":\"short\",\"traffic\":true,\"wall\":" << jwall() << ",\"t\":" << jnum(j.t) << ",\"t_cpi_s\":" << jnum(a.t_cpi_s) << ",\"b_eff_hz\":" << jnum(a.b_eff_hz)
       << ",\"range_res_m\":" << jnum(kC / a.b_eff_hz) << ",\"grid_step_m\":" << jnum(G.step) << ",\"n_voxels\":" << G.size()
       << ",\"n_dopp_tested\":" << a.tested_dopp.size() << ",\"rows\":" << j.dl.rows << ",\"gpu\":" << (cuda_ ? "true" : "false")
       << ",\"lambda_m\":" << jnum(a.lambda_m) << ",\"dopp_step_hz\":" << jnum(a.dopp_step_hz) << ",\"notch_half_bins\":" << a.notch_half_bins << ",\"rows_bad\":" << n_bad << ",\"md_suppressed\":" << md_now << ",\"md_suppressed_total\":" << md_suppressed_
@@ -480,7 +485,7 @@ void CoherentPipeline::long_result(LongResult& r)
     tracker_->step(c.t_air_s, c.cadence_s, r.D, nullptr, &band);
   }
   std::ostringstream rep;
-  rep << "{\"dwell\":\"long\",\"traffic\":true,\"wall\":" << jnum(std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count())
+  rep << "{\"dwell\":\"long\",\"traffic\":true,\"wall\":" << jwall()
       << ",\"t\":" << jnum(c.t_air_s) << ",\"t_cpi_s\":" << jnum(a.valid ? a.t_cpi_s : c.t_l_s) << ",\"t_l_s\":" << jnum(c.t_l_s)
       << ",\"cadence_s\":" << jnum(c.cadence_s) << ",\"f_slow_hz\":" << jnum(c.f_slow_hz) << ",\"rate_slow_mps\":" << jnum(c.f_slow_hz * kC / c.w.fc_hz)
       << ",\"b_eff_superrow_hz\":" << jnum(c.b_eff_hz) << ",\"n_short\":" << c.n_short << ",\"rows\":" << c.w.rows
