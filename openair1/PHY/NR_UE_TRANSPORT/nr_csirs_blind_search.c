@@ -229,7 +229,7 @@ int nr_csirs_blind_row_needs_bits(uint8_t row)
 
 int nr_csirs_blind_row_ports(uint8_t row)
 {
-  for (unsigned i = 0; i < sizeof(kRows); i++)
+  for (unsigned i = 0; i < sizeof(kRows) / sizeof(kRows[0]); i++)
     if (kRows[i] == row)
       return kPorts[i];
   return 0;
