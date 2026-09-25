@@ -15,6 +15,8 @@ typedef struct { uint8_t bundle; uint8_t interleaver; uint16_t shift; } nr_pdcch
 
 #define NR_PDCCH_AL1_MAX_MAPS  1200 /* > 1081, the largest legal catalogue (270 RB x 2 symbols) */
 #define NR_PDCCH_AL1_MAX_COVER 32   /* lane-loop bound for the cover lap; every legal shape stays below it */
+#define NR_PDCCH_AL1_MAX_FAM   96   /* > 90, the most AL1 families one observation can leave (270x3, measured) */
+#define NR_PDCCH_AL1_UNION_MAX 1088 /* >= 1080, the full-catalogue AL1 union of the largest shape (270 RB x 3 symbols) */
 
 /** Every legal mapping of a span_rb x duration CORESET, in nr_pdcch_map_candidates()' rule order:
  *  non-interleaved, then L in {2,6} (D=1,2) / {3,6} (D=3), R in {2,3,6} with N_REG % (L*R) == 0, every
@@ -32,6 +34,18 @@ int nr_pdcch_al1_narrow(int span_rb, int duration, const uint16_t (*obs)[6], int
                         nr_pdcch_al1_map_t *cand, int n);
 /** Number of distinct AL1 families among cand[0..n) (1 = AL1 decoding is exact with any of them). */
 int nr_pdcch_al1_family_count(int span_rb, int duration, const nr_pdcch_al1_map_t *cand, int n);
+/** In place: keep the FIRST mapping of each distinct AL1 family among cand[0..n), order preserved.
+ *  Returns the kept count (= nr_pdcch_al1_family_count()). */
+int nr_pdcch_al1_family_reps(int span_rb, int duration, nr_pdcch_al1_map_t *cand, int n);
+/** Deduplicated union of the AL1 REG sets of cand[0..n), family-major: cand[0]'s sets first in CCE
+ *  order, then each later family's NEW sets. Writes at most `max` sets (regsets may be NULL when
+ *  max is 0) and returns the TOTAL distinct count, snprintf-style: > max means truncated. */
+int nr_pdcch_al1_union(int span_rb, int duration, const nr_pdcch_al1_map_t *cand, int n, uint16_t (*regsets)[6], int max);
+/** Demap one AL1 candidate given only its REG set: the e_rx nr_pdcch_demapping_deinterleaving() would
+ *  produce for any (mapping, CCE) with that REG set (per symbol, its RBs ascending, 9 data REs each).
+ *  llr/e_rx elements are 4 bytes (c16_t); llr rows are llr_stride elements per symbol.
+ *  Returns 54 (REs written), or 0 when the set does not cover whole RBs. */
+int nr_pdcch_al1_demap(int duration, const uint16_t regs[6], const void *llr, int llr_stride, void *e_rx);
 
 #ifdef __cplusplus
 }

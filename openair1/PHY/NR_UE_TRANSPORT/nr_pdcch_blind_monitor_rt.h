@@ -366,6 +366,12 @@ void nr_pdcch_dci11_layout_feedback(uint16_t layout_index, bool cb0_ok);
 void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc,
                                          bool serial_candidates, long source_absolute_slot);
 
+/// Parse an ISAC_LANE_ALS-style list ("2,4,16"): the legal ALs 1/2/4/8/16 in order, deduplicated, at
+/// most 5 into v. Returns the count (0 = nothing legal, NULL input included).
+int nr_pdcch_blind_parse_lane_als(const char *s, uint8_t v[5]);
+/// Extracted-RE capacity of one lookahead lane (c16 REs; one AL-L candidate needs 54*L).
+int nr_pdcch_blind_lane_re_budget(void);
+
 #ifdef __cplusplus
 }
 #endif
