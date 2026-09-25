@@ -176,6 +176,10 @@ int nr_csirs_blind_enumerate(nr_csirs_candidate_t *out, int max, uint16_t n_rb, 
  * spins forever on the receive thread. */
 int nr_csirs_blind_row_needs_bits(uint8_t row);
 
+/** CSI-RS antenna ports of an enumerated row (TS 38.211 Table 7.4.1.5.3-1); 0 for a row this module
+ *  does not enumerate. Reference generation must clear this many per-port buffers. */
+int nr_csirs_blind_row_ports(uint8_t row);
+
 /** True when @p c may safely be handed to get_csi_mapping_parms(). Call this before generating a
  * reference from any candidate that did not come straight out of nr_csirs_blind_enumerate(). */
 bool nr_csirs_blind_candidate_safe(const nr_csirs_candidate_t *c);

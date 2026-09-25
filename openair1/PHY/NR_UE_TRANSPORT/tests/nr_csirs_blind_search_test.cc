@@ -157,19 +157,29 @@ TEST(CsirsBlindEnum, EnumeratesRealConfigurationsOnly) {
   const int n = nr_csirs_blind_enumerate(c.data(), NR_CSIRS_BLIND_MAX_CAND, 273, 2);
   ASSERT_GT(n, 0);
   for (int i = 0; i < n; i++) {
-    EXPECT_TRUE(c[i].row == 1 || c[i].row == 2 || c[i].row == 4);
+    EXPECT_GT(nr_csirs_blind_row_ports(c[i].row), 0) << "row " << (int)c[i].row << " has no port count";
     EXPECT_EQ(c[i].scramb_id, 2);
     EXPECT_EQ(c[i].nr_of_rbs, 273);
     // one-hot frequency-domain bitmap: a real configuration selects one position, and allowing
     // arbitrary bitmaps would multiply the search by 2^12 for combinations no gNB emits.
     EXPECT_EQ(c[i].freq_domain & (c[i].freq_domain - 1), 0) << "bitmap is not one-hot";
     EXPECT_NE(c[i].freq_domain, 0);
-    // symbols 0-1 are excluded: the CORESET occupies the start of the slot.
-    EXPECT_GE(c[i].symb_l0, 2);
-    EXPECT_LE(c[i].symb_l0, 12);
+    // symbols 0-13 are enumerated (row 5 stops at 12 due to l0+l1 occupancy; others go to 13).
+    EXPECT_GE(c[i].symb_l0, 0);
+    EXPECT_LE(c[i].symb_l0, 13);
   }
   EXPECT_EQ(nr_csirs_blind_enumerate(nullptr, 10, 273, 2), -1);
   EXPECT_EQ(nr_csirs_blind_enumerate(c.data(), 10, 0, 2), -1);
+}
+
+TEST(CsirsBlindEnum, RowPortsMatchTheSpecTable) {
+  // TS 38.211 Table 7.4.1.5.3-1: rows 1,2 = 1 port; row 3 = 2 ports (fd-CDM2); rows 4,5 = 4 ports.
+  EXPECT_EQ(nr_csirs_blind_row_ports(1), 1);
+  EXPECT_EQ(nr_csirs_blind_row_ports(2), 1);
+  EXPECT_EQ(nr_csirs_blind_row_ports(3), 2);
+  EXPECT_EQ(nr_csirs_blind_row_ports(4), 4);
+  EXPECT_EQ(nr_csirs_blind_row_ports(5), 4);
+  EXPECT_EQ(nr_csirs_blind_row_ports(6), 0);  // not enumerated (needs multi-bit bitmaps)
 }
 
 TEST(CsirsBlindEnum, RoundRobinVisitsEveryCandidate) {
@@ -364,7 +374,11 @@ TEST(CsirsBlindCorrelate, WholeBandMeanDilutesAPartialBandResource)
   make_rx(rx, ref, n, 8.0, 60.0);     // correct sequence, mild channel
   /* The truth only occupies the first 20 % of the band; everywhere else the reference points at REs
    * that carry nothing related. */
-  for (int i = (int)(0.2 * n); i < n; i++) { rx[2 * i] = (int16_t)0; rx[2 * i + 1] = (int16_t)0; }
+  /* Unrelated REs carry energy on air (noise, other channels). Exact zeros no longer model that: the
+   * block correlator skips zero-energy blocks by design, so a zero-filled band stopped diluting it. */
+  std::mt19937 gz(4242);
+  std::normal_distribution<double> ndz(0.0, 500.0);
+  for (int i = (int)(0.2 * n); i < n; i++) { rx[2 * i] = (int16_t)ndz(gz); rx[2 * i + 1] = (int16_t)ndz(gz); }
 
   int used = 0;
   const double z_mean = nr_csirs_blind_correlate_blocks(rx.data(), ref.data(), n, 32, &used);
