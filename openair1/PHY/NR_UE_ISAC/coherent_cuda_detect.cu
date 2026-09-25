@@ -197,14 +197,6 @@ struct DMag {
 
 // Per CPI: the RD cube as float (= the host RdResult's cf values) and its magnitude |.| as float the
 // way std::abs(complex<float>) computes it (glibc hypotf: the double hypotenuse rounded once).
-__global__ void k_rd_float(const double2* rd, size_t n, float2* rdf, float* mag)
-{
-  for (size_t j = (size_t)blockIdx.x * blockDim.x + threadIdx.x; j < n; j += (size_t)blockDim.x * gridDim.x) {
-    const float x = (float)rd[j].x, y = (float)rd[j].y;
-    rdf[j] = make_float2(x, y);
-    mag[j] = (float)sqrt((double)x * x + (double)y * y);
-  }
-}
 __global__ void k_mag(const float2* rdf, size_t n, float* mag)
 {
   for (size_t j = (size_t)blockIdx.x * blockDim.x + threadIdx.x; j < n; j += (size_t)blockDim.x * gridDim.x) {
@@ -1433,10 +1425,13 @@ std::vector<Detection> GpuDetect::run(const std::vector<float>& E, const RdResul
   auto t0 = Clock::now();
   DAxes da = to_daxes(a); const DGeo dg = to_dgeo(geo, R); const DGrid dG = to_dgrid(g);
   const size_t ncell = (size_t)kCh * a.n_range * a.n_dopp;
-  // RD cube: range_doppler()'s own device buffer (double) when given, else the host cf values.
+  // RD cube: always the host cf values the oracle reads (a few hundred kB). range_doppler()'s device
+  // buffer (d_rd) is double and is scaled by whiten_range_clutter() in double, while the oracle's cube is
+  // scaled in float: rounded once vs twice, one float ulp apart on whitened bins -- enough to flip the
+  // near-tied peak comparisons of choose().
+  (void)d_rd;
   I.rdf.ensure(ncell * sizeof(float2)); I.mag.ensure(ncell * sizeof(float));
-  if (d_rd) k_rd_float<<<I.blocks(ncell), 256, 0, I.stream>>>((const double2*)d_rd, ncell, I.rdf.as<float2>(), I.mag.as<float>());
-  else { I.up(I.rdf, (const float2*)R.rd.v.data(), ncell); k_mag<<<I.blocks(ncell), 256, 0, I.stream>>>(I.rdf.as<float2>(), ncell, I.mag.as<float>()); }
+  I.up(I.rdf, (const float2*)R.rd.v.data(), ncell); k_mag<<<I.blocks(ncell), 256, 0, I.stream>>>(I.rdf.as<float2>(), ncell, I.mag.as<float>());
   if (!d_E) { I.up(I.E_up, E.data(), E.size()); d_E = I.E_up.as<float>(); }
   std::vector<uint32_t> okc(a.n_dopp + 1, 0); std::vector<uint8_t> okt(a.n_dopp);
   for (uint32_t d = 0; d < a.n_dopp; ++d) { okt[d] = dopp_ok(a, d); okc[d + 1] = okc[d] + okt[d]; }

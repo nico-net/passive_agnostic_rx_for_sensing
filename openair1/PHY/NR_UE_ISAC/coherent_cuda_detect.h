@@ -26,9 +26,9 @@ public:
   ~GpuDetect();
   GpuDetect(const GpuDetect&) = delete;
   GpuDetect& operator=(const GpuDetect&) = delete;
-  /** Same contract as coherent::detect(E, R, g, geo, p). d_rd: the device RD cube as double2
-   * [ch][range][dopp] (range_doppler()'s own buffer) or null to upload R.rd.v; d_E: the device envelope
-   * ([t][voxel], float) or null to upload E. stream: cudaStream_t (null = legacy default). */
+  /** Same contract as coherent::detect(E, R, g, geo, p). d_E: the device envelope ([t][voxel], float) or
+   * null to upload E (E is then only a size placeholder). d_rd: unused -- the cube is always uploaded from
+   * R.rd.v, the exact float values the oracle reads (see the .cu). stream: cudaStream_t (null = default). */
   std::vector<Detection> run(const std::vector<float>& E, const RdResult& R, const Grid& g, const Geometry& geo,
                              const DetectParams& p, const void* d_rd = nullptr, const float* d_E = nullptr,
                              void* stream = nullptr);
