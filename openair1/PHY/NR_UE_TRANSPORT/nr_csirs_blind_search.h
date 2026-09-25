@@ -136,11 +136,11 @@ int nr_csirs_blind_format(const nr_csirs_candidate_t *c, uint16_t period, uint16
 /* ---- CANDIDATE ENUMERATION AND SCHEDULING -----------------------------------------------------
  * The primitives above are the oracle and the periodicity test. What follows is the search itself.
  *
- * SCOPE, STATED UP FRONT. Only the 1-port rows (1, 2) and the 4-port row 4 are enumerated. Those
- * cover a TRS pair and the ordinary CQI resource, which is what a cell actually broadcasts for
- * measurement; the 8/12/16/24/32-port rows exist but a passive receiver gains nothing from
- * recovering them that the 4-port row does not already give, and each multiplies the search.
- * Widening the row set is a one-line change to kRows if that judgement turns out wrong.
+ * SCOPE, STATED UP FRONT. The round-robin enumerates rows 1-5 (one set bitmap bit each): a TRS pair
+ * and the ordinary CQI resources. Rows 6-18 (8-32 ports, what a massive-MIMO cell uses for CSI
+ * acquisition) need 2-6 simultaneous bitmap bits and a second symbol, tens of thousands of
+ * hypotheses -- far too many to round-robin. They are reached FOOTPRINT-FIRST instead (see
+ * nr_csirs_blind_fp_match below) and appended to the same population once the air shows them.
  *
  * scramblingID is NOT swept by default. It is almost always the PCI, which acquisition already
  * gives us, and sweeping 1024 values would multiply the space by three orders of magnitude for a
@@ -173,13 +173,13 @@ typedef struct {
  * Returns the count, or -1 on bad arguments. */
 int nr_csirs_blind_enumerate(nr_csirs_candidate_t *out, int max, uint16_t n_rb, uint16_t scramb_id);
 
-/** Set bits get_csi_mapping_parms() requires for @p row, or -1 if the row is not enumerated here.
+/** Set bits get_csi_mapping_parms() requires for @p row (1-18), or -1 for anything else.
  * Its bitmap walk is UNBOUNDED: hand it a bitmap with fewer set bits than the row needs and it
  * spins forever on the receive thread. */
 int nr_csirs_blind_row_needs_bits(uint8_t row);
 
-/** CSI-RS antenna ports of an enumerated row (TS 38.211 Table 7.4.1.5.3-1); 0 for a row this module
- *  does not enumerate. Reference generation must clear this many per-port buffers. */
+/** CSI-RS antenna ports of a row (TS 38.211 Table 7.4.1.5.3-1, rows 1-18); 0 for anything else.
+ *  Reference generation must provide this many per-port buffers. */
 int nr_csirs_blind_row_ports(uint8_t row);
 
 /** True when @p c may safely be handed to get_csi_mapping_parms(). Call this before generating a
@@ -230,6 +230,66 @@ double nr_csirs_blind_zero_score_shift(const int16_t *rx_re_im, const int16_t *r
  * structural hole (a DM-RS symbol's data-free CDM group, an unscheduled band) and never confirms. */
 bool nr_csirs_blind_zp_feed(nr_csirs_blind_state_t *st, int idx, uint32_t absolute_slot,
                             double score, double score_null);
+
+/* ---- ROWS 6-18: FOOTPRINT-FIRST -------------------------------------------------------------------
+ * A candidate's sequence is only worth testing once the air shows its RE PATTERN. The pattern is
+ * measured sequence-free, with the EPR statistic evaluated per slot at subcarrier granularity: for the
+ * one symbol the RT tap FFTs anyway, mean |y|^2 per subcarrier-in-RB over the whole carrier, split by
+ * RB parity (density 0.5 lives on one parity). A resource that is transmitted into an otherwise
+ * quiet symbol shows as a clean on/off split of those 12 values; the "on" subcarriers of each slot are
+ * recorded per (density, symbol, subcarrier) cell, a cell whose hits are PERIODIC is resource energy,
+ * cells sharing a periodicity form one measured footprint, and only (row, bitmap, l0, l1) whose OAI
+ * footprint fits it are handed to the existing confirm path.
+ *
+ * WHY PER SLOT AND NOT THE ACCUMULATED EPR MEAN. The per-candidate mean over visits is diluted by
+ * every slot that does not carry the resource (1/period of visits do), and for a wide row the other
+ * REs of the symbol are mostly the resource itself: one RE of a 32-port pattern against the other 11
+ * of its symbol reads at most 11/7 = 1.57 even in a perfectly quiet slot. Averaged, that is lost in
+ * the noise; inside one slot it is an unmistakable 8-on / 4-off split.
+ *
+ * KNOWN BLIND SPOTS. Row 9 (12 ports) fills all 12 subcarriers of its symbol, so no intra-symbol
+ * contrast exists: it is never matched. A symbol that also carries PDSCH shows no contrast either,
+ * so only slots where the resource is sent into otherwise empty REs contribute evidence. */
+
+#define NR_CSIRS_BLIND_NSYM 14
+
+/** The REs @p c occupies in ONE RB (density ignored), from OAI's get_csi_mapping_parms(): per symbol
+ *  a 12-bit subcarrier mask. Returns the distinct RE count, or -1 if @p c is unsafe or would place an
+ *  RE outside the slot. Density 1 rows 6-18 return exactly their port count. */
+int nr_csirs_blind_footprint(const nr_csirs_candidate_t *c, uint16_t sym_mask[NR_CSIRS_BLIND_NSYM]);
+
+/** Per-slot evidence from one FFT'd symbol (read at (i + rx_shift) % n_fft like every comparator
+ *  here): the subcarriers-in-RB whose mean power over the even (resp. odd) RBs stands above the rest
+ *  by at least NR_CSIRS_BLIND_FP_GAP at the largest ratio gap of the sorted 12. 0 when flat. Pure. */
+#define NR_CSIRS_BLIND_FP_GAP 2.0
+void nr_csirs_blind_symbol_on(const int16_t *rx_re_im, int n_fft, int rx_shift, int n_rb,
+                              uint16_t *on_even, uint16_t *on_odd);
+
+/// Per-cell hit history, cell = (density 0 even / 1 odd / 2 one, symbol, subcarrier-in-RB).
+typedef struct {
+  uint32_t hit_slot[3][NR_CSIRS_BLIND_NSYM][12][8]; ///< ring of the LAST 8 hit slots
+  uint8_t  n_hit[3][NR_CSIRS_BLIND_NSYM][12];
+  uint8_t  w[3][NR_CSIRS_BLIND_NSYM][12];
+} nr_csirs_blind_fp_t;
+
+/** Record one visit's on-masks for @p symbol. A subcarrier lit on both parities is density one; on
+ *  one parity only, density 0.5 on that parity. Returns true when a cell with enough hits to be
+ *  tested for periodicity gained a hit (the caller's cue to re-run the match). */
+bool nr_csirs_blind_fp_record(nr_csirs_blind_fp_t *fp, int symbol, uint16_t on_even, uint16_t on_odd,
+                              uint32_t absolute_slot);
+
+/** Candidates (rows 6-18) whose footprint fits a measured one. Periodic cells of one density are
+ *  grouped by a jointly consistent periodicity; a candidate is kept when its footprint lies inside a
+ *  group and is not strictly inside another kept candidate's (a real cell sends several resources in
+ *  one slot, so the group may be a union -- exact equality would then find nothing). Candidates
+ *  with the identical footprint (e.g. rows 16 and 17) are all returned: only the sequence stage can
+ *  separate them. Returns the count written to @p out. */
+int nr_csirs_blind_fp_match(const nr_csirs_blind_fp_t *fp, uint16_t n_rb, uint16_t scramb_id,
+                            nr_csirs_candidate_t *out, int max);
+
+/** Append @p c to the search population. Returns its index, or -1 if full or already present (same
+ *  row, bitmap, symbols, density -- scramb_id ignored, since IDSWEEP patches it in place). */
+int nr_csirs_blind_append(nr_csirs_blind_state_t *st, const nr_csirs_candidate_t *c);
 
 /** The confirmed resource, or NULL. Fills period/offset when non-NULL. */
 const nr_csirs_candidate_t *nr_csirs_blind_confirmed(const nr_csirs_blind_state_t *st,

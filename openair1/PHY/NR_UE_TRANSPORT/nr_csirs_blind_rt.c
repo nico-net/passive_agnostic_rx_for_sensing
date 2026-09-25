@@ -22,8 +22,11 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* Max CSI-RS ports over the rows kRows enumerates (row 4). */
+/* Reference planes actually allocated. Only plane 0 is ever scored; rows 1-5 need at most 4 ports,
+ * and for the 8-32-port rows every port >= 3 writes into plane 3 as a shared sink (never read), so a
+ * 32-port candidate costs no extra 7 MB of per-thread buffers nor a 7 MB memset per slot. */
 #define NR_CSIRS_BLIND_RT_MAX_PORTS 4
+#define NR_CSIRS_BLIND_RT_ALL_PORTS 32
 
 static nr_csirs_blind_state_t g_st;
 static nr_csirs_blind_state_t g_zp;      /* zero-power search over the same candidates */
@@ -40,6 +43,17 @@ static uint64_t g_slots;
 #define NULLWIN 64
 static double   g_null[NULLWIN];
 static int      g_null_n, g_null_w;
+/* Rows 6-18, footprint-first (nr_csirs_blind_search.h): per-slot on/off evidence from the symbol
+ * this tap FFTs anyway, matched against OAI's mapping table at most once per FP_MATCH_EVERY calls.
+ * OPT-IN (ISAC_CSIRS_BLIND_WIDE=1, default off): appending and pinning fits changes the order in which
+ * the population is searched, and a union of two narrow resources sharing a period/offset (e.g. two
+ * row-4 resources at k0=0 and k0=4) fits a row-6 footprint. Off, none of this code runs and the rows
+ * 1-5 search is exactly what it was. */
+#define FP_MATCH_EVERY 1000
+static int      g_wide = -1;   /* -1 = not read, 0 = off, 1 = on */
+static nr_csirs_blind_fp_t g_fp;
+static bool     g_fp_dirty;
+static uint64_t g_fp_last;
 /* Per-candidate sequence-free evidence: mean power ON the candidate's REs vs the rest of its RBs.
  * Accumulated for EVERY scoring, not just the ones that pass a correlation bar -- the first cut
  * logged EPR only for z>3 candidates, which is 25 biased samples and cannot rank a 198-candidate
@@ -230,8 +244,9 @@ void nr_csirs_blind_rt_slot(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot
    * From the enumerator's own table, so a row added there cannot get the wrong port count here: rows
    * 3 and 5 (2 and 4 ports) were generated with only port 0 cleared. */
   const int n_ports = nr_csirs_blind_row_ports(c->row);
-  if (n_ports <= 0 || n_ports > NR_CSIRS_BLIND_RT_MAX_PORTS)
+  if (n_ports <= 0 || n_ports > NR_CSIRS_BLIND_RT_ALL_PORTS)
     return;
+  const int n_planes = (n_ports < NR_CSIRS_BLIND_RT_MAX_PORTS) ? n_ports : NR_CSIRS_BLIND_RT_MAX_PORTS;
 
   /* ---- ALLOCATED ONCE, NOT PER SLOT -----------------------------------------------------------
    * This runs on the PHY receive thread. The first version called calloc()/free() every slot for
@@ -255,11 +270,13 @@ void nr_csirs_blind_rt_slot(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot
     }
     t_refbuf_re = n_re;
   }
-  for (int p = 0; p < n_ports; p++) {
+  for (int p = 0; p < n_planes; p++) {
     memset(t_refbuf[p], 0, (size_t)n_re * sizeof(c16_t));
   }
   c16_t *ref = t_refbuf[0];
-  c16_t **refp = t_refbuf;
+  c16_t *refp[NR_CSIRS_BLIND_RT_ALL_PORTS];
+  for (int p = 0; p < NR_CSIRS_BLIND_RT_ALL_PORTS; p++)
+    refp[p] = t_refbuf[p < NR_CSIRS_BLIND_RT_MAX_PORTS ? p : NR_CSIRS_BLIND_RT_MAX_PORTS - 1];
   const csi_mapping_parms_t parms = get_csi_mapping_parms(c->row, c->freq_domain, c->symb_l0,
                                                           c->symb_l1);
   nr_generate_csi_rs(fp, &parms, AMP, slot, c->freq_density, c->start_rb, c->nr_of_rbs,
@@ -272,6 +289,18 @@ void nr_csirs_blind_rt_slot(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot
    * scored an empty buffer and never fired (OTA 2026-09-14: 15 min, zero progress lines). */
   nr_slot_fep_ant(ue, fp, (unsigned)slot, (unsigned)c->symb_l0, 0, rxdataF, link_type_dl, 0, ue->common_vars.rxdata);
   const uint32_t off_sym = (uint32_t)c->symb_l0 * (uint32_t)fp->ofdm_symbol_size;
+  /* Footprint evidence for rows 6-18 from the symbol just transformed: one pass over the carrier. */
+  if (g_wide < 0) {
+    const char *e = getenv("ISAC_CSIRS_BLIND_WIDE");
+    g_wide = (e != NULL && atoi(e) != 0) ? 1 : 0;
+  }
+  if (g_wide) {
+    uint16_t on_even = 0, on_odd = 0;
+    nr_csirs_blind_symbol_on((const int16_t *)&rxdataF_ant0[off_sym], fp->ofdm_symbol_size,
+                             fp->first_carrier_offset, fp->N_RB_DL, &on_even, &on_odd);
+    if (nr_csirs_blind_fp_record(&g_fp, c->symb_l0, on_even, on_odd, absolute_slot))
+      g_fp_dirty = true;
+  }
   /* Sub-band size for the channel-robust score, in OCCUPIED REs. 32 REs is ~11 RB for a density-3
    * row (4 MHz at 30 kHz) -- narrow enough that the channel is flat across it, wide enough that
    * noise stays well below a match: noise reads ~1.0, a perfect match sqrt(32)/0.886 = 6.4, and a
@@ -412,7 +441,7 @@ void nr_csirs_blind_rt_slot(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot
     for (int off = 0; off < n_slots; off++) {
       const int trial_slot = (slot + off) % n_slots;
       memset(&t_refbuf[0][off_sym], 0, (size_t)fp->ofdm_symbol_size * sizeof(c16_t));
-      for (int pp = 1; pp < n_ports; pp++)
+      for (int pp = 1; pp < n_planes; pp++)
         memset(&t_refbuf[pp][off_sym], 0, (size_t)fp->ofdm_symbol_size * sizeof(c16_t));
       const csi_mapping_parms_t sp = get_csi_mapping_parms(c->row, c->freq_domain, c->symb_l0, c->symb_l1);
       nr_generate_csi_rs(fp, &sp, AMP, trial_slot, c->freq_density, c->start_rb, c->nr_of_rbs,
@@ -448,7 +477,7 @@ void nr_csirs_blind_rt_slot(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot
       trial.scramb_id = g_id_next;
       g_id_next = (uint16_t)((g_id_next + 1) & 1023);
       memset(&t_refbuf[0][off_sym], 0, (size_t)fp->ofdm_symbol_size * sizeof(c16_t));
-      for (int pp = 1; pp < n_ports; pp++)
+      for (int pp = 1; pp < n_planes; pp++)
         memset(&t_refbuf[pp][off_sym], 0, (size_t)fp->ofdm_symbol_size * sizeof(c16_t));
       const csi_mapping_parms_t tp = get_csi_mapping_parms(trial.row, trial.freq_domain, trial.symb_l0,
                                                            trial.symb_l1);
@@ -492,6 +521,36 @@ void nr_csirs_blind_rt_slot(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot
       LOG_A(PHY, "SENSING: CSIRS_BLIND IDSWEEP full pass, no id reached z=4: best id=%u z=%.2f "
                  "(row%u fd%u l%u epr=%.2f) -- sequence error is NOT the scramblingID\n",
             g_id_best, g_id_best_z, c->row, c->freq_domain, c->symb_l0, epr);
+  }
+  /* Rows 6-18: match the measured footprints against OAI's table (~60 us, hence rate-limited) and
+   * hand each new fit to the ordinary confirm path -- round-robin, feed(), IDSWEEP -- by appending it
+   * to the population. Pinned for a confirm budget when nothing else holds the pin, since round-robin
+   * alone would reach it only once per ~700 calls. Nothing is appended on a cell without periodic
+   * pair-structured energy, which leaves the rows 1-5 search exactly as it was. */
+  if (g_wide && g_fp_dirty && g_slots - g_fp_last >= FP_MATCH_EVERY) {
+    g_fp_dirty = false;
+    g_fp_last = g_slots;
+    nr_csirs_candidate_t fit[16];
+    const int n_fit = nr_csirs_blind_fp_match(&g_fp, fp->N_RB_DL, fp->Nid_cell, fit, 16);
+    for (int i = 0; i < n_fit; i++) {
+      const int at = nr_csirs_blind_append(&g_st, &fit[i]);
+      if (at < 0)
+        continue;
+      /* g_zp mirrors g_st index for index: the ZP feed below scores g_zp at g_st's idx. */
+      const int zat = nr_csirs_blind_append(&g_zp, &fit[i]);
+      static bool s_zp_diverged;
+      if (zat != at && !s_zp_diverged) {
+        s_zp_diverged = true;
+        LOG_E(PHY, "SENSING: CSIRS_BLIND FOOTPRINT g_zp append index %d != g_st index %d -- ZP search no longer "
+                   "mirrors the NZP population\n", zat, at);
+      }
+      if (g_st.pin_left == 0)
+        nr_csirs_blind_pin(&g_st, at, NR_CSIRS_BLIND_PIN_CONFIRM_CALLS);
+      LOG_A(PHY, "SENSING: CSIRS_BLIND FOOTPRINT row%u fd0x%x l0=%u l1=%u density=%u cdm=%u (%d ports) "
+                 "fits the measured periodic RE pattern -- candidate %d added to the confirm path\n",
+            fit[i].row, fit[i].freq_domain, fit[i].symb_l0, fit[i].symb_l1, fit[i].freq_density,
+            fit[i].cdm_type, nr_csirs_blind_row_ports(fit[i].row), at);
+    }
   }
   /* the sweep above reused the shared reference buffer; the candidate's own reference is stale now */
   (void)done; // logged once, by the early return above on the next call

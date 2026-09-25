@@ -17,6 +17,8 @@
 
 #include "nr_csirs_blind_search.h"
 
+#include "PHY/nr_phy_common/inc/nr_phy_common.h"
+
 #include <math.h>
 #include <stdio.h>
 
@@ -149,15 +151,20 @@ int nr_csirs_blind_format(const nr_csirs_candidate_t *c, uint16_t period, uint16
  * `while (found < 4)` for row 6, `< 2` for row 8, `< 6` for row 9. Its loop has no bound, so a
  * candidate whose bitmap carries FEWER set bits than its row needs spins forever, on the PHY
  * receive thread. Every row below therefore needs exactly ONE set bit (`found < 1`), which is what
- * makes a one-hot enumeration safe; kNeedBits records the requirement and enumerate() asserts it.
+ * makes a one-hot enumeration safe; kRowNeedBits records the requirement and enumerate() checks it.
  *
  * Rows 6-18 (8/12/16/24/32 ports) need 2-6 simultaneous bits, i.e. a combinatorial bitmap
- * enumeration, and are deliberately still out: a 32-port CQI resource on a mMIMO cell is invisible
- * to this search, which is a real coverage limit and the honest next extension. */
+ * enumeration far too large to round-robin; they are reached footprint-first instead
+ * (nr_csirs_blind_fp_match) and appended to the population only when the air shows them. */
 static const uint8_t kRows[]     = {1, 2, 3, 4, 5};
-static const uint8_t kPorts[]    = {1, 1, 2, 4, 4};
-static const uint8_t kNeedBits[] = {1, 1, 1, 1, 1};   /* set bits get_csi_mapping_parms() demands */
 static const uint8_t kCdm[]      = {0, 0, 1, 1, 1};   /* noCDM, noCDM, fd-CDM2, fd-CDM2, fd-CDM2 */
+
+/* Per row 1-18, TS 38.211 Table 7.4.1.5.3-1: antenna ports, and the set bitmap bits
+ * get_csi_mapping_parms() walks for (its loop is unbounded -- fewer bits spins it forever). Neither is
+ * derivable by calling the mapping function: the port count sizes the buffers it writes, and the bit
+ * count is what makes calling it safe at all. The RE mapping itself is NOT transcribed here. */
+static const uint8_t kRowPorts[18]    = {1, 1, 2, 4, 4, 8, 8, 8, 12, 12, 16, 16, 24, 24, 24, 32, 32, 32};
+static const uint8_t kRowNeedBits[18] = {1, 1, 1, 1, 1, 4, 2, 2, 6, 3, 4, 4, 3, 3, 3, 4, 4, 4};
 
 /* Bitmap width per row. Row 1 is b3..b0 -- FOUR bits: the generator places its REs at k0, k0+4,
  * k0+8 with k0 in {0,1,2,3}. This said 3, so k0=3 was never enumerated and a quarter of the row-1
@@ -181,7 +188,7 @@ int nr_csirs_blind_enumerate(nr_csirs_candidate_t *out, int max, uint16_t n_rb, 
   }
   int n = 0;
   for (unsigned r = 0; r < sizeof(kRows) / sizeof(kRows[0]); r++) {
-    if (kNeedBits[r] != 1) {
+    if (nr_csirs_blind_row_needs_bits(kRows[r]) != 1) {
       continue;   /* see kRows: a multi-bit row would spin the generator's unbounded bitmap walk */
     }
     for (unsigned d = 0; d < 3; d++) {
@@ -219,20 +226,12 @@ int nr_csirs_blind_enumerate(nr_csirs_candidate_t *out, int max, uint16_t n_rb, 
 
 int nr_csirs_blind_row_needs_bits(uint8_t row)
 {
-  for (unsigned r = 0; r < sizeof(kRows) / sizeof(kRows[0]); r++) {
-    if (kRows[r] == row) {
-      return kNeedBits[r];
-    }
-  }
-  return -1;
+  return (row >= 1 && row <= 18) ? kRowNeedBits[row - 1] : -1;
 }
 
 int nr_csirs_blind_row_ports(uint8_t row)
 {
-  for (unsigned i = 0; i < sizeof(kRows) / sizeof(kRows[0]); i++)
-    if (kRows[i] == row)
-      return kPorts[i];
-  return 0;
+  return (row >= 1 && row <= 18) ? kRowPorts[row - 1] : 0;
 }
 
 bool nr_csirs_blind_candidate_safe(const nr_csirs_candidate_t *c)
@@ -628,4 +627,279 @@ double nr_csirs_blind_correlate_bestrun(const int16_t *rx_re_im, const int16_t *
     }
   }
   return best;
+}
+
+/* ---- rows 6-18: footprint-first (see the header) ------------------------------------------------ */
+
+int nr_csirs_blind_footprint(const nr_csirs_candidate_t *c, uint16_t sym_mask[NR_CSIRS_BLIND_NSYM])
+{
+  memset(sym_mask, 0, NR_CSIRS_BLIND_NSYM * sizeof(sym_mask[0]));
+  if (!nr_csirs_blind_candidate_safe(c)) {
+    return -1;
+  }
+  /* OAI's own table, walked exactly as csi_rs_resource_mapping() walks it for one RB. */
+  const csi_mapping_parms_t p = get_csi_mapping_parms(c->row, c->freq_domain, c->symb_l0, c->symb_l1);
+  for (int ji = 0; ji < p.size; ji++) {
+    for (int kp = 0; kp <= p.kprime; kp++) {
+      for (int lp = 0; lp <= p.lprime; lp++) {
+        const int k = p.koverline[ji] + kp, l = p.loverline[ji] + lp;
+        if (k < 0 || k >= 12 || l < 0 || l >= NR_CSIRS_BLIND_NSYM) {
+          return -1;
+        }
+        sym_mask[l] |= (uint16_t)(1u << k);
+      }
+    }
+  }
+  int n = 0;
+  for (int l = 0; l < NR_CSIRS_BLIND_NSYM; l++) {
+    n += __builtin_popcount(sym_mask[l]);
+  }
+  return n;
+}
+
+/* Largest-ratio gap of the sorted 12 powers: everything above it is "on" when the gap clears
+ * NR_CSIRS_BLIND_FP_GAP. On noise or flat PDSCH the neighbouring sorted means differ by a few tens of
+ * percent (each is a mean over >= 25 REs at 51 PRB per parity), never 2x. */
+static uint16_t on_mask(const double v[12])
+{
+  double s[12];
+  memcpy(s, v, sizeof(s));
+  for (int i = 1; i < 12; i++) {
+    const double x = s[i];
+    int j = i - 1;
+    while (j >= 0 && s[j] > x) { s[j + 1] = s[j]; j--; }
+    s[j + 1] = x;
+  }
+  double best = 0.0, cut = 0.0;
+  for (int i = 0; i < 11; i++) {
+    if (s[i + 1] <= 0.0) {
+      continue;
+    }
+    const double r = (s[i] > 0.0) ? s[i + 1] / s[i] : INFINITY;
+    if (r > best) {
+      best = r;
+      cut = s[i + 1];
+    }
+  }
+  if (best < NR_CSIRS_BLIND_FP_GAP) {
+    return 0;
+  }
+  uint16_t m = 0;
+  for (int k = 0; k < 12; k++) {
+    if (v[k] >= cut) {
+      m |= (uint16_t)(1u << k);
+    }
+  }
+  return m;
+}
+
+void nr_csirs_blind_symbol_on(const int16_t *rx_re_im, int n_fft, int rx_shift, int n_rb,
+                              uint16_t *on_even, uint16_t *on_odd)
+{
+  *on_even = *on_odd = 0;
+  if (rx_re_im == NULL || n_fft <= 0 || n_rb <= 0 || n_rb * 12 > n_fft) {
+    return;
+  }
+  double e[2][12] = {{0}};
+  for (int i = 0; i < n_rb * 12; i++) {
+    const int j = (int)(((long)i + rx_shift) % n_fft);
+    const double yr = rx_re_im[2 * j], yi = rx_re_im[2 * j + 1];
+    e[(i / 12) & 1][i % 12] += yr * yr + yi * yi;
+  }
+  *on_even = on_mask(e[0]);
+  *on_odd = (n_rb > 1) ? on_mask(e[1]) : 0;
+}
+
+bool nr_csirs_blind_fp_record(nr_csirs_blind_fp_t *fp, int symbol, uint16_t on_even, uint16_t on_odd,
+                              uint32_t absolute_slot)
+{
+  if (fp == NULL || symbol < 0 || symbol >= NR_CSIRS_BLIND_NSYM) {
+    return false;
+  }
+  /* density index == freq_density: 0 = dot5 even RB, 1 = dot5 odd RB, 2 = one */
+  const uint16_t by_d[3] = {(uint16_t)(on_even & ~on_odd), (uint16_t)(on_odd & ~on_even),
+                            (uint16_t)(on_even & on_odd)};
+  bool testable = false;
+  for (int d = 0; d < 3; d++) {
+    for (int k = 0; k < 12; k++) {
+      if (!((by_d[d] >> k) & 1)) {
+        continue;
+      }
+      /* Ring, not first-8: one spurious hit early on must not disqualify a cell forever. */
+      uint8_t *w = &fp->w[d][symbol][k];
+      fp->hit_slot[d][symbol][k][*w] = absolute_slot;
+      *w = (uint8_t)((*w + 1) & 7);
+      if (fp->n_hit[d][symbol][k] < 8) {
+        fp->n_hit[d][symbol][k]++;
+      }
+      if (fp->n_hit[d][symbol][k] >= CSIRS_MIN_HITS) {
+        testable = true;
+      }
+    }
+  }
+  return testable;
+}
+
+static bool cell_periodic(const nr_csirs_blind_fp_t *fp, int d, int l, int k)
+{
+  return nr_csirs_blind_infer_period(fp->hit_slot[d][l][k], fp->n_hit[d][l][k], CSIRS_MIN_HITS, NULL, NULL);
+}
+
+static bool fp_inside(const uint16_t *a, const uint16_t *b)   /* a subset of b */
+{
+  for (int l = 0; l < NR_CSIRS_BLIND_NSYM; l++) {
+    if (a[l] & ~b[l]) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/* CDM group size from OAI's table: ports / CDM groups (1, 2, 4, 8 -> noCDM, fd-CDM2, cdm4, cdm8). */
+static uint8_t row_cdm_type(int row)
+{
+  const csi_mapping_parms_t p = get_csi_mapping_parms(row, 0x3F, 4, 8);   /* 6 bits: safe for any row */
+  const int gs = p.ports / p.size;
+  return (uint8_t)(gs >= 8 ? 3 : gs >= 4 ? 2 : gs >= 2 ? 1 : 0);
+}
+
+#define FP_MATCH_TMP 64
+static int match_group(const uint16_t mask[NR_CSIRS_BLIND_NSYM], uint8_t density, uint16_t n_rb,
+                       uint16_t scramb_id, nr_csirs_candidate_t *out, int max)
+{
+  /* WIDEST ROWS FIRST, sub-footprints rejected on insertion. A row-18 pattern admits 66+ narrower
+   * fits (rows 6-15 inside it); enumerating narrow rows first filled the scratch before rows 15-18 were
+   * reached, and the truth never made it into the result. Ports only fall as the row index falls, so a
+   * later fit can never strictly contain an earlier one: every kept fit is maximal, and hitting the cap
+   * drops only further maximal fits -- truncation is harmless by construction. */
+  uint16_t mfp[FP_MATCH_TMP][NR_CSIRS_BLIND_NSYM];
+  const int cap = (max < FP_MATCH_TMP) ? max : FP_MATCH_TMP;
+  int nm = 0;
+  for (int row = 18; row >= 6 && nm < cap; row--) {
+    const int need = nr_csirs_blind_row_needs_bits((uint8_t)row), ports = nr_csirs_blind_row_ports((uint8_t)row);
+    /* Density 0.5 exists only for the 16-32-port rows (11-18); rows 6-10 are density one. */
+    if (density != 2 && ports < 16) {
+      continue;
+    }
+    nr_csirs_candidate_t c = {0};
+    c.row = (uint8_t)row;
+    c.cdm_type = row_cdm_type(row);
+    c.freq_density = density;
+    c.scramb_id = scramb_id;
+    c.start_rb = 0;
+    c.nr_of_rbs = n_rb;
+    /* Does the row place anything at l1? Asked of the table, not assumed. */
+    uint16_t a[NR_CSIRS_BLIND_NSYM], b[NR_CSIRS_BLIND_NSYM], sym[NR_CSIRS_BLIND_NSYM];
+    c.freq_domain = 0x3F;
+    c.symb_l0 = 0;
+    c.symb_l1 = 5;
+    nr_csirs_blind_footprint(&c, a);
+    c.symb_l1 = 6;
+    nr_csirs_blind_footprint(&c, b);
+    const bool uses_l1 = memcmp(a, b, sizeof(a)) != 0;
+    for (int l0 = 0; l0 < NR_CSIRS_BLIND_NSYM; l0++) {
+      /* l1 in {2..12} (38.211) and AFTER l0: the swapped order is the same RE set with the CDM groups
+       * relabelled, a configuration no gNB sends, and it would double every l1-row hypothesis. */
+      for (int l1 = uses_l1 ? (l0 + 1 > 2 ? l0 + 1 : 2) : 0; l1 <= (uses_l1 ? 12 : 0); l1++) {
+        c.symb_l0 = (uint8_t)l0;
+        c.symb_l1 = (uint8_t)l1;
+        /* The symbol set does not depend on the bitmap: prune every (l0, l1) that overlaps itself,
+         * leaves the slot, or touches a symbol with no measured energy before trying 20 bitmaps. */
+        c.freq_domain = 0x3F;
+        if (nr_csirs_blind_footprint(&c, sym) != ports) {
+          continue;
+        }
+        bool dark = false;
+        for (int l = 0; l < NR_CSIRS_BLIND_NSYM && !dark; l++) {
+          dark = sym[l] && !mask[l];
+        }
+        if (dark) {
+          continue;
+        }
+        for (int bm = 1; bm < 64; bm++) {
+          if (__builtin_popcount(bm) != need) {
+            continue;
+          }
+          c.freq_domain = (uint16_t)bm;
+          if (nr_csirs_blind_footprint(&c, sym) != ports || !fp_inside(sym, mask)) {
+            continue;
+          }
+          /* A strict sub-footprint (row 11 inside row 16, ...) is the same energy explained by fewer
+           * ports, and the sequence stage could confirm it on its port-0 REs alone. Equal footprints
+           * (rows 16/17, ...) are kept: only the sequence stage can separate those. */
+          bool dominated = false;
+          for (int j = 0; j < nm && !dominated; j++) {
+            dominated = fp_inside(sym, mfp[j]) && !fp_inside(mfp[j], sym);
+          }
+          if (dominated || nm == cap) {
+            continue;
+          }
+          out[nm] = c;
+          memcpy(mfp[nm++], sym, sizeof(sym));
+        }
+      }
+    }
+  }
+  return nm;
+}
+
+int nr_csirs_blind_fp_match(const nr_csirs_blind_fp_t *fp, uint16_t n_rb, uint16_t scramb_id,
+                            nr_csirs_candidate_t *out, int max)
+{
+  if (fp == NULL || out == NULL || max <= 0) {
+    return 0;
+  }
+  int n = 0;
+  for (int d = 0; d < 3 && n < max; d++) {
+    bool used[NR_CSIRS_BLIND_NSYM][12] = {{false}}, per[NR_CSIRS_BLIND_NSYM][12];
+    for (int l = 0; l < NR_CSIRS_BLIND_NSYM; l++)
+      for (int k = 0; k < 12; k++)
+        per[l][k] = cell_periodic(fp, d, l, k);
+    for (int l = 0; l < NR_CSIRS_BLIND_NSYM; l++) {
+      for (int k = 0; k < 12; k++) {
+        if (used[l][k] || !per[l][k]) {
+          continue;
+        }
+        /* One resource's cells share its (period, offset): group every periodic cell whose hits are
+         * jointly periodic with this seed's. */
+        uint16_t mask[NR_CSIRS_BLIND_NSYM] = {0};
+        mask[l] = (uint16_t)(1u << k);
+        used[l][k] = true;
+        for (int l2 = 0; l2 < NR_CSIRS_BLIND_NSYM; l2++) {
+          for (int k2 = 0; k2 < 12; k2++) {
+            if (used[l2][k2] || !per[l2][k2]) {
+              continue;
+            }
+            uint32_t joint[16];
+            const int n1 = fp->n_hit[d][l][k], n2 = fp->n_hit[d][l2][k2];
+            memcpy(joint, fp->hit_slot[d][l][k], (size_t)n1 * sizeof(joint[0]));
+            memcpy(joint + n1, fp->hit_slot[d][l2][k2], (size_t)n2 * sizeof(joint[0]));
+            if (nr_csirs_blind_infer_period(joint, n1 + n2, CSIRS_MIN_HITS, NULL, NULL)) {
+              mask[l2] |= (uint16_t)(1u << k2);
+              used[l2][k2] = true;
+            }
+          }
+        }
+        n += match_group(mask, (uint8_t)d, n_rb, scramb_id, out + n, max - n);
+      }
+    }
+  }
+  return n;
+}
+
+int nr_csirs_blind_append(nr_csirs_blind_state_t *st, const nr_csirs_candidate_t *c)
+{
+  if (st == NULL || c == NULL || st->n >= NR_CSIRS_BLIND_MAX_CAND) {
+    return -1;
+  }
+  for (int i = 0; i < st->n; i++) {
+    const nr_csirs_candidate_t *o = &st->cand[i];
+    if (o->row == c->row && o->freq_domain == c->freq_domain && o->symb_l0 == c->symb_l0
+        && o->symb_l1 == c->symb_l1 && o->freq_density == c->freq_density) {
+      return -1;
+    }
+  }
+  const int idx = st->n++;
+  st->cand[idx] = *c;
+  return idx;
 }
