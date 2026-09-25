@@ -269,6 +269,7 @@ __global__ void k_scale_rd(zC* rd, const float* g, uint32_t nrange, uint32_t ndo
 } // namespace
 
 struct CudaCoherent::Impl {
+  uint64_t gpu_detect_fallbacks = 0;   // CPIs whose GPU detect threw and the CPU oracle ran instead
   cudaStream_t stream = nullptr;
   cufftHandle plan = 0; long plan_nfft = -1; long plan_batch = -1;
   cudaEvent_t ev0{}, ev1{};
@@ -574,7 +575,20 @@ std::vector<Detection> CudaCoherent::detect(const Grid& g, const Geometry& geo, 
   // its own output) the GPU differs like those rebuilds do -- see gpu-exact-report.md and the
   // recorded-case mode of tests/coherent_cuda_parity_test.cc (FAIL = 0 asserted).
   if (!use_gpu_detect) return coherent::detect(h_E, R, g, geo, p);   // CPU oracle (opt-in)
-  return I.det.run(need_host_E ? h_E : I.ev_dummy_E, R, g, geo, p, I.rd.p, (const float*)I.E.p, I.stream);
+  try {
+    return I.det.run(need_host_E ? h_E : I.ev_dummy_E, R, g, geo, p, I.rd.p, (const float*)I.E.p, I.stream);
+  } catch (const std::runtime_error& e) {
+    // A CPI the GPU cannot run (e.g. a long-dwell fit needing more shared memory than the device can
+    // opt in to) is detected by the CPU oracle instead: same decisions, only slower. Counted, not hidden.
+    cudaGetLastError();   // consume the (non-sticky) error so the next CPI does not report it again
+    const uint64_t n = ++I.gpu_detect_fallbacks;
+    if (n <= 5 || n % 100 == 0) std::fprintf(stderr, "SENSING: GPU detect -> CPU oracle fallback #%llu: %s\n", (unsigned long long)n, e.what());
+    if (h_E.size() != nt * nv) {
+      h_E.resize(nt * nv);
+      cuda_check(cudaMemcpy(h_E.data(), I.E.p, h_E.size() * sizeof(float), cudaMemcpyDeviceToHost), "D2H E (fallback)");
+    }
+    return coherent::detect(h_E, R, g, geo, p);
+  }
 }
 
 void CudaCoherent::scale_rd(const std::vector<float>& g)

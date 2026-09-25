@@ -289,7 +289,7 @@ void raise_dyn_smem(const void* kern, size_t bytes, const char* what)
   size_t& c = cur[kern];
   if (bytes <= c) return;
   const cudaError_t e = cudaFuncSetAttribute(kern, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)bytes);
-  if (e != cudaSuccess) throw std::runtime_error(std::string(what) + ": " + cudaGetErrorString(e));
+  if (e != cudaSuccess) { cudaGetLastError(); throw std::runtime_error(std::string(what) + " " + std::to_string(bytes) + " B: " + cudaGetErrorString(e)); }
   c = bytes;
 }
 namespace {
