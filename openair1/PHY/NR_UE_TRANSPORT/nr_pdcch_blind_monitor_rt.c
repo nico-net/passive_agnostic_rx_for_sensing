@@ -197,8 +197,9 @@ typedef struct {
    * al1_union: the deduplicated AL1 REG sets of {banked mapping} + al1_fam, the banked family first
    * in CCE order -- so entries >= the CORESET's CCE count are exactly the sets the banked mapping
    * alone would never demap. */
-  nr_pdcch_al1_map_t al1_fam[NR_PDCCH_AL1_MAX_COVER];
+  nr_pdcch_al1_map_t al1_fam[NR_PDCCH_AL1_MAX_FAM];
   uint8_t n_al1_fam;
+  uint8_t al1_bank_out;   /* 1 = AL1 evidence excluded the banked mapping's own family */
   uint16_t n_al1_union;
   uint16_t al1_union[NR_PDCCH_AL1_UNION_MAX][6];
 } nr_pdcch_discovered_coreset_t;
@@ -354,7 +355,7 @@ static void al1_union_refresh(int bi, const char *why)
 {
   nr_pdcch_discovered_coreset_t *e = &g_coreset_bank[bi];
   const int span = e->cfg.coreset_freq_domain * 6, dur = e->cfg.coreset_duration;
-  nr_pdcch_al1_map_t list[1 + NR_PDCCH_AL1_MAX_COVER];
+  nr_pdcch_al1_map_t list[1 + NR_PDCCH_AL1_MAX_FAM];
   list[0] = al1_bank_map(&e->cfg);
   memcpy(&list[1], e->al1_fam, sizeof(e->al1_fam[0]) * e->n_al1_fam);
   int n = e->n_al1_fam > 0
@@ -383,20 +384,35 @@ static void al1_union_store(int bi, int span, int duration, const nr_pdcch_al1_m
   const nr_pdcch_blind_monitor_cfg_t *c = &g_coreset_bank[bi].cfg;
   if (c->coreset_freq_domain * 6 != span || c->coreset_duration != duration)
     return; /* the bank archived a different shape than the verified lane: families do not apply */
-  if (n > NR_PDCCH_AL1_MAX_COVER) {
+  if (n > NR_PDCCH_AL1_MAX_FAM) { /* guard only: 90 is the measured maximum over every legal shape */
     static bool s_capped;
     if (!s_capped) {
       s_capped = true;
       LOG_W(PHY, "SENSING: AL1_UNION family cap: %d consistent AL1 families > %d; keeping the first %d\n", n,
-            NR_PDCCH_AL1_MAX_COVER, NR_PDCCH_AL1_MAX_COVER);
+            NR_PDCCH_AL1_MAX_FAM, NR_PDCCH_AL1_MAX_FAM);
     }
-    n = NR_PDCCH_AL1_MAX_COVER;
+    n = NR_PDCCH_AL1_MAX_FAM;
   }
   pthread_mutex_lock(&g_al1_mu);
+  if (g_coreset_bank[bi].n_al1_fam > 0) {
+    /* Re-verifying an entry that already holds families: those have been narrowed (or collapsed) by
+     * later evidence, and a fresh single-observation set would re-widen them. Keep what is held. */
+    pthread_mutex_unlock(&g_al1_mu);
+    return;
+  }
   memcpy(g_coreset_bank[bi].al1_fam, fam, sizeof(fam[0]) * n);
   g_coreset_bank[bi].n_al1_fam = (uint8_t)n;
   al1_union_refresh(bi, "verify");
   pthread_mutex_unlock(&g_al1_mu);
+}
+
+/* Only candidates demapped from THIS pass's CORESET (the main ladder's pdcch_e_rx) are AL1-family
+ * evidence. The passive-BWP second pass decodes a different CORESET into its own buffer: its CCE
+ * numbers mean nothing under the banked mapping, and narrowing on them is irreversible. */
+static bool al1_from_ladder(const c16_t *e_rx, const c16_t *pdcch_e_rx)
+{
+  const uintptr_t p = (uintptr_t)e_rx, b = (uintptr_t)pdcch_e_rx;
+  return p >= b && p < b + sizeof(c16_t) * NR_MAX_PDCCH_SIZE;
 }
 
 /* A confirmed decode on bank entry bi. AL1: narrow by the candidate's REG set (the banked mapping's
@@ -429,18 +445,30 @@ static void al1_union_accept(int bi, int L, int cce, int num_cces, const uint16_
   if (e->n_al1_fam > 1 || (e->n_al1_fam == 1 && L >= 2)) {
     if (L >= 2) {
       const nr_pdcch_al1_map_t b = al1_bank_map(c);
-      if (e->n_al1_fam != 1 || memcmp(&e->al1_fam[0], &b, sizeof(b)) != 0) {
+      if (e->al1_bank_out) {
+        /* Contradiction: AL1 evidence excluded the banked family, yet an AL2+ decode under it passed.
+         * Keep the union (it still holds the banked family's sets) rather than collapse onto it. */
+        static bool s_warned;
+        if (!s_warned) {
+          s_warned = true;
+          LOG_W(PHY, "SENSING: AL1_UNION bank=%d: AL2+ decode under mapping %d/%d/%d that AL1 evidence excluded; "
+                     "not collapsing (fam=%d kept)\n", bi, b.bundle, b.interleaver, b.shift, e->n_al1_fam);
+        }
+      } else if (e->n_al1_fam != 1 || memcmp(&e->al1_fam[0], &b, sizeof(b)) != 0) {
         e->al1_fam[0] = b;
         e->n_al1_fam = 1;
         al1_union_refresh(bi, "AL2+ decode proves the banked mapping");
       }
     } else {
-      nr_pdcch_al1_map_t keep[NR_PDCCH_AL1_MAX_COVER];
+      nr_pdcch_al1_map_t keep[NR_PDCCH_AL1_MAX_FAM];
       memcpy(keep, e->al1_fam, sizeof(keep[0]) * e->n_al1_fam);
       const int m = nr_pdcch_al1_narrow(span, dur, (const uint16_t (*)[6])obs, 1, keep, e->n_al1_fam);
       if (m > 0 && m != e->n_al1_fam) {
         memcpy(e->al1_fam, keep, sizeof(keep[0]) * m);
         e->n_al1_fam = (uint8_t)m;
+        nr_pdcch_al1_map_t b = al1_bank_map(c);
+        if (nr_pdcch_al1_narrow(span, dur, (const uint16_t (*)[6])obs, 1, &b, 1) == 0)
+          e->al1_bank_out = 1;
         al1_union_refresh(bi, "AL1 decode narrowed");
       }
     }
@@ -1859,6 +1887,8 @@ static void blind_discovery_replay(const NR_DL_FRAME_PARMS *fp, const UE_nr_rxtx
   if (control ? (controls >= 16 || slot_key == last_control) : (hypotheses >= 64 || geometry == last_geometry)) return;
   if (span < 6 || span > 270 || pdu->coreset.duration < 1 || pdu->coreset.duration > 3
       || pdu->number_of_candidates > 64 || (control && expected_index >= pdu->number_of_candidates)) return;
+  for (int i = 0; i < pdu->number_of_candidates; i++) /* AL1-union virtual CCEs are not replayable */
+    if (pdu->CCE[i] + pdu->L[i] > span * pdu->coreset.duration / 6) return;
   nr_pdcch_discovery_replay_t h = {
     .magic=NR_PDCCH_REPLAY_MAGIC, .version=2, .header_bytes=sizeof(h), .kind=control?1:2,
     .source_slot=slot_key, .expected_payload=expected_payload,
@@ -1905,7 +1935,20 @@ static void blind_discovery_replay(const NR_DL_FRAME_PARMS *fp, const UE_nr_rxtx
  * the widest, AL16: 16*108 = 1728 int16 (= NR_PDCCH_JOINT_MAX_E; the GPU kernel's NPC_MAX_E covers it).
  * Bounded by BOTH item and vector caps; anything that does not fit is simply left for the CPU path,
  * which is always correct because the scorer falls back per item. */
-#define LANE_BATCH_VSTRIDE   (LANE_BATCH_AL_MAX * 108)  /* AL16: 1728 int16 */
+/* Vector stride, per thread, sized at allocation from the widest lane AL (floor AL8 = the pre-AL16
+ * 864): g_lb_vec is LANE_BATCH_MAX_VEC strides and counts against RLIMIT_MEMLOCK under mlockall, so
+ * a fixed AL16 stride doubled it (3.5 -> 7 MB per scan thread) on every run, AL16 or not. */
+static __thread int g_lb_n_items, g_lb_n_vec;
+static __thread int g_lb_vstride = 0;
+static int lane_batch_want_stride(void)
+{
+  const uint8_t *als = NULL;
+  const int n = lane_als(&als);
+  int w = 8;
+  for (int i = 0; i < n; i++)
+    if (als[i] > w) w = als[i];
+  return w * 108;
+}
 #define LANE_BATCH_MAX_VEC   2048           /* distinct candidates across all lanes */
 #define LANE_BATCH_MAX_ITEMS 131072          /* (candidate x length) pairs; must be <= NPG_MAX_ITEMS */
 #define LANE_BATCH_MAX_LEN   64
@@ -1916,7 +1959,7 @@ typedef struct {
   int      min_len, max_len;
 } lane_batch_slot_t;
 
-/* HEAP, not __thread: at AL16 this buffer is 2048 * 1728 * 2 = 7 MB, and a TLS block that size is
+/* HEAP, not __thread: at AL8 this buffer is 2048 * 864 * 2 = 3.5 MB (7 MB with AL16), and a TLS block that size is
  * the documented cause of an AVX alignment fault in this project (per-antenna CFR buffer, same
  * shape of bug). Only the pointer is thread-local; allocated once per thread, 32-byte aligned. */
 static __thread int16_t *g_lb_vec = NULL;
@@ -1932,11 +1975,18 @@ static __thread void     *g_lb_pool = NULL;
 
 static bool lane_batch_vec_ready(void)
 {
-  if (g_lb_vec != NULL)
-    return true;
+  const int want = lane_batch_want_stride();
+  if (g_lb_vec != NULL && (want <= g_lb_vstride || g_lb_n_vec > 0))
+    return true; /* a wider AL arriving mid-occasion waits for the next one; wider items use the CPU */
   void *m = NULL;
-  if (posix_memalign(&m, 32, sizeof(int16_t) * (size_t)LANE_BATCH_MAX_VEC * LANE_BATCH_VSTRIDE) != 0)
-    return false;
+  if (posix_memalign(&m, 32, sizeof(int16_t) * (size_t)LANE_BATCH_MAX_VEC * want) != 0)
+    return g_lb_vec != NULL;
+  if (g_lb_vec != NULL) { /* widening (a SIB1 prior added AL16): swap the vector buffer only */
+    free(g_lb_vec);
+    g_lb_vec = (int16_t *)m;
+    g_lb_vstride = want;
+    return true;
+  }
   const size_t n = (size_t)LANE_BATCH_MAX_ITEMS;
   const size_t need = n * (sizeof(uint16_t) * 2 + sizeof(uint8_t) * 2 + sizeof(uint32_t) + sizeof(uint64_t))
                       + 6 * 32;   /* slack so each slice can start 32-byte aligned */
@@ -1956,10 +2006,10 @@ static bool lane_batch_vec_ready(void)
   g_lb_ok   = LB_SLICE(uint8_t,  n);
   #undef LB_SLICE
   g_lb_vec = (int16_t *)m;
+  g_lb_vstride = want;
   return true;
 }
 static __thread lane_batch_slot_t g_lb_slot[NR_PDCCH_LOOKAHEAD_MAX];
-static __thread int g_lb_n_items, g_lb_n_vec;
 static __thread int g_lb_flushed;   /* 1 once decode_vec has run for this occasion */
 
 static void lane_batch_reset(void)
@@ -1992,11 +2042,11 @@ static bool lane_batch_add(int lane, const nr_pdcch_autodiscover_sweep_ctx_t *ct
   const int base = g_lb_n_items;
   for (int c = 0; c < ctx->n_cand; c++) {
     const nr_pdcch_autodiscover_cand_t *cd = &ctx->cand[c];
-    if ((int)cd->L * 108 > LANE_BATCH_VSTRIDE)
+    if ((int)cd->L * 108 > g_lb_vstride)
       return false;                       /* wider than LANE_BATCH_AL_MAX: CPU path */
     const int v = g_lb_n_vec + c;
     nr_pdcch_unscrambling((c16_t *)cd->e_rx, ctx->scrambling_rnti, (uint32_t)(cd->L * 108),
-                          ctx->dmrs_scrambling_id, &g_lb_vec[v * LANE_BATCH_VSTRIDE]);
+                          ctx->dmrs_scrambling_id, &g_lb_vec[v * g_lb_vstride]);
     for (int l = min_len; l <= max_len; l++) {
       const int i = g_lb_n_items + c * n_len + (l - min_len);
       g_lb_vidx[i] = (uint16_t)v;
@@ -2035,7 +2085,7 @@ static void lane_batch_flush(void)
   if (api == NULL || api->decode_vec == NULL)
     return;                                  /* no GPU: every lane falls back to CPU, unchanged */
   memset(g_lb_ok, 0, (size_t)g_lb_n_items);
-  const int m = api->decode_vec(g_lb_vec, LANE_BATCH_VSTRIDE, g_lb_n_vec, g_lb_vidx, g_lb_len,
+  const int m = api->decode_vec(g_lb_vec, g_lb_vstride, g_lb_n_vec, g_lb_vidx, g_lb_len,
                                 g_lb_al, g_lb_n_items, g_lb_crc, g_lb_pl, g_lb_ok);
   if (m < 0)
     return;
@@ -2548,10 +2598,10 @@ static void nr_pdcch_blind_cand_worker(void *arg)
 
 /* One verified AL1 decode fixes the true mapping only up to the mappings whose AL1 family holds its
  * REG set. Report how many distinct families remain and return one mapping per family (at most
- * NR_PDCCH_AL1_MAX_COVER written; the return value is uncapped): 1 means the banked mapping decodes
+ * NR_PDCCH_AL1_MAX_FAM written; the return value is uncapped): 1 means the banked mapping decodes
  * every AL1 candidate; >1 is handed to the bank entry for AL1 union decoding (al1_union_store). */
 static int al1_verify_report(const nr_pdcch_lookahead_geom_t *g, int duration, int cce, uint16_t rnti,
-                             nr_pdcch_al1_map_t fam_out[NR_PDCCH_AL1_MAX_COVER])
+                             nr_pdcch_al1_map_t fam_out[NR_PDCCH_AL1_MAX_FAM])
 {
   const int span = g->freq_domain * 6;
   const nr_pdcch_al1_map_t m = {(uint8_t)g->reg_bundle_size, (uint8_t)g->interleaver_size, (uint16_t)g->shift_index};
@@ -2564,7 +2614,7 @@ static int al1_verify_report(const nr_pdcch_lookahead_geom_t *g, int duration, i
   const int fam = nr_pdcch_al1_family_reps(span, duration, cand, n);
   LOG_A(PHY, "SENSING: AL1_VERIFY rnti=0x%04x cce=%d mapping=%d/%d/%d consistent_mappings=%d distinct_al1_families=%d%s\n",
         rnti, cce, m.bundle, m.interleaver, m.shift, n, fam, fam > 1 ? " (AL1 union decoding)" : "");
-  memcpy(fam_out, cand, sizeof(cand[0]) * (fam < NR_PDCCH_AL1_MAX_COVER ? fam : NR_PDCCH_AL1_MAX_COVER));
+  memcpy(fam_out, cand, sizeof(cand[0]) * (fam < NR_PDCCH_AL1_MAX_FAM ? fam : NR_PDCCH_AL1_MAX_FAM));
   return fam;
 }
 
@@ -5221,7 +5271,7 @@ constdiag_done:;
         const bool just_verified = nr_pdcch_blind_lookahead_observe(lane,
             cand_task[ti].dl_raw.rnti, mono >= 0 ? (uint32_t)mono : abs_slot, cand_task[ti].dl_raw.payload);
         if (just_verified) {
-          nr_pdcch_al1_map_t al1_fam[NR_PDCCH_AL1_MAX_COVER];
+          nr_pdcch_al1_map_t al1_fam[NR_PDCCH_AL1_MAX_FAM];
           int al1_nfam = 0;
           if (have_vg && vg.al1_only && cand_task[ti].L == 1)
             al1_nfam = al1_verify_report(&vg, nr_pdcch_blind_monitor_get_cfg()->coreset_duration, cand_task[ti].cce,
@@ -5433,8 +5483,9 @@ constdiag_done:;
       stage0_note_accept((uint32_t)cand_task[ti].frame * fp->slots_per_frame + (uint32_t)cand_task[ti].slot,
                          raw->rnti, true);
       nr_pdcch_ss_registry_accept(cfg, raw->rnti);
-      al1_union_accept(al1_bank, cand_task[ti].L, cand_task[ti].cce, num_cces, (const uint16_t (*)[6])al1_vset,
-                       al1_vcce, al1_nv);
+      if (al1_from_ladder(cand_task[ti].e_rx, pdcch_e_rx))
+        al1_union_accept(al1_bank, cand_task[ti].L, cand_task[ti].cce, num_cces, (const uint16_t (*)[6])al1_vset,
+                         al1_vcce, al1_nv);
       if (cfg->autodiscover) {
         const bool was_verified = nr_pdcch_blind_monitor_autodiscover_extent_verified();
         const long mono = source_absolute_slot;
@@ -5567,7 +5618,8 @@ constdiag_done:;
     stage0_note_accept((uint32_t)cand_task[ti].frame * fp->slots_per_frame + (uint32_t)cand_task[ti].slot,
                        out.rnti, nr_pdcch_blind_monitor_rnti_confirmed(abs_slot, out.rnti));
     g_accepts++;
-    if (al1_bank >= 0 && !cand_task[ti].ul_scan && nr_pdcch_blind_monitor_rnti_confirmed(abs_slot, out.rnti))
+    if (al1_bank >= 0 && !cand_task[ti].ul_scan && al1_from_ladder(cand_task[ti].e_rx, pdcch_e_rx)
+        && nr_pdcch_blind_monitor_rnti_confirmed(abs_slot, out.rnti))
       al1_union_accept(al1_bank, cand_task[ti].L, cand_task[ti].cce, num_cces, (const uint16_t (*)[6])al1_vset,
                        al1_vcce, al1_nv); /* confirmed RNTIs only: narrowing is irreversible */
     /* ACCSLOT: per-slot census of CRC passes, SI vs everything else. Noise passes are uniform over

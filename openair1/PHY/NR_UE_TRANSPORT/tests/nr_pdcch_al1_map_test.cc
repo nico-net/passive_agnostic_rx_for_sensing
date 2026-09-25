@@ -2,6 +2,7 @@
 // TS 38.211 7.3.2.2 rules (session 2026-09-25), not from this module.
 #include <algorithm>
 #include <chrono>
+#include <map>
 #include <cstdio>
 #include <cstring>
 #include <set>
@@ -180,6 +181,48 @@ TEST(Al1Map, UnionCoversEverySurvivingFamilyWhenOneObservationIsAmbiguous) {
   for (int f = 0; f < fam; f++)
     for (const auto &r : family(270, 2, cand[f])) EXPECT_TRUE(u.count(r)) << "family " << f;
   for (const auto &r : family(270, 2, truth)) EXPECT_TRUE(u.count(r));
+}
+
+TEST(Al1Map, SurvivingFamiliesFitTheBankBoundForEveryLegalShape) {
+  // Families left by ONE AL1 observation = distinct AL1 families containing that REG set. Exhaustive
+  // over every legal shape and every distinct AL1 REG set; the argmax is cross-checked through the
+  // production narrow() + family_count().
+  std::vector<nr_pdcch_al1_map_t> all(NR_PDCCH_AL1_MAX_MAPS);
+  int gmax = 0, grb = 0, gd = 0;
+  for (int d = 1; d <= 3; d++)
+    for (int rb = 6; rb <= 270; rb += 6) {
+      const int n = nr_pdcch_al1_enumerate(rb, d, all.data(), (int)all.size());
+      const int ncce = rb * d / 6;
+      std::set<std::vector<uint64_t>> fams;
+      for (int i = 0; i < n; i++) {
+        std::vector<uint64_t> f(ncce);
+        for (int j = 0; j < ncce; j++) {
+          uint16_t r[6];
+          ASSERT_EQ(nr_pdcch_al1_regset(rb, d, all[i], j, r), 6);
+          uint64_t k = 0;
+          for (int q = 0; q < 6; q++) k = (k << 10) | r[q];
+          f[j] = k;
+        }
+        std::sort(f.begin(), f.end());
+        fams.insert(f);
+      }
+      std::map<uint64_t, int> per_set;
+      for (const auto &f : fams)
+        for (uint64_t k : f) per_set[k]++;
+      int mx = 0;
+      uint64_t arg = 0;
+      for (const auto &kv : per_set)
+        if (kv.second > mx) { mx = kv.second; arg = kv.first; }
+      uint16_t obs[1][6];
+      for (int q = 5; q >= 0; q--) { obs[0][q] = (uint16_t)(arg & 1023); arg >>= 10; }
+      std::vector<nr_pdcch_al1_map_t> c(all.begin(), all.begin() + n);
+      const int m = nr_pdcch_al1_narrow(rb, d, obs, 1, c.data(), n);
+      ASSERT_EQ(nr_pdcch_al1_family_count(rb, d, c.data(), m), mx) << rb << "x" << d;
+      EXPECT_LT(mx, NR_PDCCH_AL1_MAX_FAM) << rb << "x" << d;
+      if (mx > gmax) { gmax = mx; grb = rb; gd = d; }
+    }
+  printf("max AL1 families surviving one observation: %d (first at %dx%d), bound %d\n", gmax, grb, gd,
+         NR_PDCCH_AL1_MAX_FAM);
 }
 
 TEST(Al1Map, UnionReportsTheUncappedCount) {

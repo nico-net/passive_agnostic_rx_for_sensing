@@ -15,6 +15,7 @@ typedef struct { uint8_t bundle; uint8_t interleaver; uint16_t shift; } nr_pdcch
 
 #define NR_PDCCH_AL1_MAX_MAPS  1200 /* > 1081, the largest legal catalogue (270 RB x 2 symbols) */
 #define NR_PDCCH_AL1_MAX_COVER 32   /* lane-loop bound for the cover lap; every legal shape stays below it */
+#define NR_PDCCH_AL1_MAX_FAM   96   /* > 90, the most AL1 families one observation can leave (270x3, measured) */
 #define NR_PDCCH_AL1_UNION_MAX 1088 /* >= 1080, the full-catalogue AL1 union of the largest shape (270 RB x 3 symbols) */
 
 /** Every legal mapping of a span_rb x duration CORESET, in nr_pdcch_map_candidates()' rule order:
