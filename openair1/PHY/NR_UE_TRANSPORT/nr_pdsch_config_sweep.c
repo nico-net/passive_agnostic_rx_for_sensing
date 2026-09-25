@@ -169,7 +169,7 @@ typedef struct {
  * poison the cell prior nor be forced onto it. Single-RNTI behaviour is unchanged by construction:
  * with one RNTI its own prior/observations are exactly what the cell-wide ones used to be, and the
  * (never-promoted) cell-wide ones are read only when the RNTI has nothing of its own. */
-#define RNTI_CTX_MAX 16
+#define RNTI_CTX_MAX 64 /* was 16: measured OTA 2026-09-25, 16 real+noise RNTIs already thrashed it */
 typedef struct {
   uint16_t rnti;
   uint64_t touched;
@@ -181,19 +181,35 @@ static obs_set_t g_obs;   /* cell-wide: observations two RNTIs agree on */
 static prior_t   g_prior; /* cell-wide: a prior two RNTIs converged on */
 static uint64_t g_generation, g_clock;
 
-/* ponytail: LRU by select order, no idle clock -- an active UE is touched every grant and so is
- * never the victim; only one-off noise-floor RNTIs churn. Add an idle-time floor if a real UE ever
- * gets evicted by a burst of >16 RNTIs inside one of its own grant gaps. */
+/* MEASURED OTA 2026-09-25, lab cell: pure LRU-by-touch evicted the ONE real, continuously-scheduled
+ * RNTI 5 times in a 200s run ("SWEEP: new per-RNTI context rnti=0x4768" x5), each eviction wiping its
+ * prior/obs via the memset below -- directly contradicting the old comment's assumption that "an
+ * active UE is touched every grant and so is never the victim". It CAN be the victim: a burst of
+ * one-off noise-floor RNTIs (blind PDCCH false-accepts) touches this table between two of the real
+ * RNTI's own grants, and with RNTI_CTX_MAX slots that is enough to make it briefly the
+ * least-recently-touched. On a commercial gNB with many concurrently connected UEs this only gets
+ * worse, and it directly undermines the cross-RNTI prior-promotion design above (which needs an
+ * RNTI's obs/prior to SURVIVE long enough for a second RNTI to agree with it).
+ * Fix: protect any slot carrying real evidence (a converged prior, or observations toward one) from
+ * eviction by a zero-evidence slot, regardless of recency. Only when EVERY slot already carries
+ * evidence do we fall back to evicting the least-recently-touched one of those -- the genuine
+ * "burst of more real RNTIs than we have slots for" case, which still logs loudly below. */
 static rnti_ctx_t *rnti_ctx(uint16_t rnti, bool create)
 {
-  int victim = 0;
+  int victim = -1;
+  bool victim_has_evidence = true;
   for (int i = 0; i < RNTI_CTX_MAX; i++) {
     if (g_rnti[i].rnti == rnti) {
       g_rnti[i].touched = ++g_clock;
       return &g_rnti[i];
     }
-    if (g_rnti[i].touched < g_rnti[victim].touched)
+    const bool has_evidence = g_rnti[i].prior.valid || g_rnti[i].obs.n > 0;
+    const bool better = victim < 0 || (victim_has_evidence && !has_evidence)
+                         || (has_evidence == victim_has_evidence && g_rnti[i].touched < g_rnti[victim].touched);
+    if (better) {
       victim = i;
+      victim_has_evidence = has_evidence;
+    }
   }
   if (!create)
     return NULL;

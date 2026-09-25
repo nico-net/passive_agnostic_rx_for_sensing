@@ -429,6 +429,28 @@ TEST(PdschConfigSweepPrior, AWrongPriorIsAbandonedAndTheTruthIsStillFound) {
   EXPECT_EQ(tbl, 0);
 }
 
+// MEASURED OTA 2026-09-25 (lab cell): pure LRU-by-touch on the RNTI evidence cache evicted the ONE
+// real, continuously-scheduled RNTI 5 times in a 200s run, wiping its prior each time, because a
+// flood of one-off noise-floor RNTIs (blind PDCCH false-accepts) touched the table between the real
+// RNTI's own grants. The fix protects any evidence-bearing slot from a zero-evidence one regardless
+// of recency; this reproduces the failure shape (far more distinct noise RNTIs than the cache has
+// slots) and asserts the real RNTI's evidence survives it.
+TEST(PdschConfigSweepRntiCache, EvictionProtectsEvidenceFromNoiseChurn) {
+  nr_pdsch_config_sweep_reset_all();
+  nr_pdsch_config_sweep_prior_reset();
+  const nr_pdsch_cfg_hypothesis_t truth{1, 13, 0, 1, 1, 0, 1};
+  nr_pdsch_cfg_hypothesis_t w{};
+  ASSERT_GT(drive_context(21, 0x4601, 0, truth, 0.54, 400000, &w), 0);
+  ASSERT_TRUE(nr_pdsch_config_sweep_rnti_prior_get(0x4601, nullptr, nullptr, nullptr, nullptr));
+
+  // A flood of distinct one-off RNTIs, each touched exactly once, far exceeding RNTI_CTX_MAX (64).
+  for (uint16_t noise = 0; noise < 500; noise++)
+    select_context(21, (uint16_t)(0x1000 + noise), 0);
+
+  EXPECT_TRUE(nr_pdsch_config_sweep_rnti_prior_get(0x4601, nullptr, nullptr, nullptr, nullptr))
+      << "evidence-bearing RNTI context was evicted by zero-evidence noise churn";
+}
+
 /* ---- Per-RNTI contexts ---------------------------------------------------------------------------
  * Priors and DM-RS observations are per-UE in the spec. Each RNTI keeps its own, seeded from the
  * cell-wide ones, which exist only once two distinct RNTIs agree. */

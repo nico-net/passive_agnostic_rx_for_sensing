@@ -466,9 +466,20 @@ void nr_csirs_blind_rt_slot(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot
         g_id_best = trial.scramb_id;
         if (tz >= 4.0) {   /* noise ~1.0; 1024 ids give a noise max near 2.5-3 */
           g_id_solved = true;
+          /* CLOSE THE GAP: until this line the solved id was print-only -- the pinned candidate's
+           * OWN scramb_id (assumed = PCI at init) stayed wrong, so the ordinary per-slot
+           * nr_csirs_blind_feed() below kept scoring the wrong sequence forever and g_st.confirmed
+           * never left -1 even after a correct id was found. The candidate's tried/hits/best_rho
+           * history under the WRONG id is harmless to leave in place: hits[] only increments past
+           * feed()'s CSIRS_DETECT_MARGIN bar, which the wrong sequence could never clear, so it is
+           * already at 0. Patching the id in place lets the existing, already-tested confirm path
+           * (feed() + nr_csirs_blind_infer_period()) take over on the next visit rather than
+           * duplicating that logic here. */
+          g_st.cand[g_id_pin].scramb_id = trial.scramb_id;
           LOG_A(PHY,
                 "SENSING: CSIRS_BLIND IDSWEEP SOLVED row%u fd%u l%u scramb_id=%u z=%.1f (PCI=%d, "
-                "epr=%.2f) -- csirs_monitor scramblingID is NOT the PCI\n",
+                "epr=%.2f) -- csirs_monitor scramblingID is NOT the PCI; candidate corrected, "
+                "confirmation resumes on next visit\n",
                 trial.row, trial.freq_domain, trial.symb_l0, trial.scramb_id, tz, fp->Nid_cell, epr);
           break;
         }
@@ -485,8 +496,11 @@ void nr_csirs_blind_rt_slot(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot
   /* the sweep above reused the shared reference buffer; the candidate's own reference is stale now */
   (void)done; // logged once, by the early return above on the next call
   if ((++g_slots % 20000) == 0) {
+    /* was: passed nullv (the fixed 4/3 confirm-bar constant) here instead of the real population
+     * statistic -- every line of a whole OTA run read a frozen 1.333 regardless of the actual null
+     * behaviour. null_median() is the function this field is named after; use it. */
     LOG_I(PHY, "SENSING: CSIRS_BLIND slots=%llu candidates=%d null_median=%.3f confirmed=%d\n",
-          (unsigned long long)g_slots, g_st.n, nullv, g_st.confirmed);
+          (unsigned long long)g_slots, g_st.n, null_median(), g_st.confirmed);
   }
 }
 
