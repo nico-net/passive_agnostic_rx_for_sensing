@@ -6,8 +6,8 @@ REPO=$(cd "$T/../../../.." && pwd); CONF_T=$REPO/tests/passive_rx/ota/sensing_co
 rm -rf "$O"; mkdir -p "$O"
 python3 "$T/make_coherent_scene.py" --out "$O/rows.bin" --truth "$O/truth.json" --survey-out "$O/survey.json" --seconds ${SECONDS_RUN:-6}
 python3 "$REPO/tests/passive_rx/survey.py" "$O/survey.json" --geometry "$O/g.json" --apply "$CONF_T" "$O/coherent.conf" --report-path "$O/reports.jsonl"
-# LONG_DWELL=1: also run the long-dwell slow-target CPI (coherent_long_dwell) and score it.
-if [ "${LONG_DWELL:-0}" = 1 ]; then sed -i 's/^\(\s*\)coherent_enable = 1;/\1coherent_enable = 1;\n\1coherent_long_dwell = 1;/' "$O/coherent.conf"; grep -q "coherent_long_dwell = 1" "$O/coherent.conf"; fi
+# The long-dwell slow-target CPI (coherent_long_dwell) is on by default and scored; LONG_DWELL=0 turns it off.
+if [ "${LONG_DWELL:-1}" = 0 ]; then sed -i 's/^\(\s*\)coherent_enable = 1;/\1coherent_enable = 1;\n\1coherent_long_dwell = 0;/' "$O/coherent.conf"; grep -q "coherent_long_dwell = 0" "$O/coherent.conf"; fi
 (cd "$BUILD" && ./isac_replay -O "$O/coherent.conf" --rows "$O/rows.bin") > "$O/replay.txt" 2>&1
 python3 - "$O" <<'EOF'
 import glob, json, sys, numpy as np

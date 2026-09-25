@@ -1993,7 +1993,53 @@ Calibration Calibrator::update(const std::array<cd, kCh>& tap, const std::array<
 // `los`/`sync`, only row masks/times), factored out so the GPU range_doppler can build `wf` on the
 // host without paying for the CPU RD.v computation. Kept a byte-for-byte copy of that block on
 // purpose -- range_doppler() itself is left untouched (append-only file per the Task 10 dispatch).
-std::vector<float> whiten_range_clutter(RdResult& R, double pfa_cell)
+// Notch-leakage whitening, for a CPI whose own Doppler pedestal is too high for the range-bin median
+// floor (a mover's pedestal would set its own floor: self-masking). Clutter is by definition the energy
+// in the zero-Doppler notch, which is never tested; this CPI's sampling pattern spreads it into the
+// tested cells through the waveform ambiguity, so the floor of cell (m, d) is PREDICTED:
+//   floor(m, d) = noise + sum over notch cells (m', d') of max(0, p(m', d') - noise) |A(m - m', d - d')|^2,
+// and the cell is scaled to noise level where that floor is above noise. A tested cell never enters its
+// own floor. Measured (2026-09-25, 48 GB empty-room replay): CPIs where the median floor was gated off
+// went from 6.9 to 0.64 detections/CPI (same as the other CPIs), all CPIs 1.40 -> 0.67, p95 150 -> 83 ms.
+// Tried and REJECTED on the same replay: a joint power-domain CLEAN with sub-bin sources, coherent bound
+// and a CLEAN-residual broadband floor (2.93 detections/CPI in these CPIs, p95 2.2 s).
+// Known limit (unit test, harsh synthetic): the per-cell sum re-counts a source over its notch mainlobe,
+// and in a sparse CPI a strong mover's own pedestal in the notch can raise its floor. Movers in the ~12 %
+// of CPIs that take this path can be masked; the others use the median floor.
+// ponytail: O(ambiguity table (2nr-1)(2nd-1) x rows) per such CPI; move to the GPU if it shows.
+static std::vector<float> whiten_notch_leakage(RdResult& R, double pfa_cell, WhitenInfo* info)
+{
+  (void)pfa_cell;
+  const Axes& a = R.rd.axes;
+  const size_t nr = a.n_range, nd = a.n_dopp;
+  std::vector<float> f((size_t)kCh * nr * nd, 1.f);
+  std::vector<uint32_t> notch; for (uint32_t d = 0; d < nd; ++d) if (!dopp_ok(a, d)) notch.push_back(d);
+  if (notch.empty()) return f;
+  const long dx = (long)nr - 1, dy = (long)nd - 1;
+  std::vector<double> A2((size_t)(2 * dx + 1) * (2 * dy + 1));
+  for (long x = -dx; x <= dx; ++x) for (long y = -dy; y <= dy; ++y) A2[(size_t)(x + dx) * (2 * dy + 1) + (y + dy)] = R.ambiguity((double)x, (double)y);
+  bool any = false;
+  std::vector<double> src(nr * notch.size());
+  for (uint32_t i = 0; i < kCh; ++i) {
+    if (!R.los_found[i] || !(R.noise[i] > 0)) continue;
+    const double N0 = R.noise[i];
+    for (size_t m = 0; m < nr; ++m) for (size_t q = 0; q < notch.size(); ++q) src[m * notch.size() + q] = std::max(0.0, (double)std::norm(R.rd.v[R.rd.idx(i, (uint32_t)m, notch[q])]) - N0);
+    for (uint32_t d : a.tested_dopp) for (size_t m = 0; m < nr; ++m) {
+      double leak = 0;
+      for (size_t m2 = 0; m2 < nr; ++m2) {
+        const double* row = &A2[(size_t)((long)m - (long)m2 + dx) * (2 * dy + 1)];
+        for (size_t q = 0; q < notch.size(); ++q) leak += src[m2 * notch.size() + q] * row[(long)d - (long)notch[q] + dy];
+      }
+      if (!(leak > 0)) continue;
+      const float g = (float)std::sqrt(N0 / (N0 + leak));
+      f[((size_t)i * nr + m) * nd + d] = g; R.rd.v[R.rd.idx(i, (uint32_t)m, d)] *= g; any = true;
+    }
+  }
+  if (info && any) { info->applied = true; info->mode = 2; }
+  return f;
+}
+
+std::vector<float> whiten_range_clutter(RdResult& R, double pfa_cell, WhitenInfo* info)
 {
   const Axes& a = R.rd.axes;
   std::vector<float> f((size_t)kCh * a.n_range, 1.f);
@@ -2004,7 +2050,9 @@ std::vector<float> whiten_range_clutter(RdResult& R, double pfa_cell)
   double ped = 0; uint32_t np = 0;
   for (uint32_t d : a.tested_dopp) { ped += R.ambiguity(0.0, (double)d - (a.n_dopp / 2)); ++np; }
   if (np) ped /= np;
-  if (!(ped * -std::log(pfa_cell) < 1.0)) return f;
+  if (info) { info->ped = ped; info->bound = 1.0 / -std::log(pfa_cell); }
+  if (!(ped * -std::log(pfa_cell) < 1.0)) return whiten_notch_leakage(R, pfa_cell, info);
+  if (info) { info->applied = true; info->mode = 1; }
   std::vector<double> p; p.reserve(a.tested_dopp.size());
   for (uint32_t i = 0; i < kCh; ++i) {
     if (!R.los_found[i] || !(R.noise[i] > 0)) continue;

@@ -315,7 +315,8 @@ void CoherentPipeline::process(Job& j)
   const Calibration cal = cal_.update(R.los_tap, L.found, los_snr);
   const Grid G = envelope_grid(cfg_.volume, a);
   // Clutter-limited CFAR in range (whiten_range_clutter), at the detector's own per-cell false-alarm budget.
-  { const std::vector<float> wg = whiten_range_clutter(R, detect_params(a, G, cfg_.false_object_intensity_per_s).pfa);
+  WhitenInfo wi;
+  { const std::vector<float> wg = whiten_range_clutter(R, detect_params(a, G, cfg_.false_object_intensity_per_s).pfa, &wi);
     if (cuda_) cuda_->scale_rd(wg); }
   std::vector<Detection> D;
   std::vector<float> E;   // CPU path only; GPU path's equivalent is cuda_->last_envelope() (see below)
@@ -424,7 +425,7 @@ void CoherentPipeline::process(Job& j)
   rep << "{\"cpi\":" << j.seq << ",\"dwell\":\"short\",\"traffic\":true,\"wall\":" << jwall() << ",\"t\":" << jnum(j.t) << ",\"t_cpi_s\":" << jnum(a.t_cpi_s) << ",\"b_eff_hz\":" << jnum(a.b_eff_hz)
       << ",\"range_res_m\":" << jnum(kC / a.b_eff_hz) << ",\"grid_step_m\":" << jnum(G.step) << ",\"n_voxels\":" << G.size()
       << ",\"n_dopp_tested\":" << a.tested_dopp.size() << ",\"rows\":" << j.dl.rows << ",\"gpu\":" << (cuda_ ? "true" : "false")
-      << ",\"lambda_m\":" << jnum(a.lambda_m) << ",\"dopp_step_hz\":" << jnum(a.dopp_step_hz) << ",\"notch_half_bins\":" << a.notch_half_bins << ",\"rows_bad\":" << n_bad << ",\"md_suppressed\":" << md_now << ",\"md_suppressed_total\":" << md_suppressed_
+      << ",\"lambda_m\":" << jnum(a.lambda_m) << ",\"dopp_step_hz\":" << jnum(a.dopp_step_hz) << ",\"notch_half_bins\":" << a.notch_half_bins << ",\"rows_bad\":" << n_bad << ",\"whiten\":{\"ped\":" << jnum(wi.ped) << ",\"bound\":" << jnum(wi.bound) << ",\"on\":" << (wi.applied ? "true" : "false") << ",\"mode\":" << wi.mode << "}" << ",\"md_suppressed\":" << md_now << ",\"md_suppressed_total\":" << md_suppressed_
       << ",\"static_db\":{\"los\":[" << jnum(st_los[0]) << "," << jnum(st_los[1]) << "," << jnum(st_los[2]) << "," << jnum(st_los[3])
       << "],\"edge\":[" << jnum(st_edge[0]) << "," << jnum(st_edge[1]) << "," << jnum(st_edge[2]) << "," << jnum(st_edge[3])
       << "],\"far\":[" << jnum(st_far[0]) << "," << jnum(st_far[1]) << "," << jnum(st_far[2]) << "," << jnum(st_far[3])

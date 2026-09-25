@@ -142,7 +142,12 @@ double gamma_upper_quantile(uint32_t shape, double p);
  * ~10 detections per CPI). A target at the same range as that residue is judged against it -- physics.
  * Skipped (all factors 1) when the waveform's own Doppler pedestal could hide a mover under the floor
  * (pi_ped * -ln(pfa_cell) >= 1, e.g. narrow hopping rows). Returns the factors [ch][range] (1 = none). */
-std::vector<float> whiten_range_clutter(RdResult& R, double pfa_cell);
+/** Diagnostics of one whitening call: the waveform's mean Doppler pedestal, the self-masking bound it was
+ *  tested against (1 / -ln pfa_cell) and whether whitening ran. */
+struct WhitenInfo { double ped = 0, bound = 0; bool applied = false; int mode = 0; };   // mode 0 none, 1 range-bin median, 2 notch leakage
+/** Returns amplitude factors already applied to R: per [ch][range] (median floor) or per [ch][range][dopp]
+ *  (notch-leakage floor), all 1 when nothing was applied. CudaCoherent::scale_rd accepts either size. */
+std::vector<float> whiten_range_clutter(RdResult& R, double pfa_cell, WhitenInfo* info = nullptr);
 
 /** Slow-time weight of each row: the CPI's Hann taper at the row time times the row's own subcarrier
  * weight sum (its Hann taper over the observed subcarriers). Coherent (matched-filter) integration weights

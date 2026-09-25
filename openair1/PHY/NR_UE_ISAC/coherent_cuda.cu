@@ -258,10 +258,10 @@ __global__ void k_envelope(const float* mag, const float* inv_noise, const float
 } // namespace
 
 namespace {
-__global__ void k_scale_rd(zC* rd, const float* g, uint32_t nrange, uint32_t ndopp, size_t n)
+__global__ void k_scale_rd(zC* rd, const float* g, uint32_t nrange, uint32_t ndopp, size_t n, int per_cell)
 {
   for (size_t j = (size_t)blockIdx.x * blockDim.x + threadIdx.x; j < n; j += (size_t)blockDim.x * gridDim.x) {
-    const float f = g[j / ndopp];            // [ch][range] factor; rd is [ch][range][dopp]
+    const float f = per_cell ? g[j] : g[j / ndopp];   // [ch][range][dopp] or [ch][range] factor; rd is [ch][range][dopp]
     rd[j].x *= f; rd[j].y *= f;
   }
 }
@@ -594,13 +594,15 @@ std::vector<Detection> CudaCoherent::detect(const Grid& g, const Geometry& geo, 
 void CudaCoherent::scale_rd(const std::vector<float>& g)
 {
   Impl& I = *impl_;
-  if (g.size() != (size_t)I.cur_nch * I.cur_nrange || I.cur_ndopp == 0) return;
+  const size_t nrg = (size_t)I.cur_nch * I.cur_nrange;
+  const int per_cell = g.size() == nrg * I.cur_ndopp;
+  if ((g.size() != nrg && !per_cell) || I.cur_ndopp == 0) return;
   I.whiten.ensure(g.size() * sizeof(float));
   cuda_check(cudaMemcpyAsync(I.whiten.p, g.data(), g.size() * sizeof(float), cudaMemcpyHostToDevice, I.stream), "H2D whiten");
   const size_t n = (size_t)I.cur_nch * I.cur_nrange * I.cur_ndopp;
-  k_scale_rd<<<(unsigned)std::min<size_t>(65535, (n + 255) / 256), 256, 0, I.stream>>>((zC*)I.rd.p, (const float*)I.whiten.p, I.cur_nrange, I.cur_ndopp, n);
+  k_scale_rd<<<(unsigned)std::min<size_t>(65535, (n + 255) / 256), 256, 0, I.stream>>>((zC*)I.rd.p, (const float*)I.whiten.p, I.cur_nrange, I.cur_ndopp, n, per_cell);
   cuda_check(cudaStreamSynchronize(I.stream), "sync whiten");
-  for (size_t j = 0; j < I.cached.rd.v.size(); ++j) I.cached.rd.v[j] *= g[j / I.cur_ndopp];   // keep detect()'s host copy in step
+  for (size_t j = 0; j < I.cached.rd.v.size(); ++j) I.cached.rd.v[j] *= per_cell ? g[j] : g[j / I.cur_ndopp];   // keep detect()'s host copy in step
 }
 
 const std::vector<float>& CudaCoherent::last_envelope() const { return impl_->last_E; }

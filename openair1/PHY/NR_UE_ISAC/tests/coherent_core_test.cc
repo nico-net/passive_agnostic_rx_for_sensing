@@ -1,5 +1,6 @@
 // openair1/PHY/NR_UE_ISAC/tests/coherent_core_test.cc
 #include "coherent_core.h"
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -198,6 +199,29 @@ int main() {
   // scipy.special.gammainccinv(700, 1e-4), gammainccinv(2000, 1e-4).
   require(std::abs(gamma_upper_quantile(700, 1e-4) / 802.6984979193063 - 1) < 1e-9, "Q^-1(700,1e-4)");
   require(std::abs(gamma_upper_quantile(2000, 1e-4) / 2170.611882032139 - 1) < 1e-9, "Q^-1(2000,1e-4)");
+  // --- notch-leakage whitening on a SPARSE CPI: 40 slots of which only 14 carry a row, irregularly (DL
+  // grant gaps). Its Doppler pedestal is too high for the range-bin median floor, so the floor of every
+  // tested cell is predicted from the notch energy spread by the waveform ambiguity: the leakage of a
+  // drifting in-notch wall must stop exceeding the per-cell threshold. (Movers in such CPIs can be masked
+  // by their own notch pedestal -- documented limit in coherent_core.cc.)
+  { std::array<double, kCh> wall{}; for (uint32_t i = 0; i < 4; ++i) wall[i] = los[i] + 15.0 / kC;
+    const double step = 1.0 / (40 * 2 * slot_duration_s(30000));
+    const uint32_t keep[] = {0, 1, 2, 5, 9, 10, 14, 20, 21, 27, 30, 33, 38, 39};
+    CfrWindow w = make_window(40, {{los, 1.0, 0.0}, {wall, 0.5, 0.5 * step}}, {0, 1.1, -2.0, 0.4}, 0, 64, 21);
+    for (uint32_t r = 0; r < w.rows; ++r)
+      if (std::find(std::begin(keep), std::end(keep), r) == std::end(keep))
+        for (uint32_t k = 0; k < w.subcarriers; ++k) w.observed[w.cell(r, k)] = 0;
+    const coherent::Axes a = derive_axes(w, vol, g, 50.0);
+    require(a.valid && a.tested_dopp.size() > 8, "sparse CPI axes with room outside the notch");
+    const LosEstimate L = find_los(w, a, 1e-4, &geo);
+    RdResult R = range_doppler(w, a, L, estimate_row_sync(w, a, L));
+    const double pfa = detect_params(a, envelope_grid(vol, a), 1.0).pfa, thr = -std::log(pfa);
+    auto count = [&]() { int n = 0; for (uint32_t i = 0; i < kCh; ++i) if (R.los_found[i])
+      for (uint32_t m = 0; m < a.n_range; ++m) for (uint32_t d : a.tested_dopp) n += std::norm(R.rd.v[R.rd.idx(i, m, d)]) / R.noise[i] > thr; return n; };
+    const int before = count(); WhitenInfo wi; whiten_range_clutter(R, pfa, &wi); const int after = count();
+    std::printf("  sparse CPI: ped %.3f (bound %.3f) mode %d; clutter cells over threshold %d -> %d\n", wi.ped, wi.bound, wi.mode, before, after);
+    require(wi.mode == 2 && before > 0 && after == 0, "sparse CPI: notch leakage whitened below the per-cell threshold");
+  }
   std::puts("coherent_core_test: PASS");
   return 0;
 }

@@ -236,14 +236,14 @@ extern "C" void nr_isac_init(void)
   char *p_source=nullptr,*p_sources=nullptr,*p_durations=nullptr,*p_array=nullptr,*p_broadside=nullptr;
   char *p_array_calibration=nullptr,*p_spatial_receivers=nullptr;
   char *p_out=nullptr,*p_rx_id=nullptr,*p_illum=nullptr,*p_report=nullptr,*p_endpoint=nullptr;
-  int p_coh=0,p_coh_ul=0,p_coh_long=0; double p_coh_sigma=0.1, p_coh_minage=3.0; char* p_coh_vol=nullptr;
+  int p_coh=0,p_coh_ul=0,p_coh_long=1; double p_coh_sigma=0.1, p_coh_minage=3.0; char* p_coh_vol=nullptr;
   paramdef_t params[] = {
     integer("enable","enable native passive sensing",PARAMFLAG_BOOL,&p_enable,0),
     integer("num_ues","decoded UE count (supported 1..4)",0,&p_num_ues,1),
     integer("gate_require_ul","1 = gate opens on a C-RNTI with DL AND UL CFR; 0 = DL CFR alone (DL-only)",PARAMFLAG_BOOL,&p_gate_ul,1),
     integer("coherent_enable","1 = coherent array fuser/tracker replaces per-receiver stages 1-6",PARAMFLAG_BOOL,&p_coh,0),
     integer("coherent_ul_enable","1 = also UL-illuminated focusing (built, default off)",PARAMFLAG_BOOL,&p_coh_ul,0),
-    integer("coherent_long_dwell","1 = long-dwell slow-target CPI (tests the short CPI's zero-Doppler notch)",PARAMFLAG_BOOL,&p_coh_long,0),
+    integer("coherent_long_dwell","1 (default) = long-dwell slow-target CPI (tests the short CPI's zero-Doppler notch); 0 = off",PARAMFLAG_BOOL,&p_coh_long,1),
     real("coherent_survey_sigma_m","declared antenna/gNB survey accuracy (m)",&p_coh_sigma,0.1),
     real("coherent_min_track_age_s","a track is confirmed (shown) only after it has lived this long (s)",&p_coh_minage,3.0),
     text("coherent_volume_m","surveillance volume xmin:xmax:ymin:ymax:zmin:zmax (m, ENU)",&p_coh_vol,"-15:15:-15:15:0:30"),
