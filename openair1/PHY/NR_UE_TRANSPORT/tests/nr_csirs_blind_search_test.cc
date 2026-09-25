@@ -4,9 +4,20 @@
 #include <vector>
 #include <random>
 #include <memory>
+#include <chrono>
+#include <cstdio>
 #include <gtest/gtest.h>
 extern "C" {
 #include "nr_csirs_blind_search.h"
+/* get_csi_mapping_parms() is linked in for the footprint tests; OAI's AssertFatal and CONFIG code
+ * reference these two from the softmodem's main(). */
+void *uniqCfg = nullptr;
+void exit_function(const char *file, const char *function, const int line, const char *s, const int a)
+{
+  (void)file; (void)function; (void)line; (void)a;
+  fprintf(stderr, "exit_function: %s\n", s ? s : "");
+  abort();
+}
 }
 
 // A reference grid: QPSK-ish symbols on `occupied` REs of `n`, zero elsewhere.
@@ -173,14 +184,225 @@ TEST(CsirsBlindEnum, EnumeratesRealConfigurationsOnly) {
   EXPECT_EQ(nr_csirs_blind_enumerate(c.data(), 10, 0, 2), -1);
 }
 
-TEST(CsirsBlindEnum, RowPortsMatchTheSpecTable) {
-  // TS 38.211 Table 7.4.1.5.3-1: rows 1,2 = 1 port; row 3 = 2 ports (fd-CDM2); rows 4,5 = 4 ports.
-  EXPECT_EQ(nr_csirs_blind_row_ports(1), 1);
-  EXPECT_EQ(nr_csirs_blind_row_ports(2), 1);
-  EXPECT_EQ(nr_csirs_blind_row_ports(3), 2);
-  EXPECT_EQ(nr_csirs_blind_row_ports(4), 4);
-  EXPECT_EQ(nr_csirs_blind_row_ports(5), 4);
-  EXPECT_EQ(nr_csirs_blind_row_ports(6), 0);  // not enumerated (needs multi-bit bitmaps)
+TEST(CsirsBlindEnum, RowPortsMatchTheSpecTableAllRows) {
+  // TS 38.211 Table 7.4.1.5.3-1, every row. Row 6 was 0 while only rows 1-5 were enumerated; rows
+  // 6-18 are now reachable through footprint matching, so their port counts are spec, not 0.
+  const int ports[18] = {1, 1, 2, 4, 4, 8, 8, 8, 12, 12, 16, 16, 24, 24, 24, 32, 32, 32};
+  for (int row = 1; row <= 18; row++)
+    EXPECT_EQ(nr_csirs_blind_row_ports((uint8_t)row), ports[row - 1]) << "row " << row;
+  EXPECT_EQ(nr_csirs_blind_row_ports(0), 0);
+  EXPECT_EQ(nr_csirs_blind_row_ports(19), 0);
+}
+
+// ---- rows 6-18: footprint-first search ----------------------------------------------------------
+
+static nr_csirs_candidate_t cand_of(int row, int fd, int l0, int l1, int density = 2)
+{
+  nr_csirs_candidate_t c{};
+  c.row = (uint8_t)row;
+  c.freq_domain = (uint16_t)fd;
+  c.symb_l0 = (uint8_t)l0;
+  c.symb_l1 = (uint8_t)l1;
+  c.freq_density = (uint8_t)density;
+  c.scramb_id = 382;
+  c.nr_of_rbs = 273;
+  return c;
+}
+
+TEST(CsirsBlindFootprint, EveryRowsFootprintHasPortsRes) {
+  // Density 1 puts exactly one RE per port per RB, so OAI's own mapping table must yield `ports`
+  // distinct REs for every wide row -- the property footprint matching relies on to tell rows apart.
+  for (int row = 6; row <= 18; row++) {
+    const int need = nr_csirs_blind_row_needs_bits((uint8_t)row);
+    ASSERT_GT(need, 0) << "row " << row;
+    const nr_csirs_candidate_t c = cand_of(row, (1 << need) - 1, 4, 8);
+    uint16_t m[NR_CSIRS_BLIND_NSYM];
+    const int n = nr_csirs_blind_footprint(&c, m);
+    EXPECT_EQ(n, nr_csirs_blind_row_ports((uint8_t)row)) << "row " << row;
+    int bits = 0;
+    for (int l = 0; l < NR_CSIRS_BLIND_NSYM; l++)
+      bits += __builtin_popcount(m[l]);
+    EXPECT_EQ(bits, n) << "row " << row << ": returned count disagrees with the mask";
+  }
+}
+
+TEST(CsirsBlindFootprint, RefusesACandidateThatWouldSpinTheGenerator) {
+  // row 16 needs 4 set bits; get_csi_mapping_parms()'s walk never ends with fewer.
+  const nr_csirs_candidate_t c = cand_of(16, 0x3, 4, 8);
+  uint16_t m[NR_CSIRS_BLIND_NSYM];
+  EXPECT_EQ(nr_csirs_blind_footprint(&c, m), -1);
+}
+
+// One FFT'd symbol in CRB order (rx_shift 0): power `on` at the subcarriers in `mask` of the RBs of
+// the chosen parity, `off` elsewhere, with a little deterministic ripple so the classifier cannot
+// rely on exact ties.
+static std::vector<int16_t> symbol_with(int n_rb, uint16_t mask, int on, int off, bool even, bool odd,
+                                        int n_fft, int shift)
+{
+  std::vector<int16_t> rx((size_t)2 * n_fft, 0);
+  unsigned seed = 11;
+  for (int i = 0; i < n_rb * 12; i++) {
+    const int rb = i / 12, k = i % 12;
+    const bool lit = ((mask >> k) & 1) && ((rb % 2 == 0) ? even : odd);
+    const int a = (lit ? on : off) + (int)(rand_r(&seed) % 7);
+    const int j = (i + shift) % n_fft;
+    rx[2 * j] = (int16_t)((rand_r(&seed) & 1) ? a : -a);
+    rx[2 * j + 1] = (int16_t)((rand_r(&seed) & 1) ? a : -a);
+  }
+  return rx;
+}
+
+TEST(CsirsBlindFootprint, SymbolProfileFindsTheLitSubcarriersPerParity) {
+  const int n_rb = 51, n_fft = 1024, shift = 1024 - 306;   // FFT-ordered like the real grid
+  const uint16_t m32 = 0x0F3C;                             // 8 of 12: a 32-port row's symbol
+  uint16_t e = 0, o = 0;
+  auto rx = symbol_with(n_rb, m32, 400, 40, true, true, n_fft, shift);
+  nr_csirs_blind_symbol_on(rx.data(), n_fft, shift, n_rb, &e, &o);
+  EXPECT_EQ(e, m32);
+  EXPECT_EQ(o, m32);
+  // Flat power (PDSCH everywhere, or noise): no structure, no hit.
+  rx = symbol_with(n_rb, 0, 400, 400, true, true, n_fft, shift);
+  nr_csirs_blind_symbol_on(rx.data(), n_fft, shift, n_rb, &e, &o);
+  EXPECT_EQ(e, 0);
+  EXPECT_EQ(o, 0);
+  // Density 0.5 (even RBs only): the odd-RB profile is flat.
+  rx = symbol_with(n_rb, m32, 400, 40, true, false, n_fft, shift);
+  nr_csirs_blind_symbol_on(rx.data(), n_fft, shift, n_rb, &e, &o);
+  EXPECT_EQ(e, m32);
+  EXPECT_EQ(o, 0);
+}
+
+// Drive the accumulator the way the RT path does: one symbol per visit, hits only when the visit
+// lands on a slot and symbol a resource occupies. The visited symbol is pseudo-random: a plain
+// s % 14 aliases against even periods (gcd(40, 14) = 2 would hide every even symbol forever).
+struct Res { uint16_t fp[NR_CSIRS_BLIND_NSYM]; int density; uint32_t period, offset; };
+static uint32_t xs(uint32_t &x) { x ^= x << 13; x ^= x >> 17; x ^= x << 5; return x; }
+static void run_visits(nr_csirs_blind_fp_t *acc, const std::vector<Res> &res, uint32_t n_slots,
+                       uint32_t aperiodic_every = 0, uint16_t aperiodic_mask = 0, int aperiodic_sym = -1)
+{
+  uint32_t x = 2463534242u;
+  for (uint32_t s = 0; s < n_slots; s++) {
+    const int l = (int)(xs(x) % NR_CSIRS_BLIND_NSYM);
+    uint16_t e = 0, o = 0;
+    for (const Res &r : res) {
+      if (s % r.period != r.offset) continue;
+      if (r.density != 1) e |= r.fp[l];
+      if (r.density != 0) o |= r.fp[l];
+    }
+    // traffic-driven energy on symbols aperiodic_sym and aperiodic_sym+1 (a double-symbol DM-RS)
+    if (aperiodic_every && (l == aperiodic_sym || l == aperiodic_sym + 1) && xs(x) % aperiodic_every == 0) {
+      e |= aperiodic_mask;
+      o |= aperiodic_mask;
+    }
+    nr_csirs_blind_fp_record(acc, l, e, o, s);
+  }
+}
+
+static bool has(const std::vector<nr_csirs_candidate_t> &v, int row, int fd, int l0, int l1, int d)
+{
+  for (const auto &c : v)
+    if (c.row == row && c.freq_domain == fd && c.symb_l0 == l0 && c.symb_l1 == l1 && c.freq_density == d)
+      return true;
+  return false;
+}
+
+TEST(CsirsBlindFootprint, MatchesA32PortResourceAndOnlyItsFootprintTwins) {
+  const nr_csirs_candidate_t truth = cand_of(16, 0x17, 5, 9);   // k-pairs 0,1,2,4; symbols 5,6,9,10
+  Res r{};
+  ASSERT_EQ(nr_csirs_blind_footprint(&truth, r.fp), 32);
+  r.density = 2; r.period = 40; r.offset = 3;
+  // A TRS (row 1, comb 4) in the SAME slots: a real cell carries several resources, so the measured
+  // footprint is a union and exact equality would find nothing.
+  Res trs{};
+  const nr_csirs_candidate_t t = cand_of(1, 0x8, 5, 0, 3);   // subcarriers 3,7,11: 7 and 11 lie outside the row-16 mask
+  ASSERT_EQ(nr_csirs_blind_footprint(&t, trs.fp), 3);
+  trs.density = 2; trs.period = 40; trs.offset = 3;
+  auto acc = std::make_unique<nr_csirs_blind_fp_t>();
+  run_visits(acc.get(), {r, trs}, 40 * 14 * 12);
+  std::vector<nr_csirs_candidate_t> out(64);
+  const auto t0 = std::chrono::steady_clock::now();
+  const int n = nr_csirs_blind_fp_match(acc.get(), 273, 382, out.data(), (int)out.size());
+  const auto us = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - t0).count();
+  printf("FOOTPRINT MATCH: %d candidates in %lld us\n", n, (long long)us);
+  out.resize(n > 0 ? n : 0);
+  // Exactly the two rows with this RE set: row 18 needs 4 consecutive symbols, and every narrower
+  // row (13, 11, 6, ...) fits inside it and must be dropped as a strict sub-footprint.
+  ASSERT_EQ(n, 2);
+  EXPECT_TRUE(has(out, 16, 0x17, 5, 9, 2)) << "the transmitted resource was not matched";
+  // Row 17 (cdm4) has the identical RE set; only the sequence stage can separate the two.
+  EXPECT_TRUE(has(out, 17, 0x17, 5, 9, 2));
+  for (const auto &c : out) {
+    uint16_t m[NR_CSIRS_BLIND_NSYM];
+    ASSERT_EQ(nr_csirs_blind_footprint(&c, m), 32) << "row " << (int)c.row << ": a strict sub-footprint survived";
+    for (int l = 0; l < NR_CSIRS_BLIND_NSYM; l++) EXPECT_EQ(m[l], r.fp[l]) << "row " << (int)c.row;
+    EXPECT_EQ(c.scramb_id, 382);
+    EXPECT_EQ(c.nr_of_rbs, 273);
+    EXPECT_TRUE(nr_csirs_blind_candidate_safe(&c));
+  }
+  // cdm_type follows the row: row 16 fd-CDM2 (1), row 17 cdm4-FD2-TD2 (2).
+  for (const auto &c : out) EXPECT_EQ(c.cdm_type, c.row == 16 ? 1 : 2);
+}
+
+TEST(CsirsBlindFootprint, DensityHalfIsMatchedOnItsOwnParity) {
+  const nr_csirs_candidate_t truth = cand_of(18, 0x0F, 6, 0, 0);   // cdm8, symbols 6-9, even RBs
+  Res r{};
+  ASSERT_EQ(nr_csirs_blind_footprint(&truth, r.fp), 32);
+  r.density = 0; r.period = 20; r.offset = 7;
+  auto acc = std::make_unique<nr_csirs_blind_fp_t>();
+  run_visits(acc.get(), {r}, 20 * 14 * 12);
+  std::vector<nr_csirs_candidate_t> out(64);
+  const int n = nr_csirs_blind_fp_match(acc.get(), 273, 382, out.data(), (int)out.size());
+  out.resize(n > 0 ? n : 0);
+  // Rows 16/17 with l1 = l0 + 2 occupy the same four consecutive symbols as row 18.
+  EXPECT_EQ(n, 3);
+  EXPECT_TRUE(has(out, 18, 0x0F, 6, 0, 0));
+  EXPECT_TRUE(has(out, 16, 0x0F, 6, 8, 0));
+  EXPECT_TRUE(has(out, 17, 0x0F, 6, 8, 0));
+  for (const auto &c : out) EXPECT_EQ(c.freq_density, 0) << "row " << (int)c.row;
+}
+
+TEST(CsirsBlindFootprint, RowsOneToFiveAndAperiodicEnergyProduceNoWideCandidate) {
+  // A cell with only a TRS pair and a row-5 CQI resource must leave the search exactly as it was.
+  Res trs4{}, trs8{}, r5{};
+  nr_csirs_candidate_t c = cand_of(1, 0x4, 4, 0, 3);
+  nr_csirs_blind_footprint(&c, trs4.fp);
+  c = cand_of(1, 0x4, 8, 0, 3);
+  nr_csirs_blind_footprint(&c, trs8.fp);
+  c = cand_of(5, 0x1, 6, 0);
+  nr_csirs_blind_footprint(&c, r5.fp);
+  trs4.density = trs8.density = r5.density = 2;
+  trs4.period = trs8.period = 40; trs4.offset = trs8.offset = 31;
+  r5.period = 160; r5.offset = 31;
+  auto acc = std::make_unique<nr_csirs_blind_fp_t>();
+  // ...plus type-2 double-symbol DM-RS-like pairs (subcarriers 0,1,6,7 on symbols 11,12) at
+  // traffic-driven slots: exactly a row-7/8 footprint, but not periodic, so it must not match.
+  run_visits(acc.get(), {trs4, trs8, r5}, 160 * 14 * 6, 3, 0x00C3, 11);
+  std::vector<nr_csirs_candidate_t> out(64);
+  EXPECT_EQ(nr_csirs_blind_fp_match(acc.get(), 273, 382, out.data(), (int)out.size()), 0);
+  // Control: the SAME pair energy made periodic IS matched, so it was periodicity that rejected it.
+  Res dm{};
+  for (int l = 11; l <= 12; l++) dm.fp[l] = 0x00C3;
+  dm.density = 2; dm.period = 40; dm.offset = 9;
+  auto acc2 = std::make_unique<nr_csirs_blind_fp_t>();
+  run_visits(acc2.get(), {dm}, 40 * 14 * 12);
+  const int n2 = nr_csirs_blind_fp_match(acc2.get(), 273, 382, out.data(), (int)out.size());
+  out.resize(n2 > 0 ? n2 : 0);
+  EXPECT_TRUE(has(out, 7, 0x9, 11, 0, 2));
+}
+
+TEST(CsirsBlindFootprint, AppendSkipsDuplicatesAndRespectsCapacity) {
+  auto st = std::make_unique<nr_csirs_blind_state_t>();
+  const int n0 = nr_csirs_blind_init(st.get(), 273, 382);
+  const nr_csirs_candidate_t c = cand_of(16, 0x17, 5, 9);
+  EXPECT_EQ(nr_csirs_blind_append(st.get(), &c), n0);
+  EXPECT_EQ(st->n, n0 + 1);
+  nr_csirs_candidate_t again = c;
+  again.scramb_id = 7;   // IDSWEEP may have patched the stored copy; still the same resource
+  EXPECT_EQ(nr_csirs_blind_append(st.get(), &again), -1);
+  EXPECT_EQ(st->n, n0 + 1);
+  st->n = NR_CSIRS_BLIND_MAX_CAND;
+  const nr_csirs_candidate_t d = cand_of(17, 0x17, 5, 9);
+  EXPECT_EQ(nr_csirs_blind_append(st.get(), &d), -1);
 }
 
 TEST(CsirsBlindEnum, RoundRobinVisitsEveryCandidate) {
