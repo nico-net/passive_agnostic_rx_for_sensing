@@ -217,6 +217,9 @@ const std::vector<Track>& CoherentTracker::step(double t_s, double t_cpi_s, cons
       t.llr += std::log(std::max(1e-300, 1 - pd)); ++t.misses;
       if (t.confirmed) pd_misses_ += 1;
     }
+    // The volume floor is the ground: a hard physical constraint (estimate projection onto z >= z0,
+    // no velocity into it). The other faces only bound surveillance, so they are not projected.
+    if (t.x[2] < V.z0) { t.x[2] = V.z0; t.x[5] = std::max(0.0, t.x[5]); }
     if (!t.confirmed && t.llr >= kConfirm) t.confirmed = true;
     // SPRT restart convention: a confirmed track's evidence is capped at the confirm threshold, so a
     // departed target is deleted after exactly kConfirm - kDelete of miss evidence, not after all the

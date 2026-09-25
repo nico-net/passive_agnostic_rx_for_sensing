@@ -164,7 +164,7 @@ function health(s){
 
 function banner(s){   // traffic off / no data must be impossible to miss
   const t=s.traffic||{}, b=$("#banner");
-  if(t.open===false){b.className="off";b.textContent="NO DL TRAFFIC — sensing paused: no detections, tracks cleared";return;}
+  if(t.open===false){b.className="off";b.textContent="NO DL TRAFFIC — sensing paused: no detections, tracks cleared"+(t.age_s!=null&&t.age_s>5?` (last receiver line ${t.age_s.toFixed(0)} s ago)`:"");return;}
   if(t.age_s!=null&&t.age_s>5){b.className="stale";b.textContent=`NO DATA from the receiver for ${t.age_s.toFixed(0)} s — map is NOT live`;return;}
   b.className="";b.textContent="";
 }

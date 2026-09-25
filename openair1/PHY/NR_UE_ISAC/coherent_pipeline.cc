@@ -96,9 +96,11 @@ void CoherentPipeline::submit(CfrWindow dl, std::vector<CfrWindow> ul, uint64_t 
 void CoherentPipeline::traffic(bool open)
 {
   std::lock_guard<std::mutex> l(mu_);
-  if (open && traffic_open_) return;           // steady "on": nothing to report
+  // Transitions only. Re-announcing a steady "off" every second reset the tracker every second
+  // (harmless live, where a closed gate admits no rows, but it broke every replay).
+  if (open == traffic_open_) return;
+  if (q_.size() >= 8) return;                   // never block the gate watchdog; retried next second
   traffic_open_ = open;
-  if (q_.size() >= 8) return;                   // never block the gate watchdog
   Job j; j.kind = 1; j.traffic = open; j.t = last_t_;
   q_.push_back(std::move(j));
   cv_.notify_all();

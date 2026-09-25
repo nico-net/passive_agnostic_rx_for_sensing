@@ -36,15 +36,18 @@ notch = last_rep["lambda_m"] * last_rep["notch_half_bins"] * last_rep["dopp_step
 cen = rx.mean(axis=0)
 unit = lambda v: v / np.linalg.norm(v)
 conf = [x for x in last["tracks"] if x["confirmed"]]
+import re
+vol = [float(x) for x in re.search(r'coherent_volume_m\s*=\s*"([^"]+)"', open(f"{O}/coherent.conf").read()).group(1).split(":")]
 print(f"t={t:.3f} s  range_res={res:.2f} m  notch |dL/dt| < {notch:.3f} m/s")
 for tg in tr["targets"]:
     p = np.array(tg["p0"]) + np.array(tg["v"]) * t; v = np.array(tg["v"])
     rate = v @ (unit(p - gnb) + unit(p - cen))
     per_ch = [v @ (unit(p - gnb) + unit(p - r)) for r in rx]
     dmin = min((np.linalg.norm(np.array(x["p"]) - p) for x in conf), default=1e9)
-    exempt = abs(rate) <= notch
+    inside = all(vol[2 * k] <= p[k] <= vol[2 * k + 1] for k in range(3))   # the tracker only covers the volume
+    exempt = abs(rate) <= notch or not inside
     print(f"  {tg['name']:<7} dL/dt {rate:+.3f} m/s (per ch {np.round(per_ch, 3)})  nearest confirmed {dmin:.2f} m"
-          + ("  EXEMPT (in zero-Doppler notch)" if exempt else ""))
+          + ("  EXEMPT (in zero-Doppler notch)" if abs(rate) <= notch else "") + ("" if inside else "  EXEMPT (left the volume)"))
     if not exempt: assert dmin < res, (tg["name"], dmin, res)
 assert all(x["p"][2] >= -1e-6 for r in trk for x in r["tracks"]), "below-ground track"
 assert len(conf) <= len(tr["targets"]) + 1, ("ghost tracks", len(conf))
