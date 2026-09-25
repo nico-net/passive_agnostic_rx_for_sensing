@@ -2,7 +2,15 @@
 /* GPU-resident coherent detect() -- see coherent_cuda_detect.h. Every formula is a transcription of
  * coherent_core.cc's detect() and its helpers (Response, fit_channel, static_term, leak_amp, choose,
  * walk, refit_all), which stay the CPU oracle. The small pure helpers are duplicated here because
- * coherent_core.cc keeps them in an anonymous namespace. */
+ * coherent_core.cc keeps them in an anonymous namespace.
+ *
+ * Precision (measured on two OTA recordings, see gpu-exact-report.md): everything that feeds a decision
+ * or a fit is FP64 and summed in the oracle's order where the order is sequential (rows of a path
+ * response, cells of a fit's J). On real CPIs the oracle is itself rounding-determined in places (a
+ * Newton step accepted on a J comparison at the rounding level, a joint refit stopped at its sweep cap,
+ * a Gauss-Newton position far outside the volume): there the oracle's own source rebuilt without FMA
+ * contraction, or re-run on 1-ulp-perturbed inputs, disagrees with it as often as this path does, and
+ * tests/coherent_cuda_parity_test.cc classifies such outputs against that rounding ensemble. */
 #include "coherent_cuda_detect.h"
 
 #include <cuda_runtime.h>
@@ -39,24 +47,9 @@ void cuda_check(cudaError_t s, const char* op) { if (s != cudaSuccess) throw std
 // ---- host duplicates of coherent_core.cc's anonymous-namespace helpers (kept identical) ----
 Vec3 unit(const Vec3& v) { const double n = norm(v); return n > 0 ? v / n : Vec3{}; }
 uint32_t n_used(const RdResult& R) { uint32_t n = 0; for (bool f : R.los_found) n += f; return n; }
-uint32_t dopp_half(const Axes& a, const Geometry& geo, const std::array<bool, kCh>& used, const Vec3& x)
-{
-  if (!(a.v_max_mps > 0) || !(a.dopp_step_hz > 0)) return 0;
-  Vec3 u[kCh]; for (uint32_t i = 0; i < kCh; ++i) u[i] = unit(x - geo.rx[i]);
-  double m = 0;
-  for (uint32_t i = 0; i < kCh; ++i) for (uint32_t j = i + 1; j < kCh; ++j) if (used[i] && used[j]) m = std::max(m, norm(u[i] - u[j]));
-  return (uint32_t)std::ceil(a.v_max_mps * m / (a.lambda_m * a.dopp_step_hz) - 1e-9);
-}
 bool dopp_ok(const Axes& a, long d)
 {
   return d >= 0 && d < (long)a.n_dopp && std::abs(a.dopp0_hz + d * a.dopp_step_hz) > a.notch_half_bins * a.dopp_step_hz;
-}
-cd kernel_at(const std::vector<cd>& B, long X, double x)
-{
-  const double u = (x + X) * RdResult::Waveform::kOvs;
-  if (!(u >= 0) || u >= (double)(B.size() - 1)) return 0.0;
-  const size_t u0 = (size_t)u; const double t = u - u0;
-  return B[u0] * (1 - t) + B[u0 + 1] * t;
 }
 bool sample_rd(const RdResult& R, uint32_t ch, double bin, uint32_t d, cd* out)
 {
@@ -70,11 +63,6 @@ bool sample_rd(const RdResult& R, uint32_t ch, double bin, uint32_t d, cd* out)
   const cd v0 = R.rd.v[R.rd.idx(ch, b0, d)], v1 = R.rd.v[R.rd.idx(ch, b1, d)];
   *out = std::polar(std::max(0.0, m), std::arg(v0) + t * std::remainder(std::arg(v1) - std::arg(v0), 2 * M_PI));
   return true;
-}
-double cubic4(double pm, double p0, double p1, double p2, double t)
-{
-  return -pm * t * (t - 1) * (t - 2) / 6 + p0 * (t + 1) * (t - 1) * (t - 2) / 2
-         - p1 * (t + 1) * t * (t - 2) / 2 + p2 * (t + 1) * t * (t - 1) / 6;
 }
 std::vector<double> v3(const Vec3& v) { return {v.x, v.y, v.z}; }
 Vec3 grad(const Geometry& geo, uint32_t i, const Vec3& x) { return unit(x - geo.tx) + unit(x - geo.rx[i]); }
@@ -115,211 +103,20 @@ struct MagInterp {
     return std::max(0.0, m);
   }
 };
+// The rows that carry a mask group (Response in coherent_core.cc) and their weighted mid-time tbar.
 struct Response {
-  const RdResult& R; const Axes& a;
   std::vector<uint32_t> rows;
-  std::vector<cd> ed, em;
   double tbar = 0;
-  explicit Response(const RdResult& R_) : R(R_), a(R_.rd.axes)
+  explicit Response(const RdResult& R)
   {
-    const auto& wf = R.wf;
+    const auto& wf = R.wf; const Axes& a = R.rd.axes;
     for (uint32_t r = 0; r < wf.grp.size(); ++r) if (wf.grp[r] >= 0) rows.push_back(r);
-    ed.resize((size_t)a.n_dopp * rows.size()); em.resize((size_t)a.n_range * rows.size());
-    for (uint32_t d = 0; d < a.n_dopp; ++d) for (size_t j = 0; j < rows.size(); ++j)
-      ed[d * rows.size() + j] = wf.w[rows[j]] / wf.wsum * std::polar(1.0, -2 * M_PI * (a.dopp0_hz + d * a.dopp_step_hz) * a.row_t_s[rows[j]]);
-    for (uint32_t m = 0; m < a.n_range; ++m) for (size_t j = 0; j < rows.size(); ++j)
-      em[m * rows.size() + j] = std::polar(1.0, 2 * M_PI * wf.fc[rows[j]] * m * a.delay_step_s);
     double ws = 0; for (uint32_t r : rows) { tbar += wf.w[r] * a.row_t_s[r]; ws += wf.w[r]; }
     if (ws > 0) tbar /= ws;
   }
-  struct Ph { std::vector<cd> pp; std::vector<double> pr; double p = 0, fb = 0; };
-  Ph phasors(double p, double fb) const
-  {
-    Ph h; h.pp.resize(rows.size()); h.pr.resize(rows.size()); h.p = p; h.fb = fb;
-    const double f = a.dopp0_hz + fb * a.dopp_step_hz;
-    for (size_t j = 0; j < rows.size(); ++j) {
-      h.pr[j] = p - (f / a.fc_hz) * (a.row_t_s[rows[j]] - tbar) / a.delay_step_s;
-      h.pp[j] = std::polar(1.0, 2 * M_PI * (f * a.row_t_s[rows[j]] - R.wf.fc[rows[j]] * h.pr[j] * a.delay_step_s));
-    }
-    return h;
-  }
-  cd at(uint32_t m, uint32_t d, const Ph& h) const
-  {
-    const auto& wf = R.wf;
-    const cd* e = &ed[(size_t)d * rows.size()]; const cd* f = &em[(size_t)m * rows.size()];
-    cd acc = 0;
-    for (size_t j = 0; j < rows.size(); ++j) acc += e[j] * f[j] * h.pp[j] * kernel_at(wf.B[wf.grp[rows[j]]], wf.X, m - h.pr[j]);
-    return acc;
-  }
 };
-struct ChanFit {
-  double p = 0, fb = 0, sp = 0, sf = 0, sA = 0, snr = 0; cd A = 0; bool ok = false;
-  std::vector<Response::Ph> grid;
-  std::vector<cd> M;
-  std::vector<std::vector<cd>> stat;
-};
-cd static_cell(const RdResult& R, const ChanFit& f, uint32_t m, uint32_t d)
-{
-  const Axes& a = R.rd.axes; const auto& wf = R.wf;
-  const double x = m - f.p;
-  const cd rot = std::polar(1.0, 2 * M_PI * a.scs_hz * x * a.delay_step_s);
-  cd ph = std::polar(1.0, 2 * M_PI * (-(wf.sc / 2.0)) * a.scs_hz * x * a.delay_step_s), sv = 0;
-  const cf* Qd = &wf.Q[(size_t)d * wf.sc];
-  for (uint32_t k = 0; k < wf.sc; ++k, ph *= rot) if (Qd[k] != cf(0)) sv += ph * f.M[k] * cd(Qd[k]);
-  return -sv;
-}
-cd path_value(const Response& rs, const ChanFit& f, uint32_t m, uint32_t d)
-{
-  if (!f.ok) return 0.0;
-  return f.A * (rs.at(m, d, f.grid[0]) + static_cell(rs.R, f, m, d));
-}
-thread_local uint64_t g_j_evals = 0;
-ChanFit fit_channel(const Response& rs, uint32_t ch, double p0, double fb0, long hm_r, long hm_d, double z,
-                    const std::vector<ChanFit*>& others)
-{
-  const RdResult& R = rs.R; const Axes& a = rs.a;
-  ChanFit f;
-  struct Cell { uint32_t m, d; cd y; };
-  std::vector<Cell> cells;
-  for (long m = std::lround(p0) - hm_r; m <= std::lround(p0) + hm_r; ++m)
-    for (long d = std::lround(fb0) - hm_d; d <= std::lround(fb0) + hm_d; ++d)
-      if (m >= 0 && m < (long)a.n_range && dopp_ok(a, d))
-        cells.push_back({(uint32_t)m, (uint32_t)d, cd(R.rd.v[R.rd.idx(ch, (uint32_t)m, (uint32_t)d)])});
-  if (cells.size() < 4) return f;
-  auto model = [&](double p, double fb, std::vector<cd>* ac) {
-    const Response::Ph h = rs.phasors(p, fb); ac->resize(cells.size());
-    for (size_t c = 0; c < cells.size(); ++c) (*ac)[c] = rs.at(cells[c].m, cells[c].d, h);
-  };
-  for (Cell& c : cells) for (ChanFit* o : others) c.y -= path_value(rs, *o, c.m, c.d);
-  std::vector<cd> y(cells.size()); for (size_t c = 0; c < cells.size(); ++c) y[c] = cells[c].y;
-  auto J = [&](double p, double fb, cd* A) {
-    ++g_j_evals;
-    std::vector<cd> ac; model(p, fb, &ac);
-    cd num = 0; double den = 0;
-    for (size_t c = 0; c < cells.size(); ++c) { num += y[c] * std::conj(ac[c]); den += std::norm(ac[c]); }
-    if (A) *A = den > 0 ? num / den : cd(0);
-    return den > 0 ? std::norm(num) / den : 0.0;
-  };
-  double p = p0, fb = fb0;
-  auto search = [&](double st) {
-    double best = J(p, fb, nullptr);
-    for (; st >= 0.05;) {
-      double bp = p, bf = fb;
-      for (int u = -1; u <= 1; ++u) for (int v = -1; v <= 1; ++v) if (u || v) {
-        const double j = J(p + u * st, fb + v * st, nullptr); if (j > best) { best = j; bp = p + u * st; bf = fb + v * st; }
-      }
-      if (bp == p && bf == fb) st /= 2; else { p = bp; fb = bf; }
-    }
-    for (int it = 0; it < 20; ++it) {
-      const double h = 1e-3, j0 = best;
-      const double jpp = J(p + h, fb, nullptr), jpm = J(p - h, fb, nullptr), jfp = J(p, fb + h, nullptr), jfm = J(p, fb - h, nullptr);
-      const double jpf = J(p + h, fb + h, nullptr), jmm = J(p - h, fb - h, nullptr);
-      const double gp = (jpp - jpm) / (2 * h), gf = (jfp - jfm) / (2 * h);
-      const double hpp = (jpp - 2 * j0 + jpm) / (h * h), hff = (jfp - 2 * j0 + jfm) / (h * h);
-      const double hpf = (jpf + jmm - jpp - jpm - jfp - jfm + 2 * j0) / (2 * h * h);
-      const double det = hpp * hff - hpf * hpf;
-      if (!(hpp < 0 && det > 0)) break;
-      double dp = -(hff * gp - hpf * gf) / det, df = -(hpp * gf - hpf * gp) / det;
-      double jn = J(p + dp, fb + df, nullptr);
-      for (int k = 0; k < 20 && !(jn >= j0); ++k) { dp /= 2; df /= 2; jn = J(p + dp, fb + df, nullptr); }
-      if (!(jn >= j0)) break;
-      p += dp; fb += df; best = jn;
-      if (std::hypot(dp, df) < 1e-5) break;
-    }
-  };
-  const auto& wf = R.wf;
-  auto set_M = [&](double fbv) {
-    const double fhz = a.dopp0_hz + fbv * a.dopp_step_hz;
-    f.M.assign(wf.sc, cd(0)); std::vector<uint32_t> cnt(wf.sc, 0);
-    for (uint32_t r = 0; r < wf.grp.size(); ++r) {
-      const cd e = std::polar(1.0, 2 * M_PI * fhz * a.row_t_s[r]);
-      const uint8_t* mk = &wf.mask[(size_t)r * wf.sc];
-      for (uint32_t k = wf.lo[r]; k <= wf.hi[r]; ++k) if (mk[k]) { f.M[k] += e; ++cnt[k]; }
-    }
-    for (uint32_t k = 0; k < wf.sc; ++k) if (cnt[k]) f.M[k] /= (double)cnt[k];
-  };
-  search(0.25);
-  set_M(fb);
-  for (int pass = 0; pass < 2; ++pass) {
-    cd A; J(p, fb, &A);
-    for (size_t c = 0; c < cells.size(); ++c) {
-      const cf* Qd = &wf.Q[(size_t)cells[c].d * wf.sc];
-      const double x = cells[c].m - p;
-      const cd rot = std::polar(1.0, 2 * M_PI * a.scs_hz * x * a.delay_step_s);
-      cd ph = std::polar(1.0, 2 * M_PI * (-(wf.sc / 2.0)) * a.scs_hz * x * a.delay_step_s), sv = 0;
-      for (uint32_t k = 0; k < wf.sc; ++k, ph *= rot) if (Qd[k] != cf(0)) sv += ph * f.M[k] * cd(Qd[k]);
-      y[c] = cells[c].y + A * sv;
-    }
-    search(0.0);
-  }
-  f.p = p; f.fb = fb; J(p, fb, &f.A);
-  const size_t N = cells.size(); const double h = 1e-3;
-  std::vector<cd> a0, ap, am, fp, fm;
-  model(p, fb, &a0); model(p + h, fb, &ap); model(p - h, fb, &am); model(p, fb + h, &fp); model(p, fb - h, &fm);
-  std::vector<std::array<cd, 4>> Dc(N);
-  for (size_t c = 0; c < N; ++c)
-    Dc[c] = {f.A * (ap[c] - am[c]) / (2 * h), f.A * (fp[c] - fm[c]) / (2 * h), a0[c], cd(0, 1) * a0[c]};
-  const long hr = 2 * hm_r, hd = 2 * hm_d, nd = 2 * hd + 1;
-  std::vector<cd> gam((size_t)(2 * hr + 1) * nd); std::vector<uint8_t> have(gam.size(), 0);
-  Matrix DtD(4, 4), DCD(4, 4);
-  for (size_t c = 0; c < N; ++c) {
-    for (int u = 0; u < 4; ++u) for (int v = 0; v < 4; ++v) DtD(u, v) += (std::conj(Dc[c][u]) * Dc[c][v]).real();
-    for (size_t e = 0; e < N; ++e) {
-      const long om = (long)cells[c].m - (long)cells[e].m, od = (long)cells[c].d - (long)cells[e].d;
-      const size_t gi = (size_t)((om + hr) * nd + od + hd);
-      if (!have[gi]) { gam[gi] = R.noise_corr((double)om, (double)od); have[gi] = 1; }
-      for (int u = 0; u < 4; ++u) for (int v = 0; v < 4; ++v) DCD(u, v) += (std::conj(Dc[c][u]) * gam[gi] * Dc[e][v]).real();
-    }
-  }
-  for (int u = 0; u < 4; ++u) for (int v = 0; v < 4; ++v) DCD(u, v) *= R.noise[ch] / 2;
-  double rr = 0; for (size_t c = 0; c < N; ++c) rr += std::norm(y[c] - f.A * a0[c]);
-  f.snr = std::norm(f.A) / std::max(R.noise[ch], N > 2 ? rr / (N - 2) : 0.0);
-  const Matrix Ai = inverse(DtD), cov = Ai * DCD * Ai;
-  f.sp = std::sqrt(std::max(0.0, cov(0, 0))); f.sf = std::sqrt(std::max(0.0, cov(1, 1)));
-  f.sA = std::sqrt(std::max(0.0, cov(2, 2) + cov(3, 3)));
-  std::vector<double> ps{p}, fs{fb};
-  if (z * f.sp > 1e-6) { ps.push_back(p - z * f.sp); ps.push_back(p + z * f.sp); }
-  if (z * f.sf > 1e-6) { fs.push_back(fb - z * f.sf); fs.push_back(fb + z * f.sf); }
-  for (double pv : ps) for (double fv : fs) f.grid.push_back(rs.phasors(pv, fv));
-  set_M(fb);
-  f.stat.resize(a.n_dopp);
-  f.ok = true;
-  return f;
-}
-const std::vector<cd>& static_term(const RdResult& R, ChanFit& f, uint32_t d)
-{
-  std::vector<cd>& out = f.stat[d];
-  if (!out.empty()) return out;
-  const Axes& a = R.rd.axes; const auto& wf = R.wf; const long N = a.n_fft;
-  std::vector<cd> buf(N, cd(0));
-  for (uint32_t k = 0; k < wf.sc; ++k) {
-    const cf q = wf.Q[(size_t)d * wf.sc + k];
-    if (q == cf(0)) continue;
-    const double fk = ((double)k - wf.sc / 2.0) * a.scs_hz;
-    const long qi = (long)k - (long)(wf.sc / 2);
-    buf[(size_t)(((qi % N) + N) % N)] += f.M[k] * cd(q) * std::polar(1.0, -2 * M_PI * fk * f.p * a.delay_step_s);
-  }
-  fft_inplace(buf, true);
-  out.resize(a.n_range);
-  for (uint32_t m = 0; m < a.n_range; ++m) out[m] = -buf[m] * (double)N;
-  return out;
-}
-double leak_amp(const Response& rs, ChanFit& f, double bin, uint32_t d, double z)
-{
-  if (!f.ok) return 0.0;
-  const uint32_t n = rs.a.n_range;
-  if (n == 0 || !(bin >= 0) || bin > (double)(n - 1)) return 0.0;
-  const long b0 = (long)bin; const double t = bin - b0;
-  uint32_t b[4]; for (int j = 0; j < 4; ++j) b[j] = (uint32_t)std::clamp(b0 - 1 + j, 0L, (long)n - 1);
-  const std::vector<cd>& st = static_term(rs.R, f, d);
-  double best = 0;
-  for (size_t q = 0; q < f.grid.size(); ++q) {
-    double v[4];
-    for (int j = 0; j < 4; ++j) v[j] = std::abs(rs.at(b[j], d, f.grid[q]) + st[b[j]]);
-    best = std::max(best, cubic4(v[0], v[1], v[2], v[3], t));
-  }
-  return best * (std::abs(f.A) + z * f.sA);
-}
+// One channel of an accepted detection's final fit (coherent_core.cc's ChanFit, the fields detect() reports).
+struct ChanFit { double p = 0, fb = 0, sp = 0, sf = 0, sA = 0, snr = 0; cd A = 0; bool ok = false; };
 
 
 // ================================ device side ================================
@@ -480,102 +277,187 @@ struct DPk { double v, raw; uint32_t d; };
 // column inside +-dhv of d, sorted (stable insertion sort = std::sort's for <= 16 peaks), pruned by the
 // bound, then the exact branch-and-bound DFS over velocity-consistent combinations. pk: this thread's
 // scratch, kCh * W entries. Returns ec, or -1 (me.d/me.pw untouched then; me.bin always set).
-__device__ double d_choose(const DAxes& a, const DGeo& g, DAcc& me, long d, uint32_t dhv, double thr,
-                           const float* mag, const float* magc, DPk* pk, uint32_t W)
+// coherent_core.cc's choose(), by ONE WARP: per channel the local Doppler maxima of the (magc ? residual :
+// raw) column inside +-dhv of d, sorted descending (stable: the order the oracle's per-channel lists come
+// out in on every recorded candidate), pruned by the bound; then the oracle's exact branch-and-bound DFS
+// over velocity-consistent combinations, run by lane 0 on the lists in shared memory. Scratch per warp:
+// choose_smem(W) bytes. Returns ec (every lane) or -1 (me.d/me.pw untouched then; me.bin always set).
+__host__ __device__ inline size_t choose_smem(uint32_t W) { return (size_t)W * (2 * sizeof(double) + (kCh + 1) * sizeof(DPk)) + 2 * kCh * sizeof(uint32_t); }
+__device__ double w_choose(const DAxes& a, const DGeo& g, DAcc& me, long d, uint32_t dhv, double thr, const float* mag, const float* magc,
+                           char* scr, uint32_t W)
 {
-  const long w0 = d - (long)dhv, w1 = d + (long)dhv;
-  uint32_t np[kCh] = {0, 0, 0, 0}; double pmax[kCh] = {0, 0, 0, 0};
+  const uint32_t lane = threadIdx.x & 31;
+  double* col = (double*)scr; double* raw = col + W; DPk* pk = (DPk*)(raw + W); DPk* tmp = pk + kCh * W; uint32_t* np = (uint32_t*)(tmp + W);
+  const long w0 = d - (long)dhv, w1 = d + (long)dhv; const uint32_t nw = (uint32_t)(w1 - w0 + 1);
   const uint32_t nr = a.n_range, nd = a.n_dopp;
-  for (uint32_t i = 0; i < kCh; ++i) if (g.used[i]) {
+  double pmax[kCh] = {0, 0, 0, 0};
+  for (uint32_t i = 0; i < kCh; ++i) {
+    if (!g.used[i]) { if (lane == 0) np[i] = 0; continue; }
     me.bin[i] = d_bin(g, a, me.x, i);
     const DMag mi(nr, me.bin[i]);
-    DPk* P = pk + (size_t)i * W;
-    auto colv = [&](long e, double* raw) -> double {        // col[e - w0] (-1 = not tested) and rw
-      *raw = 0.0;
-      if (!mi.ok || !d_dopp_ok(a, e)) return -1.0;
-      const double m = mi.at(mag, nr, nd, i, (uint32_t)e); *raw = m * m / g.noise[i];
-      const double mr = magc ? mi.at(magc, nr, nd, i, (uint32_t)e) : m;
-      return mr * mr / g.noise[i];
-    };
-    double rprev = 0, rcur = 0, rnext = 0;
-    double prev = -1.0, cur = colv(w0, &rcur), next = 0;
-    for (long e = w0; e <= w1; ++e) {
-      next = e < w1 ? colv(e + 1, &rnext) : -1.0;
-      const double v = cur;
-      if (v >= 0 && (e == w0 || v >= prev) && (e == w1 || v >= next)) {
-        uint32_t k = np[i]++;
-        while (k > 0 && P[k - 1].v < v) { P[k] = P[k - 1]; --k; }   // stable descending insertion
-        P[k] = DPk{v, rcur, (uint32_t)e};
+    for (uint32_t q = lane; q < nw; q += 32) {
+      const long e = w0 + (long)q; double c = -1.0, rw = 0.0;
+      if (mi.ok && d_dopp_ok(a, e)) {
+        const double m = mi.at(mag, nr, nd, i, (uint32_t)e); rw = m * m / g.noise[i];
+        const double mr = magc ? mi.at(magc, nr, nd, i, (uint32_t)e) : m;
+        c = mr * mr / g.noise[i];
       }
-      prev = cur; cur = next; rprev = rcur; rcur = rnext;
+      col[q] = c; raw[q] = rw;
     }
-    (void)rprev;
-    if (np[i] == 0) {
-      const long dc = d < 0 ? 0 : (d > (long)nd - 1 ? (long)nd - 1 : d);
-      double raw = 0; if (dc >= w0 && dc <= w1) colv(dc, &raw);
-      P[0] = DPk{0.0, raw, (uint32_t)dc}; np[i] = 1;
+    __syncwarp();
+    // peaks, compacted in increasing e (ballot + prefix count)
+    DPk* P = pk + (size_t)i * W; uint32_t base = 0;
+    for (uint32_t q0 = 0; q0 < nw; q0 += 32) {
+      const uint32_t q = q0 + lane;
+      bool pkq = false;
+      if (q < nw) { const double v = col[q]; pkq = v >= 0 && (q == 0 || v >= col[q - 1]) && (q == nw - 1 || v >= col[q + 1]); }
+      const unsigned m = __ballot_sync(0xffffffffu, pkq);
+      if (pkq) { const uint32_t o = base + __popc(m & ((1u << lane) - 1)); P[o] = DPk{col[q], raw[q], (uint32_t)(w0 + (long)q)}; }
+      base += __popc(m);
     }
+    __syncwarp();
+    // stable descending sort: each lane ranks its peaks (#greater + #equal-before), then scatters them
+    if (base > 1) {
+      for (uint32_t j = lane; j < base; j += 32) tmp[j] = P[j];
+      __syncwarp();
+      for (uint32_t j = lane; j < base; j += 32) {
+        const double v = tmp[j].v; uint32_t r = 0;
+        for (uint32_t k = 0; k < base; ++k) { const double u = tmp[k].v; r += (u > v) || (u == v && k < j); }
+        P[r] = tmp[j];
+      }
+      __syncwarp();
+    }
+    if (lane == 0) {
+      if (base == 0) {
+        const long dc = d < 0 ? 0 : (d > (long)nd - 1 ? (long)nd - 1 : d);
+        P[0] = DPk{0.0, (dc >= w0 && dc <= w1) ? raw[dc - w0] : 0.0, (uint32_t)dc}; base = 1;
+      }
+      np[i] = base;
+    }
+    __syncwarp();
     pmax[i] = P[0].v;
   }
-  double sum_max = 0; for (uint32_t i = 0; i < kCh; ++i) sum_max += pmax[i];
-  for (uint32_t i = 0; i < kCh; ++i) if (g.used[i]) {
-    const double others = sum_max - pmax[i]; const DPk* P = pk + (size_t)i * W;
-    while (np[i] > 1 && !(P[np[i] - 1].v + others > thr)) --np[i];
-  }
-  double nu[kCh] = {0, 0, 0, 0};
-  if (g.n_used == kCh) {
-    double gv[kCh][3];
-    for (uint32_t i = 0; i < kCh; ++i) { double u1[3], u2[3]; d_unit(me.x, g.tx, u1); d_unit(me.x, g.rx[i], u2); for (int k = 0; k < 3; ++k) gv[i][k] = u1[k] + u2[k]; }
-    for (uint32_t i = 0; i < kCh; ++i) {
-      const double* r3[3]; uint32_t q = 0; for (uint32_t j = 0; j < kCh; ++j) if (j != i) r3[q++] = gv[j];
-      const double cx = r3[1][1] * r3[2][2] - r3[1][2] * r3[2][1], cy = r3[1][2] * r3[2][0] - r3[1][0] * r3[2][2], cz = r3[1][0] * r3[2][1] - r3[1][1] * r3[2][0];
-      nu[i] = ((i & 1) ? -1.0 : 1.0) * (r3[0][0] * cx + r3[0][1] * cy + r3[0][2] * cz);
+  // Pruning, velocity-consistency weights (lane 0), then the branch-and-bound over the used channels:
+  // the (first, second) level pairs are shared out to the lanes in lexicographic order and every lane
+  // prunes against the best energy found by ANY lane (shared); each lane keeps its lexicographically
+  // first maximum, and the warp takes the lexicographically first among the maxima. That is the
+  // sequential DFS's answer (it returns the lexicographically first combination of maximal energy:
+  // a branch is only pruned when it cannot beat an energy already found) up to exact ties of two
+  // different combinations' summed energies.
+  __shared__ unsigned long long sh_best[32];   // per warp in the block (<= 32 warps)
+  __shared__ unsigned sh_next[32];
+  __shared__ double sh_nu[32][kCh];
+  __shared__ uint32_t sh_n[32][kCh];
+  const uint32_t wib = threadIdx.x >> 5;
+  if (lane == 0) {
+    uint32_t n[kCh]; for (uint32_t i = 0; i < kCh; ++i) n[i] = np[i];
+    double sum_max = 0; for (uint32_t i = 0; i < kCh; ++i) sum_max += pmax[i];
+    for (uint32_t i = 0; i < kCh; ++i) if (g.used[i]) {
+      const double others = sum_max - pmax[i]; const DPk* P = pk + (size_t)i * W;
+      while (n[i] > 1 && !(P[n[i] - 1].v + others > thr)) --n[i];
     }
+    double nu[kCh] = {0, 0, 0, 0};
+    if (g.n_used == kCh) {
+      double gv[kCh][3];
+      for (uint32_t i = 0; i < kCh; ++i) { double u1[3], u2[3]; d_unit(me.x, g.tx, u1); d_unit(me.x, g.rx[i], u2); for (int k = 0; k < 3; ++k) gv[i][k] = u1[k] + u2[k]; }
+      for (uint32_t i = 0; i < kCh; ++i) {
+        const double* r3[3]; uint32_t q = 0; for (uint32_t j = 0; j < kCh; ++j) if (j != i) r3[q++] = gv[j];
+        const double cx = r3[1][1] * r3[2][2] - r3[1][2] * r3[2][1], cy = r3[1][2] * r3[2][0] - r3[1][0] * r3[2][2], cz = r3[1][0] * r3[2][1] - r3[1][1] * r3[2][0];
+        nu[i] = ((i & 1) ? -1.0 : 1.0) * (r3[0][0] * cx + r3[0][1] * cy + r3[0][2] * cz);
+      }
+    }
+    for (uint32_t i = 0; i < kCh; ++i) { sh_nu[wib][i] = nu[i]; sh_n[wib][i] = n[i]; }
+    sh_best[wib] = __double_as_longlong(thr); sh_next[wib] = 0;
   }
-  double nu_abs = 0; for (uint32_t i = 0; i < kCh; ++i) nu_abs += fabs(nu[i]);
+  __syncwarp();
+  double nu[kCh], nu_abs = 0; uint32_t n[kCh];
+  for (uint32_t i = 0; i < kCh; ++i) { nu[i] = sh_nu[wib][i]; n[i] = sh_n[wib][i]; nu_abs += fabs(nu[i]); }
   double rest[kCh + 1]; rest[kCh] = 0;
   for (int i = kCh - 1; i >= 0; --i) rest[i] = rest[i + 1] + (g.used[i] ? pmax[i] : 0.0);
-  // Iterative form of the recursive DFS (same visiting order, same bound and break).
-  double ec = -1; uint32_t idx[kCh] = {0, 0, 0, 0}, pick[kCh] = {0, 0, 0, 0};
-  double es[kCh + 1], cs[kCh + 1]; es[0] = 0; cs[0] = 0;
-  int lvl = 0; uint32_t jn[kCh + 1] = {0, 0, 0, 0, 0};   // next peak index to try per level
+  uint32_t L[kCh], nL = 0; for (uint32_t i = 0; i < kCh; ++i) if (g.used[i]) L[nL++] = i;
   const double f0 = a.dopp0_hz, fstep = a.dopp_step_hz;
-  while (lvl >= 0) {
-    if (lvl == (int)kCh) {
-      if (!(nu_abs > 0 && fabs(cs[kCh]) > fstep * nu_abs) && es[kCh] > ec) { ec = es[kCh]; for (uint32_t i = 0; i < kCh; ++i) pick[i] = idx[i]; }
-      --lvl; continue;
+  double my_e = -1; uint32_t my_pick[kCh] = {0, 0, 0, 0};
+  volatile unsigned long long* best = &sh_best[wib];
+  auto leaf = [&](double e, double c, const uint32_t* idx) {
+    if (!(nu_abs > 0 && fabs(c) > fstep * nu_abs) && e > my_e && e > thr) {
+      my_e = e; for (uint32_t i = 0; i < kCh; ++i) my_pick[i] = idx[i];
+      atomicMax((unsigned long long*)best, (unsigned long long)__double_as_longlong(e));
     }
-    if (!g.used[lvl]) {
-      if (jn[lvl] == 0) { jn[lvl] = 1; idx[lvl] = 0; es[lvl + 1] = es[lvl]; cs[lvl + 1] = cs[lvl]; jn[lvl + 1] = 0; ++lvl; }
-      else { jn[lvl] = 0; --lvl; }
-      continue;
+  };
+  if (nL == 0) { if (lane == 0) { const uint32_t z[kCh] = {0, 0, 0, 0}; leaf(0.0, 0.0, z); } }
+  else {
+    const uint32_t n0 = n[L[0]], n1 = nL > 1 ? n[L[1]] : 1, units = n0 * n1;
+    for (;;) {
+      const unsigned u = lane == 0 ? atomicAdd(&sh_next[wib], 32u) : 0;   // 32 units per warp step, lane-interleaved
+      const unsigned ub = __shfl_sync(0xffffffffu, u, 0);
+      if (ub >= units) break;
+      const unsigned my = ub + lane;
+      if (my < units) {
+        const uint32_t j0 = my / n1, j1 = my % n1;
+        uint32_t idx[kCh] = {0, 0, 0, 0};
+        const DPk* P0 = pk + (size_t)L[0] * W;
+        if (P0[j0].v + rest[L[0] + 1] > __longlong_as_double((long long)*best)) {
+          idx[L[0]] = j0;
+          double es1 = 0.0 + P0[j0].v, cs1 = 0.0 + nu[L[0]] * (f0 + P0[j0].d * fstep);
+          if (nL == 1) leaf(es1, cs1, idx);
+          else {
+            const DPk* P1 = pk + (size_t)L[1] * W;
+            if (es1 + P1[j1].v + rest[L[1] + 1] > __longlong_as_double((long long)*best)) {
+              idx[L[1]] = j1;
+              const double es2 = es1 + P1[j1].v, cs2 = cs1 + nu[L[1]] * (f0 + P1[j1].d * fstep);
+              if (nL == 2) leaf(es2, cs2, idx);
+              else {
+                // levels 2.. (at most two more): sequential DFS with the same bound and break
+                double es[kCh + 1], cs[kCh + 1]; es[2] = es2; cs[2] = cs2;
+                int lvl = 2; uint32_t jn[kCh + 1] = {0, 0, 0, 0, 0};
+                while (lvl >= 2) {
+                  if (lvl == (int)nL) { leaf(es[lvl], cs[lvl], idx); --lvl; continue; }
+                  const uint32_t ch = L[lvl], j = jn[lvl]; const DPk* P = pk + (size_t)ch * W;
+                  if (j < n[ch] && es[lvl] + P[j].v + rest[ch + 1] > __longlong_as_double((long long)*best)) {
+                    jn[lvl] = j + 1; idx[ch] = j;
+                    es[lvl + 1] = es[lvl] + P[j].v; cs[lvl + 1] = cs[lvl] + nu[ch] * (f0 + P[j].d * fstep);
+                    jn[lvl + 1] = 0; ++lvl;
+                  } else { jn[lvl] = 0; --lvl; }
+                }
+              }
+            }
+          }
+        }
+      }
     }
-    const uint32_t j = jn[lvl]; const DPk* P = pk + (size_t)lvl * W;
-    if (j < np[lvl] && es[lvl] + P[j].v + rest[lvl + 1] > fmax(ec, thr)) {
-      jn[lvl] = j + 1; idx[lvl] = j;
-      es[lvl + 1] = es[lvl] + P[j].v; cs[lvl + 1] = cs[lvl] + nu[lvl] * (f0 + P[j].d * fstep);
-      jn[lvl + 1] = 0; ++lvl;
-    } else { jn[lvl] = 0; --lvl; }
   }
-  if (!(ec > thr)) return -1.0;
-  for (uint32_t i = 0; i < kCh; ++i) if (g.used[i]) { const DPk& q = pk[(size_t)i * W + pick[i]]; me.pw[i] = q.raw; me.d[i] = q.d; }
-  return ec;
+  // warp reduction: largest energy, ties -> lexicographically first combination
+  double ec = my_e; uint32_t pick[kCh]; for (uint32_t i = 0; i < kCh; ++i) pick[i] = my_pick[i];
+  for (int o = 16; o > 0; o >>= 1) {
+    const double oe = __shfl_xor_sync(0xffffffffu, ec, o);
+    uint32_t op[kCh]; for (uint32_t i = 0; i < kCh; ++i) op[i] = __shfl_xor_sync(0xffffffffu, pick[i], o);
+    bool take = oe > ec;
+    if (oe == ec) { int c = 0; for (uint32_t i = 0; i < kCh && !c; ++i) c = op[i] < pick[i] ? -1 : (op[i] > pick[i] ? 1 : 0); take = c < 0; }
+    if (take) { ec = oe; for (uint32_t i = 0; i < kCh; ++i) pick[i] = op[i]; }
+  }
+  if (lane == 0 && ec > thr) for (uint32_t i = 0; i < kCh; ++i) if (g.used[i]) { const DPk& q = pk[(size_t)i * W + pick[i]]; me.pw[i] = q.raw; me.d[i] = q.d; }
+  ec = __shfl_sync(0xffffffffu, ec, 0);
+  for (uint32_t i = 0; i < kCh; ++i) { me.pw[i] = __shfl_sync(0xffffffffu, me.pw[i], 0); me.d[i] = __shfl_sync(0xffffffffu, me.d[i], 0); }
+  __syncwarp();
+  return ec > thr ? ec : -1.0;
 }
+// One warp per candidate (blockDim = 32 * warps per block; dynamic smem = warps * choose_smem(W)).
 __global__ void k_choose_cand(DAxes a, DGeo g, DGrid G, const uint32_t* cand, uint32_t nc, size_t nv, const uint32_t* tested,
                               const uint32_t* okc, const uint32_t* dh, const double* nthr, const double* scale, const float* mag,
-                              DPk* scratch, uint32_t W, DAcc* out_me, double* out_ec, double* out_thr)
+                              uint32_t W, DAcc* out_me, double* out_ec, double* out_thr)
 {
-  const uint32_t k = blockIdx.x * blockDim.x + threadIdx.x;
+  extern __shared__ __align__(16) char csm[];
+  const uint32_t k = (blockIdx.x * blockDim.x + threadIdx.x) >> 5;
   if (k >= nc) return;
+  char* scr = csm + (threadIdx.x >> 5) * choose_smem(W);
   const size_t t = cand[k] / nv, v = cand[k] % nv;
   const long d = tested[t];
   const double thr = scale[t] * nthr[d_m_of(a, okc, d, dh[v])];
   DAcc me; d_voxel(G, v, me.x);
   for (uint32_t i = 0; i < kCh; ++i) { me.d[i] = 0; me.pw[i] = 0; me.bin[i] = 0; }
-  out_ec[k] = d_choose(a, g, me, d, dh[v], thr, mag, nullptr, scratch + (size_t)k * kCh * W, W);
-  out_me[k] = me; out_thr[k] = thr;
+  const double ec = w_choose(a, g, me, d, dh[v], thr, mag, nullptr, scr, W);
+  if ((threadIdx.x & 31) == 0) { out_ec[k] = ec; out_me[k] = me; out_thr[k] = thr; }
 }
-
 // ---------------- pursuit: path response, fitted-path tables, residual cube, leakage ----------------
 constexpr int kMaxGrid = 9;
 __device__ inline double2 cmul(double2 a, double2 b) { return make_double2(a.x * b.x - a.y * b.y, a.x * b.y + a.y * b.x); }
@@ -604,13 +486,6 @@ __device__ inline double2 d_kernel_at(const DResp& rs, int32_t g, double x)
 __device__ inline double2 d_term(const DResp& rs, uint32_t m, uint32_t d, uint32_t j, double2 pp, double pr)
 {
   return cmul(cmul(cmul(rs.ed[(size_t)d * rs.nrow + j], rs.em[(size_t)m * rs.nrow + j]), pp), d_kernel_at(rs, rs.g[j], (double)m - pr));
-}
-// rs.at(m, d, h) by one warp (lanes over rows).
-__device__ inline double2 d_at_warp(const DResp& rs, uint32_t m, uint32_t d, const double2* pp, const double* pr)
-{
-  double2 acc = make_double2(0, 0);
-  for (uint32_t j = threadIdx.x & 31; j < rs.nrow; j += 32) acc = cadd(acc, d_term(rs, m, d, j, pp[j], pr[j]));
-  return warp_sum(acc);
 }
 __global__ void k_resp(DAxes a, uint32_t nrow, const double* w, double wsum, const double* t, const double* fc, double2* ed, double2* em)
 {
@@ -702,29 +577,36 @@ __global__ void k_rebuild(DAxes a, const DFit* F, const uint32_t* slots, uint32_
 // accepted fit only appends a term, in the same order as the oracle's sum).
 struct DItem { DAcc me; double thr; int32_t d; uint32_t dh, alive, pad; double leak[kCh]; uint32_t leak_d[kCh], leak_n[kCh]; };
 struct DFitTabs { const DFit* F; const double2 *gpp, *dir, *stat; const double* gpr; uint32_t per, nc, sper; };
-// leak_amp() of one fit at (bin, d), by one warp.
-__device__ double d_leak_amp(const DAxes& a, const DResp& rs, const DFitTabs& T, uint32_t s, double bin, uint32_t d, double z)
+// leak_amp() of one fit at (bin, d), by one warp: the (grid point, range bin) responses are spread over
+// the lanes, each a sequential row sum in the oracle's order (Response::at); shv: 4 * kMaxGrid doubles.
+__device__ double d_leak_amp(const DAxes& a, const DResp& rs, const DFitTabs& T, uint32_t s, double bin, uint32_t d, double z, double* shv)
 {
   const DFit& f = T.F[s];
   if (!f.ok) return 0.0;
-  const uint32_t n = a.n_range;
+  const uint32_t n = a.n_range, lane = threadIdx.x & 31;
   if (n == 0 || !(bin >= 0) || bin > (double)(n - 1)) return 0.0;
   const long b0 = (long)bin; const double t = bin - b0;
   uint32_t b[4]; for (int j = 0; j < 4; ++j) { const long q = b0 - 1 + j; b[j] = (uint32_t)(q < 0 ? 0 : (q > (long)n - 1 ? (long)n - 1 : q)); }
   const double2* st = T.stat + (size_t)s * T.sper + (size_t)d * n;
+  for (uint32_t c = lane; c < (uint32_t)f.ngrid * 4; c += 32) {
+    const uint32_t q = c / 4, jb = c % 4; double2 at;
+    if (q == 0) at = T.dir[(size_t)s * T.nc + (size_t)b[jb] * a.n_dopp + d];
+    else {
+      const double2* pp = T.gpp + (size_t)s * T.per + (size_t)q * rs.nrow; const double* pr = T.gpr + (size_t)s * T.per + (size_t)q * rs.nrow;
+      at = make_double2(0, 0);
+      for (uint32_t j = 0; j < rs.nrow; ++j) at = cadd(at, d_term(rs, b[jb], d, j, pp[j], pr[j]));
+    }
+    shv[c] = cabs2(cadd(at, st[b[jb]]));
+  }
+  __syncwarp();
   double best = 0;
   for (int q = 0; q < f.ngrid; ++q) {
-    double v[4];
-    for (int j = 0; j < 4; ++j) {
-      const double2 at = q == 0 ? T.dir[(size_t)s * T.nc + (size_t)b[j] * a.n_dopp + d]
-                                : d_at_warp(rs, b[j], d, T.gpp + (size_t)s * T.per + (size_t)q * rs.nrow, T.gpr + (size_t)s * T.per + (size_t)q * rs.nrow);
-      v[j] = cabs2(cadd(at, st[b[j]]));
-    }
-    const double tt = t;
+    const double* v = shv + 4 * q; const double tt = t;
     const double c4 = -v[0] * tt * (tt - 1) * (tt - 2) / 6 + v[1] * (tt + 1) * (tt - 1) * (tt - 2) / 2
                       - v[2] * (tt + 1) * tt * (tt - 2) / 2 + v[3] * (tt + 1) * tt * (tt - 1) / 6;
     best = fmax(best, c4);
   }
+  __syncwarp();
   return best * (f.absA + z * f.sA);
 }
 // Leak of every (alive item, used channel): append the new fits, or recompute when the item's bin moved.
@@ -737,15 +619,19 @@ __global__ void k_leak(DAxes a, DGeo g, DResp rs, DFitTabs T, DItem* items, uint
   if (!it.alive || !g.used[i]) return;
   uint32_t from = it.leak_n[i]; double lk = it.leak[i];
   if (force || it.leak_d[i] != it.me.d[i]) { from = 0; lk = 0; }
+  __shared__ double shv[32][4 * kMaxGrid];   // per warp of the block (blockDim <= 1024)
   const double sn = sqrt(g.noise[i]);
-  for (uint32_t o = from; o < nacc; ++o) lk += d_leak_amp(a, rs, T, o * kCh + i, it.me.bin[i], it.me.d[i], z) / sn;
+  for (uint32_t o = from; o < nacc; ++o) lk += d_leak_amp(a, rs, T, o * kCh + i, it.me.bin[i], it.me.d[i], z, shv[threadIdx.x >> 5]) / sn;
   if ((threadIdx.x & 31) == 0) { it.leak[i] = lk; it.leak_d[i] = it.me.d[i]; it.leak_n[i] = nacc; }
 }
-// Re-score after an accept: NMS / harmonic merge against the accepted s, then choose() on the residual.
-__global__ void k_rescore(DAxes a, DGeo g, DAcc s, double nms_r, DItem* items, uint32_t ni, const float* mag, const float* magc, DPk* scratch, uint32_t W)
+// Re-score after an accept, one warp per item: NMS / harmonic merge against the accepted s, then choose()
+// on the residual.
+__global__ void k_rescore(DAxes a, DGeo g, DAcc s, double nms_r, DItem* items, uint32_t ni, const float* mag, const float* magc, uint32_t W)
 {
-  const uint32_t k = blockIdx.x * blockDim.x + threadIdx.x;
+  extern __shared__ __align__(16) char csm[];
+  const uint32_t k = (blockIdx.x * blockDim.x + threadIdx.x) >> 5;
   if (k >= ni) return;
+  char* scr = csm + (threadIdx.x >> 5) * choose_smem(W);
   DItem& it = items[k];
   if (!it.alive) return;
   const double dx = s.x[0] - it.me.x[0], dy = s.x[1] - it.me.x[1], dz = s.x[2] - it.me.x[2];
@@ -757,10 +643,10 @@ __global__ void k_rescore(DAxes a, DGeo g, DAcc s, double nms_r, DItem* items, u
     if (!kk) kk = lround(fc / fs);
     harm = harm && kk >= 2 && fabs(fma(-(double)kk, fs, fc)) <= a.dopp_step_hz;
   }
-  if (local && (same || harm)) { it.alive = 0; return; }
+  if (local && (same || harm)) { if ((threadIdx.x & 31) == 0) it.alive = 0; return; }
   DAcc me = it.me;
-  if (!(d_choose(a, g, me, it.d, it.dh, it.thr, mag, magc, scratch + (size_t)k * kCh * W, W) > it.thr)) { it.alive = 0; return; }
-  it.me = me;
+  const double ec = w_choose(a, g, me, it.d, it.dh, it.thr, mag, magc, scr, W);
+  if ((threadIdx.x & 31) == 0) { if (!(ec > it.thr)) it.alive = 0; else it.me = me; }
 }
 
 // ---------------- the per-channel path fit (coherent_core.cc's fit_channel) ----------------
@@ -770,6 +656,7 @@ __global__ void k_rescore(DAxes a, DGeo g, DAcc s, double nms_r, DItem* items, u
 // points in the same order as the CPU, hence the same decisions.
 struct FitJob { int32_t ch, own, from_slot, pad; double p0, fb0; };
 constexpr int kMaxPts = 9;
+constexpr int kResaPer = 64;   // per job: 2 x kMaxPts model vectors, or the refit's N x 64 path values
 struct FitArgs {
   DAxes a; DResp rs; DGeo g;
   const float2* rdf; const float2* Q; const uint8_t* mask; const uint32_t *lo, *hi; const double* trow; uint32_t nrow_all, sc;
@@ -780,13 +667,14 @@ struct FitArgs {
   // scratch (per job): cells, y0 (RD minus the other paths), y (plus the static adjustment), and the
   // results of the last two batches (double-buffered: a fast block may start batch n+1 while a slow one
   // still reads batch n)
-  int2* cells; double2 *y0, *y, *resA, *resa; double* resJ; float2* Mmid; uint32_t Nmax;
-  int* done_iter; int* moved;
+  int2* cells; double2 *y0, *y, *resA, *resa; double* resJ; double2* Mmid; double2* Z; uint32_t Nmax;
+  unsigned long long* stats;   // stats: {barriers, fits} (profiling)
+  unsigned* bar; int* moved;   // bar: per job {arrival count, generation} of the job-local barrier
 };
-size_t fit_smem_bytes(uint32_t nrow, uint32_t nm, uint32_t Nmax, uint32_t nrow_all)
+size_t fit_smem_bytes(uint32_t nrow, uint32_t nm, uint32_t Nmax, uint32_t nrow_all, uint32_t ndw)
 {
   return (size_t)(nrow + (nrow + 1) / 2 + (size_t)nm * nrow + Nmax + 4 * (size_t)Nmax + 32 * (size_t)Nmax / 2 + 2) * sizeof(double2)
-         + (size_t)nrow_all * sizeof(float2);
+         + (size_t)nrow_all * sizeof(double2) + (size_t)(ndw + nm) * nrow * sizeof(double2);
 }
 __device__ inline double2 block_sum2(double2 v, double2* sh)   // blockDim.x multiple of 32, <= 1024
 {
@@ -805,7 +693,8 @@ __device__ inline double2 block_sum2(double2 v, double2* sh)   // blockDim.x mul
 struct FitCtx {
   const FitArgs* A; uint32_t job, b; int N, m0; uint32_t nm;
   const int2* cells; double2 *y0, *y, *resA, *resa; double* resJ;
-  double2* shp; double* shr; double2* shG; double2* sha; double2* shD; double* shP; float2* erow; double2* shred;
+  double2* shp; double* shr; double2* shG; double2* sha; double2* shD; double* shP; double2* erow; double2* shred;
+  double2 *shED, *shEM; int d0;   // the window's Doppler (from d0) and range (from m0) row phasors ed / em
   int nsync, rd;   // rd: result buffer of the last completed batch
 };
 // J(p, fb) for point slot k: model a_c = sum_j ed[d_c][j] (em[m_c][j] pp_j K(m_c - pr_j)),
@@ -819,38 +708,53 @@ __device__ void fit_eval_point(FitCtx& C, double p, double fb, int k, int wb, bo
     C.shr[j] = pr; C.shp[j] = dpolar(2 * M_PI * (f * rs.t[j] - rs.fc[j] * pr * a.delay_step_s));
   }
   __syncthreads();
+  // G_j(m) = em_j(m) pp_j K_j(m - pr_j), per (m, row); then per cell ONE thread sums ed_j(d) G_j(m) over the
+  // rows in the oracle's order (Response::at), and one thread sums the cells (fit_channel's J). The
+  // products associate differently from the oracle's ((ed * em) * pp) * K -- a few ulps per term, the
+  // same size as the oracle's own FMA-contraction choices -- at a third of the FP64 work.
   for (uint32_t q = threadIdx.x; q < C.nm * rs.nrow; q += blockDim.x) {
     const uint32_t mi = q / rs.nrow, j = q % rs.nrow; const int m = C.m0 + (int)mi;
     if (m < 0 || m >= (int)a.n_range) continue;
-    C.shG[q] = cmul(cmul(rs.em[(size_t)m * rs.nrow + j], C.shp[j]), d_kernel_at(rs, rs.g[j], (double)m - C.shr[j]));
+    C.shG[q] = cmul(cmul(C.shEM[q], C.shp[j]), d_kernel_at(rs, rs.g[j], (double)m - C.shr[j]));
   }
   __syncthreads();
-  const int w = threadIdx.x >> 5, nw = blockDim.x >> 5;
-  for (int c = w; c < C.N; c += nw) {
-    const int2 cm = __ldcg(C.cells + c); const uint32_t mi = (uint32_t)(cm.x - C.m0);
+  for (int c = threadIdx.x; c < C.N; c += blockDim.x) {
+    const int2 cm = __ldcg(C.cells + c);
+    const double2* ed = C.shED + (size_t)(cm.y - C.d0) * rs.nrow; const double2* G = C.shG + (size_t)(cm.x - C.m0) * rs.nrow;
     double2 acc = make_double2(0, 0);
-    for (uint32_t j = threadIdx.x & 31; j < rs.nrow; j += 32) acc = cadd(acc, cmul(rs.ed[(size_t)cm.y * rs.nrow + j], C.shG[mi * rs.nrow + j]));
-    acc = warp_sum(acc);
-    if ((threadIdx.x & 31) == 0) C.sha[c] = acc;
+    for (uint32_t j = 0; j < rs.nrow; ++j) acc = cadd(acc, cmul(ed[j], G[j]));
+    C.sha[c] = acc;
   }
   __syncthreads();
-  if (w == 0) {
+  if (threadIdx.x == 0) {
     double2 num = make_double2(0, 0); double den = 0;
-    for (int c = threadIdx.x; c < C.N; c += 32) {
+    for (int c = 0; c < C.N; ++c) {
       const double2 yc = __ldcg(C.y + c), ac = C.sha[c];
       num.x += yc.x * ac.x + yc.y * ac.y; num.y += yc.y * ac.x - yc.x * ac.y; den += ac.x * ac.x + ac.y * ac.y;
     }
-    num = warp_sum(num);
-    for (int o = 16; o > 0; o >>= 1) den += __shfl_xor_sync(0xffffffffu, den, o);
-    if (threadIdx.x == 0) {
-      C.resJ[wb * kMaxPts + k] = den > 0 ? (num.x * num.x + num.y * num.y) / den : 0.0;
-      C.resA[wb * kMaxPts + k] = den > 0 ? make_double2(num.x / den, num.y / den) : make_double2(0, 0);
-    }
+    C.resJ[wb * kMaxPts + k] = den > 0 ? (num.x * num.x + num.y * num.y) / den : 0.0;
+    C.resA[wb * kMaxPts + k] = den > 0 ? make_double2(num.x / den, num.y / den) : make_double2(0, 0);
   }
   if (want_a) for (int c = threadIdx.x; c < C.N; c += blockDim.x) C.resa[((size_t)wb * kMaxPts + k) * A.Nmax + c] = C.sha[c];
   __syncthreads();
 }
-__device__ void fit_sync(FitCtx& C) { __threadfence(); __syncthreads(); cg::this_grid().sync(); ++C.nsync; }
+// Barrier among the B blocks of ONE job (a channel's fit): everything a fit exchanges between its blocks
+// is job-local, and the channels are independent chains, so no grid-wide barrier is needed per batch.
+// The blocks of a cooperative launch are co-resident, so spinning cannot deadlock.
+__device__ void fit_sync(FitCtx& C)
+{
+  __syncthreads();
+  if (C.A->B > 1 && threadIdx.x == 0) {
+    unsigned* cnt = C.A->bar + 2 * C.job; volatile unsigned* gen = C.A->bar + 2 * C.job + 1;
+    const unsigned g = *gen;
+    __threadfence();
+    if (atomicAdd(cnt, 1u) == C.A->B - 1) { atomicExch(cnt, 0u); __threadfence(); atomicAdd((unsigned*)gen, 1u); }
+    else while (*gen == g) { }
+    __threadfence();
+  }
+  __syncthreads();
+  ++C.nsync;
+}
 __device__ void fit_batch(FitCtx& C, const double* pp, const double* pf, int n, bool want_a)
 {
   const int wb = C.nsync & 1;
@@ -922,52 +826,61 @@ __device__ double fit_search(FitCtx& C, double& p, double& fb, double st, double
 }
 // Static-removal term of a unit path at x = m - p, Doppler bin d, per-subcarrier weights M:
 // sv = sum_k e^{j2pi (k - sc/2) scs x delay} M_k Q_k(d) (coherent_core.cc's static_cell is -sv).
-// It only shapes a fit's data (a few % of a path): FP32 phasor recurrence over 16-subcarrier chunks,
-// each restarted from an FP64 phase, FP64 accumulation across chunks.
-template <class MT>
-__device__ double2 d_static_sum(const FitArgs& A, double x, uint32_t d, const MT* M, double2* sh)
+// Phasor recurrence over 16-subcarrier chunks, each restarted from an exact phase.
+__device__ double2 d_static_sum(const FitArgs& A, double x, uint32_t d, const double2* M, double2* sh)
 {
+  // FP64 throughout (a fit's data feeds decisions; FP32 here moved fits by ~1e-8 bin, which the
+  // non-converging joint refit amplified to 0.1 bin -- measured on the full-band recording).
   const DAxes& a = A.a; const uint32_t sc = A.sc;
   const float2* Qd = A.Q + (size_t)d * sc;
   double2 acc = make_double2(0, 0);
-  constexpr uint32_t kChunk = 16;
+  const uint32_t kChunk = (sc + blockDim.x - 1) / blockDim.x;   // one chunk per thread
   const double w = 2 * M_PI * a.scs_hz * x * a.delay_step_s;
-  float rs_, rc_; sincosf((float)w, &rs_, &rc_);
+  const double2 rot = dpolar(w);
   for (uint32_t k0 = threadIdx.x * kChunk; k0 < sc; k0 += blockDim.x * kChunk) {
-    const double2 ph0 = dpolar(w * ((double)k0 - sc / 2.0));
-    float phr = (float)ph0.x, phi = (float)ph0.y; float ar = 0, ai = 0;
+    double2 ph = dpolar(w * ((double)k0 - sc / 2.0));
     const uint32_t k1 = k0 + kChunk < sc ? k0 + kChunk : sc;
     for (uint32_t k = k0; k < k1; ++k) {
       const float2 q = Qd[k];
-      if (q.x != 0.f || q.y != 0.f) {
-        const float mr = (float)M[k].x, mi = (float)M[k].y;
-        const float tr = phr * mr - phi * mi, ti = phr * mi + phi * mr;
-        ar += tr * q.x - ti * q.y; ai += tr * q.y + ti * q.x;
-      }
-      const float nr = phr * rc_ - phi * rs_; phi = phr * rs_ + phi * rc_; phr = nr;
+      if (q.x != 0.f || q.y != 0.f) { const double2 mk = __ldcg(M + k); acc = cadd(acc, cmul(cmul(ph, mk), make_double2(q.x, q.y))); }
+      ph = cmul(ph, rot);
     }
-    acc.x += ar; acc.y += ai;
   }
   return block_sum2(acc, sh);
 }
-__global__ void __launch_bounds__(256) k_fit(FitArgs A)
+// DFit as written by other blocks earlier in the same (persistent) kernel: bypass L1 (not coherent across SMs).
+__device__ inline DFit ld_fit(const DFit* p)
 {
-  extern __shared__ double2 smem[];
-  const uint32_t job = blockIdx.x / A.B, b = blockIdx.x % A.B;
-  const FitJob J = A.jobs[job];
-  const DAxes& a = A.a; const DResp& rs = A.rs;
-  const uint32_t ch = (uint32_t)J.ch, nm = (uint32_t)(2 * A.hm_r + 1);
-  FitCtx C;
+  static_assert(sizeof(DFit) % 8 == 0, "DFit is loaded as 8-byte words");
+  DFit f; const unsigned long long* s = (const unsigned long long*)p; unsigned long long* d = (unsigned long long*)&f;
+  for (int i = 0; i < (int)(sizeof(DFit) / 8); ++i) d[i] = __ldcg(s + i);
+  return f;
+}
+__device__ void fit_ctx_init(const FitArgs& A, FitCtx& C, uint32_t job, uint32_t b, double2* smem, double2* shred)
+{
+  const DResp& rs = A.rs; const uint32_t nm = (uint32_t)(2 * A.hm_r + 1);
   C.A = &A; C.job = job; C.b = b; C.nm = nm; C.nsync = 0; C.rd = 0;
   C.cells = A.cells + (size_t)job * A.Nmax; C.y0 = A.y0 + (size_t)job * A.Nmax; C.y = A.y + (size_t)job * A.Nmax;
-  C.resA = A.resA + (size_t)job * 2 * kMaxPts; C.resJ = A.resJ + (size_t)job * 2 * kMaxPts; C.resa = A.resa + (size_t)job * 2 * kMaxPts * A.Nmax;
+  C.resA = A.resA + (size_t)job * 2 * kMaxPts; C.resJ = A.resJ + (size_t)job * 2 * kMaxPts; C.resa = A.resa + (size_t)job * kResaPer * A.Nmax;
   C.shp = smem; C.shr = (double*)(smem + rs.nrow); C.shG = smem + rs.nrow + (rs.nrow + 1) / 2;
   C.sha = C.shG + (size_t)nm * rs.nrow; C.shD = C.sha + A.Nmax; C.shP = (double*)(C.shD + 4 * (size_t)A.Nmax);
-  C.shred = (double2*)(C.shP + 32 * (size_t)A.Nmax); C.erow = (float2*)(C.shred + 2);
-  __shared__ double2 shred[32];
+  C.erow = (double2*)(C.shP + 32 * (size_t)A.Nmax) + 2;
+  C.shED = C.erow + A.nrow_all; C.shEM = C.shED + (size_t)(2 * A.hm_d + 1) * rs.nrow;
   C.shred = shred;
+}
+// One channel fit (coherent_core.cc's fit_channel) by the B blocks of job C.job, ending with every block
+// of the grid at the same barrier count. moved: the refit's convergence flag (OR-ed).
+__device__ inline unsigned long long gtimer() { unsigned long long t; asm volatile("mov.u64 %0, %globaltimer;" : "=l"(t)); return t; }
+__device__ void fit_job(const FitArgs& A, FitCtx& C, const FitJob J, int* moved)
+{
+  unsigned long long tph = gtimer();
+  auto phase = [&](int k) { if (A.stats && C.b == 0 && threadIdx.x == 0) { const unsigned long long t = gtimer(); atomicAdd(A.stats + 4 + k, t - tph); tph = t; } };
+  const uint32_t b = C.b, job = C.job;
+  const DAxes& a = A.a; const DResp& rs = A.rs;
+  const uint32_t ch = (uint32_t)J.ch;
+  const int nsync0 = C.nsync;
   double p0 = J.p0, fb0 = J.fb0;
-  if (J.from_slot) { p0 = A.F[J.own * kCh + ch].p; fb0 = A.F[J.own * kCh + ch].fb; }
+  if (J.from_slot) { const DFit pf0 = ld_fit(A.F + J.own * kCh + ch); p0 = pf0.p; fb0 = pf0.fb; }
   // cells: m-major, d inner, as the CPU (every thread builds the same list; block 0 publishes it)
   const long mc = lround(p0), dc = lround(fb0);
   C.m0 = (int)(mc - A.hm_r);
@@ -976,52 +889,131 @@ __global__ void __launch_bounds__(256) k_fit(FitArgs A)
   for (long m = mc - A.hm_r; m <= mc + A.hm_r; ++m)
     for (long d = dc - A.hm_d; d <= dc + A.hm_d; ++d)
       if (m >= 0 && m < (long)a.n_range && d_dopp_ok(a, d)) { if (threadIdx.x == 0 && b == 0) cellw[N] = make_int2((int)m, (int)d); ++N; }
-  C.N = N;
+  C.N = N; C.d0 = (int)(dc - A.hm_d);
+  for (uint32_t q = threadIdx.x; q < (uint32_t)(2 * A.hm_d + 1) * rs.nrow; q += blockDim.x) {
+    const long d = C.d0 + (long)(q / rs.nrow); C.shED[q] = (d >= 0 && d < (long)a.n_dopp) ? rs.ed[(size_t)d * rs.nrow + q % rs.nrow] : make_double2(0, 0);
+  }
+  for (uint32_t q = threadIdx.x; q < C.nm * rs.nrow; q += blockDim.x) {
+    const long m = C.m0 + (long)(q / rs.nrow); C.shEM[q] = (m >= 0 && m < (long)a.n_range) ? rs.em[(size_t)m * rs.nrow + q % rs.nrow] : make_double2(0, 0);
+  }
   const bool doit = N >= 4;
   fit_sync(C);   // cells published; every block has read the slot's previous p/fb
+  phase(8);
   if (doit) {
-    // y0 = RD - sum of the other accepted paths on this channel (direct + static term), in the CPU's order
+    // y0 = RD - sum of the other accepted paths on this channel (direct + static term)
+    if (A.tables) {   // pursuit: the accepted paths' tables
     for (int c = (int)b; c < N; c += (int)A.B) {
       const int2 cm = __ldcg(C.cells + c);
       const float2 r = A.rdf[((size_t)ch * a.n_range + cm.x) * a.n_dopp + cm.y];
       double2 yc = make_double2(r.x, r.y);
       for (uint32_t o = 0; o < A.nacc; ++o) {
         if ((int)o == J.own) continue;
-        const uint32_t s = o * kCh + ch; const DFit f = A.F[s];
+        const uint32_t s = o * kCh + ch; const DFit f = ld_fit(A.F + s);
         if (!f.ok) continue;
-        double2 at, st;
-        if (A.tables) { at = A.dir[(size_t)s * A.nc + (size_t)cm.x * a.n_dopp + cm.y]; st = A.stat[(size_t)s * A.sper + (size_t)cm.y * a.n_range + cm.x]; }
-        else {
-          double2 acc = make_double2(0, 0);
-          const double2* gp0 = A.gpp + (size_t)s * A.per; const double* gr0 = A.gpr + (size_t)s * A.per;
-          for (uint32_t j = threadIdx.x; j < rs.nrow; j += blockDim.x) acc = cadd(acc, d_term(rs, (uint32_t)cm.x, (uint32_t)cm.y, j, gp0[j], gr0[j]));
-          at = block_sum2(acc, C.shred);
-          const double2 sv = d_static_sum(A, (double)cm.x - f.p, (uint32_t)cm.y, A.Mf + (size_t)s * A.sc, C.shred);
-          st = make_double2(-sv.x, -sv.y);
-        }
+        const double2 at = A.dir[(size_t)s * A.nc + (size_t)cm.x * a.n_dopp + cm.y], st = A.stat[(size_t)s * A.sper + (size_t)cm.y * a.n_range + cm.x];
         const double2 v = cmul(f.A, cadd(at, st));
         yc.x -= v.x; yc.y -= v.y;
       }
       if (threadIdx.x == 0) { C.y0[c] = yc; C.y[c] = yc; }
     }
+    } else {          // joint refit: the other paths change between fits, so on the fly
+      // The static terms are linear in each path: sum_o A_o sv_o(m - p_o, d) = sum_k e^{j W m k'} Q_k(d) Z_k with
+      // Z_k = sum_o A_o e^{-j W p_o k'} M^o_k (W = 2pi scs delay_step, k' = k - sc/2): ONE subcarrier sum per
+      // cell instead of one per (cell, other path). Only the summation order differs from the oracle.
+      __shared__ double2 shAo[64]; __shared__ double shPo[64]; __shared__ uint32_t shSo[64]; __shared__ uint32_t shNo;
+      __shared__ double2 tA[64]; __shared__ double tP[64]; __shared__ int tOk[64];
+      // the other paths o0..o0+63 of this channel (ok ones, in order) into shared memory, loaded in parallel
+      auto stage = [&](uint32_t o0) {
+        if (threadIdx.x < 64) {
+          const uint32_t o = o0 + threadIdx.x; int ok = 0;
+          if (o < A.nacc && (int)o != J.own) {
+            const DFit* F = A.F + o * kCh + ch;
+            ok = __ldcg(&F->ok); if (ok) { tA[threadIdx.x] = __ldcg(&F->A); tP[threadIdx.x] = __ldcg(&F->p); }
+          }
+          tOk[threadIdx.x] = ok;
+        }
+        __syncthreads();
+        if (threadIdx.x == 0) {
+          uint32_t no = 0;
+          for (uint32_t q = 0; q < 64; ++q) if (tOk[q]) { shAo[no] = tA[q]; shPo[no] = tP[q]; shSo[no] = (o0 + q) * kCh + ch; ++no; }
+          shNo = no;
+        }
+        __syncthreads();
+      };
+      double2* Z = A.Z + (size_t)job * A.sc;
+      const double Om = 2 * M_PI * a.scs_hz * a.delay_step_s;
+      for (uint32_t o0 = 0; o0 < A.nacc; o0 += 64) {
+        stage(o0);
+        const uint32_t kZc = (A.sc + A.B * blockDim.x - 1) / (A.B * blockDim.x) < 8 ? (A.sc + A.B * blockDim.x - 1) / (A.B * blockDim.x) : 8;
+        for (uint32_t k0 = (b * blockDim.x + threadIdx.x) * kZc; k0 < A.sc; k0 += A.B * blockDim.x * kZc) {
+          const uint32_t k1 = k0 + kZc < A.sc ? k0 + kZc : A.sc;
+          double2 z[8];
+          for (uint32_t q = 0; q < kZc; ++q) z[q] = o0 ? __ldcg(Z + k0 + (q < k1 - k0 ? q : 0)) : make_double2(0, 0);
+          for (uint32_t oi = 0; oi < shNo; ++oi) {
+            double2 ph = dpolar(-Om * shPo[oi] * ((double)k0 - A.sc / 2.0)); const double2 rot = dpolar(-Om * shPo[oi]);
+            const double2* Mo = A.Mf + (size_t)shSo[oi] * A.sc;
+            for (uint32_t k = k0; k < k1; ++k) { z[k - k0] = cadd(z[k - k0], cmul(shAo[oi], cmul(__ldcg(Mo + k), ph))); ph = cmul(ph, rot); }
+          }
+          for (uint32_t k = k0; k < k1; ++k) Z[k] = z[k - k0];
+        }
+        __syncthreads();
+      }
+      phase(6);
+      fit_sync(C);   // Z complete (every block of the job wrote its share)
+      phase(7);
+      // direct responses: one thread per (cell, other path) sums the rows in the oracle's order into V, then
+      // one thread per cell subtracts them in the paths' order (chunks of 64 paths)
+      double2* V = C.resa;   // scratch: N x 64 values (resa holds kResaPer * Nmax)
+      for (uint32_t o0 = 0; o0 < (A.nacc ? A.nacc : 1); o0 += 64) {
+        if (o0 > 0 || A.nacc > 64) stage(o0);   // (the Z loop left the only chunk staged when nacc <= 64)
+        for (uint32_t q = b * blockDim.x + threadIdx.x; q < (uint32_t)N * shNo; q += A.B * blockDim.x) {
+          const uint32_t c = q / shNo, oi = q % shNo;
+          const int2 cm = __ldcg(C.cells + c);
+          const double2* ed = C.shED + (size_t)(cm.y - C.d0) * rs.nrow; const double2* em = C.shEM + (size_t)(cm.x - C.m0) * rs.nrow;
+          const size_t sb = (size_t)shSo[oi] * A.per; const double2* pp = A.gpp + sb; const double* pr = A.gpr + sb;
+          double2 at = make_double2(0, 0);
+          for (uint32_t j = 0; j < rs.nrow; ++j)
+            at = cadd(at, cmul(cmul(cmul(ed[j], em[j]), __ldcg(pp + j)), d_kernel_at(rs, rs.g[j], (double)cm.x - __ldcg(pr + j))));
+          V[(size_t)c * 64 + oi] = cmul(shAo[oi], at);
+        }
+        fit_sync(C);
+        for (int c = (int)(b * blockDim.x + threadIdx.x); c < N; c += (int)(A.B * blockDim.x)) {
+          double2 yc;
+          if (o0 == 0) { const int2 cm = __ldcg(C.cells + c); const float2 r = A.rdf[((size_t)ch * a.n_range + cm.x) * a.n_dopp + cm.y]; yc = make_double2(r.x, r.y); }
+          else yc = C.y0[c];
+          for (uint32_t oi = 0; oi < shNo; ++oi) { const double2 v = __ldcg(V + (size_t)c * 64 + oi); yc.x -= v.x; yc.y -= v.y; }
+          C.y0[c] = yc;
+        }
+        fit_sync(C);
+      }
+      // plus the static terms of all other paths at once (block-wide subcarrier sum per cell)
+      for (int c = (int)b; c < N; c += (int)A.B) {
+        const int2 cm = __ldcg(C.cells + c);
+        const double2 sv = d_static_sum(A, (double)cm.x, (uint32_t)cm.y, Z, C.shred);
+        if (threadIdx.x == 0) { double2 yc = __ldcg(C.y0 + c); yc.x += sv.x; yc.y += sv.y; C.y0[c] = yc; C.y[c] = yc; }
+      }
+    }
     fit_sync(C);
   }
   double p = p0, fb = fb0; double2 bestA = make_double2(0, 0);
   DFit out{}; out.ch = (int32_t)ch;
+  phase(0);
   if (doit) {
     fit_search(C, p, fb, 0.25, bestA);
+    phase(1);
     // M_k(f) = mean over the rows observing k of e^{j2pi f t_r} (FP32: it only shapes y)
     const double fhz = a.dopp0_hz + fb * a.dopp_step_hz;
-    for (uint32_t r = threadIdx.x; r < A.nrow_all; r += blockDim.x) { const double2 e = dpolar(2 * M_PI * fhz * A.trow[r]); C.erow[r] = make_float2((float)e.x, (float)e.y); }
+    for (uint32_t r = threadIdx.x; r < A.nrow_all; r += blockDim.x) { const double2 e = dpolar(2 * M_PI * fhz * A.trow[r]); C.erow[r] = e; }
     __syncthreads();
-    float2* Mm = A.Mmid + (size_t)blockIdx.x * A.sc;
-    for (uint32_t k = threadIdx.x; k < A.sc; k += blockDim.x) {
-      float mr = 0, mi = 0; uint32_t cnt = 0;
+    double2* Mm = A.Mmid + (size_t)job * A.sc;   // shared by the job's blocks, each computes a share
+    for (uint32_t k = b * blockDim.x + threadIdx.x; k < A.sc; k += A.B * blockDim.x) {
+      double2 m = make_double2(0, 0); uint32_t cnt = 0;
       for (uint32_t r = 0; r < A.nrow_all; ++r)
-        if (k >= A.lo[r] && k <= A.hi[r] && A.mask[(size_t)r * A.sc + k]) { mr += C.erow[r].x; mi += C.erow[r].y; ++cnt; }
-      Mm[k] = cnt ? make_float2(mr / cnt, mi / cnt) : make_float2(0, 0);
+        if (k >= A.lo[r] && k <= A.hi[r] && A.mask[(size_t)r * A.sc + k]) { m.x += C.erow[r].x; m.y += C.erow[r].y; ++cnt; }
+      Mm[k] = cnt ? make_double2(m.x / (double)cnt, m.y / (double)cnt) : make_double2(0, 0);
     }
-    __syncthreads();
+    fit_sync(C);
+    phase(2);
     for (int pass = 0; pass < 2; ++pass) {
       const double2 Av = bestA;     // = the CPU's J(p, fb, &A): same point, same y
       for (int c = (int)b; c < N; c += (int)A.B) {
@@ -1030,7 +1022,9 @@ __global__ void __launch_bounds__(256) k_fit(FitArgs A)
         if (threadIdx.x == 0) { const double2 y0c = __ldcg(C.y0 + c); C.y[c] = make_double2(y0c.x + (Av.x * sv.x - Av.y * sv.y), y0c.y + (Av.x * sv.y + Av.y * sv.x)); }
       }
       fit_sync(C);
+      phase(3);
       fit_search(C, p, fb, 0.0, bestA);
+      phase(4);
     }
     // model at (p, fb) and +-h: the sandwich covariance of (p, fb, Re A, Im A)
     const double h = 1e-3;
@@ -1105,24 +1099,68 @@ __global__ void __launch_bounds__(256) k_fit(FitArgs A)
         out.ngrid = 0;
         for (int i2 = 0; i2 < np; ++i2) for (int j2 = 0; j2 < nf; ++j2) { out.gp[out.ngrid] = ps[i2]; out.gfb[out.ngrid] = fs[j2]; ++out.ngrid; }
         // publish, with the refit's convergence test against the slot's previous fit
-        DFit& dst = A.F[J.own * kCh + ch];
+        const DFit prev = ld_fit(A.F + J.own * kCh + ch);
         const double scv = sqrt(fmax(1.0, (fA.x * fA.x + fA.y * fA.y) / nz / fmax(out.snr, 1e-300)));
-        if (J.from_slot && (!dst.ok || fabs(out.p - dst.p) > scv * out.sp || fabs(out.fb - dst.fb) > scv * out.sf)) atomicOr(A.moved, 1);
-        dst = out;
+        if (J.from_slot && (!prev.ok || fabs(out.p - prev.p) > scv * out.sp || fabs(out.fb - prev.fb) > scv * out.sf)) atomicOr(moved, 1);
+        A.F[J.own * kCh + ch] = out;
       }
     }
   } else if (b == 0 && threadIdx.x == 0) {
     A.F[J.own * kCh + ch] = out;     // ChanFit{} (not ok): fewer than 4 cells
   }
-  // Wait for every job: a job done after its n-th barrier is visible to all at barrier n+1, so
-  // "all done_iter < nsync" is evaluated identically by every thread of every block.
-  if (b == 0 && threadIdx.x == 0) atomicExch(A.done_iter + job, C.nsync);
-  for (;;) {
-    bool all = true;
-    for (uint32_t q = 0; q < A.njobs; ++q) if (!(((volatile int*)A.done_iter)[q] < C.nsync)) all = false;
-    if (all) break;
-    fit_sync(C);
+  phase(5);
+  if (A.stats && b == 0 && threadIdx.x == 0) { atomicAdd(A.stats, (unsigned long long)(C.nsync - nsync0 + 1)); atomicAdd(A.stats + 1, 1ull); }
+  fit_sync(C);   // the published fit is visible to every block of the job
+}
+__global__ void __launch_bounds__(256) k_fit(FitArgs A)
+{
+  extern __shared__ double2 smem[];
+  __shared__ double2 shred[32];
+  FitCtx C; fit_ctx_init(A, C, blockIdx.x / A.B, blockIdx.x % A.B, smem, shred);
+  fit_job(A, C, A.jobs[C.job], A.moved);
+}
+// The joint refit (coherent_core.cc's refit_all) in ONE cooperative launch: sweeps x detections in the
+// oracle's Gauss-Seidel order, the channels (independent chains: a fit only subtracts the other paths of
+// its own channel) in parallel. After each fit its blocks refresh the slot's nominal phasors and M_k,
+// which the next detections' fits read. moved[sweep]: the sweep's convergence flag (zeroed by the host).
+__global__ void __launch_bounds__(256) k_refit(FitArgs A, int* moved, int* sweeps_done)
+{
+  extern __shared__ double2 smem[];
+  __shared__ double2 shred[32];
+  FitCtx C; fit_ctx_init(A, C, blockIdx.x / A.B, blockIdx.x % A.B, smem, shred);
+  const DAxes& a = A.a; const DResp& rs = A.rs;
+  const uint32_t ch = (uint32_t)A.jobs[C.job].ch;
+  int sweep = 0;
+  for (; sweep < 10; ++sweep) {
+    for (uint32_t j = 0; j < A.nacc; ++j) {
+      FitJob J = A.jobs[C.job]; J.own = (int32_t)j; J.from_slot = 1;
+      fit_job(A, C, J, moved + sweep);
+      // slot tables of the new fit: grid[0] phasors (k_fit_phasors) and M_k (k_setM), over the job's blocks
+      const uint32_t s = j * kCh + ch; const DFit f = ld_fit(A.F + s);
+      if (f.ok) {
+        const double fz = a.dopp0_hz + f.gfb[0] * a.dopp_step_hz;
+        for (uint32_t q = C.b * blockDim.x + threadIdx.x; q < rs.nrow; q += A.B * blockDim.x) {
+          const double pr = f.gp[0] - (fz / a.fc_hz) * (rs.t[q] - rs.tbar) / a.delay_step_s;
+          ((double*)A.gpr)[(size_t)s * A.per + q] = pr;
+          ((double2*)A.gpp)[(size_t)s * A.per + q] = dpolar(2 * M_PI * (fz * rs.t[q] - rs.fc[q] * pr * a.delay_step_s));
+        }
+        const double fhz = a.dopp0_hz + f.fb * a.dopp_step_hz;
+        for (uint32_t r = threadIdx.x; r < A.nrow_all; r += blockDim.x) C.erow[r] = dpolar(2 * M_PI * fhz * A.trow[r]);
+        __syncthreads();
+        for (uint32_t k = C.b * blockDim.x + threadIdx.x; k < A.sc; k += A.B * blockDim.x) {
+          double2 m = make_double2(0, 0); uint32_t cnt = 0;
+          for (uint32_t r = 0; r < A.nrow_all; ++r)
+            if (k >= A.lo[r] && k <= A.hi[r] && A.mask[(size_t)r * A.sc + k]) { m.x += C.erow[r].x; m.y += C.erow[r].y; ++cnt; }
+          if (cnt) { m.x /= (double)cnt; m.y /= (double)cnt; }
+          ((double2*)A.Mf)[(size_t)s * A.sc + k] = m;
+        }
+      }
+      fit_sync(C);
+    }
+    __threadfence(); cg::this_grid().sync();   // every channel's sweep done: its moved flag is final
+    if (!__ldcg(moved + sweep)) { ++sweep; break; }
   }
+  if (blockIdx.x == 0 && threadIdx.x == 0) *sweeps_done = sweep;
 }
 // Final set_M(fb) of the new fits (FP64: the weights of their static-removal tables).
 __global__ void k_setM_phase(DAxes a, const DFit* F, const uint32_t* slots, uint32_t ns, uint32_t nrow_all, const double* trow, double2* erow)
@@ -1169,42 +1207,86 @@ struct GpuDetect::Impl {
   Buf okt, rd_up, E_up, rdf, mag, rcf, magc, dh, tested, okc, nmed, nthr, zz, zz_sorted, seg_off, scale, flag, cand, ncand, cub_tmp,
       c_me, c_ec, c_thr, pk_scratch,
       r_w, r_t, r_fc, r_g, r_B, r_ed, r_em, Q, items, one, slots, F, Mf, gpp, gpr, dir, stat, st_ph, st_buf, alive,
-      w_mask, w_lo, w_hi, w_trow, gam, jobs, f_cells, f_y0, f_y, f_resA, f_resa, f_resJ, f_Mmid, done_iter, moved, m_erow;
-  int n_sm = 0; size_t fit_smem_set = 0;
-  // Cooperative fit launch: jobs (one per channel), then each new fit's grid phasors and final M.
-  void launch_fits(FitArgs fa, const std::vector<FitJob>& jb, uint32_t nrow_all, const DAxes& da, const DResp& dr, size_t per)
+      w_mask, w_lo, w_hi, w_trow, gam, jobs, f_cells, f_y0, f_y, f_resA, f_resa, f_resJ, f_Mmid, f_Z, bar, moved, fstats, m_erow, refit_flags;
+  int n_sm = 0; size_t fit_smem_set = 0, choose_smem_set = 0;
+  // Warps per block for the warp-per-candidate choose kernels: as many as fit a block's shared memory (<= 4).
+  uint32_t choose_warps(uint32_t W)
   {
-    if (jb.empty()) return;
+    const size_t per = choose_smem(W);
+    int dev = 0, maxsm = 0; cudaGetDevice(&dev); cudaDeviceGetAttribute(&maxsm, cudaDevAttrMaxSharedMemoryPerBlockOptin, dev);
+    if (per > (size_t)maxsm) throw std::runtime_error("detect choose: Doppler search window too wide for shared memory");
+    const uint32_t w = (uint32_t)std::max<size_t>(1, std::min<size_t>(4, (size_t)maxsm / per));
+    if (w * per > choose_smem_set) {
+      cuda_check(cudaFuncSetAttribute((const void*)k_choose_cand, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)(w * per)), "choose smem");
+      cuda_check(cudaFuncSetAttribute((const void*)k_rescore, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)(w * per)), "rescore smem");
+      choose_smem_set = w * per;
+    }
+    return w;
+  }
+  // Cooperative fit launch setup: jobs (one per channel), blocks per job, scratch. Returns the block count.
+  size_t fit_setup(FitArgs& fa, const std::vector<FitJob>& jb, uint32_t nrow_all, const void* kern, size_t* smem_out)
+  {
     const uint32_t nj = (uint32_t)jb.size();
     up(jobs, jb.data(), nj);
-    const size_t smem = fit_smem_bytes(fa.rs.nrow, (uint32_t)(2 * fa.hm_r + 1), fa.Nmax, nrow_all);
+    const size_t smem = fit_smem_bytes(fa.rs.nrow, (uint32_t)(2 * fa.hm_r + 1), fa.Nmax, nrow_all, (uint32_t)(2 * fa.hm_d + 1));
     if (!n_sm) { int dev = 0; cudaGetDevice(&dev); cudaDeviceGetAttribute(&n_sm, cudaDevAttrMultiProcessorCount, dev); }
     if (smem > fit_smem_set) {
-      cuda_check(cudaFuncSetAttribute(k_fit, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem), "fit smem attr");
+      cuda_check(cudaFuncSetAttribute((const void*)k_fit, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem), "fit smem attr");
+      cuda_check(cudaFuncSetAttribute((const void*)k_refit, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem), "refit smem attr");
       fit_smem_set = smem;
     }
-    int per_sm = 0; cuda_check(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&per_sm, k_fit, 256, smem), "fit occupancy");
+    int per_sm = 0; cuda_check(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&per_sm, kern, 256, smem), "fit occupancy");
     const uint32_t total = (uint32_t)std::max(1, per_sm * n_sm);
     if (total < nj) throw std::runtime_error("detect fit: device cannot co-schedule one block per job");
-    fa.B = std::max<uint32_t>(1, std::min<uint32_t>(8, total / nj));
+    fa.B = std::max<uint32_t>(1, std::min<uint32_t>(kMaxPts, total / nj));   // a full 9-point batch in one wave
     fa.jobs = jobs.as<FitJob>(); fa.njobs = nj;
     const size_t nb = (size_t)nj * fa.B;
     f_cells.ensure((size_t)nj * fa.Nmax * sizeof(int2)); f_y0.ensure((size_t)nj * fa.Nmax * sizeof(double2)); f_y.ensure((size_t)nj * fa.Nmax * sizeof(double2));
     f_resA.ensure((size_t)nj * 2 * kMaxPts * sizeof(double2)); f_resJ.ensure((size_t)nj * 2 * kMaxPts * sizeof(double));
-    f_resa.ensure((size_t)nj * 2 * kMaxPts * fa.Nmax * sizeof(double2)); f_Mmid.ensure(nb * fa.sc * sizeof(float2));
-    done_iter.ensure(nj * sizeof(int));
+    f_resa.ensure((size_t)nj * kResaPer * fa.Nmax * sizeof(double2)); f_Mmid.ensure(nb * fa.sc * sizeof(double2));
+    f_Z.ensure((size_t)nj * fa.sc * sizeof(double2)); fa.Z = f_Z.as<double2>();
+    bar.ensure(2 * nj * sizeof(unsigned));
     fa.cells = f_cells.as<int2>(); fa.y0 = f_y0.as<double2>(); fa.y = f_y.as<double2>(); fa.resA = f_resA.as<double2>(); fa.resJ = f_resJ.as<double>();
-    fa.resa = f_resa.as<double2>(); fa.Mmid = f_Mmid.as<float2>(); fa.done_iter = done_iter.as<int>(); fa.moved = moved.as<int>();
-    cuda_check(cudaMemsetAsync(done_iter.p, 0x7f, nj * sizeof(int), stream), "memset done_iter");
+    fa.resa = f_resa.as<double2>(); fa.Mmid = f_Mmid.as<double2>(); fa.bar = bar.as<unsigned>(); fa.moved = moved.as<int>();
+    cuda_check(cudaMemsetAsync(bar.p, 0, 2 * nj * sizeof(unsigned), stream), "memset fit barrier");
+    *smem_out = smem;
+    return nb;
+  }
+  // Pursuit accept: one fit per channel, then each new fit's grid phasors and final M.
+  void launch_fits(FitArgs fa, const std::vector<FitJob>& jb, uint32_t nrow_all, const DAxes& da, const DResp& dr, size_t per)
+  {
+    if (jb.empty()) return;
+    const uint32_t nj = (uint32_t)jb.size();
+    size_t smem = 0; const size_t nb = fit_setup(fa, jb, nrow_all, (const void*)k_fit, &smem);
     void* args[] = {&fa};
     cuda_check(cudaLaunchCooperativeKernel((void*)k_fit, dim3((unsigned)nb), dim3(256), args, smem, stream), "fit launch");
+    fit_post(jb, nrow_all, da, dr, per, fa.sc);
+  }
+  // Each new fit's grid phasors and final M (from its DFit in F).
+  void fit_post(const std::vector<FitJob>& jb, uint32_t nrow_all, const DAxes& da, const DResp& dr, size_t per, uint32_t sc)
+  {
+    const uint32_t nj = (uint32_t)jb.size();
     std::vector<uint32_t> sl(nj); for (uint32_t q = 0; q < nj; ++q) sl[q] = (uint32_t)jb[q].own * kCh + (uint32_t)jb[q].ch;
     up(slots, sl.data(), nj);
     k_fit_phasors<<<blocks(nj * per), 256, 0, stream>>>(da, dr, F.as<DFit>(), slots.as<uint32_t>(), nj, gpp.as<double2>(), gpr.as<double>());
     m_erow.ensure((size_t)nj * nrow_all * sizeof(double2));
     k_setM_phase<<<blocks((size_t)nj * nrow_all), 256, 0, stream>>>(da, F.as<DFit>(), slots.as<uint32_t>(), nj, nrow_all, w_trow.as<double>(), m_erow.as<double2>());
-    k_setM<<<blocks((size_t)nj * fa.sc), 256, 0, stream>>>(F.as<DFit>(), slots.as<uint32_t>(), nj, fa.sc, nrow_all, w_mask.as<uint8_t>(), w_lo.as<uint32_t>(),
+    k_setM<<<blocks((size_t)nj * sc), 256, 0, stream>>>(F.as<DFit>(), slots.as<uint32_t>(), nj, sc, nrow_all, w_mask.as<uint8_t>(), w_lo.as<uint32_t>(),
                                                           w_hi.as<uint32_t>(), m_erow.as<double2>(), Mf.as<double2>());
+  }
+  // Joint refit: all sweeps in one cooperative launch; returns the number of sweeps run.
+  int launch_refit(FitArgs fa, const std::vector<FitJob>& jb, uint32_t nrow_all)
+  {
+    if (jb.empty()) return 0;
+    size_t smem = 0; const size_t nb = fit_setup(fa, jb, nrow_all, (const void*)k_refit, &smem);
+    refit_flags.ensure(11 * sizeof(int));
+    cuda_check(cudaMemsetAsync(refit_flags.p, 0, 11 * sizeof(int), stream), "memset refit flags");
+    int* mv = refit_flags.as<int>(); int* nsw = mv + 10;
+    void* args[] = {&fa, &mv, &nsw};
+    cuda_check(cudaLaunchCooperativeKernel((void*)k_refit, dim3((unsigned)nb), dim3(256), args, smem, stream), "refit launch");
+    int sweeps = 0; cuda_check(cudaMemcpyAsync(&sweeps, nsw, sizeof(int), cudaMemcpyDeviceToHost, stream), "D2H sweeps");
+    sync();
+    return sweeps;
   }
   cufftHandle plan = 0; long plan_n = -1, plan_batch = -1;
   uint32_t slot_cap = 0;
@@ -1292,6 +1374,7 @@ std::vector<Detection> GpuDetect::run(const std::vector<float>& E, const RdResul
   const size_t nt = a.tested_dopp.size(), nv = g.size();
   if (E.size() != nt * nv) throw std::invalid_argument("detect: envelope size does not match the grid and Doppler axis");
   if (n == 0 || nv == 0 || !(p.pfa > 0)) return out;
+  const bool prof = std::getenv("NR_ISAC_DETECT_PROFILE") != nullptr;
   auto t0 = Clock::now();
   DAxes da = to_daxes(a); const DGeo dg = to_dgeo(geo, R); const DGrid dG = to_dgrid(g);
   const size_t ncell = (size_t)kCh * a.n_range * a.n_dopp;
@@ -1352,10 +1435,10 @@ std::vector<Detection> GpuDetect::run(const std::vector<float>& E, const RdResul
   std::vector<DAcc> c_me(nc); std::vector<double> c_ec(nc), c_thr(nc); std::vector<uint32_t> c_idx(nc);
   if (nc) {
     I.c_me.ensure(nc * sizeof(DAcc)); I.c_ec.ensure(nc * sizeof(double)); I.c_thr.ensure(nc * sizeof(double));
-    I.pk_scratch.ensure((size_t)nc * kCh * W * sizeof(DPk));
-    k_choose_cand<<<I.blocks(nc, 128), 128, 0, I.stream>>>(da, dg, dG, I.cand.as<uint32_t>(), nc, nv, I.tested.as<uint32_t>(), I.okc.as<uint32_t>(),
+    const uint32_t wpb = I.choose_warps(W);
+    k_choose_cand<<<(unsigned)((nc + wpb - 1) / wpb), 32 * wpb, wpb * choose_smem(W), I.stream>>>(da, dg, dG, I.cand.as<uint32_t>(), nc, nv, I.tested.as<uint32_t>(), I.okc.as<uint32_t>(),
                                                           I.dh.as<uint32_t>(), I.nthr.as<double>(), I.scale.as<double>(), I.mag.as<float>(),
-                                                          I.pk_scratch.as<DPk>(), W, I.c_me.as<DAcc>(), I.c_ec.as<double>(), I.c_thr.as<double>());
+                                                          W, I.c_me.as<DAcc>(), I.c_ec.as<double>(), I.c_thr.as<double>());
     I.down(c_me.data(), I.c_me, nc); I.down(c_ec.data(), I.c_ec, nc); I.down(c_thr.data(), I.c_thr, nc); I.down(c_idx.data(), I.cand, nc);
     I.sync();
   }
@@ -1375,107 +1458,6 @@ std::vector<Detection> GpuDetect::run(const std::vector<float>& E, const RdResul
   const Vec3 hi_box = g.origin + Vec3{(g.nx - 1) * g.step, (g.ny - 1) * g.step, (g.nz - 1) * g.step};
   struct Accepted { Acc s; size_t t = 0, v = 0; long d = 0; double ec = 0; std::array<ChanFit, kCh> fit; };
   std::vector<Accepted> acc;
-  auto leak_at = [&](uint32_t i, double bin, uint32_t d) {
-    double lk = 0; for (Accepted& pa : acc) lk += leak_amp(rs, pa.fit[i], bin, d, z) / std::sqrt(R.noise[i]);
-    return lk;
-  };
-  auto leak_of = [&](const Acc& me, uint32_t i) { return leak_at(i, me.bin[i], me.d[i]); };
-  RdResult Rc; Rc.rd.axes = a; Rc.rd.v = R.rd.v;
-  auto rebuild_residual = [&]() {
-    Rc.rd.v = R.rd.v;
-    for (Accepted& pa : acc) for (uint32_t i = 0; i < kCh; ++i) if (R.los_found[i] && pa.fit[i].ok)
-      for (uint32_t m = 0; m < a.n_range; ++m) for (uint32_t d = 0; d < a.n_dopp; ++d)
-        Rc.rd.v[Rc.rd.idx(i, m, d)] -= cf(pa.fit[i].A * rs.at(m, d, pa.fit[i].grid[0]));
-  };
-  auto choose = [&](Acc& me, long d, uint32_t dhv, double thr, bool resid) -> double {
-    const long w0 = d - (long)dhv, w1 = d + (long)dhv;
-    std::array<std::vector<std::pair<double, uint32_t>>, kCh> pk; std::array<std::vector<double>, kCh> raw;
-    std::array<double, kCh> pmax{};
-    for (uint32_t i = 0; i < kCh; ++i) if (R.los_found[i]) {
-      me.bin[i] = excess_delay_s(me.x, geo.tx, geo.rx[i]) / a.delay_step_s;
-      const MagInterp mi(a.n_range, me.bin[i]);
-      std::vector<double> col(w1 - w0 + 1, -1.0), rw(w1 - w0 + 1, 0.0);
-      if (mi.ok) for (long e = w0; e <= w1; ++e) if (dopp_ok(a, e)) {
-        const double m = mi.at(R, i, (uint32_t)e); rw[e - w0] = m * m / R.noise[i];
-        const double mr = resid ? mi.at(Rc, i, (uint32_t)e) : m;
-        col[e - w0] = mr * mr / R.noise[i];
-      }
-      for (long e = w0; e <= w1; ++e) {
-        const double v = col[e - w0];
-        if (v >= 0 && (e == w0 || v >= col[e - 1 - w0]) && (e == w1 || v >= col[e + 1 - w0])) pk[i].push_back({v, (uint32_t)e});
-      }
-      std::sort(pk[i].begin(), pk[i].end(), [](const auto& l, const auto& r) { return l.first > r.first; });
-      if (pk[i].empty()) pk[i].push_back({0.0, (uint32_t)std::clamp(d, 0L, (long)a.n_dopp - 1)});
-      for (const auto& qq : pk[i]) raw[i].push_back(qq.second >= (uint32_t)std::max(0L, w0) && (long)qq.second <= w1 ? rw[qq.second - w0] : 0.0);
-      pmax[i] = pk[i][0].first;
-    }
-    double sum_max = 0; for (uint32_t i = 0; i < kCh; ++i) sum_max += pmax[i];
-    for (uint32_t i = 0; i < kCh; ++i) if (R.los_found[i]) {
-      const double others = sum_max - pmax[i];
-      while (pk[i].size() > 1 && !(pk[i].back().first + others > thr)) { pk[i].pop_back(); raw[i].pop_back(); }
-    }
-    std::array<double, kCh> nu{};
-    if (n == kCh) {
-      Vec3 gv[kCh]; for (uint32_t i = 0; i < kCh; ++i) gv[i] = grad(geo, i, me.x);
-      for (uint32_t i = 0; i < kCh; ++i) {
-        Vec3 r3[3]; uint32_t qq = 0; for (uint32_t j = 0; j < kCh; ++j) if (j != i) r3[qq++] = gv[j];
-        nu[i] = ((i & 1) ? -1.0 : 1.0) * dot(r3[0], cross(r3[1], r3[2]));
-      }
-    }
-    double nu_abs = 0; for (double v : nu) nu_abs += std::abs(v);
-    std::array<double, kCh + 1> rest{};
-    for (int i = kCh - 1; i >= 0; --i) rest[i] = rest[i + 1] + (R.los_found[i] ? pmax[i] : 0.0);
-    double ec = -1; std::array<uint32_t, kCh> idx{}, pick{};
-    struct Dfs {
-      const std::array<std::vector<std::pair<double, uint32_t>>, kCh>& pk; const std::array<bool, kCh>& used;
-      const std::array<double, kCh + 1>& rest; const std::array<double, kCh>& nu; double nu_abs, thr, f0, fstep;
-      double& ec; std::array<uint32_t, kCh>& idx; std::array<uint32_t, kCh>& pick;
-      void run(uint32_t i, double e, double cons)
-      {
-        if (i == kCh) {
-          if (!(nu_abs > 0 && std::abs(cons) > fstep * nu_abs) && e > ec) { ec = e; pick = idx; }
-          return;
-        }
-        if (!used[i]) { idx[i] = 0; run(i + 1, e, cons); return; }
-        for (uint32_t j = 0; j < pk[i].size(); ++j) {
-          if (!(e + pk[i][j].first + rest[i + 1] > std::max(ec, thr))) break;
-          idx[i] = j;
-          run(i + 1, e + pk[i][j].first, cons + nu[i] * (f0 + pk[i][j].second * fstep));
-        }
-      }
-    } dfs{pk, R.los_found, rest, nu, nu_abs, thr, a.dopp0_hz, a.dopp_step_hz, ec, idx, pick};
-    dfs.run(0, 0.0, 0.0);
-    if (!(ec > thr)) return -1.0;
-    for (uint32_t i = 0; i < kCh; ++i) if (R.los_found[i]) { me.pw[i] = raw[i][pick[i]]; me.d[i] = pk[i][pick[i]].second; }
-    return ec;
-  };
-  if (std::getenv("NR_ISAC_DETECT_CHECK")) {   // debug: device pre-pursuit vs the host transcription
-    { std::vector<float> hm(ncell); I.down(hm.data(), I.mag, ncell); I.sync(); size_t bm = 0; double mx = 0;
-      for (size_t j = 0; j < ncell; ++j) if (hm[j] != std::abs(R.rd.v[j])) { ++bm; mx = std::max(mx, (double)std::abs(hm[j] - std::abs(R.rd.v[j])) / std::abs(R.rd.v[j])); }
-      std::fprintf(stderr, "CHECK mag_bad=%zu/%zu maxrel=%.3g\n", bm, ncell, mx); }
-    size_t bad_dh = 0; for (size_t v = 0; v < nv; ++v) bad_dh += dh[v] != dopp_half(a, geo, R.los_found, g.at(v));
-    std::vector<double> sc(nt); I.down(sc.data(), I.scale, nt); I.sync();
-    size_t bad_sc = 0;
-    for (size_t t = 0; t < nt; ++t) {
-      std::vector<double> zz(nv);
-      for (size_t v = 0; v < nv; ++v) {
-        const long d = a.tested_dopp[t]; const long lo = std::max(0L, d - (long)dh[v]), hi = std::min<long>(a.n_dopp - 1, d + dh[v]);
-        zz[v] = E[t * nv + v] / nmed[std::max<uint32_t>(1, okc[hi + 1] - okc[lo])];
-      }
-      const double m = median(std::move(zz)); if (m != sc[t]) { if (bad_sc < 3) std::fprintf(stderr, "CHECK scale t=%zu host=%.17g dev=%.17g\n", t, m, sc[t]); ++bad_sc; }
-    }
-    size_t bad_c = 0;
-    for (uint32_t kc = 0; kc < nc; ++kc) {
-      const size_t kt = c_idx[kc] / nv, kv = c_idx[kc] % nv;
-      Acc me; me.x = g.at(kv);
-      const double ec = choose(me, a.tested_dopp[kt], dh[kv], c_thr[kc], false);
-      bool same = std::abs(ec - c_ec[kc]) <= 1e-12 * std::abs(ec);
-      if (ec > c_thr[kc]) for (uint32_t i = 0; i < kCh; ++i) same = same && me.d[i] == c_me[kc].d[i] && std::abs(me.pw[i] - c_me[kc].pw[i]) <= 1e-12 * me.pw[i];
-      if (!same) { if (bad_c < 5) std::fprintf(stderr, "CHECK cand %u t=%zu v=%zu host ec=%.17g d=%u,%u,%u,%u dev ec=%.17g d=%u,%u,%u,%u dh=%u\n", kc, kt, kv, ec, me.d[0], me.d[1], me.d[2], me.d[3],
-                                c_ec[kc], c_me[kc].d[0], c_me[kc].d[1], c_me[kc].d[2], c_me[kc].d[3], dh[kv]); ++bad_c; }
-    }
-    std::fprintf(stderr, "CHECK dh_bad=%zu scale_bad=%zu choose_bad=%zu/%u\n", bad_dh, bad_sc, bad_c, nc);
-  }
   std::map<std::tuple<size_t, uint32_t, uint32_t, uint32_t, uint32_t>, size_t> seen;
   for (uint32_t kc = 0; kc < nc; ++kc) {
     const size_t kt = c_idx[kc] / nv, kv = c_idx[kc] % nv; const double kthr = c_thr[kc], ec = c_ec[kc];
@@ -1530,23 +1512,6 @@ std::vector<Detection> GpuDetect::run(const std::vector<float>& E, const RdResul
     }
     return best;
   };
-  auto refit_all = [&]() {
-    for (int sweep = 0; sweep < 10; ++sweep) {
-      ++T.sweeps;
-      bool moved = false;
-      for (size_t j = 0; j < acc.size(); ++j)
-        for (uint32_t i = 0; i < kCh; ++i) if (R.los_found[i]) {
-          std::vector<ChanFit*> oth;
-          for (size_t o = 0; o < acc.size(); ++o) if (o != j && acc[o].fit[i].ok) oth.push_back(&acc[o].fit[i]);
-          ChanFit& f = acc[j].fit[i];
-          ChanFit nf = fit_channel(rs, i, f.p, f.fb, hm_r, hm_d, z, oth); ++T.fits;
-          const double sc = nf.ok ? std::sqrt(std::max(1.0, std::norm(nf.A) / R.noise[i] / std::max(nf.snr, 1e-300))) : 1.0;
-          if (nf.ok && (!f.ok || std::abs(nf.p - f.p) > sc * nf.sp || std::abs(nf.fb - f.fb) > sc * nf.sf)) moved = true;
-          f = std::move(nf);
-        }
-      if (!moved) break;
-    }
-  };
   // ---- device state for the pursuit ----
   const uint32_t nrow = (uint32_t)rs.rows.size(), sc = R.wf.sc, nr = a.n_range, nd = a.n_dopp;
   const size_t ncc = (size_t)nr * nd, per = (size_t)kMaxGrid * nrow, sper = (size_t)nd * nr;
@@ -1586,6 +1551,8 @@ std::vector<Detection> GpuDetect::run(const std::vector<float>& E, const RdResul
     fa.per = (uint32_t)per; fa.nc = (uint32_t)ncc; fa.sper = (uint32_t)sper;
     fa.hm_r = hm_r; fa.hm_d = hm_d; fa.z = z; fa.gam = I.gam.as<double2>(); fa.ghr = hr; fa.ghd = hd;
     fa.Nmax = (uint32_t)((2 * hm_r + 1) * (2 * hm_d + 1));
+    fa.stats = nullptr;
+    if (prof) { I.fstats.ensure(32 * sizeof(unsigned long long)); cuda_check(cudaMemsetAsync(I.fstats.p, 0, 32 * sizeof(unsigned long long), I.stream), "memset"); fa.stats = I.fstats.as<unsigned long long>(); }
   }
   auto fit_ptrs = [&](FitArgs& f) {
     f.F = I.F.as<DFit>(); f.gpp = I.gpp.as<double2>(); f.gpr = I.gpr.as<double>(); f.dir = I.dir.as<double2>(); f.stat = I.stat.as<double2>(); f.Mf = I.Mf.as<double2>();
@@ -1606,7 +1573,6 @@ std::vector<Detection> GpuDetect::run(const std::vector<float>& E, const RdResul
     for (uint32_t i = 0; i < kCh; ++i) { o.leak[i] = 0; o.leak_d[i] = o.me.d[i]; o.leak_n[i] = 0; }
   }
   I.up(I.items, ditems.data(), ditems.size());
-  if (!items.empty()) I.pk_scratch.ensure(std::max<size_t>(I.pk_scratch.cap, items.size() * kCh * W * sizeof(DPk)));
   I.fit_slots_reserve(4, per, ncc, sper, sc);
   auto tabs = [&]() { return DFitTabs{I.F.as<DFit>(), I.gpp.as<double2>(), I.dir.as<double2>(), I.stat.as<double2>(), I.gpr.as<double>(), (uint32_t)per, (uint32_t)ncc, (uint32_t)sper}; };
   DItem* d_items = nullptr;
@@ -1661,8 +1627,10 @@ std::vector<Detection> GpuDetect::run(const std::vector<float>& E, const RdResul
       I.launch_fits(f, jb, nrow_all, da, dr, per);
       I.build_fit_tables(da, dr, (uint32_t)jb.size(), sc, per, ncc, sper);
     }
+    if (prof) I.sync();
     T.fit_ms += ms_since(tq); tq = Clock::now();
     k_rebuild<<<I.blocks(jb.size() * ncc), 256, 0, I.stream>>>(da, I.F.as<DFit>(), I.slots.as<uint32_t>(), (uint32_t)jb.size(), I.dir.as<double2>(), I.rcf.as<float2>(), I.magc.as<float>());
+    if (prof) I.sync();
     T.rebuild_ms += ms_since(tq); tq = Clock::now();
     {
       const Acc& sa = acc.back().s; DAcc ds{};
@@ -1674,7 +1642,9 @@ std::vector<Detection> GpuDetect::run(const std::vector<float>& E, const RdResul
       d_items = I.items.as<DItem>();
       const uint32_t ni = (uint32_t)items.size();
       if (ni) {
-        k_rescore<<<I.blocks(ni, 64), 64, 0, I.stream>>>(da, dg, ds, nms_r, d_items, ni, I.mag.as<float>(), I.magc.as<float>(), I.pk_scratch.as<DPk>(), W);
+        const uint32_t wpb = I.choose_warps(W);
+        k_rescore<<<(unsigned)((ni + wpb - 1) / wpb), 32 * wpb, wpb * choose_smem(W), I.stream>>>(da, dg, ds, nms_r, d_items, ni, I.mag.as<float>(), I.magc.as<float>(), W);
+        if (prof) { I.sync(); T.choose2_ms += ms_since(tq); }
         k_leak<<<I.blocks((size_t)ni * kCh * 32, 128), 128, 0, I.stream>>>(da, dg, dr, tabs(), d_items, ni, (uint32_t)acc.size(), z, 0);
         I.down(ditems.data(), I.items, ni); I.sync();
         for (size_t q = 0; q < items.size(); ++q) from_ditem(ditems[q], &items[q]);
@@ -1688,18 +1658,11 @@ std::vector<Detection> GpuDetect::run(const std::vector<float>& E, const RdResul
   // fitted delay or Doppler moves by more than its own standard error (at most 10 sweeps). A sweep is
   // queued without a host round trip; the host reads the convergence flag once per sweep.
   if (!acc.empty()) {
-    for (int sweep = 0; sweep < 10; ++sweep) {
-      ++T.sweeps;
-      cuda_check(cudaMemsetAsync(I.moved.p, 0, sizeof(int), I.stream), "memset moved");
-      for (size_t j = 0; j < acc.size(); ++j) {
-        std::vector<FitJob> jb;
-        for (uint32_t i = 0; i < kCh; ++i) if (R.los_found[i]) { jb.push_back(FitJob{(int32_t)i, (int32_t)j, 1, 0, 0.0, 0.0}); ++T.fits; }
-        FitArgs f = fa; fit_ptrs(f); f.tables = 0; f.nacc = (uint32_t)acc.size();
-        I.launch_fits(f, jb, nrow_all, da, dr, per);
-      }
-      int moved = 0; I.down(&moved, I.moved, 1); I.sync();
-      if (!moved) break;
-    }
+    std::vector<FitJob> jb;
+    for (uint32_t i = 0; i < kCh; ++i) if (R.los_found[i]) jb.push_back(FitJob{(int32_t)i, 0, 1, 0, 0.0, 0.0});
+    FitArgs f = fa; fit_ptrs(f); f.tables = 0; f.nacc = (uint32_t)acc.size(); if (f.stats) f.stats += 16;
+    T.sweeps = (uint32_t)I.launch_refit(f, jb, nrow_all);
+    T.fits += T.sweeps * (uint32_t)(acc.size() * jb.size());
     std::vector<DFit> hf(acc.size() * kCh);
     I.down(hf.data(), I.F, hf.size()); I.sync();
     for (size_t j = 0; j < acc.size(); ++j) for (uint32_t i = 0; i < kCh; ++i) {
@@ -1757,13 +1720,16 @@ std::vector<Detection> GpuDetect::run(const std::vector<float>& E, const RdResul
     out.push_back(det);
   }
   T.finish_ms = ms_since(t0);
+  unsigned long long fst[32] = {};
+  if (prof) { cuda_check(cudaMemcpyAsync(fst, I.fstats.p, sizeof(fst), cudaMemcpyDeviceToHost, I.stream), "D2H"); I.sync();
+    for (int w = 0; w < 2; ++w) std::fprintf(stderr, "FITPHASE %s fits=%llu barriers=%llu ms: y0=%.1f [cells=%.1f Z=%.1f zsync=%.1f] coarse=%.1f setM=%.1f passes=%.1f fine=%.1f cov=%.1f\n", w ? "refit" : "accept",
+      fst[16 * w + 1], fst[16 * w], fst[16 * w + 4] / 1e6, fst[16 * w + 12] / 1e6, fst[16 * w + 10] / 1e6, fst[16 * w + 11] / 1e6, fst[16 * w + 5] / 1e6, fst[16 * w + 6] / 1e6, fst[16 * w + 7] / 1e6, fst[16 * w + 8] / 1e6, fst[16 * w + 9] / 1e6); }
   T.total_ms = ms_since(t_all);
   if (std::getenv("NR_ISAC_DETECT_PROFILE"))
-    std::fprintf(stderr, "DETECTPROF total=%.1f prep=%.1f scale=%.1f cand=%.1f choose=%.1f items=%.1f pursuit=%.1f [pick=%.1f walk=%.1f fit=%.1f rebuild=%.1f rescore=%.1f] refit=%.1f finish=%.1f cands=%u items=%u rounds=%u acc=%u fits=%u sweeps=%u jevals=%llu hm=%ld,%ld rows=%zu nr=%u nd=%u nt=%zu nv=%zu\n",
+    std::fprintf(stderr, "DETECTPROF total=%.1f prep=%.1f scale=%.1f cand=%.1f choose=%.1f items=%.1f pursuit=%.1f [pick=%.1f walk=%.1f fit=%.1f rebuild=%.1f rescore=%.1f (choose2=%.1f)] refit=%.1f finish=%.1f cands=%u items=%u rounds=%u acc=%u fits=%u sweeps=%u bpf_acc=%.1f bpf_ref=%.1f hm=%ld,%ld rows=%zu nr=%u nd=%u nt=%zu nv=%zu\n",
                  T.total_ms, T.prep_ms, T.scale_ms, T.cand_ms, T.choose_ms, T.items_ms, T.pursuit_ms, T.pick_ms, T.walk_ms, T.fit_ms, T.rebuild_ms,
-                 T.rescore_ms, T.refit_ms, T.finish_ms, T.cands, T.items, T.rounds, T.accepted, T.fits, T.sweeps, (unsigned long long)g_j_evals,
-                 hm_r, hm_d, rs.rows.size(), a.n_range, a.n_dopp, nt, nv);
-  g_j_evals = 0;
+                 T.rescore_ms, T.choose2_ms, T.refit_ms, T.finish_ms, T.cands, T.items, T.rounds, T.accepted, T.fits, T.sweeps,
+                 fst[1] ? (double)fst[0] / fst[1] : 0.0, fst[17] ? (double)fst[16] / fst[17] : 0.0, hm_r, hm_d, rs.rows.size(), a.n_range, a.n_dopp, nt, nv);
   return out;
 }
 

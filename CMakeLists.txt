@@ -2464,7 +2464,18 @@ if(ENABLE_TESTS)
     # path or by coherent_cuda_stub.cc, and the test itself SKIPs at runtime via available().
     add_executable(test_nr_isac_coherent_cuda_parity ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/tests/coherent_cuda_parity_test.cc)
     target_include_directories(test_nr_isac_coherent_cuda_parity PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_ISAC)
-    target_link_libraries(test_nr_isac_coherent_cuda_parity PRIVATE NR_UE_ISAC)
+    target_link_libraries(test_nr_isac_coherent_cuda_parity PRIVATE NR_UE_ISAC dl)
+    # The oracle's own source built a second time WITHOUT floating-point contraction, dlopen'ed by the
+    # parity test: an equally valid build of the same algorithm whose disagreements with the oracle
+    # binary are, by construction, decided by rounding (the recorded-case parity uses it to tell
+    # rounding-determined outputs from real GPU divergences).
+    add_library(nr_isac_coherent_twin SHARED ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/coherent_core.cc ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/fft.cc
+                ${OPENAIR1_DIR}/PHY/NR_UE_ISAC/tests/coherent_twin_entry.cc)
+    target_include_directories(nr_isac_coherent_twin PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_ISAC ${OPENAIR1_DIR} ${OPENAIR_DIR})
+    target_compile_options(nr_isac_coherent_twin PRIVATE -ffp-contract=off)
+    target_link_options(nr_isac_coherent_twin PRIVATE -Wl,-Bsymbolic -Wl,--no-undefined)
+    add_dependencies(test_nr_isac_coherent_cuda_parity nr_isac_coherent_twin)
+    target_compile_definitions(test_nr_isac_coherent_cuda_parity PRIVATE NR_ISAC_COHERENT_TWIN="$<TARGET_FILE:nr_isac_coherent_twin>")
     add_dependencies(tests test_nr_isac_coherent_cuda_parity)
     add_test(NAME test_nr_isac_coherent_cuda_parity COMMAND ./test_nr_isac_coherent_cuda_parity)
   endif()

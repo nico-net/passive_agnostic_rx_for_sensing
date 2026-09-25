@@ -16,7 +16,7 @@ namespace nr_isac::coherent {
 
 struct GpuDetectTiming {
   double total_ms = 0, prep_ms = 0, scale_ms = 0, cand_ms = 0, choose_ms = 0, items_ms = 0, pursuit_ms = 0,
-         pick_ms = 0, walk_ms = 0, fit_ms = 0, rebuild_ms = 0, rescore_ms = 0, refit_ms = 0, finish_ms = 0;
+         pick_ms = 0, walk_ms = 0, fit_ms = 0, rebuild_ms = 0, rescore_ms = 0, choose2_ms = 0, refit_ms = 0, finish_ms = 0;
   uint32_t cands = 0, items = 0, rounds = 0, accepted = 0, fits = 0, sweeps = 0;
 };
 
