@@ -300,7 +300,7 @@ struct CudaCoherent::Impl {
   // detect() below. Passing this instead of downloading avoids the D2H on every CPI that doesn't need
   // a host copy, without editing coherent_cuda_detect.cu (owned by another agent).
   std::vector<float> ev_dummy_E;
-  GpuDetect det;   // GPU-resident detect() (coherent_cuda_detect.cu); opt-in via NR_ISAC_CUDA_DETECT_GPU=1 (CPU oracle default)
+  GpuDetect det;   // GPU-resident detect() (coherent_cuda_detect.cu); default; NR_ISAC_CUDA_DETECT_CPU=1 selects the CPU oracle
 
   Impl()
   {
@@ -556,7 +556,7 @@ std::vector<Detection> CudaCoherent::detect(const Grid& g, const Geometry& geo, 
   // the CPI that image is due); GpuDetect::run() below takes the DEVICE envelope pointer directly and
   // never reads its `E` argument when one is supplied, so skipping this D2H when neither applies
   // changes nothing it consumes.
-  const bool use_gpu_detect = std::getenv("NR_ISAC_CUDA_DETECT_GPU") != nullptr;
+  const bool use_gpu_detect = std::getenv("NR_ISAC_CUDA_DETECT_CPU") == nullptr;   // GPU default; CPU oracle opt-in
   const bool need_host_E = !use_gpu_detect || topview_max != nullptr;
   std::vector<float> h_E;
   if (need_host_E) {
@@ -570,12 +570,12 @@ std::vector<Detection> CudaCoherent::detect(const Grid& g, const Geometry& geo, 
   I.timing.envelope_download_ms = 0;  // included above; kept separate field for report symmetry only
 
   if (need_host_E) I.last_E = h_E;    // last_envelope(): topview builder (or the CPU-oracle path)
-  // GpuDetect is opt-in (NR_ISAC_CUDA_DETECT_GPU=1). On 120 detect() inputs dumped from two OTA
+  // GpuDetect is the default (NR_ISAC_CUDA_DETECT_CPU=1 selects the CPU oracle). On 220 real detect() inputs
   // recordings it matches the CPU oracle exactly wherever the ORACLE is reproducible; where it is not
   // (the oracle's own source rebuilt without FMA contraction, or run on 1-ulp-perturbed inputs, changes
   // its own output) the GPU differs like those rebuilds do -- see gpu-exact-report.md and the
-  // recorded-case mode of tests/coherent_cuda_parity_test.cc. Default left to the controller.
-  if (!use_gpu_detect) return coherent::detect(h_E, R, g, geo, p);   // CPU oracle (default)
+  // recorded-case mode of tests/coherent_cuda_parity_test.cc (FAIL = 0 asserted).
+  if (!use_gpu_detect) return coherent::detect(h_E, R, g, geo, p);   // CPU oracle (opt-in)
   return I.det.run(need_host_E ? h_E : I.ev_dummy_E, R, g, geo, p, I.rd.p, (const float*)I.E.p, I.stream);
 }
 
