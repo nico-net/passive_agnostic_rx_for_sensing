@@ -10,6 +10,8 @@
  *      http://www.openairinterface.org/?page_id=698
  */
 
+#include <cstdlib>
+#include <iostream>
 #include <gtest/gtest.h>
 #include <set>
 #include <tuple>
@@ -296,6 +298,53 @@ TEST(UlGrantBook, ExpiredAndCapacityDropsNeverOverwriteAnotherUe) {
   EXPECT_FALSE(nr_passive_ul_book_take(&book,1018,20,&e,&expired));
   EXPECT_EQ(expired,NR_PASSIVE_UL_BOOK_CAPACITY);
   EXPECT_EQ(nr_passive_ul_book_put(&book,&g,1020),1);
+}
+
+/* Production-shaped type-B acquisition: the real mask generator, a TYPE-B truth (S=5 L=7, add_pos 1,
+ * len 1, 256QAM, k0 0 -> DM-RS on symbols 5 and 9 = 0x220, last symbol 11). ONE oracle observation
+ * (mask, last symbol, k0 of the DCI's own slot) must prune the live context to a few entries that
+ * include the truth, and the context must then converge on it within the pre-Task-14 400k budget. */
+TEST(DlAdaptive, TypeBTruthIsPinnedByOneOracleObservationAndConverges) {
+  const int S = 5, L = 7;
+  const uint16_t mask = (uint16_t)nr_pdcch_blind_dmrs_mask(0, L, S, 1, 1, 1);
+  ASSERT_EQ(mask, 0x220);
+  nr_pdsch_config_sweep_reset_all();
+  nr_pdsch_config_sweep_prior_reset();
+  nr_pdsch_sweep_ticket_t t{};
+  nr_pdsch_cfg_hypothesis_t h{};
+  ASSERT_TRUE(nr_pdsch_config_sweep_select(0x7B, 0x4601, 0, 2, 0, nr_pdcch_blind_dmrs_mask, &t, &h));
+  nr_pdsch_config_sweep_state_t st{};
+  ASSERT_TRUE(nr_pdsch_config_sweep_snapshot(&t, &st));
+  const int full = st.n_hyp;
+  const int n = nr_pdsch_config_sweep_observe(&t, mask, S + L - 1, 0);
+  /* the prune re-indexed the context: take a fresh ticket before reading it */
+  ASSERT_TRUE(nr_pdsch_config_sweep_select(0x7B, 0x4601, 0, 2, 0, nr_pdcch_blind_dmrs_mask, &t, &h));
+  ASSERT_TRUE(nr_pdsch_config_sweep_snapshot(&t, &st));
+  bool has_truth = false;
+  for (int i = 0; i < st.n_hyp; i++)
+    has_truth |= st.hyp[i].tda_start == S && st.hyp[i].tda_length == L && st.hyp[i].k0 == 0
+                 && st.hyp[i].dmrs_mask == mask && st.hyp[i].mcs_table == 1 && st.hyp[i].mapping_type == 1;
+  std::cerr << "[ MEASURED ] type-B truth: catalog " << full << " -> " << n << " after one observation" << std::endl;
+  EXPECT_GT(n, 0);
+  EXPECT_LE(n, 40);
+  EXPECT_TRUE(has_truth);
+  unsigned seed = 4242;
+  int converged = -1;
+  nr_pdsch_cfg_hypothesis_t w{};
+  for (int i = 1; i <= 400000 && converged < 0; i++) {
+    ASSERT_TRUE(nr_pdsch_config_sweep_select(0x7B, 0x4601, 0, 2, 0, nr_pdcch_blind_dmrs_mask, &t, &h));
+    const bool truth = h.tda_start == S && h.tda_length == L && h.k0 == 0 && h.dmrs_mask == mask && h.mcs_table == 1;
+    const double u = (double)rand_r(&seed) / (double)RAND_MAX;
+    if (nr_pdsch_config_sweep_feedback(&t, truth && u < 0.54, &w))
+      converged = i;
+  }
+  std::cerr << "[ MEASURED ] type-B truth converged after " << converged << " outcomes" << std::endl;
+  ASSERT_GT(converged, 0);
+  EXPECT_EQ(w.tda_start, S);
+  EXPECT_EQ(w.tda_length, L);
+  EXPECT_EQ(w.mapping_type, 1);
+  EXPECT_EQ(w.mcs_table, 1);
+  nr_pdsch_config_sweep_reset_all();
 }
 
 TEST(DlAdaptive, MaskOracleCollapsesTheFullCatalogToAFewEntries) {

@@ -482,7 +482,8 @@ static uint16_t dmrs_oracle_measure(PHY_VARS_NR_UE *ue, NR_DL_FRAME_PARMS *fp, u
   for (int sym = 0; sym < n_sym; sym++) if (prof[sym] > 0.05) srt[ns++] = prof[sym];
   for (int a = 1; a < ns; a++) for (int b = a; b > 0 && srt[b] < srt[b - 1]; b--) { double t = srt[b]; srt[b] = srt[b - 1]; srt[b - 1] = t; }
   /* LOWER median: a short type-B allocation (L = 2) has two energetic symbols, and the upper median
-   * of two IS the DM-RS symbol, which then can never clear med + 0.18. Unchanged for >= 3 symbols. */
+   * of two IS the DM-RS symbol, which then can never clear med + 0.18. Identical to the old median for
+   * an ODD count only; for an even count >= 4 it is the lower of the two middle values. */
   const double med = ns ? srt[(ns - 1) / 2] : 1.0;
   uint16_t mask = 0;
   for (int sym = 0; sym < n_sym; sym++)
@@ -707,28 +708,41 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
       } else {
         /* k0 ORACLE (Task 14). No DM-RS on this grant's PRBs in the DCI's own slot, so its PDSCH is k0 >= 1
          * slots later. The catalog only enumerates k0 {0,1} (TS 38.214 allows 0..32); rather than all 33,
-         * probe the following slots and append ONLY the k0 the air shows. Depth K is MEASURED, never
-         * assumed: it is how far the producer has already written past the DCI slot at this instant
-         * (prod - DCI slot), each slot re-checked against the ring's retention (nr_passive_samples_valid)
-         * before and after its FEP. The probe never waits for the producer. slot+1 is probed first: k0 = 1
-         * is already in the catalog, so a hit there costs nothing further. A hit is not proof (another
-         * UE's PDSCH may sit on these PRBs at slot+k), which is why it only ADDS hypotheses -- the TB CRC
-         * still decides -- and never prunes. FEP goes to a scratch buffer: rxdataF carries this job's own
-         * slot, which the decode's per-thread FEP cache may reuse for the rest of the slot group.
-         * ponytail: 1 in 8 eligible jobs probes (up to K x 14 FFTs each); per-context gating if it shows. */
+         * probe the following slots and append ONLY the k0 values the air shows. Reach K = min(32, spf - 2):
+         * the ring keeps a slot for spf - 2 slots after it was written (nr_passive_samples_valid), so a
+         * farther slot cannot be read. The consumer usually runs only 1-2 slots behind the producer, so the
+         * probe WAITS (bounded, same pattern as the stale check) for each target slot to be written, and
+         * re-checks retention before and after its FEP. EVERY hit up to K is collected, not only the first:
+         * on a busy cell slot+1 usually carries some PDSCH on these PRBs and would hide a true k0 >= 2. A hit
+         * is not proof (another UE's PDSCH may sit there), which is why it only ADDS hypotheses -- the TB CRC
+         * still decides, and a converged context drops the layers it did not win on. FEP goes to a scratch
+         * buffer: rxdataF carries this job's own slot, which the decode's per-thread FEP cache may reuse for
+         * the rest of the slot group. ISAC_PDSCH_K0_PROBE=0 disables it (read once).
+         * ponytail: 1 in 8 eligible jobs probes (up to K x 14 FFTs + up to K slots of waiting each). */
+        static int s_k0_probe_on = -1;
+        if (s_k0_probe_on < 0) {
+          const char *e = getenv("ISAC_PDSCH_K0_PROBE");
+          s_k0_probe_on = (e != NULL && atoi(e) == 0) ? 0 : 1;
+        }
         static _Atomic uint32_t s_probe_tick;
         static __thread c16_t *t_probe;
-        if (!t_probe)
+        if (s_k0_probe_on && !t_probe)
           t_probe = (c16_t *)malloc16_clear((size_t)rxdataF_sz * sizeof(c16_t));
-        const long prod_now = atomic_load_explicit(&nr_ue_diag_producer_absolute_slot, memory_order_relaxed);
-        const long retained = prod_now - (long)job.absolute_slot;
-        if (t_probe && retained >= 1 && (atomic_fetch_add(&s_probe_tick, 1) % 8) == 0) {
-          const long K = retained < 32 ? retained : 32;
-          int hit_k = 0, hit_last = -1;
-          uint16_t hit_mask = 0;
-          for (long k = 1; k <= K && !hit_k; k++) {
+        if (s_k0_probe_on && t_probe && (atomic_fetch_add(&s_probe_tick, 1) % 8) == 0) {
+          const long K = slots_per_frame - 2 < 32 ? slots_per_frame - 2 : 32;
+          const int slot_iters = (int)(100 / slots_per_frame) > 0 ? (int)(100 / slots_per_frame) : 1; /* 100 us steps per slot */
+          uint64_t hits = 0; /* bit k: DM-RS seen on these PRBs at slot+k */
+          uint16_t hit_mask[33] = {0};
+          long reached = 0;
+          for (long k = 1; k <= K; k++) {
             const long target = (long)job.absolute_slot + k;
-            if (!nr_passive_samples_valid(atomic_load(&nr_ue_diag_producer_absolute_slot), target, slots_per_frame))
+            long p = atomic_load_explicit(&nr_ue_diag_producer_absolute_slot, memory_order_relaxed);
+            for (int w = 0; w < 30 + (int)k * slot_iters && p < target; w++) {
+              struct timespec ts = {0, 100000};
+              nanosleep(&ts, NULL);
+              p = atomic_load_explicit(&nr_ue_diag_producer_absolute_slot, memory_order_relaxed);
+            }
+            if (!nr_passive_samples_valid(p, target, slots_per_frame))
               break;
             double pf[14] = {0}, md = 1.0;
             int ls = -1;
@@ -737,25 +751,31 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
                                                    job.dlsch_pdu.nscid, &ls, pf, &md);
             if (!nr_passive_samples_valid(atomic_load(&nr_ue_diag_producer_absolute_slot), target, slots_per_frame))
               break; /* overwritten during the FEP: this measurement is not of slot+k */
+            reached = k;
             if (m) {
-              hit_k = (int)k;
-              hit_mask = m;
-              hit_last = ls;
+              hits |= UINT64_C(1) << k;
+              hit_mask[k] = m;
             }
           }
-          const int added = hit_k >= 2 ? nr_pdsch_config_sweep_add_k0(&job.sweep_ticket, (uint8_t)hit_k) : 0;
+          int added = 0, first_k = 0;
+          for (int k = 2; k <= K; k++)
+            if (hits & (UINT64_C(1) << k)) {
+              added += nr_pdsch_config_sweep_add_k0(&job.sweep_ticket, (uint8_t)k);
+              if (!first_k)
+                first_k = k;
+            }
           const uint64_t probes = atomic_fetch_add(&g_k0_probes, 1) + 1;
-          atomic_fetch_add(&g_k0_probe_retained, (uint64_t)retained);
+          atomic_fetch_add(&g_k0_probe_retained, (uint64_t)reached);
           uint64_t mx = atomic_load(&g_k0_probe_retained_max);
-          while ((uint64_t)retained > mx && !atomic_compare_exchange_weak(&g_k0_probe_retained_max, &mx, (uint64_t)retained)) {}
-          if (hit_k >= 2)
+          while ((uint64_t)reached > mx && !atomic_compare_exchange_weak(&g_k0_probe_retained_max, &mx, (uint64_t)reached)) {}
+          if (hits >> 2)
             atomic_fetch_add(&g_k0_probe_hits, 1);
           static _Atomic int s_k0_log = 20;
-          if ((hit_k >= 2 || (probes % 1000) == 1) && atomic_fetch_sub(&s_k0_log, 1) > 0)
-            LOG_A(PHY, "SENSING: K0_PROBE slot=%d rb=%d+%d retained=%ld K=%ld hit_k0=%d mask=0x%x last_sym=%d added=%d "
-                  "(probes=%lu k0>=2 hits=%lu retained mean=%.1f max=%lu)\n",
-                  job.nr_slot_rx, rb0, nrb, retained, K, hit_k, hit_mask, hit_last, added, (unsigned long)probes,
-                  (unsigned long)atomic_load(&g_k0_probe_hits),
+          if (((hits >> 2) || (probes % 1000) == 1) && atomic_fetch_sub(&s_k0_log, 1) > 0)
+            LOG_A(PHY, "SENSING: K0_PROBE slot=%d rb=%d+%d K=%ld reached=%ld hits=0x%llx first_k0>=2=%d mask=0x%x added=%d "
+                  "(probes=%lu with k0>=2 hits=%lu reached mean=%.1f max=%lu)\n",
+                  job.nr_slot_rx, rb0, nrb, K, reached, (unsigned long long)hits, first_k, first_k ? hit_mask[first_k] : 0,
+                  added, (unsigned long)probes, (unsigned long)atomic_load(&g_k0_probe_hits),
                   (double)atomic_load(&g_k0_probe_retained) / (double)probes,
                   (unsigned long)atomic_load(&g_k0_probe_retained_max));
         }

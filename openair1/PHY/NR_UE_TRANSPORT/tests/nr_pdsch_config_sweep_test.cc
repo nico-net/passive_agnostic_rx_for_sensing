@@ -61,11 +61,16 @@ TEST(PdschConfigSweep, FindsTheTruthOnAMarginalLink) {
   EXPECT_EQ(nr_pdsch_config_sweep_winner(&st), truth);
 }
 
+/* The two StaysUndecided tests are O(n^2) in the catalog (the post-MIN_TRIALS fallback scans every
+ * hypothesis per feed): they run on the type-A-only legal catalog (2016), which is what they were sized
+ * for; the 6336-entry pure A+B catalog made each take ~117 s. */
+static int32_t test_legal(int, int length, int start, int mapping_b, int add, int maxlen);
+
 TEST(PdschConfigSweep, StaysUndecidedWhenNothingDecodes) {
   // Geometry wrong upstream (bad dci_length/CORESET) -> every hypothesis scores zero. Reporting a
   // winner here would hand the receiver a confident wrong config, which is worse than no answer.
   nr_pdsch_config_sweep_state_t st;
-  const int n = nr_pdsch_config_sweep_init(&st, 2);
+  const int n = nr_pdsch_config_sweep_init_legal(&st, 2, 0, test_legal);
   drive(st, -1, 0.0, 0.0, 600 * n);
   EXPECT_EQ(nr_pdsch_config_sweep_winner(&st), -1);
 }
@@ -73,7 +78,7 @@ TEST(PdschConfigSweep, StaysUndecidedWhenNothingDecodes) {
 TEST(PdschConfigSweep, StaysUndecidedWhenTwoHypothesesAreIndistinguishable) {
   // Two hypotheses that the traffic cannot separate must NOT be resolved by a coin flip.
   nr_pdsch_config_sweep_state_t st;
-  const int n = nr_pdsch_config_sweep_init(&st, 2);
+  const int n = nr_pdsch_config_sweep_init_legal(&st, 2, 0, test_legal);
   unsigned seed = 999;
   for (int i = 0; i < 600 * n; i++) {
     nr_pdsch_cfg_hypothesis_t h;
@@ -797,4 +802,30 @@ TEST(PdschConfigSweepK0, ObservedK0IsAddedToTheContext) {
   const auto t1 = select_context(0x5150, 0x4601, 1);
   ASSERT_TRUE(nr_pdsch_config_sweep_snapshot(&t1, &st));
   EXPECT_EQ(count_k0(st, 3), added);
+}
+
+/* A k0 layer the context tried and did not win on was a false k0-oracle hit: once the context converges
+ * on another k0, later contexts of the RNTI are no longer seeded with it. */
+TEST(PdschConfigSweepK0, ConvergenceOnAnotherK0DropsTheFalseLayer) {
+  nr_pdsch_config_sweep_reset_all();
+  nr_pdsch_config_sweep_prior_reset();
+  nr_pdsch_sweep_ticket_t t{};
+  nr_pdsch_cfg_hypothesis_t h{};
+  ASSERT_TRUE(nr_pdsch_config_sweep_select(0xAC, 0x4601, 0, 2, 0, ab_legal, &t, &h));
+  ASSERT_EQ(nr_pdsch_config_sweep_add_k0(&t, 3), 6);
+  unsigned seed = 5;
+  bool converged = false;
+  nr_pdsch_cfg_hypothesis_t w{};
+  for (int i = 0; i < 200000 && !converged; i++) {
+    ASSERT_TRUE(nr_pdsch_config_sweep_select(0xAC, 0x4601, 0, 2, 0, ab_legal, &t, &h));
+    const bool truth = h.mapping_type == 0 && h.k0 == 0 && h.mcs_table == 1;
+    const double u = (double)rand_r(&seed) / (double)RAND_MAX;
+    converged = nr_pdsch_config_sweep_feedback(&t, truth && u < 0.54, &w);
+  }
+  ASSERT_TRUE(converged);
+  EXPECT_EQ(w.k0, 0);
+  ASSERT_TRUE(nr_pdsch_config_sweep_select(0xAC, 0x4601, 1, 2, 0, ab_legal, &t, &h));
+  nr_pdsch_config_sweep_state_t st{};
+  ASSERT_TRUE(nr_pdsch_config_sweep_snapshot(&t, &st));
+  EXPECT_EQ(count_k0(st, 3), 0);
 }

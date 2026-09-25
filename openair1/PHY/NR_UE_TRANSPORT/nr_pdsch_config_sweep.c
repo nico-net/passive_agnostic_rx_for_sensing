@@ -79,6 +79,11 @@ int nr_pdsch_config_sweep_init_legal(nr_pdsch_config_sweep_state_t *st, int tda_
    * (fill_dmrs_mask()'s tables via nr_pdcch_blind_dmrs_mask): type B puts the first DM-RS on the
    * first PDSCH symbol and takes the type-B columns of TS 38.211 Table 7.4.1.1.2-3/-4. */
   static const uint8_t kK0[]     = {0, 1};
+  static int typeb = -1; /* ISAC_PDSCH_TYPEB=0: catalog without mapping type B (default on) */
+  if (typeb < 0) {
+    const char *e = getenv("ISAC_PDSCH_TYPEB");
+    typeb = (e != NULL && atoi(e) == 0) ? 0 : 1;
+  }
   static const uint8_t kAddPos[] = {0, 1, 2, 3};
   static const uint8_t kMaxLen[] = {1, 2};
   static const uint8_t kMcsTab[] = {0, 1, 2};
@@ -91,7 +96,7 @@ int nr_pdsch_config_sweep_init_legal(nr_pdsch_config_sweep_state_t *st, int tda_
       * coincides with it (e.g. S=2 under dmrs-TypeA-Position pos2). Merging across mapping types is
       * required, not cosmetic: the CRC cannot separate two identical PDUs, so neither could win. */
      const int block = st->n_hyp;
-     for (uint8_t mt = 0; mt <= 1; mt++) {
+     for (uint8_t mt = 0; mt <= typeb; mt++) {
       if (!nr_pdsch_tda_legal(mt, S, L))
         continue;
       for (unsigned b = 0; b < sizeof(kAddPos); b++) {
@@ -464,7 +469,9 @@ int nr_pdsch_config_sweep_feed(nr_pdsch_config_sweep_state_t *st, int idx, bool 
     for(int i=1;i<st->n_hyp;i++)
       if(rate_of(st,i)>rate_of(st,leader)) leader=i;
     double lo,hi;
-    nr_crc_interval(st->ok[leader],st->trials[leader],NR_PDSCH_SWEEP_MAX_HYP,&lo,&hi);
+    /* Class count = the LIVE catalog, not the storage cap: every prune clears evidence and add_k0 only
+     * raises n, so the union bound always covers the hypotheses actually competing. */
+    nr_crc_interval(st->ok[leader],st->trials[leader],(unsigned)st->n_hyp,&lo,&hi);
     /* The absolute floor was 0.60, which silently assumed the TRUE config decodes at >=60 %.
      * MEASURED OTA 2026-09-13: the winning hypothesis decodes at 124/311 = 40 %, so its Wilson
      * lower bound can never reach 0.60 -- early separation could NEVER fire on this link and every
@@ -476,7 +483,7 @@ int nr_pdsch_config_sweep_feed(nr_pdsch_config_sweep_state_t *st, int idx, bool 
     for(int i=0;i<st->n_hyp && separated;i++) {
       if(i==leader) continue;
       double other_lo,other_hi;
-      nr_crc_interval(st->ok[i],st->trials[i],NR_PDSCH_SWEEP_MAX_HYP,&other_lo,&other_hi);
+      nr_crc_interval(st->ok[i],st->trials[i],(unsigned)st->n_hyp,&other_lo,&other_hi);
       if(other_hi>=lo) separated=false;
     }
     if(separated) { st->winner=leader; return leader; }
@@ -528,7 +535,10 @@ typedef struct {
    * caller having to hand the legality function back. */
   nr_pdsch_legality_fn_t legality;
   enum { PRIORED_NONE = 0, PRIORED_OWN, PRIORED_CELL } priored; /* which prior pruned this catalog */
-  nr_pdsch_config_sweep_state_t state;
+  /* Heap, allocated when the slot is first used and kept across reuse: nr-uesoftmodem mlockall()s
+   * (MCL_CURRENT|MCL_FUTURE) at startup, so 1024 inline states (180 KB each) would pin 185 MB of BSS
+   * whether or not any context ever opens. Non-NULL whenever generation != 0. */
+  nr_pdsch_config_sweep_state_t *state;
 } sweep_context_t;
 
 /* Outcomes a pruned context may spend before the prior is judged wrong for it. ~250 per hypothesis
@@ -569,10 +579,10 @@ static bool recovery_needed(const sweep_context_t *c)
 /* Full catalog for a context, plus every k0 layer the air has shown for its RNTI. */
 static void context_catalog(sweep_context_t *c, const rnti_ctx_t *r)
 {
-  nr_pdsch_config_sweep_init_legal(&c->state, c->tda_count, c->typeA, c->legality);
+  nr_pdsch_config_sweep_init_legal(c->state, c->tda_count, c->typeA, c->legality);
   for (int k = 2; r && k <= 32; k++)
     if (r->k0_seen & (UINT64_C(1) << k))
-      add_k0_layer(&c->state, (uint8_t)k);
+      add_k0_layer(c->state, (uint8_t)k);
 }
 
 static void reopen_context(sweep_context_t *c)
@@ -596,11 +606,11 @@ static void reopen_context(sweep_context_t *c)
     c->priored = PRIORED_NONE;
   }
   /* Keep the already checked legal catalog, but discard stale decoding evidence. */
-  memset(c->state.trials, 0, sizeof(c->state.trials));
-  memset(c->state.ok, 0, sizeof(c->state.ok));
-  c->state.winner = -1;
-  c->state.cursor = 0;
-  for (int i=0; i<c->state.n_hyp; ++i) c->state.order[i] = i;
+  memset(c->state->trials, 0, sizeof(c->state->trials));
+  memset(c->state->ok, 0, sizeof(c->state->ok));
+  c->state->winner = -1;
+  c->state->cursor = 0;
+  for (int i=0; i<c->state->n_hyp; ++i) c->state->order[i] = i;
   /* A reopen is the signal that a CONVERGED context stopped working -- the most valuable thing in
    * this log, because it is how a wrong prior announces itself. reacquisitions rising steadily on
    * one RNTI means its catalog keeps being re-derived. */
@@ -690,7 +700,7 @@ static sweep_context_t *ticket_context(const nr_pdsch_sweep_ticket_t *t)
   sweep_context_t *c = &g_contexts[t->context_slot];
   /* generation+slot+tda identify the context (the slot's generation changes on every reuse). */
   return c->generation == t->generation && c->tda == t->tda_index
-         && t->hypothesis >= 0 && t->hypothesis < c->state.n_hyp ? c : NULL;
+         && t->hypothesis >= 0 && t->hypothesis < c->state->n_hyp ? c : NULL;
 }
 
 bool nr_pdsch_config_sweep_select(uint64_t configuration, uint16_t rnti, uint8_t tda_index,
@@ -718,7 +728,14 @@ bool nr_pdsch_config_sweep_select(uint64_t configuration, uint16_t rnti, uint8_t
   if (found < 0) {
     found = victim;
     sweep_context_t *c = &g_contexts[found];
+    nr_pdsch_config_sweep_state_t *state = c->state ? c->state : calloc(1, sizeof(*state));
+    if (!state) {
+      pthread_mutex_unlock(&g_lock);
+      LOG_E(PHY, "SWEEP: cannot allocate a %zu-byte context state\n", sizeof(*state));
+      return false;
+    }
     memset(c, 0, sizeof(*c));
+    c->state = state;
     c->configuration = configuration;
     c->generation = ++g_generation;
     c->rnti = rnti;
@@ -726,7 +743,7 @@ bool nr_pdsch_config_sweep_select(uint64_t configuration, uint16_t rnti, uint8_t
     c->tda_count = tda_count;
     c->typeA = typeA;
     c->legality = legality;
-    nr_pdsch_config_sweep_init_legal(&c->state, tda_count, typeA, legality);
+    nr_pdsch_config_sweep_init_legal(c->state, tda_count, typeA, legality);
     /* Seed: this RNTI's own prior first (its other TDA contexts already converged on these fields),
      * else the cell-wide one. Scoped to the same configuration key either way: a different cell
      * config is a different DM-RS/PDSCH setup and its prior says nothing here. */
@@ -737,21 +754,21 @@ bool nr_pdsch_config_sweep_select(uint64_t configuration, uint16_t rnti, uint8_t
     } else if (g_prior.valid && g_prior.configuration == configuration) {
       seed = &g_prior; from = PRIORED_CELL;
     }
-    if (seed && prune_prior(&c->state, seed->mcs_table, seed->dmrs_add_pos, seed->dmrs_max_len,
+    if (seed && prune_prior(c->state, seed->mcs_table, seed->dmrs_add_pos, seed->dmrs_max_len,
                             seed->mapping_type) > 0)
       c->priored = from;
-    prune_to_observed(&c->state, &r->obs);
+    prune_to_observed(c->state, &r->obs);
     /* k0 values the air has shown for this RNTI (k0 oracle), so each new context does not re-probe. */
     for (int k = 2; k <= 32; k++)
       if (r->k0_seen & (UINT64_C(1) << k))
-        add_k0_layer(&c->state, (uint8_t)k);
+        add_k0_layer(c->state, (uint8_t)k);
   }
   sweep_context_t *c = &g_contexts[found];
   c->touched = ++g_clock;
-  const int h = nr_pdsch_config_sweep_next(&c->state, out);
+  const int h = nr_pdsch_config_sweep_next(c->state, out);
   if (h >= 0)
     *ticket = (nr_pdsch_sweep_ticket_t){.generation=c->generation, .context_slot=found,
-                                       .rnti=rnti, .tda_index=tda_index, .hypothesis=h, .settled=c->state.winner >= 0,
+                                       .rnti=rnti, .tda_index=tda_index, .hypothesis=h, .settled=c->state->winner >= 0,
                                        .k0=out->k0};
   pthread_mutex_unlock(&g_lock);
   return h >= 0;
@@ -782,8 +799,8 @@ int nr_pdsch_config_sweep_observe(const nr_pdsch_sweep_ticket_t *ticket, uint16_
     obs_record(&g_obs, dmrs_mask, last_symbol, k0);
   sweep_context_t *c = ticket_context(ticket);
   int n = 0;
-  if (c != NULL && c->state.winner < 0)
-    n = prune_to_observed(&c->state, &r->obs);
+  if (c != NULL && c->state->winner < 0)
+    n = prune_to_observed(c->state, &r->obs);
   pthread_mutex_unlock(&g_lock);
   return n;
 }
@@ -797,7 +814,7 @@ int nr_pdsch_config_sweep_add_k0(const nr_pdsch_sweep_ticket_t *t, uint8_t k0)
   const bool first = !(r->k0_seen & (UINT64_C(1) << k0));
   r->k0_seen |= UINT64_C(1) << k0;
   sweep_context_t *c = ticket_context(t);
-  const int n = c ? add_k0_layer(&c->state, k0) : 0;
+  const int n = c ? add_k0_layer(c->state, k0) : 0;
   static int s_left = 50; /* noise-floor RNTIs can drive this too: bounded, like context eviction */
   if ((first || n > 0) && s_left > 0 && s_left--)
     LOG_W(PHY, "SWEEP: rnti=0x%04x k0=%u observed on air -- %d hypotheses added to tda=%u\n", t->rnti,
@@ -821,7 +838,7 @@ int nr_pdsch_config_sweep_observe_qm(const nr_pdsch_sweep_ticket_t *ticket, uint
   pthread_mutex_lock(&g_lock);
   sweep_context_t *c = ticket_context(ticket);
   int n = 0;
-  if (c != NULL && c->state.winner < 0) {
+  if (c != NULL && c->state->winner < 0) {
     const uint8_t inter = c->qm_obs ? (uint8_t)(c->qm_tables & mask) : mask;
     if (inter == 0) {
       c->qm_obs = 0;
@@ -830,8 +847,8 @@ int nr_pdsch_config_sweep_observe_qm(const nr_pdsch_sweep_ticket_t *ticket, uint
       c->qm_tables = inter;
       if (c->qm_obs < 255) c->qm_obs++;
       if (c->qm_obs >= 2) {
-        const int before = c->state.n_hyp;
-        n = prune_tables(&c->state, inter);
+        const int before = c->state->n_hyp;
+        n = prune_tables(c->state, inter);
         if (n == before) n = 0;
       }
     }
@@ -847,13 +864,13 @@ bool nr_pdsch_config_sweep_feedback(const nr_pdsch_sweep_ticket_t *ticket, bool 
   sweep_context_t *c = ticket_context(ticket);
   bool announced = false;
   if (c) {
-    int w = nr_pdsch_config_sweep_feed(&c->state, ticket->hypothesis, crc_ok);
+    int w = nr_pdsch_config_sweep_feed(c->state, ticket->hypothesis, crc_ok);
     ++c->outcomes;
-    if (c->priored && c->state.winner < 0 && c->outcomes >= PRIOR_PROBATION) {
+    if (c->priored && c->state->winner < 0 && c->outcomes >= PRIOR_PROBATION) {
       double best_rate = 0.0;
-      for (int i = 0; i < c->state.n_hyp; i++) {
-        const double r = c->state.trials[i]
-                             ? (double)c->state.ok[i] / (double)c->state.trials[i]
+      for (int i = 0; i < c->state->n_hyp; i++) {
+        const double r = c->state->trials[i]
+                             ? (double)c->state->ok[i] / (double)c->state->trials[i]
                              : 0.0;
         if (r > best_rate) {
           best_rate = r;
@@ -898,7 +915,7 @@ bool nr_pdsch_config_sweep_feedback(const nr_pdsch_sweep_ticket_t *ticket, bool 
       }
     }
     if (c->outcomes % 10000 == 0 || (crc_ok && !c->reported)) {
-      const nr_pdsch_config_sweep_state_t *s=&c->state;
+      const nr_pdsch_config_sweep_state_t *s=c->state;
       int best=0; uint32_t minimum=UINT32_MAX;
       for(int i=0;i<s->n_hyp;i++) {
         if(s->trials[i]<minimum) minimum=s->trials[i];
@@ -916,7 +933,7 @@ bool nr_pdsch_config_sweep_feedback(const nr_pdsch_sweep_ticket_t *ticket, bool 
     if (w >= 0 && !c->reported) {
       c->reported = true;
       double reference_upper;
-      nr_crc_interval(c->state.ok[w], c->state.trials[w], NR_PDSCH_SWEEP_MAX_HYP,
+      nr_crc_interval(c->state->ok[w], c->state->trials[w], (unsigned)c->state->n_hyp,
                       &c->reference_crc_lower, &reference_upper);
 
       announced = true;
@@ -925,23 +942,31 @@ bool nr_pdsch_config_sweep_feedback(const nr_pdsch_sweep_ticket_t *ticket, bool 
        * re-publishing would let a context that converged under a prior reinforce that same prior.
        * The cell-wide prior is only ever set by agreement between two RNTIs. */
       rnti_ctx_t *r = rnti_ctx(c->rnti, true);
+      /* A k0 layer this context tried and did not win on was a false k0-oracle hit (another UE's PDSCH
+       * on those PRBs): stop seeding it into this RNTI's later contexts. */
+      const uint64_t lost = r->k0_seen & ~(UINT64_C(1) << c->state->hyp[w].k0);
+      if (lost) {
+        r->k0_seen &= ~lost;
+        LOG_I(PHY, "SWEEP: rnti=0x%04x tda=%u converged on k0=%u -- dropped k0-oracle layers 0x%llx\n", c->rnti,
+              (unsigned)c->tda, (unsigned)c->state->hyp[w].k0, (unsigned long long)lost);
+      }
       if (!r->prior.valid) {
         r->prior = (prior_t){.valid = true, .configuration = c->configuration,
-                             .mcs_table = c->state.hyp[w].mcs_table,
-                             .dmrs_add_pos = c->state.hyp[w].dmrs_add_pos,
-                             .dmrs_max_len = c->state.hyp[w].dmrs_max_len,
-                             .mapping_type = c->state.hyp[w].mapping_type};
+                             .mcs_table = c->state->hyp[w].mcs_table,
+                             .dmrs_add_pos = c->state->hyp[w].dmrs_add_pos,
+                             .dmrs_max_len = c->state->hyp[w].dmrs_max_len,
+                             .mapping_type = c->state->hyp[w].mapping_type};
         LOG_W(PHY,
               "SWEEP: rnti=0x%04x CONVERGED tda=%u mapping=%c k0=%u mcs_table=%u dmrs_add_pos=%u dmrs_max_len=%u "
               "(%u/%u trials on the winner, cfg=0x%llx) -- private to this RNTI until a second agrees\n",
-              c->rnti, (unsigned)c->tda, c->state.hyp[w].mapping_type ? 'B' : 'A',
-              (unsigned)c->state.hyp[w].k0, (unsigned)c->state.hyp[w].mcs_table,
-              (unsigned)c->state.hyp[w].dmrs_add_pos, (unsigned)c->state.hyp[w].dmrs_max_len,
-              c->state.ok[w], c->state.trials[w], (unsigned long long)c->configuration);
+              c->rnti, (unsigned)c->tda, c->state->hyp[w].mapping_type ? 'B' : 'A',
+              (unsigned)c->state->hyp[w].k0, (unsigned)c->state->hyp[w].mcs_table,
+              (unsigned)c->state->hyp[w].dmrs_add_pos, (unsigned)c->state->hyp[w].dmrs_max_len,
+              c->state->ok[w], c->state->trials[w], (unsigned long long)c->configuration);
         prior_promote_locked(r);
       }
       if (winner)
-        *winner = c->state.hyp[w];
+        *winner = c->state->hyp[w];
     }
   }
   pthread_mutex_unlock(&g_lock);
@@ -958,7 +983,7 @@ void nr_pdsch_config_sweep_context_stats(uint64_t configuration, uint16_t rnti, 
     /* tda 0xFF = every TDA context of this configuration: a layout hypothesis reads the TDA
      * index at its own offset, so its evidence is spread over the contexts that index created. */
     if (c->generation && c->configuration==configuration && c->rnti==rnti && (tda == 0xFF || c->tda==tda) && c->typeA==typeA) {
-      for (int h=0; h<c->state.n_hyp; ++h) { *passes += c->state.ok[h]; *trials += c->state.trials[h]; }
+      for (int h=0; h<c->state->n_hyp; ++h) { *passes += c->state->ok[h]; *trials += c->state->trials[h]; }
       if (tda != 0xFF)
         break;
     }
@@ -972,7 +997,7 @@ bool nr_pdsch_config_sweep_is_settled(uint64_t configuration, uint16_t rnti, uin
   for (int i=0;i<NR_PDSCH_SWEEP_MAX_CONTEXTS;++i) {
     const sweep_context_t *c=&g_contexts[i];
     if (c->generation && c->configuration==configuration && c->rnti==rnti
-        && c->tda==tda && c->tda_count==0 && c->typeA==typeA && c->state.winner>=0) {
+        && c->tda==tda && c->tda_count==0 && c->typeA==typeA && c->state->winner>=0) {
       settled=true;
       break;
     }
@@ -987,7 +1012,7 @@ int nr_pdsch_config_sweep_settled_count(void)
   pthread_mutex_lock(&g_lock);
   int n=0;
   for (int i=0;i<NR_PDSCH_SWEEP_MAX_CONTEXTS;++i)
-    if (g_contexts[i].generation && g_contexts[i].state.winner>=0) ++n;
+    if (g_contexts[i].generation && g_contexts[i].state->winner>=0) ++n;
   pthread_mutex_unlock(&g_lock);
   return n;
 }
@@ -1020,7 +1045,7 @@ bool nr_pdsch_config_sweep_snapshot(const nr_pdsch_sweep_ticket_t *ticket,
   pthread_mutex_lock(&g_lock);
   sweep_context_t *c = ticket_context(ticket);
   if (c)
-    *out = c->state;
+    *out = *c->state;
   pthread_mutex_unlock(&g_lock);
   return c != NULL;
 }

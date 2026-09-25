@@ -79,10 +79,12 @@ typedef struct {
 typedef void (*nr_pdsch_sweep_reporter_t)(const nr_pdsch_sweep_report_t *);
 void nr_pdsch_config_sweep_set_reporter(nr_pdsch_sweep_reporter_t);
 
-/* Pure catalog (no mask merging): (42 type-A + 90 type-B legal (S,L)) x k0 {0,1} x 4 add_pos x 2 max_len
+/* ISAC_PDSCH_TYPEB=0 (read once) drops mapping type B from the catalog; default on.
+ * Pure catalog (no mask merging): (42 type-A + 90 type-B legal (S,L)) x k0 {0,1} x 4 add_pos x 2 max_len
  * x 3 mcs_table = 6336. Runtime (merged by effective mask, pos2) = 2154, i.e. ~1077 per k0 layer, so
- * 8192 leaves room for five observed k0 >= 2 layers. Per context: 8192 x 22 B = 180 KB; x
- * NR_PDSCH_SWEEP_MAX_CONTEXTS (1024) = 184.6 MB of static state (was 46 MB at 2048). */
+ * 8192 leaves room for five observed k0 >= 2 layers. Per context: 8192 x 22 B = 180 KB, heap-allocated
+ * when a context slot is first used (nr-uesoftmodem mlockall()s, so 1024 inline states would pin
+ * 185 MB at startup). */
 #define NR_PDSCH_SWEEP_MAX_HYP 8192
 #define NR_PDSCH_SWEEP_MAX_CONTEXTS 1024 /* one per (layout x TDA index) under the wide search; 256 thrashed at 809 layouts */
 
@@ -131,8 +133,10 @@ int nr_pdsch_config_sweep_init_legal(nr_pdsch_config_sweep_state_t *st, int tda_
  * SWEEP_MIN_RATE within its probation window restores the full catalog AND invalidates the prior,
  * so one bad publication cannot poison the rest of the run. */
 
-/** Restrict a catalog to one set of cell-wide fields, discarding evidence.
- *  Returns the new hypothesis count, or 0 leaving the state untouched when nothing matches. */
+/** Restrict a catalog to one set of cell-wide fields (every mapping type), discarding evidence.
+ *  Returns the new hypothesis count, or 0 leaving the state untouched when nothing matches. When EVERY
+ *  entry matches nothing moves, so the count is returned unchanged and the evidence is KEPT (before
+ *  Task 14 it was cleared in that case too). */
 int nr_pdsch_config_sweep_prune_to(nr_pdsch_config_sweep_state_t *st, uint8_t mcs_table,
                                    uint8_t dmrs_add_pos, uint8_t dmrs_max_len);
 
