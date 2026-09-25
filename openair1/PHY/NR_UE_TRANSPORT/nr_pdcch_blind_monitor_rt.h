@@ -343,6 +343,8 @@ void nr_pdcch_blind_monitor_cfg_override(const nr_pdcch_blind_monitor_cfg_t *in)
 void nr_pdcch_blind_monitor_process(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc);
 /// Consumer-side outcome of a decode/probe made under DCI 1_1 layout `layout_index` (0xFFFF = none).
 void nr_pdcch_dci11_layout_feedback(uint16_t layout_index, bool cb0_ok);
+/// TB CRC outcome of a booked (type-1-read) PUSCH: the oracle for DCI 0_1 FDRA mode staging.
+void nr_pdcch_dci01_fdra_feedback(bool tb_crc_ok);
 
 /**
  * @brief Run ONE monitoring occasion: FEP -> PDCCH LLR -> demap -> per-candidate decode -> accepts.

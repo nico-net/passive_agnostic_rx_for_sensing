@@ -60,9 +60,25 @@ bool nr_dci01_layout_offsets(const nr_dci01_layout_t *l, uint16_t riv_bits, uint
 int nr_dci01_layout_enumerate(uint16_t riv_bits, uint8_t tda_bits, uint16_t observed_len,
                               nr_dci01_layout_t *out, nr_dci11_offsets_t *offsets, int max);
 
-/** As above for every FDRA mode (type 1, type 0, dynamicSwitch x rbg-Size), same rules as
- * nr_dci11_layout_enumerate_fdra(). */
+/** One FDRA mode's layouts (same rules as nr_dci11_layout_enumerate_mode(): 0 for a duplicate rbg-Size
+ * config 2), and every mode in NR_FDRA_* order. The RT receiver searches type 1 first and appends the
+ * others only once the booked type-1 PUSCH has failed its TB CRC (see nr_pdcch_blind_monitor_rt.c). */
+int nr_dci01_layout_enumerate_mode(uint16_t riv_bits, uint8_t tda_bits, uint16_t observed_len, uint16_t bwp_start,
+                                   uint16_t bwp_size, uint8_t fdra_mode, nr_dci01_layout_t *out,
+                                   nr_dci11_offsets_t *offsets, int max);
 int nr_dci01_layout_enumerate_fdra(uint16_t riv_bits, uint8_t tda_bits, uint16_t observed_len, uint16_t bwp_start,
                                    uint16_t bwp_size, nr_dci01_layout_t *out, nr_dci11_offsets_t *offsets, int max);
+
+/** DCI 0_1 FDRA MODE STAGING verdict. Stage 1 cannot refute type 1 on a type-0 cell (a type-1 window that
+ * starts on constant-zero leading bits always reads an in-range RIV), so the oracle is the TB CRC of the
+ * PUSCH booked under the type-1 read: tb_try booked TBs, tb_ok passes.
+ *   NR_DCI01_FDRA_BOOK   -- book UL grants (type 1 not refuted, or a type-1 TB has passed: type 1 is right)
+ *   NR_DCI01_FDRA_ARM    -- not armed yet and 0 passes over >= NR_DCI11_FDRA_ARM_MIN_TRIALS: append the
+ *                           type 0 / dynamicSwitch layouts (nr_dci01_layout_enumerate_mode +
+ *                           nr_dci_resolver_append_offsets), then ask again
+ *   NR_DCI01_FDRA_REFUSE -- armed, still 0 passes, and a non-type-1 layout alive: a non-type-1 FDRA is the
+ *                           leading explanation, so the type-1 read would decode the grant wrong. Pure. */
+enum { NR_DCI01_FDRA_BOOK = 0, NR_DCI01_FDRA_ARM = 1, NR_DCI01_FDRA_REFUSE = 2 };
+int nr_dci01_fdra_verdict(uint32_t tb_try, uint32_t tb_ok, bool armed, const nr_dci11_resolver_t *r);
 
 #endif /* __NR_PDCCH_DCI01_LAYOUT_SWEEP_H__ */
