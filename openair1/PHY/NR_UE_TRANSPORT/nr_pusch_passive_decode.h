@@ -125,23 +125,11 @@ void nr_pusch_passive_stats_dump(void);
 }
 #endif
 
-#include "PHY/NR_UE_TRANSPORT/nr_dmrs_id_estimate.h"
-#ifdef __cplusplus
-extern "C" {
-#endif
-/* Read-only view of the UL DM-RS identity estimate for one nSCID (0 or 1; diagnostic, plain ints,
- * racy by design). */
-const nr_dmrs_id_state_t *nr_pusch_passive_ul_dmrs_id(int nscid);
-/* dataScramblingIdentityPUSCH sweep (Task 13), cell-wide (like the DM-RS estimate above -- this
- * deployment has one UL BWP, so there is nothing to key it by yet; unlike the DL side there is no
- * per-RNTI Technique D convergence signal to gate on, so nr_pusch_passive_ul_crc_stalled's own
- * try/ok counters (g_try/g_crc_ok) are the whole gate). `current()`/`feed()` follow the same
- * contract as the DL nr_pdsch_passive_data_id_* pair. */
-uint16_t nr_pusch_passive_data_id_current(uint16_t pci, int dmrs_id, bool advance_ok);
-void     nr_pusch_passive_data_id_feed(bool tb_crc_ok);
-/* True when at least min_tries UL decodes have been attempted and NONE passed CRC. */
-bool nr_pusch_passive_ul_crc_stalled(uint32_t min_tries);
-#ifdef __cplusplus
-}
-#endif
+/* Blind UL DM-RS/data scrambling-identity DECISION STATE (Task 13) -- pure storage + getters, moved
+ * to its own library-linkable file (fix2-report.md) so this header can be included by
+ * nr_pdcch_blind_monitor.c (offline-gtest-linked) without pulling in PHY_NR_PASSIVE_UL. See that
+ * file's header comment for the full rationale; nr_pusch_passive_ul_dmrs_id/nr_pusch_passive_data_id_
+ * current/_feed/nr_pusch_passive_ul_crc_stalled keep the exact same signatures/contract they had when
+ * they were declared/defined directly in this file. */
+#include "PHY/NR_UE_TRANSPORT/nr_pusch_passive_ul_ids.h"
 #endif // NR_PUSCH_PASSIVE_DECODE_H
