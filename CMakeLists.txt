@@ -2458,6 +2458,13 @@ if(ENABLE_TESTS)
                                             ${OPENAIR1_DIR}/PHY/NR_REFSIG/refsig.c
                                             ${OPENAIR1_DIR}/PHY/NR_REFSIG/nr_dmrs_rx.c
                                             ${OPENAIR_DIR}/common/utils/ds/hashtable.c)
+  # nr_pdcch_coreset_map.c's idsweep path calls nr_passive_acq_snapshot()/nr_passive_acq_tdd_slot_has_downlink()
+  # (nr_passive_acq_state.c); this target compiles it directly rather than linking the
+  # nr_pdcch_blind_monitor library, so (same pattern as test_nr_passive_acq_state below) it needs its
+  # own copy of that file plus nr_tdd_pattern.c, which nr_passive_acq_state.c calls into.
+  target_sources(test_nr_pdcch_coreset_map PRIVATE
+    ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_passive_acq_state.c
+    ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_tdd_pattern.c)
   target_include_directories(test_nr_pdcch_coreset_map PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT ${OPENAIR_DIR}/common/utils/ds)
   target_link_libraries(test_nr_pdcch_coreset_map PRIVATE nr_common UTIL GTest::gtest)
   add_dependencies(tests test_nr_pdcch_coreset_map)
@@ -2469,6 +2476,11 @@ if(ENABLE_TESTS)
   # payload) via a fixture engineered to tempt each of them independently.
   add_executable(test_nr_pdcch_dci_length_sweep ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_dci_length_sweep_test.cc
                                                  ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_dci_length_sweep.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_config_sweep.c)
+  # nr_pdsch_config_sweep.c's qm_table_mask() calls nr_pdsch_qm_of_mcs() (nr_pdsch_qm_oracle.c, Task 6
+  # Qm oracle) -- same fix already applied to the sibling test_nr_pdsch_config_sweep target below,
+  # which compiles the same nr_pdsch_config_sweep.c but was updated for this call; this target was not.
+  target_sources(test_nr_pdcch_dci_length_sweep PRIVATE
+    ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_qm_oracle.c)
   target_include_directories(test_nr_pdcch_dci_length_sweep PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
   target_link_libraries(test_nr_pdcch_dci_length_sweep PRIVATE UTIL GTest::gtest)
   add_dependencies(tests test_nr_pdcch_dci_length_sweep)
