@@ -54,8 +54,12 @@ void nr_passive_rrc_harvest(const uint8_t *tb, uint32_t tb_bytes); // openair2/L
 #include "PHY/NR_REFSIG/dmrs_nr.h"                     // get_num_dmrs_re_per_rb
 #include "common/utils/nr/nr_common.h"                // get_num_dmrs
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_config_sweep.h" // Technique D scoring
+#include "PHY/NR_UE_TRANSPORT/nr_pdsch_qm_oracle.h" // Technique D Qm oracle
 #include "PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.h" // nr_pdcch_dci11_layout_feedback
+#include "PHY/NR_UE_TRANSPORT/nr_pdsch_prb_set.h" // nr_prb_segments (probe span of a PRB-list grant)
+#include "PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.h" // nr_pdsch_passive_alloc_normalise
 
+#include <limits.h>
 #include <math.h>
 #include <pthread.h>
 #include <stdatomic.h>
@@ -439,6 +443,95 @@ void nr_passive_mac_report_ta(uint16_t rnti, bool is_ra_rnti, int frame, int slo
   }
 }
 
+/* DM-RS SYMBOL ORACLE measurement of ONE slot on the PRBs [rb0, rb0+nrb): per-symbol coherence with
+ * that symbol's own DM-RS sequence (antenna 0, ~14 symbol FFTs into row 0 of rxdataF). Returns the
+ * DM-RS symbol mask (0 = none seen) and, in *last_sym, the last symbol carrying energy on those PRBs
+ * (-1 = none). Mapping-type agnostic: a type-B grant's first DM-RS on its first symbol is measured
+ * like any other. */
+static uint16_t dmrs_oracle_measure(PHY_VARS_NR_UE *ue, NR_DL_FRAME_PARMS *fp, uint32_t rxdataF_sz,
+                                    c16_t rxdataF[][rxdataF_sz], int nr_slot, int rb0, int nrb, int nscid,
+                                    int *last_sym, double prof[14], double *med_out)
+{
+  const int n_sym = fp->symbols_per_slot;
+  float coh[275];
+  double energy[14] = {0}; /* per symbol, over the grant's PRBs: the allocation END is where it stops */
+  for (int sym = 0; sym < n_sym && sym < 14; sym++) {
+    nr_slot_fep_ant(ue, fp, nr_slot, sym, 0, rxdataF, link_type_dl, 0, ue->common_vars.rxdata);
+    nr_dmrs_prb_coherence(&rxdataF[0][sym * fp->ofdm_symbol_size], fp->ofdm_symbol_size, fp->first_carrier_offset,
+                          fp->N_RB_DL < 275 ? fp->N_RB_DL : 275, n_sym, nr_slot, sym,
+                          nscid, fp->Nid_cell, fp->Ncp == NR_NORMAL, coh);
+    double m = 0;
+    for (int p = rb0; p < rb0 + nrb && p < fp->N_RB_DL; p++) m += coh[p];
+    prof[sym] = m / nrb;
+    const c16_t *sy = &rxdataF[0][sym * fp->ofdm_symbol_size];
+    double e = 0;
+    for (int p = rb0; p < rb0 + nrb && p < fp->N_RB_DL; p++)
+      for (int r = 0; r < 12; r++) {
+        const int k = (fp->first_carrier_offset + p * 12 + r) % fp->ofdm_symbol_size;
+        e += (double)sy[k].r * sy[k].r + (double)sy[k].i * sy[k].i;
+      }
+    energy[sym] = e;
+  }
+  /* Last symbol of the allocation: the last one whose energy on these PRBs is above a quarter of
+   * the strongest (data symbols are within a few dB of each other; an empty symbol is noise). */
+  int last = -1;
+  double emax = 0;
+  for (int sym = 0; sym < n_sym && sym < 14; sym++) if (energy[sym] > emax) emax = energy[sym];
+  for (int sym = 0; sym < n_sym && sym < 14; sym++) if (energy[sym] > 0.25 * emax) last = sym;
+  /* The metric's floor on data symbols is ~0.5 (three random pair-products per PRB), a DM-RS
+   * symbol reads ~0.9 (measured on the rank-4 bed: 0.92 vs 0.47-0.53). Symbols without energy
+   * (the special slot's UL part) read 0 and are left out of the median. */
+  double srt[14]; int ns = 0;
+  for (int sym = 0; sym < n_sym; sym++) if (prof[sym] > 0.05) srt[ns++] = prof[sym];
+  for (int a = 1; a < ns; a++) for (int b = a; b > 0 && srt[b] < srt[b - 1]; b--) { double t = srt[b]; srt[b] = srt[b - 1]; srt[b - 1] = t; }
+  /* LOWER median: a short type-B allocation (L = 2) has two energetic symbols, and the upper median
+   * of two IS the DM-RS symbol, which then can never clear med + 0.18. Identical to the old median for
+   * an ODD count only; for an even count >= 4 it is the lower of the two middle values. */
+  const double med = ns ? srt[(ns - 1) / 2] : 1.0;
+  uint16_t mask = 0;
+  for (int sym = 0; sym < n_sym; sym++)
+    if (prof[sym] > 0.68 && prof[sym] > med + 0.18) mask |= (uint16_t)(1u << sym); /* OTA reads 0.75-0.82, floor 0.50 */
+  *last_sym = last;
+  *med_out = med;
+  return mask;
+}
+
+static _Atomic uint64_t g_k0_probes, g_k0_probe_retained, g_k0_probe_retained_max, g_k0_probe_hits;
+
+/* The DM-RS probes below (oracle gate, rank, CDM, DM-RS identity) read one CONTIGUOUS stretch of
+ * subcarriers from first_rb. A PRB-list or PRG grant is not contiguous (and may change precoder at a
+ * PRG edge), so they measure its LARGEST segment instead -- still real PRBs of this grant, which is
+ * all they need; covering every segment would only add PRBs to a statistic, not correctness. A
+ * contiguous grant keeps first_rb/num_rbs exactly. *nrb = 0 = nothing measurable. */
+static int probe_span(const nr_pdsch_passive_job_t *j, int *nrb)
+{
+  const freq_alloc_bitmap_t *fa = &j->freq_alloc;
+  *nrb = fa->num_rbs;
+  if (fa->n_prb_list == 0 && fa->prg == 0)
+    return fa->first_rb;
+  uint16_t contig[NR_PRB_SET_MAX];
+  const uint16_t *prb = fa->prb_list;
+  int n = fa->n_prb_list;
+  if (n == 0) {
+    n = fa->num_rbs < NR_PRB_SET_MAX ? fa->num_rbs : NR_PRB_SET_MAX;
+    for (int i = 0; i < n; i++)
+      contig[i] = (uint16_t)(fa->first_rb + i);
+    prb = contig;
+  }
+  nr_prb_seg_t seg[NR_PRB_SET_MAX];
+  const int ns = nr_prb_segments(prb, n, j->dlsch_pdu.BWPStart, fa->prg, seg, NR_PRB_SET_MAX);
+  if (ns <= 0) {
+    *nrb = 0;
+    return fa->first_rb;
+  }
+  int best = 0;
+  for (int s = 1; s < ns; s++)
+    if (seg[s].n_prb > seg[best].n_prb)
+      best = s;
+  *nrb = seg[best].n_prb;
+  return seg[best].prb_start;
+}
+
 static void *nr_pdsch_passive_queue_thread(void *arg)
 {
   const int idx = ((consumer_arg_t *)arg)->idx;
@@ -480,8 +573,15 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
     }
     pthread_mutex_unlock(&g_lock);
     /* Union of RBs over the group members whose DM-RS configuration matches the head job's. */
-    int rb_lo = job.freq_alloc.first_rb, rb_hi = job.freq_alloc.first_rb + job.freq_alloc.num_rbs;
+    /* PRB-list / PRG grants never read the shared estimate (the decoder bypasses the cache for them),
+     * and their first_rb + num_rbs is not their span, so they must not widen the union the OTHER grants
+     * of the slot are estimated over. */
+#define CONTIG_JOB(j) ((j).freq_alloc.n_prb_list == 0 && (j).freq_alloc.prg == 0)
+    int rb_lo = CONTIG_JOB(job) ? job.freq_alloc.first_rb : INT_MAX;
+    int rb_hi = CONTIG_JOB(job) ? job.freq_alloc.first_rb + job.freq_alloc.num_rbs : INT_MIN;
     for (int k = 0; k < n_more; k++) {
+      if (!CONTIG_JOB(more[k]))
+        continue;
       const fapi_nr_dl_config_dlsch_pdu_rel15_t *a = &job.dlsch_pdu, *b = &more[k].dlsch_pdu;
       if (a->dlDmrsSymbPos != b->dlDmrsSymbPos || a->dmrsConfigType != b->dmrsConfigType
           || a->nscid != b->nscid || a->dmrs_ports != b->dmrs_ports || a->n_dmrs_cdm_groups != b->n_dmrs_cdm_groups
@@ -491,6 +591,9 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
       if (lo < rb_lo) rb_lo = lo;
       if (hi > rb_hi) rb_hi = hi;
     }
+    if (rb_hi < rb_lo) /* no contiguous member: rb_n = 0 disables the widening */
+      rb_lo = rb_hi = 0;
+#undef CONTIG_JOB
     /* Wide first: the data-aided CFR rows come from what decodes, and a wide grant's row is
      * worth more to the sensing grid than a narrow one's if the samples go stale mid-group. */
     if (n_more > 0) {
@@ -520,8 +623,11 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
       atomic_store_explicit(&g_max_lag, (uint64_t)(lag > 0 ? lag : 0), memory_order_relaxed);
     }
     /* A k0 > 0 hypothesis targets a slot the producer may not have read yet: wait for it (bounded
-     * by 3 slots of wall time) instead of counting it stale. */
-    for (int w = 0; w < 30 && prod < job.absolute_slot; w++) {
+     * by 3 ms of wall time) instead of counting it stale. An observed k0 >= 2 (k0 oracle) targets a
+     * slot further out, so its bound grows by one slot duration per slot beyond k0 = 1; k0 <= 1 is
+     * unchanged. */
+    const int wait_max = 30 + (job.sweep_ticket.k0 > 1 ? (int)(job.sweep_ticket.k0 - 1) * (int)(100 / slots_per_frame) : 0);
+    for (int w = 0; w < wait_max && prod < job.absolute_slot; w++) {
       struct timespec ts = {0, 100000};
       nanosleep(&ts, NULL);
       prod = atomic_load_explicit(&nr_ue_diag_producer_absolute_slot, memory_order_relaxed);
@@ -630,46 +736,15 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
         LOG_A(PHY, "SENSING: ORACLE_GATE settled=%d gen=%lu nrb=%u k0=%u probe=%u\n", job.sweep_ticket.settled,
               (unsigned long)job.sweep_ticket.generation, job.freq_alloc.num_rbs, job.sweep_ticket.k0, job.layout_probe);
     }
-    if (!job.sweep_ticket.settled && job.sweep_ticket.generation && job.freq_alloc.num_rbs >= 4
+    int oracle_nrb;
+    const int oracle_rb0 = probe_span(&job, &oracle_nrb);
+    if (!job.sweep_ticket.settled && job.sweep_ticket.generation && oracle_nrb >= 4
         && job.sweep_ticket.k0 == 0) {
-      const int n_sym = fp->symbols_per_slot;
-      float coh[275];
-      double prof[14] = {0};
-      const int rb0 = job.freq_alloc.first_rb, nrb = job.freq_alloc.num_rbs;
-      double energy[14] = {0}; /* per symbol, over the grant's PRBs: the allocation END is where it stops */
-      for (int sym = 0; sym < n_sym && sym < 14; sym++) {
-        nr_slot_fep_ant(ue, fp, job.nr_slot_rx, sym, 0, rxdataF, link_type_dl, 0, ue->common_vars.rxdata);
-        nr_dmrs_prb_coherence(&rxdataF[0][sym * fp->ofdm_symbol_size], fp->ofdm_symbol_size, fp->first_carrier_offset,
-                              fp->N_RB_DL < 275 ? fp->N_RB_DL : 275, n_sym, job.nr_slot_rx, sym,
-                              job.dlsch_pdu.nscid, fp->Nid_cell, fp->Ncp == NR_NORMAL, coh);
-        double m = 0;
-        for (int p = rb0; p < rb0 + nrb && p < fp->N_RB_DL; p++) m += coh[p];
-        prof[sym] = m / nrb;
-        const c16_t *sy = &rxdataF[0][sym * fp->ofdm_symbol_size];
-        double e = 0;
-        for (int p = rb0; p < rb0 + nrb && p < fp->N_RB_DL; p++)
-          for (int r = 0; r < 12; r++) {
-            const int k = (fp->first_carrier_offset + p * 12 + r) % fp->ofdm_symbol_size;
-            e += (double)sy[k].r * sy[k].r + (double)sy[k].i * sy[k].i;
-          }
-        energy[sym] = e;
-      }
-      /* Last symbol of the allocation: the last one whose energy on these PRBs is above a quarter of
-       * the strongest (data symbols are within a few dB of each other; an empty symbol is noise). */
+      const int rb0 = oracle_rb0, nrb = oracle_nrb;
+      double prof[14] = {0}, med = 1.0;
       int last_sym = -1;
-      double emax = 0;
-      for (int sym = 0; sym < n_sym && sym < 14; sym++) if (energy[sym] > emax) emax = energy[sym];
-      for (int sym = 0; sym < n_sym && sym < 14; sym++) if (energy[sym] > 0.25 * emax) last_sym = sym;
-      /* The metric's floor on data symbols is ~0.5 (three random pair-products per PRB), a DM-RS
-       * symbol reads ~0.9 (measured on the rank-4 bed: 0.92 vs 0.47-0.53). Symbols without energy
-       * (the special slot's UL part) read 0 and are left out of the median. */
-      double srt[14]; int ns = 0;
-      for (int sym = 0; sym < n_sym; sym++) if (prof[sym] > 0.05) srt[ns++] = prof[sym];
-      for (int a = 1; a < ns; a++) for (int b = a; b > 0 && srt[b] < srt[b - 1]; b--) { double t = srt[b]; srt[b] = srt[b - 1]; srt[b - 1] = t; }
-      const double med = ns ? srt[ns / 2] : 1.0;
-      uint16_t mask = 0;
-      for (int sym = 0; sym < n_sym; sym++)
-        if (prof[sym] > 0.68 && prof[sym] > med + 0.18) mask |= (uint16_t)(1u << sym); /* OTA reads 0.75-0.82, floor 0.50 */
+      const uint16_t mask = dmrs_oracle_measure(ue, fp, rxdataF_sz, rxdataF, job.nr_slot_rx, rb0, nrb,
+                                                job.dlsch_pdu.nscid, &last_sym, prof, &med);
       static _Atomic int s_oracle_log = 12;
       if (mask && atomic_load(&s_oracle_log) > 0) {
         atomic_fetch_sub(&s_oracle_log, 1);
@@ -677,10 +752,86 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
               job.nr_slot_rx, rb0, nrb, mask, last_sym, job.sweep_ticket.k0, med, prof[0], prof[1], prof[2], prof[3], prof[4], prof[5], prof[6], prof[7],
               prof[8], prof[9], prof[10], prof[11], prof[12], prof[13]);
       }
-      if (mask)
+      if (mask) {
         nr_pdsch_config_sweep_observe(&job.sweep_ticket, mask, last_sym, job.sweep_ticket.k0);
+      } else {
+        /* k0 ORACLE (Task 14). No DM-RS on this grant's PRBs (rb0/nrb = probe_span(): the largest segment of a
+         * PRB-list/PRG grant) in the DCI's own slot, so its PDSCH is k0 >= 1
+         * slots later. The catalog only enumerates k0 {0,1} (TS 38.214 allows 0..32); rather than all 33,
+         * probe the following slots and append ONLY the k0 values the air shows. Reach K = min(32, spf - 2):
+         * the ring keeps a slot for spf - 2 slots after it was written (nr_passive_samples_valid), so a
+         * farther slot cannot be read. The consumer usually runs only 1-2 slots behind the producer, so the
+         * probe WAITS (bounded, same pattern as the stale check) for each target slot to be written, and
+         * re-checks retention before and after its FEP. EVERY hit up to K is collected, not only the first:
+         * on a busy cell slot+1 usually carries some PDSCH on these PRBs and would hide a true k0 >= 2. A hit
+         * is not proof (another UE's PDSCH may sit there), which is why it only ADDS hypotheses -- the TB CRC
+         * still decides, and a converged context drops the layers it did not win on. FEP goes to a scratch
+         * buffer: rxdataF carries this job's own slot, which the decode's per-thread FEP cache may reuse for
+         * the rest of the slot group. ISAC_PDSCH_K0_PROBE=0 disables it (read once).
+         * ponytail: 1 in 8 eligible jobs probes (up to K x 14 FFTs + up to K slots of waiting each). */
+        static int s_k0_probe_on = -1;
+        if (s_k0_probe_on < 0) {
+          const char *e = getenv("ISAC_PDSCH_K0_PROBE");
+          s_k0_probe_on = (e != NULL && atoi(e) == 0) ? 0 : 1;
+        }
+        static _Atomic uint32_t s_probe_tick;
+        static __thread c16_t *t_probe;
+        if (s_k0_probe_on && !t_probe)
+          t_probe = (c16_t *)malloc16_clear((size_t)rxdataF_sz * sizeof(c16_t));
+        if (s_k0_probe_on && t_probe && (atomic_fetch_add(&s_probe_tick, 1) % 8) == 0) {
+          const long K = slots_per_frame - 2 < 32 ? slots_per_frame - 2 : 32;
+          const int slot_iters = (int)(100 / slots_per_frame) > 0 ? (int)(100 / slots_per_frame) : 1; /* 100 us steps per slot */
+          uint64_t hits = 0; /* bit k: DM-RS seen on these PRBs at slot+k */
+          uint16_t hit_mask[33] = {0};
+          long reached = 0;
+          for (long k = 1; k <= K; k++) {
+            const long target = (long)job.absolute_slot + k;
+            long p = atomic_load_explicit(&nr_ue_diag_producer_absolute_slot, memory_order_relaxed);
+            for (int w = 0; w < 30 + (int)k * slot_iters && p < target; w++) {
+              struct timespec ts = {0, 100000};
+              nanosleep(&ts, NULL);
+              p = atomic_load_explicit(&nr_ue_diag_producer_absolute_slot, memory_order_relaxed);
+            }
+            if (!nr_passive_samples_valid(p, target, slots_per_frame))
+              break;
+            double pf[14] = {0}, md = 1.0;
+            int ls = -1;
+            const uint16_t m = dmrs_oracle_measure(ue, fp, rxdataF_sz, (c16_t(*)[rxdataF_sz])t_probe,
+                                                   (int)((job.nr_slot_rx + k) % slots_per_frame), rb0, nrb,
+                                                   job.dlsch_pdu.nscid, &ls, pf, &md);
+            if (!nr_passive_samples_valid(atomic_load(&nr_ue_diag_producer_absolute_slot), target, slots_per_frame))
+              break; /* overwritten during the FEP: this measurement is not of slot+k */
+            reached = k;
+            if (m) {
+              hits |= UINT64_C(1) << k;
+              hit_mask[k] = m;
+            }
+          }
+          int added = 0, first_k = 0;
+          for (int k = 2; k <= K; k++)
+            if (hits & (UINT64_C(1) << k)) {
+              added += nr_pdsch_config_sweep_add_k0(&job.sweep_ticket, (uint8_t)k);
+              if (!first_k)
+                first_k = k;
+            }
+          const uint64_t probes = atomic_fetch_add(&g_k0_probes, 1) + 1;
+          atomic_fetch_add(&g_k0_probe_retained, (uint64_t)reached);
+          uint64_t mx = atomic_load(&g_k0_probe_retained_max);
+          while ((uint64_t)reached > mx && !atomic_compare_exchange_weak(&g_k0_probe_retained_max, &mx, (uint64_t)reached)) {}
+          if (hits >> 2)
+            atomic_fetch_add(&g_k0_probe_hits, 1);
+          static _Atomic int s_k0_log = 20;
+          if (((hits >> 2) || (probes % 1000) == 1) && atomic_fetch_sub(&s_k0_log, 1) > 0)
+            LOG_A(PHY, "SENSING: K0_PROBE slot=%d rb=%d+%d K=%ld reached=%ld hits=0x%llx first_k0>=2=%d mask=0x%x added=%d "
+                  "(probes=%lu with k0>=2 hits=%lu reached mean=%.1f max=%lu)\n",
+                  job.nr_slot_rx, rb0, nrb, K, reached, (unsigned long long)hits, first_k, first_k ? hit_mask[first_k] : 0,
+                  added, (unsigned long)probes, (unsigned long)atomic_load(&g_k0_probe_hits),
+                  (double)atomic_load(&g_k0_probe_retained) / (double)probes,
+                  (unsigned long)atomic_load(&g_k0_probe_retained_max));
+        }
+      }
     }
-    nr_pdsch_passive_decode_result_t dec;
+    nr_pdsch_passive_decode_result_t dec = {0};
     { /* ISAC_PROBE_ALL=1: every job is a first-code-block probe, pinned confs included -- isolates
        * the probe mechanics from the layout search. */
       static int s_probe_all = -1;
@@ -707,7 +858,7 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
       if (gpu_job && s_chk > 0 && atomic_load(&g_gpu_chk_n) < (uint64_t)s_chk
           && st_raw != NR_PDSCH_PASSIVE_DECODE_ERROR && st_raw != NR_PDSCH_PASSIVE_DECODE_UNSUPPORTED) {
         const bool gpu_ok = job.layout_probe ? probe_outcome : st_raw == NR_PDSCH_PASSIVE_DECODE_CRC_OK;
-        nr_pdsch_passive_decode_result_t dec2;
+        nr_pdsch_passive_decode_result_t dec2 = {0};
         fapi_nr_dl_config_dlsch_pdu_rel15_t pdu2 = job.dlsch_pdu;
         nr_pdsch_passive_probe_mode(job.layout_probe != 0);
         const nr_pdsch_passive_decode_status_t st2 =
@@ -841,13 +992,15 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
         /* RANK PROBE (OTA 2026-09-12: full-band grants 0/10000 CRC, short grants 8/9, gNB has 4 DL
          * antennas and the decoder assumes one layer). Per-grant even/odd DM-RS pair coherence under
          * the assumed identity: ~1 single-layer, collapsed two-layer. Censused by size and CRC. */
-        if (pdu->dmrsConfigType == 0 && pdu->dlDmrsSymbPos && pthread_mutex_trylock(&g_dl_rank_lock) == 0) {
+        int pr_nrb;
+        const int pr_rb0 = probe_span(&job, &pr_nrb);
+        if (pr_nrb > 0 && pdu->dmrsConfigType == 0 && pdu->dlDmrsSymbPos && pthread_mutex_trylock(&g_dl_rank_lock) == 0) {
           const NR_DL_FRAME_PARMS *fp = &ue->frame_parms;
           const int sym = __builtin_ctz((unsigned)pdu->dlDmrsSymbPos);
-          const int rb_offset = job.freq_alloc.first_rb + (pdu->refPoint ? 0 : pdu->BWPStart);
-          const int start_sc  = fp->first_carrier_offset + (pdu->BWPStart + job.freq_alloc.first_rb) * 12;
+          const int rb_offset = pr_rb0 + (pdu->refPoint ? 0 : pdu->BWPStart);
+          const int start_sc  = fp->first_carrier_offset + (pdu->BWPStart + pr_rb0) * 12;
           const double coh = nr_dmrs_port_pair_coherence(&rxdataF[0][sym * fp->ofdm_symbol_size], fp->ofdm_symbol_size,
-                                                         start_sc, rb_offset, job.freq_alloc.num_rbs, fp->N_RB_DL,
+                                                         start_sc, rb_offset, pr_nrb, fp->N_RB_DL,
                                                          fp->symbols_per_slot, job.nr_slot_rx, sym, pdu->nscid,
                                                          pdu->dlDmrsScramblingId, fp->Ncp == NR_NORMAL);
           /* CDM-GROUP PROBE. In the DM-RS symbol the other comb (delta = 1: subcarriers 4n+1, 4n+3)
@@ -858,7 +1011,7 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
           {
             const c16_t *row = &rxdataF[0][sym * fp->ofdm_symbol_size];
             int re = ((start_sc % fp->ofdm_symbol_size) + fp->ofdm_symbol_size) % fp->ofdm_symbol_size;
-            for (int m = 0; m < 12 * job.freq_alloc.num_rbs; ++m) {
+            for (int m = 0; m < 12 * pr_nrb; ++m) {
               const double e = (double)row[re].r * row[re].r + (double)row[re].i * row[re].i;
               if (m & 1) e_other += e; else e_dmrs += e;
               re = (re + 1) % fp->ofdm_symbol_size;
@@ -889,16 +1042,16 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
           }
           pthread_mutex_unlock(&g_dl_rank_lock);
         }
-        if (crc && pdu->dmrsConfigType == 0 && pdu->dlDmrsSymbPos && pthread_mutex_trylock(&g_dl_dmrs_id_lock) == 0) {
+        if (pr_nrb > 0 && crc && pdu->dmrsConfigType == 0 && pdu->dlDmrsSymbPos && pthread_mutex_trylock(&g_dl_dmrs_id_lock) == 0) {
           if (!g_dl_dmrs_id_init) { nr_dmrs_id_init(&g_dl_dmrs_id, "PDSCH", pdu->dlDmrsScramblingId); g_dl_dmrs_id_init = true; }
           if (!g_dl_dmrs_id.decided) {
             const NR_DL_FRAME_PARMS *fp = &ue->frame_parms;
             const int sym = __builtin_ctz((unsigned)pdu->dlDmrsSymbPos);
             /* Same two quantities the estimator itself derives (nr_dl_channel_estimation.c). */
-            const int rb_offset = job.freq_alloc.first_rb + (pdu->refPoint ? 0 : pdu->BWPStart);
-            const int start_sc  = fp->first_carrier_offset + (pdu->BWPStart + job.freq_alloc.first_rb) * 12;
+            const int rb_offset = pr_rb0 + (pdu->refPoint ? 0 : pdu->BWPStart);
+            const int start_sc  = fp->first_carrier_offset + (pdu->BWPStart + pr_rb0) * 12;
             if (nr_dmrs_id_accumulate(&g_dl_dmrs_id, &rxdataF[0][sym * fp->ofdm_symbol_size], fp->ofdm_symbol_size,
-                                      start_sc, rb_offset, job.freq_alloc.num_rbs, fp->N_RB_DL, fp->symbols_per_slot,
+                                      start_sc, rb_offset, pr_nrb, fp->N_RB_DL, fp->symbols_per_slot,
                                       job.nr_slot_rx, sym, pdu->nscid, fp->Ncp == NR_NORMAL))
               nr_dmrs_id_decide(&g_dl_dmrs_id, 16, 10.0);
           }
@@ -913,6 +1066,18 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
         LOG_A(PHY, "SENSING: Technique D CONVERGED rnti=0x%x tda=%u S=%u L=%u mask=0x%x table=%u\n",
               job.sweep_ticket.rnti, job.sweep_ticket.tda_index, winner.tda_start, winner.tda_length,
               winner.dmrs_mask, winner.mcs_table);
+      /* Qm-oracle prune runs AFTER this job's CRC feedback above: prune_tables() compacts and
+       * re-indexes st->hyp[] without bumping the context generation, so pruning before the CRC
+       * feedback for the SAME job would credit that outcome to a hypothesis index that has already
+       * moved (nr_pdsch_config_sweep_feedback resolves job.sweep_ticket.hypothesis against the
+       * pre-prune array). Ordering this after leaves the DM-RS observe at ~682 untouched -- that one
+       * runs on a separate, earlier tap and is out of scope here. */
+      if (!job.sweep_ticket.settled && job.sweep_ticket.generation && dec.qm_measured) {
+        const int kept = nr_pdsch_config_sweep_observe_qm(&job.sweep_ticket, job.grant.mcs, dec.qm_measured);
+        if (kept > 0)
+          LOG_A(PHY, "SENSING: Technique D Qm oracle rnti=0x%x mcs=%u qm=%u -> %d hypotheses\n",
+                job.sweep_ticket.rnti, job.grant.mcs, dec.qm_measured, kept);
+      }
       if (st == NR_PDSCH_PASSIVE_DECODE_CRC_OK && !job.layout_probe) {
         atomic_fetch_add_explicit(&g_crc_ok, 1, memory_order_relaxed);
         if (job.want_data) {
@@ -1088,7 +1253,18 @@ bool nr_pdsch_passive_queue_enqueue(const nr_pdsch_passive_job_t *job)
   if (g_n_pending > 0 && (g_pending[0].absolute_slot != job->absolute_slot
                           || g_n_pending == NR_PDSCH_PASSIVE_SLOT_GROUP_MAX))
     nr_pdsch_passive_queue_flush();
-  g_pending[g_n_pending++] = *job;
+  g_pending[g_n_pending] = *job;
+  /* ONE normalisation for everyone downstream: decoder, data-aided tap (recomputes nb_rb/G from
+   * num_rbs), queue probes, narrow-grant budget. A no-op for a contiguous grant. */
+  if (!nr_pdsch_passive_alloc_normalise(&g_pending[g_n_pending].freq_alloc, job->dlsch_pdu.BWPSize)) {
+    static _Atomic unsigned long c_ = 0;
+    const unsigned long n_ = atomic_fetch_add_explicit(&c_, 1, memory_order_relaxed) + 1;
+    if (n_ == 1 || (n_ % 200) == 0)
+      LOG_W(PHY, "SENSING: PDSCHQ refused an invalid PRB-list grant n=%lu (n_prb_list=%u bwp_size=%u)\n", n_,
+            (unsigned)job->freq_alloc.n_prb_list, (unsigned)job->dlsch_pdu.BWPSize);
+    return false;
+  }
+  g_n_pending++;
   return true;
 }
 

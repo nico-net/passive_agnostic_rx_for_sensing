@@ -36,11 +36,6 @@
  * CORESET. Entries are immutable after the release-store publishes them, so the receive producer
  * may test the count while the single scan consumer appends without a lock. */
 #define NR_PDCCH_DISCOVERED_CORESETS 8
-typedef struct {
-  nr_pdcch_blind_monitor_cfg_t cfg;
-  uint16_t owners[NR_PDCCH_BLIND_MAX_UE];
-  uint8_t nowners;
-} nr_pdcch_discovered_coreset_t;
 static nr_pdcch_discovered_coreset_t g_coreset_bank[NR_PDCCH_DISCOVERED_CORESETS];
 static _Atomic int g_coreset_bank_n;
 
@@ -52,6 +47,11 @@ int nr_pdcch_coreset_bank_count(void)
 const nr_pdcch_blind_monitor_cfg_t *nr_pdcch_coreset_bank_cfg(int index)
 {
   return &g_coreset_bank[index].cfg;
+}
+
+nr_pdcch_discovered_coreset_t *nr_pdcch_coreset_bank_entry(int index)
+{
+  return &g_coreset_bank[index];
 }
 
 /* Is this geometry already a verified bank entry? (stage 1-2 hand-off: a discovered CORESET the walk found
@@ -146,10 +146,10 @@ int nr_pdcch_coreset_bank_length_hint(void)
   return best;
 }
 
-void nr_pdcch_coreset_bank_add(const nr_pdcch_blind_monitor_cfg_t *cfg, uint16_t owner)
+int nr_pdcch_coreset_bank_add(const nr_pdcch_blind_monitor_cfg_t *cfg, uint16_t owner)
 {
   if (cfg == NULL || cfg->dci_length_override <= 0)
-    return;
+    return -1;
   int n = atomic_load_explicit(&g_coreset_bank_n, memory_order_acquire);
   int at = -1;
   for (int i = 0; i < n; ++i)
@@ -159,10 +159,10 @@ void nr_pdcch_coreset_bank_add(const nr_pdcch_blind_monitor_cfg_t *cfg, uint16_t
      * useful evidence but not a second independent configuration; retaining every such alias can
      * fill the bounded bank before another UE is reached. */
     if (nr_pdcch_coreset_bank_has_owner(owner))
-      return;
+      return -1;
     if (n >= NR_PDCCH_DISCOVERED_CORESETS) {
       LOG_W(PHY, "SENSING: multi-CORESET bank full (%d); verified geometry left unarchived\n", n);
-      return;
+      return -1;
     }
     at = n;
     memset(&g_coreset_bank[at], 0, sizeof(g_coreset_bank[at]));
@@ -179,7 +179,8 @@ void nr_pdcch_coreset_bank_add(const nr_pdcch_blind_monitor_cfg_t *cfg, uint16_t
   }
   nr_pdcch_discovered_coreset_t *e = &g_coreset_bank[at];
   for (int i = 0; i < e->nowners; ++i)
-    if (e->owners[i] == owner) return;
+    if (e->owners[i] == owner) return at;
   if (owner && e->nowners < NR_PDCCH_BLIND_MAX_UE)
     e->owners[e->nowners++] = owner;
+  return at;
 }

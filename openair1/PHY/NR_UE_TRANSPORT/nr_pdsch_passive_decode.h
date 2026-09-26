@@ -109,6 +109,7 @@ typedef struct {
   fapi_nr_dl_cw_info_t cw;    ///< codeword parameters this decode derived from the grant
   uint32_t             G;     ///< coded bits available on the allocation
   uint32_t             nvar;  ///< noise variance from channel estimation (fusion weight downstream)
+  uint8_t              qm_measured; ///< modulation order from the equalised symbols (nr_pdsch_qm_oracle.h), 0 = abstained
 } nr_pdsch_passive_decode_result_t;
 
 /**
@@ -132,7 +133,12 @@ typedef struct {
  * @param ue           UE PHY instance
  * @param proc         Current slot's RX processing context
  * @param dlsch_config Allocation description; cw_info/tbslbrm/n_codewords are written by this call
- * @param freq_alloc   Resolved PRB allocation
+ * @param freq_alloc   Resolved PRB allocation. n_prb_list > 0 = a DATA-ORDERED, possibly non-contiguous
+ *                     BWP-relative PRB list (first_rb/last_rb/num_rbs/bitmap are re-derived from it);
+ *                     prg > 0 = PRB bundling size. Either may split the grant into several channel-
+ *                     estimation segments; one segment with prg == 0 is the unchanged contiguous path.
+ *                     A segmented grant with PT-RS, or with CSI-RS rate matching on a segment whose
+ *                     data position and PRB differ in parity, returns UNSUPPORTED.
  * @param grant        Transport-block parameters from the DCI + deployment constants
  * @param rxdataF      Caller-owned per-antenna frequency-domain slot buffer, filled by this call
  * @param[out] out     Decode outcome; always written
@@ -145,6 +151,13 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
                                                          const nr_pdsch_passive_grant_t *grant,
                                                          c16_t rxdataF[][ue->frame_parms.samples_per_slot_wCP],
                                                          nr_pdsch_passive_decode_result_t *out);
+
+/// Make a PRB-list allocation self-consistent: with n_prb_list > 0, re-derive first_rb/last_rb/num_rbs
+/// (= n_prb_list, the PRB COUNT) and the bitmap from prb_list. No-op for a legacy allocation. false (fa
+/// untouched) if a PRB is outside the BWP, listed twice, or the list is longer than NR_PRB_SET_MAX.
+/// Every producer of a list grant must pass it through this before the grant reaches the decoder, the
+/// data-aided tap or the queue probes (nr_pdsch_passive_queue_enqueue() does it for queued grants).
+bool nr_pdsch_passive_alloc_normalise(freq_alloc_bitmap_t *fa, int bwp_size);
 
 /// Print the distinct decode-parameter tuples seen this run, with counts. Diffing this between a
 /// 90 %-CRC run and a 0 %-CRC run is what identifies a wrong parameter -- see section 23.3.

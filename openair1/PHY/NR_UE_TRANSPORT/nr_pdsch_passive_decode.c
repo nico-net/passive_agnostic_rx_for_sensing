@@ -27,6 +27,7 @@ extern _Atomic long nr_ue_diag_producer_absolute_slot;
  */
 
 #include "nr_pdsch_passive_decode.h"
+#include "nr_pdsch_qm_oracle.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -53,6 +54,9 @@ extern __thread int nr_dlsch_chest_per_symbol; // nr_dlsch_demodulation.c: read 
 #include "PHY/MODULATION/modulation_UE.h" // nr_slot_fep, nr_slot_fep_ant
 #include "nr_pdsch_ptrs_unav.h"
 #include "nr_agnostic_v2.h"
+#include "nr_pdsch_prb_set.h" // nr_prb_segments, nr_prb_gather_index (non-contiguous PRB sets)
+_Static_assert(sizeof(((freq_alloc_bitmap_t *)0)->prb_list) == NR_PRB_SET_MAX * sizeof(uint16_t),
+               "freq_alloc_bitmap_t.prb_list (common/utils/bits.h) must hold NR_PRB_SET_MAX PRBs");
 #include "common/utils/threadPool/task_ans.h" // init_task_ans/join_task_ans/completed_task_ans, for the per-antenna FEP dispatch below
 #include "PHY/NR_UE_ESTIMATION/nr_estimation.h"
 #include "PHY/NR_UE_TRANSPORT/nr_transport_proto_ue.h"
@@ -846,6 +850,8 @@ bool nr_pdsch_passive_gpu_job(const PHY_VARS_NR_UE *ue, const fapi_nr_dl_config_
     return false;
   const uint8_t Qm = nr_get_Qm_dl(grant->mcs, grant->mcs_table);
   const uint32_t R = nr_get_code_rate_dl(grant->mcs, grant->mcs_table);
+  if (fa->n_prb_list || fa->prg) /* segmented chest + data-ordered gather are CPU-only (Task 9) */
+    return false;
   if (Qm == 0 || R == 0 || fa->num_rbs == 0 || pdu->dlDmrsSymbPos == 0)
     return false;
   job->start_rb = (uint16_t)(pdu->BWPStart + fa->first_rb); /* CRB0-relative, as nr_pdsch_channel_estimation's start_sc */
@@ -1234,6 +1240,30 @@ void nr_pdsch_passive_set_slot_share(int on, int rb_lo, int rb_n)
   t_share.on = on; t_share.rb_lo = rb_lo; t_share.rb_n = rb_n;
 }
 
+bool nr_pdsch_passive_alloc_normalise(freq_alloc_bitmap_t *fa, int bwp_size)
+{
+  if (fa->n_prb_list == 0)
+    return true;
+  const int n = fa->n_prb_list;
+  if (n > NR_PRB_SET_MAX)
+    return false;
+  uint32_t bm[sizeofArray(fa->bitmap)] = {0};
+  int lo = NR_PRB_SET_MAX, hi = -1;
+  for (int i = 0; i < n; i++) {
+    const int r = fa->prb_list[i];
+    if (r >= bwp_size || r >= (int)(32 * sizeofArray(bm)) || ((bm[r / 32] >> (r % 32)) & 1u))
+      return false; /* outside the BWP, or listed twice */
+    bm[r / 32] |= 1u << (r % 32);
+    if (r < lo) lo = r;
+    if (r > hi) hi = r;
+  }
+  memcpy(fa->bitmap, bm, sizeof(bm));
+  fa->first_rb = lo;
+  fa->last_rb = hi;
+  fa->num_rbs = n;
+  return true;
+}
+
 nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
                                                          const UE_nr_rxtx_proc_t *proc,
                                                          fapi_nr_dl_config_dlsch_pdu_rel15_t *dlsch_config,
@@ -1246,6 +1276,67 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
   out->status = NR_PDSCH_PASSIVE_DECODE_UNSUPPORTED;
 
   NR_DL_FRAME_PARMS *fp = &ue->frame_parms;
+
+  /* ---- NON-CONTIGUOUS PRB SETS (full-running-agnosticity Task 9) ------------------------------
+   * freq_alloc->n_prb_list > 0 carries a DATA-ORDERED PRB list (RA type 0, interleaved VRB) and
+   * prg > 0 a PRB bundling size. Both split the allocation into contiguous segments (Task 8's
+   * nr_prb_segments). ONE segment with prg == 0 -- every grant produced today -- takes EXACTLY the
+   * previous code path; nothing below changes for it (every new branch is guarded by seg_path).
+   * Otherwise: the channel is estimated once per segment (never interpolated across a gap or a
+   * PRG boundary) and nr_rx_pdsch() demodulates a VIRTUAL contiguous allocation at BWP PRBs
+   * 0..n-1 into which the segments' REs are gathered in data order, so the LLR stream -- and
+   * dl_valid_re, rxdataF_comp, EQDIAG -- come out in data order with no change to nr_rx_pdsch().
+   * A list grant is normalised first so first_rb/last_rb/num_rbs/bitmap agree with the list
+   * (TBS, G, CSI-RS unavailable-RE count and the stats all read those). */
+  freq_alloc_bitmap_t fa_list;
+  nr_prb_seg_t seg[NR_PRB_SET_MAX];
+  int nseg = 1;
+  if (freq_alloc->n_prb_list > 0 || freq_alloc->prg > 0) {
+    uint16_t contig[NR_PRB_SET_MAX];
+    const uint16_t *prb = freq_alloc->prb_list;
+    int n = freq_alloc->n_prb_list;
+    if (n == 0) {
+      n = freq_alloc->num_rbs;
+      for (int i = 0; i < n && i < NR_PRB_SET_MAX; i++)
+        contig[i] = (uint16_t)(freq_alloc->first_rb + i);
+      prb = contig;
+    }
+    bool bad = n <= 0 || n > NR_PRB_SET_MAX;
+    if (!bad && freq_alloc->n_prb_list > 0) {
+      /* The producer (nr_pdsch_passive_queue_enqueue for queued grants) normalises; this re-derives
+       * as a CHECK, because the data-aided tap and the queue probes read the CALLER's copy. */
+      fa_list = *freq_alloc;
+      bad = !nr_pdsch_passive_alloc_normalise(&fa_list, dlsch_config->BWPSize);
+      if (!bad && (fa_list.first_rb != freq_alloc->first_rb || fa_list.last_rb != freq_alloc->last_rb
+                   || fa_list.num_rbs != freq_alloc->num_rbs
+                   || memcmp(fa_list.bitmap, freq_alloc->bitmap, sizeof(fa_list.bitmap)) != 0)) {
+        static _Atomic unsigned long c_ = 0;
+        const unsigned long n_ = atomic_fetch_add_explicit(&c_, 1, memory_order_relaxed) + 1;
+        if (n_ == 1 || (n_ % 200) == 0)
+          LOG_W(PHY, "SENSING: PDSCH PRB-list grant NOT normalised by its producer n=%lu (num_rbs=%d vs %d "
+                     "PRBs listed): call nr_pdsch_passive_alloc_normalise() -- the data-aided tap and the queue "
+                     "probes read the un-normalised copy\n", n_, freq_alloc->num_rbs, fa_list.num_rbs);
+      }
+      freq_alloc = &fa_list;
+    }
+    nseg = bad ? -1 : nr_prb_segments(prb, n, dlsch_config->BWPStart, freq_alloc->prg, seg, NR_PRB_SET_MAX);
+    if (nseg <= 0) {
+      { static _Atomic unsigned long c_ = 0;
+        const unsigned long n_ = atomic_fetch_add_explicit(&c_, 1, memory_order_relaxed) + 1;
+        if (n_ == 1 || (n_ % 200) == 0)
+          LOG_A(PHY, "SENSING: PDSCH UNSUP@seg-list n=%lu (n_prb_list=%u num_rbs=%d bwp_size=%u)\n", n_,
+                (unsigned)freq_alloc->n_prb_list, freq_alloc->num_rbs, (unsigned)dlsch_config->BWPSize); }
+      return out->status;
+    }
+  }
+  const bool seg_path = !(nseg == 1 && freq_alloc->prg == 0);
+  if (seg_path) {
+    static _Atomic unsigned long c_ = 0;
+    const unsigned long n_ = atomic_fetch_add_explicit(&c_, 1, memory_order_relaxed) + 1;
+    if (n_ == 1 || (n_ % 1000) == 0)
+      LOG_A(PHY, "SENSING: PDSCH segmented decode n=%lu (this grant: %d PRBs in %d segments, prg=%u)\n", n_,
+            freq_alloc->num_rbs, nseg, (unsigned)freq_alloc->prg);
+  }
 
   // ---- Scope: mirror nr_isac_pdsch_data_aided_submit()'s own guards. Decoding a grant whose
   // reconstruction we could not use anyway is pure CPU cost. ----
@@ -1260,7 +1351,7 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
    * a run that does not ask for it. */
   uint32_t ptrs_unav = 0;
   int ptrs_arm = -1;
-  if (nr_agnostic_v2() && !(dlsch_config->pduBitmap & 0x1) && grant->mcs >= 10 && grant->mcs <= 27
+  if (nr_agnostic_v2() && !seg_path && !(dlsch_config->pduBitmap & 0x1) && grant->mcs >= 10 && grant->mcs <= 27
       && t_ptrs_sweep_allow && !t_probe_first_seg) {
     ptrs_arm = rnti_ptrs_pick(grant->rnti);
     uint8_t K, L;
@@ -1274,6 +1365,16 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
       dlsch_config->PTRSPortIndex = 1;
       dlsch_config->PTRSReOffset = 0;
     }
+  }
+  /* ponytail: PT-RS subcarriers are numbered over the scheduled PRBs in INCREASING PRB order
+   * (TS 38.211 7.4.1.2.2), which the virtual data-ordered layout below does not preserve; refused
+   * until a segmented grant with PT-RS is actually seen. */
+  if (seg_path && (dlsch_config->pduBitmap & 0x1)) {
+    { static _Atomic unsigned long c_ = 0;
+      const unsigned long n_ = atomic_fetch_add_explicit(&c_, 1, memory_order_relaxed) + 1;
+      if (n_ == 1 || (n_ % 200) == 0)
+        LOG_A(PHY, "SENSING: PDSCH UNSUP@seg-ptrs n=%lu\n", n_); }
+    return out->status;
   }
   if (dlsch_config->pduBitmap & 0x1) {
     static int s_ptrs_k = -1, s_ptrs_l = -1;
@@ -1309,6 +1410,19 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
   if (dlsch_config->numCsiRsForRateMatching > 0) {
     extern uint32_t nr_ue_csi_rm_unav_res(fapi_nr_dl_config_dlsch_pdu_rel15_t *dlsch_config, freq_alloc_bitmap_t *freq_alloc);
     csi_unav = nr_ue_csi_rm_unav_res(dlsch_config, (freq_alloc_bitmap_t *)freq_alloc);
+    /* nr_dlsch_extract_rbs() picks the CSI-RS RE pattern by the PRB's CRB PARITY (density 0.5 differs
+     * on even/odd RBs). The virtual layout moves segment s from PRB prb_start to PRB data_index, so it
+     * is only exact when both have the same parity. ponytail: refused otherwise; a per-segment parity
+     * swap of the overlap bitmap is the upgrade if such grants turn up. */
+    for (int s = 0; seg_path && s < nseg; s++) {
+      if ((seg[s].data_index ^ seg[s].prb_start) & 1) {
+        { static _Atomic unsigned long c_ = 0;
+          const unsigned long n_ = atomic_fetch_add_explicit(&c_, 1, memory_order_relaxed) + 1;
+          if (n_ == 1 || (n_ % 200) == 0)
+            LOG_A(PHY, "SENSING: PDSCH UNSUP@seg-csirm-parity n=%lu\n", n_); }
+        return out->status;
+      }
+    }
   }
   int n_ports = 0;
   for (int i = 0; i < 12; i++) {
@@ -1648,7 +1762,7 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
     }
   }
   int dmrs_first = -1, dmrs_last = -1; // for the per-branch phase-slope estimator below
-  const int chest_hit = t_share.on && t_chest_cache.valid && t_chest_cache.slot == share_slot
+  const int chest_hit = !seg_path && t_share.on && t_chest_cache.valid && t_chest_cache.slot == share_slot
       && t_chest_cache.dmrs_pos == dlsch_config->dlDmrsSymbPos && t_chest_cache.cfg_type == dlsch_config->dmrsConfigType
       && t_chest_cache.nscid == dlsch_config->nscid && t_chest_cache.ports_lo == (uint8_t)dlsch_config->dmrs_ports
       && t_chest_cache.cdm == dlsch_config->n_dmrs_cdm_groups && t_chest_cache.nl == cw->Nl
@@ -1679,7 +1793,70 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
     nvar = t_chest_cache.nvar; nvar_den = t_chest_cache.nvar_den; n_dmrs_sym = t_chest_cache.n_dmrs_sym;
     dmrs_first = t_chest_cache.dmrs_first; dmrs_last = t_chest_cache.dmrs_last;
   }
-  for (int m = dlsch_config->start_symbol; !chest_hit && m < probe_end; m++) {
+  /* ---- SEGMENTED ESTIMATE (seg_path only). nr_pdsch_channel_estimation() memsets its whole
+   * output row and writes it from index 0 = the first RB of the allocation it is given, so each
+   * segment is estimated into the row, parked at its DATA offset (data_index*12) in seg_h, and the
+   * row is then rewritten in that data-ordered layout -- the one nr_rx_pdsch() below reads for the
+   * virtual contiguous allocation. A 1-PRB segment is fine: the estimator has no minimum size (its
+   * FIR/pilot loop is the same arithmetic the attached UE runs on 1-RB grants). nvar is weighted by
+   * segment width so the sum keeps its (DM-RS symbol x layer) meaning; nr_dl_chest_nvar_ant[] ends
+   * up holding the LAST segment's per-branch value (the same last-call approximation it already
+   * makes across DM-RS symbols). The ISAC_DC_FIX interpolation is not applied here. */
+  static __thread c16_t *seg_h = NULL;
+  static __thread size_t seg_h_cap = 0;
+  const int nsc_seg = freq_alloc->num_rbs * NR_NB_SC_PER_RB;
+  if (seg_path && seg_h_cap < (size_t)fp->nb_antennas_rx * nsc_seg) {
+    free(seg_h);
+    seg_h_cap = (size_t)fp->nb_antennas_rx * NR_PRB_SET_MAX * NR_NB_SC_PER_RB;
+    seg_h = (c16_t *)malloc16(seg_h_cap * sizeof(c16_t));
+    if (seg_h == NULL) {
+      seg_h_cap = 0;
+      out->status = NR_PDSCH_PASSIVE_DECODE_ERROR;
+      return out->status;
+    }
+  }
+  for (int m = dlsch_config->start_symbol; seg_path && m < probe_end; m++) {
+    if (!((dlsch_config->dlDmrsSymbPos >> m) & 1))
+      continue;
+    if (dmrs_first < 0)
+      dmrs_first = m;
+    dmrs_last = m;
+    for (int nl = 0; nl < cw->Nl; nl++) {
+      uint64_t nv = 0;
+      uint64_t nv_ant[NR_DL_CHEST_MAX_ANT] = {0}; /* per-branch, width-weighted: see the publication below */
+      for (int s = 0; s < nseg; s++) {
+        chest_alloc = set_bitmap_from_start_size(seg[s].prb_start, seg[s].n_prb);
+        chest_cfg.start_rb = seg[s].prb_start;
+        chest_cfg.number_rbs = seg[s].n_prb;
+        chest_cfg.resource_alloc = 1; /* each segment is contiguous */
+        uint32_t nvar_tmp = 0;
+        nr_dl_chest_diag_request = 1;
+        nr_pdsch_channel_estimation(ue, proc, &chest_cfg, &chest_alloc, nl,
+                                    get_dmrs_port(nl, dlsch_config->dmrs_ports), (unsigned char)m, pdsch_est_size,
+                                    pdsch_dl_ch_estimates, fp->samples_per_slot_wCP, rxdataF, &nvar_tmp);
+        nv += (uint64_t)nvar_tmp * seg[s].n_prb;
+        for (int a = 0; a < fp->nb_antennas_rx && a < NR_DL_CHEST_MAX_ANT; a++)
+          nv_ant[a] += (uint64_t)nr_dl_chest_nvar_ant[a] * seg[s].n_prb;
+        for (int aarx = 0; aarx < fp->nb_antennas_rx; aarx++)
+          memcpy(&seg_h[aarx * nsc_seg + seg[s].data_index * NR_NB_SC_PER_RB],
+                 &pdsch_dl_ch_estimates[nl * fp->nb_antennas_rx + aarx][fp->ofdm_symbol_size * m],
+                 (size_t)seg[s].n_prb * NR_NB_SC_PER_RB * sizeof(c16_t));
+      }
+      nvar += (uint32_t)(nv / (uint64_t)freq_alloc->num_rbs);
+      /* The estimator overwrites nr_dl_chest_nvar_ant[] per call, so after the loop it would hold the
+       * LAST segment's value -- possibly a single PRB -- which the per-branch nvar substitution
+       * (ISAC_RX_NVAR_PERBRANCH, default on) then feeds the equaliser. Publish the width-weighted mean. */
+      for (int a = 0; a < fp->nb_antennas_rx && a < NR_DL_CHEST_MAX_ANT; a++)
+        nr_dl_chest_nvar_ant[a] = (uint32_t)(nv_ant[a] / (uint64_t)freq_alloc->num_rbs);
+      for (int aarx = 0; aarx < fp->nb_antennas_rx; aarx++) {
+        c16_t *row = (c16_t *)&pdsch_dl_ch_estimates[nl * fp->nb_antennas_rx + aarx][fp->ofdm_symbol_size * m];
+        memset(row, 0, sizeof(c16_t) * fp->ofdm_symbol_size);
+        memcpy(row, &seg_h[aarx * nsc_seg], (size_t)nsc_seg * sizeof(c16_t));
+      }
+    }
+    n_dmrs_sym++;
+  }
+  for (int m = dlsch_config->start_symbol; !seg_path && !chest_hit && m < probe_end; m++) {
     if (!((dlsch_config->dlDmrsSymbPos >> m) & 1)) {
       continue;
     }
@@ -1875,7 +2052,7 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
   t_chest_cache.rb_lo = chest_alloc.first_rb; t_chest_cache.rb_n = chest_alloc.num_rbs;
   t_chest_cache.nvar = nvar; t_chest_cache.nvar_den = nvar_den; t_chest_cache.n_dmrs_sym = n_dmrs_sym;
   t_chest_cache.dmrs_first = dmrs_first; t_chest_cache.dmrs_last = dmrs_last;
-  t_chest_cache.valid = t_share.on;
+  t_chest_cache.valid = t_share.on && !seg_path; /* a segmented estimate is data-ordered, not RB-indexed */
 chest_done:
 
   /* ---- PER-BRANCH FREQUENCY-OFFSET ESTIMATE (2026-09-03) --------------------------------------
@@ -1932,7 +2109,7 @@ chest_done:
    * ISAC_DMRS_FO_APPLY=1 applies the CFO as a DIGITAL de-rotation through the same per-branch hook
    * nr_slot_fep_ant already uses -- never a hardware retune. SFO is reported only; correcting it
    * needs a per-subcarrier ramp in the equaliser, which is a bigger change than this. */
-  if (dmrs_first >= 0 && dmrs_last > dmrs_first) {
+  if (!seg_path && dmrs_first >= 0 && dmrs_last > dmrs_first) { /* the SFO slope needs a frequency-ordered axis */
     static _Atomic uint64_t s_dfo_n = 0;
     /* SFO is counted separately from CFO: a grant too narrow to fit two slope groups yields a CFO
      * but NO SFO, and the two populations are not the same size (measured 46 % narrow on
@@ -2354,6 +2531,7 @@ chest_done:
     }
   }
   out->nvar = nvar;
+  out->qm_measured = 0;
 
   if (ue->chest_time == 1 && probe_last_sym < 0) { /* a probe estimated only the first DM-RS symbol(s) */
     nr_chest_time_domain_avg(fp, (int32_t **)pdsch_dl_ch_estimates, dlsch_config->number_symbols,
@@ -2538,8 +2716,46 @@ gpu_llr_ready:;
     s_sfo_corr = (e != NULL && atoi(e) != 0) ? 1 : 0;
   }
   double sfo_applied[NR_SYMBOLS_PER_SLOT] = {0};  // symbol-periods of rotation already applied, per slot
-  const double sfo_eps = (s_sfo_corr && !nr_dlsch_chest_per_symbol) ? (nr_pdsch_passive_sfo_ppm() * 1.0e-6) : 0.0;
+  const double sfo_eps = (s_sfo_corr && !nr_dlsch_chest_per_symbol && !seg_path) ? (nr_pdsch_passive_sfo_ppm() * 1.0e-6) : 0.0;
   const double sfo_tsym = (1.0e-3 / (double)fp->slots_per_subframe) / (double)fp->symbols_per_slot;
+
+  /* ---- DATA-ORDERED GATHER (seg_path only). nr_rx_pdsch() walks its allocation in increasing PRB
+   * order (nr_dlsch_extract_rbs), which is not data order for interleaved VRBs, and it rereads the
+   * estimate from index 0 for every bitmap block. So it is handed a VIRTUAL contiguous allocation at
+   * BWP PRBs 0..n-1 whose subcarriers are the segments' REs gathered in data order, against the
+   * data-ordered estimate built above. DM-RS positions within a PRB are the same in every PRB, so
+   * moving whole PRBs keeps them. The caller's rxdataF is left untouched: the data-aided submit
+   * forms Y/X on the REAL subcarriers. */
+  freq_alloc_bitmap_t fa_virt;
+  c16_t(*rxdataF_dem)[fp->samples_per_slot_wCP] = rxdataF;
+  if (seg_path && !gpu_llr) {
+    static __thread c16_t *virt = NULL;
+    static __thread size_t virt_cap = 0;
+    const size_t need = (size_t)fp->nb_antennas_rx * fp->samples_per_slot_wCP;
+    if (virt_cap < need) {
+      free(virt);
+      virt = (c16_t *)malloc16(need * sizeof(c16_t));
+      virt_cap = virt ? need : 0;
+    }
+    static __thread int *gidx = NULL; /* heap, not a 13 kB frame on every decode's stack */
+    if (gidx == NULL)
+      gidx = (int *)malloc(NR_PRB_SET_MAX * NR_NB_SC_PER_RB * sizeof(int));
+    const int nre = (virt && gidx) ? nr_prb_gather_index(seg, nseg, NR_NB_SC_PER_RB, gidx, NR_PRB_SET_MAX * NR_NB_SC_PER_RB) : -1;
+    if (nre != freq_alloc->num_rbs * NR_NB_SC_PER_RB) { /* not nsc_seg: the GPU goto skips its initialiser */
+      out->status = NR_PDSCH_PASSIVE_DECODE_ERROR;
+      return out->status;
+    }
+    const int N = fp->ofdm_symbol_size, off0 = fp->first_carrier_offset + dlsch_config->BWPStart * NR_NB_SC_PER_RB;
+    for (int aarx = 0; aarx < fp->nb_antennas_rx; aarx++)
+      for (int m = dlsch_config->start_symbol; m < dlsch_config->start_symbol + dlsch_config->number_symbols; m++) {
+        const c16_t *src = &rxdataF[aarx][m * N];
+        c16_t *dst = &virt[(size_t)aarx * fp->samples_per_slot_wCP + (size_t)m * N];
+        for (int i = 0; i < nre; i++)
+          dst[(off0 + i) % N] = src[(off0 + gidx[i]) % N];
+      }
+    fa_virt = set_bitmap_from_start_size(0, freq_alloc->num_rbs);
+    rxdataF_dem = (c16_t(*)[fp->samples_per_slot_wCP])virt;
+  }
 
   const uint64_t pdt_dem = pdtim_on ? pdtim_now() : 0;
   bool demod_ok = true;
@@ -2586,9 +2802,9 @@ gpu_llr_ready:;
         }
       }
     }
-    if (nr_rx_pdsch(ue, proc, &dlsch, freq_alloc, dlsch_config, &harq, (unsigned char)m,
+    if (nr_rx_pdsch(ue, proc, &dlsch, seg_path ? &fa_virt : freq_alloc, dlsch_config, &harq, (unsigned char)m,
                     m == first_symbol_with_data, (unsigned char)dlsch_config->harq_process_nbr, pdsch_est_size,
-                    pdsch_dl_ch_estimates, llr, dl_valid_re, rxdataF, &log2_maxh, rx_size_symbol,
+                    pdsch_dl_ch_estimates, llr, dl_valid_re, rxdataF_dem, &log2_maxh, rx_size_symbol,
                     fp->nb_antennas_rx, rxdataF_comp, dl_ch_mag, dl_ch_magb, dl_ch_magr, ptrs_phase_per_slot,
                     ptrs_re_per_slot, nvar, &scope_req, NULL /* rho_dl: single layer */)
         < 0) {
@@ -2598,6 +2814,17 @@ gpu_llr_ready:;
   }
 
   pdtim_add(PDTIM_DEMOD, pdt_dem);
+
+  /* Qm oracle: same symbol choice as EQDIAG -- the one with the most valid data REs. */
+  if (demod_ok) {
+    int qm_m = -1;
+    uint32_t qm_n = 0;
+    for (int m = dlsch_config->start_symbol; m < dlsch_config->start_symbol + dlsch_config->number_symbols; m++)
+      if (dl_valid_re[m] > qm_n) { qm_n = dl_valid_re[m]; qm_m = m; }
+    if (qm_m >= 0)
+      out->qm_measured = (uint8_t)nr_pdsch_qm_classify((const int16_t *)rxdataF_comp[qm_m][0],
+                                                       qm_n > 4096 ? 4096 : qm_n, NULL);
+  }
 
   /* ---- EQDIAG: post-equalisation EVM (ISAC_PDSCH_EVM=1, default off) --------------------------
    * PASSIVE_RX_ONLY_HANDOVER.md §13 names this as "the measurement to take next, and why it was not
@@ -2721,8 +2948,8 @@ gpu_llr_ready:;
          * frequency frame rather than in units of my bin width. The allocation wraps the FFT, so
          * index i sits at (start_re + i) % ofdm_symbol_size. */
         const int start_rb_abs = freq_alloc->first_rb + dlsch_config->BWPStart;
-        const int start_re_abs =
-            (fp->first_carrier_offset + start_rb_abs * NR_NB_SC_PER_RB) % fp->ofdm_symbol_size;
+        const int start_re_abs = seg_path ? -1 /* bins are DATA order: no single FFT origin */
+            : (fp->first_carrier_offset + start_rb_abs * NR_NB_SC_PER_RB) % fp->ofdm_symbol_size;
         char eb[768];
         int ub = 0;
         for (int q = 0; q < EQDIAG_NBIN && ub < (int)sizeof(eb) - 24; q++) {
@@ -3034,8 +3261,9 @@ gpu_llr_ready:;
       atomic_fetch_add(&g_mcshist[freq_alloc->num_rbs >= 128 ? 1 : 0][sk][grant->mcs & 31], 1);
       {
         const int rb0 = freq_alloc->first_rb, nrb = freq_alloc->num_rbs;
-        for (int rb = rb0; rb < rb0 + nrb && rb < NR_RBMAP_MAX; rb++) {
+        for (int rb = rb0; rb < (seg_path ? freq_alloc->last_rb + 1 : rb0 + nrb) && rb < NR_RBMAP_MAX; rb++) {
           if (rb < 0) continue;
+          if (seg_path && !check_rb_in_bitmap(freq_alloc, rb)) continue;
           atomic_fetch_add(&g_rbmap[rb], 1);
           if (sk == 1) atomic_fetch_add(&g_rbmap_ok[rb], 1);
         }

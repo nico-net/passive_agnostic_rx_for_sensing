@@ -366,6 +366,20 @@ void nr_pdcch_dci11_layout_feedback(uint16_t layout_index, bool cb0_ok);
 void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc,
                                          bool serial_candidates, long source_absolute_slot);
 
+#define NR_PDCCH_BLIND_RE_PER_RB_OUT_DMRS 9 // == dci_nr.c's file-local RE_PER_RB_OUT_DMRS #define
+/* Widest aggregation level a lane may scan. Shared by the lane parser (library) and the
+ * RT lane-batch sizing in nr_pdcch_blind_monitor_rt.c. */
+#define LANE_BATCH_AL_MAX    16
+/* Per-lane extracted-RE budget: 8 candidates at the widest AL (9 RE/RB * 16 * 6 = 864 each), i.e.
+ * every AL16 position of the largest CORESET (270 RB x 3 symbols = 135 CCEs -> 8), and numerically
+ * the same 6912 REs as the previous 16 x AL8 sizing, so the per-thread heap does not grow. */
+#define LANE_RE_PER_LANE     (8 * NR_PDCCH_BLIND_RE_PER_RB_OUT_DMRS * LANE_BATCH_AL_MAX * 6)
+/// Parse an ISAC_LANE_ALS-style list ("2,4,16"): the legal ALs 1/2/4/8/16 in order, deduplicated, at
+/// most 5 into v. Returns the count (0 = nothing legal, NULL input included).
+int nr_pdcch_blind_parse_lane_als(const char *s, uint8_t v[5]);
+/// Extracted-RE capacity of one lookahead lane (c16 REs; one AL-L candidate needs 54*L).
+int nr_pdcch_blind_lane_re_budget(void);
+
 #ifdef __cplusplus
 }
 #endif

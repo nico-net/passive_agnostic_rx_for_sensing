@@ -27,7 +27,11 @@ typedef struct {
   uint8_t tda_start, tda_length, tda_mapping, tda_k2;
   uint8_t dmrs_config_type, dmrs_add_pos, dmrs_max_length, transform_precoding, mcs_table;
 } nr_pdcch_ul_interp_hyp_t;
-/* Initial candidate catalogue from the design; not exhaustive NR configuration recovery.
+/* TS 38.214 Table 6.1.2.1-1, normal CP: mapping type A (0) S = 0, L 4..14; type B (1) S 0..13,
+ * L 1..14, S+L <= 14. Any other mapping_type is not legal. */
+bool nr_pusch_tda_legal(int mapping_type, int S, int L);
+/* Initial candidate catalogue from the design; not exhaustive NR configuration recovery. Every TDA row
+ * (both mapping types) satisfies nr_pusch_tda_legal() -- enforced by the unit test.
  * Unsupported receiver modes remain unresolved hypotheses, never scored as CRC failures. */
 int nr_pdcch_ul_interp_sweep_generate(nr_hyp_t *, int);
 /* Apply only to the actually observed TDA index, never silently to entry zero. */

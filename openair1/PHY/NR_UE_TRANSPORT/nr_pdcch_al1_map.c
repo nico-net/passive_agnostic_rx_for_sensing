@@ -91,13 +91,6 @@ static int family_keys(int span_rb, int d, nr_pdcch_al1_map_t m, uint64_t *keys)
 /* Open-addressing set of keys -> dense index. Size is a power of two >= 4x the largest union (1080). */
 #define HSZ 8192
 typedef struct { uint64_t key[HSZ]; int idx[HSZ]; int n; } kset_t;
-static int kset_find(const kset_t *s, uint64_t k)
-{
-  for (uint32_t h = (uint32_t)((k * 0x9E3779B97F4A7C15ULL) >> 51) & (HSZ - 1);; h = (h + 1) & (HSZ - 1)) {
-    if (s->idx[h] < 0) return -1;
-    if (s->key[h] == k) return s->idx[h];
-  }
-}
 static int kset_add(kset_t *s, uint64_t k)
 {
   for (uint32_t h = (uint32_t)((k * 0x9E3779B97F4A7C15ULL) >> 51) & (HSZ - 1);; h = (h + 1) & (HSZ - 1)) {
@@ -178,6 +171,18 @@ static int cmp_u64(const void *a, const void *b)
   return (x > y) - (x < y);
 }
 
+/* FNV-1a over the sorted family = the family's fingerprint. */
+static uint64_t family_fp(int span_rb, int d, nr_pdcch_al1_map_t m)
+{
+  uint64_t keys[AL1_MAX_CCE];
+  const int nk = family_keys(span_rb, d, m, keys);
+  qsort(keys, (size_t)nk, sizeof(keys[0]), cmp_u64);
+  uint64_t h = 1469598103934665603ULL;
+  for (int j = 0; j < nk; j++)
+    h = (h ^ keys[j]) * 1099511628211ULL;
+  return h;
+}
+
 int nr_pdcch_al1_family_count(int span_rb, int duration, const nr_pdcch_al1_map_t *cand, int n)
 {
   if (!shape_ok(span_rb, duration) || cand == NULL || n <= 0)
@@ -185,19 +190,78 @@ int nr_pdcch_al1_family_count(int span_rb, int duration, const nr_pdcch_al1_map_
   uint64_t *fp = malloc(sizeof(uint64_t) * (size_t)n);
   if (fp == NULL)
     return 0;
-  uint64_t keys[AL1_MAX_CCE];
-  for (int i = 0; i < n; i++) {
-    const int nk = family_keys(span_rb, duration, cand[i], keys);
-    qsort(keys, (size_t)nk, sizeof(keys[0]), cmp_u64);
-    uint64_t h = 1469598103934665603ULL; /* FNV-1a over the sorted family = family fingerprint */
-    for (int j = 0; j < nk; j++)
-      h = (h ^ keys[j]) * 1099511628211ULL;
-    fp[i] = h;
-  }
+  for (int i = 0; i < n; i++)
+    fp[i] = family_fp(span_rb, duration, cand[i]);
   qsort(fp, (size_t)n, sizeof(fp[0]), cmp_u64);
   int d = 1;
   for (int i = 1; i < n; i++)
     d += fp[i] != fp[i - 1];
   free(fp);
   return d;
+}
+
+int nr_pdcch_al1_family_reps(int span_rb, int duration, nr_pdcch_al1_map_t *cand, int n)
+{
+  if (!shape_ok(span_rb, duration) || cand == NULL || n <= 0)
+    return 0;
+  uint64_t *fp = malloc(sizeof(uint64_t) * (size_t)n);
+  if (fp == NULL)
+    return 0;
+  int kept = 0; /* ponytail: O(n * kept) duplicate test; one-shot per verification, n <= 1081 */
+  for (int i = 0; i < n; i++) {
+    const uint64_t h = family_fp(span_rb, duration, cand[i]);
+    int dup = 0;
+    for (int k = 0; k < kept && !dup; k++)
+      dup = fp[k] == h;
+    if (!dup) {
+      fp[kept] = h;
+      cand[kept++] = cand[i];
+    }
+  }
+  free(fp);
+  return kept;
+}
+
+int nr_pdcch_al1_union(int span_rb, int duration, const nr_pdcch_al1_map_t *cand, int n, uint16_t (*regsets)[6], int max)
+{
+  if (!shape_ok(span_rb, duration) || cand == NULL || n <= 0)
+    return 0;
+  kset_t *set = malloc(sizeof(*set));
+  if (set == NULL)
+    return 0;
+  memset(set->idx, 0xff, sizeof(set->idx));
+  set->n = 0;
+  const int ncce = span_rb * duration / 6;
+  for (int i = 0; i < n; i++)
+    for (int j = 0; j < ncce; j++) {
+      uint16_t r[6];
+      if (nr_pdcch_al1_regset(span_rb, duration, cand[i], j, r) != 6)
+        continue;
+      const int prev = set->n;
+      if (kset_add(set, key6(r)) == prev && prev < max && regsets != NULL)
+        memcpy(regsets[prev], r, sizeof(r));
+    }
+  const int total = set->n; /* <= 1080 distinct sets for any legal shape: the table never fills */
+  free(set);
+  return total;
+}
+
+int nr_pdcch_al1_demap(int duration, const uint16_t regs[6], const void *llr, int llr_stride, void *e_rx)
+{
+  if (duration < 1 || duration > 3 || regs == NULL || llr == NULL || e_rx == NULL)
+    return 0;
+  int rb[6], nrb = 0;
+  for (int k = 0; k < 6; k++) { /* regs ascending -> RBs ascending; each RB holds `duration` REGs */
+    const int b = regs[k] / duration;
+    if (nrb == 0 || rb[nrb - 1] != b)
+      rb[nrb++] = b;
+  }
+  if (nrb * duration != 6)
+    return 0;
+  const size_t re = 4, per_rb = 9; /* sizeof(c16_t), data REs per RB outside the DM-RS */
+  char *o = e_rx;
+  for (int s = 0; s < duration; s++)
+    for (int i = 0; i < nrb; i++, o += per_rb * re)
+      memcpy(o, (const char *)llr + ((size_t)s * llr_stride + (size_t)rb[i] * per_rb) * re, per_rb * re);
+  return 54;
 }

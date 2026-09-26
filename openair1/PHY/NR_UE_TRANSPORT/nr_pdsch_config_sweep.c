@@ -17,7 +17,9 @@
 
 #include "nr_pdsch_config_sweep.h"
 #include "nr_crc_evidence.h"
+#include "nr_pdsch_qm_oracle.h"
 #include <string.h>
+#include <stdlib.h>
 #include <pthread.h>
 #include "common/utils/LOG/log.h"
 
@@ -47,6 +49,17 @@ int nr_pdsch_config_sweep_init(nr_pdsch_config_sweep_state_t *st, int tda_count)
   return nr_pdsch_config_sweep_init_legal(st, tda_count, 0, NULL);
 }
 
+bool nr_pdsch_tda_legal(int mapping_type, int S, int L)
+{
+  if (S < 0 || L < 1 || S + L > 14)
+    return false;
+  if (mapping_type == 0)
+    return S <= 3 && L >= 3;
+  if (mapping_type == 1)
+    return S <= 12 && L >= 2 && L <= 13;
+  return false;
+}
+
 int nr_pdsch_config_sweep_init_legal(nr_pdsch_config_sweep_state_t *st, int tda_count,
                                    int typeA, nr_pdsch_legality_fn_t legality)
 {
@@ -57,61 +70,70 @@ int nr_pdsch_config_sweep_init_legal(nr_pdsch_config_sweep_state_t *st, int tda_
   st->winner = -1;
   (void)tda_count; /* Contexts are isolated by the observed index; list width is not inferred here. */
 
-  /* Mapping-A catalog: EVERY legal (S, L) of TS 38.214 Table 5.1.2.1-1 (S 0..3, L 3..14, S+L <= 14),
-   * not a curated prefix (the previous 8 pairs were the two lab cells' entries -- a deployment bias
-   * the search must not carry). k0 (TDRA slot offset) is a TDRA-entry property like S/L and is
-   * enumerated 0..2; the consumer decodes slot + k0. */
-  uint8_t kSL[64][2];
-  unsigned n_sl = 0;
-  for (uint8_t S = 0; S <= 3; S++)
-    for (uint8_t L = 3; S + L <= 14; L++) {
-      kSL[n_sl][0] = S; kSL[n_sl][1] = L; n_sl++;
-    }
-  static const uint8_t kK0[]     = {0, 1}; /* k0 = 2 is not enumerated: 3024 raw entries would not fit the per-context state */
+  /* EVERY legal (S, L) of TS 38.214 Table 5.1.2.1-1 for BOTH mapping types, not a curated prefix (the
+   * previous 8 pairs were the two lab cells' entries -- a deployment bias the search must not carry).
+   * k0 (TDRA slot offset) is a TDRA-entry property like S/L; {0,1} are enumerated up front and any
+   * larger k0 is appended only once the k0 oracle sees it on air (nr_pdsch_config_sweep_add_k0): all
+   * 33 values would be 16x the catalog for values almost no cell uses.
+   * The mapping type goes to the legality function, i.e. OAI's own DM-RS mask generator
+   * (fill_dmrs_mask()'s tables via nr_pdcch_blind_dmrs_mask): type B puts the first DM-RS on the
+   * first PDSCH symbol and takes the type-B columns of TS 38.211 Table 7.4.1.1.2-3/-4. */
+  static const uint8_t kK0[]     = {0, 1};
+  static int typeb = -1; /* ISAC_PDSCH_TYPEB=0: catalog without mapping type B (default on) */
+  if (typeb < 0) {
+    const char *e = getenv("ISAC_PDSCH_TYPEB");
+    typeb = (e != NULL && atoi(e) == 0) ? 0 : 1;
+  }
   static const uint8_t kAddPos[] = {0, 1, 2, 3};
   static const uint8_t kMaxLen[] = {1, 2};
   static const uint8_t kMcsTab[] = {0, 1, 2};
 
-  for (unsigned a = 0; a < n_sl; a++) {
-   for (unsigned e = 0; e < sizeof(kK0); e++) {
-    for (unsigned b = 0; b < sizeof(kAddPos); b++) {
-      for (unsigned c = 0; c < sizeof(kMaxLen); c++) {
-        for (unsigned d = 0; d < sizeof(kMcsTab); d++) {
-          int32_t mask = 0;
-          if (legality) {
-            mask = legality(typeA, kSL[a][1], kSL[a][0], 0, kAddPos[b], kMaxLen[c]);
-            if (mask <= 0)
-              continue;
-            bool equivalent = false;
-            for (int i = 0; i < st->n_hyp; ++i) {
-              const nr_pdsch_cfg_hypothesis_t *h = &st->hyp[i];
-              if (h->tda_start == kSL[a][0] && h->tda_length == kSL[a][1] && h->k0 == kK0[e]
-                  && h->dmrs_mask == mask && h->mcs_table == kMcsTab[d])
-                equivalent = true;
+  for (uint8_t S = 0; S <= 12; S++)
+   for (uint8_t L = 2; S + L <= 14; L++)
+    for (unsigned e = 0; e < sizeof(kK0); e++) {
+     /* An effective PDU is fixed by (S, L, k0, mask, table): only entries of this (S,L,k0) block can
+      * be equivalent, and type A is enumerated first so it is the representative when a type-B entry
+      * coincides with it (e.g. S=2 under dmrs-TypeA-Position pos2). Merging across mapping types is
+      * required, not cosmetic: the CRC cannot separate two identical PDUs, so neither could win. */
+     const int block = st->n_hyp;
+     for (uint8_t mt = 0; mt <= typeb; mt++) {
+      if (!nr_pdsch_tda_legal(mt, S, L))
+        continue;
+      for (unsigned b = 0; b < sizeof(kAddPos); b++) {
+        for (unsigned c = 0; c < sizeof(kMaxLen); c++) {
+          for (unsigned d = 0; d < sizeof(kMcsTab); d++) {
+            int32_t mask = 0;
+            if (legality) {
+              mask = legality(typeA, L, S, mt, kAddPos[b], kMaxLen[c]);
+              if (mask <= 0)
+                continue;
+              bool equivalent = false;
+              for (int i = block; i < st->n_hyp && !equivalent; ++i)
+                equivalent = st->hyp[i].dmrs_mask == mask && st->hyp[i].mcs_table == kMcsTab[d];
+              if (equivalent)
+                continue;
             }
-            if (equivalent)
-              continue;
+            /* Fail closed if the catalog ever grows beyond its declared bound. */
+            if (st->n_hyp >= NR_PDSCH_SWEEP_MAX_HYP) {
+              st->n_hyp = 0;
+              return 0;
+            }
+            nr_pdsch_cfg_hypothesis_t *h = &st->hyp[st->n_hyp];
+            h->dmrs_mask    = (uint16_t)mask;
+            h->tda_start    = S;
+            h->tda_length   = L;
+            h->k0           = kK0[e];
+            h->dmrs_add_pos = kAddPos[b];
+            h->dmrs_max_len = kMaxLen[c];
+            h->mcs_table    = kMcsTab[d];
+            h->mapping_type = mt;
+            st->order[st->n_hyp] = st->n_hyp;
+            st->n_hyp++;
           }
-          /* Fail closed if the catalog ever grows beyond its declared bound. */
-          if (st->n_hyp >= NR_PDSCH_SWEEP_MAX_HYP) {
-            st->n_hyp = 0;
-            return 0;
-          }
-          nr_pdsch_cfg_hypothesis_t *h = &st->hyp[st->n_hyp];
-          h->dmrs_mask = (uint16_t)mask;
-          h->tda_start    = kSL[a][0];
-          h->tda_length   = kSL[a][1];
-          h->k0           = kK0[e];
-          h->dmrs_add_pos = kAddPos[b];
-          h->dmrs_max_len = kMaxLen[c];
-          h->mcs_table    = kMcsTab[d];
-          st->order[st->n_hyp] = st->n_hyp;
-          st->n_hyp++;
         }
       }
+     }
     }
-   }
-  }
   return st->n_hyp;
 }
 
@@ -120,18 +142,15 @@ int nr_pdsch_config_sweep_init_legal(nr_pdsch_config_sweep_state_t *st, int tda_
  * one or two catalog entries whose effective mask matches -- leaving only mcs_table to the TB CRC.
  * Measured need: 809 live DCI layouts x ~233 hypotheses here = a joint space no probing converges on.
  * Nothing matched -> the catalog is left whole (the measurement may be wrong; a decode still can tell). */
-int nr_pdsch_config_sweep_prune_mask(nr_pdsch_config_sweep_state_t *st, uint16_t dmrs_mask)
+/* Every prune compacts IN PLACE, keeping catalog order: a copy of NR_PDSCH_SWEEP_MAX_HYP hypotheses
+ * is 80 KB, too much for a queue-consumer thread's stack. Only matching entries are ever written, so a
+ * prune that matches nothing leaves the catalog untouched by construction. Returns 0 (nothing matched,
+ * untouched), the unchanged count (everything matched, evidence kept), or the new count with the
+ * evidence cleared -- indices have moved, and keeping it would score one hypothesis with another's. */
+static int prune_commit(nr_pdsch_config_sweep_state_t *st, int n)
 {
-  if (st == NULL || st->n_hyp <= 0 || dmrs_mask == 0)
-    return 0;
-  nr_pdsch_cfg_hypothesis_t keep[NR_PDSCH_SWEEP_MAX_HYP];
-  int n = 0;
-  for (int i = 0; i < st->n_hyp; i++)
-    if (st->hyp[i].dmrs_mask == dmrs_mask)
-      keep[n++] = st->hyp[i];
   if (n <= 0 || n == st->n_hyp)
     return n == st->n_hyp ? n : 0;
-  memcpy(st->hyp, keep, (size_t)n * sizeof(keep[0]));
   st->n_hyp = n;
   memset(st->trials, 0, sizeof(st->trials));
   memset(st->ok, 0, sizeof(st->ok));
@@ -140,6 +159,42 @@ int nr_pdsch_config_sweep_prune_mask(nr_pdsch_config_sweep_state_t *st, uint16_t
   st->cursor = 0;
   st->winner = -1;
   return n;
+}
+
+int nr_pdsch_config_sweep_prune_mask(nr_pdsch_config_sweep_state_t *st, uint16_t dmrs_mask)
+{
+  if (st == NULL || st->n_hyp <= 0 || dmrs_mask == 0)
+    return 0;
+  int n = 0;
+  for (int i = 0; i < st->n_hyp; i++)
+    if (st->hyp[i].dmrs_mask == dmrs_mask)
+      st->hyp[n++] = st->hyp[i];
+  return prune_commit(st, n);
+}
+
+static uint8_t qm_table_mask(uint8_t mcs, int qm)
+{
+  uint8_t mask = 0;
+  for (uint8_t t = 0; t < 3; t++)
+    if (nr_pdsch_qm_of_mcs(mcs, t) == qm)
+      mask |= (uint8_t)(1u << t);
+  return mask;
+}
+
+static int prune_tables(nr_pdsch_config_sweep_state_t *st, uint8_t mask)
+{
+  if (st == NULL || st->n_hyp <= 0 || mask == 0)
+    return 0;
+  int n = 0;
+  for (int i = 0; i < st->n_hyp; i++)
+    if (mask & (1u << st->hyp[i].mcs_table))
+      st->hyp[n++] = st->hyp[i];
+  return prune_commit(st, n);
+}
+
+int nr_pdsch_config_sweep_prune_qm(nr_pdsch_config_sweep_state_t *st, uint8_t mcs, int qm)
+{
+  return prune_tables(st, qm_table_mask(mcs, qm));
 }
 
 /* DM-RS symbol masks the oracle has MEASURED on this cell (per-symbol coherence, independent of
@@ -159,6 +214,7 @@ typedef struct {
   bool valid;
   uint64_t configuration;
   uint8_t mcs_table, dmrs_add_pos, dmrs_max_len;
+  uint8_t mapping_type; /* the mapping type whose DM-RS IE dmrs_add_pos/max_len were learned on */
 } prior_t;
 
 /* PER-RNTI EVIDENCE. mcs-Table, dmrs-AdditionalPosition, maxLength and the DM-RS symbol set are
@@ -175,6 +231,7 @@ typedef struct {
   uint64_t touched;
   prior_t prior;
   obs_set_t obs;
+  uint64_t k0_seen; /* bit k: the k0 oracle saw this RNTI's PDSCH k slots after its DCI (k >= 2) */
 } rnti_ctx_t;
 static rnti_ctx_t g_rnti[RNTI_CTX_MAX];
 static obs_set_t g_obs;   /* cell-wide: observations two RNTIs agree on */
@@ -286,56 +343,76 @@ static int prune_to_observed(nr_pdsch_config_sweep_state_t *st, const obs_set_t 
 {
   if (st == NULL || st->n_hyp <= 0 || ((own ? own->n : 0) + g_obs.n) <= 0)
     return 0;
-  nr_pdsch_cfg_hypothesis_t keep[NR_PDSCH_SWEEP_MAX_HYP];
   int n = 0;
   for (int i = 0; i < st->n_hyp; i++)
     if ((own && obs_any_admits(&st->hyp[i], own)) || obs_any_admits(&st->hyp[i], &g_obs))
-      keep[n++] = st->hyp[i];
-  if (n <= 0 || n == st->n_hyp)
-    return n == st->n_hyp ? n : 0;
-  memcpy(st->hyp, keep, (size_t)n * sizeof(keep[0]));
-  st->n_hyp = n;
-  memset(st->trials, 0, sizeof(st->trials));
-  memset(st->ok, 0, sizeof(st->ok));
-  for (int i = 0; i < n; i++)
-    st->order[i] = i;
-  st->cursor = 0;
-  st->winner = -1;
-  return n;
+      st->hyp[n++] = st->hyp[i];
+  return prune_commit(st, n);
+}
+
+/* Append a k0 layer: every hypothesis of the lowest-k0 layer present, with k0 replaced. The lowest
+ * layer holds every (S,L,mask,table) tuple of the catalog: prior/table prunes are k0-agnostic, and a
+ * DM-RS observation fixes k0 only to 0 (the oracle measures in the DCI's own slot), so no other layer
+ * can carry a tuple the lowest one lacks. Existing indices, evidence and outstanding tickets are
+ * untouched; the new entries join the round-robin with zero trials. Fails closed (adds nothing) when
+ * the layer would not fit. Returns the number added. */
+static int add_k0_layer(nr_pdsch_config_sweep_state_t *st, uint8_t k0)
+{
+  if (st == NULL || st->n_hyp <= 0 || st->winner >= 0 || k0 > 32)
+    return 0;
+  uint8_t lo = st->hyp[0].k0;
+  for (int i = 0; i < st->n_hyp; i++) {
+    if (st->hyp[i].k0 == k0)
+      return 0;
+    if (st->hyp[i].k0 < lo)
+      lo = st->hyp[i].k0;
+  }
+  const int n0 = st->n_hyp;
+  int layer = 0;
+  for (int i = 0; i < n0; i++)
+    layer += st->hyp[i].k0 == lo;
+  if (n0 + layer > NR_PDSCH_SWEEP_MAX_HYP) {
+    LOG_W(PHY, "SWEEP: k0=%u layer (%d hypotheses) does not fit a context holding %d (max %d): not added\n",
+          (unsigned)k0, layer, n0, NR_PDSCH_SWEEP_MAX_HYP);
+    return 0;
+  }
+  for (int i = 0; i < n0; i++)
+    if (st->hyp[i].k0 == lo) {
+      st->hyp[st->n_hyp] = st->hyp[i];
+      st->hyp[st->n_hyp].k0 = k0;
+      st->order[st->n_hyp] = st->n_hyp;
+      st->n_hyp++;
+    }
+  return layer;
+}
+
+/* dmrs_add_pos/max_len are constrained only on entries of the prior's own mapping type
+ * (mapping_type 0xFF = every entry): dmrs-DownlinkForPDSCH-MappingTypeA and -MappingTypeB are separate
+ * RRC IEs, so a type-A winner says nothing about a type-B entry's DM-RS. mcs-Table is shared. */
+static int prune_prior(nr_pdsch_config_sweep_state_t *st, uint8_t mcs_table, uint8_t dmrs_add_pos,
+                       uint8_t dmrs_max_len, uint8_t mapping_type)
+{
+  if (st == NULL || st->n_hyp <= 0) {
+    return 0;
+  }
+  int n = 0;
+  for (int i = 0; i < st->n_hyp; i++) {
+    const nr_pdsch_cfg_hypothesis_t *h = &st->hyp[i];
+    const bool dmrs_free = mapping_type != 0xFF && h->mapping_type != mapping_type;
+    if (h->mcs_table == mcs_table
+        && (dmrs_free || (h->dmrs_add_pos == dmrs_add_pos && h->dmrs_max_len == dmrs_max_len))) {
+      st->hyp[n++] = *h;
+    }
+  }
+  /* Nothing matched: the prior does not describe this catalog at all. The catalog is left in place
+   * rather than emptied -- a context with no hypotheses can never converge. */
+  return prune_commit(st, n);
 }
 
 int nr_pdsch_config_sweep_prune_to(nr_pdsch_config_sweep_state_t *st, uint8_t mcs_table,
                                    uint8_t dmrs_add_pos, uint8_t dmrs_max_len)
 {
-  if (st == NULL || st->n_hyp <= 0) {
-    return 0;
-  }
-  nr_pdsch_cfg_hypothesis_t keep[NR_PDSCH_SWEEP_MAX_HYP];
-  int n = 0;
-  for (int i = 0; i < st->n_hyp; i++) {
-    const nr_pdsch_cfg_hypothesis_t *h = &st->hyp[i];
-    if (h->mcs_table == mcs_table && h->dmrs_add_pos == dmrs_add_pos
-        && h->dmrs_max_len == dmrs_max_len) {
-      keep[n++] = *h;
-    }
-  }
-  /* Nothing matched: the prior does not describe this catalog at all. Leave the full catalog in
-   * place rather than emptying it -- a context with no hypotheses can never converge. */
-  if (n <= 0) {
-    return 0;
-  }
-  memcpy(st->hyp, keep, (size_t)n * sizeof(keep[0]));
-  st->n_hyp = n;
-  /* Evidence is per-index and the indices have just moved; keeping it would attribute one
-   * hypothesis's trials to another. */
-  memset(st->trials, 0, sizeof(st->trials));
-  memset(st->ok, 0, sizeof(st->ok));
-  for (int i = 0; i < n; i++) {
-    st->order[i] = i;
-  }
-  st->cursor = 0;
-  st->winner = -1;
-  return n;
+  return prune_prior(st, mcs_table, dmrs_add_pos, dmrs_max_len, 0xFF);
 }
 
 int nr_pdsch_config_sweep_next(nr_pdsch_config_sweep_state_t *st, nr_pdsch_cfg_hypothesis_t *out)
@@ -392,7 +469,9 @@ int nr_pdsch_config_sweep_feed(nr_pdsch_config_sweep_state_t *st, int idx, bool 
     for(int i=1;i<st->n_hyp;i++)
       if(rate_of(st,i)>rate_of(st,leader)) leader=i;
     double lo,hi;
-    nr_crc_interval(st->ok[leader],st->trials[leader],NR_PDSCH_SWEEP_MAX_HYP,&lo,&hi);
+    /* Class count = the LIVE catalog, not the storage cap: every prune clears evidence and add_k0 only
+     * raises n, so the union bound always covers the hypotheses actually competing. */
+    nr_crc_interval(st->ok[leader],st->trials[leader],(unsigned)st->n_hyp,&lo,&hi);
     /* The absolute floor was 0.60, which silently assumed the TRUE config decodes at >=60 %.
      * MEASURED OTA 2026-09-13: the winning hypothesis decodes at 124/311 = 40 %, so its Wilson
      * lower bound can never reach 0.60 -- early separation could NEVER fire on this link and every
@@ -404,7 +483,7 @@ int nr_pdsch_config_sweep_feed(nr_pdsch_config_sweep_state_t *st, int idx, bool 
     for(int i=0;i<st->n_hyp && separated;i++) {
       if(i==leader) continue;
       double other_lo,other_hi;
-      nr_crc_interval(st->ok[i],st->trials[i],NR_PDSCH_SWEEP_MAX_HYP,&other_lo,&other_hi);
+      nr_crc_interval(st->ok[i],st->trials[i],(unsigned)st->n_hyp,&other_lo,&other_hi);
       if(other_hi>=lo) separated=false;
     }
     if(separated) { st->winner=leader; return leader; }
@@ -448,6 +527,7 @@ typedef struct {
   uint8_t tda;
   int tda_count, typeA;
   bool reported;
+  uint8_t qm_tables, qm_obs; /* Qm-oracle evidence: consistent-table bitmask, sightings */
   uint64_t outcomes, locked_trials, locked_passes;
   uint64_t failure_streak, reacquisitions;
   double reference_crc_lower;
@@ -455,7 +535,10 @@ typedef struct {
    * caller having to hand the legality function back. */
   nr_pdsch_legality_fn_t legality;
   enum { PRIORED_NONE = 0, PRIORED_OWN, PRIORED_CELL } priored; /* which prior pruned this catalog */
-  nr_pdsch_config_sweep_state_t state;
+  /* Heap, allocated when the slot is first used and kept across reuse: nr-uesoftmodem mlockall()s
+   * (MCL_CURRENT|MCL_FUTURE) at startup, so 1024 inline states (180 KB each) would pin 185 MB of BSS
+   * whether or not any context ever opens. Non-NULL whenever generation != 0. */
+  nr_pdsch_config_sweep_state_t *state;
 } sweep_context_t;
 
 /* Outcomes a pruned context may spend before the prior is judged wrong for it. ~250 per hypothesis
@@ -493,6 +576,15 @@ static bool recovery_needed(const sweep_context_t *c)
   return (double)c->failure_streak * log1p(-c->reference_crc_lower) <= budget;
 }
 
+/* Full catalog for a context, plus every k0 layer the air has shown for its RNTI. */
+static void context_catalog(sweep_context_t *c, const rnti_ctx_t *r)
+{
+  nr_pdsch_config_sweep_init_legal(c->state, c->tda_count, c->typeA, c->legality);
+  for (int k = 2; r && k <= 32; k++)
+    if (r->k0_seen & (UINT64_C(1) << k))
+      add_k0_layer(c->state, (uint8_t)k);
+}
+
 static void reopen_context(sweep_context_t *c)
 {
   const uint64_t previous = c->generation;
@@ -510,15 +602,15 @@ static void reopen_context(sweep_context_t *c)
    * the cell-wide prior, restore the full one: the prior is the most likely thing to be wrong when
    * a previously converged context starts failing. */
   if (c->priored && c->legality) {
-    nr_pdsch_config_sweep_init_legal(&c->state, c->tda_count, c->typeA, c->legality);
+    context_catalog(c, rnti_ctx(c->rnti, false));
     c->priored = PRIORED_NONE;
   }
   /* Keep the already checked legal catalog, but discard stale decoding evidence. */
-  memset(c->state.trials, 0, sizeof(c->state.trials));
-  memset(c->state.ok, 0, sizeof(c->state.ok));
-  c->state.winner = -1;
-  c->state.cursor = 0;
-  for (int i=0; i<c->state.n_hyp; ++i) c->state.order[i] = i;
+  memset(c->state->trials, 0, sizeof(c->state->trials));
+  memset(c->state->ok, 0, sizeof(c->state->ok));
+  c->state->winner = -1;
+  c->state->cursor = 0;
+  for (int i=0; i<c->state->n_hyp; ++i) c->state->order[i] = i;
   /* A reopen is the signal that a CONVERGED context stopped working -- the most valuable thing in
    * this log, because it is how a wrong prior announces itself. reacquisitions rising steadily on
    * one RNTI means its catalog keeps being re-derived. */
@@ -577,7 +669,8 @@ bool nr_pdsch_config_sweep_rnti_prior_get(uint16_t rnti, uint64_t *configuration
 static bool prior_same(const prior_t *a, const prior_t *b)
 {
   return a->valid && b->valid && a->configuration == b->configuration && a->mcs_table == b->mcs_table
-         && a->dmrs_add_pos == b->dmrs_add_pos && a->dmrs_max_len == b->dmrs_max_len;
+         && a->dmrs_add_pos == b->dmrs_add_pos && a->dmrs_max_len == b->dmrs_max_len
+         && a->mapping_type == b->mapping_type;
 }
 /* Promote to the cell-wide prior once a SECOND distinct RNTI has converged on the same fields. The
  * first alone stays private: one UE's dedicated config is not evidence about the cell. */
@@ -607,7 +700,7 @@ static sweep_context_t *ticket_context(const nr_pdsch_sweep_ticket_t *t)
   sweep_context_t *c = &g_contexts[t->context_slot];
   /* generation+slot+tda identify the context (the slot's generation changes on every reuse). */
   return c->generation == t->generation && c->tda == t->tda_index
-         && t->hypothesis >= 0 && t->hypothesis < c->state.n_hyp ? c : NULL;
+         && t->hypothesis >= 0 && t->hypothesis < c->state->n_hyp ? c : NULL;
 }
 
 bool nr_pdsch_config_sweep_select(uint64_t configuration, uint16_t rnti, uint8_t tda_index,
@@ -635,7 +728,14 @@ bool nr_pdsch_config_sweep_select(uint64_t configuration, uint16_t rnti, uint8_t
   if (found < 0) {
     found = victim;
     sweep_context_t *c = &g_contexts[found];
+    nr_pdsch_config_sweep_state_t *state = c->state ? c->state : calloc(1, sizeof(*state));
+    if (!state) {
+      pthread_mutex_unlock(&g_lock);
+      LOG_E(PHY, "SWEEP: cannot allocate a %zu-byte context state\n", sizeof(*state));
+      return false;
+    }
     memset(c, 0, sizeof(*c));
+    c->state = state;
     c->configuration = configuration;
     c->generation = ++g_generation;
     c->rnti = rnti;
@@ -643,7 +743,7 @@ bool nr_pdsch_config_sweep_select(uint64_t configuration, uint16_t rnti, uint8_t
     c->tda_count = tda_count;
     c->typeA = typeA;
     c->legality = legality;
-    nr_pdsch_config_sweep_init_legal(&c->state, tda_count, typeA, legality);
+    nr_pdsch_config_sweep_init_legal(c->state, tda_count, typeA, legality);
     /* Seed: this RNTI's own prior first (its other TDA contexts already converged on these fields),
      * else the cell-wide one. Scoped to the same configuration key either way: a different cell
      * config is a different DM-RS/PDSCH setup and its prior says nothing here. */
@@ -654,17 +754,21 @@ bool nr_pdsch_config_sweep_select(uint64_t configuration, uint16_t rnti, uint8_t
     } else if (g_prior.valid && g_prior.configuration == configuration) {
       seed = &g_prior; from = PRIORED_CELL;
     }
-    if (seed && nr_pdsch_config_sweep_prune_to(&c->state, seed->mcs_table, seed->dmrs_add_pos,
-                                               seed->dmrs_max_len) > 0)
+    if (seed && prune_prior(c->state, seed->mcs_table, seed->dmrs_add_pos, seed->dmrs_max_len,
+                            seed->mapping_type) > 0)
       c->priored = from;
-    prune_to_observed(&c->state, &r->obs);
+    prune_to_observed(c->state, &r->obs);
+    /* k0 values the air has shown for this RNTI (k0 oracle), so each new context does not re-probe. */
+    for (int k = 2; k <= 32; k++)
+      if (r->k0_seen & (UINT64_C(1) << k))
+        add_k0_layer(c->state, (uint8_t)k);
   }
   sweep_context_t *c = &g_contexts[found];
   c->touched = ++g_clock;
-  const int h = nr_pdsch_config_sweep_next(&c->state, out);
+  const int h = nr_pdsch_config_sweep_next(c->state, out);
   if (h >= 0)
     *ticket = (nr_pdsch_sweep_ticket_t){.generation=c->generation, .context_slot=found,
-                                       .rnti=rnti, .tda_index=tda_index, .hypothesis=h, .settled=c->state.winner >= 0,
+                                       .rnti=rnti, .tda_index=tda_index, .hypothesis=h, .settled=c->state->winner >= 0,
                                        .k0=out->k0};
   pthread_mutex_unlock(&g_lock);
   return h >= 0;
@@ -695,8 +799,60 @@ int nr_pdsch_config_sweep_observe(const nr_pdsch_sweep_ticket_t *ticket, uint16_
     obs_record(&g_obs, dmrs_mask, last_symbol, k0);
   sweep_context_t *c = ticket_context(ticket);
   int n = 0;
-  if (c != NULL && c->state.winner < 0)
-    n = prune_to_observed(&c->state, &r->obs);
+  if (c != NULL && c->state->winner < 0)
+    n = prune_to_observed(c->state, &r->obs);
+  pthread_mutex_unlock(&g_lock);
+  return n;
+}
+
+int nr_pdsch_config_sweep_add_k0(const nr_pdsch_sweep_ticket_t *t, uint8_t k0)
+{
+  if (t == NULL || t->generation == 0 || k0 < 2 || k0 > 32)
+    return 0;
+  pthread_mutex_lock(&g_lock);
+  rnti_ctx_t *r = rnti_ctx(t->rnti, true);
+  const bool first = !(r->k0_seen & (UINT64_C(1) << k0));
+  r->k0_seen |= UINT64_C(1) << k0;
+  sweep_context_t *c = ticket_context(t);
+  const int n = c ? add_k0_layer(c->state, k0) : 0;
+  static int s_left = 50; /* noise-floor RNTIs can drive this too: bounded, like context eviction */
+  if ((first || n > 0) && s_left > 0 && s_left--)
+    LOG_W(PHY, "SWEEP: rnti=0x%04x k0=%u observed on air -- %d hypotheses added to tda=%u\n", t->rnti,
+          (unsigned)k0, n, (unsigned)t->tda_index);
+  pthread_mutex_unlock(&g_lock);
+  return n;
+}
+
+int nr_pdsch_config_sweep_observe_qm(const nr_pdsch_sweep_ticket_t *ticket, uint8_t mcs, int qm)
+{
+  static int enabled = -1;
+  if (enabled < 0) {
+    const char *e = getenv("ISAC_QM_ORACLE");
+    enabled = (e != NULL && atoi(e) == 0) ? 0 : 1;
+  }
+  if (!enabled || ticket == NULL || ticket->generation == 0 || qm <= 0)
+    return 0;
+  const uint8_t mask = qm_table_mask(mcs, qm);
+  if (mask == 0 || mask == 0x7)
+    return 0; /* impossible for this MCS, or every table agrees: no information */
+  pthread_mutex_lock(&g_lock);
+  sweep_context_t *c = ticket_context(ticket);
+  int n = 0;
+  if (c != NULL && c->state->winner < 0) {
+    const uint8_t inter = c->qm_obs ? (uint8_t)(c->qm_tables & mask) : mask;
+    if (inter == 0) {
+      c->qm_obs = 0;
+      c->qm_tables = 0;
+    } else {
+      c->qm_tables = inter;
+      if (c->qm_obs < 255) c->qm_obs++;
+      if (c->qm_obs >= 2) {
+        const int before = c->state->n_hyp;
+        n = prune_tables(c->state, inter);
+        if (n == before) n = 0;
+      }
+    }
+  }
   pthread_mutex_unlock(&g_lock);
   return n;
 }
@@ -708,13 +864,13 @@ bool nr_pdsch_config_sweep_feedback(const nr_pdsch_sweep_ticket_t *ticket, bool 
   sweep_context_t *c = ticket_context(ticket);
   bool announced = false;
   if (c) {
-    int w = nr_pdsch_config_sweep_feed(&c->state, ticket->hypothesis, crc_ok);
+    int w = nr_pdsch_config_sweep_feed(c->state, ticket->hypothesis, crc_ok);
     ++c->outcomes;
-    if (c->priored && c->state.winner < 0 && c->outcomes >= PRIOR_PROBATION) {
+    if (c->priored && c->state->winner < 0 && c->outcomes >= PRIOR_PROBATION) {
       double best_rate = 0.0;
-      for (int i = 0; i < c->state.n_hyp; i++) {
-        const double r = c->state.trials[i]
-                             ? (double)c->state.ok[i] / (double)c->state.trials[i]
+      for (int i = 0; i < c->state->n_hyp; i++) {
+        const double r = c->state->trials[i]
+                             ? (double)c->state->ok[i] / (double)c->state->trials[i]
                              : 0.0;
         if (r > best_rate) {
           best_rate = r;
@@ -725,7 +881,7 @@ bool nr_pdsch_config_sweep_feedback(const nr_pdsch_sweep_ticket_t *ticket, bool 
          * prior that seeded it -- publishing it was the error, and leaving it valid would make every
          * later context pay the same probation. */
         if (c->legality) {
-          nr_pdsch_config_sweep_init_legal(&c->state, c->tda_count, c->typeA, c->legality);
+          context_catalog(c, rnti_ctx(c->rnti, false));
         }
         if (c->priored == PRIORED_CELL) {
           g_prior.valid = false;
@@ -759,7 +915,7 @@ bool nr_pdsch_config_sweep_feedback(const nr_pdsch_sweep_ticket_t *ticket, bool 
       }
     }
     if (c->outcomes % 10000 == 0 || (crc_ok && !c->reported)) {
-      const nr_pdsch_config_sweep_state_t *s=&c->state;
+      const nr_pdsch_config_sweep_state_t *s=c->state;
       int best=0; uint32_t minimum=UINT32_MAX;
       for(int i=0;i<s->n_hyp;i++) {
         if(s->trials[i]<minimum) minimum=s->trials[i];
@@ -777,7 +933,7 @@ bool nr_pdsch_config_sweep_feedback(const nr_pdsch_sweep_ticket_t *ticket, bool 
     if (w >= 0 && !c->reported) {
       c->reported = true;
       double reference_upper;
-      nr_crc_interval(c->state.ok[w], c->state.trials[w], NR_PDSCH_SWEEP_MAX_HYP,
+      nr_crc_interval(c->state->ok[w], c->state->trials[w], (unsigned)c->state->n_hyp,
                       &c->reference_crc_lower, &reference_upper);
 
       announced = true;
@@ -786,21 +942,31 @@ bool nr_pdsch_config_sweep_feedback(const nr_pdsch_sweep_ticket_t *ticket, bool 
        * re-publishing would let a context that converged under a prior reinforce that same prior.
        * The cell-wide prior is only ever set by agreement between two RNTIs. */
       rnti_ctx_t *r = rnti_ctx(c->rnti, true);
+      /* A k0 layer this context tried and did not win on was a false k0-oracle hit (another UE's PDSCH
+       * on those PRBs): stop seeding it into this RNTI's later contexts. */
+      const uint64_t lost = r->k0_seen & ~(UINT64_C(1) << c->state->hyp[w].k0);
+      if (lost) {
+        r->k0_seen &= ~lost;
+        LOG_I(PHY, "SWEEP: rnti=0x%04x tda=%u converged on k0=%u -- dropped k0-oracle layers 0x%llx\n", c->rnti,
+              (unsigned)c->tda, (unsigned)c->state->hyp[w].k0, (unsigned long long)lost);
+      }
       if (!r->prior.valid) {
         r->prior = (prior_t){.valid = true, .configuration = c->configuration,
-                             .mcs_table = c->state.hyp[w].mcs_table,
-                             .dmrs_add_pos = c->state.hyp[w].dmrs_add_pos,
-                             .dmrs_max_len = c->state.hyp[w].dmrs_max_len};
+                             .mcs_table = c->state->hyp[w].mcs_table,
+                             .dmrs_add_pos = c->state->hyp[w].dmrs_add_pos,
+                             .dmrs_max_len = c->state->hyp[w].dmrs_max_len,
+                             .mapping_type = c->state->hyp[w].mapping_type};
         LOG_W(PHY,
-              "SWEEP: rnti=0x%04x CONVERGED tda=%u mcs_table=%u dmrs_add_pos=%u dmrs_max_len=%u "
+              "SWEEP: rnti=0x%04x CONVERGED tda=%u mapping=%c k0=%u mcs_table=%u dmrs_add_pos=%u dmrs_max_len=%u "
               "(%u/%u trials on the winner, cfg=0x%llx) -- private to this RNTI until a second agrees\n",
-              c->rnti, (unsigned)c->tda, (unsigned)c->state.hyp[w].mcs_table,
-              (unsigned)c->state.hyp[w].dmrs_add_pos, (unsigned)c->state.hyp[w].dmrs_max_len,
-              c->state.ok[w], c->state.trials[w], (unsigned long long)c->configuration);
+              c->rnti, (unsigned)c->tda, c->state->hyp[w].mapping_type ? 'B' : 'A',
+              (unsigned)c->state->hyp[w].k0, (unsigned)c->state->hyp[w].mcs_table,
+              (unsigned)c->state->hyp[w].dmrs_add_pos, (unsigned)c->state->hyp[w].dmrs_max_len,
+              c->state->ok[w], c->state->trials[w], (unsigned long long)c->configuration);
         prior_promote_locked(r);
       }
       if (winner)
-        *winner = c->state.hyp[w];
+        *winner = c->state->hyp[w];
     }
   }
   pthread_mutex_unlock(&g_lock);
@@ -817,7 +983,7 @@ void nr_pdsch_config_sweep_context_stats(uint64_t configuration, uint16_t rnti, 
     /* tda 0xFF = every TDA context of this configuration: a layout hypothesis reads the TDA
      * index at its own offset, so its evidence is spread over the contexts that index created. */
     if (c->generation && c->configuration==configuration && c->rnti==rnti && (tda == 0xFF || c->tda==tda) && c->typeA==typeA) {
-      for (int h=0; h<c->state.n_hyp; ++h) { *passes += c->state.ok[h]; *trials += c->state.trials[h]; }
+      for (int h=0; h<c->state->n_hyp; ++h) { *passes += c->state->ok[h]; *trials += c->state->trials[h]; }
       if (tda != 0xFF)
         break;
     }
@@ -831,7 +997,7 @@ bool nr_pdsch_config_sweep_is_settled(uint64_t configuration, uint16_t rnti, uin
   for (int i=0;i<NR_PDSCH_SWEEP_MAX_CONTEXTS;++i) {
     const sweep_context_t *c=&g_contexts[i];
     if (c->generation && c->configuration==configuration && c->rnti==rnti
-        && c->tda==tda && c->tda_count==0 && c->typeA==typeA && c->state.winner>=0) {
+        && c->tda==tda && c->tda_count==0 && c->typeA==typeA && c->state->winner>=0) {
       settled=true;
       break;
     }
@@ -846,7 +1012,7 @@ int nr_pdsch_config_sweep_settled_count(void)
   pthread_mutex_lock(&g_lock);
   int n=0;
   for (int i=0;i<NR_PDSCH_SWEEP_MAX_CONTEXTS;++i)
-    if (g_contexts[i].generation && g_contexts[i].state.winner>=0) ++n;
+    if (g_contexts[i].generation && g_contexts[i].state->winner>=0) ++n;
   pthread_mutex_unlock(&g_lock);
   return n;
 }
@@ -879,7 +1045,7 @@ bool nr_pdsch_config_sweep_snapshot(const nr_pdsch_sweep_ticket_t *ticket,
   pthread_mutex_lock(&g_lock);
   sweep_context_t *c = ticket_context(ticket);
   if (c)
-    *out = c->state;
+    *out = *c->state;
   pthread_mutex_unlock(&g_lock);
   return c != NULL;
 }

@@ -84,3 +84,15 @@ int nr_prb_segments(const uint16_t *prb, int n, int bwp_start, int prg, nr_prb_s
   }
   return ns;
 }
+
+int nr_prb_gather_index(const nr_prb_seg_t *seg, int nseg, int re_per_prb, int *out, int max)
+{
+  int n = 0;
+  for (int s = 0; s < nseg; s++)
+    for (int re = seg[s].prb_start * re_per_prb; re < (seg[s].prb_start + seg[s].n_prb) * re_per_prb; re++) {
+      if (n == max)
+        return -1;
+      out[n++] = re;
+    }
+  return n;
+}

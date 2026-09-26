@@ -79,6 +79,7 @@
 
 #include "nr_pdcch_coreset_map.h"        // Phase 3 Technique A: nr_pdcch_coreset_map_scan()
 #include "nr_pdcch_dci_length_sweep.h"   // Phase 3 Technique C: nr_pdcch_dci_length_sweep()
+#include "nr_pdcch_al1_map.h"            // AL1 cover lap (ISAC_AL1_COVER=1)
 
 // ---------------------------------------------------------------------------------------------
 // [sensing] pdcch_blind_monitor_* config surface. Parsed but NOT consumed by
@@ -870,6 +871,7 @@ bool nr_pdcch_blind_monitor_discovered_poll(void)
 typedef struct {
   bool active;
   bool fast_length_only;
+  bool al1_only;
   int  ext_idx;
   int  rb_offset;
   int  freq_domain;
@@ -888,6 +890,40 @@ static int s_lane_dispatch_map;
 static int s_lane_dispatch_phase;
 static int s_lane_dispatch_stage;
 static int s_lane_dispatch_map_max;
+static int s_lane_after_cover_stage = 0;
+
+/* ISAC_AL1_COVER=1: before the staged mapping walk, one lap over only the AL1 COVER of each extent,
+ * scanning AL1 only (nr_pdcch_al1_map.h: 2-11 mappings reproduce every AL1 candidate of an 81-1081
+ * mapping catalogue). Default off: discovery order unchanged unless asked for. */
+static int al1_cover_enabled(void)
+{
+  static int v = -1;
+  if (v < 0) {
+    const char *e = getenv("ISAC_AL1_COVER");
+    v = (e != NULL && atoi(e) == 1) ? 1 : 0;
+  }
+  return v;
+}
+
+/* Covers depend only on (span, duration): cache the last few so each extent pays once. */
+static int al1_cover_for_span(int span_rb, int duration, nr_pdcch_map_cand_t *out)
+{
+  static struct { int span, dur, n; nr_pdcch_al1_map_t c[NR_PDCCH_AL1_MAX_COVER]; } cache[8];
+  static int next_slot = 0;
+  int at = -1;
+  for (int i = 0; i < 8; i++)
+    if (cache[i].n > 0 && cache[i].span == span_rb && cache[i].dur == duration) { at = i; break; }
+  if (at < 0) {
+    at = next_slot;
+    next_slot = (next_slot + 1) % 8;
+    cache[at].span = span_rb;
+    cache[at].dur = duration;
+    cache[at].n = nr_pdcch_al1_cover(span_rb, duration, cache[at].c, NR_PDCCH_AL1_MAX_COVER);
+  }
+  for (int i = 0; i < cache[at].n; i++)
+    out[i] = (nr_pdcch_map_cand_t){cache[at].c[i].bundle, cache[at].c[i].interleaver, cache[at].c[i].shift};
+  return cache[at].n;
+}
 
 int nr_pdcch_blind_lookahead_count(void)
 {
@@ -916,6 +952,8 @@ static void lane_map_apply(int lane)
 static int lane_map_count(int ext, nr_pdcch_map_cand_t *out)
 {
   const int span_rb = (s_ext_cand[ext].last_w - s_ext_cand[ext].first_w + 1) * 6;
+  if (s_lane_dispatch_stage < 0)
+    return al1_cover_for_span(span_rb, g_cfg.coreset_duration, out);
   const int full_n = nr_pdcch_map_candidates(span_rb, g_cfg.coreset_duration,
                                              g_cfg.coreset_pdcch_dmrs_scrambling_id,
                                              out, NR_PDCCH_MAP_MAX_CAND);
@@ -929,6 +967,8 @@ static int lane_map_count(int ext, nr_pdcch_map_cand_t *out)
 
 static int lane_catalog_map_max(void)
 {
+  if (s_lane_dispatch_stage < 0)
+    return NR_PDCCH_AL1_MAX_COVER;
   nr_pdcch_map_cand_t tmp[NR_PDCCH_MAP_MAX_CAND];
   int max_n = 0;
   for (int ext = 0; ext < s_ext_n; ++ext) {
@@ -944,6 +984,15 @@ static bool lane_assign_next(int lane)
   nr_pdcch_lookahead_lane_t *ln = &s_lane[lane];
   while (s_ext_n > 0) {
     if (s_lane_dispatch_map >= s_lane_dispatch_map_max) {
+      if (s_lane_dispatch_stage < 0) {
+        s_lane_dispatch_stage = s_lane_after_cover_stage;
+        s_lane_dispatch_ext = 0;
+        s_lane_dispatch_map = 0;
+        s_lane_dispatch_phase = 0;
+        s_lane_dispatch_map_max = lane_catalog_map_max();
+        LOG_A(PHY, "SENSING: autodiscover AL1 cover lap done, continuing with the staged mapping walk\n");
+        continue;
+      }
       if (s_lane_dispatch_stage == 0 && map_staging_enabled()) {
         s_lane_dispatch_stage = 1;
         s_lane_dispatch_ext = 0;
@@ -987,14 +1036,15 @@ static bool lane_assign_next(int lane)
 
     ln->map_idx = map_idx;
     ln->fast_length_only = (s_lane_dispatch_stage == 0 && map_staging_enabled());
+    ln->al1_only = (s_lane_dispatch_stage < 0);
     memset(ln->evidence, 0, sizeof(ln->evidence));
     ln->occ = 0;
     ln->active = true;
     lane_map_apply(lane);
     if (getenv("ISAC_DISCOVER_DIAG") != NULL)
-      LOG_I(PHY, "SENSING: LOOKAHEAD_ASSIGN lane=%d extent=%d offset=%d span=%d bundle=%d interleaver=%d shift=%d fast=%d\n",
+      LOG_I(PHY, "SENSING: LOOKAHEAD_ASSIGN lane=%d extent=%d offset=%d span=%d bundle=%d interleaver=%d shift=%d fast=%d al1=%d\n",
             lane, ext, ln->rb_offset, span_rb, ln->reg_bundle_size, ln->interleaver_size,
-            ln->shift_index, ln->fast_length_only);
+            ln->shift_index, ln->fast_length_only, ln->al1_only);
     return true;
   }
   ln->active = false;
@@ -1011,7 +1061,8 @@ static void lookahead_lanes_init(void)
    * every one at mapping 0, making an L=6 interleaved CORESET wait behind thousands of occasions
    * of unrelated mappings. */
   const char *map_env = getenv("ISAC_MAP_PASS0_ONLY");
-  s_lane_dispatch_stage = (map_env != NULL && atoi(map_env) == 0) ? 1 : 0;
+  s_lane_after_cover_stage = (map_env != NULL && atoi(map_env) == 0) ? 1 : 0;
+  s_lane_dispatch_stage = al1_cover_enabled() ? -1 : s_lane_after_cover_stage;
   s_lane_dispatch_ext = 1; /* primary owns extent 0 / mapping 0 / preferred phase */
   s_lane_dispatch_map = 0;
   s_lane_dispatch_phase = 0;
@@ -1045,6 +1096,7 @@ bool nr_pdcch_blind_lookahead_get(int lane, nr_pdcch_lookahead_geom_t *out)
     return false;
   out->valid            = true;
   out->fast_length_only = ln->fast_length_only;
+  out->al1_only          = ln->al1_only;
   out->rb_offset         = ln->rb_offset;
   out->freq_domain       = ln->freq_domain;
   out->reg_bundle_size   = ln->reg_bundle_size;
@@ -4773,4 +4825,28 @@ void nr_pdcch_blind_reset_common(void)
   memset(&common_facts,0,sizeof(common_facts));
   sib1_cache_suppressed = true;
   pthread_mutex_unlock(&common_facts_lock);
+}
+
+/* Lookahead-lane AL list parser and RE budget (declared in nr_pdcch_blind_monitor_rt.h). Pure, so they live
+ * in the library rather than the RT translation unit; lane_als() in nr_pdcch_blind_monitor_rt.c calls them. */
+int nr_pdcch_blind_parse_lane_als(const char *e, uint8_t v[5])
+{
+  int n = 0;
+  for (const char *q = e; q != NULL && *q && n < 5;) {
+    const int x = atoi(q);
+    if ((x == 1 || x == 2 || x == 4 || x == 8 || x == 16) && x <= LANE_BATCH_AL_MAX) {
+      bool dup = false;
+      for (int i = 0; i < n; i++)
+        if (v[i] == (uint8_t)x) dup = true;
+      if (!dup) v[n++] = (uint8_t)x;
+    }
+    while (*q && *q != ',') q++;
+    if (*q == ',') q++;
+  }
+  return n;
+}
+
+int nr_pdcch_blind_lane_re_budget(void)
+{
+  return LANE_RE_PER_LANE;
 }
