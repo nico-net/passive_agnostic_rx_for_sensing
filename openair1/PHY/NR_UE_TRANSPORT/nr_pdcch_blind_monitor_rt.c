@@ -70,6 +70,7 @@ bool nr_passive_rar_tc_seen(uint16_t rnti, uint32_t now_abs_slot, uint32_t windo
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.h"  // passive PDSCH decode (data-aided source)
 #include "PHY/NR_UE_TRANSPORT/nr_passive_mac_ta.h"        // timing advance out of an overheard MAC PDU
 #include "PHY/NR_UE_TRANSPORT/nr_pdsch_passive_queue.h"   // deferred decode off the RT thread
+#include "PHY/NR_UE_TRANSPORT/nr_scrambling_id_sweep.h"   // dedicated-identity rule, walk gate (final review I1/I2)
 #include "PHY/NR_UE_TRANSPORT/nr_pdcch_passive_queue.h"   // deferred SCAN off the RT thread
 #include <stdatomic.h>
 
@@ -6025,10 +6026,13 @@ constdiag_done:;
     /* Blind DM-RS/data scrambling identities (Task 13): both default to PCI, which is what this
      * cell happens to use (dataScramblingIdentityPDSCH unset -- nr_radio_config.c:1745), but
      * neither is guaranteed on another deployment -- a wrong value descrambles to noise exactly
-     * like a wrong csirs_monitor scramb_id does, and nothing but the CRC rate would say so. */
-    const nr_dmrs_id_state_t *dl_dd = nr_pdsch_passive_dl_dmrs_id(out.nscid);
-    const int dl_dmrs_decided = dl_dd->decided ? dl_dd->best_id : -1;
-    dlsch_pdu.dlDmrsScramblingId = dl_dd->decided ? (uint16_t)dl_dd->best_id : fp->Nid_cell;
+     * like a wrong csirs_monitor scramb_id does, and nothing but the CRC rate would say so.
+     * Final review I2: the decided/latched identities apply ONLY to dedicated-class grants (C-RNTI,
+     * not a 1_0 in a common search space); SIB1, RAR, paging, TC-RNTI and CSS fallback use N_ID^cell. */
+    const bool dl_dedicated = nr_scrambling_dedicated(out.rnti_class == NR_BLIND_RNTI_CLASS_C, is_dci10,
+                                                      is_dci10 && css0_occasion);
+    const int dl_dmrs_decided = dl_dedicated ? nr_dmrs_id_2stage_decided(nr_pdsch_passive_dl_dmrs_id(out.nscid)) : -1;
+    dlsch_pdu.dlDmrsScramblingId = dl_dmrs_decided >= 0 ? (uint16_t)dl_dmrs_decided : fp->Nid_cell;
     dlsch_pdu.nscid              = out.nscid;
     dlsch_pdu.start_symbol       = out.start_symbol;
     dlsch_pdu.number_symbols     = out.num_symbols;
@@ -6036,14 +6040,17 @@ constdiag_done:;
     dlsch_pdu.dmrs_ports         = out.dmrs_ports;
     // Only the passive PDSCH decode below reads these; harmless for the DM-RS-only path, which
     // never looks past the allocation. dataScramblingIdentityPDSCH has no coherence statistic to
-    // score it blind (unlike DM-RS above) -- the TB CRC is the only oracle, so this RNTI's own
-    // sweep only advances past PCI once its config is otherwise converged and its CRC rate has
-    // stalled at 0 (see nr_pdsch_passive_data_id_current's doc); an unconverged/healthy RNTI stays
-    // on PCI forever, so a config mismatch is never misread as a scrambling mismatch.
-    const bool dl_data_advance = nr_pdsch_config_sweep_rnti_prior_get(out.rnti, NULL, NULL, NULL, NULL)
-                               && nr_pdsch_passive_rnti_crc_stalled(out.rnti, 20);
-    dlsch_pdu.dlDataScramblingId = nr_pdsch_passive_data_id_current(out.rnti, (uint16_t)fp->Nid_cell,
-                                                                    dl_dmrs_decided, dl_data_advance);
+    // score it blind (unlike DM-RS above) -- the TB CRC is the only oracle, so this RNTI's walk moves
+    // past the PCI only when nr_scrambling_walk_eligible() holds: the DM-RS id of this nSCID is
+    // DECIDED, the link is healthy (N_ID^cell grants or another RNTI passing), and this RNTI's
+    // dedicated grants failed CRC >= NR_SCR_WALK_MIN_FAILS times in a row (final review I1: the former
+    // "Technique D converged" gate was circular -- convergence needs CRC passes a wrong id never gives).
+    const bool dl_data_advance = dl_dedicated
+                                 && nr_scrambling_walk_eligible(dl_dmrs_decided, nr_pdsch_passive_link_healthy(out.rnti),
+                                                                nr_pdsch_passive_rnti_ded_fails(out.rnti));
+    dlsch_pdu.dlDataScramblingId = dl_dedicated ? nr_pdsch_passive_data_id_current(out.rnti, (uint16_t)fp->Nid_cell,
+                                                                                   dl_dmrs_decided, dl_data_advance)
+                                                : (uint16_t)fp->Nid_cell;
     dlsch_pdu.harq_process_nbr   = out.harq_pid;
     dlsch_pdu.number_rbs         = out.num_rb;
     dlsch_pdu.start_rb           = out.start_rb;
@@ -6198,7 +6205,10 @@ constdiag_done:;
                                                 .tb_scaling     = out.tb_scaling,
                                                 .bw_tbslbrm     = (uint16_t)fp->N_RB_DL,
                                                 .mcs_table_lbrm = grant_mcs_table_lbrm,
-                                                .vrb_l          = vrb_l_used};
+                                                .vrb_l          = vrb_l_used,
+                                                .rnti_class     = out.rnti_class,
+                                                .dci11          = !is_dci10,
+                                                .scr_dedicated  = dl_dedicated};
       nr_pdsch_passive_job_t job;
       memset(&job, 0, sizeof(job));
       job.dlsch_pdu     = dlsch_pdu;
@@ -6385,7 +6395,10 @@ constdiag_done:;
                                                     // The DEPLOYMENT's mcs-Table, never the
                                                     // format-1_0-forced one -- see the field comment.
                                                     .mcs_table_lbrm = grant_mcs_table_lbrm,
-                                                    .vrb_l = vrb_l_used};
+                                                    .vrb_l = vrb_l_used,
+                                                    .rnti_class = out.rnti_class,
+                                                    .dci11 = !is_dci10,
+                                                    .scr_dedicated = dl_dedicated};
             nr_pdsch_passive_decode_result_t dec;
             // Reuses rxdataF_pdsch: nr_pdsch_passive_decode() FEPs the WHOLE allocation into it,
             // a superset of the single DM-RS symbol already transformed above, so the buffer is
@@ -6439,6 +6452,8 @@ constdiag_done:;
                 LOG_A(PHY, "SENSING: Technique D CONVERGED rnti=0x%x tda=%u S=%u L=%u mask=0x%x table=%u\n",
                       sweep_ticket.rnti, sweep_ticket.tda_index, winner.tda_start, winner.tda_length,
                       winner.dmrs_mask, winner.mcs_table);
+              /* the deferred consumer's bookkeeping, on this path too (final review I1 / T13 deferred item) */
+              nr_pdsch_passive_crc_note(out.rnti, dl_dedicated, st == NR_PDSCH_PASSIVE_DECODE_CRC_OK);
               if (dl_data_advance)
                 nr_pdsch_passive_data_id_feed(out.rnti, st == NR_PDSCH_PASSIVE_DECODE_CRC_OK);
             }
@@ -6650,7 +6665,8 @@ constdiag_done:;
       if (acq_period)
       {
       const nr_pdsch_xoverhead_state_t xo = nr_pdsch_xoverhead_snapshot();
-      const nr_dmrs_id_state_t *dd = nr_pdsch_passive_dl_dmrs_id(0), *du = nr_pusch_passive_ul_dmrs_id(0);
+      const nr_dmrs_id_2stage_t *dd2 = nr_pdsch_passive_dl_dmrs_id(0), *du2 = nr_pusch_passive_ul_dmrs_id(0);
+      const int dd_id = nr_dmrs_id_2stage_decided(dd2), du_id = nr_dmrs_id_2stage_decided(du2);
       LOG_I(PHY, "SENSING: ACQ state=%s time_in_state=%lu transitions=%lu regressions=%lu "
                  "in[len=%d coreset=%d ul_bwp=%d dl_win=%lu ul_win[w=%lu i=%lu]] "
                  "uldisc[gen=%lu raw=%d wcls=%d icls=%d wtrials=%lu itrials=%lu rejected_fb=%lu] "
@@ -6665,8 +6681,8 @@ constdiag_done:;
             (unsigned long)uls.rejected_feedback,
             acq.carrier_verified > 0 ? "CONFIRMED" : acq.carrier_verified < 0 ? "MISMATCH" : "unchecked",
             xo.assumed, xo.confirmed ? "CONFIRMED" : "unresolved", xo.crc_ok_seen,
-            dd->decided ? (dd->best_id == dd->assumed_id ? "CONFIRMED:" : "MISMATCH:") : "pending:", dd->best_id, dd->grants,
-            du->decided ? (du->best_id == du->assumed_id ? "CONFIRMED:" : "MISMATCH:") : "pending:", du->best_id, du->grants);
+            dd_id >= 0 ? (dd_id == dd2->s1.assumed_id ? "CONFIRMED:" : "MISMATCH:") : "pending:", dd_id, dd2->s1.grants,
+            du_id >= 0 ? (du_id == du2->s1.assumed_id ? "CONFIRMED:" : "MISMATCH:") : "pending:", du_id, du2->s1.grants);
       }
     }
 

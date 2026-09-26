@@ -178,13 +178,11 @@ void nr_pdsch_passive_queue_stop(void);
 #ifdef __cplusplus
 extern "C" {
 #endif
-/* Read-only view of the DL DM-RS identity estimate for one nSCID (0 or 1; diagnostic, plain ints,
- * racy by design). */
-const nr_dmrs_id_state_t *nr_pdsch_passive_dl_dmrs_id(int nscid);
+/* Read-only view of the DL DM-RS identity estimate for one nSCID (0 or 1). Read the decision with
+ * nr_dmrs_id_2stage_decided() (acquire); the other fields are diagnostic and racy by design. */
+const nr_dmrs_id_2stage_t *nr_pdsch_passive_dl_dmrs_id(int nscid);
 /* Up to 6 RNTIs with >= 50 decodes, as " 0xRNTI:ok/decoded(pct)" items. */
 void nr_pdsch_passive_queue_rnti_census(char *buf, size_t n);
-/* True when this RNTI has >= min_tries decode attempts and zero of them passed CRC. */
-bool nr_pdsch_passive_rnti_crc_stalled(uint16_t rnti, uint32_t min_tries);
 #ifdef __cplusplus
 }
 #endif

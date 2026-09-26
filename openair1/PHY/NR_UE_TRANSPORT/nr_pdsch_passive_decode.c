@@ -325,42 +325,95 @@ static int g_ptrs_cell_arm = -1;         // PT-RS arm, CELL-WIDE seed; under g_p
 #define NR_VRBL_ARMS 2
 #define NR_PRG_ARMS 3
 typedef nr_arm_sweep_t nr_vrbl_sweep_t;
-typedef nr_arm_sweep_t nr_prg_sweep_t;
+typedef nr_arm_sweep_gated_t nr_prg_sweep_t;
 static int vrbl_sweep_pick(const nr_vrbl_sweep_t *s) { return nr_arm_sweep_pick(s, NR_VRBL_ARMS); }
 static int vrbl_sweep_feed(nr_vrbl_sweep_t *s, int arm, bool tb_ok) { return nr_arm_sweep_feed(s, NR_VRBL_ARMS, arm, tb_ok); }
-static int prg_sweep_pick(const nr_prg_sweep_t *s) { return nr_arm_sweep_pick(s, NR_PRG_ARMS); }
-static int prg_sweep_feed(nr_prg_sweep_t *s, int arm, bool tb_ok) { return nr_arm_sweep_feed(s, NR_PRG_ARMS, arm, tb_ok); }
+/* PRG is EVIDENCE-TRIGGERED (final review C1): arm 0 (wideband = the exact pre-sweep contiguous path) is
+ * used exclusively until it shows a sustained CRC deficit while the link is healthy, see
+ * nr_arm_sweep_gated_t. ISAC_PRG_SWEEP=0 disables the sweep entirely (always arm 0, no bookkeeping). */
+static int prg_sweep_pick(const nr_prg_sweep_t *s) { return nr_arm_sweep_gated_pick(s, NR_PRG_ARMS); }
+static int prg_sweep_feed(nr_prg_sweep_t *s, int arm, bool tb_ok, bool link_ok)
+{
+  return nr_arm_sweep_gated_feed(s, NR_PRG_ARMS, arm, tb_ok, link_ok);
+}
+static bool prg_sweep_enabled(void)
+{
+  static int on = -1;
+  if (on < 0) {
+    const char *e = getenv("ISAC_PRG_SWEEP");
+    on = (e != NULL && atoi(e) == 0) ? 0 : 1;
+  }
+  return on;
+}
 /// arm -> PRB-bundling size (0/2/4), the field prg_sweep's arm index maps to.
 static uint8_t nr_prg_arm_value(int arm) { return arm == 2 ? 4 : (arm == 1 ? 2 : 0); }
-#define RNTI_DEC_MAX 16
+/* 64 slots, evidence-protected eviction (final review I4, the policy T1 gave nr_pdsch_config_sweep.c's
+ * rnti_ctx()): a slot holding any trial, latch or walk is evicted only when EVERY slot holds evidence,
+ * so a burst of one-off noise RNTIs can no longer throw away a real UE's latched VRB-L/PRG/PT-RS/n_L or
+ * data-identity decision. SI-/RA-/P-RNTI grants never get a slot (rnti_sweepable()): those identities
+ * are not UEs and carry no dedicated RRC configuration. ~2.1 KB/slot, 135 KB of BSS. */
+#define RNTI_DEC_MAX 64
 typedef struct { uint16_t rnti; uint64_t touched; int nl; nr_ptrs_sweep_t ptrs; nr_vrbl_sweep_t vrbl; nr_prg_sweep_t prg; nr_scrambling_id_sweep_t data_id; } rnti_dec_t;
 static rnti_dec_t g_rnti_dec[RNTI_DEC_MAX];
 static uint64_t g_rnti_dec_clock;
-/* under g_ptrs_lock. ponytail: LRU by grant order, no idle clock -- an active UE is touched every
- * grant and is never the victim; only one-off noise-floor RNTIs churn. */
-static rnti_dec_t *rnti_dec(uint16_t rnti)
+/* rnti_class is nr_blind_rnti_class_t: 2 = SI, 3 = RA, 4 = P. */
+static bool rnti_sweepable(uint16_t rnti, uint8_t rnti_class)
 {
-  int victim = 0;
+  return rnti != 0 && rnti < 0xFFFE && rnti_class != 2 && rnti_class != 3 && rnti_class != 4;
+}
+/* Evidence = any latch or walk of this RNTI's own, or >= NR_ARM_SWEEP_LATCH_MIN_OK trials in total: a
+ * one-off noise-floor RNTI (one or two false-accept grants) never reaches that, a real UE does within a
+ * few grants -- a bare "any trial" test would let every noise RNTI protect itself after its first decode. */
+static bool rnti_dec_evidence(const rnti_dec_t *r)
+{
+  if (r->nl || r->data_id.n > 0 || r->prg.explore || r->prg.s.latched >= 0 || r->vrbl.latched >= 0)
+    return true;
+  uint32_t tr = 0;
+  for (int a = 0; a < NR_PTRS_ARMS; a++)
+    tr += r->ptrs.tr[a];
+  for (int a = 0; a < NR_ARM_SWEEP_MAX; a++)
+    tr += r->vrbl.tr[a] + r->prg.s.tr[a];
+  return tr >= NR_ARM_SWEEP_LATCH_MIN_OK;
+}
+/* under g_ptrs_lock. NULL only when !create and the RNTI has no slot. */
+static rnti_dec_t *rnti_dec_find(uint16_t rnti, bool create)
+{
+  int victim = -1;
+  bool victim_ev = true;
   for (int i = 0; i < RNTI_DEC_MAX; i++) {
     if (g_rnti_dec[i].rnti == rnti) {
       g_rnti_dec[i].touched = ++g_rnti_dec_clock;
       return &g_rnti_dec[i];
     }
-    if (g_rnti_dec[i].touched < g_rnti_dec[victim].touched)
+    const bool ev = g_rnti_dec[i].rnti && rnti_dec_evidence(&g_rnti_dec[i]);
+    if (victim < 0 || (victim_ev && !ev) || (ev == victim_ev && g_rnti_dec[i].touched < g_rnti_dec[victim].touched)) {
       victim = i;
+      victim_ev = ev;
+    }
   }
+  if (!create)
+    return NULL;
   rnti_dec_t *r = &g_rnti_dec[victim];
+  static int s_evict_logs = 20;
+  if (r->rnti && victim_ev && s_evict_logs > 0) {
+    s_evict_logs--;
+    LOG_W(PHY, "SENSING: RNTI_DEC all %d slots hold evidence: evicted rnti=0x%04x for rnti=0x%04x\n", RNTI_DEC_MAX,
+          r->rnti, rnti);
+  }
   memset(r, 0, sizeof(*r));
   r->rnti = rnti;
   r->touched = ++g_rnti_dec_clock;
   nr_ptrs_sweep_init(&r->ptrs);
   r->ptrs.latched = g_ptrs_cell_arm; // seed: a cell-wide arm, or -1 = sweep from scratch
   r->vrbl.latched = -1; // tr/ok already zeroed by the memset above
-  r->prg.latched = -1;  // tr/ok already zeroed by the memset above
+  nr_arm_sweep_gated_init(&r->prg);
   return r;
 }
-static int rnti_nl_get(uint16_t rnti)
+static rnti_dec_t *rnti_dec(uint16_t rnti) { return rnti_dec_find(rnti, true); }
+static int rnti_nl_get(uint16_t rnti, bool sweepable)
 {
+  if (!sweepable)
+    return atomic_load(&g_lbrm_nl);
   pthread_mutex_lock(&g_ptrs_lock);
   const rnti_dec_t *r = rnti_dec(rnti);
   const int v = r->nl ? r->nl : atomic_load(&g_lbrm_nl);
@@ -368,8 +421,10 @@ static int rnti_nl_get(uint16_t rnti)
   return v;
 }
 /* Returns the value this RNTI read before the latch (for the log). */
-static int rnti_nl_latch(uint16_t rnti, int nl)
+static int rnti_nl_latch(uint16_t rnti, bool sweepable, int nl)
 {
+  if (!sweepable)
+    return nl; /* no per-RNTI state for SI/RA/P: nothing to latch, nothing to log */
   pthread_mutex_lock(&g_ptrs_lock);
   rnti_dec_t *r = rnti_dec(rnti);
   const int prev = r->nl ? r->nl : atomic_load(&g_lbrm_nl);
@@ -383,30 +438,33 @@ static int rnti_nl_latch(uint16_t rnti, int nl)
   pthread_mutex_unlock(&g_ptrs_lock);
   return prev;
 }
-/* Per-RNTI dataScramblingIdentityPDSCH sweep (Task 13). See nr_pdsch_passive_decode.h's comment for
- * the contract; `advance_ok` (Technique D converged + this RNTI's CRC rate stalled, checked by the
- * caller in nr_pdcch_blind_monitor_rt.c, which has both those signals in scope) is what keeps a
- * healthy RNTI decoding under PCI forever -- the sweep is lazily seeded on the first call that is
- * actually allowed to advance, from (pci, dmrs_id) as they stood at that moment.
- *
- * REVIEW FIX round 1, finding 1 (CRITICAL): `advance_ok` must gate only whether the sweep is
- * allowed to ADVANCE (create/walk); it must NEVER gate whether an already-LATCHED result is
- * returned. The bug: `advance_ok` used to be checked first and, if false, this returned `pci`
- * unconditionally -- but the caller's eligibility measure was a lifetime "stalled" counter that the
- * sweep's own first successful CRC pass permanently breaks (a pass is evidence the link recovered,
- * so "stalled" becomes false forever). Net effect: the moment the sweep found the CORRECT id and
- * latched it, the very next call saw advance_ok=false and threw the answer away, reverting to PCI
- * forever -- on exactly the deployment this feature exists for. Fixed by checking `latched` FIRST. */
+/* Per-RNTI dataScramblingIdentityPDSCH walk (Task 13; gate redesigned by final review I1). Called ONLY
+ * for dedicated-class grants (nr_scrambling_dedicated()): everything else uses N_ID^cell by spec.
+ * `advance_ok` = nr_scrambling_walk_eligible() (DM-RS id of the grant's nSCID decided, link healthy,
+ * >= NR_SCR_WALK_MIN_FAILS dedicated CRC fails), computed by the caller. It gates only whether the walk
+ * may START or MOVE; a LATCHED result is always returned (review fix round 1, finding 1: gating the
+ * latch on a stall measure threw the just-found identity away on the next grant). Every start, step,
+ * wrap and latch is logged: a silent walk is indistinguishable from a broken link. */
+static _Atomic int g_data_id_walks; /* RNTIs whose walk has started (or latched): the lock-free fast path below */
 uint16_t nr_pdsch_passive_data_id_current(uint16_t rnti, uint16_t pci, int dmrs_id, bool advance_ok)
 {
+  /* Final review I8: this runs on the scan thread for every dedicated DL grant. On a cell where no walk
+   * ever started (every deployment seen so far) it takes no lock at all. */
+  if (!advance_ok && atomic_load_explicit(&g_data_id_walks, memory_order_acquire) == 0)
+    return pci;
   pthread_mutex_lock(&g_ptrs_lock);
-  rnti_dec_t *r = rnti_dec(rnti);
+  rnti_dec_t *r = rnti_dec_find(rnti, advance_ok);
   int id = -1;
-  if (r->data_id.n > 0 && r->data_id.latched >= 0) {
+  if (r && r->data_id.n > 0 && r->data_id.latched >= 0) {
     id = r->data_id.latched; // always honour a latched result, regardless of advance_ok
-  } else if (advance_ok) {
-    if (r->data_id.n == 0)
+  } else if (r && advance_ok) {
+    if (r->data_id.n == 0) {
       nr_scrambling_id_sweep_init(&r->data_id, pci, dmrs_id);
+      atomic_fetch_add_explicit(&g_data_id_walks, 1, memory_order_release);
+      LOG_A(PHY, "SENSING: DATA_ID_WALK START rnti=0x%04x first candidate=%d (reason: DM-RS id %d decided, link healthy, "
+                 ">= %d consecutive dedicated TB CRC fails)\n",
+            rnti, nr_scrambling_id_sweep_current(&r->data_id), dmrs_id, NR_SCR_WALK_MIN_FAILS);
+    }
     id = nr_scrambling_id_sweep_current(&r->data_id);
   }
   pthread_mutex_unlock(&g_ptrs_lock);
@@ -415,9 +473,18 @@ uint16_t nr_pdsch_passive_data_id_current(uint16_t rnti, uint16_t pci, int dmrs_
 void nr_pdsch_passive_data_id_feed(uint16_t rnti, bool tb_crc_ok)
 {
   pthread_mutex_lock(&g_ptrs_lock);
-  rnti_dec_t *r = rnti_dec(rnti);
-  if (r->data_id.n > 0)
+  rnti_dec_t *r = rnti_dec_find(rnti, false);
+  if (r && r->data_id.n > 0 && r->data_id.latched < 0) {
+    const int tried = nr_scrambling_id_sweep_current(&r->data_id);
     nr_scrambling_id_sweep_feed(&r->data_id, tb_crc_ok ? 1 : 0);
+    if (r->data_id.latched >= 0)
+      LOG_A(PHY, "SENSING: DATA_ID_WALK LATCHED rnti=0x%04x n_id=%d after %u tries (reason: TB CRC pass)\n", rnti,
+            r->data_id.latched, r->data_id.tries);
+    else
+      LOG_A(PHY, "SENSING: DATA_ID_WALK STEP rnti=0x%04x candidate=%d failed CRC -> next=%d (%d/%d)%s\n", rnti, tried,
+            nr_scrambling_id_sweep_current(&r->data_id), r->data_id.pos, r->data_id.n,
+            r->data_id.pos == 0 ? " WRAPPED: every candidate failed once, starting over from the PCI" : "");
+  }
   pthread_mutex_unlock(&g_ptrs_lock);
 }
 static int rnti_ptrs_pick(uint16_t rnti)
@@ -465,12 +532,54 @@ static int rnti_prg_pick(uint16_t rnti)
   pthread_mutex_unlock(&g_ptrs_lock);
   return arm;
 }
-static int rnti_prg_feed(uint16_t rnti, int arm, bool tb_ok)
+static int rnti_prg_feed(uint16_t rnti, int arm, bool tb_ok, bool link_ok, bool *explore_started)
 {
   pthread_mutex_lock(&g_ptrs_lock);
-  const int latched = prg_sweep_feed(&rnti_dec(rnti)->prg, arm, tb_ok);
+  nr_prg_sweep_t *p = &rnti_dec(rnti)->prg;
+  const bool was = p->explore;
+  const int latched = prg_sweep_feed(p, arm, tb_ok, link_ok);
+  *explore_started = !was && p->explore;
   pthread_mutex_unlock(&g_ptrs_lock);
   return latched;
+}
+
+/* A segmented (prg 2/4) arm that cannot decode this grant at all (PT-RS, CSI-RS parity, bad list) is a
+ * FAILED trial of that arm, not a non-event: unfed, its untried Wilson bound (1.0) would be picked on every
+ * grant for ever (final review C1). Arm 0 never gets here. */
+static void prg_arm_unsupported(uint16_t rnti, int prg_arm)
+{
+  if (prg_arm > 0) {
+    bool explore_started;
+    rnti_prg_feed(rnti, prg_arm, false, true, &explore_started);
+  }
+}
+
+/* ---- DL CRC bookkeeping for the scrambling-identity walk and the PRG trigger (final review I1/C1).
+ * Every decode path -- the deferred consumer AND the in-line decode in nr_pdcch_blind_monitor_rt.c --
+ * reports each TB outcome here once (layout probes excluded: a code-block-0 probe is a layout
+ * hypothesis, not evidence about the scrambling identity). */
+static nr_scr_link_t g_dl_scr_link;
+/* WINDOWED, resettable: DEDICATED-class (nr_scrambling_dedicated()) CRC fails since this RNTI's last
+ * dedicated pass. Grants that use N_ID^cell (SIB1, RAR, CSS fallback) neither count nor reset it: they
+ * pass under a wrong dedicated identity and would otherwise keep the walk from ever opening. */
+static _Atomic uint32_t g_ded_fails_since_ok[65536];
+void nr_pdsch_passive_crc_note(uint16_t rnti, bool dedicated, bool crc_ok)
+{
+  nr_scr_link_note(&g_dl_scr_link, rnti, dedicated, crc_ok);
+  if (!dedicated)
+    return;
+  if (crc_ok)
+    atomic_store_explicit(&g_ded_fails_since_ok[rnti], 0, memory_order_relaxed);
+  else
+    atomic_fetch_add_explicit(&g_ded_fails_since_ok[rnti], 1, memory_order_relaxed);
+}
+uint32_t nr_pdsch_passive_rnti_ded_fails(uint16_t rnti)
+{
+  return atomic_load_explicit(&g_ded_fails_since_ok[rnti], memory_order_relaxed);
+}
+bool nr_pdsch_passive_link_healthy(uint16_t rnti)
+{
+  return nr_scr_link_healthy(&g_dl_scr_link, rnti);
 }
 /* RBMAP: which RBs the cell actually allocated, for the dashboard's spectrum strip. One counter per
  * RB, incremented per accepted grant over its allocation, printed as 273 density digits and reset --
@@ -1372,10 +1481,16 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
    * the GPU front end already computed its channel estimate assuming prg==0 (it bails to CPU for
    * any nonzero prg -- nr_pdsch_passive_gpu_job()) so this sweep does not run on a GPU-assisted
    * decode either. Arm 0 (wideband) is a true no-op: `freq_alloc` is left pointing at the caller's
-   * own struct, so an unlatched RNTI still on arm 0 costs nothing beyond the reads below. */
+   * own struct, so an unlatched RNTI still on arm 0 costs nothing beyond the reads below.
+   * EVIDENCE-TRIGGERED (final review C1): arm 0 is used EXCLUSIVELY until it has shown <= 25 % CRC over
+   * 32 trials while the link was healthy (nr_arm_sweep_gated_t); before, the Wilson pick sent ~2/3 of all
+   * decodes from the first grant onto the ~100x costlier segmented path, which also skips DMRSFO/SFO/the
+   * chest cache/PT-RS/GPU. DCI 1_1, sweepable RNTIs only; ISAC_PRG_SWEEP=0 turns it off. */
   freq_alloc_bitmap_t fa_prg;
   int prg_arm = -1;
-  if (freq_alloc->prg == 0 && t_llr_ovr_n == 0) {
+  const bool sweepable = rnti_sweepable(grant->rnti, grant->rnti_class);
+  /* DCI 1_1 only: TS 38.214 5.1.2.3 fixes the PRG for 1_0 (and SI/RA/P grants carry no RRC config). */
+  if (freq_alloc->prg == 0 && t_llr_ovr_n == 0 && grant->dci11 && sweepable && prg_sweep_enabled()) {
     prg_arm = rnti_prg_pick(grant->rnti);
     const uint8_t prg_val = nr_prg_arm_value(prg_arm);
     if (prg_val != 0) {
@@ -1434,6 +1549,7 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
         if (n_ == 1 || (n_ % 200) == 0)
           LOG_A(PHY, "SENSING: PDSCH UNSUP@seg-list n=%lu (n_prb_list=%u num_rbs=%d bwp_size=%u)\n", n_,
                 (unsigned)freq_alloc->n_prb_list, freq_alloc->num_rbs, (unsigned)dlsch_config->BWPSize); }
+      prg_arm_unsupported(grant->rnti, prg_arm);
       return out->status;
     }
   }
@@ -1460,7 +1576,7 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
   uint32_t ptrs_unav = 0;
   int ptrs_arm = -1;
   if (nr_agnostic_v2() && !seg_path && !(dlsch_config->pduBitmap & 0x1) && grant->mcs >= 10 && grant->mcs <= 27
-      && t_ptrs_sweep_allow && !t_probe_first_seg) {
+      && t_ptrs_sweep_allow && !t_probe_first_seg && sweepable) {
     ptrs_arm = rnti_ptrs_pick(grant->rnti);
     uint8_t K, L;
     if (nr_ptrs_sweep_arm(ptrs_arm, &K, &L)) {
@@ -1482,6 +1598,7 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
       const unsigned long n_ = atomic_fetch_add_explicit(&c_, 1, memory_order_relaxed) + 1;
       if (n_ == 1 || (n_ % 200) == 0)
         LOG_A(PHY, "SENSING: PDSCH UNSUP@seg-ptrs n=%lu\n", n_); }
+    prg_arm_unsupported(grant->rnti, prg_arm);
     return out->status;
   }
   if (dlsch_config->pduBitmap & 0x1) {
@@ -1528,6 +1645,7 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
           const unsigned long n_ = atomic_fetch_add_explicit(&c_, 1, memory_order_relaxed) + 1;
           if (n_ == 1 || (n_ % 200) == 0)
             LOG_A(PHY, "SENSING: PDSCH UNSUP@seg-csirm-parity n=%lu\n", n_); }
+        prg_arm_unsupported(grant->rnti, prg_arm);
         return out->status;
       }
     }
@@ -1611,7 +1729,7 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
    * rfsim rank-4 bed (2026-09-16). It is decided by the TB CRC like every other cell property: a
    * failed TB whose E exceeds N_ref under a smaller n_L is re-dematched under that n_L (LDPC only,
    * the LLRs are untouched) and a pass latches it for this RNTI (rnti_nl_latch). */
-  const int nl_tbslbrm = rnti_nl_get(grant->rnti);
+  const int nl_tbslbrm = rnti_nl_get(grant->rnti, sweepable);
   /* TS 38.212 5.4.2.1 sizes N_ref from TBS_LBRM over the carrier's LARGEST configured DL BWP, not
    * over whatever frequency reference this particular grant uses. Measured 2026-08-21: on a
    * CORESET#0 format-1_0 grant BWPSize is 48 and this produced lbrm=229576 against the gNB's own
@@ -3272,7 +3390,7 @@ gpu_llr_ready:;
      * the smaller N_ref), never on probes; a pass latches n_L for this RNTI. Cost: one extra LDPC
      * pass per failed long TB until latched. */
     if (!ldpc_ok && t_seg_C > 0) { /* probes too: the phone's n_L is unknown and LBRM binds on code block 0 as well */
-      const int nl_now = rnti_nl_get(grant->rnti);
+      const int nl_now = rnti_nl_get(grant->rnti, sweepable);
       const uint32_t E_first = t_seg_E;
       const uint32_t tbs_now = dlsch_config->tbslbrm;
       const uint16_t bw_lbrm = grant->bw_tbslbrm > 0 ? grant->bw_tbslbrm : dlsch_config->BWPSize;
@@ -3295,7 +3413,7 @@ gpu_llr_ready:;
         if (full_ok || (t_probe_first_seg && t_probe_seg_ok)) {
           ldpc_ok = true;
           atomic_fetch_add(&g_lbrm_ok[nl_h], 1);
-          if (rnti_nl_latch(grant->rnti, nl_h) != nl_h)
+          if (rnti_nl_latch(grant->rnti, sweepable, nl_h) != nl_h)
             LOG_A(PHY, "SENSING: LBRM layer term n_L=%d latched from the TB CRC for rnti 0x%04x (was %d): TBS_LBRM=%u C=%u E=%u N_ref=%u\n",
                   nl_h, grant->rnti, nl_now, lbrm_h, t_seg_C, E_first, nref_h);
         } else {
@@ -3325,7 +3443,12 @@ gpu_llr_ready:;
      * the caller had already set an explicit freq_alloc->prg, or a GPU-assisted decode -- see the
      * pick site above). */
     if (prg_arm >= 0) {
-      const int latched = rnti_prg_feed(grant->rnti, prg_arm, ldpc_ok);
+      bool explore_started = false;
+      const int latched = rnti_prg_feed(grant->rnti, prg_arm, ldpc_ok, nr_scr_link_healthy(&g_dl_scr_link, grant->rnti),
+                                        &explore_started);
+      if (explore_started)
+        LOG_A(PHY, "SENSING: PRG rnti=0x%x wideband CRC <= %.0f%% over %d trials with the link healthy: exploring prg=2/4\n",
+              grant->rnti, 100.0 * NR_ARM_SWEEP_INCUMBENT_POOR_RATE, NR_ARM_SWEEP_INCUMBENT_MIN_TRIALS);
       if (latched >= 0)
         LOG_A(PHY, "SENSING: PRG rnti=0x%x prg=%u latched\n", grant->rnti, nr_prg_arm_value(latched));
     }

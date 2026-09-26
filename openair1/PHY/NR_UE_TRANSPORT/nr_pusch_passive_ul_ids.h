@@ -34,7 +34,7 @@
  * The actual estimation work stays where it was: nr_dmrs_id_accumulate()/_decide() need live IQ and
  * the gNB channel-estimation output, and nr_scrambling_id_sweep_* is only ever exercised by a real TB
  * CRC, so both remain called from nr_pusch_passive_decode.c. This file owns only the storage, the
- * per-nSCID mutex/init-flag/stage-2-throttle bookkeeping around it, and the cell-wide data-ID sweep
+ * per-nSCID mutex/init-flag bookkeeping around it, and the cell-wide data-ID sweep
  * object -- nr_pusch_passive_decode.c now reaches all of it through the accessors below instead of
  * touching shared globals directly, and nr_pdcch_blind_monitor.c's read side is unaffected (same
  * function names/signatures it already called). Same mutex objects / same non-blocking
@@ -56,9 +56,9 @@ extern "C" {
 /* scramblingID0/scramblingID1 are independent RRC fields -- one DM-RS estimator state per nSCID. */
 #define NR_UL_DMRS_NSCID 2
 
-/* Read-only view of the UL DM-RS identity estimate for one nSCID (0 or 1; diagnostic, plain ints,
- * racy by design) -- unchanged public contract from before the move. */
-const nr_dmrs_id_state_t *nr_pusch_passive_ul_dmrs_id(int nscid);
+/* Read-only view of the UL DM-RS identity estimate for one nSCID (0 or 1). Read the decision with
+ * nr_dmrs_id_2stage_decided() (acquire, inline -- no estimator symbol needed); the rest is diagnostic. */
+const nr_dmrs_id_2stage_t *nr_pusch_passive_ul_dmrs_id(int nscid);
 
 /* UL decode path only. Non-blocking: mirrors the old pthread_mutex_trylock-and-skip-this-grant
  * behaviour on contention exactly -- returns NULL rather than waiting. On success, returns nscid's
@@ -67,29 +67,25 @@ const nr_dmrs_id_state_t *nr_pusch_passive_ul_dmrs_id(int nscid);
  * check) -- the caller nr_dmrs_id_init()s it itself on false, since that call lives in
  * nr_dmrs_id_estimate.c, which this pure module deliberately does not depend on. Must be paired with
  * nr_pusch_passive_ul_dmrs_unlock(). */
-nr_dmrs_id_state_t *nr_pusch_passive_ul_dmrs_trylock(int nscid, bool *was_initialized);
+nr_dmrs_id_2stage_t *nr_pusch_passive_ul_dmrs_trylock(int nscid, bool *was_initialized);
 void nr_pusch_passive_ul_dmrs_unlock(int nscid);
 
-/* Stage-2 (widened-range) accumulate throttle for nscid: true once every NR_UL_DMRS_STAGE2_THROTTLE
- * calls (post-increment modulo), same constant/reasoning as the pre-move code and the DL twin in
- * nr_pdsch_passive_queue.c. */
-bool nr_pusch_passive_ul_dmrs_stage2_tick(int nscid);
-
-/* dataScramblingIdentityPUSCH sweep (Task 13), cell-wide (this deployment has one UL BWP, so there is
- * nothing to key it by yet; unlike the DL side there is no per-RNTI Technique D convergence signal to
- * gate on, so nr_pusch_passive_ul_crc_stalled()'s own eligibility counter is the whole gate).
- * `current()`/`feed()` follow the same contract as the DL nr_pdsch_passive_data_id_* pair. */
+/* dataScramblingIdentityPUSCH walk (Task 13), cell-wide (this deployment has one UL BWP, so there is
+ * nothing to key it by yet). Only DCI 0_1 grants ever use or feed it (final review I1/I2: a 0_0 may sit
+ * in a common search space, where TS 38.211 6.3.1.1 mandates N_ID^cell, and the monitor cannot tell).
+ * `current()`/`feed()` follow the same contract as the DL nr_pdsch_passive_data_id_* pair; every start,
+ * step, wrap and latch is logged. */
 uint16_t nr_pusch_passive_data_id_current(uint16_t pci, int dmrs_id, bool advance_ok);
 void     nr_pusch_passive_data_id_feed(bool tb_crc_ok);
 
-/* True when at least min_tries UL decodes have been attempted since the last CRC pass and NONE of
- * them passed CRC (windowed/resettable -- see nr_pusch_passive_ul_crc_note(); review fix round 1,
- * finding 1's fix, carried over verbatim by this move). */
-bool nr_pusch_passive_ul_crc_stalled(uint32_t min_tries);
-/* UL decode path only: record one TB CRC outcome for the stalled-window counter above -- resets it
- * to 0 on a pass, increments it on a fail. Same atomic object/semantics as the pre-move direct
- * atomic_store_explicit/atomic_fetch_add_explicit pair. */
-void nr_pusch_passive_ul_crc_note(bool tb_crc_ok);
+/* Walk eligibility for one 0_1 grant: nr_scrambling_walk_eligible(dmrs_decided_id, UL link healthy
+ * for `rnti`, 0_1 CRC fails since the last 0_1 pass). */
+bool nr_pusch_passive_ul_walk_eligible(uint16_t rnti, int dmrs_decided_id);
+/* UL decode path only (every path: this is called from the decode itself): one TB outcome. `dedicated`
+ * = a DCI 0_1 grant -- only those count toward / reset the fail window (a 0_0 passes under N_ID^cell
+ * whatever the dedicated identity is, and used to keep the walk from ever opening); every outcome
+ * feeds the UL link-health tracker. */
+void nr_pusch_passive_ul_crc_note(uint16_t rnti, bool dedicated, bool tb_crc_ok);
 
 #ifdef __cplusplus
 }

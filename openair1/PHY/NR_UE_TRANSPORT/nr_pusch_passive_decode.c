@@ -97,13 +97,12 @@ static _Atomic uint64_t g_try, g_crc_ok, g_rej_unsup, g_rej_setup;
  * see the accumulate call site's own comment, below nr_ulsch_decoding()'s CFR block, for why gating
  * this on CRC would be circular.
  *
- * The per-nSCID storage/lock/stage-2-throttle counters and the cell-wide data-ID sweep + CRC-stall
+ * The per-nSCID two-window DM-RS states/locks and the cell-wide data-ID sweep + CRC-stall
  * counter (Task 13) now live in nr_pusch_passive_ul_ids.{h,c} -- moved out of this file so
  * nr_pdcch_blind_monitor.c's read side does not pull PHY_NR_PASSIVE_UL into the offline
  * test_nr_pdcch_blind_monitor gtest binary; see that file's header comment and fix2-report.md. This
  * file still owns and calls the actual estimation (nr_dmrs_id_accumulate()/_decide(), which need live
  * IQ) through the accessors it exposes. */
-#define NR_UL_DMRS_STAGE1_GRANTS 64
 static _Atomic uint64_t g_seg_fail, g_zero_tb;
 /* Residual the channel estimator can absorb on its own: MAX_DELAY_COMP is 20 samples, so anything
  * beyond a comfortable fraction of that is worth re-placing the window for rather than hoping. */
@@ -999,35 +998,25 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
    * nr_pdsch_passive_queue.c exactly: one state per nSCID, staged range (0..1023 then the full
    * remaining space once stage 1 exhausts itself without deciding), stage-2 accumulate throttled
    * (same ~64x-cost argument, same throttle constant). */
-  if (nr_pusch_passive_queue_running() && g->dmrs_config_type == 0 && !g->transform_precoding) {
+  /* Final review I2/I5: DCI 0_1 grants only (a 0_0 uses N_ID^cell, see blind_ul_apply_scrambling_ids()),
+   * and the two-window driver (stage 1 always on, stage 2 throttled + capped, all work stops once decided). */
+  if (nr_pusch_passive_queue_running() && g->ul_dci_format == NR_BLIND_UL_DCI_FORMAT_0_1 && g->dmrs_config_type == 0
+      && !g->transform_precoding && nr_dmrs_id_2stage_decided(nr_pusch_passive_ul_dmrs_id(g->nscid)) < 0) {
     const int ul_ns = g->nscid & 1;
     bool was_init = false;
-    nr_dmrs_id_state_t *dst = nr_pusch_passive_ul_dmrs_trylock(ul_ns, &was_init);
+    nr_dmrs_id_2stage_t *dst = nr_pusch_passive_ul_dmrs_trylock(ul_ns, &was_init);
     if (dst) {
       if (!was_init)
-        nr_dmrs_id_init(dst, "PUSCH", g->ul_dmrs_scrambling_id);
-      if (!dst->decided) {
-        bool do_accum = true;
-        if (dst->range_first > 0) // stage 2: throttle, ~64x the cost of stage 1 (see nr_pdsch_passive_queue.c's constant)
-          do_accum = nr_pusch_passive_ul_dmrs_stage2_tick(ul_ns);
-        if (do_accum) {
-          int dsym = -1;
-          for (int m_ = g->start_symbol; m_ < g->start_symbol + g->num_symbols; m_++)
-            if (g->ul_dmrs_symb_pos & (1u << m_)) { dsym = m_; break; }
-          if (dsym >= 0) {
-            /* Same slot_off/fp already computed for the FEP above; absolute subcarriers. */
-            const c16_t *row = &gnb->common_vars.rxdataF[0][slot_off + dsym * fp->ofdm_symbol_size];
-            const int start_sc = fp->first_carrier_offset + (g->bwp_start + g->start_rb) * NR_NB_SC_PER_RB;
-            if (nr_dmrs_id_accumulate(dst, row, fp->ofdm_symbol_size, start_sc,
-                                      g->bwp_start + g->start_rb, g->num_rb, fp->N_RB_UL, fp->symbols_per_slot,
-                                      slot, dsym, g->nscid, fp->Ncp == NR_NORMAL)
-                && !nr_dmrs_id_decide(dst, 16, 10.0)
-                && dst->range_first == 0 && dst->grants >= NR_UL_DMRS_STAGE1_GRANTS) {
-              /* Stage 1 exhausted without a decision: escalate to the full remaining space. */
-              nr_dmrs_id_set_range(dst, NR_DMRS_ID_CANDIDATES, NR_DMRS_ID_SPACE - NR_DMRS_ID_CANDIDATES);
-            }
-          }
-        }
+        nr_dmrs_id_2stage_init(dst, "PUSCH", g->ul_dmrs_scrambling_id); /* undecided 0_1 => PCI or opts override */
+      int dsym = -1;
+      for (int m_ = g->start_symbol; m_ < g->start_symbol + g->num_symbols; m_++)
+        if (g->ul_dmrs_symb_pos & (1u << m_)) { dsym = m_; break; }
+      if (dsym >= 0) {
+        /* Same slot_off/fp already computed for the FEP above; absolute subcarriers. */
+        const c16_t *row = &gnb->common_vars.rxdataF[0][slot_off + dsym * fp->ofdm_symbol_size];
+        const int start_sc = fp->first_carrier_offset + (g->bwp_start + g->start_rb) * NR_NB_SC_PER_RB;
+        nr_dmrs_id_2stage_accumulate(dst, row, fp->ofdm_symbol_size, start_sc, g->bwp_start + g->start_rb, g->num_rb,
+                                     fp->N_RB_UL, fp->symbols_per_slot, slot, dsym, g->nscid, fp->Ncp == NR_NORMAL);
       }
       nr_pusch_passive_ul_dmrs_unlock(ul_ns);
     }
@@ -1274,7 +1263,7 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
   }
   if (hp_crc_failed(ulsch)) {
     atomic_fetch_add_explicit(&g_seg_fail, 1, memory_order_relaxed);
-    nr_pusch_passive_ul_crc_note(false);
+    nr_pusch_passive_ul_crc_note(g->rnti, g->ul_dci_format == NR_BLIND_UL_DCI_FORMAT_0_1, false);
     out->status = NR_PUSCH_PASSIVE_CRC_FAIL;
     out->reject_reason = "segment or final transport-block CRC failed";
     if (g->data_id_advance)
@@ -1307,7 +1296,7 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
   out->status = NR_PUSCH_PASSIVE_OK;
   out->tb     = hp->b;
   atomic_fetch_add_explicit(&g_crc_ok, 1, memory_order_relaxed);
-  nr_pusch_passive_ul_crc_note(true);
+  nr_pusch_passive_ul_crc_note(g->rnti, g->ul_dci_format == NR_BLIND_UL_DCI_FORMAT_0_1, true);
   if (g->data_id_advance)
     nr_pusch_passive_data_id_feed(true);
   {

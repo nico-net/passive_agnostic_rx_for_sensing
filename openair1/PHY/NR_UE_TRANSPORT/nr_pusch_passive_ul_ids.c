@@ -27,22 +27,19 @@
 
 #include <pthread.h>
 #include <stdatomic.h>
+#include "common/utils/LOG/log.h"
 
-/* ---- UL DM-RS scrambling identity, one state per nSCID ------------------------------------- */
-static nr_dmrs_id_state_t g_ul_dmrs_id[NR_UL_DMRS_NSCID];
-static bool               g_ul_dmrs_id_init[NR_UL_DMRS_NSCID];
-static pthread_mutex_t    g_ul_dmrs_id_lock[NR_UL_DMRS_NSCID] = {PTHREAD_MUTEX_INITIALIZER, PTHREAD_MUTEX_INITIALIZER};
-/* Same throttle constant/reasoning as the pre-move code (nr_dmrs_id_estimate_test.cc's
- * FindsAnIdAboveTheOldRange: a stage-2 accumulate is ~64x a stage-1 one). */
-#define NR_UL_DMRS_STAGE2_THROTTLE 2048
-static uint32_t g_ul_dmrs_stage2_skip[NR_UL_DMRS_NSCID];
+/* ---- UL DM-RS scrambling identity, one two-window state per nSCID (final review I5) -------- */
+static nr_dmrs_id_2stage_t g_ul_dmrs_id[NR_UL_DMRS_NSCID];
+static bool                g_ul_dmrs_id_init[NR_UL_DMRS_NSCID];
+static pthread_mutex_t     g_ul_dmrs_id_lock[NR_UL_DMRS_NSCID] = {PTHREAD_MUTEX_INITIALIZER, PTHREAD_MUTEX_INITIALIZER};
 
-const nr_dmrs_id_state_t *nr_pusch_passive_ul_dmrs_id(int nscid)
+const nr_dmrs_id_2stage_t *nr_pusch_passive_ul_dmrs_id(int nscid)
 {
   return &g_ul_dmrs_id[nscid & 1];
 }
 
-nr_dmrs_id_state_t *nr_pusch_passive_ul_dmrs_trylock(int nscid, bool *was_initialized)
+nr_dmrs_id_2stage_t *nr_pusch_passive_ul_dmrs_trylock(int nscid, bool *was_initialized)
 {
   const int ns = nscid & 1;
   if (pthread_mutex_trylock(&g_ul_dmrs_id_lock[ns]) != 0)
@@ -58,28 +55,25 @@ void nr_pusch_passive_ul_dmrs_unlock(int nscid)
   pthread_mutex_unlock(&g_ul_dmrs_id_lock[nscid & 1]);
 }
 
-bool nr_pusch_passive_ul_dmrs_stage2_tick(int nscid)
-{
-  const int ns = nscid & 1;
-  return (g_ul_dmrs_stage2_skip[ns]++ % NR_UL_DMRS_STAGE2_THROTTLE) == 0;
-}
-
-/* ---- dataScramblingIdentityPUSCH sweep + CRC-stall eligibility counter (Task 13) ------------ */
+/* ---- dataScramblingIdentityPUSCH walk + its eligibility window (Task 13, final review I1) --------- */
 static nr_scrambling_id_sweep_t g_ul_data_id;
 static bool                     g_ul_data_id_init;
 static pthread_mutex_t          g_ul_data_id_lock = PTHREAD_MUTEX_INITIALIZER;
-/* Review fix round 1, finding 1: windowed/resettable (fails SINCE THE LAST PASS), not a lifetime
- * try/ok ratio -- see nr_pusch_passive_ul_crc_note()'s call sites in nr_pusch_passive_decode.c for
- * why a lifetime counter permanently discards a just-latched correct id. */
+static nr_scr_link_t            g_ul_link;
+/* Windowed/resettable (review fix round 1, finding 1): 0_1 CRC fails since the last 0_1 pass. */
 static _Atomic uint32_t g_ul_fails_since_ok;
 
-bool nr_pusch_passive_ul_crc_stalled(uint32_t min_tries)
+bool nr_pusch_passive_ul_walk_eligible(uint16_t rnti, int dmrs_decided_id)
 {
-  return atomic_load_explicit(&g_ul_fails_since_ok, memory_order_relaxed) >= min_tries;
+  return nr_scrambling_walk_eligible(dmrs_decided_id, nr_scr_link_healthy(&g_ul_link, rnti),
+                                     atomic_load_explicit(&g_ul_fails_since_ok, memory_order_relaxed));
 }
 
-void nr_pusch_passive_ul_crc_note(bool tb_crc_ok)
+void nr_pusch_passive_ul_crc_note(uint16_t rnti, bool dedicated, bool tb_crc_ok)
 {
+  nr_scr_link_note(&g_ul_link, rnti, dedicated, tb_crc_ok);
+  if (!dedicated)
+    return;
   if (tb_crc_ok)
     atomic_store_explicit(&g_ul_fails_since_ok, 0, memory_order_relaxed);
   else
@@ -88,7 +82,7 @@ void nr_pusch_passive_ul_crc_note(bool tb_crc_ok)
 
 /* Review fix round 1, finding 1 (CRITICAL): `latched` must be checked BEFORE `advance_ok` -- an
  * already-decided id must survive regardless of whether the (now recovered) link still looks
- * "stalled". See task-13-report.md for the full bug history; unchanged by this move. */
+ * "stalled". See task-13-report.md for the full bug history. */
 uint16_t nr_pusch_passive_data_id_current(uint16_t pci, int dmrs_id, bool advance_ok)
 {
   pthread_mutex_lock(&g_ul_data_id_lock);
@@ -96,7 +90,13 @@ uint16_t nr_pusch_passive_data_id_current(uint16_t pci, int dmrs_id, bool advanc
   if (g_ul_data_id_init && g_ul_data_id.latched >= 0) {
     id = g_ul_data_id.latched;
   } else if (advance_ok) {
-    if (!g_ul_data_id_init) { nr_scrambling_id_sweep_init(&g_ul_data_id, pci, dmrs_id); g_ul_data_id_init = true; }
+    if (!g_ul_data_id_init) {
+      nr_scrambling_id_sweep_init(&g_ul_data_id, pci, dmrs_id);
+      g_ul_data_id_init = true;
+      LOG_A(PHY, "SENSING: UL DATA_ID_WALK START first candidate=%d (reason: UL DM-RS id %d decided, UL link healthy, "
+                 ">= %d consecutive DCI 0_1 TB CRC fails)\n",
+            nr_scrambling_id_sweep_current(&g_ul_data_id), dmrs_id, NR_SCR_WALK_MIN_FAILS);
+    }
     id = nr_scrambling_id_sweep_current(&g_ul_data_id);
   }
   pthread_mutex_unlock(&g_ul_data_id_lock);
@@ -106,7 +106,16 @@ uint16_t nr_pusch_passive_data_id_current(uint16_t pci, int dmrs_id, bool advanc
 void nr_pusch_passive_data_id_feed(bool tb_crc_ok)
 {
   pthread_mutex_lock(&g_ul_data_id_lock);
-  if (g_ul_data_id_init)
+  if (g_ul_data_id_init && g_ul_data_id.latched < 0) {
+    const int tried = nr_scrambling_id_sweep_current(&g_ul_data_id);
     nr_scrambling_id_sweep_feed(&g_ul_data_id, tb_crc_ok ? 1 : 0);
+    if (g_ul_data_id.latched >= 0)
+      LOG_A(PHY, "SENSING: UL DATA_ID_WALK LATCHED n_id=%d after %u tries (reason: TB CRC pass)\n", g_ul_data_id.latched,
+            g_ul_data_id.tries);
+    else
+      LOG_A(PHY, "SENSING: UL DATA_ID_WALK STEP candidate=%d failed CRC -> next=%d (%d/%d)%s\n", tried,
+            nr_scrambling_id_sweep_current(&g_ul_data_id), g_ul_data_id.pos, g_ul_data_id.n,
+            g_ul_data_id.pos == 0 ? " WRAPPED: every candidate failed once, starting over from the PCI" : "");
+  }
   pthread_mutex_unlock(&g_ul_data_id_lock);
 }

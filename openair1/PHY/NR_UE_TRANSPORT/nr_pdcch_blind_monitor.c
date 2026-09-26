@@ -4402,23 +4402,25 @@ static bool blind_ul_finish(const nr_pdcch_blind_ul_opts_t* opts,
  *
  * Both defaults are only an assumption -- the DM-RS identity has a coherence estimator that needs no
  * CRC (nr_pusch_passive_ul_dmrs_id), one state per nSCID (scramblingID0/1 are independent RRC
- * fields), applied here whenever it has decided; the data identity has no such estimator (the TB CRC
- * is the only oracle for it, and it is NOT nSCID-dependent -- TS 38.211 6.3.1.1's c_init has no
- * n_SCID term) and only advances past the PCI once the UL is otherwise stuck at zero CRC
- * (nr_pusch_passive_ul_crc_stalled), so a healthy link never touches the sweep. An explicit opts
- * override (>= 0) always wins over either. */
+ * fields); the data identity has no such estimator (the TB CRC is the only oracle for it, and it is
+ * NOT nSCID-dependent -- TS 38.211 6.3.1.1's c_init has no n_SCID term) and only walks past the PCI
+ * under nr_pusch_passive_ul_walk_eligible() (UL DM-RS id decided, UL link healthy, >= 20 consecutive
+ * 0_1 CRC fails). Final review I1/I2: both decided identities apply ONLY to DCI 0_1. A 0_0 always uses
+ * N_ID^cell: it may be in a common search space (TS 38.211 6.3.1.1 / 6.4.1.1.1.1; this extractor cannot
+ * tell), and its CRC must stay a clean link-health signal for the 0_1 walk. An explicit opts override
+ * (>= 0) always wins over either. */
 static void blind_ul_apply_scrambling_ids(const nr_pdcch_blind_ul_opts_t *opts, nr_pdcch_blind_ul_result_t *out)
 {
-  const nr_dmrs_id_state_t *ul_dd = nr_pusch_passive_ul_dmrs_id(out->nscid);
-  const uint16_t ul_dmrs_fallback = ul_dd->decided ? (uint16_t)ul_dd->best_id : (uint16_t)opts->phy_cell_id;
+  const bool dedicated = out->ul_dci_format == NR_BLIND_UL_DCI_FORMAT_0_1;
+  const int ul_dmrs = dedicated ? nr_dmrs_id_2stage_decided(nr_pusch_passive_ul_dmrs_id(out->nscid)) : -1;
+  const uint16_t ul_dmrs_fallback = ul_dmrs >= 0 ? (uint16_t)ul_dmrs : (uint16_t)opts->phy_cell_id;
   out->ul_dmrs_scrambling_id = (uint16_t)((opts->ul_dmrs_scrambling_id >= 0) ? opts->ul_dmrs_scrambling_id : ul_dmrs_fallback);
   const bool ul_data_explicit = opts->data_scrambling_id >= 0;
-  const bool ul_data_stalled  = !ul_data_explicit && nr_pusch_passive_ul_crc_stalled(20);
-  const uint16_t ul_data_fallback = nr_pusch_passive_data_id_current((uint16_t)opts->phy_cell_id,
-                                                                     ul_dd->decided ? ul_dd->best_id : -1,
-                                                                     ul_data_stalled);
+  const bool ul_advance = !ul_data_explicit && dedicated && nr_pusch_passive_ul_walk_eligible(out->rnti, ul_dmrs);
+  const uint16_t ul_data_fallback = dedicated ? nr_pusch_passive_data_id_current((uint16_t)opts->phy_cell_id, ul_dmrs, ul_advance)
+                                              : (uint16_t)opts->phy_cell_id;
   out->data_scrambling_id = ul_data_explicit ? (uint16_t)opts->data_scrambling_id : ul_data_fallback;
-  out->data_id_advance    = ul_data_stalled; // feed() only for grants that actually used the sweep
+  out->data_id_advance    = ul_advance; // feed() only for grants that actually used the walk
 }
 
 bool nr_pdcch_blind_decode_01_mode(bool automatic, const int16_t *llr, uint8_t aggregation_level,

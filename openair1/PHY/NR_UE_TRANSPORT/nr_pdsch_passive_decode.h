@@ -98,6 +98,12 @@ typedef struct {
                        ///< DCI 1_0 grant (L=2 is fixed by spec there, not a hypothesis) -- nothing
                        ///< to feed back, and the previous behaviour for every caller that never
                        ///< sets it.
+  uint8_t  rnti_class; ///< nr_blind_rnti_class_t of the scheduling DCI (0 = C-RNTI). SI/RA/P-RNTI
+                       ///< grants never get per-RNTI sweep state (final review I4).
+  bool     dci11;      ///< scheduled by DCI 1_1: the only grant with a PRB-bundling (PRG) hypothesis
+                       ///< (TS 38.214 5.1.2.3 fixes it for 1_0).
+  bool     scr_dedicated; ///< decoded with the RRC-dedicated scrambling identities
+                          ///< (nr_scrambling_dedicated(), final review I2)
 } nr_pdsch_passive_grant_t;
 
 /// Pick this RNTI's current DCI 1_1 interleaved VRB-to-PRB bundle-size hypothesis (2 or 4). The
@@ -194,14 +200,22 @@ bool nr_pdsch_passive_probe_outcome(void);
  *  7-13 % EVM, and would feed that failure into the searches). Default on. */
 void nr_pdsch_passive_ptrs_sweep_allow(bool on);
 
-/** Per-RNTI dataScramblingIdentityPDSCH sweep (Task 13). `current()` returns the id this grant's
- *  decode should use: `pci` when `advance_ok` is false (no eligible mismatch signal yet -- see the
- *  call site's Technique D convergence + CRC-stall gate), else this RNTI's own ordered TB-CRC-walk
- *  hypothesis (PCI, then the decided DM-RS id if any, then 0..1023). `feed()` reports whether that
- *  decode's TB CRC passed; call it ONLY when `advance_ok` was true for that same grant, so an
- *  attempt that used the PCI fallback never perturbs a sweep it did not use. */
+/** Per-RNTI dataScramblingIdentityPDSCH walk (Task 13, gate per final review I1). Call ONLY for
+ *  dedicated-class grants (nr_scrambling_dedicated()). `current()` returns this RNTI's latched id if
+ *  any, else `pci` when `advance_ok` is false, else its ordered TB-CRC-walk hypothesis (PCI, then the
+ *  decided DM-RS id if in range, then 0..1023). `advance_ok` = nr_scrambling_walk_eligible(DM-RS id of
+ *  the grant's nSCID, nr_pdsch_passive_link_healthy(rnti), nr_pdsch_passive_rnti_ded_fails(rnti)).
+ *  `feed()` reports whether that decode's TB CRC passed; call it ONLY when `advance_ok` was true for
+ *  that same grant. Every start/step/wrap/latch is logged. */
 uint16_t nr_pdsch_passive_data_id_current(uint16_t rnti, uint16_t pci, int dmrs_id, bool advance_ok);
 void nr_pdsch_passive_data_id_feed(uint16_t rnti, bool tb_crc_ok);
+/** One TB outcome from ANY decode path (deferred consumer and in-line), layout probes excluded: feeds
+ *  the DL link-health tracker and, for dedicated-class grants, this RNTI's resettable fail window. */
+void nr_pdsch_passive_crc_note(uint16_t rnti, bool dedicated, bool crc_ok);
+/** Dedicated-class CRC fails since this RNTI's last dedicated pass. */
+uint32_t nr_pdsch_passive_rnti_ded_fails(uint16_t rnti);
+/** nr_scr_link_healthy() over the DL outcomes noted above. */
+bool nr_pdsch_passive_link_healthy(uint16_t rnti);
 
 /* ---- GPU front end (NR_GPU_FEP=1, libpdsch_gpu.so): the queue does FEP + chest + MMSE + LLR for a
  * whole slot on the GPU and hands each job its LLRs; nr_pdsch_passive_decode() then skips its own

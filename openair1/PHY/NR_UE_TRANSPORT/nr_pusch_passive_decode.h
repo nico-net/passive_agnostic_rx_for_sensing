@@ -129,7 +129,7 @@ void nr_pusch_passive_stats_dump(void);
  * to its own library-linkable file (fix2-report.md) so this header can be included by
  * nr_pdcch_blind_monitor.c (offline-gtest-linked) without pulling in PHY_NR_PASSIVE_UL. See that
  * file's header comment for the full rationale; nr_pusch_passive_ul_dmrs_id/nr_pusch_passive_data_id_
- * current/_feed/nr_pusch_passive_ul_crc_stalled keep the exact same signatures/contract they had when
- * they were declared/defined directly in this file. */
+ * current/_feed keep the signatures they had when they were defined in this file; the eligibility and
+ * DM-RS state accessors changed with final review I1/I5. */
 #include "PHY/NR_UE_TRANSPORT/nr_pusch_passive_ul_ids.h"
 #endif // NR_PUSCH_PASSIVE_DECODE_H
