@@ -495,7 +495,7 @@ void CoherentPipeline::long_result(LongResult& r)
   rep << "{\"dwell\":\"long\",\"traffic\":true,\"wall\":" << jwall()
       << ",\"t\":" << jnum(c.t_air_s) << ",\"t_cpi_s\":" << jnum(a.valid ? a.t_cpi_s : c.t_l_s) << ",\"t_l_s\":" << jnum(c.t_l_s)
       << ",\"cadence_s\":" << jnum(c.cadence_s) << ",\"f_slow_hz\":" << jnum(c.f_slow_hz) << ",\"rate_slow_mps\":" << jnum(c.f_slow_hz * kC / c.w.fc_hz)
-      << ",\"b_eff_superrow_hz\":" << jnum(c.b_eff_hz) << ",\"n_short\":" << c.n_short << ",\"rows\":" << c.w.rows
+      << ",\"b_eff_superrow_hz\":" << jnum(c.b_eff_hz) << ",\"n_short\":" << c.n_short << ",\"step_frac\":" << jnum(c.step_frac) << ",\"step_frac_null\":" << jnum(c.step_frac_null) << ",\"rows\":" << c.w.rows
       << ",\"los_found\":" << jbools(c.found) << ",\"gpu\":" << (cuda_ ? "true" : "false");
   if (a.valid)
     rep << ",\"b_eff_hz\":" << jnum(a.b_eff_hz) << ",\"range_res_m\":" << jnum(kC / a.b_eff_hz) << ",\"grid_step_m\":" << jnum(r.G.step)

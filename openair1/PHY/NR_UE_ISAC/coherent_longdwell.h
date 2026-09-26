@@ -60,6 +60,10 @@ struct LongCpi {
   double f_slow_hz = 0, t_l_s = 0, cadence_s = 0, b_eff_hz = 0;   // b_eff: median super-row bandwidth (T_L's range cell)
   double t_air_s = 0;                 // midpoint air time of the long CPI
   uint32_t n_short = 0;               // short CPIs contributing
+  // Diagnostic: fraction of the residual (after this window's own per-subcarrier mean) that is constant
+  // within each contributing short CPI -- the steps left by the one-gain-one-delay per-CPI alignment --
+  // and the same fraction expected from white noise ((blocks - 1) / (rows - 1)).
+  double step_frac = 0, step_frac_null = 0;
 };
 
 /** Sliding long window: aligns and buffers super-rows; add() returns true (and fills *out) when a long

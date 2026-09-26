@@ -209,6 +209,59 @@ bool LongDwell::add(SuperRows sr, LongCpi* out)
     for (uint32_t i = 0; i < kCh; ++i)
       std::copy(e.values.begin() + e.sample(i, r, 0), e.values.begin() + e.sample(i, r, 0) + S, v.values.begin() + v.sample(i, q, 0));
   }
+  {  // step diagnostic (LongCpi::step_frac)
+    std::vector<uint32_t> blk(v.rows); { const SuperRows* p = nullptr; uint32_t b = 0;
+      std::vector<const SuperRows*> ids; for (const auto& x : sel) if (std::find(ids.begin(), ids.end(), x.first) == ids.end()) ids.push_back(x.first);
+      for (uint32_t q = 0; q < v.rows; ++q) blk[q] = (uint32_t)(std::find(ids.begin(), ids.end(), sel[q].first) - ids.begin()); (void)p; (void)b; }
+    const uint32_t nb = 1 + (v.rows ? *std::max_element(blk.begin(), blk.end()) : 0);
+    double eb = 0, et = 0, nulln = 0, nulld = 0; std::vector<cd> bs(nb); std::vector<uint32_t> bn(nb);
+    for (uint32_t i = 0; i < kCh; ++i) if (c.found[i]) for (uint32_t k = 0; k < S; ++k) {
+      cd m = 0; uint32_t n = 0;
+      for (uint32_t q = 0; q < v.rows; ++q) if (v.observed[v.cell(q, k)]) { m += cd(v.values[v.sample(i, q, k)]); ++n; }
+      if (n < 2) continue; m /= (double)n;
+      std::fill(bs.begin(), bs.end(), cd(0)); std::fill(bn.begin(), bn.end(), 0u);
+      for (uint32_t q = 0; q < v.rows; ++q) if (v.observed[v.cell(q, k)]) {
+        const cd r = cd(v.values[v.sample(i, q, k)]) - m; et += std::norm(r); bs[blk[q]] += r; ++bn[blk[q]]; }
+      uint32_t used = 0; for (uint32_t j = 0; j < nb; ++j) if (bn[j]) { eb += std::norm(bs[j]) / bn[j]; ++used; }
+      nulln += used - 1; nulld += n - 1;
+    }
+    c.step_frac = et > 0 ? eb / et : 0; c.step_frac_null = nulld > 0 ? nulln / nulld : 0;
+    if (std::getenv("COH_LONG_STEPSVD")) {   // diagnostic: rank of the per-block means across (ch, k)
+      std::vector<std::vector<cd>> M(nb);    // [block][ch*S + k], block mean of the residual (0 where unobserved)
+      for (auto& row : M) row.assign((size_t)kCh * S, cd(0));
+      for (uint32_t i = 0; i < kCh; ++i) if (c.found[i]) for (uint32_t k = 0; k < S; ++k) {
+        cd m = 0; uint32_t n = 0; for (uint32_t q = 0; q < v.rows; ++q) if (v.observed[v.cell(q, k)]) { m += cd(v.values[v.sample(i, q, k)]); ++n; }
+        if (n < 2) continue; m /= (double)n;
+        std::vector<cd> b(nb, 0); std::vector<uint32_t> c2(nb, 0);
+        for (uint32_t q = 0; q < v.rows; ++q) if (v.observed[v.cell(q, k)]) { b[blk[q]] += cd(v.values[v.sample(i, q, k)]) - m; ++c2[blk[q]]; }
+        for (uint32_t j = 0; j < nb; ++j) if (c2[j]) M[j][(size_t)i * S + k] = b[j] / std::sqrt((double)c2[j]);
+      }
+      // Gram matrix across blocks (nb x nb, small) and its eigenvalues by Jacobi-free power iterations: top-1 share.
+      std::vector<cd> Gm((size_t)nb * nb, 0);
+      for (uint32_t a2 = 0; a2 < nb; ++a2) for (uint32_t b2 = 0; b2 < nb; ++b2) { cd acc = 0; for (size_t x = 0; x < M[a2].size(); ++x) acc += M[a2][x] * std::conj(M[b2][x]); Gm[(size_t)a2 * nb + b2] = acc; }
+      double tr = 0; for (uint32_t a2 = 0; a2 < nb; ++a2) tr += Gm[(size_t)a2 * nb + a2].real();
+      std::vector<cd> x(nb, cd(1)); double lam = 0;
+      for (int it = 0; it < 200; ++it) { std::vector<cd> y(nb, 0); for (uint32_t a2 = 0; a2 < nb; ++a2) for (uint32_t b2 = 0; b2 < nb; ++b2) y[a2] += Gm[(size_t)a2 * nb + b2] * x[b2];
+        double nn = 0; for (auto& z : y) nn += std::norm(z); nn = std::sqrt(nn); if (!(nn > 0)) break; for (uint32_t a2 = 0; a2 < nb; ++a2) x[a2] = y[a2] / nn; lam = nn; }
+      // step shape u = M^H x (in ch*S space) vs the window's static profile (per-subcarrier mean)
+      std::vector<cd> u((size_t)kCh * S, 0), sp((size_t)kCh * S, 0);
+      for (uint32_t j = 0; j < nb; ++j) for (size_t z = 0; z < u.size(); ++z) u[z] += std::conj(x[j]) * M[j][z];
+      for (uint32_t i = 0; i < kCh; ++i) if (c.found[i]) for (uint32_t k = 0; k < S; ++k) {
+        cd m = 0; uint32_t n = 0; for (uint32_t q = 0; q < v.rows; ++q) if (v.observed[v.cell(q, k)]) { m += cd(v.values[v.sample(i, q, k)]); ++n; }
+        if (n >= 2) sp[(size_t)i * S + k] = m / (double)n; }
+      cd ip = 0; double nu = 0, ns = 0; for (size_t z = 0; z < u.size(); ++z) if (std::abs(u[z]) > 0) { ip += u[z] * std::conj(sp[z]); nu += std::norm(u[z]); ns += std::norm(sp[z]); }
+      cd ipd = 0; double nd2 = 0;   // delay-error shape: d/dtau of the static profile = -j2pi f s(f)
+      for (uint32_t i = 0; i < kCh; ++i) for (uint32_t k = 0; k < S; ++k) { const size_t z = (size_t)i * S + k; if (!(std::abs(u[z]) > 0)) continue;
+        const cd dz = cd(0, -2 * M_PI * baseband_hz(S, v.scs_hz, k)) * sp[z]; ipd += u[z] * std::conj(dz); nd2 += std::norm(dz); }
+      std::fprintf(stderr, "STEPSVD blocks %u step_frac %.3f null %.3f top1_share %.3f corr_static %.3f corr_delay %.3f\n", nb, c.step_frac, c.step_frac_null, tr > 0 ? lam / tr : 0.0,
+                   (nu > 0 && ns > 0) ? std::abs(ip) / std::sqrt(nu * ns) : 0.0, (nu > 0 && nd2 > 0) ? std::abs(ipd) / std::sqrt(nu * nd2) : 0.0);
+    }
+  }
+  if (std::getenv("COH_LONG_NULLTEST")) {   // diagnostic: random sign per super-row destroys all slow-time coherence
+    static uint32_t st = 12345u;
+    for (uint32_t q = 0; q < v.rows; ++q) { st = st * 1664525u + 1013904223u; if (st & 0x80000000u)
+      for (uint32_t i = 0; i < kCh; ++i) for (uint32_t k = 0; k < S; ++k) v.values[v.sample(i, q, k)] = -v.values[v.sample(i, q, k)]; }
+  }
   // Re-centre on the LOS: CPI j's LOS sat at its own reference error e_j and was moved to the profile's
   // e_ref = e_j - dr_j; the e_j are zero-mean, so e_ref ~ -mean(dr_j) over the contributing CPIs.
   {
