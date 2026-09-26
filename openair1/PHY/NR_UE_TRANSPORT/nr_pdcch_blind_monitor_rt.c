@@ -752,8 +752,10 @@ static uint64_t g_dci01_seen = 0;
  * be decoded at the wrong PRBs and offsets, and RA type 0 PUSCH is not decodable here (nr_rx_pusch_group_tp
  * takes rb_start/rb_size only). 0_0 and discovery grants stay booked (UL DM-RS CFR continues); one refused
  * grant in NR_DCI01_FDRA_PROBE_EVERY is still booked, and one oracle pass ends the refusal for good.
- * KNOWN LIMIT: a type-1 cell whose 0_1 PUSCH fails for another reason (e.g. MCS-limited decode) while 0_0
- * decodes satisfies the same evidence and is refused too -- the probe keeps checking. ---- */
+ * KNOWN LIMIT: a type-1 cell whose 0_1 PUSCH fails for another reason (e.g. MCS-limited decode, or a 0_1-only
+ * data-scrambling-ID mismatch) while 0_0 decodes satisfies the same evidence. That is why the REFUSAL is
+ * opt-in (ISAC_UL_FDRA_REFUSE=1, final review I3): by default a refuse verdict is only counted and logged as
+ * UL_FDRA_WOULD_REFUSE and every grant stays booked. ---- */
 static pthread_mutex_t g_dci01_fdra_lock = PTHREAD_MUTEX_INITIALIZER;
 static nr_dci01_fdra_evidence_t g_dci01_fdra_ev;  /* under g_dci01_fdra_lock */
 static _Atomic int g_dci01_fdra_refuse;          /* 1 = refuse oracle-class 0_1 booking */
@@ -803,7 +805,9 @@ static void nr_pdcch_dci01_fdra_stage(bool periodic)
   const int refuse = (v == NR_DCI01_FDRA_REFUSE);
   if (refuse != atomic_exchange_explicit(&g_dci01_fdra_refuse, refuse, memory_order_relaxed))
     LOG_A(PHY, "SENSING: DCI01_LAYOUT oracle-class 0_1 booking %s (0_1 type-1 PUSCH TB CRC %u/%u, other UL passes %u)\n",
-          refuse ? "REFUSED -- a non-type-1 FDRA is the leading explanation" : "resumed", ev.t1_ok, ev.t1_try, ev.link_ok);
+          refuse ? (nr_dci01_fdra_refuse_enforced() ? "REFUSED -- a non-type-1 FDRA is the leading explanation"
+                                                    : "WOULD BE REFUSED (not enforced: ISAC_UL_FDRA_REFUSE=1)")
+                 : "resumed", ev.t1_ok, ev.t1_try, ev.link_ok);
 }
 static void nr_pdcch_dci01_layout_observe(uint16_t ul_bwp_start, uint16_t ul_bwp_size, int ul_tda_count,
                                           uint16_t dci_length, uint64_t payload)
@@ -871,7 +875,9 @@ static void nr_pdcch_dci01_layout_observe(uint16_t ul_bwp_start, uint16_t ul_bwp
     LOG_A(PHY, "SENSING: DCI01_LAYOUT n=%llu observed | %d of %d layouts still plausible | 0_1 type-1 PUSCH TB CRC %u/%u, "
                "other UL passes %u | fdra %s | UL_FDRA_REFUSED=%lu\n",
           (unsigned long long)g_dci01_seen, g_dci01_resolver->n_alive, g_dci01_resolver->n_hyp, ev.t1_ok, ev.t1_try, ev.link_ok,
-          atomic_load_explicit(&g_dci01_fdra_refuse, memory_order_relaxed) ? "refusing" : (g_dci01_fdra_armed ? "armed" : "type-1"),
+          atomic_load_explicit(&g_dci01_fdra_refuse, memory_order_relaxed)
+              ? (nr_dci01_fdra_refuse_enforced() ? "refusing" : "would-refuse (not enforced)")
+              : (g_dci01_fdra_armed ? "armed" : "type-1"),
           atomic_load_explicit(&g_ul_fdra_refused, memory_order_relaxed));
   }
 }
@@ -1004,17 +1010,22 @@ static void nr_pdcch_dci11_layout_observe(const nr_pdcch_blind_monitor_cfg_t *cf
   }
   const uint64_t dl_tr = atomic_load_explicit(&g_dl_layout_trials, memory_order_relaxed);
   const uint64_t dl_link = atomic_load_explicit(&g_dl_link_pass_at, memory_order_relaxed);
-  /* Link healthy = a non-stage-2 PDSCH passed within the span a refutation needs (64 trials per live layout). */
+  /* "Link healthy" = a non-stage-2 PDSCH passed within the span a refutation needs (64 trials per live layout).
+   * NOTE (final review M7): that counts 1_0/SIB1 passes, so a 1_1-only failure cause (MCS, rank, LBRM,
+   * scrambling) also satisfies it -- which is why retirement is reversible (nr_dci11_resolver_arm_next_mode). */
   const bool dl_link_ok = dl_link != UINT64_MAX
                           && dl_tr - dl_link <= (uint64_t)NR_DCI11_FDRA_ARM_MIN_TRIALS * (uint64_t)(g_dci11_resolver->n_alive + 1);
   if (dl_link_ok && nr_dci11_resolver_all_refuted(g_dci11_resolver, NR_DCI11_FDRA_ARM_MIN_TRIALS)) {
     int added = 0;
     const int m = nr_dci11_resolver_arm_next_mode(g_dci11_resolver, &added);
-    if (m >= 0)
+    const int revived = g_dci11_resolver->last_revived;
+    if (m >= 0 || revived > 0)
       LOG_A(PHY, "SENSING: DCI11_LAYOUT live set refuted by TB CRC (0 passes, >= %d trials per live layout in total, "
-                 "link healthy): retired it, armed FDRA mode %d (1/2 = RA type 0, 3/4 = dynamicSwitch): %d layouts, "
-                 "%d live of %d%s\n",
-            NR_DCI11_FDRA_ARM_MIN_TRIALS, m, added, g_dci11_resolver->n_alive, g_dci11_resolver->n_hyp,
+                 "dl_link_ok = some 1_0/SIB1 or other non-stage-2 PDSCH passed): %s; armed FDRA mode %d (1/2 = RA type 0, "
+                 "3/4 = dynamicSwitch, -1 = none left): %d layouts, %d live of %d%s\n",
+            NR_DCI11_FDRA_ARM_MIN_TRIALS,
+            revived > 0 ? "a LATER stage refuted too -- not an FDRA cause: REVIVED the retired layouts" : "retired it", m,
+            added, g_dci11_resolver->n_alive, g_dci11_resolver->n_hyp,
             g_dci11_resolver->n_hyp >= NR_DCI11_LAYOUT_MAX ? " -- TRUNCATED at NR_DCI11_LAYOUT_MAX" : "");
   }
   const nr_dci11_resolver_t *r = g_dci11_resolver;
@@ -5358,15 +5369,20 @@ constdiag_done:;
         const int ul_verdict = atomic_load_explicit(&g_dci01_fdra_refuse, memory_order_relaxed) ? NR_DCI01_FDRA_REFUSE
                                                                                               : NR_DCI01_FDRA_BOOK;
         const bool ul_oracle = dci01_oracle_grant(u);
+        /* Final review I3: refusal is OFF by default (ISAC_UL_FDRA_REFUSE=1 enables it). Without it the
+         * verdict is only counted and logged as would-refuse: "0_1 type-1 PUSCH 0/64 while 0_0 passes" is
+         * also the exact signature of a 0_1-only data-scrambling-ID or MCS limit. */
+        const bool ul_enforce = nr_dci01_fdra_refuse_enforced();
         unsigned long nref = 0;
         if (ul_verdict == NR_DCI01_FDRA_REFUSE && ul_oracle) {
           nref = atomic_fetch_add_explicit(&g_ul_fdra_refused, 1, memory_order_relaxed) + 1;
           if (nref == 1 || (nref % 10000) == 0)
-            LOG_W(PHY, "SENSING: UL_FDRA_REFUSED n=%lu: the 0_1 FDRA is not a RIV -- 0_1 grant not booked (it would be "
-                       "decoded at the wrong PRBs/offsets); 1 in %d still booked as a probe, 0_0 always booked\n",
-                  nref, NR_DCI01_FDRA_PROBE_EVERY);
+            LOG_W(PHY, "SENSING: UL_FDRA_%s n=%lu: the 0_1 type-1 oracle is refuted -- %s; 0_0 always booked\n",
+                  ul_enforce ? "REFUSED" : "WOULD_REFUSE", nref,
+                  ul_enforce ? "0_1 grant not booked (1 in 64 still booked as a probe)"
+                             : "booked anyway (ISAC_UL_FDRA_REFUSE=1 to refuse; a 0_1-only scrambling/MCS cause looks identical)");
         }
-        if (nr_dci01_fdra_book(ul_verdict, ul_oracle, nref))
+        if (nr_dci01_fdra_book(ul_verdict, ul_oracle, nref, ul_enforce))
           nr_pusch_grant_book_add(u, source_absolute_slot);
       } else {
         g_ul_rejects++;

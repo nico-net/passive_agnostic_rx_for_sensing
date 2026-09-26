@@ -938,6 +938,56 @@ TEST(Dci11Fdra, DynamicSwitchFitsAt106PrbLength49) {
   }
 }
 
+TEST(Dci11Fdra, ALaterRefutationRevivesTheRetiredStage) {
+  // Final review I3: 1_1 grants failing for a non-FDRA reason (MCS/rank/LBRM/scrambling) while SIB1 keeps
+  // the link "healthy" refute EVERY stage alike. The first refutation retires type 1; the second must bring
+  // it back (fresh counters) rather than lose the true layout for the rest of the run.
+  const uint16_t rb = riv_bits_for(106);
+  auto r_heap = std::make_unique<nr_dci11_resolver_t>();
+  nr_dci11_resolver_t &r = *r_heap;
+  const int n1 = nr_dci11_resolver_init_fdra(&r, 0, 106, rb, 2, 46);
+  ASSERT_GT(n1, 1);
+  refute_live(r);
+  int added = 0;
+  ASSERT_EQ(nr_dci11_resolver_arm_next_mode(&r, &added), NR_FDRA_TYPE0_CFG1);
+  EXPECT_EQ(r.last_revived, 0);
+  for (int i = 0; i < n1; i++) ASSERT_TRUE(!r.alive[i] && r.retired[i]) << "type-1 layout " << i << " not retired";
+  refute_live(r); // the type-0 cfg1 stage is refuted too
+  ASSERT_TRUE(nr_dci11_resolver_all_refuted(&r, NR_DCI11_FDRA_ARM_MIN_TRIALS));
+  const int m = nr_dci11_resolver_arm_next_mode(&r, &added);
+  EXPECT_GE(m, 0);
+  EXPECT_EQ(r.last_revived, n1);
+  for (int i = 0; i < n1; i++) {
+    EXPECT_TRUE(r.alive[i]) << "type-1 layout " << i << " lost";
+    EXPECT_FALSE(r.retired[i]);
+    EXPECT_EQ(r.trials[i], 0u) << "revived without fresh counters: the aggregate rule would refute it at once";
+  }
+  EXPECT_FALSE(nr_dci11_resolver_all_refuted(&r, NR_DCI11_FDRA_ARM_MIN_TRIALS));
+  // ... and a type-1 pass now disarms as before, leaving nothing revivable behind.
+  EXPECT_GT(nr_dci11_resolver_disarm(&r, 3), 0);
+  for (int i = 0; i < r.n_hyp; i++) {
+    EXPECT_FALSE(r.retired[i]);
+    if (r.alive[i]) {
+      EXPECT_EQ(r.off[i].fdra_mode, NR_FDRA_TYPE1);
+    }
+  }
+}
+
+TEST(Dci11Fdra, EveryStageArmedStillRevives) {
+  // Once every stage is armed a refutation arms nothing (-1) but must still revive what was retired.
+  const uint16_t rb = riv_bits_for(106);
+  auto r_heap = std::make_unique<nr_dci11_resolver_t>();
+  nr_dci11_resolver_t &r = *r_heap;
+  ASSERT_GT(nr_dci11_resolver_init_fdra(&r, 0, 106, rb, NR_DCI11_TDA_UNKNOWN, 49), 0);
+  int added = 0, m = 0, guard = 0;
+  do {
+    refute_live(r);
+    m = nr_dci11_resolver_arm_next_mode(&r, &added);
+  } while (m >= 0 && ++guard < 16);
+  ASSERT_LT(guard, 16);
+  for (int i = 0; i < r.n_hyp; i++) EXPECT_FALSE(r.retired[i]) << "layout " << i << " left retired at the end";
+}
+
 TEST(Dci11Fdra, AType1PassDisarms) {
   const uint16_t rb = riv_bits_for(106);
   auto r_heap = std::make_unique<nr_dci11_resolver_t>();

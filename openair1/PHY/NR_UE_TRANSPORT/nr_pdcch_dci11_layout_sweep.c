@@ -390,12 +390,14 @@ int nr_dci11_resolver_disarm(nr_dci11_resolver_t *r, int type1_idx)
     return 0;
   const int nh = __atomic_load_n(&r->n_hyp, __ATOMIC_ACQUIRE);
   int killed = 0;
-  for (int i = 0; i < nh; i++)
+  for (int i = 0; i < nh; i++) {
     if (r->alive[i] && r->off[i].fdra_mode != NR_FDRA_TYPE1) {
       r->alive[i] = false;
       r->n_alive--;
       killed++;
     }
+    r->retired[i] = false; /* type 1 is proven: nothing retired is revivable any more */
+  }
   if (type1_idx >= 0 && type1_idx < nh && r->off[type1_idx].fdra_mode == NR_FDRA_TYPE1 && !r->alive[type1_idx]) {
     r->alive[type1_idx] = true; /* killed when its stage was refuted; its own pass proves it */
     r->n_alive++;
@@ -444,37 +446,55 @@ int nr_dci11_resolver_arm_next_mode(nr_dci11_resolver_t *r, int *added)
     *added = 0;
   if (r == NULL || r->observed_len == 0 || r->riv_bits == 0)
     return -1;
-  /* The live set was refuted by TB CRC (the caller checked nr_dci11_resolver_all_refuted): retire it, so
-   * n_alive -- and stage 1's per-payload and pruning cost -- stays one stage's size. A layout with any
-   * pass is kept. nr_dci11_resolver_disarm() revives a type-1 layout whose late pass proves it. */
   const int nh = __atomic_load_n(&r->n_hyp, __ATOMIC_ACQUIRE);
-  for (int i = 0; i < nh && r->fdra_next < NR_DCI11_FDRA_STAGES; i++)
-    if (r->alive[i] && !layout_has_pass(r, i)) {
-      r->alive[i] = false;
-      r->n_alive--;
-    }
+  /* Arm the next stage that fits (APPENDED at [nh, n_hyp), alive, fresh counters). */
   static nr_dci11_layout_t hyp[NR_DCI11_LAYOUT_MAX];   /* arming is rare and single-threaded (the observer) */
   static nr_dci11_offsets_t off[NR_DCI11_LAYOUT_MAX];
   const uint8_t tb_lo = (r->tda_bits == NR_DCI11_TDA_UNKNOWN) ? 0 : r->tda_bits;
   const uint8_t tb_hi = (r->tda_bits == NR_DCI11_TDA_UNKNOWN) ? 4 : r->tda_bits;
-  while (r->fdra_next < NR_DCI11_FDRA_STAGES) {
+  int armed = -1, k = 0;
+  while (armed < 0 && r->fdra_next < NR_DCI11_FDRA_STAGES) {
     const uint8_t m = kArmOrder[r->fdra_next++];
     int n = 0;
     for (uint8_t tb = tb_lo; tb <= tb_hi && n < NR_DCI11_LAYOUT_MAX; tb++) {
-      const int k = nr_dci11_layout_enumerate_mode(r->riv_bits, tb, r->observed_len, r->bwp_start, r->bwp_size, m,
+      const int e = nr_dci11_layout_enumerate_mode(r->riv_bits, tb, r->observed_len, r->bwp_start, r->bwp_size, m,
                                                    hyp + n, NR_DCI11_LAYOUT_MAX - n);
-      for (int i = n; i < n + (k > 0 ? k : 0); i++)
+      for (int i = n; i < n + (e > 0 ? e : 0); i++)
         nr_dci11_layout_offsets(&hyp[i], r->riv_bits, tb, &off[i]);
-      n += (k > 0) ? k : 0;
+      n += (e > 0) ? e : 0;
     }
     if (n == 0)
       continue;   /* this mode does not fit the length (or is a duplicate here): try the next */
-    const int k = append_offsets(r, hyp, off, n);
-    if (added)
-      *added = k;
-    return m;
+    k = append_offsets(r, hyp, off, n);
+    armed = m;
   }
-  return -1;
+  if (added)
+    *added = k;
+  /* The live set [0, nh) was refuted by TB CRC (the caller checked nr_dci11_resolver_all_refuted).
+   *  - Nothing retired yet: retire it, so n_alive -- and stage 1's per-payload and pruning cost -- stays one
+   *    stage's size (a layout with any pass is kept; nr_dci11_resolver_disarm() revives a type-1 layout whose
+   *    late pass proves it). Only when the new stage actually added layouts: retiring with nothing to replace
+   *    it would empty the set, and an empty set is never refuted again, i.e. never revived.
+   *  - Layouts already retired: a later stage has been refuted as well, so the cause is not the FDRA mode.
+   *    Revive them (fresh counters, so the aggregate rule needs new evidence) instead of retiring more. */
+  bool have_retired = false;
+  for (int i = 0; i < nh && !have_retired; i++)
+    have_retired = r->retired[i];
+  r->last_revived = 0;
+  for (int i = 0; i < nh; i++) {
+    if (have_retired && r->retired[i]) {
+      r->retired[i] = false;
+      r->trials[i] = r->ok[i] = r->probe_tr[i] = r->probe_ok[i] = 0;
+      r->alive[i] = true;
+      r->n_alive++;
+      r->last_revived++;
+    } else if (!have_retired && k > 0 && r->alive[i] && !layout_has_pass(r, i)) {
+      r->alive[i] = false;
+      r->retired[i] = true;
+      r->n_alive--;
+    }
+  }
+  return armed;
 }
 
 int nr_dci_resolver_init_from_offsets(nr_dci11_resolver_t *r, uint16_t bwp_size,

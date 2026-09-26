@@ -107,8 +107,13 @@ int nr_dci01_fdra_verdict(const nr_dci01_fdra_evidence_t *e, bool armed, const n
 /** Whether to book one UL grant under a verdict. REFUSE applies to oracle-class 0_1 grants only (0_0 and
  * discovery grants are always booked, so their UL DM-RS CFR and the discovery search continue), and one
  * refused grant in NR_DCI01_FDRA_PROBE_EVERY is still booked so a type-1 pass can end the refusal.
- * `refused_so_far` counts refused oracle grants including this one. Pure. */
+ * `refused_so_far` counts refused oracle grants including this one. `enforce` false (the DEFAULT, final
+ * review I3): a REFUSE verdict is only counted/logged as would-refuse and the grant is booked -- "0_1
+ * type-1 PUSCH 0/64 while 0_0 passes" is also exactly the signature of a 0_1-only data-scrambling-ID or
+ * MCS limit, which refusing would hide rather than fix. Pure. */
 #define NR_DCI01_FDRA_PROBE_EVERY 64
-bool nr_dci01_fdra_book(int verdict, bool oracle_grant, unsigned long refused_so_far);
+bool nr_dci01_fdra_book(int verdict, bool oracle_grant, unsigned long refused_so_far, bool enforce);
+/** ISAC_UL_FDRA_REFUSE=1 enables the refusal (read once). Default off. */
+bool nr_dci01_fdra_refuse_enforced(void);
 
 #endif /* __NR_PDCCH_DCI01_LAYOUT_SWEEP_H__ */

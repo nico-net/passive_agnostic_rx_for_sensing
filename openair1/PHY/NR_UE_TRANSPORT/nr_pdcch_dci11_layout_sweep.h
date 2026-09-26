@@ -171,6 +171,8 @@ typedef struct {
   uint16_t bwp_start;
   uint8_t  tda_count;      ///< last nr_dci11_resolver_set_tda_count(), applied to modes armed later
   uint8_t  fdra_next;      ///< next FDRA STAGE index to arm (1..4; NR_DCI11_FDRA_STAGES = all armed / disarmed)
+  bool     retired[NR_DCI11_LAYOUT_MAX]; ///< dead because its stage was refuted (revivable), not pruned by stage 1
+  int      last_revived;   ///< layouts revived by the last nr_dci11_resolver_arm_next_mode() call (for the log)
   /* DISTRIBUTIONAL EVIDENCE (stage 1). A correctly aligned field has structure on a live cell --
    * MCS sits on one or two values under load, RV is overwhelmingly 0, the TDA index uses one to three
    * entries, the antenna-ports codepoint is constant for a single-layer UE -- while a misaligned read
@@ -203,14 +205,20 @@ int nr_dci11_resolver_init_fdra(nr_dci11_resolver_t *r, uint16_t bwp_start, uint
 int nr_dci11_fdra_stage(uint8_t fdra_mode);
 
 /** A type-1 layout passed a TB / code-block CRC: type 1 is proven. Kill every non-type-1 layout, revive
- * `type1_idx` if its stage was retired, and never arm again. Returns the number killed. */
+ * `type1_idx` if its stage was retired (the other retired type-1 layouts stay dead: their sibling's pass
+ * does not un-refute them), and never arm again. Returns the number killed. */
 int nr_dci11_resolver_disarm(nr_dci11_resolver_t *r, int type1_idx);
 
 /* Trials with zero TB-CRC / code-block passes before a layout counts as refuted by stage 2. 64 = the
  * stage-2 decision floor (DCI11_S2_MIN_TRIALS). Against the lowest true-layout rate measured on these
  * rigs (12 % marginal CRC, rank-4 bed 2026-09-16) the truth reads 0/64 with probability 0.88^64 =
- * 2.8e-4 -- and a false refutation is not destructive: arming only ADDS the next mode's hypotheses
- * (nothing already live is dropped), i.e. it costs the pre-staging dilution, not the answer. */
+ * 2.8e-4. A false refutation is NOT harmless by itself: arming RETIRES the refuted live set, and a
+ * retired layout is never offered again, so on its own a false refutation (1_1 grants failing for an
+ * MCS, rank, LBRM or scrambling reason while SIB1 keeps the link "healthy") would lose the true layout
+ * for the rest of the run. What bounds it is REVERSIBILITY (final review I3): if the next stage is
+ * refuted as well, the refutation is evidently not about the FDRA mode, and every retired layout is
+ * revived with fresh counters (nr_dci11_resolver_arm_next_mode()). A wrong refutation costs time and
+ * dilution, never the answer. */
 #define NR_DCI11_FDRA_ARM_MIN_TRIALS 64
 
 /** True when no live layout has a pass (own feed(), code-block probe, or interpretation family) and the live
@@ -220,10 +228,16 @@ int nr_dci11_resolver_disarm(nr_dci11_resolver_t *r, int type1_idx);
 bool nr_dci11_resolver_all_refuted(const nr_dci11_resolver_t *r, uint32_t min_trials);
 
 /** Arm the next FDRA stage (type 0 cfg1, dynamicSwitch cfg1, dynamicSwitch cfg2, type 0 cfg2 -- skipping any
- * with no layout at this length). The refuted live set (every live layout WITHOUT a pass) is retired first,
- * so n_alive stays one stage; the new layouts are APPENDED alive with fresh counters. Call only after
- * nr_dci11_resolver_all_refuted(). Returns the mode armed and *added (may be NULL) its count, or -1 once
- * every stage is armed. Caller-serialised (the stage-1 observer). */
+ * with no layout at this length); the new layouts are APPENDED alive with fresh counters. Call only after
+ * nr_dci11_resolver_all_refuted(). REVERSIBLE retirement (final review I3):
+ *  - no layout currently retired: the refuted live set (every live layout WITHOUT a pass) is retired, so
+ *    n_alive stays one stage (the previous behaviour);
+ *  - some layouts already retired (so this is a LATER stage refuted too): nothing is retired; every
+ *    retired layout is revived with fresh counters instead, since a cause that refutes stage after stage
+ *    is not the FDRA mode, and dropping them would lose the truth. This also happens once every stage is
+ *    armed (the call then returns -1 but still revives).
+ * r->last_revived reports the count revived. Returns the mode armed and *added (may be NULL) its count, or
+ * -1 once every stage is armed. Caller-serialised (the stage-1 observer). */
 int nr_dci11_resolver_arm_next_mode(nr_dci11_resolver_t *r, int *added);
 
 /** Append offsets to a resolver built by nr_dci_resolver_init_from_offsets() (DCI 0_1 FDRA staging), alive,

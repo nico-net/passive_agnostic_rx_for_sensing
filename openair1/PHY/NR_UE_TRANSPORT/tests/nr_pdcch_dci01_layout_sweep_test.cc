@@ -344,10 +344,12 @@ TEST(Dci01Fdra, TypeZeroTruthWithConstantLeadingBitsKeepsType1AliveUntilTbCrcRef
     EXPECT_TRUE(r.alive[truth]) << "stage 1 deleted the armed truth";
     EXPECT_EQ(nr_dci01_fdra_verdict(&ev, true, &r), NR_DCI01_FDRA_REFUSE) << "the refusal did not fire on a type-0 cell";
     // Refusal applies to oracle-class 0_1 only: 0_0 and discovery grants stay booked; 1 in 64 is a probe.
-    EXPECT_TRUE(nr_dci01_fdra_book(NR_DCI01_FDRA_REFUSE, false, 0)) << "a DCI 0_0 grant was refused";
-    EXPECT_FALSE(nr_dci01_fdra_book(NR_DCI01_FDRA_REFUSE, true, 1));
-    EXPECT_TRUE(nr_dci01_fdra_book(NR_DCI01_FDRA_REFUSE, true, NR_DCI01_FDRA_PROBE_EVERY)) << "no probe";
-    EXPECT_TRUE(nr_dci01_fdra_book(NR_DCI01_FDRA_BOOK, true, 0));
+    EXPECT_TRUE(nr_dci01_fdra_book(NR_DCI01_FDRA_REFUSE, false, 0, true)) << "a DCI 0_0 grant was refused";
+    EXPECT_FALSE(nr_dci01_fdra_book(NR_DCI01_FDRA_REFUSE, true, 1, true));
+    EXPECT_TRUE(nr_dci01_fdra_book(NR_DCI01_FDRA_REFUSE, true, NR_DCI01_FDRA_PROBE_EVERY, true)) << "no probe";
+    EXPECT_TRUE(nr_dci01_fdra_book(NR_DCI01_FDRA_BOOK, true, 0, true));
+    // Final review I3: without ISAC_UL_FDRA_REFUSE=1 a REFUSE verdict books every grant (would-refuse only).
+    EXPECT_TRUE(nr_dci01_fdra_book(NR_DCI01_FDRA_REFUSE, true, 1, false)) << "refused although enforcement is off";
     // More 0_0 passes never flip it; one oracle pass ends it for good.
     for (int k = 0; k < 100; k++) nr_dci01_fdra_note(&ev, false, true);
     EXPECT_EQ(nr_dci01_fdra_verdict(&ev, true, &r), NR_DCI01_FDRA_REFUSE) << "0_0 passes disabled the refusal";

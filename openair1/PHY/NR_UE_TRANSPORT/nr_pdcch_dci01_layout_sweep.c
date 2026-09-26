@@ -15,6 +15,7 @@
 #include "nr_pdcch_dci01_layout_sweep.h"
 
 #include <stddef.h>
+#include <stdlib.h>
 
 /* TS 38.212 7.3.1.1.2 constant-width fields: identifier 1 | MCS 5 | NDI 1 | RV 2 |
  * UL-SCH indicator 1. Everything else is switch-dependent and lives in the group sums. */
@@ -212,7 +213,17 @@ int nr_dci01_fdra_verdict(const nr_dci01_fdra_evidence_t *e, bool armed, const n
   return NR_DCI01_FDRA_BOOK;
 }
 
-bool nr_dci01_fdra_book(int verdict, bool oracle_grant, unsigned long refused_so_far)
+bool nr_dci01_fdra_book(int verdict, bool oracle_grant, unsigned long refused_so_far, bool enforce)
 {
-  return verdict != NR_DCI01_FDRA_REFUSE || !oracle_grant || (refused_so_far % NR_DCI01_FDRA_PROBE_EVERY) == 0;
+  return !enforce || verdict != NR_DCI01_FDRA_REFUSE || !oracle_grant || (refused_so_far % NR_DCI01_FDRA_PROBE_EVERY) == 0;
+}
+
+bool nr_dci01_fdra_refuse_enforced(void)
+{
+  static int on = -1;
+  if (on < 0) {
+    const char *e = getenv("ISAC_UL_FDRA_REFUSE");
+    on = (e != NULL && atoi(e) != 0) ? 1 : 0;
+  }
+  return on;
 }
