@@ -546,6 +546,17 @@ static uint64_t g_pdsch_configuration;
  * marginal true rate of 1% has P(0 passes in 1000 trials) ~= 4.3e-5 -- 1000 trials is comfortably
  * past "unlucky" for a right layout while still cheap enough to try several wrong ones inside a run. */
 #define DCI11_PIN_GIVEUP_TRIALS 1000
+/* R30 item 2: occasions (not real Technique-D trials, which arrive far slower and far less evenly --
+ * measured live: the FIRST 200-occasion block on this bed carried 45 real trials, every block after
+ * it in the same run carried ~0, because the deferred decode queue's backlog (scanq drop_full) grows
+ * over a run's lifetime and starves later occasions of ever reaching a real trial at all) a pinned
+ * candidate gets before rotating, when the trial-count giveup above hasn't fired first. Real trials
+ * are therefore a scarce, front-loaded resource: a SMALL block that cycles through the handful of
+ * fallback candidates repeatedly gives each of them several independent chances to land its window
+ * on a still-healthy stretch of the queue, where a large block commits most of a run's healthy
+ * window to whichever candidate happened to be offered first (measured: exactly this cost FIXED a
+ * 0-crc_ok run when the first-offered candidate was not the true one). */
+#define DCI11_PIN_BLOCK_OCCASIONS 50
 /* While the configured layout is still among stage 1's survivors, hand over only at 4 (the measured
  * dilution limit); once stage 1 has REFUTED it, waiting is pointless -- the hand-picked fallback
  * enumeration hard-codes antenna_ports=4 bits and can never contain the truth. OTA 2026-09-15 on the
@@ -5631,19 +5642,36 @@ constdiag_done:;
        * different layout reads a different tda_index/mcs from the SAME bits), so evidence gathered
        * under one layout cannot simply be merged into another's key -- pinning instead keeps
        * SELECTING the same key occasion after occasion, so one context actually gets fed.
+       *
+       * ROTATION, not a one-shot trial-count giveup: a first cut here pinned to whichever candidate
+       * happened to be offered first and only gave up after DCI11_PIN_GIVEUP_TRIALS (1000) zero-pass
+       * REAL Technique-D trials. Measured live on this bed: real trials land on the pinned key at
+       * only a few percent of the raw occasion rate (deferred-queue drops, RV/decode-cap skips), so
+       * 1000 trials would need far longer than any practical run -- a wrong first pick stayed pinned
+       * for the whole capture with 0/32054 decode attempts and never once reached the giveup check's
+       * own threshold, which is worse than the round-robin churn it replaced (that at least sampled
+       * every candidate eventually). Fixed: rotate to the next candidate after a bounded number of
+       * OCCASIONS (cheap to count, unlike real trials) instead of waiting on trial-count evidence
+       * that arrives too slowly to matter; the trial-count giveup is kept as a second, faster exit
+       * for a link where real trials DO arrive quickly. Settled/preferred (already evidence-backed
+       * elsewhre in this function) are untouched and still take priority over both.
        * The pin auto-invalidates on a real cell-geometry change (dci11_pin_cfg vs the live
-       * g_pdsch_configuration) and is explicitly abandoned only once ITS OWN Technique-D evidence --
-       * not a guess -- shows a fair trial budget with zero CRC passes; a pin that is merely absent
-       * from this occasion's top-N offered list (transient resolver churn, not a verdict) is left
-       * alone rather than replaced, so it can resume being fed the moment it reappears. */
+       * g_pdsch_configuration); a pin merely absent from this occasion's top-N offered list
+       * (transient resolver churn, not a verdict) is left alone rather than rotated, so it resumes
+       * being fed the moment it reappears without consuming rotation budget. */
       static bool     dci11_pin_valid[65536];
       static uint16_t dci11_pin_layout[65536];
       static uint64_t dci11_pin_cfg[65536];
-      if (dci11_pin_valid[raw->rnti] && dci11_pin_cfg[raw->rnti] != g_pdsch_configuration)
+      static uint32_t dci11_pin_occ[65536]; /* occasions served on the current pin, for the rotation bound */
+      if (dci11_pin_valid[raw->rnti] && dci11_pin_cfg[raw->rnti] != g_pdsch_configuration) {
         dci11_pin_valid[raw->rnti] = false; /* cell geometry changed under this RNTI's pin */
+        dci11_pin_occ[raw->rnti] = 0;
+      }
       int selected;
       if (settled>=0) {
         selected = settled;
+      } else if (preferred>=0) {
+        selected = preferred; /* real evidence already promoted this candidate: take it over any pin */
       } else {
         int pinned = -1;
         if (dci11_pin_valid[raw->rnti])
@@ -5652,26 +5680,29 @@ constdiag_done:;
         if (pinned>=0) {
           uint32_t p_ok=0, p_tr=0;
           nr_pdsch_config_sweep_context_stats(keys[pinned], raw->rnti, 0xFF, cfg->dmrs_typeA_position, &p_ok, &p_tr);
-          if (p_tr>=DCI11_PIN_GIVEUP_TRIALS && p_ok==0) {
-            static uint32_t s_giveup_left=50; /* noise-floor RNTIs can drive this too: bounded, like context eviction */
+          const bool trial_giveup = p_tr>=DCI11_PIN_GIVEUP_TRIALS && p_ok==0;
+          const bool rotate = ++dci11_pin_occ[raw->rnti] >= DCI11_PIN_BLOCK_OCCASIONS;
+          if (trial_giveup || rotate) {
+            static uint32_t s_giveup_left=200; /* noise-floor RNTIs can drive this too: bounded, like context eviction */
             if (s_giveup_left) {
               s_giveup_left--;
-              LOG_W(PHY,"SENSING: DL layout pin GIVEUP rnti=0x%x layout_id=%u after %u trials, 0 CRC -- trying another candidate\n",
-                    raw->rnti,(unsigned)dci11_pin_layout[raw->rnti],(unsigned)p_tr);
+              LOG_W(PHY,"SENSING: DL layout pin %s rnti=0x%x layout_id=%u after %u occasions (%u trials, 0 CRC) -- trying another candidate\n",
+                    trial_giveup ? "GIVEUP" : "ROTATE", raw->rnti,(unsigned)dci11_pin_layout[raw->rnti],
+                    (unsigned)dci11_pin_occ[raw->rnti],(unsigned)p_tr);
             }
             dci11_pin_valid[raw->rnti]=false;
+            dci11_pin_occ[raw->rnti]=0;
             pinned=-1;
           }
         }
         if (pinned>=0) {
           selected = pinned;
         } else {
-          selected = preferred>=0 ? preferred : fallback;
-          if (!dci11_pin_valid[raw->rnti]) { /* keep an existing (merely not-offered-this-occasion) pin */
-            dci11_pin_valid[raw->rnti]=true;
-            dci11_pin_layout[raw->rnti]=layout_ids[selected];
-            dci11_pin_cfg[raw->rnti]=g_pdsch_configuration;
-          }
+          selected = fallback; /* Thompson/round-robin's own pick seeds (or rotates) the new pin */
+          dci11_pin_valid[raw->rnti]=true;
+          dci11_pin_layout[raw->rnti]=layout_ids[selected];
+          dci11_pin_cfg[raw->rnti]=g_pdsch_configuration;
+          dci11_pin_occ[raw->rnti]=0;
         }
       }
       cand_task[ti].out=layouts[selected];
