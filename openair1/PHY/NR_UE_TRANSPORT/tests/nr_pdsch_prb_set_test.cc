@@ -104,6 +104,49 @@ TEST(PrbSet, GatherConcatenatesSegmentsInDataOrder) {
   for (int i = 0; i < 8; i++) EXPECT_EQ(idx[i], want[i]);
 }
 
+TEST(PrbSet, ListNormaliseRejectsDuplicateOutOfBwpAndOverLength) {
+  // The pure core of nr_pdsch_passive_alloc_normalise(): every producer's PRB list goes through it.
+  uint32_t bm[9] = {0xdeadbeef};
+  int lo = -7, hi = -7;
+  const uint16_t ok[4] = {40, 3, 4, 100};  // data order, not sorted
+  ASSERT_TRUE(nr_prb_list_normalise(ok, 4, 106, bm, 9, &lo, &hi));
+  EXPECT_EQ(lo, 3); EXPECT_EQ(hi, 100);
+  EXPECT_EQ(bm[0], (1u << 3) | (1u << 4)); EXPECT_EQ(bm[1], 1u << 8); EXPECT_EQ(bm[3], 1u << 4);
+  const uint16_t dup[3] = {5, 6, 5};
+  bm[0] = 0x1234u; lo = hi = -7;
+  EXPECT_FALSE(nr_prb_list_normalise(dup, 3, 106, bm, 9, &lo, &hi));
+  EXPECT_EQ(bm[0], 0x1234u) << "outputs must be untouched on failure";
+  EXPECT_EQ(lo, -7);
+  const uint16_t oob[2] = {10, 106};  // PRB 106 is outside a 106-PRB BWP
+  EXPECT_FALSE(nr_prb_list_normalise(oob, 2, 106, bm, 9, &lo, &hi));
+  std::vector<uint16_t> big(NR_PRB_SET_MAX + 1);
+  for (int i = 0; i <= NR_PRB_SET_MAX; i++) big[i] = (uint16_t)i;
+  EXPECT_FALSE(nr_prb_list_normalise(big.data(), NR_PRB_SET_MAX + 1, 275, bm, 9, &lo, &hi));
+  EXPECT_TRUE(nr_prb_list_normalise(big.data(), NR_PRB_SET_MAX, 275, bm, 9, &lo, &hi));
+  EXPECT_FALSE(nr_prb_list_normalise(ok, 0, 106, bm, 9, &lo, &hi));
+}
+
+TEST(PrbSet, FdraPrbsDecodesBothRivCasesAndTheModes) {
+  uint16_t p[NR_PRB_SET_MAX];
+  int t0 = -1;
+  // RIV case 2 (L-1 > N/2): S=10, L=80 on N=106 -> RIV = N(N-L+1) + (N-1-S) = 2957.
+  ASSERT_EQ(nr_fdra_prbs(2957, NR_FDRA_TYPE1, 0, 13, 0, 106, p, NR_PRB_SET_MAX, &t0), 80);
+  EXPECT_EQ(t0, 0); EXPECT_EQ(p[0], 10); EXPECT_EQ(p[79], 89);
+  EXPECT_EQ(nr_fdra_prbs(106 * 107 / 2, NR_FDRA_TYPE1, 0, 13, 0, 106, p, NR_PRB_SET_MAX, nullptr), 0);
+  EXPECT_EQ(nr_fdra_prbs(0, NR_FDRA_TYPE0_CFG1, 14, 13, 0, 106, p, NR_PRB_SET_MAX, &t0), 0) << "empty bitmap";
+  ASSERT_EQ(nr_fdra_prbs(1u << 13, NR_FDRA_TYPE0_CFG1, 14, 13, 0, 106, p, NR_PRB_SET_MAX, &t0), 8);  // RBG 0, P=8
+  EXPECT_EQ(t0, 1); EXPECT_EQ(p[7], 7);
+  // dynamicSwitch config2 (N_RBG 7, RIV 13 -> width 14): MSB 0 = bitmap in the 7 LSBs, MSB 1 = RIV.
+  ASSERT_EQ(nr_fdra_prbs(1u, NR_FDRA_DYN_CFG2, 7, 13, 0, 106, p, NR_PRB_SET_MAX, &t0), 106 - 96);  // last RBG, P=16
+  EXPECT_EQ(t0, 1);
+  ASSERT_EQ(nr_fdra_prbs((1u << 13) | 2957u, NR_FDRA_DYN_CFG2, 7, 13, 0, 106, p, NR_PRB_SET_MAX, &t0), 80);
+  EXPECT_EQ(t0, 0);
+  EXPECT_EQ(nr_fdra_bits(NR_FDRA_TYPE1, 14, 13), 13);
+  EXPECT_EQ(nr_fdra_bits(NR_FDRA_TYPE0_CFG2, 7, 13), 7);
+  EXPECT_EQ(nr_fdra_bits(NR_FDRA_DYN_CFG1, 14, 13), 15);
+  EXPECT_EQ(nr_fdra_bits(NR_FDRA_DYN_CFG2, 7, 13), 14);
+}
+
 int main(int argc, char **argv)
 {
   testing::InitGoogleTest(&argc, argv);

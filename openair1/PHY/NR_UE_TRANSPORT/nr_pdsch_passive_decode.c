@@ -1244,23 +1244,14 @@ bool nr_pdsch_passive_alloc_normalise(freq_alloc_bitmap_t *fa, int bwp_size)
 {
   if (fa->n_prb_list == 0)
     return true;
-  const int n = fa->n_prb_list;
-  if (n > NR_PRB_SET_MAX)
-    return false;
-  uint32_t bm[sizeofArray(fa->bitmap)] = {0};
-  int lo = NR_PRB_SET_MAX, hi = -1;
-  for (int i = 0; i < n; i++) {
-    const int r = fa->prb_list[i];
-    if (r >= bwp_size || r >= (int)(32 * sizeofArray(bm)) || ((bm[r / 32] >> (r % 32)) & 1u))
-      return false; /* outside the BWP, or listed twice */
-    bm[r / 32] |= 1u << (r % 32);
-    if (r < lo) lo = r;
-    if (r > hi) hi = r;
-  }
+  uint32_t bm[sizeofArray(fa->bitmap)];
+  int lo, hi;
+  if (!nr_prb_list_normalise(fa->prb_list, fa->n_prb_list, bwp_size, bm, (int)sizeofArray(bm), &lo, &hi))
+    return false; /* fa untouched */
   memcpy(fa->bitmap, bm, sizeof(bm));
   fa->first_rb = lo;
   fa->last_rb = hi;
-  fa->num_rbs = n;
+  fa->num_rbs = fa->n_prb_list;
   return true;
 }
 

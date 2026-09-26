@@ -35,12 +35,13 @@ bool nr_dci11_layout_offsets(const nr_dci11_layout_t *l, uint16_t riv_bits, uint
                              nr_dci11_offsets_t *out)
 {
   if (l == NULL || out == NULL || riv_bits == 0 || l->bwp_ind > 2
-      || l->ant_ports < 4 || l->ant_ports > 6) {
+      || l->ant_ports < 4 || l->ant_ports > 6 || l->fdra_mode > NR_FDRA_DYN_CFG2
+      || (l->fdra_mode != NR_FDRA_TYPE1 && (l->n_rbg == 0 || l->n_rbg > 31))) {
     return false;
   }
   uint16_t p = DCI11_FIXED_ID;   /* carrier indicator is 0 here -- see the header */
   p += l->bwp_ind;
-  out->riv = p;            p += riv_bits;
+  out->riv = p;            p += (uint16_t)nr_fdra_bits(l->fdra_mode, l->n_rbg, riv_bits);
   out->tda = p;            p += tda_bits;
   p += l->pre_mcs;                                  /* vrb | prb bundling | rate match | zp csirs */
   out->mcs = p;            p += DCI11_MCS_BITS;
@@ -56,6 +57,9 @@ bool nr_dci11_layout_offsets(const nr_dci11_layout_t *l, uint16_t riv_bits, uint
   out->total = p;
   out->tda_bits = tda_bits;
   out->tda_valid = 0;
+  out->fdra_mode = l->fdra_mode;
+  out->n_rbg = l->n_rbg;
+  out->riv_bits = (uint8_t)riv_bits;
   return true;
 }
 
@@ -85,16 +89,71 @@ static const uint8_t kCbgFlush[]= {0, 1};                /* codeBlockGroupFlushI
 
 /* A layout is identified by its group SUMS, so many switch combinations collapse to one entry.
  * Deduplicating is not cosmetic: without it the same layout would be scored several times and
- * would dominate a round-robin purely by appearing more often. */
-static bool already_have(const nr_dci11_layout_t *out, int n, const nr_dci11_layout_t *c)
+ * would dominate a round-robin purely by appearing more often. So each group's DISTINCT sums are
+ * collected first, in first-occurrence order of the per-switch loops, and only those are combined:
+ * distinct by construction (no O(n^2) search -- it cost 551 ms at 26.8k layouts), and in exactly the
+ * order the per-switch nesting emitted (groups are independent and nested in the same order, and the
+ * DM-RS type stays innermost). */
+static int push_distinct(uint8_t *v, int n, int cap, int x)
 {
-  for (int i = 0; i < n; i++) {
-    if (out[i].bwp_ind == c->bwp_ind && out[i].pre_mcs == c->pre_mcs && out[i].pre_ant == c->pre_ant
-        && out[i].ant_ports == c->ant_ports && out[i].post_ant == c->post_ant && out[i].dmrs_type == c->dmrs_type) {
-      return true;
-    }
-  }
-  return false;
+  for (int i = 0; i < n; i++)
+    if (v[i] == x)
+      return n;
+  if (n >= cap)
+    return n; /* cannot happen with the switch tables below (<= 18 distinct sums per group) */
+  v[n] = (uint8_t)x;
+  return n + 1;
+}
+
+/* Appends one FDRA mode's layouts to out[n..max). */
+static int enumerate_mode(uint16_t riv_bits, uint8_t tda_bits, uint16_t observed_len, uint8_t fdra_mode,
+                          uint8_t n_rbg, nr_dci11_layout_t *out, int n, int max)
+{
+  uint8_t pm[32], pa[32], po[32];
+  int npm = 0, npa = 0, npo = 0;
+  for (int b = 0; b < NELEM(kVrb); b++)            /* vrb | prb bundling | rate match | zp csirs */
+    for (int c = 0; c < NELEM(kBundling); c++)
+      for (int d = 0; d < NELEM(kRateM); d++)
+        for (int e = 0; e < NELEM(kZpCsi); e++)
+          npm = push_distinct(pm, npm, 32, kVrb[b] + kBundling[c] + kRateM[d] + kZpCsi[e]);
+  for (int f = 0; f < NELEM(kTb2); f++)            /* tb2 | dai | harq | tpc | ri | p2h */
+    for (int g = 0; g < NELEM(kDai); g++)
+      for (int hq = 0; hq < NELEM(kHarq); hq++)
+        for (int h = 0; h < NELEM(kP2H); h++)
+          npa = push_distinct(pa, npa, 32, kTb2[f] + kHarq[hq] + kDai[g] + DCI11_TPC + DCI11_PUCCH_RI + kP2H[h]);
+  for (int j = 0; j < NELEM(kTci); j++)            /* tci | srs | cbg | cbg flush */
+    for (int k = 0; k < NELEM(kSrs); k++)
+      for (int m = 0; m < NELEM(kCbg); m++)
+        for (int q = 0; q < NELEM(kCbgFlush); q++) {
+          /* A flush indicator without CBG transmission is not a configuration the RRC can produce;
+           * allowing it would invent layouts. */
+          if (kCbg[m] == 0 && kCbgFlush[q] != 0)
+            continue;
+          npo = push_distinct(po, npo, 32, kTci[j] + kSrs[k] + kCbg[m] + kCbgFlush[q]);
+        }
+  for (int a = 0; a < NELEM(kBwpInd); a++)
+    for (int x = 0; x < npm; x++)
+      for (int y = 0; y < npa; y++)
+        for (int i = 0; i < NELEM(kAnt); i++)
+          for (int z = 0; z < npo; z++)
+            /* A 5-bit antenna-ports field is Table -2 (type 1, len 2) OR Table -3 (type 2, len 1):
+             * same width, different port sets, so two layouts. */
+            for (int dt = 0; dt < 2; dt++) {
+              if ((kAnt[i] == 4 && dt == 1) || (kAnt[i] == 6 && dt == 0))
+                continue;
+              const nr_dci11_layout_t cand = {.bwp_ind = kBwpInd[a], .pre_mcs = pm[x], .pre_ant = pa[y],
+                                              .ant_ports = kAnt[i], .post_ant = po[z], .dmrs_type = (uint8_t)dt,
+                                              .fdra_mode = fdra_mode, .n_rbg = n_rbg};
+              nr_dci11_offsets_t off;
+              /* THE CONSTRAINT. The DCI length is already derived by the length sweep, so anything
+               * that does not sum to it cannot be this cell. */
+              if (!nr_dci11_layout_offsets(&cand, riv_bits, tda_bits, &off) || off.total != observed_len)
+                continue;
+              if (n >= max)
+                return n;
+              out[n++] = cand;
+            }
+  return n;
 }
 
 int nr_dci11_layout_enumerate(uint16_t riv_bits, uint8_t tda_bits, uint16_t observed_len,
@@ -103,66 +162,41 @@ int nr_dci11_layout_enumerate(uint16_t riv_bits, uint8_t tda_bits, uint16_t obse
   if (out == NULL || max <= 0 || riv_bits == 0 || observed_len == 0) {
     return -1;
   }
+  return enumerate_mode(riv_bits, tda_bits, observed_len, NR_FDRA_TYPE1, 0, out, 0, max);
+}
+
+/* N_RBG of a mode on this BWP, or -1 when the mode is not searched there: no RBG table entry, or
+ * rbg-Size config2 with config1's RBG size (it reads exactly the same bits the same way). */
+static int mode_n_rbg(int m, uint16_t bwp_start, uint16_t bwp_size)
+{
+  if (m == NR_FDRA_TYPE1)
+    return 0;
+  const int P = nr_fdra_rbg_size(m, bwp_size);
+  if (P == 0 || ((m == NR_FDRA_TYPE0_CFG2 || m == NR_FDRA_DYN_CFG2) && P == nr_fdra_rbg_size(m - 1, bwp_size)))
+    return -1;
+  return nr_rbg_count(bwp_start, bwp_size, P);
+}
+
+int nr_dci11_layout_enumerate_mode(uint16_t riv_bits, uint8_t tda_bits, uint16_t observed_len, uint16_t bwp_start,
+                                   uint16_t bwp_size, uint8_t fdra_mode, nr_dci11_layout_t *out, int max)
+{
+  if (out == NULL || max <= 0 || riv_bits == 0 || observed_len == 0 || bwp_size == 0 || fdra_mode > NR_FDRA_DYN_CFG2) {
+    return -1;
+  }
+  const int n_rbg = mode_n_rbg(fdra_mode, bwp_start, bwp_size);
+  return n_rbg < 0 ? 0 : enumerate_mode(riv_bits, tda_bits, observed_len, fdra_mode, (uint8_t)n_rbg, out, 0, max);
+}
+
+int nr_dci11_layout_enumerate_fdra(uint16_t riv_bits, uint8_t tda_bits, uint16_t observed_len,
+                                   uint16_t bwp_start, uint16_t bwp_size, nr_dci11_layout_t *out, int max)
+{
   int n = 0;
-  for (int a = 0; a < NELEM(kBwpInd); a++) {
-    for (int b = 0; b < NELEM(kVrb); b++) {
-      for (int c = 0; c < NELEM(kBundling); c++) {
-        for (int d = 0; d < NELEM(kRateM); d++) {
-          for (int e = 0; e < NELEM(kZpCsi); e++) {
-            for (int f = 0; f < NELEM(kTb2); f++) {
-              for (int g = 0; g < NELEM(kDai); g++) {
-                for (int hq = 0; hq < NELEM(kHarq); hq++) {
-                for (int h = 0; h < NELEM(kP2H); h++) {
-                  for (int i = 0; i < NELEM(kAnt); i++) {
-                    for (int j = 0; j < NELEM(kTci); j++) {
-                      for (int k = 0; k < NELEM(kSrs); k++) {
-                        for (int m = 0; m < NELEM(kCbg); m++) {
-                          for (int q = 0; q < NELEM(kCbgFlush); q++) {
-                            /* A flush indicator without CBG transmission is not a configuration
-                             * the RRC can produce; allowing it would invent layouts. */
-                            if (kCbg[m] == 0 && kCbgFlush[q] != 0) {
-                              continue;
-                            }
-                            /* A 5-bit antenna-ports field is Table -2 (type 1, len 2) OR Table -3
-                             * (type 2, len 1): same width, different port sets, so two layouts. */
-                            for (int dt = 0; dt < 2; dt++) {
-                              if ((kAnt[i] == 4 && dt == 1) || (kAnt[i] == 6 && dt == 0))
-                                continue;
-                            nr_dci11_layout_t cand;
-                            cand.bwp_ind   = kBwpInd[a];
-                            cand.pre_mcs   = (uint8_t)(kVrb[b] + kBundling[c] + kRateM[d] + kZpCsi[e]);
-                            cand.pre_ant   = (uint8_t)(kTb2[f] + kHarq[hq] + kDai[g]
-                                                       + DCI11_TPC + DCI11_PUCCH_RI + kP2H[h]);
-                            cand.ant_ports = kAnt[i];
-                            cand.post_ant  = (uint8_t)(kTci[j] + kSrs[k] + kCbg[m] + kCbgFlush[q]);
-                            cand.dmrs_type = (uint8_t)dt;
-                            nr_dci11_offsets_t off;
-                            if (!nr_dci11_layout_offsets(&cand, riv_bits, tda_bits, &off)) {
-                              continue;
-                            }
-                            /* THE CONSTRAINT. The DCI length is already derived by the length
-                             * sweep, so anything that does not sum to it cannot be this cell. */
-                            if (off.total != observed_len || already_have(out, n, &cand)) {
-                              continue;
-                            }
-                            if (n >= max) {
-                              return n;
-                            }
-                            out[n++] = cand;
-                            }
-                          }
-                        }
-                      }
-                    }
-                  }
-                }
-                }
-              }
-            }
-          }
-        }
-      }
-    }
+  for (int m = NR_FDRA_TYPE1; m <= NR_FDRA_DYN_CFG2 && n < max; m++) {
+    const int k = nr_dci11_layout_enumerate_mode(riv_bits, tda_bits, observed_len, bwp_start, bwp_size, (uint8_t)m,
+                                                 out + n, max - n);
+    if (k < 0)
+      return -1;
+    n += k;
   }
   return n;
 }
@@ -193,12 +227,14 @@ bool nr_dci11_layout_plausible(const nr_dci11_offsets_t *off, uint64_t payload, 
    * link with no retransmissions is the same evidence that exposed the original field-width bug
    * (233/316 grants decoding as rv != 0). Treated as a soft signal by the caller, not asserted
    * here, because a cell WITH retransmissions would legitimately show it. */
-  /* The RIV must address a real allocation inside the BWP. Out-of-range is impossible for a
-   * correctly-placed field and common for a misplaced one. */
-  const uint32_t riv = peek(payload, off->total, off->riv,
-                            (uint8_t)(off->tda - off->riv));
-  const uint32_t riv_max = (uint32_t)bwp_size * ((uint32_t)bwp_size + 1u) / 2u;
-  if (riv >= riv_max) {
+  /* The RIV must address a real allocation inside the BWP, and a type-0 bitmap must select at least
+   * one RBG. Either failing is impossible for a correctly-placed field and common for a misplaced one.
+   * dynamicSwitch: the MSB picks which of the two tests applies (TS 38.212 7.3.1.2.2). */
+  uint32_t fdra = peek(payload, off->total, off->riv, (uint8_t)(off->tda - off->riv));
+  bool type0 = off->fdra_mode == NR_FDRA_TYPE0_CFG1 || off->fdra_mode == NR_FDRA_TYPE0_CFG2;
+  if (off->fdra_mode == NR_FDRA_DYN_CFG1 || off->fdra_mode == NR_FDRA_DYN_CFG2)
+    type0 = !nr_fdra_dynamic_split(fdra, off->n_rbg, off->riv_bits, &fdra, &fdra);
+  if (type0 ? fdra == 0 : fdra >= (uint32_t)bwp_size * ((uint32_t)bwp_size + 1u) / 2u) {
     return false;
   }
   /* Antenna ports: at width 4 the indexed table (TS 38.212 Table 7.3.1.2.2-1, dmrs-Type=1 /
@@ -267,18 +303,20 @@ static void wilson(uint32_t ok, uint32_t n, double *lo, double *hi)
   if (*hi > 1.0) *hi = 1.0;
 }
 
-int nr_dci11_resolver_init(nr_dci11_resolver_t *r, uint16_t bwp_size, uint16_t riv_bits,
-                           uint8_t tda_bits, uint16_t observed_len)
+int nr_dci11_resolver_init_fdra(nr_dci11_resolver_t *r, uint16_t bwp_start, uint16_t bwp_size, uint16_t riv_bits,
+                                uint8_t tda_bits, uint16_t observed_len)
 {
   if (r == NULL) {
     return 0;
   }
   memset(r, 0, sizeof(*r));
   r->winner = -1;
+  r->bwp_start = bwp_start;
   r->bwp_size = bwp_size;
   r->riv_bits = riv_bits;
   r->tda_bits = tda_bits;
   r->observed_len = observed_len;
+  r->fdra_next = 1;   /* stage index: type 1 now, the others only via nr_dci11_resolver_arm_next_mode() */
   /* NR_DCI11_TDA_UNKNOWN: the TDRA list size is itself an RRC switch the receiver cannot read (the
    * dedicated pdsch-TimeDomainAllocationList travels ciphered, and SIB1's common list is only a
    * hypothesis about it). Enumerate every width 0..4 bits; each hypothesis carries its own
@@ -297,12 +335,146 @@ int nr_dci11_resolver_init(nr_dci11_resolver_t *r, uint16_t bwp_size, uint16_t r
     }
     n += (m > 0) ? m : 0;
   }
-  if (n <= 0) {
-    return 0;
-  }
   r->n_hyp = n;
   r->n_alive = n;
-  return n;
+  /* No type-1 layout fits the length at all: "every type-1 layout refuted" holds vacuously, so the other
+   * modes are armed at once (a narrow type-0 FDRA can make a DCI shorter than any type-1 one). */
+  while (r->n_hyp == 0 && nr_dci11_resolver_arm_next_mode(r, NULL) >= 0) {
+  }
+  return r->n_hyp;
+}
+
+int nr_dci11_resolver_init(nr_dci11_resolver_t *r, uint16_t bwp_size, uint16_t riv_bits,
+                           uint8_t tda_bits, uint16_t observed_len)
+{
+  return nr_dci11_resolver_init_fdra(r, 0, bwp_size, riv_bits, tda_bits, observed_len);
+}
+
+/* ANY pass -- its own feed(), a code-block probe, or its interpretation family's (a layout reading
+ * identical fields decodes identically) -- means a layout is not refuted. */
+static bool layout_has_pass(const nr_dci11_resolver_t *r, int i)
+{
+  return r->ok[i] || r->probe_ok[i] || r->fam_ok[r->layout_fam[i] % NR_DCI11_FAM_N];
+}
+
+bool nr_dci11_resolver_all_refuted(const nr_dci11_resolver_t *r, uint32_t min_trials)
+{
+  if (r == NULL || r->n_alive <= 0 || r->winner >= 0)
+    return false;
+  /* AGGREGATE rule: no live layout has a pass, and the live set has absorbed min_trials trials per live
+   * layout IN TOTAL. A per-layout floor never fires when some layout cannot receive trials at all -- its
+   * reads are lost before enqueue (the stage-2 size check / extractor rejects them, which the true layout
+   * does not suffer) or it is never selected -- and one such layout used to freeze staging forever.
+   * The total keeps the same evidence budget; zero passes anywhere over it is the refutation. */
+  uint64_t tr = 0;
+  const int nh = __atomic_load_n(&r->n_hyp, __ATOMIC_ACQUIRE);
+  for (int i = 0; i < nh; i++) {
+    if (!r->alive[i])
+      continue;
+    if (layout_has_pass(r, i))
+      return false;
+    tr += r->trials[i] > r->probe_tr[i] ? r->trials[i] : r->probe_tr[i];
+  }
+  return tr >= (uint64_t)min_trials * (uint64_t)r->n_alive;
+}
+
+int nr_dci11_fdra_stage(uint8_t fdra_mode)
+{
+  static const int8_t stage[5] = {0, 1, 4, 2, 3}; /* see kArmOrder */
+  return fdra_mode <= NR_FDRA_DYN_CFG2 ? stage[fdra_mode] : -1;
+}
+
+int nr_dci11_resolver_disarm(nr_dci11_resolver_t *r, int type1_idx)
+{
+  if (r == NULL)
+    return 0;
+  const int nh = __atomic_load_n(&r->n_hyp, __ATOMIC_ACQUIRE);
+  int killed = 0;
+  for (int i = 0; i < nh; i++)
+    if (r->alive[i] && r->off[i].fdra_mode != NR_FDRA_TYPE1) {
+      r->alive[i] = false;
+      r->n_alive--;
+      killed++;
+    }
+  if (type1_idx >= 0 && type1_idx < nh && r->off[type1_idx].fdra_mode == NR_FDRA_TYPE1 && !r->alive[type1_idx]) {
+    r->alive[type1_idx] = true; /* killed when its stage was refuted; its own pass proves it */
+    r->n_alive++;
+  }
+  r->fdra_next = NR_DCI11_FDRA_STAGES; /* type 1 is proven: never arm again */
+  return killed;
+}
+
+/* Append entries at n_hyp and publish them with one release store: readers on other threads walk
+ * [0, n_hyp) and must never see a half-written entry. */
+static int append_offsets(nr_dci11_resolver_t *r, const nr_dci11_layout_t *hyp, const nr_dci11_offsets_t *off, int n)
+{
+  const int base = r->n_hyp;
+  int k = 0;
+  for (; k < n && base + k < NR_DCI11_LAYOUT_MAX; k++) {
+    if (off[k].total != r->observed_len)
+      break;
+    if (hyp)
+      r->hyp[base + k] = hyp[k];
+    r->off[base + k] = off[k];
+    const uint8_t tb = r->off[base + k].tda_bits;
+    r->off[base + k].tda_valid = (r->tda_count > 0 && tb > 0 && r->tda_count < (1u << tb)) ? r->tda_count : 0;
+    r->alive[base + k] = true;
+  }
+  r->n_alive += k;
+  __atomic_store_n(&r->n_hyp, base + k, __ATOMIC_RELEASE);
+  return k;
+}
+
+int nr_dci_resolver_append_offsets(nr_dci11_resolver_t *r, const nr_dci11_offsets_t *offsets, int n)
+{
+  if (r == NULL || offsets == NULL || n <= 0 || r->n_hyp <= 0)
+    return 0;
+  return append_offsets(r, NULL, offsets, n);
+}
+
+/* Arming order after type 1. dynamicSwitch goes BEFORE type 0 config 2: config 2's narrow FDRA admits
+ * the bulk of the switch space (up to 5458 layouts at one length), and armed first it used to fill the
+ * cap before dynamicSwitch got a slot (106 PRB at 48-49 bits: dynamicSwitch 0 of 1329). */
+static const uint8_t kArmOrder[NR_DCI11_FDRA_STAGES] = {NR_FDRA_TYPE1, NR_FDRA_TYPE0_CFG1, NR_FDRA_DYN_CFG1,
+                                                        NR_FDRA_DYN_CFG2, NR_FDRA_TYPE0_CFG2};
+
+int nr_dci11_resolver_arm_next_mode(nr_dci11_resolver_t *r, int *added)
+{
+  if (added)
+    *added = 0;
+  if (r == NULL || r->observed_len == 0 || r->riv_bits == 0)
+    return -1;
+  /* The live set was refuted by TB CRC (the caller checked nr_dci11_resolver_all_refuted): retire it, so
+   * n_alive -- and stage 1's per-payload and pruning cost -- stays one stage's size. A layout with any
+   * pass is kept. nr_dci11_resolver_disarm() revives a type-1 layout whose late pass proves it. */
+  const int nh = __atomic_load_n(&r->n_hyp, __ATOMIC_ACQUIRE);
+  for (int i = 0; i < nh && r->fdra_next < NR_DCI11_FDRA_STAGES; i++)
+    if (r->alive[i] && !layout_has_pass(r, i)) {
+      r->alive[i] = false;
+      r->n_alive--;
+    }
+  static nr_dci11_layout_t hyp[NR_DCI11_LAYOUT_MAX];   /* arming is rare and single-threaded (the observer) */
+  static nr_dci11_offsets_t off[NR_DCI11_LAYOUT_MAX];
+  const uint8_t tb_lo = (r->tda_bits == NR_DCI11_TDA_UNKNOWN) ? 0 : r->tda_bits;
+  const uint8_t tb_hi = (r->tda_bits == NR_DCI11_TDA_UNKNOWN) ? 4 : r->tda_bits;
+  while (r->fdra_next < NR_DCI11_FDRA_STAGES) {
+    const uint8_t m = kArmOrder[r->fdra_next++];
+    int n = 0;
+    for (uint8_t tb = tb_lo; tb <= tb_hi && n < NR_DCI11_LAYOUT_MAX; tb++) {
+      const int k = nr_dci11_layout_enumerate_mode(r->riv_bits, tb, r->observed_len, r->bwp_start, r->bwp_size, m,
+                                                   hyp + n, NR_DCI11_LAYOUT_MAX - n);
+      for (int i = n; i < n + (k > 0 ? k : 0); i++)
+        nr_dci11_layout_offsets(&hyp[i], r->riv_bits, tb, &off[i]);
+      n += (k > 0) ? k : 0;
+    }
+    if (n == 0)
+      continue;   /* this mode does not fit the length (or is a duplicate here): try the next */
+    const int k = append_offsets(r, hyp, off, n);
+    if (added)
+      *added = k;
+    return m;
+  }
+  return -1;
 }
 
 int nr_dci_resolver_init_from_offsets(nr_dci11_resolver_t *r, uint16_t bwp_size,
@@ -378,6 +550,7 @@ void nr_dci11_resolver_set_tda_count(nr_dci11_resolver_t *r, uint8_t tda_count)
 {
   if (r == NULL)
     return;
+  r->tda_count = tda_count;   /* modes armed later get the same impossible-index test */
   for (int i = 0; i < r->n_hyp; i++)
     r->off[i].tda_valid = (tda_count > 0 && r->off[i].tda_bits > 0 && tda_count < (1u << r->off[i].tda_bits))
                               ? tda_count : 0;
@@ -395,6 +568,12 @@ static void hist_observe(nr_dci11_resolver_t *r, int i, uint64_t payload)
     r->hist[i][52 + (peek(payload, o->total, o->ant_ports, (uint8_t)apb) & 63)]++;
 }
 
+static int cmp_desc(const void *a, const void *b)
+{
+  const double x = *(const double *)a, y = *(const double *)b;
+  return (x < y) - (x > y);
+}
+
 static void prune_by_distribution(nr_dci11_resolver_t *r)
 {
   static double score[NR_DCI11_LAYOUT_MAX];
@@ -406,13 +585,22 @@ static void prune_by_distribution(nr_dci11_resolver_t *r)
     if (score[i] > best)
       best = score[i];
   }
+  /* Ranks by sort + binary search, not the O(n_alive^2) double loop (20 ms at 4.3k live). */
+  static double sorted[NR_DCI11_LAYOUT_MAX];
+  int ns = 0;
+  for (int i = 0; i < r->n_hyp; i++)
+    if (r->alive[i])
+      sorted[ns++] = score[i];
+  qsort(sorted, (size_t)ns, sizeof(sorted[0]), cmp_desc);
   for (int i = 0; i < r->n_hyp && r->n_alive > DCI11_S1_KEEP_MIN; i++) {
     if (!r->alive[i] || r->seen[i] < DCI11_S1_DIST_MIN)
       continue;
-    int better = 0;
-    for (int j = 0; j < r->n_hyp; j++)
-      if (r->alive[j] && score[j] > score[i])
-        better++;
+    int lo = 0, hi = ns; /* first index whose score is <= score[i]: that many are strictly better */
+    while (lo < hi) {
+      const int mid = (lo + hi) / 2;
+      if (sorted[mid] > score[i]) lo = mid + 1; else hi = mid;
+    }
+    const int better = lo;
     /* OTA 2026-09-15 (v2l): the configured layout, which decodes at 72 % by TB CRC, was NOT in the
      * top 4 by this score -- a misaligned layout that reads constant RIV bits as MCS/RV/AP is MORE
      * compressible than the truth. So the score only RANKS (Thompson prior in the RT monitor);
@@ -632,6 +820,7 @@ bool nr_dci11_layout_to_field_bits(const nr_dci11_layout_t *l, nr_dci11_field_bi
   out->tci_bits           = l->post_ant;
   out->srs_request_bits   = 0;
   out->cbg_bits           = 0;
+  out->fdra_mode          = l->fdra_mode;
   return true;
 }
 
@@ -651,7 +840,7 @@ bool nr_dci11_layout_apply_roundtrip(const nr_dci11_layout_t *l, uint16_t riv_bi
    * diagnostic -- which is exactly how the original bwp_indicator/TDA bug behaved. */
   uint16_t p = DCI11_FIXED_ID;
   p += f.bwp_indicator_bits;
-  const uint16_t riv = p; p += riv_bits;
+  const uint16_t riv = p; p += (uint16_t)nr_fdra_bits(f.fdra_mode, l->n_rbg, riv_bits);
   const uint16_t tda = p; p += tda_bits;
   p += f.vrb_to_prb_bits + f.prb_bundling_bits + f.rate_matching_bits + f.zp_csirs_bits;
   const uint16_t mcs = p; p += DCI11_MCS_BITS + DCI11_NDI_BITS;

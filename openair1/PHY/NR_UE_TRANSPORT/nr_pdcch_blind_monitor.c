@@ -80,6 +80,7 @@
 #include "nr_pdcch_coreset_map.h"        // Phase 3 Technique A: nr_pdcch_coreset_map_scan()
 #include "nr_pdcch_dci_length_sweep.h"   // Phase 3 Technique C: nr_pdcch_dci_length_sweep()
 #include "nr_pdcch_al1_map.h"            // AL1 cover lap (ISAC_AL1_COVER=1)
+#include "nr_pdsch_prb_set.h"            // FDRA width / RA type 0 PRB sets
 
 // ---------------------------------------------------------------------------------------------
 // [sensing] pdcch_blind_monitor_* config surface. Parsed but NOT consumed by
@@ -2894,6 +2895,10 @@ static blind_field_bits_t blind_field_bits(uint16_t bwp_size, const nr_pdcch_bli
   const double riv_span = ((double)bwp_size * (double)(bwp_size + 1)) / 2.0;
   blind_field_bits_t f;
   f.riv = (int)ceil(log2(riv_span));
+  // f.riv is the FDRA WIDTH: the RIV width for type 1, N_RBG / 1 + max(N_RBG, RIV) otherwise.
+  if (opts != NULL && opts->fdra_mode != NR_FDRA_TYPE1)
+    f.riv = nr_fdra_bits(opts->fdra_mode,
+                         nr_rbg_count(opts->fdra_bwp_start, bwp_size, nr_fdra_rbg_size(opts->fdra_mode, bwp_size)), f.riv);
   // time_domain_assignment: nr_dci_size() uses ceil(log2(tdaList->count)), so a configured TDRA
   // list determines this width -- it is not a separate knob. Default 4 = the 16-entry default table.
   if (opts != NULL && opts->tda_count > 0) {
@@ -3890,9 +3895,25 @@ bool nr_pdcch_blind_extract_11(const nr_pdcch_blind_raw_result_t *raw,
     return false;
   }
   uint16_t start_rb, num_rb;
-  if (!riv_to_prb_alloc(freq_domain_assignment, bwp_size, &start_rb, &num_rb)) {
-    out->reject_reason = "RIV decodes to a PRB allocation outside the BWP";
-    return false;
+  const int fdra_mode = opts != NULL ? opts->fdra_mode : NR_FDRA_TYPE1;
+  int ra_type0 = 0, rbg_size = 0, n_rbg = 0;
+  if (fdra_mode == NR_FDRA_TYPE1) {
+    if (!riv_to_prb_alloc(freq_domain_assignment, bwp_size, &start_rb, &num_rb)) {
+      out->reject_reason = "RIV decodes to a PRB allocation outside the BWP";
+      return false;
+    }
+  } else {
+    uint16_t prb[NR_PRB_SET_MAX];
+    rbg_size = nr_fdra_rbg_size(fdra_mode, bwp_size);
+    n_rbg = nr_rbg_count(opts->fdra_bwp_start, bwp_size, rbg_size);
+    const int n = nr_fdra_prbs(freq_domain_assignment, fdra_mode, n_rbg, blind_riv_bits(bwp_size), opts->fdra_bwp_start,
+                               bwp_size, prb, NR_PRB_SET_MAX, &ra_type0);
+    if (n <= 0) {
+      out->reject_reason = "FDRA allocates nothing inside the BWP (empty RBG bitmap or out-of-range RIV)";
+      return false;
+    }
+    start_rb = prb[0];
+    num_rb = (uint16_t)n;
   }
 
   // TDRA: the deployment's own pdsch-TimeDomainAllocationList when supplied (see
@@ -3943,6 +3964,12 @@ bool nr_pdcch_blind_extract_11(const nr_pdcch_blind_raw_result_t *raw,
   // ---- All checks passed: fill the result. ----
   out->start_rb          = start_rb;
   out->num_rb            = num_rb;
+  if (ra_type0) {
+    out->ra_type0      = 1;
+    out->rbg_size      = (uint8_t)rbg_size;
+    out->rbg_bwp_start = (uint16_t)opts->fdra_bwp_start;
+    out->rbg_bitmap    = freq_domain_assignment & ((1u << n_rbg) - 1u); /* dynamicSwitch: drop the MSB */
+  }
   out->start_symbol       = (uint8_t)tda.startSymbolIndex;
   out->num_symbols        = (uint8_t)tda.nrOfSymbols;
   out->dl_dmrs_symb_pos   = (uint16_t)dmrs_mask;

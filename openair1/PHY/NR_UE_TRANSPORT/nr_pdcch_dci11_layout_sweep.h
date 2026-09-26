@@ -57,6 +57,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "nr_pdsch_prb_set.h"   /* NR_FDRA_* modes, N_RBG, FDRA width */
+
 /// One layout hypothesis, in the only terms extraction can distinguish.
 typedef struct {
   uint8_t bwp_ind;      ///< BWP indicator width: 0, 1 or 2 (n_dl_bwp)
@@ -65,9 +67,17 @@ typedef struct {
   uint8_t ant_ports;    ///< 4, 5 or 6 (DM-RS type x maxLength)
   uint8_t post_ant;     ///< tci + srs + cbg + cbg_flush (0..14)
   uint8_t dmrs_type;    ///< 0 = type 1, 1 = type 2: at 5 bits both are layouts (Tables -2 vs -3)
+  /* Frequency-domain assignment. resourceAllocation (type 0 / type 1 / dynamicSwitch) and rbg-Size are
+   * RRC switches too, and they set the FDRA WIDTH -- get it wrong and every later field shifts, the
+   * same failure as the old bwp_indicator/TDA gap. NR_FDRA_* (0 = type 1/RIV, all-zero = old layout). */
+  uint8_t fdra_mode;
+  uint8_t n_rbg;        ///< N_RBG of this mode's RBG configuration; 0 for type 1
 } nr_dci11_layout_t;
 
-#define NR_DCI11_LAYOUT_MAX 2048 /* searched TDA width x DM-RS type x HARQ width: ~2x988 at len 49 on 273 PRB */
+/* Searched TDA width x DM-RS type x HARQ width. Measured over BWP 6..273 and a 28..62-bit DCI: one FDRA
+ * stage (one mode, TDA 0..4) peaks at 5458 and every mode together at 26,992, so 32768 holds the whole
+ * staged set without a cut. Resolver memory ~0.52 kB/entry (hist dominates): ~17.2 MB each. */
+#define NR_DCI11_LAYOUT_MAX 32768
 #define NR_DCI11_HIST_BINS 116   /* mcs 32 | rv 4 | tda 16 | ant ports 64 */
 
 /// Bit offsets (MSB-first, as read_field() counts) of every field the extraction consumes.
@@ -89,6 +99,12 @@ typedef struct {
    * at or beyond the list length is impossible for the true layout and common for a shifted one. */
   uint8_t tda_bits;
   uint8_t tda_valid;
+  /* How the field at `riv` (width tda - riv) is read: NR_FDRA_* mode, N_RBG and the RIV width
+   * (the dynamicSwitch split needs both). The plausibility test follows the mode: RIV inside the BWP,
+   * or a non-empty RBG bitmap. */
+  uint8_t fdra_mode;
+  uint8_t n_rbg;
+  uint8_t riv_bits;
 } nr_dci11_offsets_t;
 
 /** Offsets implied by a layout. `tda_bits` comes from the TDRA list Technique D already recovers,
@@ -96,11 +112,22 @@ typedef struct {
 bool nr_dci11_layout_offsets(const nr_dci11_layout_t *l, uint16_t riv_bits, uint8_t tda_bits,
                              nr_dci11_offsets_t *out);
 
-/** Every layout whose total width equals `observed_len`, written to `out` (up to `max`).
+/** Every layout whose total width equals `observed_len`, written to `out` (up to `max`). Type-1 (RIV)
+ * frequency-domain assignment only -- nr_dci11_layout_enumerate_fdra() searches every mode.
  * Returns the count, or -1 on bad arguments. This is the whole point: the derived DCI length is a
  * hard constraint that most of the switch space fails. Pure. */
 int nr_dci11_layout_enumerate(uint16_t riv_bits, uint8_t tda_bits, uint16_t observed_len,
                               nr_dci11_layout_t *out, int max);
+
+/** The layouts of ONE FDRA mode: the same switch space with that mode's FDRA width, the length
+ * constraint pruning the impossible ones. N_RBG needs the BWP's CRB start (RBGs align to the common
+ * grid). Returns 0 for rbg-Size config 2 where it gives config 1's RBG size (> 144 PRB): identical
+ * reads, a duplicate. -1 on bad arguments. */
+int nr_dci11_layout_enumerate_mode(uint16_t riv_bits, uint8_t tda_bits, uint16_t observed_len, uint16_t bwp_start,
+                                   uint16_t bwp_size, uint8_t fdra_mode, nr_dci11_layout_t *out, int max);
+/** Every FDRA mode in NR_FDRA_* order (type 1 first). */
+int nr_dci11_layout_enumerate_fdra(uint16_t riv_bits, uint8_t tda_bits, uint16_t observed_len,
+                                   uint16_t bwp_start, uint16_t bwp_size, nr_dci11_layout_t *out, int max);
 
 /** Stage-1 oracle: is this payload PLAUSIBLE under this layout? Checks the fields a wrong offset
  * corrupts first -- MCS not in the reserved rows, RV in range, and a RIV inside the BWP. Costs no
@@ -141,6 +168,9 @@ typedef struct {
   uint8_t  tda_bits;
   uint16_t observed_len;
   uint16_t bwp_size;
+  uint16_t bwp_start;
+  uint8_t  tda_count;      ///< last nr_dci11_resolver_set_tda_count(), applied to modes armed later
+  uint8_t  fdra_next;      ///< next FDRA STAGE index to arm (1..4; NR_DCI11_FDRA_STAGES = all armed / disarmed)
   /* DISTRIBUTIONAL EVIDENCE (stage 1). A correctly aligned field has structure on a live cell --
    * MCS sits on one or two values under load, RV is overwhelmingly 0, the TDA index uses one to three
    * entries, the antenna-ports codepoint is constant for a single-layer UE -- while a misaligned read
@@ -151,12 +181,55 @@ typedef struct {
   uint32_t dropped_dist;   ///< hypotheses removed by the distributional test (diagnostic)
 } nr_dci11_resolver_t;
 
-/** Build the candidate set for a cell. Returns the number of candidates, 0 if none fit the
- * observed length (which means one of riv_bits/tda_bits/observed_len is wrong -- a real signal,
- * not a resolver failure). */
+/** Build the candidate set for a cell (type 1 first -- see nr_dci11_resolver_init_fdra()). Returns the
+ * number of candidates, 0 if none of ANY FDRA mode fits the observed length (which means one of
+ * riv_bits/tda_bits/observed_len is wrong -- a real signal, not a resolver failure). */
 #define NR_DCI11_TDA_UNKNOWN 0xFF /* tda_bits: enumerate every width 0..4 (the list size is an RRC switch) */
 int nr_dci11_resolver_init(nr_dci11_resolver_t *r, uint16_t bwp_size, uint16_t riv_bits,
                            uint8_t tda_bits, uint16_t observed_len);
+/** As nr_dci11_resolver_init(), remembering the BWP CRB start so the RA type 0 / dynamicSwitch modes can
+ * be ARMED later. FDRA MODE STAGING: only type 1 is enumerated here, so a type-1 cell behaves exactly as
+ * before the other modes existed. Stage 1 cannot refute the other modes' aliases on a type-1 cell (same
+ * MCS/RV/TDA/antenna-port fields, and a RIV read as a bitmap is almost never empty: survivors x2.6-6.7),
+ * nor refute type 1 on a type-0 cell (a type-1 window starting on constant leading bits always reads an
+ * in-range RIV). Only the TB CRC can, so the next mode is armed once stage 2 has refuted every live
+ * layout -- nr_dci11_resolver_all_refuted() -- and the caller then calls nr_dci11_resolver_arm_next_mode(). */
+int nr_dci11_resolver_init_fdra(nr_dci11_resolver_t *r, uint16_t bwp_start, uint16_t bwp_size, uint16_t riv_bits,
+                                uint8_t tda_bits, uint16_t observed_len);
+
+#define NR_DCI11_FDRA_STAGES 5
+/** Stage index of an FDRA mode in the arming order: type 1 = 0, type 0 cfg1 = 1, dynamicSwitch cfg1 = 2,
+ * dynamicSwitch cfg2 = 3, type 0 cfg2 = 4 (the bulk, last). -1 for a bad mode. */
+int nr_dci11_fdra_stage(uint8_t fdra_mode);
+
+/** A type-1 layout passed a TB / code-block CRC: type 1 is proven. Kill every non-type-1 layout, revive
+ * `type1_idx` if its stage was retired, and never arm again. Returns the number killed. */
+int nr_dci11_resolver_disarm(nr_dci11_resolver_t *r, int type1_idx);
+
+/* Trials with zero TB-CRC / code-block passes before a layout counts as refuted by stage 2. 64 = the
+ * stage-2 decision floor (DCI11_S2_MIN_TRIALS). Against the lowest true-layout rate measured on these
+ * rigs (12 % marginal CRC, rank-4 bed 2026-09-16) the truth reads 0/64 with probability 0.88^64 =
+ * 2.8e-4 -- and a false refutation is not destructive: arming only ADDS the next mode's hypotheses
+ * (nothing already live is dropped), i.e. it costs the pre-staging dilution, not the answer. */
+#define NR_DCI11_FDRA_ARM_MIN_TRIALS 64
+
+/** True when no live layout has a pass (own feed(), code-block probe, or interpretation family) and the live
+ * set has taken >= min_trials x n_alive stage-2 trials IN TOTAL (aggregate, so a layout that can never be
+ * trialled cannot freeze staging). False with a winner or an empty set. The caller must also gate on link
+ * health: on a dead link every layout reads 0 passes. */
+bool nr_dci11_resolver_all_refuted(const nr_dci11_resolver_t *r, uint32_t min_trials);
+
+/** Arm the next FDRA stage (type 0 cfg1, dynamicSwitch cfg1, dynamicSwitch cfg2, type 0 cfg2 -- skipping any
+ * with no layout at this length). The refuted live set (every live layout WITHOUT a pass) is retired first,
+ * so n_alive stays one stage; the new layouts are APPENDED alive with fresh counters. Call only after
+ * nr_dci11_resolver_all_refuted(). Returns the mode armed and *added (may be NULL) its count, or -1 once
+ * every stage is armed. Caller-serialised (the stage-1 observer). */
+int nr_dci11_resolver_arm_next_mode(nr_dci11_resolver_t *r, int *added);
+
+/** Append offsets to a resolver built by nr_dci_resolver_init_from_offsets() (DCI 0_1 FDRA staging), alive,
+ * fresh counters, published with a release store. Entries whose total differs from the resolver's stop
+ * the append. Returns the number appended (short at the cap). */
+int nr_dci_resolver_append_offsets(nr_dci11_resolver_t *r, const nr_dci11_offsets_t *offsets, int n);
 
 /** Build a resolver directly from a caller-supplied offsets list, for a DCI format other than 1_1.
  * The resolver only ever reads offsets, so it is format-agnostic: DCI 0_1 exposes the same fields
@@ -217,6 +290,7 @@ typedef struct {
   int dmrs_config_type;     ///< 0 = type 1, 1 = type 2 (which antenna-ports table the width means)
   int tci_bits;             ///< carries post_ant (tci + srs + cbg + flush)
   int srs_request_bits, cbg_bits;                             ///< always 0, see above
+  int fdra_mode;            ///< NR_FDRA_*: the extractor derives the FDRA width (and N_RBG) from it
 } nr_dci11_field_bits_t;
 
 /** Translate a layout into those widths. Returns false if the layout cannot be represented

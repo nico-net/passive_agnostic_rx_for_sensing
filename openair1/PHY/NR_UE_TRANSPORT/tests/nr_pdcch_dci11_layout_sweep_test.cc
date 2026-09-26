@@ -1,6 +1,8 @@
 #include <cmath>
 #include <cstdlib>
+#include <cstring>
 #include <iostream>
+#include <memory>
 #include <vector>
 #include <gtest/gtest.h>
 extern "C" {
@@ -251,7 +253,8 @@ static int drive_resolver(nr_dci11_resolver_t &r, int truth, double p_true, int 
 }
 
 TEST(Dci11Resolver, InitRefusesWhenNoLayoutFitsTheLength) {
-  nr_dci11_resolver_t r{};
+  auto r_heap = std::make_unique<nr_dci11_resolver_t>();  // ~4.3 MB: never on the stack
+  nr_dci11_resolver_t &r = *r_heap;
   // 9 bits cannot hold a 16-bit RIV plus the fixed fields -- no layout can sum to it. That is a
   // real signal (riv_bits / tda_bits / observed_len disagree), not a resolver failure.
   EXPECT_EQ(nr_dci11_resolver_init(&r, 273, 16, 2, 9), 0);
@@ -260,7 +263,8 @@ TEST(Dci11Resolver, InitRefusesWhenNoLayoutFitsTheLength) {
 }
 
 TEST(Dci11Resolver, Stage1NarrowsButNeverEmptiesTheSet) {
-  nr_dci11_resolver_t r{};
+  auto r_heap = std::make_unique<nr_dci11_resolver_t>();  // ~4.3 MB: never on the stack
+  nr_dci11_resolver_t &r = *r_heap;
   const uint16_t rb = riv_bits_for(273);
   const int n = nr_dci11_resolver_init(&r, 273, rb, 2, 47);
   ASSERT_GT(n, 1);
@@ -291,7 +295,8 @@ TEST(Dci11Resolver, ARetransmittingCellDoesNotDeleteTheTruth) {
   // MCS 28-31 are reserved retransmission rows. On a cell that retransmits, the TRUE layout emits
   // them legitimately and the reserved-MCS test flags it. If stage 1 treated that as an invariant
   // it would delete the answer on exactly the cells that exercise HARQ.
-  nr_dci11_resolver_t r{};
+  auto r_heap = std::make_unique<nr_dci11_resolver_t>();  // ~4.3 MB: never on the stack
+  nr_dci11_resolver_t &r = *r_heap;
   const uint16_t rb = riv_bits_for(273);
   const int n = nr_dci11_resolver_init(&r, 273, rb, 2, 47);
   ASSERT_GT(n, 1);
@@ -318,7 +323,8 @@ TEST(Dci11Resolver, ARetransmittingCellDoesNotDeleteTheTruth) {
 }
 
 TEST(Dci11Resolver, FindsTheTruthEndToEnd) {
-  nr_dci11_resolver_t r{};
+  auto r_heap = std::make_unique<nr_dci11_resolver_t>();  // ~4.3 MB: never on the stack
+  nr_dci11_resolver_t &r = *r_heap;
   const uint16_t rb = riv_bits_for(273);
   const int n = nr_dci11_resolver_init(&r, 273, rb, 2, 47);
   ASSERT_GT(n, 1);
@@ -330,7 +336,8 @@ TEST(Dci11Resolver, FindsTheTruthEndToEnd) {
 
 TEST(Dci11Resolver, DoesNotConvergeWhenNothingDecodes) {
   // A dead link must not let elimination promote a layout that never decoded anything.
-  nr_dci11_resolver_t r{};
+  auto r_heap = std::make_unique<nr_dci11_resolver_t>();  // ~4.3 MB: never on the stack
+  nr_dci11_resolver_t &r = *r_heap;
   const uint16_t rb = riv_bits_for(273);
   ASSERT_GT(nr_dci11_resolver_init(&r, 273, rb, 2, 47), 1);
   unsigned seed = 9;
@@ -345,7 +352,8 @@ TEST(Dci11Resolver, DoesNotConvergeWhenNothingDecodes) {
 }
 
 TEST(Dci11Resolver, PinsTheWinnerOnceDecided) {
-  nr_dci11_resolver_t r{};
+  auto r_heap = std::make_unique<nr_dci11_resolver_t>();  // ~4.3 MB: never on the stack
+  nr_dci11_resolver_t &r = *r_heap;
   const uint16_t rb = riv_bits_for(273);
   const int n = nr_dci11_resolver_init(&r, 273, rb, 2, 47);
   ASSERT_GT(n, 1);
@@ -448,7 +456,8 @@ TEST(Dci11Stage1, TheDistributionalTestRanksButNeverDeletes) {
   // OTA 2026-09-15 (v2l): with deletion on, the layout that decodes at 72 % by TB CRC was NOT in
   // the top 4 by payload statistics and stage 2 drove the sweep with four wrong layouts (0 % CRC).
   // The score is now a ranking only. Same geometry as the lab cell (273 PRB, 47-bit DCI).
-  nr_dci11_resolver_t r{};
+  auto r_heap = std::make_unique<nr_dci11_resolver_t>();  // ~4.3 MB: never on the stack
+  nr_dci11_resolver_t &r = *r_heap;
   const uint16_t rb = riv_bits_for(273);
   const int n = nr_dci11_resolver_init(&r, 273, rb, 4, 47);
   ASSERT_GT(n, 4);
@@ -466,7 +475,8 @@ TEST(Dci11Stage1, TheDistributionalTestRanksButNeverDeletes) {
 TEST(Dci11Stage1, AHeavilyRetransmittingCellStillKeepsTheTruth) {
   // A commercial cell with weak UEs retransmits far more than the lab: 35 % retx, so MCS 28-31 and
   // RV 2/3 are common in the TRUE fields and their histograms are much less peaked.
-  nr_dci11_resolver_t r{};
+  auto r_heap = std::make_unique<nr_dci11_resolver_t>();  // ~4.3 MB: never on the stack
+  nr_dci11_resolver_t &r = *r_heap;
   const uint16_t rb = riv_bits_for(273);
   const int n = nr_dci11_resolver_init(&r, 273, rb, 4, 47);
   ASSERT_GT(n, 4);
@@ -479,7 +489,8 @@ TEST(Dci11Stage1, AHeavilyRetransmittingCellStillKeepsTheTruth) {
 }
 
 TEST(Dci11Stage1, TheTruthScoresAboveEveryPrunedLayout) {
-  nr_dci11_resolver_t r{};
+  auto r_heap = std::make_unique<nr_dci11_resolver_t>();  // ~4.3 MB: never on the stack
+  nr_dci11_resolver_t &r = *r_heap;
   const uint16_t rb = riv_bits_for(273);
   nr_dci11_resolver_init(&r, 273, rb, 4, 47);
   const int truth = pick_truth(r);
@@ -544,7 +555,8 @@ TEST(Dci11Layout, UnknownTdaWidthEnumeratesEveryWidthAndContainsBothRealCells) {
   // pre_ant = harq4+dai2+tpc2+ri3+k1(3) = 14, ant 4, srs 2 sums to 47 only at 1 bit. With the width
   // searched, both truths are hypotheses; with the old 4-bit default, neither was (OTA 2026-09-15).
   const uint16_t rb = riv_bits_for(273);
-  nr_dci11_resolver_t r;
+  auto r_heap = std::make_unique<nr_dci11_resolver_t>();  // ~4.3 MB: never on the stack
+  nr_dci11_resolver_t &r = *r_heap;
   const int n = nr_dci11_resolver_init(&r, 273, rb, NR_DCI11_TDA_UNKNOWN, 47);
   ASSERT_GT(n, 0);
   bool has_1bit_truth = false, has_2bit = false, widths[5] = {false, false, false, false, false};
@@ -578,4 +590,373 @@ TEST(Dci11Layout, AFiveBitAntennaPortsFieldIsTwoLayouts) {
   EXPECT_GT(five_t1, 0);
   EXPECT_EQ(four_t2, 0);
   EXPECT_EQ(six_t1, 0);
+}
+
+// ---- FDRA modes: RA type 0 and dynamicSwitch (full-running-agnosticity Task 10) ----------------
+// 106 PRB at CRB 0: RIV 13 bits, rbg-Size config1 P=8 -> N_RBG 14, config2 P=16 -> N_RBG 7, so all
+// five modes have distinct widths (13 / 14 / 7 / 15 / 14).
+static const uint16_t kFdraBwpStart = 0, kFdraBwp = 106;
+
+static void put_bits(uint64_t &p, uint16_t total, uint16_t off, uint8_t nb, uint64_t v)
+{
+  const int sh = total - off - nb;
+  p &= ~(((1ULL << nb) - 1ULL) << sh);
+  p |= (v & ((1ULL << nb) - 1ULL)) << sh;
+}
+
+static uint32_t riv_of(int start, int len, int N)
+{
+  return (len - 1 <= N / 2) ? (uint32_t)(N * (len - 1) + start) : (uint32_t)(N * (N - len + 1) + (N - 1 - start));
+}
+
+// A valid FDRA field for this layout's mode; dynamicSwitch alternates the two branches via want_type0.
+static uint32_t fdra_field(const nr_dci11_offsets_t &t, unsigned &seed, bool want_type0)
+{
+  const int N = kFdraBwp;
+  const uint32_t riv = rand_r(&seed) % (N * (N + 1) / 2);
+  const uint32_t bitmap = t.n_rbg ? 1 + rand_r(&seed) % ((1u << t.n_rbg) - 1) : 0;
+  switch (t.fdra_mode) {
+    case NR_FDRA_TYPE1: return riv;
+    case NR_FDRA_TYPE0_CFG1: case NR_FDRA_TYPE0_CFG2: return bitmap;
+    default: {
+      const int w = t.n_rbg > t.riv_bits ? t.n_rbg : t.riv_bits;
+      return want_type0 ? bitmap : ((1u << w) | riv);
+    }
+  }
+}
+
+static uint64_t fdra_payload(const nr_dci11_offsets_t &t, unsigned &seed, uint32_t field)
+{
+  uint64_t p = 0;
+  for (int b = 0; b < t.total; b++) p |= (uint64_t)(rand_r(&seed) & 1) << b;
+  put_bits(p, t.total, t.riv, (uint8_t)(t.tda - t.riv), field);
+  put_bits(p, t.total, t.mcs, 5, rand_r(&seed) % 28);
+  put_bits(p, t.total, t.rv, 2, 0);
+  if (t.ap_valid_rows) put_bits(p, t.total, t.ant_ports, t.ant_ports_bits, rand_r(&seed) % t.ap_valid_rows);
+  return p;
+}
+
+static uint32_t read_fdra(const nr_dci11_offsets_t &t, uint64_t p)
+{
+  const uint8_t nb = (uint8_t)(t.tda - t.riv);
+  return (uint32_t)((p >> (t.total - t.riv - nb)) & ((1ULL << nb) - 1ULL));
+}
+
+// (c): the decoded PRB list of the resolved layout equals nr_ra_type0_prbs() of the constructed bitmap
+// (type 0, and dynamicSwitch's type-0 branch) or the constructed RIV's contiguous range (type 1).
+static void expect_prbs(const nr_dci11_offsets_t &resolved, const nr_dci11_offsets_t &truth, bool type0,
+                        unsigned &seed)
+{
+  const int N = kFdraBwp;
+  const int P = nr_fdra_rbg_size(truth.fdra_mode, N);
+  std::vector<uint16_t> want(NR_PRB_SET_MAX), got(NR_PRB_SET_MAX);
+  int nw;
+  uint32_t field;
+  if (type0) {
+    const uint32_t bitmap = (1u << (truth.n_rbg - 1)) | 0x5u;  // RBG 0 (MSB) plus two late RBGs
+    nw = nr_ra_type0_prbs(bitmap, kFdraBwpStart, N, P, want.data(), NR_PRB_SET_MAX);
+    field = bitmap;
+  } else {
+    const int S = 17, L = 40;
+    for (nw = 0; nw < L; nw++) want[nw] = (uint16_t)(S + nw);
+    field = riv_of(S, L, N);
+    if (truth.fdra_mode >= NR_FDRA_DYN_CFG1) field |= 1u << (truth.n_rbg > truth.riv_bits ? truth.n_rbg : truth.riv_bits);
+  }
+  const uint64_t p = fdra_payload(truth, seed, field);
+  int t0 = -1;
+  const int ng = nr_fdra_prbs(read_fdra(resolved, p), resolved.fdra_mode, resolved.n_rbg, resolved.riv_bits, kFdraBwpStart,
+                              N, got.data(), NR_PRB_SET_MAX, &t0);
+  EXPECT_EQ(t0, type0 ? 1 : 0);
+  ASSERT_EQ(ng, nw);
+  for (int i = 0; i < nw; i++) EXPECT_EQ(got[i], want[i]) << "PRB " << i;
+}
+
+static int find_layout(const nr_dci11_resolver_t &r, const nr_dci11_layout_t &l)
+{
+  for (int i = 0; i < r.n_hyp; i++)
+    if (!memcmp(&r.hyp[i], &l, sizeof(l))) return i;
+  return -1;
+}
+
+// FDRA MODE STAGING end to end: the resolver starts type-1-only; stage 2 (only the truth decodes) refutes
+// the live set, which arms the next mode, until the truth's mode is in and wins. Modes after the truth's
+// must never be armed, and a type-1 truth must arm nothing.
+static void resolve_fdra_mode(uint8_t mode)
+{
+  const uint16_t rb = riv_bits_for(kFdraBwp);
+  nr_dci11_layout_t l{};
+  l.bwp_ind = 0; l.pre_mcs = 0; l.pre_ant = 14; l.ant_ports = 4; l.post_ant = 2; l.dmrs_type = 0;
+  l.fdra_mode = mode;
+  l.n_rbg = mode == NR_FDRA_TYPE1 ? 0
+                                  : (uint8_t)nr_rbg_count(kFdraBwpStart, kFdraBwp, nr_fdra_rbg_size(mode, kFdraBwp));
+  nr_dci11_offsets_t o{};
+  ASSERT_TRUE(nr_dci11_layout_offsets(&l, rb, 2, &o));
+  EXPECT_EQ(o.tda - o.riv, nr_fdra_bits(mode, l.n_rbg, rb));
+  auto r_heap = std::make_unique<nr_dci11_resolver_t>();
+  nr_dci11_resolver_t &r = *r_heap;
+  const int n0 = nr_dci11_resolver_init_fdra(&r, kFdraBwpStart, kFdraBwp, rb, 2, o.total);
+  ASSERT_GT(n0, 1);
+  // Staging: type 1 only at init -- unless no type-1 layout fits this length, when the next modes arm at once.
+  const int armed_at_init = r.fdra_next - 1;
+  for (int i = 0; i < n0; i++) ASSERT_LT(nr_dci11_fdra_stage(r.off[i].fdra_mode), r.fdra_next);
+  if (armed_at_init > 0) {
+    std::vector<nr_dci11_layout_t> tmp(NR_DCI11_LAYOUT_MAX);
+    EXPECT_EQ(nr_dci11_layout_enumerate(rb, 2, o.total, tmp.data(), (int)tmp.size()), 0)
+        << "armed at init although a type-1 layout fits";
+  }
+  unsigned seed = 31u + mode;
+  for (int i = 0; i < 800; i++) nr_dci11_resolver_observe(&r, fdra_payload(o, seed, fdra_field(o, seed, i & 1)));
+  int truth = find_layout(r, l), w = -1, arms = 0;
+  EXPECT_EQ(truth >= 0, nr_dci11_fdra_stage(mode) < r.fdra_next) << "the truth must be absent until its mode is armed";
+  for (int i = 0; i < 2000000 && w < 0; i++) {
+    if ((i % 256) == 0 && nr_dci11_resolver_all_refuted(&r, NR_DCI11_FDRA_ARM_MIN_TRIALS)) {
+      int added = 0;
+      const int m = nr_dci11_resolver_arm_next_mode(&r, &added);
+      ASSERT_GE(m, 0) << "every mode armed and the truth never decoded";
+      ASSERT_LE(nr_dci11_fdra_stage(m), nr_dci11_fdra_stage(mode)) << "armed a stage beyond the truth's -- the truth was refuted";
+      arms++;
+      std::cerr << "[ MEASURED ] armed mode " << m << ": +" << added << " -> " << r.n_alive << " live of " << r.n_hyp
+                << " (refuted stage retired)\n";
+      truth = find_layout(r, l);
+    }
+    nr_dci11_offsets_t pick{};
+    const int idx = nr_dci11_resolver_next(&r, &pick);
+    ASSERT_GE(idx, 0);
+    w = nr_dci11_resolver_feed(&r, idx, idx == truth && (double)rand_r(&seed) / RAND_MAX < 0.40);
+  }
+  ASSERT_GE(truth, 0);
+  ASSERT_EQ(w, truth);
+  if (mode == NR_FDRA_TYPE1) {
+    EXPECT_EQ(arms, 0) << "a type-1 cell must never arm another mode";
+  }
+  EXPECT_EQ(r.hyp[w].fdra_mode, mode);                                     // (a)
+  EXPECT_EQ(r.off[w].mcs, o.mcs);                                          // (b)
+  EXPECT_EQ(r.off[w].rv, o.rv);
+  EXPECT_EQ(r.off[w].ant_ports, o.ant_ports);
+  EXPECT_TRUE(nr_dci11_layout_apply_roundtrip(&r.hyp[w], rb, 2)) << "field-bits handover shifts a type-0 layout";
+  const bool t0 = mode != NR_FDRA_TYPE1;
+  expect_prbs(r.off[w], o, t0, seed);                                      // (c)
+  if (mode >= NR_FDRA_DYN_CFG1) expect_prbs(r.off[w], o, false, seed);     // dynamicSwitch, RIV branch
+  std::cerr << "[ MEASURED ] fdra_mode " << (int)mode << ": " << n0 << " initial layouts at len " << o.total << " ("
+            << armed_at_init << " mode(s) armed at init: no type-1 fit), " << arms << " armed by TB-CRC refutation, "
+            << r.n_hyp << " total, converged on " << w << "\n";
+}
+
+TEST(Dci11Fdra, ResolvesType1) { resolve_fdra_mode(NR_FDRA_TYPE1); }
+TEST(Dci11Fdra, ResolvesType0Config1) { resolve_fdra_mode(NR_FDRA_TYPE0_CFG1); }
+TEST(Dci11Fdra, ResolvesType0Config2) { resolve_fdra_mode(NR_FDRA_TYPE0_CFG2); }
+TEST(Dci11Fdra, ResolvesDynamicSwitchConfig1) { resolve_fdra_mode(NR_FDRA_DYN_CFG1); }
+TEST(Dci11Fdra, ResolvesDynamicSwitchConfig2) { resolve_fdra_mode(NR_FDRA_DYN_CFG2); }
+
+TEST(Dci11Fdra, PlausibilityFollowsTheMode) {
+  const uint16_t rb = riv_bits_for(kFdraBwp);
+  nr_dci11_layout_t l{};
+  l.pre_ant = 14; l.ant_ports = 4; l.post_ant = 2;
+  l.fdra_mode = NR_FDRA_TYPE0_CFG1; l.n_rbg = 14;
+  nr_dci11_offsets_t o{};
+  ASSERT_TRUE(nr_dci11_layout_offsets(&l, rb, 2, &o));
+  uint64_t p = 0;
+  put_bits(p, o.total, o.mcs, 5, 10);
+  EXPECT_FALSE(nr_dci11_layout_plausible(&o, p, kFdraBwp)) << "an empty RBG bitmap allocates nothing";
+  put_bits(p, o.total, o.riv, 14, 0x3FFF);  // all 14 RBGs: fine for a bitmap, an out-of-BWP RIV value
+  EXPECT_TRUE(nr_dci11_layout_plausible(&o, p, kFdraBwp));
+  l.fdra_mode = NR_FDRA_DYN_CFG1;           // width 15, MSB 0 -> type 0
+  ASSERT_TRUE(nr_dci11_layout_offsets(&l, rb, 2, &o));
+  p = 0;
+  put_bits(p, o.total, o.mcs, 5, 10);
+  EXPECT_FALSE(nr_dci11_layout_plausible(&o, p, kFdraBwp));
+  put_bits(p, o.total, o.riv, 15, (1u << 14) | 8000u);  // MSB 1 -> RIV 8000 >= 106*107/2
+  EXPECT_FALSE(nr_dci11_layout_plausible(&o, p, kFdraBwp));
+  put_bits(p, o.total, o.riv, 15, (1u << 14) | 500u);
+  EXPECT_TRUE(nr_dci11_layout_plausible(&o, p, kFdraBwp));
+}
+
+TEST(Dci11Fdra, EveryStageFitsTheCap) {
+  // Bounded sweep: every BWP size 6..273 (N_RBG at an aligned and a worst-misaligned CRB start), DCI
+  // lengths 28..62, TDA width searched 0..4. One STAGE = one FDRA mode's layouts summed over the TDA
+  // widths (what init / one arm adds). The count depends only on the FDRA width, so it is memoised on it.
+  const int LMIN = 28, LMAX = 62, WMAX = 24;
+  std::vector<int> memo((WMAX + 1) * (LMAX + 1), -1);
+  std::vector<nr_dci11_layout_t> c(1 << 16);
+  auto stage = [&](int w, int L) {
+    int &m = memo[w * (LMAX + 1) + L];
+    if (m < 0) {
+      m = 0;
+      for (uint8_t tb = 0; tb <= 4; tb++) m += nr_dci11_layout_enumerate((uint16_t)w, tb, (uint16_t)L, c.data(), (int)c.size());
+    }
+    return m;
+  };
+  int worst[5] = {0}, wN[5] = {0}, wL[5] = {0}, worst_cum = 0;
+  for (int N = 6; N <= 273; N++) {
+    const int rb = riv_bits_for(N);
+    for (int start : {0, 15}) {  // 15 mod P = P-1 for every P: the largest N_RBG
+      for (int L = LMIN; L <= LMAX; L++) {
+        int cum = 0;
+        for (int m = NR_FDRA_TYPE1; m <= NR_FDRA_DYN_CFG2; m++) {
+          const int P = nr_fdra_rbg_size(m, N);
+          if (m != NR_FDRA_TYPE1 && (P == 0 || ((m == NR_FDRA_TYPE0_CFG2 || m == NR_FDRA_DYN_CFG2) && P == nr_fdra_rbg_size(m - 1, N))))
+            continue;
+          const int w = nr_fdra_bits(m, m == NR_FDRA_TYPE1 ? 0 : nr_rbg_count(start, N, P), rb);
+          ASSERT_LE(w, WMAX);
+          const int n = stage(w, L);
+          cum += n;
+          if (n > worst[m]) { worst[m] = n; wN[m] = N; wL[m] = L; }
+          EXPECT_LT(n, NR_DCI11_LAYOUT_MAX) << "stage " << m << " N=" << N << " L=" << L;
+        }
+        if (cum > worst_cum) worst_cum = cum;
+      }
+    }
+  }
+  for (int m = 0; m <= 4; m++)
+    std::cerr << "[ MEASURED ] stage (fdra_mode " << m << ") max " << worst[m] << " at " << wN[m] << " PRB / " << wL[m]
+              << " bits (cap " << NR_DCI11_LAYOUT_MAX << ")\n";
+  EXPECT_LT(worst_cum, NR_DCI11_LAYOUT_MAX) << "the staged set no longer fits the cap once every mode is armed";
+  std::cerr << "[ MEASURED ] cumulative (every mode armed) max " << worst_cum << " (cap " << NR_DCI11_LAYOUT_MAX << ")\n";
+}
+
+TEST(Dci11Fdra, StagingStartsType1OnlyAndArmsOnlyOnTbCrcRefutation) {
+  const uint16_t rb = riv_bits_for(106);
+  static nr_dci11_resolver_t a, b;
+  const int na = nr_dci11_resolver_init(&a, 106, rb, NR_DCI11_TDA_UNKNOWN, 45);
+  const int nb = nr_dci11_resolver_init_fdra(&b, 0, 106, rb, NR_DCI11_TDA_UNKNOWN, 45);
+  ASSERT_GT(na, 0);
+  ASSERT_EQ(nb, na) << "a type-1 cell must see exactly the pre-FDRA hypothesis set";
+  for (int i = 0; i < na; i++) EXPECT_EQ(memcmp(&a.hyp[i], &b.hyp[i], sizeof(a.hyp[i])), 0) << i;
+  // 63 failures each: not refuted. 64: refuted. One pass anywhere: not refuted.
+  for (int i = 0; i < nb; i++) b.trials[i] = NR_DCI11_FDRA_ARM_MIN_TRIALS - 1;
+  EXPECT_FALSE(nr_dci11_resolver_all_refuted(&b, NR_DCI11_FDRA_ARM_MIN_TRIALS));
+  for (int i = 0; i < nb; i++) b.trials[i] = NR_DCI11_FDRA_ARM_MIN_TRIALS;
+  EXPECT_TRUE(nr_dci11_resolver_all_refuted(&b, NR_DCI11_FDRA_ARM_MIN_TRIALS));
+  b.probe_ok[nb / 2] = 1;
+  EXPECT_FALSE(nr_dci11_resolver_all_refuted(&b, NR_DCI11_FDRA_ARM_MIN_TRIALS));
+  b.probe_ok[nb / 2] = 0;
+  // Aggregate rule: one layout that can never be trialled must not freeze staging.
+  b.trials[0] = 0;
+  b.trials[1] = 2 * NR_DCI11_FDRA_ARM_MIN_TRIALS;
+  EXPECT_TRUE(nr_dci11_resolver_all_refuted(&b, NR_DCI11_FDRA_ARM_MIN_TRIALS)) << "a starved layout froze staging";
+  b.trials[1] = NR_DCI11_FDRA_ARM_MIN_TRIALS - 1;
+  EXPECT_FALSE(nr_dci11_resolver_all_refuted(&b, NR_DCI11_FDRA_ARM_MIN_TRIALS)) << "less than the aggregate budget";
+  b.trials[1] = 2 * NR_DCI11_FDRA_ARM_MIN_TRIALS;
+  b.ok[5] = 1;  // a layout with a pass survives arming
+  int added = 0;
+  EXPECT_EQ(nr_dci11_resolver_arm_next_mode(&b, &added), NR_FDRA_TYPE0_CFG1);
+  EXPECT_GT(added, 0);
+  EXPECT_EQ(b.n_hyp, nb + added);
+  for (int i = 0; i < nb; i++) EXPECT_EQ(b.alive[i], i == 5) << "arming retires exactly the refuted stage";
+  EXPECT_EQ(b.n_alive, added + 1);
+  for (int i = nb; i < b.n_hyp; i++) {
+    EXPECT_EQ(b.off[i].fdra_mode, NR_FDRA_TYPE0_CFG1);
+    EXPECT_EQ(b.trials[i], 0u);
+  }
+  EXPECT_FALSE(nr_dci11_resolver_all_refuted(&b, NR_DCI11_FDRA_ARM_MIN_TRIALS)) << "fresh layouts have no trials";
+  int m, last = nr_dci11_fdra_stage(NR_FDRA_TYPE0_CFG1);
+  std::vector<int> order;
+  while ((m = nr_dci11_resolver_arm_next_mode(&b, &added)) >= 0) {
+    EXPECT_GT(nr_dci11_fdra_stage(m), last);
+    last = nr_dci11_fdra_stage(m);
+    order.push_back(m);
+  }
+  // dynamicSwitch before the type-0 config-2 bulk
+  ASSERT_EQ(order.size(), 3u);
+  EXPECT_EQ(order[0], NR_FDRA_DYN_CFG1);
+  EXPECT_EQ(order[1], NR_FDRA_DYN_CFG2);
+  EXPECT_EQ(order[2], NR_FDRA_TYPE0_CFG2);
+  std::cerr << "[ MEASURED ] 106 PRB len 45 TDA 0..4: type-1 stage " << na << ", every mode armed " << b.n_hyp << "\n";
+}
+
+TEST(Dci11Fdra, TypeOneCellStage1SurvivorsUnchangedByStaging) {
+  // Reviewer's I2 scene: a type-1 truth, 20000 realistic payloads. Staged = the type-1-only resolver, exactly;
+  // arming every mode up front (the pre-staging behaviour) is measured for comparison.
+  for (int N : {51, 106, 273}) {
+    const uint16_t rb = riv_bits_for(N);
+    nr_dci11_layout_t l{};
+    l.pre_mcs = 1; l.pre_ant = 14; l.ant_ports = 4; l.post_ant = 2;
+    nr_dci11_offsets_t t{};
+    ASSERT_TRUE(nr_dci11_layout_offsets(&l, rb, 2, &t));
+    static nr_dci11_resolver_t s1, s0, all;
+    nr_dci11_resolver_init(&s0, N, rb, NR_DCI11_TDA_UNKNOWN, t.total);
+    nr_dci11_resolver_init_fdra(&s1, 0, N, rb, NR_DCI11_TDA_UNKNOWN, t.total);
+    {  // the pre-staging behaviour: every mode's layouts live from the start (no retirement)
+      static nr_dci11_layout_t h[NR_DCI11_LAYOUT_MAX];
+      static nr_dci11_offsets_t of[NR_DCI11_LAYOUT_MAX];
+      int n = 0;
+      for (uint8_t tb = 0; tb <= 4; tb++) {
+        const int k = nr_dci11_layout_enumerate_fdra(rb, tb, t.total, 0, N, h + n, NR_DCI11_LAYOUT_MAX - n);
+        for (int i = n; i < n + k; i++) nr_dci11_layout_offsets(&h[i], rb, tb, &of[i]);
+        n += k;
+      }
+      ASSERT_EQ(nr_dci_resolver_init_from_offsets(&all, N, of, n), n);
+    }
+    for (auto *r : {&s0, &s1, &all}) nr_dci11_resolver_set_tda_count(r, 3);
+    unsigned seed = 11;
+    for (int k = 0; k < 20000; k++) {
+      uint64_t p = 0;
+      for (int b = 0; b < t.total; b++) p |= (uint64_t)(rand_r(&seed) & 1) << b;
+      const int S = rand_r(&seed) % N, L = 1 + rand_r(&seed) % (N - S);
+      put_bits(p, t.total, 0, 1, 1);
+      put_bits(p, t.total, t.riv, (uint8_t)rb, riv_of(S, L, N));
+      put_bits(p, t.total, t.tda, 2, rand_r(&seed) % 3);
+      put_bits(p, t.total, t.mcs, 5, rand_r(&seed) % 28);
+      put_bits(p, t.total, t.rv, 2, 0);
+      put_bits(p, t.total, t.ant_ports, 4, rand_r(&seed) % 12);
+      for (auto *r : {&s0, &s1, &all}) nr_dci11_resolver_observe(r, p);
+    }
+    EXPECT_EQ(s1.n_hyp, s0.n_hyp);
+    EXPECT_EQ(s1.n_alive, s0.n_alive) << "staging changed a type-1 cell's stage-1 survivors";
+    std::cerr << "[ MEASURED ] type-1 cell " << N << " PRB len " << t.total << ": stage-1 survivors staged " << s1.n_alive
+              << " (type-1-only " << s0.n_alive << ") vs every mode armed " << all.n_alive << " of " << all.n_hyp << "\n";
+  }
+}
+
+// Refute the live set the way stage 2 does: trials over the aggregate budget, no pass.
+static void refute_live(nr_dci11_resolver_t &r)
+{
+  for (int i = 0; i < r.n_hyp; i++)
+    if (r.alive[i]) r.trials[i] = NR_DCI11_FDRA_ARM_MIN_TRIALS;
+}
+
+TEST(Dci11Fdra, DynamicSwitchFitsAt106PrbLength49) {
+  // Review round 2: with type-0 cfg2 armed first the cumulative cut left dynamicSwitch 0 of 1329 here.
+  const uint16_t rb = riv_bits_for(106);
+  for (int L : {48, 49, 50}) {
+    auto r_heap = std::make_unique<nr_dci11_resolver_t>();
+    nr_dci11_resolver_t &r = *r_heap;
+    ASSERT_GT(nr_dci11_resolver_init_fdra(&r, 0, 106, rb, NR_DCI11_TDA_UNKNOWN, (uint16_t)L), 0);
+    int m, added;
+    std::vector<nr_dci11_layout_t> tmp(1 << 16);
+    std::cerr << "[ MEASURED ] 106 PRB L=" << L << ": type-1 " << r.n_hyp;
+    for (refute_live(r); (m = nr_dci11_resolver_arm_next_mode(&r, &added)) >= 0; refute_live(r)) {
+      int want = 0;
+      for (uint8_t tb = 0; tb <= 4; tb++) want += nr_dci11_layout_enumerate_mode(rb, tb, (uint16_t)L, 0, 106, (uint8_t)m, tmp.data(), (int)tmp.size());
+      EXPECT_EQ(added, want) << "mode " << m << " cut at L=" << L;
+      if (m == NR_FDRA_DYN_CFG1 || m == NR_FDRA_DYN_CFG2) {
+        EXPECT_GT(added, 0);
+      }
+      std::cerr << " | mode " << m << " " << added << "/" << want << " (live " << r.n_alive << ")";
+    }
+    std::cerr << " | total " << r.n_hyp << "\n";
+  }
+}
+
+TEST(Dci11Fdra, AType1PassDisarms) {
+  const uint16_t rb = riv_bits_for(106);
+  auto r_heap = std::make_unique<nr_dci11_resolver_t>();
+  nr_dci11_resolver_t &r = *r_heap;
+  const int n1 = nr_dci11_resolver_init_fdra(&r, 0, 106, rb, 2, 46);
+  ASSERT_GT(n1, 1);
+  refute_live(r);
+  int added = 0;
+  ASSERT_EQ(nr_dci11_resolver_arm_next_mode(&r, &added), NR_FDRA_TYPE0_CFG1);
+  ASSERT_GT(added, 0);
+  EXPECT_FALSE(r.alive[3]) << "the refuted type-1 stage is retired";
+  // A late type-1 pass (feedback for a probe issued before arming): type 1 is proven.
+  EXPECT_EQ(nr_dci11_resolver_disarm(&r, 3), added);
+  EXPECT_TRUE(r.alive[3]) << "the passing type-1 layout is revived";
+  EXPECT_EQ(r.n_alive, 1);
+  for (int i = 0; i < r.n_hyp; i++)
+    if (r.alive[i]) {
+      EXPECT_EQ(r.off[i].fdra_mode, NR_FDRA_TYPE1);
+    }
+  refute_live(r);
+  EXPECT_EQ(nr_dci11_resolver_arm_next_mode(&r, &added), -1) << "a disarmed resolver must never arm again";
 }

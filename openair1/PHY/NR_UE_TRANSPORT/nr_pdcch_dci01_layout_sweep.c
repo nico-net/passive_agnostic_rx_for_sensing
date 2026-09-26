@@ -28,12 +28,13 @@ bool nr_dci01_layout_offsets(const nr_dci01_layout_t *l, uint16_t riv_bits, uint
                              nr_dci11_offsets_t *out)
 {
   if (l == NULL || out == NULL || riv_bits == 0 || l->pre_riv > 3 || l->pre_mcs > 1
-      || l->ant_ports < 2 || l->ant_ports > 5) {
+      || l->ant_ports < 2 || l->ant_ports > 5 || l->fdra_mode > NR_FDRA_DYN_CFG2
+      || (l->fdra_mode != NR_FDRA_TYPE1 && (l->n_rbg == 0 || l->n_rbg > 31))) {
     return false;
   }
   uint16_t p = DCI01_ID;
   p += l->pre_riv;                 /* UL/SUL indicator + BWP indicator */
-  out->riv = p;            p += riv_bits;
+  out->riv = p;            p += (uint16_t)nr_fdra_bits(l->fdra_mode, l->n_rbg, riv_bits);
   out->tda = p;            p += tda_bits;
   p += l->pre_mcs;                 /* frequency hopping flag */
   out->mcs = p;            p += DCI01_MCS + DCI01_NDI;
@@ -53,6 +54,9 @@ bool nr_dci01_layout_offsets(const nr_dci01_layout_t *l, uint16_t riv_bits, uint
   out->total = p;
   out->tda_bits = tda_bits;
   out->tda_valid = 0;
+  out->fdra_mode = l->fdra_mode;
+  out->n_rbg = l->n_rbg;
+  out->riv_bits = (uint8_t)riv_bits;
   return true;
 }
 
@@ -74,15 +78,68 @@ static const uint8_t kDmrsInit[] = {0, 1};
 
 #define NELEM(a) ((int)(sizeof(a) / sizeof((a)[0])))
 
-static bool have(const nr_dci01_layout_t *o, int n, const nr_dci01_layout_t *c)
+/* Distinct group sums in first-occurrence order of the per-switch loops (see the DCI 1_1 enumerator):
+ * distinct by construction and in the order the per-switch nesting emitted. */
+static int push_distinct(uint8_t *v, int n, int cap, int x)
 {
-  for (int i = 0; i < n; i++) {
-    if (o[i].pre_riv == c->pre_riv && o[i].pre_mcs == c->pre_mcs && o[i].pre_ant == c->pre_ant
-        && o[i].ant_ports == c->ant_ports && o[i].post_ant == c->post_ant) {
-      return true;
-    }
-  }
-  return false;
+  for (int i = 0; i < n; i++)
+    if (v[i] == x)
+      return n;
+  if (n >= cap)
+    return n; /* cannot happen with the switch tables below (<= 18 distinct sums per group) */
+  v[n] = (uint8_t)x;
+  return n + 1;
+}
+
+/* Appends one FDRA mode's layouts to out[n..max). */
+static int enumerate_mode(uint16_t riv_bits, uint8_t tda_bits, uint16_t observed_len, uint8_t fdra_mode,
+                          uint8_t n_rbg, nr_dci01_layout_t *out, nr_dci11_offsets_t *offsets, int n, int max)
+{
+  /* The switch space is larger than DCI 1_1's (SRI, precoding and CSI request are each up to 7
+   * values), but it collapses the same way: only the SUMS between read fields are distinguishable,
+   * and the derived length then pins the rest. */
+  uint8_t pa[48], po[2][48];
+  int npa = 0, npo[2] = {0, 0};
+  for (int d1 = 0; d1 < NELEM(kDai1); d1++)
+    for (int d2 = 0; d2 < NELEM(kDai2); d2++)
+      for (int sr = 0; sr < NELEM(kSri); sr++)
+        for (int pc = 0; pc < NELEM(kPrecode); pc++)
+          for (int cs = 0; cs < NELEM(kCsiReq); cs++)
+            npa = push_distinct(pa, npa, 48, kHarq[0] + kDai1[d1] + kDai2[d2] + kTpc[0] + kSri[sr] + kPrecode[pc] + kCsiReq[cs]);
+  /* A PT-RS/DM-RS association field only exists when PT-RS does, and PT-RS in the uplink requires
+   * transform precoding to be off, which is also what admits the wider antenna-port tables. Allowing
+   * the pair otherwise would invent layouts no RRC can produce: po[0] is the post-ports group for a
+   * port field narrower than 3 bits (no PT-RS association), po[1] for the others. */
+  for (int w = 0; w < 2; w++)
+    for (int sq = 0; sq < NELEM(kSrsReq); sq++)
+      for (int cb = 0; cb < NELEM(kCbg); cb++)
+        for (int pd = 0; pd < NELEM(kPtrsDmrs); pd++)
+          for (int be = 0; be < NELEM(kBeta); be++)
+            for (int di = 0; di < NELEM(kDmrsInit); di++) {
+              if (kPtrsDmrs[pd] != 0 && w == 0)
+                continue;
+              npo[w] = push_distinct(po[w], npo[w], 48, kSrsReq[sq] + kCbg[cb] + kPtrsDmrs[pd] + kBeta[be] + kDmrsInit[di]);
+            }
+  for (int a = 0; a < NELEM(kUlSulBwp); a++)
+    for (int b = 0; b < NELEM(kFreqHop); b++)
+      for (int y = 0; y < npa; y++)
+        for (int an = 0; an < NELEM(kAnt); an++) {
+          const int w = kAnt[an] >= 3;
+          for (int z = 0; z < npo[w]; z++) {
+            const nr_dci01_layout_t c = {.pre_riv = kUlSulBwp[a], .pre_mcs = kFreqHop[b], .pre_ant = pa[y],
+                                         .ant_ports = kAnt[an], .post_ant = po[w][z], .fdra_mode = fdra_mode,
+                                         .n_rbg = n_rbg};
+            nr_dci11_offsets_t off;
+            if (!nr_dci01_layout_offsets(&c, riv_bits, tda_bits, &off) || off.total != observed_len)
+              continue;
+            if (n >= max)
+              return n;
+            if (offsets != NULL)
+              offsets[n] = off;
+            out[n++] = c;
+          }
+        }
+  return n;
 }
 
 int nr_dci01_layout_enumerate(uint16_t riv_bits, uint8_t tda_bits, uint16_t observed_len,
@@ -91,50 +148,71 @@ int nr_dci01_layout_enumerate(uint16_t riv_bits, uint8_t tda_bits, uint16_t obse
   if (out == NULL || max <= 0 || riv_bits == 0 || observed_len == 0) {
     return -1;
   }
+  return enumerate_mode(riv_bits, tda_bits, observed_len, NR_FDRA_TYPE1, 0, out, offsets, 0, max);
+}
+
+int nr_dci01_layout_enumerate_mode(uint16_t riv_bits, uint8_t tda_bits, uint16_t observed_len, uint16_t bwp_start,
+                                   uint16_t bwp_size, uint8_t fdra_mode, nr_dci01_layout_t *out,
+                                   nr_dci11_offsets_t *offsets, int max)
+{
+  if (out == NULL || max <= 0 || riv_bits == 0 || observed_len == 0 || bwp_size == 0 || fdra_mode > NR_FDRA_DYN_CFG2) {
+    return -1;
+  }
+  int n_rbg = 0;
+  if (fdra_mode != NR_FDRA_TYPE1) {
+    const int P = nr_fdra_rbg_size(fdra_mode, bwp_size);
+    if (P == 0
+        || ((fdra_mode == NR_FDRA_TYPE0_CFG2 || fdra_mode == NR_FDRA_DYN_CFG2) && P == nr_fdra_rbg_size(fdra_mode - 1, bwp_size)))
+      return 0;
+    n_rbg = nr_rbg_count(bwp_start, bwp_size, P);
+  }
+  return enumerate_mode(riv_bits, tda_bits, observed_len, fdra_mode, (uint8_t)n_rbg, out, offsets, 0, max);
+}
+
+int nr_dci01_layout_enumerate_fdra(uint16_t riv_bits, uint8_t tda_bits, uint16_t observed_len, uint16_t bwp_start,
+                                   uint16_t bwp_size, nr_dci01_layout_t *out, nr_dci11_offsets_t *offsets, int max)
+{
   int n = 0;
-  /* The switch space is larger than DCI 1_1's (SRI, precoding and CSI request are each up to 7
-   * values), but it collapses the same way: only the SUMS between read fields are distinguishable,
-   * and the derived length then pins the rest. */
-  for (int a = 0; a < NELEM(kUlSulBwp); a++)
-  for (int b = 0; b < NELEM(kFreqHop); b++)
-  for (int d1 = 0; d1 < NELEM(kDai1); d1++)
-  for (int d2 = 0; d2 < NELEM(kDai2); d2++)
-  for (int sr = 0; sr < NELEM(kSri); sr++)
-  for (int pc = 0; pc < NELEM(kPrecode); pc++)
-  for (int cs = 0; cs < NELEM(kCsiReq); cs++)
-  for (int an = 0; an < NELEM(kAnt); an++)
-  for (int sq = 0; sq < NELEM(kSrsReq); sq++)
-  for (int cb = 0; cb < NELEM(kCbg); cb++)
-  for (int pd = 0; pd < NELEM(kPtrsDmrs); pd++)
-  for (int be = 0; be < NELEM(kBeta); be++)
-  for (int di = 0; di < NELEM(kDmrsInit); di++) {
-    /* A PT-RS/DM-RS association field only exists when PT-RS does, and PT-RS in the uplink
-     * requires transform precoding to be off, which is also what admits the wider antenna-port
-     * tables. Allowing the pair otherwise would invent layouts no RRC can produce. */
-    if (kPtrsDmrs[pd] != 0 && kAnt[an] < 3) {
-      continue;
-    }
-    nr_dci01_layout_t c;
-    c.pre_riv = kUlSulBwp[a];
-    c.pre_mcs = kFreqHop[b];
-    c.pre_ant = (uint8_t)(kHarq[0] + kDai1[d1] + kDai2[d2] + kTpc[0] + kSri[sr] + kPrecode[pc]
-                          + kCsiReq[cs]);
-    c.ant_ports = kAnt[an];
-    c.post_ant = (uint8_t)(kSrsReq[sq] + kCbg[cb] + kPtrsDmrs[pd] + kBeta[be] + kDmrsInit[di]);
-    nr_dci11_offsets_t off;
-    if (!nr_dci01_layout_offsets(&c, riv_bits, tda_bits, &off)) {
-      continue;
-    }
-    if (off.total != observed_len || have(out, n, &c)) {
-      continue;
-    }
-    if (n >= max) {
-      return n;
-    }
-    if (offsets != NULL) {
-      offsets[n] = off;
-    }
-    out[n++] = c;
+  for (int m = NR_FDRA_TYPE1; m <= NR_FDRA_DYN_CFG2 && n < max; m++) {
+    const int k = nr_dci01_layout_enumerate_mode(riv_bits, tda_bits, observed_len, bwp_start, bwp_size, (uint8_t)m,
+                                                 out + n, offsets ? offsets + n : NULL, max - n);
+    if (k < 0)
+      return -1;
+    n += k;
   }
   return n;
+}
+
+void nr_dci01_fdra_note(nr_dci01_fdra_evidence_t *e, bool oracle_grant, bool tb_crc_ok)
+{
+  if (e == NULL)
+    return;
+  if (oracle_grant) {
+    e->t1_try++;
+    e->t1_ok += tb_crc_ok;
+  } else if (tb_crc_ok) {
+    e->link_ok++;
+    e->t1_try_at_link = e->t1_try;
+  }
+}
+
+int nr_dci01_fdra_verdict(const nr_dci01_fdra_evidence_t *e, bool armed, const nr_dci11_resolver_t *r)
+{
+  if (e == NULL || e->t1_ok > 0 || e->t1_try < NR_DCI11_FDRA_ARM_MIN_TRIALS)
+    return NR_DCI01_FDRA_BOOK;
+  const bool link_healthy = e->link_ok > 0 && e->t1_try - e->t1_try_at_link <= NR_DCI11_FDRA_ARM_MIN_TRIALS;
+  if (!link_healthy)
+    return NR_DCI01_FDRA_BOOK;
+  if (!armed)
+    return NR_DCI01_FDRA_ARM;
+  if (r != NULL)
+    for (int i = 0; i < r->n_hyp; i++)
+      if (r->alive[i] && r->off[i].fdra_mode != NR_FDRA_TYPE1)
+        return NR_DCI01_FDRA_REFUSE;
+  return NR_DCI01_FDRA_BOOK;
+}
+
+bool nr_dci01_fdra_book(int verdict, bool oracle_grant, unsigned long refused_so_far)
+{
+  return verdict != NR_DCI01_FDRA_REFUSE || !oracle_grant || (refused_so_far % NR_DCI01_FDRA_PROBE_EVERY) == 0;
 }
