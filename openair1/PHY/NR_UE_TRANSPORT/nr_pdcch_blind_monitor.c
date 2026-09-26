@@ -500,8 +500,11 @@ bool nr_pdcch_blind_monitor_autodiscover_done(void)
 static uint16_t s_hit_count[NR_PDCCH_MAX_CANDIDATE_WINDOWS];
 static uint16_t s_hit_count1[NR_PDCCH_MAX_CANDIDATE_WINDOWS]; /* same, CORESET symbol 1: decides the duration */
 
-/* LONG-TERM evidence, never reset by a dwell -- see the note on the per-UE CORESET hypothesis.
- * Diagnostic only: nothing below consumes these, so no decision changes. */
+/* LONG-TERM evidence, never reset by a single dwell (only by
+ * nr_pdcch_blind_monitor_autodiscover_reset() -- a full re-discovery, e.g. after a BWP switch).
+ * STALE COMMENT CORRECTED (R31 fix round 1): this used to say "diagnostic only, nothing consumes
+ * these" -- that predates MIN_ORACLE_DWELLS' seed selection, which reads s_lt_dwells/s_lt_hits
+ * directly to rank candidate windows by cross-dwell recurrence. They are load-bearing. */
 static unsigned long s_lt_hits[NR_PDCCH_MAX_CANDIDATE_WINDOWS];
 static unsigned      s_lt_dwells[NR_PDCCH_MAX_CANDIDATE_WINDOWS];
 static uint16_t      s_lt_rnti[NR_PDCCH_MAX_CANDIDATE_WINDOWS];
@@ -1194,6 +1197,22 @@ void nr_pdcch_blind_monitor_autodiscover_reset(void)
   g_cfg.dci_length_override = 0;
   extent_clear_evidence();
   memset(s_lane, 0, sizeof(s_lane));
+  /* R31 fix round 1: this used to leave the LONG-TERM dwell state (s_lt_hits/s_lt_dwells/
+   * s_lt_rnti/s_lt_ndwell) untouched -- only ever accumulated, never reset here. Two problems:
+   * (1) Gate 2's dominance bypass and the pre-existing MIN_ORACLE_DWELLS seed selection both key
+   * off s_lt_ndwell/s_lt_dwells (recurrence_floor = (s_lt_ndwell+4)/5), so a reset that leaves them
+   * non-zero makes the NEXT discovery's convergence speed depend on how much history happened to
+   * survive from before the reset -- order-dependent under --gtest_shuffle/sharding, and in
+   * production would let a genuine re-discovery (BWP switch, cell change) seed itself from a
+   * DIFFERENT cell's or DIFFERENT footprint's stale evidence. (2) Checked every caller before
+   * clearing here: as of this fix, nr_pdcch_blind_monitor_autodiscover_reset() has NO live RT/
+   * production caller at all (grep confirms only test fixtures call it) -- so there is no runtime
+   * behavior this could regress today. If a production re-discovery path starts calling this
+   * function, "full reset means full reset" is exactly the semantics its own name promises. */
+  memset(s_lt_hits, 0, sizeof(s_lt_hits));
+  memset(s_lt_dwells, 0, sizeof(s_lt_dwells));
+  memset(s_lt_rnti, 0, sizeof(s_lt_rnti));
+  s_lt_ndwell = 0;
 }
 
 int nr_pdcch_map_candidates(int span_rb, int duration, int pci, nr_pdcch_map_cand_t *out, int max_out)
@@ -1659,7 +1678,9 @@ bool nr_pdcch_blind_monitor_autodiscover_step(const void* rxdataF_symbol, int of
          * reached 3. Admit a decision anyway when one window DOMINATES every other window it is
          * actually being compared against -- not merely "is the maximum", which is exactly the
          * failure the lit_floor comment above already documents (11 hits vs a background of 6, ~2
-         * sigma, wrongly declared a footprint). Two named constants, both reused from statistics this
+         * sigma, wrongly declared a footprint). Two named constants (overridable via
+         * ISAC_DISCOVER_DOMINANCE_K / ISAC_DISCOVER_DOMINANCE_N, same convention as
+         * ISAC_DISCOVER_MIN_BG above; defaults unchanged), both reused from statistics this
          * file already trusts rather than fitted to any one cell:
          *   K = 4 -- the same margin nr_pdcch_coreset_map.c already treats as decisive for a single
          *            correlation sample (CORESET_MAP_CORR_THRESHOLD = 4x the pure-noise correlation
@@ -1682,7 +1703,21 @@ bool nr_pdcch_blind_monitor_autodiscover_step(const void* rxdataF_symbol, int of
          * CORESET#0's window range is excluded from both sides of the comparison (mirrors the
          * exclusion already applied below in COREMAPTOP/long-term accumulation), so this cannot
          * short-circuit on the already-known common CORESET instead of the sought dedicated one. */
-        enum { GATE2_DOMINANCE_K = 4, GATE2_DOMINANCE_N = 3 };
+        /* K/N are overridable (fix round 1), same pattern as ISAC_DISCOVER_MIN_BG just above:
+         * read once, default unchanged, floored at 1 so neither can degenerate the test (K=0 would
+         * make dominance trivially true, N=0 would zero the absolute-evidence floor). */
+        static int s_dom_k = -1;
+        if (s_dom_k < 0) {
+          const char *e = getenv("ISAC_DISCOVER_DOMINANCE_K");
+          s_dom_k = (e != NULL) ? atoi(e) : 4;
+          if (s_dom_k < 1) s_dom_k = 1;
+        }
+        static int s_dom_n = -1;
+        if (s_dom_n < 0) {
+          const char *e = getenv("ISAC_DISCOVER_DOMINANCE_N");
+          s_dom_n = (e != NULL) ? atoi(e) : 3;
+          if (s_dom_n < 1) s_dom_n = 1;
+        }
         int top_w = -1, top_hits = 0;
         for (int w = 0; w < n_rb_carrier / 6 && w < NR_PDCCH_MAX_CANDIDATE_WINDOWS; w++) {
           if (s_css0_excl_first_w >= 0 && w >= s_css0_excl_first_w && w <= s_css0_excl_last_w) continue;
@@ -1694,10 +1729,23 @@ bool nr_pdcch_blind_monitor_autodiscover_step(const void* rxdataF_symbol, int of
           if (s_css0_excl_first_w >= 0 && w >= s_css0_excl_first_w && w <= s_css0_excl_last_w) continue;
           if (s_hit_count[w] > rival) rival = s_hit_count[w];
         }
-        const bool dominant = top_w >= 0 && top_hits >= GATE2_DOMINANCE_N * AUTODISCOVER_HITS_PER_WINDOW
-                            && top_hits >= GATE2_DOMINANCE_K * rival;
+        const bool dominant = top_w >= 0 && top_hits >= s_dom_n * AUTODISCOVER_HITS_PER_WINDOW
+                            && top_hits >= s_dom_k * rival;
         if (!dominant) {
           return false;  /* keep observing: the background is not yet estimable and no window dominates */
+        }
+        /* Rate-limited: `dominant` stays true for every remaining call of a long dwell once it
+         * first fires, so logging unconditionally here would flood the RT log at the same rate as
+         * DISCOVERGATE's own occasion volume. Log the first occurrence (visible immediately) and
+         * then every 2000th, same cadence convention as this file's other periodic diagnostics. */
+        {
+          static uint64_t s_dom_log_n = 0;
+          if ((++s_dom_log_n == 1) || (s_dom_log_n % 2000) == 0) {
+            LOG_A(PHY,
+                  "SENSING: Gate2 dominance bypass -- w%d=%d hits vs best-other=%d (K=%d N=%d) admitted "
+                  "without an estimable background median (occurrence #%lu)\n",
+                  top_w, top_hits, rival, s_dom_k, s_dom_n, (unsigned long)s_dom_log_n);
+          }
         }
       }
     }

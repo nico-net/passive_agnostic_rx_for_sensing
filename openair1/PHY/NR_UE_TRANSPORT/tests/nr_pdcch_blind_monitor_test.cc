@@ -3239,44 +3239,17 @@ uint32_t* nr_gold_pdcch(int N_RB_DL, int symbols_per_slot, unsigned short scramb
 void nr_pdcch_dmrs_ref(const uint32_t* gold, c16_t* pilot, unsigned short nb_rb_coreset);
 }
 
-TEST(DiscoveryGates, Gate1EmptyBankNeverBlocksTheOnOccasionFallback) {
-  // nr_pdcch_blind_monitor_rt.c's process_body() used to `if (bank_count() == 0) return;` right
-  // after the discovery step, which made run_occasion()'s own bank_count()==0 branch (the cheap
-  // CORESET#0-USS/RAR-anchor fallback -- "search it before spending the occasion on unknown
-  // footprints") structurally unreachable for an entire capture. rt.c is RT-only (needs a live
-  // PHY_VARS_NR_UE) and is not linked into this binary, so this is the extracted decision point rt.c
-  // now calls instead -- it must never block the fallback, empty bank or not.
-  EXPECT_FALSE(nr_pdcch_blind_monitor_discovery_block_early_return(0));
-  EXPECT_FALSE(nr_pdcch_blind_monitor_discovery_block_early_return(1));
-  EXPECT_FALSE(nr_pdcch_blind_monitor_discovery_block_early_return(5));
-}
-
-TEST(DiscoveryGates, Gate2SparseBackgroundDominantWindowConverges) {
-  // Live evidence (sa-discovery-stall.md): with sparse traffic one window climbs 16->138 hits over
-  // 45000 calls while every other window stays near 0, so the ISAC_DISCOVER_MIN_BG=3 whole-carrier
-  // MEDIAN never becomes estimable -- zero dwells ever complete, however much evidence the true
-  // window already has. This test reproduces that shape (one genuinely occupied window, a carrier
-  // otherwise never producing a hit -- pure noise essentially never clears
-  // nr_pdcch_coreset_map_scan()'s own correlation floor) and checks the K/N dominance bypass lets
-  // discovery converge anyway.
-  //
-  // CSS0's own window range is excluded from the dominance comparison (mirrors the fix's own
-  // CSS0 exclusion, see Gate 2's comment in nr_pdcch_blind_monitor.c) via file-scope statics that
-  // OTHER TEST CASES in this binary also set and never reset -- run order otherwise leaves this
-  // test's whole 48-PRB/8-window carrier excluded by a leftover Css0Autoconf/TechniqueD call
-  // (measured: fails when run as part of the full binary, passes filtered alone). Own that state
-  // explicitly rather than depend on suite order: park CSS0 on window 7 only, clear of the
-  // occupied window (3) below.
-  ASSERT_TRUE(nr_pdcch_blind_monitor_autoconf_css0(6, 1, 42, 0, 40, 0, 2, 0, 1, 2, 0, 0));
-  nr_pdcch_blind_monitor_autodiscover_reset();
-
+// Shared by both DiscoveryGates.Gate2* tests below: build a 48-PRB symbol with exactly one real,
+// correctly-generated PDCCH DM-RS window (occupied_rb_offset) and drive
+// nr_pdcch_blind_monitor_autodiscover_step() with it, same (slot, symbol) every call, until it
+// converges or max_calls is exhausted. Returns the call count at convergence, or -1.
+static int RunSparseDiscoveryToConvergence(int occupied_rb_offset, int max_calls) {
   const int n_rb_carrier = 48, ofdm_symbol_size = 512, first_carrier_offset = 10;
   const uint16_t scrambling_id = 2;
   const int slot = 3, symbol = 0;
-  const int occupied_rb_offset = 18; // one 6-RB window, not aligned to a carrier edge
 
   std::vector<c16_t> rxdataF(ofdm_symbol_size, {0, 0});
-  std::mt19937 rng(99);
+  std::mt19937 rng(1000 + occupied_rb_offset);
   std::normal_distribution<double> noise(0.0, 8.0);
   for (auto& s : rxdataF) {
     s.r = (int16_t)std::lround(noise(rng));
@@ -3294,28 +3267,92 @@ TEST(DiscoveryGates, Gate2SparseBackgroundDominantWindowConverges) {
     }
   }
 
-  // Same (slot, symbol) every call -- this test only needs one window to stay genuinely lit while
-  // every other window stays near zero, matching the "sparse background" shape; it is not trying to
-  // be slot-accurate.
-  //
-  // Bound: MIN_ORACLE_DWELLS(8) dwells * AUTODISCOVER_OBS_CALLS(1000)/dwell = 8000 calls is the
-  // fastest the existing per-dwell floor allows even with Gate 2 fixed. The pre-fix code could only
-  // clear the min-bg gate via AUTODISCOVER_MAX_OBS_CALLS(400000)/dwell -- 400000x more calls per
-  // dwell -- so converging within a low-thousands call budget is itself the regression check.
-  const int kMaxCalls = 9000;
-  bool converged = false;
-  int calls_to_converge = 0;
-  for (int i = 1; i <= kMaxCalls && !converged; i++) {
-    converged = nr_pdcch_blind_monitor_autodiscover_step(rxdataF.data(), ofdm_symbol_size, n_rb_carrier,
-                                                          first_carrier_offset, scrambling_id, slot, symbol,
-                                                          (uint32_t)i);
-    calls_to_converge = i;
+  for (int i = 1; i <= max_calls; i++) {
+    if (nr_pdcch_blind_monitor_autodiscover_step(rxdataF.data(), ofdm_symbol_size, n_rb_carrier,
+                                                 first_carrier_offset, scrambling_id, slot, symbol, (uint32_t)i))
+      return i;
   }
-  ASSERT_TRUE(converged) << "did not converge within " << kMaxCalls << " calls";
-  EXPECT_LE(calls_to_converge, 8200);
+  return -1;
+}
+
+// Both DiscoveryGates.Gate2* tests below park CSS0 on window 7 of the 48-PRB/8-window carrier
+// (RunSparseDiscoveryToConvergence's occupied windows are always < 7), owning that global state
+// explicitly rather than depending on suite order -- see Gate2SparseBackgroundDominantWindowConverges's
+// own comment for why (measured: fails when run as part of the full binary otherwise).
+static void ParkCss0OnWindow7() {
+  ASSERT_TRUE(nr_pdcch_blind_monitor_autoconf_css0(6, 1, 42, 0, 40, 0, 2, 0, 1, 2, 0, 0));
+}
+
+TEST(DiscoveryGates, Gate1EmptyBankNeverBlocksTheOnOccasionFallback) {
+  // nr_pdcch_blind_monitor_rt.c's process_body() used to `if (bank_count() == 0) return;` right
+  // after the discovery step, which made run_occasion()'s own bank_count()==0 branch (the cheap
+  // CORESET#0-USS/RAR-anchor fallback -- "search it before spending the occasion on unknown
+  // footprints") structurally unreachable for an entire capture. rt.c is RT-only (needs a live
+  // PHY_VARS_NR_UE) and is not linked into this binary, so this is the extracted decision point rt.c
+  // now calls instead -- it must never block the fallback, empty bank or not.
+  EXPECT_FALSE(nr_pdcch_blind_monitor_discovery_block_early_return(0));
+  EXPECT_FALSE(nr_pdcch_blind_monitor_discovery_block_early_return(1));
+  EXPECT_FALSE(nr_pdcch_blind_monitor_discovery_block_early_return(5));
+}
+
+// Bound shared by both Gate2* tests below: MIN_ORACLE_DWELLS(8) dwells * AUTODISCOVER_OBS_CALLS(1000)
+// /dwell = 8000 calls is the fastest the existing per-dwell floor allows even with Gate 2 fixed. The
+// pre-fix code could only clear the min-bg gate via AUTODISCOVER_MAX_OBS_CALLS(400000)/dwell --
+// 400000x more calls per dwell -- so converging within a low-thousands call budget is itself the
+// regression check.
+static constexpr int kGate2MaxCalls = 9000;
+static constexpr int kGate2ExpectedCallBound = 8200;
+
+TEST(DiscoveryGates, Gate2SparseBackgroundDominantWindowConverges) {
+  // Live evidence (sa-discovery-stall.md): with sparse traffic one window climbs 16->138 hits over
+  // 45000 calls while every other window stays near 0, so the ISAC_DISCOVER_MIN_BG=3 whole-carrier
+  // MEDIAN never becomes estimable -- zero dwells ever complete, however much evidence the true
+  // window already has. This test reproduces that shape (one genuinely occupied window, a carrier
+  // otherwise never producing a hit -- pure noise essentially never clears
+  // nr_pdcch_coreset_map_scan()'s own correlation floor) and checks the K/N dominance bypass lets
+  // discovery converge anyway.
+  ParkCss0OnWindow7();
+  nr_pdcch_blind_monitor_autodiscover_reset();
+
+  const int occupied_rb_offset = 18; // one 6-RB window, not aligned to a carrier edge
+  const int calls = RunSparseDiscoveryToConvergence(occupied_rb_offset, kGate2MaxCalls);
+  ASSERT_GT(calls, 0) << "did not converge within " << kGate2MaxCalls << " calls";
+  EXPECT_LE(calls, kGate2ExpectedCallBound);
   EXPECT_EQ(nr_pdcch_blind_monitor_get_cfg()->coreset_rb_offset, occupied_rb_offset);
 }
 
+TEST(DiscoveryGates, Gate2ReconvergesAfterPriorDiscoveryInTheSameProcess) {
+  // Fix round 1 (controller ruling): nr_pdcch_blind_monitor_autodiscover_reset() used to leave the
+  // LONG-TERM dwell state (s_lt_ndwell/s_lt_hits/s_lt_dwells/s_lt_rnti) untouched -- only ever
+  // accumulated, never cleared. Gate 2's dominance bypass and the pre-existing MIN_ORACLE_DWELLS
+  // seed selection both key off that state (recurrence_floor = (s_lt_ndwell+4)/5), so a stale
+  // s_lt_ndwell/s_lt_dwells left over from an EARLIER discovery could let a second discovery's seed
+  // selection latch onto the FIRST run's window (already recorded enough stale dwells to clear
+  // recurrence_floor) instead of genuinely re-discovering the new one -- order-dependent under
+  // --gtest_shuffle/sharding, and in production the same failure mode for a real re-discovery (BWP
+  // switch, cell change) seeding off a stale footprint.
+  //
+  // Run discovery twice in the same process, resetting in between, with a DIFFERENT occupied window
+  // each time. If the reset doesn't clear the long-term state, the second run either converges
+  // suspiciously fast on the WRONG (first) window, or takes longer/fails as stale evidence
+  // interferes -- either way EXPECT_EQ on the second window below catches it.
+  ParkCss0OnWindow7();
+  nr_pdcch_blind_monitor_autodiscover_reset();
+  const int first_window_rb_offset = 18;
+  const int calls1 = RunSparseDiscoveryToConvergence(first_window_rb_offset, kGate2MaxCalls);
+  ASSERT_GT(calls1, 0) << "first discovery did not converge";
+  ASSERT_EQ(nr_pdcch_blind_monitor_get_cfg()->coreset_rb_offset, first_window_rb_offset);
+
+  ParkCss0OnWindow7();
+  nr_pdcch_blind_monitor_autodiscover_reset();
+  const int second_window_rb_offset = 0; // different window (window 0, not window 3)
+  const int calls2 = RunSparseDiscoveryToConvergence(second_window_rb_offset, kGate2MaxCalls);
+  ASSERT_GT(calls2, 0) << "second discovery (after reset) did not converge";
+  EXPECT_LE(calls2, kGate2ExpectedCallBound) << "second discovery took longer than a fresh one should";
+  EXPECT_EQ(nr_pdcch_blind_monitor_get_cfg()->coreset_rb_offset, second_window_rb_offset)
+      << "discovered the FIRST run's window instead of this run's -- long-term dwell state leaked "
+         "across the reset";
+}
 
 TEST(DmrsRankMapping, MatchesProductionDemapperAcrossLegalMappings) {
   // Label every data RE with its physical RB and symbol. The actual production demapper
