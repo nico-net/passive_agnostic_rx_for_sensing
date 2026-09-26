@@ -9,7 +9,9 @@
 #include <string.h>
 #include <math.h>
 #include <stdatomic.h>
+#include <pthread.h>
 
+#include "nr_harq_init_tx.h" // per-(RNTI, pid) reserved-MCS retransmission record, shared with the DL decoder
 #include "PHY/MODULATION/nr_modulation.h" // nr_symbol_fep_ul: the gNB uplink FEP
 #include "PHY/nr_phy_common/inc/nr_phy_common.h" // nr_fo_compensation: the same de-rotation nr_slot_fep uses
 
@@ -91,6 +93,11 @@ NR_gNB_PHY_STATS_t *get_phy_stats(PHY_VARS_gNB *gNB, uint16_t rnti)
 static PHY_VARS_gNB *g_gnb[NR_PUSCH_PASSIVE_MAX_CTX];
 static int           g_gnb_nant;
 static _Atomic uint64_t g_try, g_crc_ok, g_rej_unsup, g_rej_setup;
+/* Reserved-UL-MCS retransmission record (gap-harq lane): the UL twin of
+ * nr_pdsch_passive_decode.c's g_dl_harq_init, own instance so a UL HARQ pid can never collide with
+ * a DL one that happens to share the same number. See nr_harq_init_tx.h. */
+static nr_harq_init_tx_table_t g_ul_harq_init;
+static pthread_mutex_t g_ul_harq_init_lock = PTHREAD_MUTEX_INITIALIZER;
 /* UL DM-RS identity estimate (CP-OFDM PUSCH, type 1, port 0): same sequence family as PDSCH
  * (TS 38.211 6.4.1.1.1.1 vs 7.4.1.1.1), reference point CRB 0, so the PDSCH estimator applies
  * unchanged. Accumulated on EVERY attempted grant, CRC-OK or not (review fix round 1, finding 2) --
@@ -770,15 +777,56 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
   const int n_dmrs_sym = __builtin_popcount((unsigned)g->ul_dmrs_symb_pos
                                             & (((1u << g->num_symbols) - 1u) << g->start_symbol));
   const int nb_dmrs_re_per_rb = ((g->dmrs_config_type == 0) ? 6 : 4) * g->n_dmrs_cdm_groups;
-  const uint32_t tbs = nr_compute_tbs(pdu.qam_mod_order, pdu.target_code_rate, g->num_rb, g->num_symbols,
-                                      nb_dmrs_re_per_rb * n_dmrs_sym, 0, 0, g->nrOfLayers);
+  // MCS 28-31 (27-31 for a qam256 mcs-Table) have no code rate of their own (their modulation
+  // order, in pdu.qam_mod_order above, IS already correct -- the spec table encodes it directly).
+  // TS 38.214 6.1.4.1: the UE reuses the TBS and base graph of the initial transmission of this
+  // HARQ process. nr_harq_init_tx.h is that record, gated on the NDI not having toggled since it
+  // was taken; a miss means the true initial transmission was never observed and the grant is
+  // refused, same as when this receiver had no such record at all.
+  nr_harq_init_tx_t ul_init_tx = {0};
+  bool have_ul_init_tx = false;
+  uint32_t tbs;
+  if (pdu.qam_mod_order == 0 || pdu.target_code_rate == 0) {
+    pthread_mutex_lock(&g_ul_harq_init_lock);
+    have_ul_init_tx = nr_harq_init_tx_lookup(&g_ul_harq_init, g->rnti, g->harq_pid, g->ndi, &ul_init_tx);
+    pthread_mutex_unlock(&g_ul_harq_init_lock);
+    if (!have_ul_init_tx) {
+      out->status = NR_PUSCH_PASSIVE_UNSUPPORTED;
+      out->reject_reason = "reserved UL MCS with no known initial transmission on this HARQ process";
+      return false;
+    }
+    if (ul_init_tx.nl != g->nrOfLayers) {
+      // See the DL twin's identical comment: this grant's OWN layer count governs how THIS
+      // occasion's REs map, so it is kept rather than replayed from the record; only logged.
+      static _Atomic unsigned long c_ = 0;
+      const unsigned long n_ = atomic_fetch_add_explicit(&c_, 1, memory_order_relaxed) + 1;
+      if (n_ == 1 || (n_ % 200) == 0)
+        LOG_W(PHY, "SENSING: PUSCH reserved-MCS retx rnti=0x%04x pid=%u layer count changed %u->%u\n",
+              g->rnti, g->harq_pid, ul_init_tx.nl, g->nrOfLayers);
+    }
+    tbs = ul_init_tx.tbs;
+    pdu.target_code_rate = ul_init_tx.code_rate;
+  } else {
+    tbs = nr_compute_tbs(pdu.qam_mod_order, pdu.target_code_rate, g->num_rb, g->num_symbols,
+                         nb_dmrs_re_per_rb * n_dmrs_sym, 0, 0, g->nrOfLayers);
+  }
   if (tbs == 0) {
     out->status = NR_PUSCH_PASSIVE_UNSUPPORTED;
     out->reject_reason = "TBS computed as zero";
     return false;
   }
   pdu.pusch_data.tb_size = tbs >> 3;
-  pdu.maintenance_parms_v3.ldpcBaseGraph = get_BG(tbs, pdu.target_code_rate);
+  pdu.maintenance_parms_v3.ldpcBaseGraph = have_ul_init_tx ? ul_init_tx.bg : get_BG(tbs, pdu.target_code_rate);
+  if (!have_ul_init_tx) {
+    // This grant's own MCS was resolvable: record it as the current best-known initial-transmission
+    // parameters for this HARQ process, so a LATER reserved-MCS grant on it (same NDI) can use them.
+    // Every UL grant this receiver decodes is dedicated (0_0/0_1 only ever schedule a C-/TC-RNTI),
+    // so there is no SI/RA/P-class table-churn case to guard against here (unlike the DL twin).
+    pthread_mutex_lock(&g_ul_harq_init_lock);
+    nr_harq_init_tx_record(&g_ul_harq_init, g->rnti, g->harq_pid, g->ndi, pdu.qam_mod_order, g->nrOfLayers,
+                           pdu.maintenance_parms_v3.ldpcBaseGraph, tbs, pdu.target_code_rate);
+    pthread_mutex_unlock(&g_ul_harq_init_lock);
+  }
 
   NR_gNB_ULSCH_t *ulsch = &gnb->ulsch[0];
   ulsch->rnti     = g->rnti;
