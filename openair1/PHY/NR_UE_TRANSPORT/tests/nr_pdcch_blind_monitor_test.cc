@@ -690,6 +690,70 @@ TEST_F(BlindPdcchTest, RejectsValidCrcWithOutOfBoundAntennaPorts) {
   EXPECT_STREQ(out.reject_reason, "antenna_ports field outside its table's valid rows");
 }
 
+/* DM-RS type 2's DCI 1_1 antenna-ports tables (TS 38.212 Table 7.3.1.2.2-3, 5-bit field, maxLength 1;
+ * -4, 6-bit field, maxLength 2) were already implemented (g_table_7_3_2_3_3_3/_4) but had NO test
+ * exercising them -- this closes that gap. Row values below are read verbatim off the in-tree
+ * tables, not derived, so a wrong row constant here would be caught by the table itself disagreeing
+ * with the spec, not silently agreeing with a copy-paste mistake. */
+TEST_F(BlindPdcchTest, Dci11Type2AntennaPortsDecodeViaTables3And4) {
+  const uint16_t bwp_size = 106;
+  const int      riv_bits = RivBitsFor(bwp_size);
+
+  // Table 7.3.1.2.2-3 row 6 = {2,0,0,0,1,0,0}: 2 CDM groups without data, port 3 only.
+  {
+    nr_pdcch_blind_extract_opts_t opts = DefaultOpts();
+    opts.dmrs_config_type   = 1;
+    opts.antenna_ports_bits = 5;
+    const uint16_t len = nr_pdcch_blind_dci_size_ex(bwp_size, &opts);
+
+    GroundTruth gt;
+    gt.rnti                   = 0x4A11;
+    gt.bwp_size                = bwp_size;
+    gt.riv                     = (uint32_t)PRBalloc_to_locationandbandwidth0(20, 10, bwp_size);
+    gt.time_domain_assignment  = 0;
+    gt.antenna_ports            = 6;
+
+    auto llr = EncodeToLLR(PackPayload(gt, riv_bits, &opts), gt.rnti, len, kAggregationLevel, 40.0, rng_);
+    nr_pdcch_blind_result_t out;
+    ASSERT_TRUE(nr_pdcch_blind_decode_and_extract_ex(llr.data(), kAggregationLevel, len, bwp_size,
+                                                     kDmrsTypeAPositionPos2, NR_PDCCH_BLIND_RNTI_MIN_DEFAULT,
+                                                     NR_PDCCH_BLIND_RNTI_MAX_DEFAULT, &opts, &out));
+    EXPECT_EQ(out.dmrs_config_type, 1);
+    EXPECT_EQ(out.n_dmrs_cdm_groups, 2);
+    EXPECT_EQ(out.dmrs_ports, 1u << 3);
+  }
+
+  // Table 7.3.1.2.2-4 row 24 = {3,1,0,0,0,0,0,0,0,0,0,0,0,2}: 3 CDM groups, port 0 only,
+  // maxLength 2 (front-loaded + 1 additional symbol, the "symbols" column = 2).
+  {
+    nr_pdcch_blind_extract_opts_t opts = DefaultOpts();
+    opts.dmrs_config_type   = 1;
+    opts.antenna_ports_bits = 6;
+    // g_table_6_4_1_1_3_4 (maxLength 2's DM-RS symbol-mask table) defines ONLY additional
+    // positions 0 and 1 for mapping type A -- columns 2/3 are -1 (reserved) in every row, a real
+    // TS 38.211 Table 6.4.1.1.3-4 fact (double-symbol front-loading is simply not combined with
+    // pos2/pos3), not a bug. DefaultOpts()'s pos2 fallback is invalid here, so pin pos1.
+    opts.dmrs_add_pos       = 1;
+    const uint16_t len = nr_pdcch_blind_dci_size_ex(bwp_size, &opts);
+
+    GroundTruth gt;
+    gt.rnti                   = 0x4A22;
+    gt.bwp_size                = bwp_size;
+    gt.riv                     = (uint32_t)PRBalloc_to_locationandbandwidth0(20, 10, bwp_size);
+    gt.time_domain_assignment  = 0;
+    gt.antenna_ports            = 24;
+
+    auto llr = EncodeToLLR(PackPayload(gt, riv_bits, &opts), gt.rnti, len, kAggregationLevel, 40.0, rng_);
+    nr_pdcch_blind_result_t out;
+    ASSERT_TRUE(nr_pdcch_blind_decode_and_extract_ex(llr.data(), kAggregationLevel, len, bwp_size,
+                                                     kDmrsTypeAPositionPos2, NR_PDCCH_BLIND_RNTI_MIN_DEFAULT,
+                                                     NR_PDCCH_BLIND_RNTI_MAX_DEFAULT, &opts, &out));
+    EXPECT_EQ(out.dmrs_config_type, 1);
+    EXPECT_EQ(out.n_dmrs_cdm_groups, 3);
+    EXPECT_EQ(out.dmrs_ports, 1u);
+  }
+}
+
 // ---------------------------------------------------------------------------------------------
 // Group 4: plausibility filter under noise. Converts the false-positive risk into a
 // regression-guarded number (per this project's own testing-plan requirement) rather than an
@@ -2859,12 +2923,17 @@ TEST_F(BlindPdcchTest, Dci00RidesTheSame10Decode) {
   EXPECT_FALSE(nr_pdcch_blind_extract_00(dl_payload, len, rnti, &ul, &not_ul));
 }
 
-/* A blind width hypothesis feeds RAW field values into the antenna-ports closed form, which is
- * only defined over Table 7.3.1.1.2-8's four rows. Out-of-domain values used to reach
- * get_dmrs_port(), whose AssertFatal killed the softmodem mid-capture (measured 2026-09-09,
- * antenna_ports=14 -> port bitmap 1<<12 -> "No dmrs port corresponding to layer 0 found").
- * Every out-of-domain code point must be REJECTED, and every in-domain one must still work. */
-TEST_F(BlindPdcchTest, UlAntennaPortsCodePointOutsideItsTableIsRejected) {
+/* A blind width hypothesis feeds RAW field values into the antenna-ports decode, which must REJECT
+ * any code point outside its table rather than reach get_dmrs_port(), whose AssertFatal killed the
+ * softmodem mid-capture (measured 2026-09-09, antenna_ports=14 under the OLD 4-row-only closed form
+ * -> port bitmap 1<<12 -> "No dmrs port corresponding to layer 0 found"). Every in-domain code point
+ * must still decode, and every out-of-domain one must still be rejected -- now cross-checked against
+ * decode_dci_antenna_ports_val() directly (the same reverse table an attached UE's own PUSCH config
+ * uses, TS 38.212 Table 7.3.1.1.2-8/9 for rank 1 / DM-RS type 1 / transform precoding disabled),
+ * rather than a fixed "<=3" boundary: that boundary was an artifact of the old closed form's own
+ * self-imposed 4-row scope, not a real spec limit -- the reverse table has 14 valid rows at rank 1
+ * (rows 4-13 are the maxLength-2 rows a wider antenna_ports field can carry). */
+TEST_F(BlindPdcchTest, UlAntennaPortsType1DecodesViaReverseTable) {
   auto opts = LiveUlOpts();
   opts.antenna_ports_bits = 5;                 // the sweep really does try 5 bits
   const auto len = nr_pdcch_blind_dci01_size(&opts);
@@ -2875,17 +2944,54 @@ TEST_F(BlindPdcchTest, UlAntennaPortsCodePointOutsideItsTableIsRejected) {
     gt.antenna_ports = ap;
     nr_pdcch_blind_ul_result_t out{};
     const bool ok = nr_pdcch_blind_extract_01(PackUlPayload(gt, opts), len, gt.rnti, &opts, &out);
-    if (ap <= 3) {
-      EXPECT_TRUE(ok) << "in-domain antenna_ports=" << ap << " must still decode: "
-                      << (out.reject_reason ? out.reject_reason : "-");
-      if (ok) {
-        // Whatever it resolves to must name a port get_dmrs_port() can actually find.
-        int low = 0;
-        for (int i = 0; i < 12; i++) if ((out.dmrs_ports >> i) & 1) low++;
-        EXPECT_GE(low, out.nrOfLayers) << "antenna_ports=" << ap << " left layer 0 without a port";
-      }
-    } else {
-      EXPECT_FALSE(ok) << "out-of-domain antenna_ports=" << ap << " must be rejected, not asserted";
+
+    uint8_t exp_cdm = 0;
+    uint16_t exp_ports = 0;
+    int exp_fl = 0;
+    const bool table_ok = decode_dci_antenna_ports_val(1, nullptr, NR_PUSCH_Config__transformPrecoder_disabled,
+                                                       (uint8_t)ap, &exp_cdm, &exp_ports, &exp_fl) == 0;
+    EXPECT_EQ(ok, table_ok) << "antenna_ports=" << ap << ": "
+                            << (out.reject_reason ? out.reject_reason : "-");
+    if (ok && table_ok) {
+      EXPECT_EQ(out.n_dmrs_cdm_groups, exp_cdm) << "antenna_ports=" << ap;
+      EXPECT_EQ(out.dmrs_ports, exp_ports) << "antenna_ports=" << ap;
+      // Whatever it resolves to must name a port get_dmrs_port() can actually find.
+      int low = 0;
+      for (int i = 0; i < 12; i++) if ((out.dmrs_ports >> i) & 1) low++;
+      EXPECT_GE(low, out.nrOfLayers) << "antenna_ports=" << ap << " left layer 0 without a port";
+    }
+  }
+}
+
+/* Same table, DM-RS type 2 (opts.dmrs_config_type = 1). Before this fix, EVERY type-2 hypothesis was
+ * pruned upstream in nr_pdcch_ul_discovery.c's supported() gate and, even if it had reached here,
+ * this function's closed form rejected every antenna_ports value above 3 unconditionally -- so a
+ * type-2 UL cell produced zero UL grants regardless of aggregation level or RNTI range. */
+TEST_F(BlindPdcchTest, UlAntennaPortsType2DecodesViaReverseTable) {
+  auto opts = LiveUlOpts();
+  opts.dmrs_config_type = 1;   // DM-RS type 2
+  opts.antenna_ports_bits = 5; // type-2 rank-1 (Table 7.3.1.1.2-10/11) needs up to 28 code points
+  const auto len = nr_pdcch_blind_dci01_size(&opts);
+  long type2_tag = 1;
+  for (uint32_t ap = 0; ap < 32; ++ap) {
+    UlGroundTruth gt;
+    gt.riv = PRBalloc_to_locationandbandwidth0(24, 8, 273);
+    gt.mcs = 10;
+    gt.antenna_ports = ap;
+    nr_pdcch_blind_ul_result_t out{};
+    const bool ok = nr_pdcch_blind_extract_01(PackUlPayload(gt, opts), len, gt.rnti, &opts, &out);
+
+    uint8_t exp_cdm = 0;
+    uint16_t exp_ports = 0;
+    int exp_fl = 0;
+    const bool table_ok = decode_dci_antenna_ports_val(1, &type2_tag, NR_PUSCH_Config__transformPrecoder_disabled,
+                                                       (uint8_t)ap, &exp_cdm, &exp_ports, &exp_fl) == 0;
+    EXPECT_EQ(ok, table_ok) << "antenna_ports=" << ap << ": "
+                            << (out.reject_reason ? out.reject_reason : "-");
+    if (ok && table_ok) {
+      EXPECT_EQ(out.dmrs_config_type, 1);
+      EXPECT_EQ(out.n_dmrs_cdm_groups, exp_cdm) << "antenna_ports=" << ap;
+      EXPECT_EQ(out.dmrs_ports, exp_ports) << "antenna_ports=" << ap;
     }
   }
 }
