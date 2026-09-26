@@ -447,7 +447,9 @@ void nr_passive_mac_report_ta(uint16_t rnti, bool is_ra_rnti, int frame, int slo
  * that symbol's own DM-RS sequence (antenna 0, ~14 symbol FFTs into row 0 of rxdataF). Returns the
  * DM-RS symbol mask (0 = none seen) and, in *last_sym, the last symbol carrying energy on those PRBs
  * (-1 = none). Mapping-type agnostic: a type-B grant's first DM-RS on its first symbol is measured
- * like any other. */
+ * like any other.
+ * rb0 is an ABSOLUTE carrier CRB (matches nr_dmrs_prb_coherence()'s coh[] indexing), NOT the grant's
+ * BWP-relative PRB index -- callers must convert with nr_dmrs_oracle_crb(BWPStart, rb0) first. */
 static uint16_t dmrs_oracle_measure(PHY_VARS_NR_UE *ue, NR_DL_FRAME_PARMS *fp, uint32_t rxdataF_sz,
                                     c16_t rxdataF[][rxdataF_sz], int nr_slot, int rb0, int nrb, int nscid,
                                     int *last_sym, double prof[14], double *med_out)
@@ -740,7 +742,11 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
     const int oracle_rb0 = probe_span(&job, &oracle_nrb);
     if (!job.sweep_ticket.settled && job.sweep_ticket.generation && oracle_nrb >= 4
         && job.sweep_ticket.k0 == 0) {
-      const int rb0 = oracle_rb0, nrb = oracle_nrb;
+      /* dmrs_oracle_measure() indexes nr_dmrs_prb_coherence()'s coh[] and the physical subcarrier by
+       * ABSOLUTE carrier CRB (see that function's doc comment), but probe_span() returns a BWP-relative
+       * rb0 -- convert once here so both call sites below (the mask oracle and the k0 probe, which reuse
+       * this rb0) read the right PRBs whenever BWPStart != 0. No-op at BWPStart = 0 (the lab cell). */
+      const int rb0 = nr_dmrs_oracle_crb(job.dlsch_pdu.BWPStart, oracle_rb0), nrb = oracle_nrb;
       double prof[14] = {0}, med = 1.0;
       int last_sym = -1;
       const uint16_t mask = dmrs_oracle_measure(ue, fp, rxdataF_sz, rxdataF, job.nr_slot_rx, rb0, nrb,

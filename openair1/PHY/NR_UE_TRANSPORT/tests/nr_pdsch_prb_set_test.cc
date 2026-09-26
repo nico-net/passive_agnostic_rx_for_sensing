@@ -147,6 +147,16 @@ TEST(PrbSet, FdraPrbsDecodesBothRivCasesAndTheModes) {
   EXPECT_EQ(nr_fdra_bits(NR_FDRA_DYN_CFG2, 7, 13), 14);
 }
 
+TEST(PrbSet, DmrsOracleCrbAddsBwpStart) {
+  // BWPStart = 0 must be bit-identical to a bare BWP-relative index (the lab cell).
+  EXPECT_EQ(nr_dmrs_oracle_crb(0, 0), 0);
+  EXPECT_EQ(nr_dmrs_oracle_crb(0, 5), 5);
+  // BWPStart = 20, rb0 = 5 -> absolute CRB 25 (a dedicated BWP not starting at CRB 0).
+  EXPECT_EQ(nr_dmrs_oracle_crb(20, 5), 25);
+  // Carrier edge: a 273-PRB carrier's last valid CRB index is 272.
+  EXPECT_EQ(nr_dmrs_oracle_crb(260, 12), 272);
+}
+
 int main(int argc, char **argv)
 {
   testing::InitGoogleTest(&argc, argv);
