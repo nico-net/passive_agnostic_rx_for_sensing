@@ -576,10 +576,58 @@ static bool recovery_needed(const sweep_context_t *c)
   return (double)c->failure_streak * log1p(-c->reference_crc_lower) <= budget;
 }
 
+/* ---- CATALOG TEMPLATES (final review I8). nr_pdsch_config_sweep_init_legal() depends only on (typeA,
+ * legality) -- tda_count is ignored -- and costs ~6.3k legality calls with type B. It used to run for
+ * every new context UNDER g_lock, on the scan thread (the PHY receive thread when the scan is not
+ * deferred). Now each distinct catalog is built once, under its own lock, and a context copies it
+ * (memcpy of one state). Templates are immutable once published and never freed. */
+#define NR_PDSCH_SWEEP_TEMPLATES 4
+typedef struct {
+  int typeA;
+  nr_pdsch_legality_fn_t legality;
+  nr_pdsch_config_sweep_state_t *st;
+} catalog_template_t;
+static catalog_template_t g_tmpl[NR_PDSCH_SWEEP_TEMPLATES];
+static pthread_mutex_t g_tmpl_lock = PTHREAD_MUTEX_INITIALIZER; /* lock order: g_lock -> g_tmpl_lock, never reversed */
+static const nr_pdsch_config_sweep_state_t *catalog_template(int typeA, nr_pdsch_legality_fn_t legality)
+{
+  const nr_pdsch_config_sweep_state_t *t = NULL;
+  pthread_mutex_lock(&g_tmpl_lock);
+  int free_slot = -1;
+  for (int i = 0; i < NR_PDSCH_SWEEP_TEMPLATES && !t; i++) {
+    if (g_tmpl[i].st && g_tmpl[i].typeA == typeA && g_tmpl[i].legality == legality)
+      t = g_tmpl[i].st;
+    else if (!g_tmpl[i].st && free_slot < 0)
+      free_slot = i;
+  }
+  if (!t && free_slot >= 0) {
+    nr_pdsch_config_sweep_state_t *st = malloc(sizeof(*st));
+    if (st) {
+      nr_pdsch_config_sweep_init_legal(st, 0, typeA, legality);
+      g_tmpl[free_slot] = (catalog_template_t){.typeA = typeA, .legality = legality, .st = st};
+      t = st;
+    }
+  }
+  pthread_mutex_unlock(&g_tmpl_lock);
+  return t; /* NULL only when every template slot holds another key (or malloc failed): caller enumerates */
+}
+static void catalog_fill(nr_pdsch_config_sweep_state_t *st, int tda_count, int typeA, nr_pdsch_legality_fn_t legality)
+{
+  const nr_pdsch_config_sweep_state_t *t = legality ? catalog_template(typeA, legality) : NULL;
+  if (t)
+    memcpy(st, t, sizeof(*st));
+  else
+    nr_pdsch_config_sweep_init_legal(st, tda_count, typeA, legality);
+}
+/* One recycled context state (under g_lock): an evicted or race-lost state is kept for the next new
+ * context instead of being freed, so a burst of new contexts does not mmap/munmap (and, under
+ * mlockall(), fault-and-lock) a fresh 180 KB each time. */
+static nr_pdsch_config_sweep_state_t *g_spare_state;
+
 /* Full catalog for a context, plus every k0 layer the air has shown for its RNTI. */
 static void context_catalog(sweep_context_t *c, const rnti_ctx_t *r)
 {
-  nr_pdsch_config_sweep_init_legal(c->state, c->tda_count, c->typeA, c->legality);
+  catalog_fill(c->state, c->tda_count, c->typeA, c->legality);
   for (int k = 2; r && k <= 32; k++)
     if (r->k0_seen & (UINT64_C(1) << k))
       add_k0_layer(c->state, (uint8_t)k);
@@ -703,6 +751,23 @@ static sweep_context_t *ticket_context(const nr_pdsch_sweep_ticket_t *t)
          && t->hypothesis >= 0 && t->hypothesis < c->state->n_hyp ? c : NULL;
 }
 
+/* under g_lock: the context for this key, or -1 (then *victim, if non-NULL, is the LRU slot) */
+static int find_context(uint64_t configuration, uint16_t rnti, uint8_t tda_index, int tda_count, int typeA, int *victim)
+{
+  int v = 0;
+  for (int i = 0; i < NR_PDSCH_SWEEP_MAX_CONTEXTS; ++i) {
+    const sweep_context_t *c = &g_contexts[i];
+    if (c->generation && c->configuration == configuration && c->rnti == rnti
+        && c->tda == tda_index && c->tda_count == tda_count && c->typeA == typeA)
+      return i;
+    if (c->touched < g_contexts[v].touched)
+      v = i;
+  }
+  if (victim)
+    *victim = v;
+  return -1;
+}
+
 bool nr_pdsch_config_sweep_select(uint64_t configuration, uint16_t rnti, uint8_t tda_index,
                                  int tda_count, int typeA, nr_pdsch_legality_fn_t legality,
                                  nr_pdsch_sweep_ticket_t *ticket, nr_pdsch_cfg_hypothesis_t *out)
@@ -712,30 +777,36 @@ bool nr_pdsch_config_sweep_select(uint64_t configuration, uint16_t rnti, uint8_t
   if (!ticket || !out || !legality || !rnti || tda_index >= 16
       || tda_count < 0 || tda_count > 16 || (tda_count && tda_index >= tda_count))
     return false;
+  /* Final review I8: the common case (the context exists) takes g_lock ONCE. A new context is allocated
+   * and its catalog copied from a prebuilt template OUTSIDE g_lock, then installed under it (a thread
+   * that lost the race hands its buffer back to the spare slot). */
   pthread_mutex_lock(&g_lock);
-  rnti_ctx_t *r = rnti_ctx(rnti, true);
-  int found = -1, victim = 0;
-  for (int i = 0; i < NR_PDSCH_SWEEP_MAX_CONTEXTS; ++i) {
-    sweep_context_t *c = &g_contexts[i];
-    if (c->generation && c->configuration == configuration && c->rnti == rnti
-        && c->tda == tda_index && c->tda_count == tda_count && c->typeA == typeA) {
-      found = i;
-      break;
-    }
-    if (c->touched < g_contexts[victim].touched)
-      victim = i;
-  }
+  int found = find_context(configuration, rnti, tda_index, tda_count, typeA, NULL);
+  nr_pdsch_config_sweep_state_t *fresh = NULL;
   if (found < 0) {
-    found = victim;
-    sweep_context_t *c = &g_contexts[found];
-    nr_pdsch_config_sweep_state_t *state = c->state ? c->state : calloc(1, sizeof(*state));
-    if (!state) {
-      pthread_mutex_unlock(&g_lock);
-      LOG_E(PHY, "SWEEP: cannot allocate a %zu-byte context state\n", sizeof(*state));
+    fresh = g_spare_state;
+    g_spare_state = NULL;
+    pthread_mutex_unlock(&g_lock);
+    if (!fresh)
+      fresh = malloc(sizeof(*fresh));
+    if (!fresh) {
+      LOG_E(PHY, "SWEEP: cannot allocate a %zu-byte context state\n", sizeof(*fresh));
       return false;
     }
+    catalog_fill(fresh, tda_count, typeA, legality);
+    pthread_mutex_lock(&g_lock);
+  }
+  rnti_ctx_t *r = rnti_ctx(rnti, true);
+  nr_pdsch_config_sweep_state_t *to_free = NULL;
+  int victim = 0;
+  if (fresh && (found = find_context(configuration, rnti, tda_index, tda_count, typeA, &victim)) >= 0) {
+    to_free = fresh; /* another thread created it meanwhile */
+  } else if (fresh) {
+    found = victim;
+    sweep_context_t *c = &g_contexts[found];
+    to_free = c->state; /* the evicted context's state (NULL for a slot never used) */
     memset(c, 0, sizeof(*c));
-    c->state = state;
+    c->state = fresh;
     c->configuration = configuration;
     c->generation = ++g_generation;
     c->rnti = rnti;
@@ -743,7 +814,6 @@ bool nr_pdsch_config_sweep_select(uint64_t configuration, uint16_t rnti, uint8_t
     c->tda_count = tda_count;
     c->typeA = typeA;
     c->legality = legality;
-    nr_pdsch_config_sweep_init_legal(c->state, tda_count, typeA, legality);
     /* Seed: this RNTI's own prior first (its other TDA contexts already converged on these fields),
      * else the cell-wide one. Scoped to the same configuration key either way: a different cell
      * config is a different DM-RS/PDSCH setup and its prior says nothing here. */
@@ -763,6 +833,10 @@ bool nr_pdsch_config_sweep_select(uint64_t configuration, uint16_t rnti, uint8_t
       if (r->k0_seen & (UINT64_C(1) << k))
         add_k0_layer(c->state, (uint8_t)k);
   }
+  if (to_free && !g_spare_state) {
+    g_spare_state = to_free;
+    to_free = NULL;
+  }
   sweep_context_t *c = &g_contexts[found];
   c->touched = ++g_clock;
   const int h = nr_pdsch_config_sweep_next(c->state, out);
@@ -771,6 +845,7 @@ bool nr_pdsch_config_sweep_select(uint64_t configuration, uint16_t rnti, uint8_t
                                        .rnti=rnti, .tda_index=tda_index, .hypothesis=h, .settled=c->state->winner >= 0,
                                        .k0=out->k0};
   pthread_mutex_unlock(&g_lock);
+  free(to_free);
   return h >= 0;
 }
 
