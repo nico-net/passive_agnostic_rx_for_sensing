@@ -78,6 +78,20 @@ TEST(PrbSet, InterleavedVrbIsAPermutation) {
       }
 }
 
+TEST(PrbSet, InterleavedCssUsesCoreset0Grid) {
+  // DCI 1_0 in a common search space (TS 38.211 7.3.1.6): bwp_start=0 (CORESET#0's own CRB offset
+  // is carried separately downstream in rb_origin/BWPStart and added back there, not folded into
+  // the bundle-alignment parameter here), size 48 (initial DL BWP / CORESET#0 size), L=2.
+  uint16_t p[48];
+  ASSERT_EQ(nr_vrb_to_prb_interleaved(0, 48, 2, 0, 48, p), 48);
+  std::vector<int> seen(48, 0);
+  for (auto v : p) { ASSERT_LT(v, 48); seen[v]++; }
+  for (int i = 0; i < 48; i++) EXPECT_EQ(seen[i], 1) << i;
+  // Bundle 1 = VRBs {2,3}; C = nb/2 = 24/2 = 12 -> PRB bundle 12 = PRBs {24,25}.
+  EXPECT_EQ(p[2], 24);
+  EXPECT_EQ(p[3], 25);
+}
+
 TEST(PrbSet, SegmentsFollowDataOrderAndPrgBoundaries) {
   const uint16_t il[10] = {0, 1, 4, 5, 2, 3, 6, 7, 8, 9};
   nr_prb_seg_t s[16];

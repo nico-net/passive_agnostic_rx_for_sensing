@@ -92,7 +92,21 @@ typedef struct {
                        ///< with CRC scrambled by RA-RNTI or P-RNTI (Msg2/RAR and paging), where the
                        ///< field exists in place of NDI/HARQ. 0 everywhere else, which is the
                        ///< identity, so a caller that never sets it is unchanged.
+  uint8_t  vrb_l;      ///< DCI 1_1 interleaved VRB-to-PRB bundle size (2 or 4) the caller's PRB
+                       ///< list was built with (nr_pdsch_vrbl_pick()), fed back to the per-RNTI
+                       ///< sweep once this decode's TB CRC is known. 0 = not interleaved, or a
+                       ///< DCI 1_0 grant (L=2 is fixed by spec there, not a hypothesis) -- nothing
+                       ///< to feed back, and the previous behaviour for every caller that never
+                       ///< sets it.
 } nr_pdsch_passive_grant_t;
+
+/// Pick this RNTI's current DCI 1_1 interleaved VRB-to-PRB bundle-size hypothesis (2 or 4). The
+/// RRC field that decides it (vrb-ToPRB-Interleaver) is invisible to a passive receiver, so it is a
+/// minimal per-RNTI 2-arm sweep decided by the TB CRC, mirroring the PT-RS density sweep above --
+/// pick an arm, build the grant's PRB list under it (copy the return value into `vrb_l`), decode,
+/// and the TB CRC outcome feeds back automatically inside nr_pdsch_passive_decode(). Does NOT apply
+/// to DCI 1_0, whose L=2 is fixed by spec and never swept.
+int nr_pdsch_vrbl_pick(uint16_t rnti);
 
 /// Outcome of one passive decode attempt.
 typedef enum {
