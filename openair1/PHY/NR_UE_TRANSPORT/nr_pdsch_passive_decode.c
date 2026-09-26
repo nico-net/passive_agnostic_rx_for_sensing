@@ -2026,8 +2026,11 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
    * virtual contiguous allocation. A 1-PRB segment is fine: the estimator has no minimum size (its
    * FIR/pilot loop is the same arithmetic the attached UE runs on 1-RB grants). nvar is weighted by
    * segment width so the sum keeps its (DM-RS symbol x layer) meaning; nr_dl_chest_nvar_ant[] ends
-   * up holding the LAST segment's per-branch value (the same last-call approximation it already
-   * makes across DM-RS symbols). The ISAC_DC_FIX interpolation is not applied here. */
+   * up holding the WIDTH-WEIGHTED MEAN across this symbol's segments (fix round 1, 15658710b9) --
+   * NOT just the last segment's raw value, which is what this comment used to say before that fix
+   * landed a few lines below. It is still only the last DM-RS SYMBOL's mean across symbols, the
+   * same last-call approximation the branch-substitution block further down already documents. The
+   * ISAC_DC_FIX interpolation is not applied here. */
   static __thread c16_t *seg_h = NULL;
   static __thread size_t seg_h_cap = 0;
   const int nsc_seg = freq_alloc->num_rbs * NR_NB_SC_PER_RB;
