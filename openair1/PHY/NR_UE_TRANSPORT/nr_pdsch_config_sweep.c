@@ -91,10 +91,19 @@ static int catalog_add_mapping_type(nr_pdsch_config_sweep_state_t *st, int mt, i
           mask = legality(typeA, L, S, mt, kAddPos[b], kMaxLen[c]);
           if (mask <= 0)
             continue;
+          /* Equivalence is scoped to the SAME (S,L,k0): the data RE range comes from (S,L), so two
+           * DIFFERENT (S,L) pairs whose absolute dmrs_mask bit pattern happens to coincide are NOT
+           * the same effective PDU (different data REs either side of that mask) and must not be
+           * merged -- only an entry of the SAME allocation that reaches the same (mask,table) really
+           * is indistinguishable to the TB CRC. A whole-catalog scan without the (S,L) match silently
+           * dropped real type-B entries whenever an unrelated (S,L) elsewhere in the real mask
+           * generator's output happened to reuse the same mask value (measured: it ate every entry of
+           * a live TypeBTruthIsPinnedByOneOracleObservationAndConverges-style truth). */
           bool equivalent = false;
           for (int i = 0; i < st->n_hyp && !equivalent; ++i)
-            equivalent = st->hyp[i].dmrs_mask == mask && st->hyp[i].mcs_table == kMcsTab[d]
-                        && st->hyp[i].k0 == kK0[e];
+            equivalent = st->hyp[i].tda_start == S && st->hyp[i].tda_length == L
+                        && st->hyp[i].k0 == kK0[e] && st->hyp[i].dmrs_mask == mask
+                        && st->hyp[i].mcs_table == kMcsTab[d];
           if (equivalent)
             continue;
         }

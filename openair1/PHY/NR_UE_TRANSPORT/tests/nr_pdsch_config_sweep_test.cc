@@ -737,23 +737,27 @@ static int32_t ab_legal(int, int length, int start, int mapping_b, int add, int 
 }
 
 /* The merge is catalog_add_mapping_type's own dedup, shared by init_legal and the evidence-triggered
- * add_typeb_layer(). A fresh catalog no longer mixes both types in one call for the old test to
- * observe pre-prune (R30 item 1), so this drives the SAME dedup code with two type-A (S,L) pairs that
- * coincide instead of a type-A/type-B pair -- the function does not distinguish either way. */
+ * add_typeb_layer(). Equivalence is scoped to the SAME (S,L,k0): the data RE range comes from (S,L),
+ * so two DIFFERENT (S,L) that happen to produce the same absolute dmrs_mask are NOT the same
+ * effective PDU and must NOT be merged (an earlier version of this test drove exactly that case and
+ * was wrong -- it hid a real bug where the real mask generator's coincidental cross-(S,L) mask reuse
+ * silently ate legitimate type-B entries, caught by DlAdaptive.TypeBTruthIsPinnedByOneOracleObservat
+ * ionAndConverges in nr_dl_adaptive_test.cc). What DOES legitimately collide at the SAME (S,L) is two
+ * different add_pos values landing on the same DM-RS symbol pattern. A fresh catalog no longer mixes
+ * both mapping types in one call for the old test to observe pre-prune (R30 item 1), so this drives
+ * the same dedup code within one mapping type instead. */
 static int32_t dup_legal(int, int length, int start, int mapping_b, int add, int maxlen)
 {
   if (maxlen != 1 || mapping_b)
     return 0;
-  if (start == 1 && length == 13 && add == 0)
-    return 0x4;
-  if (start == 2 && length == 12 && add == 0)
-    return 0x4; /* same effective PDU as the entry above: must merge to one */
+  if (start == 1 && length == 13 && (add == 0 || add == 1))
+    return 0x4; /* two add_pos values, same effective PDU at the same (S,L,k0) -- must merge to one */
   return 0;
 }
 TEST(PdschConfigSweepTypeB, IdenticalEffectivePdusMergeToOneHypothesis) {
   nr_pdsch_config_sweep_state_t st;
   const int n = nr_pdsch_config_sweep_init_legal(&st, 2, 0, dup_legal);
-  EXPECT_EQ(n, 6); // one (S,L) worth of entries (k0{0,1} x 3 mcs tables), not two
+  EXPECT_EQ(n, 6); // one (S,L) worth of entries (k0{0,1} x 3 mcs tables), not two add_pos variants
   for (int i = 0; i < n; i++) {
     EXPECT_EQ(st.hyp[i].tda_start, 1);
     EXPECT_EQ(st.hyp[i].tda_length, 13);

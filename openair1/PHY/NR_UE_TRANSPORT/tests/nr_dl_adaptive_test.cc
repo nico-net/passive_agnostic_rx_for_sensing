@@ -28,16 +28,18 @@ void nr_pdcch_dmrs_ref(const uint32_t *, c16_t *, unsigned short);
 }
 
 TEST(DlAdaptive, CompleteLegalCatalogAndNoPermanentlyUnfeedableHypotheses) {
-  /* Every legal (S,L) of TS 38.214 Table 5.1.2.1-1 for BOTH mapping types (type A S 0..3, L 3..14;
-   * type B S 0..12, L 2..13; S+L <= 14) x k0 {0,1}: no curated prefix. The key is the effective PDU, so
-   * a type-B entry identical to a type-A one is one hypothesis. */
+  /* R30 item 1 (technique-d-regression.md): a fresh/initial catalog is mapping type A ONLY now (type
+   * B enters only once the DM-RS oracle observes a mask type A cannot explain -- see
+   * TypeBEntriesAreCompleteOnceObserved below for that catalog's own completeness check). Every legal
+   * type-A (S,L) of TS 38.214 Table 5.1.2.1-1 (S 0..3, L 3..14, S+L <= 14) x k0 {0,1}: no curated
+   * prefix. */
   using Key=std::tuple<int,int,int,int,int>;
   for(int typeA : {0,1}) {
     std::set<Key> expected, actual;
-    for(int mt=0;mt<2;mt++) for(int S=0;S<=12;S++) for(int L=2;S+L<=14;L++) for(int k0=0;k0<2;k0++)
+    for(int S=0;S<=12;S++) for(int L=2;S+L<=14;L++) for(int k0=0;k0<2;k0++)
       for(int add=0;add<4;add++) for(int len=1;len<=2;len++) for(int mcs=0;mcs<3;mcs++) {
-      if(!nr_pdsch_tda_legal(mt,S,L)) continue;
-      int mask=nr_pdcch_blind_dmrs_mask(typeA,L,S,mt,add,len);
+      if(!nr_pdsch_tda_legal(0,S,L)) continue;
+      int mask=nr_pdcch_blind_dmrs_mask(typeA,L,S,0,add,len);
       if(mask>0) expected.emplace(S,L,k0,mask,mcs);
     }
     nr_pdsch_config_sweep_state_t state{};
@@ -45,6 +47,7 @@ TEST(DlAdaptive, CompleteLegalCatalogAndNoPermanentlyUnfeedableHypotheses) {
     for(int i=0;i<state.n_hyp;i++) {
       auto h=state.hyp[i];
       EXPECT_GT(h.dmrs_mask,0);
+      EXPECT_EQ(h.mapping_type,0);
       actual.emplace(h.tda_start,h.tda_length,h.k0,h.dmrs_mask,h.mcs_table);
     }
     EXPECT_EQ(actual,expected);
@@ -59,6 +62,47 @@ TEST(DlAdaptive, CompleteLegalCatalogAndNoPermanentlyUnfeedableHypotheses) {
     }
     EXPECT_EQ(state.winner,truth);
   }
+}
+
+/* R30 item 1's companion completeness check: once triggered by observation, the type-B catalog must
+ * be just as complete as type A's -- every legal type-B (S,L) producing the observed mask reachable,
+ * no permanently unfeedable entry. Driven through the real select()/observe() API since
+ * add_typeb_layer/catalog_add_mapping_type are private to nr_pdsch_config_sweep.c. Also pins the fix
+ * for the bug this same effort found live: the dedup that merges identical effective PDUs must be
+ * scoped to the SAME (S,L,k0), not a whole-catalog scan -- a whole-catalog scan silently drops a
+ * legitimate entry whenever some UNRELATED (S,L) elsewhere in the real mask generator's output
+ * happens to reuse the same absolute dmrs_mask value, which happens for real masks (unlike the
+ * smaller synthetic fixtures in nr_pdsch_config_sweep_test.cc). If more than one (S,L) shares
+ * `trigger_mask` below, every one of them must still show up in `expected`. */
+TEST(DlAdaptive, TypeBEntriesAreCompleteOnceObserved) {
+  const int typeA = 0;
+  using Key=std::tuple<int,int,int,int,int>;
+  std::set<Key> expected;
+  const uint16_t trigger_mask = 0x220; // S=5 L=7 add=1 len=1 (TypeBTruthIsPinnedByOneOracleObservationAndConverges's truth): absent from every type-A entry
+  for(int S=0;S<=12;S++) for(int L=2;S+L<=14;L++) for(int k0=0;k0<2;k0++)
+    for(int add=0;add<4;add++) for(int len=1;len<=2;len++) for(int mcs=0;mcs<3;mcs++) {
+    if(!nr_pdsch_tda_legal(1,S,L)) continue;
+    int mask=nr_pdcch_blind_dmrs_mask(typeA,L,S,1,add,len);
+    if(mask==(int)trigger_mask) expected.emplace(S,L,k0,mask,mcs);
+  }
+  ASSERT_GT(expected.size(), 0u);
+  nr_pdsch_config_sweep_reset_all();
+  nr_pdsch_config_sweep_prior_reset();
+  nr_pdsch_sweep_ticket_t t{};
+  nr_pdsch_cfg_hypothesis_t h{};
+  ASSERT_TRUE(nr_pdsch_config_sweep_select(0x9A, 0x4601, 0, 2, typeA, nr_pdcch_blind_dmrs_mask, &t, &h));
+  nr_pdsch_config_sweep_observe(&t, trigger_mask, -1, -1);
+  /* the prune re-indexed the context: take a fresh ticket before reading it */
+  ASSERT_TRUE(nr_pdsch_config_sweep_select(0x9A, 0x4601, 0, 2, typeA, nr_pdcch_blind_dmrs_mask, &t, &h));
+  nr_pdsch_config_sweep_state_t st{};
+  ASSERT_TRUE(nr_pdsch_config_sweep_snapshot(&t, &st));
+  std::set<Key> actual;
+  for (int i=0;i<st.n_hyp;i++) {
+    EXPECT_EQ(st.hyp[i].dmrs_mask, trigger_mask);
+    actual.emplace(st.hyp[i].tda_start, st.hyp[i].tda_length, st.hyp[i].k0, st.hyp[i].dmrs_mask, st.hyp[i].mcs_table);
+  }
+  EXPECT_EQ(actual, expected);
+  nr_pdsch_config_sweep_reset_all();
 }
 
 TEST(DlAdaptive, SweptMcsReachesPduDecoderAndRateMatching) {
