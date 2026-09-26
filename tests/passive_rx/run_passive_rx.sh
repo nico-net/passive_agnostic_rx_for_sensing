@@ -506,7 +506,14 @@ fi
 summarize_rx() { # summarize_rx <label> <log_file> <reports_jsonl>
   local label="$1" log="$2" reports="$3"
   echo "--- PASSIVE $label: never transmitted ---"
-  local ul; ul=$(grep -icE "prach|RAPROC|preamble|Msg3|PUCCH|PUSCH" "$log")
+  # Every one of these keywords also appears, case-insensitively, in the receiver's OWN "SENSING:"
+  # log lines that describe UL activity it merely OBSERVED off the air (occ[...pusch=N...] CFR
+  # occupancy telemetry, blind PDCCH's own PUSCH/PRACH decode diagnostics) -- not uplink the passive
+  # receiver itself transmitted. Found live 2026-09-27: those lines false-positived this check on
+  # every run with any blind-PDCCH/ul_pusch activity, even though the receiver never actually
+  # transmitted. All of this receiver's own decode/telemetry output is tagged "SENSING:"; a real
+  # self-transmission would come from the ordinary OAI UL stack, which never uses that tag.
+  local ul; ul=$(grep -iE "prach|RAPROC|preamble|Msg3|PUCCH|PUSCH" "$log" 2>/dev/null | grep -vc "SENSING:")
   echo "  uplink/RA log lines: $ul   (MUST be 0)"
   [ "$ul" -eq 0 ] && echo "  VERDICT: no uplink activity" || echo "  VERDICT: *** UPLINK DETECTED ***"
 
