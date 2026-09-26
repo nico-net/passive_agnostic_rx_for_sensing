@@ -62,3 +62,30 @@ void nr_scrambling_id_sweep_feed(nr_scrambling_id_sweep_t *s, int tb_crc_ok)
   else
     s->pos = (s->pos + 1) % s->n;
 }
+
+void nr_scr_link_note(nr_scr_link_t *l, uint16_t rnti, bool dedicated, bool crc_ok)
+{
+  if (!l)
+    return;
+  const uint64_t n = __atomic_add_fetch(&l->n, 1, __ATOMIC_RELAXED);
+  if (!crc_ok)
+    return;
+  if (!dedicated) {
+    __atomic_store_n(&l->common_pass_n, n, __ATOMIC_RELAXED);
+  } else {
+    __atomic_store_n(&l->ded_pass_rnti, (uint32_t)rnti, __ATOMIC_RELAXED);
+    __atomic_store_n(&l->ded_pass_n, n, __ATOMIC_RELAXED);
+  }
+}
+
+bool nr_scr_link_healthy(const nr_scr_link_t *l, uint16_t rnti)
+{
+  if (!l)
+    return false;
+  const uint64_t n = __atomic_load_n(&l->n, __ATOMIC_RELAXED);
+  const uint64_t c = __atomic_load_n(&l->common_pass_n, __ATOMIC_RELAXED);
+  if (c && n - c < NR_SCR_LINK_WINDOW)
+    return true;
+  const uint64_t d = __atomic_load_n(&l->ded_pass_n, __ATOMIC_RELAXED);
+  return d && n - d < NR_SCR_LINK_WINDOW && __atomic_load_n(&l->ded_pass_rnti, __ATOMIC_RELAXED) != rnti;
+}

@@ -98,6 +98,50 @@ TEST(ScramblingIdSweep, NoDmrsDecisionYet) {
   EXPECT_EQ(s.order[1], 0);
 }
 
+// ---- final review I2: which grants carry the dedicated identities --------------------------------
+TEST(ScramblingDedicated, OnlyCRntiOutsideCssFallback) {
+  EXPECT_TRUE(nr_scrambling_dedicated(true, false, false));  // C-RNTI 1_1 / 0_1
+  EXPECT_TRUE(nr_scrambling_dedicated(true, true, false));   // C-RNTI 1_0 in a USS
+  EXPECT_FALSE(nr_scrambling_dedicated(true, true, true));   // C-RNTI 1_0 / 0_0 in a CSS
+  EXPECT_FALSE(nr_scrambling_dedicated(false, true, true));  // SI/RA/TC/P-RNTI
+  EXPECT_FALSE(nr_scrambling_dedicated(false, true, false));
+}
+
+// ---- final review I1: link health + walk eligibility ---------------------------------------------
+TEST(ScramblingLink, NothingPassedIsNotHealthy) {
+  nr_scr_link_t l = {};
+  for (int i = 0; i < 50; ++i) nr_scr_link_note(&l, 0x4601, true, false);
+  EXPECT_FALSE(nr_scr_link_healthy(&l, 0x4601)); // an outage: every class fails
+}
+
+TEST(ScramblingLink, CommonPassMakesItHealthyForEveryRnti) {
+  nr_scr_link_t l = {};
+  nr_scr_link_note(&l, 0xFFFF, false, true); // SIB1 passed
+  for (int i = 0; i < 30; ++i) nr_scr_link_note(&l, 0x4601, true, false);
+  EXPECT_TRUE(nr_scr_link_healthy(&l, 0x4601));
+}
+
+TEST(ScramblingLink, OwnPassDoesNotCountOtherRntiPassDoes) {
+  nr_scr_link_t l = {};
+  nr_scr_link_note(&l, 0x4601, true, true);
+  EXPECT_FALSE(nr_scr_link_healthy(&l, 0x4601)); // its own pass is not "the link is fine while I fail"
+  EXPECT_TRUE(nr_scr_link_healthy(&l, 0x1234));
+}
+
+TEST(ScramblingLink, OldPassExpires) {
+  nr_scr_link_t l = {};
+  nr_scr_link_note(&l, 0xFFFF, false, true);
+  for (int i = 0; i < NR_SCR_LINK_WINDOW; ++i) nr_scr_link_note(&l, 0x4601, true, false);
+  EXPECT_FALSE(nr_scr_link_healthy(&l, 0x4601));
+}
+
+TEST(ScramblingWalk, NeedsDecidedDmrsHealthyLinkAndTheStreak) {
+  EXPECT_TRUE(nr_scrambling_walk_eligible(64, true, NR_SCR_WALK_MIN_FAILS));
+  EXPECT_FALSE(nr_scrambling_walk_eligible(-1, true, 1000));          // DM-RS id undecided
+  EXPECT_FALSE(nr_scrambling_walk_eligible(64, false, 1000));         // outage, not a class failure
+  EXPECT_FALSE(nr_scrambling_walk_eligible(64, true, NR_SCR_WALK_MIN_FAILS - 1));
+}
+
 int main(int argc, char **argv) {
   testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();
