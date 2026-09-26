@@ -5663,7 +5663,7 @@ constdiag_done:;
       nr_dci11_pin_t *const pin = &dci11_pin[raw->rnti];
       uint32_t p_ok = 0, p_tr = 0;
       bool has_stats = false;
-      if (pin->valid)
+      if (nr_dci11_pin_is_valid(pin))
         for (int i = 0; i < n; ++i)
           if (layout_ids[i] == pin->layout) {
             nr_pdsch_config_sweep_context_stats(keys[i], raw->rnti, 0xFF, cfg->dmrs_typeA_position, &p_ok, &p_tr);
@@ -5684,7 +5684,7 @@ constdiag_done:;
           for (int i=0;i<n;++i) prior[i] = from_stage2 ? 2.0 * (double)(n - i) / (double)n : 0.0;
           chosen = nr_dci11_thompson_pick(ts_ok, ts_tr, prior, n, &s_rng);
           if (chosen < 0) chosen = 0;
-        } else if (pin->valid) {
+        } else if (nr_dci11_pin_is_valid(pin)) {
           /* Pin still valid, just not offered this occasion: a one-off substitute, not a reseed --
            * the free-running cursor's own cadence doesn't matter here (no successive-coverage
            * requirement on a rare, transient path), so it is left untouched otherwise. */
@@ -5693,7 +5693,7 @@ constdiag_done:;
           /* Genuinely needs a new pin (rotated, gave up, cfg changed, or never seeded). */
           chosen = nr_dci11_pin_round_robin(&dci11_pin_cursor[raw->rnti], n);
         }
-        if (!pin->valid) {
+        if (!nr_dci11_pin_is_valid(pin)) {
           static uint32_t s_seed_left=200; /* noise-floor RNTIs can drive this too: bounded, like context eviction */
           if (s_seed_left) {
             s_seed_left--;

@@ -81,3 +81,10 @@ int nr_dci11_pin_round_robin(uint32_t *cursor, int n)
   (*cursor)++;
   return idx;
 }
+
+bool nr_dci11_pin_is_valid(const nr_dci11_pin_t *pin)
+{
+  /* Same cast idiom as pin_valid() above; const-qualified here since a read never mutates the
+   * struct, and pin_valid() itself takes a non-const pointer for its store-side callers. */
+  return atomic_load_explicit((_Atomic bool *)&pin->valid, memory_order_acquire);
+}

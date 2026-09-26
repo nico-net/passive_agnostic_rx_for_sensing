@@ -162,3 +162,29 @@ TEST(Dci11Pin, TransientAbsenceLeavesTheValidPinAlone) {
   EXPECT_EQ(pin.layout, 99);
   EXPECT_EQ(pin.occ, occ_before) << "an occasion the pin wasn't even offered on must not count against it";
 }
+
+// ---- nr_dci11_pin_is_valid(): the acquire-ordered accessor callers outside this file must use
+// instead of reading pin->valid directly (nr_pdcch_blind_monitor_rt.c's RT/deferred-queue threads --
+// see the header's threading note). Tracks the plain field through every state transition the other
+// tests above already exercise via direct field reads.
+
+TEST(Dci11Pin, IsValidAccessorTracksFieldThroughSeedAndSelectTransitions) {
+  nr_dci11_pin_t pin{};
+  EXPECT_FALSE(nr_dci11_pin_is_valid(&pin)) << "a never-seeded pin must read invalid";
+
+  nr_dci11_pin_seed(&pin, /*cfg=*/1, /*layout=*/7);
+  EXPECT_TRUE(nr_dci11_pin_is_valid(&pin));
+  EXPECT_EQ(pin.valid, nr_dci11_pin_is_valid(&pin)) << "accessor must agree with the raw field";
+
+  // Rotation (block_occasions=1) drops the pin on the very next select().
+  const uint16_t layout_ids[1] = {7};
+  const int idx = nr_dci11_pin_select(&pin, 1, layout_ids, 1, -1, -1, false, 0, 0,
+                                      /*block_occasions=*/1, /*giveup_trials=*/1000000);
+  EXPECT_EQ(idx, -1);
+  EXPECT_FALSE(nr_dci11_pin_is_valid(&pin)) << "rotation must be visible through the accessor too";
+  EXPECT_EQ(pin.valid, nr_dci11_pin_is_valid(&pin));
+
+  // Reseeding after the drop must be visible again.
+  nr_dci11_pin_seed(&pin, /*cfg=*/1, /*layout=*/8);
+  EXPECT_TRUE(nr_dci11_pin_is_valid(&pin));
+}

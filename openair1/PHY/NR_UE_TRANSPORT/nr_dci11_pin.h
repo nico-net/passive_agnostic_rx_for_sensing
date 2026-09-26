@@ -63,18 +63,26 @@ typedef struct {
  * history; pass has_stats=false when there was no valid pin to look one up for.
  * Returns the index into layout_ids[0..n) to use this occasion, or -1 when the caller must pick a
  * new candidate itself (any policy -- see nr_dci11_pin_round_robin() for the plain one) and commit
- * it via nr_dci11_pin_seed(). After a -1 return, check pin->valid: if it is now false, the pin was
- * genuinely dropped (rotated out on block_occasions/giveup_trials, a real cfg change, or it was
- * never seeded) and MUST be reseeded; if it is still true, the pin is merely absent from this
- * occasion's offered list (transient) and must NOT be reseeded, so it can resume the moment it
- * reappears. */
+ * it via nr_dci11_pin_seed(). After a -1 return, check nr_dci11_pin_is_valid(pin): if it is now
+ * false, the pin was genuinely dropped (rotated out on block_occasions/giveup_trials, a real cfg
+ * change, or it was never seeded) and MUST be reseeded; if it is still true, the pin is merely
+ * absent from this occasion's offered list (transient) and must NOT be reseeded, so it can resume
+ * the moment it reappears. */
 int nr_dci11_pin_select(nr_dci11_pin_t *pin, uint64_t current_cfg, const uint16_t *layout_ids, int n,
                         int settled, int preferred, bool has_stats, uint32_t trial_ok, uint32_t trial_tr,
                         uint32_t block_occasions, uint32_t giveup_trials);
 
 /** Commits a freshly chosen candidate as the pin. Only called by the caller after a -1 return with
- * pin->valid == false (see nr_dci11_pin_select()'s contract). */
+ * nr_dci11_pin_is_valid(pin) == false (see nr_dci11_pin_select()'s contract). */
 void nr_dci11_pin_seed(nr_dci11_pin_t *pin, uint64_t current_cfg, uint16_t layout_id);
+
+/** Acquire-ordered read of pin->valid, matching the release stores nr_dci11_pin_seed() and
+ * nr_dci11_pin_select() make after publishing a fresh layout/cfg/occ. Callers outside this file
+ * (nr_pdcch_blind_monitor_rt.c, on both the RT and deferred-queue threads -- see the threading note
+ * above) must go through this rather than read pin->valid directly: a plain read has no ordering
+ * guarantee against those stores and could observe `valid` true while `layout`/`cfg` are still
+ * mid-publication on the other thread. */
+bool nr_dci11_pin_is_valid(const nr_dci11_pin_t *pin);
 
 /** Plain round-robin picker for seeding/rotating a pin when no informed signal (e.g. Thompson
  * evidence) exists. Advances *cursor by exactly one candidate per CALL, so n successive calls with
