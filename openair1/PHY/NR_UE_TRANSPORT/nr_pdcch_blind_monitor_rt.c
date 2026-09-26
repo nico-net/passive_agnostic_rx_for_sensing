@@ -5972,6 +5972,10 @@ constdiag_done:;
     }
 
     freq_alloc_bitmap_t freq_alloc = set_bitmap_from_start_size(out.start_rb, out.num_rb);
+    /* L this grant's interleaved PRB list used, fed back to the per-RNTI DCI 1_1 bundle-size sweep
+     * once the TB CRC is known (nr_pdsch_vrbl_pick()/rnti_dec_t.vrbl). 0 = not interleaved, or a
+     * DCI 1_0 grant (L=2 is fixed by spec there -- nothing to feed back). */
+    uint8_t vrb_l_used = 0;
     /* RA type 0 (resolved by the DCI 1_1 layout search): the allocation is an RBG bitmap. Hand it on as a
      * DATA-ORDERED PRB list, normalised here -- the one place every path below (fast enqueue, deferred,
      * in-line decode, data-aided tap) takes it from -- so first_rb/num_rbs/bitmap agree with the list. */
@@ -5991,6 +5995,28 @@ constdiag_done:;
       }
       dlsch_pdu.start_rb   = (uint16_t)freq_alloc.first_rb;
       dlsch_pdu.number_rbs = (uint16_t)freq_alloc.num_rbs; /* the PRB COUNT: TBS/G read it */
+    } else if (out.vrb_to_prb) {
+      /* Interleaved VRB-to-PRB (TS 38.211 7.3.1.6), RA type 1 only -- type 0 above is never
+       * interleaved. DCI 1_0 always uses L=2 (fixed by spec, no sweep needed); a common-search-space
+       * 1_0 grant's bundle alignment anchors at CRB 0 (the spec's own footnote sets N_start_BWP=0 for
+       * exactly that case), because rb_origin (dci10_rb_base) already carries CORESET#0's own offset
+       * SEPARATELY and adds it back downstream (e.g. base_sc = rb_origin + ...) -- same convention
+       * out.start_rb/the RIV decode already use. DCI 1_0 elsewhere and DCI 1_1 both anchor at the
+       * active BWP's own CRB, which is exactly what rb_origin already resolves to in those two cases.
+       * DCI 1_1's bundle size (RRC vrb-ToPRB-Interleaver) is invisible here, so it is a per-RNTI
+       * 2-arm hypothesis decided by the TB CRC (nr_pdsch_vrbl_pick(), like the PT-RS density sweep). */
+      const int il_bwp_start = (is_dci10 && cfg->dci10_ss_type == NR_BLIND_SS_COMMON) ? 0 : rb_origin;
+      const int il_l = is_dci10 ? 2 : nr_pdsch_vrbl_pick(out.rnti);
+      freq_alloc.n_prb_list = (uint16_t)nr_vrb_to_prb_interleaved(il_bwp_start, dlsch_pdu.BWPSize, il_l,
+                                                                  out.start_rb, out.num_rb, freq_alloc.prb_list);
+      if (freq_alloc.n_prb_list == 0 || !nr_pdsch_passive_alloc_normalise(&freq_alloc, dlsch_pdu.BWPSize)) {
+        grantdrop(&out, proc->frame_rx, proc->nr_slot_rx, "vrb-il-prb-list-invalid");
+        continue;
+      }
+      dlsch_pdu.start_rb   = (uint16_t)freq_alloc.first_rb;
+      dlsch_pdu.number_rbs = (uint16_t)freq_alloc.num_rbs; /* the PRB COUNT: TBS/G read it */
+      if (!is_dci10) /* DCI 1_0's L=2 is fixed, not a hypothesis -- nothing to feed back */
+        vrb_l_used = (uint8_t)il_l;
     }
     /* The per-accept channel estimate below (DM-RS CFR tap, SNR gate) is contiguous: for a PRB-list
      * grant it covers the list's FIRST contiguous run only (nr_pdsch_channel_estimation walks bitmap
@@ -6042,7 +6068,8 @@ constdiag_done:;
                                                 .nb_rb_oh       = (uint16_t)cfg->pdsch_xoverhead,
                                                 .tb_scaling     = out.tb_scaling,
                                                 .bw_tbslbrm     = (uint16_t)fp->N_RB_DL,
-                                                .mcs_table_lbrm = grant_mcs_table_lbrm};
+                                                .mcs_table_lbrm = grant_mcs_table_lbrm,
+                                                .vrb_l          = vrb_l_used};
       nr_pdsch_passive_job_t job;
       memset(&job, 0, sizeof(job));
       job.dlsch_pdu     = dlsch_pdu;
@@ -6227,7 +6254,8 @@ constdiag_done:;
                                                     .bw_tbslbrm = (uint16_t)fp->N_RB_DL,
                                                     // The DEPLOYMENT's mcs-Table, never the
                                                     // format-1_0-forced one -- see the field comment.
-                                                    .mcs_table_lbrm = grant_mcs_table_lbrm};
+                                                    .mcs_table_lbrm = grant_mcs_table_lbrm,
+                                                    .vrb_l = vrb_l_used};
             nr_pdsch_passive_decode_result_t dec;
             // Reuses rxdataF_pdsch: nr_pdsch_passive_decode() FEPs the WHOLE allocation into it,
             // a superset of the single DM-RS symbol already transformed above, so the buffer is

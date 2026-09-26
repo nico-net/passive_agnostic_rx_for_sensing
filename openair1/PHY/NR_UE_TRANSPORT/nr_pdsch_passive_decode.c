@@ -309,8 +309,85 @@ static int g_ptrs_cell_arm = -1;         // PT-RS arm, CELL-WIDE seed; under g_p
  * RNTIs latched the same one. nl == 0 means "not latched, read the cell seed". With a single RNTI
  * this is exactly the old cell-wide behaviour (its own latch is the only one, read back on the
  * next grant); the cell seed is then never promoted and never read past the first latch. */
+/* PER-RNTI DCI 1_1 VRB-to-PRB BUNDLE SIZE (L=2 or L=4, RRC vrb-ToPRB-Interleaver -- invisible to a
+ * passive receiver): a minimal 2-arm hypothesis decided by the TB CRC, same shape as the PT-RS
+ * sweep above (Wilson-interval arm selection + latch) but WITHOUT nr_hyp_sweep's ~1.16 MB
+ * nr_hyp_sweep_state_t (measured from its only two users in-tree -- see
+ * openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_discovery.c's own sizing comment) -- just two
+ * trial/pass counters and a latch, RNTI_DEC_MAX (16) of which cost nothing worth heap-allocating.
+ * arm 0 = L2, arm 1 = L4. */
+#define NR_VRBL_ARMS 2
+#define VRBL_LATCH_MIN_OK 8
+typedef struct { uint32_t tr[NR_VRBL_ARMS], ok[NR_VRBL_ARMS]; int latched; } nr_vrbl_sweep_t;
+static void vrbl_wilson(uint32_t ok, uint32_t n, double *lo, double *hi)
+{
+  if (n == 0) { *lo = 0.0; *hi = 1.0; return; }
+  const double z = 1.96, nn = (double)n, p = (double)ok / nn, d = 1.0 + z * z / nn;
+  const double c = p + z * z / (2.0 * nn), q = z * sqrt(p * (1.0 - p) / nn + z * z / (4.0 * nn * nn));
+  *lo = (c - q) / d; *hi = (c + q) / d;
+  if (*lo < 0.0) *lo = 0.0;
+  if (*hi > 1.0) *hi = 1.0;
+}
+static int vrbl_sweep_pick(const nr_vrbl_sweep_t *s)
+{
+  if (s->latched >= 0)
+    return s->latched;
+  int lead = -1;
+  double lead_p = -1.0;
+  for (int a = 0; a < NR_VRBL_ARMS; a++)
+    if (s->tr[a] > 0 && (double)s->ok[a] / (double)s->tr[a] > lead_p) {
+      lead_p = (double)s->ok[a] / (double)s->tr[a];
+      lead = a;
+    }
+  if (lead >= 0 && s->ok[lead] >= VRBL_LATCH_MIN_OK) {
+    double llo, lhi;
+    vrbl_wilson(s->ok[lead], s->tr[lead], &llo, &lhi);
+    for (int a = 0; a < NR_VRBL_ARMS; a++) {
+      if (a == lead)
+        continue;
+      double lo, hi;
+      vrbl_wilson(s->ok[a], s->tr[a], &lo, &hi);
+      if (hi >= llo)
+        return a; /* still contending: spend a trial ruling it out */
+    }
+    return lead;
+  }
+  int arg = 0;
+  double best = -1.0;
+  for (int a = 0; a < NR_VRBL_ARMS; a++) {
+    double lo, hi;
+    vrbl_wilson(s->ok[a], s->tr[a], &lo, &hi);
+    if (hi > best + 1e-12 || (fabs(hi - best) <= 1e-12 && s->tr[a] < s->tr[arg])) {
+      best = hi;
+      arg = a;
+    }
+  }
+  return arg;
+}
+static int vrbl_sweep_feed(nr_vrbl_sweep_t *s, int arm, bool tb_ok)
+{
+  if (arm < 0 || arm >= NR_VRBL_ARMS || s->latched >= 0)
+    return s->latched;
+  s->tr[arm]++;
+  if (tb_ok)
+    s->ok[arm]++;
+  if (s->ok[arm] < VRBL_LATCH_MIN_OK)
+    return -1;
+  double lo, hi;
+  vrbl_wilson(s->ok[arm], s->tr[arm], &lo, &hi);
+  for (int a = 0; a < NR_VRBL_ARMS; a++) {
+    if (a == arm)
+      continue;
+    double lo2, hi2;
+    vrbl_wilson(s->ok[a], s->tr[a], &lo2, &hi2);
+    if (hi2 >= lo)
+      return -1;
+  }
+  s->latched = arm;
+  return arm;
+}
 #define RNTI_DEC_MAX 16
-typedef struct { uint16_t rnti; uint64_t touched; int nl; nr_ptrs_sweep_t ptrs; } rnti_dec_t;
+typedef struct { uint16_t rnti; uint64_t touched; int nl; nr_ptrs_sweep_t ptrs; nr_vrbl_sweep_t vrbl; } rnti_dec_t;
 static rnti_dec_t g_rnti_dec[RNTI_DEC_MAX];
 static uint64_t g_rnti_dec_clock;
 /* under g_ptrs_lock. ponytail: LRU by grant order, no idle clock -- an active UE is touched every
@@ -332,6 +409,7 @@ static rnti_dec_t *rnti_dec(uint16_t rnti)
   r->touched = ++g_rnti_dec_clock;
   nr_ptrs_sweep_init(&r->ptrs);
   r->ptrs.latched = g_ptrs_cell_arm; // seed: a cell-wide arm, or -1 = sweep from scratch
+  r->vrbl.latched = -1; // tr/ok already zeroed by the memset above
   return r;
 }
 static int rnti_nl_get(uint16_t rnti)
@@ -377,6 +455,24 @@ static int rnti_ptrs_feed(uint16_t rnti, int arm, bool tb_ok)
       }
   pthread_mutex_unlock(&g_ptrs_lock);
   return latched;
+}
+static int rnti_vrbl_pick(uint16_t rnti)
+{
+  pthread_mutex_lock(&g_ptrs_lock);
+  const int arm = vrbl_sweep_pick(&rnti_dec(rnti)->vrbl);
+  pthread_mutex_unlock(&g_ptrs_lock);
+  return arm;
+}
+static int rnti_vrbl_feed(uint16_t rnti, int arm, bool tb_ok)
+{
+  pthread_mutex_lock(&g_ptrs_lock);
+  const int latched = vrbl_sweep_feed(&rnti_dec(rnti)->vrbl, arm, tb_ok);
+  pthread_mutex_unlock(&g_ptrs_lock);
+  return latched;
+}
+int nr_pdsch_vrbl_pick(uint16_t rnti)
+{
+  return rnti_vrbl_pick(rnti) == 1 ? 4 : 2;
 }
 /* RBMAP: which RBs the cell actually allocated, for the dashboard's spectrum strip. One counter per
  * RB, incremented per accepted grant over its allocation, printed as 273 density digits and reset --
@@ -3183,6 +3279,13 @@ gpu_llr_ready:;
         LOG_A(PHY, "SENSING: PTRS_SWEEP LATCHED arm=%d (%s K=%u L=%u) from the TB CRC for rnti 0x%04x\n", latched,
               any ? "PT-RS present," : "no PT-RS", K, L, grant->rnti);
       }
+    }
+    /* DCI 1_1 interleaved VRB-to-PRB bundle-size sweep (grant->vrb_l == 0 for a non-interleaved or
+     * DCI 1_0 grant -- nothing to feed back, see the field comment). */
+    if (grant->vrb_l == 2 || grant->vrb_l == 4) {
+      const int latched = rnti_vrbl_feed(grant->rnti, grant->vrb_l == 4 ? 1 : 0, ldpc_ok);
+      if (latched >= 0)
+        LOG_A(PHY, "SENSING: VRB_IL rnti=0x%x L=%u latched\n", grant->rnti, latched == 0 ? 2 : 4);
     }
     {
       /* 1 = decoded with data, 0 = zero_tb, 2 = seg_fail. `out->status` is not set yet here, so the
