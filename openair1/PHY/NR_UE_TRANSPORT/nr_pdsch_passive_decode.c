@@ -1442,20 +1442,10 @@ void nr_pdsch_passive_set_slot_share(int on, int rb_lo, int rb_n)
   t_share.on = on; t_share.rb_lo = rb_lo; t_share.rb_n = rb_n;
 }
 
-bool nr_pdsch_passive_alloc_normalise(freq_alloc_bitmap_t *fa, int bwp_size)
-{
-  if (fa->n_prb_list == 0)
-    return true;
-  uint32_t bm[sizeofArray(fa->bitmap)];
-  int lo, hi;
-  if (!nr_prb_list_normalise(fa->prb_list, fa->n_prb_list, bwp_size, bm, (int)sizeofArray(bm), &lo, &hi))
-    return false; /* fa untouched */
-  memcpy(fa->bitmap, bm, sizeof(bm));
-  fa->first_rb = lo;
-  fa->last_rb = hi;
-  fa->num_rbs = fa->n_prb_list;
-  return true;
-}
+/* nr_pdsch_passive_alloc_normalise() moved to nr_pdsch_prb_set.c (2026-09-27): it is pure (only
+ * freq_alloc_bitmap_t + nr_prb_list_normalise(), both already there) and had no unit test because
+ * this file pulls in PHY_VARS_NR_UE/NFAPI and can't link into the lightweight test_nr_pdsch_prb_set
+ * target. Declared via nr_pdsch_passive_decode.h's include of nr_pdsch_prb_set.h. */
 
 nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
                                                          const UE_nr_rxtx_proc_t *proc,

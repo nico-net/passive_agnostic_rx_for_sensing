@@ -55,6 +55,7 @@
 #include <stdint.h>
 
 #include "common/utils/bits.h" // freq_alloc_bitmap_t
+#include "PHY/NR_UE_TRANSPORT/nr_pdsch_prb_set.h" // nr_pdsch_passive_alloc_normalise (pure, lives there)
 #include "PHY/defs_nr_UE.h"
 #include "nfapi/open-nFAPI/nfapi/public_inc/fapi_nr_ue_interface.h"
 
@@ -172,12 +173,9 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
                                                          c16_t rxdataF[][ue->frame_parms.samples_per_slot_wCP],
                                                          nr_pdsch_passive_decode_result_t *out);
 
-/// Make a PRB-list allocation self-consistent: with n_prb_list > 0, re-derive first_rb/last_rb/num_rbs
-/// (= n_prb_list, the PRB COUNT) and the bitmap from prb_list. No-op for a legacy allocation. false (fa
-/// untouched) if a PRB is outside the BWP, listed twice, or the list is longer than NR_PRB_SET_MAX.
-/// Every producer of a list grant must pass it through this before the grant reaches the decoder, the
-/// data-aided tap or the queue probes (nr_pdsch_passive_queue_enqueue() does it for queued grants).
-bool nr_pdsch_passive_alloc_normalise(freq_alloc_bitmap_t *fa, int bwp_size);
+/// nr_pdsch_passive_alloc_normalise() (make a PRB-list allocation self-consistent) moved to
+/// nr_pdsch_prb_set.{h,c} -- it depends only on freq_alloc_bitmap_t and nr_prb_list_normalise(),
+/// both already pure/dependency-free there, unlike this header. Declared via the include above.
 
 /// Print the distinct decode-parameter tuples seen this run, with counts. Diffing this between a
 /// 90 %-CRC run and a 0 %-CRC run is what identifies a wrong parameter -- see section 23.3.

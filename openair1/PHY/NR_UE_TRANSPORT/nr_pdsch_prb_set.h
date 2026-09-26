@@ -2,6 +2,7 @@
 #define NR_PDSCH_PRB_SET_H
 #include <stdbool.h>
 #include <stdint.h>
+#include "common/utils/bits.h" // freq_alloc_bitmap_t (nr_pdsch_passive_alloc_normalise())
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -17,6 +18,16 @@ extern "C" {
  *  list is empty or longer than NR_PRB_SET_MAX, or a PRB is outside the BWP / the bitmap, or listed twice. */
 bool nr_prb_list_normalise(const uint16_t *prb, int n, int bwp_size, uint32_t *bitmap, int bitmap_words, int *first,
                            int *last);
+
+/** Make a PRB-list allocation self-consistent: with n_prb_list > 0, re-derive first_rb/last_rb/num_rbs
+ *  (= n_prb_list, the PRB COUNT) and the bitmap from prb_list via nr_prb_list_normalise() above. No-op
+ *  for a legacy (contiguous) allocation. false (fa untouched) if a listed PRB is outside the BWP,
+ *  listed twice, or the list is longer than NR_PRB_SET_MAX. Every producer of a list grant must pass
+ *  it through this before the grant reaches the decoder, the data-aided tap or the queue probes
+ *  (nr_pdsch_passive_queue_enqueue() does it for queued grants). Moved here from
+ *  nr_pdsch_passive_decode.{h,c} (2026-09-27): it depends on nothing else in that file, and living
+ *  here lets it be unit-tested without linking PHY_VARS_NR_UE/NFAPI. */
+bool nr_pdsch_passive_alloc_normalise(freq_alloc_bitmap_t *fa, int bwp_size);
 /** RBG size P (TS 38.214 Table 5.1.2.2.1-1; UL Table 6.1.2.2.1-1 is identical). 0 if out of range. */
 int nr_rbg_size(int bwp_size, int rbg_config2);
 /** N_RBG = ceil((N_size + (N_start mod P)) / P). */

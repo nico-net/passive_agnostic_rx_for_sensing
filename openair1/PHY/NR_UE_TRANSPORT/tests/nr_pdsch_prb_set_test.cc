@@ -1,4 +1,5 @@
 #include <vector>
+#include <cstring>
 #include <gtest/gtest.h>
 extern "C" {
 #include "nr_pdsch_prb_set.h"
@@ -169,6 +170,44 @@ TEST(PrbSet, DmrsOracleCrbAddsBwpStart) {
   EXPECT_EQ(nr_dmrs_oracle_crb(20, 5), 25);
   // Carrier edge: a 273-PRB carrier's last valid CRB index is 272.
   EXPECT_EQ(nr_dmrs_oracle_crb(260, 12), 272);
+}
+
+// ---- nr_pdsch_passive_alloc_normalise(): the wrapper around nr_prb_list_normalise() above that
+// re-derives first_rb/last_rb/num_rbs/bitmap for a passive-decode list grant. Moved here from
+// nr_pdsch_passive_decode.c (2026-09-27) specifically so it could get a unit test: that file pulls
+// in PHY_VARS_NR_UE/NFAPI and cannot link into this lightweight target.
+
+TEST(PrbSet, PassiveAllocNormaliseNoOpForALegacyContiguousGrant) {
+  freq_alloc_bitmap_t fa{};
+  fa.first_rb = 10; fa.last_rb = 20; fa.num_rbs = 11; fa.bitmap[0] = 0xdeadbeef; fa.n_prb_list = 0;
+  EXPECT_TRUE(nr_pdsch_passive_alloc_normalise(&fa, 106));
+  EXPECT_EQ(fa.first_rb, 10); EXPECT_EQ(fa.last_rb, 20); EXPECT_EQ(fa.num_rbs, 11u);
+  EXPECT_EQ(fa.bitmap[0], 0xdeadbeefu) << "n_prb_list == 0 must be an untouched no-op";
+}
+
+TEST(PrbSet, PassiveAllocNormaliseDerivesFieldsFromAValidList) {
+  freq_alloc_bitmap_t fa{};
+  fa.n_prb_list = 4;
+  const uint16_t list[4] = {40, 3, 4, 100}; // data order, not sorted -- same list ListNormalise... uses above
+  memcpy(fa.prb_list, list, sizeof(list));
+  ASSERT_TRUE(nr_pdsch_passive_alloc_normalise(&fa, 106));
+  EXPECT_EQ(fa.first_rb, 3);
+  EXPECT_EQ(fa.last_rb, 100);
+  EXPECT_EQ(fa.num_rbs, fa.n_prb_list) << "num_rbs must be the PRB COUNT, not a span";
+  EXPECT_EQ(fa.bitmap[0], (1u << 3) | (1u << 4));
+  EXPECT_EQ(fa.bitmap[1], 1u << 8);
+  EXPECT_EQ(fa.bitmap[3], 1u << 4);
+}
+
+TEST(PrbSet, PassiveAllocNormaliseLeavesFaUntouchedOnAnInvalidList) {
+  freq_alloc_bitmap_t fa{};
+  fa.first_rb = 5; fa.last_rb = 6; fa.num_rbs = 2; fa.bitmap[0] = 0x1234u;
+  fa.n_prb_list = 3;
+  const uint16_t dup[3] = {5, 6, 5}; // listed twice
+  memcpy(fa.prb_list, dup, sizeof(dup));
+  EXPECT_FALSE(nr_pdsch_passive_alloc_normalise(&fa, 106));
+  EXPECT_EQ(fa.first_rb, 5); EXPECT_EQ(fa.last_rb, 6); EXPECT_EQ(fa.num_rbs, 2u);
+  EXPECT_EQ(fa.bitmap[0], 0x1234u) << "a rejected list must not touch any already-derived field";
 }
 
 int main(int argc, char **argv)
