@@ -22,6 +22,8 @@
 #include <random>
 #include <vector>
 #include <algorithm>
+#include <chrono>
+#include <cstdio>
 #include <gtest/gtest.h>
 extern "C" {
 #include "nr_dmrs_id_estimate.h"
@@ -140,6 +142,37 @@ TEST(DmrsId, PortPairCoherenceSeparatesOneLayerFromTwo) {
   const double c2 = nr_dmrs_port_pair_coherence(rx2.data(), FFT, FIRST_CARRIER + 5 * 12, 5, 50, N_RB, SYMS, 3, 2, 0, 2, 1);
   EXPECT_LT(c2, 0.5) << "two layers: " << c2;
   EXPECT_LT(nr_dmrs_port_pair_coherence(nullptr, FFT, 0, 0, 1, N_RB, SYMS, 0, 0, 0, 2, 1), 0.0);
+}
+TEST(DmrsId, FindsAnIdAboveTheOldRange) {
+  /* Stage 2: N_ID = 40000, well above the old 0..1023 window. Accumulate WITHOUT any CRC input --
+   * the estimator never needed one, that is the whole point of Task 13(a). */
+  std::mt19937 rng(13);
+  nr_dmrs_id_state_t st;
+  nr_dmrs_id_init(&st, "TEST", 2);
+  nr_dmrs_id_set_range(&st, NR_DMRS_ID_CANDIDATES, NR_DMRS_ID_SPACE - NR_DMRS_ID_CANDIDATES);
+  auto rx = synth(40000, 0, 3, 2, /*rb_offset=*/5, /*nb_rb=*/50, /*tau=*/3.7, /*noise=*/40.0, rng);
+  const auto t0 = std::chrono::steady_clock::now();
+  const int scored = nr_dmrs_id_accumulate(&st, rx.data(), FFT, FIRST_CARRIER + 5 * 12, 5, 50, N_RB,
+                                           SYMS, 3, 2, 0, 1);
+  const auto t1 = std::chrono::steady_clock::now();
+  ASSERT_EQ(scored, (int)(NR_DMRS_ID_SPACE - NR_DMRS_ID_CANDIDATES));
+  const double us_per_accumulate =
+      std::chrono::duration<double, std::micro>(t1 - t0).count();
+  fprintf(stderr, "[ INFO     ] stage-2 accumulate() over %d candidates took %.0f us\n", scored,
+          us_per_accumulate);
+  ASSERT_TRUE(nr_dmrs_id_decide(&st, 1, 10.0));
+  EXPECT_EQ(st.best_id, 40000);
+  EXPECT_GT(st.margin_db, 10.0);
+}
+TEST(DmrsId, WrongRangeDoesNotDecide) {
+  /* Same true identity (40000), but the state is still watching the default 0..1023 window: the
+   * margin gate must not decide on a window that cannot contain the true id. */
+  std::mt19937 rng(17);
+  nr_dmrs_id_state_t st;
+  nr_dmrs_id_init(&st, "TEST", 2); // default range 0..1023
+  auto rx = synth(40000, 0, 3, 2, 5, 50, 3.7, 40.0, rng);
+  nr_dmrs_id_accumulate(&st, rx.data(), FFT, FIRST_CARRIER + 5 * 12, 5, 50, N_RB, SYMS, 3, 2, 0, 1);
+  EXPECT_FALSE(nr_dmrs_id_decide(&st, 1, 10.0));
 }
 TEST(DmrsId, RejectsInvalidGeometry) {
   nr_dmrs_id_state_t st; nr_dmrs_id_init(&st, "TEST", 2);

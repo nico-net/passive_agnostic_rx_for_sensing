@@ -39,23 +39,36 @@ extern "C" {
  * two subcarriers apart, over which any physical channel is highly correlated, so the TRUE identity
  * sums coherently (score -> 1) while a wrong identity rotates each term by a pseudo-random QPSK
  * phase (score ~ 1/sqrt(M)). Scores accumulate across grants; a decision needs both a minimum number
- * of grants and a minimum margin, in dB, of the best candidate over the median of all 1024 -- a
- * relative gate, so it does not depend on gain, SNR or allocation size.
+ * of grants and a minimum margin, in dB, of the best candidate over the median of the current
+ * candidate window (see nr_dmrs_id_set_range below) -- a relative gate, so it does not depend on
+ * gain, SNR or allocation size.
  *
  * Cost: ~1024 x (gold generation + 6*nb_rb complex MACs) per grant, single-threaded, no allocation
  * after init. Never call this on the PHY receive thread; the deferred decode consumers are the
- * intended call sites. */
+ * intended call sites.
+ *
+ * RANGE. scramblingID0/scramblingID1 (TS 38.211 7.4.1.1.2) are 16-bit RRC fields, 0..65535 --
+ * four times NR_DMRS_ID_CANDIDATES. The state sweeps a WINDOW of the full space at a time
+ * (nr_dmrs_id_set_range, default 0..1023, matching every deployment seen so far); num_r/num_i/den
+ * are allocated to fit the current window rather than sized to the full range, since a 65536-wide
+ * window costs 64x a 1024-wide one per grant (see nr_dmrs_id_set_range's own comment) and almost
+ * every cell needs only the default window. */
 #define NR_DMRS_ID_CANDIDATES 1024
+#define NR_DMRS_ID_SPACE 65536 // full scramblingID0/1 range; stage 2 sweeps [NR_DMRS_ID_CANDIDATES, NR_DMRS_ID_SPACE)
 
 typedef struct {
   /* Complex numerator sum h[m]conj(h[m-1]) and real denominator sum |h|^2, accumulated ACROSS
    * grants per candidate. Kept separate on purpose: accumulating per-grant |num|/den would be
    * biased positive (the magnitude of a random walk is never zero) and the margin would stop
    * growing with evidence; with complex accumulation a wrong candidate's numerator keeps
-   * random-walking down as 1/sqrt(total pilots) while the true one adds coherently. */
-  double   num_r[NR_DMRS_ID_CANDIDATES], num_i[NR_DMRS_ID_CANDIDATES], den[NR_DMRS_ID_CANDIDATES];
-  uint32_t grants;                       // grants accumulated so far
-  int      best_id;                      // -1 until decided
+   * random-walking down as 1/sqrt(total pilots) while the true one adds coherently.
+   * Sized to range_count (nr_dmrs_id_set_range), NOT NR_DMRS_ID_CANDIDATES -- index i here is
+   * candidate id (range_first + i), never a raw id, everywhere in the .c file. */
+  double  *num_r, *num_i, *den;
+  uint32_t range_first;                  // physical id represented by index 0 of the arrays above
+  uint32_t range_count;                  // number of candidates currently swept
+  uint32_t grants;                       // grants accumulated so far IN THE CURRENT RANGE
+  int      best_id;                      // -1 until decided; a PHYSICAL id (range_first + local)
   double   margin_db;                    // best over median, at decision time
   bool     decided;
   int      assumed_id;                   // what the receiver is currently using (PCI by default)
@@ -63,6 +76,16 @@ typedef struct {
 } nr_dmrs_id_state_t;
 
 void nr_dmrs_id_init(nr_dmrs_id_state_t *st, const char *label, int assumed_id);
+
+/* (Re)size the sweep window to [first, first+count) and reset accumulation (grants/decided/best_id
+ * all clear -- a range change is a fresh estimation problem). Called by nr_dmrs_id_init() for the
+ * default window (0, NR_DMRS_ID_CANDIDATES); callers escalate to a wider/shifted window (typically
+ * stage 2 = NR_DMRS_ID_CANDIDATES..NR_DMRS_ID_SPACE) only after the default window's margin gate
+ * has failed with enough evidence -- see nr_pdsch_passive_queue.c's stage-2 trigger, which also
+ * THROTTLES stage-2 accumulate() calls: cost scales with range_count (one gold sequence + pilot
+ * regen per candidate), so a 64512-wide sweep is roughly 64x a 1024-wide one and must not run on
+ * every grant. count == 0 is a no-op (a state must always have at least one candidate). */
+void nr_dmrs_id_set_range(nr_dmrs_id_state_t *st, uint32_t first, uint32_t count);
 
 /* Accumulate one DM-RS symbol of one grant.
  *   rx_symbol        : frequency-domain samples of the DM-RS OFDM symbol, ofdm_symbol_size long
@@ -74,7 +97,10 @@ void nr_dmrs_id_init(nr_dmrs_id_state_t *st, const char *label, int assumed_id);
  *   nb_rb            : allocation width in RBs
  *   N_RB, symbols_per_slot, slot, symbol, nscid : as passed to nr_gold_pdsch/nr_pdsch_dmrs_rx
  *   normal_cp        : 1 for normal CP (extended CP is not supported by the pilot generator either)
- * Returns the number of candidates scored (1024) or 0 on invalid input. */
+ * Returns the number of candidates scored (the current window's range_count) or 0 on invalid
+ * input. Works WITHOUT a CRC precondition on purpose -- the DM-RS sequence is fully determined by
+ * the (nid, slot, symbol) tuple regardless of whether the payload later decodes, so requiring a
+ * CRC pass first would be circular: under a wrong id the CRC never passes. */
 int nr_dmrs_id_accumulate(nr_dmrs_id_state_t *st, const c16_t *rx_symbol, int ofdm_symbol_size,
                           int start_subcarrier, int rb_offset, int nb_rb, int N_RB,
                           int symbols_per_slot, int slot, int symbol, int nscid, int normal_cp);
@@ -99,7 +125,9 @@ void nr_dmrs_prb_coherence(const c16_t *rx_symbol, int ofdm_symbol_size, int fir
                            int symbols_per_slot, int slot, int symbol, int nscid, int nid, int normal_cp,
                            float *out);
 
-/* Coherence score of one candidate, and its margin over the median of all 1024 in dB. */
+/* Coherence score of one candidate, and its margin over the median of the current window, in dB.
+ * `id` is a PHYSICAL candidate id; either returns 0.0 / -inf if id falls outside the current
+ * window (nr_dmrs_id_set_range). */
 double nr_dmrs_id_score(const nr_dmrs_id_state_t *st, int id);
 double nr_dmrs_id_margin_db(const nr_dmrs_id_state_t *st, int id);
 

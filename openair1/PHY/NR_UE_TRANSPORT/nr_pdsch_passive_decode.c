@@ -28,6 +28,7 @@ extern _Atomic long nr_ue_diag_producer_absolute_slot;
 
 #include "nr_pdsch_passive_decode.h"
 #include "nr_pdsch_qm_oracle.h"
+#include "nr_scrambling_id_sweep.h" // per-RNTI dataScramblingIdentityPDSCH TB-CRC walk (Task 13)
 
 #include <stdlib.h>
 #include <string.h>
@@ -388,7 +389,7 @@ static int vrbl_sweep_feed(nr_vrbl_sweep_t *s, int arm, bool tb_ok)
   return arm;
 }
 #define RNTI_DEC_MAX 16
-typedef struct { uint16_t rnti; uint64_t touched; int nl; nr_ptrs_sweep_t ptrs; nr_vrbl_sweep_t vrbl; } rnti_dec_t;
+typedef struct { uint16_t rnti; uint64_t touched; int nl; nr_ptrs_sweep_t ptrs; nr_vrbl_sweep_t vrbl; nr_scrambling_id_sweep_t data_id; } rnti_dec_t;
 static rnti_dec_t g_rnti_dec[RNTI_DEC_MAX];
 static uint64_t g_rnti_dec_clock;
 /* under g_ptrs_lock. ponytail: LRU by grant order, no idle clock -- an active UE is touched every
@@ -436,6 +437,43 @@ static int rnti_nl_latch(uint16_t rnti, int nl)
       }
   pthread_mutex_unlock(&g_ptrs_lock);
   return prev;
+}
+/* Per-RNTI dataScramblingIdentityPDSCH sweep (Task 13). See nr_pdsch_passive_decode.h's comment for
+ * the contract; `advance_ok` (Technique D converged + this RNTI's CRC rate stalled, checked by the
+ * caller in nr_pdcch_blind_monitor_rt.c, which has both those signals in scope) is what keeps a
+ * healthy RNTI decoding under PCI forever -- the sweep is lazily seeded on the first call that is
+ * actually allowed to advance, from (pci, dmrs_id) as they stood at that moment.
+ *
+ * REVIEW FIX round 1, finding 1 (CRITICAL): `advance_ok` must gate only whether the sweep is
+ * allowed to ADVANCE (create/walk); it must NEVER gate whether an already-LATCHED result is
+ * returned. The bug: `advance_ok` used to be checked first and, if false, this returned `pci`
+ * unconditionally -- but the caller's eligibility measure was a lifetime "stalled" counter that the
+ * sweep's own first successful CRC pass permanently breaks (a pass is evidence the link recovered,
+ * so "stalled" becomes false forever). Net effect: the moment the sweep found the CORRECT id and
+ * latched it, the very next call saw advance_ok=false and threw the answer away, reverting to PCI
+ * forever -- on exactly the deployment this feature exists for. Fixed by checking `latched` FIRST. */
+uint16_t nr_pdsch_passive_data_id_current(uint16_t rnti, uint16_t pci, int dmrs_id, bool advance_ok)
+{
+  pthread_mutex_lock(&g_ptrs_lock);
+  rnti_dec_t *r = rnti_dec(rnti);
+  int id = -1;
+  if (r->data_id.n > 0 && r->data_id.latched >= 0) {
+    id = r->data_id.latched; // always honour a latched result, regardless of advance_ok
+  } else if (advance_ok) {
+    if (r->data_id.n == 0)
+      nr_scrambling_id_sweep_init(&r->data_id, pci, dmrs_id);
+    id = nr_scrambling_id_sweep_current(&r->data_id);
+  }
+  pthread_mutex_unlock(&g_ptrs_lock);
+  return (uint16_t)(id >= 0 ? id : pci);
+}
+void nr_pdsch_passive_data_id_feed(uint16_t rnti, bool tb_crc_ok)
+{
+  pthread_mutex_lock(&g_ptrs_lock);
+  rnti_dec_t *r = rnti_dec(rnti);
+  if (r->data_id.n > 0)
+    nr_scrambling_id_sweep_feed(&r->data_id, tb_crc_ok ? 1 : 0);
+  pthread_mutex_unlock(&g_ptrs_lock);
 }
 static int rnti_ptrs_pick(uint16_t rnti)
 {

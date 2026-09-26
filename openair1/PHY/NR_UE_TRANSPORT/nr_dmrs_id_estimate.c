@@ -40,12 +40,29 @@ static void gold_for(uint32_t *seq, int words, int symbols_per_slot, int slot, i
     seq[n] = gold_generic(&x1, &x2, 0);
 }
 
+void nr_dmrs_id_set_range(nr_dmrs_id_state_t *st, uint32_t first, uint32_t count)
+{
+  if (!st || count == 0)
+    return;
+  free(st->num_r); free(st->num_i); free(st->den);
+  st->num_r = calloc(count, sizeof(double));
+  st->num_i = calloc(count, sizeof(double));
+  st->den   = calloc(count, sizeof(double));
+  st->range_first = first;
+  st->range_count = count;
+  st->grants   = 0;
+  st->decided  = false;
+  st->best_id  = -1;
+  st->margin_db = 0.0;
+}
+
 void nr_dmrs_id_init(nr_dmrs_id_state_t *st, const char *label, int assumed_id)
 {
   memset(st, 0, sizeof(*st));
   st->best_id = -1;
   st->assumed_id = assumed_id;
   st->label = label ? label : "DMRS";
+  nr_dmrs_id_set_range(st, 0, NR_DMRS_ID_CANDIDATES);
 }
 
 int nr_dmrs_id_accumulate(nr_dmrs_id_state_t *st, const c16_t *rx_symbol, int ofdm_symbol_size,
@@ -53,7 +70,7 @@ int nr_dmrs_id_accumulate(nr_dmrs_id_state_t *st, const c16_t *rx_symbol, int of
                           int symbols_per_slot, int slot, int symbol, int nscid, int normal_cp)
 {
   if (!st || !rx_symbol || ofdm_symbol_size <= 0 || nb_rb <= 0 || rb_offset < 0 || N_RB <= 0
-      || nb_rb + rb_offset > N_RB || st->decided)
+      || nb_rb + rb_offset > N_RB || st->decided || !st->num_r || st->range_count == 0)
     return 0;
   const int words   = ((N_RB * 24) >> 5) + 1;
   const int npil    = 6 * nb_rb;                 // type 1: one pilot every 2nd subcarrier
@@ -62,8 +79,9 @@ int nr_dmrs_id_accumulate(nr_dmrs_id_state_t *st, const c16_t *rx_symbol, int of
   c16_t    *pilot   = malloc((size_t)ntot * sizeof(*pilot));
   if (!seq || !pilot) { free(seq); free(pilot); return 0; }
 
-  for (int id = 0; id < NR_DMRS_ID_CANDIDATES; ++id) {
-    gold_for(seq, words, symbols_per_slot, slot, symbol, id, nscid);
+  for (uint32_t li = 0; li < st->range_count; ++li) {
+    const uint32_t id = st->range_first + li;
+    gold_for(seq, words, symbols_per_slot, slot, symbol, (int)id, nscid);
     /* Port 1000, first DM-RS symbol (lp = 0), unit scaling: identical to the receiver's estimator
      * except for the identity under test. */
     nr_pdsch_dmrs_rx(normal_cp ? NR_NORMAL : NR_EXTENDED, seq, pilot, 1000, 0, (unsigned short)(nb_rb + rb_offset), NFAPI_NR_DMRS_TYPE1, 16384);
@@ -81,11 +99,11 @@ int nr_dmrs_id_accumulate(nr_dmrs_id_state_t *st, const c16_t *rx_symbol, int of
       prev_r = hr; prev_i = hi;
       re = (re + 2) % ofdm_symbol_size;
     }
-    st->num_r[id] += num_r; st->num_i[id] += num_i; st->den[id] += den;
+    st->num_r[li] += num_r; st->num_i[li] += num_i; st->den[li] += den;
   }
   free(seq); free(pilot);
   ++st->grants;
-  return NR_DMRS_ID_CANDIDATES;
+  return (int)st->range_count;
 }
 
 double nr_dmrs_port_pair_coherence(const c16_t *rx_symbol, int ofdm_symbol_size, int start_subcarrier,
@@ -157,20 +175,31 @@ static int cmp_double(const void *a, const void *b)
   const double x = *(const double *)a, y = *(const double *)b;
   return (x > y) - (x < y);
 }
+/* Score by LOCAL index into the current window (0..range_count-1), no id translation. */
+static double score_local(const nr_dmrs_id_state_t *st, uint32_t li)
+{
+  if (!st || !st->den || li >= st->range_count || st->den[li] <= 0) return 0.0;
+  return sqrt(st->num_r[li] * st->num_r[li] + st->num_i[li] * st->num_i[li]) / st->den[li];
+}
 double nr_dmrs_id_score(const nr_dmrs_id_state_t *st, int id)
 {
-  if (!st || id < 0 || id >= NR_DMRS_ID_CANDIDATES || st->den[id] <= 0) return 0.0;
-  return sqrt(st->num_r[id] * st->num_r[id] + st->num_i[id] * st->num_i[id]) / st->den[id];
+  if (!st || id < 0 || (uint32_t)id < st->range_first) return 0.0;
+  const uint32_t li = (uint32_t)id - st->range_first;
+  return score_local(st, li);
 }
 static double median_score(const nr_dmrs_id_state_t *st)
 {
-  double tmp[NR_DMRS_ID_CANDIDATES];
-  for (int i = 0; i < NR_DMRS_ID_CANDIDATES; ++i) tmp[i] = nr_dmrs_id_score(st, i);
-  qsort(tmp, NR_DMRS_ID_CANDIDATES, sizeof(double), cmp_double);
-  return 0.5 * (tmp[NR_DMRS_ID_CANDIDATES / 2 - 1] + tmp[NR_DMRS_ID_CANDIDATES / 2]);
+  double *tmp = malloc((size_t)st->range_count * sizeof(double));
+  if (!tmp) return 0.0;
+  for (uint32_t i = 0; i < st->range_count; ++i) tmp[i] = score_local(st, i);
+  qsort(tmp, st->range_count, sizeof(double), cmp_double);
+  const double med = 0.5 * (tmp[(st->range_count - 1) / 2] + tmp[st->range_count / 2]);
+  free(tmp);
+  return med;
 }
 double nr_dmrs_id_margin_db(const nr_dmrs_id_state_t *st, int id)
 {
+  if (!st) return -INFINITY;
   const double med = median_score(st), sc = nr_dmrs_id_score(st, id);
   if (med <= 0 || sc <= 0) return -INFINITY;
   return 10.0 * log10(sc / med);
@@ -178,17 +207,26 @@ double nr_dmrs_id_margin_db(const nr_dmrs_id_state_t *st, int id)
 
 bool nr_dmrs_id_decide(nr_dmrs_id_state_t *st, uint32_t min_grants, double min_margin_db)
 {
-  if (!st || st->decided || st->grants < min_grants) return false;
-  double sc[NR_DMRS_ID_CANDIDATES];
-  int best = 0;
-  for (int id = 0; id < NR_DMRS_ID_CANDIDATES; ++id) { sc[id] = nr_dmrs_id_score(st, id); if (sc[id] > sc[best]) best = id; }
+  if (!st || st->decided || st->grants < min_grants || st->range_count == 0) return false;
+  uint32_t best_li = 0;
+  double best_sc = score_local(st, 0);
+  for (uint32_t li = 1; li < st->range_count; ++li) {
+    const double sc = score_local(st, li);
+    if (sc > best_sc) { best_sc = sc; best_li = li; }
+  }
+  const int best = (int)(st->range_first + best_li);
   const double margin = nr_dmrs_id_margin_db(st, best);
   if (margin < min_margin_db) return false;
   /* Runner-up too: a decision is only as good as its separation from the next candidate. */
-  int second = best == 0 ? 1 : 0;
-  for (int id = 0; id < NR_DMRS_ID_CANDIDATES; ++id)
-    if (id != best && sc[id] > sc[second]) second = id;
-  const double sep = 10.0 * log10(sc[best] / (sc[second] > 0 ? sc[second] : 1e-300));
+  uint32_t second_li = best_li == 0 ? 1 : 0;
+  double second_sc = st->range_count > 1 ? score_local(st, second_li) : 0.0;
+  for (uint32_t li = 0; li < st->range_count; ++li) {
+    if (li == best_li) continue;
+    const double sc = score_local(st, li);
+    if (sc > second_sc) { second_sc = sc; second_li = li; }
+  }
+  const double sep = 10.0 * log10(best_sc / (second_sc > 0 ? second_sc : 1e-300));
+  const int second = (int)(st->range_first + second_li);
   st->best_id = best;
   st->margin_db = margin;
   st->decided = true;

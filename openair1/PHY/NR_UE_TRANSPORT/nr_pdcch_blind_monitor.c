@@ -79,6 +79,8 @@
 
 #include "nr_pdcch_coreset_map.h"        // Phase 3 Technique A: nr_pdcch_coreset_map_scan()
 #include "nr_pdcch_dci_length_sweep.h"   // Phase 3 Technique C: nr_pdcch_dci_length_sweep()
+#include "nr_dmrs_id_estimate.h"         // blind UL DM-RS scrambling-identity estimate (Task 13)
+#include "nr_pusch_passive_decode.h"     // nr_pusch_passive_ul_dmrs_id / data-ID sweep (Task 13)
 #include "nr_pdcch_al1_map.h"            // AL1 cover lap (ISAC_AL1_COVER=1)
 #include "nr_pdsch_prb_set.h"            // FDRA width / RA type 0 PRB sets
 
@@ -4386,12 +4388,37 @@ static bool blind_ul_finish(const nr_pdcch_blind_ul_opts_t* opts,
   out->dmrs_ports        = ports;
   out->antenna_ports_field = (uint8_t)antenna_ports;
   out->transform_precoding = (uint8_t)((opts->transform_precoding == 1) ? 1 : 0);
-  out->data_scrambling_id  = (uint16_t)((opts->data_scrambling_id >= 0) ? opts->data_scrambling_id : opts->phy_cell_id);
-  out->ul_dmrs_scrambling_id =
-      (uint16_t)((opts->ul_dmrs_scrambling_id >= 0) ? opts->ul_dmrs_scrambling_id : opts->phy_cell_id);
   out->plausible     = true;
   out->reject_reason = NULL;
   return true;
+}
+
+/* Blind DM-RS/data scrambling identities (Task 13; nscid split added in review fix round 1, finding
+ * 2), applied once out->nscid is known. NOT done inside blind_ul_finish() above: nscid is a DCI
+ * FIELD (dmrs_seq_init on format 0_1; spec-fixed 0 on format 0_0), decoded/assigned by each format's
+ * own extractor at different points relative to its blind_ul_finish() call -- BEFORE it for 0_1,
+ * AFTER for 0_0 -- so neither caller has a finalized out->nscid at the point blind_ul_finish() itself
+ * runs. Both callers invoke this immediately after their own out->nscid assignment instead.
+ *
+ * Both defaults are only an assumption -- the DM-RS identity has a coherence estimator that needs no
+ * CRC (nr_pusch_passive_ul_dmrs_id), one state per nSCID (scramblingID0/1 are independent RRC
+ * fields), applied here whenever it has decided; the data identity has no such estimator (the TB CRC
+ * is the only oracle for it, and it is NOT nSCID-dependent -- TS 38.211 6.3.1.1's c_init has no
+ * n_SCID term) and only advances past the PCI once the UL is otherwise stuck at zero CRC
+ * (nr_pusch_passive_ul_crc_stalled), so a healthy link never touches the sweep. An explicit opts
+ * override (>= 0) always wins over either. */
+static void blind_ul_apply_scrambling_ids(const nr_pdcch_blind_ul_opts_t *opts, nr_pdcch_blind_ul_result_t *out)
+{
+  const nr_dmrs_id_state_t *ul_dd = nr_pusch_passive_ul_dmrs_id(out->nscid);
+  const uint16_t ul_dmrs_fallback = ul_dd->decided ? (uint16_t)ul_dd->best_id : (uint16_t)opts->phy_cell_id;
+  out->ul_dmrs_scrambling_id = (uint16_t)((opts->ul_dmrs_scrambling_id >= 0) ? opts->ul_dmrs_scrambling_id : ul_dmrs_fallback);
+  const bool ul_data_explicit = opts->data_scrambling_id >= 0;
+  const bool ul_data_stalled  = !ul_data_explicit && nr_pusch_passive_ul_crc_stalled(20);
+  const uint16_t ul_data_fallback = nr_pusch_passive_data_id_current((uint16_t)opts->phy_cell_id,
+                                                                     ul_dd->decided ? ul_dd->best_id : -1,
+                                                                     ul_data_stalled);
+  out->data_scrambling_id = ul_data_explicit ? (uint16_t)opts->data_scrambling_id : ul_data_fallback;
+  out->data_id_advance    = ul_data_stalled; // feed() only for grants that actually used the sweep
 }
 
 bool nr_pdcch_blind_decode_01_mode(bool automatic, const int16_t *llr, uint8_t aggregation_level,
@@ -4568,8 +4595,11 @@ bool nr_pdcch_blind_extract_01(uint64_t payload, uint16_t dci_length, uint16_t r
    * decoded UL grants here, because the guard keyed on the field EXISTING rather than on its VALUE
    * -- and this cell logs mimo=0 on 100 % of its UL DCIs. The decoded rv/tpc/ulsch/dai/h_id/ndi on
    * those rejected grants already matched the gNB exactly, i.e. everything upstream was right. */
-  return blind_ul_finish(opts, riv, tda_idx, mcs, antenna_ports, layers,
-                         -1 /* 0_1 uses the configured dmrs-AdditionalPosition */, out);
+  if (!blind_ul_finish(opts, riv, tda_idx, mcs, antenna_ports, layers,
+                       -1 /* 0_1 uses the configured dmrs-AdditionalPosition */, out))
+    return false;
+  blind_ul_apply_scrambling_ids(opts, out); // out->nscid was already set above (dmrs_seq_init)
+  return true;
 }
 
 bool nr_pdcch_blind_extract_00(uint64_t       payload,
@@ -4649,6 +4679,7 @@ bool nr_pdcch_blind_extract_00(uint64_t       payload,
     out->antenna_ports_field = 0;
   }
   out->nscid = 0; // TS 38.211 6.4.1.1.1: n_SCID = 0 for a DCI 0_0 scheduled PUSCH
+  blind_ul_apply_scrambling_ids(opts, out);
   return true;
 }
 

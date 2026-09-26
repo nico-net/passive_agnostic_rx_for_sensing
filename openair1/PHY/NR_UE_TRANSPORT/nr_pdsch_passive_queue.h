@@ -116,6 +116,11 @@ typedef struct {
   /// Passive BWP entry the grant was decoded against (>0): its TB CRC is fed back to the tracker.
   int8_t   bwp_entry;
   uint64_t bwp_probe_payload;
+  /// True when dlsch_pdu.dlDataScramblingId came from this RNTI's data-ID sweep (Task 13) rather
+  /// than the PCI fallback -- gates whether this job's CRC outcome should be fed back into that
+  /// sweep (nr_pdsch_passive_data_id_feed), so an attempt that used the PCI never perturbs a sweep
+  /// it did not use.
+  bool     data_id_advance;
 } nr_pdsch_passive_job_t;
 
 /// Per-run census. Every field is a reason a job did NOT become a decode, so a shortfall in
@@ -173,10 +178,13 @@ void nr_pdsch_passive_queue_stop(void);
 #ifdef __cplusplus
 extern "C" {
 #endif
-/* Read-only view of the DL DM-RS identity estimate (diagnostic; plain ints, racy by design). */
-const nr_dmrs_id_state_t *nr_pdsch_passive_dl_dmrs_id(void);
+/* Read-only view of the DL DM-RS identity estimate for one nSCID (0 or 1; diagnostic, plain ints,
+ * racy by design). */
+const nr_dmrs_id_state_t *nr_pdsch_passive_dl_dmrs_id(int nscid);
 /* Up to 6 RNTIs with >= 50 decodes, as " 0xRNTI:ok/decoded(pct)" items. */
 void nr_pdsch_passive_queue_rnti_census(char *buf, size_t n);
+/* True when this RNTI has >= min_tries decode attempts and zero of them passed CRC. */
+bool nr_pdsch_passive_rnti_crc_stalled(uint16_t rnti, uint32_t min_tries);
 #ifdef __cplusplus
 }
 #endif

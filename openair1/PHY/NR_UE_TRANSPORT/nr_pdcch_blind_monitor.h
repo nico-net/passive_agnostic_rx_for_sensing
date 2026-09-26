@@ -690,8 +690,12 @@ typedef struct {
   // Waveform / scrambling
   uint8_t  transform_precoding; ///< 0 = disabled (CP-OFDM), 1 = enabled (DFT-s-OFDM). From opts.
   uint8_t  frequency_hopping;   ///< decoded hopping flag (0 when the field is 0 bits wide)
-  uint16_t data_scrambling_id;  ///< nid_pusch; from opts (defaults to the PCI)
-  uint16_t ul_dmrs_scrambling_id; ///< from opts (defaults to the PCI)
+  uint16_t data_scrambling_id;  ///< nid_pusch; from opts, else the blind sweep, else the PCI
+  uint16_t ul_dmrs_scrambling_id; ///< from opts, else the blind DM-RS estimate, else the PCI
+  /// True when data_scrambling_id came from the per-cell data-ID sweep (Task 13), not opts/PCI --
+  /// gates whether this grant's decode outcome should be fed back into that sweep
+  /// (nr_pusch_passive_data_id_feed), so an attempt that used the PCI never perturbs it.
+  bool     data_id_advance;
 
   // Fields decoded only so they can be reconciled against the gNB's own log. Not consumed
   // downstream -- but they are half the evidence that the layout is right, so they are reported

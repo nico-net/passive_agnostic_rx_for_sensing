@@ -194,6 +194,15 @@ bool nr_pdsch_passive_probe_outcome(void);
  *  7-13 % EVM, and would feed that failure into the searches). Default on. */
 void nr_pdsch_passive_ptrs_sweep_allow(bool on);
 
+/** Per-RNTI dataScramblingIdentityPDSCH sweep (Task 13). `current()` returns the id this grant's
+ *  decode should use: `pci` when `advance_ok` is false (no eligible mismatch signal yet -- see the
+ *  call site's Technique D convergence + CRC-stall gate), else this RNTI's own ordered TB-CRC-walk
+ *  hypothesis (PCI, then the decided DM-RS id if any, then 0..1023). `feed()` reports whether that
+ *  decode's TB CRC passed; call it ONLY when `advance_ok` was true for that same grant, so an
+ *  attempt that used the PCI fallback never perturbs a sweep it did not use. */
+uint16_t nr_pdsch_passive_data_id_current(uint16_t rnti, uint16_t pci, int dmrs_id, bool advance_ok);
+void nr_pdsch_passive_data_id_feed(uint16_t rnti, bool tb_crc_ok);
+
 /* ---- GPU front end (NR_GPU_FEP=1, libpdsch_gpu.so): the queue does FEP + chest + MMSE + LLR for a
  * whole slot on the GPU and hands each job its LLRs; nr_pdsch_passive_decode() then skips its own
  * FEP/chest/demod and runs descramble + LDPC on them. ---- */
