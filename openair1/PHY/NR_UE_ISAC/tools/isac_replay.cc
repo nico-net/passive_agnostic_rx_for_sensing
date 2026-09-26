@@ -128,6 +128,22 @@ int main(int argc, char **argv)
       ++n_close;
       continue;
     }
+    // ISAC_REPLAY_DMRS_DESPREAD=1: emulate the frequency-OCC despreading that nr_pdsch_passive_queue.c's
+    // dmrs_ls_cfr_submit now applies at capture time, for recordings made before it (every blind DM-RS row
+    // of such a rank>=2 recording carries the port pair interleaved; average each consecutive RE pair).
+    static const bool despread = std::getenv("ISAC_REPLAY_DMRS_DESPREAD") != nullptr;
+    if (despread && source == NR_ISAC_SRC_PDSCH_DMRS_BLIND && re >= 2) {
+      const uint32_t m = re / 2;
+      std::vector<float> h2((size_t)2 * ant * m); std::vector<uint32_t> k2(m), l2(m);
+      for (uint32_t a = 0; a < ant; ++a) for (uint32_t q = 0; q < m; ++q) for (int c2 = 0; c2 < 2; ++c2)
+        h2[2 * ((size_t)a * m + q) + c2] = 0.5f * (h[2 * ((size_t)a * re + 2 * q) + c2] + h[2 * ((size_t)a * re + 2 * q + 1) + c2]);
+      for (uint32_t q = 0; q < m; ++q) { k2[q] = (k[2 * q] + k[2 * q + 1]) / 2; l2[q] = l[2 * q]; }
+      nr_isac_carrier_t c{prb, scs, fc, pci, spf};
+      nr_isac_submit_cfr_multi_session(slot, frac, source, &c, h2.data(), ant, m, k2.data(), l2.data(), m, noise, session);
+      ++n_rows;
+      while (!realtime && !nr_isac_drained()) std::this_thread::sleep_for(std::chrono::microseconds(50));
+      continue;
+    }
     nr_isac_carrier_t c{prb, scs, fc, pci, spf};
     nr_isac_submit_cfr_multi_session(slot, frac, source, &c, h.data(), ant, re, k.data(), l.data(), re, noise, session);
     ++n_rows;

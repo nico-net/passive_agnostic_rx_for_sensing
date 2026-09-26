@@ -118,6 +118,31 @@ static void dmrs_ls_cfr_submit(PHY_VARS_NR_UE *ue, const nr_pdsch_passive_job_t 
   }
   if (n == 0)
     return;
+  /* Frequency OCC despreading (TS 38.211 7.4.1.1.2): a type-1 CDM group carries TWO ports on the same
+   * REs, separated only by w_f = [+1,+1] / [+1,-1] over each consecutive pair of the group's REs. When
+   * the grant also uses this port's CDM partner (p ^ 1: rank >= 2), the raw Y/X above alternates
+   * h_p + h_p' / h_p - h_p' from RE to RE -- two channels interleaved, and a different mixture for every
+   * rank. Measured on a rank-4 empty-room capture (2026-09-26): neighbouring REs differed by -3.2 dB
+   * (median energy ratio |a-b|^2/|a+b|^2) while REs two apart agreed to -18.5 dB, on 100 % of rows; the
+   * static profile then could not exist (per-row residual +0.7 dB of the LOS tap). Averaging each pair
+   * (whose OCC weights for port p are both +1 after the division by p's own pilot) cancels the partner
+   * and leaves h_p, placed at the pair's midpoint subcarrier. Single-port grants are left untouched. */
+  if ((d->dmrs_ports >> (p ^ 1)) & 1) {
+    uint32_t m = 0;
+    for (uint32_t q = 0; q + 1 < n; q += 2, m++) {
+      for (uint32_t a = 0; a < nof_ant; a++) {
+        const float *x0 = &h[2 * ((size_t)a * MAX_RE + q)], *x1 = &h[2 * ((size_t)a * MAX_RE + q + 1)];
+        float *o = &h[2 * ((size_t)a * MAX_RE + m)];
+        const float re = 0.5f * (x0[0] + x1[0]), im = 0.5f * (x0[1] + x1[1]);
+        o[0] = re; o[1] = im;
+      }
+      kk[m] = (kk[q] + kk[q + 1]) / 2;
+      ll[m] = ll[q];
+    }
+    n = m;
+    if (n == 0)
+      return;
+  }
   const nr_isac_carrier_t carrier = {.nof_prb = (uint32_t)fp->N_RB_DL, .scs_hz = fp->subcarrier_spacing,
                                      .dl_center_hz = fp->dl_CarrierFreq, .pci = fp->Nid_cell,
                                      .slots_per_frame = fp->slots_per_frame};
