@@ -241,3 +241,56 @@ bool nr_dmrs_id_decide(nr_dmrs_id_state_t *st, uint32_t min_grants, double min_m
           st->label, best, st->assumed_id, margin, sep, st->grants, st->label);
   return true;
 }
+
+void nr_dmrs_id_2stage_init(nr_dmrs_id_2stage_t *t, const char *label, int assumed_id)
+{
+  memset(t, 0, sizeof(*t));
+  nr_dmrs_id_init(&t->s1, label, assumed_id);
+  t->s2.best_id = -1;
+  t->s2.assumed_id = assumed_id;
+  t->s2.label = t->s1.label;
+  t->s1_grants = NR_DMRS_ID_STAGE1_GRANTS;
+  t->s2_throttle = NR_DMRS_ID_STAGE2_THROTTLE;
+  t->s2_max_evals = NR_DMRS_ID_STAGE2_MAX_EVALS;
+}
+
+bool nr_dmrs_id_2stage_accumulate(nr_dmrs_id_2stage_t *t, const c16_t *rx_symbol, int ofdm_symbol_size,
+                                  int start_subcarrier, int rb_offset, int nb_rb, int N_RB, int symbols_per_slot,
+                                  int slot, int symbol, int nscid, int normal_cp)
+{
+  if (!t || t->decided_p1 > 0)
+    return false;
+  if (nr_dmrs_id_accumulate(&t->s1, rx_symbol, ofdm_symbol_size, start_subcarrier, rb_offset, nb_rb, N_RB,
+                            symbols_per_slot, slot, symbol, nscid, normal_cp)
+      && nr_dmrs_id_decide(&t->s1, 16, 10.0)) {
+    __atomic_store_n(&t->decided_p1, t->s1.best_id + 1, __ATOMIC_RELEASE);
+    return true;
+  }
+  if (!t->s2_armed && t->s1.grants >= t->s1_grants) {
+    t->s2_armed = true;
+    nr_dmrs_id_set_range(&t->s2, NR_DMRS_ID_CANDIDATES, NR_DMRS_ID_SPACE - NR_DMRS_ID_CANDIDATES);
+    LOG_W(PHY, "SENSING: DMRS_ID %s 0..%d undecided after %u grants: also sweeping %d..%d (throttled 1/%u, at most %u "
+               "evaluations); 0..%d keeps accumulating\n",
+          t->s1.label, NR_DMRS_ID_CANDIDATES - 1, t->s1.grants, NR_DMRS_ID_CANDIDATES, NR_DMRS_ID_SPACE - 1,
+          t->s2_throttle, t->s2_max_evals, NR_DMRS_ID_CANDIDATES - 1);
+  }
+  if (!t->s2_armed || t->s2_evals >= t->s2_max_evals || !t->s2.num_r)
+    return false;
+  if ((t->s2_tick++ % (t->s2_throttle ? t->s2_throttle : 1)) != 0)
+    return false;
+  t->s2_evals++;
+  if (nr_dmrs_id_accumulate(&t->s2, rx_symbol, ofdm_symbol_size, start_subcarrier, rb_offset, nb_rb, N_RB,
+                            symbols_per_slot, slot, symbol, nscid, normal_cp)
+      && nr_dmrs_id_decide(&t->s2, 16, 10.0)) {
+    __atomic_store_n(&t->decided_p1, t->s2.best_id + 1, __ATOMIC_RELEASE);
+    return true;
+  }
+  if (t->s2_evals >= t->s2_max_evals) {
+    LOG_W(PHY, "SENSING: DMRS_ID %s %d..%d undecided after %u evaluations: stage 2 stopped (0..%d still accumulating)\n",
+          t->s2.label, NR_DMRS_ID_CANDIDATES, NR_DMRS_ID_SPACE - 1, t->s2_evals, NR_DMRS_ID_CANDIDATES - 1);
+    free(t->s2.num_r); free(t->s2.num_i); free(t->s2.den);
+    t->s2.num_r = t->s2.num_i = t->s2.den = NULL;
+    t->s2.range_count = 0;
+  }
+  return false;
+}

@@ -181,4 +181,84 @@ TEST(DmrsId, RejectsInvalidGeometry) {
   EXPECT_EQ(nr_dmrs_id_accumulate(&st, nullptr, FFT, 0, 0, 10, N_RB, SYMS, 0, 2, 0, 1), 0);
   EXPECT_EQ(st.grants, 0u);
 }
+// ---- final review I5: two-window driver ------------------------------------------------------------
+static bool feed2(nr_dmrs_id_2stage_t *t, const std::vector<c16_t> &rx, int slot)
+{
+  return nr_dmrs_id_2stage_accumulate(t, rx.data(), FFT, FIRST_CARRIER + 5 * 12, 5, 50, N_RB, SYMS, slot, 2, 0, 1);
+}
+
+TEST(DmrsId2Stage, PrematureEscalationDoesNotLoseAStage1Id) {
+  // The first grants are garbage (acquisition / mis-lock / false accepts) so stage 2 is armed; the
+  // true id 300 arrives afterwards. The old one-way switch made 300 undecidable from then on.
+  std::mt19937 rng(21);
+  nr_dmrs_id_2stage_t t;
+  nr_dmrs_id_2stage_init(&t, "TEST", 2);
+  t.s1_grants = 4;
+  t.s2_throttle = 1000000; // stage 2 evaluated once (tick 0), then never again in this test
+  std::normal_distribution<double> n(0.0, 200.0);
+  for (int i = 0; i < 4; ++i) {
+    std::vector<c16_t> junk(FFT);
+    for (auto &v : junk) v = c16_t{(int16_t)n(rng), (int16_t)n(rng)};
+    EXPECT_FALSE(feed2(&t, junk, 3 + i));
+  }
+  EXPECT_TRUE(t.s2_armed);
+  EXPECT_EQ(nr_dmrs_id_2stage_decided(&t), -1);
+  bool decided = false;
+  for (int g = 0; g < 40 && !decided; ++g)
+    decided = feed2(&t, synth(300, 0, g % 20, 2, 5, 50, 3.7, 40.0, rng), g % 20);
+  ASSERT_TRUE(decided);
+  EXPECT_EQ(nr_dmrs_id_2stage_decided(&t), 300);
+  EXPECT_LE(t.s2_evals, 1u);
+}
+
+TEST(DmrsId2Stage, FindsAStage2IdThrottledAndCapped) {
+  std::mt19937 rng(23);
+  nr_dmrs_id_2stage_t t;
+  nr_dmrs_id_2stage_init(&t, "TEST", 2);
+  t.s1_grants = 2;
+  t.s2_throttle = 3;
+  t.s2_max_evals = 20;
+  int calls = 0;
+  bool decided = false;
+  for (; calls < 200 && !decided; ++calls)
+    decided = feed2(&t, synth(40000, 0, calls % 20, 2, 5, 50, 3.7, 40.0, rng), calls % 20);
+  ASSERT_TRUE(decided) << "after " << calls << " calls, " << t.s2_evals << " stage-2 evaluations";
+  EXPECT_EQ(nr_dmrs_id_2stage_decided(&t), 40000);
+  EXPECT_LE(t.s2_evals, 20u);
+  EXPECT_GE(t.s2_evals, 16u); // the decide floor is 16 stage-2 grants
+  EXPECT_GE(calls, 2 + 3 * 15); // throttled: one evaluation per 3 calls after arming
+  // decided: every later call is a no-op for both stages
+  const uint32_t g1 = t.s1.grants, e2 = t.s2_evals;
+  EXPECT_FALSE(feed2(&t, synth(40000, 0, 1, 2, 5, 50, 3.7, 40.0, rng), 1));
+  EXPECT_EQ(t.s1.grants, g1);
+  EXPECT_EQ(t.s2_evals, e2);
+}
+
+TEST(DmrsId2Stage, Stage2BudgetIsAHardCap) {
+  std::mt19937 rng(29);
+  nr_dmrs_id_2stage_t t;
+  nr_dmrs_id_2stage_init(&t, "TEST", 2);
+  t.s1_grants = 1;
+  t.s2_throttle = 1;
+  t.s2_max_evals = 3;
+  std::normal_distribution<double> n(0.0, 200.0);
+  for (int i = 0; i < 12; ++i) {
+    std::vector<c16_t> junk(FFT);
+    for (auto &v : junk) v = c16_t{(int16_t)n(rng), (int16_t)n(rng)};
+    feed2(&t, junk, i % 20);
+  }
+  EXPECT_EQ(t.s2_evals, 3u);
+  EXPECT_EQ(t.s2.num_r, nullptr); // spent undecided: stage-2 arrays released
+  EXPECT_EQ(t.s1.grants, 12u);     // stage 1 kept accumulating throughout
+  EXPECT_EQ(nr_dmrs_id_2stage_decided(&t), -1);
+}
+
+TEST(DmrsId2Stage, ZeroInitialisedStateIsUndecided) {
+  // The live states are static BSS read by the scan thread before any consumer init()s them: a zeroed
+  // state must read as undecided, never as "decided identity 0".
+  static nr_dmrs_id_2stage_t z;
+  EXPECT_EQ(nr_dmrs_id_2stage_decided(&z), -1);
+  EXPECT_EQ(nr_dmrs_id_2stage_decided(nullptr), -1);
+}
+
 int main(int argc, char **argv) { logInit(); testing::InitGoogleTest(&argc, argv); return RUN_ALL_TESTS(); }

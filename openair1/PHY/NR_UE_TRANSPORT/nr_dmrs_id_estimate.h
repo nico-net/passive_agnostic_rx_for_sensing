@@ -131,6 +131,46 @@ void nr_dmrs_prb_coherence(const c16_t *rx_symbol, int ofdm_symbol_size, int fir
 double nr_dmrs_id_score(const nr_dmrs_id_state_t *st, int id);
 double nr_dmrs_id_margin_db(const nr_dmrs_id_state_t *st, int id);
 
+/* ---- TWO-WINDOW DRIVER (final review I5) ----------------------------------------------------------
+ * Stage 1 (0..1023, every deployment seen so far) accumulates on EVERY call until an identity is
+ * decided -- it is never switched off, so evidence gathered while escalation was premature (acquisition
+ * garbage, CFO mis-lock, false-accept DCIs, a wrong Technique D mask reading data as DM-RS) cannot make
+ * a true identity in 0..1023 undecidable, as the former one-way switch to 1024..65535 did.
+ * Stage 2 (1024..65535) is armed once stage 1 has s1_grants grants without deciding, then evaluated on
+ * one call in s2_throttle and at most s2_max_evals times IN TOTAL: at ~170 ms per stage-2 accumulate
+ * (measured, FindsAnIdAboveTheOldRange) the cap bounds its lifetime cost to ~11 s of one consumer's CPU
+ * instead of ~83 us/job forever. 64 evaluations = 4x the decide floor (16 grants); a stage-2 id that
+ * cannot clear the margin gate in 64 grants is not going to. Once either stage decides, all work stops
+ * (and the stage-2 arrays are freed if its budget is spent undecided). Caller-serialised (a trylock
+ * around it, as before); nr_dmrs_id_2stage_decided() is safe to call unlocked from any thread. */
+#define NR_DMRS_ID_STAGE1_GRANTS 64
+#define NR_DMRS_ID_STAGE2_THROTTLE 2048
+#define NR_DMRS_ID_STAGE2_MAX_EVALS 64
+typedef struct {
+  nr_dmrs_id_state_t s1;   ///< 0..1023
+  nr_dmrs_id_state_t s2;   ///< 1024..65535, allocated when armed
+  uint32_t s1_grants;      ///< stage-1 grants before stage 2 is armed (default NR_DMRS_ID_STAGE1_GRANTS)
+  uint32_t s2_throttle;    ///< one stage-2 evaluation per this many calls (default NR_DMRS_ID_STAGE2_THROTTLE)
+  uint32_t s2_max_evals;   ///< total stage-2 evaluations allowed (default NR_DMRS_ID_STAGE2_MAX_EVALS)
+  uint32_t s2_tick;        ///< calls since stage 2 was armed
+  uint32_t s2_evals;       ///< stage-2 evaluations made
+  bool     s2_armed;
+  int      decided_p1;     ///< decided identity + 1; 0 = undecided, so a zero-initialised (static,
+                           ///< never-init'd) state reads as undecided. Release-published; read with _decided().
+} nr_dmrs_id_2stage_t;
+
+void nr_dmrs_id_2stage_init(nr_dmrs_id_2stage_t *t, const char *label, int assumed_id);
+/* Same inputs as nr_dmrs_id_accumulate(). Returns true on the call that decides. */
+bool nr_dmrs_id_2stage_accumulate(nr_dmrs_id_2stage_t *t, const c16_t *rx_symbol, int ofdm_symbol_size,
+                                  int start_subcarrier, int rb_offset, int nb_rb, int N_RB, int symbols_per_slot,
+                                  int slot, int symbol, int nscid, int normal_cp);
+/* The decided identity, or -1 (acquire load: never exposes a half-published decision, final review M1).
+ * Inline so a pure library reading it (nr_pdcch_blind_monitor.c) needs no estimator symbol. */
+static inline int nr_dmrs_id_2stage_decided(const nr_dmrs_id_2stage_t *t)
+{
+  return t ? __atomic_load_n(&t->decided_p1, __ATOMIC_ACQUIRE) - 1 : -1;
+}
+
 #ifdef __cplusplus
 }
 #endif
