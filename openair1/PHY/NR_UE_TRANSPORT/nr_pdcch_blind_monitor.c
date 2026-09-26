@@ -4287,7 +4287,19 @@ static blind_ul_field_bits_t blind_ul_field_bits(const nr_pdcch_blind_ul_opts_t*
 {
   blind_ul_field_bits_t f;
   const double riv_span = ((double)opts->bwp_size * (double)(opts->bwp_size + 1)) / 2.0;
-  f.riv = (int)ceil(log2(riv_span));
+  const int riv_bits = (int)ceil(log2(riv_span));
+  // Frequency-domain assignment width (TS 38.212 7.3.1.1.2 / 38.214 6.1.2.2.1): RIV bits for
+  // resource allocation type 1 (the only mode this file assumed until gap item 1 -- "PUSCH RA
+  // type 0 / dynamicSwitch"), N_RBG bits for type 0, or 1+max(N_RBG,RIV) for dynamicSwitch.
+  // nr_fdra_bits() is the exact formula the DL 1_1 side already uses (nr_pdcch_blind_dci_size());
+  // TS 38.214 6.1.2.2.1's table is shared verbatim between DL and UL.
+  if (opts->fdra_mode == NR_FDRA_TYPE1) {
+    f.riv = riv_bits;
+  } else {
+    const int rbg_size = nr_fdra_rbg_size(opts->fdra_mode, opts->bwp_size);
+    const int n_rbg     = nr_rbg_count(opts->fdra_bwp_start, opts->bwp_size, rbg_size);
+    f.riv = nr_fdra_bits(opts->fdra_mode, n_rbg, riv_bits);
+  }
   // time_domain_assignment: nr_dci_size() uses ceil(log2(tdaList->count)) when a
   // pusch-TimeDomainAllocationList is configured, and 4 (the 16-entry default table) otherwise.
   // Derived from tda_count, never a separate knob -- same rule as the DL path.
@@ -4330,6 +4342,24 @@ uint16_t nr_pdcch_blind_dci01_size(const nr_pdcch_blind_ul_opts_t* opts)
   return (uint16_t)(12 + f.carrier_ind + f.ul_sul + f.bwp_ind + f.riv + f.tda + f.fh + f.harq_pid
                     + f.dai1 + f.dai2 + f.sri + f.precoding + f.ant_ports + f.srs_req + f.csi_req
                     + f.cbg + f.ptrs_dmrs + f.beta_offset + f.dmrs_seq_init);
+}
+
+int nr_pdcch_blind_ul_fdra_mode_candidates(const nr_pdcch_blind_ul_opts_t *opts, uint16_t observed_len,
+                                           uint8_t *out_modes, int max)
+{
+  if (opts == NULL || out_modes == NULL || max <= 0 || opts->bwp_size < 1 || observed_len == 0) {
+    return 0;
+  }
+  static const uint8_t kModes[4] = {NR_FDRA_TYPE0_CFG1, NR_FDRA_TYPE0_CFG2, NR_FDRA_DYN_CFG1, NR_FDRA_DYN_CFG2};
+  nr_pdcch_blind_ul_opts_t trial = *opts;
+  int n = 0;
+  for (int i = 0; i < 4 && n < max; i++) {
+    trial.fdra_mode = kModes[i];
+    if (nr_pdcch_blind_dci01_size(&trial) == observed_len) {
+      out_modes[n++] = kModes[i];
+    }
+  }
+  return n;
 }
 
 /// Resolve the PUSCH time-domain allocation. `mu` is the numerology, needed for k2's j offset when
@@ -4390,9 +4420,32 @@ static bool blind_ul_finish(const nr_pdcch_blind_ul_opts_t* opts,
     return false;
   }
   uint16_t start_rb, num_rb;
-  if (!riv_to_prb_alloc(riv, opts->bwp_size, &start_rb, &num_rb)) {
-    out->reject_reason = "RIV decodes to a PRB allocation outside the UL BWP";
-    return false;
+  int ra_type0 = 0, rbg_size = 0, n_rbg = 0;
+  if (opts->fdra_mode == NR_FDRA_TYPE1) {
+    if (!riv_to_prb_alloc(riv, opts->bwp_size, &start_rb, &num_rb)) {
+      out->reject_reason = "RIV decodes to a PRB allocation outside the UL BWP";
+      return false;
+    }
+  } else {
+    // Gap item 1 (PUSCH RA type 0 / dynamicSwitch): the field named `riv` above is really "the
+    // FDRA field's raw value", whatever it means under this mode -- nr_fdra_prbs() is the same
+    // primitive nr_pdcch_blind_decode_and_extract_11() uses for the DL 1_1 side (TS 38.214
+    // 6.1.2.2.1 is one shared table). `start_rb`/`num_rb` become only the PRB list's bounding box;
+    // the exact (possibly non-contiguous) set is out->rbg_bitmap, expanded by the caller exactly as
+    // the DL RT loop already does (nr_ra_type0_prbs() + nr_prb_segments()).
+    uint16_t prb[NR_PRB_SET_MAX];
+    const double riv_span_check = ((double)opts->bwp_size * (double)(opts->bwp_size + 1)) / 2.0;
+    const int riv_bits = (int)ceil(log2(riv_span_check));
+    rbg_size = nr_fdra_rbg_size(opts->fdra_mode, opts->bwp_size);
+    n_rbg    = nr_rbg_count(opts->fdra_bwp_start, opts->bwp_size, rbg_size);
+    const int n = nr_fdra_prbs(riv, opts->fdra_mode, n_rbg, riv_bits, opts->fdra_bwp_start, opts->bwp_size,
+                               prb, NR_PRB_SET_MAX, &ra_type0);
+    if (n <= 0) {
+      out->reject_reason = "FDRA allocates nothing inside the UL BWP (empty RBG bitmap or out-of-range RIV)";
+      return false;
+    }
+    start_rb = prb[0];
+    num_rb   = (uint16_t)n;
   }
   const int table = opts->mcs_table < 0 ? 0 : opts->mcs_table;
   if (table > 4 || mcs > 31 || nr_get_code_rate_ul(mcs, table) == 0) {
@@ -4481,6 +4534,12 @@ static bool blind_ul_finish(const nr_pdcch_blind_ul_opts_t* opts,
   out->num_rb            = num_rb;
   out->bwp_start         = opts->bwp_start;
   out->bwp_size          = opts->bwp_size;
+  if (ra_type0) {
+    out->ra_type0      = 1;
+    out->rbg_size      = (uint8_t)rbg_size;
+    out->rbg_bwp_start = opts->fdra_bwp_start;
+    out->rbg_bitmap    = riv & ((n_rbg >= 32) ? 0xFFFFFFFFu : ((1u << n_rbg) - 1u)); /* dynamicSwitch: drop the mode bit */
+  }
   out->tda_index         = (uint8_t)tda_idx;
   out->start_symbol      = S;
   out->num_symbols       = L;

@@ -60,6 +60,7 @@ void crcTableInit(void);
 #include "nr_pdcch_dci_length_sweep.h"
 #include "nr_pdcch_ul_field_sweep.h"
 #include "nr_pdcch_ul_discovery.h"
+#include "nr_pdsch_prb_set.h"
 #include "nr_pdcch_blind_monitor_rt.h"
 #include "executables/softmodem-common.h"
 }
@@ -1508,6 +1509,47 @@ uint64_t PackUlPayload(const UlGroundTruth& gt, const nr_pdcch_blind_ul_opts_t& 
   return p;
 }
 
+/// Gap item 1 (PUSCH RA type 0 / dynamicSwitch): identical to PackUlPayload() except the
+/// frequency-domain assignment field is packed at an EXPLICIT (value, width) instead of
+/// (gt.riv, RivBitsFor(o.bwp_size)) -- RivBitsFor() only knows resource allocation type 1's width,
+/// and gap item 1 needs to pack an RBG bitmap / dynamicSwitch field, whose width is
+/// nr_fdra_bits(o.fdra_mode, n_rbg, riv_bits) instead. Kept as a separate function rather than
+/// parameterising PackUlPayload() so every existing type-1 test stays byte-for-byte unchanged.
+uint64_t PackUlPayloadFdra(const UlGroundTruth& gt, const nr_pdcch_blind_ul_opts_t& o, uint32_t fdra_value, int fdra_bits)
+{
+  uint64_t p = 0;
+  auto put = [&](uint32_t val, int nbits) {
+    if (nbits == 0) return;
+    const uint32_t mask = (nbits >= 32) ? 0xFFFFFFFFu : ((1u << nbits) - 1u);
+    p = (p << nbits) | (val & mask);
+  };
+  put(gt.format_ind, 1);
+  put(0, PickBits(o.carrier_indicator_bits, 0));
+  put(0, PickBits(o.ul_sul_bits, 0));
+  put(0, PickBits(o.bwp_indicator_bits, 0));
+  put(fdra_value, fdra_bits);                              // frequency domain assignment
+  put(gt.tda_index, UlTdaBits(o));                         // time domain assignment
+  put(gt.freq_hopping, PickBits(o.freq_hopping_bits, 0));  // frequency hopping flag
+  put(gt.mcs, 5);
+  put(gt.ndi, 1);
+  put(gt.rv, 2);
+  put(gt.harq_pid, PickBits(o.harq_pid_bits, 4));
+  put(gt.dai, PickBits(o.dai1_bits, 2));
+  put(0, PickBits(o.dai2_bits, 0));
+  put(gt.tpc, 2);
+  put(0, PickBits(o.sri_bits, 0));
+  put(0, PickBits(o.precoding_info_bits, 0));
+  put(gt.antenna_ports, PickBits(o.antenna_ports_bits, 2));
+  put(gt.srs_request, PickBits(o.srs_request_bits, 2));
+  put(gt.csi_request, PickBits(o.csi_request_bits, 0));
+  put(0, PickBits(o.cbg_bits, 0));
+  put(0, PickBits(o.ptrs_dmrs_bits, 0));
+  put(0, PickBits(o.beta_offset_bits, 0));
+  put(gt.dmrs_seq_init, PickBits(o.dmrs_seq_init_bits, 1));
+  put(gt.ulsch_ind, 1);
+  return p;
+}
+
 /// UL opts matching THIS deployment as far as it is known (live gNB, 2026-08-25): 273-PRB UL BWP
 /// at CRB 0, CP-OFDM, qam64, PCI 2, and the 2-entry TDRA list the PUSCH dump implies
 /// (symb=[0..14), k2=4). Widths are left at their documented defaults -- see the group comment for
@@ -1869,6 +1911,42 @@ TEST_F(BlindPdcchTest, Dci00ExtractsEveryFieldWithoutASecondDecode) {
   EXPECT_EQ(out.k2, 1);
   EXPECT_EQ(out.ulsch_indicator, 1); // 0_0 has no indicator field; it always schedules UL-SCH
   EXPECT_EQ(out.nscid, 0);           // TS 38.211 6.4.1.1.1
+}
+
+// ---- Gap item 3: PUSCH scrambling IDs for DCI 0_0 --------------------------------------------
+// Checked against spec, not assumed: TS 38.214 6.1.1.1 / TS 38.211 6.3.1.1 & 6.4.1.1.1.1 make BOTH
+// the data and DM-RS scrambling identities of a 0_0-scheduled PUSCH the physical cell ID, with no
+// USS/CSS exception (unlike the general "PCI for CSS/SI/RA/P-RNTI, decided ID for C-RNTI in a USS"
+// rule nr_scrambling_dedicated() encodes for 1_0/1_1/0_1 -- 0_0's field list is spec-fixed with NO
+// RRC-derived content at all, exactly the same reason blind_ul_apply_scrambling_ids()'s own comment
+// gives for why nscid=0 is forced). blind_ul_apply_scrambling_ids() already implements this
+// correctly (dedicated := format==0_1), so this is a REGRESSION GUARD, not a new fix -- confirmed
+// by direct inspection of the code and by TS 38.214/38.211 above, not carried over from an
+// unverified assumption.
+TEST_F(BlindPdcchTest, Dci00ScramblingIdsAreAlwaysThePciNeverTheDedicatedEstimate) {
+  nr_pdcch_blind_ul_opts_t o = LiveUlOpts();
+  o.tda_count = 0;
+  o.phy_cell_id = 137;
+  o.data_scrambling_id = -1;    // not explicitly configured
+  o.ul_dmrs_scrambling_id = -1; // not explicitly configured
+  const uint16_t len = nr_pdcch_blind_dci00_size(o.bwp_size, 0);
+
+  UlGroundTruth gt;
+  gt.riv = 1200;
+  nr_pdcch_blind_ul_result_t out;
+  ASSERT_TRUE(nr_pdcch_blind_extract_00(PackDci00(gt, o.bwp_size, len), len, gt.rnti, &o, &out))
+      << (out.reject_reason ? out.reject_reason : "");
+  EXPECT_EQ(out.data_scrambling_id, o.phy_cell_id);
+  EXPECT_EQ(out.ul_dmrs_scrambling_id, o.phy_cell_id);
+  EXPECT_FALSE(out.data_id_advance) << "0_0 must never feed the 0_1 dedicated-ID walk";
+
+  // An EXPLICIT opts override still always wins, for 0_0 exactly as for every other format --
+  // that half of the rule (opts overrides everything) is format-independent by design.
+  o.data_scrambling_id = 55;
+  o.ul_dmrs_scrambling_id = 66;
+  ASSERT_TRUE(nr_pdcch_blind_extract_00(PackDci00(gt, o.bwp_size, len), len, gt.rnti, &o, &out));
+  EXPECT_EQ(out.data_scrambling_id, 55);
+  EXPECT_EQ(out.ul_dmrs_scrambling_id, 66);
 }
 
 TEST_F(BlindPdcchTest, Dci00RejectsTheDownlinkFormatIndicator) {
@@ -3155,6 +3233,185 @@ TEST_F(BlindPdcchTest, UlFeedbackOwnershipStillSeparatesActualOptionChanges) {
   EXPECT_NE(first.hyp_generation,changed.hyp_generation);
   EXPECT_EQ(nr_pdcch_ul_discovery_snapshot().raw_samples,16);
   nr_pdcch_ul_discovery_reset();
+}
+
+// ---- Gap item 1: PUSCH RA type 0 / dynamicSwitch (DCI 0_1) ---------------------------------------
+// "Detected and refused" before this: nr_pdcch_blind_ul_opts_t had no fdra_mode at all, so
+// blind_ul_finish() unconditionally called riv_to_prb_alloc(), and blind_ul_field_bits() always
+// sized the frequency-domain field as a RIV. These tests exercise the decode primitive directly
+// (nr_pdcch_blind_extract_01(), bypassing polar decode, same pattern as
+// UlDefaultK2AndDmrsUseMeasuredCellParameters above) -- the RT-side wiring that decides WHEN to try
+// a non-type-1 mode is PHY/thread-coupled and is verified by build and reading, like every other
+// RT-only change in this file's history (see e.g. I6's "Test. None" in final-fix-report.md).
+
+TEST_F(BlindPdcchTest, Dci01FdraModeCandidatesNarrowByLengthConsistency) {
+  nr_pdcch_blind_ul_opts_t truth = {};
+  truth.bwp_start = 0;
+  truth.bwp_size  = 52;
+  truth.tda_count = 0;
+  truth.mcs_table = -1;
+  truth.data_scrambling_id = -1;
+  truth.ul_dmrs_scrambling_id = -1;
+  truth.dmrs_add_pos = -1;
+  truth.dmrs_max_length = -1;
+
+  // Ground truth: this RNTI's grants actually decode at TYPE0_CFG1's total length.
+  truth.fdra_mode = NR_FDRA_TYPE0_CFG1;
+  const uint16_t observed_len = nr_pdcch_blind_dci01_size(&truth);
+  ASSERT_GT(observed_len, 0);
+
+  uint8_t candidates[4] = {};
+  const int n = nr_pdcch_blind_ul_fdra_mode_candidates(&truth, observed_len, candidates, 4);
+  ASSERT_GT(n, 0);
+  bool saw_true_mode = false;
+  for (int i = 0; i < n; i++) {
+    EXPECT_NE(candidates[i], (uint8_t)NR_FDRA_TYPE1) << "TYPE1 is never a candidate: it is the "
+                                                          "baseline this function tries alternatives to";
+    if (candidates[i] == NR_FDRA_TYPE0_CFG1) saw_true_mode = true;
+  }
+  EXPECT_TRUE(saw_true_mode) << "the actual mode must always be length-consistent with its own length";
+
+  // A length nothing can reproduce (absurdly large) narrows to nothing, not a false positive.
+  EXPECT_EQ(nr_pdcch_blind_ul_fdra_mode_candidates(&truth, 63, candidates, 4), 0);
+}
+
+TEST_F(BlindPdcchTest, Dci01ExtractRaType0BitmapProducesTheCorrectPrbList) {
+  nr_pdcch_blind_ul_opts_t o = {};
+  o.bwp_start = 0;
+  o.bwp_size  = 52;              // TS 38.214 Table 6.1.2.2.1-1: <=72 PRB -> config-1 P = 4
+  o.fdra_mode = NR_FDRA_TYPE0_CFG1;
+  o.fdra_bwp_start = 0;
+  o.tda_count = 0;
+  o.mcs_table = -1;
+  o.data_scrambling_id = -1;
+  o.ul_dmrs_scrambling_id = -1;
+  o.dmrs_add_pos = -1;
+  o.dmrs_max_length = -1;
+
+  const int rbg_size = nr_fdra_rbg_size(o.fdra_mode, o.bwp_size);
+  ASSERT_EQ(rbg_size, 4);
+  const int n_rbg = nr_rbg_count(o.fdra_bwp_start, o.bwp_size, rbg_size);
+  ASSERT_EQ(n_rbg, 13); // ceil(52/4)
+
+  UlGroundTruth gt;
+  gt.riv = 0b0000000000011u; // MSB=RBG0 .. LSB=RBG12: RBG 11 and RBG 12 set (the last, partial, RBG)
+  const int fdra_bits = nr_fdra_bits(o.fdra_mode, n_rbg, RivBitsFor(o.bwp_size));
+  const uint64_t len = nr_pdcch_blind_dci01_size(&o);
+  const uint64_t payload = PackUlPayloadFdra(gt, o, gt.riv, fdra_bits);
+
+  nr_pdcch_blind_ul_result_t out;
+  ASSERT_TRUE(nr_pdcch_blind_extract_01(payload, len, gt.rnti, &o, &out)) << out.reject_reason;
+  EXPECT_EQ(out.ra_type0, 1);
+  EXPECT_EQ(out.rbg_size, rbg_size);
+  EXPECT_EQ(out.rbg_bwp_start, o.fdra_bwp_start);
+  EXPECT_EQ(out.rbg_bitmap, gt.riv);
+
+  uint16_t prb[NR_PRB_SET_MAX];
+  const int n = nr_ra_type0_prbs(out.rbg_bitmap, out.rbg_bwp_start, o.bwp_size, out.rbg_size, prb, NR_PRB_SET_MAX);
+  // RBG index g covers [g*P-off, (g+1)*P-off) except the last RBG, which runs to bwp_size-1;
+  // off = bwp_start % P = 0 here. RBG11 -> [44,48), RBG12 (last) -> [48,52) => 4+4 = 8 PRBs.
+  ASSERT_EQ(n, 8);
+  EXPECT_EQ(prb[0], 44);
+  EXPECT_EQ(prb[n - 1], 51);
+}
+
+TEST_F(BlindPdcchTest, Dci01ExtractDynamicSwitchBothBranches) {
+  nr_pdcch_blind_ul_opts_t o = {};
+  o.bwp_start = 0;
+  o.bwp_size  = 52;
+  o.fdra_mode = NR_FDRA_DYN_CFG1;
+  o.fdra_bwp_start = 0;
+  o.tda_count = 0;
+  o.mcs_table = -1;
+  o.data_scrambling_id = -1;
+  o.ul_dmrs_scrambling_id = -1;
+  o.dmrs_add_pos = -1;
+  o.dmrs_max_length = -1;
+
+  const int rbg_size = nr_fdra_rbg_size(o.fdra_mode, o.bwp_size);
+  const int n_rbg = nr_rbg_count(o.fdra_bwp_start, o.bwp_size, rbg_size);
+  const int riv_bits = RivBitsFor(o.bwp_size);
+  const int fdra_bits = nr_fdra_bits(o.fdra_mode, n_rbg, riv_bits); // 1 + max(n_rbg, riv_bits)
+  const uint64_t len = nr_pdcch_blind_dci01_size(&o);
+
+  UlGroundTruth gt;
+  {
+    // MSB = 0 -> type-0 bitmap in the low n_rbg bits.
+    gt.riv = 0x1u; // RBG 12 (LSB) only
+    const uint64_t payload = PackUlPayloadFdra(gt, o, gt.riv, fdra_bits);
+    nr_pdcch_blind_ul_result_t out;
+    ASSERT_TRUE(nr_pdcch_blind_extract_01(payload, len, gt.rnti, &o, &out)) << out.reject_reason;
+    EXPECT_EQ(out.ra_type0, 1);
+    EXPECT_EQ(out.rbg_bitmap, 0x1u);
+  }
+  {
+    // MSB = 1 -> RIV in the low riv_bits bits, exactly like resource allocation type 1. Expected
+    // start/count from nr_fdra_prbs() itself (already independently tested by
+    // test_nr_pdsch_prb_set) -- what THIS test verifies is that the 0_1 field walk correctly
+    // isolates the dynamicSwitch mode bit and hands the remaining bits to that same primitive.
+    const uint32_t riv_val = 5; // any in-range RIV
+    uint16_t exp_prb[NR_PRB_SET_MAX];
+    int exp_type0 = -1;
+    const int exp_n = nr_fdra_prbs(riv_val, NR_FDRA_TYPE1, n_rbg, riv_bits, o.fdra_bwp_start, o.bwp_size,
+                                   exp_prb, NR_PRB_SET_MAX, &exp_type0);
+    ASSERT_GT(exp_n, 0);
+    const uint16_t exp_start = exp_prb[0], exp_num = (uint16_t)exp_n;
+    const uint32_t field = riv_val | (1u << (fdra_bits - 1));
+    gt.riv = field;
+    const uint64_t payload = PackUlPayloadFdra(gt, o, field, fdra_bits);
+    nr_pdcch_blind_ul_result_t out;
+    ASSERT_TRUE(nr_pdcch_blind_extract_01(payload, len, gt.rnti, &o, &out)) << out.reject_reason;
+    EXPECT_EQ(out.ra_type0, 0);
+    EXPECT_EQ(out.start_rb, exp_start);
+    EXPECT_EQ(out.num_rb, exp_num);
+  }
+}
+
+TEST_F(BlindPdcchTest, Dci01ExtractRaType0EmptyBitmapIsRejected) {
+  nr_pdcch_blind_ul_opts_t o = {};
+  o.bwp_start = 0;
+  o.bwp_size  = 52;
+  o.fdra_mode = NR_FDRA_TYPE0_CFG1;
+  o.fdra_bwp_start = 0;
+  o.tda_count = 0;
+  o.mcs_table = -1;
+  o.data_scrambling_id = -1;
+  o.ul_dmrs_scrambling_id = -1;
+  o.dmrs_add_pos = -1;
+  o.dmrs_max_length = -1;
+
+  const int rbg_size = nr_fdra_rbg_size(o.fdra_mode, o.bwp_size);
+  const int n_rbg = nr_rbg_count(o.fdra_bwp_start, o.bwp_size, rbg_size);
+  const int fdra_bits = nr_fdra_bits(o.fdra_mode, n_rbg, RivBitsFor(o.bwp_size));
+  const uint64_t len = nr_pdcch_blind_dci01_size(&o);
+
+  UlGroundTruth gt;
+  gt.riv = 0; // empty bitmap: allocates nothing
+  const uint64_t payload = PackUlPayloadFdra(gt, o, gt.riv, fdra_bits);
+  nr_pdcch_blind_ul_result_t out;
+  EXPECT_FALSE(nr_pdcch_blind_extract_01(payload, len, gt.rnti, &o, &out));
+  EXPECT_NE(out.reject_reason, nullptr);
+}
+
+TEST_F(BlindPdcchTest, Dci01FdraModeChangesTotalDciLength) {
+  // Sanity that blind_ul_field_bits() actually consults fdra_mode: TYPE0's N_RBG width and RIV's
+  // width generally differ, so the total DCI length must differ too (this is the whole premise
+  // behind Dci01FdraModeCandidatesNarrowByLengthConsistency's length-consistency test).
+  nr_pdcch_blind_ul_opts_t o = {};
+  o.bwp_start = 0;
+  o.bwp_size  = 52;
+  o.tda_count = 0;
+  o.mcs_table = -1;
+  o.data_scrambling_id = -1;
+  o.ul_dmrs_scrambling_id = -1;
+  o.dmrs_add_pos = -1;
+  o.dmrs_max_length = -1;
+
+  o.fdra_mode = NR_FDRA_TYPE1;
+  const uint16_t len_type1 = nr_pdcch_blind_dci01_size(&o);
+  o.fdra_mode = NR_FDRA_TYPE0_CFG1;
+  const uint16_t len_type0 = nr_pdcch_blind_dci01_size(&o);
+  EXPECT_NE(len_type1, len_type0);
 }
 
 // ---- CCE-to-REG mapping hypotheses (TS 38.211 7.3.2.2) ------------------------------------------

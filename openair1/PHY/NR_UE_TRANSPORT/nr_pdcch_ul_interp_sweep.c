@@ -21,6 +21,7 @@
 
 #include "nr_pdcch_ul_interp_sweep.h"
 #include "common/utils/LOG/log.h"
+#include <stdatomic.h>
 #include <string.h>
 bool nr_pusch_tda_legal(int mapping_type, int S, int L)
 {
@@ -61,6 +62,86 @@ int nr_pdcch_ul_interp_sweep_generate(nr_hyp_t *out, int cap)
             }
   return n;
 }
+int nr_pdcch_ul_interp_sweep_generate_pinned(nr_hyp_t *out, int cap, int S, int L, int mapping_type)
+{
+  if (!out || cap <= 0 || (mapping_type != 0 && mapping_type != 1) || !nr_pusch_tda_legal(mapping_type, S, L))
+    return NR_HYP_SWEEP_INVALID;
+  int n = 0;
+  for (int k2 = 1; k2 <= 4; ++k2)
+    for (int type = 0; type < 2; ++type)
+      for (int pos = 0; pos < 4; ++pos)
+        for (int max = 1; max <= 2; ++max)
+          for (int tp = 0; tp < 2; ++tp)
+            for (int mcs = 0; mcs < 3; ++mcs) {
+              if (n == cap || n == NR_HYP_SWEEP_MAX_RAW) {
+                LOG_E(PHY, "UL pinned interpretation search refused: raw cap exceeded\n");
+                return NR_HYP_SWEEP_RAW_OVERFLOW;
+              }
+              nr_pdcch_ul_interp_hyp_t h = {(uint8_t)S, (uint8_t)L, (uint8_t)mapping_type, (uint8_t)k2,
+                                            type, pos, max, tp, mcs};
+              out[n] = (nr_hyp_t){.len = sizeof(h)};
+              memcpy(out[n++].bytes, &h, sizeof(h));
+            }
+  return n;
+}
+
+bool nr_pusch_ul_energy_span(const double energy[14], double rel_thresh, int *S, int *L)
+{
+  if (!energy || !S || !L || rel_thresh <= 0.0 || rel_thresh >= 1.0)
+    return false;
+  double emax = 0.0;
+  for (int i = 0; i < 14; i++)
+    if (energy[i] > emax) emax = energy[i];
+  if (emax <= 0.0)
+    return false;
+  int first = -1, last = -1;
+  for (int i = 0; i < 14; i++) {
+    if (energy[i] > rel_thresh * emax) {
+      if (first < 0) first = i;
+      last = i;
+    }
+  }
+  if (first < 0)
+    return false;
+  *S = first;
+  *L = last - first + 1;
+  return true;
+}
+
+static _Atomic int g_ul_dmrs_pin_valid;
+static int g_ul_dmrs_pin_S, g_ul_dmrs_pin_L, g_ul_dmrs_pin_mapping;
+
+void nr_pusch_ul_dmrs_pin_set(int S, int L)
+{
+  /* First observation wins and is never overwritten -- same rule the DL DM-RS oracle already uses. */
+  if (atomic_load_explicit(&g_ul_dmrs_pin_valid, memory_order_acquire))
+    return;
+  const int mapping = (S == 0 && L >= 4) ? 0 : 1; /* TS 38.214 Table 6.1.2.1-1: type A requires S=0 */
+  if (!nr_pusch_tda_legal(mapping, S, L))
+    return;
+  g_ul_dmrs_pin_S = S;
+  g_ul_dmrs_pin_L = L;
+  g_ul_dmrs_pin_mapping = mapping;
+  atomic_store_explicit(&g_ul_dmrs_pin_valid, 1, memory_order_release);
+  LOG_A(PHY, "SENSING: UL_DMRS_PIN S=%d L=%d mapping=%s (from energy occupancy)\n", S, L,
+        mapping ? "B" : "A");
+}
+
+bool nr_pusch_ul_dmrs_pin_get(int *S, int *L, int *mapping_type)
+{
+  if (!atomic_load_explicit(&g_ul_dmrs_pin_valid, memory_order_acquire))
+    return false;
+  if (S) *S = g_ul_dmrs_pin_S;
+  if (L) *L = g_ul_dmrs_pin_L;
+  if (mapping_type) *mapping_type = g_ul_dmrs_pin_mapping;
+  return true;
+}
+
+void nr_pusch_ul_dmrs_pin_reset(void)
+{
+  atomic_store_explicit(&g_ul_dmrs_pin_valid, 0, memory_order_release);
+}
+
 bool nr_pdcch_ul_interp_sweep_apply(const nr_hyp_t *hyp, int idx, nr_pdcch_blind_ul_opts_t *o)
 {
   if (!hyp || !o || hyp->len!=sizeof(nr_pdcch_ul_interp_hyp_t) ||

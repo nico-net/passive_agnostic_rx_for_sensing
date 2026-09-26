@@ -667,11 +667,22 @@ typedef struct {
 
   // Frequency domain (resource allocation type 1 / RIV -- the only type this deployment uses)
   uint32_t freq_domain_assignment; ///< the raw RIV, kept for ground-truth comparison
-  uint16_t start_rb;         ///< PRB allocation start, counted from bwp_start
-  uint16_t num_rb;           ///< PRB allocation size
+  uint16_t start_rb;         ///< PRB allocation start, counted from bwp_start (bounding box: the
+                             ///< lowest allocated PRB when ra_type0, exact for RIV otherwise)
+  uint16_t num_rb;           ///< PRB allocation size (PRB COUNT when ra_type0, exact for RIV)
   uint16_t bwp_start;        ///< UL BWP start the allocation is relative to (echoed from opts)
   uint16_t bwp_size;         ///< UL BWP size (echoed from opts)
   uint8_t  bwp_indicator;    ///< decoded BWP indicator field (0 when the field is 0 bits wide)
+
+  /// RA type 0 / dynamicSwitch (TS 38.214 6.1.2.2.1, same mechanism as the DL 1_1 side --
+  /// nr_pdsch_prb_set.h's nr_fdra_prbs()/nr_ra_type0_prbs()): 1 when the FDRA field resolved to an
+  /// RBG bitmap rather than a RIV. start_rb/num_rb above are then only the bounding box; the exact
+  /// (possibly non-contiguous) PRB set is rbg_bitmap expanded with nr_ra_type0_prbs(rbg_bitmap,
+  /// rbg_bwp_start, bwp_size, rbg_size, ...), NOT start_rb..start_rb+num_rb.
+  uint8_t  ra_type0;
+  uint8_t  rbg_size;         ///< RBG size P this bitmap was built with (0 when !ra_type0)
+  uint16_t rbg_bwp_start;    ///< the BWP start the RBG grid was computed on (echoed from opts)
+  uint32_t rbg_bitmap;       ///< N_RBG-bit bitmap, MSB = RBG 0 (valid only when ra_type0)
 
   // Time domain. NOTE `k2` is NOT in the payload -- it is the TDRA list entry's own k2, and it is
   // what makes the grant actionable: the PUSCH is in slot (DCI slot + k2).
@@ -781,6 +792,16 @@ typedef struct {
   int ptrs_dmrs_bits;           ///< default 0 (no PTRS, or maxRank 1, or transform precoding on)
   int beta_offset_bits;         ///< default 0 (semi-static betaOffsets)
   int dmrs_seq_init_bits;       ///< default 1 (transform precoding disabled)
+
+  /// Frequency-domain resource assignment mode (NR_FDRA_* in nr_pdsch_prb_set.h -- the same enum
+  /// the DL 1_1 side uses; the mechanism is identical, TS 38.214 6.1.2.2.1). NR_FDRA_TYPE1 (0,
+  /// default, matches the zero-init every existing caller uses) is resource allocation type 1 /
+  /// RIV. Any other value is a hypothesis the caller is trying, not a deployment fact yet confirmed
+  /// by a TB CRC pass. Appended at the end of the struct (not grouped with the UL BWP fields above)
+  /// so it cannot shift the alignment padding UlFeedbackOwnershipIgnoresConfigurationPadding pins
+  /// between dmrs_typeA_position and tda_count.
+  int      fdra_mode;
+  uint16_t fdra_bwp_start;   ///< the BWP the RBG grid (N_RBG) is computed on; usually == bwp_start
 } nr_pdcch_blind_ul_opts_t;
 
 /// Total DCI-0_1 payload width implied by `opts`. Its job is to CHECK a configuration against the
@@ -792,6 +813,20 @@ int32_t nr_pdcch_blind_ul_dmrs_mask(uint8_t num_symbols, uint8_t start_symbol,
     int mapping_type_is_b, int add_pos, int max_length, uint8_t dmrs_typeA_position);
 
 uint16_t nr_pdcch_blind_dci01_size(const nr_pdcch_blind_ul_opts_t* opts);
+
+/** RA type 0 / dynamicSwitch discovery, gap item 1: which non-type-1 FDRA modes are consistent
+ *  with an ALREADY-OBSERVED DCI 0_1 total length. `opts` supplies bwp_size/fdra_bwp_start and every
+ *  other field width (held fixed -- this is a config-WIDTH test, not a joint search); `opts->fdra_mode`
+ *  itself is ignored, since the whole point is to try every OTHER value. `observed_len` is the
+ *  dci_length this RNTI's grants already decode at under SOME interpretation (from the blind
+ *  length/RNTI search, independent of what the FDRA field means). A candidate mode X passes iff
+ *  nr_pdcch_blind_dci01_size() with fdra_mode=X reproduces observed_len exactly: since the fixed
+ *  and RIV FDRA widths generally differ (TS 38.214 6.1.2.2.1's N_RBG vs the RIV span), this is a
+ *  genuine, cheap discriminator among the 4 non-type-1 modes, not a certainty -- the caller's TB CRC
+ *  is still the final oracle. Writes NR_FDRA_TYPE0_CFG1/CFG2/DYN_CFG1/DYN_CFG2 (never NR_FDRA_TYPE1)
+ *  into out_modes in that fixed order; returns the count (0 if opts is unusable or none match). */
+int nr_pdcch_blind_ul_fdra_mode_candidates(const nr_pdcch_blind_ul_opts_t *opts, uint16_t observed_len,
+                                            uint8_t *out_modes, int max);
 
 bool nr_pdcch_blind_decode_01_mode(bool automatic, const int16_t *llr, uint8_t aggregation_level,
                                    uint16_t dci_length, const nr_pdcch_blind_ul_opts_t *opts,

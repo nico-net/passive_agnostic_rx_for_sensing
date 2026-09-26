@@ -97,3 +97,96 @@ TEST(UlInterpSweep, EveryCatalogueTdaIsLegalAndTypeBIsPresent) {
   }
   EXPECT_GT(type_b,0);
 }
+
+// ---- Gap item 2: PUSCH TDRA type B, full (S,L) space once the DM-RS energy oracle has pinned one --
+
+TEST(UlInterpSweepPinned, ReachesAFullTypeBPointTheCuratedCatalogueNeveromits) {
+  // (S,L) = (5,6) type B is legal (S 0..13, L 1..14, S+L<=14) but is NOT one of the curated
+  // catalogue's four rows -- exactly the gap this closes.
+  ASSERT_TRUE(nr_pusch_tda_legal(1, 5, 6));
+  std::vector<nr_hyp_t> raw(NR_HYP_SWEEP_MAX_RAW);
+  const int n = nr_pdcch_ul_interp_sweep_generate_pinned(raw.data(), raw.size(), 5, 6, 1);
+  ASSERT_EQ(n, 4 /*k2*/ * 2 * 4 * 2 * 2 * 3);
+  for (int i = 0; i < n; i++) {
+    nr_pdcch_ul_interp_hyp_t h; memcpy(&h, raw[i].bytes, sizeof(h));
+    EXPECT_EQ(h.tda_start, 5);
+    EXPECT_EQ(h.tda_length, 6);
+    EXPECT_EQ(h.tda_mapping, 1);
+    EXPECT_GE(h.tda_k2, 1);
+    EXPECT_LE(h.tda_k2, 4);
+  }
+  // Confirms the curated catalogue really never reaches this point (the premise above).
+  std::vector<nr_hyp_t> curated(NR_HYP_SWEEP_MAX_RAW);
+  const int nc = nr_pdcch_ul_interp_sweep_generate(curated.data(), curated.size());
+  for (int i = 0; i < nc; i++) {
+    nr_pdcch_ul_interp_hyp_t h; memcpy(&h, curated[i].bytes, sizeof(h));
+    EXPECT_FALSE(h.tda_start == 5 && h.tda_length == 6 && h.tda_mapping == 1);
+  }
+}
+
+TEST(UlInterpSweepPinned, RejectsAnIllegalPin) {
+  std::vector<nr_hyp_t> raw(NR_HYP_SWEEP_MAX_RAW);
+  // Type A requires S=0; S=3 type A is illegal.
+  EXPECT_EQ(nr_pdcch_ul_interp_sweep_generate_pinned(raw.data(), raw.size(), 3, 4, 0), NR_HYP_SWEEP_INVALID);
+  // S+L>14 is illegal for either mapping type.
+  EXPECT_EQ(nr_pdcch_ul_interp_sweep_generate_pinned(raw.data(), raw.size(), 10, 10, 1), NR_HYP_SWEEP_INVALID);
+}
+
+TEST(UlEnergySpan, RecoversTheOccupiedSpanFromAPeakedProfile) {
+  double e[14] = {0};
+  for (int i = 2; i < 12; i++) e[i] = 100.0; // S=2, L=10
+  int S = -1, L = -1;
+  ASSERT_TRUE(nr_pusch_ul_energy_span(e, 0.25, &S, &L));
+  EXPECT_EQ(S, 2);
+  EXPECT_EQ(L, 10);
+}
+
+TEST(UlEnergySpan, IgnoresNoiseBelowTheRelativeThreshold) {
+  double e[14] = {0};
+  for (int i = 0; i < 14; i++) e[i] = 1.0; // noise floor everywhere
+  for (int i = 4; i < 8; i++) e[i] = 100.0; // real signal, S=4, L=4
+  int S = -1, L = -1;
+  ASSERT_TRUE(nr_pusch_ul_energy_span(e, 0.25, &S, &L));
+  EXPECT_EQ(S, 4);
+  EXPECT_EQ(L, 4);
+}
+
+TEST(UlEnergySpan, AllZeroProfileFails) {
+  double e[14] = {0};
+  int S, L;
+  EXPECT_FALSE(nr_pusch_ul_energy_span(e, 0.25, &S, &L));
+}
+
+TEST(UlDmrsPin, GetFailsUntilSetThenLatchesTheFirstValue) {
+  nr_pusch_ul_dmrs_pin_reset();
+  int S = -1, L = -1, m = -1;
+  EXPECT_FALSE(nr_pusch_ul_dmrs_pin_get(&S, &L, &m));
+  nr_pusch_ul_dmrs_pin_set(2, 12); // legal type B (S!=0)
+  ASSERT_TRUE(nr_pusch_ul_dmrs_pin_get(&S, &L, &m));
+  EXPECT_EQ(S, 2);
+  EXPECT_EQ(L, 12);
+  EXPECT_EQ(m, 1);
+  // First observation wins: a second, different measurement must not overwrite it.
+  nr_pusch_ul_dmrs_pin_set(0, 14);
+  ASSERT_TRUE(nr_pusch_ul_dmrs_pin_get(&S, &L, &m));
+  EXPECT_EQ(S, 2);
+  EXPECT_EQ(L, 12);
+  nr_pusch_ul_dmrs_pin_reset();
+  EXPECT_FALSE(nr_pusch_ul_dmrs_pin_get(nullptr, nullptr, nullptr));
+}
+
+TEST(UlDmrsPin, RejectsAnIllegalSpanAndStaysUnset) {
+  nr_pusch_ul_dmrs_pin_reset();
+  nr_pusch_ul_dmrs_pin_set(1, 0); // L=0 is illegal for either mapping type
+  EXPECT_FALSE(nr_pusch_ul_dmrs_pin_get(nullptr, nullptr, nullptr));
+  nr_pusch_ul_dmrs_pin_reset();
+}
+
+TEST(UlDmrsPin, DerivesMappingTypeFromSAndL) {
+  nr_pusch_ul_dmrs_pin_reset();
+  nr_pusch_ul_dmrs_pin_set(0, 14); // S=0, L>=4 -> type A
+  int m = -1;
+  ASSERT_TRUE(nr_pusch_ul_dmrs_pin_get(nullptr, nullptr, &m));
+  EXPECT_EQ(m, 0);
+  nr_pusch_ul_dmrs_pin_reset();
+}
