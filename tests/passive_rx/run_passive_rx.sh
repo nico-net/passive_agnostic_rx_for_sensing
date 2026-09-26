@@ -204,6 +204,9 @@ teardown_ue_netns() { # teardown_ue_netns <idx>
 
 cleanup() {
   echo "--- tearing down ---"
+  # Cancel the watchdog below first: on a normal exit it would otherwise sit there for the rest of
+  # its sleep with nothing left to kill (harmless, but noisy and pointless).
+  [ -n "${WATCHDOG_PID:-}" ] && kill "$WATCHDOG_PID" 2>/dev/null
   # Match on the config paths so we never touch unrelated OAI processes on this machine
   # (e.g. a concurrent tests/sensing_sim run). Prefix match "ue.passive"/"ue.active" (not the exact
   # "ue.passive.conf" string) so this catches ue.passive2.conf/ue.active2.conf etc too.
@@ -220,6 +223,31 @@ cleanup() {
   sleep 1
 }
 trap cleanup EXIT INT TERM
+
+# WATCHDOG: guarantees the whole run (including its fusion/scoring post-processing, a stuck gNB/UE
+# `wait_for` retry loop, or an iperf3 client that doesn't self-terminate at its own -t deadline under
+# congestion -- see that pkill's own comment above) cannot outlive DURATION plus a bounded grace.
+# Found live 2026-09-27: a 600s run was still alive 30+ minutes later. Nothing between here and the
+# EXIT trap firing is individually timeout-guarded (isac-track/merge/rnti_gate run synchronously with
+# no timeout, and the sequential per-UE/per-receiver wait_for attach budget alone is
+# 30 + NUM_UE*300 + NUM_RX*150 seconds), so a single hang anywhere in that path previously meant an
+# unbounded run. This does not diagnose which one hung; it guarantees the run ends regardless of
+# which one does by killing every process this script's own subshell tree started -- gNB, every UE,
+# every traffic generator, any wedged post-processing script -- none of which use setsid/nohup, so
+# they all share this script's own process group.
+WATCHDOG_GRACE_S="${WATCHDOG_GRACE_S:-600}"
+WATCHDOG_TOTAL_S=$((30 + NUM_UE * 300 + NUM_RX * 150 + DURATION + WATCHDOG_GRACE_S))
+# Look up this script's actual PGID rather than assuming it equals $$ (only true when this script
+# happens to be its own process-group leader, e.g. invoked directly at an interactive prompt).
+WATCHDOG_PGID=$(ps -o pgid= -p $$ 2>/dev/null | tr -d ' ')
+(
+  sleep "$WATCHDOG_TOTAL_S"
+  echo "*** WATCHDOG: run exceeded ${WATCHDOG_TOTAL_S}s (duration=${DURATION}s + attach budget + ${WATCHDOG_GRACE_S}s grace) -- force-killing this run's process group ***" >&2
+  [ -n "$WATCHDOG_PGID" ] && kill -TERM -- "-$WATCHDOG_PGID" 2>/dev/null
+  sleep 10
+  [ -n "$WATCHDOG_PGID" ] && kill -KILL -- "-$WATCHDOG_PGID" 2>/dev/null
+) &
+WATCHDOG_PID=$!
 
 # Namespaces/veths from a prior run that crashed before cleanup ran would collide with setup_ue_netns
 # below ("File exists") -- clear defensively before starting, same rationale as the report-file/
