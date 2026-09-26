@@ -52,6 +52,7 @@
 #include "PHY/NR_UE_TRANSPORT/nr_csirs_blind_rt.h" // blind CSI-RS search, observe-only
 #include "PHY/NR_UE_TRANSPORT/nr_pdcch_coreset_map.h"      // Phase 3 Technique A cross-check (XCHECK diag)
 #include "PHY/NR_UE_TRANSPORT/nr_pdcch_coreset_bank.h"      // multi-CORESET bank, moved to the library 2026-09-25
+#include "PHY/NR_UE_TRANSPORT/nr_dci11_pin.h"               // R30 item 2 / R32: pure pin/rotate/giveup decision
 
 #include <string.h>
 #include <stdlib.h>
@@ -541,6 +542,22 @@ static uint64_t g_pdsch_configuration;
  * selection promotes the one that decodes. TB CRC remains the only authority. The hand-picked
  * 3-family enumeration is the fallback while stage 1 is not armed. */
 #define NR_DCI11_STAGE2_MAX_ALIVE 8   /* hand over once stage 1 is down to this many */
+/* R30 item 2: trials a pinned Technique-D layout candidate may accumulate at zero CRC passes before
+ * it is judged wrong and abandoned. A 24-bit TB CRC's false-accept floor is ~6e-8/try, and even a
+ * marginal true rate of 1% has P(0 passes in 1000 trials) ~= 4.3e-5 -- 1000 trials is comfortably
+ * past "unlucky" for a right layout while still cheap enough to try several wrong ones inside a run. */
+#define DCI11_PIN_GIVEUP_TRIALS 1000
+/* R30 item 2: occasions (not real Technique-D trials, which arrive far slower and far less evenly --
+ * measured live: the FIRST 200-occasion block on this bed carried 45 real trials, every block after
+ * it in the same run carried ~0, because the deferred decode queue's backlog (scanq drop_full) grows
+ * over a run's lifetime and starves later occasions of ever reaching a real trial at all) a pinned
+ * candidate gets before rotating, when the trial-count giveup above hasn't fired first. Real trials
+ * are therefore a scarce, front-loaded resource: a SMALL block that cycles through the handful of
+ * fallback candidates repeatedly gives each of them several independent chances to land its window
+ * on a still-healthy stretch of the queue, where a large block commits most of a run's healthy
+ * window to whichever candidate happened to be offered first (measured: exactly this cost FIXED a
+ * 0-crc_ok run when the first-offered candidate was not the true one). */
+#define DCI11_PIN_BLOCK_OCCASIONS 50
 /* While the configured layout is still among stage 1's survivors, hand over only at 4 (the measured
  * dilution limit); once stage 1 has REFUTED it, waiting is pointless -- the hand-picked fallback
  * enumeration hard-codes antenna_ports=4 bits and can never contain the truth. OTA 2026-09-15 on the
@@ -5610,21 +5627,83 @@ constdiag_done:;
                 raw->rnti,(unsigned)layout_ids[preferred],n,preferred_ok);
         }
       } else preferred=-1;
-      int fallback;
-      if (nr_agnostic_v2() && n > 1) {
-        /* Thompson over the candidates' cell-wide TB-CRC evidence (contexts are keyed without the
-         * RNTI, so every UE's grants inform every other's). Stage-2 candidates arrive best-scored
-         * first; that order becomes a small prior so the first grants go to the stage-1 favourite. */
-        static __thread uint64_t s_rng = 0;
-        if (s_rng == 0) s_rng = 0x9E3779B97F4A7C15ULL ^ (uint64_t)(uintptr_t)&s_rng;
-        double prior[NR_DCI11_STAGE2_MAX_ALIVE + 3];
-        for (int i=0;i<n;++i) prior[i] = from_stage2 ? 2.0 * (double)(n - i) / (double)n : 0.0;
-        fallback = nr_dci11_thompson_pick(ts_ok, ts_tr, prior, n, &s_rng);
-        if (fallback < 0) fallback = 0;
-      } else {
-        fallback = layout_cursor[raw->rnti]++ % n;
+      /* R30 item 2 (context churn, technique-d-regression.md) / R32 fix round 1: pin the
+       * Technique-D layout candidate per RNTI so its `configuration` key (keys[]) stops rotating
+       * across whichever of the n offered DCI-11 layout candidates Thompson/round-robin happens to
+       * pick THIS grant. Without this, no sweep context (nr_pdsch_config_sweep.c, keyed on
+       * configuration) ever accumulates enough trials to converge -- measured 20 context-table
+       * churn events and 0 crc_ok across 6+ independent runs on the phy-test bed even though the
+       * correct layout is among the candidates offered every grant. `configuration` genuinely
+       * depends on which field-width layout guess parsed the DCI (a different layout reads a
+       * different tda_index/mcs from the SAME bits), so evidence gathered under one layout cannot
+       * simply be merged into another's key -- pinning instead keeps SELECTING the same key
+       * occasion after occasion, so one context actually gets fed. Settled/preferred (already
+       * evidence-backed above) take priority over the pin outright.
+       *
+       * The pin/rotate/giveup DECISION itself lives in nr_dci11_pin.c (pure, unit-tested in
+       * tests/nr_dci11_pin_test.cc) -- rotates after DCI11_PIN_BLOCK_OCCASIONS occasions (real
+       * Technique-D trials arrive far slower and far less evenly than occasions on this bed, so a
+       * trial-count-only giveup essentially never fires in a practical run; see that define's own
+       * comment) or DCI11_PIN_GIVEUP_TRIALS zero-pass real trials, whichever comes first, and
+       * auto-invalidates on a real cell-geometry change. A pin merely absent from this occasion's
+       * offered list (transient resolver churn, not a verdict) is left alone rather than rotated
+       * -- see nr_dci11_pin_select()'s own contract for how the caller (here) tells the two apart.
+       *
+       * R32: the round-robin cursor used to seed/rotate a pin MUST advance only at the point of
+       * actually reseeding, never on every occasion -- advancing it every occasion while a pin
+       * survives ~block_occasions occasions before being re-read made successive picks land
+       * gcd(block_occasions, n) apart instead of 1 apart (e.g. n=8, block=50: only 2 of 8
+       * candidates ever pinned). nr_dci11_pin_round_robin() is therefore called ONLY inside the
+       * "must reseed" branch below, using a cursor dedicated to that purpose
+       * (dci11_pin_cursor[]) -- the pre-existing free-running layout_cursor[]/Thompson pick is
+       * still computed lazily, only when needed, for the separate "pin still valid but not offered
+       * this occasion" one-off substitute, which has no such successive-coverage requirement. */
+      static nr_dci11_pin_t dci11_pin[65536];
+      static uint32_t       dci11_pin_cursor[65536];
+      nr_dci11_pin_t *const pin = &dci11_pin[raw->rnti];
+      uint32_t p_ok = 0, p_tr = 0;
+      bool has_stats = false;
+      if (pin->valid)
+        for (int i = 0; i < n; ++i)
+          if (layout_ids[i] == pin->layout) {
+            nr_pdsch_config_sweep_context_stats(keys[i], raw->rnti, 0xFF, cfg->dmrs_typeA_position, &p_ok, &p_tr);
+            has_stats = true;
+            break;
+          }
+      int selected = nr_dci11_pin_select(pin, g_pdsch_configuration, layout_ids, n, settled, preferred,
+                                         has_stats, p_ok, p_tr, DCI11_PIN_BLOCK_OCCASIONS, DCI11_PIN_GIVEUP_TRIALS);
+      if (selected < 0) {
+        int chosen;
+        if (nr_agnostic_v2() && n > 1) {
+          /* Thompson over the candidates' cell-wide TB-CRC evidence (contexts are keyed without the
+           * RNTI, so every UE's grants inform every other's). Stage-2 candidates arrive best-scored
+           * first; that order becomes a small prior so the first grants go to the stage-1 favourite. */
+          static __thread uint64_t s_rng = 0;
+          if (s_rng == 0) s_rng = 0x9E3779B97F4A7C15ULL ^ (uint64_t)(uintptr_t)&s_rng;
+          double prior[NR_DCI11_STAGE2_MAX_ALIVE + 3];
+          for (int i=0;i<n;++i) prior[i] = from_stage2 ? 2.0 * (double)(n - i) / (double)n : 0.0;
+          chosen = nr_dci11_thompson_pick(ts_ok, ts_tr, prior, n, &s_rng);
+          if (chosen < 0) chosen = 0;
+        } else if (pin->valid) {
+          /* Pin still valid, just not offered this occasion: a one-off substitute, not a reseed --
+           * the free-running cursor's own cadence doesn't matter here (no successive-coverage
+           * requirement on a rare, transient path), so it is left untouched otherwise. */
+          chosen = layout_cursor[raw->rnti]++ % n;
+        } else {
+          /* Genuinely needs a new pin (rotated, gave up, cfg changed, or never seeded). */
+          chosen = nr_dci11_pin_round_robin(&dci11_pin_cursor[raw->rnti], n);
+        }
+        if (!pin->valid) {
+          static uint32_t s_seed_left=200; /* noise-floor RNTIs can drive this too: bounded, like context eviction */
+          if (s_seed_left) {
+            s_seed_left--;
+            LOG_W(PHY,"SENSING: DL layout pin SEED rnti=0x%x layout_id=%u%s\n",
+                  raw->rnti,(unsigned)layout_ids[chosen], has_stats ? " (previous pin dropped)" : "");
+          }
+          nr_dci11_pin_seed(pin, g_pdsch_configuration, layout_ids[chosen]);
+        }
+        selected = chosen;
       }
-      const int selected=settled>=0 ? settled : preferred>=0 ? preferred : fallback;
       cand_task[ti].out=layouts[selected];
       cand_task[ti].dl_layout_configuration=keys[selected];
       cand_task[ti].dl_layout_index=from_stage2 ? layout_ids[selected] : 0xFFFF;
