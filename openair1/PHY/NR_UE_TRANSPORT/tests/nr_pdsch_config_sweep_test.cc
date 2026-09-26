@@ -707,16 +707,19 @@ TEST(PdschConfigSweepTypeB, LegalTdaTablesMatchTs38214) {
   EXPECT_FALSE(nr_pdsch_tda_legal(2, 0, 7));
 }
 
-TEST(PdschConfigSweepTypeB, CatalogIncludesTypeBAndFits) {
+/* R30 item 1 (technique-d-regression.md): a FRESH context's catalog is mapping type A only, matching
+ * base commit 222f98d072's pre-Task-14 (pre-dilution) size -- type B used to be built in
+ * unconditionally (2016 -> 6336 pure, 2.9x) whether or not the cell even used it, which measurably
+ * starved the type-A search this cell actually needed. Type B enters only once the DM-RS oracle
+ * observes a mask type A cannot explain (see the observation tests below). */
+TEST(PdschConfigSweepTypeB, FreshCatalogIsTypeAOnly) {
   nr_pdsch_config_sweep_state_t st;
   const int n = nr_pdsch_config_sweep_init(&st, 2);
-  int nb = 0;
-  for (int i = 0; i < n; i++)
-    nb += st.hyp[i].mapping_type == 1;
-  std::cerr << "[ MEASURED ] pure catalog n_hyp=" << n << " (type B " << nb << ") max=" << NR_PDSCH_SWEEP_MAX_HYP
+  std::cerr << "[ MEASURED ] fresh pure catalog n_hyp=" << n << " max=" << NR_PDSCH_SWEEP_MAX_HYP
             << " bytes/context=" << sizeof(nr_pdsch_config_sweep_state_t) << std::endl;
-  EXPECT_GT(nb, 0);
-  EXPECT_LT(n, NR_PDSCH_SWEEP_MAX_HYP);
+  EXPECT_EQ(n, 2016);
+  for (int i = 0; i < n; i++)
+    EXPECT_EQ(st.hyp[i].mapping_type, 0);
 }
 
 /* The mapping type reaches the legality function (OAI's mask generator takes it), and a type-B entry
@@ -732,16 +735,68 @@ static int32_t ab_legal(int, int length, int start, int mapping_b, int add, int 
     return 0x4; /* identical PDU to the type-A entry: must merge */
   return start == 5 && length == 4 && add == 1 ? 0x20 : 0;
 }
-TEST(PdschConfigSweepTypeB, TypeBReachesTheMaskGeneratorAndMergesIdenticalPdus) {
+
+/* The merge is catalog_add_mapping_type's own dedup, shared by init_legal and the evidence-triggered
+ * add_typeb_layer(). A fresh catalog no longer mixes both types in one call for the old test to
+ * observe pre-prune (R30 item 1), so this drives the SAME dedup code with two type-A (S,L) pairs that
+ * coincide instead of a type-A/type-B pair -- the function does not distinguish either way. */
+static int32_t dup_legal(int, int length, int start, int mapping_b, int add, int maxlen)
+{
+  if (maxlen != 1 || mapping_b)
+    return 0;
+  if (start == 1 && length == 13 && add == 0)
+    return 0x4;
+  if (start == 2 && length == 12 && add == 0)
+    return 0x4; /* same effective PDU as the entry above: must merge to one */
+  return 0;
+}
+TEST(PdschConfigSweepTypeB, IdenticalEffectivePdusMergeToOneHypothesis) {
   nr_pdsch_config_sweep_state_t st;
-  ASSERT_EQ(nr_pdsch_config_sweep_init_legal(&st, 2, 0, ab_legal), 12); /* 2 (S,L) x k0{0,1} x 3 tables */
-  int b = 0;
+  const int n = nr_pdsch_config_sweep_init_legal(&st, 2, 0, dup_legal);
+  EXPECT_EQ(n, 6); // one (S,L) worth of entries (k0{0,1} x 3 mcs tables), not two
+  for (int i = 0; i < n; i++) {
+    EXPECT_EQ(st.hyp[i].tda_start, 1);
+    EXPECT_EQ(st.hyp[i].tda_length, 13);
+  }
+}
+
+/* R30 item 1's own wording: "type B enters a context only once the DM-RS oracle observes ... a
+ * type-B-only mask." ab_legal's type-A catalog only ever produces mask 0x4 (S=1,L=13); 0x20
+ * (S=5,L=4,add=1) cannot come from any type-A hypothesis, so it must trigger the widening and then
+ * prune to exactly the entries that produce it -- "a type-B observation adds exactly the matching
+ * type-B entries." */
+TEST(PdschConfigSweepTypeB, ObservingATypeBOnlyMaskWidensToExactlyItsMatchingEntries) {
+  nr_pdsch_config_sweep_reset_all();
+  nr_pdsch_config_sweep_prior_reset();
+  nr_pdsch_sweep_ticket_t t{};
+  nr_pdsch_cfg_hypothesis_t h{};
+  ASSERT_TRUE(nr_pdsch_config_sweep_select(0xCC, 0x4601, 0, 2, 0, ab_legal, &t, &h));
+  nr_pdsch_config_sweep_state_t st{};
+  ASSERT_TRUE(nr_pdsch_config_sweep_snapshot(&t, &st));
+  EXPECT_EQ(st.n_hyp, 6); // fresh: type A only (S=1,L=13 x k0{0,1} x 3 tables)
   for (int i = 0; i < st.n_hyp; i++)
-    if (st.hyp[i].mapping_type == 1) {
-      b++;
-      EXPECT_EQ(st.hyp[i].tda_start, 5);
-      EXPECT_EQ(st.hyp[i].dmrs_mask, 0x20);
-    }
+    EXPECT_EQ(st.hyp[i].mapping_type, 0);
+
+  ASSERT_GT(nr_pdsch_config_sweep_observe_mask(&t, 0x20), 0);
+  ASSERT_TRUE(nr_pdsch_config_sweep_snapshot(&t, &st));
+  EXPECT_EQ(st.n_hyp, 6); // 1 (S,L) x k0{0,1} x 3 tables, all mapping type B
+  for (int i = 0; i < st.n_hyp; i++) {
+    EXPECT_EQ(st.hyp[i].mapping_type, 1);
+    EXPECT_EQ(st.hyp[i].tda_start, 5);
+    EXPECT_EQ(st.hyp[i].tda_length, 4);
+    EXPECT_EQ(st.hyp[i].dmrs_mask, 0x20);
+  }
+
+  // A sibling context (same RNTI, different TDA index) created AFTER the observation inherits the
+  // widening too -- mirrors the k0-layer mechanism (PdschConfigSweepK0.ObservedK0IsAddedToTheContext).
+  nr_pdsch_sweep_ticket_t t1{};
+  nr_pdsch_cfg_hypothesis_t h1{};
+  ASSERT_TRUE(nr_pdsch_config_sweep_select(0xCC, 0x4601, 1, 2, 0, ab_legal, &t1, &h1));
+  nr_pdsch_config_sweep_state_t st1{};
+  ASSERT_TRUE(nr_pdsch_config_sweep_snapshot(&t1, &st1));
+  int b = 0;
+  for (int i = 0; i < st1.n_hyp; i++)
+    b += st1.hyp[i].mapping_type == 1;
   EXPECT_EQ(b, 6);
 }
 
@@ -752,27 +807,34 @@ TEST(PdschConfigSweepTypeB, PriorFromTypeAKeepsTypeBEntriesOfTheSameTable) {
   nr_pdsch_config_sweep_prior_reset();
   unsigned seed = 77;
   bool converged = false;
+  nr_pdsch_sweep_ticket_t t{};
+  nr_pdsch_cfg_hypothesis_t h{};
   for (int i = 0; i < 200000 && !converged; i++) {
-    nr_pdsch_sweep_ticket_t t{};
-    nr_pdsch_cfg_hypothesis_t h{};
     ASSERT_TRUE(nr_pdsch_config_sweep_select(0xAB, 0x4601, 0, 2, 0, ab_legal, &t, &h));
     const bool truth = h.mapping_type == 0 && h.k0 == 0 && h.mcs_table == 1;
     const double u = (double)rand_r(&seed) / (double)RAND_MAX;
     converged = nr_pdsch_config_sweep_feedback(&t, truth && u < 0.54, nullptr);
   }
   ASSERT_TRUE(converged);
+  // R30 item 1: type B enters only once observed. Tell this RNTI about the type-B-only mask (as the
+  // DM-RS oracle would on air) before opening the sibling -- without this the sibling is type-A only.
+  // The same observation also narrows by mask (prune_to_observed), so the sibling collapses straight to
+  // the type-B entries sharing both the prior's mcs_table AND the observed mask -- if prune_prior
+  // wrongly applied the type-A prior's add_pos to type-B entries too, they would have been dropped
+  // already and nothing would survive the mask narrowing that follows.
+  nr_pdsch_config_sweep_observe_mask(&t, 0x20);
   nr_pdsch_sweep_ticket_t t1{};
   nr_pdsch_cfg_hypothesis_t h1{};
   ASSERT_TRUE(nr_pdsch_config_sweep_select(0xAB, 0x4601, 1, 2, 0, ab_legal, &t1, &h1));
   nr_pdsch_config_sweep_state_t st{};
   ASSERT_TRUE(nr_pdsch_config_sweep_snapshot(&t1, &st));
-  int b = 0;
+  EXPECT_EQ(st.n_hyp, 2);  /* type B, table 1, k0 {0,1} -- its own add_pos 1, not the type-A prior's 0 */
   for (int i = 0; i < st.n_hyp; i++) {
     EXPECT_EQ(st.hyp[i].mcs_table, 1);
-    b += st.hyp[i].mapping_type == 1;
+    EXPECT_EQ(st.hyp[i].mapping_type, 1);
+    EXPECT_EQ(st.hyp[i].dmrs_add_pos, 1);
+    EXPECT_EQ(st.hyp[i].dmrs_mask, 0x20);
   }
-  EXPECT_EQ(b, 2);         /* type B, table 1, k0 {0,1} -- its add_pos 1 is not the type-A prior's 0 */
-  EXPECT_EQ(st.n_hyp, 4);
 }
 
 static int count_k0(const nr_pdsch_config_sweep_state_t &st, int k0)
@@ -812,7 +874,7 @@ TEST(PdschConfigSweepK0, ConvergenceOnAnotherK0DropsTheFalseLayer) {
   nr_pdsch_sweep_ticket_t t{};
   nr_pdsch_cfg_hypothesis_t h{};
   ASSERT_TRUE(nr_pdsch_config_sweep_select(0xAC, 0x4601, 0, 2, 0, ab_legal, &t, &h));
-  ASSERT_EQ(nr_pdsch_config_sweep_add_k0(&t, 3), 6);
+  ASSERT_EQ(nr_pdsch_config_sweep_add_k0(&t, 3), 3); // R30 item 1: fresh catalog is type A only (3 mcs tables at k0=0)
   unsigned seed = 5;
   bool converged = false;
   nr_pdsch_cfg_hypothesis_t w{};
