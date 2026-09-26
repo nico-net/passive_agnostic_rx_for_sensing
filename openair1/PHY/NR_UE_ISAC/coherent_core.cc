@@ -2092,6 +2092,165 @@ std::vector<float> whiten_range_clutter(RdResult& R, double pfa_cell, WhitenInfo
   return c;
 }
 
+
+// MEASURED NOT SAFE (2026-09-26, synthetic constant-transmitter scene, tools/test_coherent_chain.sh): it
+// accepts ~20-30 shapes where the truth is 0 and the long-dwell person hit rate falls 7/10 -> 3/10. The held-
+// out test is right that the structure is real -- per-row sync residuals on the strong direct path -- but
+// each accepted shape spends one slow-time degree of freedom, removing ~1/rows of every target's energy at
+// the shape's delays, and the delay support cannot protect targets: the direct path's mainlobe alone spans
+// +/-5 taps (~12 m of path) and the targets sit 3-10 taps out. Within one CPI a slow target and a single
+// transmitter-state step are the same low-rank time series, so no test on the unlabelled rows separates them.
+// Opt-in only (COH_STATIC_SUBSPACE=1).
+StaticModelInfo remove_static_subspace(CfrWindow& w, const Axes& a, const LosEstimate& L, const RowSync& s)
+{
+  StaticModelInfo info;
+  if (!a.valid || w.rows < 3) return info;
+  const uint32_t R = w.rows, S = w.subcarriers;
+  auto amp = [&](uint32_t r) { return s.amp.empty() ? 1.0 : s.amp[r]; };
+  auto rot = [&](uint32_t i, uint32_t r, uint32_t k) {   // range_doppler's derotation (amp * e^{j theta})
+    return std::polar(amp(r), 2 * M_PI * baseband_hz(w, k) * (L.delay_s[i] + s.delay_s[r]) - s.phase_rad[r]); };
+  // Observed columns (channel, subcarrier) of the channels with a LOS reference; residual e = z' - mean.
+  std::vector<uint32_t> ch; for (uint32_t i = 0; i < kCh; ++i) if (L.found[i]) ch.push_back(i);
+  if (ch.empty()) return info;
+  std::vector<std::vector<uint32_t>> ks(R);             // observed subcarriers per row
+  for (uint32_t r = 0; r < R; ++r) for (uint32_t k = 0; k < S; ++k) if (w.observed[w.cell(r, k)]) ks[r].push_back(k);
+  const size_t NC = ch.size() * S;
+  std::vector<cd> mean(NC, 0); std::vector<uint32_t> cnt(S, 0);
+  std::vector<std::vector<cd>> E(R);                    // E[r][c * |ks[r]| + q]: channel c, q-th observed subcarrier
+  for (uint32_t r = 0; r < R; ++r) {
+    E[r].resize(ch.size() * ks[r].size());
+    for (size_t c = 0; c < ch.size(); ++c) for (size_t q = 0; q < ks[r].size(); ++q) {
+      const uint32_t k = ks[r][q]; const cd z = cd(w.values[w.sample(ch[c], r, k)]) * rot(ch[c], r, k);
+      E[r][c * ks[r].size() + q] = z; mean[c * S + k] += z; }
+    for (uint32_t k : ks[r]) ++cnt[k];
+  }
+  for (size_t c = 0; c < ch.size(); ++c) for (uint32_t k = 0; k < S; ++k) if (cnt[k]) mean[c * S + k] /= (double)cnt[k];
+  double etot = 0; uint32_t rows_used = 0; size_t entries = 0;
+  for (uint32_t r = 0; r < R; ++r) {
+    if (ks[r].empty()) continue; ++rows_used;
+    for (size_t c = 0; c < ch.size(); ++c) for (size_t q = 0; q < ks[r].size(); ++q) {
+      cd& v = E[r][c * ks[r].size() + q]; v -= mean[c * S + ks[r][q]]; etot += std::norm(v); ++entries; }
+  }
+  if (rows_used < 3 || !(etot > 0)) return info;
+  // Noise per entry from adjacent observed subcarriers of each row (the static residual is smooth over a
+  // few subcarriers; noise is not): complex Gaussian |x_q - x_q+1|^2 ~ Exp(2 sigma^2), median 2 sigma^2 ln 2.
+  std::vector<double> dd;
+  for (uint32_t r = 0; r < R; ++r) for (size_t c = 0; c < ch.size(); ++c)
+    for (size_t q = 0; q + 1 < ks[r].size(); ++q) if (ks[r][q + 1] - ks[r][q] <= 4)
+      dd.push_back(std::norm(E[r][c * ks[r].size() + q + 1] - E[r][c * ks[r].size() + q]));
+  if (dd.size() < 16) return info;
+  const double sig2 = median(dd) / (2 * std::log(2.0));
+  // Delay support of the static scene, per channel: the static paths in the window's mean channel (the
+  // static profile), found by CLEAN against the observed-subcarrier point spread down to the profile's
+  // own noise floor at 1 % (Bonferroni over the taps), and each path's mainlobe (to the point spread's
+  // first minimum). A transmitter change only re-weights how the EXISTING static paths are illuminated,
+  // so every candidate shape is projected onto this support: a mover at its own delay cannot be absorbed
+  // (one inside a static path's own range cell is indistinguishable from it anyway). Thresholding the
+  // raw profile instead admits the direct path's sidelobes -- a quarter of the delay axis -- and with it
+  // every mover's energy.
+  std::vector<cd> Bv(NC), c(R);
+  std::vector<double> bn(NC);
+  const uint32_t NF = next_pow2(S);
+  std::vector<std::vector<char>> sup(ch.size(), std::vector<char>(NF, 0));
+  std::vector<cd> tv(NF), psf(NF, cd(0));
+  for (uint32_t k = 0; k < S; ++k) if (cnt[k]) psf[k] = 1;
+  fft_inplace(psf, true);
+  uint32_t hw = 1;                                      // mainlobe half-width: first minimum of |psf|
+  while (hw + 1 < NF / 2 && std::norm(psf[hw + 1]) < std::norm(psf[hw])) ++hw;
+  for (size_t cc = 0; cc < ch.size(); ++cc) {
+    std::fill(tv.begin(), tv.end(), cd(0));
+    for (uint32_t k = 0; k < S; ++k) if (cnt[k]) tv[k] = mean[cc * S + k];
+    fft_inplace(tv, true);
+    std::vector<double> pw(NF); for (uint32_t t = 0; t < NF; ++t) pw[t] = std::norm(tv[t]);
+    const double thr = median(pw) / std::log(2.0) * -std::log(0.01 / NF);
+    for (uint32_t n = 0; n < NF; ++n) {
+      uint32_t t0 = 0; double pk = -1;
+      for (uint32_t t = 0; t < NF; ++t) if (std::norm(tv[t]) > pk) { pk = std::norm(tv[t]); t0 = t; }
+      if (!(pk > thr)) break;
+      const cd g = tv[t0] / psf[0];
+      for (uint32_t t = 0; t < NF; ++t) tv[t] -= g * psf[(t + NF - t0) % NF];
+      for (int64_t d = -(int64_t)hw; d <= (int64_t)hw; ++d) sup[cc][(t0 + NF + d) % NF] = 1;
+    }
+  }
+  auto project = [&]() {
+    for (size_t cc = 0; cc < ch.size(); ++cc) {
+      for (uint32_t k = 0; k < S; ++k) tv[k] = Bv[cc * S + k];
+      for (uint32_t k = S; k < NF; ++k) tv[k] = 0;
+      fft_inplace(tv, true);
+      for (uint32_t t = 0; t < NF; ++t) if (!sup[cc][t]) tv[t] = 0;
+      fft_inplace(tv, false);
+      for (uint32_t k = 0; k < S; ++k) Bv[cc * S + k] = tv[k];
+    }
+  };
+  // Doppler-tone test: M tested bins, max of |DFT|^2 / (n sum|c|^2) over them vs the broadband null.
+  const double qthr = std::log(std::max<double>(1.0, a.tested_dopp.size()) / 0.01);
+  double removed = 0;
+  // Rank-1 ALS on the observed residual, rows restricted by `use` (B init from the strongest used row).
+  auto als = [&](const std::vector<char>& use) {
+    uint32_t r0 = 0; double best = -1;
+    for (uint32_t r = 0; r < R; ++r) if (use[r]) { double e = 0; for (const cd& v : E[r]) e += std::norm(v); if (e > best) { best = e; r0 = r; } }
+    std::fill(Bv.begin(), Bv.end(), cd(0));
+    if (!(best > 0)) return false;
+    for (size_t cc = 0; cc < ch.size(); ++cc) for (size_t q = 0; q < ks[r0].size(); ++q) Bv[cc * S + ks[r0][q]] = E[r0][cc * ks[r0].size() + q];
+    project();
+    std::vector<cd> nb(NC);
+    for (int iter = 0; iter < 12; ++iter) {
+      for (uint32_t r = 0; r < R; ++r) {
+        cd num = 0; double den = 0;
+        if (use[r]) for (size_t cc = 0; cc < ch.size(); ++cc) for (size_t q = 0; q < ks[r].size(); ++q) {
+          const cd bb = Bv[cc * S + ks[r][q]]; num += std::conj(bb) * E[r][cc * ks[r].size() + q]; den += std::norm(bb); }
+        c[r] = den > 0 ? num / den : cd(0);
+      }
+      std::fill(nb.begin(), nb.end(), cd(0)); std::fill(bn.begin(), bn.end(), 0.0);
+      for (uint32_t r = 0; r < R; ++r) if (use[r]) for (size_t cc = 0; cc < ch.size(); ++cc) for (size_t q = 0; q < ks[r].size(); ++q) {
+        const size_t col = cc * S + ks[r][q]; nb[col] += std::conj(c[r]) * E[r][cc * ks[r].size() + q]; bn[col] += std::norm(c[r]); }
+      for (size_t col = 0; col < NC; ++col) Bv[col] = bn[col] > 0 ? nb[col] / bn[col] : cd(0);
+      project();
+    }
+    return true;
+  };
+  std::vector<char> even(R, 0), all(R, 0);
+  for (uint32_t r = 0; r < R; ++r) { all[r] = !ks[r].empty(); even[r] = all[r] && (r % 2 == 0); }
+  const int kmax = (int)rows_used / 2;                  // identifiability: a shape needs its rows
+  for (int it = 0; it < kmax; ++it) {
+    // Held-out test (missing-data safe): a shape fitted on the even rows must explain energy in the odd
+    // rows it never saw. Under the null each odd row's projection energy / sigma^2 is Exp(1), so their
+    // sum is Gamma(n, 1): keep the shape only above its 1 % upper quantile. A free per-column fit of noise
+    // does not carry over to other rows; a real static shape (a transmitter state) does.
+    if (!als(even)) break;
+    double stat = 0; uint32_t n_odd = 0;
+    for (uint32_t r = 1; r < R; r += 2) if (all[r]) {
+      cd num = 0; double den = 0;
+      for (size_t cc = 0; cc < ch.size(); ++cc) for (size_t q = 0; q < ks[r].size(); ++q) {
+        const cd bb = Bv[cc * S + ks[r][q]]; num += std::conj(bb) * E[r][cc * ks[r].size() + q]; den += std::norm(bb); }
+      if (den > 0) { stat += std::norm(num) / den / sig2; ++n_odd; }
+    }
+    if (n_odd < 2 || !(stat > gamma_upper_quantile(n_odd, 0.01))) break;   // model complete
+    if (!als(all)) break;                               // refit the accepted shape on every row
+    double cap = 0;
+    for (uint32_t r = 0; r < R; ++r) for (size_t cc = 0; cc < ch.size(); ++cc) for (size_t q = 0; q < ks[r].size(); ++q)
+      cap += std::norm(c[r] * Bv[cc * S + ks[r][q]]);
+    // Mover test on the shape's time series
+    double csum = 0; uint32_t n = 0; for (uint32_t r = 0; r < R; ++r) if (all[r]) { csum += std::norm(c[r]); ++n; }
+    double qmax = 0;
+    for (uint32_t d : a.tested_dopp) {
+      const double f = a.dopp0_hz + d * a.dopp_step_hz; cd acc = 0;
+      for (uint32_t r = 0; r < R; ++r) if (all[r]) acc += c[r] * std::polar(1.0, -2 * M_PI * f * a.row_t_s[r]);
+      qmax = std::max(qmax, std::norm(acc) / (n * csum));
+    }
+    // deflate either way (so the next shape is found), but only subtract from the data if not a mover
+    const bool mover = csum > 0 && qmax * n > qthr;
+    for (uint32_t r = 0; r < R; ++r) for (size_t cc = 0; cc < ch.size(); ++cc) for (size_t q = 0; q < ks[r].size(); ++q) {
+      const uint32_t k = ks[r][q]; const cd dlt = c[r] * Bv[cc * S + k];
+      E[r][cc * ks[r].size() + q] -= dlt;
+      if (!mover) { const uint32_t i = ch[cc]; const cd x = cd(w.values[w.sample(i, r, k)]) - dlt / rot(i, r, k); w.values[w.sample(i, r, k)] = cf(x); }
+    }
+    if (mover) ++info.protected_movers; else { ++info.removed; removed += cap; }
+  }
+  info.energy_frac = removed / etot;
+  return info;
+}
+
 std::vector<double> slow_time_weights(const CfrWindow& w, const Axes& a)
 {
   std::vector<double> sw(w.rows, 0.0);

@@ -87,6 +87,7 @@ struct LongResult {
   Axes a;
   Grid G;
   std::vector<Detection> D;
+  StaticModelInfo smi;
   double tm_build = 0, tm_rd = 0, tm_env = 0, tm_detect = 0, tm_refine = 0, tm_total = 0;
   size_t queue_max = 0;
 };

@@ -148,6 +148,21 @@ struct WhitenInfo { double ped = 0, bound = 0; bool applied = false; int mode = 
 /** Returns amplitude factors already applied to R: per [ch][range] (median floor) or per [ch][range][dopp]
  *  (notch-leakage floor), all 1 when nothing was applied. CudaCoherent::scale_rd accepts either size. */
 std::vector<float> whiten_range_clutter(RdResult& R, double pfa_cell, WhitenInfo* info = nullptr);
+/** Static model of unknown rank. The per-subcarrier slow-time mean (range_doppler's static removal) is a
+ *  one-shape model: it assumes the static scene, seen through the transmitter, looks the same in every row.
+ *  A transmitter that changes how it transmits (precoding, beams, rank, several UEs) makes the static part of
+ *  each row a mix of several shapes. This finds those extra shapes from the window's own rows, in
+ *  range_doppler's derotated frame, and subtracts them from w (so every later stage, CPU or GPU, sees clean
+ *  rows):
+ *   - shapes are extracted one at a time (rank-1 alternating least squares on the observed entries);
+ *   - a shape is kept only if, fitted on the even rows, it explains energy in the odd rows it never saw
+ *     (held-out projection energy / sigma^2 above the 1 % quantile of its Gamma(n,1) null; sigma^2 from
+ *     each row's own adjacent-subcarrier differences) -- missing-data safe, and the number of shapes is
+ *     decided by the data, not configured;
+ *   - a shape whose per-row coefficient is a single Doppler tone inside the tested band is a mover, not a
+ *     transmitter state: it is left in place (1 % max-periodogram test against a broadband null). */
+struct StaticModelInfo { int removed = 0, protected_movers = 0; double energy_frac = 0; };
+StaticModelInfo remove_static_subspace(CfrWindow& w, const Axes& a, const LosEstimate& L, const RowSync& s);
 
 /** Slow-time weight of each row: the CPI's Hann taper at the row time times the row's own subcarrier
  * weight sum (its Hann taper over the observed subcarriers). Coherent (matched-filter) integration weights

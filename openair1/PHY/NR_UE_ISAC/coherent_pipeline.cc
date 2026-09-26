@@ -249,6 +249,12 @@ void CoherentPipeline::process(Job& j)
       std::fill(dl_masked.observed.begin() + dl_masked.cell(r, 0), dl_masked.observed.begin() + dl_masked.cell(r, 0) + dl_masked.subcarriers, 0);
     dlp = &dl_masked;
   }
+  // Static model of unknown rank (remove_static_subspace): the extra static shapes a changing transmitter
+  // (precoder/rank/beam) puts in the rows are removed here, before range_doppler, so the CPU and GPU paths
+  // both see the cleaned window. EXPERIMENTAL, opt-in with COH_STATIC_SUBSPACE=1.
+  StaticModelInfo smi; CfrWindow dl_clean;
+  static const bool ss_off = std::getenv("COH_STATIC_SUBSPACE") == nullptr;   // opt-in: costs targets (see remove_static_subspace)
+  if (!ss_off && rs.phase_rad.size() == dlp->rows) { dl_clean = *dlp; smi = remove_static_subspace(dl_clean, a, L, rs); dlp = &dl_clean; }
   RdResult R = cuda_ ? cuda_->range_doppler(*dlp, a, L, rs, true) : range_doppler(*dlp, a, L, rs);
   // Static-removal diagnostic, per channel, in dB over the channel's thermal noise: the direct path
   // before removal (LOS tap) and the strongest residue left at the direct path's range (bins 0-3),
@@ -425,7 +431,7 @@ void CoherentPipeline::process(Job& j)
   rep << "{\"cpi\":" << j.seq << ",\"dwell\":\"short\",\"traffic\":true,\"wall\":" << jwall() << ",\"t\":" << jnum(j.t) << ",\"t_cpi_s\":" << jnum(a.t_cpi_s) << ",\"b_eff_hz\":" << jnum(a.b_eff_hz)
       << ",\"range_res_m\":" << jnum(kC / a.b_eff_hz) << ",\"grid_step_m\":" << jnum(G.step) << ",\"n_voxels\":" << G.size()
       << ",\"n_dopp_tested\":" << a.tested_dopp.size() << ",\"rows\":" << j.dl.rows << ",\"gpu\":" << (cuda_ ? "true" : "false")
-      << ",\"lambda_m\":" << jnum(a.lambda_m) << ",\"dopp_step_hz\":" << jnum(a.dopp_step_hz) << ",\"notch_half_bins\":" << a.notch_half_bins << ",\"rows_bad\":" << n_bad << ",\"whiten\":{\"ped\":" << jnum(wi.ped) << ",\"bound\":" << jnum(wi.bound) << ",\"on\":" << (wi.applied ? "true" : "false") << ",\"mode\":" << wi.mode << "}" << ",\"md_suppressed\":" << md_now << ",\"md_suppressed_total\":" << md_suppressed_
+      << ",\"lambda_m\":" << jnum(a.lambda_m) << ",\"dopp_step_hz\":" << jnum(a.dopp_step_hz) << ",\"notch_half_bins\":" << a.notch_half_bins << ",\"rows_bad\":" << n_bad << ",\"static_model\":{\"removed\":" << smi.removed << ",\"movers\":" << smi.protected_movers << ",\"frac\":" << jnum(smi.energy_frac) << "}" << ",\"whiten\":{\"ped\":" << jnum(wi.ped) << ",\"bound\":" << jnum(wi.bound) << ",\"on\":" << (wi.applied ? "true" : "false") << ",\"mode\":" << wi.mode << "}" << ",\"md_suppressed\":" << md_now << ",\"md_suppressed_total\":" << md_suppressed_
       << ",\"static_db\":{\"los\":[" << jnum(st_los[0]) << "," << jnum(st_los[1]) << "," << jnum(st_los[2]) << "," << jnum(st_los[3])
       << "],\"edge\":[" << jnum(st_edge[0]) << "," << jnum(st_edge[1]) << "," << jnum(st_edge[2]) << "," << jnum(st_edge[3])
       << "],\"far\":[" << jnum(st_far[0]) << "," << jnum(st_far[1]) << "," << jnum(st_far[2]) << "," << jnum(st_far[3])
@@ -495,7 +501,7 @@ void CoherentPipeline::long_result(LongResult& r)
   rep << "{\"dwell\":\"long\",\"traffic\":true,\"wall\":" << jwall()
       << ",\"t\":" << jnum(c.t_air_s) << ",\"t_cpi_s\":" << jnum(a.valid ? a.t_cpi_s : c.t_l_s) << ",\"t_l_s\":" << jnum(c.t_l_s)
       << ",\"cadence_s\":" << jnum(c.cadence_s) << ",\"f_slow_hz\":" << jnum(c.f_slow_hz) << ",\"rate_slow_mps\":" << jnum(c.f_slow_hz * kC / c.w.fc_hz)
-      << ",\"b_eff_superrow_hz\":" << jnum(c.b_eff_hz) << ",\"n_short\":" << c.n_short << ",\"step_frac\":" << jnum(c.step_frac) << ",\"step_frac_null\":" << jnum(c.step_frac_null) << ",\"rows\":" << c.w.rows
+      << ",\"b_eff_superrow_hz\":" << jnum(c.b_eff_hz) << ",\"n_short\":" << c.n_short << ",\"static_model\":{\"removed\":" << r.smi.removed << ",\"movers\":" << r.smi.protected_movers << ",\"frac\":" << jnum(r.smi.energy_frac) << "}" << ",\"step_frac\":" << jnum(c.step_frac) << ",\"step_frac_null\":" << jnum(c.step_frac_null) << ",\"rows\":" << c.w.rows
       << ",\"los_found\":" << jbools(c.found) << ",\"gpu\":" << (cuda_ ? "true" : "false");
   if (a.valid)
     rep << ",\"b_eff_hz\":" << jnum(a.b_eff_hz) << ",\"range_res_m\":" << jnum(kC / a.b_eff_hz) << ",\"grid_step_m\":" << jnum(r.G.step)

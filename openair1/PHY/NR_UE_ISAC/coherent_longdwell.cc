@@ -347,6 +347,10 @@ void LongDwellRunner::process(Job& j)
     const Axes& a = r.a;
     LosEstimate L0; L0.found = c.found;                       // rows are LOS-referenced already: delay 0
     RowSync s0; s0.phase_rad.assign(c.w.rows, 0.0); s0.delay_s.assign(c.w.rows, 0.0); s0.valid = true;
+    // Same static model of unknown rank as the short CPI: here it also absorbs the per-short-CPI steps
+    // (one fixed shape x a random amplitude per short CPI, measured 2026-09-25).
+    static const bool ss_off = std::getenv("COH_STATIC_SUBSPACE") == nullptr;   // opt-in: costs targets (see remove_static_subspace)
+    if (!ss_off) r.smi = remove_static_subspace(r.cpi.w, a, L0, s0);   // c aliases r.cpi (const view)
     RdResult R = cuda_ ? cuda_->range_doppler(c.w, a, L0, s0, true) : range_doppler(c.w, a, L0, s0);
     r.G = envelope_grid(cfg_.volume, a);
     // Expected false objects per long CPI = intensity x cadence (not x T_L): at 50 % overlap the long
