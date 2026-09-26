@@ -63,6 +63,14 @@ RX3_NANT="${RX3_NANT:-4}"
 BW100="${BW100:-0}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BUILD_DIR="$SCRIPT_DIR/../../cmake_targets/ran_build/build"
+# nrL1_UE_stats-*.log/etc. are created in each nr-uesoftmodem's own CWD, which is wherever THIS
+# script was invoked from (it never `cd`s), NOT $SCRIPT_DIR -- those only coincide when the harness
+# is invoked as `cd $R && ./tests/passive_rx/run_passive_rx.sh`. Found live 2026-09-27: invoking it
+# any other way (e.g. from $SCRIPT_DIR itself, or a wrapper that cd's elsewhere first) makes the
+# chmod/rm below a silent no-op every time, so the active UE's root-owned stats file still blocks
+# the passive receiver's fopen() (see the AssertFatal comment lower down). Capture the real CWD once,
+# up front, before anything below might change directory.
+RUN_CWD="$PWD"
 ISAC_TRACK="/home/sens/NICOLA/repos/isac/target/release/isac-track"
 
 # All 3 confs' out_path/report_path are hardcoded absolute paths (see each .conf's header comment),
@@ -150,7 +158,7 @@ rm -f /tmp/passive_rx/passive_reports*.jsonl /tmp/passive_rx/passive_sensing*
 # nrL1_UE_stats_thread() hits an AssertFatal (found live 2026-07-28 -- looked like a startup crash
 # in the passive UE, was actually this stale-file collision from a PRIOR run's active UE). Clean
 # up before every run rather than leave it as a one-off manual fix.
-sudo -n rm -f "$SCRIPT_DIR"/nr*_stats*.log 2>/dev/null
+sudo -n rm -f "$RUN_CWD"/nr*_stats*.log 2>/dev/null
 
 # UE2/UE3's own netns + veth pair (see ue.active2.conf/ue.active3.conf's header comment for WHY --
 # nr-uesoftmodem's PDU session TUN name has no per-process instance knob, so concurrent active UEs
@@ -314,7 +322,7 @@ done
 # the filesystem). The first (sudo) UE creates it root-owned; open() checks permission bits not
 # ownership, so chmod'ing it world-writable here lets everyone else open/truncate it too instead of
 # hitting nr-ue.c:121's AssertFatal on startup.
-sudo -n chmod 666 "$SCRIPT_DIR"/nr*_stats*.log 2>/dev/null
+sudo -n chmod 666 "$RUN_CWD"/nr*_stats*.log 2>/dev/null
 
 # --- 3. passive receivers ---------------------------------------------------------------------
 # Started AFTER the active UE is connected, so the CSI-RS/PDCCH they sense is already on the air.
