@@ -2816,9 +2816,17 @@ static void nr_pdcch_blind_monitor_process_body(PHY_VARS_NR_UE *ue, const UE_nr_
     nr_pdcch_blind_monitor_autodiscover_step(rxdataF_disc[0] + disc_symbol * fp->ofdm_symbol_size, fp->ofdm_symbol_size, fp->N_RB_DL,
                                              fp->first_carrier_offset, (uint16_t)fp->Nid_cell,
                                              proc->nr_slot_rx, disc_symbol, abs_slot_now);
-    /* Previously a second discovery epoch made the receiver deaf: the unconditional return also
-     * stopped every already-verified CORESET. Keep those immutable bank entries running. */
-    if (nr_pdcch_coreset_bank_count() == 0)
+    /* GATE 1 FIX (R31, sa-discovery-stall.md): this used to be `if (bank_count() == 0) return;`,
+     * which -- on top of keeping already-verified CORESETs running, the reason it was narrowed from
+     * an earlier unconditional return -- also unconditionally skipped the rest of process_body()
+     * (the on-occasion gate and nr_pdcch_blind_monitor_run_occasion() below) for the ENTIRE capture
+     * whenever the bank was still empty, i.e. for the whole time autodiscover has not yet converged.
+     * run_occasion() already has a cheap CORESET#0-USS/RAR-anchor pass specifically for
+     * bank_count()==0 ("search it before spending the occasion on unknown footprints"); that pass
+     * was structurally unreachable. nr_pdcch_blind_monitor_discovery_block_early_return() is now the
+     * single decision point (always false; see its own comment) so the fallback runs on its
+     * occasions from SIB1_DECODED onward, same as any other on-occasion work. */
+    if (nr_pdcch_blind_monitor_discovery_block_early_return(nr_pdcch_coreset_bank_count()))
       return;
   }
 

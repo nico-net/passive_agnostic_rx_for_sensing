@@ -752,6 +752,19 @@ bool nr_pdcch_blind_monitor_discovery_paused(void)
   return s_disc_paused;
 }
 
+/* GATE 1 (R31): see the declaration-site comment in nr_pdcch_blind_monitor.h for the full history --
+ * this predicate replaces what used to be an inline `bank_count == 0` early return in
+ * nr_pdcch_blind_monitor_rt.c's process_body(), which made the CORESET#0-USS/RAR-anchor fallback in
+ * nr_pdcch_blind_monitor_run_occasion() unreachable for an entire capture. Nothing needs to gate
+ * here any more: run_occasion()'s own n==0 branch already does the right thing, and the on-occasion
+ * timing check plus run_occasion() itself already bound the cost (same cost this deployment already
+ * pays once discovery finishes or is paused). */
+bool nr_pdcch_blind_monitor_discovery_block_early_return(int bank_count)
+{
+  (void)bank_count;
+  return false;
+}
+
 static void discovered_restore(void) /* called from extent_advance(): the applied line failed its dwell */
 {
   if (!s_disc_active)
@@ -1639,7 +1652,53 @@ bool nr_pdcch_blind_monitor_autodiscover_step(const void* rxdataF_symbol, int of
       for (int i = 1; i < m; i++) { int x = v[i]; int j = i - 1; while (j >= 0 && v[j] > x) { v[j+1] = v[j]; j--; } v[j+1] = x; }
       const int bg = (m > 0) ? v[m / 2] : 0;
       if (bg < s_min_bg && s_obs_calls < AUTODISCOVER_MAX_OBS_CALLS) {
-        return false;  /* keep observing: the background is not yet estimable */
+        /* GATE 2 BYPASS (R31, sa-discovery-stall.md): sparse traffic can leave the whole-carrier
+         * MEDIAN genuinely inestimable (most windows legitimately never see a hit) even though the
+         * true window is already unmistakable -- live evidence: top window climbed 16->138 hits over
+         * 45000 calls while every other window stayed near the noise floor and the median never
+         * reached 3. Admit a decision anyway when one window DOMINATES every other window it is
+         * actually being compared against -- not merely "is the maximum", which is exactly the
+         * failure the lit_floor comment above already documents (11 hits vs a background of 6, ~2
+         * sigma, wrongly declared a footprint). Two named constants, both reused from statistics this
+         * file already trusts rather than fitted to any one cell:
+         *   K = 4 -- the same margin nr_pdcch_coreset_map.c already treats as decisive for a single
+         *            correlation sample (CORESET_MAP_CORR_THRESHOLD = 4x the pure-noise correlation
+         *            floor). Applied here as a hit-count dominance ratio against the best of every
+         *            OTHER window. Cross-checked against this file's own recorded false positive:
+         *            11 vs 6 is a 1.8x margin, well under K=4, so this bypass still rejects it; the
+         *            live dedicated-CORESET case clears K by close to an order of magnitude.
+         *   N = 3 -- three multiples of AUTODISCOVER_HITS_PER_WINDOW (the code's own "one window's
+         *            worth of trustworthy dwell evidence" bar), so the top window must carry three
+         *            times the evidence normally required of one lit window before this bypass will
+         *            trust it in place of an estimable median. Every hit here is a separate DL
+         *            occasion that independently cleared nr_pdcch_coreset_map_scan()'s own
+         *            correlation threshold (adaptive, capped at CORESET_MAP_CORR_THRESHOLD=0.836) --
+         *            that IS the "correlation >= a threshold the code already uses for real"
+         *            requirement, inherited for free, and N*HITS_PER_WINDOW hits is repeated
+         *            evidence across that many occasions, not one lucky burst. Pure noise essentially
+         *            never clears the correlation floor at all (comment above: ~0.1-0.25 vs a 0.35
+         *            absolute floor), so it cannot accumulate N*30=90 hits on any one window within
+         *            any bounded dwell -- the existing noise-floor protection is unchanged.
+         * CORESET#0's window range is excluded from both sides of the comparison (mirrors the
+         * exclusion already applied below in COREMAPTOP/long-term accumulation), so this cannot
+         * short-circuit on the already-known common CORESET instead of the sought dedicated one. */
+        enum { GATE2_DOMINANCE_K = 4, GATE2_DOMINANCE_N = 3 };
+        int top_w = -1, top_hits = 0;
+        for (int w = 0; w < n_rb_carrier / 6 && w < NR_PDCCH_MAX_CANDIDATE_WINDOWS; w++) {
+          if (s_css0_excl_first_w >= 0 && w >= s_css0_excl_first_w && w <= s_css0_excl_last_w) continue;
+          if (s_hit_count[w] > top_hits) { top_hits = s_hit_count[w]; top_w = w; }
+        }
+        int rival = 0;
+        for (int w = 0; w < n_rb_carrier / 6 && w < NR_PDCCH_MAX_CANDIDATE_WINDOWS; w++) {
+          if (w == top_w) continue;
+          if (s_css0_excl_first_w >= 0 && w >= s_css0_excl_first_w && w <= s_css0_excl_last_w) continue;
+          if (s_hit_count[w] > rival) rival = s_hit_count[w];
+        }
+        const bool dominant = top_w >= 0 && top_hits >= GATE2_DOMINANCE_N * AUTODISCOVER_HITS_PER_WINDOW
+                            && top_hits >= GATE2_DOMINANCE_K * rival;
+        if (!dominant) {
+          return false;  /* keep observing: the background is not yet estimable and no window dominates */
+        }
       }
     }
   }

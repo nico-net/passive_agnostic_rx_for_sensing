@@ -489,6 +489,19 @@ bool nr_pdcch_blind_monitor_bank_has_geometry(int rb_offset, int groups, int dur
 /* True while every discovered CORESET is verified: the catalog walk (and its decode pass) is paused. */
 bool nr_pdcch_blind_monitor_discovery_paused(void);
 
+/* GATE 1 (R31, sa-discovery-stall.md): whether nr_pdcch_blind_monitor_process_body()'s Technique-A
+ * discovery block (nr_pdcch_blind_monitor_rt.c) should return early -- instead of falling through
+ * to the on-occasion gate and nr_pdcch_blind_monitor_run_occasion() further down in that file --
+ * after this slot's discovery step. Pulled out as a pure predicate purely so it is unit-testable:
+ * nr_pdcch_blind_monitor_rt.c needs a live PHY_VARS_NR_UE and is not linked into the test binary.
+ * Was `bank_count == 0`: an empty bank used to make the rest of process_body for that slot
+ * unreachable, which made run_occasion()'s own bank_count()==0 branch (the CORESET#0-USS/RAR-anchor
+ * fallback -- the cheapest exact geometry available OTA) structurally dead code for the whole
+ * capture, even though that branch already handles bank_count()==0 correctly and cheaply. Always
+ * false now: there is nothing left to gate here, on-occasion timing and run_occasion() itself bound
+ * the cost exactly as they do once discovery is done. */
+bool nr_pdcch_blind_monitor_discovery_block_early_return(int bank_count);
+
 /** Advance the current geometry after an inconclusive length budget. The offset is not
  * blacklisted: other widths and future observations remain eligible. */
 void nr_pdcch_blind_monitor_autodiscover_retry(int failed_rb_offset);

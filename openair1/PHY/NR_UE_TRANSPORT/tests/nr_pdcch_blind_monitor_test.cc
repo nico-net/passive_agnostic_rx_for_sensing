@@ -3228,6 +3228,94 @@ TEST(MapCandidates, ANonInterleavedCellNeedsNoDwellBeyondHypothesisZero) {
   EXPECT_EQ(c[0].shift, 0);
 }
 
+// ---- R31 discovery-stall fixes (sa-discovery-stall.md) ----------------------------------------
+
+// Real current signatures (openair1/PHY/NR_REFSIG/nr_refsig.h), declared by hand (same convention
+// as nr_pdcch_coreset_map_test.cc) so this file doesn't need to pull in nr_refsig.h's own includes.
+// A linkage-specification with braces is only legal at namespace scope, hence file scope here
+// rather than inside the test body.
+extern "C" {
+uint32_t* nr_gold_pdcch(int N_RB_DL, int symbols_per_slot, unsigned short scrambling_id, int slot, int symbol);
+void nr_pdcch_dmrs_ref(const uint32_t* gold, c16_t* pilot, unsigned short nb_rb_coreset);
+}
+
+TEST(DiscoveryGates, Gate1EmptyBankNeverBlocksTheOnOccasionFallback) {
+  // nr_pdcch_blind_monitor_rt.c's process_body() used to `if (bank_count() == 0) return;` right
+  // after the discovery step, which made run_occasion()'s own bank_count()==0 branch (the cheap
+  // CORESET#0-USS/RAR-anchor fallback -- "search it before spending the occasion on unknown
+  // footprints") structurally unreachable for an entire capture. rt.c is RT-only (needs a live
+  // PHY_VARS_NR_UE) and is not linked into this binary, so this is the extracted decision point rt.c
+  // now calls instead -- it must never block the fallback, empty bank or not.
+  EXPECT_FALSE(nr_pdcch_blind_monitor_discovery_block_early_return(0));
+  EXPECT_FALSE(nr_pdcch_blind_monitor_discovery_block_early_return(1));
+  EXPECT_FALSE(nr_pdcch_blind_monitor_discovery_block_early_return(5));
+}
+
+TEST(DiscoveryGates, Gate2SparseBackgroundDominantWindowConverges) {
+  // Live evidence (sa-discovery-stall.md): with sparse traffic one window climbs 16->138 hits over
+  // 45000 calls while every other window stays near 0, so the ISAC_DISCOVER_MIN_BG=3 whole-carrier
+  // MEDIAN never becomes estimable -- zero dwells ever complete, however much evidence the true
+  // window already has. This test reproduces that shape (one genuinely occupied window, a carrier
+  // otherwise never producing a hit -- pure noise essentially never clears
+  // nr_pdcch_coreset_map_scan()'s own correlation floor) and checks the K/N dominance bypass lets
+  // discovery converge anyway.
+  //
+  // CSS0's own window range is excluded from the dominance comparison (mirrors the fix's own
+  // CSS0 exclusion, see Gate 2's comment in nr_pdcch_blind_monitor.c) via file-scope statics that
+  // OTHER TEST CASES in this binary also set and never reset -- run order otherwise leaves this
+  // test's whole 48-PRB/8-window carrier excluded by a leftover Css0Autoconf/TechniqueD call
+  // (measured: fails when run as part of the full binary, passes filtered alone). Own that state
+  // explicitly rather than depend on suite order: park CSS0 on window 7 only, clear of the
+  // occupied window (3) below.
+  ASSERT_TRUE(nr_pdcch_blind_monitor_autoconf_css0(6, 1, 42, 0, 40, 0, 2, 0, 1, 2, 0, 0));
+  nr_pdcch_blind_monitor_autodiscover_reset();
+
+  const int n_rb_carrier = 48, ofdm_symbol_size = 512, first_carrier_offset = 10;
+  const uint16_t scrambling_id = 2;
+  const int slot = 3, symbol = 0;
+  const int occupied_rb_offset = 18; // one 6-RB window, not aligned to a carrier edge
+
+  std::vector<c16_t> rxdataF(ofdm_symbol_size, {0, 0});
+  std::mt19937 rng(99);
+  std::normal_distribution<double> noise(0.0, 8.0);
+  for (auto& s : rxdataF) {
+    s.r = (int16_t)std::lround(noise(rng));
+    s.i = (int16_t)std::lround(noise(rng));
+  }
+  const int pilot_rb_count = occupied_rb_offset + 6;
+  uint32_t* gold = nr_gold_pdcch(n_rb_carrier, 14, scrambling_id, slot, symbol);
+  std::vector<c16_t> pilot(pilot_rb_count * 3);
+  nr_pdcch_dmrs_ref(gold, pilot.data(), (unsigned short)pilot_rb_count);
+  for (int rb = occupied_rb_offset; rb < occupied_rb_offset + 6; rb++) {
+    for (int p = 0; p < 3; p++) {
+      const int k = (first_carrier_offset + rb * 12 + 1 + 4 * p) % ofdm_symbol_size;
+      rxdataF[k].r = (int16_t)pilot[rb * 3 + p].r;
+      rxdataF[k].i = (int16_t)(-pilot[rb * 3 + p].i);
+    }
+  }
+
+  // Same (slot, symbol) every call -- this test only needs one window to stay genuinely lit while
+  // every other window stays near zero, matching the "sparse background" shape; it is not trying to
+  // be slot-accurate.
+  //
+  // Bound: MIN_ORACLE_DWELLS(8) dwells * AUTODISCOVER_OBS_CALLS(1000)/dwell = 8000 calls is the
+  // fastest the existing per-dwell floor allows even with Gate 2 fixed. The pre-fix code could only
+  // clear the min-bg gate via AUTODISCOVER_MAX_OBS_CALLS(400000)/dwell -- 400000x more calls per
+  // dwell -- so converging within a low-thousands call budget is itself the regression check.
+  const int kMaxCalls = 9000;
+  bool converged = false;
+  int calls_to_converge = 0;
+  for (int i = 1; i <= kMaxCalls && !converged; i++) {
+    converged = nr_pdcch_blind_monitor_autodiscover_step(rxdataF.data(), ofdm_symbol_size, n_rb_carrier,
+                                                          first_carrier_offset, scrambling_id, slot, symbol,
+                                                          (uint32_t)i);
+    calls_to_converge = i;
+  }
+  ASSERT_TRUE(converged) << "did not converge within " << kMaxCalls << " calls";
+  EXPECT_LE(calls_to_converge, 8200);
+  EXPECT_EQ(nr_pdcch_blind_monitor_get_cfg()->coreset_rb_offset, occupied_rb_offset);
+}
+
 
 TEST(DmrsRankMapping, MatchesProductionDemapperAcrossLegalMappings) {
   // Label every data RE with its physical RB and symbol. The actual production demapper
