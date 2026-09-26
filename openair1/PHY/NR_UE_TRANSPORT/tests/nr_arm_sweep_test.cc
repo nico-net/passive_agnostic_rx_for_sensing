@@ -126,6 +126,132 @@ TEST(ArmSweep, PickReturnsLatchWithoutRecordingFurtherTrials)
   EXPECT_EQ(s.tr[1], 42u); // unchanged: a latched sweep costs one field read, nothing else
 }
 
+// ---- Evidence-triggered (incumbent) variant, final review C1 ----------------------------------
+
+TEST(ArmSweepGated, HealthyIncumbentNeverExplores)
+{
+  nr_arm_sweep_gated_t g;
+  nr_arm_sweep_gated_init(&g);
+  for (int r = 0; r < 5000; r++) {
+    const int arm = nr_arm_sweep_gated_pick(&g, 3);
+    ASSERT_EQ(arm, 0) << "round " << r;
+    nr_arm_sweep_gated_feed(&g, 3, arm, (r * 37 % 100) < 60, true); // 60 % CRC, interleaved: a normal link
+  }
+  EXPECT_FALSE(g.explore);
+  EXPECT_EQ(g.s.tr[1] + g.s.tr[2], 0u); // the costly arms were never paid for
+}
+
+TEST(ArmSweepGated, DeadLinkNeverTriggers)
+{
+  // Every decode fails, but nothing else passes either (outage / CFO mis-lock): no trigger.
+  nr_arm_sweep_gated_t g;
+  nr_arm_sweep_gated_init(&g);
+  for (int r = 0; r < 1000; r++)
+    nr_arm_sweep_gated_feed(&g, 3, nr_arm_sweep_gated_pick(&g, 3), false, false);
+  EXPECT_FALSE(g.explore);
+  EXPECT_EQ(nr_arm_sweep_gated_pick(&g, 3), 0);
+}
+
+TEST(ArmSweepGated, TriggersAfterExactlyOnePoorHealthyWindow)
+{
+  nr_arm_sweep_gated_t g;
+  nr_arm_sweep_gated_init(&g);
+  for (int r = 0; r < NR_ARM_SWEEP_INCUMBENT_MIN_TRIALS - 1; r++)
+    nr_arm_sweep_gated_feed(&g, 3, 0, r < 4, true); // 4 passes: <= 25 %
+  EXPECT_FALSE(g.explore);
+  nr_arm_sweep_gated_feed(&g, 3, 0, false, true);
+  EXPECT_TRUE(g.explore);
+}
+
+TEST(ArmSweepGated, NonPoorWindowIsDiscarded)
+{
+  // 9/32 (just above the 25 % line) must not trigger, and must not carry into the next window.
+  nr_arm_sweep_gated_t g;
+  nr_arm_sweep_gated_init(&g);
+  for (int r = 0; r < NR_ARM_SWEEP_INCUMBENT_MIN_TRIALS; r++)
+    nr_arm_sweep_gated_feed(&g, 3, 0, r < 9, true);
+  EXPECT_FALSE(g.explore);
+  EXPECT_EQ(g.win_tr, 0u);
+}
+
+TEST(ArmSweepGated, FindsTheBetterArmOnceTriggered)
+{
+  nr_arm_sweep_gated_t g;
+  nr_arm_sweep_gated_init(&g);
+  const int p[3] = {5, 5, 80}; // prg=4 is the truth
+  int latched = -1;
+  for (int r = 0; r < 4000 && latched < 0; r++) {
+    const int arm = nr_arm_sweep_gated_pick(&g, 3);
+    latched = nr_arm_sweep_gated_feed(&g, 3, arm, (r % 100) < p[arm], true);
+  }
+  EXPECT_EQ(latched, 2);
+}
+
+TEST(ArmSweepGated, TieLatchesTheIncumbent)
+{
+  // Every arm decodes alike (SISO / wideband precoding): the sweep must still end, on arm 0.
+  nr_arm_sweep_gated_t g;
+  nr_arm_sweep_gated_init(&g);
+  int latched = -1, r = 0;
+  for (; r < 20000 && latched < 0; r++) {
+    const int arm = nr_arm_sweep_gated_pick(&g, 3);
+    latched = nr_arm_sweep_gated_feed(&g, 3, arm, (r * 37 % 100) < 10, true);
+  }
+  EXPECT_EQ(latched, 0) << "after " << r << " rounds";
+  EXPECT_LE(g.explore_tr, 3u * NR_ARM_SWEEP_EXPLORE_MAX_TRIALS); // bounded exploration cost
+  EXPECT_EQ(nr_arm_sweep_gated_pick(&g, 3), 0);
+}
+
+TEST(ArmSweepGated, TieBreakPrefersArmZero)
+{
+  nr_arm_sweep_gated_t g;
+  nr_arm_sweep_gated_init(&g);
+  g.explore = true;
+  g.s.tr[0] = 4; g.s.ok[0] = 1;
+  g.s.tr[1] = 4; g.s.ok[1] = 1;
+  g.s.tr[2] = 4; g.s.ok[2] = 1;
+  EXPECT_EQ(nr_arm_sweep_gated_pick(&g, 3), 0);
+}
+
+// Dual bandit on ONE TB-CRC stream (the review's missing test): the per-RNTI VRB-L sweep (plain) and
+// the PRG sweep (gated) are fed the same outcome. A CRC pass needs BOTH to be right.
+static int run_dual(int vrbl_truth, int prg_truth, int *vrbl_latch, bool *prg_explored)
+{
+  nr_arm_sweep_t v = {};
+  v.latched = -1;
+  nr_arm_sweep_gated_t g;
+  nr_arm_sweep_gated_init(&g);
+  int prg_latch = -1;
+  for (int r = 0; r < 20000 && (v.latched < 0 || (g.explore && prg_latch < 0)); r++) {
+    const int va = nr_arm_sweep_pick(&v, 2), pa = nr_arm_sweep_gated_pick(&g, 3);
+    const bool ok = va == vrbl_truth && pa == prg_truth && (r % 10) < 9;
+    nr_arm_sweep_feed(&v, 2, va, ok);
+    prg_latch = nr_arm_sweep_gated_feed(&g, 3, pa, ok, true);
+  }
+  *vrbl_latch = v.latched;
+  *prg_explored = g.explore;
+  return g.explore ? prg_latch : 0;
+}
+
+TEST(ArmSweepGated, DualBanditVrblWrongDoesNotTriggerPrg)
+{
+  int vl;
+  bool ex;
+  run_dual(/*vrbl L4*/ 1, /*prg wideband*/ 0, &vl, &ex);
+  EXPECT_EQ(vl, 1);
+  EXPECT_FALSE(ex); // VRB-L's early failures stay under the PRG trigger window's poor line
+}
+
+TEST(ArmSweepGated, DualBanditBothConvergeWhenPrgIsWrong)
+{
+  int vl;
+  bool ex;
+  const int pl = run_dual(/*vrbl L2*/ 0, /*prg 4*/ 2, &vl, &ex);
+  EXPECT_TRUE(ex);
+  EXPECT_EQ(pl, 2);
+  EXPECT_EQ(vl, 0);
+}
+
 int main(int argc, char **argv)
 {
   ::testing::InitGoogleTest(&argc, argv);

@@ -146,6 +146,89 @@ static inline int nr_arm_sweep_feed(nr_arm_sweep_t *s, int n_arms, int arm, bool
   return arm;
 }
 
+/* ---- EVIDENCE-TRIGGERED variant: arm 0 is the INCUMBENT (today's decode path) --------------------
+ * For a sweep whose non-zero arms are much more expensive than arm 0 and change a path that works on
+ * every cell seen so far (PRG: arms 1/2 take the segmented chest, ~100x the cost, and skip the
+ * per-grant CFO/SFO/chest-cache/PT-RS/GPU steps), exploring from the first grant is wrong: arm 0 is
+ * used EXCLUSIVELY until it has shown a sustained CRC deficit while the link is demonstrably healthy
+ * (other decodes passing), and only then are the other arms explored.
+ *
+ * Trigger: NR_ARM_SWEEP_INCUMBENT_MIN_TRIALS consecutive arm-0 trials fed with link_ok, of which at most
+ * NR_ARM_SWEEP_INCUMBENT_POOR_RATE passed. A window that is NOT poor is discarded and a new one starts,
+ * so old evidence and link outages (link_ok false -> not counted) never add up to a trigger.
+ *   N = 32, rate 0.25: a healthy wideband decode (true rate >= 0.5) reads <= 8/32 with probability
+ *   P(Bin(32, 0.5) <= 8) = 3.5e-3 per window, while a precoder-switching (PRG) mismatch collapses wide
+ *   grants to ~0 % (OTA 2026-09-12: 0/10000 full-band) and trips in the first window.
+ * Explore: Wilson-upper-bound pick over all arms, ties broken TOWARDS ARM 0 (not towards the fewest
+ * trials). Latch: the usual separation rule (nr_arm_sweep_feed), or, once n_arms x
+ * NR_ARM_SWEEP_EXPLORE_MAX_TRIALS trials have been spent exploring with no arm separated, arm 0 -- a tie
+ * is not evidence for the costlier path, and without this a cell where all arms decode alike never
+ * latches and keeps paying. The budget counts exploration trials in TOTAL, not per arm: the plain
+ * pick can keep re-trying one contender, so a per-arm floor might never be reached. */
+#define NR_ARM_SWEEP_INCUMBENT_MIN_TRIALS 32
+#define NR_ARM_SWEEP_INCUMBENT_POOR_RATE 0.25
+#define NR_ARM_SWEEP_EXPLORE_MAX_TRIALS 128
+
+typedef struct {
+  nr_arm_sweep_t s;   ///< every trial, all arms (s.latched is the decision)
+  uint32_t win_tr;    ///< arm-0 trials with the link healthy in the current trigger window
+  uint32_t win_ok;    ///< ... of which passed
+  bool explore;       ///< arm 0 showed a sustained deficit on a healthy link: arms 1.. are now tried
+  uint32_t explore_tr; ///< trials fed while exploring (bounded by n_arms x NR_ARM_SWEEP_EXPLORE_MAX_TRIALS)
+} nr_arm_sweep_gated_t;
+
+static inline void nr_arm_sweep_gated_init(nr_arm_sweep_gated_t *g)
+{
+  *g = (nr_arm_sweep_gated_t){0};
+  g->s.latched = -1;
+}
+
+static inline int nr_arm_sweep_gated_pick(const nr_arm_sweep_gated_t *g, int n_arms)
+{
+  if (!g->explore)
+    return 0;
+  if (g->s.latched >= 0)
+    return g->s.latched;
+  const int p = nr_arm_sweep_pick(&g->s, n_arms);
+  /* nr_arm_sweep_pick breaks upper-bound ties by the fewest trials; here a tie goes to arm 0. */
+  double lo0, hi0, lo, hi;
+  nr_arm_sweep_wilson(g->s.ok[0], g->s.tr[0], &lo0, &hi0);
+  nr_arm_sweep_wilson(g->s.ok[p], g->s.tr[p], &lo, &hi);
+  return (p != 0 && fabs(hi - hi0) <= 1e-12) ? 0 : p;
+}
+
+/// Feed one outcome. link_ok: some OTHER decode passed recently (caller's measure). Returns the latched
+/// arm (>= 0) once decided, else -1.
+static inline int nr_arm_sweep_gated_feed(nr_arm_sweep_gated_t *g, int n_arms, int arm, bool tb_ok, bool link_ok)
+{
+  if (arm < 0 || arm >= n_arms || g->s.latched >= 0)
+    return g->s.latched;
+  if (!g->explore) {
+    if (arm != 0)
+      return -1;
+    g->s.tr[0]++; /* real arm-0 evidence, kept for the Wilson comparison once exploring */
+    if (tb_ok)
+      g->s.ok[0]++;
+    if (!link_ok)
+      return -1; /* a dead link says nothing about the incumbent */
+    g->win_tr++;
+    g->win_ok += tb_ok;
+    if (g->win_tr >= NR_ARM_SWEEP_INCUMBENT_MIN_TRIALS) {
+      if ((double)g->win_ok <= NR_ARM_SWEEP_INCUMBENT_POOR_RATE * (double)g->win_tr)
+        g->explore = true;
+      g->win_tr = g->win_ok = 0;
+    }
+    return -1;
+  }
+  const int l = nr_arm_sweep_feed(&g->s, n_arms, arm, tb_ok);
+  if (l >= 0)
+    return l;
+  if (++g->explore_tr < (uint32_t)n_arms * NR_ARM_SWEEP_EXPLORE_MAX_TRIALS)
+    return -1;
+  g->s.latched = 0; /* budget spent, nothing separated: a tie stays on the incumbent */
+  return 0;
+}
+
 #ifdef __cplusplus
 }
 #endif
