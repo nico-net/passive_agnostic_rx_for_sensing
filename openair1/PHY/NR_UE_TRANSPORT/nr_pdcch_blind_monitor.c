@@ -4853,3 +4853,27 @@ void nr_pdcch_blind_reset_common(void)
   sib1_cache_suppressed = true;
   pthread_mutex_unlock(&common_facts_lock);
 }
+
+/* Lookahead-lane AL list parser and RE budget (declared in nr_pdcch_blind_monitor_rt.h). Pure, so they live
+ * in the library rather than the RT translation unit; lane_als() in nr_pdcch_blind_monitor_rt.c calls them. */
+int nr_pdcch_blind_parse_lane_als(const char *e, uint8_t v[5])
+{
+  int n = 0;
+  for (const char *q = e; q != NULL && *q && n < 5;) {
+    const int x = atoi(q);
+    if ((x == 1 || x == 2 || x == 4 || x == 8 || x == 16) && x <= LANE_BATCH_AL_MAX) {
+      bool dup = false;
+      for (int i = 0; i < n; i++)
+        if (v[i] == (uint8_t)x) dup = true;
+      if (!dup) v[n++] = (uint8_t)x;
+    }
+    while (*q && *q != ',') q++;
+    if (*q == ',') q++;
+  }
+  return n;
+}
+
+int nr_pdcch_blind_lane_re_budget(void)
+{
+  return LANE_RE_PER_LANE;
+}

@@ -51,6 +51,7 @@
 #include "PHY/NR_UE_TRANSPORT/nr_agnostic_v2.h"
 #include "PHY/NR_UE_TRANSPORT/nr_csirs_blind_rt.h" // blind CSI-RS search, observe-only
 #include "PHY/NR_UE_TRANSPORT/nr_pdcch_coreset_map.h"      // Phase 3 Technique A cross-check (XCHECK diag)
+#include "PHY/NR_UE_TRANSPORT/nr_pdcch_coreset_bank.h"      // multi-CORESET bank, moved to the library 2026-09-25
 
 #include <string.h>
 #include <stdlib.h>
@@ -94,7 +95,6 @@ extern _Atomic long nr_ue_diag_producer_absolute_slot;
 #include <stdio.h>
 #include "nr_polar_gpu.h"                                 // SWEEP GPU BATCH: nr_gpu_polar_load/decode_vec
 
-#define NR_PDCCH_BLIND_RE_PER_RB_OUT_DMRS 9 // == dci_nr.c's file-local RE_PER_RB_OUT_DMRS #define
 // Spec maxima for a CORESET: the frequency-domain bitmap addresses 6-PRB groups over the BWP, so at
 // most floor(275/6) = 45 groups = 270 PRB; duration is 1..3 symbols (38.331 ControlResourceSet).
 #define NR_PDCCH_BLIND_MAX_CORESET_RB 270
@@ -184,158 +184,9 @@ static bool         g_length_swept  = false;
 static bool         g_length_found  = false;
 
 
-/* Verified dedicated geometries remain operational while discovery continues for another UE's
- * CORESET. Entries are immutable after the release-store publishes them, so the receive producer
- * may test the count while the single scan consumer appends without a lock. */
-#define NR_PDCCH_DISCOVERED_CORESETS 8
-typedef struct {
-  nr_pdcch_blind_monitor_cfg_t cfg;
-  uint16_t owners[NR_PDCCH_BLIND_MAX_UE];
-  uint8_t nowners;
-  /* AL1 UNION. Unlike cfg these change after publication, so they are guarded by g_al1_mu.
-   * al1_fam: one mapping per AL1 family still consistent with the evidence (0 = never ambiguous);
-   * al1_union: the deduplicated AL1 REG sets of {banked mapping} + al1_fam, the banked family first
-   * in CCE order -- so entries >= the CORESET's CCE count are exactly the sets the banked mapping
-   * alone would never demap. */
-  nr_pdcch_al1_map_t al1_fam[NR_PDCCH_AL1_MAX_FAM];
-  uint8_t n_al1_fam;
-  uint8_t al1_bank_out;   /* 1 = AL1 evidence excluded the banked mapping's own family */
-  uint16_t n_al1_union;
-  uint16_t al1_union[NR_PDCCH_AL1_UNION_MAX][6];
-} nr_pdcch_discovered_coreset_t;
-static nr_pdcch_discovered_coreset_t g_coreset_bank[NR_PDCCH_DISCOVERED_CORESETS];
+/* Guards the AL1 UNION fields of the bank entries (nr_pdcch_coreset_bank.h): unlike cfg they change
+ * after publication. */
 static pthread_mutex_t g_al1_mu = PTHREAD_MUTEX_INITIALIZER;
-static _Atomic int g_coreset_bank_n;
-/* Is this geometry already a verified bank entry? (stage 1-2 hand-off: a discovered CORESET the walk found
- * first must not be re-dwelled -- run s3live5 re-tested it, the alias rule retired it as "not verified",
- * and the walk resumed instead of pausing.) */
-bool nr_pdcch_blind_monitor_bank_has_geometry(int rb_offset, int groups, int duration, int bundle, int interleaver,
-                                               int shift, int nid)
-{
-  const int n = atomic_load_explicit(&g_coreset_bank_n, memory_order_acquire);
-  for (int i = 0; i < n; ++i) {
-    const nr_pdcch_blind_monitor_cfg_t *b = &g_coreset_bank[i].cfg;
-    if ((int)(b->bwp_start + b->coreset_rb_offset) == rb_offset && (int)b->coreset_freq_domain == groups
-        && (int)b->coreset_duration == duration && (int)b->coreset_reg_bundle_size == bundle
-        && (bundle == 0 || ((int)b->coreset_interleaver_size == interleaver && (int)b->coreset_shift_index == shift))
-        && (int)b->coreset_pdcch_dmrs_scrambling_id == nid)
-      return true;
-  }
-  return false;
-}
-
-static bool coreset_same_geometry(const nr_pdcch_blind_monitor_cfg_t *a,
-                                  const nr_pdcch_blind_monitor_cfg_t *b)
-{
-  return a->bwp_start == b->bwp_start && a->bwp_size == b->bwp_size
-      && a->coreset_rb_offset == b->coreset_rb_offset
-      && a->coreset_freq_domain == b->coreset_freq_domain
-      && a->coreset_duration == b->coreset_duration
-      && a->coreset_reg_bundle_size == b->coreset_reg_bundle_size
-      && a->coreset_interleaver_size == b->coreset_interleaver_size
-      && a->coreset_shift_index == b->coreset_shift_index
-      && a->coreset_pdcch_dmrs_scrambling_id == b->coreset_pdcch_dmrs_scrambling_id
-      && a->ss_first_symbol == b->ss_first_symbol
-      && a->dci_length_override == b->dci_length_override;
-}
-
-/* A banked operational scan may deliberately cover a wider RB interval than the observed
- * footprint. It covers any later hypothesis inside that interval when symbol, duration, DM-RS ID
- * and CCE-to-REG mapping agree. Skipping such hypotheses prevents discovery from repeatedly
- * rediscovering its first archived CORESET while still allowing a different mapping in the same
- * RBs to become a separate bank entry. */
-static bool coreset_bank_covers(int rb_offset, int span_rb, int duration, int symbol,
-                                int bundle, int interleaver, int shift, int dmrs_id)
-{
-  const int n = atomic_load_explicit(&g_coreset_bank_n, memory_order_acquire);
-  for (int i = 0; i < n; ++i) {
-    const nr_pdcch_blind_monitor_cfg_t *b = &g_coreset_bank[i].cfg;
-    const int bank_span = b->coreset_freq_domain * 6;
-    if (b->coreset_rb_offset <= rb_offset
-        && b->coreset_rb_offset + bank_span >= rb_offset + span_rb
-        && b->coreset_duration == duration && b->ss_first_symbol == symbol
-        && b->coreset_reg_bundle_size == bundle
-        && b->coreset_interleaver_size == interleaver
-        && b->coreset_shift_index == shift
-        && b->coreset_pdcch_dmrs_scrambling_id == dmrs_id)
-      return true;
-  }
-  return false;
-}
-
-static bool coreset_bank_has_owner(uint16_t rnti)
-{
-  if (!rnti)
-    return false;
-  const int n = atomic_load_explicit(&g_coreset_bank_n, memory_order_acquire);
-  for (int i = 0; i < n; ++i)
-    for (int j = 0; j < g_coreset_bank[i].nowners; ++j)
-      if (g_coreset_bank[i].owners[j] == rnti)
-        return true;
-  return false;
-}
-
-/* A verified dedicated DCI length is a high-value cell prior for another CORESET, but not ground
- * truth: different UEs may have different BWPs/configurations. The fast catalog tests the modal
- * bank length for a bounded eight rounds; the exhaustive lap still tries every legal length. */
-static int coreset_bank_length_hint(void)
-{
-  const int n = atomic_load_explicit(&g_coreset_bank_n, memory_order_acquire);
-  int best = 0, best_count = 0;
-  for (int i = 0; i < n; ++i) {
-    const int len = g_coreset_bank[i].cfg.dci_length_override;
-    if (len <= 0)
-      continue;
-    int count = 0;
-    for (int j = 0; j < n; ++j)
-      if (g_coreset_bank[j].cfg.dci_length_override == len)
-        ++count;
-    if (count > best_count) {
-      best = len;
-      best_count = count;
-    }
-  }
-  return best;
-}
-
-static int coreset_bank_add(const nr_pdcch_blind_monitor_cfg_t *cfg, uint16_t owner)
-{
-  if (cfg == NULL || cfg->dci_length_override <= 0)
-    return -1;
-  int n = atomic_load_explicit(&g_coreset_bank_n, memory_order_acquire);
-  int at = -1;
-  for (int i = 0; i < n; ++i)
-    if (coreset_same_geometry(&g_coreset_bank[i].cfg, cfg)) { at = i; break; }
-  if (at < 0) {
-    /* A narrow CCE-compatible subset can decode the same UE as its already banked CORESET. It is
-     * useful evidence but not a second independent configuration; retaining every such alias can
-     * fill the bounded bank before another UE is reached. */
-    if (coreset_bank_has_owner(owner))
-      return -1;
-    if (n >= NR_PDCCH_DISCOVERED_CORESETS) {
-      LOG_W(PHY, "SENSING: multi-CORESET bank full (%d); verified geometry left unarchived\n", n);
-      return -1;
-    }
-    at = n;
-    memset(&g_coreset_bank[at], 0, sizeof(g_coreset_bank[at]));
-    g_coreset_bank[at].cfg = *cfg;
-    g_coreset_bank[at].cfg.autodiscover = 0;
-    g_coreset_bank[at].cfg.ss_monitoring_slot_periodicity = 1;
-    g_coreset_bank[at].cfg.ss_monitoring_slot_offset = 0;
-    g_coreset_bank[at].cfg.ss_duration = 1;
-    atomic_store_explicit(&g_coreset_bank_n, n + 1, memory_order_release);
-    LOG_A(PHY, "SENSING: multi-CORESET bank add index=%d offset=%d span=%d symbol=%d mapping=%d/%d/%d len=%d\n",
-          at, cfg->coreset_rb_offset, cfg->coreset_freq_domain * 6, cfg->ss_first_symbol,
-          cfg->coreset_reg_bundle_size, cfg->coreset_interleaver_size, cfg->coreset_shift_index,
-          cfg->dci_length_override);
-  }
-  nr_pdcch_discovered_coreset_t *e = &g_coreset_bank[at];
-  for (int i = 0; i < e->nowners; ++i)
-    if (e->owners[i] == owner) return at;
-  if (owner && e->nowners < NR_PDCCH_BLIND_MAX_UE)
-    e->owners[e->nowners++] = owner;
-  return at;
-}
 
 /* ---- AL1 UNION DECODING ------------------------------------------------------------------------
  * An AL1 verification pins the CCE-to-REG mapping only up to the mappings whose AL1 family holds the
@@ -353,7 +204,7 @@ static nr_pdcch_al1_map_t al1_bank_map(const nr_pdcch_blind_monitor_cfg_t *c)
 /* Caller holds g_al1_mu. */
 static void al1_union_refresh(int bi, const char *why)
 {
-  nr_pdcch_discovered_coreset_t *e = &g_coreset_bank[bi];
+  nr_pdcch_discovered_coreset_t *e = nr_pdcch_coreset_bank_entry(bi);
   const int span = e->cfg.coreset_freq_domain * 6, dur = e->cfg.coreset_duration;
   nr_pdcch_al1_map_t list[1 + NR_PDCCH_AL1_MAX_FAM];
   list[0] = al1_bank_map(&e->cfg);
@@ -381,7 +232,7 @@ static void al1_union_store(int bi, int span, int duration, const nr_pdcch_al1_m
 {
   if (bi < 0 || n <= 1)
     return; /* one family: AL1 decoding under the banked mapping is already exact */
-  const nr_pdcch_blind_monitor_cfg_t *c = &g_coreset_bank[bi].cfg;
+  const nr_pdcch_blind_monitor_cfg_t *c = &nr_pdcch_coreset_bank_entry(bi)->cfg;
   if (c->coreset_freq_domain * 6 != span || c->coreset_duration != duration)
     return; /* the bank archived a different shape than the verified lane: families do not apply */
   if (n > NR_PDCCH_AL1_MAX_FAM) { /* guard only: 90 is the measured maximum over every legal shape */
@@ -394,14 +245,14 @@ static void al1_union_store(int bi, int span, int duration, const nr_pdcch_al1_m
     n = NR_PDCCH_AL1_MAX_FAM;
   }
   pthread_mutex_lock(&g_al1_mu);
-  if (g_coreset_bank[bi].n_al1_fam > 0) {
+  if (nr_pdcch_coreset_bank_entry(bi)->n_al1_fam > 0) {
     /* Re-verifying an entry that already holds families: those have been narrowed (or collapsed) by
      * later evidence, and a fresh single-observation set would re-widen them. Keep what is held. */
     pthread_mutex_unlock(&g_al1_mu);
     return;
   }
-  memcpy(g_coreset_bank[bi].al1_fam, fam, sizeof(fam[0]) * n);
-  g_coreset_bank[bi].n_al1_fam = (uint8_t)n;
+  memcpy(nr_pdcch_coreset_bank_entry(bi)->al1_fam, fam, sizeof(fam[0]) * n);
+  nr_pdcch_coreset_bank_entry(bi)->n_al1_fam = (uint8_t)n;
   al1_union_refresh(bi, "verify");
   pthread_mutex_unlock(&g_al1_mu);
 }
@@ -424,7 +275,7 @@ static void al1_union_accept(int bi, int L, int cce, int num_cces, const uint16_
 {
   if (bi < 0)
     return;
-  const nr_pdcch_blind_monitor_cfg_t *c = &g_coreset_bank[bi].cfg;
+  const nr_pdcch_blind_monitor_cfg_t *c = &nr_pdcch_coreset_bank_entry(bi)->cfg;
   const int span = c->coreset_freq_domain * 6, dur = c->coreset_duration;
   uint16_t obs[1][6];
   if (L == 1) {
@@ -441,7 +292,7 @@ static void al1_union_accept(int bi, int L, int cce, int num_cces, const uint16_
     }
   }
   pthread_mutex_lock(&g_al1_mu);
-  nr_pdcch_discovered_coreset_t *e = &g_coreset_bank[bi];
+  nr_pdcch_discovered_coreset_t *e = nr_pdcch_coreset_bank_entry(bi);
   if (e->n_al1_fam > 1 || (e->n_al1_fam == 1 && L >= 2)) {
     if (L >= 2) {
       const nr_pdcch_al1_map_t b = al1_bank_map(c);
@@ -1318,13 +1169,6 @@ static inline int dci_len_max(void)
   }
   return v;
 }
-/* Widest aggregation level a lane may scan. Defined here because lane_als() validates against it
- * and is declared above the LANE BATCH block that sizes its vectors from it. */
-#define LANE_BATCH_AL_MAX    16
-/* Per-lane extracted-RE budget: 8 candidates at the widest AL (9 RE/RB * 16 * 6 = 864 each), i.e.
- * every AL16 position of the largest CORESET (270 RB x 3 symbols = 135 CCEs -> 8), and numerically
- * the same 6912 REs as the previous 16 x AL8 sizing, so the per-thread heap does not grow. */
-#define LANE_RE_PER_LANE     (8 * NR_PDCCH_BLIND_RE_PER_RB_OUT_DMRS * LANE_BATCH_AL_MAX * 6)
 /* ISAC_LANE_ALS: aggregation levels the LOOKAHEAD LANES scan, comma-separated (default "2").
  *
  * The lanes were AL2-only, hardcoded, and they perform ~99 % of the CORESET geometry search -- the
@@ -1334,28 +1178,8 @@ static inline int dci_len_max(void)
  * log prints log2(L), so its "AL1" IS AL2). For a commercial macro received at distance there is NO
  * such measurement, and cell-edge UEs are served at AL4/8/16, where an AL2-only scan can never find
  * a grant however long it dwells. Default stays "2" so nothing changes silently. */
-int nr_pdcch_blind_parse_lane_als(const char *e, uint8_t v[5])
-{
-  int n = 0;
-  for (const char *q = e; q != NULL && *q && n < 5;) {
-    const int x = atoi(q);
-    if ((x == 1 || x == 2 || x == 4 || x == 8 || x == 16) && x <= LANE_BATCH_AL_MAX) {
-      bool dup = false;
-      for (int i = 0; i < n; i++)
-        if (v[i] == (uint8_t)x) dup = true;
-      if (!dup) v[n++] = (uint8_t)x;
-    }
-    while (*q && *q != ',') q++;
-    if (*q == ',') q++;
-  }
-  return n;
-}
-
-int nr_pdcch_blind_lane_re_budget(void)
-{
-  return LANE_RE_PER_LANE;
-}
-
+/* nr_pdcch_blind_parse_lane_als() / nr_pdcch_blind_lane_re_budget() live in nr_pdcch_blind_monitor.c (the
+ * offline-linked library), so the test links the real parser rather than a stub. */
 static int lane_als(const uint8_t **out)
 {
   static uint8_t v[5];
@@ -2945,7 +2769,7 @@ static void nr_pdcch_blind_monitor_process_body(PHY_VARS_NR_UE *ue, const UE_nr_
                                              proc->nr_slot_rx, disc_symbol, abs_slot_now);
     /* Previously a second discovery epoch made the receiver deaf: the unconditional return also
      * stopped every already-verified CORESET. Keep those immutable bank entries running. */
-    if (atomic_load_explicit(&g_coreset_bank_n, memory_order_acquire) == 0)
+    if (nr_pdcch_coreset_bank_count() == 0)
       return;
   }
 
@@ -3082,7 +2906,7 @@ void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_pr
                                          bool serial_candidates, long source_absolute_slot)
 {
   const nr_pdcch_blind_monitor_cfg_t *root = nr_pdcch_blind_monitor_get_cfg();
-  const int n = atomic_load_explicit(&g_coreset_bank_n, memory_order_acquire);
+  const int n = nr_pdcch_coreset_bank_count();
   if (!root->autodiscover) {
     nr_pdcch_blind_monitor_run_occasion_one(ue, proc, serial_candidates, source_absolute_slot);
     return;
@@ -3114,7 +2938,7 @@ void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_pr
   }
   t_pass_kind = PASS_BANK;
   for (int i = 0; i < n; ++i) {
-    nr_pdcch_blind_monitor_cfg_override(&g_coreset_bank[i].cfg);
+    nr_pdcch_blind_monitor_cfg_override(nr_pdcch_coreset_bank_cfg(i));
     nr_pdcch_blind_monitor_run_occasion_one(ue, proc, serial_candidates, source_absolute_slot);
   }
   nr_pdcch_blind_monitor_cfg_override(NULL);
@@ -3186,7 +3010,7 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
   const nr_pdcch_blind_monitor_cfg_t *cfg = nr_pdcch_blind_monitor_get_cfg();
   if (cfg->autodiscover && nr_pdcch_blind_monitor_autodiscover_done()
       && !nr_pdcch_blind_monitor_autodiscover_extent_verified()
-      && coreset_bank_covers(cfg->coreset_rb_offset, cfg->coreset_freq_domain * 6,
+      && nr_pdcch_coreset_bank_covers(cfg->coreset_rb_offset, cfg->coreset_freq_domain * 6,
                             cfg->coreset_duration, cfg->ss_first_symbol,
                             cfg->coreset_reg_bundle_size, cfg->coreset_interleaver_size,
                             cfg->coreset_shift_index, cfg->coreset_pdcch_dmrs_scrambling_id)) {
@@ -3492,16 +3316,16 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
    * mapping's own CCEs; the rest get a VIRTUAL CCE number (the union index) and are demapped from
    * their REG set (see the demap below) -- the banked mapping cannot demap them. */
   int al1_bank = -1;
-  for (int i = 0, nb = atomic_load_explicit(&g_coreset_bank_n, memory_order_acquire); i < nb; ++i)
-    if (cfg == &g_coreset_bank[i].cfg)
+  for (int i = 0, nb = nr_pdcch_coreset_bank_count(); i < nb; ++i)
+    if (cfg == nr_pdcch_coreset_bank_cfg(i))
       al1_bank = i;
   uint16_t al1_vset[sizeof(rel15->CCE) / sizeof(rel15->CCE[0])][6]; /* this occasion's union-only AL1 sets */
   uint16_t al1_vcce[sizeof(rel15->CCE) / sizeof(rel15->CCE[0])];    /* ... and their virtual CCE numbers */
   int al1_nv = 0;
   if (al1_bank >= 0)
     pthread_mutex_lock(&g_al1_mu);
-  const int al1_npos = (al1_bank >= 0 && g_coreset_bank[al1_bank].n_al1_union > num_cces)
-                           ? g_coreset_bank[al1_bank].n_al1_union : num_cces;
+  const int al1_npos = (al1_bank >= 0 && nr_pdcch_coreset_bank_entry(al1_bank)->n_al1_union > num_cces)
+                           ? nr_pdcch_coreset_bank_entry(al1_bank)->n_al1_union : num_cces;
   for (int oi = 0; oi < 4; oi++) {
     const int L   = al_order[oi];
     const int idx = (L == 1) ? 0 : (L == 2) ? 1 : (L == 4) ? 2 : 3; // ss_al_candidates[] is AL 1,2,4,8
@@ -3521,7 +3345,7 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
     for (int k = 0; k < n_pos && nc < max_cand && added < cap && used_re + need <= max_re; k++) {
       const int cce = (int)(((start + (uint32_t)k) % (uint32_t)n_pos) * (uint32_t)L);
       if (L == 1 && cce >= num_cces) {
-        memcpy(al1_vset[al1_nv], g_coreset_bank[al1_bank].al1_union[cce], sizeof(al1_vset[0]));
+        memcpy(al1_vset[al1_nv], nr_pdcch_coreset_bank_entry(al1_bank)->al1_union[cce], sizeof(al1_vset[0]));
         al1_vcce[al1_nv++] = (uint16_t)cce;
       }
       rel15->CCE[nc] = (uint16_t)cce;
@@ -4938,7 +4762,7 @@ constdiag_done:;
     nr_pdcch_lookahead_geom_t geom;
     if (!nr_pdcch_blind_lookahead_get(lane, &geom))
       continue;
-    if (coreset_bank_covers(geom.rb_offset, geom.freq_domain * 6, cfg->coreset_duration,
+    if (nr_pdcch_coreset_bank_covers(geom.rb_offset, geom.freq_domain * 6, cfg->coreset_duration,
                             cfg->ss_first_symbol, geom.reg_bundle_size, geom.interleaver_size,
                             geom.shift_index, cfg->coreset_pdcch_dmrs_scrambling_id)) {
       nr_pdcch_blind_lookahead_retry(lane);
@@ -4952,7 +4776,7 @@ constdiag_done:;
        * KNOWN, not swept. Tried first for NR_PDCCH_LENGTH_PREFERRED_ROUNDS rounds, then the full
        * 30..63 sweep as before (the 1_1 length still depends on the dedicated config). */
       {
-        const int bank_len = geom.fast_length_only ? coreset_bank_length_hint() : 0;
+        const int bank_len = geom.fast_length_only ? nr_pdcch_coreset_bank_length_hint() : 0;
         if (bank_len >= dci_len_min() && bank_len <= dci_len_max())
           g_lane_length_state[lane].preferred_len = bank_len;
         const nr_pdcch_sib1_prior_t *pr = nr_pdcch_sib1_prior_get();
@@ -5400,7 +5224,7 @@ constdiag_done:;
       if (lane < 0 || lane >= NR_PDCCH_LOOKAHEAD_MAX || retired_lookahead[lane])
         continue;
       if (cand_task[ti].ok && cand_task[ti].dl_raw.rnti) {
-        if (coreset_bank_has_owner(cand_task[ti].dl_raw.rnti)) {
+        if (nr_pdcch_coreset_bank_has_owner(cand_task[ti].dl_raw.rnti)) {
           /* This hypothesis is another decode-compatible view of an already operational UE.
            * Retire it once, immediately, so aliases cannot consume the search or the bank. */
           nr_pdcch_blind_lookahead_retry(lane);
@@ -5424,7 +5248,7 @@ constdiag_done:;
            * primary. Mark that result consumed so the newly committed geometry is not swept again. */
           g_length_swept = true;
           g_length_found = true;
-          al1_union_store(coreset_bank_add(nr_pdcch_blind_monitor_get_cfg(), cand_task[ti].dl_raw.rnti),
+          al1_union_store(nr_pdcch_coreset_bank_add(nr_pdcch_blind_monitor_get_cfg(), cand_task[ti].dl_raw.rnti),
                           vg.freq_domain * 6, nr_pdcch_blind_monitor_get_cfg()->coreset_duration, al1_fam, al1_nfam);
           nr_pdcch_blind_monitor_autodiscover_next();
         }
@@ -5617,7 +5441,7 @@ constdiag_done:;
       if (accept_dup(abs_slot, raw->rnti, 0)) /* same DCI already accepted by another pass this slot */
         continue;
       if (cfg->autodiscover && !nr_pdcch_blind_monitor_autodiscover_extent_verified()
-          && coreset_bank_has_owner(raw->rnti)) {
+          && nr_pdcch_coreset_bank_has_owner(raw->rnti)) {
         /* Same alias rule as the lookahead path. The already banked geometry continues decoding
          * this UE through the dispatcher; the discovery cursor must keep looking for a new owner. */
         nr_pdcch_blind_monitor_autodiscover_retry(cfg->bwp_start + cfg->coreset_rb_offset);
@@ -5647,7 +5471,7 @@ constdiag_done:;
         nr_pdcch_blind_monitor_autodiscover_observe(raw->rnti,
             mono >= 0 ? (uint32_t)mono : abs_slot, raw->payload);
         if (!was_verified && nr_pdcch_blind_monitor_autodiscover_extent_verified()) {
-          coreset_bank_add(nr_pdcch_blind_monitor_get_cfg(), raw->rnti);
+          nr_pdcch_coreset_bank_add(nr_pdcch_blind_monitor_get_cfg(), raw->rnti);
           nr_pdcch_blind_monitor_autodiscover_next();
         }
       }
