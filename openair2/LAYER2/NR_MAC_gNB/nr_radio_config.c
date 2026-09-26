@@ -40,6 +40,26 @@
 
 const uint8_t slotsperframe[5] = {10, 20, 40, 80, 160};
 
+/* ISAC_GNB_TEST_* — TEST-ONLY, environment-gated injection of non-default gNB PHY/MAC
+ * configuration values, added to exercise a passive receiver's blind discovery of
+ * non-default configs over rfsim (see docs/superpowers/sdd/full-running-agnosticity/).
+ * Every knob defaults OFF: with its env var unset, the gNB is bit-identical to before.
+ * Read once at config-build time only, never on a scheduling hot path. */
+static bool isac_gnb_test_env_long(const char *name, long *out)
+{
+  const char *v = getenv(name);
+  if (!v || !*v)
+    return false;
+  char *end = NULL;
+  long val = strtol(v, &end, 10);
+  if (end == v) {
+    LOG_E(NR_RRC, "%s=%s is not a valid integer, ignoring\n", name, v);
+    return false;
+  }
+  *out = val;
+  return true;
+}
+
 static NR_BWP_t clone_generic_parameters(const NR_BWP_t *gp)
 {
   NR_BWP_t clone = {0};
@@ -1074,6 +1094,25 @@ void nr_rrc_config_dl_tda(NR_PDSCH_TimeDomainResourceAllocationList_t *pdsch_Tim
       }
     }
   }
+
+  // ISAC_GNB_TEST_DL_TYPEB_K0: TEST-ONLY, adds one extra DL TDRA entry with
+  // mappingType=typeB and the given k0, mirroring the PUSCH typeB helper below.
+  // The scheduler's get_dl_tda() never picks this entry on its own (see
+  // ISAC_GNB_TEST_DL_TDA_IDX in gNB_scheduler_dlsch.c to force it for a live test).
+  long isac_k0;
+  if (isac_gnb_test_env_long("ISAC_GNB_TEST_DL_TYPEB_K0", &isac_k0)) {
+    struct NR_PDSCH_TimeDomainResourceAllocation *isac_typeb = CALLOC(1, sizeof(NR_PDSCH_TimeDomainResourceAllocation_t));
+    isac_typeb->k0 = CALLOC(1, sizeof(*isac_typeb->k0));
+    *isac_typeb->k0 = isac_k0;
+    isac_typeb->mappingType = NR_PDSCH_TimeDomainResourceAllocation__mappingType_typeB;
+    isac_typeb->startSymbolAndLength = get_SLIV(0, 13); // mirrors set_TimeDomainResourceAllocation()'s PUSCH typeB entries
+    asn1cSeqAdd(&pdsch_TimeDomainAllocationList->list, isac_typeb);
+    LOG_W(NR_RRC,
+          "ISAC_GNB_TEST_DL_TYPEB_K0=%ld active: extra DL TDRA entry index=%d added, mappingType=typeB k0=%ld (test-only)\n",
+          isac_k0,
+          pdsch_TimeDomainAllocationList->list.count - 1,
+          isac_k0);
+  }
 }
 
 static struct NR_PUSCH_TimeDomainResourceAllocation *set_TimeDomainResourceAllocation(const int k2, long sliv)
@@ -1590,6 +1629,12 @@ static NR_SetupRelease_PUSCH_Config_t *config_pusch(const nr_mac_config_t *confi
   setup_puschconfig->choice.setup = pusch_Config;
 
   pusch_Config->dataScramblingIdentityPUSCH = NULL;
+  long isac_ul_data_id;
+  if (isac_gnb_test_env_long("ISAC_GNB_TEST_UL_DATA_ID", &isac_ul_data_id)) {
+    pusch_Config->dataScramblingIdentityPUSCH = calloc_or_fail(1, sizeof(*pusch_Config->dataScramblingIdentityPUSCH));
+    *pusch_Config->dataScramblingIdentityPUSCH = isac_ul_data_id;
+    LOG_W(NR_RRC, "ISAC_GNB_TEST_UL_DATA_ID=%ld active: dataScramblingIdentityPUSCH overridden (test-only)\n", isac_ul_data_id);
+  }
   if (!pusch_Config->txConfig)
     pusch_Config->txConfig = calloc(1, sizeof(*pusch_Config->txConfig));
   *pusch_Config->txConfig = NR_PUSCH_Config__txConfig_codebook;
@@ -1615,6 +1660,19 @@ static NR_SetupRelease_PUSCH_Config_t *config_pusch(const nr_mac_config_t *confi
     NR_DMRS_UplinkConfig->transformPrecodingDisabled = calloc(1, sizeof(*NR_DMRS_UplinkConfig->transformPrecodingDisabled));
   NR_DMRS_UplinkConfig->transformPrecodingDisabled->scramblingID0 = NULL;
   NR_DMRS_UplinkConfig->transformPrecodingDisabled->scramblingID1 = NULL;
+  long isac_ul_dmrs_id0, isac_ul_dmrs_id1;
+  if (isac_gnb_test_env_long("ISAC_GNB_TEST_UL_DMRS_ID0", &isac_ul_dmrs_id0)) {
+    NR_DMRS_UplinkConfig->transformPrecodingDisabled->scramblingID0 =
+        calloc_or_fail(1, sizeof(*NR_DMRS_UplinkConfig->transformPrecodingDisabled->scramblingID0));
+    *NR_DMRS_UplinkConfig->transformPrecodingDisabled->scramblingID0 = isac_ul_dmrs_id0;
+    LOG_W(NR_RRC, "ISAC_GNB_TEST_UL_DMRS_ID0=%ld active: UL DM-RS scramblingID0 overridden (test-only)\n", isac_ul_dmrs_id0);
+  }
+  if (isac_gnb_test_env_long("ISAC_GNB_TEST_UL_DMRS_ID1", &isac_ul_dmrs_id1)) {
+    NR_DMRS_UplinkConfig->transformPrecodingDisabled->scramblingID1 =
+        calloc_or_fail(1, sizeof(*NR_DMRS_UplinkConfig->transformPrecodingDisabled->scramblingID1));
+    *NR_DMRS_UplinkConfig->transformPrecodingDisabled->scramblingID1 = isac_ul_dmrs_id1;
+    LOG_W(NR_RRC, "ISAC_GNB_TEST_UL_DMRS_ID1=%ld active: UL DM-RS scramblingID1 overridden (test-only)\n", isac_ul_dmrs_id1);
+  }
   if (!NR_DMRS_UplinkConfig->transformPrecodingEnabled)
     NR_DMRS_UplinkConfig->transformPrecodingEnabled = calloc(1, sizeof(*NR_DMRS_UplinkConfig->transformPrecodingEnabled));
   NR_DMRS_UplinkConfig->transformPrecodingEnabled->nPUSCH_Identity = NULL;
@@ -1737,17 +1795,75 @@ static NR_SetupRelease_PDSCH_Config_t *config_pdsch(uint64_t ssb_bitmap, int bwp
   dmrs_DownlinkForPDSCH_MappingTypeA->maxLength = NULL;
   dmrs_DownlinkForPDSCH_MappingTypeA->scramblingID0 = NULL;
   dmrs_DownlinkForPDSCH_MappingTypeA->scramblingID1 = NULL;
+  long isac_dl_dmrs_id0, isac_dl_dmrs_id1;
+  if (isac_gnb_test_env_long("ISAC_GNB_TEST_DL_DMRS_ID0", &isac_dl_dmrs_id0)) {
+    dmrs_DownlinkForPDSCH_MappingTypeA->scramblingID0 = calloc_or_fail(1, sizeof(*dmrs_DownlinkForPDSCH_MappingTypeA->scramblingID0));
+    *dmrs_DownlinkForPDSCH_MappingTypeA->scramblingID0 = isac_dl_dmrs_id0;
+    LOG_W(NR_RRC, "ISAC_GNB_TEST_DL_DMRS_ID0=%ld active: DL DM-RS scramblingID0 overridden (test-only)\n", isac_dl_dmrs_id0);
+  }
+  if (isac_gnb_test_env_long("ISAC_GNB_TEST_DL_DMRS_ID1", &isac_dl_dmrs_id1)) {
+    dmrs_DownlinkForPDSCH_MappingTypeA->scramblingID1 = calloc_or_fail(1, sizeof(*dmrs_DownlinkForPDSCH_MappingTypeA->scramblingID1));
+    *dmrs_DownlinkForPDSCH_MappingTypeA->scramblingID1 = isac_dl_dmrs_id1;
+    LOG_W(NR_RRC, "ISAC_GNB_TEST_DL_DMRS_ID1=%ld active: DL DM-RS scramblingID1 overridden (test-only)\n", isac_dl_dmrs_id1);
+  }
   dmrs_DownlinkForPDSCH_MappingTypeA->dmrs_AdditionalPosition = calloc(1, sizeof(*dmrs_DownlinkForPDSCH_MappingTypeA->dmrs_AdditionalPosition));
   // TODO possible improvement is to select based on some input additional position
   *dmrs_DownlinkForPDSCH_MappingTypeA->dmrs_AdditionalPosition = NR_DMRS_DownlinkConfig__dmrs_AdditionalPosition_pos1;
 
   pdsch_Config->dataScramblingIdentityPDSCH = NULL;
+  long isac_dl_data_id;
+  if (isac_gnb_test_env_long("ISAC_GNB_TEST_DL_DATA_ID", &isac_dl_data_id)) {
+    pdsch_Config->dataScramblingIdentityPDSCH = calloc_or_fail(1, sizeof(*pdsch_Config->dataScramblingIdentityPDSCH));
+    *pdsch_Config->dataScramblingIdentityPDSCH = isac_dl_data_id;
+    LOG_W(NR_RRC, "ISAC_GNB_TEST_DL_DATA_ID=%ld active: dataScramblingIdentityPDSCH overridden (test-only)\n", isac_dl_data_id);
+  }
   pdsch_Config->resourceAllocation = NR_PDSCH_Config__resourceAllocation_resourceAllocationType1;
 
   pdsch_Config->prb_BundlingType.present = NR_PDSCH_Config__prb_BundlingType_PR_staticBundling;
   pdsch_Config->prb_BundlingType.choice.staticBundling = calloc(1, sizeof(*pdsch_Config->prb_BundlingType.choice.staticBundling));
   pdsch_Config->prb_BundlingType.choice.staticBundling->bundleSize = calloc(1, sizeof(*pdsch_Config->prb_BundlingType.choice.staticBundling->bundleSize));
   *pdsch_Config->prb_BundlingType.choice.staticBundling->bundleSize = NR_PDSCH_Config__prb_BundlingType__staticBundling__bundleSize_wideband;
+
+  // ISAC_GNB_TEST_PRG: TEST-ONLY override of the static PRB-bundling size (PRG).
+  // Spec/ASN1 note: staticBundling->bundleSize only HAS {n4, wideband} (no n2 value
+  // exists for static bundling per 3GPP 38.331 / this generated enum); a true PRG=2
+  // needs dynamicBundling, which gNB_scheduler_primitives.c AssertFatal()s on
+  // ("Dynamic PRB bundling type currently not supported") -- enabling it would crash
+  // the gNB. So only PRG=4 is honoured here; PRG=2 is refused with a logged error
+  // rather than silently doing nothing or crashing the process.
+  long isac_prg;
+  if (isac_gnb_test_env_long("ISAC_GNB_TEST_PRG", &isac_prg)) {
+    if (isac_prg == 4) {
+      *pdsch_Config->prb_BundlingType.choice.staticBundling->bundleSize = NR_PDSCH_Config__prb_BundlingType__staticBundling__bundleSize_n4;
+      LOG_W(NR_RRC, "ISAC_GNB_TEST_PRG=4 active: PDSCH prb_BundlingType staticBundling bundleSize overridden to n4 (test-only)\n");
+    } else {
+      LOG_E(NR_RRC,
+            "ISAC_GNB_TEST_PRG=%ld not supported: static PRB bundling has no n2 value (spec/ASN1 only defines "
+            "{n4, wideband}) and dynamicBundling is AssertFatal-blocked in the scheduler; only PRG=4 is honoured, ignoring\n",
+            isac_prg);
+    }
+  }
+
+  // ISAC_GNB_TEST_VRB_IL: TEST-ONLY, sets vrb_ToPRB_Interleaver so the scheduler signals
+  // an interleaved VRB-to-PRB mapping in DCI 1_1 (gNB_scheduler_primitives.c reads this
+  // field to set dci_pdu_rel15->vrb_to_prb_mapping.val, and nr_mac_common.c's DCI size
+  // calc reserves the bit once this is non-NULL). NOTE: the gNB PHY TX itself
+  // (openair1/PHY/NR_TRANSPORT/nr_dlsch.c, "Non interleaved VRB to PRB mapping") only
+  // ever implements the NON-interleaved resource mapping -- so this knob exercises the
+  // RRC IE + DCI-bit signalling path only; the actual PDSCH RE placement does not change.
+  long isac_vrb_il;
+  if (isac_gnb_test_env_long("ISAC_GNB_TEST_VRB_IL", &isac_vrb_il) && (isac_vrb_il == 2 || isac_vrb_il == 4)) {
+    pdsch_Config->vrb_ToPRB_Interleaver = calloc_or_fail(1, sizeof(*pdsch_Config->vrb_ToPRB_Interleaver));
+    *pdsch_Config->vrb_ToPRB_Interleaver = (isac_vrb_il == 2) ? NR_PDSCH_Config__vrb_ToPRB_Interleaver_n2
+                                                               : NR_PDSCH_Config__vrb_ToPRB_Interleaver_n4;
+    LOG_W(NR_RRC,
+          "ISAC_GNB_TEST_VRB_IL=%ld active: PDSCH vrb_ToPRB_Interleaver set to n%ld -- DCI 1_1 vrb_to_prb_mapping bit "
+          "will be signalled, but gNB PHY TX still maps VRB=PRB non-interleaved (test-only)\n",
+          isac_vrb_il,
+          isac_vrb_il);
+  } else if (getenv("ISAC_GNB_TEST_VRB_IL")) {
+    LOG_E(NR_RRC, "ISAC_GNB_TEST_VRB_IL=%s invalid, must be 2 or 4, ignoring\n", getenv("ISAC_GNB_TEST_VRB_IL"));
+  }
 
   if (configuration->do_TCI) {
     int n_ssb = 0;

@@ -6,6 +6,7 @@
  * \brief       procedures related to gNB for the DLSCH transport channel
  */
 
+#include <stdlib.h>
 #include "common/utils/nr/nr_common.h"
 /*MAC*/
 #include "NR_MAC_COMMON/nr_mac.h"
@@ -33,6 +34,21 @@ int get_dl_tda(const gNB_MAC_INST *nrmac, int slot)
 {
   /* we assume that this function is mutex-protected from outside */
   const frame_structure_t *fs = &nrmac->frame_structure;
+
+  // ISAC_GNB_TEST_DL_TDA_IDX: TEST-ONLY, force the DL TDRA index the scheduler picks
+  // every slot, bypassing the CSI-RS/mixed-slot logic below. Exists because this
+  // function otherwise only ever returns 0/1/2 and never picks an extra TDRA entry
+  // added by ISAC_GNB_TEST_DL_TYPEB_K0 (nr_radio_config.c). Read once (env is constant
+  // for the process lifetime); unset -> no effect on this hot-path function.
+  static int isac_forced_dl_tda_idx = -2; // -2 = not yet read, -1 = read and unset
+  if (isac_forced_dl_tda_idx == -2) {
+    const char *v = getenv("ISAC_GNB_TEST_DL_TDA_IDX");
+    isac_forced_dl_tda_idx = (v && *v) ? atoi(v) : -1;
+    if (isac_forced_dl_tda_idx >= 0)
+      LOG_W(NR_MAC, "ISAC_GNB_TEST_DL_TDA_IDX=%d active: DL TDA index forced every slot (test-only)\n", isac_forced_dl_tda_idx);
+  }
+  if (isac_forced_dl_tda_idx >= 0)
+    return isac_forced_dl_tda_idx;
 
   // Use special TDA in case of CSI-RS
   if (nrmac->UE_info.sched_csirs > 0)

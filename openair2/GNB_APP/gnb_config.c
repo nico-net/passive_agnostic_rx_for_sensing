@@ -1616,6 +1616,35 @@ void RCconfig_nr_macrlc(configmodule_interface_t *cfg)
     num_agg_levels = GNBParamList.paramarray[0][GNB_UESS_AGG_LEVEL_LIST_IDX].numelt;
   }
   memcpy(config.num_agg_level_candidates, agg_level_list, sizeof(int) * num_agg_levels);
+
+  // ISAC_GNB_TEST_USS_AL: TEST-ONLY, env-gated override of the UESS aggregation level
+  // candidate table for rfsim full-running-agnosticity validation. Unset -> no effect.
+  // Format: "a1,a2,a4,a8,a16" (e.g. "4,0,0,0,0" for AL1-only, "0,0,0,0,1" for AL16-only).
+  const char *isac_uss_al = getenv("ISAC_GNB_TEST_USS_AL");
+  if (isac_uss_al) {
+    int parsed[NUM_PDCCH_AGG_LEVELS];
+    char buf[256];
+    strncpy(buf, isac_uss_al, sizeof(buf) - 1);
+    buf[sizeof(buf) - 1] = 0;
+    int n = 0;
+    char *save = NULL;
+    char *tok = strtok_r(buf, ",", &save);
+    while (tok && n < NUM_PDCCH_AGG_LEVELS) {
+      parsed[n++] = atoi(tok);
+      tok = strtok_r(NULL, ",", &save);
+    }
+    if (n == NUM_PDCCH_AGG_LEVELS) {
+      memcpy(config.num_agg_level_candidates, parsed, sizeof(parsed));
+      LOG_W(NR_MAC,
+            "ISAC_GNB_TEST_USS_AL=%s active: UESS aggregation candidates overridden (test-only)\n",
+            isac_uss_al);
+    } else {
+      LOG_E(NR_MAC,
+            "ISAC_GNB_TEST_USS_AL=%s malformed, expected 5 comma-separated values, ignoring\n",
+            isac_uss_al);
+    }
+  }
+
   LOG_I(NR_MAC,
         "Candidates per PDCCH aggregation level on UESS: L1: %d, L2: %d, L4: %d, L8: %d, L16: %d\n",
         config.num_agg_level_candidates[PDCCH_AGG_LEVEL1],
