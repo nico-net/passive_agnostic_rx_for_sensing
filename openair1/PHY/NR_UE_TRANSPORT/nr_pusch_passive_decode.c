@@ -94,28 +94,55 @@ static int           g_gnb_nant;
 static _Atomic uint64_t g_try, g_crc_ok, g_rej_unsup, g_rej_setup;
 /* UL DM-RS identity estimate (CP-OFDM PUSCH, type 1, port 0): same sequence family as PDSCH
  * (TS 38.211 6.4.1.1.1.1 vs 7.4.1.1.1), reference point CRB 0, so the PDSCH estimator applies
- * unchanged. Shared across decode contexts under one lock; CRC-OK grants only. */
-static nr_dmrs_id_state_t g_ul_dmrs_id;
-static bool g_ul_dmrs_id_init;
-static pthread_mutex_t g_ul_dmrs_id_lock = PTHREAD_MUTEX_INITIALIZER;
-const nr_dmrs_id_state_t *nr_pusch_passive_ul_dmrs_id(void) { return &g_ul_dmrs_id; }
+ * unchanged. Shared across decode contexts under one lock. Accumulated on EVERY attempted grant,
+ * CRC-OK or not (review fix round 1, finding 2) -- see the accumulate call site's own comment,
+ * below nr_ulsch_decoding()'s CFR block, for why gating this on CRC would be circular. */
+/* One state per nSCID, mirroring the DL side (nr_pdsch_passive_queue.c) -- scramblingID0/1 are
+ * independent RRC fields. */
+#define NR_UL_DMRS_NSCID 2
+static nr_dmrs_id_state_t g_ul_dmrs_id[NR_UL_DMRS_NSCID];
+static bool g_ul_dmrs_id_init[NR_UL_DMRS_NSCID];
+static pthread_mutex_t g_ul_dmrs_id_lock[NR_UL_DMRS_NSCID] = {PTHREAD_MUTEX_INITIALIZER, PTHREAD_MUTEX_INITIALIZER};
+/* Stage-2 escalation, same constants/reasoning as the DL side (nr_pdsch_passive_queue.c): stage 1
+ * (0..1023) must accumulate this many grants without deciding before escalating, and once escalated
+ * a stage-2 (64512-candidate) accumulate is throttled -- measured ~64x a stage-1 accumulate's cost
+ * (nr_dmrs_id_estimate_test.cc's FindsAnIdAboveTheOldRange: 170360 us over 64512 candidates). */
+#define NR_UL_DMRS_STAGE1_GRANTS 64
+#define NR_UL_DMRS_STAGE2_THROTTLE 2048
+static uint32_t g_ul_dmrs_stage2_skip[NR_UL_DMRS_NSCID];
+const nr_dmrs_id_state_t *nr_pusch_passive_ul_dmrs_id(int nscid) { return &g_ul_dmrs_id[nscid & 1]; }
 
 /* dataScramblingIdentityPUSCH sweep (Task 13), cell-wide like the DM-RS estimate above. */
 static nr_scrambling_id_sweep_t g_ul_data_id;
 static bool g_ul_data_id_init;
 static pthread_mutex_t g_ul_data_id_lock = PTHREAD_MUTEX_INITIALIZER;
+/* Review fix round 1, finding 1: this used to be `g_try >= min_tries && g_crc_ok == 0`, both LIFETIME
+ * counters -- so the sweep's own first successful CRC pass (under the id it just found) made
+ * g_crc_ok > 0 FOREVER, permanently flipping "stalled" to false and (via the bug fixed below in
+ * nr_pusch_passive_data_id_current) discarding the just-latched correct id on every later call.
+ * Windowed/resettable instead: fails SINCE THE LAST PASS, reset to 0 on every CRC_OK (updated at
+ * this function's two call sites in nr_pusch_passive_decode_inner: the CRC-fail return and the
+ * CRC-OK success path). A real recovery (or a correct latch) resets the window; only a persistent
+ * run of failures re-arms eligibility. */
+static _Atomic uint32_t g_ul_fails_since_ok;
 bool nr_pusch_passive_ul_crc_stalled(uint32_t min_tries)
 {
-  return atomic_load_explicit(&g_try, memory_order_relaxed) >= min_tries
-      && atomic_load_explicit(&g_crc_ok, memory_order_relaxed) == 0;
+  return atomic_load_explicit(&g_ul_fails_since_ok, memory_order_relaxed) >= min_tries;
 }
+/* Review fix round 1, finding 1 (CRITICAL): same fix as the DL nr_pdsch_passive_data_id_current --
+ * `advance_ok` must gate only whether the sweep ADVANCES, never whether an already-LATCHED result is
+ * returned. Checking `latched` first is what makes a correctly-discovered id survive past the point
+ * where the (now recovered) link stops looking "stalled". */
 uint16_t nr_pusch_passive_data_id_current(uint16_t pci, int dmrs_id, bool advance_ok)
 {
-  if (!advance_ok)
-    return pci;
   pthread_mutex_lock(&g_ul_data_id_lock);
-  if (!g_ul_data_id_init) { nr_scrambling_id_sweep_init(&g_ul_data_id, pci, dmrs_id); g_ul_data_id_init = true; }
-  const int id = nr_scrambling_id_sweep_current(&g_ul_data_id);
+  int id = -1;
+  if (g_ul_data_id_init && g_ul_data_id.latched >= 0) {
+    id = g_ul_data_id.latched;
+  } else if (advance_ok) {
+    if (!g_ul_data_id_init) { nr_scrambling_id_sweep_init(&g_ul_data_id, pci, dmrs_id); g_ul_data_id_init = true; }
+    id = nr_scrambling_id_sweep_current(&g_ul_data_id);
+  }
   pthread_mutex_unlock(&g_ul_data_id_lock);
   return (uint16_t)(id >= 0 ? id : pci);
 }
@@ -1012,6 +1039,47 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
     }
   }
 
+  /* ---- UL DM-RS SCRAMBLING IDENTITY (review fix round 1, finding 2) --------------------------
+   * Placed HERE, same spot and same reasoning as the PUSCH_DMRS CFR block just above: the DM-RS
+   * sequence is fixed by (nid, slot, symbol) regardless of whether the transport block later
+   * decodes, so gating this on CRC (as it used to be, further down past nr_ulsch_decoding()) was
+   * circular -- on a cell whose UL DM-RS id differs from the PCI the CRC never passes, so the id
+   * that would explain the failures could never be measured. Mirrors the DL fix in
+   * nr_pdsch_passive_queue.c exactly: one state per nSCID, staged range (0..1023 then the full
+   * remaining space once stage 1 exhausts itself without deciding), stage-2 accumulate throttled
+   * (same ~64x-cost argument, same throttle constant). */
+  if (nr_pusch_passive_queue_running() && g->dmrs_config_type == 0 && !g->transform_precoding) {
+    const int ul_ns = g->nscid & 1;
+    if (pthread_mutex_trylock(&g_ul_dmrs_id_lock[ul_ns]) == 0) {
+      nr_dmrs_id_state_t *dst = &g_ul_dmrs_id[ul_ns];
+      if (!g_ul_dmrs_id_init[ul_ns]) { nr_dmrs_id_init(dst, "PUSCH", g->ul_dmrs_scrambling_id); g_ul_dmrs_id_init[ul_ns] = true; }
+      if (!dst->decided) {
+        bool do_accum = true;
+        if (dst->range_first > 0) // stage 2: throttle, ~64x the cost of stage 1 (see nr_pdsch_passive_queue.c's constant)
+          do_accum = (g_ul_dmrs_stage2_skip[ul_ns]++ % NR_UL_DMRS_STAGE2_THROTTLE) == 0;
+        if (do_accum) {
+          int dsym = -1;
+          for (int m_ = g->start_symbol; m_ < g->start_symbol + g->num_symbols; m_++)
+            if (g->ul_dmrs_symb_pos & (1u << m_)) { dsym = m_; break; }
+          if (dsym >= 0) {
+            /* Same slot_off/fp already computed for the FEP above; absolute subcarriers. */
+            const c16_t *row = &gnb->common_vars.rxdataF[0][slot_off + dsym * fp->ofdm_symbol_size];
+            const int start_sc = fp->first_carrier_offset + (g->bwp_start + g->start_rb) * NR_NB_SC_PER_RB;
+            if (nr_dmrs_id_accumulate(dst, row, fp->ofdm_symbol_size, start_sc,
+                                      g->bwp_start + g->start_rb, g->num_rb, fp->N_RB_UL, fp->symbols_per_slot,
+                                      slot, dsym, g->nscid, fp->Ncp == NR_NORMAL)
+                && !nr_dmrs_id_decide(dst, 16, 10.0)
+                && dst->range_first == 0 && dst->grants >= NR_UL_DMRS_STAGE1_GRANTS) {
+              /* Stage 1 exhausted without a decision: escalate to the full remaining space. */
+              nr_dmrs_id_set_range(dst, NR_DMRS_ID_CANDIDATES, NR_DMRS_ID_SPACE - NR_DMRS_ID_CANDIDATES);
+            }
+          }
+        }
+      }
+      pthread_mutex_unlock(&g_ul_dmrs_id_lock[ul_ns]);
+    }
+  }
+
   /* G is needed by the LLR probe below, which runs BEFORE nr_ulsch_decoding(). It used to be
    * assigned after it, so the probe read G = 0 and reported an empty LLR field on every grant --
    * a probe reporting its own initialisation order rather than the receiver. */
@@ -1253,6 +1321,7 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
   }
   if (hp_crc_failed(ulsch)) {
     atomic_fetch_add_explicit(&g_seg_fail, 1, memory_order_relaxed);
+    atomic_fetch_add_explicit(&g_ul_fails_since_ok, 1, memory_order_relaxed);
     out->status = NR_PUSCH_PASSIVE_CRC_FAIL;
     out->reject_reason = "segment or final transport-block CRC failed";
     if (g->data_id_advance)
@@ -1285,6 +1354,7 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
   out->status = NR_PUSCH_PASSIVE_OK;
   out->tb     = hp->b;
   atomic_fetch_add_explicit(&g_crc_ok, 1, memory_order_relaxed);
+  atomic_store_explicit(&g_ul_fails_since_ok, 0, memory_order_relaxed);
   if (g->data_id_advance)
     nr_pusch_passive_data_id_feed(true);
   {
@@ -1296,29 +1366,11 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
             g->data_scrambling_id, (unsigned)fp->Nid_cell, g->rnti);
   }
 
-  /* 1024-candidate sweep, milliseconds: only when this decode runs on a queue consumer. When the
-   * queue is not running this function IS the RT thread's in-line decode (monitor_rt.c), where a
-   * millisecond burst is a guaranteed timing-loop hit -- the identity then simply stays unmeasured. */
-  if (nr_pusch_passive_queue_running() && g->dmrs_config_type == 0 && !g->transform_precoding
-      && pthread_mutex_trylock(&g_ul_dmrs_id_lock) == 0) {
-    if (!g_ul_dmrs_id_init) { nr_dmrs_id_init(&g_ul_dmrs_id, "PUSCH", g->ul_dmrs_scrambling_id); g_ul_dmrs_id_init = true; }
-    if (!g_ul_dmrs_id.decided) {
-      int dsym = -1;
-      for (int m_ = g->start_symbol; m_ < g->start_symbol + g->num_symbols; m_++)
-        if (g->ul_dmrs_symb_pos & (1u << m_)) { dsym = m_; break; }
-      if (dsym >= 0) {
-        /* rxdataF is a ring of RU_RX_SLOT_DEPTH slots (see the FEP above); absolute subcarriers. */
-        const int slot_off_ = (slot % RU_RX_SLOT_DEPTH) * fp->symbols_per_slot * fp->ofdm_symbol_size;
-        const c16_t *row = &gnb->common_vars.rxdataF[0][slot_off_ + dsym * fp->ofdm_symbol_size];
-        const int start_sc = fp->first_carrier_offset + (g->bwp_start + g->start_rb) * NR_NB_SC_PER_RB;
-        if (nr_dmrs_id_accumulate(&g_ul_dmrs_id, row, fp->ofdm_symbol_size, start_sc,
-                                  g->bwp_start + g->start_rb, g->num_rb, fp->N_RB_UL, fp->symbols_per_slot,
-                                  slot, dsym, g->nscid, fp->Ncp == NR_NORMAL))
-          nr_dmrs_id_decide(&g_ul_dmrs_id, 16, 10.0);
-      }
-    }
-    pthread_mutex_unlock(&g_ul_dmrs_id_lock);
-  }
+  /* DM-RS identity: MOVED (review fix round 1, finding 2) to right after the delay-refined FEP,
+   * alongside the PUSCH_DMRS CFR block above -- same reasoning that block's own comment already
+   * gives: the DM-RS channel is fixed by (nid, slot, symbol) regardless of whether the payload
+   * later decodes, so gating this on CRC was circular (a wrong id never lets the CRC pass, which is
+   * exactly the situation this estimator exists to diagnose). See that insertion, above. */
 
   /* UPLINK DATA-AIDED CFR. Gated on o_ack == 0, which means this TB decoded on the FIRST attempt --
    * the no-UCI hypothesis -- so the codeword occupies every data RE and X is fully reconstructible.

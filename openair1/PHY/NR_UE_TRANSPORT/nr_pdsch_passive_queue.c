@@ -327,6 +327,13 @@ void nr_pdsch_passive_rank_verdict(void)
 /* Per-RNTI DL decode census: "DL converged" is a per-UE statement, and a cell-wide CRC rate can hide
  * one UE decoding at 80 % and the other at 0 %. Indexed by C-RNTI; printed with the PDSCHQ census. */
 static _Atomic uint32_t g_rnti_dec[65536], g_rnti_ok[65536];
+/* WINDOWED, resettable: CRC fails since this RNTI's last pass. Review fix round 1, finding 1 --
+ * g_rnti_dec/g_rnti_ok above are LIFETIME totals, so using them for the data-ID sweep's eligibility
+ * gate meant the sweep's own first successful pass (ok > 0 forever) permanently disabled further
+ * eligibility, discarding the just-latched correct id on the very next grant (fixed in
+ * nr_pdsch_passive_data_id_current by checking `latched` before `advance_ok`; this counter is the
+ * OTHER half of that fix -- the eligibility measure itself must be able to recover). */
+static _Atomic uint32_t g_rnti_fails_since_ok[65536];
 void nr_pdsch_passive_queue_rnti_census(char *buf, size_t n)
 {
   size_t off = 0; int shown = 0;
@@ -339,17 +346,15 @@ void nr_pdsch_passive_queue_rnti_census(char *buf, size_t n)
   }
   if (!shown) snprintf(buf, n, " (none>=50)");
 }
-/* True when this RNTI has attempted at least min_tries decodes and NONE of them passed CRC -- the
- * gate for advancing the per-RNTI dataScramblingIdentityPDSCH sweep (nr_pdcch_blind_monitor_rt.c):
- * a persistently-zero CRC rate under an otherwise-converged config (see the Technique D prior check
- * at that call site) is the one situation where trying a different data identity is warranted
- * rather than a guaranteed waste of an LDPC decode. Reuses the census counters above rather than
- * adding a second per-RNTI counter pair. */
+/* True when this RNTI has accumulated at least min_tries CRC fails SINCE ITS LAST PASS -- the gate
+ * for advancing the per-RNTI dataScramblingIdentityPDSCH sweep (nr_pdcch_blind_monitor_rt.c): a
+ * persistently-zero CRC rate under an otherwise-converged config (see the Technique D prior check at
+ * that call site) is the one situation where trying a different data identity is warranted rather
+ * than a guaranteed waste of an LDPC decode. Windowed, not lifetime (review fix round 1, finding 1)
+ * -- see g_rnti_fails_since_ok's own comment for why a lifetime measure was wrong. */
 bool nr_pdsch_passive_rnti_crc_stalled(uint16_t rnti, uint32_t min_tries)
 {
-  const uint32_t d  = atomic_load_explicit(&g_rnti_dec[rnti], memory_order_relaxed);
-  const uint32_t ok = atomic_load_explicit(&g_rnti_ok[rnti], memory_order_relaxed);
-  return d >= min_tries && ok == 0;
+  return atomic_load_explicit(&g_rnti_fails_since_ok[rnti], memory_order_relaxed) >= min_tries;
 }
 static _Atomic uint64_t g_dropped_full  = 0; // evicted oldest to admit a newer job
 static _Atomic uint64_t g_dropped_narrow = 0; // budget: narrow grant refused while the ring was nearly full
@@ -973,7 +978,12 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
     if (st != NR_PDSCH_PASSIVE_DECODE_ERROR && st != NR_PDSCH_PASSIVE_DECODE_UNSUPPORTED) {
       atomic_fetch_add_explicit(&g_decoded, 1, memory_order_relaxed);
       atomic_fetch_add_explicit(&g_rnti_dec[job.rnti], 1, memory_order_relaxed);
-      if (st == NR_PDSCH_PASSIVE_DECODE_CRC_OK) atomic_fetch_add_explicit(&g_rnti_ok[job.rnti], 1, memory_order_relaxed);
+      if (st == NR_PDSCH_PASSIVE_DECODE_CRC_OK) {
+        atomic_fetch_add_explicit(&g_rnti_ok[job.rnti], 1, memory_order_relaxed);
+        atomic_store_explicit(&g_rnti_fails_since_ok[job.rnti], 0, memory_order_relaxed);
+      } else {
+        atomic_fetch_add_explicit(&g_rnti_fails_since_ok[job.rnti], 1, memory_order_relaxed);
+      }
       /* TIMING ADVANCE FROM AN OVERHEARD PDU (nr_passive_mac_ta.h). The payload of a CRC-verified
        * transport block was being discarded; a RAR carries the gNB's absolute advance for the UE it
        * answers, and a TA Command CE carries an update -- i.e. that UE's range to the illuminator,

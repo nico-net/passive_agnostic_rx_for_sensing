@@ -129,8 +129,9 @@ void nr_pusch_passive_stats_dump(void);
 #ifdef __cplusplus
 extern "C" {
 #endif
-/* Read-only view of the UL DM-RS identity estimate (diagnostic; plain ints, racy by design). */
-const nr_dmrs_id_state_t *nr_pusch_passive_ul_dmrs_id(void);
+/* Read-only view of the UL DM-RS identity estimate for one nSCID (0 or 1; diagnostic, plain ints,
+ * racy by design). */
+const nr_dmrs_id_state_t *nr_pusch_passive_ul_dmrs_id(int nscid);
 /* dataScramblingIdentityPUSCH sweep (Task 13), cell-wide (like the DM-RS estimate above -- this
  * deployment has one UL BWP, so there is nothing to key it by yet; unlike the DL side there is no
  * per-RNTI Technique D convergence signal to gate on, so nr_pusch_passive_ul_crc_stalled's own

@@ -6552,7 +6552,7 @@ constdiag_done:;
       if (acq_period)
       {
       const nr_pdsch_xoverhead_state_t xo = nr_pdsch_xoverhead_snapshot();
-      const nr_dmrs_id_state_t *dd = nr_pdsch_passive_dl_dmrs_id(0), *du = nr_pusch_passive_ul_dmrs_id();
+      const nr_dmrs_id_state_t *dd = nr_pdsch_passive_dl_dmrs_id(0), *du = nr_pusch_passive_ul_dmrs_id(0);
       LOG_I(PHY, "SENSING: ACQ state=%s time_in_state=%lu transitions=%lu regressions=%lu "
                  "in[len=%d coreset=%d ul_bwp=%d dl_win=%lu ul_win[w=%lu i=%lu]] "
                  "uldisc[gen=%lu raw=%d wcls=%d icls=%d wtrials=%lu itrials=%lu rejected_fb=%lu] "

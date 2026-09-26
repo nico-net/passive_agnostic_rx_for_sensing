@@ -52,6 +52,36 @@ TEST(ScramblingIdSweep, LatchesOnFirstCrcPass) {
   EXPECT_EQ(nr_scrambling_id_sweep_current(&s), s.order[3]);
 }
 
+TEST(ScramblingIdSweep, LatchedIdSurvivesFurtherPassesAndFailures) {
+  // Review fix round 1, finding 1: the bug was in the CALLER wrappers
+  // (nr_pdsch_passive_data_id_current / nr_pusch_passive_data_id_current), which re-derived
+  // eligibility from a lifetime "stalled" counter that the sweep's own first CRC pass permanently
+  // broke, discarding the just-latched correct id and reverting to PCI forever. That fix makes the
+  // wrappers ALWAYS return latched (never re-consult eligibility) once nr_scrambling_id_sweep_t
+  // itself has latched -- this pins the invariant the fix depends on: once latched, current() is
+  // stable under ANY sequence of further feed() calls, pass or fail.
+  nr_scrambling_id_sweep_t s;
+  nr_scrambling_id_sweep_init(&s, 64, 700);
+  nr_scrambling_id_sweep_feed(&s, 0);
+  nr_scrambling_id_sweep_feed(&s, 0);
+  nr_scrambling_id_sweep_feed(&s, 1); // latches on the first pass
+  const int latched_id = s.latched;
+  ASSERT_GE(latched_id, 0);
+  EXPECT_EQ(nr_scrambling_id_sweep_current(&s), latched_id);
+  // Further PASSES must not perturb it (a real deployment keeps decoding successfully forever).
+  for (int i = 0; i < 5; ++i) {
+    nr_scrambling_id_sweep_feed(&s, 1);
+    EXPECT_EQ(s.latched, latched_id);
+    EXPECT_EQ(nr_scrambling_id_sweep_current(&s), latched_id);
+  }
+  // Later FAILURES (an unrelated bad grant, noise, etc.) must not perturb it either.
+  for (int i = 0; i < 5; ++i) {
+    nr_scrambling_id_sweep_feed(&s, 0);
+    EXPECT_EQ(s.latched, latched_id);
+    EXPECT_EQ(nr_scrambling_id_sweep_current(&s), latched_id);
+  }
+}
+
 TEST(ScramblingIdSweep, DmrsIdAboveDataRangeIsSkipped) {
   nr_scrambling_id_sweep_t s;
   nr_scrambling_id_sweep_init(&s, 64, 40000); // 40000 is outside the 0..1023 data-id space

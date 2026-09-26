@@ -361,19 +361,31 @@ static int rnti_nl_latch(uint16_t rnti, int nl)
   return prev;
 }
 /* Per-RNTI dataScramblingIdentityPDSCH sweep (Task 13). See nr_pdsch_passive_decode.h's comment for
- * the contract; `advance_ok` (Technique D converged + this RNTI's CRC rate stalled at 0, checked by
- * the caller in nr_pdcch_blind_monitor_rt.c, which has both those signals in scope) is what keeps a
+ * the contract; `advance_ok` (Technique D converged + this RNTI's CRC rate stalled, checked by the
+ * caller in nr_pdcch_blind_monitor_rt.c, which has both those signals in scope) is what keeps a
  * healthy RNTI decoding under PCI forever -- the sweep is lazily seeded on the first call that is
- * actually allowed to advance, from (pci, dmrs_id) as they stood at that moment. */
+ * actually allowed to advance, from (pci, dmrs_id) as they stood at that moment.
+ *
+ * REVIEW FIX round 1, finding 1 (CRITICAL): `advance_ok` must gate only whether the sweep is
+ * allowed to ADVANCE (create/walk); it must NEVER gate whether an already-LATCHED result is
+ * returned. The bug: `advance_ok` used to be checked first and, if false, this returned `pci`
+ * unconditionally -- but the caller's eligibility measure was a lifetime "stalled" counter that the
+ * sweep's own first successful CRC pass permanently breaks (a pass is evidence the link recovered,
+ * so "stalled" becomes false forever). Net effect: the moment the sweep found the CORRECT id and
+ * latched it, the very next call saw advance_ok=false and threw the answer away, reverting to PCI
+ * forever -- on exactly the deployment this feature exists for. Fixed by checking `latched` FIRST. */
 uint16_t nr_pdsch_passive_data_id_current(uint16_t rnti, uint16_t pci, int dmrs_id, bool advance_ok)
 {
-  if (!advance_ok)
-    return pci;
   pthread_mutex_lock(&g_ptrs_lock);
   rnti_dec_t *r = rnti_dec(rnti);
-  if (r->data_id.n == 0)
-    nr_scrambling_id_sweep_init(&r->data_id, pci, dmrs_id);
-  const int id = nr_scrambling_id_sweep_current(&r->data_id);
+  int id = -1;
+  if (r->data_id.n > 0 && r->data_id.latched >= 0) {
+    id = r->data_id.latched; // always honour a latched result, regardless of advance_ok
+  } else if (advance_ok) {
+    if (r->data_id.n == 0)
+      nr_scrambling_id_sweep_init(&r->data_id, pci, dmrs_id);
+    id = nr_scrambling_id_sweep_current(&r->data_id);
+  }
   pthread_mutex_unlock(&g_ptrs_lock);
   return (uint16_t)(id >= 0 ? id : pci);
 }
