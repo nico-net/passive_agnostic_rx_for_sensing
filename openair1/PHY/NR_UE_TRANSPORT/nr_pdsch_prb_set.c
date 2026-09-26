@@ -96,3 +96,8 @@ int nr_prb_gather_index(const nr_prb_seg_t *seg, int nseg, int re_per_prb, int *
     }
   return n;
 }
+
+int nr_dmrs_oracle_crb(int bwp_start, int rb0)
+{
+  return bwp_start + rb0;
+}

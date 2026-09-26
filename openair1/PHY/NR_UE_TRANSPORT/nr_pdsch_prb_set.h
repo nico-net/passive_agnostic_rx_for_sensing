@@ -37,6 +37,13 @@ int nr_prb_segments(const uint16_t *prb, int n, int bwp_start, int prg, nr_prb_s
  *  Returns the count, -1 if more than max. */
 int nr_prb_gather_index(const nr_prb_seg_t *seg, int nseg, int re_per_prb, int *out, int max);
 
+/** BWP-relative PRB index -> absolute carrier CRB (CRB0-referenced), for probes that index a
+ *  whole-carrier array such as nr_dmrs_prb_coherence()'s out[] (that function fills it by absolute
+ *  CRB, per its own doc comment -- it is NOT BWP-relative like everything else in this file). Every
+ *  such probe's rb0 must be converted with this before use; skipping it reads the wrong PRBs on any
+ *  BWP that does not start at CRB 0. bwp_start = 0 is a no-op (identity). */
+int nr_dmrs_oracle_crb(int bwp_start, int rb0);
+
 #ifdef __cplusplus
 }
 #endif
