@@ -541,6 +541,11 @@ static uint64_t g_pdsch_configuration;
  * selection promotes the one that decodes. TB CRC remains the only authority. The hand-picked
  * 3-family enumeration is the fallback while stage 1 is not armed. */
 #define NR_DCI11_STAGE2_MAX_ALIVE 8   /* hand over once stage 1 is down to this many */
+/* R30 item 2: trials a pinned Technique-D layout candidate may accumulate at zero CRC passes before
+ * it is judged wrong and abandoned. A 24-bit TB CRC's false-accept floor is ~6e-8/try, and even a
+ * marginal true rate of 1% has P(0 passes in 1000 trials) ~= 4.3e-5 -- 1000 trials is comfortably
+ * past "unlucky" for a right layout while still cheap enough to try several wrong ones inside a run. */
+#define DCI11_PIN_GIVEUP_TRIALS 1000
 /* While the configured layout is still among stage 1's survivors, hand over only at 4 (the measured
  * dilution limit); once stage 1 has REFUTED it, waiting is pointless -- the hand-picked fallback
  * enumeration hard-codes antenna_ports=4 bits and can never contain the truth. OTA 2026-09-15 on the
@@ -5616,7 +5621,59 @@ constdiag_done:;
       } else {
         fallback = layout_cursor[raw->rnti]++ % n;
       }
-      const int selected=settled>=0 ? settled : preferred>=0 ? preferred : fallback;
+      /* R30 item 2 (context churn, technique-d-regression.md): pin the Technique-D layout candidate
+       * per RNTI so its `configuration` key (keys[]) stops rotating across whichever of the n offered
+       * DCI-11 layout candidates Thompson/round-robin happens to pick THIS grant. Without this, no
+       * sweep context (nr_pdsch_config_sweep.c, keyed on configuration) ever accumulates enough trials
+       * to converge -- measured 20 context-table churn events and 0 crc_ok across 6+ independent runs
+       * on the phy-test bed even though the correct layout is among the candidates offered every
+       * grant. `configuration` genuinely depends on which field-width layout guess parsed the DCI (a
+       * different layout reads a different tda_index/mcs from the SAME bits), so evidence gathered
+       * under one layout cannot simply be merged into another's key -- pinning instead keeps
+       * SELECTING the same key occasion after occasion, so one context actually gets fed.
+       * The pin auto-invalidates on a real cell-geometry change (dci11_pin_cfg vs the live
+       * g_pdsch_configuration) and is explicitly abandoned only once ITS OWN Technique-D evidence --
+       * not a guess -- shows a fair trial budget with zero CRC passes; a pin that is merely absent
+       * from this occasion's top-N offered list (transient resolver churn, not a verdict) is left
+       * alone rather than replaced, so it can resume being fed the moment it reappears. */
+      static bool     dci11_pin_valid[65536];
+      static uint16_t dci11_pin_layout[65536];
+      static uint64_t dci11_pin_cfg[65536];
+      if (dci11_pin_valid[raw->rnti] && dci11_pin_cfg[raw->rnti] != g_pdsch_configuration)
+        dci11_pin_valid[raw->rnti] = false; /* cell geometry changed under this RNTI's pin */
+      int selected;
+      if (settled>=0) {
+        selected = settled;
+      } else {
+        int pinned = -1;
+        if (dci11_pin_valid[raw->rnti])
+          for (int i=0;i<n;++i)
+            if (layout_ids[i]==dci11_pin_layout[raw->rnti]) { pinned=i; break; }
+        if (pinned>=0) {
+          uint32_t p_ok=0, p_tr=0;
+          nr_pdsch_config_sweep_context_stats(keys[pinned], raw->rnti, 0xFF, cfg->dmrs_typeA_position, &p_ok, &p_tr);
+          if (p_tr>=DCI11_PIN_GIVEUP_TRIALS && p_ok==0) {
+            static uint32_t s_giveup_left=50; /* noise-floor RNTIs can drive this too: bounded, like context eviction */
+            if (s_giveup_left) {
+              s_giveup_left--;
+              LOG_W(PHY,"SENSING: DL layout pin GIVEUP rnti=0x%x layout_id=%u after %u trials, 0 CRC -- trying another candidate\n",
+                    raw->rnti,(unsigned)dci11_pin_layout[raw->rnti],(unsigned)p_tr);
+            }
+            dci11_pin_valid[raw->rnti]=false;
+            pinned=-1;
+          }
+        }
+        if (pinned>=0) {
+          selected = pinned;
+        } else {
+          selected = preferred>=0 ? preferred : fallback;
+          if (!dci11_pin_valid[raw->rnti]) { /* keep an existing (merely not-offered-this-occasion) pin */
+            dci11_pin_valid[raw->rnti]=true;
+            dci11_pin_layout[raw->rnti]=layout_ids[selected];
+            dci11_pin_cfg[raw->rnti]=g_pdsch_configuration;
+          }
+        }
+      }
       cand_task[ti].out=layouts[selected];
       cand_task[ti].dl_layout_configuration=keys[selected];
       cand_task[ti].dl_layout_index=from_stage2 ? layout_ids[selected] : 0xFFFF;
