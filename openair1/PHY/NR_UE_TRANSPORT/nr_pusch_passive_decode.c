@@ -20,8 +20,7 @@
 #include "common/utils/nr/nr_common.h"
 #include "PHY/defs_gNB.h"
 #include "PHY/defs_RU.h"          // RU_RX_SLOT_DEPTH -- the gNB rxdataF ring depth
-#include "PHY/NR_UE_TRANSPORT/nr_dmrs_id_estimate.h" // blind UL DM-RS identity estimate
-#include "PHY/NR_UE_TRANSPORT/nr_scrambling_id_sweep.h" // blind UL data (PUSCH) scrambling identity (Task 13)
+#include "PHY/NR_UE_TRANSPORT/nr_dmrs_id_estimate.h" // blind UL DM-RS identity estimate (nr_dmrs_id_init/_accumulate/_decide/_set_range)
 #include "PHY/NR_UE_TRANSPORT/nr_pusch_passive_queue.h" // nr_pusch_passive_queue_running()
 #include "PHY/MODULATION/modulation_UE.h"
 #include "PHY/NR_TRANSPORT/nr_transport_proto.h"
@@ -94,65 +93,17 @@ static int           g_gnb_nant;
 static _Atomic uint64_t g_try, g_crc_ok, g_rej_unsup, g_rej_setup;
 /* UL DM-RS identity estimate (CP-OFDM PUSCH, type 1, port 0): same sequence family as PDSCH
  * (TS 38.211 6.4.1.1.1.1 vs 7.4.1.1.1), reference point CRB 0, so the PDSCH estimator applies
- * unchanged. Shared across decode contexts under one lock. Accumulated on EVERY attempted grant,
- * CRC-OK or not (review fix round 1, finding 2) -- see the accumulate call site's own comment,
- * below nr_ulsch_decoding()'s CFR block, for why gating this on CRC would be circular. */
-/* One state per nSCID, mirroring the DL side (nr_pdsch_passive_queue.c) -- scramblingID0/1 are
- * independent RRC fields. */
-#define NR_UL_DMRS_NSCID 2
-static nr_dmrs_id_state_t g_ul_dmrs_id[NR_UL_DMRS_NSCID];
-static bool g_ul_dmrs_id_init[NR_UL_DMRS_NSCID];
-static pthread_mutex_t g_ul_dmrs_id_lock[NR_UL_DMRS_NSCID] = {PTHREAD_MUTEX_INITIALIZER, PTHREAD_MUTEX_INITIALIZER};
-/* Stage-2 escalation, same constants/reasoning as the DL side (nr_pdsch_passive_queue.c): stage 1
- * (0..1023) must accumulate this many grants without deciding before escalating, and once escalated
- * a stage-2 (64512-candidate) accumulate is throttled -- measured ~64x a stage-1 accumulate's cost
- * (nr_dmrs_id_estimate_test.cc's FindsAnIdAboveTheOldRange: 170360 us over 64512 candidates). */
+ * unchanged. Accumulated on EVERY attempted grant, CRC-OK or not (review fix round 1, finding 2) --
+ * see the accumulate call site's own comment, below nr_ulsch_decoding()'s CFR block, for why gating
+ * this on CRC would be circular.
+ *
+ * The per-nSCID storage/lock/stage-2-throttle counters and the cell-wide data-ID sweep + CRC-stall
+ * counter (Task 13) now live in nr_pusch_passive_ul_ids.{h,c} -- moved out of this file so
+ * nr_pdcch_blind_monitor.c's read side does not pull PHY_NR_PASSIVE_UL into the offline
+ * test_nr_pdcch_blind_monitor gtest binary; see that file's header comment and fix2-report.md. This
+ * file still owns and calls the actual estimation (nr_dmrs_id_accumulate()/_decide(), which need live
+ * IQ) through the accessors it exposes. */
 #define NR_UL_DMRS_STAGE1_GRANTS 64
-#define NR_UL_DMRS_STAGE2_THROTTLE 2048
-static uint32_t g_ul_dmrs_stage2_skip[NR_UL_DMRS_NSCID];
-const nr_dmrs_id_state_t *nr_pusch_passive_ul_dmrs_id(int nscid) { return &g_ul_dmrs_id[nscid & 1]; }
-
-/* dataScramblingIdentityPUSCH sweep (Task 13), cell-wide like the DM-RS estimate above. */
-static nr_scrambling_id_sweep_t g_ul_data_id;
-static bool g_ul_data_id_init;
-static pthread_mutex_t g_ul_data_id_lock = PTHREAD_MUTEX_INITIALIZER;
-/* Review fix round 1, finding 1: this used to be `g_try >= min_tries && g_crc_ok == 0`, both LIFETIME
- * counters -- so the sweep's own first successful CRC pass (under the id it just found) made
- * g_crc_ok > 0 FOREVER, permanently flipping "stalled" to false and (via the bug fixed below in
- * nr_pusch_passive_data_id_current) discarding the just-latched correct id on every later call.
- * Windowed/resettable instead: fails SINCE THE LAST PASS, reset to 0 on every CRC_OK (updated at
- * this function's two call sites in nr_pusch_passive_decode_inner: the CRC-fail return and the
- * CRC-OK success path). A real recovery (or a correct latch) resets the window; only a persistent
- * run of failures re-arms eligibility. */
-static _Atomic uint32_t g_ul_fails_since_ok;
-bool nr_pusch_passive_ul_crc_stalled(uint32_t min_tries)
-{
-  return atomic_load_explicit(&g_ul_fails_since_ok, memory_order_relaxed) >= min_tries;
-}
-/* Review fix round 1, finding 1 (CRITICAL): same fix as the DL nr_pdsch_passive_data_id_current --
- * `advance_ok` must gate only whether the sweep ADVANCES, never whether an already-LATCHED result is
- * returned. Checking `latched` first is what makes a correctly-discovered id survive past the point
- * where the (now recovered) link stops looking "stalled". */
-uint16_t nr_pusch_passive_data_id_current(uint16_t pci, int dmrs_id, bool advance_ok)
-{
-  pthread_mutex_lock(&g_ul_data_id_lock);
-  int id = -1;
-  if (g_ul_data_id_init && g_ul_data_id.latched >= 0) {
-    id = g_ul_data_id.latched;
-  } else if (advance_ok) {
-    if (!g_ul_data_id_init) { nr_scrambling_id_sweep_init(&g_ul_data_id, pci, dmrs_id); g_ul_data_id_init = true; }
-    id = nr_scrambling_id_sweep_current(&g_ul_data_id);
-  }
-  pthread_mutex_unlock(&g_ul_data_id_lock);
-  return (uint16_t)(id >= 0 ? id : pci);
-}
-void nr_pusch_passive_data_id_feed(bool tb_crc_ok)
-{
-  pthread_mutex_lock(&g_ul_data_id_lock);
-  if (g_ul_data_id_init)
-    nr_scrambling_id_sweep_feed(&g_ul_data_id, tb_crc_ok ? 1 : 0);
-  pthread_mutex_unlock(&g_ul_data_id_lock);
-}
 static _Atomic uint64_t g_seg_fail, g_zero_tb;
 /* Residual the channel estimator can absorb on its own: MAX_DELAY_COMP is 20 samples, so anything
  * beyond a comfortable fraction of that is worth re-placing the window for rather than hoping. */
@@ -1050,13 +1001,15 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
    * (same ~64x-cost argument, same throttle constant). */
   if (nr_pusch_passive_queue_running() && g->dmrs_config_type == 0 && !g->transform_precoding) {
     const int ul_ns = g->nscid & 1;
-    if (pthread_mutex_trylock(&g_ul_dmrs_id_lock[ul_ns]) == 0) {
-      nr_dmrs_id_state_t *dst = &g_ul_dmrs_id[ul_ns];
-      if (!g_ul_dmrs_id_init[ul_ns]) { nr_dmrs_id_init(dst, "PUSCH", g->ul_dmrs_scrambling_id); g_ul_dmrs_id_init[ul_ns] = true; }
+    bool was_init = false;
+    nr_dmrs_id_state_t *dst = nr_pusch_passive_ul_dmrs_trylock(ul_ns, &was_init);
+    if (dst) {
+      if (!was_init)
+        nr_dmrs_id_init(dst, "PUSCH", g->ul_dmrs_scrambling_id);
       if (!dst->decided) {
         bool do_accum = true;
         if (dst->range_first > 0) // stage 2: throttle, ~64x the cost of stage 1 (see nr_pdsch_passive_queue.c's constant)
-          do_accum = (g_ul_dmrs_stage2_skip[ul_ns]++ % NR_UL_DMRS_STAGE2_THROTTLE) == 0;
+          do_accum = nr_pusch_passive_ul_dmrs_stage2_tick(ul_ns);
         if (do_accum) {
           int dsym = -1;
           for (int m_ = g->start_symbol; m_ < g->start_symbol + g->num_symbols; m_++)
@@ -1076,7 +1029,7 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
           }
         }
       }
-      pthread_mutex_unlock(&g_ul_dmrs_id_lock[ul_ns]);
+      nr_pusch_passive_ul_dmrs_unlock(ul_ns);
     }
   }
 
@@ -1321,7 +1274,7 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
   }
   if (hp_crc_failed(ulsch)) {
     atomic_fetch_add_explicit(&g_seg_fail, 1, memory_order_relaxed);
-    atomic_fetch_add_explicit(&g_ul_fails_since_ok, 1, memory_order_relaxed);
+    nr_pusch_passive_ul_crc_note(false);
     out->status = NR_PUSCH_PASSIVE_CRC_FAIL;
     out->reject_reason = "segment or final transport-block CRC failed";
     if (g->data_id_advance)
@@ -1354,7 +1307,7 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
   out->status = NR_PUSCH_PASSIVE_OK;
   out->tb     = hp->b;
   atomic_fetch_add_explicit(&g_crc_ok, 1, memory_order_relaxed);
-  atomic_store_explicit(&g_ul_fails_since_ok, 0, memory_order_relaxed);
+  nr_pusch_passive_ul_crc_note(true);
   if (g->data_id_advance)
     nr_pusch_passive_data_id_feed(true);
   {
