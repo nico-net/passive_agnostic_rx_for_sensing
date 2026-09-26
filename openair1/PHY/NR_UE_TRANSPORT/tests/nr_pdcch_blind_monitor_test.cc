@@ -3295,6 +3295,25 @@ TEST(DiscoveryGates, Gate1EmptyBankNeverBlocksTheOnOccasionFallback) {
   EXPECT_FALSE(nr_pdcch_blind_monitor_discovery_block_early_return(5));
 }
 
+// Lane perf (2026-09-27): once a verified bank is decoding, the further-CORESET discovery pass is
+// background work. Measured on the phy-test bed: its DL dci_length sweep took 102.9 s of the scan
+// consumer's 133 s busy time in a 150 s run and the consumer dropped 41 % of all occasions
+// (scanq drop_full=190876 of 468343), the bank's real grants included. It must yield to a waiting
+// occasion, but still run at least once per NR_PDCCH_DISCOVERY_PASS_FLOOR occasions so it can never
+// starve outright.
+TEST(DiscoveryGates, BackgroundDiscoveryPassYieldsToABacklogButCannotStarve) {
+  uint32_t skipped = 0;
+  EXPECT_TRUE(nr_pdcch_blind_monitor_discovery_pass_due(0, &skipped));   // idle consumer: run
+  EXPECT_TRUE(nr_pdcch_blind_monitor_discovery_pass_due(-1, &skipped));  // no queue (in-line scan): run
+  int ran = 0;
+  for (int i = 0; i < 10 * NR_PDCCH_DISCOVERY_PASS_FLOOR; i++)
+    ran += nr_pdcch_blind_monitor_discovery_pass_due(3, &skipped);      // permanently backlogged
+  EXPECT_EQ(ran, 10);                                                    // exactly the floor
+  skipped = 5;
+  EXPECT_TRUE(nr_pdcch_blind_monitor_discovery_pass_due(0, &skipped));
+  EXPECT_EQ(skipped, 0u);                                                // an idle run restarts the floor
+}
+
 // Bound shared by both Gate2* tests below: MIN_ORACLE_DWELLS(8) dwells * AUTODISCOVER_OBS_CALLS(1000)
 // /dwell = 8000 calls is the fastest the existing per-dwell floor allows even with Gate 2 fixed. The
 // pre-fix code could only clear the min-bg gate via AUTODISCOVER_MAX_OBS_CALLS(400000)/dwell --

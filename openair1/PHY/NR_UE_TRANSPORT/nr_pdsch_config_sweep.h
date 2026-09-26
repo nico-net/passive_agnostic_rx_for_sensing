@@ -199,6 +199,11 @@ int nr_pdsch_config_sweep_observe(const nr_pdsch_sweep_ticket_t *ticket, uint16_
  *  remembers it for this RNTI's later contexts. Returns the number of hypotheses added: 0 when the
  *  layer is already there, k0 > 32, the context is settled/stale, or the layer would not fit. */
 int nr_pdsch_config_sweep_add_k0(const nr_pdsch_sweep_ticket_t *t, uint8_t k0);
+/** The PDSCH slot a hypothesis with slot offset `k0` targets for a DCI received in (frame, slot):
+ *  slot + k0, carried into the frame (and SFN, mod 1024). Every decode path must use it: decoding a
+ *  k0 = 1 hypothesis on the DCI's own slot makes it an exact twin of its k0 = 0 sibling, and the sweep
+ *  (correctly) never picks between two indistinguishable hypotheses. */
+void nr_pdsch_k0_slot(int frame, int slot, int slots_per_frame, int k0, int *frame_out, int *slot_out);
 /** Returns true exactly once on convergence; fills winner when supplied. */
 bool nr_pdsch_config_sweep_feedback(const nr_pdsch_sweep_ticket_t *ticket, bool crc_ok,
                                    nr_pdsch_cfg_hypothesis_t *winner);

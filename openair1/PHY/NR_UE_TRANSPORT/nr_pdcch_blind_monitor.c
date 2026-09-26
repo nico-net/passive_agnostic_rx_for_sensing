@@ -768,6 +768,17 @@ bool nr_pdcch_blind_monitor_discovery_block_early_return(int bank_count)
   return false;
 }
 
+bool nr_pdcch_blind_monitor_discovery_pass_due(int backlog, uint32_t *skipped)
+{
+  /* ponytail: the floor is a compute budget, not a cell parameter (same spirit as the CORESET0_USS
+   * 1-in-64 probe); lower it if multi-CORESET discovery ever measures too slow behind a busy bank */
+  if (backlog <= 0 || ++*skipped >= NR_PDCCH_DISCOVERY_PASS_FLOOR) {
+    *skipped = 0;
+    return true;
+  }
+  return false;
+}
+
 static void discovered_restore(void) /* called from extent_advance(): the applied line failed its dwell */
 {
   if (!s_disc_active)

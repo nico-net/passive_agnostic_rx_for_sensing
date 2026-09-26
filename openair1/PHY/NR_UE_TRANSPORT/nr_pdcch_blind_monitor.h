@@ -502,6 +502,15 @@ bool nr_pdcch_blind_monitor_discovery_paused(void);
  * the cost exactly as they do once discovery is done. */
 bool nr_pdcch_blind_monitor_discovery_block_early_return(int bank_count);
 
+/* Lane perf (2026-09-27): admission of the further-CORESET discovery pass once a verified bank is
+ * decoding (nr_pdcch_blind_monitor_run_occasion()). That pass is background work -- its DL dci_length
+ * sweep measured 77 % of the scan consumer's time on the phy-test bed and made the consumer drop 41 % of
+ * occasions, the bank's own grants included. It runs whenever the consumer has no occasion waiting
+ * (backlog <= 0; -1 = no scan queue) and otherwise once per NR_PDCCH_DISCOVERY_PASS_FLOOR occasions, so
+ * it yields to real traffic but can never starve. `skipped` is the caller's counter. Pure. */
+#define NR_PDCCH_DISCOVERY_PASS_FLOOR 16
+bool nr_pdcch_blind_monitor_discovery_pass_due(int backlog, uint32_t *skipped);
+
 /** Advance the current geometry after an inconclusive length budget. The offset is not
  * blacklisted: other widths and future observations remain eligible. */
 void nr_pdcch_blind_monitor_autodiscover_retry(int failed_rb_offset);

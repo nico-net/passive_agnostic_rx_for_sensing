@@ -64,6 +64,13 @@ bool nr_pdsch_tda_legal(int mapping_type, int S, int L)
   return false;
 }
 
+void nr_pdsch_k0_slot(int frame, int slot, int slots_per_frame, int k0, int *frame_out, int *slot_out)
+{
+  const int abs = slot + k0;
+  *frame_out = (frame + abs / slots_per_frame) % 1024;
+  *slot_out = abs % slots_per_frame;
+}
+
 /* Appends every legal (S,L,k0,add_pos,max_len,mcs_table) entry of ONE mapping type to st, merging any
  * that duplicate an ALREADY-PRESENT effective PDU (S,L,k0,mask,table) anywhere in the catalog: the TB
  * CRC cannot tell two identical PDUs apart, so neither could ever win. Shared by init_legal (mapping
@@ -610,6 +617,21 @@ typedef struct {
 
 static sweep_context_t g_contexts[NR_PDSCH_SWEEP_MAX_CONTEXTS];
 static nr_pdsch_sweep_reporter_t g_reporter;
+/* Census (lane perf 2026-09-27), all under g_lock: whether evidence ACCUMULATES is the question every
+ * "never converged" report needs answered first, and nothing in the log could answer it -- the
+ * new-context line is capped at 20 and the evidence line fires only on a pass or every 10000 outcomes
+ * of one context, i.e. never on a context that lives a few grants. */
+static uint64_t g_st_created, g_st_scored, g_st_stale, g_st_reindexed;
+
+/* A prune compacts st->hyp[] in place (or a probation restore rebuilds it), so every outstanding ticket
+ * names an index that now belongs to another hypothesis. Retire them: a new generation makes
+ * ticket_context() refuse them instead of crediting whatever moved onto their index. Appends (k0/type-B
+ * layers) keep every index and need no bump. Call under g_lock whenever n_hyp changed by a prune. */
+static void context_reindexed(sweep_context_t *c)
+{
+  c->generation = ++g_generation;
+  g_st_reindexed++;
+}
 static uint32_t g_recovery_minimum_failures = 32;
 static double g_recovery_probability_budget = 1e-6;
 bool nr_pdsch_config_sweep_set_recovery_policy(uint32_t minimum_failures, double probability_budget)
@@ -875,6 +897,7 @@ bool nr_pdsch_config_sweep_select(uint64_t configuration, uint16_t rnti, uint8_t
     c->state = fresh;
     c->configuration = configuration;
     c->generation = ++g_generation;
+    g_st_created++;
     c->rnti = rnti;
     c->tda = tda_index;
     c->tda_count = tda_count;
@@ -955,7 +978,10 @@ int nr_pdsch_config_sweep_observe(const nr_pdsch_sweep_ticket_t *ticket, uint16_
   if (c != NULL && c->state->winner < 0) {
     if (r->typeb_seen)
       add_typeb_layer(c->state, c->typeA, c->legality);
+    const int before = c->state->n_hyp;
     n = prune_to_observed(c->state, &r->obs);
+    if (c->state->n_hyp != before)
+      context_reindexed(c);
   }
   pthread_mutex_unlock(&g_lock);
   return n;
@@ -1006,11 +1032,48 @@ int nr_pdsch_config_sweep_observe_qm(const nr_pdsch_sweep_ticket_t *ticket, uint
         const int before = c->state->n_hyp;
         n = prune_tables(c->state, inter);
         if (n == before) n = 0;
+        else if (n > 0) context_reindexed(c);
       }
     }
   }
   pthread_mutex_unlock(&g_lock);
   return n;
+}
+
+/* One line per 4096 scored outcomes (under g_lock): how many contexts exist and how long they live
+ * (created vs scored), how much feedback arrives stale, and for the context just fed how far it is from
+ * the separation test -- the leader's lower bound against the widest bound still overlapping it. */
+static void census_log(const sweep_context_t *c)
+{
+  const nr_pdsch_config_sweep_state_t *s = c->state;
+  int live = 0;
+  for (int i = 0; i < NR_PDSCH_SWEEP_MAX_CONTEXTS; i++)
+    live += g_contexts[i].generation != 0;
+  int lead = 0;
+  for (int i = 1; i < s->n_hyp; i++)
+    if (rate_of(s, i) > rate_of(s, lead)) lead = i;
+  double lo, hi, max_hi = 0;
+  nr_crc_interval(s->ok[lead], s->trials[lead], (unsigned)s->n_hyp, &lo, &hi);
+  int unrefuted = 0, twins = 0;
+  uint32_t tmin = UINT32_MAX, tmax = 0;
+  for (int i = 0; i < s->n_hyp; i++) {
+    if (s->trials[i] < tmin) tmin = s->trials[i];
+    if (s->trials[i] > tmax) tmax = s->trials[i];
+    if (i == lead) continue;
+    double l2, h2;
+    nr_crc_interval(s->ok[i], s->trials[i], (unsigned)s->n_hyp, &l2, &h2);
+    if (h2 >= lo) unrefuted++;
+    if (h2 > max_hi) max_hi = h2;
+    if (s->ok[i] * 2 > s->ok[lead] && s->ok[lead] >= 4) twins++; /* a runner-up passing at >= half the leader's count */
+  }
+  const nr_pdsch_cfg_hypothesis_t *h = &s->hyp[lead];
+  LOG_A(PHY, "SENSING: SWEEPSTAT scored=%llu stale=%llu created=%llu reindexed=%llu live=%d | rnti=0x%04x tda=%u "
+             "n_hyp=%d outcomes=%llu trials[min=%u max=%u] leader=%d S=%u L=%u k0=%u tbl=%u ok=%u/%u lo=%.3f "
+             "max_other_hi=%.3f unrefuted=%d near_twins=%d winner=%d\n",
+        (unsigned long long)g_st_scored, (unsigned long long)g_st_stale, (unsigned long long)g_st_created,
+        (unsigned long long)g_st_reindexed, live, c->rnti, (unsigned)c->tda, s->n_hyp,
+        (unsigned long long)c->outcomes, tmin, tmax, lead, h->tda_start, h->tda_length, h->k0, h->mcs_table,
+        s->ok[lead], s->trials[lead], lo, max_hi, unrefuted, twins, s->winner);
 }
 
 bool nr_pdsch_config_sweep_feedback(const nr_pdsch_sweep_ticket_t *ticket, bool crc_ok,
@@ -1019,9 +1082,13 @@ bool nr_pdsch_config_sweep_feedback(const nr_pdsch_sweep_ticket_t *ticket, bool 
   pthread_mutex_lock(&g_lock);
   sweep_context_t *c = ticket_context(ticket);
   bool announced = false;
+  if (!c && ticket && ticket->generation)
+    g_st_stale++;
   if (c) {
     int w = nr_pdsch_config_sweep_feed(c->state, ticket->hypothesis, crc_ok);
     ++c->outcomes;
+    if ((++g_st_scored % 4096) == 0)
+      census_log(c);
     if (c->priored && c->state->winner < 0 && c->outcomes >= PRIOR_PROBATION) {
       double best_rate = 0.0;
       for (int i = 0; i < c->state->n_hyp; i++) {
@@ -1038,6 +1105,7 @@ bool nr_pdsch_config_sweep_feedback(const nr_pdsch_sweep_ticket_t *ticket, bool 
          * later context pay the same probation. */
         if (c->legality) {
           context_catalog(c, rnti_ctx(c->rnti, false));
+          context_reindexed(c);
         }
         if (c->priored == PRIORED_CELL) {
           g_prior.valid = false;
