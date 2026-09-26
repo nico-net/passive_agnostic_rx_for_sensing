@@ -5987,17 +5987,28 @@ constdiag_done:;
     dlsch_pdu.refPoint           = (is_dci10 && out.rnti_class == NR_BLIND_RNTI_CLASS_SI) ? 1 : 0;
     dlsch_pdu.dmrsConfigType     = out.dmrs_config_type ? NFAPI_NR_DMRS_TYPE2 : NFAPI_NR_DMRS_TYPE1; // the table the ports were read under
     dlsch_pdu.n_dmrs_cdm_groups  = out.n_dmrs_cdm_groups;
-    dlsch_pdu.dlDmrsScramblingId = fp->Nid_cell;
+    /* Blind DM-RS/data scrambling identities (Task 13): both default to PCI, which is what this
+     * cell happens to use (dataScramblingIdentityPDSCH unset -- nr_radio_config.c:1745), but
+     * neither is guaranteed on another deployment -- a wrong value descrambles to noise exactly
+     * like a wrong csirs_monitor scramb_id does, and nothing but the CRC rate would say so. */
+    const nr_dmrs_id_state_t *dl_dd = nr_pdsch_passive_dl_dmrs_id(out.nscid);
+    const int dl_dmrs_decided = dl_dd->decided ? dl_dd->best_id : -1;
+    dlsch_pdu.dlDmrsScramblingId = dl_dd->decided ? (uint16_t)dl_dd->best_id : fp->Nid_cell;
     dlsch_pdu.nscid              = out.nscid;
     dlsch_pdu.start_symbol       = out.start_symbol;
     dlsch_pdu.number_symbols     = out.num_symbols;
     dlsch_pdu.dlDmrsSymbPos      = out.dl_dmrs_symb_pos;
     dlsch_pdu.dmrs_ports         = out.dmrs_ports;
     // Only the passive PDSCH decode below reads these; harmless for the DM-RS-only path, which
-    // never looks past the allocation. dlDataScramblingId = PCI because this gNB leaves
-    // dataScramblingIdentityPDSCH unset (nr_radio_config.c:1745) -- re-verify per deployment, a
-    // wrong value descrambles to noise exactly like a wrong csirs_monitor scramb_id does.
-    dlsch_pdu.dlDataScramblingId = fp->Nid_cell;
+    // never looks past the allocation. dataScramblingIdentityPDSCH has no coherence statistic to
+    // score it blind (unlike DM-RS above) -- the TB CRC is the only oracle, so this RNTI's own
+    // sweep only advances past PCI once its config is otherwise converged and its CRC rate has
+    // stalled at 0 (see nr_pdsch_passive_data_id_current's doc); an unconverged/healthy RNTI stays
+    // on PCI forever, so a config mismatch is never misread as a scrambling mismatch.
+    const bool dl_data_advance = nr_pdsch_config_sweep_rnti_prior_get(out.rnti, NULL, NULL, NULL, NULL)
+                               && nr_pdsch_passive_rnti_crc_stalled(out.rnti, 20);
+    dlsch_pdu.dlDataScramblingId = nr_pdsch_passive_data_id_current(out.rnti, (uint16_t)fp->Nid_cell,
+                                                                    dl_dmrs_decided, dl_data_advance);
     dlsch_pdu.harq_process_nbr   = out.harq_pid;
     dlsch_pdu.number_rbs         = out.num_rb;
     dlsch_pdu.start_rb           = out.start_rb;
@@ -6112,6 +6123,7 @@ constdiag_done:;
                   : nr_slot_fep_fo_override_hz;  /* receive-thread sample; see nr_slot_fep_fo_override_hz */
       job.sweep_ticket  = sweep_ticket;
       job.bwp_entry     = cand_task[ti].bwp_entry;
+      job.data_id_advance = dl_data_advance;
       /* Wide layout set: this trial is a first-code-block probe, not a full decode. */
       /* ... until a layout family is PREFERRED by its own code-block CRCs: from then on every
        * trial is a full decode (the rank-4 bed converged at 22k grants and then sat at 0 % CRC
@@ -6307,6 +6319,7 @@ constdiag_done:;
                   : nr_slot_fep_fo_override_hz;  /* receive-thread sample */
               job.sweep_ticket  = sweep_ticket;
               job.bwp_entry     = cand_task[ti].bwp_entry;
+              job.data_id_advance = dl_data_advance;
               atomic_fetch_add_explicit(&g_enq_class[1][out.rnti_class], 1, memory_order_relaxed);
               ragrant_dump(&dlsch_pdu, &out, grant_mcs_table, css0_occasion, "normal");
               nr_pdsch_passive_queue_enqueue(&job);
@@ -6328,6 +6341,8 @@ constdiag_done:;
                 LOG_A(PHY, "SENSING: Technique D CONVERGED rnti=0x%x tda=%u S=%u L=%u mask=0x%x table=%u\n",
                       sweep_ticket.rnti, sweep_ticket.tda_index, winner.tda_start, winner.tda_length,
                       winner.dmrs_mask, winner.mcs_table);
+              if (dl_data_advance)
+                nr_pdsch_passive_data_id_feed(out.rnti, st == NR_PDSCH_PASSIVE_DECODE_CRC_OK);
             }
             if (st == NR_PDSCH_PASSIVE_DECODE_UNSUPPORTED) {
               g_dec_unsup++;
@@ -6537,7 +6552,7 @@ constdiag_done:;
       if (acq_period)
       {
       const nr_pdsch_xoverhead_state_t xo = nr_pdsch_xoverhead_snapshot();
-      const nr_dmrs_id_state_t *dd = nr_pdsch_passive_dl_dmrs_id(), *du = nr_pusch_passive_ul_dmrs_id();
+      const nr_dmrs_id_state_t *dd = nr_pdsch_passive_dl_dmrs_id(0), *du = nr_pusch_passive_ul_dmrs_id();
       LOG_I(PHY, "SENSING: ACQ state=%s time_in_state=%lu transitions=%lu regressions=%lu "
                  "in[len=%d coreset=%d ul_bwp=%d dl_win=%lu ul_win[w=%lu i=%lu]] "
                  "uldisc[gen=%lu raw=%d wcls=%d icls=%d wtrials=%lu itrials=%lu rejected_fb=%lu] "

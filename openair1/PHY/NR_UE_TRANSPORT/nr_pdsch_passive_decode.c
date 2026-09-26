@@ -28,6 +28,7 @@ extern _Atomic long nr_ue_diag_producer_absolute_slot;
 
 #include "nr_pdsch_passive_decode.h"
 #include "nr_pdsch_qm_oracle.h"
+#include "nr_scrambling_id_sweep.h" // per-RNTI dataScramblingIdentityPDSCH TB-CRC walk (Task 13)
 
 #include <stdlib.h>
 #include <string.h>
@@ -311,7 +312,7 @@ static int g_ptrs_cell_arm = -1;         // PT-RS arm, CELL-WIDE seed; under g_p
  * this is exactly the old cell-wide behaviour (its own latch is the only one, read back on the
  * next grant); the cell seed is then never promoted and never read past the first latch. */
 #define RNTI_DEC_MAX 16
-typedef struct { uint16_t rnti; uint64_t touched; int nl; nr_ptrs_sweep_t ptrs; } rnti_dec_t;
+typedef struct { uint16_t rnti; uint64_t touched; int nl; nr_ptrs_sweep_t ptrs; nr_scrambling_id_sweep_t data_id; } rnti_dec_t;
 static rnti_dec_t g_rnti_dec[RNTI_DEC_MAX];
 static uint64_t g_rnti_dec_clock;
 /* under g_ptrs_lock. ponytail: LRU by grant order, no idle clock -- an active UE is touched every
@@ -358,6 +359,31 @@ static int rnti_nl_latch(uint16_t rnti, int nl)
       }
   pthread_mutex_unlock(&g_ptrs_lock);
   return prev;
+}
+/* Per-RNTI dataScramblingIdentityPDSCH sweep (Task 13). See nr_pdsch_passive_decode.h's comment for
+ * the contract; `advance_ok` (Technique D converged + this RNTI's CRC rate stalled at 0, checked by
+ * the caller in nr_pdcch_blind_monitor_rt.c, which has both those signals in scope) is what keeps a
+ * healthy RNTI decoding under PCI forever -- the sweep is lazily seeded on the first call that is
+ * actually allowed to advance, from (pci, dmrs_id) as they stood at that moment. */
+uint16_t nr_pdsch_passive_data_id_current(uint16_t rnti, uint16_t pci, int dmrs_id, bool advance_ok)
+{
+  if (!advance_ok)
+    return pci;
+  pthread_mutex_lock(&g_ptrs_lock);
+  rnti_dec_t *r = rnti_dec(rnti);
+  if (r->data_id.n == 0)
+    nr_scrambling_id_sweep_init(&r->data_id, pci, dmrs_id);
+  const int id = nr_scrambling_id_sweep_current(&r->data_id);
+  pthread_mutex_unlock(&g_ptrs_lock);
+  return (uint16_t)(id >= 0 ? id : pci);
+}
+void nr_pdsch_passive_data_id_feed(uint16_t rnti, bool tb_crc_ok)
+{
+  pthread_mutex_lock(&g_ptrs_lock);
+  rnti_dec_t *r = rnti_dec(rnti);
+  if (r->data_id.n > 0)
+    nr_scrambling_id_sweep_feed(&r->data_id, tb_crc_ok ? 1 : 0);
+  pthread_mutex_unlock(&g_ptrs_lock);
 }
 static int rnti_ptrs_pick(uint16_t rnti)
 {

@@ -21,6 +21,7 @@
 #include "PHY/defs_gNB.h"
 #include "PHY/defs_RU.h"          // RU_RX_SLOT_DEPTH -- the gNB rxdataF ring depth
 #include "PHY/NR_UE_TRANSPORT/nr_dmrs_id_estimate.h" // blind UL DM-RS identity estimate
+#include "PHY/NR_UE_TRANSPORT/nr_scrambling_id_sweep.h" // blind UL data (PUSCH) scrambling identity (Task 13)
 #include "PHY/NR_UE_TRANSPORT/nr_pusch_passive_queue.h" // nr_pusch_passive_queue_running()
 #include "PHY/MODULATION/modulation_UE.h"
 #include "PHY/NR_TRANSPORT/nr_transport_proto.h"
@@ -98,6 +99,33 @@ static nr_dmrs_id_state_t g_ul_dmrs_id;
 static bool g_ul_dmrs_id_init;
 static pthread_mutex_t g_ul_dmrs_id_lock = PTHREAD_MUTEX_INITIALIZER;
 const nr_dmrs_id_state_t *nr_pusch_passive_ul_dmrs_id(void) { return &g_ul_dmrs_id; }
+
+/* dataScramblingIdentityPUSCH sweep (Task 13), cell-wide like the DM-RS estimate above. */
+static nr_scrambling_id_sweep_t g_ul_data_id;
+static bool g_ul_data_id_init;
+static pthread_mutex_t g_ul_data_id_lock = PTHREAD_MUTEX_INITIALIZER;
+bool nr_pusch_passive_ul_crc_stalled(uint32_t min_tries)
+{
+  return atomic_load_explicit(&g_try, memory_order_relaxed) >= min_tries
+      && atomic_load_explicit(&g_crc_ok, memory_order_relaxed) == 0;
+}
+uint16_t nr_pusch_passive_data_id_current(uint16_t pci, int dmrs_id, bool advance_ok)
+{
+  if (!advance_ok)
+    return pci;
+  pthread_mutex_lock(&g_ul_data_id_lock);
+  if (!g_ul_data_id_init) { nr_scrambling_id_sweep_init(&g_ul_data_id, pci, dmrs_id); g_ul_data_id_init = true; }
+  const int id = nr_scrambling_id_sweep_current(&g_ul_data_id);
+  pthread_mutex_unlock(&g_ul_data_id_lock);
+  return (uint16_t)(id >= 0 ? id : pci);
+}
+void nr_pusch_passive_data_id_feed(bool tb_crc_ok)
+{
+  pthread_mutex_lock(&g_ul_data_id_lock);
+  if (g_ul_data_id_init)
+    nr_scrambling_id_sweep_feed(&g_ul_data_id, tb_crc_ok ? 1 : 0);
+  pthread_mutex_unlock(&g_ul_data_id_lock);
+}
 static _Atomic uint64_t g_seg_fail, g_zero_tb;
 /* Residual the channel estimator can absorb on its own: MAX_DELAY_COMP is 20 samples, so anything
  * beyond a comfortable fraction of that is worth re-placing the window for rather than hoping. */
@@ -1227,6 +1255,8 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
     atomic_fetch_add_explicit(&g_seg_fail, 1, memory_order_relaxed);
     out->status = NR_PUSCH_PASSIVE_CRC_FAIL;
     out->reject_reason = "segment or final transport-block CRC failed";
+    if (g->data_id_advance)
+      nr_pusch_passive_data_id_feed(false);
     return false;
   }
 
@@ -1255,6 +1285,8 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
   out->status = NR_PUSCH_PASSIVE_OK;
   out->tb     = hp->b;
   atomic_fetch_add_explicit(&g_crc_ok, 1, memory_order_relaxed);
+  if (g->data_id_advance)
+    nr_pusch_passive_data_id_feed(true);
   {
     /* dataScramblingIdentityPUSCH, same argument as the DL: a CRC-OK TB under this n_ID is proof. */
     static _Atomic int s_ul_scr_confirmed;

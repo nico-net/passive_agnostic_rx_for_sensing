@@ -131,6 +131,15 @@ extern "C" {
 #endif
 /* Read-only view of the UL DM-RS identity estimate (diagnostic; plain ints, racy by design). */
 const nr_dmrs_id_state_t *nr_pusch_passive_ul_dmrs_id(void);
+/* dataScramblingIdentityPUSCH sweep (Task 13), cell-wide (like the DM-RS estimate above -- this
+ * deployment has one UL BWP, so there is nothing to key it by yet; unlike the DL side there is no
+ * per-RNTI Technique D convergence signal to gate on, so nr_pusch_passive_ul_crc_stalled's own
+ * try/ok counters (g_try/g_crc_ok) are the whole gate). `current()`/`feed()` follow the same
+ * contract as the DL nr_pdsch_passive_data_id_* pair. */
+uint16_t nr_pusch_passive_data_id_current(uint16_t pci, int dmrs_id, bool advance_ok);
+void     nr_pusch_passive_data_id_feed(bool tb_crc_ok);
+/* True when at least min_tries UL decodes have been attempted and NONE passed CRC. */
+bool nr_pusch_passive_ul_crc_stalled(uint32_t min_tries);
 #ifdef __cplusplus
 }
 #endif

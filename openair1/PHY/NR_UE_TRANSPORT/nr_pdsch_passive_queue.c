@@ -244,10 +244,24 @@ static _Atomic uint64_t g_crc_ok        = 0;
 /* DL DM-RS identity estimate: one process-wide accumulator shared by every consumer, so evidence
  * from all of them adds. The 1024-candidate sweep runs under this lock on the consumer that
  * happens to hold it -- off the RT thread by construction, since this file IS the consumer. */
-static nr_dmrs_id_state_t g_dl_dmrs_id;
-static bool g_dl_dmrs_id_init;
-static pthread_mutex_t g_dl_dmrs_id_lock = PTHREAD_MUTEX_INITIALIZER;
-const nr_dmrs_id_state_t *nr_pdsch_passive_dl_dmrs_id(void) { return &g_dl_dmrs_id; }
+/* One state per nSCID (TS 38.211 scramblingID0 vs scramblingID1 are independent RRC fields, so a
+ * cell that sets them differently needs two separate estimates -- a single shared state would
+ * average two different true identities into neither). */
+#define NR_DL_DMRS_NSCID 2
+static nr_dmrs_id_state_t g_dl_dmrs_id[NR_DL_DMRS_NSCID];
+static bool g_dl_dmrs_id_init[NR_DL_DMRS_NSCID];
+static pthread_mutex_t g_dl_dmrs_id_lock[NR_DL_DMRS_NSCID] = {PTHREAD_MUTEX_INITIALIZER, PTHREAD_MUTEX_INITIALIZER};
+/* Stage-2 escalation (0..1023 -> 1024..65535) only once stage 1 has this many grants without
+ * deciding -- enough to trust the margin gate's "not in this window" verdict, not merely "not
+ * enough evidence yet" (nr_dmrs_id_decide already requires >= 16 grants per attempt). Once
+ * escalated, accumulate() is THROTTLED: measured 170360 us for one stage-2 (64512-candidate)
+ * accumulate vs ~2 ms for a 1024-candidate one at similar geometry, i.e. running it every job would
+ * cost far more than the ~775 us decode budget it must stay off of. One in NR_DL_DMRS_STAGE2_THROTTLE
+ * amortises to ~83 us/job. */
+#define NR_DL_DMRS_STAGE1_GRANTS 64
+#define NR_DL_DMRS_STAGE2_THROTTLE 2048
+static uint32_t g_dl_dmrs_stage2_skip[NR_DL_DMRS_NSCID];
+const nr_dmrs_id_state_t *nr_pdsch_passive_dl_dmrs_id(int nscid) { return &g_dl_dmrs_id[nscid & 1]; }
 static pthread_mutex_t g_dl_rank_lock = PTHREAD_MUTEX_INITIALIZER;
 static uint64_t g_rank_n[4], g_rank_low[4], g_rank_total; static double g_rank_sum[4];
 static uint64_t g_cdm_empty[4]; static double g_cdm_sum[4];
@@ -324,6 +338,18 @@ void nr_pdsch_passive_queue_rnti_census(char *buf, size_t n)
     ++shown;
   }
   if (!shown) snprintf(buf, n, " (none>=50)");
+}
+/* True when this RNTI has attempted at least min_tries decodes and NONE of them passed CRC -- the
+ * gate for advancing the per-RNTI dataScramblingIdentityPDSCH sweep (nr_pdcch_blind_monitor_rt.c):
+ * a persistently-zero CRC rate under an otherwise-converged config (see the Technique D prior check
+ * at that call site) is the one situation where trying a different data identity is warranted
+ * rather than a guaranteed waste of an LDPC decode. Reuses the census counters above rather than
+ * adding a second per-RNTI counter pair. */
+bool nr_pdsch_passive_rnti_crc_stalled(uint16_t rnti, uint32_t min_tries)
+{
+  const uint32_t d  = atomic_load_explicit(&g_rnti_dec[rnti], memory_order_relaxed);
+  const uint32_t ok = atomic_load_explicit(&g_rnti_ok[rnti], memory_order_relaxed);
+  return d >= min_tries && ok == 0;
 }
 static _Atomic uint64_t g_dropped_full  = 0; // evicted oldest to admit a newer job
 static _Atomic uint64_t g_dropped_narrow = 0; // budget: narrow grant refused while the ring was nearly full
@@ -1042,21 +1068,43 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
           }
           pthread_mutex_unlock(&g_dl_rank_lock);
         }
-        if (pr_nrb > 0 && crc && pdu->dmrsConfigType == 0 && pdu->dlDmrsSymbPos && pthread_mutex_trylock(&g_dl_dmrs_id_lock) == 0) {
-          if (!g_dl_dmrs_id_init) { nr_dmrs_id_init(&g_dl_dmrs_id, "PDSCH", pdu->dlDmrsScramblingId); g_dl_dmrs_id_init = true; }
-          if (!g_dl_dmrs_id.decided) {
-            const NR_DL_FRAME_PARMS *fp = &ue->frame_parms;
-            const int sym = __builtin_ctz((unsigned)pdu->dlDmrsSymbPos);
-            /* Same two quantities the estimator itself derives (nr_dl_channel_estimation.c). */
-            const int rb_offset = pr_rb0 + (pdu->refPoint ? 0 : pdu->BWPStart);
-            const int start_sc  = fp->first_carrier_offset + (pdu->BWPStart + pr_rb0) * 12;
-            if (nr_dmrs_id_accumulate(&g_dl_dmrs_id, &rxdataF[0][sym * fp->ofdm_symbol_size], fp->ofdm_symbol_size,
-                                      start_sc, rb_offset, pr_nrb, fp->N_RB_DL, fp->symbols_per_slot,
-                                      job.nr_slot_rx, sym, pdu->nscid, fp->Ncp == NR_NORMAL))
-              nr_dmrs_id_decide(&g_dl_dmrs_id, 16, 10.0);
+        /* DM-RS identity: accumulated on EVERY decode attempt, CRC-OK or not -- the DM-RS sequence
+         * is fixed by (nid, slot, symbol) regardless of whether the payload later decodes, so
+         * gating this on `crc` would be circular: under a wrong id the CRC never passes, so the
+         * identity that would explain the failures could never be measured. */
+        const int dl_ns = pdu->nscid & 1;
+        if (pr_nrb > 0 && pdu->dmrsConfigType == 0 && pdu->dlDmrsSymbPos && pthread_mutex_trylock(&g_dl_dmrs_id_lock[dl_ns]) == 0) {
+          nr_dmrs_id_state_t *dst = &g_dl_dmrs_id[dl_ns];
+          if (!g_dl_dmrs_id_init[dl_ns]) { nr_dmrs_id_init(dst, "PDSCH", pdu->dlDmrsScramblingId); g_dl_dmrs_id_init[dl_ns] = true; }
+          if (!dst->decided) {
+            bool do_accum = true;
+            if (dst->range_first > 0) // stage 2: throttle, ~64x the cost of stage 1 (see the constant's comment)
+              do_accum = (g_dl_dmrs_stage2_skip[dl_ns]++ % NR_DL_DMRS_STAGE2_THROTTLE) == 0;
+            if (do_accum) {
+              const NR_DL_FRAME_PARMS *fp = &ue->frame_parms;
+              const int sym = __builtin_ctz((unsigned)pdu->dlDmrsSymbPos);
+              /* Same two quantities the estimator itself derives (nr_dl_channel_estimation.c). */
+              const int rb_offset = pr_rb0 + (pdu->refPoint ? 0 : pdu->BWPStart);
+              const int start_sc  = fp->first_carrier_offset + (pdu->BWPStart + pr_rb0) * 12;
+              if (nr_dmrs_id_accumulate(dst, &rxdataF[0][sym * fp->ofdm_symbol_size], fp->ofdm_symbol_size,
+                                        start_sc, rb_offset, pr_nrb, fp->N_RB_DL, fp->symbols_per_slot,
+                                        job.nr_slot_rx, sym, pdu->nscid, fp->Ncp == NR_NORMAL)
+                  && !nr_dmrs_id_decide(dst, 16, 10.0)
+                  && dst->range_first == 0 && dst->grants >= NR_DL_DMRS_STAGE1_GRANTS) {
+                /* Stage 1 exhausted without a decision: the true identity is evidently outside
+                 * 0..1023. Escalate to the full remaining space. */
+                nr_dmrs_id_set_range(dst, NR_DMRS_ID_CANDIDATES, NR_DMRS_ID_SPACE - NR_DMRS_ID_CANDIDATES);
+              }
+            }
           }
-          pthread_mutex_unlock(&g_dl_dmrs_id_lock);
+          pthread_mutex_unlock(&g_dl_dmrs_id_lock[dl_ns]);
         }
+        /* Data (PDSCH) scrambling identity: feed the outcome back to the per-RNTI sweep the wiring
+         * in nr_pdcch_blind_monitor_rt.c consulted when it chose this grant's dlDataScramblingId --
+         * only for grants where that sweep's own candidate was actually used (data_id_advance),
+         * so an attempt that used the PCI fallback never perturbs a sweep it did not use. */
+        if (job.data_id_advance)
+          nr_pdsch_passive_data_id_feed(job.rnti, crc);
       }
       /* Technique D scoring: the TB CRC is the only oracle that can tell a right payload
        * interpretation from a wrong one, and this is the one place it is known. */

@@ -79,6 +79,8 @@
 
 #include "nr_pdcch_coreset_map.h"        // Phase 3 Technique A: nr_pdcch_coreset_map_scan()
 #include "nr_pdcch_dci_length_sweep.h"   // Phase 3 Technique C: nr_pdcch_dci_length_sweep()
+#include "nr_dmrs_id_estimate.h"         // blind UL DM-RS scrambling-identity estimate (Task 13)
+#include "nr_pusch_passive_decode.h"     // nr_pusch_passive_ul_dmrs_id / data-ID sweep (Task 13)
 #include "nr_pdcch_al1_map.h"            // AL1 cover lap (ISAC_AL1_COVER=1)
 
 // ---------------------------------------------------------------------------------------------
@@ -4359,9 +4361,22 @@ static bool blind_ul_finish(const nr_pdcch_blind_ul_opts_t* opts,
   out->dmrs_ports        = ports;
   out->antenna_ports_field = (uint8_t)antenna_ports;
   out->transform_precoding = (uint8_t)((opts->transform_precoding == 1) ? 1 : 0);
-  out->data_scrambling_id  = (uint16_t)((opts->data_scrambling_id >= 0) ? opts->data_scrambling_id : opts->phy_cell_id);
-  out->ul_dmrs_scrambling_id =
-      (uint16_t)((opts->ul_dmrs_scrambling_id >= 0) ? opts->ul_dmrs_scrambling_id : opts->phy_cell_id);
+  /* Blind DM-RS/data scrambling identities (Task 13), same argument as the DL side: both default
+   * to the PCI, which is only an assumption -- the DM-RS identity has a coherence estimator that
+   * needs no CRC (nr_pusch_passive_ul_dmrs_id), applied here whenever it has decided; the data
+   * identity has no such estimator (the TB CRC is the only oracle for it) and only advances past
+   * the PCI once the UL is otherwise stuck at zero CRC (nr_pusch_passive_ul_crc_stalled), so a
+   * healthy link never touches the sweep. An explicit opts override (>= 0) always wins over either. */
+  const nr_dmrs_id_state_t *ul_dd = nr_pusch_passive_ul_dmrs_id();
+  const uint16_t ul_dmrs_fallback = ul_dd->decided ? (uint16_t)ul_dd->best_id : (uint16_t)opts->phy_cell_id;
+  out->ul_dmrs_scrambling_id = (uint16_t)((opts->ul_dmrs_scrambling_id >= 0) ? opts->ul_dmrs_scrambling_id : ul_dmrs_fallback);
+  const bool ul_data_explicit = opts->data_scrambling_id >= 0;
+  const bool ul_data_stalled  = !ul_data_explicit && nr_pusch_passive_ul_crc_stalled(20);
+  const uint16_t ul_data_fallback = nr_pusch_passive_data_id_current((uint16_t)opts->phy_cell_id,
+                                                                     ul_dd->decided ? ul_dd->best_id : -1,
+                                                                     ul_data_stalled);
+  out->data_scrambling_id = ul_data_explicit ? (uint16_t)opts->data_scrambling_id : ul_data_fallback;
+  out->data_id_advance    = ul_data_stalled; // feed() only for grants that actually used the sweep
   out->plausible     = true;
   out->reject_reason = NULL;
   return true;
