@@ -54,6 +54,7 @@ extern __thread int nr_dlsch_chest_per_symbol; // nr_dlsch_demodulation.c: read 
 #include "nr_pdsch_ptrs_unav.h"
 #include "nr_agnostic_v2.h"
 #include "nr_pdsch_prb_set.h" // nr_prb_segments, nr_prb_gather_index (non-contiguous PRB sets)
+#include "nr_arm_sweep.h" // generic per-RNTI Wilson pick/latch core shared by the VRB-L and PRG sweeps
 _Static_assert(sizeof(((freq_alloc_bitmap_t *)0)->prb_list) == NR_PRB_SET_MAX * sizeof(uint16_t),
                "freq_alloc_bitmap_t.prb_list (common/utils/bits.h) must hold NR_PRB_SET_MAX PRBs");
 #include "common/utils/threadPool/task_ans.h" // init_task_ans/join_task_ans/completed_task_ans, for the per-antenna FEP dispatch below
@@ -310,84 +311,27 @@ static int g_ptrs_cell_arm = -1;         // PT-RS arm, CELL-WIDE seed; under g_p
  * this is exactly the old cell-wide behaviour (its own latch is the only one, read back on the
  * next grant); the cell seed is then never promoted and never read past the first latch. */
 /* PER-RNTI DCI 1_1 VRB-to-PRB BUNDLE SIZE (L=2 or L=4, RRC vrb-ToPRB-Interleaver -- invisible to a
- * passive receiver): a minimal 2-arm hypothesis decided by the TB CRC, same shape as the PT-RS
- * sweep above (Wilson-interval arm selection + latch) but WITHOUT nr_hyp_sweep's ~1.16 MB
- * nr_hyp_sweep_state_t (measured from its only two users in-tree -- see
- * openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_discovery.c's own sizing comment) -- just two
- * trial/pass counters and a latch, RNTI_DEC_MAX (16) of which cost nothing worth heap-allocating.
- * arm 0 = L2, arm 1 = L4. */
+ * passive receiver) and PER-RNTI PRB-BUNDLING/PRG SIZE (0=wideband/2/4, RRC PRB-bundling-type --
+ * also invisible): two small hypotheses decided by the TB CRC, same shape as the PT-RS sweep above
+ * (Wilson-interval arm selection + latch), both built on nr_arm_sweep.h's generic pick/latch core
+ * rather than each re-deriving it -- WITHOUT nr_hyp_sweep's ~1.16 MB nr_hyp_sweep_state_t (measured
+ * from its only two users in-tree -- see openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_discovery.c's own
+ * sizing comment): just a couple of trial/pass counters and a latch per sweep, RNTI_DEC_MAX (16) of
+ * which cost nothing worth heap-allocating.
+ * VRB-L: arm 0 = L2, arm 1 = L4 (nr_pdsch_vrbl_pick() below).
+ * PRG:   arm 0 = wideband (prg=0), arm 1 = 2, arm 2 = 4 (nr_prg_arm_value() below). */
 #define NR_VRBL_ARMS 2
-#define VRBL_LATCH_MIN_OK 8
-typedef struct { uint32_t tr[NR_VRBL_ARMS], ok[NR_VRBL_ARMS]; int latched; } nr_vrbl_sweep_t;
-static void vrbl_wilson(uint32_t ok, uint32_t n, double *lo, double *hi)
-{
-  if (n == 0) { *lo = 0.0; *hi = 1.0; return; }
-  const double z = 1.96, nn = (double)n, p = (double)ok / nn, d = 1.0 + z * z / nn;
-  const double c = p + z * z / (2.0 * nn), q = z * sqrt(p * (1.0 - p) / nn + z * z / (4.0 * nn * nn));
-  *lo = (c - q) / d; *hi = (c + q) / d;
-  if (*lo < 0.0) *lo = 0.0;
-  if (*hi > 1.0) *hi = 1.0;
-}
-static int vrbl_sweep_pick(const nr_vrbl_sweep_t *s)
-{
-  if (s->latched >= 0)
-    return s->latched;
-  int lead = -1;
-  double lead_p = -1.0;
-  for (int a = 0; a < NR_VRBL_ARMS; a++)
-    if (s->tr[a] > 0 && (double)s->ok[a] / (double)s->tr[a] > lead_p) {
-      lead_p = (double)s->ok[a] / (double)s->tr[a];
-      lead = a;
-    }
-  if (lead >= 0 && s->ok[lead] >= VRBL_LATCH_MIN_OK) {
-    double llo, lhi;
-    vrbl_wilson(s->ok[lead], s->tr[lead], &llo, &lhi);
-    for (int a = 0; a < NR_VRBL_ARMS; a++) {
-      if (a == lead)
-        continue;
-      double lo, hi;
-      vrbl_wilson(s->ok[a], s->tr[a], &lo, &hi);
-      if (hi >= llo)
-        return a; /* still contending: spend a trial ruling it out */
-    }
-    return lead;
-  }
-  int arg = 0;
-  double best = -1.0;
-  for (int a = 0; a < NR_VRBL_ARMS; a++) {
-    double lo, hi;
-    vrbl_wilson(s->ok[a], s->tr[a], &lo, &hi);
-    if (hi > best + 1e-12 || (fabs(hi - best) <= 1e-12 && s->tr[a] < s->tr[arg])) {
-      best = hi;
-      arg = a;
-    }
-  }
-  return arg;
-}
-static int vrbl_sweep_feed(nr_vrbl_sweep_t *s, int arm, bool tb_ok)
-{
-  if (arm < 0 || arm >= NR_VRBL_ARMS || s->latched >= 0)
-    return s->latched;
-  s->tr[arm]++;
-  if (tb_ok)
-    s->ok[arm]++;
-  if (s->ok[arm] < VRBL_LATCH_MIN_OK)
-    return -1;
-  double lo, hi;
-  vrbl_wilson(s->ok[arm], s->tr[arm], &lo, &hi);
-  for (int a = 0; a < NR_VRBL_ARMS; a++) {
-    if (a == arm)
-      continue;
-    double lo2, hi2;
-    vrbl_wilson(s->ok[a], s->tr[a], &lo2, &hi2);
-    if (hi2 >= lo)
-      return -1;
-  }
-  s->latched = arm;
-  return arm;
-}
+#define NR_PRG_ARMS 3
+typedef nr_arm_sweep_t nr_vrbl_sweep_t;
+typedef nr_arm_sweep_t nr_prg_sweep_t;
+static int vrbl_sweep_pick(const nr_vrbl_sweep_t *s) { return nr_arm_sweep_pick(s, NR_VRBL_ARMS); }
+static int vrbl_sweep_feed(nr_vrbl_sweep_t *s, int arm, bool tb_ok) { return nr_arm_sweep_feed(s, NR_VRBL_ARMS, arm, tb_ok); }
+static int prg_sweep_pick(const nr_prg_sweep_t *s) { return nr_arm_sweep_pick(s, NR_PRG_ARMS); }
+static int prg_sweep_feed(nr_prg_sweep_t *s, int arm, bool tb_ok) { return nr_arm_sweep_feed(s, NR_PRG_ARMS, arm, tb_ok); }
+/// arm -> PRB-bundling size (0/2/4), the field prg_sweep's arm index maps to.
+static uint8_t nr_prg_arm_value(int arm) { return arm == 2 ? 4 : (arm == 1 ? 2 : 0); }
 #define RNTI_DEC_MAX 16
-typedef struct { uint16_t rnti; uint64_t touched; int nl; nr_ptrs_sweep_t ptrs; nr_vrbl_sweep_t vrbl; } rnti_dec_t;
+typedef struct { uint16_t rnti; uint64_t touched; int nl; nr_ptrs_sweep_t ptrs; nr_vrbl_sweep_t vrbl; nr_prg_sweep_t prg; } rnti_dec_t;
 static rnti_dec_t g_rnti_dec[RNTI_DEC_MAX];
 static uint64_t g_rnti_dec_clock;
 /* under g_ptrs_lock. ponytail: LRU by grant order, no idle clock -- an active UE is touched every
@@ -410,6 +354,7 @@ static rnti_dec_t *rnti_dec(uint16_t rnti)
   nr_ptrs_sweep_init(&r->ptrs);
   r->ptrs.latched = g_ptrs_cell_arm; // seed: a cell-wide arm, or -1 = sweep from scratch
   r->vrbl.latched = -1; // tr/ok already zeroed by the memset above
+  r->prg.latched = -1;  // tr/ok already zeroed by the memset above
   return r;
 }
 static int rnti_nl_get(uint16_t rnti)
@@ -473,6 +418,20 @@ static int rnti_vrbl_feed(uint16_t rnti, int arm, bool tb_ok)
 int nr_pdsch_vrbl_pick(uint16_t rnti)
 {
   return rnti_vrbl_pick(rnti) == 1 ? 4 : 2;
+}
+static int rnti_prg_pick(uint16_t rnti)
+{
+  pthread_mutex_lock(&g_ptrs_lock);
+  const int arm = prg_sweep_pick(&rnti_dec(rnti)->prg);
+  pthread_mutex_unlock(&g_ptrs_lock);
+  return arm;
+}
+static int rnti_prg_feed(uint16_t rnti, int arm, bool tb_ok)
+{
+  pthread_mutex_lock(&g_ptrs_lock);
+  const int latched = prg_sweep_feed(&rnti_dec(rnti)->prg, arm, tb_ok);
+  pthread_mutex_unlock(&g_ptrs_lock);
+  return latched;
 }
 /* RBMAP: which RBs the cell actually allocated, for the dashboard's spectrum strip. One counter per
  * RB, incremented per accepted grant over its allocation, printed as 273 density digits and reset --
@@ -1362,6 +1321,30 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
   out->status = NR_PDSCH_PASSIVE_DECODE_UNSUPPORTED;
 
   NR_DL_FRAME_PARMS *fp = &ue->frame_parms;
+
+  /* ---- PRB-BUNDLING (PRG) HYPOTHESIS (full-running-agnosticity Task 12) -----------------------
+   * RRC pdsch-Config PRB-bundling-type/bundleSize decides whether the gNB may switch precoder
+   * every `prg` PRBs; interpolating the channel estimate across that boundary mixes two precoders
+   * and costs CRC on a commercial MIMO cell. That field is invisible here, so it is a per-RNTI
+   * 3-arm hypothesis {wideband(0), 2, 4} decided by the TB CRC -- same shape as the VRB-L sweep,
+   * except a wrong prg guess only moves chest INTERPOLATION boundaries, never which REs are read,
+   * so (unlike VRB-L) the whole hypothesis lives here instead of needing a caller-side PRB-list
+   * rebuild. An explicit caller-set freq_alloc->prg (no producer sets one today) always wins, and
+   * the GPU front end already computed its channel estimate assuming prg==0 (it bails to CPU for
+   * any nonzero prg -- nr_pdsch_passive_gpu_job()) so this sweep does not run on a GPU-assisted
+   * decode either. Arm 0 (wideband) is a true no-op: `freq_alloc` is left pointing at the caller's
+   * own struct, so an unlatched RNTI still on arm 0 costs nothing beyond the reads below. */
+  freq_alloc_bitmap_t fa_prg;
+  int prg_arm = -1;
+  if (freq_alloc->prg == 0 && t_llr_ovr_n == 0) {
+    prg_arm = rnti_prg_pick(grant->rnti);
+    const uint8_t prg_val = nr_prg_arm_value(prg_arm);
+    if (prg_val != 0) {
+      fa_prg = *freq_alloc;
+      fa_prg.prg = prg_val;
+      freq_alloc = &fa_prg;
+    }
+  }
 
   /* ---- NON-CONTIGUOUS PRB SETS (full-running-agnosticity Task 9) ------------------------------
    * freq_alloc->n_prb_list > 0 carries a DATA-ORDERED PRB list (RA type 0, interleaved VRB) and
@@ -3286,6 +3269,14 @@ gpu_llr_ready:;
       const int latched = rnti_vrbl_feed(grant->rnti, grant->vrb_l == 4 ? 1 : 0, ldpc_ok);
       if (latched >= 0)
         LOG_A(PHY, "SENSING: VRB_IL rnti=0x%x L=%u latched\n", grant->rnti, latched == 0 ? 2 : 4);
+    }
+    /* PRB-bundling (PRG) hypothesis feedback (prg_arm < 0 when nothing was swept for this decode --
+     * the caller had already set an explicit freq_alloc->prg, or a GPU-assisted decode -- see the
+     * pick site above). */
+    if (prg_arm >= 0) {
+      const int latched = rnti_prg_feed(grant->rnti, prg_arm, ldpc_ok);
+      if (latched >= 0)
+        LOG_A(PHY, "SENSING: PRG rnti=0x%x prg=%u latched\n", grant->rnti, nr_prg_arm_value(latched));
     }
     {
       /* 1 = decoded with data, 0 = zero_tb, 2 = seg_fail. `out->status` is not set yet here, so the

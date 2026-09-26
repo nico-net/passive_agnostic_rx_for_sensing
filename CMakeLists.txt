@@ -2581,6 +2581,12 @@ if(ENABLE_TESTS)
   add_dependencies(tests test_nr_mrc_weights)
   add_test(NAME test_nr_mrc_weights COMMAND ./test_nr_mrc_weights)
 
+  add_executable(test_nr_arm_sweep ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_arm_sweep_test.cc)
+  target_include_directories(test_nr_arm_sweep PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
+  target_link_libraries(test_nr_arm_sweep PRIVATE GTest::gtest m)
+  add_dependencies(tests test_nr_arm_sweep)
+  add_test(NAME test_nr_arm_sweep COMMAND ./test_nr_arm_sweep)
+
   add_executable(test_nr_pdsch_ptrs_unav ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_pdsch_ptrs_unav_test.cc
                                          ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_ptrs_unav.c)
   target_include_directories(test_nr_pdsch_ptrs_unav PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
