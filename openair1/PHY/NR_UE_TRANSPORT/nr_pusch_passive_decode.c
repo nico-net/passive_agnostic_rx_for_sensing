@@ -16,6 +16,7 @@
 #include "PHY/nr_phy_common/inc/nr_phy_common.h" // nr_fo_compensation: the same de-rotation nr_slot_fep uses
 
 #include "nr_pusch_passive_decode.h"
+#include "nr_pusch_passive_dmrs_pdu.h"
 #include "nr_pusch_data_aided.h"
 #include "nr_pdsch_prb_set.h"
 
@@ -505,13 +506,7 @@ static void fill_pusch_pdu(const nr_pdcch_blind_ul_result_t *g, int nant,
   p->data_scrambling_id = g->data_scrambling_id;
   p->nrOfLayers         = g->nrOfLayers;
 
-  p->ul_dmrs_symb_pos   = g->ul_dmrs_symb_pos;
-  p->dmrs_config_type   = g->dmrs_config_type;
-  p->ul_dmrs_scrambling_id = g->ul_dmrs_scrambling_id;
-  p->pusch_identity     = g->ul_dmrs_scrambling_id;
-  p->scid               = g->nscid;
-  p->num_dmrs_cdm_grps_no_data = g->n_dmrs_cdm_groups;
-  p->dmrs_ports         = g->dmrs_ports;
+  nr_pusch_passive_fill_dmrs_pdu(g, fp->Nid_cell, p);
 
   /* LDPC consumes the allocated count. Gapped physical geometry is passed to the
    * demodulator explicitly as a PRB list, not disguised as a contiguous span. */
@@ -742,12 +737,6 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
     out->reject_reason = "multi-layer PUSCH";
     return false;
   }
-  if (g->transform_precoding) {
-    atomic_fetch_add_explicit(&g_rej_unsup, 1, memory_order_relaxed);
-    out->status = NR_PUSCH_PASSIVE_UNSUPPORTED;
-    out->reject_reason = "DFT-s-OFDM (transform precoding) not wired";
-    return false;
-  }
   if (g->rv != 0) {
     /* No HARQ history: a passive receiver has no earlier redundancy version to combine with, so an
      * rv != 0 transmission carries only incremental parity and cannot be decoded standalone. The
@@ -855,6 +844,12 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
   PUSCH_STAGE(3, "FEP done");
   nfapi_nr_pusch_pdu_t pdu;
   fill_pusch_pdu(g, nant, fp, &pdu);
+  static atomic_bool tp_scope_logged = false;
+  if (g->transform_precoding && !atomic_exchange_explicit(&tp_scope_logged, true, memory_order_relaxed)) {
+    LOG_A(PHY, "PUSCH TP scope: PCI-default nPUSCH-Identity=%u, no group/sequence hopping; "
+               "explicit nPUSCH-Identity/hopping discovery unsupported, hypothesis needs CRC validation\n",
+          pdu.pusch_identity);
+  }
   /* The reused estimator takes its pilot seed from this private context.
    * Keep physical PCI in frame_parms separate from the grant's DM-RS identity. */
   gnb->gNB_config.cell_config.phy_cell_id.value = g->ul_dmrs_scrambling_id;
