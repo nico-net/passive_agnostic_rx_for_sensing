@@ -2544,6 +2544,7 @@ if(ENABLE_TESTS)
   # The footprint tests call OAI's own mapping table (get_csi_mapping_parms), hence the same PHY
   # sources and libraries as test_nr_csirs_blind_synth below.
   add_executable(test_nr_csirs_blind_search ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_csirs_blind_search_test.cc
+                                            ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_csirs_blind_rt_test_bridge.c
                                             ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_csirs_blind_search.c
                                             ${OPENAIR1_DIR}/PHY/nr_phy_common/src/nr_phy_common_csirs.c
                                             ${OPENAIR1_DIR}/PHY/NR_REFSIG/refsig.c

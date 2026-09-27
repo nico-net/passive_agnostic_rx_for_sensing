@@ -83,6 +83,15 @@ bool nr_csirs_blind_infer_period(const uint32_t *hit_slots, int n_hits, int min_
   if (hit_slots == NULL || n_hits < 2 || min_hits < 2 || n_hits < min_hits) {
     return false;
   }
+  int distinct = 0;
+  for (int i = 0; i < n_hits; i++) {
+    bool duplicate = false;
+    for (int j = 0; j < i; j++)
+      duplicate |= hit_slots[i] == hit_slots[j];
+    distinct += !duplicate;
+  }
+  if (distinct < min_hits)
+    return false; /* multiple symbols in one slot do not add independent period evidence */
   uint32_t lo = hit_slots[0], hi = hit_slots[0];
   for (int i = 1; i < n_hits; i++) {
     if (hit_slots[i] < lo) lo = hit_slots[i];
@@ -121,6 +130,62 @@ bool nr_csirs_blind_infer_period(const uint32_t *hit_slots, int n_hits, int min_
       if (offset) *offset = (uint16_t)phase;
       return true;
     }
+  }
+  return false;
+}
+
+bool nr_csirs_blind_infer_period2(const uint32_t *hit_slots, int n_hits, int min_hits,
+                                  uint16_t *period, uint16_t off[2], int *n_off)
+{
+  if (hit_slots == NULL || min_hits < 2 || n_hits < min_hits)
+    return false;
+  uint16_t p = 0, o = 0;
+  if (nr_csirs_blind_infer_period(hit_slots, n_hits, min_hits, &p, &o)) {
+    if (period) *period = p;
+    if (off) off[0] = o;
+    if (n_off) *n_off = 1;
+    return true;
+  }
+  if (hit_slots == NULL || n_hits < 4 || n_hits < min_hits)
+    return false; /* two phases x two hits each is the minimum evidence */
+  uint32_t lo = hit_slots[0], hi = hit_slots[0];
+  for (int i = 1; i < n_hits; i++) {
+    if (hit_slots[i] < lo) lo = hit_slots[i];
+    if (hit_slots[i] > hi) hi = hit_slots[i];
+  }
+  for (int pi = NR_CSIRS_BLIND_N_PERIODS - 1; pi >= 0; pi--) {
+    const uint32_t P = nr_csirs_blind_periods[pi];
+    if (P > hi - lo)
+      continue;
+    uint32_t ph[2] = {hit_slots[0] % P, 0};
+    int cnt[2] = {0, 0}, n_ph = 1;
+    bool ok = true;
+    for (int i = 0; i < n_hits && ok; i++) {
+      bool duplicate = false;
+      for (int j = 0; j < i; j++)
+        duplicate |= hit_slots[i] == hit_slots[j];
+      if (duplicate)
+        continue;
+      const uint32_t v = hit_slots[i] % P;
+      if (v == ph[0]) {
+        cnt[0]++;
+      } else if (n_ph == 2 && v == ph[1]) {
+        cnt[1]++;
+      } else if (n_ph == 1) {
+        ph[1] = v;
+        cnt[1] = 1;
+        n_ph = 2;
+      } else {
+        ok = false;
+      }
+    }
+    if (!ok || n_ph != 2 || cnt[0] < 2 || cnt[1] < 2 || cnt[0] + cnt[1] < min_hits)
+      continue;
+    const int a = ph[0] < ph[1] ? 0 : 1;
+    if (period) *period = (uint16_t)P;
+    if (off) { off[0] = (uint16_t)ph[a]; off[1] = (uint16_t)ph[1 - a]; }
+    if (n_off) *n_off = 2;
+    return true;
   }
   return false;
 }
@@ -282,16 +347,161 @@ int nr_csirs_blind_next(nr_csirs_blind_state_t *st)
   if (st == NULL || st->n <= 0) {
     return -1;
   }
-  if (st->confirmed >= 0) {
-    return st->confirmed;
+  /* Silence does not prove completeness: legal periods extend to 640 slots, and the caller may
+   * skip slots. Keep the one-candidate work bound and stop only when no search capacity remains. */
+  if (st->n_conf >= NR_CSIRS_BLIND_MAX_CONF || st->n_conf >= st->n) {
+    return -1;
   }
-  if (st->pin_left > 0 && st->pinned >= 0 && st->pinned < st->n) {
+  if (st->pin_left > 0 && st->pinned >= 0 && st->pinned < st->n && !nr_csirs_blind_is_confirmed(st, st->pinned)) {
     st->pin_left--;
     return st->pinned;
   }
-  const int idx = st->cursor;
-  st->cursor = (st->cursor + 1) % st->n;
-  return idx;
+  if (st->cycle_left == 0) {
+    if (st->cycle_pad > 0 && !nr_csirs_blind_is_confirmed(st, st->cycle_last)) {
+      st->cycle_pad--;
+      return st->cycle_last;
+    }
+    const int active = st->n - st->n_conf;
+    int stride = active;
+    /* Every legal period has only 2 and 5 as prime factors. Pad a round by at most three
+     * calls so its stride is coprime to both; regular slot visits then sample every phase. */
+    while (stride % 2 == 0 || stride % 5 == 0)
+      stride++;
+    st->cycle_left = active;
+    st->cycle_pad = stride - active;
+  }
+  for (int k = 0; k < st->n; k++) {
+    const int idx = st->cursor;
+    st->cursor = (st->cursor + 1) % st->n;
+    if (!nr_csirs_blind_is_confirmed(st, idx)) {
+      st->cycle_left--;
+      st->cycle_last = idx;
+      return idx;
+    }
+  }
+  return -1;
+}
+
+bool nr_csirs_blind_is_confirmed(const nr_csirs_blind_state_t *st, int idx)
+{
+  if (st == NULL)
+    return false;
+  for (int k = 0; k < st->n_conf; k++)
+    if (st->conf_idx[k] == idx)
+      return true;
+  return false;
+}
+
+int nr_csirs_blind_occurring(const nr_csirs_blind_state_t *st, uint32_t absolute_slot, int *idx_out, int max)
+{
+  int n = 0;
+  for (int k = 0; st != NULL && idx_out != NULL && k < st->n_conf && n < max; k++) {
+    const uint32_t P = st->conf_period[k];
+    if (P == 0)
+      continue;
+    const uint32_t ph = absolute_slot % P;
+    bool on = false;
+    for (int j = 0; j < st->conf_n_off[k]; j++)
+      on |= ph == st->conf_off[k][j] % P;
+    if (on)
+      idx_out[n++] = st->conf_idx[k];
+  }
+  return n;
+}
+
+static void zp_restart_epoch(nr_csirs_blind_state_t *st, int idx, uint32_t absolute_slot)
+{
+  st->zp_epoch[idx]++;
+  st->hit_slot[idx][0] = absolute_slot;
+  st->n_hit_slot[idx] = 1;
+  memset(st->zp_rejected_phase[idx], 0, sizeof(st->zp_rejected_phase[idx]));
+}
+
+/* Observations arrive in slot order. Bits accumulate only after the first supporting hit and
+ * are checked when the next hit proposes a period, so their span is exactly that evidence epoch.
+ * One bit per legal phase retains every contradiction without an observation-rate-dependent FIFO. */
+static void zp_record_rejection(nr_csirs_blind_state_t *st, int idx, uint32_t absolute_slot)
+{
+  if (st->n_hit_slot[idx] == 0)
+    return;
+  unsigned base = 0;
+  for (int i = 0; i < NR_CSIRS_BLIND_N_PERIODS; i++) {
+    const unsigned p = nr_csirs_blind_periods[i];
+    const unsigned bit = base + absolute_slot % p;
+    st->zp_rejected_phase[idx][bit / 64] |= UINT64_C(1) << (bit % 64);
+    base += p;
+  }
+}
+
+static bool zp_phase_rejected(const nr_csirs_blind_state_t *st, int idx, uint16_t period,
+                              const uint16_t off[2], int n_off)
+{
+  unsigned base = 0;
+  for (int i = 0; i < NR_CSIRS_BLIND_N_PERIODS; i++) {
+    if (nr_csirs_blind_periods[i] == period) {
+      for (int j = 0; j < n_off; j++) {
+        const unsigned bit = base + off[j];
+        if (st->zp_rejected_phase[idx][bit / 64] & (UINT64_C(1) << (bit % 64)))
+          return true;
+      }
+      return false;
+    }
+    base += nr_csirs_blind_periods[i];
+  }
+  return true; /* an unknown period has no checked phase evidence */
+}
+
+/* Record hit slot + test periodicity; on success add idx to the confirmed list. Shared by the NZP and
+ * ZP feeds. A hit on a still-unpinned search pins the candidate: round-robin revisits it every n
+ * slots, which is a FIXED phase of the period whenever n shares a factor with it, so the repeats a
+ * lucky first hit needs might otherwise never be looked at. */
+static bool record_hit(nr_csirs_blind_state_t *st, int idx, uint32_t absolute_slot, bool structural, bool zp)
+{
+  for (int i = 0; i < st->n_hit_slot[idx]; i++)
+    if (st->hit_slot[idx][i] == absolute_slot)
+      return false;
+  st->hits[idx]++;
+  if (zp && (st->n_hit_slot[idx] == 0 || st->n_hit_slot[idx] == 8)) {
+    zp_restart_epoch(st, idx, absolute_slot);
+  } else if (st->n_hit_slot[idx] < 8) {
+    st->hit_slot[idx][st->n_hit_slot[idx]++] = absolute_slot;
+  }
+  if (st->pin_left == 0 && st->pinned != idx)
+    nr_csirs_blind_pin(st, idx, NR_CSIRS_BLIND_PIN_CONFIRM_CALLS);
+  if (st->n_hit_slot[idx] < CSIRS_MIN_HITS || structural || st->n_conf >= NR_CSIRS_BLIND_MAX_CONF) {
+    return false;
+  }
+  uint16_t p = 0, off[2] = {0, 0};
+  int n_off = 0;
+  if (!nr_csirs_blind_infer_period2(st->hit_slot[idx], st->n_hit_slot[idx], CSIRS_MIN_HITS, &p, off, &n_off)) {
+    if (zp && st->n_hit_slot[idx] == 8)
+      zp_restart_epoch(st, idx, absolute_slot);
+    return false;   /* scoring high is not enough -- it must also be PERIODIC */
+  }
+  if (zp) {
+    st->zp_selected_period[idx] = p;
+    memcpy(st->zp_selected_off[idx], off, sizeof(off));
+    st->zp_selected_n_off[idx] = n_off;
+  }
+  if (zp && zp_phase_rejected(st, idx, p, off, n_off)) {
+    zp_restart_epoch(st, idx, absolute_slot);
+    return false;
+  }
+  const int k = st->n_conf++;
+  st->conf_idx[k] = idx;
+  st->conf_period[k] = p;
+  st->conf_off[k][0] = off[0];
+  st->conf_off[k][1] = off[1];
+  st->conf_n_off[k] = (uint8_t)n_off;
+  st->cycle_left = st->cycle_pad = 0;
+  if (st->pinned == idx)
+    st->pin_left = 0;
+  if (st->confirmed < 0) {
+    st->confirmed = idx;
+    st->period = p;
+    st->offset = off[0];
+  }
+  return true;
 }
 
 bool nr_csirs_blind_feed(nr_csirs_blind_state_t *st, int idx, uint32_t absolute_slot,
@@ -300,7 +510,7 @@ bool nr_csirs_blind_feed(nr_csirs_blind_state_t *st, int idx, uint32_t absolute_
   if (st == NULL || idx < 0 || idx >= st->n) {
     return false;
   }
-  if (st->confirmed >= 0) {
+  if (nr_csirs_blind_is_confirmed(st, idx)) {
     return true;
   }
   st->tried[idx]++;
@@ -314,95 +524,190 @@ bool nr_csirs_blind_feed(nr_csirs_blind_state_t *st, int idx, uint32_t absolute_
   if (rho <= 0.0 || rho_null <= 0.0 || rho < CSIRS_DETECT_MARGIN * rho_null) {
     return false;
   }
-  if (st->n_hit_slot[idx] < 8) {
-    st->hit_slot[idx][st->n_hit_slot[idx]++] = absolute_slot;
-  }
-  st->hits[idx]++;
-  if (st->n_hit_slot[idx] < CSIRS_MIN_HITS) {
-    return false;
-  }
-  uint16_t p = 0, o = 0;
-  if (!nr_csirs_blind_infer_period(st->hit_slot[idx], st->n_hit_slot[idx], CSIRS_MIN_HITS, &p, &o)) {
-    return false;   /* scoring high is not enough -- it must also be PERIODIC */
-  }
-  st->confirmed = idx;
-  st->period = p;
-  st->offset = o;
-  return true;
+  return record_hit(st, idx, absolute_slot, false, false);
 }
 
 /* Same grid-alignment requirement as the other two comparators: this reads rxdataF at the
  * reference's RE positions, so it must map CRB order to FFT order. It searches ZP CSI-RS, whose
  * only evidence IS the energy, so a misaligned read does not merely weaken it -- it measures a
  * different part of the spectrum entirely. */
-double nr_csirs_blind_zero_score_shift(const int16_t *rx_re_im, const int16_t *ref_re_im, int n,
-                                       int rx_shift)
+static bool zp_reference_occupied(const int16_t *const *refs, int n_refs, int i)
 {
-  if (rx_re_im == NULL || ref_re_im == NULL || n <= 0) {
+  for (int p = 0; p < n_refs; p++)
+    if (refs[p][2 * i] != 0 || refs[p][2 * i + 1] != 0)
+      return true;
+  return false;
+}
+
+double nr_csirs_blind_zero_score_evidence_shift(const int16_t *rx_re_im, const int16_t *const *refs,
+                                               int n_refs, int n, int rx_shift, double *median_score)
+{
+  if (median_score != NULL)
+    *median_score = -1.0;
+  if (rx_re_im == NULL || refs == NULL || n_refs <= 0 || n <= 0) {
     return -1.0;
   }
+  for (int p = 0; p < n_refs; p++)
+    if (refs[p] == NULL)
+      return -1.0;
   /* RBs the pattern touches: a 12-RE granularity mask on the caller's index (symbol-relative
    * indices keep the RB grid; a whole-symbol buffer starts at RB 0 either way). */
-  double e_on = 0.0, e_off = 0.0;
-  int n_on = 0, n_off = 0;
+  double e_on = 0.0, off_power[12] = {0};
+  int n_on = 0, off_count[12] = {0};
+  double median_power = 0.0;
+  int median_count = 0;
   for (int rb0 = 0; rb0 + 12 <= n; rb0 += 12) {
     bool touched = false;
     for (int i = rb0; i < rb0 + 12; i++) {
-      if (ref_re_im[2 * i] != 0 || ref_re_im[2 * i + 1] != 0) { touched = true; break; }
+      if (zp_reference_occupied(refs, n_refs, i)) { touched = true; break; }
     }
     if (!touched) {
       continue;
     }
+    double rb_off[12];
+    int rb_n_off = 0;
     for (int i = rb0; i < rb0 + 12; i++) {
       const int j = (int)(((long)i + rx_shift) % n);
       const double yr = (double)rx_re_im[2 * j], yi = (double)rx_re_im[2 * j + 1];
       const double e = yr * yr + yi * yi;
-      if (ref_re_im[2 * i] != 0 || ref_re_im[2 * i + 1] != 0) { e_on += e; n_on++; }
-      else { e_off += e; n_off++; }
+      if (zp_reference_occupied(refs, n_refs, i)) { e_on += e; n_on++; }
+      else {
+        off_power[i - rb0] += e;
+        off_count[i - rb0]++;
+        if (median_score != NULL)
+          rb_off[rb_n_off++] = e;
+      }
+    }
+    if (rb_n_off > 0) {
+      for (int i = 1; i < rb_n_off; i++) {
+        const double value = rb_off[i];
+        int j = i;
+        while (j > 0 && rb_off[j - 1] > value) {
+          rb_off[j] = rb_off[j - 1];
+          j--;
+        }
+        rb_off[j] = value;
+      }
+      median_power += rb_off[(rb_n_off - 1) / 2] * rb_n_off;
+      median_count += rb_n_off;
     }
   }
-  if (n_on == 0 || n_off == 0 || e_off <= 0.0) {
+  if (median_score != NULL && n_on > 0 && median_count > 0 && median_power > 0.0)
+    *median_score = 1.0 - fmin(1.0, (e_on / n_on) / (median_power / median_count));
+  /* A candidate must explain the complete quiet pattern, not just one quiet tone of a
+   * wider comb. A median reference cannot establish that: removing a row-2 quiet tone
+   * from a half-occupied RB leaves SIX active vs FIVE quiet off-pattern tones.
+   * Compare against every off-pattern subcarrier class, averaged over the same touched
+   * RBs first so one low-amplitude QAM sample is not a veto. The weakest class bounds
+   * the background: another quiet class makes this geometry unidentifiable. This is
+   * deliberately conservative when independent resources create additional holes. */
+  double e_off = -1.0;
+  for (int k = 0; k < 12; k++) {
+    if (off_count[k] > 0) {
+      const double mean = off_power[k] / off_count[k];
+      if (e_off < 0.0 || mean < e_off)
+        e_off = mean;
+    }
+  }
+  if (n_on == 0 || e_off <= 0.0) {
     return -1.0;
   }
-  const double ratio = (e_on / n_on) / (e_off / n_off);
+  const double ratio = (e_on / n_on) / e_off;
   return 1.0 - (ratio > 1.0 ? 1.0 : ratio);
+}
+
+double nr_csirs_blind_zero_score_ports_shift(const int16_t *rx_re_im, const int16_t *const *refs,
+                                             int n_refs, int n, int rx_shift)
+{
+  return nr_csirs_blind_zero_score_evidence_shift(rx_re_im, refs, n_refs, n, rx_shift, NULL);
+}
+
+double nr_csirs_blind_zero_score_shift(const int16_t *rx_re_im, const int16_t *ref_re_im, int n,
+                                       int rx_shift)
+{
+  return nr_csirs_blind_zero_score_ports_shift(rx_re_im, &ref_re_im, 1, n, rx_shift);
 }
 
 bool nr_csirs_blind_zp_feed(nr_csirs_blind_state_t *st, int idx, uint32_t absolute_slot,
                             double score, double score_null)
 {
+  return nr_csirs_blind_zp_feed_pair(st, idx, absolute_slot, score, score, score_null);
+}
+
+bool nr_csirs_blind_zp_score_qualifies(double score, double score_null)
+{
+  return isfinite(score) && score > 0.5 && score_null >= 0.0 && score > CSIRS_DETECT_MARGIN * score_null;
+}
+
+bool nr_csirs_blind_zp_feed_pair(nr_csirs_blind_state_t *st, int idx, uint32_t absolute_slot,
+                                double score, double other_score, double score_null)
+{
   if (st == NULL || idx < 0 || idx >= st->n) {
     return false;
   }
-  if (st->confirmed >= 0) {
-    return true;
-  }
+  const bool confirmed = nr_csirs_blind_is_confirmed(st, idx);
+  if (!isfinite(score) || score < 0.0 || !isfinite(other_score) || other_score < 0.0
+      || ((st->tried[idx] > 0 || st->zp_epoch[idx] > 0) && st->zp_last_slot[idx] == absolute_slot))
+    return confirmed;
+  st->zp_last_slot[idx] = absolute_slot;
   /* Same relative bar as the NZP feed; the null population is the other candidates' zero scores,
    * which sit near 0 on data (E_on ~ E_off). A minimum absolute margin keeps a null median of
    * ~0 from turning every small fluctuation into a hit. */
-  const bool hit = score > 0.5 && score_null >= 0.0 && score > CSIRS_DETECT_MARGIN * score_null;
+  /* A joint hit validates BOTH symbols at the same inferred period/phase. Count a raw hole on
+   * EITHER symbol for the structural veto: a persistent hole in one symbol must not become
+   * "periodic" just because the other symbol is only occasionally empty. This union is
+   * conservative if the symbols also carry unrelated holes at different occasions. */
+  const bool hole = score > 0.5 || other_score > 0.5;
+  const double joint_score = fmin(score, other_score);
+  const bool hit = nr_csirs_blind_zp_score_qualifies(joint_score, score_null);
+  if (confirmed) {
+    for (int k = 0; k < st->n_conf; k++) {
+      if (st->conf_idx[k] != idx)
+        continue;
+      bool predicted = false;
+      for (int j = 0; j < st->conf_n_off[k]; j++)
+        predicted |= absolute_slot % st->conf_period[k] == st->conf_off[k][j];
+      if (!predicted)
+        return true;
+      if (hit)
+        st->zp_contradictions[idx] = 0;
+      if (joint_score > 0.5 || ++st->zp_contradictions[idx] < 2)
+        return true;
+      /* Compact the export bank; no previously made k0 decision is retroactively changed. */
+      for (int j = k; j + 1 < st->n_conf; j++) {
+        st->conf_idx[j] = st->conf_idx[j + 1];
+        st->conf_period[j] = st->conf_period[j + 1];
+        st->conf_n_off[j] = st->conf_n_off[j + 1];
+        memcpy(st->conf_off[j], st->conf_off[j + 1], sizeof(st->conf_off[j]));
+      }
+      st->n_conf--;
+      st->confirmed = st->n_conf ? st->conf_idx[0] : -1;
+      st->period = st->n_conf ? st->conf_period[0] : 0;
+      st->offset = st->n_conf ? st->conf_off[0][0] : 0;
+      st->zp_revocations[idx]++;
+      st->zp_contradictions[idx] = 0;
+      st->n_hit_slot[idx] = 0;
+      st->tried[idx] = st->zp_holes[idx] = 0;
+      memset(st->zp_rejected_phase[idx], 0, sizeof(st->zp_rejected_phase[idx]));
+      st->cycle_left = st->cycle_pad = 0;
+      return false;
+    }
+  }
   st->tried[idx]++;
-  if (score > st->best_rho[idx]) {
-    st->best_rho[idx] = score;
+  st->zp_holes[idx] += hole;
+  if (joint_score > st->best_rho[idx]) {
+    st->best_rho[idx] = joint_score;
   }
   if (!hit) {
+    /* A population-suppressed raw hole is unresolved, not evidence of occupancy.
+     * Only a required symbol lacking a hole contradicts the proposed ZP phase. */
+    if (joint_score <= 0.5)
+      zp_record_rejection(st, idx, absolute_slot);
     return false;
   }
-  st->hits[idx]++;
-  if (st->n_hit_slot[idx] < 8) {
-    st->hit_slot[idx][st->n_hit_slot[idx]++] = absolute_slot;
-  }
-  if (st->n_hit_slot[idx] < CSIRS_MIN_HITS || st->hits[idx] * 2 > st->tried[idx]) {
-    return false; /* not enough evidence, or a structural hole (hit on most tests) */
-  }
-  uint16_t p = 0, o = 0;
-  if (!nr_csirs_blind_infer_period(st->hit_slot[idx], st->n_hit_slot[idx], CSIRS_MIN_HITS, &p, &o)) {
-    return false;
-  }
-  st->confirmed = idx;
-  st->period = p;
-  st->offset = o;
-  return true;
+  /* Count raw holes, not population-qualified detections: a varying null can suppress a hit,
+   * but cannot turn that hole into evidence of data. Repeated occasions count only once. */
+  return record_hit(st, idx, absolute_slot, (uint64_t)st->zp_holes[idx] * 2 > st->tried[idx], true);
 }
 
 const nr_csirs_candidate_t *nr_csirs_blind_confirmed(const nr_csirs_blind_state_t *st,

@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <cmath>
 #include <cstdlib>
 #include <string>
@@ -8,6 +9,19 @@
 #include <gtest/gtest.h>
 extern "C" {
 #include "nr_csirs_blind_search.h"
+int nr_csirs_blind_rt_test_export(int rank, int banks, int types[2], int *untouched);
+int nr_csirs_blind_rt_test_zp_feed(uint32_t slot, double score, int reset);
+int nr_csirs_blind_rt_test_slot(int row, uint32_t slot, int holes, int empty, int reset, int *fep_mask);
+int nr_csirs_blind_rt_test_slot_pattern(int row, uint32_t slot, int holes, int empty,
+                                      int extra_holes, int reset, int *fep_mask);
+void nr_csirs_blind_rt_test_logging(int enabled);
+int nr_csirs_blind_rt_test_future_export(uint32_t slot);
+int nr_csirs_blind_rt_test_nzp_confirmed(void);
+void nr_csirs_blind_rt_test_maintenance_control(int control);
+double nr_csirs_blind_rt_test_union_score(void);
+void nr_csirs_blind_rt_test_status_next(void);
+void nr_csirs_blind_rt_test_two_resources(void);
+int nr_csirs_blind_rt_test_bank_index(int k);
 /* get_csi_mapping_parms() is linked in for the footprint tests; OAI's AssertFatal and CONFIG code
  * reference these two from the softmodem's main(). */
 void *uniqCfg = nullptr;
@@ -17,6 +31,27 @@ void exit_function(const char *file, const char *function, const int line, const
   fprintf(stderr, "exit_function: %s\n", s ? s : "");
   abort();
 }
+}
+
+TEST(CsirsBlindRuntime, OrdinaryModeExportsBothBanks) {
+  for (int banks : {1, 2, 3}) {
+    int types[2] = {}, untouched = 0;
+    const int n = nr_csirs_blind_rt_test_export(0, banks, types, &untouched);
+    ASSERT_EQ(n, banks == 3 ? 2 : 1);
+    EXPECT_FALSE(untouched);
+    EXPECT_EQ(types[0], banks == 2 ? 2 : 1);
+    if (banks == 3) {
+      EXPECT_EQ(types[1], 2);
+    }
+  }
+}
+
+TEST(CsirsBlindRuntime, RankModeExportsNeitherBankAndLeavesOutputUntouched) {
+  for (int banks : {1, 2, 3}) {
+    int types[2] = {}, untouched = 0;
+    EXPECT_EQ(nr_csirs_blind_rt_test_export(1, banks, types, &untouched), 0) << "banks=" << banks;
+    EXPECT_TRUE(untouched) << "banks=" << banks;
+  }
 }
 
 // A reference grid: QPSK-ish symbols on `occupied` REs of `n`, zero elsewhere.
@@ -472,12 +507,190 @@ TEST(CsirsBlindFeed, ConfirmsAPeriodicResourceAndReportsIt) {
   ASSERT_NE(c, nullptr);
   EXPECT_EQ(p, 20);
   EXPECT_EQ(o, 13);
-  // Once confirmed the scheduler stops rotating -- there is nothing left to search for.
-  EXPECT_EQ(nr_csirs_blind_next(&st), 2);
+  // A cell carries several CSI-RS resources (OCUDU bed: TRS l4, TRS l8, a CQI row 2, a ZP), and
+  // PDSCH is rate-matched around ALL of them -- so a confirmation no longer ends the search: the
+  // confirmed candidate simply leaves the rotation (it was 2 == "stops rotating" before 2026-09-27).
+  for (int k = 0; k < st.n + 2; k++)
+    EXPECT_NE(nr_csirs_blind_next(&st), 2);
   // And it formats straight back out as a csirs_monitor line.
   char buf[128];
   ASSERT_GT(nr_csirs_blind_format(c, p, o, buf, sizeof(buf)), 0);
   EXPECT_NE(std::string(buf).find(":20:13"), std::string::npos);
+}
+
+// ---- several resources per cell (OCUDU ZMQ bed, 2026-09-27) --------------------------------------
+/* Truth from that bed's RRC Setup: TRS = row 1 at symbols 4 and 8 in BOTH slot 2 and slot 3 of a
+ * 40-slot period (38.214 5.1.6.1.1: a TRS set spans two consecutive slots), NZP row 2 and ZP row 4 in
+ * slot 4. The gNB drops the MCS one step in exactly those slots (10 instead of 11), and every such
+ * grant failed its CRC because the passive rate-matched around none of it. */
+
+TEST(CsirsBlindPeriod, TrsPairOneSlotApartIsTwoPhasesOfOnePeriod) {
+  const uint32_t hits[] = {2, 3, 42, 43, 82, 83};
+  uint16_t p = 0, o = 0;
+  EXPECT_FALSE(nr_csirs_blind_infer_period(hits, 6, 3, &p, &o));  // no single phase explains it
+  uint16_t off[2] = {0, 0};
+  int n_off = 0;
+  ASSERT_TRUE(nr_csirs_blind_infer_period2(hits, 6, 3, &p, off, &n_off));
+  EXPECT_EQ(p, 40);
+  ASSERT_EQ(n_off, 2);
+  EXPECT_EQ(off[0], 2);
+  EXPECT_EQ(off[1], 3);
+}
+
+TEST(CsirsBlindPeriod, TwoPhaseInferencePrefersASinglePhase) {
+  const uint32_t hits[] = {13, 33, 53, 73};
+  uint16_t p = 0, off[2] = {0, 0};
+  int n_off = 0;
+  ASSERT_TRUE(nr_csirs_blind_infer_period2(hits, 4, 3, &p, off, &n_off));
+  EXPECT_EQ(p, 20);
+  EXPECT_EQ(n_off, 1);
+  EXPECT_EQ(off[0], 13);
+}
+
+TEST(CsirsBlindPeriod, DuplicateSlotsAreNotIndependentPhaseRepeats) {
+  const uint32_t hits[] = {2, 2, 43, 43};
+  uint16_t p = 0, off[2] = {};
+  int n_off = 0;
+  EXPECT_FALSE(nr_csirs_blind_infer_period2(hits, 4, 3, &p, off, &n_off));
+}
+
+TEST(CsirsBlindPeriod, TrsPairMayStraddleThePeriodBoundary) {
+  const uint32_t hits[] = {39, 40, 79, 80, 119, 120};
+  uint16_t p = 0, off[2] = {};
+  int n_off = 0;
+  ASSERT_TRUE(nr_csirs_blind_infer_period2(hits, 6, 3, &p, off, &n_off));
+  EXPECT_EQ(p, 40);
+  EXPECT_EQ(n_off, 2);
+  EXPECT_EQ(off[0], 0);
+  EXPECT_EQ(off[1], 39);
+}
+
+TEST(CsirsBlindPeriod, TwoPhaseInferenceRejectsInvalidEvidenceThreshold) {
+  const uint32_t hits[] = {2, 3, 42, 43};
+  EXPECT_FALSE(nr_csirs_blind_infer_period2(hits, 4, 1, nullptr, nullptr, nullptr));
+}
+
+TEST(CsirsBlindFeed, DuplicateSlotCannotConfirmAResource) {
+  auto st = std::make_unique<nr_csirs_blind_state_t>();
+  ASSERT_GT(nr_csirs_blind_init(st.get(), 51, 1), 0);
+  nr_csirs_blind_feed(st.get(), 0, 2, 6.0, 4.0 / 3.0);
+  nr_csirs_blind_feed(st.get(), 0, 42, 6.0, 4.0 / 3.0);
+  EXPECT_FALSE(nr_csirs_blind_feed(st.get(), 0, 42, 6.0, 4.0 / 3.0));
+  EXPECT_EQ(st->n_conf, 0);
+  EXPECT_EQ(st->n_hit_slot[0], 2);
+}
+
+TEST(CsirsBlindFeed, RotationVisitsEveryLegalPhaseAfterAConfirmation) {
+  for (const int population : {5, 6, 9, 11}) {
+    auto st = std::make_unique<nr_csirs_blind_state_t>();
+    ASSERT_GT(nr_csirs_blind_init(st.get(), 51, 1), population);
+    st->n = population;
+    for (uint32_t slot : {2u, 42u, 82u})
+      nr_csirs_blind_feed(st.get(), 0, slot, 6.0, 4.0 / 3.0);
+    ASSERT_EQ(st->n_conf, 1);
+    // Test the longest legal period, not the period of this particular deployment.
+    bool seen[NR_CSIRS_BLIND_MAX_CAND][640] = {};
+    for (uint32_t slot = 0; slot < 640u * (population + 5); slot++) {
+      const int idx = nr_csirs_blind_next(st.get());
+      ASSERT_GE(idx, 1) << "population=" << population << " slot=" << slot;
+      seen[idx][slot % 640] = true;
+    }
+    for (int idx = 1; idx < population; idx++)
+      for (int phase = 0; phase < 640; phase++)
+        ASSERT_TRUE(seen[idx][phase]) << "population=" << population << " candidate=" << idx << " phase=" << phase;
+  }
+}
+
+TEST(CsirsBlindZp, StructuralHoleCannotRenewItsOwnPinForever) {
+  auto st = std::make_unique<nr_csirs_blind_state_t>();
+  ASSERT_GT(nr_csirs_blind_init(st.get(), 51, 1), 3);
+  nr_csirs_blind_pin(st.get(), 2, 3);
+  bool left = false;
+  for (uint32_t slot = 0; slot < NR_CSIRS_BLIND_PIN_CONFIRM_CALLS + 10; slot++) {
+    const int idx = nr_csirs_blind_next(st.get());
+    nr_csirs_blind_zp_feed(st.get(), idx, slot, idx == 2 ? 0.98 : 0.02, 0.02);
+    left |= idx != 2;
+  }
+  EXPECT_TRUE(left);
+  EXPECT_EQ(st->n_conf, 0);
+}
+
+TEST(CsirsBlindPeriod, ASecondPhaseNeedsItsOwnRepeat) {
+  // One stray hit must not be promoted to a second phase: each phase needs >= 2 hits.
+  const uint32_t hits[] = {13, 33, 53, 54, 73};
+  uint16_t p = 0, off[2] = {0, 0};
+  int n_off = 0;
+  if (nr_csirs_blind_infer_period2(hits, 5, 3, &p, off, &n_off)) {
+    for (int i = 0; i < 5; i++) {
+      EXPECT_TRUE(hits[i] % p == off[0] || (n_off == 2 && hits[i] % p == off[1])) << i;
+    }
+  }
+  EXPECT_FALSE(n_off == 2 && p == 20);
+}
+
+TEST(CsirsBlindFeed, KeepsSearchingAndConfirmsEveryResourceOfTheCell) {
+  auto st = std::make_unique<nr_csirs_blind_state_t>();
+  ASSERT_GT(nr_csirs_blind_init(st.get(), 51, 1), 10);
+  for (int k = 0; k < 4; k++)
+    nr_csirs_blind_feed(st.get(), 2, (uint32_t)(40 * k + 4), 6.0, 4.0 / 3.0);   // row-2-like, slot 4
+  ASSERT_TRUE(nr_csirs_blind_is_confirmed(st.get(), 2));
+  const uint32_t trs[] = {2, 3, 42, 43, 82, 83};
+  for (uint32_t s : trs)
+    nr_csirs_blind_feed(st.get(), 5, s, 6.0, 4.0 / 3.0);                        // TRS, slots 2+3
+  ASSERT_TRUE(nr_csirs_blind_is_confirmed(st.get(), 5));
+  EXPECT_EQ(st->n_conf, 2);
+  EXPECT_EQ(st->confirmed, 2);   // the legacy single-resource fields keep the FIRST confirmation
+  for (int k = 0; k < 2 * st->n; k++) {
+    const int idx = nr_csirs_blind_next(st.get());
+    EXPECT_NE(idx, 2);
+    EXPECT_NE(idx, 5);
+  }
+  // Which resources occur in which slot -- what the rate-matcher asks every grant.
+  int got[NR_CSIRS_BLIND_MAX_CONF];
+  EXPECT_EQ(nr_csirs_blind_occurring(st.get(), 122, got, NR_CSIRS_BLIND_MAX_CONF), 1);  // 122 = 40*3+2
+  EXPECT_EQ(got[0], 5);
+  EXPECT_EQ(nr_csirs_blind_occurring(st.get(), 123, got, NR_CSIRS_BLIND_MAX_CONF), 1);
+  EXPECT_EQ(got[0], 5);
+  EXPECT_EQ(nr_csirs_blind_occurring(st.get(), 124, got, NR_CSIRS_BLIND_MAX_CONF), 1);
+  EXPECT_EQ(got[0], 2);
+  EXPECT_EQ(nr_csirs_blind_occurring(st.get(), 125, got, NR_CSIRS_BLIND_MAX_CONF), 0);
+}
+
+TEST(CsirsBlindFeed, AHitPinsTheCandidateSoItsRepeatsAreSeen) {
+  // Round-robin revisits a candidate every n slots, i.e. at a FIXED phase of the period when n shares
+  // a factor with it -- a resource first seen by luck might never be seen again. A hit pins it.
+  auto st = std::make_unique<nr_csirs_blind_state_t>();
+  ASSERT_GT(nr_csirs_blind_init(st.get(), 51, 1), 10);
+  nr_csirs_blind_feed(st.get(), 7, 4, 6.0, 4.0 / 3.0);
+  EXPECT_EQ(nr_csirs_blind_next(st.get()), 7);
+  EXPECT_EQ(nr_csirs_blind_next(st.get()), 7);
+}
+
+TEST(CsirsBlindFeed, SearchContinuesUntilCapacityOrAllCandidatesConfirmed) {
+  auto st = std::make_unique<nr_csirs_blind_state_t>();
+  ASSERT_GT(nr_csirs_blind_init(st.get(), 51, 1), 10);
+  EXPECT_GE(nr_csirs_blind_next(st.get()), 0);  // nothing confirmed: search never ends on its own
+  for (int k = 0; k < 4; k++)
+    nr_csirs_blind_feed(st.get(), 2, (uint32_t)(40 * k + 4), 6.0, 4.0 / 3.0);
+  ASSERT_EQ(st->n_conf, 1);
+  for (int calls = 0; calls < st->n * 81; calls++)
+    ASSERT_GE(nr_csirs_blind_next(st.get()), 0);
+  st->n_conf = NR_CSIRS_BLIND_MAX_CONF;
+  EXPECT_EQ(nr_csirs_blind_next(st.get()), -1);
+  st->n_conf = st->n = 1;
+  EXPECT_EQ(nr_csirs_blind_next(st.get()), -1);
+}
+
+TEST(CsirsBlindZp, ConfirmsSeveralHoles) {
+  auto st = std::make_unique<nr_csirs_blind_state_t>();
+  ASSERT_GT(nr_csirs_blind_init(st.get(), 24, 1), 3);
+  for (uint32_t slot = 0; slot < 400; slot += 4) {
+    nr_csirs_blind_zp_feed(st.get(), 0, slot, (slot % 40 == 4) ? 0.98 : 0.02, 0.02);
+    nr_csirs_blind_zp_feed(st.get(), 1, slot + 1, ((slot + 1) % 20 == 9) ? 0.98 : 0.02, 0.02);
+  }
+  EXPECT_TRUE(nr_csirs_blind_is_confirmed(st.get(), 0));
+  EXPECT_TRUE(nr_csirs_blind_is_confirmed(st.get(), 1));
+  EXPECT_EQ(st->n_conf, 2);
 }
 
 // ---- pinning ------------------------------------------------------------------------------------
@@ -570,6 +783,695 @@ TEST(CsirsBlindZp, ConfirmsAPeriodicHoleAndRejectsAStructuralOne) {
   for (uint32_t slot = 0; slot < 400; slot += 4)
     EXPECT_FALSE(nr_csirs_blind_zp_feed(&st2, 0, slot, 0.98, 0.02));
   EXPECT_LT(st2.confirmed, 0);
+}
+
+TEST(CsirsBlindZp, SparsePilotsDoNotConfirmOrExportZeroPowerGeometry) {
+  std::vector<int16_t> rx, ref;
+  for (uint32_t slot = 0; slot < 100; slot++) {
+    zp_symbol(false, false, rx, ref);
+    if (slot % 20 == 13) {
+      // A periodically scheduled pilot in an otherwise quiet symbol. There is no data hole:
+      // the candidate's k=0 REs have exactly the same background as most other REs.
+      std::fill(rx.begin(), rx.end(), 2);
+      for (int rb = 0; rb < 4; rb++)
+        rx[2 * (12 * rb + 4)] = rx[2 * (12 * rb + 4) + 1] = 700;
+    }
+    const double score = nr_csirs_blind_zero_score(rx.data(), ref.data(), 48);
+    EXPECT_EQ(nr_csirs_blind_rt_test_zp_feed(slot, score, slot == 0), 0) << "slot=" << slot << " score=" << score;
+  }
+}
+
+TEST(CsirsBlindZp, BoostedPilotsDoNotConfirmOrExportZeroPowerGeometry) {
+  std::vector<int16_t> rx, ref;
+  for (uint32_t slot = 0; slot < 100; slot++) {
+    zp_symbol(false, false, rx, ref);
+    if (slot % 20 == 13) {
+      // All candidate REs still carry full-power data. One boosted off-pattern pilot per RB
+      // must not manufacture a ZP hole by raising the off-pattern arithmetic mean.
+      for (int rb = 0; rb < 4; rb++)
+        rx[2 * (12 * rb + 4)] = rx[2 * (12 * rb + 4) + 1] = 5000;
+    }
+    const double score = nr_csirs_blind_zero_score(rx.data(), ref.data(), 48);
+    EXPECT_EQ(nr_csirs_blind_rt_test_zp_feed(slot, score, slot == 0), 0) << "slot=" << slot << " score=" << score;
+  }
+}
+
+TEST(CsirsBlindZp, RepeatedStructuralObservationsDoNotConfirmOrExport) {
+  // Every distinct observed slot has the same structural hole. Multiple occasions inspecting
+  // one slot must not turn its hit fraction into 1/4 and accept an apparent periodic phase.
+  for (uint32_t slot : {13u, 33u, 53u, 73u}) {
+    for (int duplicate = 0; duplicate < 4; duplicate++) {
+      EXPECT_EQ(nr_csirs_blind_rt_test_zp_feed(slot, 0.98, slot == 13 && duplicate == 0), 0);
+    }
+  }
+}
+
+TEST(CsirsBlindZp, PopulationThresholdCannotHideStructuralHoles) {
+  auto st = std::make_unique<nr_csirs_blind_state_t>();
+  ASSERT_GT(nr_csirs_blind_init(st.get(), 24, 17), 0);
+  // The candidate is a hole in every observation. A varying population threshold suppresses
+  // some detections; those suppressed holes are not evidence of occupied candidate REs.
+  for (uint32_t slot = 0; slot < 100; slot++) {
+    const double population = slot % 20 == 13 ? 0.02 : 0.98;
+    EXPECT_FALSE(nr_csirs_blind_zp_feed(st.get(), 0, slot, 0.98, population));
+  }
+  EXPECT_EQ(st->n_conf, 0);
+}
+
+TEST(CsirsBlindZp, PopulationSuppressedRawHoleDoesNotContradictPeriodicEvidence) {
+  auto st = std::make_unique<nr_csirs_blind_state_t>();
+  ASSERT_GT(nr_csirs_blind_init(st.get(), 24, 17), 0);
+  for (uint32_t slot = 0; slot <= 73; slot++) {
+    const bool hole = slot % 20 == 13;
+    // Both required symbols remain raw holes at 53; only the population threshold
+    // suppresses that hit. Ordinary off-phase data rules out a structural hole.
+    const double score = hole ? 0.98 : 0.0;
+    const double other_score = hole ? 0.75 : 0.0;
+    const double population = slot == 53 ? 0.98 : 0.02;
+    EXPECT_EQ(nr_csirs_blind_zp_feed_pair(st.get(), 0, slot, score, other_score, population), slot == 73)
+        << "slot=" << slot;
+  }
+  EXPECT_EQ(st->tried[0], 74u);
+  EXPECT_EQ(st->zp_holes[0], 4u);
+  EXPECT_EQ(st->hits[0], 3u);
+  EXPECT_EQ(st->period, 20);
+  EXPECT_EQ(st->offset, 13);
+}
+
+TEST(CsirsBlindZp, PeriodicHoleUnderDataStillConfirmsAndExports) {
+  std::vector<int16_t> rx, ref;
+  bool exported = false;
+  for (uint32_t slot = 0; slot < 100; slot++) {
+    const bool hole = slot % 20 == 13;
+    zp_symbol(hole, false, rx, ref);
+    const double score = nr_csirs_blind_zero_score(rx.data(), ref.data(), 48);
+    const int count = nr_csirs_blind_rt_test_zp_feed(slot, score, slot == 0);
+    if (!hole) {
+      EXPECT_EQ(count, 0);
+    }
+    exported |= count == 1;
+  }
+  EXPECT_TRUE(exported);
+}
+
+TEST(CsirsBlindZp, CompletePatternSurvivesVariableDataAndIsolatedFadedSamples) {
+  std::vector<int16_t> rx, ref;
+  zp_symbol(true, false, rx, ref);
+  for (int k = 0; k < 48; k++) {
+    if (k % 12 == 0)
+      continue;
+    // Unequal QAM amplitudes and RB gains: aggregate each class before comparing, so
+    // the one faded sample per class cannot be mistaken for a whole extra quiet tone.
+    const int16_t amp = k / 12 == 0 ? 0 : 100 * (1 + k / 12) * (1 + 2 * (k % 4));
+    rx[2 * k] = amp;
+    rx[2 * k + 1] = -amp;
+  }
+  EXPECT_GT(nr_csirs_blind_zero_score(rx.data(), ref.data(), 48), 0.99);
+}
+
+TEST(CsirsBlindRuntime, Row5FirstSymbolHoleCannotExportTwoSymbols) {
+  for (uint32_t slot = 0; slot < 100; slot++) {
+    int mask = 0;
+    EXPECT_EQ(nr_csirs_blind_rt_test_slot(5, slot, slot % 20 == 13 ? 1 : 0, 0, slot == 0, &mask), 0)
+        << "slot=" << slot;
+  }
+}
+
+TEST(CsirsBlindRuntime, Row5PeriodicHolesOnBothSymbolsExport) {
+  bool exported = false;
+  for (uint32_t slot = 0; slot < 100; slot++) {
+    const bool hole = slot % 20 == 13;
+    int mask = 0;
+    const int n = nr_csirs_blind_rt_test_slot(5, slot, hole ? 3 : 0, 0, slot == 0, &mask);
+    ASSERT_GE(n, 0);
+    if (!hole) {
+      EXPECT_EQ(n, 0);
+    }
+    exported |= n == 1;
+  }
+  EXPECT_TRUE(exported);
+}
+
+TEST(CsirsBlindRuntime, Row2PeriodicHoleStillExportsThroughSlotPath) {
+  bool exported = false;
+  for (uint32_t slot = 0; slot < 100; slot++) {
+    const bool hole = slot % 20 == 13;
+    int mask = 0;
+    const int n = nr_csirs_blind_rt_test_slot(2, slot, hole ? 1 : 0, 0, slot == 0, &mask);
+    ASSERT_GE(n, 0);
+    EXPECT_EQ(mask, 1 << 7);
+    if (!hole) {
+      EXPECT_EQ(n, 0);
+    }
+    exported |= n == 1;
+  }
+  EXPECT_TRUE(exported);
+}
+
+TEST(CsirsBlindRuntime, ConfirmedZpWithdrawsAfterTwoOccupiedOccasionsAndRecovers) {
+  for (int row : {2, 4}) {
+    for (uint32_t slot = 0; slot <= 153; slot++) {
+      int mask = 0;
+      const bool hole = slot % 20 == 13 && slot != 73 && slot != 93;
+      const int n = nr_csirs_blind_rt_test_slot(row, slot, hole, 0, slot == 0, &mask);
+      ASSERT_EQ(nr_csirs_blind_rt_test_nzp_confirmed(), 0); // recovery has no active NZP at this geometry
+      const bool exported = slot == 53 || slot == 73 || slot == 153;
+      EXPECT_EQ(n, exported ? 1 : 0) << "row=" << row << " slot=" << slot;
+    }
+  }
+}
+
+TEST(CsirsBlindRuntime, ConfirmedZpUnscorableOccasionDoesNotRevoke) {
+  for (int row : {2, 4}) {
+    for (uint32_t slot = 0; slot <= 113; slot++) {
+      int mask = 0;
+      const bool hole = slot % 20 == 13 && slot != 73 && slot != 93;
+      const int n = nr_csirs_blind_rt_test_slot(row, slot, hole, slot == 93, slot == 0, &mask);
+      EXPECT_EQ(n, slot >= 53 && slot % 20 == 13 ? 1 : 0) << "row=" << row << " slot=" << slot;
+    }
+  }
+}
+
+TEST(CsirsBlindZp, ConfirmedZpPopulationSuppressionAndDuplicatesAreInconclusive) {
+  auto st = std::make_unique<nr_csirs_blind_state_t>();
+  nr_csirs_blind_init(st.get(), 24, 17);
+  for (uint32_t slot = 0; slot <= 53; slot++)
+    nr_csirs_blind_zp_feed(st.get(), 0, slot, slot % 20 == 13 ? 0.98 : 0.0, 0.02);
+  ASSERT_TRUE(nr_csirs_blind_is_confirmed(st.get(), 0));
+  nr_csirs_blind_zp_feed(st.get(), 0, 73, 0.0, 0.02);
+  nr_csirs_blind_zp_feed(st.get(), 0, 73, 0.0, 0.02);
+  nr_csirs_blind_zp_feed(st.get(), 0, 93, 0.98, 0.9);
+  EXPECT_TRUE(nr_csirs_blind_is_confirmed(st.get(), 0));
+  nr_csirs_blind_zp_feed(st.get(), 0, 113, 0.0, 0.02);
+  EXPECT_FALSE(nr_csirs_blind_is_confirmed(st.get(), 0));
+  nr_csirs_blind_zp_feed(st.get(), 0, 113, 0.98, 0.02);
+  EXPECT_EQ(st->n_hit_slot[0], 0); // compaction/reset must not make this same slot fresh evidence
+}
+
+TEST(CsirsBlindZp, ConfirmedZpCompactionPreservesOtherResourceAndLegacyView) {
+  auto st = std::make_unique<nr_csirs_blind_state_t>();
+  nr_csirs_blind_init(st.get(), 24, 17);
+  for (uint32_t slot = 0; slot <= 153; slot++) {
+    nr_csirs_blind_zp_feed(st.get(), 0, slot,
+                         slot % 20 == 13 && slot != 73 && slot != 93 ? 0.98 : 0.0, 0.02);
+    nr_csirs_blind_zp_feed(st.get(), 1, slot, slot % 20 == 14 ? 0.98 : 0.0, 0.02);
+    if (slot == 93) {
+      EXPECT_EQ(st->n_conf, 1);
+      EXPECT_EQ(st->confirmed, 1);
+      EXPECT_EQ(st->period, 20);
+      EXPECT_EQ(st->offset, 14);
+      int index = -1;
+      EXPECT_EQ(nr_csirs_blind_occurring(st.get(), 94, &index, 1), 1);
+      EXPECT_EQ(index, 1);
+    }
+  }
+  EXPECT_EQ(st->n_conf, 2);
+  EXPECT_TRUE(nr_csirs_blind_is_confirmed(st.get(), 0));
+  EXPECT_TRUE(nr_csirs_blind_is_confirmed(st.get(), 1));
+}
+
+TEST(CsirsBlindRuntime, ZpLifecycleTelemetryReportsEpochHitsAndRevocationOnce) {
+  int mask = 0;
+  nr_csirs_blind_rt_test_slot(2, 0, 0, 0, 1, &mask);
+  nr_csirs_blind_rt_test_logging(1);
+  testing::internal::CaptureStdout();
+  for (uint32_t slot = 1; slot <= 93; slot++) {
+    const bool hole = slot % 20 == 13 && slot <= 53;
+    nr_csirs_blind_rt_test_slot(2, slot, hole, 0, 0, &mask);
+    nr_csirs_blind_rt_test_slot(2, slot, hole, 0, 0, &mask);
+  }
+  nr_csirs_blind_rt_test_logging(0);
+  const std::string log = testing::internal::GetCapturedStdout();
+  EXPECT_NE(log.find("ZP_EVIDENCE"), std::string::npos) << log;
+  EXPECT_NE(log.find("hits=13,33,53"), std::string::npos) << log;
+  EXPECT_NE(log.find("event=REVOKED abs_slot=93"), std::string::npos) << log;
+  const auto at = log.find("event=REVOKED");
+  if (at != std::string::npos) {
+    EXPECT_EQ(log.find("event=REVOKED", at + 1), std::string::npos) << log;
+  }
+}
+
+TEST(CsirsBlindRuntime, ZpRevocationAffectsOnlySubsequentK0Decisions) {
+  int mask = 0;
+  for (uint32_t slot = 0; slot <= 92; slot++)
+    nr_csirs_blind_rt_test_slot(2, slot, slot % 20 == 13 && slot <= 53, 0, slot == 0, &mask);
+  const int decision_before_observation = nr_csirs_blind_rt_test_future_export(93);
+  ASSERT_EQ(decision_before_observation, 1);
+  nr_csirs_blind_rt_test_slot(2, 93, 0, 0, 0, &mask);
+  EXPECT_EQ(nr_csirs_blind_rt_test_future_export(113), 0);
+  EXPECT_EQ(decision_before_observation, 1);
+}
+
+TEST(CsirsBlindRuntime, ZpLifecycleDetailsAreBoundedAcrossRepeatedRevocations) {
+  int mask = 0;
+  nr_csirs_blind_rt_test_slot(2, 0, 0, 0, 1, &mask);
+  nr_csirs_blind_rt_test_logging(1);
+  testing::internal::CaptureStdout();
+  for (uint32_t slot = 1; slot < 5000; slot++)
+    nr_csirs_blind_rt_test_slot(2, slot, slot % 20 == 13 && slot % 100 <= 53, 0, 0, &mask);
+  nr_csirs_blind_rt_test_logging(0);
+  const std::string log = testing::internal::GetCapturedStdout();
+  size_t at = 0, count = 0;
+  while ((at = log.find("ZP_EVIDENCE", at)) != std::string::npos) {
+    count++;
+    at++;
+  }
+  EXPECT_EQ(count, 32u);
+  EXPECT_NE(log.find("detail=32/32"), std::string::npos);
+  EXPECT_NE(log.find("epoch=50 hits=4913,4933,4953 revocations=49"), std::string::npos) << log;
+}
+
+namespace {
+void confirm_runtime_zp(int row) {
+  int mask = 0;
+  for (uint32_t slot = 0; slot <= 53; slot++) {
+    const int n = nr_csirs_blind_rt_test_slot(row, slot, slot % 20 == 13 ? 3 : 0, 0, slot == 0, &mask);
+    if (slot == 53) {
+      EXPECT_EQ(n, 1);
+    }
+  }
+}
+std::string maintenance_summary(const std::string &log) {
+  const size_t at = log.rfind("ZP_MAINT_SUMMARY idx=0 ");
+  return at == std::string::npos ? "" : log.substr(at, log.find('\n', at) - at);
+}
+uint64_t diagnostic_count(const std::string &line, const std::string &key) {
+  const size_t at = line.find(" " + key + "=");
+  if (at == std::string::npos) { ADD_FAILURE() << "missing " << key << ": " << line; return 0; }
+  return std::strtoull(line.c_str() + at + key.size() + 2, nullptr, 10);
+}
+void balanced_maintenance(const std::string &line) {
+  uint64_t sum = 0;
+  for (const char *outcome : {"duplicate", "setup_invalid", "rho_unscorable", "score_invalid",
+                            "population_unknown", "population_suppressed", "qualified_hole", "occupied"})
+    sum += diagnostic_count(line, outcome);
+  EXPECT_EQ(sum, diagnostic_count(line, "reached"));
+  EXPECT_EQ(sum, diagnostic_count(line, "scheduled"));
+}
+}
+
+TEST(CsirsBlindRuntime, MaintenanceOutcomesAreDisjointAndPopulationDoesNotHideOccupied) {
+  confirm_runtime_zp(5);
+  nr_csirs_blind_rt_test_logging(1);
+  testing::internal::CaptureStdout();
+  int mask = 0;
+  nr_csirs_blind_rt_test_maintenance_control(1);
+  EXPECT_EQ(nr_csirs_blind_rt_test_slot(5, 73, 3, 0, 0, &mask), 1); // unknown population
+  EXPECT_EQ(nr_csirs_blind_rt_test_slot(5, 73, 3, 0, 0, &mask), 1); // duplicate takes precedence
+  nr_csirs_blind_rt_test_maintenance_control(2);
+  EXPECT_EQ(nr_csirs_blind_rt_test_slot(5, 93, 3, 0, 0, &mask), 1); // suppressed
+  nr_csirs_blind_rt_test_maintenance_control(4);
+  EXPECT_EQ(nr_csirs_blind_rt_test_slot(5, 113, 3, 0, 0, &mask), 1); // invalid row5 setup
+  nr_csirs_blind_rt_test_maintenance_control(3);
+  EXPECT_EQ(nr_csirs_blind_rt_test_slot(5, 133, 3, 1, 0, &mask), 1); // first symbol rho unavailable
+  EXPECT_EQ(nr_csirs_blind_rt_test_slot(5, 153, 3, 2, 0, &mask), 1); // second symbol score unavailable
+  EXPECT_EQ(nr_csirs_blind_rt_test_slot(5, 173, 3, 0, 0, &mask), 1); // qualified
+  nr_csirs_blind_rt_test_maintenance_control(1);
+  EXPECT_EQ(nr_csirs_blind_rt_test_slot(5, 193, 0, 0, 0, &mask), 1); // occupied despite unknown population
+  nr_csirs_blind_rt_test_maintenance_control(2);
+  nr_csirs_blind_rt_test_status_next();
+  EXPECT_EQ(nr_csirs_blind_rt_test_slot(5, 213, 0, 0, 0, &mask), 0); // occupied despite suppression; revokes
+  nr_csirs_blind_rt_test_logging(0);
+  const std::string log = testing::internal::GetCapturedStdout();
+  const std::string summary = maintenance_summary(log);
+  ASSERT_FALSE(summary.empty()) << log;
+  balanced_maintenance(summary);
+  EXPECT_EQ(diagnostic_count(summary, "scheduled"), 9u);
+  for (const char *outcome : {"duplicate", "setup_invalid", "rho_unscorable", "score_invalid",
+                            "population_unknown", "population_suppressed", "qualified_hole"})
+    EXPECT_EQ(diagnostic_count(summary, outcome), 1u) << outcome;
+  EXPECT_EQ(diagnostic_count(summary, "occupied"), 2u);
+  EXPECT_NE(summary.find("first_slot=73 last_slot=213"), std::string::npos);
+  EXPECT_NE(summary.find("active=0"), std::string::npos);
+  size_t at = 0, details = 0;
+  while ((at = log.find("ZP_MAINT_DETAIL", at)) != std::string::npos) { details++; at++; }
+  EXPECT_EQ(details, 8u);
+}
+
+TEST(CsirsBlindRuntime, MaintenanceExactZeroRow4Port0ReportsRhoUnscorableWithoutChangingExport) {
+  confirm_runtime_zp(4);
+  nr_csirs_blind_rt_test_logging(1);
+  testing::internal::CaptureStdout();
+  int mask = 0;
+  for (uint32_t slot : {73u, 93u}) {
+    nr_csirs_blind_rt_test_status_next();
+    EXPECT_EQ(nr_csirs_blind_rt_test_slot_pattern(4, slot, 0, 0, 3, 0, &mask), 1);
+    EXPECT_DOUBLE_EQ(nr_csirs_blind_rt_test_union_score(), 0.5);
+    EXPECT_EQ(nr_csirs_blind_rt_test_future_export(slot + 20), 1);
+  }
+  nr_csirs_blind_rt_test_logging(0);
+  const std::string log = testing::internal::GetCapturedStdout();
+  const std::string summary = maintenance_summary(log);
+  ASSERT_FALSE(summary.empty()) << log;
+  balanced_maintenance(summary);
+  EXPECT_EQ(diagnostic_count(summary, "rho_unscorable"), 2u);
+  EXPECT_EQ(diagnostic_count(summary, "occupied"), 0u);
+  EXPECT_NE(log.find("outcome=rho_unscorable"), std::string::npos);
+  EXPECT_NE(log.find("score=NA other_score=NA population=NA"), std::string::npos);
+  const size_t detail = log.find("ZP_MAINT_DETAIL");
+  ASSERT_NE(detail, std::string::npos);
+  EXPECT_EQ(log.find("ZP_MAINT_DETAIL", detail + 1), std::string::npos); // repeat outcome detail capped
+}
+
+TEST(CsirsBlindRuntime, MaintenanceInvalidObservationsPrecedeSameSlotDuplicateClassification) {
+  confirm_runtime_zp(5);
+  nr_csirs_blind_rt_test_logging(1);
+  testing::internal::CaptureStdout();
+  nr_csirs_blind_rt_test_maintenance_control(3); // qualifying population
+  int mask = 0;
+  EXPECT_EQ(nr_csirs_blind_rt_test_slot(5, 73, 3, 0, 0, &mask), 1);
+  EXPECT_EQ(nr_csirs_blind_rt_test_slot(5, 73, 3, 1, 0, &mask), 1); // rho fails before ZP feed
+  EXPECT_EQ(nr_csirs_blind_rt_test_slot(5, 73, 3, 2, 0, &mask), 1); // invalid second-symbol ZP score
+  nr_csirs_blind_rt_test_status_next();
+  EXPECT_EQ(nr_csirs_blind_rt_test_slot(5, 73, 3, 0, 0, &mask), 1); // valid duplicate
+  nr_csirs_blind_rt_test_logging(0);
+  const std::string log = testing::internal::GetCapturedStdout();
+  const std::string summary = maintenance_summary(log);
+  ASSERT_FALSE(summary.empty()) << log;
+  balanced_maintenance(summary);
+  EXPECT_EQ(diagnostic_count(summary, "scheduled"), 4u);
+  EXPECT_EQ(diagnostic_count(summary, "qualified_hole"), 1u);
+  EXPECT_EQ(diagnostic_count(summary, "rho_unscorable"), 1u);
+  EXPECT_EQ(diagnostic_count(summary, "score_invalid"), 1u);
+  EXPECT_EQ(diagnostic_count(summary, "duplicate"), 1u);
+  EXPECT_EQ(diagnostic_count(summary, "occupied"), 0u);
+  EXPECT_NE(summary.find("epoch=1 active=1"), std::string::npos);
+  EXPECT_EQ(nr_csirs_blind_rt_test_future_export(93), 1);
+}
+
+TEST(CsirsBlindRuntime, MaintenanceLifetimeSurvivesTwoResourceCompactionAndReconfirmation) {
+  int mask = 0;
+  nr_csirs_blind_rt_test_slot(2, 0, 0, 0, 1, &mask);
+  nr_csirs_blind_rt_test_two_resources();
+  nr_csirs_blind_rt_test_logging(1);
+  testing::internal::CaptureStdout();
+  for (uint32_t slot = 1; slot <= 173; slot++) {
+    const bool phase = slot % 20 == 13;
+    const int holes = phase ? (slot == 73 || slot == 93 ? 2 : 3) : 0;
+    if (slot == 173) nr_csirs_blind_rt_test_status_next();
+    const int n = nr_csirs_blind_rt_test_slot(2, slot, holes, 0, 0, &mask);
+    if (slot == 53) {
+      EXPECT_EQ(n, 2);
+    }
+    if (slot == 93) {
+      EXPECT_EQ(n, 1);
+      EXPECT_EQ(nr_csirs_blind_rt_test_bank_index(0), 1);
+    }
+    if (slot == 153 || slot == 173) {
+      EXPECT_EQ(n, 2);
+    }
+  }
+  nr_csirs_blind_rt_test_logging(0);
+  const std::string log = testing::internal::GetCapturedStdout();
+  const std::string zero = maintenance_summary(log);
+  balanced_maintenance(zero);
+  EXPECT_EQ(diagnostic_count(zero, "scheduled"), 3u); // 73,93,173 across two epochs
+  EXPECT_EQ(diagnostic_count(zero, "occupied"), 2u);
+  EXPECT_EQ(diagnostic_count(zero, "qualified_hole"), 1u);
+  EXPECT_NE(zero.find("epoch=2 active=1"), std::string::npos);
+  EXPECT_NE(zero.find("first_slot=73 last_slot=173"), std::string::npos);
+  const auto at = log.rfind("ZP_MAINT_SUMMARY idx=1 ");
+  ASSERT_NE(at, std::string::npos) << log;
+  const std::string one = log.substr(at, log.find('\n', at) - at);
+  balanced_maintenance(one);
+  EXPECT_EQ(diagnostic_count(one, "scheduled"), 6u);
+  EXPECT_EQ(diagnostic_count(one, "qualified_hole"), 6u);
+  EXPECT_EQ(diagnostic_count(one, "occupied"), 0u);
+  EXPECT_NE(one.find("epoch=1 active=1"), std::string::npos);
+  EXPECT_NE(log.find("first_slot=NA last_slot=NA"), std::string::npos); // new confirmation before maintenance
+}
+
+TEST(CsirsBlindRuntime, MaintenanceDetailsStayCappedButLifetimeSummariesContinueAcrossEpochs) {
+  int mask = 0;
+  nr_csirs_blind_rt_test_slot(2, 0, 0, 0, 1, &mask);
+  nr_csirs_blind_rt_test_logging(1);
+  testing::internal::CaptureStdout();
+  for (uint32_t slot = 1; slot < 5000; slot++) {
+    if (slot == 4999) nr_csirs_blind_rt_test_status_next();
+    nr_csirs_blind_rt_test_slot(2, slot, slot % 20 == 13 && slot % 100 <= 53, 0, 0, &mask);
+  }
+  nr_csirs_blind_rt_test_logging(0);
+  const std::string log = testing::internal::GetCapturedStdout();
+  size_t at = 0, details = 0, summaries = 0;
+  while ((at = log.find("ZP_MAINT_DETAIL", at)) != std::string::npos) { details++; at++; }
+  at = 0;
+  while ((at = log.find("ZP_MAINT_SUMMARY", at)) != std::string::npos) { summaries++; at++; }
+  EXPECT_EQ(details, 1u); // only occupied outcome, even over fifty revocations
+  EXPECT_GT(summaries, 50u);
+  const std::string summary = maintenance_summary(log);
+  balanced_maintenance(summary);
+  EXPECT_EQ(diagnostic_count(summary, "occupied"), 100u);
+  EXPECT_NE(summary.find("epoch=50 active=0"), std::string::npos);
+  EXPECT_NE(summary.find("first_slot=73 last_slot=4993"), std::string::npos);
+}
+
+TEST(CsirsBlindRuntime, Row2PeriodicHalfCombCannotExportItsQuietSubset) {
+  for (uint32_t slot = 0; slot < 100; slot++) {
+    int mask = 0;
+    EXPECT_EQ(nr_csirs_blind_rt_test_slot_pattern(2, slot, slot % 20 == 13 ? 1 : 0,
+                                                 0, 1, slot == 0, &mask), 0)
+        << "slot=" << slot;
+    EXPECT_EQ(mask, 1 << 7);
+  }
+}
+
+TEST(CsirsBlindRuntime, Row4CompletePatternIncludesEveryPortGroup) {
+  bool exported = false;
+  for (uint32_t slot = 0; slot < 100; slot++) {
+    const bool hole = slot % 20 == 13;
+    int mask = 0;
+    const int n = nr_csirs_blind_rt_test_slot(4, slot, hole ? 1 : 0, 0, slot == 0, &mask);
+    ASSERT_GE(n, 0);
+    EXPECT_EQ(mask, 1 << 7);
+    if (!hole) {
+      EXPECT_EQ(n, 0);
+    }
+    exported |= n == 1;
+  }
+  EXPECT_TRUE(exported);
+}
+
+TEST(CsirsBlindRuntime, Row2OnPhaseGeometryRejectionPreventsConfirmation) {
+  for (uint32_t slot = 0; slot <= 73; slot++) {
+    int mask = 0;
+    // Complete holes at 13/33/73 contradict the wider half-comb observed at 53.
+    const int holes = slot % 20 == 13;
+    EXPECT_EQ(nr_csirs_blind_rt_test_slot_pattern(2, slot, holes, 0, slot == 53,
+                                                slot == 0, &mask), 0) << "slot=" << slot;
+    EXPECT_EQ(mask, 1 << 7);
+  }
+}
+
+TEST(CsirsBlindRuntime, Row4OnPhaseGeometryRejectionPreventsConfirmation) {
+  for (uint32_t slot = 0; slot <= 73; slot++) {
+    int mask = 0;
+    EXPECT_EQ(nr_csirs_blind_rt_test_slot_pattern(4, slot, slot % 20 == 13, 0, slot == 53,
+                                                slot == 0, &mask), 0) << "slot=" << slot;
+    EXPECT_EQ(mask, 1 << 7);
+  }
+}
+
+TEST(CsirsBlindRuntime, CompleteThreeOccasionsConfirmWithOffPhaseGeometryRejection) {
+  for (int row : {2, 4}) {
+    for (int reject_slot : {-1, 34}) {
+      for (uint32_t slot = 0; slot <= 53; slot++) {
+        int mask = 0;
+        const bool rejected = static_cast<int>(slot) == reject_slot;
+        const int holes = slot % 20 == 13 || rejected;
+        EXPECT_EQ(nr_csirs_blind_rt_test_slot_pattern(row, slot, holes, 0, rejected,
+                                                    slot == 0, &mask), slot == 53 ? 1 : 0)
+            << "row=" << row << " reject_slot=" << reject_slot << " slot=" << slot;
+      }
+    }
+  }
+}
+
+TEST(CsirsBlindZp, PhaseContradictionRecoversWithNewEvidence) {
+  auto st = std::make_unique<nr_csirs_blind_state_t>();
+  ASSERT_GT(nr_csirs_blind_init(st.get(), 24, 17), 0);
+  for (uint32_t slot = 0; slot <= 113; slot++) {
+    const bool hole = slot % 20 == 13 && slot != 53;
+    const bool done = nr_csirs_blind_zp_feed(st.get(), 0, slot, hole ? 0.98 : 0.0, 0.02);
+    EXPECT_EQ(done, slot == 113) << "slot=" << slot;
+  }
+  EXPECT_EQ(st->period, 20);
+  EXPECT_EQ(st->offset, 13);
+}
+
+TEST(CsirsBlindZp, OnPhaseRejectionBeforeFirstHitIsOutsideEvidenceSpan) {
+  auto st = std::make_unique<nr_csirs_blind_state_t>();
+  ASSERT_GT(nr_csirs_blind_init(st.get(), 24, 17), 0);
+  for (uint32_t slot = 0; slot <= 73; slot++) {
+    const bool hole = slot % 20 == 13 && slot >= 33;
+    EXPECT_EQ(nr_csirs_blind_zp_feed(st.get(), 0, slot, hole ? 0.98 : 0.0, 0.02), slot == 73);
+  }
+  EXPECT_EQ(st->period, 20);
+  EXPECT_EQ(st->offset, 13);
+}
+
+TEST(CsirsBlindZp, UnscorableOnPhaseObservationIsNotAContradiction) {
+  for (double invalid : {-1.0, static_cast<double>(NAN), static_cast<double>(INFINITY)}) {
+    auto st = std::make_unique<nr_csirs_blind_state_t>();
+    ASSERT_GT(nr_csirs_blind_init(st.get(), 24, 17), 0);
+    for (uint32_t slot = 0; slot <= 73; slot++) {
+      const double score = slot == 53 ? invalid : slot % 20 == 13 ? 0.98 : 0.0;
+      EXPECT_EQ(nr_csirs_blind_zp_feed(st.get(), 0, slot, score, 0.02), slot == 73)
+          << "slot=" << slot << " invalid=" << invalid;
+    }
+  }
+}
+
+TEST(CsirsBlindZp, ContradictionChecksBothInferredOffsets) {
+  // Both sets infer period 20 with offsets 13 and 14, but have a missing middle
+  // occurrence on a different offset. A single-offset-only veto would miss one.
+  for (int missing : {33, 34}) {
+    auto st = std::make_unique<nr_csirs_blind_state_t>();
+    ASSERT_GT(nr_csirs_blind_init(st.get(), 24, 17), 0);
+    for (uint32_t slot = 0; slot <= (missing == 33 ? 53u : 54u); slot++) {
+      if (slot == 53 && missing == 34)
+        continue; // unobserved, rather than a second contradiction
+      const bool hole = slot == 13 || slot == 14
+          || (missing == 33 ? slot == 34 || slot == 53 : slot == 33 || slot == 54);
+      EXPECT_FALSE(nr_csirs_blind_zp_feed(st.get(), 0, slot, hole ? 0.98 : 0.0, 0.02))
+          << "missing=" << missing << " slot=" << slot;
+    }
+  }
+}
+
+TEST(CsirsBlindZp, LongPeriodContradictionSurvivesDenseOffPhaseObservations) {
+  auto st = std::make_unique<nr_csirs_blind_state_t>();
+  ASSERT_GT(nr_csirs_blind_init(st.get(), 24, 17), 0);
+  for (uint32_t slot = 0; slot <= 1933; slot++) {
+    const bool hole = slot == 13 || slot == 653 || slot == 1933;
+    EXPECT_FALSE(nr_csirs_blind_zp_feed(st.get(), 0, slot, hole ? 0.98 : 0.0, 0.02))
+        << "slot=" << slot;
+  }
+}
+
+TEST(CsirsBlindZp, LongPeriodCompleteEvidenceStillConfirms) {
+  auto st = std::make_unique<nr_csirs_blind_state_t>();
+  ASSERT_GT(nr_csirs_blind_init(st.get(), 24, 17), 0);
+  for (uint32_t slot = 0; slot <= 1293; slot++) {
+    EXPECT_EQ(nr_csirs_blind_zp_feed(st.get(), 0, slot, slot % 640 == 13 ? 0.98 : 0.0, 0.02),
+              slot == 1293) << "slot=" << slot;
+  }
+  EXPECT_EQ(st->period, 640);
+  EXPECT_EQ(st->offset, 13);
+}
+
+TEST(CsirsBlindZp, FullUnresolvedHitWindowRecoversWithNewEvidence) {
+  auto st = std::make_unique<nr_csirs_blind_state_t>();
+  ASSERT_GT(nr_csirs_blind_init(st.get(), 24, 17), 0);
+  for (uint32_t slot = 0; slot <= 60; slot++) {
+    const bool hole = (slot >= 13 && slot <= 20) || slot == 40 || slot == 60;
+    EXPECT_EQ(nr_csirs_blind_zp_feed(st.get(), 0, slot, hole ? 0.98 : 0.0, 0.02), slot == 60)
+        << "slot=" << slot;
+  }
+  EXPECT_EQ(st->period, 20);
+  EXPECT_EQ(st->offset, 0);
+}
+
+TEST(CsirsBlindZp, PhaseStorageCoversLegalTableAndInitClearsEveryCandidate) {
+  unsigned phase_bits = 0;
+  for (unsigned period : nr_csirs_blind_periods)
+    phase_bits += period;
+  ASSERT_EQ(phase_bits, NR_CSIRS_BLIND_ZP_PHASE_BITS);
+  static_assert(NR_CSIRS_BLIND_ZP_PHASE_WORDS == 22, "Bound ZP phase evidence to 176 bytes per candidate");
+  auto st = std::make_unique<nr_csirs_blind_state_t>();
+  for (auto &candidate : st->zp_rejected_phase)
+    for (auto &word : candidate)
+      word = UINT64_MAX;
+  ASSERT_GT(nr_csirs_blind_init(st.get(), 24, 17), 0);
+  for (const auto &candidate : st->zp_rejected_phase)
+    for (uint64_t word : candidate)
+      ASSERT_EQ(word, 0u);
+  RecordProperty("state_bytes", static_cast<int>(sizeof(*st)));
+  RecordProperty("phase_storage_bytes", static_cast<int>(sizeof(st->zp_rejected_phase)));
+}
+
+TEST(CsirsBlindRuntime, Row2PeriodicTwoToneHoleCannotExportItsSubset) {
+  for (uint32_t slot = 0; slot < 100; slot++) {
+    int mask = 0;
+    EXPECT_EQ(nr_csirs_blind_rt_test_slot_pattern(2, slot, slot % 20 == 13 ? 1 : 0,
+                                                 0, 2, slot == 0, &mask), 0)
+        << "slot=" << slot;
+  }
+}
+
+namespace {
+std::string capture_zp_telemetry(int extra_holes, int duplicates, bool *exported) {
+  int mask = 0;
+  nr_csirs_blind_rt_test_slot_pattern(2, 0, 0, 0, extra_holes, 1, &mask);
+  *exported = false;
+  nr_csirs_blind_rt_test_logging(1);
+  testing::internal::CaptureStdout();
+  for (uint32_t call = 1; call < 20000; call++) {
+    const uint32_t slot = call / duplicates;
+    const int n = nr_csirs_blind_rt_test_slot_pattern(2, slot, slot % 20 == 13 ? 1 : 0,
+                                                    0, extra_holes, 0, &mask);
+    *exported |= n > 0;
+  }
+  nr_csirs_blind_rt_test_logging(0);
+  return testing::internal::GetCapturedStdout();
+}
+}
+
+TEST(CsirsBlindRuntime, HalfCombVetoTelemetryIsBoundedAndDeduplicated) {
+  bool exported = false;
+  const std::string log = capture_zp_telemetry(1, 2, &exported);
+  EXPECT_FALSE(exported);
+  const std::string event = "CSIRS_BLIND ZP_GEOMETRY_VETO";
+  const auto first = log.find(event);
+  EXPECT_NE(first, std::string::npos) << log;
+  if (first != std::string::npos) {
+    EXPECT_EQ(log.find(event, first + event.size()), std::string::npos) << log;
+  }
+  EXPECT_NE(log.find("row=2 fd=2 l0=7 l1=0 density=2 start_rb=0 nrb=4 abs_slot=13"), std::string::npos) << log;
+  EXPECT_NE(log.find("old_score=0.999992 completeness_score=0.000000 null=0.000000"), std::string::npos) << log;
+  EXPECT_NE(log.find("zp_geometry_veto=500"), std::string::npos) << log;
+}
+
+TEST(CsirsBlindRuntime, TwoToneVetoTelemetryCountsEveryDistinctSlot) {
+  bool exported = false;
+  const std::string log = capture_zp_telemetry(2, 1, &exported);
+  EXPECT_FALSE(exported);
+  EXPECT_NE(log.find("CSIRS_BLIND ZP_GEOMETRY_VETO"), std::string::npos) << log;
+  EXPECT_NE(log.find("zp_geometry_veto=1000"), std::string::npos) << log;
+}
+
+TEST(CsirsBlindRuntime, CompleteHoleConfirmsWithoutGeometryVeto) {
+  bool exported = false;
+  const std::string log = capture_zp_telemetry(0, 1, &exported);
+  EXPECT_TRUE(exported);
+  EXPECT_NE(log.find("CSIRS_BLIND ZP CONFIRMED"), std::string::npos) << log;
+  EXPECT_EQ(log.find("CSIRS_BLIND ZP_GEOMETRY_VETO"), std::string::npos) << log;
+  EXPECT_NE(log.find("zp_geometry_veto=0"), std::string::npos) << log;
+}
+
+TEST(CsirsBlindRuntime, Row5UnmeasuredSecondSymbolCannotExport) {
+  for (uint32_t slot = 0; slot < 100; slot++) {
+    int mask = 0;
+    EXPECT_EQ(nr_csirs_blind_rt_test_slot(5, slot, slot % 20 == 13 ? 1 : 0, 2, slot == 0, &mask), 0);
+  }
+}
+
+TEST(CsirsBlindRuntime, Row5StructuralHoleOnEitherSymbolCannotExport) {
+  for (int structural : {1, 2}) {
+    for (uint32_t slot = 0; slot < 100; slot++) {
+      int mask = 0;
+      const int holes = structural | (slot % 20 == 13 ? 3 : 0);
+      EXPECT_EQ(nr_csirs_blind_rt_test_slot(5, slot, holes, 0, slot == 0, &mask), 0)
+          << "structural=" << structural << " slot=" << slot;
+    }
+  }
+}
+
+TEST(CsirsBlindRuntime, Row5DifferentPeriodicPhasesCannotExport) {
+  for (uint32_t slot = 0; slot < 100; slot++) {
+    int mask = 0;
+    const int holes = (slot % 20 == 13 ? 1 : 0) | (slot % 20 == 14 ? 2 : 0);
+    EXPECT_EQ(nr_csirs_blind_rt_test_slot(5, slot, holes, 0, slot == 0, &mask), 0);
+  }
 }
 
 /* ---- Channel robustness: the whole reason the OTA correlation read as noise ------------------

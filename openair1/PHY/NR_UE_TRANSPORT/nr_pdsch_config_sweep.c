@@ -944,6 +944,65 @@ bool nr_pdsch_config_sweep_select(uint64_t configuration, uint16_t rnti, uint8_t
   return h >= 0;
 }
 
+/* An earlier TDA can seed this context with its mask, but cannot prove that this TDA has the
+ * same duration. Restore type-A entries when a newly measured footprint has no representative
+ * left after that seed prune. Append only: pending tickets and existing CRC evidence stay valid.
+ * Type B has its separate observation-gated expansion below. Called with g_lock held. */
+static int restore_observed_typea(sweep_context_t *c, const rnti_ctx_t *r,
+                                 uint16_t mask, int last_symbol, int k0)
+{
+  if (last_symbol < -1 || last_symbol >= 14 || k0 < -1 || k0 > 32)
+    return 0;
+  nr_pdsch_config_sweep_state_t *st = c->state;
+  obs_set_t observation = {.n = 1, .mask = {mask}, .last = {last_symbol}, .k0 = {k0}};
+  for (int i = 0; i < st->n_hyp; i++)
+    if (obs_admits(&st->hyp[i], &observation, 0))
+      return 0;
+  const nr_pdsch_config_sweep_state_t *catalog = catalog_template(c->typeA, c->legality);
+  nr_pdsch_config_sweep_state_t *scratch = NULL;
+  if (!catalog) {
+    scratch = malloc(sizeof(*scratch));
+    if (!scratch)
+      return 0;
+    nr_pdsch_config_sweep_init_legal(scratch, c->tda_count, c->typeA, c->legality);
+    catalog = scratch;
+  }
+  const int before = st->n_hyp;
+  const prior_t *prior = r->prior.valid && r->prior.configuration == c->configuration ? &r->prior
+                        : g_prior.valid && g_prior.configuration == c->configuration ? &g_prior : NULL;
+  for (int i = 0; i < catalog->n_hyp && st->n_hyp < NR_PDSCH_SWEEP_MAX_HYP; i++) {
+    nr_pdsch_cfg_hypothesis_t h = catalog->hyp[i];
+    if (k0 >= 0)
+      h.k0 = (uint8_t)k0;
+    if (h.mapping_type != 0 || !obs_admits(&h, &observation, 0))
+      continue;
+    if (c->qm_obs >= 2 && !(c->qm_tables & (1u << h.mcs_table)))
+      continue;
+    if (prior && (h.mcs_table != prior->mcs_table
+                  || (prior->mapping_type == h.mapping_type
+                      && (h.dmrs_add_pos != prior->dmrs_add_pos || h.dmrs_max_len != prior->dmrs_max_len))))
+      continue;
+    bool duplicate = false;
+    for (int j = before; j < st->n_hyp; j++) {
+      const nr_pdsch_cfg_hypothesis_t *old = &st->hyp[j];
+      duplicate |= old->tda_start == h.tda_start && old->tda_length == h.tda_length
+                   && old->k0 == h.k0 && old->dmrs_mask == h.dmrs_mask && old->mcs_table == h.mcs_table;
+    }
+    if (duplicate)
+      continue;
+    const int at = st->n_hyp++;
+    st->hyp[at] = h;
+    st->trials[at] = st->ok[at] = 0;
+    st->order[at] = at;
+  }
+  free(scratch);
+  const int added = st->n_hyp - before;
+  if (added)
+    LOG_I(PHY, "SWEEP: ORACLE_RESTORE rnti=0x%04x tda=%u mask=0x%x last=%d k0=%d added=%d\n",
+          c->rnti, c->tda, mask, last_symbol, k0, added);
+  return added;
+}
+
 int nr_pdsch_config_sweep_observe_mask(const nr_pdsch_sweep_ticket_t *ticket, uint16_t dmrs_mask)
 {
   return nr_pdsch_config_sweep_observe(ticket, dmrs_mask, -1, -1);
@@ -976,6 +1035,7 @@ int nr_pdsch_config_sweep_observe(const nr_pdsch_sweep_ticket_t *ticket, uint16_
     r->typeb_seen = true;
   int n = 0;
   if (c != NULL && c->state->winner < 0) {
+    restore_observed_typea(c, r, dmrs_mask, last_symbol, k0);
     if (r->typeb_seen)
       add_typeb_layer(c->state, c->typeA, c->legality);
     const int before = c->state->n_hyp;

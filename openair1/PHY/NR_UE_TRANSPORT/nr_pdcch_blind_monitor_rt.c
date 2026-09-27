@@ -6254,11 +6254,15 @@ constdiag_done:;
      * slots they occur. A hypothesis that lands on one of this grant's DM-RS symbols is wrong for
      * this grant (the standard forbids the overlap and nr_dlsch_extract_rbs() ASSERTS on it -- which
      * killed the 4-RX OTA run r4a_223725): applied only when it touches no DM-RS symbol. */
-    for (int zp = 0; zp < 2; zp++) {
+    /* EVERY confirmed resource occurring in this slot, not one NZP + one ZP: the OCUDU bed sends a TRS
+     * pair (two NZP resources in one slot) and an NZP + a ZP in another. Its failed MCS-10 grants
+     * align with those slots; live validation must establish the CRC impact of this correction. */
+    fapi_nr_dl_config_csirs_pdu_rel15_t rm[NFAPI_MAX_NUM_CSI_RATEMATCH];
+    const int n_rm = nr_csirs_blind_rt_rate_match_all(abs_slot + hy_k0 /* the PDSCH slot */, rm, NFAPI_MAX_NUM_CSI_RATEMATCH);
+    for (int i = 0; i < n_rm; i++) {
       fapi_nr_dl_config_csirs_pdu_rel15_t *c = &dlsch_pdu.csiRsForRateMatching[dlsch_pdu.numCsiRsForRateMatching];
-      const bool have = zp ? nr_csirs_blind_rt_rate_match_zp(abs_slot, c) : nr_csirs_blind_rt_rate_match(abs_slot, c);
-      if (!have)
-        continue;
+      *c = rm[i];
+      const bool zp = c->csi_type == 2;
       static const uint8_t num_l0[18] = {1, 1, 1, 1, 2, 1, 2, 2, 1, 2, 2, 2, 2, 2, 4, 2, 2, 4};
       bool clash = (c->row < 1 || c->row > 18);
       for (int k = 0; !clash && k < num_l0[c->row - 1]; k++)

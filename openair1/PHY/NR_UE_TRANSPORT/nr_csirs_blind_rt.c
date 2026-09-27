@@ -21,9 +21,12 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <assert.h>
+#include <math.h>
 
-/* Reference planes actually allocated. Only plane 0 is ever scored; rows 1-5 need at most 4 ports,
- * and for the 8-32-port rows every port >= 3 writes into plane 3 as a shared sink (never read), so a
+/* Reference planes actually allocated. NZP scores plane 0; ZP scores their occupancy union.
+ * Rows 1-5 need at most 4 ports,
+ * and for the 8-32-port rows every port >= 3 writes into plane 3 as a shared union sink, so a
  * 32-port candidate costs no extra 7 MB of per-thread buffers nor a 7 MB memset per slot. */
 #define NR_CSIRS_BLIND_RT_MAX_PORTS 4
 #define NR_CSIRS_BLIND_RT_ALL_PORTS 32
@@ -34,7 +37,87 @@ static double   g_zp_null[64];
 static int      g_zp_null_n, g_zp_null_w;
 static int      g_on = -1;      /* -1 = not read, 0 = off, 1 = on */
 static int      g_rank = -1;    /* ISAC_CSIRS_BLIND_RANK: keep scoring after a confirmation */
-static bool     g_confirm_logged;
+static int      g_conf_logged;   /* g_st confirmations already logged */
+/* Candidate-indexed counters survive export-bank compaction. Diagnostic details are capped;
+ * every confirmation still carries its complete bounded epoch history in the normal log. */
+static uint32_t g_zp_logged[NR_CSIRS_BLIND_MAX_CAND];
+static uint8_t g_zp_events[NR_CSIRS_BLIND_MAX_CAND];
+#define ZP_EVENT_LIMIT 32
+/* Diagnostic lifetime state is indexed by immutable candidate index, never export-bank position.
+ * Neither evidence epochs nor export compaction/reset may clear this accounting. */
+enum zp_maint_outcome {
+  ZPM_DUPLICATE, ZPM_SETUP_INVALID, ZPM_RHO_UNSCORABLE, ZPM_SCORE_INVALID,
+  ZPM_POPULATION_UNKNOWN, ZPM_POPULATION_SUPPRESSED, ZPM_QUALIFIED_HOLE, ZPM_OCCUPIED, ZPM_OUTCOMES
+};
+static const char *const zp_maint_names[ZPM_OUTCOMES] = {
+  "duplicate", "setup_invalid", "rho_unscorable", "score_invalid",
+  "population_unknown", "population_suppressed", "qualified_hole", "occupied"
+};
+static struct {
+  uint64_t scheduled, reached, outcome[ZPM_OUTCOMES];
+  uint32_t first_slot, last_slot;
+} g_zp_maint[NR_CSIRS_BLIND_MAX_CAND];
+
+static void zp_maint_summary(int idx)
+{
+  const nr_csirs_candidate_t *c = &g_zp.cand[idx];
+  char first[24] = "NA", last[24] = "NA";
+  uint64_t total = 0;
+  for (int k = 0; k < ZPM_OUTCOMES; k++)
+    total += g_zp_maint[idx].outcome[k];
+  assert(total == g_zp_maint[idx].reached);
+  if (g_zp_maint[idx].reached) {
+    snprintf(first, sizeof(first), "%u", g_zp_maint[idx].first_slot);
+    snprintf(last, sizeof(last), "%u", g_zp_maint[idx].last_slot);
+  }
+  LOG_I(PHY, "SENSING: CSIRS_BLIND ZP_MAINT_SUMMARY idx=%d row=%u fd=%u l0=%u l1=%u density=%u "
+             "start_rb=%u nrb=%u scramb_id=%u cdm=%u epoch=%u active=%d scheduled=%llu reached=%llu duplicate=%llu "
+             "setup_invalid=%llu rho_unscorable=%llu score_invalid=%llu population_unknown=%llu "
+             "population_suppressed=%llu qualified_hole=%llu occupied=%llu first_slot=%s last_slot=%s\n",
+        idx, c->row, c->freq_domain, c->symb_l0, c->symb_l1, c->freq_density, c->start_rb, c->nr_of_rbs,
+        c->scramb_id, c->cdm_type, g_zp.zp_epoch[idx], nr_csirs_blind_is_confirmed(&g_zp, idx),
+        (unsigned long long)g_zp_maint[idx].scheduled, (unsigned long long)g_zp_maint[idx].reached,
+        (unsigned long long)g_zp_maint[idx].outcome[ZPM_DUPLICATE],
+        (unsigned long long)g_zp_maint[idx].outcome[ZPM_SETUP_INVALID],
+        (unsigned long long)g_zp_maint[idx].outcome[ZPM_RHO_UNSCORABLE],
+        (unsigned long long)g_zp_maint[idx].outcome[ZPM_SCORE_INVALID],
+        (unsigned long long)g_zp_maint[idx].outcome[ZPM_POPULATION_UNKNOWN],
+        (unsigned long long)g_zp_maint[idx].outcome[ZPM_POPULATION_SUPPRESSED],
+        (unsigned long long)g_zp_maint[idx].outcome[ZPM_QUALIFIED_HOLE],
+        (unsigned long long)g_zp_maint[idx].outcome[ZPM_OCCUPIED], first, last);
+}
+
+static void zp_maint_end(int idx, uint32_t slot, bool duplicate, enum zp_maint_outcome outcome,
+                         double rho, double score, double other_score, double population)
+{
+  /* Runtime setup/rho failures and the feed's score-validity guard precede duplicate handling.
+   * A repeated slot is a duplicate only after it supplies a valid pair of ZP scores. */
+  if (duplicate && outcome >= ZPM_POPULATION_UNKNOWN)
+    outcome = ZPM_DUPLICATE;
+  const uint64_t count = ++g_zp_maint[idx].outcome[outcome];
+  uint64_t total = 0;
+  for (int k = 0; k < ZPM_OUTCOMES; k++)
+    total += g_zp_maint[idx].outcome[k];
+  assert(total == g_zp_maint[idx].reached);
+  if (count != 1)
+    return; // one detail per outcome per candidate lifetime; summaries remain uncapped
+  char values[4][32];
+  const double numbers[] = {rho, score, other_score, population};
+  for (int k = 0; k < 4; k++) {
+    if (isfinite(numbers[k]))
+      snprintf(values[k], sizeof(values[k]), "%.6f", numbers[k]);
+    else
+      snprintf(values[k], sizeof(values[k]), "NA");
+  }
+  LOG_I(PHY, "SENSING: CSIRS_BLIND ZP_MAINT_DETAIL idx=%d epoch=%u active=%d abs_slot=%u outcome=%s "
+             "rho=%s score=%s other_score=%s population=%s\n",
+        idx, g_zp.zp_epoch[idx], nr_csirs_blind_is_confirmed(&g_zp, idx), slot, zp_maint_names[outcome],
+        values[0], values[1], values[2], values[3]);
+}
+/* Diagnostic only: exact row-2 old-score/new-score disagreement, counted once per candidate
+ * and absolute slot. One detailed line per candidate; aggregate uses the existing status cadence. */
+static struct { uint64_t count; uint32_t last_slot; } g_zp_geometry_veto[NR_CSIRS_BLIND_MAX_CAND];
+static uint64_t g_zp_geometry_veto_total;
 static int      g_armed;
 static uint64_t g_slots;
 /* Recent scores from OTHER candidates, for the RELATIVE detection bar. An absolute correlation
@@ -102,6 +185,9 @@ static double median_of(const double *src, int n)
 }
 static double null_median(void) { return median_of(g_null, g_null_n); }
 
+static void score_candidate(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot,
+                            c16_t rxdataF[][ue->frame_parms.samples_per_slot_wCP], int idx, bool maintenance);
+
 void nr_csirs_blind_rt_slot(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot,
                             c16_t rxdataF[][ue->frame_parms.samples_per_slot_wCP])
 {
@@ -122,17 +208,26 @@ void nr_csirs_blind_rt_slot(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot
       return;
     }
     nr_csirs_blind_init(&g_zp, fp->N_RB_DL, fp->Nid_cell);
+    memset(g_zp_geometry_veto, 0, sizeof(g_zp_geometry_veto));
+    g_zp_geometry_veto_total = 0;
+    memset(g_zp_logged, 0, sizeof(g_zp_logged));
+    memset(g_zp_events, 0, sizeof(g_zp_events));
+    memset(g_zp_maint, 0, sizeof(g_zp_maint));
     g_armed = 1;
     LOG_I(PHY, "SENSING: CSIRS_BLIND armed: %d candidates, N_RB=%d scramb_id=%d (assumed = PCI)\n",
           g_st.n, fp->N_RB_DL, fp->Nid_cell);
   }
-  /* NOTHING TO SEARCH ONCE CONFIRMED. nr_csirs_blind_next() returns the confirmed index forever
+  /* Historical cost issue: nr_csirs_blind_next() used to return the confirmed index forever
    * after confirmation, so every later call regenerated the SAME resource's full-slot reference
    * (memset of up to 4 x 57 KB, nr_generate_csi_rs, an FEP, a correlation) and re-scored it -- and
    * the ZP search below, which shares idx, could only ever re-test that one candidate. Measured
    * 2026-09-17 on the PDCCH scan consumer: ~1.85 ms of untimed work per occasion, 68 % of PDCCH
    * occasions dropped, and 281k "CONFIRMED" lines in one 600 s run. The rate-matcher and the sensing
-   * capture read the stored state (rate_match_from), which this leaves untouched. */
+   * capture read the stored state (rate_match_from), which this leaves untouched.
+   * 2026-09-27: confirmed candidates now LEAVE the rotation instead of owning it, and the search goes
+   * on for other resources until capacity is reached. The OCUDU bed carries a TRS pair, a CQI row 2
+   * and a ZP. Failed MCS-10 grants align with these slots; a CRC improvement still needs live
+   * validation, as does the CPU cost of this opt-in search. Silence cannot prove completeness. */
   /* RANKING MODE (ISAC_CSIRS_BLIND_RANK=1, diagnostic only). MEASURED 2026-09-19 on a live
    * commercial cell: two identical 300 s runs both CONFIRMED, but on DIFFERENT resources
    * ("...:2:6:...:16:3" vs "...:4:5:...:16:8"; agreeing only on row 2 / density / period 16). The
@@ -144,32 +239,34 @@ void nr_csirs_blind_rt_slot(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot
    * So in this mode: log EVERY confirmation, clear it, and keep scoring the whole population, then
    * print the top candidates by best correlation. A real resource sits far above the rest and
    * repeats across runs; a false positive shuffles. The rate-matcher gets no resource while this is
-   * on (g_st.confirmed is cleared), which is why it is diagnostic only. */
+   * on (the export explicitly suppresses both banks), which is why it is diagnostic only. */
   if (g_rank < 0) {
     const char *e = getenv("ISAC_CSIRS_BLIND_RANK");
     g_rank = (e != NULL && atoi(e) != 0) ? 1 : 0;
   }
-  if (g_st.confirmed >= 0) {
-    uint16_t period = 0, offset = 0;
-    const nr_csirs_candidate_t *w = nr_csirs_blind_confirmed(&g_st, &period, &offset);
-    char line[128];
-    if (w != NULL && nr_csirs_blind_format(w, period, offset, line, sizeof(line)) > 0) {
-      const int widx = g_st.confirmed;
-      if (g_rank)
-        LOG_A(PHY,
-              "SENSING: CSIRS_BLIND CONFIRMED[rank] after %llu slots -- \"%s\" z=%.2f hits=%u "
-              "tried=%u z_median=%.2f (search continues)\n",
-              (unsigned long long)g_slots, line, g_st.best_rho[widx], g_st.hits[widx],
-              g_st.tried[widx], null_median());
-      else if (!g_confirm_logged)
-        LOG_A(PHY, "SENSING: CSIRS_BLIND CONFIRMED after %llu slots -- csirs_monitor = \"%s\" (search stopped)\n",
-              (unsigned long long)g_slots, line);
-    }
-    if (!g_rank) {
-      g_confirm_logged = true;
-      return;
-    }
-    g_st.confirmed = -1; /* keep the population moving; see RANKING MODE above */
+  /* Every confirmation is logged once; nr_csirs_blind_next() skips confirmed candidates. */
+  for (; g_conf_logged < g_st.n_conf; g_conf_logged++) {
+    const int k = g_conf_logged, widx = g_st.conf_idx[k];
+    char line[128], phase[32] = {0};
+    if (nr_csirs_blind_format(&g_st.cand[widx], g_st.conf_period[k], g_st.conf_off[k][0], line, sizeof(line)) <= 0)
+      continue;
+    if (g_st.conf_n_off[k] == 2)
+      snprintf(phase, sizeof(phase), " and offset %u", (unsigned)g_st.conf_off[k][1]);
+    if (g_rank)
+      LOG_A(PHY,
+            "SENSING: CSIRS_BLIND CONFIRMED[rank] after %llu slots -- \"%s\"%s z=%.2f hits=%u "
+            "tried=%u z_median=%.2f (search continues)\n",
+            (unsigned long long)g_slots, line, g_st.conf_n_off[k] == 2 ? " (two phases)" : "", g_st.best_rho[widx],
+            g_st.hits[widx], g_st.tried[widx], null_median());
+    else
+      LOG_A(PHY, "SENSING: CSIRS_BLIND CONFIRMED #%d after %llu slots -- csirs_monitor = \"%s\"%s (search continues)\n",
+            k, (unsigned long long)g_slots, line, phase);
+  }
+  if (g_rank && g_st.n_conf > 0) {
+    /* keep the population moving; see RANKING MODE above */
+    g_st.n_conf = 0;
+    g_st.confirmed = -1;
+    g_conf_logged = 0;
   }
   if (g_rank && (g_slots % 4000) == 3999) {
     /* Top 5 by best SCALE-FREE score (best_rho now holds z = rho*sqrt(n_re); noise ~0.89). */
@@ -227,11 +324,55 @@ void nr_csirs_blind_rt_slot(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot
             g_st.cand[g_id_pin].row, g_st.cand[g_id_pin].freq_domain, g_st.cand[g_id_pin].symb_l0, hb);
     }
   }
+  /* Validate every predicted ZP occurrence, even if the NZP bank has retired that
+   * geometry or filled its capacity. Snapshot indices before feeds compact the bank.
+   * At most MAX_CONF maintenance scores plus the ordinary discovery score per slot. */
+  int occurring[NR_CSIRS_BLIND_MAX_CONF];
+  const int n = nr_csirs_blind_occurring(&g_zp, absolute_slot, occurring, NR_CSIRS_BLIND_MAX_CONF);
+  for (int k = 0; k < n; k++) {
+    g_zp_maint[occurring[k]].scheduled++;
+    score_candidate(ue, slot, absolute_slot, rxdataF, occurring[k], true);
+  }
   const int idx = nr_csirs_blind_next(&g_st);
+  bool measured = false;
+  for (int k = 0; k < n; k++)
+    if (occurring[k] == idx)
+      measured = true;
+  if (idx >= 0 && !measured)
+    score_candidate(ue, slot, absolute_slot, rxdataF, idx, false);
+  if ((++g_slots % 20000) == 0) {
+    LOG_I(PHY, "SENSING: CSIRS_BLIND slots=%llu candidates=%d null_median=%.3f confirmed nzp=%d zp=%d zp_geometry_veto=%llu\n",
+          (unsigned long long)g_slots, g_st.n, null_median(), g_st.n_conf, g_zp.n_conf,
+          (unsigned long long)g_zp_geometry_veto_total);
+    for (int k = 0; k < g_zp.n; k++)
+      if (g_zp_maint[k].scheduled || nr_csirs_blind_is_confirmed(&g_zp, k))
+        zp_maint_summary(k);
+  }
+}
+
+static void score_candidate(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot,
+                            c16_t rxdataF[][ue->frame_parms.samples_per_slot_wCP], int idx, bool maintenance)
+{
+  const NR_DL_FRAME_PARMS *fp = &ue->frame_parms;
+  const c16_t *rxdataF_ant0 = &rxdataF[0][0];
   if (idx < 0) {
     return;
   }
   const nr_csirs_candidate_t *c = &g_st.cand[idx];
+  /* Snapshot the feed's existing duplicate predicate before any feed mutates it. This affects
+   * accounting only: repeated calls still execute exactly the historical receiver path. */
+  const bool duplicate = (g_zp.tried[idx] > 0 || g_zp.zp_epoch[idx] > 0)
+      && g_zp.zp_last_slot[idx] == absolute_slot;
+  if (maintenance) {
+    if (g_zp_maint[idx].reached++ == 0)
+      g_zp_maint[idx].first_slot = absolute_slot;
+    g_zp_maint[idx].last_slot = absolute_slot;
+  }
+  if (c->row == 5 && c->symb_l0 + 1 >= fp->symbols_per_slot) {
+    if (maintenance)
+      zp_maint_end(idx, absolute_slot, duplicate, ZPM_SETUP_INVALID, NAN, NAN, NAN, NAN);
+    return;   /* row 5 maps l0 and l0+1, NOT the separate symb_l1 parameter */
+  }
 
   /* Build the reference with the REAL generator. The RE-to-sequence mapping is row-dependent
    * (k-prime/l-prime, CDM groups, density parity) and a hand-rolled version that is subtly wrong
@@ -244,8 +385,11 @@ void nr_csirs_blind_rt_slot(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot
    * From the enumerator's own table, so a row added there cannot get the wrong port count here: rows
    * 3 and 5 (2 and 4 ports) were generated with only port 0 cleared. */
   const int n_ports = nr_csirs_blind_row_ports(c->row);
-  if (n_ports <= 0 || n_ports > NR_CSIRS_BLIND_RT_ALL_PORTS)
+  if (n_ports <= 0 || n_ports > NR_CSIRS_BLIND_RT_ALL_PORTS) {
+    if (maintenance)
+      zp_maint_end(idx, absolute_slot, duplicate, ZPM_SETUP_INVALID, NAN, NAN, NAN, NAN);
     return;
+  }
   const int n_planes = (n_ports < NR_CSIRS_BLIND_RT_MAX_PORTS) ? n_ports : NR_CSIRS_BLIND_RT_MAX_PORTS;
 
   /* ---- ALLOCATED ONCE, NOT PER SLOT -----------------------------------------------------------
@@ -264,6 +408,8 @@ void nr_csirs_blind_rt_slot(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot
     for (int p = 0; p < NR_CSIRS_BLIND_RT_MAX_PORTS; p++) {
       c16_t *nb = (c16_t *)realloc(t_refbuf[p], (size_t)n_re * sizeof(c16_t));
       if (nb == NULL) {
+        if (maintenance)
+          zp_maint_end(idx, absolute_slot, duplicate, ZPM_SETUP_INVALID, NAN, NAN, NAN, NAN);
         return;   /* keep whatever we had; a short buffer is never used because t_refbuf_re stands */
       }
       t_refbuf[p] = nb;
@@ -294,7 +440,7 @@ void nr_csirs_blind_rt_slot(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot
     const char *e = getenv("ISAC_CSIRS_BLIND_WIDE");
     g_wide = (e != NULL && atoi(e) != 0) ? 1 : 0;
   }
-  if (g_wide) {
+  if (g_wide && !maintenance) {
     uint16_t on_even = 0, on_odd = 0;
     nr_csirs_blind_symbol_on((const int16_t *)&rxdataF_ant0[off_sym], fp->ofdm_symbol_size,
                              fp->first_carrier_offset, fp->N_RB_DL, &on_even, &on_odd);
@@ -312,6 +458,8 @@ void nr_csirs_blind_rt_slot(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot
                                                      fp->ofdm_symbol_size, CSIRS_BLIND_SUBBAND_RE,
                                                      fp->first_carrier_offset, &n_used);
   if (rho < 0.0) {
+    if (maintenance)
+      zp_maint_end(idx, absolute_slot, duplicate, ZPM_RHO_UNSCORABLE, rho, NAN, NAN, NAN);
     return;   /* unscorable: this candidate maps no RE in this symbol */
   }
   /* SCALE-FREE SCORE. rho is not comparable across candidates -- noise gives ~0.89/sqrt(n_used), and
@@ -327,11 +475,11 @@ void nr_csirs_blind_rt_slot(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot
   const double epr = nr_csirs_blind_energy_ratio_shift((const int16_t *)&rxdataF_ant0[off_sym],
                                                  (const int16_t *)&ref[off_sym], fp->ofdm_symbol_size,
                                                  fp->first_carrier_offset);
-  if (epr > 0.0 && idx < NR_CSIRS_BLIND_MAX_CAND) {
+  if (!maintenance && epr > 0.0 && idx < NR_CSIRS_BLIND_MAX_CAND) {
     g_epr_sum[idx] += epr;
     g_epr_n[idx]++;
   }
-  if (epr > 0.0 && idx == g_id_pin && slot >= 0) {
+  if (!maintenance && epr > 0.0 && idx == g_id_pin && slot >= 0) {
     const int b = slot % EPR_SLOT_BINS;
     g_epr_slot_all[b]++;
     if (epr > 2.0)
@@ -346,7 +494,7 @@ void nr_csirs_blind_rt_slot(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot
    * SEQUENCE (e.g. scramb_id != PCI) is flat. Slices are FFT-index ranges, so a carrier-contiguous
    * resource shows up as high slices at BOTH ends when it straddles DC. */
   static uint64_t s_span_last;
-  if (g_rank && z > 3.0 && g_slots - s_span_last >= 200) {
+  if (!maintenance && g_rank && z > 3.0 && g_slots - s_span_last >= 200) {
     s_span_last = g_slots;
     enum { G = 12 };
     const uint32_t step = (uint32_t)fp->ofdm_symbol_size / G;
@@ -364,33 +512,126 @@ void nr_csirs_blind_rt_slot(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot
    * demands z >= 6, i.e. ~6.7x the 0.89 noise level, at ANY candidate size. The measured null median
    * is still tracked and logged, for visibility only. */
   const double nullv = 4.0 / 3.0;   /* feed()'s 3x margin => confirm at z >= 4 (noise ~1) */
-  const bool done = nr_csirs_blind_feed(&g_st, idx, absolute_slot, z, nullv);
+  const bool done = !maintenance && nr_csirs_blind_feed(&g_st, idx, absolute_slot, z, nullv);
   /* Keep the observed z population for the diagnostics. */
-  g_null[g_null_w] = z;
-  g_null_w = (g_null_w + 1) % NULLWIN;
-  if (g_null_n < NULLWIN) {
-    g_null_n++;
+  if (!maintenance) {
+    g_null[g_null_w] = z;
+    g_null_w = (g_null_w + 1) % NULLWIN;
+    if (g_null_n < NULLWIN)
+      g_null_n++;
   }
-  /* ZERO-POWER hypothesis on the same candidate and symbol (no extra FEP or reference): does the
-   * pattern carry no energy while the PDSCH around it does? Confirmed the same way (periodic). */
-  if (g_zp.confirmed < 0) {
-    const double zs = nr_csirs_blind_zero_score_shift((const int16_t *)&rxdataF_ant0[off_sym], (const int16_t *)&ref[off_sym],
-                                                fp->ofdm_symbol_size, fp->first_carrier_offset);
-    if (zs >= 0.0) {
-      const double znull = median_of(g_zp_null, g_zp_null_n);
-      if (nr_csirs_blind_zp_feed(&g_zp, idx, absolute_slot, zs, znull)) {
-        uint16_t period = 0, offset = 0;
-        const nr_csirs_candidate_t *w = nr_csirs_blind_confirmed(&g_zp, &period, &offset);
-        char line[128];
-        if (w != NULL && nr_csirs_blind_format(w, period, offset, line, sizeof(line)) > 0)
-          LOG_A(PHY, "SENSING: CSIRS_BLIND ZP CONFIRMED after %llu slots (rate-matching only) -- \"%s\"\n",
-                (unsigned long long)g_slots, line);
+  /* ZERO-POWER hypothesis: score the full mapped occupancy union, not just port 0's REs.
+   * Every mapped row-5 symbol must be a measured periodic hole. OAI's row-5 mapping puts
+   * ports 0/1 on l0 and ports 2/3 on l0+1; plane 0 has NO REs on l0+1.
+   * One additional antenna-0 FFT and score on discovery and predicted maintenance occasions. */
+  if (maintenance || !nr_csirs_blind_is_confirmed(&g_zp, idx)) {
+    const int16_t *zp_refs[NR_CSIRS_BLIND_RT_MAX_PORTS];
+    for (int p = 0; p < n_planes; p++)
+      zp_refs[p] = (const int16_t *)&t_refbuf[p][off_sym];
+    double old_score = -1.0;
+    const double zs = nr_csirs_blind_zero_score_evidence_shift((const int16_t *)&rxdataF_ant0[off_sym], zp_refs, n_planes,
+                                                            fp->ofdm_symbol_size, fp->first_carrier_offset,
+                                                            c->row == 2 ? &old_score : NULL);
+    double zs_other = zs;
+    if (c->row == 5) {
+      const unsigned symbol = c->symb_l0 + 1;
+      const uint32_t off_other = symbol * fp->ofdm_symbol_size;
+      zs_other = -1.0;
+      if (nr_slot_fep_ant(ue, fp, (unsigned)slot, symbol, 0, rxdataF, link_type_dl, 0, ue->common_vars.rxdata) == 0) {
+        for (int p = 0; p < n_planes; p++)
+          zp_refs[p] = (const int16_t *)&t_refbuf[p][off_other];
+        zs_other = nr_csirs_blind_zero_score_ports_shift((const int16_t *)&rxdataF_ant0[off_other], zp_refs, n_planes,
+                                                       fp->ofdm_symbol_size, fp->first_carrier_offset);
       }
-      g_zp_null[g_zp_null_w] = zs;
-      g_zp_null_w = (g_zp_null_w + 1) % NULLWIN;
-      if (g_zp_null_n < NULLWIN) g_zp_null_n++;
+    }
+    const double znull = median_of(g_zp_null, g_zp_null_n);
+    if (maintenance) {
+      const double joint = fmin(zs, zs_other);
+      const enum zp_maint_outcome outcome = !isfinite(zs) || !isfinite(zs_other) || zs < 0.0 || zs_other < 0.0
+          ? ZPM_SCORE_INVALID : joint <= 0.5 ? ZPM_OCCUPIED
+          : znull < 0.0 || !isfinite(znull) ? ZPM_POPULATION_UNKNOWN
+          : nr_csirs_blind_zp_score_qualifies(joint, znull) ? ZPM_QUALIFIED_HOLE : ZPM_POPULATION_SUPPRESSED;
+      zp_maint_end(idx, absolute_slot, duplicate, outcome, rho, zs, zs_other, znull);
+    }
+    if (c->row == 2 && nr_csirs_blind_zp_score_qualifies(old_score, znull)
+        && !nr_csirs_blind_zp_score_qualifies(zs, znull)
+        && (g_zp_geometry_veto[idx].count == 0 || g_zp_geometry_veto[idx].last_slot != absolute_slot)) {
+      g_zp_geometry_veto[idx].last_slot = absolute_slot;
+      g_zp_geometry_veto_total++;
+      if (++g_zp_geometry_veto[idx].count == 1)
+        LOG_A(PHY, "SENSING: CSIRS_BLIND ZP_GEOMETRY_VETO row=%u fd=%u l0=%u l1=%u density=%u "
+                   "start_rb=%u nrb=%u abs_slot=%u old_score=%.6f completeness_score=%.6f null=%.6f total=%llu\n",
+              c->row, c->freq_domain, c->symb_l0, c->symb_l1, c->freq_density, c->start_rb, c->nr_of_rbs,
+              absolute_slot, old_score, zs, znull, (unsigned long long)g_zp_geometry_veto_total);
+    }
+    if (zs >= 0.0 && zs_other >= 0.0) {
+      const uint32_t zhits = g_zp.hits[idx];
+      const uint32_t epoch = g_zp.zp_epoch[idx];
+      const uint32_t revoked = g_zp.zp_revocations[idx];
+      const uint8_t contradictions = g_zp.zp_contradictions[idx];
+      char previous_hits[96] = {0};
+      int previous_used = 0;
+      for (int h = 0; h < g_zp.n_hit_slot[idx]; h++)
+        previous_used += snprintf(previous_hits + previous_used, sizeof(previous_hits) - previous_used,
+                                  "%s%u", h ? "," : "", g_zp.hit_slot[idx][h]);
+      nr_csirs_blind_zp_feed_pair(&g_zp, idx, absolute_slot, zs, zs_other, znull);
+      const bool is_confirmed = nr_csirs_blind_is_confirmed(&g_zp, idx);
+      if (g_zp.zp_revocations[idx] != revoked)
+        zp_maint_summary(idx);
+      char hit_history[96] = {0};
+      int used = 0;
+      for (int h = 0; h < g_zp.n_hit_slot[idx]; h++)
+        used += snprintf(hit_history + used, sizeof(hit_history) - used, "%s%u",
+                         h ? "," : "", g_zp.hit_slot[idx][h]);
+      const char *event = g_zp.zp_revocations[idx] != revoked ? "REVOKED"
+          : g_zp.zp_epoch[idx] != epoch ? "EPOCH"
+          : g_zp.hits[idx] != zhits ? "HIT"
+          : g_zp.zp_contradictions[idx] != contradictions ? "CONTRADICTION" : NULL;
+      if (g_zp.zp_revocations[idx] != revoked)
+        LOG_A(PHY, "SENSING: CSIRS_BLIND ZP REVOKED idx=%d abs_slot=%u epoch=%u hits=%s "
+                   "period=%u offsets=%u,%u n_off=%u score=%.6f other_score=%.6f revocations=%u\n",
+              idx, absolute_slot, epoch, previous_hits, g_zp.zp_selected_period[idx],
+              g_zp.zp_selected_off[idx][0], g_zp.zp_selected_off[idx][1], g_zp.zp_selected_n_off[idx],
+              zs, zs_other, g_zp.zp_revocations[idx]);
+      if (event && g_zp_events[idx] < ZP_EVENT_LIMIT) {
+        g_zp_events[idx]++;
+        LOG_A(PHY, "SENSING: CSIRS_BLIND ZP_EVIDENCE idx=%d row=%u fd=%u l0=%u l1=%u density=%u "
+                   "event=%s abs_slot=%u epoch=%u hits=%s previous_epoch=%u previous_hits=%s "
+                   "selected_period=%u offsets=%u,%u n_off=%u contradictions=%u revocations=%u detail=%u/%u\n",
+              idx, c->row, c->freq_domain, c->symb_l0, c->symb_l1, c->freq_density, event, absolute_slot,
+              g_zp.zp_epoch[idx], hit_history, epoch, previous_hits, g_zp.zp_selected_period[idx],
+              g_zp.zp_selected_off[idx][0], g_zp.zp_selected_off[idx][1], g_zp.zp_selected_n_off[idx],
+              g_zp.zp_contradictions[idx], g_zp.zp_revocations[idx],
+              g_zp_events[idx], ZP_EVENT_LIMIT);
+      }
+      /* A ZP hit pins the SHARED rotation (g_st drives which candidate is scored) for the same reason
+       * an NZP hit does; a ZP confirmation counts as news for the search budget. */
+      if (g_zp.hits[idx] != zhits && g_st.pin_left == 0 && g_st.pinned != idx)
+        nr_csirs_blind_pin(&g_st, idx, NR_CSIRS_BLIND_PIN_CONFIRM_CALLS);
+      for (int k = 0; k < g_zp.n_conf; k++) {
+        if (g_zp.conf_idx[k] != idx || !is_confirmed || g_zp_logged[idx] == g_zp.zp_epoch[idx])
+          continue;
+        g_zp_logged[idx] = g_zp.zp_epoch[idx];
+        zp_maint_summary(idx);
+        char line[128], phase[32] = {0};
+        if (g_zp.conf_n_off[k] == 2)
+          snprintf(phase, sizeof(phase), " and offset %u", (unsigned)g_zp.conf_off[k][1]);
+        if (nr_csirs_blind_format(&g_zp.cand[g_zp.conf_idx[k]], g_zp.conf_period[k], g_zp.conf_off[k][0], line, sizeof(line)) > 0)
+          LOG_A(PHY, "SENSING: CSIRS_BLIND ZP CONFIRMED #%d after %llu slots (rate-matching only) -- \"%s\"%s "
+                     "idx=%d abs_slot=%u epoch=%u hits=%s revocations=%u\n",
+                k, (unsigned long long)g_slots, line, phase, idx, absolute_slot, g_zp.zp_epoch[idx],
+                hit_history, g_zp.zp_revocations[idx]);
+      }
+      if (!maintenance) {
+        g_zp_null[g_zp_null_w] = zs < zs_other ? zs : zs_other;
+        g_zp_null_w = (g_zp_null_w + 1) % NULLWIN;
+        if (g_zp_null_n < NULLWIN)
+          g_zp_null_n++;
+      }
     }
   }
+  if (maintenance)
+    return;
   /* ---- scramblingID sweep on a candidate whose POSITIONS already look like a pilot ---- */
   if (g_ids < 0) {
     const char *e = getenv("ISAC_CSIRS_BLIND_IDSWEEP");
@@ -553,14 +794,7 @@ void nr_csirs_blind_rt_slot(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot
     }
   }
   /* the sweep above reused the shared reference buffer; the candidate's own reference is stale now */
-  (void)done; // logged once, by the early return above on the next call
-  if ((++g_slots % 20000) == 0) {
-    /* was: passed nullv (the fixed 4/3 confirm-bar constant) here instead of the real population
-     * statistic -- every line of a whole OTA run read a frozen 1.333 regardless of the actual null
-     * behaviour. null_median() is the function this field is named after; use it. */
-    LOG_I(PHY, "SENSING: CSIRS_BLIND slots=%llu candidates=%d null_median=%.3f confirmed=%d\n",
-          (unsigned long long)g_slots, g_st.n, null_median(), g_st.confirmed);
-  }
+  (void)done; // logged once at the start of the next call
 }
 
 /* RATE MATCHING FROM THE BLIND SEARCH (2026-09-15). The passive PDSCH decoder used to refuse any
@@ -568,14 +802,8 @@ void nr_csirs_blind_rt_slot(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot
  * search now does, so its confirmed resource is offered as the FAPI PDU the demodulator already
  * understands. ZP CSI-RS (a pure rate-matching pattern) is searched by energy (nr_csirs_blind_zero_score)
  * on the same candidates and offered separately as csi_type 2. */
-static bool rate_match_from(const nr_csirs_blind_state_t *st, uint8_t csi_type, uint32_t absolute_slot,
-                            fapi_nr_dl_config_csirs_pdu_rel15_t *out)
+static void fill_pdu(const nr_csirs_candidate_t *c, uint8_t csi_type, fapi_nr_dl_config_csirs_pdu_rel15_t *out)
 {
-  if (out == NULL || g_on <= 0 || g_armed == 0 || st->confirmed < 0 || st->period == 0)
-    return false;
-  if ((absolute_slot % st->period) != (st->offset % st->period))
-    return false;
-  const nr_csirs_candidate_t *c = &st->cand[st->confirmed];
   memset(out, 0, sizeof(*out));
   out->start_rb = c->start_rb;
   out->nr_of_rbs = c->nr_of_rbs;
@@ -587,13 +815,18 @@ static bool rate_match_from(const nr_csirs_blind_state_t *st, uint8_t csi_type, 
   out->cdm_type = c->cdm_type;
   out->freq_density = c->freq_density;
   out->scramb_id = c->scramb_id;
-  return true;
 }
-bool nr_csirs_blind_rt_rate_match(uint32_t absolute_slot, fapi_nr_dl_config_csirs_pdu_rel15_t *out)
+int nr_csirs_blind_rt_rate_match_all(uint32_t absolute_slot, fapi_nr_dl_config_csirs_pdu_rel15_t *out, int max)
 {
-  return rate_match_from(&g_st, 1 /* NZP */, absolute_slot, out);
-}
-bool nr_csirs_blind_rt_rate_match_zp(uint32_t absolute_slot, fapi_nr_dl_config_csirs_pdu_rel15_t *out)
-{
-  return rate_match_from(&g_zp, 2 /* ZP: rate matching only, no estimation */, absolute_slot, out);
+  /* Ranking is diagnostic only: neither newly confirmed NZP nor retained ZP may alter PDSCH. */
+  if (out == NULL || max <= 0 || g_on <= 0 || g_armed == 0 || g_rank > 0)
+    return 0;
+  int n = 0, idx[NR_CSIRS_BLIND_MAX_CONF];
+  const int nn = nr_csirs_blind_occurring(&g_st, absolute_slot, idx, NR_CSIRS_BLIND_MAX_CONF);
+  for (int i = 0; i < nn && n < max; i++)
+    fill_pdu(&g_st.cand[idx[i]], 1 /* NZP */, &out[n++]);
+  const int nz = nr_csirs_blind_occurring(&g_zp, absolute_slot, idx, NR_CSIRS_BLIND_MAX_CONF);
+  for (int i = 0; i < nz && n < max; i++)
+    fill_pdu(&g_zp.cand[idx[i]], 2 /* ZP: rate matching only, no estimation */, &out[n++]);
+  return n;
 }
