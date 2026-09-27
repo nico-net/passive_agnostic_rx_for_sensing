@@ -67,14 +67,18 @@ void nr_dmrs_id_init(nr_dmrs_id_state_t *st, const char *label, int assumed_id)
 
 int nr_dmrs_id_accumulate(nr_dmrs_id_state_t *st, const c16_t *rx_symbol, int ofdm_symbol_size,
                           int start_subcarrier, int rb_offset, int nb_rb, int N_RB,
-                          int symbols_per_slot, int slot, int symbol, int nscid, int normal_cp)
+                          int symbols_per_slot, int slot, int symbol, int nscid, int normal_cp, int dmrs_type)
 {
   if (!st || !rx_symbol || ofdm_symbol_size <= 0 || nb_rb <= 0 || rb_offset < 0 || N_RB <= 0
       || nb_rb + rb_offset > N_RB || st->decided || !st->num_r || st->range_count == 0)
     return 0;
+  /* Type 1 CDM group 0: 6 pilot REs/RB, comb-2 (get_dmrs_freq_idx_ul: 4n+2k'). Type 2 CDM group 0:
+   * 4 pilot REs/RB, 2 adjacent REs every 6 (get_dmrs_freq_idx_ul: 6n+k'). Was hardcoded to type 1's
+   * pattern unconditionally -- a type-2 cell's estimate silently correlated against the wrong REs. */
+  const int nb_dmrs = (dmrs_type == NFAPI_NR_DMRS_TYPE2) ? 4 : 6;
   const int words   = ((N_RB * 24) >> 5) + 1;
-  const int npil    = 6 * nb_rb;                 // type 1: one pilot every 2nd subcarrier
-  const int ntot    = 6 * (nb_rb + rb_offset);   // pilots from the reference point
+  const int npil    = nb_dmrs * nb_rb;
+  const int ntot    = nb_dmrs * (nb_rb + rb_offset);   // pilots from the reference point
   uint32_t *seq     = malloc((size_t)words * sizeof(*seq));
   c16_t    *pilot   = malloc((size_t)ntot * sizeof(*pilot));
   if (!seq || !pilot) { free(seq); free(pilot); return 0; }
@@ -84,11 +88,13 @@ int nr_dmrs_id_accumulate(nr_dmrs_id_state_t *st, const c16_t *rx_symbol, int of
     gold_for(seq, words, symbols_per_slot, slot, symbol, (int)id, nscid);
     /* Port 1000, first DM-RS symbol (lp = 0), unit scaling: identical to the receiver's estimator
      * except for the identity under test. */
-    nr_pdsch_dmrs_rx(normal_cp ? NR_NORMAL : NR_EXTENDED, seq, pilot, 1000, 0, (unsigned short)(nb_rb + rb_offset), NFAPI_NR_DMRS_TYPE1, 16384);
-    const c16_t *pil = &pilot[6 * rb_offset];
-    int re = ((start_subcarrier % ofdm_symbol_size) + ofdm_symbol_size) % ofdm_symbol_size;
+    nr_pdsch_dmrs_rx(normal_cp ? NR_NORMAL : NR_EXTENDED, seq, pilot, 1000, 0, (unsigned short)(nb_rb + rb_offset), dmrs_type, 16384);
+    const c16_t *pil = &pilot[nb_dmrs * rb_offset];
     double prev_r = 0, prev_i = 0, num_r = 0, num_i = 0, den = 0;
     for (int m = 0; m < npil; ++m) {
+      /* get_dmrs_freq_idx_ul(n=m/2, k'=m%2, delta=0, dmrs_type), inlined: CDM group 0 either way. */
+      const int off = (dmrs_type == NFAPI_NR_DMRS_TYPE2) ? (6 * (m / 2) + (m % 2)) : (4 * (m / 2) + 2 * (m % 2));
+      const int re = ((start_subcarrier + off) % ofdm_symbol_size + ofdm_symbol_size) % ofdm_symbol_size;
       const c16_t h = c16mulShift(pil[m], rx_symbol[re], 15);
       const double hr = h.r, hi = h.i;
       den += hr * hr + hi * hi;
@@ -97,7 +103,6 @@ int nr_dmrs_id_accumulate(nr_dmrs_id_state_t *st, const c16_t *rx_symbol, int of
         num_i += hi * prev_r - hr * prev_i;
       }
       prev_r = hr; prev_i = hi;
-      re = (re + 2) % ofdm_symbol_size;
     }
     st->num_r[li] += num_r; st->num_i[li] += num_i; st->den[li] += den;
   }
@@ -256,12 +261,12 @@ void nr_dmrs_id_2stage_init(nr_dmrs_id_2stage_t *t, const char *label, int assum
 
 bool nr_dmrs_id_2stage_accumulate(nr_dmrs_id_2stage_t *t, const c16_t *rx_symbol, int ofdm_symbol_size,
                                   int start_subcarrier, int rb_offset, int nb_rb, int N_RB, int symbols_per_slot,
-                                  int slot, int symbol, int nscid, int normal_cp)
+                                  int slot, int symbol, int nscid, int normal_cp, int dmrs_type)
 {
   if (!t || t->decided_p1 > 0)
     return false;
   if (nr_dmrs_id_accumulate(&t->s1, rx_symbol, ofdm_symbol_size, start_subcarrier, rb_offset, nb_rb, N_RB,
-                            symbols_per_slot, slot, symbol, nscid, normal_cp)
+                            symbols_per_slot, slot, symbol, nscid, normal_cp, dmrs_type)
       && nr_dmrs_id_decide(&t->s1, 16, 10.0)) {
     __atomic_store_n(&t->decided_p1, t->s1.best_id + 1, __ATOMIC_RELEASE);
     return true;
@@ -280,7 +285,7 @@ bool nr_dmrs_id_2stage_accumulate(nr_dmrs_id_2stage_t *t, const c16_t *rx_symbol
     return false;
   t->s2_evals++;
   if (nr_dmrs_id_accumulate(&t->s2, rx_symbol, ofdm_symbol_size, start_subcarrier, rb_offset, nb_rb, N_RB,
-                            symbols_per_slot, slot, symbol, nscid, normal_cp)
+                            symbols_per_slot, slot, symbol, nscid, normal_cp, dmrs_type)
       && nr_dmrs_id_decide(&t->s2, 16, 10.0)) {
     __atomic_store_n(&t->decided_p1, t->s2.best_id + 1, __ATOMIC_RELEASE);
     return true;
