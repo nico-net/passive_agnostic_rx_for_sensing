@@ -543,6 +543,34 @@ static int probe_span(const nr_pdsch_passive_job_t *j, int *nrb)
   return seg[best].prb_start;
 }
 
+void nr_pdsch_passive_oracle_inline(PHY_VARS_NR_UE *ue, const nr_pdsch_sweep_ticket_t *ticket,
+                                    const fapi_nr_dl_config_dlsch_pdu_rel15_t *pdu, const freq_alloc_bitmap_t *fa,
+                                    int nr_slot, c16_t *scratch)
+{
+  if (ticket == NULL || ticket->settled || ticket->generation == 0)
+    return;
+  nr_pdsch_passive_job_t j;
+  memset(&j, 0, sizeof(j));
+  j.dlsch_pdu = *pdu;
+  j.freq_alloc = *fa;
+  int nrb;
+  const int rb = probe_span(&j, &nrb);
+  if (nrb < 4)
+    return;
+  NR_DL_FRAME_PARMS *fp = &ue->frame_parms;
+  const uint32_t sz = fp->samples_per_slot_wCP;
+  double prof[14] = {0}, med = 1.0;
+  int last_sym = -1;
+  const uint16_t mask = dmrs_oracle_measure(ue, fp, sz, (c16_t(*)[sz])scratch, nr_slot, nr_dmrs_oracle_crb(pdu->BWPStart, rb),
+                                            nrb, pdu->nscid, pdu->dlDmrsScramblingId, &last_sym, prof, &med);
+  static _Atomic int s_log = 6;
+  if (mask && atomic_fetch_sub(&s_log, 1) > 0)
+    LOG_A(PHY, "SENSING: DMRS_ORACLE (in-line) slot=%d rb=%d+%d mask=0x%x last_sym=%d med=%.2f\n", nr_slot, rb, nrb, mask,
+          last_sym, med);
+  if (mask)
+    nr_pdsch_config_sweep_observe(ticket, mask, last_sym, 0); /* measured on the DCI's own slot: k0 = 0 */
+}
+
 static void *nr_pdsch_passive_queue_thread(void *arg)
 {
   const int idx = ((consumer_arg_t *)arg)->idx;

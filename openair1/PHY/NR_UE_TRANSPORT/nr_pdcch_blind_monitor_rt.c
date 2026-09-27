@@ -331,6 +331,10 @@ static void al1_union_accept(int bi, int L, int cce, int num_cces, const uint16_
 
 /* Manual/auto is authoritative: disabled means no hypothesis application or scoring. */
 static bool g_pdsch_sweep_on;
+/* Which pass of nr_pdcch_blind_monitor_run_occasion() is running on this thread (bank / CORESET#0-USS /
+ * root cfg). Declared up here because pdsch_sweep_maybe_enable() keys Technique D on it. */
+enum { PASS_OTHER = 0, PASS_C0USS = 1, PASS_BANK = 2 };
+static __thread int t_pass_kind;
 
 /* ---- DCI 1_1 LAYOUT CONSISTENCY (stage 1 of nr_pdcch_dci11_layout_sweep) ---------------------
  * The configured field layout is a set of ASSUMPTIONS. A wrong one still yields CRC-valid DCIs
@@ -1170,7 +1174,12 @@ static void pdsch_sweep_maybe_enable(const nr_pdcch_blind_monitor_cfg_t *cfg)
   const unsigned char *bytes = (const unsigned char *)&cfg->extract;
   for (unsigned i = 0; i < sizeof(cfg->extract); ++i)
     identity = (identity ^ bytes[i]) * UINT64_C(1099511628211);
-  identity ^= nr_pdcch_blind_monitor_autodiscover_generation();
+  /* The discovery generation names the ROOT cfg's current geometry hypothesis. A verified bank entry's
+   * geometry is fully described by its own fields above, and the generation bumps every time the
+   * discovery CURSOR moves -- folding it in re-keyed the bank's Technique-D contexts (and dropped its
+   * layout pin) on every cursor move: measured 214 contexts for 3 layouts in 150 s, none converged. */
+  if (t_pass_kind != PASS_BANK)
+    identity ^= nr_pdcch_blind_monitor_autodiscover_generation();
   /* No reset on an identity change or a not-ready pass (lane perf 2026-09-27): the bank pass, the
    * CORESET#0-USS pass and the discovery pass of ONE occasion each call this with their own cfg, and
    * resetting on every switch wiped the bank's contexts once per occasion (see dl_discovery_invalidate).
@@ -2963,8 +2972,6 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
  * discovery). A DCI whose REs lie in CORESET#0's RBs decodes in BOTH the bank pass and the CORESET#0-USS
  * pass under different CCE numbering -- run s3live4: 1962 DL DCIs accepted twice (CCE 4 and CCE 6), i.e.
  * duplicate grants and duplicate PDSCH decodes. One accept per (slot, RNTI, direction). */
-enum { PASS_OTHER = 0, PASS_C0USS = 1, PASS_BANK = 2 };
-static __thread int t_pass_kind;
 static pthread_mutex_t s_dedupe_mu = PTHREAD_MUTEX_INITIALIZER;
 static struct { uint32_t slot; uint16_t rnti; uint8_t dir; } s_dedupe[256];
 static unsigned s_dedupe_w;
@@ -6633,6 +6640,12 @@ constdiag_done:;
       } else if (nof_re > 0) {
         g_held_snr++;
       }
+      /* DM-RS symbol oracle on the in-line path (lane perf 2026-09-27): only the deferred consumer
+       * ran it, so this conf's contexts never shrank below the full catalog (500 entries after the Qm
+       * oracle) and separation needed ~20 fails on every one of them. Last, because it refills
+       * rxdataF_pdsch's antenna-0 row, which the decode and the data-aided submit above read. */
+      if (serial_candidates && !defer && want_decode && sweep_ticket.generation && !sweep_ticket.settled)
+        nr_pdsch_passive_oracle_inline(ue, &sweep_ticket, &dlsch_pdu, &freq_alloc, proc->nr_slot_rx, &rxdataF_pdsch[0][0]);
     }
     free(toFree);
   }
