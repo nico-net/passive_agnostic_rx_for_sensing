@@ -14,6 +14,7 @@
 #include "PHY/nr_phy_common/inc/nr_phy_common.h" // nr_fo_compensation: the same de-rotation nr_slot_fep uses
 
 #include "nr_pusch_passive_decode.h"
+#include "nr_pusch_passive_dmrs_pdu.h"
 #include "nr_pusch_data_aided.h"
 
 #include "common/utils/LOG/log.h"
@@ -496,26 +497,7 @@ static void fill_pusch_pdu(const nr_pdcch_blind_ul_result_t *g, int nant,
   p->data_scrambling_id = g->data_scrambling_id;
   p->nrOfLayers         = g->nrOfLayers;
 
-  p->ul_dmrs_symb_pos   = g->ul_dmrs_symb_pos;
-  p->dmrs_config_type   = g->dmrs_config_type;
-  p->ul_dmrs_scrambling_id = g->ul_dmrs_scrambling_id;
-  p->pusch_identity     = g->ul_dmrs_scrambling_id;
-  p->scid               = g->nscid;
-  p->num_dmrs_cdm_grps_no_data = g->n_dmrs_cdm_groups;
-  p->dmrs_ports         = g->dmrs_ports;
-  /* Low-PAPR (transform-precoding-enabled) DM-RS sequence selection, TS 38.211 6.4.1.1.1.2: u =
-   * (f_gh(n_s,l) + f_ss) mod 30, v in {0,1}. No group/sequence hopping is implemented anywhere in
-   * this codebase -- gNB_scheduler_ulsch.c and nr_ue_scheduler.c (the gNB's and an attached UE's
-   * OWN reference computation of these same two fields) both hardcode f_gh=0 and v=0
-   * unconditionally, i.e. they only ever produce the "neither hopping enabled" case, so matching
-   * that exactly is not a simplification relative to the rest of this codebase, it is parity with
-   * it. In that case f_ss = n_ID_RS mod 30, and p->pusch_identity already carries n_ID_RS (PCI
-   * fallback, or an explicit override -- see blind_ul_apply_scrambling_ids()), so no new
-   * hypothesis dimension is needed. Group/sequence hopping enabled is a real, separate,
-   * NOT-implemented gap (this codebase has no reference implementation of it to match either) --
-   * flagged, not silently guessed at. */
-  p->dfts_ofdm.low_papr_group_number    = (uint8_t)(p->pusch_identity % 30);
-  p->dfts_ofdm.low_papr_sequence_number = 0;
+  nr_pusch_passive_fill_dmrs_pdu(g, fp->Nid_cell, p);
 
   p->resource_alloc     = 1;   // type 1 -- the only type this deployment schedules
   p->rb_start           = g->start_rb;
@@ -770,6 +752,12 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
   PUSCH_STAGE(3, "FEP done");
   nfapi_nr_pusch_pdu_t pdu;
   fill_pusch_pdu(g, nant, fp, &pdu);
+  static atomic_bool tp_scope_logged = false;
+  if (g->transform_precoding && !atomic_exchange_explicit(&tp_scope_logged, true, memory_order_relaxed)) {
+    LOG_A(PHY, "PUSCH TP scope: PCI-default nPUSCH-Identity=%u, no group/sequence hopping; "
+               "explicit nPUSCH-Identity/hopping discovery unsupported, hypothesis needs CRC validation\n",
+          pdu.pusch_identity);
+  }
   /* The reused estimator takes its pilot seed from this private context.
    * Keep physical PCI in frame_parms separate from the grant's DM-RS identity. */
   gnb->gNB_config.cell_config.phy_cell_id.value = g->ul_dmrs_scrambling_id;

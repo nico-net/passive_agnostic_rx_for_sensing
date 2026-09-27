@@ -27,13 +27,10 @@ extern "C" {
 }
 TEST(UlInterpSweep, CatalogueAndObservedIndexIsolation) {
   std::vector<nr_hyp_t> raw(NR_HYP_SWEEP_MAX_RAW);
-  // 10 tda x 2 type x 4 pos x 2 max x (3 mcs for tp=0 + 2 mcs for tp=1) = 10*2*4*2*5 = 800: TP
-  // enabled has only 2 valid MCS-table choices (qam256 does not combine with transform precoding),
-  // not 3, so the raw catalogue shrank from the pre-TP-support 960 -- narrower, not looser, since
-  // every one of those 160 removed combinations described a configuration TS 38.214 forbids.
-  ASSERT_EQ(nr_pdcch_ul_interp_sweep_generate(raw.data(),raw.size()),800);
+  // 10 TDA x 4 pos x 2 max x (2 types x 3 non-TP tables + 1 type x 2 TP tables).
+  ASSERT_EQ(nr_pdcch_ul_interp_sweep_generate(raw.data(),raw.size()),640);
   int found=-1;
-  for(int i=0;i<800;++i) {
+  for(int i=0;i<640;++i) {
     nr_pdcch_ul_interp_hyp_t h; memcpy(&h,raw[i].bytes,sizeof(h));
     if(h.tda_start==0 && h.tda_length==14 && h.tda_mapping==0 && h.tda_k2==4 &&
        h.dmrs_config_type==0 && h.dmrs_add_pos==2 && h.dmrs_max_length==1 &&
@@ -102,9 +99,25 @@ TEST(UlInterpSweep, TransformPrecodingOnlyGeneratesItsOwnMcsTables) {
       ++tp0_count;
     }
   }
-  // 3 mcs choices x half the (tda,type,pos,max) space for tp=0; 2 choices for tp=1.
-  EXPECT_EQ(tp0_count, n * 3 / 5);
-  EXPECT_EQ(tp1_count, n * 2 / 5);
+  EXPECT_EQ(tp0_count, 480);
+  EXPECT_EQ(tp1_count, 160);
+}
+TEST(UlInterpSweep, TransformPrecodingNeverGeneratesType2) {
+  std::vector<nr_hyp_t> raw(NR_HYP_SWEEP_MAX_RAW);
+  const int n = nr_pdcch_ul_interp_sweep_generate(raw.data(), raw.size());
+  ASSERT_GT(n, 0);
+  for (int i = 0; i < n; ++i) {
+    nr_pdcch_ul_interp_hyp_t h;
+    memcpy(&h, raw[i].bytes, sizeof(h));
+    EXPECT_FALSE(h.transform_precoding && h.dmrs_config_type) << "hypothesis=" << i;
+  }
+}
+TEST(UlInterpSweep, ApplyRejectsIllegalTransformPrecodingType2WithoutMutation) {
+  nr_pdcch_ul_interp_hyp_t h{0,14,0,1,1,1,1,1,3};
+  nr_hyp_t raw{}; raw.len=sizeof(h); memcpy(raw.bytes,&h,sizeof(h));
+  nr_pdcch_blind_ul_opts_t opts{}; opts.tda_count=1; opts.tda_k2[0]=9;
+  EXPECT_FALSE(nr_pdcch_ul_interp_sweep_apply(&raw,0,&opts));
+  EXPECT_EQ(opts.tda_k2[0],9);
 }
 TEST(UlInterpSweep, PuschLegalTdaCounts) {
   int a=0,b=0;

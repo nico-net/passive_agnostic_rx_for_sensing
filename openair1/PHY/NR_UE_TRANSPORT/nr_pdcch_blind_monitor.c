@@ -4386,6 +4386,10 @@ static bool blind_ul_finish(const nr_pdcch_blind_ul_opts_t* opts,
     out->reject_reason = "invalid measured UL numerology or MIB DMRS position";
     return false;
   }
+  if (opts->transform_precoding && opts->dmrs_config_type != 0) {
+    out->reject_reason = "transform precoding requires DM-RS type 1";
+    return false;
+  }
   uint16_t start_rb, num_rb;
   if (!riv_to_prb_alloc(riv, opts->bwp_size, &start_rb, &num_rb)) {
     out->reject_reason = "RIV decodes to a PRB allocation outside the UL BWP";
@@ -4411,11 +4415,6 @@ static bool blind_ul_finish(const nr_pdcch_blind_ul_opts_t* opts,
                           ? force_add_pos
                           : ((opts->dmrs_add_pos >= 0) ? opts->dmrs_add_pos : 2);
   const int max_len = (opts->dmrs_max_length > 0) ? opts->dmrs_max_length : 1;
-  const int32_t mask = nr_pdcch_blind_ul_dmrs_mask(L, S, mapping_is_b, add_pos, max_len, opts->dmrs_typeA_position);
-  if (mask < 0) {
-    out->reject_reason = "no valid PUSCH DM-RS position for this allocation length";
-    return false;
-  }
 
   // Antenna ports -> (CDM groups without data, port bitmask). Was a closed form defined ONLY over
   // Table 7.3.1.1.2-8's four rows (transform precoder disabled, DM-RS type 1, maxLength 1, rank 1),
@@ -4437,6 +4436,7 @@ static bool blind_ul_finish(const nr_pdcch_blind_ul_opts_t* opts,
   // abort and never guess, and the reverse table's own bounds check gives that for free.
   uint8_t  cdm_groups;
   uint16_t ports;
+  int front_load = 0;
   if (nrOfLayers <= 1) {
     // decode_dci_antenna_ports_val() branches on `tp` FIRST (transform-precoding-enabled always
     // uses lut_tp_rev, TS 38.212 Table 7.3.1.1.2-6/-7, regardless of dmrs_type -- transform
@@ -4450,7 +4450,6 @@ static bool blind_ul_finish(const nr_pdcch_blind_ul_opts_t* opts,
     const long *dmrs_type_arg = (opts->dmrs_config_type > 0) ? &dmrs_type2 : NULL;
     const long tp = (opts->transform_precoding == 1) ? NR_PUSCH_Config__transformPrecoder_enabled
                                                      : NR_PUSCH_Config__transformPrecoder_disabled;
-    int front_load = 0;
     if (decode_dci_antenna_ports_val((uint8_t)nrOfLayers, dmrs_type_arg, tp,
                                      (uint8_t)antenna_ports, &cdm_groups, &ports, &front_load) != 0) {
       out->reject_reason = "antenna-ports code point outside its DM-RS-type/rank reverse table";
@@ -4461,6 +4460,19 @@ static bool blind_ul_finish(const nr_pdcch_blind_ul_opts_t* opts,
     // receiver has no way to separate UE layers it was not precoded for. Reject rather than
     // produce a confident wrong port set.
     out->reject_reason = "multi-layer PUSCH not supported by this monitor";
+    return false;
+  }
+
+  // maxLength is an upper bound. A maxLength2 configuration can schedule a
+  // single-symbol row; the row, not that bound, determines the actual mask.
+  if (front_load < 1 || front_load > max_len) {
+    out->reject_reason = "antenna-ports front-loading exceeds DM-RS maxLength";
+    return false;
+  }
+  const int32_t mask = nr_pdcch_blind_ul_dmrs_mask(L, S, mapping_is_b, add_pos,
+                                                front_load, opts->dmrs_typeA_position);
+  if (mask < 0) {
+    out->reject_reason = "no valid PUSCH DM-RS position for this allocation length";
     return false;
   }
 

@@ -60,6 +60,7 @@ int nr_pdcch_ul_interp_sweep_generate(nr_hyp_t *out, int cap)
       for (int pos=0;pos<4;++pos)
         for (int max=1;max<=2;++max)
           for (int tp=0;tp<2;++tp) {
+            if (tp && type != 0) continue; // TP requires DM-RS type 1 (38.211 6.4.1.1.1.2).
             const uint8_t *mcs_list = tp ? mcs_tp : mcs_no_tp;
             const int      n_mcs    = tp ? 2 : 3;
             for (int mi=0; mi<n_mcs; ++mi) {
@@ -81,6 +82,7 @@ bool nr_pdcch_ul_interp_sweep_apply(const nr_hyp_t *hyp, int idx, nr_pdcch_blind
       idx<0 || idx>=16 || o->tda_count<=idx) return false;
   nr_pdcch_ul_interp_hyp_t h;
   memcpy(&h,hyp->bytes,sizeof(h));
+  if (h.transform_precoding && h.dmrs_config_type != 0) return false;
   o->tda_start[idx]=h.tda_start; o->tda_length[idx]=h.tda_length;
   o->tda_mapping[idx]=h.tda_mapping; o->tda_k2[idx]=h.tda_k2;
   o->dmrs_config_type=h.dmrs_config_type; o->dmrs_add_pos=h.dmrs_add_pos;

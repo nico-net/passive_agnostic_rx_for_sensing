@@ -659,6 +659,7 @@ typedef struct {
   int width_hyp_class;       ///< -1 when no width search owns this grant
   int interp_hyp_class;      ///< -1 when no interpretation search owns this grant
   uint64_t hyp_generation;   ///< reject feedback from an earlier discovery context
+  uint16_t hyp_width_raw, hyp_interp_raw; ///< joint raw identities + 1; zero for baseline grants
   uint8_t carrier_indicator, ul_sul_indicator; ///< preserve carrier identity for search equivalence
 
   // ---- valid only when plausible ----

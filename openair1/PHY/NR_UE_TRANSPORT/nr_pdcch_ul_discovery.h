@@ -29,6 +29,7 @@ typedef struct {
   int width_classes, interp_classes, raw_samples;
   int width_winners, interp_winners;
   uint64_t rejected_feedback;
+  int interp_refusals; ///< bounded joint catalog refused, baseline remains available
 } nr_pdcch_ul_discovery_snapshot_t;
 nr_pdcch_ul_discovery_snapshot_t nr_pdcch_ul_discovery_snapshot(void);
 void nr_pdcch_ul_discovery_reset(void);
