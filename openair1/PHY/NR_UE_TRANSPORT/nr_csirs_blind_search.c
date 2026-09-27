@@ -171,11 +171,11 @@ static const uint8_t kRowNeedBits[18] = {1, 1, 1, 1, 1, 4, 2, 2, 6, 3, 4, 4, 3, 
  * (TRS) space was unreachable no matter how long a search ran. */
 static const uint8_t kFdBits[]   = {4, 12, 3, 3, 3};
 
-/* Densities to try per row. Row 2 is the only single-port row that admits dot5, and a cell using
- * dot5 (even or odd RBs) puts its REs on half the RBs a density-one candidate tests -- which reads
- * as a half-strength match, not as a miss, so it has to be enumerated rather than inferred.
+/* Densities to try per row. Rows 2 and 3 admit dot5 (even or odd RBs); a cell using dot5 puts
+ * its REs on half the RBs a density-one candidate tests -- which reads as a half-strength match,
+ * not as a miss, so both parities have to be enumerated rather than inferred.
  * 0 = dot5 even RB, 1 = dot5 odd RB, 2 = one, 3 = three. */
-static const uint8_t kDensities[][3] = {{3, 0xFF, 0xFF}, {2, 0, 1}, {2, 0xFF, 0xFF},
+static const uint8_t kDensities[][3] = {{3, 0xFF, 0xFF}, {2, 0, 1}, {2, 0, 1},
                                         {2, 0xFF, 0xFF}, {2, 0xFF, 0xFF}};
 
 #define CSIRS_DETECT_MARGIN 3.0   /* a hit must beat the null MEDIAN by this factor */

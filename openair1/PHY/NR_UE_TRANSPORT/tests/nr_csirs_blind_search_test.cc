@@ -183,6 +183,34 @@ TEST(CsirsBlindEnum, EnumeratesRealConfigurationsOnly) {
   EXPECT_EQ(nr_csirs_blind_enumerate(c.data(), 10, 0, 2), -1);
 }
 
+TEST(CsirsBlindEnum, Row3EnumeratesBothHalfDensityParities) {
+  std::vector<nr_csirs_candidate_t> c(NR_CSIRS_BLIND_MAX_CAND);
+  const int n = nr_csirs_blind_enumerate(c.data(), NR_CSIRS_BLIND_MAX_CAND, 273, 382);
+  ASSERT_EQ(n, 767);
+
+  int count[3] = {};
+  bool seen[3][3][14] = {};
+  for (int i = 0; i < n; i++) {
+    if (c[i].row != 3) continue;
+    ASSERT_LE(c[i].freq_density, 2);
+    ASSERT_LT(c[i].symb_l0, 14);
+    ASSERT_NE(c[i].freq_domain, 0);
+    const int fd = __builtin_ctz(c[i].freq_domain);
+    ASSERT_LT(fd, 3);
+    EXPECT_FALSE(seen[c[i].freq_density][fd][c[i].symb_l0]);
+    seen[c[i].freq_density][fd][c[i].symb_l0] = true;
+    EXPECT_EQ(c[i].cdm_type, 1);
+    EXPECT_EQ(c[i].scramb_id, 382);
+    count[c[i].freq_density]++;
+  }
+  for (int d = 0; d < 3; d++) {
+    EXPECT_EQ(count[d], 42) << "row-3 density " << d;
+    for (int fd = 0; fd < 3; fd++)
+      for (int l = 0; l < 14; l++)
+        EXPECT_TRUE(seen[d][fd][l]) << "missing density=" << d << " fd=" << fd << " l=" << l;
+  }
+}
+
 TEST(CsirsBlindEnum, RowPortsMatchTheSpecTableAllRows) {
   // TS 38.211 Table 7.4.1.5.3-1, every row. Row 6 was 0 while only rows 1-5 were enumerated; rows
   // 6-18 are now reachable through footprint matching, so their port counts are spec, not 0.
