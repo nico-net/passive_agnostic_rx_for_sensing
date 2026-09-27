@@ -20,6 +20,7 @@
  */
 
 #include <cstring>
+#include <thread>
 #include <vector>
 #include <gtest/gtest.h>
 extern "C" {
@@ -182,11 +183,78 @@ TEST(UlDmrsPin, RejectsAnIllegalSpanAndStaysUnset) {
   nr_pusch_ul_dmrs_pin_reset();
 }
 
-TEST(UlDmrsPin, DerivesMappingTypeFromSAndL) {
+// Review-caught: an earlier version of this file guessed mapping type A whenever S==0 && L>=4 and
+// pinned that guess forever. That is wrong -- TS 38.214 Table 6.1.2.1-1 makes type B legal at S=0
+// too (any L with S+L<=14), so (S=0,L=14) is legal under EITHER mapping and energy occupancy alone
+// (which is all this oracle measures) cannot tell them apart. The pin must keep that ambiguity
+// rather than manufacture a false certainty that then excludes every legal type-B row at (0,14).
+TEST(UlDmrsPin, AmbiguousSpanKeepsBothMappingTypesRatherThanGuessing) {
   nr_pusch_ul_dmrs_pin_reset();
-  nr_pusch_ul_dmrs_pin_set(0, 14); // S=0, L>=4 -> type A
+  ASSERT_TRUE(nr_pusch_tda_legal(0, 0, 14)); // legal as type A
+  ASSERT_TRUE(nr_pusch_tda_legal(1, 0, 14)); // ALSO legal as type B: genuinely ambiguous
+  nr_pusch_ul_dmrs_pin_set(0, 14);
   int m = -1;
   ASSERT_TRUE(nr_pusch_ul_dmrs_pin_get(nullptr, nullptr, &m));
-  EXPECT_EQ(m, 0);
+  EXPECT_EQ(m, NR_PUSCH_MAPPING_EITHER);
+  // The pinned generator must then produce hypotheses for BOTH mapping types at this (S,L).
+  std::vector<nr_hyp_t> raw(NR_HYP_SWEEP_MAX_RAW);
+  const int n = nr_pdcch_ul_interp_sweep_generate_pinned(raw.data(), raw.size(), 0, 14, m);
+  ASSERT_EQ(n, 2 * (4 * 2 * 4 * 2 * 2 * 3)); // both mapping types, same per-type count as elsewhere
+  bool saw_a = false, saw_b = false;
+  for (int i = 0; i < n; i++) {
+    nr_pdcch_ul_interp_hyp_t h; memcpy(&h, raw[i].bytes, sizeof(h));
+    EXPECT_EQ(h.tda_start, 0);
+    EXPECT_EQ(h.tda_length, 14);
+    saw_a |= h.tda_mapping == 0;
+    saw_b |= h.tda_mapping == 1;
+  }
+  EXPECT_TRUE(saw_a);
+  EXPECT_TRUE(saw_b);
+  nr_pusch_ul_dmrs_pin_reset();
+}
+
+// S=0 does NOT always mean "candidate type A": type A additionally requires L>=4, so a short span
+// starting at 0 is unambiguously type B despite S==0.
+TEST(UlDmrsPin, ShortSpanAtSZeroIsUnambiguouslyTypeB) {
+  nr_pusch_ul_dmrs_pin_reset();
+  ASSERT_FALSE(nr_pusch_tda_legal(0, 0, 2)); // type A needs L>=4
+  ASSERT_TRUE(nr_pusch_tda_legal(1, 0, 2));  // type B has no such floor
+  nr_pusch_ul_dmrs_pin_set(0, 2);
+  int m = -1;
+  ASSERT_TRUE(nr_pusch_ul_dmrs_pin_get(nullptr, nullptr, &m));
+  EXPECT_EQ(m, 1);
+  nr_pusch_ul_dmrs_pin_reset();
+}
+
+// Review-caught race: nr_pusch_ul_dmrs_pin_set() used to be a plain load-then-store with no claim
+// on the fields it writes, so two UL consumer threads racing into it (a real case: `ul_thread` can
+// run more than one consumer) could tear a reader's view of (S,L,mapping). This cannot PROVE the
+// absence of a race in one run, but it is exactly the shape a thread sanitizer or a lucky
+// interleaving would catch, and it pins the invariant the CAS-claim fix depends on: whichever
+// (S,L) wins is entirely self-consistent (never a mix of two callers' values), every run.
+TEST(UlDmrsPin, ConcurrentSetIsNeverTornEvenUnderContention) {
+  for (int trial = 0; trial < 50; ++trial) {
+    nr_pusch_ul_dmrs_pin_reset();
+    static const int kCandidates[][2] = {{0, 14}, {2, 12}, {5, 6}, {0, 4}, {3, 8}};
+    std::vector<std::thread> threads;
+    // Capture s/l BY VALUE: a by-reference capture of the range-for variable would dangle once the
+    // loop moves on, since the thread body runs concurrently with (not after) this loop.
+    for (const auto &c : kCandidates) {
+      const int s = c[0], l = c[1];
+      threads.emplace_back([s, l] { nr_pusch_ul_dmrs_pin_set(s, l); });
+    }
+    for (auto &t : threads) t.join();
+    int S = -1, L = -1, m = -1;
+    ASSERT_TRUE(nr_pusch_ul_dmrs_pin_get(&S, &L, &m));
+    // Whoever won must be one of the offered candidates, in full (never S from one thread paired
+    // with L from another), and mapping must be exactly what that (S,L) legally admits.
+    bool matched_one = false;
+    for (const auto &c : kCandidates)
+      matched_one |= (S == c[0] && L == c[1]);
+    EXPECT_TRUE(matched_one) << "S=" << S << " L=" << L << " matches no offered candidate -- torn write";
+    const bool legal_a = nr_pusch_tda_legal(0, S, L), legal_b = nr_pusch_tda_legal(1, S, L);
+    const int expected_m = (legal_a && legal_b) ? NR_PUSCH_MAPPING_EITHER : (legal_a ? 0 : 1);
+    EXPECT_EQ(m, expected_m);
+  }
   nr_pusch_ul_dmrs_pin_reset();
 }

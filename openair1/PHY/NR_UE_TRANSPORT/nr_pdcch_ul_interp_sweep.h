@@ -41,11 +41,19 @@ int nr_pdcch_ul_interp_sweep_generate(nr_hyp_t *, int);
  * B) x k2{1..4} x the 96 field combinations overflows NR_HYP_SWEEP_MAX_RAW with no oracle to prune
  * it first; once (S,L,mapping) is pinned that product collapses to k2{1..4} x 96 = 384, so the WHOLE
  * type-B (S,L) plane becomes reachable. ---- */
-/** Every field combination at ONE pinned (S, L, mapping_type), k2 in {1..4}. mapping_type must be
- *  0 (type A) or 1 (type B) and (S,L,mapping_type) must satisfy nr_pusch_tda_legal() -- the caller
- *  (nr_pdcch_ul_discovery.c) derives mapping_type from S/L itself (type A iff S==0 && L>=4, per
- *  38.214 Table 6.1.2.1-1; the energy oracle only measures occupancy, not the mapping-type bit,
- *  which is not observable from energy alone). Returns NR_HYP_SWEEP_INVALID if not legal. */
+/** mapping_type value for nr_pdcch_ul_interp_sweep_generate_pinned()/the pin: S=0 does NOT
+ *  determine mapping type by itself -- type A requires S=0 AND L>=4, but type B is ALSO legal at
+ *  S=0 for any L with S+L<=14 (TS 38.214 Table 6.1.2.1-1), so an (S,L) with S=0 and L>=4 is legal
+ *  under EITHER mapping type and energy occupancy alone cannot tell them apart (both durations
+ *  produce the identical observed span). Review-caught: an earlier version of this file guessed
+ *  type A whenever S==0 && L>=4 and latched that guess forever, silently excluding every legal
+ *  type-B row at that same (S,L) -- e.g. (S=0,L=14) is a real, common type-B row. */
+#define NR_PUSCH_MAPPING_EITHER (-1)
+/** Every field combination at ONE pinned (S, L), k2 in {1..4}, for every mapping_type that
+ *  satisfies nr_pusch_tda_legal(mapping_type, S, L): mapping_type may be 0 (type A only), 1 (type B
+ *  only) or NR_PUSCH_MAPPING_EITHER (try whichever of the two nr_pusch_tda_legal() actually admits
+ *  -- both, when the (S,L) span is ambiguous per the note above, so a guess is never latched as a
+ *  false certainty). Returns NR_HYP_SWEEP_INVALID if no mapping type admits (S,L) at all. */
 int nr_pdcch_ul_interp_sweep_generate_pinned(nr_hyp_t *out, int cap, int S, int L, int mapping_type);
 
 /** Occupied-symbol span (S = first, L = length) from a per-symbol RX energy profile covering one
@@ -63,12 +71,17 @@ bool nr_pusch_ul_energy_span(const double energy[14], double rel_thresh, int *S,
  *  as tda_count/tda_start elsewhere in this module). Set once a caller has established (S,L) with
  *  confidence and never overwritten after that -- "the oracle prunes on the first observation", the
  *  same rule the DL DM-RS oracle already uses (see nr_pdsch_passive_queue.c's dmrs_oracle_measure()
- *  callers). mapping_type is derived by the setter from (S,L) via nr_pusch_tda_legal(), not passed
- *  in, so it can never disagree with the (S,L) it was pinned from. */
+ *  callers). mapping_type is derived by the setter from (S,L) via nr_pusch_tda_legal() against BOTH
+ *  mapping types, not guessed from S alone -- see NR_PUSCH_MAPPING_EITHER above -- so it can never
+ *  disagree with, or be more certain than, the (S,L) it was pinned from.
+ *  Thread-safe: multiple UL consumer threads may call this concurrently (claimed with a single CAS
+ *  on the validity flag before any field is written; a losing caller's own (S,L) is simply
+ *  discarded, which is correct under "first observation wins"). */
 void nr_pusch_ul_dmrs_pin_set(int S, int L);
-/** True and fills S/L/mapping_type (any pointer may be NULL) iff a pin exists. */
+/** True and fills S/L/mapping_type (any pointer may be NULL) iff a pin exists. Thread-safe. */
 bool nr_pusch_ul_dmrs_pin_get(int *S, int *L, int *mapping_type);
-/** Test/reset hook: clears the pin (as if nothing had ever been measured). */
+/** Test/reset hook: clears the pin (as if nothing had ever been measured). NOT thread-safe against
+ *  a concurrent set()/get() -- call only from a single-threaded test harness between cases. */
 void nr_pusch_ul_dmrs_pin_reset(void);
 
 /* Apply only to the actually observed TDA index, never silently to entry zero. */

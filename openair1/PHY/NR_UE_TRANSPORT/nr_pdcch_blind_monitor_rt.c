@@ -5442,10 +5442,14 @@ constdiag_done:;
             const int nseg = nprb > 0 ? nr_prb_segments(prb, nprb, alt_opts.bwp_start, 0, seg, NR_PRB_SET_MAX) : -1;
             if (nseg != 1)
               continue; /* non-contiguous: the gNB-PHY-reuse limitation above */
-            /* NOT an oracle-class (type-1) grant: dci01_oracle_grant() would otherwise misread this
-             * TB's CRC outcome as evidence FOR type 1 (width_hyp_class < 0 is its only test, and this
-             * path leaves both classes unset like any non-discovery grant). It is real evidence the
-             * link works, so it still counts -- just in the same link_ok bucket a 0_0 grant would. */
+            /* nr_pdcch_blind_extract_01() (called two lines up) leaves width_hyp_class/interp_hyp_class
+             * at their memset default of -1, same as every non-discovery grant -- which is EXACTLY
+             * dci01_oracle_grant()'s test for "oracle class" (format 0_1, both classes < 0). Left as
+             * -1, this retry's CRC outcome would be misread as evidence FOR type 1 by
+             * nr_dci01_fdra_note()'s t1_try/t1_ok counters, when it is a type-0/dynamicSwitch read.
+             * Setting width_hyp_class to any value >= 0 here is what excludes it from that class; it
+             * is real evidence the link works, so it still counts -- just in the same link_ok bucket
+             * a 0_0 grant's CRC pass would (nr_dci01_fdra_note()'s oracle_grant==false branch). */
             alt.width_hyp_class = 0;
             static _Atomic unsigned long s_ul_type0_booked;
             const unsigned long nb = atomic_fetch_add_explicit(&s_ul_type0_booked, 1, memory_order_relaxed) + 1;

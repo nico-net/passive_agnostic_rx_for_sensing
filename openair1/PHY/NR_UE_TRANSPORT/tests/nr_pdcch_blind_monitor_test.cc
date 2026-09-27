@@ -3278,7 +3278,11 @@ TEST_F(BlindPdcchTest, Dci01FdraModeCandidatesNarrowByLengthConsistency) {
 TEST_F(BlindPdcchTest, Dci01ExtractRaType0BitmapProducesTheCorrectPrbList) {
   nr_pdcch_blind_ul_opts_t o = {};
   o.bwp_start = 0;
-  o.bwp_size  = 52;              // TS 38.214 Table 6.1.2.2.1-1: <=72 PRB -> config-1 P = 4
+  // 50, not 52: TS 38.214 Table 6.1.2.2.1-1 gives P=4 for either, but 52 = 13*4 exactly, so its
+  // last RBG is a FULL 4 PRBs -- not the genuinely partial last RBG this test means to exercise.
+  // 50 = 13*4 - 2, so RBG12 (the last) is only 2 PRBs wide, which is the case worth testing:
+  // nr_ra_type0_prbs()'s "last RBG runs to bwp_size-1" branch, not its ordinary [g*P,(g+1)*P) one.
+  o.bwp_size  = 50;
   o.fdra_mode = NR_FDRA_TYPE0_CFG1;
   o.fdra_bwp_start = 0;
   o.tda_count = 0;
@@ -3291,10 +3295,10 @@ TEST_F(BlindPdcchTest, Dci01ExtractRaType0BitmapProducesTheCorrectPrbList) {
   const int rbg_size = nr_fdra_rbg_size(o.fdra_mode, o.bwp_size);
   ASSERT_EQ(rbg_size, 4);
   const int n_rbg = nr_rbg_count(o.fdra_bwp_start, o.bwp_size, rbg_size);
-  ASSERT_EQ(n_rbg, 13); // ceil(52/4)
+  ASSERT_EQ(n_rbg, 13); // ceil(50/4)
 
   UlGroundTruth gt;
-  gt.riv = 0b0000000000011u; // MSB=RBG0 .. LSB=RBG12: RBG 11 and RBG 12 set (the last, partial, RBG)
+  gt.riv = 0b0000000000011u; // MSB=RBG0 .. LSB=RBG12: RBG 11 (full, 4 PRBs) and RBG 12 (the last, partial, 2 PRBs)
   const int fdra_bits = nr_fdra_bits(o.fdra_mode, n_rbg, RivBitsFor(o.bwp_size));
   const uint64_t len = nr_pdcch_blind_dci01_size(&o);
   const uint64_t payload = PackUlPayloadFdra(gt, o, gt.riv, fdra_bits);
@@ -3309,10 +3313,10 @@ TEST_F(BlindPdcchTest, Dci01ExtractRaType0BitmapProducesTheCorrectPrbList) {
   uint16_t prb[NR_PRB_SET_MAX];
   const int n = nr_ra_type0_prbs(out.rbg_bitmap, out.rbg_bwp_start, o.bwp_size, out.rbg_size, prb, NR_PRB_SET_MAX);
   // RBG index g covers [g*P-off, (g+1)*P-off) except the last RBG, which runs to bwp_size-1;
-  // off = bwp_start % P = 0 here. RBG11 -> [44,48), RBG12 (last) -> [48,52) => 4+4 = 8 PRBs.
-  ASSERT_EQ(n, 8);
+  // off = bwp_start % P = 0 here. RBG11 -> [44,48) = 4 PRBs, RBG12 (last) -> [48,50) = 2 PRBs: 6 total.
+  ASSERT_EQ(n, 6);
   EXPECT_EQ(prb[0], 44);
-  EXPECT_EQ(prb[n - 1], 51);
+  EXPECT_EQ(prb[n - 1], 49);
 }
 
 TEST_F(BlindPdcchTest, Dci01ExtractDynamicSwitchBothBranches) {

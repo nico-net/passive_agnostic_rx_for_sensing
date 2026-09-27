@@ -9,6 +9,7 @@
 #include <string.h>
 #include <math.h>
 #include <stdatomic.h>
+#include <pthread.h>
 
 #include "PHY/MODULATION/nr_modulation.h" // nr_symbol_fep_ul: the gNB uplink FEP
 #include "PHY/nr_phy_common/inc/nr_phy_common.h" // nr_fo_compensation: the same de-rotation nr_slot_fep uses
@@ -636,15 +637,26 @@ static uint32_t passive_ul_slow_time_idx(const NR_DL_FRAME_PARMS *fp,
  * downstream of nr_rx_pusch_group_tp() consults again for this grant), so it cannot perturb the
  * decode it rides along with. A no-op once nr_pusch_ul_dmrs_pin_get() has a pin (checked first, so
  * steady-state cost after that is one atomic load). */
+/* g_profile[]/g_seen_mask below are shared, plain (non-atomic) state written by every UL consumer
+ * thread that reaches this function -- `ul_thread` can run more than one consumer, so this is a
+ * real concurrent-writer case, not a theoretical one. A mutex is the simplest correct fix: the
+ * double array can't be updated atomically piecewise anyway (unlike the pin's own int fields,
+ * which the CAS-claim scheme in nr_pusch_ul_dmrs_pin_set() protects instead), and this section is
+ * cheap (a handful of int/double stores) so lock contention is not a concern. Energy for the
+ * symbols THIS call measured is computed OUTSIDE the lock (pure read of this grant's own rxdataF,
+ * no shared state touched) to keep the held section as short as possible. */
+static pthread_mutex_t g_ul_energy_lock = PTHREAD_MUTEX_INITIALIZER;
+static double          g_ul_energy_profile[14];
+static uint16_t        g_ul_energy_seen_mask;
+
 static void ul_dmrs_energy_oracle_observe(const nr_pdcch_blind_ul_result_t *g, const NR_DL_FRAME_PARMS *fp,
                                           PHY_VARS_gNB *gnb, int slot_off, int symsz)
 {
   if (nr_pusch_ul_dmrs_pin_get(NULL, NULL, NULL))
     return;
-  static double        g_profile[14];
-  static _Atomic uint16_t g_seen_mask;
   const int s0 = g->start_symbol, s1 = g->start_symbol + g->num_symbols;
-  uint16_t seen = atomic_load_explicit(&g_seen_mask, memory_order_relaxed);
+  double   local_profile[14];
+  uint16_t local_mask = 0;
   for (int sym = s0; sym < s1 && sym < 14; sym++) {
     const c16_t *row = &gnb->common_vars.rxdataF[0][slot_off + sym * symsz];
     double e = 0;
@@ -653,15 +665,21 @@ static void ul_dmrs_energy_oracle_observe(const nr_pdcch_blind_ul_result_t *g, c
         const int k = (fp->first_carrier_offset + p * NR_NB_SC_PER_RB + r) % fp->ofdm_symbol_size;
         e += (double)row[k].r * row[k].r + (double)row[k].i * row[k].i;
       }
-    g_profile[sym] = (g->num_rb > 0) ? e / g->num_rb : e; /* per-PRB average: comparable across grants */
-    seen |= (uint16_t)(1u << sym);
+    local_profile[sym] = (g->num_rb > 0) ? e / g->num_rb : e; /* per-PRB average: comparable across grants */
+    local_mask |= (uint16_t)(1u << sym);
   }
-  atomic_store_explicit(&g_seen_mask, seen, memory_order_relaxed);
-  if (seen == 0x3FFFu) { /* every symbol of the slot observed at least once */
-    int S, L;
-    if (nr_pusch_ul_energy_span(g_profile, 0.25, &S, &L))
-      nr_pusch_ul_dmrs_pin_set(S, L);
-  }
+  int S = -1, L = -1;
+  bool span_ready = false;
+  pthread_mutex_lock(&g_ul_energy_lock);
+  for (int sym = s0; sym < s1 && sym < 14; sym++)
+    if (local_mask & (uint16_t)(1u << sym))
+      g_ul_energy_profile[sym] = local_profile[sym];
+  g_ul_energy_seen_mask |= local_mask;
+  if (g_ul_energy_seen_mask == 0x3FFFu) /* every symbol of the slot observed at least once */
+    span_ready = nr_pusch_ul_energy_span(g_ul_energy_profile, 0.25, &S, &L);
+  pthread_mutex_unlock(&g_ul_energy_lock);
+  if (span_ready)
+    nr_pusch_ul_dmrs_pin_set(S, L); /* independently thread-safe: CAS-claimed, see that function */
 }
 
 static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
