@@ -191,9 +191,18 @@ static bool init_search(search_t *s, apply_ctx_t *ctx)
 {
   s->raw=calloc(NR_HYP_SWEEP_MAX_RAW,sizeof(*s->raw));
   if (!s->raw) { s->refused=true; LOG_E(PHY,"UL discovery: hypothesis allocation failed\n"); return false; }
-  s->n_raw=ctx->interpretation
-      ? nr_pdcch_ul_interp_sweep_generate(s->raw,NR_HYP_SWEEP_MAX_RAW)
-      : nr_pdcch_ul_field_sweep_generate(&ctx->opts,ctx->owner->target_length,s->raw,NR_HYP_SWEEP_MAX_RAW);
+  if (ctx->interpretation) {
+    /* Gap item 2 (PUSCH TDRA type B): once the DM-RS energy oracle has pinned (S,L), search the
+     * FULL legal set at that one point instead of the curated 10-row catalogue -- see
+     * nr_pdcch_ul_interp_sweep.h's group comment. Falls back to the curated list, byte-for-byte the
+     * old behaviour, until a pin exists (early occasions / a receiver that never wires the oracle). */
+    int pin_s = 0, pin_l = 0, pin_map = 0;
+    s->n_raw = nr_pusch_ul_dmrs_pin_get(&pin_s, &pin_l, &pin_map)
+        ? nr_pdcch_ul_interp_sweep_generate_pinned(s->raw, NR_HYP_SWEEP_MAX_RAW, pin_s, pin_l, pin_map)
+        : nr_pdcch_ul_interp_sweep_generate(s->raw, NR_HYP_SWEEP_MAX_RAW);
+  } else {
+    s->n_raw = nr_pdcch_ul_field_sweep_generate(&ctx->opts, ctx->owner->target_length, s->raw, NR_HYP_SWEEP_MAX_RAW);
+  }
   const void *observations[UL_DISCOVERY_SAMPLES];
   for (int i=0;i<ctx->owner->nsamples;++i) observations[i]=&ctx->owner->samples[i];
   int classes=s->n_raw>0 ? nr_hyp_sweep_init(&s->engine,s->raw,s->n_raw,supported,ctx,

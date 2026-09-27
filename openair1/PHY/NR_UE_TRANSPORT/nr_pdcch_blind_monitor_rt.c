@@ -5441,8 +5441,58 @@ constdiag_done:;
                   ul_enforce ? "0_1 grant not booked (1 in 64 still booked as a probe)"
                              : "booked anyway (ISAC_UL_FDRA_REFUSE=1 to refuse; a 0_1-only scrambling/MCS cause looks identical)");
         }
-        if (nr_dci01_fdra_book(ul_verdict, ul_oracle, nref, ul_enforce))
+        if (nr_dci01_fdra_book(ul_verdict, ul_oracle, nref, ul_enforce)) {
           nr_pusch_grant_book_add(u, source_absolute_slot);
+        } else if (ul_verdict == NR_DCI01_FDRA_REFUSE && ul_oracle) {
+          /* Gap item 1 (PUSCH RA type 0 / dynamicSwitch): "detected and refused" closed here for the
+           * CONTIGUOUS case. Type 1 is refuted for this class (that is what got us here); rather than
+           * drop the already-CRC-verified payload, re-extract it under each FDRA mode that reproduces
+           * the SAME observed dci_length (nr_pdcch_blind_ul_fdra_mode_candidates() -- "DCI length
+           * consistency", not a joint search over every other field width too, so this is a
+           * discriminator, not a certainty; the eventual TB CRC is the real oracle, same as every other
+           * hypothesis this receiver tries).
+           * Only a CONTIGUOUS resulting PRB set is booked: nr_pusch_passive_decode.c's PUSCH receiver
+           * is nr_rx_pusch_group_tp() -- real gNB PHY, shared with actual gNB reception -- which reads
+           * rb_start/rb_size only and has no rb_bitmap support (R11, PASSIVE_PDSCH_DATA_AIDED-adjacent
+           * finding). A non-contiguous type-0 grant would need this receiver's OWN per-segment UL
+           * extraction (repeated nr_rx_pusch_group_tp() calls, one per segment -- see the still-open
+           * item in gap-pusch-report.md); it is refused here, loudly, rather than decoded from the
+           * wrong PRBs. */
+          uint8_t fdra_cand[4];
+          const int n_cand = nr_pdcch_blind_ul_fdra_mode_candidates(&ul_opts, u->dci_length, fdra_cand, 4);
+          for (int c = 0; c < n_cand; c++) {
+            nr_pdcch_blind_ul_opts_t alt_opts = ul_opts;
+            alt_opts.fdra_mode      = fdra_cand[c];
+            alt_opts.fdra_bwp_start = ul_opts.bwp_start;
+            nr_pdcch_blind_ul_result_t alt;
+            if (!nr_pdcch_blind_extract_01(u->raw_payload, u->dci_length, u->rnti, &alt_opts, &alt) || !alt.ra_type0)
+              continue; /* extraction failed outright, or this dynamicSwitch candidate resolved back to
+                         * type 1 -- already refuted for this class, nothing new to try */
+            uint16_t prb[NR_PRB_SET_MAX];
+            const int nprb = nr_ra_type0_prbs(alt.rbg_bitmap, alt.rbg_bwp_start, alt_opts.bwp_size, alt.rbg_size,
+                                              prb, NR_PRB_SET_MAX);
+            nr_prb_seg_t seg[NR_PRB_SET_MAX];
+            const int nseg = nprb > 0 ? nr_prb_segments(prb, nprb, alt_opts.bwp_start, 0, seg, NR_PRB_SET_MAX) : -1;
+            if (nseg != 1)
+              continue; /* non-contiguous: the gNB-PHY-reuse limitation above */
+            /* nr_pdcch_blind_extract_01() (called two lines up) leaves width_hyp_class/interp_hyp_class
+             * at their memset default of -1, same as every non-discovery grant -- which is EXACTLY
+             * dci01_oracle_grant()'s test for "oracle class" (format 0_1, both classes < 0). Left as
+             * -1, this retry's CRC outcome would be misread as evidence FOR type 1 by
+             * nr_dci01_fdra_note()'s t1_try/t1_ok counters, when it is a type-0/dynamicSwitch read.
+             * Setting width_hyp_class to any value >= 0 here is what excludes it from that class; it
+             * is real evidence the link works, so it still counts -- just in the same link_ok bucket
+             * a 0_0 grant's CRC pass would (nr_dci01_fdra_note()'s oracle_grant==false branch). */
+            alt.width_hyp_class = 0;
+            static _Atomic unsigned long s_ul_type0_booked;
+            const unsigned long nb = atomic_fetch_add_explicit(&s_ul_type0_booked, 1, memory_order_relaxed) + 1;
+            if (nb == 1 || (nb % 1000) == 0)
+              LOG_A(PHY, "SENSING: UL_FDRA_TYPE0_DECODED n=%lu rnti=0x%x mode=%d rbg_bitmap=0x%x start_rb=%u num_rb=%u\n",
+                    nb, u->rnti, alt_opts.fdra_mode, alt.rbg_bitmap, alt.start_rb, alt.num_rb);
+            nr_pusch_grant_book_add(&alt, source_absolute_slot);
+            break; /* one candidate booked is enough per occasion; a wrong guess fails its own TB CRC */
+          }
+        }
       } else {
         g_ul_rejects++;
       }
