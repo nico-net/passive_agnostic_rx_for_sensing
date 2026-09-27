@@ -170,6 +170,19 @@ int nr_csirs_blind_format(const nr_csirs_candidate_t *c, uint16_t period, uint16
 #define NR_CSIRS_BLIND_ZP_PHASE_BITS (4 + 5 + 8 + 10 + 16 + 20 + 32 + 40 + 64 + 80 + 160 + 320 + 640)
 #define NR_CSIRS_BLIND_ZP_PHASE_WORDS ((NR_CSIRS_BLIND_ZP_PHASE_BITS + 63) / 64)
 
+/* The probation horizon is the maximum of nr_csirs_blind_periods, not a deployment
+ * duration or false-alarm probability. A unit test checks the lattice identity. */
+uint16_t nr_csirs_blind_zp_lattice_horizon(void);
+
+typedef struct {
+  int owner; ///< candidate index + 1; zero is a free bank entry
+  uint16_t period, off[2];
+  uint8_t n_off;
+  uint32_t proposed_slot, support_start, admitted_slot;
+  uint64_t votes[2], promotion_votes;
+  uint32_t occupied[NR_CSIRS_BLIND_ZP_PHASE_BITS]; ///< UINT32_MAX means unobserved
+} nr_csirs_zp_probation_t;
+
 typedef struct {
   nr_csirs_candidate_t cand[NR_CSIRS_BLIND_MAX_CAND];
   uint32_t             hits[NR_CSIRS_BLIND_MAX_CAND];
@@ -183,6 +196,9 @@ typedef struct {
   uint16_t             zp_selected_off[NR_CSIRS_BLIND_MAX_CAND][2];
   uint8_t              zp_selected_n_off[NR_CSIRS_BLIND_MAX_CAND];
   uint64_t             zp_rejected_phase[NR_CSIRS_BLIND_MAX_CAND][NR_CSIRS_BLIND_ZP_PHASE_WORDS];
+  uint64_t             zp_failed_run[NR_CSIRS_BLIND_MAX_CAND]; ///< durable across evidence epochs/revocation
+  uint32_t             zp_evidence_floor[NR_CSIRS_BLIND_MAX_CAND]; ///< do not reuse pre-withdrawal/eviction hits
+  nr_csirs_zp_probation_t zp_bank[NR_CSIRS_BLIND_MAX_CONF]; ///< shared probation + export capacity
   double               best_rho[NR_CSIRS_BLIND_MAX_CAND];
   uint32_t             hit_slot[NR_CSIRS_BLIND_MAX_CAND][8]; ///< NZP first 8; ZP current evidence epoch
   uint8_t              n_hit_slot[NR_CSIRS_BLIND_MAX_CAND];
@@ -206,6 +222,10 @@ bool nr_csirs_blind_is_confirmed(const nr_csirs_blind_state_t *st, int idx);
 
 /** Confirmed resources that occur in `absolute_slot`, written to idx_out (up to max). Pure. */
 int nr_csirs_blind_occurring(const nr_csirs_blind_state_t *st, uint32_t absolute_slot, int *idx_out, int max);
+
+/** Due admitted ZP geometries, once each: exports, probation and unresolved divisors.
+ * Never use this list for rate matching. At most MAX_CONF entries. */
+int nr_csirs_blind_zp_due(const nr_csirs_blind_state_t *st, uint32_t absolute_slot, int *idx_out, int max);
 
 /** Enumerate candidate resources for a cell. `scramb_id` is normally the PCI.
  * Returns the count, or -1 on bad arguments. */
@@ -285,12 +305,17 @@ bool nr_csirs_blind_zp_score_qualifies(double score, double score_null);
  * once. A raw hole on more than half the observed slots is structural and cannot confirm;
  * population-threshold misses do not erase raw-hole evidence. Unscorable samples are ignored.
  * Finite observations lacking a joint raw hole veto claimed phases within the positive-evidence epoch.
- * Population-suppressed raw holes remain unresolved. A contradicted
- * or full unresolved epoch restarts with the latest hit, allowing fresh evidence to recover.
+ * Population-suppressed raw holes remain unresolved. Discovery creates unexported probation;
+ * distinct prospective votes must span the complete legal-period lattice horizon and exceed
+ * any previously contradicted held-out run. Both offsets need independent support. A harmonic
+ * remains unexported until measured divisor-only observations resolve every viable divisor.
+ * Eight admitted/exported geometries share bounded scheduling; phase timestamps and failed-run
+ * history survive discovery resets and revocation. New measured evidence may recover a phase.
  * Confirmed resources remain observable: two distinct scorable occupied predicted occasions
  * since the last qualified hole revoke them. Unscorable/population-suppressed holes do not count.
  * Revocation affects only export decisions made AFTER this feed (including future k0 queries).
- * Feed observations in nondecreasing absolute-slot order, under the existing sequential owner. */
+ * Feed observations in nondecreasing absolute-slot order, under the existing sequential owner.
+ * Counter overflow and slot wrap/backwards observations fail closed until cell reset. */
 bool nr_csirs_blind_zp_feed(nr_csirs_blind_state_t *st, int idx, uint32_t absolute_slot,
                             double score, double score_null);
 

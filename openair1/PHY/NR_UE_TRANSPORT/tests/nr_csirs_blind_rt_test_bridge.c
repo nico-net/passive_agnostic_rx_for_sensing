@@ -7,6 +7,7 @@ extern configmodule_interface_t *uniqCfg;
 enum { TEST_FFT = 128, TEST_RE = TEST_FFT * NR_SYMBOLS_PER_SLOT };
 static c16_t test_samples[TEST_RE];
 static int test_fep_enabled, test_fep_mask;
+static int test_fep_calls;
 static int test_maintenance_control;
 static double test_union_score;
 static int test_two_resources;
@@ -23,6 +24,35 @@ void nr_csirs_blind_rt_test_two_resources(void)
   g_st.cand[1].symb_l0 = g_zp.cand[1].symb_l0 = 8;
 }
 int nr_csirs_blind_rt_test_bank_index(int k) { return k < g_zp.n_conf ? g_zp.conf_idx[k] : -1; }
+void nr_csirs_blind_rt_test_retire_discovery(void)
+{
+  g_st.n_conf = 1;
+  g_st.conf_idx[0] = 0;
+  g_st.conf_period[0] = 0; // retire search without producing an NZP rate-match PDU
+}
+uint64_t nr_csirs_blind_rt_test_maintenance_count(int idx, const char *key)
+{
+  if (!strcmp(key, "scheduled")) return g_zp_maint[idx].scheduled;
+  if (!strcmp(key, "reached")) return g_zp_maint[idx].reached;
+  if (!strcmp(key, "first_slot")) return g_zp_maint[idx].first_slot;
+  for (int k = 0; k < ZPM_OUTCOMES; k++)
+    if (!strcmp(key, zp_maint_names[k])) return g_zp_maint[idx].outcome[k];
+  abort();
+}
+int nr_csirs_blind_rt_test_fep_calls(void) { return test_fep_calls; }
+void nr_csirs_blind_rt_test_eight_probations(void)
+{
+  /* Geometry clones isolate the dispatch budget, not discovery accuracy. Every
+   * admitted entry still goes through the real core feed, never a seeded export. */
+  g_st.n = g_zp.n = NR_CSIRS_BLIND_MAX_CONF + 1;
+  for (int idx = 1; idx < g_zp.n; idx++) {
+    g_st.cand[idx] = g_zp.cand[idx] = g_st.cand[0];
+    for (uint32_t slot = 0; slot <= 53; slot++)
+      nr_csirs_blind_zp_feed(&g_zp, idx, slot, slot % 20 == 13 ? 0.98 : 0.0, 0.02);
+  }
+  nr_csirs_blind_pin(&g_st, NR_CSIRS_BLIND_MAX_CONF, 10);
+  nr_csirs_blind_pin(&g_zp, NR_CSIRS_BLIND_MAX_CONF, 10);
+}
 
 /* Deterministic FFT boundary: copy samples only for symbols actually requested by runtime. */
 int nr_slot_fep_ant(PHY_VARS_NR_UE *ue, const NR_DL_FRAME_PARMS *frame_parms,
@@ -34,6 +64,7 @@ int nr_slot_fep_ant(PHY_VARS_NR_UE *ue, const NR_DL_FRAME_PARMS *frame_parms,
     abort();
   memcpy(&rxdataF[0][symbol * TEST_FFT], &test_samples[symbol * TEST_FFT], TEST_FFT * sizeof(c16_t));
   test_fep_mask |= 1 << symbol;
+  test_fep_calls++;
   return 0;
 }
 
@@ -108,6 +139,7 @@ int nr_csirs_blind_rt_test_slot_pattern(int row, uint32_t slot, int holes, int e
   }
   memset(rx, 0, sizeof(rx));
   test_fep_mask = 0;
+  test_fep_calls = 0;
   test_fep_enabled = 1;
   const int16_t *union_refs[] = {(int16_t *)&refs[0][7 * TEST_FFT], (int16_t *)&refs[1][7 * TEST_FFT],
                                (int16_t *)&refs[2][7 * TEST_FFT], (int16_t *)&refs[3][7 * TEST_FFT]};

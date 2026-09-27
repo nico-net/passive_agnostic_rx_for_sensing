@@ -324,16 +324,21 @@ void nr_csirs_blind_rt_slot(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot
             g_st.cand[g_id_pin].row, g_st.cand[g_id_pin].freq_domain, g_st.cand[g_id_pin].symb_l0, hb);
     }
   }
-  /* Validate every predicted ZP occurrence, even if the NZP bank has retired that
-   * geometry or filled its capacity. Snapshot indices before feeds compact the bank.
-   * At most MAX_CONF maintenance scores plus the ordinary discovery score per slot. */
+  /* Shared bounded admission bank: exported maintenance plus unexported probation
+   * and divisor probes, even when NZP has retired the geometry. This list is NOT
+   * the rate-match bank. At most MAX_CONF scores plus one ordinary discovery. */
   int occurring[NR_CSIRS_BLIND_MAX_CONF];
-  const int n = nr_csirs_blind_occurring(&g_zp, absolute_slot, occurring, NR_CSIRS_BLIND_MAX_CONF);
+  const int n = nr_csirs_blind_zp_due(&g_zp, absolute_slot, occurring, NR_CSIRS_BLIND_MAX_CONF);
   for (int k = 0; k < n; k++) {
     g_zp_maint[occurring[k]].scheduled++;
     score_candidate(ue, slot, absolute_slot, rxdataF, occurring[k], true);
   }
-  const int idx = nr_csirs_blind_next(&g_st);
+  /* Alternate independent discovery rotations. A geometry retired by NZP must
+   * remain eligible for ZP re-admission after pressure eviction. Still at most
+   * one ordinary score, deduplicated against the bounded maintenance snapshot. */
+  int idx = nr_csirs_blind_next((g_slots & 1) ? &g_st : &g_zp);
+  if (idx < 0)
+    idx = nr_csirs_blind_next((g_slots & 1) ? &g_zp : &g_st);
   bool measured = false;
   for (int k = 0; k < n; k++)
     if (occurring[k] == idx)

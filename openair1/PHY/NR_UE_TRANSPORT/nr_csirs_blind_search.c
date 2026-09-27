@@ -25,6 +25,19 @@
 const uint16_t nr_csirs_blind_periods[NR_CSIRS_BLIND_N_PERIODS] = {
     4, 5, 8, 10, 16, 20, 32, 40, 64, 80, 160, 320, 640};
 
+uint16_t nr_csirs_blind_zp_lattice_horizon(void)
+{
+  uint16_t maximum = 0;
+  for (int i = 0; i < NR_CSIRS_BLIND_N_PERIODS; i++)
+    if (nr_csirs_blind_periods[i] > maximum)
+      maximum = nr_csirs_blind_periods[i];
+  return maximum;
+}
+
+_Static_assert(NR_CSIRS_BLIND_ZP_PHASE_BITS == 1399, "legal phase lattice storage changed");
+_Static_assert(sizeof(((nr_csirs_zp_probation_t *)0)->occupied) == 1399 * sizeof(uint32_t),
+               "bounded timestamp ledger");
+
 double nr_csirs_blind_correlate(const int16_t *rx_re_im, const int16_t *ref_re_im, int n)
 {
   return nr_csirs_blind_correlate_n(rx_re_im, ref_re_im, n, NULL);
@@ -409,12 +422,175 @@ int nr_csirs_blind_occurring(const nr_csirs_blind_state_t *st, uint32_t absolute
   return n;
 }
 
+static nr_csirs_zp_probation_t *zp_bank(nr_csirs_blind_state_t *st, int idx)
+{
+  for (int k = 0; k < NR_CSIRS_BLIND_MAX_CONF; k++)
+    if (st->zp_bank[k].owner == idx + 1)
+      return &st->zp_bank[k];
+  return NULL;
+}
+
+static bool zp_on(uint32_t slot, unsigned period, const uint16_t off[2], unsigned n_off)
+{
+  for (unsigned j = 0; period && j < n_off; j++)
+    if (slot % period == off[j] % period)
+      return true;
+  return false;
+}
+
+int nr_csirs_blind_zp_due(const nr_csirs_blind_state_t *st, uint32_t slot, int *out, int max)
+{
+  int n = 0;
+  for (int k = 0; st && out && k < NR_CSIRS_BLIND_MAX_CONF && n < max; k++) {
+    const nr_csirs_zp_probation_t *b = &st->zp_bank[k];
+    if (!b->owner || st->zp_failed_run[b->owner - 1] == UINT64_MAX)
+      continue;
+    bool due = !b->period || zp_on(slot, b->period, b->off, b->n_off);
+    if (!nr_csirs_blind_is_confirmed(st, b->owner - 1))
+      for (int pi = 0; !due && pi < NR_CSIRS_BLIND_N_PERIODS; pi++) {
+        const unsigned d = nr_csirs_blind_periods[pi];
+        due = b->period > d && b->period % d == 0 && zp_on(slot, d, b->off, b->n_off);
+      }
+    if (due)
+      out[n++] = b->owner - 1;
+  }
+  return n;
+}
+
+static void zp_failed(nr_csirs_blind_state_t *st, int idx, nr_csirs_zp_probation_t *b)
+{
+  st->zp_evidence_floor[idx] = st->zp_last_slot[idx];
+  for (int j = 0; j < b->n_off; j++)
+    if (b->votes[j] > st->zp_failed_run[idx])
+      st->zp_failed_run[idx] = b->votes[j];
+  if (b->promotion_votes > st->zp_failed_run[idx])
+    st->zp_failed_run[idx] = b->promotion_votes;
+  b->period = b->n_off = 0;
+  b->votes[0] = b->votes[1] = b->promotion_votes = 0;
+}
+
+static uint64_t zp_required_votes(const nr_csirs_blind_state_t *st, int idx, unsigned period)
+{
+  if (!period || st->zp_failed_run[idx] == UINT64_MAX)
+    return UINT64_MAX;
+  uint64_t need = (nr_csirs_blind_zp_lattice_horizon() + period - 1) / period;
+  if (need < CSIRS_MIN_HITS) need = CSIRS_MIN_HITS;
+  if (need <= st->zp_failed_run[idx]) need = st->zp_failed_run[idx] + 1;
+  return need;
+}
+
+/* Capacity pressure may replace only an unexported admission after enough time
+ * for a fully measured probation plus one lattice horizon. Unknown observations
+ * cannot reserve all eight entries forever. Durable failed-run debt and a fresh
+ * evidence floor survive replacement; no old supporting hit can be recycled. */
+static nr_csirs_zp_probation_t *zp_admit(nr_csirs_blind_state_t *st, int idx, uint32_t slot)
+{
+  nr_csirs_zp_probation_t *victim = NULL;
+  const uint64_t horizon = nr_csirs_blind_zp_lattice_horizon();
+  for (int k = 0; k < NR_CSIRS_BLIND_MAX_CONF; k++) {
+    nr_csirs_zp_probation_t *b = &st->zp_bank[k];
+    if (!b->owner) { victim = b; break; }
+    const int old = b->owner - 1;
+    if (nr_csirs_blind_is_confirmed(st, old) || slot < b->admitted_slot)
+      continue;
+    const unsigned p = b->period ? b->period : st->zp_selected_period[old];
+    const uint64_t need = zp_required_votes(st, old, p);
+    uint64_t lease = UINT64_MAX;
+    if (p && need <= (UINT64_MAX - horizon) / p)
+      lease = need * p + horizon;
+    const bool expired = st->zp_failed_run[old] == UINT64_MAX
+        || (uint64_t)(slot - b->admitted_slot) >= lease;
+    if (expired && (!victim || b->admitted_slot < victim->admitted_slot))
+      victim = b;
+  }
+  if (!victim)
+    return NULL;
+  if (victim->owner) {
+    const int old = victim->owner - 1;
+    st->zp_evidence_floor[old] = slot;
+    st->n_hit_slot[old] = 0;
+    st->tried[old] = st->zp_holes[old] = 0;
+    memset(st->zp_rejected_phase[old], 0, sizeof(st->zp_rejected_phase[old]));
+  }
+  memset(victim, 0, sizeof(*victim));
+  victim->owner = idx + 1;
+  victim->admitted_slot = slot;
+  memset(victim->occupied, 0xff, sizeof(victim->occupied));
+  for (unsigned bit = 0; bit < NR_CSIRS_BLIND_ZP_PHASE_BITS; bit++)
+    if (st->zp_rejected_phase[idx][bit / 64] & (UINT64_C(1) << (bit % 64)))
+      victim->occupied[bit] = slot;
+  return victim;
+}
+
+static void zp_occupied(nr_csirs_zp_probation_t *b, uint32_t slot)
+{
+  unsigned base = 0;
+  for (int pi = 0; pi < NR_CSIRS_BLIND_N_PERIODS; pi++) {
+    const unsigned p = nr_csirs_blind_periods[pi];
+    b->occupied[base + slot % p] = slot;
+    base += p;
+  }
+}
+
+static bool zp_ledger_rejected(const nr_csirs_zp_probation_t *b, unsigned p,
+                               const uint16_t off[2], unsigned n_off, uint32_t start)
+{
+  unsigned base = 0;
+  for (int pi = 0; pi < NR_CSIRS_BLIND_N_PERIODS; pi++) {
+    if (nr_csirs_blind_periods[pi] == p) {
+      for (unsigned j = 0; j < n_off; j++) {
+        const uint32_t last = b->occupied[base + off[j] % p];
+        if (last != UINT32_MAX && last >= start)
+          return true;
+      }
+      return false;
+    }
+    base += nr_csirs_blind_periods[pi];
+  }
+  return true;
+}
+
+static bool zp_divisors_resolved(const nr_csirs_zp_probation_t *b)
+{
+  for (int pi = 0; pi < NR_CSIRS_BLIND_N_PERIODS; pi++) {
+    const unsigned d = nr_csirs_blind_periods[pi];
+    if (d >= b->period || b->period % d)
+      continue;
+    bool additional = false;
+    for (unsigned s = 0; s < b->period; s++)
+      additional |= zp_on(s, d, b->off, b->n_off) && !zp_on(s, b->period, b->off, b->n_off);
+    if (additional && !zp_ledger_rejected(b, d, b->off, b->n_off, b->support_start))
+      return false;
+  }
+  return true;
+}
+
+static void zp_export(nr_csirs_blind_state_t *st, int idx, nr_csirs_zp_probation_t *b)
+{
+  const int k = st->n_conf++;
+  st->conf_idx[k] = idx;
+  st->conf_period[k] = b->period;
+  memcpy(st->conf_off[k], b->off, sizeof(b->off));
+  st->conf_n_off[k] = b->n_off;
+  b->promotion_votes = b->votes[0] > b->votes[1] ? b->votes[0] : b->votes[1];
+  if (st->confirmed < 0) {
+    st->confirmed = idx;
+    st->period = b->period;
+    st->offset = b->off[0];
+  }
+}
+
 static void zp_restart_epoch(nr_csirs_blind_state_t *st, int idx, uint32_t absolute_slot)
 {
+  if (st->zp_epoch[idx] == UINT32_MAX) {
+    st->zp_failed_run[idx] = UINT64_MAX;
+    return;
+  }
   st->zp_epoch[idx]++;
   st->hit_slot[idx][0] = absolute_slot;
   st->n_hit_slot[idx] = 1;
   memset(st->zp_rejected_phase[idx], 0, sizeof(st->zp_rejected_phase[idx]));
+  /* Admission timestamps and failed-run history deliberately survive this reset. */
 }
 
 /* Observations arrive in slot order. Bits accumulate only after the first supporting hit and
@@ -457,6 +633,13 @@ static bool zp_phase_rejected(const nr_csirs_blind_state_t *st, int idx, uint16_
  * lucky first hit needs might otherwise never be looked at. */
 static bool record_hit(nr_csirs_blind_state_t *st, int idx, uint32_t absolute_slot, bool structural, bool zp)
 {
+  nr_csirs_zp_probation_t *bank = zp ? zp_bank(st, idx) : NULL;
+  if (zp && st->zp_evidence_floor[idx] && absolute_slot <= st->zp_evidence_floor[idx])
+    return false;
+  if (zp && st->hits[idx] == UINT32_MAX) {
+    st->zp_failed_run[idx] = UINT64_MAX;
+    return false;
+  }
   for (int i = 0; i < st->n_hit_slot[idx]; i++)
     if (st->hit_slot[idx][i] == absolute_slot)
       return false;
@@ -479,6 +662,13 @@ static bool record_hit(nr_csirs_blind_state_t *st, int idx, uint32_t absolute_sl
     return false;   /* scoring high is not enough -- it must also be PERIODIC */
   }
   if (zp) {
+    for (int j = 0; j < n_off; j++) {
+      int supports = 0;
+      for (int h = 0; h < st->n_hit_slot[idx]; h++)
+        supports += st->hit_slot[idx][h] % p == off[j];
+      if (supports < CSIRS_MIN_HITS)
+        return false;
+    }
     st->zp_selected_period[idx] = p;
     memcpy(st->zp_selected_off[idx], off, sizeof(off));
     st->zp_selected_n_off[idx] = n_off;
@@ -486,6 +676,25 @@ static bool record_hit(nr_csirs_blind_state_t *st, int idx, uint32_t absolute_sl
   if (zp && zp_phase_rejected(st, idx, p, off, n_off)) {
     zp_restart_epoch(st, idx, absolute_slot);
     return false;
+  }
+  if (zp) {
+    if (st->zp_failed_run[idx] == UINT64_MAX)
+      return false;
+    if (!bank)
+      bank = zp_admit(st, idx, absolute_slot);
+    if (!bank)
+      return false; // combined probation/export bank is full
+    if (zp_ledger_rejected(bank, p, off, n_off, st->hit_slot[idx][0])) {
+      zp_restart_epoch(st, idx, absolute_slot);
+      return false;
+    }
+    bank->period = p;
+    bank->n_off = n_off;
+    memcpy(bank->off, off, sizeof(off));
+    bank->support_start = st->hit_slot[idx][0];
+    bank->proposed_slot = absolute_slot;
+    bank->votes[0] = bank->votes[1] = bank->promotion_votes = 0;
+    return false; // discovery can NEVER write the ZP export bank
   }
   const int k = st->n_conf++;
   st->conf_idx[k] = idx;
@@ -639,6 +848,36 @@ bool nr_csirs_blind_zp_score_qualifies(double score, double score_null)
   return isfinite(score) && score > 0.5 && score_null >= 0.0 && score > CSIRS_DETECT_MARGIN * score_null;
 }
 
+static void zp_withdraw(nr_csirs_blind_state_t *st, int idx, nr_csirs_zp_probation_t *bank)
+{
+  for (int k = 0; k < st->n_conf; k++) {
+    if (st->conf_idx[k] != idx)
+      continue;
+    for (int j = k; j + 1 < st->n_conf; j++) {
+      st->conf_idx[j] = st->conf_idx[j + 1];
+      st->conf_period[j] = st->conf_period[j + 1];
+      st->conf_n_off[j] = st->conf_n_off[j + 1];
+      memcpy(st->conf_off[j], st->conf_off[j + 1], sizeof(st->conf_off[j]));
+    }
+    st->n_conf--;
+    st->confirmed = st->n_conf ? st->conf_idx[0] : -1;
+    st->period = st->n_conf ? st->conf_period[0] : 0;
+    st->offset = st->n_conf ? st->conf_off[0][0] : 0;
+    if (st->zp_revocations[idx] == UINT32_MAX)
+      st->zp_failed_run[idx] = UINT64_MAX;
+    else
+      st->zp_revocations[idx]++;
+    break;
+  }
+  if (bank)
+    zp_failed(st, idx, bank);
+  st->zp_contradictions[idx] = 0;
+  st->n_hit_slot[idx] = 0;
+  st->tried[idx] = st->zp_holes[idx] = 0;
+  memset(st->zp_rejected_phase[idx], 0, sizeof(st->zp_rejected_phase[idx]));
+  st->cycle_left = st->cycle_pad = 0;
+}
+
 bool nr_csirs_blind_zp_feed_pair(nr_csirs_blind_state_t *st, int idx, uint32_t absolute_slot,
                                 double score, double other_score, double score_null)
 {
@@ -646,6 +885,15 @@ bool nr_csirs_blind_zp_feed_pair(nr_csirs_blind_state_t *st, int idx, uint32_t a
     return false;
   }
   const bool confirmed = nr_csirs_blind_is_confirmed(st, idx);
+  nr_csirs_zp_probation_t *bank = zp_bank(st, idx);
+  /* Slot wrap/backwards replay and evidence overflow fail closed until cell reset. */
+  if (st->zp_failed_run[idx] == UINT64_MAX || absolute_slot == UINT32_MAX
+      || ((st->tried[idx] || st->zp_epoch[idx]) && absolute_slot < st->zp_last_slot[idx])
+      || st->tried[idx] == UINT32_MAX) {
+    st->zp_failed_run[idx] = UINT64_MAX;
+    zp_withdraw(st, idx, bank);
+    return false;
+  }
   if (!isfinite(score) || score < 0.0 || !isfinite(other_score) || other_score < 0.0
       || ((st->tried[idx] > 0 || st->zp_epoch[idx] > 0) && st->zp_last_slot[idx] == absolute_slot))
     return confirmed;
@@ -660,6 +908,8 @@ bool nr_csirs_blind_zp_feed_pair(nr_csirs_blind_state_t *st, int idx, uint32_t a
   const bool hole = score > 0.5 || other_score > 0.5;
   const double joint_score = fmin(score, other_score);
   const bool hit = nr_csirs_blind_zp_score_qualifies(joint_score, score_null);
+  if (bank && joint_score <= 0.5)
+    zp_occupied(bank, absolute_slot);
   if (confirmed) {
     for (int k = 0; k < st->n_conf; k++) {
       if (st->conf_idx[k] != idx)
@@ -673,23 +923,7 @@ bool nr_csirs_blind_zp_feed_pair(nr_csirs_blind_state_t *st, int idx, uint32_t a
         st->zp_contradictions[idx] = 0;
       if (joint_score > 0.5 || ++st->zp_contradictions[idx] < 2)
         return true;
-      /* Compact the export bank; no previously made k0 decision is retroactively changed. */
-      for (int j = k; j + 1 < st->n_conf; j++) {
-        st->conf_idx[j] = st->conf_idx[j + 1];
-        st->conf_period[j] = st->conf_period[j + 1];
-        st->conf_n_off[j] = st->conf_n_off[j + 1];
-        memcpy(st->conf_off[j], st->conf_off[j + 1], sizeof(st->conf_off[j]));
-      }
-      st->n_conf--;
-      st->confirmed = st->n_conf ? st->conf_idx[0] : -1;
-      st->period = st->n_conf ? st->conf_period[0] : 0;
-      st->offset = st->n_conf ? st->conf_off[0][0] : 0;
-      st->zp_revocations[idx]++;
-      st->zp_contradictions[idx] = 0;
-      st->n_hit_slot[idx] = 0;
-      st->tried[idx] = st->zp_holes[idx] = 0;
-      memset(st->zp_rejected_phase[idx], 0, sizeof(st->zp_rejected_phase[idx]));
-      st->cycle_left = st->cycle_pad = 0;
+      zp_withdraw(st, idx, bank);
       return false;
     }
   }
@@ -697,6 +931,57 @@ bool nr_csirs_blind_zp_feed_pair(nr_csirs_blind_state_t *st, int idx, uint32_t a
   st->zp_holes[idx] += hole;
   if (joint_score > st->best_rho[idx]) {
     st->best_rho[idx] = joint_score;
+  }
+  if (bank && bank->period) {
+    const bool on = zp_on(absolute_slot, bank->period, bank->off, bank->n_off);
+    if (on && joint_score <= 0.5) {
+      zp_failed(st, idx, bank);
+      st->n_hit_slot[idx] = 0;
+      zp_record_rejection(st, idx, absolute_slot);
+      return false;
+    }
+    if (!hit)
+      return false; // unknown/suppressed holes cannot supply held-out evidence
+    if (on) {
+      if (st->hits[idx] == UINT32_MAX) {
+        st->zp_failed_run[idx] = UINT64_MAX;
+        return false;
+      }
+      st->hits[idx]++;
+      for (int j = 0; j < bank->n_off; j++) {
+        if (absolute_slot > bank->proposed_slot && absolute_slot % bank->period == bank->off[j]) {
+          if (bank->votes[j] == UINT64_MAX) {
+            st->zp_failed_run[idx] = UINT64_MAX;
+            return false;
+          }
+          bank->votes[j]++;
+        }
+      }
+      const uint64_t lattice = nr_csirs_blind_zp_lattice_horizon();
+      const uint64_t need = zp_required_votes(st, idx, bank->period);
+      bool ready = absolute_slot - bank->proposed_slot >= lattice;
+      for (int j = 0; j < bank->n_off; j++)
+        ready &= bank->votes[j] >= need;
+      if (ready && (uint64_t)st->zp_holes[idx] * 2 <= st->tried[idx] && zp_divisors_resolved(bank)
+          && st->n_conf < NR_CSIRS_BLIND_MAX_CONF) {
+        zp_export(st, idx, bank);
+        return true;
+      }
+      return false;
+    }
+    /* A new measured interstitial hole changes the fitted period; do not
+     * extrapolate a divisor merely from missing intermediate observations. */
+    bool interstitial = false;
+    for (int pi = 0; pi < NR_CSIRS_BLIND_N_PERIODS; pi++) {
+      const unsigned d = nr_csirs_blind_periods[pi];
+      if (d < bank->period && bank->period % d == 0 && zp_on(absolute_slot, d, bank->off, bank->n_off)
+          && !zp_ledger_rejected(bank, d, bank->off, bank->n_off, bank->support_start))
+        interstitial = true;
+    }
+    if (!interstitial)
+      return false;
+    bank->period = bank->n_off = 0;
+    bank->votes[0] = bank->votes[1] = 0;
   }
   if (!hit) {
     /* A population-suppressed raw hole is unresolved, not evidence of occupancy.
