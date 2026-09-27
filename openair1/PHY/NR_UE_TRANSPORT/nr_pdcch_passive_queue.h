@@ -116,6 +116,9 @@ bool nr_pdcch_passive_queue_enqueue(const nr_pdcch_passive_job_t *job);
 
 void nr_pdcch_passive_queue_get_stats(nr_pdcch_passive_queue_stats_t *out);
 
+/// Occasions waiting in the ring right now, or -1 when the pool is not running (in-line scan).
+int nr_pdcch_passive_queue_backlog(void);
+
 void nr_pdcch_passive_queue_stop(void);
 
 #ifdef __cplusplus

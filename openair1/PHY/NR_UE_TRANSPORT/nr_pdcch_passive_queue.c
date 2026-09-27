@@ -222,6 +222,16 @@ bool nr_pdcch_passive_queue_enqueue(const nr_pdcch_passive_job_t *job)
   return true;
 }
 
+int nr_pdcch_passive_queue_backlog(void)
+{
+  if (!atomic_load_explicit(&g_running, memory_order_acquire))
+    return -1;
+  pthread_mutex_lock(&g_lock);
+  const int n = g_count;
+  pthread_mutex_unlock(&g_lock);
+  return n;
+}
+
 void nr_pdcch_passive_queue_get_stats(nr_pdcch_passive_queue_stats_t *out)
 {
   if (out == NULL) {

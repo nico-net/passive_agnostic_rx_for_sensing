@@ -782,6 +782,10 @@ TEST(PdschConfigSweepTypeB, ObservingATypeBOnlyMaskWidensToExactlyItsMatchingEnt
     EXPECT_EQ(st.hyp[i].mapping_type, 0);
 
   ASSERT_GT(nr_pdsch_config_sweep_observe_mask(&t, 0x20), 0);
+  // The prune re-numbered the catalog, so the pre-prune ticket is retired (lane perf 2026-09-27,
+  // TicketIssuedBeforeAPruneCannotScoreAfterIt); look through a fresh one.
+  EXPECT_FALSE(nr_pdsch_config_sweep_snapshot(&t, &st));
+  ASSERT_TRUE(nr_pdsch_config_sweep_select(0xCC, 0x4601, 0, 2, 0, ab_legal, &t, &h));
   ASSERT_TRUE(nr_pdsch_config_sweep_snapshot(&t, &st));
   EXPECT_EQ(st.n_hyp, 6); // 1 (S,L) x k0{0,1} x 3 tables, all mapping type B
   for (int i = 0; i < st.n_hyp; i++) {
@@ -894,4 +898,75 @@ TEST(PdschConfigSweepK0, ConvergenceOnAnotherK0DropsTheFalseLayer) {
   nr_pdsch_config_sweep_state_t st{};
   ASSERT_TRUE(nr_pdsch_config_sweep_snapshot(&t, &st));
   EXPECT_EQ(count_k0(st, 3), 0);
+}
+
+/* ---- Lane perf (2026-09-27): a prune compacts st->hyp[] IN PLACE, so every ticket issued before it
+ * names an index that now belongs to a different hypothesis (or none). Such a ticket must be refused,
+ * never credited to whatever landed on its old index. Before the fix the context generation did not
+ * change on a prune, and a pre-prune ticket for old index 0..2 scored the post-prune entry 0..2. */
+TEST(PdschConfigSweepOracle, TicketIssuedBeforeAPruneCannotScoreAfterIt) {
+  nr_pdsch_config_sweep_reset_all();
+  nr_pdsch_config_sweep_prior_reset();
+  const uint16_t mask = (uint16_t)test_legal(0, 13, 1, 0, 2, 1); // S=1 L=13 add 2 len 1
+  nr_pdsch_sweep_ticket_t old{};
+  nr_pdsch_cfg_hypothesis_t h{};
+  bool found = false;
+  for (int i = 0; i < NR_PDSCH_SWEEP_MAX_HYP && !found; i++) {
+    ASSERT_TRUE(nr_pdsch_config_sweep_select(0x51, 0x4601, 0, 2, 0, test_legal, &old, &h));
+    found = old.hypothesis < 3 && h.dmrs_mask != mask;
+  }
+  ASSERT_TRUE(found);
+  ASSERT_EQ(nr_pdsch_config_sweep_observe(&old, mask, 13, 0), 3); // prunes to the 3 mcs tables
+  nr_pdsch_config_sweep_feedback(&old, true, nullptr);            // in flight across the prune
+  nr_pdsch_sweep_ticket_t now{};
+  ASSERT_TRUE(nr_pdsch_config_sweep_select(0x51, 0x4601, 0, 2, 0, test_legal, &now, &h));
+  nr_pdsch_config_sweep_state_t state{};
+  ASSERT_TRUE(nr_pdsch_config_sweep_snapshot(&now, &state));
+  ASSERT_EQ(state.n_hyp, 3);
+  for (int i = 0; i < state.n_hyp; i++) {
+    EXPECT_EQ(state.trials[i], 0u) << "pre-prune ticket credited to hypothesis " << i;
+    EXPECT_EQ(state.ok[i], 0u);
+  }
+  EXPECT_FALSE(nr_pdsch_config_sweep_snapshot(&old, &state)); // the old ticket names a dead layout
+}
+
+/* The same holds for the Qm oracle's table prune (observe_qm runs on the consumer after its own
+ * feedback, but OTHER consumers' tickets are still in flight). */
+TEST(PdschConfigSweepQm, TicketIssuedBeforeATablePruneCannotScoreAfterIt) {
+  nr_pdsch_config_sweep_reset_all();
+  nr_pdsch_config_sweep_prior_reset();
+  nr_pdsch_sweep_ticket_t old{}, t{};
+  nr_pdsch_cfg_hypothesis_t h{};
+  bool found = false; /* an old index that survives the prune's re-numbering, so it WOULD be credited */
+  for (int i = 0; i < NR_PDSCH_SWEEP_MAX_HYP && !found; i++) {
+    ASSERT_TRUE(nr_pdsch_config_sweep_select(0x52, 0x4601, 0, 2, 0, test_legal, &old, &h));
+    found = old.hypothesis < 10;
+  }
+  ASSERT_TRUE(found);
+  ASSERT_TRUE(nr_pdsch_config_sweep_select(0x52, 0x4601, 0, 2, 0, test_legal, &t, &h));
+  nr_pdsch_config_sweep_observe_qm(&t, 20, 8);          // MCS 20 at Qm 8 is table 1 only
+  ASSERT_GT(nr_pdsch_config_sweep_observe_qm(&t, 20, 8), 0);
+  EXPECT_FALSE(nr_pdsch_config_sweep_feedback(&old, true, nullptr));
+  nr_pdsch_sweep_ticket_t now{};
+  ASSERT_TRUE(nr_pdsch_config_sweep_select(0x52, 0x4601, 0, 2, 0, test_legal, &now, &h));
+  nr_pdsch_config_sweep_state_t state{};
+  ASSERT_TRUE(nr_pdsch_config_sweep_snapshot(&now, &state));
+  for (int i = 0; i < state.n_hyp; i++)
+    EXPECT_EQ(state.trials[i], 0u);
+}
+
+/* A k0 hypothesis decodes the slot k0 after the DCI: every decode path (deferred fast path, deferred
+ * normal path, in-line) must target that slot, or a k0 = 1 entry decodes the SAME samples as its
+ * k0 = 0 twin, scores identically, and the sweep can never separate them (it correctly refuses to
+ * pick between two indistinguishable hypotheses) -- measured: 0 CONVERGED on the phy-test bed. */
+TEST(PdschConfigSweepK0, TargetSlotWrapsFrameAndSfn) {
+  int f = -1, s = -1;
+  nr_pdsch_k0_slot(100, 5, 20, 0, &f, &s);
+  EXPECT_EQ(f, 100); EXPECT_EQ(s, 5);
+  nr_pdsch_k0_slot(100, 19, 20, 1, &f, &s);
+  EXPECT_EQ(f, 101); EXPECT_EQ(s, 0);
+  nr_pdsch_k0_slot(1023, 18, 20, 3, &f, &s);
+  EXPECT_EQ(f, 0); EXPECT_EQ(s, 1);
+  nr_pdsch_k0_slot(7, 2, 20, 32, &f, &s);
+  EXPECT_EQ(f, 8); EXPECT_EQ(s, 14);
 }
