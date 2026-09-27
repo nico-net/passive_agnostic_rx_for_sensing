@@ -21,9 +21,13 @@
 
 /*! \file openair1/PHY/NR_UE_TRANSPORT/nr_harq_init_tx.h
  * \brief Per-(RNTI, HARQ pid) record of the last TRANSPORT-BLOCK PARAMETERS a passive receiver
- * could resolve on its own, kept so a later RESERVED-MCS grant on the same HARQ process (DL MCS
- * 29-31 / 28-31 for a qam256 mcs-Table, TS 38.214 5.1.3.1; UL MCS 28-31 / 27-31 for qam256, TS
- * 38.214 6.1.4.1) can still be decoded.
+ * could resolve on its own, kept so a later RESERVED-MCS grant on the same HARQ process can still
+ * be decoded. DL (TS 38.214 5.1.3.1): 29-31 for Table 5.1.3.1-1/-3 (qam64/qam64LowSE), 28-31 for
+ * Table 5.1.3.1-2 (qam256). UL (TS 38.214 6.1.4.1) shares the SAME reserved boundary per table --
+ * nr_get_Qm_ul()/nr_get_code_rate_ul() literally reuse Table_51311/51312/51313 for UL tables 0/1/2
+ * -- plus two UL-only transform-precoded tables (61411/61412) at table index 3/4, ALSO 28-31. So:
+ * 29-31 for tables 0/2, 28-31 for tables 1/3/4. (An earlier version of this file said UL was
+ * "28-31 / 27-31 for qam256" -- corrected, G5 review, gap-harq: there is no "27-31" boundary.)
  *
  * A reserved MCS index carries no target code rate of its own: the spec says the UE "shall assume
  * the same modulation order and transport block size as the initial PDSCH/PUSCH transmission of the
@@ -74,13 +78,18 @@ typedef struct {
 
 /// Fixed-size, RNTI+pid-keyed, least-recently-used table. One instance per (module, direction): the
 /// passive DL and UL decoders each keep their own, so a UL HARQ pid can never collide with a DL one
-/// that happens to share the same number. 16 entries covers every live HARQ process of a couple of
-/// UEs, the same sizing rationale nr_pdsch_passive_decode.c's own per-RNTI tables already use.
-#define NR_HARQ_INIT_TX_N 16
+/// that happens to share the same number. 64 (G5 review, gap-harq; was 16): a single DL HARQ-pid
+/// field is up to 5 bits (`harq-ProcessNumberSizeDCI-1-1`), i.e. up to 32 live processes for ONE
+/// RNTI alone -- 16 total was undersized the moment more than one RNTI was live at all, let alone
+/// one RNTI using every process. 64 covers 2 UEs at the 5-bit maximum with headroom, same rationale
+/// nr_pdsch_passive_decode.c's own per-RNTI tables (RNTI_DEC_MAX) already use.
+#define NR_HARQ_INIT_TX_N 64
 
 typedef struct {
   nr_harq_init_tx_t e[NR_HARQ_INIT_TX_N];
   uint64_t clock;
+  uint64_t hits;   ///< nr_harq_init_tx_lookup() successes -- surfaced on the live stats line (G5 review)
+  uint64_t evicts; ///< nr_harq_init_tx_record() calls that evicted a DIFFERENT (rnti, pid)'s entry
 } nr_harq_init_tx_table_t;
 
 /// NULL when (rnti, pid) has no slot yet.
@@ -105,6 +114,8 @@ static inline void nr_harq_init_tx_record(nr_harq_init_tx_table_t *t, uint16_t r
     for (int i = 1; i < NR_HARQ_INIT_TX_N; i++)
       if (!t->e[i].used || t->e[i].touched < e->touched)
         e = &t->e[i];
+    if (e->used)
+      t->evicts++; // a genuinely different (rnti, pid) occupied this slot, not just an empty one
   }
   e->used = true;
   e->rnti = rnti;
@@ -129,6 +140,7 @@ static inline bool nr_harq_init_tx_lookup(nr_harq_init_tx_table_t *t, uint16_t r
   if (e == NULL || e->ndi != ndi)
     return false;
   *out = *e;
+  t->hits++;
   return true;
 }
 

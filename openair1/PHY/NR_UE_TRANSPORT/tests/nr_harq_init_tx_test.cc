@@ -134,6 +134,35 @@ TEST(HarqInitTx, RecordOnSameKeyUpdatesInPlaceRatherThanEvicting)
   EXPECT_EQ(out.tbs, 7777u);
 }
 
+TEST(HarqInitTx, HitAndEvictCountersMeasureExactlyWhatTheyName)
+{
+  // G5 review: hit/evict counters surfaced on the live stats line -- pin their exact semantics here.
+  nr_harq_init_tx_table_t t = {};
+  EXPECT_EQ(t.hits, 0u);
+  EXPECT_EQ(t.evicts, 0u);
+
+  // Filling empty slots is not an eviction.
+  for (int i = 0; i < NR_HARQ_INIT_TX_N; i++)
+    nr_harq_init_tx_record(&t, (uint16_t)(0x2000 + i), 0, 0, 6, 2, 1, (uint32_t)(1000 + i), 100);
+  EXPECT_EQ(t.evicts, 0u);
+  // Re-recording an EXISTING key is a refresh, not an eviction.
+  nr_harq_init_tx_record(&t, 0x2000, 0, 1, 4, 1, 2, 7777, 200);
+  EXPECT_EQ(t.evicts, 0u);
+  // A NEW key, table full: exactly one real eviction.
+  nr_harq_init_tx_record(&t, 0x9999, 0, 0, 6, 2, 1, 42, 100);
+  EXPECT_EQ(t.evicts, 1u);
+
+  // A failed lookup (miss) must not count as a hit.
+  nr_harq_init_tx_t out = {};
+  EXPECT_FALSE(nr_harq_init_tx_lookup(&t, 0xBEEF, 0, 0, &out));
+  EXPECT_EQ(t.hits, 0u);
+  // A successful lookup counts exactly one hit, and only for a real hit.
+  ASSERT_TRUE(nr_harq_init_tx_lookup(&t, 0x9999, 0, 0, &out));
+  EXPECT_EQ(t.hits, 1u);
+  ASSERT_TRUE(nr_harq_init_tx_lookup(&t, 0x9999, 0, 0, &out));
+  EXPECT_EQ(t.hits, 2u);
+}
+
 int main(int argc, char **argv)
 {
   ::testing::InitGoogleTest(&argc, argv);

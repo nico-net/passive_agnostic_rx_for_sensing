@@ -777,12 +777,15 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
   const int n_dmrs_sym = __builtin_popcount((unsigned)g->ul_dmrs_symb_pos
                                             & (((1u << g->num_symbols) - 1u) << g->start_symbol));
   const int nb_dmrs_re_per_rb = ((g->dmrs_config_type == 0) ? 6 : 4) * g->n_dmrs_cdm_groups;
-  // MCS 28-31 (27-31 for a qam256 mcs-Table) have no code rate of their own (their modulation
-  // order, in pdu.qam_mod_order above, IS already correct -- the spec table encodes it directly).
-  // TS 38.214 6.1.4.1: the UE reuses the TBS and base graph of the initial transmission of this
-  // HARQ process. nr_harq_init_tx.h is that record, gated on the NDI not having toggled since it
-  // was taken; a miss means the true initial transmission was never observed and the grant is
-  // refused, same as when this receiver had no such record at all.
+  // UL's reserved MCS range is 29-31 for tables 0/2 (Table_51311/51313, qam64/qam64LowSE) and
+  // 28-31 for tables 1/3/4 (Table_51312/61411/61412, qam256 and the two transform-precoded
+  // tables) -- corrected here (G5 review, gap-harq): an earlier version of this comment said
+  // "27-31", which is not a boundary any table actually uses. The reserved rows have no code rate
+  // of their own (their modulation order, in pdu.qam_mod_order above, IS already correct -- the
+  // spec table encodes it directly). TS 38.214 6.1.4.1: the UE reuses the TBS and base graph of
+  // the initial transmission of this HARQ process. nr_harq_init_tx.h is that record, gated on the
+  // NDI not having toggled since it was taken; a miss means the true initial transmission was
+  // never observed and the grant is refused, same as when this receiver had no such record at all.
   nr_harq_init_tx_t ul_init_tx = {0};
   bool have_ul_init_tx = false;
   uint32_t tbs;
@@ -817,16 +820,9 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
   }
   pdu.pusch_data.tb_size = tbs >> 3;
   pdu.maintenance_parms_v3.ldpcBaseGraph = have_ul_init_tx ? ul_init_tx.bg : get_BG(tbs, pdu.target_code_rate);
-  if (!have_ul_init_tx) {
-    // This grant's own MCS was resolvable: record it as the current best-known initial-transmission
-    // parameters for this HARQ process, so a LATER reserved-MCS grant on it (same NDI) can use them.
-    // Every UL grant this receiver decodes is dedicated (0_0/0_1 only ever schedule a C-/TC-RNTI),
-    // so there is no SI/RA/P-class table-churn case to guard against here (unlike the DL twin).
-    pthread_mutex_lock(&g_ul_harq_init_lock);
-    nr_harq_init_tx_record(&g_ul_harq_init, g->rnti, g->harq_pid, g->ndi, pdu.qam_mod_order, g->nrOfLayers,
-                           pdu.maintenance_parms_v3.ldpcBaseGraph, tbs, pdu.target_code_rate);
-    pthread_mutex_unlock(&g_ul_harq_init_lock);
-  }
+  // The record write itself is deferred to the TB CRC outcome (G5 review, gap-harq) -- see the DL
+  // twin's identical comment for why recording here, before any decode is attempted, is not safe
+  // evidence. The actual write is at the NR_PUSCH_PASSIVE_OK branch below.
 
   NR_gNB_ULSCH_t *ulsch = &gnb->ulsch[0];
   ulsch->rnti     = g->rnti;
@@ -1344,6 +1340,18 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
   out->status = NR_PUSCH_PASSIVE_OK;
   out->tb     = hp->b;
   atomic_fetch_add_explicit(&g_crc_ok, 1, memory_order_relaxed);
+  // Reserved-MCS retransmission record (G5 review, gap-harq): only a CRC-verified, non-all-zero TB
+  // (this point, past the ZERO_TB guard above) is strong enough evidence to seed/refresh this
+  // (rnti, pid)'s record. Every UL grant this receiver decodes is dedicated (0_0/0_1 only ever
+  // schedule a C-/TC-RNTI), so there is no SI/RA/P-class table-churn case to guard against here
+  // (unlike the DL twin). A grant that itself USED a stored record (have_ul_init_tx) is a
+  // retransmission, not a fresh resolvable MCS, so it does not refresh the record either.
+  if (!have_ul_init_tx) {
+    pthread_mutex_lock(&g_ul_harq_init_lock);
+    nr_harq_init_tx_record(&g_ul_harq_init, g->rnti, g->harq_pid, g->ndi, pdu.qam_mod_order, g->nrOfLayers,
+                           pdu.maintenance_parms_v3.ldpcBaseGraph, tbs, pdu.target_code_rate);
+    pthread_mutex_unlock(&g_ul_harq_init_lock);
+  }
   nr_pusch_passive_ul_crc_note(g->rnti, g->ul_dci_format == NR_BLIND_UL_DCI_FORMAT_0_1, true);
   if (g->data_id_advance)
     nr_pusch_passive_data_id_feed(true);
@@ -1431,10 +1439,15 @@ void nr_pusch_passive_stats_dump(void)
    * fraction even when nothing is wrong. Quoting only the latter misled the downlink work once. */
   const uint64_t sf = atomic_load_explicit(&g_seg_fail, memory_order_relaxed);
   const uint64_t zt = atomic_load_explicit(&g_zero_tb, memory_order_relaxed);
+  uint64_t init_tx_hits, init_tx_evicts;
+  pthread_mutex_lock(&g_ul_harq_init_lock);
+  init_tx_hits   = g_ul_harq_init.hits;
+  init_tx_evicts = g_ul_harq_init.evicts;
+  pthread_mutex_unlock(&g_ul_harq_init_lock);
   LOG_I(PHY,
         "SENSING: pusch_passive[try=%lu crc_ok=%lu (%.1f%%) seg_fail=%lu zero_tb=%lu (%.1f%%) "
         "ta_refined=%lu uci[trials=%lu rescued=%lu] "
-        "health=%.1f%% unsup=%lu setup_fail=%lu] ul_cfr[submits=%lu re=%lu]\n",
+        "health=%.1f%% unsup=%lu setup_fail=%lu] init_tx[hit=%lu evict=%lu] ul_cfr[submits=%lu re=%lu]\n",
         (unsigned long)t, (unsigned long)k, t ? (100.0 * (double)k / (double)t) : 0.0,
         (unsigned long)sf, (unsigned long)zt, t ? (100.0 * (double)zt / (double)t) : 0.0,
         (unsigned long)atomic_load_explicit(&g_ta_refined, memory_order_relaxed),
@@ -1443,6 +1456,7 @@ void nr_pusch_passive_stats_dump(void)
         (k + sf) ? (100.0 * (double)k / (double)(k + sf)) : 0.0,
         (unsigned long)atomic_load_explicit(&g_rej_unsup, memory_order_relaxed),
         (unsigned long)atomic_load_explicit(&g_rej_setup, memory_order_relaxed),
+        (unsigned long)init_tx_hits, (unsigned long)init_tx_evicts,
         (unsigned long)atomic_load_explicit(&g_cfr_submits, memory_order_relaxed),
         (unsigned long)atomic_load_explicit(&g_cfr_re, memory_order_relaxed));
   if (utim_enabled() && g_utim_n[UTIM_TOTAL] > 0) {
