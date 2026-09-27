@@ -107,7 +107,7 @@ TEST(UlInterpSweepPinned, ReachesAFullTypeBPointTheCuratedCatalogueNeveromits) {
   ASSERT_TRUE(nr_pusch_tda_legal(1, 5, 6));
   std::vector<nr_hyp_t> raw(NR_HYP_SWEEP_MAX_RAW);
   const int n = nr_pdcch_ul_interp_sweep_generate_pinned(raw.data(), raw.size(), 5, 6, 1);
-  ASSERT_EQ(n, 4 /*k2*/ * 2 * 4 * 2 * 2 * 3);
+  ASSERT_EQ(n, 4 /*k2*/ * (2 * 4 * 2 * 3 /*CP*/ + 4 * 2 * 2 /*TP: type1, tables3/4*/));
   for (int i = 0; i < n; i++) {
     nr_pdcch_ul_interp_hyp_t h; memcpy(&h, raw[i].bytes, sizeof(h));
     EXPECT_EQ(h.tda_start, 5);
@@ -131,6 +131,36 @@ TEST(UlInterpSweepPinned, RejectsAnIllegalPin) {
   EXPECT_EQ(nr_pdcch_ul_interp_sweep_generate_pinned(raw.data(), raw.size(), 3, 4, 0), NR_HYP_SWEEP_INVALID);
   // S+L>14 is illegal for either mapping type.
   EXPECT_EQ(nr_pdcch_ul_interp_sweep_generate_pinned(raw.data(), raw.size(), 10, 10, 1), NR_HYP_SWEEP_INVALID);
+}
+
+TEST(UlInterpSweepPinned, TransformPrecodingUsesOnlyType1AndTpMcsTables) {
+  std::vector<nr_hyp_t> raw(NR_HYP_SWEEP_MAX_RAW);
+  const int n = nr_pdcch_ul_interp_sweep_generate_pinned(raw.data(), raw.size(), 5, 6, 1);
+  ASSERT_GT(n, 0);
+  unsigned cp[2][3] = {}, tp[2] = {};
+  unsigned illegal_tp_type = 0, illegal_tp_table = 0, illegal_cp_table = 0;
+  for (int i = 0; i < n; ++i) {
+    nr_pdcch_ul_interp_hyp_t h;
+    memcpy(&h, raw[i].bytes, sizeof(h));
+    if (h.transform_precoding) {
+      illegal_tp_type += h.dmrs_config_type != 0;
+      if (h.mcs_table < 3 || h.mcs_table > 4) ++illegal_tp_table;
+      else ++tp[h.mcs_table - 3];
+    } else {
+      if (h.mcs_table > 2 || h.dmrs_config_type > 1) ++illegal_cp_table;
+      else ++cp[h.dmrs_config_type][h.mcs_table];
+    }
+  }
+  EXPECT_EQ(illegal_tp_type, 0u);
+  EXPECT_EQ(illegal_tp_table, 0u);
+  EXPECT_EQ(illegal_cp_table, 0u);
+  // Every k2/position/maxLength combination reaches both TP tables and all CP tables.
+  for (unsigned count : tp) EXPECT_EQ(count, 4u * 4u * 2u);
+  for (const auto &type : cp)
+    for (unsigned count : type) EXPECT_EQ(count, 4u * 4u * 2u);
+  EXPECT_EQ(n, 256);
+  EXPECT_EQ(nr_pdcch_ul_interp_sweep_generate_pinned(raw.data(), 255, 5, 6, 1), NR_HYP_SWEEP_RAW_OVERFLOW);
+  EXPECT_EQ(nr_pdcch_ul_interp_sweep_generate_pinned(raw.data(), 256, 5, 6, 1), 256);
 }
 
 TEST(UlEnergySpan, RecoversTheOccupiedSpanFromAPeakedProfile) {
@@ -199,7 +229,7 @@ TEST(UlDmrsPin, AmbiguousSpanKeepsBothMappingTypesRatherThanGuessing) {
   // The pinned generator must then produce hypotheses for BOTH mapping types at this (S,L).
   std::vector<nr_hyp_t> raw(NR_HYP_SWEEP_MAX_RAW);
   const int n = nr_pdcch_ul_interp_sweep_generate_pinned(raw.data(), raw.size(), 0, 14, m);
-  ASSERT_EQ(n, 2 * (4 * 2 * 4 * 2 * 2 * 3)); // both mapping types, same per-type count as elsewhere
+  ASSERT_EQ(n, 2 * 256); // both mapping types, same legal CP/TP combinations as the single-map case
   bool saw_a = false, saw_b = false;
   for (int i = 0; i < n; i++) {
     nr_pdcch_ul_interp_hyp_t h; memcpy(&h, raw[i].bytes, sizeof(h));

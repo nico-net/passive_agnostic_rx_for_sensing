@@ -148,8 +148,27 @@ static void nr_ulsch_extract_rbs(c16_t* const rxdataF,
                                  int choffset,
                                  int is_dmrs_symbol,
                                  const nfapi_nr_pusch_pdu_t *pusch_pdu,
-                                 NR_DL_FRAME_PARMS *frame_parms)
+                                 NR_DL_FRAME_PARMS *frame_parms,
+                                 const uint16_t *prb)
 {
+  if (prb) {
+    /* H is packed in allocation order; Y remains on the physical carrier grid.
+     * CDM groups reserve REs irrespective of the selected DM-RS port. */
+    int out = 0;
+    for (int i = 0; i < pusch_pdu->rb_size; ++i) {
+      for (int k = 0; k < NR_NB_SC_PER_RB; ++k) {
+        const int group = pusch_pdu->dmrs_config_type == pusch_dmrs_type1 ? k % 2 : (k % 6) / 2;
+        if (is_dmrs_symbol && group < pusch_pdu->num_dmrs_cdm_grps_no_data)
+          continue;
+        const int physical = (frame_parms->first_carrier_offset
+                              + (pusch_pdu->bwp_start + prb[i]) * NR_NB_SC_PER_RB + k)
+                             % frame_parms->ofdm_symbol_size;
+        rxFext[out] = rxdataF[rxoffset + physical];
+        chFext[out++] = chF[choffset + i * NR_NB_SC_PER_RB + k];
+      }
+    }
+    return;
+  }
   uint8_t delta = 0;
   if (is_dmrs_symbol) {
     uint8_t max_cdm = (pusch_pdu->dmrs_config_type == pusch_dmrs_type1 ? 2 : 3);
@@ -265,7 +284,8 @@ static void inner_rx(PHY_VARS_gNB *gNB,
                      c16_t *chFext_slot,
                      time_stats_t *pusch_extr,
                      time_stats_t *pusch_ch_comp,
-                     time_stats_t *ulsch_llr)
+                     time_stats_t *ulsch_llr,
+                     const uint16_t *prb)
 {
   int nb_layer = rel15_ul->nrOfLayers;
   int nb_rx_ant = rel15_ul->param_v4.numSpatialStreamIndices;
@@ -295,7 +315,8 @@ static void inner_rx(PHY_VARS_gNB *gNB,
                            dmrs_symbol * frame_parms->ofdm_symbol_size,
                            dmrs_symbol_flag, 
                            rel15_ul,
-                           frame_parms);
+                           frame_parms,
+                           prb);
       stop_meas(pusch_extr);
 #if T_TRACER
       // Data Recording application supports only 1 layer and 1 Tx antenna, so only record the first layer and first Tx antenna
@@ -427,6 +448,7 @@ typedef struct puschSymbolProc_s {
   PHY_VARS_gNB *gNB;
   NR_DL_FRAME_PARMS *frame_parms;
   const nfapi_nr_pusch_pdu_t *rel15_ul;
+  const uint16_t *prb;
   NR_gNB_PUSCH *pusch_vars;
   int slot;
   int startSymbol;
@@ -485,7 +507,8 @@ static void nr_pusch_symbol_processing(void *arg)
              rdata->pusch_ch_est_dmrs_interpl_slot_mem,
              &rdata->pusch_extr,
              &rdata->pusch_ch_comp,
-             &rdata->ulsch_llr);
+             &rdata->ulsch_llr,
+             rdata->prb);
 
     int nb_re_pusch = pusch_vars->ul_valid_re_per_slot[symbol];
     for (int u = 0; u < rdata->group_size; u++) {
@@ -561,6 +584,34 @@ static uint32_t average_u32(const uint32_t *x, uint16_t size)
   return (uint32_t)(sum_x / size);
 }
 
+static int nr_rx_pusch_group_internal(PHY_VARS_gNB *, NR_gNB_PUSCH **,
+                                      const nfapi_nr_pusch_pdu_t **, uint32_t **,
+                                      uint8_t, uint32_t, uint8_t, const uint16_t *);
+
+int nr_rx_pusch_prb_list_tp(PHY_VARS_gNB *gNB, NR_gNB_PUSCH *pusch_vars,
+                           const nfapi_nr_pusch_pdu_t *pdu, uint32_t *unav_res,
+                           uint32_t frame, uint8_t slot, const uint16_t *prb, int n_prb)
+{
+  if (!gNB || !pusch_vars || !pdu || !unav_res || !prb || n_prb <= 0
+      || n_prb != pdu->rb_size || n_prb > 275 || pdu->nrOfLayers != 1
+      || pdu->transform_precoding != transformPrecoder_disabled || pdu->frequency_hopping
+      || (pdu->pdu_bit_map & PUSCH_PDU_BITMAP_PUSCH_PTRS)
+      || pdu->param_v4.numSpatialStreamIndices == 0
+      || pdu->dmrs_config_type > pusch_dmrs_type2
+      || pdu->num_dmrs_cdm_grps_no_data == 0
+      || pdu->num_dmrs_cdm_grps_no_data > (pdu->dmrs_config_type == pusch_dmrs_type1 ? 2 : 3))
+    return -1;
+  bool contiguous = true;
+  for (int i = 0; i < n_prb; ++i) {
+    if (prb[i] >= pdu->bwp_size || pdu->bwp_start + prb[i] >= gNB->frame_parms.N_RB_UL
+        || (i && prb[i] <= prb[i - 1]))
+      return -1;
+    contiguous &= prb[i] == pdu->rb_start + i;
+  }
+  return nr_rx_pusch_group_internal(gNB, &pusch_vars, &pdu, &unav_res, 1, frame, slot,
+                                    contiguous ? NULL : prb);
+}
+
 int nr_rx_pusch_group_tp(PHY_VARS_gNB *gNB,
                          NR_gNB_PUSCH **pusch_vars_group,
                          const nfapi_nr_pusch_pdu_t **rel15_ul_group,
@@ -568,6 +619,58 @@ int nr_rx_pusch_group_tp(PHY_VARS_gNB *gNB,
                          uint8_t group_size,
                          uint32_t frame,
                          uint8_t slot)
+{
+  return nr_rx_pusch_group_internal(gNB, pusch_vars_group, rel15_ul_group, ret_unav_res_group,
+                                    group_size, frame, slot, NULL);
+}
+
+/* Each segment's estimator writes allocation-local H and clears the whole symbol.
+ * Save each result before the next call, then publish one packed symbol. Data
+ * demapping and Gold descrambling still run once over the complete allocation. */
+static void estimate_prb_list(PHY_VARS_gNB *gnb, uint8_t slot, int layer, int port,
+                              int dmrs_index, int symbol, NR_gNB_PUSCH *pv, int ant_start,
+                              const nfapi_nr_pusch_pdu_t *pdu, const uint16_t *prb,
+                              int *max_ch, uint32_t *nvar, c16_t *dmrs_trace, c16_t *h_trace)
+{
+  const int nant = pdu->param_v4.numSpatialStreamIndices;
+  const int nsc = pdu->rb_size * NR_NB_SC_PER_RB;
+  const int fft = gnb->frame_parms.ofdm_symbol_size;
+  c16_t packed[nant][nsc];
+  uint64_t noise = 0;
+  delay_t best_delay = {0};
+  for (int first = 0; first < pdu->rb_size;) {
+    int end = first + 1;
+    while (end < pdu->rb_size && prb[end] == prb[end - 1] + 1) ++end;
+    nfapi_nr_pusch_pdu_t part = *pdu;
+    part.rb_start = prb[first];
+    part.rb_size = end - first;
+    const int start_sc = (gnb->frame_parms.first_carrier_offset
+                          + (part.bwp_start + part.rb_start) * NR_NB_SC_PER_RB) % fft;
+    int segment_max = 0;
+    uint32_t segment_noise = 0;
+    nr_pusch_channel_estimation(gnb, slot, layer, port, dmrs_index, symbol, pv, ant_start,
+                                start_sc, &part, &segment_max, &segment_noise, dmrs_trace, h_trace);
+    *max_ch = max(*max_ch, segment_max);
+    noise += (uint64_t)segment_noise * part.rb_size;
+    if (first == 0 || pv->delay.delay_max_val > best_delay.delay_max_val) best_delay = pv->delay;
+    for (int a = 0; a < nant; ++a)
+      memcpy(&packed[a][first * NR_NB_SC_PER_RB],
+             &pv->ul_ch_estimates[layer * nant + a][symbol * fft],
+             part.rb_size * NR_NB_SC_PER_RB * sizeof(c16_t));
+    first = end;
+  }
+  for (int a = 0; a < nant; ++a)
+    memcpy(&pv->ul_ch_estimates[layer * nant + a][symbol * fft], packed[a], nsc * sizeof(c16_t));
+  pv->delay = best_delay;
+  *nvar = noise / pdu->rb_size;
+}
+
+static int nr_rx_pusch_group_internal(PHY_VARS_gNB *gNB,
+                                      NR_gNB_PUSCH **pusch_vars_group,
+                                      const nfapi_nr_pusch_pdu_t **rel15_ul_group,
+                                      uint32_t **ret_unav_res_group,
+                                      uint8_t group_size, uint32_t frame, uint8_t slot,
+                                      const uint16_t *prb)
 {
   // This is a reference pdu since all the UEs in the group have same resource related parameters.
   const nfapi_nr_pusch_pdu_t *rel15_ul_ref = rel15_ul_group[0];
@@ -670,7 +773,11 @@ int nr_rx_pusch_group_tp(PHY_VARS_gNB *gNB,
         for (int nl = 0; nl < p->nrOfLayers; nl++) {
           int global_layer = layer_offset[u] + nl;
           uint32_t nvar_tmp = 0;
-          nr_pusch_channel_estimation(gNB,
+          if (prb) {
+            estimate_prb_list(gNB, slot, global_layer, get_dmrs_port(nl, p->dmrs_ports),
+                              dmrs_symb_idx, symbol, joint_pv, ant_port_start, &joint_pdu,
+                              prb, &max_ch, &nvar_tmp, pusch_dmrs_slot_mem, pusch_ch_est_dmrs_pos_slot_mem);
+          } else nr_pusch_channel_estimation(gNB,
                                       slot,
                                       global_layer,
                                       get_dmrs_port(nl, p->dmrs_ports),
@@ -730,7 +837,15 @@ int nr_rx_pusch_group_tp(PHY_VARS_gNB *gNB,
       int offset0 = ((slot % RU_RX_SLOT_DEPTH) * frame_parms->symbols_per_slot + symbol) * frame_parms->ofdm_symbol_size;
       int offset = offset0 + (frame_parms->first_carrier_offset + start_sc) % frame_parms->ofdm_symbol_size;
       c16_t *ul_ch = &gNB->common_vars.rxdataF[aarx][offset];
-      if (end_sc < start_sc) {
+      if (prb) {
+        c16_t allocated[rel15_ul_ref->rb_size * NR_NB_SC_PER_RB];
+        for (int i = 0; i < rel15_ul_ref->rb_size; ++i)
+          for (int k = 0; k < NR_NB_SC_PER_RB; ++k)
+            allocated[i * NR_NB_SC_PER_RB + k] = gNB->common_vars.rxdataF[aarx][offset0
+              + (frame_parms->first_carrier_offset + (rel15_ul_ref->bwp_start + prb[i]) * NR_NB_SC_PER_RB + k)
+                % frame_parms->ofdm_symbol_size];
+        symb_energy += signal_energy_nodc(allocated, rel15_ul_ref->rb_size * NR_NB_SC_PER_RB);
+      } else if (end_sc < start_sc) {
         int64_t symb_energy_aux = signal_energy_nodc(ul_ch, middle_sc - start_sc) * (middle_sc - start_sc);
         ul_ch = &gNB->common_vars.rxdataF[aarx][offset0];
         symb_energy_aux += (signal_energy_nodc(ul_ch, end_sc + 1) * (end_sc + 1));
@@ -741,8 +856,13 @@ int nr_rx_pusch_group_tp(PHY_VARS_gNB *gNB,
     }
     joint_pv->ulsch_power[aa_pusch] += (symb_energy / rel15_ul_ref->nr_of_symbols);
 
-    joint_pv->ulsch_noise_power[aa_pusch] +=
-        average_u32(&n0_subband_power[aarx][rel15_ul_ref->bwp_start + rel15_ul_ref->rb_start], rel15_ul_ref->rb_size);
+    if (prb) {
+      uint64_t power = 0;
+      for (int i = 0; i < rel15_ul_ref->rb_size; ++i)
+        power += n0_subband_power[aarx][rel15_ul_ref->bwp_start + prb[i]];
+      joint_pv->ulsch_noise_power[aa_pusch] += power / rel15_ul_ref->rb_size;
+    } else joint_pv->ulsch_noise_power[aa_pusch] +=
+          average_u32(&n0_subband_power[aarx][rel15_ul_ref->bwp_start + rel15_ul_ref->rb_start], rel15_ul_ref->rb_size);
 
     LOG_D(NR_PHY,
           "aa %d, bwp_start%d, rb_start %d, rb_size %d: ulsch_power %d, ulsch_noise_power %d\n",
@@ -842,7 +962,8 @@ int nr_rx_pusch_group_tp(PHY_VARS_gNB *gNB,
                            dmrs_symbol * frame_parms->ofdm_symbol_size,
                            (rel15_ul_ref->ul_dmrs_symb_pos >> meas_symbol) & 0x01,
                            &joint_pdu,
-                           frame_parms);
+                           frame_parms,
+                           prb);
       stop_meas(&gNB->pusch_extraction_stats);
     }
 
@@ -934,6 +1055,7 @@ int nr_rx_pusch_group_tp(PHY_VARS_gNB *gNB,
       rdata->gNB = gNB;
       rdata->frame_parms = frame_parms;
       rdata->rel15_ul = &joint_pdu;
+      rdata->prb = prb;
       rdata->slot = slot;
       rdata->startSymbol = symbol;
       // Last task processes remainder symbols
@@ -969,6 +1091,8 @@ int nr_rx_pusch_group_tp(PHY_VARS_gNB *gNB,
   } // symbol loop
 
 #if T_TRACER
+  /* These trace schemas carry a contiguous span, not a physical PRB list. */
+  if (!prb) {
   int dmrs_port = get_dmrs_port(0, rel15_ul_ref->dmrs_ports);
 
   log_ul_fd_dmrs(frame,
@@ -1007,6 +1131,7 @@ int nr_rx_pusch_group_tp(PHY_VARS_gNB *gNB,
       dmrs_port,
       (const c16_t *)pusch_ch_est_dmrs_interpl_slot_mem,
       rel15_ul_ref->rb_size * NR_NB_SC_PER_RB * rel15_ul_ref->nr_of_symbols * num_sp_streams * total_layers * 4);
+  }
 #endif
 
   join_task_ans(&ans);

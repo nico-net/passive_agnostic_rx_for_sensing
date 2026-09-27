@@ -4362,6 +4362,53 @@ int nr_pdcch_blind_ul_fdra_mode_candidates(const nr_pdcch_blind_ul_opts_t *opts,
   return n;
 }
 
+int nr_pdcch_blind_ul_fdra_bundle(const nr_pdcch_blind_ul_opts_t *opts, uint64_t payload,
+                                 uint16_t length, uint16_t rnti, nr_pdcch_blind_ul_result_t *out)
+{
+  if (!opts || !out) return 0;
+  memset(out, 0, sizeof(*out));
+  uint8_t modes[NR_PUSCH_FDRA_MAX_CANDIDATES];
+  nr_pdcch_blind_ul_opts_t trial = *opts;
+  trial.fdra_bwp_start = opts->bwp_start;
+  const int n = nr_pdcch_blind_ul_fdra_mode_candidates(&trial, length, modes, NR_PUSCH_FDRA_MAX_CANDIDATES);
+  for (int i = 0; i < n; ++i) {
+    trial.fdra_mode = modes[i];
+    nr_pdcch_blind_ul_result_t alt;
+    if (!nr_pdcch_blind_extract_01(payload, length, rnti, &trial, &alt)) continue;
+    const int count = out->fdra_candidate_count;
+    if (count == 0) {
+      *out = alt;
+      /* FDRA retries are link evidence, not evidence for the refuted type-1 layout. */
+      out->width_hyp_class = 0;
+    }
+    out->fdra_candidates[count] = (nr_pusch_fdra_allocation_t){
+      .start_rb=alt.start_rb, .num_rb=alt.num_rb, .rbg_bwp_start=alt.rbg_bwp_start,
+      .ra_type0=alt.ra_type0, .rbg_size=alt.rbg_size, .mode=modes[i], .rbg_bitmap=alt.rbg_bitmap};
+    out->fdra_candidate_count = count + 1;
+  }
+  return out->fdra_candidate_count;
+}
+
+int nr_pdcch_blind_ul_fdra_try(const nr_pdcch_blind_ul_result_t *bundle,
+                              bool (*attempt)(void *, const nr_pdcch_blind_ul_result_t *), void *opaque)
+{
+  if (!bundle || !attempt || bundle->fdra_candidate_count > NR_PUSCH_FDRA_MAX_CANDIDATES) return -1;
+  if (!bundle->fdra_candidate_count) return attempt(opaque, bundle) ? 0 : -1;
+  for (int i = 0; i < bundle->fdra_candidate_count; ++i) {
+    nr_pdcch_blind_ul_result_t candidate = *bundle;
+    const nr_pusch_fdra_allocation_t *a = &bundle->fdra_candidates[i];
+    candidate.start_rb = a->start_rb;
+    candidate.num_rb = a->num_rb;
+    candidate.ra_type0 = a->ra_type0;
+    candidate.rbg_size = a->rbg_size;
+    candidate.rbg_bwp_start = a->rbg_bwp_start;
+    candidate.rbg_bitmap = a->rbg_bitmap;
+    candidate.data_id_advance = false;
+    if (attempt(opaque, &candidate)) return i;
+  }
+  return -1;
+}
+
 /// Resolve the PUSCH time-domain allocation. `mu` is the numerology, needed for k2's j offset when
 /// the default table applies. Returns false when the index is past the configured list -- on a
 /// 2-entry list that rejects 14 of 16 code points, which is a strong plausibility check in itself.

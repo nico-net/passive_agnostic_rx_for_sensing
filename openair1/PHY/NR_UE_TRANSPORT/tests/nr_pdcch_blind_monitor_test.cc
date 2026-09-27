@@ -3275,6 +3275,81 @@ TEST_F(BlindPdcchTest, Dci01FdraModeCandidatesNarrowByLengthConsistency) {
   EXPECT_EQ(nr_pdcch_blind_ul_fdra_mode_candidates(&truth, 63, candidates, 4), 0);
 }
 
+#include "nr_passive_ul_grant_book.h"
+
+TEST_F(BlindPdcchTest, Dci01EqualLengthFdraHypothesesSurviveBookUntilCrc) {
+  nr_pdcch_blind_ul_opts_t o{};
+  o.bwp_size = 106;
+  o.fdra_mode = NR_FDRA_DYN_CFG2;
+  o.mcs_table = o.data_scrambling_id = o.ul_dmrs_scrambling_id = -1;
+  o.dmrs_add_pos = o.dmrs_max_length = -1;
+  UlGroundTruth gt;
+  const uint32_t bitmap = 0x22; // dynamic CFG2: RBGs1,5 => PRBs16..31,80..95
+  const uint16_t length = nr_pdcch_blind_dci01_size(&o);
+  const uint64_t payload = PackUlPayloadFdra(gt, o, bitmap, 14);
+  nr_pdcch_blind_ul_result_t bundle{};
+  ASSERT_EQ(nr_pdcch_blind_ul_fdra_bundle(&o, payload, length, gt.rnti, &bundle), 2);
+  EXPECT_EQ(bundle.fdra_candidates[0].mode, NR_FDRA_TYPE0_CFG1);
+  EXPECT_EQ(bundle.fdra_candidates[0].start_rb, 64);
+  EXPECT_EQ(bundle.fdra_candidates[0].num_rb, 16);
+  EXPECT_EQ(bundle.fdra_candidates[1].mode, NR_FDRA_DYN_CFG2);
+  EXPECT_EQ(bundle.fdra_candidates[1].start_rb, 16);
+  EXPECT_EQ(bundle.fdra_candidates[1].num_rb, 32);
+  EXPECT_GE(bundle.width_hyp_class, 0); // a win must never rehabilitate the type-1 oracle
+  bundle.data_id_advance = true;
+  nr_passive_ul_book_t book{};
+  ASSERT_EQ(nr_passive_ul_book_put(&book, &bundle, 20), 1);
+  EXPECT_EQ(nr_passive_ul_book_put(&book, &bundle, 20), 0); // one job, including both allocations
+  nr_passive_ul_book_entry_t entry{};
+  unsigned expired = 0;
+  ASSERT_TRUE(nr_passive_ul_book_take(&book, 20 + bundle.k2, 20, &entry, &expired));
+  EXPECT_FALSE(nr_passive_ul_book_take(&book, 20 + bundle.k2, 20, &entry, &expired));
+  struct Trial { int count = 0; } trial;
+  const int winner = nr_pdcch_blind_ul_fdra_try(&entry.grant,
+      [](void *v, const nr_pdcch_blind_ul_result_t *g) {
+        ++static_cast<Trial *>(v)->count;
+        EXPECT_FALSE(g->data_id_advance); // feedback is once per bundle, after all allocation attempts
+        return g->rbg_size == 16 && g->rbg_bitmap == 0x22;
+      }, &trial);
+  EXPECT_EQ(winner, 1);
+  EXPECT_EQ(trial.count, 2);
+}
+
+TEST_F(BlindPdcchTest, Dci01FdraRetriesAreBoundedAndStopOnlyOnCrcSuccess) {
+  nr_pdcch_blind_ul_result_t bundle{};
+  bundle.fdra_candidate_count = NR_PUSCH_FDRA_MAX_CANDIDATES;
+  int calls = 0;
+  EXPECT_EQ(nr_pdcch_blind_ul_fdra_try(&bundle,
+      [](void *v, const nr_pdcch_blind_ul_result_t *) { ++*static_cast<int *>(v); return false; }, &calls), -1);
+  EXPECT_EQ(calls, NR_PUSCH_FDRA_MAX_CANDIDATES);
+  calls = 0;
+  EXPECT_EQ(nr_pdcch_blind_ul_fdra_try(&bundle,
+      [](void *v, const nr_pdcch_blind_ul_result_t *) { ++*static_cast<int *>(v); return true; }, &calls), 0);
+  EXPECT_EQ(calls, 1);
+  bundle.fdra_candidate_count++;
+  calls = 0;
+  EXPECT_EQ(nr_pdcch_blind_ul_fdra_try(&bundle,
+      [](void *v, const nr_pdcch_blind_ul_result_t *) { ++*static_cast<int *>(v); return true; }, &calls), -1);
+  EXPECT_EQ(calls, 0);
+}
+
+TEST_F(BlindPdcchTest, Dci01DynamicType1BranchIsNotDiscardedWithTheOldType1Layout) {
+  nr_pdcch_blind_ul_opts_t o{};
+  o.bwp_size = 106;
+  o.fdra_mode = NR_FDRA_DYN_CFG2;
+  o.mcs_table = o.data_scrambling_id = o.ul_dmrs_scrambling_id = -1;
+  o.dmrs_add_pos = o.dmrs_max_length = -1;
+  UlGroundTruth gt;
+  const uint32_t field = (1u << 13) | (106 * 3 + 2); // dynamic RIV: four PRBs starting at2
+  nr_pdcch_blind_ul_result_t bundle{};
+  ASSERT_EQ(nr_pdcch_blind_ul_fdra_bundle(&o, PackUlPayloadFdra(gt, o, field, 14),
+                                         nr_pdcch_blind_dci01_size(&o), gt.rnti, &bundle), 2);
+  EXPECT_EQ(bundle.fdra_candidates[1].mode, NR_FDRA_DYN_CFG2);
+  EXPECT_EQ(bundle.fdra_candidates[1].ra_type0, 0);
+  EXPECT_EQ(bundle.fdra_candidates[1].start_rb, 2);
+  EXPECT_EQ(bundle.fdra_candidates[1].num_rb, 4);
+}
+
 TEST_F(BlindPdcchTest, Dci01ExtractRaType0BitmapProducesTheCorrectPrbList) {
   nr_pdcch_blind_ul_opts_t o = {};
   o.bwp_start = 0;

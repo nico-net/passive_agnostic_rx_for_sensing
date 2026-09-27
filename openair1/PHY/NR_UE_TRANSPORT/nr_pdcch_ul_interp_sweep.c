@@ -84,17 +84,21 @@ int nr_pdcch_ul_interp_sweep_generate_pinned(nr_hyp_t *out, int cap, int S, int 
       for (int type = 0; type < 2; ++type)
         for (int pos = 0; pos < 4; ++pos)
           for (int max = 1; max <= 2; ++max)
-            for (int tp = 0; tp < 2; ++tp)
-              for (int mcs = 0; mcs < 3; ++mcs) {
+            for (int tp = 0; tp < 2; ++tp) {
+              /* Final CP/DFT-s-OFDM table indices consumed by the UL PHY:
+               * TP uses DM-RS type 1 and the final UL MCS table indices 3/4. */
+              if (tp && type != 0) continue;
+              for (int mcs = 0; mcs < (tp ? 2 : 3); ++mcs) {
                 if (n == cap || n == NR_HYP_SWEEP_MAX_RAW) {
                   LOG_E(PHY, "UL pinned interpretation search refused: raw cap exceeded\n");
                   return NR_HYP_SWEEP_RAW_OVERFLOW;
                 }
                 nr_pdcch_ul_interp_hyp_t h = {(uint8_t)S, (uint8_t)L, (uint8_t)maps[mi], (uint8_t)k2,
-                                              type, pos, max, tp, mcs};
+                                              type, pos, max, tp, tp ? 3 + mcs : mcs};
                 out[n] = (nr_hyp_t){.len = sizeof(h)};
                 memcpy(out[n++].bytes, &h, sizeof(h));
               }
+            }
   return n;
 }
 
