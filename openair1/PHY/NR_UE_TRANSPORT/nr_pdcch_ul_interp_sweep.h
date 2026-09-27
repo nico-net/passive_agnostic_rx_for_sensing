@@ -39,8 +39,9 @@ int nr_pdcch_ul_interp_sweep_generate(nr_hyp_t *, int);
  * see nr_pusch_ul_energy_span()/nr_pusch_ul_dmrs_pin_set() below. The curated catalogue above tries
  * only (0,14),(0,7) type A and (2,12),(0,4) type B because the FULL legal set (11 type A + 105 type
  * B) x k2{1..4} x the 96 field combinations overflows NR_HYP_SWEEP_MAX_RAW with no oracle to prune
- * it first; once (S,L,mapping) is pinned that product collapses to k2{1..4} x 96 = 384, so the WHOLE
- * type-B (S,L) plane becomes reachable. ---- */
+ * it first; once (S,L,mapping) is pinned the legal CP/TP combinations collapse to 256 hypotheses
+ * per mapping type (TP requires type-1 DM-RS and UL MCS table 3 or 4), so the WHOLE type-B (S,L)
+ * plane becomes reachable. ---- */
 /** mapping_type value for nr_pdcch_ul_interp_sweep_generate_pinned()/the pin: S=0 does NOT
  *  determine mapping type by itself -- type A requires S=0 AND L>=4, but type B is ALSO legal at
  *  S=0 for any L with S+L<=14 (TS 38.214 Table 6.1.2.1-1), so an (S,L) with S=0 and L>=4 is legal
