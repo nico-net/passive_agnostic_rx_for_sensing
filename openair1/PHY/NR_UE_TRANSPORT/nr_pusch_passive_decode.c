@@ -1100,8 +1100,14 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
    * remaining space once stage 1 exhausts itself without deciding), stage-2 accumulate throttled
    * (same ~64x-cost argument, same throttle constant). */
   /* Final review I2/I5: DCI 0_1 grants only (a 0_0 uses N_ID^cell, see blind_ul_apply_scrambling_ids()),
-   * and the two-window driver (stage 1 always on, stage 2 throttled + capped, all work stops once decided). */
-  if (nr_pusch_passive_queue_running() && g->ul_dci_format == NR_BLIND_UL_DCI_FORMAT_0_1 && g->dmrs_config_type == 0
+   * and the two-window driver (stage 1 always on, stage 2 throttled + capped, all work stops once decided).
+   * dmrs_config_type is no longer restricted to type 1: nr_dmrs_id_2stage_accumulate()/
+   * nr_dmrs_id_accumulate() now take the type and generate the matching reference sequence/RE
+   * pattern for both (dmrs_nr.c already supported type 2 generation; this estimator's own RE
+   * stepping was the part that was type-1-only). transform_precoding stays excluded: low-PAPR
+   * DM-RS uses a different sequence generator (nr_pusch_lowpaprtype1_dmrs_rx) this probe never
+   * calls, a separate gap. */
+  if (nr_pusch_passive_queue_running() && g->ul_dci_format == NR_BLIND_UL_DCI_FORMAT_0_1
       && !g->transform_precoding && nr_dmrs_id_2stage_decided(nr_pusch_passive_ul_dmrs_id(g->nscid)) < 0) {
     const int ul_ns = g->nscid & 1;
     bool was_init = false;
@@ -1117,7 +1123,8 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
         const c16_t *row = &gnb->common_vars.rxdataF[0][slot_off + dsym * fp->ofdm_symbol_size];
         const int start_sc = fp->first_carrier_offset + (g->bwp_start + g->start_rb) * NR_NB_SC_PER_RB;
         nr_dmrs_id_2stage_accumulate(dst, row, fp->ofdm_symbol_size, start_sc, g->bwp_start + g->start_rb, g->num_rb,
-                                     fp->N_RB_UL, fp->symbols_per_slot, slot, dsym, g->nscid, fp->Ncp == NR_NORMAL);
+                                     fp->N_RB_UL, fp->symbols_per_slot, slot, dsym, g->nscid, fp->Ncp == NR_NORMAL,
+                                     g->dmrs_config_type);
       }
       nr_pusch_passive_ul_dmrs_unlock(ul_ns);
     }

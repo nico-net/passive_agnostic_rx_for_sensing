@@ -1096,9 +1096,13 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
          * gating this on `crc` would be circular: under a wrong id the CRC never passes, so the
          * identity that would explain the failures could never be measured.
          * Only DEDICATED-class grants (final review I2): SIB1/RAR/paging/TC/CSS-fallback DM-RS is
-         * scrambled with N_ID^cell, and mixing it in would average two different identities. */
+         * scrambled with N_ID^cell, and mixing it in would average two different identities.
+         * dmrsConfigType is no longer restricted to type 1 here either -- forced by the shared
+         * estimator's signature change (nr_pdcch_gap_dmrs2 fix), and left inconsistent with type 1
+         * would just move this same gap one file over. See nr_pusch_passive_decode.c's UL twin of
+         * this comment for the full reasoning. */
         const int dl_ns = pdu->nscid & 1;
-        if (job.grant.scr_dedicated && pr_nrb > 0 && pdu->dmrsConfigType == 0 && pdu->dlDmrsSymbPos
+        if (job.grant.scr_dedicated && pr_nrb > 0 && pdu->dlDmrsSymbPos
             && nr_dmrs_id_2stage_decided(&g_dl_dmrs_id[dl_ns]) < 0 && pthread_mutex_trylock(&g_dl_dmrs_id_lock[dl_ns]) == 0) {
           nr_dmrs_id_2stage_t *dst = &g_dl_dmrs_id[dl_ns];
           if (!g_dl_dmrs_id_init[dl_ns]) { nr_dmrs_id_2stage_init(dst, "PDSCH", ue->frame_parms.Nid_cell); g_dl_dmrs_id_init[dl_ns] = true; }
@@ -1109,7 +1113,7 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
           const int start_sc  = fp->first_carrier_offset + (pdu->BWPStart + pr_rb0) * 12;
           nr_dmrs_id_2stage_accumulate(dst, &rxdataF[0][sym * fp->ofdm_symbol_size], fp->ofdm_symbol_size, start_sc,
                                        rb_offset, pr_nrb, fp->N_RB_DL, fp->symbols_per_slot, job.nr_slot_rx, sym,
-                                       pdu->nscid, fp->Ncp == NR_NORMAL);
+                                       pdu->nscid, fp->Ncp == NR_NORMAL, pdu->dmrsConfigType);
           pthread_mutex_unlock(&g_dl_dmrs_id_lock[dl_ns]);
         }
         /* Data (PDSCH) scrambling identity: feed the outcome back to the per-RNTI sweep the wiring

@@ -3993,9 +3993,6 @@ bool nr_pdcch_blind_extract_11(const nr_pdcch_blind_raw_result_t *raw,
     out->reject_reason = "format indicator=0 (UL grant, not a PDSCH DCI)";
     return false;
   }
-  /* 4-bit field: Table 7.3.1.2.2-1 (type 1, maxLength 1). 5-bit field: Table -2 (type 1, maxLength 2),
-   * whose code point also fixes the DM-RS symbol count. Type 2 (5/6 bits, Tables -3/-4) is not
-   * decoded: rejected as out of range, so a type-2 hypothesis never produces a grant. */
   /* Table by (field width, DM-RS type): 4 bits = type 1 len 1 (-1); 5 bits = type 1 len 2 (-2) or
    * type 2 len 1 (-3), told apart by the DM-RS type hypothesis; 6 bits = type 2 len 2 (-4). */
   const int dmrs_t2 = (opts != NULL && opts->dmrs_config_type == 1);
@@ -4494,32 +4491,42 @@ static bool blind_ul_finish(const nr_pdcch_blind_ul_opts_t* opts,
     return false;
   }
 
-  // Antenna ports -> (CDM groups without data, port bitmask). Closed form rather than a table,
-  // copied from mac_tables.c's ul_ports_config() for the transform-precoder-disabled / dmrs-type1 /
-  // maxLength1 / rank-1 case (TS 38.212 Table 7.3.1.1.2-8), which is the only combination this
-  // deployment produces. Verified against the live gNB 2026-08-25: it logs `ant=2` on every UL DCI
-  // and dumps `num_dmrs_cdm_grps_no_data=2 dmrs_ports=1`, which is exactly what val=2 gives here.
-  /* `antenna_ports` is a RAW payload field, and the width sweep tries 2..5 bits for it, so values
-   * up to 31 reach this point. The closed form below is defined ONLY over Table 7.3.1.1.2-8's four
-   * rows (transform precoder disabled, DM-RS type 1, maxLength 1, rank 1) -- the sole combination
-   * this path supports and the only one its caller emits. Outside that domain it produces nonsense.
-   * Measured 2026-09-09: antenna_ports=14 yields 1u<<12, a port bitmap with no port below 12, which
-   * AssertFatal()s inside get_dmrs_port() ("No dmrs port corresponding to layer 0 found") and
-   * killed the entire softmodem mid-capture. Values above 17 are worse still -- they truncate to 0
-   * in a uint16_t and read silently as "DCI 1_0, port 0".
-   * A blind decoder must REJECT a code point it cannot interpret, never abort and never guess. */
-  if (antenna_ports > 3) {
-    out->reject_reason = "antenna-ports code point outside Table 7.3.1.1.2-8's four rows";
-    return false;
-  }
+  // Antenna ports -> (CDM groups without data, port bitmask). Was a closed form defined ONLY over
+  // Table 7.3.1.1.2-8's four rows (transform precoder disabled, DM-RS type 1, maxLength 1, rank 1),
+  // which rejected every DM-RS-type-2 hypothesis as "antenna-ports code point outside Table
+  // 7.3.1.1.2-8's four rows" before it could ever be evaluated -- the whole reason a type-2 cell
+  // produced zero UL grants. Replaced by decode_dci_antenna_ports_val() (nr_mac_common.c), the same
+  // reverse-table lookup mac_tables.c's ul_ports_config() uses for an attached UE's own PUSCH: it
+  // already covers DM-RS type 1 AND type 2, both maxLength values, ranks 1-4, and bounds `val`
+  // against the real table size itself (no separate range guard needed here). Verified against the
+  // live gNB 2026-08-25 for the type-1/rank-1 case this deployment produces: it logs `ant=2` on
+  // every UL DCI and dumps `num_dmrs_cdm_grps_no_data=2 dmrs_ports=1`, which is exactly what val=2
+  // still gives via the reverse table.
+  //
+  // `antenna_ports` is a RAW payload field, and the width sweep tries 2..5 bits for it, so values
+  // up to 31 reach this point; decode_dci_antenna_ports_val() returns -1 (rejected) for any value
+  // its table doesn't define, which is what prevents the AssertFatal-in-get_dmrs_port() landmine
+  // (measured 2026-09-09: antenna_ports=14 under the OLD closed form yielded 1u<<12, a port bitmap
+  // with no port below 12) -- a blind decoder must REJECT a code point it cannot interpret, never
+  // abort and never guess, and the reverse table's own bounds check gives that for free.
   uint8_t  cdm_groups;
   uint16_t ports;
   if (opts->transform_precoding == 1) {
+    // Transform-precoded (DFT-s-OFDM) low-PAPR sequences: out of scope (see nr_pdcch_ul_discovery.c's
+    // supported() gate, which never lets a transform_precoding=1 hypothesis reach here). Left as the
+    // original closed form rather than reused/removed, since it is unreachable and untouched by the
+    // DM-RS-type fix above.
     cdm_groups = 2;
     ports      = (uint16_t)(1u << antenna_ports);
   } else if (nrOfLayers <= 1) {
-    cdm_groups = (antenna_ports > 1) ? 2 : 1;
-    ports      = (uint16_t)(1u << ((antenna_ports > 1) ? (antenna_ports - 2) : antenna_ports));
+    long dmrs_type2 = 1;
+    const long *dmrs_type_arg = (opts->dmrs_config_type > 0) ? &dmrs_type2 : NULL;
+    int front_load = 0;
+    if (decode_dci_antenna_ports_val((uint8_t)nrOfLayers, dmrs_type_arg, NR_PUSCH_Config__transformPrecoder_disabled,
+                                     (uint8_t)antenna_ports, &cdm_groups, &ports, &front_load) != 0) {
+      out->reject_reason = "antenna-ports code point outside its DM-RS-type/rank reverse table";
+      return false;
+    }
   } else {
     // Multi-layer UL is out of scope: this deployment schedules num_layers=1 and the passive
     // receiver has no way to separate UE layers it was not precoded for. Reject rather than
