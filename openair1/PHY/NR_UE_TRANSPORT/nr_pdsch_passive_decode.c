@@ -57,6 +57,7 @@ extern __thread int nr_dlsch_chest_per_symbol; // nr_dlsch_demodulation.c: read 
 #include "nr_agnostic_v2.h"
 #include "nr_pdsch_prb_set.h" // nr_prb_segments, nr_prb_gather_index (non-contiguous PRB sets)
 #include "nr_arm_sweep.h" // generic per-RNTI Wilson pick/latch core shared by the VRB-L and PRG sweeps
+#include "nr_harq_init_tx.h" // per-(RNTI, pid) reserved-MCS retransmission record, shared with the UL decoder
 _Static_assert(sizeof(((freq_alloc_bitmap_t *)0)->prb_list) == NR_PRB_SET_MAX * sizeof(uint16_t),
                "freq_alloc_bitmap_t.prb_list (common/utils/bits.h) must hold NR_PRB_SET_MAX PRBs");
 #include "common/utils/threadPool/task_ans.h" // init_task_ans/join_task_ans/completed_task_ans, for the per-antenna FEP dispatch below
@@ -302,6 +303,14 @@ static _Atomic uint64_t g_mcs_segs[32], g_mcs_segs_ok[32], g_mcs_tbs[32], g_mcs_
 static _Atomic uint64_t g_rv_try[4][32], g_rv_ok[4][32]; // ISAC_RV_RETRY rescues by [rv][mcs]
 /* V2 HARQ soft-combining and PT-RS sweep state, declared here so the periodic report can read it. */
 static _Atomic uint64_t g_hq_retx_try, g_hq_retx_ok, g_hq_tbs_override, g_hq_busy_skip, g_hq_first;
+/* g_harqc's own lock (harqc_entry_t/g_harqc are declared further down, next to their only other
+ * users) and the reserved-MCS retransmission record (gap-harq lane) that shares it -- both declared
+ * this early, alongside the harqc counters above, for the SAME reason: nr_pdsch_passive_ldpc_stats_
+ * dump() (right below) is defined before harqc_entry_t and must be able to read g_dl_harq_init's
+ * hit/evict counts under the same lock. See nr_harq_init_tx.h for why TBS/base-graph (not
+ * modulation order) is the field a reserved MCS cannot supply on its own. */
+static pthread_mutex_t g_harqc_lock = PTHREAD_MUTEX_INITIALIZER;
+static nr_harq_init_tx_table_t g_dl_harq_init;
 static pthread_mutex_t g_ptrs_lock = PTHREAD_MUTEX_INITIALIZER;
 static _Atomic int g_ptrs_arm_last = -2; // for the report
 static _Atomic int g_lbrm_nl = 4;        // TBS_LBRM layer term n_L, CELL-WIDE seed (4 = spec ceiling), see rnti_dec()
@@ -814,10 +823,16 @@ void nr_pdsch_passive_ldpc_stats_dump(void)
       LOG_I(PHY, "SENSING: RVRETRY rescued/tried by mcs: %s\n", rb);
   }
   if (nr_agnostic_v2()) {
-    LOG_I(PHY, "SENSING: HARQC first=%lu retx_combined=%lu/%lu tbs_from_first=%lu busy_skip=%lu | rv census mcs<24 [%lu %lu %lu %lu] mcs>=24 [%lu %lu %lu %lu] | lbrm n_L=%d try/ok 4:%lu/%lu 2:%lu/%lu 1:%lu/%lu | llr_norm shift0..4 [%lu %lu %lu %lu %lu]\n",
+    uint64_t init_tx_hits, init_tx_evicts;
+    pthread_mutex_lock(&g_harqc_lock);
+    init_tx_hits   = g_dl_harq_init.hits;
+    init_tx_evicts = g_dl_harq_init.evicts;
+    pthread_mutex_unlock(&g_harqc_lock);
+    LOG_I(PHY, "SENSING: HARQC first=%lu retx_combined=%lu/%lu tbs_from_first=%lu busy_skip=%lu | init_tx hit=%lu evict=%lu | rv census mcs<24 [%lu %lu %lu %lu] mcs>=24 [%lu %lu %lu %lu] | lbrm n_L=%d try/ok 4:%lu/%lu 2:%lu/%lu 1:%lu/%lu | llr_norm shift0..4 [%lu %lu %lu %lu %lu]\n",
           (unsigned long)atomic_load(&g_hq_first), (unsigned long)atomic_load(&g_hq_retx_ok),
           (unsigned long)atomic_load(&g_hq_retx_try), (unsigned long)atomic_load(&g_hq_tbs_override),
           (unsigned long)atomic_load(&g_hq_busy_skip),
+          (unsigned long)init_tx_hits, (unsigned long)init_tx_evicts,
           (unsigned long)atomic_load(&g_rv_census[0][0]), (unsigned long)atomic_load(&g_rv_census[0][1]),
           (unsigned long)atomic_load(&g_rv_census[0][2]), (unsigned long)atomic_load(&g_rv_census[0][3]),
           (unsigned long)atomic_load(&g_rv_census[1][0]), (unsigned long)atomic_load(&g_rv_census[1][1]),
@@ -1016,7 +1031,9 @@ typedef struct {
   size_t cap;
 } harqc_entry_t;
 static harqc_entry_t g_harqc[NR_HARQC_N];
-static pthread_mutex_t g_harqc_lock = PTHREAD_MUTEX_INITIALIZER;
+/* g_harqc_lock and g_dl_harq_init (the reserved-MCS retransmission record that shares this lock)
+ * are declared much earlier in this file, alongside g_hq_first and friends -- see the comment
+ * there for why. */
 static uint64_t g_harqc_clock;
 static __thread struct { int armed; uint16_t rnti; uint8_t pid, ndi; } t_hq;
 static __thread int16_t *t_hq_d = NULL;
@@ -1672,22 +1689,43 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
   cw->new_data_indicator = true;
   cw->qamModOrder = nr_get_Qm_dl(grant->mcs, grant->mcs_table);
   const uint32_t R = nr_get_code_rate_dl(grant->mcs, grant->mcs_table);
-  if (cw->qamModOrder == 0 || R == 0) {
-    // MCS 28-31 (reserved-for-retransmission rows) have no modulation order/code rate of their own:
-    // a real UE takes them from the initial transmission. A passive receiver has no such history,
-    // so such a grant is simply not decodable here. nr_pdcch_blind_decode_and_extract() already
-    // rejects those, so reaching this means the MCS table assumption is wrong.
-    { static _Atomic unsigned long c_ = 0;
-      const unsigned long n_ = atomic_fetch_add_explicit(&c_, 1, memory_order_relaxed) + 1;
-      if (n_ == 1 || (n_ % 200) == 0)
-        LOG_A(PHY, "SENSING: PDSCH UNSUP@1423 n=%lu\n", n_); }
-    return out->status;
-  }
   const uint8_t nb_re_dmrs = get_num_dmrs_re_per_rb(dlsch_config->dmrsConfigType, dlsch_config->n_dmrs_cdm_groups);
   const uint16_t dmrs_len  = get_num_dmrs(dlsch_config->dlDmrsSymbPos);
-  cw->targetCodeRate = (uint16_t)R;
-  cw->TBS = nr_compute_tbs(cw->qamModOrder, (uint16_t)R, freq_alloc->num_rbs, dlsch_config->number_symbols,
-                           nb_re_dmrs * dmrs_len, grant->nb_rb_oh, grant->tb_scaling, cw->Nl);
+  // MCS 28-31 (reserved-for-retransmission rows) have no code rate of their own (their modulation
+  // order, from cw->qamModOrder above, IS already correct -- the spec table encodes it directly,
+  // e.g. Table_51311[29..31] = {2,0},{4,0},{6,0}). TS 38.214 5.1.3.1: the UE reuses the TBS and
+  // base graph of the initial transmission of this HARQ process. nr_harq_init_tx.h is that record,
+  // keyed by (RNTI, HARQ pid) and gated on the NDI not having toggled since it was taken; a miss
+  // means the true initial transmission was never observed and the grant stays refused, as before.
+  nr_harq_init_tx_t init_tx = {0};
+  bool have_init_tx = false;
+  if (cw->qamModOrder == 0 || R == 0) {
+    pthread_mutex_lock(&g_harqc_lock);
+    have_init_tx = nr_harq_init_tx_lookup(&g_dl_harq_init, grant->rnti, grant->harq_pid, grant->ndi, &init_tx);
+    pthread_mutex_unlock(&g_harqc_lock);
+    if (!have_init_tx) {
+      { static _Atomic unsigned long c_ = 0;
+        const unsigned long n_ = atomic_fetch_add_explicit(&c_, 1, memory_order_relaxed) + 1;
+        if (n_ == 1 || (n_ % 200) == 0)
+          LOG_A(PHY, "SENSING: PDSCH UNSUP@1423 n=%lu\n", n_); }
+      return out->status;
+    }
+    if (init_tx.nl != cw->Nl) {
+      // Layer count is this grant's OWN antenna-ports field, not replayed from the record: it
+      // decides how the transmitter mapped RE-to-layer THIS occasion, which the DM-RS ports of
+      // THIS DCI already reflect. A mismatch is merely logged -- it does not by itself mean the
+      // record is wrong, since the spec permits a retransmission to use a different layer count.
+      static _Atomic unsigned long c_ = 0;
+      const unsigned long n_ = atomic_fetch_add_explicit(&c_, 1, memory_order_relaxed) + 1;
+      if (n_ == 1 || (n_ % 200) == 0)
+        LOG_W(PHY, "SENSING: PDSCH reserved-MCS retx rnti=0x%04x pid=%u layer count changed %u->%u\n",
+              grant->rnti, grant->harq_pid, init_tx.nl, cw->Nl);
+    }
+  }
+  cw->targetCodeRate = have_init_tx ? (uint16_t)init_tx.code_rate : (uint16_t)R;
+  cw->TBS = have_init_tx ? init_tx.tbs
+                        : nr_compute_tbs(cw->qamModOrder, (uint16_t)R, freq_alloc->num_rbs, dlsch_config->number_symbols,
+                                         nb_re_dmrs * dmrs_len, grant->nb_rb_oh, grant->tb_scaling, cw->Nl);
   if (cw->TBS == 0) {
     { static _Atomic unsigned long c_ = 0;
       const unsigned long n_ = atomic_fetch_add_explicit(&c_, 1, memory_order_relaxed) + 1;
@@ -1695,7 +1733,13 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
         LOG_A(PHY, "SENSING: PDSCH UNSUP@1431 n=%lu\n", n_); }
     return out->status;
   }
-  cw->ldpcBaseGraph = get_BG(cw->TBS, cw->targetCodeRate);
+  cw->ldpcBaseGraph = have_init_tx ? init_tx.bg : get_BG(cw->TBS, cw->targetCodeRate);
+  // The record write itself is deferred to the TB CRC outcome (G5 review, gap-harq): recording here,
+  // right after these parameters are merely COMPUTED and before any decode is attempted, let a single
+  // blind DCI false-accept (a random payload whose CRC happened to mask to an in-range RNTI, same
+  // residual risk the mismatched-bits gate exists for) seed a bogus (rnti, pid, ndi) record that a
+  // LATER, genuine reserved-MCS grant on that same process would then trust. Only a CRC-verified TB
+  // is strong enough evidence -- see the write site at the CRC_OK branch below.
   dlsch_config->n_codewords = 1;
   /* TBS_LBRM's layer term is n_L = min(maxMIMO-LayersPDSCH, 4) -- the UE's CAPABILITY (TS 38.212
    * 5.4.2.1), NOT the rank of this particular grant. It was hardcoded to 1, which is wrong for any
@@ -3540,6 +3584,20 @@ gpu_llr_ready:;
     if (ldpc_ok) {
       out->status = NR_PDSCH_PASSIVE_DECODE_CRC_OK;
       out->tb     = g_harq.b;
+      // Reserved-MCS retransmission record (G5 review, gap-harq): only a CRC-VERIFIED TB is strong
+      // enough evidence to seed/refresh this (rnti, pid)'s record -- see the computation site's
+      // comment for why recording on mere "the MCS was resolvable" was not. SI-/RA-/P-RNTI grants
+      // never carry a real NDI/HARQ-pid field and can never reach the reserved-MCS lookup at all
+      // (format 1_0 keeps a hard reject for them), so recording them would only churn the table
+      // with unusable entries. A grant that itself USED a stored record (have_init_tx) is a
+      // retransmission, not a fresh resolvable MCS, so it does not refresh the record either --
+      // only the genuinely resolvable grant that established have_init_tx=false does.
+      if (!have_init_tx && rnti_sweepable(grant->rnti, grant->rnti_class)) {
+        pthread_mutex_lock(&g_harqc_lock);
+        nr_harq_init_tx_record(&g_dl_harq_init, grant->rnti, grant->harq_pid, grant->ndi, cw->qamModOrder, cw->Nl,
+                               cw->ldpcBaseGraph, cw->TBS, cw->targetCodeRate);
+        pthread_mutex_unlock(&g_harqc_lock);
+      }
     } else {
       out->status = NR_PDSCH_PASSIVE_DECODE_CRC_FAIL;
     }

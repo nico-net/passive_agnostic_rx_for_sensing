@@ -1307,10 +1307,18 @@ TEST_F(BlindPdcchTest, Dci10RejectsATdaIndexBeyondTheList) {
   EXPECT_NE(std::string(out.reject_reason).find("TDRA"), std::string::npos);
 }
 
-TEST_F(BlindPdcchTest, Dci10RejectsTheReservedMcsRange) {
+TEST_F(BlindPdcchTest, Dci10CrntiAcceptsTheReservedMcsRangeAsAPossibleRetransmission) {
   // Format 1_0 always indexes Table 5.1.3.1-1, where 0..28 are valid and 29..31 are reserved. Note
   // this bound differs from the format 1_1 path's >=28, which is table 2's -- see the comment at
   // that check for why the two are deliberately different rather than inconsistent.
+  //
+  // gap-harq lane: a reserved codepoint on a C-/TC-RNTI grant is no longer a hard reject at
+  // extraction -- TS 38.214 5.1.3.1 defines it as "same modulation order and TBS as the initial
+  // transmission of the same HARQ process", which the passive decoder may be able to resolve from
+  // its own per-(RNTI, pid) record (nr_harq_init_tx.h). Renamed from
+  // Dci10RejectsTheReservedMcsRange, whose whole premise (a reserved MCS is always rejected here)
+  // this fix overturns; Dci10RaRntiRejectsTheReservedMcsRange below pins that the invariant still
+  // holds for the RNTI classes that have no NDI/HARQ-pid field to key a retransmission on.
   const uint16_t bwp = 273;
   const uint16_t len = nr_pdcch_blind_dci10_size(bwp);
   auto opts = OptsWithTdaLists();
@@ -1324,10 +1332,37 @@ TEST_F(BlindPdcchTest, Dci10RejectsTheReservedMcsRange) {
   EXPECT_TRUE(nr_pdcch_blind_decode_and_extract_10(ok.data(), kAggregationLevel, len, &ctx, 0x0001, 0xFFEF,
                                                    &opts, &out))
       << (out.reject_reason ? out.reject_reason : "");
+  gt.mcs = 29; // reserved, but a C-RNTI grant is now let through -- decodability is decided downstream
+  auto retx = EncodeToLLR(PackDci10Crnti(gt, RivBitsFor(bwp)), 0x4601, len, kAggregationLevel, 40.0, rng_);
+  EXPECT_TRUE(nr_pdcch_blind_decode_and_extract_10(retx.data(), kAggregationLevel, len, &ctx, 0x0001, 0xFFEF,
+                                                   &opts, &out))
+      << (out.reject_reason ? out.reject_reason : "");
+  EXPECT_EQ(out.mcs, 29);
+}
+
+TEST_F(BlindPdcchTest, Dci10RaRntiRejectsTheReservedMcsRange) {
+  // RA-RNTI (and SI-/P-RNTI, same field layout) never carries a real NDI/HARQ-pid -- dci10_parse
+  // does not even read those fields for this class -- so there is no retransmission this receiver
+  // could key on, and the reserved codepoint stays an invariant TS 38.214 5.1.3.1 never assigns to
+  // this class in the first place.
+  const uint16_t cset0 = 48;
+  const int      riv_bits = RivBitsFor(cset0);
+  const uint16_t len = nr_pdcch_blind_dci10_size(cset0);
+  auto opts = OptsWithTdaLists();
+
+  Dci10Gt gt;
+  gt.riv = 100;
   gt.mcs = 29; // reserved
-  auto bad = EncodeToLLR(PackDci10Crnti(gt, RivBitsFor(bwp)), 0x4601, len, kAggregationLevel, 40.0, rng_);
-  EXPECT_FALSE(nr_pdcch_blind_decode_and_extract_10(bad.data(), kAggregationLevel, len, &ctx, 0x0001, 0xFFEF,
+  const uint64_t payload = PackDci10Ra(gt, riv_bits);
+  auto llr = EncodeToLLR(payload, 0x0011, len, kAggregationLevel, 40.0, rng_);
+
+  auto ctx = Dci10Ctx(NR_BLIND_SS_COMMON, cset0);
+  ctx.rnti_class_mask = 1u << NR_BLIND_RNTI_CLASS_RA; // isolate the class under test
+  nr_pdcch_blind_result_t out;
+  EXPECT_FALSE(nr_pdcch_blind_decode_and_extract_10(llr.data(), kAggregationLevel, len, &ctx, 0x0001, 0xFFEF,
                                                     &opts, &out));
+  ASSERT_NE(out.reject_reason, nullptr);
+  EXPECT_NE(std::string(out.reject_reason).find("reserved"), std::string::npos);
 }
 
 TEST_F(BlindPdcchTest, Dci10SizeAlignmentPaddingIsCheckedForZero) {
@@ -1830,15 +1865,21 @@ TEST_F(BlindPdcchTest, Dci01RejectsANonZeroPrecodingCodePoint) {
   ASSERT_NE(out.reject_reason, nullptr);
 }
 
-TEST_F(BlindPdcchTest, Dci01RejectsTheReservedUlMcsRange) {
+TEST_F(BlindPdcchTest, Dci01AcceptsTheReservedUlMcsRangeAsAPossibleRetransmission) {
+  // gap-harq lane: format 0_0/0_1 always schedules a C-/TC-RNTI with a real NDI/HARQ-pid field, so
+  // a reserved codepoint (TS 38.214 6.1.4.1: "same modulation order and TBS as the initial
+  // transmission") is no longer a hard reject here -- the passive UL decoder may be able to resolve
+  // it from its own per-(RNTI, pid) record (nr_harq_init_tx.h). Renamed from
+  // Dci01RejectsTheReservedUlMcsRange, whose premise this fix overturns.
   nr_pdcch_blind_ul_opts_t o = LiveUlOpts(); // mcs_table = 0 (qam64) -> 28..31 reserved
   const uint16_t len = nr_pdcch_blind_dci01_size(&o);
   UlGroundTruth gt;
   gt.mcs = 29;
   auto llr = EncodeToLLR(PackUlPayload(gt, o), gt.rnti, len, kAggregationLevel, 40.0, rng_);
   nr_pdcch_blind_ul_result_t out;
-  EXPECT_FALSE(nr_pdcch_blind_decode_and_extract_01(llr.data(), kAggregationLevel, len, &o, 0x0001, 0xFFEF, &out));
-  ASSERT_NE(out.reject_reason, nullptr);
+  EXPECT_TRUE(nr_pdcch_blind_decode_and_extract_01(llr.data(), kAggregationLevel, len, &o, 0x0001, 0xFFEF, &out))
+      << (out.reject_reason ? out.reject_reason : "");
+  EXPECT_EQ(out.mcs, 29);
 }
 
 // ---- DCI format 0_0. No second polar decode: it reinterprets a payload the 1_0 scan already
@@ -2832,16 +2873,25 @@ TEST_F(BlindPdcchTest, UlDmrsMaskLookupRejectsInvalidGeometryWithoutAborting) {
   EXPECT_EQ(nr_pdcch_blind_ul_dmrs_mask(14,0,0,2,1,2),-1);
 }
 
-TEST_F(BlindPdcchTest, UlMcsBoundaryUsesActualSelectedTable) {
+TEST_F(BlindPdcchTest, UlMcsExtractionNoLongerGatesOnTheReservedRange) {
+  // gap-harq lane: extraction used to hard-reject MCS 29 (every table) and MCS 28 wherever table 1
+  // (qam256) reserves it, using nr_get_code_rate_ul() as the gate. It no longer does -- a reserved
+  // codepoint on a UL grant (always dedicated, always with a real NDI/HARQ-pid) may be a genuine
+  // retransmission the passive UL decoder can resolve downstream (nr_harq_init_tx.h), so extraction
+  // now accepts it unconditionally and leaves resolvability to the decoder. The library function
+  // itself (nr_get_code_rate_ul) is unchanged and still correctly table-dependent -- only
+  // extraction's USE of it as a hard gate is gone. Renamed from UlMcsBoundaryUsesActualSelectedTable,
+  // whose premise (extraction rejects on the table-dependent boundary) this fix overturns.
   for(int table=0;table<3;++table) {
     auto opts=LiveUlOpts(); opts.mcs_table=table;
     UlGroundTruth gt; gt.mcs=28; gt.riv=273;
     nr_pdcch_blind_ul_result_t result{};
     bool ok=nr_pdcch_blind_extract_01(PackUlPayload(gt,opts),nr_pdcch_blind_dci01_size(&opts),gt.rnti,&opts,&result);
-    EXPECT_EQ(ok,table!=1) << table;
+    EXPECT_TRUE(ok) << table;
+    // The library table function is untouched: table 1 (qam256) still reserves 28, tables 0/2 don't.
     EXPECT_EQ(nr_get_code_rate_ul(28,table)>0,table!=1);
     gt.mcs=29;
-    EXPECT_FALSE(nr_pdcch_blind_extract_01(PackUlPayload(gt,opts),nr_pdcch_blind_dci01_size(&opts),gt.rnti,&opts,&result));
+    EXPECT_TRUE(nr_pdcch_blind_extract_01(PackUlPayload(gt,opts),nr_pdcch_blind_dci01_size(&opts),gt.rnti,&opts,&result));
   }
 }
 TEST_F(BlindPdcchTest, DlMcs28SurvivesUntilTableInterpretation) {

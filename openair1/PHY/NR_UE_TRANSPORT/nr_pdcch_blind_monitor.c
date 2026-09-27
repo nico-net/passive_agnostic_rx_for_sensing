@@ -3540,11 +3540,15 @@ static bool dci10_parse(uint64_t                             payload,
 
   // TS 38.214 5.1.3.1: a PDSCH scheduled by format 1_0 ALWAYS uses Table 5.1.3.1-1 (qam64),
   // whatever mcs-Table the deployment configures -- qam256 is conditioned on format 1_1. In that
-  // table entries 0..28 are valid and 29..31 are reserved for retransmissions whose modulation the
-  // UE already knows. (The format 1_1 path above uses >=28 because table 2, which a qam256
-  // deployment selects there, reserves 28..31; here the table is fixed by the spec so the exact
-  // bound is known.)
-  if (mcs >= 29) {
+  // table entries 0..28 are valid and 29..31 are reserved: "same modulation order and TBS as the
+  // initial transmission of the same HARQ process" -- a genuine retransmission this receiver may be
+  // able to resolve downstream (nr_harq_init_tx.h) from its own record of that HARQ process's last
+  // resolvable grant. That reserved-codepoint rule is scoped by the spec to C-RNTI/MCS-C-RNTI/
+  // TC-RNTI: SI-/RA-/P-RNTI format 1_0 never uses it (no NDI/HARQ-pid field exists for those classes
+  // to even key a retransmission on -- see the switch above), so the reject stays a hard invariant
+  // there. (The format 1_1 path uses >=28 because table 2, which a qam256 deployment selects there,
+  // reserves 28..31; here the table is fixed by the spec so the exact bound is known.)
+  if (mcs >= 29 && klass != NR_BLIND_RNTI_CLASS_C && klass != NR_BLIND_RNTI_CLASS_TC) {
     out->reject_reason = "DCI-1_0 MCS in the reserved range (29-31 of Table 5.1.3.1-1)";
     return false;
   }
@@ -4008,12 +4012,13 @@ bool nr_pdcch_blind_extract_11(const nr_pdcch_blind_raw_result_t *raw,
                         : ap_table == 2 ? g_table_7_3_2_3_3_2[antenna_ports]
                         : ap_table == 3 ? g_table_7_3_2_3_3_3[antenna_ports] : g_table_7_3_2_3_3_4[antenna_ports];
   const int ap_len2 = (ap_table == 2) || (ap_table == 4);
-  // Table selection is still unknown here. MCS 28 is valid in tables 0 and 2;
-  // the actual PDSCH decoder checks the selected table's nonzero code rate.
-  if (mcs >= 29) {
-    out->reject_reason = "MCS reserved in every supported DL table (29-31)";
-    return false;
-  }
+  // Table selection is still unknown here. MCS 28 is valid in tables 0 and 2, and reserved (with
+  // 29-31) in table 1 (qam256) -- the actual PDSCH decoder checks the selected table's nonzero code
+  // rate, and no longer hard-refuses on it: format 1_1 is always a dedicated C-RNTI grant with a real
+  // NDI/HARQ-pid field, so a reserved codepoint (TS 38.214 5.1.3.1: "same modulation order and TBS as
+  // the initial transmission") is a genuine retransmission this receiver may be able to resolve
+  // downstream (nr_harq_init_tx.h) rather than noise. Values above 31 are impossible: the field is 5
+  // bits wide.
   uint16_t start_rb, num_rb;
   const int fdra_mode = opts != NULL ? opts->fdra_mode : NR_FDRA_TYPE1;
   int ra_type0 = 0, rbg_size = 0, n_rbg = 0;
@@ -4459,8 +4464,13 @@ static bool blind_ul_finish(const nr_pdcch_blind_ul_opts_t* opts,
     num_rb   = (uint16_t)n;
   }
   const int table = opts->mcs_table < 0 ? 0 : opts->mcs_table;
-  if (table > 4 || mcs > 31 || nr_get_code_rate_ul(mcs, table) == 0) {
-    out->reject_reason = "UL MCS reserved or invalid in the selected table";
+  // table > 4 is a config error (invalid mcs-Table), a hard reject. A reserved codepoint (TS 38.214
+  // 6.1.4.1: "same modulation order and TBS as the initial transmission") is NOT rejected here --
+  // format 0_0/0_1 are always dedicated grants with a real NDI/HARQ-pid field, so this may be a
+  // genuine retransmission the passive UL decoder can resolve from its own per-(RNTI, pid) record
+  // (nr_harq_init_tx.h) instead of noise. mcs > 31 is impossible: the field is 5 bits wide.
+  if (table > 4 || mcs > 31) {
+    out->reject_reason = "UL MCS table selection is invalid";
 
     return false;
   }
