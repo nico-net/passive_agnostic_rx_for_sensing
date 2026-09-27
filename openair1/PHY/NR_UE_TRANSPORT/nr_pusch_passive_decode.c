@@ -16,7 +16,9 @@
 #include "PHY/nr_phy_common/inc/nr_phy_common.h" // nr_fo_compensation: the same de-rotation nr_slot_fep uses
 
 #include "nr_pusch_passive_decode.h"
+#include "nr_pusch_passive_dmrs_pdu.h"
 #include "nr_pusch_data_aided.h"
+#include "nr_pdsch_prb_set.h"
 
 #include "common/utils/LOG/log.h"
 #include "common/utils/nr/nr_common.h"
@@ -504,15 +506,11 @@ static void fill_pusch_pdu(const nr_pdcch_blind_ul_result_t *g, int nant,
   p->data_scrambling_id = g->data_scrambling_id;
   p->nrOfLayers         = g->nrOfLayers;
 
-  p->ul_dmrs_symb_pos   = g->ul_dmrs_symb_pos;
-  p->dmrs_config_type   = g->dmrs_config_type;
-  p->ul_dmrs_scrambling_id = g->ul_dmrs_scrambling_id;
-  p->pusch_identity     = g->ul_dmrs_scrambling_id;
-  p->scid               = g->nscid;
-  p->num_dmrs_cdm_grps_no_data = g->n_dmrs_cdm_groups;
-  p->dmrs_ports         = g->dmrs_ports;
+  nr_pusch_passive_fill_dmrs_pdu(g, fp->Nid_cell, p);
 
-  p->resource_alloc     = 1;   // type 1 -- the only type this deployment schedules
+  /* LDPC consumes the allocated count. Gapped physical geometry is passed to the
+   * demodulator explicitly as a PRB list, not disguised as a contiguous span. */
+  p->resource_alloc     = 1;
   p->rb_start           = g->start_rb;
   p->rb_size            = g->num_rb;
   p->vrb_to_prb_mapping = 0;
@@ -706,18 +704,37 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
     out->reject_reason = "no plausible grant";
     return false;
   }
+  uint16_t prb[NR_PRB_SET_MAX];
+  bool gapped = false;
+  const bool fdra_unresolved = g->fdra_candidate_count != 0;
+  if (g->ra_type0) {
+    const int n = nr_ra_type0_prbs(g->rbg_bitmap, g->rbg_bwp_start, g->bwp_size,
+                                  g->rbg_size, prb, NR_PRB_SET_MAX);
+    if (n <= 0 || n != g->num_rb || prb[0] != g->start_rb) {
+      out->status = NR_PUSCH_PASSIVE_UNSUPPORTED;
+      out->reject_reason = "inconsistent type-0 PRB allocation";
+      return false;
+    }
+    for (int i = 0; i < n; ++i) gapped |= prb[i] != g->start_rb + i;
+  }
+  if (gapped || fdra_unresolved) {
+    static _Atomic unsigned long skipped_aux;
+    const unsigned long count = atomic_fetch_add_explicit(&skipped_aux, 1, memory_order_relaxed) + 1;
+    if (count == 1 || count % 1000 == 0)
+      LOG_I(PHY, "SENSING: UL_FDRA_AUX_SKIPPED n=%lu rnti=0x%x energy_pin,dmrs_id,cfr require resolved PRB geometry\n",
+            count, g->rnti);
+    if (cfr_only) {
+      out->status = NR_PUSCH_PASSIVE_UNSUPPORTED;
+      out->reject_reason = "gapped or ambiguous allocation CFR not implemented";
+      return false;
+    }
+  }
   /* Scope guards, each a case this receiver cannot do correctly rather than one it merely has not
    * been tested on. Silently attempting any of them would produce a confident wrong answer. */
   if (g->nrOfLayers != 1) {
     atomic_fetch_add_explicit(&g_rej_unsup, 1, memory_order_relaxed);
     out->status = NR_PUSCH_PASSIVE_UNSUPPORTED;
     out->reject_reason = "multi-layer PUSCH";
-    return false;
-  }
-  if (g->transform_precoding) {
-    atomic_fetch_add_explicit(&g_rej_unsup, 1, memory_order_relaxed);
-    out->status = NR_PUSCH_PASSIVE_UNSUPPORTED;
-    out->reject_reason = "DFT-s-OFDM (transform precoding) not wired";
     return false;
   }
   if (g->rv != 0) {
@@ -809,7 +826,7 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
   } while (0)
 
   PASSIVE_UL_FEP(ul_sample_offset);
-  ul_dmrs_energy_oracle_observe(g, fp, gnb, slot_off, symsz); // gap item 2: DM-RS energy oracle
+  if (!gapped && !fdra_unresolved) ul_dmrs_energy_oracle_observe(g, fp, gnb, slot_off, symsz);
   if (abs_slot && !nr_passive_samples_valid(
       atomic_load_explicit(&nr_ue_diag_producer_absolute_slot,memory_order_relaxed),
       (long)abs_slot,fp->slots_per_frame)) {
@@ -827,6 +844,12 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
   PUSCH_STAGE(3, "FEP done");
   nfapi_nr_pusch_pdu_t pdu;
   fill_pusch_pdu(g, nant, fp, &pdu);
+  static atomic_bool tp_scope_logged = false;
+  if (g->transform_precoding && !atomic_exchange_explicit(&tp_scope_logged, true, memory_order_relaxed)) {
+    LOG_A(PHY, "PUSCH TP scope: PCI-default nPUSCH-Identity=%u, no group/sequence hopping; "
+               "explicit nPUSCH-Identity/hopping discovery unsupported, hypothesis needs CRC validation\n",
+          pdu.pusch_identity);
+  }
   /* The reused estimator takes its pilot seed from this private context.
    * Keep physical PCI in frame_parms separate from the grant's DM-RS identity. */
   gnb->gNB_config.cell_config.phy_cell_id.value = g->ul_dmrs_scrambling_id;
@@ -898,7 +921,13 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
     atomic_fetch_add_explicit(&g_try, 1, memory_order_relaxed);
   }
   PUSCH_STAGE(4, "entering nr_rx_pusch_group_tp");
-  nr_rx_pusch_group_tp(gnb, &pvp, &pdup, &unavp, 1, frame, slot);
+  const int rx_rc = gapped ? nr_rx_pusch_prb_list_tp(gnb, pvp, pdup, unavp, frame, slot, prb, g->num_rb)
+                           : nr_rx_pusch_group_tp(gnb, &pvp, &pdup, &unavp, 1, frame, slot);
+  if (rx_rc != 0) {
+    out->status = NR_PUSCH_PASSIVE_UNSUPPORTED;
+    out->reject_reason = "unsupported PUSCH PRB-list receive contract";
+    return false;
+  }
 
   /* ---- PER-GRANT DELAY REFINEMENT ---------------------------------------------------------------
    * A FIXED timing advance cannot work here, and the reason is measurable rather than theoretical.
@@ -934,7 +963,10 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
     return false;
   }
 
-      nr_rx_pusch_group_tp(gnb, &pvp, &pdup, &unavp, 1, frame, slot);
+      if (gapped)
+        nr_rx_pusch_prb_list_tp(gnb, pvp, pdup, unavp, frame, slot, prb, g->num_rb);
+      else
+        nr_rx_pusch_group_tp(gnb, &pvp, &pdup, &unavp, 1, frame, slot);
       out->est_delay_pre = d;
     }
   }
@@ -959,7 +991,7 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
    * The antennas are kept SEPARATE (nof_ant > 1, ant_stride_re) rather than combined: the whole
    * point of a 4-element array is that the inter-element phase carries the bearing, and combining
    * before submission would destroy exactly that. */
-  if (nr_isac_enabled() && nr_isac_source_enabled(NR_ISAC_SRC_PUSCH_DMRS)) {
+  if (!gapped && !fdra_unresolved && nr_isac_enabled() && nr_isac_source_enabled(NR_ISAC_SRC_PUSCH_DMRS)) {
     const uint32_t nof_ant_cfr = (uint32_t)nant;
     const int      num_sp      = pdu.param_v4.numSpatialStreamIndices;
     /* First DM-RS symbol inside the allocation. TS 38.211 puts the front-loaded one at l0, and it
@@ -1100,8 +1132,14 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
    * remaining space once stage 1 exhausts itself without deciding), stage-2 accumulate throttled
    * (same ~64x-cost argument, same throttle constant). */
   /* Final review I2/I5: DCI 0_1 grants only (a 0_0 uses N_ID^cell, see blind_ul_apply_scrambling_ids()),
-   * and the two-window driver (stage 1 always on, stage 2 throttled + capped, all work stops once decided). */
-  if (nr_pusch_passive_queue_running() && g->ul_dci_format == NR_BLIND_UL_DCI_FORMAT_0_1 && g->dmrs_config_type == 0
+   * and the two-window driver (stage 1 always on, stage 2 throttled + capped, all work stops once decided).
+   * dmrs_config_type is no longer restricted to type 1: nr_dmrs_id_2stage_accumulate()/
+   * nr_dmrs_id_accumulate() now take the type and generate the matching reference sequence/RE
+   * pattern for both (dmrs_nr.c already supported type 2 generation; this estimator's own RE
+   * stepping was the part that was type-1-only). transform_precoding stays excluded: low-PAPR
+   * DM-RS uses a different sequence generator (nr_pusch_lowpaprtype1_dmrs_rx) this probe never
+   * calls, a separate gap. */
+  if (!gapped && !fdra_unresolved && nr_pusch_passive_queue_running() && g->ul_dci_format == NR_BLIND_UL_DCI_FORMAT_0_1
       && !g->transform_precoding && nr_dmrs_id_2stage_decided(nr_pusch_passive_ul_dmrs_id(g->nscid)) < 0) {
     const int ul_ns = g->nscid & 1;
     bool was_init = false;
@@ -1117,7 +1155,8 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
         const c16_t *row = &gnb->common_vars.rxdataF[0][slot_off + dsym * fp->ofdm_symbol_size];
         const int start_sc = fp->first_carrier_offset + (g->bwp_start + g->start_rb) * NR_NB_SC_PER_RB;
         nr_dmrs_id_2stage_accumulate(dst, row, fp->ofdm_symbol_size, start_sc, g->bwp_start + g->start_rb, g->num_rb,
-                                     fp->N_RB_UL, fp->symbols_per_slot, slot, dsym, g->nscid, fp->Ncp == NR_NORMAL);
+                                     fp->N_RB_UL, fp->symbols_per_slot, slot, dsym, g->nscid, fp->Ncp == NR_NORMAL,
+                                     g->dmrs_config_type);
       }
       nr_pusch_passive_ul_dmrs_unlock(ul_ns);
     }
@@ -1364,7 +1403,7 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
   }
   if (hp_crc_failed(ulsch)) {
     atomic_fetch_add_explicit(&g_seg_fail, 1, memory_order_relaxed);
-    nr_pusch_passive_ul_crc_note(g->rnti, g->ul_dci_format == NR_BLIND_UL_DCI_FORMAT_0_1, false);
+    if (!fdra_unresolved) nr_pusch_passive_ul_crc_note(g->rnti, g->ul_dci_format == NR_BLIND_UL_DCI_FORMAT_0_1, false);
     out->status = NR_PUSCH_PASSIVE_CRC_FAIL;
     out->reject_reason = "segment or final transport-block CRC failed";
     if (g->data_id_advance)
@@ -1409,7 +1448,7 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
                            pdu.maintenance_parms_v3.ldpcBaseGraph, tbs, pdu.target_code_rate);
     pthread_mutex_unlock(&g_ul_harq_init_lock);
   }
-  nr_pusch_passive_ul_crc_note(g->rnti, g->ul_dci_format == NR_BLIND_UL_DCI_FORMAT_0_1, true);
+  if (!fdra_unresolved) nr_pusch_passive_ul_crc_note(g->rnti, g->ul_dci_format == NR_BLIND_UL_DCI_FORMAT_0_1, true);
   if (g->data_id_advance)
     nr_pusch_passive_data_id_feed(true);
   {
@@ -1433,13 +1472,36 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
    * bits this receiver never decodes; reconstructing X there would be a guess, and a guess in the
    * numerator of Y/X is indistinguishable from a measurement downstream. Those grants keep
    * contributing through the DM-RS source, which does not depend on the payload at all. */
-  if (out->uci_ack_re == 0) {
+  if (!gapped && out->uci_ack_re == 0) {
     nr_isac_pusch_data_aided_submit(ue, gnb, &pdu, g, hp->b,
                                     NR_PUSCH_PASSIVE_DA_TAG_BASE + (uint32_t)ctx,
                                     passive_ul_slow_time_idx(fp, frame, slot, abs_slot),
                                     (uint32_t)nant, slot);
   }
   return true;
+}
+
+typedef struct {
+  PHY_VARS_NR_UE *ue;
+  int ctx;
+  uint32_t frame;
+  uint8_t slot;
+  int32_t ta;
+  uint64_t absolute_slot;
+  bool cfr_only;
+  double fo_hz;
+  nr_pusch_passive_out_t *out;
+  nr_pdcch_blind_ul_result_t last;
+  int attempts;
+} passive_fdra_attempt_t;
+
+static bool passive_fdra_attempt(void *opaque, const nr_pdcch_blind_ul_result_t *candidate)
+{
+  passive_fdra_attempt_t *a = opaque;
+  a->last = *candidate;
+  ++a->attempts;
+  return nr_pusch_passive_decode_inner(a->ue, a->ctx, a->frame, a->slot, candidate, a->ta,
+                                       a->absolute_slot, a->cfr_only, a->fo_hz, a->out);
 }
 
 /* The per-grant probe lives HERE, wrapping the decode, rather than in a caller: there are two
@@ -1458,8 +1520,33 @@ bool nr_pusch_passive_decode(PHY_VARS_NR_UE *ue,
                              double   fo_hz,
                              nr_pusch_passive_out_t *out)
 {
-  const bool ok = nr_pusch_passive_decode_inner(ue, ctx, frame, slot, g, ta_offset_samples, abs_slot,
-                                                cfr_only, fo_hz, out);
+  bool ok;
+  passive_fdra_attempt_t retry = {0};
+  if (g && g->fdra_candidate_count) {
+    retry = (passive_fdra_attempt_t){.ue=ue, .ctx=ctx, .frame=frame, .slot=slot, .ta=ta_offset_samples,
+      .absolute_slot=abs_slot, .cfr_only=cfr_only, .fo_hz=fo_hz, .out=out};
+    memset(out, 0, sizeof(*out));
+    out->status = NR_PUSCH_PASSIVE_UNSUPPORTED;
+    out->reject_reason = "invalid FDRA candidate bundle";
+    const int winner = nr_pdcch_blind_ul_fdra_try(g, passive_fdra_attempt, &retry);
+    ok = winner >= 0;
+    if (!cfr_only && (out->status == NR_PUSCH_PASSIVE_OK || out->status == NR_PUSCH_PASSIVE_CRC_FAIL)) {
+      nr_pusch_passive_ul_crc_note(g->rnti, g->ul_dci_format == NR_BLIND_UL_DCI_FORMAT_0_1, ok);
+      if (g->data_id_advance) nr_pusch_passive_data_id_feed(ok);
+    }
+    if (ok) {
+      static _Atomic unsigned long resolved;
+      const unsigned long count = atomic_fetch_add_explicit(&resolved, 1, memory_order_relaxed) + 1;
+      if (count == 1 || count % 1000 == 0)
+        LOG_I(PHY, "SENSING: UL_FDRA_CRC_RESOLVED n=%lu rnti=0x%x candidate=%d/%u mode=%u rb=%u+%u bitmap=0x%x\n",
+              count, g->rnti, winner + 1, g->fdra_candidate_count, g->fdra_candidates[winner].mode,
+              retry.last.start_rb, retry.last.num_rb, retry.last.rbg_bitmap);
+    }
+    if (retry.attempts) g = &retry.last;
+  } else {
+    ok = nr_pusch_passive_decode_inner(ue, ctx, frame, slot, g, ta_offset_samples, abs_slot,
+                                      cfr_only, fo_hz, out);
+  }
 
   if (s_diag_on() && g != NULL) {
     LOG_I(PHY,

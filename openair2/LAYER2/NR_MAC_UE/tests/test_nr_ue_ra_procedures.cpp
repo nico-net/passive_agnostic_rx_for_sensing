@@ -11,6 +11,7 @@ extern "C" {
 #include "common/utils/ocp_itti/intertask_interface.h"
 #include "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.h"
 #include "openair1/PHY/NR_UE_TRANSPORT/nr_passive_acq_state.h"
+#include "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_sib1_prior.h"
 
 static softmodem_params_t softmodem_params;
 
@@ -41,6 +42,9 @@ uint16_t nr_pdcch_blind_dci10_size(uint16_t)
 }
 void nr_passive_acq_note_sib1(void) {} // same passive-mode-only site as publish_common
 void nr_passive_acq_note_sib1_carrier(int, int, int, int, int) {} // same gate (ISAC_AUTO_ACQUIRE + passive)
+void nr_pdcch_blind_monitor_set_tda_common(const uint8_t *, const uint8_t *, const uint8_t *, int) {}
+void nr_pdcch_sib1_prior_set(const nr_pdcch_sib1_prior_t *) {}
+void nr_passive_acq_note_sib1_tdd(const nr_tdd_pattern_t *, const nr_tdd_pattern_t *) {}
 softmodem_params_t *get_softmodem_params(void)
 {
   return &softmodem_params;

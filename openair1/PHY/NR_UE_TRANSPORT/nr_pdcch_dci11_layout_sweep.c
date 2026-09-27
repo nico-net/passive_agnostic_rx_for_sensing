@@ -50,8 +50,13 @@ bool nr_dci11_layout_offsets(const nr_dci11_layout_t *l, uint16_t riv_bits, uint
   p += l->pre_ant;                                  /* tb2 | harq pid | dai | tpc | ri | p2h */
   out->ant_ports = p;      p += l->ant_ports;
   out->ant_ports_bits = l->ant_ports;
-  /* Only width 4 has a row count verified in-tree (g_table_7_3_2_3_3_1, 12 rows). */
-  out->ap_valid_rows = (l->ant_ports == 4) ? 12 : 0;
+  /* Row counts for all four TS 38.212 7.3.1.2.2 tables, taken from the same g_table_7_3_2_3_3_{1,2,3,4}
+   * arrays nr_pdcch_blind_monitor.c's actual DCI 1_1 extraction indexes (12/31/24/58 rows): width 4 is
+   * always type 1 maxLength 1 (-1, 12 rows); width 5 is type 1 maxLength 2 (-2, 31 rows) or type 2
+   * maxLength 1 (-3, 24 rows), told apart by l->dmrs_type; width 6 is type 2 maxLength 2 (-4, 58 rows). */
+  out->ap_valid_rows = (l->ant_ports == 4) ? 12
+                     : (l->ant_ports == 5) ? (l->dmrs_type ? 24 : 31)
+                     : (l->ant_ports == 6) ? 58 : 0;
   p += l->post_ant;                                 /* tci | srs | cbg | cbg flush */
   out->dmrs_init = p;      p += DCI11_DMRS_INIT;
   out->total = p;

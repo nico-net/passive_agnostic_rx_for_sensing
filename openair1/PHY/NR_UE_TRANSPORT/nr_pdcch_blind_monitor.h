@@ -649,6 +649,13 @@ typedef enum {
   NR_BLIND_UL_DCI_FORMAT_0_0 = 1,
 } nr_blind_ul_dci_format_t;
 
+#define NR_PUSCH_FDRA_MAX_CANDIDATES 4
+typedef struct {
+  uint16_t start_rb, num_rb, rbg_bwp_start;
+  uint8_t ra_type0, rbg_size, mode;
+  uint32_t rbg_bitmap;
+} nr_pusch_fdra_allocation_t;
+
 /// Result of one blind UL decode+extract attempt. Deliberately a SEPARATE struct from
 /// nr_pdcch_blind_result_t rather than extra members on it: the DL result is consumed by the
 /// PDSCH decode, the CFR tap and the queue job (which copies it by value), and the overriding
@@ -668,6 +675,7 @@ typedef struct {
   int width_hyp_class;       ///< -1 when no width search owns this grant
   int interp_hyp_class;      ///< -1 when no interpretation search owns this grant
   uint64_t hyp_generation;   ///< reject feedback from an earlier discovery context
+  uint16_t hyp_width_raw, hyp_interp_raw; ///< joint raw identities + 1; zero for baseline grants
   uint8_t carrier_indicator, ul_sul_indicator; ///< preserve carrier identity for search equivalence
 
   // ---- valid only when plausible ----
@@ -742,6 +750,11 @@ typedef struct {
 
   bool        plausible;        ///< false => caller MUST discard everything above the raw fields
   const char* reject_reason;    ///< non-NULL iff !plausible; static string, do not free
+  /* Equal-length FDRA interpretations travel as ONE book/queue entry. They differ
+   * only in allocation: the identical field width preserves every other DCI field.
+   * Nonzero count means unresolved until the consumer obtains a transport-block CRC. */
+  uint8_t fdra_candidate_count;
+  nr_pusch_fdra_allocation_t fdra_candidates[NR_PUSCH_FDRA_MAX_CANDIDATES];
 } nr_pdcch_blind_ul_result_t;
 
 /// Deployment facts needed to size and interpret an UL DCI. Same contract as the DL
@@ -836,6 +849,13 @@ uint16_t nr_pdcch_blind_dci01_size(const nr_pdcch_blind_ul_opts_t* opts);
  *  into out_modes in that fixed order; returns the count (0 if opts is unusable or none match). */
 int nr_pdcch_blind_ul_fdra_mode_candidates(const nr_pdcch_blind_ul_opts_t *opts, uint16_t observed_len,
                                             uint8_t *out_modes, int max);
+int nr_pdcch_blind_ul_fdra_bundle(const nr_pdcch_blind_ul_opts_t *opts, uint64_t payload,
+                                 uint16_t length, uint16_t rnti, nr_pdcch_blind_ul_result_t *out);
+/* Try each allocation at most once, stopping ONLY when attempt reports TB CRC OK.
+ * Return the winning index, or -1. Malformed counts invoke no callback. The caller
+ * owns aggregate feedback: candidate attempts cannot advance the data-ID sweep. */
+int nr_pdcch_blind_ul_fdra_try(const nr_pdcch_blind_ul_result_t *bundle,
+                              bool (*attempt)(void *, const nr_pdcch_blind_ul_result_t *), void *opaque);
 
 bool nr_pdcch_blind_decode_01_mode(bool automatic, const int16_t *llr, uint8_t aggregation_level,
                                    uint16_t dci_length, const nr_pdcch_blind_ul_opts_t *opts,

@@ -61,6 +61,7 @@ void crcTableInit(void);
 #include "nr_pdcch_ul_field_sweep.h"
 #include "nr_pdcch_ul_discovery.h"
 #include "nr_pdsch_prb_set.h"
+#include "nr_pusch_passive_dmrs_pdu.h"
 #include "nr_pdcch_blind_monitor_rt.h"
 #include "executables/softmodem-common.h"
 }
@@ -689,6 +690,70 @@ TEST_F(BlindPdcchTest, RejectsValidCrcWithOutOfBoundAntennaPorts) {
   EXPECT_EQ(out.rnti, gt.rnti);
   ASSERT_NE(out.reject_reason, nullptr);
   EXPECT_STREQ(out.reject_reason, "antenna_ports field outside its table's valid rows");
+}
+
+/* DM-RS type 2's DCI 1_1 antenna-ports tables (TS 38.212 Table 7.3.1.2.2-3, 5-bit field, maxLength 1;
+ * -4, 6-bit field, maxLength 2) were already implemented (g_table_7_3_2_3_3_3/_4) but had NO test
+ * exercising them -- this closes that gap. Row values below are read verbatim off the in-tree
+ * tables, not derived, so a wrong row constant here would be caught by the table itself disagreeing
+ * with the spec, not silently agreeing with a copy-paste mistake. */
+TEST_F(BlindPdcchTest, Dci11Type2AntennaPortsDecodeViaTables3And4) {
+  const uint16_t bwp_size = 106;
+  const int      riv_bits = RivBitsFor(bwp_size);
+
+  // Table 7.3.1.2.2-3 row 6 = {2,0,0,0,1,0,0}: 2 CDM groups without data, port 3 only.
+  {
+    nr_pdcch_blind_extract_opts_t opts = DefaultOpts();
+    opts.dmrs_config_type   = 1;
+    opts.antenna_ports_bits = 5;
+    const uint16_t len = nr_pdcch_blind_dci_size_ex(bwp_size, &opts);
+
+    GroundTruth gt;
+    gt.rnti                   = 0x4A11;
+    gt.bwp_size                = bwp_size;
+    gt.riv                     = (uint32_t)PRBalloc_to_locationandbandwidth0(20, 10, bwp_size);
+    gt.time_domain_assignment  = 0;
+    gt.antenna_ports            = 6;
+
+    auto llr = EncodeToLLR(PackPayload(gt, riv_bits, &opts), gt.rnti, len, kAggregationLevel, 40.0, rng_);
+    nr_pdcch_blind_result_t out;
+    ASSERT_TRUE(nr_pdcch_blind_decode_and_extract_ex(llr.data(), kAggregationLevel, len, bwp_size,
+                                                     kDmrsTypeAPositionPos2, NR_PDCCH_BLIND_RNTI_MIN_DEFAULT,
+                                                     NR_PDCCH_BLIND_RNTI_MAX_DEFAULT, &opts, &out));
+    EXPECT_EQ(out.dmrs_config_type, 1);
+    EXPECT_EQ(out.n_dmrs_cdm_groups, 2);
+    EXPECT_EQ(out.dmrs_ports, 1u << 3);
+  }
+
+  // Table 7.3.1.2.2-4 row 24 = {3,1,0,0,0,0,0,0,0,0,0,0,0,2}: 3 CDM groups, port 0 only,
+  // maxLength 2 (front-loaded + 1 additional symbol, the "symbols" column = 2).
+  {
+    nr_pdcch_blind_extract_opts_t opts = DefaultOpts();
+    opts.dmrs_config_type   = 1;
+    opts.antenna_ports_bits = 6;
+    // g_table_6_4_1_1_3_4 (maxLength 2's DM-RS symbol-mask table) defines ONLY additional
+    // positions 0 and 1 for mapping type A -- columns 2/3 are -1 (reserved) in every row, a real
+    // TS 38.211 Table 6.4.1.1.3-4 fact (double-symbol front-loading is simply not combined with
+    // pos2/pos3), not a bug. DefaultOpts()'s pos2 fallback is invalid here, so pin pos1.
+    opts.dmrs_add_pos       = 1;
+    const uint16_t len = nr_pdcch_blind_dci_size_ex(bwp_size, &opts);
+
+    GroundTruth gt;
+    gt.rnti                   = 0x4A22;
+    gt.bwp_size                = bwp_size;
+    gt.riv                     = (uint32_t)PRBalloc_to_locationandbandwidth0(20, 10, bwp_size);
+    gt.time_domain_assignment  = 0;
+    gt.antenna_ports            = 24;
+
+    auto llr = EncodeToLLR(PackPayload(gt, riv_bits, &opts), gt.rnti, len, kAggregationLevel, 40.0, rng_);
+    nr_pdcch_blind_result_t out;
+    ASSERT_TRUE(nr_pdcch_blind_decode_and_extract_ex(llr.data(), kAggregationLevel, len, bwp_size,
+                                                     kDmrsTypeAPositionPos2, NR_PDCCH_BLIND_RNTI_MIN_DEFAULT,
+                                                     NR_PDCCH_BLIND_RNTI_MAX_DEFAULT, &opts, &out));
+    EXPECT_EQ(out.dmrs_config_type, 1);
+    EXPECT_EQ(out.n_dmrs_cdm_groups, 3);
+    EXPECT_EQ(out.dmrs_ports, 1u);
+  }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -2073,10 +2138,14 @@ TEST(Css0Autoconf, TurnsOffEverySettingThatDescribesTheDedicatedSearchSpace) {
   c->rnti_max            = 0xFFEF;
 
   // This cell: CORESET#0 = 48 RB / 1 symbol at CRB 0, SSB at CRB offset 12 from point A,
-  // SS0 period 40 slots / offset 0 / duration 2 / first symbol 0, mux pattern 1, PCI 2,
+  // SS0 period 40 slots / offset 0 / duration 2 / first symbol 0, mux pattern 1. Use a
+  // test-unique PCI so this call always exercises the genuine configuration-change path even
+  // under --gtest_shuffle; reusing another test's identical 12-field derivation correctly takes
+  // the production idempotence fast path and would leave the deliberately dirtied fields above.
+  // PCI 997 is valid and immaterial to the settings asserted here.
   // rb_offset 12 (so cset_start_rb = ssb_offset_point_a - rb_offset = 0 is self-consistent),
   // dmrs-TypeA-Position 2.
-  ASSERT_TRUE(nr_pdcch_blind_monitor_autoconf_css0(48, 1, 0, 12, 40, 0, 2, 0, 1, 2, 12, 2));
+  ASSERT_TRUE(nr_pdcch_blind_monitor_autoconf_css0(48, 1, 0, 12, 40, 0, 2, 0, 1, 997, 12, 2));
 
   // The adaptive energy floor is estimated from the very candidates it gates. On the dedicated
   // CORESET (45 groups) most candidates are empty so it tracks noise; CORESET#0 is 8 CCEs with
@@ -2873,6 +2942,66 @@ TEST_F(BlindPdcchTest, UlDmrsMaskLookupRejectsInvalidGeometryWithoutAborting) {
   EXPECT_EQ(nr_pdcch_blind_ul_dmrs_mask(14,0,0,2,1,2),-1);
 }
 
+/* Gap: dmrs_max_length was pruned to <=1 everywhere in nr_pdcch_ul_discovery.c ("double-symbol
+ * front-loading is receiver scope this monitor cannot resolve"), even though
+ * nr_pdcch_blind_ul_dmrs_mask() already carries the maxLength-2 table (g_table_6_4_1_1_3_4) and
+ * blind_ul_finish() already threads opts->dmrs_max_length through to it unconditionally -- the
+ * mask lookup itself needed no change, only removing the upstream pruning that never let a
+ * maxLength-2 hypothesis reach it. TS 38.211 Table 6.4.1.1.3-4 row ld=14 col add_pos=1 = 3072;
+ * verified against the in-tree array, not derived independently, same practice as the sibling
+ * UlDmrsMaskLookupRejectsInvalidGeometryWithoutAborting test above. */
+TEST_F(BlindPdcchTest, UlDmrsMaskLookupSupportsMaxLength2) {
+  // add_pos 0/1 (mapping type A) are the only ones TS 38.211 Table 6.4.1.1.3-4 defines.
+  EXPECT_EQ(nr_pdcch_blind_ul_dmrs_mask(14, 0, 0, 1, 2, 0), 0xC0C);
+  // add_pos 2/3 are reserved at maxLength 2 (columns 2/3 are -1 in every row of that table) -- must
+  // be REJECTED, not silently misread as some other position.
+  EXPECT_EQ(nr_pdcch_blind_ul_dmrs_mask(14, 0, 0, 2, 2, 0), -1);
+  EXPECT_EQ(nr_pdcch_blind_ul_dmrs_mask(14, 0, 0, 3, 2, 0), -1);
+}
+
+/* End-to-end: a maxLength-2 hypothesis must now actually reach nr_pdcch_blind_extract_01() and
+ * decode to a symbol mask with MORE DM-RS symbols than the maxLength-1 case -- not just avoid being
+ * pruned, but genuinely engage the double-symbol table. */
+TEST_F(BlindPdcchTest, UlAntennaPortsAcceptsMaxLength2AndDoublesTheDmrsSymbolCount) {
+  auto opts1 = LiveUlOpts();
+  opts1.dmrs_max_length = 1;
+  opts1.dmrs_add_pos = 1;
+  UlGroundTruth gt1;
+  gt1.riv = PRBalloc_to_locationandbandwidth0(24, 8, 273);
+  gt1.mcs = 10;
+  gt1.antenna_ports = 2;
+  const auto len1 = nr_pdcch_blind_dci01_size(&opts1);
+  nr_pdcch_blind_ul_result_t out1{};
+  ASSERT_TRUE(nr_pdcch_blind_extract_01(PackUlPayload(gt1, opts1), len1, gt1.rnti, &opts1, &out1));
+
+  auto opts2 = LiveUlOpts();
+  opts2.dmrs_max_length = 2;
+  opts2.dmrs_add_pos = 1;
+  opts2.antenna_ports_bits = 5;
+  UlGroundTruth gt2;
+  gt2.riv = PRBalloc_to_locationandbandwidth0(24, 8, 273);
+  gt2.mcs = 10;
+  gt2.antenna_ports = 6; // type-1 rank-1 first double-symbol row
+  const auto len2 = nr_pdcch_blind_dci01_size(&opts2);
+  nr_pdcch_blind_ul_result_t out2{};
+  ASSERT_TRUE(nr_pdcch_blind_extract_01(PackUlPayload(gt2, opts2), len2, gt2.rnti, &opts2, &out2))
+      << (out2.reject_reason ? out2.reject_reason : "-");
+  EXPECT_GT(__builtin_popcount((unsigned)out2.ul_dmrs_symb_pos), __builtin_popcount((unsigned)out1.ul_dmrs_symb_pos));
+
+  // The reserved add_pos/maxLength-2 combination must still be rejected end to end, not just at
+  // the raw table-lookup level.
+  auto opts3 = LiveUlOpts();
+  opts3.dmrs_max_length = 2;
+  opts3.dmrs_add_pos = 2;
+  opts3.antenna_ports_bits = 5;
+  UlGroundTruth gt3 = gt2;
+  const auto len3 = nr_pdcch_blind_dci01_size(&opts3);
+  nr_pdcch_blind_ul_result_t out3{};
+  EXPECT_FALSE(nr_pdcch_blind_extract_01(PackUlPayload(gt3, opts3), len3, gt3.rnti, &opts3, &out3));
+  ASSERT_NE(out3.reject_reason, nullptr);
+  EXPECT_STREQ(out3.reject_reason, "no valid PUSCH DM-RS position for this allocation length");
+}
+
 TEST_F(BlindPdcchTest, UlMcsExtractionNoLongerGatesOnTheReservedRange) {
   // gap-harq lane: extraction used to hard-reject MCS 29 (every table) and MCS 28 wherever table 1
   // (qam256) reserves it, using nr_get_code_rate_ul() as the gate. It no longer does -- a reserved
@@ -2987,12 +3116,17 @@ TEST_F(BlindPdcchTest, Dci00RidesTheSame10Decode) {
   EXPECT_FALSE(nr_pdcch_blind_extract_00(dl_payload, len, rnti, &ul, &not_ul));
 }
 
-/* A blind width hypothesis feeds RAW field values into the antenna-ports closed form, which is
- * only defined over Table 7.3.1.1.2-8's four rows. Out-of-domain values used to reach
- * get_dmrs_port(), whose AssertFatal killed the softmodem mid-capture (measured 2026-09-09,
- * antenna_ports=14 -> port bitmap 1<<12 -> "No dmrs port corresponding to layer 0 found").
- * Every out-of-domain code point must be REJECTED, and every in-domain one must still work. */
-TEST_F(BlindPdcchTest, UlAntennaPortsCodePointOutsideItsTableIsRejected) {
+/* A blind width hypothesis feeds RAW field values into the antenna-ports decode, which must REJECT
+ * any code point outside its table rather than reach get_dmrs_port(), whose AssertFatal killed the
+ * softmodem mid-capture (measured 2026-09-09, antenna_ports=14 under the OLD 4-row-only closed form
+ * -> port bitmap 1<<12 -> "No dmrs port corresponding to layer 0 found"). Every in-domain code point
+ * must still decode, and every out-of-domain one must still be rejected -- now cross-checked against
+ * decode_dci_antenna_ports_val() directly (the same reverse table an attached UE's own PUSCH config
+ * uses, TS 38.212 Table 7.3.1.1.2-8/9 for rank 1 / DM-RS type 1 / transform precoding disabled),
+ * rather than a fixed "<=3" boundary: that boundary was an artifact of the old closed form's own
+ * self-imposed 4-row scope, not a real spec limit -- the reverse table has 14 valid rows at rank 1
+ * (rows 6-13 need two front-loaded symbols and must fail the maxLength1 hypothesis). */
+TEST_F(BlindPdcchTest, UlAntennaPortsType1DecodesViaReverseTable) {
   auto opts = LiveUlOpts();
   opts.antenna_ports_bits = 5;                 // the sweep really does try 5 bits
   const auto len = nr_pdcch_blind_dci01_size(&opts);
@@ -3003,18 +3137,170 @@ TEST_F(BlindPdcchTest, UlAntennaPortsCodePointOutsideItsTableIsRejected) {
     gt.antenna_ports = ap;
     nr_pdcch_blind_ul_result_t out{};
     const bool ok = nr_pdcch_blind_extract_01(PackUlPayload(gt, opts), len, gt.rnti, &opts, &out);
-    if (ap <= 3) {
-      EXPECT_TRUE(ok) << "in-domain antenna_ports=" << ap << " must still decode: "
-                      << (out.reject_reason ? out.reject_reason : "-");
-      if (ok) {
-        // Whatever it resolves to must name a port get_dmrs_port() can actually find.
-        int low = 0;
-        for (int i = 0; i < 12; i++) if ((out.dmrs_ports >> i) & 1) low++;
-        EXPECT_GE(low, out.nrOfLayers) << "antenna_ports=" << ap << " left layer 0 without a port";
-      }
-    } else {
-      EXPECT_FALSE(ok) << "out-of-domain antenna_ports=" << ap << " must be rejected, not asserted";
+
+    uint8_t exp_cdm = 0;
+    uint16_t exp_ports = 0;
+    int exp_fl = 0;
+    const bool table_ok = decode_dci_antenna_ports_val(1, nullptr, NR_PUSCH_Config__transformPrecoder_disabled,
+                                                       (uint8_t)ap, &exp_cdm, &exp_ports, &exp_fl) == 0;
+    EXPECT_EQ(ok, table_ok && exp_fl == 1) << "antenna_ports=" << ap << ": "
+                            << (out.reject_reason ? out.reject_reason : "-");
+    if (ok && table_ok) {
+      EXPECT_EQ(out.n_dmrs_cdm_groups, exp_cdm) << "antenna_ports=" << ap;
+      EXPECT_EQ(out.dmrs_ports, exp_ports) << "antenna_ports=" << ap;
+      // Whatever it resolves to must name a port get_dmrs_port() can actually find.
+      int low = 0;
+      for (int i = 0; i < 12; i++) if ((out.dmrs_ports >> i) & 1) low++;
+      EXPECT_GE(low, out.nrOfLayers) << "antenna_ports=" << ap << " left layer 0 without a port";
     }
+  }
+}
+
+/* Same table, DM-RS type 2 (opts.dmrs_config_type = 1). Before this fix, EVERY type-2 hypothesis was
+ * pruned upstream in nr_pdcch_ul_discovery.c's supported() gate and, even if it had reached here,
+ * this function's closed form rejected every antenna_ports value above 3 unconditionally -- so a
+ * type-2 UL cell produced zero UL grants regardless of aggregation level or RNTI range. */
+TEST_F(BlindPdcchTest, UlAntennaPortsType2DecodesViaReverseTable) {
+  auto opts = LiveUlOpts();
+  opts.dmrs_config_type = 1;   // DM-RS type 2
+  opts.antenna_ports_bits = 5; // type-2 rank-1 (Table 7.3.1.1.2-10/11) needs up to 28 code points
+  const auto len = nr_pdcch_blind_dci01_size(&opts);
+  long type2_tag = 1;
+  for (uint32_t ap = 0; ap < 32; ++ap) {
+    UlGroundTruth gt;
+    gt.riv = PRBalloc_to_locationandbandwidth0(24, 8, 273);
+    gt.mcs = 10;
+    gt.antenna_ports = ap;
+    nr_pdcch_blind_ul_result_t out{};
+    const bool ok = nr_pdcch_blind_extract_01(PackUlPayload(gt, opts), len, gt.rnti, &opts, &out);
+
+    uint8_t exp_cdm = 0;
+    uint16_t exp_ports = 0;
+    int exp_fl = 0;
+    const bool table_ok = decode_dci_antenna_ports_val(1, &type2_tag, NR_PUSCH_Config__transformPrecoder_disabled,
+                                                       (uint8_t)ap, &exp_cdm, &exp_ports, &exp_fl) == 0;
+    EXPECT_EQ(ok, table_ok && exp_fl == 1) << "antenna_ports=" << ap << ": "
+                            << (out.reject_reason ? out.reject_reason : "-");
+    if (ok && table_ok) {
+      EXPECT_EQ(out.dmrs_config_type, 1);
+      EXPECT_EQ(out.n_dmrs_cdm_groups, exp_cdm) << "antenna_ports=" << ap;
+      EXPECT_EQ(out.dmrs_ports, exp_ports) << "antenna_ports=" << ap;
+    }
+  }
+}
+
+/* TS 38.212 Tables 7.3.1.1.2-6/-7: rows 0..3 use one symbol; rows 4..11
+ * use two and are forbidden by maxLength1. maxLength2 still permits rows 0..3. */
+TEST_F(BlindPdcchTest, UlAntennaPortsTransformPrecodingDecodesViaReverseTable) {
+  for (int max_length : {1, 2}) {
+  auto opts = LiveUlOpts();
+  opts.transform_precoding = 1;
+  opts.mcs_table = 3;
+  opts.dmrs_max_length = max_length;
+  opts.dmrs_add_pos = 1;
+  opts.antenna_ports_bits = 4; // lut_tp_rev has 12 rows, needs 4 bits
+  const auto len = nr_pdcch_blind_dci01_size(&opts);
+  for (uint32_t ap = 0; ap < 16; ++ap) {
+    UlGroundTruth gt;
+    gt.riv = PRBalloc_to_locationandbandwidth0(24, 8, 273);
+    gt.mcs = 10;
+    gt.antenna_ports = ap;
+    nr_pdcch_blind_ul_result_t out{};
+    const bool ok = nr_pdcch_blind_extract_01(PackUlPayload(gt, opts), len, gt.rnti, &opts, &out);
+
+    uint8_t exp_cdm = 0;
+    uint16_t exp_ports = 0;
+    int exp_fl = 0;
+    const bool table_ok = decode_dci_antenna_ports_val(1, nullptr, NR_PUSCH_Config__transformPrecoder_enabled,
+                                                       (uint8_t)ap, &exp_cdm, &exp_ports, &exp_fl) == 0;
+    EXPECT_EQ(ok, table_ok && exp_fl <= max_length) << "maxLength=" << max_length << " antenna_ports=" << ap << ": "
+                            << (out.reject_reason ? out.reject_reason : "-");
+    if (ok && table_ok) {
+      EXPECT_EQ(out.n_dmrs_cdm_groups, exp_cdm) << "antenna_ports=" << ap;
+      EXPECT_EQ(out.dmrs_ports, exp_ports) << "antenna_ports=" << ap;
+      EXPECT_EQ(out.ul_dmrs_symb_pos, exp_fl == 1 ? 0x804 : 0xc0c);
+    }
+  }
+  }
+}
+
+TEST_F(BlindPdcchTest, UlMaxLength2SingleSymbolRowKeepsSingleSymbolMask) {
+  for (int type : {0, 1}) {
+    auto opts = LiveUlOpts();
+    opts.dmrs_config_type = type;
+    opts.dmrs_max_length = 2;
+    opts.dmrs_add_pos = 1;
+    UlGroundTruth gt; gt.riv = PRBalloc_to_locationandbandwidth0(24, 8, 273);
+    gt.mcs = 10; gt.antenna_ports = 0;
+    nr_pdcch_blind_ul_result_t out{};
+    ASSERT_TRUE(nr_pdcch_blind_extract_01(PackUlPayload(gt,opts),
+        nr_pdcch_blind_dci01_size(&opts),gt.rnti,&opts,&out));
+    EXPECT_EQ(out.ul_dmrs_symb_pos, 0x804);
+  }
+}
+
+TEST_F(BlindPdcchTest, UlTransformPrecodingRejectsType2) {
+  auto opts = LiveUlOpts();
+  opts.transform_precoding = 1; opts.mcs_table = 3; opts.dmrs_config_type = 1;
+  UlGroundTruth gt; gt.riv = PRBalloc_to_locationandbandwidth0(24, 8, 273); gt.mcs = 10;
+  nr_pdcch_blind_ul_result_t out{};
+  EXPECT_FALSE(nr_pdcch_blind_extract_01(PackUlPayload(gt,opts),
+      nr_pdcch_blind_dci01_size(&opts),gt.rnti,&opts,&out));
+}
+
+TEST_F(BlindPdcchTest, UlTransformPrecodingPduUsesMeasuredPciIndependentlyOfCpDmrsIdentity) {
+  nr_pdcch_blind_ul_result_t g{};
+  g.transform_precoding = 1; g.ul_dmrs_scrambling_id = 700; g.nscid = 1;
+  nfapi_nr_pusch_pdu_t p{};
+  nr_pusch_passive_fill_dmrs_pdu(&g, 42, &p);
+  EXPECT_EQ(p.pusch_identity, 42);
+  EXPECT_EQ(p.dfts_ofdm.low_papr_group_number, 12);
+  EXPECT_EQ(p.dfts_ofdm.low_papr_sequence_number, 0);
+  EXPECT_EQ(p.ul_dmrs_scrambling_id, 700);
+  g.ul_dmrs_scrambling_id = 701;
+  nr_pusch_passive_fill_dmrs_pdu(&g, 42, &p);
+  EXPECT_EQ(p.pusch_identity, 42);
+  EXPECT_EQ(p.dfts_ofdm.low_papr_group_number, 12);
+  nr_pusch_passive_fill_dmrs_pdu(&g, 43, &p);
+  EXPECT_EQ(p.pusch_identity, 43);
+  EXPECT_EQ(p.dfts_ofdm.low_papr_group_number, 13);
+}
+
+/* TS 38.214 6.1.4.1: transform-precoding-enabled UL uses Table 6.1.4.1-1 (opts.mcs_table=3, the
+ * default-RRC-config case) or -2 (opts.mcs_table=4, qam64LowSE), never the non-TP tables 0-2 --
+ * already implemented as nr_mac_common.c's Table_61411/Table_61412 (table_idx 3/4), just never
+ * reachable from the passive discovery path before this fix (the interp-sweep generator produced
+ * mcs_table in {0,1,2} for every hypothesis regardless of transform_precoding, so a TP-enabled
+ * cell's true table could never be represented as a hypothesis at all). */
+TEST_F(BlindPdcchTest, UlTransformPrecodingUsesTheTpMcsTables) {
+  for (int table : {3, 4}) {
+    auto opts = LiveUlOpts();
+    opts.transform_precoding = 1;
+    opts.mcs_table = table;
+    UlGroundTruth gt;
+    gt.riv = PRBalloc_to_locationandbandwidth0(24, 8, 273);
+    gt.mcs = 10;
+    const auto len = nr_pdcch_blind_dci01_size(&opts);
+    nr_pdcch_blind_ul_result_t out{};
+    ASSERT_TRUE(nr_pdcch_blind_extract_01(PackUlPayload(gt, opts), len, gt.rnti, &opts, &out))
+        << "table=" << table << ": " << (out.reject_reason ? out.reject_reason : "-");
+    EXPECT_EQ(out.mcs_table, table);
+
+    // A reserved codepoint of THIS TP table (found by walking down from the top of the MCS range,
+    // which proves the TP table is the one consulted) is no longer rejected at extraction: since the
+    // gap-harq merge, reserved UL MCS values are accepted as possible retransmissions and resolved
+    // downstream from the (rnti, pid) init-TX record (see UlMcsExtractionNoLongerGatesOnTheReservedRange).
+    // Extraction must accept it and keep the TP table.
+    uint32_t reserved_mcs = 31;
+    while (reserved_mcs > 0 && nr_get_code_rate_ul((uint8_t)reserved_mcs, (uint8_t)table) != 0)
+      --reserved_mcs;
+    ASSERT_GT(reserved_mcs, 0u) << "table=" << table << " has no reserved MCS to test with";
+    UlGroundTruth bad = gt;
+    bad.mcs = reserved_mcs;
+    nr_pdcch_blind_ul_result_t bad_out{};
+    EXPECT_TRUE(nr_pdcch_blind_extract_01(PackUlPayload(bad, opts), len, bad.rnti, &opts, &bad_out))
+        << "table=" << table << " mcs=" << reserved_mcs;
+    EXPECT_EQ(bad_out.mcs_table, table);
   }
 }
 
@@ -3154,6 +3440,7 @@ TEST_F(BlindPdcchTest, AutoDci10KeepsUlBitsAndClearsReusedReports) {
 #include <cstddef>
 extern "C" {
 #include "nr_pdcch_ul_field_sweep.h"
+#include "nr_pdcch_ul_interp_sweep.h"
 }
 static nr_pdcch_blind_ul_opts_t FeedbackIdentityOpts()
 {
@@ -3164,6 +3451,217 @@ static nr_pdcch_blind_ul_opts_t FeedbackIdentityOpts()
   nr_hyp_t h{}; h.len=sizeof(widths); memcpy(h.bytes,&widths,sizeof(widths));
   nr_pdcch_ul_field_sweep_apply(&h,&o);
   return o;
+}
+/* Scheduling regression, not a synthetic waveform-CRC claim: all baseline
+ * CRCs fail, so no width winner can unlock the interpretation stage. */
+static bool JointTpProbe(int observation, nr_pdcch_blind_ul_result_t *grant, bool retain_timing=false,
+                         bool wide=false)
+{
+  auto truth=FeedbackIdentityOpts();
+  truth.bwp_size=106; truth.dmrs_seq_init_bits=0;
+  truth.dai1_bits=2; // 36-bit payload: ten raw layouts, including distinct TP-compatible widths.
+  if(wide) truth.csi_request_bits=2;
+  truth.transform_precoding=1; truth.mcs_table=3;
+  for(int i=0;i<2;++i) { truth.tda_length[i]=14; truth.tda_k2[i]=1; }
+  if(retain_timing) for(int i=0;i<2;++i) { truth.tda_length[i]=13; truth.tda_k2[i]=6; }
+  auto baseline=truth; baseline.transform_precoding=0; baseline.mcs_table=0;
+  UlGroundTruth gt;
+  gt.riv=106*(1+observation%8); gt.mcs=2+observation%8;
+  gt.harq_pid=observation%8; gt.ndi=observation%2; gt.antenna_ports=0;
+  gt.tda_index=(observation/8)%2;
+  const auto len=nr_pdcch_blind_dci01_size(&truth);
+  const auto payload=PackUlPayload(gt,truth);
+  nr_pdcch_blind_ul_result_t known{};
+  EXPECT_TRUE(nr_pdcch_blind_extract_01(payload,len,gt.rnti,&truth,&known));
+  return nr_pdcch_ul_discovery_grant(&baseline,len,gt.rnti,payload,grant);
+}
+TEST_F(BlindPdcchTest, UlJointSearchReachesBothTpTablesWithoutWidthWinner)
+{
+  nr_pdcch_ul_discovery_reset();
+  bool reached[2][2]{};
+  for(int i=0;i<30000;++i) {
+    nr_pdcch_blind_ul_result_t grant{};
+    if(!JointTpProbe(i,&grant)) continue;
+    if(grant.transform_precoding && grant.mcs_table>=3 && grant.mcs_table<=4)
+      reached[grant.tda_index][grant.mcs_table-3]=true;
+    nr_pdcch_ul_discovery_feedback(&grant,false);
+    if(reached[0][0] && reached[0][1] && reached[1][0] && reached[1][1]) break;
+  }
+  EXPECT_EQ(nr_pdcch_ul_discovery_snapshot().width_winners,0);
+  EXPECT_GT(nr_pdcch_ul_discovery_snapshot().width_trials,0u);
+  for(int tda=0;tda<2;++tda) for(int table=0;table<2;++table)
+    EXPECT_TRUE(reached[tda][table]) << "TDA=" << tda << " table=" << table+3;
+  nr_pdcch_ul_discovery_reset();
+}
+TEST_F(BlindPdcchTest, UlJointSearchRetainsBaselineTimingAsAnUnvalidatedHypothesis)
+{
+  nr_pdcch_ul_discovery_reset();
+  bool reached[2][2]{};
+  for(int i=0;i<30000;++i) {
+    nr_pdcch_blind_ul_result_t g{};
+    if(!JointTpProbe(i,&g,true)) continue;
+    if(g.transform_precoding && g.mcs_table>=3 && g.mcs_table<=4 && g.num_symbols==13 && g.k2==6)
+      reached[g.tda_index][g.mcs_table-3]=true;
+    nr_pdcch_ul_discovery_feedback(&g,false);
+    if(reached[0][0] && reached[0][1] && reached[1][0] && reached[1][1]) break;
+  }
+  for(int t=0;t<2;++t) for(int m=0;m<2;++m) EXPECT_TRUE(reached[t][m]) << "tda=" << t << " table=" << m+3;
+  EXPECT_EQ(nr_pdcch_ul_discovery_snapshot().width_winners,0);
+  EXPECT_EQ(nr_pdcch_ul_discovery_snapshot().interp_winners,0);
+  nr_pdcch_ul_discovery_reset();
+}
+TEST_F(BlindPdcchTest, UlJointCatalogDeduplicatesRowsAndRefusesWholeOverflow)
+{
+  for(int retained=0;retained<2;++retained) {
+    nr_pdcch_ul_discovery_reset();
+    for(int i=0;i<30000 && nr_pdcch_ul_discovery_snapshot().interp_classes==0;++i) {
+      nr_pdcch_blind_ul_result_t g{};
+      if(JointTpProbe(i,&g,retained)) nr_pdcch_ul_discovery_feedback(&g,false);
+    }
+    /* Ten raw layouts: nine omit sequence initialization (TP), one includes
+     * it (CP). Two TDAs times [9*160 + 1*480] generic configurations. An
+     * already-present row adds zero; a new row adds 2*[9*16 + 1*48]. */
+    EXPECT_EQ(nr_pdcch_ul_discovery_snapshot().interp_classes,retained?4224:3840);
+  }
+  nr_pdcch_ul_discovery_reset();
+  for(int i=0;i<100000 && !nr_pdcch_ul_discovery_snapshot().interp_refusals;++i) {
+    nr_pdcch_blind_ul_result_t g{};
+    if(JointTpProbe(i,&g,false,true)) nr_pdcch_ul_discovery_feedback(&g,false);
+  }
+  const auto before=nr_pdcch_ul_discovery_snapshot();
+  EXPECT_EQ(before.interp_refusals,1);
+  EXPECT_EQ(before.interp_classes,0);
+  for(int i=100000;i<101000;++i) {
+    nr_pdcch_blind_ul_result_t g{};
+    if(JointTpProbe(i,&g,false,true)) nr_pdcch_ul_discovery_feedback(&g,false);
+  }
+  const auto after=nr_pdcch_ul_discovery_snapshot();
+  EXPECT_GT(after.width_trials,before.width_trials);
+  EXPECT_EQ(after.interp_trials,0u);
+  nr_pdcch_ul_discovery_reset();
+}
+TEST_F(BlindPdcchTest, UlJointWinnerCannotStarveAnotherTda)
+{
+  nr_pdcch_ul_discovery_reset();
+  auto opts=FeedbackIdentityOpts();
+  opts.bwp_size=106; opts.dai1_bits=2; opts.dmrs_seq_init_bits=0;
+  std::vector<nr_hyp_t> raw(NR_HYP_SWEEP_MAX_RAW);
+  const int count=nr_pdcch_ul_field_sweep_generate(&opts,36,raw.data(),raw.size());
+  ASSERT_EQ(count,10);
+  int shifted_width=-1;
+  for(int i=0;i<count;++i) {
+    nr_pdcch_ul_field_widths_t w;
+    memcpy(&w,raw[i].bytes,sizeof(w));
+    if(w.bwp_indicator_bits==1) shifted_width=i+1;
+  }
+  ASSERT_GT(shifted_width,0);
+  nr_pdcch_blind_ul_result_t g{};
+  for(int i=0;i<16;++i) if(JointTpProbe(i,&g)) nr_pdcch_ul_discovery_feedback(&g,false);
+  int first_class=-1,first_passes=0;
+  for(int i=0;i<500000 && nr_pdcch_ul_discovery_snapshot().interp_winners==0;++i) {
+    /* Eight distinct bootstrap samples above; these two legal fresh DCI
+     * observations alternate the true TDA bit. The shifted layout instead
+     * reads the zero MCS MSB as TDA0, so its winner parses BOTH payloads. */
+    if(!JointTpProbe((i%2)*8,&g)) continue;
+    if(first_class<0 && g.hyp_width_raw==shifted_width && g.tda_index==0 &&
+       g.transform_precoding && g.mcs_table==3) first_class=g.interp_hyp_class;
+    const bool pass=first_class>=0 && g.interp_hyp_class==first_class;
+    first_passes+=pass;
+    nr_pdcch_ul_discovery_feedback(&g,pass);
+  }
+  ASSERT_GE(first_class,0);
+  ASSERT_EQ(nr_pdcch_ul_discovery_snapshot().interp_winners,1);
+  int row1_probes=0;
+  for(int i=0;i<500000 && nr_pdcch_ul_discovery_snapshot().interp_winners<2;++i) {
+    if(!JointTpProbe((i%2)*8,&g)) continue;
+    const bool row1=g.interp_hyp_class>=0 && g.tda_index==1;
+    row1_probes+=row1;
+    nr_pdcch_ul_discovery_feedback(&g,row1 || g.interp_hyp_class==first_class);
+  }
+  EXPECT_GT(row1_probes,0);
+  EXPECT_EQ(nr_pdcch_ul_discovery_snapshot().interp_winners,2);
+  EXPECT_EQ(nr_pdcch_ul_discovery_snapshot().width_winners,0);
+  printf("joint winner fairness: first_passes=%d row1_probes=%d winners=%d\n",
+         first_passes,row1_probes,nr_pdcch_ul_discovery_snapshot().interp_winners);
+  nr_pdcch_ul_discovery_reset();
+}
+TEST_F(BlindPdcchTest, UlJointFeedbackCannotCrossStageOrGeneration)
+{
+  nr_pdcch_ul_discovery_reset();
+  nr_pdcch_blind_ul_result_t baseline{}, joint{};
+  bool found=false;
+  for(int i=0;i<30000;++i) {
+    nr_pdcch_blind_ul_result_t grant{};
+    if(!JointTpProbe(i,&grant)) continue;
+    if(grant.width_hyp_class>=0) baseline=grant;
+    if(grant.transform_precoding) { joint=grant; found=true; break; }
+    nr_pdcch_ul_discovery_feedback(&grant,false);
+  }
+  ASSERT_TRUE(found); ASSERT_GE(baseline.width_hyp_class,0); ASSERT_GE(joint.interp_hyp_class,0);
+  auto before=nr_pdcch_ul_discovery_snapshot();
+  nr_pdcch_ul_discovery_feedback(&baseline,false);
+  auto after=nr_pdcch_ul_discovery_snapshot();
+  EXPECT_EQ(after.width_trials,before.width_trials+1); EXPECT_EQ(after.interp_trials,before.interp_trials);
+  before=after;
+  auto forged=joint; forged.interp_hyp_class=-1; forged.width_hyp_class=baseline.width_hyp_class;
+  nr_pdcch_ul_discovery_feedback(&forged,true);
+  after=nr_pdcch_ul_discovery_snapshot();
+  EXPECT_EQ(after.width_trials,before.width_trials); EXPECT_EQ(after.interp_trials,before.interp_trials);
+  EXPECT_EQ(after.rejected_feedback,before.rejected_feedback+1);
+  nr_pdcch_ul_discovery_feedback(&joint,true);
+  EXPECT_EQ(nr_pdcch_ul_discovery_snapshot().interp_trials,before.interp_trials+1);
+  for(int mutation=0;mutation<3;++mutation) {
+    before=nr_pdcch_ul_discovery_snapshot();
+    forged=joint;
+    if(mutation==0) ++forged.hyp_width_raw;
+    if(mutation==1) ++forged.hyp_interp_raw;
+    if(mutation==2) forged.tda_index^=1;
+    nr_pdcch_ul_discovery_feedback(&forged,true);
+    after=nr_pdcch_ul_discovery_snapshot();
+    EXPECT_EQ(after.width_trials,before.width_trials);
+    EXPECT_EQ(after.interp_trials,before.interp_trials);
+    EXPECT_EQ(after.rejected_feedback,before.rejected_feedback+1);
+  }
+  nr_pdcch_ul_discovery_reset();
+  for(int i=0;i<8;++i) JointTpProbe(i,&forged);
+  before=nr_pdcch_ul_discovery_snapshot(); nr_pdcch_ul_discovery_feedback(&joint,true);
+  after=nr_pdcch_ul_discovery_snapshot();
+  EXPECT_EQ(after.width_trials,before.width_trials); EXPECT_EQ(after.interp_trials,before.interp_trials);
+  EXPECT_EQ(after.rejected_feedback,before.rejected_feedback+1);
+  nr_pdcch_ul_discovery_reset();
+}
+TEST_F(BlindPdcchTest, UlJointEvidenceKeepsRawWidthsAndTdaRowsSeparate)
+{
+  nr_pdcch_ul_discovery_reset();
+  nr_pdcch_blind_ul_result_t first{}, other{}, row{};
+  bool have_first=false,have_other=false,have_row=false;
+  for(int i=0;i<30000;++i) {
+    nr_pdcch_blind_ul_result_t g{};
+    if(!JointTpProbe(i,&g)) continue;
+    if(g.interp_hyp_class>=0) {
+      if(!have_first) { first=g; have_first=true; }
+      if(g.hyp_width_raw!=first.hyp_width_raw) { other=g; have_other=true; }
+      if(g.hyp_width_raw==first.hyp_width_raw && g.tda_index!=first.tda_index) { row=g; have_row=true; }
+      if(have_other && have_row) break;
+    }
+    nr_pdcch_ul_discovery_feedback(&g,false);
+  }
+  ASSERT_TRUE(have_first); ASSERT_TRUE(have_other); ASSERT_TRUE(have_row);
+  EXPECT_NE(first.interp_hyp_class,other.interp_hyp_class);
+  EXPECT_NE(first.interp_hyp_class,row.interp_hyp_class);
+  const auto before=nr_pdcch_ul_discovery_snapshot();
+  auto forged=first; forged.interp_hyp_class=other.interp_hyp_class;
+  nr_pdcch_ul_discovery_feedback(&forged,true);
+  forged=first; forged.interp_hyp_class=row.interp_hyp_class;
+  nr_pdcch_ul_discovery_feedback(&forged,true);
+  auto after=nr_pdcch_ul_discovery_snapshot();
+  EXPECT_EQ(after.interp_trials,before.interp_trials);
+  EXPECT_EQ(after.rejected_feedback,before.rejected_feedback+2);
+  for(const auto &g:{first,other,row}) nr_pdcch_ul_discovery_feedback(&g,false);
+  after=nr_pdcch_ul_discovery_snapshot();
+  EXPECT_EQ(after.interp_trials,before.interp_trials+3);
+  EXPECT_EQ(after.width_trials,before.width_trials);
+  nr_pdcch_ul_discovery_reset();
 }
 static bool FeedbackIdentityGrant(const nr_pdcch_blind_ul_opts_t &opts, int observation,
                                    nr_pdcch_blind_ul_result_t *grant, nr_pdcch_blind_ul_result_t *truth)
@@ -3323,6 +3821,81 @@ TEST_F(BlindPdcchTest, Dci01FdraModeCandidatesNarrowByLengthConsistency) {
 
   // A length nothing can reproduce (absurdly large) narrows to nothing, not a false positive.
   EXPECT_EQ(nr_pdcch_blind_ul_fdra_mode_candidates(&truth, 63, candidates, 4), 0);
+}
+
+#include "nr_passive_ul_grant_book.h"
+
+TEST_F(BlindPdcchTest, Dci01EqualLengthFdraHypothesesSurviveBookUntilCrc) {
+  nr_pdcch_blind_ul_opts_t o{};
+  o.bwp_size = 106;
+  o.fdra_mode = NR_FDRA_DYN_CFG2;
+  o.mcs_table = o.data_scrambling_id = o.ul_dmrs_scrambling_id = -1;
+  o.dmrs_add_pos = o.dmrs_max_length = -1;
+  UlGroundTruth gt;
+  const uint32_t bitmap = 0x22; // dynamic CFG2: RBGs1,5 => PRBs16..31,80..95
+  const uint16_t length = nr_pdcch_blind_dci01_size(&o);
+  const uint64_t payload = PackUlPayloadFdra(gt, o, bitmap, 14);
+  nr_pdcch_blind_ul_result_t bundle{};
+  ASSERT_EQ(nr_pdcch_blind_ul_fdra_bundle(&o, payload, length, gt.rnti, &bundle), 2);
+  EXPECT_EQ(bundle.fdra_candidates[0].mode, NR_FDRA_TYPE0_CFG1);
+  EXPECT_EQ(bundle.fdra_candidates[0].start_rb, 64);
+  EXPECT_EQ(bundle.fdra_candidates[0].num_rb, 16);
+  EXPECT_EQ(bundle.fdra_candidates[1].mode, NR_FDRA_DYN_CFG2);
+  EXPECT_EQ(bundle.fdra_candidates[1].start_rb, 16);
+  EXPECT_EQ(bundle.fdra_candidates[1].num_rb, 32);
+  EXPECT_GE(bundle.width_hyp_class, 0); // a win must never rehabilitate the type-1 oracle
+  bundle.data_id_advance = true;
+  nr_passive_ul_book_t book{};
+  ASSERT_EQ(nr_passive_ul_book_put(&book, &bundle, 20), 1);
+  EXPECT_EQ(nr_passive_ul_book_put(&book, &bundle, 20), 0); // one job, including both allocations
+  nr_passive_ul_book_entry_t entry{};
+  unsigned expired = 0;
+  ASSERT_TRUE(nr_passive_ul_book_take(&book, 20 + bundle.k2, 20, &entry, &expired));
+  EXPECT_FALSE(nr_passive_ul_book_take(&book, 20 + bundle.k2, 20, &entry, &expired));
+  struct Trial { int count = 0; } trial;
+  const int winner = nr_pdcch_blind_ul_fdra_try(&entry.grant,
+      [](void *v, const nr_pdcch_blind_ul_result_t *g) {
+        ++static_cast<Trial *>(v)->count;
+        EXPECT_FALSE(g->data_id_advance); // feedback is once per bundle, after all allocation attempts
+        return g->rbg_size == 16 && g->rbg_bitmap == 0x22;
+      }, &trial);
+  EXPECT_EQ(winner, 1);
+  EXPECT_EQ(trial.count, 2);
+}
+
+TEST_F(BlindPdcchTest, Dci01FdraRetriesAreBoundedAndStopOnlyOnCrcSuccess) {
+  nr_pdcch_blind_ul_result_t bundle{};
+  bundle.fdra_candidate_count = NR_PUSCH_FDRA_MAX_CANDIDATES;
+  int calls = 0;
+  EXPECT_EQ(nr_pdcch_blind_ul_fdra_try(&bundle,
+      [](void *v, const nr_pdcch_blind_ul_result_t *) { ++*static_cast<int *>(v); return false; }, &calls), -1);
+  EXPECT_EQ(calls, NR_PUSCH_FDRA_MAX_CANDIDATES);
+  calls = 0;
+  EXPECT_EQ(nr_pdcch_blind_ul_fdra_try(&bundle,
+      [](void *v, const nr_pdcch_blind_ul_result_t *) { ++*static_cast<int *>(v); return true; }, &calls), 0);
+  EXPECT_EQ(calls, 1);
+  bundle.fdra_candidate_count++;
+  calls = 0;
+  EXPECT_EQ(nr_pdcch_blind_ul_fdra_try(&bundle,
+      [](void *v, const nr_pdcch_blind_ul_result_t *) { ++*static_cast<int *>(v); return true; }, &calls), -1);
+  EXPECT_EQ(calls, 0);
+}
+
+TEST_F(BlindPdcchTest, Dci01DynamicType1BranchIsNotDiscardedWithTheOldType1Layout) {
+  nr_pdcch_blind_ul_opts_t o{};
+  o.bwp_size = 106;
+  o.fdra_mode = NR_FDRA_DYN_CFG2;
+  o.mcs_table = o.data_scrambling_id = o.ul_dmrs_scrambling_id = -1;
+  o.dmrs_add_pos = o.dmrs_max_length = -1;
+  UlGroundTruth gt;
+  const uint32_t field = (1u << 13) | (106 * 3 + 2); // dynamic RIV: four PRBs starting at2
+  nr_pdcch_blind_ul_result_t bundle{};
+  ASSERT_EQ(nr_pdcch_blind_ul_fdra_bundle(&o, PackUlPayloadFdra(gt, o, field, 14),
+                                         nr_pdcch_blind_dci01_size(&o), gt.rnti, &bundle), 2);
+  EXPECT_EQ(bundle.fdra_candidates[1].mode, NR_FDRA_DYN_CFG2);
+  EXPECT_EQ(bundle.fdra_candidates[1].ra_type0, 0);
+  EXPECT_EQ(bundle.fdra_candidates[1].start_rb, 2);
+  EXPECT_EQ(bundle.fdra_candidates[1].num_rb, 4);
 }
 
 TEST_F(BlindPdcchTest, Dci01ExtractRaType0BitmapProducesTheCorrectPrbList) {

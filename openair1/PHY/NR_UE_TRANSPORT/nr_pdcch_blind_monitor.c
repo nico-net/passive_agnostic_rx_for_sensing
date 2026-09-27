@@ -3993,9 +3993,6 @@ bool nr_pdcch_blind_extract_11(const nr_pdcch_blind_raw_result_t *raw,
     out->reject_reason = "format indicator=0 (UL grant, not a PDSCH DCI)";
     return false;
   }
-  /* 4-bit field: Table 7.3.1.2.2-1 (type 1, maxLength 1). 5-bit field: Table -2 (type 1, maxLength 2),
-   * whose code point also fixes the DM-RS symbol count. Type 2 (5/6 bits, Tables -3/-4) is not
-   * decoded: rejected as out of range, so a type-2 hypothesis never produces a grant. */
   /* Table by (field width, DM-RS type): 4 bits = type 1 len 1 (-1); 5 bits = type 1 len 2 (-2) or
    * type 2 len 1 (-3), told apart by the DM-RS type hypothesis; 6 bits = type 2 len 2 (-4). */
   const int dmrs_t2 = (opts != NULL && opts->dmrs_config_type == 1);
@@ -4378,6 +4375,53 @@ int nr_pdcch_blind_ul_fdra_mode_candidates(const nr_pdcch_blind_ul_opts_t *opts,
   return n;
 }
 
+int nr_pdcch_blind_ul_fdra_bundle(const nr_pdcch_blind_ul_opts_t *opts, uint64_t payload,
+                                 uint16_t length, uint16_t rnti, nr_pdcch_blind_ul_result_t *out)
+{
+  if (!opts || !out) return 0;
+  memset(out, 0, sizeof(*out));
+  uint8_t modes[NR_PUSCH_FDRA_MAX_CANDIDATES];
+  nr_pdcch_blind_ul_opts_t trial = *opts;
+  trial.fdra_bwp_start = opts->bwp_start;
+  const int n = nr_pdcch_blind_ul_fdra_mode_candidates(&trial, length, modes, NR_PUSCH_FDRA_MAX_CANDIDATES);
+  for (int i = 0; i < n; ++i) {
+    trial.fdra_mode = modes[i];
+    nr_pdcch_blind_ul_result_t alt;
+    if (!nr_pdcch_blind_extract_01(payload, length, rnti, &trial, &alt)) continue;
+    const int count = out->fdra_candidate_count;
+    if (count == 0) {
+      *out = alt;
+      /* FDRA retries are link evidence, not evidence for the refuted type-1 layout. */
+      out->width_hyp_class = 0;
+    }
+    out->fdra_candidates[count] = (nr_pusch_fdra_allocation_t){
+      .start_rb=alt.start_rb, .num_rb=alt.num_rb, .rbg_bwp_start=alt.rbg_bwp_start,
+      .ra_type0=alt.ra_type0, .rbg_size=alt.rbg_size, .mode=modes[i], .rbg_bitmap=alt.rbg_bitmap};
+    out->fdra_candidate_count = count + 1;
+  }
+  return out->fdra_candidate_count;
+}
+
+int nr_pdcch_blind_ul_fdra_try(const nr_pdcch_blind_ul_result_t *bundle,
+                              bool (*attempt)(void *, const nr_pdcch_blind_ul_result_t *), void *opaque)
+{
+  if (!bundle || !attempt || bundle->fdra_candidate_count > NR_PUSCH_FDRA_MAX_CANDIDATES) return -1;
+  if (!bundle->fdra_candidate_count) return attempt(opaque, bundle) ? 0 : -1;
+  for (int i = 0; i < bundle->fdra_candidate_count; ++i) {
+    nr_pdcch_blind_ul_result_t candidate = *bundle;
+    const nr_pusch_fdra_allocation_t *a = &bundle->fdra_candidates[i];
+    candidate.start_rb = a->start_rb;
+    candidate.num_rb = a->num_rb;
+    candidate.ra_type0 = a->ra_type0;
+    candidate.rbg_size = a->rbg_size;
+    candidate.rbg_bwp_start = a->rbg_bwp_start;
+    candidate.rbg_bitmap = a->rbg_bitmap;
+    candidate.data_id_advance = false;
+    if (attempt(opaque, &candidate)) return i;
+  }
+  return -1;
+}
+
 /// Resolve the PUSCH time-domain allocation. `mu` is the numerology, needed for k2's j offset when
 /// the default table applies. Returns false when the index is past the configured list -- on a
 /// 2-entry list that rejects 14 of 16 code points, which is a strong plausibility check in itself.
@@ -4435,6 +4479,10 @@ static bool blind_ul_finish(const nr_pdcch_blind_ul_opts_t* opts,
     out->reject_reason = "invalid measured UL numerology or MIB DMRS position";
     return false;
   }
+  if (opts->transform_precoding && opts->dmrs_config_type != 0) {
+    out->reject_reason = "transform precoding requires DM-RS type 1";
+    return false;
+  }
   uint16_t start_rb, num_rb;
   int ra_type0 = 0, rbg_size = 0, n_rbg = 0;
   if (opts->fdra_mode == NR_FDRA_TYPE1) {
@@ -4488,43 +4536,64 @@ static bool blind_ul_finish(const nr_pdcch_blind_ul_opts_t* opts,
                           ? force_add_pos
                           : ((opts->dmrs_add_pos >= 0) ? opts->dmrs_add_pos : 2);
   const int max_len = (opts->dmrs_max_length > 0) ? opts->dmrs_max_length : 1;
-  const int32_t mask = nr_pdcch_blind_ul_dmrs_mask(L, S, mapping_is_b, add_pos, max_len, opts->dmrs_typeA_position);
-  if (mask < 0) {
-    out->reject_reason = "no valid PUSCH DM-RS position for this allocation length";
-    return false;
-  }
 
-  // Antenna ports -> (CDM groups without data, port bitmask). Closed form rather than a table,
-  // copied from mac_tables.c's ul_ports_config() for the transform-precoder-disabled / dmrs-type1 /
-  // maxLength1 / rank-1 case (TS 38.212 Table 7.3.1.1.2-8), which is the only combination this
-  // deployment produces. Verified against the live gNB 2026-08-25: it logs `ant=2` on every UL DCI
-  // and dumps `num_dmrs_cdm_grps_no_data=2 dmrs_ports=1`, which is exactly what val=2 gives here.
-  /* `antenna_ports` is a RAW payload field, and the width sweep tries 2..5 bits for it, so values
-   * up to 31 reach this point. The closed form below is defined ONLY over Table 7.3.1.1.2-8's four
-   * rows (transform precoder disabled, DM-RS type 1, maxLength 1, rank 1) -- the sole combination
-   * this path supports and the only one its caller emits. Outside that domain it produces nonsense.
-   * Measured 2026-09-09: antenna_ports=14 yields 1u<<12, a port bitmap with no port below 12, which
-   * AssertFatal()s inside get_dmrs_port() ("No dmrs port corresponding to layer 0 found") and
-   * killed the entire softmodem mid-capture. Values above 17 are worse still -- they truncate to 0
-   * in a uint16_t and read silently as "DCI 1_0, port 0".
-   * A blind decoder must REJECT a code point it cannot interpret, never abort and never guess. */
-  if (antenna_ports > 3) {
-    out->reject_reason = "antenna-ports code point outside Table 7.3.1.1.2-8's four rows";
-    return false;
-  }
+  // Antenna ports -> (CDM groups without data, port bitmask). Was a closed form defined ONLY over
+  // Table 7.3.1.1.2-8's four rows (transform precoder disabled, DM-RS type 1, maxLength 1, rank 1),
+  // which rejected every DM-RS-type-2 hypothesis as "antenna-ports code point outside Table
+  // 7.3.1.1.2-8's four rows" before it could ever be evaluated -- the whole reason a type-2 cell
+  // produced zero UL grants. Replaced by decode_dci_antenna_ports_val() (nr_mac_common.c), the same
+  // reverse-table lookup mac_tables.c's ul_ports_config() uses for an attached UE's own PUSCH: it
+  // already covers DM-RS type 1 AND type 2, both maxLength values, ranks 1-4, and bounds `val`
+  // against the real table size itself (no separate range guard needed here). Verified against the
+  // live gNB 2026-08-25 for the type-1/rank-1 case this deployment produces: it logs `ant=2` on
+  // every UL DCI and dumps `num_dmrs_cdm_grps_no_data=2 dmrs_ports=1`, which is exactly what val=2
+  // still gives via the reverse table.
+  //
+  // `antenna_ports` is a RAW payload field, and the width sweep tries 2..5 bits for it, so values
+  // up to 31 reach this point; decode_dci_antenna_ports_val() returns -1 (rejected) for any value
+  // its table doesn't define, which is what prevents the AssertFatal-in-get_dmrs_port() landmine
+  // (measured 2026-09-09: antenna_ports=14 under the OLD closed form yielded 1u<<12, a port bitmap
+  // with no port below 12) -- a blind decoder must REJECT a code point it cannot interpret, never
+  // abort and never guess, and the reverse table's own bounds check gives that for free.
   uint8_t  cdm_groups;
   uint16_t ports;
-  if (opts->transform_precoding == 1) {
-    cdm_groups = 2;
-    ports      = (uint16_t)(1u << antenna_ports);
-  } else if (nrOfLayers <= 1) {
-    cdm_groups = (antenna_ports > 1) ? 2 : 1;
-    ports      = (uint16_t)(1u << ((antenna_ports > 1) ? (antenna_ports - 2) : antenna_ports));
+  int front_load = 0;
+  if (nrOfLayers <= 1) {
+    // decode_dci_antenna_ports_val() branches on `tp` FIRST (transform-precoding-enabled always
+    // uses lut_tp_rev, TS 38.212 Table 7.3.1.1.2-6/-7, regardless of dmrs_type -- transform
+    // precoding mandates DM-RS type 1 by spec, so dmrs_type_arg is computed the same way either
+    // way and simply ignored when tp is enabled). This used to be a hand-rolled closed form here
+    // (cdm_groups=2; ports=1u<<antenna_ports;) that -- like the pre-fix DM-RS-type-1-only closed
+    // form above -- was only correct for antenna_ports 0..3 (front_load 1); lut_tp_rev's rows 4..11
+    // (front_load 2) wrap the port index instead of shifting it further, so the old formula was
+    // wrong there too. One table lookup now covers type 1, type 2, and transform precoding.
+    long dmrs_type2 = 1;
+    const long *dmrs_type_arg = (opts->dmrs_config_type > 0) ? &dmrs_type2 : NULL;
+    const long tp = (opts->transform_precoding == 1) ? NR_PUSCH_Config__transformPrecoder_enabled
+                                                     : NR_PUSCH_Config__transformPrecoder_disabled;
+    if (decode_dci_antenna_ports_val((uint8_t)nrOfLayers, dmrs_type_arg, tp,
+                                     (uint8_t)antenna_ports, &cdm_groups, &ports, &front_load) != 0) {
+      out->reject_reason = "antenna-ports code point outside its DM-RS-type/rank reverse table";
+      return false;
+    }
   } else {
     // Multi-layer UL is out of scope: this deployment schedules num_layers=1 and the passive
     // receiver has no way to separate UE layers it was not precoded for. Reject rather than
     // produce a confident wrong port set.
     out->reject_reason = "multi-layer PUSCH not supported by this monitor";
+    return false;
+  }
+
+  // maxLength is an upper bound. A maxLength2 configuration can schedule a
+  // single-symbol row; the row, not that bound, determines the actual mask.
+  if (front_load < 1 || front_load > max_len) {
+    out->reject_reason = "antenna-ports front-loading exceeds DM-RS maxLength";
+    return false;
+  }
+  const int32_t mask = nr_pdcch_blind_ul_dmrs_mask(L, S, mapping_is_b, add_pos,
+                                                front_load, opts->dmrs_typeA_position);
+  if (mask < 0) {
+    out->reject_reason = "no valid PUSCH DM-RS position for this allocation length";
     return false;
   }
 

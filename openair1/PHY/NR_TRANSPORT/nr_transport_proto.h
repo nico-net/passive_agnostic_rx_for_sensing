@@ -100,6 +100,12 @@ int nr_rx_pusch_group_tp(PHY_VARS_gNB *gNB,
                          uint32_t frame,
                          uint8_t slot);
 
+/* Single-user CP-OFDM receive with an increasing, BWP-relative PRB list.
+ * n_prb must equal pdu->rb_size. The ordinary contiguous entry point is unchanged. */
+int nr_rx_pusch_prb_list_tp(PHY_VARS_gNB *gNB, NR_gNB_PUSCH *pusch_vars,
+                           const nfapi_nr_pusch_pdu_t *pdu, uint32_t *unav_res,
+                           uint32_t frame, uint8_t slot, const uint16_t *prb, int n_prb);
+
 /*!
 \brief This function implements the idft transform precoding in PUSCH
 \param z Pointer to input in frequnecy domain, and it is also the output in time domain

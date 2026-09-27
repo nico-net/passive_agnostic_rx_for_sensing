@@ -2158,6 +2158,28 @@ target_link_libraries(nr_ulsim PRIVATE
   )
 target_link_libraries(nr_ulsim PRIVATE asn1_nr_rrc_hdrs asn1_lte_rrc_hdrs)
 
+add_executable(nr_pusch_ra0sim
+  ${OPENAIR1_DIR}/SIMULATION/NR_PHY/pusch_ra0sim.c
+  ${NFAPI_USER_DIR}/nfapi.c
+  ${NFAPI_USER_DIR}/gnb_ind_vars.c
+  ${PHY_INTERFACE_DIR}/queue_t.c)
+target_link_libraries(nr_pusch_ra0sim PRIVATE
+  -Wl,--start-group UTIL SIMU PHY_NR_COMMON PHY_NR PHY_NR_UE NR_UE_ISAC SCHED_NR_LIB SCHED_NR_UE_LIB MAC_UE_NR MAC_NR_COMMON CONFIG_LIB L2_NR nr_pdcch_blind_monitor -Wl,--end-group
+  m pthread ${T_LIB} ITTI dl nr_ue_phy_meas physim_common softmodem_common NR_L2_UE
+  asn1_nr_rrc_hdrs asn1_lte_rrc_hdrs)
+if (ENABLE_TESTS)
+  add_test(NAME test_nr_pusch_ra0_qpsk COMMAND nr_pusch_ra0sim -n 2 -s 60 -S 60.1 -r 16 -w 2 -R 106 -m 9 -v 1)
+  add_test(NAME test_nr_pusch_ra0_qam16 COMMAND nr_pusch_ra0sim -n 2 -s 60 -S 60.1 -r 16 -w 2 -R 106 -m 16 -v 1)
+  add_test(NAME test_nr_pusch_ra0_qam64 COMMAND nr_pusch_ra0sim -n 2 -s 60 -S 60.1 -r 16 -w 46 -R 106 -m 24 -v 1)
+  add_test(NAME test_nr_pusch_ra0_qam256 COMMAND nr_pusch_ra0sim -n 2 -s 60 -S 60.1 -r 16 -w 46 -R 106 -m 25 -q 1 -v 1)
+  add_test(NAME test_nr_pusch_ra0_multidmrs COMMAND nr_pusch_ra0sim -n 2 -s 60 -S 60.1 -r 16 -w 2 -R 106 -m 16 -v 1 -U 0,2,1,2)
+  add_test(NAME test_nr_pusch_ra0_short_segments COMMAND nr_pusch_ra0sim -n 2 -s 60 -S 60.1 -r 3 -w 50 -R 106 -m 9 -v 1)
+  add_test(NAME test_nr_pusch_ra0_late_typeb COMMAND nr_pusch_ra0sim -n 2 -s 60 -S 60.1 -r 16 -w 2 -R 106 -m 9 -v 1 -a 5 -b 4)
+  add_test(NAME test_nr_pusch_ra0_type2 COMMAND nr_pusch_ra0sim -n 2 -s 60 -S 60.1 -r 16 -w 53 -R 106 -m 9 -v 1 -U 0,0,2,1)
+  add_test(NAME test_nr_pusch_ra0_fdra_collision COMMAND nr_pusch_ra0sim -n 2 -s 60 -S 60.1 -r 32 -w 16 -R 106 -m 9 -v 1)
+  set_tests_properties(test_nr_pusch_ra0_fdra_collision PROPERTIES ENVIRONMENT "RA0_FDRA_COLLISION=1")
+endif()
+
 add_executable(nr_srssim
   ${OPENAIR1_DIR}/SIMULATION/NR_PHY/srssim.c
   ${NFAPI_USER_DIR}/nfapi.c
@@ -2271,6 +2293,7 @@ endif()
 
 if(ENABLE_TESTS)
   find_package(GTest)
+  add_dependencies(tests nr_pusch_ra0sim)
   if (NOT GTest_FOUND)
     message(STATUS "GTest package not found, will download googletest automatically. To prevent that install google test on your system (libgtest-dev)")
     CPMAddPackage(

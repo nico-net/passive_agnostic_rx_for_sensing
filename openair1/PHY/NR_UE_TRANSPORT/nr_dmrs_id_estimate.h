@@ -97,13 +97,17 @@ void nr_dmrs_id_set_range(nr_dmrs_id_state_t *st, uint32_t first, uint32_t count
  *   nb_rb            : allocation width in RBs
  *   N_RB, symbols_per_slot, slot, symbol, nscid : as passed to nr_gold_pdsch/nr_pdsch_dmrs_rx
  *   normal_cp        : 1 for normal CP (extended CP is not supported by the pilot generator either)
+ *   dmrs_type        : NFAPI_NR_DMRS_TYPE1 (0) or NFAPI_NR_DMRS_TYPE2 (1) -- selects both the
+ *                      reference-sequence generation (nr_pdsch_dmrs_rx's config_type) and the RE
+ *                      stepping (comb-2 for type 1, TS 38.211 6.4.1.1.3-2's 2-adjacent-per-6 for
+ *                      type 2); CDM group 0 (delta=0) either way, matching the port-1000 assumption
  * Returns the number of candidates scored (the current window's range_count) or 0 on invalid
  * input. Works WITHOUT a CRC precondition on purpose -- the DM-RS sequence is fully determined by
  * the (nid, slot, symbol) tuple regardless of whether the payload later decodes, so requiring a
  * CRC pass first would be circular: under a wrong id the CRC never passes. */
 int nr_dmrs_id_accumulate(nr_dmrs_id_state_t *st, const c16_t *rx_symbol, int ofdm_symbol_size,
                           int start_subcarrier, int rb_offset, int nb_rb, int N_RB,
-                          int symbols_per_slot, int slot, int symbol, int nscid, int normal_cp);
+                          int symbols_per_slot, int slot, int symbol, int nscid, int normal_cp, int dmrs_type);
 
 /* Decide once enough evidence exists. Returns true exactly when the decision is first made.
  * min_margin_db is the best-over-median gate; 10 dB is comfortably above what 1023 wrong
@@ -160,10 +164,10 @@ typedef struct {
 } nr_dmrs_id_2stage_t;
 
 void nr_dmrs_id_2stage_init(nr_dmrs_id_2stage_t *t, const char *label, int assumed_id);
-/* Same inputs as nr_dmrs_id_accumulate(). Returns true on the call that decides. */
+/* Same inputs as nr_dmrs_id_accumulate(), including dmrs_type. Returns true on the call that decides. */
 bool nr_dmrs_id_2stage_accumulate(nr_dmrs_id_2stage_t *t, const c16_t *rx_symbol, int ofdm_symbol_size,
                                   int start_subcarrier, int rb_offset, int nb_rb, int N_RB, int symbols_per_slot,
-                                  int slot, int symbol, int nscid, int normal_cp);
+                                  int slot, int symbol, int nscid, int normal_cp, int dmrs_type);
 /* The decided identity, or -1 (acquire load: never exposes a half-published decision, final review M1).
  * Inline so a pure library reading it (nr_pdcch_blind_monitor.c) needs no estimator symbol. */
 static inline int nr_dmrs_id_2stage_decided(const nr_dmrs_id_2stage_t *t)
