@@ -3286,9 +3286,11 @@ TEST_F(BlindPdcchTest, UlTransformPrecodingUsesTheTpMcsTables) {
         << "table=" << table << ": " << (out.reject_reason ? out.reject_reason : "-");
     EXPECT_EQ(out.mcs_table, table);
 
-    // A reserved codepoint in THIS table must still be rejected -- proof the check actually reads
-    // the TP table (found by walking down from the top of the MCS range) rather than always
-    // passing via some non-TP fallback.
+    // A reserved codepoint of THIS TP table (found by walking down from the top of the MCS range,
+    // which proves the TP table is the one consulted) is no longer rejected at extraction: since the
+    // gap-harq merge, reserved UL MCS values are accepted as possible retransmissions and resolved
+    // downstream from the (rnti, pid) init-TX record (see UlMcsExtractionNoLongerGatesOnTheReservedRange).
+    // Extraction must accept it and keep the TP table.
     uint32_t reserved_mcs = 31;
     while (reserved_mcs > 0 && nr_get_code_rate_ul((uint8_t)reserved_mcs, (uint8_t)table) != 0)
       --reserved_mcs;
@@ -3296,8 +3298,9 @@ TEST_F(BlindPdcchTest, UlTransformPrecodingUsesTheTpMcsTables) {
     UlGroundTruth bad = gt;
     bad.mcs = reserved_mcs;
     nr_pdcch_blind_ul_result_t bad_out{};
-    EXPECT_FALSE(nr_pdcch_blind_extract_01(PackUlPayload(bad, opts), len, bad.rnti, &opts, &bad_out))
+    EXPECT_TRUE(nr_pdcch_blind_extract_01(PackUlPayload(bad, opts), len, bad.rnti, &opts, &bad_out))
         << "table=" << table << " mcs=" << reserved_mcs;
+    EXPECT_EQ(bad_out.mcs_table, table);
   }
 }
 
