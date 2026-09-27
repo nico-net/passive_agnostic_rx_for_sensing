@@ -2818,6 +2818,64 @@ TEST_F(BlindPdcchTest, UlDmrsMaskLookupRejectsInvalidGeometryWithoutAborting) {
   EXPECT_EQ(nr_pdcch_blind_ul_dmrs_mask(14,0,0,2,1,2),-1);
 }
 
+/* Gap: dmrs_max_length was pruned to <=1 everywhere in nr_pdcch_ul_discovery.c ("double-symbol
+ * front-loading is receiver scope this monitor cannot resolve"), even though
+ * nr_pdcch_blind_ul_dmrs_mask() already carries the maxLength-2 table (g_table_6_4_1_1_3_4) and
+ * blind_ul_finish() already threads opts->dmrs_max_length through to it unconditionally -- the
+ * mask lookup itself needed no change, only removing the upstream pruning that never let a
+ * maxLength-2 hypothesis reach it. TS 38.211 Table 6.4.1.1.3-4 row ld=14 col add_pos=1 = 3072;
+ * verified against the in-tree array, not derived independently, same practice as the sibling
+ * UlDmrsMaskLookupRejectsInvalidGeometryWithoutAborting test above. */
+TEST_F(BlindPdcchTest, UlDmrsMaskLookupSupportsMaxLength2) {
+  // add_pos 0/1 (mapping type A) are the only ones TS 38.211 Table 6.4.1.1.3-4 defines.
+  EXPECT_EQ(nr_pdcch_blind_ul_dmrs_mask(14, 0, 0, 1, 2, 0), 0xC0C);
+  // add_pos 2/3 are reserved at maxLength 2 (columns 2/3 are -1 in every row of that table) -- must
+  // be REJECTED, not silently misread as some other position.
+  EXPECT_EQ(nr_pdcch_blind_ul_dmrs_mask(14, 0, 0, 2, 2, 0), -1);
+  EXPECT_EQ(nr_pdcch_blind_ul_dmrs_mask(14, 0, 0, 3, 2, 0), -1);
+}
+
+/* End-to-end: a maxLength-2 hypothesis must now actually reach nr_pdcch_blind_extract_01() and
+ * decode to a symbol mask with MORE DM-RS symbols than the maxLength-1 case -- not just avoid being
+ * pruned, but genuinely engage the double-symbol table. */
+TEST_F(BlindPdcchTest, UlAntennaPortsAcceptsMaxLength2AndDoublesTheDmrsSymbolCount) {
+  auto opts1 = LiveUlOpts();
+  opts1.dmrs_max_length = 1;
+  opts1.dmrs_add_pos = 1;
+  UlGroundTruth gt1;
+  gt1.riv = PRBalloc_to_locationandbandwidth0(24, 8, 273);
+  gt1.mcs = 10;
+  gt1.antenna_ports = 2;
+  const auto len1 = nr_pdcch_blind_dci01_size(&opts1);
+  nr_pdcch_blind_ul_result_t out1{};
+  ASSERT_TRUE(nr_pdcch_blind_extract_01(PackUlPayload(gt1, opts1), len1, gt1.rnti, &opts1, &out1));
+
+  auto opts2 = LiveUlOpts();
+  opts2.dmrs_max_length = 2;
+  opts2.dmrs_add_pos = 1;
+  UlGroundTruth gt2;
+  gt2.riv = PRBalloc_to_locationandbandwidth0(24, 8, 273);
+  gt2.mcs = 10;
+  gt2.antenna_ports = 2;
+  const auto len2 = nr_pdcch_blind_dci01_size(&opts2);
+  nr_pdcch_blind_ul_result_t out2{};
+  ASSERT_TRUE(nr_pdcch_blind_extract_01(PackUlPayload(gt2, opts2), len2, gt2.rnti, &opts2, &out2))
+      << (out2.reject_reason ? out2.reject_reason : "-");
+  EXPECT_GT(__builtin_popcount((unsigned)out2.ul_dmrs_symb_pos), __builtin_popcount((unsigned)out1.ul_dmrs_symb_pos));
+
+  // The reserved add_pos/maxLength-2 combination must still be rejected end to end, not just at
+  // the raw table-lookup level.
+  auto opts3 = LiveUlOpts();
+  opts3.dmrs_max_length = 2;
+  opts3.dmrs_add_pos = 2;
+  UlGroundTruth gt3 = gt2;
+  const auto len3 = nr_pdcch_blind_dci01_size(&opts3);
+  nr_pdcch_blind_ul_result_t out3{};
+  EXPECT_FALSE(nr_pdcch_blind_extract_01(PackUlPayload(gt3, opts3), len3, gt3.rnti, &opts3, &out3));
+  ASSERT_NE(out3.reject_reason, nullptr);
+  EXPECT_STREQ(out3.reject_reason, "no valid PUSCH DM-RS position for this allocation length");
+}
+
 TEST_F(BlindPdcchTest, UlMcsBoundaryUsesActualSelectedTable) {
   for(int table=0;table<3;++table) {
     auto opts=LiveUlOpts(); opts.mcs_table=table;

@@ -172,12 +172,17 @@ static bool supported(const nr_hyp_t *h, void *context)
   if(ctx->interpretation) {
     if(!nr_pdcch_ul_interp_sweep_apply(h,ctx->owner->tda_index,&opts)) return false;
   } else nr_pdcch_ul_field_sweep_apply(h,&opts);
-  /* Transform-precoded (DFT-s-OFDM) and double-symbol-front-loaded modes are still refused by the
-   * delivery path (see below): refuse them before selection so they cannot await CRC feedback that
-   * never arrives. This is receiver scope, not evidence that the network mode is invalid. DM-RS
-   * type 2 is no longer excluded here: blind_ul_finish() now decodes its antenna-ports field via
-   * decode_dci_antenna_ports_val(), the same reverse table an attached UE's own PUSCH config uses. */
-  return !opts.transform_precoding && opts.dmrs_max_length<=1;
+  /* Transform-precoded (DFT-s-OFDM) is still refused by the delivery path (see below): refuse it
+   * before selection so it cannot await CRC feedback that never arrives. This is receiver scope,
+   * not evidence that the network mode is invalid. Neither DM-RS type nor maxLength is excluded
+   * here any more: blind_ul_finish() decodes antenna-ports via decode_dci_antenna_ports_val() (type
+   * 1 and 2 alike, front_load is an output of that table, not a separate input) and
+   * nr_pdcch_blind_ul_dmrs_mask() already has both TS 38.211 6.4.1.1.3-3 (maxLength 1) and -4
+   * (maxLength 2) tables. A maxLength-2 hypothesis paired with an add_pos the -4 table reserves
+   * (2 or 3, mapping type A -- TS 38.211 6.4.1.1.3-4 only defines 0/1 there) is not special-cased:
+   * it simply fails nr_pdcch_blind_ul_dmrs_mask()'s own -1 return and is rejected downstream, the
+   * same as any other hypothesis that does not describe a real configuration. */
+  return !opts.transform_precoding;
 }
 static bool plausible(const nr_hyp_t *h, const void *candidate, void *context)
 {
@@ -351,11 +356,11 @@ bool nr_pdcch_ul_discovery_grant(const nr_pdcch_blind_ul_opts_t *fixed, uint16_t
       c->logged_interp=true;
     }
   }
-  /* DFT-s-OFDM (transform precoding) and double-symbol front-loading are still receiver scope this
-   * monitor cannot resolve, not evidence the network hypothesis is false. DM-RS type is no longer
-   * gated here -- blind_ul_finish()/nr_pdcch_blind_extract_01() decode type 2 via
-   * decode_dci_antenna_ports_val() same as type 1. */
-  if(ctx.opts.transform_precoding || ctx.opts.dmrs_max_length>1)
+  /* DFT-s-OFDM (transform precoding) is still receiver scope this monitor cannot resolve, not
+   * evidence the network hypothesis is false. Neither DM-RS type nor maxLength is gated here any
+   * more -- blind_ul_finish()/nr_pdcch_blind_extract_01() decode both via decode_dci_antenna_ports_val()
+   * and nr_pdcch_blind_ul_dmrs_mask() (see supported()'s comment above for the maxLength-2 detail). */
+  if(ctx.opts.transform_precoding)
     goto done;
   ok=nr_pdcch_blind_extract_01(payload,len,rnti,&ctx.opts,out);
   if(ok && (out->carrier_indicator || out->ul_sul_indicator)) {
