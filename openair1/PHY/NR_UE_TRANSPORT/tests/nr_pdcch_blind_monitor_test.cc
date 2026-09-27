@@ -2137,10 +2137,14 @@ TEST(Css0Autoconf, TurnsOffEverySettingThatDescribesTheDedicatedSearchSpace) {
   c->rnti_max            = 0xFFEF;
 
   // This cell: CORESET#0 = 48 RB / 1 symbol at CRB 0, SSB at CRB offset 12 from point A,
-  // SS0 period 40 slots / offset 0 / duration 2 / first symbol 0, mux pattern 1, PCI 2,
+  // SS0 period 40 slots / offset 0 / duration 2 / first symbol 0, mux pattern 1. Use a
+  // test-unique PCI so this call always exercises the genuine configuration-change path even
+  // under --gtest_shuffle; reusing another test's identical 12-field derivation correctly takes
+  // the production idempotence fast path and would leave the deliberately dirtied fields above.
+  // PCI 997 is valid and immaterial to the settings asserted here.
   // rb_offset 12 (so cset_start_rb = ssb_offset_point_a - rb_offset = 0 is self-consistent),
   // dmrs-TypeA-Position 2.
-  ASSERT_TRUE(nr_pdcch_blind_monitor_autoconf_css0(48, 1, 0, 12, 40, 0, 2, 0, 1, 2, 12, 2));
+  ASSERT_TRUE(nr_pdcch_blind_monitor_autoconf_css0(48, 1, 0, 12, 40, 0, 2, 0, 1, 997, 12, 2));
 
   // The adaptive energy floor is estimated from the very candidates it gates. On the dedicated
   // CORESET (45 groups) most candidates are empty so it tracks noise; CORESET#0 is 8 CCEs with
