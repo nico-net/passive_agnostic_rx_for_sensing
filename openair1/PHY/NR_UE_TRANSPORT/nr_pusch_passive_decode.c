@@ -503,6 +503,19 @@ static void fill_pusch_pdu(const nr_pdcch_blind_ul_result_t *g, int nant,
   p->scid               = g->nscid;
   p->num_dmrs_cdm_grps_no_data = g->n_dmrs_cdm_groups;
   p->dmrs_ports         = g->dmrs_ports;
+  /* Low-PAPR (transform-precoding-enabled) DM-RS sequence selection, TS 38.211 6.4.1.1.1.2: u =
+   * (f_gh(n_s,l) + f_ss) mod 30, v in {0,1}. No group/sequence hopping is implemented anywhere in
+   * this codebase -- gNB_scheduler_ulsch.c and nr_ue_scheduler.c (the gNB's and an attached UE's
+   * OWN reference computation of these same two fields) both hardcode f_gh=0 and v=0
+   * unconditionally, i.e. they only ever produce the "neither hopping enabled" case, so matching
+   * that exactly is not a simplification relative to the rest of this codebase, it is parity with
+   * it. In that case f_ss = n_ID_RS mod 30, and p->pusch_identity already carries n_ID_RS (PCI
+   * fallback, or an explicit override -- see blind_ul_apply_scrambling_ids()), so no new
+   * hypothesis dimension is needed. Group/sequence hopping enabled is a real, separate,
+   * NOT-implemented gap (this codebase has no reference implementation of it to match either) --
+   * flagged, not silently guessed at. */
+  p->dfts_ofdm.low_papr_group_number    = (uint8_t)(p->pusch_identity % 30);
+  p->dfts_ofdm.low_papr_sequence_number = 0;
 
   p->resource_alloc     = 1;   // type 1 -- the only type this deployment schedules
   p->rb_start           = g->start_rb;
@@ -649,12 +662,6 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
     atomic_fetch_add_explicit(&g_rej_unsup, 1, memory_order_relaxed);
     out->status = NR_PUSCH_PASSIVE_UNSUPPORTED;
     out->reject_reason = "multi-layer PUSCH";
-    return false;
-  }
-  if (g->transform_precoding) {
-    atomic_fetch_add_explicit(&g_rej_unsup, 1, memory_order_relaxed);
-    out->status = NR_PUSCH_PASSIVE_UNSUPPORTED;
-    out->reject_reason = "DFT-s-OFDM (transform precoding) not wired";
     return false;
   }
   if (g->rv != 0) {

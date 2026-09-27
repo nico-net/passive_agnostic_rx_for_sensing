@@ -4437,18 +4437,21 @@ static bool blind_ul_finish(const nr_pdcch_blind_ul_opts_t* opts,
   // abort and never guess, and the reverse table's own bounds check gives that for free.
   uint8_t  cdm_groups;
   uint16_t ports;
-  if (opts->transform_precoding == 1) {
-    // Transform-precoded (DFT-s-OFDM) low-PAPR sequences: out of scope (see nr_pdcch_ul_discovery.c's
-    // supported() gate, which never lets a transform_precoding=1 hypothesis reach here). Left as the
-    // original closed form rather than reused/removed, since it is unreachable and untouched by the
-    // DM-RS-type fix above.
-    cdm_groups = 2;
-    ports      = (uint16_t)(1u << antenna_ports);
-  } else if (nrOfLayers <= 1) {
+  if (nrOfLayers <= 1) {
+    // decode_dci_antenna_ports_val() branches on `tp` FIRST (transform-precoding-enabled always
+    // uses lut_tp_rev, TS 38.212 Table 7.3.1.1.2-6/-7, regardless of dmrs_type -- transform
+    // precoding mandates DM-RS type 1 by spec, so dmrs_type_arg is computed the same way either
+    // way and simply ignored when tp is enabled). This used to be a hand-rolled closed form here
+    // (cdm_groups=2; ports=1u<<antenna_ports;) that -- like the pre-fix DM-RS-type-1-only closed
+    // form above -- was only correct for antenna_ports 0..3 (front_load 1); lut_tp_rev's rows 4..11
+    // (front_load 2) wrap the port index instead of shifting it further, so the old formula was
+    // wrong there too. One table lookup now covers type 1, type 2, and transform precoding.
     long dmrs_type2 = 1;
     const long *dmrs_type_arg = (opts->dmrs_config_type > 0) ? &dmrs_type2 : NULL;
+    const long tp = (opts->transform_precoding == 1) ? NR_PUSCH_Config__transformPrecoder_enabled
+                                                     : NR_PUSCH_Config__transformPrecoder_disabled;
     int front_load = 0;
-    if (decode_dci_antenna_ports_val((uint8_t)nrOfLayers, dmrs_type_arg, NR_PUSCH_Config__transformPrecoder_disabled,
+    if (decode_dci_antenna_ports_val((uint8_t)nrOfLayers, dmrs_type_arg, tp,
                                      (uint8_t)antenna_ports, &cdm_groups, &ports, &front_load) != 0) {
       out->reject_reason = "antenna-ports code point outside its DM-RS-type/rank reverse table";
       return false;

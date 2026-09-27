@@ -42,23 +42,37 @@ int nr_pdcch_ul_interp_sweep_generate(nr_hyp_t *out, int cap)
     {0,14,0,1},{0,14,0,2},{0,14,0,3},{0,14,0,4},
     {0,7,0,1},{0,7,0,2},{2,12,1,1},{2,12,1,2},{0,4,1,1},{0,4,1,2}
   };
+  /* TS 38.214 6.1.4.1: which MCS table opts.mcs_table names depends on transform precoding --
+   * nr_get_Qm_ul()/nr_get_code_rate_ul() (nr_mac_common.c) index 0=Table 5.1.3.1-1 (qam64), 1=Table
+   * 5.1.3.1-2 (qam256), 2=Table 5.1.3.1-3 (qam64LowSE), 3=Table 6.1.4.1-1 (the TP-enabled default),
+   * 4=Table 6.1.4.1-2 (TP-enabled qam64LowSE) -- get_pusch_mcs_table()'s own `2 + (is_tp<<1)` /
+   * `0 + is_tp*3` arithmetic. qam256 (index 1) is not combined with transform precoding (spec:
+   * mcs-Table is not applicable when transformPrecoder is enabled), so TP-enabled has two table
+   * choices, not three. opts.mcs_table is the FINAL index used downstream (blind_ul_finish(),
+   * fill_pusch_pdu()) -- generating it correctly here means no separate resolution step exists to
+   * forget, matching this field's own header comment ("3..5 = TP variants"). */
+  static const uint8_t mcs_no_tp[3] = {0, 1, 2};
+  static const uint8_t mcs_tp[2]    = {3, 4};
   if (!out || cap<=0) return NR_HYP_SWEEP_INVALID;
   int n=0;
   for (int t=0;t<10;++t)
     for (int type=0;type<2;++type)
       for (int pos=0;pos<4;++pos)
         for (int max=1;max<=2;++max)
-          for (int tp=0;tp<2;++tp)
-            for (int mcs=0;mcs<3;++mcs) {
+          for (int tp=0;tp<2;++tp) {
+            const uint8_t *mcs_list = tp ? mcs_tp : mcs_no_tp;
+            const int      n_mcs    = tp ? 2 : 3;
+            for (int mi=0; mi<n_mcs; ++mi) {
               if (n==cap || n==NR_HYP_SWEEP_MAX_RAW) {
                 LOG_E(PHY,"UL interpretation search refused: raw cap exceeded\n");
                 return NR_HYP_SWEEP_RAW_OVERFLOW;
               }
               nr_pdcch_ul_interp_hyp_t h={tda[t][0],tda[t][1],tda[t][2],tda[t][3],
-                                         type,pos,max,tp,mcs};
+                                         type,pos,max,tp,mcs_list[mi]};
               out[n]=(nr_hyp_t){.len=sizeof(h)};
               memcpy(out[n++].bytes,&h,sizeof(h));
             }
+          }
   return n;
 }
 bool nr_pdcch_ul_interp_sweep_apply(const nr_hyp_t *hyp, int idx, nr_pdcch_blind_ul_opts_t *o)

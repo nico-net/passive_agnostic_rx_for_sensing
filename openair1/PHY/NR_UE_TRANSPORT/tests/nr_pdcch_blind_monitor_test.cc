@@ -3054,6 +3054,75 @@ TEST_F(BlindPdcchTest, UlAntennaPortsType2DecodesViaReverseTable) {
   }
 }
 
+/* Transform precoding (DFT-s-OFDM): the antenna-ports field always uses lut_tp_rev (TS 38.212
+ * Table 7.3.1.1.2-6/-7) regardless of the DM-RS-type hypothesis -- transform precoding mandates
+ * DM-RS type 1 by spec. Before this fix, blind_ul_finish() used a hand-rolled closed form here
+ * (cdm_groups=2; ports=1u<<antenna_ports) that was unreachable anyway (nr_pdcch_ul_discovery.c
+ * refused every transform_precoding=1 hypothesis before it could reach this code), AND wrong for
+ * antenna_ports>=4 (front_load 2 rows): lut_tp_rev wraps the port index there, the old formula
+ * kept shifting it. */
+TEST_F(BlindPdcchTest, UlAntennaPortsTransformPrecodingDecodesViaReverseTable) {
+  auto opts = LiveUlOpts();
+  opts.transform_precoding = 1;
+  opts.antenna_ports_bits = 4; // lut_tp_rev has 12 rows, needs 4 bits
+  const auto len = nr_pdcch_blind_dci01_size(&opts);
+  for (uint32_t ap = 0; ap < 16; ++ap) {
+    UlGroundTruth gt;
+    gt.riv = PRBalloc_to_locationandbandwidth0(24, 8, 273);
+    gt.mcs = 10;
+    gt.antenna_ports = ap;
+    nr_pdcch_blind_ul_result_t out{};
+    const bool ok = nr_pdcch_blind_extract_01(PackUlPayload(gt, opts), len, gt.rnti, &opts, &out);
+
+    uint8_t exp_cdm = 0;
+    uint16_t exp_ports = 0;
+    int exp_fl = 0;
+    const bool table_ok = decode_dci_antenna_ports_val(1, nullptr, NR_PUSCH_Config__transformPrecoder_enabled,
+                                                       (uint8_t)ap, &exp_cdm, &exp_ports, &exp_fl) == 0;
+    EXPECT_EQ(ok, table_ok) << "antenna_ports=" << ap << ": "
+                            << (out.reject_reason ? out.reject_reason : "-");
+    if (ok && table_ok) {
+      EXPECT_EQ(out.n_dmrs_cdm_groups, exp_cdm) << "antenna_ports=" << ap;
+      EXPECT_EQ(out.dmrs_ports, exp_ports) << "antenna_ports=" << ap;
+    }
+  }
+}
+
+/* TS 38.214 6.1.4.1: transform-precoding-enabled UL uses Table 6.1.4.1-1 (opts.mcs_table=3, the
+ * default-RRC-config case) or -2 (opts.mcs_table=4, qam64LowSE), never the non-TP tables 0-2 --
+ * already implemented as nr_mac_common.c's Table_61411/Table_61412 (table_idx 3/4), just never
+ * reachable from the passive discovery path before this fix (the interp-sweep generator produced
+ * mcs_table in {0,1,2} for every hypothesis regardless of transform_precoding, so a TP-enabled
+ * cell's true table could never be represented as a hypothesis at all). */
+TEST_F(BlindPdcchTest, UlTransformPrecodingUsesTheTpMcsTables) {
+  for (int table : {3, 4}) {
+    auto opts = LiveUlOpts();
+    opts.transform_precoding = 1;
+    opts.mcs_table = table;
+    UlGroundTruth gt;
+    gt.riv = PRBalloc_to_locationandbandwidth0(24, 8, 273);
+    gt.mcs = 10;
+    const auto len = nr_pdcch_blind_dci01_size(&opts);
+    nr_pdcch_blind_ul_result_t out{};
+    ASSERT_TRUE(nr_pdcch_blind_extract_01(PackUlPayload(gt, opts), len, gt.rnti, &opts, &out))
+        << "table=" << table << ": " << (out.reject_reason ? out.reject_reason : "-");
+    EXPECT_EQ(out.mcs_table, table);
+
+    // A reserved codepoint in THIS table must still be rejected -- proof the check actually reads
+    // the TP table (found by walking down from the top of the MCS range) rather than always
+    // passing via some non-TP fallback.
+    uint32_t reserved_mcs = 31;
+    while (reserved_mcs > 0 && nr_get_code_rate_ul((uint8_t)reserved_mcs, (uint8_t)table) != 0)
+      --reserved_mcs;
+    ASSERT_GT(reserved_mcs, 0u) << "table=" << table << " has no reserved MCS to test with";
+    UlGroundTruth bad = gt;
+    bad.mcs = reserved_mcs;
+    nr_pdcch_blind_ul_result_t bad_out{};
+    EXPECT_FALSE(nr_pdcch_blind_extract_01(PackUlPayload(bad, opts), len, bad.rnti, &opts, &bad_out))
+        << "table=" << table << " mcs=" << reserved_mcs;
+  }
+}
+
 TEST_F(BlindPdcchTest, AutoDci10RetainsRaTcAmbiguityAndNeverExportsAGrant) {
   // One real polar codeword, two different TS 38.212 7.3.1.2.1 field lists:
   // C/TC identifier=1,RIV=0; RA RIV=1024. Remaining fields are zero.

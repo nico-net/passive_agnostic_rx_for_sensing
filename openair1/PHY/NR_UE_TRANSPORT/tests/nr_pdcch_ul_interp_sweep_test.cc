@@ -27,9 +27,13 @@ extern "C" {
 }
 TEST(UlInterpSweep, CatalogueAndObservedIndexIsolation) {
   std::vector<nr_hyp_t> raw(NR_HYP_SWEEP_MAX_RAW);
-  ASSERT_EQ(nr_pdcch_ul_interp_sweep_generate(raw.data(),raw.size()),960);
+  // 10 tda x 2 type x 4 pos x 2 max x (3 mcs for tp=0 + 2 mcs for tp=1) = 10*2*4*2*5 = 800: TP
+  // enabled has only 2 valid MCS-table choices (qam256 does not combine with transform precoding),
+  // not 3, so the raw catalogue shrank from the pre-TP-support 960 -- narrower, not looser, since
+  // every one of those 160 removed combinations described a configuration TS 38.214 forbids.
+  ASSERT_EQ(nr_pdcch_ul_interp_sweep_generate(raw.data(),raw.size()),800);
   int found=-1;
-  for(int i=0;i<960;++i) {
+  for(int i=0;i<800;++i) {
     nr_pdcch_ul_interp_hyp_t h; memcpy(&h,raw[i].bytes,sizeof(h));
     if(h.tda_start==0 && h.tda_length==14 && h.tda_mapping==0 && h.tda_k2==4 &&
        h.dmrs_config_type==0 && h.dmrs_add_pos==2 && h.dmrs_max_length==1 &&
@@ -64,7 +68,7 @@ TEST(UlInterpSweep, FullCatalogueFitsAndRawCapStillRefusesLoudly) {
   ASSERT_EQ(classes,n) << "no equivalence fn supplied: every raw hypothesis must be its own class";
   EXPECT_LE(classes,NR_HYP_SWEEP_MAX_CLASSES);
   EXPECT_EQ(nr_hyp_sweep_winner(&st),-1);
-  EXPECT_EQ(nr_pdcch_ul_interp_sweep_generate(raw.data(),959),NR_HYP_SWEEP_RAW_OVERFLOW);
+  EXPECT_EQ(nr_pdcch_ul_interp_sweep_generate(raw.data(),n-1),NR_HYP_SWEEP_RAW_OVERFLOW);
 }
 TEST(UlInterpSweep, DifferentK2IsNotAnEquivalentGrant) {
   nr_pdcch_blind_ul_opts_t a{},b{}; a.tda_count=b.tda_count=1;
@@ -77,6 +81,31 @@ TEST(UlInterpSweep, DifferentK2IsNotAnEquivalentGrant) {
   /* Matching only S/L, as the plan's tie-check did, is not grant equivalence. */
 }
 /* TS 38.214 Table 6.1.2.1-1 (normal CP): type A S = 0, L 4..14; type B S 0..13, L 1..14, S+L <= 14. */
+/* TS 38.214 6.1.4.1: transform-precoding-enabled hypotheses must only ever carry mcs_table in
+ * {3,4} (Table 6.1.4.1-1/-2), never {0,1,2} (the non-TP tables, including qam256 which TP does not
+ * combine with); non-TP hypotheses must only ever carry {0,1,2}. Checked over every generated
+ * hypothesis, not just one, since a single off-by-one in the generator's loop bounds would
+ * otherwise leak one wrong combination through undetected. */
+TEST(UlInterpSweep, TransformPrecodingOnlyGeneratesItsOwnMcsTables) {
+  std::vector<nr_hyp_t> raw(NR_HYP_SWEEP_MAX_RAW);
+  const int n = nr_pdcch_ul_interp_sweep_generate(raw.data(), raw.size());
+  ASSERT_GT(n, 0);
+  int tp0_count = 0, tp1_count = 0;
+  for (int i = 0; i < n; ++i) {
+    nr_pdcch_ul_interp_hyp_t h;
+    memcpy(&h, raw[i].bytes, sizeof(h));
+    if (h.transform_precoding) {
+      EXPECT_TRUE(h.mcs_table == 3 || h.mcs_table == 4) << "i=" << i << " mcs_table=" << (int)h.mcs_table;
+      ++tp1_count;
+    } else {
+      EXPECT_TRUE(h.mcs_table <= 2) << "i=" << i << " mcs_table=" << (int)h.mcs_table;
+      ++tp0_count;
+    }
+  }
+  // 3 mcs choices x half the (tda,type,pos,max) space for tp=0; 2 choices for tp=1.
+  EXPECT_EQ(tp0_count, n * 3 / 5);
+  EXPECT_EQ(tp1_count, n * 2 / 5);
+}
 TEST(UlInterpSweep, PuschLegalTdaCounts) {
   int a=0,b=0;
   for(int S=0;S<14;++S)
