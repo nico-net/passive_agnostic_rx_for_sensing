@@ -600,6 +600,245 @@ TEST(CsirsBlindZp, ConfirmsAPeriodicHoleAndRejectsAStructuralOne) {
   EXPECT_LT(st2.confirmed, 0);
 }
 
+/* ---- Lab G4 (8-port NZP, one receive antenna, identity channel) --------------------------------
+ * Only port 0 (CDM group 0, k=0,1) of a row-6 resource reaches the receiver; the other ports' REs
+ * are empty at this antenna and nothing else is sent in the symbol. REs that are dark next to a
+ * PILOT are not a hole under data: the ZP score must not read them as one. A hole carved out of a
+ * data symbol that also carries the pilot must still read as one. */
+namespace {
+const int kLabRb = 106;
+// Symbol-relative buffer, RB 0 at index 0: pilot (amp 2000) on k=0,1 of every RB, `data` (amp 700)
+// on every other RE except k=8..11 when `hole`, plus residual noise (amp ~10) everywhere.
+void lab_symbol(bool data, std::vector<int16_t> &rx)
+{
+  const int n = 12 * kLabRb;
+  rx.assign(2 * n, 0);
+  std::mt19937 g(2026);
+  std::normal_distribution<double> nd(0.0, 10.0);
+  for (int i = 0; i < n; i++) {
+    const int k = i % 12;
+    int16_t a = 0;
+    if (k < 2)
+      a = 2000;
+    else if (data && !(k >= 8 && k <= 11))
+      a = 700;
+    rx[2 * i] = (int16_t)(((g() & 1) ? a : -a) + nd(g));
+    rx[2 * i + 1] = (int16_t)(((g() & 1) ? a : -a) + nd(g));
+  }
+}
+// A ZP pattern on subcarriers [k0, k0 + width) of the RBs with parity `parity` (-1 = every RB).
+void lab_pattern(int k0, int width, int parity, std::vector<int16_t> &ref)
+{
+  const int n = 12 * kLabRb;
+  ref.assign(2 * n, 0);
+  for (int rb = 0; rb < kLabRb; rb++) {
+    if (parity >= 0 && (rb & 1) != parity)
+      continue;
+    for (int k = k0; k < k0 + width; k++) {
+      ref[2 * (12 * rb + k)] = 100;
+      ref[2 * (12 * rb + k) + 1] = -100;
+    }
+  }
+}
+} // namespace
+
+TEST(CsirsBlindZp, DarkOnlyBesideAPilotIsNotAHole)
+{
+  std::vector<int16_t> rx, ref;
+  lab_symbol(false, rx);
+  // The six lab exports' shapes: row 2 k=5/8/9, row 3 density-0.5 (both parities) k=4,5, row 4 k=8..11
+  // (plane 0 of the scorer's reference: k=8,9).
+  const struct { int k0, width, parity; } lab[] = {{5, 1, -1}, {8, 1, -1}, {9, 1, -1}, {4, 2, 1}, {4, 2, 0}, {8, 2, -1}};
+  for (const auto &c : lab) {
+    lab_pattern(c.k0, c.width, c.parity, ref);
+    const double zs = nr_csirs_blind_zero_score(rx.data(), ref.data(), 12 * kLabRb);
+    EXPECT_LE(zs, 0.5) << "k0=" << c.k0 << " width=" << c.width << " parity=" << c.parity
+                       << ": REs dark only beside a pilot scored as a ZP hole";
+  }
+  // The pilot itself is lit: never a hole.
+  lab_pattern(0, 2, -1, ref);
+  EXPECT_LE(nr_csirs_blind_zero_score(rx.data(), ref.data(), 12 * kLabRb), 0.5);
+}
+
+TEST(CsirsBlindZp, HoleUnderDataBesideAPilotIsStillAHole)
+{
+  std::vector<int16_t> rx, ref;
+  lab_symbol(true, rx);
+  const struct { int k0, width, parity; } hole[] = {{8, 2, -1}, {10, 2, -1}, {8, 1, -1}, {8, 2, 1}, {8, 2, 0}};
+  for (const auto &c : hole) {
+    lab_pattern(c.k0, c.width, c.parity, ref);
+    EXPECT_GT(nr_csirs_blind_zero_score(rx.data(), ref.data(), 12 * kLabRb), 0.9)
+        << "k0=" << c.k0 << " width=" << c.width << " parity=" << c.parity;
+  }
+  // Data and pilot REs are not holes.
+  lab_pattern(4, 2, -1, ref);
+  EXPECT_LE(nr_csirs_blind_zero_score(rx.data(), ref.data(), 12 * kLabRb), 0.5);
+  lab_pattern(0, 2, -1, ref);
+  EXPECT_LE(nr_csirs_blind_zero_score(rx.data(), ref.data(), 12 * kLabRb), 0.5);
+}
+
+/* ---- Wide holes: dark REs may be the MAJORITY of an RB -----------------------------------------
+ * An 8-RE/RB ZP (row-6 shape, or rate matching around a neighbour's 8-32-port NZP), or a CSI-IM and
+ * a ZP in one symbol, leave data on only a third of the RB. The baseline must still be the data, so
+ * the statistic may reject a sparse bright minority (a pilot) but must not assume that dark REs are
+ * the minority. One RB pattern per 12-char spec, repeated over kLabRb RBs: 'P' pilot (amp 2000),
+ * 'D' data (amp 700), '.' dark; noise (sigma 10) everywhere. */
+namespace {
+void spec_symbol(const char *spec, std::vector<int16_t> &rx)
+{
+  const int n = 12 * kLabRb;
+  rx.assign(2 * n, 0);
+  std::mt19937 g(77);
+  std::normal_distribution<double> nd(0.0, 10.0);
+  for (int i = 0; i < n; i++) {
+    const char c = spec[i % 12];
+    const int16_t a = (c == 'P') ? 2000 : (c == 'D') ? 700 : 0;
+    rx[2 * i] = (int16_t)(((g() & 1) ? a : -a) + nd(g));
+    rx[2 * i + 1] = (int16_t)(((g() & 1) ? a : -a) + nd(g));
+  }
+}
+double spec_score(const char *spec, int k0, int width, int parity = -1)
+{
+  std::vector<int16_t> rx, ref;
+  spec_symbol(spec, rx);
+  lab_pattern(k0, width, parity, ref);
+  return nr_csirs_blind_zero_score(rx.data(), ref.data(), 12 * kLabRb);
+}
+} // namespace
+
+TEST(CsirsBlindZp, WideHolesUnderDataAreStillHoles)
+{
+  //                          k: 0123456789AB
+  EXPECT_GT(spec_score("DDDDDDDD....", 8, 2), 0.9);  // 4-RE ZP k8..11
+  EXPECT_GT(spec_score("DDDDDD......", 8, 2), 0.9);  // 6 dark k6..11
+  EXPECT_GT(spec_score("DDDDD.......", 8, 2), 0.9);  // 7 dark k5..11
+  EXPECT_GT(spec_score("DDDD........", 8, 2), 0.9);  // 8-RE ZP k4..11 (row-6 shape)
+  EXPECT_GT(spec_score("DDDD........", 4, 2), 0.9);  //   ... its other CDM groups
+  EXPECT_GT(spec_score("DDDD........", 6, 2, 1), 0.9);
+  EXPECT_GT(spec_score("....DDDD....", 8, 2), 0.9);  // two 4-RE holes (ZP + CSI-IM), data between
+  EXPECT_GT(spec_score("....DDDD....", 0, 2), 0.9);
+  EXPECT_GT(spec_score("PP..DDDD....", 8, 2), 0.9);  // the same beside a port-0 pilot
+  // Data and pilot REs never read as holes, however dark the rest of the RB is.
+  EXPECT_LE(spec_score("DDDD........", 0, 2), 0.5);
+  EXPECT_LE(spec_score("....DDDD....", 4, 2), 0.5);
+  EXPECT_LE(spec_score("PP..DDDD....", 0, 2), 0.5);
+  EXPECT_LE(spec_score("DDDDDDDDDDDD", 4, 2), 0.5);
+}
+
+TEST(CsirsBlindZp, SparsePilotMinorityIsNotData)
+{
+  // Up to three bright classes beside dark REs are a pilot, not data: port 0 of a wider NZP
+  // (k=0,1), or a TRS-like comb (k=0,4,8). Nothing dark next to them is a hole.
+  for (int k0 : {2, 5, 9})
+    EXPECT_LE(spec_score("PP..........", k0, 1), 0.5) << "k0=" << k0;
+  for (int k0 : {2, 5, 9})
+    EXPECT_LE(spec_score("P...P...P...", k0, 1), 0.5) << "k0=" << k0;
+  EXPECT_LE(spec_score("PPP.........", 6, 2), 0.5);
+}
+
+TEST(CsirsBlindZp, DarkPortsBesideAPilotInAScheduledPdschSymbolReadAsAHole)
+{
+  // Intended, and pinned so it is not mistaken for a regression: when the CSI-RS symbol also carries
+  // PDSCH (here k=8..11), REs left dark by unreceived ports 1..7 ARE data-free REs of a scheduled
+  // PDSCH symbol -- the gNB rate-matches the PDSCH around them -- and are indistinguishable, from one
+  // antenna, from a ZP hole. Rate-matching around them loses no PDSCH RE.
+  EXPECT_GT(spec_score("PP......DDDD", 4, 2), 0.9);
+}
+
+/* ---- Slot-level ZP evidence: the pattern's own REs must carry data in a neighbouring symbol --------
+ * A symbol alone cannot tell "8-class NZP (all ports of a row-6/32-port resource through a real
+ * channel) + REs nobody uses, no PDSCH in the slot" from "8 classes of data + a ZP hole": the energy
+ * pattern is identical. What separates them is the PDSCH itself: it spans consecutive symbols, so under
+ * a real ZP the pattern's subcarriers carry data in the symbol next door, while in an unscheduled slot
+ * they are as dark there as in the CSI-RS symbol. Per-RB specs as spec_symbol(); 'N' = NZP (amp 1000).
+ * `busy` is used on RBs with rb % every == 0 (every = 0: never), `idle` on the others. */
+namespace {
+void rb_symbol(const char *busy, const char *idle, int every, unsigned seed, double sigma,
+               std::vector<int16_t> &rx)
+{
+  const int n = 12 * kLabRb;
+  rx.assign(2 * n, 0);
+  std::mt19937 g(seed);
+  std::normal_distribution<double> nd(0.0, sigma);
+  for (int i = 0; i < n; i++) {
+    const int rb = i / 12;
+    const char c = ((every > 0 && rb % every == 0) ? busy : idle)[i % 12];
+    const int16_t a = (c == 'P') ? 2000 : (c == 'N') ? 1000 : (c == 'D') ? 700 : 0;
+    rx[2 * i] = (int16_t)(((g() & 1) ? a : -a) + nd(g));
+    rx[2 * i + 1] = (int16_t)(((g() & 1) ? a : -a) + nd(g));
+  }
+}
+struct SlotCase {
+  const char *sym_busy, *sym_idle, *nb_busy, *nb_idle;
+  int every;
+};
+double slot_score(const SlotCase &c, int k0, int width, double sigma = 10.0)
+{
+  std::vector<int16_t> rx, nb, ref;
+  rb_symbol(c.sym_busy, c.sym_idle, c.every, 11, sigma, rx);
+  rb_symbol(c.nb_busy, c.nb_idle, c.every, 12, sigma, nb);
+  lab_pattern(k0, width, -1, ref);
+  const int16_t *nbp[1] = {nb.data()};
+  return nr_csirs_blind_zero_score_slot(rx.data(), nbp, 1, ref.data(), 12 * kLabRb);
+}
+const char *const kAllD = "DDDDDDDDDDDD";
+const char *const kDark = "............";
+} // namespace
+
+TEST(CsirsBlindZpSlot, WideNzpBesideUnusedResWithoutPdschIsNotAHole)
+{
+  // G5 reviewer cases, candidate k=8,9: an 8-class NZP (k0..7) and k8..11 unused, no PDSCH; the same
+  // with PDSCH on 10 % of the RBs (both symbols, k8..11 carrying data there); two 2-class NZP
+  // resources (k0,1 + k4,5) and no data.
+  EXPECT_LE(slot_score({"NNNNNNNN....", "NNNNNNNN....", kDark, kDark, 0}, 8, 2), 0.5);
+  EXPECT_LE(slot_score({"NNNNNNNNDDDD", "NNNNNNNN....", kAllD, kDark, 10}, 8, 2), 0.5);
+  EXPECT_LE(slot_score({"NN..NN......", "NN..NN......", kDark, kDark, 0}, 8, 2), 0.5);
+  // ... and the lab: port 0 only, nothing else in the slot.
+  EXPECT_LE(slot_score({"PP..........", "PP..........", kDark, kDark, 0}, 8, 2), 0.5);
+}
+
+TEST(CsirsBlindZpSlot, HolesUnderPdschAreStillHoles)
+{
+  EXPECT_GT(slot_score({"DDDDDDDD....", "", kAllD, "", 1}, 8, 2), 0.9);     // 4-RE ZP
+  EXPECT_GT(slot_score({"DDDD........", "", kAllD, "", 1}, 8, 2), 0.9);     // 8-RE ZP
+  EXPECT_GT(slot_score({"....DDDD....", "", kAllD, "", 1}, 0, 2), 0.9);     // ZP + CSI-IM
+  EXPECT_GT(slot_score({"PP..DDDD....", "", kAllD, "", 1}, 8, 2), 0.9);     // beside a port-0 pilot
+  EXPECT_GT(slot_score({"NNNNNNNN....", "", kAllD, "", 1}, 8, 2), 0.9);     // beside an 8-class NZP
+  // Partial load: PDSCH on 10 % of the RBs, ZP hole k8..11 inside them.
+  EXPECT_GT(slot_score({"NNNNDDDD....", "NNNN........", kAllD, kDark, 10}, 8, 2), 0.9);
+  // Data and NZP REs are never holes.
+  EXPECT_LE(slot_score({"DDDD........", "", kAllD, "", 1}, 0, 2), 0.5);
+  EXPECT_LE(slot_score({"NNNNNNNN....", "", kAllD, "", 1}, 0, 2), 0.5);
+  EXPECT_LE(slot_score({kAllD, "", kAllD, "", 1}, 4, 2), 0.5);
+}
+
+TEST(CsirsBlindZpSlot, WideHoleOperatingPointAtLowSnr)
+{
+  // The documented cost of rejecting a bright minority: an 8-RE hole (k4..11, data k0..3) at full load
+  // and 12 dB per-RE SNR (sigma = 700 / 10^(12/20)) scores ~0.69 -- still a hit (> the zp_feed bar),
+  // no longer the ~1 a narrow hole gets. Both statistics, since the slot score is their minimum.
+  const double sigma = 700.0 / std::pow(10.0, 12.0 / 20.0);
+  std::vector<int16_t> rx, nb, ref;
+  rb_symbol("DDDD........", "", 1, 21, sigma, rx);
+  rb_symbol(kAllD, "", 1, 22, sigma, nb);
+  lab_pattern(8, 2, -1, ref);
+  const int16_t *nbp[1] = {nb.data()};
+  const double in = nr_csirs_blind_zero_score(rx.data(), ref.data(), 12 * kLabRb);
+  const double slot = nr_csirs_blind_zero_score_slot(rx.data(), nbp, 1, ref.data(), 12 * kLabRb);
+  EXPECT_GT(in, NR_CSIRS_BLIND_ZP_MIN_SCORE);
+  EXPECT_LT(in, 0.8);
+  EXPECT_GT(slot, NR_CSIRS_BLIND_ZP_MIN_SCORE);
+  EXPECT_LE(slot, in);
+}
+
+TEST(CsirsBlindZpSlot, WithoutAnyNeighbourThereIsNoEvidence)
+{
+  std::vector<int16_t> rx, ref;
+  rb_symbol("DDDDDDDD....", "", 1, 11, 10.0, rx);
+  lab_pattern(8, 2, -1, ref);
+  EXPECT_LT(nr_csirs_blind_zero_score_slot(rx.data(), nullptr, 0, ref.data(), 12 * kLabRb), 0.0);
+}
+
 /* ---- Channel robustness: the whole reason the OTA correlation read as noise ------------------
  * MEASURED 2026-09-19 on a live 100 MHz cell: the sequence-free energy test found a TRS pair at
  * 4-6x its neighbours while the flat correlation sat at the noise floor for EVERY scramblingID.

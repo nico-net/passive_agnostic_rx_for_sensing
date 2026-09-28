@@ -371,11 +371,30 @@ void nr_csirs_blind_rt_slot(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot
   if (g_null_n < NULLWIN) {
     g_null_n++;
   }
-  /* ZERO-POWER hypothesis on the same candidate and symbol (no extra FEP or reference): does the
-   * pattern carry no energy while the PDSCH around it does? Confirmed the same way (periodic). */
+  /* ZERO-POWER hypothesis on the same candidate and symbol (no extra reference): does the pattern
+   * carry no energy while the PDSCH around it does? Confirmed the same way (periodic). */
   if (g_zp.confirmed < 0) {
-    const double zs = nr_csirs_blind_zero_score_shift((const int16_t *)&rxdataF_ant0[off_sym], (const int16_t *)&ref[off_sym],
-                                                fp->ofdm_symbol_size, fp->first_carrier_offset);
+    double zs = nr_csirs_blind_zero_score_shift((const int16_t *)&rxdataF_ant0[off_sym], (const int16_t *)&ref[off_sym],
+                                          fp->ofdm_symbol_size, fp->first_carrier_offset);
+    /* A symbol alone cannot tell data + a ZP hole from a wide NZP beside REs nobody uses (lab G4 round
+     * 3): only when it could be a hit, FFT the neighbouring symbols and demand the pattern's own
+     * subcarriers carry PDSCH there (nr_csirs_blind_zero_score_slot_shift). Below the bar the score is
+     * passed through unchanged -- the slot score can only be lower -- so the extra FEPs are spent on
+     * candidate hits only, never on the ordinary per-slot visit. */
+    if (zs > NR_CSIRS_BLIND_ZP_MIN_SCORE) {
+      const int16_t *nb[2];
+      int n_nb = 0;
+      for (int d = -1; d <= 1; d += 2) {
+        const int l = (int)c->symb_l0 + d;
+        if (l < 0 || l >= fp->symbols_per_slot)
+          continue;
+        nr_slot_fep_ant(ue, fp, (unsigned)slot, (unsigned)l, 0, rxdataF, link_type_dl, 0, ue->common_vars.rxdata);
+        nb[n_nb++] = (const int16_t *)&rxdataF_ant0[(uint32_t)l * (uint32_t)fp->ofdm_symbol_size];
+      }
+      zs = nr_csirs_blind_zero_score_slot_shift((const int16_t *)&rxdataF_ant0[off_sym], nb, n_nb,
+                                                (const int16_t *)&ref[off_sym], fp->ofdm_symbol_size,
+                                                fp->first_carrier_offset);
+    }
     if (zs >= 0.0) {
       const double znull = median_of(g_zp_null, g_zp_null_n);
       if (nr_csirs_blind_zp_feed(&g_zp, idx, absolute_slot, zs, znull)) {

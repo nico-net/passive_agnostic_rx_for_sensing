@@ -331,10 +331,68 @@ bool nr_csirs_blind_feed(nr_csirs_blind_state_t *st, int idx, uint32_t absolute_
   return true;
 }
 
-/* Same grid-alignment requirement as the other two comparators: this reads rxdataF at the
- * reference's RE positions, so it must map CRB order to FFT order. It searches ZP CSI-RS, whose
- * only evidence IS the energy, so a misaligned read does not merely weaken it -- it measures a
- * different part of the spectrum entirely. */
+/* ZERO-POWER SCORES. What a ZP CSI-RS is: REs the PDSCH is rate-matched around, dark while the PDSCH
+ * around them carries data. Two statistics, both needed:
+ *
+ * GRID ALIGNMENT. Like the other comparators these read rxdataF at the reference's RE positions, so
+ * they map CRB order to FFT order (rx_shift). Their only evidence IS the energy, so a misaligned read
+ * does not merely weaken them -- it measures a different part of the spectrum entirely.
+ *
+ * 1. IN-SYMBOL (nr_csirs_blind_zero_score_shift): the pattern's REs against the DATA level of the rest
+ *    of their RBs. Off-pattern power is taken per subcarrier-in-RB class (averaged over the touched RBs,
+ *    which keeps a partial-band PDSCH visible), the CSIRS_ZP_BRIGHT_CLASSES = 3 brightest classes are
+ *    dropped and the rest averaged.
+ *    - Not the mean (the first cut): a mean is dominated by any boosted pilot. Lab G4, 2026-09-28: an
+ *      8-port cell seen by one antenna through an identity channel delivers port 0 only (k=0,1), k=2..11
+ *      are empty, and every candidate there read 1 - noise/(2*pilot/11) ~ 1 -> a false ZP every run.
+ *    - Not a median: dark REs may be the MAJORITY of a genuine hole's RB -- an 8-RE ZP, or a ZP next to
+ *      a CSI-IM, leaves data on four classes, and a median of ~10 off classes then reads the dark ones.
+ *      Dropping three keeps a data class in the average whenever data fills >= 4 classes (data on
+ *      k0..3 around a k4..11 hole: baseline = 1/7 of the data power).
+ *    - The cost, against the old mean: a wide hole's baseline is diluted by the dark classes, so it
+ *      needs more SNR. Per-RE SNR, 106 RB (logs/zp_snr_table): an 8-RE hole (or ZP + CSI-IM) at full
+ *      load scores 0.52 at 9 dB (the old mean crossed 0.5 at ~1-2 dB), 0.69 at 12, 0.88 at 17, 0.93 at
+ *      20; a 4-RE hole 0.85 at 9 dB, 0.97 at 17. Partial load dilutes the data classes further: an
+ *      8-RE hole under 10 % load reaches 0.5 only at ~19 dB (0.74 at 23 dB).
+ *    - What it can NOT do: a symbol alone cannot tell "4+ bright classes + REs nobody uses" (an 8- or
+ *      32-port NZP through a real channel, several NZP resources, in a slot without PDSCH) from "data
+ *      + a ZP hole" -- the energy patterns are identical. Hence:
+ *
+ * 2. SLOT-LEVEL (nr_csirs_blind_zero_score_slot_shift): additionally, the pattern's OWN REs must carry
+ *    energy in a neighbouring symbol of the same slot: score = min(in-symbol, best over neighbours of
+ *    1 - min(1, CSIRS_ZP_NEIGHBOUR_GAIN * E_pattern(symbol) / E_pattern(neighbour))). A PDSCH spans
+ *    consecutive symbols, so under a real ZP the pattern's subcarriers carry data next door; in a slot
+ *    without PDSCH on those subcarriers (unscheduled, lightly loaded elsewhere, dark ports) they are as
+ *    dark there as in the CSI-RS symbol. This is what nr_csirs_blind_rt.c feeds zp_feed().
+ *    THE GAIN (4): when both symbols are dark the ratio is noise over noise, and every such visit falls
+ *    on a CSI-RS slot, so chance hits would be PERIODIC -- exactly what zp_feed() confirms. Without it
+ *    (gain 1) a 53-RE density-0.5 candidate passed 0.5 on 4 of 20000 dark/dark trials. With 4 a hit
+ *    needs the neighbour 8x brighter: >= 5 sigma of that ratio even for a 12-RE candidate. The cost
+ *    lands on holes the neighbour shows weakly: slot score 0.5 at ~9 dB for a 4-RE hole at full load
+ *    (in-symbol alone: ~2 dB), the same ~9 dB as the in-symbol limit for an 8-RE hole; under 10 % load
+ *    it costs ~2 dB more around 15-17 dB (0.36 vs 0.41 at 17 dB) and nothing from 20 dB up.
+ *
+ * GUARANTEED (slot-level): no hit from REs that are dark in the CSI-RS symbol AND in both neighbouring
+ * symbols, whatever lights the rest of the symbol (pilot, wide NZP, several NZP); and none from dark REs
+ * beside <= 3 bright classes when the CSI-RS symbol carries no data.
+ * NOT GUARANTEED: REs dark in the CSI-RS symbol while ANY energy covers their subcarriers in a
+ * neighbour. PDSCH there is what a ZP pattern IS -- including REs dark only because their ports never
+ * reach this antenna, which the gNB rate-matches the PDSCH around anyway -- but the same pattern comes
+ * from (a) a PDSCH that ENDS just before the CSI-RS symbol, beside >= 4 bright classes there (the OAI
+ * gNB's default CSI-RS-slot time allocation, PDSCH symbols 1..12 with CSI-RS in 13, does exactly this
+ * on a cell with >= 4 visible CSI-RS classes), and (b) a neighbour lit by something other than PDSCH:
+ * another NZP resource of the same set, SSB/PBCH, PDCCH DM-RS. Both are periodic, so zp_feed can still
+ * confirm them (independent G5, 2026-09-28). The false resource then sits on REs that carry no PDSCH in
+ * the slots where it was learned; it harms only when a later PDSCH puts data there, which needs
+ * contradiction-based revocation (see sdd/gap-ocudu-dl) rather than a stronger single-slot score.
+ *
+ * -1 (unscorable, never a hit): empty reference; the typical-neighbour baseline exactly 0 (this
+ * includes a noise-free symbol holding nothing but a pilot, which the mean used to score ~1); no
+ * neighbour symbol given. The "<= CSIRS_ZP_BRIGHT_CLASSES off classes" branch is a guard only: every
+ * reference the search builds (plane 0, <= 3 classes per RB for rows 1-5 and for port 0 of rows 6-18)
+ * leaves >= 9 off classes. */
+#define CSIRS_ZP_BRIGHT_CLASSES 3
+#define CSIRS_ZP_NEIGHBOUR_GAIN 4.0
 double nr_csirs_blind_zero_score_shift(const int16_t *rx_re_im, const int16_t *ref_re_im, int n,
                                        int rx_shift)
 {
@@ -343,8 +401,10 @@ double nr_csirs_blind_zero_score_shift(const int16_t *rx_re_im, const int16_t *r
   }
   /* RBs the pattern touches: a 12-RE granularity mask on the caller's index (symbol-relative
    * indices keep the RB grid; a whole-symbol buffer starts at RB 0 either way). */
-  double e_on = 0.0, e_off = 0.0;
-  int n_on = 0, n_off = 0;
+  double e_on = 0.0;
+  int n_on = 0;
+  double off_pow[12] = {0.0};
+  int off_n[12] = {0};
   for (int rb0 = 0; rb0 + 12 <= n; rb0 += 12) {
     bool touched = false;
     for (int i = rb0; i < rb0 + 12; i++) {
@@ -358,14 +418,85 @@ double nr_csirs_blind_zero_score_shift(const int16_t *rx_re_im, const int16_t *r
       const double yr = (double)rx_re_im[2 * j], yi = (double)rx_re_im[2 * j + 1];
       const double e = yr * yr + yi * yi;
       if (ref_re_im[2 * i] != 0 || ref_re_im[2 * i + 1] != 0) { e_on += e; n_on++; }
-      else { e_off += e; n_off++; }
+      else { off_pow[i - rb0] += e; off_n[i - rb0]++; }
     }
   }
-  if (n_on == 0 || n_off == 0 || e_off <= 0.0) {
+  double cls[12];
+  int n_cls = 0;
+  for (int k = 0; k < 12; k++) {
+    if (off_n[k] == 0) {
+      continue;
+    }
+    const double v = off_pow[k] / off_n[k];
+    int j = n_cls++;
+    while (j > 0 && cls[j - 1] > v) { cls[j] = cls[j - 1]; j--; }
+    cls[j] = v;
+  }
+  /* Too few free classes to tell a pilot from data: unscorable, never a hit. */
+  if (n_on == 0 || n_cls <= CSIRS_ZP_BRIGHT_CLASSES) {
     return -1.0;
   }
-  const double ratio = (e_on / n_on) / (e_off / n_off);
+  double e_off = 0.0;
+  for (int k = 0; k < n_cls - CSIRS_ZP_BRIGHT_CLASSES; k++) {
+    e_off += cls[k];
+  }
+  e_off /= (n_cls - CSIRS_ZP_BRIGHT_CLASSES);
+  if (e_off <= 0.0) {
+    return -1.0;   /* noise-free and nothing but a pilot around: no data, no hole */
+  }
+  const double ratio = (e_on / n_on) / e_off;
   return 1.0 - (ratio > 1.0 ? 1.0 : ratio);
+}
+
+double nr_csirs_blind_zero_score_slot_shift(const int16_t *rx_sym, const int16_t *const *rx_nb, int n_nb,
+                                            const int16_t *ref_re_im, int n, int rx_shift)
+{
+  const double in_sym = nr_csirs_blind_zero_score_shift(rx_sym, ref_re_im, n, rx_shift);
+  if (in_sym < 0.0 || rx_nb == NULL || n_nb <= 0) {
+    return -1.0;   /* unscorable, or no second symbol to show the PDSCH: no evidence either way */
+  }
+  if (in_sym <= 0.0) {
+    return 0.0;    /* not dark against its own symbol: nothing a neighbour could add */
+  }
+  double e_on = 0.0;
+  for (int i = 0; i < n; i++) {
+    if (ref_re_im[2 * i] == 0 && ref_re_im[2 * i + 1] == 0) {
+      continue;
+    }
+    const int j = (int)(((long)i + rx_shift) % n);
+    const double yr = (double)rx_sym[2 * j], yi = (double)rx_sym[2 * j + 1];
+    e_on += yr * yr + yi * yi;
+  }
+  double best = 0.0;
+  for (int q = 0; q < n_nb; q++) {
+    if (rx_nb[q] == NULL) {
+      continue;
+    }
+    double e_nb = 0.0;
+    for (int i = 0; i < n; i++) {
+      if (ref_re_im[2 * i] == 0 && ref_re_im[2 * i + 1] == 0) {
+        continue;
+      }
+      const int j = (int)(((long)i + rx_shift) % n);
+      const double yr = (double)rx_nb[q][2 * j], yi = (double)rx_nb[q][2 * j + 1];
+      e_nb += yr * yr + yi * yi;
+    }
+    if (e_nb <= 0.0) {
+      continue;
+    }
+    const double ratio = CSIRS_ZP_NEIGHBOUR_GAIN * e_on / e_nb;   /* same REs, same count */
+    const double x = 1.0 - (ratio > 1.0 ? 1.0 : ratio);
+    if (x > best) {
+      best = x;
+    }
+  }
+  return best < in_sym ? best : in_sym;
+}
+
+double nr_csirs_blind_zero_score_slot(const int16_t *rx_sym, const int16_t *const *rx_nb, int n_nb,
+                                      const int16_t *ref_re_im, int n)
+{
+  return nr_csirs_blind_zero_score_slot_shift(rx_sym, rx_nb, n_nb, ref_re_im, n, 0);
 }
 
 bool nr_csirs_blind_zp_feed(nr_csirs_blind_state_t *st, int idx, uint32_t absolute_slot,
@@ -380,7 +511,7 @@ bool nr_csirs_blind_zp_feed(nr_csirs_blind_state_t *st, int idx, uint32_t absolu
   /* Same relative bar as the NZP feed; the null population is the other candidates' zero scores,
    * which sit near 0 on data (E_on ~ E_off). A minimum absolute margin keeps a null median of
    * ~0 from turning every small fluctuation into a hit. */
-  const bool hit = score > 0.5 && score_null >= 0.0 && score > CSIRS_DETECT_MARGIN * score_null;
+  const bool hit = score > NR_CSIRS_BLIND_ZP_MIN_SCORE && score_null >= 0.0 && score > CSIRS_DETECT_MARGIN * score_null;
   st->tried[idx]++;
   if (score > st->best_rho[idx]) {
     st->best_rho[idx] = score;

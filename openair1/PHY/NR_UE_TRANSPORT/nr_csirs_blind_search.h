@@ -215,15 +215,39 @@ bool nr_csirs_blind_feed(nr_csirs_blind_state_t *st, int idx, uint32_t absolute_
  * energy while the PDSCH scheduled around it does. Observable without any reference sequence:
  * the energy on the pattern's REs against the energy on the other REs of the same RBs and symbol. */
 
-/** 1 - min(1, E_on / E_off): E_on = mean |rx|^2 on the REs `ref` occupies, E_off = mean |rx|^2 on
- * the remaining REs of the RBs the pattern touches. ~1 for a ZP resource under a scheduled PDSCH,
- * ~0 for data or an NZP resource, ~0 on an empty symbol (no false hit from silence). -1 when the
- * reference is empty or the off-pattern REs carry no energy at all. Pure. */
+/** IN-SYMBOL ZP score, 1 - min(1, E_on / E_off): E_on = mean |rx|^2 on the REs `ref` occupies; E_off =
+ * the off-pattern power per subcarrier-in-RB class (mean over the RBs the pattern touches), 3 brightest
+ * classes dropped, rest averaged -- the data level around the pattern, not a pilot's. ~1 for a hole under
+ * PDSCH (also 8-RE holes and ZP + CSI-IM, as long as data fills >= 4 classes; wide holes need ~9 dB
+ * per-RE SNR at full load, ~19 dB at 10 % load, to reach 0.5), ~0 for data / NZP REs, an empty symbol,
+ * or dark REs beside <= 3 bright classes.
+ * ALONE IT CANNOT reject dark REs beside >= 4 bright classes with no PDSCH (a wide NZP, several NZP
+ * resources): use nr_csirs_blind_zero_score_slot_shift() for any export decision.
+ * -1 when the reference is empty or the averaged baseline is exactly 0 (e.g. a noise-free symbol holding
+ * only a pilot, which the earlier mean scored ~1). Rationale and numbers: nr_csirs_blind_search.c. Pure. */
 double nr_csirs_blind_zero_score(const int16_t *rx_re_im, const int16_t *ref_re_im, int n);
 
 /** ZP energy score with the rx index mapped to FFT order (rx_shift = first_carrier_offset). Pure. */
 double nr_csirs_blind_zero_score_shift(const int16_t *rx_re_im, const int16_t *ref_re_im, int n,
                                        int rx_shift);
+
+/** SLOT-LEVEL ZP score -- the one exports are decided on: min(in-symbol score, best over the `n_nb`
+ * neighbouring symbols `rx_nb` of the same slot of 1 - E_pattern(rx_sym) / E_pattern(neighbour)), i.e.
+ * the pattern must also be dark against its OWN subcarriers carrying PDSCH next door. Guaranteed: no hit
+ * from REs dark in the CSI-RS symbol and in every given neighbour, whatever else lights the symbol. Not
+ * guaranteed: REs dark only in the CSI-RS symbol while ANY energy covers them in a neighbour -- a real
+ * ZP under PDSCH, but also a PDSCH ending just before the CSI-RS symbol beside >= 4 bright classes, or a
+ * neighbour lit by another NZP resource, SSB/PBCH or PDCCH DM-RS (see the .c block). The neighbour must
+ * be 4x brighter than the pattern for a non-zero term (8x for 0.5), so a dark/dark noise ratio cannot
+ * pass; this costs a 4-RE hole the 0.5 point below ~9 dB. -1 when the in-symbol score is -1 or no
+ * neighbour is given. Same indexing and rx_shift for every buffer. Pure. */
+double nr_csirs_blind_zero_score_slot_shift(const int16_t *rx_sym, const int16_t *const *rx_nb, int n_nb,
+                                            const int16_t *ref_re_im, int n, int rx_shift);
+/** Same with rx_shift = 0. Pure. */
+double nr_csirs_blind_zero_score_slot(const int16_t *rx_sym, const int16_t *const *rx_nb, int n_nb,
+                                      const int16_t *ref_re_im, int n);
+/// Minimum ZP score nr_csirs_blind_zp_feed() counts as a hit.
+#define NR_CSIRS_BLIND_ZP_MIN_SCORE 0.5
 
 /** nr_csirs_blind_feed() for the ZP search, plus one guard: a periodic resource is hit in at most
  * 1/period of its tests, so a candidate that scores a hit on more than half of them is a
