@@ -183,7 +183,8 @@ typedef struct {
 } zp_grant_ev_t;
 static zp_grant_ev_t g_zp_grant_q[ZP_GRANT_QUEUE];
 static int g_zp_grant_qn;
-static uint64_t g_zp_grant_dropped, g_zp_grant_applied, g_zp_grant_contradictions;
+static uint64_t g_zp_grant_dropped; /* written under g_zp_grant_lock */
+static uint64_t g_zp_grant_dropped_seen, g_zp_grant_applied, g_zp_grant_contradictions; /* scan thread only */
 
 void nr_csirs_blind_rt_zp_grant_evidence(uint32_t pdsch_absolute_slot, const fapi_nr_dl_config_csirs_pdu_rel15_t *zp,
                                          double score)
@@ -212,12 +213,15 @@ static bool zp_same_geometry(const nr_csirs_candidate_t *c, const fapi_nr_dl_con
 static void zp_grant_drain(void)
 {
   int n;
+  uint64_t dropped;
   zp_grant_ev_t q[ZP_GRANT_QUEUE];
   pthread_mutex_lock(&g_zp_grant_lock);
   n = g_zp_grant_qn;
   memcpy(q, g_zp_grant_q, sizeof(q[0]) * (size_t)n);
   g_zp_grant_qn = 0;
+  dropped = g_zp_grant_dropped;
   pthread_mutex_unlock(&g_zp_grant_lock);
+  g_zp_grant_dropped_seen = dropped;
   for (int e = 0; e < n; e++) {
     for (int k = 0; k < g_zp.n_conf; k++) {
       const int idx = g_zp.conf_idx[k];
@@ -232,7 +236,7 @@ static void zp_grant_drain(void)
                    "(applied=%llu contradictions=%llu dropped=%llu)\n",
               idx, q[e].slot, q[e].score, g_zp.zp_revocations[idx] != revoked ? "REVOKED" : "kept",
               (unsigned long long)g_zp_grant_applied, (unsigned long long)g_zp_grant_contradictions,
-              (unsigned long long)g_zp_grant_dropped);
+              (unsigned long long)dropped);
       }
       break;
     }
@@ -422,7 +426,7 @@ void nr_csirs_blind_rt_slot(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot
                "zp_grant_evidence=%llu contradictions=%llu dropped=%llu\n",
           (unsigned long long)g_slots, g_st.n, null_median(), g_st.n_conf, g_zp.n_conf,
           (unsigned long long)g_zp_geometry_veto_total, (unsigned long long)g_zp_grant_applied,
-          (unsigned long long)g_zp_grant_contradictions, (unsigned long long)g_zp_grant_dropped);
+          (unsigned long long)g_zp_grant_contradictions, (unsigned long long)g_zp_grant_dropped_seen);
     for (int k = 0; k < g_zp.n; k++)
       if (g_zp_maint[k].scheduled || nr_csirs_blind_is_confirmed(&g_zp, k))
         zp_maint_summary(k);

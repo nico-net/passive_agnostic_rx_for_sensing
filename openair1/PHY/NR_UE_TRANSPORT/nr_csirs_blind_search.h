@@ -354,8 +354,8 @@ bool nr_csirs_blind_zp_feed_pair(nr_csirs_blind_state_t *st, int idx, uint32_t a
  * the receiver knows the PRBs and symbols that carry data, and it rate-matched this ZP out of them.
  * Score only those REs, against the grant's own data REs on a data-only symbol (no DM-RS, no CSI-RS):
  * a true ZP reads ~1 (noise against data), data on the pattern ~0, whatever the band share, the load
- * pattern or the NZP boost. A grant whose reference is not clearly above the noise floor (a false DCI
- * accept, a PRB/symbol/k0 hypothesis that looks where nothing was sent) is no evidence. */
+ * pattern or the NZP boost. A grant whose PRBs do not carry this cell's own DM-RS (a false DCI accept, a
+ * PRB/symbol/k0 hypothesis that looks where nothing of ours was sent) is no evidence. */
 
 /** Adds |y|^2 of the REs of one FFT'd symbol at the subcarriers-in-RB of @p re_even / @p re_odd
  * (12-bit masks by CRB parity, the extractor's convention) of every RB set in @p rb_bitmap
@@ -364,25 +364,37 @@ bool nr_csirs_blind_zp_feed_pair(nr_csirs_blind_state_t *st, int idx, uint32_t a
 void nr_csirs_blind_re_energy(const int16_t *rx_re_im, int n_fft, int rx_shift, const uint32_t *rb_bitmap, int n_rb,
                               int crb_offset, uint16_t re_even, uint16_t re_odd, double *sum, uint32_t *n);
 
-/** Hypothesis-free noise floor of one FFT'd symbol: adds |y|^2 of the guard bins (the n_fft - n_occupied FFT bins
- * outside the carrier, which starts at rx_shift) nearest the two carrier edges -- 1/8 of the guard on each side,
- * where an analog filter attenuates least; leakage from busy edge subcarriers only raises the estimate, which
- * only makes the gate below stricter. Adds nothing when the guard is shorter than 8 bins. Pure. */
-void nr_csirs_blind_guard_energy(const int16_t *rx_re_im, int n_fft, int rx_shift, int n_occupied, double *sum,
-                                 uint32_t *n);
+/** This cell's DM-RS in a decoded grant, scale-free: for every RB set in @p rb_bitmap (CRB = rb + crb_offset) the
+ * block of its first four pilots (two fd-OCC pairs, subcarriers-in-RB @p k_of[0..3]) is correlated against each of
+ * the @p n_ports pilot sequences (one per distinct fd-OCC of the grant's CDM group, conjugated as OAI's
+ * nr_pdsch_dmrs_rx() returns them, pilots[p][(crb - pilot_crb0) * per_rb + j]): *coh += sum_p |sum_j y_j p_j|^2,
+ * *inc += sum_j |y_j|^2 |pilots[0]_j|^2, *rx_pow += sum_j |y_j|^2, *n_blocks += 1. Pure. */
+void nr_csirs_blind_pilot_coherence(const int16_t *rx_re_im, int n_fft, int rx_shift, const uint32_t *rb_bitmap, int n_rb,
+                                    int crb_offset, const int16_t *const *pilots, int n_ports, int pilot_crb0, int per_rb,
+                                    const uint8_t k_of[4], double *coh, double *inc, double *rx_pow, uint32_t *n_blocks);
 
-/** Data reference over the noise floor that a grant needs to count: a TRUE ZP reads noise on its REs, and it can
- * only be contradicted (score <= 0.5) when the data reference is <= 2x the noise; 4x (6 dB) keeps a further 2x
- * margin for the guard-vs-in-band noise mismatch. */
-#define NR_CSIRS_BLIND_ZP_GRANT_MIN_SNR 4.0
+/** Fraction of the received DM-RS-RE power that is this cell's DM-RS on this grant: (coh / inc - n_ports) /
+ * (4 - n_ports) -- 0 for noise, a neighbour cell (another scrambling), or nothing sent; 1 for a clean own DM-RS
+ * (a 4-pilot block spans 7-8 subcarriers, flat enough for a coherent sum). -1 with fewer than
+ * NR_CSIRS_BLIND_PILOT_MIN_BLOCKS blocks (one per RB per antenna). For noise or a foreign signal coh/inc is the
+ * mean of `blocks` unit exponentials (for one port), so the 0.5 bar needs that mean >= 2.5: at 8 blocks the chance
+ * is 7.8e-4 per grant, and revocation needs two such grants in one window. Pure. */
+#define NR_CSIRS_BLIND_PILOT_MIN_BLOCKS 8
+double nr_csirs_blind_pilot_presence(double coh, double inc, uint32_t n_blocks, int n_ports);
 
 /** 1 - min(1, (e_zp / n_zp) / (e_data / n_data)): e_zp on the ZP REs inside the grant's PRBs, e_data on the grant's
- * data-only reference symbol, e_noise from nr_csirs_blind_guard_energy() on that symbol. -1 (no evidence) when the
- * ZP or data set is empty, no noise floor was measured, or the data mean is below NR_CSIRS_BLIND_ZP_GRANT_MIN_SNR
- * times the noise mean. Known limit: interference on a TRUE ZP at or above the grant's own signal (SINR <= 0 dB)
- * reads as a contradiction. Pure. */
-double nr_csirs_blind_zp_grant_score(double e_zp, uint32_t n_zp, double e_data, uint32_t n_data, double e_noise,
-                                     uint32_t n_noise);
+ * data-only reference symbol. -1 (no evidence) when either set is empty, e_data <= 0, @p presence (from
+ * nr_csirs_blind_pilot_presence) is below NR_CSIRS_BLIND_ZP_MIN_SCORE -- unless this cell's own DM-RS carries at
+ * least half the power of the grant's pilot REs, nothing proves the grant's PRBs hold this cell's PDSCH (a false
+ * DCI accept, a wrong PRB/symbol/k0 hypothesis, or a co-channel neighbour there, which does not rate-match our
+ * ZP) -- or the reference symbol's mean is below 1/4 of @p own_dmrs_re_power (this cell's DM-RS power per pilot
+ * RE, presence x mean pilot-RE power): the DM-RS may exceed the PDSCH EPRE by at most 4.77 dB (TS 38.214 Table
+ * 4.1-1), so a darker reference is not this grant's PDSCH (a start/length hypothesis reaching past it). Raw
+ * energy is never the test: it cannot tell our cell from a neighbour or an adjacent carrier.
+ * Known limit: interference on a TRUE ZP at or above the grant's own signal (SINR <= 0 dB) reads as a
+ * contradiction; the presence bar makes that case rare (it requires our DM-RS to dominate the same PRBs). Pure. */
+double nr_csirs_blind_zp_grant_score(double e_zp, uint32_t n_zp, double e_data, uint32_t n_data, double presence,
+                                     double own_dmrs_re_power);
 
 /** Decoded-grant evidence for exported ZP @p idx in @p absolute_slot (a score from the functions above).
  * Ignored unless idx is exported, the slot is one of its predicted occasions and not before the export (evidence

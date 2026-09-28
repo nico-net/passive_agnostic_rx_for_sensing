@@ -165,7 +165,7 @@ After GitHub access was restored, all of this session's branches were pushed:
 - **csirs** (merged in `060edd290c`, post-review fixes below): repeat the 8-port AWGN ×3 phy-test arm — expect 0 ZP
   exports. Then an arm where a ZP export overlaps decoded PDSCH (OCUDU CSI-RS bed, `ISAC_CSIRS_BLIND=1`,
   `pdcch_blind_monitor_pdsch >= 1`): bar = `SENSING: CSIRS_BLIND ZP_GRANT_EVIDENCE` lines appear, a false export is
-  `REVOKED` after 2 of them, a true ZP never logs a contradiction, and the 20000-slot status line reports
+  `REVOKED` after 2 of them, a true ZP logs no contradiction on a clean cell (see known limit (b)), and the 20000-slot status line reports
   `zp_grant_evidence=` > 0 with `dropped=0`. **Known false negative to check on the lab**: a cell with an 8-RE ZP
   (row-6-like) or two holes in one CSI-RS symbol (ZP + CSI-IM on different REs) gets NO ZP export by design, so
   every PDSCH crossing that symbol is decoded without that rate matching — expect a CRC deficit on exactly those
@@ -187,24 +187,33 @@ also did not disclose that the synth `nzp8_no_data` / `nzp8_light_load` negative
 
 **Important 1 — fixed (root cause).** Contradictions are now also scored on the PRBs the receiver's own decoded
 grants occupy. After FEP, `nr_pdsch_passive_decode()` calls `nr_pdsch_passive_zp_grant_score()` (exported, pinned by
-`test_nr_ssb_rate_match_prod` Z1–Z9) for every ZP (csi_type 2) entry it was handed for rate matching: energy on the ZP
-REs inside the grant's PRBs on the CSI-RS symbol(s) (REs of other rate-matching entries excluded, extractor's CRB-parity
-bitmap, BWPStart) vs every RE of the grant on ONE data-only reference symbol (no DM-RS/CSI-RS, not an SSB symbol; the
-one nearest the ZP symbol), all antennas summed. **Noise-floor gate**: the reference must be >= 6 dB over the
-hypothesis-free noise floor of that symbol (guard-band FFT bins next to the carrier edges,
-`nr_csirs_blind_guard_energy`), else the grant is no evidence — a true ZP reads noise, and a grant decoded where nothing
-was sent (false DCI accept, wrong PRB/symbol/k0 hypothesis) would otherwise read noise-vs-noise = a contradiction
-(RED during this fix: such a true ZP was revoked after 2 grants; pinned `GrantDecodedUnderAWrongPrbHypothesisIsNoEvidence`,
-incl. a phantom whole-carrier grant). The score is posted to a mutex queue (`nr_csirs_blind_rt_zp_grant_evidence`);
-`nr_csirs_blind_rt_slot()` drains it into `nr_csirs_blind_zp_grant_feed()`: a separate window of the last 8 distinct
-predicted slots with evidence (out-of-order arrival allowed; evidence from before the current export is stale and
-ignored), a slot is a contradiction only if NO scorable grant of it supports the ZP, 2 contradicted slots revoke, and a
-qualified full-band hole does not clear it. The full-band path keeps ocudu-dl's rules unchanged on purpose: in a fully
-idle symbol its score reads ~0 exactly like data on the pattern, so without the hole-clears-debt rule a TRUE ZP would
-be revoked by idle occasions (pinned: `TrueZpSurvivesIdleOccasionsAndDecodedGrants`).
-Cost (micro-benchmark of the production scorer, RelWithDebInfo, pinned core, 273 PRB full-band grant): 9.7 µs with
-1 antenna, 38.1 µs with 4 (the first cut read all data symbols with a per-RE modulo: 325.8 µs, reviewer). Runs only for
-grants carrying a ZP entry, per decode.
+`test_nr_ssb_rate_match_prod` Z1–Z13) for every ZP (csi_type 2) entry it was handed for rate matching: energy on the
+ZP REs inside the grant's PRBs on the CSI-RS symbol(s) (REs of other rate-matching entries excluded, extractor's
+CRB-parity bitmap, BWPStart) vs every RE of the grant on ONE data-only reference symbol (no DM-RS/CSI-RS, not an SSB
+symbol; the one nearest the ZP symbol), all antennas summed. A grant only counts when:
+- it is dedicated-class (`grant->scr_dedicated`): p-ZP-CSI-RS is UE-dedicated PDSCH-Config, common PDSCH need not
+  respect it;
+- its first DM-RS symbol carries **this cell's own DM-RS** (scrambling id, nSCID, the grant's ports incl. fd-OCC) on
+  its PRBs: `nr_csirs_blind_pilot_coherence/presence` — the coherent fraction of the pilot-RE power over 4-pilot
+  blocks, >= 0.5, from >= 8 blocks (RB x antenna; chance pass for noise or a foreign signal 7.8e-4 per grant).
+  This is what makes a false DCI accept, a wrong PRB/symbol/k0 hypothesis, and a co-channel neighbour (which does
+  not rate-match our ZP) no evidence; raw energy cannot tell them from our PDSCH (G5 round 2, I1);
+- its reference symbol is at least 1/4 of the own-DM-RS power per RE (DM-RS may exceed the PDSCH EPRE by at most
+  4.77 dB), so a length hypothesis reaching past the real PDSCH is no evidence;
+- the ZP symbol is not an SSB symbol.
+No guard-band or absolute-energy test remains (round 1 used a guard-band noise floor; round 2 measured that it reads
+the adjacent operator's carrier at 80/100 MHz and then refuses every grant — removed, RED/GREEN pinned by
+`AdjacentCarrierInTheFftGuardDoesNotDisableRevocation`). The score is posted to a mutex queue
+(`nr_csirs_blind_rt_zp_grant_evidence`); `nr_csirs_blind_rt_slot()` drains it into `nr_csirs_blind_zp_grant_feed()`:
+a separate window of the last 8 distinct predicted slots with evidence (out-of-order arrival allowed; evidence from
+before the current export is stale and ignored), a slot is a contradiction only if NO scorable grant of it supports
+the ZP, 2 contradicted slots revoke, and a qualified full-band hole does not clear it. The full-band path keeps
+ocudu-dl's rules unchanged on purpose: in a fully idle symbol its score reads ~0 exactly like data on the pattern,
+so without the hole-clears-debt rule a TRUE ZP would be revoked by idle occasions
+(pinned: `TrueZpSurvivesIdleOccasionsAndDecodedGrants`).
+Cost (micro-benchmark of the production scorer incl. DM-RS generation, RelWithDebInfo, pinned core, 273 PRB
+full-band grant): 13.0 µs with 1 antenna, 48.0 µs with 4, per ZP entry per decode call (the first cut read all data
+symbols with a per-RE modulo: 325.8 µs, reviewer). Not deduplicated across hypothesis retries of one grant.
 
 | Case (false ZP k8..11 beside 8-class NZP k0..7) | before (full-band only) | after: wrong occasions until revoked |
 |---|---|---|
@@ -217,18 +226,22 @@ grants carrying a ZP entry, per decode.
 | NZP +6 dB, full band | never | **2** |
 | 1/10 of RBs + NZP +6 dB + alternate | never | **2** |
 | 1/3 of RBs, other UEs' PDSCH on the rest, NZP 0 / +6 dB | 2 / never | **2 / 2** |
+| 1/3 of RBs, NZP +6 dB, co-channel neighbour INR 10 dB | never | **2** |
+| 1/3 of RBs, NZP +6 dB, adjacent carrier -3 / 0 / +10 dB in the FFT guard | never | **2** |
 | synth (real generator chain): NZP 0 dB / +6 dB, grants on 1/1 and 1/3 of RBs | +6 dB: never | **2** each |
 
-"Wrong occasions" = decoded grants rate-matched around the still-exported false ZP, counted synchronously. On the
-receiver add the decodes already queued or in flight when the revoking evidence is drained (decode-queue latency /
-ZP period); the bound is therefore 2 + in-flight, not 2. Grants with no evidence: no data-only symbol in the FFT'd
-range, or a reference under the noise gate. (GPU-LLR decodes never carry CSI rate matching, so they are not a gap.)
+Conditions of that bound (it is not unconditional): the grant is dedicated-class, crosses the ZP symbol, carries our
+own DM-RS on >= 8 RB x antenna blocks at >= 0 dB SINR on its pilots, has a data-only symbol in the FFT'd range, and
+the ZP symbol is not an SSB symbol. "Wrong occasions" are counted synchronously; on the receiver add the decodes
+already queued or in flight when the revoking evidence is drained (decode-queue latency / ZP period), so the harm
+bound is 2 + in-flight. GPU-LLR decodes never carry CSI rate matching, so they are not a gap.
 
-Known limits, pinned: (a) full-band score alone (grants the receiver does not decode — harmless to its own decoding):
-1/3 of RBs never, alternate never, +6 dB never, full band 2 (`KnownLimitationWithoutDecodedGrantEvidence`);
-(b) interference on a TRUE ZP (CSI-IM) at or above the grant's own signal (SINR <= 0 dB) reads as a contradiction
-(unit-pinned in `GrantScoreSeparates…`); (c) a phantom grant only escapes the gate if its reference is >= 6 dB over the
-guard noise, i.e. something (another UE's PDSCH) was actually sent there — then a cell-wide true ZP supports.
+Known limits, pinned: (a) full-band score alone (grants the receiver does not decode, or that fail the conditions
+above — harmless to decoding only for the former): 1/3 of RBs never, alternate never, +6 dB never, full band 2
+(`KnownLimitationWithoutDecodedGrantEvidence`); (b) interference on a TRUE ZP (CSI-IM) at or above the grant's own
+signal (SINR <= 0 dB on the ZP REs) reads as a contradiction (unit-pinned in `GrantScoreSeparates…`); (c) a true ZP
+that is UE-specific (not cell-wide) can be contradicted by another UE's correctly decoded grant of this cell — the
+receiver applies one exported ZP set to every RNTI, so it cannot represent per-UE ZP sets anyway.
 
 **Important 2 — fixed.** Synth `nzp8_no_data` / `nzp8_light_load` now `assert(w >= 0)` (export must happen), then
 assert full-band revocation (0 dB) AND decoded-grant revocation after exactly 2 wrong occasions. New boosted case
@@ -259,18 +272,23 @@ unscorable guard is unreachable for rows 1–5 (it only makes results more conse
 from an init-cache of `agn-wt/integ`), every build under `flock radio_bed.lock`, no receiver running, load < 1).**
 - G3 RED (stubs, tests written first): `test_nr_csirs_blind_search` 121/126 — 5 new tests fail, the load-shape table
   reproducing the reviewer's probe exactly (1/3, 1/5, 1/10, alternate, +6 dB: never revoked); synth aborts at
-  `grant_revoke` (data on the false ZP not counted). Wrong-hypothesis RED (first cut without a gate): 125/128, a true ZP
-  revoked at occasion 2 / 4. Review-round mutants, each caught: no noise gate (2 tests fail), no support-wins (1), no
-  stale-evidence floor (1), no other-entry exclusion (Z4), antenna 0 only (Z8), skip mask ignored (Z9), no even/odd
-  bitmap split (Z5 x2). GREEN: `test_nr_csirs_blind_search` 128/128 (118 existing + 10 new), synth PASS,
-  `test_nr_ssb_rate_match_prod` PASSED (existing checks + Z1–Z9). Logs: `…/build/evidence/` (not committed).
+  `grant_revoke` (data on the false ZP not counted). Wrong-hypothesis RED (first cut, no gate): 125/128, a true ZP
+  revoked at occasion 2 / 4. Round-2 RED on the guard-band gate: 128/130 — co-channel neighbour INR 6/10/20 dB
+  contradicts a true ZP (revoked after 2); adjacent carrier -3/0 dB in the guard: false ZP never revoked (200 wrong).
+  Mutants, each caught: round 1 — no support-wins, no stale floor, no other-entry exclusion (Z4), antenna 0 only
+  (Z8), skip mask ignored (Z9), no even/odd bitmap split (Z5 x2); round 2 — no own-DM-RS gate (3 gtests + Z3, Z10),
+  no reference-vs-DM-RS check (Z9), dedicated ignored (Z11), ZP in SSB symbol scored (Z12), BWP-relative pilot base
+  (Z6). GREEN: `test_nr_csirs_blind_search` 131/131 (118 existing + 13 new), synth PASS, `test_nr_ssb_rate_match_prod`
+  PASSED (existing SSB checks + Z1–Z13, DM-RS from an independent TS 38.211 Gold generator). Logs:
+  `…/build/evidence/` (not committed).
 - G1: `nr-uesoftmodem` and `tests` build clean; the only warning in a touched file (`dmrs_first` maybe-uninitialized in
   `nr_pdsch_passive_decode.c`) is pre-existing on the parent.
 - G2: full ctest 125/126 on the parent `a13c2b9a06` and 125/126 with the fix — same single failure
-  (`test_vrtsim_cirdb`, environment), delta 0. Shuffle seeds 1/3/5 green: csirs_blind_search 128, blind_monitor
+  (`test_vrtsim_cirdb`, environment), delta 0. Shuffle seeds 1/3/5 green: csirs_blind_search 131, blind_monitor
   195+2 skipped, config_sweep 44+1 skipped, prb_set 17, scrambling 11, ssb_rate_match 8, mib_handoff 6.
-- G5: round 1 (fresh reviewer) NOT approved — 3 Important (whole-carrier phantom/wrong-hypothesis grants still
-  contradicted a true ZP; the first-cut locality test hid false ZPs when other UEs' data surrounded the grant; 325.8 µs
-  per grant) + 4 Minor (untested production hook, SSB in the reference, stale evidence, report inaccuracies). All
-  addressed above; round 2 below.
+- G5: round 1 NOT approved (3 Important: phantom/wrong-hypothesis whole-carrier grants, an undisclosed locality
+  gap, 325.8 µs; 4 Minor). Round 2 NOT approved (2 Important: co-channel neighbour passes a raw-energy gate;
+  guard-band floor reads the adjacent carrier at 80/100 MHz; 5 Minor: SSB on the ZP symbol, non-dedicated grants,
+  per-hypothesis cost, dropped-counter race + window static assert, report overclaims). All addressed above except
+  the per-hypothesis cost dedup (documented). Round 3 below.
 - G4: pending (lab) — see the csirs entry in "What the lab must still run".

@@ -1893,21 +1893,31 @@ struct ZpScene {
   int hyp = 0;   // the receiver's PRB hypothesis for the grant: rb % every == hyp (0 = right; else nothing sent there)
   bool others = false; // another UE's PDSCH on every RB outside the grant (on k8..11 too unless true_zp)
   bool phantom = false; // the grant was decoded but nothing was sent (false DCI accept)
+  double inr_db = -100.0; // co-channel neighbour cell on EVERY RE of the carrier, dB over the thermal noise
+  double aci_db = -100.0; // adjacent carrier in the FFT guard bins, dB relative to the PDSCH EPRE
 };
 struct ZpSlot {
-  std::vector<int16_t> csi, data;
+  std::vector<int16_t> csi, data, dmrs; // CSI-RS symbol, a data-only symbol, the DM-RS symbol (type 1, one port)
   uint32_t rbs[4];
 };
+// This cell's DM-RS for port 1000 on CRB rb, pilot i (k = 2i): a fixed QPSK sequence, amplitude 700.
+int16_t zp_pilot(int rb, int i, int im)
+{
+  const uint32_t h = (uint32_t)(rb * 12 + i) * 2654435761u;
+  return (int16_t)(((h >> (im ? 7 : 3)) & 1) ? 700 : -700);
+}
 const int kZpGuard = 128; // FFT bins past the carrier: noise only, the scorer's noise floor
 void zp_scene(const ZpScene &z, unsigned seed, ZpSlot &s)
 {
   const int n = 12 * kLabRb;
   s.csi.assign(2 * (n + kZpGuard), 0);
   s.data.assign(2 * (n + kZpGuard), 0);
+  s.dmrs.assign(2 * (n + kZpGuard), 0);
   memset(s.rbs, 0, sizeof(s.rbs));
   std::mt19937 g(seed);
   std::normal_distribution<double> nd(0.0, 10.0);
   const double a_nzp = z.idle ? 0.0 : 700.0 * std::pow(10.0, z.nzp_db / 20.0);
+  const double a_nb = 10.0 * std::pow(10.0, z.inr_db / 20.0), a_aci = 700.0 * std::pow(10.0, z.aci_db / 20.0);
   for (int rb = 0; rb < kLabRb; rb++) {
     const bool granted = z.every > 0 && rb % z.every == 0 && !z.phantom;
     const bool data = granted || (z.others && !granted);
@@ -1921,12 +1931,19 @@ void zp_scene(const ZpScene &z, unsigned seed, ZpSlot &s)
       s.csi[2 * i + 1] = (int16_t)lrint(((g() & 1) ? a : -a) + nd(g));
       s.data[2 * i] = (int16_t)lrint(((g() & 1) ? d : -d) + nd(g));
       s.data[2 * i + 1] = (int16_t)lrint(((g() & 1) ? d : -d) + nd(g));
+      const bool pilot = !(k & 1);
+      s.dmrs[2 * i] = (int16_t)lrint((granted ? (pilot ? zp_pilot(rb, k / 2, 0) : ((g() & 1) ? d : -d)) : 0) + nd(g));
+      s.dmrs[2 * i + 1] = (int16_t)lrint((granted ? (pilot ? zp_pilot(rb, k / 2, 1) : ((g() & 1) ? d : -d)) : 0) + nd(g));
+      for (auto *v : {&s.csi, &s.data, &s.dmrs}) { // the neighbour does not know our ZP
+        (*v)[2 * i] = (int16_t)lrint((*v)[2 * i] + ((g() & 1) ? a_nb : -a_nb));
+        (*v)[2 * i + 1] = (int16_t)lrint((*v)[2 * i + 1] + ((g() & 1) ? a_nb : -a_nb));
+      }
     }
   }
   for (int i = n; i < n + kZpGuard; i++)
-    for (auto *v : {&s.csi, &s.data}) {
-      (*v)[2 * i] = (int16_t)lrint(nd(g));
-      (*v)[2 * i + 1] = (int16_t)lrint(nd(g));
+    for (auto *v : {&s.csi, &s.data, &s.dmrs}) {
+      (*v)[2 * i] = (int16_t)lrint(nd(g) + ((g() & 1) ? a_aci : -a_aci));
+      (*v)[2 * i + 1] = (int16_t)lrint(nd(g) + ((g() & 1) ? a_aci : -a_aci));
     }
 }
 double zp_full_band(const ZpSlot &s)
@@ -1937,15 +1954,40 @@ double zp_full_band(const ZpSlot &s)
 }
 // What nr_pdsch_passive_decode() computes for one decoded grant: ZP REs of the grant's PRBs on the CSI-RS
 // symbol against all REs of the grant's PRBs on a data-only symbol.
+// This cell's type-1 port-1000 pilots, conjugated as nr_pdsch_dmrs_rx() returns them, 6 per CRB from CRB 0.
+const std::vector<int16_t> &zp_own_pilots()
+{
+  static std::vector<int16_t> p;
+  if (p.empty())
+    for (int rb = 0; rb < kLabRb; rb++)
+      for (int i = 0; i < 6; i++) {
+        p.push_back(zp_pilot(rb, i, 0));
+        p.push_back((int16_t)-zp_pilot(rb, i, 1));
+      }
+  return p;
+}
+double zp_presence(const std::vector<int16_t> &dmrs, const uint32_t *rbs, double *own)
+{
+  const int16_t *pl[1] = {zp_own_pilots().data()};
+  const uint8_t k_of[4] = {0, 2, 4, 6};
+  double coh = 0.0, inc = 0.0, pw = 0.0;
+  uint32_t nb = 0;
+  nr_csirs_blind_pilot_coherence(dmrs.data(), 12 * kLabRb + kZpGuard, 0, rbs, kLabRb, 0, pl, 1, 0, 6, k_of, &coh, &inc, &pw, &nb);
+  *own = nb ? pw / (4.0 * nb) : 0.0;
+  const double presence = nr_csirs_blind_pilot_presence(coh, inc, nb, 1);
+  *own *= presence;
+  return presence;
+}
 double zp_grant(const ZpSlot &s)
 {
   const int n_fft = 12 * kLabRb + kZpGuard;
-  double ez = 0.0, ed = 0.0, en = 0.0;
-  uint32_t nz = 0, ndat = 0, nn = 0;
+  double ez = 0.0, ed = 0.0;
+  uint32_t nz = 0, ndat = 0;
   nr_csirs_blind_re_energy(s.csi.data(), n_fft, 0, s.rbs, kLabRb, 0, 0xF00, 0xF00, &ez, &nz);
   nr_csirs_blind_re_energy(s.data.data(), n_fft, 0, s.rbs, kLabRb, 0, 0xFFF, 0xFFF, &ed, &ndat);
-  nr_csirs_blind_guard_energy(s.data.data(), n_fft, 0, 12 * kLabRb, &en, &nn);
-  return nr_csirs_blind_zp_grant_score(ez, nz, ed, ndat, en, nn);
+  double own = 0.0;
+  const double presence = zp_presence(s.dmrs, s.rbs, &own);
+  return nr_csirs_blind_zp_grant_score(ez, nz, ed, ndat, presence, own);
 }
 // Export a ZP on candidate 0 from dark occasions (k8..11 unused beside the NZP), as
 // ExportedFalseHoleIsRevokedWhenPdschLandsOnIt does. Returns the first predicted occasion after the export.
@@ -2008,28 +2050,19 @@ TEST(CsirsBlindZpGrant, GrantScoreSeparatesDataFromAHoleWhateverTheBandShareOrBo
     }
   zp_scene({0, 0.0, false, false}, 7, s);
   EXPECT_LT(zp_grant(s), 0.0) << "no grant PRB: unscorable";
-  EXPECT_LT(nr_csirs_blind_zp_grant_score(5.0, 1, 0.0, 12, 0.0, 1), 0.0) << "dark data symbol: unscorable";
-  EXPECT_LT(nr_csirs_blind_zp_grant_score(5.0, 0, 5.0, 12, 0.0, 1), 0.0);
-  EXPECT_LT(nr_csirs_blind_zp_grant_score(1.0, 1, 4.0, 1, 0.0, 0), 0.0) << "no noise floor measured";
-  EXPECT_DOUBLE_EQ(nr_csirs_blind_zp_grant_score(1.0, 1, 4.0, 1, 1.0, 1), 0.75) << "data exactly 6 dB over noise";
-  EXPECT_LT(nr_csirs_blind_zp_grant_score(1.0, 1, 3.9, 1, 1.0, 1), 0.0) << "data under 6 dB over noise";
-  EXPECT_DOUBLE_EQ(nr_csirs_blind_zp_grant_score(0.0, 1, 4.0, 1, 0.0, 1), 1.0) << "noise-free simulator";
+  EXPECT_LT(nr_csirs_blind_zp_grant_score(5.0, 1, 0.0, 12, 1.0, 0.0), 0.0) << "dark data symbol: unscorable";
+  EXPECT_LT(nr_csirs_blind_zp_grant_score(5.0, 0, 5.0, 12, 1.0, 0.0), 0.0);
+  EXPECT_DOUBLE_EQ(nr_csirs_blind_zp_grant_score(1.0, 1, 4.0, 1, 1.0, 0.0), 0.75);
+  EXPECT_DOUBLE_EQ(nr_csirs_blind_zp_grant_score(1.0, 1, 4.0, 1, 0.5, 0.0), 0.75) << "own DM-RS exactly half the power";
+  EXPECT_LT(nr_csirs_blind_zp_grant_score(1.0, 1, 4.0, 1, 0.49, 0.0), 0.0) << "own DM-RS under half the power";
+  EXPECT_LT(nr_csirs_blind_zp_grant_score(1.0, 1, 4.0, 1, -1.0, 0.0), 0.0) << "presence unmeasured";
+  EXPECT_DOUBLE_EQ(nr_csirs_blind_zp_grant_score(0.0, 1, 4.0, 1, 1.0, 0.0), 1.0) << "noise-free simulator";
+  EXPECT_DOUBLE_EQ(nr_csirs_blind_zp_grant_score(1.0, 1, 4.0, 1, 1.0, 16.0), 0.75) << "reference 6 dB under the DM-RS";
+  EXPECT_LT(nr_csirs_blind_zp_grant_score(1.0, 1, 4.0, 1, 1.0, 16.1), 0.0) << "reference darker: not this PDSCH";
   // Known limit on a TRUE ZP (CSI-IM): interference I on its REs against the grant's S + I. Below the grant's
   // own signal it supports; at SINR 0 dB it reaches the 0.5 bar and contradicts.
-  EXPECT_GT(nr_csirs_blind_zp_grant_score(0.5, 1, 1.5, 1, 0.01, 1), NR_CSIRS_BLIND_ZP_MIN_SCORE);
-  EXPECT_LE(nr_csirs_blind_zp_grant_score(1.0, 1, 2.0, 1, 0.01, 1), NR_CSIRS_BLIND_ZP_MIN_SCORE);
-  // Guard noise floor: the 1/8 of the guard next to each carrier edge (carrier = 24 bins from 30 of 48).
-  std::vector<int16_t> gx(2 * 48, 0);
-  for (int i = 0; i < 48; i++)
-    gx[2 * i] = (int16_t)(i + 1);
-  double ge = 0.0;
-  uint32_t gn = 0;
-  nr_csirs_blind_guard_energy(gx.data(), 48, 30, 24, &ge, &gn); // guard bins 6..29, edges 6,7,8 and 27,28,29
-  EXPECT_EQ(gn, 6u);
-  EXPECT_DOUBLE_EQ(ge, 7.0 * 7 + 8.0 * 8 + 9.0 * 9 + 28.0 * 28 + 29.0 * 29 + 30.0 * 30);
-  gn = 0;
-  nr_csirs_blind_guard_energy(gx.data(), 48, 0, 41, &ge, &gn);
-  EXPECT_EQ(gn, 0u) << "guard under 8 bins: no floor";
+  EXPECT_GT(nr_csirs_blind_zp_grant_score(0.5, 1, 1.5, 1, 1.0, 0.0), NR_CSIRS_BLIND_ZP_MIN_SCORE);
+  EXPECT_LE(nr_csirs_blind_zp_grant_score(1.0, 1, 2.0, 1, 1.0, 0.0), NR_CSIRS_BLIND_ZP_MIN_SCORE);
   // CRB parity picks the mask, and the RB offset is applied before it (the extractor's convention).
   std::vector<int16_t> rx(2 * 12 * 4, 0);
   for (int i = 0; i < 12 * 4; i++)
@@ -2051,6 +2084,51 @@ TEST(CsirsBlindZpGrant, GrantScoreSeparatesDataFromAHoleWhateverTheBandShareOrBo
   nr_csirs_blind_re_energy(rx.data(), 48, 47, &two_rbs, 1, 0, 0x002, 0x002, &e, &n); // k=1 wraps to index 0
   EXPECT_EQ(n, 1u);
   EXPECT_DOUBLE_EQ(e, 1.0);
+}
+
+TEST(CsirsBlindZpGrant, PilotPresenceIsThisCellsDmrsAndNothingElse)
+{
+  // 40 RBs, one 4-pilot block each (k = 0, 2, 4, 6), pilots of two fd-OCC ports ([+1 +1] and [+1 -1] per pair).
+  const int nrb = 40, n_fft = 12 * nrb;
+  std::mt19937 g(5);
+  std::normal_distribution<double> nd(0.0, 1.0);
+  std::vector<int16_t> x0(2 * 6 * nrb), x1(2 * 6 * nrb), foreign(2 * 6 * nrb);
+  for (int j = 0; j < 6 * nrb; j++) {
+    x0[2 * j] = (g() & 1) ? 1000 : -1000;
+    x0[2 * j + 1] = (g() & 1) ? 1000 : -1000;
+    const int occ = (j % 2) ? -1 : 1;
+    x1[2 * j] = (int16_t)(occ * x0[2 * j]);
+    x1[2 * j + 1] = (int16_t)(occ * x0[2 * j + 1]);
+    foreign[2 * j] = (g() & 1) ? 1000 : -1000;
+    foreign[2 * j + 1] = (g() & 1) ? 1000 : -1000;
+  }
+  auto conj = [](std::vector<int16_t> v) { for (size_t j = 1; j < v.size(); j += 2) v[j] = (int16_t)-v[j]; return v; };
+  const std::vector<int16_t> p0 = conj(x0), p1 = conj(x1);
+  const uint8_t k_of[4] = {0, 2, 4, 6};
+  // rx = h0 * tx0 + h1 * tx1 + noise, per-RB flat channel.
+  auto presence = [&](double a0, double a1, const std::vector<int16_t> &t0, double sigma, int n_ports, int n_rb_used) {
+    std::vector<int16_t> rx(2 * n_fft, 0);
+    for (int rb = 0; rb < nrb; rb++)
+      for (int j = 0; j < 6; j++) {
+        const int f = 12 * rb + 2 * j, q = 6 * rb + j;
+        rx[2 * f] = (int16_t)lrint(a0 * t0[2 * q] + a1 * x1[2 * q] + sigma * nd(g));
+        rx[2 * f + 1] = (int16_t)lrint(a0 * t0[2 * q + 1] + a1 * x1[2 * q + 1] + sigma * nd(g));
+      }
+    uint32_t used[2] = {n_rb_used >= 32 ? 0xFFFFFFFFu : (1u << n_rb_used) - 1, n_rb_used > 32 ? (1u << (n_rb_used - 32)) - 1 : 0};
+    const int16_t *pl[2] = {p0.data(), p1.data()};
+    double coh = 0.0, inc = 0.0, pw = 0.0;
+    uint32_t nb = 0;
+    nr_csirs_blind_pilot_coherence(rx.data(), n_fft, 0, used, nrb, 0, pl, n_ports, 0, 6, k_of, &coh, &inc, &pw, &nb);
+    return nr_csirs_blind_pilot_presence(coh, inc, nb, n_ports);
+  };
+  EXPECT_GT(presence(1.0, 0.0, x0, 10.0, 1, 40), 0.95) << "own DM-RS, 40 dB";
+  EXPECT_NEAR(presence(1.0, 0.0, x0, 1000.0, 1, 40), 0.5, 0.2) << "own DM-RS at 0 dB SNR";
+  EXPECT_LT(presence(0.0, 0.0, x0, 1000.0, 1, 40), 0.3) << "noise only";
+  EXPECT_LT(presence(3.0, 0.0, foreign, 10.0, 1, 40), 0.3) << "another cell's DM-RS, 10 dB over ours-absent";
+  EXPECT_GT(presence(1.0, 1.0, x0, 10.0, 2, 40), 0.95) << "two fd-OCC ports of one CDM group, both counted";
+  EXPECT_LT(presence(0.0, 0.0, x0, 1000.0, 2, 40), 0.3) << "noise, two ports: the OCC pair must not look coherent";
+  EXPECT_LT(presence(1.0, 0.0, x0, 10.0, 1, 7), 0.0) << "7 blocks: too few to decide";
+  EXPECT_GT(presence(1.0, 0.0, x0, 10.0, 1, 8), 0.95) << "8 blocks decide";
 }
 
 TEST(CsirsBlindZpGrant, FalseHoleRevocationBoundUnderEveryLoadShape)
@@ -2167,6 +2245,38 @@ TEST(CsirsBlindZpGrant, GrantDecodedUnderAWrongPrbHypothesisIsNoEvidence)
   zp_scene(phantom, 9, s);
   EXPECT_LT(zp_grant(s), 0.0);
   EXPECT_EQ(zp_run(phantom, zp_every_occasion(200), true).revoked_at, -1);
+}
+
+TEST(CsirsBlindZpGrant, CoChannelNeighbourOnAPhantomGrantIsNoEvidence)
+{
+  // G5 round 2, I1: a phantom / wrong-hypothesis grant on PRBs where THIS cell sends nothing but a reuse-1
+  // neighbour does (INR 6..20 dB). The neighbour does not rate-match our ZP, so raw energy says "data on the
+  // pattern" and would revoke a TRUE ZP. Only evidence tied to this cell (its own DM-RS) may count.
+  ZpSlot s;
+  for (double inr : {6.0, 10.0, 20.0}) {
+    ZpScene z = {1, 0.0, true, false, 0, false, true};
+    z.inr_db = inr;
+    zp_scene(z, 17, s);
+    EXPECT_LT(zp_grant(s), 0.0) << "INR " << inr << " dB";
+    EXPECT_EQ(zp_run(z, zp_every_occasion(200), true).revoked_at, -1) << "INR " << inr << " dB";
+  }
+  // The same neighbour under a REAL grant of ours on a false ZP: the grant's DM-RS is there, it still revokes.
+  ZpScene real = {3, 6.0, false, false};
+  real.inr_db = 10.0;
+  EXPECT_EQ(zp_run(real, zp_every_occasion(200), true).wrong, 2);
+}
+
+TEST(CsirsBlindZpGrant, AdjacentCarrierInTheFftGuardDoesNotDisableRevocation)
+{
+  // G5 round 2, I2: at 80/100 MHz the FFT guard bins next to the carrier hold the adjacent operator's
+  // carrier. Whatever sits there must not decide whether this cell's decoded grants count.
+  for (double aci : {-3.0, 0.0, 10.0}) {
+    ZpScene z = {3, 6.0, false, false};
+    z.aci_db = aci;
+    const ZpRun r = zp_run(z, zp_every_occasion(200), true);
+    EXPECT_EQ(r.wrong, 2) << "adjacent carrier " << aci << " dB";
+    EXPECT_GT(r.revoked_at, 0) << "adjacent carrier " << aci << " dB";
+  }
 }
 
 TEST(CsirsBlindZpGrant, OtherUesDataBesideTheGrantDoesNotHideAFalseZp)

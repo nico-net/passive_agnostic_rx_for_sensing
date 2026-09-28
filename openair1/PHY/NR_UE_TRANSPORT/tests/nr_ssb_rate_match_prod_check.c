@@ -500,9 +500,51 @@ static int observe_trials(double snr_db, int trials, bool present, int pci_offse
  * each case pins one piece of its RE bookkeeping: the extractor's even/odd 16-bit CSI bitmap split and CRB parity,
  * BWPStart, the exclusion of other rate-matching entries, the FFT'd-symbol clip, the antenna sum, the skipped
  * (SSB) symbols and the noise-floor gate. Grant: symbols 1..13, DM-RS on 2; ZP: row 4 bitmap 4 (k8..11) at 13. */
-enum { ZD = 512, ZN = 4 };
+enum { ZD = 512, ZN = 4, ZNID = 77 };
 static c16_t *zgrid;
 static uint32_t zstride;
+/* TS 38.211 5.2.1 Gold sequence and 7.4.1.1 PDSCH DM-RS, written independently of OAI's nr_gold_pdsch() /
+ * nr_pdsch_dmrs_rx(): c_init = (2^17 (14 n_s + l + 1)(2 N_ID + 1) + 2 N_ID + n_SCID) mod 2^31 (lambda = 0),
+ * r(m) = ((1 - 2c(2m)) + j(1 - 2c(2m+1))) / sqrt(2), type 1: DM-RS m on subcarrier 2m + delta counted from
+ * CRB 0 (refPoint 0), weighted by w_f(k') = (-1)^k' for odd ports. */
+static void zdmrs(int slot, int sym, int nid, int m_max, int *re, int *im)
+{
+  static uint8_t x1[31 + 1600 + 2 * 6 * 275], x2[31 + 1600 + 2 * 6 * 275];
+  const uint32_t cinit = (uint32_t)(((1ull << 17) * (14 * slot + sym + 1) * (2 * nid + 1) + 2 * nid) % (1ull << 31));
+  const int len = 1600 + 2 * m_max;
+  for (int n = 0; n < 31; n++) {
+    x1[n] = n == 0;
+    x2[n] = (cinit >> n) & 1;
+  }
+  for (int n = 0; n + 31 < len + 31; n++) {
+    x1[n + 31] = (x1[n + 3] + x1[n]) & 1;
+    x2[n + 31] = (x2[n + 3] + x2[n + 2] + x2[n + 1] + x2[n]) & 1;
+  }
+  for (int m = 0; m < m_max; m++) {
+    re[m] = 1 - 2 * ((x1[1600 + 2 * m] + x2[1600 + 2 * m]) & 1);
+    im[m] = 1 - 2 * ((x1[1600 + 2 * m + 1] + x2[1600 + 2 * m + 1]) & 1);
+  }
+}
+/* This cell's DM-RS (symbol 2) on antenna mask @p ants, CRBs [crb0, crb1): ports 1000 (and 1001 when @p two),
+ * data on the odd subcarriers (one CDM group). */
+static void zset_dmrs(const NR_DL_FRAME_PARMS *fp, int ants, int crb0, int crb1, bool two)
+{
+  static int re[6 * 275], im[6 * 275];
+  zdmrs(0, 2, ZNID, 6 * crb1, re, im);
+  for (int a = 0; a < fp->nb_antennas_rx; a++)
+    for (int crb = crb0; ((ants >> a) & 1) && crb < crb1; crb++)
+      for (int k = 0; k < 12; k++) {
+        const int j = (fp->first_carrier_offset + crb * 12 + k) % fp->ofdm_symbol_size;
+        const int m = crb * 6 + k / 2;
+        c16_t *y = &zgrid[(size_t)a * zstride + 2 * fp->ofdm_symbol_size + j];
+        if (k & 1) {
+          *y = (c16_t){(int16_t)(bit() ? ZD : -ZD), (int16_t)(bit() ? ZD : -ZD)};
+          continue;
+        }
+        const int w1 = two ? ((m & 1) ? -1 : 1) : 0; // port 1001: w_f = (-1)^k', k' = m & 1
+        *y = (c16_t){(int16_t)(ZD * (re[m] + w1 * re[m])), (int16_t)(ZD * (im[m] + w1 * im[m]))};
+      }
+}
 static void zset(const NR_DL_FRAME_PARMS *fp, int a, int sym, int crb, int k, int amp)
 {
   const int j = (fp->first_carrier_offset + crb * 12 + k) % fp->ofdm_symbol_size;
@@ -523,6 +565,7 @@ static void zscene(const NR_DL_FRAME_PARMS *fp, int ants, int crb0, int crb1, bo
           if (!dark)
             zset(fp, a, sym, crb, k, ZD);
         }
+  zset_dmrs(fp, ants, crb0, crb1, false);
 }
 static void zcfg(fapi_nr_dl_config_dlsch_pdu_rel15_t *cfg, freq_alloc_bitmap_t *fa, int bwp_start, int bwp_size, int rb0,
                  int nrb, int density)
@@ -535,6 +578,8 @@ static void zcfg(fapi_nr_dl_config_dlsch_pdu_rel15_t *cfg, freq_alloc_bitmap_t *
   cfg->dlDmrsSymbPos = 1 << 2;
   cfg->dmrsConfigType = NFAPI_NR_DMRS_TYPE1;
   cfg->n_dmrs_cdm_groups = 1;
+  cfg->dmrs_ports = 1;
+  cfg->dlDmrsScramblingId = ZNID;
   fapi_nr_dl_config_csirs_pdu_rel15_t *c = &cfg->csiRsForRateMatching[cfg->numCsiRsForRateMatching++];
   c->csi_type = 2;
   c->row = 4;
@@ -550,7 +595,7 @@ static void zcfg(fapi_nr_dl_config_dlsch_pdu_rel15_t *cfg, freq_alloc_bitmap_t *
 static double zscore(const NR_DL_FRAME_PARMS *fp, const fapi_nr_dl_config_dlsch_pdu_rel15_t *cfg, const freq_alloc_bitmap_t *fa,
                      int fep_n, uint16_t skip)
 {
-  return nr_pdsch_passive_zp_grant_score(fp, cfg, fa, zgrid, zstride, 1, fep_n, skip, 0);
+  return nr_pdsch_passive_zp_grant_score(fp, cfg, fa, zgrid, zstride, 0, 1, fep_n, skip, true, 0);
 }
 static void check_zp_grant_evidence(void)
 {
@@ -586,7 +631,7 @@ static void check_zp_grant_evidence(void)
   nzp->freq_density = 2;
   nzp->nr_of_rbs = NRB;
   CHECK((z = zscore(&fp, &cfg, &fa, 13, 0)) > 0.9, "Z4: an overlapping NZP entry was counted as ZP energy (%.3f)", z);
-  CHECK(nr_pdsch_passive_zp_grant_score(&fp, &cfg, &fa, zgrid, zstride, 1, 13, 0, 1) < 0.0, "Z4: an NZP entry was scored");
+  CHECK(nr_pdsch_passive_zp_grant_score(&fp, &cfg, &fa, zgrid, zstride, 0, 1, 13, 0, true, 1) < 0.0, "Z4: an NZP entry was scored");
   // Z5: density 0.5 on EVEN CRBs (extractor: low 16 bits). Data on k8..11 of odd RBs only is off the pattern.
   zcfg(&cfg, &fa, 0, NRB, 0, 30, 0);
   zscene(&fp, 3, 0, 30, true, 0);
@@ -619,8 +664,29 @@ static void check_zp_grant_evidence(void)
         zset(&fp, a, 12, crb, k, 0);
   CHECK(zscore(&fp, &cfg, &fa, 13, 0) < 0.0, "Z9: a dark reference symbol produced evidence");
   CHECK((z = zscore(&fp, &cfg, &fa, 13, 1 << 12)) >= 0.0 && z <= 0.5, "Z9: skipped symbol not skipped (%.3f)", z);
+  // Z10: a phantom grant (nothing of ours sent) on PRBs a co-channel neighbour fills, 20 dB over the noise, with
+  // its own DM-RS scrambling: raw energy says "data on the pattern", but it is not this cell's grant.
+  zcfg(&cfg, &fa, 0, NRB, 0, 30, 2);
+  zscene(&fp, 0, 0, 0, false, -1);
+  for (int a = 0; a < MAX_RX; a++)
+    for (int sym = 1; sym < 14; sym++)
+      for (int crb = 0; crb < 30; crb++)
+        for (int k = 0; k < 12; k++)
+          zset(&fp, a, sym, crb, k, 10 * ZN);
+  CHECK(zscore(&fp, &cfg, &fa, 13, 0) < 0.0, "Z10: a co-channel neighbour produced evidence");
+  // Z11: the same data on a false ZP, but a common (non-dedicated) grant: no evidence (p-ZP is dedicated config).
+  zscene(&fp, 3, 0, 30, false, -1);
+  CHECK(nr_pdsch_passive_zp_grant_score(&fp, &cfg, &fa, zgrid, zstride, 0, 1, 13, 0, false, 0) < 0.0,
+        "Z11: a non-dedicated grant produced evidence");
+  // Z12: a ZP symbol shared with the SSB gives no evidence.
+  CHECK(zscore(&fp, &cfg, &fa, 13, 1 << 13) < 0.0, "Z12: a ZP symbol in the SSB mask was scored");
+  // Z13: rank 2 on ports 1000 + 1001 (one CDM group, fd-OCC): both sequences are ours, still a contradiction.
+  cfg.dmrs_ports = 3;
+  zset_dmrs(&fp, 3, 0, 30, true);
+  CHECK((z = zscore(&fp, &cfg, &fa, 13, 0)) >= 0.0 && z <= 0.5, "Z13: two-port DM-RS not recognised (%.3f)", z);
+  cfg.dmrs_ports = 1;
   free(zgrid);
-  printf("ZPGRANT production scorer: Z1-Z9 done\n");
+  printf("ZPGRANT production scorer: Z1-Z13 done\n");
 }
 
 int main(void)

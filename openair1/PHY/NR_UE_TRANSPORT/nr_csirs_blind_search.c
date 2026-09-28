@@ -1076,38 +1076,65 @@ void nr_csirs_blind_re_energy(const int16_t *rx_re_im, int n_fft, int rx_shift, 
   }
 }
 
-void nr_csirs_blind_guard_energy(const int16_t *rx_re_im, int n_fft, int rx_shift, int n_occupied, double *sum,
-                                 uint32_t *n)
+void nr_csirs_blind_pilot_coherence(const int16_t *rx_re_im, int n_fft, int rx_shift, const uint32_t *rb_bitmap, int n_rb,
+                                    int crb_offset, const int16_t *const *pilots, int n_ports, int pilot_crb0, int per_rb,
+                                    const uint8_t k_of[4], double *coh, double *inc, double *rx_pow, uint32_t *n_blocks)
 {
-  if (rx_re_im == NULL || sum == NULL || n == NULL || n_fft <= 0 || rx_shift < 0 || n_occupied < 0)
+  if (rx_re_im == NULL || rb_bitmap == NULL || pilots == NULL || k_of == NULL || coh == NULL || inc == NULL
+      || rx_pow == NULL || n_blocks == NULL || n_fft <= 0 || rx_shift < 0 || crb_offset < 0 || n_ports < 1 || per_rb < 4)
     return;
-  const int guard = n_fft - n_occupied;
-  if (guard < 8)
-    return;
-  const int side = guard / 8;
-  for (int g = 0; g < guard; g++) {
-    if (g >= side && g < guard - side)
+  for (int rb = 0; rb < n_rb; rb++) {
+    if (!((rb_bitmap[rb / 32] >> (rb % 32)) & 1))
       continue;
-    const int j = (int)(((long)rx_shift + n_occupied + g) % n_fft);
-    const double yr = (double)rx_re_im[2 * j], yi = (double)rx_re_im[2 * j + 1];
-    *sum += yr * yr + yi * yi;
-    (*n)++;
+    const int crb = rb + crb_offset;
+    if (crb < pilot_crb0)
+      continue;
+    const int base = (int)(((long)crb * 12 + rx_shift) % n_fft);
+    double y[4][2];
+    for (int j = 0; j < 4; j++) {
+      const int f = (base + k_of[j]) % n_fft;
+      y[j][0] = rx_re_im[2 * f];
+      y[j][1] = rx_re_im[2 * f + 1];
+    }
+    for (int p = 0; p < n_ports; p++) {
+      const int16_t *pl = pilots[p] + 2 * (size_t)((crb - pilot_crb0) * per_rb);
+      double sr = 0.0, si = 0.0;
+      for (int j = 0; j < 4; j++) {
+        sr += y[j][0] * pl[2 * j] - y[j][1] * pl[2 * j + 1];
+        si += y[j][0] * pl[2 * j + 1] + y[j][1] * pl[2 * j];
+      }
+      *coh += sr * sr + si * si;
+    }
+    const int16_t *p0 = pilots[0] + 2 * (size_t)((crb - pilot_crb0) * per_rb);
+    for (int j = 0; j < 4; j++) {
+      const double e = y[j][0] * y[j][0] + y[j][1] * y[j][1];
+      *inc += e * ((double)p0[2 * j] * p0[2 * j] + (double)p0[2 * j + 1] * p0[2 * j + 1]);
+      *rx_pow += e;
+    }
+    (*n_blocks)++;
   }
 }
 
-double nr_csirs_blind_zp_grant_score(double e_zp, uint32_t n_zp, double e_data, uint32_t n_data, double e_noise,
-                                     uint32_t n_noise)
+double nr_csirs_blind_pilot_presence(double coh, double inc, uint32_t n_blocks, int n_ports)
 {
-  if (n_zp == 0 || n_data == 0 || n_noise == 0 || !isfinite(e_zp) || e_zp < 0.0 || !isfinite(e_data)
-      || e_data <= 0.0 || !isfinite(e_noise) || e_noise < 0.0)
+  if (n_blocks < NR_CSIRS_BLIND_PILOT_MIN_BLOCKS || n_ports < 1 || n_ports >= 4 || !isfinite(coh) || !isfinite(inc)
+      || coh < 0.0 || inc <= 0.0)
     return -1.0;
-  /* Nothing sent where the grant looks (false DCI accept, wrong PRB/symbol/k0 hypothesis): noise against noise
-   * reads exactly like data on the pattern, so it is no evidence. */
-  if (e_data / n_data < NR_CSIRS_BLIND_ZP_GRANT_MIN_SNR * (e_noise / n_noise))
+  return (coh / inc - n_ports) / (4 - n_ports);
+}
+
+double nr_csirs_blind_zp_grant_score(double e_zp, uint32_t n_zp, double e_data, uint32_t n_data, double presence,
+                                     double own_dmrs_re_power)
+{
+  if (n_zp == 0 || n_data == 0 || !isfinite(e_zp) || e_zp < 0.0 || !isfinite(e_data) || e_data <= 0.0
+      || !(presence >= NR_CSIRS_BLIND_ZP_MIN_SCORE) || !isfinite(own_dmrs_re_power)
+      || e_data / n_data < 0.25 * own_dmrs_re_power)
     return -1.0;
   const double ratio = (e_zp / n_zp) / (e_data / n_data);
   return 1.0 - (ratio > 1.0 ? 1.0 : ratio);
 }
+
+_Static_assert(NR_CSIRS_BLIND_ZP_GRANT_WINDOW <= 8, "zp_grant_contra/support are 8-bit ring masks");
 
 bool nr_csirs_blind_zp_grant_feed(nr_csirs_blind_state_t *st, int idx, uint32_t absolute_slot, double grant_score)
 {

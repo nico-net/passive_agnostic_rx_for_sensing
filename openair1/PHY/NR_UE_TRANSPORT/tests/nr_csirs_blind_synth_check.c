@@ -464,8 +464,8 @@ static uint32_t union_mask(const NR_DL_FRAME_PARMS *fp, const nr_csirs_candidate
 }
 
 /* DECODED-GRANT evidence with the library pieces nr_pdsch_passive_zp_grant_score() uses (that function itself is
- * pinned by test_nr_ssb_rate_match_prod, Z1-Z9): the exported ZP's REs inside the grant's PRBs (rb % load_every
- * == 0) of the CSI-RS symbol against every RE of those PRBs on a data-only symbol and its guard noise floor.
+ * pinned by test_nr_ssb_rate_match_prod, Z1-Z13): the exported ZP's REs inside the grant's PRBs (rb % load_every
+ * == 0) of the CSI-RS symbol against every RE of those PRBs on a data-only symbol.
  * Occasions t0.. at the ZP's predicted slots; returns the number of decoded grants rate-matched around the
  * still-exported ZP up to and including the revoking one, or -1 if still exported after @p n occasions. */
 static int grant_revoke(const NR_DL_FRAME_PARMS *fp, csi_sym_fn csi_sym, int load_every, nr_csirs_blind_state_t *zp,
@@ -482,7 +482,7 @@ static int grant_revoke(const NR_DL_FRAME_PARMS *fp, csi_sym_fn csi_sym, int loa
     memset(csi, 0, (size_t)LAB_FFT * sizeof(c16_t));
     memset(dat, 0, (size_t)LAB_FFT * sizeof(c16_t));
     csi_sym(fp, t, csi);
-    for (int k = 0; k < LAB_FFT; k++) { /* noise on the guard bins too: the scorer's noise floor */
+    for (int k = 0; k < LAB_FFT; k++) {
       if (k < LAB_NRB * 12 && ((rbs[(k / 12) / 32] >> ((k / 12) % 32)) & 1))
         dat[k] = data_re();
       c16_t *const b[2] = {&csi[k], &dat[k]};
@@ -491,12 +491,13 @@ static int grant_revoke(const NR_DL_FRAME_PARMS *fp, csi_sym_fn csi_sym, int loa
         b[q]->i = (int16_t)(b[q]->i + noise(20.0));
       }
     }
-    double ez = 0.0, ed = 0.0, en = 0.0;
-    uint32_t nz = 0, nd = 0, nn = 0;
+    double ez = 0.0, ed = 0.0;
+    uint32_t nz = 0, nd = 0;
     nr_csirs_blind_re_energy((const int16_t *)csi, LAB_FFT, 0, rbs, LAB_NRB, 0, m & 0xFFF, (m >> 12) & 0xFFF, &ez, &nz);
     nr_csirs_blind_re_energy((const int16_t *)dat, LAB_FFT, 0, rbs, LAB_NRB, 0, 0xFFF, 0xFFF, &ed, &nd);
-    nr_csirs_blind_guard_energy((const int16_t *)dat, LAB_FFT, 0, LAB_NRB * 12, &en, &nn);
-    const double gs = nr_csirs_blind_zp_grant_score(ez, nz, ed, nd, en, nn);
+    /* The grant's own DM-RS is taken as present at the data EPRE here: that gate is pinned by
+     * CsirsBlindZpGrant.PilotPresence... and test_nr_ssb_rate_match_prod Z1-Z13 on a real sequence. */
+    const double gs = nr_csirs_blind_zp_grant_score(ez, nz, ed, nd, 1.0, ed / nd);
     assert(gs >= 0.0 && gs <= NR_CSIRS_BLIND_ZP_MIN_SCORE && "data on the false ZP must contradict it");
     if (!nr_csirs_blind_zp_grant_feed(zp, w, (uint32_t)(LAB_PERIOD * t), gs))
       wrong = t - t0 + 1;
