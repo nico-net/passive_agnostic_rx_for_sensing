@@ -14,6 +14,8 @@
 #include "PHY/nr_phy_common/inc/nr_phy_common.h"
 #include "PHY/CODING/nrPolar_tools/nr_polar_psbch_defs.h"
 #include "common/utils/bits.h"
+#include "nr_ssb_rate_match.h"
+#include "nr_pdsch_prb_set.h"
 
 // Specifies the data that should be copied to the scope during PDSCH RX
 typedef struct pdsch_scope_req_s {
@@ -252,6 +254,41 @@ void nr_sl_rf_card_config_freq(PHY_VARS_NR_UE *ue,
     @param ptrs_phase_per_slot
     @param ptrs_re_per_slot
 */
+uint32_t nr_dlsch_csi_overlap_bitmap(fapi_nr_dl_config_dlsch_pdu_rel15_t *dlsch_config, int symbol);
+/** CSI-RS REs nr_dlsch_extract_rbs() removes from this grant (union over the rate-matching resources). */
+uint32_t nr_dlsch_csi_unav_res(fapi_nr_dl_config_dlsch_pdu_rel15_t *dlsch_config, const freq_alloc_bitmap_t *freq_alloc);
+
+/* SSB rate matching of a passive PDSCH grant (nr_ssb_rate_match.c). */
+typedef struct {
+  nr_ssb_rm_mask_t physical; // BWP order: G and the first-data-symbol rule
+  nr_ssb_rm_mask_t dem;      // data order handed to nr_rx_pdsch() (== physical unless segmented)
+  uint32_t unav;             // SSB REs removed from G, CSI-RS REs not counted twice
+} nr_ssb_rm_plan_t;
+/** SSB candidate start symbols (bitmask) of this slot that overlap symbols [start_symbol, +nb_symbols). */
+uint16_t nr_ssb_rm_candidates(const NR_DL_FRAME_PARMS *fp, int slot, int start_symbol, int nb_symbols);
+/** Observe the candidates' PSS/SSS in rxdataF (already FFT'd at s and s+2): a 4-symbol event per burst present. */
+nr_ssb_rm_event_t nr_ssb_rm_observe(const NR_DL_FRAME_PARMS *fp,
+                                    int frame,
+                                    int slot,
+                                    uint16_t candidates,
+                                    c16_t rxdataF[][fp->samples_per_slot_wCP]);
+/** Masks and unavailable-RE count for this grant; false = unsupported overlap, refuse the grant.
+ *  seg/nseg: the data-ordered segments of a segmented grant, NULL/0 for a contiguous one. */
+bool nr_ssb_rm_plan(const nr_ssb_rm_event_t *e,
+                    int frame,
+                    int slot,
+                    int pci,
+                    uint16_t rnti,
+                    fapi_nr_dl_config_dlsch_pdu_rel15_t *cfg,
+                    const freq_alloc_bitmap_t *fa,
+                    const nr_prb_seg_t *seg,
+                    int nseg,
+                    nr_ssb_rm_plan_t *p);
+/** First symbol of the grant that carries PDSCH data. */
+int nr_ssb_rm_first_data_symbol(const fapi_nr_dl_config_dlsch_pdu_rel15_t *cfg,
+                                const freq_alloc_bitmap_t *fa,
+                                const nr_ssb_rm_plan_t *p);
+
 int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
                 const UE_nr_rxtx_proc_t *proc,
                 NR_UE_DLSCH_t *dlsch,
@@ -277,7 +314,8 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
                 int32_t ptrs_re_per_slot[][NR_SYMBOLS_PER_SLOT],
                 uint32_t nvar,
                 pdsch_scope_req_t *scope_req,
-                c16_t rho_dl[][NR_MAX_NB_LAYERS * NR_MAX_NB_LAYERS][pdsch_buf_size_max]);
+                c16_t rho_dl[][NR_MAX_NB_LAYERS * NR_MAX_NB_LAYERS][pdsch_buf_size_max],
+                const nr_ssb_rm_mask_t *ssb_rm);
 
 int32_t generate_nr_prach(PHY_VARS_NR_UE *ue, uint8_t gNB_id, int frame, uint8_t slot, c16_t **txData);
 void apply_ntn_config(PHY_VARS_NR_UE *UE,
@@ -372,4 +410,3 @@ int nr_dlsch_last_branch(void);
 int nr_dlsch_planned_branch(int nbRx, int nl);
 /**@}*/
 #endif
-

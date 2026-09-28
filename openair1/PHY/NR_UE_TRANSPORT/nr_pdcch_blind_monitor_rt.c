@@ -6653,7 +6653,7 @@ constdiag_done:;
                   const uint64_t btim_t_sub = btim_on ? btim_now() : 0;
                   nr_isac_pdsch_data_aided_submit(ue, &proc_pd, &dec.cw, &dlsch_pdu, &freq_alloc, out.rnti, dec.tb,
                                                   blind_harq_tag(abs_slot, out.rnti, out.harq_pid), rxdataF_pdsch,
-                                                  (double)dec.nvar);
+                                                  (double)dec.nvar, dec.G);
                   btim_add(BTIM_SUBMIT, btim_t_sub);
                   g_data_submits++;
                 }

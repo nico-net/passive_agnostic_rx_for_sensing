@@ -1151,7 +1151,7 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
            * fatal once several consumers submit concurrently across a wrap. */
           nr_isac_abs_slot_override = (uint64_t)job.absolute_slot;
           nr_isac_pdsch_data_aided_submit(ue, &proc, &dec.cw, &job.dlsch_pdu, &job.freq_alloc, job.rnti,
-                                          dec.tb, job.harq_pid_tag, rxdataF, (double)dec.nvar);
+                                          dec.tb, job.harq_pid_tag, rxdataF, (double)dec.nvar, dec.G);
           nr_isac_abs_slot_override = 0;
         }
       }

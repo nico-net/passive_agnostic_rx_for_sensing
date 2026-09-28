@@ -976,6 +976,7 @@ set(PHY_SRC_UE
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/dci_nr.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c
+  ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_ssb_rate_match.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_passive_mac_ta.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_ptrs_unav.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_dci11_layout_sweep.c
@@ -2636,6 +2637,22 @@ if(ENABLE_TESTS)
   target_link_libraries(test_nr_pdsch_prb_set PRIVATE GTest::gtest)
   add_dependencies(tests test_nr_pdsch_prb_set)
   add_test(NAME test_nr_pdsch_prb_set COMMAND ./test_nr_pdsch_prb_set)
+  add_executable(test_nr_ssb_rate_match ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_ssb_rate_match_test.cc)
+  target_include_directories(test_nr_ssb_rate_match PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
+  target_link_libraries(test_nr_ssb_rate_match PRIVATE GTest::gtest_main)
+  add_dependencies(tests test_nr_ssb_rate_match)
+  add_test(NAME test_nr_ssb_rate_match COMMAND ./test_nr_ssb_rate_match)
+  # Production path: nr_ssb_rate_match.c, nr_rx_pdsch()/nr_dlsch_extract_rbs() and nr_pdsch_passive_decode()
+  # from PHY_NR_UE, driven from an observed PSS/SSS through G and the LLR stream, plus the data-aided tap's
+  # G guard. Plain C: nr_rx_pdsch() takes C VLA parameters.
+  add_executable(test_nr_ssb_rate_match_prod ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_ssb_rate_match_prod_check.c)
+  target_link_libraries(test_nr_ssb_rate_match_prod PRIVATE
+    -Wl,--start-group PHY_NR_UE PHY_NR_COMMON PHY_COMMON nr_phy_common nr_common nr_pdcch_blind_monitor NR_UE_ISAC
+    SCHED_NR_UE_LIB MAC_NR_COMMON CONFIG_LIB shlib_loader UTIL ds -Wl,--end-group
+    ${T_LIB} m pthread dl asn1_nr_rrc_hdrs asn1_lte_rrc_hdrs)
+  add_dependencies(test_nr_ssb_rate_match_prod dfts) # the decoder's FEP loads libdfts at run time
+  add_dependencies(tests test_nr_ssb_rate_match_prod)
+  add_test(NAME test_nr_ssb_rate_match_prod COMMAND ./test_nr_ssb_rate_match_prod)
   add_executable(test_nr_pdcch_al1_map ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_al1_map_test.cc
                                        ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_al1_map.c)
   target_include_directories(test_nr_pdcch_al1_map PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
