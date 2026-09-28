@@ -462,10 +462,12 @@ static void score_candidate(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot
                                                      (const int16_t *)&ref[off_sym],
                                                      fp->ofdm_symbol_size, CSIRS_BLIND_SUBBAND_RE,
                                                      fp->first_carrier_offset, &n_used);
+  double epr = NAN;
+  bool done = false;
   if (rho < 0.0) {
-    if (maintenance)
-      zp_maint_end(idx, absolute_slot, duplicate, ZPM_RHO_UNSCORABLE, rho, NAN, NAN, NAN);
-    return;   /* unscorable: this candidate maps no RE in this symbol */
+    /* A zero-energy mapped comb is unscorable as an NZP sequence but is exactly the observation
+     * the independent ZP energy path must evaluate. Invalid mappings still fail closed there. */
+    goto score_zero_power;
   }
   /* SCALE-FREE SCORE. rho is not comparable across candidates -- noise gives ~0.89/sqrt(n_used), and
    * n_used is 273 for a density-one row-2 candidate but 819 for density-three at 273 RB, so the old
@@ -477,7 +479,7 @@ static void score_candidate(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot
   /* Sequence-free positional evidence, logged next to z: if z stays at noise while this shows
    * periodic structure, the POSITIONS are right and the SEQUENCE (scramblingID != PCI) is wrong --
    * which the correlation alone cannot distinguish from an empty hypothesis. */
-  const double epr = nr_csirs_blind_energy_ratio_shift((const int16_t *)&rxdataF_ant0[off_sym],
+  epr = nr_csirs_blind_energy_ratio_shift((const int16_t *)&rxdataF_ant0[off_sym],
                                                  (const int16_t *)&ref[off_sym], fp->ofdm_symbol_size,
                                                  fp->first_carrier_offset);
   if (!maintenance && epr > 0.0 && idx < NR_CSIRS_BLIND_MAX_CAND) {
@@ -517,7 +519,7 @@ static void score_candidate(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot
    * demands z >= 6, i.e. ~6.7x the 0.89 noise level, at ANY candidate size. The measured null median
    * is still tracked and logged, for visibility only. */
   const double nullv = 4.0 / 3.0;   /* feed()'s 3x margin => confirm at z >= 4 (noise ~1) */
-  const bool done = !maintenance && nr_csirs_blind_feed(&g_st, idx, absolute_slot, z, nullv);
+  done = !maintenance && nr_csirs_blind_feed(&g_st, idx, absolute_slot, z, nullv);
   /* Keep the observed z population for the diagnostics. */
   if (!maintenance) {
     g_null[g_null_w] = z;
@@ -525,6 +527,7 @@ static void score_candidate(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot
     if (g_null_n < NULLWIN)
       g_null_n++;
   }
+score_zero_power:
   /* ZERO-POWER hypothesis: score the full mapped occupancy union, not just port 0's REs.
    * Every mapped row-5 symbol must be a measured periodic hole. OAI's row-5 mapping puts
    * ports 0/1 on l0 and ports 2/3 on l0+1; plane 0 has NO REs on l0+1.
@@ -579,7 +582,16 @@ static void score_candidate(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot
       for (int h = 0; h < g_zp.n_hit_slot[idx]; h++)
         previous_used += snprintf(previous_hits + previous_used, sizeof(previous_hits) - previous_used,
                                   "%s%u", h ? "," : "", g_zp.hit_slot[idx][h]);
+      const int saved_zp_pin = g_zp.pinned;
+      const uint32_t saved_zp_pin_left = g_zp.pin_left;
       nr_csirs_blind_zp_feed_pair(&g_zp, idx, absolute_slot, zs, zs_other, znull);
+      /* Admitted maintenance already has a bounded due path. Letting it seize either discovery
+       * rotation starves candidates that have never been measured. Ordinary discovery retains
+       * the existing hit pin, but maintenance cannot create or renew one. */
+      if (maintenance) {
+        g_zp.pinned = saved_zp_pin;
+        g_zp.pin_left = saved_zp_pin_left;
+      }
       const bool is_confirmed = nr_csirs_blind_is_confirmed(&g_zp, idx);
       if (g_zp.zp_revocations[idx] != revoked)
         zp_maint_summary(idx);
@@ -611,7 +623,7 @@ static void score_candidate(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot
       }
       /* A ZP hit pins the SHARED rotation (g_st drives which candidate is scored) for the same reason
        * an NZP hit does; a ZP confirmation counts as news for the search budget. */
-      if (g_zp.hits[idx] != zhits && g_st.pin_left == 0 && g_st.pinned != idx)
+      if (!maintenance && g_zp.hits[idx] != zhits && g_st.pin_left == 0 && g_st.pinned != idx)
         nr_csirs_blind_pin(&g_st, idx, NR_CSIRS_BLIND_PIN_CONFIRM_CALLS);
       for (int k = 0; k < g_zp.n_conf; k++) {
         if (g_zp.conf_idx[k] != idx || !is_confirmed || g_zp_logged[idx] == g_zp.zp_epoch[idx])
@@ -635,7 +647,7 @@ static void score_candidate(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot
       }
     }
   }
-  if (maintenance)
+  if (maintenance || rho < 0.0)
     return;
   /* ---- scramblingID sweep on a candidate whose POSITIONS already look like a pilot ---- */
   if (g_ids < 0) {

@@ -196,7 +196,7 @@ typedef struct {
   uint16_t             zp_selected_off[NR_CSIRS_BLIND_MAX_CAND][2];
   uint8_t              zp_selected_n_off[NR_CSIRS_BLIND_MAX_CAND];
   uint64_t             zp_rejected_phase[NR_CSIRS_BLIND_MAX_CAND][NR_CSIRS_BLIND_ZP_PHASE_WORDS];
-  uint64_t             zp_failed_run[NR_CSIRS_BLIND_MAX_CAND]; ///< durable across evidence epochs/revocation
+  uint64_t             zp_failed_run[NR_CSIRS_BLIND_MAX_CAND]; ///< cumulative contradicted support; durable across epochs
   uint32_t             zp_evidence_floor[NR_CSIRS_BLIND_MAX_CAND]; ///< do not reuse pre-withdrawal/eviction hits
   nr_csirs_zp_probation_t zp_bank[NR_CSIRS_BLIND_MAX_CONF]; ///< shared probation + export capacity
   double               best_rho[NR_CSIRS_BLIND_MAX_CAND];

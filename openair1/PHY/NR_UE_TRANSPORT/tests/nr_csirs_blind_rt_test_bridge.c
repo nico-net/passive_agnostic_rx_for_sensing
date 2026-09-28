@@ -40,6 +40,12 @@ uint64_t nr_csirs_blind_rt_test_maintenance_count(int idx, const char *key)
   abort();
 }
 int nr_csirs_blind_rt_test_fep_calls(void) { return test_fep_calls; }
+void nr_csirs_blind_rt_test_clear_pins(void)
+{
+  g_st.pinned = g_zp.pinned = -1;
+  g_st.pin_left = g_zp.pin_left = 0;
+}
+uint32_t nr_csirs_blind_rt_test_pin_left(int zp) { return zp ? g_zp.pin_left : g_st.pin_left; }
 void nr_csirs_blind_rt_test_eight_probations(void)
 {
   /* Geometry clones isolate the dispatch budget, not discovery accuracy. Every
@@ -131,7 +137,9 @@ int nr_csirs_blind_rt_test_slot_pattern(int row, uint32_t slot, int holes, int e
        * the candidate's k=1 hole only when `holes` requests it. */
       const int structural = (holes & bit)
           && ((extra_holes == 1 && (k & 1)) || (extra_holes == 2 && k % 12 == 7));
-      const int16_t amp = (empty & bit) || (extra_holes == 3 && (refs[0][pos].r || refs[0][pos].i))
+      const int16_t amp = (empty & bit)
+          || (extra_holes == 3 && (refs[0][pos].r || refs[0][pos].i))
+          || (extra_holes == 4 && (holes & bit) && on)
           ? 0 : (((holes & bit) && on) || structural) ? 2 : 700;
       const int shifted = symbol * TEST_FFT + (k + ue.frame_parms.first_carrier_offset) % TEST_FFT;
       test_samples[shifted] = (c16_t){(k & 1) ? amp : -amp, (k & 2) ? amp : -amp};

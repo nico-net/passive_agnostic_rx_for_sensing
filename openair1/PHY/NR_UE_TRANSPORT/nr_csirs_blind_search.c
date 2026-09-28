@@ -460,11 +460,20 @@ int nr_csirs_blind_zp_due(const nr_csirs_blind_state_t *st, uint32_t slot, int *
 static void zp_failed(nr_csirs_blind_state_t *st, int idx, nr_csirs_zp_probation_t *b)
 {
   st->zp_evidence_floor[idx] = st->zp_last_slot[idx];
+  uint64_t rejected = 1; /* every contradicted measured trial carries evidence, even before a vote */
   for (int j = 0; j < b->n_off; j++)
-    if (b->votes[j] > st->zp_failed_run[idx])
-      st->zp_failed_run[idx] = b->votes[j];
-  if (b->promotion_votes > st->zp_failed_run[idx])
-    st->zp_failed_run[idx] = b->promotion_votes;
+    if (b->votes[j] > rejected)
+      rejected = b->votes[j];
+  if (b->promotion_votes > rejected)
+    rejected = b->promotion_votes;
+  /* Repeatedly selecting the same transient after fresh epochs is multiple-testing evidence,
+   * not permission to retry forever at max(previous_streak)+1. Accumulate the contradicted
+   * measured support with saturation; a stable resource can still recover by supplying a longer
+   * prospective run, while overflow fails closed through the existing UINT64_MAX sentinel. */
+  if (st->zp_failed_run[idx] > UINT64_MAX - rejected)
+    st->zp_failed_run[idx] = UINT64_MAX;
+  else
+    st->zp_failed_run[idx] += rejected;
   b->period = b->n_off = 0;
   b->votes[0] = b->votes[1] = b->promotion_votes = 0;
 }
