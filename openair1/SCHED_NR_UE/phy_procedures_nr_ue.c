@@ -2301,7 +2301,8 @@ static void nr_isac_pdsch_data_aided_tap(PHY_VARS_NR_UE *ue,
                                          const fapi_nr_dl_config_dlsch_pdu_rel15_t *dlsch_config,
                                          const freq_alloc_bitmap_t *freq_alloc,
                                          const c16_t rxdataF[][ue->frame_parms.samples_per_slot_wCP],
-                                         double nvar)
+                                         double nvar,
+                                         uint32_t G)
 {
   if (!nr_isac_enabled() || !nr_isac_source_enabled(NR_ISAC_SRC_PDSCH_DATA))
     return;
@@ -2319,7 +2320,7 @@ static void nr_isac_pdsch_data_aided_tap(PHY_VARS_NR_UE *ue,
   // Offset well clear of real harq_pid / 2*harq_pid+cw_idx ranges used by concurrent PDSCH decode
   // and PUSCH encode on this same nrLDPC_coding_interface, to avoid any id collision.
   nr_isac_pdsch_data_aided_submit(ue, proc, &dlsch->cw_info, dlsch_config, freq_alloc, dlsch->rnti, (uint8_t *)decoded_tb,
-                                  1000 + dlsch_config->harq_process_nbr, rxdataF, nvar);
+                                  1000 + dlsch_config->harq_process_nbr, rxdataF, nvar, G);
 }
 
 void pdsch_processing(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc, nr_phy_data_t *phy_data)
@@ -2471,7 +2472,7 @@ void pdsch_processing(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc, nr_phy_
       // ISAC data-aided PDSCH tap: only meaningful once decode has run (harq->decodeResult is set
       // inside nr_ue_dlsch_procedures -> nr_dlsch_decoding). See nr_isac_pdsch_data_aided_tap()'s own
       // scope-guard comments for when it actually contributes vs. silently no-ops.
-      nr_isac_pdsch_data_aided_tap(ue, proc, dlsch, harq, decoded_tb, dlsch_config, &freq_alloc, rxdataF, (double)nvar);
+      nr_isac_pdsch_data_aided_tap(ue, proc, dlsch, harq, decoded_tb, dlsch_config, &freq_alloc, rxdataF, (double)nvar, G);
     } else {
       LOG_E(NR_PHY, "Demodulation impossible, internal error\n");
       if (dlsch_config->k1_feedback) {

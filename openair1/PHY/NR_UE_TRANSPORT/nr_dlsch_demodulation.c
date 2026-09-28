@@ -236,6 +236,26 @@ static void nr_dlsch_channel_level_median(uint32_t rx_size_symbol,
   }
 }
 
+/* CSI-RS REs of this grant that nr_dlsch_extract_rbs() removes: the UNION over every rate-matching
+ * resource (the per-symbol bitmap ORs them), by CRB parity, over the allocated BWP RBs. It counts the
+ * extractor's own RE set, so G built from it and the extracted RE count agree by construction --
+ * unlike nr_ue_csi_rm_unav_res(), which sums resources (an RE two resources share counts twice). */
+uint32_t nr_dlsch_csi_unav_res(fapi_nr_dl_config_dlsch_pdu_rel15_t *dlsch_config, const freq_alloc_bitmap_t *freq_alloc)
+{
+  uint32_t n = 0;
+  for (int m = dlsch_config->start_symbol; m < dlsch_config->start_symbol + dlsch_config->number_symbols; m++) {
+    const uint32_t csi = nr_dlsch_csi_overlap_bitmap(dlsch_config, m);
+    if (csi == 0)
+      continue;
+    const int even = __builtin_popcount(csi & 0xfff), odd = __builtin_popcount((csi >> 16) & 0xfff);
+    for (int rb = 0; rb < dlsch_config->BWPSize; rb++) {
+      if ((freq_alloc->bitmap[rb / 32] >> (rb % 32)) & 1)
+        n += ((rb + dlsch_config->BWPStart) & 1) ? odd : even;
+    }
+  }
+  return n;
+}
+
 //==============================================================================================
 // Extraction functions
 //==============================================================================================

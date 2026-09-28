@@ -16,11 +16,17 @@ uint16_t nr_ssb_rm_candidates(const NR_DL_FRAME_PARMS *fp, int slot, int start_s
       || (fp->numerology_index != 0 && fp->numerology_index != 1))
     return 0;
   uint16_t candidates = 0;
+  // The candidate symbols follow fp->ssb_type (case A/B/C), which the PHY derives from the band and
+  // SCS (TS 38.213 4.1), not from anything the gNB configures; presence is decided per slot below.
   for (int i = 0; i < fp->Lmax; ++i) {
     const int start = nr_get_ssb_start_symbol(fp, i);
     const int s = start % 14;
     // Every candidate position the grant overlaps in TIME. Frequency is left to the mask, so the
     // observation (and its log line) also happens when the scheduler kept the grant off the SSB PRBs.
+    // Cost, accepted deliberately: on a slot-share miss every such grant FFTs the PSS and SSS symbols
+    // (2 symbols per candidate, per antenna) before G even when it has no SSB PRB -- that time-only
+    // gating is what makes the PDSCH SSB-OBS line observable under a scheduler that keeps PDSCH off
+    // the SSB PRBs.
     if (start / 14 == slot % (fp->slots_per_frame / 2) && s <= 10 && s + 3 >= start_symbol
         && s < start_symbol + nb_symbols)
       candidates |= 1u << s;

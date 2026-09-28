@@ -146,10 +146,19 @@ typedef struct {
  * `n_codewords` from `grant`, so the caller can pass the same struct straight on to the
  * data-aided submit.
  *
- * Scope (returns NR_PDSCH_PASSIVE_DECODE_UNSUPPORTED, having done nothing): PTRS present, CSI-RS
- * rate-matching overlap, more than one DM-RS port, or an MCS/allocation that yields no valid TBS.
- * These match the data-aided submit's own scope guards -- decoding a grant it could not use anyway
- * would only burn CPU.
+ * Rate matching: G (out->G) excludes the PT-RS REs of the swept/configured density, the CSI-RS REs of
+ * the blind CSI-RS search's confirmed resource, and the REs of an SSB OBSERVED in this slot (PSS x SSS
+ * of the acquired PCI on this slot's own FFT, TS 38.214 5.1.4 -- never a configured or projected SSB).
+ * On the CPU path the demodulator must hand exactly G LLRs to the decoder (sum of the per-symbol
+ * valid REs x Qm x Nl == G) or the call returns NR_PDSCH_PASSIVE_DECODE_ERROR.
+ *
+ * Scope (returns NR_PDSCH_PASSIVE_DECODE_UNSUPPORTED): PT-RS with no density to compute G from, a
+ * segmented grant with PT-RS or with CSI-RS on a parity-changing segment, more DM-RS ports than
+ * receive antennas, an MCS/allocation that yields no valid TBS, or an observed SSB the grant
+ * overlaps with a DM-RS or PT-RS RE, or under SI-RNTI.
+ *
+ * The data-aided submit re-encodes onto every non-DM-RS RE (no SSB/CSI-RS/PT-RS hole): pass it out->G
+ * and it refuses any decode whose G differs from its own RE model.
  *
  * @param ue           UE PHY instance
  * @param proc         Current slot's RX processing context

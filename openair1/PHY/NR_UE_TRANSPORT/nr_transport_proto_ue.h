@@ -255,6 +255,8 @@ void nr_sl_rf_card_config_freq(PHY_VARS_NR_UE *ue,
     @param ptrs_re_per_slot
 */
 uint32_t nr_dlsch_csi_overlap_bitmap(fapi_nr_dl_config_dlsch_pdu_rel15_t *dlsch_config, int symbol);
+/** CSI-RS REs nr_dlsch_extract_rbs() removes from this grant (union over the rate-matching resources). */
+uint32_t nr_dlsch_csi_unav_res(fapi_nr_dl_config_dlsch_pdu_rel15_t *dlsch_config, const freq_alloc_bitmap_t *freq_alloc);
 
 /* SSB rate matching of a passive PDSCH grant (nr_ssb_rate_match.c). */
 typedef struct {

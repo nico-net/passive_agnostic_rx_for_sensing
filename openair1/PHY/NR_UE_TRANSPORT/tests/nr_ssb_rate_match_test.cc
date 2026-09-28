@@ -109,3 +109,34 @@ TEST(SsbRateMatch, UnionDoesNotDoubleCountCsiOrDmrs)
   EXPECT_EQ(__builtin_popcount(nr_ssb_rm_excluded(&m, 2, 5) | 0x555 | 0x88), 12);
   EXPECT_EQ(__builtin_popcount(nr_ssb_rm_excluded(&m, 6, 5) | 0x555 | 0x88), 8);
 }
+
+/* The false-alarm contract of the gate, numerically. Noise only, the detector's statistic is a sum of
+ * N independent uniform unit phasors; its tail must stay under the Bernstein/direction-union bound
+ * nr_ssb_rm_sync_r2() is solved from, and that bound must never undercut the asymptotic (Gaussian)
+ * tail exp(-r^2/N) of the true distribution. */
+TEST(SsbRateMatch, NoiseTailStaysUnderTheFalseAlarmBound)
+{
+  std::mt19937 rng(20260928);
+  std::uniform_real_distribution<double> phase(0, 2 * M_PI);
+  const int trials = 200000;
+  const double pfa[] = {1e-1, 1e-2, 1e-3, 1e-9};
+  int exceed[4] = {0, 0, 0, 0};
+  for (int t = 0; t < trials; ++t) {
+    double sr = 0, si = 0;
+    for (int n = 0; n < 127; ++n) {
+      const double ph = phase(rng);
+      sr += std::cos(ph);
+      si += std::sin(ph);
+    }
+    for (int i = 0; i < 4; ++i)
+      exceed[i] += sr * sr + si * si > nr_ssb_rm_sync_r2(127, pfa[i]);
+  }
+  for (int i = 0; i < 4; ++i)
+    EXPECT_LE(exceed[i], pfa[i] * trials) << "pfa " << pfa[i];
+  EXPECT_EQ(exceed[3], 0);
+  for (int n = 1; n <= 127; ++n)
+    for (double p : pfa)
+      EXPECT_GE(nr_ssb_rm_sync_r2(n, p), n * std::log(1 / p)) << "n " << n << " pfa " << p;
+  // Sensitivity this buys at the operating false-alarm rate: a coherence of about 0.51 over 127 bins.
+  EXPECT_LT(nr_ssb_rm_sync_r2(127, 1e-9), std::pow(0.52 * 127, 2));
+}

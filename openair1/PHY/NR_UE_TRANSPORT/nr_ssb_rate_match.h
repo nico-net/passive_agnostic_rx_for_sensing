@@ -30,7 +30,8 @@ static inline bool nr_ssb_rm_event_valid(const nr_ssb_rm_event_t *e, int frame, 
 static inline nr_ssb_rm_event_t nr_ssb_rm_event(int frame, int slot, int pci, int first_sc, uint16_t symbols)
 {
   nr_ssb_rm_event_t e = {frame, slot, pci, 0, 0, 0};
-  if (first_sc < 0 || first_sc + 239 >= 12 * NR_SSB_RM_MAX_RB) return e;
+  if (first_sc < 0 || first_sc + 239 >= 12 * NR_SSB_RM_MAX_RB)
+    return e;
   e.symbols = symbols;
   e.first_crb = first_sc / 12;
   e.last_crb = (first_sc + 239) / 12;
@@ -44,7 +45,8 @@ static inline nr_ssb_rm_mask_t nr_ssb_rm_map(const nr_ssb_rm_event_t *e, int fra
                                             int bwp_start, int nrb, const uint16_t *physical)
 {
   nr_ssb_rm_mask_t m = {0, {0}};
-  if (!nr_ssb_rm_event_valid(e, frame, slot, pci) || nrb < 0 || nrb > NR_SSB_RM_MAX_RB) return m;
+  if (!nr_ssb_rm_event_valid(e, frame, slot, pci) || nrb < 0 || nrb > NR_SSB_RM_MAX_RB)
+    return m;
   m.symbols = e->symbols;
   for (int rb = 0; rb < nrb; ++rb) {
     const int crb = bwp_start + (physical ? physical[rb] : rb);
@@ -53,14 +55,32 @@ static inline nr_ssb_rm_mask_t nr_ssb_rm_map(const nr_ssb_rm_event_t *e, int fra
   return m;
 }
 
+/* False-alarm gate of nr_ssb_rm_sync_present(): the squared radius |S|^2 above which a sum S of
+ * `nvalid` independent, uniformly distributed unit phasors (noise only) lands with probability at most
+ * `pfa`. Each projection of a phasor on a fixed direction is bounded by 1 with variance 1/2, so
+ * Bernstein gives P(proj >= t) <= exp(-t^2 / (nvalid + 2t/3)); |S| >= r puts the projection on one of
+ * K = 16 equally spaced directions at >= r cos(pi/K), hence P(|S| >= r) <= K exp(-t^2/(nvalid + 2t/3))
+ * with t = r cos(pi/K). Solved for t at K exp(...) = pfa. (The former Hoeffding form, 4 exp(-|S|^2/(4N)),
+ * needed a coherence of 0.83 at N = 127; this bound needs 0.51 for the same 1e-9.) Deliberately
+ * conservative: at N = 127, pfa = 1e-9 the exact asymptotic (Rayleigh) tail exp(-r^2/N) of the noise-only
+ * statistic is ~1e-14, i.e. the gate is about five orders of magnitude stricter than its target. */
+static inline double nr_ssb_rm_sync_r2(int nvalid, double pfa)
+{
+  const int K = 16;
+  const double L = log(K / pfa);
+  const double t = (2.0 * L / 3.0 + sqrt(4.0 * L * L / 9.0 + 4.0 * L * nvalid)) / 2.0;
+  const double r = t / cos(M_PI / K);
+  return r * r;
+}
+
 /* PSS and SSS occupy the same 127 subcarriers two symbols apart. Their product
  * removes a frequency-selective channel and any common inter-symbol CFO phase.
  * Unit normalization prevents a few large interferers from dominating. A fixed
- * false-alarm probability (1e-9 per trial), not an RF-amplitude threshold, sets
- * the gate: the union/Hoeffding bound for independent uniform noise phases is
- * 4 exp(-|sum|^2/(4 N)). Structured interferers are tested separately; this is
- * not a guarantee under arbitrary interference. No timing history is reused.
- * Inputs are 127 interleaved complex int16 samples, already FFT-unwrapped. */
+ * false-alarm probability (1e-9 per trial, nr_ssb_rm_sync_r2()), not an
+ * RF-amplitude threshold, sets the gate. Structured interferers are tested
+ * separately; this is not a guarantee under arbitrary interference. No timing
+ * history is reused. Inputs are 127 interleaved complex int16 samples, already
+ * FFT-unwrapped. */
 static inline bool nr_ssb_rm_sync_present(const int16_t *pss, const int16_t *sss, int pci)
 {
   if (!pss || !sss || pci < 0 || pci > 1007) return false;
@@ -86,7 +106,7 @@ static inline bool nr_ssb_rm_sync_present(const int16_t *pss, const int16_t *sss
     si += sign * im / mag;
     ++nvalid;
   }
-  // Too few occupied bins cannot meet the bound, even with perfect coherence.
-  return nvalid > 0 && sr * sr + si * si > 4.0 * nvalid * log(4.0e9);
+  // Too few occupied bins (< 17) cannot meet the bound, even with perfect coherence.
+  return nvalid > 0 && sr * sr + si * si > nr_ssb_rm_sync_r2(nvalid, 1e-9);
 }
 #endif

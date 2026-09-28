@@ -1649,8 +1649,13 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
   if (ssb_cand && !fep_hit) {
     if (grant->check_sample_lifetime && !nr_passive_samples_valid(
             atomic_load_explicit(&nr_ue_diag_producer_absolute_slot, memory_order_relaxed),
-            grant->source_absolute_slot, fp->slots_per_frame))
-      return out->status;
+            grant->source_absolute_slot, fp->slots_per_frame)) {
+      { static _Atomic unsigned long c_ = 0;
+        const unsigned long n_ = atomic_fetch_add_explicit(&c_, 1, memory_order_relaxed) + 1;
+        if (n_ == 1 || (n_ % 200) == 0)
+          LOG_A(PHY, "SENSING: PDSCH UNSUP@ssb-fep-before n=%lu\n", n_); }
+      return out->status; /* IQ already overwritten: nothing to observe */
+    }
     const uint16_t fep_syms = ssb_cand | (ssb_cand << 2); // PSS at s, SSS at s+2
     for (int sym = 0; sym < 14; ++sym) {
       if (!((fep_syms >> sym) & 1))
@@ -1664,8 +1669,13 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
     }
     if (grant->check_sample_lifetime && !nr_passive_samples_valid(
             atomic_load_explicit(&nr_ue_diag_producer_absolute_slot, memory_order_relaxed),
-            grant->source_absolute_slot, fp->slots_per_frame))
-      return out->status;
+            grant->source_absolute_slot, fp->slots_per_frame)) {
+      { static _Atomic unsigned long c_ = 0;
+        const unsigned long n_ = atomic_fetch_add_explicit(&c_, 1, memory_order_relaxed) + 1;
+        if (n_ == 1 || (n_ % 200) == 0)
+          LOG_A(PHY, "SENSING: PDSCH UNSUP@ssb-fep-after n=%lu\n", n_); }
+      return out->status; /* overwritten IQ is not SSB evidence */
+    }
   }
   const nr_ssb_rm_event_t ssb_event = nr_ssb_rm_observe(fp, proc->frame_rx, proc->nr_slot_rx, ssb_cand, rxdataF);
   nr_ssb_rm_plan_t ssb;
@@ -1680,8 +1690,14 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
             n, ssb_event.frame, ssb_event.slot, ssb_event.pci, ssb_event.symbols, ssb_event.first_crb,
             ssb_event.last_crb, ssb_unav, !ssb_ok, grant->rnti);
   }
-  if (!ssb_ok)
+  if (!ssb_ok) {
+    { static _Atomic unsigned long c_ = 0;
+      const unsigned long n_ = atomic_fetch_add_explicit(&c_, 1, memory_order_relaxed) + 1;
+      if (n_ == 1 || (n_ % 200) == 0)
+        LOG_A(PHY, "SENSING: PDSCH UNSUP@ssb n=%lu (SSB REs under a DM-RS/PT-RS RE or an SI-RNTI grant)\n", n_); }
+    prg_arm_unsupported(grant->rnti, prg_arm);
     return out->status;
+  }
   if (ssb_unav) {
     static _Atomic unsigned long count = 0;
     const unsigned long n = atomic_fetch_add_explicit(&count, 1, memory_order_relaxed) + 1;
@@ -1693,11 +1709,14 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
 
   /* ---- CSI-RS rate matching: from the blind CSI-RS search's confirmed resource (the monitor fills
    * csiRsForRateMatching on the slots it occurs). The demodulator's own overlap bitmap skips the
-   * REs; here only G needs the unavailable-RE count, from the same routine the attached UE uses. */
+   * REs; here only G needs the unavailable-RE count, taken from that same bitmap (TS 38.214 5.1.4.1:
+   * the union of the rate-matching resources). Against a gNB that instead SUMS overlapping resources,
+   * a single-CB TB that decoded before may now carry a few extra tail LLRs. */
   uint32_t csi_unav = 0;
   if (dlsch_config->numCsiRsForRateMatching > 0) {
-    extern uint32_t nr_ue_csi_rm_unav_res(fapi_nr_dl_config_dlsch_pdu_rel15_t *dlsch_config, freq_alloc_bitmap_t *freq_alloc);
-    csi_unav = nr_ue_csi_rm_unav_res(dlsch_config, (freq_alloc_bitmap_t *)freq_alloc);
+    /* The extractor's own RE set (union over the resources, CRB parity), not the attached UE's
+     * nr_ue_csi_rm_unav_res(), which sums overlapping resources: G and the LLR count must agree. */
+    csi_unav = nr_dlsch_csi_unav_res(dlsch_config, freq_alloc);
     /* nr_dlsch_extract_rbs() picks the CSI-RS RE pattern by the PRB's CRB PARITY (density 0.5 differs
      * on even/odd RBs). The virtual layout moves segment s from PRB prb_start to PRB data_index, so it
      * is only exact when both have the same parity. ponytail: refused otherwise; a per-segment parity
@@ -2938,6 +2957,10 @@ gpu_llr_ready:;
 
   // Same "first symbol carrying data" rule as nr_ue_pdsch_procedures().
   const int first_symbol_with_data = nr_ssb_rm_first_data_symbol(dlsch_config, freq_alloc, &ssb);
+  /* Always a mask, even an empty one: with one, nr_rx_pdsch() takes its per-symbol RE count from what
+   * nr_dlsch_extract_rbs() actually packed (CRB-parity CSI-RS, DM-RS, SSB) instead of its own CSI-RS
+   * re-count, which walks CRB numbers over the BWP-relative bitmap and is wrong for BWPStart > 0. */
+  static const nr_ssb_rm_mask_t no_ssb = {0};
 
   /* ---- PDSCH BRANCH-QUALITY GATE (ISAC_PDSCH_ANT_GATE=1, default OFF) --------------------------
    * 2026-09-23, ADDED BUT NOT LIVE-VALIDATED (no hardware available overnight to A/B it). Mirrors
@@ -3115,7 +3138,7 @@ gpu_llr_ready:;
                     pdsch_dl_ch_estimates, llr, dl_valid_re, rxdataF_dem, &log2_maxh, rx_size_symbol,
                     fp->nb_antennas_rx, rxdataF_comp, dl_ch_mag, dl_ch_magb, dl_ch_magr, ptrs_phase_per_slot,
                     ptrs_re_per_slot, nvar, &scope_req, NULL /* rho_dl: single layer */,
-                    ssb_unav ? &ssb.dem : NULL)
+                    ssb_unav ? &ssb.dem : &no_ssb)
         < 0) {
       demod_ok = false;
       break;
@@ -3123,6 +3146,27 @@ gpu_llr_ready:;
   }
 
   pdtim_add(PDTIM_DEMOD, pdt_dem);
+
+  /* ---- RE-BUDGET INVARIANT (CPU path, whole allocation demodulated). G above is what rate
+   * de-matching will read; the demodulator must have produced exactly that many LLRs. A mismatch --
+   * an SSB/CSI-RS/PT-RS/DM-RS RE model in nr_rx_pdsch() that disagrees with the one G was computed
+   * from -- shifts every LLR after the first disagreement, so the TB cannot be CRC evidence of
+   * anything: fail closed instead of feeding the sweeps a misleading CRC failure. */
+  if (demod_ok && !gpu_llr && probe_last_sym < 0) {
+    uint64_t llr_n = 0;
+    for (int m = dlsch_config->start_symbol; m < dlsch_config->start_symbol + dlsch_config->number_symbols; m++)
+      llr_n += (uint64_t)dl_valid_re[m] * cw->qamModOrder * cw->Nl;
+    if (llr_n != G) {
+      static _Atomic unsigned long c_ = 0;
+      const unsigned long n_ = atomic_fetch_add_explicit(&c_, 1, memory_order_relaxed) + 1;
+      if (n_ == 1 || (n_ % 200) == 0)
+        LOG_W(PHY, "SENSING: PDSCH RE-budget mismatch n=%lu rnti=0x%x: demodulated %lu LLRs, G %u (ssb_unav %u csi_unav %u "
+                   "ptrs_unav %u)\n", n_, grant->rnti, (unsigned long)llr_n, G, ssb_unav, csi_unav, ptrs_unav);
+      prg_arm_unsupported(grant->rnti, prg_arm);
+      out->status = NR_PDSCH_PASSIVE_DECODE_ERROR;
+      return out->status;
+    }
+  }
 
   /* Qm oracle: same symbol choice as EQDIAG -- the one with the most valid data REs. */
   if (demod_ok) {

@@ -33,6 +33,7 @@
 __thread uint64_t nr_isac_abs_slot_override = 0;
 
 #include <math.h>
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -48,6 +49,12 @@ __thread uint64_t nr_isac_abs_slot_override = 0;
 #include "executables/nr-uesoftmodem.h"
 #include "openair2/LAYER2/NR_MAC_COMMON/nr_mac_common.h"
 
+static _Atomic uint64_t g_data_aided_g_refused = 0;
+uint64_t nr_isac_pdsch_data_aided_g_refused(void)
+{
+  return atomic_load_explicit(&g_data_aided_g_refused, memory_order_relaxed);
+}
+
 void nr_isac_pdsch_data_aided_submit(PHY_VARS_NR_UE *ue,
                                      const UE_nr_rxtx_proc_t *proc,
                                      const fapi_nr_dl_cw_info_t *cw,
@@ -57,8 +64,28 @@ void nr_isac_pdsch_data_aided_submit(PHY_VARS_NR_UE *ue,
                                      const uint8_t *tb_bytes,
                                      uint32_t harq_pid_tag,
                                      const c16_t rxdataF[][ue->frame_parms.samples_per_slot_wCP],
-                                     double nvar)
+                                     double nvar,
+                                     uint32_t decode_G)
 {
+  /* RE-MODEL GUARD. The reconstruction below maps the re-encoded TB onto EVERY non-DM-RS RE of the
+   * allocation: its RE model has no hole for an SSB, a CSI-RS or a PT-RS. A decode that rate-matched
+   * around any of them (G smaller than this tap's G) verified a TB whose E per code block, and hence
+   * whose X, differs from what is re-encoded here -- and the enumeration is still self-consistent with
+   * its own G, so the mod_idx invariant further down cannot catch it. Checked FIRST, before the
+   * sensing gate, so the refusal is independent of the sensing configuration. */
+  const uint8_t nb_re_dmrs = get_num_dmrs_re_per_rb(dlsch_config->dmrsConfigType, dlsch_config->n_dmrs_cdm_groups);
+  const uint16_t dmrs_len = get_num_dmrs(dlsch_config->dlDmrsSymbPos);
+  const uint32_t tap_G = nr_get_G(freq_alloc->num_rbs, dlsch_config->number_symbols, nb_re_dmrs, dmrs_len,
+                                  0 /* no SSB/CSI-RS/PT-RS hole in this RE model */, cw->qamModOrder, cw->Nl);
+  if (decode_G != tap_G) {
+    const uint64_t n = atomic_fetch_add_explicit(&g_data_aided_g_refused, 1, memory_order_relaxed) + 1;
+    if (n == 1 || n % 200 == 0)
+      LOG_W(NR_PHY,
+            "SENSING: data-aided tap refused n=%lu rnti=0x%x: decode G %u != tap G %u (SSB/CSI-RS/PT-RS REs rate-matched "
+            "around; the tap's RE model has no hole for them)\n",
+            (unsigned long)n, rnti, decode_G, tap_G);
+    return;
+  }
   if (!nr_isac_enabled() || !nr_isac_source_enabled(NR_ISAC_SRC_PDSCH_DATA))
     return;
 
@@ -126,10 +153,7 @@ void nr_isac_pdsch_data_aided_submit(PHY_VARS_NR_UE *ue,
   TB_parameters.rv_index = cw->rv;
   TB_parameters.tbslbrm = dlsch_config->tbslbrm;
 
-  const uint8_t  nb_re_dmrs = get_num_dmrs_re_per_rb(dlsch_config->dmrsConfigType, dlsch_config->n_dmrs_cdm_groups);
-  const uint16_t dmrs_len   = get_num_dmrs(dlsch_config->dlDmrsSymbPos);
-  TB_parameters.G = nr_get_G(freq_alloc->num_rbs, dlsch_config->number_symbols, nb_re_dmrs, dmrs_len,
-                            0 /* unav_res: PTRS/CSI-RM already excluded by the caller */, cw->qamModOrder, cw->Nl);
+  TB_parameters.G = tap_G; // == the decode's G: checked on entry
   if (TB_parameters.G == 0)
     return;
 
