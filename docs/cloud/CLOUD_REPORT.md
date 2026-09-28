@@ -47,9 +47,29 @@ Other remote branches seen (not WIP, not triaged, untouched): `adaptive-rx-UL-DL
 c295fa18f1, `sdd/integration` 239eb144ac, `sdd/gap-bwp` 8e9fdbf8b5, `sdd/gap-csirs` 621a91dabe,
 `sdd/gap-ocudu-dl` 02aa0cb5a3.
 
-## Task 2 — ssb
+## Task 2 — ssb — DONE (offline-complete, merged)
 
-In progress.
+Branch `sdd/gap-ssb` = WIP `d4d807a7d3` + **`af8213a`** (local; push blocked).
+
+- The WIP did not build: the production-path check had a VLA/goto compile error, link gaps and a LOG segfault — fixed
+  (test-side only). Production integration unchanged by that step.
+- G5 round 1 (NOT approved): Critical — the data-aided tap re-encoded newly decodable SSB grants with a hole-less G
+  (garbage CFR); Important — decoder wiring untested, detector sensitivity untested. Round 2 (NOT approved): Important —
+  the new RE-budget invariant exposed a pre-existing CSI-RS count bug (CRB/BWP index mix-up for BWPStart>0; overlapping
+  resources summed) that would have turned CRC-passable grants into ERROR. Round 3: **Approved** (Minor only).
+- Final lane content: per-slot PSS/SSS detector (Bernstein bound, 1e-9/trial; ≥99 % at 8 dB, 2-tap channel), SSB
+  mask in extraction and G, fail-closed DM-RS/PT-RS/SI-RNTI, `PDSCH SSB-OBS` named line; RE-budget invariant;
+  `nr_dlsch_csi_unav_res()` (union, CRB parity) + always-mask for the passive path (attached UE unchanged); tap
+  `decode_G` guard.
+- G3 RED evidence (logs `/home/user/wt/logs/ssb/`): 4 production breaks; decoder-wiring breaks (G without `+ssb_unav`
+  → G 31800 vs 29880 bits; early FEP dropped; mask not handed → ERROR, 0 LDPC calls); tap guard off; old Hoeffding
+  gate (243/1000 at 8 dB); partial-edge PRB; antenna-0-only; CSI BWPStart 10 (ERROR) and overlap (G 27648 vs 28224).
+- G1 clean (12 ISAC link failures only; `dmrs_first` warning is at base). G2 ctest 112/125 (baseline + 2), shuffle
+  1/3/5 green (ssb_rate_match 8, blind_monitor 195+2, config_sweep 43+1, prb_set 17, scrambling 11, prod 0 failures).
+- Follow-ups (not blocking): density-0.5 odd-BWPStart CSI scene; PT-RS on CSI-RS REs double-counted (pre-existing);
+  attached-UE CSI count still has the BWPStart>0 / overlap bug (pre-existing, outside the passive path); early FEP
+  runs on time-only overlap (deliberate, for the G4 line) — measure cost live.
+- G4 pending (lab): named line `PDSCH SSB-OBS`.
 
 ## Task 3 — csirs — DONE_WITH_CONCERNS (G5 not approved; not merged)
 
@@ -99,3 +119,50 @@ Branch `sdd/gap-nsa-mib` (from `239eb144ac`): **`70516af`** (local; push blocked
 | # | Merge commit | Lane | Post-merge G1 | Post-merge G2 |
 |---|---|---|---|---|
 | 1 | `13d76a2` | `sdd/gap-nsa-mib` @ `70516af` | clean (12 ISAC link failures only) | ctest 111/124 (13 = baseline set); shuffle 1/3/5 green (blind_monitor 195+2, config_sweep 43+1, prb_set 17, scrambling 11, mib_handoff 6) |
+| 2 | `418999d` | `sdd/gap-ssb` @ `af8213a` | clean merge, no conflicts; build clean (12 ISAC link failures only) | ctest 113/126 (13 = baseline set); shuffle 1/3/5 green (18/18 runs: + ssb_rate_match 8, mib_handoff 6) |
+
+`sdd/gap-csirs` is NOT merged (G5 not approved). Expect a textual conflict between it and `sdd/gap-ocudu-dl` in
+`nr_csirs_blind_search.c/.h` and the RT ZP block of `nr_csirs_blind_rt.c`; the ssb lane touches the PDSCH CSI-RS
+count (`nr_dlsch_csi_unav_res`) but not the CSI search, so ssb × csirs should merge cleanly.
+
+## Task 5 — ocudu-dl (optional) — NOT DONE
+
+Skipped to conserve the shared usage budget; no micro-benchmark was run.
+
+## Branch deletions
+
+**None performed.** Pushing and deleting on the remote failed: every `git push` returned HTTP 403 (the Claude GitHub
+App has no write access to `nico-net/passive_agnostic_rx_for_sensing` from this session). Candidate for deletion once
+the work is pushed:
+
+| Branch | Tip SHA | Why it may go |
+|---|---|---|
+| `wip/2026-09-28/gap-ssb` | `d4d807a7d375c9726e11194e466480651a87d3e5` | ancestor of `sdd/offline-validated` (`git merge-base --is-ancestor` true) once that branch is pushed |
+
+Kept: `wip/2026-09-28/gap-cbg` (`7e1fce4318`, out-of-scope work) and every non-WIP branch.
+
+## Push status — ACTION NEEDED
+
+All of this session's work exists only in the cloud container until pushed:
+
+| Branch | Local tip | Content |
+|---|---|---|
+| `cloud/ue-localization` | (this report) | report commits |
+| `sdd/gap-ssb` | `af8213a` | ssb lane |
+| `sdd/gap-csirs` | `cb5c358` | csirs lane (G5 not approved) |
+| `sdd/gap-nsa-mib` | `70516af` | nsa-mib lane |
+| `sdd/offline-validated` | `418999d` | staging: nsa-mib + ssb |
+
+## What the lab must still run (G4 per lane)
+
+- **ssb** (`sdd/gap-ssb` / `sdd/offline-validated`): OCUDU or OAI arm with PDSCH overlapping SSB symbols, n ≥ 3,
+  alternated with baseline; bar: `PDSCH SSB-OBS` events with `overlap_re>0`, crc_ok ≥ baseline, no `RE-budget
+  mismatch` lines, `UNSUP@ssb` counts reported.
+- **nsa-mib** (`sdd/gap-nsa-mib` / `sdd/offline-validated`): a no-SIB1 / kSSB ≥ 24 cell with dmrs-TypeA-Position pos3
+  (needs the repaired NSA bed, see `gap-nsa-report.md`); bar: `SENSING: MIB dmrs-TypeA-Position pos3 -> blind monitor`,
+  blind discovery converges without CSS0, decodes use DM-RS symbol 3. Also check RNTI bootstrap without CSS0 (not
+  provable offline).
+- **csirs** (`sdd/gap-csirs`, not merged): repeat the 8-port AWGN ×3 phy-test arm — expect 0 ZP exports; then decide
+  on the two open G5 findings together with `sdd/gap-ocudu-dl`'s revocation logic before merging.
+- **Not triaged** (never pushed): `wip/2026-09-28/rfsim-*`, `ocudu-bed-matrix`, `ocudu-dl-*` — push them for a later
+  session.
