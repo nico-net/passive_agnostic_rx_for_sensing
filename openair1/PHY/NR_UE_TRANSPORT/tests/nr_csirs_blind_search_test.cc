@@ -7,6 +7,7 @@
 #include <memory>
 #include <map>
 #include <cstdio>
+#include <cstring>
 #include <gtest/gtest.h>
 extern "C" {
 #include "nr_csirs_blind_search.h"
@@ -29,6 +30,7 @@ int nr_csirs_blind_rt_test_fep_calls(void);
 void nr_csirs_blind_rt_test_clear_pins(void);
 uint32_t nr_csirs_blind_rt_test_pin_left(int zp);
 void nr_csirs_blind_rt_test_eight_probations(void);
+int nr_csirs_blind_rt_test_post_grant(uint32_t slot, double score, int other_geometry);
 /* get_csi_mapping_parms() is linked in for the footprint tests; OAI's AssertFatal and CONFIG code
  * reference these two from the softmodem's main(). */
 void *uniqCfg = nullptr;
@@ -1686,15 +1688,56 @@ double load_score(const char *busy, const char *idle, int every, int k0, int wid
   lab_pattern(k0, width, -1, ref);
   return nr_csirs_blind_zero_score(rx.data(), ref.data(), 12 * kLabRb);
 }
+// Per-RB subcarrier masks (one symbol) of every candidate the production enumeration builds.
+std::vector<uint16_t> enumerated_masks()
+{
+  std::vector<nr_csirs_candidate_t> cand(NR_CSIRS_BLIND_MAX_CAND);
+  const int n = nr_csirs_blind_enumerate(cand.data(), NR_CSIRS_BLIND_MAX_CAND, kLabRb, 0);
+  std::vector<uint16_t> masks;
+  for (int i = 0; i < n; i++) {
+    uint16_t m[NR_CSIRS_BLIND_NSYM];
+    if (nr_csirs_blind_footprint(&cand[i], m) <= 0)
+      continue;
+    for (int l = 0; l < NR_CSIRS_BLIND_NSYM; l++)
+      if (m[l] && std::find(masks.begin(), masks.end(), m[l]) == masks.end())
+        masks.push_back(m[l]);
+  }
+  return masks;
+}
+bool enumerable(int k0, int width)
+{
+  const std::vector<uint16_t> masks = enumerated_masks();
+  return std::find(masks.begin(), masks.end(), (uint16_t)(((1u << width) - 1) << k0)) != masks.end();
+}
+double mask_score(const char *spec, uint16_t mask)
+{
+  std::vector<int16_t> rx, ref(2 * 12 * kLabRb, 0);
+  rb_symbol(spec, spec, 1, 77, 10.0, rx);
+  for (int rb = 0; rb < kLabRb; rb++)
+    for (int k = 0; k < 12; k++)
+      if ((mask >> k) & 1) {
+        ref[2 * (12 * rb + k)] = 100;
+        ref[2 * (12 * rb + k) + 1] = -100;
+      }
+  return nr_csirs_blind_zero_score(rx.data(), ref.data(), 12 * kLabRb);
+}
 } // namespace
 
-TEST(CsirsBlindZp, WideHolesUnderDataAreStillHoles)
+TEST(CsirsBlindZp, ScorerOnlyWideHolesUnderDataAreStillHoles)
 {
+  // SCORER-ONLY for the wide shapes (G5 review of 060edd290c, Minor 1): (6,6), (5,7) and (4,8) are
+  // candidates the rows-1..5 enumeration never builds, so these lines test the statistic, not a
+  // production export -- in production an 8-RE hole is REFUSED (EnumeratedShapesRefuseEightReAndTwoHoleSymbols,
+  // synth "8-RE hole k4..11"). Asserted, so a new row cannot silently turn them into production claims.
+  EXPECT_TRUE(enumerable(8, 4));
+  EXPECT_FALSE(enumerable(6, 6));
+  EXPECT_FALSE(enumerable(5, 7));
+  EXPECT_FALSE(enumerable(4, 8));
   //                          k: 0123456789AB
-  EXPECT_GT(spec_score("DDDDDDDD....", 8, 4), 0.9);  // 4-RE ZP k8..11
-  EXPECT_GT(spec_score("DDDDDD......", 6, 6), 0.9);  // 6 dark k6..11
-  EXPECT_GT(spec_score("DDDDD.......", 5, 7), 0.9);  // 7 dark k5..11
-  EXPECT_GT(spec_score("DDDD........", 4, 8), 0.9);  // 8-RE ZP k4..11 (row-6 shape)
+  EXPECT_GT(spec_score("DDDDDDDD....", 8, 4), 0.9);  // 4-RE ZP k8..11 (row 4, enumerated)
+  EXPECT_GT(spec_score("DDDDDD......", 6, 6), 0.9);  // scorer-only: 6 dark k6..11
+  EXPECT_GT(spec_score("DDDDD.......", 5, 7), 0.9);  // scorer-only: 7 dark k5..11
+  EXPECT_GT(spec_score("DDDD........", 4, 8), 0.9);  // scorer-only: 8-RE ZP k4..11 (row-6 shape)
   EXPECT_GT(spec_score("DDDD........", 4, 8, 1), 0.9);
   EXPECT_GT(spec_score("NNNNNNNN....", 8, 4), 0.9);  // beside an 8-class NZP (see WideNzp... below)
   // Partial load: PDSCH on 10 % of the RBs, ZP hole k8..11 inside them, NZP on k0..3 everywhere.
@@ -1726,8 +1769,11 @@ TEST(CsirsBlindZp, SparsePilotMinorityIsNotData)
   EXPECT_LE(spec_score("PPP.........", 6, 2), 0.5);
 }
 
-TEST(CsirsBlindZp, DarkPortsBesideAPilotInAScheduledPdschSymbolReadAsAHole)
+TEST(CsirsBlindZp, ScorerOnlyDarkPortsBesideAPilotInAScheduledPdschSymbolReadAsAHole)
 {
+  // SCORER-ONLY (G5 review of 060edd290c, Minor 1): the (2,6) candidate is not built by the enumeration,
+  // so in production these dark ports are never exported (synth ZPDARK asserts no export).
+  EXPECT_FALSE(enumerable(2, 6));
   // Intended, and pinned so it is not mistaken for a regression: when the CSI-RS symbol also carries
   // PDSCH (here k=8..11), REs left dark by unreceived ports 1..7 ARE data-free REs of a scheduled
   // PDSCH symbol -- the gNB rate-matches the PDSCH around them -- and are indistinguishable, from one
@@ -1737,8 +1783,14 @@ TEST(CsirsBlindZp, DarkPortsBesideAPilotInAScheduledPdschSymbolReadAsAHole)
   EXPECT_LE(spec_score("PP......DDDD", 4, 2), 0.5);
 }
 
-TEST(CsirsBlindZp, WideNzpBesideUnusedResWithoutPdschIsNotAHole)
+TEST(CsirsBlindZp, WideNzpBesideUnusedResWithoutPdschSubsetIsNotAHole)
 {
+  // KNOWN LIMITATION, pinned (G5 review of 060edd290c, Minor 3): on the SAME input the complete candidate
+  // (8,4) -- row 4, enumerated -- reads as a hole and is exported. One symbol cannot tell it from data + a
+  // ZP. It is withdrawn by decoded-grant revocation after exactly 2 wrong occasions under any load shape
+  // (CsirsBlindZpGrant.FalseHoleRevocationBoundUnderEveryLoadShape).
+  EXPECT_GT(load_score("NNNNNNNN....", "NNNNNNNN....", 0, 8, 4), 0.9);
+  EXPECT_TRUE(enumerable(8, 4));
   // G5 reviewer cases (sdd/gap-csirs), candidate k=8,9: an 8-class NZP (k0..7) and k8..11 unused, no
   // PDSCH; the same with PDSCH on 10 % of the RBs; two 2-class NZP resources (k0,1 + k4,5) and no data;
   // the lab (port 0 only, nothing else). k10,11 stay dark beside the candidate, so it is refused in the
@@ -1752,8 +1804,10 @@ TEST(CsirsBlindZp, WideNzpBesideUnusedResWithoutPdschIsNotAHole)
   EXPECT_LE(load_score("PP..........", "PP..........", 0, 8, 2), 0.5);
 }
 
-TEST(CsirsBlindZp, CompleteWideHoleSurvivesLowSnr)
+TEST(CsirsBlindZp, ScorerOnlyCompleteWideHoleSurvivesLowSnr)
 {
+  // SCORER-ONLY (G5 review of 060edd290c, Minor 1): (4,8) is not enumerated; see ScorerOnlyWideHoles....
+  EXPECT_FALSE(enumerable(4, 8));
   // An 8-RE hole (k4..11, data k0..3) at full load and 12 dB per-RE SNR (sigma = 700 / 10^(12/20)):
   // with the weakest-class baseline the complete candidate is not diluted by the dark classes, while a
   // quiet subset of it is still refused at that noise level.
@@ -1764,6 +1818,23 @@ TEST(CsirsBlindZp, CompleteWideHoleSurvivesLowSnr)
   EXPECT_GT(nr_csirs_blind_zero_score(rx.data(), ref.data(), 12 * kLabRb), 0.9);
   lab_pattern(8, 2, -1, ref);
   EXPECT_LE(nr_csirs_blind_zero_score(rx.data(), ref.data(), 12 * kLabRb), NR_CSIRS_BLIND_ZP_MIN_SCORE);
+}
+
+TEST(CsirsBlindZp, EnumeratedShapesRefuseEightReAndTwoHoleSymbols)
+{
+  // DECLARED CAPABILITY LOSS, pinned (G5 review of 060edd290c, Minor 2): no candidate of the production
+  // enumeration explains an 8-RE ZP (k4..11 under data on k0..3) or two holes in one symbol (ZP k0..3 +
+  // CSI-IM k8..11, data k4..7), so neither is ever exported -- on such a cell every PDSCH crossing the
+  // CSI-RS symbol is decoded WITHOUT that rate matching (docs/cloud/CLOUD_REPORT.md, "Post-review fixes").
+  const std::vector<uint16_t> masks = enumerated_masks();
+  ASSERT_GT(masks.size(), 20u);
+  int refused = 0;
+  for (uint16_t m : masks) {
+    EXPECT_LE(mask_score("DDDD........", m), NR_CSIRS_BLIND_ZP_MIN_SCORE) << "8-RE hole, mask 0x" << std::hex << m;
+    EXPECT_LE(mask_score("....DDDD....", m), NR_CSIRS_BLIND_ZP_MIN_SCORE) << "two holes, mask 0x" << std::hex << m;
+    refused++;
+  }
+  printf("ZPREFUSE: %d distinct enumerated per-RB masks, all refuse the 8-RE hole and the two-hole symbol\n", refused);
 }
 
 TEST(CsirsBlindZp, ExportedFalseHoleIsRevokedWhenPdschLandsOnIt)
@@ -1802,6 +1873,365 @@ TEST(CsirsBlindZp, ExportedFalseHoleIsRevokedWhenPdschLandsOnIt)
   EXPECT_FALSE(nr_csirs_blind_zp_feed(st.get(), 0, slot + 20, s_busy, 0.02));
   EXPECT_FALSE(nr_csirs_blind_is_confirmed(st.get(), 0));
   EXPECT_EQ(st->n_conf, 0);
+}
+
+/* ---- DECODED-GRANT REVOCATION (G5 review of merge 060edd290c, Important 1) -------------------------
+ * The reviewer's probe, pinned. A false ZP on k8..11 beside an 8-class NZP on k0..7 is exported from
+ * slots where k8..11 carry nothing; afterwards PDSCH lands on k8..11 at the predicted occasions. Every
+ * occasion runs what the receiver runs: the RT maintenance full-band score (nr_csirs_blind_zp_feed),
+ * then, if a grant crossing the ZP symbol was decoded there, that grant's own evidence (energy on the
+ * ZP REs of its PRBs against its data-only symbol, nr_csirs_blind_zp_grant_feed). A WRONG occasion is
+ * one where a decoded grant was rate-matched around the still-exported false ZP -- every TB of that
+ * slot overlapping it is corrupted. The bound asserted is the number of wrong occasions up to and
+ * including the one that revokes. */
+namespace {
+struct ZpScene {
+  int every;     // grant PRBs: rb % every == 0; 0 = no decoded grant at this occasion
+  double nzp_db; // NZP EPRE over the PDSCH EPRE
+  bool true_zp;  // the gNB really rate-matches k8..11 (the grant leaves them dark)
+  bool idle;     // nothing at all in the CSI-RS symbol (no NZP, no PDSCH)
+  int hyp = 0;   // the receiver's PRB hypothesis for the grant: rb % every == hyp (0 = right; else nothing sent there)
+  bool others = false; // another UE's PDSCH on every RB outside the grant (on k8..11 too unless true_zp)
+  bool phantom = false; // the grant was decoded but nothing was sent (false DCI accept)
+};
+struct ZpSlot {
+  std::vector<int16_t> csi, data;
+  uint32_t rbs[4];
+};
+const int kZpGuard = 128; // FFT bins past the carrier: noise only, the scorer's noise floor
+void zp_scene(const ZpScene &z, unsigned seed, ZpSlot &s)
+{
+  const int n = 12 * kLabRb;
+  s.csi.assign(2 * (n + kZpGuard), 0);
+  s.data.assign(2 * (n + kZpGuard), 0);
+  memset(s.rbs, 0, sizeof(s.rbs));
+  std::mt19937 g(seed);
+  std::normal_distribution<double> nd(0.0, 10.0);
+  const double a_nzp = z.idle ? 0.0 : 700.0 * std::pow(10.0, z.nzp_db / 20.0);
+  for (int rb = 0; rb < kLabRb; rb++) {
+    const bool granted = z.every > 0 && rb % z.every == 0 && !z.phantom;
+    const bool data = granted || (z.others && !granted);
+    if (z.every > 0 && rb % z.every == z.hyp)
+      s.rbs[rb / 32] |= 1u << (rb % 32);
+    for (int k = 0; k < 12; k++) {
+      const int i = 12 * rb + k;
+      const double a = k < 8 ? a_nzp : (data && !z.true_zp ? 700.0 : 0.0);
+      const double d = data ? 700.0 : 0.0;
+      s.csi[2 * i] = (int16_t)lrint(((g() & 1) ? a : -a) + nd(g));
+      s.csi[2 * i + 1] = (int16_t)lrint(((g() & 1) ? a : -a) + nd(g));
+      s.data[2 * i] = (int16_t)lrint(((g() & 1) ? d : -d) + nd(g));
+      s.data[2 * i + 1] = (int16_t)lrint(((g() & 1) ? d : -d) + nd(g));
+    }
+  }
+  for (int i = n; i < n + kZpGuard; i++)
+    for (auto *v : {&s.csi, &s.data}) {
+      (*v)[2 * i] = (int16_t)lrint(nd(g));
+      (*v)[2 * i + 1] = (int16_t)lrint(nd(g));
+    }
+}
+double zp_full_band(const ZpSlot &s)
+{
+  std::vector<int16_t> ref;
+  lab_pattern(8, 4, -1, ref);
+  return nr_csirs_blind_zero_score(s.csi.data(), ref.data(), 12 * kLabRb);
+}
+// What nr_pdsch_passive_decode() computes for one decoded grant: ZP REs of the grant's PRBs on the CSI-RS
+// symbol against all REs of the grant's PRBs on a data-only symbol.
+double zp_grant(const ZpSlot &s)
+{
+  const int n_fft = 12 * kLabRb + kZpGuard;
+  double ez = 0.0, ed = 0.0, en = 0.0;
+  uint32_t nz = 0, ndat = 0, nn = 0;
+  nr_csirs_blind_re_energy(s.csi.data(), n_fft, 0, s.rbs, kLabRb, 0, 0xF00, 0xF00, &ez, &nz);
+  nr_csirs_blind_re_energy(s.data.data(), n_fft, 0, s.rbs, kLabRb, 0, 0xFFF, 0xFFF, &ed, &ndat);
+  nr_csirs_blind_guard_energy(s.data.data(), n_fft, 0, 12 * kLabRb, &en, &nn);
+  return nr_csirs_blind_zp_grant_score(ez, nz, ed, ndat, en, nn);
+}
+// Export a ZP on candidate 0 from dark occasions (k8..11 unused beside the NZP), as
+// ExportedFalseHoleIsRevokedWhenPdschLandsOnIt does. Returns the first predicted occasion after the export.
+uint32_t zp_export_false(nr_csirs_blind_state_t *st, double nzp_db)
+{
+  ZpSlot dark;
+  zp_scene({0, nzp_db, false, false}, 31, dark);
+  const double s_dark = zp_full_band(dark);
+  EXPECT_GT(s_dark, 0.9);
+  EXPECT_GT(nr_csirs_blind_init(st, 24, 17), 0);
+  uint32_t at = 0;
+  for (uint32_t slot = 0; slot < 4000 && at == 0; slot++)
+    if (nr_csirs_blind_zp_feed(st, 0, slot, slot % 20 == 13 ? s_dark : 0.0, 0.02))
+      at = slot;
+  EXPECT_GT(at, 0u);
+  EXPECT_TRUE(nr_csirs_blind_is_confirmed(st, 0));
+  uint32_t slot = at + 1;
+  while (slot % 20 != 13)
+    slot++;
+  return slot;
+}
+struct ZpRun {
+  int revoked_at; // occasion index (1-based) of the revocation, -1 = never
+  int wrong;      // decoded grants rate-matched around the exported ZP until then
+};
+// busy[i]: a grant (per `z`) is decoded at occasion i; otherwise the occasion is dark (NZP only, or idle).
+ZpRun zp_run(const ZpScene &z, const std::vector<bool> &busy, bool grant_evidence, const ZpScene *dark_scene = nullptr)
+{
+  auto st = std::make_unique<nr_csirs_blind_state_t>();
+  uint32_t slot = zp_export_false(st.get(), z.nzp_db);
+  ZpRun r = {-1, 0};
+  ZpSlot s;
+  const ZpScene dark = dark_scene ? *dark_scene : ZpScene{0, z.nzp_db, false, false};
+  for (size_t i = 0; i < busy.size(); i++, slot += 20) {
+    zp_scene(busy[i] ? z : dark, 1000 + (unsigned)i, s);
+    if (busy[i])
+      r.wrong++; // the grant was rate-matched around the ZP exported when it was decoded
+    nr_csirs_blind_zp_feed(st.get(), 0, slot, zp_full_band(s), 0.02);
+    if (busy[i] && grant_evidence && nr_csirs_blind_is_confirmed(st.get(), 0))
+      nr_csirs_blind_zp_grant_feed(st.get(), 0, slot, zp_grant(s));
+    if (!nr_csirs_blind_is_confirmed(st.get(), 0)) {
+      r.revoked_at = (int)i + 1;
+      return r;
+    }
+  }
+  return r;
+}
+std::vector<bool> zp_every_occasion(size_t n) { return std::vector<bool>(n, true); }
+} // namespace
+
+TEST(CsirsBlindZpGrant, GrantScoreSeparatesDataFromAHoleWhateverTheBandShareOrBoost)
+{
+  ZpSlot s;
+  for (int every : {1, 2, 3, 5, 10})
+    for (double db : {0.0, 3.0, 6.0}) {
+      zp_scene({every, db, false, false}, 7, s);
+      EXPECT_LE(zp_grant(s), 0.1) << "data on the pattern, 1/" << every << " of RBs, NZP +" << db << " dB";
+      zp_scene({every, db, true, false}, 7, s);
+      EXPECT_GT(zp_grant(s), 0.99) << "true ZP, 1/" << every << " of RBs, NZP +" << db << " dB";
+    }
+  zp_scene({0, 0.0, false, false}, 7, s);
+  EXPECT_LT(zp_grant(s), 0.0) << "no grant PRB: unscorable";
+  EXPECT_LT(nr_csirs_blind_zp_grant_score(5.0, 1, 0.0, 12, 0.0, 1), 0.0) << "dark data symbol: unscorable";
+  EXPECT_LT(nr_csirs_blind_zp_grant_score(5.0, 0, 5.0, 12, 0.0, 1), 0.0);
+  EXPECT_LT(nr_csirs_blind_zp_grant_score(1.0, 1, 4.0, 1, 0.0, 0), 0.0) << "no noise floor measured";
+  EXPECT_DOUBLE_EQ(nr_csirs_blind_zp_grant_score(1.0, 1, 4.0, 1, 1.0, 1), 0.75) << "data exactly 6 dB over noise";
+  EXPECT_LT(nr_csirs_blind_zp_grant_score(1.0, 1, 3.9, 1, 1.0, 1), 0.0) << "data under 6 dB over noise";
+  EXPECT_DOUBLE_EQ(nr_csirs_blind_zp_grant_score(0.0, 1, 4.0, 1, 0.0, 1), 1.0) << "noise-free simulator";
+  // Known limit on a TRUE ZP (CSI-IM): interference I on its REs against the grant's S + I. Below the grant's
+  // own signal it supports; at SINR 0 dB it reaches the 0.5 bar and contradicts.
+  EXPECT_GT(nr_csirs_blind_zp_grant_score(0.5, 1, 1.5, 1, 0.01, 1), NR_CSIRS_BLIND_ZP_MIN_SCORE);
+  EXPECT_LE(nr_csirs_blind_zp_grant_score(1.0, 1, 2.0, 1, 0.01, 1), NR_CSIRS_BLIND_ZP_MIN_SCORE);
+  // Guard noise floor: the 1/8 of the guard next to each carrier edge (carrier = 24 bins from 30 of 48).
+  std::vector<int16_t> gx(2 * 48, 0);
+  for (int i = 0; i < 48; i++)
+    gx[2 * i] = (int16_t)(i + 1);
+  double ge = 0.0;
+  uint32_t gn = 0;
+  nr_csirs_blind_guard_energy(gx.data(), 48, 30, 24, &ge, &gn); // guard bins 6..29, edges 6,7,8 and 27,28,29
+  EXPECT_EQ(gn, 6u);
+  EXPECT_DOUBLE_EQ(ge, 7.0 * 7 + 8.0 * 8 + 9.0 * 9 + 28.0 * 28 + 29.0 * 29 + 30.0 * 30);
+  gn = 0;
+  nr_csirs_blind_guard_energy(gx.data(), 48, 0, 41, &ge, &gn);
+  EXPECT_EQ(gn, 0u) << "guard under 8 bins: no floor";
+  // CRB parity picks the mask, and the RB offset is applied before it (the extractor's convention).
+  std::vector<int16_t> rx(2 * 12 * 4, 0);
+  for (int i = 0; i < 12 * 4; i++)
+    rx[2 * i] = (int16_t)(i + 1);
+  const uint32_t two_rbs = 0x3; // RB 0 and 1
+  double e = 0.0;
+  uint32_t n = 0;
+  nr_csirs_blind_re_energy(rx.data(), 48, 0, &two_rbs, 2, 1 /* CRB 1, 2 */, 0x001, 0x002, &e, &n);
+  // CRB 1 (odd, k=1): index 13 -> 14; CRB 2 (even, k=0): index 24 -> 25.
+  EXPECT_EQ(n, 2u);
+  EXPECT_DOUBLE_EQ(e, 14.0 * 14.0 + 25.0 * 25.0);
+  e = 0.0;
+  n = 0;
+  nr_csirs_blind_re_energy(rx.data(), 48, 47, &two_rbs, 1, 0, 0x001, 0x001, &e, &n); // CRB 0 k=0 -> FFT index 47
+  EXPECT_EQ(n, 1u);
+  EXPECT_DOUBLE_EQ(e, 48.0 * 48.0);
+  e = 0.0;
+  n = 0;
+  nr_csirs_blind_re_energy(rx.data(), 48, 47, &two_rbs, 1, 0, 0x002, 0x002, &e, &n); // k=1 wraps to index 0
+  EXPECT_EQ(n, 1u);
+  EXPECT_DOUBLE_EQ(e, 1.0);
+}
+
+TEST(CsirsBlindZpGrant, FalseHoleRevocationBoundUnderEveryLoadShape)
+{
+  // Reviewer table (review-060edd290c.md, Important 1). Before this fix only "full band, every occasion"
+  // revoked (after 2 wrong occasions); 1/3, 1/5, 1/10 of the RBs, alternate occasions and NZP +6 dB never did.
+  struct Case {
+    const char *what;
+    ZpScene z;
+    std::vector<bool> busy;
+  };
+  std::vector<bool> alt(200);
+  for (size_t i = 0; i < alt.size(); i++)
+    alt[i] = i % 2 == 1;
+  const std::vector<Case> cases = {
+      {"full band, every occasion", {1, 0.0, false, false}, zp_every_occasion(200)},
+      {"1/2 of RBs", {2, 0.0, false, false}, zp_every_occasion(200)},
+      {"1/3 of RBs", {3, 0.0, false, false}, zp_every_occasion(200)},
+      {"1/5 of RBs", {5, 0.0, false, false}, zp_every_occasion(200)},
+      {"1/10 of RBs", {10, 0.0, false, false}, zp_every_occasion(200)},
+      {"full band, alternate occasions", {1, 0.0, false, false}, alt},
+      {"full band, NZP +3 dB", {1, 3.0, false, false}, zp_every_occasion(200)},
+      {"full band, NZP +6 dB", {1, 6.0, false, false}, zp_every_occasion(200)},
+      {"1/10 of RBs, NZP +6 dB, alternate occasions", {10, 6.0, false, false}, alt},
+  };
+  for (const auto &c : cases) {
+    const ZpRun r = zp_run(c.z, c.busy, true);
+    printf("ZPGRANT: %-45s revoked at occasion %d, %d wrong occasion(s)\n", c.what, r.revoked_at, r.wrong);
+    EXPECT_GT(r.revoked_at, 0) << c.what;
+    EXPECT_EQ(r.wrong, 2) << c.what;
+  }
+}
+
+TEST(CsirsBlindZpGrant, FalseHoleRevocationBoundAtRandomThirtyPercentDuty)
+{
+  // Reviewer: 200/200 revoked, mean 4.1 wrong occasions, full-band score only. With decoded-grant evidence
+  // the bound is exact: 2 in every trial.
+  std::mt19937 g(7);
+  std::bernoulli_distribution duty(0.3);
+  int total_occasions = 0;
+  for (int trial = 0; trial < 200; trial++) {
+    std::vector<bool> busy(200);
+    for (size_t i = 0; i < busy.size(); i++)
+      busy[i] = duty(g);
+    const ZpRun r = zp_run({1, 0.0, false, false}, busy, true);
+    ASSERT_GT(r.revoked_at, 0) << "trial " << trial;
+    ASSERT_EQ(r.wrong, 2) << "trial " << trial;
+    total_occasions += r.revoked_at;
+  }
+  printf("ZPGRANT: random 30%% duty: revoked 200/200, 2 wrong occasions each, mean %.1f occasions\n",
+         total_occasions / 200.0);
+}
+
+TEST(CsirsBlindZpGrant, KnownLimitationWithoutDecodedGrantEvidence)
+{
+  // What the full-band score alone achieves (grant_evidence = false): the reviewer's measurements, pinned.
+  // Not fixable there: in a symbol with no PDSCH and no NZP the full-band score reads ~0 exactly like data on
+  // the pattern, so a qualified hole must clear its contradictions or a TRUE ZP would be revoked by idle
+  // occasions (TrueZpSurvivesIdleOccasionsAndDecodedGrants). Harmless for the receiver's own decoding: only
+  // decoded grants are mis-rate-matched, and each decoded grant supplies the evidence above.
+  std::vector<bool> alt(200);
+  for (size_t i = 0; i < alt.size(); i++)
+    alt[i] = i % 2 == 1;
+  const ZpRun third = zp_run({3, 0.0, false, false}, zp_every_occasion(200), false);
+  const ZpRun alternate = zp_run({1, 0.0, false, false}, alt, false);
+  const ZpRun boost6 = zp_run({1, 6.0, false, false}, zp_every_occasion(200), false);
+  const ZpRun full = zp_run({1, 0.0, false, false}, zp_every_occasion(200), false);
+  EXPECT_EQ(third.revoked_at, -1);
+  EXPECT_EQ(third.wrong, 200);
+  EXPECT_EQ(alternate.revoked_at, -1);
+  EXPECT_EQ(alternate.wrong, 100);
+  EXPECT_EQ(boost6.revoked_at, -1);
+  EXPECT_EQ(boost6.wrong, 200);
+  EXPECT_EQ(full.revoked_at, 2);
+  EXPECT_EQ(full.wrong, 2);
+}
+
+TEST(CsirsBlindZpGrant, TrueZpSurvivesIdleOccasionsAndDecodedGrants)
+{
+  // A GENUINE ZP on k8..11: decoded grants leave it dark (partial band, boosted NZP), and every other
+  // predicted occasion the CSI-RS symbol is completely idle -- which the full-band score reads as a
+  // contradiction. It must stay exported: the full-band path keeps its hole-clears-the-debt rule, and a
+  // supporting grant never adds to the decoded-grant debt.
+  const ZpScene truth = {3, 6.0, true, false};
+  const ZpScene idle = {0, 0.0, false, true};
+  std::vector<bool> alt(200);
+  for (size_t i = 0; i < alt.size(); i++)
+    alt[i] = i % 2 == 1;
+  const ZpRun r = zp_run(truth, alt, true, &idle);
+  EXPECT_EQ(r.revoked_at, -1);
+  const ZpRun every = zp_run({1, 0.0, true, false}, zp_every_occasion(200), true);
+  EXPECT_EQ(every.revoked_at, -1);
+}
+
+TEST(CsirsBlindZpGrant, GrantDecodedUnderAWrongPrbHypothesisIsNoEvidence)
+{
+  // Blind decoding sweeps its PDSCH hypotheses (Technique D, VRB mapping, BWP start, k0) and a DCI can be a false
+  // accept, so a decoded grant's PRBs may hold nothing at all. There a TRUE ZP reads noise against noise --
+  // exactly what data on the pattern reads -- and would be revoked, raising its durable recovery debt. The noise
+  // floor gate makes such a grant no evidence. hyp = 1: the receiver looks at rb % 3 == 1 while the gNB sent
+  // rb % 3 == 0; also a whole-carrier grant on an idle slot.
+  ZpSlot s;
+  const ZpScene miss = {3, 6.0, true, false, 1, false};
+  zp_scene(miss, 9, s);
+  EXPECT_LT(zp_grant(s), 0.0);
+  const ZpScene idle = {0, 0.0, false, true};
+  std::vector<bool> alt(200);
+  for (size_t i = 0; i < alt.size(); i++)
+    alt[i] = i % 2 == 1;
+  EXPECT_EQ(zp_run(miss, zp_every_occasion(200), true).revoked_at, -1);
+  EXPECT_EQ(zp_run(miss, alt, true, &idle).revoked_at, -1);
+  // A phantom whole-carrier grant (false DCI accept): no PDSCH anywhere, only the NZP.
+  const ZpScene phantom = {1, 0.0, true, false, 0, false, true};
+  zp_scene(phantom, 9, s);
+  EXPECT_LT(zp_grant(s), 0.0);
+  EXPECT_EQ(zp_run(phantom, zp_every_occasion(200), true).revoked_at, -1);
+}
+
+TEST(CsirsBlindZpGrant, OtherUesDataBesideTheGrantDoesNotHideAFalseZp)
+{
+  // Another UE's PDSCH also on the false pattern outside our grant: our grant's own PRBs still carry data there.
+  for (double db : {0.0, 6.0}) {
+    const ZpRun r = zp_run({3, db, false, false, 0, true}, zp_every_occasion(200), true);
+    EXPECT_EQ(r.wrong, 2) << "NZP +" << db << " dB";
+    EXPECT_GT(r.revoked_at, 0);
+  }
+}
+
+TEST(CsirsBlindZpGrant, WindowDedupeAndScope)
+{
+  auto st = std::make_unique<nr_csirs_blind_state_t>();
+  // Not exported: no state, no effect.
+  ASSERT_GT(nr_csirs_blind_init(st.get(), 24, 17), 0);
+  EXPECT_FALSE(nr_csirs_blind_zp_grant_feed(st.get(), 0, 13, 0.0));
+  EXPECT_EQ(st->zp_grant_n[0], 0);
+  uint32_t slot = zp_export_false(st.get(), 0.0);
+  // Unscorable, non-predicted and pre-export (stale, queued under an earlier export) evidence is ignored; two
+  // grants of ONE slot count once; a slot one of whose grants supports the ZP is no contradiction.
+  EXPECT_TRUE(nr_csirs_blind_zp_grant_feed(st.get(), 0, slot, -1.0));
+  EXPECT_TRUE(nr_csirs_blind_zp_grant_feed(st.get(), 0, slot + 1, 0.0));
+  EXPECT_TRUE(nr_csirs_blind_zp_grant_feed(st.get(), 0, slot - 40, 0.0));
+  EXPECT_TRUE(nr_csirs_blind_zp_grant_feed(st.get(), 0, slot - 60, 0.0));
+  EXPECT_EQ(st->zp_grant_n[0], 0);
+  EXPECT_TRUE(nr_csirs_blind_zp_grant_feed(st.get(), 0, slot - 20, 0.0)); // the export slot itself: not stale
+  EXPECT_TRUE(nr_csirs_blind_zp_grant_feed(st.get(), 0, slot - 20, 0.98)); // ... and a grant there supports it
+  EXPECT_TRUE(nr_csirs_blind_zp_grant_feed(st.get(), 0, slot, 0.0));
+  EXPECT_TRUE(nr_csirs_blind_zp_grant_feed(st.get(), 0, slot, 0.0));
+  EXPECT_TRUE(nr_csirs_blind_is_confirmed(st.get(), 0)) << "one contradicted slot, one supported";
+  // A contradiction ages out after NR_CSIRS_BLIND_ZP_GRANT_WINDOW supporting occasions ...
+  for (int i = 1; i < NR_CSIRS_BLIND_ZP_GRANT_WINDOW; i++)
+    EXPECT_TRUE(nr_csirs_blind_zp_grant_feed(st.get(), 0, slot + 20 * i, 0.98));
+  EXPECT_TRUE(nr_csirs_blind_zp_grant_feed(st.get(), 0, slot + 20 * NR_CSIRS_BLIND_ZP_GRANT_WINDOW, 0.0));
+  EXPECT_TRUE(nr_csirs_blind_is_confirmed(st.get(), 0));
+  // ... but not within it, and a qualified full-band hole in between does not clear it. Evidence may
+  // arrive out of slot order (decode consumers run behind the search).
+  const uint32_t base = slot + 20 * (NR_CSIRS_BLIND_ZP_GRANT_WINDOW + 4);
+  EXPECT_TRUE(nr_csirs_blind_zp_feed(st.get(), 0, base + 20, 0.98, 0.02));
+  EXPECT_FALSE(nr_csirs_blind_zp_grant_feed(st.get(), 0, base, 0.0));
+  EXPECT_FALSE(nr_csirs_blind_is_confirmed(st.get(), 0));
+  EXPECT_EQ(st->zp_revocations[0], 1u);
+  EXPECT_EQ(st->zp_grant_n[0], 0) << "withdrawal clears the decoded-grant ring";
+}
+
+TEST(CsirsBlindRuntime, DecodedGrantEvidenceReachesTheRuntimeBankAndRevokes)
+{
+  // Export through the real RT slot path, then post decoded-grant evidence exactly as the passive PDSCH
+  // decoder does (a FAPI PDU copy of the rate-matching entry). The next RT slot drains it.
+  for (uint32_t slot = 0; slot <= 693; slot++) {
+    int mask = 0;
+    nr_csirs_blind_rt_test_slot(2, slot, slot % 20 == 13, 0, slot == 0, &mask);
+  }
+  ASSERT_EQ(nr_csirs_blind_rt_test_future_export(713), 1);
+  EXPECT_EQ(nr_csirs_blind_rt_test_post_grant(713, 0.0, 1 /* other geometry */), 0);
+  EXPECT_EQ(nr_csirs_blind_rt_test_post_grant(733, 0.0, 1), 0);
+  int mask = 0;
+  nr_csirs_blind_rt_test_slot(2, 694, 0, 0, 0, &mask);
+  EXPECT_EQ(nr_csirs_blind_rt_test_future_export(713), 1) << "another resource's evidence must not count";
+  EXPECT_EQ(nr_csirs_blind_rt_test_post_grant(713, 0.0, 0), 0);
+  EXPECT_EQ(nr_csirs_blind_rt_test_post_grant(733, 0.0, 0), 0);
+  nr_csirs_blind_rt_test_slot(2, 695, 0, 0, 0, &mask);
+  EXPECT_EQ(nr_csirs_blind_rt_test_future_export(713), 0) << "two decoded-grant contradictions revoke";
 }
 
 /* ---- Channel robustness: the whole reason the OTA correlation read as noise ------------------

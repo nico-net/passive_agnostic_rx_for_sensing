@@ -238,5 +238,14 @@ bool nr_pdsch_passive_gpu_job(const PHY_VARS_NR_UE *ue, const fapi_nr_dl_config_
 void nr_pdsch_passive_set_llr_override(const int16_t *llr, uint32_t n);
 /** The (descrambled) LLR buffer and G of this thread's last decode -- the GPU self-check compares against it. */
 uint32_t nr_pdsch_passive_last_llr(const int16_t **p);
+/** Decoded-grant evidence on ZP rate-matching entry @p i of @p cfg (csi_type 2): energy on its REs inside the
+ *  grant's PRBs (fa) on the CSI-RS symbol(s), REs of the other entries left out, against every RE of the grant on
+ *  ONE data-only reference symbol (no DM-RS, no CSI-RS, not in @p skip_symbols -- the SSB symbols; the one nearest
+ *  the ZP symbol), and that symbol's guard-band noise floor; all receive antennas summed. Only symbols inside the
+ *  allocation and the FFT'd range [fep_s0, fep_s0 + fep_n) are read. rxdataF_flat: antenna a, symbol m at
+ *  [a * stride + m * ofdm_symbol_size]. Returns nr_csirs_blind_zp_grant_score(), or -1 (no evidence). */
+double nr_pdsch_passive_zp_grant_score(const NR_DL_FRAME_PARMS *fp, const fapi_nr_dl_config_dlsch_pdu_rel15_t *cfg,
+                                       const freq_alloc_bitmap_t *fa, const c16_t *rxdataF_flat, uint32_t stride,
+                                       int fep_s0, int fep_n, uint16_t skip_symbols, int i);
 
 #endif // NR_PDSCH_PASSIVE_DECODE_H

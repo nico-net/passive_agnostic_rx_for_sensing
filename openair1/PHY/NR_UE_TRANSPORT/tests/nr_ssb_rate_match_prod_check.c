@@ -495,6 +495,134 @@ static int observe_trials(double snr_db, int trials, bool present, int pci_offse
   return hits;
 }
 
+/* ---- ZP evidence from a decoded grant: the production scorer nr_pdsch_passive_zp_grant_score() --------------
+ * (G5 review of merge 060edd290c). Frequency-domain grid written directly (the scorer reads FFT'd symbols), so
+ * each case pins one piece of its RE bookkeeping: the extractor's even/odd 16-bit CSI bitmap split and CRB parity,
+ * BWPStart, the exclusion of other rate-matching entries, the FFT'd-symbol clip, the antenna sum, the skipped
+ * (SSB) symbols and the noise-floor gate. Grant: symbols 1..13, DM-RS on 2; ZP: row 4 bitmap 4 (k8..11) at 13. */
+enum { ZD = 512, ZN = 4 };
+static c16_t *zgrid;
+static uint32_t zstride;
+static void zset(const NR_DL_FRAME_PARMS *fp, int a, int sym, int crb, int k, int amp)
+{
+  const int j = (fp->first_carrier_offset + crb * 12 + k) % fp->ofdm_symbol_size;
+  zgrid[(size_t)a * zstride + (size_t)sym * fp->ofdm_symbol_size + j] = (c16_t){(int16_t)((bit() ? amp : -amp) + (bit() ? ZN : -ZN)), (int16_t)(bit() ? amp : -amp)};
+}
+/* Noise everywhere (guard bins included); data on every RE of CRBs [crb0, crb1) on symbols 1..13 of the antennas in
+ * @p ants, except k8..11 of symbol 13 when @p hole (only on RBs of parity hole_parity, -1 = all). */
+static void zscene(const NR_DL_FRAME_PARMS *fp, int ants, int crb0, int crb1, bool hole, int hole_parity)
+{
+  for (int a = 0; a < fp->nb_antennas_rx; a++)
+    for (int i = 0; i < 14 * fp->ofdm_symbol_size; i++)
+      zgrid[(size_t)a * zstride + i] = (c16_t){(int16_t)(bit() ? ZN : -ZN), (int16_t)(bit() ? ZN : -ZN)};
+  for (int a = 0; a < fp->nb_antennas_rx; a++)
+    for (int sym = 1; ((ants >> a) & 1) && sym < 14; sym++)
+      for (int crb = crb0; crb < crb1; crb++)
+        for (int k = 0; k < 12; k++) {
+          const bool dark = hole && sym == 13 && k >= 8 && (hole_parity < 0 || (crb & 1) == hole_parity);
+          if (!dark)
+            zset(fp, a, sym, crb, k, ZD);
+        }
+}
+static void zcfg(fapi_nr_dl_config_dlsch_pdu_rel15_t *cfg, freq_alloc_bitmap_t *fa, int bwp_start, int bwp_size, int rb0,
+                 int nrb, int density)
+{
+  memset(cfg, 0, sizeof(*cfg));
+  cfg->BWPStart = bwp_start;
+  cfg->BWPSize = bwp_size;
+  cfg->start_symbol = 1;
+  cfg->number_symbols = 13;
+  cfg->dlDmrsSymbPos = 1 << 2;
+  cfg->dmrsConfigType = NFAPI_NR_DMRS_TYPE1;
+  cfg->n_dmrs_cdm_groups = 1;
+  fapi_nr_dl_config_csirs_pdu_rel15_t *c = &cfg->csiRsForRateMatching[cfg->numCsiRsForRateMatching++];
+  c->csi_type = 2;
+  c->row = 4;
+  c->freq_domain = 4; // k = 8..11
+  c->symb_l0 = 13;
+  c->cdm_type = 1;
+  c->freq_density = density;
+  c->nr_of_rbs = NRB;
+  memset(fa, 0, sizeof(*fa));
+  for (int rb = rb0; rb < rb0 + nrb; rb++)
+    fa->bitmap[rb / 32] |= 1u << (rb % 32);
+}
+static double zscore(const NR_DL_FRAME_PARMS *fp, const fapi_nr_dl_config_dlsch_pdu_rel15_t *cfg, const freq_alloc_bitmap_t *fa,
+                     int fep_n, uint16_t skip)
+{
+  return nr_pdsch_passive_zp_grant_score(fp, cfg, fa, zgrid, zstride, 1, fep_n, skip, 0);
+}
+static void check_zp_grant_evidence(void)
+{
+  NR_DL_FRAME_PARMS fp;
+  make_fp(&fp, TX_PCI, SSB_SC, MAX_RX);
+  zstride = fp.samples_per_slot_wCP;
+  zgrid = calloc((size_t)MAX_RX * zstride, sizeof(c16_t));
+  fapi_nr_dl_config_dlsch_pdu_rel15_t cfg;
+  freq_alloc_bitmap_t fa;
+  double z;
+  // Z1/Z2: partial grant (RB 0..29), data on the pattern (false ZP) vs a real hole (true ZP).
+  zcfg(&cfg, &fa, 0, NRB, 0, 30, 2);
+  zscene(&fp, 3, 0, 30, false, -1);
+  CHECK((z = zscore(&fp, &cfg, &fa, 13, 0)) >= 0.0 && z <= 0.5, "Z1: data on a false ZP scores %.3f", z);
+  zscene(&fp, 3, 0, 30, true, -1);
+  CHECK((z = zscore(&fp, &cfg, &fa, 13, 0)) > 0.9, "Z2: a true ZP scores %.3f", z);
+  // Z3: nothing sent (false DCI accept / wrong hypothesis): noise against noise is no evidence.
+  zcfg(&cfg, &fa, 0, NRB, 0, NRB, 2);
+  zscene(&fp, 0, 0, 0, false, -1);
+  CHECK(zscore(&fp, &cfg, &fa, 13, 0) < 0.0, "Z3: an idle full-band grant produced evidence");
+  // Z4: an NZP entry on k=8 of the same symbol is bright by design and must be left out of the ZP REs.
+  zcfg(&cfg, &fa, 0, NRB, 0, 30, 2);
+  zscene(&fp, 3, 0, 30, true, -1);
+  for (int a = 0; a < MAX_RX; a++)
+    for (int crb = 0; crb < 30; crb++)
+      zset(&fp, a, 13, crb, 8, 4 * ZD);
+  fapi_nr_dl_config_csirs_pdu_rel15_t *nzp = &cfg.csiRsForRateMatching[cfg.numCsiRsForRateMatching++];
+  memset(nzp, 0, sizeof(*nzp));
+  nzp->csi_type = 1;
+  nzp->row = 2;
+  nzp->freq_domain = 1 << 8;
+  nzp->symb_l0 = 13;
+  nzp->freq_density = 2;
+  nzp->nr_of_rbs = NRB;
+  CHECK((z = zscore(&fp, &cfg, &fa, 13, 0)) > 0.9, "Z4: an overlapping NZP entry was counted as ZP energy (%.3f)", z);
+  CHECK(nr_pdsch_passive_zp_grant_score(&fp, &cfg, &fa, zgrid, zstride, 1, 13, 0, 1) < 0.0, "Z4: an NZP entry was scored");
+  // Z5: density 0.5 on EVEN CRBs (extractor: low 16 bits). Data on k8..11 of odd RBs only is off the pattern.
+  zcfg(&cfg, &fa, 0, NRB, 0, 30, 0);
+  zscene(&fp, 3, 0, 30, true, 0);
+  CHECK((z = zscore(&fp, &cfg, &fa, 13, 0)) > 0.9, "Z5: even-RB ZP read odd-RB data (%.3f)", z);
+  zscene(&fp, 3, 0, 30, true, 1);
+  CHECK((z = zscore(&fp, &cfg, &fa, 13, 0)) >= 0.0 && z <= 0.5, "Z5: data on the even-RB pattern scores %.3f", z);
+  // Z6: BWPStart. BWP from CRB 10, grant BWP RBs 0..19 = CRB 10..29 with a real hole; CRBs 0..9 below the BWP
+  // carry data on k8..11 as well, which a scorer ignoring BWPStart would read as a contradiction.
+  zcfg(&cfg, &fa, 10, NRB - 10, 0, 20, 2);
+  zscene(&fp, 3, 10, 30, true, -1);
+  for (int a = 0; a < MAX_RX; a++)
+    for (int crb = 0; crb < 10; crb++)
+      for (int sym = 12; sym < 14; sym++)
+        for (int k = 0; k < 12; k++)
+          zset(&fp, a, sym, crb, k, ZD);
+  CHECK((z = zscore(&fp, &cfg, &fa, 13, 0)) > 0.9, "Z6: BWPStart ignored (%.3f)", z);
+  zscene(&fp, 3, 10, 30, false, -1);
+  // Z7: the ZP symbol outside the FFT'd range [1, 1 + 12) is never read.
+  CHECK(zscore(&fp, &cfg, &fa, 12, 0) < 0.0, "Z7: an un-FFT'd ZP symbol was scored");
+  // Z8: all antennas summed: antenna 0 in a deep fade, antenna 1 carries the data on the pattern.
+  zcfg(&cfg, &fa, 0, NRB, 0, 30, 2);
+  zscene(&fp, 2, 0, 30, false, -1);
+  CHECK((z = zscore(&fp, &cfg, &fa, 13, 0)) >= 0.0 && z <= 0.5, "Z8: antenna 1 not summed (%.3f)", z);
+  // Z9: the reference is the data-only symbol nearest the ZP symbol (12) unless skipped (SSB): a dark 12 is no
+  // reference, a skipped 12 hands over to 11.
+  zscene(&fp, 3, 0, 30, false, -1);
+  for (int a = 0; a < MAX_RX; a++)
+    for (int crb = 0; crb < 30; crb++)
+      for (int k = 0; k < 12; k++)
+        zset(&fp, a, 12, crb, k, 0);
+  CHECK(zscore(&fp, &cfg, &fa, 13, 0) < 0.0, "Z9: a dark reference symbol produced evidence");
+  CHECK((z = zscore(&fp, &cfg, &fa, 13, 1 << 12)) >= 0.0 && z <= 0.5, "Z9: skipped symbol not skipped (%.3f)", z);
+  free(zgrid);
+  printf("ZPGRANT production scorer: Z1-Z9 done\n");
+}
+
 int main(void)
 {
   // nr_rx_pdsch()'s LOG macros dereference global state that only logInit() sets up.
@@ -651,6 +779,8 @@ int main(void)
   CHECK(fa_noise == 0, "I2: %d/5000 events on noise only", fa_noise);
   const int fa_pci = observe_trials(20.0, 1000, true, 1);
   CHECK(fa_pci == 0, "I2: %d/1000 events for the neighbouring PCI at 20 dB", fa_pci);
+
+  check_zp_grant_evidence();
 
   printf("%s: %d failure(s)\n", failures ? "FAILED" : "PASSED", failures);
   return failures ? 1 : 0;

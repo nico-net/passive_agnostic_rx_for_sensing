@@ -369,8 +369,9 @@ static void lab_two_holes(const NR_DL_FRAME_PARMS *fp, int t, c16_t *sym)
  * EVERY port, so an 8-port row-6 resource lights 8 classes (k=0..7) and k=8..11 are simply unused.
  * Sum of all ports' planes through a flat channel whose gain alternates 1, j between the ports of a
  * CDM pair (unit gains would cancel the FD-CDM2 pair on every second subcarrier), scaled to the data
- * EPRE (powerControlOffset 0 dB), plus, when @p load_every > 0, PDSCH on the RBs rb % load_every == 0
- * (k=8..11 of the CSI-RS symbol carry data there). */
+ * EPRE plus s_nzp_boost_db (powerControlOffset; 0 dB unless a case boosts it), plus, when
+ * @p load_every > 0, PDSCH on the RBs rb % load_every == 0 (k=8..11 of the CSI-RS symbol carry data there). */
+static double s_nzp_boost_db;
 static void nzp_all_ports(const NR_DL_FRAME_PARMS *fp, const nr_csirs_candidate_t *c, int t, c16_t *sym)
 {
   const int np = nr_csirs_blind_row_ports(c->row);
@@ -394,7 +395,7 @@ static void nzp_all_ports(const NR_DL_FRAME_PARMS *fp, const nr_csirs_candidate_
     }
   }
   assert(n_lit > 0);
-  const double g = sqrt(2.0 * 700.0 * 700.0 / (pw / n_lit));
+  const double g = sqrt(2.0 * 700.0 * 700.0 / (pw / n_lit)) * pow(10.0, s_nzp_boost_db / 20.0);
   for (int k = 0; k < LAB_NRB * 12; k++) {
     sym[k].r = (int16_t)(sym[k].r + lrint(g * re[2 * k]));
     sym[k].i = (int16_t)(sym[k].i + lrint(g * re[2 * k + 1]));
@@ -422,6 +423,10 @@ static void nzp8_light_load(const NR_DL_FRAME_PARMS *fp, int t, c16_t *sym)
 static void nzp8_full_load(const NR_DL_FRAME_PARMS *fp, int t, c16_t *sym)
 {
   nzp8_loaded(fp, t, sym, 1);
+}
+static void nzp8_third_load(const NR_DL_FRAME_PARMS *fp, int t, c16_t *sym)
+{
+  nzp8_loaded(fp, t, sym, 3);
 }
 /* Two 2-port NZP resources in one symbol (row 3 at k=0,1 and k=4,5), no data. */
 static void two_nzp_no_data(const NR_DL_FRAME_PARMS *fp, int t, c16_t *sym)
@@ -456,6 +461,49 @@ static uint32_t union_mask(const NR_DL_FRAME_PARMS *fp, const nr_csirs_candidate
 {
   const int ports = nr_csirs_blind_row_ports(c->row);
   return port_mask(fp, c, ports < PLANES ? ports : PLANES);
+}
+
+/* DECODED-GRANT evidence with the library pieces nr_pdsch_passive_zp_grant_score() uses (that function itself is
+ * pinned by test_nr_ssb_rate_match_prod, Z1-Z9): the exported ZP's REs inside the grant's PRBs (rb % load_every
+ * == 0) of the CSI-RS symbol against every RE of those PRBs on a data-only symbol and its guard noise floor.
+ * Occasions t0.. at the ZP's predicted slots; returns the number of decoded grants rate-matched around the
+ * still-exported ZP up to and including the revoking one, or -1 if still exported after @p n occasions. */
+static int grant_revoke(const NR_DL_FRAME_PARMS *fp, csi_sym_fn csi_sym, int load_every, nr_csirs_blind_state_t *zp,
+                        int w, int t0, int n)
+{
+  const uint32_t m = union_mask(fp, &zp->cand[w]);
+  uint32_t rbs[(LAB_NRB + 31) / 32] = {0};
+  for (int rb = 0; rb < LAB_NRB; rb += load_every)
+    rbs[rb / 32] |= 1u << (rb % 32);
+  c16_t *csi = malloc((size_t)LAB_FFT * sizeof(c16_t));
+  c16_t *dat = malloc((size_t)LAB_FFT * sizeof(c16_t));
+  int wrong = -1;
+  for (int t = t0; t < t0 + n && wrong < 0; t++) {
+    memset(csi, 0, (size_t)LAB_FFT * sizeof(c16_t));
+    memset(dat, 0, (size_t)LAB_FFT * sizeof(c16_t));
+    csi_sym(fp, t, csi);
+    for (int k = 0; k < LAB_FFT; k++) { /* noise on the guard bins too: the scorer's noise floor */
+      if (k < LAB_NRB * 12 && ((rbs[(k / 12) / 32] >> ((k / 12) % 32)) & 1))
+        dat[k] = data_re();
+      c16_t *const b[2] = {&csi[k], &dat[k]};
+      for (int q = 0; q < 2; q++) {
+        b[q]->r = (int16_t)(b[q]->r + noise(20.0));
+        b[q]->i = (int16_t)(b[q]->i + noise(20.0));
+      }
+    }
+    double ez = 0.0, ed = 0.0, en = 0.0;
+    uint32_t nz = 0, nd = 0, nn = 0;
+    nr_csirs_blind_re_energy((const int16_t *)csi, LAB_FFT, 0, rbs, LAB_NRB, 0, m & 0xFFF, (m >> 12) & 0xFFF, &ez, &nz);
+    nr_csirs_blind_re_energy((const int16_t *)dat, LAB_FFT, 0, rbs, LAB_NRB, 0, 0xFFF, 0xFFF, &ed, &nd);
+    nr_csirs_blind_guard_energy((const int16_t *)dat, LAB_FFT, 0, LAB_NRB * 12, &en, &nn);
+    const double gs = nr_csirs_blind_zp_grant_score(ez, nz, ed, nd, en, nn);
+    assert(gs >= 0.0 && gs <= NR_CSIRS_BLIND_ZP_MIN_SCORE && "data on the false ZP must contradict it");
+    if (!nr_csirs_blind_zp_grant_feed(zp, w, (uint32_t)(LAB_PERIOD * t), gs))
+      wrong = t - t0 + 1;
+  }
+  free(csi);
+  free(dat);
+  return wrong;
 }
 
 static void check_zp_dark_ports(void)
@@ -552,25 +600,33 @@ static void check_zp_dark_ports(void)
   }
 
   /* An 8-class NZP beside the unused k=8..11: the row-4 candidate covering all of k=8..11 explains the
-   * complete quiet pattern and one symbol cannot tell it from data + a ZP, so it may be exported (and
-   * only there: never on a lit RE). The cure is revocation: once PDSCH is scheduled on k=8..11 at the
-   * CSI-RS occasions, two occupied predicted occasions withdraw the export. */
+   * complete quiet pattern and one symbol cannot tell it from data + a ZP, so it IS exported (and only
+   * there: never on a lit RE) -- asserted, so the revocation below is always exercised (G5 review of
+   * 060edd290c, Important 2: this used to accept "no export" and skip it). The cure is revocation once
+   * PDSCH is scheduled on k=8..11. Two evidence paths, each replayed from the same export:
+   * - the full-band score (RT maintenance): revokes a full-band PDSCH only while the NZP is at the PDSCH
+   *   EPRE; at +6 dB data on the pattern still reads 0.75 and is NOT a contradiction (pinned limitation);
+   * - decoded-grant evidence (the fix): revokes after exactly 2 wrong occasions, full band or 1/3 of the
+   *   RBs, NZP at 0 or +6 dB. */
   const struct {
     csi_sym_fn fn;
     const char *what;
-  } nzp[] = {{nzp8_no_data, "8-class NZP k0..7, k8..11 unused, no PDSCH"},
-             {nzp8_light_load, "8-class NZP k0..7, PDSCH on 10% of RBs"}};
+    double boost_db;
+  } nzp[] = {{nzp8_no_data, "8-class NZP k0..7, k8..11 unused, no PDSCH", 0.0},
+             {nzp8_light_load, "8-class NZP k0..7, PDSCH on 10% of RBs", 0.0},
+             {nzp8_no_data, "8-class NZP k0..7 boosted +6 dB, k8..11 unused, no PDSCH", 6.0}};
+  nr_csirs_blind_state_t *exported = malloc(sizeof(*exported));
   for (size_t c = 0; c < sizeof(nzp) / sizeof(nzp[0]); c++) {
+    s_nzp_boost_db = nzp[c].boost_db;
     w = run_zp_chain(&fp, nzp[c].fn, zp, &best);
-    if (w < 0) {
-      printf("ZPDARK: %s: no ZP export (best CSI-slot score %.3f)\n", nzp[c].what, best);
-      continue;
-    }
+    printf("ZPDARK: %s: %s (best CSI-slot score %.3f)\n", nzp[c].what, w >= 0 ? "exported" : "NOT exported", best);
+    assert(w >= 0 && "the known false export beside a wide NZP must happen, so its revocation is exercised");
     nr_csirs_blind_format(&zp->cand[w], zp->period, zp->offset, line, sizeof(line));
     const uint32_t m = union_mask(&fp, &zp->cand[w]);
-    printf("ZPDARK: %s: exported ZP \"%s\" (port-union mask 0x%06x, best %.3f)\n", nzp[c].what, line, m, best);
+    printf("ZPDARK: %s: exported ZP \"%s\" (port-union mask 0x%06x)\n", nzp[c].what, line, m);
     assert(zp->cand[w].symb_l0 == LAB_SYM);
     assert((m & ~0xF00F00u) == 0 && "a ZP beside an NZP was exported on lit REs");
+    memcpy(exported, zp, sizeof(*zp));
     zp_ref_t *refs = calloc(NR_CSIRS_BLIND_MAX_CAND, sizeof(*refs));
     const int n13 = load_zp_refs(&fp, zp, refs);
     zp_null_t nl = {.null_n = 0, .null_w = 0};
@@ -578,10 +634,28 @@ static void check_zp_dark_ports(void)
     replay_zp(&fp, nzp8_full_load, zp, refs, n13, &nl, LAB_OCC, LAB_OCC + 4, false, &b2);
     free_zp_refs(refs, n13);
     free(refs);
-    printf("ZPDARK: %s: after PDSCH lands on k8..11: %s (revocations %u)\n", nzp[c].what,
-           nr_csirs_blind_is_confirmed(zp, w) ? "STILL EXPORTED" : "revoked", zp->zp_revocations[w]);
-    assert(!nr_csirs_blind_is_confirmed(zp, w) && "a false ZP was not revoked once PDSCH used its REs");
+    const bool full_band_revoked = !nr_csirs_blind_is_confirmed(zp, w);
+    printf("ZPDARK: %s: full-band score only, PDSCH on k8..11 for 4 occasions: %s (revocations %u)\n", nzp[c].what,
+           full_band_revoked ? "revoked" : "STILL EXPORTED", zp->zp_revocations[w]);
+    if (nzp[c].boost_db == 0.0)
+      assert(full_band_revoked && "a false ZP was not revoked once full-band PDSCH used its REs");
+    else
+      assert(!full_band_revoked && "pinned limitation changed: re-derive the boosted-NZP full-band bound");
+    const struct {
+      csi_sym_fn fn;
+      int every;
+    } load[] = {{nzp8_full_load, 1}, {nzp8_third_load, 3}};
+    for (size_t l = 0; l < sizeof(load) / sizeof(load[0]); l++) {
+      memcpy(zp, exported, sizeof(*zp));
+      const int wrong = grant_revoke(&fp, load[l].fn, load[l].every, zp, w, LAB_OCC, 20);
+      printf("ZPDARK: %s: decoded grants on 1/%d of the RBs: revoked after %d wrong occasion(s)\n", nzp[c].what,
+             load[l].every, wrong);
+      assert(wrong == 2 && "decoded-grant evidence must revoke a false ZP after exactly 2 wrong occasions");
+      assert(!nr_csirs_blind_is_confirmed(zp, w));
+    }
   }
+  s_nzp_boost_db = 0.0;
+  free(exported);
   free(zp);
   printf("ZPDARK: PASS\n");
 }

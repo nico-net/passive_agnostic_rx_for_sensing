@@ -777,11 +777,15 @@ bool nr_csirs_blind_feed(nr_csirs_blind_state_t *st, int idx, uint32_t absolute_
  * held-out probation before export, then two scorable occupied predicted occasions revoke an export, so
  * a false resource is withdrawn as soon as a PDSCH puts data on its REs -- provided the weakest bright
  * class is not boosted >= 3 dB above the PDSCH EPRE: then data on the pattern still scores > 0.5 and is
- * not counted as a contradiction.
+ * not counted as a contradiction. That proviso (and partial-band / alternating PDSCH) applies to this
+ * full-band score only; a DECODED grant crossing the export is scored on its own PRBs by
+ * nr_csirs_blind_zp_grant_feed(), which revokes after 2 such grants under any of them.
  *
  * -1 (unscorable, never a hit): empty reference, <= CSIRS_ZP_BRIGHT_CLASSES off-pattern classes, or an
  * off-pattern class with exactly zero energy (a noise-free symbol holding nothing but a pilot). */
 #define CSIRS_ZP_BRIGHT_CLASSES 3
+/* Distinct scorable contradictions that revoke an exported ZP (full-band feed and decoded-grant feed alike). */
+#define CSIRS_ZP_REVOKE_CONTRADICTIONS 2
 static bool zp_reference_occupied(const int16_t *const *refs, int n_refs, int i)
 {
   for (int p = 0; p < n_refs; p++)
@@ -918,6 +922,7 @@ static void zp_withdraw(nr_csirs_blind_state_t *st, int idx, nr_csirs_zp_probati
   if (bank)
     zp_failed(st, idx, bank);
   st->zp_contradictions[idx] = 0;
+  st->zp_grant_n[idx] = st->zp_grant_w[idx] = st->zp_grant_contra[idx] = st->zp_grant_support[idx] = 0;
   st->n_hit_slot[idx] = 0;
   st->tried[idx] = st->zp_holes[idx] = 0;
   memset(st->zp_rejected_phase[idx], 0, sizeof(st->zp_rejected_phase[idx]));
@@ -967,7 +972,7 @@ bool nr_csirs_blind_zp_feed_pair(nr_csirs_blind_state_t *st, int idx, uint32_t a
         return true;
       if (hit)
         st->zp_contradictions[idx] = 0;
-      if (joint_score > NR_CSIRS_BLIND_ZP_MIN_SCORE || ++st->zp_contradictions[idx] < 2)
+      if (joint_score > NR_CSIRS_BLIND_ZP_MIN_SCORE || ++st->zp_contradictions[idx] < CSIRS_ZP_REVOKE_CONTRADICTIONS)
         return true;
       zp_withdraw(st, idx, bank);
       return false;
@@ -1011,6 +1016,7 @@ bool nr_csirs_blind_zp_feed_pair(nr_csirs_blind_state_t *st, int idx, uint32_t a
       if (ready && (uint64_t)st->zp_holes[idx] * 2 <= st->tried[idx] && zp_divisors_resolved(bank)
           && st->n_conf < NR_CSIRS_BLIND_MAX_CONF) {
         zp_export(st, idx, bank);
+        st->zp_grant_floor[idx] = absolute_slot;
         return true;
       }
       return false;
@@ -1039,6 +1045,103 @@ bool nr_csirs_blind_zp_feed_pair(nr_csirs_blind_state_t *st, int idx, uint32_t a
   /* Count raw holes, not population-qualified detections: a varying null can suppress a hit,
    * but cannot turn that hole into evidence of data. Repeated occasions count only once. */
   return record_hit(st, idx, absolute_slot, (uint64_t)st->zp_holes[idx] * 2 > st->tried[idx], true);
+}
+
+/* DECODED-GRANT EVIDENCE (G5 review of merge 060edd290c, Important 1). The full-band feed above counts a
+ * contradiction only when data covers more than half the pattern's RBs at no more than the weakest bright
+ * class's EPRE, and a qualified hole clears it -- so a false ZP under partial-band, alternating or boosted-NZP
+ * traffic was never revoked (probe: 1/3..1/10 of the RBs, alternate occasions, NZP +6 dB: never in 200
+ * occasions). Those rules are kept there on purpose: in an idle symbol the full-band score reads exactly like
+ * data on the pattern, and a true ZP must survive idle occasions. The decoded grant is not ambiguous: the REs
+ * of its PRBs carry data unless the gNB rate-matched them, so its evidence accumulates in its own window. */
+void nr_csirs_blind_re_energy(const int16_t *rx_re_im, int n_fft, int rx_shift, const uint32_t *rb_bitmap, int n_rb,
+                              int crb_offset, uint16_t re_even, uint16_t re_odd, double *sum, uint32_t *n)
+{
+  if (rx_re_im == NULL || rb_bitmap == NULL || sum == NULL || n == NULL || n_fft <= 0 || rx_shift < 0
+      || crb_offset < 0)
+    return;
+  for (int rb = 0; rb < n_rb; rb++) {
+    if (!((rb_bitmap[rb / 32] >> (rb % 32)) & 1))
+      continue;
+    const int crb = rb + crb_offset;
+    const uint16_t mask = (crb & 1) ? re_odd : re_even;
+    int j = (int)(((long)crb * 12 + rx_shift) % n_fft); /* one modulo per RB; the carrier wraps at most once */
+    for (int k = 0; k < 12; k++, j = (j + 1 == n_fft) ? 0 : j + 1) {
+      if (!((mask >> k) & 1))
+        continue;
+      const double yr = (double)rx_re_im[2 * j], yi = (double)rx_re_im[2 * j + 1];
+      *sum += yr * yr + yi * yi;
+      (*n)++;
+    }
+  }
+}
+
+void nr_csirs_blind_guard_energy(const int16_t *rx_re_im, int n_fft, int rx_shift, int n_occupied, double *sum,
+                                 uint32_t *n)
+{
+  if (rx_re_im == NULL || sum == NULL || n == NULL || n_fft <= 0 || rx_shift < 0 || n_occupied < 0)
+    return;
+  const int guard = n_fft - n_occupied;
+  if (guard < 8)
+    return;
+  const int side = guard / 8;
+  for (int g = 0; g < guard; g++) {
+    if (g >= side && g < guard - side)
+      continue;
+    const int j = (int)(((long)rx_shift + n_occupied + g) % n_fft);
+    const double yr = (double)rx_re_im[2 * j], yi = (double)rx_re_im[2 * j + 1];
+    *sum += yr * yr + yi * yi;
+    (*n)++;
+  }
+}
+
+double nr_csirs_blind_zp_grant_score(double e_zp, uint32_t n_zp, double e_data, uint32_t n_data, double e_noise,
+                                     uint32_t n_noise)
+{
+  if (n_zp == 0 || n_data == 0 || n_noise == 0 || !isfinite(e_zp) || e_zp < 0.0 || !isfinite(e_data)
+      || e_data <= 0.0 || !isfinite(e_noise) || e_noise < 0.0)
+    return -1.0;
+  /* Nothing sent where the grant looks (false DCI accept, wrong PRB/symbol/k0 hypothesis): noise against noise
+   * reads exactly like data on the pattern, so it is no evidence. */
+  if (e_data / n_data < NR_CSIRS_BLIND_ZP_GRANT_MIN_SNR * (e_noise / n_noise))
+    return -1.0;
+  const double ratio = (e_zp / n_zp) / (e_data / n_data);
+  return 1.0 - (ratio > 1.0 ? 1.0 : ratio);
+}
+
+bool nr_csirs_blind_zp_grant_feed(nr_csirs_blind_state_t *st, int idx, uint32_t absolute_slot, double grant_score)
+{
+  if (st == NULL || idx < 0 || idx >= st->n || !nr_csirs_blind_is_confirmed(st, idx))
+    return false;
+  if (!isfinite(grant_score) || grant_score < 0.0 || absolute_slot < st->zp_grant_floor[idx])
+    return true;
+  bool predicted = false;
+  for (int k = 0; k < st->n_conf; k++)
+    for (int j = 0; st->conf_idx[k] == idx && j < st->conf_n_off[k]; j++)
+      predicted |= absolute_slot % st->conf_period[k] == st->conf_off[k][j];
+  if (!predicted)
+    return true;
+  int e = -1;
+  for (int j = 0; j < st->zp_grant_n[idx]; j++)
+    if (st->zp_grant_slot[idx][j] == absolute_slot)
+      e = j;
+  if (e < 0) {
+    e = st->zp_grant_w[idx];
+    st->zp_grant_w[idx] = (uint8_t)((e + 1) % NR_CSIRS_BLIND_ZP_GRANT_WINDOW);
+    if (st->zp_grant_n[idx] < NR_CSIRS_BLIND_ZP_GRANT_WINDOW)
+      st->zp_grant_n[idx]++;
+    st->zp_grant_slot[idx][e] = absolute_slot;
+    st->zp_grant_contra[idx] &= (uint8_t)~(1u << e);
+    st->zp_grant_support[idx] &= (uint8_t)~(1u << e);
+  }
+  if (grant_score <= NR_CSIRS_BLIND_ZP_MIN_SCORE)
+    st->zp_grant_contra[idx] |= (uint8_t)(1u << e);
+  else
+    st->zp_grant_support[idx] |= (uint8_t)(1u << e);
+  if (__builtin_popcount(st->zp_grant_contra[idx] & (uint8_t)~st->zp_grant_support[idx]) < CSIRS_ZP_REVOKE_CONTRADICTIONS)
+    return true;
+  zp_withdraw(st, idx, zp_bank(st, idx));
+  return false;
 }
 
 const nr_csirs_candidate_t *nr_csirs_blind_confirmed(const nr_csirs_blind_state_t *st,

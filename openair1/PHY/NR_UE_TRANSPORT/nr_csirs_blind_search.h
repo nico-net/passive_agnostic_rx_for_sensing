@@ -165,6 +165,11 @@ int nr_csirs_blind_format(const nr_csirs_candidate_t *c, uint16_t period, uint16
 /* Confirmed resources kept per search (NZP and ZP each). A PDSCH carries at most
  * NFAPI_MAX_NUM_CSI_RATEMATCH (4) of them per slot; 8 covers a TRS pair + CQI + CSI-IM with room. */
 #define NR_CSIRS_BLIND_MAX_CONF 8
+/* Distinct predicted occasions with decoded-grant evidence kept per ZP (nr_csirs_blind_zp_grant_feed);
+ * revocation counts the contradictions among them. A false ZP contradicts on EVERY decoded grant that
+ * crosses it, so it is revoked at its second one for any window >= 2; the window only bounds how far
+ * apart two isolated spurious contradictions (a phantom grant) may be before they add up on a true ZP. */
+#define NR_CSIRS_BLIND_ZP_GRANT_WINDOW 8
 /* One rejected-phase bit for every offset of every legal period, per ZP evidence epoch.
  * Unlike a slot FIFO, this cannot forget a contradiction under dense observations. */
 #define NR_CSIRS_BLIND_ZP_PHASE_BITS (4 + 5 + 8 + 10 + 16 + 20 + 32 + 40 + 64 + 80 + 160 + 320 + 640)
@@ -198,6 +203,11 @@ typedef struct {
   uint64_t             zp_rejected_phase[NR_CSIRS_BLIND_MAX_CAND][NR_CSIRS_BLIND_ZP_PHASE_WORDS];
   uint64_t             zp_failed_run[NR_CSIRS_BLIND_MAX_CAND]; ///< cumulative contradicted support; durable across epochs
   uint32_t             zp_evidence_floor[NR_CSIRS_BLIND_MAX_CAND]; ///< do not reuse pre-withdrawal/eviction hits
+  uint32_t             zp_grant_slot[NR_CSIRS_BLIND_MAX_CAND][NR_CSIRS_BLIND_ZP_GRANT_WINDOW]; ///< decoded-grant evidence ring
+  uint8_t              zp_grant_n[NR_CSIRS_BLIND_MAX_CAND], zp_grant_w[NR_CSIRS_BLIND_MAX_CAND];
+  uint8_t              zp_grant_contra[NR_CSIRS_BLIND_MAX_CAND]; ///< bit j: a grant of ring entry j contradicted
+  uint8_t              zp_grant_support[NR_CSIRS_BLIND_MAX_CAND]; ///< bit j: a grant of ring entry j supported
+  uint32_t             zp_grant_floor[NR_CSIRS_BLIND_MAX_CAND]; ///< export slot: older evidence is stale
   nr_csirs_zp_probation_t zp_bank[NR_CSIRS_BLIND_MAX_CONF]; ///< shared probation + export capacity
   double               best_rho[NR_CSIRS_BLIND_MAX_CAND];
   uint32_t             hit_slot[NR_CSIRS_BLIND_MAX_CAND][8]; ///< NZP first 8; ZP current evidence epoch
@@ -283,8 +293,9 @@ bool nr_csirs_blind_feed(nr_csirs_blind_state_t *st, int idx, uint32_t absolute_
  * wide one (8 RE/RB) when the candidate covers every dark class; ~0 for data or an NZP resource.
  * Conservative if other resources add off-pattern holes (two holes in one symbol are refused).
  * Cannot, in one symbol, reject dark REs covering every dark class beside >= 4 bright non-PDSCH
- * classes (a wide NZP in a slot without PDSCH): contradiction-based revocation in
- * nr_csirs_blind_zp_feed_pair() withdraws such an export once PDSCH lands there.
+ * classes (a wide NZP in a slot without PDSCH): revocation withdraws such an export once PDSCH lands
+ * there -- nr_csirs_blind_zp_grant_feed() after 2 decoded grants crossing it, whatever their band share
+ * or the NZP boost; nr_csirs_blind_zp_feed_pair() only for data over > ~half the band at the NZP EPRE.
  * -1 when the reference is empty, <= 3 off-pattern classes remain (too few to tell a sparse pilot
  * from data), or an off-pattern class carries no energy. Rationale: nr_csirs_blind_search.c. Pure. */
 double nr_csirs_blind_zero_score(const int16_t *rx_re_im, const int16_t *ref_re_im, int n);
@@ -334,6 +345,54 @@ bool nr_csirs_blind_zp_feed(nr_csirs_blind_state_t *st, int idx, uint32_t absolu
  * The single-symbol entry point above passes the same score twice. */
 bool nr_csirs_blind_zp_feed_pair(nr_csirs_blind_state_t *st, int idx, uint32_t absolute_slot,
                                 double score, double other_score, double score_null);
+
+/* ---- DECODED-GRANT EVIDENCE ON AN EXPORTED ZP ------------------------------------------------------
+ * The full-band score above cannot revoke a false ZP whose REs carry PDSCH on only part of the band
+ * (averaged over all the pattern's RBs the data stays above 0.5), nor beside an NZP boosted over the
+ * PDSCH EPRE, and in an idle symbol it reads exactly like data on the pattern -- which is why a
+ * qualified hole must clear its contradictions there. A DECODED grant has none of those ambiguities:
+ * the receiver knows the PRBs and symbols that carry data, and it rate-matched this ZP out of them.
+ * Score only those REs, against the grant's own data REs on a data-only symbol (no DM-RS, no CSI-RS):
+ * a true ZP reads ~1 (noise against data), data on the pattern ~0, whatever the band share, the load
+ * pattern or the NZP boost. A grant whose reference is not clearly above the noise floor (a false DCI
+ * accept, a PRB/symbol/k0 hypothesis that looks where nothing was sent) is no evidence. */
+
+/** Adds |y|^2 of the REs of one FFT'd symbol at the subcarriers-in-RB of @p re_even / @p re_odd
+ * (12-bit masks by CRB parity, the extractor's convention) of every RB set in @p rb_bitmap
+ * (bit rb = RB rb, n_rb bits; CRB = rb + crb_offset) to *sum, and their count to *n. rx is read at
+ * (i + rx_shift) % n_fft like every comparator here. Pure. */
+void nr_csirs_blind_re_energy(const int16_t *rx_re_im, int n_fft, int rx_shift, const uint32_t *rb_bitmap, int n_rb,
+                              int crb_offset, uint16_t re_even, uint16_t re_odd, double *sum, uint32_t *n);
+
+/** Hypothesis-free noise floor of one FFT'd symbol: adds |y|^2 of the guard bins (the n_fft - n_occupied FFT bins
+ * outside the carrier, which starts at rx_shift) nearest the two carrier edges -- 1/8 of the guard on each side,
+ * where an analog filter attenuates least; leakage from busy edge subcarriers only raises the estimate, which
+ * only makes the gate below stricter. Adds nothing when the guard is shorter than 8 bins. Pure. */
+void nr_csirs_blind_guard_energy(const int16_t *rx_re_im, int n_fft, int rx_shift, int n_occupied, double *sum,
+                                 uint32_t *n);
+
+/** Data reference over the noise floor that a grant needs to count: a TRUE ZP reads noise on its REs, and it can
+ * only be contradicted (score <= 0.5) when the data reference is <= 2x the noise; 4x (6 dB) keeps a further 2x
+ * margin for the guard-vs-in-band noise mismatch. */
+#define NR_CSIRS_BLIND_ZP_GRANT_MIN_SNR 4.0
+
+/** 1 - min(1, (e_zp / n_zp) / (e_data / n_data)): e_zp on the ZP REs inside the grant's PRBs, e_data on the grant's
+ * data-only reference symbol, e_noise from nr_csirs_blind_guard_energy() on that symbol. -1 (no evidence) when the
+ * ZP or data set is empty, no noise floor was measured, or the data mean is below NR_CSIRS_BLIND_ZP_GRANT_MIN_SNR
+ * times the noise mean. Known limit: interference on a TRUE ZP at or above the grant's own signal (SINR <= 0 dB)
+ * reads as a contradiction. Pure. */
+double nr_csirs_blind_zp_grant_score(double e_zp, uint32_t n_zp, double e_data, uint32_t n_data, double e_noise,
+                                     uint32_t n_noise);
+
+/** Decoded-grant evidence for exported ZP @p idx in @p absolute_slot (a score from the functions above).
+ * Ignored unless idx is exported, the slot is one of its predicted occasions and not before the export (evidence
+ * queued under an earlier export); unscorable (< 0) is ignored. Grants of one slot count once, and a slot is a
+ * contradiction only if NO scorable grant of it supports the ZP (one bad hypothesis cannot decide the slot).
+ * Separate from the full-band feed: it may arrive out of slot order (decode consumers run behind the search),
+ * and a qualified full-band hole does not clear it. Two contradicted slots among the last
+ * NR_CSIRS_BLIND_ZP_GRANT_WINDOW slots with evidence revoke the export, exactly as two full-band contradictions
+ * do. Returns true while idx stays exported. */
+bool nr_csirs_blind_zp_grant_feed(nr_csirs_blind_state_t *st, int idx, uint32_t absolute_slot, double grant_score);
 
 /* ---- ROWS 6-18: FOOTPRINT-FIRST -------------------------------------------------------------------
  * A candidate's sequence is only worth testing once the air shows its RE PATTERN. The pattern is

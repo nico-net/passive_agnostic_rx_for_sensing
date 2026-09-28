@@ -244,3 +244,15 @@ int nr_csirs_blind_rt_test_zp_feed(uint32_t slot, double score, int reset)
   fapi_nr_dl_config_csirs_pdu_rel15_t out[2];
   return nr_csirs_blind_rt_rate_match_all(slot, out, 2);
 }
+
+/* Post decoded-grant evidence for the bank's candidate 0 exactly as nr_pdsch_passive_decode() does: a copy
+ * of the FAPI rate-matching entry this module exported. other_geometry: an entry of a different resource. */
+int nr_csirs_blind_rt_test_post_grant(uint32_t slot, double score, int other_geometry)
+{
+  fapi_nr_dl_config_csirs_pdu_rel15_t pdu;
+  fill_pdu(&g_zp.cand[0], 2, &pdu);
+  if (other_geometry)
+    pdu.symb_l0 = (uint8_t)(pdu.symb_l0 + 1);
+  nr_csirs_blind_rt_zp_grant_evidence(slot, &pdu, score);
+  return 0;
+}

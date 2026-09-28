@@ -58,6 +58,8 @@ extern __thread int nr_dlsch_chest_per_symbol; // nr_dlsch_demodulation.c: read 
 #include "nr_pdsch_prb_set.h" // nr_prb_segments, nr_prb_gather_index (non-contiguous PRB sets)
 #include "nr_arm_sweep.h" // generic per-RNTI Wilson pick/latch core shared by the VRB-L and PRG sweeps
 #include "nr_harq_init_tx.h" // per-(RNTI, pid) reserved-MCS retransmission record, shared with the UL decoder
+#include "nr_csirs_blind_search.h" // nr_csirs_blind_re_energy / nr_csirs_blind_zp_grant_score
+#include "nr_csirs_blind_rt.h" // nr_csirs_blind_rt_zp_grant_evidence
 _Static_assert(sizeof(((freq_alloc_bitmap_t *)0)->prb_list) == NR_PRB_SET_MAX * sizeof(uint16_t),
                "freq_alloc_bitmap_t.prb_list (common/utils/bits.h) must hold NR_PRB_SET_MAX PRBs");
 #include "common/utils/threadPool/task_ans.h" // init_task_ans/join_task_ans/completed_task_ans, for the per-antenna FEP dispatch below
@@ -1456,6 +1458,62 @@ static __thread struct {
   int rb_lo, rb_n; uint32_t nvar, nvar_den; int n_dmrs_sym, dmrs_first, dmrs_last; int valid;
 } t_chest_cache = {0};
 
+/* ZP EVIDENCE FROM THIS DECODED GRANT (G5 review of merge 060edd290c, Important 1). Every ZP entry the blind
+ * CSI-RS search handed this grant for rate matching is scored on the grant's OWN PRBs: a true ZP is dark there,
+ * PDSCH on a false one is as bright as the grant's data -- independent of how much of the band the grant covers,
+ * of the traffic pattern, and of an NZP boost, which is what the search's full-band score cannot see. One
+ * reference symbol, nearest the ZP symbol (inside the real PDSCH whenever the ZP symbol is, even under a wrong
+ * start-symbol hypothesis), and its guard-band noise floor (nr_csirs_blind_zp_grant_score refuses a reference
+ * that is not clearly above it). Cost: one symbol of grant REs plus the ZP REs, per antenna. */
+double nr_pdsch_passive_zp_grant_score(const NR_DL_FRAME_PARMS *fp, const fapi_nr_dl_config_dlsch_pdu_rel15_t *cfg,
+                                       const freq_alloc_bitmap_t *fa, const c16_t *rxdataF_flat, uint32_t stride,
+                                       int fep_s0, int fep_n, uint16_t skip_symbols, int i)
+{
+  if (i < 0 || i >= cfg->numCsiRsForRateMatching || cfg->csiRsForRateMatching[i].csi_type != 2)
+    return -1.0;
+  const int s_lo = cfg->start_symbol > fep_s0 ? cfg->start_symbol : fep_s0;
+  const int s_hi = cfg->start_symbol + cfg->number_symbols < fep_s0 + fep_n ? cfg->start_symbol + cfg->number_symbols
+                                                                             : fep_s0 + fep_n;
+  fapi_nr_dl_config_dlsch_pdu_rel15_t all = *cfg, one = *cfg, others = *cfg;
+  one.numCsiRsForRateMatching = 1;
+  one.csiRsForRateMatching[0] = cfg->csiRsForRateMatching[i];
+  others.numCsiRsForRateMatching = 0;
+  for (int j = 0; j < cfg->numCsiRsForRateMatching; j++)
+    if (j != i)
+      others.csiRsForRateMatching[others.numCsiRsForRateMatching++] = cfg->csiRsForRateMatching[j];
+  uint32_t zp_bm[NR_SYMBOLS_PER_SLOT] = {0};
+  int zp_first = -1;
+  for (int m = s_lo; m < s_hi; m++) {
+    zp_bm[m] = nr_dlsch_csi_overlap_bitmap(&one, m) & ~nr_dlsch_csi_overlap_bitmap(&others, m);
+    if (zp_bm[m] && zp_first < 0)
+      zp_first = m;
+  }
+  if (zp_first < 0)
+    return -1.0; // the grant does not cross the ZP symbol
+  int ref = -1;
+  for (int m = s_lo; m < s_hi; m++)
+    if (!((cfg->dlDmrsSymbPos >> m) & 1) && !((skip_symbols >> m) & 1) && nr_dlsch_csi_overlap_bitmap(&all, m) == 0
+        && (ref < 0 || abs(m - zp_first) < abs(ref - zp_first)))
+      ref = m;
+  if (ref < 0)
+    return -1.0;
+  double e_zp = 0.0, e_data = 0.0, e_noise = 0.0;
+  uint32_t n_zp = 0, n_data = 0, n_noise = 0;
+  for (int a = 0; a < fp->nb_antennas_rx; a++) {
+    const int16_t *y = (const int16_t *)&rxdataF_flat[(size_t)a * stride + (size_t)ref * fp->ofdm_symbol_size];
+    nr_csirs_blind_re_energy(y, fp->ofdm_symbol_size, fp->first_carrier_offset, fa->bitmap, cfg->BWPSize,
+                             cfg->BWPStart, 0xFFF, 0xFFF, &e_data, &n_data);
+    nr_csirs_blind_guard_energy(y, fp->ofdm_symbol_size, fp->first_carrier_offset, fp->N_RB_DL * NR_NB_SC_PER_RB,
+                                &e_noise, &n_noise);
+    for (int m = zp_first; m < s_hi; m++)
+      if (zp_bm[m])
+        nr_csirs_blind_re_energy((const int16_t *)&rxdataF_flat[(size_t)a * stride + (size_t)m * fp->ofdm_symbol_size],
+                                 fp->ofdm_symbol_size, fp->first_carrier_offset, fa->bitmap, cfg->BWPSize,
+                                 cfg->BWPStart, zp_bm[m] & 0xFFF, (zp_bm[m] >> 16) & 0xFFF, &e_zp, &n_zp);
+  }
+  return nr_csirs_blind_zp_grant_score(e_zp, n_zp, e_data, n_data, e_noise, n_noise);
+}
+
 void nr_pdsch_passive_set_slot_share(int on, int rb_lo, int rb_n)
 {
   t_share.on = on; t_share.rb_lo = rb_lo; t_share.rb_n = rb_n;
@@ -2018,6 +2076,14 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
       if (n_ == 1 || (n_ % 200) == 0)
         LOG_A(PHY, "SENSING: PDSCH UNSUP@1625 n=%lu\n", n_); }
     return out->status; /* overwritten IQ is not CRC evidence */
+  }
+  for (int i = 0; !gpu_llr && grant->source_absolute_slot >= 0 && i < dlsch_config->numCsiRsForRateMatching; i++) {
+    if (dlsch_config->csiRsForRateMatching[i].csi_type != 2)
+      continue; // NZP-only slots cost nothing here
+    const double zs = nr_pdsch_passive_zp_grant_score(fp, dlsch_config, freq_alloc, &rxdataF[0][0],
+                                                      fp->samples_per_slot_wCP, fep_s0, fep_n, ssb_event.symbols, i);
+    if (zs >= 0.0)
+      nr_csirs_blind_rt_zp_grant_evidence((uint32_t)grant->source_absolute_slot, &dlsch_config->csiRsForRateMatching[i], zs);
   }
 
   // ---- Channel estimation on the DM-RS symbols. ----

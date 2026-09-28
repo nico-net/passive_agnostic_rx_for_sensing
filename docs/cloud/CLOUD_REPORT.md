@@ -162,7 +162,115 @@ After GitHub access was restored, all of this session's branches were pushed:
   (needs the repaired NSA bed, see `gap-nsa-report.md`); bar: `SENSING: MIB dmrs-TypeA-Position pos3 -> blind monitor`,
   blind discovery converges without CSS0, decodes use DM-RS symbol 3. Also check RNTI bootstrap without CSS0 (not
   provable offline).
-- **csirs** (`sdd/gap-csirs`, not merged): repeat the 8-port AWGN ×3 phy-test arm — expect 0 ZP exports; then decide
-  on the two open G5 findings together with `sdd/gap-ocudu-dl`'s revocation logic before merging.
+- **csirs** (merged in `060edd290c`, post-review fixes below): repeat the 8-port AWGN ×3 phy-test arm — expect 0 ZP
+  exports. Then an arm where a ZP export overlaps decoded PDSCH (OCUDU CSI-RS bed, `ISAC_CSIRS_BLIND=1`,
+  `pdcch_blind_monitor_pdsch >= 1`): bar = `SENSING: CSIRS_BLIND ZP_GRANT_EVIDENCE` lines appear, a false export is
+  `REVOKED` after 2 of them, a true ZP never logs a contradiction, and the 20000-slot status line reports
+  `zp_grant_evidence=` > 0 with `dropped=0`. **Known false negative to check on the lab**: a cell with an 8-RE ZP
+  (row-6-like) or two holes in one CSI-RS symbol (ZP + CSI-IM on different REs) gets NO ZP export by design, so
+  every PDSCH crossing that symbol is decoded without that rate matching — expect a CRC deficit on exactly those
+  slots (compare crc_ok on CSI-RS slots vs other slots).
 - **Not triaged** (never pushed): `wip/2026-09-28/rfsim-*`, `ocudu-bed-matrix`, `ocudu-dl-*` — push them for a later
   session.
+
+## Post-review fixes — G5 review of merge `060edd290c` (csirs × ocudu-dl), 2026-09-28
+
+Review: `docs/superpowers/sdd/full-running-agnosticity/review-060edd290c.md` (NOT approved: 2 Important, 5 Minor).
+
+**Correction to the `060edd290c` merge note (history not rewritten).** The note said the new revocation test
+"covers csirs's open G5 findings". It did not: the merged revocation (a contradiction needs the full-band score
+<= 0.5, and any qualified hole clears the debt) only withdrew a false ZP under full-band PDSCH on consecutive
+occasions with the NZP at the PDSCH EPRE. Measured (reviewer probe, reproduced as RED here): PDSCH on 1/3, 1/5 or
+1/10 of the RBs, on alternate occasions, or beside an NZP boosted +6 dB — never revoked in 200 occasions. The note
+also did not disclose that the synth `nzp8_no_data` / `nzp8_light_load` negatives were relaxed from "no export" to
+"may export, must be revoked", with an `if (w < 0) continue;` that let the revocation go unexercised.
+
+**Important 1 — fixed (root cause).** Contradictions are now also scored on the PRBs the receiver's own decoded
+grants occupy. After FEP, `nr_pdsch_passive_decode()` calls `nr_pdsch_passive_zp_grant_score()` (exported, pinned by
+`test_nr_ssb_rate_match_prod` Z1–Z9) for every ZP (csi_type 2) entry it was handed for rate matching: energy on the ZP
+REs inside the grant's PRBs on the CSI-RS symbol(s) (REs of other rate-matching entries excluded, extractor's CRB-parity
+bitmap, BWPStart) vs every RE of the grant on ONE data-only reference symbol (no DM-RS/CSI-RS, not an SSB symbol; the
+one nearest the ZP symbol), all antennas summed. **Noise-floor gate**: the reference must be >= 6 dB over the
+hypothesis-free noise floor of that symbol (guard-band FFT bins next to the carrier edges,
+`nr_csirs_blind_guard_energy`), else the grant is no evidence — a true ZP reads noise, and a grant decoded where nothing
+was sent (false DCI accept, wrong PRB/symbol/k0 hypothesis) would otherwise read noise-vs-noise = a contradiction
+(RED during this fix: such a true ZP was revoked after 2 grants; pinned `GrantDecodedUnderAWrongPrbHypothesisIsNoEvidence`,
+incl. a phantom whole-carrier grant). The score is posted to a mutex queue (`nr_csirs_blind_rt_zp_grant_evidence`);
+`nr_csirs_blind_rt_slot()` drains it into `nr_csirs_blind_zp_grant_feed()`: a separate window of the last 8 distinct
+predicted slots with evidence (out-of-order arrival allowed; evidence from before the current export is stale and
+ignored), a slot is a contradiction only if NO scorable grant of it supports the ZP, 2 contradicted slots revoke, and a
+qualified full-band hole does not clear it. The full-band path keeps ocudu-dl's rules unchanged on purpose: in a fully
+idle symbol its score reads ~0 exactly like data on the pattern, so without the hole-clears-debt rule a TRUE ZP would
+be revoked by idle occasions (pinned: `TrueZpSurvivesIdleOccasionsAndDecodedGrants`).
+Cost (micro-benchmark of the production scorer, RelWithDebInfo, pinned core, 273 PRB full-band grant): 9.7 µs with
+1 antenna, 38.1 µs with 4 (the first cut read all data symbols with a per-RE modulo: 325.8 µs, reviewer). Runs only for
+grants carrying a ZP entry, per decode.
+
+| Case (false ZP k8..11 beside 8-class NZP k0..7) | before (full-band only) | after: wrong occasions until revoked |
+|---|---|---|
+| full band, every occasion | 2 | **2** |
+| 1/2 of RBs | 2 (borderline 0.499) | **2** |
+| 1/3, 1/5, 1/10 of RBs | never (200 wrong) | **2** |
+| full band, alternate occasions | never (100 wrong) | **2** (revoked at occasion 4) |
+| random 30 % duty, 200 trials | 200/200, mean 4.1 wrong | **2 in every trial** (mean 6.6 occasions) |
+| NZP +3 dB, full band | 2 (score ~0.5, fragile) | **2** |
+| NZP +6 dB, full band | never | **2** |
+| 1/10 of RBs + NZP +6 dB + alternate | never | **2** |
+| 1/3 of RBs, other UEs' PDSCH on the rest, NZP 0 / +6 dB | 2 / never | **2 / 2** |
+| synth (real generator chain): NZP 0 dB / +6 dB, grants on 1/1 and 1/3 of RBs | +6 dB: never | **2** each |
+
+"Wrong occasions" = decoded grants rate-matched around the still-exported false ZP, counted synchronously. On the
+receiver add the decodes already queued or in flight when the revoking evidence is drained (decode-queue latency /
+ZP period); the bound is therefore 2 + in-flight, not 2. Grants with no evidence: no data-only symbol in the FFT'd
+range, or a reference under the noise gate. (GPU-LLR decodes never carry CSI rate matching, so they are not a gap.)
+
+Known limits, pinned: (a) full-band score alone (grants the receiver does not decode — harmless to its own decoding):
+1/3 of RBs never, alternate never, +6 dB never, full band 2 (`KnownLimitationWithoutDecodedGrantEvidence`);
+(b) interference on a TRUE ZP (CSI-IM) at or above the grant's own signal (SINR <= 0 dB) reads as a contradiction
+(unit-pinned in `GrantScoreSeparates…`); (c) a phantom grant only escapes the gate if its reference is >= 6 dB over the
+guard noise, i.e. something (another UE's PDSCH) was actually sent there — then a cell-wide true ZP supports.
+
+**Important 2 — fixed.** Synth `nzp8_no_data` / `nzp8_light_load` now `assert(w >= 0)` (export must happen), then
+assert full-band revocation (0 dB) AND decoded-grant revocation after exactly 2 wrong occasions. New boosted case
+(NZP +6 dB): exported; full-band revocation pinned as NOT happening; decoded-grant revocation after 2. The NZP rescale
+to data EPRE is no longer what makes revocation pass.
+
+**Minor 1 — fixed.** `WideHolesUnderDataAreStillHoles`, `DarkPorts…ReadAsAHole`, `CompleteWideHoleSurvivesLowSnr`
+renamed `ScorerOnly…`, and each asserts its wide shapes ((6,6), (5,7), (4,8), (2,6)) are NOT in the production
+enumeration (per-RB footprint masks), so a new row cannot silently turn them into production claims.
+
+**Minor 2 — documented + pinned (declared capability loss).** 8-RE ZP holes and two holes in one symbol (ZP +
+CSI-IM on different REs) are refused by design: no rows-1..5 candidate explains them, so no ZP is exported and on
+such a cell every PDSCH crossing that CSI-RS symbol is decoded without that rate matching (known false negative;
+lab check in the G4 list above). Pinned by `EnumeratedShapesRefuseEightReAndTwoHoleSymbols` (all 22 distinct
+enumerated per-RB masks score <= 0.5 on both) and the existing synth "not exported, as designed" asserts.
+
+**Minor 3 — pinned as known limitation.** Renamed `WideNzpBesideUnusedResWithoutPdschSubsetIsNotAHole`; it now
+also asserts the complete (8,4) candidate scores > 0.9 on the same input (exported), covered by the decoded-grant
+revocation bound above (2 wrong occasions).
+
+**Minor 4 — covered** by the boosted-NZP rows (+3/+6 dB) in the gtest table and the synth +6 dB case.
+
+**Minor 5 (informational).** Row-3 density-0.5 raises the default enumeration from 683 (reviewer, parent 1) to
+767 candidates (re-measured here: synth `ENUM: 767 candidates`), +12 % discovery rotation; FFT budget unchanged (RT identical to ocudu-dl, FEP-count test passes); the `n_cls <= 3`
+unscorable guard is unreachable for rows 1–5 (it only makes results more conservative).
+
+**Evidence (sens6, `agn-wt/cloud`, build dir `cmake_targets/ran_build/build` inside the worktree (gitignored, created
+from an init-cache of `agn-wt/integ`), every build under `flock radio_bed.lock`, no receiver running, load < 1).**
+- G3 RED (stubs, tests written first): `test_nr_csirs_blind_search` 121/126 — 5 new tests fail, the load-shape table
+  reproducing the reviewer's probe exactly (1/3, 1/5, 1/10, alternate, +6 dB: never revoked); synth aborts at
+  `grant_revoke` (data on the false ZP not counted). Wrong-hypothesis RED (first cut without a gate): 125/128, a true ZP
+  revoked at occasion 2 / 4. Review-round mutants, each caught: no noise gate (2 tests fail), no support-wins (1), no
+  stale-evidence floor (1), no other-entry exclusion (Z4), antenna 0 only (Z8), skip mask ignored (Z9), no even/odd
+  bitmap split (Z5 x2). GREEN: `test_nr_csirs_blind_search` 128/128 (118 existing + 10 new), synth PASS,
+  `test_nr_ssb_rate_match_prod` PASSED (existing checks + Z1–Z9). Logs: `…/build/evidence/` (not committed).
+- G1: `nr-uesoftmodem` and `tests` build clean; the only warning in a touched file (`dmrs_first` maybe-uninitialized in
+  `nr_pdsch_passive_decode.c`) is pre-existing on the parent.
+- G2: full ctest 125/126 on the parent `a13c2b9a06` and 125/126 with the fix — same single failure
+  (`test_vrtsim_cirdb`, environment), delta 0. Shuffle seeds 1/3/5 green: csirs_blind_search 128, blind_monitor
+  195+2 skipped, config_sweep 44+1 skipped, prb_set 17, scrambling 11, ssb_rate_match 8, mib_handoff 6.
+- G5: round 1 (fresh reviewer) NOT approved — 3 Important (whole-carrier phantom/wrong-hypothesis grants still
+  contradicted a true ZP; the first-cut locality test hid false ZPs when other UEs' data surrounded the grant; 325.8 µs
+  per grant) + 4 Minor (untested production hook, SSB in the reference, stale evidence, report inaccuracies). All
+  addressed above; round 2 below.
+- G4: pending (lab) — see the csirs entry in "What the lab must still run".

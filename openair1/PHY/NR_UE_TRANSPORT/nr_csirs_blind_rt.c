@@ -23,6 +23,7 @@
 #include <string.h>
 #include <assert.h>
 #include <math.h>
+#include <pthread.h>
 
 /* Reference planes actually allocated. NZP scores plane 0; ZP scores their occupancy union.
  * Rows 1-5 need at most 4 ports,
@@ -167,6 +168,76 @@ static int      g_id_pin = -1;   /* candidate the sweep is locked to; -1 = not c
 static double   g_id_best_z;
 static uint16_t g_id_best;
 static bool     g_id_solved;
+
+/* DECODED-GRANT ZP EVIDENCE (G5 review of 060edd290c, Important 1). The passive PDSCH decode consumers score
+ * every ZP entry they were handed against the grant's own PRBs (nr_pdsch_passive_decode.c) and post it here.
+ * They run on other threads and behind this search, so the evidence is queued and applied by the next
+ * nr_csirs_blind_rt_slot(), the only writer of g_zp. ponytail: bounded queue, overflow counted and dropped --
+ * one decoded grant per ZP occasion is enough and the drain runs every slot. */
+#define ZP_GRANT_QUEUE 64
+static pthread_mutex_t g_zp_grant_lock = PTHREAD_MUTEX_INITIALIZER;
+typedef struct {
+  uint32_t slot;
+  fapi_nr_dl_config_csirs_pdu_rel15_t zp;
+  double score;
+} zp_grant_ev_t;
+static zp_grant_ev_t g_zp_grant_q[ZP_GRANT_QUEUE];
+static int g_zp_grant_qn;
+static uint64_t g_zp_grant_dropped, g_zp_grant_applied, g_zp_grant_contradictions;
+
+void nr_csirs_blind_rt_zp_grant_evidence(uint32_t pdsch_absolute_slot, const fapi_nr_dl_config_csirs_pdu_rel15_t *zp,
+                                         double score)
+{
+  if (zp == NULL || zp->csi_type != 2)
+    return;
+  pthread_mutex_lock(&g_zp_grant_lock);
+  if (g_zp_grant_qn < ZP_GRANT_QUEUE) {
+    g_zp_grant_q[g_zp_grant_qn].slot = pdsch_absolute_slot;
+    g_zp_grant_q[g_zp_grant_qn].zp = *zp;
+    g_zp_grant_q[g_zp_grant_qn].score = score;
+    g_zp_grant_qn++;
+  } else {
+    g_zp_grant_dropped++;
+  }
+  pthread_mutex_unlock(&g_zp_grant_lock);
+}
+
+static bool zp_same_geometry(const nr_csirs_candidate_t *c, const fapi_nr_dl_config_csirs_pdu_rel15_t *p)
+{
+  return c->row == p->row && c->freq_domain == p->freq_domain && c->symb_l0 == p->symb_l0 && c->symb_l1 == p->symb_l1
+         && c->cdm_type == p->cdm_type && c->freq_density == p->freq_density && c->start_rb == p->start_rb
+         && c->nr_of_rbs == p->nr_of_rbs;
+}
+
+static void zp_grant_drain(void)
+{
+  int n;
+  zp_grant_ev_t q[ZP_GRANT_QUEUE];
+  pthread_mutex_lock(&g_zp_grant_lock);
+  n = g_zp_grant_qn;
+  memcpy(q, g_zp_grant_q, sizeof(q[0]) * (size_t)n);
+  g_zp_grant_qn = 0;
+  pthread_mutex_unlock(&g_zp_grant_lock);
+  for (int e = 0; e < n; e++) {
+    for (int k = 0; k < g_zp.n_conf; k++) {
+      const int idx = g_zp.conf_idx[k];
+      if (!zp_same_geometry(&g_zp.cand[idx], &q[e].zp))
+        continue;
+      const uint32_t revoked = g_zp.zp_revocations[idx];
+      nr_csirs_blind_zp_grant_feed(&g_zp, idx, q[e].slot, q[e].score);
+      g_zp_grant_applied++;
+      if (q[e].score >= 0.0 && q[e].score <= NR_CSIRS_BLIND_ZP_MIN_SCORE) {
+        g_zp_grant_contradictions++;
+        LOG_A(PHY, "SENSING: CSIRS_BLIND ZP_GRANT_EVIDENCE idx=%d abs_slot=%u score=%.3f contradiction %s "
+                   "(applied=%llu contradictions=%llu dropped=%llu)\n",
+              idx, q[e].slot, q[e].score, g_zp.zp_revocations[idx] != revoked ? "REVOKED" : "kept",
+              (unsigned long long)g_zp_grant_applied, (unsigned long long)g_zp_grant_contradictions,
+              (unsigned long long)g_zp_grant_dropped);
+      }
+      break;
+    }
+  }
+}
 
 static double median_of(const double *src, int n)
 {
@@ -324,6 +395,7 @@ void nr_csirs_blind_rt_slot(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot
             g_st.cand[g_id_pin].row, g_st.cand[g_id_pin].freq_domain, g_st.cand[g_id_pin].symb_l0, hb);
     }
   }
+  zp_grant_drain();
   /* Shared bounded admission bank: exported maintenance plus unexported probation
    * and divisor probes, even when NZP has retired the geometry. This list is NOT
    * the rate-match bank. At most MAX_CONF scores plus one ordinary discovery. */
@@ -346,9 +418,11 @@ void nr_csirs_blind_rt_slot(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot
   if (idx >= 0 && !measured)
     score_candidate(ue, slot, absolute_slot, rxdataF, idx, false);
   if ((++g_slots % 20000) == 0) {
-    LOG_I(PHY, "SENSING: CSIRS_BLIND slots=%llu candidates=%d null_median=%.3f confirmed nzp=%d zp=%d zp_geometry_veto=%llu\n",
+    LOG_I(PHY, "SENSING: CSIRS_BLIND slots=%llu candidates=%d null_median=%.3f confirmed nzp=%d zp=%d zp_geometry_veto=%llu "
+               "zp_grant_evidence=%llu contradictions=%llu dropped=%llu\n",
           (unsigned long long)g_slots, g_st.n, null_median(), g_st.n_conf, g_zp.n_conf,
-          (unsigned long long)g_zp_geometry_veto_total);
+          (unsigned long long)g_zp_geometry_veto_total, (unsigned long long)g_zp_grant_applied,
+          (unsigned long long)g_zp_grant_contradictions, (unsigned long long)g_zp_grant_dropped);
     for (int k = 0; k < g_zp.n; k++)
       if (g_zp_maint[k].scheduled || nr_csirs_blind_is_confirmed(&g_zp, k))
         zp_maint_summary(k);
