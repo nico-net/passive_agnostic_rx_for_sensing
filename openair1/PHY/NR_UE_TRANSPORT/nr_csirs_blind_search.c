@@ -249,11 +249,11 @@ static const uint8_t kRowNeedBits[18] = {1, 1, 1, 1, 1, 4, 2, 2, 6, 3, 4, 4, 3, 
  * (TRS) space was unreachable no matter how long a search ran. */
 static const uint8_t kFdBits[]   = {4, 12, 3, 3, 3};
 
-/* Densities to try per row. Row 2 is the only single-port row that admits dot5, and a cell using
- * dot5 (even or odd RBs) puts its REs on half the RBs a density-one candidate tests -- which reads
- * as a half-strength match, not as a miss, so it has to be enumerated rather than inferred.
+/* Densities to try per row. Rows 2 and 3 admit dot5 (even or odd RBs); a cell using dot5 puts
+ * its REs on half the RBs a density-one candidate tests -- which reads as a half-strength match,
+ * not as a miss, so both parities have to be enumerated rather than inferred.
  * 0 = dot5 even RB, 1 = dot5 odd RB, 2 = one, 3 = three. */
-static const uint8_t kDensities[][3] = {{3, 0xFF, 0xFF}, {2, 0, 1}, {2, 0xFF, 0xFF},
+static const uint8_t kDensities[][3] = {{3, 0xFF, 0xFF}, {2, 0, 1}, {2, 0, 1},
                                         {2, 0xFF, 0xFF}, {2, 0xFF, 0xFF}};
 
 #define CSIRS_DETECT_MARGIN 3.0   /* a hit must beat the null MEDIAN by this factor */
@@ -745,10 +745,43 @@ bool nr_csirs_blind_feed(nr_csirs_blind_state_t *st, int idx, uint32_t absolute_
   return record_hit(st, idx, absolute_slot, false, false);
 }
 
-/* Same grid-alignment requirement as the other two comparators: this reads rxdataF at the
- * reference's RE positions, so it must map CRB order to FFT order. It searches ZP CSI-RS, whose
- * only evidence IS the energy, so a misaligned read does not merely weaken it -- it measures a
- * different part of the spectrum entirely. */
+/* ZERO-POWER SCORE. What a ZP CSI-RS is: REs the PDSCH is rate-matched around, dark while the PDSCH
+ * around them carries data. Its only evidence IS the energy.
+ *
+ * GRID ALIGNMENT. Like the other comparators this reads rxdataF at the reference's RE positions, so it
+ * maps CRB order to FFT order (rx_shift). A misaligned read does not merely weaken it -- it measures a
+ * different part of the spectrum entirely.
+ *
+ * OCCUPANCY is the union of the generated port planes (plane 0 alone omits other CDM groups, e.g. row
+ * 4's ports 2/3). BASELINE (E_off) is the WEAKEST off-pattern subcarrier-in-RB class, each class first
+ * averaged over the touched RBs so one faded QAM sample is not a veto:
+ * - Not the mean (the first cut): a mean is dominated by any boosted pilot. Lab G4, 2026-09-28: an
+ *   8-port cell seen by one antenna through an identity channel delivers port 0 only (k=0,1), k=2..11
+ *   are empty, and every candidate there read 1 - noise/(2*pilot/11) ~ 1 -> a false ZP every run. With
+ *   the weakest class every such candidate has a dark off-pattern class beside it and reads ~0.
+ * - Not a median: removing a row-2 quiet tone from a half-occupied RB leaves six active vs five quiet
+ *   off-pattern tones, so a quiet SUBSET of a wider hole would score as a hole.
+ * - A candidate must therefore explain the COMPLETE quiet pattern of its RBs: another quiet class makes
+ *   the geometry unidentifiable and the score ~0. Wide holes (8 RE/RB, dark REs the majority) still
+ *   read ~1 when the candidate covers all of them; two independent holes in one symbol (ZP + CSI-IM
+ *   on different REs) or a candidate covering only part of a wider hole are deliberately refused.
+ * - At most CSIRS_ZP_BRIGHT_CLASSES off-pattern classes: unscorable. Up to three bright classes may be
+ *   a sparse pilot (port 0 of a wider NZP, a TRS-like comb), not data; with so few free classes the
+ *   weakest one can be a pilot, which is the lab false ZP in another shape. Rows 1-5 (<= 4 classes per
+ *   RB) never reach this guard.
+ *
+ * NOT GUARANTEED in one symbol: dark REs that cover EVERY dark class beside >= 4 bright classes that are
+ * not PDSCH (a wide NZP, several NZP resources, in a slot without PDSCH on those REs) read exactly like
+ * data + a ZP hole. A single-slot neighbour-symbol test was tried (sdd/gap-csirs cb5c358) but costs two
+ * extra FFTs per candidate hit; the cure kept here is the lifecycle in nr_csirs_blind_zp_feed_pair():
+ * held-out probation before export, then two scorable occupied predicted occasions revoke an export, so
+ * a false resource is withdrawn as soon as a PDSCH puts data on its REs -- provided the weakest bright
+ * class is not boosted >= 3 dB above the PDSCH EPRE: then data on the pattern still scores > 0.5 and is
+ * not counted as a contradiction.
+ *
+ * -1 (unscorable, never a hit): empty reference, <= CSIRS_ZP_BRIGHT_CLASSES off-pattern classes, or an
+ * off-pattern class with exactly zero energy (a noise-free symbol holding nothing but a pilot). */
+#define CSIRS_ZP_BRIGHT_CLASSES 3
 static bool zp_reference_occupied(const int16_t *const *refs, int n_refs, int i)
 {
   for (int p = 0; p < n_refs; p++)
@@ -820,14 +853,17 @@ double nr_csirs_blind_zero_score_evidence_shift(const int16_t *rx_re_im, const i
    * the background: another quiet class makes this geometry unidentifiable. This is
    * deliberately conservative when independent resources create additional holes. */
   double e_off = -1.0;
+  int n_cls = 0;
   for (int k = 0; k < 12; k++) {
     if (off_count[k] > 0) {
       const double mean = off_power[k] / off_count[k];
+      n_cls++;
       if (e_off < 0.0 || mean < e_off)
         e_off = mean;
     }
   }
-  if (n_on == 0 || e_off <= 0.0) {
+  /* Too few free classes to tell a sparse pilot from data: unscorable, never a hit. */
+  if (n_on == 0 || n_cls <= CSIRS_ZP_BRIGHT_CLASSES || e_off <= 0.0) {
     return -1.0;
   }
   const double ratio = (e_on / n_on) / e_off;
@@ -854,7 +890,8 @@ bool nr_csirs_blind_zp_feed(nr_csirs_blind_state_t *st, int idx, uint32_t absolu
 
 bool nr_csirs_blind_zp_score_qualifies(double score, double score_null)
 {
-  return isfinite(score) && score > 0.5 && score_null >= 0.0 && score > CSIRS_DETECT_MARGIN * score_null;
+  return isfinite(score) && score > NR_CSIRS_BLIND_ZP_MIN_SCORE && score_null >= 0.0
+         && score > CSIRS_DETECT_MARGIN * score_null;
 }
 
 static void zp_withdraw(nr_csirs_blind_state_t *st, int idx, nr_csirs_zp_probation_t *bank)
@@ -914,10 +951,10 @@ bool nr_csirs_blind_zp_feed_pair(nr_csirs_blind_state_t *st, int idx, uint32_t a
    * EITHER symbol for the structural veto: a persistent hole in one symbol must not become
    * "periodic" just because the other symbol is only occasionally empty. This union is
    * conservative if the symbols also carry unrelated holes at different occasions. */
-  const bool hole = score > 0.5 || other_score > 0.5;
+  const bool hole = score > NR_CSIRS_BLIND_ZP_MIN_SCORE || other_score > NR_CSIRS_BLIND_ZP_MIN_SCORE;
   const double joint_score = fmin(score, other_score);
   const bool hit = nr_csirs_blind_zp_score_qualifies(joint_score, score_null);
-  if (bank && joint_score <= 0.5)
+  if (bank && joint_score <= NR_CSIRS_BLIND_ZP_MIN_SCORE)
     zp_occupied(bank, absolute_slot);
   if (confirmed) {
     for (int k = 0; k < st->n_conf; k++) {
@@ -930,7 +967,7 @@ bool nr_csirs_blind_zp_feed_pair(nr_csirs_blind_state_t *st, int idx, uint32_t a
         return true;
       if (hit)
         st->zp_contradictions[idx] = 0;
-      if (joint_score > 0.5 || ++st->zp_contradictions[idx] < 2)
+      if (joint_score > NR_CSIRS_BLIND_ZP_MIN_SCORE || ++st->zp_contradictions[idx] < 2)
         return true;
       zp_withdraw(st, idx, bank);
       return false;
@@ -943,7 +980,7 @@ bool nr_csirs_blind_zp_feed_pair(nr_csirs_blind_state_t *st, int idx, uint32_t a
   }
   if (bank && bank->period) {
     const bool on = zp_on(absolute_slot, bank->period, bank->off, bank->n_off);
-    if (on && joint_score <= 0.5) {
+    if (on && joint_score <= NR_CSIRS_BLIND_ZP_MIN_SCORE) {
       zp_failed(st, idx, bank);
       st->n_hit_slot[idx] = 0;
       zp_record_rejection(st, idx, absolute_slot);
@@ -995,7 +1032,7 @@ bool nr_csirs_blind_zp_feed_pair(nr_csirs_blind_state_t *st, int idx, uint32_t a
   if (!hit) {
     /* A population-suppressed raw hole is unresolved, not evidence of occupancy.
      * Only a required symbol lacking a hole contradicts the proposed ZP phase. */
-    if (joint_score <= 0.5)
+    if (joint_score <= NR_CSIRS_BLIND_ZP_MIN_SCORE)
       zp_record_rejection(st, idx, absolute_slot);
     return false;
   }

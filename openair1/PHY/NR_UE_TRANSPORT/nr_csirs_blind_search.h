@@ -278,9 +278,15 @@ bool nr_csirs_blind_feed(nr_csirs_blind_state_t *st, int idx, uint32_t absolute_
 /** 1 - min(1, E_on / E_off): E_on = mean |rx|^2 on the REs `ref` occupies. E_off is the
  * weakest off-pattern subcarrier class after averaging each class over touched RBs. A quiet
  * subset of a wider comb is not an identifiable geometry, and isolated/boosted pilots cannot
- * manufacture a data background. ~1 for a complete ZP pattern under scheduled PDSCH,
- * ~0 for data or an NZP resource. Conservative if other resources add off-pattern holes.
- * -1 when the reference is empty or an off-pattern class carries no energy. Pure. */
+ * manufacture a data background: REs dark only beside a pilot (lab G4: an 8-port NZP of which one
+ * antenna receives port 0 only) read ~0. ~1 for a complete ZP pattern under scheduled PDSCH, also a
+ * wide one (8 RE/RB) when the candidate covers every dark class; ~0 for data or an NZP resource.
+ * Conservative if other resources add off-pattern holes (two holes in one symbol are refused).
+ * Cannot, in one symbol, reject dark REs covering every dark class beside >= 4 bright non-PDSCH
+ * classes (a wide NZP in a slot without PDSCH): contradiction-based revocation in
+ * nr_csirs_blind_zp_feed_pair() withdraws such an export once PDSCH lands there.
+ * -1 when the reference is empty, <= 3 off-pattern classes remain (too few to tell a sparse pilot
+ * from data), or an off-pattern class carries no energy. Rationale: nr_csirs_blind_search.c. Pure. */
 double nr_csirs_blind_zero_score(const int16_t *rx_re_im, const int16_t *ref_re_im, int n);
 
 /** ZP energy score with the rx index mapped to FFT order (rx_shift = first_carrier_offset). Pure. */
@@ -297,6 +303,9 @@ double nr_csirs_blind_zero_score_ports_shift(const int16_t *rx_re_im, const int1
  * the median score must never feed confirmation, scheduling, or population state. */
 double nr_csirs_blind_zero_score_evidence_shift(const int16_t *rx_re_im, const int16_t *const *refs,
                                                int n_refs, int n, int rx_shift, double *median_score);
+
+/// Minimum ZP score counted as a (raw) hole; nr_csirs_blind_zp_score_qualifies() also needs the population bar.
+#define NR_CSIRS_BLIND_ZP_MIN_SCORE 0.5
 
 /** The existing ZP hit predicate, shared with diagnostic comparison so its thresholds cannot drift. */
 bool nr_csirs_blind_zp_score_qualifies(double score, double score_null);

@@ -531,7 +531,10 @@ score_zero_power:
   /* ZERO-POWER hypothesis: score the full mapped occupancy union, not just port 0's REs.
    * Every mapped row-5 symbol must be a measured periodic hole. OAI's row-5 mapping puts
    * ports 0/1 on l0 and ports 2/3 on l0+1; plane 0 has NO REs on l0+1.
-   * One additional antenna-0 FFT and score on discovery and predicted maintenance occasions. */
+   * One additional antenna-0 FFT and score on discovery and predicted maintenance occasions.
+   * No neighbour-symbol FFT (tried on sdd/gap-csirs): a hole that is dark only because nothing is
+   * scheduled there is withdrawn by contradiction revocation in nr_csirs_blind_zp_feed_pair(), and
+   * REs dark only beside a pilot (lab G4, one antenna of an 8-port cell) already score ~0 here. */
   if (maintenance || !nr_csirs_blind_is_confirmed(&g_zp, idx)) {
     const int16_t *zp_refs[NR_CSIRS_BLIND_RT_MAX_PORTS];
     for (int p = 0; p < n_planes; p++)
@@ -556,7 +559,7 @@ score_zero_power:
     if (maintenance) {
       const double joint = fmin(zs, zs_other);
       const enum zp_maint_outcome outcome = !isfinite(zs) || !isfinite(zs_other) || zs < 0.0 || zs_other < 0.0
-          ? ZPM_SCORE_INVALID : joint <= 0.5 ? ZPM_OCCUPIED
+          ? ZPM_SCORE_INVALID : joint <= NR_CSIRS_BLIND_ZP_MIN_SCORE ? ZPM_OCCUPIED
           : znull < 0.0 || !isfinite(znull) ? ZPM_POPULATION_UNKNOWN
           : nr_csirs_blind_zp_score_qualifies(joint, znull) ? ZPM_QUALIFIED_HOLE : ZPM_POPULATION_SUPPRESSED;
       zp_maint_end(idx, absolute_slot, duplicate, outcome, rho, zs, zs_other, znull);
