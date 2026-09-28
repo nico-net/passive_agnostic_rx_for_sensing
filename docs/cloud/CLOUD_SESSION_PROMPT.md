@@ -40,6 +40,53 @@ serves as a consistency check.
   index, and an older note says relative: verify with a test before relying on either. The UL decode runs off the
   RT thread (`nr_pusch_passive_queue.c`); keep all new work there or later.
 
+**TOGGLE CONTRACT (hard requirement).** The operator will first test the passive agnostic receiver ALONE, so UE
+localisation must be a single runtime flag, **OFF by default everywhere**:
+- One config key (`ue_loc_enable = 0|1` in the passive receiver's config section) with an env override
+  `ISAC_UE_LOC=0|1`. No conf file or runner script in the repo turns it on.
+- When OFF: no allocation, no thread, no queue, no log line, no extra computation. The existing decode path
+  (including the `est_delay` window re-placement) is byte-for-byte unchanged. Prove it with (a) a test that runs
+  the hook with the flag off and asserts every localisation counter stays 0 and no measurement is copied, and
+  (b) the full existing ctest suite green with the flag off.
+- When ON: purely additive. It reads measurements the receiver already produced, never changes a decode
+  decision, a window position, an RNTI table or a CRC outcome. It is only a consumer, and a failure inside it
+  (bad geometry, NaN, full queue) is logged once and dropped, never propagated.
+- Startup prints one line stating the flag's state, so a capture's log shows which mode it ran in.
+
+**Known problems the implementation must handle, test, or explicitly flag (do not discover them in the lab):**
+1. **N_TA_offset is unknown blind** (FR1: 0 / 25600 / 39936 T_c). 25600 T_c ≈ 13 µs ≈ 3.9 km of path, so a
+   wrong hypothesis is a km-scale error, not a small bias. Hypotheses must stay explicit until TA-consistency
+   resolves them; otherwise output "ambiguous", not a fix.
+2. **UE timing is not exact.** The UE's own transmit-timing error and the gNB's TA control loop let UL timing
+   wander by samples to tens of samples between TA commands. The error on Δd is set by that loop, not by our
+   estimator. Model it as a noise term, and report expected accuracy with it, not only the estimator's CRB.
+3. **TA granularity** at 30 kHz: 16·64/2 T_c ≈ 0.26 µs ≈ 39 m one-way per step. TA is a coarse check only.
+4. **Receiver DL reference**: the DL frame timing the receiver tracks is its sync point, which may be the strongest
+   path, not the first. d(gNB,rx) must come from surveyed positions, and any sync offset to the first path must
+   be measured (DL CIR), not assumed. The receiver's clock drift (~3.3 ppm sawtooth) cancels only if UL and DL
+   references come from the same slot.
+5. **Multipath / NLOS**: a reflected UL path biases both Δd (late) and θ. One receiver has no redundancy to detect
+   it; use the first-path estimate, not the peak, and flag low K-factor / spread CIRs.
+6. **Bearing limits**: the 4-element λ/2 ULA has ~25° beamwidth; mirror ambiguity about the array axis;
+   azimuth/elevation coupling (height prior); per-channel phase calibration drifts (re-calibrate continuously
+   from the DL direct path). On the X410 two branches are measured 8–15 dB weaker (physical), so per-channel SNR
+   must weight the estimator. A per-branch frequency offset rotates inter-antenna phase between calibration and
+   use: estimate or bound it.
+7. **UE identity / linkage**: RNTIs change on re-attach; in NSA CFRA the C-RNTI is never seen in plaintext and
+   the RAR link is heuristic (T4). Many NSA UEs send UL data over LTE, so NR PUSCH may be rare (PUCCH is not
+   decoded): expect sparse fixes, and handle long gaps in the tracker.
+8. **Geometry dilution**: near the extension of the gNB–receiver baseline the hyperbola degenerates, and far
+   away the cross-range error grows linearly with distance (1° ≈ 1.7 m at 100 m). The covariance must show it;
+   no fix is emitted when the covariance exceeds a bound.
+9. **UL SNR**: UEs power-control toward the gNB, not the receiver, so far UEs may be too weak for bearing even
+   when timing works. Degrade gracefully (timing + prior, larger covariance).
+10. **Resources**: the extra work runs per PUSCH. Keep it off the RT thread, bounded (drop when the queue is full,
+    count drops), and measure its CPU cost in the report.
+11. **Privacy**: localising third-party UEs is personal data. Pseudonymised RNTIs only, no raw identities in logs,
+    and the lab validates only with its own UEs.
+12. **Validation honesty**: link-level simulation is an upper bound; items 2, 4, 5, 7 only show up live/OTA. List
+    them in `UE_LOC_IMPLEMENTATION.md` as what the lab must measure.
+
 **Tasks (TDD for each: failing test first, record RED→GREEN in the report).** New pure-C modules in
 `openair1/PHY/NR_UE_TRANSPORT/` with no PHY state, so they are unit-testable. Hook only in T6, opt-in, default
 bit-identical.
@@ -126,6 +173,30 @@ be pushed yet: list the missing ones and move on. Record a triage table (landed 
 | `rfsim-val`, `rfsim-local`, `rfsim-base` | Older harness copies, `ue.passive.agn.conf`, a 3-line `gnb.sa.rfsim.conf` change | Dedupe vs `rfsim-integ` (newest per file); land with the harness if still needed, else retire |
 | `ocudu-bed-matrix` | Plan-only matrix planner + 4 tests | Land on `sdd/gap-bed` if its tests pass |
 | `ocudu-dl-clean`, `ocudu-dl-g4`, `ocudu-dl-r3` | Old iterations of the OCUDU-DL fix | SUPERSEDED by 02aa0cb5a3: do not merge; report anything (tests especially) missing from the committed fix |
+
+## Agent dispatch rules
+
+This session shares the operator's weekly usage limit with everything else, so spend it on implementation, not
+on coordination.
+- **You are the coordinator.** You own git (branches, commits, pushes), the report and the order of work. Subagents
+  never push, never merge, and never edit the report.
+- **At most 3 subagents running at once.** No workflows or fan-outs beyond that.
+- **One implementer subagent per task** (T1…T7, each Part B lane, the Part C triage), with a self-contained brief:
+  goal, files it may touch, the tests it must write first, the gate commands, what to return (diff summary,
+  RED/GREEN logs, test counts).
+- **Parallel only where files are disjoint:** T1, T3 and T4 are independent pure modules and may run together. T2
+  depends on T1's types; T5 needs T1–T4; T6 and T7 run after T5. Part B csirs and ssb touch different files and
+  may run in parallel with Part A tasks.
+- **One heavy build at a time.** Serialize full builds (a shared build dir; parallel ninja runs corrupt each other
+  and starve the VM). Subagents build only their own test targets, or ask the coordinator to build.
+- **G5 review is a fresh subagent** that did not write the code: give it only the diff vs the lane base, the
+  task brief and the gate rules. It returns Approved / findings (Critical / Important / Minor). Fix Critical and
+  Important, then re-review with a fresh reviewer.
+- **Verify, don't trust:** before committing, the coordinator re-runs the task's tests itself and reads the diff.
+  A subagent's "all green" is not evidence.
+- **Survive cutoffs:** after every task, commit (on the branch) and append to `CLOUD_REPORT.md`, so a session
+  limit mid-run loses at most one task. If you resume, read the report first and continue from the last
+  completed task.
 
 ## Rules
 
