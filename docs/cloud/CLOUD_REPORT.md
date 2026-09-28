@@ -11,7 +11,16 @@ Remote name: in this container the GitHub remote is `origin` (the prompt calls i
   -DAUTO_DOWNLOAD_ASN1C=ON`, RelWithDebInfo, ccache shared through `CCACHE_BASEDIR`), heavy builds serialised by
   `flock` (`/home/user/wt/bin/lane-build.sh`). System packages installed: libconfig, libsctp, gtest/gmock,
   benchmark, blas/lapack(e), fftw3, libcap, zmq, ccache.
-- Baseline: `sdd/integration` @ `239eb144ac` built in `/home/user/wt/integ` (reference for pre-existing ctest failures).
+- Baseline: `sdd/integration` @ `239eb144ac` built in `/home/user/wt/integ` (targets `nr-uesoftmodem rfsimulator tests`,
+  `ninja -k 0`, 12207 steps). Pre-existing on the baseline in this container:
+  - 12 sensing binaries fail to LINK with the default `ENABLE_ISAC_SENSING=OFF` receiver-only build (test_isac_sync,
+    isac_sync_replay, test_eca_clutter, test_target_tracker, test_matrix_complete, test_multi_target_tracker,
+    test_det_quality, test_isac_aoa, test_sparse_doppler, test_nr_isac_ssb_source, test_clean_deconv, test_occ_clean)
+    → 11 ctest "Not Run". Sensing is out of scope; not touched.
+  - `test_thread-pool` aborts (`pthread_getaffinity_np` ret 22 — container CPU-affinity restriction).
+  - `nr_cuup_functional_test` fails (`SCTP socket creation failed: Protocol not supported` — no SCTP in the container kernel).
+  - Baseline ctest: **110/123 passed, 13 failed = exactly the 13 environment/out-of-scope entries above**. G2 for every
+    lane = the same 110 pass + any new tests, with no other failure.
 
 ## Task 1 — WIP snapshot triage
 
