@@ -131,27 +131,27 @@ Skipped to conserve the shared usage budget; no micro-benchmark was run.
 
 ## Branch deletions
 
-**None performed.** Pushing and deleting on the remote failed: every `git push` returned HTTP 403 (the Claude GitHub
-App has no write access to `nico-net/passive_agnostic_rx_for_sensing` from this session). Candidate for deletion once
-the work is pushed:
+**None performed.** `sdd/offline-validated` is now pushed and contains the snapshot below
+(`git merge-base --is-ancestor` true), so it meets every deletion rule, but the delete was refused by this session's
+permission policy (destructive remote git op). Left for the operator:
 
-| Branch | Tip SHA | Why it may go |
-|---|---|---|
-| `wip/2026-09-28/gap-ssb` | `d4d807a7d375c9726e11194e466480651a87d3e5` | ancestor of `sdd/offline-validated` (`git merge-base --is-ancestor` true) once that branch is pushed |
+| Branch | Tip SHA | Why it may go | Command |
+|---|---|---|---|
+| `wip/2026-09-28/gap-ssb` | `d4d807a7d375c9726e11194e466480651a87d3e5` | ancestor of `sdd/offline-validated` | `git push github --delete wip/2026-09-28/gap-ssb` |
 
 Kept: `wip/2026-09-28/gap-cbg` (`7e1fce4318`, out-of-scope work) and every non-WIP branch.
 
-## Push status — ACTION NEEDED
+## Push status
 
-All of this session's work exists only in the cloud container until pushed:
+After GitHub access was restored, all of this session's branches were pushed:
 
-| Branch | Local tip | Content |
+| Branch | Tip | Content |
 |---|---|---|
-| `cloud/ue-localization` | (this report) | report commits |
-| `sdd/gap-ssb` | `af8213a` | ssb lane |
-| `sdd/gap-csirs` | `cb5c358` | csirs lane (G5 not approved) |
-| `sdd/gap-nsa-mib` | `70516af` | nsa-mib lane |
-| `sdd/offline-validated` | `418999d` | staging: nsa-mib + ssb |
+| `cloud/ue-localization` | this report | report commits |
+| `sdd/gap-ssb` | `af8213a` | ssb lane (new branch) |
+| `sdd/gap-csirs` | `cb5c358` | csirs lane (G5 not approved), fast-forward from `621a91dabe` |
+| `sdd/gap-nsa-mib` | `70516af` | nsa-mib lane (new branch) |
+| `sdd/offline-validated` | `418999d` | staging: nsa-mib + ssb (new branch) |
 
 ## What the lab must still run (G4 per lane)
 
