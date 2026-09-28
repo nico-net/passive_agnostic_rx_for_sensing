@@ -525,25 +525,31 @@ static void zdmrs(int slot, int sym, int nid, int m_max, int *re, int *im)
     im[m] = 1 - 2 * ((x1[1600 + 2 * m + 1] + x2[1600 + 2 * m + 1]) & 1);
   }
 }
-/* This cell's DM-RS (symbol 2) on antenna mask @p ants, CRBs [crb0, crb1): ports 1000 (and 1001 when @p two),
- * data on the odd subcarriers (one CDM group). */
-static void zset_dmrs(const NR_DL_FRAME_PARMS *fp, int ants, int crb0, int crb1, bool two)
+/* This cell's DM-RS (slot @p slot, symbol @p sym) on antenna mask @p ants, CRBs [crb0, crb1): ports 1000 (and 1001
+ * when @p two), data on the other subcarriers (one CDM group). Type 1: m = 2n + k' on k = 4n + 2k'; type 2:
+ * m = 2n + k' on k = 6n + k' (TS 38.211 7.4.1.1.2, delta 0). */
+static void zset_dmrs_at(const NR_DL_FRAME_PARMS *fp, int ants, int crb0, int crb1, bool two, int slot, int sym, bool type2)
 {
   static int re[6 * 275], im[6 * 275];
-  zdmrs(0, 2, ZNID, 6 * crb1, re, im);
+  zdmrs(slot, sym, ZNID, 6 * crb1, re, im);
   for (int a = 0; a < fp->nb_antennas_rx; a++)
     for (int crb = crb0; ((ants >> a) & 1) && crb < crb1; crb++)
       for (int k = 0; k < 12; k++) {
         const int j = (fp->first_carrier_offset + crb * 12 + k) % fp->ofdm_symbol_size;
-        const int m = crb * 6 + k / 2;
-        c16_t *y = &zgrid[(size_t)a * zstride + 2 * fp->ofdm_symbol_size + j];
-        if (k & 1) {
+        const bool pilot = type2 ? (k % 6) < 2 : !(k & 1);
+        const int m = type2 ? crb * 4 + (k / 6) * 2 + (k % 6) : crb * 6 + k / 2;
+        c16_t *y = &zgrid[(size_t)a * zstride + (size_t)sym * fp->ofdm_symbol_size + j];
+        if (!pilot) {
           *y = (c16_t){(int16_t)(bit() ? ZD : -ZD), (int16_t)(bit() ? ZD : -ZD)};
           continue;
         }
         const int w1 = two ? ((m & 1) ? -1 : 1) : 0; // port 1001: w_f = (-1)^k', k' = m & 1
         *y = (c16_t){(int16_t)(ZD * (re[m] + w1 * re[m])), (int16_t)(ZD * (im[m] + w1 * im[m]))};
       }
+}
+static void zset_dmrs(const NR_DL_FRAME_PARMS *fp, int ants, int crb0, int crb1, bool two)
+{
+  zset_dmrs_at(fp, ants, crb0, crb1, two, 0, 2, false);
 }
 static void zset(const NR_DL_FRAME_PARMS *fp, int a, int sym, int crb, int k, int amp)
 {
@@ -685,8 +691,29 @@ static void check_zp_grant_evidence(void)
   zset_dmrs(&fp, 3, 0, 30, true);
   CHECK((z = zscore(&fp, &cfg, &fa, 13, 0)) >= 0.0 && z <= 0.5, "Z13: two-port DM-RS not recognised (%.3f)", z);
   cfg.dmrs_ports = 1;
+  // Z14: slot 7, DM-RS on symbol 3 -- the sequence is seeded by the slot and symbol the scorer is handed; the
+  // wrong slot or symbol reads as a foreign sequence (no evidence).
+  zscene(&fp, 3, 0, 30, false, -1);
+  zset_dmrs_at(&fp, 3, 0, 30, false, 7, 3, false);
+  cfg.dlDmrsSymbPos = 1 << 3;
+  CHECK((z = nr_pdsch_passive_zp_grant_score(&fp, &cfg, &fa, zgrid, zstride, 7, 1, 13, 0, true, 0)) >= 0.0 && z <= 0.5,
+        "Z14: slot 7 / DM-RS symbol 3 not recognised (%.3f)", z);
+  CHECK(nr_pdsch_passive_zp_grant_score(&fp, &cfg, &fa, zgrid, zstride, 6, 1, 13, 0, true, 0) < 0.0,
+        "Z14: the wrong slot's sequence was accepted");
+  cfg.dlDmrsSymbPos = 1 << 2;
+  CHECK(nr_pdsch_passive_zp_grant_score(&fp, &cfg, &fa, zgrid, zstride, 7, 1, 13, 0, true, 0) < 0.0,
+        "Z14: a symbol without our DM-RS was accepted");
+  // Z15: DM-RS configuration type 2 (4 pilots per RB on k = 0, 1, 6, 7), true ZP and false ZP.
+  cfg.dmrsConfigType = NFAPI_NR_DMRS_TYPE2;
+  zscene(&fp, 3, 0, 30, true, -1);
+  zset_dmrs_at(&fp, 3, 0, 30, false, 0, 2, true);
+  CHECK((z = zscore(&fp, &cfg, &fa, 13, 0)) > 0.9, "Z15: type-2 true ZP scores %.3f", z);
+  zscene(&fp, 3, 0, 30, false, -1);
+  zset_dmrs_at(&fp, 3, 0, 30, false, 0, 2, true);
+  CHECK((z = zscore(&fp, &cfg, &fa, 13, 0)) >= 0.0 && z <= 0.5, "Z15: type-2 data on a false ZP scores %.3f", z);
+  cfg.dmrsConfigType = NFAPI_NR_DMRS_TYPE1;
   free(zgrid);
-  printf("ZPGRANT production scorer: Z1-Z13 done\n");
+  printf("ZPGRANT production scorer: Z1-Z15 done\n");
 }
 
 int main(void)

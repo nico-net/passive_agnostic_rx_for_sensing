@@ -2227,8 +2227,8 @@ TEST(CsirsBlindZpGrant, GrantDecodedUnderAWrongPrbHypothesisIsNoEvidence)
 {
   // Blind decoding sweeps its PDSCH hypotheses (Technique D, VRB mapping, BWP start, k0) and a DCI can be a false
   // accept, so a decoded grant's PRBs may hold nothing at all. There a TRUE ZP reads noise against noise --
-  // exactly what data on the pattern reads -- and would be revoked, raising its durable recovery debt. The noise
-  // floor gate makes such a grant no evidence. hyp = 1: the receiver looks at rb % 3 == 1 while the gNB sent
+  // exactly what data on the pattern reads -- and would be revoked, raising its durable recovery debt. The
+  // own-DM-RS gate makes such a grant no evidence. hyp = 1: the receiver looks at rb % 3 == 1 while the gNB sent
   // rb % 3 == 0; also a whole-carrier grant on an idle slot.
   ZpSlot s;
   const ZpScene miss = {3, 6.0, true, false, 1, false};

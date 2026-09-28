@@ -376,9 +376,11 @@ void nr_csirs_blind_pilot_coherence(const int16_t *rx_re_im, int n_fft, int rx_s
 /** Fraction of the received DM-RS-RE power that is this cell's DM-RS on this grant: (coh / inc - n_ports) /
  * (4 - n_ports) -- 0 for noise, a neighbour cell (another scrambling), or nothing sent; 1 for a clean own DM-RS
  * (a 4-pilot block spans 7-8 subcarriers, flat enough for a coherent sum). -1 with fewer than
- * NR_CSIRS_BLIND_PILOT_MIN_BLOCKS blocks (one per RB per antenna). For noise or a foreign signal coh/inc is the
- * mean of `blocks` unit exponentials (for one port), so the 0.5 bar needs that mean >= 2.5: at 8 blocks the chance
- * is 7.8e-4 per grant, and revocation needs two such grants in one window. Pure. */
+ * NR_CSIRS_BLIND_PILOT_MIN_BLOCKS blocks (one per RB per antenna). Chance pass of the 0.5 bar for noise or a
+ * foreign signal at 8 blocks (independent G5 Monte Carlo, 200k trials): < 5e-6 with one port, ~1.1e-3 with two
+ * fd-OCC ports; revocation needs two such grants in one window. The 4-pilot block must be phase-coherent: a
+ * residual timing offset or delay spread >= ~1.5 us at 30 kHz SCS removes the evidence (fails safe: no evidence).
+ * Pure. */
 #define NR_CSIRS_BLIND_PILOT_MIN_BLOCKS 8
 double nr_csirs_blind_pilot_presence(double coh, double inc, uint32_t n_blocks, int n_ports);
 

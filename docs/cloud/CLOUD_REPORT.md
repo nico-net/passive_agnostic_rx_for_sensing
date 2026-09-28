@@ -187,7 +187,7 @@ also did not disclose that the synth `nzp8_no_data` / `nzp8_light_load` negative
 
 **Important 1 — fixed (root cause).** Contradictions are now also scored on the PRBs the receiver's own decoded
 grants occupy. After FEP, `nr_pdsch_passive_decode()` calls `nr_pdsch_passive_zp_grant_score()` (exported, pinned by
-`test_nr_ssb_rate_match_prod` Z1–Z13) for every ZP (csi_type 2) entry it was handed for rate matching: energy on the
+`test_nr_ssb_rate_match_prod` Z1–Z15) for every ZP (csi_type 2) entry it was handed for rate matching: energy on the
 ZP REs inside the grant's PRBs on the CSI-RS symbol(s) (REs of other rate-matching entries excluded, extractor's
 CRB-parity bitmap, BWPStart) vs every RE of the grant on ONE data-only reference symbol (no DM-RS/CSI-RS, not an SSB
 symbol; the one nearest the ZP symbol), all antennas summed. A grant only counts when:
@@ -195,7 +195,8 @@ symbol; the one nearest the ZP symbol), all antennas summed. A grant only counts
   respect it;
 - its first DM-RS symbol carries **this cell's own DM-RS** (scrambling id, nSCID, the grant's ports incl. fd-OCC) on
   its PRBs: `nr_csirs_blind_pilot_coherence/presence` — the coherent fraction of the pilot-RE power over 4-pilot
-  blocks, >= 0.5, from >= 8 blocks (RB x antenna; chance pass for noise or a foreign signal 7.8e-4 per grant).
+  blocks, >= 0.5, from >= 8 blocks (RB x antenna; chance pass for noise or a foreign signal at 8 blocks, G5 round-3
+  Monte Carlo: < 5e-6 with one port, ~1.1e-3 with two fd-OCC ports).
   This is what makes a false DCI accept, a wrong PRB/symbol/k0 hypothesis, and a co-channel neighbour (which does
   not rate-match our ZP) no evidence; raw energy cannot tell them from our PDSCH (G5 round 2, I1);
 - its reference symbol is at least 1/4 of the own-DM-RS power per RE (DM-RS may exceed the PDSCH EPRE by at most
@@ -231,15 +232,20 @@ symbols with a per-RE modulo: 325.8 µs, reviewer). Not deduplicated across hypo
 | synth (real generator chain): NZP 0 dB / +6 dB, grants on 1/1 and 1/3 of RBs | +6 dB: never | **2** each |
 
 Conditions of that bound (it is not unconditional): the grant is dedicated-class, crosses the ZP symbol, carries our
-own DM-RS on >= 8 RB x antenna blocks at >= 0 dB SINR on its pilots, has a data-only symbol in the FFT'd range, and
-the ZP symbol is not an SSB symbol. "Wrong occasions" are counted synchronously; on the receiver add the decodes
+own DM-RS on >= 8 RB x antenna blocks at >= 0 dB SINR on its pilots, coherent over a 4-pilot block (residual timing
+offset or delay spread below ~1-1.5 µs at 30 kHz; round-3 probe: evidence disappears at >= 1.75 µs at high SNR,
+>= 1.5 µs at ~3 dB), has a data-only symbol in the FFT'd range, and the ZP symbol is not an SSB symbol. Outside
+these conditions the grant is no evidence (fails safe for a true ZP; a false ZP falls back to full-band-only
+revocation) — G4 must check that `zp_grant_evidence` counts rise on a macro cell. "Wrong occasions" are counted synchronously; on the receiver add the decodes
 already queued or in flight when the revoking evidence is drained (decode-queue latency / ZP period), so the harm
 bound is 2 + in-flight. GPU-LLR decodes never carry CSI rate matching, so they are not a gap.
 
 Known limits, pinned: (a) full-band score alone (grants the receiver does not decode, or that fail the conditions
 above — harmless to decoding only for the former): 1/3 of RBs never, alternate never, +6 dB never, full band 2
 (`KnownLimitationWithoutDecodedGrantEvidence`); (b) interference on a TRUE ZP (CSI-IM) at or above the grant's own
-signal (SINR <= 0 dB on the ZP REs) reads as a contradiction (unit-pinned in `GrantScoreSeparates…`); (c) a true ZP
+signal (SINR <= 0 dB on the ZP REs) reads as a contradiction (unit-pinned in `GrantScoreSeparates…`) — including a
+neighbour signal present on the ZP REs only (e.g. the neighbour's NZP-CSI-RS/TRS that the ZP protects, while the
+neighbour is idle on our DM-RS symbol), which the own-DM-RS gate cannot see; G4 check on a macro cell; (c) a true ZP
 that is UE-specific (not cell-wide) can be contradicted by another UE's correctly decoded grant of this cell — the
 receiver applies one exported ZP set to every RNTI, so it cannot represent per-UE ZP sets anyway.
 
@@ -279,7 +285,7 @@ from an init-cache of `agn-wt/integ`), every build under `flock radio_bed.lock`,
   (Z8), skip mask ignored (Z9), no even/odd bitmap split (Z5 x2); round 2 — no own-DM-RS gate (3 gtests + Z3, Z10),
   no reference-vs-DM-RS check (Z9), dedicated ignored (Z11), ZP in SSB symbol scored (Z12), BWP-relative pilot base
   (Z6). GREEN: `test_nr_csirs_blind_search` 131/131 (118 existing + 13 new), synth PASS, `test_nr_ssb_rate_match_prod`
-  PASSED (existing SSB checks + Z1–Z13, DM-RS from an independent TS 38.211 Gold generator). Logs:
+  PASSED (existing SSB checks + Z1–Z15, DM-RS from an independent TS 38.211 Gold generator). Logs:
   `…/build/evidence/` (not committed).
 - G1: `nr-uesoftmodem` and `tests` build clean; the only warning in a touched file (`dmrs_first` maybe-uninitialized in
   `nr_pdsch_passive_decode.c`) is pre-existing on the parent.
@@ -290,5 +296,11 @@ from an init-cache of `agn-wt/integ`), every build under `flock radio_bed.lock`,
   gap, 325.8 µs; 4 Minor). Round 2 NOT approved (2 Important: co-channel neighbour passes a raw-energy gate;
   guard-band floor reads the adjacent carrier at 80/100 MHz; 5 Minor: SSB on the ZP symbol, non-dedicated grants,
   per-hypothesis cost, dropped-counter race + window static assert, report overclaims). All addressed above except
-  the per-hypothesis cost dedup (documented). Round 3 below.
+  the per-hypothesis cost dedup (documented).
+- G5 round 3 (fresh reviewer, `a13c2b9a06..9c5c5cec30`): **Approved**, 0 Critical / 0 Important, 4 Minor — all
+  addressed in the follow-up commit: timing/delay-spread condition stated, chance-pass per port count, prod check
+  Z14 (slot 7, DM-RS symbol 3, wrong slot/symbol refused) and Z15 (DM-RS type 2), stale test comment and the
+  ZP-only neighbour signal added to known limit (b). Independent probe on the production scorer (own TS 38.211
+  generator): type 1 slot 7/BWPStart 10, DM-RS symbol 3, refPoint 1, ports {2,3} and {0,2}, type 2 ports {0}, {2,3},
+  {4,5}: false ZP ~0.00 / true ZP 1.00 in every case.
 - G4: pending (lab) — see the csirs entry in "What the lab must still run".
