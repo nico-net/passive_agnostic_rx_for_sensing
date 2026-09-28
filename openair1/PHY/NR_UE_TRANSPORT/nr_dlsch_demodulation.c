@@ -139,7 +139,7 @@ static bool overlap_csi_symbol(fapi_nr_dl_config_csirs_pdu_rel15_t *csi_pdu, int
   return false;
 }
 
-static uint32_t build_csi_overlap_bitmap(fapi_nr_dl_config_dlsch_pdu_rel15_t *dlsch_config, int symbol)
+uint32_t nr_dlsch_csi_overlap_bitmap(fapi_nr_dl_config_dlsch_pdu_rel15_t *dlsch_config, int symbol)
 {
   // LS 16 bits for even RBs, MS 16 bits for odd RBs
   uint32_t csi_res_bitmap = 0;
@@ -240,7 +240,8 @@ static void nr_dlsch_channel_level_median(uint32_t rx_size_symbol,
 // Extraction functions
 //==============================================================================================
 
-static void nr_dlsch_extract_rbs(uint32_t rxdataF_sz,
+// Returns the number of REs extracted per antenna/layer row.
+static uint32_t nr_dlsch_extract_rbs(uint32_t rxdataF_sz,
                                  c16_t rxdataF[][rxdataF_sz],
                                  uint32_t rx_size_symbol,
                                  uint32_t pdsch_est_size,
@@ -254,7 +255,8 @@ static void nr_dlsch_extract_rbs(uint32_t rxdataF_sz,
                                  uint8_t Nl,
                                  NR_DL_FRAME_PARMS *fp,
                                  uint32_t csi_res_bitmap,
-                                 int chest_time_type)
+                                 int chest_time_type,
+                                 const nr_ssb_rm_mask_t *ssb_rm)
 {
   int config_type = dlsch_config->dmrsConfigType;
   int n_dmrs_cdm_groups = dlsch_config->n_dmrs_cdm_groups;
@@ -309,7 +311,7 @@ static void nr_dlsch_extract_rbs(uint32_t rxdataF_sz,
       for (int l = 0; l < Nl; l++) {
         int32_t *dl_ch0 = &dl_ch_estimates[(l * fp->nb_antennas_rx) + aarx][validDmrsEst * fp->ofdm_symbol_size];
         int32_t *dl_ch0_ext = dl_ch_estimates_ext[(l * fp->nb_antennas_rx) + aarx] + offset;
-        if (pilots == 0 && csi_res_bitmap == 0) { // data symbol only
+        if (pilots == 0 && csi_res_bitmap == 0 && (!ssb_rm || !((ssb_rm->symbols >> symbol) & 1))) { // data symbol only
           if (l == 0) {
             if (start_re + nb_rb * NR_NB_SC_PER_RB <= fp->ofdm_symbol_size) {
               memcpy(rxF_ext, &rxF[start_re], nb_rb * NR_NB_SC_PER_RB * sizeof(int32_t));
@@ -326,6 +328,7 @@ static void nr_dlsch_extract_rbs(uint32_t rxdataF_sz,
           int k = start_re;
           for (int rb = start_rb; rb < start_rb + nb_rb; rb++) {
             uint32_t overlap_map = rb % 2 ?  dmrs_csi_overlap_odd : dmrs_csi_overlap_even;
+            overlap_map |= nr_ssb_rm_excluded(ssb_rm, symbol, rb - dlsch_config->BWPStart);
             for (int re = 0; re < NR_NB_SC_PER_RB; re++) {
               if (((overlap_map >> re) & 0x01) == 0) {
                 // DATA RE
@@ -343,8 +346,18 @@ static void nr_dlsch_extract_rbs(uint32_t rxdataF_sz,
         }
       }
     }
-    offset += nb_rb * NR_NB_SC_PER_RB;
+    if (ssb_rm) {
+      /* Pack across allocation blocks as well as within each block. */
+      for (int rb = start_rb; rb < start_rb + nb_rb; ++rb) {
+        uint32_t excluded = (rb % 2 ? dmrs_csi_overlap_odd : dmrs_csi_overlap_even)
+                          | nr_ssb_rm_excluded(ssb_rm, symbol, rb - dlsch_config->BWPStart);
+        offset += 12 - __builtin_popcount(excluded);
+      }
+    } else {
+      offset += nb_rb * NR_NB_SC_PER_RB;
+    }
   }
+  return offset;
 }
 
 /* Zero Forcing Rx function: nr_a_sum_b()
@@ -974,7 +987,8 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
                 int32_t ptrs_re_per_slot[][NR_SYMBOLS_PER_SLOT],
                 uint32_t nvar,
                 pdsch_scope_req_t *scope_req,
-                c16_t rho_dl[][NR_MAX_NB_LAYERS * NR_MAX_NB_LAYERS][pdsch_buf_size_max])
+                c16_t rho_dl[][NR_MAX_NB_LAYERS * NR_MAX_NB_LAYERS][pdsch_buf_size_max],
+                const nr_ssb_rm_mask_t *ssb_rm)
 {
   NR_DL_FRAME_PARMS *fp = &ue->frame_parms;
   const int nl = dlsch->cw_info.Nl;
@@ -1087,24 +1101,25 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
   __attribute__((aligned(32))) c16_t rxdataF_ext[nbRx][rx_size_symbol];
   memset(rxdataF_ext, 0, sizeof(rxdataF_ext));
 
-  uint32_t csi_res_bitmap = build_csi_overlap_bitmap(dlsch_config, symbol);
+  uint32_t csi_res_bitmap = nr_dlsch_csi_overlap_bitmap(dlsch_config, symbol);
   LOG_D(PHY, "%d.%d symbol %d csi overlap bitmap %d\n", frame, nr_slot_rx, symbol, csi_res_bitmap);
 
-  nr_dlsch_extract_rbs(fp->samples_per_slot_wCP,
-                       rxdataF,
-                       rx_size_symbol,
-                       pdsch_est_size,
-                       dl_ch_estimates,
-                       rxdataF_ext,
-                       dl_ch_estimates_ext,
-                       symbol,
-                       pilots,
-                       dlsch_config,
-                       freq_alloc,
-                       nl,
-                       fp,
-                       csi_res_bitmap,
-                       ue->chest_time);
+  const uint32_t nb_re_ext = nr_dlsch_extract_rbs(fp->samples_per_slot_wCP,
+                                                  rxdataF,
+                                                  rx_size_symbol,
+                                                  pdsch_est_size,
+                                                  dl_ch_estimates,
+                                                  rxdataF_ext,
+                                                  dl_ch_estimates_ext,
+                                                  symbol,
+                                                  pilots,
+                                                  dlsch_config,
+                                                  freq_alloc,
+                                                  nl,
+                                                  fp,
+                                                  csi_res_bitmap,
+                                                  ue->chest_time,
+                                                  ssb_rm);
   stop_meas_nr_ue_phy(ue, DLSCH_EXTRACT_RBS_STATS);
   if (scope_req->copy_chanest_to_scope) {
     size_t size = sizeof(c16_t) * nb_rb_pdsch * NR_NB_SC_PER_RB;
@@ -1152,6 +1167,9 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
             nb_re_pdsch);
     }
   }
+
+  if (ssb_rm)
+    nb_re_pdsch = nb_re_ext; // the extractor packed exactly the DM-RS | CSI-RS | SSB union out
 
   if (scope_req->copy_rxdataF_to_scope) {
     size_t size = sizeof(c16_t) * nb_re_pdsch;

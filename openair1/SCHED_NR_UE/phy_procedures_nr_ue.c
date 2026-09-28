@@ -609,7 +609,8 @@ static int nr_ue_pdsch_procedures(PHY_VARS_NR_UE *ue,
                     ptrs_re_per_slot,
                     nvar,
                     &scope_req,
-                    rho_dl)
+                    rho_dl,
+                    NULL)
         < 0) {
       if (scope_req.copy_chanest_to_scope) {
         UEunlockScopeData(ue, pdschChanEstimates);
