@@ -75,6 +75,10 @@ extern __thread uint64_t nr_isac_abs_slot_override;
  * @param harq_pid_tag  Disambiguates this TB on the shared nrLDPC coding interface; see the .c file
  * @param rxdataF       Frequency-domain received samples for this slot, per rx antenna
  * @param nvar          Noise variance estimate from the demodulator, for the engine's fusion weight
+ * @param decode_G      G the decode that verified `tb_bytes` rate-matched with. The re-encode maps onto every
+ *                      non-DM-RS RE of the allocation (no SSB/CSI-RS/PT-RS hole), so any other G means the
+ *                      reconstructed X would be misaligned: the call then contributes nothing and counts the
+ *                      refusal (nr_isac_pdsch_data_aided_g_refused()).
  */
 void nr_isac_pdsch_data_aided_submit(PHY_VARS_NR_UE *ue,
                                      const UE_nr_rxtx_proc_t *proc,
@@ -85,7 +89,11 @@ void nr_isac_pdsch_data_aided_submit(PHY_VARS_NR_UE *ue,
                                      const uint8_t *tb_bytes,
                                      uint32_t harq_pid_tag,
                                      const c16_t rxdataF[][ue->frame_parms.samples_per_slot_wCP],
-                                     double nvar);
+                                     double nvar,
+                                     uint32_t decode_G);
+
+/// Submissions refused because the decode's G differed from the tap's RE model (see decode_G above).
+uint64_t nr_isac_pdsch_data_aided_g_refused(void);
 
 #ifdef __cplusplus
 }
