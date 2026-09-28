@@ -474,6 +474,14 @@ bool nr_pdcch_blind_monitor_autoconf_css0(int num_rbs,
                                           int rb_offset,
                                           int dmrs_typea_position);
 
+/* Hand the MIB's dmrs-TypeA-Position (ASN.1 enum: pos2 = 0, pos3 = 1, exactly as
+ * mac->dmrs_TypeA_Position carries it) to the monitor. Measured off the air on EVERY cell, including
+ * one without CORESET#0 (NSA, FR1 k_SSB >= 24) where nr_pdcch_blind_monitor_autoconf_css0() never
+ * runs and would otherwise be the only path that sets it. Writes that single field of the live config
+ * and nothing else: no CSS0 state, no learned CORESET/SS geometry, no discovery state. Out-of-range
+ * values are refused. Returns true if the value was accepted. */
+bool nr_pdcch_blind_monitor_set_mib_dmrs_typeA_position(int dmrs_typea_position);
+
 /* PHASE 3: recover the DEDICATED CORESET/search space by search (Techniques A + C) instead of
  * reading pdcch_blind_monitor_coreset/_ss/_bwp by hand. See the definition-site comment in
  * nr_pdcch_blind_monitor.c for the full design (why this is NOT gated on g_cfg.bwp_size == 0). */

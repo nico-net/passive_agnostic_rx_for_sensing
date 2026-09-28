@@ -232,6 +232,27 @@ void nr_pdcch_blind_monitor_set_tda_common(const uint8_t *start, const uint8_t *
   }
 }
 
+bool nr_pdcch_blind_monitor_set_mib_dmrs_typeA_position(int dmrs_typea_position)
+{
+  /* The MIB's dmrs-TypeA-Position is a cell-wide fact (TS 38.211 7.4.1.1.2 l0 for every type-A
+   * PDSCH), measured on every MIB decode. Until this handoff it reached g_cfg only through
+   * autoconf_css0(), which a cell without CORESET#0 (NSA, FR1 k_SSB >= 24) never runs -- so there
+   * the blind chain kept the pos2 default and built every type-A DM-RS mask on the wrong symbol.
+   * Deliberately touches ONLY this field: CSS0 state (g_css0_cfg, s_css0_applied) stays owned by
+   * autoconf_css0(), and blindly learned CORESET/SS/BWP geometry is left exactly as discovered. */
+  if (dmrs_typea_position != 0 && dmrs_typea_position != 1) {
+    LOG_W(PHY, "SENSING: MIB dmrs-TypeA-Position %d is not an ASN.1 enum value (0=pos2, 1=pos3) -- ignored\n",
+          dmrs_typea_position);
+    return false;
+  }
+  if (g_cfg.dmrs_typeA_position != dmrs_typea_position) {
+    LOG_I(PHY, "SENSING: MIB dmrs-TypeA-Position pos%d -> blind monitor (was pos%d)\n", dmrs_typea_position + 2,
+          g_cfg.dmrs_typeA_position + 2);
+    g_cfg.dmrs_typeA_position = dmrs_typea_position;
+  }
+  return true;
+}
+
 bool nr_pdcch_blind_monitor_autoconf_css0(int num_rbs,
                                           int num_symbols,
                                           int cset_start_rb,
@@ -2009,7 +2030,7 @@ bool nr_pdcch_blind_monitor_autodiscover_step(const void* rxdataF_symbol, int of
    *    derive the real dedicated SS periodicity from occupancy alone, and scanning every slot is
    *    always a superset of any real (sparser) schedule -- costs CPU, not correctness.
    *  - ss_first_symbol = the symbol Technique A actually locked onto.
-   *  - dmrs_typeA_position: left exactly as CSS0 autoconf/the conf set it. It is the ASN.1 enum
+   *  - dmrs_typeA_position: left exactly as the MIB handoff/CSS0 autoconf/the conf set it. It is the ASN.1 enum
    *    (pos2 = 0), so the zero default is already the TS 38.331 spec default -- see the block
    *    further down where an earlier "fix it up to 2" made it illegal.
    * ponytail: fixed "scan every slot" ceiling -- ~2000 extra occasions/s of CPU on a cell whose
@@ -2654,7 +2675,8 @@ void nr_pdcch_blind_monitor_init(void)
         0, .strptr = &p_ss, .defstrval = "", TYPE_STRING, 0},
       {"pdcch_blind_monitor_bwp",
         "Active DL BWP for sizing; bwp_start:bwp_size:dmrs_typeA_position[:dci_length_override] "
-        "(dci_length_override optional, 0/omitted = use the computed formula; see "
+        "(dmrs_typeA_position is an initial value only: every decoded MIB overrides it; "
+        "dci_length_override optional, 0/omitted = use the computed formula; see "
         "nr_pdcch_blind_monitor_rt.h's dci_length_override comment for why a live-verified override "
         "is often needed)",
         0, .strptr = &p_bwp, .defstrval = "", TYPE_STRING, 0},
