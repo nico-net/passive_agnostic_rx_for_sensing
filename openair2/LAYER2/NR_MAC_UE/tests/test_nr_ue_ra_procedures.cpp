@@ -22,6 +22,7 @@ static softmodem_params_t softmodem_params;
  *   nr_pdcch_blind_publish_common  -- config_ue.c, only under IS_PASSIVE_RX_MODE (not set here)
  *   ..._autoconf_css0              -- nr_ue_dci_configuration.c, only if autoconf_wanted() is true
  *   nr_pdcch_blind_dci10_size      -- nr_ue_dci_configuration.c, only under getenv("ISAC_OTA_CFG")
+ *   ..._set_mib_dmrs_typeA_position -- nr_ue_procedures.c, MIB decode (no MIB is delivered here)
  * autoconf_wanted() returning false is the module's own default (pdcch_blind_monitor_autoconf=0). */
 bool nr_pdcch_blind_publish_common(const nr_pdcch_blind_common_config_t *facts)
 {
@@ -33,6 +34,10 @@ bool nr_pdcch_blind_monitor_autoconf_wanted(void)
   return false;
 }
 bool nr_pdcch_blind_monitor_autoconf_css0(int, int, int, int, int, int, int, int, int, int, int, int)
+{
+  return false;
+}
+bool nr_pdcch_blind_monitor_set_mib_dmrs_typeA_position(int)
 {
   return false;
 }
