@@ -77,6 +77,25 @@ State as of 2026-09-28 (details in the lane reports; `wip/2026-09-28/*` branches
 - **integration** — merge each lane that passes G1–G6 into `sdd/integration`, re-run G1+G2 on the merged tree.
   Do NOT merge into `adaptive-rx-UL-DL`: that needs the full §4.4 matrix, which needs the local OCUDU/SA beds.
 
+## Part C — uncommitted work and WIP snapshots (triage, then land or retire)
+
+On 2026-09-28 the uncommitted work of every tree was snapshotted as one commit per tree on `wip/2026-09-28/<name>`.
+The parent of each snapshot is the tree's HEAD at the time (often an OLDER integration commit). None is validated.
+Run `git fetch github 'refs/heads/wip/*:refs/remotes/github/wip/*'` and list them. The six marked (L) were made on
+the local lab host and may not be on GitHub yet: if one is missing, record it as "not pushed" and move on.
+
+| Branch `wip/2026-09-28/…` | Parent | Content | What to do |
+|---|---|---|---|
+| `gap-ssb` | 239eb144ac | SSB rate-match detector + production-path test, 9 files | Part B **ssb** above |
+| `gap-cbg` | 239eb144ac | `cbg_contract_test.py` | Out of scope: leave, only list it |
+| `rfsim-integ` (L) | 66176b7250 | 4 receiver files (`nr_pdcch_blind_monitor.c`, `nr_pdcch_ul_discovery.c`, `nr_pdcch_ul_interp_sweep.c`, `nr_pusch_passive_decode.c`) + new `nr_pusch_passive_dmrs_pdu.h`, AND the OCUDU ZMQ harness (`tests/passive_rx/run_ocudu_passive.sh`, `ocudu_owned_process.py`, `tests/passive_rx/ocudu/{gnb.ocudu.zmq.yaml,ocudu_zmq_broker.py,score_ocudu_run.py,ue.passive.ocudu.conf,ue.srsue.ocudu.conf}`) | (a) Receiver edits: diff against the same files on `sdd/integration`. If already landed, retire. If not, work out their purpose (see the handover status log and `gap-pusch-report.md`), write the failing test first, port onto a new lane `sdd/gap-ul-wip` from `sdd/integration`, run G1–G3 + G5, commit. (b) Harness: land it on a lane `sdd/ocudu-harness` (test infra only: syntax checks + py tests; it cannot run without OCUDU here). This is the canonical `run_ocudu_passive.sh` that `ocudu-harness.md` describes. |
+| `rfsim-val` (L), `rfsim-local` (L), `rfsim-base` (L) | c295fa18f1 / 67bb0eaa11 / 222f98d072 | Older copies of the OCUDU harness, plus `ue.passive.agn.conf` and a 3-line `gnb.sa.rfsim.conf` change | Dedupe against `rfsim-integ` (keep the newest per file, note differences). Land `ue.passive.agn.conf` and the gNB conf change with the harness if they are still needed, else retire |
+| `ocudu-bed-matrix` (L) | 239eb144ac | `tests/passive_rx/ocudu_bed_matrix.py` + `test_ocudu_bed_matrix.py` (plan-only, 18 arms × 3 pairs, 4/4 offline) | Land on `sdd/gap-bed` after its tests pass here. It stays plan-only; it must refuse to launch the arms marked unroutable |
+| `ocudu-dl-clean` (L), `ocudu-dl-g4` (L), `ocudu-dl-r3` (L) | older | Earlier iterations of the OCUDU-DL CSI-RS ZP fix | SUPERSEDED by `sdd/gap-ocudu-dl` @ 02aa0cb5a3. Do not merge. Only diff them against 02aa0cb5a3 and report anything that exists there and not in the committed fix (tests especially). Port a missing test only if it still applies, test-first. |
+
+Also untracked on the lab host and deliberately NOT snapshotted: gate-evidence logs (`cmake_targets/ocudu-r3-gates/`)
+and build directories. Record each triage decision (landed → SHA / retired → reason) as a table in `CLOUD_REPORT.md`.
+
 Out of scope: sensing (all of `NR_UE_ISAC`), nsa/prg/cbg lanes, X410/OTA, anything under `gnb_remote_logs/`/`cuLogs/`.
 
 ## Rules
@@ -86,11 +105,13 @@ Out of scope: sensing (all of `NR_UE_ISAC`), nsa/prg/cbg lanes, X410/OTA, anythi
   assumptions. Ground truth is for scoring only.
 - `git add <explicit paths>` only (never `-A`), no stray files/logs. Commit messages state root cause + evidence
   and end with `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`.
-- Work on branches (`sdd/ue-loc` for Part A, the lane branches for Part B); push them to `github`
+- Order: Part C triage first (it may change what Part A/B build on), then Part B (ssb, csirs), then Part A.
+- Work on branches (`sdd/ue-loc` for Part A, the lane branches for Parts B/C); push them to `github`
   (no force-push, never push `adaptive-rx-UL-DL`).
 - Append progress to `docs/cloud/CLOUD_REPORT.md` after every step, so a cutoff loses nothing.
 
 ## Final reply
 
 Per part/lane: Status (DONE / DONE_WITH_CONCERNS / BLOCKED), branches + commit SHAs, tests + counts (with RED
-evidence), live evidence (per-run table) or an explicit "not run here + why", what remains for the local beds.
+evidence), live evidence (per-run table) or an explicit "not run here + why", what remains for the local beds, and
+the Part C triage table.
