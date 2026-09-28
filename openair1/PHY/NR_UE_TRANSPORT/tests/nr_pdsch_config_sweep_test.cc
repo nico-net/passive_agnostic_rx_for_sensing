@@ -626,6 +626,43 @@ TEST(PdschConfigSweepOracle, ObservedMaskPrunesContextsCreatedLater) {
   EXPECT_LT(n * 4, alone);  // mcs_table is all that is left to the CRC
 }
 
+static int32_t long_short_legal(int, int length, int start, int mapping_b, int add, int maxlen)
+{
+  if (mapping_b || start != 2 || add != 2 || maxlen != 1)
+    return -1;
+  return length == 12 ? 0x884 : length == 6 ? 0x84 : -1;
+}
+
+TEST(PdschConfigSweepOracle, LaterShortTdaObservationRestoresCandidatesPrunedByEarlierLongTda) {
+  nr_pdsch_config_sweep_reset_all();
+  nr_pdsch_config_sweep_prior_reset();
+  nr_pdsch_sweep_ticket_t t{};
+  nr_pdsch_cfg_hypothesis_t h{};
+  ASSERT_TRUE(nr_pdsch_config_sweep_select(79, 0x4601, 0, 2, 0, long_short_legal, &t, &h));
+  ASSERT_EQ(nr_pdsch_config_sweep_observe(&t, 0x884, 13, 0), 3);
+  ASSERT_TRUE(nr_pdsch_config_sweep_select(79, 0x4601, 1, 2, 0, long_short_legal, &t, &h));
+  EXPECT_EQ(h.dmrs_mask, 0x884); // inherited observation is a seed, not proof that TDA1 is long
+  nr_pdsch_config_sweep_feedback(&t, false, nullptr);
+  const auto outstanding = t;
+  ASSERT_EQ(nr_pdsch_config_sweep_observe(&t, 0x84, 7, 0), 6);
+  // Appending does not move the old hypothesis or invalidate its pending feedback.
+  nr_pdsch_config_sweep_feedback(&outstanding, false, nullptr);
+  uint32_t passes = 0, trials = 0;
+  nr_pdsch_config_sweep_context_stats(79, 0x4601, 1, 0, &passes, &trials);
+  EXPECT_EQ(trials, 2u);
+  EXPECT_EQ(passes, 0u);
+  EXPECT_EQ(nr_pdsch_config_sweep_observe(&outstanding, 0x84, 7, 0), 6); // no duplicate append
+  bool short_seen = false, long_seen = false;
+  for (int i = 0; i < 12; i++) {
+    ASSERT_TRUE(nr_pdsch_config_sweep_select(79, 0x4601, 1, 2, 0, long_short_legal, &t, &h));
+    EXPECT_EQ(t.generation, outstanding.generation);
+    short_seen |= h.tda_start == 2 && h.tda_length == 6 && h.dmrs_mask == 0x84;
+    long_seen |= h.tda_start == 2 && h.tda_length == 12 && h.dmrs_mask == 0x884;
+  }
+  EXPECT_TRUE(short_seen);
+  EXPECT_TRUE(long_seen);
+}
+
 TEST(PdschConfigSweepOracle, MaskLastSymbolAndK0CollapseAContextToTheEndAmbiguity) {
   // A mask alone leaves every (S,L,k0,mcs) that produces it; the allocation END (last symbol with
   // energy on the grant's PRBs) and the job's k0 are observable in the same FEP. With test_legal's

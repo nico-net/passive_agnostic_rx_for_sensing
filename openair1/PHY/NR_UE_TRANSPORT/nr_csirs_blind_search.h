@@ -127,6 +127,15 @@ extern const uint16_t nr_csirs_blind_periods[NR_CSIRS_BLIND_N_PERIODS];
 bool nr_csirs_blind_infer_period(const uint32_t *hit_slots, int n_hits, int min_hits,
                                  uint16_t *period, uint16_t *offset);
 
+/** nr_csirs_blind_infer_period(), plus the one multi-slot shape a resource GEOMETRY really takes: the
+ * same (row, bitmap, symbols) sent at TWO phases of one period. A TRS set is exactly that (38.214
+ * 5.1.6.1.1: its resources span two consecutive slots), and no single phase explains its hits. A
+ * single phase is always tried first; two phases are accepted only for the largest legal period at
+ * which the hits take exactly two phases with at least two hits EACH, so one stray hit is never
+ * promoted to a phase. Fills off[0] < off[1] (n_off = 2) or off[0] (n_off = 1). Pure. */
+bool nr_csirs_blind_infer_period2(const uint32_t *hit_slots, int n_hits, int min_hits,
+                                  uint16_t *period, uint16_t off[2], int *n_off);
+
 /** Format a confirmed candidate as a `csirs_monitor` config entry
  * ("row:start_rb:nr_rbs:freq_domain:symb_l0:symb_l1:cdm_type:freq_density:scramb_id:period:offset").
  * Returns the number of characters written, or 0 if it would not fit. Pure. */
@@ -153,21 +162,70 @@ int nr_csirs_blind_format(const nr_csirs_candidate_t *c, uint16_t period, uint16
  * candidate is still scored per slot, so a full pass is ~1 s at this slot rate and the per-candidate
  * evidence (32 samples before the sweep pins) takes ~35 s. */
 #define NR_CSIRS_BLIND_MAX_CAND 1024
+/* Confirmed resources kept per search (NZP and ZP each). A PDSCH carries at most
+ * NFAPI_MAX_NUM_CSI_RATEMATCH (4) of them per slot; 8 covers a TRS pair + CQI + CSI-IM with room. */
+#define NR_CSIRS_BLIND_MAX_CONF 8
+/* One rejected-phase bit for every offset of every legal period, per ZP evidence epoch.
+ * Unlike a slot FIFO, this cannot forget a contradiction under dense observations. */
+#define NR_CSIRS_BLIND_ZP_PHASE_BITS (4 + 5 + 8 + 10 + 16 + 20 + 32 + 40 + 64 + 80 + 160 + 320 + 640)
+#define NR_CSIRS_BLIND_ZP_PHASE_WORDS ((NR_CSIRS_BLIND_ZP_PHASE_BITS + 63) / 64)
+
+/* The probation horizon is the maximum of nr_csirs_blind_periods, not a deployment
+ * duration or false-alarm probability. A unit test checks the lattice identity. */
+uint16_t nr_csirs_blind_zp_lattice_horizon(void);
+
+typedef struct {
+  int owner; ///< candidate index + 1; zero is a free bank entry
+  uint16_t period, off[2];
+  uint8_t n_off;
+  uint32_t proposed_slot, support_start, admitted_slot;
+  uint64_t votes[2], promotion_votes;
+  uint32_t occupied[NR_CSIRS_BLIND_ZP_PHASE_BITS]; ///< UINT32_MAX means unobserved
+} nr_csirs_zp_probation_t;
 
 typedef struct {
   nr_csirs_candidate_t cand[NR_CSIRS_BLIND_MAX_CAND];
   uint32_t             hits[NR_CSIRS_BLIND_MAX_CAND];
   uint32_t             tried[NR_CSIRS_BLIND_MAX_CAND];
+  uint32_t             zp_last_slot[NR_CSIRS_BLIND_MAX_CAND]; ///< last distinct ZP observation
+  uint32_t             zp_holes[NR_CSIRS_BLIND_MAX_CAND]; ///< raw holes, before the population test
+  uint32_t             zp_epoch[NR_CSIRS_BLIND_MAX_CAND]; ///< monotonically numbered evidence epochs
+  uint32_t             zp_revocations[NR_CSIRS_BLIND_MAX_CAND];
+  uint8_t              zp_contradictions[NR_CSIRS_BLIND_MAX_CAND]; ///< scorable predicted misses since last qualified hit
+  uint16_t             zp_selected_period[NR_CSIRS_BLIND_MAX_CAND]; ///< last proposed phase, for diagnostics
+  uint16_t             zp_selected_off[NR_CSIRS_BLIND_MAX_CAND][2];
+  uint8_t              zp_selected_n_off[NR_CSIRS_BLIND_MAX_CAND];
+  uint64_t             zp_rejected_phase[NR_CSIRS_BLIND_MAX_CAND][NR_CSIRS_BLIND_ZP_PHASE_WORDS];
+  uint64_t             zp_failed_run[NR_CSIRS_BLIND_MAX_CAND]; ///< cumulative contradicted support; durable across epochs
+  uint32_t             zp_evidence_floor[NR_CSIRS_BLIND_MAX_CAND]; ///< do not reuse pre-withdrawal/eviction hits
+  nr_csirs_zp_probation_t zp_bank[NR_CSIRS_BLIND_MAX_CONF]; ///< shared probation + export capacity
   double               best_rho[NR_CSIRS_BLIND_MAX_CAND];
-  uint32_t             hit_slot[NR_CSIRS_BLIND_MAX_CAND][8]; ///< first 8 hit slots, for the period test
+  uint32_t             hit_slot[NR_CSIRS_BLIND_MAX_CAND][8]; ///< NZP first 8; ZP current evidence epoch
   uint8_t              n_hit_slot[NR_CSIRS_BLIND_MAX_CAND];
   int                  n;
   int                  cursor;
   int                  confirmed;   ///< index of a resolved resource, or -1
   int                  pinned;      ///< candidate served on every next() while pin_left > 0, or -1
   uint32_t             pin_left;    ///< remaining pinned next() calls
-  uint16_t             period, offset;
+  uint16_t             period, offset; ///< of `confirmed` (the FIRST confirmation; legacy single view)
+  /* EVERY confirmed resource. A cell carries several and PDSCH is rate-matched around all of them. */
+  int                  n_conf;
+  int                  conf_idx[NR_CSIRS_BLIND_MAX_CONF];
+  uint16_t             conf_period[NR_CSIRS_BLIND_MAX_CONF];
+  uint16_t             conf_off[NR_CSIRS_BLIND_MAX_CONF][2];
+  uint8_t              conf_n_off[NR_CSIRS_BLIND_MAX_CONF];
+  int                  cycle_left, cycle_pad, cycle_last; ///< phase-diverse round-robin cadence
 } nr_csirs_blind_state_t;
+
+/** True when candidate idx is one of the confirmed resources. Pure. */
+bool nr_csirs_blind_is_confirmed(const nr_csirs_blind_state_t *st, int idx);
+
+/** Confirmed resources that occur in `absolute_slot`, written to idx_out (up to max). Pure. */
+int nr_csirs_blind_occurring(const nr_csirs_blind_state_t *st, uint32_t absolute_slot, int *idx_out, int max);
+
+/** Due admitted ZP geometries, once each: exports, probation and unresolved divisors.
+ * Never use this list for rate matching. At most MAX_CONF entries. */
+int nr_csirs_blind_zp_due(const nr_csirs_blind_state_t *st, uint32_t absolute_slot, int *idx_out, int max);
 
 /** Enumerate candidate resources for a cell. `scramb_id` is normally the PCI.
  * Returns the count, or -1 on bad arguments. */
@@ -190,7 +248,9 @@ bool nr_csirs_blind_candidate_safe(const nr_csirs_candidate_t *c);
 int nr_csirs_blind_init(nr_csirs_blind_state_t *st, uint16_t n_rb, uint16_t scramb_id);
 
 /** Which candidate to test in this slot. Round-robin, so every candidate sees statistically the
- * same channel -- the same reason Technique D interleaves per grant. Returns -1 when empty. */
+ * same channel -- the same reason Technique D interleaves per grant. Confirmed candidates leave the
+ * rotation. A round is padded to a stride coprime to the legal periods, avoiding phase aliasing
+ * with regular slot visits. Returns -1 when empty, full, or all candidates confirmed. */
 int nr_csirs_blind_next(nr_csirs_blind_state_t *st);
 
 /** Serve candidate idx on EVERY next() call for up to `budget` calls (or until confirmed), then resume
@@ -215,21 +275,56 @@ bool nr_csirs_blind_feed(nr_csirs_blind_state_t *st, int idx, uint32_t absolute_
  * energy while the PDSCH scheduled around it does. Observable without any reference sequence:
  * the energy on the pattern's REs against the energy on the other REs of the same RBs and symbol. */
 
-/** 1 - min(1, E_on / E_off): E_on = mean |rx|^2 on the REs `ref` occupies, E_off = mean |rx|^2 on
- * the remaining REs of the RBs the pattern touches. ~1 for a ZP resource under a scheduled PDSCH,
- * ~0 for data or an NZP resource, ~0 on an empty symbol (no false hit from silence). -1 when the
- * reference is empty or the off-pattern REs carry no energy at all. Pure. */
+/** 1 - min(1, E_on / E_off): E_on = mean |rx|^2 on the REs `ref` occupies. E_off is the
+ * weakest off-pattern subcarrier class after averaging each class over touched RBs. A quiet
+ * subset of a wider comb is not an identifiable geometry, and isolated/boosted pilots cannot
+ * manufacture a data background. ~1 for a complete ZP pattern under scheduled PDSCH,
+ * ~0 for data or an NZP resource. Conservative if other resources add off-pattern holes.
+ * -1 when the reference is empty or an off-pattern class carries no energy. Pure. */
 double nr_csirs_blind_zero_score(const int16_t *rx_re_im, const int16_t *ref_re_im, int n);
 
 /** ZP energy score with the rx index mapped to FFT order (rx_shift = first_carrier_offset). Pure. */
 double nr_csirs_blind_zero_score_shift(const int16_t *rx_re_im, const int16_t *ref_re_im, int n,
                                        int rx_shift);
 
-/** nr_csirs_blind_feed() for the ZP search, plus one guard: a periodic resource is hit in at most
- * 1/period of its tests, so a candidate that scores a hit on more than half of them is a
- * structural hole (a DM-RS symbol's data-free CDM group, an unscheduled band) and never confirms. */
+/** Same, with occupancy equal to the union of generated reference planes. ZP geometry is the
+ * full port union: plane 0 alone omits other CDM groups (for example row 4's ports 2/3). */
+double nr_csirs_blind_zero_score_ports_shift(const int16_t *rx_re_im, const int16_t *const *refs,
+                                             int n_refs, int n, int rx_shift);
+
+/** Same completeness score, optionally reporting the previous per-RB-median score on the
+ * same reference occupancy. For row 2 this is the exact old ZP statistic. Diagnostic only:
+ * the median score must never feed confirmation, scheduling, or population state. */
+double nr_csirs_blind_zero_score_evidence_shift(const int16_t *rx_re_im, const int16_t *const *refs,
+                                               int n_refs, int n, int rx_shift, double *median_score);
+
+/** The existing ZP hit predicate, shared with diagnostic comparison so its thresholds cannot drift. */
+bool nr_csirs_blind_zp_score_qualifies(double score, double score_null);
+
+/** nr_csirs_blind_feed() for the ZP search. Repeated occasions in the same candidate/slot count
+ * once. A raw hole on more than half the observed slots is structural and cannot confirm;
+ * population-threshold misses do not erase raw-hole evidence. Unscorable samples are ignored.
+ * Finite observations lacking a joint raw hole veto claimed phases within the positive-evidence epoch.
+ * Population-suppressed raw holes remain unresolved. Discovery creates unexported probation;
+ * distinct prospective votes must span the complete legal-period lattice horizon and exceed
+ * any previously contradicted held-out run. Both offsets need independent support. A harmonic
+ * remains unexported until measured divisor-only observations resolve every viable divisor.
+ * Eight admitted/exported geometries share bounded scheduling; phase timestamps and failed-run
+ * history survive discovery resets and revocation. New measured evidence may recover a phase.
+ * Confirmed resources remain observable: two distinct scorable occupied predicted occasions
+ * since the last qualified hole revoke them. Unscorable/population-suppressed holes do not count.
+ * Revocation affects only export decisions made AFTER this feed (including future k0 queries).
+ * Feed observations in nondecreasing absolute-slot order, under the existing sequential owner.
+ * Counter overflow and slot wrap/backwards observations fail closed until cell reset. */
 bool nr_csirs_blind_zp_feed(nr_csirs_blind_state_t *st, int idx, uint32_t absolute_slot,
                             double score, double score_null);
+
+/** Two-symbol ZP evidence: both scores must be scorable and qualify on the SAME slots. The
+ * inferred period/phase therefore validates both symbols, not their independently inferred union.
+ * Raw holes on either symbol count toward the structural veto; population misses never erase them.
+ * The single-symbol entry point above passes the same score twice. */
+bool nr_csirs_blind_zp_feed_pair(nr_csirs_blind_state_t *st, int idx, uint32_t absolute_slot,
+                                double score, double other_score, double score_null);
 
 /* ---- ROWS 6-18: FOOTPRINT-FIRST -------------------------------------------------------------------
  * A candidate's sequence is only worth testing once the air shows its RE PATTERN. The pattern is

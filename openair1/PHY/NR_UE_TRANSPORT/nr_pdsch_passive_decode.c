@@ -598,6 +598,8 @@ static _Atomic uint32_t g_rbmap[NR_RBMAP_MAX];
 static _Atomic uint32_t g_rbmap_ok[NR_RBMAP_MAX];
 static _Atomic uint64_t g_rbmap_grants;
 static __thread uint32_t t_seg_ok_last = 0; // segments that decoded in the last TB on this thread
+static __thread int t_last_sk = -1;        // last TB outcome for TBRESULT: 1 decoded, 0 zero_tb, 2 seg_fail
+static __thread uint32_t t_last_llr_have, t_last_data_bits;
 static _Atomic uint64_t g_shape_rv[3]  = {0, 0, 0};
 static _Atomic uint64_t g_shape_G[3]   = {0, 0, 0};
 /* Segmentation parameters, binned by outcome. §34.4's hypothesis: filler bits F are ZEROS by
@@ -1474,6 +1476,8 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
 {
   memset(out, 0, sizeof(*out));
   out->status = NR_PDSCH_PASSIVE_DECODE_UNSUPPORTED;
+  t_last_sk = -1;
+  t_last_llr_have = t_last_data_bits = 0;
 
   NR_DL_FRAME_PARMS *fp = &ue->frame_parms;
 
@@ -3583,6 +3587,7 @@ gpu_llr_ready:;
       /* 1 = decoded with data, 0 = zero_tb, 2 = seg_fail. `out->status` is not set yet here, so the
        * zero/seg distinction comes from the counters passive_ldpc_decode just bumped. */
       const int sk = ldpc_ok ? 1 : ((atomic_load(&g_ldpc_zero_tb) != zero_before) ? 0 : 2);
+      t_last_sk = sk;
       {
         /* llr_have: index one past the last NON-ZERO LLR. An exactly-zero LLR is possible but
          * vanishingly rare in real soft output, so the last nonzero is a good proxy for how far
@@ -3592,6 +3597,7 @@ gpu_llr_ready:;
         for (int i = (int)G - 1; i >= 0; i--) {
           if (llr[i] != 0) { llr_have = (uint32_t)i + 1; break; }
         }
+        t_last_llr_have = llr_have;
         /* LLRFILL (2026-09-16): per-symbol non-zero LLR counts of the assembled buffer, one shot when
          * llr_have < 0.9 G -- which symbols/layers come out empty (rank-4 bed: llr_have 3 % of G). */
         static _Atomic int s_llrfill_left = 3;
@@ -3613,6 +3619,7 @@ gpu_llr_ready:;
           vre += dl_valid_re[m];
         }
         const int pk = (sk == 1) ? 1 : 0;  // 1 = decoded, 0 = did not decode (zero_tb or seg_fail)
+        t_last_data_bits = vre * cw->qamModOrder * cw->Nl;
         const uint64_t v[PIPE_N_FIELDS] = {
             G, llr_have, vre, (uint64_t)vre * cw->qamModOrder * cw->Nl,
             t_seg_C, t_seg_K, t_seg_Z, t_seg_F, t_seg_E, t_seg_R, t_seg_lbrm,
@@ -3704,14 +3711,30 @@ gpu_llr_ready:;
     static int s_tbp2 = -1;
     if (s_tbp2 < 0)
       s_tbp2 = (getenv("ISAC_PDSCH_TBPARM") != NULL) ? 1 : 0;
-    if (s_tbp2)
+    if (s_tbp2) {
+      /* These are the PDUs actually supplied to this TB after occasion/overlap filtering.
+       * Keep geometry on the outcome line: export logs alone cannot attribute applied masks.
+       * Tuple: type/row:start:nrb:bitmap:l0:l1:cdm:density:scramblingID. */
+      char csi_detail[512] = "";
+      int pos = 0;
+      for (unsigned i = 0; i < dlsch_config->numCsiRsForRateMatching && i < NFAPI_MAX_NUM_CSI_RATEMATCH; i++) {
+        const fapi_nr_dl_config_csirs_pdu_rel15_t *c = &dlsch_config->csiRsForRateMatching[i];
+        const int n = snprintf(csi_detail + pos, sizeof(csi_detail) - pos,
+                               "%s%u/%u:%u:%u:%u:%u:%u:%u:%u:%u", i ? ";" : "",
+                               c->csi_type, c->row, c->start_rb, c->nr_of_rbs, c->freq_domain,
+                               c->symb_l0, c->symb_l1, c->cdm_type, c->freq_density, c->scramb_id);
+        if (n < 0 || (size_t)n >= sizeof(csi_detail) - pos)
+          break;
+        pos += n;
+      }
       /* Every field needed to attribute a failure is on THIS line. Do NOT reconstruct it by pairing
        * against the preceding TBPARM line: decodes for different slots interleave in the log, so
        * adjacency-based pairing silently mis-attributes (it produced two mutually contradictory
        * breakdowns before this was fixed). Same class of error as the retracted "20 % dt bias". */
       LOG_I(PHY,
             "SENSING: TBRESULT rnti=0x%x nl=%u mcs=%u Qm=%u R=%u tbs=%u bg=%u prb=%u+%u "
-            "cdm=%u dmrsmask=0x%x nscid=%u scramb=%u refpt=%u sym=%u+%u G=%u bwpstart=%u status=%s\n",
+            "cdm=%u dmrsmask=0x%x nscid=%u scramb=%u refpt=%u sym=%u+%u G=%u bwpstart=%u status=%s "
+            "slot=%d.%d why=%s csirm=%u harq=%u rv=%u llr_have=%u data_bits=%u csirs=[%s]\n",
             grant->rnti, (unsigned)cw->Nl, (unsigned)grant->mcs, (unsigned)cw->qamModOrder,
             (unsigned)cw->targetCodeRate, (unsigned)cw->TBS, (unsigned)cw->ldpcBaseGraph,
             (unsigned)freq_alloc->first_rb, (unsigned)freq_alloc->num_rbs,
@@ -3725,7 +3748,13 @@ gpu_llr_ready:;
             (unsigned)out->G,
             (unsigned)dlsch_config->BWPStart,
             out->status == NR_PDSCH_PASSIVE_DECODE_CRC_OK ? "CRC_OK"
-              : (out->status == NR_PDSCH_PASSIVE_DECODE_CRC_FAIL ? "CRC_FAIL" : "ERROR"));
+              : (out->status == NR_PDSCH_PASSIVE_DECODE_CRC_FAIL ? "CRC_FAIL" : "ERROR"),
+            proc->frame_rx, proc->nr_slot_rx,
+            out->status == NR_PDSCH_PASSIVE_DECODE_CRC_OK ? "ok" : t_last_sk == 0 ? "zero_tb" : t_last_sk == 2 ? "seg_fail" : "-",
+            (unsigned)dlsch_config->numCsiRsForRateMatching, (unsigned)grant->harq_pid, (unsigned)grant->rv,
+            t_last_llr_have, t_last_data_bits, csi_detail);
+    }
+    t_last_sk = -1;
   }
 
   pdtim_report();
