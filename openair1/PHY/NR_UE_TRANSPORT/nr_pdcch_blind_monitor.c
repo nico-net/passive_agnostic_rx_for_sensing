@@ -232,6 +232,27 @@ void nr_pdcch_blind_monitor_set_tda_common(const uint8_t *start, const uint8_t *
   }
 }
 
+bool nr_pdcch_blind_monitor_set_mib_dmrs_typeA_position(int dmrs_typea_position)
+{
+  /* The MIB's dmrs-TypeA-Position is a cell-wide fact (TS 38.211 7.4.1.1.2 l0 for every type-A
+   * PDSCH), measured on every MIB decode. Until this handoff it reached g_cfg only through
+   * autoconf_css0(), which a cell without CORESET#0 (NSA, FR1 k_SSB >= 24) never runs -- so there
+   * the blind chain kept the pos2 default and built every type-A DM-RS mask on the wrong symbol.
+   * Deliberately touches ONLY this field: CSS0 state (g_css0_cfg, s_css0_applied) stays owned by
+   * autoconf_css0(), and blindly learned CORESET/SS/BWP geometry is left exactly as discovered. */
+  if (dmrs_typea_position != 0 && dmrs_typea_position != 1) {
+    LOG_W(PHY, "SENSING: MIB dmrs-TypeA-Position %d is not an ASN.1 enum value (0=pos2, 1=pos3) -- ignored\n",
+          dmrs_typea_position);
+    return false;
+  }
+  if (g_cfg.dmrs_typeA_position != dmrs_typea_position) {
+    LOG_I(PHY, "SENSING: MIB dmrs-TypeA-Position pos%d -> blind monitor (was pos%d)\n", dmrs_typea_position + 2,
+          g_cfg.dmrs_typeA_position + 2);
+    g_cfg.dmrs_typeA_position = dmrs_typea_position;
+  }
+  return true;
+}
+
 bool nr_pdcch_blind_monitor_autoconf_css0(int num_rbs,
                                           int num_symbols,
                                           int cset_start_rb,
@@ -500,8 +521,11 @@ bool nr_pdcch_blind_monitor_autodiscover_done(void)
 static uint16_t s_hit_count[NR_PDCCH_MAX_CANDIDATE_WINDOWS];
 static uint16_t s_hit_count1[NR_PDCCH_MAX_CANDIDATE_WINDOWS]; /* same, CORESET symbol 1: decides the duration */
 
-/* LONG-TERM evidence, never reset by a dwell -- see the note on the per-UE CORESET hypothesis.
- * Diagnostic only: nothing below consumes these, so no decision changes. */
+/* LONG-TERM evidence, never reset by a single dwell (only by
+ * nr_pdcch_blind_monitor_autodiscover_reset() -- a full re-discovery, e.g. after a BWP switch).
+ * STALE COMMENT CORRECTED (R31 fix round 1): this used to say "diagnostic only, nothing consumes
+ * these" -- that predates MIN_ORACLE_DWELLS' seed selection, which reads s_lt_dwells/s_lt_hits
+ * directly to rank candidate windows by cross-dwell recurrence. They are load-bearing. */
 static unsigned long s_lt_hits[NR_PDCCH_MAX_CANDIDATE_WINDOWS];
 static unsigned      s_lt_dwells[NR_PDCCH_MAX_CANDIDATE_WINDOWS];
 static uint16_t      s_lt_rnti[NR_PDCCH_MAX_CANDIDATE_WINDOWS];
@@ -750,6 +774,30 @@ static int s_disc_saved[8];
 bool nr_pdcch_blind_monitor_discovery_paused(void)
 {
   return s_disc_paused;
+}
+
+/* GATE 1 (R31): see the declaration-site comment in nr_pdcch_blind_monitor.h for the full history --
+ * this predicate replaces what used to be an inline `bank_count == 0` early return in
+ * nr_pdcch_blind_monitor_rt.c's process_body(), which made the CORESET#0-USS/RAR-anchor fallback in
+ * nr_pdcch_blind_monitor_run_occasion() unreachable for an entire capture. Nothing needs to gate
+ * here any more: run_occasion()'s own n==0 branch already does the right thing, and the on-occasion
+ * timing check plus run_occasion() itself already bound the cost (same cost this deployment already
+ * pays once discovery finishes or is paused). */
+bool nr_pdcch_blind_monitor_discovery_block_early_return(int bank_count)
+{
+  (void)bank_count;
+  return false;
+}
+
+bool nr_pdcch_blind_monitor_discovery_pass_due(int backlog, uint32_t *skipped)
+{
+  /* ponytail: the floor is a compute budget, not a cell parameter (same spirit as the CORESET0_USS
+   * 1-in-64 probe); lower it if multi-CORESET discovery ever measures too slow behind a busy bank */
+  if (backlog <= 0 || ++*skipped >= NR_PDCCH_DISCOVERY_PASS_FLOOR) {
+    *skipped = 0;
+    return true;
+  }
+  return false;
 }
 
 static void discovered_restore(void) /* called from extent_advance(): the applied line failed its dwell */
@@ -1181,6 +1229,22 @@ void nr_pdcch_blind_monitor_autodiscover_reset(void)
   g_cfg.dci_length_override = 0;
   extent_clear_evidence();
   memset(s_lane, 0, sizeof(s_lane));
+  /* R31 fix round 1: this used to leave the LONG-TERM dwell state (s_lt_hits/s_lt_dwells/
+   * s_lt_rnti/s_lt_ndwell) untouched -- only ever accumulated, never reset here. Two problems:
+   * (1) Gate 2's dominance bypass and the pre-existing MIN_ORACLE_DWELLS seed selection both key
+   * off s_lt_ndwell/s_lt_dwells (recurrence_floor = (s_lt_ndwell+4)/5), so a reset that leaves them
+   * non-zero makes the NEXT discovery's convergence speed depend on how much history happened to
+   * survive from before the reset -- order-dependent under --gtest_shuffle/sharding, and in
+   * production would let a genuine re-discovery (BWP switch, cell change) seed itself from a
+   * DIFFERENT cell's or DIFFERENT footprint's stale evidence. (2) Checked every caller before
+   * clearing here: as of this fix, nr_pdcch_blind_monitor_autodiscover_reset() has NO live RT/
+   * production caller at all (grep confirms only test fixtures call it) -- so there is no runtime
+   * behavior this could regress today. If a production re-discovery path starts calling this
+   * function, "full reset means full reset" is exactly the semantics its own name promises. */
+  memset(s_lt_hits, 0, sizeof(s_lt_hits));
+  memset(s_lt_dwells, 0, sizeof(s_lt_dwells));
+  memset(s_lt_rnti, 0, sizeof(s_lt_rnti));
+  s_lt_ndwell = 0;
 }
 
 int nr_pdcch_map_candidates(int span_rb, int duration, int pci, nr_pdcch_map_cand_t *out, int max_out)
@@ -1639,7 +1703,82 @@ bool nr_pdcch_blind_monitor_autodiscover_step(const void* rxdataF_symbol, int of
       for (int i = 1; i < m; i++) { int x = v[i]; int j = i - 1; while (j >= 0 && v[j] > x) { v[j+1] = v[j]; j--; } v[j+1] = x; }
       const int bg = (m > 0) ? v[m / 2] : 0;
       if (bg < s_min_bg && s_obs_calls < AUTODISCOVER_MAX_OBS_CALLS) {
-        return false;  /* keep observing: the background is not yet estimable */
+        /* GATE 2 BYPASS (R31, sa-discovery-stall.md): sparse traffic can leave the whole-carrier
+         * MEDIAN genuinely inestimable (most windows legitimately never see a hit) even though the
+         * true window is already unmistakable -- live evidence: top window climbed 16->138 hits over
+         * 45000 calls while every other window stayed near the noise floor and the median never
+         * reached 3. Admit a decision anyway when one window DOMINATES every other window it is
+         * actually being compared against -- not merely "is the maximum", which is exactly the
+         * failure the lit_floor comment above already documents (11 hits vs a background of 6, ~2
+         * sigma, wrongly declared a footprint). Two named constants (overridable via
+         * ISAC_DISCOVER_DOMINANCE_K / ISAC_DISCOVER_DOMINANCE_N, same convention as
+         * ISAC_DISCOVER_MIN_BG above; defaults unchanged), both reused from statistics this
+         * file already trusts rather than fitted to any one cell:
+         *   K = 4 -- the same margin nr_pdcch_coreset_map.c already treats as decisive for a single
+         *            correlation sample (CORESET_MAP_CORR_THRESHOLD = 4x the pure-noise correlation
+         *            floor). Applied here as a hit-count dominance ratio against the best of every
+         *            OTHER window. Cross-checked against this file's own recorded false positive:
+         *            11 vs 6 is a 1.8x margin, well under K=4, so this bypass still rejects it; the
+         *            live dedicated-CORESET case clears K by close to an order of magnitude.
+         *   N = 3 -- three multiples of AUTODISCOVER_HITS_PER_WINDOW (the code's own "one window's
+         *            worth of trustworthy dwell evidence" bar), so the top window must carry three
+         *            times the evidence normally required of one lit window before this bypass will
+         *            trust it in place of an estimable median. Every hit here is a separate DL
+         *            occasion that independently cleared nr_pdcch_coreset_map_scan()'s own
+         *            correlation threshold (adaptive, capped at CORESET_MAP_CORR_THRESHOLD=0.836) --
+         *            that IS the "correlation >= a threshold the code already uses for real"
+         *            requirement, inherited for free, and N*HITS_PER_WINDOW hits is repeated
+         *            evidence across that many occasions, not one lucky burst. Pure noise essentially
+         *            never clears the correlation floor at all (comment above: ~0.1-0.25 vs a 0.35
+         *            absolute floor), so it cannot accumulate N*30=90 hits on any one window within
+         *            any bounded dwell -- the existing noise-floor protection is unchanged.
+         * CORESET#0's window range is excluded from both sides of the comparison (mirrors the
+         * exclusion already applied below in COREMAPTOP/long-term accumulation), so this cannot
+         * short-circuit on the already-known common CORESET instead of the sought dedicated one. */
+        /* K/N are overridable (fix round 1), same pattern as ISAC_DISCOVER_MIN_BG just above:
+         * read once, default unchanged, floored at 1 so neither can degenerate the test (K=0 would
+         * make dominance trivially true, N=0 would zero the absolute-evidence floor). */
+        static int s_dom_k = -1;
+        if (s_dom_k < 0) {
+          const char *e = getenv("ISAC_DISCOVER_DOMINANCE_K");
+          s_dom_k = (e != NULL) ? atoi(e) : 4;
+          if (s_dom_k < 1) s_dom_k = 1;
+        }
+        static int s_dom_n = -1;
+        if (s_dom_n < 0) {
+          const char *e = getenv("ISAC_DISCOVER_DOMINANCE_N");
+          s_dom_n = (e != NULL) ? atoi(e) : 3;
+          if (s_dom_n < 1) s_dom_n = 1;
+        }
+        int top_w = -1, top_hits = 0;
+        for (int w = 0; w < n_rb_carrier / 6 && w < NR_PDCCH_MAX_CANDIDATE_WINDOWS; w++) {
+          if (s_css0_excl_first_w >= 0 && w >= s_css0_excl_first_w && w <= s_css0_excl_last_w) continue;
+          if (s_hit_count[w] > top_hits) { top_hits = s_hit_count[w]; top_w = w; }
+        }
+        int rival = 0;
+        for (int w = 0; w < n_rb_carrier / 6 && w < NR_PDCCH_MAX_CANDIDATE_WINDOWS; w++) {
+          if (w == top_w) continue;
+          if (s_css0_excl_first_w >= 0 && w >= s_css0_excl_first_w && w <= s_css0_excl_last_w) continue;
+          if (s_hit_count[w] > rival) rival = s_hit_count[w];
+        }
+        const bool dominant = top_w >= 0 && top_hits >= s_dom_n * AUTODISCOVER_HITS_PER_WINDOW
+                            && top_hits >= s_dom_k * rival;
+        if (!dominant) {
+          return false;  /* keep observing: the background is not yet estimable and no window dominates */
+        }
+        /* Rate-limited: `dominant` stays true for every remaining call of a long dwell once it
+         * first fires, so logging unconditionally here would flood the RT log at the same rate as
+         * DISCOVERGATE's own occasion volume. Log the first occurrence (visible immediately) and
+         * then every 2000th, same cadence convention as this file's other periodic diagnostics. */
+        {
+          static uint64_t s_dom_log_n = 0;
+          if ((++s_dom_log_n == 1) || (s_dom_log_n % 2000) == 0) {
+            LOG_A(PHY,
+                  "SENSING: Gate2 dominance bypass -- w%d=%d hits vs best-other=%d (K=%d N=%d) admitted "
+                  "without an estimable background median (occurrence #%lu)\n",
+                  top_w, top_hits, rival, s_dom_k, s_dom_n, (unsigned long)s_dom_log_n);
+          }
+        }
       }
     }
   }
@@ -1891,7 +2030,7 @@ bool nr_pdcch_blind_monitor_autodiscover_step(const void* rxdataF_symbol, int of
    *    derive the real dedicated SS periodicity from occupancy alone, and scanning every slot is
    *    always a superset of any real (sparser) schedule -- costs CPU, not correctness.
    *  - ss_first_symbol = the symbol Technique A actually locked onto.
-   *  - dmrs_typeA_position: left exactly as CSS0 autoconf/the conf set it. It is the ASN.1 enum
+   *  - dmrs_typeA_position: left exactly as the MIB handoff/CSS0 autoconf/the conf set it. It is the ASN.1 enum
    *    (pos2 = 0), so the zero default is already the TS 38.331 spec default -- see the block
    *    further down where an earlier "fix it up to 2" made it illegal.
    * ponytail: fixed "scan every slot" ceiling -- ~2000 extra occasions/s of CPU on a cell whose
@@ -2536,7 +2675,8 @@ void nr_pdcch_blind_monitor_init(void)
         0, .strptr = &p_ss, .defstrval = "", TYPE_STRING, 0},
       {"pdcch_blind_monitor_bwp",
         "Active DL BWP for sizing; bwp_start:bwp_size:dmrs_typeA_position[:dci_length_override] "
-        "(dci_length_override optional, 0/omitted = use the computed formula; see "
+        "(dmrs_typeA_position is an initial value only: every decoded MIB overrides it; "
+        "dci_length_override optional, 0/omitted = use the computed formula; see "
         "nr_pdcch_blind_monitor_rt.h's dci_length_override comment for why a live-verified override "
         "is often needed)",
         0, .strptr = &p_bwp, .defstrval = "", TYPE_STRING, 0},
@@ -3422,11 +3562,15 @@ static bool dci10_parse(uint64_t                             payload,
 
   // TS 38.214 5.1.3.1: a PDSCH scheduled by format 1_0 ALWAYS uses Table 5.1.3.1-1 (qam64),
   // whatever mcs-Table the deployment configures -- qam256 is conditioned on format 1_1. In that
-  // table entries 0..28 are valid and 29..31 are reserved for retransmissions whose modulation the
-  // UE already knows. (The format 1_1 path above uses >=28 because table 2, which a qam256
-  // deployment selects there, reserves 28..31; here the table is fixed by the spec so the exact
-  // bound is known.)
-  if (mcs >= 29) {
+  // table entries 0..28 are valid and 29..31 are reserved: "same modulation order and TBS as the
+  // initial transmission of the same HARQ process" -- a genuine retransmission this receiver may be
+  // able to resolve downstream (nr_harq_init_tx.h) from its own record of that HARQ process's last
+  // resolvable grant. That reserved-codepoint rule is scoped by the spec to C-RNTI/MCS-C-RNTI/
+  // TC-RNTI: SI-/RA-/P-RNTI format 1_0 never uses it (no NDI/HARQ-pid field exists for those classes
+  // to even key a retransmission on -- see the switch above), so the reject stays a hard invariant
+  // there. (The format 1_1 path uses >=28 because table 2, which a qam256 deployment selects there,
+  // reserves 28..31; here the table is fixed by the spec so the exact bound is known.)
+  if (mcs >= 29 && klass != NR_BLIND_RNTI_CLASS_C && klass != NR_BLIND_RNTI_CLASS_TC) {
     out->reject_reason = "DCI-1_0 MCS in the reserved range (29-31 of Table 5.1.3.1-1)";
     return false;
   }
@@ -3871,9 +4015,6 @@ bool nr_pdcch_blind_extract_11(const nr_pdcch_blind_raw_result_t *raw,
     out->reject_reason = "format indicator=0 (UL grant, not a PDSCH DCI)";
     return false;
   }
-  /* 4-bit field: Table 7.3.1.2.2-1 (type 1, maxLength 1). 5-bit field: Table -2 (type 1, maxLength 2),
-   * whose code point also fixes the DM-RS symbol count. Type 2 (5/6 bits, Tables -3/-4) is not
-   * decoded: rejected as out of range, so a type-2 hypothesis never produces a grant. */
   /* Table by (field width, DM-RS type): 4 bits = type 1 len 1 (-1); 5 bits = type 1 len 2 (-2) or
    * type 2 len 1 (-3), told apart by the DM-RS type hypothesis; 6 bits = type 2 len 2 (-4). */
   const int dmrs_t2 = (opts != NULL && opts->dmrs_config_type == 1);
@@ -3890,12 +4031,13 @@ bool nr_pdcch_blind_extract_11(const nr_pdcch_blind_raw_result_t *raw,
                         : ap_table == 2 ? g_table_7_3_2_3_3_2[antenna_ports]
                         : ap_table == 3 ? g_table_7_3_2_3_3_3[antenna_ports] : g_table_7_3_2_3_3_4[antenna_ports];
   const int ap_len2 = (ap_table == 2) || (ap_table == 4);
-  // Table selection is still unknown here. MCS 28 is valid in tables 0 and 2;
-  // the actual PDSCH decoder checks the selected table's nonzero code rate.
-  if (mcs >= 29) {
-    out->reject_reason = "MCS reserved in every supported DL table (29-31)";
-    return false;
-  }
+  // Table selection is still unknown here. MCS 28 is valid in tables 0 and 2, and reserved (with
+  // 29-31) in table 1 (qam256) -- the actual PDSCH decoder checks the selected table's nonzero code
+  // rate, and no longer hard-refuses on it: format 1_1 is always a dedicated C-RNTI grant with a real
+  // NDI/HARQ-pid field, so a reserved codepoint (TS 38.214 5.1.3.1: "same modulation order and TBS as
+  // the initial transmission") is a genuine retransmission this receiver may be able to resolve
+  // downstream (nr_harq_init_tx.h) rather than noise. Values above 31 are impossible: the field is 5
+  // bits wide.
   uint16_t start_rb, num_rb;
   const int fdra_mode = opts != NULL ? opts->fdra_mode : NR_FDRA_TYPE1;
   int ra_type0 = 0, rbg_size = 0, n_rbg = 0;
@@ -4180,7 +4322,19 @@ static blind_ul_field_bits_t blind_ul_field_bits(const nr_pdcch_blind_ul_opts_t*
 {
   blind_ul_field_bits_t f;
   const double riv_span = ((double)opts->bwp_size * (double)(opts->bwp_size + 1)) / 2.0;
-  f.riv = (int)ceil(log2(riv_span));
+  const int riv_bits = (int)ceil(log2(riv_span));
+  // Frequency-domain assignment width (TS 38.212 7.3.1.1.2 / 38.214 6.1.2.2.1): RIV bits for
+  // resource allocation type 1 (the only mode this file assumed until gap item 1 -- "PUSCH RA
+  // type 0 / dynamicSwitch"), N_RBG bits for type 0, or 1+max(N_RBG,RIV) for dynamicSwitch.
+  // nr_fdra_bits() is the exact formula the DL 1_1 side already uses (nr_pdcch_blind_dci_size());
+  // TS 38.214 6.1.2.2.1's table is shared verbatim between DL and UL.
+  if (opts->fdra_mode == NR_FDRA_TYPE1) {
+    f.riv = riv_bits;
+  } else {
+    const int rbg_size = nr_fdra_rbg_size(opts->fdra_mode, opts->bwp_size);
+    const int n_rbg     = nr_rbg_count(opts->fdra_bwp_start, opts->bwp_size, rbg_size);
+    f.riv = nr_fdra_bits(opts->fdra_mode, n_rbg, riv_bits);
+  }
   // time_domain_assignment: nr_dci_size() uses ceil(log2(tdaList->count)) when a
   // pusch-TimeDomainAllocationList is configured, and 4 (the 16-entry default table) otherwise.
   // Derived from tda_count, never a separate knob -- same rule as the DL path.
@@ -4223,6 +4377,71 @@ uint16_t nr_pdcch_blind_dci01_size(const nr_pdcch_blind_ul_opts_t* opts)
   return (uint16_t)(12 + f.carrier_ind + f.ul_sul + f.bwp_ind + f.riv + f.tda + f.fh + f.harq_pid
                     + f.dai1 + f.dai2 + f.sri + f.precoding + f.ant_ports + f.srs_req + f.csi_req
                     + f.cbg + f.ptrs_dmrs + f.beta_offset + f.dmrs_seq_init);
+}
+
+int nr_pdcch_blind_ul_fdra_mode_candidates(const nr_pdcch_blind_ul_opts_t *opts, uint16_t observed_len,
+                                           uint8_t *out_modes, int max)
+{
+  if (opts == NULL || out_modes == NULL || max <= 0 || opts->bwp_size < 1 || observed_len == 0) {
+    return 0;
+  }
+  static const uint8_t kModes[4] = {NR_FDRA_TYPE0_CFG1, NR_FDRA_TYPE0_CFG2, NR_FDRA_DYN_CFG1, NR_FDRA_DYN_CFG2};
+  nr_pdcch_blind_ul_opts_t trial = *opts;
+  int n = 0;
+  for (int i = 0; i < 4 && n < max; i++) {
+    trial.fdra_mode = kModes[i];
+    if (nr_pdcch_blind_dci01_size(&trial) == observed_len) {
+      out_modes[n++] = kModes[i];
+    }
+  }
+  return n;
+}
+
+int nr_pdcch_blind_ul_fdra_bundle(const nr_pdcch_blind_ul_opts_t *opts, uint64_t payload,
+                                 uint16_t length, uint16_t rnti, nr_pdcch_blind_ul_result_t *out)
+{
+  if (!opts || !out) return 0;
+  memset(out, 0, sizeof(*out));
+  uint8_t modes[NR_PUSCH_FDRA_MAX_CANDIDATES];
+  nr_pdcch_blind_ul_opts_t trial = *opts;
+  trial.fdra_bwp_start = opts->bwp_start;
+  const int n = nr_pdcch_blind_ul_fdra_mode_candidates(&trial, length, modes, NR_PUSCH_FDRA_MAX_CANDIDATES);
+  for (int i = 0; i < n; ++i) {
+    trial.fdra_mode = modes[i];
+    nr_pdcch_blind_ul_result_t alt;
+    if (!nr_pdcch_blind_extract_01(payload, length, rnti, &trial, &alt)) continue;
+    const int count = out->fdra_candidate_count;
+    if (count == 0) {
+      *out = alt;
+      /* FDRA retries are link evidence, not evidence for the refuted type-1 layout. */
+      out->width_hyp_class = 0;
+    }
+    out->fdra_candidates[count] = (nr_pusch_fdra_allocation_t){
+      .start_rb=alt.start_rb, .num_rb=alt.num_rb, .rbg_bwp_start=alt.rbg_bwp_start,
+      .ra_type0=alt.ra_type0, .rbg_size=alt.rbg_size, .mode=modes[i], .rbg_bitmap=alt.rbg_bitmap};
+    out->fdra_candidate_count = count + 1;
+  }
+  return out->fdra_candidate_count;
+}
+
+int nr_pdcch_blind_ul_fdra_try(const nr_pdcch_blind_ul_result_t *bundle,
+                              bool (*attempt)(void *, const nr_pdcch_blind_ul_result_t *), void *opaque)
+{
+  if (!bundle || !attempt || bundle->fdra_candidate_count > NR_PUSCH_FDRA_MAX_CANDIDATES) return -1;
+  if (!bundle->fdra_candidate_count) return attempt(opaque, bundle) ? 0 : -1;
+  for (int i = 0; i < bundle->fdra_candidate_count; ++i) {
+    nr_pdcch_blind_ul_result_t candidate = *bundle;
+    const nr_pusch_fdra_allocation_t *a = &bundle->fdra_candidates[i];
+    candidate.start_rb = a->start_rb;
+    candidate.num_rb = a->num_rb;
+    candidate.ra_type0 = a->ra_type0;
+    candidate.rbg_size = a->rbg_size;
+    candidate.rbg_bwp_start = a->rbg_bwp_start;
+    candidate.rbg_bitmap = a->rbg_bitmap;
+    candidate.data_id_advance = false;
+    if (attempt(opaque, &candidate)) return i;
+  }
+  return -1;
 }
 
 /// Resolve the PUSCH time-domain allocation. `mu` is the numerology, needed for k2's j offset when
@@ -4282,14 +4501,46 @@ static bool blind_ul_finish(const nr_pdcch_blind_ul_opts_t* opts,
     out->reject_reason = "invalid measured UL numerology or MIB DMRS position";
     return false;
   }
-  uint16_t start_rb, num_rb;
-  if (!riv_to_prb_alloc(riv, opts->bwp_size, &start_rb, &num_rb)) {
-    out->reject_reason = "RIV decodes to a PRB allocation outside the UL BWP";
+  if (opts->transform_precoding && opts->dmrs_config_type != 0) {
+    out->reject_reason = "transform precoding requires DM-RS type 1";
     return false;
   }
+  uint16_t start_rb, num_rb;
+  int ra_type0 = 0, rbg_size = 0, n_rbg = 0;
+  if (opts->fdra_mode == NR_FDRA_TYPE1) {
+    if (!riv_to_prb_alloc(riv, opts->bwp_size, &start_rb, &num_rb)) {
+      out->reject_reason = "RIV decodes to a PRB allocation outside the UL BWP";
+      return false;
+    }
+  } else {
+    // Gap item 1 (PUSCH RA type 0 / dynamicSwitch): the field named `riv` above is really "the
+    // FDRA field's raw value", whatever it means under this mode -- nr_fdra_prbs() is the same
+    // primitive nr_pdcch_blind_decode_and_extract_11() uses for the DL 1_1 side (TS 38.214
+    // 6.1.2.2.1 is one shared table). `start_rb`/`num_rb` become only the PRB list's bounding box;
+    // the exact (possibly non-contiguous) set is out->rbg_bitmap, expanded by the caller exactly as
+    // the DL RT loop already does (nr_ra_type0_prbs() + nr_prb_segments()).
+    uint16_t prb[NR_PRB_SET_MAX];
+    const double riv_span_check = ((double)opts->bwp_size * (double)(opts->bwp_size + 1)) / 2.0;
+    const int riv_bits = (int)ceil(log2(riv_span_check));
+    rbg_size = nr_fdra_rbg_size(opts->fdra_mode, opts->bwp_size);
+    n_rbg    = nr_rbg_count(opts->fdra_bwp_start, opts->bwp_size, rbg_size);
+    const int n = nr_fdra_prbs(riv, opts->fdra_mode, n_rbg, riv_bits, opts->fdra_bwp_start, opts->bwp_size,
+                               prb, NR_PRB_SET_MAX, &ra_type0);
+    if (n <= 0) {
+      out->reject_reason = "FDRA allocates nothing inside the UL BWP (empty RBG bitmap or out-of-range RIV)";
+      return false;
+    }
+    start_rb = prb[0];
+    num_rb   = (uint16_t)n;
+  }
   const int table = opts->mcs_table < 0 ? 0 : opts->mcs_table;
-  if (table > 4 || mcs > 31 || nr_get_code_rate_ul(mcs, table) == 0) {
-    out->reject_reason = "UL MCS reserved or invalid in the selected table";
+  // table > 4 is a config error (invalid mcs-Table), a hard reject. A reserved codepoint (TS 38.214
+  // 6.1.4.1: "same modulation order and TBS as the initial transmission") is NOT rejected here --
+  // format 0_0/0_1 are always dedicated grants with a real NDI/HARQ-pid field, so this may be a
+  // genuine retransmission the passive UL decoder can resolve from its own per-(RNTI, pid) record
+  // (nr_harq_init_tx.h) instead of noise. mcs > 31 is impossible: the field is 5 bits wide.
+  if (table > 4 || mcs > 31) {
+    out->reject_reason = "UL MCS table selection is invalid";
 
     return false;
   }
@@ -4307,43 +4558,64 @@ static bool blind_ul_finish(const nr_pdcch_blind_ul_opts_t* opts,
                           ? force_add_pos
                           : ((opts->dmrs_add_pos >= 0) ? opts->dmrs_add_pos : 2);
   const int max_len = (opts->dmrs_max_length > 0) ? opts->dmrs_max_length : 1;
-  const int32_t mask = nr_pdcch_blind_ul_dmrs_mask(L, S, mapping_is_b, add_pos, max_len, opts->dmrs_typeA_position);
-  if (mask < 0) {
-    out->reject_reason = "no valid PUSCH DM-RS position for this allocation length";
-    return false;
-  }
 
-  // Antenna ports -> (CDM groups without data, port bitmask). Closed form rather than a table,
-  // copied from mac_tables.c's ul_ports_config() for the transform-precoder-disabled / dmrs-type1 /
-  // maxLength1 / rank-1 case (TS 38.212 Table 7.3.1.1.2-8), which is the only combination this
-  // deployment produces. Verified against the live gNB 2026-08-25: it logs `ant=2` on every UL DCI
-  // and dumps `num_dmrs_cdm_grps_no_data=2 dmrs_ports=1`, which is exactly what val=2 gives here.
-  /* `antenna_ports` is a RAW payload field, and the width sweep tries 2..5 bits for it, so values
-   * up to 31 reach this point. The closed form below is defined ONLY over Table 7.3.1.1.2-8's four
-   * rows (transform precoder disabled, DM-RS type 1, maxLength 1, rank 1) -- the sole combination
-   * this path supports and the only one its caller emits. Outside that domain it produces nonsense.
-   * Measured 2026-09-09: antenna_ports=14 yields 1u<<12, a port bitmap with no port below 12, which
-   * AssertFatal()s inside get_dmrs_port() ("No dmrs port corresponding to layer 0 found") and
-   * killed the entire softmodem mid-capture. Values above 17 are worse still -- they truncate to 0
-   * in a uint16_t and read silently as "DCI 1_0, port 0".
-   * A blind decoder must REJECT a code point it cannot interpret, never abort and never guess. */
-  if (antenna_ports > 3) {
-    out->reject_reason = "antenna-ports code point outside Table 7.3.1.1.2-8's four rows";
-    return false;
-  }
+  // Antenna ports -> (CDM groups without data, port bitmask). Was a closed form defined ONLY over
+  // Table 7.3.1.1.2-8's four rows (transform precoder disabled, DM-RS type 1, maxLength 1, rank 1),
+  // which rejected every DM-RS-type-2 hypothesis as "antenna-ports code point outside Table
+  // 7.3.1.1.2-8's four rows" before it could ever be evaluated -- the whole reason a type-2 cell
+  // produced zero UL grants. Replaced by decode_dci_antenna_ports_val() (nr_mac_common.c), the same
+  // reverse-table lookup mac_tables.c's ul_ports_config() uses for an attached UE's own PUSCH: it
+  // already covers DM-RS type 1 AND type 2, both maxLength values, ranks 1-4, and bounds `val`
+  // against the real table size itself (no separate range guard needed here). Verified against the
+  // live gNB 2026-08-25 for the type-1/rank-1 case this deployment produces: it logs `ant=2` on
+  // every UL DCI and dumps `num_dmrs_cdm_grps_no_data=2 dmrs_ports=1`, which is exactly what val=2
+  // still gives via the reverse table.
+  //
+  // `antenna_ports` is a RAW payload field, and the width sweep tries 2..5 bits for it, so values
+  // up to 31 reach this point; decode_dci_antenna_ports_val() returns -1 (rejected) for any value
+  // its table doesn't define, which is what prevents the AssertFatal-in-get_dmrs_port() landmine
+  // (measured 2026-09-09: antenna_ports=14 under the OLD closed form yielded 1u<<12, a port bitmap
+  // with no port below 12) -- a blind decoder must REJECT a code point it cannot interpret, never
+  // abort and never guess, and the reverse table's own bounds check gives that for free.
   uint8_t  cdm_groups;
   uint16_t ports;
-  if (opts->transform_precoding == 1) {
-    cdm_groups = 2;
-    ports      = (uint16_t)(1u << antenna_ports);
-  } else if (nrOfLayers <= 1) {
-    cdm_groups = (antenna_ports > 1) ? 2 : 1;
-    ports      = (uint16_t)(1u << ((antenna_ports > 1) ? (antenna_ports - 2) : antenna_ports));
+  int front_load = 0;
+  if (nrOfLayers <= 1) {
+    // decode_dci_antenna_ports_val() branches on `tp` FIRST (transform-precoding-enabled always
+    // uses lut_tp_rev, TS 38.212 Table 7.3.1.1.2-6/-7, regardless of dmrs_type -- transform
+    // precoding mandates DM-RS type 1 by spec, so dmrs_type_arg is computed the same way either
+    // way and simply ignored when tp is enabled). This used to be a hand-rolled closed form here
+    // (cdm_groups=2; ports=1u<<antenna_ports;) that -- like the pre-fix DM-RS-type-1-only closed
+    // form above -- was only correct for antenna_ports 0..3 (front_load 1); lut_tp_rev's rows 4..11
+    // (front_load 2) wrap the port index instead of shifting it further, so the old formula was
+    // wrong there too. One table lookup now covers type 1, type 2, and transform precoding.
+    long dmrs_type2 = 1;
+    const long *dmrs_type_arg = (opts->dmrs_config_type > 0) ? &dmrs_type2 : NULL;
+    const long tp = (opts->transform_precoding == 1) ? NR_PUSCH_Config__transformPrecoder_enabled
+                                                     : NR_PUSCH_Config__transformPrecoder_disabled;
+    if (decode_dci_antenna_ports_val((uint8_t)nrOfLayers, dmrs_type_arg, tp,
+                                     (uint8_t)antenna_ports, &cdm_groups, &ports, &front_load) != 0) {
+      out->reject_reason = "antenna-ports code point outside its DM-RS-type/rank reverse table";
+      return false;
+    }
   } else {
     // Multi-layer UL is out of scope: this deployment schedules num_layers=1 and the passive
     // receiver has no way to separate UE layers it was not precoded for. Reject rather than
     // produce a confident wrong port set.
     out->reject_reason = "multi-layer PUSCH not supported by this monitor";
+    return false;
+  }
+
+  // maxLength is an upper bound. A maxLength2 configuration can schedule a
+  // single-symbol row; the row, not that bound, determines the actual mask.
+  if (front_load < 1 || front_load > max_len) {
+    out->reject_reason = "antenna-ports front-loading exceeds DM-RS maxLength";
+    return false;
+  }
+  const int32_t mask = nr_pdcch_blind_ul_dmrs_mask(L, S, mapping_is_b, add_pos,
+                                                front_load, opts->dmrs_typeA_position);
+  if (mask < 0) {
+    out->reject_reason = "no valid PUSCH DM-RS position for this allocation length";
     return false;
   }
 
@@ -4374,6 +4646,12 @@ static bool blind_ul_finish(const nr_pdcch_blind_ul_opts_t* opts,
   out->num_rb            = num_rb;
   out->bwp_start         = opts->bwp_start;
   out->bwp_size          = opts->bwp_size;
+  if (ra_type0) {
+    out->ra_type0      = 1;
+    out->rbg_size      = (uint8_t)rbg_size;
+    out->rbg_bwp_start = opts->fdra_bwp_start;
+    out->rbg_bitmap    = riv & ((n_rbg >= 32) ? 0xFFFFFFFFu : ((1u << n_rbg) - 1u)); /* dynamicSwitch: drop the mode bit */
+  }
   out->tda_index         = (uint8_t)tda_idx;
   out->start_symbol      = S;
   out->num_symbols       = L;

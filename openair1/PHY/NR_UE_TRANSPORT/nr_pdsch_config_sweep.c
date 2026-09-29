@@ -44,6 +44,10 @@
  * a runner-up that decodes nothing at all. */
 #define SWEEP_MIN_RATE 0.02
 
+/* Forward declaration: the per-(typeA,legality) catalog template is built much further down (final
+ * review I8), but R30 item 1's mask_needs_typeb() below needs it as the type-A reference set. */
+static const nr_pdsch_config_sweep_state_t *catalog_template(int typeA, nr_pdsch_legality_fn_t legality);
+
 int nr_pdsch_config_sweep_init(nr_pdsch_config_sweep_state_t *st, int tda_count)
 {
   return nr_pdsch_config_sweep_init_legal(st, tda_count, 0, NULL);
@@ -60,6 +64,75 @@ bool nr_pdsch_tda_legal(int mapping_type, int S, int L)
   return false;
 }
 
+void nr_pdsch_k0_slot(int frame, int slot, int slots_per_frame, int k0, int *frame_out, int *slot_out)
+{
+  const int abs = slot + k0;
+  *frame_out = (frame + abs / slots_per_frame) % 1024;
+  *slot_out = abs % slots_per_frame;
+}
+
+/* Appends every legal (S,L,k0,add_pos,max_len,mcs_table) entry of ONE mapping type to st, merging any
+ * that duplicate an ALREADY-PRESENT effective PDU (S,L,k0,mask,table) anywhere in the catalog: the TB
+ * CRC cannot tell two identical PDUs apart, so neither could ever win. Shared by init_legal (mapping
+ * type A, always -- see R30 item 1 below) and add_typeb_layer (mapping type B, added later, on
+ * evidence). Returns the number of entries added, or -1 if the catalog would have overflowed (whatever
+ * already fit stays; the two callers differ only in what they do with that -1). */
+static int catalog_add_mapping_type(nr_pdsch_config_sweep_state_t *st, int mt, int typeA,
+                                    nr_pdsch_legality_fn_t legality)
+{
+  static const uint8_t kK0[]     = {0, 1};
+  static const uint8_t kAddPos[] = {0, 1, 2, 3};
+  static const uint8_t kMaxLen[] = {1, 2};
+  static const uint8_t kMcsTab[] = {0, 1, 2};
+  int added = 0;
+  for (uint8_t S = 0; S <= 12; S++)
+   for (uint8_t L = 2; S + L <= 14; L++) {
+    if (!nr_pdsch_tda_legal(mt, S, L))
+      continue;
+    for (unsigned e = 0; e < sizeof(kK0); e++)
+     for (unsigned b = 0; b < sizeof(kAddPos); b++)
+      for (unsigned c = 0; c < sizeof(kMaxLen); c++)
+       for (unsigned d = 0; d < sizeof(kMcsTab); d++) {
+        int32_t mask = 0;
+        if (legality) {
+          mask = legality(typeA, L, S, mt, kAddPos[b], kMaxLen[c]);
+          if (mask <= 0)
+            continue;
+          /* Equivalence is scoped to the SAME (S,L,k0): the data RE range comes from (S,L), so two
+           * DIFFERENT (S,L) pairs whose absolute dmrs_mask bit pattern happens to coincide are NOT
+           * the same effective PDU (different data REs either side of that mask) and must not be
+           * merged -- only an entry of the SAME allocation that reaches the same (mask,table) really
+           * is indistinguishable to the TB CRC. A whole-catalog scan without the (S,L) match silently
+           * dropped real type-B entries whenever an unrelated (S,L) elsewhere in the real mask
+           * generator's output happened to reuse the same mask value (measured: it ate every entry of
+           * a live TypeBTruthIsPinnedByOneOracleObservationAndConverges-style truth). */
+          bool equivalent = false;
+          for (int i = 0; i < st->n_hyp && !equivalent; ++i)
+            equivalent = st->hyp[i].tda_start == S && st->hyp[i].tda_length == L
+                        && st->hyp[i].k0 == kK0[e] && st->hyp[i].dmrs_mask == mask
+                        && st->hyp[i].mcs_table == kMcsTab[d];
+          if (equivalent)
+            continue;
+        }
+        if (st->n_hyp >= NR_PDSCH_SWEEP_MAX_HYP)
+          return -1; /* fail closed: caller decides what "did not fit" means for it */
+        nr_pdsch_cfg_hypothesis_t *h = &st->hyp[st->n_hyp];
+        h->dmrs_mask    = (uint16_t)mask;
+        h->tda_start    = S;
+        h->tda_length   = L;
+        h->k0           = kK0[e];
+        h->dmrs_add_pos = kAddPos[b];
+        h->dmrs_max_len = kMaxLen[c];
+        h->mcs_table    = kMcsTab[d];
+        h->mapping_type = mt;
+        st->order[st->n_hyp] = st->n_hyp;
+        st->n_hyp++;
+        added++;
+       }
+   }
+  return added;
+}
+
 int nr_pdsch_config_sweep_init_legal(nr_pdsch_config_sweep_state_t *st, int tda_count,
                                    int typeA, nr_pdsch_legality_fn_t legality)
 {
@@ -70,71 +143,66 @@ int nr_pdsch_config_sweep_init_legal(nr_pdsch_config_sweep_state_t *st, int tda_
   st->winner = -1;
   (void)tda_count; /* Contexts are isolated by the observed index; list width is not inferred here. */
 
-  /* EVERY legal (S, L) of TS 38.214 Table 5.1.2.1-1 for BOTH mapping types, not a curated prefix (the
-   * previous 8 pairs were the two lab cells' entries -- a deployment bias the search must not carry).
-   * k0 (TDRA slot offset) is a TDRA-entry property like S/L; {0,1} are enumerated up front and any
-   * larger k0 is appended only once the k0 oracle sees it on air (nr_pdsch_config_sweep_add_k0): all
-   * 33 values would be 16x the catalog for values almost no cell uses.
-   * The mapping type goes to the legality function, i.e. OAI's own DM-RS mask generator
-   * (fill_dmrs_mask()'s tables via nr_pdcch_blind_dmrs_mask): type B puts the first DM-RS on the
-   * first PDSCH symbol and takes the type-B columns of TS 38.211 Table 7.4.1.1.2-3/-4. */
-  static const uint8_t kK0[]     = {0, 1};
-  static int typeb = -1; /* ISAC_PDSCH_TYPEB=0: catalog without mapping type B (default on) */
-  if (typeb < 0) {
-    const char *e = getenv("ISAC_PDSCH_TYPEB");
-    typeb = (e != NULL && atoi(e) == 0) ? 0 : 1;
-  }
-  static const uint8_t kAddPos[] = {0, 1, 2, 3};
-  static const uint8_t kMaxLen[] = {1, 2};
-  static const uint8_t kMcsTab[] = {0, 1, 2};
-
-  for (uint8_t S = 0; S <= 12; S++)
-   for (uint8_t L = 2; S + L <= 14; L++)
-    for (unsigned e = 0; e < sizeof(kK0); e++) {
-     /* An effective PDU is fixed by (S, L, k0, mask, table): only entries of this (S,L,k0) block can
-      * be equivalent, and type A is enumerated first so it is the representative when a type-B entry
-      * coincides with it (e.g. S=2 under dmrs-TypeA-Position pos2). Merging across mapping types is
-      * required, not cosmetic: the CRC cannot separate two identical PDUs, so neither could win. */
-     const int block = st->n_hyp;
-     for (uint8_t mt = 0; mt <= typeb; mt++) {
-      if (!nr_pdsch_tda_legal(mt, S, L))
-        continue;
-      for (unsigned b = 0; b < sizeof(kAddPos); b++) {
-        for (unsigned c = 0; c < sizeof(kMaxLen); c++) {
-          for (unsigned d = 0; d < sizeof(kMcsTab); d++) {
-            int32_t mask = 0;
-            if (legality) {
-              mask = legality(typeA, L, S, mt, kAddPos[b], kMaxLen[c]);
-              if (mask <= 0)
-                continue;
-              bool equivalent = false;
-              for (int i = block; i < st->n_hyp && !equivalent; ++i)
-                equivalent = st->hyp[i].dmrs_mask == mask && st->hyp[i].mcs_table == kMcsTab[d];
-              if (equivalent)
-                continue;
-            }
-            /* Fail closed if the catalog ever grows beyond its declared bound. */
-            if (st->n_hyp >= NR_PDSCH_SWEEP_MAX_HYP) {
-              st->n_hyp = 0;
-              return 0;
-            }
-            nr_pdsch_cfg_hypothesis_t *h = &st->hyp[st->n_hyp];
-            h->dmrs_mask    = (uint16_t)mask;
-            h->tda_start    = S;
-            h->tda_length   = L;
-            h->k0           = kK0[e];
-            h->dmrs_add_pos = kAddPos[b];
-            h->dmrs_max_len = kMaxLen[c];
-            h->mcs_table    = kMcsTab[d];
-            h->mapping_type = mt;
-            st->order[st->n_hyp] = st->n_hyp;
-            st->n_hyp++;
-          }
-        }
-      }
-     }
-    }
+  /* R30 item 1 (2026-09-26, technique-d-regression.md): mapping type A only, unconditionally. Type B
+   * used to be built in here too (env ISAC_PDSCH_TYPEB, default on) and grew every fresh catalog
+   * 2.9x (750->2154 runtime, 2016->6336 pure) whether or not the cell even uses it -- diluting the
+   * trial density on EVERY hypothesis, including this cell's true type-A one, by the same factor.
+   * Measured: BASE (type-A only, pre-dilution) still occasionally decoded a TB on the phy-test rig
+   * while the diluted catalog decoded 0/6 independent runs in the same wall time. Type B now enters a
+   * context only once the air has shown it is needed -- see mask_needs_typeb()/add_typeb_layer()
+   * below, hooked from nr_pdsch_config_sweep_observe(). ISAC_PDSCH_TYPEB=0 (pdsch_typeb_enabled())
+   * still hard-disables it there, so the env knob keeps its old meaning as a kill switch. */
+  catalog_add_mapping_type(st, 0, typeA, legality);
   return st->n_hyp;
+}
+
+/* ISAC_PDSCH_TYPEB=0 (read once): hard-disables mapping type B, even via the evidence-triggered path
+ * below. Unset/nonzero (default): type B stays available, gated purely by observation. */
+static bool pdsch_typeb_enabled(void)
+{
+  static int enabled = -1;
+  if (enabled < 0) {
+    const char *e = getenv("ISAC_PDSCH_TYPEB");
+    enabled = (e != NULL && atoi(e) == 0) ? 0 : 1;
+  }
+  return enabled != 0;
+}
+
+/* R30 item 1's admission test: true when NO mapping-type-A hypothesis of this cell's own catalog can
+ * produce `mask`. Reuses the cached type-A template (init_legal's only output now) rather than a
+ * bespoke classifier: "not explainable by type A" is exactly what "the first DM-RS is not at
+ * dmrs-TypeA-Position" and "a type-B-only mask" both reduce to -- type A's own front-loaded DM-RS
+ * symbol is pinned at that one fixed slot position for every (S,L), so no type-A entry's mask can
+ * ever land anywhere else, and any other type-B-only pattern is equally absent from the template. */
+static bool mask_needs_typeb(uint16_t mask, int typeA, nr_pdsch_legality_fn_t legality)
+{
+  if (!mask || !legality)
+    return false;
+  const nr_pdsch_config_sweep_state_t *t = catalog_template(typeA, legality);
+  if (!t)
+    return false; /* every template slot busy: do not guess */
+  for (int i = 0; i < t->n_hyp; i++)
+    if (t->hyp[i].dmrs_mask == mask)
+      return false;
+  return true;
+}
+
+/* Appends every legal mapping-type-B entry not already present as an equivalent effective PDU.
+ * Mirrors add_k0_layer: only ADDS, never prunes the type-A incumbent, so a wrong trigger costs
+ * catalog size, never correctness (the TB CRC still adjudicates). No-op once the catalog already has
+ * a type-B entry (a sibling context already widened and this one inherited the same evidence). */
+static int add_typeb_layer(nr_pdsch_config_sweep_state_t *st, int typeA, nr_pdsch_legality_fn_t legality)
+{
+  if (st == NULL || st->n_hyp <= 0 || st->winner >= 0 || !legality || !pdsch_typeb_enabled())
+    return 0;
+  for (int i = 0; i < st->n_hyp; i++)
+    if (st->hyp[i].mapping_type == 1)
+      return 0;
+  const int before = st->n_hyp;
+  if (catalog_add_mapping_type(st, 1, typeA, legality) < 0)
+    LOG_W(PHY, "SWEEP: type-B layer did not fully fit a context holding %d (max %d): kept what fit\n",
+          before, NR_PDSCH_SWEEP_MAX_HYP);
+  return st->n_hyp - before;
 }
 
 /* OBSERVED DM-RS SYMBOL MASK (2026-09-15). The DM-RS symbol pattern of a grant is directly
@@ -232,6 +300,7 @@ typedef struct {
   prior_t prior;
   obs_set_t obs;
   uint64_t k0_seen; /* bit k: the k0 oracle saw this RNTI's PDSCH k slots after its DCI (k >= 2) */
+  bool typeb_seen; /* R30 item 1: this RNTI's DM-RS oracle has shown a mask type A cannot explain */
 } rnti_ctx_t;
 static rnti_ctx_t g_rnti[RNTI_CTX_MAX];
 static obs_set_t g_obs;   /* cell-wide: observations two RNTIs agree on */
@@ -548,6 +617,21 @@ typedef struct {
 
 static sweep_context_t g_contexts[NR_PDSCH_SWEEP_MAX_CONTEXTS];
 static nr_pdsch_sweep_reporter_t g_reporter;
+/* Census (lane perf 2026-09-27), all under g_lock: whether evidence ACCUMULATES is the question every
+ * "never converged" report needs answered first, and nothing in the log could answer it -- the
+ * new-context line is capped at 20 and the evidence line fires only on a pass or every 10000 outcomes
+ * of one context, i.e. never on a context that lives a few grants. */
+static uint64_t g_st_created, g_st_scored, g_st_stale, g_st_reindexed;
+
+/* A prune compacts st->hyp[] in place (or a probation restore rebuilds it), so every outstanding ticket
+ * names an index that now belongs to another hypothesis. Retire them: a new generation makes
+ * ticket_context() refuse them instead of crediting whatever moved onto their index. Appends (k0/type-B
+ * layers) keep every index and need no bump. Call under g_lock whenever n_hyp changed by a prune. */
+static void context_reindexed(sweep_context_t *c)
+{
+  c->generation = ++g_generation;
+  g_st_reindexed++;
+}
 static uint32_t g_recovery_minimum_failures = 32;
 static double g_recovery_probability_budget = 1e-6;
 bool nr_pdsch_config_sweep_set_recovery_policy(uint32_t minimum_failures, double probability_budget)
@@ -628,6 +712,10 @@ static nr_pdsch_config_sweep_state_t *g_spare_state;
 static void context_catalog(sweep_context_t *c, const rnti_ctx_t *r)
 {
   catalog_fill(c->state, c->tda_count, c->typeA, c->legality);
+  /* Restoring the "full" catalog after a bad prior/probation must include type B once the air has
+   * already shown it for this RNTI -- that is real evidence, not a prior that could be wrong. */
+  if (r && r->typeb_seen)
+    add_typeb_layer(c->state, c->typeA, c->legality);
   for (int k = 2; r && k <= 32; k++)
     if (r->k0_seen & (UINT64_C(1) << k))
       add_k0_layer(c->state, (uint8_t)k);
@@ -809,11 +897,18 @@ bool nr_pdsch_config_sweep_select(uint64_t configuration, uint16_t rnti, uint8_t
     c->state = fresh;
     c->configuration = configuration;
     c->generation = ++g_generation;
+    g_st_created++;
     c->rnti = rnti;
     c->tda = tda_index;
     c->tda_count = tda_count;
     c->typeA = typeA;
     c->legality = legality;
+    /* R30 item 1: widen to type B BEFORE the prior/observed prunes below, not after -- so those prunes
+     * (which already know how to treat a different mapping type, see prune_prior's dmrs_free) apply to
+     * the type-B entries too instead of leaving them unfiltered alongside an already-narrowed type-A
+     * set. Mirrors the k0-layer mechanism: only ever adds, seeded from this RNTI's own evidence. */
+    if (r->typeb_seen)
+      add_typeb_layer(fresh, typeA, legality);
     /* Seed: this RNTI's own prior first (its other TDA contexts already converged on these fields),
      * else the cell-wide one. Scoped to the same configuration key either way: a different cell
      * config is a different DM-RS/PDSCH setup and its prior says nothing here. */
@@ -849,6 +944,65 @@ bool nr_pdsch_config_sweep_select(uint64_t configuration, uint16_t rnti, uint8_t
   return h >= 0;
 }
 
+/* An earlier TDA can seed this context with its mask, but cannot prove that this TDA has the
+ * same duration. Restore type-A entries when a newly measured footprint has no representative
+ * left after that seed prune. Append only: pending tickets and existing CRC evidence stay valid.
+ * Type B has its separate observation-gated expansion below. Called with g_lock held. */
+static int restore_observed_typea(sweep_context_t *c, const rnti_ctx_t *r,
+                                 uint16_t mask, int last_symbol, int k0)
+{
+  if (last_symbol < -1 || last_symbol >= 14 || k0 < -1 || k0 > 32)
+    return 0;
+  nr_pdsch_config_sweep_state_t *st = c->state;
+  obs_set_t observation = {.n = 1, .mask = {mask}, .last = {last_symbol}, .k0 = {k0}};
+  for (int i = 0; i < st->n_hyp; i++)
+    if (obs_admits(&st->hyp[i], &observation, 0))
+      return 0;
+  const nr_pdsch_config_sweep_state_t *catalog = catalog_template(c->typeA, c->legality);
+  nr_pdsch_config_sweep_state_t *scratch = NULL;
+  if (!catalog) {
+    scratch = malloc(sizeof(*scratch));
+    if (!scratch)
+      return 0;
+    nr_pdsch_config_sweep_init_legal(scratch, c->tda_count, c->typeA, c->legality);
+    catalog = scratch;
+  }
+  const int before = st->n_hyp;
+  const prior_t *prior = r->prior.valid && r->prior.configuration == c->configuration ? &r->prior
+                        : g_prior.valid && g_prior.configuration == c->configuration ? &g_prior : NULL;
+  for (int i = 0; i < catalog->n_hyp && st->n_hyp < NR_PDSCH_SWEEP_MAX_HYP; i++) {
+    nr_pdsch_cfg_hypothesis_t h = catalog->hyp[i];
+    if (k0 >= 0)
+      h.k0 = (uint8_t)k0;
+    if (h.mapping_type != 0 || !obs_admits(&h, &observation, 0))
+      continue;
+    if (c->qm_obs >= 2 && !(c->qm_tables & (1u << h.mcs_table)))
+      continue;
+    if (prior && (h.mcs_table != prior->mcs_table
+                  || (prior->mapping_type == h.mapping_type
+                      && (h.dmrs_add_pos != prior->dmrs_add_pos || h.dmrs_max_len != prior->dmrs_max_len))))
+      continue;
+    bool duplicate = false;
+    for (int j = before; j < st->n_hyp; j++) {
+      const nr_pdsch_cfg_hypothesis_t *old = &st->hyp[j];
+      duplicate |= old->tda_start == h.tda_start && old->tda_length == h.tda_length
+                   && old->k0 == h.k0 && old->dmrs_mask == h.dmrs_mask && old->mcs_table == h.mcs_table;
+    }
+    if (duplicate)
+      continue;
+    const int at = st->n_hyp++;
+    st->hyp[at] = h;
+    st->trials[at] = st->ok[at] = 0;
+    st->order[at] = at;
+  }
+  free(scratch);
+  const int added = st->n_hyp - before;
+  if (added)
+    LOG_I(PHY, "SWEEP: ORACLE_RESTORE rnti=0x%04x tda=%u mask=0x%x last=%d k0=%d added=%d\n",
+          c->rnti, c->tda, mask, last_symbol, k0, added);
+  return added;
+}
+
 int nr_pdsch_config_sweep_observe_mask(const nr_pdsch_sweep_ticket_t *ticket, uint16_t dmrs_mask)
 {
   return nr_pdsch_config_sweep_observe(ticket, dmrs_mask, -1, -1);
@@ -873,9 +1027,22 @@ int nr_pdsch_config_sweep_observe(const nr_pdsch_sweep_ticket_t *ticket, uint16_
   if (obs_find(&g_obs, dmrs_mask) >= 0)
     obs_record(&g_obs, dmrs_mask, last_symbol, k0);
   sweep_context_t *c = ticket_context(ticket);
+  /* R30 item 1: a mask no mapping-type-A hypothesis of this cell can produce is direct evidence the
+   * cell is not type A only. Record it against the RNTI regardless of whether this ticket's own
+   * context is still open to react to it (a converged context's evidence must still seed its later
+   * siblings), mirroring how the k0 oracle records k0_seen unconditionally. */
+  if (c != NULL && pdsch_typeb_enabled() && mask_needs_typeb(dmrs_mask, c->typeA, c->legality))
+    r->typeb_seen = true;
   int n = 0;
-  if (c != NULL && c->state->winner < 0)
+  if (c != NULL && c->state->winner < 0) {
+    restore_observed_typea(c, r, dmrs_mask, last_symbol, k0);
+    if (r->typeb_seen)
+      add_typeb_layer(c->state, c->typeA, c->legality);
+    const int before = c->state->n_hyp;
     n = prune_to_observed(c->state, &r->obs);
+    if (c->state->n_hyp != before)
+      context_reindexed(c);
+  }
   pthread_mutex_unlock(&g_lock);
   return n;
 }
@@ -925,11 +1092,48 @@ int nr_pdsch_config_sweep_observe_qm(const nr_pdsch_sweep_ticket_t *ticket, uint
         const int before = c->state->n_hyp;
         n = prune_tables(c->state, inter);
         if (n == before) n = 0;
+        else if (n > 0) context_reindexed(c);
       }
     }
   }
   pthread_mutex_unlock(&g_lock);
   return n;
+}
+
+/* One line per 4096 scored outcomes (under g_lock): how many contexts exist and how long they live
+ * (created vs scored), how much feedback arrives stale, and for the context just fed how far it is from
+ * the separation test -- the leader's lower bound against the widest bound still overlapping it. */
+static void census_log(const sweep_context_t *c)
+{
+  const nr_pdsch_config_sweep_state_t *s = c->state;
+  int live = 0;
+  for (int i = 0; i < NR_PDSCH_SWEEP_MAX_CONTEXTS; i++)
+    live += g_contexts[i].generation != 0;
+  int lead = 0;
+  for (int i = 1; i < s->n_hyp; i++)
+    if (rate_of(s, i) > rate_of(s, lead)) lead = i;
+  double lo, hi, max_hi = 0;
+  nr_crc_interval(s->ok[lead], s->trials[lead], (unsigned)s->n_hyp, &lo, &hi);
+  int unrefuted = 0, twins = 0;
+  uint32_t tmin = UINT32_MAX, tmax = 0;
+  for (int i = 0; i < s->n_hyp; i++) {
+    if (s->trials[i] < tmin) tmin = s->trials[i];
+    if (s->trials[i] > tmax) tmax = s->trials[i];
+    if (i == lead) continue;
+    double l2, h2;
+    nr_crc_interval(s->ok[i], s->trials[i], (unsigned)s->n_hyp, &l2, &h2);
+    if (h2 >= lo) unrefuted++;
+    if (h2 > max_hi) max_hi = h2;
+    if (s->ok[i] * 2 > s->ok[lead] && s->ok[lead] >= 4) twins++; /* a runner-up passing at >= half the leader's count */
+  }
+  const nr_pdsch_cfg_hypothesis_t *h = &s->hyp[lead];
+  LOG_A(PHY, "SENSING: SWEEPSTAT scored=%llu stale=%llu created=%llu reindexed=%llu live=%d | rnti=0x%04x tda=%u "
+             "n_hyp=%d outcomes=%llu trials[min=%u max=%u] leader=%d S=%u L=%u k0=%u tbl=%u ok=%u/%u lo=%.3f "
+             "max_other_hi=%.3f unrefuted=%d near_twins=%d winner=%d\n",
+        (unsigned long long)g_st_scored, (unsigned long long)g_st_stale, (unsigned long long)g_st_created,
+        (unsigned long long)g_st_reindexed, live, c->rnti, (unsigned)c->tda, s->n_hyp,
+        (unsigned long long)c->outcomes, tmin, tmax, lead, h->tda_start, h->tda_length, h->k0, h->mcs_table,
+        s->ok[lead], s->trials[lead], lo, max_hi, unrefuted, twins, s->winner);
 }
 
 bool nr_pdsch_config_sweep_feedback(const nr_pdsch_sweep_ticket_t *ticket, bool crc_ok,
@@ -938,9 +1142,13 @@ bool nr_pdsch_config_sweep_feedback(const nr_pdsch_sweep_ticket_t *ticket, bool 
   pthread_mutex_lock(&g_lock);
   sweep_context_t *c = ticket_context(ticket);
   bool announced = false;
+  if (!c && ticket && ticket->generation)
+    g_st_stale++;
   if (c) {
     int w = nr_pdsch_config_sweep_feed(c->state, ticket->hypothesis, crc_ok);
     ++c->outcomes;
+    if ((++g_st_scored % 4096) == 0)
+      census_log(c);
     if (c->priored && c->state->winner < 0 && c->outcomes >= PRIOR_PROBATION) {
       double best_rate = 0.0;
       for (int i = 0; i < c->state->n_hyp; i++) {
@@ -957,6 +1165,7 @@ bool nr_pdsch_config_sweep_feedback(const nr_pdsch_sweep_ticket_t *ticket, bool 
          * later context pay the same probation. */
         if (c->legality) {
           context_catalog(c, rnti_ctx(c->rnti, false));
+          context_reindexed(c);
         }
         if (c->priored == PRIORED_CELL) {
           g_prior.valid = false;

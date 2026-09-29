@@ -1,0 +1,48 @@
+# /home/sens/gnb.yaml on sens4 as read at ~20:30 on 2026-09-25 (before the user's AL1/realism edits). ru_ofh/cu_cp/hal sections omitted = unchanged.
+cell_cfg:
+  dl_arfcn: 630000 #623334 #627666
+  band: 78
+  channel_bandwidth_MHz: 100
+  common_scs: 30
+  plmn: "00106"
+  tac: 1
+  pci: 2
+  sector_id: 1
+  nof_antennas_dl: 4
+  nof_antennas_ul: 4
+  prach:
+    prach_root_sequence_index: 0
+    zero_correlation_zone: 0
+    prach_frequency_start: 20
+    preamble_trans_max: 100
+  pdsch:
+    mcs_table: qam256
+    olla_target_bler: 0.1
+    max_rank: 1
+    min_ue_mcs: 1
+    max_ue_mcs: 25 #10
+    max_nof_harq_retxs: 16
+  pusch:
+     olla_max_snr_offset: 20
+     mcs_table: qam64
+     olla_target_bler: 0.1
+     min_ue_mcs: 1
+     max_ue_mcs: 25
+     max_nof_harq_retxs: 16 #16
+  ssb:
+    ssb_period: 20
+  tdd_ul_dl_cfg:
+    dl_ul_tx_period: 10
+    nof_dl_slots: 7
+    nof_ul_slots: 2
+    nof_dl_symbols: 8
+    nof_ul_symbols: 0
+expert_phy:
+    allow_request_on_empty_uplink_slot: true
+log:
+  filename: /home/sens/NICOLA/gnbLogs/gnb.log
+  all_level: warning #debug
+du:
+  warn_on_drop: true
+metrics:
+  autostart_stdout_metrics: true

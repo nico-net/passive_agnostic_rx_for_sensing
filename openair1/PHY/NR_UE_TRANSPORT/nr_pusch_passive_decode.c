@@ -9,12 +9,16 @@
 #include <string.h>
 #include <math.h>
 #include <stdatomic.h>
+#include <pthread.h>
 
+#include "nr_harq_init_tx.h" // per-(RNTI, pid) reserved-MCS retransmission record, shared with the DL decoder
 #include "PHY/MODULATION/nr_modulation.h" // nr_symbol_fep_ul: the gNB uplink FEP
 #include "PHY/nr_phy_common/inc/nr_phy_common.h" // nr_fo_compensation: the same de-rotation nr_slot_fep uses
 
 #include "nr_pusch_passive_decode.h"
+#include "nr_pusch_passive_dmrs_pdu.h"
 #include "nr_pusch_data_aided.h"
+#include "nr_pdsch_prb_set.h"
 
 #include "common/utils/LOG/log.h"
 #include "common/utils/nr/nr_common.h"
@@ -30,6 +34,7 @@
 #include "openair2/LAYER2/NR_MAC_COMMON/nr_mac_common.h"
 #include "PHY/NR_UE_ISAC/nr_isac.h" // UL CFR submission
 #include "nr_pdcch_blind_monitor_rt.h" // nr_pdcch_blind_monitor_get_cfg: the UCI search parameters
+#include "nr_pdcch_ul_interp_sweep.h" // gap item 2: nr_pusch_ul_energy_span/nr_pusch_ul_dmrs_pin_set
 
 /* nr_ulsch_decoding() has no declaration in any header this library exposes -- nr_transport_proto.h
  * declares nr_rx_pusch_group_tp() but not its decoder. Declared here against the definition read
@@ -91,6 +96,11 @@ NR_gNB_PHY_STATS_t *get_phy_stats(PHY_VARS_gNB *gNB, uint16_t rnti)
 static PHY_VARS_gNB *g_gnb[NR_PUSCH_PASSIVE_MAX_CTX];
 static int           g_gnb_nant;
 static _Atomic uint64_t g_try, g_crc_ok, g_rej_unsup, g_rej_setup;
+/* Reserved-UL-MCS retransmission record (gap-harq lane): the UL twin of
+ * nr_pdsch_passive_decode.c's g_dl_harq_init, own instance so a UL HARQ pid can never collide with
+ * a DL one that happens to share the same number. See nr_harq_init_tx.h. */
+static nr_harq_init_tx_table_t g_ul_harq_init;
+static pthread_mutex_t g_ul_harq_init_lock = PTHREAD_MUTEX_INITIALIZER;
 /* UL DM-RS identity estimate (CP-OFDM PUSCH, type 1, port 0): same sequence family as PDSCH
  * (TS 38.211 6.4.1.1.1.1 vs 7.4.1.1.1), reference point CRB 0, so the PDSCH estimator applies
  * unchanged. Accumulated on EVERY attempted grant, CRC-OK or not (review fix round 1, finding 2) --
@@ -496,15 +506,11 @@ static void fill_pusch_pdu(const nr_pdcch_blind_ul_result_t *g, int nant,
   p->data_scrambling_id = g->data_scrambling_id;
   p->nrOfLayers         = g->nrOfLayers;
 
-  p->ul_dmrs_symb_pos   = g->ul_dmrs_symb_pos;
-  p->dmrs_config_type   = g->dmrs_config_type;
-  p->ul_dmrs_scrambling_id = g->ul_dmrs_scrambling_id;
-  p->pusch_identity     = g->ul_dmrs_scrambling_id;
-  p->scid               = g->nscid;
-  p->num_dmrs_cdm_grps_no_data = g->n_dmrs_cdm_groups;
-  p->dmrs_ports         = g->dmrs_ports;
+  nr_pusch_passive_fill_dmrs_pdu(g, fp->Nid_cell, p);
 
-  p->resource_alloc     = 1;   // type 1 -- the only type this deployment schedules
+  /* LDPC consumes the allocated count. Gapped physical geometry is passed to the
+   * demodulator explicitly as a PRB list, not disguised as a contiguous span. */
+  p->resource_alloc     = 1;
   p->rb_start           = g->start_rb;
   p->rb_size            = g->num_rb;
   p->vrb_to_prb_mapping = 0;
@@ -625,6 +631,61 @@ static uint32_t passive_ul_slow_time_idx(const NR_DL_FRAME_PARMS *fp,
   return (uint32_t)(prod - lag);
 }
 
+/* ---- Gap item 2 (PUSCH TDRA type B): the DM-RS ENERGY oracle's live half ---------------------
+ * Accumulates a per-symbol energy profile from what THIS grant's own FEP already computed --
+ * [g->start_symbol, g->start_symbol+g->num_symbols), whatever TDA row is currently being guessed --
+ * so it costs no extra FEP call. Because the curated candidate catalogue
+ * (nr_pdcch_ul_interp_sweep_generate()) already includes a (0,14) row that every interpretation
+ * search tries, symbol coverage reaches the whole slot on its own well before this is needed; this
+ * function only has to notice when that has happened and pin. Read-only over rxdataF (which nothing
+ * downstream of nr_rx_pusch_group_tp() consults again for this grant), so it cannot perturb the
+ * decode it rides along with. A no-op once nr_pusch_ul_dmrs_pin_get() has a pin (checked first, so
+ * steady-state cost after that is one atomic load). */
+/* g_profile[]/g_seen_mask below are shared, plain (non-atomic) state written by every UL consumer
+ * thread that reaches this function -- `ul_thread` can run more than one consumer, so this is a
+ * real concurrent-writer case, not a theoretical one. A mutex is the simplest correct fix: the
+ * double array can't be updated atomically piecewise anyway (unlike the pin's own int fields,
+ * which the CAS-claim scheme in nr_pusch_ul_dmrs_pin_set() protects instead), and this section is
+ * cheap (a handful of int/double stores) so lock contention is not a concern. Energy for the
+ * symbols THIS call measured is computed OUTSIDE the lock (pure read of this grant's own rxdataF,
+ * no shared state touched) to keep the held section as short as possible. */
+static pthread_mutex_t g_ul_energy_lock = PTHREAD_MUTEX_INITIALIZER;
+static double          g_ul_energy_profile[14];
+static uint16_t        g_ul_energy_seen_mask;
+
+static void ul_dmrs_energy_oracle_observe(const nr_pdcch_blind_ul_result_t *g, const NR_DL_FRAME_PARMS *fp,
+                                          PHY_VARS_gNB *gnb, int slot_off, int symsz)
+{
+  if (nr_pusch_ul_dmrs_pin_get(NULL, NULL, NULL))
+    return;
+  const int s0 = g->start_symbol, s1 = g->start_symbol + g->num_symbols;
+  double   local_profile[14];
+  uint16_t local_mask = 0;
+  for (int sym = s0; sym < s1 && sym < 14; sym++) {
+    const c16_t *row = &gnb->common_vars.rxdataF[0][slot_off + sym * symsz];
+    double e = 0;
+    for (int p = g->start_rb; p < g->start_rb + g->num_rb && p < fp->N_RB_UL; p++)
+      for (int r = 0; r < 12; r++) {
+        const int k = (fp->first_carrier_offset + p * NR_NB_SC_PER_RB + r) % fp->ofdm_symbol_size;
+        e += (double)row[k].r * row[k].r + (double)row[k].i * row[k].i;
+      }
+    local_profile[sym] = (g->num_rb > 0) ? e / g->num_rb : e; /* per-PRB average: comparable across grants */
+    local_mask |= (uint16_t)(1u << sym);
+  }
+  int S = -1, L = -1;
+  bool span_ready = false;
+  pthread_mutex_lock(&g_ul_energy_lock);
+  for (int sym = s0; sym < s1 && sym < 14; sym++)
+    if (local_mask & (uint16_t)(1u << sym))
+      g_ul_energy_profile[sym] = local_profile[sym];
+  g_ul_energy_seen_mask |= local_mask;
+  if (g_ul_energy_seen_mask == 0x3FFFu) /* every symbol of the slot observed at least once */
+    span_ready = nr_pusch_ul_energy_span(g_ul_energy_profile, 0.25, &S, &L);
+  pthread_mutex_unlock(&g_ul_energy_lock);
+  if (span_ready)
+    nr_pusch_ul_dmrs_pin_set(S, L); /* independently thread-safe: CAS-claimed, see that function */
+}
+
 static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
                                           int      ctx,
                                           uint32_t frame,
@@ -643,18 +704,37 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
     out->reject_reason = "no plausible grant";
     return false;
   }
+  uint16_t prb[NR_PRB_SET_MAX];
+  bool gapped = false;
+  const bool fdra_unresolved = g->fdra_candidate_count != 0;
+  if (g->ra_type0) {
+    const int n = nr_ra_type0_prbs(g->rbg_bitmap, g->rbg_bwp_start, g->bwp_size,
+                                  g->rbg_size, prb, NR_PRB_SET_MAX);
+    if (n <= 0 || n != g->num_rb || prb[0] != g->start_rb) {
+      out->status = NR_PUSCH_PASSIVE_UNSUPPORTED;
+      out->reject_reason = "inconsistent type-0 PRB allocation";
+      return false;
+    }
+    for (int i = 0; i < n; ++i) gapped |= prb[i] != g->start_rb + i;
+  }
+  if (gapped || fdra_unresolved) {
+    static _Atomic unsigned long skipped_aux;
+    const unsigned long count = atomic_fetch_add_explicit(&skipped_aux, 1, memory_order_relaxed) + 1;
+    if (count == 1 || count % 1000 == 0)
+      LOG_I(PHY, "SENSING: UL_FDRA_AUX_SKIPPED n=%lu rnti=0x%x energy_pin,dmrs_id,cfr require resolved PRB geometry\n",
+            count, g->rnti);
+    if (cfr_only) {
+      out->status = NR_PUSCH_PASSIVE_UNSUPPORTED;
+      out->reject_reason = "gapped or ambiguous allocation CFR not implemented";
+      return false;
+    }
+  }
   /* Scope guards, each a case this receiver cannot do correctly rather than one it merely has not
    * been tested on. Silently attempting any of them would produce a confident wrong answer. */
   if (g->nrOfLayers != 1) {
     atomic_fetch_add_explicit(&g_rej_unsup, 1, memory_order_relaxed);
     out->status = NR_PUSCH_PASSIVE_UNSUPPORTED;
     out->reject_reason = "multi-layer PUSCH";
-    return false;
-  }
-  if (g->transform_precoding) {
-    atomic_fetch_add_explicit(&g_rej_unsup, 1, memory_order_relaxed);
-    out->status = NR_PUSCH_PASSIVE_UNSUPPORTED;
-    out->reject_reason = "DFT-s-OFDM (transform precoding) not wired";
     return false;
   }
   if (g->rv != 0) {
@@ -746,6 +826,7 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
   } while (0)
 
   PASSIVE_UL_FEP(ul_sample_offset);
+  if (!gapped && !fdra_unresolved) ul_dmrs_energy_oracle_observe(g, fp, gnb, slot_off, symsz);
   if (abs_slot && !nr_passive_samples_valid(
       atomic_load_explicit(&nr_ue_diag_producer_absolute_slot,memory_order_relaxed),
       (long)abs_slot,fp->slots_per_frame)) {
@@ -763,6 +844,12 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
   PUSCH_STAGE(3, "FEP done");
   nfapi_nr_pusch_pdu_t pdu;
   fill_pusch_pdu(g, nant, fp, &pdu);
+  static atomic_bool tp_scope_logged = false;
+  if (g->transform_precoding && !atomic_exchange_explicit(&tp_scope_logged, true, memory_order_relaxed)) {
+    LOG_A(PHY, "PUSCH TP scope: PCI-default nPUSCH-Identity=%u, no group/sequence hopping; "
+               "explicit nPUSCH-Identity/hopping discovery unsupported, hypothesis needs CRC validation\n",
+          pdu.pusch_identity);
+  }
   /* The reused estimator takes its pilot seed from this private context.
    * Keep physical PCI in frame_parms separate from the grant's DM-RS identity. */
   gnb->gNB_config.cell_config.phy_cell_id.value = g->ul_dmrs_scrambling_id;
@@ -770,15 +857,52 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
   const int n_dmrs_sym = __builtin_popcount((unsigned)g->ul_dmrs_symb_pos
                                             & (((1u << g->num_symbols) - 1u) << g->start_symbol));
   const int nb_dmrs_re_per_rb = ((g->dmrs_config_type == 0) ? 6 : 4) * g->n_dmrs_cdm_groups;
-  const uint32_t tbs = nr_compute_tbs(pdu.qam_mod_order, pdu.target_code_rate, g->num_rb, g->num_symbols,
-                                      nb_dmrs_re_per_rb * n_dmrs_sym, 0, 0, g->nrOfLayers);
+  // UL's reserved MCS range is 29-31 for tables 0/2 (Table_51311/51313, qam64/qam64LowSE) and
+  // 28-31 for tables 1/3/4 (Table_51312/61411/61412, qam256 and the two transform-precoded
+  // tables) -- corrected here (G5 review, gap-harq): an earlier version of this comment said
+  // "27-31", which is not a boundary any table actually uses. The reserved rows have no code rate
+  // of their own (their modulation order, in pdu.qam_mod_order above, IS already correct -- the
+  // spec table encodes it directly). TS 38.214 6.1.4.1: the UE reuses the TBS and base graph of
+  // the initial transmission of this HARQ process. nr_harq_init_tx.h is that record, gated on the
+  // NDI not having toggled since it was taken; a miss means the true initial transmission was
+  // never observed and the grant is refused, same as when this receiver had no such record at all.
+  nr_harq_init_tx_t ul_init_tx = {0};
+  bool have_ul_init_tx = false;
+  uint32_t tbs;
+  if (pdu.qam_mod_order == 0 || pdu.target_code_rate == 0) {
+    pthread_mutex_lock(&g_ul_harq_init_lock);
+    have_ul_init_tx = nr_harq_init_tx_lookup(&g_ul_harq_init, g->rnti, g->harq_pid, g->ndi, &ul_init_tx);
+    pthread_mutex_unlock(&g_ul_harq_init_lock);
+    if (!have_ul_init_tx) {
+      out->status = NR_PUSCH_PASSIVE_UNSUPPORTED;
+      out->reject_reason = "reserved UL MCS with no known initial transmission on this HARQ process";
+      return false;
+    }
+    if (ul_init_tx.nl != g->nrOfLayers) {
+      // See the DL twin's identical comment: this grant's OWN layer count governs how THIS
+      // occasion's REs map, so it is kept rather than replayed from the record; only logged.
+      static _Atomic unsigned long c_ = 0;
+      const unsigned long n_ = atomic_fetch_add_explicit(&c_, 1, memory_order_relaxed) + 1;
+      if (n_ == 1 || (n_ % 200) == 0)
+        LOG_W(PHY, "SENSING: PUSCH reserved-MCS retx rnti=0x%04x pid=%u layer count changed %u->%u\n",
+              g->rnti, g->harq_pid, ul_init_tx.nl, g->nrOfLayers);
+    }
+    tbs = ul_init_tx.tbs;
+    pdu.target_code_rate = ul_init_tx.code_rate;
+  } else {
+    tbs = nr_compute_tbs(pdu.qam_mod_order, pdu.target_code_rate, g->num_rb, g->num_symbols,
+                         nb_dmrs_re_per_rb * n_dmrs_sym, 0, 0, g->nrOfLayers);
+  }
   if (tbs == 0) {
     out->status = NR_PUSCH_PASSIVE_UNSUPPORTED;
     out->reject_reason = "TBS computed as zero";
     return false;
   }
   pdu.pusch_data.tb_size = tbs >> 3;
-  pdu.maintenance_parms_v3.ldpcBaseGraph = get_BG(tbs, pdu.target_code_rate);
+  pdu.maintenance_parms_v3.ldpcBaseGraph = have_ul_init_tx ? ul_init_tx.bg : get_BG(tbs, pdu.target_code_rate);
+  // The record write itself is deferred to the TB CRC outcome (G5 review, gap-harq) -- see the DL
+  // twin's identical comment for why recording here, before any decode is attempted, is not safe
+  // evidence. The actual write is at the NR_PUSCH_PASSIVE_OK branch below.
 
   NR_gNB_ULSCH_t *ulsch = &gnb->ulsch[0];
   ulsch->rnti     = g->rnti;
@@ -797,7 +921,13 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
     atomic_fetch_add_explicit(&g_try, 1, memory_order_relaxed);
   }
   PUSCH_STAGE(4, "entering nr_rx_pusch_group_tp");
-  nr_rx_pusch_group_tp(gnb, &pvp, &pdup, &unavp, 1, frame, slot);
+  const int rx_rc = gapped ? nr_rx_pusch_prb_list_tp(gnb, pvp, pdup, unavp, frame, slot, prb, g->num_rb)
+                           : nr_rx_pusch_group_tp(gnb, &pvp, &pdup, &unavp, 1, frame, slot);
+  if (rx_rc != 0) {
+    out->status = NR_PUSCH_PASSIVE_UNSUPPORTED;
+    out->reject_reason = "unsupported PUSCH PRB-list receive contract";
+    return false;
+  }
 
   /* ---- PER-GRANT DELAY REFINEMENT ---------------------------------------------------------------
    * A FIXED timing advance cannot work here, and the reason is measurable rather than theoretical.
@@ -833,7 +963,10 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
     return false;
   }
 
-      nr_rx_pusch_group_tp(gnb, &pvp, &pdup, &unavp, 1, frame, slot);
+      if (gapped)
+        nr_rx_pusch_prb_list_tp(gnb, pvp, pdup, unavp, frame, slot, prb, g->num_rb);
+      else
+        nr_rx_pusch_group_tp(gnb, &pvp, &pdup, &unavp, 1, frame, slot);
       out->est_delay_pre = d;
     }
   }
@@ -858,7 +991,7 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
    * The antennas are kept SEPARATE (nof_ant > 1, ant_stride_re) rather than combined: the whole
    * point of a 4-element array is that the inter-element phase carries the bearing, and combining
    * before submission would destroy exactly that. */
-  if (nr_isac_enabled() && nr_isac_source_enabled(NR_ISAC_SRC_PUSCH_DMRS)) {
+  if (!gapped && !fdra_unresolved && nr_isac_enabled() && nr_isac_source_enabled(NR_ISAC_SRC_PUSCH_DMRS)) {
     const uint32_t nof_ant_cfr = (uint32_t)nant;
     const int      num_sp      = pdu.param_v4.numSpatialStreamIndices;
     /* First DM-RS symbol inside the allocation. TS 38.211 puts the front-loaded one at l0, and it
@@ -999,8 +1132,14 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
    * remaining space once stage 1 exhausts itself without deciding), stage-2 accumulate throttled
    * (same ~64x-cost argument, same throttle constant). */
   /* Final review I2/I5: DCI 0_1 grants only (a 0_0 uses N_ID^cell, see blind_ul_apply_scrambling_ids()),
-   * and the two-window driver (stage 1 always on, stage 2 throttled + capped, all work stops once decided). */
-  if (nr_pusch_passive_queue_running() && g->ul_dci_format == NR_BLIND_UL_DCI_FORMAT_0_1 && g->dmrs_config_type == 0
+   * and the two-window driver (stage 1 always on, stage 2 throttled + capped, all work stops once decided).
+   * dmrs_config_type is no longer restricted to type 1: nr_dmrs_id_2stage_accumulate()/
+   * nr_dmrs_id_accumulate() now take the type and generate the matching reference sequence/RE
+   * pattern for both (dmrs_nr.c already supported type 2 generation; this estimator's own RE
+   * stepping was the part that was type-1-only). transform_precoding stays excluded: low-PAPR
+   * DM-RS uses a different sequence generator (nr_pusch_lowpaprtype1_dmrs_rx) this probe never
+   * calls, a separate gap. */
+  if (!gapped && !fdra_unresolved && nr_pusch_passive_queue_running() && g->ul_dci_format == NR_BLIND_UL_DCI_FORMAT_0_1
       && !g->transform_precoding && nr_dmrs_id_2stage_decided(nr_pusch_passive_ul_dmrs_id(g->nscid)) < 0) {
     const int ul_ns = g->nscid & 1;
     bool was_init = false;
@@ -1016,7 +1155,8 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
         const c16_t *row = &gnb->common_vars.rxdataF[0][slot_off + dsym * fp->ofdm_symbol_size];
         const int start_sc = fp->first_carrier_offset + (g->bwp_start + g->start_rb) * NR_NB_SC_PER_RB;
         nr_dmrs_id_2stage_accumulate(dst, row, fp->ofdm_symbol_size, start_sc, g->bwp_start + g->start_rb, g->num_rb,
-                                     fp->N_RB_UL, fp->symbols_per_slot, slot, dsym, g->nscid, fp->Ncp == NR_NORMAL);
+                                     fp->N_RB_UL, fp->symbols_per_slot, slot, dsym, g->nscid, fp->Ncp == NR_NORMAL,
+                                     g->dmrs_config_type);
       }
       nr_pusch_passive_ul_dmrs_unlock(ul_ns);
     }
@@ -1263,7 +1403,7 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
   }
   if (hp_crc_failed(ulsch)) {
     atomic_fetch_add_explicit(&g_seg_fail, 1, memory_order_relaxed);
-    nr_pusch_passive_ul_crc_note(g->rnti, g->ul_dci_format == NR_BLIND_UL_DCI_FORMAT_0_1, false);
+    if (!fdra_unresolved) nr_pusch_passive_ul_crc_note(g->rnti, g->ul_dci_format == NR_BLIND_UL_DCI_FORMAT_0_1, false);
     out->status = NR_PUSCH_PASSIVE_CRC_FAIL;
     out->reject_reason = "segment or final transport-block CRC failed";
     if (g->data_id_advance)
@@ -1296,7 +1436,19 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
   out->status = NR_PUSCH_PASSIVE_OK;
   out->tb     = hp->b;
   atomic_fetch_add_explicit(&g_crc_ok, 1, memory_order_relaxed);
-  nr_pusch_passive_ul_crc_note(g->rnti, g->ul_dci_format == NR_BLIND_UL_DCI_FORMAT_0_1, true);
+  // Reserved-MCS retransmission record (G5 review, gap-harq): only a CRC-verified, non-all-zero TB
+  // (this point, past the ZERO_TB guard above) is strong enough evidence to seed/refresh this
+  // (rnti, pid)'s record. Every UL grant this receiver decodes is dedicated (0_0/0_1 only ever
+  // schedule a C-/TC-RNTI), so there is no SI/RA/P-class table-churn case to guard against here
+  // (unlike the DL twin). A grant that itself USED a stored record (have_ul_init_tx) is a
+  // retransmission, not a fresh resolvable MCS, so it does not refresh the record either.
+  if (!have_ul_init_tx) {
+    pthread_mutex_lock(&g_ul_harq_init_lock);
+    nr_harq_init_tx_record(&g_ul_harq_init, g->rnti, g->harq_pid, g->ndi, pdu.qam_mod_order, g->nrOfLayers,
+                           pdu.maintenance_parms_v3.ldpcBaseGraph, tbs, pdu.target_code_rate);
+    pthread_mutex_unlock(&g_ul_harq_init_lock);
+  }
+  if (!fdra_unresolved) nr_pusch_passive_ul_crc_note(g->rnti, g->ul_dci_format == NR_BLIND_UL_DCI_FORMAT_0_1, true);
   if (g->data_id_advance)
     nr_pusch_passive_data_id_feed(true);
   {
@@ -1320,13 +1472,36 @@ static bool nr_pusch_passive_decode_inner(PHY_VARS_NR_UE *ue,
    * bits this receiver never decodes; reconstructing X there would be a guess, and a guess in the
    * numerator of Y/X is indistinguishable from a measurement downstream. Those grants keep
    * contributing through the DM-RS source, which does not depend on the payload at all. */
-  if (out->uci_ack_re == 0) {
+  if (!gapped && out->uci_ack_re == 0) {
     nr_isac_pusch_data_aided_submit(ue, gnb, &pdu, g, hp->b,
                                     NR_PUSCH_PASSIVE_DA_TAG_BASE + (uint32_t)ctx,
                                     passive_ul_slow_time_idx(fp, frame, slot, abs_slot),
                                     (uint32_t)nant, slot);
   }
   return true;
+}
+
+typedef struct {
+  PHY_VARS_NR_UE *ue;
+  int ctx;
+  uint32_t frame;
+  uint8_t slot;
+  int32_t ta;
+  uint64_t absolute_slot;
+  bool cfr_only;
+  double fo_hz;
+  nr_pusch_passive_out_t *out;
+  nr_pdcch_blind_ul_result_t last;
+  int attempts;
+} passive_fdra_attempt_t;
+
+static bool passive_fdra_attempt(void *opaque, const nr_pdcch_blind_ul_result_t *candidate)
+{
+  passive_fdra_attempt_t *a = opaque;
+  a->last = *candidate;
+  ++a->attempts;
+  return nr_pusch_passive_decode_inner(a->ue, a->ctx, a->frame, a->slot, candidate, a->ta,
+                                       a->absolute_slot, a->cfr_only, a->fo_hz, a->out);
 }
 
 /* The per-grant probe lives HERE, wrapping the decode, rather than in a caller: there are two
@@ -1345,8 +1520,33 @@ bool nr_pusch_passive_decode(PHY_VARS_NR_UE *ue,
                              double   fo_hz,
                              nr_pusch_passive_out_t *out)
 {
-  const bool ok = nr_pusch_passive_decode_inner(ue, ctx, frame, slot, g, ta_offset_samples, abs_slot,
-                                                cfr_only, fo_hz, out);
+  bool ok;
+  passive_fdra_attempt_t retry = {0};
+  if (g && g->fdra_candidate_count) {
+    retry = (passive_fdra_attempt_t){.ue=ue, .ctx=ctx, .frame=frame, .slot=slot, .ta=ta_offset_samples,
+      .absolute_slot=abs_slot, .cfr_only=cfr_only, .fo_hz=fo_hz, .out=out};
+    memset(out, 0, sizeof(*out));
+    out->status = NR_PUSCH_PASSIVE_UNSUPPORTED;
+    out->reject_reason = "invalid FDRA candidate bundle";
+    const int winner = nr_pdcch_blind_ul_fdra_try(g, passive_fdra_attempt, &retry);
+    ok = winner >= 0;
+    if (!cfr_only && (out->status == NR_PUSCH_PASSIVE_OK || out->status == NR_PUSCH_PASSIVE_CRC_FAIL)) {
+      nr_pusch_passive_ul_crc_note(g->rnti, g->ul_dci_format == NR_BLIND_UL_DCI_FORMAT_0_1, ok);
+      if (g->data_id_advance) nr_pusch_passive_data_id_feed(ok);
+    }
+    if (ok) {
+      static _Atomic unsigned long resolved;
+      const unsigned long count = atomic_fetch_add_explicit(&resolved, 1, memory_order_relaxed) + 1;
+      if (count == 1 || count % 1000 == 0)
+        LOG_I(PHY, "SENSING: UL_FDRA_CRC_RESOLVED n=%lu rnti=0x%x candidate=%d/%u mode=%u rb=%u+%u bitmap=0x%x\n",
+              count, g->rnti, winner + 1, g->fdra_candidate_count, g->fdra_candidates[winner].mode,
+              retry.last.start_rb, retry.last.num_rb, retry.last.rbg_bitmap);
+    }
+    if (retry.attempts) g = &retry.last;
+  } else {
+    ok = nr_pusch_passive_decode_inner(ue, ctx, frame, slot, g, ta_offset_samples, abs_slot,
+                                      cfr_only, fo_hz, out);
+  }
 
   if (s_diag_on() && g != NULL) {
     LOG_I(PHY,
@@ -1383,10 +1583,15 @@ void nr_pusch_passive_stats_dump(void)
    * fraction even when nothing is wrong. Quoting only the latter misled the downlink work once. */
   const uint64_t sf = atomic_load_explicit(&g_seg_fail, memory_order_relaxed);
   const uint64_t zt = atomic_load_explicit(&g_zero_tb, memory_order_relaxed);
+  uint64_t init_tx_hits, init_tx_evicts;
+  pthread_mutex_lock(&g_ul_harq_init_lock);
+  init_tx_hits   = g_ul_harq_init.hits;
+  init_tx_evicts = g_ul_harq_init.evicts;
+  pthread_mutex_unlock(&g_ul_harq_init_lock);
   LOG_I(PHY,
         "SENSING: pusch_passive[try=%lu crc_ok=%lu (%.1f%%) seg_fail=%lu zero_tb=%lu (%.1f%%) "
         "ta_refined=%lu uci[trials=%lu rescued=%lu] "
-        "health=%.1f%% unsup=%lu setup_fail=%lu] ul_cfr[submits=%lu re=%lu]\n",
+        "health=%.1f%% unsup=%lu setup_fail=%lu] init_tx[hit=%lu evict=%lu] ul_cfr[submits=%lu re=%lu]\n",
         (unsigned long)t, (unsigned long)k, t ? (100.0 * (double)k / (double)t) : 0.0,
         (unsigned long)sf, (unsigned long)zt, t ? (100.0 * (double)zt / (double)t) : 0.0,
         (unsigned long)atomic_load_explicit(&g_ta_refined, memory_order_relaxed),
@@ -1395,6 +1600,7 @@ void nr_pusch_passive_stats_dump(void)
         (k + sf) ? (100.0 * (double)k / (double)(k + sf)) : 0.0,
         (unsigned long)atomic_load_explicit(&g_rej_unsup, memory_order_relaxed),
         (unsigned long)atomic_load_explicit(&g_rej_setup, memory_order_relaxed),
+        (unsigned long)init_tx_hits, (unsigned long)init_tx_evicts,
         (unsigned long)atomic_load_explicit(&g_cfr_submits, memory_order_relaxed),
         (unsigned long)atomic_load_explicit(&g_cfr_re, memory_order_relaxed));
   if (utim_enabled() && g_utim_n[UTIM_TOTAL] > 0) {

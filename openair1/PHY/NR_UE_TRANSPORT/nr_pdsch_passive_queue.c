@@ -543,6 +543,34 @@ static int probe_span(const nr_pdsch_passive_job_t *j, int *nrb)
   return seg[best].prb_start;
 }
 
+void nr_pdsch_passive_oracle_inline(PHY_VARS_NR_UE *ue, const nr_pdsch_sweep_ticket_t *ticket,
+                                    const fapi_nr_dl_config_dlsch_pdu_rel15_t *pdu, const freq_alloc_bitmap_t *fa,
+                                    int nr_slot, c16_t *scratch)
+{
+  if (ticket == NULL || ticket->settled || ticket->generation == 0)
+    return;
+  nr_pdsch_passive_job_t j;
+  memset(&j, 0, sizeof(j));
+  j.dlsch_pdu = *pdu;
+  j.freq_alloc = *fa;
+  int nrb;
+  const int rb = probe_span(&j, &nrb);
+  if (nrb < 4)
+    return;
+  NR_DL_FRAME_PARMS *fp = &ue->frame_parms;
+  const uint32_t sz = fp->samples_per_slot_wCP;
+  double prof[14] = {0}, med = 1.0;
+  int last_sym = -1;
+  const uint16_t mask = dmrs_oracle_measure(ue, fp, sz, (c16_t(*)[sz])scratch, nr_slot, nr_dmrs_oracle_crb(pdu->BWPStart, rb),
+                                            nrb, pdu->nscid, pdu->dlDmrsScramblingId, &last_sym, prof, &med);
+  static _Atomic int s_log = 6;
+  if (mask && atomic_fetch_sub(&s_log, 1) > 0)
+    LOG_A(PHY, "SENSING: DMRS_ORACLE (in-line) slot=%d rb=%d+%d mask=0x%x last_sym=%d med=%.2f\n", nr_slot, rb, nrb, mask,
+          last_sym, med);
+  if (mask)
+    nr_pdsch_config_sweep_observe(ticket, mask, last_sym, 0); /* measured on the DCI's own slot: k0 = 0 */
+}
+
 static void *nr_pdsch_passive_queue_thread(void *arg)
 {
   const int idx = ((consumer_arg_t *)arg)->idx;
@@ -1068,9 +1096,13 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
          * gating this on `crc` would be circular: under a wrong id the CRC never passes, so the
          * identity that would explain the failures could never be measured.
          * Only DEDICATED-class grants (final review I2): SIB1/RAR/paging/TC/CSS-fallback DM-RS is
-         * scrambled with N_ID^cell, and mixing it in would average two different identities. */
+         * scrambled with N_ID^cell, and mixing it in would average two different identities.
+         * dmrsConfigType is no longer restricted to type 1 here either -- forced by the shared
+         * estimator's signature change (nr_pdcch_gap_dmrs2 fix), and left inconsistent with type 1
+         * would just move this same gap one file over. See nr_pusch_passive_decode.c's UL twin of
+         * this comment for the full reasoning. */
         const int dl_ns = pdu->nscid & 1;
-        if (job.grant.scr_dedicated && pr_nrb > 0 && pdu->dmrsConfigType == 0 && pdu->dlDmrsSymbPos
+        if (job.grant.scr_dedicated && pr_nrb > 0 && pdu->dlDmrsSymbPos
             && nr_dmrs_id_2stage_decided(&g_dl_dmrs_id[dl_ns]) < 0 && pthread_mutex_trylock(&g_dl_dmrs_id_lock[dl_ns]) == 0) {
           nr_dmrs_id_2stage_t *dst = &g_dl_dmrs_id[dl_ns];
           if (!g_dl_dmrs_id_init[dl_ns]) { nr_dmrs_id_2stage_init(dst, "PDSCH", ue->frame_parms.Nid_cell); g_dl_dmrs_id_init[dl_ns] = true; }
@@ -1081,7 +1113,7 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
           const int start_sc  = fp->first_carrier_offset + (pdu->BWPStart + pr_rb0) * 12;
           nr_dmrs_id_2stage_accumulate(dst, &rxdataF[0][sym * fp->ofdm_symbol_size], fp->ofdm_symbol_size, start_sc,
                                        rb_offset, pr_nrb, fp->N_RB_DL, fp->symbols_per_slot, job.nr_slot_rx, sym,
-                                       pdu->nscid, fp->Ncp == NR_NORMAL);
+                                       pdu->nscid, fp->Ncp == NR_NORMAL, pdu->dmrsConfigType);
           pthread_mutex_unlock(&g_dl_dmrs_id_lock[dl_ns]);
         }
         /* Data (PDSCH) scrambling identity: feed the outcome back to the per-RNTI sweep the wiring
@@ -1119,7 +1151,7 @@ static void *nr_pdsch_passive_queue_thread(void *arg)
            * fatal once several consumers submit concurrently across a wrap. */
           nr_isac_abs_slot_override = (uint64_t)job.absolute_slot;
           nr_isac_pdsch_data_aided_submit(ue, &proc, &dec.cw, &job.dlsch_pdu, &job.freq_alloc, job.rnti,
-                                          dec.tb, job.harq_pid_tag, rxdataF, (double)dec.nvar);
+                                          dec.tb, job.harq_pid_tag, rxdataF, (double)dec.nvar, dec.G);
           nr_isac_abs_slot_override = 0;
         }
       }

@@ -626,6 +626,43 @@ TEST(PdschConfigSweepOracle, ObservedMaskPrunesContextsCreatedLater) {
   EXPECT_LT(n * 4, alone);  // mcs_table is all that is left to the CRC
 }
 
+static int32_t long_short_legal(int, int length, int start, int mapping_b, int add, int maxlen)
+{
+  if (mapping_b || start != 2 || add != 2 || maxlen != 1)
+    return -1;
+  return length == 12 ? 0x884 : length == 6 ? 0x84 : -1;
+}
+
+TEST(PdschConfigSweepOracle, LaterShortTdaObservationRestoresCandidatesPrunedByEarlierLongTda) {
+  nr_pdsch_config_sweep_reset_all();
+  nr_pdsch_config_sweep_prior_reset();
+  nr_pdsch_sweep_ticket_t t{};
+  nr_pdsch_cfg_hypothesis_t h{};
+  ASSERT_TRUE(nr_pdsch_config_sweep_select(79, 0x4601, 0, 2, 0, long_short_legal, &t, &h));
+  ASSERT_EQ(nr_pdsch_config_sweep_observe(&t, 0x884, 13, 0), 3);
+  ASSERT_TRUE(nr_pdsch_config_sweep_select(79, 0x4601, 1, 2, 0, long_short_legal, &t, &h));
+  EXPECT_EQ(h.dmrs_mask, 0x884); // inherited observation is a seed, not proof that TDA1 is long
+  nr_pdsch_config_sweep_feedback(&t, false, nullptr);
+  const auto outstanding = t;
+  ASSERT_EQ(nr_pdsch_config_sweep_observe(&t, 0x84, 7, 0), 6);
+  // Appending does not move the old hypothesis or invalidate its pending feedback.
+  nr_pdsch_config_sweep_feedback(&outstanding, false, nullptr);
+  uint32_t passes = 0, trials = 0;
+  nr_pdsch_config_sweep_context_stats(79, 0x4601, 1, 0, &passes, &trials);
+  EXPECT_EQ(trials, 2u);
+  EXPECT_EQ(passes, 0u);
+  EXPECT_EQ(nr_pdsch_config_sweep_observe(&outstanding, 0x84, 7, 0), 6); // no duplicate append
+  bool short_seen = false, long_seen = false;
+  for (int i = 0; i < 12; i++) {
+    ASSERT_TRUE(nr_pdsch_config_sweep_select(79, 0x4601, 1, 2, 0, long_short_legal, &t, &h));
+    EXPECT_EQ(t.generation, outstanding.generation);
+    short_seen |= h.tda_start == 2 && h.tda_length == 6 && h.dmrs_mask == 0x84;
+    long_seen |= h.tda_start == 2 && h.tda_length == 12 && h.dmrs_mask == 0x884;
+  }
+  EXPECT_TRUE(short_seen);
+  EXPECT_TRUE(long_seen);
+}
+
 TEST(PdschConfigSweepOracle, MaskLastSymbolAndK0CollapseAContextToTheEndAmbiguity) {
   // A mask alone leaves every (S,L,k0,mcs) that produces it; the allocation END (last symbol with
   // energy on the grant's PRBs) and the job's k0 are observable in the same FEP. With test_legal's
@@ -707,16 +744,19 @@ TEST(PdschConfigSweepTypeB, LegalTdaTablesMatchTs38214) {
   EXPECT_FALSE(nr_pdsch_tda_legal(2, 0, 7));
 }
 
-TEST(PdschConfigSweepTypeB, CatalogIncludesTypeBAndFits) {
+/* R30 item 1 (technique-d-regression.md): a FRESH context's catalog is mapping type A only, matching
+ * base commit 222f98d072's pre-Task-14 (pre-dilution) size -- type B used to be built in
+ * unconditionally (2016 -> 6336 pure, 2.9x) whether or not the cell even used it, which measurably
+ * starved the type-A search this cell actually needed. Type B enters only once the DM-RS oracle
+ * observes a mask type A cannot explain (see the observation tests below). */
+TEST(PdschConfigSweepTypeB, FreshCatalogIsTypeAOnly) {
   nr_pdsch_config_sweep_state_t st;
   const int n = nr_pdsch_config_sweep_init(&st, 2);
-  int nb = 0;
-  for (int i = 0; i < n; i++)
-    nb += st.hyp[i].mapping_type == 1;
-  std::cerr << "[ MEASURED ] pure catalog n_hyp=" << n << " (type B " << nb << ") max=" << NR_PDSCH_SWEEP_MAX_HYP
+  std::cerr << "[ MEASURED ] fresh pure catalog n_hyp=" << n << " max=" << NR_PDSCH_SWEEP_MAX_HYP
             << " bytes/context=" << sizeof(nr_pdsch_config_sweep_state_t) << std::endl;
-  EXPECT_GT(nb, 0);
-  EXPECT_LT(n, NR_PDSCH_SWEEP_MAX_HYP);
+  EXPECT_EQ(n, 2016);
+  for (int i = 0; i < n; i++)
+    EXPECT_EQ(st.hyp[i].mapping_type, 0);
 }
 
 /* The mapping type reaches the legality function (OAI's mask generator takes it), and a type-B entry
@@ -732,16 +772,76 @@ static int32_t ab_legal(int, int length, int start, int mapping_b, int add, int 
     return 0x4; /* identical PDU to the type-A entry: must merge */
   return start == 5 && length == 4 && add == 1 ? 0x20 : 0;
 }
-TEST(PdschConfigSweepTypeB, TypeBReachesTheMaskGeneratorAndMergesIdenticalPdus) {
+
+/* The merge is catalog_add_mapping_type's own dedup, shared by init_legal and the evidence-triggered
+ * add_typeb_layer(). Equivalence is scoped to the SAME (S,L,k0): the data RE range comes from (S,L),
+ * so two DIFFERENT (S,L) that happen to produce the same absolute dmrs_mask are NOT the same
+ * effective PDU and must NOT be merged (an earlier version of this test drove exactly that case and
+ * was wrong -- it hid a real bug where the real mask generator's coincidental cross-(S,L) mask reuse
+ * silently ate legitimate type-B entries, caught by DlAdaptive.TypeBTruthIsPinnedByOneOracleObservat
+ * ionAndConverges in nr_dl_adaptive_test.cc). What DOES legitimately collide at the SAME (S,L) is two
+ * different add_pos values landing on the same DM-RS symbol pattern. A fresh catalog no longer mixes
+ * both mapping types in one call for the old test to observe pre-prune (R30 item 1), so this drives
+ * the same dedup code within one mapping type instead. */
+static int32_t dup_legal(int, int length, int start, int mapping_b, int add, int maxlen)
+{
+  if (maxlen != 1 || mapping_b)
+    return 0;
+  if (start == 1 && length == 13 && (add == 0 || add == 1))
+    return 0x4; /* two add_pos values, same effective PDU at the same (S,L,k0) -- must merge to one */
+  return 0;
+}
+TEST(PdschConfigSweepTypeB, IdenticalEffectivePdusMergeToOneHypothesis) {
   nr_pdsch_config_sweep_state_t st;
-  ASSERT_EQ(nr_pdsch_config_sweep_init_legal(&st, 2, 0, ab_legal), 12); /* 2 (S,L) x k0{0,1} x 3 tables */
-  int b = 0;
+  const int n = nr_pdsch_config_sweep_init_legal(&st, 2, 0, dup_legal);
+  EXPECT_EQ(n, 6); // one (S,L) worth of entries (k0{0,1} x 3 mcs tables), not two add_pos variants
+  for (int i = 0; i < n; i++) {
+    EXPECT_EQ(st.hyp[i].tda_start, 1);
+    EXPECT_EQ(st.hyp[i].tda_length, 13);
+  }
+}
+
+/* R30 item 1's own wording: "type B enters a context only once the DM-RS oracle observes ... a
+ * type-B-only mask." ab_legal's type-A catalog only ever produces mask 0x4 (S=1,L=13); 0x20
+ * (S=5,L=4,add=1) cannot come from any type-A hypothesis, so it must trigger the widening and then
+ * prune to exactly the entries that produce it -- "a type-B observation adds exactly the matching
+ * type-B entries." */
+TEST(PdschConfigSweepTypeB, ObservingATypeBOnlyMaskWidensToExactlyItsMatchingEntries) {
+  nr_pdsch_config_sweep_reset_all();
+  nr_pdsch_config_sweep_prior_reset();
+  nr_pdsch_sweep_ticket_t t{};
+  nr_pdsch_cfg_hypothesis_t h{};
+  ASSERT_TRUE(nr_pdsch_config_sweep_select(0xCC, 0x4601, 0, 2, 0, ab_legal, &t, &h));
+  nr_pdsch_config_sweep_state_t st{};
+  ASSERT_TRUE(nr_pdsch_config_sweep_snapshot(&t, &st));
+  EXPECT_EQ(st.n_hyp, 6); // fresh: type A only (S=1,L=13 x k0{0,1} x 3 tables)
   for (int i = 0; i < st.n_hyp; i++)
-    if (st.hyp[i].mapping_type == 1) {
-      b++;
-      EXPECT_EQ(st.hyp[i].tda_start, 5);
-      EXPECT_EQ(st.hyp[i].dmrs_mask, 0x20);
-    }
+    EXPECT_EQ(st.hyp[i].mapping_type, 0);
+
+  ASSERT_GT(nr_pdsch_config_sweep_observe_mask(&t, 0x20), 0);
+  // The prune re-numbered the catalog, so the pre-prune ticket is retired (lane perf 2026-09-27,
+  // TicketIssuedBeforeAPruneCannotScoreAfterIt); look through a fresh one.
+  EXPECT_FALSE(nr_pdsch_config_sweep_snapshot(&t, &st));
+  ASSERT_TRUE(nr_pdsch_config_sweep_select(0xCC, 0x4601, 0, 2, 0, ab_legal, &t, &h));
+  ASSERT_TRUE(nr_pdsch_config_sweep_snapshot(&t, &st));
+  EXPECT_EQ(st.n_hyp, 6); // 1 (S,L) x k0{0,1} x 3 tables, all mapping type B
+  for (int i = 0; i < st.n_hyp; i++) {
+    EXPECT_EQ(st.hyp[i].mapping_type, 1);
+    EXPECT_EQ(st.hyp[i].tda_start, 5);
+    EXPECT_EQ(st.hyp[i].tda_length, 4);
+    EXPECT_EQ(st.hyp[i].dmrs_mask, 0x20);
+  }
+
+  // A sibling context (same RNTI, different TDA index) created AFTER the observation inherits the
+  // widening too -- mirrors the k0-layer mechanism (PdschConfigSweepK0.ObservedK0IsAddedToTheContext).
+  nr_pdsch_sweep_ticket_t t1{};
+  nr_pdsch_cfg_hypothesis_t h1{};
+  ASSERT_TRUE(nr_pdsch_config_sweep_select(0xCC, 0x4601, 1, 2, 0, ab_legal, &t1, &h1));
+  nr_pdsch_config_sweep_state_t st1{};
+  ASSERT_TRUE(nr_pdsch_config_sweep_snapshot(&t1, &st1));
+  int b = 0;
+  for (int i = 0; i < st1.n_hyp; i++)
+    b += st1.hyp[i].mapping_type == 1;
   EXPECT_EQ(b, 6);
 }
 
@@ -752,27 +852,34 @@ TEST(PdschConfigSweepTypeB, PriorFromTypeAKeepsTypeBEntriesOfTheSameTable) {
   nr_pdsch_config_sweep_prior_reset();
   unsigned seed = 77;
   bool converged = false;
+  nr_pdsch_sweep_ticket_t t{};
+  nr_pdsch_cfg_hypothesis_t h{};
   for (int i = 0; i < 200000 && !converged; i++) {
-    nr_pdsch_sweep_ticket_t t{};
-    nr_pdsch_cfg_hypothesis_t h{};
     ASSERT_TRUE(nr_pdsch_config_sweep_select(0xAB, 0x4601, 0, 2, 0, ab_legal, &t, &h));
     const bool truth = h.mapping_type == 0 && h.k0 == 0 && h.mcs_table == 1;
     const double u = (double)rand_r(&seed) / (double)RAND_MAX;
     converged = nr_pdsch_config_sweep_feedback(&t, truth && u < 0.54, nullptr);
   }
   ASSERT_TRUE(converged);
+  // R30 item 1: type B enters only once observed. Tell this RNTI about the type-B-only mask (as the
+  // DM-RS oracle would on air) before opening the sibling -- without this the sibling is type-A only.
+  // The same observation also narrows by mask (prune_to_observed), so the sibling collapses straight to
+  // the type-B entries sharing both the prior's mcs_table AND the observed mask -- if prune_prior
+  // wrongly applied the type-A prior's add_pos to type-B entries too, they would have been dropped
+  // already and nothing would survive the mask narrowing that follows.
+  nr_pdsch_config_sweep_observe_mask(&t, 0x20);
   nr_pdsch_sweep_ticket_t t1{};
   nr_pdsch_cfg_hypothesis_t h1{};
   ASSERT_TRUE(nr_pdsch_config_sweep_select(0xAB, 0x4601, 1, 2, 0, ab_legal, &t1, &h1));
   nr_pdsch_config_sweep_state_t st{};
   ASSERT_TRUE(nr_pdsch_config_sweep_snapshot(&t1, &st));
-  int b = 0;
+  EXPECT_EQ(st.n_hyp, 2);  /* type B, table 1, k0 {0,1} -- its own add_pos 1, not the type-A prior's 0 */
   for (int i = 0; i < st.n_hyp; i++) {
     EXPECT_EQ(st.hyp[i].mcs_table, 1);
-    b += st.hyp[i].mapping_type == 1;
+    EXPECT_EQ(st.hyp[i].mapping_type, 1);
+    EXPECT_EQ(st.hyp[i].dmrs_add_pos, 1);
+    EXPECT_EQ(st.hyp[i].dmrs_mask, 0x20);
   }
-  EXPECT_EQ(b, 2);         /* type B, table 1, k0 {0,1} -- its add_pos 1 is not the type-A prior's 0 */
-  EXPECT_EQ(st.n_hyp, 4);
 }
 
 static int count_k0(const nr_pdsch_config_sweep_state_t &st, int k0)
@@ -812,7 +919,7 @@ TEST(PdschConfigSweepK0, ConvergenceOnAnotherK0DropsTheFalseLayer) {
   nr_pdsch_sweep_ticket_t t{};
   nr_pdsch_cfg_hypothesis_t h{};
   ASSERT_TRUE(nr_pdsch_config_sweep_select(0xAC, 0x4601, 0, 2, 0, ab_legal, &t, &h));
-  ASSERT_EQ(nr_pdsch_config_sweep_add_k0(&t, 3), 6);
+  ASSERT_EQ(nr_pdsch_config_sweep_add_k0(&t, 3), 3); // R30 item 1: fresh catalog is type A only (3 mcs tables at k0=0)
   unsigned seed = 5;
   bool converged = false;
   nr_pdsch_cfg_hypothesis_t w{};
@@ -828,4 +935,75 @@ TEST(PdschConfigSweepK0, ConvergenceOnAnotherK0DropsTheFalseLayer) {
   nr_pdsch_config_sweep_state_t st{};
   ASSERT_TRUE(nr_pdsch_config_sweep_snapshot(&t, &st));
   EXPECT_EQ(count_k0(st, 3), 0);
+}
+
+/* ---- Lane perf (2026-09-27): a prune compacts st->hyp[] IN PLACE, so every ticket issued before it
+ * names an index that now belongs to a different hypothesis (or none). Such a ticket must be refused,
+ * never credited to whatever landed on its old index. Before the fix the context generation did not
+ * change on a prune, and a pre-prune ticket for old index 0..2 scored the post-prune entry 0..2. */
+TEST(PdschConfigSweepOracle, TicketIssuedBeforeAPruneCannotScoreAfterIt) {
+  nr_pdsch_config_sweep_reset_all();
+  nr_pdsch_config_sweep_prior_reset();
+  const uint16_t mask = (uint16_t)test_legal(0, 13, 1, 0, 2, 1); // S=1 L=13 add 2 len 1
+  nr_pdsch_sweep_ticket_t old{};
+  nr_pdsch_cfg_hypothesis_t h{};
+  bool found = false;
+  for (int i = 0; i < NR_PDSCH_SWEEP_MAX_HYP && !found; i++) {
+    ASSERT_TRUE(nr_pdsch_config_sweep_select(0x51, 0x4601, 0, 2, 0, test_legal, &old, &h));
+    found = old.hypothesis < 3 && h.dmrs_mask != mask;
+  }
+  ASSERT_TRUE(found);
+  ASSERT_EQ(nr_pdsch_config_sweep_observe(&old, mask, 13, 0), 3); // prunes to the 3 mcs tables
+  nr_pdsch_config_sweep_feedback(&old, true, nullptr);            // in flight across the prune
+  nr_pdsch_sweep_ticket_t now{};
+  ASSERT_TRUE(nr_pdsch_config_sweep_select(0x51, 0x4601, 0, 2, 0, test_legal, &now, &h));
+  nr_pdsch_config_sweep_state_t state{};
+  ASSERT_TRUE(nr_pdsch_config_sweep_snapshot(&now, &state));
+  ASSERT_EQ(state.n_hyp, 3);
+  for (int i = 0; i < state.n_hyp; i++) {
+    EXPECT_EQ(state.trials[i], 0u) << "pre-prune ticket credited to hypothesis " << i;
+    EXPECT_EQ(state.ok[i], 0u);
+  }
+  EXPECT_FALSE(nr_pdsch_config_sweep_snapshot(&old, &state)); // the old ticket names a dead layout
+}
+
+/* The same holds for the Qm oracle's table prune (observe_qm runs on the consumer after its own
+ * feedback, but OTHER consumers' tickets are still in flight). */
+TEST(PdschConfigSweepQm, TicketIssuedBeforeATablePruneCannotScoreAfterIt) {
+  nr_pdsch_config_sweep_reset_all();
+  nr_pdsch_config_sweep_prior_reset();
+  nr_pdsch_sweep_ticket_t old{}, t{};
+  nr_pdsch_cfg_hypothesis_t h{};
+  bool found = false; /* an old index that survives the prune's re-numbering, so it WOULD be credited */
+  for (int i = 0; i < NR_PDSCH_SWEEP_MAX_HYP && !found; i++) {
+    ASSERT_TRUE(nr_pdsch_config_sweep_select(0x52, 0x4601, 0, 2, 0, test_legal, &old, &h));
+    found = old.hypothesis < 10;
+  }
+  ASSERT_TRUE(found);
+  ASSERT_TRUE(nr_pdsch_config_sweep_select(0x52, 0x4601, 0, 2, 0, test_legal, &t, &h));
+  nr_pdsch_config_sweep_observe_qm(&t, 20, 8);          // MCS 20 at Qm 8 is table 1 only
+  ASSERT_GT(nr_pdsch_config_sweep_observe_qm(&t, 20, 8), 0);
+  EXPECT_FALSE(nr_pdsch_config_sweep_feedback(&old, true, nullptr));
+  nr_pdsch_sweep_ticket_t now{};
+  ASSERT_TRUE(nr_pdsch_config_sweep_select(0x52, 0x4601, 0, 2, 0, test_legal, &now, &h));
+  nr_pdsch_config_sweep_state_t state{};
+  ASSERT_TRUE(nr_pdsch_config_sweep_snapshot(&now, &state));
+  for (int i = 0; i < state.n_hyp; i++)
+    EXPECT_EQ(state.trials[i], 0u);
+}
+
+/* A k0 hypothesis decodes the slot k0 after the DCI: every decode path (deferred fast path, deferred
+ * normal path, in-line) must target that slot, or a k0 = 1 entry decodes the SAME samples as its
+ * k0 = 0 twin, scores identically, and the sweep can never separate them (it correctly refuses to
+ * pick between two indistinguishable hypotheses) -- measured: 0 CONVERGED on the phy-test bed. */
+TEST(PdschConfigSweepK0, TargetSlotWrapsFrameAndSfn) {
+  int f = -1, s = -1;
+  nr_pdsch_k0_slot(100, 5, 20, 0, &f, &s);
+  EXPECT_EQ(f, 100); EXPECT_EQ(s, 5);
+  nr_pdsch_k0_slot(100, 19, 20, 1, &f, &s);
+  EXPECT_EQ(f, 101); EXPECT_EQ(s, 0);
+  nr_pdsch_k0_slot(1023, 18, 20, 3, &f, &s);
+  EXPECT_EQ(f, 0); EXPECT_EQ(s, 1);
+  nr_pdsch_k0_slot(7, 2, 20, 32, &f, &s);
+  EXPECT_EQ(f, 8); EXPECT_EQ(s, 14);
 }

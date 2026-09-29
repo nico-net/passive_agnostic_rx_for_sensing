@@ -2,6 +2,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <string.h>
+#include "common/utils/utils.h" // sizeofArray
 
 bool nr_prb_list_normalise(const uint16_t *prb, int n, int bwp_size, uint32_t *bitmap, int bitmap_words, int *first,
                            int *last)
@@ -21,6 +22,21 @@ bool nr_prb_list_normalise(const uint16_t *prb, int n, int bwp_size, uint32_t *b
   memcpy(bitmap, bm, (size_t)bitmap_words * sizeof(*bitmap));
   *first = lo;
   *last = hi;
+  return true;
+}
+
+bool nr_pdsch_passive_alloc_normalise(freq_alloc_bitmap_t *fa, int bwp_size)
+{
+  if (fa->n_prb_list == 0)
+    return true;
+  uint32_t bm[sizeofArray(fa->bitmap)];
+  int lo, hi;
+  if (!nr_prb_list_normalise(fa->prb_list, fa->n_prb_list, bwp_size, bm, (int)sizeofArray(bm), &lo, &hi))
+    return false; /* fa untouched */
+  memcpy(fa->bitmap, bm, sizeof(bm));
+  fa->first_rb = lo;
+  fa->last_rb = hi;
+  fa->num_rbs = fa->n_prb_list;
   return true;
 }
 

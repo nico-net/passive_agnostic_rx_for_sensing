@@ -36,10 +36,14 @@ void nr_csirs_blind_rt_slot(PHY_VARS_NR_UE *ue, int slot, uint32_t absolute_slot
                             c16_t rxdataF[][ue->frame_parms.samples_per_slot_wCP]);
 
 #include "nfapi/open-nFAPI/nfapi/public_inc/fapi_nr_ue_interface.h"
-/** The confirmed cell CSI-RS resource as a FAPI PDU for PDSCH rate matching, if the blind search has
- *  converged and the resource occurs in `absolute_slot`. Returns true and fills *out; else false. */
-bool nr_csirs_blind_rt_rate_match(uint32_t absolute_slot, fapi_nr_dl_config_csirs_pdu_rel15_t *out);
-/** Same for the confirmed ZERO-POWER resource (csi_type 2): REs to rate-match around, nothing to
- *  estimate on. */
-bool nr_csirs_blind_rt_rate_match_zp(uint32_t absolute_slot, fapi_nr_dl_config_csirs_pdu_rel15_t *out);
+/** Every confirmed cell CSI-RS resource occurring in `absolute_slot`, as FAPI PDUs for PDSCH rate
+ *  matching: NZP (csi_type 1) first, then ZERO-POWER (csi_type 2, REs to rate-match around, nothing
+ *  to estimate on). Returns how many were written to out[0..max). */
+int nr_csirs_blind_rt_rate_match_all(uint32_t absolute_slot, fapi_nr_dl_config_csirs_pdu_rel15_t *out, int max);
+/** Decoded-grant evidence on a ZP (csi_type 2) rate-matching entry this module handed out: the grant decoded
+ *  for PDSCH slot @p pdsch_absolute_slot scored @p score = nr_csirs_blind_zp_grant_score() on its own PRBs.
+ *  Thread-safe (the PDSCH decode consumers call it); queued and applied by the next nr_csirs_blind_rt_slot(),
+ *  which owns the search state. Entries that match no exported ZP geometry are dropped there. */
+void nr_csirs_blind_rt_zp_grant_evidence(uint32_t pdsch_absolute_slot, const fapi_nr_dl_config_csirs_pdu_rel15_t *zp,
+                                         double score);
 #endif /* __NR_CSIRS_BLIND_RT_H__ */

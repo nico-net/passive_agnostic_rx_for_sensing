@@ -79,12 +79,19 @@ typedef struct {
 typedef void (*nr_pdsch_sweep_reporter_t)(const nr_pdsch_sweep_report_t *);
 void nr_pdsch_config_sweep_set_reporter(nr_pdsch_sweep_reporter_t);
 
-/* ISAC_PDSCH_TYPEB=0 (read once) drops mapping type B from the catalog; default on.
- * Pure catalog (no mask merging): (42 type-A + 90 type-B legal (S,L)) x k0 {0,1} x 4 add_pos x 2 max_len
- * x 3 mcs_table = 6336. Runtime (merged by effective mask, pos2) = 2154, i.e. ~1077 per k0 layer, so
- * 8192 leaves room for five observed k0 >= 2 layers. Per context: 8192 x 22 B = 180 KB, heap-allocated
- * when a context slot is first used (nr-uesoftmodem mlockall()s, so 1024 inline states would pin
- * 185 MB at startup). */
+/* ISAC_PDSCH_TYPEB=0 (read once) hard-disables mapping type B entirely; default on.
+ * R30 item 1 (2026-09-26, technique-d-regression.md): a fresh/initial catalog is mapping type A
+ * ONLY -- type A pure catalog 2016, runtime (merged by effective mask, pos2) ~750, matching base
+ * commit 222f98d072's pre-Task-14 numbers. Type B enters a context only once the DM-RS oracle
+ * observes a mask no type-A hypothesis can produce (nr_pdsch_config_sweep_observe(), mirroring the
+ * k0-layer mechanism: adds hypotheses, never prunes the incumbent). Diluting every fresh catalog
+ * 2.9x regardless of whether the cell uses type B measurably starved the type-A search this cell
+ * actually needed (BASE still occasionally decoded on the phy-test rig; the diluted catalog did not,
+ * in the same wall time). Full both-types pure catalog, when triggered: (42 type-A + 90 type-B legal
+ * (S,L)) x k0 {0,1} x 4 add_pos x 2 max_len x 3 mcs_table = 6336; runtime up to ~2154, i.e. ~1077 per
+ * k0 layer, so 8192 leaves room for five observed k0 >= 2 layers on top of it. Per context:
+ * 8192 x 22 B = 180 KB, heap-allocated when a context slot is first used (nr-uesoftmodem mlockall()s,
+ * so 1024 inline states would pin 185 MB at startup). */
 #define NR_PDSCH_SWEEP_MAX_HYP 8192
 #define NR_PDSCH_SWEEP_MAX_CONTEXTS 1024 /* one per (layout x TDA index) under the wide search; 256 thrashed at 809 layouts */
 
@@ -192,6 +199,11 @@ int nr_pdsch_config_sweep_observe(const nr_pdsch_sweep_ticket_t *ticket, uint16_
  *  remembers it for this RNTI's later contexts. Returns the number of hypotheses added: 0 when the
  *  layer is already there, k0 > 32, the context is settled/stale, or the layer would not fit. */
 int nr_pdsch_config_sweep_add_k0(const nr_pdsch_sweep_ticket_t *t, uint8_t k0);
+/** The PDSCH slot a hypothesis with slot offset `k0` targets for a DCI received in (frame, slot):
+ *  slot + k0, carried into the frame (and SFN, mod 1024). Every decode path must use it: decoding a
+ *  k0 = 1 hypothesis on the DCI's own slot makes it an exact twin of its k0 = 0 sibling, and the sweep
+ *  (correctly) never picks between two indistinguishable hypotheses. */
+void nr_pdsch_k0_slot(int frame, int slot, int slots_per_frame, int k0, int *frame_out, int *slot_out);
 /** Returns true exactly once on convergence; fills winner when supplied. */
 bool nr_pdsch_config_sweep_feedback(const nr_pdsch_sweep_ticket_t *ticket, bool crc_ok,
                                    nr_pdsch_cfg_hypothesis_t *winner);

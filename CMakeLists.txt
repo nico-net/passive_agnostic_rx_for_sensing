@@ -976,6 +976,7 @@ set(PHY_SRC_UE
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/dci_nr.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor_rt.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_passive_decode.c
+  ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_ssb_rate_match.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_passive_mac_ta.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_ptrs_unav.c
   ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_dci11_layout_sweep.c
@@ -1460,7 +1461,7 @@ target_link_libraries(NR_L2_UE PRIVATE nr_nas)
 # executables (see the test_nr_pdcch_coreset_map/test_nr_pdcch_dci_length_sweep targets below) --
 # nothing wired them into any library nr-uesoftmodem links, so the first real (non-test) caller
 # failed at link time with "undefined reference" until they were added here.
-add_library(nr_pdcch_blind_monitor ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_rnti_bootstrap.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_coreset_map.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_coreset_bank.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_uss_tracker.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_dci_length_sweep.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_config_sweep.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_hyp_sweep.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_field_sweep.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_interp_sweep.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_discovery.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_passive_acq_state.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_tdd_pattern.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_sib1_prior.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_joint_solve.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_joint_live.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_prb_set.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_al1_map.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_qm_oracle.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pusch_passive_ul_ids.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_scrambling_id_sweep.c)
+add_library(nr_pdcch_blind_monitor ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_rnti_bootstrap.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_coreset_map.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_coreset_bank.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_uss_tracker.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_dci_length_sweep.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_config_sweep.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_hyp_sweep.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_field_sweep.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_interp_sweep.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_ul_discovery.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_passive_acq_state.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_tdd_pattern.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_sib1_prior.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_joint_solve.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_joint_live.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_prb_set.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_al1_map.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_qm_oracle.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pusch_passive_ul_ids.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_scrambling_id_sweep.c ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_dci11_pin.c)
 # nr_scrambling_id_sweep.c lives HERE only (final review I7): nr_pusch_passive_ul_ids.c (this library) and
 # nr_pdsch_passive_decode.c (PHY_NR_UE) both call it. Every executable that pulls nr_pdsch_passive_decode.o
 # already needs this library (nr_prb_segments, nr_pdsch_config_sweep_*), so no PHY_NR_UE-only link unit loses it.
@@ -2158,6 +2159,28 @@ target_link_libraries(nr_ulsim PRIVATE
   )
 target_link_libraries(nr_ulsim PRIVATE asn1_nr_rrc_hdrs asn1_lte_rrc_hdrs)
 
+add_executable(nr_pusch_ra0sim
+  ${OPENAIR1_DIR}/SIMULATION/NR_PHY/pusch_ra0sim.c
+  ${NFAPI_USER_DIR}/nfapi.c
+  ${NFAPI_USER_DIR}/gnb_ind_vars.c
+  ${PHY_INTERFACE_DIR}/queue_t.c)
+target_link_libraries(nr_pusch_ra0sim PRIVATE
+  -Wl,--start-group UTIL SIMU PHY_NR_COMMON PHY_NR PHY_NR_UE NR_UE_ISAC SCHED_NR_LIB SCHED_NR_UE_LIB MAC_UE_NR MAC_NR_COMMON CONFIG_LIB L2_NR nr_pdcch_blind_monitor -Wl,--end-group
+  m pthread ${T_LIB} ITTI dl nr_ue_phy_meas physim_common softmodem_common NR_L2_UE
+  asn1_nr_rrc_hdrs asn1_lte_rrc_hdrs)
+if (ENABLE_TESTS)
+  add_test(NAME test_nr_pusch_ra0_qpsk COMMAND nr_pusch_ra0sim -n 2 -s 60 -S 60.1 -r 16 -w 2 -R 106 -m 9 -v 1)
+  add_test(NAME test_nr_pusch_ra0_qam16 COMMAND nr_pusch_ra0sim -n 2 -s 60 -S 60.1 -r 16 -w 2 -R 106 -m 16 -v 1)
+  add_test(NAME test_nr_pusch_ra0_qam64 COMMAND nr_pusch_ra0sim -n 2 -s 60 -S 60.1 -r 16 -w 46 -R 106 -m 24 -v 1)
+  add_test(NAME test_nr_pusch_ra0_qam256 COMMAND nr_pusch_ra0sim -n 2 -s 60 -S 60.1 -r 16 -w 46 -R 106 -m 25 -q 1 -v 1)
+  add_test(NAME test_nr_pusch_ra0_multidmrs COMMAND nr_pusch_ra0sim -n 2 -s 60 -S 60.1 -r 16 -w 2 -R 106 -m 16 -v 1 -U 0,2,1,2)
+  add_test(NAME test_nr_pusch_ra0_short_segments COMMAND nr_pusch_ra0sim -n 2 -s 60 -S 60.1 -r 3 -w 50 -R 106 -m 9 -v 1)
+  add_test(NAME test_nr_pusch_ra0_late_typeb COMMAND nr_pusch_ra0sim -n 2 -s 60 -S 60.1 -r 16 -w 2 -R 106 -m 9 -v 1 -a 5 -b 4)
+  add_test(NAME test_nr_pusch_ra0_type2 COMMAND nr_pusch_ra0sim -n 2 -s 60 -S 60.1 -r 16 -w 53 -R 106 -m 9 -v 1 -U 0,0,2,1)
+  add_test(NAME test_nr_pusch_ra0_fdra_collision COMMAND nr_pusch_ra0sim -n 2 -s 60 -S 60.1 -r 32 -w 16 -R 106 -m 9 -v 1)
+  set_tests_properties(test_nr_pusch_ra0_fdra_collision PROPERTIES ENVIRONMENT "RA0_FDRA_COLLISION=1")
+endif()
+
 add_executable(nr_srssim
   ${OPENAIR1_DIR}/SIMULATION/NR_PHY/srssim.c
   ${NFAPI_USER_DIR}/nfapi.c
@@ -2271,6 +2294,7 @@ endif()
 
 if(ENABLE_TESTS)
   find_package(GTest)
+  add_dependencies(tests nr_pusch_ra0sim)
   if (NOT GTest_FOUND)
     message(STATUS "GTest package not found, will download googletest automatically. To prevent that install google test on your system (libgtest-dev)")
     CPMAddPackage(
@@ -2398,12 +2422,14 @@ if(ENABLE_TESTS)
     ${OPENAIR1_DIR}/PHY/NR_REFSIG/nr_dmrs_rx.c
     ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_dl_adaptive_test.cc
     ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_ul_field_sweep_test.cc
-    ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_ul_interp_sweep_test.cc)
+    ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_ul_interp_sweep_test.cc
+    ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_dci11_pin_test.cc)
   add_test(NAME test_nr_dl_adaptive COMMAND test_nr_pdcch_blind_monitor --gtest_filter=DlAdaptive.*:DlGeometry.*)
   add_custom_target(test_nr_pdcch_ul_field_sweep DEPENDS test_nr_pdcch_blind_monitor)
   add_custom_target(test_nr_pdcch_ul_interp_sweep DEPENDS test_nr_pdcch_blind_monitor)
   add_test(NAME test_nr_pdcch_ul_field_sweep COMMAND test_nr_pdcch_blind_monitor --gtest_filter=UlFieldSweep.*)
   add_test(NAME test_nr_pdcch_ul_interp_sweep COMMAND test_nr_pdcch_blind_monitor --gtest_filter=UlInterpSweep.*)
+  add_test(NAME test_nr_dci11_pin COMMAND test_nr_pdcch_blind_monitor --gtest_filter=Dci11Pin.*)
   target_include_directories(test_nr_pdcch_blind_monitor PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT ${OPENAIR_DIR}/common/utils/ds)
   target_link_libraries(test_nr_pdcch_blind_monitor PRIVATE nr_pdcch_blind_monitor nr_common MAC_NR_COMMON polar crc_byte UTIL asn1_nr_rrc_hdrs asn1_lte_rrc_hdrs GTest::gtest)
   add_dependencies(tests test_nr_pdcch_blind_monitor)
@@ -2542,6 +2568,7 @@ if(ENABLE_TESTS)
   # The footprint tests call OAI's own mapping table (get_csi_mapping_parms), hence the same PHY
   # sources and libraries as test_nr_csirs_blind_synth below.
   add_executable(test_nr_csirs_blind_search ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_csirs_blind_search_test.cc
+                                            ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_csirs_blind_rt_test_bridge.c
                                             ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_csirs_blind_search.c
                                             ${OPENAIR1_DIR}/PHY/nr_phy_common/src/nr_phy_common_csirs.c
                                             ${OPENAIR1_DIR}/PHY/NR_REFSIG/refsig.c
@@ -2611,6 +2638,22 @@ if(ENABLE_TESTS)
   target_link_libraries(test_nr_pdsch_prb_set PRIVATE GTest::gtest)
   add_dependencies(tests test_nr_pdsch_prb_set)
   add_test(NAME test_nr_pdsch_prb_set COMMAND ./test_nr_pdsch_prb_set)
+  add_executable(test_nr_ssb_rate_match ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_ssb_rate_match_test.cc)
+  target_include_directories(test_nr_ssb_rate_match PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
+  target_link_libraries(test_nr_ssb_rate_match PRIVATE GTest::gtest_main)
+  add_dependencies(tests test_nr_ssb_rate_match)
+  add_test(NAME test_nr_ssb_rate_match COMMAND ./test_nr_ssb_rate_match)
+  # Production path: nr_ssb_rate_match.c, nr_rx_pdsch()/nr_dlsch_extract_rbs() and nr_pdsch_passive_decode()
+  # from PHY_NR_UE, driven from an observed PSS/SSS through G and the LLR stream, plus the data-aided tap's
+  # G guard. Plain C: nr_rx_pdsch() takes C VLA parameters.
+  add_executable(test_nr_ssb_rate_match_prod ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_ssb_rate_match_prod_check.c)
+  target_link_libraries(test_nr_ssb_rate_match_prod PRIVATE
+    -Wl,--start-group PHY_NR_UE PHY_NR_COMMON PHY_COMMON nr_phy_common nr_common nr_pdcch_blind_monitor NR_UE_ISAC
+    SCHED_NR_UE_LIB MAC_NR_COMMON CONFIG_LIB shlib_loader UTIL ds -Wl,--end-group
+    ${T_LIB} m pthread dl asn1_nr_rrc_hdrs asn1_lte_rrc_hdrs)
+  add_dependencies(test_nr_ssb_rate_match_prod dfts) # the decoder's FEP loads libdfts at run time
+  add_dependencies(tests test_nr_ssb_rate_match_prod)
+  add_test(NAME test_nr_ssb_rate_match_prod COMMAND ./test_nr_ssb_rate_match_prod)
   add_executable(test_nr_pdcch_al1_map ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_pdcch_al1_map_test.cc
                                        ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdcch_al1_map.c)
   target_include_directories(test_nr_pdcch_al1_map PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
@@ -2636,6 +2679,12 @@ if(ENABLE_TESTS)
   target_link_libraries(test_nr_arm_sweep PRIVATE GTest::gtest m)
   add_dependencies(tests test_nr_arm_sweep)
   add_test(NAME test_nr_arm_sweep COMMAND ./test_nr_arm_sweep)
+
+  add_executable(test_nr_harq_init_tx ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_harq_init_tx_test.cc)
+  target_include_directories(test_nr_harq_init_tx PRIVATE ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT)
+  target_link_libraries(test_nr_harq_init_tx PRIVATE GTest::gtest)
+  add_dependencies(tests test_nr_harq_init_tx)
+  add_test(NAME test_nr_harq_init_tx COMMAND ./test_nr_harq_init_tx)
 
   add_executable(test_nr_pdsch_ptrs_unav ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/tests/nr_pdsch_ptrs_unav_test.cc
                                          ${OPENAIR1_DIR}/PHY/NR_UE_TRANSPORT/nr_pdsch_ptrs_unav.c)

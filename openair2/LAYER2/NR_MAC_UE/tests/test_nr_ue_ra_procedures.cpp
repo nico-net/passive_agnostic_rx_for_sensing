@@ -11,6 +11,7 @@ extern "C" {
 #include "common/utils/ocp_itti/intertask_interface.h"
 #include "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_blind_monitor.h"
 #include "openair1/PHY/NR_UE_TRANSPORT/nr_passive_acq_state.h"
+#include "openair1/PHY/NR_UE_TRANSPORT/nr_pdcch_sib1_prior.h"
 
 static softmodem_params_t softmodem_params;
 
@@ -21,6 +22,7 @@ static softmodem_params_t softmodem_params;
  *   nr_pdcch_blind_publish_common  -- config_ue.c, only under IS_PASSIVE_RX_MODE (not set here)
  *   ..._autoconf_css0              -- nr_ue_dci_configuration.c, only if autoconf_wanted() is true
  *   nr_pdcch_blind_dci10_size      -- nr_ue_dci_configuration.c, only under getenv("ISAC_OTA_CFG")
+ *   ..._set_mib_dmrs_typeA_position -- nr_ue_procedures.c, MIB decode (no MIB is delivered here)
  * autoconf_wanted() returning false is the module's own default (pdcch_blind_monitor_autoconf=0). */
 bool nr_pdcch_blind_publish_common(const nr_pdcch_blind_common_config_t *facts)
 {
@@ -35,12 +37,19 @@ bool nr_pdcch_blind_monitor_autoconf_css0(int, int, int, int, int, int, int, int
 {
   return false;
 }
+bool nr_pdcch_blind_monitor_set_mib_dmrs_typeA_position(int)
+{
+  return false;
+}
 uint16_t nr_pdcch_blind_dci10_size(uint16_t)
 {
   return 0; // the real function's own "invalid" sentinel; unreachable without ISAC_OTA_CFG
 }
 void nr_passive_acq_note_sib1(void) {} // same passive-mode-only site as publish_common
 void nr_passive_acq_note_sib1_carrier(int, int, int, int, int) {} // same gate (ISAC_AUTO_ACQUIRE + passive)
+void nr_pdcch_blind_monitor_set_tda_common(const uint8_t *, const uint8_t *, const uint8_t *, int) {}
+void nr_pdcch_sib1_prior_set(const nr_pdcch_sib1_prior_t *) {}
+void nr_passive_acq_note_sib1_tdd(const nr_tdd_pattern_t *, const nr_tdd_pattern_t *) {}
 softmodem_params_t *get_softmodem_params(void)
 {
   return &softmodem_params;

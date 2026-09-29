@@ -167,6 +167,15 @@ void nr_pdsch_passive_queue_flush(void);
 
 void nr_pdsch_passive_queue_get_stats(nr_pdsch_passive_queue_stats_t *out);
 
+/// DM-RS symbol oracle for the IN-LINE decode path (no consumer running): the same per-symbol
+/// coherence measurement the consumer makes, on the DCI's own slot, fed to the ticket's Technique-D
+/// context (mask + last data symbol, k0 = 0). Call AFTER that ticket's CRC feedback -- a resulting
+/// prune retires outstanding tickets. `scratch` receives antenna-0 FFTs (samples_per_slot_wCP entries).
+/// No-op for a settled/unscored ticket or a grant narrower than 4 PRBs.
+void nr_pdsch_passive_oracle_inline(PHY_VARS_NR_UE *ue, const nr_pdsch_sweep_ticket_t *ticket,
+                                    const fapi_nr_dl_config_dlsch_pdu_rel15_t *pdu, const freq_alloc_bitmap_t *fa,
+                                    int nr_slot, c16_t *scratch);
+
 /// Stop and join the consumer. Called from the monitor's own teardown.
 void nr_pdsch_passive_queue_stop(void);
 

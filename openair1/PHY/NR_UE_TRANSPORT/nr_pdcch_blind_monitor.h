@@ -474,6 +474,14 @@ bool nr_pdcch_blind_monitor_autoconf_css0(int num_rbs,
                                           int rb_offset,
                                           int dmrs_typea_position);
 
+/* Hand the MIB's dmrs-TypeA-Position (ASN.1 enum: pos2 = 0, pos3 = 1, exactly as
+ * mac->dmrs_TypeA_Position carries it) to the monitor. Measured off the air on EVERY cell, including
+ * one without CORESET#0 (NSA, FR1 k_SSB >= 24) where nr_pdcch_blind_monitor_autoconf_css0() never
+ * runs and would otherwise be the only path that sets it. Writes that single field of the live config
+ * and nothing else: no CSS0 state, no learned CORESET/SS geometry, no discovery state. Out-of-range
+ * values are refused. Returns true if the value was accepted. */
+bool nr_pdcch_blind_monitor_set_mib_dmrs_typeA_position(int dmrs_typea_position);
+
 /* PHASE 3: recover the DEDICATED CORESET/search space by search (Techniques A + C) instead of
  * reading pdcch_blind_monitor_coreset/_ss/_bwp by hand. See the definition-site comment in
  * nr_pdcch_blind_monitor.c for the full design (why this is NOT gated on g_cfg.bwp_size == 0). */
@@ -488,6 +496,28 @@ bool nr_pdcch_blind_monitor_bank_has_geometry(int rb_offset, int groups, int dur
                                                int shift, int nid);
 /* True while every discovered CORESET is verified: the catalog walk (and its decode pass) is paused. */
 bool nr_pdcch_blind_monitor_discovery_paused(void);
+
+/* GATE 1 (R31, sa-discovery-stall.md): whether nr_pdcch_blind_monitor_process_body()'s Technique-A
+ * discovery block (nr_pdcch_blind_monitor_rt.c) should return early -- instead of falling through
+ * to the on-occasion gate and nr_pdcch_blind_monitor_run_occasion() further down in that file --
+ * after this slot's discovery step. Pulled out as a pure predicate purely so it is unit-testable:
+ * nr_pdcch_blind_monitor_rt.c needs a live PHY_VARS_NR_UE and is not linked into the test binary.
+ * Was `bank_count == 0`: an empty bank used to make the rest of process_body for that slot
+ * unreachable, which made run_occasion()'s own bank_count()==0 branch (the CORESET#0-USS/RAR-anchor
+ * fallback -- the cheapest exact geometry available OTA) structurally dead code for the whole
+ * capture, even though that branch already handles bank_count()==0 correctly and cheaply. Always
+ * false now: there is nothing left to gate here, on-occasion timing and run_occasion() itself bound
+ * the cost exactly as they do once discovery is done. */
+bool nr_pdcch_blind_monitor_discovery_block_early_return(int bank_count);
+
+/* Lane perf (2026-09-27): admission of the further-CORESET discovery pass once a verified bank is
+ * decoding (nr_pdcch_blind_monitor_run_occasion()). That pass is background work -- its DL dci_length
+ * sweep measured 77 % of the scan consumer's time on the phy-test bed and made the consumer drop 41 % of
+ * occasions, the bank's own grants included. It runs whenever the consumer has no occasion waiting
+ * (backlog <= 0; -1 = no scan queue) and otherwise once per NR_PDCCH_DISCOVERY_PASS_FLOOR occasions, so
+ * it yields to real traffic but can never starve. `skipped` is the caller's counter. Pure. */
+#define NR_PDCCH_DISCOVERY_PASS_FLOOR 16
+bool nr_pdcch_blind_monitor_discovery_pass_due(int backlog, uint32_t *skipped);
 
 /** Advance the current geometry after an inconclusive length budget. The offset is not
  * blacklisted: other widths and future observations remain eligible. */
@@ -627,6 +657,13 @@ typedef enum {
   NR_BLIND_UL_DCI_FORMAT_0_0 = 1,
 } nr_blind_ul_dci_format_t;
 
+#define NR_PUSCH_FDRA_MAX_CANDIDATES 4
+typedef struct {
+  uint16_t start_rb, num_rb, rbg_bwp_start;
+  uint8_t ra_type0, rbg_size, mode;
+  uint32_t rbg_bitmap;
+} nr_pusch_fdra_allocation_t;
+
 /// Result of one blind UL decode+extract attempt. Deliberately a SEPARATE struct from
 /// nr_pdcch_blind_result_t rather than extra members on it: the DL result is consumed by the
 /// PDSCH decode, the CFR tap and the queue job (which copies it by value), and the overriding
@@ -646,6 +683,7 @@ typedef struct {
   int width_hyp_class;       ///< -1 when no width search owns this grant
   int interp_hyp_class;      ///< -1 when no interpretation search owns this grant
   uint64_t hyp_generation;   ///< reject feedback from an earlier discovery context
+  uint16_t hyp_width_raw, hyp_interp_raw; ///< joint raw identities + 1; zero for baseline grants
   uint8_t carrier_indicator, ul_sul_indicator; ///< preserve carrier identity for search equivalence
 
   // ---- valid only when plausible ----
@@ -654,11 +692,22 @@ typedef struct {
 
   // Frequency domain (resource allocation type 1 / RIV -- the only type this deployment uses)
   uint32_t freq_domain_assignment; ///< the raw RIV, kept for ground-truth comparison
-  uint16_t start_rb;         ///< PRB allocation start, counted from bwp_start
-  uint16_t num_rb;           ///< PRB allocation size
+  uint16_t start_rb;         ///< PRB allocation start, counted from bwp_start (bounding box: the
+                             ///< lowest allocated PRB when ra_type0, exact for RIV otherwise)
+  uint16_t num_rb;           ///< PRB allocation size (PRB COUNT when ra_type0, exact for RIV)
   uint16_t bwp_start;        ///< UL BWP start the allocation is relative to (echoed from opts)
   uint16_t bwp_size;         ///< UL BWP size (echoed from opts)
   uint8_t  bwp_indicator;    ///< decoded BWP indicator field (0 when the field is 0 bits wide)
+
+  /// RA type 0 / dynamicSwitch (TS 38.214 6.1.2.2.1, same mechanism as the DL 1_1 side --
+  /// nr_pdsch_prb_set.h's nr_fdra_prbs()/nr_ra_type0_prbs()): 1 when the FDRA field resolved to an
+  /// RBG bitmap rather than a RIV. start_rb/num_rb above are then only the bounding box; the exact
+  /// (possibly non-contiguous) PRB set is rbg_bitmap expanded with nr_ra_type0_prbs(rbg_bitmap,
+  /// rbg_bwp_start, bwp_size, rbg_size, ...), NOT start_rb..start_rb+num_rb.
+  uint8_t  ra_type0;
+  uint8_t  rbg_size;         ///< RBG size P this bitmap was built with (0 when !ra_type0)
+  uint16_t rbg_bwp_start;    ///< the BWP start the RBG grid was computed on (echoed from opts)
+  uint32_t rbg_bitmap;       ///< N_RBG-bit bitmap, MSB = RBG 0 (valid only when ra_type0)
 
   // Time domain. NOTE `k2` is NOT in the payload -- it is the TDRA list entry's own k2, and it is
   // what makes the grant actionable: the PUSCH is in slot (DCI slot + k2).
@@ -709,6 +758,11 @@ typedef struct {
 
   bool        plausible;        ///< false => caller MUST discard everything above the raw fields
   const char* reject_reason;    ///< non-NULL iff !plausible; static string, do not free
+  /* Equal-length FDRA interpretations travel as ONE book/queue entry. They differ
+   * only in allocation: the identical field width preserves every other DCI field.
+   * Nonzero count means unresolved until the consumer obtains a transport-block CRC. */
+  uint8_t fdra_candidate_count;
+  nr_pusch_fdra_allocation_t fdra_candidates[NR_PUSCH_FDRA_MAX_CANDIDATES];
 } nr_pdcch_blind_ul_result_t;
 
 /// Deployment facts needed to size and interpret an UL DCI. Same contract as the DL
@@ -768,6 +822,16 @@ typedef struct {
   int ptrs_dmrs_bits;           ///< default 0 (no PTRS, or maxRank 1, or transform precoding on)
   int beta_offset_bits;         ///< default 0 (semi-static betaOffsets)
   int dmrs_seq_init_bits;       ///< default 1 (transform precoding disabled)
+
+  /// Frequency-domain resource assignment mode (NR_FDRA_* in nr_pdsch_prb_set.h -- the same enum
+  /// the DL 1_1 side uses; the mechanism is identical, TS 38.214 6.1.2.2.1). NR_FDRA_TYPE1 (0,
+  /// default, matches the zero-init every existing caller uses) is resource allocation type 1 /
+  /// RIV. Any other value is a hypothesis the caller is trying, not a deployment fact yet confirmed
+  /// by a TB CRC pass. Appended at the end of the struct (not grouped with the UL BWP fields above)
+  /// so it cannot shift the alignment padding UlFeedbackOwnershipIgnoresConfigurationPadding pins
+  /// between dmrs_typeA_position and tda_count.
+  int      fdra_mode;
+  uint16_t fdra_bwp_start;   ///< the BWP the RBG grid (N_RBG) is computed on; usually == bwp_start
 } nr_pdcch_blind_ul_opts_t;
 
 /// Total DCI-0_1 payload width implied by `opts`. Its job is to CHECK a configuration against the
@@ -779,6 +843,27 @@ int32_t nr_pdcch_blind_ul_dmrs_mask(uint8_t num_symbols, uint8_t start_symbol,
     int mapping_type_is_b, int add_pos, int max_length, uint8_t dmrs_typeA_position);
 
 uint16_t nr_pdcch_blind_dci01_size(const nr_pdcch_blind_ul_opts_t* opts);
+
+/** RA type 0 / dynamicSwitch discovery, gap item 1: which non-type-1 FDRA modes are consistent
+ *  with an ALREADY-OBSERVED DCI 0_1 total length. `opts` supplies bwp_size/fdra_bwp_start and every
+ *  other field width (held fixed -- this is a config-WIDTH test, not a joint search); `opts->fdra_mode`
+ *  itself is ignored, since the whole point is to try every OTHER value. `observed_len` is the
+ *  dci_length this RNTI's grants already decode at under SOME interpretation (from the blind
+ *  length/RNTI search, independent of what the FDRA field means). A candidate mode X passes iff
+ *  nr_pdcch_blind_dci01_size() with fdra_mode=X reproduces observed_len exactly: since the fixed
+ *  and RIV FDRA widths generally differ (TS 38.214 6.1.2.2.1's N_RBG vs the RIV span), this is a
+ *  genuine, cheap discriminator among the 4 non-type-1 modes, not a certainty -- the caller's TB CRC
+ *  is still the final oracle. Writes NR_FDRA_TYPE0_CFG1/CFG2/DYN_CFG1/DYN_CFG2 (never NR_FDRA_TYPE1)
+ *  into out_modes in that fixed order; returns the count (0 if opts is unusable or none match). */
+int nr_pdcch_blind_ul_fdra_mode_candidates(const nr_pdcch_blind_ul_opts_t *opts, uint16_t observed_len,
+                                            uint8_t *out_modes, int max);
+int nr_pdcch_blind_ul_fdra_bundle(const nr_pdcch_blind_ul_opts_t *opts, uint64_t payload,
+                                 uint16_t length, uint16_t rnti, nr_pdcch_blind_ul_result_t *out);
+/* Try each allocation at most once, stopping ONLY when attempt reports TB CRC OK.
+ * Return the winning index, or -1. Malformed counts invoke no callback. The caller
+ * owns aggregate feedback: candidate attempts cannot advance the data-ID sweep. */
+int nr_pdcch_blind_ul_fdra_try(const nr_pdcch_blind_ul_result_t *bundle,
+                              bool (*attempt)(void *, const nr_pdcch_blind_ul_result_t *), void *opaque);
 
 bool nr_pdcch_blind_decode_01_mode(bool automatic, const int16_t *llr, uint8_t aggregation_level,
                                    uint16_t dci_length, const nr_pdcch_blind_ul_opts_t *opts,

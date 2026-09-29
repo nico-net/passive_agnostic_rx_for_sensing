@@ -55,6 +55,7 @@
 #include <stdint.h>
 
 #include "common/utils/bits.h" // freq_alloc_bitmap_t
+#include "PHY/NR_UE_TRANSPORT/nr_pdsch_prb_set.h" // nr_pdsch_passive_alloc_normalise (pure, lives there)
 #include "PHY/defs_nr_UE.h"
 #include "nfapi/open-nFAPI/nfapi/public_inc/fapi_nr_ue_interface.h"
 
@@ -145,10 +146,19 @@ typedef struct {
  * `n_codewords` from `grant`, so the caller can pass the same struct straight on to the
  * data-aided submit.
  *
- * Scope (returns NR_PDSCH_PASSIVE_DECODE_UNSUPPORTED, having done nothing): PTRS present, CSI-RS
- * rate-matching overlap, more than one DM-RS port, or an MCS/allocation that yields no valid TBS.
- * These match the data-aided submit's own scope guards -- decoding a grant it could not use anyway
- * would only burn CPU.
+ * Rate matching: G (out->G) excludes the PT-RS REs of the swept/configured density, the CSI-RS REs of
+ * the blind CSI-RS search's confirmed resource, and the REs of an SSB OBSERVED in this slot (PSS x SSS
+ * of the acquired PCI on this slot's own FFT, TS 38.214 5.1.4 -- never a configured or projected SSB).
+ * On the CPU path the demodulator must hand exactly G LLRs to the decoder (sum of the per-symbol
+ * valid REs x Qm x Nl == G) or the call returns NR_PDSCH_PASSIVE_DECODE_ERROR.
+ *
+ * Scope (returns NR_PDSCH_PASSIVE_DECODE_UNSUPPORTED): PT-RS with no density to compute G from, a
+ * segmented grant with PT-RS or with CSI-RS on a parity-changing segment, more DM-RS ports than
+ * receive antennas, an MCS/allocation that yields no valid TBS, or an observed SSB the grant
+ * overlaps with a DM-RS or PT-RS RE, or under SI-RNTI.
+ *
+ * The data-aided submit re-encodes onto every non-DM-RS RE (no SSB/CSI-RS/PT-RS hole): pass it out->G
+ * and it refuses any decode whose G differs from its own RE model.
  *
  * @param ue           UE PHY instance
  * @param proc         Current slot's RX processing context
@@ -172,12 +182,9 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
                                                          c16_t rxdataF[][ue->frame_parms.samples_per_slot_wCP],
                                                          nr_pdsch_passive_decode_result_t *out);
 
-/// Make a PRB-list allocation self-consistent: with n_prb_list > 0, re-derive first_rb/last_rb/num_rbs
-/// (= n_prb_list, the PRB COUNT) and the bitmap from prb_list. No-op for a legacy allocation. false (fa
-/// untouched) if a PRB is outside the BWP, listed twice, or the list is longer than NR_PRB_SET_MAX.
-/// Every producer of a list grant must pass it through this before the grant reaches the decoder, the
-/// data-aided tap or the queue probes (nr_pdsch_passive_queue_enqueue() does it for queued grants).
-bool nr_pdsch_passive_alloc_normalise(freq_alloc_bitmap_t *fa, int bwp_size);
+/// nr_pdsch_passive_alloc_normalise() (make a PRB-list allocation self-consistent) moved to
+/// nr_pdsch_prb_set.{h,c} -- it depends only on freq_alloc_bitmap_t and nr_prb_list_normalise(),
+/// both already pure/dependency-free there, unlike this header. Declared via the include above.
 
 /// Print the distinct decode-parameter tuples seen this run, with counts. Diffing this between a
 /// 90 %-CRC run and a 0 %-CRC run is what identifies a wrong parameter -- see section 23.3.
@@ -231,5 +238,16 @@ bool nr_pdsch_passive_gpu_job(const PHY_VARS_NR_UE *ue, const fapi_nr_dl_config_
 void nr_pdsch_passive_set_llr_override(const int16_t *llr, uint32_t n);
 /** The (descrambled) LLR buffer and G of this thread's last decode -- the GPU self-check compares against it. */
 uint32_t nr_pdsch_passive_last_llr(const int16_t **p);
+/** Decoded-grant evidence on ZP rate-matching entry @p i of @p cfg (csi_type 2): energy on its REs inside the
+ *  grant's PRBs (fa) on the CSI-RS symbol(s), REs of the other entries left out, against every RE of the grant on
+ *  ONE data-only reference symbol (no DM-RS, no CSI-RS, not in @p skip_symbols -- the SSB symbols; the one nearest
+ *  the ZP symbol); all receive antennas summed. Counted only for a @p dedicated grant whose first DM-RS symbol
+ *  carries this cell's DM-RS on its PRBs (nr_csirs_blind_pilot_presence >= 0.5; slot_rx seeds the sequence). Only
+ *  symbols inside the allocation and the FFT'd range [fep_s0, fep_s0 + fep_n) are read; a ZP symbol in
+ *  @p skip_symbols gives no evidence. rxdataF_flat: antenna a, symbol m at [a * stride + m * ofdm_symbol_size].
+ *  Returns nr_csirs_blind_zp_grant_score(), or -1 (no evidence). */
+double nr_pdsch_passive_zp_grant_score(const NR_DL_FRAME_PARMS *fp, const fapi_nr_dl_config_dlsch_pdu_rel15_t *cfg,
+                                       const freq_alloc_bitmap_t *fa, const c16_t *rxdataF_flat, uint32_t stride,
+                                       int slot_rx, int fep_s0, int fep_n, uint16_t skip_symbols, bool dedicated, int i);
 
 #endif // NR_PDSCH_PASSIVE_DECODE_H

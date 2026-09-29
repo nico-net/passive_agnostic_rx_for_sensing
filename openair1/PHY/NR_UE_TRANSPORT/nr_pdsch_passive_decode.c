@@ -57,6 +57,11 @@ extern __thread int nr_dlsch_chest_per_symbol; // nr_dlsch_demodulation.c: read 
 #include "nr_agnostic_v2.h"
 #include "nr_pdsch_prb_set.h" // nr_prb_segments, nr_prb_gather_index (non-contiguous PRB sets)
 #include "nr_arm_sweep.h" // generic per-RNTI Wilson pick/latch core shared by the VRB-L and PRG sweeps
+#include "nr_harq_init_tx.h" // per-(RNTI, pid) reserved-MCS retransmission record, shared with the UL decoder
+#include "nr_csirs_blind_search.h" // nr_csirs_blind_re_energy / nr_csirs_blind_zp_grant_score
+#include "nr_csirs_blind_rt.h" // nr_csirs_blind_rt_zp_grant_evidence
+#include "PHY/NR_REFSIG/nr_refsig.h" // nr_gold_pdsch, nr_pdsch_dmrs_rx (ZP grant evidence: own-DM-RS presence)
+#include "PHY/NR_TRANSPORT/nr_sch_dmrs.h" // get_delta
 _Static_assert(sizeof(((freq_alloc_bitmap_t *)0)->prb_list) == NR_PRB_SET_MAX * sizeof(uint16_t),
                "freq_alloc_bitmap_t.prb_list (common/utils/bits.h) must hold NR_PRB_SET_MAX PRBs");
 #include "common/utils/threadPool/task_ans.h" // init_task_ans/join_task_ans/completed_task_ans, for the per-antenna FEP dispatch below
@@ -302,6 +307,14 @@ static _Atomic uint64_t g_mcs_segs[32], g_mcs_segs_ok[32], g_mcs_tbs[32], g_mcs_
 static _Atomic uint64_t g_rv_try[4][32], g_rv_ok[4][32]; // ISAC_RV_RETRY rescues by [rv][mcs]
 /* V2 HARQ soft-combining and PT-RS sweep state, declared here so the periodic report can read it. */
 static _Atomic uint64_t g_hq_retx_try, g_hq_retx_ok, g_hq_tbs_override, g_hq_busy_skip, g_hq_first;
+/* g_harqc's own lock (harqc_entry_t/g_harqc are declared further down, next to their only other
+ * users) and the reserved-MCS retransmission record (gap-harq lane) that shares it -- both declared
+ * this early, alongside the harqc counters above, for the SAME reason: nr_pdsch_passive_ldpc_stats_
+ * dump() (right below) is defined before harqc_entry_t and must be able to read g_dl_harq_init's
+ * hit/evict counts under the same lock. See nr_harq_init_tx.h for why TBS/base-graph (not
+ * modulation order) is the field a reserved MCS cannot supply on its own. */
+static pthread_mutex_t g_harqc_lock = PTHREAD_MUTEX_INITIALIZER;
+static nr_harq_init_tx_table_t g_dl_harq_init;
 static pthread_mutex_t g_ptrs_lock = PTHREAD_MUTEX_INITIALIZER;
 static _Atomic int g_ptrs_arm_last = -2; // for the report
 static _Atomic int g_lbrm_nl = 4;        // TBS_LBRM layer term n_L, CELL-WIDE seed (4 = spec ceiling), see rnti_dec()
@@ -589,6 +602,8 @@ static _Atomic uint32_t g_rbmap[NR_RBMAP_MAX];
 static _Atomic uint32_t g_rbmap_ok[NR_RBMAP_MAX];
 static _Atomic uint64_t g_rbmap_grants;
 static __thread uint32_t t_seg_ok_last = 0; // segments that decoded in the last TB on this thread
+static __thread int t_last_sk = -1;        // last TB outcome for TBRESULT: 1 decoded, 0 zero_tb, 2 seg_fail
+static __thread uint32_t t_last_llr_have, t_last_data_bits;
 static _Atomic uint64_t g_shape_rv[3]  = {0, 0, 0};
 static _Atomic uint64_t g_shape_G[3]   = {0, 0, 0};
 /* Segmentation parameters, binned by outcome. §34.4's hypothesis: filler bits F are ZEROS by
@@ -814,10 +829,16 @@ void nr_pdsch_passive_ldpc_stats_dump(void)
       LOG_I(PHY, "SENSING: RVRETRY rescued/tried by mcs: %s\n", rb);
   }
   if (nr_agnostic_v2()) {
-    LOG_I(PHY, "SENSING: HARQC first=%lu retx_combined=%lu/%lu tbs_from_first=%lu busy_skip=%lu | rv census mcs<24 [%lu %lu %lu %lu] mcs>=24 [%lu %lu %lu %lu] | lbrm n_L=%d try/ok 4:%lu/%lu 2:%lu/%lu 1:%lu/%lu | llr_norm shift0..4 [%lu %lu %lu %lu %lu]\n",
+    uint64_t init_tx_hits, init_tx_evicts;
+    pthread_mutex_lock(&g_harqc_lock);
+    init_tx_hits   = g_dl_harq_init.hits;
+    init_tx_evicts = g_dl_harq_init.evicts;
+    pthread_mutex_unlock(&g_harqc_lock);
+    LOG_I(PHY, "SENSING: HARQC first=%lu retx_combined=%lu/%lu tbs_from_first=%lu busy_skip=%lu | init_tx hit=%lu evict=%lu | rv census mcs<24 [%lu %lu %lu %lu] mcs>=24 [%lu %lu %lu %lu] | lbrm n_L=%d try/ok 4:%lu/%lu 2:%lu/%lu 1:%lu/%lu | llr_norm shift0..4 [%lu %lu %lu %lu %lu]\n",
           (unsigned long)atomic_load(&g_hq_first), (unsigned long)atomic_load(&g_hq_retx_ok),
           (unsigned long)atomic_load(&g_hq_retx_try), (unsigned long)atomic_load(&g_hq_tbs_override),
           (unsigned long)atomic_load(&g_hq_busy_skip),
+          (unsigned long)init_tx_hits, (unsigned long)init_tx_evicts,
           (unsigned long)atomic_load(&g_rv_census[0][0]), (unsigned long)atomic_load(&g_rv_census[0][1]),
           (unsigned long)atomic_load(&g_rv_census[0][2]), (unsigned long)atomic_load(&g_rv_census[0][3]),
           (unsigned long)atomic_load(&g_rv_census[1][0]), (unsigned long)atomic_load(&g_rv_census[1][1]),
@@ -1016,7 +1037,9 @@ typedef struct {
   size_t cap;
 } harqc_entry_t;
 static harqc_entry_t g_harqc[NR_HARQC_N];
-static pthread_mutex_t g_harqc_lock = PTHREAD_MUTEX_INITIALIZER;
+/* g_harqc_lock and g_dl_harq_init (the reserved-MCS retransmission record that shares this lock)
+ * are declared much earlier in this file, alongside g_hq_first and friends -- see the comment
+ * there for why. */
 static uint64_t g_harqc_clock;
 static __thread struct { int armed; uint16_t rnti; uint8_t pid, ndi; } t_hq;
 static __thread int16_t *t_hq_d = NULL;
@@ -1437,25 +1460,106 @@ static __thread struct {
   int rb_lo, rb_n; uint32_t nvar, nvar_den; int n_dmrs_sym, dmrs_first, dmrs_last; int valid;
 } t_chest_cache = {0};
 
+/* ZP EVIDENCE FROM THIS DECODED GRANT (G5 review of merge 060edd290c, Important 1). Every ZP entry the blind
+ * CSI-RS search handed this grant for rate matching is scored on the grant's OWN PRBs: a true ZP is dark there,
+ * PDSCH on a false one is as bright as the grant's data -- independent of how much of the band the grant covers,
+ * of the traffic pattern, and of an NZP boost, which is what the search's full-band score cannot see. One
+ * reference symbol, nearest the ZP symbol (inside the real PDSCH whenever the ZP symbol is, even under a wrong
+ * start-symbol hypothesis). The grant only counts when its first DM-RS symbol carries THIS cell's DM-RS
+ * (scrambling id, nSCID, ports of the grant) on its PRBs: raw energy cannot tell a false DCI accept or a wrong
+ * PRB/k0 hypothesis landing on a co-channel neighbour -- which does not rate-match our ZP -- from our own
+ * PDSCH (G5 round 2). Only dedicated-class grants count: the ZP set is UE-dedicated PDSCH-Config, common PDSCH
+ * need not respect it. Cost: two symbols of grant REs plus the ZP REs, per antenna. */
+double nr_pdsch_passive_zp_grant_score(const NR_DL_FRAME_PARMS *fp, const fapi_nr_dl_config_dlsch_pdu_rel15_t *cfg,
+                                       const freq_alloc_bitmap_t *fa, const c16_t *rxdataF_flat, uint32_t stride,
+                                       int slot_rx, int fep_s0, int fep_n, uint16_t skip_symbols, bool dedicated, int i)
+{
+  if (!dedicated || i < 0 || i >= cfg->numCsiRsForRateMatching || cfg->csiRsForRateMatching[i].csi_type != 2)
+    return -1.0;
+  const int s_lo = cfg->start_symbol > fep_s0 ? cfg->start_symbol : fep_s0;
+  const int s_hi = cfg->start_symbol + cfg->number_symbols < fep_s0 + fep_n ? cfg->start_symbol + cfg->number_symbols
+                                                                             : fep_s0 + fep_n;
+  fapi_nr_dl_config_dlsch_pdu_rel15_t all = *cfg, one = *cfg, others = *cfg;
+  one.numCsiRsForRateMatching = 1;
+  one.csiRsForRateMatching[0] = cfg->csiRsForRateMatching[i];
+  others.numCsiRsForRateMatching = 0;
+  for (int j = 0; j < cfg->numCsiRsForRateMatching; j++)
+    if (j != i)
+      others.csiRsForRateMatching[others.numCsiRsForRateMatching++] = cfg->csiRsForRateMatching[j];
+  uint32_t zp_bm[NR_SYMBOLS_PER_SLOT] = {0};
+  int zp_first = -1, dmrs = -1;
+  for (int m = s_lo; m < s_hi; m++) {
+    zp_bm[m] = nr_dlsch_csi_overlap_bitmap(&one, m) & ~nr_dlsch_csi_overlap_bitmap(&others, m);
+    if (zp_bm[m] && ((skip_symbols >> m) & 1))
+      return -1.0; // ZP symbol shares a symbol with the SSB: SSB REs are not ours to judge by
+    if (zp_bm[m] && zp_first < 0)
+      zp_first = m;
+    if (((cfg->dlDmrsSymbPos >> m) & 1) && dmrs < 0)
+      dmrs = m;
+  }
+  if (zp_first < 0 || dmrs < 0 || cfg->dmrs_ports == 0)
+    return -1.0; // the grant does not cross the ZP symbol, or no DM-RS symbol was FFT'd
+  int ref = -1;
+  for (int m = s_lo; m < s_hi; m++)
+    if (!((cfg->dlDmrsSymbPos >> m) & 1) && !((skip_symbols >> m) & 1) && nr_dlsch_csi_overlap_bitmap(&all, m) == 0
+        && (ref < 0 || abs(m - zp_first) < abs(ref - zp_first)))
+      ref = m;
+  if (ref < 0)
+    return -1.0;
+  /* The grant's DM-RS: the CDM group of its lowest port, one pilot sequence per distinct fd-OCC in that group
+   * (ports differing only in td-OCC are the same sequence on one symbol). */
+  const uint8_t type = cfg->dmrsConfigType;
+  const int p0 = __builtin_ctz(cfg->dmrs_ports);
+  const uint8_t delta = get_delta(p0, type);
+  const int per_rb = type == NFAPI_NR_DMRS_TYPE1 ? 6 : 4;
+  const uint8_t k_of[4] = {delta, (uint8_t)(delta + (per_rb == 6 ? 2 : 1)), (uint8_t)(delta + (per_rb == 6 ? 4 : 6)),
+                           (uint8_t)(delta + (per_rb == 6 ? 6 : 7))};
+  const int pilot_crb0 = cfg->refPoint ? cfg->BWPStart : 0;
+  const int n_rb_gen = cfg->BWPStart + cfg->BWPSize - pilot_crb0;
+  c16_t pil[2][6 * 275] __attribute__((aligned(16))); // stack, not TLS: 13 KB of __thread shifts the TLS layout
+  const int16_t *pilots[2];
+  int n_ports = 0, fd_seen = 0;
+  const uint32_t *gold = nr_gold_pdsch(fp->N_RB_DL, fp->symbols_per_slot, cfg->dlDmrsScramblingId, cfg->nscid, slot_rx, dmrs);
+  for (int p = 0; p < 12 && n_ports < 2 && n_rb_gen > 0 && n_rb_gen <= 275; p++) {
+    if (!((cfg->dmrs_ports >> p) & 1) || get_delta(p, type) != delta || ((fd_seen >> (p & 1)) & 1))
+      continue;
+    fd_seen |= 1 << (p & 1);
+    nr_pdsch_dmrs_rx(fp->Ncp, gold, pil[n_ports], 1000 + p, 0, n_rb_gen, type, 1 << 14);
+    pilots[n_ports] = (const int16_t *)pil[n_ports];
+    n_ports++;
+  }
+  if (n_ports == 0)
+    return -1.0;
+  double e_zp = 0.0, e_data = 0.0, coh = 0.0, inc = 0.0, rx_pow = 0.0;
+  uint32_t n_zp = 0, n_data = 0, n_blocks = 0;
+  for (int a = 0; a < fp->nb_antennas_rx; a++) {
+    const c16_t *ant = &rxdataF_flat[(size_t)a * stride];
+    nr_csirs_blind_re_energy((const int16_t *)&ant[(size_t)ref * fp->ofdm_symbol_size], fp->ofdm_symbol_size,
+                             fp->first_carrier_offset, fa->bitmap, cfg->BWPSize, cfg->BWPStart, 0xFFF, 0xFFF, &e_data,
+                             &n_data);
+    nr_csirs_blind_pilot_coherence((const int16_t *)&ant[(size_t)dmrs * fp->ofdm_symbol_size], fp->ofdm_symbol_size,
+                                   fp->first_carrier_offset, fa->bitmap, cfg->BWPSize, cfg->BWPStart, pilots, n_ports,
+                                   pilot_crb0, per_rb, k_of, &coh, &inc, &rx_pow, &n_blocks);
+    for (int m = zp_first; m < s_hi; m++)
+      if (zp_bm[m])
+        nr_csirs_blind_re_energy((const int16_t *)&ant[(size_t)m * fp->ofdm_symbol_size], fp->ofdm_symbol_size,
+                                 fp->first_carrier_offset, fa->bitmap, cfg->BWPSize, cfg->BWPStart, zp_bm[m] & 0xFFF,
+                                 (zp_bm[m] >> 16) & 0xFFF, &e_zp, &n_zp);
+  }
+  const double presence = nr_csirs_blind_pilot_presence(coh, inc, n_blocks, n_ports);
+  return nr_csirs_blind_zp_grant_score(e_zp, n_zp, e_data, n_data, presence,
+                                       n_blocks ? presence * rx_pow / (4.0 * n_blocks) : 0.0);
+}
+
 void nr_pdsch_passive_set_slot_share(int on, int rb_lo, int rb_n)
 {
   t_share.on = on; t_share.rb_lo = rb_lo; t_share.rb_n = rb_n;
 }
 
-bool nr_pdsch_passive_alloc_normalise(freq_alloc_bitmap_t *fa, int bwp_size)
-{
-  if (fa->n_prb_list == 0)
-    return true;
-  uint32_t bm[sizeofArray(fa->bitmap)];
-  int lo, hi;
-  if (!nr_prb_list_normalise(fa->prb_list, fa->n_prb_list, bwp_size, bm, (int)sizeofArray(bm), &lo, &hi))
-    return false; /* fa untouched */
-  memcpy(fa->bitmap, bm, sizeof(bm));
-  fa->first_rb = lo;
-  fa->last_rb = hi;
-  fa->num_rbs = fa->n_prb_list;
-  return true;
-}
+/* nr_pdsch_passive_alloc_normalise() moved to nr_pdsch_prb_set.c (2026-09-27): it is pure (only
+ * freq_alloc_bitmap_t + nr_prb_list_normalise(), both already there) and had no unit test because
+ * this file pulls in PHY_VARS_NR_UE/NFAPI and can't link into the lightweight test_nr_pdsch_prb_set
+ * target. Declared via nr_pdsch_passive_decode.h's include of nr_pdsch_prb_set.h. */
 
 nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
                                                          const UE_nr_rxtx_proc_t *proc,
@@ -1467,6 +1571,8 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
 {
   memset(out, 0, sizeof(*out));
   out->status = NR_PDSCH_PASSIVE_DECODE_UNSUPPORTED;
+  t_last_sk = -1;
+  t_last_llr_have = t_last_data_bits = 0;
 
   NR_DL_FRAME_PARMS *fp = &ue->frame_parms;
 
@@ -1628,13 +1734,88 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
       return out->status; // the density did not describe any PT-RS -- do not guess G
     }
   }
+  /* ---- SSB rate matching (TS 38.214 5.1.4): the CURRENT slot's SSB, observed blind (PSS x SSS of
+   * the acquired PCI) -- no configured bitmap, no projected period, no SIB1. PSS/SSS need their FFT
+   * before G. On a slot-cache hit the whole slot is already transformed; otherwise FEP exactly as the
+   * main FEP below does, so a cached slot never holds a differently compensated symbol. */
+  const double fep_fo = isnan(nr_slot_fep_fo_override_hz)
+      ? (ue->cont_fo_comp ? ue->dl_Doppler_shift + ue->freq_offset : 0.0)
+      : nr_slot_fep_fo_override_hz;
+  const long share_slot = grant->source_absolute_slot;
+  const int fep_hit = t_share.on && t_fep_cache.valid && t_fep_cache.slot == share_slot && t_fep_cache.fo == fep_fo;
+  const uint16_t ssb_cand = nr_ssb_rm_candidates(fp, proc->nr_slot_rx, dlsch_config->start_symbol,
+                                                 dlsch_config->number_symbols);
+  if (ssb_cand && !fep_hit) {
+    if (grant->check_sample_lifetime && !nr_passive_samples_valid(
+            atomic_load_explicit(&nr_ue_diag_producer_absolute_slot, memory_order_relaxed),
+            grant->source_absolute_slot, fp->slots_per_frame)) {
+      { static _Atomic unsigned long c_ = 0;
+        const unsigned long n_ = atomic_fetch_add_explicit(&c_, 1, memory_order_relaxed) + 1;
+        if (n_ == 1 || (n_ % 200) == 0)
+          LOG_A(PHY, "SENSING: PDSCH UNSUP@ssb-fep-before n=%lu\n", n_); }
+      return out->status; /* IQ already overwritten: nothing to observe */
+    }
+    const uint16_t fep_syms = ssb_cand | (ssb_cand << 2); // PSS at s, SSS at s+2
+    for (int sym = 0; sym < 14; ++sym) {
+      if (!((fep_syms >> sym) & 1))
+        continue;
+      if (fp->nb_antennas_rx > 1) {
+        for (int ant = 0; ant < fp->nb_antennas_rx; ++ant)
+          nr_slot_fep_ant_snapshot(ue, fp, proc->nr_slot_rx, sym, ant, rxdataF, link_type_dl, 0, ue->common_vars.rxdata, fep_fo);
+      } else {
+        nr_slot_fep(ue, fp, proc->nr_slot_rx, sym, rxdataF, link_type_dl, 0, ue->common_vars.rxdata);
+      }
+    }
+    if (grant->check_sample_lifetime && !nr_passive_samples_valid(
+            atomic_load_explicit(&nr_ue_diag_producer_absolute_slot, memory_order_relaxed),
+            grant->source_absolute_slot, fp->slots_per_frame)) {
+      { static _Atomic unsigned long c_ = 0;
+        const unsigned long n_ = atomic_fetch_add_explicit(&c_, 1, memory_order_relaxed) + 1;
+        if (n_ == 1 || (n_ % 200) == 0)
+          LOG_A(PHY, "SENSING: PDSCH UNSUP@ssb-fep-after n=%lu\n", n_); }
+      return out->status; /* overwritten IQ is not SSB evidence */
+    }
+  }
+  const nr_ssb_rm_event_t ssb_event = nr_ssb_rm_observe(fp, proc->frame_rx, proc->nr_slot_rx, ssb_cand, rxdataF);
+  nr_ssb_rm_plan_t ssb;
+  const bool ssb_ok = nr_ssb_rm_plan(&ssb_event, proc->frame_rx, proc->nr_slot_rx, fp->Nid_cell, grant->rnti, dlsch_config,
+                                     freq_alloc, seg_path ? seg : NULL, seg_path ? nseg : 0, &ssb);
+  const uint32_t ssb_unav = ssb.unav;
+  if (ssb_event.symbols) {
+    static _Atomic unsigned long count = 0;
+    const unsigned long n = atomic_fetch_add_explicit(&count, 1, memory_order_relaxed) + 1;
+    if (n <= 100 || n % 100 == 0)
+      LOG_I(PHY, "PDSCH SSB-OBS n=%lu frame=%d slot=%d pci=%d symbols=0x%x crb=%u..%u overlap_re=%u refused=%d rnti=0x%x\n",
+            n, ssb_event.frame, ssb_event.slot, ssb_event.pci, ssb_event.symbols, ssb_event.first_crb,
+            ssb_event.last_crb, ssb_unav, !ssb_ok, grant->rnti);
+  }
+  if (!ssb_ok) {
+    { static _Atomic unsigned long c_ = 0;
+      const unsigned long n_ = atomic_fetch_add_explicit(&c_, 1, memory_order_relaxed) + 1;
+      if (n_ == 1 || (n_ % 200) == 0)
+        LOG_A(PHY, "SENSING: PDSCH UNSUP@ssb n=%lu (SSB REs under a DM-RS/PT-RS RE or an SI-RNTI grant)\n", n_); }
+    prg_arm_unsupported(grant->rnti, prg_arm);
+    return out->status;
+  }
+  if (ssb_unav) {
+    static _Atomic unsigned long count = 0;
+    const unsigned long n = atomic_fetch_add_explicit(&count, 1, memory_order_relaxed) + 1;
+    if (n == 1 || n % 200 == 0)
+      LOG_I(PHY, "PDSCH SSB-RM n=%lu frame=%d slot=%d pci=%d symbols=0x%x crb=%u..%u extra_re=%u rnti=0x%x\n",
+            n, ssb_event.frame, ssb_event.slot, ssb_event.pci, ssb_event.symbols,
+            ssb_event.first_crb, ssb_event.last_crb, ssb_unav, grant->rnti);
+  }
+
   /* ---- CSI-RS rate matching: from the blind CSI-RS search's confirmed resource (the monitor fills
    * csiRsForRateMatching on the slots it occurs). The demodulator's own overlap bitmap skips the
-   * REs; here only G needs the unavailable-RE count, from the same routine the attached UE uses. */
+   * REs; here only G needs the unavailable-RE count, taken from that same bitmap (TS 38.214 5.1.4.1:
+   * the union of the rate-matching resources). Against a gNB that instead SUMS overlapping resources,
+   * a single-CB TB that decoded before may now carry a few extra tail LLRs. */
   uint32_t csi_unav = 0;
   if (dlsch_config->numCsiRsForRateMatching > 0) {
-    extern uint32_t nr_ue_csi_rm_unav_res(fapi_nr_dl_config_dlsch_pdu_rel15_t *dlsch_config, freq_alloc_bitmap_t *freq_alloc);
-    csi_unav = nr_ue_csi_rm_unav_res(dlsch_config, (freq_alloc_bitmap_t *)freq_alloc);
+    /* The extractor's own RE set (union over the resources, CRB parity), not the attached UE's
+     * nr_ue_csi_rm_unav_res(), which sums overlapping resources: G and the LLR count must agree. */
+    csi_unav = nr_dlsch_csi_unav_res(dlsch_config, freq_alloc);
     /* nr_dlsch_extract_rbs() picks the CSI-RS RE pattern by the PRB's CRB PARITY (density 0.5 differs
      * on even/odd RBs). The virtual layout moves segment s from PRB prb_start to PRB data_index, so it
      * is only exact when both have the same parity. ponytail: refused otherwise; a per-segment parity
@@ -1682,22 +1863,43 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
   cw->new_data_indicator = true;
   cw->qamModOrder = nr_get_Qm_dl(grant->mcs, grant->mcs_table);
   const uint32_t R = nr_get_code_rate_dl(grant->mcs, grant->mcs_table);
-  if (cw->qamModOrder == 0 || R == 0) {
-    // MCS 28-31 (reserved-for-retransmission rows) have no modulation order/code rate of their own:
-    // a real UE takes them from the initial transmission. A passive receiver has no such history,
-    // so such a grant is simply not decodable here. nr_pdcch_blind_decode_and_extract() already
-    // rejects those, so reaching this means the MCS table assumption is wrong.
-    { static _Atomic unsigned long c_ = 0;
-      const unsigned long n_ = atomic_fetch_add_explicit(&c_, 1, memory_order_relaxed) + 1;
-      if (n_ == 1 || (n_ % 200) == 0)
-        LOG_A(PHY, "SENSING: PDSCH UNSUP@1423 n=%lu\n", n_); }
-    return out->status;
-  }
   const uint8_t nb_re_dmrs = get_num_dmrs_re_per_rb(dlsch_config->dmrsConfigType, dlsch_config->n_dmrs_cdm_groups);
   const uint16_t dmrs_len  = get_num_dmrs(dlsch_config->dlDmrsSymbPos);
-  cw->targetCodeRate = (uint16_t)R;
-  cw->TBS = nr_compute_tbs(cw->qamModOrder, (uint16_t)R, freq_alloc->num_rbs, dlsch_config->number_symbols,
-                           nb_re_dmrs * dmrs_len, grant->nb_rb_oh, grant->tb_scaling, cw->Nl);
+  // MCS 28-31 (reserved-for-retransmission rows) have no code rate of their own (their modulation
+  // order, from cw->qamModOrder above, IS already correct -- the spec table encodes it directly,
+  // e.g. Table_51311[29..31] = {2,0},{4,0},{6,0}). TS 38.214 5.1.3.1: the UE reuses the TBS and
+  // base graph of the initial transmission of this HARQ process. nr_harq_init_tx.h is that record,
+  // keyed by (RNTI, HARQ pid) and gated on the NDI not having toggled since it was taken; a miss
+  // means the true initial transmission was never observed and the grant stays refused, as before.
+  nr_harq_init_tx_t init_tx = {0};
+  bool have_init_tx = false;
+  if (cw->qamModOrder == 0 || R == 0) {
+    pthread_mutex_lock(&g_harqc_lock);
+    have_init_tx = nr_harq_init_tx_lookup(&g_dl_harq_init, grant->rnti, grant->harq_pid, grant->ndi, &init_tx);
+    pthread_mutex_unlock(&g_harqc_lock);
+    if (!have_init_tx) {
+      { static _Atomic unsigned long c_ = 0;
+        const unsigned long n_ = atomic_fetch_add_explicit(&c_, 1, memory_order_relaxed) + 1;
+        if (n_ == 1 || (n_ % 200) == 0)
+          LOG_A(PHY, "SENSING: PDSCH UNSUP@1423 n=%lu\n", n_); }
+      return out->status;
+    }
+    if (init_tx.nl != cw->Nl) {
+      // Layer count is this grant's OWN antenna-ports field, not replayed from the record: it
+      // decides how the transmitter mapped RE-to-layer THIS occasion, which the DM-RS ports of
+      // THIS DCI already reflect. A mismatch is merely logged -- it does not by itself mean the
+      // record is wrong, since the spec permits a retransmission to use a different layer count.
+      static _Atomic unsigned long c_ = 0;
+      const unsigned long n_ = atomic_fetch_add_explicit(&c_, 1, memory_order_relaxed) + 1;
+      if (n_ == 1 || (n_ % 200) == 0)
+        LOG_W(PHY, "SENSING: PDSCH reserved-MCS retx rnti=0x%04x pid=%u layer count changed %u->%u\n",
+              grant->rnti, grant->harq_pid, init_tx.nl, cw->Nl);
+    }
+  }
+  cw->targetCodeRate = have_init_tx ? (uint16_t)init_tx.code_rate : (uint16_t)R;
+  cw->TBS = have_init_tx ? init_tx.tbs
+                        : nr_compute_tbs(cw->qamModOrder, (uint16_t)R, freq_alloc->num_rbs, dlsch_config->number_symbols,
+                                         nb_re_dmrs * dmrs_len, grant->nb_rb_oh, grant->tb_scaling, cw->Nl);
   if (cw->TBS == 0) {
     { static _Atomic unsigned long c_ = 0;
       const unsigned long n_ = atomic_fetch_add_explicit(&c_, 1, memory_order_relaxed) + 1;
@@ -1705,7 +1907,13 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
         LOG_A(PHY, "SENSING: PDSCH UNSUP@1431 n=%lu\n", n_); }
     return out->status;
   }
-  cw->ldpcBaseGraph = get_BG(cw->TBS, cw->targetCodeRate);
+  cw->ldpcBaseGraph = have_init_tx ? init_tx.bg : get_BG(cw->TBS, cw->targetCodeRate);
+  // The record write itself is deferred to the TB CRC outcome (G5 review, gap-harq): recording here,
+  // right after these parameters are merely COMPUTED and before any decode is attempted, let a single
+  // blind DCI false-accept (a random payload whose CRC happened to mask to an in-range RNTI, same
+  // residual risk the mismatched-bits gate exists for) seed a bogus (rnti, pid, ndi) record that a
+  // LATER, genuine reserved-MCS grant on that same process would then trust. Only a CRC-verified TB
+  // is strong enough evidence -- see the write site at the CRC_OK branch below.
   dlsch_config->n_codewords = 1;
   /* TBS_LBRM's layer term is n_L = min(maxMIMO-LayersPDSCH, 4) -- the UE's CAPABILITY (TS 38.212
    * 5.4.2.1), NOT the rank of this particular grant. It was hardcoded to 1, which is wrong for any
@@ -1744,7 +1952,7 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
   dlsch_config->tbslbrm = nr_compute_tbslbrm(tbl_lbrm, bw_lbrm, (uint8_t)nl_tbslbrm);
 
   const uint32_t G = nr_get_G(freq_alloc->num_rbs, dlsch_config->number_symbols, nb_re_dmrs, dmrs_len,
-                              ptrs_unav + csi_unav /* PT-RS from the density sweep; CSI-RS from the blind search */,
+                              ptrs_unav + csi_unav + ssb_unav,
                               cw->qamModOrder, cw->Nl);
   if (G == 0) {
     { static _Atomic unsigned long c_ = 0;
@@ -1817,7 +2025,7 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
   int probe_last_sym = -1;
   static int s_probe_horizon = -1; /* ISAC_PROBE_HORIZON=0: probe with the whole slot processed (A/B of the horizon) */
   if (s_probe_horizon < 0) { const char *e = getenv("ISAC_PROBE_HORIZON"); s_probe_horizon = (e && atoi(e) == 0) ? 0 : 1; }
-  if (t_probe_first_seg && s_probe_horizon) {
+  if (t_probe_first_seg && s_probe_horizon && !ssb_unav) {
     const uint32_t Kcb = (cw->ldpcBaseGraph == 2) ? 3840u : 8448u;
     const uint32_t B = cw->TBS + 24u;
     const uint32_t C_est = (B <= Kcb) ? 1u : (B + (Kcb - 24u) - 1u) / (Kcb - 24u);
@@ -1843,7 +2051,7 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
   /* GPU LLRs in hand: everything from here to the LLR buffer (FEP, channel estimation, equaliser,
    * demodulator) is what the GPU already did for this slot. A PT-RS arm or CSI-RS rate matching
    * armed above changes the RE budget the GPU did not model, so that job stays on the CPU path. */
-  const int16_t *gpu_llr = ((dlsch_config->pduBitmap & 0x1) || csi_unav) ? NULL : t_llr_ovr;
+  const int16_t *gpu_llr = ((dlsch_config->pduBitmap & 0x1) || csi_unav || ssb_unav) ? NULL : t_llr_ovr;
   const uint32_t gpu_llr_n = gpu_llr ? t_llr_ovr_n : 0;
   atomic_fetch_add(gpu_llr ? &g_gpu_llr_jobs : &g_gpu_cpu_jobs, 1);
 
@@ -1859,11 +2067,6 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
    * slot_fep_nr.c. Each antenna's FEP is independent, so dispatch one per antenna across the
    * thread pool instead of looping them serially. nb_antennas_rx==1 skips the pool and matches
    * the previous behaviour exactly. */
-  const double fep_fo = isnan(nr_slot_fep_fo_override_hz)
-      ? (ue->cont_fo_comp ? ue->dl_Doppler_shift + ue->freq_offset : 0.0)
-      : nr_slot_fep_fo_override_hz;
-  const long share_slot = grant->source_absolute_slot;
-  const int fep_hit = t_share.on && t_fep_cache.valid && t_fep_cache.slot == share_slot && t_fep_cache.fo == fep_fo;
   const int fep_s0 = t_share.on ? 0 : dlsch_config->start_symbol;
   const int fep_n  = t_share.on ? fp->symbols_per_slot
                      : (probe_last_sym >= 0 ? probe_end - dlsch_config->start_symbol : dlsch_config->number_symbols);
@@ -1910,6 +2113,15 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
       if (n_ == 1 || (n_ % 200) == 0)
         LOG_A(PHY, "SENSING: PDSCH UNSUP@1625 n=%lu\n", n_); }
     return out->status; /* overwritten IQ is not CRC evidence */
+  }
+  for (int i = 0; !gpu_llr && grant->source_absolute_slot >= 0 && i < dlsch_config->numCsiRsForRateMatching; i++) {
+    if (dlsch_config->csiRsForRateMatching[i].csi_type != 2)
+      continue; // NZP-only slots cost nothing here
+    const double zs = nr_pdsch_passive_zp_grant_score(fp, dlsch_config, freq_alloc, &rxdataF[0][0],
+                                                      fp->samples_per_slot_wCP, proc->nr_slot_rx, fep_s0, fep_n,
+                                                      ssb_event.symbols, grant->scr_dedicated, i);
+    if (zs >= 0.0)
+      nr_csirs_blind_rt_zp_grant_evidence((uint32_t)grant->source_absolute_slot, &dlsch_config->csiRsForRateMatching[i], zs);
   }
 
   // ---- Channel estimation on the DM-RS symbols. ----
@@ -2026,8 +2238,11 @@ nr_pdsch_passive_decode_status_t nr_pdsch_passive_decode(PHY_VARS_NR_UE *ue,
    * virtual contiguous allocation. A 1-PRB segment is fine: the estimator has no minimum size (its
    * FIR/pilot loop is the same arithmetic the attached UE runs on 1-RB grants). nvar is weighted by
    * segment width so the sum keeps its (DM-RS symbol x layer) meaning; nr_dl_chest_nvar_ant[] ends
-   * up holding the LAST segment's per-branch value (the same last-call approximation it already
-   * makes across DM-RS symbols). The ISAC_DC_FIX interpolation is not applied here. */
+   * up holding the WIDTH-WEIGHTED MEAN across this symbol's segments (fix round 1, 15658710b9) --
+   * NOT just the last segment's raw value, which is what this comment used to say before that fix
+   * landed a few lines below. It is still only the last DM-RS SYMBOL's mean across symbols, the
+   * same last-call approximation the branch-substitution block further down already documents. The
+   * ISAC_DC_FIX interpolation is not applied here. */
   static __thread c16_t *seg_h = NULL;
   static __thread size_t seg_h_cap = 0;
   const int nsc_seg = freq_alloc->num_rbs * NR_NB_SC_PER_RB;
@@ -2849,13 +3064,11 @@ gpu_llr_ready:;
                                  .scope_rxdataF_offset = 0};
 
   // Same "first symbol carrying data" rule as nr_ue_pdsch_procedures().
-  uint32_t dmrs_data_re = (dlsch_config->dmrsConfigType == NFAPI_NR_DMRS_TYPE1)
-                              ? 12 - 6 * dlsch_config->n_dmrs_cdm_groups
-                              : 12 - 4 * dlsch_config->n_dmrs_cdm_groups;
-  int first_symbol_with_data = dlsch_config->start_symbol;
-  while (dmrs_data_re == 0 && (dlsch_config->dlDmrsSymbPos & (1 << first_symbol_with_data))) {
-    first_symbol_with_data++;
-  }
+  const int first_symbol_with_data = nr_ssb_rm_first_data_symbol(dlsch_config, freq_alloc, &ssb);
+  /* Always a mask, even an empty one: with one, nr_rx_pdsch() takes its per-symbol RE count from what
+   * nr_dlsch_extract_rbs() actually packed (CRB-parity CSI-RS, DM-RS, SSB) instead of its own CSI-RS
+   * re-count, which walks CRB numbers over the BWP-relative bitmap and is wrong for BWPStart > 0. */
+  static const nr_ssb_rm_mask_t no_ssb = {0};
 
   /* ---- PDSCH BRANCH-QUALITY GATE (ISAC_PDSCH_ANT_GATE=1, default OFF) --------------------------
    * 2026-09-23, ADDED BUT NOT LIVE-VALIDATED (no hardware available overnight to A/B it). Mirrors
@@ -3032,7 +3245,8 @@ gpu_llr_ready:;
                     m == first_symbol_with_data, (unsigned char)dlsch_config->harq_process_nbr, pdsch_est_size,
                     pdsch_dl_ch_estimates, llr, dl_valid_re, rxdataF_dem, &log2_maxh, rx_size_symbol,
                     fp->nb_antennas_rx, rxdataF_comp, dl_ch_mag, dl_ch_magb, dl_ch_magr, ptrs_phase_per_slot,
-                    ptrs_re_per_slot, nvar, &scope_req, NULL /* rho_dl: single layer */)
+                    ptrs_re_per_slot, nvar, &scope_req, NULL /* rho_dl: single layer */,
+                    ssb_unav ? &ssb.dem : &no_ssb)
         < 0) {
       demod_ok = false;
       break;
@@ -3040,6 +3254,27 @@ gpu_llr_ready:;
   }
 
   pdtim_add(PDTIM_DEMOD, pdt_dem);
+
+  /* ---- RE-BUDGET INVARIANT (CPU path, whole allocation demodulated). G above is what rate
+   * de-matching will read; the demodulator must have produced exactly that many LLRs. A mismatch --
+   * an SSB/CSI-RS/PT-RS/DM-RS RE model in nr_rx_pdsch() that disagrees with the one G was computed
+   * from -- shifts every LLR after the first disagreement, so the TB cannot be CRC evidence of
+   * anything: fail closed instead of feeding the sweeps a misleading CRC failure. */
+  if (demod_ok && !gpu_llr && probe_last_sym < 0) {
+    uint64_t llr_n = 0;
+    for (int m = dlsch_config->start_symbol; m < dlsch_config->start_symbol + dlsch_config->number_symbols; m++)
+      llr_n += (uint64_t)dl_valid_re[m] * cw->qamModOrder * cw->Nl;
+    if (llr_n != G) {
+      static _Atomic unsigned long c_ = 0;
+      const unsigned long n_ = atomic_fetch_add_explicit(&c_, 1, memory_order_relaxed) + 1;
+      if (n_ == 1 || (n_ % 200) == 0)
+        LOG_W(PHY, "SENSING: PDSCH RE-budget mismatch n=%lu rnti=0x%x: demodulated %lu LLRs, G %u (ssb_unav %u csi_unav %u "
+                   "ptrs_unav %u)\n", n_, grant->rnti, (unsigned long)llr_n, G, ssb_unav, csi_unav, ptrs_unav);
+      prg_arm_unsupported(grant->rnti, prg_arm);
+      out->status = NR_PDSCH_PASSIVE_DECODE_ERROR;
+      return out->status;
+    }
+  }
 
   /* Qm oracle: same symbol choice as EQDIAG -- the one with the most valid data REs. */
   if (demod_ok) {
@@ -3456,6 +3691,7 @@ gpu_llr_ready:;
       /* 1 = decoded with data, 0 = zero_tb, 2 = seg_fail. `out->status` is not set yet here, so the
        * zero/seg distinction comes from the counters passive_ldpc_decode just bumped. */
       const int sk = ldpc_ok ? 1 : ((atomic_load(&g_ldpc_zero_tb) != zero_before) ? 0 : 2);
+      t_last_sk = sk;
       {
         /* llr_have: index one past the last NON-ZERO LLR. An exactly-zero LLR is possible but
          * vanishingly rare in real soft output, so the last nonzero is a good proxy for how far
@@ -3465,6 +3701,7 @@ gpu_llr_ready:;
         for (int i = (int)G - 1; i >= 0; i--) {
           if (llr[i] != 0) { llr_have = (uint32_t)i + 1; break; }
         }
+        t_last_llr_have = llr_have;
         /* LLRFILL (2026-09-16): per-symbol non-zero LLR counts of the assembled buffer, one shot when
          * llr_have < 0.9 G -- which symbols/layers come out empty (rank-4 bed: llr_have 3 % of G). */
         static _Atomic int s_llrfill_left = 3;
@@ -3486,6 +3723,7 @@ gpu_llr_ready:;
           vre += dl_valid_re[m];
         }
         const int pk = (sk == 1) ? 1 : 0;  // 1 = decoded, 0 = did not decode (zero_tb or seg_fail)
+        t_last_data_bits = vre * cw->qamModOrder * cw->Nl;
         const uint64_t v[PIPE_N_FIELDS] = {
             G, llr_have, vre, (uint64_t)vre * cw->qamModOrder * cw->Nl,
             t_seg_C, t_seg_K, t_seg_Z, t_seg_F, t_seg_E, t_seg_R, t_seg_lbrm,
@@ -3547,6 +3785,20 @@ gpu_llr_ready:;
     if (ldpc_ok) {
       out->status = NR_PDSCH_PASSIVE_DECODE_CRC_OK;
       out->tb     = g_harq.b;
+      // Reserved-MCS retransmission record (G5 review, gap-harq): only a CRC-VERIFIED TB is strong
+      // enough evidence to seed/refresh this (rnti, pid)'s record -- see the computation site's
+      // comment for why recording on mere "the MCS was resolvable" was not. SI-/RA-/P-RNTI grants
+      // never carry a real NDI/HARQ-pid field and can never reach the reserved-MCS lookup at all
+      // (format 1_0 keeps a hard reject for them), so recording them would only churn the table
+      // with unusable entries. A grant that itself USED a stored record (have_init_tx) is a
+      // retransmission, not a fresh resolvable MCS, so it does not refresh the record either --
+      // only the genuinely resolvable grant that established have_init_tx=false does.
+      if (!have_init_tx && rnti_sweepable(grant->rnti, grant->rnti_class)) {
+        pthread_mutex_lock(&g_harqc_lock);
+        nr_harq_init_tx_record(&g_dl_harq_init, grant->rnti, grant->harq_pid, grant->ndi, cw->qamModOrder, cw->Nl,
+                               cw->ldpcBaseGraph, cw->TBS, cw->targetCodeRate);
+        pthread_mutex_unlock(&g_harqc_lock);
+      }
     } else {
       out->status = NR_PDSCH_PASSIVE_DECODE_CRC_FAIL;
     }
@@ -3563,14 +3815,30 @@ gpu_llr_ready:;
     static int s_tbp2 = -1;
     if (s_tbp2 < 0)
       s_tbp2 = (getenv("ISAC_PDSCH_TBPARM") != NULL) ? 1 : 0;
-    if (s_tbp2)
+    if (s_tbp2) {
+      /* These are the PDUs actually supplied to this TB after occasion/overlap filtering.
+       * Keep geometry on the outcome line: export logs alone cannot attribute applied masks.
+       * Tuple: type/row:start:nrb:bitmap:l0:l1:cdm:density:scramblingID. */
+      char csi_detail[512] = "";
+      int pos = 0;
+      for (unsigned i = 0; i < dlsch_config->numCsiRsForRateMatching && i < NFAPI_MAX_NUM_CSI_RATEMATCH; i++) {
+        const fapi_nr_dl_config_csirs_pdu_rel15_t *c = &dlsch_config->csiRsForRateMatching[i];
+        const int n = snprintf(csi_detail + pos, sizeof(csi_detail) - pos,
+                               "%s%u/%u:%u:%u:%u:%u:%u:%u:%u:%u", i ? ";" : "",
+                               c->csi_type, c->row, c->start_rb, c->nr_of_rbs, c->freq_domain,
+                               c->symb_l0, c->symb_l1, c->cdm_type, c->freq_density, c->scramb_id);
+        if (n < 0 || (size_t)n >= sizeof(csi_detail) - pos)
+          break;
+        pos += n;
+      }
       /* Every field needed to attribute a failure is on THIS line. Do NOT reconstruct it by pairing
        * against the preceding TBPARM line: decodes for different slots interleave in the log, so
        * adjacency-based pairing silently mis-attributes (it produced two mutually contradictory
        * breakdowns before this was fixed). Same class of error as the retracted "20 % dt bias". */
       LOG_I(PHY,
             "SENSING: TBRESULT rnti=0x%x nl=%u mcs=%u Qm=%u R=%u tbs=%u bg=%u prb=%u+%u "
-            "cdm=%u dmrsmask=0x%x nscid=%u scramb=%u refpt=%u sym=%u+%u G=%u bwpstart=%u status=%s\n",
+            "cdm=%u dmrsmask=0x%x nscid=%u scramb=%u refpt=%u sym=%u+%u G=%u bwpstart=%u status=%s "
+            "slot=%d.%d why=%s csirm=%u harq=%u rv=%u llr_have=%u data_bits=%u csirs=[%s]\n",
             grant->rnti, (unsigned)cw->Nl, (unsigned)grant->mcs, (unsigned)cw->qamModOrder,
             (unsigned)cw->targetCodeRate, (unsigned)cw->TBS, (unsigned)cw->ldpcBaseGraph,
             (unsigned)freq_alloc->first_rb, (unsigned)freq_alloc->num_rbs,
@@ -3584,7 +3852,13 @@ gpu_llr_ready:;
             (unsigned)out->G,
             (unsigned)dlsch_config->BWPStart,
             out->status == NR_PDSCH_PASSIVE_DECODE_CRC_OK ? "CRC_OK"
-              : (out->status == NR_PDSCH_PASSIVE_DECODE_CRC_FAIL ? "CRC_FAIL" : "ERROR"));
+              : (out->status == NR_PDSCH_PASSIVE_DECODE_CRC_FAIL ? "CRC_FAIL" : "ERROR"),
+            proc->frame_rx, proc->nr_slot_rx,
+            out->status == NR_PDSCH_PASSIVE_DECODE_CRC_OK ? "ok" : t_last_sk == 0 ? "zero_tb" : t_last_sk == 2 ? "seg_fail" : "-",
+            (unsigned)dlsch_config->numCsiRsForRateMatching, (unsigned)grant->harq_pid, (unsigned)grant->rv,
+            t_last_llr_have, t_last_data_bits, csi_detail);
+    }
+    t_last_sk = -1;
   }
 
   pdtim_report();

@@ -120,6 +120,54 @@ TEST(Dci11Layout, PlausibilityRejectsAnOutOfRangeRiv) {
   EXPECT_TRUE(nr_dci11_layout_plausible(&o, p, 273));
 }
 
+// TS 38.212 Table 7.3.1.2.2-{1,2,3,4} row counts, exactly as nr_pdcch_blind_monitor.c's
+// g_table_7_3_2_3_3_{1,2,3,4} arrays are sized (the actual DCI 1_1 extraction indexes those, so a
+// disagreement here would silently mis-prune the layout search). Width 4 is always DM-RS type 1
+// maxLength 1; width 5 is type 1 maxLength 2 OR type 2 maxLength 1, told apart by dmrs_type; width 6
+// is always type 2 maxLength 2.
+TEST(Dci11Layout, ApValidRowsCoversAllFourAntennaPortsTables) {
+  nr_dci11_layout_t l{};
+  l.bwp_ind = 0; l.pre_mcs = 0; l.pre_ant = 11; l.post_ant = 4;
+  nr_dci11_offsets_t o{};
+
+  l.ant_ports = 4; l.dmrs_type = 0;
+  ASSERT_TRUE(nr_dci11_layout_offsets(&l, 16, 2, &o));
+  EXPECT_EQ(o.ap_valid_rows, 12);
+
+  l.ant_ports = 5; l.dmrs_type = 0;
+  ASSERT_TRUE(nr_dci11_layout_offsets(&l, 16, 2, &o));
+  EXPECT_EQ(o.ap_valid_rows, 31);
+
+  l.ant_ports = 5; l.dmrs_type = 1;
+  ASSERT_TRUE(nr_dci11_layout_offsets(&l, 16, 2, &o));
+  EXPECT_EQ(o.ap_valid_rows, 24);
+
+  l.ant_ports = 6; l.dmrs_type = 1;
+  ASSERT_TRUE(nr_dci11_layout_offsets(&l, 16, 2, &o));
+  EXPECT_EQ(o.ap_valid_rows, 58);
+}
+
+// Before this fix, ap_valid_rows was 0 at every width but 4, so an out-of-range antenna_ports code
+// point on a DM-RS-type-2 (or maxLength-2 type-1) layout was NOT rejected by this "free" plausibility
+// signal -- it just meant the search converged slower, not that it converged wrong, but the whole
+// point of this check is to speed up exactly this. Table 7.3.1.2.2-3 (width 5, type 2) has 24 rows.
+TEST(Dci11Layout, PlausibilityRejectsAnOutOfRangeType2AntennaPorts) {
+  nr_dci11_layout_t l{};
+  l.bwp_ind = 0; l.pre_mcs = 0; l.pre_ant = 11; l.ant_ports = 5; l.dmrs_type = 1; l.post_ant = 4;
+  nr_dci11_offsets_t o{};
+  ASSERT_TRUE(nr_dci11_layout_offsets(&l, 16, 2, &o));
+  ASSERT_EQ(o.ap_valid_rows, 24);
+
+  auto build = [&](uint32_t ap) {
+    uint64_t p = 0;
+    p |= (uint64_t)10 << (o.total - o.mcs - 5);                        // legal MCS
+    p |= (uint64_t)ap << (o.total - o.ant_ports - o.ant_ports_bits);   // antenna_ports field
+    return p;
+  };
+  EXPECT_TRUE(nr_dci11_layout_plausible(&o, build(23), 273));   // last valid row of table -3
+  EXPECT_FALSE(nr_dci11_layout_plausible(&o, build(24), 273));  // one past it
+}
+
 TEST(Dci11Layout, AWrongLayoutIsRejectedMoreOftenThanARightOne) {
   // The confusion the sweep actually faces is between layouts of the SAME total length -- the
   // length is already derived, so every candidate agrees on it and differs only internally.

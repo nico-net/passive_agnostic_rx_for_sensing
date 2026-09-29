@@ -52,6 +52,7 @@
 #include "PHY/NR_UE_TRANSPORT/nr_csirs_blind_rt.h" // blind CSI-RS search, observe-only
 #include "PHY/NR_UE_TRANSPORT/nr_pdcch_coreset_map.h"      // Phase 3 Technique A cross-check (XCHECK diag)
 #include "PHY/NR_UE_TRANSPORT/nr_pdcch_coreset_bank.h"      // multi-CORESET bank, moved to the library 2026-09-25
+#include "PHY/NR_UE_TRANSPORT/nr_dci11_pin.h"               // R30 item 2 / R32: pure pin/rotate/giveup decision
 
 #include <string.h>
 #include <stdlib.h>
@@ -330,6 +331,10 @@ static void al1_union_accept(int bi, int L, int cce, int num_cces, const uint16_
 
 /* Manual/auto is authoritative: disabled means no hypothesis application or scoring. */
 static bool g_pdsch_sweep_on;
+/* Which pass of nr_pdcch_blind_monitor_run_occasion() is running on this thread (bank / CORESET#0-USS /
+ * root cfg). Declared up here because pdsch_sweep_maybe_enable() keys Technique D on it. */
+enum { PASS_OTHER = 0, PASS_C0USS = 1, PASS_BANK = 2 };
+static __thread int t_pass_kind;
 
 /* ---- DCI 1_1 LAYOUT CONSISTENCY (stage 1 of nr_pdcch_dci11_layout_sweep) ---------------------
  * The configured field layout is a set of ASSUMPTIONS. A wrong one still yields CRC-valid DCIs
@@ -541,6 +546,22 @@ static uint64_t g_pdsch_configuration;
  * selection promotes the one that decodes. TB CRC remains the only authority. The hand-picked
  * 3-family enumeration is the fallback while stage 1 is not armed. */
 #define NR_DCI11_STAGE2_MAX_ALIVE 8   /* hand over once stage 1 is down to this many */
+/* R30 item 2: trials a pinned Technique-D layout candidate may accumulate at zero CRC passes before
+ * it is judged wrong and abandoned. A 24-bit TB CRC's false-accept floor is ~6e-8/try, and even a
+ * marginal true rate of 1% has P(0 passes in 1000 trials) ~= 4.3e-5 -- 1000 trials is comfortably
+ * past "unlucky" for a right layout while still cheap enough to try several wrong ones inside a run. */
+#define DCI11_PIN_GIVEUP_TRIALS 1000
+/* R30 item 2: occasions (not real Technique-D trials, which arrive far slower and far less evenly --
+ * measured live: the FIRST 200-occasion block on this bed carried 45 real trials, every block after
+ * it in the same run carried ~0, because the deferred decode queue's backlog (scanq drop_full) grows
+ * over a run's lifetime and starves later occasions of ever reaching a real trial at all) a pinned
+ * candidate gets before rotating, when the trial-count giveup above hasn't fired first. Real trials
+ * are therefore a scarce, front-loaded resource: a SMALL block that cycles through the handful of
+ * fallback candidates repeatedly gives each of them several independent chances to land its window
+ * on a still-healthy stretch of the queue, where a large block commits most of a run's healthy
+ * window to whichever candidate happened to be offered first (measured: exactly this cost FIXED a
+ * 0-crc_ok run when the first-offered candidate was not the true one). */
+#define DCI11_PIN_BLOCK_OCCASIONS 50
 /* While the configured layout is still among stage 1's survivors, hand over only at 4 (the measured
  * dilution limit); once stage 1 has REFUTED it, waiting is pointless -- the hand-picked fallback
  * enumeration hard-codes antenna_ports=4 bits and can never contain the truth. OTA 2026-09-15 on the
@@ -750,8 +771,9 @@ static uint64_t g_dci01_seen = 0;
  * discovery-hypothesis passes are LINK HEALTH (nr_dci01_fdra_evidence_t). With the link healthy and that
  * oracle 0/NR_DCI11_FDRA_ARM_MIN_TRIALS, the RA type 0 / dynamicSwitch 0_1 layouts are armed and oracle-class
  * 0_1 grants REFUSED (UL_FDRA_REFUSED): the UL extractor reads a RIV of the configured width, so they would
- * be decoded at the wrong PRBs and offsets, and RA type 0 PUSCH is not decodable here (nr_rx_pusch_group_tp
- * takes rb_start/rb_size only). 0_0 and discovery grants stay booked (UL DM-RS CFR continues); one refused
+ * be decoded at the wrong PRBs and offsets. Refused payloads are retried under length-consistent
+ * type-0/dynamicSwitch interpretations, with an explicit physical PRB list at the decoder.
+ * 0_0 and discovery grants stay booked (UL DM-RS CFR continues); one refused
  * grant in NR_DCI01_FDRA_PROBE_EVERY is still booked, and one oracle pass ends the refusal for good.
  * KNOWN LIMIT: a type-1 cell whose 0_1 PUSCH fails for another reason (e.g. MCS-limited decode, or a 0_1-only
  * data-scrambling-ID mismatch) while 0_0 decodes satisfies the same evidence. That is why the REFUSAL is
@@ -1129,7 +1151,12 @@ static void dl_discovery_invalidate(void)
   g_length_swept = g_length_found = false;
   atomic_store_explicit(&g_dl_layout_preferred, 0, memory_order_relaxed);
   nr_pdcch_dci_length_sweep_reset(&g_dl_length_state);
-  nr_pdsch_config_sweep_reset_all();
+  /* NOT nr_pdsch_config_sweep_reset_all() (lane perf 2026-09-27): Technique D contexts are keyed by
+   * the configuration identity (pdsch_sweep_maybe_enable()), so a different geometry already gets
+   * contexts of its own. The discovery pass that calls this runs in the SAME occasion as the verified
+   * bank's pass, and wiping every context here erased the bank's evidence each time the discovery
+   * cursor moved -- measured on the phy-test bed: "Technique D ARMED" 265238 times in 150 s, i.e. no
+   * context ever outlived one occasion, and 0 CONVERGED in every run. */
   g_pdsch_sweep_on = false;
 }
 
@@ -1148,11 +1175,25 @@ static void pdsch_sweep_maybe_enable(const nr_pdcch_blind_monitor_cfg_t *cfg)
   const unsigned char *bytes = (const unsigned char *)&cfg->extract;
   for (unsigned i = 0; i < sizeof(cfg->extract); ++i)
     identity = (identity ^ bytes[i]) * UINT64_C(1099511628211);
-  identity ^= nr_pdcch_blind_monitor_autodiscover_generation();
-  if (g_pdsch_sweep_on && (!ready || identity != g_pdsch_configuration))
-    nr_pdsch_config_sweep_reset_all();
-  if (ready && !g_pdsch_sweep_on)
-    LOG_A(PHY, "SENSING: Technique D ARMED: independent RNTI/TDA contexts, TB-CRC scoring\n");
+  /* The discovery generation names the ROOT cfg's current geometry hypothesis. A verified bank entry's
+   * geometry is fully described by its own fields above, and the generation bumps every time the
+   * discovery CURSOR moves -- folding it in re-keyed the bank's Technique-D contexts (and dropped its
+   * layout pin) on every cursor move: measured 214 contexts for 3 layouts in 150 s, none converged. */
+  if (t_pass_kind != PASS_BANK)
+    identity ^= nr_pdcch_blind_monitor_autodiscover_generation();
+  /* No reset on an identity change or a not-ready pass (lane perf 2026-09-27): the bank pass, the
+   * CORESET#0-USS pass and the discovery pass of ONE occasion each call this with their own cfg, and
+   * resetting on every switch wiped the bank's contexts once per occasion (see dl_discovery_invalidate).
+   * Contexts are keyed by `identity`, so each geometry keeps its own evidence; an abandoned identity's
+   * contexts are simply never selected again and age out of the LRU. */
+  static uint64_t s_armed_identity;
+  static int s_armed_left = 20;
+  if (ready && identity != s_armed_identity && s_armed_left > 0) {
+    s_armed_left--;
+    s_armed_identity = identity;
+    LOG_A(PHY, "SENSING: Technique D ARMED: independent RNTI/TDA contexts, TB-CRC scoring (configuration 0x%llx)\n",
+          (unsigned long long)identity);
+  }
   g_pdsch_configuration = identity;
   g_pdsch_sweep_on = ready;
 }
@@ -1566,6 +1607,7 @@ static uint64_t g_dec_skip_rv = 0;
  * throwing away real grants and should be raised (or more consumers added), which is a capacity
  * decision, not a defect. */
 static uint64_t g_dec_over_cap = 0;
+static uint64_t g_dec_k0_wait = 0; // in-line: the hypothesis' k0 slot was not yet written, not decoded/scored
 
 /* ---- ADAPTIVE AGGREGATION-LEVEL ALLOCATION --------------------------------------------------
  * The candidate budget (64 candidates / NR_MAX_PDCCH_SIZE REs) cannot cover a full sweep of every
@@ -2816,9 +2858,17 @@ static void nr_pdcch_blind_monitor_process_body(PHY_VARS_NR_UE *ue, const UE_nr_
     nr_pdcch_blind_monitor_autodiscover_step(rxdataF_disc[0] + disc_symbol * fp->ofdm_symbol_size, fp->ofdm_symbol_size, fp->N_RB_DL,
                                              fp->first_carrier_offset, (uint16_t)fp->Nid_cell,
                                              proc->nr_slot_rx, disc_symbol, abs_slot_now);
-    /* Previously a second discovery epoch made the receiver deaf: the unconditional return also
-     * stopped every already-verified CORESET. Keep those immutable bank entries running. */
-    if (nr_pdcch_coreset_bank_count() == 0)
+    /* GATE 1 FIX (R31, sa-discovery-stall.md): this used to be `if (bank_count() == 0) return;`,
+     * which -- on top of keeping already-verified CORESETs running, the reason it was narrowed from
+     * an earlier unconditional return -- also unconditionally skipped the rest of process_body()
+     * (the on-occasion gate and nr_pdcch_blind_monitor_run_occasion() below) for the ENTIRE capture
+     * whenever the bank was still empty, i.e. for the whole time autodiscover has not yet converged.
+     * run_occasion() already has a cheap CORESET#0-USS/RAR-anchor pass specifically for
+     * bank_count()==0 ("search it before spending the occasion on unknown footprints"); that pass
+     * was structurally unreachable. nr_pdcch_blind_monitor_discovery_block_early_return() is now the
+     * single decision point (always false; see its own comment) so the fallback runs on its
+     * occasions from SIB1_DECODED onward, same as any other on-occasion work. */
+    if (nr_pdcch_blind_monitor_discovery_block_early_return(nr_pdcch_coreset_bank_count()))
       return;
   }
 
@@ -2923,8 +2973,6 @@ static void nr_pdcch_blind_monitor_run_occasion_one(PHY_VARS_NR_UE *ue, const UE
  * discovery). A DCI whose REs lie in CORESET#0's RBs decodes in BOTH the bank pass and the CORESET#0-USS
  * pass under different CCE numbering -- run s3live4: 1962 DL DCIs accepted twice (CCE 4 and CCE 6), i.e.
  * duplicate grants and duplicate PDSCH decodes. One accept per (slot, RNTI, direction). */
-enum { PASS_OTHER = 0, PASS_C0USS = 1, PASS_BANK = 2 };
-static __thread int t_pass_kind;
 static pthread_mutex_t s_dedupe_mu = PTHREAD_MUTEX_INITIALIZER;
 static struct { uint32_t slot; uint16_t rnti; uint8_t dir; } s_dedupe[256];
 static unsigned s_dedupe_w;
@@ -3020,7 +3068,18 @@ void nr_pdcch_blind_monitor_run_occasion(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_pr
   nr_pdcch_blind_monitor_cfg_override(NULL);
 
   if (nr_pdcch_blind_monitor_autodiscover_done()) {
-    nr_pdcch_blind_monitor_run_occasion_one(ue, proc, serial_candidates, source_absolute_slot);
+    /* Background once a bank exists (lane perf 2026-09-27): the further-CORESET discovery pass yields
+     * to a waiting occasion (nr_pdcch_blind_monitor_discovery_pass_due()). Measured on the phy-test bed:
+     * its DL length sweep was 77 % of the scan consumer's time and made it drop 41 % of occasions. */
+    static uint32_t s_disc_skipped;
+    static uint64_t s_disc_run, s_disc_yield;
+    if (nr_pdcch_blind_monitor_discovery_pass_due(nr_pdcch_passive_queue_backlog(), &s_disc_skipped)) {
+      s_disc_run++;
+      nr_pdcch_blind_monitor_run_occasion_one(ue, proc, serial_candidates, source_absolute_slot);
+    } else if ((++s_disc_yield % 20000) == 1) {
+      LOG_A(PHY, "SENSING: discovery pass yielded to scan backlog: yielded=%llu ran=%llu\n",
+            (unsigned long long)s_disc_yield, (unsigned long long)s_disc_run);
+    }
   } else {
     /* CSS0 remains alive while the discovery-only path has no candidate geometry to scan. */
     static uint64_t css_tick;
@@ -5383,8 +5442,31 @@ constdiag_done:;
                   ul_enforce ? "0_1 grant not booked (1 in 64 still booked as a probe)"
                              : "booked anyway (ISAC_UL_FDRA_REFUSE=1 to refuse; a 0_1-only scrambling/MCS cause looks identical)");
         }
-        if (nr_dci01_fdra_book(ul_verdict, ul_oracle, nref, ul_enforce))
+        if (nr_dci01_fdra_book(ul_verdict, ul_oracle, nref, ul_enforce)) {
           nr_pusch_grant_book_add(u, source_absolute_slot);
+        } else if (ul_verdict == NR_DCI01_FDRA_REFUSE && ul_oracle) {
+          /* Gap item 1 (PUSCH RA type 0 / dynamicSwitch). Type 1 is refuted for this class; rather than
+           * drop the already-CRC-verified payload, re-extract it under each FDRA mode that reproduces
+           * the SAME observed dci_length (nr_pdcch_blind_ul_fdra_mode_candidates() -- "DCI length
+           * consistency", not a joint search over every other field width too, so this is a
+           * discriminator, not a certainty; the eventual TB CRC is the real oracle, same as every other
+           * hypothesis this receiver tries). The passive decoder reconstructs the same PRB list
+           * from the bitmap and passes it explicitly to per-segment channel estimation and
+           * per-symbol RE gathering, followed by one full-allocation descrambling/LDPC pass. */
+          nr_pdcch_blind_ul_result_t alternatives;
+          const int n_cand = nr_pdcch_blind_ul_fdra_bundle(&ul_opts, u->raw_payload, u->dci_length,
+                                                         u->rnti, &alternatives);
+          if (n_cand > 0) {
+            static _Atomic unsigned long s_ul_type0_booked;
+            const unsigned long nb = atomic_fetch_add_explicit(&s_ul_type0_booked, 1, memory_order_relaxed) + 1;
+            if (nb == 1 || (nb % 1000) == 0)
+              LOG_A(PHY, "SENSING: UL_FDRA_ALTERNATIVES_BOOKED n=%lu rnti=0x%x candidates=%d\n",
+                    nb, u->rnti, n_cand);
+            /* One queue job preserves all interpretations through book deduplication.
+             * Only the consumer's TB CRC may stop the bounded (at most four) search. */
+            nr_pusch_grant_book_add(&alternatives, source_absolute_slot);
+          }
+        }
       } else {
         g_ul_rejects++;
       }
@@ -5602,21 +5684,83 @@ constdiag_done:;
                 raw->rnti,(unsigned)layout_ids[preferred],n,preferred_ok);
         }
       } else preferred=-1;
-      int fallback;
-      if (nr_agnostic_v2() && n > 1) {
-        /* Thompson over the candidates' cell-wide TB-CRC evidence (contexts are keyed without the
-         * RNTI, so every UE's grants inform every other's). Stage-2 candidates arrive best-scored
-         * first; that order becomes a small prior so the first grants go to the stage-1 favourite. */
-        static __thread uint64_t s_rng = 0;
-        if (s_rng == 0) s_rng = 0x9E3779B97F4A7C15ULL ^ (uint64_t)(uintptr_t)&s_rng;
-        double prior[NR_DCI11_STAGE2_MAX_ALIVE + 3];
-        for (int i=0;i<n;++i) prior[i] = from_stage2 ? 2.0 * (double)(n - i) / (double)n : 0.0;
-        fallback = nr_dci11_thompson_pick(ts_ok, ts_tr, prior, n, &s_rng);
-        if (fallback < 0) fallback = 0;
-      } else {
-        fallback = layout_cursor[raw->rnti]++ % n;
+      /* R30 item 2 (context churn, technique-d-regression.md) / R32 fix round 1: pin the
+       * Technique-D layout candidate per RNTI so its `configuration` key (keys[]) stops rotating
+       * across whichever of the n offered DCI-11 layout candidates Thompson/round-robin happens to
+       * pick THIS grant. Without this, no sweep context (nr_pdsch_config_sweep.c, keyed on
+       * configuration) ever accumulates enough trials to converge -- measured 20 context-table
+       * churn events and 0 crc_ok across 6+ independent runs on the phy-test bed even though the
+       * correct layout is among the candidates offered every grant. `configuration` genuinely
+       * depends on which field-width layout guess parsed the DCI (a different layout reads a
+       * different tda_index/mcs from the SAME bits), so evidence gathered under one layout cannot
+       * simply be merged into another's key -- pinning instead keeps SELECTING the same key
+       * occasion after occasion, so one context actually gets fed. Settled/preferred (already
+       * evidence-backed above) take priority over the pin outright.
+       *
+       * The pin/rotate/giveup DECISION itself lives in nr_dci11_pin.c (pure, unit-tested in
+       * tests/nr_dci11_pin_test.cc) -- rotates after DCI11_PIN_BLOCK_OCCASIONS occasions (real
+       * Technique-D trials arrive far slower and far less evenly than occasions on this bed, so a
+       * trial-count-only giveup essentially never fires in a practical run; see that define's own
+       * comment) or DCI11_PIN_GIVEUP_TRIALS zero-pass real trials, whichever comes first, and
+       * auto-invalidates on a real cell-geometry change. A pin merely absent from this occasion's
+       * offered list (transient resolver churn, not a verdict) is left alone rather than rotated
+       * -- see nr_dci11_pin_select()'s own contract for how the caller (here) tells the two apart.
+       *
+       * R32: the round-robin cursor used to seed/rotate a pin MUST advance only at the point of
+       * actually reseeding, never on every occasion -- advancing it every occasion while a pin
+       * survives ~block_occasions occasions before being re-read made successive picks land
+       * gcd(block_occasions, n) apart instead of 1 apart (e.g. n=8, block=50: only 2 of 8
+       * candidates ever pinned). nr_dci11_pin_round_robin() is therefore called ONLY inside the
+       * "must reseed" branch below, using a cursor dedicated to that purpose
+       * (dci11_pin_cursor[]) -- the pre-existing free-running layout_cursor[]/Thompson pick is
+       * still computed lazily, only when needed, for the separate "pin still valid but not offered
+       * this occasion" one-off substitute, which has no such successive-coverage requirement. */
+      static nr_dci11_pin_t dci11_pin[65536];
+      static uint32_t       dci11_pin_cursor[65536];
+      nr_dci11_pin_t *const pin = &dci11_pin[raw->rnti];
+      uint32_t p_ok = 0, p_tr = 0;
+      bool has_stats = false;
+      if (nr_dci11_pin_is_valid(pin))
+        for (int i = 0; i < n; ++i)
+          if (layout_ids[i] == pin->layout) {
+            nr_pdsch_config_sweep_context_stats(keys[i], raw->rnti, 0xFF, cfg->dmrs_typeA_position, &p_ok, &p_tr);
+            has_stats = true;
+            break;
+          }
+      int selected = nr_dci11_pin_select(pin, g_pdsch_configuration, layout_ids, n, settled, preferred,
+                                         has_stats, p_ok, p_tr, DCI11_PIN_BLOCK_OCCASIONS, DCI11_PIN_GIVEUP_TRIALS);
+      if (selected < 0) {
+        int chosen;
+        if (nr_agnostic_v2() && n > 1) {
+          /* Thompson over the candidates' cell-wide TB-CRC evidence (contexts are keyed without the
+           * RNTI, so every UE's grants inform every other's). Stage-2 candidates arrive best-scored
+           * first; that order becomes a small prior so the first grants go to the stage-1 favourite. */
+          static __thread uint64_t s_rng = 0;
+          if (s_rng == 0) s_rng = 0x9E3779B97F4A7C15ULL ^ (uint64_t)(uintptr_t)&s_rng;
+          double prior[NR_DCI11_STAGE2_MAX_ALIVE + 3];
+          for (int i=0;i<n;++i) prior[i] = from_stage2 ? 2.0 * (double)(n - i) / (double)n : 0.0;
+          chosen = nr_dci11_thompson_pick(ts_ok, ts_tr, prior, n, &s_rng);
+          if (chosen < 0) chosen = 0;
+        } else if (nr_dci11_pin_is_valid(pin)) {
+          /* Pin still valid, just not offered this occasion: a one-off substitute, not a reseed --
+           * the free-running cursor's own cadence doesn't matter here (no successive-coverage
+           * requirement on a rare, transient path), so it is left untouched otherwise. */
+          chosen = layout_cursor[raw->rnti]++ % n;
+        } else {
+          /* Genuinely needs a new pin (rotated, gave up, cfg changed, or never seeded). */
+          chosen = nr_dci11_pin_round_robin(&dci11_pin_cursor[raw->rnti], n);
+        }
+        if (!nr_dci11_pin_is_valid(pin)) {
+          static uint32_t s_seed_left=200; /* noise-floor RNTIs can drive this too: bounded, like context eviction */
+          if (s_seed_left) {
+            s_seed_left--;
+            LOG_W(PHY,"SENSING: DL layout pin SEED rnti=0x%x layout_id=%u%s\n",
+                  raw->rnti,(unsigned)layout_ids[chosen], has_stats ? " (previous pin dropped)" : "");
+          }
+          nr_dci11_pin_seed(pin, g_pdsch_configuration, layout_ids[chosen]);
+        }
+        selected = chosen;
       }
-      const int selected=settled>=0 ? settled : preferred>=0 ? preferred : fallback;
       cand_task[ti].out=layouts[selected];
       cand_task[ti].dl_layout_configuration=keys[selected];
       cand_task[ti].dl_layout_index=from_stage2 ? layout_ids[selected] : 0xFFFF;
@@ -6084,11 +6228,15 @@ constdiag_done:;
      * slots they occur. A hypothesis that lands on one of this grant's DM-RS symbols is wrong for
      * this grant (the standard forbids the overlap and nr_dlsch_extract_rbs() ASSERTS on it -- which
      * killed the 4-RX OTA run r4a_223725): applied only when it touches no DM-RS symbol. */
-    for (int zp = 0; zp < 2; zp++) {
+    /* EVERY confirmed resource occurring in this slot, not one NZP + one ZP: the OCUDU bed sends a TRS
+     * pair (two NZP resources in one slot) and an NZP + a ZP in another. Its failed MCS-10 grants
+     * align with those slots; live validation must establish the CRC impact of this correction. */
+    fapi_nr_dl_config_csirs_pdu_rel15_t rm[NFAPI_MAX_NUM_CSI_RATEMATCH];
+    const int n_rm = nr_csirs_blind_rt_rate_match_all(abs_slot + hy_k0 /* the PDSCH slot */, rm, NFAPI_MAX_NUM_CSI_RATEMATCH);
+    for (int i = 0; i < n_rm; i++) {
       fapi_nr_dl_config_csirs_pdu_rel15_t *c = &dlsch_pdu.csiRsForRateMatching[dlsch_pdu.numCsiRsForRateMatching];
-      const bool have = zp ? nr_csirs_blind_rt_rate_match_zp(abs_slot, c) : nr_csirs_blind_rt_rate_match(abs_slot, c);
-      if (!have)
-        continue;
+      *c = rm[i];
+      const bool zp = c->csi_type == 2;
       static const uint8_t num_l0[18] = {1, 1, 1, 1, 2, 1, 2, 2, 1, 2, 2, 2, 2, 2, 4, 2, 2, 4};
       bool clash = (c->row < 1 || c->row > 18);
       for (int k = 0; !clash && k < num_l0[c->row - 1]; k++)
@@ -6215,8 +6363,7 @@ constdiag_done:;
       job.freq_alloc    = freq_alloc;
       job.grant         = grant_q;
       /* k0: the PDSCH is k0 slots after the DCI. The consumer waits for that slot's samples. */
-      job.frame_rx      = (proc->frame_rx + (proc->nr_slot_rx + hy_k0) / fp->slots_per_frame) % 1024;
-      job.nr_slot_rx    = (proc->nr_slot_rx + hy_k0) % fp->slots_per_frame;
+      nr_pdsch_k0_slot(proc->frame_rx, proc->nr_slot_rx, fp->slots_per_frame, hy_k0, &job.frame_rx, &job.nr_slot_rx);
       job.gNB_id        = proc->gNB_id;
       job.absolute_slot = source_absolute_slot + hy_k0;
       job.rnti          = out.rnti;
@@ -6414,11 +6561,12 @@ constdiag_done:;
               job.dlsch_pdu     = dlsch_pdu;
               job.freq_alloc    = freq_alloc;
               job.grant         = grant;
-              job.frame_rx      = proc->frame_rx;
-              job.nr_slot_rx    = proc->nr_slot_rx;
+              /* The hypothesis' k0 slot, as on the fast path above: decoding a k0 = 1 hypothesis on the
+               * DCI's own slot made it an exact twin of its k0 = 0 sibling (lane perf 2026-09-27). */
+              nr_pdsch_k0_slot(proc->frame_rx, proc->nr_slot_rx, fp->slots_per_frame, hy_k0, &job.frame_rx, &job.nr_slot_rx);
               job.gNB_id        = proc->gNB_id;
               /* Preserve the original RF slot across PDCCH -> PDSCH deferral. */
-              job.absolute_slot = source_absolute_slot;
+              job.absolute_slot = source_absolute_slot + hy_k0;
               job.rnti          = out.rnti;
               job.rnti_class    = out.rnti_class;
               job.harq_pid_tag  = blind_harq_tag(abs_slot, out.rnti, out.harq_pid);
@@ -6439,9 +6587,35 @@ constdiag_done:;
               continue; // nothing further to do on this thread for this candidate
             }
 
+            /* In-line decode of the hypothesis' k0 slot (lane perf 2026-09-27). Decoding every k0 on the
+             * DCI's own slot made each k0 = 1 entry an exact twin of its k0 = 0 sibling, so the sweep
+             * could never separate them. The producer publishes a slot BEFORE writing it, so the target
+             * is complete once the producer has moved past it; wait for that the way the deferred
+             * consumer waits for its k0 slot (100 us steps, 3 ms + one slot per extra k0), and if it
+             * still is not there do not decode or score it (a partial slot is not CRC evidence). */
+            UE_nr_rxtx_proc_t proc_pd = *proc;
+            nr_pdsch_k0_slot(proc->frame_rx, proc->nr_slot_rx, fp->slots_per_frame, hy_k0, &proc_pd.frame_rx,
+                             &proc_pd.nr_slot_rx);
+            nr_pdsch_passive_grant_t grant_pd = grant;
+            grant_pd.check_sample_lifetime = hy_k0 > 0;
+            grant_pd.source_absolute_slot = source_absolute_slot + hy_k0;
+            nr_pdsch_passive_decode_status_t st = NR_PDSCH_PASSIVE_DECODE_ERROR;
             const uint64_t btim_t_pds = btim_on ? btim_now() : 0;
-            const nr_pdsch_passive_decode_status_t st =
-                nr_pdsch_passive_decode(ue, proc, &dlsch_pdu, &freq_alloc, &grant, rxdataF_pdsch, &dec);
+            bool pd_ready = hy_k0 == 0;
+            /* Never sleep on the PHY receive thread (serial_candidates == off it): there, one look only. */
+            const int pd_wait = serial_candidates ? 30 + (int)hy_k0 * (int)(100 / fp->slots_per_frame) : 1;
+            for (int w = 0; !pd_ready && w < pd_wait; w++) {
+              pd_ready = atomic_load_explicit(&nr_ue_diag_producer_absolute_slot, memory_order_relaxed)
+                         > grant_pd.source_absolute_slot;
+              if (!pd_ready && serial_candidates) {
+                const struct timespec ts = {0, 100000};
+                nanosleep(&ts, NULL);
+              }
+            }
+            if (pd_ready)
+              st = nr_pdsch_passive_decode(ue, &proc_pd, &dlsch_pdu, &freq_alloc, &grant_pd, rxdataF_pdsch, &dec);
+            else
+              g_dec_k0_wait++;
             btim_add(BTIM_PDSCH, btim_t_pds);
             /* Same feedback contract as deferred decoding: unsupported/internal errors are not CRC trials. */
             if (st == NR_PDSCH_PASSIVE_DECODE_CRC_OK || st == NR_PDSCH_PASSIVE_DECODE_CRC_FAIL) {
@@ -6452,6 +6626,10 @@ constdiag_done:;
                 LOG_A(PHY, "SENSING: Technique D CONVERGED rnti=0x%x tda=%u S=%u L=%u mask=0x%x table=%u\n",
                       sweep_ticket.rnti, sweep_ticket.tda_index, winner.tda_start, winner.tda_length,
                       winner.dmrs_mask, winner.mcs_table);
+              /* Qm oracle, as the deferred consumer runs it: AFTER this trial's own feedback (a prune
+               * re-indexes the catalog and retires outstanding tickets). */
+              if (!sweep_ticket.settled && sweep_ticket.generation && dec.qm_measured)
+                nr_pdsch_config_sweep_observe_qm(&sweep_ticket, out.mcs, dec.qm_measured);
               /* the deferred consumer's bookkeeping, on this path too (final review I1 / T13 deferred item) */
               nr_pdsch_passive_crc_note(out.rnti, dl_dedicated, st == NR_PDSCH_PASSIVE_DECODE_CRC_OK);
               if (dl_data_advance)
@@ -6470,16 +6648,16 @@ constdiag_done:;
                  * illuminator obtained without transmitting -- would be silently discarded. */
                 if (dec.tb != NULL && dec.cw.TBS > 0)
                   nr_passive_mac_report_ta(out.rnti, out.rnti_class == NR_BLIND_RNTI_CLASS_RA,
-                                           proc->frame_rx, proc->nr_slot_rx,
+                                           proc_pd.frame_rx, proc_pd.nr_slot_rx,
                                            (int)fp->numerology_index, (uint32_t)abs_slot, dec.tb,
                                            dec.cw.TBS / 8); /* TBS is in BITS; the parser walks octets */
                 if (want_data) {
                   // The reconstruction chain the attached UE uses, unchanged -- the ONLY difference
                   // is where the verified transport block came from.
                   const uint64_t btim_t_sub = btim_on ? btim_now() : 0;
-                  nr_isac_pdsch_data_aided_submit(ue, proc, &dec.cw, &dlsch_pdu, &freq_alloc, out.rnti, dec.tb,
+                  nr_isac_pdsch_data_aided_submit(ue, &proc_pd, &dec.cw, &dlsch_pdu, &freq_alloc, out.rnti, dec.tb,
                                                   blind_harq_tag(abs_slot, out.rnti, out.harq_pid), rxdataF_pdsch,
-                                                  (double)dec.nvar);
+                                                  (double)dec.nvar, dec.G);
                   btim_add(BTIM_SUBMIT, btim_t_sub);
                   g_data_submits++;
                 }
@@ -6490,6 +6668,12 @@ constdiag_done:;
       } else if (nof_re > 0) {
         g_held_snr++;
       }
+      /* DM-RS symbol oracle on the in-line path (lane perf 2026-09-27): only the deferred consumer
+       * ran it, so this conf's contexts never shrank below the full catalog (500 entries after the Qm
+       * oracle) and separation needed ~20 fails on every one of them. Last, because it refills
+       * rxdataF_pdsch's antenna-0 row, which the decode and the data-aided submit above read. */
+      if (serial_candidates && !defer && want_decode && sweep_ticket.generation && !sweep_ticket.settled)
+        nr_pdsch_passive_oracle_inline(ue, &sweep_ticket, &dlsch_pdu, &freq_alloc, proc->nr_slot_rx, &rxdataF_pdsch[0][0]);
     }
     free(toFree);
   }
@@ -6553,7 +6737,7 @@ constdiag_done:;
          "dci10[accepts=%lu C=%lu TC=%lu SI=%lu RA=%lu P=%lu] dci01[accepts=%lu rejects=%lu] "
          "dci00[accepts=%lu rejects=%lu] ulscan[sched=%lu crc_hit=%lu disc=%lu] "
          "held[energy=%lu dmrs=%lu persist=%lu snr=%lu mismatch=%lu rnti_set=%lu] efloor=%.2f cfr_submits=%lu "
-         "pdsch_decode[try=%lu crc_ok=%lu (%.1f%%) skip_rv=%lu unsup=%lu over_cap=%lu data_submits=%lu] "
+         "pdsch_decode[try=%lu crc_ok=%lu (%.1f%%) skip_rv=%lu unsup=%lu over_cap=%lu data_submits=%lu k0_wait=%lu] "
          "scanq[queued=%lu done=%lu drop_full=%lu drop_stale=%lu maxlag=%lu] "
          "last_reject=\"%s\" last_reject_rnti=0x%x\n",
          (unsigned long)g_occasions_run, (unsigned long)g_candidates_run, (unsigned long)g_accepts,
@@ -6573,7 +6757,7 @@ constdiag_done:;
          (unsigned long)g_dec_try, (unsigned long)g_dec_ok,
          g_dec_try ? (100.0 * (double)g_dec_ok / (double)g_dec_try) : 0.0,
          (unsigned long)g_dec_skip_rv, (unsigned long)g_dec_unsup, (unsigned long)g_dec_over_cap,
-         (unsigned long)g_data_submits,
+         (unsigned long)g_data_submits, (unsigned long)g_dec_k0_wait,
          (unsigned long)scanq.queued, (unsigned long)scanq.processed, (unsigned long)scanq.dropped_full,
          (unsigned long)scanq.dropped_stale, (unsigned long)scanq.max_lag_slots,
          g_last_reject_reason ? g_last_reject_reason : "(none yet)",

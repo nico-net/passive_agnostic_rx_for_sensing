@@ -41,21 +41,37 @@ void exit_function(const char *,const char *,int,const char *,int) { std::abort(
 /* Geometry of the cell every saved capture comes from: 273 PRB, mu=1, 4096-point grid. */
 static constexpr int N_RB = 273, SYMS = 14, FFT = 4096, FIRST_CARRIER = FFT - (N_RB * 12) / 2;
 
-/* Transmit one type-1, port-0 DM-RS symbol with identity `nid` through a channel with delay
- * `tau_samples` and per-component noise sigma; returns the full OFDM symbol in the estimator's
- * own rxdataF layout (first_carrier_offset applied, wrap-around at FFT). */
+/* NFAPI_NR_DMRS_TYPE1/2 == 0/1, duplicated (not included) for the same "no heavy PHY headers"
+ * reason as this file's other ABI-equivalent declarations above. */
+static constexpr int kDmrsType1 = 0, kDmrsType2 = 1;
+
+/* TS 38.211 6.4.1.1.3-1/-2: absolute RE offset of pilot index m = 2n+k' from the reference point,
+ * CDM group 0 (delta=0). Mirrors get_dmrs_freq_idx_ul() (dmrs_nr.h) exactly -- duplicated here
+ * rather than linked, same reasoning as kDmrsType1/2 above. Type 1: 4n+2k' (comb-2, 6 REs/RB).
+ * Type 2: 6n+k' (2 adjacent REs every 6, 4 REs/RB). */
+static int dmrs_re_offset(int m, int dmrs_type)
+{
+  const int n = m / 2, kp = m % 2;
+  return dmrs_type == kDmrsType2 ? (6 * n + kp) : (4 * n + 2 * kp);
+}
+
+/* Transmit one port-0 DM-RS symbol (type 1 by default) with identity `nid` through a channel with
+ * delay `tau_samples` and per-component noise sigma; returns the full OFDM symbol in the
+ * estimator's own rxdataF layout (first_carrier_offset applied, wrap-around at FFT). */
 static std::vector<c16_t> synth(int nid, int nscid, int slot, int sym, int rb_offset, int nb_rb,
-                                double tau_samples, double noise, std::mt19937 &rng)
+                                double tau_samples, double noise, std::mt19937 &rng, int dmrs_type = kDmrsType1)
 {
   std::vector<c16_t> rx(FFT, c16_t{0, 0});
   std::normal_distribution<double> n(0.0, noise);
   for (auto &v : rx) v = c16_t{(int16_t)n(rng), (int16_t)n(rng)};
   const uint32_t *gold = nr_gold_pdsch(N_RB, SYMS, nid, nscid, slot, sym);
-  std::vector<c16_t> pil(6 * (nb_rb + rb_offset));
-  nr_pdsch_dmrs_rx(0, gold, pil.data(), 1000, 0, (unsigned short)(nb_rb + rb_offset), 0, 16384);
-  int re = (FIRST_CARRIER + (rb_offset) * 12) % FFT;
-  for (int m = 0; m < 6 * nb_rb; ++m) {
-    const c16_t p = pil[6 * rb_offset + m];            // the receiver's pilot is conj-form: p * tx = |.|^2
+  const int nb_dmrs_per_rb = dmrs_type == kDmrsType2 ? 4 : 6;
+  std::vector<c16_t> pil(nb_dmrs_per_rb * (nb_rb + rb_offset));
+  nr_pdsch_dmrs_rx(0, gold, pil.data(), 1000, 0, (unsigned short)(nb_rb + rb_offset), dmrs_type, 16384);
+  const int npil = nb_dmrs_per_rb * nb_rb;
+  for (int m = 0; m < npil; ++m) {
+    const int re = (FIRST_CARRIER + rb_offset * 12 + dmrs_re_offset(m, dmrs_type)) % FFT;
+    const c16_t p = pil[nb_dmrs_per_rb * rb_offset + m]; // the receiver's pilot is conj-form: p * tx = |.|^2
     const double ph = -2.0 * M_PI * tau_samples * re / FFT; // linear phase across subcarriers
     // tx symbol = conj(p)/|p| * 256 rotated by the channel: then p * tx ~ 256*|p| * e^{j ph}
     const double pr = p.r, pi = p.i, mag = std::hypot(pr, pi);
@@ -63,7 +79,6 @@ static std::vector<c16_t> synth(int nid, int nscid, int slot, int sym, int rb_of
     const double txi = (pr * std::sin(ph) - pi * std::cos(ph)) / mag * 256.0;
     rx[re].r = (int16_t)std::lround(txr + n(rng));
     rx[re].i = (int16_t)std::lround(txi + n(rng));
-    re = (re + 2) % FFT;
   }
   return rx;
 }
@@ -73,18 +88,54 @@ TEST(DmrsId, RecoversTheTrueIdentityWithLargeMargin) {
   for (int nid : {2, 517, 1023}) {
     nr_dmrs_id_state_t st; nr_dmrs_id_init(&st, "TEST", nid);
     auto rx = synth(nid, 0, 3, 2, /*rb_offset=*/5, /*nb_rb=*/50, /*tau=*/3.7, /*noise=*/40.0, rng);
-    ASSERT_EQ(nr_dmrs_id_accumulate(&st, rx.data(), FFT, FIRST_CARRIER + 5 * 12, 5, 50, N_RB, SYMS, 3, 2, 0, 1),
+    ASSERT_EQ(nr_dmrs_id_accumulate(&st, rx.data(), FFT, FIRST_CARRIER + 5 * 12, 5, 50, N_RB, SYMS, 3, 2, 0, 1, kDmrsType1),
               NR_DMRS_ID_CANDIDATES);
     ASSERT_TRUE(nr_dmrs_id_decide(&st, 1, 10.0)) << "nid=" << nid;
     EXPECT_EQ(st.best_id, nid);
     EXPECT_GT(st.margin_db, 10.0) << "nid=" << nid << " margin " << st.margin_db;
   }
 }
+/* The gap this closes: nr_dmrs_id_accumulate() used to hardcode NFAPI_NR_DMRS_TYPE1 unconditionally
+ * (both the reference-sequence generation AND the comb-2 RE-stepping), so a DM-RS-type-2 cell's
+ * scrambling-ID estimate would silently correlate against the wrong REs -- not a crash, just a
+ * receiver that reads noise and never converges (or worse, converges to a wrong answer by chance).
+ * Type 2 CDM group 0 has only 4 pilot REs/RB (vs type 1's 6), so this exercises a genuinely
+ * different, sparser RE pattern, not a relabelled copy of the type-1 test. */
+TEST(DmrsId, RecoversTheTrueIdentityWithType2Dmrs) {
+  std::mt19937 rng(13);
+  for (int nid : {2, 517, 1023}) {
+    nr_dmrs_id_state_t st; nr_dmrs_id_init(&st, "TEST", nid);
+    auto rx = synth(nid, 0, 3, 2, /*rb_offset=*/5, /*nb_rb=*/50, /*tau=*/3.7, /*noise=*/40.0, rng, kDmrsType2);
+    ASSERT_EQ(nr_dmrs_id_accumulate(&st, rx.data(), FFT, FIRST_CARRIER + 5 * 12, 5, 50, N_RB, SYMS, 3, 2, 0, 1, kDmrsType2),
+              NR_DMRS_ID_CANDIDATES);
+    ASSERT_TRUE(nr_dmrs_id_decide(&st, 1, 10.0)) << "nid=" << nid;
+    EXPECT_EQ(st.best_id, nid);
+    EXPECT_GT(st.margin_db, 10.0) << "nid=" << nid << " margin " << st.margin_db;
+  }
+}
+/* If the RE-stepping formula degenerated to the same pattern for both types, a type-2 signal read
+ * with dmrs_type forced to type 1 might still accumulate SOME coherent energy by accident and reach
+ * a confident (possibly even correct, by luck) decision. Cross-feeding proves the two paths are
+ * genuinely different: reading a type-2 signal as type-1 must score far worse than reading it as
+ * what it actually is. */
+TEST(DmrsId, Type1AndType2ReadingsOfATtype2SignalDiffer) {
+  std::mt19937 rng(17);
+  const int nid = 42;
+  auto rx = synth(nid, 0, 3, 2, 5, 50, 3.7, 40.0, rng, kDmrsType2);
+  nr_dmrs_id_state_t matched; nr_dmrs_id_init(&matched, "TEST", nid);
+  nr_dmrs_id_accumulate(&matched, rx.data(), FFT, FIRST_CARRIER + 5 * 12, 5, 50, N_RB, SYMS, 3, 2, 0, 1, kDmrsType2);
+  nr_dmrs_id_state_t mismatched; nr_dmrs_id_init(&mismatched, "TEST", nid);
+  nr_dmrs_id_accumulate(&mismatched, rx.data(), FFT, FIRST_CARRIER + 5 * 12, 5, 50, N_RB, SYMS, 3, 2, 0, 1, kDmrsType1);
+  const double matched_score = nr_dmrs_id_score(&matched, nid);
+  const double mismatched_score = nr_dmrs_id_score(&mismatched, nid);
+  EXPECT_GT(matched_score, 10.0 * mismatched_score)
+      << "matched=" << matched_score << " mismatched=" << mismatched_score;
+}
 TEST(DmrsId, WrongAssumptionIsReportedAsMismatchNotConfirmed) {
   std::mt19937 rng(11);
   nr_dmrs_id_state_t st; nr_dmrs_id_init(&st, "TEST", /*assumed=*/2);
   auto rx = synth(/*true=*/900, 0, 5, 2, 0, 30, 1.2, 40.0, rng);
-  nr_dmrs_id_accumulate(&st, rx.data(), FFT, FIRST_CARRIER, 0, 30, N_RB, SYMS, 5, 2, 0, 1);
+  nr_dmrs_id_accumulate(&st, rx.data(), FFT, FIRST_CARRIER, 0, 30, N_RB, SYMS, 5, 2, 0, 1, kDmrsType1);
   ASSERT_TRUE(nr_dmrs_id_decide(&st, 1, 10.0));
   EXPECT_EQ(st.best_id, 900);
   EXPECT_NE(st.best_id, st.assumed_id);
@@ -96,7 +147,7 @@ TEST(DmrsId, NoiseAloneNeverDecides) {
   for (int g = 0; g < 8; ++g) {
     std::vector<c16_t> rx(FFT);
     for (auto &v : rx) v = c16_t{(int16_t)n(rng), (int16_t)n(rng)};
-    nr_dmrs_id_accumulate(&st, rx.data(), FFT, FIRST_CARRIER, 0, 40, N_RB, SYMS, g, 2, 0, 1);
+    nr_dmrs_id_accumulate(&st, rx.data(), FFT, FIRST_CARRIER, 0, 40, N_RB, SYMS, g, 2, 0, 1, kDmrsType1);
   }
   double best = -1e9; for (int i = 0; i < NR_DMRS_ID_CANDIDATES; ++i) best = std::max(best, nr_dmrs_id_margin_db(&st, i));
   EXPECT_FALSE(nr_dmrs_id_decide(&st, 1, 10.0)) << "best margin on noise: " << best;
@@ -108,7 +159,7 @@ TEST(DmrsId, EvidenceAccumulatesAcrossGrantsAtLowSnr) {
   nr_dmrs_id_state_t st; nr_dmrs_id_init(&st, "TEST", 2);
   auto one = [&](int slot) {
     auto rx = synth(2, 0, slot, 2, 10, /*nb_rb=*/4, 0.4, /*noise=*/120.0, rng);
-    nr_dmrs_id_accumulate(&st, rx.data(), FFT, FIRST_CARRIER + 10 * 12, 10, 4, N_RB, SYMS, slot, 2, 0, 1);
+    nr_dmrs_id_accumulate(&st, rx.data(), FFT, FIRST_CARRIER + 10 * 12, 10, 4, N_RB, SYMS, slot, 2, 0, 1, kDmrsType1);
   };
   one(0);
   const double m1 = nr_dmrs_id_margin_db(&st, 2);
@@ -153,7 +204,7 @@ TEST(DmrsId, FindsAnIdAboveTheOldRange) {
   auto rx = synth(40000, 0, 3, 2, /*rb_offset=*/5, /*nb_rb=*/50, /*tau=*/3.7, /*noise=*/40.0, rng);
   const auto t0 = std::chrono::steady_clock::now();
   const int scored = nr_dmrs_id_accumulate(&st, rx.data(), FFT, FIRST_CARRIER + 5 * 12, 5, 50, N_RB,
-                                           SYMS, 3, 2, 0, 1);
+                                           SYMS, 3, 2, 0, 1, kDmrsType1);
   const auto t1 = std::chrono::steady_clock::now();
   ASSERT_EQ(scored, (int)(NR_DMRS_ID_SPACE - NR_DMRS_ID_CANDIDATES));
   const double us_per_accumulate =
@@ -171,20 +222,20 @@ TEST(DmrsId, WrongRangeDoesNotDecide) {
   nr_dmrs_id_state_t st;
   nr_dmrs_id_init(&st, "TEST", 2); // default range 0..1023
   auto rx = synth(40000, 0, 3, 2, 5, 50, 3.7, 40.0, rng);
-  nr_dmrs_id_accumulate(&st, rx.data(), FFT, FIRST_CARRIER + 5 * 12, 5, 50, N_RB, SYMS, 3, 2, 0, 1);
+  nr_dmrs_id_accumulate(&st, rx.data(), FFT, FIRST_CARRIER + 5 * 12, 5, 50, N_RB, SYMS, 3, 2, 0, 1, kDmrsType1);
   EXPECT_FALSE(nr_dmrs_id_decide(&st, 1, 10.0));
 }
 TEST(DmrsId, RejectsInvalidGeometry) {
   nr_dmrs_id_state_t st; nr_dmrs_id_init(&st, "TEST", 2);
   std::vector<c16_t> rx(FFT);
-  EXPECT_EQ(nr_dmrs_id_accumulate(&st, rx.data(), FFT, 0, 270, 10, N_RB, SYMS, 0, 2, 0, 1), 0) << "beyond N_RB";
-  EXPECT_EQ(nr_dmrs_id_accumulate(&st, nullptr, FFT, 0, 0, 10, N_RB, SYMS, 0, 2, 0, 1), 0);
+  EXPECT_EQ(nr_dmrs_id_accumulate(&st, rx.data(), FFT, 0, 270, 10, N_RB, SYMS, 0, 2, 0, 1, kDmrsType1), 0) << "beyond N_RB";
+  EXPECT_EQ(nr_dmrs_id_accumulate(&st, nullptr, FFT, 0, 0, 10, N_RB, SYMS, 0, 2, 0, 1, kDmrsType1), 0);
   EXPECT_EQ(st.grants, 0u);
 }
 // ---- final review I5: two-window driver ------------------------------------------------------------
-static bool feed2(nr_dmrs_id_2stage_t *t, const std::vector<c16_t> &rx, int slot)
+static bool feed2(nr_dmrs_id_2stage_t *t, const std::vector<c16_t> &rx, int slot, int dmrs_type = kDmrsType1)
 {
-  return nr_dmrs_id_2stage_accumulate(t, rx.data(), FFT, FIRST_CARRIER + 5 * 12, 5, 50, N_RB, SYMS, slot, 2, 0, 1);
+  return nr_dmrs_id_2stage_accumulate(t, rx.data(), FFT, FIRST_CARRIER + 5 * 12, 5, 50, N_RB, SYMS, slot, 2, 0, 1, dmrs_type);
 }
 
 TEST(DmrsId2Stage, PrematureEscalationDoesNotLoseAStage1Id) {
@@ -251,6 +302,20 @@ TEST(DmrsId2Stage, Stage2BudgetIsAHardCap) {
   EXPECT_EQ(t.s2.num_r, nullptr); // spent undecided: stage-2 arrays released
   EXPECT_EQ(t.s1.grants, 12u);     // stage 1 kept accumulating throughout
   EXPECT_EQ(nr_dmrs_id_2stage_decided(&t), -1);
+}
+
+TEST(DmrsId2Stage, WorksEndToEndWithType2Dmrs) {
+  // The 2-stage driver is a thin wrapper around nr_dmrs_id_accumulate(); this confirms dmrs_type
+  // actually reaches through both stage-1 calls inside it, not just the direct-call path the tests
+  // above exercise.
+  std::mt19937 rng(31);
+  nr_dmrs_id_2stage_t t;
+  nr_dmrs_id_2stage_init(&t, "TEST", 2);
+  bool decided = false;
+  for (int g = 0; g < 40 && !decided; ++g)
+    decided = feed2(&t, synth(700, 0, g % 20, 2, 5, 50, 3.7, 40.0, rng, kDmrsType2), g % 20, kDmrsType2);
+  ASSERT_TRUE(decided);
+  EXPECT_EQ(nr_dmrs_id_2stage_decided(&t), 700);
 }
 
 TEST(DmrsId2Stage, ZeroInitialisedStateIsUndecided) {
