@@ -30,6 +30,9 @@
  * estimator concurrently on different transport blocks. 0 = that antenna produced no estimate. */
 #define NR_DL_CHEST_MAX_ANT 8
 __thread uint32_t nr_dl_chest_nvar_ant[NR_DL_CHEST_MAX_ANT];
+/* >= 0: estimate ONLY this rx branch (the one the single-branch decode reads); the others are zeroed.
+ * Set by the passive decoders around their chest call, -1 (all branches) everywhere else. */
+__thread int nr_dl_chest_only_ant = -1;
 /* Consumer-only diagnostics (BRDELAY/PDP). The passive decode consumer sets the request flag on its
  * thread; the per-antenna pool task inherits it through the task struct. Never set on the RT thread. */
 static __thread c16_t t_dft_est[4096];
@@ -1509,7 +1512,8 @@ void nr_pdsch_channel_estimation(PHY_VARS_NR_UE *ue,
     nr_dl_chest_nvar_ant[a_] = 0;
   }
 
-  if (fp->nb_antennas_rx > 1) {
+  const int only_ant = (nr_dl_chest_only_ant >= 0 && nr_dl_chest_only_ant < fp->nb_antennas_rx) ? nr_dl_chest_only_ant : -1;
+  if (fp->nb_antennas_rx > 1 && only_ant < 0) {
     nr_pdsch_chest_ant_task_t chest_tasks[fp->nb_antennas_rx];
     task_ans_t chest_ans;
     init_task_ans(&chest_ans, fp->nb_antennas_rx);
@@ -1579,6 +1583,8 @@ void nr_pdsch_channel_estimation(PHY_VARS_NR_UE *ue,
       c16_t *rxF = &rxdataF[aarx][symbol_offset + delta];
       c16_t *dl_ch = (c16_t *)&dl_ch_estimates[nl * fp->nb_antennas_rx + aarx][ch_offset];
       memset(dl_ch, 0, sizeof(*dl_ch) * fp->ofdm_symbol_size);
+      if (only_ant >= 0 && aarx != only_ant)
+        continue;
 
       if (config_type == NFAPI_NR_DMRS_TYPE1 && ue->chest_freq == 0) {
         NFAPI_NR_DMRS_TYPE1_linear_interp(fp,

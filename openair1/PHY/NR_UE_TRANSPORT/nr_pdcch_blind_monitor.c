@@ -2671,7 +2671,7 @@ void nr_pdcch_blind_monitor_init(void)
       {"pdcch_blind_monitor_ss",
         "Dedicated SearchSpace geometry; "
         "monitoring_slot_periodicity:monitoring_slot_offset:duration:first_symbol:"
-        "al2_cand:al4_cand:al8_cand:al16_cand",
+        "al1_cand:al2_cand:al4_cand:al8_cand (0 = adaptive, >0 = pin, <0 = disable)",
         0, .strptr = &p_ss, .defstrval = "", TYPE_STRING, 0},
       {"pdcch_blind_monitor_bwp",
         "Active DL BWP for sizing; bwp_start:bwp_size:dmrs_typeA_position[:dci_length_override] "

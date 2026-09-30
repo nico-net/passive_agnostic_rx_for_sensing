@@ -1003,6 +1003,8 @@ void *UE_thread(void *arg)
   bool scan_confirm_pending = false;
   int scan_confirm_left = 1; /* once per process: a second pass that also fails must not loop */
   nr_gscn_info_t scan_confirm_ssb = {0};
+  bool scan_confirm_check = false;
+  int scan_confirm_fo1 = 0;
   bool auto_anchor_valid = false, auto_drift_ready = false;
   openair0_timestamp_t auto_anchor_timestamp = 0;
   int auto_anchor_frame = 0, auto_anchor_pci = -1;
@@ -1114,6 +1116,15 @@ void *UE_thread(void *arg)
           // shift the frame index with all the frames we trashed meanwhile we perform the synch search
           decoded_frame_rx = (decoded_frame_rx + UE->init_sync_frame + trashed_frames) % MAX_FRAME_NUMBER;
           intialSyncOffset = syncMsg->rx_offset;
+          if (scan_confirm_check) {
+            scan_confirm_check = false;
+            const int fo2 = UE->common_vars.freq_offset;
+            if (abs(scan_confirm_fo1) > 3000 && 10 * abs(fo2) < abs(scan_confirm_fo1))
+              LOG_W(PHY,
+                    "SENSING: SCAN_CONFIRM pass measured %d Hz vs %d Hz on the scan pass: the radio was not "
+                    "reset to the initial CFO seed, the confirm result is a residual applied as a total\n",
+                    fo2, scan_confirm_fo1);
+          }
           /* See scan_confirm_on: re-acquire against the SSB this scan just won, so tracking starts
            * from the single-SSB path's state rather than the multi-GSCN scan's. */
           if (scan_confirm_on && scan_confirm_left > 0 && syncMsg->numGscn > 1) {
@@ -1128,6 +1139,36 @@ void *UE_thread(void *arg)
                   "SENSING: SCAN_CONFIRM blind scan won PCI %d at SSB subcarrier %d; re-acquiring "
                   "against that SSB alone before tracking\n",
                   fp->Nid_cell, fp->ssb_start_subcarrier);
+            /* UE_synch() already retuned by the scan's CFO. The confirm pass is seeded from
+             * initial_fo and UE_synch() applies its result as the TOTAL offset, so re-acquiring on
+             * the corrected radio measures only the residual and throws the correction away. Put
+             * the radio back to the pinned-start state so the confirm pass measures the full CFO. */
+            scan_confirm_fo1 = UE->common_vars.freq_offset;
+            scan_confirm_check = true;
+            uint64_t dl_carrier = 0, ul_carrier = 0;
+            nr_get_carrier_frequencies(UE, &dl_carrier, &ul_carrier);
+            nrue_ru_set_freq(UE, ul_carrier, dl_carrier, UE->initial_fo);
+            UE->common_vars.freq_offset = UE->initial_fo;
+            /* The retune does not reach the very next samples: capturing straight after it measured
+             * the residual again (-12 Hz vs -14657, 2026-09-23). OTA, the drain below found no
+             * host backlog (first read waited 19.7 ms), yet discarding those >= 2 reads (40 ms) was
+             * enough (-14607 vs -14596), so the lag is in-flight/retune latency, not a queue. Drain
+             * any queue anyway (until a 2-frame read waits >= 15 ms of its 20 ms), then read once more. */
+            {
+              int flushed = 0;
+              double dt = 0.0;
+              struct timespec t0, t1;
+              while (dt < 15e-3 && flushed < 400 && !oai_exit) {
+                clock_gettime(CLOCK_MONOTONIC, &t0);
+                readFrame(UE, &sync_timestamp, duration_rx_to_tx, true);
+                clock_gettime(CLOCK_MONOTONIC, &t1);
+                dt = (t1.tv_sec - t0.tv_sec) + 1e-9 * (t1.tv_nsec - t0.tv_nsec);
+                flushed += 2;
+              }
+              readFrame(UE, &sync_timestamp, duration_rx_to_tx, true);
+              LOG_W(PHY, "SENSING: SCAN_CONFIRM drained %d queued frames after the retune (last read %.1f ms)\n",
+                    flushed, dt * 1e3);
+            }
             delNotifiedFIFO_elt(res);
             stream_status = STREAM_STATUS_UNSYNC;
             continue;
